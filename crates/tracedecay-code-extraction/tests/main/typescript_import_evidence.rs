@@ -1,0 +1,819 @@
+use tracedecay_code_extraction::parsed_extraction::{
+    ParsedExtractionDisposition, ParsedExtractionScope,
+};
+use tracedecay_code_extraction::{
+    AstroExtractor, ImportModuleKindV1, ImportNamespaceV1, LanguageExtractor, SvelteExtractor,
+    TypeScriptExtractor,
+};
+use tracedecay_domain::{NodeKind, SourceSpan};
+use tree_sitter::Parser;
+
+#[test]
+fn parser_import_rows_do_not_collapse_grouped_multiline_type_bindings() {
+    let source = concat!(
+        "import type {\n",
+        "  Foo,\n",
+        "  Bar as Baz,\n",
+        "} from \"../models\";\n",
+    );
+    let extractor = TypeScriptExtractor;
+    let artifact = extractor.extract_artifact("src/features/use-models.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let raw_use_nodes = artifact
+        .result
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Use)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        raw_use_nodes.len(),
+        1,
+        "one raw statement node must not become one node per binding"
+    );
+    assert_eq!(raw_use_nodes[0].name, "../models");
+    assert!(
+        artifact
+            .result
+            .nodes
+            .iter()
+            .all(|node| !matches!(node.name.as_str(), "Foo" | "Bar" | "Baz")),
+        "binding evidence belongs only in artifact.imports, not raw graph nodes"
+    );
+
+    let observed = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.logical_path.as_str(),
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.namespace,
+                row.module_kind,
+                row.span,
+                row.start_line,
+                row.start_column,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            (
+                "src/features/use-models.ts",
+                "../models",
+                Some("Foo"),
+                Some("Foo"),
+                ImportNamespaceV1::Type,
+                ImportModuleKindV1::ProjectRelative,
+                SourceSpan {
+                    start_byte: 16,
+                    end_byte: 19,
+                },
+                1,
+                2,
+            ),
+            (
+                "src/features/use-models.ts",
+                "../models",
+                Some("Bar"),
+                Some("Baz"),
+                ImportNamespaceV1::Type,
+                ImportModuleKindV1::ProjectRelative,
+                SourceSpan {
+                    start_byte: 23,
+                    end_byte: 33,
+                },
+                2,
+                2,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn parser_owned_tree_import_rows_do_not_disappear_from_parsed_artifact() {
+    let source = "import type { Foo } from \"pkg\";\n";
+    let mut parser = Parser::new();
+    parser
+        .set_language(
+            &tracedecay_code_extraction::ts_provider::try_language("typescript")
+                .expect("bundled TypeScript grammar"),
+        )
+        .expect("configure TypeScript parser");
+    let tree = parser.parse(source, None).expect("parse TypeScript source");
+    let extractor = TypeScriptExtractor;
+
+    let parsed = extractor.extract_parsed_artifact_prepared(
+        "src/parsed.ts",
+        source,
+        source,
+        &tree,
+        ParsedExtractionScope::FullDocument,
+    );
+
+    assert_eq!(
+        parsed.disposition,
+        ParsedExtractionDisposition::FullDocument
+    );
+    assert!(
+        parsed.artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        parsed.artifact.result.errors
+    );
+    assert_eq!(
+        parsed
+            .artifact
+            .imports
+            .iter()
+            .map(|row| (
+                row.logical_path.as_str(),
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.namespace,
+                row.module_kind,
+                row.span,
+                row.start_line,
+                row.start_column,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            "src/parsed.ts",
+            "pkg",
+            Some("Foo"),
+            Some("Foo"),
+            ImportNamespaceV1::Type,
+            ImportModuleKindV1::BareModule,
+            SourceSpan {
+                start_byte: 14,
+                end_byte: 17,
+            },
+            0,
+            14,
+        )]
+    );
+}
+
+#[test]
+fn parser_import_rows_do_not_promote_per_specifier_type_bindings_to_value() {
+    let source = "import { type Foo, Bar as Baz } from \"@scope/pkg\";\n";
+    let extractor = TypeScriptExtractor;
+    let artifact = extractor.extract_artifact("src/consumer.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+
+    let observed = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.namespace,
+                row.module_kind,
+                row.span,
+                row.start_line,
+                row.start_column,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            (
+                Some("Foo"),
+                Some("Foo"),
+                ImportNamespaceV1::Type,
+                ImportModuleKindV1::BareModule,
+                SourceSpan {
+                    start_byte: 9,
+                    end_byte: 17,
+                },
+                0,
+                9,
+            ),
+            (
+                Some("Bar"),
+                Some("Baz"),
+                ImportNamespaceV1::Value,
+                ImportModuleKindV1::BareModule,
+                SourceSpan {
+                    start_byte: 19,
+                    end_byte: 29,
+                },
+                0,
+                19,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn parser_import_rows_do_not_conflate_value_and_side_effect_namespaces() {
+    let source = concat!(
+        "import { run as execute } from \"runner\";\n",
+        "import \"reflect-metadata\";\n",
+    );
+    let extractor = TypeScriptExtractor;
+    let artifact = extractor.extract_artifact("src/bootstrap.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+
+    let observed = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.namespace,
+                row.module_kind,
+                row.span,
+                row.start_line,
+                row.start_column,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            (
+                "runner",
+                Some("run"),
+                Some("execute"),
+                ImportNamespaceV1::Value,
+                ImportModuleKindV1::BareModule,
+                SourceSpan {
+                    start_byte: 9,
+                    end_byte: 23,
+                },
+                0,
+                9,
+            ),
+            (
+                "reflect-metadata",
+                None,
+                None,
+                ImportNamespaceV1::SideEffect,
+                ImportModuleKindV1::BareModule,
+                SourceSpan {
+                    start_byte: 41,
+                    end_byte: 67,
+                },
+                1,
+                0,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn parser_import_rows_do_not_classify_external_modules_as_project_relative() {
+    let source = concat!(
+        "import type { Local } from \"./local\";\n",
+        "import type { External } from \"@scope/pkg\";\n",
+    );
+    let extractor = TypeScriptExtractor;
+    let artifact = extractor.extract_artifact("src/module-kinds.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+
+    let observed = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.logical_path.as_str(),
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.module_kind,
+                row.span,
+                row.start_line,
+                row.start_column,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            (
+                "src/module-kinds.ts",
+                "./local",
+                Some("Local"),
+                ImportModuleKindV1::ProjectRelative,
+                SourceSpan {
+                    start_byte: 14,
+                    end_byte: 19,
+                },
+                0,
+                14,
+            ),
+            (
+                "src/module-kinds.ts",
+                "@scope/pkg",
+                Some("External"),
+                ImportModuleKindV1::BareModule,
+                SourceSpan {
+                    start_byte: 52,
+                    end_byte: 60,
+                },
+                1,
+                14,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn bare_module_rows_do_not_claim_package_or_ignored_source_resolution() {
+    let source = concat!(
+        "import type { SvelteAlias } from \"$lib/types\";\n",
+        "import type { TsAlias } from \"@/types\";\n",
+        "import type { BuiltinType } from \"node:fs\";\n",
+        "import type { UrlType } from \"https://example.invalid/types.ts\";\n",
+        "import type { ScopedPackage } from \"@scope/pkg\";\n",
+    );
+    let artifact = TypeScriptExtractor.extract_artifact("src/bare-modules.ts", source);
+    assert!(artifact.result.errors.is_empty());
+    assert_eq!(
+        artifact
+            .imports
+            .iter()
+            .map(|row| (row.module_specifier.as_str(), row.module_kind))
+            .collect::<Vec<_>>(),
+        vec![
+            ("$lib/types", ImportModuleKindV1::BareModule),
+            ("@/types", ImportModuleKindV1::BareModule),
+            ("node:fs", ImportModuleKindV1::BareModule),
+            (
+                "https://example.invalid/types.ts",
+                ImportModuleKindV1::BareModule,
+            ),
+            ("@scope/pkg", ImportModuleKindV1::BareModule),
+        ]
+    );
+}
+
+#[test]
+fn astro_artifact_wrapper_does_not_drop_frontmatter_type_import_evidence() {
+    let source = concat!(
+        "---\n",
+        "import type { Card as CardModel } from \"../models/card\";\n",
+        "---\n",
+        "<Card />\n",
+    );
+    let artifact = AstroExtractor.extract_artifact("src/components/Card.astro", source);
+    assert!(artifact.result.errors.is_empty());
+    assert_eq!(
+        artifact
+            .result
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Use)
+            .count(),
+        1,
+        "frontmatter retains one raw import statement node"
+    );
+    assert!(
+        artifact
+            .result
+            .nodes
+            .iter()
+            .all(|node| { !matches!(node.name.as_str(), "Card" | "CardModel") })
+    );
+    assert_eq!(artifact.imports.len(), 1);
+    let row = &artifact.imports[0];
+    assert_eq!(row.logical_path, "src/components/Card.astro");
+    assert_eq!(row.module_specifier, "../models/card");
+    assert_eq!(row.imported_name.as_deref(), Some("Card"));
+    assert_eq!(row.local_name.as_deref(), Some("CardModel"));
+    assert_eq!(row.namespace, ImportNamespaceV1::Type);
+    assert_eq!(row.module_kind, ImportModuleKindV1::ProjectRelative);
+    assert_eq!(
+        row.span,
+        SourceSpan {
+            start_byte: 18,
+            end_byte: 35,
+        }
+    );
+    assert_eq!(row.start_line, 1);
+    assert_eq!(row.start_column, 14);
+}
+
+#[test]
+fn svelte_artifact_wrapper_does_not_drop_script_type_import_evidence() {
+    let source = concat!(
+        "<script lang=\"ts\">\n",
+        "import type { Widget as WidgetProps } from \"$lib/types\";\n",
+        "</script>\n",
+        "<h1>Widget</h1>\n",
+    );
+    let artifact = SvelteExtractor.extract_artifact("src/routes/+page.svelte", source);
+    assert!(artifact.result.errors.is_empty());
+    assert_eq!(
+        artifact
+            .result
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Use)
+            .count(),
+        1,
+        "script retains one raw import statement node"
+    );
+    assert!(
+        artifact
+            .result
+            .nodes
+            .iter()
+            .all(|node| { !matches!(node.name.as_str(), "Widget" | "WidgetProps") })
+    );
+    assert_eq!(artifact.imports.len(), 1);
+    let row = &artifact.imports[0];
+    assert_eq!(row.logical_path, "src/routes/+page.svelte");
+    assert_eq!(row.module_specifier, "$lib/types");
+    assert_eq!(row.imported_name.as_deref(), Some("Widget"));
+    assert_eq!(row.local_name.as_deref(), Some("WidgetProps"));
+    assert_eq!(row.namespace, ImportNamespaceV1::Type);
+    assert_eq!(row.module_kind, ImportModuleKindV1::BareModule);
+    assert_eq!(
+        row.span,
+        SourceSpan {
+            start_byte: 33,
+            end_byte: 54,
+        }
+    );
+    assert_eq!(row.start_line, 1);
+    assert_eq!(row.start_column, 14);
+}
+
+/// `export … from` forwards bindings without binding them locally: each
+/// forwarded name is public import evidence (`is_public`), a `*` forward is a
+/// public glob, and the exported name is the local name so a barrel walk can
+/// follow `export { sum as add }` from `add` back to `sum`. A same-module
+/// `export { local }` names the declaring file as its module.
+#[test]
+fn reexport_statements_are_public_import_evidence() {
+    let source = concat!(
+        "export * from \"./format\";\n",
+        "export { sum as add, type Shape } from \"./math\";\n",
+        "export * as ns from \"./ns\";\n",
+        "import { local } from \"./local\";\n",
+        "export { local };\n",
+    );
+    let artifact = TypeScriptExtractor.extract_artifact("packages/shared/src/index.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "{:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.is_public,
+                row.is_glob,
+                row.namespace,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "./format",
+                Some("*"),
+                None,
+                true,
+                true,
+                ImportNamespaceV1::Value
+            ),
+            (
+                "./math",
+                Some("sum"),
+                Some("add"),
+                true,
+                false,
+                ImportNamespaceV1::Value
+            ),
+            (
+                "./math",
+                Some("Shape"),
+                Some("Shape"),
+                true,
+                false,
+                ImportNamespaceV1::Type
+            ),
+            (
+                "./ns",
+                Some("*"),
+                Some("ns"),
+                true,
+                false,
+                ImportNamespaceV1::Value
+            ),
+            (
+                "./local",
+                Some("local"),
+                Some("local"),
+                false,
+                false,
+                ImportNamespaceV1::Value
+            ),
+            (
+                "./index.ts",
+                Some("local"),
+                Some("local"),
+                true,
+                false,
+                ImportNamespaceV1::Value
+            ),
+        ]
+    );
+    assert_eq!(
+        artifact
+            .result
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Export)
+            .map(|node| node.signature.as_deref())
+            .collect::<Vec<_>>(),
+        [
+            Some("export { sum as add, type Shape } from \"./math\";"),
+            Some("export { local };"),
+        ],
+        "the export-clause statements stay in the graph as their own nodes"
+    );
+}
+
+#[test]
+fn local_and_default_exports_forward_through_the_module_itself() {
+    for (source, expected) in [
+        (
+            "export default function greet(): void {}\n",
+            vec![(Some("greet"), Some("default"), ImportNamespaceV1::Value)],
+        ),
+        (
+            "export default class Greeter {}\n",
+            vec![(Some("Greeter"), Some("default"), ImportNamespaceV1::Value)],
+        ),
+        (
+            "export default interface Shape {}\n",
+            vec![(Some("Shape"), Some("default"), ImportNamespaceV1::Type)],
+        ),
+        (
+            "function farewell(): void {}\nexport default farewell;\n",
+            vec![(Some("farewell"), Some("default"), ImportNamespaceV1::Value)],
+        ),
+        (
+            "function impl(): void {}\ntype T = string;\nexport { impl as default, type T };\n",
+            vec![
+                (Some("impl"), Some("default"), ImportNamespaceV1::Value),
+                (Some("T"), Some("T"), ImportNamespaceV1::Type),
+            ],
+        ),
+        // Anonymous defaults and default expressions name no binding.
+        ("export default function (): void {}\n", Vec::new()),
+        ("export default () => 1;\n", Vec::new()),
+        ("export default { a: 1 };\n", Vec::new()),
+        // A declaration export binds its own name; nothing forwards.
+        ("export function plain(): void {}\n", Vec::new()),
+    ] {
+        let artifact =
+            TypeScriptExtractor.extract_artifact("apps/web/src/defaults/greet.ts", source);
+        assert!(
+            artifact.result.errors.is_empty(),
+            "{source}: {:?}",
+            artifact.result.errors
+        );
+        assert!(
+            artifact
+                .imports
+                .iter()
+                .all(|row| row.module_specifier == "./greet.ts"
+                    && row.is_public
+                    && !row.is_glob
+                    && row.module_kind == ImportModuleKindV1::ProjectRelative),
+            "{source}: {:?}",
+            artifact.imports
+        );
+        let rows = artifact
+            .imports
+            .iter()
+            .map(|row| {
+                (
+                    row.imported_name.as_deref(),
+                    row.local_name.as_deref(),
+                    row.namespace,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, expected, "{source}");
+    }
+}
+
+/// `const X = require("./m")` is the CommonJS default import. Without this
+/// row, `new X()` cannot bind across files.
+#[test]
+fn require_assignment_is_a_default_import_row() {
+    let source = "const URLImportPlugin = require(\"../../webpack\");\n";
+    let artifact =
+        TypeScriptExtractor.extract_artifact("manual/webpack/webpackConfigFactory.js", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.namespace,
+                row.module_kind,
+                row.is_public,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [(
+            "../../webpack",
+            Some("default"),
+            Some("URLImportPlugin"),
+            ImportNamespaceV1::Value,
+            ImportModuleKindV1::ProjectRelative,
+            false,
+        )],
+        "{:?}",
+        artifact.imports
+    );
+}
+
+/// A `require` inside a test callback or `namespace` block binds a name
+/// only that body sees. Emitting a file-scope row would let `new` sites in
+/// unrelated functions claim the module.
+#[test]
+fn require_outside_module_scope_emits_no_import_row() {
+    for source in [
+        // Test callbacks traverse their body statements, but the binding is
+        // still local to the callback.
+        "describe('loads', () => {\n\
+         \x20 const Plugin = require('./plugin');\n\
+         \x20 new Plugin();\n\
+         });\n",
+        // A `namespace` block is its own scope.
+        "namespace inner {\n\
+         \x20 const Plugin = require('./plugin');\n\
+         \x20 export function build() { return new Plugin(); }\n\
+         }\n",
+    ] {
+        let artifact = TypeScriptExtractor.extract_artifact("factory.test.ts", source);
+        assert!(
+            artifact.result.errors.is_empty(),
+            "{source}: {:?}",
+            artifact.result.errors
+        );
+        assert!(
+            artifact.imports.is_empty(),
+            "{source}: {:?}",
+            artifact.imports
+        );
+    }
+}
+
+/// `const { Foo } = require("./m")` binds the named export, matching ESM
+/// `import { Foo } from "./m"`.
+#[test]
+fn require_destructure_is_a_named_import_row() {
+    let source = "const { URLImportPlugin: Plugin } = require(\"./webpack\");\n";
+    let artifact = TypeScriptExtractor.extract_artifact("factory.js", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.module_specifier.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [(Some("URLImportPlugin"), Some("Plugin"), "./webpack")],
+        "{:?}",
+        artifact.imports
+    );
+}
+
+/// `module.exports = Name` is the CommonJS default export. Callers of
+/// `Name` through `require()` need this forwarding row.
+#[test]
+fn module_exports_assignment_is_a_default_export_row() {
+    let source = "class URLImportPlugin {}\nmodule.exports = URLImportPlugin;\n";
+    let artifact = TypeScriptExtractor.extract_artifact("src/webpack/index.js", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .filter(|row| row.is_public)
+        .map(|row| {
+            (
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.module_specifier.as_str(),
+                row.namespace,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [(
+            Some("URLImportPlugin"),
+            Some("default"),
+            "./index.js",
+            ImportNamespaceV1::Value,
+        )],
+        "{:?}",
+        artifact.imports
+    );
+}
+
+/// `exports.Name = Local` and `module.exports.Name = Local` are named
+/// CommonJS exports. `const { Name } = require("./m")` binds `Local`
+/// through these forwarding rows.
+#[test]
+fn member_exports_assignments_are_named_export_rows() {
+    let source =
+        "class Internal {}\nexports.Plugin = Internal;\nmodule.exports.Factory = Internal;\n";
+    let artifact = TypeScriptExtractor.extract_artifact("src/plugin.js", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .filter(|row| row.is_public)
+        .map(|row| {
+            (
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.module_specifier.as_str(),
+                row.namespace,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [
+            (
+                Some("Internal"),
+                Some("Plugin"),
+                "./plugin.js",
+                ImportNamespaceV1::Value,
+            ),
+            (
+                Some("Internal"),
+                Some("Factory"),
+                "./plugin.js",
+                ImportNamespaceV1::Value,
+            ),
+        ],
+        "{:?}",
+        artifact.imports
+    );
+}

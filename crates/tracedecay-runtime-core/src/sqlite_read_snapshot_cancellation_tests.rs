@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, config::DbConfig};
 use tempfile::TempDir;
 
 use super::{SnapshotReadControl, family_state, open_foreign_in};
 
-#[tokio::test]
+#[asupersync::test]
 async fn foreign_snapshot_cancellation_interrupts_mid_capture() {
     // Bulk stays WAL-resident so cancel can land in copy or in the
     // progress_handler-backed journal_mode=DELETE fold. Either path must
@@ -46,7 +46,7 @@ async fn foreign_snapshot_cancellation_interrupts_mid_capture() {
     drop(writer);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn foreign_snapshot_cancellation_interrupts_the_wal_fold() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("live.db");
@@ -60,6 +60,10 @@ async fn foreign_snapshot_cancellation_interrupts_the_wal_fold() {
              INSERT INTO durable(value) VALUES (zeroblob(67108864));",
         )
         .unwrap();
+    writer
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .unwrap();
+    drop(writer);
 
     let scratch = temp.path().join("scratch.db");
     fs::copy(&source, &scratch).unwrap();
@@ -84,5 +88,4 @@ async fn foreign_snapshot_cancellation_interrupts_the_wal_fold() {
 
     assert!(checkpoints.load(Ordering::Relaxed) >= 3);
     assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-    drop(writer);
 }

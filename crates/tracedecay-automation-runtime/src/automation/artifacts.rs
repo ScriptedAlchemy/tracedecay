@@ -7,7 +7,6 @@ use super::artifact_payloads::{
     generated_eval_payloads, generated_evals_payload, improvement_gate_payload,
     optimizer_diagnosis_payload, traces_payload, validation_gate_payload,
 };
-use super::artifact_policy::artifact_policy;
 use super::artifact_refs::artifact_ref;
 use super::backend::{
     AgentTaskKind, AgentTaskRequest, AgentTaskResponse, prompt_version, task_key,
@@ -17,7 +16,8 @@ use super::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
     prepare_run_artifact, publish_run_artifact_chain, read_published_artifact_chain,
 };
-use crate::errors::Result;
+use tracedecay_automation::artifact_policy::artifact_policy;
+use tracedecay_domain::errors::Result;
 
 pub(crate) use super::artifact_refs::{sha256_bytes, sha256_json};
 
@@ -40,7 +40,7 @@ impl<'a> ImprovementArtifactWriter<'a> {
         }
     }
 
-    async fn write(
+    fn write(
         &mut self,
         kind: AutomationRunArtifactKind,
         payload: &Value,
@@ -80,9 +80,8 @@ pub(crate) async fn write_improvement_artifacts(
             "prompt_version": prompt_version,
             "policy": {
                 "optimizer_action": policy.optimizer_action,
-                "next_actions": policy.next_actions(record),
-                "handoff_tests": policy.handoff_tests(),
-                "eval_replay_commands": policy.eval_replay_commands(),
+                "next_actions": policy.next_actions(record.accepted_count),
+                "handoff_tests": [policy.handoff_test()],
             },
             "request": request,
             "response": response,
@@ -108,65 +107,55 @@ pub(crate) async fn write_improvement_artifacts(
     };
     let mut writer = ImprovementArtifactWriter::new(dashboard_root, run_id, &created_at);
 
-    let trace_ref = writer
-        .write(
-            AutomationRunArtifactKind::Traces,
-            &traces_payload(&ctx),
-            Some(format!("{task_key} trace and hash references")),
-        )
-        .await?;
+    let trace_ref = writer.write(
+        AutomationRunArtifactKind::Traces,
+        &traces_payload(&ctx),
+        Some(format!("{task_key} trace and hash references")),
+    )?;
 
-    let feedback_ref = writer
-        .write(
-            AutomationRunArtifactKind::Feedback,
-            &feedback_payload(&ctx, &trace_ref),
-            Some("feedback derived from validation outcomes".to_string()),
-        )
-        .await?;
+    let feedback_ref = writer.write(
+        AutomationRunArtifactKind::Feedback,
+        &feedback_payload(&ctx, &trace_ref),
+        Some("feedback derived from validation outcomes".to_string()),
+    )?;
 
     let evals = generated_eval_payloads(&ctx);
-    let generated_evals_ref = writer
-        .write(
-            AutomationRunArtifactKind::GeneratedEvals,
-            &generated_evals_payload(&ctx, (&trace_ref, &feedback_ref), &evals),
-            Some("evals generated from validation outcomes".to_string()),
-        )
-        .await?;
+    let generated_evals_ref = writer.write(
+        AutomationRunArtifactKind::GeneratedEvals,
+        &generated_evals_payload(&ctx, (&trace_ref, &feedback_ref), &evals),
+        Some("evals generated from validation outcomes".to_string()),
+    )?;
 
     let gate = improvement_gate_payload(&ctx, &evals);
-    let validation_gate_ref = writer
-        .write(
-            AutomationRunArtifactKind::ValidationGate,
-            &validation_gate_payload(
-                &ctx,
-                (&trace_ref, &feedback_ref, &generated_evals_ref),
-                &evals,
-                &gate,
-            ),
-            Some(format!(
-                "{} accepted, {} rejected",
-                record.accepted_count, record.rejected_count
-            )),
-        )
-        .await?;
+    let validation_gate_ref = writer.write(
+        AutomationRunArtifactKind::ValidationGate,
+        &validation_gate_payload(
+            &ctx,
+            (&trace_ref, &feedback_ref, &generated_evals_ref),
+            &evals,
+            &gate,
+        ),
+        Some(format!(
+            "{} accepted, {} rejected",
+            record.accepted_count, record.rejected_count
+        )),
+    )?;
 
-    let optimizer_diagnosis_ref = writer
-        .write(
-            AutomationRunArtifactKind::OptimizerDiagnosis,
-            &optimizer_diagnosis_payload(
-                &ctx,
-                (
-                    &trace_ref,
-                    &feedback_ref,
-                    &generated_evals_ref,
-                    &validation_gate_ref,
-                ),
-                &evals,
-                &gate,
+    let optimizer_diagnosis_ref = writer.write(
+        AutomationRunArtifactKind::OptimizerDiagnosis,
+        &optimizer_diagnosis_payload(
+            &ctx,
+            (
+                &trace_ref,
+                &feedback_ref,
+                &generated_evals_ref,
+                &validation_gate_ref,
             ),
-            Some("optimizer diagnosis derived from validation outcomes".to_string()),
-        )
-        .await?;
+            &evals,
+            &gate,
+        ),
+        Some("optimizer diagnosis derived from validation outcomes".to_string()),
+    )?;
 
     let codex_handoff = codex_handoff_payload(
         &ctx,
@@ -180,13 +169,11 @@ pub(crate) async fn write_improvement_artifacts(
         &evals,
         &gate,
     );
-    writer
-        .write(
-            AutomationRunArtifactKind::CodexHandoff,
-            &codex_handoff,
-            Some(format!("{task_key} review handoff")),
-        )
-        .await?;
+    writer.write(
+        AutomationRunArtifactKind::CodexHandoff,
+        &codex_handoff,
+        Some(format!("{task_key} review handoff")),
+    )?;
 
     writer.finish(&publication_identity).await
 }
@@ -195,7 +182,9 @@ pub(crate) async fn write_improvement_artifacts(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::super::outcomes::automation_outcomes_path;
-    use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
+    use super::super::run_ledger::{
+        AutomationRunStatus, AutomationTrigger, read_run_artifact_payload,
+    };
     use super::*;
 
     fn artifact_record(run_id: &str) -> AutomationRunLedgerRecord {
@@ -230,12 +219,66 @@ mod tests {
             backend_attempt_count: 0,
             backend_attempts: Vec::new(),
             fallback_status: None,
+            session_evidence_budget_stage: None,
             report_ref: None,
             artifacts: Vec::new(),
             started_at: "0".to_string(),
             completed_at: "1".to_string(),
             completed_at_micros: Some(1_000_000),
         }
+    }
+
+    #[tokio::test]
+    async fn schema_v1_six_kind_chain_stays_readable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let run_id = "legacy-v1-chain";
+        let legacy_evals = serde_json::json!({
+            "schema_version": 1,
+            "loop_stage": "generated_evals",
+            "runner": {"type": "validation_replay", "status": "passed"},
+        });
+        let chain = [
+            AutomationRunArtifactKind::Traces,
+            AutomationRunArtifactKind::Feedback,
+            AutomationRunArtifactKind::GeneratedEvals,
+            AutomationRunArtifactKind::ValidationGate,
+            AutomationRunArtifactKind::OptimizerDiagnosis,
+            AutomationRunArtifactKind::CodexHandoff,
+        ]
+        .into_iter()
+        .map(|kind| {
+            let payload = if kind == AutomationRunArtifactKind::GeneratedEvals {
+                legacy_evals.clone()
+            } else {
+                serde_json::json!({"schema_version": 1, "loop_stage": kind.as_str()})
+            };
+            prepare_run_artifact(run_id, kind, &payload, None, "1").unwrap()
+        })
+        .collect();
+        publish_run_artifact_chain(
+            temp.path(),
+            run_id,
+            chain,
+            &serde_json::json!({"sha256": "legacy"}),
+        )
+        .await
+        .unwrap();
+
+        let artifacts = read_published_artifact_chain(temp.path(), run_id, None)
+            .await
+            .unwrap()
+            .expect("legacy chain");
+        assert_eq!(artifacts.len(), 6);
+        let evals = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "generated_evals")
+            .unwrap();
+        assert_eq!(
+            read_run_artifact_payload(temp.path(), run_id, evals)
+                .await
+                .unwrap(),
+            legacy_evals
+        );
     }
 
     #[tokio::test]

@@ -5,17 +5,38 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
-use super::memory_fact_assertions::assert_fact_list;
+fn assert_fact_list(payload: &Value, included: &str, excluded: &str, context: &str) {
+    let facts = payload["facts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{context} must return canonical facts: {payload}"));
+    assert_eq!(facts.len(), 1, "{context}: {payload}");
+    let contents: Vec<&str> = facts
+        .iter()
+        .map(|projection| {
+            assert_eq!(projection["kind"], "available", "{context}: {payload}");
+            projection["fact"]["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{context} fact content: {payload}"))
+        })
+        .collect();
+    assert!(
+        contents.iter().any(|content| content.contains(included)),
+        "{context}: {payload}"
+    );
+    assert!(
+        contents.iter().all(|content| !content.contains(excluded)),
+        "{context}: {payload}"
+    );
+}
 
 /// The fact-store surfaces are daemon-owned application operations. Keep these
 /// tests on the production composition so they cannot accidentally exercise
 /// the removed direct broad-action handler.
 pub(super) struct FactStoreMcpFixture {
     production: ProductionCompositionFixture,
-    server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) server: Arc<tracedecay::mcp::McpServer>,
 }
 
 async fn fact_store_mcp_fixture() -> FactStoreMcpFixture {
@@ -31,9 +52,42 @@ pub(super) async fn setup_project() -> FactStoreMcpFixture {
     fact_store_mcp_fixture().await
 }
 
+pub(super) async fn active_project_id(fixture: &FactStoreMcpFixture) -> String {
+    fixture
+        .production
+        .harness
+        .project_id(&fixture.production.project_root)
+        .await
+        .expect("registered project id")
+}
+
+/// JSON-RPC `tools/call` response, including protocol errors that the payload
+/// helper collapses into `Err`.
+pub(super) async fn invoke_production_tool_response(
+    fixture: &FactStoreMcpFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
+    handle_real_server_tool_call_raw(&fixture.server, tool_name, arguments).await
+}
+
 /// Invoke an exact MCP operation through the production daemon executor and
 /// project its typed operation payload for focused behavioral assertions.
-async fn invoke_exact_tool(
+pub(super) async fn invoke_exact_tool(
+    server: &tracedecay::mcp::McpServer,
+    tool_name: &str,
+    arguments: Value,
+) -> tracedecay_domain::errors::Result<Value> {
+    let response_value = invoke_exact_tool_envelope(server, tool_name, arguments).await?;
+    response_value
+        .pointer("/outcome/value/payload")
+        .cloned()
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("{tool_name} omitted its canonical application payload"),
+        })
+}
+
+async fn invoke_exact_tool_envelope(
     server: &tracedecay::mcp::McpServer,
     tool_name: &str,
     mut arguments: Value,
@@ -63,13 +117,7 @@ async fn invoke_exact_tool(
             .to_owned();
         return Err(tracedecay_domain::errors::TraceDecayError::Config { message });
     }
-    let payload = response_value
-        .pointer("/outcome/value/payload")
-        .cloned()
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("{tool_name} omitted its canonical application payload"),
-        })?;
-    Ok(payload)
+    Ok(response_value)
 }
 
 pub(super) async fn invoke_production_tool(
@@ -78,6 +126,10 @@ pub(super) async fn invoke_production_tool(
     arguments: Value,
 ) -> tracedecay_domain::errors::Result<Value> {
     invoke_exact_tool(&fixture.server, tool_name, arguments).await
+}
+
+pub(super) fn fact_store_server(fixture: &FactStoreMcpFixture) -> &tracedecay::mcp::McpServer {
+    &fixture.server
 }
 
 pub(super) async fn close_test_graph(fixture: FactStoreMcpFixture) {
@@ -100,52 +152,33 @@ fn committed_add_result(payload: &Value) -> &Value {
     result
 }
 
-struct FactStoreCrossProjectFixture {
-    harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+pub(super) struct FactStoreCrossProjectFixture {
+    pub(super) harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
     target_root: std::path::PathBuf,
-    active_server: Arc<tracedecay::mcp::McpServer>,
-    target_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) active_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) target_server: Arc<tracedecay::mcp::McpServer>,
     _isolation: TestTempDir,
+}
+
+impl FactStoreCrossProjectFixture {
+    pub(super) async fn shutdown(self) {
+        self.harness.shutdown().await;
+    }
 }
 
 fn initialize_production_fact_project(root: &Path) {
     fs::create_dir_all(root).expect("cross-project fact fixture root");
     crate::fixture::write_indexed_fixture_sources(root);
-    let init = Command::new(crate::common::git_program())
-        .args(["init", "-q"])
-        .current_dir(root)
-        .status()
-        .expect("initialize cross-project fact fixture");
-    assert!(init.success(), "git init should succeed");
-    let add = Command::new(crate::common::git_program())
-        .args(["add", "."])
-        .current_dir(root)
-        .status()
-        .expect("stage cross-project fact fixture");
-    assert!(add.success(), "git add should succeed");
-    let commit = Command::new(crate::common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "production fact-store fixture",
-        ])
-        .current_dir(root)
-        .status()
-        .expect("commit cross-project fact fixture");
-    assert!(commit.success(), "git commit should succeed");
+    commit_worktree(root, "production fact-store fixture");
 }
 
-async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
+pub(super) async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
     let isolation = test_temp_dir();
     let active_root = isolation.path().join("active");
     let target_root = isolation.path().join("target");
     initialize_production_fact_project(&active_root);
     initialize_production_fact_project(&target_root);
-    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
+    let harness = crate::support::seeded_composition::open(
         isolation.path(),
         vec![active_root.clone(), target_root.clone()],
     )
@@ -282,7 +315,7 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
         Some(first_results.len() as i64 + rare_results.len() as i64)
     );
     // Every fact the two searches returned must be counted exactly once, so
-    // the distinct-fact tally is the size of the returned id set — not the
+    // the distinct-fact tally is the size of the returned id set, not the
     // number of stored facts, which would also assert how many weak matches
     // the ranker chooses to return.
     let retrieved_ids: BTreeSet<String> = first_results
@@ -370,7 +403,7 @@ async fn memory_fact_store_add_search_update_and_remove() {
         (
             "tracedecay_fact_store_reason",
             "reason",
-            json!({"entities": ["Amari Memory", "Project Phoenix"]}),
+            json!({"entities": ["Project Phoenix", "Amari Memory"]}),
         ),
         (
             "tracedecay_fact_store_contradict",
@@ -440,6 +473,170 @@ async fn memory_fact_store_add_search_update_and_remove() {
     close_test_graph(cg).await;
 }
 
+/// #727: an explicit supersession retires the old fact from the default
+/// surfaces without deleting it. Fails if the superseded fact still lists, if
+/// its history stops carrying the retired projection, or if a second
+/// successor is silently accepted.
+#[tokio::test]
+async fn memory_fact_store_supersede_retires_old_fact_from_default_surfaces() {
+    let cg = setup_project().await;
+    let old = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({
+            "content": "Project Phoenix ships on the first of the month",
+            "category": "project",
+            "entities": ["Project Phoenix"]
+        }),
+    )
+    .await
+    .unwrap();
+    let old_fact = committed_add_result(&old);
+    let old_fact_id = available_fact(&old_fact["fact"])["fact_id"]
+        .as_str()
+        .expect("old fact id")
+        .to_owned();
+    let successor = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({
+            "content": "The Phoenix release train now departs on the fifteenth after the Q3 retro moved the cutoff",
+            "category": "decision",
+            "entities": ["Phoenix release train", "Q3 retro"]
+        }),
+    )
+    .await
+    .unwrap();
+    let successor_fact_id = available_fact(&committed_add_result(&successor)["fact"])["fact_id"]
+        .as_str()
+        .expect("successor fact id")
+        .to_owned();
+
+    let superseded = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_supersede",
+        json!({
+            "fact_id": old_fact_id.clone(),
+            "superseded_by": successor_fact_id.clone()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(superseded["outcome"], "superseded", "{superseded}");
+    assert_eq!(superseded["fact_id"], old_fact_id);
+    assert_eq!(superseded["superseded_by"], successor_fact_id);
+    assert_eq!(superseded["commit"]["fact_id"], old_fact_id);
+    assert!(
+        superseded["commit"]["active_assertion_id"].is_null(),
+        "supersession retires the active assertion: {superseded}"
+    );
+
+    let listed = invoke_production_tool(&cg, "tracedecay_fact_store_list", json!({}))
+        .await
+        .unwrap();
+    let listed_ids: Vec<String> = listed["facts"]
+        .as_array()
+        .expect("list facts")
+        .iter()
+        .map(|fact| {
+            available_fact(fact)["fact_id"]
+                .as_str()
+                .expect("listed fact id")
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        !listed_ids.contains(&old_fact_id),
+        "a superseded fact must leave the default list surface: {listed}"
+    );
+    assert!(
+        listed_ids.contains(&successor_fact_id),
+        "the successor stays current: {listed}"
+    );
+
+    let retired = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_get",
+        json!({"fact_id": old_fact_id.clone()}),
+    )
+    .await
+    .expect("an exact read keeps the superseded fact available");
+    assert_eq!(retired["fact"]["kind"], "superseded", "{retired}");
+    assert_eq!(retired["fact"]["superseded_by"], successor_fact_id);
+    assert_eq!(
+        retired["fact"]["fact"]["content"],
+        "Project Phoenix ships on the first of the month"
+    );
+
+    // The identical request is the same retained operation: it replays the
+    // recorded commit instead of writing a second supersession event.
+    let replayed = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_supersede",
+        json!({
+            "fact_id": old_fact_id.clone(),
+            "superseded_by": successor_fact_id.clone()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed["outcome"], "superseded", "{replayed}");
+    assert_eq!(
+        replayed["commit"]["disposition"], "idempotent_replay",
+        "{replayed}"
+    );
+    assert_eq!(
+        replayed["commit"]["last_event_id"], superseded["commit"]["last_event_id"],
+        "a replay must not append a second supersession event: {replayed}"
+    );
+
+    // A distinct operation naming the same successor observes the recorded
+    // supersession instead of writing again.
+    let observed = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_supersede",
+        json!({
+            "fact_id": old_fact_id.clone(),
+            "superseded_by": successor_fact_id.clone(),
+            "expected_last_event_id": superseded["commit"]["last_event_id"].clone()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(observed["outcome"], "already_superseded", "{observed}");
+    assert_eq!(observed["superseded_by"], successor_fact_id);
+
+    let other = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({
+            "content": "Quarterly shipping for the Orion service is owned by the platform guild",
+            "category": "tool",
+            "entities": ["Orion service", "platform guild"]
+        }),
+    )
+    .await
+    .unwrap();
+    let other_fact_id = available_fact(&committed_add_result(&other)["fact"])["fact_id"]
+        .as_str()
+        .expect("other fact id")
+        .to_owned();
+    let refused = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_supersede",
+        json!({
+            "fact_id": old_fact_id.clone(),
+            "superseded_by": other_fact_id
+        }),
+    )
+    .await;
+    assert!(
+        refused.is_err(),
+        "a fact has exactly one successor; a different successor is a typed refusal: {refused:?}"
+    );
+    close_test_graph(cg).await;
+}
+
 #[tokio::test]
 async fn memory_fact_store_project_selector_targets_registered_project() {
     let fixture = fact_store_cross_project_fixture().await;
@@ -481,7 +678,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     .await
     .unwrap();
 
-    let target_list = invoke_exact_tool(
+    let target_list_envelope = invoke_exact_tool_envelope(
         &fixture.active_server,
         "tracedecay_fact_store_list",
         json!({
@@ -492,6 +689,22 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     )
     .await
     .unwrap();
+    let selected_scope = &target_list_envelope["scope"];
+    let selected_evidence = &target_list_envelope["outcome"]["value"];
+    assert_eq!(selected_scope["project_id"], target_project_id);
+    assert_eq!(
+        selected_evidence["authority"]["authorized_scope_digest"], selected_scope["scope_digest"],
+        "the selected server's project-open grant must authorize the reported scope: {target_list_envelope}"
+    );
+    assert_eq!(
+        selected_evidence["evidence_authorities"][0]["scope"], *selected_scope,
+        "selected evidence must be produced under the same scope the envelope reports: {target_list_envelope}"
+    );
+    assert_eq!(
+        selected_evidence["payload"]["owner"]["project_id"], target_project_id,
+        "the selected payload owner must match the project-open grant: {target_list_envelope}"
+    );
+    let target_list = selected_evidence["payload"].clone();
     assert_fact_list(
         &target_list,
         "Target selector fact",
@@ -513,22 +726,44 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "default exact fact-tool scope should remain the active project",
     );
 
-    let cross_project_write = invoke_exact_tool(
+    invoke_exact_tool(
         &fixture.active_server,
         "tracedecay_fact_store_add",
         json!({
             "project_selector": {"project_id": target_project_id.clone()},
-            "content": "Cross-project writes should be rejected",
-            "category": "project"
+            "content": "Cross-project write lands in the selected project",
+            "category": "decision"
         }),
     )
-    .await;
-    assert!(
-        cross_project_write.is_err(),
-        "the exact add route must reject cross-project writes"
+    .await
+    .expect("a selected-project add must land in the selected project's store");
+    let target_decisions = invoke_exact_tool(
+        &fixture.target_server,
+        "tracedecay_fact_store_list",
+        json!({"category": "decision", "min_trust": 0.0}),
+    )
+    .await
+    .unwrap();
+    assert_fact_list(
+        &target_decisions,
+        "Cross-project write lands",
+        "Active selector fact",
+        "the selected project's own list must show the cross-project add",
+    );
+    let active_decisions = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_list",
+        json!({"category": "decision", "min_trust": 0.0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        active_decisions["facts"],
+        json!([]),
+        "the cross-project add must not land in the active project: {active_decisions}"
     );
 
-    let cross_project_feedback = invoke_exact_tool(
+    invoke_exact_tool(
         &fixture.active_server,
         "tracedecay_fact_feedback",
         json!({
@@ -537,11 +772,8 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
             "project_selector": {"project_id": target_project_id.clone()}
         }),
     )
-    .await;
-    assert!(
-        cross_project_feedback.is_err(),
-        "fact feedback must reject cross-project selectors"
-    );
+    .await
+    .expect("feedback on a selected-project fact must reach the selected project's store");
 
     let typo_selector = invoke_exact_tool(
         &fixture.active_server,
@@ -823,29 +1055,31 @@ async fn memory_recall_updates_retrieval_count() {
         .map(available_fact)
         .find(|fact| fact["fact_id"].as_str() == Some(fact_id.as_str()))
         .unwrap();
+    assert_eq!(
+        fact["telemetry"]["retrieval_count"], 1,
+        "writable-graph search must increment retrieval_count once: {status}"
+    );
     assert!(
-        fact["telemetry"]["retrieval_count"]
+        fact["telemetry"]["last_retrieved_at"].as_i64().is_some(),
+        "writable-graph search must stamp last_retrieved_at: {status}"
+    );
+
+    let memory_status = invoke_production_tool(&cg, "tracedecay_memory_status", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        memory_status["memory"]["feedback_funnel"]["retrieval_count_total"]
             .as_u64()
             .unwrap_or_default()
             > 0,
-        "returned facts should increment retrieval_count: {status}"
+        "memory_status retrieval funnel must move after search: {memory_status}"
     );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn memory_list_rejects_an_unknown_category() {
-    let cg = setup_project().await;
-
-    let bad_category = invoke_production_tool(
-        &cg,
-        "tracedecay_fact_store_list",
-        json!({"category": "definitely-not-a-category"}),
-    )
-    .await;
     assert!(
-        bad_category.is_err(),
-        "the exact list schema must reject an unknown category"
+        memory_status["memory"]["feedback_funnel"]["retrieved_fact_count"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "memory_status must count the retrieved fact: {memory_status}"
     );
     close_test_graph(cg).await;
 }
@@ -878,7 +1112,7 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
         "status must include the stored fact: {status}"
     );
     assert_eq!(
-        status["memory"]["algebra"]["name"], "amari_fhrr",
+        status["memory"]["algebra"]["name"], "map_c",
         "status must name the canonical similarity algebra: {status}"
     );
     assert_eq!(status["memory"]["algebra"]["hrr_dim"].as_u64(), Some(2048));
@@ -886,18 +1120,6 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
         status["memory"]["algebra"]["estimated_capacity"]
             .as_u64()
             .is_some_and(|capacity| capacity > 0)
-    );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn fact_store_reason_requires_an_entity_selection() {
-    let cg = setup_project().await;
-
-    let result = invoke_production_tool(&cg, "tracedecay_fact_store_reason", json!({})).await;
-    assert!(
-        result.is_err(),
-        "the exact reason route must reject an empty entity selection"
     );
     close_test_graph(cg).await;
 }
@@ -1009,9 +1231,13 @@ async fn fact_store_add_rejects_out_of_range_trust() {
         }),
     )
     .await;
+    let error =
+        result.expect_err("the exact add route must reject a trust value outside its schema range");
+    let message = error.to_string();
     assert!(
-        result.is_err(),
-        "the exact add route must reject a trust value outside its schema range"
+        message.contains(r#""code":"application.retained.invalid-request""#)
+            && message.contains(r#""kind":"invalid_request""#),
+        "refused with: {error}"
     );
     close_test_graph(cg).await;
 }

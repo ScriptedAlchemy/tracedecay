@@ -21,7 +21,9 @@ pub enum MemoryApplicationError {
         request_owner: FactOwnerV1,
     },
     #[error("fact store operation failed")]
-    Store(#[from] FactStoreError),
+    Store(#[source] FactStoreError),
+    #[error("fact store operation was cancelled")]
+    Cancelled(#[source] FactStoreError),
     #[error("memory input is invalid: {invariant}")]
     InvalidInput { invariant: &'static str },
     #[error("memory authority returned a result violating {invariant}")]
@@ -45,7 +47,7 @@ pub enum MemoryMutationError<T: Debug> {
     InvalidAuthorityResult {
         #[source]
         error: MemoryApplicationError,
-        authority_result: T,
+        authority_result: Box<T>,
     },
 }
 
@@ -61,7 +63,7 @@ impl<T: Debug> MemoryMutationError<T> {
                 authority_result,
             } => MemoryMutationError::InvalidAuthorityResult {
                 error,
-                authority_result: map(authority_result),
+                authority_result: Box::new(map(*authority_result)),
             },
         }
     }
@@ -76,6 +78,25 @@ impl<T: Debug> From<MemoryMutationError<T>> for MemoryApplicationError {
     }
 }
 
+impl From<FactStoreError> for MemoryApplicationError {
+    fn from(error: FactStoreError) -> Self {
+        match error {
+            FactStoreError::ReadCancelled
+            | FactStoreError::GraphCancelled
+            | FactStoreError::GraphDeadlineExceeded => Self::Cancelled(error),
+            // FactStoreError is #[non_exhaustive]; a future cancellation variant would land in Store.
+            error => Self::Store(error),
+        }
+    }
+}
+
+impl MemoryApplicationError {
+    /// True for store cancellation and deadline failures, not ordinary store errors.
+    pub fn is_cancellation(&self) -> bool {
+        matches!(self, Self::Cancelled(_))
+    }
+}
+
 pub(super) fn settle_authority_result<T: Debug>(
     authority_result: T,
     validate: impl FnOnce(&T) -> Result<(), MemoryApplicationError>,
@@ -84,7 +105,7 @@ pub(super) fn settle_authority_result<T: Debug>(
         Ok(()) => Ok(authority_result),
         Err(error) => Err(MemoryMutationError::InvalidAuthorityResult {
             error,
-            authority_result,
+            authority_result: Box::new(authority_result),
         }),
     }
 }

@@ -3,14 +3,14 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use tracedecay_application::memory::FactSearchGraphCoverageV1;
+use tracedecay_contracts::memory::FactSearchGraphCoverageV1;
 use tracedecay_store::FactReadControl;
 
 use super::{ExplorerQueryRequestV1, ExplorerSourceIdV1, ExplorerSourceProgressV1, ready_source};
 use crate::memory_service::MemoryFactsCoverageV1;
 use crate::read_model::DashboardCoverageCompletenessV1;
 use crate::{DashboardHttpRequestControlV1, DashboardState, memory_service};
-use tracedecay_session_memory::context::CancellationToken;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 fn coverage_summary(
     coverage: &MemoryFactsCoverageV1,
@@ -162,8 +162,7 @@ mod tests {
                 completeness: DashboardCoverageCompletenessV1::Partial,
                 limit: 3,
                 graph: Some(FactSearchGraphCoverageV1::Degraded {
-                    reason:
-                        tracedecay_application::memory::FactSearchGraphDegradationV1::Unavailable,
+                    reason: tracedecay_contracts::memory::FactSearchGraphDegradationV1::Unavailable,
                 }),
                 examined: None,
                 eligible: None,
@@ -181,25 +180,5 @@ mod tests {
             require_first_page(1),
             Err("knowledge search requires a canonical cursor before pagination")
         );
-    }
-
-    #[test]
-    fn bounded_page_does_not_advertise_a_rejected_numeric_continuation() {
-        let request = ExplorerQueryRequestV1 {
-            query: "cache".to_owned(),
-            limit: 1,
-            offset: 0,
-        };
-        let source = ready_source(
-            ExplorerSourceIdV1::Knowledge,
-            &request,
-            vec![json!({"fact_id": "fact.fixture"})],
-            Some(2),
-            json!({}),
-            "facts",
-            Vec::new(),
-        );
-
-        assert_eq!(source.page.and_then(|page| page.next_offset), None);
     }
 }

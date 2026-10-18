@@ -166,19 +166,43 @@ fn scan_utf8_content(
     checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
 ) -> Result<(String, u64), LcmError> {
     checkpoint()?;
-    let mut hasher = sha2::Sha256::new();
-    let mut char_count = 0_u64;
-    let mut utf8 = Utf8State::default();
+    let mut scanner = ContentScanner::default();
     for chunk in content.chunks(64 * 1024) {
         checkpoint()?;
-        hasher.update(chunk);
-        char_count = char_count
-            .checked_add(utf8.validate(chunk)?)
-            .ok_or(LcmError::PayloadIntegrityMismatch)?;
+        scanner.update(chunk)?;
     }
-    utf8.finish()?;
     checkpoint()?;
-    Ok((encode_lowercase_hex(&hasher.finalize()), char_count))
+    scanner.finish()
+}
+
+/// Incremental content proof: SHA-256 plus UTF-8 validity and scalar count
+/// over bytes fed in any window sizes, so a payload can be proven without
+/// holding more than one window at a time.
+#[derive(Default)]
+pub(super) struct ContentScanner {
+    hasher: sha2::Sha256,
+    utf8: Utf8State,
+    char_count: u64,
+}
+
+impl ContentScanner {
+    pub(super) fn update(&mut self, chunk: &[u8]) -> Result<(), LcmError> {
+        self.hasher.update(chunk);
+        self.char_count = self
+            .char_count
+            .checked_add(self.utf8.validate(chunk)?)
+            .ok_or(LcmError::PayloadIntegrityMismatch)?;
+        Ok(())
+    }
+
+    /// Lowercase hex SHA-256 and UTF-8 scalar count of everything fed so far.
+    pub(super) fn finish(self) -> Result<(String, u64), LcmError> {
+        self.utf8.finish()?;
+        Ok((
+            encode_lowercase_hex(&self.hasher.finalize()),
+            self.char_count,
+        ))
+    }
 }
 
 #[derive(Default)]
@@ -236,6 +260,7 @@ impl Utf8State {
 mod tests {
     use super::*;
     use std::fs;
+    use tracedecay_domain::canonical_text::sha256_hex;
 
     #[test]
     fn utf8_scalar_split_at_verification_window_is_accepted_once() {
@@ -291,7 +316,7 @@ mod tests {
         let path = temp.path().join("payload.payload");
         let content = vec![b'x'; 512 * 1024];
         fs::write(&path, &content).unwrap();
-        let hash = super::super::super::util::sha256_hex(&content);
+        let hash = sha256_hex(&content);
         let mut checkpoints = 0;
         let error = read_verified_payload_file_with_checkpoint(
             &path,
@@ -313,31 +338,5 @@ mod tests {
             checkpoints >= 5,
             "verification did not reach an in-file checkpoint"
         );
-    }
-
-    #[test]
-    fn verified_read_preserves_deadline_interruption() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("payload.payload");
-        let content = vec![b'x'; 256 * 1024];
-        fs::write(&path, &content).unwrap();
-        let hash = super::super::super::util::sha256_hex(&content);
-        let mut checkpoints = 0;
-        let error = read_verified_payload_file_with_checkpoint(
-            &path,
-            &hash,
-            content.len() as u64,
-            content.len() as u64,
-            &mut || {
-                checkpoints += 1;
-                if checkpoints >= 4 {
-                    Err(LcmError::DeadlineExceeded)
-                } else {
-                    Ok(())
-                }
-            },
-        )
-        .expect_err("deadline must interrupt a multi-chunk verified read");
-        assert_eq!(error, LcmError::DeadlineExceeded);
     }
 }

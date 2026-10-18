@@ -5,7 +5,7 @@ use std::future::Future;
 
 use thiserror::Error;
 
-use tracedecay_domain::{DomainError, FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecordV2};
+use tracedecay_domain::{DomainError, FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecord};
 use tracedecay_store::FactStore;
 
 use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
@@ -17,11 +17,11 @@ use super::error::MemoryApplicationError;
 /// a fact shard. It deliberately reuses the canonical retrieval-anchor model.
 #[derive(Clone, Debug)]
 pub struct ResolvedEvidenceAnchor {
-    record: RetrievalAnchorRecordV2,
+    record: RetrievalAnchorRecord,
 }
 
 impl ResolvedEvidenceAnchor {
-    pub fn new(record: RetrievalAnchorRecordV2) -> Result<Self, DomainError> {
+    pub fn new(record: RetrievalAnchorRecord) -> Result<Self, DomainError> {
         record.validate()?;
         Ok(Self { record })
     }
@@ -30,11 +30,11 @@ impl ResolvedEvidenceAnchor {
         self.record.anchor_id()
     }
 
-    pub fn record(&self) -> &RetrievalAnchorRecordV2 {
+    pub fn record(&self) -> &RetrievalAnchorRecord {
         &self.record
     }
 
-    pub fn into_record(self) -> RetrievalAnchorRecordV2 {
+    pub fn into_record(self) -> RetrievalAnchorRecord {
         self.record
     }
 }
@@ -65,12 +65,12 @@ impl<A: FactStore> MemoryApplication<A> {
     /// Resolves a daemon-authorized observation anchor before the caller
     /// materializes the returned record in `FactWriteBatch::new_anchors`.
     /// The fact shard never performs a cross-database anchor lookup itself.
-    #[hotpath::measure(label = "usecases.memory.anchor.resolve", future = true)]
+    #[tracing::instrument(name = "usecases.memory.anchor.resolve", level = "trace", skip_all)]
     pub async fn resolve_evidence_anchor<R: EvidenceAnchorResolver>(
         &self,
         resolver: &R,
         anchor_id: RetrievalAnchorId,
-    ) -> Result<RetrievalAnchorRecordV2, MemoryApplicationError> {
+    ) -> Result<RetrievalAnchorRecord, MemoryApplicationError> {
         anchor_id
             .validate()
             .map_err(MemoryApplicationError::InvalidEvidenceAnchor)?;
@@ -93,7 +93,7 @@ impl<A: FactStore> MemoryApplication<A> {
     /// authorization) before the caller materializes any returned record.
     /// The same owner and identity checks as `resolve_evidence_anchor` apply:
     /// a report never silently switches owner or anchor identity.
-    #[hotpath::measure(label = "usecases.memory.anchor.report", future = true)]
+    #[tracing::instrument(name = "usecases.memory.anchor.report", level = "trace", skip_all)]
     pub async fn resolve_evidence_anchor_report<R: EvidenceAnchorReportResolver>(
         &self,
         resolver: &R,

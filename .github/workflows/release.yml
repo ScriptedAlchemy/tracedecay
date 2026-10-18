@@ -1,12 +1,14 @@
 name: Release
 
+# Dispatched on `master` by release-please after it creates the immutable
+# tag. GitHub Actions caches are scoped by the workflow run ref: a run on a
+# unique tag cannot restore the previous tag's cache, while master can reuse
+# the same target/profile dependency cache across releases.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing stable release tag to recover"
+        description: "Stable release tag to build or recover"
         required: true
         type: string
 
@@ -15,23 +17,18 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
-  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
+  RELEASE_TAG: ${{ inputs.release_tag }}
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  group: release-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   validate-release:
     name: Resolve release source
-    if: >-
-      github.repository == 'ScriptedAlchemy/tracedecay' &&
-      (
-        (github.event_name == 'release' && !github.event.release.prerelease) ||
-        github.event_name == 'workflow_dispatch'
-      )
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       attestations: read
@@ -50,8 +47,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
-      - name: Validate manual stable recovery
-        if: github.event_name == 'workflow_dispatch'
+      - name: Validate stable release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -72,16 +68,14 @@ jobs:
           [[ "$version" != *-* ]]
           tag="v${version}"
           test "$RELEASE_TAG" = "$tag"
-          test "$GITHUB_REF" = "refs/tags/${tag}"
-          test "$GITHUB_SHA" = "$source_sha"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
-            tag_sha="$(git rev-list -n 1 "$tag")"
-            if [[ "$tag_sha" != "$source_sha" ]]; then
-              echo "::error::${tag} targets ${tag_sha}, not release source ${source_sha}"
-              exit 1
-            fi
+          test "$GITHUB_REF" = "refs/heads/master"
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          tag_sha="$(git rev-list -n 1 "$tag")"
+          if [[ "$tag_sha" != "$source_sha" ]]; then
+            echo "::error::${tag} targets ${tag_sha}, not release source ${source_sha}"
+            exit 1
           fi
+          git merge-base --is-ancestor "$source_sha" "$GITHUB_SHA"
           {
             echo "source_sha=${source_sha}"
             echo "source_epoch=${source_epoch}"
@@ -104,55 +98,22 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$source_sha" \
+            --signer-ref "refs/tags/${tag}" \
+            --signer-ref "refs/heads/master" \
             --asset-names retained-asset-names \
             --download-dir retained-assets
 
-  dashboard-assets:
-    name: Build dashboard artifact
-    needs: validate-release
-    if: needs.validate-release.outputs.build_required == 'true'
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate-release.outputs.source_sha }}
-
-      - name: Checkout release automation
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate-release.outputs.source_sha }}
-          path: .release-automation
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Install dashboard dependencies
-        working-directory: dashboard
-        run: npm ci
-
-      - name: Build dashboard
-        working-directory: dashboard
-        run: npm run build
-
-      - name: Validate dashboard bundle
-        run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
-
-      - name: Upload dashboard artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-          if-no-files-found: error
-          include-hidden-files: true
-
   build:
     name: Build ${{ matrix.name }}
-    needs: [validate-release, dashboard-assets]
+    # Gold crashes in its Cortex-A53 erratum fixup during the ARM CLI link.
+    # The workflow setting also recovers immutable release sources.
+    env:
+      BAZEL_LINKOPTS: ${{ matrix.name == 'aarch64-linux' && '-fuse-ld=bfd' || '' }}
+    needs: validate-release
     if: needs.validate-release.outputs.build_required == 'true'
     runs-on: ${{ matrix.runner }}
+    # Same matrix as release-beta. Windows 81 min, macOS 54 min. 180 is ~2x Windows.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.validate-release.outputs.matrix) }}
@@ -162,321 +123,79 @@ jobs:
         with:
           ref: ${{ needs.validate-release.outputs.source_sha }}
 
-      - name: Checkout release automation
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate-release.outputs.source_sha }}
-          path: .release-automation
-
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - name: Validate downloaded dashboard bundle
-        run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
-
-      # Skip-mode cargo builds require the expected digest of the validated
-      # prebuilt bundle; the CLI build script refuses to skip without it.
-      - name: Export dashboard bundle digest for skip-mode builds
-        shell: bash
-        run: |
-          set -euo pipefail
-          digest="$(python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
-          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
-
-      - name: Validate portable distribution harnesses
-        run: |
-          python3 .release-automation/scripts/test-check-packaged-lsp-bridge.py
-          python3 .release-automation/scripts/test-build-mcpb.py
-          python3 .release-automation/scripts/test-resolve-installed-binary.py
-          python3 .release-automation/scripts/test-check-packaged-mcp-stdio.py
-          python3 .release-automation/scripts/test-check-distribution-feature-wiring.py
-          python3 .release-automation/scripts/test-resolve-release-source-profile.py
-          python3 .release-automation/scripts/test-package-release-archive.py
-          python3 .release-automation/scripts/test-prepare-release-runtime.py
-          python3 .release-automation/scripts/test-plan-release-recovery.py
-          python3 .release-automation/scripts/test-check-release-artifacts.py
-          bash .release-automation/scripts/test-check-distribution-clean-source.sh
-          bash .release-automation/scripts/test-check-distribution-snapshot.sh
-
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@acdba816b0980ba6b63f1109f89a046e15fc301a # nextest
-
-      - name: Resolve release source feature profile
-        id: release-profile
-        shell: bash
-        run: |
-          python3 .release-automation/scripts/resolve-release-source-profile.py \
-            --source . \
-            --target "${{ matrix.target }}" \
-            --github-output "$GITHUB_OUTPUT"
-          if [[ -f crates/tracedecay-cli/Cargo.toml ]]; then
-            echo "binary_args=--package tracedecay-cli --bin tracedecay" >> "$GITHUB_OUTPUT"
-          else
-            echo "binary_args=--bin tracedecay" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Prepare target release runtime
-        id: target-runtime
-        shell: bash
-        run: |
-          python3 .release-automation/scripts/prepare-release-runtime.py \
-            --manifest .github/release-targets.json \
-            --name "${{ matrix.name }}" \
-            --output "$RUNNER_TEMP/tracedecay-release-runtime" \
-            --github-env "$GITHUB_ENV" \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Verify target runtime compatibility
-        if: steps.target-runtime.outputs.runtime_library != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          runtime="${{ steps.target-runtime.outputs.runtime_library }}"
-          test "$(readelf -d "$runtime" | sed -n 's/.*SONAME.*\[\([^]]*\)\].*/\1/p')" = \
-            "${{ steps.target-runtime.outputs.runtime_entry_name }}"
-          max_glibc="$(readelf --version-info "$runtime" \
-            | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
-            | sort -Vu \
-            | tail -n 1)"
-          test "$max_glibc" = "${{ matrix.runtime.max_glibc }}"
-
-      # make-default symlinks ld to mold, which works on this
-      # runner's GCC 11 (unlike -fuse-ld=mold, which needs GCC 12+).
-      - name: Install mold
-        if: runner.os == 'Linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-        with:
-          mold-version: 2.41.0
-          make-default: true
-
-      - name: Verify mold is the default linker
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mold --version
-          ld --version | head -n 1 | grep -i mold
-
-      - name: Use lld-link
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          where.exe lld-link
-          lld-link --version
-          "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: release-${{ matrix.target }}
-          cache-on-failure: true
-
-      - name: Test release distribution
-        if: matrix.name == 'x86_64-linux'
-        run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
-
-      # Runs before the default build so it never leaves an all-features
-      # binary (e.g. test-transport) on disk at the shared release output
-      # path for later packaging steps to pick up.
-      - name: Verify all-feature release build compiles
-        if: runner.os != 'Windows'
-        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} --all-features --locked
-
+      # Bazel builds and validates //dashboard:app_dist, and the CLI build
+      # script refuses to embed it unless it matches //dashboard:bundle_sha256.
       - name: Build release binary for packaging
-        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
-
-      - name: Install modern Bash for distribution acceptance
-        if: runner.os == 'macOS'
-        run: brew install bash
-
-      - name: Validate immutable FastEmbed fixture pins
-        if: steps.release-profile.outputs.profile == 'production'
-        shell: bash
-        run: |
-          set -euo pipefail
-          gate="scripts/check-distribution-acceptance.sh"
-          prepare="tests/distribution/fastembed/prepare_fixture.py"
-          validator="tests/distribution/fastembed/validate_fixture.py"
-          if [[ ! -x "$gate" || ! -f "$prepare" || ! -f "$validator" ]]; then
-            echo "::error title=FastEmbed acceptance setup missing::Expected executable $gate plus $prepare and $validator from the distribution fixture work."
-            exit 1
-          fi
-          # Pins live in-repo; real model bytes are acquired later by the gate.
-          if ! python3 "$prepare" --check tests/distribution/fastembed; then
-            echo "::error title=FastEmbed fixture pins invalid::The immutable Jina fixture pins must validate before release acceptance acquires real model bytes."
-            exit 1
-          fi
-          cargo fetch --locked --target ${{ matrix.target }}
-
-      - name: Run distribution acceptance
-        if: steps.release-profile.outputs.profile == 'production'
-        shell: bash
-        run: |
-          set -euo pipefail
-          gate_shell="bash"
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            gate_shell="$(brew --prefix)/bin/bash"
-          fi
-          lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          # Allow curl fixture acquisition; keep Cargo and HF hub offline for the
-          # packaged library/CLI and ORT inference phases inside the gate.
-          CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 \
-            "$gate_shell" scripts/check-distribution-acceptance.sh
-          actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          if [[ "$actual_lockfile_sha" != "$lockfile_sha" ]]; then
-            echo "::error title=Cargo.lock changed::Distribution acceptance must preserve the checked-in lockfile."
-            exit 1
-          fi
-
-      - name: Run historical release binary smoke
-        if: steps.release-profile.outputs.profile == 'legacy-default'
-        shell: bash
-        run: |
-          set -euo pipefail
-          binary="target/${{ matrix.target }}/release/tracedecay"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            binary="${binary}.exe"
-          fi
-          test -f "$binary"
-          "$binary" --version
-          "$binary" --help >/dev/null
-
-      - name: Get version
-        id: version
-        shell: bash
-        run: |
-          echo "tag=${{ needs.validate-release.outputs.tag }}" >> "$GITHUB_OUTPUT"
-          echo "version=${{ needs.validate-release.outputs.version }}" >> "$GITHUB_OUTPUT"
-
-      # --- MCP Registry bundle (all platforms) ---
-
-      - name: Package MCPB
-        shell: bash
-        run: |
-          set -euo pipefail
-          binary="target/${{ matrix.target }}/release/tracedecay"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            binary="${binary}.exe"
-          fi
-          bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
-          runtime_args=()
-          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
-            runtime_args+=(
-              --runtime-library "${{ steps.target-runtime.outputs.runtime_library }}"
-              --runtime-license "${{ steps.target-runtime.outputs.runtime_license }}"
-              --runtime-notices "${{ steps.target-runtime.outputs.runtime_notices }}"
-            )
-          fi
-          python3 .release-automation/scripts/build-mcpb.py build \
-            --binary "$binary" \
-            --output "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
-            --platform "${{ matrix.name }}" \
-            "${runtime_args[@]}"
-          test -s "$bundle"
-          python3 .release-automation/scripts/build-mcpb.py verify \
-            --bundle "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
-            --platform "${{ matrix.name }}"
-
-      - name: Verify MCPB runtime (unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
-          rm -rf verify-mcpb
-          python3 -m zipfile -e "$bundle" verify-mcpb
-          test -x verify-mcpb/server/tracedecay
-          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --version
-          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --help >/dev/null
-
-      - name: Upload MCPB artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: cli
+        uses: ./.github/actions/build-cli
         with:
-          name: mcpb-${{ matrix.name }}
-          path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb
+          config: dist
+          dest: target/${{ matrix.target }}/release
+          cache-key: release-${{ matrix.target }}
+
+      # verify-release requires every target to embed the same bundle.
+      - name: Record the embedded dashboard digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Already built for the CLI; naming it top-level materializes it.
+          bazel build --config=dist --config=ci //dashboard:bundle_sha256
+          cp "$(bazel info --config=dist --config=ci bazel-bin)/dashboard/bundle_sha256.txt" \
+            "dashboard-sha256-${{ matrix.name }}.txt"
+
+      - name: Upload embedded dashboard digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-sha256-${{ matrix.name }}
+          path: dashboard-sha256-${{ matrix.name }}.txt
           if-no-files-found: error
 
-      # --- Binary archive (all platforms) ---
+      # Packaging orchestration comes from this immutable workflow revision,
+      # so recovery also works for tags predating the shared helper. The CLI
+      # and its packager inputs still come from the validated release source.
+      - name: Checkout release packaging helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-automation
+          persist-credentials: false
+          sparse-checkout: .github/actions/package-release
 
-      - name: Package binary archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          binary="target/${{ matrix.target }}/release/tracedecay"
-          entry_name="tracedecay"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            binary="${binary}.exe"
-            entry_name="${entry_name}.exe"
-          fi
-          companion_args=()
-          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
-            companion_args+=(
-              --companion
-              "${{ steps.target-runtime.outputs.runtime_library }}=${{ steps.target-runtime.outputs.runtime_entry_name }}"
-              --companion
-              "${{ steps.target-runtime.outputs.runtime_license }}=onnxruntime-LICENSE"
-              --companion
-              "${{ steps.target-runtime.outputs.runtime_notices }}=onnxruntime-ThirdPartyNotices.txt"
-            )
-          fi
-          python3 .release-automation/scripts/package-release-archive.py \
-            --binary "$binary" \
-            --output "tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}" \
-            --format "${{ matrix.archive }}" \
-            --entry-name "$entry_name" \
-            --epoch "${{ needs.validate-release.outputs.source_epoch }}" \
-            "${companion_args[@]}"
+      - name: Package and verify native archive and MCPB
+        uses: ./.release-automation/.github/actions/package-release
+        with:
+          binary: ${{ steps.cli.outputs.path }}
+          tag: ${{ needs.validate-release.outputs.tag }}
+          asset-prefix: tracedecay-${{ needs.validate-release.outputs.tag }}
+          platform: ${{ matrix.name }}
+          archive: ${{ matrix.archive }}
+          epoch: ${{ needs.validate-release.outputs.source_epoch }}
 
-      - name: Verify binary archive (unix)
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        run: |
-          set -euo pipefail
-          archive="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.tar.gz"
-          rm -rf verify-binary
-          mkdir verify-binary
-          tar xzf "$archive" -C verify-binary
-          test -x verify-binary/tracedecay
-          env -u LD_LIBRARY_PATH verify-binary/tracedecay --version
-          env -u LD_LIBRARY_PATH verify-binary/tracedecay --help >/dev/null
-
-      - name: Verify binary archive (windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $archive = "tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.zip"
-          Remove-Item verify-binary -Recurse -Force -ErrorAction SilentlyContinue
-          Expand-Archive -Path $archive -DestinationPath verify-binary
-          & "./verify-binary/tracedecay.exe" --version
-          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --version" }
-          & "./verify-binary/tracedecay.exe" --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --help" }
+      - name: Upload MCPB artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mcpb-${{ matrix.name }}
+          path: tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.mcpb
+          if-no-files-found: error
 
       - name: Upload binary archive artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-${{ matrix.name }}
-          path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
+          path: tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
           if-no-files-found: error
 
   verify-release:
     name: Verify immutable GitHub release
-    needs: [validate-release, dashboard-assets, build]
+    needs: [validate-release, build]
+    # Both publishers (GitHub assets and the npm SDK) need this job, so a
+    # failed target stops them here.
     if: >-
       always() &&
       needs.validate-release.result == 'success' &&
-      (needs.dashboard-assets.result == 'success' || needs.dashboard-assets.result == 'skipped') &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -486,18 +205,19 @@ jobs:
           ref: ${{ needs.validate-release.outputs.source_sha }}
           persist-credentials: false
 
-      - name: Download validated dashboard artifact
+      - name: Download embedded dashboard digests
         if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
+          pattern: dashboard-sha256-*
+          path: dashboard-digests
+          merge-multiple: true
 
-      - name: Validate downloaded dashboard bundle
+      - name: Require one embedded dashboard across targets
         if: needs.validate-release.outputs.build_required == 'true'
-        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+        run: scripts/check-dashboard-digests.sh dashboard-digests
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Revalidate release tag target
         env:
@@ -524,37 +244,29 @@ jobs:
   publish-assets:
     name: Publish release assets
     needs: [validate-release, build, verify-release]
+    # Publish only a whole release (#3756): verify-release runs only when every
+    # target built or was already published, so a failed target withholds
+    # every asset. Re-dispatching the tag rebuilds only the missing targets.
     if: >-
       always() &&
       needs.validate-release.result == 'success' &&
-      needs.verify-release.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      needs.verify-release.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
-      - name: Checkout release automation
+      - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate-release.outputs.source_sha }}
-          path: .release-automation
-          persist-credentials: false
-
-      - name: Get release tag
-        id: release
-        run: |
-          echo "tag=${{ needs.validate-release.outputs.tag }}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.release.outputs.tag }}
           persist-credentials: false
 
       - name: Download newly built binary artifacts
         if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: binary-*
           path: new-binaries
@@ -562,79 +274,55 @@ jobs:
 
       - name: Download newly built MCPB artifacts
         if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: mcpb-*
           path: new-mcpbs
           merge-multiple: true
 
+      # Use the helpers from the running workflow revision for older-tag recovery.
+      - name: Checkout release recovery helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-automation
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            scripts/assemble-release-artifacts.sh
+            scripts/update-release-checksums.py
+
       - name: Assemble exact retained and newly built artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ needs.validate-release.outputs.source_sha }}
+          TAG: ${{ needs.validate-release.outputs.tag }}
+          BUILD_REQUIRED: ${{ needs.validate-release.outputs.build_required }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ steps.release.outputs.tag }}"
-          SOURCE_SHA="${{ needs.validate-release.outputs.source_sha }}"
-          VERSION="${TAG#v}"
-          mkdir binaries mcpbs retained-assets
-          gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
-            --jq '.assets[].name' > remote-asset-names
-          python3 .release-automation/scripts/plan-release-recovery.py \
-            --manifest .release-automation/.github/release-targets.json \
-            --tag "$TAG" \
-            --profile stable \
-            --asset-names remote-asset-names \
-            --retained-output retained-asset-names \
-            --github-output planner-output
-          .release-automation/scripts/verify-retained-release-assets.sh \
-            --tag "$TAG" \
-            --repo "${{ github.repository }}" \
-            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
-            --source-digest "$SOURCE_SHA" \
-            --asset-names retained-asset-names \
-            --download-dir retained-assets
-          while IFS= read -r asset; do
-            [[ -z "$asset" ]] && continue
-            if [[ "$asset" == *.mcpb ]]; then
-              cp "retained-assets/$asset" "mcpbs/$asset"
-            else
-              cp "retained-assets/$asset" "binaries/$asset"
-            fi
-          done < retained-asset-names
-          if [[ "${{ needs.validate-release.outputs.build_required }}" == "true" ]]; then
-            for artifact in new-binaries/tracedecay-*; do
-              destination="binaries/$(basename "$artifact")"
-              [[ -e "$destination" ]] || cp "$artifact" "$destination"
-            done
-            for artifact in new-mcpbs/*.mcpb; do
-              destination="mcpbs/$(basename "$artifact")"
-              [[ -e "$destination" ]] || cp "$artifact" "$destination"
-            done
-          fi
-          python3 .release-automation/scripts/check-release-artifacts.py \
-            --manifest .release-automation/.github/release-targets.json \
-            --tag "$TAG" \
-            --binaries binaries \
-            --mcpbs mcpbs
-          for bundle in mcpbs/*.mcpb; do
-            platform="${bundle#mcpbs/tracedecay-"${TAG}"-}"
-            platform="${platform%.mcpb}"
-            python3 .release-automation/scripts/build-mcpb.py verify \
-              --bundle "$bundle" \
-              --version "$VERSION" \
-              --platform "$platform"
-          done
+          bash .release-automation/scripts/assemble-release-artifacts.sh \
+            "$TAG" "$SOURCE_SHA" "${{ github.repository }}" stable \
+            "${{ github.repository }}/.github/workflows/release.yml" "$BUILD_REQUIRED"
+
+      - name: Count newly built artifacts
+        id: built
+        run: |
+          shopt -s nullglob
+          archives=(new-binaries/tracedecay-*)
+          bundles=(new-mcpbs/*.mcpb)
+          echo "archives=${#archives[@]}" >>"$GITHUB_OUTPUT"
+          echo "bundles=${#bundles[@]}" >>"$GITHUB_OUTPUT"
 
       - name: Attest newly built binary archives
-        if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        if: steps.built.outputs.archives != '0'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: new-binaries/tracedecay-*
 
       - name: Attest newly built MCPBs
-        if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        if: steps.built.outputs.bundles != '0'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: new-mcpbs/*.mcpb
 
@@ -656,10 +344,10 @@ jobs:
             sha256sum -- *.mcpb
           ) >> SHA256SUMS
           assets+=(SHA256SUMS install.sh)
-          TAG="${{ steps.release.outputs.tag }}"
+          TAG="${{ needs.validate-release.outputs.tag }}"
           SOURCE_SHA="${{ needs.validate-release.outputs.source_sha }}"
-          git -C .release-automation fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
-          test "$(git -C .release-automation rev-list -n 1 "$TAG")" = "$SOURCE_SHA"
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          test "$(git rev-list -n 1 "$TAG")" = "$SOURCE_SHA"
 
           gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
             --jq '.assets[].name' > remote-asset-names
@@ -680,7 +368,10 @@ jobs:
           for asset in "${assets[@]}"; do
             name="$(basename "$asset")"
             if grep -Fxq "$name" remote-asset-names; then
-              if [[ "$name" != tracedecay-* ]]; then
+              if [[ "$name" == SHA256SUMS ]]; then
+                python3 .release-automation/scripts/update-release-checksums.py \
+                  --tag "$TAG" --repo "${{ github.repository }}" --checksums "$asset"
+              elif [[ "$name" != tracedecay-* ]]; then
                 mkdir -p retained-metadata
                 gh release download "$TAG" --repo "${{ github.repository }}" \
                   --pattern "$name" --dir retained-metadata
@@ -694,23 +385,34 @@ jobs:
             fi
           done
 
+          # Verify by name, not by glob: a partial publish may have no .zip
+          # or no .tar.gz yet, and `gh release download --pattern` fails on
+          # an empty match.
           mkdir -p remote-assets/{binaries,mcpbs}
-          gh release download "$TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-${TAG}-*.tar.gz" --dir remote-assets/binaries
-          gh release download "$TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-${TAG}-*.zip" --dir remote-assets/binaries
-          gh release download "$TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-${TAG}-*.mcpb" --dir remote-assets/mcpbs
-          python3 .release-automation/scripts/check-release-artifacts.py \
-            --manifest .release-automation/.github/release-targets.json \
+          gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
+            --jq '.assets[].name' > remote-asset-names
+          while IFS= read -r name; do
+            case "$name" in
+              tracedecay-"${TAG}"-*.mcpb)
+                gh release download "$TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir remote-assets/mcpbs ;;
+              tracedecay-"${TAG}"-*.tar.gz | tracedecay-"${TAG}"-*.zip)
+                gh release download "$TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir remote-assets/binaries ;;
+            esac
+          done < remote-asset-names
+          python3 scripts/check-release-artifacts.py \
+            --manifest .github/release-targets.json \
             --tag "$TAG" \
             --binaries remote-assets/binaries \
             --mcpbs remote-assets/mcpbs
-          .release-automation/scripts/verify-retained-release-assets.sh \
+          scripts/verify-retained-release-assets.sh \
             --tag "$TAG" \
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$SOURCE_SHA" \
+            --signer-ref "refs/tags/${TAG}" \
+            --signer-ref "refs/heads/master" \
             --files remote-assets/binaries/* remote-assets/mcpbs/*
 
       - name: Mark stable release as latest
@@ -735,6 +437,7 @@ jobs:
       needs.validate-release.outputs.prerelease == 'false'
     needs: [validate-release, build, publish-assets]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -833,47 +536,54 @@ jobs:
     needs: validate-release
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
+    outputs:
+      artifact_id: ${{ steps.sdk-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate-release.outputs.source_sha }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: stable
+      # rust-toolchain.toml is the only compiler. A floating stable channel
+      # would rebuild the SDK conformance daemon on a different rustc than
+      # the release binaries.
+      - name: Resolve pinned toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          node-version: "22.23.2"
-          cache: npm
-          cache-dependency-path: |
-            dashboard/package-lock.json
-            sdks/typescript/package-lock.json
+          toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.12.0"
 
       - name: Install reviewed npm
-        run: npm install -g npm@12.0.2
+        run: npm install -g npm@12.2.0
 
-      - name: Install dependencies
-        working-directory: sdks/typescript
-        run: npm ci
+      - uses: ./.github/actions/setup-pnpm
 
-      - name: Verify canonical SDK registry-client parity
-        run: scripts/check-sdk-codegen.sh
+      - name: Verify generated contracts and SDK sources
+        working-directory: dashboard
+        run: pnpm run contracts:check
 
       - name: Typecheck
         working-directory: sdks/typescript
-        run: npm run typecheck
+        run: pnpm run typecheck
 
       - name: Fast unit suite
         working-directory: sdks/typescript
-        run: npm test
+        run: pnpm test
 
       - name: Build
         working-directory: sdks/typescript
-        run: npm run build
+        run: pnpm run build
 
       - name: Verify package dry run
         working-directory: sdks/typescript
@@ -893,30 +603,22 @@ jobs:
         working-directory: sdks/typescript
         run: |
           set -euo pipefail
-          npm pack npm@12.0.2 --ignore-scripts
-          echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  npm-12.0.2.tgz" \
+          npm pack npm@12.2.0 --ignore-scripts
+          echo "6666b48816b39b86c3febac7b51a4ee4de6c5ca589c382ad8004b6b113f86677  npm-12.2.0.tgz" \
             | sha256sum -c -
 
-      - name: Build embedded dashboard for the conformance daemon
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
-
-      # The workflow-global skip flag applies here too, so the freshly built
-      # bundle's digest must accompany it for the CLI build script.
-      - name: Export dashboard bundle digest for skip-mode builds
-        run: |
-          set -euo pipefail
-          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
-          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
-
+      # The conformance suite spawns target/debug/tracedecay; Bazel builds the
+      # dashboard bundle the daemon embeds.
       - name: Build the real production daemon for conformance
-        run: cargo build -p tracedecay-cli --bin tracedecay
+        uses: ./.github/actions/build-cli
+        with:
+          config: ci
+          dest: target/debug
+          cache-key: sdk-conformance
 
       - name: Real-daemon conformance against the exact packed tarball
         working-directory: sdks/typescript
-        run: npx vitest run test/installed-package.test.ts
+        run: pnpm run test:installed
         env:
           TRACEDECAY_SDK_TARBALL: ${{ github.workspace }}/sdks/typescript/${{ steps.pack.outputs.filename }}
 
@@ -925,16 +627,17 @@ jobs:
         run: |
           sha256sum -- "${{ steps.pack.outputs.filename }}" \
             > "${{ steps.pack.outputs.filename }}.sha256"
-          sha256sum -- npm-12.0.2.tgz > npm-12.0.2.tgz.sha256
+          sha256sum -- npm-12.2.0.tgz > npm-12.2.0.tgz.sha256
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - id: sdk-artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-tarball
           path: |
             sdks/typescript/${{ steps.pack.outputs.filename }}
             sdks/typescript/${{ steps.pack.outputs.filename }}.sha256
-            sdks/typescript/npm-12.0.2.tgz
-            sdks/typescript/npm-12.0.2.tgz.sha256
+            sdks/typescript/npm-12.2.0.tgz
+            sdks/typescript/npm-12.2.0.tgz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -943,23 +646,21 @@ jobs:
     needs: [validate-release, build-typescript, verify-release]
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: npm-tracedecay-sdk
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: npm-tarball
+          artifact-ids: ${{ needs.build-typescript.outputs.artifact_id }}
           path: artifact
+          digest-mismatch: error
 
-      - name: Verify the downloaded artifact digests
-        working-directory: artifact
-        run: sha256sum -c -- *.sha256
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22.23.2"
+          node-version: "26.12.0"
 
       # Prerelease SDK versions mirror the beta release convention: they take
       # the beta dist-tag and never take latest. Recovery re-runs are
@@ -969,11 +670,12 @@ jobs:
       # Authentication is tokenless npm trusted publishing: the reviewed npm
       # CLI (>= 11.5.1) exchanges this job's GitHub OIDC token itself, and npm
       # attaches provenance automatically. No token, registry-url, or .npmrc
-      # auth may exist here — a configured token would shadow the OIDC path.
+      # auth may exist here. A configured token would shadow the OIDC path.
       - name: Publish the exact conformance-tested tarball with reviewed npm
         working-directory: artifact
         run: |
           set -euo pipefail
+          sha256sum -c -- *.sha256
           tarball="$(ls -- tracedecay-sdk-*.tgz)"
           version="${tarball#tracedecay-sdk-}"
           version="${version%.tgz}"
@@ -982,7 +684,7 @@ jobs:
             dist_tag=beta
           fi
           mkdir npm-cli
-          tar -xzf npm-12.0.2.tgz -C npm-cli
+          tar -xzf npm-12.2.0.tgz -C npm-cli
           local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
           if published_integrity="$(node npm-cli/package/bin/npm-cli.js view "@tracedecay/sdk@${version}" dist.integrity 2>/dev/null)" \
             && [[ -n "$published_integrity" ]]; then

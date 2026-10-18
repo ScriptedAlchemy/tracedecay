@@ -6,10 +6,10 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::super::get_tool_definitions;
 use super::dispatch_test_support::*;
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
+use crate::daemon::retained_test_support::ignore_feedback_observations;
+use tracedecay_mcp::get_tool_definitions;
 
 /// Records the daemon operation every multi-root tool routes to, then refuses
 /// it. The refusal is the point: it proves the MCP name reached the closed
@@ -19,18 +19,18 @@ struct RecordingMultiRootExecutor {
     operations: Mutex<Vec<tracedecay_daemon_protocol::DaemonInvocationOperation>>,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for RecordingMultiRootExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for RecordingMultiRootExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        _invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
     }
 }
 
@@ -38,8 +38,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRoot
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-        _deadline: tracedecay_application::Deadline,
-        _cancellation: tracedecay_application::CancellationSignal,
+        _deadline: tracedecay_contracts::Deadline,
+        _cancellation: tracedecay_contracts::CancellationSignal,
         _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -55,31 +55,60 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRoot
         Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: tracedecay_domain::ManifestDigest,
-        _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
+}
+
+#[tokio::test]
+async fn retired_file_metadata_is_absent_and_refused_by_public_dispatch() {
+    let retired = "tracedecay_file_metadata";
+    assert!(
+        get_tool_definitions()
+            .expect("tool definitions")
+            .iter()
+            .all(|definition| definition.name != retired)
+    );
+    assert!(
+        tracedecay_mcp::tools::binding::mcp_dispatch_catalog()
+            .expect("MCP dispatch catalog")
+            .contract(retired)
+            .is_none()
+    );
+    let dir = TempDir::new().expect("temporary project");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("retired-file-metadata");
+    fs::create_dir_all(&project).expect("project root");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.retired-file-metadata",
+    )
+    .await
+    .expect("TraceDecay fixture");
+    let error = handle_tool_call_with_registry_options(
+        &cg,
+        retired,
+        json!({"files": ["../outside"]}),
+        ToolCallRegistryOptions::default(),
+    )
+    .await
+    .expect_err("retired tool must be refused");
+    assert!(
+        error.to_string().contains("unknown tool"),
+        "retired tool reached a public dispatch path: {error}"
+    );
+    cg.close();
 }
 
 #[tokio::test]
 async fn multi_root_tools_invoke_the_closed_daemon_routes() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("multi-root-mcp");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn mcp_multi_root() {}\n").unwrap();
-    let (cg, _runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.mcp-multi-root")
-            .await
-            .unwrap();
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "multi-root-mcp",
+        "pub fn mcp_multi_root() {}\n",
+        "project.mcp-multi-root",
+    )
+    .await;
     let executor = RecordingMultiRootExecutor::default();
     let requests = [
         (
@@ -112,8 +141,6 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
             &cg,
             tool_name,
             args,
-            None,
-            None,
             ToolCallRegistryOptions {
                 application_invocation_executor: Some(&executor),
                 ..Default::default()
@@ -137,39 +164,10 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     );
 }
 
-/// `DiagnosticsRead` answers to two tool names, and the classifier only
-/// declines the surface for one of them. The deferred name must land on a
-/// group that owns a concrete handler; it previously resolved to nothing,
-/// so every executor-less server answered `unknown tool`.
-#[test]
-fn diagnostics_without_an_executor_reaches_the_analysis_handler() {
-    assert_eq!(
-        classify_mcp_tool_dispatch_group("tracedecay_diagnostics", true),
-        Some(McpToolDispatchGroup::ApplicationSurface),
-    );
-    assert_eq!(
-        classify_mcp_tool_dispatch_group("tracedecay_diagnostics", false),
-        Some(McpToolDispatchGroup::Analysis),
-    );
-    assert_eq!(
-        dispatch_group_for_tool("tracedecay_diagnostics"),
-        Some(McpToolDispatchGroup::Analysis),
-        "the deferred lookup has no other table to resolve against",
-    );
-    for executor_available in [true, false] {
-        assert_eq!(
-            classify_mcp_tool_dispatch_group("tracedecay_diagnostics_read", executor_available),
-            Some(McpToolDispatchGroup::ApplicationSurface),
-            "the reviewed request shape has no in-process handler to fall back to",
-        );
-    }
-}
-
 #[tokio::test]
-async fn unmounted_files_root_dispatch_reports_a_real_orphaned_rust_source() {
-    let _env_lock = lock_user_data_dir_test_env();
+async fn unmounted_files_graph_tool_owner_reports_a_real_orphaned_rust_source() {
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("unmounted-files-root-dispatch");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -184,27 +182,22 @@ async fn unmounted_files_root_dispatch_reports_a_real_orphaned_rust_source() {
     )
     .unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-unmounted-files-root-dispatch",
     )
     .await
     .unwrap();
 
-    let result = handle_tool_call(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_unmounted_files",
         json!({"ecosystem": "rust", "format": "json"}),
-        None,
-        None,
+        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
     )
     .await
-    .expect("the production root dispatch reaches the portable unmounted-files handler");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("unmounted-files JSON text"),
-    )
-    .expect("unmounted-files JSON payload");
+    .expect("the graph-tool owner computes the unmounted-files report");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["unmounted_file_count"], 1);
     assert_eq!(payload["returned_count"], 1);
@@ -222,25 +215,24 @@ async fn unmounted_files_root_dispatch_reports_a_real_orphaned_rust_source() {
 }
 
 #[test]
-fn hotpath_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
+fn bounded_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
     assert_eq!(
-        mcp_tool_hotpath_identity("tracedecay_search", false),
+        mcp_tool_bounded_identity("tracedecay_search"),
         "tracedecay_search"
     );
     assert_eq!(
-        mcp_tool_hotpath_identity("attacker-controlled-unknown-name", false),
+        mcp_tool_bounded_identity("attacker-controlled-unknown-name"),
         "unknown"
     );
-    assert_eq!(
-        mcp_tool_hotpath_identity("another-unknown-name", true),
-        "unknown"
-    );
+    assert_eq!(mcp_tool_bounded_identity("another-unknown-name"), "unknown");
 }
 
-/// The MCP deadline horizon asks this predicate which reads walk git, so it
-/// must stay in step with the git dispatch family rather than a name list.
+/// The git-context reads are application operations the graph-tool owner
+/// answers; only the internal branch-add tool stays in the git dispatch
+/// family the MCP deadline horizon asks about.
 #[test]
-fn git_dispatch_family_is_visible_to_the_server_horizon() {
+fn git_dispatch_family_holds_only_the_internal_branch_add_tool() {
+    assert!(tool_dispatches_git_reads("tracedecay_admin_branch_add"));
     for tool_name in [
         "tracedecay_pr_context",
         "tracedecay_diff_context",
@@ -249,28 +241,29 @@ fn git_dispatch_family_is_visible_to_the_server_horizon() {
         "tracedecay_affected",
     ] {
         assert!(
-            tool_dispatches_git_reads(tool_name),
-            "{tool_name} dispatches through the git family",
+            !tool_dispatches_git_reads(tool_name),
+            "{tool_name} is answered by the graph-tool owner",
+        );
+        assert!(
+            ApplicationSurfaceOperation::from_tool_name(tool_name)
+                .is_some_and(ApplicationSurfaceOperation::is_graph_tool),
+            "{tool_name} is a graph-tool operation",
         );
     }
-    assert!(!tool_dispatches_git_reads("tracedecay_outline"));
+    assert!(!tool_dispatches_git_reads("tracedecay_files"));
     assert!(!tool_dispatches_git_reads("tracedecay_diagnostics"));
 }
 
 #[tokio::test]
 async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("dispatch-registry");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn dispatch_probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "dispatch-registry",
+        "pub fn dispatch_probe() {}\n",
         "project.mcp-dispatch-registry",
     )
-    .await
-    .unwrap();
+    .await;
     let options = ToolCallRegistryOptions::default();
     let mut advertised = BTreeSet::new();
 
@@ -280,107 +273,54 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
             "{} is advertised more than once",
             definition.name
         );
-        // Both executor states, because the classifier defers a tool to a
-        // different group when no application invocation executor is
-        // attached. Probing only the attached state let the deferred group
-        // resolve to nothing at all without failing this test.
-        for executor_available in [true, false] {
-            assert_eq!(
-                mcp_tool_hotpath_identity(&definition.name, executor_available),
-                definition.name,
-                "{} must retain exact bounded Hotpath identity",
-                definition.name
-            );
-            let group = classify_mcp_tool_dispatch_group(&definition.name, executor_available)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{} has no production dispatch entry with executor_available={executor_available}",
-                        definition.name
-                    )
-                });
+        assert_eq!(
+            mcp_tool_bounded_identity(&definition.name),
+            definition.name,
+            "{} must retain exact bounded tool identity",
+            definition.name
+        );
+        let group = classify_mcp_tool_dispatch_group(&definition.name)
+            .unwrap_or_else(|| panic!("{} has no production dispatch entry", definition.name));
 
-            match group {
-                McpToolDispatchGroup::ApplicationSurface => assert!(
-                    ApplicationSurfaceOperation::from_tool_name(&definition.name).is_some(),
-                    "{} has no application-surface handler entry",
-                    definition.name
+        match group {
+            McpToolDispatchGroup::ApplicationSurface => assert!(
+                ApplicationSurfaceOperation::from_tool_name(&definition.name).is_some(),
+                "{} has no application-surface handler entry",
+                definition.name
+            ),
+            McpToolDispatchGroup::MultiRoot => assert!(
+                matches!(
+                    definition.name.as_str(),
+                    "tracedecay_multi_root_scope_set_read"
+                        | "tracedecay_multi_root_scope_set_compare_and_swap"
+                        | "tracedecay_multi_root_execute"
                 ),
-                McpToolDispatchGroup::MultiRoot => assert!(
-                    matches!(
-                        definition.name.as_str(),
-                        "tracedecay_multi_root_scope_set_read"
-                            | "tracedecay_multi_root_scope_set_compare_and_swap"
-                            | "tracedecay_multi_root_execute"
-                    ),
-                    "{} has no multi-root daemon handler entry",
+                "{} has no multi-root daemon handler entry",
+                definition.name
+            ),
+            McpToolDispatchGroup::Work => assert!(
+                tracedecay_mcp::tools::binding::work_operation_for_tool(&definition.name).is_some(),
+                "{} has no canonical Work operation entry",
+                definition.name
+            ),
+            McpToolDispatchGroup::Workflow => assert!(
+                tracedecay_mcp::tools::binding::workflow_operation_for_tool(&definition.name)
+                    .is_some(),
+                "{} has no canonical Workflow operation entry",
+                definition.name
+            ),
+            group @ McpToolDispatchGroup::Git => {
+                assert_eq!(
+                    dispatch_group_for_tool(&definition.name),
+                    Some(group),
+                    "{} does not resolve through the canonical MCP binding registry",
                     definition.name
-                ),
-                McpToolDispatchGroup::Work => assert!(
-                    crate::mcp::tools::binding::work_operation_for_tool(&definition.name).is_some(),
-                    "{} has no canonical Work operation entry",
+                );
+                assert!(
+                    Box::pin(concrete_dispatch_group_accepts(group, &definition.name)).await,
+                    "{} has no concrete handler-family entry",
                     definition.name
-                ),
-                McpToolDispatchGroup::Workflow => assert!(
-                    crate::mcp::tools::binding::workflow_operation_for_tool(&definition.name)
-                        .is_some(),
-                    "{} has no canonical Workflow operation entry",
-                    definition.name
-                ),
-                McpToolDispatchGroup::RetainedApplication => {
-                    let composition = retained_mcp_composition().unwrap_or_else(|error| {
-                        panic!("{} catalog composition failed: {error}", definition.name)
-                    });
-                    let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-                    for operation in retained_operations_for_advertised_tool(&definition.name) {
-                        let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
-                        let capability = composition
-                            .snapshot()
-                            .resolve_binding(
-                                &profile,
-                                BindingSurface::Mcp,
-                                &operation_name,
-                                1,
-                                &BTreeSet::new(),
-                            )
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "{} action {} catalog binding is not callable",
-                                    definition.name,
-                                    operation.as_str()
-                                )
-                            });
-                        let expected = retained_surface_application_operation(operation).unwrap();
-                        assert_eq!(capability.capability_id(), expected.capability_id());
-                        assert_eq!(capability.use_case_id(), expected.use_case_id());
-                        assert!(
-                            composition
-                                .bind_handler(capability.use_case_id(), &())
-                                .is_some(),
-                            "{} action {} application handler is not registered",
-                            definition.name,
-                            operation.as_str()
-                        );
-                    }
-                }
-                group => {
-                    assert_eq!(
-                        dispatch_group_for_tool(&definition.name),
-                        Some(group),
-                        "{} does not resolve through the canonical MCP binding registry",
-                        definition.name
-                    );
-                    assert!(
-                        concrete_dispatch_group_accepts(
-                            group,
-                            &definition.name,
-                            &cg,
-                            options.clone()
-                        )
-                        .await,
-                        "{} has no concrete handler-family entry",
-                        definition.name
-                    );
-                }
+                );
             }
         }
     }
@@ -391,22 +331,14 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
         "tracedecay_fact_store",
     ] {
         assert!(!advertised.contains(tool_name));
-        for executor_available in [true, false] {
-            assert_eq!(
-                classify_mcp_tool_dispatch_group(tool_name, executor_available),
-                None,
-                "{tool_name} must fail closed with executor_available={executor_available}"
-            );
-        }
-        let rejected = handle_tool_call_with_registry_options(
-            &cg,
-            tool_name,
-            json!({}),
+        assert_eq!(
+            classify_mcp_tool_dispatch_group(tool_name),
             None,
-            None,
-            options.clone(),
-        )
-        .await;
+            "{tool_name} must fail closed"
+        );
+        let rejected =
+            handle_tool_call_with_registry_options(&cg, tool_name, json!({}), options.clone())
+                .await;
         assert!(
             rejected.is_err(),
             "{tool_name} must reject handler dispatch"
@@ -414,22 +346,8 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
     }
 }
 
-fn retained_operations_for_advertised_tool(tool_name: &str) -> Vec<RetainedSurfaceOperation> {
-    match tool_name {
-        "tracedecay_session_refresh" => vec![
-            RetainedSurfaceOperation::SessionRefreshStatus,
-            RetainedSurfaceOperation::SessionRefreshCancel,
-            RetainedSurfaceOperation::SessionRefreshBegin,
-        ],
-        _ => vec![
-            RetainedSurfaceOperation::from_tool_name(tool_name)
-                .unwrap_or_else(|| panic!("{tool_name} has no retained-surface handler entry")),
-        ],
-    }
-}
-
 #[test]
-fn graph_reader_selector_dispatch_policy_is_allowlisted() {
+fn registered_project_selector_dispatch_policy_matches_tool_schemas() {
     for tool in get_tool_definitions().expect("tool definitions") {
         let properties = &tool.input_schema["properties"];
         let schema_has_registered_project_selector = properties.get("project_selector").is_some();
@@ -468,47 +386,16 @@ fn graph_reader_selector_dispatch_policy_is_allowlisted() {
             );
         }
     }
-
-    for tool_name in [
-        // `tracedecay_search` resolves a daemon-owned code-index search
-        // authority that is bound to the active project, so a selector
-        // would run the active authority against a different graph.
-        "tracedecay_search",
-        "tracedecay_str_replace",
-        "tracedecay_run_affected_tests",
-        "tracedecay_status",
-        "tracedecay_health",
-        "tracedecay_dead_code",
-    ] {
-        assert!(
-            !tool_accepts_registered_project_selector(tool_name),
-            "{tool_name} should not be routed by the pure graph-reader selector policy"
-        );
-    }
-
-    // Pure graph reads that need nothing but the selected project's graph
-    // must accept a selector.
-    for tool_name in [
-        "tracedecay_type_hierarchy",
-        "tracedecay_outline",
-        "tracedecay_read",
-        "tracedecay_body",
-    ] {
-        assert!(
-            tool_accepts_registered_project_selector(tool_name),
-            "{tool_name} should route through the graph-reader selector policy"
-        );
-    }
 }
 
 #[tokio::test]
 async fn status_and_runtime_share_cursor_session_ingest_authority() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("active");
     fs::create_dir_all(&project).unwrap();
     let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-session-ingest-authority",
     )
@@ -567,49 +454,45 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         )
         .await
         .unwrap();
-    let options = || ToolCallRegistryOptions {
-        registered_project_session_db: runtime
-            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project),
-        ..Default::default()
+    let options = || {
+        ToolCallRegistryOptions {
+            registered_project_session_db: runtime.registered_database_arc(
+                tracedecay_sessions::admission::HostAdmissionScope::Project,
+            ),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits")
     };
-    let status = handle_tool_call_with_registry_options(
+    let status = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({
             "format": "json",
+            // Compact-by-default status omits ingest unless requested; opt in so
+            // this authority check shares the same surface as tracedecay_runtime.
+            "include_session_ingest": true,
             "include_branch_diagnostics": false,
             "include_storage_health": false,
             "include_staleness": false,
         }),
-        None,
-        None,
         options(),
     )
     .await
     .unwrap();
-    let runtime_result = handle_tool_call_with_registry_options(
+    let runtime_result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_runtime",
         json!({
             "format": "json",
             "session_ingest_health": true,
         }),
-        None,
-        None,
         options(),
     )
     .await
     .unwrap();
-    let parse = |result: ToolResult| {
-        serde_json::from_str::<Value>(
-            result.value["content"][0]["text"]
-                .as_str()
-                .expect("tool JSON text"),
-        )
-        .expect("parse tool JSON")
-    };
-    let status = parse(status);
-    let runtime_result = parse(runtime_result);
+    let status = tool_json(&status);
+    let runtime_result = tool_json(&runtime_result);
 
     assert_eq!(
         status["session_ingest"],
@@ -623,6 +506,92 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
     cg.close();
 }
 
+/// A `wait_for` status read carries its outcome beside the body in both
+/// formats, so a caller types its exit on it without parsing the rendering,
+/// and a budget this call cannot live out is refused by naming that budget.
+#[tokio::test]
+async fn status_wait_outcome_rides_beside_the_body_and_the_budget_refusal_names_it() {
+    let dir = TempDir::new().unwrap();
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "status-wait-outcome",
+        "pub fn probe() {}\n",
+        "project.mcp-status-wait-outcome",
+    )
+    .await;
+    let waiter: tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter =
+        std::sync::Arc::new(|worktree_root, _, _| {
+            Box::pin(async move {
+                Ok(
+                    tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::TimedOut {
+                        last: Some(Box::new(
+                            tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                                worktree_root: worktree_root.display().to_string(),
+                                staleness_state: Some(
+                                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Indexing,
+                                ),
+                                rebuild_in_flight: true,
+                                ..Default::default()
+                            },
+                        )),
+                    },
+                )
+            })
+        });
+    let status = |args: Value| {
+        dispatch_on_graph_authority(
+            &cg,
+            "tracedecay_status",
+            args,
+            ToolCallRegistryOptions {
+                code_index_readiness_waiter: Some(std::sync::Arc::clone(&waiter)),
+                ..Default::default()
+            }
+            .admit_opened_project(&cg)
+            .expect("opened fixture admits"),
+        )
+    };
+
+    let markdown = status(json!({"wait_for": {"state": "fresh", "timeout_ms": 1000}}))
+        .await
+        .expect("a timed-out wait still answers the status");
+    let expected_wait = json!({"outcome": "timed_out", "last_state": "warming"});
+    assert_eq!(
+        markdown.value["structuredContent"],
+        json!({"wait": expected_wait}),
+        "{}",
+        markdown.value
+    );
+    let text = markdown.value["content"][0]["text"]
+        .as_str()
+        .expect("status markdown");
+    assert!(
+        text.lines()
+            .any(|line| line == "**wait:** timed_out (warming)"),
+        "{text}"
+    );
+    let json_status = status(json!({
+        "format": "json",
+        "wait_for": {"state": "fresh", "timeout_ms": 1000},
+    }))
+    .await
+    .expect("a timed-out wait still answers the status");
+    assert_eq!(
+        json_status.value["structuredContent"],
+        json!({"wait": expected_wait})
+    );
+
+    let refused = status(json!({"wait_for": {"state": "fresh", "timeout_ms": 120_001}}))
+        .await
+        .expect_err("a wait longer than the dispatch ceiling is refused");
+    assert_eq!(
+        refused.to_string(),
+        "config error: tracedecay_status wait_for.timeout_ms 120001 exceeds this \
+         call's 120000 ms dispatch budget"
+    );
+    cg.close();
+}
+
 /// Status must report the serving truth the retrieval lanes enforce. On a
 /// fresh daemon the census answers before any generation seals; claiming
 /// `serving_branch` there contradicted every lane's truthful
@@ -631,9 +600,8 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
 /// state.
 #[tokio::test]
 async fn status_serving_branch_reports_the_lane_serving_truth() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("status-serving-truth");
     fs::create_dir_all(project.join("src")).unwrap();
     run_git_in(&project, &["init", "-b", "main"]);
@@ -641,13 +609,14 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     run_git_in(&project, &["add", "."]);
     run_git_in(&project, &["commit", "-m", "initial"]);
     let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-status-serving-truth",
     )
     .await
     .unwrap();
     // Publish store branch metadata and reopen, so `serving_branch` is a
-    // claim the store would actually make — the exact claim the gate must
+    // claim the store would actually make, the exact claim the gate must
     // withhold while nothing serves.
     cg.checkpoint().await.unwrap();
     let layout = cg.store_layout().clone();
@@ -657,7 +626,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     let cg = runtime
         .open_project_graph_for_test(
             &project,
-            crate::tracedecay::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::for_profile(profile.profile()),
         )
         .await
         .unwrap();
@@ -671,44 +640,38 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                             staleness_state: Option<&str>,
                             rebuild_in_flight: bool| {
         let latest_generation_id = latest_generation_id.map(str::to_owned);
-        let staleness_state = staleness_state.map(str::to_owned);
-        let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+        let staleness_state = staleness_state.and_then(
+            tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::from_wire,
+        );
+        let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
             std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
-                let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
-                    worktree_root: worktree_root.display().to_string(),
-                    latest_generation_id: latest_generation_id.clone(),
-                    staleness_state: staleness_state.clone(),
-                    rebuild_in_flight,
-                    ..Default::default()
-                };
-                Box::pin(async move { Some(freshness) })
+                let freshness =
+                    tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                        worktree_root: worktree_root.display().to_string(),
+                        latest_generation_id: latest_generation_id.clone(),
+                        staleness_state,
+                        rebuild_in_flight,
+                        ..Default::default()
+                    };
+                Box::pin(async move { Ok(Some(freshness)) })
             });
         reader
     };
-    let status_output = |result: ToolResult| {
-        serde_json::from_str::<Value>(
-            result.value["content"][0]["text"]
-                .as_str()
-                .expect("status JSON text"),
-        )
-        .expect("parse status JSON")
-    };
-
     // Fresh daemon: the census answers, nothing has sealed yet.
-    let rebuilding = handle_tool_call_with_registry_options(
+    let rebuilding = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(None, Some("indexing"), true)),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while nothing serves");
-    let rebuilding = status_output(rebuilding);
+    let rebuilding = tool_json(&rebuilding);
     assert_eq!(
         rebuilding["retrieval_serving"],
         json!({"status": "unavailable", "reason": "generation_rebuilding"}),
@@ -720,12 +683,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     );
 
     // A sealed complete generation exists: the branch claim is truthful again.
-    let serving = handle_tool_call_with_registry_options(
+    let serving = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(
                 Some("generation.status-serving-truth.1"),
@@ -733,11 +694,13 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 false,
             )),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while serving");
-    let serving = status_output(serving);
+    let serving = tool_json(&serving);
     assert_eq!(
         serving["retrieval_serving"],
         json!({"status": "serving", "freshness": "current"})
@@ -748,12 +711,225 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         "a serving census restores the branch claim: {serving}",
     );
 
-    let rebuilding = handle_tool_call_with_registry_options(
+    // Unified generations can serve an ordinary checked-out branch without
+    // adding it to the legacy branch-store registry. Both status surfaces
+    // must prefer the scheduler's current source witness while keeping the
+    // registry count truthful. A stale witness for an earlier commit on the
+    // same branch is not enough to replace the startup fallback.
+    run_git_in(&project, &["checkout", "-b", "public-feature"]);
+    let public_revision = git_stdout_in(&project, &["rev-parse", "HEAD"]);
+    let public_freshness_reader = |revision: Option<String>, staleness: &'static str| {
+        let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
+            std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+                let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: worktree_root.display().to_string(),
+                    source_reference: Some("refs/heads/public-feature".to_owned()),
+                    source_revision: revision.clone(),
+                    latest_generation_id: Some(
+                        "generation.status-serving-truth.public-feature".to_owned(),
+                    ),
+                    code_graph_serving: Some(
+                        tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
+                    ),
+                    coverage: if staleness == "fresh" {
+                        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
+                    } else {
+                        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::PartialSourceVerification
+                    },
+                    staleness_state: tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::from_wire(staleness),
+                    ..Default::default()
+                };
+                Box::pin(async move { Ok(Some(freshness)) })
+            });
+        reader
+    };
+    let stale_public = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_status",
+        // Full branch claim fields (branch_resolution, diagnostics) are opt-in
+        // after compact-by-default status; serving truth still uses the freshness path.
+        json!({"format": "json", "include_branch_diagnostics": true}),
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(public_freshness_reader(
+                Some("0".repeat(40)),
+                "verifying",
+            )),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("status answers for stale public branch generation");
+    let stale_public = tool_json(&stale_public);
+    assert_eq!(stale_public["serving_branch"], json!("main"));
+    assert_ne!(stale_public["branch_resolution"], json!("exact"));
+
+    let committed_public_reader = public_freshness_reader(Some(public_revision), "fresh");
+    let current_public = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json", "include_branch_diagnostics": true}),
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(committed_public_reader),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("status answers for current public branch generation");
+    let current_public = tool_json(&current_public);
+    assert_eq!(current_public["active_branch"], json!("public-feature"));
+    assert_eq!(current_public["serving_branch"], json!("public-feature"));
+    assert_eq!(current_public["branch_resolution"], json!("exact"));
+    assert_eq!(current_public["tracked_branch_count"], json!(1));
+    assert_eq!(
+        current_public["branch_diagnostics"]["live_branch_tracked"],
+        json!(false)
+    );
+    assert_eq!(
+        current_public["branch_diagnostics"]["live_branch_ready"],
+        json!(true)
+    );
+    assert!(current_public.get("branch_warnings").is_none());
+
+    // A dirty worktree snapshot has an exact content identity but no Git OID.
+    // Its complete, fresh, ready source witness still identifies the current
+    // public branch without inventing a revision.
+    let active_public = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_active_project",
+        json!({"format": "json"}),
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(public_freshness_reader(None, "fresh")),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("active project answers for current public branch generation");
+    let active_public = tool_json(&active_public);
+    assert_eq!(
+        active_public["branch"]["current_branch"],
+        json!("public-feature")
+    );
+    assert_eq!(
+        active_public["branch"]["serving_branch"],
+        json!("public-feature")
+    );
+    assert_eq!(active_public["branch"]["branch_resolution"], json!("exact"));
+    assert_eq!(active_public["branch"]["tracked_branch_count"], json!(1));
+
+    // A branch publication can finish after the drift-triggered graph reopen
+    // already froze the startup fallback. The ready generation source is the
+    // serving authority in that window, including when its ref is the private
+    // tracking ref rather than the user-visible branch name.
+    let mut branch_meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root)
+        .expect("main branch metadata");
+    branch_meta.add_branch("feature", "main");
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &branch_meta)
+        .unwrap();
+    run_git_in(&project, &["checkout", "-b", "feature"]);
+    let feature_revision = git_stdout_in(&project, &["rev-parse", "HEAD"]);
+    let feature_reference = "refs/heads/tracedecay/track/feature";
+    let published = tracedecay_runtime_core::branch_meta::publish_graph_source(
+        &layout.data_root,
+        "feature",
+        None,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
+            project_id: "project.mcp-status-serving-truth".to_owned(),
+            repository_id: "repository.status-serving-truth".to_owned(),
+            worktree_id: "worktree.status-serving-truth".to_owned(),
+            worktree_root: project.display().to_string(),
+            reference: feature_reference.to_owned(),
+            source_oid: feature_revision.clone(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        published,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+    ));
+    let feature_reference = feature_reference.to_owned();
+    let feature_reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
+        std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+            let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: worktree_root.display().to_string(),
+                source_reference: Some(feature_reference.clone()),
+                source_revision: Some(feature_revision.clone()),
+                latest_generation_id: Some("generation.status-serving-truth.feature".to_owned()),
+                code_graph_serving: Some(
+                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
+                ),
+                staleness_state: Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                ),
+                ..Default::default()
+            };
+            Box::pin(async move { Ok(Some(freshness)) })
+        });
+    let published_feature = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json", "include_branch_diagnostics": true}),
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(feature_reader.clone()),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("status answers after branch publication");
+    let published_feature = tool_json(&published_feature);
+    assert_eq!(published_feature["active_branch"], json!("feature"));
+    assert_eq!(published_feature["serving_branch"], json!("feature"));
+    assert_eq!(published_feature["branch_drifted"], json!(false));
+    assert_eq!(published_feature["branch_resolution"], json!("exact"));
+    assert_eq!(
+        published_feature["branch_diagnostics"]["open_active_branch"],
+        json!("feature")
+    );
+    assert_eq!(
+        published_feature["branch_diagnostics"]["serving_branch"],
+        json!("feature")
+    );
+    let feature_row = published_feature["branch_diagnostics"]["branches"]
+        .as_array()
+        .and_then(|branches| {
+            branches
+                .iter()
+                .find(|branch| branch["name"] == json!("feature"))
+        })
+        .expect("published feature branch diagnostics");
+    assert_eq!(feature_row["is_open_active"], json!(true));
+    assert_eq!(feature_row["is_serving"], json!(true));
+    assert_eq!(feature_row["is_ready"], json!(true));
+    assert!(published_feature.get("branch_warnings").is_none());
+
+    let compact_feature = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json", "include_branch_diagnostics": false}),
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(feature_reader),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("compact status answers after branch publication");
+    let compact_feature = tool_json(&compact_feature);
+    assert_eq!(compact_feature["active_branch"], json!("feature"));
+    assert_eq!(compact_feature["serving_branch"], json!("feature"));
+
+    let rebuilding = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(
                 Some("generation.status-serving-truth.1"),
@@ -761,11 +937,13 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 true,
             )),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while a stale seat is rebuilding");
-    let rebuilding = status_output(rebuilding);
+    let rebuilding = tool_json(&rebuilding);
     assert_eq!(
         rebuilding["retrieval_serving"]["freshness"],
         json!("last_complete_stale")
@@ -784,32 +962,34 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         .unwrap()
         .as_micros() as i64
         - 3 * 86_400 * 1_000_000;
-    let aged_reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+    let aged_reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
         std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
             let freshness =
-                tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                     worktree_root: worktree_root.display().to_string(),
                     latest_generation_id: Some("generation.status-serving-truth.1".to_owned()),
                     sealed_at_micros: Some(sealed_at_micros),
-                    staleness_state: Some("stale".to_owned()),
+                    staleness_state: Some(
+                        tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Stale,
+                    ),
                     ..Default::default()
                 };
-            Box::pin(async move { Some(freshness) })
+            Box::pin(async move { Ok(Some(freshness)) })
         });
-    let aged = handle_tool_call_with_registry_options(
+    let aged = dispatch_on_graph_authority(
         &cg,
         "tracedecay_status",
         json!({"format": "json"}),
-        None,
-        None,
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(aged_reader),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers for an aged seat");
-    let aged = status_output(aged);
+    let aged = tool_json(&aged);
     assert_eq!(aged["retrieval_serving"]["status"], json!("serving"));
     assert_eq!(
         aged["retrieval_serving"]["freshness"],
@@ -834,18 +1014,14 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
 
 #[tokio::test]
 async fn unsupported_selector_tool_rejects_explicit_project_selector() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("active");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "active",
+        "pub fn active_symbol() {}\n",
         "project.mcp-unsupported-selector",
     )
-    .await
-    .unwrap();
+    .await;
 
     let err = handle_tool_call(
         &cg,
@@ -855,8 +1031,6 @@ async fn unsupported_selector_tool_rejects_explicit_project_selector() {
                 "project_id": "explicit-selector-should-not-fall-open"
             },
         }),
-        None,
-        None,
     )
     .await
     .expect_err("unsupported selector tools must reject explicit selectors");
@@ -872,18 +1046,14 @@ async fn unsupported_selector_tool_rejects_explicit_project_selector() {
 
 #[tokio::test]
 async fn query_search_rejects_cross_project_selector() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("active");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "active",
+        "pub fn active_symbol() {}\n",
         "project.mcp-cross-selector",
     )
-    .await
-    .unwrap();
+    .await;
 
     let err = handle_tool_call(
         &cg,
@@ -894,8 +1064,6 @@ async fn query_search_rejects_cross_project_selector() {
             },
             "query": "target",
         }),
-        None,
-        None,
     )
     .await
     .expect_err("single-root search must reject project selectors");
@@ -911,10 +1079,8 @@ async fn query_search_rejects_cross_project_selector() {
 async fn selected_project_retrieve_finds_selected_project_response_handle() {
     const LARGE_RESPONSE_MARKER_COUNT: usize = 200;
     const LAST_RETURNED_RESPONSE_MARKER: usize = 19;
-
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let active_project = dir.path().join("active");
     let target_project = dir.path().join("target");
     fs::create_dir_all(active_project.join("src")).unwrap();
@@ -936,6 +1102,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     fs::write(target_project.join("src/lib.rs"), target_source).unwrap();
 
     let (active, active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &active_project,
         "project.mcp-active-retrieval",
     )
@@ -964,16 +1131,20 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     let target_server = crate::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
         target,
         None,
-        crate::host_admission::ProjectScopedTestRuntimeV1::new(target_runtime)
-            .expect("target project-scoped runtime"),
+        tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1::new(
+            target_runtime,
+        )
+        .expect("target project-scoped runtime"),
     )
     .await
     .expect("target retained server");
     let server = crate::mcp::McpServer::new_with_retained_test_servers_for_test(
         active,
         None,
-        crate::host_admission::ProjectScopedTestRuntimeV1::new(active_runtime)
-            .expect("active project-scoped runtime"),
+        tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1::new(
+            active_runtime,
+        )
+        .expect("active project-scoped runtime"),
         vec![target_server],
     )
     .await
@@ -1022,44 +1193,68 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
         "selected-project envelopes should tell clients to retrieve from the same project: {retrieve_instruction}"
     );
 
-    let retrieved = server
-        .handle_request(&tracedecay_mcp::transport::JsonRpcRequest {
-            jsonrpc: "2.0".to_owned(),
-            id: Some(json!(2)),
-            method: "tools/call".to_owned(),
-            params: Some(json!({
-                "name": "tracedecay_retrieve",
-                "arguments": {
-                    "handle": handle,
-                    "project_selector": {"project_id": target_project_id},
-                    "format": "json"
-                }
-            })),
-        })
-        .await
-        .expect("selected-project retrieve response");
-    let retrieved = retrieved
-        .result
-        .unwrap_or_else(|| panic!("selected-project retrieve failed: {:?}", retrieved.error));
-    let payload: Value = retrieved["content"]
-        .as_array()
-        .and_then(|items| {
-            items.iter().find_map(|item| {
-                item["text"]
-                    .as_str()
-                    .and_then(|text| serde_json::from_str(text).ok())
+    // A stored response is by definition larger than one MCP response frame,
+    // so `tracedecay_retrieve` hands it back a page at a time. Walk
+    // `next_offset` to the end: the whole selected-project response, through
+    // its last returned marker, must be reachable from the target project.
+    let mut offset = 0_u64;
+    let mut retrieved_content = String::new();
+    let mut pages = 0_u32;
+    loop {
+        let retrieved = server
+            .handle_request(&tracedecay_mcp::transport::JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: Some(json!(2)),
+                method: "tools/call".to_owned(),
+                params: Some(json!({
+                    "name": "tracedecay_retrieve",
+                    "arguments": {
+                        "handle": handle,
+                        "project_selector": {"project_id": target_project_id},
+                        "offset": offset,
+                        "format": "json"
+                    }
+                })),
             })
-        })
-        .expect("retrieve JSON payload");
+            .await
+            .expect("selected-project retrieve response");
+        let retrieved = retrieved
+            .result
+            .unwrap_or_else(|| panic!("selected-project retrieve failed: {:?}", retrieved.error));
+        let payload: Value = retrieved["content"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    item["text"]
+                        .as_str()
+                        .and_then(|text| serde_json::from_str(text).ok())
+                })
+            })
+            .expect("retrieve JSON payload");
 
-    assert_eq!(payload["expired"], false);
+        assert_eq!(payload["expired"], false);
+        retrieved_content.push_str(
+            payload["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("retrieve page content: {payload}")),
+        );
+        pages += 1;
+        assert!(
+            pages < 64,
+            "selected-project retrieve paging did not settle"
+        );
+        match payload["next_offset"].as_u64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
     assert!(
-        payload["content"]
-            .as_str()
-            .is_some_and(|content| content.contains(&format!(
-                "selected_project_handle_marker_{LAST_RETURNED_RESPONSE_MARKER:03}"
-            ))),
-        "selected project retrieve should return the full selected-project response: {payload}"
+        retrieved_content.contains(&format!(
+            "selected_project_handle_marker_{LAST_RETURNED_RESPONSE_MARKER:03}"
+        )),
+        "selected project retrieve should return the full selected-project response \
+         ({} chars over {pages} page(s))",
+        retrieved_content.len()
     );
 
     for (id, label, arguments) in [
@@ -1150,80 +1345,70 @@ fn git_stdout_in(root: &std::path::Path, args: &[&str]) -> String {
 
 /// A deadline `offset_micros` from now, used to hand the git dispatcher a live
 /// budget the way the admission layer does.
-fn deadline_from_now(offset_micros: i64) -> tracedecay_application::Deadline {
+fn deadline_from_now(offset_micros: i64) -> tracedecay_contracts::Deadline {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock after unix epoch")
         .as_micros() as i64;
-    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+    tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
         now.saturating_add(offset_micros),
     ))
     .expect("deadline")
 }
 
 /// An already-elapsed deadline must short-circuit *before* the expensive body
-/// runs, so neither the `pr_context` walk nor the `admin_branch_add` index
-/// build can proceed once the horizon is gone.
+/// runs, so the `pr_context` walk cannot proceed once the horizon is gone.
 #[tokio::test]
-async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_handler() {
-    let _env_lock = lock_user_data_dir_test_env();
+async fn pr_context_rejects_an_already_elapsed_deadline_without_running_the_walk() {
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("git-deadline-elapsed");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "git-deadline-elapsed",
+        "pub fn probe() {}\n",
         "project.mcp-git-deadline-elapsed",
     )
-    .await
-    .unwrap();
+    .await;
 
-    for tool_name in ["tracedecay_pr_context", "tracedecay_admin_branch_add"] {
-        let options = ToolCallRegistryOptions {
-            application_deadline: Some(
-                tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
-            ),
-            ..ToolCallRegistryOptions::default()
-        };
-        let started = std::time::Instant::now();
-        let result = dispatch_git_tools(
-            tool_name,
-            &cg,
-            json!({ "base_ref": "main", "head_ref": "HEAD", "branch": "feature" }),
-            options,
-        )
-        .await
-        .expect("an elapsed-deadline dispatch returns a typed result, not a hard error");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "{tool_name} elapsed-deadline path must return fast, took {:?}",
-            started.elapsed()
-        );
-        assert_eq!(
-            result.semantic_error(),
-            Some(true),
-            "{tool_name} must surface the exhausted deadline as a semantic error",
-        );
-        assert!(
-            result
-                .failure_message()
-                .is_some_and(|message| message.contains("dispatch deadline")),
-            "{tool_name} must report the dispatch deadline, got {:?}",
-            result.failure_message(),
-        );
+    let options = ToolCallRegistryOptions {
+        application_deadline: Some(
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
+        ),
+        ..ToolCallRegistryOptions::default()
     }
+    .admit_opened_project(&cg)
+    .expect("opened fixture admits");
+    let started = std::time::Instant::now();
+    let error = super::compute_graph_tool_for_owner(
+        &cg,
+        ApplicationSurfaceOperation::PrContext,
+        json!({ "base_ref": "main", "head_ref": "HEAD" }),
+        None,
+        options,
+    )
+    .await
+    .expect_err("an elapsed deadline refuses the PR context walk");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "elapsed-deadline path must return fast, took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        error
+            .project_route_context()
+            .map(|(reason, retryable, _)| (reason, retryable)),
+        Some(("tool_dispatch_deadline_exceeded", true)),
+        "the exhausted deadline is the typed dispatch-deadline refusal, got {error}",
+    );
 
     cg.close();
 }
 
 /// An unresolvable ref must fail fast with a typed git error well inside the
-/// carried deadline — never spinning until the horizon.
+/// carried deadline, never spinning until the horizon.
 #[tokio::test]
 async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("git-pr-context-badref");
     fs::create_dir_all(project.join("src")).unwrap();
     run_git_in(&project, &["init", "-b", "main"]);
@@ -1232,6 +1417,7 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
     run_git_in(&project, &["commit", "-m", "initial"]);
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-git-pr-context-badref",
     )
@@ -1245,9 +1431,9 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
         },
     );
     let started = std::time::Instant::now();
-    let result = dispatch_git_tools(
-        "tracedecay_pr_context",
+    let result = dispatch_on_graph_authority(
         &cg,
+        "tracedecay_pr_context",
         json!({ "base_ref": "does-not-exist-ref", "head_ref": "HEAD" }),
         options,
     )
@@ -1275,9 +1461,8 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
 
 #[tokio::test]
 async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("git-pr-context-cold-graph");
     fs::create_dir_all(project.join("src")).unwrap();
     run_git_in(&project, &["init", "-b", "main"]);
@@ -1294,6 +1479,7 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
     run_git_in(&project, &["commit", "-m", "change source"]);
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-git-pr-context-cold-graph",
     )
@@ -1316,9 +1502,9 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
             "code-graph-stale",
         ),
     ] {
-        let result = dispatch_git_tools(
-            "tracedecay_pr_context",
+        let result = dispatch_on_graph_authority(
             &cg,
+            "tracedecay_pr_context",
             json!({
                 "base_ref": "main",
                 "head_ref": "HEAD",
@@ -1329,12 +1515,7 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
         .await
         .expect("transient verified graph failure must preserve available Git evidence");
         assert_ne!(result.semantic_error(), Some(true));
-        let payload = serde_json::from_str::<Value>(
-            result.value["content"][0]["text"]
-                .as_str()
-                .expect("PR context JSON text"),
-        )
-        .expect("parse PR context JSON");
+        let payload = tool_json(&result);
 
         assert_eq!(payload["base"], "main");
         assert_eq!(payload["head"], "HEAD");
@@ -1357,104 +1538,23 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
 }
 
 #[tokio::test]
-async fn pr_context_propagates_terminal_graph_failures_without_a_cursor() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("git-pr-context-terminal-graph");
-    fs::create_dir_all(project.join("src")).unwrap();
-    run_git_in(&project, &["init", "-b", "main"]);
-    fs::write(project.join("src/lib.rs"), "pub fn before() {}\n").unwrap();
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-m", "initial"]);
-    run_git_in(&project, &["switch", "-c", "feature"]);
-    fs::write(
-        project.join("src/lib.rs"),
-        "pub fn before() {}\npub fn after() {}\n",
-    )
-    .unwrap();
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-m", "change source"]);
-
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
-        "project.mcp-git-pr-context-terminal-graph",
-    )
-    .await
-    .unwrap();
-    let terminal_errors = [
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::Cancelled,
-        ),
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::Denied,
-        ),
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::Corrupt {
-                detail: "corrupt projection".to_owned(),
-            },
-        ),
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::ResetRequired {
-                detail: "generation reset required".to_owned(),
-            },
-        ),
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::InvalidRequest {
-                detail: "invalid graph request".to_owned(),
-            },
-        ),
-        TraceDecayError::Config {
-            message: "graph configuration is invalid".to_owned(),
-        },
-    ];
-
-    for error in terminal_errors {
-        let detail = error.to_string();
-        let result = git::handle_pr_context(
-            &cg,
-            async move { Err::<tracedecay_graph_query::VerifiedGraphQuery, _>(error) },
-            json!({"base_ref": "main", "head_ref": "HEAD", "format": "json"}),
-            None,
-            None,
-            None,
-        )
-        .await;
-        assert!(
-            result.is_err(),
-            "terminal graph failure must not become partial success: {detail}"
-        );
-    }
-
-    cg.close();
-}
-
-#[tokio::test]
 async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("blank-node-id");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "blank-node-id",
         "pub fn blank_probe_callee() {}\npub fn blank_probe() { blank_probe_callee(); }\n",
+        "project.blank-node-id",
     )
-    .unwrap();
-    let (cg, _runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.blank-node-id")
-            .await
-            .unwrap();
-    for tool_name in [
-        "tracedecay_impact",
-        "tracedecay_callers",
-        "tracedecay_callees",
-        "tracedecay_node",
+    .await;
+    for (tool_name, operation) in [
+        ("tracedecay_impact", ApplicationSurfaceOperation::Impact),
+        ("tracedecay_node", ApplicationSurfaceOperation::Node),
     ] {
         for blank in ["", "   "] {
-            let error = dispatch_graph_tools(
-                tool_name,
+            let error = super::compute_graph_tool_for_owner(
                 &cg,
+                operation,
                 json!({"node_id": blank}),
                 None,
                 verified_graph_options(&cg, ToolCallRegistryOptions::default()),
@@ -1472,14 +1572,10 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
     // Handlers clamp depth with `min(max)`, which leaves an explicit zero
     // intact, so a valid node id still reaches the guard from this side.
     let node_id = "symbol.blank-probe";
-    for tool_name in [
-        "tracedecay_impact",
-        "tracedecay_callers",
-        "tracedecay_callees",
-    ] {
-        let error = dispatch_graph_tools(
-            tool_name,
+    for (tool_name, operation) in [("tracedecay_impact", ApplicationSurfaceOperation::Impact)] {
+        let error = super::compute_graph_tool_for_owner(
             &cg,
+            operation,
             json!({"node_id": node_id, "max_depth": 0}),
             None,
             verified_graph_options(&cg, ToolCallRegistryOptions::default()),
@@ -1498,7 +1594,7 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
 // Universal dispatch ceiling
 // ---------------------------------------------------------------------------
 
-use super::dispatch_groups::{
+use tracedecay_mcp::tools::dispatch_ceiling::{
     LONG_RUNNING_TOOL_DISPATCH_CEILING, TOOL_DISPATCH_CEILING, tool_dispatch_budget,
     tool_dispatch_ceiling, tool_dispatch_deadline_error,
 };
@@ -1594,11 +1690,11 @@ fn carried_deadline_is_preferred_when_shorter_and_clamped_when_longer() {
 }
 
 /// An already-elapsed carried deadline is rejected rather than dispatched, for
-/// every group — the same rule the git and memory wraps already applied.
+/// every group, the same rule the git and memory wraps already applied.
 #[test]
 fn an_elapsed_carried_deadline_is_rejected_for_every_group() {
     let elapsed =
-        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(1)).expect("deadline");
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).expect("deadline");
     for tool_name in DISPATCH_GROUP_SPOT_CHECKS {
         assert!(
             tool_dispatch_budget(tool_name, Some(&elapsed)).is_none(),
@@ -1635,53 +1731,23 @@ fn the_ceiling_reports_a_typed_retryable_problem() {
     );
 }
 
-/// The wrap itself: a handler that never returns must surface the typed
-/// deadline at the ceiling rather than holding the transport open forever.
-/// This is the 900-second hang reduced to a unit.
-#[tokio::test]
-async fn a_handler_that_never_returns_hits_the_typed_ceiling() {
-    let budget = std::time::Duration::from_millis(50);
-    let never = std::future::pending::<Result<ToolResult>>();
-    let started = std::time::Instant::now();
-    let outcome = match tokio::time::timeout(budget, never).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(tool_dispatch_deadline_error("tracedecay_context", budget)),
-    };
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "the ceiling must fire promptly, took {:?}",
-        started.elapsed(),
-    );
-    let error = outcome.expect_err("a never-returning handler must not report success");
-    assert!(
-        error.to_string().contains("dispatch ceiling"),
-        "got {error}"
-    );
-}
-
 /// Equivalence: a warm call that finishes well inside the ceiling is untouched
-/// by it — the bound changes failure, not work.
+/// by it, the bound changes failure, not work.
 #[tokio::test]
 async fn a_warm_call_is_unaffected_by_the_ceiling() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("dispatch-ceiling-warm");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "dispatch-ceiling-warm",
+        "pub fn probe() {}\n",
         "project.mcp-dispatch-ceiling-warm",
     )
-    .await
-    .unwrap();
+    .await;
     let started = std::time::Instant::now();
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({ "task": "probe" }),
-        None,
-        None,
         verified_graph_options(&cg, ToolCallRegistryOptions::default()),
     )
     .await
@@ -1696,80 +1762,89 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
     cg.close();
 }
 
+/// One graph read through the owner dispatch, rendered as its MCP result.
+async fn rendered_graph_read(
+    cg: &TraceDecay,
+    tool: &str,
+    args: Value,
+    options: ToolCallRegistryOptions<'_>,
+) -> String {
+    let result = dispatch_on_graph_authority(cg, tool, args, options)
+        .await
+        .unwrap_or_else(|error| panic!("{tool} still answers: {error}"));
+    serde_json::to_string(&result.value).unwrap()
+}
+
 /// Serve-old-while-rebuilding is typed on the wire: when the one verified-
 /// graph open funnel answered from the last complete seated generation, the
 /// dispatch boundary appends the `code_graph_freshness` trailer naming the
 /// serving generation; a proven-current open leaves the response untouched.
+/// A search carries its own freshness verdict, read after it settled, so the
+/// earlier seat reading is not reported beside it.
 #[tokio::test]
 async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("stale-graph-trailer");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "stale-graph-trailer",
+        "// TODO: probe\npub fn probe() {}\n",
         "project.mcp-stale-graph-trailer",
     )
-    .await
-    .unwrap();
-
-    let stale = handle_tool_call_with_registry_options(
+    .await;
+    let rendered = rendered_graph_read(
         &cg,
-        "tracedecay_files",
+        "tracedecay_todos",
         json!({}),
-        None,
-        None,
         verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
     )
-    .await
-    .expect("a stale-served graph read still answers");
-    let rendered = serde_json::to_string(&stale.value).unwrap();
+    .await;
     assert!(
-        rendered.contains("code_graph_freshness: stale"),
+        rendered.contains(
+            "code_graph_freshness: stale, serving the last complete generation \
+             generation.mcp-verified-graph-fixture.1 (sealed 1m ago) while the code index rebuilds"
+        ),
         "a stale-served response must carry the typed freshness trailer: {rendered}",
     );
+
+    let rendered = rendered_graph_read(
+        &cg,
+        "tracedecay_search",
+        json!({ "query": "probe" }),
+        verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await;
     assert!(
-        rendered.contains("generation.mcp-verified-graph-fixture.1"),
-        "the trailer must name the serving generation: {rendered}",
+        rendered.contains("freshness: "),
+        "a search states its own freshness verdict: {rendered}",
     );
     assert!(
-        rendered.contains("(sealed 1m ago) while the code index rebuilds"),
-        "a rebuild-in-flight serve must state the seat age and the rebuild: {rendered}",
+        !rendered.contains("code_graph_freshness"),
+        "a search must not add a second, contradicting freshness reading: {rendered}",
     );
 
-    let wedged = handle_tool_call_with_registry_options(
+    let rendered = rendered_graph_read(
         &cg,
-        "tracedecay_files",
+        "tracedecay_todos",
         json!({}),
-        None,
-        None,
         verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
     )
-    .await
-    .expect("a wedged stale serve still answers");
-    let rendered = serde_json::to_string(&wedged.value).unwrap();
+    .await;
     assert!(
-        rendered.contains("no rebuild pass in flight"),
-        "a wedged route must not claim a rebuild is in flight: {rendered}",
+        rendered.contains("source freshness remains unverified"),
+        "an unverified route must state what remains unknown: {rendered}",
     );
     assert!(
         !rendered.contains("while the code index rebuilds"),
-        "a wedged route must not present itself as a routine rebuild: {rendered}",
+        "an unverified route must not present itself as a rebuild: {rendered}",
     );
 
-    let current = handle_tool_call_with_registry_options(
+    let rendered = rendered_graph_read(
         &cg,
-        "tracedecay_files",
+        "tracedecay_todos",
         json!({}),
-        None,
-        None,
         verified_graph_options(&cg, ToolCallRegistryOptions::default()),
     )
-    .await
-    .expect("a proven-current graph read answers");
-    let rendered = serde_json::to_string(&current.value).unwrap();
+    .await;
     assert!(
         !rendered.contains("code_graph_freshness"),
         "a proven-current response must not carry a freshness trailer: {rendered}",
@@ -1778,101 +1853,107 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     cg.close();
 }
 
-#[test]
-fn unavailable_effect_contract_fails_before_handler_dispatch() {
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").is_ok());
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_compress").is_err());
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_search").is_ok());
+/// The graph-tool owner reports the generation it served on the completion,
+/// so the envelope carries the stale seat and every surface renders the same
+/// trailer from it.
+#[tokio::test]
+async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
+    let dir = TempDir::new().unwrap();
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "graph-tool-trailer",
+        "pub fn probe() {}\n",
+        "project.graph-tool-trailer",
+    )
+    .await;
+
+    let stale = super::compute_graph_tool_for_owner(
+        &cg,
+        ApplicationSurfaceOperation::Todos,
+        json!({}),
+        None,
+        verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a stale-served graph tool still answers");
+    let served = stale.code_graph.clone().expect("served generation");
+    assert_eq!(served.generation, "generation.mcp-verified-graph-fixture.1");
+    assert!(served.freshness.is_stale());
+    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+        Some(&cg.store_layout().response_handle_root),
+        &json!({}),
+        stale,
+    )
+    .unwrap();
+    let rendered = serde_json::to_string(&rendered.value).unwrap();
+    assert!(
+        rendered.contains(
+            "code_graph_freshness: stale, serving the last complete generation \
+             generation.mcp-verified-graph-fixture.1 (sealed 1m ago) while the code index rebuilds"
+        ),
+        "{rendered}"
+    );
+
+    let current = super::compute_graph_tool_for_owner(
+        &cg,
+        ApplicationSurfaceOperation::Todos,
+        json!({}),
+        None,
+        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a current graph tool answers");
+    assert!(
+        !current
+            .code_graph
+            .as_ref()
+            .expect("served generation")
+            .freshness
+            .is_stale()
+    );
+    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+        Some(&cg.store_layout().response_handle_root),
+        &json!({}),
+        current,
+    )
+    .unwrap();
+    assert!(
+        !serde_json::to_string(&rendered.value)
+            .unwrap()
+            .contains("code_graph_freshness")
+    );
+
+    cg.close();
 }
 
-#[tokio::test]
-async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("unavailable-user-lcm-effect");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
-        "project.mcp-unavailable-user-lcm-effect",
-    )
-    .await
-    .unwrap();
-    let profile_root = dir.path().join("unavailable-user-lcm-profile");
-    let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
-    let profile_identity =
-        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
-            .expect("missing-store profile identity");
-    let profile_id = profile_identity.profile_id().as_str();
-    let suffix = profile_id
-        .strip_prefix("profile.")
-        .expect("canonical profile identity prefix");
-    let session_identity = tracedecay_session_memory::context::ResolvedSessionIdentity::for_profile(
-        tracedecay_session_memory::context::ProfileId::new(profile_id.to_owned())
-            .expect("profile session identity"),
-        tracedecay_session_memory::context::SessionStoreId::new(format!("store.profile.{suffix}"))
-            .expect("profile store identity"),
-        tracedecay_session_memory::context::SessionRootId::new(format!("root.profile.{suffix}"))
-            .expect("profile root identity"),
-    );
-    let profile_retained_authority =
-        crate::daemon::retained_owner::profile_retained_connection_authority(
-            &profile_identity,
-            &session_identity,
-        )
-        .expect("canonical profile retained authority");
-
-    let result = handle_tool_call_with_registry_options(
-        &cg,
-        "tracedecay_lcm_doctor",
-        json!({ "storage_scope": "user", "format": "json" }),
-        None,
-        None,
-        ToolCallRegistryOptions {
-            profile_root: Some(&profile_root),
-            session_authorities: SessionAuthorities::default()
-                .with_profile_retained_authority(Some(&profile_retained_authority)),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    let payload: serde_json::Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("LCM Doctor text response"),
-    )
-    .expect("LCM Doctor unavailable payload");
+#[test]
+fn uncataloged_tool_fails_before_handler_dispatch() {
+    let error = super::ensure_mcp_dispatch_available("tracedecay_lcm_compress").unwrap_err();
     assert_eq!(
-        payload["problem"]["kind"], "unavailable",
-        "missing-store LCM Doctor renders the application problem kind, got {payload}"
+        error.project_route_context(),
+        Some((
+            "unknown_tool",
+            false,
+            "unknown tool: tracedecay_lcm_compress"
+        )),
+        "{error:?}"
     );
-    assert!(
-        !sessions_db.exists(),
-        "read-only LCM Doctor must not open a missing profile store"
-    );
-    cg.close();
 }
 
 #[tokio::test]
 async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("retired-user-lcm-effect");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "retired-user-lcm-effect",
+        "pub fn probe() {}\n",
         "project.mcp-retired-user-lcm-effect",
     )
-    .await
-    .unwrap();
-    let profile_root = dir.path().join("retired-user-lcm-profile");
-    let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+    .await;
+    let lcm_profile = tracedecay_runtime_core::config::ProfileRoot::new(
+        dir.path().join("retired-user-lcm-profile"),
+    );
+    let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(lcm_profile.data_dir());
 
     let error = handle_tool_call_with_registry_options(
         &cg,
@@ -1882,26 +1963,93 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
             "provider": "codex",
             "session_id": "retired",
         }),
-        None,
-        None,
         ToolCallRegistryOptions {
-            profile_root: Some(&profile_root),
+            profile: Some(&lcm_profile),
             ..Default::default()
         },
     )
     .await
     .unwrap_err();
 
-    let message = error.to_string();
-    assert!(
-        message.contains(
-            "storage_scope=user is unavailable for non-retained tool `tracedecay_lcm_compress`"
-        ),
-        "a known-but-unavailable LCM effect must report its typed reason, got {message}"
+    assert_eq!(
+        error.project_route_context(),
+        Some((
+            "application_surface_invalid_request",
+            false,
+            "application surface request does not match its reviewed schema: storage_scope=user \
+             is unavailable for non-retained tool `tracedecay_lcm_compress`"
+        )),
+        "a known-but-unavailable LCM effect must report its typed reason, got {error}"
     );
     assert!(
         !sessions_db.exists(),
         "unavailable LCM must not open its profile store"
+    );
+    cg.close();
+}
+
+#[tokio::test]
+async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
+    let dir = TempDir::new().expect("temporary project");
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "terminal-code-index-sync",
+        "pub fn terminal_sync() {}\n",
+        "project.terminal-code-index-sync",
+    )
+    .await;
+    let reconcile_sink: crate::mcp::server::CodeIndexReconcileSink = std::sync::Arc::new(
+        move |_, _| {
+            Box::pin(async move {
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::Terminal(
+                    tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+                        reason: "the publication authority is corrupt and requires an index reset: injected sync refusal".to_owned(),
+                        blocked_reason: Some(
+                            tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
+                        ),
+                        remediation: "reset the code-index publication authority".to_owned(),
+                        parked_at_micros: 1,
+                        observed_passes: 1,
+                        retries_on_wake: false,
+                    },
+                )
+            })
+        },
+    );
+
+    let error = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_admin_sync",
+        json!({"format": "json"}),
+        ToolCallRegistryOptions {
+            code_index_reconcile_sink: Some(reconcile_sink),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect_err("terminal publication corruption must refuse sync");
+
+    let wire = tracedecay_mcp::tool_error_response(json!(1), "tracedecay_admin_sync", &error)
+        .error
+        .expect("JSON-RPC refusal")
+        .data;
+    assert_eq!(
+        wire,
+        Some(json!({
+            "tool": "tracedecay_admin_sync",
+            "kind": "unavailable",
+            "code": "code_index_publication_authority_corrupt",
+            "reason_code": "code_index_publication_authority_corrupt",
+            "retryable": false,
+            "detail": {
+                "kind": "parked",
+                "cause": "the publication authority is corrupt and requires an index reset: injected sync refusal",
+                "remedy": "reset the code-index publication authority",
+                "retries_on_wake": false,
+            },
+        }))
     );
     cg.close();
 }

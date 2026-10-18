@@ -3,7 +3,7 @@
  * Two things live here and nothing else: (1) the kind→hue arithmetic, copied
  * verbatim from dashboard/src/viz/graph/kindColor.ts so a `struct` is the same
  * hue on these pages as it is on the Code workspace's spine; (2) the relief
- * primitives — seeded blob outlines and bundled flow splines — that all four
+ * primitives, seeded blob outlines and bundled flow splines. That all four
  * pages draw with. Every function here is deterministic: the same fixture
  * produces the same picture on every screenshot run.
  */
@@ -33,7 +33,7 @@ function kindColor(kind, light) {
 }
 
 /** Both sides of the hue as custom properties, so a mark carries dark+light
- * and the stylesheet picks — no theme observer, exactly as the app does it. */
+ * and the stylesheet picks, no theme observer, exactly as the app does it. */
 function kindVars(kind) {
   return `--kind-dark:${kindColor(kind, false)};--kind-light:${kindColor(kind, true)}`;
 }
@@ -42,7 +42,7 @@ function kindVars(kind) {
  * The paint every kind-tinted mark in these pages actually uses.
  *
  * A canvas has to be handed a resolved colour, but these sheets are SVG, so a
- * mark can carry both sides of the hue and let the stylesheet pick — which is
+ * mark can carry both sides of the hue and let the stylesheet pick. Which is
  * how the console answers a theme flip everywhere else (see `kindColorVars`).
  * The first request for a kind registers one custom property with its dark
  * value and a `[data-theme='light']` override with its light value, and every
@@ -155,7 +155,7 @@ function ribbonPath(points, widthStart, widthEnd) {
     .map((pt, i) => [pt[0] - normals[i][0] * w(i), pt[1] - normals[i][1] * w(i)])
     .reverse();
   // The return leg starts at the far end of the upper edge, so its leading
-  // moveto becomes a lineto — concatenating the two `M` paths without doing
+  // moveto becomes a lineto, concatenating the two `M` paths without doing
   // that fuses two coordinates into one enormous number and the ribbon flies
   // off the canvas.
   return bundledPath(upper) + 'L' + bundledPath(lower).slice(1) + 'Z';

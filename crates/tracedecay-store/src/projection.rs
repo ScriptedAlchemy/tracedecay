@@ -16,7 +16,12 @@ mod tests;
 
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V4: &str = "claude-session-message-v4";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V5: &str = "claude-session-message-v5";
-pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V5;
+/// v7 renders a message whose content is a block array as its text blocks.
+/// v6 (shipped in v1.0.0-beta.66) stored the array's JSON; its stores are
+/// reset through the LCM schema version rather than rebuilt, because their
+/// immutable session-temporal effects bind the v6 output digests.
+pub const SESSION_MESSAGE_PROJECTOR_VERSION_V7: &str = "claude-session-message-v7";
+pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V7;
 pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION;
 /// Immutable provider-usage row contract. Usage shares the canonical
 /// observation projection's checkpoint and rebuild transaction, but carries
@@ -69,6 +74,8 @@ impl ProjectionProvenance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectionSkipReason {
     NonConversationalRecord,
+    /// A proven native stream observation replaced the historical combined source.
+    NativeSourceSuperseded,
     /// The observation's deterministic output identity is already owned by a
     /// different observation (duplicate-era provider records). The first
     /// binder keeps the output; this observation converges as a durable,
@@ -80,36 +87,53 @@ pub enum ProjectionSkipReason {
     /// succeed, so the observation converges as a durable, auditable skip
     /// instead of wedging the projection queue behind an endless retry.
     SanitizationRefused,
+    /// A rewrite of the observation's source file reached its end without
+    /// offering this record again; the file no longer holds it, so it
+    /// projects nothing.
+    SourceRecordRetired,
 }
+
+/// Retry deadline that parks one projection queue row permanently.
+///
+/// A genuine session-output collision records its error on that row and sets
+/// this deadline. Queue-head selection and restart re-arm ignore the row, so
+/// the projector advances and the same collision is not retried every pass.
+pub const PROJECTION_TERMINAL_RETRY_MICROS: i64 = i64::MAX;
 
 impl ProjectionSkipReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NonConversationalRecord => "non_conversational_record",
+            Self::NativeSourceSuperseded => "native_source_superseded",
             Self::OutputCollision => "output_collision",
             Self::InvalidContract => "invalid_contract",
             Self::SanitizationRefused => "sanitization_refused",
+            Self::SourceRecordRetired => "source_record_retired",
         }
     }
 
     pub fn from_durable_str(value: &str) -> Option<Self> {
         match value {
             "non_conversational_record" => Some(Self::NonConversationalRecord),
+            "native_source_superseded" => Some(Self::NativeSourceSuperseded),
             "output_collision" => Some(Self::OutputCollision),
             "invalid_contract" => Some(Self::InvalidContract),
             "sanitization_refused" => Some(Self::SanitizationRefused),
+            "source_record_retired" => Some(Self::SourceRecordRetired),
             _ => None,
         }
     }
 }
 
 /// Deterministic effect derived from one receipt-bound observation.
+///
+/// An observation projects at most one message: retrieval resolves each
+/// observation's single retrieval anchor to exactly one searchable occurrence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ObservationProjection {
     Message(Box<SessionMessageProjection>),
     Composite {
         message: Option<Box<SessionMessageProjection>>,
-        derived_messages: Vec<SessionMessageProjection>,
         workflow_facts: Vec<WorkflowFactProjection>,
     },
     Skipped(ProjectionSkipReason),
@@ -131,18 +155,8 @@ impl ObservationProjection {
         }
     }
 
-    pub fn messages(&self) -> impl Iterator<Item = &SessionMessageProjection> {
-        let derived_messages: &[SessionMessageProjection] = match self {
-            Self::Composite {
-                derived_messages, ..
-            } => derived_messages,
-            Self::Message(_) | Self::Skipped(_) => &[],
-        };
-        self.message().into_iter().chain(derived_messages)
-    }
-
     pub fn output_count(&self) -> usize {
-        self.messages().count() + self.workflow_facts().len()
+        usize::from(self.message().is_some()) + self.workflow_facts().len()
     }
 
     pub fn skip_reason(&self) -> Option<ProjectionSkipReason> {
@@ -168,10 +182,11 @@ impl ObservationProjection {
     /// The deterministic `output_digest` is a pure function of the projector
     /// version, ordinal, session, and message, so it is derived lazily on first
     /// use (see [`SessionMessageProjection::output_digest`]) instead of on
-    /// every derivation. Read paths that only need the projected records —
-    /// temporal hydration, occurrence materialization, parent resolution —
+    /// every derivation. Read paths that only need the projected records
     /// therefore never pay the canonical-JSON plus SHA-256 cost, while write
-    /// paths that persist the digest observe byte-identical values.
+    /// paths that persist the digest observe byte-identical values. That
+    /// covers temporal hydration, occurrence materialization, and parent
+    /// resolution.
     fn message_projection(
         provenance: ProjectionProvenance,
         session: SessionRecord,
@@ -189,10 +204,10 @@ impl ObservationProjection {
 
     pub fn for_outputs(
         observation: &DurableObservationV1,
-        messages: Vec<(SessionRecord, SessionMessageRecord)>,
+        message: Option<(SessionRecord, SessionMessageRecord)>,
         workflow_facts: Vec<(SessionRecord, WorkflowFactRecord)>,
     ) -> ProjectionStoreResult<Self> {
-        if messages.is_empty() && workflow_facts.is_empty() {
+        if message.is_none() && workflow_facts.is_empty() {
             return Err(ProjectionStoreError::Contract(
                 ObservationContractError::InvalidCanonicalPayload,
             ));
@@ -201,36 +216,25 @@ impl ObservationProjection {
         // derivation runs once per observation and is cloned across outputs
         // instead of once per output row.
         let provenance = ProjectionProvenance::for_observation(observation)?;
-        let mut messages = messages
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, (session, message))| {
-                let ordinal = u32::try_from(ordinal).map_err(|_| {
-                    ProjectionStoreError::Contract(
-                        ObservationContractError::InvalidCanonicalPayload,
-                    )
-                })?;
-                Ok(Self::message_projection(
-                    provenance.clone(),
-                    session,
-                    message,
-                    ordinal,
-                ))
-            })
-            .collect::<ProjectionStoreResult<Vec<_>>>()?;
+        let message = message.map(|(session, message)| {
+            Box::new(Self::message_projection(
+                provenance.clone(),
+                session,
+                message,
+                0,
+            ))
+        });
         let workflow_facts = workflow_facts
             .into_iter()
             .map(|(session, fact)| WorkflowFactProjection::new(provenance.clone(), session, fact))
             .collect::<Vec<_>>();
-        if workflow_facts.is_empty() && messages.len() == 1 {
-            return Ok(Self::Message(Box::new(messages.remove(0))));
+        match message {
+            Some(message) if workflow_facts.is_empty() => Ok(Self::Message(message)),
+            message => Ok(Self::Composite {
+                message,
+                workflow_facts,
+            }),
         }
-        let message = (!messages.is_empty()).then(|| Box::new(messages.remove(0)));
-        Ok(Self::Composite {
-            message,
-            derived_messages: messages,
-            workflow_facts,
-        })
     }
 
     pub fn for_skip(
@@ -296,7 +300,13 @@ impl SessionMessageProjection {
     }
 }
 
-fn message_output_digest(
+/// The digest a projected message output carries, over records a caller
+/// already holds.
+///
+/// The same function [`SessionMessageProjection::output_digest`] memoizes, so
+/// an authority that reads the output rows a store persisted can name their
+/// digest without re-deriving the projection that wrote them.
+pub fn message_output_digest(
     session: &SessionRecord,
     message: &SessionMessageRecord,
     output_ordinal: u32,
@@ -423,9 +433,6 @@ fn workflow_fact_output_digest(
         .digest()
         .clone())
 }
-
-pub type ClaudeObservationProjection = ObservationProjection;
-pub type ClaudeSessionMessageProjection = SessionMessageProjection;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectionCheckpoint {
@@ -578,6 +585,12 @@ pub enum ProjectionStoreError {
         provider: String,
         message_id: String,
     },
+    #[error("projection session output collided at {provider}/{session_id}: {field} differs")]
+    SessionOutputCollision {
+        provider: String,
+        session_id: String,
+        field: &'static str,
+    },
     #[error("projection provenance collided with an existing output")]
     ProvenanceCollision,
     #[error("projection rebuild frontier {frontier} is past committed sequence {committed}")]
@@ -596,12 +609,27 @@ pub enum ProjectionStoreError {
         #[source]
         source: Box<dyn Error + Send + Sync>,
     },
+    /// SQLITE_CORRUPT / SQLITE_NOTADB. Retrying a malformed page cannot
+    /// succeed; callers classify this as blocked and point at repair.
+    #[error("projection store is corrupt: {operation} failed: {source}")]
+    Corrupt {
+        operation: &'static str,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
     // Deterministic, content-dependent refusal (the projected output failed
     // pure sanitization/receipt binding). Like `Contract`, it can never
     // succeed on retry: callers record a durable skip disposition and keep
     // draining instead of scheduling an environmental retry.
     #[error("projected content failed deterministic sanitization: {reason}")]
-    SanitizationRefused { reason: String },
+    SanitizationRefused {
+        reason: String,
+        /// Set when the sanitizer withheld content it proved it cannot serve,
+        /// rather than failing to run. Both converge to the same durable skip
+        /// on capture; only re-rendering an already-captured output treats the
+        /// verdict as the current rendering instead of a fault.
+        quarantined: bool,
+    },
     #[error(
         "projection retry is deferred after attempt {attempt_count} until {next_retry_at_micros}"
     )]
@@ -613,19 +641,66 @@ pub enum ProjectionStoreError {
 }
 
 impl ProjectionStoreError {
-    pub fn durable_detail(&self) -> String {
-        let mut detail = self.to_string();
-        let mut source = self.source();
-        while let Some(current) = source {
-            let message = current.to_string();
-            if !detail.ends_with(&message) {
-                detail.push_str(": ");
-                detail.push_str(&message);
+    pub fn storage(operation: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
+        if error_chain_is_sqlite_disk_image_corrupt(&source) {
+            Self::Corrupt {
+                operation,
+                source: Box::new(source),
             }
-            source = current.source();
+        } else {
+            Self::Storage {
+                operation,
+                source: Box::new(source),
+            }
         }
-        detail
     }
+
+    pub fn is_sqlite_disk_image_corrupt(&self) -> bool {
+        match self {
+            Self::Corrupt { .. } => true,
+            Self::Storage { source, .. } => {
+                error_chain_is_sqlite_disk_image_corrupt(source.as_ref())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn durable_detail(&self) -> String {
+        durable_error_detail(self)
+    }
+}
+
+pub fn durable_error_detail(error: &dyn Error) -> String {
+    let mut detail = error.to_string();
+    let mut source = error.source();
+    while let Some(current) = source {
+        let message = current.to_string();
+        if !detail.ends_with(&message) {
+            detail.push_str(": ");
+            detail.push_str(&message);
+        }
+        source = current.source();
+    }
+    detail
+}
+
+pub fn error_chain_is_sqlite_disk_image_corrupt(error: &(dyn Error + Send + Sync)) -> bool {
+    let mut current: Option<&dyn Error> = Some(error);
+    while let Some(err) = current {
+        if sqlite_disk_image_corrupt_message(&err.to_string()) {
+            return true;
+        }
+        current = err.source();
+    }
+    false
+}
+
+fn sqlite_disk_image_corrupt_message(message: &str) -> bool {
+    message.contains("database disk image is malformed")
+        || message.contains("file is not a database")
+        || message.contains("malformed database schema")
+        || message.contains("SQLITE_CORRUPT")
+        || message.contains("SQLITE_NOTADB")
 }
 
 pub type ProjectionStoreResult<T> = Result<T, ProjectionStoreError>;
@@ -644,7 +719,7 @@ pub struct ProjectionBatchItem {
 pub struct ProjectionDrainBatch {
     /// Items in authoritative sequence order.
     pub items: Vec<ProjectionBatchItem>,
-    /// Whether queued work remains after this window — either ready items
+    /// Whether queued work remains after this window, either ready items
     /// past the window budget or a retry-deferred queue head.
     pub has_more: bool,
 }

@@ -1,0 +1,300 @@
+use super::*;
+
+/// A production admission carries its request's budget, so a seat that never
+/// arrives ends in a typed deadline refusal instead of an unbounded wait.
+struct RequestBudget(std::time::Instant);
+
+impl RequestBudget {
+    fn within(budget: Duration) -> Arc<Self> {
+        Arc::new(Self(std::time::Instant::now() + budget))
+    }
+}
+
+impl CodeIndexExecutionControlV1 for RequestBudget {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        std::time::Instant::now() >= self.0
+    }
+}
+
+fn assert_reconcile_did_not_publish_invalid_roster(
+    served: &LatestCompleteCodeIndexV1,
+    incumbent: &CodeGenerationId,
+) {
+    let generation = served.generation();
+    if &generation.manifest().generation_id == incumbent {
+        assert_eq!(
+            roster_paths(served),
+            ["node_modules/pkg/index.d.ts"],
+            "the unchanged incumbent may remain serving while re-admission is required"
+        );
+    } else {
+        assert!(
+            generation.ignored_source_admissions().is_empty(),
+            "a successor may not retain a path whose ignored-source proof is invalid"
+        );
+    }
+}
+
+async fn admit_package(
+    fixture: &GitFixture,
+    store: &TempDir,
+) -> (
+    CodeIndexSchedulerRegistryV1,
+    CodeIndexIgnoredDependencyRequestV1,
+    CodeGenerationId,
+) {
+    write_types_package(
+        fixture.path(),
+        "pkg",
+        "export interface PublicWidget { value: string }\n",
+    );
+    let registry = mount(fixture.path(), store, 1).await;
+    let baseline = latest(&registry, fixture.path()).await;
+    let request = request_for(&baseline, "pkg");
+    let outcome = index_dependency(
+        &registry,
+        fixture.path(),
+        request.clone(),
+        StaticControl::active(),
+    )
+    .await
+    .expect("admit ignored dependency");
+    (registry, request, outcome.generation_id)
+}
+
+async fn restart_after_one_worker_pass(
+    fixture: &GitFixture,
+    store: &TempDir,
+) -> CodeIndexSchedulerRegistryV1 {
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold restart activation");
+    registry
+        .mount_worktree(project_id(), fixture.path(), store.path().to_path_buf())
+        .await
+        .expect("remount retained ignored-source store");
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal restart scheduler hold");
+        release_rx.recv().expect("release restart scheduler hold");
+    });
+    held_rx.recv().expect("restart scheduler is held");
+    drop(admission);
+    wait_for_reconciling(&registry, fixture.path(), 1).await;
+    release_tx.send(()).expect("release restart scheduler");
+    lock_thread.join().expect("restart scheduler holder joins");
+    wait_for_reconciling(&registry, fixture.path(), 0).await;
+    registry
+}
+
+async fn assert_restart_requires_readmission(
+    registry: &CodeIndexSchedulerRegistryV1,
+    fixture: &GitFixture,
+    prior_request: CodeIndexIgnoredDependencyRequestV1,
+    expected: CodeIndexIgnoredDependencyRefusalV1,
+) {
+    // A retained publication can still have an identity while its invalid
+    // ignored-source roster prevents complete-generation admission.
+    let budget = RequestBudget::within(Duration::from_secs(10));
+    let error = if let Some(restored) = registry.latest_complete_fresh(fixture.path()).await {
+        assert!(
+            restored.generation().ignored_source_admissions().is_empty(),
+            "restart cannot activate a generation with an invalid ignored-source roster"
+        );
+        index_dependency(
+            registry,
+            fixture.path(),
+            request_for(&restored, "pkg"),
+            budget,
+        )
+        .await
+        .expect_err("the changed entrypoint requires typed re-admission")
+    } else {
+        index_dependency(registry, fixture.path(), prior_request, budget)
+            .await
+            .expect_err("unverified restart requires typed re-admission")
+    };
+    // A restart whose worker refused the roster parks on that refusal and
+    // seats nothing, so admission answers with the park it left.
+    let parked_on_expected = CodeIndexSchedulerErrorV1::from(expected.clone()).to_string();
+    assert!(
+        matches!(
+            &error,
+            CodeIndexSchedulerErrorV1::IgnoredDependency(refusal)
+                if refusal == &expected
+                    || refusal == &CodeIndexIgnoredDependencyRefusalV1::StaleGeneration
+                    || matches!(
+                        refusal,
+                        CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(parked)
+                            if parked.reason == parked_on_expected && !parked.retries_on_wake
+                    )
+        ),
+        "restart must expose the exact validation refusal, a stale-generation re-admission \
+         fence, or the park that refusal left, expected {expected:?}, observed {error:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tracked_dependency_roster_is_rejected_by_reconcile_and_restart() {
+    let fixture = GitFixture::new(
+        r#"import type { PublicWidget } from "pkg";
+export function GenerationAnchor(value: PublicWidget) { return value; }
+"#,
+    );
+    let store = TempDir::new().expect("store root");
+    let (registry, request, incumbent) = admit_package(&fixture, &store).await;
+
+    git(
+        fixture.path(),
+        &["add", "-f", "node_modules/pkg/index.d.ts"],
+    );
+    git(
+        fixture.path(),
+        &["commit", "-qm", "track dependency source"],
+    );
+    reconcile_through_worker(&registry, fixture.path(), &request.scope).await;
+    let served = latest(&registry, fixture.path()).await;
+    assert_reconcile_did_not_publish_invalid_roster(&served, &incumbent);
+
+    registry.shutdown().await;
+    let restarted = restart_after_one_worker_pass(&fixture, &store).await;
+    assert_restart_requires_readmission(
+        &restarted,
+        &fixture,
+        request,
+        CodeIndexIgnoredDependencyRefusalV1::NotIgnored,
+    )
+    .await;
+    restarted.shutdown().await;
+}
+
+/// A restart pass that refuses the retained roster parks the worktree and
+/// holds later passes over unchanged input. The retained text projection
+/// that finishes beside that pass cannot clear the park, or admission waits
+/// for a seat or a park that never comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_text_projection_keeps_the_roster_refusal_park() {
+    let fixture = GitFixture::new(
+        r#"import type { PublicWidget } from "pkg";
+export function GenerationAnchor(value: PublicWidget) { return value; }
+"#,
+    );
+    let store = TempDir::new().expect("store root");
+    let (registry, request, _) = admit_package(&fixture, &store).await;
+    git(
+        fixture.path(),
+        &["add", "-f", "node_modules/pkg/index.d.ts"],
+    );
+    git(
+        fixture.path(),
+        &["commit", "-qm", "track dependency source"],
+    );
+    reconcile_through_worker(&registry, fixture.path(), &request.scope).await;
+    registry.shutdown().await;
+
+    let restarted = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let (projection_entered, release_projection) =
+        restarted.pause_next_retained_text_projection(fixture.path().to_path_buf());
+    let admission = restarted
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold restart activation");
+    restarted
+        .mount_worktree(project_id(), fixture.path(), store.path().to_path_buf())
+        .await
+        .expect("remount retained ignored-source store");
+    // The restart's first pass then validates the retained roster instead of
+    // only restoring the retained generation.
+    restarted.notify_hook_overflow(fixture.path()).await;
+    drop(admission);
+    projection_entered
+        .await
+        .expect("restart projects its retained text owner");
+    let parked = wait_for_owner(&restarted, fixture.path(), || {
+        restarted.convergence_park(fixture.path())
+    })
+    .await;
+    release_projection
+        .send(())
+        .expect("release the retained text projection");
+    wait_for_reconciling(&restarted, fixture.path(), 0).await;
+    assert_eq!(
+        restarted
+            .convergence_park(fixture.path())
+            .await
+            .map(|park| park.reason),
+        Some(parked.reason),
+        "the roster refusal park outlives the retained text projection"
+    );
+    let error = index_dependency(&restarted, fixture.path(), request, StaticControl::active())
+        .await
+        .expect_err("the parked restart refuses re-admission");
+    assert!(
+        matches!(
+            &error,
+            CodeIndexSchedulerErrorV1::IgnoredDependency(
+                CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(_)
+            )
+        ),
+        "admission answers with the park: {error:?}"
+    );
+    restarted.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retargeted_dependency_symlink_is_rejected_by_reconcile_and_restart() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = GitFixture::new(
+        r#"import type { PublicWidget } from "pkg";
+export function GenerationAnchor(value: PublicWidget) { return value; }
+"#,
+    );
+    fixture.write(
+        "src/retargeted.d.ts",
+        b"export interface RetargetedWidget { outsidePackage: true }\n",
+    );
+    git(fixture.path(), &["add", "src/retargeted.d.ts"]);
+    git(fixture.path(), &["commit", "-qm", "retarget fixture"]);
+    let store = TempDir::new().expect("store root");
+    let (registry, request, incumbent) = admit_package(&fixture, &store).await;
+
+    std::fs::remove_file(fixture.path().join("node_modules/pkg/index.d.ts"))
+        .expect("remove admitted dependency file");
+    symlink(
+        "../../src/retargeted.d.ts",
+        fixture.path().join("node_modules/pkg/index.d.ts"),
+    )
+    .expect("retarget dependency inside project but outside package");
+    reconcile_through_worker(&registry, fixture.path(), &request.scope).await;
+    let served = latest(&registry, fixture.path()).await;
+    assert_reconcile_did_not_publish_invalid_roster(&served, &incumbent);
+
+    registry.shutdown().await;
+    let restarted = restart_after_one_worker_pass(&fixture, &store).await;
+    assert_restart_requires_readmission(
+        &restarted,
+        &fixture,
+        request,
+        CodeIndexIgnoredDependencyRefusalV1::SymlinkEscape,
+    )
+    .await;
+    restarted.shutdown().await;
+}

@@ -7,7 +7,7 @@ use tracedecay_domain::{
     SessionId, SessionRefreshKeyV1, SessionRefreshOperationIdV1, SessionSourceCoverageReceiptV1,
     SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::common::{
     SessionRefreshBeginOrJoinPermit, SessionRefreshCancelPermit, SessionRefreshCompletePermit,
@@ -38,17 +38,14 @@ impl SessionRefreshFrontierV1 {
         })
     }
 
-    #[hotpath::skip]
     pub const fn observed_through(&self) -> u64 {
         self.observed_through
     }
 
-    #[hotpath::skip]
     pub const fn committed_through(&self) -> u64 {
         self.committed_through
     }
 
-    #[hotpath::skip]
     pub const fn is_complete(&self) -> bool {
         self.observed_through == self.committed_through
     }
@@ -73,6 +70,11 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         }
     }
 
+    pub fn with_target_frontier(mut self, target_frontier: SessionRefreshFrontierV1) -> Self {
+        self.target_frontier = target_frontier;
+        self
+    }
+
     pub fn with_refresh_key(mut self, refresh_key: SessionRefreshKeyV1) -> Self {
         self.refresh_key = Some(refresh_key);
         self
@@ -88,7 +90,6 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         self
     }
 
-    #[hotpath::skip]
     pub const fn coverage_request(&self) -> &SessionTemporalCoverageRequestV1 {
         &self.coverage_request
     }
@@ -97,7 +98,6 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn target_frontier(&self) -> SessionRefreshFrontierV1 {
         self.target_frontier
     }
@@ -156,17 +156,14 @@ impl SessionRefreshBeginOrJoinReceiptV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn target_frontier(&self) -> SessionRefreshFrontierV1 {
         self.target_frontier
     }
 
-    #[hotpath::skip]
     pub const fn disposition(&self) -> SessionRefreshDispositionV1 {
         self.disposition
     }
 
-    #[hotpath::skip]
     pub const fn accepted_at(&self) -> UtcMicros {
         self.accepted_at
     }
@@ -240,7 +237,6 @@ impl SessionRefreshProgressV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -258,17 +254,14 @@ impl SessionRefreshProgressV1 {
         self.source_coverage.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn committed_batches(&self) -> u64 {
         self.committed_batches
     }
 
-    #[hotpath::skip]
     pub const fn committed_records(&self) -> u64 {
         self.committed_records
     }
 
-    #[hotpath::skip]
     pub const fn updated_at(&self) -> UtcMicros {
         self.updated_at
     }
@@ -282,8 +275,13 @@ impl SessionRefreshProgressV1 {
         }
         let current = self.coverage;
         let candidate = next.coverage;
+        // The durable guard admits a successor only when it strictly advances
+        // the committed frontier. Accepting an equal frontier here let a
+        // producer submit a row the trigger then refused as a SQLite
+        // constraint abort, which the worker read as transient storage and
+        // resubmitted forever. Refuse it as typed state instead.
         if self.frontier.observed_through != next.frontier.observed_through
-            || next.frontier.committed_through < self.frontier.committed_through
+            || next.frontier.committed_through <= self.frontier.committed_through
             || next.committed_batches < self.committed_batches
             || next.committed_records < self.committed_records
             || candidate.visible < current.visible
@@ -373,7 +371,6 @@ impl SessionRefreshCompletionRequestV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -518,7 +515,6 @@ impl SessionRefreshFailureRequestV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -575,7 +571,6 @@ impl SessionRefreshCancellationRequestV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -658,7 +653,6 @@ impl SessionRefreshReceiptV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -676,7 +670,6 @@ impl SessionRefreshReceiptV1 {
         self.source_coverage.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> SessionRefreshTerminalStateV1 {
         self.state
     }
@@ -685,37 +678,8 @@ impl SessionRefreshReceiptV1 {
         self.failure_code.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn terminal_at(&self) -> UtcMicros {
         self.terminal_at
-    }
-
-    /// Terminal receipts must preserve identity and never regress committed
-    /// progress. Complete additionally requires a fully committed frontier.
-    pub fn validate_transition_from(
-        &self,
-        progress: &SessionRefreshProgressV1,
-    ) -> SessionStoreResult<()> {
-        if self.operation_id != progress.operation_id || self.session_id != progress.session_id {
-            return Err(SessionStoreError::ReceiptIdentityMismatch {
-                context: "refresh terminal transition",
-            });
-        }
-        if self.frontier.observed_through != progress.frontier.observed_through
-            || self.frontier.committed_through < progress.frontier.committed_through
-            || self.terminal_at < progress.updated_at
-            || !source_coverage_is_successor(
-                progress.source_coverage.as_ref(),
-                self.source_coverage.as_ref(),
-            )
-            || (self.state == SessionRefreshTerminalStateV1::Complete
-                && !self.frontier.is_complete())
-        {
-            return Err(SessionStoreError::InvalidStateTransition {
-                context: "refresh terminal transition",
-            });
-        }
-        Ok(())
     }
 }
 

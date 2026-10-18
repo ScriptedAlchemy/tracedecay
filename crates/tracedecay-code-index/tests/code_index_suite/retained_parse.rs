@@ -4,10 +4,13 @@ use std::{
     time::Duration,
 };
 
+use tracedecay_code_extraction::incremental::ParseError;
 use tracedecay_code_extraction::{
     AstroExtractor, LanguageExtractor, RustExtractor,
     incremental::{ParseDocumentIdentity, ParseLimits, ParseReuse},
-    parsed_extraction::{ParsedExtraction, ParsedExtractionDisposition, ParsedExtractionScope},
+    parsed_extraction::{
+        ParsedExtractionArtifactV1, ParsedExtractionDisposition, ParsedExtractionScope,
+    },
 };
 use tracedecay_code_index::retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool};
 use tracedecay_domain::{
@@ -53,19 +56,22 @@ impl LanguageExtractor for RendezvousRustExtractor {
         RustExtractor.language_name()
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        RustExtractor.extract(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        parsed_source: &str,
         tree: &Tree,
         scope: ParsedExtractionScope<'_>,
-    ) -> ParsedExtraction {
+    ) -> ParsedExtractionArtifactV1 {
         self.rendezvous.wait();
-        RustExtractor.extract_parsed(file_path, source, tree, scope)
+        RustExtractor.extract_parsed_artifact_prepared(
+            file_path,
+            source,
+            parsed_source,
+            tree,
+            scope,
+        )
     }
 }
 
@@ -146,7 +152,7 @@ fn incremental_extraction_matches_cold_canonical_rows_and_visits_only_changed_ru
     assert!(incremental.metrics.visited_bytes < after.len());
     assert_eq!(
         normalize_extraction(incremental.result),
-        normalize_extraction(extractor.extract("src/lib.rs", after))
+        normalize_extraction(extractor.extract_artifact("src/lib.rs", after).result)
     );
     assert_eq!(
         initial.disposition,
@@ -205,7 +211,7 @@ fn composite_source_masking_preserves_incremental_astro_canonical_rows() {
     );
     assert_eq!(
         normalize_extraction(incremental.result),
-        normalize_extraction(extractor.extract("src/page.astro", after))
+        normalize_extraction(extractor.extract_artifact("src/page.astro", after).result)
     );
 }
 
@@ -234,12 +240,18 @@ fn retained_pool_eviction_and_failure_preserve_truthful_bounded_state() {
     )
     .expect("second parse evicts first");
 
-    let error = pool.parse(
-        identity("worktree.two", "commit-b", "tree-b"),
-        "rust",
-        "fn two() { let value = 12345678901234567890; }\n",
+    let oversized = "fn two() { let value = 12345678901234567890; }\n";
+    assert_eq!(
+        pool.parse(
+            identity("worktree.two", "commit-b", "tree-b"),
+            "rust",
+            oversized,
+        ),
+        Err(ParseError::SourceTooLarge {
+            size: oversized.len(),
+            limit: 32,
+        })
     );
-    assert!(error.is_err());
     let no_op = pool
         .parse(
             identity("worktree.two", "commit-b", "tree-b"),

@@ -58,9 +58,12 @@ fn store_snapshot(path: &Path) -> StoreSnapshot {
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .expect("open final-shape snapshot read-only");
-    let user_version = connection
-        .query_row("PRAGMA user_version", (), |row| row.get(0))
-        .expect("read final-shape snapshot version");
+    let user_version = tracedecay_rusqlite_runtime::schema_version::read_version_sync(
+        &connection,
+        tracedecay_rusqlite_runtime::schema_version::GRAPH_COMPONENT,
+    )
+    .expect("read final-shape snapshot version")
+    .unwrap_or(0);
     let schema_bytes = connection
         .query_row(
             "SELECT CAST(COALESCE(group_concat(entry, char(0)), '') AS BLOB)
@@ -89,7 +92,9 @@ fn tamper(path: &Path, sql: &str) {
         .expect("apply literal final-shape tamper");
 }
 
-async fn assert_reset_required_without_repair(path: &Path, mutation: &str) {
+/// Opens the store through the production writer, requires the typed
+/// reset-required refusal, and returns its reason.
+async fn assert_reset_required_without_repair(path: &Path, mutation: &str) -> String {
     let before = store_snapshot(path);
     let authority = DatabaseAuthority::acquire_test(path, "final-shape admission fixture")
         .expect("acquire final-shape admission authority");
@@ -100,7 +105,7 @@ async fn assert_reset_required_without_repair(path: &Path, mutation: &str) {
             Ok(_) => panic!("a stamped final store with a structural tamper must be refused"),
             Err(error) => error,
         };
-    let (authority, _) = error
+    let (authority, reason) = error
         .reset_required_context()
         .expect("final-shape refusal must remain typed reset-required");
     assert_eq!(authority, "SQLite store", "{mutation} refusal authority");
@@ -109,11 +114,22 @@ async fn assert_reset_required_without_repair(path: &Path, mutation: &str) {
         before,
         "{mutation} refusal must not repair or otherwise rewrite the store"
     );
+    reason.to_owned()
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn current_final_store_is_admitted_without_mutation() {
     let (_directory, path) = fresh_current_store().await;
+    // Diagnostics install this same DDL when publishing their first result.
+    // That ordinary operation must not make the store fail its next open.
+    tamper(&path, tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL);
+    // The runtime writer likewise re-ensures its ledger before its first
+    // idempotency lookup. A fresh store followed by an ordinary write must
+    // remain the exact shape accepted on restart.
+    tamper(
+        &path,
+        tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA,
+    );
     let before = store_snapshot(&path);
     assert_eq!(before.user_version, i64::from(SCHEMA_VERSION));
 
@@ -132,7 +148,69 @@ async fn current_final_store_is_admitted_without_mutation() {
     );
 }
 
-#[tokio::test]
+async fn admit_existing(path: &Path, context: &str) {
+    let authority = DatabaseAuthority::acquire_test(path, "final-shape admission fixture")
+        .expect("acquire final-shape admission authority");
+    let (database, _) =
+        Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing)
+            .await
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+    drop(database);
+}
+
+fn ledger_tables(path: &Path) -> Vec<String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open final-shape fixture read-only");
+    let mut statement = connection
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name LIKE 'td_runtime_writer_%' ORDER BY name",
+        )
+        .expect("prepare ledger table probe");
+    statement
+        .query_map((), |row| row.get(0))
+        .expect("query ledger tables")
+        .collect::<Result<_, _>>()
+        .expect("read ledger tables")
+}
+
+/// The runtime writer ledger is part of the exact shape a fresh store is
+/// created with. A store missing it, or still holding the retired
+/// idempotency table, is refused unchanged rather than upgraded.
+#[asupersync::test]
+async fn runtime_writer_ledger_is_part_of_the_final_shape() {
+    let (_directory, path) = fresh_current_store().await;
+    assert_eq!(
+        ledger_tables(&path).len(),
+        4,
+        "fresh store carries the ledger"
+    );
+    let before = store_snapshot(&path);
+    admit_existing(&path, "store carrying the ledger must be admitted").await;
+    assert_eq!(
+        store_snapshot(&path),
+        before,
+        "ledger-carrying admission stays query-only"
+    );
+
+    tamper(&path, "DROP TABLE td_runtime_writer_checkpoint_v1;");
+    assert_reset_required_without_repair(&path, "store missing a ledger table").await;
+
+    let (_directory, path) = fresh_current_store().await;
+    tamper(
+        &path,
+        "CREATE TABLE td_runtime_writer_idempotency_v1 (key TEXT PRIMARY KEY);",
+    );
+    let reason =
+        assert_reset_required_without_repair(&path, "store holding the retired ledger").await;
+    assert!(
+        reason.contains("td_runtime_writer_idempotency_v1"),
+        "{reason}"
+    );
+}
+
+#[asupersync::test]
 async fn automation_run_receipt_indexes_are_required_final_shape() {
     let (_directory, path) = fresh_current_store().await;
     for name in [
@@ -153,7 +231,7 @@ async fn automation_run_receipt_indexes_are_required_final_shape() {
     assert_reset_required_without_repair(&path, "missing automatic-run lookup index").await;
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn stamped_final_store_with_missing_or_tampered_required_shape_is_reset_required() {
     let (_directory, path) = fresh_current_store().await;
     tamper(&path, "DROP TABLE metadata;");

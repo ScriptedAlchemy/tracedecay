@@ -5,13 +5,17 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-
-type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::sync::Semaphore;
 use tracedecay_domain::{RepositoryId, UtcMicros};
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
+
+/// How often a queued mutation re-checks cancellation while it waits for the
+/// repository permit.
+const CANCELLATION_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Error)]
 pub enum RepositoryMutationQueueError {
@@ -21,35 +25,8 @@ pub enum RepositoryMutationQueueError {
     Saturated,
 }
 
-struct RepositoryGate {
-    occupied: Mutex<bool>,
-    available: Condvar,
-}
-
-impl RepositoryGate {
-    fn new() -> Self {
-        Self {
-            occupied: Mutex::new(false),
-            available: Condvar::new(),
-        }
-    }
-}
-
-struct OccupiedGate<'a> {
-    gate: &'a RepositoryGate,
-}
-
-impl Drop for OccupiedGate<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut occupied) = self.gate.occupied.lock() {
-            *occupied = false;
-            self.gate.available.notify_one();
-        }
-    }
-}
-
 pub struct RepositoryMutationQueue {
-    gates: ProfiledStdMutex<BTreeMap<RepositoryId, Arc<RepositoryGate>>>,
+    gates: Mutex<BTreeMap<RepositoryId, Arc<Semaphore>>>,
     pending: AtomicUsize,
     capacity: usize,
 }
@@ -59,23 +36,31 @@ const MAX_PENDING_REPOSITORY_MUTATIONS: usize = 64;
 impl Default for RepositoryMutationQueue {
     fn default() -> Self {
         Self {
-            gates: hotpath::mutex!(
-                Mutex::new(BTreeMap::new()),
-                label = "daemon.git.tx.mutation_gates"
-            ),
+            gates: Mutex::new(BTreeMap::new()),
             pending: AtomicUsize::new(0),
             capacity: MAX_PENDING_REPOSITORY_MUTATIONS,
         }
     }
 }
 
+/// Holds one pending-capacity slot and one repository gate reference, and
+/// returns both when the mutation ends, however it ends.
 struct MutationAdmission<'a> {
-    pending: &'a AtomicUsize,
+    queue: &'a RepositoryMutationQueue,
+    repository_id: &'a RepositoryId,
+    gate: Arc<Semaphore>,
 }
 
 impl Drop for MutationAdmission<'_> {
     fn drop(&mut self) {
-        self.pending.fetch_sub(1, Ordering::Release);
+        if let Ok(mut gates) = self.queue.gates.lock()
+            && gates.get(self.repository_id).is_some_and(|current| {
+                Arc::ptr_eq(current, &self.gate) && Arc::strong_count(current) == 2
+            })
+        {
+            gates.remove(self.repository_id);
+        }
+        self.queue.pending.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -83,21 +68,22 @@ impl RepositoryMutationQueue {
     #[cfg(test)]
     pub fn with_capacity_for_test(capacity: usize) -> Self {
         Self {
-            gates: hotpath::mutex!(
-                Mutex::new(BTreeMap::new()),
-                label = "daemon.git.tx.mutation_gates"
-            ),
+            gates: Mutex::new(BTreeMap::new()),
             pending: AtomicUsize::new(0),
             capacity,
         }
     }
 
-    pub fn with_repository<T>(
+    pub async fn with_repository<T, F>(
         &self,
         repository_id: &RepositoryId,
-        operation: impl FnOnce() -> T,
-    ) -> Result<T, RepositoryMutationQueueError> {
+        operation: impl FnOnce() -> F,
+    ) -> Result<T, RepositoryMutationQueueError>
+    where
+        F: Future<Output = T>,
+    {
         self.with_repository_cancellable(repository_id, || None, |_| operation())
+            .await
     }
 
     /// Waits for the exact repository permit while polling cancellation.
@@ -106,85 +92,56 @@ impl RepositoryMutationQueue {
     /// therefore must only publish a proven-no-change outcome. This lets
     /// callers durably record cancellation without waiting behind unrelated
     /// native work.
-    #[hotpath::measure(label = "daemon.git.tx.queue")]
-    pub fn with_repository_cancellable<T>(
+    #[tracing::instrument(name = "daemon.git.tx.queue", level = "trace", skip_all)]
+    pub async fn with_repository_cancellable<T, F>(
         &self,
         repository_id: &RepositoryId,
         cancellation_requested: impl Fn() -> Option<UtcMicros>,
-        operation: impl FnOnce(Option<UtcMicros>) -> T,
-    ) -> Result<T, RepositoryMutationQueueError> {
+        operation: impl FnOnce(Option<UtcMicros>) -> F,
+    ) -> Result<T, RepositoryMutationQueueError>
+    where
+        F: Future<Output = T>,
+    {
         self.pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
                 (pending < self.capacity).then_some(pending + 1)
             })
             .map_err(|_| RepositoryMutationQueueError::Saturated)?;
-        let _admission = MutationAdmission {
-            pending: &self.pending,
-        };
-        let gate = {
-            let mut gates = self
-                .gates
-                .lock()
-                .map_err(|_| RepositoryMutationQueueError::Unavailable)?;
-            Arc::clone(
+        let gate = match self.gates.lock() {
+            Ok(mut gates) => Arc::clone(
                 gates
                     .entry(repository_id.clone())
-                    .or_insert_with(|| Arc::new(RepositoryGate::new())),
-            )
+                    .or_insert_with(|| Arc::new(Semaphore::new(1))),
+            ),
+            Err(_) => {
+                self.pending.fetch_sub(1, Ordering::Release);
+                return Err(RepositoryMutationQueueError::Unavailable);
+            }
+        };
+        let admission = MutationAdmission {
+            queue: self,
+            repository_id,
+            gate,
+        };
+        let permit = loop {
+            if let Some(cancelled_at) = cancellation_requested() {
+                return Ok(operation(Some(cancelled_at)).await);
+            }
+            match native_runtime::timeout(CANCELLATION_POLL, admission.gate.acquire()).await {
+                Ok(Ok(permit)) => break permit,
+                Err(TimeoutError::Elapsed) => {}
+                Ok(Err(_)) | Err(TimeoutError::TimerUnavailable(_)) => {
+                    return Err(RepositoryMutationQueueError::Unavailable);
+                }
+            }
         };
         if let Some(cancelled_at) = cancellation_requested() {
-            self.release_idle_gate(repository_id, &gate)?;
-            return Ok(operation(Some(cancelled_at)));
+            drop(permit);
+            return Ok(operation(Some(cancelled_at)).await);
         }
-        let mut occupied = gate
-            .occupied
-            .lock()
-            .map_err(|_| RepositoryMutationQueueError::Unavailable)?;
-        loop {
-            if !*occupied {
-                *occupied = true;
-                break;
-            }
-            if let Some(cancelled_at) = cancellation_requested() {
-                drop(occupied);
-                self.release_idle_gate(repository_id, &gate)?;
-                return Ok(operation(Some(cancelled_at)));
-            }
-            let (guard, _) = gate
-                .available
-                .wait_timeout(occupied, Duration::from_millis(50))
-                .map_err(|_| RepositoryMutationQueueError::Unavailable)?;
-            occupied = guard;
-        }
-        drop(occupied);
-        let _held = OccupiedGate { gate: &gate };
-        if let Some(cancelled_at) = cancellation_requested() {
-            drop(_held);
-            self.release_idle_gate(repository_id, &gate)?;
-            return Ok(operation(Some(cancelled_at)));
-        }
-        let result = operation(None);
-        drop(_held);
-        self.release_idle_gate(repository_id, &gate)?;
+        let result = operation(None).await;
+        drop(permit);
         Ok(result)
-    }
-
-    fn release_idle_gate(
-        &self,
-        repository_id: &RepositoryId,
-        gate: &Arc<RepositoryGate>,
-    ) -> Result<(), RepositoryMutationQueueError> {
-        let mut gates = self
-            .gates
-            .lock()
-            .map_err(|_| RepositoryMutationQueueError::Unavailable)?;
-        if gates
-            .get(repository_id)
-            .is_some_and(|current| Arc::ptr_eq(current, gate) && Arc::strong_count(current) == 2)
-        {
-            gates.remove(repository_id);
-        }
-        Ok(())
     }
 
     #[cfg(test)]

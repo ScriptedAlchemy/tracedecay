@@ -71,15 +71,7 @@ async fn recent_sessions_uses_store_order_for_null_timestamp_activity() {
         "ingested later without source timestamp",
     );
     message.timestamp = None;
-    assert!(
-        db.upsert_transcript_batch(
-            &session,
-            &[message],
-            "session-lcm-query-cursor-null-timestamp-session.jsonl",
-            ParseOffset::default(),
-        )
-        .await
-    );
+    assert!(db.seed_session_messages(&session, &[message]).await);
 
     let sessions = db
         .lcm_recent_sessions_for_test(None, 1)

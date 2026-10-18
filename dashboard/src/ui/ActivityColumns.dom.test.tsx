@@ -5,8 +5,8 @@ import { CapacityBar } from './ActivityColumns.tsx';
 /**
  * The only quantity this bar encodes is the free-page share, so an unreported
  * free figure leaves it with nothing to draw. It used to default that figure to
- * zero, which drew a completely filled bar announcing "0.0% free pages" — a
- * store measured as full — for a store whose pages nobody sampled. The caller
+ * zero, which drew a completely filled bar announcing "0.0% free pages", a
+ * store measured as full, for a store whose pages nobody sampled. The caller
  * that hit it worked around it and left the defect in the primitive, so the
  * honest state belongs here, where the next caller inherits it.
  */

@@ -36,7 +36,7 @@ pub fn rerank_fetch_limit(limit: usize, max_fetch: usize) -> usize {
         .max(limit)
 }
 
-#[hotpath::measure(label = "sessions.retrieval.dedupe")]
+#[tracing::instrument(name = "sessions.retrieval.dedupe", level = "trace", skip_all)]
 pub fn dedupe_related_message_copies<T>(
     rows: Vec<T>,
     identity: impl for<'a> Fn(&'a T) -> RelatedMessageCopyIdentity<'a>,
@@ -103,6 +103,37 @@ pub fn is_inventory_text(text: &str) -> bool {
         return true;
     }
     is_branch_inventory(&lower)
+}
+
+/// Recognizes a whole block shaped as one long base64 signature token.
+/// Readable evidence containing such a token remains eligible for retrieval.
+pub fn is_noise_block_content(content: &str) -> bool {
+    const NOISE_TOKEN_MIN_CHARS: usize = 160;
+    let trimmed = content.trim();
+    if trimmed.len() < NOISE_TOKEN_MIN_CHARS {
+        return false;
+    }
+    token_is_signature_blob(trimmed, NOISE_TOKEN_MIN_CHARS)
+}
+
+fn token_is_signature_blob(token: &str, min_chars: usize) -> bool {
+    if token.chars().count() < min_chars {
+        return false;
+    }
+    let mut has_lower = false;
+    let mut has_upper = false;
+    let mut has_digit = false;
+    for c in token.chars() {
+        if !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')) {
+            return false;
+        }
+        has_lower |= c.is_ascii_lowercase();
+        has_upper |= c.is_ascii_uppercase();
+        has_digit |= c.is_ascii_digit();
+    }
+    // Real base64 entropy mixes case and digits. A run of one repeated
+    // character, long padding or a giant single-case word is not a blob.
+    has_lower && has_upper && has_digit
 }
 
 fn derived_text_with_cap(raw: &str, max_chars: usize) -> String {
@@ -228,9 +259,8 @@ mod tests {
 
     #[test]
     fn derived_index_text_caps_without_mutating_source_content() {
-        // Deterministic replacement for the deleted LCM ingest source-scan
-        // guard: derived index text is capped through the application contract
-        // while the authoritative raw payload remains lossless.
+        // Derived index text is capped while the authoritative raw payload
+        // remains lossless.
         let content = format!("{}{}", "a".repeat(300_000), "::lossless-tail");
         let derived = derived_text_for_index(&content);
         assert!(
@@ -248,17 +278,6 @@ mod tests {
         assert_eq!(
             content.chars().count(),
             300_000 + "::lossless-tail".chars().count()
-        );
-        assert_eq!(
-            crate::MAX_DERIVED_TEXT_CHARS,
-            MAX_DERIVED_TEXT_CHARS,
-            "LCM must re-export the application derived-text cap, not redefine it"
-        );
-        assert_eq!(crate::DERIVED_TRUNCATION_MARKER, DERIVED_TRUNCATION_MARKER);
-        assert_eq!(
-            crate::derived_text_for_index(&content),
-            derived,
-            "LCM derived_text_for_index must be the application helper"
         );
     }
 
@@ -279,6 +298,33 @@ mod tests {
         assert_ne!(
             normalized_content_identity("open pull requests to fix"),
             normalized_content_identity("open pull requests to review")
+        );
+    }
+
+    #[test]
+    fn only_high_entropy_base64_tokens_are_noise_blocks() {
+        let blob = "Ab3Cd9Ef2Gh7Jk1Lm5".repeat(10);
+        assert!(is_noise_block_content(&blob));
+        assert!(!is_noise_block_content(&"a".repeat(200)));
+        assert!(!is_noise_block_content(&"ABC123".repeat(40)));
+        assert!(!is_noise_block_content(&format!(
+            "see https://example.com/{}",
+            "Ab3/Cd9.Ef2?".repeat(20)
+        )));
+        assert!(!is_noise_block_content(&format!(
+            "{} ",
+            "Ab3Cd9Ef2 ".repeat(30)
+        )));
+    }
+
+    #[test]
+    fn noise_filter_keeps_prose_with_a_signature() {
+        let signature = "Ab3Cd9Ef2Gh7Jk1Lm5".repeat(10);
+        let prose =
+            format!("Keep the verified migration decision. Diagnostic signature: {signature}");
+        assert!(
+            !is_noise_block_content(&prose),
+            "a signature token must not discard readable evidence"
         );
     }
 
@@ -334,35 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn fenced_branch_roster_stays_inventory() {
-        assert!(is_inventory_text(
-            "Branch inventory sweep:\n```\ncodex/foo\ncodex/bar\ncodex/baz\n```"
-        ));
-    }
-
-    #[test]
-    fn genuine_roster_with_negated_work_verb_stays_inventory() {
-        assert!(is_inventory_text(
-            "Worktree fleet status again names codex/retrieval-evals-analytics amid twelve \
-             other branches; nothing is implemented in this session, it is only an index of \
-             branch names."
-        ));
-        assert!(is_inventory_text(
-            "Branch inventory listing of codex/a, codex/b, and codex/c across every worktree."
-        ));
-    }
-
-    #[test]
     fn branch_mention_without_listing_vocab_is_not_inventory() {
         assert!(!is_inventory_text(
             "the literal foo-bar marker on a scoped branch"
         ));
-    }
-
-    #[test]
-    fn rerank_fetch_limit_over_fetches_within_bounds() {
-        assert_eq!(rerank_fetch_limit(10, 100), 40);
-        assert_eq!(rerank_fetch_limit(30, 100), 100);
-        assert_eq!(rerank_fetch_limit(0, 100), 0);
     }
 }

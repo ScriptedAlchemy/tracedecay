@@ -1,5 +1,5 @@
 /**
- * OBSERVATORY — `GET /api/observatory` (Plan 26 canonical observations).
+ * OBSERVATORY. `GET /api/observatory` (Plan 26 canonical observations).
  *
  * This is the read model the CLI, MCP, and this dashboard all share: the same
  * `ObservatoryReadModelV1` bytes, projected once by
@@ -25,6 +25,11 @@ import { ObservatoryReadModelV1Schema, type ObservatoryReadModelV1 } from '../..
 import { CanonicalReadModelSection } from '../../ui/CanonicalReadModelSection.tsx';
 import { Field } from '../../ui/instrument.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
+import {
+  OBSERVATORY_READ_MODEL_KEY,
+  OBSERVATORY_READ_MODEL_STALE_MS,
+  OBSERVATORY_READ_MODEL_URL,
+} from './observatoryReadModel.ts';
 
 export function CanonicalObservations() {
   return (
@@ -32,16 +37,16 @@ export function CanonicalObservations() {
       title="Canonical observations"
       blurb={
         'event flow, terminal failures, telemetry drops, and retrieval-feedback latency' +
-        ' — the same Plan 26 read model the CLI and MCP serve'
+        ', the same Plan 26 read model the CLI and MCP serve'
       }
-      queryKey={['observatory', 'canonical']}
-      url="/api/observatory"
+      queryKey={OBSERVATORY_READ_MODEL_KEY}
+      url={OBSERVATORY_READ_MODEL_URL}
       schema={ObservatoryReadModelV1Schema}
-      refetchInterval={30_000}
+      refetchInterval={OBSERVATORY_READ_MODEL_STALE_MS}
       loadingDetail="requesting canonical observations"
       className="border-b border-edge-subtle"
       metrics={(model) => model.metrics}
-      emptyLabel="the read model carried no measurements — this is a payload with no metrics, not a set of zeroes"
+      emptyLabel="the read model carried no measurements, this is a payload with no metrics, not a set of zeroes"
       horizonAttributes={(model) => ({
         'data-observations-current': model.current ? 'true' : 'false',
       })}

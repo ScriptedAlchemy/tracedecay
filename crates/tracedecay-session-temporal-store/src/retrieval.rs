@@ -1,13 +1,15 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 
 /// `(session_id, generation, provider)` -> the `(state, frozen_watermarks_json)`
 /// rows the join produced for that participant key.
 type FrozenParticipantGenerations = HashMap<(String, i64, String), Vec<(String, String)>>;
 
 /// The largest participant batch one frozen-generation read binds. Each entry
-/// contributes three variables plus the shared project key, so this stays clear of
-/// `SQLite`'s default statement-variable ceiling.
-const FROZEN_PARTICIPANT_BATCH: usize = 300;
+/// adds one OR branch as well as three variables, so the batch stays below both
+/// SQLite's expression-depth and statement-variable ceilings.
+const FROZEN_PARTICIPANT_BATCH: usize = 64;
 
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
@@ -21,13 +23,24 @@ use tracedecay_domain::{
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidatePlan};
-use tracedecay_temporal_query::ports::{
-    CandidatePageSink, MeasuredTemporalValue, PageRequest, PageStatus, PortFuture,
-    TemporalCandidateFilterV1, TemporalCandidatePreparationPort, TemporalExecutionSnapshot,
-    TemporalMessageTypeFilterV1, TemporalPortError, TemporalReadPort, TemporalRecordPageSink,
-    TemporalRetrievalScope, TemporalSessionScopeFilterV1, TemporalSnapshotRequest,
+use tracedecay_temporal_query::execution::TemporalPortError;
+use tracedecay_temporal_query::execution::await_controlled;
+use tracedecay_temporal_query::paging::{
+    CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidatePageSink, CandidateReadState, PageLimits,
+    PageRequest, PageStatus, TemporalRecordPageSink,
+};
+use tracedecay_temporal_query::paging::{
+    MeasuredTemporalValue, PortFuture, TemporalReadPort, begin_prepared_candidate_pull,
+    commit_prepared_candidate_pull,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
+use tracedecay_temporal_query::snapshot::{
+    TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalRetrievalScope,
+    TemporalSessionScopeFilterV1, TemporalSnapshotRequest,
+};
+use tracedecay_temporal_query::snapshot::{
+    TemporalCandidatePopulationCount, TemporalExecutionSnapshot, TemporalPreparedCandidateCohort,
+};
 
 mod candidates;
 mod cursors;
@@ -43,6 +56,7 @@ mod semantic_filter_tests;
 mod tests;
 
 use super::projection::observation_envelope_from_payload;
+use super::query::decode_stored_observation;
 use super::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
 };
@@ -50,6 +64,9 @@ use super::sql::{TemporalSqlRead, TemporalSqlRows};
 use super::store::execution_control_graph_cancellation;
 use candidates::*;
 use cursors::*;
+use queries::ROOT_OCCURRENCE_FTS_COUNT_QUERY;
+use queries::ROOT_SCOPE_CANDIDATE_QUERY;
+pub(crate) use queries::partial_summary_invalidation_exists;
 use records::*;
 use rows::*;
 
@@ -61,10 +78,11 @@ pub const MAX_SUMMARY_SOURCES_PER_RECORD: usize = 256;
 const MAX_SESSION_CONTEXT_RELATIONS: usize = 256;
 const FILTER_SCAN_PAGE_ITEMS: usize = 64;
 const MAX_RECORD_QUERY_CANDIDATES: usize = 8;
+const ROOT_STRICT_POPULATION_COUNT_LIMIT: usize = 4_096;
 
 fn temporal_relation_error(
     error: SessionRelationError,
-    control: &tracedecay_temporal_query::ports::ExecutionControl,
+    control: &tracedecay_temporal_query::execution::ExecutionControl,
     resource: &'static str,
 ) -> TemporalPortError {
     if error == SessionRelationError::Cancelled
@@ -73,7 +91,10 @@ fn temporal_relation_error(
         return control_error;
     }
     match error {
-        SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded { resource },
+        SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded {
+            resource,
+            accounting: None,
+        },
         SessionRelationError::Cancelled => TemporalPortError::Cancelled,
         SessionRelationError::DeadlineExceeded => TemporalPortError::DeadlineExceeded,
         SessionRelationError::Invalid
@@ -100,7 +121,7 @@ fn temporal_relation_error(
 }
 
 fn observation_matches_filter(
-    encoded: &str,
+    observation: &DurableObservationV1,
     occurrence_role: &str,
     filter: &TemporalCandidateFilterV1,
 ) -> Result<bool, TemporalPortError> {
@@ -112,8 +133,6 @@ fn observation_matches_filter(
     {
         return Ok(false);
     }
-    let observation: DurableObservationV1 =
-        serde_json::from_str(encoded).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     if let Some(source) = filter.source.as_deref()
         && observation.source().provider().as_str() != source
         && observation.source().source_key().as_str() != source
@@ -175,52 +194,10 @@ fn observation_matches_filter(
 }
 
 /// Borrowed read-only adapter over one authoritative database snapshot.
-pub struct GlobalDbTemporalReadPort<'a> {
+pub struct SessionTemporalReadPort<'a> {
     read: TemporalSqlRead<'a>,
     relation_authority: Option<SessionReadRelationAuthority<'a>>,
     git_scope_session_ids: Option<&'a BTreeSet<(String, String)>>,
-}
-
-pub(super) struct GlobalDbPreparedCandidatePort<'port, 'db, 'request> {
-    read_port: &'port GlobalDbTemporalReadPort<'db>,
-    request: &'request TemporalSnapshotRequest,
-    plan: &'request CandidatePlan,
-}
-
-impl<'port, 'db, 'request> GlobalDbPreparedCandidatePort<'port, 'db, 'request> {
-    #[hotpath::skip]
-    pub(super) const fn new(
-        read_port: &'port GlobalDbTemporalReadPort<'db>,
-        request: &'request TemporalSnapshotRequest,
-        plan: &'request CandidatePlan,
-    ) -> Self {
-        Self {
-            read_port,
-            request,
-            plan,
-        }
-    }
-}
-
-impl TemporalCandidatePreparationPort for GlobalDbPreparedCandidatePort<'_, '_, '_> {
-    fn produce_prepared_candidate_page<'a>(
-        &'a self,
-        request: PageRequest,
-        sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async move {
-            self.read_port
-                .produce_candidates_from_request(
-                    &TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
-                    self.request,
-                    1,
-                    self.plan,
-                    &request,
-                    sink,
-                )
-                .await
-        })
-    }
 }
 
 struct SessionReadRelationAuthority<'a> {
@@ -228,9 +205,8 @@ struct SessionReadRelationAuthority<'a> {
     store: SessionRelationGraphStore,
 }
 
-impl<'a> GlobalDbTemporalReadPort<'a> {
+impl<'a> SessionTemporalReadPort<'a> {
     #[cfg(test)]
-    #[hotpath::skip]
     pub const fn new(read: &'a engine::Connection) -> Self {
         Self {
             read: TemporalSqlRead::engine_connection(read),
@@ -239,7 +215,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn new_registered(read: &'a DatabaseEngineReadSnapshot) -> Self {
         Self {
             read: TemporalSqlRead::registered(read),
@@ -249,7 +224,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub const fn new_with_relations(
         read: &'a engine::Connection,
         scope: &'a SessionRelationScope,
@@ -262,7 +236,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn new_registered_with_relations(
         read: &'a DatabaseEngineReadSnapshot,
         scope: &'a SessionRelationScope,
@@ -275,7 +248,215 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
     }
 
-    #[hotpath::skip]
+    #[tracing::instrument(
+        name = "session_temporal.query.prepare_root_candidates",
+        level = "trace",
+        skip_all
+    )]
+    pub(super) async fn prepare_root_candidate_cohort(
+        &self,
+        request: &TemporalSnapshotRequest,
+        plan: &CandidatePlan,
+    ) -> Result<TemporalPreparedCandidateCohort, TemporalPortError> {
+        request.execution_control().checkpoint()?;
+        let limits = request.limits();
+        let candidate_limits = PageLimits::new(
+            limits.candidate_limit,
+            limits.candidate_total_bytes,
+            limits.candidate_item_bytes,
+            limits.candidate_limit.min(64),
+        )?;
+        let mut state = CandidateReadState::new(candidate_limits);
+        let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
+        loop {
+            let limits = begin_prepared_candidate_pull(request, &mut state)?;
+            let control = request.execution_control();
+            let field_caps = CandidateFieldCaps::new(
+                limits.candidate_stable_id_bytes,
+                limits.candidate_anchor_id_bytes,
+                limits.candidate_metadata_field_bytes,
+            );
+            let page_request = state.request(limits.candidate_key_bytes, Some(field_caps));
+            let mut sink = state.begin_page(
+                control,
+                limits.candidate_key_bytes,
+                Some(field_caps),
+                CANDIDATE_READ_BUDGET,
+            );
+            let produced: Pin<
+                Box<dyn Future<Output = Result<PageStatus, TemporalPortError>> + Send + '_>,
+            > = Box::pin(self.produce_candidates_from_request(
+                &TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+                request,
+                1,
+                plan,
+                &page_request,
+                &mut sink,
+            ));
+            let status = await_controlled(control, produced).await?;
+            let page = sink.finish(status)?;
+            if page.status() == PageStatus::More && state.consumed_items() == limits.candidate_limit
+            {
+                candidates.extend(page.into_items());
+                return TemporalPreparedCandidateCohort::partial(
+                    candidates,
+                    self.count_root_strict_population(request, plan, &page_request)
+                        .await?,
+                );
+            }
+            let page = commit_prepared_candidate_pull(&mut state, page)?;
+            let status = page.status();
+            candidates.extend(page.into_items());
+            if status == PageStatus::Complete {
+                break;
+            }
+        }
+        TemporalPreparedCandidateCohort::new(candidates)
+    }
+
+    async fn count_root_strict_population(
+        &self,
+        request: &TemporalSnapshotRequest,
+        plan: &CandidatePlan,
+        page_request: &PageRequest,
+    ) -> Result<TemporalCandidatePopulationCount, TemporalPortError> {
+        let Some((clause_index, clause)) = plan
+            .clauses()
+            .iter()
+            .enumerate()
+            .find(|(_, clause)| clause.channel == CandidateChannel::Lexical)
+        else {
+            return Ok(TemporalCandidatePopulationCount::AtLeast(
+                u64::try_from(request.limits().candidate_limit)
+                    .map_err(|error| read_error(CANDIDATE_OPERATION, error))?,
+            ));
+        };
+        let query_limit = ROOT_STRICT_POPULATION_COUNT_LIMIT.saturating_add(1);
+        if request.semantic_filter().is_empty() {
+            return self
+                .count_unfiltered_root_strict_population(request, clause, page_request, query_limit)
+                .await;
+        }
+        let cursor = CandidateCursor {
+            clause: clause_index,
+            knowledge_at: i64::MAX,
+            session_id: String::new(),
+            stable_id: String::new(),
+            strict_lexical_matched: false,
+        };
+        let scope = TemporalRetrievalScope::AllSessionsInAuthorizedRoot;
+        let project_key = request
+            .authorized_root()
+            .ok_or(TemporalPortError::UnauthorizedSnapshot)?
+            .project_key();
+        let mut rows = query_candidate_clause(
+            &self.read,
+            &scope,
+            request,
+            1,
+            clause,
+            &cursor,
+            query_limit,
+            page_request,
+            Some(project_key),
+        )
+        .await?;
+        let mut scanned = 0usize;
+        let mut anchors = HashSet::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?
+        {
+            request.execution_control().checkpoint()?;
+            scanned += 1;
+            let candidate = candidate_from_row(&row, clause.channel, &scope, 1)?;
+            if self
+                .candidate_matches_filter(request, &candidate, request.semantic_filter())
+                .await?
+            {
+                anchors.insert(candidate.anchor_id);
+            }
+        }
+        let count =
+            u64::try_from(anchors.len()).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        Ok(if scanned == query_limit {
+            TemporalCandidatePopulationCount::AtLeast(count)
+        } else {
+            TemporalCandidatePopulationCount::Exact(count)
+        })
+    }
+
+    async fn count_unfiltered_root_strict_population(
+        &self,
+        request: &TemporalSnapshotRequest,
+        clause: &tracedecay_temporal_query::candidates::CandidateClause,
+        page_request: &PageRequest,
+        query_limit: usize,
+    ) -> Result<TemporalCandidatePopulationCount, TemporalPortError> {
+        let caps = page_request.candidate_field_caps();
+        let metadata_cap = caps.map_or(
+            page_request.max_item_bytes(),
+            CandidateFieldCaps::metadata_field_bytes,
+        );
+        let stable_cap = caps.map_or(
+            page_request.max_item_bytes(),
+            CandidateFieldCaps::stable_id_bytes,
+        );
+        let anchor_cap = caps.map_or(
+            page_request.max_item_bytes(),
+            CandidateFieldCaps::anchor_id_bytes,
+        );
+        let integer = |value: usize| {
+            i64::try_from(value)
+                .map(Value::Integer)
+                .map_err(|error| read_error(CANDIDATE_OPERATION, error))
+        };
+        let project_key = request
+            .authorized_root()
+            .ok_or(TemporalPortError::UnauthorizedSnapshot)?
+            .project_key();
+        let provider = request
+            .provider_scope()
+            .map_or(Value::Null, |value| Value::Text(value.to_string()));
+        let mut rows = self
+            .read
+            .query(
+                ROOT_OCCURRENCE_FTS_COUNT_QUERY,
+                vec![
+                    Value::Text(project_key.to_string()),
+                    provider,
+                    Value::Text(fts_all_terms(&clause.value)),
+                    integer(stable_cap.min(metadata_cap))?,
+                    integer(anchor_cap)?,
+                    integer(metadata_cap)?,
+                    integer(page_request.max_item_bytes())?,
+                    integer(stable_cap)?,
+                    integer(query_limit)?,
+                ],
+            )
+            .await
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let count = rows
+            .next()
+            .await
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?
+            .ok_or_else(|| read_message(CANDIDATE_OPERATION, "strict count returned no row"))?
+            .get::<i64>(0)
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let count = u64::try_from(count).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        Ok(
+            if count
+                == u64::try_from(query_limit)
+                    .map_err(|error| read_error(CANDIDATE_OPERATION, error))?
+            {
+                TemporalCandidatePopulationCount::AtLeast(count)
+            } else {
+                TemporalCandidatePopulationCount::Exact(count)
+            },
+        )
+    }
+
     async fn candidate_matches_filter(
         &self,
         request: &TemporalSnapshotRequest,
@@ -330,7 +511,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .await
     }
 
-    #[hotpath::skip]
     async fn session_matches_filter(
         &self,
         request: &TemporalSnapshotRequest,
@@ -455,7 +635,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(true)
     }
 
-    #[hotpath::skip]
     async fn candidate_observations_match(
         &self,
         candidate: &RankingCandidate,
@@ -482,19 +661,19 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                  FROM session_derived_evidence evidence
                  JOIN session_derived_evidence_members member
                    ON member.session_id = evidence.session_id
-                  AND member.generation = evidence.generation
+                  AND +member.generation <= ?4
                   AND member.evidence_kind = evidence.evidence_kind
-                  AND member.evidence_id = evidence.evidence_id
+                  AND member.first_occurrence_id = evidence.first_occurrence_id
                  JOIN session_occurrences occurrence
                    ON occurrence.session_id = member.session_id
-                  AND occurrence.generation = member.generation
+                  AND +occurrence.generation <= ?4
                   AND occurrence.occurrence_id = member.occurrence_id
                  JOIN observations observation
                    ON observation.observation_id = occurrence.source_observation_id
                  WHERE evidence.session_id = ?1
                    AND evidence.evidence_id = ?2
                    AND evidence.retrieval_anchor_id = ?3
-                   AND evidence.generation = ?4
+                   AND +evidence.generation <= ?4
                  ORDER BY member.ordinal
                  LIMIT 257",
                 common_values(),
@@ -510,7 +689,8 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             | CandidateChannel::Phrase
             | CandidateChannel::Entity
             | CandidateChannel::Time
-            | CandidateChannel::Lexical => (
+            | CandidateChannel::Lexical
+            | CandidateChannel::LexicalRelaxed => (
                 "SELECT observation.observation_json, occurrence.role
                  FROM session_occurrences occurrence
                  JOIN observations observation
@@ -518,7 +698,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                  WHERE occurrence.session_id = ?1
                    AND occurrence.occurrence_id = ?2
                    AND occurrence.retrieval_anchor_id = ?3
-                   AND occurrence.generation = ?4
+                   AND +occurrence.generation <= ?4
                  LIMIT 2",
                 common_values(),
             ),
@@ -539,6 +719,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             if count > MAX_SUMMARY_SOURCES_PER_RECORD {
                 return Err(TemporalPortError::BudgetExceeded {
                     resource: "semantic filter source count",
+                    accounting: None,
                 });
             }
             let encoded: String = row
@@ -547,14 +728,16 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             let role: String = row
                 .get(1)
                 .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-            if observation_matches_filter(&encoded, &role, filter)? {
+            let observation = decode_stored_observation(&self.read, &encoded, CANDIDATE_OPERATION)
+                .await
+                .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+            if observation_matches_filter(&observation, &role, filter)? {
                 matched = true;
             }
         }
         Ok(matched)
     }
 
-    #[hotpath::skip]
     async fn summary_observations_match(
         &self,
         candidate: &RankingCandidate,
@@ -609,7 +792,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                  JOIN session_occurrences occurrence
                    ON occurrence.retrieval_anchor_id = CAST(retained.value AS TEXT)
                   AND occurrence.session_id = ?1
-                  AND occurrence.generation = ?3
+                  AND +occurrence.generation <= ?3
                  JOIN observations observation
                    ON observation.observation_id = occurrence.source_observation_id
                  ORDER BY CAST(retained.key AS INTEGER)
@@ -629,6 +812,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             if count > MAX_SUMMARY_SOURCES_PER_RECORD {
                 return Err(TemporalPortError::BudgetExceeded {
                     resource: "semantic filter source count",
+                    accounting: None,
                 });
             }
             let encoded = row
@@ -637,7 +821,10 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             let role = row
                 .get::<String>(1)
                 .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-            if observation_matches_filter(&encoded, &role, filter)? {
+            let observation = decode_stored_observation(&self.read, &encoded, CANDIDATE_OPERATION)
+                .await
+                .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+            if observation_matches_filter(&observation, &role, filter)? {
                 matched = true;
             }
         }
@@ -646,7 +833,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::skip]
     async fn query_root_scope_candidates(
         &self,
         snapshot_request: &TemporalSnapshotRequest,
@@ -658,78 +844,22 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         let caps = request.candidate_field_caps();
         let metadata_cap = caps.map_or(
             request.max_item_bytes(),
-            tracedecay_temporal_query::ports::CandidateFieldCaps::metadata_field_bytes,
+            tracedecay_temporal_query::paging::CandidateFieldCaps::metadata_field_bytes,
         );
         let stable_cap = caps.map_or(
             request.max_item_bytes(),
-            tracedecay_temporal_query::ports::CandidateFieldCaps::stable_id_bytes,
+            tracedecay_temporal_query::paging::CandidateFieldCaps::stable_id_bytes,
         );
         let anchor_cap = caps.map_or(
             request.max_item_bytes(),
-            tracedecay_temporal_query::ports::CandidateFieldCaps::anchor_id_bytes,
+            tracedecay_temporal_query::paging::CandidateFieldCaps::anchor_id_bytes,
         );
         let provider = snapshot_request
             .provider_scope()
             .map_or(Value::Null, |value| Value::Text(value.to_string()));
         self.read
             .query(
-                "SELECT occurrence.occurrence_id, occurrence.retrieval_anchor_id,
-                        occurrence.knowledge_at, occurrence.message_id, occurrence.turn_id,
-                        occurrence.session_id, occurrence.role, authority_session.provider,
-                        frozen.generation
-                 FROM session_temporal_generations frozen
-                 JOIN session_occurrences occurrence
-                   ON occurrence.session_id = frozen.session_id
-                  AND occurrence.generation = frozen.generation
-                 JOIN retrieval_anchors authority_anchor
-                   ON authority_anchor.anchor_id = occurrence.retrieval_anchor_id
-                 JOIN sessions authority_session
-                   ON authority_session.session_id = occurrence.session_id
-                  AND authority_session.provider = occurrence.source_provider
-                  AND authority_session.project_key = ?1
-                 WHERE frozen.state = 'active'
-                   AND (?2 IS NULL OR authority_session.provider = ?2)
-                   AND (
-                       (authority_session.project_key = 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                       OR
-                       (authority_session.project_key <> 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                        AND json_extract(authority_anchor.owner_json, '$.project_id')
-                            = authority_session.project_key)
-                   )
-                   AND (
-                       occurrence.knowledge_at < ?3
-                       OR (
-                           occurrence.knowledge_at = ?3
-                           AND (
-                               occurrence.session_id > ?4
-                               OR (
-                                   occurrence.session_id = ?4
-                                   AND occurrence.occurrence_id > ?5
-                               )
-                           )
-                       )
-                   )
-                   AND length(CAST(occurrence.occurrence_id AS BLOB)) <= ?6
-                   AND length(CAST(occurrence.retrieval_anchor_id AS BLOB)) <= ?7
-                   AND length(CAST(COALESCE(occurrence.message_id, '') AS BLOB)) <= ?8
-                   AND length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB)) <= ?8
-                   AND length(CAST(occurrence.session_id AS BLOB)) <= ?8
-                   AND length(CAST(occurrence.role AS BLOB)) <= ?8
-                   AND length(CAST(authority_session.provider AS BLOB)) <= ?8
-                   AND length(CAST(occurrence.occurrence_id AS BLOB))
-                       + length(CAST(occurrence.retrieval_anchor_id AS BLOB))
-                       + length(CAST(COALESCE(occurrence.message_id, '') AS BLOB))
-                       + length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB))
-                       + length(CAST(occurrence.session_id AS BLOB))
-                       + length(CAST(occurrence.role AS BLOB))
-                       + length(CAST(authority_session.provider AS BLOB)) <= ?9
-                   AND length(CAST(occurrence.occurrence_id AS BLOB))
-                       + length(CAST(occurrence.session_id AS BLOB)) + 9 <= ?10
-                 ORDER BY occurrence.knowledge_at DESC, occurrence.session_id,
-                          occurrence.occurrence_id
-                 LIMIT ?11",
+                ROOT_SCOPE_CANDIDATE_QUERY,
                 vec![
                     Value::Text(project_key.to_string()),
                     provider,
@@ -748,7 +878,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))
     }
 
-    #[hotpath::skip]
     async fn validate_snapshot(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -885,11 +1014,10 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     ///
     /// `session_temporal_generations` is keyed by `(session_id, generation)` and
     /// `sessions` by `(provider, session_id)`, so the inner join yields at most one
-    /// row per `(session_id, generation, provider)` — the same row the replaced
+    /// row per `(session_id, generation, provider)`, the same row the replaced
     /// per-participant `LIMIT 2` probe would have returned. Rows are still kept in
     /// a vector per key so a schema that ever admitted a duplicate raises the same
     /// "not unique" error the probe did.
-    #[hotpath::skip]
     async fn read_frozen_participant_generations(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -979,7 +1107,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(batch)
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.query.candidates")]
+    #[tracing::instrument(name = "session_temporal.query.candidates", level = "trace", skip_all)]
     async fn produce_candidates(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1001,7 +1129,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         .await
     }
 
-    #[hotpath::skip]
     async fn produce_candidates_from_request(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1027,6 +1154,14 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             control.checkpoint()?;
             let clause = &plan.clauses()[cursor.clause];
             validate_clause(clause, request)?;
+            // The relaxation tier is reached only after the strict tier was
+            // scanned to exhaustion under these filters and this snapshot and
+            // answered nothing. A refusal returns before advancing the clause,
+            // so a deadline or budget stop never arrives here.
+            if clause.channel == CandidateChannel::LexicalRelaxed && cursor.strict_lexical_matched {
+                cursor = cursor.advance_to_clause(cursor.clause + 1);
+                continue;
+            }
             let mut extra = false;
             let mut last_emitted = None;
             let mut scan_cursor = cursor.clone();
@@ -1040,6 +1175,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 {
                     return Err(TemporalPortError::BudgetExceeded {
                         resource: "candidate filter scans",
+                        accounting: None,
                     });
                 }
                 let query_limit = bounds
@@ -1092,6 +1228,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                         knowledge_at: candidate.knowledge_at_micros,
                         session_id: candidate.session.clone().unwrap_or_default(),
                         stable_id: candidate.retriever_record_id.clone(),
+                        strict_lexical_matched: cursor.strict_lexical_matched,
                     };
                     if !self
                         .candidate_matches_filter(
@@ -1112,12 +1249,17 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                         if sink.is_empty() {
                             return Err(TemporalPortError::BudgetExceeded {
                                 resource: "candidate bytes",
+                                accounting: None,
                             });
                         }
                         extra = true;
                         break;
                     }
                     page_bytes += encoded;
+                    if clause.channel == CandidateChannel::Lexical {
+                        cursor.strict_lexical_matched = true;
+                        scan_cursor.strict_lexical_matched = true;
+                    }
                     last_emitted = Some(scan_cursor.clone());
                     sink.push(candidate)?;
                 }
@@ -1130,12 +1272,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 sink.set_continuation_key(continuation.encode(request.max_key_bytes())?)?;
                 return Ok(PageStatus::More);
             }
-            cursor = CandidateCursor {
-                clause: cursor.clause + 1,
-                knowledge_at: i64::MAX,
-                session_id: String::new(),
-                stable_id: String::new(),
-            };
+            cursor = cursor.advance_to_clause(cursor.clause + 1);
             if sink.len() == bounds.items {
                 if cursor.clause < plan.clauses().len() {
                     sink.set_continuation_key(cursor.encode(request.max_key_bytes())?)?;
@@ -1147,7 +1284,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(PageStatus::Complete)
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.query.records")]
+    #[tracing::instrument(name = "session_temporal.query.records", level = "trace", skip_all)]
     async fn produce_records(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1180,6 +1317,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             if window_queries > bounds.items.saturating_add(1) {
                 return Err(TemporalPortError::BudgetExceeded {
                     resource: "record candidate window scans",
+                    accounting: None,
                 });
             }
             let window_end = bounded_window_end(candidates.len(), cursor.candidate, window_size);
@@ -1209,6 +1347,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 if candidate.anchor_id.to_string().len() > request.max_key_bytes() {
                     return Err(TemporalPortError::BudgetExceeded {
                         resource: "record candidate anchor bytes",
+                        accounting: None,
                     });
                 }
             }
@@ -1263,6 +1402,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                     if sink.is_empty() {
                         return Err(TemporalPortError::BudgetExceeded {
                             resource: "record bytes",
+                            accounting: None,
                         });
                     }
                     extra = true;
@@ -1295,20 +1435,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 }
 
-impl TemporalReadPort for GlobalDbTemporalReadPort<'_> {
-    fn produce_candidate_page<'a>(
-        &'a self,
-        snapshot: &'a TemporalExecutionSnapshot,
-        plan: &'a CandidatePlan,
-        request: PageRequest,
-        sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async move {
-            self.produce_candidates(snapshot.retrieval_scope(), snapshot, plan, &request, sink)
-                .await
-        })
-    }
-
+impl TemporalReadPort for SessionTemporalReadPort<'_> {
     fn produce_candidate_page_for_scope<'a>(
         &'a self,
         scope: &'a TemporalRetrievalScope,
@@ -1320,25 +1447,6 @@ impl TemporalReadPort for GlobalDbTemporalReadPort<'_> {
         Box::pin(async move {
             self.produce_candidates(scope, snapshot, plan, &request, sink)
                 .await
-        })
-    }
-
-    fn produce_temporal_record_page<'a>(
-        &'a self,
-        snapshot: &'a TemporalExecutionSnapshot,
-        candidates: &'a [RankingCandidate],
-        request: PageRequest,
-        sink: &'a mut TemporalRecordPageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async move {
-            self.produce_records(
-                snapshot.retrieval_scope(),
-                snapshot,
-                candidates,
-                &request,
-                sink,
-            )
-            .await
         })
     }
 

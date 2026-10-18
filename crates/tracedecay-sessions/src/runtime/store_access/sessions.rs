@@ -1,18 +1,25 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::path::Path;
 
 use serde_json::Value as JsonValue;
 
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_runtime_core::db::engine::Value;
+use tracedecay_runtime_core::db::engine::{Error as EngineError, FromValue, Row, Value};
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::runtime::SessionMessageSearchResult;
+use crate::runtime::hosts::codex::codex_cursor_key;
+use tracedecay_lcm::raw::{
+    message_body_from_record_row, message_body_record_select_columns, message_record_select_columns,
+};
 use tracedecay_lcm::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
+use super::super::shared::{durable_project_path_key, path_identity_key};
+use super::super::source::HostProviderCoverage;
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -23,6 +30,41 @@ use super::types::{
 };
 
 const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
+
+/// Largest durable message-id window admitted to one indexed lookup.
+pub(crate) const SESSION_MESSAGE_ID_LOOKUP_MAX: usize = 256;
+
+/// The JSON rowset is the outer loop and every value probes the canonical
+/// `(provider, message_id)` primary key. Keeping this authority here lets
+/// provider ingest batch identity reads without duplicating session schema.
+pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.message_id
+     FROM json_each(?2) AS requested
+     CROSS JOIN lcm_raw_messages AS messages
+     WHERE requested.type = 'text'
+       AND messages.provider = ?1
+       AND messages.message_id = requested.value";
+
+/// Appends the project-scope predicate.
+///
+/// `project_key` is an opaque authority and stays byte-exact. `project_path`
+/// may retain its opened spelling in observation projection or its canonical
+/// OS identity in transcript persistence. Scoped reads accept both spellings.
+fn push_project_identity_predicate(
+    sql: &mut String,
+    query_params: &mut Vec<Value>,
+    project_selector: &str,
+) {
+    query_params.push(Value::Text(project_selector.to_owned()));
+    let key_parameter = query_params.len();
+    query_params.push(Value::Text(durable_project_path_key(project_selector)));
+    let path_parameter = query_params.len();
+    query_params.push(Value::Text(path_identity_key(project_selector)));
+    let opened_parameter = query_params.len();
+    let _ = write!(
+        sql,
+        " AND (s.project_key = ?{key_parameter} OR s.project_path IN (?{path_parameter}, ?{opened_parameter}))"
+    );
+}
 
 fn session_db_operation_error(
     operation: &'static str,
@@ -52,20 +94,25 @@ fn descending_timestamp(left: Option<i64>, right: Option<i64>) -> std::cmp::Orde
     }
 }
 pub const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, tool_names, metadata_json \
-                 FROM session_messages \
+                 FROM lcm_raw_messages \
                  WHERE provider = ?1 AND session_id = ?2 \
                    AND timestamp IS NOT NULL AND timestamp >= ?3 \
                  ORDER BY timestamp, ordinal, message_id \
                  LIMIT ?4";
 
+type WorkflowFactRow = (String, Option<String>, Option<String>);
+
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
-    #[hotpath::skip]
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
         self.session_ingest_health_for_provider(Some("cursor"))
             .await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.ingest_health")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.ingest_health",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
@@ -166,19 +213,25 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             })?;
             let deferred_units = u64::try_from(deferred)
                 .map_err(|_| format!("negative deferred units for provider {provider_name}"))?;
-            let state = match row
+            let file_id = row
                 .get::<i64>(2)
-                .map_err(|error| format!("failed to decode host ingest coverage state: {error}"))?
-            {
-                1 => SessionProviderCoverageState::Complete,
-                2 => SessionProviderCoverageState::Partial,
-                3 => SessionProviderCoverageState::Unavailable,
-                _ => continue,
+                .map_err(|error| format!("failed to decode host ingest coverage state: {error}"))?;
+            let Ok(file_id) = u64::try_from(file_id) else {
+                continue;
+            };
+            let Some((coverage, reason)) = HostProviderCoverage::from_file_id(file_id) else {
+                continue;
+            };
+            let state = match coverage {
+                HostProviderCoverage::Complete => SessionProviderCoverageState::Complete,
+                HostProviderCoverage::Partial => SessionProviderCoverageState::Partial,
+                HostProviderCoverage::Unavailable => SessionProviderCoverageState::Unavailable,
             };
             health.provider_coverage.push(SessionProviderCoverage {
                 provider: provider_name.to_owned(),
                 state,
                 deferred_units,
+                reason,
             });
         }
         drop(coverage_rows);
@@ -186,22 +239,15 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         loop {
             let mut rows = reader
                 .query(
-                    "SELECT paths.transcript_path,
-                            COALESCE(offsets.byte_offset, 0),
-                            COALESCE(offsets.mtime, 0)
-                     FROM (
-                         SELECT DISTINCT transcript_path
-                         FROM sessions
-                         WHERE (?1 IS NULL OR provider = ?1)
-                           AND transcript_path IS NOT NULL
-                           AND transcript_path != ''
-                           AND transcript_path > ?2
-                         ORDER BY transcript_path
-                         LIMIT ?3
-                     ) AS paths
-                     LEFT JOIN parse_offsets AS offsets
-                       ON offsets.file_path = paths.transcript_path
-                     ORDER BY paths.transcript_path",
+                    "SELECT transcript_path, json_group_array(DISTINCT provider)
+                     FROM sessions
+                     WHERE (?1 IS NULL OR provider = ?1)
+                       AND transcript_path IS NOT NULL
+                       AND transcript_path != ''
+                       AND transcript_path > ?2
+                     GROUP BY transcript_path
+                     ORDER BY transcript_path
+                     LIMIT ?3",
                     tracedecay_runtime_core::db::engine::params![
                         provider,
                         after_path.as_str(),
@@ -219,6 +265,60 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 let path = row
                     .get::<String>(0)
                     .map_err(|error| format!("failed to decode transcript path: {error}"))?;
+                let providers_json = row
+                    .get::<String>(1)
+                    .map_err(|error| format!("failed to decode transcript providers: {error}"))?;
+                let providers: Vec<String> = serde_json::from_str(&providers_json)
+                    .map_err(|error| format!("invalid transcript providers: {error}"))?;
+                page.push((path, providers));
+            }
+            drop(rows);
+            if page.is_empty() {
+                break;
+            }
+            // Locations identify files to stat; provider cursor keys identify
+            // checkpoints. Resolve the page in one query without treating an
+            // opaque checkpoint as a filesystem path or reimplementing its hash.
+            let keys: Vec<JsonValue> = page
+                .iter()
+                .flat_map(|(path, providers)| {
+                    providers.iter().map(move |provider| {
+                        // `set_parse_offset` stores every cursor under its
+                        // identity key, so a Windows location must be looked
+                        // up the same way to find its checkpoint.
+                        let key = if provider == "codex" {
+                            codex_cursor_key(Path::new(path)).durable_text()
+                        } else {
+                            path_identity_key(path)
+                        };
+                        serde_json::json!({ "path": path, "key": key })
+                    })
+                })
+                .collect();
+            let keys_json = serde_json::to_string(&keys)
+                .map_err(|error| format!("failed to encode transcript checkpoint keys: {error}"))?;
+            let mut offsets = reader
+                .query(
+                    "SELECT json_extract(requested.value, '$.path'),
+                            COALESCE(MAX(offsets.byte_offset), 0),
+                            COALESCE(MAX(offsets.mtime), 0)
+                     FROM json_each(?1) AS requested
+                     LEFT JOIN parse_offsets AS offsets
+                       ON offsets.file_path = json_extract(requested.value, '$.key')
+                     GROUP BY json_extract(requested.value, '$.path')",
+                    tracedecay_runtime_core::db::engine::params![keys_json],
+                )
+                .await
+                .map_err(|error| format!("failed to query transcript checkpoints: {error}"))?;
+            let mut checkpoints = Vec::with_capacity(page.len());
+            while let Some(row) = offsets
+                .next()
+                .await
+                .map_err(|error| format!("failed to read transcript checkpoint: {error}"))?
+            {
+                let path = row
+                    .get::<String>(0)
+                    .map_err(|error| format!("failed to decode transcript location: {error}"))?;
                 let byte_offset = u64::try_from(
                     row.get::<i64>(1)
                         .map_err(|error| format!("failed to decode transcript offset: {error}"))?,
@@ -229,17 +329,17 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                         .map_err(|error| format!("failed to decode transcript mtime: {error}"))?,
                 )
                 .map_err(|error| format!("invalid transcript mtime: {error}"))?;
-                page.push((path, byte_offset, mtime));
+                checkpoints.push((path, byte_offset, mtime));
             }
-            drop(rows);
-            if page.is_empty() {
-                break;
-            }
-            for (path, byte_offset, mtime) in &page {
-                let Ok(metadata) = hotpath::measure_block!(
-                    "global_db.registered_sessions.ingest_stat",
+            drop(offsets);
+            for (path, byte_offset, mtime) in &checkpoints {
+                // Opaque non-Unicode locations cannot be resolved from this
+                // display field; like missing files, they remain untracked.
+                let Ok(metadata) = ({
+                    let _span =
+                        tracing::trace_span!("global_db.registered_sessions.ingest_stat").entered();
                     std::fs::metadata(path)
-                ) else {
+                }) else {
                     continue;
                 };
                 health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
@@ -261,7 +361,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             }
             after_path = page
                 .last()
-                .map(|(path, _, _)| path.clone())
+                .map(|(path, _)| path.clone())
                 .ok_or_else(|| "session ingest health page unexpectedly empty".to_owned())?;
             if page.len() < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
                 break;
@@ -270,7 +370,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         Ok(health)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.exists")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.exists",
+        level = "trace",
+        skip_all
+    )]
     pub async fn has_session_message(
         &self,
         provider: &str,
@@ -283,7 +387,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .read_connection()
             .query(
                 "SELECT EXISTS(
-                    SELECT 1 FROM session_messages
+                    SELECT 1 FROM lcm_raw_messages
                     WHERE provider = ?1 AND message_id = ?2
                  )",
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
@@ -300,11 +404,57 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| format!("failed to decode session message existence: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.count")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.exists_batch",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn existing_session_message_ids(
+        &self,
+        provider: &str,
+        message_ids: &[String],
+    ) -> Result<Vec<String>, String> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if message_ids.len() > SESSION_MESSAGE_ID_LOOKUP_MAX {
+            return Err(format!(
+                "session message identity batch has {} rows; maximum is {SESSION_MESSAGE_ID_LOOKUP_MAX}",
+                message_ids.len()
+            ));
+        }
+        let encoded = serde_json::to_string(message_ids)
+            .map_err(|error| format!("failed to encode session message identity batch: {error}"))?;
+        let mut rows = self
+            .read_connection()
+            .query(
+                EXISTING_SESSION_MESSAGE_IDS_SQL,
+                tracedecay_runtime_core::db::engine::params![provider, encoded],
+            )
+            .await
+            .map_err(|error| format!("failed to query session message identity batch: {error}"))?;
+        let mut existing = Vec::with_capacity(message_ids.len());
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read session message identity batch: {error}"))?
+        {
+            existing.push(row.get::<String>(0).map_err(|error| {
+                format!("failed to decode session message identity batch: {error}")
+            })?);
+        }
+        Ok(existing)
+    }
+
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.count",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_message_count(&self) -> Result<i64, String> {
         let mut rows = self
             .read_connection()
-            .query("SELECT COUNT(*) FROM session_messages", ())
+            .query("SELECT COUNT(*) FROM lcm_raw_messages", ())
             .await
             .map_err(|error| format!("failed to count session messages: {error}"))?;
         let row = rows
@@ -316,20 +466,25 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| format!("failed to decode session message count: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.count_project")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.count_project",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_message_count_for_project(
         &self,
         project_key: &str,
     ) -> Result<i64, String> {
+        let mut sql = "SELECT COUNT(*)
+                 FROM lcm_raw_messages m
+                 JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
+                 WHERE 1 = 1"
+            .to_owned();
+        let mut query_params = Vec::with_capacity(2);
+        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
         let mut rows = self
             .read_connection()
-            .query(
-                "SELECT COUNT(*)
-                 FROM session_messages m
-                 JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-                 WHERE s.project_key = ?1",
-                tracedecay_runtime_core::db::engine::params![project_key],
-            )
+            .query(sql.as_str(), query_params)
             .await
             .map_err(|error| format!("failed to count project session messages: {error}"))?;
         let row = rows
@@ -341,7 +496,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| format!("failed to decode project session message count: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.after")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.after",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_messages_after(
         &self,
         provider: &str,
@@ -403,7 +562,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// `Ok(None)` is the truthful "this store holds no timestamped messages";
     /// a failed query or an unreadable timestamp stays an error rather than
     /// masquerading as an idle store.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.activity")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.activity",
+        level = "trace",
+        skip_all
+    )]
     pub async fn latest_session_activity_secs(
         &self,
     ) -> tracedecay_domain::errors::Result<Option<i64>> {
@@ -412,14 +575,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .read_connection()
             .query(
                 "WITH latest_seconds AS (
-                    SELECT timestamp FROM session_messages
+                    SELECT timestamp FROM lcm_raw_messages
                     WHERE timestamp IS NOT NULL
                       AND timestamp < ?1
                     ORDER BY timestamp DESC
                     LIMIT 1
                  ),
                  latest_millis AS (
-                    SELECT timestamp FROM session_messages
+                    SELECT timestamp FROM lcm_raw_messages
                     WHERE timestamp >= ?1
                     ORDER BY timestamp DESC
                     LIMIT 1
@@ -452,7 +615,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
 
     /// Reads one message by provider and id. `Ok(None)` is truthful absence;
     /// snapshot, query, and row-decode failures stay typed errors.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.get")]
+    #[tracing::instrument(name = "global_db.registered_sessions.get", level = "trace", skip_all)]
     pub async fn get_session_message(
         &self,
         provider: &str,
@@ -460,11 +623,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     ) -> tracedecay_domain::errors::Result<Option<SessionMessageRecord>> {
         const OPERATION: &str = "read registered session message";
         let snapshot = self.read_snapshot().await?;
+        let sql = format!(
+            "SELECT {}
+             FROM lcm_raw_messages AS message WHERE provider = ?1 AND message_id = ?2",
+            message_body_record_select_columns("message")
+        );
         let mut rows = snapshot
             .query(
-                "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
-                        model, tool_names, source_path, source_offset, metadata_json
-                 FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                &sql,
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await
@@ -476,16 +642,22 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         else {
             return Ok(None);
         };
-        row_to_message(&row, 0)
-            .map(Some)
-            .map_err(|message| session_db_operation_message(OPERATION, message))
+        let mut message = row_to_message(&row, 0)
+            .map_err(|message| session_db_operation_message(OPERATION, message))?;
+        message.text = message_body_from_record_row(&row, 0)
+            .map_err(|error| session_db_operation_message(OPERATION, error.to_string()))?;
+        Ok(Some(message))
     }
 
     /// Searches message text for a provider, optionally constrained to one project.
     ///
     /// `Ok(vec![])` is the truthful "nothing matched"; snapshot, query, and
     /// row-decode failures are typed errors instead of an empty result page.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.search")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.search",
+        level = "trace",
+        skip_all
+    )]
     pub async fn search_session_messages(
         &self,
         provider: &str,
@@ -506,33 +678,40 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         let fetch_limit = rerank_fetch_limit(limit, SESSION_MESSAGE_SEARCH_MAX_FETCH);
         let snapshot = self.read_snapshot().await?;
 
-        let mut sql = "SELECT
+        let mut sql = format!(
+            "SELECT
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
                 s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
                 s.is_subagent, s.agent_id, s.parent_tool_use_id,
-                m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
-                m.kind, m.model, m.tool_names, m.source_path, m.source_offset, m.metadata_json,
-                bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
-             FROM session_messages_fts
-             JOIN session_messages m ON session_messages_fts.rowid = m.rowid
+                {},
+                (SELECT p.observation_id
+                 FROM observation_projection_provenance p
+                 WHERE p.projector_version = ?2
+                   AND p.output_provider = m.provider
+                   AND p.output_message_id = m.message_id
+                 ORDER BY p.output_ordinal
+                 LIMIT 1) AS observation_id,
+                bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages m ON lcm_raw_messages_fts.rowid = m.store_id
              JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE session_messages_fts MATCH ?1"
-            .to_owned();
-        let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_owned())];
+             WHERE lcm_raw_messages_fts MATCH ?1",
+            message_record_select_columns("m")
+        );
+        let mut query_params = vec![
+            Value::Text(fts_query),
+            Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
+            Value::Text(provider.to_owned()),
+        ];
         let _ = write!(sql, " AND m.provider = ?{}", query_params.len());
         if let Some(project_key) = project_key {
-            query_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                query_params.len()
-            );
+            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
         }
         for term in &literal_terms {
             query_params.push(Value::Text(term.clone()));
             let _ = write!(
                 sql,
-                " AND instr(lower(m.text), ?{}) > 0",
+                " AND instr(lower(m.index_text), ?{}) > 0",
                 query_params.len()
             );
         }
@@ -541,12 +720,13 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         ));
         let _ = write!(
             sql,
-            " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
+            " ORDER BY bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
               LIMIT ?{}",
             query_params.len()
         );
 
         let mut transcript_results = Vec::new();
+        let mut transcript_observations = BTreeMap::new();
         let mut rows = snapshot
             .query(&sql, query_params)
             .await
@@ -561,8 +741,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             let message = row_to_message(&row, 13)
                 .map_err(|message| session_db_operation_message(OPERATION, message))?;
             let score = -row
-                .get::<f64>(26)
+                .get::<f64>(27)
                 .map_err(|error| session_db_operation_error(OPERATION, error))?;
+            if let Some(observation_id) = row
+                .get::<Option<String>>(26)
+                .map_err(|error| session_db_operation_error(OPERATION, error))?
+            {
+                transcript_observations.insert(observation_id, transcript_results.len());
+            }
             transcript_results.push(SessionMessageSearchResult {
                 session,
                 message,
@@ -570,8 +756,39 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let workflow_results =
-            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await?;
+        let mut workflow_results: Vec<SessionMessageSearchResult> = Vec::new();
+        let mut workflow_observations: BTreeMap<String, usize> = BTreeMap::new();
+        let anchored_observations = transcript_observations
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        for (observation_id, fact) in search_workflow_facts(
+            &snapshot,
+            provider,
+            project_key,
+            query,
+            fetch_limit,
+            &anchored_observations,
+        )
+        .await?
+        {
+            if let Some(&index) = transcript_observations.get(&observation_id) {
+                append_observation_text(
+                    &mut transcript_results[index].message.text,
+                    &fact.message.text,
+                );
+                continue;
+            }
+            if let Some(&index) = workflow_observations.get(&observation_id) {
+                append_observation_text(
+                    &mut workflow_results[index].message.text,
+                    &fact.message.text,
+                );
+                continue;
+            }
+            workflow_observations.insert(observation_id, workflow_results.len());
+            workflow_results.push(fact);
+        }
         let mut results = interleave_workflow_search_results(transcript_results, workflow_results);
         results = dedupe_related_message_copies(results, |result| RelatedMessageCopyIdentity {
             provider: &result.session.provider,
@@ -592,7 +809,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// Lists each session's latest canonical goal state, newest first.
     /// Goals with no native timestamp rank after all timestamped goals
     /// instead of being assigned a fabricated epoch-zero time.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.goals")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.goals",
+        level = "trace",
+        skip_all
+    )]
     pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
@@ -628,12 +849,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .to_owned();
         let mut query_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
-            query_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                query_params.len()
-            );
+            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
         }
         query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
@@ -665,63 +881,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let mut legacy_sql = "SELECT
-                s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
-                s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
-                s.is_subagent, s.agent_id, s.parent_tool_use_id,
-                m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
-                m.kind, m.model, m.tool_names, m.source_path, m.source_offset, m.metadata_json
-             FROM session_messages m
-             JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE m.kind = 'goal'
-               AND m.ordinal = (
-                   SELECT MAX(m2.ordinal) FROM session_messages m2
-                   WHERE m2.provider = m.provider
-                     AND m2.session_id = m.session_id
-                     AND m2.kind = 'goal'
-               )
-               AND NOT EXISTS (
-                   SELECT 1 FROM observation_workflow_facts w
-                   WHERE w.projector_version = ?1
-                     AND w.provider = m.provider
-                     AND w.session_id = m.session_id
-                     AND w.semantic_kind = 'goal'
-               )"
-        .to_owned();
-        let mut legacy_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
-        if let Some(project_key) = project_key {
-            legacy_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                legacy_sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                legacy_params.len()
-            );
-        }
-        legacy_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
-        let _ = write!(
-            legacy_sql,
-            " ORDER BY (m.timestamp IS NULL) ASC, m.timestamp DESC, m.ordinal DESC LIMIT ?{}",
-            legacy_params.len()
-        );
-        let mut rows = snapshot
-            .query(&legacy_sql, legacy_params)
-            .await
-            .map_err(|error| session_db_operation_error(OPERATION, error))?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| session_db_operation_error(OPERATION, error))?
-        {
-            let session = row_to_session(&row)
-                .map_err(|message| session_db_operation_message(OPERATION, message))?;
-            let message = row_to_message(&row, 13)
-                .map_err(|message| session_db_operation_message(OPERATION, message))?;
-            results.push(SessionMessageSearchResult {
-                session,
-                message,
-                score: 0.0,
-            });
-        }
         results.sort_by(|left, right| {
             descending_timestamp(left.message.timestamp, right.message.timestamp)
                 .then_with(|| right.message.ordinal.cmp(&left.message.ordinal))
@@ -732,10 +891,15 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     /// Reads the canonical workflow fact columns used by projection acceptance.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_facts")]
+    /// Each row is (kind, status, state).
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.workflow_facts",
+        level = "trace",
+        skip_all
+    )]
     pub async fn workflow_fact_rows(
         &self,
-    ) -> tracedecay_domain::errors::Result<Vec<(String, Option<String>, Option<String>)>> {
+    ) -> tracedecay_domain::errors::Result<Vec<WorkflowFactRow>> {
         let snapshot = self.read_snapshot().await.map_err(|error| {
             tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "begin registered workflow fact snapshot".to_owned(),
@@ -788,14 +952,29 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_search")]
+fn append_observation_text(text: &mut String, fact_text: &str) {
+    if fact_text.is_empty() || text.contains(fact_text) {
+        return;
+    }
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(fact_text);
+}
+
+#[tracing::instrument(
+    name = "global_db.registered_sessions.workflow_search",
+    level = "trace",
+    skip_all
+)]
 async fn search_workflow_facts(
     snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
     provider: &str,
     project_key: Option<&str>,
     query: &str,
     limit: usize,
-) -> tracedecay_domain::errors::Result<Vec<SessionMessageSearchResult>> {
+    anchored_observations: &[&str],
+) -> tracedecay_domain::errors::Result<Vec<(String, SessionMessageSearchResult)>> {
     const OPERATION: &str = "search registered workflow facts";
     let terms = query
         .split_whitespace()
@@ -811,18 +990,18 @@ async fn search_workflow_facts(
         return Ok(Vec::new());
     }
 
-    let mut sql = "SELECT
-            s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
-            s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
-            s.is_subagent, s.agent_id, s.parent_tool_use_id,
-            w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
-            w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
-            w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
-            w.source_sequence, w.native_timestamp, w.observation_sequence,
-            w.ordering_domain, w.content_json, w.content_text
-         FROM observation_workflow_facts w
-         JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
-         WHERE w.projector_version = ?1"
+    let mut sql = "WITH matching_observations AS (
+            SELECT
+                w.provider,
+                w.observation_id,
+                MIN(CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END) AS item_order_missing,
+                MIN(w.item_order) AS first_item_order,
+                MAX(w.native_timestamp) AS latest_timestamp,
+                MAX(w.observation_sequence) AS latest_sequence,
+                MIN(w.fact_ordinal) AS first_fact_ordinal
+            FROM observation_workflow_facts w
+            JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+            WHERE w.projector_version = ?1"
         .to_owned();
     let mut query_params = vec![
         Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
@@ -830,12 +1009,7 @@ async fn search_workflow_facts(
     ];
     let _ = write!(sql, " AND w.provider = ?{}", query_params.len());
     if let Some(project_key) = project_key {
-        query_params.push(Value::Text(project_key.to_owned()));
-        let _ = write!(
-            sql,
-            " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-            query_params.len()
-        );
+        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
     }
     let mut term_predicates = Vec::with_capacity(terms.len());
     for term in terms {
@@ -845,14 +1019,71 @@ async fn search_workflow_facts(
             query_params.len()
         ));
     }
-    let _ = write!(sql, " AND ({})", term_predicates.join(" AND "));
+    let matching_predicate = term_predicates.join(" OR ");
+    let _ = write!(sql, " AND ({matching_predicate})");
+    // An observation qualifies on its own only when every term appears in at
+    // least one of its facts (master's AND, lifted from fact to observation,
+    // the unit a search row now stands for). Observations the transcript
+    // search already returned are anchored: any term-matching fact of theirs
+    // only enriches that existing row.
+    let every_term = term_predicates
+        .iter()
+        .map(|predicate| format!("SUM({predicate}) > 0"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let _ = write!(
+        sql,
+        " GROUP BY w.provider, w.observation_id HAVING ({every_term})"
+    );
+    if !anchored_observations.is_empty() {
+        let mut anchored_params = Vec::with_capacity(anchored_observations.len());
+        for observation_id in anchored_observations {
+            query_params.push(Value::Text((*observation_id).to_owned()));
+            anchored_params.push(format!("?{}", query_params.len()));
+        }
+        let _ = write!(
+            sql,
+            " OR w.observation_id IN ({})",
+            anchored_params.join(", ")
+        );
+    }
+    // The row leads with the observation's fact that matches the most terms,
+    // so its metadata names the item the query asked for.
+    let matched_terms = term_predicates
+        .iter()
+        .map(|predicate| format!("({predicate})"))
+        .collect::<Vec<_>>()
+        .join(" + ");
     query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
     let _ = write!(
         sql,
-        " ORDER BY CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END,
-                  w.item_order, (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
-                  w.observation_sequence DESC, w.fact_ordinal
-          LIMIT ?{}",
+        " ORDER BY item_order_missing, first_item_order,
+                   (latest_timestamp IS NULL) ASC, latest_timestamp DESC,
+                   latest_sequence DESC, first_fact_ordinal
+          LIMIT ?{}
+        )
+        SELECT
+            s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
+            s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
+            s.is_subagent, s.agent_id, s.parent_tool_use_id,
+            w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
+            w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
+            w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
+            w.source_sequence, w.native_timestamp, w.observation_sequence,
+            w.ordering_domain, w.content_json, w.content_text
+        FROM matching_observations matched
+        JOIN observation_workflow_facts w
+          ON w.provider = matched.provider
+         AND w.observation_id = matched.observation_id
+         AND w.projector_version = ?1
+        JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+        ORDER BY matched.item_order_missing, matched.first_item_order,
+                 (matched.latest_timestamp IS NULL) ASC, matched.latest_timestamp DESC,
+                 matched.latest_sequence DESC, matched.first_fact_ordinal,
+                 ({matched_terms}) DESC,
+                 CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END, w.item_order,
+                 (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
+                 w.fact_ordinal",
         query_params.len()
     );
 
@@ -868,13 +1099,19 @@ async fn search_workflow_facts(
     {
         let session = row_to_session(&row)
             .map_err(|message| session_db_operation_message(OPERATION, message))?;
+        let observation_id = row
+            .get::<String>(14)
+            .map_err(|error| session_db_operation_error(OPERATION, error))?;
         let message = row_to_workflow_message(&row, 13)
             .map_err(|message| session_db_operation_message(OPERATION, message))?;
-        results.push(SessionMessageSearchResult {
-            session,
-            message,
-            score: 0.0,
-        });
+        results.push((
+            observation_id,
+            SessionMessageSearchResult {
+                session,
+                message,
+                score: 0.0,
+            },
+        ));
     }
     Ok(results)
 }
@@ -891,98 +1128,70 @@ fn workflow_column_error(column: &str, error: &dyn std::fmt::Display) -> String 
     format!("failed to decode workflow fact column '{column}': {error}")
 }
 
-fn row_to_session(
-    row: &tracedecay_runtime_core::db::engine::Row,
-) -> std::result::Result<SessionRecord, String> {
-    Ok(SessionRecord {
-        provider: row
-            .get(0)
-            .map_err(|error| session_column_error("provider", &error))?,
-        session_id: row
-            .get(1)
-            .map_err(|error| session_column_error("session_id", &error))?,
-        project_key: row
-            .get(2)
-            .map_err(|error| session_column_error("project_key", &error))?,
-        project_path: row
-            .get(3)
-            .map_err(|error| session_column_error("project_path", &error))?,
-        title: row
-            .get(4)
-            .map_err(|error| session_column_error("title", &error))?,
-        started_at: row
-            .get(5)
-            .map_err(|error| session_column_error("started_at", &error))?,
-        ended_at: row
-            .get(6)
-            .map_err(|error| session_column_error("ended_at", &error))?,
-        transcript_path: row
-            .get(7)
-            .map_err(|error| session_column_error("transcript_path", &error))?,
-        metadata_json: row
-            .get(8)
-            .map_err(|error| session_column_error("metadata_json", &error))?,
-        parent_session_id: row
-            .get(9)
-            .map_err(|error| session_column_error("parent_session_id", &error))?,
-        is_subagent: row
-            .get::<i64>(10)
-            .map_err(|error| session_column_error("is_subagent", &error))?
-            != 0,
-        agent_id: row
-            .get(11)
-            .map_err(|error| session_column_error("agent_id", &error))?,
-        parent_tool_use_id: row
-            .get(12)
-            .map_err(|error| session_column_error("parent_tool_use_id", &error))?,
+/// Column decode failure. Callers keep their own error text; the column name
+/// is the sessions spelling and the source is the engine error.
+pub struct SqlColumnError {
+    pub column: &'static str,
+    pub source: EngineError,
+}
+
+fn column<T: FromValue>(row: &Row, index: i32, name: &'static str) -> Result<T, SqlColumnError> {
+    row.get(index).map_err(|source| SqlColumnError {
+        column: name,
+        source,
     })
 }
 
-fn row_to_message(
-    row: &tracedecay_runtime_core::db::engine::Row,
-    offset: i32,
-) -> std::result::Result<SessionMessageRecord, String> {
-    Ok(SessionMessageRecord {
-        provider: row
-            .get(offset)
-            .map_err(|error| message_column_error("provider", &error))?,
-        message_id: row
-            .get(offset + 1)
-            .map_err(|error| message_column_error("message_id", &error))?,
-        session_id: row
-            .get(offset + 2)
-            .map_err(|error| message_column_error("session_id", &error))?,
-        role: row
-            .get(offset + 3)
-            .map_err(|error| message_column_error("role", &error))?,
-        timestamp: row
-            .get(offset + 4)
-            .map_err(|error| message_column_error("timestamp", &error))?,
-        ordinal: row
-            .get(offset + 5)
-            .map_err(|error| message_column_error("ordinal", &error))?,
-        text: row
-            .get(offset + 6)
-            .map_err(|error| message_column_error("text", &error))?,
-        kind: row
-            .get(offset + 7)
-            .map_err(|error| message_column_error("kind", &error))?,
-        model: row
-            .get(offset + 8)
-            .map_err(|error| message_column_error("model", &error))?,
-        tool_names: row
-            .get(offset + 9)
-            .map_err(|error| message_column_error("tool_names", &error))?,
-        source_path: row
-            .get(offset + 10)
-            .map_err(|error| message_column_error("source_path", &error))?,
-        source_offset: row
-            .get(offset + 11)
-            .map_err(|error| message_column_error("source_offset", &error))?,
-        metadata_json: row
-            .get(offset + 12)
-            .map_err(|error| message_column_error("metadata_json", &error))?,
+/// `sessions` row in the column order both the session store and the
+/// observation projection read.
+pub fn session_record_from_row(row: &Row) -> Result<SessionRecord, SqlColumnError> {
+    Ok(SessionRecord {
+        provider: column(row, 0, "provider")?,
+        session_id: column(row, 1, "session_id")?,
+        project_key: column(row, 2, "project_key")?,
+        project_path: column(row, 3, "project_path")?,
+        title: column(row, 4, "title")?,
+        started_at: column(row, 5, "started_at")?,
+        ended_at: column(row, 6, "ended_at")?,
+        transcript_path: column(row, 7, "transcript_path")?,
+        metadata_json: column(row, 8, "metadata_json")?,
+        parent_session_id: column(row, 9, "parent_session_id")?,
+        is_subagent: column::<i64>(row, 10, "is_subagent")? != 0,
+        agent_id: column(row, 11, "agent_id")?,
+        parent_tool_use_id: column(row, 12, "parent_tool_use_id")?,
     })
+}
+
+/// Message row read through one of the `tracedecay_lcm::raw` record column
+/// lists, starting at `offset`.
+pub fn message_record_from_row(
+    row: &Row,
+    offset: i32,
+) -> Result<SessionMessageRecord, SqlColumnError> {
+    Ok(SessionMessageRecord {
+        provider: column(row, offset, "provider")?,
+        message_id: column(row, offset + 1, "message_id")?,
+        session_id: column(row, offset + 2, "session_id")?,
+        role: column(row, offset + 3, "role")?,
+        timestamp: column(row, offset + 4, "timestamp")?,
+        ordinal: column(row, offset + 5, "ordinal")?,
+        text: column(row, offset + 6, "text")?,
+        kind: column(row, offset + 7, "kind")?,
+        model: column(row, offset + 8, "model")?,
+        tool_names: column(row, offset + 9, "tool_names")?,
+        source_path: column(row, offset + 10, "source_path")?,
+        source_offset: column(row, offset + 11, "source_offset")?,
+        metadata_json: column(row, offset + 12, "metadata_json")?,
+    })
+}
+
+fn row_to_session(row: &Row) -> std::result::Result<SessionRecord, String> {
+    session_record_from_row(row).map_err(|error| session_column_error(error.column, &error.source))
+}
+
+fn row_to_message(row: &Row, offset: i32) -> std::result::Result<SessionMessageRecord, String> {
+    message_record_from_row(row, offset)
+        .map_err(|error| message_column_error(error.column, &error.source))
 }
 
 fn row_to_workflow_message(
@@ -1105,4 +1314,48 @@ fn row_to_workflow_message(
         source_offset: None,
         metadata_json: Some(JsonValue::Object(metadata).to_string()),
     })
+}
+
+#[cfg(all(test, unix))]
+mod identity_tests {
+    use super::{Value, durable_project_path_key, push_project_identity_predicate};
+
+    #[test]
+    fn project_identity_reads_opened_and_canonical_paths_without_aliasing_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let opened = alias.to_str().unwrap();
+        let canonical = durable_project_path_key(opened);
+        assert_ne!(opened, canonical);
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions (project_key TEXT, project_path TEXT);")
+            .unwrap();
+        for (key, path) in [
+            ("typed-project-a", opened),
+            ("typed-project-a", canonical.as_str()),
+            (opened, "user"),
+            (canonical.as_str(), "user"),
+            ("unrelated", "unknown"),
+        ] {
+            db.execute("INSERT INTO sessions VALUES (?1, ?2)", [key, path])
+                .unwrap();
+        }
+        let mut sql = "SELECT count(*) FROM sessions s WHERE 1 = 1".to_owned();
+        let mut params = Vec::new();
+        push_project_identity_predicate(&mut sql, &mut params, opened);
+        let params = params.iter().map(|value| match value {
+            Value::Text(text) => text.as_str(),
+            _ => panic!("project identity parameters must be text"),
+        });
+        let count: i64 = db
+            .query_row(&sql, rusqlite::params_from_iter(params), |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 3,
+            "both path forms and only the byte-exact opaque key match"
+        );
+    }
 }

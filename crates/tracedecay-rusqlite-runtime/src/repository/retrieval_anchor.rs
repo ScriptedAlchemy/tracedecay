@@ -1,12 +1,12 @@
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
-use tracedecay_domain::RetrievalAnchorId;
+use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecord};
 use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionStateV1, RetrievalAnchorDerivativeV1,
-    RetrievalAnchorDispositionRecordV1, RetrievalAnchorOwnerV1, RetrievalAnchorReadOperationV1,
-    RetrievalAnchorReadResultV1, RetrievalAnchorTombstoneV1, StoredRetrievalAnchorRecordV1,
+    RetrievalAnchorDispositionRecordV1, RetrievalAnchorReadOperationV1,
+    RetrievalAnchorReadResultV1, RetrievalAnchorTombstoneV1,
 };
 
-use super::support::{decode, encode, idempotent_insert, invalid};
+use super::support::{CachedStatements, decode, encode, idempotent_insert, invalid};
 
 #[derive(Clone, Default)]
 pub struct RetrievalAnchorExecutor;
@@ -21,7 +21,7 @@ impl RetrievalAnchorExecutor {
         let owner_json = encode(record.owner())?;
         let record_json = encode(record)?;
         if let Some(existing) = savepoint
-            .query_row(
+            .query_row_cached(
                 "SELECT record_json FROM retrieval_anchor_dispositions
                  WHERE disposition_id = ?1",
                 [record.disposition_id()],
@@ -36,10 +36,10 @@ impl RetrievalAnchorExecutor {
             };
         }
         let current = current_state(savepoint, record.anchor_id(), record.owner(), &owner_json)?;
-        if !transition_allowed(current, record.state()) {
+        if !AnchorDispositionStateV1::transition_allowed(current, record.state()) {
             return Err(invalid("invalid retrieval anchor disposition transition"));
         }
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO retrieval_anchor_dispositions (
                 disposition_id, anchor_id, owner_json, state, superseded_by,
                 reason_class, effective_at, record_json
@@ -55,8 +55,8 @@ impl RetrievalAnchorExecutor {
                 record_json,
             ],
         )?;
-        if suppresses_derivatives(record.state()) {
-            savepoint.execute(
+        if record.state().suppresses_derivatives() {
+            savepoint.execute_cached(
                 "INSERT INTO retrieval_anchor_derivative_tombstones (
                     source_anchor_id, owner_json, derivative_kind, derivative_id,
                     disposition_id, effective_at
@@ -163,8 +163,8 @@ impl RetrievalAnchorExecutor {
 fn read_anchor(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
-    owner: &RetrievalAnchorOwnerV1,
-) -> rusqlite::Result<Option<StoredRetrievalAnchorRecordV1>> {
+    owner: &FactOwnerV1,
+) -> rusqlite::Result<Option<RetrievalAnchorRecord>> {
     let owner_json = encode(owner)?;
     if !AnchorDispositionStateV1::serves_derivatives(current_state(
         connection,
@@ -175,7 +175,7 @@ fn read_anchor(
         return Ok(None);
     }
     connection
-        .query_row(
+        .query_row_cached(
             "SELECT anchor_json, projection_generation FROM retrieval_anchors
              WHERE anchor_id = ?1 AND owner_json = ?2",
             params![anchor_id.as_str(), owner_json],
@@ -183,10 +183,10 @@ fn read_anchor(
         )
         .optional()?
         .map(|(record_json, projection_generation)| {
-            let record: StoredRetrievalAnchorRecordV1 = decode(record_json)?;
+            let record: RetrievalAnchorRecord = decode(record_json)?;
             record.validate().map_err(invalid)?;
             if record.anchor_id() != anchor_id
-                || record.owner() != *owner
+                || FactOwnerV1::from(record.owner().clone()) != *owner
                 || record.projection_generation().as_str() != projection_generation
             {
                 return Err(invalid("retrieval anchor record identity mismatch"));
@@ -199,7 +199,7 @@ fn read_anchor(
 fn current_state(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
-    owner: &RetrievalAnchorOwnerV1,
+    owner: &FactOwnerV1,
     owner_json: &str,
 ) -> rusqlite::Result<Option<AnchorDispositionStateV1>> {
     current_record(connection, anchor_id, owner, owner_json)
@@ -209,11 +209,11 @@ fn current_state(
 fn current_record(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
-    owner: &RetrievalAnchorOwnerV1,
+    owner: &FactOwnerV1,
     owner_json: &str,
 ) -> rusqlite::Result<Option<RetrievalAnchorDispositionRecordV1>> {
     connection
-        .query_row(
+        .query_row_cached(
             "SELECT disposition_id, state, superseded_by, reason_class,
                     effective_at, record_json
              FROM retrieval_anchor_dispositions
@@ -261,7 +261,7 @@ fn current_record(
 fn read_derivatives(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
-    owner: &RetrievalAnchorOwnerV1,
+    owner: &FactOwnerV1,
 ) -> rusqlite::Result<Vec<RetrievalAnchorDerivativeV1>> {
     let owner_json = encode(owner)?;
     if !AnchorDispositionStateV1::serves_derivatives(current_state(
@@ -297,24 +297,6 @@ fn read_derivatives(
             .map_err(invalid)
         })?
         .collect()
-}
-
-// The disposition legality rules are owned by `AnchorDispositionStateV1` in
-// `tracedecay-store`, because the root authority in
-// `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs` appends
-// to the same tables and the two
-// must never disagree about what an anchor's history permits. Only the refusal
-// wording in this module is local, and it is observable, so it stays.
-
-fn transition_allowed(
-    current: Option<AnchorDispositionStateV1>,
-    next: AnchorDispositionStateV1,
-) -> bool {
-    AnchorDispositionStateV1::transition_allowed(current, next)
-}
-
-fn suppresses_derivatives(state: AnchorDispositionStateV1) -> bool {
-    state.suppresses_derivatives()
 }
 
 #[cfg(test)]
@@ -391,7 +373,7 @@ mod tests {
 
     fn insert_anchor(connection: &rusqlite::Connection, anchor_id: &RetrievalAnchorId) {
         connection
-            .execute(
+            .execute_cached(
                 "INSERT INTO retrieval_anchors (
                     anchor_id, anchor_json, owner_json, projection_generation
                  ) VALUES (?1, '{}', ?2, 'projection.fixture')",
@@ -442,7 +424,7 @@ mod tests {
                 &snapshot,
                 &RetrievalAnchorReadOperationV1::Derivatives {
                     anchor_id: source.clone(),
-                    owner: owner().into(),
+                    owner: owner(),
                 },
             )
             .unwrap();
@@ -455,7 +437,7 @@ mod tests {
                 &snapshot,
                 &RetrievalAnchorReadOperationV1::Tombstone {
                     anchor_id: source,
-                    owner: owner().into(),
+                    owner: owner(),
                 },
             )
             .unwrap();
@@ -469,7 +451,7 @@ mod tests {
                     &snapshot,
                     &RetrievalAnchorReadOperationV1::AnchorById {
                         anchor_id: anchor("retrieval.source.fixture"),
-                        owner: owner().into(),
+                        owner: owner(),
                     },
                 )
                 .unwrap(),
@@ -592,7 +574,7 @@ mod tests {
                     &snapshot,
                     &RetrievalAnchorReadOperationV1::Derivatives {
                         anchor_id: source,
-                        owner: owner().into(),
+                        owner: owner(),
                     },
                 )
                 .unwrap(),
@@ -607,16 +589,18 @@ mod tests {
         let source = anchor("retrieval.source.fixture");
         insert_anchor(&connection, &source);
         let snapshot = connection.transaction().unwrap();
-        assert!(
+        assert_eq!(
             RetrievalAnchorExecutor
                 .execute_read(
                     &snapshot,
                     &RetrievalAnchorReadOperationV1::AnchorById {
                         anchor_id: source,
-                        owner: owner().into(),
+                        owner: owner(),
                     },
                 )
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "Conversion error from type Text at index: 0, missing field `anchor_id` at line 1 column 2"
         );
     }
 
@@ -644,7 +628,7 @@ mod tests {
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
         connection
-            .execute(
+            .execute_cached(
                 "UPDATE retrieval_anchor_dispositions
                  SET state = 'deleted' WHERE disposition_id = ?1",
                 [active.disposition_id()],
@@ -652,16 +636,18 @@ mod tests {
             .unwrap();
 
         let snapshot = connection.transaction().unwrap();
-        assert!(
+        assert_eq!(
             RetrievalAnchorExecutor
                 .execute_read(
                     &snapshot,
                     &RetrievalAnchorReadOperationV1::CurrentDisposition {
                         anchor_id: source,
-                        owner: owner().into(),
+                        owner: owner(),
                     },
                 )
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "Invalid parameter name: retrieval anchor disposition physical columns mismatch"
         );
     }
 }

@@ -20,7 +20,7 @@ import {
  * Two absences are stated rather than filled. The MCP/other split is a
  * subtraction and is only drawn when both counts arrived. The per-agent
  * attribution comes from `recent_hooks`, which is a recent suffix of the hook
- * tape and never a total — so it is captioned as a suffix, and when the fold
+ * tape and never a total, so it is captioned as a suffix, and when the fold
  * serves none the surface says the fold attributed nothing rather than that no
  * agent used a tool.
  */
@@ -49,8 +49,8 @@ export function AgentToolActivity({ payload }: { payload: ToolActivityRead }) {
             {split.total === 1 ? 'call' : 'calls'} in the window
             {perMessage != null ? (
               <>
-                {' '}
-                — <span className="td-value">{perMessage.toFixed(2)}</span> per message, as the
+                {', '}
+                <span className="td-value">{perMessage.toFixed(2)}</span> per message, as the
                 fold reports it
               </>
             ) : null}
@@ -63,7 +63,7 @@ export function AgentToolActivity({ payload }: { payload: ToolActivityRead }) {
         <p className="text-2xs leading-relaxed text-state-conflicting" data-agent-tool-split="contradiction">
           The fold reports {split.mcp?.toLocaleString()} MCP tool calls inside{' '}
           {split.total?.toLocaleString()} tool calls. The two disagree, so no remainder is drawn
-          from them — a non-MCP figure subtracted here would be this build inventing a number to
+          from them, a non-MCP figure subtracted here would be this build inventing a number to
           make the totals agree.
         </p>
       ) : split.total != null && split.mcp != null && split.other != null ? (
@@ -139,7 +139,7 @@ export function AgentToolActivity({ payload }: { payload: ToolActivityRead }) {
           <>
             <p className="text-3xs leading-relaxed text-text-muted">
               From the hook tape the fold served, which is {truncated ? 'a recent suffix' : 'the window it scanned'} and
-              never a total — these counts rank agents against each other on that suffix and are
+              never a total, these counts rank agents against each other on that suffix and are
               floors, not totals.
             </p>
             <ul className="flex min-w-0 flex-col" data-agent-attribution={attribution.agents.length}>
@@ -174,7 +174,7 @@ export function AgentToolActivity({ payload }: { payload: ToolActivityRead }) {
               <p className="text-3xs leading-relaxed text-text-muted">
                 {attribution.unattributed.toLocaleString()} further hook{' '}
                 {attribution.unattributed === 1 ? 'row names' : 'rows name'} no agent and{' '}
-                {attribution.unattributed === 1 ? 'is' : 'are'} not ranked above — an unnamed row
+                {attribution.unattributed === 1 ? 'is' : 'are'} not ranked above, an unnamed row
                 drawn beside named agents would read as an agent called nothing.
               </p>
             ) : null}

@@ -10,14 +10,12 @@ impl Database {
     }
 
     /// Applies the canonical retained runtime's bounded WAL checkpoint policy.
-    #[hotpath::skip]
     pub async fn checkpoint(&self) -> Result<()> {
         self.require_active_write_scope("checkpoint")?;
-        let _writer = self.writer().await;
+        let _writer = self.writer().await?;
         self.checkpoint_unguarded().await
     }
 
-    #[hotpath::skip]
     pub async fn release_connection_memory(&self) -> Result<()> {
         // Both connections derive from the same registry runtime handle and
         // share one reader pool, so releasing through either covers every
@@ -43,7 +41,6 @@ impl Database {
     }
 
     /// Forces a complete WAL truncation through the retained writer actor.
-    #[hotpath::skip]
     pub async fn truncate_wal_for_offline_maintenance(&self) -> Result<()> {
         const OPERATION: &str = "truncate WAL for offline maintenance";
         self.require_active_write_scope(OPERATION)?;
@@ -54,8 +51,8 @@ impl Database {
                 operation: OPERATION.to_owned(),
             });
         }
-        let _writer = self.writer().await;
-        let connection = self.open_writer_connection_unguarded(OPERATION).await?;
+        let _writer = self.writer().await?;
+        let connection = self.open_writer_connection_unguarded(OPERATION)?;
         let mut rows = connection
             .checkpoint_wal_truncate()
             .await
@@ -117,15 +114,10 @@ impl Database {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
-    #[doc(hidden)]
-    #[hotpath::skip]
-    pub async fn truncate_wal_for_test_artifact(&self) -> Result<()> {
-        self.truncate_wal_for_offline_maintenance().await
-    }
-
-    #[hotpath::skip]
     pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
+        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
+            message: "database checkpoint requires an Asupersync context".to_owned(),
+        })?;
         let authority = self.write_authority()?;
         let request = CheckpointRequest::new(
             CheckpointBlockers::default(),
@@ -134,7 +126,7 @@ impl Database {
         let outcome = self
             .client
             .runtime()
-            .run_checkpoint(request, authority)
+            .run_checkpoint(&cx, request, authority)
             .await
             .map_err(|error| TraceDecayError::Database {
                 message: format!("registered checkpoint failed: {error:?}"),
@@ -153,7 +145,6 @@ impl Database {
         }
     }
 
-    #[hotpath::skip]
     pub async fn size(&self) -> Result<u64> {
         let mut rows = self
             .inner
@@ -187,12 +178,10 @@ impl Database {
         Ok(size as u64)
     }
 
-    #[hotpath::skip]
     pub async fn quick_check(&self) -> Result<bool> {
         Ok(self.quick_check_report().await?.is_none())
     }
 
-    #[hotpath::skip]
     pub async fn quick_check_report(&self) -> Result<Option<String>> {
         Ok(match self.health_on_fresh_reader("quick_check").await? {
             DatabaseHealth::Healthy => None,
@@ -200,13 +189,18 @@ impl Database {
         })
     }
 
-    #[hotpath::skip]
     async fn health_on_fresh_reader(&self, operation: &str) -> Result<DatabaseHealth> {
+        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
+            message: "database health check requires an Asupersync context".to_owned(),
+        })?;
         let queued_at = std::time::Instant::now();
-        let _health_guard = DATABASE_HEALTH_GATE
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
+        let health_gate = DATABASE_HEALTH_GATE.get_or_init(Arc::default);
+        let _health_guard = asupersync::sync::OwnedMutexGuard::lock(Arc::clone(health_gate), &cx)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("database health admission failed: {error}"),
+                operation: operation.to_owned(),
+            })?;
         let wait_ms = u64::try_from(queued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::debug!(
             event = "database_health_check",
@@ -253,74 +247,44 @@ impl Database {
         })
     }
 
-    #[hotpath::skip]
     pub async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
         // The registry sampler blocks on reserved-health reader acquisition
         // and a worker rendezvous (each bounded below); run it on the blocking
         // pool so a busy store cannot capture an async executor thread.
         let runtime = self.client.runtime().clone();
-        tokio::task::spawn_blocking(move || {
-            runtime.storage_page_counts(std::time::Duration::from_secs(5))
-        })
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("store-size sampling task failed: {error}"),
-            operation: "sample SQLite-store pages".to_owned(),
-        })?
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to sample SQLite-store pages: {error:?}"),
-            operation: "sample SQLite-store pages".to_owned(),
-        })
+        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
+            message: "store-size sampling requires an Asupersync context".to_owned(),
+        })?;
+        cx.spawn_blocking(move |_cx| runtime.storage_page_counts(std::time::Duration::from_secs(5)))
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("store-size sampling admission failed: {error}"),
+                operation: "sample SQLite-store pages".to_owned(),
+            })?
+            .join(&cx)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("store-size sampling task failed: {error}"),
+                operation: "sample SQLite-store pages".to_owned(),
+            })?
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to sample SQLite-store pages: {error:?}"),
+                operation: "sample SQLite-store pages".to_owned(),
+            })
     }
 
     /// Runs bounded incremental vacuum through the canonical writer lane.
-    #[hotpath::skip]
     pub async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
+        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
+            message: "database compaction requires an Asupersync context".to_owned(),
+        })?;
         let authority = self.write_authority()?;
         self.client
             .runtime()
-            .run_bounded_incremental_compaction(pages, authority)
+            .run_bounded_incremental_compaction(&cx, pages, authority)
             .await
             .map_err(|error| TraceDecayError::Database {
                 message: format!("failed to compact SQLite store: {error:?}"),
                 operation: "run bounded SQLite-store compaction".to_owned(),
-            })
-    }
-
-    /// Produces an online snapshot through this database's canonical writer
-    /// runtime. Read-only clients cannot request a snapshot because the
-    /// writer samples the retained write authority throughout publication.
-    #[hotpath::skip]
-    pub async fn snapshot_to(&self, destination: &std::path::Path) -> Result<()> {
-        let authority = self.write_authority()?;
-        self.client
-            .runtime()
-            .snapshot_to(destination.to_path_buf(), authority)
-            .await
-            .map(|_| ())
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to snapshot SQLite store: {error:?}"),
-                operation: "snapshot SQLite store".to_owned(),
-            })
-    }
-
-    /// Produces an interruption-aware online snapshot through this database's
-    /// canonical writer runtime. The caller supplies only request control;
-    /// this guarded facade retains and revalidates the exact write authority.
-    #[hotpath::skip]
-    pub async fn snapshot_to_interruptible(
-        &self,
-        destination: &std::path::Path,
-        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
-    ) -> Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt> {
-        let authority = self.write_authority()?;
-        self.client
-            .runtime()
-            .snapshot_to_interruptible(destination.to_path_buf(), probe, authority)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to snapshot SQLite store: {error:?}"),
-                operation: "snapshot SQLite store".to_owned(),
             })
     }
 }

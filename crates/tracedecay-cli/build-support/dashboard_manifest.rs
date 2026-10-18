@@ -31,13 +31,39 @@ impl fmt::Display for DashboardManifestError {
 impl Error for DashboardManifestError {}
 
 pub fn dashboard_asset_paths(app_dist: &Path) -> Result<Vec<String>, DashboardManifestError> {
-    let app_dist_metadata = fs::symlink_metadata(app_dist).map_err(|error| {
+    dashboard_asset_paths_with(app_dist, false)
+}
+
+/// Same manifest scan, but the source tree may contain symlinks whose targets
+/// are regular files or directories. Only for inputs a build system hands us
+/// explicitly (`TRACEDECAY_DASHBOARD_DIST_DIR`), where sandboxed inputs arrive
+/// as symlinks to action outputs and the caller still compares the staged
+/// digest byte-for-byte against the producer's advertised digest. Packaged
+/// and in-tree bundles keep the strict no-symlink rule.
+pub fn dashboard_asset_paths_build_output(
+    app_dist: &Path,
+) -> Result<Vec<String>, DashboardManifestError> {
+    dashboard_asset_paths_with(app_dist, true)
+}
+
+fn dashboard_asset_paths_with(
+    app_dist: &Path,
+    allow_source_symlinks: bool,
+) -> Result<Vec<String>, DashboardManifestError> {
+    let metadata_of = |path: &Path| {
+        if allow_source_symlinks {
+            fs::metadata(path)
+        } else {
+            fs::symlink_metadata(path)
+        }
+    };
+    let app_dist_metadata = metadata_of(app_dist).map_err(|error| {
         DashboardManifestError::new(format!(
             "failed to inspect dashboard app-dist root {}: {error}",
             app_dist.display()
         ))
     })?;
-    if app_dist_metadata.file_type().is_symlink() {
+    if !allow_source_symlinks && app_dist_metadata.file_type().is_symlink() {
         return Err(DashboardManifestError::new(format!(
             "dashboard app-dist root {} must not be a symlink",
             app_dist.display()
@@ -45,13 +71,13 @@ pub fn dashboard_asset_paths(app_dist: &Path) -> Result<Vec<String>, DashboardMa
     }
 
     let manifest_path = app_dist.join(DASHBOARD_ASSET_MANIFEST);
-    let manifest_metadata = fs::symlink_metadata(&manifest_path).map_err(|error| {
+    let manifest_metadata = metadata_of(&manifest_path).map_err(|error| {
         DashboardManifestError::new(format!(
             "failed to inspect dashboard asset manifest {}: {error}",
             manifest_path.display()
         ))
     })?;
-    if manifest_metadata.file_type().is_symlink() {
+    if !allow_source_symlinks && manifest_metadata.file_type().is_symlink() {
         return Err(DashboardManifestError::new(format!(
             "dashboard asset manifest {} must not be a symlink",
             manifest_path.display()
@@ -105,13 +131,13 @@ pub fn dashboard_asset_paths(app_dist: &Path) -> Result<Vec<String>, DashboardMa
         let mut asset_is_file = false;
         for component in relative.split('/') {
             asset_path.push(component);
-            let metadata = fs::symlink_metadata(&asset_path).map_err(|error| {
+            let metadata = metadata_of(&asset_path).map_err(|error| {
                 DashboardManifestError::new(format!(
                     "dashboard asset manifest lists missing file {relative:?} at {}: {error}",
                     asset_path.display()
                 ))
             })?;
-            if metadata.file_type().is_symlink() {
+            if !allow_source_symlinks && metadata.file_type().is_symlink() {
                 return Err(DashboardManifestError::new(format!(
                     "dashboard asset manifest path component {} must not be a symlink",
                     asset_path.display()

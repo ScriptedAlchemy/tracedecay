@@ -23,8 +23,8 @@ artifacts to recreate.
 
 **Portability gap (found 2026-07-27; closed).** Path canonicalization was
 inconsistent across the preview boundary: the daemon canonicalized
-`repository_root` before building the assembler while callers — the
-index-transaction acceptance fixture among them — captured snapshots from
+`repository_root` before building the assembler while callers, the
+index-transaction acceptance fixture among them, captured snapshots from
 uncanonicalized paths.
 On Linux with a real `/tmp` the two forms were identical, so the defect stayed
 latent; on hosts whose repository path traverses a symlink (macOS
@@ -107,30 +107,30 @@ committed, unchanged, rolled back, or requiring inspection.
 
 ### Native-integration authority mount state (updated 2026-08-07)
 
-All five native-integration operations — `stack_snapshot`,
+All five native-integration operations, `stack_snapshot`,
 `preflight_native_integration`, `apply_native_integration`,
-`native_integration_status`, `cancel_native_integration` — are declared,
+`native_integration_status`, `cancel_native_integration`, are declared,
 schema-backed, separately authorized, bound to CLI and MCP, and served by a
 mounted per-project authority. The daemon native-integration registry
 composes, at project-open admission, the four inputs the 2026-08-07 deferral
 named:
 
-- `NativeIntegrationStore` — the durable preview/approval/status/receipt CAS
+- `NativeIntegrationStore`, the durable preview/approval/status/receipt CAS
   authority is `GlobalDbNativeIntegrationStore` in the registered project
   session database, bridged to the synchronous kernel through one bounded
   store actor per database. Records, receipts, and the needs-inspection
   repository quarantine survive restart; pending transactions replay through
   coordinator recovery before the owner serves a single request.
-- `NativeIntegrationStackResolutionPort` — `ExactPairNativeIntegrationTopology`
+- `NativeIntegrationStackResolutionPort`, `ExactPairNativeIntegrationTopology`
   freezes the explicit independent-branch pair from native Git tips. Declared
   stack edges still resolve `Unavailable`: Plan 16's branch-stack projection
   remains the unbound authority for edge meaning and visibility, and
   `Unavailable` discloses no node identity or topology.
-- `NativeIntegrationAuthorizationPort` — `DaemonNativeIntegrationAuthorization`
+- `NativeIntegrationAuthorizationPort`, `DaemonNativeIntegrationAuthorization`
   is pinned at composition to the same policy digest the configuration
   runtime registered, so stale/denied predicates and minted route grants
   agree on one policy identity.
-- The per-project daemon owner — one retained coordinator per exact
+- The per-project daemon owner, one retained coordinator per exact
   project/repository/database identity; a non-Git project or a request that
   arrives before admission answers the typed
   `NativeIntegrationSurfaceUnavailableV1::AuthorityUnmounted` result, never a

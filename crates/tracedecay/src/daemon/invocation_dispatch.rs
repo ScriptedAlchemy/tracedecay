@@ -3,37 +3,27 @@
 //! Validates multi-root payloads before they cost a project admission,
 //! resolves the roots they name, and runs the invocation on the Unix and
 //! portable executors.
-//!
-//! Semantic execution controls are admitted before project routing and bound
-//! around project-open waits so route failures cannot hide cancellation or
-//! deadline expiry.
 
 use super::project_open_admission::ProjectOpenWaitOutcome;
 use super::*;
 use std::future::Future;
 use tracedecay_code_index_runtime::git_transactions;
+use tracedecay_contracts::SharedProfileStoreLocatorV1;
+#[cfg(any(not(unix), test))]
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationService, Lease, SemanticInvocationControlV1, register,
+    DaemonInvocationService, Lease,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
-
-fn semantic_invocation_interruption_response(
-    request_id: &str,
-    control: Option<&SemanticInvocationControlV1>,
-) -> Option<DaemonInvocationResponse> {
-    control
-        .and_then(|control| control.interruption(tracedecay_application::clock::now_micros()))
-        .map(|problem| {
-            DaemonInvocationResponse::application_problem(request_id.to_owned(), problem)
-        })
-}
+use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_store::StoreShardScopeV1;
 
 fn record_project_open_refusal(
     operation: &str,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) {
-    hotpath::gauge!("daemon.invocation.route.project_open_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
         outcome = "refused",
@@ -48,7 +38,6 @@ fn record_project_route_refusal(
     operation: &str,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) {
-    hotpath::gauge!("daemon.invocation.route.project_route_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
         outcome = "refused",
@@ -60,7 +49,6 @@ fn record_project_route_refusal(
 }
 
 fn record_admitted_root_refusal(operation: &str) {
-    hotpath::gauge!("daemon.invocation.route.admitted_root_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
         outcome = "refused",
@@ -70,70 +58,10 @@ fn record_admitted_root_refusal(operation: &str) {
     );
 }
 
-async fn await_project_open_with_semantic_control<Output>(
-    control: Option<&SemanticInvocationControlV1>,
-    request_cancellation: Option<&CancellationToken>,
-    project_open: impl Future<Output = Output>,
-) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
-    let Some(control) = control else {
-        return Ok(project_open.await);
-    };
-    if let Some(problem) = control.interruption(tracedecay_application::clock::now_micros()) {
-        return Err(problem);
-    }
-    if request_cancellation.is_some_and(CancellationToken::is_cancelled) {
-        return Err(tracedecay_application::ApplicationProblem::cancelled_before_admission());
-    }
-    let remaining = control.remaining(tracedecay_application::clock::now_micros())?;
-    let deadline = tokio::time::Instant::now()
-        .checked_add(remaining)
-        .ok_or_else(
-            || tracedecay_application::ApplicationProblem::InvalidRequest {
-                diagnostic: tracedecay_application::SafeDiagnostic {
-                    code: "semantic_evaluation_deadline_out_of_range".to_owned(),
-                    message: "The semantic evaluation deadline is outside the supported range"
-                        .to_owned(),
-                },
-                retry: tracedecay_application::RetryDirective::Never,
-                legal_actions: Vec::new(),
-            },
-        )?;
-    tokio::pin!(project_open);
-    tokio::select! {
-        biased;
-        () = async {
-            match request_cancellation {
-                Some(request_cancellation) => request_cancellation.cancelled().await,
-                None => std::future::pending::<()>().await,
-            }
-        } => {
-            Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
-        }
-        () = tokio::time::sleep_until(deadline) => {
-            Err(tracedecay_application::ApplicationProblem::TimedOut {
-                stage: tracedecay_application::CancellationStage::BeforeAdmission,
-                retry: tracedecay_application::RetryDirective::Never,
-                legal_actions: Vec::new(),
-            })
-        }
-        output = &mut project_open => {
-            if request_cancellation.is_some_and(CancellationToken::is_cancelled) {
-                Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
-            } else if let Some(problem) =
-                control.interruption(tracedecay_application::clock::now_micros())
-            {
-                Err(problem)
-            } else {
-                Ok(output)
-            }
-        }
-    }
-}
-
 async fn await_lsp_project_open_upgrade(
     project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     route: &ProjectRouteKey,
-    deadline: &tracedecay_application::Deadline,
+    deadline: &tracedecay_contracts::Deadline,
     request_cancellation: &CancellationToken,
 ) -> ProjectOpenWaitOutcome {
     project_open_tasks(project_open_gates.as_ref())
@@ -143,38 +71,41 @@ async fn await_lsp_project_open_upgrade(
 }
 
 async fn await_lsp_route_rejoin<Output>(
-    deadline: &tracedecay_application::Deadline,
+    deadline: &tracedecay_contracts::Deadline,
     request_cancellation: &CancellationToken,
     route_read: impl Future<Output = Output>,
-) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
+) -> std::result::Result<Output, tracedecay_contracts::ApplicationProblem> {
     if request_cancellation.is_cancelled() {
-        return Err(tracedecay_application::ApplicationProblem::cancelled_before_admission());
+        return Err(tracedecay_contracts::ApplicationProblem::cancelled_before_admission());
     }
-    let now = tracedecay_application::clock::now_micros();
+    let now = tracedecay_contracts::clock::now_micros();
     let remaining_micros = deadline
         .expires_at
         .0
         .checked_sub(now.0)
         .filter(|remaining| *remaining > 0)
-        .ok_or_else(tracedecay_application::ApplicationProblem::timed_out_before_admission)?;
+        .ok_or_else(tracedecay_contracts::ApplicationProblem::timed_out_before_admission)?;
     let remaining_micros = u64::try_from(remaining_micros)
-        .map_err(|_| tracedecay_application::ApplicationProblem::timed_out_before_admission())?;
-    let sleep = tokio::time::sleep(Duration::from_micros(remaining_micros));
+        .map_err(|_| tracedecay_contracts::ApplicationProblem::timed_out_before_admission())?;
+    let sleep = tracedecay_runtime_core::native_runtime::sleep_until(
+        std::time::Instant::now() + Duration::from_micros(remaining_micros),
+    );
     tokio::pin!(sleep);
     tokio::pin!(route_read);
     tokio::select! {
         biased;
         () = request_cancellation.cancelled() => {
-            Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
+            Err(tracedecay_contracts::ApplicationProblem::cancelled_before_admission())
         }
-        () = &mut sleep => {
-            Err(tracedecay_application::ApplicationProblem::timed_out_before_admission())
+        // A timer that cannot start fails closed, as an elapsed deadline.
+        _ = &mut sleep => {
+            Err(tracedecay_contracts::ApplicationProblem::timed_out_before_admission())
         }
         output = &mut route_read => {
             if request_cancellation.is_cancelled() {
-                Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
-            } else if deadline.is_elapsed_at(tracedecay_application::clock::now_micros()) {
-                Err(tracedecay_application::ApplicationProblem::timed_out_before_admission())
+                Err(tracedecay_contracts::ApplicationProblem::cancelled_before_admission())
+            } else if deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros()) {
+                Err(tracedecay_contracts::ApplicationProblem::timed_out_before_admission())
             } else {
                 Ok(output)
             }
@@ -190,17 +121,19 @@ fn lsp_project_open_wait_response(
 ) -> Option<DaemonInvocationResponse> {
     match outcome {
         ProjectOpenWaitOutcome::Completed | ProjectOpenWaitOutcome::NotTracked => None,
-        ProjectOpenWaitOutcome::Failed(error) => Some(DaemonInvocationResponse::problem(
+        ProjectOpenWaitOutcome::Failed(error) => Some(project_open_refusal_response(
             request_id.to_owned(),
-            project_open_problem(&error, workflow_application, git_operation),
+            &error,
+            workflow_application,
+            git_operation,
         )),
         ProjectOpenWaitOutcome::Cancelled => Some(DaemonInvocationResponse::application_problem(
             request_id.to_owned(),
-            tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+            tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
         )),
         ProjectOpenWaitOutcome::TimedOut => Some(DaemonInvocationResponse::application_problem(
             request_id.to_owned(),
-            tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+            tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
         )),
     }
 }
@@ -228,101 +161,243 @@ pub(super) fn invalid_multi_root_invocation_response(
         .map(|problem| DaemonInvocationResponse::problem(request.request_id.clone(), problem))
 }
 
-#[cfg(any(not(unix), test))]
-pub(super) async fn execute_portable_daemon_invocation(
-    lifecycle: DaemonLifecycle,
-    store_administration: StoreAdministration,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+fn scope_set_cas_admission(
+    request: &DaemonInvocationRequest,
+) -> Option<(
+    &tracedecay_contracts::MultiRootScopeSetCasRequestV1,
+    tracedecay_domain::UtcMicros,
+    &tracedecay_contracts::Deadline,
+    &tracedecay_contracts::CancellationContext,
+)> {
+    let DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
+        request,
+        observed_at,
+        deadline,
+        cancellation,
+    } = &request.payload
+    else {
+        return None;
+    };
+    Some((request, *observed_at, deadline, cancellation))
+}
+
+struct InvocationCancellation {
+    request_id: String,
+    scope_set_cas_lease: Option<Lease>,
+    lsp_lease: Option<Lease>,
+    lsp_cancellation: Option<CancellationToken>,
+    request_cancellation: Option<CancellationToken>,
+}
+
+fn invocation_cancellation(
+    request: &DaemonInvocationRequest,
+    service: &DaemonInvocationService,
+) -> Option<InvocationCancellation> {
+    let request_id = request.request_id.clone();
+    let request_cancellations = service.request_cancellations();
+    let scope_set_cas_lease = if scope_set_cas_admission(request).is_some() {
+        Some(request_cancellations.register(&request_id)?)
+    } else {
+        None
+    };
+    let lsp_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
+        Some(request_cancellations.register(&request_id)?)
+    } else {
+        None
+    };
+    let lsp_cancellation = lsp_lease.as_ref().map(Lease::token);
+    let request_cancellation = lsp_cancellation
+        .clone()
+        .or_else(|| scope_set_cas_lease.as_ref().map(Lease::token));
+    Some(InvocationCancellation {
+        request_id,
+        scope_set_cas_lease,
+        lsp_lease,
+        lsp_cancellation,
+        request_cancellation,
+    })
+}
+
+fn selected_root_handshake(handshake: &DaemonHandshake, root: &Path) -> DaemonHandshake {
+    DaemonHandshake {
+        project_path: Some(root.to_path_buf()),
+        scope_prefix: None,
+        allow_init: false,
+        allow_initialize_root_routing: false,
+        ..handshake.clone()
+    }
+}
+
+type ProjectOpenFuture<'a> =
+    std::pin::Pin<Box<dyn Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'a>>;
+
+#[allow(clippy::too_many_arguments)]
+async fn open_scope_set_cas_projects<'a>(
     handshake: &DaemonHandshake,
-    invocation: &DaemonInvocationState,
-    http_application_registry: http_application::DaemonHttpApplicationRegistry,
+    scope_set_request: &tracedecay_contracts::MultiRootScopeSetCasRequestV1,
+    observed_at: tracedecay_domain::UtcMicros,
+    deadline: &tracedecay_contracts::Deadline,
+    cancellation: &tracedecay_contracts::CancellationContext,
+    request_id: &str,
+    request_cancellation: &CancellationToken,
+    project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    mut open_project: impl FnMut(DaemonHandshake) -> ProjectOpenFuture<'a>,
+) -> std::result::Result<Vec<Arc<crate::mcp::McpServer>>, Box<DaemonInvocationResponse>> {
+    if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
+        return Err(Box::new(DaemonInvocationResponse::application_problem(
+            request_id.to_owned(),
+            tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
+        )));
+    }
+    if deadline.is_elapsed_at(observed_at)
+        || deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
+    {
+        return Err(Box::new(DaemonInvocationResponse::application_problem(
+            request_id.to_owned(),
+            tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
+        )));
+    }
+    let mut servers = Vec::with_capacity(scope_set_request.roots.len());
+    for selector in &scope_set_request.roots {
+        let selected_handshake = selected_root_handshake(handshake, &selector.root);
+        let project_server = await_lsp_route_rejoin(
+            deadline,
+            request_cancellation,
+            open_project(selected_handshake.clone()),
+        )
+        .await;
+        match project_server {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) if error_is_project_open_retryable(&error) => {}
+            Ok(Err(error)) => {
+                record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
+                return Err(Box::new(project_open_refusal_response(
+                    request_id.to_owned(),
+                    &error,
+                    false,
+                    false,
+                )));
+            }
+            Err(problem) => {
+                return Err(Box::new(DaemonInvocationResponse::application_problem(
+                    request_id.to_owned(),
+                    problem,
+                )));
+            }
+        }
+        let root = canonical_existing_identity(&selector.root).map_err(|_| {
+            DaemonInvocationResponse::problem(
+                request_id.to_owned(),
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            )
+        })?;
+        let route = ProjectRouteKey::from_handshake(&root, &selected_handshake).map_err(|_| {
+            DaemonInvocationResponse::problem(
+                request_id.to_owned(),
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            )
+        })?;
+        let wait = await_lsp_project_open_upgrade(
+            project_open_gates,
+            &route,
+            deadline,
+            request_cancellation,
+        )
+        .await;
+        if let Some(response) = lsp_project_open_wait_response(request_id, wait, false, false) {
+            return Err(Box::new(response));
+        }
+        let project_server = await_lsp_route_rejoin(
+            deadline,
+            request_cancellation,
+            open_project(selected_handshake),
+        )
+        .await;
+        match project_server {
+            Ok(Ok(project_server)) => servers.push(project_server),
+            Ok(Err(error)) => {
+                record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
+                return Err(Box::new(project_open_refusal_response(
+                    request_id.to_owned(),
+                    &error,
+                    false,
+                    false,
+                )));
+            }
+            Err(problem) => {
+                return Err(Box::new(DaemonInvocationResponse::application_problem(
+                    request_id.to_owned(),
+                    problem,
+                )));
+            }
+        }
+    }
+    Ok(servers)
+}
+
+/// Run one invocation through a transport's project-open owner.
+///
+/// `open_project` opens the handshake's project, `resolve_project_route` resolves its
+/// canonical route, and `open_selected_root` opens one root a scope-set
+/// compare-and-swap names.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Daemon invocation dispatch is one payload match onto the owning executor."
+)]
+#[allow(clippy::too_many_arguments)]
+async fn execute_invocation_with_project_owner<'a>(
+    handshake: &DaemonHandshake,
     request: DaemonInvocationRequest,
-    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+    invocation: &DaemonInvocationState,
+    store_administration: &StoreAdministration,
+    project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    open_project: impl Fn() -> ProjectOpenFuture<'a>,
+    resolve_project_route: impl Fn() -> Result<(PathBuf, ProjectRouteKey)>,
+    open_selected_root: impl FnMut(DaemonHandshake) -> ProjectOpenFuture<'a>,
 ) -> DaemonInvocationResponse {
     if let Some(response) = invalid_multi_root_invocation_response(&request) {
         return response;
     }
-    let request_id = request.request_id.clone();
-    let semantic_control = SemanticInvocationControlV1::from_request(&request);
-    if let Some(response) =
-        semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-    {
-        return response;
-    }
-    let semantic_cancellation_lease = if semantic_control.is_some() {
-        match register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
+    let InvocationCancellation {
+        request_id,
+        scope_set_cas_lease: _scope_set_cas_lease,
+        lsp_lease: _lsp_lease,
+        lsp_cancellation,
+        request_cancellation,
+    } = match invocation_cancellation(&request, &invocation.service) {
+        Some(cancellation) => cancellation,
+        None => {
+            return DaemonInvocationResponse::problem(
+                request.request_id.clone(),
+                DaemonInvocationProblem::InvalidRequest,
+            );
         }
-    } else {
-        None
     };
-    let semantic_cancellation = semantic_cancellation_lease.as_ref().map(Lease::token);
-    let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
-        match register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
-    let request_cancellation = semantic_cancellation.clone().or(lsp_cancellation.clone());
-    let lsp_project_open_gates = Arc::clone(&project_open_gates);
-    #[cfg(test)]
-    let lsp_project_open_attempts = project_open_attempts.clone();
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
-    let mut project_path = None;
+    // A profile registry read marks the handshake's project active without
+    // opening it.
+    let mut project_path = match &request.payload {
+        DaemonInvocationPayload::ProfileGraphTool { .. } => handshake.project_path.clone(),
+        _ => None,
+    };
     if request.requires_project() {
-        let project_server = hotpath::measure_block!(
-            "daemon.invocation.project_open",
-            await_project_open_with_semantic_control(
-                semantic_control.as_ref(),
-                semantic_cancellation.as_ref(),
-                Box::pin(portable_project_server_for_request(
-                    lifecycle.clone(),
-                    store_administration.clone(),
-                    project_open_gates,
-                    invocation.clone(),
-                    http_application_registry.clone(),
-                    handshake,
-                    ProjectServerRequirement::Core,
-                    #[cfg(test)]
-                    project_open_attempts.clone(),
-                )),
-            )
-            .await
-        );
-        let project_server = match project_server {
-            Ok(project_server) => project_server,
-            Err(problem) => {
-                return DaemonInvocationResponse::application_problem(request_id, problem);
-            }
+        let project_server = {
+            use tracing::Instrument as _;
+            open_project()
+                .instrument(tracing::trace_span!("daemon.invocation.project_open"))
+                .await
         };
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
-            return DaemonInvocationResponse::problem(
+            return project_open_refusal_response(
                 request_id,
-                project_open_problem(&error, workflow_application, git_operation),
+                &error,
+                workflow_application,
+                git_operation,
             );
         }
-        let project_route = project_route_for_handshake(handshake);
-        if let Some(response) =
-            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-        {
-            return response;
-        }
+        let project_route = resolve_project_route();
         let (mut resolved_project_path, route) = match project_route {
             Ok(route) => route,
             Err(error) => {
@@ -337,7 +412,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             (request.lsp_open_control(), lsp_cancellation.as_ref())
         {
             let wait = await_lsp_project_open_upgrade(
-                &lsp_project_open_gates,
+                project_open_gates,
                 &route,
                 deadline,
                 request_cancellation,
@@ -355,22 +430,8 @@ pub(super) async fn execute_portable_daemon_invocation(
             // Core publication may have been visible before the dependent LSP
             // owner finished. Re-enter the canonical route lookup after the
             // wait instead of carrying the pre-upgrade root/owner snapshot.
-            let project_server = await_lsp_route_rejoin(
-                deadline,
-                request_cancellation,
-                portable_project_server_for_request(
-                    lifecycle.clone(),
-                    store_administration.clone(),
-                    lsp_project_open_gates,
-                    invocation.clone(),
-                    http_application_registry.clone(),
-                    handshake,
-                    ProjectServerRequirement::Core,
-                    #[cfg(test)]
-                    lsp_project_open_attempts,
-                ),
-            )
-            .await;
+            let project_server =
+                await_lsp_route_rejoin(deadline, request_cancellation, open_project()).await;
             let project_server = match project_server {
                 Ok(project_server) => project_server,
                 Err(problem) => {
@@ -378,12 +439,14 @@ pub(super) async fn execute_portable_daemon_invocation(
                 }
             };
             if let Err(error) = project_server {
-                return DaemonInvocationResponse::problem(
+                return project_open_refusal_response(
                     request_id,
-                    project_open_problem(&error, workflow_application, git_operation),
+                    &error,
+                    workflow_application,
+                    git_operation,
                 );
             }
-            let Ok((canonical_project_path, _)) = project_route_for_handshake(handshake) else {
+            let Ok((canonical_project_path, _)) = resolve_project_route() else {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::NotFoundOrNotAuthorized,
@@ -392,11 +455,6 @@ pub(super) async fn execute_portable_daemon_invocation(
             resolved_project_path = canonical_project_path;
         }
         let admitted_root = admitted_lsp_root_for_project_path(&resolved_project_path);
-        if let Some(response) =
-            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-        {
-            return response;
-        }
         if admitted_root.is_none() {
             record_admitted_root_refusal(request.operation().as_str());
             return DaemonInvocationResponse::problem(
@@ -406,14 +464,116 @@ pub(super) async fn execute_portable_daemon_invocation(
         }
         project_path = Some(resolved_project_path);
     }
-    invocation
-        .invoke_for_project(
-            &store_administration,
-            project_path.as_deref(),
-            request,
-            request_cancellation,
-        )
-        .await
+    let _selected_project_servers =
+        if let Some((scope_set_request, observed_at, deadline, cancellation)) =
+            scope_set_cas_admission(&request)
+        {
+            let Some(request_cancellation) = request_cancellation.as_ref() else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            };
+            match open_scope_set_cas_projects(
+                handshake,
+                scope_set_request,
+                observed_at,
+                deadline,
+                cancellation,
+                &request_id,
+                request_cancellation,
+                project_open_gates,
+                open_selected_root,
+            )
+            .await
+            {
+                Ok(servers) => servers,
+                Err(response) => return *response,
+            }
+        } else {
+            Vec::new()
+        };
+    Box::pin(invocation.invoke_for_project(
+        store_administration,
+        project_path.as_deref(),
+        request,
+        request_cancellation,
+    ))
+    .await
+}
+
+#[cfg(any(not(unix), test))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Portable transport composes separately owned lifecycle, route admission and HTTP owners; the extra argument is a test probe."
+)]
+pub(super) async fn execute_portable_daemon_invocation(
+    lifecycle: DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    handshake: &DaemonHandshake,
+    invocation: &DaemonInvocationState,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
+    request: DaemonInvocationRequest,
+    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+) -> DaemonInvocationResponse {
+    let requirement = match &request.payload {
+        DaemonInvocationPayload::GraphTool {
+            surface_operation,
+            arguments,
+            ..
+        } => super::project_open_admission::graph_tool_requirement(*surface_operation, arguments),
+        _ => ProjectServerRequirement::Core,
+    };
+    execute_invocation_with_project_owner(
+        handshake,
+        request,
+        invocation,
+        &store_administration,
+        &project_open_gates,
+        || {
+            Box::pin(portable_project_server_for_request(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                http_application_registry.clone(),
+                handshake,
+                requirement,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ))
+        },
+        || {
+            store_administration
+                .owner_home()
+                .and_then(|owner_home| project_route_for_handshake(handshake, owner_home))
+        },
+        |selected_handshake| {
+            let lifecycle = lifecycle.clone();
+            let store_administration = store_administration.clone();
+            let project_open_gates = Arc::clone(&project_open_gates);
+            let invocation = invocation.clone();
+            let http_application_registry = http_application_registry.clone();
+            #[cfg(test)]
+            let project_open_attempts = project_open_attempts.clone();
+            Box::pin(async move {
+                Box::pin(portable_project_server_for_request(
+                    lifecycle,
+                    store_administration,
+                    project_open_gates,
+                    invocation,
+                    http_application_registry,
+                    &selected_handshake,
+                    ProjectServerRequirement::Core,
+                    #[cfg(test)]
+                    project_open_attempts,
+                ))
+                .await
+            })
+        },
+    )
+    .await
 }
 
 pub(super) async fn git_service_for_project_path(
@@ -461,15 +621,34 @@ pub(super) async fn write_tool_list_changed_notification(
     Ok(())
 }
 
+/// `NotFoundOrNotAuthorized` is one closed outcome for every way a named root
+/// can be refused, which is right on the wire and useless in a log. Record
+/// which gate refused so an operator can tell "this project was never
+/// registered" from "this root is registered but its LSP owner answers for a
+/// different checkout".
+fn multi_root_root_refused(
+    selector: &tracedecay_contracts::RegisteredRootSelectorV1,
+    reason_code: &str,
+) {
+    log_daemon_event(
+        "multi_root_root_refused",
+        &[
+            ("project_id", selector.project_id.as_str().to_owned()),
+            ("root", selector.root.display().to_string()),
+            ("reason_code", reason_code.to_owned()),
+        ],
+    );
+}
+
 pub(super) async fn resolve_multi_root_projects(
     store_administration: &StoreAdministration,
     service: &DaemonInvocationService,
-    selectors: &[tracedecay_application::RegisteredRootSelectorV1],
+    selectors: &[tracedecay_contracts::RegisteredRootSelectorV1],
 ) -> std::result::Result<
     Vec<(
         PathBuf,
-        tracedecay_application::ResolvedScope,
-        tracedecay_application::RegisteredRootLocatorV1,
+        tracedecay_contracts::ResolvedScope,
+        tracedecay_contracts::RegisteredRootLocatorV1,
     )>,
     DaemonInvocationProblem,
 > {
@@ -477,40 +656,51 @@ pub(super) async fn resolve_multi_root_projects(
         .registered_profile_database()
         .await
         .map_err(|_| DaemonInvocationProblem::Unavailable)?;
-    let profile_id = store_administration
+    let profile_identity = store_administration
         .profile_identity()
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?
-        .profile_id()
-        .clone();
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let profile_shard = &database.binding().shard_id;
+    if profile_shard.scope != StoreShardScopeV1::Profile
+        || &profile_shard.brain_id != profile_identity.brain_id()
+        || &profile_shard.profile_id != profile_identity.profile_id()
+    {
+        return Err(DaemonInvocationProblem::Unavailable);
+    }
+    let profile_locator = SharedProfileStoreLocatorV1::new(
+        profile_shard.brain_id.clone(),
+        profile_shard.profile_id.clone(),
+        database.verified_locator().locator_digest.as_str(),
+    )
+    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let mut roots = Vec::with_capacity(selectors.len());
     for selector in selectors {
         let context = database
             .project_registry_context_by_id(selector.project_id.as_str())
             .await
             .map_err(|_| DaemonInvocationProblem::Unavailable)?
-            .ok_or(DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+            .ok_or_else(|| {
+                multi_root_root_refused(selector, "project_not_registered");
+                DaemonInvocationProblem::NotFoundOrNotAuthorized
+            })?;
         if context.project.project_id != selector.project_id.as_str() {
+            multi_root_root_refused(selector, "registry_project_id_mismatch");
             return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
         let mut stores = context
             .stores
             .iter()
             .filter(|store| store.store.project_id == selector.project_id.as_str());
-        let Some(store) = stores.next() else {
-            return Err(DaemonInvocationProblem::Unavailable);
-        };
-        if stores.next().is_some() {
+        // Exactly one registered store instance must back this project.
+        if stores.next().is_none() || stores.next().is_some() {
             return Err(DaemonInvocationProblem::Unavailable);
         }
         let registered_root = PathBuf::from(context.project.canonical_root);
         if !registered_root.is_absolute()
-            || registered_root.canonicalize().ok().as_ref() != Some(&registered_root)
+            || canonical_existing_identity(&registered_root).ok().as_ref() != Some(&registered_root)
         {
             return Err(DaemonInvocationProblem::Unavailable);
         }
-        let root = selector
-            .root
-            .canonicalize()
+        let root = canonical_existing_identity(&selector.root)
             .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
             &registered_root,
@@ -522,12 +712,17 @@ pub(super) async fn resolve_multi_root_projects(
             tracedecay_code_index_runtime::resolved_scope_for_project(&root, &selector.project_id)
                 .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         if !service.lsp_owner_matches_scope(&root, &scope).await {
+            let reason_code = if service.lsp_owner(Some(&root)).await.is_some() {
+                "lsp_owner_scope_mismatch"
+            } else {
+                "lsp_owner_absent"
+            };
+            multi_root_root_refused(selector, reason_code);
             return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
-        let locator = tracedecay_application::RegisteredRootLocatorV1::new(
+        let locator = tracedecay_contracts::RegisteredRootLocatorV1::new(
             selector.project_id.clone(),
-            profile_id.clone(),
-            store.store.store_id.clone(),
+            profile_locator.clone(),
             root.clone(),
         )
         .map_err(|_| DaemonInvocationProblem::Unavailable)?;
@@ -549,157 +744,68 @@ pub(super) async fn execute_daemon_invocation(
     handshake: &DaemonHandshake,
     request: DaemonInvocationRequest,
 ) -> DaemonInvocationResponse {
-    if let Some(response) = invalid_multi_root_invocation_response(&request) {
-        return response;
-    }
-    let request_id = request.request_id.clone();
-    let semantic_control = SemanticInvocationControlV1::from_request(&request);
-    if let Some(response) =
-        semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-    {
-        return response;
-    }
-    let semantic_cancellation_lease = if semantic_control.is_some() {
-        match register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let semantic_cancellation = semantic_cancellation_lease.as_ref().map(Lease::token);
-    let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
-        match register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
-    let request_cancellation = semantic_cancellation.clone().or(lsp_cancellation.clone());
-    let git_operation = invocation_is_git_operation(request.operation());
-    let workflow_application = request.is_workflow_application();
-    let mut project_path = None;
-    if request.requires_project() {
-        let project_server = hotpath::measure_block!(
-            "daemon.invocation.project_open",
-            await_project_open_with_semantic_control(
-                semantic_control.as_ref(),
-                semantic_cancellation.as_ref(),
-                engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
-            )
-            .await
-        );
-        let project_server = match project_server {
-            Ok(project_server) => project_server,
-            Err(problem) => {
-                return DaemonInvocationResponse::application_problem(request_id, problem);
-            }
-        };
-        if let Err(error) = project_server {
-            record_project_open_refusal(request.operation().as_str(), &error);
-            return DaemonInvocationResponse::problem(
-                request_id,
-                project_open_problem(&error, workflow_application, git_operation),
-            );
-        }
-        let project_route = DaemonEngine::project_route(handshake);
-        if let Some(response) =
-            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-        {
-            return response;
-        }
-        let (mut resolved_project_path, route) = match project_route {
-            Ok(route) => route,
-            Err(error) => {
-                record_project_route_refusal(request.operation().as_str(), &error);
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                );
-            }
-        };
-        if let (Some((deadline, _)), Some(request_cancellation)) =
-            (request.lsp_open_control(), lsp_cancellation.as_ref())
-        {
-            let wait = await_lsp_project_open_upgrade(
-                &engine.project_open_gates,
-                &route,
-                deadline,
-                request_cancellation,
-            )
-            .await;
-            if let Some(response) = lsp_project_open_wait_response(
-                &request_id,
-                wait,
-                workflow_application,
-                git_operation,
-            ) {
-                return response;
-            }
-
-            // Core publication may have been visible before the dependent LSP
-            // owner finished. Re-enter the canonical route lookup after the
-            // wait instead of carrying the pre-upgrade root/owner snapshot.
-            let project_server = await_lsp_route_rejoin(
-                deadline,
-                request_cancellation,
-                engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
-            )
-            .await;
-            let project_server = match project_server {
-                Ok(project_server) => project_server,
-                Err(problem) => {
-                    return DaemonInvocationResponse::application_problem(request_id, problem);
-                }
-            };
-            if let Err(error) = project_server {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    project_open_problem(&error, workflow_application, git_operation),
-                );
-            }
-            let Ok((canonical_project_path, _)) = DaemonEngine::project_route(handshake) else {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                );
-            };
-            resolved_project_path = canonical_project_path;
-        }
-        let admitted_root = admitted_lsp_root_for_project_path(&resolved_project_path);
-        if let Some(response) =
-            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
-        {
-            return response;
-        }
-        if admitted_root.is_none() {
-            record_admitted_root_refusal(request.operation().as_str());
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        }
-        project_path = Some(resolved_project_path);
-    }
-    Box::pin(engine.invocation.invoke_for_project(
-        &engine.store_administration,
-        project_path.as_deref(),
+    execute_invocation_with_project_owner(
+        handshake,
         request,
-        request_cancellation,
-    ))
+        &engine.invocation,
+        &engine.store_administration,
+        &engine.project_open_gates,
+        || Box::pin(engine.project_server_for_request(handshake, ProjectServerRequirement::Core)),
+        || engine.project_route(handshake),
+        |selected_handshake| {
+            Box::pin(async move {
+                engine
+                    .project_server_for_request(&selected_handshake, ProjectServerRequirement::Core)
+                    .await
+            })
+        },
+    )
     .await
+}
+
+/// A still-opening project is the mounting refusal the typed CLI re-sends
+/// until its deadline.
+///
+/// The 500 ms open bound answers "has this route published yet" and leaves
+/// the open running. Mapping that miss to [`DaemonInvocationProblem::Unavailable`]
+/// republishes `application.surface.unavailable`, which the typed client treats
+/// as the answer, so a cold `storage_status` or configuration write fails the
+/// moment the bound elapses. Terminal open failures stay on that problem.
+fn project_open_refusal_response(
+    request_id: String,
+    error: &tracedecay_domain::errors::TraceDecayError,
+    workflow_application: bool,
+    git_operation: bool,
+) -> DaemonInvocationResponse {
+    if error_is_project_open_retryable(error) {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            tracedecay_contracts::ApplicationProblem::runtime_mounting(),
+        );
+    }
+    // No route names an enrolled project: the caller must pick one, so a
+    // retryable `unavailable` would only be retried until its deadline.
+    if let Some((
+        reason_code @ (PROJECT_NOT_ENROLLED_REASON_CODE | PROJECT_REQUIRED_REASON_CODE),
+        false,
+        detail,
+    )) = error.project_route_context()
+    {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            tracedecay_contracts::ApplicationProblem::invalid_request(reason_code, detail),
+        );
+    }
+    let problem = project_open_problem(error, workflow_application, git_operation);
+    if problem == DaemonInvocationProblem::ResetRequired
+        && let Some(detail) = tracedecay_mcp::reset_required_detail(error)
+    {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            tracedecay_contracts::ApplicationProblem::from_detail(detail),
+        );
+    }
+    DaemonInvocationResponse::problem(request_id, problem)
 }
 
 fn project_open_problem(
@@ -712,7 +818,7 @@ fn project_open_problem(
     // this to `authority == "workflow"` sent every other caller down the
     // retryable-unavailable branch below, so a project whose relational shape
     // this binary refuses answered "the application service is unavailable,
-    // retry after 250ms" — and clients dutifully retried it until their whole
+    // retry after 250ms", and clients dutifully retried it until their whole
     // budget was gone, never learning that the only legal action is `reset`.
     if matches!(
         error,
@@ -720,7 +826,7 @@ fn project_open_problem(
             if workflow_application || authority != "workflow"
     ) {
         DaemonInvocationProblem::ResetRequired
-    } else if crate::daemon::error_message_is_project_open_retryable(&error.to_string()) {
+    } else if crate::daemon::error_is_project_open_retryable(error) {
         // A still-warming project open (or a saturated open queue) is a
         // retryable state for every operation. Mapping it to the git branch's
         // terminal not-found/not-authorized would misreport an authorized
@@ -730,163 +836,6 @@ fn project_open_problem(
         DaemonInvocationProblem::NotFoundOrNotAuthorized
     } else {
         DaemonInvocationProblem::Unavailable
-    }
-}
-
-#[cfg(test)]
-mod semantic_control_tests {
-    use super::*;
-    use tracedecay_application::ApplicationProblemKind;
-
-    fn active_control(deadline_offset_micros: i64) -> SemanticInvocationControlV1 {
-        let observed_at = tracedecay_application::clock::now_micros();
-        SemanticInvocationControlV1::new(
-            observed_at,
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                observed_at
-                    .0
-                    .checked_add(deadline_offset_micros)
-                    .expect("test deadline"),
-            ))
-            .expect("valid deadline"),
-            tracedecay_application::CancellationContext::active("semantic-project-open-active")
-                .expect("active cancellation"),
-        )
-    }
-
-    fn cancelled_control() -> SemanticInvocationControlV1 {
-        let observed_at = tracedecay_application::clock::now_micros();
-        SemanticInvocationControlV1::new(
-            observed_at,
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                observed_at.0.checked_add(1_000_000).expect("test deadline"),
-            ))
-            .expect("valid deadline"),
-            tracedecay_application::CancellationContext::cancelled(
-                "semantic-project-open-cancelled",
-                observed_at,
-            )
-            .expect("cancelled cancellation"),
-        )
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unix_dispatch_admits_controls_before_and_during_project_open() {
-        let cancelled = cancelled_control();
-        let cancelled_problem =
-            await_project_open_with_semantic_control(Some(&cancelled), None, async {
-                panic!("pre-cancelled project open must not be polled");
-            })
-            .await
-            .expect_err("pre-cancelled request");
-        assert_eq!(cancelled_problem.kind(), ApplicationProblemKind::Cancelled);
-
-        let expired = active_control(0);
-        let expired_problem =
-            await_project_open_with_semantic_control(Some(&expired), None, async {
-                panic!("pre-expired project open must not be polled");
-            })
-            .await
-            .expect_err("pre-expired request");
-        assert_eq!(expired_problem.kind(), ApplicationProblemKind::TimedOut);
-
-        let expiring = active_control(2_000);
-        let during_open_problem = await_project_open_with_semantic_control(
-            Some(&expiring),
-            None,
-            std::future::pending::<()>(),
-        )
-        .await
-        .expect_err("project open must observe deadline");
-        assert_eq!(during_open_problem.kind(), ApplicationProblemKind::TimedOut);
-
-        let request_cancellation = CancellationToken::new();
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let cancelled_open = {
-            let request_cancellation = request_cancellation.clone();
-            tokio::spawn(async move {
-                let control = active_control(1_000_000);
-                await_project_open_with_semantic_control(
-                    Some(&control),
-                    Some(&request_cancellation),
-                    async move {
-                        let _ = started_tx.send(());
-                        std::future::pending::<()>().await;
-                    },
-                )
-                .await
-            })
-        };
-        started_rx.await.expect("project open started");
-        request_cancellation.cancel();
-        assert_eq!(
-            cancelled_open
-                .await
-                .expect("project-open task")
-                .expect_err("request cancellation must interrupt project open")
-                .kind(),
-            ApplicationProblemKind::Cancelled
-        );
-    }
-
-    #[tokio::test]
-    async fn portable_dispatch_admits_controls_before_and_during_project_open() {
-        let cancelled = cancelled_control();
-        let cancelled_problem =
-            await_project_open_with_semantic_control(Some(&cancelled), None, async {
-                panic!("pre-cancelled project open must not be polled");
-            })
-            .await
-            .expect_err("pre-cancelled request");
-        assert_eq!(cancelled_problem.kind(), ApplicationProblemKind::Cancelled);
-
-        let expired = active_control(0);
-        let expired_problem =
-            await_project_open_with_semantic_control(Some(&expired), None, async {
-                panic!("pre-expired project open must not be polled");
-            })
-            .await
-            .expect_err("pre-expired request");
-        assert_eq!(expired_problem.kind(), ApplicationProblemKind::TimedOut);
-
-        let expiring = active_control(2_000);
-        let during_open_problem = await_project_open_with_semantic_control(
-            Some(&expiring),
-            None,
-            std::future::pending::<()>(),
-        )
-        .await
-        .expect_err("project open must observe deadline");
-        assert_eq!(during_open_problem.kind(), ApplicationProblemKind::TimedOut);
-
-        let request_cancellation = CancellationToken::new();
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let cancelled_open = {
-            let request_cancellation = request_cancellation.clone();
-            tokio::spawn(async move {
-                let control = active_control(1_000_000);
-                await_project_open_with_semantic_control(
-                    Some(&control),
-                    Some(&request_cancellation),
-                    async move {
-                        let _ = started_tx.send(());
-                        std::future::pending::<()>().await;
-                    },
-                )
-                .await
-            })
-        };
-        started_rx.await.expect("project open started");
-        request_cancellation.cancel();
-        assert_eq!(
-            cancelled_open
-                .await
-                .expect("project-open task")
-                .expect_err("request cancellation must interrupt project open")
-                .kind(),
-            ApplicationProblemKind::Cancelled
-        );
     }
 }
 
@@ -921,6 +870,24 @@ mod workflow_reset_tests {
         assert_eq!(
             project_open_problem(&warming, false, false),
             DaemonInvocationProblem::Unavailable
+        );
+    }
+
+    #[test]
+    fn warming_project_open_is_a_mounting_refusal_the_client_resends() {
+        let warming = project_warming_error(Path::new("/tmp/surface-fixture"));
+        let response =
+            project_open_refusal_response("request.warming".to_owned(), &warming, false, false);
+        let tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } =
+            response.outcome
+        else {
+            panic!("warming open must be an application problem, got {response:?}");
+        };
+        assert_eq!(
+            problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some(tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
         );
     }
 

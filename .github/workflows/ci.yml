@@ -1,650 +1,741 @@
 name: CI
+run-name: >-
+  ${{ github.event_name == 'pull_request' && format('CI for PR #{0}', github.event.pull_request.number) || format('CI for {0}', github.ref_name) }}
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [master, feature/holographic-memory]
-  pull_request:
-    branches: ['**']
+  workflow_dispatch:
+    inputs:
+      run_os:
+        description: "Also run the macOS matrix"
+        type: boolean
+        default: false
+      run_hosts:
+        description: "Also run stock host integrations"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+# Explicit OS/host coverage must not be replaced by a default-coverage push
+# while queued (separate group suffixes). Non-master refs cancel superseded
+# runs for tip-fast feedback. Master finishes the in-progress snapshot so a
+# green/red signal still lands when merges outpace the long pole; GitHub
+# keeps only the newest pending tip. Shorter shards cut how long that tip
+# may wait for first job — shard layout is owned elsewhere.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && format('os-{0}-hosts-{1}', inputs.run_os, inputs.run_hosts) || 'default' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: "0"
-  CARGO_PROFILE_DEV_DEBUG: "0"
-  CARGO_PROFILE_TEST_DEBUG: "0"
-  AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Single source of truth for the fork/base-branch guard: heavy jobs run on
-  # pushes, on PRs from this repository, and on fork PRs that target an
-  # integration branch. Guarded jobs `needs:`-check this job's output instead
-  # of each repeating the expression, so the branch list lives in one place.
+  # Drafts run repository and frontend checks. Ready PRs and pushes also run
+  # the Bazel Linux authority; dispatch can request OS and host journeys.
   scope-gate:
     name: Scope gate
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     outputs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
+      run-os: ${{ steps.decide.outputs.run-os }}
+      run-hosts: ${{ steps.decide.outputs.run-hosts }}
     steps:
-      - name: Decide whether guarded jobs run
+      - name: Decide what this run may spend
         id: decide
-        run: echo "run-heavy=${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft || false }}
+          RUN_OS: ${{ inputs.run_os || false }}
+          RUN_HOSTS: ${{ inputs.run_hosts || false }}
+        run: |
+          heavy=true
+          if [[ $EVENT == pull_request && $DRAFT == true ]]; then
+            heavy=false
+          fi
+          os=false
+          hosts=false
+          if [[ $EVENT == workflow_dispatch ]]; then
+            [[ $RUN_OS == true ]] && os=true
+            [[ $RUN_HOSTS == true ]] && hosts=true
+          fi
+          {
+            echo "run-heavy=$heavy"
+            echo "run-os=$os"
+            echo "run-hosts=$hosts"
+          } >>"$GITHUB_OUTPUT"
+          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts (event=$EVENT)"
 
-  pr-dogfood:
-    name: PR checkout dogfood
-    if: github.event_name == 'pull_request'
+  # One dev-profile `tracedecay` binary for the explicitly requested stock
+  # host integrations. Ordinary Linux validation needs no CLI artifact, so
+  # this build is absent unless `run_hosts=true`.
+  debug-cli:
+    name: Build debug CLI
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build tracedecay binary
+        uses: ./.github/actions/build-cli
+        with:
+          config: ci
+          dest: target/debug
+          cache-key: ci-linux-arm64
+
+      - name: Publish the binary for the host integration jobs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: debug-tracedecay-cli
+          path: target/debug/tracedecay
+          if-no-files-found: error
+          retention-days: 1
+
+  benchmark-harness:
+    name: Benchmark harness self-tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The runtime benchmark harness produces the evidence PRs cite; its own
+      # unit tests only count if something runs them.
+      - name: Test the runtime benchmark harness
+        working-directory: benchmark_data/runtime
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Test benchmark result publication
+        run: python3 scripts/test-claude-observation-benchmark-publication.py
+
+  # The cheap repository gates in one job: commit lint, cache lineage, the
+  # release guards, and rustfmt. Each used to hold its own ubuntu-latest
+  # runner for a couple of minutes of work; on 20 free slots that is three
+  # queue entries per push doing what one does.
+  gates:
+    permissions:
+      contents: read
+      id-token: write
+    name: Repository gates
+    runs-on: ubuntu-latest
+    # The rustfmt build's crate_universe splice clones git-pinned crates from
+    # scratch. asupersync's full history alone took over 7 minutes on a hosted
+    # runner, so 15 minutes no longer fits.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
-          cache: npm
+          node-version: 26
 
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-pr-dogfood
-          cache-on-failure: true
+      - uses: ./.github/actions/setup-pnpm
 
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Build checked-out TraceDecay CLI
-        run: cargo build -p tracedecay-cli --bin tracedecay --locked
-
-      - name: Test dogfood harnesses
-        run: |
-          python3 scripts/test-check-pr-dogfood-output.py
-          python3 scripts/test-efficiency-scorecard.py
-          python3 scripts/test-pr-dogfood-portability.py
-
-      - name: Initialize checkout and exercise CLI tools
-        run: scripts/ci-pr-dogfood-smoke.sh
+      # Reject invalid commit messages before fetching toolchains or running
+      # repository-wide checks, without rejudging published history.
+      - name: Validate commit messages
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
         env:
-          TRACEDECAY_BIN: target/debug/tracedecay
-          TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
-          TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
-
-  commit-messages:
-    name: Commit Messages
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install commit message lint dependencies
-        run: npm ci
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/lint-ci-commits.sh
 
       - name: Reject tracked ignored files
         run: scripts/check-release-pr-integrity.sh HEAD HEAD
 
-      - name: Validate PR commit messages
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          commit_shas=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
-          while IFS= read -r commit_sha; do
-            [[ -n "$commit_sha" ]] || continue
-            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
-          done <<<"$commit_shas"
+      - name: Test bounded commit range linting
+        run: python3 scripts/test-lint-commit-range.py
 
-      - name: Validate pushed commit messages
-        if: github.event_name == 'push'
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-            if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-              range="${HEAD_SHA}^..${HEAD_SHA}"
-            else
-              git show --no-patch --format=%B "$HEAD_SHA" | npm run lint:commit --
-              exit 0
-            fi
-          else
-            range="$BEFORE_SHA..$HEAD_SHA"
-          fi
-          commit_shas=$(git rev-list --no-merges "$range")
-          while IFS= read -r commit_sha; do
-            [[ -n "$commit_sha" ]] || continue
-            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
-          done <<<"$commit_shas"
+      - name: Test Windows checkout preserves generated and embedded bytes
+        run: python3 scripts/test-checkout-bytes.py
 
-  release-version-drift:
-    name: Release Version Drift
-    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
+      - name: Test worktree GC classification and build reclamation
+        run: python3 scripts/test-worktree-gc.py
 
-      - uses: actions/setup-python@v6
+      - name: Test Bazel workspace provenance
+        run: python3 scripts/test-bazel-workspace-status.py
+
+      - name: Test Bazel default-feature alias collapse
+        run: python3 scripts/test-gen-builds-default-alias.py
+
+      - name: Test the real-repository hot-path benchmark harness
+        run: python3 scripts/test-bench-hot-paths.py
+
+      - name: Test the unused tool-context matching rules
+        run: python3 scripts/test-measure-unused-tool-context.py
+
+      # Configure the output base and restore caches before the first Bazel
+      # invocation so this job does not start two independent Bazel servers.
+      - uses: ./.github/actions/setup-bazel
         with:
-          python-version: "3.12"
+          cache-key: ci-format-linux
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
 
-      - name: Test release version drift guard
-        run: bash tests/release_drift_check_test.sh
+      - name: Test the ranked-tail trim replay against the Rust rule cases
+        run: bazel run //scripts:test-measure-ranked-tail-trim.py
 
-      # The workflow-contract pin scripts were replaced by the safety-guard
-      # assertions (f3b065545) and the dogfood surface was retired (b73a8a396);
-      # this job keeps the guards that protect the shipped release flow.
-      - name: Check release safety guards
-        run: bash tests/release_safety_test.sh
+      - name: Test the Hermes dashboard embed helpers
+        run: python3 -m unittest discover -s dashboard/hermes-wrapper -p 'test_*.py'
 
-      - name: Test GitHub release installer
-        run: bash tests/install_script_test.sh
+      - name: Check Rust cache key lineage and the superseded-entry selection
+        run: |
+          python3 scripts/test-prune-superseded-actions-caches.py
+          python3 scripts/test-rust-cache-lineage.py
+          python3 scripts/check-rust-cache-lineage.py
 
-      # These two sat unwired: they are the tests for
-      # `scripts/check-release-pr-integrity.sh` and
-      # `scripts/check-dashboard-bundle.py`, both of which CI does run. So the
-      # guards were enforced while the tests proving the guards work were not,
-      # which is the shape that let a `test-transport` target rot until it
-      # stopped compiling. Three of the five `tests/*_test.sh` gates were wired;
-      # these are the other two.
-      - name: Test release PR integrity guard
-        run: bash tests/release_pr_integrity_test.sh
+      # Packager unit tests. They do not need a release binary, so they run
+      # once here instead of once per release matrix target.
+      - name: Test release packagers
+        run: |
+          python3 scripts/test-check-packaged-lsp-bridge.py
+          python3 scripts/test-build-mcpb.py
+          python3 scripts/test-resolve-installed-binary.py
+          python3 scripts/test-check-packaged-mcp-stdio.py
+          python3 scripts/test-check-distribution-feature-wiring.py
+          python3 scripts/test-resolve-release-source-profile.py
+          python3 scripts/test-package-release-archive.py
+          python3 scripts/test-plan-release-recovery.py
+          python3 scripts/test-check-release-artifacts.py
+          python3 scripts/test-update-release-checksums.py
+          python3 scripts/test-neutralize-release-pr-closing-keywords.py
+          bash scripts/test-check-distribution-clean-source.sh
+          bash scripts/test-check-distribution-snapshot.sh
+          bash scripts/test-check-distribution-reuse.sh
+          bash tests/macos_stable_codesign_test.sh
 
-      - name: Test dashboard bundle check
-        run: bash tests/dashboard_bundle_check_test.sh
+      # Exercise the release guard scripts when admitting proposed changes.
+      - name: Check the release guards
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        run: |
+          bash tests/release_drift_check_test.sh
+          bash tests/release_safety_test.sh
+          bash tests/install_script_test.sh
+          bash tests/release_pr_integrity_test.sh
+          bash tests/dashboard_bundle_check_test.sh
+          bash tests/dashboard_digests_check_test.sh
 
-      - name: Check release version drift
-        run: scripts/check-release-drift.sh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+      - name: Check formatting
+        run: bazel build --config=ci //:rustfmt_check
 
-  test:
-    name: Test ${{ matrix.name }}
+      # Manifest edits that skip a gen_builds.py rerun leave stale BUILD
+      # files; compare the committed files against a fresh generation.
+      - name: Check generated Bazel BUILD files are current
+        run: bazel run //scripts:bazel/gen_builds.py -- --check
+
+      - name: Test and check dev skill host copies
+        run: |
+          python3 scripts/test-check-dev-skill-mirrors.py
+          python3 scripts/check-dev-skill-mirrors.py check
+
+      # Every SQLite connection plans with SQLITE_DBCONFIG_ENABLE_QPSG, so a
+      # bound partial-index predicate or LIKE pattern silently scans.
+      - name: Test and check SQL plans stay index-backed under QPSG
+        run: |
+          python3 scripts/test-check-sqlite-plan-stability.py
+          python3 scripts/check-sqlite-plan-stability.py
+
+      # `daemon run` drives its futures on native workers, which have no
+      # ambient Tokio runtime; production code names its Tokio handle.
+      - name: Test and check production code has no ambient Tokio call
+        run: |
+          python3 scripts/test-check-ambient-tokio.py
+          python3 scripts/check-ambient-tokio.py
+
+      - name: Test and check rusqlite stays inside storage owners
+        run: |
+          python3 scripts/test-check-rusqlite-storage-boundary.py
+          python3 scripts/check-rusqlite-storage-boundary.py
+
+  # The macOS and Windows lanes run the same Bazel workspace the Linux
+  # authority does, on demand: they exercise target-specific behavior the
+  # Linux lane cannot prove.
+  macos-test:
+    name: Test macOS
     needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
+    runs-on: macos-26
+    timeout-minutes: 330
+    steps:
+      # Full history: the search-quality workload fixture pins a
+      # `source_repository_commit`, and `validate_source_bindings` resolves that
+      # object out of this checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Remove inactive Xcode installations
+        shell: bash
+        run: |
+          df -h /
+          python3 - <<'PYTHON'
+          import pathlib
+          import subprocess
+
+          applications = pathlib.Path("/Applications")
+          selected = pathlib.Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip()).resolve(strict=True)
+          active = next((path for path in selected.parents if path.suffix == ".app"), None)
+          if active is None:
+              raise SystemExit(f"Selected developer directory is not an Xcode application: {selected}")
+          print(f"Selected Xcode before cleanup: {active}", flush=True)
+          inactive = [path for path in applications.glob("Xcode*.app") if path.resolve() != active]
+          for path in inactive:
+              print(f"Removing inactive Xcode: {path}", flush=True)
+              subprocess.run(["sudo", "rm", "-rf", "--", str(path)], check=True)
+          after = pathlib.Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip()).resolve(strict=True)
+          if after != selected:
+              raise SystemExit(f"Selected developer directory changed: {selected} -> {after}")
+          print(f"Selected Xcode after cleanup: {active}", flush=True)
+          PYTHON
+          df -h /
+
+      - uses: ./.github/actions/setup-bazel
+        id: bazel
+        with:
+          cache-key: ci-macos-test
+
+      # `bazel test` builds every target in the pattern, so tests start
+      # while the rest of the workspace still links.
+      - name: Build and test the workspace
+        shell: bash
+        run: bazel test --config=ci //...
+
+      - name: Upload failed test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bazel-test-logs-${{ runner.os }}
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+
+      - name: Save compiled Bazel actions
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+  # Root suites and the full-daemon memory journey reserve HOST_CPUS.
+  # Workspace suites reserve one CPU each so they can overlap jobs=4 rustc.
+  # Warm v2 cache (run 38071732620) still left workspace-a at 65m because
+  # cli + code-index share one critical path; split that group into
+  # workspace-a (light a–capture) and workspace-code (cli + code-*). One
+  # shared ci-linux-test-v2 prefix; root-b alone saves (a 6.9 GiB second
+  # family previously evicted the budget). root-b and workspace-c catch
+  # unlisted targets in their groups.
+  linux-test:
+    permissions:
+      contents: read
+      id-token: write
+    name: Test Linux (${{ matrix.shard }})
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ${{ fromJSON(matrix.runner) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      CARGO_BAZEL_TIMEOUT: "3600"
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Linux
-            runner: '"ubuntu-latest"'
-          - name: macOS
-            runner: '"macos-14"'
+          - shard: root-a
+            test_resources: ""
+            targets: >-
+              //crates/tracedecay:mcp_suite
+              //crates/tracedecay:dashboard_api_test
+              //crates/tracedecay:daemon_suite
+              //crates/tracedecay:storage_suite
+              //crates/tracedecay-cli:refresh_memory_journey
+          - shard: root-b
+            test_resources: ""
+            targets: >-
+              --
+              //crates/tracedecay/...
+              -//crates/tracedecay:mcp_suite
+              -//crates/tracedecay:dashboard_api_test
+              -//crates/tracedecay:daemon_suite
+              -//crates/tracedecay:storage_suite
+          # Four package groups. New crates land in workspace-c via the
+          # catch-all until listed here for balance.
+          - shard: workspace-a
+            test_resources: --default_test_resources=cpu=1
+            targets: >-
+              //crates/tracedecay-agent-hosts/...
+              //crates/tracedecay-api/...
+              //crates/tracedecay-application/...
+              //crates/tracedecay-automation/...
+              //crates/tracedecay-automation-runtime/...
+              //crates/tracedecay-capture/...
+          - shard: workspace-code
+            test_resources: --default_test_resources=cpu=1
+            targets: >-
+              --
+              //crates/tracedecay-cli/...
+              //crates/tracedecay-code-extraction/...
+              //crates/tracedecay-code-index/...
+              //crates/tracedecay-code-index-retention/...
+              //crates/tracedecay-code-index-runtime/...
+              -//crates/tracedecay-cli:refresh_memory_journey
+          - shard: workspace-b
+            test_resources: --default_test_resources=cpu=1
+            targets: >-
+              //crates/tracedecay-configuration/...
+              //crates/tracedecay-contracts/...
+              //crates/tracedecay-daemon-control/...
+              //crates/tracedecay-daemon-identity/...
+              //crates/tracedecay-daemon-protocol/...
+              //crates/tracedecay-daemon-service/...
+              //crates/tracedecay-dashboard-api/...
+              //crates/tracedecay-domain/...
+              //crates/tracedecay-framing/...
+              //crates/tracedecay-global-db/...
+              //crates/tracedecay-graph-db/...
+              //crates/tracedecay-graph-query/...
+              //crates/tracedecay-hooks/...
+              //crates/tracedecay-host-admission/...
+              //crates/tracedecay-host-integration/...
+              //crates/tracedecay-lcm/...
+              //crates/tracedecay-lsp/...
+              //crates/tracedecay-maintenance/...
+              //crates/tracedecay-mcp/...
+              //crates/tracedecay-mcp-catalog/...
+          - shard: workspace-c
+            test_resources: --default_test_resources=cpu=1
+            targets: >-
+              --
+              //...
+              -//crates/tracedecay/...
+              -//crates/tracedecay-agent-hosts/...
+              -//crates/tracedecay-api/...
+              -//crates/tracedecay-application/...
+              -//crates/tracedecay-automation/...
+              -//crates/tracedecay-automation-runtime/...
+              -//crates/tracedecay-capture/...
+              -//crates/tracedecay-cli/...
+              -//crates/tracedecay-code-extraction/...
+              -//crates/tracedecay-code-index/...
+              -//crates/tracedecay-code-index-retention/...
+              -//crates/tracedecay-code-index-runtime/...
+              -//crates/tracedecay-configuration/...
+              -//crates/tracedecay-contracts/...
+              -//crates/tracedecay-daemon-control/...
+              -//crates/tracedecay-daemon-identity/...
+              -//crates/tracedecay-daemon-protocol/...
+              -//crates/tracedecay-daemon-service/...
+              -//crates/tracedecay-dashboard-api/...
+              -//crates/tracedecay-domain/...
+              -//crates/tracedecay-framing/...
+              -//crates/tracedecay-global-db/...
+              -//crates/tracedecay-graph-db/...
+              -//crates/tracedecay-graph-query/...
+              -//crates/tracedecay-hooks/...
+              -//crates/tracedecay-host-admission/...
+              -//crates/tracedecay-host-integration/...
+              -//crates/tracedecay-lcm/...
+              -//crates/tracedecay-lsp/...
+              -//crates/tracedecay-maintenance/...
+              -//crates/tracedecay-mcp/...
+              -//crates/tracedecay-mcp-catalog/...
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
+      # The workspace build plus its test outputs outgrow the runner's free
+      # space (run 37403143722 died with ENOSPC mid-test); drop preinstalled
+      # SDKs this job never uses.
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          status=0
+          sudo rm -rf /usr/local/lib/android &
+          p1=$!
+          sudo rm -rf /usr/share/dotnet &
+          p2=$!
+          sudo rm -rf /opt/ghc &
+          p3=$!
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          p4=$!
+          for pid in "$p1" "$p2" "$p3" "$p4"; do
+            wait "$pid" || status=1
+          done
+          df -h /
+          exit "$status"
+
+      - uses: ./.github/actions/setup-bazel
+        id: bazel
+        with:
+          cache-key: ci-linux-test-v2
+          # Tailscale independently checks this repository and immutable actor
+          # ID. This condition avoids requesting credentials for fork PRs.
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
+          # Prefer v2; keep legacy prefixes as restore fallbacks if still present.
+          extra-restore-keys: ci-linux-test,ci-linux-workspace-test
+
+      # Root suites exercise latency-sensitive daemon journeys. Finish their
+      # compilation before testing so compiler work cannot consume that budget.
+      - name: Build root suite binaries
+        if: ${{ matrix.test_resources == '' }}
+        run: bazel build --config=ci ${{ matrix.targets }}
+
+      - name: Build and test this shard
+        run: bazel test --config=ci ${{ steps.bazel.outputs.fleet-enabled == 'true' && '--default_test_resources=cpu=HOST_CPUS' || matrix.test_resources }} ${{ matrix.targets }}
+
+      - name: Upload failed test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bazel-test-logs-${{ runner.os }}-${{ matrix.shard }}
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+
+      # Matrix shards share github.job, so they would race the same save key.
+      # One writer keeps the 10 GiB Actions cache from holding several copies
+      # that would evict this prefix (observed: 6.9 GiB workspace-only save).
+      - name: Save compiled Bazel actions
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.shard == 'root-b' && steps.bazel.outputs.disk-cache-key != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+  # Preserves the "Test Linux" check name for branch protection.
+  linux-test-result:
+    name: Test Linux
+    needs: [scope-gate, linux-test]
+    if: ${{ always() && !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Linux test shard
+        run: test "${{ needs.linux-test.result }}" = "success"
+
+  windows-test:
+    name: Test Windows
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 330
     steps:
       # Full history: the search-quality workload fixture pins a
       # `source_repository_commit`, and `validate_source_bindings` resolves that
-      # object out of this checkout to prove the checked-in corpus really is the
-      # product source at that commit. A depth-1 checkout carries only the tip,
-      # so every candidate_output/report test fails with "resolve fixture source
-      # commit: An object with id ... could not be found".
-      - uses: actions/checkout@v7
+      # object out of this checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-test-full-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      # Every `crates/tracedecay` integration target declares
-      # `required-features = ["test-helpers"]`, because the fixture surface it
-      # gates is used by `tests/common/mod.rs`. Those targets are selected here
-      # today only as a side effect of dev-dependency feature unification
-      # (`tracedecay-cli` dev-depends on `tracedecay` with that feature), which
-      # is not a property this lane should depend on: it would evaporate the
-      # moment that dev-dependency changes, and nextest would then silently
-      # select zero of them and report green having run nothing. Asking for the
-      # feature explicitly makes the selection independent of that accident.
-      - name: Run tests
-        run: cargo nextest run --workspace --profile ci --locked --features tracedecay/test-helpers
-
-      # Compile-only gate for the features this lane does not enable. Both are
-      # otherwise built for the first time at release (`--all-features`), so
-      # anything that breaks them merges green and is discovered at tag time.
-      # That is not hypothetical: `tests/mcp_suite/support.rs` called
-      # `fs::create_dir_all` without importing `std::fs`, which made ten
-      # `required-features = ["test-transport"]` targets unbuildable, and
-      # nothing reported it.
-      #
-      # `check --all-targets` rather than `nextest run`: the point is that the
-      # code still compiles, and the acceptance suites behind `test-transport`
-      # spawn daemons, so running them here would change this lane's cost and
-      # flakiness profile. Enable them as a real test lane separately once
-      # they are confirmed green.
-      - name: Check feature-gated surfaces compile
-        run: |
-          cargo check --workspace --all-targets --features test-transport --locked
-          cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
-
-      - name: Upload ${{ matrix.name }} nextest report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nextest-junit-${{ matrix.name }}
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: ignore
-          retention-days: 7
-
-  windows-build:
-    name: Build Windows tests
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: windows-latest
-    # Full-workspace `nextest archive` on hosted windows-latest has been
-    # dying at the job timeout with no failed step: first at 30m, then at 45m
-    # (run 32789438873 burned 44m08s in `Build nextest archive` on a cold
-    # Swatinem cache -- the restore step took 12s, i.e. a miss -- and was
-    # killed mid-compile). Earlier runs only "finished" faster because a
-    # resolution error aborted the `tracedecay` lib-test unit early. 75m fits
-    # a genuinely cold cache while still failing loudly on a hung linker.
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Tune Windows runner for build I/O
-        uses: ./.github/actions/tune-windows-runner
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Use lld-link linker
-        shell: pwsh
-        run: |
-          where.exe lld-link.exe
-          lld-link.exe --version
-          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      # Node is only needed so build.rs can produce the embedded dashboard
-      # dist assets (npm ci + npm run build) once, instead of once per shard.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Cache Windows Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-test-full-windows-msvc-lld
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Build nextest archive
-        shell: pwsh
-        run: cargo nextest archive --workspace --locked --features tracedecay/test-helpers --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
-
-      - name: Upload nextest archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-nextest-archive
-          path: ${{ runner.temp }}/nextest-archive.tar.zst
-          retention-days: 1
-          compression-level: 0
-
-  windows-test-shard:
-    name: Test Windows shard ${{ matrix.partition }}/5
-    needs: windows-build
-    runs-on: windows-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4, 5]
-    steps:
-      # Full history for the same reason as the Linux/macOS test job: the
-      # shards run the workspace suite remapped onto this checkout, so the
-      # pinned search-quality fixture commit must be resolvable here too.
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Tune Windows runner for test I/O
+      - name: Tune Windows runner for build and test I/O
         uses: ./.github/actions/tune-windows-runner
         with:
           redirect-temp: "true"
 
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-bazel
+        id: bazel
         with:
-          node-version: 22
+          cache-key: ci-windows-test
 
-      - uses: actions/setup-python@v6
+      # `bazel test` builds every target in the pattern, so tests start
+      # while the rest of the workspace still links.
+      - name: Build and test the workspace
+        shell: bash
+        run: bazel test --config=ci //...
+
+      - name: Upload failed test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          python-version: "3.12"
+          name: bazel-test-logs-${{ runner.os }}
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
 
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
+      - name: Save compiled Bazel actions
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          version: ${{ env.AST_GREP_VERSION }}
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-      # The architecture tests exec `cargo metadata` at runtime, and they run
-      # concurrently under nextest: without the pinned toolchain installed,
-      # each test process's rustup shim races to self-install it and the
-      # concurrent downloads corrupt each other's partial files. Install the
-      # rust-toolchain.toml pin serially up front.
-      - name: Install pinned toolchain
-        shell: pwsh
+  # Blocking Clippy policy over every Bazel Rust target, the
+  # `cargo clippy --workspace --all-targets -D warnings` equivalent.
+  clippy:
+    permissions:
+      contents: read
+      id-token: write
+    name: Clippy
+    needs: [scope-gate, gates]
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    # Same image as Test Linux so rustc action keys can restore that job's
+    # disk cache (proc-macros, build scripts, grammar cc, matching rlibs)
+    # when this job's own prefix misses. ARM isolated Clippy from that
+    # cache and paid a cold 55–61m `//...` on recent PRs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-bazel
+        id: bazel
+        with:
+          cache-key: ci-linux-clippy
+          # Tailscale independently checks this repository and immutable actor
+          # ID. This condition avoids requesting credentials for fork PRs.
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
+          extra-restore-keys: ci-linux-test-v2
+
+      - name: Run blocking Clippy policy
+        run: bazel build --config=ci --config=clippy //...
+
+      # Master pushes run no Windows lane, so `cfg(windows)` code otherwise
+      # first compiles in the release build. Bazel has no MSVC toolchain on
+      # Linux, so this cross-target type check stays on Cargo: `cargo check`
+      # needs no linker, and mingw supplies the C compiler the native build
+      # scripts run. macOS has no equivalent: its build scripts need the Apple
+      # SDK headers.
+      - name: Install pinned toolchain and Windows check target
         run: |
           rustup toolchain install
-          rustup show active-toolchain
+          rustup target add x86_64-pc-windows-gnu
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+      - uses: ./.github/actions/setup-pnpm
 
-      - name: Download nextest archive
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-nextest-archive
-          path: ${{ runner.temp }}
+      - name: Install the Windows C cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
 
-      - name: Run Windows tests
-        env:
-          TRACEDECAY_SQLITE_UNSAFE_FAST: "1"
-        shell: pwsh
-        # --extract-to must be the workspace so target/ lands at the same
-        # absolute path as on the build job: integration tests bake
-        # env!("CARGO_BIN_EXE_tracedecay") into the binaries at compile time.
+      - name: Check the Windows target
         run: >-
-          cargo-nextest nextest run --profile ci
-          --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
-          --extract-to "$env:GITHUB_WORKSPACE"
-          --workspace-remap "$env:GITHUB_WORKSPACE"
-          --partition slice:${{ matrix.partition }}/5
-          --test-threads num-cpus --status-level slow
+          cargo check --workspace --all-targets --locked
+          --target x86_64-pc-windows-gnu
+          --features tracedecay/test-transport,tracedecay/test-helpers,tracedecay-cli/test-transport
 
-      - name: Clean abandoned Windows test children
-        if: always()
-        shell: pwsh
-        run: |
-          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
-          $all = Get-CimInstance Win32_Process
-          $liveProcessIds = [System.Collections.Generic.HashSet[uint32]]::new()
-          foreach ($process in $all) {
-            [void]$liveProcessIds.Add([uint32]$process.ProcessId)
-          }
-          $stale = foreach ($process in $all) {
-            if ($process.Name -ne "tracedecay.exe") {
-              continue
-            }
-            if (-not $process.CommandLine) {
-              continue
-            }
-            $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            if (-not $inCurrentWorkspace) {
-              continue
-            }
-            if (-not $liveProcessIds.Contains([uint32]$process.ParentProcessId)) {
-              $process
-            }
-          }
-          foreach ($process in $stale) {
-            Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
-            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: Upload Windows nextest report
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Save compiled Bazel actions
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          name: windows-nextest-junit-${{ matrix.partition }}
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: ignore
-          retention-days: 7
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-  windows-test:
-    name: Test Windows
-    if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
-    needs: [windows-test-shard, scope-gate]
+  # The production feature graph must exclude test-only surfaces. The
+  # feature-gated variants themselves (every `test-transport` library and the
+  # lean `--no-default-features` root, emitted by scripts/bazel/gen_builds.py)
+  # are ordinary `//...` targets that the Clippy job compiles.
+  feature-gates:
+    name: Feature gates
+    needs: [scope-gate, gates]
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    # x86 shares the pnpm store Repository gates and Dashboard already warm.
+    # ubuntu-26.04-arm missed that cache on run 37707017494 and spent 325s
+    # in `pnpm install` for an 8s `cargo tree`.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Check Windows shards
-        run: |
-          if [ "${{ needs.windows-test-shard.result }}" != "success" ]; then
-            echo "Windows shard result: ${{ needs.windows-test-shard.result }}"
-            exit 1
-          fi
-          echo "All Windows shards passed."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-  clippy:
-    name: Clippy
-    needs: scope-gate
+      - uses: ./.github/actions/setup-pnpm
+
+      # One graph walk per push. The release resolver repeats it on the tag it
+      # builds, since a release is dispatched without waiting on this run.
+      - name: Check the production feature graph
+        run: python3 scripts/check-production-feature-profile.py
+
+  # The configuration users actually receive: the release build of
+  # `tracedecay-cli`, whose default features are `production`. Nothing else on
+  # a push compiles it, so a break confined to the release graph (the
+  # mimalloc allocator, the embedded dashboard, opt-level 3) would otherwise
+  # first appear while a release is being cut.
+  shipped-cli:
+    permissions:
+      contents: read
+      id-token: write
+    name: Shipped CLI build (x86_64-linux)
+    needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the shipped binary
+        id: cli
+        uses: ./.github/actions/build-cli
         with:
-          components: clippy
+          config: release
+          dest: target/x86_64-unknown-linux-gnu/release
+          cache-key: release-x86_64-unknown-linux-gnu
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
 
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-clippy-full-${{ runner.os }}
-          cache-on-failure: true
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
+      - name: Read immutable packaging inputs
+        id: packaging
         shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Run blocking Clippy policy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Check lean build
-        run: cargo check -p tracedecay --no-default-features --locked
-
-  # Additive visibility lint. Not a required check yet — introduce Hawk, then
-  # promote once the workspace is clean under `-D warnings`.
-  hawk:
-    name: Hawk
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_NET_RETRY: 10
-      # renovate: datasource=github-releases depName=astral-sh/hawk
-      HAWK_VERSION: 0.1.12
-      RUSTUP_MAX_RETRIES: 10
-      TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target/hawk"
-          cache-workspace-crates: "false"
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1
-
-      - name: Install Hawk
-        run: |
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
-
-      # Hawk compiles every workspace member, so the tracedecay-cli build
-      # script runs here. Skip mode requires a validatable bundle plus its
-      # digest, so the seed must pass scripts/check-dashboard-bundle.py.
-      - name: Seed dashboard app-dist for the CLI build script
         run: |
           set -euo pipefail
-          mkdir -p dashboard/app-dist/static/js
-          printf '%s\n' '{"allFiles":["index.html","static/js/index.js"]}' > dashboard/app-dist/asset-manifest.json
-          printf '%s\n' '<!doctype html><title>hawk</title><script src="/static/js/index.js"></script>' > dashboard/app-dist/index.html
-          head -c 1024 /dev/zero | tr '\0' ';' > dashboard/app-dist/static/js/index.js
-          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
-          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+          echo "tag=v$(cat version.txt)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Hawk
-        # Reports, does not gate. The job header above states Hawk is not a
-        # required check until the workspace is clean under `-D warnings`, but
-        # the step hard-failed anyway, so Hawk showed as a red required check
-        # while the workspace carries ~9k visibility findings. Keep `-D
-        # warnings` so the report stays honest, and drop the gate until the
-        # backlog is burned down and this line can be removed.
-        continue-on-error: true
-        run: cargo +1.97.1 hawk check --target-dir target/hawk -D warnings
-
-  fmt:
-    name: Format
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Package and exercise the shipped artifacts
+        uses: ./.github/actions/package-release
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
+          binary: ${{ steps.cli.outputs.path }}
+          tag: ${{ steps.packaging.outputs.tag }}
+          asset-prefix: tracedecay-${{ steps.packaging.outputs.tag }}
+          platform: x86_64-linux
+          archive: tar.gz
+          epoch: ${{ steps.packaging.outputs.epoch }}
 
+  # Frontend checks require no Rust compilation and must also validate drafts.
+  # Do not serialize them behind repository-wide Rust formatting and gates.
   dashboard:
     name: Dashboard
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
+          node-version: "26"
 
-      - name: Install dashboard dependencies
+      - uses: ./.github/actions/setup-pnpm
+
+      - name: Typecheck dashboard consumers
         working-directory: dashboard
-        run: npm ci
+        run: pnpm run typecheck
+
+      - name: Typecheck TypeScript SDK
+        working-directory: sdks/typescript
+        run: pnpm run typecheck
+
+      - name: Run TypeScript SDK unit tests
+        working-directory: sdks/typescript
+        run: pnpm test
 
       - name: Build dashboard assets
         working-directory: dashboard
-        run: npm run build
+        run: pnpm run build
 
       - name: Run dashboard unit tests
         working-directory: dashboard
-        run: npm test
+        run: pnpm test
 
       # The dashboard is one rsbuild app emitting `app-dist/` (the legacy
       # shell/holographic/lcm/graph/savings bundle split no longer exists), so
@@ -656,94 +747,49 @@ jobs:
           set -euo pipefail
           python3 ../scripts/check-dashboard-bundle.py app-dist
           (cd app-dist && find . -type f | sort | xargs sha256sum) > /tmp/dashboard-dist.sha
-          npm run build
+          pnpm run build
           (cd app-dist && find . -type f | sort | xargs sha256sum) | diff /tmp/dashboard-dist.sha -
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Build TypeScript SDK for the ChatGPT extension
+        working-directory: sdks/typescript
+        run: pnpm run build
 
-      - uses: ./.github/actions/setup-linux-mold
+      - name: Typecheck ChatGPT extension
+        working-directory: plugin/chatgpt-extension
+        run: pnpm run typecheck
 
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
+      # extension.test.ts needs a tracedecay binary, which this job does not
+      # build; the adapter tests run against a fake `serve`.
+      - name: Run ChatGPT extension adapter tests
+        working-directory: plugin/chatgpt-extension
+        run: pnpm exec vitest run test/adapter.test.ts
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-dashboard-full-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Run dashboard integration tests
-        run: cargo nextest run --test dashboard_api_test --features test-transport --no-fail-fast --locked
+      - name: Verify ChatGPT extension embedded artifacts
+        working-directory: plugin/chatgpt-extension
+        run: pnpm run check:embedded
 
   hermes-integration:
     name: Hermes integration (stock)
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    needs: [scope-gate, debug-cli]
+    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     env:
-      # Stock (upstream) Hermes pin — the generated plugin must keep working
+      # Stock (upstream) Hermes pin. The generated plugin must keep working
       # against this exact upstream commit. Bump deliberately after rerunning
       # scripts/hermes_stock_integration.sh against the new ref locally.
       HERMES_UPSTREAM_REPO: https://github.com/NousResearch/hermes-agent.git
       HERMES_UPSTREAM_REF: 9dd9ef0ec99a87f078f7272b4323df5440b4b3f9
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
+      - name: Fetch the debug CLI built once for this run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-hermes-integration-full-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Build tracedecay binary
-        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+          name: debug-tracedecay-cli
+          path: target/debug
+      - name: Restore the executable bit the artifact store drops
+        run: chmod +x target/debug/tracedecay
 
       - name: Run generated-plugin unit checks (no Hermes required)
         run: python3 scripts/hermes_plugin_unit_check.py
@@ -756,7 +802,7 @@ jobs:
           git -C "$RUNNER_TEMP/hermes-upstream" fetch --depth 1 origin "$HERMES_UPSTREAM_REF"
           git -C "$RUNNER_TEMP/hermes-upstream" checkout --detach FETCH_HEAD
 
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: ${{ runner.temp }}/hermes-upstream/uv.lock
@@ -774,54 +820,38 @@ jobs:
 
   host-stock-integration:
     name: Claude Code + OpenCode integration (stock)
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-latest
+    needs: [scope-gate, debug-cli]
+    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     env:
-      # Stock host pins — the installed bundle must keep working against these
+      # Stock host pins. The installed bundle must keep working against these
       # exact host releases. Bump deliberately after rerunning
       # scripts/claude_stock_integration.sh and
       # scripts/opencode_stock_integration.sh against the new versions locally.
-      CLAUDE_CODE_VERSION: 2.1.224
-      OPENCODE_VERSION: 1.18.4
+      CLAUDE_CODE_VERSION: 2.1.296
+      OPENCODE_VERSION: 2.0.28
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+      - name: Fetch the debug CLI built once for this run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          shared-key: ci-host-stock-integration-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Build tracedecay binary
-        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+          name: debug-tracedecay-cli
+          path: target/debug
+      - name: Restore the executable bit the artifact store drops
+        run: chmod +x target/debug/tracedecay
 
       - name: Install stock Claude Code and OpenCode at pinned versions
         run: |
-          npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}"
+          npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@opencode/cli@${OPENCODE_VERSION}"
           claude --version
           opencode --version
+
+      - name: Run MCP conformance smoke
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: scripts/mcp-conformance-smoke.sh
 
       - name: Run stock Claude Code integration checks
         env:

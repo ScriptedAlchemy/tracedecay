@@ -7,39 +7,53 @@
 //! The lexical lane is separate from the exact lane; exact and lexical are
 //! independently disableable and inspectable.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, ComponentRevision, CursorPayloadDigest,
-    EphemeralSanitizedQueryViewV1, FixedPointScore, RetrievalBudget, RetrievalError,
-    RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch, RetrieverContinuation,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, split_subtokens,
-    technical_tokens,
+    EphemeralSanitizedQueryViewV1, FixedPointScore, RetrievalBudget, RetrievalFailure,
+    RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
+    RetrieverOutcome, ScoreDomainId, split_subtokens, technical_tokens,
 };
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, LaneBoundEvidence, LaneEvidenceRejections,
-    LexicalPostingReadPort, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
-    contract_error, lane_bound_evidence, lane_candidate_cap,
+    CodeCandidateBindingV1, LaneBoundEvidence, LaneEvidenceRejections, LexicalPostingReadPort,
+    RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalExecutionControl, RetrievalPortError,
+    candidate_checkpoint_prefix, checkpoint_digest, contract_error, lane_bound_evidence,
+    lane_candidate_cap, retrieval_checkpoint,
 };
 
 mod projection;
+mod routes;
 
+pub(crate) use self::projection::exact_field_for_kind;
 pub use self::projection::{
-    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
-    CodeExactProjectionAdapterV1, CodeLexicalArtifactBatchLimitV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1,
+    CarriedFilePagesV1, CloneArtifactCursorV1, CloneArtifactPageV1, CloneExactArtifactMemberV1,
+    CloneExactFamilyArtifactCandidateV1, CloneExactFamilyArtifactPageV1,
+    CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactBatchLimitV1,
     CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
-    CodeLexicalImportMembershipWitnessV1, CodeLexicalProjectionAdapterV1,
-    CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
-    CodeLexicalProjectionMetadataV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
-    PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
-    VerifiedCodeLexicalArtifactV1, lexical_projection_build_deadline_micros,
+    CodeLexicalArtifactRestoreWitnessV1, CodeLexicalArtifactSectionDigestV1,
+    CodeLexicalCloneIndexCensusV1, CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1,
+    MAX_CLONE_EXACT_PAGE_MEMBERS_V1, PreparedCodeLexicalArtifactBatchV1,
+    PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
+    code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
+};
+pub use self::routes::{
+    LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1, LexicalAliasV1, LexicalAlternativeReasonV1,
+    LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalAnchorV1, LexicalQueryRouteV1,
+    LexicalRouteDeciderV1, LexicalRouteDecisionV1, LexicalRouteErrorV1, LexicalRouteKindV1,
+    LexicalRouteMatchV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRouteReceiptV1,
+    LexicalRouteV1, LexicalRoutingV1, MAX_LEXICAL_ALIAS_BYTES_V1, MAX_LEXICAL_ALIASES_V1,
+    MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1, MAX_PREFERRED_SYMBOL_TOKENS_V1,
+    SymbolRoutePreferenceV1, classify_query_shape, merge_lexical_routes, preferred_symbol_tokens,
+    task_is_name_shaped,
 };
 
 /// Wording the lexical lane uses when a port-emitted batch fails the shared
@@ -54,15 +68,89 @@ const LEXICAL_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
 /// The projection sorts all eligible expansions before taking this prefix, so
 /// producer order and scheduler timing cannot affect the selected terms.
 pub const MAX_FUZZY_TERM_EXPANSIONS_V1: u32 = 64;
+pub const MAX_LEXICAL_PROXIMITIES_V1: usize = 4;
+pub const MAX_LEXICAL_PROXIMITY_TERMS_V1: usize = 8;
+pub const MAX_LEXICAL_PROXIMITY_GAP_V1: u32 = 8;
+pub const MAX_LEXICAL_PHRASES_V1: usize = 4;
+pub const MAX_LEXICAL_FIELD_FILTERS_V1: usize = 9;
 
-/// Maximum UTF-8 bytes in one lexical whole term, subtoken, or phrase.
+/// Maximum UTF-8 bytes in one lexical whole term, subtoken, phrase, or
+/// proximity term.
 pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Summed document-frequency budget for lexical term-source admission. Every
+/// candidate is decoded from its row and scored, so the union of the request's
+/// term sources, not the winner cap, decides the lane's transient allocation
+/// and wall time: unbounded, a natural-language task whose terms include
+/// common words hydrated ~74k rows of a 472k-chunk corpus per read (~0.95 GB
+/// decoded, 5.7 s) and missed the context deadline. Term sources are admitted
+/// in ascending document-frequency order until their summed frequencies would
+/// exceed this bound; the most selective source is always admitted so a
+/// single common-term query still answers. Phrase sources are admitted separately.
+/// This is a recall/latency policy, not a hard document or allocation ceiling:
+/// documents matching only pruned terms cannot rank. The initial 16,384 value
+/// retains the measured policy (~100 MiB decode churn at ~6.6 KiB per row);
+/// changing the reader cache must not change candidate eligibility.
+pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize = 16_384;
+
+/// Admit `(document_frequency, source)` pairs rarest-first while the summed
+/// frequency stays within [`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`]; the rarest
+/// nonempty source is always admitted. Ties keep request order so admission
+/// is deterministic. Sources past the bound still weigh admitted candidates
+/// through scoring; a document matching only those sources is never hydrated.
+pub(crate) fn admit_candidate_sources<S>(
+    mut sources: Vec<(usize, S)>,
+    mut on_pruned: impl FnMut(usize, &S),
+) -> Vec<S> {
+    sources.retain(|(frequency, _)| *frequency > 0);
+    sources.sort_by_key(|(frequency, _)| *frequency);
+    let total = sources.len();
+    let mut admitted_documents = 0usize;
+    let mut admitted = Vec::with_capacity(total);
+    for (ordinal, (frequency, source)) in sources.into_iter().enumerate() {
+        let next = admitted_documents.saturating_add(frequency);
+        if ordinal > 0 && next > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 {
+            on_pruned(frequency, &source);
+            continue;
+        }
+        admitted_documents = next;
+        admitted.push(source);
+    }
+    admitted
+}
+
+fn candidate_admission_outcome<E>(
+    batch: RetrieverBatch<E>,
+    term_sources: Vec<(String, u64)>,
+) -> RetrieverOutcome<RetrieverBatch<E>> {
+    if term_sources.is_empty() {
+        RetrieverOutcome::Complete(batch)
+    } else {
+        tracing::debug!(
+            pruned_source_count = term_sources.len(),
+            source_document_frequencies = ?term_sources.iter().map(|(_, frequency)| *frequency).collect::<Vec<_>>(),
+            document_frequency_budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
+            "lexical candidate term sources pruned by retrieval policy"
+        );
+        RetrieverOutcome::Partial {
+            value: batch,
+            reason: RetrievalFailure::CandidateSourcesPruned {
+                term_sources,
+                document_frequency_budget: MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LexicalQueryPartsV1 {
     pub whole_terms: Vec<String>,
     pub subtokens: Vec<String>,
     pub phrases: Vec<String>,
+}
+
+pub(super) fn normalize_lexical(value: &str) -> String {
+    value.to_ascii_lowercase()
 }
 
 /// Shared tokenizer for production retrieval and its direct evaluator.
@@ -128,12 +216,15 @@ pub fn lexical_query_parts(query: &str) -> Result<LexicalQueryPartsV1, Retrieval
     })
 }
 
-/// Whole exact terms and language-profiled subtokens are distinct fields.
+/// Posting field selected by lexical filters and emitted in per-field score
+/// evidence.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LexicalFieldV1 {
     SymbolName,
     QualifiedName,
     Path,
+    Signature,
+    Documentation,
     BodyText,
     PreambleText,
     ExactTerm,
@@ -148,23 +239,81 @@ pub struct LexicalFieldFilterV1 {
     pub include: bool,
 }
 
-/// Typed lexical-lane request for identifier, phrase, token, field, and
-/// bounded fuzzy retrieval.
-#[derive(Debug, PartialEq, Eq)]
+/// Ordered terms that must occur in one field. `maximum_gap` counts the
+/// intervening tokens between each adjacent pair.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalProximityV1 {
+    pub terms: Vec<String>,
+    pub maximum_gap: u32,
+}
+
+impl LexicalProximityV1 {
+    fn validate(&self) -> Result<(), RetrievalPortError> {
+        if !(2..=MAX_LEXICAL_PROXIMITY_TERMS_V1).contains(&self.terms.len())
+            || self.maximum_gap > MAX_LEXICAL_PROXIMITY_GAP_V1
+        {
+            return Err(RetrievalPortError::Contract(
+                "lexical proximity requires two to eight terms and a maximum gap no larger than eight"
+                    .to_owned(),
+            ));
+        }
+        for term in &self.terms {
+            if term.is_empty()
+                || term.trim() != term
+                || term.len() > MAX_LEXICAL_QUERY_TERM_BYTES_V1
+                || term.chars().any(char::is_control)
+                || technical_tokens(term).count() != 1
+            {
+                return Err(RetrievalPortError::Contract(
+                    "lexical proximity terms must be single trimmed control-free terms within the v1 byte bound"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalSpellingVariantV1 {
+    pub query: String,
+    pub alternative: String,
+}
+
+/// Typed lexical-lane request for identifier, phrase, proximity, token, field,
+/// and bounded fuzzy retrieval.
+///
+/// Term / proximity / filter collections are [`Cow`] so multi-route callers can
+/// borrow the route plan's parts once per sanitize instead of cloning five
+/// owned vectors on every lane call.
 pub struct LexicalLaneRequest<'a> {
     pub base: RetrievalRequest,
     pub query_view: &'a EphemeralSanitizedQueryViewV1,
     pub generation: CodeGenerationId,
-    pub whole_terms: Vec<String>,
-    pub subtokens: Vec<String>,
-    pub phrases: Vec<String>,
-    pub field_filters: Vec<LexicalFieldFilterV1>,
+    pub whole_terms: Cow<'a, [String]>,
+    pub subtokens: Cow<'a, [String]>,
+    pub phrases: Cow<'a, [String]>,
+    pub proximities: Cow<'a, [LexicalProximityV1]>,
+    pub field_filters: Cow<'a, [LexicalFieldFilterV1]>,
+    /// Applied before the candidate cap, so out-of-scope matches cannot
+    /// crowd in-scope ones out of a bounded selection.
+    pub path_prefix: Option<&'a str>,
     /// Bounded fuzzy-term budget; the profile revision pins tokenizer and
     /// normalization versions.
     pub fuzzy_budget: u32,
     pub lexical_profile_revision: ComponentRevision,
     pub score_domain: ScoreDomainId,
     pub budget: RetrievalBudget,
+    /// The live request authority the lane consults between bounded units of
+    /// row work. The candidate-source bound keeps one
+    /// request's hydration finite, but a caller that has already settled,
+    /// cancelled, past its deadline, or revoked, must not keep the shared
+    /// search execution permit occupied while the remaining rows decode and
+    /// score. Cancellation unwinds the scan with
+    /// [`RetrievalPortError::Cancelled`] instead of an empty or partial batch.
+    pub control: &'a dyn RetrievalExecutionControl,
 }
 
 /// Per-occurrence lexical-lane evidence with its field score breakdown.
@@ -180,25 +329,20 @@ pub struct LexicalLaneEvidence {
     pub matched_whole_terms: Vec<String>,
     pub matched_subtokens: Vec<String>,
     pub matched_phrases: Vec<String>,
+    pub matched_proximities: Vec<LexicalProximityV1>,
+    pub spelling_variants: Vec<LexicalSpellingVariantV1>,
     pub typo_recovery_applied: bool,
     pub echo_penalty_applied: bool,
+    /// Source-role evidence for the same-symbol definition/reference order.
+    /// Absent historical evidence deserializes as a non-definition hit.
+    #[serde(default)]
+    pub source_role: tracedecay_domain::RetrievalSourceRoleV1,
 }
 
 impl LaneBoundEvidence for LexicalLaneEvidence {
     fn binding(&self) -> &CodeCandidateBindingV1 {
         &self.binding
     }
-}
-
-/// The independently disableable lexical-lane retriever contract.
-///
-/// Missing lexical authority rejects the request as unavailable.
-pub trait LexicalLaneRetriever {
-    /// Retrieve the committed lexical candidate prefix for `request`.
-    fn retrieve_lexical(
-        &self,
-        request: &LexicalLaneRequest<'_>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError>;
 }
 
 impl LexicalLaneRequest<'_> {
@@ -215,9 +359,29 @@ impl LexicalLaneRequest<'_> {
                 "lexical fuzzy budget exceeds the v1 bound of {MAX_FUZZY_TERM_EXPANSIONS_V1}"
             )));
         }
-        if self.whole_terms.is_empty() && self.subtokens.is_empty() && self.phrases.is_empty() {
+        if self.whole_terms.is_empty()
+            && self.subtokens.is_empty()
+            && self.phrases.is_empty()
+            && self.proximities.is_empty()
+        {
             return Err(RetrievalPortError::Contract(
-                "lexical requests require at least one whole term, subtoken, or phrase".to_owned(),
+                "lexical requests require at least one whole term, subtoken, phrase, or proximity"
+                    .to_owned(),
+            ));
+        }
+        if self.proximities.len() > MAX_LEXICAL_PROXIMITIES_V1 {
+            return Err(RetrievalPortError::Contract(format!(
+                "lexical proximity count exceeds the v1 bound of {MAX_LEXICAL_PROXIMITIES_V1}"
+            )));
+        }
+        for proximity in self.proximities.iter() {
+            proximity.validate()?;
+        }
+        if self.phrases.len() > MAX_LEXICAL_PHRASES_V1
+            || self.field_filters.len() > MAX_LEXICAL_FIELD_FILTERS_V1
+        {
+            return Err(RetrievalPortError::Contract(
+                "lexical phrases or field filters exceed their v1 request bounds".to_owned(),
             ));
         }
         for term in self
@@ -238,7 +402,7 @@ impl LexicalLaneRequest<'_> {
             }
         }
         let mut filtered_fields = BTreeSet::new();
-        for filter in &self.field_filters {
+        for filter in self.field_filters.iter() {
             if !filtered_fields.insert(filter.field) {
                 return Err(RetrievalPortError::Contract(
                     "lexical field filters must name each field at most once".to_owned(),
@@ -280,26 +444,46 @@ impl LexicalLaneEvidence {
                 ));
             }
         }
-        for term in &self.matched_whole_terms {
-            if !request.whole_terms.contains(term) {
-                return Err(RetrievalPortError::Contract(
-                    "lexical lane evidence matches a whole term outside the request".to_owned(),
-                ));
+        for (matched, requested, channel) in [
+            (
+                self.matched_whole_terms.as_slice(),
+                request.whole_terms.as_ref(),
+                "whole term",
+            ),
+            (
+                self.matched_subtokens.as_slice(),
+                request.subtokens.as_ref(),
+                "subtoken",
+            ),
+            (
+                self.matched_phrases.as_slice(),
+                request.phrases.as_ref(),
+                "phrase",
+            ),
+        ] {
+            if matched.iter().any(|term| !requested.contains(term)) {
+                return Err(RetrievalPortError::Contract(format!(
+                    "lexical lane evidence matches a {channel} outside the request"
+                )));
             }
         }
-        for subtoken in &self.matched_subtokens {
-            if !request.subtokens.contains(subtoken) {
-                return Err(RetrievalPortError::Contract(
-                    "lexical lane evidence matches a subtoken outside the request".to_owned(),
-                ));
-            }
+        if self
+            .matched_proximities
+            .iter()
+            .any(|proximity| !request.proximities.contains(proximity))
+        {
+            return Err(RetrievalPortError::Contract(
+                "lexical lane evidence matches a proximity outside the request".to_owned(),
+            ));
         }
-        for phrase in &self.matched_phrases {
-            if !request.phrases.contains(phrase) {
-                return Err(RetrievalPortError::Contract(
-                    "lexical lane evidence matches a phrase outside the request".to_owned(),
-                ));
-            }
+        if self.spelling_variants.iter().any(|variant| {
+            !request.whole_terms.contains(&variant.query)
+                || variant.alternative == variant.query
+                || variant.alternative.is_empty()
+        }) {
+            return Err(RetrievalPortError::Contract(
+                "lexical spelling evidence is not bound to the request".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -360,7 +544,10 @@ where
         let mut admitted: Vec<(CompactCandidate, LexicalLaneEvidence, FixedPointScore)> =
             Vec::with_capacity(batch.candidates.len());
         let mut excluded = 0_u64;
-        for candidate in &batch.candidates {
+        for (ordinal, candidate) in batch.candidates.iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             let evidence = lane_bound_evidence(
                 batch,
                 candidate,
@@ -368,16 +555,20 @@ where
                 &LEXICAL_REJECTIONS,
             )?;
             evidence.validate_against_validated_request(request)?;
-            let mut filtered = evidence.clone();
-            filtered
+            if !evidence
                 .field_scores_micros
-                .retain(|(field, _)| field_admitted(&request.field_filters, *field));
-            if filtered.field_scores_micros.is_empty() {
+                .iter()
+                .any(|(field, _)| field_admitted(&request.field_filters, *field))
+            {
                 // A candidate scored only on filtered-out fields is excluded
                 // by the typed field filters; it is accounted, never silent.
                 excluded += 1;
                 continue;
             }
+            let mut filtered = evidence.clone();
+            filtered
+                .field_scores_micros
+                .retain(|(field, _)| field_admitted(&request.field_filters, *field));
             let mut raw_score = FixedPointScore::ZERO;
             for (_, field_score) in &filtered.field_scores_micros {
                 raw_score = raw_score
@@ -386,13 +577,16 @@ where
             }
             admitted.push((candidate.clone(), filtered, raw_score));
         }
-        // Canonical deterministic order: recomputed fixed-point score
+        // Canonical deterministic order: production definitions ahead of
+        // every other source role, then recomputed fixed-point score
         // (descending), then stable occurrence identity, then the evidence
         // anchor. Port emission order can never select a different prefix.
         admitted.sort_by(|left, right| {
-            right
-                .2
-                .cmp(&left.2)
+            left.1
+                .source_role
+                .admission_rank()
+                .cmp(&right.1.source_role.admission_rank())
+                .then_with(|| right.2.cmp(&left.2))
                 .then_with(|| {
                     left.0
                         .source_occurrence_id
@@ -411,7 +605,11 @@ where
         let mut candidates = Vec::with_capacity(admitted.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, (mut candidate, evidence, raw_score)) in admitted.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             candidate.ordinal_rank = ordinal as u32;
+            candidate.source_role = evidence.source_role;
             candidate.raw_score = raw_score;
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
@@ -424,6 +622,7 @@ where
         let eligible = batch.coverage.eligible.max(seen).saturating_sub(excluded);
         let capped = batch.coverage.capped.saturating_add(truncated as u64);
         let exhausted = truncated == 0 && batch.coverage.capped == 0;
+        retrieval_checkpoint(request.control)?;
         let checkpoint_digest = lexical_checkpoint_digest(&request.generation, &candidates)?;
         let rebuilt = RetrieverBatch {
             candidates,
@@ -444,18 +643,15 @@ where
         rebuilt.validate().map_err(contract_error)?;
         Ok(rebuilt)
     }
-}
 
-impl<P> LexicalLaneRetriever for LexicalLane<P>
-where
-    P: LexicalPostingReadPort,
-{
-    #[hotpath::measure(label = "query.lane.lexical")]
-    fn retrieve_lexical(
+    /// Retrieve the committed lexical candidate prefix for `request`.
+    #[tracing::instrument(name = "query.lane.lexical", level = "trace", skip_all)]
+    pub fn retrieve_lexical(
         &self,
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
+        retrieval_checkpoint(request.control)?;
         let outcome = match self.postings.read_lexical_postings(request) {
             Ok(outcome) => outcome,
             // A missing lexical authority rejects the request as a typed
@@ -477,39 +673,8 @@ where
             },
             outcome => outcome,
         };
-        crate::hotpath_metrics::record_lane(
-            "query.lane.lexical.candidates",
-            "query.lane.lexical.examined",
-            "query.lane.lexical.results",
-            "query.lane.lexical.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.lexical.residency", &outcome);
         Ok(outcome)
-    }
-}
-
-impl<'a, P> Retriever<LexicalLaneRequest<'a>, LexicalLaneEvidence> for LexicalLane<P>
-where
-    P: LexicalPostingReadPort,
-{
-    fn retrieve(
-        &self,
-        request: &LexicalLaneRequest<'a>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalError> {
-        self.retrieve_lexical(request)
-            .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
-    }
-}
-
-impl<'a, P> CompactCandidateLane<LexicalLaneRequest<'a>, LexicalLaneEvidence> for LexicalLane<P>
-where
-    P: LexicalPostingReadPort,
-{
-    fn candidates(
-        &self,
-        request: &LexicalLaneRequest<'a>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
-        self.retrieve_lexical(request)
     }
 }
 

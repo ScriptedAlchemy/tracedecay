@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::DomainError;
 use super::evidence::LogSafeText;
-use super::id::{CatalogGenerationId, EntityId, LocatorDigest, ManifestDigest};
+use super::id::{EntityId, LocatorDigest};
 
 /// Canonical entity categories needed by the research slice.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -44,20 +44,6 @@ pub struct EntityRef {
 impl EntityRef {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.id.validate()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
-pub struct CatalogSnapshotRefV1 {
-    pub generation: CatalogGenerationId,
-    pub digest: ManifestDigest,
-}
-
-impl CatalogSnapshotRefV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.generation.validate()?;
-        self.digest.validate()
     }
 }
 

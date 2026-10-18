@@ -3,26 +3,28 @@
 use crate::memory::{
     MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
+use serde::Serialize;
 use serde_json::Value;
-use tracedecay_application::RetainedSurfaceExecutionErrorV1;
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
+use tracedecay_contracts::retained_surfaces::{
     FactCategoryV1, FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1,
     FactContradictionV1, FactFeedbackActionV1, FactFeedbackDetailsAvailabilityV1,
     FactFeedbackRequestV1, FactFeedbackV1, FactIdentitySourceResultV1, FactPayloadAccessV1,
     FactProjectionV1, FactReadOptionsV1, FactRetrievalTelemetryDegradationV1,
-    FactRetrievalTelemetryV1, FactSearchCursorV1, FactSearchGraphCoverageV1,
-    FactSearchGraphDegradationV1, FactSearchHitV1, FactSearchScoresV1, FactSourceLabelPatchV1,
-    FactStatusV1, FactStoreAddCommitV1, FactStoreAddRequestV1, FactStoreAddResultV1,
-    FactStoreContradictResultV1, FactStoreGetResultV1, FactStoreListResultV1,
-    FactStoreProbeResultV1, FactStoreReasonResultV1, FactStoreRelatedResultV1,
-    FactStoreRemoveRequestV1, FactStoreRemoveResultV1, FactStoreSearchRequestV1,
-    FactStoreSearchResultV1, FactStoreUpdateRequestV1, FactStoreUpdateResultV1, FactTelemetryV1,
+    FactRetrievalTelemetryV1, FactSearchGraphCoverageV1, FactSearchGraphDegradationV1,
+    FactSearchHitV1, FactSearchScoresV1, FactSourceLabelPatchV1, FactStatusV1,
+    FactStoreAddCommitV1, FactStoreAddRequestV1, FactStoreAddResultV1, FactStoreContradictResultV1,
+    FactStoreGetResultV1, FactStoreListResultV1, FactStoreProbeResultV1, FactStoreReasonResultV1,
+    FactStoreRelatedResultV1, FactStoreRemoveRequestV1, FactStoreRemoveResultV1,
+    FactStoreSearchRequestV1, FactStoreSearchResultV1, FactStoreSupersedeRequestV1,
+    FactStoreSupersedeResultV1, FactStoreUpdateRequestV1, FactStoreUpdateResultV1, FactTelemetryV1,
     FactV1, MemoryAlgebraV1, MemoryFeedbackFunnelV1, MemoryScopeV1, MemoryStatusResultV1,
     MemoryStatusV1, RetainedProjectSelectorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
     TrustHistoryEntryV1,
 };
 use tracedecay_domain::{
-    ActorId, Confidence, FactIdentitySourceV1, FactOwnerV1, PayloadAccessState, ProvenanceId,
+    ActorId, Confidence, CursorBindingV1, FactId, FactIdentitySourceV1, FactOwnerV1,
+    PayloadAccessState, ProvenanceId, UtcMicros, decode_bound_cursor, encode_bound_cursor,
 };
 use tracedecay_store::{
     FactCommitReceipt, FactStoreError, ProjectMemoryFactAddDispositionV1,
@@ -34,6 +36,7 @@ use tracedecay_store::{
     ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchGraphCoverageV1,
     ProjectMemoryFactSearchGraphDegradationV1, ProjectMemoryFactSearchHitV1,
     ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery,
+    ProjectMemoryFactSupersedeCommandV1, ProjectMemoryFactSupersedeOutcomeV1,
     ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryMemoryStatusV1,
@@ -48,13 +51,18 @@ pub fn read_scope(
     (options.memory_scope, options.project_selector.as_ref())
 }
 
-pub fn validate_reason_entities(
+pub fn normalize_reason_entities(
     entities: &[String],
-) -> Result<(), RetainedSurfaceExecutionErrorV1> {
-    if entities.is_empty() || entities.windows(2).any(|pair| pair.first() >= pair.get(1)) {
+) -> Result<Vec<String>, RetainedSurfaceExecutionErrorV1> {
+    if entities.is_empty() {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
-    Ok(())
+    let mut entities = entities.to_vec();
+    entities.sort();
+    if entities.windows(2).any(|pair| pair.first() == pair.get(1)) {
+        return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+    }
+    Ok(entities)
 }
 
 pub fn ensure_profile_request_scope(
@@ -88,7 +96,7 @@ pub fn add_request(
     })
 }
 
-pub fn update_patch(
+fn update_patch(
     request: &FactStoreUpdateRequestV1,
 ) -> Result<ProjectMemoryFactUpdatePatchV1, RetainedSurfaceExecutionErrorV1> {
     let source_label = request.source_label.as_ref().map(|patch| match patch {
@@ -101,156 +109,415 @@ pub fn update_patch(
         source_label,
         request.tags.clone(),
         request.entities.clone(),
-        request
-            .metadata
-            .clone()
-            .map(|metadata| Value::Object(metadata.into_iter().collect::<serde_json::Map<_, _>>())),
+        request.metadata.as_ref().map(|metadata| {
+            Value::Object(
+                metadata
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            )
+        }),
         confidence(request.trust)?,
     )
     .map_err(map_store_error)
 }
 
-pub fn update_logical_effect(
-    owner: &FactOwnerV1,
-    request: &FactStoreUpdateRequestV1,
-) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
-    let target = ProjectMemoryFactIdV1::new(owner.clone(), request.fact_id.clone())
-        .map_err(map_store_error)?;
-    update_patch(request)?;
-    serde_json::to_value((
-        "project-memory-fact-update.v1",
-        target.owner(),
-        target.fact_id(),
-        &request.expected_last_event_id,
-        &request.content,
-        request.category,
-        &request.source_label,
-        &request.tags,
-        &request.entities,
-        confidence(request.trust)?,
-        &request.metadata,
-    ))
-    .map_err(|error| {
-        RetainedSurfaceExecutionErrorV1::unavailable(format!(
-            "the memory effect payload could not be serialized: {error}"
-        ))
-    })
-}
-
-pub fn remove_logical_effect(
-    owner: &FactOwnerV1,
-    request: &FactStoreRemoveRequestV1,
-) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
-    let target = ProjectMemoryFactIdV1::new(owner.clone(), request.fact_id.clone())
-        .map_err(map_store_error)?;
-    serde_json::to_value((
-        "project-memory-fact-remove.v1",
-        target.owner(),
-        target.fact_id(),
-        &request.expected_last_event_id,
-    ))
-    .map_err(|error| {
-        RetainedSurfaceExecutionErrorV1::unavailable(format!(
-            "the memory effect payload could not be serialized: {error}"
-        ))
-    })
-}
-
-pub fn feedback_logical_effect(
-    owner: &FactOwnerV1,
-    request: &FactFeedbackRequestV1,
-) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
-    let target = ProjectMemoryFactIdV1::new(owner.clone(), request.fact_id.clone())
-        .map_err(map_store_error)?;
-    serde_json::to_value((
-        "project-memory-fact-feedback.v1",
-        target.owner(),
-        target.fact_id(),
-        &request.expected_last_event_id,
-        request.action,
-        &request.source_label,
-        &request.reason,
-    ))
-    .map_err(|error| {
-        RetainedSurfaceExecutionErrorV1::unavailable(format!(
-            "the memory effect payload could not be serialized: {error}"
-        ))
-    })
-}
-
-pub fn search_logical_effect(
-    owner: &FactOwnerV1,
-    request: &FactStoreSearchRequestV1,
-) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
-    serde_json::to_value((
-        "project-memory-fact-search.v1",
-        owner,
-        &request.query,
-        request.options.category,
-        confidence(Some(request.options.min_trust.unwrap_or(0.3)))?,
-        fact_limit(request.options.limit)?,
-        &request.after,
-    ))
-    .map_err(|error| {
-        RetainedSurfaceExecutionErrorV1::unavailable(format!(
-            "the memory effect payload could not be serialized: {error}"
-        ))
-    })
-}
-
-pub fn update_command(
+fn fact_target(
     owner: FactOwnerV1,
-    request: &FactStoreUpdateRequestV1,
-    operation_id: ProvenanceId,
-    actor: ActorId,
-) -> Result<ProjectMemoryFactUpdateCommandV1, RetainedSurfaceExecutionErrorV1> {
-    let target =
-        ProjectMemoryFactIdV1::new(owner, request.fact_id.clone()).map_err(map_store_error)?;
-    ProjectMemoryFactUpdateCommandV1::new(
-        target,
-        operation_id,
-        request.expected_last_event_id.clone(),
-        update_patch(request)?,
-        Some(actor),
-    )
-    .map_err(map_store_error)
+    fact_id: &FactId,
+) -> Result<ProjectMemoryFactIdV1, RetainedSurfaceExecutionErrorV1> {
+    ProjectMemoryFactIdV1::new(owner, fact_id.clone()).map_err(map_store_error)
 }
 
-pub fn remove_command(
-    owner: FactOwnerV1,
-    request: &FactStoreRemoveRequestV1,
-    operation_id: ProvenanceId,
-    actor: ActorId,
-) -> Result<ProjectMemoryFactRemoveCommandV1, RetainedSurfaceExecutionErrorV1> {
-    let target =
-        ProjectMemoryFactIdV1::new(owner, request.fact_id.clone()).map_err(map_store_error)?;
-    ProjectMemoryFactRemoveCommandV1::new(
-        target,
-        operation_id,
-        request.expected_last_event_id.clone(),
-        Some(actor),
-    )
-    .map_err(map_store_error)
+fn logical_effect_value<T: Serialize>(
+    effect: &T,
+) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
+    serde_json::to_value(effect).map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the memory effect payload could not be serialized: {error}"
+        ))
+    })
 }
 
-pub fn feedback_command(
-    owner: FactOwnerV1,
-    request: &FactFeedbackRequestV1,
-    operation_id: ProvenanceId,
-    actor: ActorId,
-) -> Result<ProjectMemoryFactFeedbackCommandV1, RetainedSurfaceExecutionErrorV1> {
-    let target =
-        ProjectMemoryFactIdV1::new(owner, request.fact_id.clone()).map_err(map_store_error)?;
-    ProjectMemoryFactFeedbackCommandV1::new(
-        target,
-        operation_id,
-        request.expected_last_event_id.clone(),
-        feedback_action(request.action),
-        Some(actor),
-        request.source_label.clone(),
-        request.reason.clone(),
-    )
-    .map_err(map_store_error)
+// Retained memory operations validated once at the mapping boundary.
+//
+// Logical-effect identity (the digest that makes a retry the same durable
+// operation) and the store command or query are both derived from one set of
+// normalized values, so they cannot disagree, and the owned patch values move
+// into the command instead of being rebuilt from the public request. The
+// serialized effect tuples are durable identity inputs: their labels, field
+// order, and wire shapes must not change without a digest version.
+
+/// A fact update whose target and patch validated once.
+pub struct PreparedFactUpdate<'a> {
+    target: ProjectMemoryFactIdV1,
+    patch: ProjectMemoryFactUpdatePatchV1,
+    request: &'a FactStoreUpdateRequestV1,
+}
+
+impl<'a> PreparedFactUpdate<'a> {
+    pub fn new(
+        owner: FactOwnerV1,
+        request: &'a FactStoreUpdateRequestV1,
+    ) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
+        Ok(Self {
+            target: fact_target(owner, &request.fact_id)?,
+            patch: update_patch(request)?,
+            request,
+        })
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        self.target.owner()
+    }
+
+    pub fn logical_effect(&self) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
+        logical_effect_value(&(
+            "project-memory-fact-update.v1",
+            self.target.owner(),
+            self.target.fact_id(),
+            &self.request.expected_last_event_id,
+            self.patch.content(),
+            self.patch.category(),
+            // The public patch keeps `Clear` distinct from "not patched"; the
+            // store patch's nested `Option` would flatten both to `null`.
+            &self.request.source_label,
+            self.patch.tags(),
+            self.patch.entities(),
+            self.patch.trust(),
+            self.patch.metadata(),
+        ))
+    }
+
+    pub fn into_command(
+        self,
+        operation_id: ProvenanceId,
+        actor: ActorId,
+    ) -> Result<ProjectMemoryFactUpdateCommandV1, RetainedSurfaceExecutionErrorV1> {
+        ProjectMemoryFactUpdateCommandV1::new(
+            self.target,
+            operation_id,
+            self.request.expected_last_event_id.clone(),
+            self.patch,
+            Some(actor),
+        )
+        .map_err(map_store_error)
+    }
+}
+
+/// A fact removal whose target validated once.
+pub struct PreparedFactRemove<'a> {
+    target: ProjectMemoryFactIdV1,
+    request: &'a FactStoreRemoveRequestV1,
+}
+
+impl<'a> PreparedFactRemove<'a> {
+    pub fn new(
+        owner: FactOwnerV1,
+        request: &'a FactStoreRemoveRequestV1,
+    ) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
+        Ok(Self {
+            target: fact_target(owner, &request.fact_id)?,
+            request,
+        })
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        self.target.owner()
+    }
+
+    pub fn logical_effect(&self) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
+        logical_effect_value(&(
+            "project-memory-fact-remove.v1",
+            self.target.owner(),
+            self.target.fact_id(),
+            &self.request.expected_last_event_id,
+        ))
+    }
+
+    pub fn into_command(
+        self,
+        operation_id: ProvenanceId,
+        actor: ActorId,
+    ) -> Result<ProjectMemoryFactRemoveCommandV1, RetainedSurfaceExecutionErrorV1> {
+        ProjectMemoryFactRemoveCommandV1::new(
+            self.target,
+            operation_id,
+            self.request.expected_last_event_id.clone(),
+            Some(actor),
+        )
+        .map_err(map_store_error)
+    }
+}
+
+/// A fact supersession whose target and successor validated once.
+pub struct PreparedFactSupersede<'a> {
+    target: ProjectMemoryFactIdV1,
+    successor: ProjectMemoryFactIdV1,
+    request: &'a FactStoreSupersedeRequestV1,
+}
+
+impl<'a> PreparedFactSupersede<'a> {
+    pub fn new(
+        owner: FactOwnerV1,
+        request: &'a FactStoreSupersedeRequestV1,
+    ) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
+        Ok(Self {
+            target: fact_target(owner.clone(), &request.fact_id)?,
+            successor: fact_target(owner, &request.superseded_by)?,
+            request,
+        })
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        self.target.owner()
+    }
+
+    pub fn logical_effect(&self) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
+        logical_effect_value(&(
+            "project-memory-fact-supersede.v1",
+            self.target.owner(),
+            self.target.fact_id(),
+            self.successor.fact_id(),
+            &self.request.expected_last_event_id,
+        ))
+    }
+
+    pub fn into_command(
+        self,
+        operation_id: ProvenanceId,
+        actor: ActorId,
+    ) -> Result<ProjectMemoryFactSupersedeCommandV1, RetainedSurfaceExecutionErrorV1> {
+        ProjectMemoryFactSupersedeCommandV1::new(
+            self.target,
+            self.successor,
+            operation_id,
+            self.request.expected_last_event_id.clone(),
+            Some(actor),
+        )
+        .map_err(map_store_error)
+    }
+}
+
+/// Fact feedback whose target validated once.
+pub struct PreparedFactFeedback<'a> {
+    target: ProjectMemoryFactIdV1,
+    request: &'a FactFeedbackRequestV1,
+}
+
+impl<'a> PreparedFactFeedback<'a> {
+    pub fn new(
+        owner: FactOwnerV1,
+        request: &'a FactFeedbackRequestV1,
+    ) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
+        Ok(Self {
+            target: fact_target(owner, &request.fact_id)?,
+            request,
+        })
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        self.target.owner()
+    }
+
+    pub fn logical_effect(&self) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
+        logical_effect_value(&(
+            "project-memory-fact-feedback.v1",
+            self.target.owner(),
+            self.target.fact_id(),
+            &self.request.expected_last_event_id,
+            self.request.action,
+            &self.request.source_label,
+            &self.request.reason,
+        ))
+    }
+
+    pub fn into_command(
+        self,
+        operation_id: ProvenanceId,
+        actor: ActorId,
+    ) -> Result<ProjectMemoryFactFeedbackCommandV1, RetainedSurfaceExecutionErrorV1> {
+        ProjectMemoryFactFeedbackCommandV1::new(
+            self.target,
+            operation_id,
+            self.request.expected_last_event_id.clone(),
+            feedback_action(self.request.action),
+            Some(actor),
+            self.request.source_label.clone(),
+            self.request.reason.clone(),
+        )
+        .map_err(map_store_error)
+    }
+}
+
+/// Trust floor an exact search applies when the request names none. The store
+/// applies the same floor to a filter without one, so passing it explicitly
+/// keeps the query and the identity on one value without changing results.
+const DEFAULT_SEARCH_MIN_TRUST: f64 = 0.3;
+
+/// An exact fact search whose query, trust floor, and page size validated
+/// once; probe/related/reason reads keep using [`search_query`] because they
+/// admit no retained effect.
+pub struct PreparedFactSearch<'a> {
+    query: ProjectMemoryFactSearchQuery,
+    min_trust: Confidence,
+    request: &'a FactStoreSearchRequestV1,
+    binding: CursorBindingV1,
+}
+
+impl<'a> PreparedFactSearch<'a> {
+    pub fn new(
+        owner: FactOwnerV1,
+        request: &'a FactStoreSearchRequestV1,
+    ) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
+        let min_trust = Confidence::new(
+            request
+                .options
+                .min_trust
+                .unwrap_or(DEFAULT_SEARCH_MIN_TRUST),
+        )
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+        let limit = fact_limit(request.options.limit)?;
+        let binding = fact_page_binding(
+            FactPageOperation::Search,
+            &request.query,
+            &request.options,
+            Some(min_trust.as_f64()),
+            limit,
+        )?;
+        let query = fact_search_query(
+            owner,
+            ProjectMemoryFactSearchKindV1::Search,
+            Some(request.query.clone()),
+            request.options.category,
+            Some(min_trust),
+            limit,
+            request.after.as_deref(),
+            &binding,
+        )?;
+        Ok(Self {
+            query,
+            min_trust,
+            request,
+            binding,
+        })
+    }
+
+    pub fn logical_effect(&self) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
+        logical_effect_value(&(
+            "project-memory-fact-search.v1",
+            self.query.owner(),
+            self.query.query(),
+            self.query.filter().category(),
+            self.min_trust,
+            self.query.limit(),
+            &self.request.after,
+        ))
+    }
+
+    /// The store query and the binding its continuation is minted under.
+    pub fn into_parts(self) -> (ProjectMemoryFactSearchQuery, CursorBindingV1) {
+        (self.query, self.binding)
+    }
+}
+
+/// A fact read that pages with a bound continuation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactPageOperation {
+    Search,
+    Probe,
+    Related,
+    Reason,
+    List,
+}
+
+impl FactPageOperation {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Search => "fact_store_search",
+            Self::Probe => "fact_store_probe",
+            Self::Related => "fact_store_related",
+            Self::Reason => "fact_store_reason",
+            Self::List => "fact_store_list",
+        }
+    }
+
+    /// The request field naming what the read is about; a list has none.
+    const fn subject(self) -> Option<&'static str> {
+        match self {
+            Self::Search => Some("query"),
+            Self::Probe | Self::Related => Some("entity"),
+            Self::Reason => Some("entities"),
+            Self::List => None,
+        }
+    }
+}
+
+/// The operation and every result-shaping parameter a fact page continuation
+/// is minted for; `min_trust` and `limit` are the effective values.
+pub fn fact_page_binding<S: Serialize + ?Sized>(
+    operation: FactPageOperation,
+    subject: &S,
+    options: &FactReadOptionsV1,
+    min_trust: Option<f64>,
+    limit: usize,
+) -> Result<CursorBindingV1, RetainedSurfaceExecutionErrorV1> {
+    let binding = CursorBindingV1::builder(operation.name());
+    let binding = match operation.subject() {
+        Some(name) => binding.parameter(name, subject),
+        None => binding,
+    };
+    binding
+        .parameter("memory_scope", &options.memory_scope)
+        .parameter("project_selector", &options.project_selector)
+        .parameter("category", &options.category)
+        .parameter("min_trust", &min_trust)
+        .parameter("limit", &limit)
+        .build()
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
+}
+
+/// Where a fact search page resumes: the store's ranked sort key.
+type FactSearchPosition = (u32, UtcMicros, FactId);
+
+fn decode_search_cursor(
+    binding: &CursorBindingV1,
+    after: Option<&str>,
+) -> Result<Option<ProjectMemoryFactSearchCursorV1>, RetainedSurfaceExecutionErrorV1> {
+    after
+        .map(|encoded| {
+            let (score_millionths, updated_at, fact_id) =
+                decode_bound_cursor::<FactSearchPosition>(binding, encoded).map_err(
+                    |mismatch| RetainedSurfaceExecutionErrorV1::cursor_refused(&mismatch),
+                )?;
+            ProjectMemoryFactSearchCursorV1::new(score_millionths, updated_at, fact_id)
+                .map_err(map_store_error)
+        })
+        .transpose()
+}
+
+/// The fact a list page resumes after, from a cursor minted for `binding`.
+pub fn decode_list_cursor(
+    binding: &CursorBindingV1,
+    after: Option<&str>,
+) -> Result<Option<FactId>, RetainedSurfaceExecutionErrorV1> {
+    after
+        .map(|encoded| {
+            decode_bound_cursor::<FactId>(binding, encoded)
+                .map_err(|mismatch| RetainedSurfaceExecutionErrorV1::cursor_refused(&mismatch))
+        })
+        .transpose()
+}
+
+fn encode_page_cursor<P: Serialize>(
+    binding: &CursorBindingV1,
+    position: &P,
+) -> Result<String, RetainedSurfaceExecutionErrorV1> {
+    encode_bound_cursor(binding, position).map_err(|_| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the fact page continuation could not be encoded",
+        )
+    })
 }
 
 pub fn search_query(
@@ -258,33 +525,40 @@ pub fn search_query(
     kind: ProjectMemoryFactSearchKindV1,
     query: Option<String>,
     options: &FactReadOptionsV1,
-    after: Option<&FactSearchCursorV1>,
+    after: Option<&str>,
+    binding: &CursorBindingV1,
 ) -> Result<ProjectMemoryFactSearchQuery, RetainedSurfaceExecutionErrorV1> {
-    let filter = ProjectMemoryFactSearchFilterV1::new(
-        options.category,
-        confidence(options.min_trust)?,
-        None,
-    )
-    .map_err(map_store_error)?;
-    let after = after
-        .map(|cursor| {
-            ProjectMemoryFactSearchCursorV1::new(
-                cursor.score_millionths,
-                cursor.updated_at,
-                cursor.fact_id.clone(),
-            )
-        })
-        .transpose()
-        .map_err(map_store_error)?;
-    ProjectMemoryFactSearchQuery::with_filter(
+    fact_search_query(
         owner,
         kind,
         query,
-        filter,
-        after,
+        options.category,
+        confidence(options.min_trust)?,
         fact_limit(options.limit)?,
+        after,
+        binding,
     )
-    .map_err(map_store_error)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Maps each validated retained search field onto the store query."
+)]
+fn fact_search_query(
+    owner: FactOwnerV1,
+    kind: ProjectMemoryFactSearchKindV1,
+    query: Option<String>,
+    category: Option<FactCategoryV1>,
+    min_trust: Option<Confidence>,
+    limit: usize,
+    after: Option<&str>,
+    binding: &CursorBindingV1,
+) -> Result<ProjectMemoryFactSearchQuery, RetainedSurfaceExecutionErrorV1> {
+    let filter =
+        ProjectMemoryFactSearchFilterV1::new(category, min_trust, None).map_err(map_store_error)?;
+    let after = decode_search_cursor(binding, after)?;
+    ProjectMemoryFactSearchQuery::with_filter(owner, kind, query, filter, after, limit)
+        .map_err(map_store_error)
 }
 
 pub fn fact_limit(limit: Option<u64>) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
@@ -350,9 +624,18 @@ pub fn projection(
     projection: &ProjectMemoryFactProjectionV1,
 ) -> Result<FactProjectionV1, RetainedSurfaceExecutionErrorV1> {
     match projection {
-        ProjectMemoryFactProjectionV1::Available(fact) => Ok(FactProjectionV1::Available {
-            fact: Box::new(available_fact(fact)?),
-        }),
+        ProjectMemoryFactProjectionV1::Available(fact) => {
+            let fact_projection = Box::new(available_fact(fact)?);
+            match fact.superseded_by() {
+                Some(superseded_by) => Ok(FactProjectionV1::Superseded {
+                    fact: fact_projection,
+                    superseded_by: superseded_by.clone(),
+                }),
+                None => Ok(FactProjectionV1::Available {
+                    fact: fact_projection,
+                }),
+            }
+        }
         ProjectMemoryFactProjectionV1::Unavailable(fact) => Ok(FactProjectionV1::Unavailable {
             status: unavailable_fact(fact)?,
         }),
@@ -440,6 +723,7 @@ fn unavailable_fact(
 
 pub fn search_page(
     page: &ProjectMemoryFactSearchPageV1,
+    binding: &CursorBindingV1,
 ) -> Result<MappedSearchPageV1, RetainedSurfaceExecutionErrorV1> {
     Ok(MappedSearchPageV1 {
         owner: public_owner(page.owner()),
@@ -448,7 +732,19 @@ pub fn search_page(
             .iter()
             .map(search_hit)
             .collect::<Result<Vec<_>, _>>()?,
-        next_after: page.next_after().map(search_cursor),
+        next_after: page
+            .next_after()
+            .map(|cursor| {
+                encode_page_cursor::<FactSearchPosition>(
+                    binding,
+                    &(
+                        cursor.score_millionths(),
+                        cursor.updated_at(),
+                        cursor.fact_id().clone(),
+                    ),
+                )
+            })
+            .transpose()?,
         graph_coverage: graph_coverage(page.graph_coverage()),
     })
 }
@@ -456,7 +752,7 @@ pub fn search_page(
 pub struct MappedSearchPageV1 {
     pub owner: FactCommitOwnerV1,
     pub hits: Vec<FactSearchHitV1>,
-    pub next_after: Option<FactSearchCursorV1>,
+    pub next_after: Option<String>,
     pub graph_coverage: FactSearchGraphCoverageV1,
 }
 
@@ -576,14 +872,6 @@ fn search_hit(
     })
 }
 
-fn search_cursor(cursor: &tracedecay_store::ProjectMemoryFactSearchCursorV1) -> FactSearchCursorV1 {
-    FactSearchCursorV1 {
-        score_millionths: cursor.score_millionths(),
-        updated_at: cursor.updated_at(),
-        fact_id: cursor.fact_id().clone(),
-    }
-}
-
 fn graph_coverage(coverage: ProjectMemoryFactSearchGraphCoverageV1) -> FactSearchGraphCoverageV1 {
     match coverage {
         ProjectMemoryFactSearchGraphCoverageV1::NotApplicable => {
@@ -696,6 +984,7 @@ pub fn memory_status_result(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatu
 
 pub fn list_page(
     page: &ProjectMemoryFactPageV1,
+    binding: &CursorBindingV1,
 ) -> Result<FactStoreListResultV1, RetainedSurfaceExecutionErrorV1> {
     Ok(FactStoreListResultV1 {
         owner: public_owner(page.owner()),
@@ -704,7 +993,10 @@ pub fn list_page(
             .iter()
             .map(projection)
             .collect::<Result<Vec<_>, _>>()?,
-        next_after_fact_id: page.next_after_fact_id().cloned(),
+        next_after: page
+            .next_after_fact_id()
+            .map(|fact_id| encode_page_cursor(binding, fact_id))
+            .transpose()?,
     })
 }
 
@@ -840,9 +1132,7 @@ pub fn remove_result(
             })
         }
         (false, None, None) if !outcome.commit_replayed() => {
-            Ok(FactStoreRemoveResultV1::NotFound {
-                remaining_fact_count: outcome.remaining_fact_count(),
-            })
+            Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
         }
         _ => Err(RetainedSurfaceExecutionErrorV1::unavailable(
             "the fact remove outcome had an inconsistent receipt shape",
@@ -850,15 +1140,42 @@ pub fn remove_result(
     }
 }
 
+pub fn supersede_result(
+    outcome: &ProjectMemoryFactSupersedeOutcomeV1,
+) -> Result<FactStoreSupersedeResultV1, RetainedSurfaceExecutionErrorV1> {
+    match outcome {
+        ProjectMemoryFactSupersedeOutcomeV1::Superseded {
+            fact_id,
+            superseded_by,
+            commit_receipt: receipt,
+            commit_replayed,
+        } => Ok(FactStoreSupersedeResultV1::Superseded {
+            fact_id: fact_id.clone(),
+            superseded_by: superseded_by.clone(),
+            commit: commit_receipt(receipt, *commit_replayed),
+        }),
+        ProjectMemoryFactSupersedeOutcomeV1::AlreadySuperseded {
+            fact_id,
+            superseded_by,
+        } => Ok(FactStoreSupersedeResultV1::AlreadySuperseded {
+            fact_id: fact_id.clone(),
+            superseded_by: superseded_by.clone(),
+        }),
+        ProjectMemoryFactSupersedeOutcomeV1::NotFound => {
+            Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
+        }
+    }
+}
+
 pub fn feedback_result(
     outcome: &tracedecay_store::ProjectMemoryFactFeedbackOutcomeV1,
     action: FactFeedbackActionV1,
 ) -> Result<
-    tracedecay_application::retained_surfaces::FactFeedbackResultV1,
+    tracedecay_contracts::retained_surfaces::FactFeedbackResultV1,
     RetainedSurfaceExecutionErrorV1,
 > {
     Ok(
-        tracedecay_application::retained_surfaces::FactFeedbackResultV1 {
+        tracedecay_contracts::retained_surfaces::FactFeedbackResultV1 {
             fact: projection(outcome.fact())?,
             feedback: FactFeedbackV1 {
                 event_id: outcome.event_id().clone(),
@@ -913,7 +1230,9 @@ pub fn map_memory_error(error: MemoryApplicationError) -> RetainedSurfaceExecuti
         MemoryApplicationError::OwnerMismatch { .. } => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        MemoryApplicationError::Store(error) => map_store_error(error),
+        MemoryApplicationError::Store(error) | MemoryApplicationError::Cancelled(error) => {
+            map_store_error(error)
+        }
         error @ (MemoryApplicationError::InvalidAuthorityResult { .. }
         | MemoryApplicationError::InvalidEvidenceAnchor(_)
         | MemoryApplicationError::EvidenceAnchor(_)) => {
@@ -939,12 +1258,12 @@ pub fn map_store_error(error: FactStoreError) -> RetainedSurfaceExecutionErrorV1
         | FactStoreError::GraphConflict => RetainedSurfaceExecutionErrorV1::Conflict,
         FactStoreError::GraphCancelled | FactStoreError::ReadCancelled => {
             RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             )
         }
         FactStoreError::GraphBudgetExhausted => RetainedSurfaceExecutionErrorV1::Saturated,
         FactStoreError::GraphDeadlineExceeded => RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
+            tracedecay_contracts::CancellationStage::DuringRead,
         ),
         FactStoreError::GraphResetRequired { owner, .. } => match owner {
             FactOwnerV1::Profile => RetainedSurfaceExecutionErrorV1::ProfileResetRequired,
@@ -960,17 +1279,383 @@ fn confidence_millionths(value: Confidence) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::RetainedSurfaceExecutionErrorV1;
-    use tracedecay_application::retained_surfaces::{
-        FactReadOptionsV1, FactStoreSearchRequestV1, MemoryScopeV1, RetainedProjectSelectorV1,
+    use std::collections::BTreeMap;
+
+    use serde_json::{Value, json};
+    use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
+    use tracedecay_contracts::retained_surfaces::{
+        FactCategoryV1, FactFeedbackActionV1, FactFeedbackRequestV1, FactReadOptionsV1,
+        FactSourceLabelPatchV1, FactStoreRemoveRequestV1, FactStoreSearchRequestV1,
+        FactStoreSupersedeRequestV1, FactStoreUpdateRequestV1, MemoryScopeV1,
+        RetainedProjectSelectorV1,
     };
-    use tracedecay_domain::{FactOwnerV1, ProjectId};
+    use tracedecay_domain::{
+        ActorId, FactEventId, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
+        ProjectId, ProvenanceId, UtcMicros, canonical_sha256,
+    };
     use tracedecay_store::FactStoreError;
 
     use super::{
-        FactRetrievalTelemetryDegradationV1, MAX_RETAINED_FACT_LIMIT, fact_limit, map_store_error,
-        retrieval_telemetry_degradation, search_logical_effect,
+        FactPageOperation, FactRetrievalTelemetryDegradationV1, FactSearchPosition,
+        MAX_RETAINED_FACT_LIMIT, PreparedFactFeedback, PreparedFactRemove, PreparedFactSearch,
+        PreparedFactSupersede, PreparedFactUpdate, confidence, encode_page_cursor, fact_limit,
+        fact_page_binding, map_store_error, retrieval_telemetry_degradation,
     };
+
+    fn owner() -> FactOwnerV1 {
+        FactOwnerV1::Project {
+            project_id: ProjectId::new("project.retained-memory-mapping").expect("project id"),
+        }
+    }
+
+    fn fact_id(owner: &FactOwnerV1, operation: &str) -> FactId {
+        FactId::derive(
+            &FactIdentityMaterialV1::new(
+                owner.clone(),
+                FactIdentitySourceV1::Application {
+                    operation_id: ProvenanceId::new(operation.to_owned()).expect("operation id"),
+                },
+            )
+            .expect("identity material"),
+        )
+        .expect("fact id")
+    }
+
+    fn event_id(label: &str) -> FactEventId {
+        FactEventId::new(format!("event.mapping.{label}")).expect("event id")
+    }
+
+    fn operation_id() -> ProvenanceId {
+        ProvenanceId::new("memory-operation.effect.mapping".to_owned()).expect("operation id")
+    }
+
+    fn actor() -> ActorId {
+        ActorId::new("actor.memory.mapping").expect("actor id")
+    }
+
+    fn metadata() -> BTreeMap<String, Value> {
+        BTreeMap::from([
+            ("zeta".to_owned(), json!({"nested": [1, 2, {"k": "v"}]})),
+            ("alpha".to_owned(), json!(true)),
+        ])
+    }
+
+    fn update_request(
+        owner: &FactOwnerV1,
+        source_label: Option<FactSourceLabelPatchV1>,
+    ) -> FactStoreUpdateRequestV1 {
+        FactStoreUpdateRequestV1 {
+            fact_id: fact_id(owner, "operation.mapping.update"),
+            expected_last_event_id: Some(event_id("update")),
+            content: Some("Project Phoenix uses deterministic Amari Memory".to_owned()),
+            memory_scope: None,
+            category: Some(FactCategoryV1::Decision),
+            tags: Some(vec!["memory".to_owned(), "holographic".to_owned()]),
+            entities: Some(vec![
+                "Amari Memory".to_owned(),
+                "Project Phoenix".to_owned(),
+            ]),
+            trust: Some(0.75),
+            source_label,
+            metadata: Some(metadata()),
+            project_selector: None,
+        }
+    }
+
+    fn assert_same_identity(prepared: &Value, legacy: &Value, label: &str) {
+        assert_eq!(prepared, legacy, "{label}: logical effect value");
+        assert_eq!(
+            canonical_sha256(prepared).expect("prepared digest"),
+            canonical_sha256(legacy).expect("legacy digest"),
+            "{label}: logical effect digest"
+        );
+    }
+
+    /// The prepared values must reproduce the logical-effect tuples the
+    /// retained memory surface digested before request preparation existed:
+    /// an operation id derived from these bytes is a replay of a committed
+    /// effect, so any drift here would silently fork idempotency.
+    #[test]
+    fn prepared_effects_reproduce_the_retained_identity_tuples() {
+        let owner = owner();
+        for (label, request) in [
+            (
+                "update.set",
+                update_request(
+                    &owner,
+                    Some(FactSourceLabelPatchV1::Set {
+                        value: "mcp-test".to_owned(),
+                    }),
+                ),
+            ),
+            (
+                "update.clear",
+                update_request(&owner, Some(FactSourceLabelPatchV1::Clear)),
+            ),
+            ("update.untouched-label", update_request(&owner, None)),
+            (
+                "update.trust-only",
+                FactStoreUpdateRequestV1 {
+                    content: None,
+                    category: None,
+                    tags: None,
+                    entities: None,
+                    metadata: None,
+                    expected_last_event_id: None,
+                    ..update_request(&owner, None)
+                },
+            ),
+        ] {
+            let prepared = PreparedFactUpdate::new(owner.clone(), &request).expect(label);
+            let legacy = serde_json::to_value((
+                "project-memory-fact-update.v1",
+                &owner,
+                &request.fact_id,
+                &request.expected_last_event_id,
+                &request.content,
+                request.category,
+                &request.source_label,
+                &request.tags,
+                &request.entities,
+                confidence(request.trust).expect(label),
+                &request.metadata,
+            ))
+            .expect(label);
+            assert_same_identity(&prepared.logical_effect().expect(label), &legacy, label);
+        }
+
+        let remove = FactStoreRemoveRequestV1 {
+            fact_id: fact_id(&owner, "operation.mapping.remove"),
+            expected_last_event_id: Some(event_id("remove")),
+            memory_scope: None,
+            project_selector: None,
+        };
+        let prepared = PreparedFactRemove::new(owner.clone(), &remove).expect("remove");
+        let legacy = serde_json::to_value((
+            "project-memory-fact-remove.v1",
+            &owner,
+            &remove.fact_id,
+            &remove.expected_last_event_id,
+        ))
+        .expect("remove");
+        assert_same_identity(
+            &prepared.logical_effect().expect("remove"),
+            &legacy,
+            "remove",
+        );
+
+        let supersede = FactStoreSupersedeRequestV1 {
+            fact_id: fact_id(&owner, "operation.mapping.supersede.old"),
+            superseded_by: fact_id(&owner, "operation.mapping.supersede.new"),
+            expected_last_event_id: None,
+            memory_scope: None,
+            project_selector: None,
+        };
+        let prepared = PreparedFactSupersede::new(owner.clone(), &supersede).expect("supersede");
+        let legacy = serde_json::to_value((
+            "project-memory-fact-supersede.v1",
+            &owner,
+            &supersede.fact_id,
+            &supersede.superseded_by,
+            &supersede.expected_last_event_id,
+        ))
+        .expect("supersede");
+        assert_same_identity(
+            &prepared.logical_effect().expect("supersede"),
+            &legacy,
+            "supersede",
+        );
+
+        let feedback = FactFeedbackRequestV1 {
+            fact_id: fact_id(&owner, "operation.mapping.feedback"),
+            expected_last_event_id: Some(event_id("feedback")),
+            action: FactFeedbackActionV1::Unhelpful,
+            source_label: Some("reviewer".to_owned()),
+            reason: Some("stale after the Q3 retro".to_owned()),
+            memory_scope: None,
+            project_selector: None,
+        };
+        let prepared = PreparedFactFeedback::new(owner.clone(), &feedback).expect("feedback");
+        let legacy = serde_json::to_value((
+            "project-memory-fact-feedback.v1",
+            &owner,
+            &feedback.fact_id,
+            &feedback.expected_last_event_id,
+            feedback.action,
+            &feedback.source_label,
+            &feedback.reason,
+        ))
+        .expect("feedback");
+        assert_same_identity(
+            &prepared.logical_effect().expect("feedback"),
+            &legacy,
+            "feedback",
+        );
+
+        let explicit = FactReadOptionsV1 {
+            category: Some(FactCategoryV1::Project),
+            min_trust: Some(0.6),
+            limit: Some(5),
+            ..FactReadOptionsV1::default()
+        };
+        let explicit_cursor = encode_page_cursor::<FactSearchPosition>(
+            &fact_page_binding(
+                FactPageOperation::Search,
+                "canonical identity",
+                &explicit,
+                Some(0.6),
+                5,
+            )
+            .expect("binding"),
+            &(
+                750_000,
+                UtcMicros(1_700_000_000_000_000),
+                fact_id(&owner, "operation.mapping.search.cursor"),
+            ),
+        )
+        .expect("cursor");
+        for (label, options, after) in [
+            ("search.defaults", FactReadOptionsV1::default(), None),
+            ("search.explicit", explicit, Some(explicit_cursor)),
+        ] {
+            let request = FactStoreSearchRequestV1 {
+                query: "canonical identity".to_owned(),
+                options,
+                after,
+            };
+            let prepared = PreparedFactSearch::new(owner.clone(), &request).expect(label);
+            let legacy = serde_json::to_value((
+                "project-memory-fact-search.v1",
+                &owner,
+                &request.query,
+                request.options.category,
+                confidence(Some(request.options.min_trust.unwrap_or(0.3))).expect(label),
+                fact_limit(request.options.limit).expect(label),
+                &request.after,
+            ))
+            .expect(label);
+            assert_same_identity(&prepared.logical_effect().expect(label), &legacy, label);
+        }
+    }
+
+    /// Invalid public input fails while preparing, before any identity or
+    /// command exists, with the same typed error class the surface reports.
+    #[test]
+    fn invalid_requests_fail_before_effect_identity() {
+        let owner = owner();
+        let foreign_owner = FactOwnerV1::Project {
+            project_id: ProjectId::new("project.retained-memory-other").expect("project id"),
+        };
+        let mut out_of_range_trust = update_request(&owner, None);
+        out_of_range_trust.trust = Some(1.5);
+        assert!(matches!(
+            PreparedFactUpdate::new(owner.clone(), &out_of_range_trust),
+            Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        ));
+        let empty_patch = FactStoreUpdateRequestV1 {
+            content: None,
+            category: None,
+            tags: None,
+            entities: None,
+            trust: None,
+            metadata: None,
+            ..update_request(&owner, None)
+        };
+        assert!(matches!(
+            PreparedFactUpdate::new(owner.clone(), &empty_patch),
+            Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        ));
+        let foreign_fact = FactStoreUpdateRequestV1 {
+            fact_id: fact_id(&foreign_owner, "operation.mapping.update"),
+            ..update_request(&owner, None)
+        };
+        assert!(matches!(
+            PreparedFactUpdate::new(owner.clone(), &foreign_fact),
+            Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
+        ));
+        assert!(matches!(
+            PreparedFactRemove::new(
+                owner.clone(),
+                &FactStoreRemoveRequestV1 {
+                    fact_id: fact_id(&foreign_owner, "operation.mapping.remove"),
+                    expected_last_event_id: None,
+                    memory_scope: None,
+                    project_selector: None,
+                },
+            ),
+            Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
+        ));
+        assert!(matches!(
+            PreparedFactSupersede::new(
+                owner.clone(),
+                &FactStoreSupersedeRequestV1 {
+                    fact_id: fact_id(&owner, "operation.mapping.supersede.old"),
+                    superseded_by: fact_id(&foreign_owner, "operation.mapping.supersede.new"),
+                    expected_last_event_id: None,
+                    memory_scope: None,
+                    project_selector: None,
+                },
+            ),
+            Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
+        ));
+        let self_supersession = FactStoreSupersedeRequestV1 {
+            fact_id: fact_id(&owner, "operation.mapping.supersede.same"),
+            superseded_by: fact_id(&owner, "operation.mapping.supersede.same"),
+            expected_last_event_id: None,
+            memory_scope: None,
+            project_selector: None,
+        };
+        assert!(matches!(
+            PreparedFactSupersede::new(owner.clone(), &self_supersession)
+                .expect("targets validate")
+                .into_command(operation_id(), actor()),
+            Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        ));
+        let blank_feedback_label = FactFeedbackRequestV1 {
+            fact_id: fact_id(&owner, "operation.mapping.feedback"),
+            expected_last_event_id: None,
+            action: FactFeedbackActionV1::Helpful,
+            source_label: Some("   ".to_owned()),
+            reason: None,
+            memory_scope: None,
+            project_selector: None,
+        };
+        assert!(matches!(
+            PreparedFactFeedback::new(owner.clone(), &blank_feedback_label)
+                .expect("target validates")
+                .into_command(operation_id(), actor()),
+            Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        ));
+        for (label, options) in [
+            (
+                "zero limit",
+                FactReadOptionsV1 {
+                    limit: Some(0),
+                    ..FactReadOptionsV1::default()
+                },
+            ),
+            (
+                "trust above one",
+                FactReadOptionsV1 {
+                    min_trust: Some(1.2),
+                    ..FactReadOptionsV1::default()
+                },
+            ),
+        ] {
+            let request = FactStoreSearchRequestV1 {
+                query: "canonical identity".to_owned(),
+                options,
+                after: None,
+            };
+            assert!(
+                matches!(
+                    PreparedFactSearch::new(owner.clone(), &request),
+                    Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+                ),
+                "{label}"
+            );
+        }
+    }
 
     #[test]
     fn retained_limits_reject_zero_and_oversized_pages() {
@@ -992,13 +1677,13 @@ mod tests {
         assert_eq!(
             map_store_error(FactStoreError::GraphCancelled),
             RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::DuringRead
+                tracedecay_contracts::CancellationStage::DuringRead
             )
         );
         assert_eq!(
             map_store_error(FactStoreError::ReadCancelled),
             RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::DuringRead
+                tracedecay_contracts::CancellationStage::DuringRead
             )
         );
         assert_eq!(
@@ -1008,7 +1693,7 @@ mod tests {
         assert_eq!(
             map_store_error(FactStoreError::GraphDeadlineExceeded),
             RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::DuringRead
+                tracedecay_contracts::CancellationStage::DuringRead
             )
         );
         assert_eq!(
@@ -1055,10 +1740,10 @@ mod tests {
             RetainedSurfaceExecutionErrorV1::ProfileResetRequired,
             RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
             RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             ),
             RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::DuringRead,
+                tracedecay_contracts::CancellationStage::DuringRead,
             ),
         ] {
             assert_eq!(
@@ -1085,8 +1770,12 @@ mod tests {
         explicitly_routed.options.project_selector = Some(RetainedProjectSelectorV1 { project_id });
 
         assert_eq!(
-            search_logical_effect(&owner, &direct),
-            search_logical_effect(&owner, &explicitly_routed)
+            PreparedFactSearch::new(owner.clone(), &direct)
+                .expect("direct search")
+                .logical_effect(),
+            PreparedFactSearch::new(owner, &explicitly_routed)
+                .expect("routed search")
+                .logical_effect()
         );
     }
 }

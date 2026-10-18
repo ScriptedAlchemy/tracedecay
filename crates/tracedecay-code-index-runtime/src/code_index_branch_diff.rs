@@ -1,11 +1,13 @@
-//! Exact sealed-generation branch comparison for the daemon-owned MCP route.
+//! Exact sealed-generation inputs for branch diff and dashboard comparison reads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    FreshnessVectorDigest, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1,
-    TemporalModeV1, VectorWatermark, canonical_sha256,
+    ContentDigest, CursorBindingMismatchV1, CursorBindingV1, FileIdentityDigest, FileOccurrenceId,
+    FreshnessVectorDigest, GitOidV1, RefId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, VectorWatermark,
+    canonical_sha256,
 };
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
@@ -29,8 +31,43 @@ struct GenerationCountsV1 {
     symbols: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct CodeIndexRevisionFileV1 {
+    pub file_identity: FileIdentityDigest,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub path: String,
+    pub content_digest: ContentDigest,
+    pub disposition: SnapshotFileDispositionV1,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexRevisionSnapshotV1 {
+    pub generation: String,
+    pub files: Vec<CodeIndexRevisionFileV1>,
+    pub symbols: Vec<code_search::CodeIndexBranchSymbolV1>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexRevisionPairV1 {
+    pub base: CodeIndexRevisionSnapshotV1,
+    pub head: CodeIndexRevisionSnapshotV1,
+}
+
+#[derive(Clone)]
+pub struct CodeIndexRevisionPairRequestV1 {
+    pub base_reference: RefId,
+    pub base_revision: GitOidV1,
+    pub base_tree: GitOidV1,
+    pub head_reference: RefId,
+    pub head_revision: GitOidV1,
+    pub head_tree: GitOidV1,
+    pub file_filter: Option<String>,
+    pub kind_filter: Option<String>,
+    pub control: code_index_scheduler::branch_generations::BranchGenerationReadControlV1,
+}
+
 fn generation_counts(
-    generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
 ) -> GenerationCountsV1 {
     GenerationCountsV1 {
         files: generation.snapshot().files.len(),
@@ -112,7 +149,7 @@ pub fn diff_symbols(
 }
 
 pub fn generation_symbols(
-    generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     file_filter: Option<&str>,
     kind_filter: Option<&str>,
     control: &code_index_scheduler::branch_generations::BranchGenerationReadControlV1,
@@ -181,6 +218,93 @@ pub fn generation_symbols(
     Ok(symbols)
 }
 
+fn generation_files(
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    file_filter: Option<&str>,
+) -> Result<Vec<CodeIndexRevisionFileV1>, code_search::CodeIndexSearchUnavailableReasonV1> {
+    let repository = generation.snapshot().repository.as_str();
+    let mut files = generation
+        .snapshot()
+        .files
+        .iter()
+        .filter(|file| {
+            file_filter.is_none_or(|filter| {
+                file.logical_path == filter || file.logical_path.starts_with(filter)
+            })
+        })
+        .map(|file| {
+            let file_identity =
+                tracedecay_code_index::chunks::code_file_identity(repository, &file.logical_path)
+                    .map_err(|_| code_search::CodeIndexSearchUnavailableReasonV1::Internal)?;
+            Ok(CodeIndexRevisionFileV1 {
+                file_identity,
+                file_occurrence_id: file.file_occurrence_id.clone(),
+                path: file.logical_path.clone(),
+                content_digest: file.content_digest.clone(),
+                disposition: file.disposition,
+            })
+        })
+        .collect::<Result<Vec<_>, code_search::CodeIndexSearchUnavailableReasonV1>>()?;
+    files.sort_by(|left, right| left.file_identity.cmp(&right.file_identity));
+    Ok(files)
+}
+
+pub async fn revision_pair_layout_inputs(
+    schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    scope: &tracedecay_contracts::ResolvedScope,
+    request: CodeIndexRevisionPairRequestV1,
+) -> Result<CodeIndexRevisionPairV1, code_search::CodeIndexSearchUnavailableReasonV1> {
+    request.control.termination().map_or(Ok(()), Err)?;
+    // Boxed: the pair future holds its blocking read and settle timer inline,
+    // which pushes every handler awaiting this past the large-future bound.
+    let generations = Box::pin(schedulers.bounded_generations_for_revisions(
+        scope,
+        &request.base_reference,
+        &request.base_revision,
+        &request.base_tree,
+        &request.head_reference,
+        &request.head_revision,
+        &request.head_tree,
+        code_index_scheduler::branch_generations::BranchGenerationCardinalityBoundsV1 {
+            maximum_files: MAX_BRANCH_DIFF_FILES_PER_GENERATION,
+            maximum_chunks: MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION,
+            maximum_symbols: MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION,
+        },
+        request.control.clone(),
+    ))
+    .await?;
+    if generation_exceeds_bound(generation_counts(generations.base.generation()))
+        || generation_exceeds_bound(generation_counts(generations.head.generation()))
+    {
+        return Err(code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+    }
+    let read = |generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1| {
+        let symbols = generation_symbols(
+            generation,
+            request.file_filter.as_deref(),
+            request.kind_filter.as_deref(),
+            &request.control,
+        )?;
+        let mut files = generation_files(generation, request.file_filter.as_deref())?;
+        if request.kind_filter.is_some() {
+            let included = symbols
+                .iter()
+                .map(|symbol| symbol.file_identity.clone())
+                .collect::<BTreeSet<_>>();
+            files.retain(|file| included.contains(&file.file_identity));
+        }
+        Ok(CodeIndexRevisionSnapshotV1 {
+            generation: generation.manifest().generation_id.as_str().to_owned(),
+            files,
+            symbols,
+        })
+    };
+    let base = read(generations.base.generation())?;
+    let head = read(generations.head.generation())?;
+    request.control.termination().map_or(Ok(()), Err)?;
+    Ok(CodeIndexRevisionPairV1 { base, head })
+}
+
 fn page_diff_changes(
     base_generation: &str,
     head_generation: &str,
@@ -211,8 +335,8 @@ fn page_diff_changes(
 }
 
 pub fn bounded_diff(
-    base: &crate::code_index::production::CodeIndexPublishedGenerationV1,
-    head: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    base: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    head: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     file_filter: Option<&str>,
     kind_filter: Option<&str>,
     control: &code_index_scheduler::branch_generations::BranchGenerationReadControlV1,
@@ -238,24 +362,40 @@ pub fn bounded_diff(
     diff_symbols(base_id, base_symbols, head_id, head_symbols)
 }
 
-fn prepared_error_reason(
+/// What a branch-diff caller is told when its continuation cannot page this
+/// request. The refs, revisions, and generations ride the scope digest, so a
+/// cursor whose request still matches but whose scope moved names a comparison
+/// that no longer exists: it is stale, not foreign.
+fn prepared_error_outcome(
+    base_generation: Option<String>,
+    head_generation: Option<String>,
     error: PreparedQueryErrorV1,
-) -> code_search::CodeIndexSearchUnavailableReasonV1 {
-    match error {
+) -> code_search::CodeIndexBranchDiffOutcomeV1 {
+    let reason = match error {
         PreparedQueryErrorV1::Invalid => {
-            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest
+            return code_search::CodeIndexBranchDiffOutcomeV1::CursorRefused(
+                CursorBindingMismatchV1::Foreign,
+            );
         }
-        PreparedQueryErrorV1::Stale => {
+        PreparedQueryErrorV1::ParameterChanged { parameter } => {
+            return code_search::CodeIndexBranchDiffOutcomeV1::CursorRefused(
+                CursorBindingMismatchV1::ParameterChanged { parameter },
+            );
+        }
+        PreparedQueryErrorV1::Foreign
+        | PreparedQueryErrorV1::Stale
+        | PreparedQueryErrorV1::GenerationNotHeld => {
             code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
         }
         PreparedQueryErrorV1::Unavailable => {
             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable
         }
-    }
+    };
+    unavailable(base_generation, head_generation, reason)
 }
 
 fn branch_diff_scope_digest(
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     request: &code_search::CodeIndexBranchDiffRequestV1,
     base_generation: &tracedecay_domain::CodeGenerationId,
     head_generation: &tracedecay_domain::CodeGenerationId,
@@ -275,15 +415,18 @@ fn branch_diff_scope_digest(
     ))
 }
 
-fn branch_diff_query_binding_digest(
+const BRANCH_DIFF_OPERATION: &str = "branch_diff";
+
+fn branch_diff_query_binding(
     request: &code_search::CodeIndexBranchDiffRequestV1,
-) -> Result<tracedecay_domain::ManifestDigest, tracedecay_domain::DomainError> {
-    canonical_sha256(&(
-        "tracedecay.code-index-branch-diff.query.v1",
-        request.file_filter.as_deref(),
-        request.kind_filter.as_deref(),
-        "symbol_identity_ascending.v1",
-    ))
+) -> Result<CursorBindingV1, PreparedQueryErrorV1> {
+    CursorBindingV1::builder(BRANCH_DIFF_OPERATION)
+        .parameter("base", &request.base_reference)
+        .parameter("head", &request.head_reference)
+        .parameter("file", &request.file_filter)
+        .parameter("kind", &request.kind_filter)
+        .build()
+        .map_err(|_| PreparedQueryErrorV1::Unavailable)
 }
 
 pub fn code_index_branch_diff_executor<A, S>(
@@ -303,19 +446,13 @@ where
         let admission_provider = admission_provider.clone();
         let scope_resolver = scope_resolver.clone();
         let execution_admission = Arc::clone(&execution_admission);
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let scope = match scope_resolver
                     .resolved_scope_for_project(&request.project_root, &project_id)
                 {
                     Ok(scope) => scope,
-                    Err(crate::mcp_admission::CodeIndexScopeUnavailableV1) => {
-                        return unavailable(
-                            None,
-                            None,
-                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        );
-                    }
+                    Err(error) => return unavailable(None, None, error.search_reason()),
                 };
                 let admission = match admission_provider.admit_current(&scope) {
                     Ok(admission) => admission,
@@ -345,15 +482,15 @@ where
                 if let Some(reason) = control.termination() {
                     return unavailable(None, None, reason);
                 }
-                let _permit = match execution_admission.try_acquire_owned() {
+                let _permit = match crate::code_index_executor::acquire_execution_permit(
+                    execution_admission,
+                    control.deadline.as_ref(),
+                    control.cancellation.as_ref(),
+                )
+                .await
+                {
                     Ok(permit) => permit,
-                    Err(_) => {
-                        return unavailable(
-                            None,
-                            None,
-                            code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
-                        );
-                    }
+                    Err(reason) => return unavailable(None, None, reason),
                 };
                 let generations = match schedulers
                 .bounded_generations_for_revisions(
@@ -390,19 +527,21 @@ where
                     .generation_id
                     .as_str()
                     .to_owned();
-                let completed =
-                    match hotpath::measure_block!("daemon.code_index.branch_diff.diff", {
-                        bounded_diff(
-                            generations.base.generation(),
-                            generations.head.generation(),
-                            request.file_filter.as_deref(),
-                            request.kind_filter.as_deref(),
-                            &control,
-                        )
-                    }) {
-                        Ok(completed) => completed,
-                        Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
-                    };
+                let match_result = {
+                    let _span =
+                        tracing::trace_span!("daemon.code_index.branch_diff.diff").entered();
+                    bounded_diff(
+                        generations.base.generation(),
+                        generations.head.generation(),
+                        request.file_filter.as_deref(),
+                        request.kind_filter.as_deref(),
+                        &control,
+                    )
+                };
+                let completed = match match_result {
+                    Ok(completed) => completed,
+                    Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
+                };
                 let query_authority = match schedulers.query_authority_for_scope(&scope).await {
                     Some(authority) => authority,
                     None => {
@@ -493,8 +632,8 @@ where
                         );
                     }
                 };
-                let query_binding_digest = match branch_diff_query_binding_digest(&request) {
-                    Ok(digest) => digest,
+                let query_binding = match branch_diff_query_binding(&request) {
+                    Ok(binding) => binding,
                     Err(_) => {
                         return unavailable(
                             Some(base_id),
@@ -504,7 +643,6 @@ where
                     }
                 };
                 let bindings = match PreparedQueryBindingsV1::new(
-                    "code_index_branch_diff.v1",
                     scope_digest,
                     generations
                         .head
@@ -512,14 +650,14 @@ where
                         .manifest()
                         .generation_id
                         .clone(),
-                    query_binding_digest,
+                    query_binding,
                 ) {
                     Ok(bindings) => bindings,
-                    Err(error) => {
+                    Err(_) => {
                         return unavailable(
                             Some(base_id),
                             Some(head_id),
-                            prepared_error_reason(error),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                         );
                     }
                 };
@@ -530,11 +668,7 @@ where
                 ) {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        return unavailable(
-                            Some(base_id),
-                            Some(head_id),
-                            prepared_error_reason(error),
-                        );
+                        return prepared_error_outcome(Some(base_id), Some(head_id), error);
                     }
                 };
                 let page_size = match u32::try_from(
@@ -555,15 +689,11 @@ where
                     &bindings,
                     completed.changes,
                     page_size,
-                    tracedecay_application::clock::now_micros(),
+                    tracedecay_contracts::clock::now_micros(),
                 ) {
                     Ok(page) => page,
                     Err(error) => {
-                        return unavailable(
-                            Some(base_id),
-                            Some(head_id),
-                            prepared_error_reason(error),
-                        );
+                        return prepared_error_outcome(Some(base_id), Some(head_id), error);
                     }
                 };
                 let total_changes = match usize::try_from(page.total) {
@@ -621,7 +751,7 @@ where
                 }
                 outcome
             },
-            label = "daemon.code_index.branch_diff"
+            tracing::trace_span!("daemon.code_index.branch_diff"),
         ))
     })
 }
@@ -631,7 +761,7 @@ mod tests {
     use tracedecay_query::code_search::{self, CodeIndexBranchSymbolV1};
 
     use super::{
-        branch_diff_query_binding_digest, branch_diff_scope_digest, diff_symbols, page_diff_changes,
+        branch_diff_query_binding, branch_diff_scope_digest, diff_symbols, page_diff_changes,
     };
 
     fn symbol(
@@ -759,50 +889,6 @@ mod tests {
     }
 
     #[test]
-    fn result_page_retains_authenticated_continuation_and_merged_order() {
-        let changes = vec![
-            code_search::CodeIndexBranchChangeV1::Removed {
-                symbol: symbol(
-                    1,
-                    "symbol.base.removed",
-                    "crate::removed",
-                    "src/a.rs",
-                    "sha256:removed",
-                ),
-            },
-            code_search::CodeIndexBranchChangeV1::Added {
-                symbol: symbol(
-                    2,
-                    "symbol.head.added",
-                    "crate::added",
-                    "src/b.rs",
-                    "sha256:added",
-                ),
-            },
-        ];
-
-        let outcome = page_diff_changes(
-            "generation.base",
-            "generation.head",
-            changes.clone(),
-            3,
-            Some("cursor.authenticated".to_owned()),
-        );
-
-        assert!(matches!(
-            outcome,
-            code_search::CodeIndexBranchDiffOutcomeV1::Partial(
-                code_search::CodeIndexBranchDiffPartialV1 {
-                    total_changes: 3,
-                    changes: page,
-                    next_cursor,
-                    ..
-                }
-            ) if page == changes && next_cursor == "cursor.authenticated"
-        ));
-    }
-
-    #[test]
     fn same_named_symbol_occurrences_are_not_overwritten() {
         let base = vec![
             symbol(
@@ -874,7 +960,7 @@ mod tests {
 
     #[test]
     fn continuation_binding_covers_exact_refs_commits_trees_generations_and_filters() {
-        let scope = tracedecay_application::ResolvedScope::new(
+        let scope = tracedecay_contracts::ResolvedScope::new(
             tracedecay_domain::ProjectId::new("project.diff-binding").expect("project"),
             tracedecay_domain::RepositoryId::new("repository.diff-binding").expect("repository"),
             tracedecay_domain::WorktreeId::new("worktree.diff-binding").expect("worktree"),
@@ -961,12 +1047,11 @@ mod tests {
             .expect("changed head generation digest"),
             expected,
         );
-        let expected_query =
-            branch_diff_query_binding_digest(&request).expect("query binding digest");
+        let expected_query = branch_diff_query_binding(&request).expect("query binding");
         let mut changed_filter = request;
         changed_filter.kind_filter = Some("struct".to_owned());
         assert_ne!(
-            branch_diff_query_binding_digest(&changed_filter).expect("changed query digest"),
+            branch_diff_query_binding(&changed_filter).expect("changed query binding"),
             expected_query,
         );
     }

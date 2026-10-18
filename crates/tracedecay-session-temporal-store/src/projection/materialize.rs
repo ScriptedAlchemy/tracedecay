@@ -12,9 +12,9 @@ use tracedecay_store::{
     SessionRefreshProgressV1, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
-use crate::support::derive_projection;
+use tracedecay_store::derive_canonical_projection;
 
 use super::super::query::{
     PERSIST_OPERATION, frontier_i64, generation_i64, missing_observation, now_micros,
@@ -25,6 +25,7 @@ use super::super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartState
 use super::MATERIALIZE_REFRESH;
 use super::persist::*;
 use super::receipts::*;
+use crate::sql::live_effect_predicate;
 
 const PARENT_RESOLVER_PAGE_SIZE: i64 = 512;
 const PARENT_RESOLVER_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
@@ -32,7 +33,6 @@ const PARENT_RESOLVER_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
 pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
     conn: &impl crate::handle::SessionTemporalQuery,
     recovery: &SessionRefreshRecoveryV1,
-    baseline_copy_count: u64,
 ) -> SessionStoreResult<Option<(SessionRefreshProgressV1, SessionTemporalProjectionBatchV1)>> {
     let (
         batch_ordinal,
@@ -42,13 +42,16 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
         previous_updated_at,
     ) = match recovery.restart_state() {
         SessionRefreshRestartStateV1::BeginProjection => {
-            let baseline_records = session_temporal_projection_record_count(
-                conn,
-                recovery.session_id(),
-                recovery.frozen_watermarks().active_generation(),
-                baseline_copy_count,
+            let baseline_records = u64::try_from(
+                base_projection_coverage(
+                    conn,
+                    recovery.session_id(),
+                    generation_i64(recovery.candidate_generation(), MATERIALIZE_REFRESH)?,
+                )
+                .await?
+                .record_count(),
             )
-            .await?;
+            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
             (
                 0,
                 recovery.source_frontier(),
@@ -84,14 +87,18 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
         .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
     let mut rows = conn
         .query(
-            "SELECT observation_id, observation_sequence, output_count
-             FROM session_temporal_observation_effects
-             WHERE session_id = ?1
-               AND observation_sequence > ?2
-               AND observation_sequence <= ?3
-               AND output_count > 0
-             ORDER BY observation_sequence, observation_id
-             LIMIT ?4",
+            &format!(
+                "SELECT effect.observation_id, effect.observation_sequence, effect.output_count
+                 FROM session_temporal_observation_effects AS effect
+                 WHERE effect.session_id = ?1
+                   AND effect.observation_sequence > ?2
+                   AND effect.observation_sequence <= ?3
+                   AND effect.output_count > 0
+                   AND {}
+                 ORDER BY effect.observation_sequence, effect.observation_id
+                 LIMIT ?4",
+                live_effect_predicate("?3")
+            ),
             params![
                 recovery.session_id().as_str(),
                 frontier_i64(committed_through, MATERIALIZE_REFRESH)?,
@@ -168,9 +175,7 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
         return Ok(None);
     }
 
-    let (all_occurrences, occurrence_work) =
-        materialize_effect_occurrences(conn, &effects, item_count).await?;
-    record_occurrence_materialization_work(occurrence_work);
+    let all_occurrences = materialize_effect_occurrences(conn, &effects, item_count).await?;
     let mut parents = candidate_parent_message_resolver(
         conn,
         recovery.session_id(),
@@ -194,15 +199,13 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
                         "observation effect output count does not match canonical projection",
                     )
                 })?;
-        let (effect_copies, effect_assertions, relation_work) =
-            derive_retained_projection_relations(
-                conn,
-                recovery.session_id(),
-                effect_occurrences,
-                &parents,
-            )
-            .await?;
-        record_relation_derivation_work(relation_work);
+        let (effect_copies, effect_assertions) = derive_retained_projection_relations(
+            conn,
+            recovery.session_id(),
+            effect_occurrences,
+            &parents,
+        )
+        .await?;
         let effect_items = effect_occurrences
             .len()
             .saturating_add(effect_copies.len())
@@ -305,12 +308,8 @@ pub(super) async fn materialize_effect_occurrences(
     conn: &impl crate::handle::SessionTemporalQuery,
     effects: &[(tracedecay_domain::CanonicalObservationIdV1, u64, usize)],
     item_count: usize,
-) -> SessionStoreResult<(
-    Vec<MessageOccurrenceRecordV1>,
-    OccurrenceMaterializationWork,
-)> {
+) -> SessionStoreResult<Vec<MessageOccurrenceRecordV1>> {
     let mut occurrences = Vec::with_capacity(item_count);
-    let mut work = OccurrenceMaterializationWork::default();
     // One chunked prefetch for the whole effect set instead of one probe per
     // effect. The loop below still walks `effects` in order, so both the emitted
     // occurrence order and the first error raised are unchanged.
@@ -324,9 +323,9 @@ pub(super) async fn materialize_effect_occurrences(
             .get(observation_id.as_str())
             .ok_or_else(|| missing_observation(observation_id))?;
         // One derivation per observation, reused across all of its outputs.
-        let projection =
-            derive_projection(observation).map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-        let outputs = projection.messages().collect::<Vec<_>>();
+        let projection = derive_canonical_projection(observation)
+            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        let outputs = projection.message().into_iter().collect::<Vec<_>>();
         if outputs.len() != *output_count {
             return Err(storage_message(
                 MATERIALIZE_REFRESH,
@@ -336,26 +335,15 @@ pub(super) async fn materialize_effect_occurrences(
         let envelope: CanonicalObservationEnvelopeV1 =
             observation_envelope_from_payload(observation.payload())
                 .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-        work.envelope_parses = work.envelope_parses.saturating_add(1);
         for output in outputs {
-            occurrences.push(canonical_occurrence(conn, observation, &envelope, output).await?);
+            occurrences.push(
+                canonical_occurrence(conn, observation, &envelope, output)
+                    .await?
+                    .0,
+            );
         }
     }
-    Ok((occurrences, work))
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct OccurrenceMaterializationWork {
-    pub(super) envelope_parses: u64,
-}
-
-#[inline(always)]
-fn record_occurrence_materialization_work(work: OccurrenceMaterializationWork) {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.occurrence_materialization.envelope_parses")
-        .inc(work.envelope_parses);
-    #[cfg(not(feature = "hotpath"))]
-    let _ = work;
+    Ok(occurrences)
 }
 
 pub(super) fn derived_temporal_assertion_id(
@@ -470,11 +458,7 @@ pub(super) async fn derive_retained_projection_relations(
     session_id: &SessionId,
     occurrences: &[MessageOccurrenceRecordV1],
     parents: &ParentMessageResolver,
-) -> SessionStoreResult<(
-    Vec<LogicalCopyRecordV1>,
-    Vec<TemporalAssertionRecordV1>,
-    RelationDerivationWork,
-)> {
+) -> SessionStoreResult<(Vec<LogicalCopyRecordV1>, Vec<TemporalAssertionRecordV1>)> {
     let mut copies = BTreeMap::<(String, String), LogicalCopyRecordV1>::new();
     let mut assertions = BTreeMap::<String, TemporalAssertionRecordV1>::new();
     let mut seen_copy_keys = BTreeSet::new();
@@ -489,7 +473,6 @@ pub(super) async fn derive_retained_projection_relations(
         .collect::<Vec<_>>();
     let observations = read_observations(conn, &observation_ids).await?;
     let mut envelopes = HashMap::with_capacity(observations.len());
-    let mut work = RelationDerivationWork::default();
 
     for occurrence in occurrences {
         let envelope = match envelopes.entry(occurrence.source_observation_id.as_str().to_owned()) {
@@ -501,7 +484,6 @@ pub(super) async fn derive_retained_projection_relations(
                 let envelope: CanonicalObservationEnvelopeV1 =
                     observation_envelope_from_payload(observation.payload())
                         .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                work.envelope_parses = work.envelope_parses.saturating_add(1);
                 entry.insert(envelope)
             }
         };
@@ -614,25 +596,14 @@ pub(super) async fn derive_retained_projection_relations(
     Ok((
         copies.into_values().collect(),
         assertions.into_values().collect(),
-        work,
     ))
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct RelationDerivationWork {
-    pub(super) envelope_parses: u64,
-}
-
-#[inline(always)]
-fn record_relation_derivation_work(work: RelationDerivationWork) {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.relation_derivation.envelope_parses")
-        .inc(work.envelope_parses);
-    #[cfg(not(feature = "hotpath"))]
-    let _ = work;
-}
-
-#[hotpath::measure(future = true, label = "session_temporal.projection.candidate_parent")]
+#[tracing::instrument(
+    name = "session_temporal.projection.candidate_parent",
+    level = "trace",
+    skip_all
+)]
 async fn candidate_parent_message_resolver(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
@@ -650,20 +621,17 @@ async fn candidate_parent_message_resolver(
     }
     let encoded_ids =
         serde_json::to_string(&message_ids).map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-    record_parent_resolver_probe();
     let mut rows = conn
         .query(
             "SELECT requested.value,
                     (
                         SELECT occurrence.occurrence_id
                         FROM session_occurrences AS occurrence
-                        JOIN session_temporal_observation_effects AS effect
-                          ON effect.observation_id = occurrence.source_observation_id
-                         AND effect.session_id = occurrence.session_id
+                             INDEXED BY idx_session_occurrences_message
                         WHERE occurrence.session_id = ?1
-                          AND occurrence.generation = ?2
                           AND occurrence.message_id = requested.value
-                        ORDER BY effect.observation_sequence,
+                          AND +occurrence.generation <= ?2
+                        ORDER BY occurrence.source_sequence,
                                  occurrence.projection_output_ordinal,
                                  occurrence.occurrence_id
                         LIMIT 1
@@ -692,19 +660,22 @@ async fn candidate_parent_message_resolver(
         let Some(occurrence_id) = occurrence_id else {
             continue;
         };
-        record_parent_resolver_row(
-            u64::try_from(message_id.len().saturating_add(occurrence_id.len()))
-                .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
-        );
         resolver.register(&message_id, &occurrence_id);
     }
     Ok(resolver)
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.projection.parent_resolver")]
+#[tracing::instrument(
+    name = "session_temporal.projection.parent_resolver",
+    level = "trace",
+    skip_all
+)]
+/// Resolves the canonical outputs of the session's effects in
+/// `(after_frontier, source_frontier]`.
 pub async fn canonical_parent_message_resolver(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &str,
+    after_frontier: u64,
     source_frontier: u64,
     operation: &'static str,
     control: Option<&ExecutionControl>,
@@ -712,38 +683,41 @@ pub async fn canonical_parent_message_resolver(
 ) -> SessionStoreResult<ParentMessageResolver> {
     let mut resolver = ParentMessageResolver::default();
     let frontier = frontier_i64(source_frontier, operation)?;
-    let mut after_sequence = 0_i64;
+    let mut after_sequence = frontier_i64(after_frontier, operation)?;
     loop {
         if let Some(control) = control {
             checkpoint_relation_rebuild_control(control)?;
         }
-        record_parent_resolver_probe();
         let mut rows = conn
             .query(
-                "WITH page AS (
-                     SELECT effect.observation_sequence AS sequence,
-                            observation.observation_json
-                     FROM session_temporal_observation_effects AS effect
-                     JOIN observations AS observation
-                       ON observation.observation_id = effect.observation_id
-                     WHERE effect.session_id = ?1
-                       AND effect.observation_sequence > ?2
-                       AND effect.observation_sequence <= ?3
-                       AND effect.output_count > 0
-                     ORDER BY effect.observation_sequence
-                     LIMIT ?4
-                 ),
-                 bounded AS (
-                     SELECT sequence, observation_json,
-                            ROW_NUMBER() OVER (ORDER BY sequence) AS page_row,
-                            SUM(length(CAST(observation_json AS BLOB)))
-                                OVER (ORDER BY sequence) AS cumulative_bytes
-                     FROM page
-                 )
-                 SELECT sequence, observation_json
-                 FROM bounded
-                 WHERE cumulative_bytes <= ?5 OR page_row = 1
-                 ORDER BY sequence",
+                &format!(
+                    "WITH page AS (
+                         SELECT effect.observation_sequence AS sequence,
+                                observation.observation_json
+                         FROM session_temporal_observation_effects AS effect
+                         JOIN observations AS observation
+                           ON observation.observation_id = effect.observation_id
+                         WHERE effect.session_id = ?1
+                           AND effect.observation_sequence > ?2
+                           AND effect.observation_sequence <= ?3
+                           AND effect.output_count > 0
+                           AND {}
+                         ORDER BY effect.observation_sequence
+                         LIMIT ?4
+                     ),
+                     bounded AS (
+                         SELECT sequence, observation_json,
+                                ROW_NUMBER() OVER (ORDER BY sequence) AS page_row,
+                                SUM(length(CAST(observation_json AS BLOB)))
+                                    OVER (ORDER BY sequence) AS cumulative_bytes
+                         FROM page
+                     )
+                     SELECT sequence, observation_json
+                     FROM bounded
+                     WHERE cumulative_bytes <= ?5 OR page_row = 1
+                     ORDER BY sequence",
+                    live_effect_predicate("?3")
+                ),
                 params![
                     session_id,
                     after_sequence,
@@ -771,11 +745,8 @@ pub async fn canonical_parent_message_resolver(
                 ));
             }
             let encoded: String = row.get(1).map_err(|error| storage(operation, error))?;
-            record_parent_resolver_row(
-                u64::try_from(encoded.len()).map_err(|error| storage(operation, error))?,
-            );
             let observation: tracedecay_domain::DurableObservationV1 =
-                serde_json::from_str(&encoded).map_err(|error| storage(operation, error))?;
+                crate::query::decode_stored_observation(conn, &encoded, operation).await?;
             let envelope = if retain_canonical_outputs {
                 Some(
                     observation_envelope_from_payload(observation.payload())
@@ -784,10 +755,11 @@ pub async fn canonical_parent_message_resolver(
             } else {
                 None
             };
-            let projection =
-                derive_projection(&observation).map_err(|error| storage(operation, error))?;
+            let projection = derive_canonical_projection(&observation)
+                .map_err(|error| storage(operation, error))?;
             for output in projection
-                .messages()
+                .message()
+                .into_iter()
                 .filter(|output| output.session().session_id == session_id)
             {
                 let occurrence_id = MessageOccurrenceIdV1::derive(
@@ -814,25 +786,8 @@ pub async fn canonical_parent_message_resolver(
             break;
         }
     }
-    resolver.reject_ambiguity(operation)?;
+    resolver.reject_ambiguity()?;
     Ok(resolver)
-}
-
-#[inline(always)]
-fn record_parent_resolver_probe() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.parent_resolver.query_probes").inc(1_u64);
-}
-
-#[inline(always)]
-fn record_parent_resolver_row(bytes: u64) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("session_temporal.parent_resolver.rows").inc(1_u64);
-        hotpath::gauge!("session_temporal.parent_resolver.row_payload_bytes").inc(bytes);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = bytes;
 }
 
 impl ParentMessageResolver {
@@ -848,19 +803,16 @@ impl ParentMessageResolver {
             });
     }
 
-    pub(crate) fn reject_ambiguity(&self, operation: &'static str) -> SessionStoreResult<()> {
+    pub(crate) fn reject_ambiguity(&self) -> SessionStoreResult<()> {
         if let Some((message_id, resolution)) = self
             .occurrences
             .iter()
             .find(|(_, resolution)| resolution.occurrences.len() > 1)
         {
-            return Err(storage_message(
-                operation,
-                format!(
-                    "session-scoped message id {message_id} resolves to {} occurrences",
-                    resolution.occurrences.len()
-                ),
-            ));
+            return Err(SessionStoreError::AmbiguousMessageOccurrence {
+                message_id: message_id.clone(),
+                occurrences: resolution.occurrences.len(),
+            });
         }
         Ok(())
     }
@@ -873,6 +825,10 @@ impl ParentMessageResolver {
 
     pub(crate) fn canonical_outputs(&self) -> &[(String, Option<String>)] {
         &self.canonical_outputs
+    }
+
+    pub(crate) fn message_ids(&self) -> impl Iterator<Item = &str> {
+        self.occurrences.keys().map(String::as_str)
     }
 }
 

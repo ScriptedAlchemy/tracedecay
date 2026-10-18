@@ -22,15 +22,15 @@ preservation, current-frontier preservation, authority-loss rollback, and
 trigger restoration.
 
 Corrected 2026-07-31: failure class 2 and the matching Delivery entry claimed
-code-index generation retention was not implemented. That claim was stale —
+code-index generation retention was not implemented. That claim was stale,
 retention has been implemented and converging since before this correction. Both
 sections are restated below; the residual gap is stranded scope roots and the
 byte-budget gates that made the retention findings unreachable, both addressed
 by the same change that carries this correction.
 
 Size evidence published in this plan remains file- and directory-level only.
-`SqliteStoreSizeTelemetryPort` in
-`crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs` implements
+`GuardedStoreTelemetryPort` in
+`crates/tracedecay-maintenance/src/telemetry.rs` implements
 `StoreSizeTelemetryPort` over the runtime's read-only SQLite health reader,
 including `dbstat` table-payload samples. The daemon Doctor kernel emits those
 per-table samples only as tracing; they are not Doctor findings, dashboard
@@ -56,7 +56,7 @@ evidence that motivated this plan. The current census of the same profile
 ≈ 13 GB, `code-index-v1/` ≈ 13 GB, `tracedecay.db` ≈ 7.1 GB, with 17 sealed
 generation files spread across 11 scope roots. The live tracedecay scope sits at
 generation `…00000082` with 4 superseded generations, 17 retention receipts
-dated Jul 27–29, and an empty quarantine — that is generation retention running
+dated Jul 27–29, and an empty quarantine, that is generation retention running
 and converging, not a store that has never collected.
 
 The historical measurement follows. The profile totalled 106 GB: `projects/` was
@@ -75,8 +75,8 @@ measurements, not inferred table sizes.
    lightweight.
 2. **Code-index storage is unreachable above the scope root** (restated
    2026-07-31; the original "generations have no retention" reading is
-   withdrawn). The 2026-07-23 observation — 28 immutable generation files,
-   22.2 GiB, one active generation, sequence equal to file count — was accurate
+   withdrawn). The 2026-07-23 observation, 28 immutable generation files,
+   22.2 GiB, one active generation, sequence equal to file count, was accurate
    for its date and is no longer the failure. Liveness-based generation
    retention is implemented and converging: mark-and-sweep over
    {active} ∪ vector-readable sources ∪ a newest-superseded rollback floor, an
@@ -89,18 +89,20 @@ measurements, not inferred table sizes.
    `code-index-v1/<sha256(canonical_project_root)>/`, and every caller derives
    exactly one scope from the project root it was handed, so nothing enumerated
    the siblings. One repository carried three scope directories under a single
-   repository discriminator — two stranded by deleted agent worktrees — holding
+   repository discriminator, two stranded by deleted agent worktrees, holding
    7.2 GiB that no retention pass could reach and no report counted. Scope-root
    reconciliation now closes this: it collects a stranded scope through the same
    journal/quarantine/receipt ordering, only under the maintenance writer lease,
-   and only against one revision-bound, complete liveness proof. That proof joins
-   registered and `gix`-observed worktree scopes, every durable configuration
-   active/rollback vector root, pending/ready/published vector dependencies,
-   exact verified-generation leases, and the durable physical-scope-to-logical-
-   shard binding. Any missing, corrupt, stale, or unreadable authority collects
-   nothing and emits a named degradation. Collection starts only past a
-   seven-day minimum stranding age and never recursively removes anything
-   outside the journaled quarantine path.
+   and only against one liveness proof: the scopes of every worktree `gix`
+   registers for the repository and of every mounted worktree still on disk,
+   derived again immediately before quarantine and required to match. An
+   unreadable authority collects nothing and emits a named degradation. A scope
+   whose recorded checkout root is gone (a removed worktree) is collected on the
+   next full maintenance tick; any other unnamed scope waits out a seven-day
+   minimum stranding age. Collection never recursively removes anything outside
+   the journaled quarantine path, and the shared segments and text artifacts
+   only the collected scope named are swept by the next generation-retention
+   pass.
 
    A second, quieter failure sat beside it: the Doctor and storage-report
    entry points guarded this family with byte budgets (64 MiB and 32 MiB) that
@@ -111,13 +113,13 @@ measurements, not inferred table sizes.
    reads; only digest verification is expensive. Doctor now gates on entry count
    and censuses from metadata, and the report keeps its digest budget but
    degrades to a metadata-only entry instead of discarding a readable census.
-3. **Identity-drift orphan stores — ~41 GB.** A project-root path migration
+3. **Identity-drift orphan stores, ~41 GB.** A project-root path migration
    re-registered repositories under new project IDs; the old-identity stores
    remained silently, invisible to any surface. Registry GC exists but was
    not automatic and was blocked by a daemon configuration-authority bug.
    (Update 2026-08-07: the configuration-authority defect forcing a moved or
    renamed checkout to `reset_required` instead of republishing its source
-   binding now has code repairs at tip — `fix(config): rebind daemon source
+   binding now has code repairs at tip, `fix(config): rebind daemon source
    binding for moved checkouts` and `fix(global-db): keep moved project roots
    resolvable by former path`. Whether this closes the measured ~41 GB
    orphan-store backlog, or whether Registry GC still needs an operator-run
@@ -140,7 +142,7 @@ measurements, not inferred table sizes.
 6. **Free-page bloat.** Large DBs carry unreclaimed free pages; no
    compaction policy exists.
    Corrected 2026-08-08: this class is closed. A compaction policy now exists
-   and is engaged — see the dated Delivery amendment below. The sentence above
+   and is engaged, see the dated Delivery amendment below. The sentence above
    is retained as the original measured finding, not as current state.
 
 ## Product contract
@@ -150,7 +152,7 @@ measurements, not inferred table sizes.
    daemon sweep reconciles `branches/` against live git refs. `branch gc`
    remains the manual verb; the automatic path is the default.
 
-   **Dated amendment (2026-08-07, recorded decision — supersedes the
+   **Dated amendment (2026-08-07, recorded decision, supersedes the
    per-branch-DB model above).** Per-branch SQLite copies are retired as the
    write-side mechanism. Non-default-branch writes now land in the single
    project store's next branch-graph publication epoch, fenced by the sync
@@ -158,14 +160,14 @@ measurements, not inferred table sizes.
    (`feat(graph): fence branch graph publication and mutation epochs`,
    e19add066a; `feat(branch): serve tracked branches from the single project
    store`, 712f69ec04). Tracking a branch publishes a metadata entry
-   referencing the canonical main database instead of copying a private
-   SQLite snapshot; `resolve_db_for_branch` always serves the main store,
-   with the branch argument deciding provenance and fallback warnings only;
+   in the canonical main database instead of copying a private SQLite
+   snapshot; `resolve_serving_branch` resolves only the serving branch and
+   fallback warning, never a database path;
    branch admin Remove/RemoveAll/Gc retire single-store entries rather than
    deleting per-branch files. This structurally removes the "live branch
    stores scale as branches × full graph size" failure class described
    above (Measured failure classes, item 1) instead of mitigating it through
-   GC — there is no longer a per-branch database to accumulate or collect.
+   GC, there is no longer a per-branch database to accumulate or collect.
    Branch identity remains provenance-only; facts stay project-wide.
 
    **Residual defect closed 2026-08-07 (RC item G4).** The cutover left
@@ -173,27 +175,27 @@ measurements, not inferred table sizes.
    `branch_drifted_with()` was vacuously false, the mid-session drift reopen
    never fired, and the MCP freshness drift test failed. Ordinary opens
    (read-write, read-only, and init) now resolve branch provenance through
-   `TraceDecay::resolve_branch_provenance`, which reads `resolve_db_for_branch`
-   for the serving branch and fallback warning only — never for a path, since
-   the canonical project database serves every branch. `serving_branch` is
+   `TraceDecay::resolve_branch_provenance`, which reads `resolve_serving_branch`
+   for the serving branch and fallback warning, since the canonical project
+   database serves every branch. `serving_branch` is
    therefore `Some` exactly when the store publishes branch metadata, which is
    what the drift check reads as "there is a branch identity to drift from".
    The write gate follows the same epoch model: it now refuses only on drift
    from the open-time branch, and no longer refuses a write because the live
-   branch falls back to an ancestor's provenance — a fallback is no longer a
+   branch falls back to an ancestor's provenance, a fallback is no longer a
    wrong database to write into.
 2. **Registry orphan detection and collection.** The registry sweep detects
    stores whose project identity no longer resolves to a live repository
    root, reports them as a typed Doctor finding (with age and size), and
    collects them under an owner-visible retention window. Identity
    migrations must re-link or explicitly retire prior-identity stores in the
-   same operation — never orphan silently.
+   same operation, never orphan silently.
 3. **Session retention policy.** Raw transcript rows (`lcm_raw_messages`)
    are retained only until their LCM projection/summary lineage is durable,
    then payload-offloaded or dropped per a configurable retention window.
    Projected `session_messages` and their FTS indexes obey the same window.
    Append-only evidence stores (`observations`, anchors, provenance) gain
-   generation-scoped retention tied to anchor dispositions — superseded and
+   generation-scoped retention tied to anchor dispositions, superseded and
    deleted dispositions release their storage.
 4. **One content copy.** Raw and projected message content must not be
    duplicated at rest indefinitely. The projection either references raw
@@ -201,7 +203,7 @@ measurements, not inferred table sizes.
    both full copies is a defect, not a design.
 5. **Incident debris ownership.** Recovery/corruption artifacts are written
    into a single quarantined location with metadata, surfaced by Doctor,
-   and collected by the same retention machinery — never left as loose
+   and collected by the same retention machinery, never left as loose
    sibling files.
 6. **Compaction policy.** The daemon schedules incremental vacuum/compaction
    for stores whose free-page ratio crosses a threshold, off the hot path.
@@ -230,7 +232,21 @@ measurements, not inferred table sizes.
   quarantine, and durable receipt, with crash replay on the next pass. It runs
   from the daemon maintenance cadence and semantic-runtime publication, under a
   lease and with the vector inventory pinned before any sweep. Doctor and the
-  storage report observe its state but never trigger a sweep.
+  storage report observe its state but never trigger a sweep. (Amended
+  2026-09-28, #2400/#2401.) Every registered project's scopes that no mounted
+  graph owns are a unit of the maintenance tick too, so a project nothing has
+  opened since a restart is collected within one cadence; its graph-replay
+  releases wait in the durable queue for the next mount. One fully verified
+  plan batches up to 32 superseded generations, so a backlog drains in
+  batch-count passes (measured on tree-sitter: 8 generations and their 8 text
+  artifacts, 167 MB, in two ticks one minute apart, unmounted). Generation and
+  text-artifact receipts are pruned once no pending journal or queued release
+  names them. Graph-replay tombstones stay for the life of the store, because
+  append and compare-and-swap refuse a retired key through them; they cost
+  about 2.4 KB per retired replay. The storage report sizes each store by
+  family (graph database, sealed graph, text artifacts, generation artifacts,
+  sessions, other) and lists the backlog against the daemon's resolved
+  protection set.
 - Code-index *scope-root* reconciliation is implemented and engaged. It is the
   only pass that reaches a scope directory whose canonical project root no
   longer exists. It runs beside generation retention on the maintenance cadence,
@@ -250,8 +266,8 @@ measurements, not inferred table sizes.
   daemon-authorized retention owner. The exact receipt supporting the current
   source frontier is retained; the delete trigger is suspended and restored
   inside one immediate transaction, with rollback on authority loss.
-- `StoreSizeTelemetryPort` is implemented by `SqliteStoreSizeTelemetryPort` at
-  `crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs`. Its first
+- `StoreSizeTelemetryPort` is implemented by `GuardedStoreTelemetryPort` at
+  `crates/tracedecay-maintenance/src/telemetry.rs`. Its first
   table read establishes scoped watermarks and later reads return `dbstat`
   payload-growth samples. The daemon Doctor kernel emits those samples as
   tracing only; the dashboard exposes per-store size/free ratio and whole-store
@@ -262,7 +278,7 @@ measurements, not inferred table sizes.
   "no compaction policy exists"; both were stale. `CompactionTriggerPolicyV1`
   (free-page-ratio threshold plus a reclaimable-bytes floor) and
   `CompactionPlacementV1::DeferredBackground` live in
-  `crates/tracedecay-application/src/storage/compaction.rs`. The placement enum
+  `crates/tracedecay-contracts/src/storage/compaction.rs`. The placement enum
   is the type-level enforcement of the "no background compaction that competes
   with foreground writes" non-goal: a compaction cannot be constructed into a
   foreground lane. The daemon maintenance cadence applies the policy from
@@ -291,3 +307,63 @@ measurements, not inferred table sizes.
 - No lossy deletion of live, referenced evidence: retention acts on
   superseded, orphaned, or projected-and-durable data only.
 - No background compaction that competes with foreground writes.
+
+## Dated amendment (2026-09-12, measured): session-store residue after the receipt cutover
+
+**Landed 2026-09-12** (PR #707 lane): retire-on-head-install for sealed
+graph generations, staging sweep on open, retention due on publish,
+immediate collection of vanished worktree scopes and `/tmp`-rooted or
+root-less unregistered stores, enrolled-only writers for response handles
+and the run ledger, the activity index without `metadata_json`, a rowid
+idempotency ledger, one `mutation_json` per mutation, slim receipts with
+frontiers stored once, and a Doctor census of dead sealed artifacts. On the
+measured 16 GB `sessions.db` those remove roughly 7 GB.
+
+**Also landed 2026-09-12 (graph side):** a deferred retirement now deletes
+the retired generation's sealed artifact on its first pass, the directory
+needs no engine, and the Doctor `RetentionBacklog` finding reports the
+live container against its sealed heads with the deferred native
+retirement count. Plan 39's corrected amendment records why the container
+of an inactive project still needs a design.
+
+**Also landed 2026-09-12:** `observation_repository_provenance` embedded the
+repository capture twice per row (`capture_json` and
+`availability_json.value`). Twenty-nine distinct captures stood behind
+187,002 rows, 495 MB, of which 396 MB was the repeated capture. The capture
+now lives once in `observation_repository_captures`; rows keep a reference
+and every reader hydrates through one shared SQL projection. Measured on a
+copy of the live table: 494.6 MB → 98.6 MB.
+
+Two residues remain, each blocked on a design decision outside retention:
+
+1. **`retrieval_anchors` (0.67 GB; 441k anchors at ~1.5 KB).** Measured on
+   the same store, the constant structure inside `anchor_json` is smaller
+   than it looks: `coverage` is one distinct value (154 B × 441k = 68 MB),
+   `projection_watermark` one (17 B, 7 MB), and `authorization` has 249,889
+   distinct values across 441k rows because it carries the per-observation
+   `canonical_request_digest`, interning it saves ~50 MB. A slim persisted
+   shape therefore reclaims ~20 % while touching 126 `anchor_json` read
+   sites across the temporal store and the foreign keys from
+   `retrieval_anchor_aliases`, `retrieval_anchor_dispositions`, and the
+   derived-evidence tables into `retrieval_anchors(anchor_id, owner_json)`.
+   That trade is not worth taking. The cost is structural: 71-byte
+   identifiers repeated in `anchor_id`, `source_observations`, the target,
+   and the owner of every document. The real fix is a columnar anchor table
+   (identifier columns, a small `target_kind`, and only the variable part
+   as JSON), a `RetrievalAnchorRecordV3` persisted shape with the
+   dependent foreign keys moving with it. `anchor_id` derives from owner and
+   target only, so the identity is unaffected. Cardinality is the other
+   lever: 187,002 `repository_capture` anchors name 29 captures because the
+   anchor target folds in the observation's sanitization receipt; whether a
+   capture anchor should be per observation or per capture is a retrieval
+   model decision, not a storage one.
+2. **`observations.observation_json` (1.3 GB) after projection.** Plan 38
+   §4 asks for one content copy; the observation payload is the third beside
+   `session_messages.text` and `lcm_raw_messages.content`. It cannot be
+   released on projection durability today because temporal retrieval reads
+   `observation.observation_json` as the content authority when matching
+   evidence (`tracedecay-session-temporal-store/src/retrieval.rs`), and the
+   retention module correctly never releases active evidence. Release becomes
+   possible once temporal hydration reads message content from the LCM raw
+   store (content-addressed, offloadable) and the observation row keeps only
+   its identity, receipt, and cursor.

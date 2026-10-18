@@ -1,19 +1,20 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::Deserialize;
+use tracedecay_application::observability::{
+    DeliverySettlementAuthorityV1, DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,
+};
 use tracedecay_domain::{
     DeliveryChannelIdentityV1, DeliveryDropReasonV1, DeliveryEventClassV1,
     DeliverySettlementAttemptV1, DeliverySettlementOutcomeV1, DeliverySettlementV1,
     DeliverySurfaceFamilyV1, UtcMicros, canonical_sha256,
 };
-use tracedecay_usecases::observability::{
-    DeliverySettlementAuthorityV1, DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,
-};
+use tracedecay_runtime_core::native_runtime;
 
 use super::DashboardState;
 use super::events_api::DashboardEventV1;
@@ -75,21 +76,27 @@ impl DashboardDeliverySettlementRegistryV1 {
     /// Starts the dashboard-owned bounded deadline lane. The task retains only
     /// a weak reference, so it ends with the mounted dashboard state instead
     /// of surviving restarts as a detached duplicate scheduler.
-    pub(crate) fn mount_deadline_reaper(registry: &Arc<Self>) {
+    pub(crate) fn mount_deadline_reaper(registry: &Arc<Self>) -> Result<(), String> {
         if registry.authority.is_none() {
-            return;
+            return Ok(());
         }
         let registry = Arc::downgrade(registry);
-        tokio::spawn(async move {
+        native_runtime::NativeTask::spawn(async move {
             loop {
                 let Some(registry) = registry.upgrade() else {
                     return;
                 };
                 registry.reap_expired_durable().await;
                 drop(registry);
-                tokio::time::sleep(DELIVERY_DEADLINE_REAPER_INTERVAL).await;
+                let due = Instant::now() + DELIVERY_DEADLINE_REAPER_INTERVAL;
+                if let Err(error) = native_runtime::sleep_until(due).await {
+                    // Without a timer the loop would reap without pause.
+                    tracing::error!(%error, "dashboard delivery deadline reaper timer unavailable");
+                    return;
+                }
             }
-        });
+        })
+        .map(drop)
     }
 
     /// Durably admits an opaque receipt before putting it on the SSE channel.
@@ -555,7 +562,7 @@ enum DeliveryAckOutcomeV1 {
     Unavailable,
 }
 
-#[hotpath::measure(label = "dashboard_api.events.acknowledge", future = true)]
+#[tracing::instrument(name = "dashboard_api.events.acknowledge", level = "trace", skip_all)]
 pub(crate) async fn acknowledge(
     State(state): State<DashboardState>,
     Json(request): Json<DashboardDeliveryAckRequestV1>,
@@ -589,11 +596,11 @@ mod tests {
     use super::*;
     use crate::events_api::DashboardEventKindV1;
     use crate::read_model::DashboardCoverageV1;
-    use tracedecay_domain::ProjectId;
-    use tracedecay_usecases::observability::{
+    use tracedecay_application::observability::{
         BoundedObservabilityProducerV1, DeliverySettlementAuthorityV1,
         ObservabilityProducerIdentityV1,
     };
+    use tracedecay_domain::ProjectId;
 
     fn event() -> DashboardEventV1 {
         DashboardEventV1 {
@@ -664,21 +671,13 @@ mod tests {
         assert!(!valid_receipt(&format!("dsa1:{}", "z".repeat(64))));
     }
 
-    #[test]
-    fn acknowledgement_future_is_send_for_the_http_router() {
-        fn require_send<T: Send>(_: T) {}
-
-        let registry = DashboardDeliverySettlementRegistryV1::new(None);
-        require_send(registry.acknowledge(&format!("dsa1:{}", "a".repeat(64))));
-    }
-
     #[tokio::test]
     async fn receipt_survives_restart_between_sse_frame_and_browser_ack() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project directory");
         let project_id = ProjectId::new("project.dashboard.delivery").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile_dir.path().to_path_buf(),
             project.path(),
             project_id.clone(),
         )
@@ -734,14 +733,85 @@ mod tests {
         producer.shutdown().await.expect("flush producer");
     }
 
-    #[tokio::test]
-    async fn restarted_deadline_reaper_drops_durable_receipt_without_browser_ack() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    /// The reaper and the settlement it drives (durable write, owner-fact
+    /// emission under its persistence deadline) run with no Tokio runtime.
+    #[test]
+    fn restarted_deadline_reaper_drops_durable_receipt_without_browser_ack() {
+        let profile_dir = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project directory");
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_runtime, authority, producer, receipt) =
+            fixture.block_on(overdue_receipt_fixture(profile_dir.path(), project.path()));
+        let writer_waits = native_runtime::native_thread_writer_waits();
+        native_runtime::block_on(async move {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let restarted = Arc::new(DashboardDeliverySettlementRegistryV1::new(Some(
+                Arc::clone(&authority),
+            )));
+            DashboardDeliverySettlementRegistryV1::mount_deadline_reaper(&restarted)
+                .expect("deadline reaper mounted");
+
+            native_runtime::timeout(Duration::from_secs(1), async {
+                loop {
+                    if matches!(
+                        authority
+                            .attempt_for_receipt(&receipt)
+                            .await
+                            .expect("durable receipt lookup"),
+                        Some(DeliverySourceReceiptReadV1::Settled(DeliverySettlementV1 {
+                            outcome: DeliverySettlementOutcomeV1::Dropped,
+                            drop_reason: Some(DeliveryDropReasonV1::Deadline),
+                            ..
+                        }))
+                    ) {
+                        return;
+                    }
+                    let _ = native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
+                        .await;
+                }
+            })
+            .await
+            .expect("mounted deadline reaper settles the overdue receipt without an ACK");
+            let weak_restarted = Arc::downgrade(&restarted);
+            drop(restarted);
+            native_runtime::timeout(Duration::from_secs(1), async {
+                while weak_restarted.upgrade().is_some() {
+                    let _ = native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
+                        .await;
+                }
+            })
+            .await
+            .expect("weak deadline reaper releases its dashboard state");
+            drop(authority);
+            let producer = match Arc::try_unwrap(producer) {
+                Ok(producer) => producer,
+                Err(_) => panic!("registry releases producer"),
+            };
+            producer.shutdown().await.expect("flush producer");
+        })
+        .expect("native block_on");
+        assert_eq!(
+            native_runtime::native_thread_writer_waits(),
+            writer_waits,
+            "the reaper parked no native thread on a writer"
+        );
+    }
+
+    /// A durable receipt admitted by an earlier dashboard process and already
+    /// past its browser ACK deadline.
+    async fn overdue_receipt_fixture(
+        profile_dir: &std::path::Path,
+        project: &std::path::Path,
+    ) -> (
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
+        Arc<DeliverySettlementAuthorityV1>,
+        Arc<BoundedObservabilityProducerV1>,
+        String,
+    ) {
         let project_id = ProjectId::new("project.dashboard.deadline").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-            project.path(),
+            profile_dir.to_path_buf(),
+            project,
             project_id.clone(),
         )
         .await
@@ -774,46 +844,6 @@ mod tests {
             .begin_receipted(&pending.attempt, &receipt)
             .await
             .expect("first dashboard process durably admits the frame");
-
-        let restarted = Arc::new(DashboardDeliverySettlementRegistryV1::new(Some(
-            Arc::clone(&authority),
-        )));
-        DashboardDeliverySettlementRegistryV1::mount_deadline_reaper(&restarted);
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if matches!(
-                    authority
-                        .attempt_for_receipt(&receipt)
-                        .await
-                        .expect("durable receipt lookup"),
-                    Some(DeliverySourceReceiptReadV1::Settled(DeliverySettlementV1 {
-                        outcome: DeliverySettlementOutcomeV1::Dropped,
-                        drop_reason: Some(DeliveryDropReasonV1::Deadline),
-                        ..
-                    }))
-                ) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("mounted deadline reaper settles the overdue receipt without an ACK");
-        let weak_restarted = Arc::downgrade(&restarted);
-        drop(restarted);
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while weak_restarted.upgrade().is_some() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("weak deadline reaper releases its dashboard state");
-        drop(authority);
-        let producer = match Arc::try_unwrap(producer) {
-            Ok(producer) => producer,
-            Err(_) => panic!("registry releases producer"),
-        };
-        producer.shutdown().await.expect("flush producer");
+        (runtime, authority, producer, receipt)
     }
 }

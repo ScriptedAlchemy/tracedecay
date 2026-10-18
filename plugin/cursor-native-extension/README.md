@@ -16,5 +16,5 @@ remain explicit overrides.
 `embedded/extension.js` is the sole checked-in compiled asset. The Rust host
 bundle embeds it at compile time and the published crate must build with stock
 Cargo without Node, so this generated file is an explicit offline-packaging
-exception. `npm run build` regenerates it from TypeScript; `npm run
+exception. `pnpm run build` regenerates it from TypeScript; `pnpm run
 check:embedded` performs a byte-for-byte drift check. `dist/` remains ignored.

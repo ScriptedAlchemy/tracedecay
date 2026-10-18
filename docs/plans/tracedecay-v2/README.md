@@ -2,13 +2,11 @@
 
 Status: active product rewrite. Temporal capture is complete. Retrieval,
 production integration, dashboard journeys, stable active contracts, direct
-tests, and normal CI remain active delivery work. [NEXT.md](NEXT.md) records
-the current product outcomes and blockers.
+tests, and normal CI remain active delivery work.
 
 [00-plan-set-index.md](00-plan-set-index.md) is the sole precedence, rejection,
-delivery, and acceptance authority. [NEXT.md](NEXT.md) tracks current outcomes
-and blockers only. These are contributor documents only and never product
-runtime input.
+delivery, and acceptance authority. These are contributor documents only and
+never product runtime input.
 Numbered plans define component behavior and boundaries, not separate
 crate-first work queues.
 
@@ -161,10 +159,9 @@ removes duplicate authorities and follows
 inventories, registries, matrices, and generated declarations remain
 non-product and never justify implementation or CI by themselves.
 
-The current executable slice is always [NEXT.md](NEXT.md). This roadmap is
-contributor documentation, never daemon input, workflow input, product state,
-or a source of completion truth. Integration completes only after direct
-product tests and normal cross-platform CI are stable.
+This roadmap is contributor documentation, never daemon input, workflow input,
+product state, or a source of completion truth. Integration completes only
+after direct product tests and normal cross-platform CI are stable.
 
 ## Release
 

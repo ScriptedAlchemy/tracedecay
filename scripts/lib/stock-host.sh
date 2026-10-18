@@ -16,15 +16,15 @@ readonly STOCK_HOST_REPO_ROOT
 STOCK_HOST_TRACEDECAY_BIN=""
 
 # Prints the absolutized tracedecay binary under test ($TRACEDECAY_BIN, or the
-# default cargo debug output) and requires it to be executable.
+# default Bazel CLI output) and requires it to be executable.
 resolve_tracedecay_bin() {
     local bin
-    bin="${TRACEDECAY_BIN:-$STOCK_HOST_REPO_ROOT/target/debug/tracedecay}"
-    bin="$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")"
+    bin="${TRACEDECAY_BIN:-$STOCK_HOST_REPO_ROOT/bazel-bin/crates/tracedecay-cli/tracedecay}"
     if [[ ! -x "$bin" ]]; then
-        echo "error: tracedecay binary not found at $bin (build with: cargo build -p tracedecay-cli --bin tracedecay)" >&2
+        echo "error: tracedecay binary not found at $bin (build with: bazel build //crates/tracedecay-cli:tracedecay)" >&2
         return 1
     fi
+    bin="$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")"
     printf '%s\n' "$bin"
 }
 
@@ -54,7 +54,7 @@ shim_tracedecay_bin() {
 
 # seed_throwaway_project DIR
 #
-# Turns DIR — into which the caller has already written its source files —
+# Turns DIR, into which the caller has already written its source files,
 # into a single-commit throwaway git project.
 seed_throwaway_project() {
     local project="$1"

@@ -1,0 +1,591 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
+
+use crate::{GraphQueryError, GraphQueryResult as Result};
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_code_index::is_test_file;
+use tracedecay_contracts::retrieval::{
+    TestAttributionMethodV1, TestRiskAttributionSummaryV1, TestRiskBucketSummaryV1,
+    TestRiskConfidenceV1, TestRiskEntryV1, TestRiskResultV1, TestRiskSummaryV1,
+};
+use tracedecay_domain::code_intelligence::NodeKind;
+use tracedecay_domain::{
+    CanonicalRelationEdgeV1, ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId,
+};
+
+use crate::VerifiedGraphQuery;
+use crate::test_classification::{TestClassification, rust_module_declarer_candidates};
+use tracedecay_runtime_core::git::churn::file_churn;
+
+const ATTRIBUTION_DEPTH: usize = 3;
+const MAX_TEST_RISK_SYMBOLS: usize = 500_000;
+const MAX_TEST_RISK_RELATIONS: usize = 2_000_000;
+
+struct RiskEntry {
+    id: String,
+    name: String,
+    file: String,
+    line: u32,
+    complexity: u32,
+    complexity_analysis: ComplexityAnalysisV1,
+    fan_in: usize,
+    attribution_method: TestAttributionMethod,
+    attribution_depth: Option<usize>,
+    risk: f64,
+    churn: usize,
+}
+
+impl RiskEntry {
+    fn has_test(&self) -> bool {
+        self.attribution_method != TestAttributionMethod::None
+    }
+
+    fn into_public(self) -> TestRiskEntryV1 {
+        let has_test = self.has_test();
+        TestRiskEntryV1 {
+            id: self.id,
+            name: self.name,
+            file: self.file,
+            line: self.line,
+            complexity: self
+                .complexity_analysis
+                .is_complete()
+                .then_some(self.complexity),
+            complexity_analysis: self.complexity_analysis,
+            fan_in: self.fan_in as u64,
+            has_test,
+            attribution_method: self.attribution_method.wire(),
+            attribution_depth: self.attribution_depth.map(|depth| depth as u64),
+            risk: (self.risk * 100.0).round() / 100.0,
+            churn: self.churn as u64,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestAttributionMethod {
+    None,
+    DirectUnit,
+    Closure,
+}
+
+impl TestAttributionMethod {
+    fn wire(self) -> TestAttributionMethodV1 {
+        match self {
+            Self::None => TestAttributionMethodV1::None,
+            Self::DirectUnit => TestAttributionMethodV1::DirectUnit,
+            Self::Closure => TestAttributionMethodV1::Closure,
+        }
+    }
+
+    fn risk_multiplier(self) -> f64 {
+        match self {
+            Self::None => 1.0,
+            Self::DirectUnit => 0.1,
+            Self::Closure => 0.4,
+        }
+    }
+}
+
+#[tracing::instrument(name = "graph.health.test_risk", level = "trace", skip_all)]
+pub async fn analyze_test_risk(
+    graph: &VerifiedGraphQuery,
+    path_prefix: Option<&str>,
+    include_tested: bool,
+    limit: usize,
+) -> Result<TestRiskResultV1> {
+    let evidence = verified_test_evidence(graph, path_prefix)?;
+    let eligible_fns: Vec<_> = evidence
+        .symbols
+        .iter()
+        .filter(|n| n.callable && !n.test_code && !n.skip_test_coverage)
+        .filter(|n| tracedecay_domain::path_matches_scope(&n.file, path_prefix))
+        .collect();
+
+    let excluded_count = eligible_fns
+        .iter()
+        .filter(|n| !is_source_file(&n.file))
+        .count();
+    let source_fns: Vec<_> = eligible_fns
+        .iter()
+        .copied()
+        .filter(|n| is_source_file(&n.file))
+        .collect();
+
+    let mut fan_in: HashMap<String, usize> = HashMap::new();
+    for (_, target) in &evidence.calls {
+        *fan_in.entry(target.clone()).or_insert(0) += 1;
+    }
+    let attribution_depths = build_test_attribution_depths(
+        &evidence.calls,
+        &evidence.files,
+        &evidence.classification,
+        ATTRIBUTION_DEPTH,
+    );
+
+    let total_functions = source_fns.len();
+    let attributed_count = source_fns
+        .iter()
+        .filter(|n| attribution_depths.contains_key(n.occurrence.as_str()))
+        .count();
+    let direct_unit_attributed = source_fns
+        .iter()
+        .filter(|n| attribution_depths.get(n.occurrence.as_str()).copied() == Some(1))
+        .count();
+    let closure_attributed = source_fns
+        .iter()
+        .filter(|n| {
+            attribution_depths
+                .get(n.occurrence.as_str())
+                .is_some_and(|depth| *depth >= 2)
+        })
+        .count();
+    let skipped_count = evidence
+        .symbols
+        .iter()
+        .filter(|n| {
+            n.callable
+                && n.skip_test_coverage
+                && !n.test_code
+                && is_source_file(&n.file)
+                && tracedecay_domain::path_matches_scope(&n.file, path_prefix)
+        })
+        .count();
+
+    let mut risks: Vec<RiskEntry> = source_fns
+        .iter()
+        .map(|n| {
+            let complexity = n.complexity;
+            let attribution_depth = attribution_depths.get(n.occurrence.as_str()).copied();
+            let attribution_method = classify_test_attribution(attribution_depth);
+            let fan_in = *fan_in.get(n.occurrence.as_str()).unwrap_or(&0);
+            let risk = (f64::from(complexity) + 1.0)
+                * (fan_in as f64 + 1.0)
+                * attribution_method.risk_multiplier();
+            RiskEntry {
+                id: n.occurrence.as_str().to_owned(),
+                name: n.name.clone(),
+                file: n.file.clone(),
+                line: n.line,
+                complexity,
+                complexity_analysis: n.complexity_analysis,
+                fan_in,
+                attribution_method,
+                attribution_depth,
+                risk,
+                churn: 0,
+            }
+        })
+        .filter(|risk| include_tested || !risk.has_test())
+        .collect();
+
+    let churn_map = file_churn(graph.project_root()?, 90).await?;
+    for risk in &mut risks {
+        let churn = churn_map.get(&risk.file).copied().unwrap_or(0);
+        risk.churn = churn;
+        if churn > 0 {
+            risk.risk *= (churn as f64 + 1.0).log2();
+        }
+    }
+    risks.sort_by(|a, b| {
+        b.risk
+            .partial_cmp(&a.risk)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let top_risk_untested = risks
+        .iter()
+        .find(|risk| !risk.has_test())
+        .map_or_default(|risk| risk.name.clone());
+    let reachable_unattributed = source_fns
+        .iter()
+        .filter(|n| {
+            !attribution_depths.contains_key(n.occurrence.as_str())
+                && fan_in.get(n.occurrence.as_str()).copied().unwrap_or(0) > 0
+        })
+        .count();
+    let orphan_entry = source_fns
+        .iter()
+        .filter(|n| {
+            !attribution_depths.contains_key(n.occurrence.as_str())
+                && fan_in.get(n.occurrence.as_str()).copied().unwrap_or(0) == 0
+        })
+        .count();
+    let coverage_pct = if total_functions == 0 {
+        0.0
+    } else {
+        (attributed_count as f64 / total_functions as f64 * 100.0).round()
+    };
+
+    risks.truncate(limit);
+    Ok(TestRiskResultV1 {
+        risks: risks.into_iter().map(RiskEntry::into_public).collect(),
+        summary: TestRiskSummaryV1 {
+            total_functions: total_functions as u64,
+            tested: attributed_count as u64,
+            skipped: skipped_count as u64,
+            coverage_pct,
+            top_risk_untested: top_risk_untested.clone(),
+            top_risk_unattributed: top_risk_untested,
+            attribution: TestRiskAttributionSummaryV1 {
+                depth: ATTRIBUTION_DEPTH as u64,
+                direct_unit_attributed: direct_unit_attributed as u64,
+                closure_attributed: closure_attributed as u64,
+                trait_resolved_attributed: 0,
+                public_api_attributed: 0,
+                cli_entry_attributed: 0,
+                total_attributed: attributed_count as u64,
+            },
+            buckets: TestRiskBucketSummaryV1 {
+                attributed: attributed_count as u64,
+                reachable_unattributed: reachable_unattributed as u64,
+                orphan_entry: orphan_entry as u64,
+                excluded: excluded_count as u64,
+            },
+            confidence: TestRiskConfidenceV1::StaticLowerBound,
+            confidence_note: "coverage_pct is a depth-3 static attribution lower bound over the admitted generation; complexity uses extraction-attested branches, loops, and maximum nesting, and is null (with risk weighing lower-bound counters) when complexity_analysis reports an incomplete walk; direct_unit is strongest, while closure retains higher residual risk.".to_owned(),
+        },
+        freshness: None,
+    })
+}
+
+struct VerifiedTestSymbol {
+    occurrence: SymbolOccurrenceId,
+    name: String,
+    file: String,
+    line: u32,
+    /// A lower bound when `complexity_analysis` is not complete.
+    complexity: u32,
+    complexity_analysis: ComplexityAnalysisV1,
+    callable: bool,
+    skip_test_coverage: bool,
+    test_code: bool,
+}
+
+pub struct VerifiedTestEvidence {
+    symbols: Vec<VerifiedTestSymbol>,
+    calls: Vec<(String, String)>,
+    files: HashMap<String, String>,
+    classification: TestClassification,
+}
+
+#[tracing::instrument(name = "graph.health.test_risk.evidence", level = "trace", skip_all)]
+pub fn verified_test_evidence(
+    graph: &VerifiedGraphQuery,
+    path_prefix: Option<&str>,
+) -> Result<VerifiedTestEvidence> {
+    let scoped_paths = path_prefix
+        .map(|prefix| {
+            graph.files(MAX_TEST_RISK_SYMBOLS).map(|files| {
+                files
+                    .into_iter()
+                    .map(|file| file.logical_path)
+                    .filter(|path| tracedecay_domain::path_matches_scope(path, Some(prefix)))
+                    .collect::<HashSet<_>>()
+            })
+        })
+        .transpose()?;
+    let page = match &scoped_paths {
+        Some(paths) => graph.symbols_in_logical_files_page(
+            paths,
+            None,
+            MAX_TEST_RISK_SYMBOLS,
+            MAX_TEST_RISK_SYMBOLS,
+        )?,
+        None => graph.symbols_page(None, MAX_TEST_RISK_SYMBOLS)?,
+    };
+    if page.has_more {
+        return Err(test_risk_graph_problem(
+            "verified test-risk symbol census exceeded its budget",
+        ));
+    }
+    let occurrences = page
+        .symbols
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    let (edges, neighbors, (declarers, declarer_edges)) = match &scoped_paths {
+        Some(paths) => {
+            let (edges, neighbors) = scoped_test_edges(graph, &occurrences)?;
+            (edges, neighbors, rust_test_module_declarers(graph, paths)?)
+        }
+        None => (
+            graph.edges_among(
+                &occurrences,
+                &[
+                    RelationEdgeKindV1::Calls,
+                    RelationEdgeKindV1::Annotates,
+                    RelationEdgeKindV1::Contains,
+                ],
+                MAX_TEST_RISK_RELATIONS,
+            )?,
+            Vec::new(),
+            (Vec::new(), Vec::new()),
+        ),
+    };
+    let classified = page
+        .symbols
+        .iter()
+        .chain(&neighbors)
+        .chain(&declarers)
+        .map(|symbol| verified_test_symbol_parts(symbol).map(|(metadata, file)| (file, metadata)))
+        .collect::<Result<Vec<_>>>()?;
+    let classification = TestClassification::new(&classified, edges.iter().chain(&declarer_edges));
+    let files = page
+        .symbols
+        .iter()
+        .chain(&neighbors)
+        .zip(&classified)
+        .map(|(symbol, (file, _))| (symbol.occurrence.as_str().to_owned(), (*file).to_owned()))
+        .collect::<HashMap<_, _>>();
+    let mut symbols = Vec::with_capacity(page.symbols.len());
+    for (symbol, (file, metadata)) in page.symbols.iter().zip(&classified) {
+        symbols.push(VerifiedTestSymbol {
+            occurrence: symbol.occurrence.clone(),
+            name: metadata.simple_name.clone(),
+            file: (*file).to_owned(),
+            line: metadata.start_line.saturating_add(1),
+            complexity: metadata
+                .branches
+                .saturating_add(metadata.loops)
+                .saturating_add(metadata.max_nesting),
+            complexity_analysis: metadata.complexity_analysis,
+            callable: NodeKind::from_str(&metadata.kind)
+                .is_some_and(|kind| kind.is_callable_kind()),
+            skip_test_coverage: metadata.skip_test_coverage,
+            test_code: classification.is_test_code(file, metadata),
+        });
+    }
+    let calls = edges
+        .iter()
+        .filter(|edge| edge.kind == RelationEdgeKindV1::Calls)
+        .map(|edge| {
+            (
+                edge.from_occurrence.as_str().to_owned(),
+                edge.to_occurrence.as_str().to_owned(),
+            )
+        })
+        .collect();
+    Ok(VerifiedTestEvidence {
+        symbols,
+        calls,
+        files,
+        classification,
+    })
+}
+
+/// The symbols and `Annotates` edges of the files that could declare a
+/// scoped file's Rust module, so `#[cfg(test)] mod` gates outside the scope
+/// classify the files they gate.
+fn rust_test_module_declarers(
+    graph: &VerifiedGraphQuery,
+    scoped_paths: &HashSet<String>,
+) -> Result<(Vec<CodeGraphSymbolSummaryV1>, Vec<CanonicalRelationEdgeV1>)> {
+    let mut declarer_paths = rust_module_declarer_candidates(scoped_paths);
+    declarer_paths.retain(|path| !scoped_paths.contains(path));
+    if declarer_paths.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let page = graph.symbols_in_logical_files_page(
+        &declarer_paths,
+        None,
+        MAX_TEST_RISK_SYMBOLS,
+        MAX_TEST_RISK_SYMBOLS,
+    )?;
+    if page.has_more {
+        return Err(test_risk_graph_problem(
+            "verified test-risk declaration census exceeded its budget",
+        ));
+    }
+    if page.symbols.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let occurrences = page
+        .symbols
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    let edges = graph.edges_among(
+        &occurrences,
+        &[RelationEdgeKindV1::Annotates, RelationEdgeKindV1::Contains],
+        MAX_TEST_RISK_RELATIONS,
+    )?;
+    Ok((page.symbols, edges))
+}
+
+/// Calls and `Annotates` edges into the scoped symbols, walked to the
+/// attribution depth, with the far endpoint of each edge.
+fn scoped_test_edges(
+    graph: &VerifiedGraphQuery,
+    occurrences: &[SymbolOccurrenceId],
+) -> Result<(Vec<CanonicalRelationEdgeV1>, Vec<CodeGraphSymbolSummaryV1>)> {
+    let mut edges = Vec::new();
+    let mut neighbors = Vec::new();
+    let mut seen = occurrences.iter().cloned().collect::<HashSet<_>>();
+    let mut frontier = occurrences.to_vec();
+    for _ in 0..ATTRIBUTION_DEPTH {
+        if frontier.is_empty() {
+            break;
+        }
+        let remaining = MAX_TEST_RISK_RELATIONS
+            .checked_sub(edges.len())
+            .filter(|remaining| *remaining > 0)
+            .ok_or_else(|| {
+                test_risk_graph_problem("verified test-risk relation census exceeded its budget")
+            })?;
+        let incoming = graph
+            .callers(&frontier, &[RelationEdgeKindV1::Calls], remaining)?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if edges.len().saturating_add(incoming.len()) > MAX_TEST_RISK_RELATIONS {
+            return Err(test_risk_graph_problem(
+                "verified test-risk relation census exceeded its budget",
+            ));
+        }
+        let mut next = Vec::new();
+        for edge in incoming {
+            if seen.insert(edge.neighbor.occurrence.clone()) {
+                next.push(edge.neighbor.occurrence.clone());
+            }
+            edges.push(edge.edge);
+            neighbors.push(edge.neighbor);
+        }
+        frontier = next;
+    }
+    if seen.is_empty() {
+        return Ok((edges, neighbors));
+    }
+    let remaining = MAX_TEST_RISK_RELATIONS
+        .checked_sub(edges.len())
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| {
+            test_risk_graph_problem("verified test-risk relation census exceeded its budget")
+        })?;
+    let annotated = graph
+        .callers(
+            &seen.into_iter().collect::<Vec<_>>(),
+            &[RelationEdgeKindV1::Annotates],
+            remaining,
+        )?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if edges.len().saturating_add(annotated.len()) > MAX_TEST_RISK_RELATIONS {
+        return Err(test_risk_graph_problem(
+            "verified test-risk relation census exceeded its budget",
+        ));
+    }
+    for edge in annotated {
+        edges.push(edge.edge);
+        neighbors.push(edge.neighbor);
+    }
+    // `#[cfg(test)]` containment is intra-file, so every member a gate
+    // encloses sits inside the scoped census.
+    let remaining = MAX_TEST_RISK_RELATIONS
+        .checked_sub(edges.len())
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| {
+            test_risk_graph_problem("verified test-risk relation census exceeded its budget")
+        })?;
+    let contained = graph.edges_among(occurrences, &[RelationEdgeKindV1::Contains], remaining)?;
+    if edges.len().saturating_add(contained.len()) > MAX_TEST_RISK_RELATIONS {
+        return Err(test_risk_graph_problem(
+            "verified test-risk relation census exceeded its budget",
+        ));
+    }
+    edges.extend(contained);
+    Ok((edges, neighbors))
+}
+
+fn is_source_file(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .any(|component| component.as_os_str() == "src")
+}
+
+pub fn verified_test_symbol_parts(
+    symbol: &CodeGraphSymbolSummaryV1,
+) -> Result<(&tracedecay_code_index::lineage::LineageSymbolRecordV1, &str)> {
+    let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+        test_risk_graph_problem("verified test evidence is missing extraction metadata")
+    })?;
+    let file = symbol
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.logical_path.as_deref())
+        .ok_or_else(|| {
+            test_risk_graph_problem("verified test evidence is missing a file binding")
+        })?;
+    Ok((metadata, file))
+}
+
+fn test_risk_graph_problem(detail: &str) -> GraphQueryError {
+    GraphQueryError::EvidenceUnavailable {
+        reason_code: "verified-test-evidence-unavailable",
+        detail: detail.to_owned(),
+    }
+}
+
+#[tracing::instrument(name = "graph.health.test_risk.attribution", level = "trace", skip_all)]
+fn build_test_attribution_depths(
+    calls: &[(String, String)],
+    node_to_file: &HashMap<String, String>,
+    classification: &TestClassification,
+    max_depth: usize,
+) -> HashMap<String, usize> {
+    let mut outgoing_calls: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seed_nodes: HashSet<String> = HashSet::new();
+
+    for (source, target) in calls {
+        outgoing_calls
+            .entry(source.clone())
+            .or_default()
+            .push(target.clone());
+        let is_test_seed = node_to_file
+            .get(source)
+            .is_some_and(|file| is_test_file(file))
+            || classification.is_test_annotated(source);
+        if is_test_seed {
+            seed_nodes.insert(source.clone());
+        }
+    }
+
+    let mut reached_depths: HashMap<String, usize> = HashMap::new();
+    let mut queue: VecDeque<(String, usize)> = seed_nodes
+        .into_iter()
+        .map(|node_id| (node_id, 0usize))
+        .collect();
+    let mut best_seen: HashMap<String, usize> = queue.iter().cloned().collect();
+
+    while let Some((node_id, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+        let next_depth = depth + 1;
+        for target in outgoing_calls.get(&node_id).into_iter().flatten() {
+            let should_visit = best_seen
+                .get(target)
+                .is_none_or(|seen_depth| next_depth < *seen_depth);
+            if !should_visit {
+                continue;
+            }
+            best_seen.insert(target.clone(), next_depth);
+            reached_depths
+                .entry(target.clone())
+                .and_modify(|existing| *existing = (*existing).min(next_depth))
+                .or_insert(next_depth);
+            queue.push_back((target.clone(), next_depth));
+        }
+    }
+
+    reached_depths
+}
+
+fn classify_test_attribution(depth: Option<usize>) -> TestAttributionMethod {
+    match depth {
+        Some(1) => TestAttributionMethod::DirectUnit,
+        Some(depth) if depth >= 2 => TestAttributionMethod::Closure,
+        None | Some(_) => TestAttributionMethod::None,
+    }
+}

@@ -3,8 +3,8 @@
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ChangePlanId, ConfigurationMutationEffectV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
-    ConfigurationValueV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
-    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan, RollbackModeV1,
+    SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
@@ -12,30 +12,25 @@ use crate::config::registry::ConfigurationRegistry;
 use crate::config::scope_control::{
     ProtectedChangePlanDraftV1, plan_protected_change, validate_apply_binding,
 };
-
-use super::ports::{
-    ConfigurationClock, ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
-    ConfigurationOperationFuture, CredentialWritePort, ScopeResolutionPort,
+use crate::config::setting_findings;
+use tracedecay_global_db::configuration::contracts::ports::{
+    ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
+    ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort,
     ScopeRevalidationEvidenceV1,
 };
-use super::types::{
+use tracedecay_global_db::configuration::contracts::types::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationRollbackRequest,
-    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
+    DirectConfigurationMutation, ResolvedSetting, SettingSummary,
 };
+use tracedecay_global_db::configuration::store::protected_change_snapshot_v1;
 
 /// One transport-neutral control-plane contract. CLI, MCP, HTTP, dashboard,
 /// and Doctor call this shape rather than rebuilding mutation semantics.
 pub trait ConfigurationControlPlane: Sync {
     fn list(&self, actor: AuthorizedActor)
     -> ConfigurationOperationFuture<'_, Vec<SettingSummary>>;
-
-    fn explain(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting>;
 
     fn get(
         &self,
@@ -49,16 +44,6 @@ pub trait ConfigurationControlPlane: Sync {
         mutation: DirectConfigurationMutation,
         expected_revision: ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt>;
-
-    fn write_credential(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        write: WriteOnlyCredentialMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<
-        '_,
-        tracedecay_domain::configuration::CredentialReferenceMetadataV1,
-    >;
 
     fn observed_state(
         &self,
@@ -97,46 +82,40 @@ pub trait ConfigurationControlPlane: Sync {
     ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage>;
 }
 
-pub struct ConfigurationControlPlaneOperations<'a, Store, Scopes, Credentials, Authorization, Clock>
-{
+pub struct ConfigurationControlPlaneOperations<'a, Store, Scopes, Authorization> {
     registry: &'a ConfigurationRegistry,
     store: &'a Store,
     scopes: &'a Scopes,
-    credentials: &'a Credentials,
     authorization: &'a Authorization,
-    clock: &'a Clock,
+    clock: fn() -> UtcMicros,
 }
 
-impl<'a, Store, Scopes, Credentials, Authorization, Clock>
-    ConfigurationControlPlaneOperations<'a, Store, Scopes, Credentials, Authorization, Clock>
+impl<'a, Store, Scopes, Authorization>
+    ConfigurationControlPlaneOperations<'a, Store, Scopes, Authorization>
 {
     pub fn new(
         registry: &'a ConfigurationRegistry,
         store: &'a Store,
         scopes: &'a Scopes,
-        credentials: &'a Credentials,
         authorization: &'a Authorization,
-        clock: &'a Clock,
+        clock: fn() -> UtcMicros,
     ) -> Self {
         Self {
             registry,
             store,
             scopes,
-            credentials,
             authorization,
             clock,
         }
     }
 }
 
-impl<Store, Scopes, Credentials, Authorization, Clock> ConfigurationControlPlane
-    for ConfigurationControlPlaneOperations<'_, Store, Scopes, Credentials, Authorization, Clock>
+impl<Store, Scopes, Authorization> ConfigurationControlPlane
+    for ConfigurationControlPlaneOperations<'_, Store, Scopes, Authorization>
 where
     Store: ConfigurationControlStore,
     Scopes: ScopeResolutionPort,
-    Credentials: CredentialWritePort,
     Authorization: ConfigurationMutationAuthorizationPort,
-    Clock: ConfigurationClock,
 {
     fn list(
         &self,
@@ -156,14 +135,6 @@ where
         })
     }
 
-    fn explain(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
-        Box::pin(async move { self.get(actor, key).await })
-    }
-
     fn get(
         &self,
         actor: AuthorizedActor,
@@ -171,7 +142,8 @@ where
     ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
         Box::pin(async move {
             actor.validate()?;
-            self.registry
+            let definition = self
+                .registry
                 .definition(&key)
                 .map_err(ConfigurationError::validation)?;
             let current = self.store.current().await?;
@@ -179,15 +151,23 @@ where
                 .snapshot
                 .validate()
                 .map_err(ConfigurationError::validation)?;
+            // A registered setting always resolves. A snapshot persisted before
+            // this key was registered simply stores no value for it, which is
+            // absence of an override, not absence of the setting; the registry
+            // default is the authority for that case. Reporting it as
+            // not-found made every install that predates a key's registration
+            // look as though the setting did not exist.
             let effective_value = current
                 .snapshot
                 .effective_values
                 .get(&key)
                 .cloned()
-                .ok_or(ConfigurationError::TargetUnavailable)?;
+                .unwrap_or_else(|| definition.default_value.clone());
             Ok(ResolvedSetting {
+                findings: setting_findings(&key, &effective_value),
                 key: key.clone(),
                 effective_value,
+                revision_id: current.revision_id,
                 snapshot_id: current.snapshot.snapshot_id,
                 effective_behavior_digest: current.snapshot.effective_behavior_digest,
                 resolution_provenance_digest: current.snapshot.resolution_provenance_digest,
@@ -232,35 +212,6 @@ where
         })
     }
 
-    fn write_credential(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        write: WriteOnlyCredentialMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<
-        '_,
-        tracedecay_domain::configuration::CredentialReferenceMetadataV1,
-    > {
-        Box::pin(async move {
-            expected_revision
-                .validate()
-                .map_err(ConfigurationError::validation)?;
-            // The credential store checks exact replay before its revision
-            // CAS, matching direct configuration mutation semantics.
-            self.authorize_mutation(
-                &authority,
-                ConfigurationMutationOperationV1::CredentialWrite,
-                &expected_revision,
-                ConfigurationMutationSinkV1::CredentialStore,
-                ConfigurationMutationEffectV1::WriteCredentialReference,
-            )
-            .await?;
-            self.credentials
-                .write_reference(&authority, &write, &expected_revision)
-                .await
-        })
-    }
-
     fn observed_state(
         &self,
         actor: AuthorizedActor,
@@ -286,6 +237,7 @@ where
             if current.revision_id != expected_revision {
                 return Err(ConfigurationError::RevisionConflict);
             }
+            protected_change_snapshot_v1(&current.snapshot, &change, &current.revision_id)?;
             let current_authorization = self
                 .authorize_mutation(
                     &authority,
@@ -301,7 +253,7 @@ where
                 .resolve_protected_change(&actor, &change)
                 .await?;
             validate_authorization_evidence(&current_authorization, &evidence)?;
-            let now = self.clock.now();
+            let now = (self.clock)();
             let operation_digest = change
                 .compute_digest()
                 .map_err(ConfigurationError::validation)?;
@@ -398,7 +350,7 @@ where
             )
             .await?;
             self.store
-                .dry_run_rollback(&authority, &rollback, self.clock.now())
+                .dry_run_rollback(&authority, &rollback, (self.clock)())
                 .await
         })
     }
@@ -457,14 +409,12 @@ where
     }
 }
 
-impl<Store, Scopes, Credentials, Authorization, Clock>
-    ConfigurationControlPlaneOperations<'_, Store, Scopes, Credentials, Authorization, Clock>
+impl<Store, Scopes, Authorization>
+    ConfigurationControlPlaneOperations<'_, Store, Scopes, Authorization>
 where
     Store: ConfigurationControlStore,
     Scopes: ScopeResolutionPort,
-    Credentials: CredentialWritePort,
     Authorization: ConfigurationMutationAuthorizationPort,
-    Clock: ConfigurationClock,
 {
     fn apply_plan(
         &self,
@@ -499,7 +449,7 @@ where
             {
                 return Ok(receipt);
             }
-            let now = self.clock.now();
+            let now = (self.clock)();
             if plan.is_expired_at(now) {
                 return Err(ConfigurationError::PlanExpired);
             }
@@ -530,9 +480,9 @@ where
         expected_revision: &ConfigurationRevisionId,
         sink: ConfigurationMutationSinkV1,
         effect: ConfigurationMutationEffectV1,
-    ) -> Result<super::ports::CurrentConfigurationMutationAuthorizationV1, ConfigurationError> {
+    ) -> Result<CurrentConfigurationMutationAuthorizationV1, ConfigurationError> {
         authority.validate_integrity()?;
-        let now = self.clock.now();
+        let now = (self.clock)();
         let current = self
             .authorization
             .recheck(
@@ -572,16 +522,11 @@ fn validate_direct_mutation(
     match mutation {
         DirectConfigurationMutation::Set { layer, key, value } => {
             reject_protected_key(key)?;
-            if matches!(value.as_ref(), ConfigurationValueV1::CredentialReference(_)) {
-                return Err(ConfigurationError::validation_message(
-                    "credential references require the write-only credential operation",
-                ));
-            }
             registry
                 .validate_layer(key, layer)
                 .map_err(ConfigurationError::validation)?;
             registry
-                .validate_value(key, value)
+                .validate_written_value(key, value)
                 .map_err(ConfigurationError::validation)
         }
         DirectConfigurationMutation::Unset { layer, key } => {
@@ -628,7 +573,7 @@ fn validate_frozen_evidence(
 }
 
 fn validate_authorization_evidence(
-    authorization: &super::ports::CurrentConfigurationMutationAuthorizationV1,
+    authorization: &CurrentConfigurationMutationAuthorizationV1,
     evidence: &ScopeRevalidationEvidenceV1,
 ) -> Result<(), ConfigurationError> {
     if authorization.scope_digest != evidence.resolved_scope_digest
@@ -659,7 +604,7 @@ fn derive_plan_id(
         created_at,
     ))
     .map_err(ConfigurationError::validation)?;
-    let encoded = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+    let encoded = digest.hex_suffix().ok_or_else(|| {
         ConfigurationError::validation_message("configuration plan digest missing prefix")
     })?;
     ChangePlanId::new(format!("configuration.plan.v1.{encoded}"))
@@ -673,37 +618,25 @@ mod tests {
 
     use super::*;
     use crate::config::registry::ConfigurationRegistry;
-    use crate::configuration::types::ConfigurationSettlementAuthorityV1;
     use tracedecay_domain::configuration::{
-        AnalyzerSettingsV1, AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId,
-        ConfigurationLayerIdV1, ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1,
-        ConfigurationValueV1, CredentialReferenceMetadataV1, ProtectedChange, ScopeSourceBinding,
-        SettingKey, SourceBindingId, SourceKindV1,
+        AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
+        ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1, ConfigurationValueV1,
+        ProtectedChange, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
     };
-    use tracedecay_domain::{
-        AccessPolicyDigest, ActorId, LocatorDigest, ManifestDigest, ProjectId,
-    };
-
-    use super::super::ports::{
+    use tracedecay_domain::{AccessPolicyDigest, ActorId, LocatorDigest, ProjectId};
+    use tracedecay_global_db::configuration::contracts::ports::{
         ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
-        CredentialWritePort,
+        CurrentConfigurationMutationAuthorizationV1,
     };
+    use tracedecay_global_db::configuration::contracts::types::ConfigurationSettlementAuthorityV1;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn policy_digest(byte: char) -> AccessPolicyDigest {
         AccessPolicyDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
     }
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     struct Store {
         current: ConfigurationCurrentStateV1,
@@ -853,21 +786,8 @@ mod tests {
         }
     }
 
-    struct Credentials;
-
-    impl CredentialWritePort for Credentials {
-        fn write_reference(
-            &self,
-            _authority: &ConfigurationMutationAuthority,
-            _write: &WriteOnlyCredentialMutation,
-            _expected_revision: &ConfigurationRevisionId,
-        ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-            Box::pin(async { Err(ConfigurationError::Unavailable) })
-        }
-    }
-
     struct Authorization {
-        current: super::super::ports::CurrentConfigurationMutationAuthorizationV1,
+        current: CurrentConfigurationMutationAuthorizationV1,
     }
 
     impl ConfigurationMutationAuthorizationPort for Authorization {
@@ -879,29 +799,14 @@ mod tests {
             _sink: ConfigurationMutationSinkV1,
             _effect: ConfigurationMutationEffectV1,
             _now: UtcMicros,
-        ) -> ConfigurationOperationFuture<
-            '_,
-            super::super::ports::CurrentConfigurationMutationAuthorizationV1,
-        > {
+        ) -> ConfigurationOperationFuture<'_, CurrentConfigurationMutationAuthorizationV1> {
             let current = self.current.clone();
             Box::pin(async move { Ok(current) })
         }
     }
 
-    struct Clock;
-
-    impl ConfigurationClock for Clock {
-        fn now(&self) -> UtcMicros {
-            UtcMicros(10)
-        }
-    }
-
-    struct AdvancedClock(UtcMicros);
-
-    impl ConfigurationClock for AdvancedClock {
-        fn now(&self) -> UtcMicros {
-            self.0
-        }
+    fn clock() -> UtcMicros {
+        UtcMicros(10)
     }
 
     #[test]
@@ -921,26 +826,8 @@ mod tests {
     }
 
     #[test]
-    fn direct_mutation_accepts_typed_analyzer_values() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let result = validate_direct_mutation(
-            &registry,
-            &DirectConfigurationMutation::Set {
-                layer: ConfigurationLayerIdV1::Project {
-                    project_id: id::<ProjectId>("project.fixture"),
-                },
-                key: SettingKey::new("analyzer.settings.v1").unwrap(),
-                value: Box::new(ConfigurationValueV1::AnalyzerSettings(
-                    AnalyzerSettingsV1::empty(),
-                )),
-            },
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn current_authorization_must_match_scope_and_policy_evidence() {
-        let authorization = super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+        let authorization = CurrentConfigurationMutationAuthorizationV1 {
             grant_revision: 1,
             grant_digest: digest('c'),
             scope_digest: digest('a'),
@@ -965,7 +852,73 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    /// Reading a registered setting that the persisted snapshot predates must
+    /// resolve to its registry default.
+    ///
+    /// Reporting `TargetUnavailable` here surfaced as
+    /// `not_found_or_not_authorized`, so every profile whose snapshot was
+    /// written before a key was registered looked as though the setting did
+    /// not exist at all.
+    #[asupersync::test]
+    async fn get_resolves_a_registered_setting_missing_from_the_snapshot_to_its_default() {
+        let store = Store {
+            current: ConfigurationCurrentStateV1 {
+                revision_id: id("configuration.revision.default-fallback"),
+                snapshot: ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default())
+                    .unwrap(),
+            },
+            saved: Mutex::new(None),
+            replay: Mutex::new(None),
+        };
+        let registry = ConfigurationRegistry::core().unwrap();
+        let authorization = Authorization {
+            current: CurrentConfigurationMutationAuthorizationV1 {
+                grant_revision: 1,
+                grant_digest: digest('c'),
+                scope_digest: digest('a'),
+                policy_epoch: 7,
+                policy_digest: policy_digest('b'),
+            },
+        };
+        let scope = Scope {
+            evidence: ScopeRevalidationEvidenceV1 {
+                resolved_scope_digest: digest('a'),
+                membership_digest: None,
+                authorization_policy_digest: policy_digest('b'),
+                policy_epoch: 7,
+            },
+        };
+        let operations = ConfigurationControlPlaneOperations::new(
+            &registry,
+            &store,
+            &scope,
+            &authorization,
+            clock,
+        );
+
+        let key =
+            SettingKey::new(tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1)
+                .unwrap();
+        let expected = registry.definition(&key).unwrap().default_value.clone();
+        let actor = AuthorizedActor {
+            actor_id: id::<ActorId>("actor.configuration.default-fallback"),
+        };
+
+        let resolved = operations.get(actor, key.clone()).await.unwrap();
+
+        assert_eq!(resolved.key, key);
+        assert_eq!(resolved.effective_value, expected);
+        assert_eq!(
+            resolved.effective_value,
+            ConfigurationValueV1::Unsigned(7_000)
+        );
+        assert!(
+            resolved.candidates.is_empty(),
+            "a default carries no layer candidate"
+        );
+    }
+
+    #[asupersync::test]
     async fn protected_dry_run_persists_the_exact_operation_beside_its_redacted_plan() {
         let revision_id: ConfigurationRevisionId = id("configuration.revision.fixture");
         let scope_digest = digest('a');
@@ -986,7 +939,7 @@ mod tests {
             replay: Mutex::new(None),
         };
         let authorization = Authorization {
-            current: super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+            current: CurrentConfigurationMutationAuthorizationV1 {
                 grant_revision: 1,
                 grant_digest: digest('c'),
                 scope_digest: scope_digest.clone(),
@@ -1023,15 +976,12 @@ mod tests {
         );
         let registry = ConfigurationRegistry::core().unwrap();
         let scope = Scope { evidence };
-        let credentials = Credentials;
-        let clock = Clock;
         let operations = ConfigurationControlPlaneOperations::new(
             &registry,
             &store,
             &scope,
-            &credentials,
             &authorization,
-            &clock,
+            clock,
         );
 
         let plan = operations
@@ -1047,7 +997,87 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    /// A preview answers exactly what apply's validator answers: a change
+    /// apply refuses gets no plan, and the refusal is apply's typed reason.
+    #[asupersync::test]
+    async fn protected_dry_run_refuses_what_apply_refuses_with_the_same_reason() {
+        let revision_id: ConfigurationRevisionId = id("configuration.revision.parity");
+        let scope_digest = digest('a');
+        let policy_digest = policy_digest('b');
+        let snapshot =
+            ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default()).unwrap();
+        let store = Store {
+            current: ConfigurationCurrentStateV1 {
+                revision_id: revision_id.clone(),
+                snapshot: snapshot.clone(),
+            },
+            saved: Mutex::new(None),
+            replay: Mutex::new(None),
+        };
+        let authorization = Authorization {
+            current: CurrentConfigurationMutationAuthorizationV1 {
+                grant_revision: 1,
+                grant_digest: digest('c'),
+                scope_digest: scope_digest.clone(),
+                policy_epoch: 7,
+                policy_digest: policy_digest.clone(),
+            },
+        };
+        let authority = ConfigurationMutationAuthority {
+            receipt: ConfigurationMutationGrantReceiptV1::issue(
+                id::<ConfigurationGrantReceiptId>("configuration.grant-receipt.parity"),
+                id::<ConfigurationGrantId>("configuration.grant.parity"),
+                id::<ActorId>("actor.configuration.parity"),
+                ConfigurationMutationOperationV1::ProtectedDryRun,
+                scope_digest.clone(),
+                revision_id.clone(),
+                7,
+                policy_digest.clone(),
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+                None,
+                UtcMicros(1),
+                UtcMicros(100),
+            )
+            .unwrap(),
+        };
+        let registry = ConfigurationRegistry::core().unwrap();
+        let scope = Scope {
+            evidence: ScopeRevalidationEvidenceV1 {
+                resolved_scope_digest: scope_digest,
+                membership_digest: None,
+                authorization_policy_digest: policy_digest,
+                policy_epoch: 7,
+            },
+        };
+        let operations = ConfigurationControlPlaneOperations::new(
+            &registry,
+            &store,
+            &scope,
+            &authorization,
+            clock,
+        );
+        let unbind_absent = ProtectedChange::UnbindSource {
+            binding_id: id::<SourceBindingId>("binding.configuration.absent"),
+        };
+
+        let preview = operations
+            .dry_run_protected_change(authority, unbind_absent.clone(), revision_id.clone())
+            .await;
+
+        assert_eq!(preview, Err(ConfigurationError::PlanStale));
+        assert_eq!(
+            protected_change_snapshot_v1(&snapshot, &unbind_absent, &revision_id).map(|_| ()),
+            Err(ConfigurationError::PlanStale),
+            "apply's validator refuses the same change for the same reason"
+        );
+        assert!(
+            store.saved.lock().unwrap().is_none(),
+            "a refused preview persists no plan"
+        );
+    }
+
+    #[asupersync::test]
     async fn protected_apply_restart_replays_original_receipt_after_plan_expiry() {
         let actor_id: ActorId = id("actor.configuration.replay");
         let revision_id: ConfigurationRevisionId = id("configuration.revision.replay.base");
@@ -1126,7 +1156,7 @@ mod tests {
             ))),
         };
         let authorization = Authorization {
-            current: super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+            current: CurrentConfigurationMutationAuthorizationV1 {
                 grant_revision: 2,
                 grant_digest: digest('e'),
                 scope_digest: scope_digest.clone(),
@@ -1154,16 +1184,13 @@ mod tests {
         };
         let registry = ConfigurationRegistry::core().unwrap();
         let scope = Scope { evidence };
-        let credentials = Credentials;
-        let clock = AdvancedClock(UtcMicros(10));
 
         let restarted = ConfigurationControlPlaneOperations::new(
             &registry,
             &store,
             &scope,
-            &credentials,
             &authorization,
-            &clock,
+            clock,
         );
 
         assert_eq!(

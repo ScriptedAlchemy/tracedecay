@@ -3,12 +3,12 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use tracedecay_application::git::{
+use tracedecay_contracts::git::{
     NativeWorktreeTargetV1, WorktreeCleanupReconcileRequestV1, WorktreeCleanupReconciliationV1,
     WorktreeCleanupRemovalV1, WorktreeCleanupRemoveRequestV1, WorktreeContractError,
     WorktreePresenceV1, worktree_confirmation_digest,
 };
-use tracedecay_application::{AuthorizedScopeSet, CancellationSignal};
+use tracedecay_contracts::{AuthorizedScopeSet, CancellationSignal};
 use tracedecay_domain::{
     NativeWorktreeCleanupCommandV1, NativeWorktreeCleanupOutcomeV1, NativeWorktreeCleanupPhaseV1,
     NativeWorktreeCleanupReceiptV1, NativeWorktreeCleanupTransactionV1, UtcMicros,
@@ -28,19 +28,8 @@ enum CleanupNativeStateV1 {
 }
 
 impl DaemonNativeWorktreeAuthority {
-    pub(super) fn remove_cleanup(
-        &self,
-        request: &WorktreeCleanupRemoveRequestV1,
-        scope_set: &AuthorizedScopeSet,
-        cancellation: &CancellationSignal,
-    ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError> {
-        let removal = self.remove_cleanup_checked(request, scope_set, cancellation);
-        record_worktree_removal_outcome(&removal);
-        removal
-    }
-
-    #[hotpath::measure(label = "daemon.git.worktree.remove")]
-    fn remove_cleanup_checked(
+    #[tracing::instrument(name = "daemon.git.worktree.remove", level = "trace", skip_all)]
+    pub(super) async fn remove_cleanup(
         &self,
         request: &WorktreeCleanupRemoveRequestV1,
         scope_set: &AuthorizedScopeSet,
@@ -92,7 +81,7 @@ impl DaemonNativeWorktreeAuthority {
         let fenced = self.observe_target(
             &request.target,
             scope_set,
-            tracedecay_application::now_micros(),
+            tracedecay_contracts::now_micros(),
             true,
         )?;
         if fenced.presence != WorktreePresenceV1::Present
@@ -137,7 +126,7 @@ impl DaemonNativeWorktreeAuthority {
         }
         .seal()?;
 
-        let transaction = match self.store.begin_worktree_cleanup(prepared) {
+        let transaction = match self.store.begin_worktree_cleanup(prepared).await {
             Ok(NativeWorktreeCleanupBeginResultV1::Started(transaction)) => *transaction,
             Ok(NativeWorktreeCleanupBeginResultV1::Replay(receipt)) => {
                 return Ok(removal_from_outcome(
@@ -147,7 +136,9 @@ impl DaemonNativeWorktreeAuthority {
                 ));
             }
             Ok(NativeWorktreeCleanupBeginResultV1::RecoveryRequired(transaction)) => {
-                return self.reconcile_for_remove(*transaction, scope_set, admission, cancellation);
+                return self
+                    .reconcile_for_remove(*transaction, scope_set, admission, cancellation)
+                    .await;
             }
             Err(error) => return Ok(removal_store_error(error)),
         };
@@ -155,6 +146,7 @@ impl DaemonNativeWorktreeAuthority {
         if !cancellation.try_begin_commit() {
             return match self
                 .write_terminal(transaction, NativeWorktreeCleanupOutcomeV1::AbortedNoChange)
+                .await
             {
                 Ok(_) => Ok(WorktreeCleanupRemovalV1::Unavailable),
                 Err(outcome) => {
@@ -163,22 +155,11 @@ impl DaemonNativeWorktreeAuthority {
                 }
             };
         }
-        self.execute_remove(transaction, scope_set, admission)
+        self.execute_remove(transaction, scope_set, admission).await
     }
 
-    pub(super) fn reconcile_cleanup(
-        &self,
-        request: &WorktreeCleanupReconcileRequestV1,
-        scope_set: &AuthorizedScopeSet,
-        cancellation: &CancellationSignal,
-    ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError> {
-        let reconciliation = self.reconcile_cleanup_checked(request, scope_set, cancellation);
-        record_worktree_reconciliation_outcome(&reconciliation);
-        reconciliation
-    }
-
-    #[hotpath::measure(label = "daemon.git.worktree.reconcile")]
-    fn reconcile_cleanup_checked(
+    #[tracing::instrument(name = "daemon.git.worktree.reconcile", level = "trace", skip_all)]
+    pub(super) async fn reconcile_cleanup(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,
         scope_set: &AuthorizedScopeSet,
@@ -190,6 +171,7 @@ impl DaemonNativeWorktreeAuthority {
         let transaction = match self
             .store
             .read_worktree_cleanup(&request.confirmation_digest)
+            .await
         {
             Ok(Some(transaction)) => transaction,
             Ok(None) => return Ok(WorktreeCleanupReconciliationV1::Stale),
@@ -226,22 +208,25 @@ impl DaemonNativeWorktreeAuthority {
             return Ok(WorktreeCleanupReconciliationV1::Unavailable);
         }
         self.reconcile_transaction(transaction, scope_set, admission)
+            .await
     }
 
-    fn execute_remove(
+    async fn execute_remove(
         &self,
         transaction: NativeWorktreeCleanupTransactionV1,
         scope_set: &AuthorizedScopeSet,
         admission: WorktreeCleanupAdmissionV1,
     ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError> {
-        let started =
-            match self.advance_phase(transaction, NativeWorktreeCleanupPhaseV1::MutationStarted) {
-                Ok(transaction) => transaction,
-                Err(outcome) => {
-                    admission.retain_recovery();
-                    return Ok(outcome);
-                }
-            };
+        let started = match self
+            .advance_phase(transaction, NativeWorktreeCleanupPhaseV1::MutationStarted)
+            .await
+        {
+            Ok(transaction) => transaction,
+            Err(outcome) => {
+                admission.retain_recovery();
+                return Ok(outcome);
+            }
+        };
         let command = run_worktree_remove(
             &started.command.repository_root,
             &started.command.worktree_root,
@@ -250,7 +235,10 @@ impl DaemonNativeWorktreeAuthority {
         match native_state {
             CleanupNativeStateV1::Removed => {
                 let observed_at = now_at_least(started.updated_at);
-                match self.write_terminal(started, NativeWorktreeCleanupOutcomeV1::Removed) {
+                match self
+                    .write_terminal(started, NativeWorktreeCleanupOutcomeV1::Removed)
+                    .await
+                {
                     Ok(receipt) => Ok(WorktreeCleanupRemovalV1::Removed {
                         confirmation_digest: receipt.transaction.confirmation_digest,
                         observed_at: receipt.completed_at,
@@ -274,7 +262,9 @@ impl DaemonNativeWorktreeAuthority {
             CleanupNativeStateV1::Present
                 if command.is_ok_and(|output| !output.status.success()) =>
             {
-                match self.write_terminal(started, NativeWorktreeCleanupOutcomeV1::AbortedNoChange)
+                match self
+                    .write_terminal(started, NativeWorktreeCleanupOutcomeV1::AbortedNoChange)
+                    .await
                 {
                     Ok(_) => Ok(WorktreeCleanupRemovalV1::Denied),
                     Err(outcome) => {
@@ -286,6 +276,7 @@ impl DaemonNativeWorktreeAuthority {
             CleanupNativeStateV1::Foreign => {
                 match self
                     .write_terminal(started, NativeWorktreeCleanupOutcomeV1::RefusedForeignDrift)
+                    .await
                 {
                     Ok(_) => Ok(WorktreeCleanupRemovalV1::Denied),
                     Err(outcome) => {
@@ -295,7 +286,9 @@ impl DaemonNativeWorktreeAuthority {
                 }
             }
             CleanupNativeStateV1::Present | CleanupNativeStateV1::Uncertain => {
-                match self.advance_phase(started, NativeWorktreeCleanupPhaseV1::NeedsReconciliation)
+                match self
+                    .advance_phase(started, NativeWorktreeCleanupPhaseV1::NeedsReconciliation)
+                    .await
                 {
                     Ok(_) | Err(WorktreeCleanupRemovalV1::DurabilityUncertain) => {
                         admission.retain_recovery();
@@ -310,7 +303,7 @@ impl DaemonNativeWorktreeAuthority {
         }
     }
 
-    fn reconcile_for_remove(
+    async fn reconcile_for_remove(
         &self,
         transaction: NativeWorktreeCleanupTransactionV1,
         scope_set: &AuthorizedScopeSet,
@@ -322,7 +315,10 @@ impl DaemonNativeWorktreeAuthority {
             return Ok(WorktreeCleanupRemovalV1::Unavailable);
         }
         Ok(
-            match self.reconcile_transaction(transaction, scope_set, admission)? {
+            match self
+                .reconcile_transaction(transaction, scope_set, admission)
+                .await?
+            {
                 WorktreeCleanupReconciliationV1::Removed {
                     confirmation_digest,
                     observed_at,
@@ -343,7 +339,7 @@ impl DaemonNativeWorktreeAuthority {
         )
     }
 
-    fn reconcile_transaction(
+    async fn reconcile_transaction(
         &self,
         transaction: NativeWorktreeCleanupTransactionV1,
         scope_set: &AuthorizedScopeSet,
@@ -351,7 +347,10 @@ impl DaemonNativeWorktreeAuthority {
     ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError> {
         match self.cleanup_native_state(&transaction, scope_set)? {
             CleanupNativeStateV1::Removed => {
-                match self.write_terminal(transaction, NativeWorktreeCleanupOutcomeV1::Removed) {
+                match self
+                    .write_terminal(transaction, NativeWorktreeCleanupOutcomeV1::Removed)
+                    .await
+                {
                     Ok(receipt) => Ok(WorktreeCleanupReconciliationV1::Removed {
                         confirmation_digest: receipt.transaction.confirmation_digest,
                         observed_at: receipt.completed_at,
@@ -365,6 +364,7 @@ impl DaemonNativeWorktreeAuthority {
             CleanupNativeStateV1::Present => {
                 match self
                     .write_terminal(transaction, NativeWorktreeCleanupOutcomeV1::AbortedNoChange)
+                    .await
                 {
                     Ok(_) => Ok(WorktreeCleanupReconciliationV1::StillPresent),
                     Err(_) => {
@@ -374,10 +374,13 @@ impl DaemonNativeWorktreeAuthority {
                 }
             }
             CleanupNativeStateV1::Foreign => {
-                match self.write_terminal(
-                    transaction,
-                    NativeWorktreeCleanupOutcomeV1::RefusedForeignDrift,
-                ) {
+                match self
+                    .write_terminal(
+                        transaction,
+                        NativeWorktreeCleanupOutcomeV1::RefusedForeignDrift,
+                    )
+                    .await
+                {
                     Ok(_) => Ok(WorktreeCleanupReconciliationV1::Denied),
                     Err(_) => {
                         admission.retain_recovery();
@@ -410,12 +413,8 @@ impl DaemonNativeWorktreeAuthority {
             repository_id: transaction.command.repository_id.clone(),
             worktree_id: transaction.command.worktree_id.clone(),
         };
-        let inspection = self.observe_target(
-            &target,
-            scope_set,
-            tracedecay_application::now_micros(),
-            true,
-        )?;
+        let inspection =
+            self.observe_target(&target, scope_set, tracedecay_contracts::now_micros(), true)?;
         Ok(match inspection.presence {
             WorktreePresenceV1::Present => CleanupNativeStateV1::Present,
             WorktreePresenceV1::Foreign => CleanupNativeStateV1::Foreign,
@@ -426,7 +425,7 @@ impl DaemonNativeWorktreeAuthority {
     }
 
     fn linked_admin_present(&self, worktree_root: &Path) -> Result<bool, WorktreeContractError> {
-        let repository = gix::open(&self.repository_root)
+        let repository = tracedecay_runtime_core::git_open::open(&self.repository_root)
             .map_err(|_| WorktreeContractError::AuthorityUnavailable)?;
         let worktrees = repository
             .worktrees()
@@ -438,7 +437,7 @@ impl DaemonNativeWorktreeAuthority {
         }))
     }
 
-    fn advance_phase(
+    async fn advance_phase(
         &self,
         current: NativeWorktreeCleanupTransactionV1,
         phase: NativeWorktreeCleanupPhaseV1,
@@ -457,10 +456,11 @@ impl DaemonNativeWorktreeAuthority {
                 current.phase_revision,
                 replacement,
             )
+            .await
             .map_err(removal_store_error)
     }
 
-    fn write_terminal(
+    async fn write_terminal(
         &self,
         current: NativeWorktreeCleanupTransactionV1,
         outcome: NativeWorktreeCleanupOutcomeV1,
@@ -486,72 +486,8 @@ impl DaemonNativeWorktreeAuthority {
                 current.phase_revision,
                 receipt,
             )
+            .await
             .map_err(removal_store_error)
-    }
-}
-
-/// Tallies one durable worktree removal against its exact typed outcome. The
-/// outcome set is the closed [`WorktreeCleanupRemovalV1`] enum plus one
-/// contract-error bucket, so every gauge key stays compile-time static and
-/// fail-closed outcomes are recorded alongside removals.
-fn record_worktree_removal_outcome(
-    removal: &Result<WorktreeCleanupRemovalV1, WorktreeContractError>,
-) {
-    match removal {
-        Ok(WorktreeCleanupRemovalV1::Removed { .. }) => {
-            hotpath::gauge!("daemon.native_integration.worktree_remove.removed").inc(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::AlreadyRemoved { .. }) => {
-            hotpath::gauge!("daemon.native_integration.worktree_remove.already_removed").inc(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::Denied) => {
-            hotpath::gauge!("daemon.native_integration.worktree_remove.denied").inc(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::Stale) => {
-            hotpath::gauge!("daemon.native_integration.worktree_remove.stale").inc(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::DurabilityUncertain) => {
-            hotpath::gauge!("daemon.native_integration.worktree_remove.durability_uncertain")
-                .inc(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::Unavailable) => {
-            hotpath::gauge!("daemon.native_integration.worktree_remove.unavailable").inc(1.0);
-        }
-        Err(_) => {
-            hotpath::gauge!("daemon.native_integration.worktree_remove.contract_error").inc(1.0);
-        }
-    }
-}
-
-/// Tallies one worktree cleanup reconciliation against its exact typed
-/// outcome, mirroring [`record_worktree_removal_outcome`] for the recovery
-/// path.
-fn record_worktree_reconciliation_outcome(
-    reconciliation: &Result<WorktreeCleanupReconciliationV1, WorktreeContractError>,
-) {
-    match reconciliation {
-        Ok(WorktreeCleanupReconciliationV1::Removed { .. }) => {
-            hotpath::gauge!("daemon.native_integration.worktree_reconcile.removed").inc(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::StillPresent) => {
-            hotpath::gauge!("daemon.native_integration.worktree_reconcile.still_present").inc(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::DurabilityUncertain) => {
-            hotpath::gauge!("daemon.native_integration.worktree_reconcile.durability_uncertain")
-                .inc(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::Stale) => {
-            hotpath::gauge!("daemon.native_integration.worktree_reconcile.stale").inc(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::Denied) => {
-            hotpath::gauge!("daemon.native_integration.worktree_reconcile.denied").inc(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::Unavailable) => {
-            hotpath::gauge!("daemon.native_integration.worktree_reconcile.unavailable").inc(1.0);
-        }
-        Err(_) => {
-            hotpath::gauge!("daemon.native_integration.worktree_reconcile.contract_error").inc(1.0);
-        }
     }
 }
 
@@ -573,7 +509,7 @@ fn run_worktree_remove(repository_root: &Path, worktree_root: &Path) -> Result<O
 }
 
 fn now_at_least(floor: UtcMicros) -> UtcMicros {
-    let now = tracedecay_application::now_micros();
+    let now = tracedecay_contracts::now_micros();
     UtcMicros(now.0.max(floor.0))
 }
 

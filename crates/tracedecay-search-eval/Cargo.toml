@@ -4,77 +4,29 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "TraceDecay search-quality evaluator: candidate generation, direct evaluation, and native semantic measurement"
+description = "TraceDecay search-quality evaluator: exact/lexical/graph candidate generation and direct evaluation"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/assets/**", "/src/**"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
 hex = "0.4"
-hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = [
-    "native-git",
-] }
-tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["eval-helpers"] }
-tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
-tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-capture = { path = "../tracedecay-capture" }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["eval-helpers"] }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
+tracedecay-query = { path = "../tracedecay-query" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracing = "0.1"
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "tracedecay-application/hotpath",
-    "tracedecay-capture/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-daemon-identity/hotpath",
-    "tracedecay-daemon-protocol/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-query/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-sessions/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-    "tracedecay-capture/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-daemon-identity/hotpath-alloc",
-    "tracedecay-daemon-protocol/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-query/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
-    "tracedecay-capture/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-daemon-identity/hotpath-cpu",
-    "tracedecay-daemon-protocol/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-query/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-]
 # Language tiers forwarded to the code-index owner the evaluator mounts. Off by
 # default so a composing binary keeps its own tier selection authoritative; the
 # checked-in evaluator corpus is Rust, so the crate's own tests enable `lite`
@@ -96,3 +48,12 @@ path = "src/bin/tracedecay-search-eval.rs"
 [[bin]]
 name = "tracedecay-search-eval-direct"
 path = "src/bin/tracedecay-search-eval-direct.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

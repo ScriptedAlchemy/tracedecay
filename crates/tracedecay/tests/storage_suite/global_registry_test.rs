@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{
     GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert, StoreInstanceUpsert,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::{
     BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, write_store_manifest_to_path,
@@ -74,6 +74,7 @@ fn write_observation_store_manifest(
             graph_db_relpath: PathBuf::from("tracedecay.db"),
             sessions_db_relpath: PathBuf::from(SESSIONS_DB_FILENAME),
             branch_meta_relpath: PathBuf::from(BRANCH_META_FILENAME),
+            sessions_schema_digest: None,
         },
     )
     .unwrap();
@@ -130,7 +131,6 @@ async fn upsert_registry_fixture(db: &HostAdmissionTestRuntimeV1, project_root: 
         project_id: project.project_id,
         store_id: store.store_id.clone(),
         branch_name: "main".to_string(),
-        db_relpath: "projects/proj_registry/tracedecay.db".to_string(),
         parent_scope_id: None,
         last_synced_at: Some(102),
         writable: true,
@@ -287,7 +287,8 @@ async fn registered_profile_runtime_creates_and_round_trips_registry_records() {
     assert_eq!(projects[0].project_id, "proj_registry");
     assert_eq!(
         projects[0].canonical_root,
-        project_root.canonicalize().unwrap().to_string_lossy()
+        tracedecay_runtime_core::path_safety::canonical_root_identity(&project_root)
+            .to_string_lossy()
     );
     assert_eq!(
         db.search_code_projects("repo.git", 10).await.unwrap().len(),
@@ -305,11 +306,10 @@ async fn registered_profile_runtime_creates_and_round_trips_registry_records() {
         .iter()
         .map(|alias| alias.alias_path.as_str())
         .collect();
-    let canonical_project_root = project_root
-        .canonicalize()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
+    let canonical_project_root =
+        tracedecay_runtime_core::path_safety::canonical_root_identity(&project_root)
+            .to_string_lossy()
+            .to_string();
     assert!(alias_paths.contains(&canonical_project_root.as_str()));
     assert!(
         alias_paths
@@ -975,11 +975,17 @@ async fn project_tokens_saved_schema_and_queries_still_work() {
     assert_eq!(db.get_project_tokens(&project_one).await, 33);
     assert_eq!(db.get_project_tokens(&project_two.join(".")).await, 22);
     assert_eq!(db.global_tokens_saved().await, 55);
+    // The ledger stores the resolved root, so the expectation must resolve
+    // too: on macOS a tempdir is handed out as `/var/folders/...` while the
+    // registry records `/private/var/folders/...` for the same directory.
     assert_eq!(
         db.project_ledger_paths_for_test()
             .await
             .expect("project ledger path listing should succeed"),
-        vec![project_one, project_two]
+        vec![
+            tracedecay_runtime_core::path_safety::canonical_root_identity(&project_one),
+            tracedecay_runtime_core::path_safety::canonical_root_identity(&project_two),
+        ]
     );
     close_profile_runtime(db).await;
 }
@@ -1020,12 +1026,15 @@ async fn registry_gc_reaps_dead_paths_without_discarding_retained_store_authorit
             "registry GC fixture",
         )
         .unwrap();
-        let runtime =
-            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::open(
-                profile.path(),
-            )
+        let identity =
+            tracedecay_daemon_identity::profile_identity::load_existing(profile.path()).unwrap();
+        let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
             .await
             .unwrap();
+        let runtime =
+            tracedecay_global_db::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::from_admitted_lease(
+                registry.profile_database().await.unwrap(),
+            );
         let preview = runtime
             .registry_gc(profile.path(), None, false)
             .await

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
     SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
@@ -37,7 +37,7 @@ pub(super) fn fixture_request() -> SourceEditEffectRequestV1 {
     )
     .unwrap();
     let grant = CapabilityGrantSnapshot::new(
-        tracedecay_application::CapabilityGrantId::new("grant.edit.fixture").unwrap(),
+        tracedecay_contracts::CapabilityGrantId::new("grant.edit.fixture").unwrap(),
         1,
         digest(SHA256_A),
         ActorId::new("actor.edit.issuer").unwrap(),
@@ -119,7 +119,7 @@ pub(super) fn fixture_journal(
         effect_id: effect_id(&request.idempotency_key, &input_digest).unwrap(),
         input_digest,
         expected_state: request.expected_state.clone(),
-        predicted_state: None,
+        predicted_state: Some(digest(SHA256_B)),
         candidate_files: vec!["src/lib.rs".to_owned()],
         recovery_files: Vec::new(),
         recovery_digest: None,
@@ -151,7 +151,7 @@ pub(super) fn fixture_reconciliation(
         kind: request.edit.kind(),
         effect_id: journal.effect_id.clone(),
         idempotency_key: request.idempotency_key.clone(),
-        attempt_idempotency_key: tracedecay_application::IdempotencyKey::new(
+        attempt_idempotency_key: tracedecay_contracts::IdempotencyKey::new(
             "source-edit-reconciliation-attempt.fixture",
         )
         .unwrap(),

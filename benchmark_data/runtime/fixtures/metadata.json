@@ -6,7 +6,7 @@
   "crate_identities": [
     "tracedecay-domain",
     "tracedecay-store",
-    "tracedecay-application",
+    "tracedecay-contracts",
     "tracedecay-api",
     "tracedecay-capture",
     "tracedecay-hooks",

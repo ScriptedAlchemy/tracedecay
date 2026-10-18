@@ -1,0 +1,448 @@
+//! Dispatch source-edit mutations through the project-owned authority.
+
+use std::sync::Arc;
+
+use tracedecay_contracts::{
+    ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemDetailV1,
+    CancellationContext, CancellationSignal, Deadline, RequestId, SafeDiagnostic,
+    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
+};
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
+
+#[cfg(test)]
+use tracedecay_contracts::RetryDirective;
+use tracedecay_domain::UtcMicros;
+use tracedecay_domain::errors::TraceDecayError;
+
+use crate::project_owner_registration::{ProjectSourceEditOwnerV1, SourceEditOwnerError};
+
+use super::{
+    DaemonInvocationOutcome, DaemonInvocationResponse, application_problem,
+    concealed_application_problem, runtime_mounting_problem, runtime_publication_failed_problem,
+};
+
+type AdmittedSourceEdit = (Arc<ProjectSourceEditOwnerV1>, RequestId, CancellationSignal);
+
+/// Resolves what every source-edit mutation needs before it reaches the
+/// owner: the owner itself, a typed request id, and a live cancellation signal.
+fn admit_source_edit(
+    request_id: &str,
+    owner: Option<Arc<ProjectSourceEditOwnerV1>>,
+    unavailable_message: &str,
+    observed_at: UtcMicros,
+    cancellation: &CancellationContext,
+) -> Result<AdmittedSourceEdit, Box<DaemonInvocationResponse>> {
+    let Some(owner) = owner else {
+        return Err(Box::new(application_problem(
+            request_id.to_owned(),
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "source_edit.authority_unavailable".to_owned(),
+                message: unavailable_message.to_owned(),
+            }),
+        )));
+    };
+    let Ok(typed_request_id) = RequestId::new(request_id.to_owned()) else {
+        return Err(Box::new(application_problem(
+            request_id.to_owned(),
+            ApplicationProblem::invalid_request(
+                "source_edit.invalid_request_id",
+                "The source-edit request id is invalid",
+            ),
+        )));
+    };
+    let cancellation =
+        super::native_integration::live_cancellation_signal(cancellation, observed_at)
+            .map_err(|problem| Box::new(application_problem(request_id.to_owned(), problem)))?;
+    Ok((owner, typed_request_id, cancellation))
+}
+
+fn source_edit_response(
+    request_id: String,
+    owner: &ProjectSourceEditOwnerV1,
+    result: Result<
+        tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
+        SourceEditOwnerError,
+    >,
+) -> DaemonInvocationResponse {
+    match result {
+        Ok(result) => DaemonInvocationResponse::with_outcome(
+            request_id,
+            DaemonInvocationOutcome::SourceEdit {
+                scope: owner.scope(),
+                result,
+            },
+        ),
+        Err(error) => map_source_edit_error(request_id, error),
+    }
+}
+
+pub(super) async fn execute_source_edit(
+    request_id: String,
+    owner: Option<Arc<ProjectSourceEditOwnerV1>>,
+    request: SourceEditInvocationV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let (owner, typed_request_id, cancellation) = match admit_source_edit(
+        &request_id,
+        owner,
+        "The daemon-owned source edit authority is unavailable",
+        observed_at,
+        &cancellation,
+    ) {
+        Ok(admitted) => admitted,
+        Err(response) => return *response,
+    };
+    let result = owner
+        .execute(typed_request_id, request, deadline, cancellation)
+        .await;
+    source_edit_response(request_id, &owner, result)
+}
+
+pub(super) async fn execute_source_edit_reconcile(
+    request_id: String,
+    owner: Option<Arc<ProjectSourceEditOwnerV1>>,
+    request: SourceEditReconciliationInvocationV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let (owner, typed_request_id, cancellation) = match admit_source_edit(
+        &request_id,
+        owner,
+        "The daemon-owned source edit reconciliation authority is unavailable",
+        observed_at,
+        &cancellation,
+    ) {
+        Ok(admitted) => admitted,
+        Err(response) => return *response,
+    };
+    let result = owner
+        .reconcile(typed_request_id, request, deadline, cancellation)
+        .await;
+    source_edit_response(request_id, &owner, result)
+}
+
+pub(super) async fn execute_source_edit_rollback(
+    request_id: String,
+    owner: Option<Arc<ProjectSourceEditOwnerV1>>,
+    request: SourceEditRollbackInvocationV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let (owner, typed_request_id, cancellation) = match admit_source_edit(
+        &request_id,
+        owner,
+        "The daemon-owned source edit rollback authority is unavailable",
+        observed_at,
+        &cancellation,
+    ) {
+        Ok(admitted) => admitted,
+        Err(response) => return *response,
+    };
+    let result = owner
+        .rollback(typed_request_id, request, deadline, cancellation)
+        .await;
+    source_edit_response(request_id, &owner, result)
+}
+
+fn map_source_edit_error(
+    request_id: String,
+    error: SourceEditOwnerError,
+) -> DaemonInvocationResponse {
+    match error {
+        SourceEditOwnerError::Warming => runtime_mounting_problem(request_id),
+        SourceEditOwnerError::PublicationFailed => runtime_publication_failed_problem(request_id),
+        SourceEditOwnerError::NotAuthorized => concealed_application_problem(request_id),
+        SourceEditOwnerError::InvalidContract => application_problem(
+            request_id,
+            ApplicationProblem::invalid_request(
+                "source_edit.invalid_request",
+                "The source-edit request does not match its invocation contract",
+            ),
+        ),
+        SourceEditOwnerError::Cancelled => {
+            application_problem(request_id, ApplicationProblem::cancelled_before_admission())
+        }
+        SourceEditOwnerError::TimedOut => {
+            application_problem(request_id, ApplicationProblem::timed_out_before_admission())
+        }
+        SourceEditOwnerError::ExecutionFailed(error) => {
+            map_source_edit_execution_error(request_id, error)
+        }
+    }
+}
+
+const SOURCE_EDIT_EXPECTED_STATE_MISMATCH: &str = "source_edit.expected_state_mismatch";
+const SOURCE_EDIT_IDEMPOTENCY_CONFLICT: &str = "source_edit.idempotency_conflict";
+const SOURCE_EDIT_SYMBOL_EVIDENCE_UNAVAILABLE: &str = "source-edit-symbol-evidence-unavailable";
+const SOURCE_EDIT_DIAGNOSTICS_UNAVAILABLE: &str = "source_edit_diagnostics_unavailable";
+
+fn sanitize_safe_diagnostic_text(value: &str, limit: usize) -> String {
+    let collapsed = tracedecay_domain::fold_control_characters(value);
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    tracedecay_domain::utf8_prefix_at_or_before(trimmed, limit)
+        .trim_end()
+        .to_owned()
+}
+
+fn source_edit_kernel_cause(error: &TraceDecayError) -> (String, String) {
+    match error.project_route_context() {
+        Some((code, _, detail)) => (code.to_owned(), detail.to_owned()),
+        None => match error {
+            TraceDecayError::Io(io) => (
+                "source_edit.execution_failed".to_owned(),
+                format!("source edit I/O failed ({})", io.kind()),
+            ),
+            _ => ("source_edit.execution_failed".to_owned(), error.to_string()),
+        },
+    }
+}
+
+fn source_edit_safe_diagnostic(
+    code: String,
+    message: String,
+) -> Result<SafeDiagnostic, tracedecay_contracts::ApplicationContractError> {
+    let code = sanitize_safe_diagnostic_text(&code, 128);
+    let code = if code.is_empty() {
+        "source_edit.execution_failed".to_owned()
+    } else {
+        code
+    };
+    let message = sanitize_safe_diagnostic_text(&message, 512);
+    let message = if message.is_empty() {
+        "Source edit execution failed".to_owned()
+    } else {
+        message
+    };
+    SafeDiagnostic::new(code, message)
+}
+
+fn source_edit_execution_problem(
+    error: TraceDecayError,
+) -> Result<ApplicationProblem, tracedecay_contracts::ApplicationContractError> {
+    if let Some(detail) = ApplicationProblemDetailV1::from_lock_deadline(&error) {
+        return Ok(ApplicationProblem::from_detail(detail));
+    }
+    let (code, message) = source_edit_kernel_cause(&error);
+    let diagnostic = source_edit_safe_diagnostic(code, message)?;
+    match diagnostic.code.as_str() {
+        SOURCE_EDIT_EXPECTED_STATE_MISMATCH => Ok(ApplicationProblem::stale(diagnostic)),
+        SOURCE_EDIT_IDEMPOTENCY_CONFLICT => Ok(ApplicationProblem::conflict(
+            diagnostic.code,
+            diagnostic.message,
+        )),
+        SOURCE_EDIT_SYMBOL_EVIDENCE_UNAVAILABLE | SOURCE_EDIT_DIAGNOSTICS_UNAVAILABLE => {
+            Ok(ApplicationProblem::unavailable(diagnostic))
+        }
+        _ => ApplicationProblem::execution_failed(
+            ApplicationExecutionFailureClassV1::Permanent,
+            diagnostic,
+        ),
+    }
+}
+
+fn map_source_edit_execution_error(
+    request_id: String,
+    error: TraceDecayError,
+) -> DaemonInvocationResponse {
+    match source_edit_execution_problem(error) {
+        Ok(problem) => application_problem(request_id, problem),
+        Err(_) => DaemonInvocationResponse::problem(
+            request_id,
+            DaemonInvocationProblem::ApplicationContractViolation,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_contracts::ApplicationProblemKind;
+
+    fn classified_problem(error: SourceEditOwnerError) -> ApplicationProblem {
+        match map_source_edit_error("request.source-edit.classify".to_owned(), error).outcome {
+            DaemonInvocationOutcome::ApplicationProblem { problem } => problem,
+            outcome => {
+                panic!("source-edit refusals must stay application problems, got {outcome:?}")
+            }
+        }
+    }
+
+    fn classified_kind(error: SourceEditOwnerError) -> ApplicationProblemKind {
+        classified_problem(error).kind()
+    }
+
+    fn kernel_digest_mismatch() -> SourceEditOwnerError {
+        SourceEditOwnerError::ExecutionFailed(TraceDecayError::project_route(
+            "source_edit.expected_state_mismatch",
+            true,
+            "source edit candidate state changed while its exact preview was captured",
+        ))
+    }
+
+    fn kernel_idempotency_conflict() -> SourceEditOwnerError {
+        SourceEditOwnerError::ExecutionFailed(TraceDecayError::project_route(
+            "source_edit.idempotency_conflict",
+            false,
+            "source edit idempotency key conflicts with a prior input",
+        ))
+    }
+
+    #[test]
+    fn source_edit_refusal_classification_follows_typed_state_not_message_text() {
+        assert_eq!(
+            classified_kind(SourceEditOwnerError::Warming),
+            ApplicationProblemKind::Unavailable
+        );
+        assert_eq!(
+            classified_kind(SourceEditOwnerError::PublicationFailed),
+            ApplicationProblemKind::ExecutionFailed
+        );
+        assert_eq!(
+            classified_kind(SourceEditOwnerError::NotAuthorized),
+            ApplicationProblemKind::NotFoundOrNotAuthorized
+        );
+        assert_eq!(
+            classified_kind(SourceEditOwnerError::InvalidContract),
+            ApplicationProblemKind::InvalidRequest
+        );
+
+        let reworded = SourceEditOwnerError::ExecutionFailed(TraceDecayError::Config {
+            message: "warming failed to publish not found or is not authorized invocation contract is invalid"
+                .to_owned(),
+        });
+        assert_eq!(
+            classified_kind(reworded),
+            ApplicationProblemKind::ExecutionFailed,
+            "message text must not reclassify a typed ExecutionFailed refusal"
+        );
+    }
+
+    #[test]
+    fn source_edit_kernel_stale_keeps_reason_code_and_retryability() {
+        let problem = classified_problem(kernel_digest_mismatch());
+        assert_eq!(problem.kind(), ApplicationProblemKind::Stale);
+        assert_eq!(problem.reason_code(), SOURCE_EDIT_EXPECTED_STATE_MISMATCH);
+        assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
+        let error = problem.into_trace_decay_error();
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("digest mismatch must stay a typed project-route error");
+        assert_eq!(reason_code, SOURCE_EDIT_EXPECTED_STATE_MISMATCH);
+        assert!(retryable);
+    }
+
+    #[test]
+    fn source_edit_kernel_conflict_keeps_reason_code_and_retryability() {
+        let problem = classified_problem(kernel_idempotency_conflict());
+        assert_eq!(problem.kind(), ApplicationProblemKind::Conflict);
+        assert_eq!(problem.reason_code(), SOURCE_EDIT_IDEMPOTENCY_CONFLICT);
+        assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
+        let error = problem.into_trace_decay_error();
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .expect("idempotency conflict must stay a typed project-route error");
+        assert_eq!(reason_code, SOURCE_EDIT_IDEMPOTENCY_CONFLICT);
+        assert!(retryable);
+    }
+
+    #[test]
+    fn a_missed_writer_lock_deadline_is_retryable_capacity_with_typed_detail() {
+        let response = map_source_edit_error(
+            "request.source-edit.lock-deadline".to_owned(),
+            SourceEditOwnerError::ExecutionFailed(TraceDecayError::LockDeadline {
+                resource: "source-edit writer lock",
+                deadline_ms: 30_000,
+            }),
+        );
+        let wire = serde_json::to_value(&response).expect("daemon response wire");
+        let problem = &wire["problem"];
+        assert_eq!(
+            (
+                &problem["kind"],
+                &problem["retry"],
+                &problem["legal_actions"],
+                &problem["diagnostic"],
+                &problem["detail"],
+            ),
+            (
+                &serde_json::json!("saturated"),
+                &serde_json::json!("after_delay"),
+                &serde_json::json!(["retry"]),
+                &serde_json::json!({
+                    "code": "application.lock-deadline",
+                    "message": "The source-edit writer lock stayed busy past its 30000ms \
+                                admission deadline; retry the operation.",
+                }),
+                &serde_json::json!({
+                    "kind": "lock_deadline",
+                    "resource": "source-edit writer lock",
+                    "deadline_ms": 30_000,
+                }),
+            ),
+            "{wire}"
+        );
+    }
+
+    #[test]
+    fn source_edit_cancelled_request_is_cancelled_before_admission() {
+        let problem = classified_problem(SourceEditOwnerError::Cancelled);
+        assert_eq!(problem.kind(), ApplicationProblemKind::Cancelled);
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(problem.reason_code(), "cancelled");
+    }
+
+    #[test]
+    fn source_edit_elapsed_deadline_is_timed_out_before_admission() {
+        let problem = classified_problem(SourceEditOwnerError::TimedOut);
+        assert_eq!(problem.kind(), ApplicationProblemKind::TimedOut);
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(problem.reason_code(), "timed_out");
+    }
+
+    #[test]
+    fn source_edit_multiline_kernel_cause_survives_as_a_safe_diagnostic() {
+        let problem = classified_problem(SourceEditOwnerError::ExecutionFailed(
+            TraceDecayError::Config {
+                message: "sqlx execute failed\nUNIQUE constraint\nwhile writing the journal"
+                    .to_owned(),
+            },
+        ));
+        assert_eq!(problem.kind(), ApplicationProblemKind::ExecutionFailed);
+        assert_eq!(problem.reason_code(), "source_edit.execution_failed");
+        let message = problem.safe_message();
+        assert!(
+            message.contains("sqlx execute failed") && message.contains("UNIQUE constraint"),
+            "sanitized diagnostic must keep the kernel cause, got {message:?}"
+        );
+        assert!(
+            !message.chars().any(char::is_control),
+            "safe diagnostic must not retain control characters"
+        );
+    }
+
+    #[test]
+    fn source_edit_io_failure_omits_filesystem_paths() {
+        let problem = classified_problem(SourceEditOwnerError::ExecutionFailed(
+            TraceDecayError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "/secret/path/db.sqlite",
+            )),
+        ));
+        let message = problem.safe_message();
+        assert!(
+            message.contains("source edit I/O failed") && message.contains("permission denied"),
+            "I/O failures must name the kind, got {message:?}"
+        );
+        assert!(
+            !message.contains("/secret") && !message.contains("db.sqlite"),
+            "safe diagnostics must not carry filesystem paths, got {message:?}"
+        );
+    }
+}

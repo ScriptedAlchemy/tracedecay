@@ -1,17 +1,27 @@
-use std::path::PathBuf;
+use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use futures_util::FutureExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore};
 
-use super::super::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
+use super::super::client::{LspDocument, LspRefreshError, LspRefreshTimeouts, StdioLspClient};
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
+use super::super::launch::AnalyzerLaunch;
+use super::shared_client::{SharedAnalyzerClient, SharedAnalyzerClientSlot};
 use super::{CodeDiagnostic, EngineState};
+use crate::AnalyzerEvent;
 
 pub(crate) struct RefreshBatch {
     pub(crate) workspace_root: PathBuf,
+    /// Resolved from this batch's own workspace root: nested roots may pin
+    /// different toolchains, so each batch spawns the binary rustup reports
+    /// for its root rather than the one the project root resolved to.
+    pub(crate) launch: AnalyzerLaunch,
     pub(crate) documents: Vec<LspDocument>,
-    pub(crate) client: Arc<Mutex<Option<StdioLspClient>>>,
+    pub(crate) client: Arc<SharedAnalyzerClient>,
 }
 
 /// Each analyzer may wait behind at most this many independent workspace-root
@@ -23,8 +33,8 @@ pub const MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS: usize = 4;
 
 /// Broker-owned capacity shared by every refresh prepared from one broker.
 /// Queue permits reserve bounded work before a caller can retain it; run
-/// permits live inside spawned batches, so completion, cancellation, and task
-/// abortion release them without a separate cleanup path.
+/// permits live inside each batch future, so completion and cancellation
+/// release them without a separate cleanup path.
 #[derive(Clone)]
 pub(crate) struct BrokerRefreshCapacity {
     running: Arc<Semaphore>,
@@ -63,11 +73,19 @@ impl PreparedRefreshReservation {
     }
 }
 
+/// What every batch of a refresh shares: the configured command (for
+/// operator-facing messages) and the adapter's arguments. The program each
+/// batch runs is its own [`RefreshBatch::launch`].
+#[derive(Clone)]
+pub(crate) struct AnalyzerSpawn {
+    pub(crate) command: String,
+    pub(crate) args: Vec<String>,
+}
+
 pub struct PreparedRefresh {
     language: String,
     project_root: PathBuf,
-    command: String,
-    args: Vec<String>,
+    spawn: AnalyzerSpawn,
     epoch: u64,
     batches: Vec<RefreshBatch>,
     reservation: PreparedRefreshReservation,
@@ -90,8 +108,7 @@ impl PreparedRefresh {
     pub(crate) fn new(
         language: String,
         project_root: PathBuf,
-        command: String,
-        args: Vec<String>,
+        spawn: AnalyzerSpawn,
         epoch: u64,
         batches: Vec<RefreshBatch>,
         reservation: PreparedRefreshReservation,
@@ -99,12 +116,20 @@ impl PreparedRefresh {
         Self {
             language,
             project_root,
-            command,
-            args,
+            spawn,
             epoch,
             batches,
             reservation,
         }
+    }
+
+    /// The exact program and environment each workspace-root batch of this
+    /// refresh spawns, in batch order.
+    pub fn batch_launches(&self) -> Vec<(&Path, &AnalyzerLaunch)> {
+        self.batches
+            .iter()
+            .map(|batch| (batch.workspace_root.as_path(), &batch.launch))
+            .collect()
     }
 
     pub async fn collect_diagnostics(
@@ -117,13 +142,13 @@ impl PreparedRefresh {
         .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_collect_refresh", impl_type = "PreparedRefresh")]
+    #[tracing::instrument(name = "lsp_analyzer_collect_refresh", level = "trace", skip_all)]
     pub async fn collect_diagnostics_with_timeouts(
         self,
         timeouts: LspRefreshTimeouts,
     ) -> CompletedRefresh {
         let language = self.language.clone();
-        let command = self.command.clone();
+        let command = self.spawn.command.clone();
         let epoch = self.epoch;
         let result = self.collect(timeouts).await;
         CompletedRefresh {
@@ -138,49 +163,36 @@ impl PreparedRefresh {
         self,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<Vec<CodeDiagnostic>, RefreshFailure> {
-        let mut pending = tokio::task::JoinSet::new();
-        let mut batches = self.batches.into_iter().enumerate();
-        let mut completed = Vec::new();
-
-        while pending.len() < MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS {
-            let Some((ordinal, batch)) = batches.next() else {
-                break;
-            };
-            let run_permit = self.reservation.acquire_run().await.ok_or_else(|| {
-                RefreshFailure::crashed_message("broker run capacity unavailable".to_owned())
-            })?;
-            pending.spawn(collect_refresh_batch(
-                ordinal,
-                batch,
-                self.project_root.clone(),
-                self.command.clone(),
-                self.args.clone(),
-                timeouts,
-                run_permit,
-            ));
-        }
-
-        while let Some(result) = pending.join_next().await {
-            let result = result.map_err(|error| {
-                RefreshFailure::crashed_message(format!(
-                    "analyzer refresh task terminated: {error}"
-                ))
+        // Batches run concurrently inside this future rather than as spawned
+        // tasks, so dropping the refresh drops every batch with it. Each batch
+        // waits for its run permit inside the set, which keeps the batches
+        // already holding permits polled while later ones queue.
+        let reservation = &self.reservation;
+        let mut pending = self
+            .batches
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, batch)| {
+                let project_root = self.project_root.clone();
+                let spawn = self.spawn.clone();
+                AssertUnwindSafe(async move {
+                    let run_permit = reservation.acquire_run().await.ok_or_else(|| {
+                        RefreshFailure::crashed_message(
+                            "broker run capacity unavailable".to_owned(),
+                        )
+                    })?;
+                    collect_refresh_batch(ordinal, batch, project_root, spawn, timeouts, run_permit)
+                        .await
+                })
+                .catch_unwind()
+            })
+            .collect::<FuturesUnordered<_>>();
+        let mut completed = Vec::with_capacity(pending.len());
+        while let Some(result) = pending.next().await {
+            let result = result.map_err(|_| {
+                RefreshFailure::crashed_message("analyzer refresh task panicked".to_owned())
             })?;
             completed.push(result?);
-            if let Some((ordinal, batch)) = batches.next() {
-                let run_permit = self.reservation.acquire_run().await.ok_or_else(|| {
-                    RefreshFailure::crashed_message("broker run capacity unavailable".to_owned())
-                })?;
-                pending.spawn(collect_refresh_batch(
-                    ordinal,
-                    batch,
-                    self.project_root.clone(),
-                    self.command.clone(),
-                    self.args.clone(),
-                    timeouts,
-                    run_permit,
-                ));
-            }
         }
         completed.sort_by_key(|(ordinal, _)| *ordinal);
         Ok(completed
@@ -190,36 +202,134 @@ impl PreparedRefresh {
     }
 }
 
-#[hotpath::measure(label = "lsp_analyzer_collect_batch")]
+#[tracing::instrument(name = "lsp_analyzer_collect_batch", level = "trace", skip_all)]
 async fn collect_refresh_batch(
     ordinal: usize,
     batch: RefreshBatch,
     project_root: PathBuf,
-    command: String,
-    args: Vec<String>,
+    spawn: AnalyzerSpawn,
     timeouts: LspRefreshTimeouts,
     _run_permit: OwnedSemaphorePermit,
 ) -> std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure> {
-    let mut client_slot = batch.client.lock().await;
-    let mut client = match client_slot.take() {
-        Some(client) => client,
-        None => {
-            StdioLspClient::start_with_timeouts(&command, &args, &batch.workspace_root, timeouts)
-                .await
-                .map_err(|error| RefreshFailure::crashed(&error))?
-        }
-    };
-    match client
-        .collect_document_diagnostics(&project_root, batch.documents, timeouts)
+    let AnalyzerSpawn { command, args } = spawn;
+    let launch = batch.launch;
+    let shared = batch.client;
+    let mut client_slot = shared
+        .client()
         .await
-    {
+        .map_err(|error| RefreshFailure::crashed(&error))?;
+    let mut use_of_analyzer = if let Some(client) = client_slot.take() {
+        RefreshUseOfAnalyzer::new(&shared, client_slot, shared.current_attempt(), Some(client))
+    } else {
+        // Restart exhaustion is a stable health state
+        // (`MAX_ANALYZER_RESTARTS`), not an invitation for this lane to
+        // start the analyzer the semantic lane was just refused.
+        let Some(attempt) = shared.begin_start() else {
+            return Err(RefreshFailure::crashed_message(format!(
+                "analyzer '{command}' is retired: restart budget exhausted"
+            )));
+        };
+        let mut use_of_analyzer = RefreshUseOfAnalyzer::new(&shared, client_slot, attempt, None);
+        use_of_analyzer.client = match StdioLspClient::start_with_launch(
+            &launch,
+            &args,
+            &batch.workspace_root,
+            timeouts,
+        )
+        .await
+        {
+            Ok(client) => Some(client),
+            Err(error) => {
+                use_of_analyzer.retire(AnalyzerEvent::StartupFailed);
+                return Err(RefreshFailure::unstartable(
+                    &error,
+                    batch.workspace_root.clone(),
+                ));
+            }
+        };
+        if shared.mark_ready(attempt).is_none() {
+            // Superseded while holding the client lock cannot happen; if it
+            // ever does, this client is not the session's analyzer.
+            return Err(RefreshFailure::crashed_message(format!(
+                "analyzer '{command}' start was superseded"
+            )));
+        }
+        use_of_analyzer
+    };
+    let result = match use_of_analyzer.client.as_mut() {
+        Some(client) => {
+            client
+                .collect_document_diagnostics(&project_root, batch.documents, timeouts)
+                .await
+        }
+        None => Err(LspRefreshError::Transport {
+            message: format!("analyzer '{command}' client slot was empty"),
+        }),
+    };
+    match result {
         Ok(diagnostics) => {
-            *client_slot = Some(client);
+            use_of_analyzer.restore(AnalyzerEvent::Ready);
             Ok((ordinal, diagnostics))
         }
         Err(error) => {
-            *client_slot = None;
-            Err(RefreshFailure::crashed(&error))
+            let failure = RefreshFailure::client(&error);
+            use_of_analyzer.retire(error.analyzer_event());
+            Err(failure)
+        }
+    }
+}
+
+/// One refresh's use of the shared analyzer, concluded exactly once.
+///
+/// A refresh task can be aborted at any await while it holds the client out of
+/// the slot, which drops the process with it. Without this guard the supervisor
+/// would keep describing that incarnation as live, and the next caller would
+/// serve its replacement on the retired attempt.
+struct RefreshUseOfAnalyzer<'a> {
+    shared: &'a SharedAnalyzerClient,
+    client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+    client: Option<StdioLspClient>,
+    attempt: u32,
+    concluded: bool,
+}
+
+impl<'a> RefreshUseOfAnalyzer<'a> {
+    fn new(
+        shared: &'a SharedAnalyzerClient,
+        client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+        attempt: u32,
+        client: Option<StdioLspClient>,
+    ) -> Self {
+        Self {
+            shared,
+            client_slot,
+            client,
+            attempt,
+            concluded: false,
+        }
+    }
+
+    fn restore(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+        if let Some(client) = self.client.take() {
+            self.client_slot.replace(client);
+        }
+    }
+
+    fn retire(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+    }
+}
+
+impl Drop for RefreshUseOfAnalyzer<'_> {
+    fn drop(&mut self) {
+        if !self.concluded {
+            self.shared.record(self.attempt, AnalyzerEvent::Retired);
+        }
+        if let Some(client) = self.client.take() {
+            self.client_slot.retire(client);
         }
     }
 }
@@ -228,17 +338,41 @@ async fn collect_refresh_batch(
 pub(crate) struct RefreshFailure {
     pub(crate) state: EngineState,
     pub(crate) message: String,
+    /// The workspace root whose resolved launch could not be started at all
+    /// (the program is gone, not executable, or exited before initialize).
+    /// The broker evicts that retained launch so the next refresh re-probes.
+    pub(crate) unstartable_launch_root: Option<PathBuf>,
 }
 
 impl RefreshFailure {
+    fn client(error: &LspRefreshError) -> Self {
+        Self {
+            state: if error.is_policy_retirement() {
+                EngineState::Available
+            } else {
+                EngineState::Crashed
+            },
+            message: error.to_string(),
+            unstartable_launch_root: None,
+        }
+    }
+
     fn crashed(error: &TraceDecayError) -> Self {
         Self::crashed_message(error.to_string())
     }
 
-    fn crashed_message(message: String) -> Self {
+    fn unstartable(error: &TraceDecayError, workspace_root: PathBuf) -> Self {
+        Self {
+            unstartable_launch_root: Some(workspace_root),
+            ..Self::crashed(error)
+        }
+    }
+
+    pub(crate) fn crashed_message(message: String) -> Self {
         Self {
             state: EngineState::Crashed,
             message,
+            unstartable_launch_root: None,
         }
     }
 }
@@ -251,30 +385,20 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn prepared_refreshes_share_four_running_batch_permits() {
-        let capacity = BrokerRefreshCapacity::new();
-        let first = capacity.reserve(2).expect("first prepared refresh");
-        let second = capacity.reserve(2).expect("second prepared refresh");
-        let (first_a, first_b, second_a, second_b) = tokio::join!(
-            first.acquire_run(),
-            first.acquire_run(),
-            second.acquire_run(),
-            second.acquire_run(),
-        );
-        let permits = [first_a, first_b, second_a, second_b];
-        assert!(permits.iter().all(Option::is_some));
-        assert!(capacity.running.clone().try_acquire_owned().is_err());
-    }
-
     #[test]
     fn global_queued_batch_reservation_rejects_the_129th_batch() {
         let capacity = BrokerRefreshCapacity::new();
-        let _full = capacity
-            .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES)
-            .expect("full queue reservation");
+        let full = capacity
+            .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES - 1)
+            .expect("all but one queued batch");
+        let _last = capacity.reserve(1).expect("the 128th batch fits");
 
         assert!(capacity.reserve(1).is_none());
+        drop(full);
+        assert!(
+            capacity.reserve(1).is_some(),
+            "released batches are reusable"
+        );
     }
 
     #[tokio::test]

@@ -8,14 +8,14 @@
 //! until a real installed-runtime fixture proves their event contract.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, McpUninstallPolicy, config_backup_path, install_mcp_server_entry,
-    load_json_file, mcp_servers_registration_state, report_mcp_registration,
-    uninstall_mcp_server_entry,
+    McpDoctorLabels, install_mcp_server_entry, load_json_file, mcp_servers_registration_state,
+    report_mcp_registration, uninstall_mcp_server_entry,
 };
 
 pub struct ClineIntegration;
@@ -23,20 +23,6 @@ pub struct ClineIntegration;
 /// Current Cline CLI/IDE user MCP settings path documented by Cline.
 fn cline_mcp_settings_path(home: &Path) -> PathBuf {
     home.join(".cline/mcp.json")
-}
-
-/// Legacy VS Code extension storage path retained only for migration diagnosis.
-fn legacy_cline_mcp_settings_path(home: &Path) -> PathBuf {
-    super::vscode_data_dir(home)
-        .join("User/globalStorage/saoudrizwan.claude-dev")
-        .join("settings/cline_mcp_settings.json")
-}
-
-fn cline_settings_paths(home: &Path) -> [PathBuf; 2] {
-    [
-        cline_mcp_settings_path(home),
-        legacy_cline_mcp_settings_path(home),
-    ]
 }
 
 /// Cline accepts any `mcpServers.tracedecay` entry, so this deliberately skips
@@ -55,58 +41,58 @@ impl AgentIntegration for ClineIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mCline integration\x1b[0m");
+        dc.section("Cline integration");
         doctor_check_settings(dc, &ctx.home);
     }
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
-            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        if component != super::host_bundle::HostComponentV1::ContextMcp {
+            return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
-        mcp_servers_registration_state(&cline_mcp_settings_path(&ctx.home))
+        mcp_servers_registration_state(
+            &cline_mcp_settings_path(&ctx.home),
+            &ctx.catalog_profiles.serve_args(self.id()),
+        )
     }
 
     fn is_detected(&self, home: &Path) -> bool {
         home.join(".cline").is_dir()
-            || legacy_cline_mcp_settings_path(home)
-                .parent()
-                .is_some_and(Path::is_dir)
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(cline_mcp_settings_path(home))
     }
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
-            let path = cline_mcp_settings_path(home);
-            vec![path.clone(), config_backup_path(&path)]
+        if components == [super::host_bundle::HostComponentV1::ContextMcp] {
+            vec![cline_mcp_settings_path(home)]
         } else {
             Vec::new()
         }
     }
 
-    #[hotpath::measure(label = "cline_mcp_install")]
+    #[tracing::instrument(name = "cline_mcp_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             install_mcp_server_entry(
                 &cline_mcp_settings_path(&ctx.home),
                 "mcpServers",
                 serde_json::json!({
                     "command": ctx.tracedecay_bin.clone(),
-                    "args": ["serve"],
+                    "args": ctx.serve_args.json(&[]),
                     "env": {},
                     "disabled": false,
                     "autoApprove": []
@@ -120,49 +106,29 @@ impl AgentIntegration for ClineIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             uninstall_mcp_server_entry(
                 &cline_mcp_settings_path(&ctx.home),
                 "mcpServers",
                 JsonConfigDialect::Json,
-                McpUninstallPolicy::default(),
             )?;
         }
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
-        cline_settings_paths(home)
-            .iter()
-            .any(|path| settings_have_tracedecay(path))
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
+        settings_have_tracedecay(&cline_mcp_settings_path(home))
     }
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
-/// Unlike the plain [`super::doctor_check_mcp_registration`] flow, an absent
-/// primary settings file is not a warning on its own: Cline falls through to
-/// the legacy VS Code extension path first and only then reports a failure.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = cline_mcp_settings_path(home);
     let registered = settings_have_tracedecay(&settings_path);
-
-    if !registered {
-        let legacy_path = legacy_cline_mcp_settings_path(home);
-        if settings_have_tracedecay(&legacy_path) {
-            dc.warn(&format!(
-                "legacy Cline MCP registration found in {} — configure or remove it through Cline's supported flow",
-                legacy_path.display()
-            ));
-            return;
-        }
-    }
-
     report_mcp_registration(
         dc,
         &settings_path,

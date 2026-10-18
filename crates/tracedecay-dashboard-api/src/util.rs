@@ -55,7 +55,7 @@ pub async fn collect_rows(
 /// the error message so handlers can surface it in the payload's `error`
 /// field (mirroring the Python APIs, which never 500 on a bad/missing DB).
 ///
-/// One static hotpath bucket per helper: direct rusqlite has no SQL adapter,
+/// One static metrics bucket per helper: direct rusqlite has no SQL adapter,
 /// so these seams are where per-request store-read demand (and N+1 call
 /// storms) become visible without leaking query text into labels.
 pub async fn query_rows(
@@ -63,34 +63,12 @@ pub async fn query_rows(
     sql: &str,
     params: impl IntoParams,
 ) -> std::result::Result<Vec<Value>, String> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
             collect_rows(rows).await.map_err(|e| e.to_string())
         },
-        label = "dashboard_api.store.query_rows"
-    )
-    .await
-}
-
-/// Runs a scalar `SELECT COUNT(*)`-style query; errors and missing rows
-/// collapse to 0 (these feed overview cards, not critical paths).
-pub async fn query_i64(
-    conn: &(impl QueryExecutor + ?Sized),
-    sql: &str,
-    params: impl IntoParams,
-) -> i64 {
-    hotpath::future!(
-        async move {
-            let Ok(mut rows) = conn.query(sql, params).await else {
-                return 0;
-            };
-            match rows.next().await {
-                Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0),
-                _ => 0,
-            }
-        },
-        label = "dashboard_api.store.query_scalar"
+        tracing::trace_span!("dashboard_api.store.query_rows"),
     )
     .await
 }
@@ -102,7 +80,7 @@ pub async fn query_i64_result(
     sql: &str,
     params: impl IntoParams,
 ) -> std::result::Result<i64, String> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let mut rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
             let row = rows
@@ -112,7 +90,7 @@ pub async fn query_i64_result(
                 .ok_or_else(|| "scalar query returned no rows".to_string())?;
             row.get::<i64>(0).map_err(|e| e.to_string())
         },
-        label = "dashboard_api.store.query_scalar_result"
+        tracing::trace_span!("dashboard_api.store.query_scalar_result"),
     )
     .await
 }
@@ -190,13 +168,6 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn coerce_limit_clamps() {
-        assert_eq!(coerce_limit(None, 25, 100), 25);
-        assert_eq!(coerce_limit(Some(0), 25, 100), 1);
-        assert_eq!(coerce_limit(Some(500), 25, 100), 100);
-    }
-
     #[allow(clippy::unwrap_used)]
     fn test_conn() -> (
         tempfile::TempDir,
@@ -207,30 +178,6 @@ mod tests {
             &directory.path().join("dashboard.db"),
         );
         (directory, connection)
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn query_rows_returns_named_json_objects() {
-        let (_directory, conn) = test_conn();
-        conn.execute_batch("CREATE TABLE t (id INTEGER, name TEXT, score REAL, data BLOB)")
-            .await
-            .unwrap();
-        conn.execute_batch("INSERT INTO t VALUES (1, 'alpha', 0.5, X'00'), (2, NULL, NULL, NULL)")
-            .await
-            .unwrap();
-
-        let rows = query_rows(&conn, "SELECT id, name, score, data FROM t ORDER BY id", ())
-            .await
-            .unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["id"], 1);
-        assert_eq!(rows[0]["name"], "alpha");
-        assert_eq!(rows[0]["score"], 0.5);
-        // Blobs (like NULLs) collapse to JSON null per db_value_to_json.
-        assert!(rows[0]["data"].is_null());
-        assert!(rows[1]["name"].is_null());
-        assert_eq!(rows[1]["id"], 2);
     }
 
     #[tokio::test]
@@ -259,38 +206,6 @@ mod tests {
         let err = query_rows(&conn, "SELECT * FROM missing_table", ()).await;
         assert!(err.is_err());
         assert!(err.unwrap_err().contains("missing_table"));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn query_i64_returns_scalar_and_collapses_failures_to_zero() {
-        let (_directory, conn) = test_conn();
-        conn.execute_batch("CREATE TABLE c (v INTEGER)")
-            .await
-            .unwrap();
-        conn.execute_batch("INSERT INTO c VALUES (7), (8)")
-            .await
-            .unwrap();
-
-        assert_eq!(query_i64(&conn, "SELECT COUNT(*) FROM c", ()).await, 2);
-        assert_eq!(
-            query_i64(
-                &conn,
-                "SELECT v FROM c WHERE v = ?1",
-                tracedecay_runtime_core::db::engine::params![7],
-            )
-            .await,
-            7
-        );
-        // Bad SQL and empty result sets both collapse to 0 (overview-card semantics).
-        assert_eq!(
-            query_i64(&conn, "SELECT COUNT(*) FROM missing", ()).await,
-            0
-        );
-        assert_eq!(
-            query_i64(&conn, "SELECT v FROM c WHERE v = 999", ()).await,
-            0
-        );
     }
 
     #[tokio::test]

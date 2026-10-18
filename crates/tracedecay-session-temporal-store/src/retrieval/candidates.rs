@@ -4,12 +4,14 @@ use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 
 use tracedecay_capture::parse_rfc3339_timestamp;
 use tracedecay_runtime_core::db::engine::Value as SqlValue;
-use tracedecay_temporal_query::candidates::{CandidateChannel, CandidateClause};
-use tracedecay_temporal_query::ports::{
-    CandidateFieldCaps, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
-    TemporalRetrievalScope, TemporalSnapshotRequest,
+use tracedecay_temporal_query::candidates::{
+    CandidateChannel, CandidateClause, is_fts_boolean_operator,
 };
+use tracedecay_temporal_query::execution::{ReadBudgetAccounting, TemporalPortError};
+use tracedecay_temporal_query::paging::{CandidateFieldCaps, PageRequest};
 use tracedecay_temporal_query::ranking::RankingCandidate;
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
+use tracedecay_temporal_query::snapshot::{TemporalRetrievalScope, TemporalSnapshotRequest};
 
 use super::super::sql::{TemporalSqlRead, TemporalSqlRow, TemporalSqlRows};
 use super::cursors::*;
@@ -25,9 +27,16 @@ pub(super) fn validate_clause(
         request.max_item_bytes(),
         CandidateFieldCaps::metadata_field_bytes,
     );
-    if clause.value.len() > request.max_item_bytes() || clause.value.len() > metadata_cap {
+    let clause_cap = request.max_item_bytes().min(metadata_cap);
+    if clause.value.len() > clause_cap {
         return Err(TemporalPortError::BudgetExceeded {
             resource: "candidate clause bytes",
+            // The clause text is the request, so the tighter of the two caps is
+            // the ceiling the operator has to see next to the length that missed it.
+            accounting: Some(ReadBudgetAccounting::requested(
+                clause_cap as u64,
+                clause.value.len() as u64,
+            )),
         });
     }
     Ok(())
@@ -86,7 +95,6 @@ enum RootAuthorityChannel {
 }
 
 impl RootAuthorityChannel {
-    #[hotpath::skip]
     const fn from_candidate(channel: CandidateChannel) -> Self {
         match channel {
             CandidateChannel::Summary => Self::Summary,
@@ -97,11 +105,11 @@ impl RootAuthorityChannel {
             | CandidateChannel::Phrase
             | CandidateChannel::Entity
             | CandidateChannel::Time
-            | CandidateChannel::Lexical => Self::Occurrence,
+            | CandidateChannel::Lexical
+            | CandidateChannel::LexicalRelaxed => Self::Occurrence,
         }
     }
 
-    #[hotpath::skip]
     const fn tag(self) -> &'static str {
         match self {
             Self::Summary => "summary",
@@ -144,11 +152,11 @@ impl RootAuthorityChannel {
                       AND evidence.evidence_id = input.source_id
                      JOIN session_temporal_generations AS generation
                        ON generation.session_id = evidence.session_id
-                      AND generation.generation = evidence.generation
+                      AND +evidence.generation <= generation.generation
                       AND generation.state = 'active'
                      JOIN session_occurrences AS first_occurrence
                        ON first_occurrence.session_id = evidence.session_id
-                      AND first_occurrence.generation = evidence.generation
+                      AND +first_occurrence.generation <= generation.generation
                       AND first_occurrence.occurrence_id = evidence.first_occurrence_id
                      JOIN sessions AS authority_session
                        ON authority_session.session_id = evidence.session_id
@@ -172,7 +180,7 @@ impl RootAuthorityChannel {
                       AND occurrence.occurrence_id = input.source_id
                      JOIN session_temporal_generations AS generation
                        ON generation.session_id = occurrence.session_id
-                      AND generation.generation = occurrence.generation
+                      AND +occurrence.generation <= generation.generation
                       AND generation.state = 'active'
                      JOIN sessions AS authority_session
                        ON authority_session.session_id = occurrence.session_id
@@ -390,6 +398,12 @@ pub(super) async fn query_candidate_clause(
         .map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string()));
     let root_project_key =
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
+    let temporal_mode = SqlValue::Text(snapshot_request.temporal_mode().as_str().to_string());
+    let occurrence_fts_query = match clause.channel {
+        CandidateChannel::Lexical => fts_all_terms(&clause.value),
+        CandidateChannel::LexicalRelaxed => fts_drop_one_terms(&clause.value),
+        _ => fts_phrase(&clause.value),
+    };
     let (sql, params) = match (scope, clause.channel) {
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Scope) => {
             return Err(read_message(
@@ -411,6 +425,11 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(limit),
             ],
         ),
+        // The exact literal is admitted through the maintained FTS index before
+        // `instr` verifies it. A literal without an indexable token (`!!!`,
+        // `🚨 :: --`) is an empty FTS phrase, which FTS5 resolves to EOF: zero
+        // rows through the index and no retained-row text scan. That is a
+        // measured empty channel, not a budget refusal.
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::ExactMessage) => (
             ROOT_EXACT_CANDIDATE_QUERY,
             vec![
@@ -419,6 +438,7 @@ pub(super) async fn query_candidate_clause(
                 })?,
                 provider,
                 SqlValue::Text(clause.value.clone()),
+                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -433,7 +453,10 @@ pub(super) async fn query_candidate_clause(
         ),
         (
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
-            CandidateChannel::Phrase | CandidateChannel::Entity | CandidateChannel::Lexical,
+            CandidateChannel::Phrase
+            | CandidateChannel::Entity
+            | CandidateChannel::Lexical
+            | CandidateChannel::LexicalRelaxed,
         ) => (
             ROOT_OCCURRENCE_FTS_QUERY,
             vec![
@@ -441,7 +464,7 @@ pub(super) async fn query_candidate_clause(
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value)),
+                SqlValue::Text(occurrence_fts_query.clone()),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -497,6 +520,7 @@ pub(super) async fn query_candidate_clause(
                     SqlValue::Integer(item_cap),
                     SqlValue::Integer(stable_cap),
                     SqlValue::Integer(limit),
+                    temporal_mode.clone(),
                 ],
             )
         }
@@ -516,6 +540,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(item_cap),
                 SqlValue::Integer(stable_cap),
                 SqlValue::Integer(limit),
+                temporal_mode.clone(),
             ],
         ),
         (
@@ -567,6 +592,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(limit),
+                temporal_mode.clone(),
             ],
         ),
         (TemporalRetrievalScope::Session(session_id), CandidateChannel::Scope) => (
@@ -586,14 +612,17 @@ pub(super) async fn query_candidate_clause(
         ),
         (
             TemporalRetrievalScope::Session(session_id),
-            CandidateChannel::Phrase | CandidateChannel::Entity | CandidateChannel::Lexical,
+            CandidateChannel::Phrase
+            | CandidateChannel::Entity
+            | CandidateChannel::Lexical
+            | CandidateChannel::LexicalRelaxed,
         ) => (
             OCCURRENCE_FTS_QUERY,
             vec![
                 SqlValue::Text(session_id.as_str().to_string()),
                 SqlValue::Integer(generation),
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value)),
+                SqlValue::Text(occurrence_fts_query),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(source_stable_cap),
@@ -641,6 +670,7 @@ pub(super) async fn query_candidate_clause(
                     SqlValue::Integer(metadata_cap),
                     SqlValue::Integer(item_cap),
                     SqlValue::Integer(limit),
+                    temporal_mode.clone(),
                 ],
             )
         }
@@ -657,6 +687,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(metadata_cap),
                 SqlValue::Integer(item_cap),
                 SqlValue::Integer(limit),
+                temporal_mode,
             ],
         ),
         (
@@ -768,11 +799,66 @@ pub(super) const fn candidate_score(channel: CandidateChannel) -> i64 {
         CandidateChannel::Time => 600,
         CandidateChannel::Summary => 500,
         CandidateChannel::Lexical => 400,
+        // Below every strict channel: a relaxed hit answered a query no strict
+        // tier could, and never outranks one that did.
+        CandidateChannel::LexicalRelaxed => 380,
     }
 }
 
 pub(super) fn fts_phrase(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+/// Strict lexical tier: every term must match the same message.
+///
+/// Terms are joined with `AND` unless the query typed its own operator between
+/// them, in which case that operator stands. Each term is quoted, so a term
+/// FTS5 would otherwise read as syntax (`NEAR`, `(`, `*`) matches as the word
+/// it is.
+pub(super) fn fts_all_terms(value: &str) -> String {
+    let mut expression = String::new();
+    let mut term_precedes = false;
+    for token in value.split_whitespace() {
+        if is_fts_boolean_operator(token) {
+            expression.push(' ');
+            expression.push_str(token);
+            term_precedes = false;
+            continue;
+        }
+        if term_precedes {
+            expression.push_str(" AND ");
+        } else if !expression.is_empty() {
+            expression.push(' ');
+        }
+        expression.push_str(&fts_phrase(token));
+        term_precedes = true;
+    }
+    expression
+}
+
+/// The one relaxation tier: any all-but-one subset of the terms.
+///
+/// The plan reaches this channel only for a plain conjunction of bounded width;
+/// a typed boolean expression already says what to match and is answered
+/// strictly.
+fn fts_drop_one_terms(value: &str) -> String {
+    let terms = value.split_whitespace().collect::<Vec<_>>();
+    if terms.len() < 2 || terms.iter().copied().any(is_fts_boolean_operator) {
+        return fts_all_terms(value);
+    }
+    (0..terms.len())
+        .map(|dropped| {
+            let kept = terms
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != dropped)
+                .map(|(_, term)| fts_phrase(term))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            format!("({kept})")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 pub(super) fn iso_day_bounds(value: &str) -> Result<(i64, i64), TemporalPortError> {
@@ -782,11 +868,13 @@ pub(super) fn iso_day_bounds(value: &str) -> Result<(i64, i64), TemporalPortErro
         .checked_mul(1_000_000)
         .ok_or(TemporalPortError::BudgetExceeded {
             resource: "time range",
+            accounting: None,
         })?;
     let end = start
         .checked_add(86_400_000_000)
         .ok_or(TemporalPortError::BudgetExceeded {
             resource: "time range",
+            accounting: None,
         })?;
     Ok((start, end))
 }

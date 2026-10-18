@@ -37,8 +37,7 @@ pub(super) fn synthetic_prompt_cases() -> Vec<HintEval> {
             "search source for a quoted string",
             Some(HintCategory::Search),
             &["tracedecay_grep"],
-        )
-        .with_families(&[ScenarioFamily::QuotedData]),
+        ),
         shell_eval(
             "cargo-test-without-failure-silent",
             "cargo test hooks::tool_hints",
@@ -101,16 +100,14 @@ pub(super) fn synthetic_prompt_cases() -> Vec<HintEval> {
             "look for docs mentioning cargo check",
             None,
             &[],
-        )
-        .with_families(&[ScenarioFamily::QuotedData]),
+        ),
         shell_eval(
             "quoted-git-command-is-search-data",
             "grep \"git status\" README.md",
             "look for docs mentioning git status",
             None,
             &[],
-        )
-        .with_families(&[ScenarioFamily::QuotedData]),
+        ),
         shell_eval(
             "git-status-no-hint",
             "git status --short --branch",
@@ -130,21 +127,21 @@ pub(super) fn synthetic_prompt_cases() -> Vec<HintEval> {
             "head -n 60 src/hooks/tool_hints.rs",
             "inspect top of hook hints file",
             Some(HintCategory::FileRead),
-            &["tracedecay_outline"],
+            &["tracedecay_source_outline"],
         ),
         shell_eval(
             "shell-tail-source-read",
             "tail -n 80 src/hooks/tool_hints/classifiers.rs",
             "inspect classifier bottom",
             Some(HintCategory::FileRead),
-            &["tracedecay_outline"],
+            &["tracedecay_source_outline"],
         ),
         shell_eval(
             "shell-nl-source-read",
             "nl -ba src/hooks/tool_hints/evals.rs",
             "read evals with line numbers",
             Some(HintCategory::FileRead),
-            &["tracedecay_outline"],
+            &["tracedecay_source_outline"],
         ),
         prompt_eval(
             "call-chain-question",
@@ -216,7 +213,7 @@ pub(super) fn synthetic_prompt_cases() -> Vec<HintEval> {
             "duplicate-helper-question",
             "is there duplicate logic or a similar helper before I add another classifier?",
             Some(HintCategory::TypeOrientation),
-            &["tracedecay_redundancy"],
+            &["tracedecay_constructors", "tracedecay_field_sites"],
         ),
         prompt_eval(
             "type-hierarchy-question",

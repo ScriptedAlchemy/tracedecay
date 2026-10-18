@@ -1,0 +1,48 @@
+{
+  "id": "narrow_availability_call_chain",
+  "category": "call_tracing",
+  "pack": "pack_repeated_query",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Walk the call chain upward from check_availability: what calls it, what calls that, and what does the outermost function hand back to its caller?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_callers",
+      "tracedecay_call_chain",
+      "tracedecay_context",
+      "tracedecay_search"
+    ],
+    "acceptable": [
+      "tracedecay_source_body",
+      "tracedecay_grep",
+      "tracedecay_impact",
+      "Read"
+    ]
+  },
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        },
+        {
+          "id": "states compute_total",
+          "pattern": "\\bcompute_total\\b"
+        }
+      ]
+    }
+  },
+  "max_tool_calls": 6,
+  "repeated_query_class": "narrowing",
+  "notes": "Legitimate narrowing: check_availability <- reserve_stock <- place_order, which returns the order total from compute_total. Successive caller queries over symbols in one module share path words, so a repeated-query hint here is a false-positive opportunity."
+}

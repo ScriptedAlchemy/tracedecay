@@ -1,6 +1,6 @@
 # Code-index restore performance evidence (2026-07-31)
 
-> **Dated runtime evidence — not acceptance authority.** Preserve these raw
+> **Dated runtime evidence, not acceptance authority.** Preserve these raw
 > samples and their provenance, but do not recreate their exact counts,
 > snapshots, receipts, attestations, binary/worktree choreography, or gates as
 > build prerequisites. Current requirements come only from the
@@ -9,8 +9,8 @@
 ## Question under test
 
 A historical defect from the delivery snapshot (not recorded in-repo) claims
-code-index **restore** — loading an already-built index at project open, not
-initial indexing — costs about **488.8 s wall / 7.8 GiB peak RSS**. The
+code-index **restore**, loading an already-built index at project open, not
+initial indexing, costs about **488.8 s wall / 7.8 GiB peak RSS**. The
 release-readiness investigation requires this to be disproven or fixed.
 
 ## Verdict: DISPROVEN at repo-scale workload
@@ -55,7 +55,7 @@ directory is the generation script):
 1. `benchmark_data/runtime/fixtures.py::prepare_fixture_snapshot(fixture_root=...)`
    prepared an isolated snapshot (isolated `HOME`, `TRACEDECAY_DATA_DIR`,
    `TRACEDECAY_DAEMON_SOCKET` all derived by the harness from the snapshot
-   root — never exported manually) whose fixture project embeds the repo code
+   root, never exported manually) whose fixture project embeds the repo code
    tree. Snapshot root `/tmp/td-restore-ev/snap-base` (short path: the daemon
    socket must fit `SUN_LEN`).
 2. `tracedecay init <project>` ran once, daemon-less, building the full index
@@ -75,7 +75,7 @@ directory is the generation script):
    Every sample invocation wrapped in `/usr/bin/time -v` (parsed into
    `gnu_time` per JSONL line).
 4. Controls: three daemon cold starts over freshly prepared, never-indexed
-   snapshots (admission 0.04 / 2.91 / 4.83 s — first-open global-DB creation
+   snapshots (admission 0.04 / 2.91 / 4.83 s, first-open global-DB creation
    variance; peak RSS 25–31 MiB). Restore-sample admission was uniformly
    about 0.04 s (one 0.17 s outlier); nearly all restore-path time is the
    post-admission warming window.
@@ -109,9 +109,9 @@ python3 restore_driver.py index   --binary target/release/tracedecay \
 | 6 | 0.039 | 2.383 | 3 | 2.422 | 125 | 318 |
 | 7 | 0.041 | 2.877 | 4 | 2.918 | 158 | 338 |
 
-Raw per-sample records: `report.samples.jsonl` (custom explicit line schema —
+Raw per-sample records: `report.samples.jsonl` (custom explicit line schema,
 `kind` in {`index-build-once`, `cold-restore-sample`,
-`control-empty-profile-admission`} — not the `run.py` sample schema, whose
+`control-empty-profile-admission`}, not the `run.py` sample schema, whose
 fields do not describe this composed measurement).
 
 ## Provenance and environment

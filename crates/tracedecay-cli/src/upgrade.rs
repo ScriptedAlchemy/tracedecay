@@ -1,32 +1,93 @@
 //! Self-update for the tracedecay binary.
 //!
-//! Direct installs use GitHub release assets, extracting the binary and
-//! replacing the running executable using `self_replace`. Homebrew installs
-//! continue to delegate to Homebrew.
-//! Beta and stable are separate channels — a beta build only sees beta
+//! Direct installs use GitHub release assets: the platform archive is
+//! verified against the release's `SHA256SUMS` and its build-provenance
+//! attestation (see [`attestation`]), every required release member (the
+//! executable alone) is staged in an attempt-owned scratch directory, and
+//! only then is it published over the running executable. Installations owned by
+//! a package manager (Homebrew, Scoop) are upgraded by that manager and never
+//! written to directly; see [`UpgradeSource`].
+//! Beta and stable are separate channels, a beta build only sees beta
 //! releases and vice versa.
 
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::fmt;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, ExitStatus, Output};
 use std::time::{Duration, Instant};
+use tracedecay_runtime_core::config::ProfileRoot;
 
-#[cfg(test)]
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::sha256_hex;
+use tempfile::TempDir;
 
-use tracedecay::cloud::{self, InstallMethod};
+use self::attestation::{ReleaseProvenance, verify_release_attestation};
+use crate::cloud::{self, InstallMethod};
+use crate::macos_codesign::stabilize_installed_executable;
+use tracedecay_application::http_agent::http_agent;
+use tracedecay_dashboard_api::cloud::ReleaseLookupError;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
 use tracedecay_session_memory::user_config::UserConfig;
+
+mod attestation;
+#[cfg(test)]
+mod test_server;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 
-// Asset-naming and platform helpers live in `tracedecay::cloud` so the version-
+/// One member every release archive for this platform must carry. Every
+/// required member is an entry point published with [`RELEASE_MEMBER_MODE`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReleaseMember {
+    name: &'static str,
+}
+
+#[cfg(unix)]
+const RELEASE_MEMBER_MODE: u32 = 0o755;
+
+const EXECUTABLE_MEMBER: ReleaseMember = ReleaseMember {
+    name: if cfg!(windows) {
+        "tracedecay.exe"
+    } else {
+        "tracedecay"
+    },
+};
+
+/// Every member a release archive must contain: the executable alone, on
+/// every platform. The unit test
+/// `required_members_match_the_release_target_manifest` pins this to
+/// `.github/release-targets.json` declaring no runtime companions, so the
+/// installer and the packaging step cannot disagree about what a complete
+/// release is.
+fn required_members() -> Vec<ReleaseMember> {
+    vec![EXECUTABLE_MEMBER]
+}
+
+/// A verified release whose required members sit in an attempt-owned scratch
+/// directory. The directory (and everything staged in it) is removed when the
+/// value drops, on every success and failure path.
+#[derive(Debug)]
+struct StagedRelease {
+    scratch: TempDir,
+}
+
+impl StagedRelease {
+    fn path_of(&self, member: ReleaseMember) -> PathBuf {
+        self.scratch.path().join(member.name)
+    }
+
+    fn executable(&self) -> PathBuf {
+        self.path_of(EXECUTABLE_MEMBER)
+    }
+}
+
+// Asset-naming and platform helpers live in `crate::cloud` so the version-
 // detection path can use the same naming convention to filter out releases
 // whose CI hasn't finished uploading the current platform's binary yet.
-use tracedecay::cloud::asset_name;
+use crate::cloud::asset_name;
 #[cfg(test)]
-use tracedecay::cloud::current_platform;
+use crate::cloud::current_platform;
 
 /// The GitHub release tag for a given version.
 fn release_tag(version: &str) -> String {
@@ -39,45 +100,52 @@ fn io_err(msg: &str) -> impl Fn(std::io::Error) -> TraceDecayError + '_ {
     }
 }
 
+/// The platform archive and checksum manifest of one GitHub release, with the
+/// byte sizes the release metadata advertises for each, and where the
+/// archive's build provenance is proven. The sizes are the download
+/// ceilings: a body that runs past its advertised size, or ends short of it,
+/// is not the published asset.
 #[derive(Debug)]
 struct ReleaseDownload {
     asset_name: String,
     asset_url: String,
+    asset_size: u64,
     checksums_url: String,
+    checksums_size: u64,
+    provenance: ReleaseProvenance,
 }
 
 /// Resolves both the platform archive and its checksum manifest from one
 /// GitHub release. An archive without `SHA256SUMS` is not installable.
-#[hotpath::measure(label = "cli.upgrade.fetch_release")]
-fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload> {
+#[tracing::instrument(name = "cli.upgrade.fetch_release", level = "trace", skip_all)]
+fn fetch_release_download(
+    api_base: &str,
+    authorization: Option<&str>,
+    tag: &str,
+    asset_name: &str,
+    is_beta: bool,
+) -> Result<ReleaseDownload> {
     #[derive(serde::Deserialize)]
     struct Asset {
         name: String,
         browser_download_url: String,
+        size: u64,
     }
     #[derive(serde::Deserialize)]
     struct Release {
         assets: Vec<Asset>,
     }
 
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{tag}");
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(30)))
-        .build()
-        .into();
-
-    let release: Release = agent
-        .get(&url)
-        .header("User-Agent", "tracedecay")
-        .call()
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to reach GitHub: {e}"),
-        })?
-        .body_mut()
-        .read_json()
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to parse release info: {e}"),
-        })?;
+    let url = format!("{}/tags/{tag}", cloud::releases_url(api_base));
+    let release: Release =
+        cloud::get_release_json(&url, authorization, cloud::UPGRADE_RELEASE_LOOKUP_TIMEOUT)
+            .and_then(|release| {
+                release.ok_or(ReleaseLookupError::NoAssetForPlatform {
+                    channel: if is_beta { "beta" } else { "stable" },
+                    platform: cloud::current_platform(),
+                })
+            })
+            .map_err(release_lookup_failed)?;
 
     let archive = release
         .assets
@@ -86,7 +154,7 @@ fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload
         .ok_or_else(|| TraceDecayError::Config {
             message: format!(
                 "release {tag} exists but asset '{asset_name}' is not yet available.\n  \
-                 CI build may still be in progress — try again in a few minutes.\n  \
+                 CI build may still be in progress, try again in a few minutes.\n  \
                  https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
             ),
         })?;
@@ -103,27 +171,118 @@ fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload
     Ok(ReleaseDownload {
         asset_name: archive.name.clone(),
         asset_url: archive.browser_download_url.clone(),
+        asset_size: archive.size,
         checksums_url: checksums.browser_download_url.clone(),
+        checksums_size: checksums.size,
+        provenance: ReleaseProvenance::for_release(api_base, authorization, tag, is_beta),
     })
 }
 
-#[hotpath::measure(label = "cli.upgrade.download")]
-fn download_bytes(agent: &ureq::Agent, url: &str, description: &str) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    agent
+/// Streams `url` into `sink`, requiring exactly `advertised_len` bytes: the
+/// body is cut off the moment it runs past the size the release metadata
+/// advertises, and a body that ends short of it is a truncated download.
+/// Only a fixed transfer buffer is ever held in memory.
+fn download_exact(
+    agent: &ureq::Agent,
+    url: &str,
+    advertised_len: u64,
+    description: &str,
+    sink: &mut impl Write,
+) -> Result<()> {
+    let mut response = agent
         .get(url)
         .header("User-Agent", "tracedecay")
         .call()
         .map_err(|e| TraceDecayError::Config {
             message: format!("{description} download failed: {e}"),
-        })?
-        .body_mut()
-        .as_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("{description} download read failed: {error}"),
         })?;
-    Ok(bytes)
+    let mut body = response.body_mut().as_reader();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut received: u64 = 0;
+    loop {
+        let count = body
+            .read(&mut buffer)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("{description} download read failed: {error}"),
+            })?;
+        if count == 0 {
+            break;
+        }
+        received += count as u64;
+        if received > advertised_len {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "{description} exceeds the {advertised_len} bytes the release advertises; \
+                     refusing an unverified download"
+                ),
+            });
+        }
+        sink.write_all(&buffer[..count])
+            .map_err(io_err("cannot write downloaded bytes"))?;
+    }
+    if received != advertised_len {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{description} ended after {received} of the {advertised_len} bytes the release \
+                 advertises"
+            ),
+        });
+    }
+    sink.flush()
+        .map_err(io_err("cannot flush downloaded bytes"))
+}
+
+/// Writer that hashes every byte it forwards, so the archive digest is taken
+/// over exactly the bytes that reached the staging file.
+struct DigestingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W: Write> Write for DigestingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Downloads the checksum manifest, bounded by its advertised size.
+fn download_manifest(agent: &ureq::Agent, download: &ReleaseDownload) -> Result<Vec<u8>> {
+    let mut manifest = Vec::new();
+    download_exact(
+        agent,
+        &download.checksums_url,
+        download.checksums_size,
+        "checksum manifest",
+        &mut manifest,
+    )?;
+    Ok(manifest)
+}
+
+/// Streams the release archive into `archive`, bounded by its advertised
+/// size, and returns the SHA-256 of the bytes written.
+fn stream_archive(
+    agent: &ureq::Agent,
+    download: &ReleaseDownload,
+    archive: &mut File,
+) -> Result<[u8; 32]> {
+    let mut sink = DigestingWriter {
+        inner: archive,
+        hasher: Sha256::new(),
+    };
+    download_exact(
+        agent,
+        &download.asset_url,
+        download.asset_size,
+        "release archive",
+        &mut sink,
+    )?;
+    Ok(sink.hasher.finalize().into())
 }
 
 fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
@@ -152,9 +311,7 @@ fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
     Ok(digest.to_ascii_lowercase())
 }
 
-#[hotpath::measure(label = "cli.upgrade.verify_sha256")]
-fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
-    let actual = sha256_hex(bytes);
+fn verify_sha256(actual: &str, expected: &str, asset_name: &str) -> Result<()> {
     if actual == expected {
         return Ok(());
     }
@@ -163,166 +320,265 @@ fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
     })
 }
 
-/// Downloads and verifies the archive, then extracts the first entry matching
-/// any of `bin_names` to a temp path. Returns the temp path.
-#[hotpath::measure(label = "cli.upgrade.download_and_extract")]
-fn download_and_extract(
+/// Downloads and verifies the archive, then stages every required release
+/// member in an attempt-owned scratch directory. Nothing is published here.
+#[tracing::instrument(name = "cli.upgrade.download_and_stage", level = "trace", skip_all)]
+fn download_and_stage(
     download: &ReleaseDownload,
-    bin_names: &[&str],
-) -> Result<std::path::PathBuf> {
-    let tmp_path = std::env::temp_dir().join(format!(
-        "tracedecay_upgrade_{}{}",
-        std::process::id(),
-        if cfg!(windows) { ".exe" } else { "" }
-    ));
+    members: &[ReleaseMember],
+) -> Result<StagedRelease> {
+    let scratch = tempfile::Builder::new()
+        .prefix("tracedecay-upgrade-")
+        .tempdir()
+        .map_err(io_err("cannot create upgrade staging directory"))?;
+    stage_release_in(scratch, download, members)
+}
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_mins(5)))
-        .build()
-        .into();
+/// Streams the archive into an exclusively created file inside `scratch`,
+/// hashing as it lands, verifies the whole-archive digest against the
+/// release's checksum manifest and its build-provenance attestation, and
+/// only then rewinds that same file for extraction. `scratch` is owned by
+/// this attempt: it is removed with everything in it whenever this returns
+/// an error.
+fn stage_release_in(
+    scratch: TempDir,
+    download: &ReleaseDownload,
+    members: &[ReleaseMember],
+) -> Result<StagedRelease> {
+    let agent = http_agent(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_mins(5)))
+            .build(),
+    );
 
     eprint!("  Downloading...");
 
-    let manifest = download_bytes(&agent, &download.checksums_url, "checksum manifest")?;
+    let manifest = download_manifest(&agent, download)?;
     let expected = expected_sha256(&manifest, &download.asset_name)?;
-    // Buffer the entire archive so the reader type is concrete
-    // (Cursor<Vec<u8>>), which keeps archive extraction platform-neutral.
-    let raw = download_bytes(&agent, &download.asset_url, "release archive")?;
+    let mut archive = File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(scratch.path().join("archive"))
+        .map_err(io_err("cannot create staged archive"))?;
+    let actual = stream_archive(&agent, download, &mut archive)?;
 
-    eprintln!(" ({:.1} MiB)", raw.len() as f64 / 1_048_576.0);
-    verify_sha256(&raw, &expected, &download.asset_name)?;
+    eprintln!(" ({:.1} MiB)", download.asset_size as f64 / 1_048_576.0);
+    verify_sha256(&hex::encode(actual), &expected, &download.asset_name)?;
     eprintln!("  Checksum verified");
+    let signer = verify_release_attestation(&download.provenance, actual).map_err(|refusal| {
+        TraceDecayError::tool_refused(
+            "tracedecay upgrade",
+            Some(refusal.code().to_owned()),
+            Some(refusal.to_string()),
+        )
+    })?;
+    eprintln!("  Build provenance verified: {signer}");
     eprint!("  Extracting...");
 
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(io_err("cannot rewind staged archive"))?;
+
     #[cfg(not(windows))]
-    extract_targz(&raw, bin_names, &tmp_path)?;
+    extract_targz(io::BufReader::new(archive), scratch.path(), members)?;
 
     #[cfg(windows)]
-    extract_zip(&raw, bin_names, &tmp_path)?;
+    extract_zip(io::BufReader::new(archive), scratch.path(), members)?;
 
     eprintln!(" Done");
-    Ok(tmp_path)
+    Ok(StagedRelease { scratch })
 }
 
-/// Extracts the first entry matching any of `bin_names` from a `.tar.gz`
-/// archive (Unix).
+/// The required member an archive entry path names, if any. Release archives
+/// are flat: only a single-component path (an optional leading `./` aside)
+/// can name a member, so nested entries are never unpacked.
+fn intended_member(path: &Path, members: &[ReleaseMember]) -> Option<ReleaseMember> {
+    let mut components = path
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir));
+    let Some(Component::Normal(name)) = components.next() else {
+        return None;
+    };
+    if components.next().is_some() {
+        return None;
+    }
+    let name = name.to_str()?;
+    members.iter().copied().find(|member| member.name == name)
+}
+
+/// Writes one archive member into `staging` under its own name, refusing a
+/// duplicate entry: an archive that names the same member twice is
+/// ambiguous, not a payload to pick from.
+fn stage_member(
+    staging: &Path,
+    member: ReleaseMember,
+    contents: &mut impl Read,
+    staged: &mut Vec<&'static str>,
+) -> Result<()> {
+    if staged.contains(&member.name) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "release archive contains duplicate entries for '{}'",
+                member.name
+            ),
+        });
+    }
+    let path = staging.join(member.name);
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(io_err("cannot create staged release member"))?;
+    io::copy(contents, &mut file).map_err(io_err("extract failed"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(RELEASE_MEMBER_MODE))
+            .map_err(io_err("cannot set staged member permissions"))?;
+    }
+    staged.push(member.name);
+    Ok(())
+}
+
+fn not_a_regular_file(member: ReleaseMember) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "release archive entry '{}' is not a regular file",
+            member.name
+        ),
+    }
+}
+
+/// Fails unless every required member was staged, naming the missing ones.
+fn require_complete_release(members: &[ReleaseMember], staged: &[&str]) -> Result<()> {
+    let missing: Vec<&str> = members
+        .iter()
+        .map(|member| member.name)
+        .filter(|name| !staged.contains(name))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(TraceDecayError::Config {
+        message: format!(
+            "release archive is missing required member(s): {}",
+            missing.join(", ")
+        ),
+    })
+}
+
+/// Stages every required member of a `.tar.gz` release archive (Unix).
 #[cfg(not(windows))]
-#[hotpath::measure(label = "cli.upgrade.extract_targz")]
-fn extract_targz(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
+fn extract_targz(archive: impl Read, staging: &Path, members: &[ReleaseMember]) -> Result<()> {
     use flate2::read::GzDecoder;
-    use std::io::Cursor;
     use tar::Archive;
 
-    let gz = GzDecoder::new(Cursor::new(data));
-    let mut archive = Archive::new(gz);
+    let mut archive = Archive::new(GzDecoder::new(archive));
+    let mut staged = Vec::new();
 
     for entry in archive.entries().map_err(io_err("archive open failed"))? {
         let mut entry = entry.map_err(io_err("archive read failed"))?;
         let path = entry
             .path()
             .map_err(io_err("archive path error"))?
-            .to_path_buf();
-
-        let file_name = path.file_name().and_then(|n| n.to_str());
-        if file_name.is_some_and(|n| bin_names.contains(&n)) {
-            entry.unpack(dest).map_err(io_err("extract failed"))?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(dest)
-                    .map_err(io_err("stat failed"))?
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(dest, perms).map_err(io_err("chmod failed"))?;
-            }
-
-            return Ok(());
+            .into_owned();
+        let Some(member) = intended_member(&path, members) else {
+            continue;
+        };
+        if !entry.header().entry_type().is_file() {
+            return Err(not_a_regular_file(member));
         }
+        stage_member(staging, member, &mut entry, &mut staged)?;
     }
 
-    Err(TraceDecayError::Config {
-        message: format!("binary '{}' not found in archive", bin_names.join("' or '")),
-    })
+    require_complete_release(members, &staged)
 }
 
-/// Extracts the first entry matching any of `bin_names` from a `.zip`
-/// archive (Windows).
+/// Stages every required member of a `.zip` release archive (Windows).
 #[cfg(windows)]
-#[hotpath::measure(label = "cli.upgrade.extract_zip")]
-fn extract_zip(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
-    use std::io::Cursor;
-
-    let mut archive =
-        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| TraceDecayError::Config {
-            message: format!("zip open failed: {e}"),
-        })?;
+fn extract_zip(archive: impl Read + Seek, staging: &Path, members: &[ReleaseMember]) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(archive).map_err(|e| TraceDecayError::Config {
+        message: format!("zip open failed: {e}"),
+    })?;
+    let mut staged = Vec::new();
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| TraceDecayError::Config {
             message: format!("zip entry error: {e}"),
         })?;
-
-        let file_name = Path::new(file.name()).file_name().and_then(|n| n.to_str());
-        if file_name.is_some_and(|n| bin_names.contains(&n)) {
-            let mut out = std::fs::File::create(dest).map_err(io_err("create temp file failed"))?;
-            std::io::copy(&mut file, &mut out).map_err(io_err("extract failed"))?;
-            return Ok(());
+        let name = file.name().map_err(|e| TraceDecayError::Config {
+            message: format!("zip entry name error: {e}"),
+        })?;
+        let Some(member) = intended_member(Path::new(name.as_ref()), members) else {
+            continue;
+        };
+        if !file.is_file() {
+            return Err(not_a_regular_file(member));
         }
+        stage_member(staging, member, &mut file, &mut staged)?;
     }
 
-    Err(TraceDecayError::Config {
-        message: format!("binary '{}' not found in zip", bin_names.join("' or '")),
-    })
+    require_complete_release(members, &staged)
 }
 
-/// Replaces the running binary with `new_exe`, dispatching to the
-/// appropriate strategy for the detected install method. Cleans up the
-/// temp file afterwards regardless of outcome. Returns the path the new
-/// binary was installed at, when known.
-#[hotpath::measure(label = "cli.upgrade.replace_binary")]
-fn replace_binary(
-    new_exe: &Path,
-    method: &InstallMethod,
-    new_version: &str,
-) -> Result<Option<PathBuf>> {
-    let result = match method {
-        InstallMethod::Brew => replace_for_brew(new_exe, new_version),
-        InstallMethod::Scoop => replace_for_scoop(new_exe, new_version),
-        _ => replace_default(new_exe),
-    };
-    let _ = std::fs::remove_file(new_exe);
-    result
-}
-
-/// Default replacement using `self_replace`. Falls back to a direct copy
-/// when the running binary is behind a symlink (avoids ENOENT caused by
-/// `self_replace` resolving relative symlink targets from CWD).
-/// Returns the path the new binary was written to, when known.
-fn replace_default(new_exe: &Path) -> Result<Option<PathBuf>> {
-    // Capture the exe path before the swap: on Linux the rename makes
-    // `/proc/self/exe` read `… (deleted)` afterwards.
-    let exe = std::env::current_exe().ok();
-
+/// Publishes a staged release around the running executable and returns the
+/// path the new binary was installed at, when known, plus whether codesign
+/// failed after that replacement.
+///
+/// On Unix the running executable is resolved to its real file first: a
+/// symlinked entry point must be replaced at its target (`self_replace`
+/// resolves relative link targets from the CWD and fails with `ENOENT`), and
+/// `$ORIGIN` is that target's directory. The path is captured before the
+/// swap because on Linux `/proc/self/exe` reads `… (deleted)` afterwards.
+#[tracing::instrument(name = "cli.upgrade.publish_release", level = "trace", skip_all)]
+fn publish_release(staged: &StagedRelease) -> Result<(Option<PathBuf>, bool)> {
     #[cfg(unix)]
     {
-        let canonical = exe.as_ref().and_then(|e| e.canonicalize().ok());
-        if let (Some(exe), Some(canonical)) = (&exe, canonical)
-            && exe.as_path() != canonical.as_path()
-        {
-            install_binary(new_exe, &canonical)?;
-            return Ok(Some(canonical));
+        let executable = std::env::current_exe()
+            .and_then(|exe| exe.canonicalize())
+            .map_err(io_err("cannot resolve the running executable"))?;
+        let codesign_failed = publish_release_at(staged, &executable)?;
+        Ok((Some(executable), codesign_failed))
+    }
+    #[cfg(not(unix))]
+    {
+        let exe = std::env::current_exe().ok();
+        self_replace::self_replace(staged.executable()).map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "binary replacement failed: {e}\n  \
+                 The old version is still in place.\n  \
+                 To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
+            ),
+        })?;
+        Ok((exe, false))
+    }
+}
+
+/// Publishes a staged release by replacing `executable` with its entry point.
+#[cfg(unix)]
+fn publish_release_at(staged: &StagedRelease, executable: &Path) -> Result<bool> {
+    executable.parent().ok_or_else(|| TraceDecayError::Config {
+        message: "cannot determine the running executable's directory".into(),
+    })?;
+    publish_member(&staged.executable(), executable, RELEASE_MEMBER_MODE)?;
+    // The archive checksum already matched. This only replaces an ad-hoc or
+    // missing signature on the installed Mach-O; a team signature stays.
+    // The binary is already the installed one: a codesign failure must not
+    // turn into an error that drops that install.
+    Ok(codesign_failed(stabilize_installed_executable(executable)))
+}
+
+/// `true` when codesign did not complete after the binary was replaced.
+#[cfg(unix)]
+fn codesign_failed(sign: Result<()>) -> bool {
+    match sign {
+        Ok(()) => false,
+        Err(error) => {
+            eprintln!("  \x1b[33mwarning:\x1b[0m {error}");
+            true
         }
     }
-
-    self_replace::self_replace(new_exe).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "binary replacement failed: {e}\n  \
-             The old version is still in place.\n  \
-             To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
-        ),
-    })?;
-    Ok(exe)
 }
 
 /// Outcome of an upgrade attempt that completed without error.
@@ -340,18 +596,21 @@ pub enum UpgradeOutcome {
         /// binary: `which_tracedecay()`'s current-exe-first order can point
         /// at the OLD binary (e.g. a stale Homebrew keg) after an upgrade.
         binary: Option<PathBuf>,
-        /// Version of the freshly installed binary: the release-manifest
-        /// version for GitHub-release installs, the linked binary's
-        /// self-reported version for Homebrew. Daemon restore validates this
-        /// version — the binary it actually restarts — instead of the one
-        /// that was running before the upgrade. `None` only when Homebrew's
-        /// install could not be interrogated; restore verification then
-        /// validates the pre-upgrade version and, if a new daemon really was
-        /// installed, fails with a typed identity mismatch rather than
-        /// silently passing.
+        /// Version the installed binary reports for itself (`--version`),
+        /// `{release}+{sha}[.dirty]`. Daemon restore compares this string to
+        /// the daemon's advertised build identity exactly, so a release tag
+        /// is not a substitute: the tag and the binary differ by build
+        /// metadata, and that mismatch is what failed `tracedecay update`'s
+        /// readiness wait. `None` only when the binary could not be
+        /// interrogated; restore then validates the pre-upgrade version and,
+        /// if a new daemon really was installed, fails with a typed identity
+        /// mismatch rather than accepting a less specific name.
         version: Option<String>,
+        /// The binary was replaced and the macOS codesign step failed.
+        /// Callers keep `version` for daemon restore and still exit non-zero.
+        codesign_failed: bool,
     },
-    /// Already on the latest version — the binary was not replaced.
+    /// Already on the latest version. The binary was not replaced.
     AlreadyCurrent,
 }
 
@@ -364,59 +623,211 @@ enum UpgradeStatus<'a> {
 fn classify_upgrade<'a>(current: &str, latest: &'a str) -> UpgradeStatus<'a> {
     // Plain semver is safe across the version-epoch reset: `cloud::fetch_latest_*`
     // never yields pre-reset releases (see `release_has_current_platform_asset`).
-    if cloud::is_newer_version(current, latest) {
+    if tracedecay_dashboard_api::cloud::is_newer_version(current, latest) {
         UpgradeStatus::UpgradeAvailable(latest)
     } else {
         UpgradeStatus::AlreadyCurrent
     }
 }
 
+/// A native package manager that owns a TraceDecay installation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageManager {
+    Homebrew,
+    Scoop,
+}
+
+/// Who installs a release for the running binary.
+///
+/// Installation ownership is exclusive: files under a package manager's tree
+/// are only ever changed by that manager, so a managed install delegates its
+/// upgrade to the manager and refuses operations the manager has no command
+/// for. Everything else is a direct install that TraceDecay publishes itself
+/// from the verified GitHub release bundle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpgradeSource {
-    Homebrew,
+    PackageManager(PackageManager),
     GitHubRelease,
 }
 
 fn upgrade_source_for(method: &InstallMethod) -> UpgradeSource {
     match method {
-        InstallMethod::Brew => UpgradeSource::Homebrew,
-        InstallMethod::Cargo | InstallMethod::Scoop | InstallMethod::Unknown => {
-            UpgradeSource::GitHubRelease
+        InstallMethod::Brew => UpgradeSource::PackageManager(PackageManager::Homebrew),
+        InstallMethod::Scoop => UpgradeSource::PackageManager(PackageManager::Scoop),
+        InstallMethod::Cargo | InstallMethod::Unknown => UpgradeSource::GitHubRelease,
+    }
+}
+
+/// One package-manager invocation, spelled the way an operator would run it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagerCommand {
+    program: String,
+    args: Vec<String>,
+}
+
+impl ManagerCommand {
+    fn new(program: &str, args: &[&str]) -> Self {
+        Self {
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        }
+    }
+
+    /// Runs the manager with inherited stdio: delegated installation is the
+    /// operator's interactive command, and may legitimately take a while.
+    fn status(&self) -> io::Result<ExitStatus> {
+        Command::new(&self.program).args(&self.args).status()
+    }
+
+    /// Captures a short metadata answer from the manager under the shared
+    /// bounded process boundary (deadline, output bounds, settlement).
+    fn output(&self) -> std::result::Result<Output, GitCommandError> {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        bounded_command_output(command, None, &GitCommandBounds::default())
+    }
+}
+
+impl fmt::Display for ManagerCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.program)?;
+        for arg in &self.args {
+            write!(formatter, " {arg}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Scoop publishes the two channels as separate apps, mirroring the package
+/// ids the Scoop service hooks accept.
+fn scoop_package(is_beta: bool) -> &'static str {
+    if is_beta {
+        "tracedecay-beta"
+    } else {
+        "tracedecay"
+    }
+}
+
+impl PackageManager {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Homebrew => "Homebrew",
+            Self::Scoop => "Scoop",
+        }
+    }
+
+    /// The manager's own shim is a `.cmd` on Windows; Rust spawns those
+    /// through `cmd.exe` only when the extension is spelled out.
+    fn scoop_program() -> &'static str {
+        if cfg!(windows) { "scoop.cmd" } else { "scoop" }
+    }
+
+    /// Refreshes the manager's package metadata before an upgrade.
+    fn refresh_command(self) -> ManagerCommand {
+        match self {
+            Self::Homebrew => ManagerCommand::new("brew", &["update", "--quiet"]),
+            Self::Scoop => ManagerCommand::new(Self::scoop_program(), &["update"]),
+        }
+    }
+
+    /// The manager's own upgrade of the installed TraceDecay package.
+    fn upgrade_command(self, is_beta: bool) -> ManagerCommand {
+        match self {
+            Self::Homebrew => ManagerCommand::new("brew", &["upgrade", "tracedecay"]),
+            Self::Scoop => {
+                ManagerCommand::new(Self::scoop_program(), &["update", scoop_package(is_beta)])
+            }
+        }
+    }
+
+    /// Asks the manager where it installed the package.
+    fn prefix_command(self, is_beta: bool) -> ManagerCommand {
+        match self {
+            Self::Homebrew => ManagerCommand::new("brew", &["--prefix", "tracedecay"]),
+            Self::Scoop => {
+                ManagerCommand::new(Self::scoop_program(), &["prefix", scoop_package(is_beta)])
+            }
+        }
+    }
+
+    /// The binary the manager currently links: Homebrew's opt prefix
+    /// survives keg-version bumps and cleanup (unlike the keg-versioned
+    /// Cellar path the running process resolves to); Scoop's `current`
+    /// junction plays the same role.
+    fn installed_binary(self, is_beta: bool) -> std::result::Result<PathBuf, String> {
+        let command = self.prefix_command(is_beta);
+        let output = command
+            .output()
+            .map_err(|error| format!("`{command}` {}", describe_process_failure(&error)))?;
+        if !output.status.success() {
+            return Err(format!("`{command}` exited with {}", output.status));
+        }
+        let prefix = String::from_utf8(output.stdout)
+            .map_err(|_| format!("`{command}` printed a non-UTF-8 path"))?;
+        let binary = match self {
+            Self::Homebrew => Path::new(prefix.trim()).join("bin").join("tracedecay"),
+            Self::Scoop => Path::new(prefix.trim()).join("tracedecay.exe"),
+        };
+        if binary.is_file() {
+            Ok(binary)
+        } else {
+            Err(format!(
+                "`{command}` named {}, which is not a file",
+                binary.display()
+            ))
+        }
+    }
+
+    /// Channel switching has no manager command: Homebrew ships one formula,
+    /// and Scoop's channels are separate apps whose transition (uninstall,
+    /// then install) changes which package owns the daemon service. Both are
+    /// the operator's call, so the request is refused before anything moves.
+    fn channel_switch_refusal(self, is_beta: bool, target_channel: &str) -> TraceDecayError {
+        let label = self.label();
+        let guidance = match self {
+            Self::Homebrew => format!(
+                "keep upgrading with `{}`, or install the {target_channel} channel outside the \
+                 Homebrew prefix from https://github.com/{GITHUB_REPO}/releases",
+                self.upgrade_command(is_beta)
+            ),
+            Self::Scoop => format!(
+                "switch with `scoop uninstall {}` followed by `scoop install {}`",
+                scoop_package(is_beta),
+                scoop_package(!is_beta),
+            ),
+        };
+        TraceDecayError::Config {
+            message: format!(
+                "this tracedecay was installed by {label}, which owns its files; TraceDecay will \
+                 not rewrite a {label}-managed installation to switch channels.\n  {guidance}"
+            ),
         }
     }
 }
 
-fn latest_upgrade_version(is_beta: bool) -> Result<String> {
-    cloud::fetch_latest_version().ok_or_else(|| github_latest_unavailable_error(is_beta))
-}
-
-fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
-    let channel = if is_beta { "beta" } else { "stable" };
+fn release_lookup_failed(error: ReleaseLookupError) -> TraceDecayError {
     TraceDecayError::Config {
-        message: format!(
-            "failed to check for updates — no installable GitHub release asset is available for \
-             the current platform on the {channel} channel.\n  \
-             GitHub may be reachable, but release CI may still be uploading binaries."
-        ),
+        message: format!("failed to check for updates, {error}"),
     }
 }
 
-fn install_upgrade_version(
-    latest: &str,
-    is_beta: bool,
-    method: &InstallMethod,
-) -> Result<Option<PathBuf>> {
+fn install_upgrade_version(latest: &str, is_beta: bool) -> Result<(Option<PathBuf>, bool)> {
     let download = preflight_asset_check(latest, is_beta)?;
-    perform_upgrade(latest, &download, method)
+    perform_upgrade(&download)
 }
 
 fn run_versioned_upgrade(
+    profile: &ProfileRoot,
     current: &str,
     is_beta: bool,
-    method: &InstallMethod,
 ) -> Result<UpgradeOutcome> {
     eprintln!("Checking GitHub releases...");
-    let latest = latest_upgrade_version(is_beta)?;
+    let latest = cloud::fetch_latest_channel_version(
+        cloud::GITHUB_API_URL,
+        is_beta,
+        cloud::github_authorization().as_deref(),
+    )
+    .map_err(release_lookup_failed)?;
     let latest = match classify_upgrade(current, &latest) {
         UpgradeStatus::AlreadyCurrent => {
             eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
@@ -426,369 +837,59 @@ fn run_versioned_upgrade(
     };
 
     eprintln!("Upgrading v{current} → v{latest}...");
-    let binary = install_upgrade_version(latest, is_beta, method)?;
-    record_previous_version();
-    eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
-    Ok(UpgradeOutcome::Installed {
-        binary,
-        version: Some(latest.to_owned()),
-    })
+    let (binary, codesign_failed) = install_upgrade_version(latest, is_beta)?;
+    record_previous_version(profile);
+    Ok(finish_versioned_upgrade(latest, binary, codesign_failed))
 }
 
-/// Atomically replace a binary at `target` by copying `src` to a temp file
-/// in the same directory, setting permissions, then renaming over `target`.
-/// Avoids `ETXTBSY` on Linux (rename swaps directory entries rather than
-/// writing into the running executable).
+/// Completes a GitHub-release install.
+///
+/// `catalog_version` is the release name shown to the operator. It is not
+/// the installed identity: the published binary names itself
+/// `{release}+{sha}` and the daemon advertises that same string. Readiness
+/// compares the two exactly, so recording the catalog tag refuses the binary
+/// this function just installed.
+fn finish_versioned_upgrade(
+    catalog_version: &str,
+    binary: Option<PathBuf>,
+    codesign_failed: bool,
+) -> UpgradeOutcome {
+    let version = probed_installed_version(binary.as_deref(), "installed release");
+    eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{catalog_version}!");
+    UpgradeOutcome::Installed {
+        binary,
+        version,
+        codesign_failed,
+    }
+}
+
+/// Atomically replaces `target` with the contents of `source`: the bytes are
+/// copied into an exclusively created sibling in `target`'s directory, given
+/// `mode`, then renamed over `target`. Rename swaps directory entries, so a
+/// running executable (`ETXTBSY`) or a currently mapped library is never
+/// written in place, and a failure leaves `target` untouched.
 #[cfg(unix)]
-fn install_binary(src: &Path, target: &Path) -> Result<()> {
+fn publish_member(source: &Path, target: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = target.parent().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine target directory".into(),
     })?;
-    let temp = dir.join(format!(".tracedecay_upgrade_{}", std::process::id()));
-
-    std::fs::copy(src, &temp).map_err(io_err("cannot copy new binary"))?;
-
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
-            .map_err(io_err("cannot set permissions"))?;
-    }
-
-    if let Err(e) = std::fs::rename(&temp, target) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(io_err("cannot replace binary")(e));
-    }
-
+    let mut sibling = tempfile::Builder::new()
+        .prefix(".tracedecay-upgrade-")
+        .tempfile_in(dir)
+        .map_err(io_err("cannot stage release member beside its target"))?;
+    let mut source = File::open(source).map_err(io_err("cannot open staged release member"))?;
+    io::copy(&mut source, sibling.as_file_mut()).map_err(io_err("cannot copy release member"))?;
+    sibling
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(mode))
+        .map_err(io_err("cannot set permissions"))?;
+    sibling
+        .persist(target)
+        .map_err(|error| io_err("cannot replace release member")(error.error))?;
     Ok(())
 }
-
-#[cfg(unix)]
-fn retarget_homebrew_symlink(
-    symlink_path: &Path,
-    old_version: &str,
-    new_version: &str,
-) -> Result<()> {
-    let old_target =
-        std::fs::read_link(symlink_path).map_err(io_err("cannot read Homebrew symlink target"))?;
-    let new_target = std::path::PathBuf::from(old_target.to_string_lossy().replacen(
-        old_version,
-        new_version,
-        1,
-    ));
-    std::fs::remove_file(symlink_path).map_err(io_err("cannot remove Homebrew symlink"))?;
-    std::os::unix::fs::symlink(&new_target, symlink_path)
-        .map_err(io_err("cannot recreate Homebrew symlink"))?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn rewrite_homebrew_install_receipt(
-    receipt: &Path,
-    old_version: &str,
-    new_version: &str,
-) -> Result<()> {
-    let text =
-        std::fs::read_to_string(receipt).map_err(io_err("cannot read INSTALL_RECEIPT.json"))?;
-    std::fs::write(receipt, text.replace(old_version, new_version))
-        .map_err(io_err("cannot rewrite INSTALL_RECEIPT.json"))?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn warn_best_effort(step: &str, error: &TraceDecayError) {
-    eprintln!("\n  \x1b[33mwarning:\x1b[0m {step}: {error}");
-}
-
-// ── Homebrew ────────────────────────────────────────────────────────────
-
-/// Replace the binary inside the Homebrew Cellar, then rename the version
-/// directory and update the symlink so that `brew` reports the new version.
-/// Returns the stable `<prefix>/bin` symlink path when one exists, so
-/// downstream consumers never pin the keg-versioned path.
-#[cfg(unix)]
-fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>> {
-    let exe = std::env::current_exe().map_err(io_err("cannot determine current exe"))?;
-    let canonical = exe
-        .canonicalize()
-        .map_err(io_err("cannot resolve binary path"))?;
-
-    // Validate Cellar layout: <prefix>/Cellar/<formula>/<version>/bin/<binary>
-    let bin_dir = match canonical.parent() {
-        Some(p) if p.file_name().and_then(|n| n.to_str()) == Some("bin") => p,
-        _ => return replace_default(new_exe),
-    };
-    let Some(version_dir) = bin_dir.parent() else {
-        return replace_default(new_exe);
-    };
-    let Some(formula_dir) = version_dir.parent() else {
-        return replace_default(new_exe);
-    };
-    let cellar_dir = match formula_dir.parent() {
-        Some(p) if p.file_name().and_then(|n| n.to_str()) == Some("Cellar") => p,
-        _ => return replace_default(new_exe),
-    };
-    let Some(prefix) = cellar_dir.parent() else {
-        return replace_default(new_exe);
-    };
-
-    let Some(bin_name) = canonical.file_name() else {
-        return replace_default(new_exe);
-    };
-    let Some(old_version_os) = version_dir.file_name() else {
-        return replace_default(new_exe);
-    };
-    let old_version = old_version_os.to_string_lossy().to_string();
-
-    // Step 1 (critical): replace the binary atomically.
-    install_binary(new_exe, &canonical)?;
-    // The keg-versioned path is valid until the version-dir rename below;
-    // prefer the stable `<prefix>/bin` symlink when Homebrew manages one.
-    let mut installed_at = canonical.clone();
-
-    // Steps 2-4 update Cellar metadata so `brew` sees the correct version.
-    // These are best-effort — if they fail the binary itself is fine.
-    if old_version != new_version {
-        let new_version_dir = formula_dir.join(new_version);
-
-        // Step 2: rename the version directory (e.g. 4.0.3 → 4.0.4).
-        match std::fs::rename(version_dir, &new_version_dir) {
-            Ok(()) => {
-                installed_at = new_version_dir.join("bin").join(bin_name);
-
-                // Step 3: update the symlink at <prefix>/bin/<binary>.
-                let symlink_path = prefix.join("bin").join(bin_name);
-                if let Ok(meta) = std::fs::symlink_metadata(&symlink_path)
-                    && meta.file_type().is_symlink()
-                {
-                    match retarget_homebrew_symlink(&symlink_path, &old_version, new_version) {
-                        Ok(()) => installed_at = symlink_path,
-                        Err(error) => {
-                            warn_best_effort("could not update Homebrew symlink", &error);
-                        }
-                    }
-                }
-
-                // Step 4: patch INSTALL_RECEIPT.json so `brew info` is accurate.
-                let receipt = new_version_dir.join("INSTALL_RECEIPT.json");
-                if receipt.exists()
-                    && let Err(error) =
-                        rewrite_homebrew_install_receipt(&receipt, &old_version, new_version)
-                {
-                    warn_best_effort("could not rewrite Homebrew INSTALL_RECEIPT.json", &error);
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "\n  \x1b[33mwarning:\x1b[0m could not rename Cellar directory: {e}\n    \
-                     brew may still report the old version"
-                );
-            }
-        }
-    }
-
-    Ok(Some(installed_at))
-}
-
-#[cfg(not(unix))]
-fn replace_for_brew(new_exe: &Path, _new_version: &str) -> Result<Option<PathBuf>> {
-    replace_default(new_exe)
-}
-
-// ── Scoop ───────────────────────────────────────────────────────────────
-
-/// Replace the binary via `self_replace` (handles Windows exe locking),
-/// then update Scoop's version directory and junction so that
-/// `scoop status` reports the new version.
-#[cfg(windows)]
-fn replace_for_scoop(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>> {
-    let exe = std::env::current_exe().ok();
-    self_replace::self_replace(new_exe).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "binary replacement failed: {e}\n  \
-             The old version is still in place.\n  \
-             To upgrade manually: https://github.com/{GITHUB_REPO}/releases/latest"
-        ),
-    })?;
-
-    // Best-effort: update Scoop metadata for `scoop status` compatibility.
-    update_scoop_metadata(new_version);
-
-    Ok(exe)
-}
-
-#[cfg(windows)]
-fn update_scoop_metadata(new_version: &str) {
-    use std::os::windows::process::CommandExt;
-
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(err) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m could not resolve current exe for Scoop metadata \
-                 update ({err}); `scoop status` may show a stale version"
-            );
-            return;
-        }
-    };
-    let canonical = exe.canonicalize().unwrap_or(exe);
-
-    let Some(version_dir) = find_scoop_version_dir(&canonical) else {
-        return;
-    };
-    let Some(app_dir) = version_dir.parent() else {
-        return;
-    };
-    let old_version = version_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    if old_version == new_version || old_version == "current" {
-        return;
-    }
-
-    let new_version_dir = app_dir.join(new_version);
-    if let Err(err) = std::fs::create_dir_all(&new_version_dir) {
-        eprintln!(
-            "  \x1b[33mwarning:\x1b[0m could not create Scoop version directory {} ({err}); \
-             `scoop status` may show a stale version",
-            new_version_dir.display()
-        );
-        return;
-    }
-
-    // Copy files from old version directory to new. Track failures so a
-    // partially-populated version directory never gets relinked as `current`.
-    let mut incomplete = false;
-    match std::fs::read_dir(&version_dir) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
-                    continue;
-                }
-                let name = entry.file_name();
-                if name.to_string_lossy().contains("__self_delete__") {
-                    continue;
-                }
-                if let Err(err) = std::fs::copy(entry.path(), new_version_dir.join(&name)) {
-                    eprintln!(
-                        "  \x1b[33mwarning:\x1b[0m could not copy {} into Scoop version \
-                         directory ({err})",
-                        entry.path().display()
-                    );
-                    incomplete = true;
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m could not read Scoop version directory {} ({err}); \
-                 `scoop status` may show a stale version",
-                version_dir.display()
-            );
-            incomplete = true;
-        }
-    }
-
-    // Patch manifest.json version.
-    let manifest = new_version_dir.join("manifest.json");
-    if manifest.exists() {
-        match std::fs::read_to_string(&manifest) {
-            Ok(text) => {
-                if let Err(err) = std::fs::write(&manifest, text.replace(&old_version, new_version))
-                {
-                    eprintln!(
-                        "  \x1b[33mwarning:\x1b[0m could not patch Scoop manifest {} ({err})",
-                        manifest.display()
-                    );
-                    incomplete = true;
-                }
-            }
-            Err(err) => {
-                eprintln!(
-                    "  \x1b[33mwarning:\x1b[0m could not read Scoop manifest {} ({err})",
-                    manifest.display()
-                );
-                incomplete = true;
-            }
-        }
-    }
-
-    if incomplete {
-        eprintln!(
-            "  \x1b[33mwarning:\x1b[0m Scoop version directory {} is incomplete; leaving \
-             `current` pointed at {old_version} — run `scoop reset tracedecay` after fixing",
-            new_version_dir.display()
-        );
-        return;
-    }
-
-    let current = app_dir.join("current");
-    if let Err(err) = std::fs::remove_dir(&current) {
-        eprintln!(
-            "  \x1b[33mwarning:\x1b[0m could not remove Scoop `current` junction {} ({err}); \
-             `scoop status` may show a stale version",
-            current.display()
-        );
-        return;
-    }
-    match std::process::Command::new("cmd")
-        .args([
-            "/c",
-            "mklink",
-            "/J",
-            &current.to_string_lossy(),
-            &new_version_dir.to_string_lossy(),
-        ])
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .status()
-    {
-        Ok(status) if status.success() => {}
-        Ok(status) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m Scoop `current` junction relink exited with {status}; \
-                 run `scoop reset tracedecay` if `scoop status` looks stale"
-            );
-        }
-        Err(err) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m could not relink Scoop `current` junction ({err}); \
-                 run `scoop reset tracedecay` if `scoop status` looks stale"
-            );
-        }
-    }
-}
-
-/// Walk the canonical path to find the Scoop version directory.
-/// Layout: `<scoop>/apps/<app>/<version>/…`
-#[cfg(windows)]
-fn find_scoop_version_dir(path: &Path) -> Option<std::path::PathBuf> {
-    let mut found_apps = false;
-    let mut depth_after_apps = 0u8;
-    let mut result = std::path::PathBuf::new();
-
-    for comp in path.components() {
-        result.push(comp);
-        if found_apps {
-            depth_after_apps += 1;
-            if depth_after_apps == 2 {
-                return Some(result);
-            }
-        } else if let std::path::Component::Normal(name) = comp
-            && name.to_string_lossy().eq_ignore_ascii_case("apps")
-        {
-            found_apps = true;
-        }
-    }
-    None
-}
-
-#[cfg(not(windows))]
-fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<Option<PathBuf>> {
-    replace_default(new_exe)
-}
-
-// ────────────────────────────────────────────────────────────────────────
 
 /// Downloads, extracts, and installs the binary for `version`/`is_beta`.
 /// Verifies the release asset exists on GitHub and returns the download URL.
@@ -798,7 +899,13 @@ fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload
     let tag = release_tag(version);
     let asset = asset_name(version, is_beta);
     eprintln!("  Asset: {asset}");
-    fetch_release_download(&tag, &asset)
+    fetch_release_download(
+        cloud::GITHUB_API_URL,
+        cloud::github_authorization().as_deref(),
+        &tag,
+        &asset,
+        is_beta,
+    )
 }
 
 /// Record the *currently running* binary's version in user config just before
@@ -806,14 +913,16 @@ fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload
 /// `previous_version` and decides whether reinstall is required for the
 /// transition (e.g. minor/major bumps re-register agents to pick up new MCP
 /// tools or hook changes; patch bumps just update the field).
-fn record_previous_version() {
+fn record_previous_version(profile: &ProfileRoot) {
     let current = env!("CARGO_PKG_VERSION");
-    let mut cfg = UserConfig::load();
-    if cfg.previous_version == current {
-        return;
-    }
-    cfg.previous_version = current.to_string();
-    if let Err(err) = cfg.save() {
+    let recorded = UserConfig::load(profile.data_dir()).and_then(|mut cfg| {
+        if cfg.previous_version == current {
+            return Ok(());
+        }
+        cfg.previous_version = current.to_string();
+        cfg.save(profile.data_dir())
+    });
+    if let Err(err) = recorded {
         eprintln!(
             "  \x1b[33mwarning:\x1b[0m could not record previous version ({err}); \
              run `tracedecay reinstall` manually if new tools aren't registered"
@@ -821,151 +930,235 @@ fn record_previous_version() {
     }
 }
 
-/// Returns the path the new binary was installed at, when known.
-fn perform_upgrade(
-    version: &str,
-    download: &ReleaseDownload,
-    method: &InstallMethod,
-) -> Result<Option<PathBuf>> {
-    let bin_names: &[&str] = if cfg!(windows) {
-        &["tracedecay.exe"]
-    } else {
-        &["tracedecay"]
-    };
+/// Downloads, verifies, stages and publishes the complete release bundle of a
+/// direct install. Returns the path the new binary was installed at, when
+/// known.
+fn perform_upgrade(download: &ReleaseDownload) -> Result<(Option<PathBuf>, bool)> {
+    let staged = download_and_stage(download, &required_members())?;
 
-    let tmp = download_and_extract(download, bin_names)?;
-
-    let label = match method {
-        InstallMethod::Brew => " (Homebrew Cellar)",
-        InstallMethod::Scoop => " (Scoop)",
-        _ => "",
-    };
-    eprint!("  Replacing binary{label}...");
-    let installed_at = replace_binary(&tmp, method, version)?;
+    eprint!("  Installing release...");
+    let installed = publish_release(&staged)?;
     eprintln!(" Done");
 
-    Ok(installed_at)
+    Ok(installed)
 }
 
-fn brew_upgrade_command() -> (&'static str, [&'static str; 2]) {
-    ("brew", ["upgrade", "tracedecay"])
-}
+/// A `--version` line is `tracedecay <release>[+<40-hex sha>[.dirty]]`, well
+/// under 128 bytes. 4 KiB leaves room for any such line and refuses an
+/// executable that chatters or loops without retaining unbounded output.
+const VERSION_PROBE_STDOUT_LIMIT: usize = 4 * 1024;
+/// A wedged binary must not hang the upgrade; a healthy one answers in
+/// milliseconds.
+const VERSION_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
-/// The stable Homebrew-managed binary path: the opt symlink reported by
-/// `brew --prefix tracedecay`, which survives keg-version bumps and cleanup
-/// (unlike the keg-versioned Cellar path the running process resolves to).
-fn brew_linked_binary() -> Option<PathBuf> {
-    let output = std::process::Command::new("brew")
-        .args(["--prefix", "tracedecay"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let prefix = String::from_utf8(output.stdout).ok()?;
-    let binary = Path::new(prefix.trim()).join("bin").join("tracedecay");
-    binary.exists().then_some(binary)
-}
-
-/// Extracts the version from `tracedecay --version` output
-/// (e.g. `tracedecay 5.0.1` → `5.0.1`).
+/// The version a `tracedecay --version` line reports: exactly one line,
+/// `tracedecay ` followed by a `SemVer` version. Build metadata is kept so a
+/// checkout build's `+<sha>` identity survives; anything else is not version
+/// evidence.
 fn parse_version_output(output: &str) -> Option<String> {
-    let version = output.split_whitespace().last()?;
-    Some(version.trim_start_matches('v').to_string())
-}
-
-/// Asks the binary at `path` for its version, killing it after a short
-/// deadline so a wedged binary cannot hang the upgrade. `None` when it
-/// cannot be run, times out, or its output is unrecognizable.
-fn installed_binary_version(path: &Path) -> Option<String> {
-    let mut child = std::process::Command::new(path)
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => return None,
-        }
-    };
-    if !status.success() {
+    let mut lines = output.lines();
+    let line = lines.next()?;
+    if lines.next().is_some() {
         return None;
     }
-    let mut output = String::new();
-    child.stdout.take()?.read_to_string(&mut output).ok()?;
-    parse_version_output(&output)
+    let version = line.strip_prefix("tracedecay ")?;
+    semver::Version::parse(version).ok()?;
+    Some(version.to_owned())
 }
 
-/// Whether a delegated `brew upgrade` was a no-op: the linked binary still
-/// reports the version we are already running. `None` (undetectable) is
-/// treated as a real install so the refresh chain never silently skips.
-fn brew_upgrade_was_noop(current: &str, installed_version: Option<&str>) -> bool {
-    installed_version == Some(current)
+/// Why a version probe produced no installed version.
+#[derive(Debug)]
+enum VersionProbeError {
+    /// Spawn, deadline, output-bound, or settlement failure at the process
+    /// boundary; the child was killed and reaped before this is reported.
+    Execution(GitCommandError),
+    /// The binary ran to completion but did not succeed.
+    ExitStatus(ExitStatus),
+    /// Stdout was not a single `tracedecay <semver>` line.
+    Unrecognized(String),
 }
 
-fn run_brew_upgrade() -> Result<UpgradeOutcome> {
-    let current = env!("CARGO_PKG_VERSION");
-    eprintln!("Updating Homebrew formula cache...");
-    let update_ok = std::process::Command::new("brew")
-        .args(["update", "--quiet"])
-        .status()
-        .is_ok_and(|s| s.success());
-    if !update_ok {
-        eprintln!("  warning: `brew update` failed — continuing with existing cache");
+/// Neutral wording for the shared process boundary's failures, whose own
+/// messages are phrased for its primary `git` caller.
+fn describe_process_failure(error: &GitCommandError) -> String {
+    match error {
+        GitCommandError::Unavailable(source) => format!("could not run: {source}"),
+        GitCommandError::Cancelled => "was cancelled".to_owned(),
+        GitCommandError::DeadlineExceeded => {
+            "did not exit and release its output before the deadline".to_owned()
+        }
+        GitCommandError::OutputLimitExceeded { stream, bound } => {
+            format!("wrote more than {bound} bytes to {stream}")
+        }
+        GitCommandError::ReadOutput { stream, source } => {
+            format!("could not be read on {stream}: {source}")
+        }
+        GitCommandError::Wait(source) => format!("could not be waited for: {source}"),
+        GitCommandError::WriteInput(source) => format!("could not receive its input: {source}"),
+    }
+}
+
+impl fmt::Display for VersionProbeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Execution(error) => {
+                write!(formatter, "`--version` {}", describe_process_failure(error))
+            }
+            Self::ExitStatus(status) => write!(formatter, "`--version` exited with {status}"),
+            Self::Unrecognized(text) => {
+                write!(formatter, "unrecognized `--version` output {text:?}")
+            }
+        }
+    }
+}
+
+/// Asks the binary at `path` for its version under one absolute deadline,
+/// draining bounded stdout concurrently with the child's progress so a
+/// chatty binary cannot deadlock on a full pipe and a wedged one cannot hang
+/// the upgrade. Every exit path leaves the child killed and reaped.
+fn installed_binary_version(path: &Path) -> std::result::Result<String, VersionProbeError> {
+    installed_binary_version_within(path, VERSION_PROBE_DEADLINE)
+}
+
+fn installed_binary_version_within(
+    path: &Path,
+    deadline: Duration,
+) -> std::result::Result<String, VersionProbeError> {
+    let mut command = Command::new(path);
+    command.arg("--version");
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + deadline,
+        max_stdout_bytes: VERSION_PROBE_STDOUT_LIMIT,
+        ..GitCommandBounds::default()
+    };
+    let output =
+        bounded_command_output(command, None, &bounds).map_err(VersionProbeError::Execution)?;
+    if !output.status.success() {
+        return Err(VersionProbeError::ExitStatus(output.status));
+    }
+    let text = String::from_utf8(output.stdout).map_err(|error| {
+        VersionProbeError::Unrecognized(String::from_utf8_lossy(error.as_bytes()).into_owned())
+    })?;
+    parse_version_output(&text).ok_or(VersionProbeError::Unrecognized(text))
+}
+
+/// The version `binary` reports for itself, or `None` when there is nothing
+/// to ask or it does not answer.
+///
+/// A missing answer is not filled in from a release tag. The tag omits the
+/// commit the binary and the daemon both name, and readiness treats that
+/// omission as a different identity.
+fn probed_installed_version(binary: Option<&Path>, owner: &str) -> Option<String> {
+    match installed_binary_version(binary?) {
+        Ok(version) => Some(version),
+        Err(reason) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not read the {owner} binary's version \
+                 ({reason}); daemon restore will not invent an identity"
+            );
+            None
+        }
+    }
+}
+
+/// Whether a delegated manager upgrade was a no-op: the binary the manager
+/// links reports exactly the build version this process is running, which
+/// is the same file unless the manager installed something. `None`
+/// (undetectable) is treated as a real install so the refresh chain never
+/// silently skips.
+fn delegated_upgrade_was_noop(
+    running_build_version: &str,
+    installed_version: Option<&str>,
+) -> bool {
+    installed_version == Some(running_build_version)
+}
+
+/// Delegates an upgrade to the package manager that owns the installation
+/// and classifies the result by asking the binary the manager links for its
+/// version. TraceDecay writes nothing under the manager's tree: a manager
+/// failure is reported as-is and `locate_installed_binary` is never reached.
+fn run_delegated_upgrade(
+    manager: PackageManager,
+    refresh: &ManagerCommand,
+    upgrade: &ManagerCommand,
+    locate_installed_binary: impl FnOnce() -> std::result::Result<PathBuf, String>,
+) -> Result<UpgradeOutcome> {
+    let label = manager.label();
+    eprintln!("Refreshing {label} package metadata: {refresh}");
+    if !refresh.status().is_ok_and(|status| status.success()) {
+        eprintln!("  warning: `{refresh}` failed, continuing with existing metadata");
     }
 
-    let (program, args) = brew_upgrade_command();
-    eprintln!(
-        "Delegating upgrade to Homebrew: {program} {}",
-        args.join(" ")
-    );
-
-    let status = std::process::Command::new(program)
-        .args(args)
-        .status()
-        .map_err(io_err("failed to run Homebrew upgrade"))?;
-
+    eprintln!("Delegating upgrade to {label}: {upgrade}");
+    let status = upgrade.status().map_err(|error| TraceDecayError::Config {
+        message: format!("failed to run `{upgrade}`: {error}"),
+    })?;
     if !status.success() {
         return Err(TraceDecayError::Config {
-            message: format!("Homebrew upgrade failed with status: {status}"),
+            message: format!(
+                "`{upgrade}` failed with status: {status}\n  \
+                 TraceDecay made no changes to the {label}-owned installation."
+            ),
         });
     }
 
-    // `brew upgrade` exits 0 even when the formula was already current, so
-    // ask the freshly linked binary for its version to tell the outcomes
-    // apart. When undetectable, assume an install so the refresh chain
-    // keeps generated plugins in sync.
-    let binary = brew_linked_binary();
-    let installed_version = binary.as_deref().and_then(installed_binary_version);
-    if brew_upgrade_was_noop(current, installed_version.as_deref()) {
-        eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
+    // The manager exits 0 whether or not it installed anything, so ask the
+    // binary it now links for its version to tell the outcomes apart.
+    let binary = match locate_installed_binary() {
+        Ok(binary) => Some(binary),
+        Err(reason) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not locate the {label}-installed binary \
+                 ({reason}); assuming a new install so the refresh chain runs"
+            );
+            None
+        }
+    };
+    let installed_version =
+        probed_installed_version(binary.as_deref(), &format!("{label}-installed"));
+    if delegated_upgrade_was_noop(
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
+        installed_version.as_deref(),
+    ) {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Already up to date (v{}).",
+            env!("CARGO_PKG_VERSION")
+        );
         return Ok(UpgradeOutcome::AlreadyCurrent);
     }
 
-    record_previous_version();
     // `installed_version` may be None here (assumed install, undetectable
     // binary): daemon restore then validates the pre-upgrade version and
-    // reports a typed identity mismatch if Homebrew really did install a new
-    // daemon — truthful failure over a fabricated version.
+    // reports a typed identity mismatch if the manager really did install a
+    // new daemon, truthful failure over a fabricated version.
     Ok(UpgradeOutcome::Installed {
         binary,
         version: installed_version,
+        codesign_failed: false,
     })
+}
+
+fn run_package_manager_upgrade(
+    profile: &ProfileRoot,
+    manager: PackageManager,
+    is_beta: bool,
+) -> Result<UpgradeOutcome> {
+    let outcome = run_delegated_upgrade(
+        manager,
+        &manager.refresh_command(),
+        &manager.upgrade_command(is_beta),
+        || manager.installed_binary(is_beta),
+    )?;
+    if matches!(outcome, UpgradeOutcome::Installed { .. }) {
+        record_previous_version(profile);
+    }
+    Ok(outcome)
 }
 
 /// Check for a newer version and perform the upgrade if one is available.
 ///
 /// Returns whether a new binary was actually installed.
-pub fn run_upgrade() -> Result<UpgradeOutcome> {
+pub fn run_upgrade(profile: &ProfileRoot) -> Result<UpgradeOutcome> {
     let current = env!("CARGO_PKG_VERSION");
     let is_beta = cloud::is_beta();
     let channel = if is_beta { "beta" } else { "stable" };
@@ -980,8 +1173,10 @@ pub fn run_upgrade() -> Result<UpgradeOutcome> {
     eprintln!("Current version: v{current} ({channel} channel{method_suffix})");
 
     match upgrade_source_for(&method) {
-        UpgradeSource::Homebrew => run_brew_upgrade(),
-        UpgradeSource::GitHubRelease => run_versioned_upgrade(current, is_beta, &method),
+        UpgradeSource::PackageManager(manager) => {
+            run_package_manager_upgrade(profile, manager, is_beta)
+        }
+        UpgradeSource::GitHubRelease => run_versioned_upgrade(profile, current, is_beta),
     }
 }
 
@@ -993,12 +1188,21 @@ pub fn show_channel() {
 }
 
 /// Switch to a different channel by downloading the latest release from it.
-#[hotpath::measure(label = "cli.channel.switch")]
-pub fn switch_channel(target_channel: &str) -> Result<String> {
+/// Package-manager installs are refused before anything is fetched: the
+/// manager owns those files, and no manager command switches channels.
+#[tracing::instrument(name = "cli.channel.switch", level = "trace", skip_all)]
+pub fn switch_channel(profile: &ProfileRoot, target_channel: &str) -> Result<String> {
+    switch_channel_for(profile, &cloud::detect_install_method(), target_channel)
+}
+
+fn switch_channel_for(
+    profile: &ProfileRoot,
+    method: &InstallMethod,
+    target_channel: &str,
+) -> Result<String> {
     let current = env!("CARGO_PKG_VERSION");
     let current_is_beta = cloud::is_beta();
     let current_channel = if current_is_beta { "beta" } else { "stable" };
-    let method = cloud::detect_install_method();
 
     let target_is_beta = match target_channel {
         "beta" => true,
@@ -1016,16 +1220,18 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
         return Ok(current.to_string());
     }
 
+    if let UpgradeSource::PackageManager(manager) = upgrade_source_for(method) {
+        return Err(manager.channel_switch_refusal(current_is_beta, target_channel));
+    }
+
     eprintln!("Switching from {current_channel} to {target_channel}...");
 
-    let latest = if target_is_beta {
-        cloud::fetch_latest_beta_version()
-    } else {
-        cloud::fetch_latest_stable_version()
-    }
-    .ok_or_else(|| TraceDecayError::Config {
-        message: format!("failed to find latest {target_channel} release — could not reach GitHub"),
-    })?;
+    let latest = cloud::fetch_latest_channel_version(
+        cloud::GITHUB_API_URL,
+        target_is_beta,
+        cloud::github_authorization().as_deref(),
+    )
+    .map_err(release_lookup_failed)?;
 
     eprintln!("  Target: v{latest}");
 
@@ -1033,9 +1239,16 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
 
     // Channel switches do not yet run the post-update refresh chain, so the
     // installed path is unused here.
-    let _ = perform_upgrade(&latest, &download, &method)?;
-    record_previous_version();
+    let (_installed_at, codesign_failed) = perform_upgrade(&download)?;
+    record_previous_version(profile);
     eprintln!("\x1b[32m✔\x1b[0m Switched to {target_channel} channel: v{latest}");
+    if codesign_failed {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "switched to {target_channel} channel v{latest}, but codesign failed (see above)"
+            ),
+        });
+    }
     Ok(latest)
 }
 
@@ -1078,99 +1291,299 @@ mod tests {
 
     #[test]
     fn release_archive_checksum_must_match_before_extraction() {
-        let bytes = b"verified archive bytes";
-        let digest = hex::encode(Sha256::digest(bytes));
+        let digest = hex::encode(Sha256::digest(b"verified archive bytes"));
+        let tampered = hex::encode(Sha256::digest(b"tampered"));
 
-        assert!(verify_sha256(bytes, &digest, "archive.tar.gz").is_ok());
-        assert!(verify_sha256(b"tampered", &digest, "archive.tar.gz").is_err());
+        assert!(verify_sha256(&digest, &digest, "archive.tar.gz").is_ok());
+        assert!(verify_sha256(&tampered, &digest, "archive.tar.gz").is_err());
     }
 
     #[test]
-    fn test_asset_name_stable() {
-        let name = asset_name("3.3.3", false);
-        assert!(name.starts_with("tracedecay-v3.3.3-"));
-        assert!(!name.contains("beta"));
-        if cfg!(windows) {
-            assert!(name.ends_with(".zip"));
-        } else {
-            assert!(name.ends_with(".tar.gz"));
-        }
-    }
-
-    #[test]
-    fn test_asset_name_beta() {
-        let name = asset_name("4.0.2-beta.1", true);
-        assert!(name.starts_with("tracedecay-beta-v4.0.2-beta.1-"));
-        if cfg!(windows) {
-            assert!(name.ends_with(".zip"));
-        } else {
-            assert!(name.ends_with(".tar.gz"));
-        }
-    }
-
-    #[test]
-    fn test_asset_name_uses_current_name() {
-        assert!(asset_name("3.3.3", false).starts_with("tracedecay-v3.3.3-"));
-    }
-
-    #[test]
-    fn test_release_tag() {
-        assert_eq!(release_tag("3.3.3"), "v3.3.3");
-        assert_eq!(release_tag("4.0.2-beta.1"), "v4.0.2-beta.1");
-    }
-
-    #[test]
-    fn test_current_platform_not_unknown() {
-        assert_ne!(current_platform(), "unknown");
-    }
-
-    #[test]
-    fn brew_upgrade_command_delegates_to_homebrew() {
-        let (program, args) = brew_upgrade_command();
-
-        assert_eq!(program, "brew");
-        assert_eq!(args, ["upgrade", "tracedecay"]);
-    }
-
-    #[test]
-    fn parse_version_output_extracts_trailing_version() {
+    fn only_a_single_tracedecay_semver_line_is_version_evidence() {
         assert_eq!(
             parse_version_output("tracedecay 5.0.1\n").as_deref(),
             Some("5.0.1")
         );
+        let build = "0.1.0-beta.37+0123456789abcdef0123456789abcdef01234567.dirty";
         assert_eq!(
-            parse_version_output("tracedecay v5.0.1").as_deref(),
-            Some("5.0.1")
+            parse_version_output(&format!("tracedecay {build}\n")).as_deref(),
+            Some(build),
+            "build metadata identifies the exact binary and must survive"
         );
         assert_eq!(parse_version_output(""), None);
-    }
-
-    #[test]
-    fn brew_upgrade_is_a_noop_when_linked_binary_reports_running_version() {
-        // A no-op `brew upgrade` must map to `AlreadyCurrent` so it never
-        // triggers the post-upgrade refresh chain (daemon restart included).
-        assert!(brew_upgrade_was_noop("5.0.1", Some("5.0.1")));
-    }
-
-    #[test]
-    fn brew_upgrade_with_new_or_unknown_version_counts_as_install() {
-        assert!(!brew_upgrade_was_noop("5.0.1", Some("5.0.2")));
-        // Undetectable → assume install so the refresh never silently skips.
-        assert!(!brew_upgrade_was_noop("5.0.1", None));
-    }
-
-    #[test]
-    fn cargo_installs_use_github_release_pipeline() {
+        assert_eq!(parse_version_output("tracedecay v5.0.1"), None);
+        assert_eq!(parse_version_output("tracedecay"), None);
+        assert_eq!(parse_version_output("tracedecay not-a-version"), None);
+        assert_eq!(parse_version_output("error: missing runtime 5.0.1"), None);
         assert_eq!(
-            upgrade_source_for(&InstallMethod::Cargo),
-            UpgradeSource::GitHubRelease
+            parse_version_output("tracedecay 5.0.1\nwarning: a newer version exists\n"),
+            None
         );
     }
 
+    #[cfg(unix)]
+    mod version_probe {
+        #[cfg(target_os = "linux")]
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        use tracedecay_runtime_core::git::GitCommandError;
+
+        use super::super::{
+            UpgradeOutcome, VERSION_PROBE_DEADLINE, VersionProbeError, finish_versioned_upgrade,
+            installed_binary_version, installed_binary_version_within,
+        };
+        use tracedecay_runtime_core::test_executable::write_executable_script;
+
+        fn script(dir: &Path, body: &str) -> PathBuf {
+            let path = dir.join("tracedecay");
+            write_executable_script(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            path
+        }
+
+        #[test]
+        fn a_healthy_binary_reports_its_version() {
+            let dir = tempfile::tempdir().unwrap();
+            let binary = script(dir.path(), "printf 'tracedecay 1.2.3+abcdef\\n'");
+
+            assert_eq!(installed_binary_version(&binary).unwrap(), "1.2.3+abcdef");
+        }
+
+        #[test]
+        fn failed_exits_and_malformed_output_are_not_version_evidence() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let failing = script(dir.path(), "printf 'tracedecay 1.2.3\\n'; exit 1");
+            assert!(matches!(
+                installed_binary_version(&failing),
+                Err(VersionProbeError::ExitStatus(_))
+            ));
+
+            let chatty = script(dir.path(), "printf 'tracedecay 1.2.3\\nnote: hi\\n'");
+            assert!(matches!(
+                installed_binary_version(&chatty),
+                Err(VersionProbeError::Unrecognized(_))
+            ));
+
+            let garbage = script(dir.path(), "printf 'segfault at 0x42 1.2.3\\n'");
+            assert!(matches!(
+                installed_binary_version(&garbage),
+                Err(VersionProbeError::Unrecognized(_))
+            ));
+
+            let invalid_utf8 = script(dir.path(), "printf 'tracedecay 1.2.3\\377\\n'");
+            assert!(matches!(
+                installed_binary_version(&invalid_utf8),
+                Err(VersionProbeError::Unrecognized(_))
+            ));
+
+            let missing = dir.path().join("absent");
+            assert!(matches!(
+                installed_binary_version(&missing),
+                Err(VersionProbeError::Execution(GitCommandError::Unavailable(
+                    _
+                )))
+            ));
+        }
+
+        #[test]
+        fn a_child_that_overfills_its_stdout_pipe_is_refused_without_a_deadlock() {
+            let dir = tempfile::tempdir().unwrap();
+            // Well past both the probe's byte bound and the kernel pipe
+            // capacity: a wait-before-read probe would block here until its
+            // deadline and then misclassify the binary as wedged.
+            let flood = script(dir.path(), "head -c 200000 /dev/zero | tr '\\0' a");
+            let started = Instant::now();
+
+            let error = installed_binary_version(&flood).unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    VersionProbeError::Execution(GitCommandError::OutputLimitExceeded {
+                        stream: "stdout",
+                        ..
+                    })
+                ),
+                "{error}"
+            );
+            assert!(
+                started.elapsed() < VERSION_PROBE_DEADLINE,
+                "the byte bound must refuse the flood before the deadline a \
+                 blocked pipe would reach"
+            );
+        }
+
+        #[test]
+        fn a_wedged_binary_is_killed_and_reaped_at_the_deadline() {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let never = dir.path().join("never");
+            assert!(
+                Command::new("mkfifo")
+                    .arg(&never)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            // Blocks in open(2) on a fifo nobody writes: no exec and no child,
+            // so the wedged process keeps this script's command line for as
+            // long as it lives.
+            let wedged = script(
+                dir.path(),
+                &format!(
+                    "printf '%s\\n' $$ > '{}'; read _ < '{}'",
+                    pid_file.display(),
+                    never.display()
+                ),
+            );
+            let started = Instant::now();
+
+            let error =
+                installed_binary_version_within(&wedged, Duration::from_millis(300)).unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    VersionProbeError::Execution(GitCommandError::DeadlineExceeded)
+                ),
+                "{error}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(5));
+            #[cfg(target_os = "linux")]
+            {
+                // `Command::spawn` returns only after the child has exec'd, so
+                // a child the probe left behind is already this script, however
+                // far the scheduler has let it run.
+                assert_eq!(
+                    processes_running(&wedged),
+                    Vec::<String>::new(),
+                    "the probe must not leave its child running"
+                );
+                // Under load the deadline can fire before the script writes its
+                // pid. When it did write one, that pid must be reaped, not a
+                // zombie.
+                let pid = fs::read_to_string(&pid_file).unwrap_or_default();
+                let pid = pid.trim();
+                assert!(
+                    pid.is_empty() || !Path::new("/proc").join(pid).exists(),
+                    "the probe must reap its child, but pid {pid} remains"
+                );
+            }
+        }
+
+        /// Pids of live processes whose command line runs `script`.
+        #[cfg(target_os = "linux")]
+        fn processes_running(script: &Path) -> Vec<String> {
+            let script = script.as_os_str().as_encoded_bytes();
+            fs::read_dir("/proc")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .bytes()
+                        .all(|b| b.is_ascii_digit())
+                })
+                .filter(|entry| {
+                    fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| {
+                        cmdline.split(|byte| *byte == 0).any(|arg| arg == script)
+                    })
+                })
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        }
+
+        #[test]
+        fn a_descendant_holding_stdout_cannot_hold_the_probe_past_its_deadline() {
+            // The descendant keeps the inherited pipe open this long, so a probe
+            // that returns at or after it waited for the pipe, not its deadline.
+            const DESCENDANT_PIPE_HOLD: Duration = Duration::from_secs(30);
+            let dir = tempfile::tempdir().unwrap();
+            let leaky = script(
+                dir.path(),
+                &format!(
+                    "printf 'tracedecay 1.2.3\\n'; sleep {} & exit 0",
+                    DESCENDANT_PIPE_HOLD.as_secs()
+                ),
+            );
+            let started = Instant::now();
+
+            let error =
+                installed_binary_version_within(&leaky, Duration::from_millis(300)).unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    VersionProbeError::Execution(GitCommandError::DeadlineExceeded)
+                ),
+                "{error}"
+            );
+            assert!(
+                started.elapsed() < DESCENDANT_PIPE_HOLD,
+                "a successful parent exit does not close an inherited pipe; the deadline must"
+            );
+        }
+
+        /// The observed update failure: GitHub names the release `0.1.0-beta.47`
+        /// and the binary that release ships names
+        /// `0.1.0-beta.47+<sha>`. Readiness compares those strings exactly, so
+        /// the catalog tag must not be the version the outcome records.
+        #[test]
+        fn a_release_install_reports_the_binary_identity_not_the_catalog_tag() {
+            let dir = tempfile::tempdir().unwrap();
+            let sha = "84598a0b9c841b914565f46b20bb6c765706e8e5";
+            let identity = format!("0.1.0-beta.47+{sha}");
+            let binary = script(dir.path(), &format!("printf 'tracedecay {identity}\\n'"));
+            let catalog = "0.1.0-beta.47";
+
+            let outcome = finish_versioned_upgrade(catalog, Some(binary), false);
+
+            let UpgradeOutcome::Installed { version, .. } = outcome else {
+                panic!("a published release is an install, got {outcome:?}");
+            };
+            assert_eq!(version.as_deref(), Some(identity.as_str()));
+            assert_ne!(
+                version.as_deref(),
+                Some(catalog),
+                "the catalog tag is not the identity the daemon advertises"
+            );
+        }
+
+        /// A binary that cannot be asked must not be labeled with the release
+        /// tag. Restore then fails closed against the pre-upgrade identity
+        /// instead of waiting for a version the new daemon will never report.
+        #[test]
+        fn an_unreadable_release_binary_is_not_labeled_with_the_catalog_tag() {
+            let catalog = "0.1.0-beta.47";
+            let missing = PathBuf::from("/nonexistent/tracedecay-release");
+
+            let outcome = finish_versioned_upgrade(catalog, Some(missing), false);
+
+            let UpgradeOutcome::Installed { version, .. } = outcome else {
+                panic!("a published release is an install, got {outcome:?}");
+            };
+            assert_eq!(version, None);
+        }
+    }
+
+    // ── Installation ownership ──────────────────────────────────────────
+
     #[test]
-    fn direct_installs_use_github_release_pipeline() {
+    fn package_managers_own_their_installations_and_direct_installs_use_github() {
+        assert_eq!(
+            upgrade_source_for(&InstallMethod::Brew),
+            UpgradeSource::PackageManager(PackageManager::Homebrew)
+        );
         assert_eq!(
             upgrade_source_for(&InstallMethod::Scoop),
+            UpgradeSource::PackageManager(PackageManager::Scoop)
+        );
+        assert_eq!(
+            upgrade_source_for(&InstallMethod::Cargo),
             UpgradeSource::GitHubRelease
         );
         assert_eq!(
@@ -1180,11 +1593,199 @@ mod tests {
     }
 
     #[test]
-    fn homebrew_installs_keep_the_package_manager_pipeline() {
+    fn managed_upgrades_are_the_managers_own_commands() {
         assert_eq!(
-            upgrade_source_for(&InstallMethod::Brew),
-            UpgradeSource::Homebrew
+            PackageManager::Homebrew.refresh_command().to_string(),
+            "brew update --quiet"
         );
+        assert_eq!(
+            PackageManager::Homebrew.upgrade_command(false).to_string(),
+            "brew upgrade tracedecay"
+        );
+        assert_eq!(
+            PackageManager::Homebrew.upgrade_command(true).to_string(),
+            "brew upgrade tracedecay",
+            "Homebrew ships one formula; the channel does not change the command"
+        );
+        let scoop = PackageManager::scoop_program();
+        assert_eq!(
+            PackageManager::Scoop.upgrade_command(false).to_string(),
+            format!("{scoop} update tracedecay")
+        );
+        assert_eq!(
+            PackageManager::Scoop.upgrade_command(true).to_string(),
+            format!("{scoop} update tracedecay-beta")
+        );
+        assert_eq!(
+            PackageManager::Scoop.prefix_command(true).to_string(),
+            format!("{scoop} prefix tracedecay-beta")
+        );
+    }
+
+    #[test]
+    fn a_no_op_managed_upgrade_is_the_same_build_and_anything_else_is_an_install() {
+        let running = "0.1.0-beta.37+0123456789abcdef0123456789abcdef01234567";
+
+        // A no-op must map to `AlreadyCurrent` so it never triggers the
+        // post-upgrade refresh chain (daemon restart included).
+        assert!(delegated_upgrade_was_noop(running, Some(running)));
+        // A different build of the same release is a different binary.
+        assert!(!delegated_upgrade_was_noop(
+            running,
+            Some("0.1.0-beta.37+fedcba9876543210fedcba9876543210fedcba98")
+        ));
+        assert!(!delegated_upgrade_was_noop(running, Some("0.1.0-beta.38")));
+        // Undetectable → assume install so the refresh never silently skips.
+        assert!(!delegated_upgrade_was_noop(running, None));
+    }
+
+    #[test]
+    fn package_manager_installs_refuse_channel_switches_before_fetching_anything() {
+        let profile_home = tempfile::tempdir().unwrap();
+        let profile =
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
+        let other_channel = if cloud::is_beta() { "stable" } else { "beta" };
+
+        let homebrew =
+            switch_channel_for(profile, &InstallMethod::Brew, other_channel).unwrap_err();
+        let message = homebrew.to_string();
+        assert!(message.contains("installed by Homebrew"), "{message}");
+        assert!(message.contains("`brew upgrade tracedecay`"), "{message}");
+
+        let scoop = switch_channel_for(profile, &InstallMethod::Scoop, other_channel).unwrap_err();
+        let message = scoop.to_string();
+        assert!(message.contains("installed by Scoop"), "{message}");
+        let (current, target) = if cloud::is_beta() {
+            ("tracedecay-beta", "tracedecay")
+        } else {
+            ("tracedecay", "tracedecay-beta")
+        };
+        assert!(
+            message.contains(&format!("uninstall {current}"))
+                && message.contains(&format!("install {target}")),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    mod delegation {
+        use std::cell::Cell;
+        use std::path::PathBuf;
+
+        use super::super::{ManagerCommand, PackageManager, UpgradeOutcome, run_delegated_upgrade};
+        use tracedecay_runtime_core::test_executable::write_executable_script;
+
+        fn sh(script: &str) -> ManagerCommand {
+            ManagerCommand::new("sh", &["-c", script])
+        }
+
+        /// A stand-in for the binary a manager links: prints `tracedecay
+        /// <version>` like the real `--version`.
+        fn fake_binary(dir: &std::path::Path, version: &str) -> PathBuf {
+            let path = dir.join("tracedecay");
+            write_executable_script(
+                &path,
+                format!("#!/bin/sh\nprintf 'tracedecay %s\\n' '{version}'\n"),
+            )
+            .unwrap();
+            path
+        }
+
+        #[test]
+        fn a_failed_manager_command_is_reported_and_nothing_else_is_touched() {
+            let located = Cell::new(false);
+
+            let error = run_delegated_upgrade(
+                PackageManager::Homebrew,
+                &sh("exit 0"),
+                &sh("exit 3"),
+                || {
+                    located.set(true);
+                    Ok(PathBuf::from("/nonexistent"))
+                },
+            )
+            .unwrap_err();
+
+            let message = error.to_string();
+            assert!(message.contains("`sh -c exit 3` failed"), "{message}");
+            assert!(
+                message.contains("no changes to the Homebrew-owned"),
+                "{message}"
+            );
+            assert!(
+                !located.get(),
+                "a failed manager leaves the outcome unclassified"
+            );
+        }
+
+        #[test]
+        fn a_manager_that_left_the_running_build_in_place_is_a_noop() {
+            let dir = tempfile::tempdir().unwrap();
+            let binary = fake_binary(dir.path(), crate::product_runtime::PRODUCT_BUILD_VERSION);
+
+            let outcome = run_delegated_upgrade(
+                PackageManager::Homebrew,
+                &sh("exit 1"),
+                &sh("exit 0"),
+                || Ok(binary.clone()),
+            )
+            .unwrap();
+
+            assert!(
+                matches!(outcome, UpgradeOutcome::AlreadyCurrent),
+                "{outcome:?}"
+            );
+        }
+
+        #[test]
+        fn a_manager_that_linked_a_different_build_installed_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let binary = fake_binary(dir.path(), "0.0.1+0123456789abcdef0123456789abcdef01234567");
+
+            let outcome =
+                run_delegated_upgrade(PackageManager::Scoop, &sh("exit 0"), &sh("exit 0"), || {
+                    Ok(binary.clone())
+                })
+                .unwrap();
+
+            let UpgradeOutcome::Installed {
+                binary: installed,
+                version,
+                codesign_failed,
+            } = outcome
+            else {
+                panic!("expected an install, got {outcome:?}");
+            };
+            assert!(!codesign_failed);
+            assert_eq!(installed, Some(binary));
+            assert_eq!(
+                version.as_deref(),
+                Some("0.0.1+0123456789abcdef0123456789abcdef01234567")
+            );
+        }
+
+        #[test]
+        fn an_unlocatable_managed_binary_counts_as_an_install_with_unknown_version() {
+            let outcome = run_delegated_upgrade(
+                PackageManager::Homebrew,
+                &sh("exit 0"),
+                &sh("exit 0"),
+                || Err("`brew --prefix tracedecay` exited with 1".to_owned()),
+            )
+            .unwrap();
+
+            assert!(
+                matches!(
+                    outcome,
+                    UpgradeOutcome::Installed {
+                        binary: None,
+                        version: None,
+                        codesign_failed: false,
+                    }
+                ),
+                "{outcome:?}"
+            );
+        }
     }
 
     #[test]
@@ -1212,14 +1813,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_upgrade_marks_equal_version_as_already_current() {
-        assert_eq!(
-            classify_upgrade("4.0.3", "4.0.3"),
-            UpgradeStatus::AlreadyCurrent
-        );
-    }
-
-    #[test]
     fn classify_upgrade_marks_newer_version_as_upgrade_available() {
         assert_eq!(
             classify_upgrade("4.0.2", "4.0.3"),
@@ -1228,398 +1821,446 @@ mod tests {
     }
 
     #[test]
-    fn github_latest_unavailable_error_mentions_assets_not_connectivity() {
-        let err = github_latest_unavailable_error(false);
-        let TraceDecayError::Config { message } = err else {
-            panic!("expected config error");
-        };
-
-        assert!(message.contains("no installable GitHub release asset"));
-        assert!(message.contains("current platform"));
-        assert!(!message.contains("could not reach GitHub"));
-    }
-
-    #[test]
     fn switch_channel_same_channel_is_a_successful_noop() {
+        let profile_home = tempfile::tempdir().unwrap();
+        let profile =
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
         let current = env!("CARGO_PKG_VERSION").to_string();
         let current_channel = if cloud::is_beta() { "beta" } else { "stable" };
 
-        let result = switch_channel(current_channel);
+        let result = switch_channel(profile, current_channel);
 
         assert_eq!(result.unwrap(), current);
     }
 
-    // ── Regression tests for symlink upgrade bug ────────────────────────
-    //
-    // The self-replace crate resolves symlinks via `fs::read_link`, which
-    // returns the raw target (often relative for Homebrew). Subsequent
-    // operations resolve that relative path from CWD instead of the
-    // symlink's parent, causing ENOENT.
-    //
-    // Canonicalize the exe path before passing it to self_update. These
-    // tests cover every symlink layout we've seen in the wild.
+    /// The installer's idea of a complete release must be the packaging
+    /// step's: `.github/release-targets.json` declares no runtime companions
+    /// for this platform, so the executable is the whole release.
+    #[test]
+    fn required_members_match_the_release_target_manifest() {
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read("../../.github/release-targets.json").unwrap())
+                .unwrap();
+        let target = manifest["include"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["name"] == current_platform());
+
+        assert_eq!(
+            target.and_then(|target| target.get("runtime")),
+            None,
+            "release targets must not declare runtime companions"
+        );
+        assert_eq!(required_members(), vec![EXECUTABLE_MEMBER]);
+    }
 
     #[cfg(unix)]
-    mod symlink_upgrade_regression {
+    mod release_bundle {
         use std::fs;
-        use std::os::unix::fs::symlink;
-        use std::path::PathBuf;
+        use std::io::Cursor;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
 
-        /// Homebrew-style Cellar layout: `(cellar_binary, symlink, tmp_guard)`.
-        fn homebrew_layout() -> (PathBuf, PathBuf, tempfile::TempDir) {
-            let tmp = tempfile::tempdir().unwrap();
-            // Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay
-            let cellar_bin_dir = tmp.path().join("Cellar/tracedecay/4.1.1-beta.1/bin");
-            fs::create_dir_all(&cellar_bin_dir).unwrap();
-            let real_binary = cellar_bin_dir.join("tracedecay");
-            fs::write(&real_binary, b"fake-binary").unwrap();
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use sha2::{Digest, Sha256};
+        use tar::{Builder, EntryType, Header};
 
-            // bin/tracedecay -> ../Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay
-            let bin_dir = tmp.path().join("bin");
-            fs::create_dir_all(&bin_dir).unwrap();
-            let link_path = bin_dir.join("tracedecay");
-            symlink(
-                "../Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay",
-                &link_path,
-            )
-            .unwrap();
+        use super::super::test_server::{FakeGitHub, attestations_path};
+        use super::super::{
+            EXECUTABLE_MEMBER, RELEASE_MEMBER_MODE, ReleaseDownload, ReleaseMember,
+            ReleaseProvenance, StagedRelease, extract_targz, intended_member, publish_member,
+            publish_release_at, stage_release_in,
+        };
 
-            (real_binary, link_path, tmp)
+        /// The release contract every platform shares: the executable alone.
+        fn members() -> Vec<ReleaseMember> {
+            vec![EXECUTABLE_MEMBER]
+        }
+
+        struct Entry {
+            path: &'static str,
+            contents: &'static [u8],
+            kind: EntryType,
+        }
+
+        fn file(path: &'static str, contents: &'static [u8]) -> Entry {
+            Entry {
+                path,
+                contents,
+                kind: EntryType::Regular,
+            }
+        }
+
+        fn targz(entries: &[Entry]) -> Vec<u8> {
+            let mut builder = Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+            for entry in entries {
+                let mut header = Header::new_ustar();
+                header.set_entry_type(entry.kind);
+                header.set_mode(0o600);
+                header.set_size(entry.contents.len() as u64);
+                if entry.kind == EntryType::Symlink {
+                    header.set_link_name("tracedecay").unwrap();
+                }
+                builder
+                    .append_data(&mut header, entry.path, entry.contents)
+                    .unwrap();
+            }
+            builder.into_inner().unwrap().finish().unwrap()
+        }
+
+        fn complete_release() -> Vec<u8> {
+            targz(&[file("tracedecay", b"new-executable")])
+        }
+
+        fn stage(archive: &[u8], members: &[ReleaseMember]) -> super::super::Result<StagedRelease> {
+            let scratch = tempfile::tempdir().unwrap();
+            extract_targz(Cursor::new(archive), scratch.path(), members)?;
+            Ok(StagedRelease { scratch })
+        }
+
+        fn mode_of(path: &std::path::Path) -> u32 {
+            fs::metadata(path).unwrap().permissions().mode() & 0o777
         }
 
         #[test]
-        fn read_link_returns_relative_path_for_homebrew_symlink() {
-            let (_real, link, _tmp) = homebrew_layout();
-            let target = fs::read_link(&link).unwrap();
+        fn extraction_stages_the_executable_with_its_publication_mode() {
+            let staged = stage(&complete_release(), &members()).unwrap();
+
+            assert_eq!(fs::read(staged.executable()).unwrap(), b"new-executable");
+            assert_eq!(mode_of(&staged.executable()), RELEASE_MEMBER_MODE);
+        }
+
+        #[test]
+        fn a_release_missing_its_executable_is_rejected() {
+            let no_executable = targz(&[file("README", b"unrequested")]);
+
+            let error = stage(&no_executable, &members()).unwrap_err();
+
+            let message = error.to_string();
             assert!(
-                target.is_relative(),
-                "Homebrew symlink target should be relative, got: {target:?}"
+                message.contains("missing required member(s): tracedecay"),
+                "{message}"
+            );
+        }
+
+        #[test]
+        fn duplicate_executable_entries_are_ambiguous_not_a_choice() {
+            let duplicated = targz(&[
+                file("tracedecay", b"first"),
+                file("README", b"unrequested"),
+                file("tracedecay", b"second"),
+            ]);
+
+            let error = stage(&duplicated, &members()).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("duplicate entries for 'tracedecay'"),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn a_required_member_that_is_not_a_regular_file_is_rejected() {
+            let symlinked_executable = targz(&[Entry {
+                path: "tracedecay",
+                contents: b"",
+                kind: EntryType::Symlink,
+            }]);
+
+            let error = stage(&symlinked_executable, &members()).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("'tracedecay' is not a regular file"),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn only_flat_entries_can_name_a_required_member() {
+            use std::path::Path;
+
+            let members = members();
+            assert_eq!(
+                intended_member(Path::new("tracedecay"), &members),
+                Some(EXECUTABLE_MEMBER)
             );
             assert_eq!(
-                target,
-                PathBuf::from("../Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay")
+                intended_member(Path::new("./tracedecay"), &members),
+                Some(EXECUTABLE_MEMBER)
             );
+            assert_eq!(intended_member(Path::new("bin/tracedecay"), &members), None);
+            assert_eq!(intended_member(Path::new("../tracedecay"), &members), None);
+            assert_eq!(intended_member(Path::new("/tracedecay"), &members), None);
+            assert_eq!(intended_member(Path::new("README"), &members), None);
         }
 
         #[test]
-        fn relative_read_link_fails_from_wrong_cwd() {
-            // read_link returns a relative path, and metadata() resolves it
-            // from CWD rather than the symlink's parent.
-            let (_real, link, _tmp) = homebrew_layout();
-            let target = fs::read_link(&link).unwrap();
+        fn nested_and_unknown_entries_are_never_unpacked() {
+            let scratch = tempfile::tempdir().unwrap();
+            let archive = targz(&[
+                file("tracedecay", b"new-executable"),
+                file("bin/tracedecay", b"nested-decoy"),
+                file("README", b"unrequested"),
+            ]);
 
-            // From a different directory (e.g. the user's home), the relative
-            // path doesn't resolve to anything valid.
-            let other_dir = tempfile::tempdir().unwrap();
-            let wrong_path = other_dir.path().join(&target);
-            assert!(
-                wrong_path.metadata().is_err(),
-                "relative symlink target should NOT resolve from an unrelated directory"
-            );
-        }
+            extract_targz(Cursor::new(&archive[..]), scratch.path(), &members()).unwrap();
 
-        #[test]
-        fn canonicalize_resolves_relative_symlink_to_absolute() {
-            let (real, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize().unwrap();
-            let real_canonical = real.canonicalize().unwrap();
-            assert_eq!(
-                canonical, real_canonical,
-                "canonicalize should resolve symlink to the real Cellar path"
-            );
-            assert!(canonical.is_absolute());
-        }
-
-        #[test]
-        fn canonical_path_differs_from_symlink_path() {
-            // After canonicalization the path differs from the symlink path,
-            // so self_update chooses Move instead of self_replace.
-            let (_real, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize().unwrap();
-            assert_ne!(
-                canonical, link,
-                "canonical path and symlink path must differ so self_update uses Move"
-            );
-        }
-
-        #[test]
-        fn canonical_path_parent_exists() {
-            // Move::to_dest needs the parent directory to exist for rename().
-            let (_real, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize().unwrap();
-            assert!(
-                canonical.parent().unwrap().is_dir(),
-                "parent of canonical path must be a real directory"
-            );
-        }
-
-        #[test]
-        fn canonicalize_is_identity_for_non_symlink() {
-            // For direct installs (cargo install, manual copy), canonicalize
-            // returns the same path, so self_replace is still used — no
-            // behavior change for non-symlink installs.
-            let tmp = tempfile::tempdir().unwrap();
-            let binary = tmp.path().join("tracedecay");
-            fs::write(&binary, b"fake-binary").unwrap();
-
-            let canonical = binary.canonicalize().unwrap();
-            let original_canonical = binary.canonicalize().unwrap();
-            assert_eq!(canonical, original_canonical);
-        }
-
-        #[test]
-        fn canonicalize_resolves_absolute_symlink() {
-            // Some package managers use absolute symlinks.
-            let tmp = tempfile::tempdir().unwrap();
-            let real_dir = tmp.path().join("lib");
-            fs::create_dir_all(&real_dir).unwrap();
-            let real_binary = real_dir.join("tracedecay");
-            fs::write(&real_binary, b"fake-binary").unwrap();
-
-            let bin_dir = tmp.path().join("bin");
-            fs::create_dir_all(&bin_dir).unwrap();
-            let link = bin_dir.join("tracedecay");
-            symlink(&real_binary, &link).unwrap();
-
-            let canonical = link.canonicalize().unwrap();
-            assert_eq!(canonical, real_binary.canonicalize().unwrap());
-            assert_ne!(canonical, link);
-        }
-
-        #[test]
-        fn canonicalize_resolves_chained_symlinks() {
-            // A -> B -> C: canonicalize must reach C.
-            let tmp = tempfile::tempdir().unwrap();
-            let real = tmp.path().join("real_binary");
-            fs::write(&real, b"fake-binary").unwrap();
-
-            let link_b = tmp.path().join("link_b");
-            symlink(&real, &link_b).unwrap();
-
-            let link_a = tmp.path().join("link_a");
-            symlink(&link_b, &link_a).unwrap();
-
-            let canonical = link_a.canonicalize().unwrap();
-            assert_eq!(canonical, real.canonicalize().unwrap());
-        }
-
-        #[test]
-        fn canonicalize_resolves_symlink_with_dotdot_in_real_path() {
-            // Real path contains ".." components — canonicalize normalizes them.
-            let tmp = tempfile::tempdir().unwrap();
-            let deep = tmp.path().join("a/b/c");
-            fs::create_dir_all(&deep).unwrap();
-            let real = deep.join("tracedecay");
-            fs::write(&real, b"fake-binary").unwrap();
-
-            // Construct a path with ".." that still reaches the same file
-            let dotdot_path = tmp.path().join("a/b/c/../c/tracedecay");
-            let canonical = dotdot_path.canonicalize().unwrap();
-            assert_eq!(canonical, real.canonicalize().unwrap());
-            assert!(
-                !canonical.to_string_lossy().contains(".."),
-                "canonical path should have no '..' components"
-            );
-        }
-
-        #[test]
-        fn rename_works_for_canonical_cellar_path() {
-            // Simulate what Move::to_dest does: rename a new binary over the
-            // canonical (Cellar) path. The symlink continues to work.
-            let (real, link, _tmp) = homebrew_layout();
-
-            // "New binary" in a temp location (same filesystem)
-            let new_binary = real.parent().unwrap().join(".tracedecay.__temp__");
-            fs::write(&new_binary, b"upgraded-binary").unwrap();
-
-            // Rename new binary over the real path (what Move does)
-            let canonical = link.canonicalize().unwrap();
-            fs::rename(&new_binary, &canonical).unwrap();
-
-            // Verify: reading through the symlink yields the new content
-            let content = fs::read(&link).unwrap();
-            assert_eq!(content, b"upgraded-binary");
-
-            // Verify: the canonical path also has new content
-            let content = fs::read(&canonical).unwrap();
-            assert_eq!(content, b"upgraded-binary");
-        }
-
-        #[test]
-        fn symlink_survives_rename_replacement() {
-            // After the upgrade replaces the Cellar binary, the Homebrew
-            // symlink must still point to a valid file.
-            let (_real, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize().unwrap();
-
-            // Replace the binary at the canonical path
-            fs::write(&canonical, b"new-version").unwrap();
-
-            // Symlink still works
-            assert!(
-                link.exists(),
-                "symlink must still resolve after replacement"
-            );
-            assert!(
-                fs::symlink_metadata(&link)
-                    .unwrap()
-                    .file_type()
-                    .is_symlink(),
-                "must still be a symlink"
-            );
-            assert_eq!(fs::read(&link).unwrap(), b"new-version");
-        }
-
-        #[test]
-        fn canonicalize_fails_for_dangling_symlink() {
-            // If the Cellar dir was removed (brew cleanup), canonicalize
-            // should fail and we gracefully fall back to the default.
-            let tmp = tempfile::tempdir().unwrap();
-            let bin_dir = tmp.path().join("bin");
-            fs::create_dir_all(&bin_dir).unwrap();
-            let link = bin_dir.join("tracedecay");
-            symlink("../Cellar/tracedecay/old/bin/tracedecay", &link).unwrap();
-            // Target doesn't exist — dangling symlink
-            assert!(
-                link.canonicalize().is_err(),
-                "canonicalize should fail for dangling symlinks"
-            );
-        }
-
-        #[test]
-        fn our_fix_pattern_handles_all_cases() {
-            // Simulate the exact pattern used in run_upgrade/switch_channel:
-            //   if let Ok(canonical) = path.canonicalize() { ... }
-            // Verify it does the right thing for each scenario.
-
-            // Case 1: relative symlink (Homebrew) — canonical differs
-            let (_, link, _tmp) = homebrew_layout();
-            let canonical = link.canonicalize();
-            assert!(canonical.is_ok());
-            assert_ne!(canonical.unwrap(), link);
-
-            // Case 2: direct file — canonical matches
-            let tmp2 = tempfile::tempdir().unwrap();
-            let direct = tmp2.path().join("tracedecay");
-            fs::write(&direct, b"binary").unwrap();
-            let canonical = direct.canonicalize().unwrap();
-            // After canonicalization of the tmpdir itself, they match
-            assert_eq!(canonical, direct.canonicalize().unwrap());
-
-            // Case 3: dangling symlink — canonical fails, we skip setting
-            // bin_install_path and let self_update use its default
-            let tmp3 = tempfile::tempdir().unwrap();
-            let dangling = tmp3.path().join("tracedecay");
-            symlink("/nonexistent/path/tracedecay", &dangling).unwrap();
-            assert!(dangling.canonicalize().is_err());
-        }
-
-        // ── install_binary tests ───────────────────────────────────────
-
-        #[test]
-        fn install_binary_replaces_target_atomically() {
-            let tmp = tempfile::tempdir().unwrap();
-            let target = tmp.path().join("tracedecay");
-            fs::write(&target, b"old-binary").unwrap();
-
-            let src = tmp.path().join("new-binary");
-            fs::write(&src, b"new-binary-content").unwrap();
-
-            super::super::install_binary(&src, &target).unwrap();
-
-            assert_eq!(fs::read(&target).unwrap(), b"new-binary-content");
-            // Temp file should be cleaned up
-            assert!(
-                !tmp.path()
-                    .join(format!(".tracedecay_upgrade_{}", std::process::id()))
-                    .exists()
-            );
-        }
-
-        #[test]
-        fn install_binary_sets_executable_permission() {
-            use std::os::unix::fs::PermissionsExt;
-
-            let tmp = tempfile::tempdir().unwrap();
-            let target = tmp.path().join("tracedecay");
-            fs::write(&target, b"old").unwrap();
-
-            let src = tmp.path().join("new");
-            fs::write(&src, b"new").unwrap();
-
-            super::super::install_binary(&src, &target).unwrap();
-
-            let mode = fs::metadata(&target).unwrap().permissions().mode();
-            assert_eq!(mode & 0o755, 0o755, "binary should be executable");
-        }
-
-        // ── Brew upgrade flow ──────────────────────────────────────────
-
-        #[test]
-        fn brew_upgrade_renames_version_dir_and_updates_symlink() {
-            let (_real, link, _tmp) = homebrew_layout();
-
-            // Write an "upgraded" binary via the Cellar path
-            let canonical = link.canonicalize().unwrap();
-            fs::write(&canonical, b"v5.0.0-binary").unwrap();
-
-            // Simulate the Cellar directory rename (4.1.1-beta.1 → 5.0.0)
-            let bin_dir = canonical.parent().unwrap();
-            let version_dir = bin_dir.parent().unwrap();
-            let formula_dir = version_dir.parent().unwrap();
-            let cellar_dir = formula_dir.parent().unwrap();
-            let _prefix = cellar_dir.parent().unwrap();
-
-            let new_version_dir = formula_dir.join("5.0.0");
-            fs::rename(version_dir, &new_version_dir).unwrap();
-
-            // Update the symlink
-            super::super::retarget_homebrew_symlink(&link, "4.1.1-beta.1", "5.0.0").unwrap();
-
-            // Verify: symlink resolves and has the new content
-            assert!(link.exists(), "symlink must resolve after dir rename");
-            assert_eq!(fs::read(&link).unwrap(), b"v5.0.0-binary");
-
-            // Verify: new version directory exists, old one doesn't
-            assert!(new_version_dir.exists());
-            assert!(!version_dir.exists());
-
-            // Verify: brew would see "5.0.0" as the installed version
-            // (brew reads directory names under Cellar/<formula>/)
-            let versions: Vec<_> = fs::read_dir(formula_dir)
+            let staged: Vec<String> = fs::read_dir(scratch.path())
                 .unwrap()
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().to_string())
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
-            assert_eq!(versions, vec!["5.0.0"]);
+            assert_eq!(staged, ["tracedecay"]);
+            assert_eq!(
+                fs::read(scratch.path().join("tracedecay")).unwrap(),
+                b"new-executable"
+            );
         }
 
         #[test]
-        fn brew_upgrade_updates_install_receipt() {
-            let tmp = tempfile::tempdir().unwrap();
-            let cellar = tmp.path().join("Cellar/tracedecay/4.0.3");
-            fs::create_dir_all(cellar.join("bin")).unwrap();
-            fs::write(cellar.join("bin/tracedecay"), b"binary").unwrap();
+        fn publishing_replaces_the_executable_and_leaves_no_staging_sibling() {
+            let staged = stage(&complete_release(), &members()).unwrap();
+            let install = tempfile::tempdir().unwrap();
+            let executable = install.path().join("tracedecay");
+            fs::write(&executable, b"old-executable").unwrap();
 
-            let receipt_content = r#"{
-  "source": {
-    "versions": { "stable": "4.0.3" }
-  },
-  "tabfile": "/opt/homebrew/Cellar/tracedecay/4.0.3/INSTALL_RECEIPT.json"
-}"#;
-            fs::write(cellar.join("INSTALL_RECEIPT.json"), receipt_content).unwrap();
+            publish_release_at(&staged, &executable).unwrap();
 
-            // Simulate rename + receipt update
-            let new_dir = tmp.path().join("Cellar/tracedecay/4.0.4");
-            fs::rename(&cellar, &new_dir).unwrap();
+            assert_eq!(fs::read(&executable).unwrap(), b"new-executable");
+            assert_eq!(mode_of(&executable), RELEASE_MEMBER_MODE);
+            let published: Vec<String> = fs::read_dir(install.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                published,
+                ["tracedecay"],
+                "no staging sibling may outlive publication"
+            );
+        }
 
-            let receipt = new_dir.join("INSTALL_RECEIPT.json");
-            super::super::rewrite_homebrew_install_receipt(&receipt, "4.0.3", "4.0.4").unwrap();
-            let updated = fs::read_to_string(&receipt).unwrap();
+        #[test]
+        fn a_failed_member_publication_leaves_the_target_untouched() {
+            let staged = stage(&complete_release(), &members()).unwrap();
+            let install = tempfile::tempdir().unwrap();
+            // The target name is occupied by a directory, so the rename over it
+            // must fail after the sibling was fully staged.
+            let occupied = install.path().join("tracedecay");
+            fs::create_dir(&occupied).unwrap();
+            fs::write(occupied.join("marker"), b"keep").unwrap();
 
-            assert!(updated.contains("\"stable\": \"4.0.4\""));
-            assert!(updated.contains("/4.0.4/INSTALL_RECEIPT.json"));
-            assert!(!updated.contains("4.0.3"));
+            let error =
+                publish_member(&staged.executable(), &occupied, RELEASE_MEMBER_MODE).unwrap_err();
+
+            assert!(
+                error.to_string().contains("cannot replace release member"),
+                "{error}"
+            );
+            assert_eq!(fs::read(occupied.join("marker")).unwrap(), b"keep");
+            let leftovers: Vec<_> = fs::read_dir(install.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .filter(|name| name != "tracedecay")
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "staging sibling leaked: {leftovers:?}"
+            );
+        }
+
+        // ── Streamed download into owned staging ───────────────────────
+
+        const ASSET: &str = "tracedecay-v9.9.9-x86_64-linux.tar.gz";
+
+        /// Serves the archive and its manifest, plus any extra `(path, body)`.
+        fn serve(
+            archive: &[u8],
+            manifest: &[u8],
+            extra: Vec<(String, Vec<u8>)>,
+        ) -> (String, Arc<Mutex<Vec<String>>>) {
+            let server = FakeGitHub::bind();
+            let base = server.base.clone();
+            let mut responses = vec![
+                ("/SHA256SUMS".to_owned(), manifest.to_vec()),
+                ("/archive".to_owned(), archive.to_vec()),
+            ];
+            responses.extend(extra);
+            (base, server.serve(responses))
+        }
+
+        fn manifest_for(archive: &[u8]) -> Vec<u8> {
+            format!("{}  {ASSET}\n", hex::encode(Sha256::digest(archive))).into_bytes()
+        }
+
+        fn archive_attestations_path(archive: &[u8]) -> String {
+            attestations_path(&hex::encode(Sha256::digest(archive)))
+        }
+
+        fn download(base: &str, asset_size: u64, checksums_size: u64) -> ReleaseDownload {
+            ReleaseDownload {
+                asset_name: ASSET.to_owned(),
+                asset_url: format!("{base}/archive"),
+                asset_size,
+                checksums_url: format!("{base}/SHA256SUMS"),
+                checksums_size,
+                provenance: ReleaseProvenance::for_release(base, None, "v9.9.9", false),
+            }
+        }
+
+        /// A scratch directory inside a test-owned parent, so the test can
+        /// prove the attempt removed its own staging afterwards.
+        fn scratch_in(parent: &std::path::Path) -> tempfile::TempDir {
+            tempfile::Builder::new()
+                .prefix("tracedecay-upgrade-")
+                .tempdir_in(parent)
+                .unwrap()
+        }
+
+        fn is_empty_dir(path: &std::path::Path) -> bool {
+            fs::read_dir(path).unwrap().next().is_none()
+        }
+
+        #[test]
+        fn a_matching_sha256sums_without_an_attestation_is_refused_before_extraction() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let (base, requests) = serve(&archive, &manifest, Vec::new());
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64, manifest.len() as u64);
+
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
+
+            let digest = hex::encode(Sha256::digest(&archive));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "tracedecay upgrade refused the request (release_attestation_missing): \
+                     GitHub has no build-provenance attestation for sha256:{digest}; \
+                     refusing an unattested release archive"
+                )
+            );
+            assert_eq!(
+                *requests.lock().unwrap(),
+                [
+                    "/SHA256SUMS".to_owned(),
+                    "/archive".to_owned(),
+                    archive_attestations_path(&archive)
+                ]
+            );
+            assert!(
+                is_empty_dir(parent.path()),
+                "a refused attempt stages nothing and removes its scratch"
+            );
+        }
+
+        #[test]
+        fn a_swapped_archive_with_a_matching_sha256sums_is_refused_before_extraction() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let released_bundle: serde_json::Value = serde_json::from_str(include_str!(
+                "../tests/fixtures/release-attestations/tracedecay-beta-v1.0.0-beta.59-x86_64-linux.sigstore.json"
+            ))
+            .unwrap();
+            let listing = serde_json::json!({ "attestations": [{ "bundle": released_bundle }] });
+            let (base, _) = serve(
+                &archive,
+                &manifest,
+                vec![(
+                    archive_attestations_path(&archive),
+                    listing.to_string().into_bytes(),
+                )],
+            );
+            let parent = tempfile::tempdir().unwrap();
+            let mut download = download(&base, archive.len() as u64, manifest.len() as u64);
+            download.provenance =
+                ReleaseProvenance::for_release(&base, None, "v1.0.0-beta.59", true);
+
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
+
+            let digest = hex::encode(Sha256::digest(&archive));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "tracedecay upgrade refused the request (release_attestation_rejected): \
+                     no build-provenance attestation for sha256:{digest} proves a release workflow build: attestation 1: failed verification \
+                     (artifact mismatch: artifact hash does not match any subject in \
+                     attestation)"
+                )
+            );
+            assert!(is_empty_dir(parent.path()));
+        }
+
+        #[test]
+        fn an_archive_running_past_its_advertised_size_is_refused() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let (base, _) = serve(&archive, &manifest, Vec::new());
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64 - 1, manifest.len() as u64);
+
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
+
+            assert!(error.to_string().contains("exceeds the"), "{error}");
+            assert!(
+                is_empty_dir(parent.path()),
+                "failed attempts release their scratch"
+            );
+        }
+
+        #[test]
+        fn a_truncated_archive_is_refused() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let (base, _) = serve(&archive, &manifest, Vec::new());
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64 + 1, manifest.len() as u64);
+
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
+
+            assert!(error.to_string().contains("ended after"), "{error}");
+            assert!(is_empty_dir(parent.path()));
+        }
+
+        #[test]
+        fn a_checksum_mismatch_refuses_before_extraction() {
+            let archive = complete_release();
+            let manifest = manifest_for(b"some other release");
+            let (base, _) = serve(&archive, &manifest, Vec::new());
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64, manifest.len() as u64);
+
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
+
+            assert!(error.to_string().contains("checksum mismatch"), "{error}");
+            assert!(is_empty_dir(parent.path()));
+        }
+
+        #[test]
+        fn an_oversized_checksum_manifest_is_refused() {
+            let archive = complete_release();
+            let manifest = manifest_for(&archive);
+            let (base, _) = serve(&archive, &manifest, Vec::new());
+            let parent = tempfile::tempdir().unwrap();
+            let download = download(&base, archive.len() as u64, manifest.len() as u64 - 1);
+
+            let error =
+                stage_release_in(scratch_in(parent.path()), &download, &members()).unwrap_err();
+
+            assert!(
+                error.to_string().contains("checksum manifest exceeds"),
+                "{error}"
+            );
+            assert!(is_empty_dir(parent.path()));
         }
     }
 }

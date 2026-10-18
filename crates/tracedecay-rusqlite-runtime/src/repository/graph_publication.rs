@@ -4,6 +4,8 @@
 //! Production access is exclusively through [`GraphPublicationExactSqlStorage`]
 //! over an already-authorized exact-SQL attachment.
 
+use std::collections::BTreeMap;
+
 use tracedecay_store::{
     GraphCanonicalReplaySourceDigestV1, GraphDependencyGenerationClosureDigestV1,
     GraphDependencyGenerationIdentityV1, GraphGenerationIdV1, GraphNamespaceV1,
@@ -18,29 +20,65 @@ use tracedecay_store::{
 #[path = "graph_publication/exact.rs"]
 mod exact;
 pub use exact::GraphPublicationExactSqlStorage;
-pub(crate) use exact::append_replay_in_transaction;
 
 pub const GRAPH_PUBLICATION_SCHEMA_V1: &str = include_str!("graph_publication_schema.sql");
 
-pub(crate) fn authoritative_verified_head_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
-    projection: &GraphProjectionIdentityV1,
-) -> GraphPublicationStoreResultV1<Option<GraphVerifiedHeadV1>> {
-    exact::authoritative_verified_head_in_transaction(transaction, projection)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphPublicationSchemaObjectV1 {
+    pub object_type: String,
+    pub table: String,
+    pub sql: String,
 }
 
-pub(crate) fn active_replay_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
-    key: &GraphPublicationKeyV1,
-) -> GraphPublicationStoreResultV1<Option<GraphPublicationReplayRecordV1>> {
-    exact::active_replay_in_transaction(transaction, key)
-}
-
-pub(crate) fn retire_replay_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
-    request: &GraphPublicationReplayRetirementV1,
-) -> GraphPublicationStoreResultV1<tracedecay_store::GraphReplayRetirementOutcomeV1> {
-    exact::retire_replay_in_transaction(transaction, request)
+pub fn canonical_graph_publication_schema_inventory()
+-> Result<BTreeMap<String, GraphPublicationSchemaObjectV1>, String> {
+    let connection = rusqlite::Connection::open_in_memory()
+        .map_err(|error| format!("failed to open canonical graph publication schema: {error}"))?;
+    connection
+        .execute_batch(GRAPH_PUBLICATION_SCHEMA_V1)
+        .map_err(|error| {
+            format!("failed to install canonical graph publication schema: {error}")
+        })?;
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+               AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .map_err(|error| format!("failed to prepare canonical graph schema inventory: {error}"))?;
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| format!("failed to query canonical graph schema inventory: {error}"))?;
+    let mut inventory = BTreeMap::new();
+    for row in rows {
+        let (object_type, name, table, sql) =
+            row.map_err(|error| format!("failed to read canonical graph schema object: {error}"))?;
+        if inventory
+            .insert(
+                name.clone(),
+                GraphPublicationSchemaObjectV1 {
+                    object_type,
+                    table,
+                    sql,
+                },
+            )
+            .is_some()
+        {
+            return Err(format!(
+                "canonical graph publication schema repeats object '{name}'"
+            ));
+        }
+    }
+    Ok(inventory)
 }
 
 #[derive(Clone)]
@@ -54,7 +92,7 @@ impl EncodedProjection {
     fn new(identity: &GraphProjectionIdentityV1) -> GraphPublicationStoreResultV1<Self> {
         Ok(Self {
             shard_id: serde_json::to_string(&identity.shard_id)
-                .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?,
+                .map_err(|error| infrastructure("encode graph projection shard", error))?,
             namespace: identity.namespace.as_str().to_owned(),
             projection: identity.projection.as_str().to_owned(),
         })
@@ -299,7 +337,8 @@ fn encode_optional_head(
     head: Option<&GraphVerifiedHeadV1>,
 ) -> GraphPublicationStoreResultV1<Option<String>> {
     head.map(|head| {
-        serde_json::to_string(head).map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+        serde_json::to_string(head)
+            .map_err(|error| infrastructure("encode graph verified head", error))
     })
     .transpose()
 }
@@ -307,7 +346,8 @@ fn encode_optional_head(
 fn encode_direct_dependency_generations(
     dependencies: &[GraphDependencyGenerationIdentityV1],
 ) -> GraphPublicationStoreResultV1<Vec<u8>> {
-    serde_json::to_vec(dependencies).map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+    serde_json::to_vec(dependencies)
+        .map_err(|error| infrastructure("encode graph replay dependencies", error))
 }
 
 fn sequence_from_i64(value: i64) -> GraphPublicationStoreResultV1<GraphPublicationSequenceV1> {
@@ -339,10 +379,11 @@ fn begin_verified_commit(
     if context.try_begin_verified_commit() {
         return Ok(());
     }
-    context.interruption().map_or(
-        Err(GraphPublicationStoreErrorV1::Infrastructure),
-        |reason| Err(GraphPublicationStoreErrorV1::Interrupted(reason)),
-    )
+    context
+        .interruption()
+        .map_or(Err(GraphPublicationStoreErrorV1::CommitRefused), |reason| {
+            Err(GraphPublicationStoreErrorV1::Interrupted(reason))
+        })
 }
 
 fn begin_replay_retirement_commit(
@@ -351,10 +392,11 @@ fn begin_replay_retirement_commit(
     if context.try_begin_replay_retirement_commit() {
         return Ok(());
     }
-    context.interruption().map_or(
-        Err(GraphPublicationStoreErrorV1::Infrastructure),
-        |reason| Err(GraphPublicationStoreErrorV1::Interrupted(reason)),
-    )
+    context
+        .interruption()
+        .map_or(Err(GraphPublicationStoreErrorV1::CommitRefused), |reason| {
+            Err(GraphPublicationStoreErrorV1::Interrupted(reason))
+        })
 }
 
 fn begin_pending_discard_commit(
@@ -363,10 +405,11 @@ fn begin_pending_discard_commit(
     if context.try_begin_pending_discard_commit() {
         return Ok(());
     }
-    context.interruption().map_or(
-        Err(GraphPublicationStoreErrorV1::Infrastructure),
-        |reason| Err(GraphPublicationStoreErrorV1::Interrupted(reason)),
-    )
+    context
+        .interruption()
+        .map_or(Err(GraphPublicationStoreErrorV1::CommitRefused), |reason| {
+            Err(GraphPublicationStoreErrorV1::Interrupted(reason))
+        })
 }
 
 fn begin_retired_cleanup_finalize_commit(
@@ -375,10 +418,15 @@ fn begin_retired_cleanup_finalize_commit(
     if context.try_begin_retired_cleanup_finalize_commit() {
         return Ok(());
     }
-    context.interruption().map_or(
-        Err(GraphPublicationStoreErrorV1::Infrastructure),
-        |reason| Err(GraphPublicationStoreErrorV1::Interrupted(reason)),
-    )
+    context
+        .interruption()
+        .map_or(Err(GraphPublicationStoreErrorV1::CommitRefused), |reason| {
+            Err(GraphPublicationStoreErrorV1::Interrupted(reason))
+        })
+}
+
+fn infrastructure(operation: &str, error: impl std::fmt::Display) -> GraphPublicationStoreErrorV1 {
+    GraphPublicationStoreErrorV1::Infrastructure(format!("{operation}: {error}"))
 }
 
 fn corrupt(error: impl std::fmt::Display) -> GraphPublicationStoreErrorV1 {

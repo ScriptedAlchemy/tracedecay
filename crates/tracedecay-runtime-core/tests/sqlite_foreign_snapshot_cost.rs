@@ -30,9 +30,7 @@ fn written_bytes() -> u64 {
 }
 
 fn file_bytes(path: &Path) -> u64 {
-    fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
+    fs::metadata(path).map_or(0, |metadata| metadata.len())
 }
 
 fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
@@ -42,7 +40,7 @@ fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
 }
 
 /// Capturing a foreign WAL family must cost about one family copy plus one
-/// WAL checkpoint of that copy — never another full rewrite of the main
+/// WAL checkpoint of that copy, never another full rewrite of the main
 /// database. The previous materialization backed the copy up into a second
 /// standalone file, which rewrote every main-database page again; the budget
 /// asserted here is structurally below that behavior on both reflink and

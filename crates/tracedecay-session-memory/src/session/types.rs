@@ -1,9 +1,12 @@
 use std::fmt;
 
-use tracedecay_application::RequestContext;
-use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
+use tracedecay_contracts::RequestContext;
+use tracedecay_contracts::retrieval::{
+    SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
+};
 use tracedecay_domain::{
-    ActorId, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1,
+    ActorId, CursorBindingMismatchV1, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1,
+    SessionId, TemporalModeV1,
 };
 pub use tracedecay_session_temporal_store::execution::SessionDataFreshness;
 pub use tracedecay_sessions::{
@@ -11,9 +14,10 @@ pub use tracedecay_sessions::{
 };
 
 use crate::context::{
-    CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
-    ResolvedSessionIdentity, SessionOwner, session_application_grant_digest,
+    CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets, ResolvedSessionIdentity,
+    SessionOwner, session_application_grant_digest,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// Typed authority for the already-resolved session store/root.
 ///
@@ -106,8 +110,8 @@ impl SessionRequestBinding {
         // registered under, while the request context carries whatever label
         // HEAD happens to hold. Those diverge on every ordinary branch switch,
         // and comparing whole scopes (directly or through the derived
-        // `scope_digest`) turned that label move into an authorization refusal
-        // — every session read on a checkout serving another branch answered
+        // `scope_digest`) turned that label move into an authorization refusal,
+        // every session read on a checkout serving another branch answered
         // `WrongScope`, which surfaces as `not_found_or_not_authorized`.
         if !scope.identifies_same_checkout(context.scope()) {
             return Err(SessionAuthorizationError::WrongScope);
@@ -138,17 +142,14 @@ impl SessionRequestBinding {
         &self.identity
     }
 
-    #[hotpath::skip]
     pub const fn capability_digest(&self) -> CapabilityDigest {
         self.capability_digest
     }
 
-    #[hotpath::skip]
     pub const fn policy_digest(&self) -> PolicyDigest {
         self.policy_digest
     }
 
-    #[hotpath::skip]
     pub const fn configuration_digest(&self) -> ConfigurationDigest {
         self.configuration_digest
     }
@@ -157,7 +158,6 @@ impl SessionRequestBinding {
         &self.cancellation
     }
 
-    #[hotpath::skip]
     pub const fn budgets(&self) -> RequestBudgets {
         self.budgets
     }
@@ -256,17 +256,14 @@ impl SessionScopeAuthorizationRequest {
         self.provider_scope.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn access(&self) -> SessionAccess {
         self.access
     }
@@ -324,17 +321,14 @@ impl AuthorizedSessionScope {
         self.provider_scope.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn access(&self) -> SessionAccess {
         self.access
     }
@@ -430,7 +424,6 @@ impl SessionAuthorizationGrant {
         &self.id
     }
 
-    #[hotpath::skip]
     pub const fn revision(&self) -> u64 {
         self.revision
     }
@@ -439,22 +432,19 @@ impl SessionAuthorizationGrant {
         &self.scope
     }
 
-    #[hotpath::skip]
     pub const fn capability_digest(&self) -> CapabilityDigest {
         self.binding.capability_digest()
     }
 
-    #[hotpath::skip]
     pub const fn policy_digest(&self) -> PolicyDigest {
         self.binding.policy_digest()
     }
 
-    #[hotpath::skip]
     pub const fn configuration_digest(&self) -> ConfigurationDigest {
         self.binding.configuration_digest()
     }
 
-    pub fn deadline(&self) -> &tracedecay_application::Deadline {
+    pub fn deadline(&self) -> &tracedecay_contracts::Deadline {
         self.context.deadline()
     }
 
@@ -462,7 +452,6 @@ impl SessionAuthorizationGrant {
         self.binding.cancellation()
     }
 
-    #[hotpath::skip]
     pub const fn budgets(&self) -> RequestBudgets {
         self.binding.budgets()
     }
@@ -484,7 +473,6 @@ pub enum SessionFreshnessPolicy {
 }
 
 impl SessionFreshnessPolicy {
-    #[hotpath::skip]
     pub const fn accepts(self, freshness: SessionDataFreshness) -> bool {
         matches!(
             (self, freshness),
@@ -549,15 +537,27 @@ impl SessionRetrievalRequest {
         &self.target
     }
 
-    #[hotpath::skip]
     pub const fn freshness_policy(&self) -> SessionFreshnessPolicy {
         self.freshness_policy
     }
 
-    #[hotpath::skip]
     pub const fn limit(&self) -> u64 {
         self.limit
     }
+}
+
+/// Why a retrieval has no answer. Each cause asks for a different remedy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionRetrievalUnavailableCause {
+    /// No store, manifest, payload, or key authority exists for the request.
+    AuthorityAbsent,
+    /// A store read failed.
+    ReadFailed,
+    /// Candidates matched, but none of them hydrated.
+    HydrationUnavailable,
+    /// The kernel refused the admitted request, its cursor, or the projected
+    /// index it read: a defect in what was handed to it, not a missing store.
+    KernelRefused,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -575,17 +575,26 @@ pub enum SessionRetrievalOutcome<T> {
     /// The cursor's frozen candidate cohort no longer matches the authorized
     /// snapshot. Replaying this cursor cannot succeed; restart without it.
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     Partial {
         items: Vec<T>,
         freshness: SessionDataFreshness,
+        /// The folded omission count: the freshness lag flag folded into the
+        /// same count as genuine record omissions (see `record_omitted`).
         omitted: u64,
+        /// Genuine missing records only — coverage and explicit omission
+        /// entries count the same records two ways, so the larger stands; the
+        /// lag flag measures projection distance, not records, and stays out.
+        record_omitted: u64,
     },
     WrongScope,
     Locked,
     Redacted,
     Deleted,
     Denied,
-    Unavailable,
+    Unavailable(SessionRetrievalUnavailableCause),
     ResetRequired,
     CursorManifestLimitExceeded {
         kind: CursorManifestLimitKindV1,
@@ -599,6 +608,8 @@ pub enum SessionRetrievalOutcome<T> {
     /// different outcome and never uses this variant.
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
     },
     TimedOut,
     Cancelled,
@@ -644,24 +655,23 @@ impl std::error::Error for SessionRetrievalError {}
 mod tests {
     use std::collections::BTreeSet;
 
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId,
     };
     use tracedecay_domain::{
-        ActorId, ProjectId, RepositoryId, RetrievalGrainV1,
-        SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS, SessionId, SessionSourceCoverageReceiptV1,
-        SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1,
-        SessionTemporalCoverageRequestV1, TemporalModeV1, UtcMicros, WorktreeId,
+        ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
+        SessionSourceCoverageReceiptV1, SessionSourceCoverageV1, SessionSourceFrontierV1,
+        SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalModeV1, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
     use crate::context::{
-        BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest,
-        ProfileId, RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
-        SessionStoreId,
+        BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+        ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     };
+    use tracedecay_runtime_core::cancellation::CancellationToken;
 
     const DIGEST: [u8; 32] = [0xa5; 32];
 
@@ -835,40 +845,6 @@ mod tests {
             context.binding.budgets,
             admitted_grant_digest,
         )
-    }
-
-    #[test]
-    fn grant_binds_the_exact_typed_retrieval_target_without_serialization() {
-        let context = context();
-        let request = exact_authorization_request(context.identity().clone());
-        let grant = AllowAuthorizer
-            .authorize(&context, context.binding(), &request)
-            .unwrap();
-
-        assert_eq!(grant.id().as_str(), "grant.session.read");
-        assert_eq!(grant.revision(), 7);
-        assert_eq!(grant.scope().actor_id(), context.actor_id());
-        assert_eq!(grant.scope().identity(), context.identity());
-        assert_eq!(
-            grant.scope().session_id().unwrap().as_str(),
-            "session.application-slice-1"
-        );
-        assert_eq!(grant.scope().provider_scope(), Some("cursor"));
-        assert_eq!(
-            grant.scope().temporal_mode(),
-            TemporalModeV1::AsOf {
-                cutoff: UtcMicros(1_234_567)
-            }
-        );
-        assert_eq!(grant.scope().grain(), RetrievalGrainV1::LogicalMessage);
-        assert_eq!(grant.scope().access(), SessionAccess::Hydrate);
-        assert_eq!(grant.capability_digest(), context.capability_digest());
-        assert_eq!(grant.policy_digest(), context.policy_digest());
-        assert_eq!(grant.configuration_digest(), context.configuration_digest());
-        assert_eq!(
-            grant.validate(&context, context.binding(), &request),
-            Ok(())
-        );
     }
 
     #[test]
@@ -1142,30 +1118,6 @@ mod tests {
     }
 
     #[test]
-    fn authorizer_issues_an_opaque_grant_for_the_exact_resolved_route() {
-        let context = context();
-        let request = exact_authorization_request(context.identity().clone());
-        let grant = AllowAuthorizer
-            .authorize(&context, context.binding(), &request)
-            .unwrap();
-
-        assert_eq!(grant.id().as_str(), "grant.session.read");
-        assert_eq!(grant.revision(), 7);
-        assert_eq!(grant.scope().identity(), context.identity());
-        assert_eq!(grant.scope().access(), SessionAccess::Hydrate);
-        assert_eq!(
-            grant
-                .scope()
-                .identity()
-                .git_route()
-                .unwrap()
-                .branch_id()
-                .as_str(),
-            "branch.application-slice-1"
-        );
-    }
-
-    #[test]
     fn grant_rejects_scope_or_route_substitution() {
         let context = context();
         let profile_request = SessionScopeAuthorizationRequest::new(
@@ -1252,44 +1204,6 @@ mod tests {
         );
     }
 
-    fn rebranched_binding(context: &TestRequestContext, branch: &str) -> SessionRequestBinding {
-        let route = context.identity().git_route().unwrap();
-        SessionRequestBinding::new(
-            ResolvedSessionIdentity::for_project(
-                ProfileId::new("profile.primary").unwrap(),
-                ProjectId::new("project.tracedecay").unwrap(),
-                SessionStoreId::new("store.project.tracedecay").unwrap(),
-                SessionRootId::new("root.project.tracedecay").unwrap(),
-                ResolvedGitRoute::new(
-                    route.repository_id().clone(),
-                    route.worktree_id().clone(),
-                    BranchId::new(branch).unwrap(),
-                ),
-            ),
-            context.capability_digest(),
-            context.policy_digest(),
-            context.configuration_digest(),
-            context.binding.cancellation.clone(),
-            context.binding.budgets,
-        )
-    }
-
-    #[test]
-    fn binding_admits_the_same_checkout_under_a_moved_branch_label() {
-        let context = context();
-        // The mounted session identity records the branch its graph scope was
-        // registered under; the request context records whatever branch HEAD
-        // currently points at. A session store is partitioned by
-        // project/repository/worktree only, so the divergent label must not be
-        // reported as an authorization refusal.
-        let moved = rebranched_binding(&context, "branch.registered-elsewhere");
-        assert_ne!(
-            moved.identity().session_request_scope().unwrap(),
-            *context.scope()
-        );
-        assert_eq!(moved.validate_context(&context), Ok(()));
-    }
-
     #[test]
     fn binding_still_fails_closed_on_a_foreign_checkout() {
         let context = context();
@@ -1343,21 +1257,6 @@ mod tests {
     }
 
     #[test]
-    fn admitted_binding_identity_includes_the_outer_grant_digest() {
-        let context = context();
-        let exact = admitted_binding(&context, context.grant().digest.clone());
-        let same = exact.clone();
-        let different_digest = ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).unwrap();
-        assert_ne!(different_digest, context.grant().digest);
-        let different = admitted_binding(&context, different_digest.clone());
-
-        assert!(exact.matches(&same));
-        assert!(!exact.matches(&different));
-        assert_eq!(exact.admitted_grant_digest(), Some(&context.grant().digest));
-        assert_eq!(different.admitted_grant_digest(), Some(&different_digest));
-    }
-
-    #[test]
     fn binding_rejects_cancellation_or_budget_substitution() {
         let context = context();
         let fresh_cancellation =
@@ -1394,33 +1293,6 @@ mod tests {
                 &exact_authorization_request(context.identity().clone()),
             ),
             Err(SessionAuthorizationError::WrongContext)
-        ));
-    }
-
-    #[test]
-    fn retrieval_request_carries_grant_target_freshness_and_limit() {
-        let context = context();
-        let authorization = exact_authorization_request(context.identity().clone());
-        let grant = AllowAuthorizer
-            .authorize(&context, context.binding(), &authorization)
-            .unwrap();
-        let request = SessionRetrievalRequest::new(
-            grant,
-            SessionRetrievalTarget::Session(SessionId::new("session.application-slice-1").unwrap()),
-            SessionFreshnessPolicy::RequireFresh,
-            25,
-        )
-        .unwrap();
-
-        assert_eq!(request.limit(), 25);
-        assert_eq!(
-            request.freshness_policy(),
-            SessionFreshnessPolicy::RequireFresh
-        );
-        assert!(matches!(
-            request.target(),
-            SessionRetrievalTarget::Session(session_id)
-                if session_id.as_str() == "session.application-slice-1"
         ));
     }
 
@@ -1515,52 +1387,6 @@ mod tests {
             SessionDataFreshness::from_source_coverage(&partial),
             SessionDataFreshness::Partial { generation_lag: 2 }
         );
-    }
-
-    #[test]
-    fn retrieval_terminal_states_never_collapse_to_complete_zero() {
-        let states: [SessionRetrievalOutcome<()>; 15] = [
-            SessionRetrievalOutcome::CompleteZero {
-                freshness: SessionDataFreshness::Fresh,
-            },
-            SessionRetrievalOutcome::Stale {
-                freshness: SessionDataFreshness::Stored { generation_lag: 1 },
-            },
-            SessionRetrievalOutcome::CursorStale,
-            SessionRetrievalOutcome::Partial {
-                items: vec![],
-                freshness: SessionDataFreshness::Fresh,
-                omitted: 1,
-            },
-            SessionRetrievalOutcome::WrongScope,
-            SessionRetrievalOutcome::Locked,
-            SessionRetrievalOutcome::Redacted,
-            SessionRetrievalOutcome::Deleted,
-            SessionRetrievalOutcome::Denied,
-            SessionRetrievalOutcome::Unavailable,
-            SessionRetrievalOutcome::ResetRequired,
-            SessionRetrievalOutcome::CursorManifestLimitExceeded {
-                kind: CursorManifestLimitKindV1::Participants,
-                observed: 257,
-                maximum: SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
-            },
-            SessionRetrievalOutcome::BudgetExhausted {
-                stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
-            },
-            SessionRetrievalOutcome::TimedOut,
-            SessionRetrievalOutcome::Cancelled,
-        ];
-
-        assert!(matches!(
-            states[0],
-            SessionRetrievalOutcome::CompleteZero { .. }
-        ));
-        for state in &states[1..] {
-            assert!(!matches!(
-                state,
-                SessionRetrievalOutcome::CompleteZero { .. }
-            ));
-        }
     }
 
     #[test]

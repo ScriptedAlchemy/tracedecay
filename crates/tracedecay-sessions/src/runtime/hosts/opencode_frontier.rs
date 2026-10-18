@@ -30,7 +30,10 @@ pub(super) async fn prepare_generation_rewrite(
         };
         write(admission, scope, GENERATION_KEY, generation).await?;
         write(admission, scope, REWRITE_KEY, rewrite).await?;
-    } else if generation.byte_offset != current_generation && rewrite.byte_offset == u64::MAX {
+    } else if rewrite.byte_offset == u64::MAX {
+        // Content-derived generations keep reconciliation idempotent after WAL reuse.
+        // ponytail: reconciliation is O(history), bounded per pass; replace it with
+        // a native durable change cursor if OpenCode supplies one.
         let revision = generation.mtime.max(rewrite.mtime).saturating_add(1).max(1);
         generation = ParseOffset {
             byte_offset: current_generation,

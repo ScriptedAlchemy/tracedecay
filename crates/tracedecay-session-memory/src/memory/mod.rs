@@ -1,20 +1,29 @@
-//! Canonical memory use cases over the append-only fact authority.
+//! Canonical memory use cases over the append-only fact authority, plus the
+//! memory model they and [`crate::fact_store`] share: sanitization hygiene,
+//! scoring, entity, encoding, and trust utilities.
 
+use crate::fact_store::DatabaseFactStore;
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 mod anchors;
 mod canonical;
 mod context;
 mod curation;
 mod dashboard;
+pub mod diff;
+pub mod encoding;
+pub mod entities;
 mod error;
 mod graph;
+pub mod hygiene;
 mod privacy_remediation;
 mod project_memory;
 mod sanitize;
+pub mod similarity;
+pub mod trust;
+pub mod user;
 
 #[cfg(test)]
 mod tests;
@@ -36,7 +45,7 @@ pub use project_memory::{
 
 #[cfg(test)]
 use tracedecay_domain::{
-    DomainError, FactId, FactLineageEventV1, ProvenanceId, RetrievalAnchorRecordV2,
+    DomainError, FactId, FactLineageEventV1, ProvenanceId, RetrievalAnchorRecord,
 };
 #[cfg(test)]
 use tracedecay_store::{
@@ -47,8 +56,8 @@ use tracedecay_store::{
     ProjectMemoryAutomaticFactStateV1, ProjectMemoryDashboardFactDetailQueryV1,
     ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
     ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardOplogEntryV1,
-    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactAddCommandV1,
+    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryDashboardVectorSnapshotV1, ProjectMemoryFactAddCommandV1,
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactContentDigestQueryV1,
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
     ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationReceiptV1,
@@ -62,8 +71,14 @@ use tracedecay_store::{
     ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
     ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
     ProjectMemoryMemoryStatusV1, ProjectMemoryPrivacyPurgeCursorV1,
-    ProjectMemoryPrivacyPurgeReceiptV1, RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryPrivacyPurgeReceiptV1, ProjectMemoryStoreRevisionV1, RetrievalAnchorQuery,
+    StoredFactV1,
 };
+
+/// Operation label for a typed memory-application cancellation. Callers that
+/// must distinguish cancellation from a generic database failure match this
+/// exact [`TraceDecayError::Database::operation`] instead of scanning Display.
+pub const MEMORY_APPLICATION_INTERRUPTED_OPERATION: &str = "memory application interrupted";
 
 /// Maps a [`MemoryApplicationError`] onto the root/dashboard-facing
 /// [`TraceDecayError`]. The single conversion site for every project-memory
@@ -71,6 +86,9 @@ use tracedecay_store::{
 /// instead of maintaining independent copies.
 pub fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     match error {
+        MemoryApplicationError::Cancelled(error) => {
+            TraceDecayError::database_operation(MEMORY_APPLICATION_INTERRUPTED_OPERATION, error)
+        }
         MemoryApplicationError::Store(tracedecay_store::FactStoreError::GraphResetRequired {
             owner,
             reason,
@@ -85,9 +103,19 @@ pub fn memory_application_error(error: MemoryApplicationError) -> TraceDecayErro
     }
 }
 
+/// True when [`memory_application_error`] mapped a store cancellation or
+/// deadline into the typed interrupted-operation database error.
+pub fn is_memory_application_cancellation(error: &TraceDecayError) -> bool {
+    matches!(
+        error,
+        TraceDecayError::Database { operation, .. }
+            if operation == MEMORY_APPLICATION_INTERRUPTED_OPERATION
+    )
+}
+
 /// Builds a [`MemoryApplication`] directly over a database handle's
 /// [`DatabaseFactStore`]. The shared resolver for every route that already
-/// holds an open [`Database`] rather than a higher-level fact-store handle —
+/// holds an open [`Database`] rather than a higher-level fact-store handle,
 /// used by the root crate's daemon scheduler and MCP lifecycle paths as well
 /// as the dashboard API.
 pub fn memory_application_for_db(

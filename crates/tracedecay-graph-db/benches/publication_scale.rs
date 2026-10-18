@@ -12,15 +12,11 @@
 //!     --features test-helpers
 //! Run with phase attribution:
 //!   cargo bench -p tracedecay-graph-db --bench publication_scale \
-//!     --features test-helpers,hotpath
+//!     --features test-helpers
 
 use std::time::Instant;
 
 use tracedecay_graph_db::GraphGenerationManifest;
-
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod support;
 #[path = "support/scale.rs"]
@@ -41,9 +37,6 @@ fn env_scale(name: &str, default: usize) -> usize {
 }
 
 fn main() {
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("publication-scale").build();
-
     let shards = env_scale("PUBLICATION_SCALE_SHARDS", SHARDS);
     let entities_per_shard = env_scale("PUBLICATION_SCALE_ENTITIES", ENTITIES_PER_SHARD);
     let relations_per_shard = env_scale("PUBLICATION_SCALE_RELATIONS", RELATIONS_PER_SHARD);

@@ -7,10 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use axum::{
-    Json,
-    extract::{Extension, State},
-};
+use axum::{Json, extract::State};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +16,8 @@ use super::read_model::{
     scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
+use tracedecay_store::TOOL_USE_ID_KEY;
 
 mod aggregates;
 
@@ -87,6 +85,9 @@ pub enum DashboardLcmReadStateV1 {
     Redacted,
     Unavailable,
     CursorManifestLimitExceeded,
+    /// The page cursor was minted for another route or query; the reason is
+    /// the cursor refusal code and the caller restarts without the cursor.
+    CursorRefused,
     BudgetExhausted,
     TimedOut,
     Cancelled,
@@ -121,6 +122,9 @@ pub struct DashboardLcmCanonicalSummaryV1 {
 #[derive(Clone, Debug, Default)]
 pub struct DashboardLcmCanonicalStatsV1 {
     pub message_count: i64,
+    /// Messages counted in `message_count` that the temporal transcript has
+    /// not published, so no page can serve them yet.
+    pub unpublished_message_count: i64,
     pub summary_node_count: i64,
     pub summary_token_count: Option<i64>,
     pub source_token_count: Option<i64>,
@@ -160,6 +164,7 @@ pub trait DashboardLcmReadPortV1: Send + Sync {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct LcmSessionCountsV1 {
     message_count: i64,
+    unpublished_message_count: i64,
     summary_node_count: i64,
     summary_token_count: Option<i64>,
     source_token_count: Option<i64>,
@@ -187,10 +192,25 @@ pub(super) struct LcmMessageV1 {
     pub(super) storage_kind: Option<String>,
     pub(super) metadata_json: Option<String>,
     pub(super) tool_name: Option<String>,
+    /// The host's own identifier of this message's tool invocation (Claude
+    /// `tool_use.id`, Codex `call_id`, Cursor composer `toolCallId`), the value
+    /// a child session's `parent_tool_use_id` names. Absent when the host
+    /// recorded none; never synthesized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) tool_use_id: Option<String>,
     pub(super) pinned: Option<i64>,
     pub(super) summary_node_ids: Vec<String>,
     #[serde(default)]
     pub(super) snippet: Option<String>,
+}
+
+/// The typed `tool_use_id` a stored message row carries in its metadata.
+pub(super) fn message_tool_use_id(metadata_json: Option<&str>) -> Option<String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json?).ok()?;
+    metadata
+        .get(TOOL_USE_ID_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -392,14 +412,14 @@ pub struct OverviewParams {
 /// manifest before this boundary reduces the hydrated records.
 pub async fn overview(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             lcm_read(
                 &state,
-                control.map(|Extension(control)| control),
+                control,
                 DashboardLcmReadRequestV1::Overview {
                     query: params.q,
                     limit: params.limit.unwrap_or(25).clamp(1, 200),
@@ -407,7 +427,7 @@ pub async fn overview(
             )
             .await
         },
-        label = "dashboard_api.lcm.overview"
+        tracing::trace_span!("dashboard_api.lcm.overview"),
     )
     .await
 }
@@ -433,10 +453,10 @@ pub struct SearchParams {
 /// GET /api/plugins/hermes-lcm/search
 pub async fn search(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let since = match parse_optional_i64(&params.since) {
                 Ok(since) => since,
@@ -448,7 +468,7 @@ pub async fn search(
             };
             lcm_read(
                 &state,
-                control.map(|Extension(control)| control),
+                control,
                 DashboardLcmReadRequestV1::Search {
                     query: params.q,
                     limit: params.limit.unwrap_or(50).clamp(1, 500),
@@ -462,7 +482,7 @@ pub async fn search(
             )
             .await
         },
-        label = "dashboard_api.lcm.search"
+        tracing::trace_span!("dashboard_api.lcm.search"),
     )
     .await
 }
@@ -476,15 +496,15 @@ pub struct SessionParams {
 /// GET /api/plugins/hermes-lcm/session/{session_id}
 pub async fn session(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             lcm_read(
                 &state,
-                control.map(|Extension(control)| control),
+                control,
                 DashboardLcmReadRequestV1::Session {
                     session_id,
                     limit: params.limit.unwrap_or(100).clamp(1, 500),
@@ -493,7 +513,7 @@ pub async fn session(
             )
             .await
         },
-        label = "dashboard_api.lcm.session"
+        tracing::trace_span!("dashboard_api.lcm.session"),
     )
     .await
 }
@@ -509,10 +529,10 @@ pub struct TimelineParams {
 /// GET /api/plugins/hermes-lcm/timeline
 pub async fn timeline(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<TimelineParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let bucket = match params.bucket.trim().to_ascii_lowercase().as_str() {
                 "" | "day" => DashboardLcmTimelineBucketV1::Day,
@@ -521,7 +541,7 @@ pub async fn timeline(
             };
             lcm_read(
                 &state,
-                control.map(|Extension(control)| control),
+                control,
                 DashboardLcmReadRequestV1::Timeline {
                     bucket,
                     session_id: trimmed_nonempty(params.session_id),
@@ -530,14 +550,14 @@ pub async fn timeline(
             )
             .await
         },
-        label = "dashboard_api.lcm.timeline"
+        tracing::trace_span!("dashboard_api.lcm.timeline"),
     )
     .await
 }
 
 async fn lcm_read<T>(
     state: &DashboardState,
-    control: Option<DashboardHttpRequestControlV1>,
+    control: DashboardHttpRequestControlV1,
     request: DashboardLcmReadRequestV1,
 ) -> Json<DashboardEnvelopeV1<Option<T>>>
 where
@@ -550,13 +570,6 @@ where
             "lcm_daemon_authority_unavailable",
         ));
     };
-    let Some(control) = control else {
-        return Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(state),
-            None,
-            "dashboard_request_admission_unavailable",
-        ));
-    };
     let outcome = authority
         .read(control, state.project_id.as_deref(), request.clone())
         .await;
@@ -564,20 +577,18 @@ where
     match outcome {
         DashboardLcmReadOutcomeV1::Ready(page) => {
             let timeline_coverage = aggregates::timeline_view_coverage(&request, &page);
-            let coverage = if aggregates::is_aggregate_request(&request) {
-                DashboardCoverageV1::complete(
-                    aggregates::returned_count(&page),
-                    "canonical hydrated records",
-                )
-            } else {
-                DashboardCoverageV1::unknown()
-            };
+            let coverage = DashboardCoverageV1::complete(
+                aggregates::returned_count(&page),
+                "canonical hydrated records",
+            );
             match aggregates::render_canonical_payload(
                 request,
                 page,
                 &state.lcm_scope,
                 &state.token_counts,
-            ) {
+            )
+            .await
+            {
                 Ok(payload) => {
                     if let Some((eligible, examined, true)) = timeline_coverage {
                         Json(DashboardEnvelopeV1::partial(
@@ -607,7 +618,9 @@ where
                 page,
                 &state.lcm_scope,
                 &state.token_counts,
-            ) {
+            )
+            .await
+            {
                 Ok(payload) => Json(DashboardEnvelopeV1::partial(
                     scope,
                     eligible,
@@ -644,6 +657,9 @@ where
                 DashboardLcmReadStateV1::Denied => DashboardEnvelopeV1::denied(scope, None),
                 DashboardLcmReadStateV1::Redacted => {
                     typed_not_ready_envelope(scope, DashboardDomainStateV1::Redacted, reason)
+                }
+                DashboardLcmReadStateV1::CursorRefused => {
+                    DashboardEnvelopeV1::error(scope, None, reason)
                 }
                 DashboardLcmReadStateV1::Unavailable
                 | DashboardLcmReadStateV1::CursorManifestLimitExceeded

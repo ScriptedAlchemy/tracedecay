@@ -12,12 +12,12 @@
 //!   (`src/mcp/tool_call_deadline.rs`) and is what daemon admission and
 //!   settlement measure. A real `fact_store add` runs, commits durably, and is
 //!   parked at the commit boundary by the `test-transport` fact-commit barrier
-//!   (`crates/tracedecay-runtime-core/src/store/memory/commit_barrier.rs`)
+//!   (`crates/tracedecay-session-memory/src/fact_store/commit_barrier.rs`)
 //!   until that deadline has elapsed. The retained memory owner then observes
-//!   exactly what production observes when a commit outlives its budget —
-//!   commit started, deadline elapsed — and reports `PartialEffect` with a real
+//!   exactly what production observes when a commit outlives its budget,
+//!   commit started, deadline elapsed, and reports `PartialEffect` with a real
 //!   committed receipt and a `Reconcile`-only legal action
-//!   (`crates/tracedecay-application/src/retained_receipts.rs::complete_at`,
+//!   (`crates/tracedecay-contracts/src/retained_receipts.rs::complete_at`,
 //!   `src/daemon/retained_owner/memory.rs::execute_add_on_db`).
 //!
 //!   The barrier exists because that window is otherwise one fsync wide: a
@@ -36,9 +36,19 @@
 //!   final shape this binary creates, returning `ResetRequired` with a
 //!   `Reset`-only legal action for every subsequent open of that store.
 use crate::common;
-/// The HTTP, MCP-host, and Rust SDK legs of this same journey.
+/// A reset-required registered store served as a typed state.
+mod reset_required_serving;
+/// A pre-log hook admission ledger is refused until its scoped reset.
+mod stale_hook_admission_reset;
+/// A released profile authority resets alone and its projects register again.
+mod stale_profile_authority_reset;
+mod stale_project_sessions_census;
+/// Stale session stores refuse only sessions until their scoped reset.
+mod stale_sessions_store_reset;
+/// The HTTP, MCP-host, Rust SDK, and TypeScript SDK legs of this same journey.
 mod transport_boundaries;
 
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -55,9 +65,11 @@ const FACT_COMMIT_BARRIER_DIR_ENV: &str = "TRACEDECAY_TEST_FACT_COMMIT_BARRIER_D
 const MAX_MARKER_TOKEN_BYTES: usize = 36;
 /// Request budget for the parked add. It must comfortably outlive a cold
 /// dispatch so the worker reaches the commit boundary while the budget is still
-/// live; the barrier — not this number — decides when settlement happens.
+/// live; the barrier, not this number, decides when settlement happens.
 const PARTIAL_EFFECT_DEADLINE: Duration = Duration::from_secs(8);
 const BARRIER_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bound on the scoped reset reaching its wait for the profile lease.
+const SCOPED_RESET_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Fails loudly if a marker could be refused by memory hygiene instead of
 /// committing, so a future marker edit cannot silently invalidate the
@@ -98,7 +110,7 @@ fn make_store_reset_required(home: &Path, project: &Path) {
         &home.join(".tracedecay"),
         &tracedecay_runtime_core::storage::default_profile_project_id(project),
     );
-    let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+    let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     assert!(
         db_path.is_file(),
         "tracedecay init should have created the project store at {}",
@@ -175,13 +187,23 @@ fn add_fact_settling_after_its_deadline(
     barrier_dir: &Path,
     content: &str,
 ) -> Value {
+    // One-shot markers: clear a previous park so a leftover `arrived` cannot
+    // make this helper release before the CLI request reaches the boundary.
+    for marker in ["armed", "claimed", "arrived", "release", "expect_content"] {
+        let _ = std::fs::remove_file(barrier_dir.join(marker));
+    }
+    // Bind the barrier to this fact's content so a foreign write (project-open
+    // side effect, curator, graph publish) cannot claim `arrived` while the
+    // CLI add races past an unarmed commit boundary.
+    std::fs::write(barrier_dir.join("expect_content"), content.as_bytes())
+        .expect("pin the fact commit barrier to the parked content");
     std::fs::write(barrier_dir.join("armed"), b"armed\n").expect("arm the fact commit barrier");
 
     let mut command = tool_command(
         home,
         project,
         "tracedecay_fact_store_add",
-        &json!({ "content": content, "category": "general" }),
+        &json!({ "content": content, "category": "general", "format": "json" }),
     );
     command
         .env(
@@ -226,8 +248,18 @@ fn add_fact_settling_after_its_deadline(
     // test spawned it, so `spawn + deadline` can still be earlier than the real
     // expiry. Arrival is strictly after that clock started, so holding a full
     // deadline plus a margin beyond arrival always outlives it.
+    //
+    // Keep asserting the CLI is still blocked: an early success here means the
+    // commit path skipped the barrier (or a foreign claim wrote `arrived`).
     let release_at = arrived_at + PARTIAL_EFFECT_DEADLINE + Duration::from_secs(1);
     while Instant::now() < release_at {
+        assert!(
+            child
+                .try_wait()
+                .expect("inspect the parked fact_store add")
+                .is_none(),
+            "the fact_store add settled before its request deadline could expire at the commit barrier"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
     std::fs::write(barrier_dir.join("release"), b"release\n")
@@ -236,7 +268,28 @@ fn add_fact_settling_after_its_deadline(
     let output = child
         .wait_with_output()
         .expect("collect the parked fact_store add");
-    parse_tool_output("tracedecay_fact_store_add", &output)
+    let raw = parse_tool_output("tracedecay_fact_store_add", &output);
+    // Compatibility MCP results nest the typed envelope in content text when
+    // `format: json` is set; also accept a top-level problem field.
+    cli_problem_envelope(&raw, "CLI fact_store_add partial effect")
+}
+
+/// Normalizes the CLI `tracedecay tool --json` MCP payload to `{ "problem": ... }`.
+fn cli_problem_envelope(payload: &Value, context: &str) -> Value {
+    let typed = typed_envelope(payload);
+    for candidate in [
+        payload.clone(),
+        typed.clone(),
+        typed["value"].clone(),
+        typed["data"].clone(),
+        typed["outcome"]["value"].clone(),
+        payload["value"].clone(),
+    ] {
+        if candidate["problem"].is_object() {
+            return json!({ "problem": candidate["problem"].clone() });
+        }
+    }
+    panic!("{context}: no typed problem envelope in the payload: {payload}")
 }
 
 fn assert_partial_effect_committed_receipt(payload: &Value, context: &str) {
@@ -282,6 +335,72 @@ fn assert_reset_required(payload: &Value, context: &str) {
         &vec![Value::String("reset".to_owned())],
         "{context}: ResetRequired must carry Never retry with only the Reset legal action"
     );
+}
+
+/// Runs the scoped reset the way an operator does while the daemon that
+/// reported the stale stores is still serving: the reset reads the daemon's
+/// reset census, then waits for the operator to stop the unmanaged test
+/// daemon (a managed service is stopped by the reset itself). `between` runs
+/// after the daemon exited and before the reset can take the profile, so it
+/// observes exactly the bytes the reset starts from.
+fn run_scoped_reset(
+    home: &Path,
+    project: &Path,
+    daemon: &mut common::DaemonProcess,
+    between: impl FnOnce(),
+) -> (std::process::ExitStatus, String) {
+    let profile_root = home.join(".tracedecay");
+    let hold = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+        &profile_root,
+        "stale-sessions-store-reset",
+    )
+    .expect("hold the profile while the daemon stops");
+    let mut child = tracedecay_command_with_home(home)
+        .args(["wipe", "--stale", "--yes"])
+        .current_dir(project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the scoped reset");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        for line in BufReader::new(stdout).lines() {
+            text.push_str(&line.expect("reset stdout line"));
+            text.push('\n');
+        }
+        text
+    });
+    let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
+    let mut transcript = String::new();
+    let started = Instant::now();
+    loop {
+        let mut line = String::new();
+        let read = stderr.read_line(&mut line).expect("read reset stderr");
+        transcript.push_str(&line);
+        if read == 0 {
+            panic!("the scoped reset exited before waiting for the profile:\n{transcript}");
+        }
+        if line.contains("stop it and wipe --stale continues") {
+            break;
+        }
+        assert!(
+            started.elapsed() < SCOPED_RESET_TIMEOUT,
+            "the scoped reset never waited for the profile:\n{transcript}"
+        );
+    }
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon for the scoped reset");
+    between();
+    drop(hold);
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stderr, &mut rest).expect("read reset stderr");
+    transcript.push_str(&rest);
+    let status = child.wait().expect("wait for the scoped reset");
+    transcript.push_str(&stdout_reader.join().expect("join reset stdout"));
+    (status, transcript)
 }
 
 fn spawn_daemon_with_commit_barrier(home: &Path, barrier_dir: &Path) -> common::DaemonProcess {
@@ -367,7 +486,7 @@ fn partial_effect_survives_physical_daemon_restart_via_cli() {
 /// (`src/daemon/project_open_orchestration.rs`) publishes the failed open
 /// instead of reporting warming forever, and `project_open_problem`
 /// (`src/daemon/invocation_dispatch.rs`) maps it to the `reset`-only legal
-/// action for every operation. This journey proves that settlement — and that
+/// action for every operation. This journey proves that settlement, and that
 /// a physical restart repeats it identically, because a restart is not a
 /// reset.
 #[test]
@@ -382,17 +501,18 @@ fn reset_required_survives_physical_daemon_restart_via_cli() {
     let mut daemon = spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     initialize_project(&home_path, &reset_project_path, "reset-required-fixture");
 
-    // Tamper the store. `tracedecay init` is daemon-owned, so this daemon
-    // already opened the project once and holds a verified handle; the
-    // incompatible shape is what the *next* process-level open observes, which
-    // is exactly the physical restart below.
-    make_store_reset_required(&home_path, &reset_project_path);
-
     let first_pid = daemon.id();
     let stopped = daemon
         .kill_and_wait()
         .expect("force-stop and reap the first physical daemon");
     assert!(!stopped.success(), "forced daemon stop exited cleanly");
+
+    // Tamper the store between processes. `tracedecay init` is daemon-owned,
+    // so the first daemon already opened the project once; the incompatible
+    // shape is what the *next* process-level open observes. Tampering while
+    // that daemon lived would race its writes.
+    make_store_reset_required(&home_path, &reset_project_path);
+
     let mut daemon = spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     assert_ne!(
         daemon.id(),
@@ -409,7 +529,7 @@ fn reset_required_survives_physical_daemon_restart_via_cli() {
         "tracedecay_storage_status",
         &json!({ "include_details": false }),
     );
-    assert_reset_required(&reset_payload, "first observation");
+    assert_reset_required(&reset_payload["structuredContent"], "first observation");
 
     // Replace the serving process again. The reset-only legal action must be
     // reported identically: the tampered store is never repaired implicitly,
@@ -432,7 +552,10 @@ fn reset_required_survives_physical_daemon_restart_via_cli() {
         "tracedecay_storage_status",
         &json!({ "include_details": false }),
     );
-    assert_reset_required(&reset_payload_after_restart, "after a physical restart");
+    assert_reset_required(
+        &reset_payload_after_restart["structuredContent"],
+        "after a physical restart",
+    );
 
     let _ = daemon.kill_and_wait();
 }

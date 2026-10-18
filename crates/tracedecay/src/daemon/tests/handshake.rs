@@ -11,17 +11,8 @@ pub(super) async fn daemon_round_trip(
     handshake: &DaemonHandshake,
     request: Value,
 ) -> Vec<Value> {
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("daemon socket pair");
-    let server = tokio::spawn(async move {
-        Box::pin(super::super::serve_socket_client(server_stream, engine)).await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    writer
-        .write_all(handshake.to_line().expect("handshake json").as_bytes())
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("write newline");
+    let (reader, mut writer, server) =
+        super::handshake_authenticated_test_client(engine, handshake).await;
     writer
         .write_all(request.to_string().as_bytes())
         .await
@@ -38,8 +29,12 @@ pub(super) async fn daemon_round_trip(
         }
         responses
     };
+    // Anti-hang bound, not a latency budget: under whole-suite parallelism the
+    // first connection for a fresh profile pays a cold
+    // `DaemonSessionRuntimeRegistryV1::open` (measured over 500ms with six
+    // profiles opening at once) before it can even route the request.
     let (server_result, responses) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             tokio::join!(server, read_responses)
         })
         .await
@@ -48,22 +43,6 @@ pub(super) async fn daemon_round_trip(
         .expect("daemon socket client task")
         .expect("serve daemon socket client");
     responses
-}
-
-#[test]
-fn daemon_handshake_round_trips_project_scope_and_timings() {
-    let handshake = DaemonHandshake {
-        project_path: Some(PathBuf::from("/work/repo")),
-        scope_prefix: Some("src/mcp".to_string()),
-        timings: true,
-        allow_init: true,
-        ..test_handshake_defaults()
-    };
-
-    let encoded = handshake.to_line().expect("handshake should encode");
-    let decoded = DaemonHandshake::from_line(&encoded).expect("handshake should decode");
-
-    assert_eq!(decoded, handshake);
 }
 
 /// Old clients omit the adoption field entirely; the daemon must default it
@@ -86,24 +65,8 @@ fn daemon_handshake_defaults_missing_moved_store_adoption_to_never() {
     let decoded = DaemonHandshake::from_line(&encoded).expect("legacy handshake should decode");
     assert_eq!(
         decoded.moved_store_adoption,
-        crate::tracedecay::MovedStoreAdoption::Never
+        tracedecay_project::project::MovedStoreAdoption::Never
     );
-}
-
-/// The adoption request survives the wire in both explicit shapes.
-#[test]
-fn daemon_handshake_round_trips_moved_store_adoption() {
-    for adoption in [
-        crate::tracedecay::MovedStoreAdoption::OfferCandidates,
-        crate::tracedecay::MovedStoreAdoption::AdoptUnique,
-        crate::tracedecay::MovedStoreAdoption::AdoptNamed("proj_nongit_moved".to_owned()),
-    ] {
-        let mut handshake = test_handshake_defaults();
-        handshake.moved_store_adoption = adoption.clone();
-        let encoded = handshake.to_line().expect("handshake should encode");
-        let decoded = DaemonHandshake::from_line(&encoded).expect("handshake should decode");
-        assert_eq!(decoded.moved_store_adoption, adoption);
-    }
 }
 
 #[test]
@@ -116,7 +79,15 @@ fn daemon_handshake_requires_client_identity() {
     })
     .to_string();
 
-    assert!(DaemonHandshake::from_line(&encoded).is_err());
+    let Err(error) = DaemonHandshake::from_line(&encoded) else {
+        panic!("a handshake without client identity must be refused");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("missing field `client_identity`"),
+        "unexpected refusal: {error}"
+    );
 }
 
 /// Handshake metadata is negotiated over a live daemon connection. Absent
@@ -139,10 +110,10 @@ fn handshake_defaults_optional_metadata_when_fields_are_absent() {
         DaemonHandshake::from_line(&encoded).expect("handshake with absent optional metadata");
 
     assert!(!decoded.allow_initialize_root_routing);
-    assert!(decoded.client_version.is_empty());
-    assert!(decoded.client_instance_id.is_empty());
+    assert_eq!(decoded.client_version, "");
+    assert_eq!(decoded.client_instance_id, "");
     assert!(!decoded.tool_list_changed_capable);
-    assert!(decoded.catalog_version.is_empty());
+    assert_eq!(decoded.catalog_version, "");
 }
 
 #[tokio::test]
@@ -179,9 +150,7 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
     });
     let mut handshake = test_handshake_defaults();
     handshake.project_path = Some(PathBuf::from("/must-not-route"));
-    let mut client = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect client");
+    let mut client = super::connect_loopback_test_peer(&endpoint).await;
     client
         .write_all(handshake.to_line().expect("handshake").as_bytes())
         .await
@@ -242,9 +211,7 @@ async fn socket_client_requires_authentication_before_routing() {
         .await
     });
 
-    let mut client = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect client");
+    let mut client = super::connect_loopback_test_peer(&endpoint).await;
     client
         .write_all(
             test_handshake_defaults()
@@ -285,60 +252,44 @@ async fn socket_client_requires_authentication_before_routing() {
         .expect("an auth refusal is a served connection");
 }
 
+/// First-touch bootstrap keys on the typed missing-index kind its producers
+/// raise; a message that merely reads like one is some other failure.
 #[test]
-fn daemon_handshake_advertises_binary_version() {
-    let handshake = test_handshake_defaults();
-
-    let encoded = handshake.to_line().expect("handshake should encode");
-    let value: serde_json::Value = serde_json::from_str(&encoded).expect("handshake json");
-
-    assert_eq!(
-        value["client_version"],
-        serde_json::json!(
-            crate::version::build_version().expect("fixture product runtime registered")
-        )
+fn missing_index_classifier_matches_the_kind_not_the_message() {
+    let missing = tracedecay_domain::errors::TraceDecayError::project_open(
+        tracedecay_domain::errors::ProjectOpenFailureKind::IndexMissing,
+        "no TraceDecay database found at '/repo/store.db'; run 'tracedecay init' first",
     );
-    assert_eq!(
-        value["client_instance_id"],
-        serde_json::json!(tracedecay_runtime_core::runtime_identity::process_run_id())
-    );
-}
+    assert!(super::super::is_missing_index_error(&missing));
 
-#[test]
-fn missing_index_classifier_covers_every_auto_init_store_miss() {
-    let missing_messages = [
-        "no TraceDecay index found at '/repo'",
-        "no TraceDecay database found at '/repo/store.db'",
-    ];
-    for message in missing_messages {
-        let error = tracedecay_domain::errors::TraceDecayError::Config {
-            message: message.to_string(),
-        };
-        assert!(
-            super::super::is_missing_index_error(&error),
-            "intentional missing-store state should permit config-gated auto-init: {message}"
-        );
-    }
-
-    let unrelated = tracedecay_domain::errors::TraceDecayError::Config {
-        message: "identity cutover conflict".to_string(),
+    let lookalike = tracedecay_domain::errors::TraceDecayError::Config {
+        message: "no TraceDecay index found at '/repo'".to_string(),
     };
-    assert!(!super::super::is_missing_index_error(&unrelated));
+    assert!(
+        !super::super::is_missing_index_error(&lookalike),
+        "a config error whose text names a missing index must not auto-initialize"
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn client_version_skew_flags_only_real_mismatches() {
-    assert_eq!(super::super::client_version_skew("1.2.3", "1.2.3"), None);
-    assert_eq!(super::super::client_version_skew("", "1.2.3"), None);
     assert_eq!(
-        super::super::client_version_skew("1.3.0", "1.2.3"),
+        tracedecay_daemon_protocol::client_version_skew("1.2.3", "1.2.3"),
+        None
+    );
+    assert_eq!(
+        tracedecay_daemon_protocol::client_version_skew("", "1.2.3"),
+        None
+    );
+    assert_eq!(
+        tracedecay_daemon_protocol::client_version_skew("1.3.0", "1.2.3"),
         Some("1.3.0".to_string())
     );
 }
 
 /// A client whose handshake this daemon cannot decode (wire drift between
-/// build revisions) must read one typed refusal frame and a clean EOF —
+/// build revisions) must read one typed refusal frame and a clean EOF,
 /// never a raw `Connection reset by peer` from a dropped socket.
 #[cfg(unix)]
 #[tokio::test]
@@ -350,10 +301,7 @@ async fn wire_drifted_handshake_reads_typed_refusal_then_clean_eof() {
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "handshake-refusal-test");
 
-    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
-
-    let (reader, mut writer) = client.into_split();
+    let (reader, mut writer, server_task) = super::connect_authenticated_test_client(engine).await;
     // Valid JSON that is not this daemon's handshake shape, followed by the
     // pipelined first request a real client writes before it starts reading.
     writer
@@ -364,7 +312,7 @@ async fn wire_drifted_handshake_reads_typed_refusal_then_clean_eof() {
         .write_all(
             b"{\"protocol\":\"tracedecay.daemon.invocation\",\"revision\":1,\
               \"request_id\":\"request.after-drifted-handshake\",\
-              \"operation\":\"semantic_evaluate_and_publish\"}\n",
+              \"operation\":\"git_status\"}\n",
         )
         .await
         .expect("write pipelined request");
@@ -412,10 +360,7 @@ async fn non_json_handshake_reads_invalid_handshake_refusal() {
         "handshake-invalid-refusal-test",
     );
 
-    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
-
-    let (reader, mut writer) = client.into_split();
+    let (reader, mut writer, server_task) = super::connect_authenticated_test_client(engine).await;
     writer
         .write_all(b"GET / HTTP/1.1\n")
         .await
@@ -442,7 +387,7 @@ async fn non_json_handshake_reads_invalid_handshake_refusal() {
 }
 
 /// A client whose auth preface this daemon rejects must read one typed
-/// `authentication_rejected` refusal frame and a clean EOF — never a bare
+/// `authentication_rejected` refusal frame and a clean EOF, never a bare
 /// connection close its transport reports as "outcome unknown". The daemon
 /// serves the refusal and survives; it never echoes the supplied token.
 #[cfg(unix)]
@@ -458,7 +403,8 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(async move {
         Box::pin(super::super::serve_authenticated_socket_client_with_class(
-            tracedecay_daemon_protocol::transport::BrokerStream::Unix(server),
+            tracedecay_daemon_protocol::transport::BrokerStream::from_tokio_unix(server)
+                .expect("daemon end of the test socket"),
             engine,
             "daemon-minted-token".to_string(),
             super::super::core_admission::DaemonClientAdmissionClass::General,
@@ -468,7 +414,7 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
 
     let (reader, mut writer) = client.into_split();
     // The real client pipeline: auth preface (here with a token the daemon
-    // did not mint), handshake, then the first request — all written before
+    // did not mint), handshake, then the first request, all written before
     // the client starts reading.
     let preface = tracedecay_daemon_protocol::transport::DaemonAuthPreface::new("stale-token")
         .to_line()
@@ -486,7 +432,7 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
         .write_all(
             b"{\"protocol\":\"tracedecay.daemon.invocation\",\"revision\":1,\
               \"request_id\":\"request.after-rejected-auth\",\
-              \"operation\":\"semantic_evaluate_and_publish\"}\n",
+              \"operation\":\"git_status\"}\n",
         )
         .await
         .expect("write pipelined request");
@@ -566,13 +512,15 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     let mut handshake = test_handshake_defaults();
     handshake.client_version = "0.0.0-old".to_string();
     handshake.catalog_version = "0.0.0-old".to_string();
-    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+    let ping = super::super::AuthenticatedFirstRequest::new(
+        json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string(),
+    );
 
     handshake.client_instance_id.clear();
     handshake.tool_list_changed_capable = true;
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_none()
     );
@@ -581,7 +529,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     handshake.tool_list_changed_capable = false;
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_none()
     );
@@ -590,16 +538,18 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     handshake.catalog_version.clear();
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_none(),
         "catalog refresh requires an explicitly negotiated catalog version"
     );
     handshake.tool_list_changed_capable = false;
-    let initialize = json!({"jsonrpc": "2.0", "id": 2, "method": "initialize"}).to_string();
+    let initialize = super::super::AuthenticatedFirstRequest::new(
+        json!({"jsonrpc": "2.0", "id": 2, "method": "initialize"}).to_string(),
+    );
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &initialize, false)
+            .claim_catalog_refresh(&handshake, initialize.parsed(), false)
             .await
             .is_none(),
         "fresh initialize marks the generation current without notifying"
@@ -610,7 +560,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
         .to_string();
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_none(),
         "the initialized client must not get a redundant refresh"
@@ -619,13 +569,13 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     handshake.client_instance_id = test_client_instance_id(3);
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_some()
     );
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_none()
     );
@@ -633,7 +583,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     let next_generation = super::super::DaemonEngine::default();
     assert!(
         next_generation
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_some(),
         "a new daemon generation must notify the same long-lived client once"
@@ -645,7 +595,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     let same_version_generation = super::super::DaemonEngine::default();
     assert!(
         same_version_generation
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_some(),
         "generation identity, not a reused package version, controls refresh"
@@ -667,10 +617,12 @@ async fn warming_catalog_does_not_mark_a_client_current() {
         .to_string();
     handshake.client_instance_id = test_client_instance_id(7);
 
-    let tools_list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).to_string();
+    let tools_list = super::super::AuthenticatedFirstRequest::new(
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).to_string(),
+    );
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &tools_list, true)
+            .claim_catalog_refresh(&handshake, tools_list.parsed(), true)
             .await
             .is_none(),
         "a warming tools/list neither notifies nor marks the client current"
@@ -678,17 +630,19 @@ async fn warming_catalog_does_not_mark_a_client_current() {
 
     // Warm-up completed. The client's next non-discovery request must learn the
     // published catalog is now available.
-    let ping = json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}).to_string();
+    let ping = super::super::AuthenticatedFirstRequest::new(
+        json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}).to_string(),
+    );
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_some(),
         "warm-up completion must arm exactly one catalog refresh"
     );
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_none(),
         "the refresh stays once-per-generation after warm-up"
@@ -702,7 +656,9 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
     let mut handshake = test_handshake_defaults();
     handshake.tool_list_changed_capable = true;
     handshake.catalog_version = "0.0.0-old".to_string();
-    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+    let ping = super::super::AuthenticatedFirstRequest::new(
+        json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string(),
+    );
 
     assert!(super::super::valid_client_instance_id(
         &test_client_instance_id(0)
@@ -717,7 +673,7 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
         handshake.client_instance_id = invalid_id;
         assert!(
             engine
-                .claim_catalog_refresh(&handshake, &ping, false)
+                .claim_catalog_refresh(&handshake, ping.parsed(), false)
                 .await
                 .is_none()
         );
@@ -734,7 +690,7 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
         handshake.client_instance_id = test_client_instance_id(value as u128);
         assert!(
             engine
-                .claim_catalog_refresh(&handshake, &ping, false)
+                .claim_catalog_refresh(&handshake, ping.parsed(), false)
                 .await
                 .is_some()
         );
@@ -743,7 +699,7 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
         test_client_instance_id(super::super::MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION as u128);
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_none(),
         "capacity saturation must skip rather than evicting an existing client"
@@ -755,7 +711,7 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
     handshake.client_instance_id = test_client_instance_id(0);
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping, false)
+            .claim_catalog_refresh(&handshake, ping.parsed(), false)
             .await
             .is_none(),
         "saturation must preserve existing dedupe entries"
@@ -781,6 +737,7 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     };
     handshake.client_instance_id = test_client_instance_id(4);
     let engine = test_daemon_engine_for_profile(&profile_root);
+    prewarm_test_profile_runtime(&engine.store_administration).await;
 
     let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
     let initialize_responses =
@@ -815,6 +772,7 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     assert_eq!(same_generation[0]["id"], json!(2));
 
     let next_generation = test_daemon_engine_for_profile(&profile_root);
+    prewarm_test_profile_runtime(&next_generation.store_administration).await;
     let first = daemon_round_trip(
         next_generation.clone(),
         &handshake,
@@ -852,6 +810,7 @@ async fn initialized_ack_preserves_pending_catalog_refresh_notification() {
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "initialized catalog refresh ack");
     let engine = test_daemon_engine_for_profile(&profile_root);
+    prewarm_test_profile_runtime(&engine.store_administration).await;
     let mut handshake = test_handshake_defaults();
     handshake.client_identity = DaemonClientIdentity {
         global_db_path: profile_root.join("global.db"),
@@ -881,67 +840,6 @@ async fn initialized_ack_preserves_pending_catalog_refresh_notification() {
     .await;
     assert_eq!(ping.len(), 1, "refresh notification must be deduplicated");
     assert_eq!(ping[0]["id"], json!(6));
-}
-
-#[cfg(unix)]
-#[test]
-fn daemon_version_skew_warning_reads_initialize_server_info() {
-    let initialize = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {}
-    })
-    .to_string();
-    let response = |version: &str| {
-        vec![
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": { "serverInfo": { "name": "tracedecay", "version": version } }
-            })
-            .to_string(),
-        ]
-    };
-
-    let warning =
-        super::super::daemon_version_skew_warning(&initialize, &response("9.9.9"), "1.0.0")
-            .expect("mismatched daemon version should warn");
-    assert!(
-        warning.contains("9.9.9") && warning.contains("1.0.0"),
-        "warning should name both versions, got: {warning}"
-    );
-    assert!(
-        warning.contains("MCP host") && !warning.contains("tracedecay daemon restart"),
-        "a newer daemon should direct recovery at the stale host, got: {warning}"
-    );
-
-    let warning =
-        super::super::daemon_version_skew_warning(&initialize, &response("1.0.0"), "9.9.9")
-            .expect("newer client should warn about stale daemon");
-    assert!(
-        warning.contains("tracedecay daemon restart"),
-        "a newer client should direct recovery at the stale daemon, got: {warning}"
-    );
-
-    assert_eq!(
-        super::super::daemon_version_skew_warning(&initialize, &response("1.0.0"), "1.0.0"),
-        None,
-        "matching versions must not warn"
-    );
-
-    let tools_call = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {}
-    })
-    .to_string();
-    assert_eq!(
-        super::super::daemon_version_skew_warning(&tools_call, &response("9.9.9"), "1.0.0"),
-        None,
-        "only initialize responses advertise the daemon version"
-    );
 }
 
 #[cfg(unix)]
@@ -987,5 +885,194 @@ fn proxy_records_negotiated_catalog_capability_and_version() {
     let mut legacy = test_handshake_defaults();
     super::super::apply_proxy_initialize_metadata(&mut legacy, metadata);
     assert!(!legacy.tool_list_changed_capable);
-    assert!(legacy.catalog_version.is_empty());
+    assert_eq!(legacy.catalog_version, "");
+}
+
+/// A saturated daemon must still name wire skew.
+///
+/// The saturation rejection path parsed the client handshake with `?` and
+/// dropped the socket when it failed, leaving the client's pipelined request
+/// unread, the kernel answers that with `Connection reset by peer`, the exact
+/// signature reported in #753 for a day-old eval client. Saturation is not a
+/// reason to hide a protocol refusal behind a transport error.
+#[cfg(unix)]
+#[tokio::test]
+async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() {
+    // The refusal advertises the daemon's build version, which is read from
+    // the registered product runtime and is deliberately fallible: a process
+    // that never registered one has no truthful version to advertise, and the
+    // refusal is abandoned rather than sent. Under `cargo test` a sibling test
+    // in the same process had already registered it, so this passed locally
+    // and failed under nextest, which runs every test in its own process.
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let _engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "saturated-handshake-refusal-test",
+    );
+
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(async move {
+        super::super::reject_saturated_daemon_client(
+            tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(server)
+                .expect("daemon end of the test socket"),
+            super::super::DaemonClientSaturationResponse {
+                kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
+                retryable: true,
+                capacity: 1,
+            },
+        )
+        .await;
+    });
+
+    let (reader, mut writer) = client.into_split();
+    // Valid JSON that is not this daemon's handshake shape, then the request a
+    // real client pipelines behind it before it starts reading.
+    writer
+        .write_all(b"{\"handshake_revision\":99,\"client\":\"future-build\"}\n")
+        .await
+        .expect("write drifted handshake");
+    writer
+        .write_all(
+            b"{\"protocol\":\"tracedecay.daemon.invocation\",\"revision\":1,\
+              \"request_id\":\"request.saturated-drifted-handshake\",\
+              \"operation\":\"git_status\"}\n",
+        )
+        .await
+        .expect("write pipelined request");
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let refusal_line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("refusal must arrive before the read deadline")
+        .expect("the refusal read must not fail with a transport reset")
+        .expect("a saturated daemon must answer a drifted handshake with a refusal line");
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
+        .expect("the refusal line must parse as the typed refusal frame");
+    assert_eq!(
+        refusal.refusal,
+        tracedecay_daemon_protocol::DaemonHandshakeRefusalReason::UnsupportedRevision,
+        "wire drift under saturation is still a revision refusal"
+    );
+    assert!(
+        !refusal.daemon_version.is_empty(),
+        "the refusal must advertise the daemon version so the client can name the skew"
+    );
+
+    let eof = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("connection close must arrive before the read deadline")
+        .expect("the close must be a clean EOF, not a connection reset");
+    assert_eq!(
+        eof, None,
+        "the refusal replaces the saturation frame; no frames follow it"
+    );
+
+    server_task.await.expect("saturation server task");
+}
+
+/// A daemon that reads `lines` lines, answers with an authentication refusal
+/// and closes. Reading only the preface while the client sends a request
+/// larger than the socket buffer keeps the client writing past the close, the
+/// state a client stalled past the daemon's drain window reaches.
+#[cfg(unix)]
+fn refusing_daemon(socket: &std::path::Path, lines: usize) -> tokio::task::JoinHandle<()> {
+    let listener = tokio::net::UnixListener::bind(socket).expect("bind daemon socket");
+    let refusal_line =
+        tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_rejected_authentication("9.9.9")
+            .to_line()
+            .expect("refusal line");
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept client");
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(reader).lines();
+        for _ in 0..lines {
+            reader
+                .next_line()
+                .await
+                .expect("read client line")
+                .expect("client line");
+        }
+        writer
+            .write_all(format!("{refusal_line}\n").as_bytes())
+            .await
+            .expect("write refusal");
+        writer.flush().await.expect("flush refusal");
+    })
+}
+
+#[cfg(unix)]
+fn assert_authentication_refused(error: &tracedecay_domain::errors::TraceDecayError) {
+    let (code, retryable, _) = error
+        .project_route_context()
+        .unwrap_or_else(|| panic!("the queued refusal must be reported, got: {error:?}"));
+    assert_eq!(
+        code,
+        tracedecay_daemon_protocol::DAEMON_AUTHENTICATION_REJECTED
+    );
+    assert!(retryable);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn one_shot_clients_report_a_refusal_queued_before_their_write_failed() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
+    let handshake = test_handshake_defaults();
+    let oversized = "x".repeat(4 * 1024 * 1024);
+
+    let daemon = refusing_daemon(&socket, 1);
+    let error = super::super::call_tool(
+        &socket,
+        &handshake,
+        "tracedecay_status",
+        json!({ "padding": oversized }),
+    )
+    .await
+    .expect_err("a refused tool call must fail");
+    assert_authentication_refused(&error);
+    daemon.await.expect("refusing daemon");
+
+    std::fs::remove_file(&socket).expect("unbind daemon socket");
+    let daemon = refusing_daemon(&socket, 1);
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "tracedecay_status", "arguments": { "padding": oversized } },
+    })
+    .to_string();
+    let error = super::super::send_daemon_request_line(&socket, &handshake, &request)
+        .await
+        .expect_err("a refused proxied request must fail");
+    assert_authentication_refused(&error);
+    daemon.await.expect("refusing daemon");
+}
+
+/// The stdio proxy reports a refusal that arrives after its whole request
+/// was written, instead of a connection closed before any matching response.
+#[cfg(unix)]
+#[tokio::test]
+async fn proxied_request_reports_the_refusal_read_after_its_write() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
+    let daemon = refusing_daemon(&socket, 3);
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "tracedecay_status", "arguments": {} },
+    })
+    .to_string();
+
+    let error =
+        super::super::send_daemon_request_line(&socket, &test_handshake_defaults(), &request)
+            .await
+            .expect_err("a refused proxied request must fail");
+    assert_authentication_refused(&error);
+    daemon.await.expect("refusing daemon");
 }

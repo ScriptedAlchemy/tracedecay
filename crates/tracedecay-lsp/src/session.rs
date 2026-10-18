@@ -172,29 +172,8 @@ impl AuthorizedLspWorkspace {
         Ok(root)
     }
 
-    pub fn resolve_root_uri(
-        &self,
-        root_uri: &str,
-    ) -> Result<&AdmittedRoot, LspWorkspaceRouteError> {
-        let mut matches = self
-            .roots
-            .iter()
-            .filter(|root| root.matches_root_uri(root_uri));
-        let Some(root) = matches.next() else {
-            return Err(LspWorkspaceRouteError::OutsideAdmittedRoots);
-        };
-        if matches.next().is_some() {
-            return Err(LspWorkspaceRouteError::AmbiguousAdmittedRoots);
-        }
-        Ok(root)
-    }
-
     pub fn admits_exact_root_hints(&self, requested: &[String]) -> bool {
         self.matches_multi_root_hints(requested)
-    }
-
-    pub fn is_single_root(&self) -> bool {
-        self.roots.len() == 1
     }
 
     pub(crate) fn primary(&self) -> &AdmittedRoot {
@@ -240,7 +219,6 @@ pub trait LspSessionAdmissionPort {
 pub enum LspEndpointError {
     InvalidSessionId,
     InvalidCredential,
-    MultipleRootsUnsupported,
     AdmissionRejected,
     DuplicateSession,
     Saturated,
@@ -330,11 +308,10 @@ impl LspSessionRegistry {
                 control: LspSessionControl::default(),
             },
         );
-        self.observe_active_sessions();
         Ok(access)
     }
 
-    #[hotpath::measure(label = "lsp_session_authenticate", impl_type = "LspSessionRegistry")]
+    #[tracing::instrument(name = "lsp_session_authenticate", level = "trace", skip_all)]
     pub fn authenticate(
         &mut self,
         access: &LspSessionAccess,
@@ -354,7 +331,6 @@ impl LspSessionRegistry {
             if let Some(mut expired) = self.sessions.remove(access.session_id()) {
                 expired.control.expire();
             }
-            self.observe_active_sessions();
             return Err(LspEndpointError::SessionExpired);
         }
         self.sessions
@@ -397,7 +373,7 @@ impl LspSessionRegistry {
             .map_err(LspEndpointError::Lifecycle)
     }
 
-    #[hotpath::measure(label = "lsp.session.close", impl_type = "LspSessionRegistry")]
+    #[tracing::instrument(name = "lsp.session.close", level = "trace", skip_all)]
     pub fn close(
         &mut self,
         access: &LspSessionAccess,
@@ -409,7 +385,6 @@ impl LspSessionRegistry {
             .remove(access.session_id())
             .ok_or(LspEndpointError::AuthenticationFailed)?;
         session.control.expire();
-        self.observe_active_sessions();
         Ok(())
     }
 
@@ -419,7 +394,6 @@ impl LspSessionRegistry {
         if let Some(mut session) = self.sessions.remove(session_id) {
             session.control.expire();
         }
-        self.observe_active_sessions();
     }
 
     pub fn reconnect(
@@ -475,16 +449,11 @@ impl LspSessionRegistry {
         }
         self.sessions
             .retain(|_, session| session.expires_at_ms > now_ms);
-        self.observe_active_sessions();
         expired.len()
     }
 
     pub fn active_sessions(&self) -> usize {
         self.sessions.len()
-    }
-
-    fn observe_active_sessions(&self) {
-        hotpath::gauge!("lsp.session.active").set(self.sessions.len());
     }
 
     fn validate_open_capacity(&self, now_ms: u64) -> Result<(), LspEndpointError> {
@@ -525,7 +494,7 @@ where
         }
     }
 
-    #[hotpath::measure(label = "lsp_session_open", impl_type = "DaemonLspSessionEndpoint")]
+    #[tracing::instrument(name = "lsp_session_open", level = "trace", skip_all)]
     pub fn open(
         &mut self,
         request: LspSessionOpenRequest,
@@ -535,10 +504,10 @@ where
         // Separates the daemon admission-authority wait (workspace/root
         // resolution, credential minting) from registry bookkeeping inside
         // the enclosing open span; rejected admissions are recorded too.
-        let authorized = hotpath::measure_block!(
-            "lsp.session.admission_wait",
+        let authorized = {
+            let _span = tracing::trace_span!("lsp.session.admission_wait").entered();
             self.admission.admit_lsp_session(&request, now_ms)
-        )?;
+        }?;
         self.registry.register(authorized, now_ms)
     }
 
@@ -636,26 +605,55 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn authorized_workspace_retains_anchor_independent_of_scope_sort_order() {
-        let workspace = AuthorizedLspWorkspace::anchored(
-            Some(ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap()),
-            vec![
-                AdmittedRoot::authorized(
-                    "file:///first-by-scope",
-                    ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
-                ),
-                AdmittedRoot::authorized(
-                    "file:///active",
-                    ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).unwrap(),
-                ),
-            ],
-            "file:///active/",
-        )
-        .unwrap();
+    fn authorized_workspace_accepts_root_aliases_without_admitting_other_roots() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        let alias = base.path().join("alias");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(real.join("src/lib.rs"), "pub fn inside() {}\n").unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        std::os::unix::fs::symlink(&outside, real.join("escape")).unwrap();
+        let uri = |path: &std::path::Path| url::Url::from_file_path(path).unwrap().to_string();
+        let canonical_uri = uri(&real.canonicalize().unwrap());
+        let alias_uri = uri(&alias);
+        let outside_uri = uri(&outside);
+        let admitted = AdmittedRoot::authorized(
+            canonical_uri.clone(),
+            ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+        );
+        let workspace =
+            AuthorizedLspWorkspace::anchored(None, vec![admitted.clone()], alias_uri.clone())
+                .unwrap();
 
-        assert_eq!(workspace.anchor_root_uri(), "file:///active");
-        assert_eq!(workspace.primary().uri(), "file:///active");
+        assert_eq!(workspace.primary(), &admitted);
+        assert!(workspace.admits_exact_root_hints(std::slice::from_ref(&alias_uri)));
+        assert!(!workspace.admits_exact_root_hints(&[canonical_uri, alias_uri]));
+        assert!(!workspace.admits_exact_root_hints(std::slice::from_ref(&outside_uri)));
+        for path in [alias.join("src/lib.rs"), alias.join("src/unsaved.rs")] {
+            assert_eq!(workspace.resolve_document(&uri(&path)), Ok(&admitted));
+        }
+        for path in [
+            outside.join("lib.rs"),
+            alias.join("escape/lib.rs"),
+            alias.clone(),
+        ] {
+            assert_eq!(
+                workspace.resolve_document(&uri(&path)),
+                Err(LspWorkspaceRouteError::OutsideAdmittedRoots),
+            );
+        }
+        // Repointing a presentation alias cannot move the admitted root.
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&outside, &alias).unwrap();
+        assert!(!workspace.admits_exact_root_hints(&[uri(&alias)]));
+        assert_eq!(
+            workspace.resolve_document(&uri(&alias.join("lib.rs"))),
+            Err(LspWorkspaceRouteError::OutsideAdmittedRoots),
+        );
     }
 
     #[cfg(unix)]

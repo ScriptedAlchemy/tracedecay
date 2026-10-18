@@ -83,12 +83,8 @@ pub enum SessionContractError {
     NoncontiguousDerivedEvidenceOrdinals,
     #[error("derived evidence endpoints do not match the ordered manifest")]
     DerivedEvidenceEndpointMismatch,
-    #[error("derived evidence session identity mismatches its members")]
-    DerivedEvidenceSessionMismatch,
     #[error("derived evidence authority must be derived_projection")]
     DerivedEvidenceAuthorityMismatch,
-    #[error("derived evidence member digest does not match membership")]
-    DerivedEvidenceMemberDigestMismatch,
 }
 
 macro_rules! session_string_id {

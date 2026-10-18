@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use serde_json::{Map, Value as JsonValue, json};
 use tracedecay_domain::{ComponentVersion, SanitizationReceiptV1, SanitizerDispositionV1};
@@ -6,27 +8,119 @@ use tracedecay_domain::{ComponentVersion, SanitizationReceiptV1, SanitizerDispos
 pub use crate::retrieval_content::derived_text_for_index;
 pub use crate::retrieval_content::derived_text_for_snippet;
 use crate::retrieval_content::projected_content_hash;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, PrivacyDetectorV1,
     bind_sanitized_lcm_payload_text, quarantine_lcm_payload_text, sanitize_lcm_payload_text,
     sanitize_provider_metadata_json, verify_sanitized_json_payload,
 };
-use tracedecay_store::SessionMessageRecord;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, Value, params};
+use tracedecay_store::{
+    INLINE_BODY_BYTES, SessionMessageRecord, StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL,
+    unpack_body,
+};
 
 use super::{
-    LcmError, LcmPayloadRef, LcmRawMessage, LcmRawMessageMetadata, LcmStorageKind, payload,
-    security,
+    LcmError, LcmPayloadRef, LcmRawMessage, LcmRawMessageMetadata, LcmStorageKind,
+    LcmSummarySourceRange, payload, security,
 };
 
 pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
-                    snippet_text, legacy_source, legacy_truncated, metadata_json";
+                    snippet_text, metadata_json,
+                    (SELECT encoding FROM session_canonical_bodies
+                      WHERE content_hash = lcm_raw_messages.content_hash),
+                    (SELECT body FROM session_canonical_bodies
+                      WHERE content_hash = lcm_raw_messages.content_hash),
+                    (SELECT uncompressed_bytes FROM session_canonical_bodies
+                      WHERE content_hash = lcm_raw_messages.content_hash)";
+fn record_select_columns(alias: &str, text: &str, metadata: &str) -> String {
+    format!(
+        "{alias}.provider, {alias}.message_id, {alias}.session_id, {alias}.role,
+         {alias}.timestamp, {alias}.ordinal, {text}, {alias}.kind, {alias}.model,
+         {alias}.tool_names, {alias}.source_path, {alias}.source_offset, {metadata}"
+    )
+}
+
+/// Provider metadata as read surfaces return it: the ingest-protection
+/// receipts are storage bookkeeping for the raw authority, not message
+/// metadata.
+fn served_metadata(alias: &str) -> String {
+    format!(
+        "CASE WHEN json_valid({alias}.metadata_json)
+              THEN NULLIF(json_remove({alias}.metadata_json, '$.ingest_protection'), '{{}}')
+              ELSE {alias}.metadata_json END"
+    )
+}
+
+/// Reads a message row as a [`SessionMessageRecord`] in its field order for
+/// search surfaces: the text is the bounded retrieval text (`index_text`),
+/// the stored body capped at [`crate::MAX_DERIVED_TEXT_CHARS`], or the
+/// placeholder of a body stored outside the row. Lossless bodies load through
+/// [`load_raw_message_by_identity`].
+pub fn message_record_select_columns(alias: &str) -> String {
+    record_select_columns(
+        alias,
+        &format!("{alias}.index_text"),
+        &served_metadata(alias),
+    )
+}
+
+/// Reads one message row as a [`SessionMessageRecord`] carrying its whole
+/// stored body, or the placeholder of a body stored outside the row.
+pub fn message_body_record_select_columns(alias: &str) -> String {
+    body_record_select_columns(alias, &served_metadata(alias))
+}
+
+/// Stored metadata retains the protection receipts for verification and re-ingestion.
+pub fn stored_message_record_select_columns(alias: &str) -> String {
+    body_record_select_columns(alias, &format!("{alias}.metadata_json"))
+}
+
+fn body_record_select_columns(alias: &str, metadata: &str) -> String {
+    let record = record_select_columns(
+        alias,
+        &format!("COALESCE({alias}.content, {alias}.placeholder_text, '')"),
+        metadata,
+    );
+    format!(
+        "{record}, {alias}.content, {alias}.storage_kind, {alias}.content_hash,
+        (SELECT encoding FROM session_canonical_bodies WHERE content_hash = {alias}.content_hash),
+        (SELECT body FROM session_canonical_bodies WHERE content_hash = {alias}.content_hash),
+        (SELECT uncompressed_bytes FROM session_canonical_bodies WHERE content_hash = {alias}.content_hash)"
+    )
+}
+
+/// Decodes the whole text carried by a body-record column list. External
+/// payloads keep their placeholder; missing or corrupt inline bodies fail closed.
+pub fn message_body_from_record_row(row: &Row, offset: i32) -> Result<String, LcmError> {
+    let kind: String = row.get(offset + 14)?;
+    match LcmStorageKind::from_db(&kind)
+        .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {kind}")))?
+    {
+        LcmStorageKind::External => Ok(row.get(offset + 6)?),
+        LcmStorageKind::Inline => {
+            if let Some(content) = row.get::<Option<String>>(offset + 13)? {
+                return Ok(content);
+            }
+            let hash: String = row.get(offset + 15)?;
+            let encoding = row
+                .get::<Option<String>>(offset + 16)?
+                .ok_or(LcmError::PayloadIntegrityMismatch)?;
+            let body = row
+                .get::<Option<Vec<u8>>>(offset + 17)?
+                .ok_or(LcmError::PayloadIntegrityMismatch)?;
+            let bytes = unpack_body(&hash, &encoding, &body, row.get(offset + 18)?)
+                .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+            String::from_utf8(bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)
+        }
+    }
+}
+
 pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
-                    '' AS snippet_text, legacy_source, legacy_truncated, metadata_json";
+                    '' AS snippet_text, metadata_json";
 
 pub fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, LcmError> {
     let storage_kind_text: String = row.get(9)?;
@@ -44,9 +138,7 @@ pub fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata,
         content_hash,
         storage_kind,
         payload_ref: row.get(10)?,
-        legacy_source: row.get::<i64>(12)? != 0,
-        legacy_truncated: row.get::<i64>(13)? != 0,
-        metadata_json: row.get(14)?,
+        metadata_json: row.get(12)?,
     })
 }
 
@@ -54,15 +146,15 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
     let metadata = message
         .metadata_json
         .as_deref()
-        .ok_or_else(|| LcmError::Db("missing LCM sanitization receipt".to_owned()))?;
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
     let metadata = serde_json::from_str::<JsonValue>(metadata)
-        .map_err(|_| LcmError::Db("invalid LCM sanitization metadata".to_owned()))?;
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     let receipt = metadata
         .get("ingest_protection")
         .and_then(|protection| protection.get("sanitization_receipt"))
-        .ok_or_else(|| LcmError::Db("missing LCM sanitization receipt".to_owned()))?;
-    let receipt: SanitizationReceiptV1 = serde_json::from_value(receipt.clone())
-        .map_err(|_| LcmError::Db("invalid LCM sanitization receipt".to_owned()))?;
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let receipt: SanitizationReceiptV1 =
+        serde_json::from_value(receipt.clone()).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     let expected_revision = ComponentVersion::new(LCM_PAYLOAD_SANITIZER_VERSION_V1)
         .map_err(|_| LcmError::Db("invalid canonical LCM sanitizer revision".to_owned()))?;
     if message.storage_kind == LcmStorageKind::Inline {
@@ -71,7 +163,7 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
             &receipt,
             &expected_revision,
         )
-        .map_err(|error| LcmError::Db(format!("invalid LCM sanitization receipt: {error}")))?;
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     } else {
         let quarantined = metadata
             .get("ingest_protection")
@@ -85,9 +177,7 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
             && receipt.disposition() == SanitizerDispositionV1::Quarantined
             && receipt.payload().is_none());
         if receipt.receipt().sanitizer_version() != &expected_revision || !disposition_is_valid {
-            return Err(LcmError::Db(
-                "invalid LCM sanitization receipt for external payload".to_owned(),
-            ));
+            return Err(LcmError::PayloadIntegrityMismatch);
         }
     }
     Ok(())
@@ -96,15 +186,11 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
 /// The decode + integrity phase of every LCM read: content hashing and
 /// receipt verification per row, separable in a profile from the enclosing
 /// query spans (span minus this ≈ SQLite evaluation and row transport).
-/// Substantive per call — SHA-256 over the full content — and bounded by the
+/// Substantive per call, SHA-256 over the full content, and bounded by the
 /// caller's page/session row count, so it is not an inner-loop micro-probe.
-#[hotpath::measure(label = "sessions.lcm.raw.verify_row")]
+#[tracing::instrument(name = "sessions.lcm.raw.verify_row", level = "trace", skip_all)]
 pub fn verified_raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
-    let verified = decode_verified_raw_message(row);
-    crate::metrics::record_lcm_raw_row_verified(
-        verified.as_ref().map(|message| message.content.len()).ok(),
-    );
-    verified
+    decode_verified_raw_message(row)
 }
 
 fn decode_verified_raw_message(row: &Row) -> Result<LcmRawMessage, LcmError> {
@@ -113,7 +199,10 @@ fn decode_verified_raw_message(row: &Row) -> Result<LcmRawMessage, LcmError> {
     let metadata = raw_message_metadata_from_row(row)?;
     let message = match metadata.storage_kind {
         LcmStorageKind::Inline => {
-            let inline_content = inline_content.ok_or(LcmError::PayloadIntegrityMismatch)?;
+            let inline_content = match inline_content {
+                Some(content) => content,
+                None => inline_content_from_canonical_body(row, &metadata.content_hash)?,
+            };
             metadata.with_verified_content(inline_content)?
         }
         // External rows hash the owning payload, while the raw-message
@@ -122,6 +211,37 @@ fn decode_verified_raw_message(row: &Row) -> Result<LcmRawMessage, LcmError> {
     };
     verify_raw_message_receipt(&message)?;
     Ok(message)
+}
+
+fn inline_content_from_canonical_body(row: &Row, content_hash: &str) -> Result<String, LcmError> {
+    let encoding = row
+        .get::<Option<String>>(13)?
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let blob = row
+        .get::<Option<Vec<u8>>>(14)?
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let bytes = unpack_body(content_hash, &encoding, &blob, row.get(15)?)
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    String::from_utf8(bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)
+}
+
+async fn persist_canonical_text(
+    conn: &(impl Executor + ?Sized),
+    text: &str,
+) -> Result<(), LcmError> {
+    let body = StoredCanonicalBody::pack(text.as_bytes())
+        .map_err(|error| LcmError::Db(format!("canonical body pack failed: {error}")))?;
+    conn.execute(
+        UPSERT_CANONICAL_BODY_SQL,
+        params![
+            body.content_hash.as_str(),
+            body.encoding,
+            body.blob.as_slice(),
+            body.uncompressed_bytes
+        ],
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn load_raw_message_by_identity(
@@ -137,7 +257,7 @@ pub async fn load_raw_message_by_identity(
          ORDER BY store_id
          LIMIT 2"
     );
-    let fetched = hotpath::future!(
+    let fetched = tracing::Instrument::instrument(
         async {
             let mut rows = conn
                 .query(&sql, params![provider, session_id, message_id])
@@ -148,7 +268,7 @@ pub async fn load_raw_message_by_identity(
             let duplicate = rows.next().await?.is_some();
             Ok(Some((row, duplicate)))
         },
-        label = "sessions.lcm.hydrate.fetch"
+        tracing::trace_span!("sessions.lcm.hydrate.fetch"),
     )
     .await?;
     let Some((row, duplicate)) = fetched else {
@@ -159,9 +279,59 @@ pub async fn load_raw_message_by_identity(
             "duplicate raw messages for exact provider/session/message identity".to_string(),
         ));
     }
-    hotpath::measure_block!("sessions.lcm.hydrate.redact", {
+    {
+        let _span = tracing::trace_span!("sessions.lcm.hydrate.redact").entered();
         verified_raw_message_from_row(&row).map(Some)
-    })
+    }
+}
+
+pub async fn load_raw_message_store_ids_by_identity(
+    conn: &(impl QueryExecutor + ?Sized),
+    identities: &[(String, String)],
+) -> Result<BTreeMap<(String, String), i64>, LcmError> {
+    if identities.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut message_ids_by_provider = BTreeMap::<&str, Vec<&str>>::new();
+    for (provider, message_id) in identities {
+        message_ids_by_provider
+            .entry(provider)
+            .or_default()
+            .push(message_id);
+    }
+    let mut values = Vec::with_capacity(identities.len() + message_ids_by_provider.len());
+    let predicate = message_ids_by_provider
+        .into_iter()
+        .map(|(provider, message_ids)| {
+            values.push(Value::Text(provider.to_owned()));
+            let provider_param = values.len();
+            let message_params = message_ids
+                .into_iter()
+                .map(|message_id| {
+                    values.push(Value::Text(message_id.to_owned()));
+                    format!("?{}", values.len())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("(provider = ?{provider_param} AND message_id IN ({message_params}))")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let sql = format!(
+        "SELECT provider, message_id, store_id
+         FROM lcm_raw_messages
+         WHERE {predicate}"
+    );
+    let mut rows = tracing::Instrument::instrument(
+        conn.query(&sql, values),
+        tracing::trace_span!("sessions.lcm.grep.store_ids"),
+    )
+    .await?;
+    let mut store_ids = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        store_ids.insert((row.get(0)?, row.get(1)?), row.get(2)?);
+    }
+    Ok(store_ids)
 }
 
 pub async fn load_raw_message_by_store_id(
@@ -173,19 +343,20 @@ pub async fn load_raw_message_by_store_id(
          FROM lcm_raw_messages
          WHERE store_id = ?1"
     );
-    let row = hotpath::future!(
+    let row = tracing::Instrument::instrument(
         async {
             let mut rows = conn.query(&sql, params![store_id]).await?;
             rows.next()
                 .await?
                 .ok_or(LcmError::SummarySourceNotOwnedBySession)
         },
-        label = "sessions.lcm.hydrate.fetch"
+        tracing::trace_span!("sessions.lcm.hydrate.fetch"),
     )
     .await?;
-    hotpath::measure_block!("sessions.lcm.hydrate.redact", {
+    {
+        let _span = tracing::trace_span!("sessions.lcm.hydrate.redact").entered();
         verified_raw_message_from_row(&row)
-    })
+    }
 }
 
 pub struct RawMessageUpsert {
@@ -213,6 +384,48 @@ struct PreparedMessage {
 pub struct StagedRawMessageIngest {
     prepared: PreparedMessage,
     whole_message: Option<StagedWholeMessage>,
+}
+
+impl StagedRawMessageIngest {
+    /// The whole-message payload this staged row will reference after commit.
+    pub fn external_payload_ref(&self) -> Option<&str> {
+        self.whole_message
+            .as_ref()
+            .map(|message| message.payload_ref.payload_ref.as_str())
+    }
+
+    /// Keeps the sanitized provider metadata beneath a whole-message payload
+    /// envelope. Re-ingest of an already stored row uses this so provider
+    /// fields survive; the new envelope keys always win over provider keys.
+    pub fn retain_provider_metadata(&mut self) -> Result<(), LcmError> {
+        let (Some(whole_message), Some(provider)) = (
+            self.whole_message.as_mut(),
+            self.prepared.metadata_json.as_deref(),
+        ) else {
+            return Ok(());
+        };
+        let encoding = |error: serde_json::Error| {
+            LcmError::Db(format!("LCM metadata encoding failed: {error}"))
+        };
+        let mut merged: JsonValue = serde_json::from_str(provider).map_err(encoding)?;
+        let envelope: JsonValue =
+            serde_json::from_str(&whole_message.metadata_json).map_err(encoding)?;
+        let (Some(merged_object), JsonValue::Object(envelope)) = (merged.as_object_mut(), envelope)
+        else {
+            return Err(LcmError::Db(
+                "LCM metadata must be a JSON object".to_owned(),
+            ));
+        };
+        for (key, value) in envelope {
+            // The provider side carries the same body receipt plus the
+            // metadata receipt, so its protection envelope is the superset.
+            if key != "ingest_protection" || !merged_object.contains_key(&key) {
+                merged_object.insert(key, value);
+            }
+        }
+        whole_message.metadata_json = merged.to_string();
+        Ok(())
+    }
 }
 
 struct StagedWholeMessage {
@@ -262,20 +475,23 @@ fn externalized_payload_placeholder(
     field_path: &str,
     quarantine_reason: Option<&str>,
 ) -> String {
-    if let Some(reason) = quarantine_reason {
-        return format!(
-            "[Externalized LCM ingest payload: assistant output quarantined; kind={}; reason={}; field={}; chars={}; bytes={}; ref={}]",
+    let body = payload_placeholder_body(payload_ref, field_path);
+    match quarantine_reason {
+        Some(reason) => format!(
+            "[Externalized LCM ingest payload: assistant output quarantined; kind={}; reason={}; {body}]",
             safe_placeholder_metadata(&payload_ref.kind),
             safe_placeholder_metadata(reason),
-            safe_placeholder_metadata(field_path),
-            payload_ref.char_count,
-            payload_ref.byte_count,
-            payload_ref.payload_ref
-        );
+        ),
+        None => format!(
+            "[Externalized LCM ingest payload: kind={}; {body}]",
+            safe_placeholder_metadata(&payload_ref.kind)
+        ),
     }
+}
+
+fn payload_placeholder_body(payload_ref: &LcmPayloadRef, field_path: &str) -> String {
     format!(
-        "[Externalized LCM ingest payload: kind={}; field={}; chars={}; bytes={}; ref={}]",
-        safe_placeholder_metadata(&payload_ref.kind),
+        "field={}; chars={}; bytes={}; ref={}",
         safe_placeholder_metadata(field_path),
         payload_ref.char_count,
         payload_ref.byte_count,
@@ -289,16 +505,63 @@ async fn upsert_inline_raw_message(
     text: &str,
     metadata_json: Option<&str>,
 ) -> Result<(), LcmError> {
-    let snippet = derived_text_for_snippet(text);
-    let index = derived_text_for_index(text);
     let content_hash = projected_content_hash(text);
-    conn.execute(
-        "INSERT INTO lcm_raw_messages (
+    if text.len() >= INLINE_BODY_BYTES {
+        persist_canonical_text(conn, text).await?;
+        let placeholder = derived_text_for_snippet(text);
+        return upsert_owned_raw_message(
+            conn,
+            message,
+            OwnedRawMessageWrite {
+                content: None,
+                content_hash: content_hash.as_str(),
+                storage_kind: LcmStorageKind::Inline,
+                payload_ref: None,
+                placeholder: Some(placeholder.as_str()),
+                metadata_json,
+            },
+        )
+        .await;
+    }
+    upsert_owned_raw_message(
+        conn,
+        message,
+        OwnedRawMessageWrite {
+            content: Some(text),
+            content_hash: content_hash.as_str(),
+            storage_kind: LcmStorageKind::Inline,
+            payload_ref: None,
+            placeholder: None,
+            metadata_json,
+        },
+    )
+    .await
+}
+
+struct OwnedRawMessageWrite<'a> {
+    content: Option<&'a str>,
+    content_hash: &'a str,
+    storage_kind: LcmStorageKind,
+    payload_ref: Option<&'a str>,
+    /// Retrieval text of a body stored outside the row; the snippet and
+    /// index columns derive from it in place of `content`.
+    placeholder: Option<&'a str>,
+    metadata_json: Option<&'a str>,
+}
+
+async fn upsert_owned_raw_message(
+    conn: &(impl Executor + ?Sized),
+    message: &SessionMessageRecord,
+    write: OwnedRawMessageWrite<'_>,
+) -> Result<(), LcmError> {
+    let affected = conn
+        .execute(
+            "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
-            content, content_hash, storage_kind, payload_ref, snippet_text,
-            index_text, legacy_source, legacy_truncated, metadata_json
+            content, content_hash, storage_kind, payload_ref, placeholder_text,
+            metadata_json, kind, model, tool_names, source_path, source_offset
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11, 0, 0, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(provider, message_id) DO UPDATE SET
             session_id = excluded.session_id,
             role = excluded.role,
@@ -308,28 +571,265 @@ async fn upsert_inline_raw_message(
             content_hash = excluded.content_hash,
             storage_kind = excluded.storage_kind,
             payload_ref = excluded.payload_ref,
-            snippet_text = excluded.snippet_text,
-            index_text = excluded.index_text,
-            legacy_source = 0,
-            legacy_truncated = 0,
-            metadata_json = excluded.metadata_json",
-        params![
-            message.provider.as_str(),
-            message.message_id.as_str(),
-            message.session_id.as_str(),
-            message.role.as_str(),
-            message.ordinal,
-            message.timestamp,
-            text,
-            content_hash.as_str(),
-            LcmStorageKind::Inline.as_str(),
-            snippet.as_str(),
-            index.as_str(),
-            metadata_json,
-        ],
+            placeholder_text = excluded.placeholder_text,
+            metadata_json = excluded.metadata_json,
+            kind = excluded.kind,
+            model = excluded.model,
+            tool_names = excluded.tool_names,
+            source_path = excluded.source_path,
+            source_offset = excluded.source_offset
+         WHERE lcm_raw_messages.session_id = excluded.session_id",
+            params![
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                message.session_id.as_str(),
+                message.role.as_str(),
+                message.ordinal,
+                message.timestamp,
+                write.content,
+                write.content_hash,
+                write.storage_kind.as_str(),
+                write.payload_ref,
+                write.placeholder,
+                write.metadata_json,
+                message.kind.as_deref(),
+                message.model.as_deref(),
+                message.tool_names.as_deref(),
+                message.source_path.as_deref(),
+                message.source_offset,
+            ],
+        )
+        .await?;
+    if affected != 1 {
+        return Err(LcmError::SummarySourceNotOwnedBySession);
+    }
+    Ok(())
+}
+
+async fn persist_raw_predecessor_range(
+    conn: &(impl Executor + ?Sized),
+    message: &SessionMessageRecord,
+) -> Result<(), LcmError> {
+    persist_raw_predecessor_range_for_identity(
+        conn,
+        message.provider.as_str(),
+        message.message_id.as_str(),
+    )
+    .await
+}
+
+/// Predecessor-range upsert for the `current` rows selected by a predicate.
+///
+/// Captures each selected message's preceding conversational interval: first
+/// and last earlier raw rows whose roles are not policy anchors. Compression
+/// pins `system`/`developer` rows separately as `pinned_anchors` and drops
+/// them from the backlog native evidence is compared against, so those
+/// leading/trailing markers must not widen this interval. A session whose
+/// only earlier rows are policy anchors has no predecessor, and the joins
+/// yield no row. The predicate only narrows which `current` rows are
+/// visited; every visited row is written with its own identity and relation.
+///
+/// Ingest writes one range per message, so the statement text is built once
+/// per predicate ([`PREDECESSOR_RANGE_UPSERT_BY_IDENTITY`],
+/// [`PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE`]) instead of per call.
+fn predecessor_range_upsert_sql(current_predicate: &str) -> String {
+    let role_list = crate::compression_policy::policy_anchor_role_sql_in_list();
+    let bound = |order: &str| {
+        format!(
+            "SELECT candidate.store_id
+                FROM lcm_raw_messages AS candidate
+                WHERE candidate.provider = current.provider
+                  AND candidate.session_id = current.session_id
+                  AND candidate.store_id < current.store_id
+                  AND candidate.role NOT IN ({role_list})
+                ORDER BY candidate.store_id{order}
+                LIMIT 1"
+        )
+    };
+    let first = bound("");
+    let prior = bound(" DESC");
+    format!(
+        "INSERT INTO lcm_raw_predecessor_ranges (
+             provider, message_id, session_id, from_store_id, to_store_id
+         )
+         SELECT current.provider, current.message_id, current.session_id,
+                first.store_id, prior.store_id
+         FROM lcm_raw_messages AS current
+         JOIN lcm_raw_messages AS first
+           ON first.store_id = (
+                {first}
+           )
+         JOIN lcm_raw_messages AS prior
+           ON prior.store_id = (
+                {prior}
+           )
+         WHERE {current_predicate}
+         ON CONFLICT(provider, message_id) DO UPDATE SET
+             session_id = excluded.session_id,
+             from_store_id = excluded.from_store_id,
+             to_store_id = excluded.to_store_id"
+    )
+}
+
+static PREDECESSOR_RANGE_UPSERT_BY_IDENTITY: LazyLock<String> = LazyLock::new(|| {
+    predecessor_range_upsert_sql("current.provider = ?1 AND current.message_id = ?2")
+});
+
+static PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE: LazyLock<String> = LazyLock::new(|| {
+    predecessor_range_upsert_sql("current.store_id > ?1 AND current.store_id <= ?2")
+});
+
+/// Typed state of one raw message's conversational predecessor interval.
+///
+/// An absent row in `lcm_raw_predecessor_ranges` is ambiguous on its own, so
+/// this resolves it against the same policy-anchor authority the interval is
+/// derived from: a message with no earlier conversational row genuinely has
+/// no interval, while a message that is owed one and has none is unavailable
+/// (the background rewrite has not reached it, or the range was lost).
+/// Neither may be published as summary provenance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LcmPredecessorRangeState {
+    Interval(LcmSummarySourceRange),
+    NoPredecessor,
+    Unavailable,
+}
+
+impl LcmPredecessorRangeState {
+    pub fn interval(&self) -> Option<&LcmSummarySourceRange> {
+        match self {
+            Self::Interval(interval) => Some(interval),
+            Self::NoPredecessor | Self::Unavailable => None,
+        }
+    }
+
+    /// Stable reason label for the states that carry no interval.
+    pub fn absent_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Interval(_) => None,
+            Self::NoPredecessor => Some("no_predecessor_interval"),
+            Self::Unavailable => Some("predecessor_interval_unavailable"),
+        }
+    }
+}
+
+static PREDECESSOR_RANGE_STATE_SQL: LazyLock<String> = LazyLock::new(|| {
+    let role_list = crate::compression_policy::policy_anchor_role_sql_in_list();
+    format!(
+        "SELECT range.from_store_id, range.to_store_id,
+                EXISTS (
+                    SELECT 1
+                    FROM lcm_raw_messages AS earlier
+                    WHERE earlier.provider = ?1
+                      AND earlier.session_id = ?2
+                      AND earlier.store_id < ?3
+                      AND earlier.role NOT IN ({role_list})
+                )
+         FROM lcm_raw_messages AS owner
+         LEFT JOIN lcm_raw_predecessor_ranges AS range
+           ON range.provider = owner.provider
+          AND range.message_id = owner.message_id
+          AND range.session_id = owner.session_id
+         WHERE owner.provider = ?1 AND owner.session_id = ?2
+           AND owner.store_id = ?3
+         LIMIT 1"
+    )
+});
+
+/// Resolves the persisted predecessor interval of one raw message.
+pub async fn predecessor_range_state(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    store_id: i64,
+) -> Result<LcmPredecessorRangeState, LcmError> {
+    let mut rows = conn
+        .query(
+            PREDECESSOR_RANGE_STATE_SQL.as_str(),
+            params![provider, session_id, store_id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        // The store id names no row in the raw authority, so no interval can
+        // be derived for it at all.
+        return Ok(LcmPredecessorRangeState::Unavailable);
+    };
+    let from_store_id = row.get::<Option<i64>>(0)?;
+    let to_store_id = row.get::<Option<i64>>(1)?;
+    let owes_interval = row.get::<i64>(2)? != 0;
+    Ok(match (from_store_id, to_store_id) {
+        (Some(from_store_id), Some(to_store_id)) => {
+            LcmPredecessorRangeState::Interval(LcmSummarySourceRange {
+                from_store_id,
+                to_store_id,
+            })
+        }
+        _ if owes_interval => LcmPredecessorRangeState::Unavailable,
+        _ => LcmPredecessorRangeState::NoPredecessor,
+    })
+}
+
+pub(crate) async fn persist_raw_predecessor_range_for_identity(
+    conn: &(impl Executor + ?Sized),
+    provider: &str,
+    message_id: &str,
+) -> Result<(), LcmError> {
+    // Capture the exact preceding raw interval in the same ingest transaction.
+    conn.execute(
+        PREDECESSOR_RANGE_UPSERT_BY_IDENTITY.as_str(),
+        params![provider, message_id],
     )
     .await?;
     Ok(())
+}
+
+/// Same per-message write as [`persist_raw_predecessor_range_for_identity`]
+/// for every raw message with `from_store_id < store_id <= to_store_id`, in
+/// one statement. Used by the summary-queue backfill, whose page is exactly
+/// such a store-id range.
+pub(crate) async fn persist_raw_predecessor_ranges_for_store_range(
+    conn: &(impl Executor + ?Sized),
+    from_store_id_exclusive: i64,
+    to_store_id_inclusive: i64,
+) -> Result<(), LcmError> {
+    conn.execute(
+        PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE.as_str(),
+        params![from_store_id_exclusive, to_store_id_inclusive],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Rewrite persisted predecessor ranges for one keyset page of raw messages.
+///
+/// Rows ingested before the policy-anchor filter hold unfiltered intervals,
+/// and a row whose only earlier rows are policy anchors must lose its range
+/// entirely rather than keep a widened one, so the page deletes the selected
+/// rows' ranges before re-deriving them from the current authority. Both
+/// statements are set-based over the same keyset window.
+pub(crate) async fn rewrite_predecessor_ranges_for_store_range(
+    conn: &(impl Executor + ?Sized),
+    from_store_id_exclusive: i64,
+    to_store_id_inclusive: i64,
+) -> Result<(), LcmError> {
+    conn.execute(
+        "DELETE FROM lcm_raw_predecessor_ranges
+         WHERE EXISTS (
+             SELECT 1
+             FROM lcm_raw_messages AS owner
+             WHERE owner.provider = lcm_raw_predecessor_ranges.provider
+               AND owner.message_id = lcm_raw_predecessor_ranges.message_id
+               AND owner.store_id > ?1
+               AND owner.store_id <= ?2
+         )",
+        params![from_store_id_exclusive, to_store_id_inclusive],
+    )
+    .await?;
+    persist_raw_predecessor_ranges_for_store_range(
+        conn,
+        from_store_id_exclusive,
+        to_store_id_inclusive,
+    )
+    .await
 }
 
 fn externalized_payload_metadata(
@@ -353,18 +853,31 @@ fn externalized_payload_metadata(
 /// Observation capture already privacy-sanitized and size-bounded the payload
 /// before it became durable, so the projected row stays inline; this binds a
 /// fresh content receipt to the stored text so the canonical raw-read
-/// authority ([`load_raw_message`]) can hydrate observation-projected
+/// authority (`load_raw_message`) can hydrate observation-projected
 /// messages instead of refusing them as receipt-less rows.
 pub async fn upsert_projection_raw_message(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
 ) -> Result<(), LcmError> {
+    let stored = projection_stored_message(message)?;
+    upsert_inline_raw_message(conn, message, &stored.text, stored.metadata_json.as_deref()).await
+}
+
+/// The message row exactly as [`upsert_projection_raw_message`] stores it and
+/// [`stored_message_record_select_columns`] reads it back: the body is the sanitized
+/// text and the metadata carries its ingest-protection receipts. Verifiers
+/// compare a stored row against this rather than against the unsanitized
+/// projection record.
+pub fn projection_stored_message(
+    message: &SessionMessageRecord,
+) -> Result<SessionMessageRecord, LcmError> {
     // `sanitize_lcm_payload_text` is a pure function of the text: a failure
     // here is a deterministic content refusal, not a storage fault, and must
     // never be retried as one.
     let sanitization = sanitize_lcm_payload_text(&message.text).map_err(|error| {
         LcmError::SanitizationRefused {
             reason: format!("LCM privacy sanitization failed: {error}"),
+            quarantined: error.is_quarantine_verdict(),
         }
     })?;
     let mut prepared = PreparedMessage {
@@ -378,14 +891,12 @@ pub async fn upsert_projection_raw_message(
         quarantine_kind: None,
         pending_payload_refs: Vec::new(),
     };
-    prepared.metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &prepared)?;
-    upsert_inline_raw_message(
-        conn,
-        message,
-        &prepared.text,
-        prepared.metadata_json.as_deref(),
-    )
-    .await
+    let metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &prepared)?;
+    Ok(SessionMessageRecord {
+        text: std::mem::take(&mut prepared.text),
+        metadata_json,
+        ..message.clone()
+    })
 }
 
 pub fn stage_raw_message_with_payload_tracked(
@@ -437,9 +948,7 @@ pub async fn commit_staged_raw_message(
     message: &SessionMessageRecord,
     staged: StagedRawMessageIngest,
 ) -> Result<RawMessageUpsert, LcmError> {
-    for payload_ref in &staged.prepared.pending_payload_refs {
-        payload::upsert_payload_metadata(conn, payload_ref).await?;
-    }
+    payload::upsert_payload_metadata_batch(conn, &staged.prepared.pending_payload_refs).await?;
     let Some(whole_message) = staged.whole_message else {
         let projection_text = derived_text_for_index(&staged.prepared.text);
         upsert_inline_raw_message(
@@ -449,49 +958,27 @@ pub async fn commit_staged_raw_message(
             staged.prepared.metadata_json.as_deref(),
         )
         .await?;
+        persist_raw_predecessor_range(conn, message).await?;
         return Ok(RawMessageUpsert {
             projection_text,
             projection_metadata_json: staged.prepared.metadata_json,
         });
     };
     payload::upsert_payload_metadata(conn, &whole_message.payload_ref).await?;
-    conn.execute(
-        "INSERT INTO lcm_raw_messages (
-            provider, message_id, session_id, role, ordinal, timestamp,
-            content, content_hash, storage_kind, payload_ref, snippet_text,
-            index_text, legacy_source, legacy_truncated, metadata_json
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, 0, 0, ?12)
-         ON CONFLICT(provider, message_id) DO UPDATE SET
-            session_id = excluded.session_id,
-            role = excluded.role,
-            ordinal = excluded.ordinal,
-            timestamp = excluded.timestamp,
-            content = excluded.content,
-            content_hash = excluded.content_hash,
-            storage_kind = excluded.storage_kind,
-            payload_ref = excluded.payload_ref,
-            snippet_text = excluded.snippet_text,
-            index_text = excluded.index_text,
-            legacy_source = 0,
-            legacy_truncated = 0,
-            metadata_json = excluded.metadata_json",
-        params![
-            message.provider.as_str(),
-            message.message_id.as_str(),
-            message.session_id.as_str(),
-            message.role.as_str(),
-            message.ordinal,
-            message.timestamp,
-            whole_message.payload_ref.content_hash.as_str(),
-            LcmStorageKind::External.as_str(),
-            whole_message.payload_ref.payload_ref.as_str(),
-            whole_message.placeholder.as_str(),
-            whole_message.placeholder.as_str(),
-            whole_message.metadata_json.as_str(),
-        ],
+    upsert_owned_raw_message(
+        conn,
+        message,
+        OwnedRawMessageWrite {
+            content: None,
+            content_hash: whole_message.payload_ref.content_hash.as_str(),
+            storage_kind: LcmStorageKind::External,
+            payload_ref: Some(whole_message.payload_ref.payload_ref.as_str()),
+            placeholder: Some(whole_message.placeholder.as_str()),
+            metadata_json: Some(whole_message.metadata_json.as_str()),
+        },
     )
     .await?;
+    persist_raw_predecessor_range(conn, message).await?;
     Ok(RawMessageUpsert {
         projection_text: whole_message.placeholder,
         projection_metadata_json: Some(whole_message.metadata_json),
@@ -556,6 +1043,7 @@ fn prepare_message(
     let initial = sanitize_lcm_payload_text(&message.text).map_err(|error| {
         LcmError::SanitizationRefused {
             reason: format!("LCM privacy sanitization failed: {error}"),
+            quarantined: error.is_quarantine_verdict(),
         }
     })?;
     let mut text = initial.sanitized_text().to_owned();
@@ -801,14 +1289,7 @@ fn externalize_spans(
 }
 
 fn ingest_payload_placeholder(payload_ref: &LcmPayloadRef, field_path: &str) -> String {
-    format!(
-        "[Externalized LCM ingest payload: kind={}; field={}; chars={}; bytes={}; ref={}]",
-        safe_placeholder_metadata(&payload_ref.kind),
-        safe_placeholder_metadata(field_path),
-        payload_ref.char_count,
-        payload_ref.byte_count,
-        payload_ref.payload_ref
-    )
+    externalized_payload_placeholder(payload_ref, field_path, None)
 }
 
 fn safe_placeholder_metadata(value: &str) -> String {
@@ -838,7 +1319,7 @@ const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 /// Returns whether the current detector would change this provider metadata.
 ///
 /// This is the at-rest rescan's change probe for the exact transformation
-/// ingest applies through [`protected_metadata_json`]: metadata persisted
+/// ingest applies through `protected_metadata_json`: metadata persisted
 /// under older detector rules is dirty when re-sanitizing it under the
 /// current rules yields a different document. A document the sanitizer
 /// refuses to evaluate is a typed refusal, never implicitly clean.
@@ -848,14 +1329,51 @@ pub fn provider_metadata_requires_resanitization(
     let original = serde_json::from_str::<JsonValue>(provider_metadata_json).map_err(|error| {
         LcmError::SanitizationRefused {
             reason: format!("stored LCM provider metadata is not valid JSON: {error}"),
+            quarantined: false,
         }
     })?;
     let sanitized =
         sanitize_provider_metadata_json(provider_metadata_json, MAX_PROVIDER_METADATA_BYTES)
             .ok_or_else(|| LcmError::SanitizationRefused {
                 reason: "LCM metadata sanitization failed".to_owned(),
+                quarantined: false,
             })?;
     Ok(sanitized != original)
+}
+
+/// Re-sanitizes provider metadata while preserving the independently bound body receipt.
+pub fn resanitize_stored_provider_metadata_json(stored: &str) -> Result<String, LcmError> {
+    let refused = |reason: String| LcmError::SanitizationRefused {
+        reason,
+        quarantined: false,
+    };
+    let mut metadata: JsonValue = serde_json::from_str(stored)
+        .map_err(|error| refused(format!("invalid stored metadata: {error}")))?;
+    let object = metadata
+        .as_object_mut()
+        .ok_or_else(|| refused("stored metadata must be an object".to_owned()))?;
+    let mut protection = object
+        .remove("ingest_protection")
+        .and_then(|value| value.as_object().cloned())
+        .ok_or_else(|| refused("stored metadata has no protection envelope".to_owned()))?;
+    let original = serde_json::to_string(&metadata).map_err(|error| refused(error.to_string()))?;
+    let mut sanitized = sanitize_provider_metadata_json(&original, MAX_PROVIDER_METADATA_BYTES)
+        .ok_or_else(|| refused("metadata sanitization failed".to_owned()))?;
+    let encoded = serde_json::to_string(&sanitized).map_err(|error| refused(error.to_string()))?;
+    let receipt = bind_sanitized_lcm_payload_text(&original, &encoded)
+        .map_err(|error| refused(error.to_string()))?;
+    protection.insert(
+        "metadata_sanitization_receipt".to_owned(),
+        serde_json::to_value(receipt.receipt()).map_err(|error| refused(error.to_string()))?,
+    );
+    sanitized
+        .as_object_mut()
+        .ok_or_else(|| refused("sanitized metadata must be an object".to_owned()))?
+        .insert(
+            "ingest_protection".to_owned(),
+            JsonValue::Object(protection),
+        );
+    serde_json::to_string(&sanitized).map_err(|error| refused(error.to_string()))
 }
 
 /// Pure function of the provider metadata bytes: every failure is a
@@ -864,7 +1382,10 @@ fn protected_metadata_json(
     original: Option<&str>,
     prepared: &PreparedMessage,
 ) -> Result<Option<String>, LcmError> {
-    let refused = |reason: String| LcmError::SanitizationRefused { reason };
+    let refused = |reason: String| LcmError::SanitizationRefused {
+        reason,
+        quarantined: false,
+    };
     let mut metadata =
         sanitize_provider_metadata_json(original.unwrap_or("{}"), MAX_PROVIDER_METADATA_BYTES)
             .ok_or_else(|| refused("LCM metadata sanitization failed".to_owned()))?;

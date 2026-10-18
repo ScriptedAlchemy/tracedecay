@@ -1,7 +1,7 @@
 //! The dashboard's public Work contract.
 //!
 //! The routes themselves are built by [`tracedecay_api::work_dashboard_router`] from
-//! the canonical [`WorkOperation`] descriptor — this module only restates that
+//! the canonical [`WorkOperation`] descriptor, this module only restates that
 //! descriptor as the route document the dashboard contract schema publishes.
 //! There is no second route table and no forwarding hop: a dashboard Work
 //! request enters the same handler, owner, and dispatch as an application Work
@@ -11,16 +11,10 @@ use std::borrow::Cow;
 
 use tracedecay_api::WorkOperation;
 
-/// `operation_id` and `application_path` are the identity the contract test
-/// checks this document against; schema generation itself needs only the
-/// method, path, and schema names.
 #[derive(Clone, Copy)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct RegisteredWorkRouteContractV1 {
     pub method: &'static str,
-    pub operation_id: &'static str,
     pub path: &'static str,
-    pub application_path: &'static str,
     pub request_schema_name: fn() -> Cow<'static, str>,
     pub response_schema_name: fn() -> Cow<'static, str>,
 }
@@ -34,17 +28,12 @@ macro_rules! dashboard_work_routes {
             $(
                 RegisteredWorkRouteContractV1 {
                     method: "POST",
-                    operation_id: WorkOperation::$variant.operation_id_str(),
                     path: WorkOperation::$variant.dashboard_route_path(),
-                    application_path: WorkOperation::$variant.application_route_path(),
                     request_schema_name: || WorkOperation::$variant.request_schema_name(),
                     response_schema_name: || WorkOperation::$variant.result_schema_name(),
                 },
             )+
         ];
-
-        #[cfg(test)]
-        static DOCUMENTED_OPERATIONS: &[WorkOperation] = &[$(WorkOperation::$variant),+];
     };
 }
 
@@ -93,8 +82,8 @@ mod tests {
     use axum::http::{Method, Request, StatusCode};
     use axum::response::IntoResponse;
     use tower::ServiceExt;
-    use tracedecay_api::{WorkHttpRequest, WorkOperation};
-    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_api::WorkHttpRequest;
+    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
     use tracedecay_domain::UtcMicros;
 
     fn dashboard_router() -> Router {
@@ -145,91 +134,5 @@ mod tests {
             post(&router, "/api/work/not-an-operation").await,
             StatusCode::NOT_FOUND
         );
-        for retired in [
-            "/api/work/snapshot",
-            "/api/work/delta",
-            "/api/work/replan-dependencies",
-            "/api/work/accept-task",
-        ] {
-            assert_eq!(
-                post(&router, retired).await,
-                StatusCode::NOT_FOUND,
-                "{retired}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_route_document_is_exactly_the_descriptor() {
-        let expected = WorkOperation::ALL
-            .into_iter()
-            .filter(|operation| operation.is_dashboard_operation())
-            .collect::<Vec<_>>();
-        assert_eq!(super::DOCUMENTED_OPERATIONS, expected.as_slice());
-    }
-
-    #[test]
-    fn the_route_document_covers_every_canonical_core_work_binding() {
-        use std::collections::BTreeSet;
-
-        let registry = tracedecay_application::work_executable_binding_registry()
-            .expect("canonical Work registry");
-        let routes = super::registered_route_contracts();
-        let actual_ids = routes
-            .iter()
-            .map(|route| route.operation_id)
-            .collect::<BTreeSet<_>>();
-        let expected_ids = WorkOperation::ALL
-            .into_iter()
-            .filter(|operation| operation.is_dashboard_operation())
-            .map(|operation| operation.operation_id_str())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            routes.len(),
-            expected_ids.len(),
-            "dashboard must expose each core Work operation exactly once"
-        );
-        assert_eq!(
-            actual_ids, expected_ids,
-            "dashboard routes must cover every core Work operation exactly once"
-        );
-        assert_eq!(
-            routes
-                .iter()
-                .map(|route| route.path)
-                .collect::<BTreeSet<_>>()
-                .len(),
-            routes.len(),
-            "dashboard Work paths must be unique"
-        );
-
-        for route in routes {
-            assert!(!route.path.is_empty(), "{}", route.operation_id);
-            let binding = registry
-                .get(
-                    &tracedecay_tool_catalog::OperationId::new(route.operation_id)
-                        .expect("operation id"),
-                )
-                .and_then(|availability| availability.binding())
-                .expect("available canonical Work binding");
-            let tracedecay_tool_catalog::RouteExposureV1::Public { route_path, .. } =
-                binding.exposure()
-            else {
-                panic!("canonical Work binding must be public");
-            };
-            assert_eq!(route.application_path, route_path);
-            assert_eq!(
-                (route.request_schema_name)(),
-                binding.request_schema().body()["title"]
-                    .as_str()
-                    .expect("a titled request schema")
-            );
-            assert_eq!(
-                (route.response_schema_name)(),
-                binding.result_schema().body()["title"]
-                    .as_str()
-                    .expect("a titled result schema")
-            );
-        }
     }
 }

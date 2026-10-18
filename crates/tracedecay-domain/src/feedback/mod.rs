@@ -944,6 +944,7 @@ fn safe_diagnostic_code_description_uri(
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackDiagnosticProducerV1 {
+    CodeDiagnostic,
     GitHubReview,
     CiLocalization,
     Proximity,
@@ -1317,15 +1318,21 @@ impl FeedbackCycleResultV1 {
                     field: "feedback finding provider state",
                 });
             }
-            if let Some(projection) = finding.diagnostic_projection.as_ref()
-                && !self.advisory_provider_states.iter().any(|provider| {
-                    provider.producer == projection.producer
-                        && provider.state == finding.provider_state
-                })
-            {
-                return Err(DomainError::NonCanonical {
-                    field: "feedback advisory finding producer state",
-                });
+            if let Some(projection) = finding.diagnostic_projection.as_ref() {
+                let producer_state_is_represented = match projection.producer {
+                    FeedbackDiagnosticProducerV1::CodeDiagnostic => {
+                        self.provider_states.contains(&finding.provider_state)
+                    }
+                    _ => self.advisory_provider_states.iter().any(|provider| {
+                        provider.producer == projection.producer
+                            && provider.state == finding.provider_state
+                    }),
+                };
+                if !producer_state_is_represented {
+                    return Err(DomainError::NonCanonical {
+                        field: "feedback diagnostic finding producer state",
+                    });
+                }
             }
         }
         if self.findings.iter().enumerate().any(|(index, finding)| {
@@ -1580,17 +1587,9 @@ impl FeedbackCycleObservationV1 {
 mod tests {
     use super::*;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use crate::test_fixtures::digest;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use crate::test_fixtures::id;
 
     fn request(content: FeedbackContentIdentityV1) -> FeedbackCycleRequestV1 {
         FeedbackCycleRequestV1::new(
@@ -1650,18 +1649,6 @@ mod tests {
     }
 
     #[test]
-    fn overlay_requests_are_session_only() {
-        let request = request(FeedbackContentIdentityV1::EphemeralOverlay {
-            session_id: id("session.fixture"),
-            owner_client_id: id("client.fixture"),
-            agent_id: None,
-            document_version: 1,
-            overlay_digest: digest('c'),
-        });
-        assert_eq!(request.durability(), FeedbackDurabilityV1::SessionOnly);
-    }
-
-    #[test]
     fn clean_results_require_complete_provider_coverage() {
         let request = request(FeedbackContentIdentityV1::SavedContent {
             generation_digest: digest('c'),
@@ -1683,7 +1670,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(
+        assert_eq!(
             FeedbackCycleResultV1::new(
                 &request,
                 FeedbackCycleTerminationV1::Clean,
@@ -1697,7 +1684,9 @@ mod tests {
                 0,
                 0,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "clean feedback cycle result is not canonical"
         );
     }
 }

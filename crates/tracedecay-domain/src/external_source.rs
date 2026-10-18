@@ -630,10 +630,6 @@ impl SourceEventV1 {
         &self.binding
     }
 
-    pub fn stable_signal_digest(&self) -> &ManifestDigest {
-        &self.stable_signal_digest
-    }
-
     pub fn event_key(&self) -> &SourceEventKeyV1 {
         &self.event_key
     }
@@ -1025,10 +1021,6 @@ impl SourceProviderEnvelopeV1 {
 
     pub fn coverage(&self) -> SourceCoverageV1 {
         self.coverage
-    }
-
-    pub fn sanitized_envelope_digest(&self) -> &ManifestDigest {
-        &self.sanitized_envelope_digest
     }
 
     pub fn envelope_digest(&self) -> &ManifestDigest {
@@ -1689,9 +1681,7 @@ impl SourceSnapshotCompletionV1 {
 mod tests {
     use super::*;
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-    }
+    use crate::test_fixtures::digest;
 
     fn binding_identity() -> SourceBindingIdentityV1 {
         SourceBindingIdentityV1 {

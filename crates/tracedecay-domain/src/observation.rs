@@ -3,8 +3,8 @@
 //! These values deliberately exclude filesystem paths, ambient working
 //! directories, database row identifiers, and provider display labels from
 //! durable identity. Capture code resolves those runtime details before it
-//! constructs this boundary. Claude compatibility aliases preserve the legacy
-//! wire format while later providers retain typed native ordering evidence.
+//! constructs this boundary. Every provider uses one observation-id domain,
+//! one receipt domain, and a provider field on the source identity.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -23,16 +23,14 @@ use crate::research::{
     SanitizationReceiptRefV1, SessionId, canonical_json_bytes,
 };
 
-const CLAUDE_OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.claude.observation.v1\0";
 const OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.observation.v1\0";
-const LEGACY_IDEMPOTENCY_KEY_DOMAIN: &[u8] = b"tracedecay.claude.idempotency.v1\0";
-const CLAUDE_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.claude.receipt.v1\0";
+const OBSERVATION_POSITIONAL_OCCURRENCE_DOMAIN: &[u8] =
+    b"tracedecay.observation.positional-occurrence.v1\0";
 const OBSERVATION_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.observation.receipt.v1\0";
-const CLAUDE_RECEIPT_SENSITIVITY_DOMAIN: &[u8] = b"sensitivity\0";
-const CLAUDE_RECEIPT_RAW_DIGEST_DOMAIN: &[u8] = b"raw-record-sha256\0";
-const CLAUDE_RECEIPT_SANITIZED_PAYLOAD_DOMAIN: &[u8] = b"sanitized-payload-digest\0";
-const CLAUDE_RECEIPT_NO_PAYLOAD_DOMAIN: &[u8] = b"no-durable-payload\0";
-const CLAUDE_RECEIPT_ID_PREFIX: &str = "privacy.claude.v1.";
+const RECEIPT_SENSITIVITY_DOMAIN: &[u8] = b"sensitivity\0";
+const RECEIPT_RAW_DIGEST_DOMAIN: &[u8] = b"raw-record-sha256\0";
+const RECEIPT_SANITIZED_PAYLOAD_DOMAIN: &[u8] = b"sanitized-payload-digest\0";
+const RECEIPT_NO_PAYLOAD_DOMAIN: &[u8] = b"no-durable-payload\0";
 const OBSERVATION_RECEIPT_ID_PREFIX: &str = "privacy.observation.v1.";
 
 /// Shared parse and canonical-envelope limits for one observation record.
@@ -80,8 +78,6 @@ pub enum ObservationContractError {
     ReceiptPayloadMismatch,
     #[error("serialized observation identity does not match its source evidence")]
     ObservationIdentityMismatch,
-    #[error("serialized idempotency key does not match its source evidence")]
-    IdempotencyKeyMismatch,
     #[error("canonical observation envelope version is unsupported")]
     UnsupportedCanonicalEnvelopeVersion,
     #[error("canonical observation record kind is invalid")]
@@ -113,10 +109,6 @@ pub enum ObservationContractError {
 )]
 #[serde(deny_unknown_fields)]
 pub struct ObservationSourceIdentityV1 {
-    #[serde(
-        default = "default_observation_provider",
-        skip_serializing_if = "is_default_observation_provider"
-    )]
     provider: ProviderId,
     session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,12 +202,6 @@ fn default_observation_provider() -> ProviderId {
     ProviderId::new("claude").expect("the built-in Claude provider id is valid")
 }
 
-fn is_default_observation_provider(provider: &ProviderId) -> bool {
-    provider.as_str() == "claude"
-}
-
-pub type ClaudeSourceIdentityV1 = ObservationSourceIdentityV1;
-
 /// Authoritative ownership scope selected before persistence.
 #[derive(
     Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -235,6 +221,223 @@ impl ObservationScopeV1 {
                 .map_err(|_| ObservationContractError::InvalidProjectScope),
         }
     }
+}
+
+/// Native Cline-family streams share a task while retaining independent order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClineTranscriptStream {
+    ApiHistory,
+    UiMessages,
+}
+
+impl ClineTranscriptStream {
+    pub fn source_identity(
+        self,
+        provider: ProviderId,
+        session_id: SessionId,
+    ) -> Result<ObservationSourceIdentityV1, ObservationContractError> {
+        if !matches!(provider.as_str(), "cline" | "roo-code" | "kilo") {
+            return Err(ObservationContractError::InvalidSourceIdentity);
+        }
+        let key = match self {
+            Self::ApiHistory => "api_history",
+            Self::UiMessages => "ui_messages",
+        };
+        ObservationSourceIdentityV1::for_provider_source(
+            provider,
+            session_id,
+            SessionId::new(key).map_err(|_| ObservationContractError::InvalidSourceIdentity)?,
+        )
+    }
+
+    pub fn from_source(source: &ObservationSourceIdentityV1) -> Option<Self> {
+        if !matches!(source.provider().as_str(), "cline" | "roo-code" | "kilo") {
+            return None;
+        }
+        match source.explicit_source_key()?.as_str() {
+            "api_history" => Some(Self::ApiHistory),
+            "ui_messages" => Some(Self::UiMessages),
+            _ => None,
+        }
+    }
+}
+
+/// Verified replacement of a historical combined Cline record by its native stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClineNativeSourceTransition {
+    predecessor_id: CanonicalObservationIdV1,
+    successor_id: CanonicalObservationIdV1,
+    predecessor_payload: PayloadReferenceV1,
+    successor_payload: PayloadReferenceV1,
+    stream: ClineTranscriptStream,
+}
+
+impl ClineNativeSourceTransition {
+    pub fn predecessor_id(&self) -> &CanonicalObservationIdV1 {
+        &self.predecessor_id
+    }
+    pub fn successor_id(&self) -> &CanonicalObservationIdV1 {
+        &self.successor_id
+    }
+    pub fn predecessor_payload(&self) -> &PayloadReferenceV1 {
+        &self.predecessor_payload
+    }
+    pub fn successor_payload(&self) -> &PayloadReferenceV1 {
+        &self.successor_payload
+    }
+    pub fn stream(&self) -> ClineTranscriptStream {
+        self.stream
+    }
+}
+
+/// Stable task/native-object identity used before native stream cursors split.
+/// This derives a lookup key; it neither fabricates nor persists an observation.
+pub fn cline_task_native_observation_id(
+    observation: &DurableObservationV1,
+) -> Result<Option<CanonicalObservationIdV1>, ObservationContractError> {
+    if ClineTranscriptStream::from_source(observation.source()).is_none() {
+        return Ok(None);
+    }
+    let identity = observation.identity();
+    let Some(native_record_id) = identity.native_record_id() else {
+        return Ok(None);
+    };
+    let task_source = ObservationSourceIdentityV1::for_provider(
+        observation.source().provider().clone(),
+        observation.source().session_id().clone(),
+    )?;
+    let material = ObservationIdentityMaterialV1::for_native_record(
+        task_source,
+        observation.scope().clone(),
+        identity.generation(),
+        identity.position(),
+        identity.ordering_domain(),
+        native_record_id.clone(),
+    )?;
+    CanonicalObservationIdV1::derive(&material).map(Some)
+}
+
+/// Locates the native-stream candidate for an immutable combined-source record.
+/// A matching key is not transition authority; callers must verify both records.
+pub fn cline_native_source_successor_id(
+    observation: &DurableObservationV1,
+) -> Result<Option<CanonicalObservationIdV1>, ObservationContractError> {
+    if observation.source().explicit_source_key().is_some()
+        || !matches!(
+            observation.source().provider().as_str(),
+            "cline" | "roo-code" | "kilo"
+        )
+    {
+        return Ok(None);
+    }
+    let Some(native_id) = observation.identity().native_record_id() else {
+        return Ok(None);
+    };
+    let Ok(envelope) = CanonicalObservationEnvelopeV1::deserialize(observation.payload()) else {
+        return Ok(None);
+    };
+    let stream = match envelope.native_record_kind() {
+        "message" => ClineTranscriptStream::ApiHistory,
+        "usage" => ClineTranscriptStream::UiMessages,
+        _ => return Ok(None),
+    };
+    let identity = observation.identity();
+    let material = ObservationIdentityMaterialV1::for_native_record(
+        stream.source_identity(
+            observation.source().provider().clone(),
+            observation.source().session_id().clone(),
+        )?,
+        observation.scope().clone(),
+        identity.generation(),
+        identity.position(),
+        identity.ordering_domain(),
+        native_id.clone(),
+    )?;
+    CanonicalObservationIdV1::derive(&material).map(Some)
+}
+
+/// Permits only the evidenced combined-file to native-file source transition.
+/// Authored facts, native identity, scope and sanitization remain exact; a UI
+/// record may lose only the API-array length formerly added to its position.
+pub fn prove_cline_native_source_transition(
+    predecessor: &DurableObservationV1,
+    successor: &DurableObservationV1,
+) -> Option<ClineNativeSourceTransition> {
+    let stream = ClineTranscriptStream::from_source(successor.source())?;
+    let prior = predecessor.identity();
+    let next = successor.identity();
+    let native_id = next.native_record_id()?;
+    if predecessor.source().explicit_source_key().is_some()
+        || predecessor.source().provider() != successor.source().provider()
+        || predecessor.source().session_id() != successor.source().session_id()
+        || predecessor.scope() != successor.scope()
+        || prior.native_record_id() != Some(native_id)
+        || prior.ordering_domain() != ObservationOrderingDomainV1::SnapshotOrder
+        || next.ordering_domain() != ObservationOrderingDomainV1::SnapshotOrder
+        || predecessor.retention_class() != successor.retention_class()
+        || predecessor.receipt().disposition() != successor.receipt().disposition()
+        || predecessor.receipt().sensitivity() != successor.receipt().sensitivity()
+        || predecessor.receipt().receipt().sanitizer_version()
+            != successor.receipt().receipt().sanitizer_version()
+        || cline_task_native_observation_id(successor)
+            .ok()
+            .flatten()
+            .as_ref()
+            != Some(predecessor.observation_id())
+    {
+        return None;
+    }
+    let mut old = CanonicalObservationEnvelopeV1::deserialize(predecessor.payload()).ok()?;
+    let new = CanonicalObservationEnvelopeV1::deserialize(successor.payload()).ok()?;
+    if serde_json::to_value(&old).ok().as_ref() != Some(predecessor.payload())
+        || serde_json::to_value(&new).ok().as_ref() != Some(successor.payload())
+        || old.provider() != predecessor.source().provider()
+        || new.provider() != successor.source().provider()
+        || old.stable_record_id() != native_id
+        || new.stable_record_id() != native_id
+        || old.relations().session_id() != predecessor.source().session_id()
+        || new.relations().session_id() != successor.source().session_id()
+        || old.evidence.ordering_domain != ObservationOrderingDomainV1::SnapshotOrder
+        || new.evidence.ordering_domain != ObservationOrderingDomainV1::SnapshotOrder
+        || old.evidence.range != prior.position()
+        || new.evidence.range != next.position()
+    {
+        return None;
+    }
+    match stream {
+        ClineTranscriptStream::ApiHistory => {
+            if old.native_record_kind() != "message" || new.native_record_kind() != "message" {
+                return None;
+            }
+        }
+        ClineTranscriptStream::UiMessages => {
+            if old.native_record_kind() != "usage"
+                || new.native_record_kind() != "usage"
+                || !old.facts().iter().all(|fact| {
+                    matches!(fact, CanonicalObservationFactV1::UncorrelatedUsage { .. })
+                })
+                || old.evidence.range.end() - old.evidence.range.start() != 1
+                || new.evidence.range.end() - new.evidence.range.start() != 1
+                || old.evidence.range.start() < new.evidence.range.start()
+                || old.evidence.native_sequence != Some(old.evidence.range.start())
+                || new.evidence.native_sequence != Some(new.evidence.range.start())
+            {
+                return None;
+            }
+            old.evidence.range = new.evidence.range;
+            old.evidence.native_sequence = new.evidence.native_sequence;
+        }
+    }
+    if old != new {
+        return None;
+    }
+    Some(ClineNativeSourceTransition {
+        predecessor_id: predecessor.observation_id().clone(),
+        successor_id: successor.observation_id().clone(),
+        predecessor_payload: predecessor.payload_reference().clone(),
+        successor_payload: successor.payload_reference().clone(),
+        stream,
+    })
 }
 
 /// Native ordering authority for one provider source.
@@ -300,8 +503,6 @@ impl<'de> Deserialize<'de> for ObservationSourceGenerationV1 {
     }
 }
 
-pub type ClaudeFileGenerationV1 = ObservationSourceGenerationV1;
-
 /// Exact byte span of one complete Claude JSONL record.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObservationSourceRangeV1 {
@@ -343,7 +544,47 @@ impl<'de> Deserialize<'de> for ObservationSourceRangeV1 {
     }
 }
 
-pub type ClaudeByteRangeV1 = ObservationSourceRangeV1;
+/// A collision-only identity refinement for a provider record that has no
+/// native record id.
+///
+/// The primary identity remains the provider's existing content identity.
+/// This value is used only after that primary identity collides with a
+/// different source occurrence, binding the fallback to the exact native
+/// ordering range without weakening ordinary replay identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObservationPositionalOccurrenceV1 {
+    position: ObservationSourceRangeV1,
+}
+
+impl ObservationPositionalOccurrenceV1 {
+    pub fn new(position: ObservationSourceRangeV1) -> Self {
+        Self { position }
+    }
+
+    pub fn position(self) -> ObservationSourceRangeV1 {
+        self.position
+    }
+
+    pub fn disambiguate(
+        self,
+        primary: &ObservationId,
+    ) -> Result<ObservationId, ObservationContractError> {
+        #[derive(Serialize)]
+        struct PositionalOccurrence<'a> {
+            primary: &'a ObservationId,
+            position: ObservationSourceRangeV1,
+        }
+
+        ObservationId::new(domain_digest(
+            OBSERVATION_POSITIONAL_OCCURRENCE_DOMAIN,
+            &PositionalOccurrence {
+                primary,
+                position: self.position,
+            },
+        )?)
+        .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)
+    }
+}
 
 /// Stable source evidence used to derive one observation identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -459,8 +700,6 @@ impl ObservationIdentityMaterialV1 {
     }
 }
 
-pub type ClaudeObservationIdentityMaterialV1 = ObservationIdentityMaterialV1;
-
 crate::canonical_text::validated_string_newtype!(
     schema,
     ObservationContractError,
@@ -469,35 +708,11 @@ crate::canonical_text::validated_string_newtype!(
     PayloadDigestV1 => "payload digest",
 );
 
-pub type IdempotencyKeyV1 = CanonicalObservationIdV1;
-
 impl CanonicalObservationIdV1 {
     pub fn derive(
         material: &ObservationIdentityMaterialV1,
     ) -> Result<Self, ObservationContractError> {
         material.validate()?;
-        if is_default_observation_provider(material.source().provider()) {
-            if let Some(native_record_id) = material.native_record_id() {
-                #[derive(Serialize)]
-                struct ClaudeNativeIdentity<'a> {
-                    provider: &'a ProviderId,
-                    session_id: &'a SessionId,
-                    scope: &'a ObservationScopeV1,
-                    native_record_id: &'a ObservationId,
-                }
-
-                return Self::new(domain_digest(
-                    CLAUDE_OBSERVATION_ID_DOMAIN,
-                    &ClaudeNativeIdentity {
-                        provider: material.source().provider(),
-                        session_id: material.source().session_id(),
-                        scope: material.scope(),
-                        native_record_id,
-                    },
-                )?);
-            }
-            return Self::new(domain_digest(CLAUDE_OBSERVATION_ID_DOMAIN, material)?);
-        }
         if let Some(native_record_id) = material.native_record_id() {
             #[derive(Serialize)]
             struct NativeIdentity<'a> {
@@ -536,22 +751,6 @@ pub struct ObservationSourceCursorV1 {
 }
 
 impl ObservationSourceCursorV1 {
-    /// Constructs the legacy-compatible file-byte cursor.
-    pub fn new(
-        source: ObservationSourceIdentityV1,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-        byte_offset: u64,
-    ) -> Result<Self, ObservationContractError> {
-        Self::for_ordering(
-            source,
-            scope,
-            generation,
-            ObservationOrderingDomainV1::FileBytes,
-            byte_offset,
-        )
-    }
-
     pub fn for_ordering(
         source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
@@ -627,9 +826,20 @@ impl ObservationSourceCursorV1 {
         }
         Ok(self.byte_offset.cmp(&other.byte_offset))
     }
-}
 
-pub type ClaudeSourceCursorV1 = ObservationSourceCursorV1;
+    /// Whether this cursor already owns `frontier` on the same ordering authority.
+    ///
+    /// Progress is the position. Resume fingerprints are checkpoints, not
+    /// coverage, so two owners of the same bytes can disagree there without
+    /// either being behind the frontier.
+    #[must_use]
+    pub fn reached(&self, frontier: &Self) -> bool {
+        matches!(
+            self.checked_cmp(frontier),
+            Ok(Ordering::Equal | Ordering::Greater)
+        )
+    }
+}
 
 pub const CANONICAL_OBSERVATION_ENVELOPE_VERSION_V1: u16 = 1;
 
@@ -825,9 +1035,9 @@ fn visit_structure_value(values: &mut usize, depth: usize) -> Result<(), Structu
     Ok(())
 }
 
-/// Counts the JSON values `serde_json` serialization would produce — with the
+/// Counts the JSON values `serde_json` serialization would produce, with the
 /// same per-node accounting as [`validate_value_structure`] over the
-/// materialized tree — without building that tree.
+/// materialized tree, without building that tree.
 ///
 /// Each `serialize_*` case mirrors how `serde_json::value::Serializer`
 /// constructs a `Value`: scalars are one value, sequences and maps are one
@@ -836,6 +1046,36 @@ fn visit_structure_value(values: &mut usize, depth: usize) -> Result<(), Structu
 struct StructureLimitSerializer<'count> {
     values: &'count mut usize,
     depth: usize,
+}
+
+impl<'count> StructureLimitSerializer<'count> {
+    fn count_node(self) -> Result<(), StructureLimitError> {
+        visit_structure_value(self.values, self.depth)
+    }
+
+    fn descend(
+        self,
+        extra_ancestor: bool,
+    ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
+        visit_structure_value(self.values, self.depth)?;
+        if extra_ancestor {
+            visit_structure_value(self.values, self.depth + 1)?;
+        }
+        Ok(StructureLimitCompound {
+            values: self.values,
+            child_depth: self.depth + 1 + usize::from(extra_ancestor),
+        })
+    }
+}
+
+macro_rules! count_scalar {
+    ($($name:ident ( $($params:tt)* );)*) => {
+        $(
+            fn $name(self, $($params)*) -> Result<(), StructureLimitError> {
+                self.count_node()
+            }
+        )*
+    };
 }
 
 impl<'count> serde::Serializer for StructureLimitSerializer<'count> {
@@ -850,64 +1090,30 @@ impl<'count> serde::Serializer for StructureLimitSerializer<'count> {
     type SerializeStruct = StructureLimitCompound<'count>;
     type SerializeStructVariant = StructureLimitCompound<'count>;
 
-    fn serialize_bool(self, _value: bool) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_i8(self, _value: i8) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_i16(self, _value: i16) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_i32(self, _value: i32) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_i64(self, _value: i64) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_i128(self, _value: i128) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_u8(self, _value: u8) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_u16(self, _value: u16) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_u32(self, _value: u32) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_u64(self, _value: u64) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_u128(self, _value: u128) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_f32(self, _value: f32) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_f64(self, _value: f64) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_char(self, _value: char) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_str(self, _value: &str) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
+    count_scalar! {
+        serialize_bool(_value: bool);
+        serialize_i8(_value: i8);
+        serialize_i16(_value: i16);
+        serialize_i32(_value: i32);
+        serialize_i64(_value: i64);
+        serialize_i128(_value: i128);
+        serialize_u8(_value: u8);
+        serialize_u16(_value: u16);
+        serialize_u32(_value: u32);
+        serialize_u64(_value: u64);
+        serialize_u128(_value: u128);
+        serialize_f32(_value: f32);
+        serialize_f64(_value: f64);
+        serialize_char(_value: char);
+        serialize_str(_value: &str);
+        serialize_none();
+        serialize_unit();
+        serialize_unit_struct(_name: &'static str);
+        serialize_unit_variant(
+            _name: &'static str,
+            _variant_index: u32,
+            _variant: &'static str
+        );
     }
 
     fn serialize_bytes(self, value: &[u8]) -> Result<(), StructureLimitError> {
@@ -919,32 +1125,11 @@ impl<'count> serde::Serializer for StructureLimitSerializer<'count> {
         Ok(())
     }
 
-    fn serialize_none(self) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
     fn serialize_some<T>(self, value: &T) -> Result<(), StructureLimitError>
     where
         T: ?Sized + Serialize,
     {
         value.serialize(self)
-    }
-
-    fn serialize_unit(self) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_unit_struct(self, _name: &'static str) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
-    }
-
-    fn serialize_unit_variant(
-        self,
-        _name: &'static str,
-        _variant_index: u32,
-        _variant: &'static str,
-    ) -> Result<(), StructureLimitError> {
-        visit_structure_value(self.values, self.depth)
     }
 
     fn serialize_newtype_struct<T>(
@@ -979,11 +1164,7 @@ impl<'count> serde::Serializer for StructureLimitSerializer<'count> {
         self,
         _len: Option<usize>,
     ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
-        visit_structure_value(self.values, self.depth)?;
-        Ok(StructureLimitCompound {
-            values: self.values,
-            child_depth: self.depth + 1,
-        })
+        self.descend(false)
     }
 
     fn serialize_tuple(
@@ -1008,23 +1189,14 @@ impl<'count> serde::Serializer for StructureLimitSerializer<'count> {
         _variant: &'static str,
         _len: usize,
     ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
-        visit_structure_value(self.values, self.depth)?;
-        visit_structure_value(self.values, self.depth + 1)?;
-        Ok(StructureLimitCompound {
-            values: self.values,
-            child_depth: self.depth + 2,
-        })
+        self.descend(true)
     }
 
     fn serialize_map(
         self,
         _len: Option<usize>,
     ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
-        visit_structure_value(self.values, self.depth)?;
-        Ok(StructureLimitCompound {
-            values: self.values,
-            child_depth: self.depth + 1,
-        })
+        self.descend(false)
     }
 
     fn serialize_struct(
@@ -1032,11 +1204,7 @@ impl<'count> serde::Serializer for StructureLimitSerializer<'count> {
         _name: &'static str,
         _len: usize,
     ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
-        visit_structure_value(self.values, self.depth)?;
-        Ok(StructureLimitCompound {
-            values: self.values,
-            child_depth: self.depth + 1,
-        })
+        self.descend(false)
     }
 
     fn serialize_struct_variant(
@@ -1046,19 +1214,14 @@ impl<'count> serde::Serializer for StructureLimitSerializer<'count> {
         _variant: &'static str,
         _len: usize,
     ) -> Result<StructureLimitCompound<'count>, StructureLimitError> {
-        visit_structure_value(self.values, self.depth)?;
-        visit_structure_value(self.values, self.depth + 1)?;
-        Ok(StructureLimitCompound {
-            values: self.values,
-            child_depth: self.depth + 2,
-        })
+        self.descend(true)
     }
 
     fn collect_str<T>(self, _value: &T) -> Result<(), StructureLimitError>
     where
         T: ?Sized + fmt::Display,
     {
-        visit_structure_value(self.values, self.depth)
+        self.count_node()
     }
 }
 
@@ -1081,69 +1244,30 @@ impl StructureLimitCompound<'_> {
     }
 }
 
-impl serde::ser::SerializeSeq for StructureLimitCompound<'_> {
-    type Ok = ();
-    type Error = StructureLimitError;
+macro_rules! impl_structure_limit_compound {
+    ($trait:path, $method:ident, ($($extra:tt)*)) => {
+        impl $trait for StructureLimitCompound<'_> {
+            type Ok = ();
+            type Error = StructureLimitError;
 
-    fn serialize_element<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
-    where
-        T: ?Sized + Serialize,
-    {
-        self.child(value)
-    }
+            fn $method<T>(&mut self, $($extra)* value: &T) -> Result<(), StructureLimitError>
+            where
+                T: ?Sized + Serialize,
+            {
+                self.child(value)
+            }
 
-    fn end(self) -> Result<(), StructureLimitError> {
-        Ok(())
-    }
+            fn end(self) -> Result<(), StructureLimitError> {
+                Ok(())
+            }
+        }
+    };
 }
 
-impl serde::ser::SerializeTuple for StructureLimitCompound<'_> {
-    type Ok = ();
-    type Error = StructureLimitError;
-
-    fn serialize_element<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
-    where
-        T: ?Sized + Serialize,
-    {
-        self.child(value)
-    }
-
-    fn end(self) -> Result<(), StructureLimitError> {
-        Ok(())
-    }
-}
-
-impl serde::ser::SerializeTupleStruct for StructureLimitCompound<'_> {
-    type Ok = ();
-    type Error = StructureLimitError;
-
-    fn serialize_field<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
-    where
-        T: ?Sized + Serialize,
-    {
-        self.child(value)
-    }
-
-    fn end(self) -> Result<(), StructureLimitError> {
-        Ok(())
-    }
-}
-
-impl serde::ser::SerializeTupleVariant for StructureLimitCompound<'_> {
-    type Ok = ();
-    type Error = StructureLimitError;
-
-    fn serialize_field<T>(&mut self, value: &T) -> Result<(), StructureLimitError>
-    where
-        T: ?Sized + Serialize,
-    {
-        self.child(value)
-    }
-
-    fn end(self) -> Result<(), StructureLimitError> {
-        Ok(())
-    }
-}
+impl_structure_limit_compound!(serde::ser::SerializeSeq, serialize_element, ());
+impl_structure_limit_compound!(serde::ser::SerializeTuple, serialize_element, ());
+impl_structure_limit_compound!(serde::ser::SerializeTupleStruct, serialize_field, ());
+impl_structure_limit_compound!(serde::ser::SerializeTupleVariant, serialize_field, ());
 
 impl serde::ser::SerializeMap for StructureLimitCompound<'_> {
     type Ok = ();
@@ -1169,45 +1293,16 @@ impl serde::ser::SerializeMap for StructureLimitCompound<'_> {
     }
 }
 
-impl serde::ser::SerializeStruct for StructureLimitCompound<'_> {
-    type Ok = ();
-    type Error = StructureLimitError;
-
-    fn serialize_field<T>(
-        &mut self,
-        _key: &'static str,
-        value: &T,
-    ) -> Result<(), StructureLimitError>
-    where
-        T: ?Sized + Serialize,
-    {
-        self.child(value)
-    }
-
-    fn end(self) -> Result<(), StructureLimitError> {
-        Ok(())
-    }
-}
-
-impl serde::ser::SerializeStructVariant for StructureLimitCompound<'_> {
-    type Ok = ();
-    type Error = StructureLimitError;
-
-    fn serialize_field<T>(
-        &mut self,
-        _key: &'static str,
-        value: &T,
-    ) -> Result<(), StructureLimitError>
-    where
-        T: ?Sized + Serialize,
-    {
-        self.child(value)
-    }
-
-    fn end(self) -> Result<(), StructureLimitError> {
-        Ok(())
-    }
-}
+impl_structure_limit_compound!(
+    serde::ser::SerializeStruct,
+    serialize_field,
+    (_key: &'static str,)
+);
+impl_structure_limit_compound!(
+    serde::ser::SerializeStructVariant,
+    serialize_field,
+    (_key: &'static str,)
+);
 
 struct ByteLimitWriter {
     written: usize,
@@ -1261,6 +1356,10 @@ pub struct CanonicalObservationRelationsV1 {
     agent_id: Option<ObservationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_agent_id: Option<ObservationId>,
+    /// The host's id of the parent-session tool call that spawned this
+    /// session, as recorded by the host on the child side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_tool_use_id: Option<ObservationId>,
 }
 
 impl CanonicalObservationRelationsV1 {
@@ -1274,6 +1373,7 @@ impl CanonicalObservationRelationsV1 {
             parent_message_id: None,
             agent_id: None,
             parent_agent_id: None,
+            parent_tool_use_id: None,
         }
     }
 
@@ -1319,6 +1419,12 @@ impl CanonicalObservationRelationsV1 {
         self
     }
 
+    #[must_use]
+    pub fn with_parent_tool_use_id(mut self, parent_tool_use_id: ObservationId) -> Self {
+        self.parent_tool_use_id = Some(parent_tool_use_id);
+        self
+    }
+
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
@@ -1351,6 +1457,10 @@ impl CanonicalObservationRelationsV1 {
         self.parent_agent_id.as_ref()
     }
 
+    pub fn parent_tool_use_id(&self) -> Option<&ObservationId> {
+        self.parent_tool_use_id.as_ref()
+    }
+
     fn validate(&self) -> Result<(), ObservationContractError> {
         self.session_id
             .validate()
@@ -1367,6 +1477,7 @@ impl CanonicalObservationRelationsV1 {
             self.parent_message_id.as_ref(),
             self.agent_id.as_ref(),
             self.parent_agent_id.as_ref(),
+            self.parent_tool_use_id.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -1466,6 +1577,20 @@ pub enum CanonicalMessageRoleV1 {
     Unknown,
 }
 
+impl CanonicalMessageRoleV1 {
+    /// Role label written into canonical projections. It is the serde name so
+    /// projection and the wire encoding cannot drift.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Tool => "tool",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalReasoningVisibilityV1 {
@@ -1473,6 +1598,30 @@ pub enum CanonicalReasoningVisibilityV1 {
     Redacted,
     Unavailable,
     NotApplicable,
+}
+
+impl CanonicalMessageRoleV1 {
+    /// Exact canonical role label. Host aliases (`developer`, `model`,
+    /// `_system_prompt`) stay at the host boundary so a foreign alias cannot
+    /// become a role for every provider.
+    pub fn from_known_label(value: &str) -> Option<Self> {
+        match value {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "system" => Some(Self::System),
+            "tool" => Some(Self::Tool),
+            _ => None,
+        }
+    }
+
+    /// `from_known_label`, with every other label recorded as [`Self::Unknown`]
+    /// instead of refused.
+    pub fn from_wire_label(value: &str) -> Self {
+        match Self::from_known_label(value) {
+            Some(role) => role,
+            None => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1735,7 +1884,8 @@ pub enum CanonicalObservationFactV1 {
         timestamp: Option<i64>,
     },
     ToolInvocation {
-        invocation_id: ObservationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<ObservationId>,
         name: String,
         arguments: Value,
     },
@@ -1745,6 +1895,12 @@ pub enum CanonicalObservationFactV1 {
         content: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         success: Option<bool>,
+        /// Real served-output count. Missing means the count was never recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_count: Option<u64>,
+        /// Whether the served output was trimmed or truncated. Missing means unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cut: Option<bool>,
     },
     ProviderUsage {
         model: ProviderUsageModelV1,
@@ -1884,9 +2040,11 @@ impl CanonicalObservationFactV1 {
                 name,
                 ..
             } => {
-                invocation_id
-                    .validate()
-                    .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+                if let Some(invocation_id) = invocation_id {
+                    invocation_id
+                        .validate()
+                        .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+                }
                 validate_canonical_label(name)?;
             }
             Self::ToolResult {
@@ -1992,6 +2150,118 @@ impl CanonicalObservationFactV1 {
         }
         Ok(())
     }
+
+    /// One tool-result fact with the served token count and cut marker.
+    pub fn tool_result(
+        invocation_id: Option<ObservationId>,
+        content: Value,
+        success: Option<bool>,
+        token_count: Option<u64>,
+        cut: Option<bool>,
+    ) -> Self {
+        Self::ToolResult {
+            invocation_id,
+            content,
+            success,
+            token_count,
+            cut,
+        }
+    }
+}
+
+/// Visible text the unused-context meter scores for one stored tool result.
+///
+/// `Null` means the host stored no output. Provider and MCP envelopes unwrap
+/// to their text blocks; any other text, JSON included, counts exactly as
+/// served, because re-serializing it would change what the agent read.
+pub fn tool_result_visible_text(content: &Value) -> Option<String> {
+    match content {
+        Value::Null => None,
+        Value::String(text) => Some(
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .as_ref()
+                .and_then(envelope_text)
+                .unwrap_or_else(|| text.clone()),
+        ),
+        other => Some(envelope_text(other).unwrap_or_else(|| other.to_string())),
+    }
+}
+
+/// Text of an `output`/`content`/`text` envelope field or a list of text blocks.
+fn envelope_text(value: &Value) -> Option<String> {
+    let inner = match value {
+        Value::Object(map) => ["output", "content", "text"]
+            .into_iter()
+            .find_map(|key| map.get(key))?,
+        other => other,
+    };
+    match inner {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let texts: Vec<&str> = items
+                .iter()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+/// Evidence that served tool output was or was not trimmed or truncated.
+///
+/// `Some(true)` means an explicit truncation marker was found: the
+/// `# Truncated Response` header, a `truncated: true` field, or a host
+/// warning such as Codex's `truncated output` notice. `Some(false)` means an
+/// explicit `truncated: false` field declared the output complete. `None`
+/// means there is no evidence for either state; opaque output must not be
+/// certified uncut.
+pub fn tool_result_output_cut_state(content: &Value) -> Option<bool> {
+    match content {
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+        Value::String(text) => {
+            let trimmed = text.trim_start();
+            if trimmed.starts_with("# Truncated Response") {
+                return Some(true);
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(text) {
+                return tool_result_output_cut_state(&value);
+            }
+            native_truncation_marker(trimmed).then_some(true)
+        }
+        Value::Array(items) => items
+            .iter()
+            .map(tool_result_output_cut_state)
+            .fold(None, combine_cut_state),
+        Value::Object(map) => {
+            let declared = map.get("truncated").and_then(Value::as_bool);
+            ["content", "output", "text", "preview", "metadata"]
+                .into_iter()
+                .filter_map(|key| map.get(key))
+                .map(tool_result_output_cut_state)
+                .fold(declared, combine_cut_state)
+        }
+    }
+}
+
+/// The strongest of two cut states: truncation evidence wins over an explicit
+/// complete marker, and either wins over unknown.
+fn combine_cut_state(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+/// Native notices begin the result or follow its execution header; source
+/// excerpts can contain the same words without being truncated.
+fn native_truncation_marker(text: &str) -> bool {
+    let notice = "Warning: truncated output (original token count:";
+    text.starts_with(notice)
+        || ((text.starts_with("Wall time:") || text.starts_with("Chunk ID:"))
+            && text.contains(&format!("\nOutput:\n{notice}")))
 }
 
 fn validate_canonical_label(value: &str) -> Result<(), ObservationContractError> {
@@ -2077,39 +2347,8 @@ impl SensitivityV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReceiptDomainV1 {
-    Claude,
-    Observation,
-}
-
-impl ReceiptDomainV1 {
-    fn for_identity(identity: &ObservationIdentityMaterialV1) -> Self {
-        if is_default_observation_provider(identity.source().provider()) {
-            Self::Claude
-        } else {
-            Self::Observation
-        }
-    }
-
-    fn digest_domain(self) -> &'static [u8] {
-        match self {
-            Self::Claude => CLAUDE_RECEIPT_ID_DOMAIN,
-            Self::Observation => OBSERVATION_RECEIPT_ID_DOMAIN,
-        }
-    }
-
-    fn id_prefix(self) -> &'static str {
-        match self {
-            Self::Claude => CLAUDE_RECEIPT_ID_PREFIX,
-            Self::Observation => OBSERVATION_RECEIPT_ID_PREFIX,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalClaudeSanitizationReceiptMaterialV1 {
-    receipt_domain: ReceiptDomainV1,
     sanitizer_version: ComponentVersion,
     observation_id: CanonicalObservationIdV1,
     disposition: SanitizerDispositionV1,
@@ -2120,7 +2359,7 @@ pub struct CanonicalClaudeSanitizationReceiptMaterialV1 {
 
 impl CanonicalClaudeSanitizationReceiptMaterialV1 {
     pub fn for_durable_payload(
-        identity: &ClaudeObservationIdentityMaterialV1,
+        identity: &ObservationIdentityMaterialV1,
         sanitizer_version: ComponentVersion,
         disposition: SanitizerDispositionV1,
         raw_digest: &[u8; 32],
@@ -2144,7 +2383,7 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
     }
 
     pub fn for_durable_payload_with_sensitivity(
-        identity: &ClaudeObservationIdentityMaterialV1,
+        identity: &ObservationIdentityMaterialV1,
         sanitizer_version: ComponentVersion,
         disposition: SanitizerDispositionV1,
         sensitivity: SensitivityV1,
@@ -2157,7 +2396,6 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         validate_receipt_sensitivity(disposition, sensitivity)?;
         let observation_id = CanonicalObservationIdV1::derive(identity)?;
         Ok(Self {
-            receipt_domain: ReceiptDomainV1::for_identity(identity),
             sanitizer_version,
             observation_id,
             disposition,
@@ -2167,23 +2405,8 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         })
     }
 
-    pub fn for_non_durable(
-        identity: &ClaudeObservationIdentityMaterialV1,
-        sanitizer_version: ComponentVersion,
-        disposition: SanitizerDispositionV1,
-        raw_digest: &[u8; 32],
-    ) -> Result<Self, ObservationContractError> {
-        Self::for_non_durable_with_sensitivity(
-            identity,
-            sanitizer_version,
-            disposition,
-            SensitivityV1::Sensitive,
-            raw_digest,
-        )
-    }
-
     pub fn for_non_durable_with_sensitivity(
-        identity: &ClaudeObservationIdentityMaterialV1,
+        identity: &ObservationIdentityMaterialV1,
         sanitizer_version: ComponentVersion,
         disposition: SanitizerDispositionV1,
         sensitivity: SensitivityV1,
@@ -2195,7 +2418,6 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         validate_receipt_sensitivity(disposition, sensitivity)?;
         let observation_id = CanonicalObservationIdV1::derive(identity)?;
         Ok(Self {
-            receipt_domain: ReceiptDomainV1::for_identity(identity),
             sanitizer_version,
             observation_id,
             disposition,
@@ -2207,23 +2429,22 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
 
     pub fn derive_receipt_ref(&self) -> Result<SanitizationReceiptRefV1, ObservationContractError> {
         let mut hasher = Sha256::new();
-        update_hash_frame(&mut hasher, self.receipt_domain.digest_domain());
+        update_hash_frame(&mut hasher, OBSERVATION_RECEIPT_ID_DOMAIN);
         update_hash_frame(&mut hasher, self.sanitizer_version.as_str().as_bytes());
         update_hash_frame(&mut hasher, self.observation_id.as_str().as_bytes());
         update_hash_frame(&mut hasher, self.disposition.as_str().as_bytes());
-        update_hash_frame(&mut hasher, CLAUDE_RECEIPT_SENSITIVITY_DOMAIN);
+        update_hash_frame(&mut hasher, RECEIPT_SENSITIVITY_DOMAIN);
         update_hash_frame(&mut hasher, self.sensitivity.as_str().as_bytes());
-        update_hash_frame(&mut hasher, CLAUDE_RECEIPT_RAW_DIGEST_DOMAIN);
+        update_hash_frame(&mut hasher, RECEIPT_RAW_DIGEST_DOMAIN);
         update_hash_frame(&mut hasher, &self.raw_digest);
         if let Some(payload_digest) = &self.sanitized_payload_digest {
-            update_hash_frame(&mut hasher, CLAUDE_RECEIPT_SANITIZED_PAYLOAD_DOMAIN);
+            update_hash_frame(&mut hasher, RECEIPT_SANITIZED_PAYLOAD_DOMAIN);
             update_hash_frame(&mut hasher, payload_digest.as_str().as_bytes());
         } else {
-            update_hash_frame(&mut hasher, CLAUDE_RECEIPT_NO_PAYLOAD_DOMAIN);
+            update_hash_frame(&mut hasher, RECEIPT_NO_PAYLOAD_DOMAIN);
         }
         let receipt_id = SanitizationReceiptId::new(format!(
-            "{}{}",
-            self.receipt_domain.id_prefix(),
+            "{OBSERVATION_RECEIPT_ID_PREFIX}{}",
             crate::canonical_text::encode_lowercase_hex(&hasher.finalize())
         ))
         .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
@@ -2364,10 +2585,6 @@ impl DurableObservationV1 {
         &self.observation_id
     }
 
-    pub fn idempotency_key(&self) -> &IdempotencyKeyV1 {
-        &self.observation_id
-    }
-
     pub fn identity(&self) -> &ObservationIdentityMaterialV1 {
         &self.identity
     }
@@ -2408,9 +2625,8 @@ impl Serialize for DurableObservationV1 {
     where
         S: Serializer,
     {
-        let mut wire = serializer.serialize_struct("DurableClaudeObservationV1", 6)?;
+        let mut wire = serializer.serialize_struct("DurableObservationV1", 5)?;
         wire.serialize_field("observation_id", &self.observation_id)?;
-        wire.serialize_field("idempotency_key", self.idempotency_key())?;
         wire.serialize_field("identity", &self.identity)?;
         wire.serialize_field("receipt", &self.receipt)?;
         wire.serialize_field("retention_class", &self.retention_class)?;
@@ -2428,54 +2644,29 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
         #[serde(deny_unknown_fields)]
         struct Wire {
             observation_id: CanonicalObservationIdV1,
-            idempotency_key: IdempotencyKeyV1,
-            identity: ClaudeObservationIdentityMaterialV1,
+            identity: ObservationIdentityMaterialV1,
             receipt: SanitizationReceiptV1,
             retention_class: RetentionClass,
             payload: Value,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        let expected_observation_id = wire.observation_id.clone();
-        let expected_idempotency_key = wire.idempotency_key.clone();
-        let mut observation = Self::new(
+        let expected_observation_id = wire.observation_id;
+        let observation = Self::new(
             wire.identity,
             wire.receipt,
             wire.retention_class,
             wire.payload,
         )
         .map_err(serde::de::Error::custom)?;
-        let accepted =
-            accepted_identity_digests(&observation.observation_id, &observation.identity)
-                .map_err(serde::de::Error::custom)?;
-        if !accepted.contains(&expected_observation_id) {
+        if expected_observation_id != observation.observation_id {
             return Err(serde::de::Error::custom(
                 ObservationContractError::ObservationIdentityMismatch,
             ));
         }
-        if !accepted.contains(&expected_idempotency_key) {
-            return Err(serde::de::Error::custom(
-                ObservationContractError::IdempotencyKeyMismatch,
-            ));
-        }
-        // Carry the id the row actually stores, not the one just re-derived.
-        //
-        // `new` derives the current form, which is right for a fresh
-        // observation and wrong for a decoded one: a row written under an
-        // earlier derivation is keyed by that earlier digest, in its own
-        // `observation_id` column and in every row that joins to it. Handing
-        // callers a different id than the row is keyed by makes each of them
-        // responsible for knowing the derivation history, and the storage
-        // audit's column-versus-JSON comparison failed for exactly that
-        // reason. Keeping the accepted digest here also makes decode/encode
-        // round-trip, so re-serializing a legacy row cannot silently restate
-        // its identity.
-        observation.observation_id = expected_observation_id;
         Ok(observation)
     }
 }
-
-pub type DurableClaudeObservationV1 = DurableObservationV1;
 
 /// Relationship between an existing record and a candidate retry.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2500,13 +2691,18 @@ pub fn classify_observation_collision(
 }
 
 /// Whether `candidate` is the current canonical form of a retained Codex or
-/// Cursor record written before route-only source context was removed.
+/// Cursor record written before route-only source context was removed, a
+/// Cursor native record replayed from another physical transcript occurrence,
+/// or a snapshot-host (Cline-family, Kiro) or Vibe record written before its
+/// location was projected as a leading `Session` fact.
 ///
 /// The compatibility is deliberately directional and field-bounded. It first
 /// binds both payloads to the same native record identity, then permits only
-/// the exact source-context fields those providers formerly synthesized. Any
-/// authored fact, role, content, native timestamp, or unrelated relation still
-/// differs after normalization and therefore remains an identity collision.
+/// the exact source-context fields those providers formerly synthesized, the
+/// Codex tool-invocation `arguments` that earlier capture dropped to null, and,
+/// for Cursor, the physical evidence range. Any authored fact, role, content,
+/// non-null arguments, native timestamp, or unrelated relation still differs
+/// after normalization and therefore remains an identity collision.
 pub fn is_canonical_payload_revision_replay(
     existing: &DurableObservationV1,
     candidate: &DurableObservationV1,
@@ -2554,9 +2750,82 @@ pub fn is_canonical_payload_revision_replay(
     let legacy_context_changed = match candidate_envelope.provider().as_str() {
         "codex" => normalize_codex_payload_revision(&mut normalized, current),
         "cursor" => normalize_cursor_payload_revision(&mut normalized, current),
+        "cline" | "roo-code" | "kilo" | "kiro" | "vibe" => {
+            normalize_snapshot_location_revision(&mut normalized, current)
+        }
         _ => false,
     };
     legacy_context_changed && normalized == *current
+}
+
+/// Snapshot hosts (Cline-family, Kiro) and Vibe now lead every canonical
+/// payload with a location-only `Session` fact; records admitted before that
+/// change carry none. The revision is directional: an existing payload gains
+/// the candidate's leading location session verbatim, or a retained
+/// location-only session may adopt a moved `location_path`/`location_provenance`.
+/// A candidate whose first fact is not a location-only session, or any deeper
+/// difference, stays an identity collision.
+fn normalize_snapshot_location_revision(existing: &mut Value, current: &Value) -> bool {
+    let (Some(existing_object), Some(current_object)) =
+        (existing.as_object_mut(), current.as_object())
+    else {
+        return false;
+    };
+    let (Some(existing_facts), Some(current_facts)) = (
+        existing_object
+            .get_mut("facts")
+            .and_then(Value::as_array_mut),
+        current_object.get("facts").and_then(Value::as_array),
+    ) else {
+        return false;
+    };
+    let Some(current_session) = current_facts.first().and_then(Value::as_object) else {
+        return false;
+    };
+    if current_session.get("kind").and_then(Value::as_str) != Some("session")
+        || !is_location_only_session_fact(current_session)
+    {
+        return false;
+    }
+    let existing_is_session = existing_facts
+        .first()
+        .and_then(Value::as_object)
+        .is_some_and(|fact| fact.get("kind").and_then(Value::as_str) == Some("session"));
+    if existing_is_session {
+        if existing_facts.len() != current_facts.len() {
+            return false;
+        }
+        let Some(existing_session) = existing_facts.first_mut().and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        if !is_location_only_session_fact(existing_session) {
+            return false;
+        }
+        let mut changed = false;
+        for key in ["location_path", "location_provenance"] {
+            changed |= replace_with_current_field(existing_session, current_session, key);
+        }
+        changed
+    } else {
+        if existing_facts.len() + 1 != current_facts.len() {
+            return false;
+        }
+        existing_facts.insert(0, current_facts[0].clone());
+        true
+    }
+}
+
+/// A session fact may carry only the projected location. Fields the
+/// serializer always emits (`source`) or that are absent in this revision's
+/// shape must be unset or JSON null to count as location-only.
+fn is_location_only_session_fact(fact: &serde_json::Map<String, Value>) -> bool {
+    fact.iter().all(|(key, value)| {
+        matches!(
+            key.as_str(),
+            "kind" | "location_path" | "location_provenance"
+        ) || value.is_null()
+    })
 }
 
 fn normalize_codex_payload_revision(existing: &mut Value, current: &Value) -> bool {
@@ -2595,6 +2864,11 @@ fn normalize_codex_payload_revision(existing: &mut Value, current: &Value) -> bo
                 for key in ["project_path", "location_path", "transcript_path"] {
                     changed |= replace_with_current_field(existing_fact, current_fact, key);
                 }
+            }
+            Some("tool_invocation")
+                if existing_fact.get("arguments").is_none_or(Value::is_null) =>
+            {
+                changed |= replace_with_current_field(existing_fact, current_fact, "arguments");
             }
             Some("provider_usage") if is_unknown_absent_model(current_fact.get("model")) => {
                 changed |= replace_with_current_field(existing_fact, current_fact, "model");
@@ -2658,6 +2932,7 @@ fn normalize_cursor_payload_revision(existing: &mut Value, current: &Value) -> b
     if !current_evidence.contains_key("native_timestamp") {
         changed |= existing_evidence.remove("native_timestamp").is_some();
     }
+    changed |= replace_with_current_field(existing_evidence, current_evidence, "range");
     changed
 }
 
@@ -2742,43 +3017,49 @@ fn domain_digest(
     Ok(format_sha256(&hasher.finalize()))
 }
 
-/// Every digest this identity material has legitimately produced, newest
-/// first. Element zero is the only one ever written; the rest exist so rows
-/// committed under an earlier derivation stay decodable.
-///
-/// A stored row carries this digest under two names — `observation_id` and its
-/// `idempotency_key` alias, see [`DurableObservationV1::idempotency_key`] — so
-/// the two fields must accept exactly the same set. Accepting an older entry
-/// grants nothing: every one digests the same identity material under a domain
-/// separator, so a row still binds to its own evidence. Rejecting them makes
-/// committed rows permanently undecodable, and nothing downstream can
-/// quarantine a row that will not decode.
-///
-/// A new derivation goes at the front of this list and nowhere else.
-///
-/// `current` is the caller's already-derived id rather than a re-derivation,
-/// because the warm-up authority audit runs this once per row over the whole
-/// `observations` table.
-fn accepted_identity_digests(
-    current: &CanonicalObservationIdV1,
-    material: &ClaudeObservationIdentityMaterialV1,
-) -> Result<[CanonicalObservationIdV1; 3], ObservationContractError> {
-    let provider_domain = if is_default_observation_provider(material.source().provider()) {
-        CLAUDE_OBSERVATION_ID_DOMAIN
-    } else {
-        OBSERVATION_ID_DOMAIN
-    };
-    Ok([
-        current.clone(),
-        CanonicalObservationIdV1::new(domain_digest(provider_domain, material)?)?,
-        CanonicalObservationIdV1::new(domain_digest(LEGACY_IDEMPOTENCY_KEY_DOMAIN, material)?)?,
-    ])
-}
-
 fn sha256_digest(bytes: &[u8]) -> String {
     format_sha256(&Sha256::digest(bytes))
 }
 
 fn format_sha256(digest: &[u8]) -> String {
     crate::canonical_text::encode_tagged_lowercase_hex("sha256:", digest)
+}
+
+#[cfg(test)]
+mod canonical_message_role_label_tests {
+    use super::CanonicalMessageRoleV1;
+
+    #[test]
+    fn known_labels_parse_and_foreign_aliases_stay_unknown() {
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("user"),
+            Some(CanonicalMessageRoleV1::User)
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("assistant"),
+            Some(CanonicalMessageRoleV1::Assistant)
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("system"),
+            Some(CanonicalMessageRoleV1::System)
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("tool"),
+            Some(CanonicalMessageRoleV1::Tool)
+        );
+        assert_eq!(CanonicalMessageRoleV1::from_known_label("unknown"), None);
+        assert_eq!(CanonicalMessageRoleV1::from_known_label("developer"), None);
+        assert_eq!(
+            CanonicalMessageRoleV1::from_wire_label("user"),
+            CanonicalMessageRoleV1::User
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_wire_label("developer"),
+            CanonicalMessageRoleV1::Unknown
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_wire_label(""),
+            CanonicalMessageRoleV1::Unknown
+        );
+    }
 }

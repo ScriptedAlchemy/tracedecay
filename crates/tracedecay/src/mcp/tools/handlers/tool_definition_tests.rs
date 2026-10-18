@@ -1,24 +1,23 @@
 use serde_json::json;
 use tracedecay_tool_catalog::OperationId;
 
-use super::super::get_tool_definitions;
 use super::*;
+use tracedecay_mcp::get_tool_definitions;
 
 #[test]
 fn terminal_application_definitions_project_canonical_request_schemas() {
-    let registry = tracedecay_application::mcp_executable_binding_registry()
+    let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .expect("MCP executable binding registry");
     let definitions = get_tool_definitions().expect("tool definitions");
     for (operation, tool_name, admits_project_selector) in [
         ("context", "tracedecay_context", true),
-        ("callees", "tracedecay_callees", true),
         ("impact", "tracedecay_impact", true),
         ("node", "tracedecay_node", true),
         ("similar", "tracedecay_similar", false),
+        ("redundancy", "tracedecay_redundancy", false),
         ("rename_preview", "tracedecay_rename_preview", false),
         ("port_status", "tracedecay_port_status", false),
         ("port_order", "tracedecay_port_order", false),
-        ("redundancy", "tracedecay_redundancy", false),
         ("todos", "tracedecay_todos", false),
     ] {
         let operation_id = OperationId::new(format!("operation.application.{operation}"))
@@ -51,48 +50,87 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
             }
         }
         assert_eq!(
-            &projected, canonical,
+            projected,
+            tracedecay_mcp::mcp_input_schema(canonical),
             "{tool_name} must project its canonical executable request schema before MCP transport fields",
         );
     }
 }
 
 #[test]
-fn canonical_and_retired_tools_keep_truthful_discovery() {
+fn work_proposal_tools_expose_only_the_dispositions_their_routes_accept() {
     let tools = get_tool_definitions().expect("tool definitions");
-    let tool_names = tools
-        .iter()
-        .map(|tool| tool.name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-
-    for operation in ApplicationSurfaceOperation::ALL {
-        let tool_name = format!("tracedecay_{}", operation.as_str());
-        assert!(
-            tool_names.contains(tool_name.as_str()),
-            "{tool_name} must be projected from the application registry"
-        );
-    }
-
-    for retired in [
-        "tracedecay_fact_store",
-        "tracedecay_memory_automation_run",
-        "tracedecay_session_start",
-        "tracedecay_session_end",
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
+    for (tool_name, disposition_schema, expected) in [
+        (
+            "tracedecay_work_review_proposal",
+            "ReviewWorkProposalDispositionV1",
+            json!(["rejected", "superseded"]),
+        ),
+        (
+            "tracedecay_work_accept_proposal",
+            "AcceptWorkProposalDispositionV1",
+            json!(["accepted"]),
+        ),
     ] {
-        assert!(
-            !tool_names.contains(retired),
-            "retired tool {retired} must not be advertised"
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} must be advertised"));
+        assert_eq!(
+            tool.input_schema["properties"]["disposition"]["$ref"],
+            format!("#/$defs/{disposition_schema}"),
+            "{tool_name} must expose its route-specific disposition schema"
+        );
+        assert_eq!(
+            tool.input_schema["$defs"][disposition_schema]["enum"], expected,
+            "{tool_name} must not advertise a disposition its handler refuses"
         );
     }
+}
 
-    assert!(tool_names.contains("tracedecay_ast_grep_search"));
+#[test]
+fn diagnostics_public_name_preserves_one_shipped_flat_request_schema() {
+    let registry = tracedecay_contracts::mcp_executable_binding_registry()
+        .expect("MCP executable binding registry");
+    let operation_id = OperationId::new("operation.application.diagnostics_read")
+        .expect("diagnostics operation id");
+    let canonical = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+        .expect("diagnostics executable binding")
+        .request_schema()
+        .body();
+    let definitions = get_tool_definitions().expect("tool definitions");
+    let diagnostics = definitions
+        .iter()
+        .filter(|definition| {
+            matches!(
+                definition.name.as_str(),
+                "tracedecay_diagnostics" | "tracedecay_diagnostics_read"
+            )
+        })
+        .collect::<Vec<_>>();
+
     assert_eq!(
-        tool_names.contains("tracedecay_ast_grep_rewrite"),
-        tracedecay_mcp::ast_grep_available(),
-        "CLI-backed rewrite discovery must match host availability"
+        diagnostics.len(),
+        1,
+        "diagnostics must have one public tool name"
+    );
+    assert_eq!(diagnostics[0].name, "tracedecay_diagnostics");
+    let mut projected = diagnostics[0].input_schema.clone();
+    let properties = projected["properties"]
+        .as_object_mut()
+        .expect("diagnostics request properties");
+    assert!(properties.remove("format").is_some());
+    assert_eq!(
+        properties["scope"]["enum"],
+        json!(["workspace", "file"]),
+        "the public diagnostics tool must preserve its shipped flat scope"
+    );
+    assert_eq!(properties["path"]["type"], "string");
+    assert_ne!(
+        &projected, canonical,
+        "only the MCP/CLI edge keeps the shipped flat request; the executable remains canonical"
     );
 }
 
@@ -133,7 +171,7 @@ fn fact_store_curate_exposes_only_caller_owned_bounds() {
 /// undiscoverable to MCP clients.
 #[test]
 fn work_definitions_cover_the_canonical_operation_registry() {
-    let registry = tracedecay_application::work_executable_binding_registry().unwrap();
+    let registry = tracedecay_contracts::work_executable_binding_registry().unwrap();
     let work_definitions = get_tool_definitions()
         .expect("tool definitions")
         .into_iter()
@@ -184,21 +222,10 @@ fn work_definitions_cover_the_canonical_operation_registry() {
             .and_then(|availability| availability.binding())
             .expect("canonical Work operation must be executable");
         assert_eq!(
-            &definition.input_schema,
-            binding.request_schema().body(),
+            definition.input_schema,
+            tracedecay_mcp::mcp_input_schema(binding.request_schema().body()),
             "{tool_name} must expose the exact executable request schema",
         );
-    }
-}
-
-#[test]
-fn test_tool_definitions_have_schemas() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    for tool in &tools {
-        assert!(!tool.name.is_empty());
-        assert!(!tool.description.is_empty());
-        assert!(tool.input_schema.is_object());
-        assert_eq!(tool.input_schema["type"], "object");
     }
 }
 
@@ -206,173 +233,27 @@ fn test_tool_definitions_have_schemas() {
 fn format_capable_tools_advertise_markdown_json_without_tables() {
     let tools = get_tool_definitions().expect("tool definitions");
     for tool_name in tracedecay_mcp::format_capable_tool_names() {
-        if *tool_name == "tracedecay_ast_grep_rewrite" && !tracedecay_mcp::ast_grep_available() {
-            continue;
-        }
         let tool = tools
             .iter()
             .find(|tool| tool.name == *tool_name)
             .unwrap_or_else(|| panic!("{tool_name} missing tool definition"));
-        let format = &tool.input_schema["properties"]["format"];
         assert_eq!(
-            format["enum"],
-            json!(["markdown", "json"]),
-            "{tool_name} should expose markdown/json format choices"
-        );
-        let description = format["description"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{tool_name} format must have a description"));
-        assert!(
-            description.contains("Default 'markdown'"),
-            "{tool_name} should document Markdown as default: {description}"
-        );
-        assert!(
-            description.contains("no tables"),
-            "{tool_name} should advertise no-table Markdown: {description}"
-        );
-        assert!(
-            !description.contains("prose/tables"),
-            "{tool_name} should not advertise table-heavy Markdown: {description}"
+            tool.input_schema["properties"]["format"],
+            json!({
+                "type": "string",
+                "enum": ["markdown", "json"],
+                "default": "markdown",
+                "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
+            }),
+            "{tool_name} format schema"
         );
     }
-}
-
-#[test]
-fn every_advertised_application_surface_uses_canonical_output_formats() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    for operation in ApplicationSurfaceOperation::ALL {
-        let tool_name = format!("tracedecay_{}", operation.as_str());
-        let tool = tools
-            .iter()
-            .find(|tool| tool.name == tool_name)
-            .unwrap_or_else(|| panic!("{tool_name} missing tool definition"));
-        assert_eq!(
-            tool.input_schema["properties"]["format"]["enum"],
-            json!(["markdown", "json"]),
-            "{tool_name} must expose the canonical output formats"
-        );
-    }
-}
-
-#[test]
-fn redundancy_tool_definition_describes_ranking_contract() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == "tracedecay_redundancy")
-        .expect("tracedecay_redundancy tool definition");
-    // Assert only literal output keys — free prose in the description may
-    // be reworded without breaking the ranking contract.
-    for required in [
-        "ranking_score",
-        "body_vector_cosine",
-        "generic_helper_downranked",
-    ] {
-        assert!(
-            tool.description.contains(required),
-            "redundancy definition should mention {required}: {}",
-            tool.description
-        );
-    }
-}
-
-#[test]
-fn test_tool_definitions_have_annotations() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let write_tools = [
-        "tracedecay_str_replace",
-        "tracedecay_multi_str_replace",
-        "tracedecay_insert_at",
-        "tracedecay_replace_symbol",
-        "tracedecay_insert_at_symbol",
-        "tracedecay_move_symbol",
-        "tracedecay_rename_symbol",
-        "tracedecay_ast_grep_rewrite",
-        "tracedecay_source_edit_reconcile",
-        "tracedecay_source_edit_rollback",
-        "tracedecay_git_apply",
-        "tracedecay_approve_native_integration",
-        "tracedecay_apply_native_integration",
-        "tracedecay_cancel_native_integration",
-        "tracedecay_run_affected_tests",
-        "tracedecay_fact_store_add",
-        "tracedecay_fact_store_curate",
-        "tracedecay_fact_store_update",
-        "tracedecay_fact_store_remove",
-        "tracedecay_fact_feedback",
-        "tracedecay_multi_root_scope_set_compare_and_swap",
-        "tracedecay_worktree_cleanup_remove",
-        "tracedecay_session_refresh",
-        "tracedecay_session_refresh_begin",
-        "tracedecay_session_refresh_cancel",
-        "tracedecay_configuration_set",
-        "tracedecay_configuration_unset",
-        "tracedecay_configuration_batch",
-        "tracedecay_configuration_write_credential",
-        "tracedecay_configuration_protected_apply",
-        "tracedecay_configuration_rollback_apply",
-        "tracedecay_context_scout_pause",
-        "tracedecay_context_scout_resume",
-        "tracedecay_context_scout_cancel",
-        "tracedecay_context_scout_claim",
-        "tracedecay_context_scout_delivery",
-        "tracedecay_context_scout_feedback",
-        "tracedecay_dashboard",
-    ];
-    for tool in &tools {
-        let ann = tool
-            .annotations
-            .as_ref()
-            .unwrap_or_else(|| panic!("{} missing annotations", tool.name));
-        let name = tool.name.as_str();
-        // Work and Workflow project readOnlyHint from their executable
-        // registries; those families are pinned by their own discovery tests.
-        let registry_projected =
-            name.starts_with("tracedecay_work_") || name.starts_with("tracedecay_workflow_");
-        if write_tools.contains(&name) {
-            assert_eq!(
-                ann["readOnlyHint"], false,
-                "{} should have readOnlyHint=false",
-                tool.name
-            );
-        } else if !registry_projected {
-            assert_eq!(
-                ann["readOnlyHint"], true,
-                "{} missing readOnlyHint",
-                tool.name
-            );
-        }
-        assert!(
-            ann["title"].is_string(),
-            "{} missing title annotation",
-            tool.name
-        );
-    }
-}
-
-#[test]
-fn memory_status_discovery_matches_its_pure_read_owner() {
-    let status = get_tool_definitions()
-        .expect("tool definitions")
-        .into_iter()
-        .find(|tool| tool.name == "tracedecay_memory_status")
-        .expect("memory status definition");
-    assert_eq!(status.annotations.unwrap()["readOnlyHint"], true);
-    assert!(
-        status
-            .description
-            .contains("Inspect canonical memory state"),
-        "read-only discovery must advertise a status snapshot, not a mutation"
-    );
-    assert!(
-        !status.description.contains("repair"),
-        "memory status no longer shares an owner with holographic repair"
-    );
 }
 
 #[test]
 fn advertised_read_only_matches_canonical_execution_effect() {
-    let catalog = crate::mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
+    let catalog =
+        tracedecay_mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
     for tool in get_tool_definitions().expect("tool definitions") {
         if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool.name.as_str()) {
             continue;
@@ -425,58 +306,5 @@ fn lcm_doctor_exposes_diagnostics_only() {
     assert_eq!(
         doctor.annotations.as_ref().unwrap()["readOnlyHint"],
         json!(true)
-    );
-}
-
-#[test]
-fn test_always_load_tools() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let always_load: Vec<&str> = tools
-        .iter()
-        .filter(|t| {
-            t.meta
-                .as_ref()
-                .and_then(|m| m.get("anthropic/alwaysLoad"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        })
-        .map(|t| t.name.as_str())
-        .collect();
-    assert!(
-        always_load.contains(&"tracedecay_context"),
-        "tracedecay_context must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_search"),
-        "tracedecay_search must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_status"),
-        "tracedecay_status must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_active_project"),
-        "tracedecay_active_project must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_storage_status"),
-        "tracedecay_storage_status must be alwaysLoad"
-    );
-    // grep and callers cover the two most common native-tool reflexes
-    // (content search and "who calls this"), so they join the always-loaded
-    // set to keep the model from ToolSearch-ing before reaching for Bash.
-    assert!(
-        always_load.contains(&"tracedecay_grep"),
-        "tracedecay_grep must be alwaysLoad"
-    );
-    assert!(
-        always_load.contains(&"tracedecay_callers"),
-        "tracedecay_callers must be alwaysLoad"
-    );
-    assert_eq!(
-        always_load.len(),
-        7,
-        "exactly 7 tools should be alwaysLoad (cap), got {:?}",
-        always_load
     );
 }

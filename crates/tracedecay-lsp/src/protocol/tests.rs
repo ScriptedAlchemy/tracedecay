@@ -1,8 +1,9 @@
 use super::context_controller::ContextProjectionCurrentness;
 use super::*;
 use crate::TRACEDECAY_CONTEXT_REVISION;
+use crate::analyzer::broker::DiagnosticSeverity;
 use crate::capabilities::SemanticCapability;
-use crate::diagnostics::{DiagnosticSeverity, DiagnosticSource, LspPosition, LspRange};
+use crate::diagnostics::{DiagnosticSource, LspPosition, LspRange};
 use crate::gateway::{FeedbackCycleRequest, LspLocation, SemanticProviderOutcome, WorkspaceSymbol};
 use crate::overlay::OverlaySnapshot;
 use crate::provider::GenerationDiagnostics;
@@ -12,8 +13,8 @@ use crate::workspace_diagnostics::{
 };
 use std::cell::RefCell;
 use std::sync::Mutex;
-use tracedecay_application::{application_catalog_contributions, application_handler_descriptors};
-use tracedecay_domain::ManifestDigest;
+use tracedecay_contracts::{application_catalog_contributions, application_handler_descriptors};
+use tracedecay_domain::{ContentDigest, ManifestDigest};
 use tracedecay_tool_catalog::{BindingSurface, CatalogContributionInputV1, CatalogContributionV1};
 
 mod diagnostic_publication;
@@ -863,7 +864,6 @@ fn outbound_backpressure_cannot_half_commit_initialize() {
         payload: vec![0; MAX_QUEUED_OUTBOUND_BYTES],
         publication: None,
         server_request: None,
-        queued_at: std::time::Instant::now(),
     });
     session.outbound.queued_bytes = MAX_QUEUED_OUTBOUND_BYTES;
     session.handle_payload(

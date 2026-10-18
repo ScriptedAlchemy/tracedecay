@@ -1,7 +1,14 @@
+use tracedecay_domain::{
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, SessionId,
+};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
-use tracedecay_store::ObservationStoreError;
+use tracedecay_store::{
+    CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1, ObservationCoverageReason,
+    ObservationCoverageV1, ObservationStoreError,
+};
 
 use super::*;
 
@@ -20,19 +27,23 @@ fn probe_distinguishes_unknown_provider_and_unbound_project_authority() {
 }
 
 #[test]
-fn all_production_provider_ids_are_supported() {
-    for provider in tracedecay_sessions::runtime::SessionProvider::ALL
-        .into_iter()
-        .filter(|provider| provider.supports_host_admission())
-    {
+fn provider_capture_admits_providers_refused_as_direct_host_calls() {
+    for provider in SessionProvider::ALL {
         assert!(
-            supported_provider(provider.id()),
-            "unsupported provider {}",
+            admits_provider_capture(provider.id()),
+            "provider capture refuses {}",
+            provider.id()
+        );
+        assert_eq!(
+            admits_direct_host_call(provider.id()),
+            provider.supports_host_admission(),
+            "direct host admission of {}",
             provider.id()
         );
     }
-    assert!(!supported_provider("roo"));
-    assert!(!supported_provider("vibe"));
+    assert!(!admits_direct_host_call("vibe"));
+    assert!(!admits_provider_capture("roo"));
+    assert!(!admits_direct_host_call("roo"));
 }
 
 #[test]
@@ -99,22 +110,43 @@ fn application_errors_map_to_bounded_static_outcomes() {
             Some("admission_cancelled"),
         )
     );
+    let storage = classify_error(&ObservationApplicationError::Store(
+        ObservationStoreError::Storage {
+            operation: "write",
+            source: Box::new(std::io::Error::other("provider content must not escape")),
+        },
+    ));
+    assert_eq!(storage.status, HostAdmissionStatus::Unavailable);
+    assert!(storage.retryable);
+    assert_eq!(storage.reason_code, Some("authority_write_failed"));
     assert_eq!(
         classify_error(&ObservationApplicationError::Store(
-            ObservationStoreError::Storage {
-                operation: "write",
-                source: Box::new(std::io::Error::other("provider content must not escape",)),
+            ObservationStoreError::WriterSaturated {
+                operation: "submit observation batch",
             },
         )),
         admission_outcome(
-            HostAdmissionStatus::Unavailable,
+            HostAdmissionStatus::Backpressured,
             true,
-            Some("authority_write_failed"),
+            Some("writer_lane_saturated"),
         )
     );
+    assert_eq!(
+        storage.cause.as_deref(),
+        Some("write: provider content must not escape")
+    );
+    let serialized = serde_json::to_string(&storage).unwrap();
+    assert!(
+        !serialized.contains("provider content must not escape"),
+        "storage cause must not escape onto the host-admission wire: {serialized}"
+    );
+    assert!(
+        !serialized.contains("\"write\""),
+        "storage operation must not escape onto the host-admission wire: {serialized}"
+    );
     for error in [
-        tracedecay_runtime_core::privacy::PrivacySanitizerError::DetectorUnavailable,
-        tracedecay_runtime_core::privacy::PrivacySanitizerError::InvalidPolicy,
+        tracedecay_privacy::PrivacySanitizerError::DetectorUnavailable,
+        tracedecay_privacy::PrivacySanitizerError::InvalidPolicy,
     ] {
         assert_eq!(
             classify_error(&ObservationApplicationError::Privacy(error)),
@@ -160,4 +192,43 @@ fn observation_store_failures_keep_privacy_safe_static_reason_codes() {
         assert_eq!(serialized.matches(reason_code).count(), 1);
         assert!(!serialized.contains("provider-private-payload"));
     }
+}
+
+#[test]
+fn immutable_cursor_ledger_disagreement_is_a_permanent_bounded_admission_failure() {
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor").unwrap(),
+        SessionId::new("session.fixture").unwrap(),
+    )
+    .unwrap();
+    let coverage = ObservationCoverageV1::new(
+        ObservationSourceGenerationV1::new(7).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationSourceRangeV1::new(10, 20).unwrap(),
+    );
+    let disagreement = CursorAdvanceLedgerDisagreementV1::new(
+        source,
+        ObservationScopeV1::Profile,
+        coverage,
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::BlankFrame, None),
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::OutOfScope, None),
+    );
+
+    let outcome = classify_error(&ObservationApplicationError::Store(
+        ObservationStoreError::CursorAdvanceLedgerDisagreement {
+            disagreement: Box::new(disagreement),
+        },
+    ));
+
+    assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
+    assert!(!outcome.retryable);
+    assert_eq!(
+        outcome.reason_code,
+        Some("observation_cursor_advance_ledger_disagreement")
+    );
+    assert!(
+        !serde_json::to_string(&outcome)
+            .unwrap()
+            .contains("session.fixture")
+    );
 }

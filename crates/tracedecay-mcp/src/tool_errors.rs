@@ -1,12 +1,27 @@
 //! Semantic tool-failure classification and JSON-RPC error-response mapping.
 
 use serde_json::{Value, json};
-use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_sessions::admission::HostAdmissionStatus;
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationProblemDetailV1, ApplicationProblemRecord,
+};
+use tracedecay_domain::errors::{
+    PROFILE_RESET_COMMAND, STALE_STORE_RESET_COMMAND, TraceDecayError,
+};
+use tracedecay_domain::{
+    CURSOR_INVALID_CODE, CURSOR_PARAMETER_CHANGED_CODE, CursorBindingMismatchV1,
+};
 
-use crate::response_handles::RESPONSE_RETRIEVE_TOOL;
 use crate::tools::ToolResult;
 use crate::transport::{ErrorCode, JsonRpcResponse};
+
+/// Reason code for `tracedecay tool` flags or an `--args` payload that do not
+/// form a request for the named tool.
+pub const TOOL_ARGUMENTS_INVALID: &str = "tool_arguments_invalid";
+/// The session-sync owner refused the request before admitting it, because
+/// the caller cancelled or its deadline passed first. An admitted sync that
+/// ends cancelled or timed out reports its own termination instead.
+pub const SESSION_SYNC_CANCELLED_BEFORE_ADMISSION: &str = "session_sync_cancelled_before_admission";
+pub const SESSION_SYNC_DEADLINE_EXCEEDED: &str = "session_sync_deadline_exceeded";
 
 fn plain_text_tool_failure(text: &str) -> bool {
     text.starts_with("git error:") || text.starts_with("git diff failed:")
@@ -44,18 +59,19 @@ fn value_has_semantic_error(value: &Value) -> bool {
         })
 }
 
-/// Projects a hook-runtime error onto the structured JSON-RPC data object.
+/// Projects a hook-runtime error's typed context for test assertions.
 ///
 /// The status is whatever the admission authority reported, carried through
 /// the error rather than re-derived here. Failures raised without an
 /// authority behind them report the application-level default.
+#[cfg(test)]
 #[must_use]
-pub fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
+pub(crate) fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
     let (reason_code, retryable, detail) = error.hook_runtime_context()?;
     let status = error
         .hook_runtime_status()
-        .and_then(HostAdmissionStatus::from_wire)
-        .unwrap_or(HostAdmissionStatus::Degraded);
+        .and_then(tracedecay_sessions::admission::HostAdmissionStatus::from_wire)
+        .unwrap_or(tracedecay_sessions::admission::HostAdmissionStatus::Degraded);
     Some(json!({
         "tool": "tracedecay_hook_runtime",
         "status": status,
@@ -70,7 +86,7 @@ pub fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
 ///
 /// Handlers that build results structurally (e.g. edit tools, whose result
 /// struct carries a `success: bool`) call
-/// [`ToolResult::with_semantic_error`] to record the outcome directly — that
+/// [`ToolResult::with_semantic_error`] to record the outcome directly, that
 /// marker is authoritative and wins over the rendered text. Handlers that
 /// have not been migrated to set the marker leave it `None`, and this falls
 /// back to the pre-existing text-based heuristic (`value_has_semantic_error`)
@@ -89,7 +105,7 @@ pub fn tool_result_has_semantic_error(result: &ToolResult) -> bool {
 /// "`old_str` not found"); falls back to the rendered response's first text
 /// block for handlers that only signal failure via `value_has_semantic_error`
 /// text heuristics. Callers must only invoke this once the result is already
-/// known to be a semantic failure — it does not itself re-check that.
+/// known to be a semantic failure, it does not itself re-check that.
 #[must_use]
 pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
     if let Some(message) = result.failure_message() {
@@ -107,6 +123,23 @@ pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
         .map(|text| text.trim_start().to_string())
 }
 
+/// The MCP `structuredContent` member of a tool result that refuses with
+/// `problem`.
+///
+/// `CallToolResult` has no extension members, so structured content is the
+/// only place a typed record reaches MCP clients. Every route, and the
+/// `tracedecay tool --json` output, carries the refusal record there and
+/// nowhere else; [`tool_result_problem`] is its one reader.
+pub fn problem_structured_content(problem: &ApplicationProblemRecord) -> serde_json::Result<Value> {
+    Ok(json!({ "problem": serde_json::to_value(problem)? }))
+}
+
+/// The typed problem record a tool result refuses with, if any.
+#[must_use]
+pub fn tool_result_problem(result: &Value) -> Option<&Value> {
+    result.get("structuredContent")?.get("problem")
+}
+
 pub fn mark_semantic_tool_error(result: &mut ToolResult) {
     if !tool_result_has_semantic_error(result) {
         return;
@@ -116,11 +149,19 @@ pub fn mark_semantic_tool_error(result: &mut ToolResult) {
     }
 }
 
+/// The refusal of a continuation cursor minted for another operation or
+/// request: the caller corrects the request or restarts without the cursor.
+#[must_use]
+pub fn cursor_refusal(mismatch: &CursorBindingMismatchV1) -> TraceDecayError {
+    TraceDecayError::project_route(mismatch.code(), false, mismatch.message())
+}
+
 /// Canonical wire problem kind for reason codes minted inside MCP dispatch
 /// and application-surface layers. The boundary owns this translation so
 /// clients (and the catalog sweep) can read a truthful `kind` alongside the
 /// machine `code` instead of inferring from prose.
-fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
+#[must_use]
+pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
     match reason_code {
         "tool_dispatch_deadline_exceeded" => Some("deadline_exceeded"),
         "tool_dispatch_cancelled" => Some("cancelled"),
@@ -131,9 +172,49 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         "tool_dispatch_shutdown"
         | "mcp_dispatch_effect_journey_unverified"
         | "application_surface_unavailable" => Some("unavailable"),
-        "application_surface_not_found_or_not_authorized" => Some("denied"),
+        "application_surface_invalid_request"
+        | TOOL_ARGUMENTS_INVALID
+        | "project_required"
+        | "project_not_enrolled"
+        | "project_route_invalid_selector"
+        | "unknown_tool"
+        | "session_sync_wrong_scope"
+        | CURSOR_PARAMETER_CHANGED_CODE
+        | CURSOR_INVALID_CODE => Some("invalid_request"),
+        "application_surface_not_found_or_not_authorized" | "project_route_not_found" => {
+            Some("denied")
+        }
         _ => None,
     }
+}
+
+/// The JSON-RPC error `data` a project-route refusal of `tool_name` carries.
+/// `None` for any other error.
+fn project_route_problem(tool_name: &str, error: &TraceDecayError) -> Option<Value> {
+    let (reason_code, retryable, detail) = error.project_route_context()?;
+    let mut data = json!({
+        "tool": tool_name,
+        "reason_code": reason_code,
+        "retryable": retryable,
+        "detail": detail,
+    });
+    let mut kind = project_route_problem_kind(reason_code).map(|kind| json!(kind));
+    if let (Some(typed_detail), Some(object)) =
+        (error.project_route_typed_detail(), data.as_object_mut())
+    {
+        object.insert("detail".to_string(), json!(typed_detail));
+        kind = Some(json!(
+            ApplicationProblem::from_detail(typed_detail.clone()).kind()
+        ));
+    }
+    if let Some(record) = crate::application_output::tool_result::error_problem_record(error) {
+        kind = Some(json!(record.kind));
+    }
+    if let (Some(kind), Some(object)) = (kind, data.as_object_mut()) {
+        object.insert("kind".to_string(), json!(kind));
+        object.insert("code".to_string(), json!(reason_code));
+    }
+    Some(data)
 }
 
 /// Map response-handle failures onto actionable JSON-RPC errors at the MCP
@@ -146,149 +227,46 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
         } else {
             ErrorCode::InvalidParams
         };
-        let mut data = json!({
-            "tool": tool_name,
-            "reason_code": reason_code,
-            "retryable": retryable,
-            "detail": detail,
-        });
-        if let (Some(kind), Some(object)) = (
-            project_route_problem_kind(reason_code),
-            data.as_object_mut(),
-        ) {
-            object.insert("kind".to_string(), json!(kind));
-            object.insert("code".to_string(), json!(reason_code));
-        }
         return JsonRpcResponse::error_with_data(
             id,
             code,
             format!(
                 "tool project route failed: reason_code={reason_code} retryable={retryable}: {detail}"
             ),
-            Some(data),
+            project_route_problem(tool_name, error),
         );
     }
-    if tool_name == "tracedecay_hook_runtime"
-        && let Some(data) = structured_hook_error_data(error)
-    {
-        let detail = data
-            .get("detail")
-            .and_then(Value::as_str)
-            .unwrap_or("Claude observation ingest failed");
+    // A refused persisted shape is a terminal typed state with one legal
+    // action (reset); it travels with its authority so the client can render
+    // the exact reset command instead of an anonymous internal error.
+    if let Some((authority, reason)) = reset_required_context(error) {
+        let remedy = reset_required_remedy(&authority, None);
         return JsonRpcResponse::error_with_data(
             id,
             ErrorCode::InternalError,
-            format!("tool execution failed: {detail}"),
-            Some(data),
-        );
-    }
-    if tool_name == RESPONSE_RETRIEVE_TOOL {
-        match error {
-            TraceDecayError::Config { message }
-                if message.starts_with("missing required parameter: handle") =>
-            {
-                return JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InvalidParams,
-                    "tracedecay_retrieve requires the `handle` argument copied from a truncated MCP response envelope."
-                        .to_string(),
-                    Some(json!({
-                        "tool": RESPONSE_RETRIEVE_TOOL,
-                        "reason_code": "missing_handle_argument",
-                        "retryable": false,
-                        "retry_instruction": "Call `tracedecay_retrieve` again with the exact `handle` value emitted by the truncated response envelope."
-                    })),
-                );
-            }
-            TraceDecayError::Config { message }
-                if message.starts_with("invalid response handle") =>
-            {
-                return JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InvalidParams,
-                    message.clone(),
-                    Some(json!({
-                        "tool": RESPONSE_RETRIEVE_TOOL,
-                        "reason_code": "invalid_handle",
-                        "retryable": false,
-                        "retry_instruction": "Pass the exact `handle` string from a truncated MCP response envelope; do not shorten or edit it."
-                    })),
-                );
-            }
-            TraceDecayError::File { message, .. }
-                if message.starts_with("corrupt response-handle record") =>
-            {
-                return JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InternalError,
-                    "tool execution failed: cached response handle record is unreadable."
-                        .to_string(),
-                    Some(json!({
-                        "tool": RESPONSE_RETRIEVE_TOOL,
-                        "reason_code": "corrupt_handle_record",
-                        "retryable": true,
-                        "retry_instruction": "Re-run the original MCP tool in this project to regenerate the full response and a fresh handle."
-                    })),
-                );
-            }
-            TraceDecayError::File { .. } => {
-                return JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InternalError,
-                    "tool execution failed: failed to read cached response handle.".to_string(),
-                    Some(json!({
-                        "tool": RESPONSE_RETRIEVE_TOOL,
-                        "reason_code": "handle_read_failed",
-                        "retryable": true,
-                        "retry_instruction": "Fix the local project cache/filesystem issue, then re-run the original MCP tool to regenerate the full response and a fresh handle."
-                    })),
-                );
-            }
-            _ => {}
-        }
-    }
-    if let TraceDecayError::ProjectRoute {
-        reason_code,
-        retryable: false,
-        detail,
-    } = error
-    {
-        return JsonRpcResponse::error_with_data(
-            id,
-            ErrorCode::InvalidParams,
-            detail.clone(),
+            format!("{error}\n\n{remedy}"),
             Some(json!({
                 "tool": tool_name,
-                "reason_code": reason_code,
+                "kind": "reset_required",
                 "retryable": false,
-                "detail": detail,
+                "authority": authority,
+                "reason": reason,
+                "remedy": remedy,
             })),
         );
     }
-    if let TraceDecayError::Config { message } = error {
-        // Handler-authored argument and lookup failures follow two message
-        // conventions; surface them as typed invalid-params data instead of
-        // an untyped internal error.
-        let reason_code = if message.starts_with("missing required parameter") {
-            Some("missing_required_parameter")
-        } else if message.contains("not found") {
-            Some("not_found")
-        } else {
-            None
-        };
-        if let Some(reason_code) = reason_code {
-            return JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::InvalidParams,
-                message.clone(),
-                Some(json!({
-                    "tool": tool_name,
-                    "reason_code": reason_code,
-                    "retryable": false,
-                    "detail": message,
-                })),
-            );
-        }
+    if let TraceDecayError::InvalidRequest { reason, message } = error {
+        return JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InvalidParams,
+            message.clone(),
+            Some(json!({
+                "tool": tool_name,
+                "reason_code": reason.reason_code(),
+                "retryable": false,
+                "detail": message,
+            })),
+        );
     }
 
     let cli_name = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
@@ -306,6 +284,139 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
             ),
         })),
     )
+}
+
+/// Authorities whose refused shape is one project's store. Everything else a
+/// typed reset names is profile-scoped state.
+const PROJECT_STORE_AUTHORITIES: [&str; 2] = ["project store", "graph store"];
+
+fn is_project_store_authority(authority: &str) -> bool {
+    PROJECT_STORE_AUTHORITIES.contains(&authority)
+}
+
+/// Authorities refused while admitting a registered store: the profile
+/// authority or a session store. The daemon holds that store in its typed
+/// reset-required state, so the scoped reset deletes exactly the refused
+/// stores.
+const REGISTERED_STORE_AUTHORITIES: [&str; 10] = [
+    "project registry",
+    "observations",
+    "session temporal",
+    "session temporal profile schema",
+    "workflow",
+    "authority schema",
+    "LCM",
+    "LCM profile schema",
+    "git correlation",
+    "git correlation profile schema",
+];
+
+fn is_registered_store_authority(authority: &str) -> bool {
+    REGISTERED_STORE_AUTHORITIES.contains(&authority)
+}
+
+/// Authorities whose refused shape was written into an agent host's files.
+/// No profile reset reaches it; its reset deletes exactly the block or
+/// package the refusal reason names.
+const HOST_ARTIFACT_AUTHORITIES: [&str; 2] =
+    ["managed skill prompt index", "materialized skill package"];
+
+fn is_host_artifact_authority(authority: &str) -> bool {
+    HOST_ARTIFACT_AUTHORITIES.contains(&authority)
+}
+
+fn project_root_argument(project_root: Option<&std::path::Path>) -> String {
+    project_root.map_or_else(
+        || "<project-root>".to_string(),
+        |root| shell_words::quote(&root.to_string_lossy()).into_owned(),
+    )
+}
+
+/// The one exact command that performs the legal `reset` action for a typed
+/// reset refusal. Refused shapes are never migrated or backed up: the reset
+/// deletes the authority's old data and the next open creates the shape this
+/// binary writes. `project_root` scopes a project-store reset to the refused
+/// project when the caller knows it. Single line, so it fits a bounded
+/// problem diagnostic.
+pub fn reset_required_command(authority: &str, project_root: Option<&std::path::Path>) -> String {
+    if is_project_store_authority(authority) {
+        format!(
+            "tracedecay storage reset-project-store --project-root {} --yes",
+            project_root_argument(project_root)
+        )
+    } else if is_host_artifact_authority(authority) {
+        "delete the block or package directory named in the refusal".to_string()
+    } else if is_registered_store_authority(authority) {
+        STALE_STORE_RESET_COMMAND.to_string()
+    } else {
+        PROFILE_RESET_COMMAND.to_string()
+    }
+}
+
+/// Operator rendering of [`reset_required_command`]: the refused authority,
+/// what the reset deletes, the command, and the re-initialization that
+/// follows.
+pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::Path>) -> String {
+    let command = reset_required_command(authority, project_root);
+    if is_project_store_authority(authority) {
+        return format!(
+            "refused authority: {authority}\n\
+             this binary does not open or migrate that shape; reset it (its old data is \
+             deleted, nothing is backed up):\n  \
+             {command}\n\
+             then re-run `tracedecay init {}`",
+            project_root_argument(project_root)
+        );
+    }
+    if is_host_artifact_authority(authority) {
+        return format!(
+            "refused authority: {authority}\n\
+             this binary does not adopt or migrate that host file; reset it (its old \
+             content is deleted, nothing is backed up):\n  \
+             {command}\n\
+             the next managed-skill export writes the current shape"
+        );
+    }
+    if is_registered_store_authority(authority) {
+        return format!(
+            "refused authority: {authority}\n\
+             this binary does not open or migrate that shape; reset it (its old data is \
+             deleted, nothing is backed up):\n  \
+             {command}    deletes only the stores the daemon reports as requiring reset\n\
+             the daemon recreates each one empty; resetting the profile authority (global.db) \
+             loses the project registry, usage accounting and remote-deletion records it holds, \
+             leaves every project store (code index, graph, sessions, memory) in place, and \
+             prints the `tracedecay init` command that registers each project again"
+        );
+    }
+    format!(
+        "refused authority: {authority}\n\
+         this binary does not open or migrate that shape; reset it (its old data is deleted, \
+         nothing is backed up):\n  \
+         {command}    resets the complete profile database state\n\
+         then re-run `tracedecay init <project-root>` for each project"
+    )
+}
+
+/// The refused authority and its reason for both typed reset states: the
+/// generic persisted-shape refusal and the versioned profile schema refusal.
+pub fn reset_required_context(error: &TraceDecayError) -> Option<(String, String)> {
+    match error {
+        TraceDecayError::ResetRequired { authority, reason } => {
+            Some((authority.clone(), reason.clone()))
+        }
+        TraceDecayError::ProfileResetRequired { component, .. } => {
+            Some((format!("{component} profile schema"), error.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// The typed reset-required detail of either reset state, naming the command
+/// that resets its authority.
+pub fn reset_required_detail(error: &TraceDecayError) -> Option<ApplicationProblemDetailV1> {
+    let (authority, _) = reset_required_context(error)?;
+    ApplicationProblemDetailV1::from_reset_required(error, reset_required_command(&authority, None))
 }
 
 fn hardcoded_internal_error_response(id: &Value, detail: &str) -> String {
@@ -336,5 +447,223 @@ pub fn serialize_response_line(resp: &JsonRpcResponse) -> String {
                 hardcoded_internal_error_response(&resp.id, &fallback_err.to_string())
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tracedecay_domain::ApplicationProblemDetailV1;
+    use tracedecay_domain::errors::TraceDecayError;
+
+    use super::tool_error_response;
+
+    #[test]
+    fn a_typed_lookup_miss_is_invalid_params_not_found() {
+        let response = tool_error_response(
+            json!(4),
+            "tracedecay_automation_run_view",
+            &TraceDecayError::not_found("automation run not found: run.missing"),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+        assert_eq!(
+            wire["error"],
+            json!({
+                "code": -32602,
+                "message": "automation run not found: run.missing",
+                "data": {
+                    "tool": "tracedecay_automation_run_view",
+                    "reason_code": "not_found",
+                    "retryable": false,
+                    "detail": "automation run not found: run.missing",
+                },
+            })
+        );
+    }
+
+    /// A configuration failure is not a lookup miss because its text says
+    /// "not found"; it stays an execution failure with the CLI fallback.
+    #[test]
+    fn a_config_error_reading_not_found_is_not_a_lookup_miss() {
+        let response = tool_error_response(
+            json!(5),
+            "tracedecay_admin_sync",
+            &TraceDecayError::Config {
+                message: "warming failed to publish not found or is not authorized invocation \
+                          contract is invalid"
+                    .to_owned(),
+            },
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+        assert_eq!(wire["error"]["code"], -32603);
+        assert_eq!(wire["error"]["data"].get("reason_code"), None, "{wire}");
+        assert_eq!(wire["error"]["data"]["tool"], "tracedecay_admin_sync");
+    }
+
+    #[test]
+    fn reset_required_travels_with_its_authority_and_reason() {
+        let response = tool_error_response(
+            json!(3),
+            "tracedecay_project_list",
+            &TraceDecayError::reset_required(
+                "session temporal",
+                "persisted session temporal schema is the published v3 shape",
+            ),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+
+        assert_eq!(wire["error"]["data"]["kind"], "reset_required");
+        assert_eq!(wire["error"]["data"]["retryable"], false);
+        assert_eq!(wire["error"]["data"]["authority"], "session temporal");
+        assert_eq!(
+            wire["error"]["data"]["reason"],
+            "persisted session temporal schema is the published v3 shape"
+        );
+        let remedy = wire["error"]["data"]["remedy"]
+            .as_str()
+            .expect("the refusal names its reset command");
+        assert!(remedy.contains("tracedecay wipe --stale --yes"), "{remedy}");
+        assert!(
+            wire["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("tracedecay wipe --stale --yes")),
+            "the human-readable message must carry the reset command too: {wire}"
+        );
+        assert!(
+            wire["error"]["data"].get("cli_fallback").is_none(),
+            "a refused shape is not a transport failure to retry from the shell"
+        );
+    }
+
+    #[test]
+    fn lcm_profile_schema_refusal_names_the_scoped_reset() {
+        let response = tool_error_response(
+            json!(4),
+            "tracedecay_message_search",
+            &TraceDecayError::ProfileResetRequired {
+                component: "LCM",
+                found_version: Some(13),
+                required_version: 14,
+            },
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+        let remedy = wire["error"]["data"]["remedy"]
+            .as_str()
+            .expect("the refusal names its reset command");
+        assert!(
+            remedy.contains("\n  tracedecay wipe --stale --yes"),
+            "{remedy}"
+        );
+        assert!(!remedy.contains("wipe --all"), "{remedy}");
+    }
+
+    #[test]
+    fn reset_remedy_scopes_project_stores_and_quotes_their_roots() {
+        let project = super::reset_required_remedy(
+            "project store",
+            Some(std::path::Path::new("/repo/it's an example")),
+        );
+        let command = project
+            .split_once("\n  tracedecay storage")
+            .map(|(_, tail)| format!("tracedecay storage{}", tail.split_once('\n').unwrap().0))
+            .expect("project-store reset command");
+        assert_eq!(
+            shell_words::split(&command).unwrap(),
+            [
+                "tracedecay",
+                "storage",
+                "reset-project-store",
+                "--project-root",
+                "/repo/it's an example",
+                "--yes",
+            ]
+        );
+        assert!(!project.contains("wipe --all"), "{project}");
+
+        let stale = super::reset_required_remedy("session temporal", None);
+        assert!(stale.contains("refused authority: session temporal"));
+        assert!(!stale.contains("tracedecay update"), "{stale}");
+        assert!(
+            stale.contains("\n  tracedecay wipe --stale --yes"),
+            "{stale}"
+        );
+        assert!(!stale.contains("wipe --all"), "{stale}");
+
+        assert_eq!(
+            super::reset_required_remedy("project registry", None),
+            "refused authority: project registry\n\
+             this binary does not open or migrate that shape; reset it (its old data is \
+             deleted, nothing is backed up):\n  \
+             tracedecay wipe --stale --yes    deletes only the stores the daemon reports as \
+             requiring reset\n\
+             the daemon recreates each one empty; resetting the profile authority (global.db) \
+             loses the project registry, usage accounting and remote-deletion records it holds, \
+             leaves every project store (code index, graph, sessions, memory) in place, and \
+             prints the `tracedecay init` command that registers each project again"
+        );
+
+        let host = super::reset_required_remedy("managed skill prompt index", None);
+        assert!(host.contains("refused authority: managed skill prompt index"));
+        assert!(
+            host.contains("\n  delete the block or package directory named in the refusal\n"),
+            "{host}"
+        );
+        assert!(!host.contains("wipe --all"), "{host}");
+    }
+
+    #[test]
+    fn application_surface_invalid_request_keeps_its_typed_wire_kind() {
+        let response = tool_error_response(
+            json!(7),
+            "tracedecay_configuration_get",
+            &TraceDecayError::project_route(
+                "application_surface_invalid_request",
+                false,
+                "configuration request rejected by the application surface",
+            ),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+
+        assert_eq!(wire["error"]["code"], -32602);
+        assert_eq!(wire["error"]["data"]["kind"], "invalid_request");
+        assert_eq!(
+            wire["error"]["data"]["code"],
+            "application_surface_invalid_request"
+        );
+    }
+
+    #[test]
+    fn project_route_parked_detail_stays_structured_on_the_wire() {
+        let response = tool_error_response(
+            json!(11),
+            "tracedecay_sync",
+            &TraceDecayError::project_route_with_detail(
+                "code_index_publication_authority_corrupt",
+                false,
+                ApplicationProblemDetailV1::Parked {
+                    cause: "source mode is not owner-private".to_owned(),
+                    remedy: "restore mode 0600".to_owned(),
+                    retries_on_wake: true,
+                },
+            ),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+
+        assert_eq!(
+            wire["error"]["data"],
+            json!({
+                "tool": "tracedecay_sync",
+                "kind": "unavailable",
+                "code": "code_index_publication_authority_corrupt",
+                "reason_code": "code_index_publication_authority_corrupt",
+                "retryable": false,
+                "detail": {
+                    "kind": "parked",
+                    "cause": "source mode is not owner-private",
+                    "remedy": "restore mode 0600",
+                    "retries_on_wake": true,
+                },
+            })
+        );
     }
 }

@@ -1,9 +1,9 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
-use fs2::FileExt;
+use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, set_owner_private_file_mode};
 
 use crate::config;
@@ -12,10 +12,10 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(windows)]
 use super::DURABLE_REMOVAL_TOMBSTONE_PREFIX;
 use super::{
-    ActiveProjectContext, BRANCH_META_FILENAME, DurableAtomicWritePhase, EnrollmentMarker,
-    GraphScopeId, PrivateStoreIo, ProjectIdentity, ProjectPath, QueryTarget, SESSIONS_DB_FILENAME,
-    STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind, StoreLayout,
-    StoreManifest, inject_durable_atomic_write_fault, inject_durable_namespace_sync_fault,
+    BRANCH_META_FILENAME, DurableAtomicWritePhase, PrivateStoreIo, ProjectIdentity, ProjectPath,
+    RESPONSE_HANDLES_DIRECTORY, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreArtifactPath, StoreKind, StoreLayout, StoreManifest, inject_durable_atomic_write_fault,
+    inject_durable_namespace_sync_fault,
 };
 
 impl StoreManifest {
@@ -30,19 +30,7 @@ impl StoreManifest {
             graph_db_relpath: relative_to_data_root(&layout.graph_db_path, &layout.data_root),
             sessions_db_relpath: relative_to_data_root(&layout.sessions_db_path, &layout.data_root),
             branch_meta_relpath: relative_to_data_root(&layout.branch_meta_path, &layout.data_root),
-        }
-    }
-}
-
-impl ActiveProjectContext {
-    pub fn new(layout: StoreLayout, scope_id: GraphScopeId) -> Self {
-        let query_target = QueryTarget {
-            graph_db_path: layout.graph_db_path.clone(),
-        };
-        Self {
-            layout,
-            scope_id,
-            query_target,
+            sessions_schema_digest: None,
         }
     }
 }
@@ -97,7 +85,7 @@ impl ProjectPath {
     }
 
     pub fn relative_path_string(&self) -> String {
-        self.relative_path.to_string_lossy().replace('\\', "/")
+        tracedecay_domain::forward_slash_path(&self.relative_path)
     }
 }
 
@@ -227,10 +215,7 @@ impl PrivateStoreIo {
         let mut options = fs::OpenOptions::new();
         options.append(true);
         // One canonical handle: the append file itself, no buffer wrapper.
-        let mut file = hotpath::io!(
-            Self::open_private(path, &mut options)?,
-            label = "runtime_core.storage.append_line"
-        );
+        let mut file = Self::open_private(path, &mut options)?;
         file.write_all(format!("{line}\n").as_bytes())?;
         file.flush()?;
         drop(file);
@@ -282,7 +267,7 @@ impl PrivateStoreIo {
     /// `path`. Callers that require rollback must retain and restore their prior
     /// value under their own stable serialization authority; this primitive
     /// never unlinks a destination it cannot prove it still owns.
-    #[hotpath::measure(label = "runtime_core.storage.durable_write")]
+    #[tracing::instrument(name = "runtime_core.storage.durable_write", level = "trace", skip_all)]
     pub fn write_file_atomically_durable(
         path: &Path,
         temp_path: &Path,
@@ -303,27 +288,24 @@ impl PrivateStoreIo {
             options.write(true).truncate(true);
             let mut temp = Self::open_private(temp_path, &mut options)?;
             temp.write_all(contents)?;
-            hotpath::measure_block!("runtime_core.storage.fsync_temp", temp.sync_all())
-                .inspect_err(|_| {
-                    hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
-                })?;
+            {
+                let _span = tracing::trace_span!("runtime_core.storage.fsync_temp").entered();
+                temp.sync_all()?;
+            }
         }
         set_owner_private_file_mode(temp_path)?;
         inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterTempSync)?;
-        hotpath::measure_block!(
-            "runtime_core.storage.rename",
+        {
+            let _span = tracing::trace_span!("runtime_core.storage.rename").entered();
             crate::db::DatabaseAuthority::replace_file_atomically(
                 temp_path,
                 path,
                 "private store durable file",
             )
-            .map_err(io::Error::other)
-        )
-        .inspect_err(|_| {
-            hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
-        })?;
-        hotpath::measure_block!(
-            "runtime_core.storage.fsync_publish",
+            .map_err(io::Error::other)?;
+        }
+        {
+            let _span = tracing::trace_span!("runtime_core.storage.fsync_publish").entered();
             fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -332,30 +314,9 @@ impl PrivateStoreIo {
                 .and_then(|()| {
                     inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterRename)
                 })
-                .and_then(|()| sync_parent_directory(path))
-        )
-        .inspect_err(|_| {
-            hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
-        })?;
-        Ok(())
-    }
-
-    /// Synchronizes the durable members of one `SQLite` WAL family. The SHM
-    /// coordination file is intentionally excluded because `SQLite` rebuilds it.
-    #[hotpath::measure(label = "runtime_core.storage.sqlite_family_sync")]
-    pub fn sync_sqlite_family(path: &Path) -> io::Result<()> {
-        reject_symlink_components(path, "private SQLite store")?;
-        for member in [
-            path.to_path_buf(),
-            PathBuf::from(format!("{}-wal", path.display())),
-        ] {
-            match fs::OpenOptions::new().read(true).write(true).open(&member) {
-                Ok(file) => file.sync_all()?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
+                .and_then(|()| sync_parent_directory(path))?;
         }
-        sync_parent_directory(path)
+        Ok(())
     }
 
     pub fn copy_artifact(source: &Path, target: &Path) -> io::Result<u64> {
@@ -373,7 +334,6 @@ impl PrivateStoreIo {
             Self::create_dir_all(parent)?;
         }
         let bytes = fs::copy(source, target)?;
-        hotpath::gauge!("runtime_core.storage.copy_bytes").inc(bytes as f64);
         set_owner_private_file_mode(target)?;
         Ok(bytes)
     }
@@ -432,8 +392,19 @@ fn missing_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(missing)
 }
 
+fn durable_directory_lock_path(parent: &Path, destination_name: &OsStr) -> PathBuf {
+    let mut lock_name = OsString::from(".");
+    lock_name.push(destination_name);
+    lock_name.push(".durable-directory.lock");
+    parent.join(lock_name)
+}
+
 #[cfg(unix)]
-fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
+fn create_missing_directories_locked(
+    path: &Path,
+    mut publish: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    reject_symlink_components(path, "durable private store directory")?;
     let missing = missing_directories(path)?;
     let Some(highest_missing) = missing.last() else {
         PrivateStoreIo::create_dir_all(path)?;
@@ -446,10 +417,30 @@ fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
         sync_parent_directory(existing_parent)?;
     }
     for destination in missing.iter().rev() {
-        PrivateStoreIo::create_private_directory(destination)?;
-        sync_parent_directory(destination)?;
+        let parent = destination.parent().ok_or_else(|| {
+            invalid_input("durable private store directory has no parent directory")
+        })?;
+        let destination_name = destination
+            .file_name()
+            .ok_or_else(|| invalid_input("durable private store directory has no file name"))?;
+        let lock_path = durable_directory_lock_path(parent, destination_name);
+        reject_symlink_components(&lock_path, "durable private store directory lock")?;
+        let _lock = acquire_lock_file_blocking(&lock_path, true)?;
+        if destination.try_exists()? {
+            tracedecay_private_fs::validate_private_directory(destination)?;
+            continue;
+        }
+        publish(destination)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
+    create_missing_directories_locked(path, |destination| {
+        PrivateStoreIo::create_private_directory(destination)?;
+        sync_parent_directory(destination)
+    })
 }
 
 #[cfg(windows)]
@@ -470,10 +461,7 @@ fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
         let destination_name = destination
             .file_name()
             .ok_or_else(|| invalid_input("durable private store directory has no file name"))?;
-        let mut lock_name = OsString::from(".");
-        lock_name.push(destination_name);
-        lock_name.push(".durable-directory.lock");
-        let lock_path = parent.join(lock_name);
+        let lock_path = durable_directory_lock_path(parent, destination_name);
         reject_symlink_components(&lock_path, "durable private store directory lock")?;
         let _lock = acquire_lock_file_blocking(&lock_path, true)?;
         if destination.try_exists()? {
@@ -535,7 +523,7 @@ fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
 fn unique_private_staging_directory(parent: &Path) -> io::Result<PathBuf> {
     for _ in 0..16 {
         let mut entropy = [0_u8; 16];
-        getrandom::getrandom(&mut entropy).map_err(|error| io::Error::other(error.to_string()))?;
+        getrandom::fill(&mut entropy).map_err(|error| io::Error::other(error.to_string()))?;
         let path = parent.join(format!(
             ".tracedecay-directory-staging-{}",
             hex::encode(entropy)
@@ -700,7 +688,7 @@ pub fn append_lock_path(path: &Path) -> PathBuf {
 // should reuse one rather than hand-rolling a third:
 //
 //   1. Sidecar advisory lock (this utility). Open a dedicated `<file>.lock`
-//      handle for read+write and hold an `fs2` `flock` on it while mutating the
+//      handle for read+write and hold a `File::lock` on it while mutating the
 //      real file. Use it to serialize writers to an append-only log or an
 //      mmap/config file where readers must never see a torn write and a crashed
 //      holder must not leave a stale marker (the OS drops the lock on process
@@ -721,6 +709,8 @@ pub fn append_lock_path(path: &Path) -> PathBuf {
 // (os error 5). Locking the r/w sidecar sidesteps that and avoids locking the
 // data region being written. This rationale lives here once; call sites point
 // back to it rather than restating it.
+
+const SIDECAR_LEASE_LABEL: &str = "storage.sidecar";
 
 pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::File> {
     if let Some(parent) = lock_path.parent() {
@@ -749,10 +739,10 @@ pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::
 /// success, or `None` when another process/thread already holds it (the caller
 /// then skips its critical section). See the sidecar-lock module note above for
 /// the read+write-handle rationale.
-pub fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
+pub fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<FileLease>> {
     let file = open_lock_file(lock_path, false)?;
-    match file.try_lock_exclusive() {
-        Ok(()) => Ok(Some(file)),
+    match file.try_lock().map_err(std::io::Error::from) {
+        Ok(()) => Ok(Some(FileLease::held(file, SIDECAR_LEASE_LABEL))),
         // `is_lock_contended` covers Windows, where contention surfaces as
         // ERROR_LOCK_VIOLATION rather than a `WouldBlock` error kind.
         Err(err) if crate::db::is_lock_contended(&err) => Ok(None),
@@ -763,14 +753,14 @@ pub fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>
 /// Blocking sidecar lock acquisition. Returns the held lock file once the
 /// exclusive lock is granted. See the sidecar-lock module note above for the
 /// read+write-handle rationale.
-pub fn acquire_sidecar_lock_blocking(lock_path: &Path) -> io::Result<fs::File> {
+pub fn acquire_sidecar_lock_blocking(lock_path: &Path) -> io::Result<FileLease> {
     acquire_lock_file_blocking(lock_path, false)
 }
 
-fn acquire_lock_file_blocking(lock_path: &Path, private: bool) -> io::Result<fs::File> {
+fn acquire_lock_file_blocking(lock_path: &Path, private: bool) -> io::Result<FileLease> {
     let file = open_lock_file(lock_path, private)?;
-    file.lock_exclusive()?;
-    Ok(file)
+    file.lock()?;
+    Ok(FileLease::held(file, SIDECAR_LEASE_LABEL))
 }
 
 /// Appends `line` (newline-terminated) to `path` under the shared sidecar
@@ -788,7 +778,7 @@ pub(crate) fn append_line_locked(path: &Path, line: &str, private: bool) -> io::
     } else {
         append_line_plain(path, line)
     };
-    let unlock_result = lock_file.unlock();
+    let unlock_result = lock_file.release();
     write_result?;
     unlock_result?;
     if private {
@@ -866,15 +856,13 @@ impl StoreLayout {
         data_root: PathBuf,
         manifest_filename: Option<&str>,
     ) -> Self {
-        let graph_db_path = data_root.join(config::db_filename(&data_root));
-        let config_path = data_root.join("config.json");
+        let graph_db_path = data_root.join(config::DB_FILENAME);
         let branch_meta_path = data_root.join(BRANCH_META_FILENAME);
         let sessions_db_path = data_root.join(SESSIONS_DB_FILENAME);
-        let response_handle_root = data_root.join("response-handles");
+        let response_handle_root = data_root.join(RESPONSE_HANDLES_DIRECTORY);
         let lcm_payload_root = data_root.join("lcm-payloads");
         let dashboard_root = data_root.join("dashboard");
         let manifest_path = manifest_filename.map(|filename| data_root.join(filename));
-        let dirty_path = data_root.join("dirty");
         let sync_lock_path = data_root.join("sync.lock");
         let branch_add_lock_path = data_root.join(".branch-add.lock");
         Self {
@@ -884,24 +872,16 @@ impl StoreLayout {
             project_root,
             data_root,
             graph_db_path,
-            config_path,
             branch_meta_path,
             sessions_db_path,
             response_handle_root,
             lcm_payload_root,
             dashboard_root,
             manifest_path,
-            dirty_path,
             sync_lock_path,
             branch_add_lock_path,
         }
     }
-}
-
-pub(super) fn validate_enrollment_marker(marker: &EnrollmentMarker, path: &Path) -> Result<()> {
-    validate_project_id(&marker.project_id).map_err(|message| TraceDecayError::Config {
-        message: format!("invalid enrollment marker '{}': {message}", path.display()),
-    })
 }
 
 pub fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static str> {
@@ -974,10 +954,11 @@ pub fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
-pub fn set_private_dir_permissions(_path: &Path) -> std::io::Result<()> {
-    Ok(())
+/// A new directory inherits its parent's ACEs, which private-directory
+/// readers reject.
+#[cfg(windows)]
+pub fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
+    tracedecay_private_fs::make_private_directory(path)
 }
 
 #[cfg(unix)]

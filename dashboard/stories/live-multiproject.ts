@@ -3,7 +3,7 @@
  *
  * `live-sweep.ts` proves each workspace *renders*: it loads a route and checks
  * the main element is non-empty and did not fall into React Router's error
- * boundary. That is necessary but not sufficient — a workspace whose data
+ * boundary. That is necessary but not sufficient. A workspace whose data
  * source is unavailable still renders its chrome (headers, empty-state cards,
  * nav) and so passes that sweep while showing nothing real. The Code workspace
  * did exactly that: `/api/plugins/graph/overview` answered 200 with
@@ -109,7 +109,7 @@ function overviewCounts(payload: unknown): {
       ? (rows as Record<string, unknown>[]).reduce((acc, r) => acc + num(r['count']), 0)
       : 0;
   const nodes = num(totals['nodes']) || sum(p['nodes_by_kind']);
-  const edges = num(totals['edges']) || sum(p['edges_by_kind']);
+  const edges = num(totals['edges']);
   const files = num(totals['files']) || sum(byLanguage);
   const topLanguages = byLanguage
     .slice()

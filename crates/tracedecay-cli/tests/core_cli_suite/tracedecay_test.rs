@@ -51,61 +51,6 @@ fn setup_daemon_project(
 }
 
 #[test]
-fn test_is_test_file_test_dir() {
-    assert!(tracedecay::tracedecay::is_test_file("tests/my_test.rs"));
-    assert!(tracedecay::tracedecay::is_test_file("tests/integration.rs"));
-}
-
-#[test]
-fn test_is_test_file_test_prefix() {
-    assert!(tracedecay::tracedecay::is_test_file("test/foo.rs"));
-}
-
-#[test]
-fn test_is_test_file_spec_dir() {
-    assert!(tracedecay::tracedecay::is_test_file(
-        "spec/models/user_spec.rb"
-    ));
-}
-
-#[test]
-fn test_is_test_file_e2e_dir() {
-    assert!(tracedecay::tracedecay::is_test_file("e2e/login.test.ts"));
-}
-
-#[test]
-fn test_is_test_file_dot_test() {
-    assert!(tracedecay::tracedecay::is_test_file("src/utils.test.ts"));
-    assert!(tracedecay::tracedecay::is_test_file("src/utils.spec.js"));
-}
-
-#[test]
-fn test_is_test_file_underscore_test() {
-    assert!(tracedecay::tracedecay::is_test_file("src/utils_test.rs"));
-    assert!(tracedecay::tracedecay::is_test_file("src/utils_spec.py"));
-}
-
-#[test]
-fn test_is_test_file_dunder_tests() {
-    assert!(tracedecay::tracedecay::is_test_file(
-        "__tests__/component.test.tsx"
-    ));
-}
-
-#[test]
-fn test_is_test_file_normal_source() {
-    assert!(!tracedecay::tracedecay::is_test_file("src/lib.rs"));
-    assert!(!tracedecay::tracedecay::is_test_file("src/main.rs"));
-    assert!(!tracedecay::tracedecay::is_test_file("src/utils.rs"));
-}
-
-#[test]
-fn test_is_test_file_case_insensitive() {
-    assert!(tracedecay::tracedecay::is_test_file("Tests/MyTest.rs"));
-    assert!(tracedecay::tracedecay::is_test_file("TESTS/foo.rs"));
-}
-
-#[test]
 fn daemon_tool_searches_the_active_project() {
     let (_home, _project, home_path, project_path) =
         setup_daemon_project("pub fn findable_symbol() {}\n");
@@ -139,10 +84,275 @@ fn daemon_tool_searches_the_active_project() {
 }
 
 #[test]
+fn daemon_tool_search_flags_find_the_indexed_symbol() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn findable_symbol() {}\n");
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = common::poll_until(
+        Instant::now() + Duration::from_secs(30),
+        Duration::from_millis(100),
+        || {
+            let output = run_tool(
+                &project_path,
+                &home_path,
+                &[
+                    "--project",
+                    &project_arg,
+                    "search",
+                    "--json",
+                    "findable_symbol",
+                    "--limit",
+                    "10",
+                ],
+            );
+            (output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("findable_symbol"))
+            .then_some(output)
+        },
+        || "daemon scheduler did not publish findable_symbol for flag search".to_owned(),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("findable_symbol"),
+        "flag-based search must return the indexed symbol"
+    );
+}
+
+/// `status --json .` names the CLI's working directory as the diagnostic
+/// target. The daemon runs from its own directory, so a `.` forwarded verbatim
+/// resolved to whatever that was (`/` under launchd) and reported the wrong
+/// project, or no project, instead of the one the operator stood in.
+#[test]
+fn status_anchors_an_explicit_dot_to_the_cli_working_directory() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn status_marker() {}\n");
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .args(["status", "--json", "."])
+        .output()
+        .expect("tracedecay status should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "status --json . must report the project the CLI ran in\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_str(&stdout).expect("status JSON");
+    let reported = status["project_root"]
+        .as_str()
+        .expect("status names its project_root");
+    assert_eq!(
+        canonical_existing_path(Path::new(reported)),
+        project_path,
+        "status must select the CLI's project, never the daemon's working directory"
+    );
+}
+
+/// A profile registry whose `code_projects` table this binary refuses is
+/// served in its typed reset-required state. `status` and `list --all` render
+/// that state, its authority, reason and reset command, rather than a missing
+/// status field or an untyped execution failure.
+#[test]
+fn status_and_list_render_a_reset_required_project_registry() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn reset_marker() {}\n");
+    drop(common::spawn_tracedecay_daemon(&home_path));
+    rusqlite::Connection::open(home_path.join(".tracedecay/global.db"))
+        .unwrap()
+        .execute_batch("ALTER TABLE code_projects DROP COLUMN default_branch")
+        .unwrap();
+    common::ensure_tracedecay_daemon(&home_path);
+
+    let expected = "Error: project route error (application.reset-required)\n\
+         Reset authority: project registry\n\
+         Reset reason: database error: table 'code_projects' has an incompatible number \
+         of columns (operation: validate global database authority schema)\n\
+         Reset remedy: tracedecay wipe --stale --yes\n";
+    for args in [&["status"][..], &["list", "--all"][..]] {
+        let output = tracedecay_command_with_home(&home_path)
+            .current_dir(&project_path)
+            .args(args)
+            .output()
+            .expect("tracedecay should run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error = stderr
+            .find("Error: ")
+            .map_or(stderr.as_ref(), |at| &stderr[at..]);
+        assert_eq!(
+            (output.status.code(), error),
+            (Some(1), expected),
+            "{args:?} stdout:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+/// `--project-path .` names the registered project the operator stands in,
+/// exactly as its absolute path does; the registry never sees the bare `.`.
+#[test]
+fn project_path_flags_resolve_a_relative_path_from_inside_the_project() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn imported_marker() {}\n");
+
+    let import = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .args(["sessions", "import", "--project-path", "."])
+        .output()
+        .expect("tracedecay sessions import should run");
+    let stdout = String::from_utf8_lossy(&import.stdout);
+    assert!(
+        import.status.success()
+            && stdout.starts_with("session import scheduled (")
+            && stdout.contains("); historical catch-up has remaining work 2 "),
+        "sessions import --project-path . must import into the CLI's project\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let sync_status = stdout.split_once("Check status with: ").map_or_else(
+        || panic!("the import hint must name its status command: {stdout}"),
+        |(_, command)| shell_words::split(command.trim_end()).unwrap(),
+    );
+    assert_eq!(
+        sync_status[..4],
+        ["tracedecay", "sessions", "sync-status", "--idempotency-key"],
+        "{stdout}"
+    );
+    assert!(sync_status[4].starts_with("session-sync."), "{stdout}");
+    assert_eq!(sync_status[5], "--project-path", "{stdout}");
+    assert_eq!(
+        Path::new(&sync_status[6]).canonicalize().unwrap(),
+        project_path.canonicalize().unwrap(),
+        "{stdout}"
+    );
+
+    let status = tracedecay_command_with_home(&home_path)
+        .current_dir(project_path.join("src"))
+        .args(["status", "--json", "--project-path", ".."])
+        .output()
+        .expect("tracedecay status should run");
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status.status.success(),
+        "status --project-path .. must report the CLI's project\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_str(&stdout).expect("status JSON");
+    assert_eq!(
+        status["project_root"],
+        project_path.to_string_lossy().as_ref()
+    );
+}
+
+/// `sessions git-sync --dry-run` reaches the daemon's git sync as a preview;
+/// the global `--dry-run` scope check must not refuse it.
+#[test]
+fn sessions_git_sync_dry_run_previews_through_the_daemon() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn synced_marker() {}\n");
+    let dry_run_line = "git-sync (dry-run): no rows were written";
+
+    for (args, previews) in [
+        (&["sessions", "git-sync", "--dry-run"][..], true),
+        (&["sessions", "git-sync"][..], false),
+    ] {
+        let output = tracedecay_command_with_home(&home_path)
+            .current_dir(&project_path)
+            .args(args)
+            .output()
+            .expect("tracedecay sessions git-sync should run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{args:?} should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.starts_with("session git sync completed (session-sync."),
+            "{args:?}\nstdout:\n{stdout}"
+        );
+        assert_eq!(
+            stdout.lines().any(|line| line == dry_run_line),
+            previews,
+            "{args:?}\nstdout:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn daemon_tool_search_discloses_configured_alias_recovery() {
+    let (_home, _project, home_path, project_path) = setup_daemon_project("pub fn cache() {}\n");
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = common::poll_until(
+        Instant::now() + Duration::from_secs(30),
+        Duration::from_millis(100),
+        || {
+            let output = run_tool(
+                &project_path,
+                &home_path,
+                &[
+                    "--project",
+                    &project_arg,
+                    "search",
+                    "--json",
+                    "--args",
+                    r#"{"query":"memoization","lexical_aliases":[{"strict_query":"memoization","alternative":"cache"}],"limit":10}"#,
+                ],
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            (output.status.success()
+                && stdout.contains("Strict query: `memoization`")
+                && stdout.contains("Alternative tried: `cache`")
+                && stdout.contains("Reason: configured vocabulary alias"))
+            .then_some(output)
+        },
+        || "daemon scheduler did not expose alias recovery for cache".to_owned(),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("cache"), "{stdout}");
+}
+
+/// A daemon-owned source edit is a preview-then-apply effect: an apply must
+/// carry a fresh `idempotency_key` and the `expected_state` its own preview
+/// returned, so the write is compare-and-set against the exact bytes the
+/// preview was computed from. Drive that journey end to end from the CLI.
+#[test]
 fn daemon_tool_str_replace_updates_source() {
     let (_home, _project, home_path, project_path) =
         setup_daemon_project("pub fn answer() -> u32 { 1 }\n");
     let project_arg = project_path.to_string_lossy().to_string();
+    let preview = run_tool(
+        &project_path,
+        &home_path,
+        &[
+            "--project",
+            &project_arg,
+            "str_replace",
+            "--json",
+            "--args",
+            r#"{"path":"src/lib.rs","old_str":"pub fn answer() -> u32 { 1 }","new_str":"pub fn answer() -> u32 { 2 }","dry_run":true,"format":"json"}"#,
+        ],
+    );
+    assert!(
+        preview.status.success(),
+        "daemon-owned source edit preview failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&preview.stdout),
+        String::from_utf8_lossy(&preview.stderr),
+    );
+    assert_eq!(
+        fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
+        "pub fn answer() -> u32 { 1 }\n",
+        "a preview must not write"
+    );
+    let expected_state = source_edit_expected_state(&preview.stdout);
+
+    let apply_args = serde_json::json!({
+        "path": "src/lib.rs",
+        "old_str": "pub fn answer() -> u32 { 1 }",
+        "new_str": "pub fn answer() -> u32 { 2 }",
+        "idempotency_key": "core-cli-suite.source-edit.str-replace",
+        "expected_state": expected_state,
+    })
+    .to_string();
     let output = run_tool(
         &project_path,
         &home_path,
@@ -152,7 +362,7 @@ fn daemon_tool_str_replace_updates_source() {
             "str_replace",
             "--json",
             "--args",
-            r#"{"path":"src/lib.rs","old_str":"pub fn answer() -> u32 { 1 }","new_str":"pub fn answer() -> u32 { 2 }"}"#,
+            apply_args.as_str(),
         ],
     );
 
@@ -168,32 +378,20 @@ fn daemon_tool_str_replace_updates_source() {
     );
 }
 
-#[test]
-fn daemon_tool_str_replace_dry_run_preserves_source() {
-    let original = "pub fn answer() -> u32 { 1 }\n";
-    let (_home, _project, home_path, project_path) = setup_daemon_project(original);
-    let project_arg = project_path.to_string_lossy().to_string();
-    let output = run_tool(
-        &project_path,
-        &home_path,
-        &[
-            "--project",
-            &project_arg,
-            "str_replace",
-            "--json",
-            "--args",
-            r#"{"path":"src/lib.rs","old_str":"pub fn answer() -> u32 { 1 }","new_str":"pub fn answer() -> u32 { 2 }","dry_run":true}"#,
-        ],
-    );
-
-    assert!(
-        output.status.success(),
-        "daemon-owned source-edit dry run failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert_eq!(
-        fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
-        original
-    );
+/// Reads `expected_state` out of a `format: "json"` source-edit preview.
+///
+/// `tracedecay tool --json` prints the MCP tool-result envelope; the requested
+/// JSON document travels inside the first content block's text.
+fn source_edit_expected_state(stdout: &[u8]) -> String {
+    let envelope: serde_json::Value =
+        serde_json::from_slice(stdout).expect("source edit preview should print JSON");
+    let text = envelope["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("preview returned no content text: {envelope}"));
+    let document: serde_json::Value =
+        serde_json::from_str(text).expect("preview content should carry the JSON document");
+    document["expected_state"]
+        .as_str()
+        .unwrap_or_else(|| panic!("preview omitted expected_state: {document}"))
+        .to_owned()
 }

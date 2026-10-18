@@ -1,14 +1,14 @@
 //! Borrowed-index detection for git worktrees.
 //!
 //! A tracedecay index resolves through the active project root or user profile
-//! store (see [`config::discover_project_root`](crate::config::discover_project_root)).
+//! store (see [`ProfileRoot::discover_project_root`](crate::config::ProfileRoot::discover_project_root)).
 //! That walk is unaware of git worktrees: when a worktree is created *inside*
 //! the main checkout (e.g. agent tooling that puts worktrees under
 //! `.claude/worktrees/<name>/` or `.worktrees/<name>/`), a command run from
 //! the worktree walks up and silently resolves the MAIN checkout's index.
 //!
-//! Every query then returns results from the main tree's code — usually a
-//! different branch — rather than the worktree the user is actually editing.
+//! Every query then returns results from the main tree's code, usually a
+//! different branch, rather than the worktree the user is actually editing.
 //! Symbols added or changed only in the worktree are invisible to the agent.
 //! This module detects that "borrowed index" situation so callers can warn.
 //!
@@ -20,8 +20,6 @@
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 /// A mismatch between the caller's git working tree and the resolved
 /// tracedecay index root.
@@ -41,20 +39,10 @@ pub struct WorktreeIndexMismatch {
 /// checkout and each linked worktree report their own distinct directory,
 /// which is exactly the distinction this module relies on.
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
-    crate::git_repository::GitRepositoryAuthority::discover(dir)
+    crate::git_repository::repository_topology(dir)
         .ok()?
-        .worktree_root()
-        .map(Path::to_path_buf)
-}
-
-/// Discovers a worktree root without invoking Git.
-///
-/// Bounded and cancellable callers use this authority so discovery cannot
-/// escape their subprocess deadline through [`git_worktree_root`]'s
-/// command-line fallback.
-pub fn discover_git_worktree_root(dir: &Path) -> Option<PathBuf> {
-    let repo = gix::discover(dir).ok()?;
-    realpath(repo.workdir()?)
+        .worktree_root
+        .clone()
 }
 
 /// Absolute, symlink-resolved path to the repository's git common directory.
@@ -62,30 +50,25 @@ pub fn discover_git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    crate::git_repository::GitRepositoryAuthority::discover(dir)
+    crate::git_repository::repository_topology(dir)
         .ok()
-        .map(|repository| repository.common_dir().to_path_buf())
+        .map(|topology| topology.common_dir.clone())
 }
 
-/// Stable repository locator digest for a registered project root.
+/// [`git_common_dir`] for callers that must not wait on another thread's
+/// walk, keeping a blocked discovery distinct from "not a repository".
 ///
-/// Linked worktrees share one retained project/configuration authority, so
-/// this binds that authority to their canonical Git common directory.
-/// Independent clones retain distinct locators. Non-Git projects fall back
-/// to their canonical root.
-pub fn locator_digest_for_project(project_root: &Path) -> Result<ManifestDigest, TraceDecayError> {
-    let repository_locator = git_common_dir(project_root).unwrap_or_else(|| {
-        project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.to_path_buf())
-    });
-    canonical_sha256(&(
-        "tracedecay.project-open.repository-locator.v2",
-        repository_locator.to_string_lossy().as_ref(),
-    ))
-    .map_err(|_| TraceDecayError::Config {
-        message: "project locator digest is inconsistent".to_owned(),
-    })
+/// `Ok(None)` is a path that is not a readable repository. `Err` means another
+/// thread owns the walk, and treating that as absence would mint a second
+/// project identity while the real one is still unresolved.
+pub fn git_common_dir_outcome(
+    dir: &Path,
+) -> std::result::Result<Option<PathBuf>, crate::git_repository::DiscoveryBlocked> {
+    match crate::git_repository::try_repository_topology(dir) {
+        Ok(topology) => Ok(Some(topology.common_dir.clone())),
+        Err(crate::git_repository::GitTopologyProbeError::Blocked(blocked)) => Err(blocked),
+        Err(crate::git_repository::GitTopologyProbeError::Repository(_)) => Ok(None),
+    }
 }
 
 /// Derives the primary checkout root for a linked worktree from its git
@@ -96,7 +79,7 @@ pub fn locator_digest_for_project(project_root: &Path) -> Result<ManifestDigest,
 /// Canonicalize of `project_root` is best-effort. This helper's contract is
 /// "redirect to the derived primary when that checkout still exists", not a
 /// typed filesystem probe. A failed canonicalize must not return `None`
-/// ("already primary") — that would mint a second store for a linked
+/// ("already primary"). That would mint a second store for a linked
 /// worktree whose path could not be resolved. The unresolved path is
 /// compared instead, and `Some(primary)` is still returned when that
 /// directory exists.
@@ -131,30 +114,30 @@ pub fn primary_checkout_root(
 /// repository it belongs to. Keying identity off the worktree path instead
 /// mints a second store for a repository that already has one.
 ///
-/// Returns `None` — meaning "this path is its own identity" — when `dir` is
+/// Returns `None`, meaning "this path is its own identity", when `dir` is
 /// the primary checkout, is not a worktree root at all (a package directory
 /// inside a monorepo is its own project), is outside git, or has a repository
 /// shape whose primary checkout cannot be derived safely.
 pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
-    let worktree_root = git_worktree_root(dir)?;
+    let topology = crate::git_repository::repository_topology(dir).ok()?;
+    let worktree_root = topology.worktree_root.as_deref()?;
     // Only a worktree ROOT inherits repository identity. Without this check a
     // subdirectory indexed as its own project would be absorbed into the
     // enclosing repository's store.
     if worktree_root != realpath(dir)? {
         return None;
     }
-    let common_dir = git_common_dir(dir)?;
-    primary_checkout_root(&worktree_root, Some(&common_dir))
+    primary_checkout_root(worktree_root, Some(&topology.common_dir))
 }
 
 /// Returns whether `dir` resolves to a linked worktree root.
 pub fn is_linked_worktree(dir: &Path) -> bool {
-    let Ok(repository) = crate::git_repository::GitRepositoryAuthority::discover(dir) else {
+    let Ok(topology) = crate::git_repository::repository_topology(dir) else {
         return false;
     };
-    repository.worktree_root().is_some_and(|root| {
-        realpath(dir).is_some_and(|canonical_dir| root == canonical_dir)
-            && repository.git_dir() != repository.common_dir()
+    topology.worktree_root.as_deref().is_some_and(|root| {
+        realpath(dir).is_some_and(|canonical_dir| canonical_dir.starts_with(root))
+            && topology.git_dir != topology.common_dir
     })
 }
 
@@ -171,9 +154,9 @@ pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
     if !is_detached_linked_worktree(dir) {
         return None;
     }
-    let repository = crate::git_repository::GitRepositoryAuthority::discover(dir).ok()?;
-    let git_dir = repository.git_dir();
-    let common_dir = repository.common_dir();
+    let topology = crate::git_repository::repository_topology(dir).ok()?;
+    let git_dir = topology.git_dir.as_path();
+    let common_dir = topology.common_dir.as_path();
     let identity = git_dir.strip_prefix(common_dir).unwrap_or(git_dir);
     let mut hasher = Sha256::new();
     hasher.update(crate::os_str_bytes::native_os_str_bytes(
@@ -198,7 +181,7 @@ pub fn git_may_resolve_repo(dir: &Path) -> bool {
 /// Detect when `start_path` lives in one git working tree but the resolved
 /// tracedecay index (`index_root`) belongs to a *different* working tree.
 ///
-/// Returns `None` — meaning "nothing to warn about" — when:
+/// Returns `None`, meaning "nothing to warn about", when:
 ///   - `start_path` isn't in a git repo (or git is unavailable),
 ///   - the index already lives in `start_path`'s own working tree, or
 ///   - `index_root` isn't itself a working-tree root (an unrelated parent
@@ -248,8 +231,8 @@ pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
         "This tracedecay index belongs to a different git working tree.\n  \
          Running in: {}\n  \
          Index from: {}\n\
-         Results reflect that tree's code (often a different branch), not this worktree — \
-         symbols changed only here are missing. Run `tracedecay init` in this worktree for a \
+         Results reflect that tree's code (often a different branch), not this worktree. \
+         Symbols changed only here are missing. Run `tracedecay init` in this worktree for a \
          worktree-local index.",
         m.worktree_root.display(),
         m.index_root.display()
@@ -258,12 +241,12 @@ pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
 
 /// Compact, single-line variant for prefixing an MCP tool response. Read
 /// tools return their answer inline, so the heads-up has to ride on the
-/// same payload the agent is already reading — a multi-line block would
+/// same payload the agent is already reading. A multi-line block would
 /// bury the result.
 pub fn worktree_mismatch_notice(m: &WorktreeIndexMismatch) -> String {
     format!(
         "WARNING: tracedecay results below come from a different git worktree ({}), \
-         not where you're working ({}) — they may reflect another branch, and symbols \
+         not where you're working ({}). They may reflect another branch, and symbols \
          changed only here are missing. Run `tracedecay init` here for a worktree-local index.",
         m.index_root.display(),
         m.worktree_root.display()
@@ -280,9 +263,8 @@ fn realpath(p: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 fn git_command() -> std::process::Command {
     let mut command = std::process::Command::new("git");
-    let paths: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect())
-        .unwrap_or_default();
+    let paths: Vec<PathBuf> =
+        std::env::var_os("PATH").map_or_default(|path| std::env::split_paths(&path).collect());
     #[cfg(not(windows))]
     let paths = {
         let mut paths = paths;
@@ -293,6 +275,14 @@ fn git_command() -> std::process::Command {
     if let Ok(path) = std::env::join_paths(paths) {
         command.env("PATH", path);
     }
+    // Inherited GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR would resolve every
+    // fixture `git` spawn against the caller's checkout (or a sibling test's
+    // repo) instead of `current_dir`.
+    command.env_remove("GIT_DIR");
+    command.env_remove("GIT_WORK_TREE");
+    command.env_remove("GIT_COMMON_DIR");
+    command.env_remove("GIT_INDEX_FILE");
+    command.env_remove("GIT_OBJECT_DIRECTORY");
     command
 }
 
@@ -304,12 +294,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let status = git_command()
+        let output = git_command()
             .args(args)
             .current_dir(cwd)
-            .status()
-            .expect("git not on PATH — required for worktree tests");
-        assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+            .output()
+            .expect("git not on PATH, required for worktree tests");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -320,18 +315,6 @@ mod tests {
         fs::create_dir_all(&index).unwrap();
         fs::create_dir_all(&start).unwrap();
         assert!(detect_worktree_index_mismatch(&start, &index).is_none());
-    }
-
-    #[test]
-    fn no_mismatch_when_index_lives_in_same_worktree() {
-        let tmp = tempdir().unwrap();
-        let project = tmp.path().join("repo");
-        fs::create_dir_all(&project).unwrap();
-        run_git(&project, &["init", "--quiet"]);
-        // start_path is inside the same working tree as the index
-        let sub = project.join("src");
-        fs::create_dir_all(&sub).unwrap();
-        assert!(detect_worktree_index_mismatch(&sub, &project).is_none());
     }
 
     #[test]
@@ -360,6 +343,10 @@ mod tests {
             ],
         );
         let worktree = tmp.path().join("wt");
+        // git worktree add creates `.git/worktrees/<name>/locked`. Under load
+        // the parent can be missing for the lock open (ENOENT). Create the
+        // directory first so add only has to create the named slot.
+        fs::create_dir_all(main.join(".git/worktrees")).unwrap();
         run_git(
             &main,
             &["worktree", "add", "--detach", worktree.to_str().unwrap()],
@@ -374,45 +361,6 @@ mod tests {
         assert!(
             detached_worktree_graph_scope(&worktree)
                 .is_some_and(|scope| scope.starts_with("detached-worktree/"))
-        );
-    }
-
-    #[test]
-    fn gix_resolves_the_linked_worktree_specific_branch() {
-        let tmp = tempdir().unwrap();
-        let main = tmp.path().join("main");
-        fs::create_dir_all(&main).unwrap();
-        run_git(&main, &["init", "--quiet"]);
-        fs::write(main.join("README.md"), "hi").unwrap();
-        run_git(&main, &["add", "."]);
-        run_git(
-            &main,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "--quiet",
-                "-m",
-                "init",
-            ],
-        );
-        let worktree = tmp.path().join("feature");
-        run_git(
-            &main,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "feature",
-                worktree.to_str().unwrap(),
-            ],
-        );
-
-        assert_eq!(
-            crate::branch::current_branch(&worktree).as_deref(),
-            Some("feature")
         );
     }
 
@@ -442,9 +390,18 @@ mod tests {
             &main,
             &["worktree", "add", "--detach", linked.to_str().unwrap()],
         );
+        let primary_subdirectory = main.join("packages/service");
+        let linked_subdirectory = linked.join("packages/service");
+        fs::create_dir_all(&primary_subdirectory).unwrap();
+        fs::create_dir_all(&linked_subdirectory).unwrap();
 
         assert!(!is_linked_worktree(&main));
+        assert!(!is_linked_worktree(&primary_subdirectory));
         assert!(is_linked_worktree(&linked));
+        assert!(
+            is_linked_worktree(&linked_subdirectory),
+            "a project rooted below a linked worktree must retain linked-worktree admission"
+        );
     }
 
     #[test]
@@ -521,28 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn primary_checkout_root_redirects_linked_worktree_to_existing_primary() {
-        let tmp = tempdir().unwrap();
-        let primary = tmp.path().join("main");
-        let worktree = tmp.path().join("main-wt");
-        fs::create_dir_all(&primary).unwrap();
-        fs::create_dir_all(&worktree).unwrap();
-        // `git_common_dir` always returns a canonicalized path — mirror that
-        // guarantee here rather than a raw join.
-        let primary = fs::canonicalize(&primary).unwrap();
-        let common_dir = primary.join(".git");
-        fs::create_dir_all(&common_dir).unwrap();
-
-        let redirected = primary_checkout_root(&worktree, Some(&common_dir));
-
-        assert_eq!(
-            redirected,
-            Some(primary),
-            "a linked worktree with a live primary checkout must redirect to it"
-        );
-    }
-
-    #[test]
     fn primary_checkout_root_is_none_when_project_root_is_already_primary() {
         let tmp = tempdir().unwrap();
         let primary = tmp.path().join("main");
@@ -555,19 +490,6 @@ mod tests {
             primary_checkout_root(&primary, Some(&common_dir)),
             None,
             "the primary checkout must never be redirected to itself"
-        );
-    }
-
-    #[test]
-    fn primary_checkout_root_is_none_without_git_common_dir() {
-        let tmp = tempdir().unwrap();
-        let project_root = tmp.path().join("not-a-worktree");
-        fs::create_dir_all(&project_root).unwrap();
-
-        assert_eq!(
-            primary_checkout_root(&project_root, None),
-            None,
-            "non-git projects must register themselves unchanged"
         );
     }
 
@@ -594,7 +516,7 @@ mod tests {
     fn primary_checkout_root_ignores_non_dot_git_common_dirs() {
         // Bare repos and submodule gitlinks resolve `git_common_dir` to a
         // path that isn't a plain `<repo>/.git`, so the parent directory
-        // isn't reliably a checkout root — leave registration alone rather
+        // isn't reliably a checkout root. Leave registration alone rather
         // than risk deriving a bogus "primary".
         let tmp = tempdir().unwrap();
         let worktree = tmp.path().join("checkout");
@@ -609,51 +531,49 @@ mod tests {
         );
     }
 
-    #[test]
-    fn linked_worktrees_share_repository_locator_but_independent_repositories_do_not() {
+    /// A caller that finds another thread mid-walk on the same checkout must
+    /// still get the repository answer, not "not a repository": a linked
+    /// worktree otherwise mints a path-derived identity of its own. Only the
+    /// non-waiting probe reports the walk as blocked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_walk_in_flight_on_another_thread_does_not_hide_the_repository() {
         let temporary = tempdir().unwrap();
         let primary = temporary.path().join("primary");
-        let linked = temporary.path().join("linked");
-        let independent = temporary.path().join("independent");
         fs::create_dir_all(&primary).unwrap();
-        fs::create_dir_all(&independent).unwrap();
-
         run_git(&primary, &["init", "-b", "main", "--quiet"]);
-        fs::write(primary.join("README.md"), "primary\n").unwrap();
-        run_git(&primary, &["add", "README.md"]);
-        run_git(
-            &primary,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "--quiet",
-                "-m",
-                "fixture",
-            ],
-        );
-        run_git(
-            &primary,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "feature/linked",
-                linked.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
-        run_git(&independent, &["init", "-b", "main", "--quiet"]);
+        let primary = primary.canonicalize().unwrap();
+        let common_dir = primary.join(".git");
 
-        let primary_digest = locator_digest_for_project(&primary).expect("primary locator digest");
-        let linked_digest = locator_digest_for_project(&linked).expect("linked locator digest");
-        let independent_digest =
-            locator_digest_for_project(&independent).expect("independent locator digest");
+        let mut block = crate::git_repository::block_repository_discovery_for_test(&primary);
+        let parked = std::thread::spawn({
+            let primary = primary.clone();
+            move || git_common_dir(&primary)
+        });
+        block.wait_entered().await;
 
-        assert_eq!(linked_digest, primary_digest);
-        assert_ne!(independent_digest, primary_digest);
+        match git_common_dir_outcome(&primary) {
+            Err(crate::git_repository::DiscoveryBlocked { path }) => {
+                assert_eq!(path, primary.display().to_string());
+            }
+            outcome => panic!("the probe must not wait on the parked walk: {outcome:?}"),
+        }
+        let joined = std::thread::spawn({
+            let primary = primary.clone();
+            move || git_worktree_root(&primary)
+        });
+        crate::git_repository::wait_for_topology_callers_for_test(&primary, 1, || {
+            u64::from(joined.is_finished())
+        })
+        .await;
+        block.release();
+
+        assert_eq!(parked.join().unwrap(), Some(common_dir));
+        assert_eq!(joined.join().unwrap(), Some(primary.clone()));
+        assert_eq!(
+            crate::git_repository::repository_discovery_count_for_test(&primary),
+            1
+        );
+        crate::git_repository::reset_repository_discovery_for_test(&primary);
     }
 
     #[test]

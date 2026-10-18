@@ -2,7 +2,7 @@
 //!
 //! Worker-yield (one-worker heartbeat) is covered by the snapshot admission
 //! tests; this bench times the sync walk each adapter still performs inside
-//! `run_blocking_transcript_section`.
+//! the `spawn_blocking` section.
 
 use std::hint::black_box;
 use std::path::Path;
@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
+use tracedecay_sessions::runtime::hosts::vibe::VibeSource;
 use tracedecay_sessions::runtime::source::{TranscriptDiscoveryBounds, TranscriptSource};
-use tracedecay_sessions::runtime::vibe::VibeSource;
 
 fn write_vibe_session(root: &Path, name: &str, mtime_secs: u64) {
     let dir = root.join(name);
@@ -58,12 +58,14 @@ fn bench_one_worker_heartbeat(c: &mut Criterion) {
             let (sender, receiver) = std::sync::mpsc::channel();
             let started = std::time::Instant::now();
             tokio::spawn(async move {
-                tokio::task::block_in_place(|| {
+                tokio::task::spawn_blocking(move || {
                     handle.spawn(async move {
                         let _ = sender.send(std::time::Instant::now());
                     });
                     std::thread::sleep(Duration::from_millis(40));
-                });
+                })
+                .await
+                .expect("join blocking heartbeat");
             })
             .await
             .expect("join blocking section");

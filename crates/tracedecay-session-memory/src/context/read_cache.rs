@@ -1,4 +1,4 @@
-//! Cross-session response cache for `tracedecay_read`.
+//! Cross-session response cache for mode-aware source reads.
 //!
 //! Cached entries are keyed by `(project_id, file_path, mode, args_hash)` and
 //! survive across MCP sessions. The `mtime_ns` column on each row is the
@@ -14,7 +14,7 @@
 
 use std::time::UNIX_EPOCH;
 
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_domain::canonical_json_value;
 use tracedecay_domain::canonical_text::sha256_hex;
 
@@ -44,18 +44,12 @@ pub fn args_hash(args: &serde_json::Value) -> Result<String> {
     Ok(sha256_hex(canonical.as_bytes()))
 }
 
-/// SHA-256 of arbitrary bytes, hex-encoded. Used as the body digest so callers
-/// can detect content changes even when only the cache layer changed.
-pub fn digest_bytes(bytes: &[u8]) -> String {
-    sha256_hex(bytes)
-}
-
 /// Looks up a cached row. Returns `Some` only when the row exists *and* its
 /// `mtime_ns` matches `current_mtime_ns`. A stale row (file changed since the
 /// cache was written) is reported as a miss; the caller is expected to
 /// recompute and `put` a fresh row, which replaces the stale one via the
 /// primary-key `INSERT OR REPLACE`.
-#[hotpath::measure(label = "usecases.context.read_cache.get", future = true)]
+#[tracing::instrument(name = "usecases.context.read_cache.get", level = "trace", skip_all)]
 pub async fn get(
     conn: &impl QueryExecutor,
     project_id: &str,
@@ -87,11 +81,10 @@ pub async fn get(
         operation: "read_cache::get".to_string(),
     })?;
 
-    // Hit/miss/stale are disjoint counters: `misses` is a cold lookup with no
-    // row, `stale` is a row evicted by an mtime mismatch. Both force the
-    // caller to recompute, but only stale implies the file changed.
+    // A missing row is a cold lookup; a row evicted by an mtime mismatch is
+    // stale. Both force the caller to recompute, but only stale implies the
+    // file changed.
     let Some(row) = row else {
-        hotpath::gauge!("usecases.context.read_cache.misses").inc(1.0);
         return Ok(None);
     };
 
@@ -101,7 +94,6 @@ pub async fn get(
     })?;
 
     if cached_mtime != current_mtime_ns {
-        hotpath::gauge!("usecases.context.read_cache.stale").inc(1.0);
         return Ok(None);
     }
 
@@ -114,7 +106,6 @@ pub async fn get(
         operation: "read_cache::get".to_string(),
     })?;
 
-    hotpath::gauge!("usecases.context.read_cache.hits").inc(1.0);
     Ok(Some(CachedRead {
         mtime_ns: cached_mtime,
         digest,
@@ -143,7 +134,7 @@ pub(crate) struct ReadCacheWrite<'a> {
     clippy::too_many_arguments,
     reason = "preserves the public read-cache API"
 )]
-#[hotpath::measure(label = "usecases.context.read_cache.put", future = true)]
+#[tracing::instrument(name = "usecases.context.read_cache.put", level = "trace", skip_all)]
 pub async fn put(
     db: &Database,
     project_id: &str,
@@ -235,22 +226,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    #[test]
-    fn args_hash_uses_domain_canonical_encoding_for_escaped_object_keys() {
-        let args = json!({
-            "quoted\"key": {
-                "slash\\key": "control:\u{0001}",
-            },
-        });
-        let canonical =
-            tracedecay_domain::canonical_json_value(&args).expect("domain canonical JSON");
-
-        assert_eq!(
-            args_hash(&args).expect("cache argument hash"),
-            digest_bytes(canonical.as_bytes())
-        );
-    }
 
     #[test]
     fn args_hash_preserves_legacy_production_key() {

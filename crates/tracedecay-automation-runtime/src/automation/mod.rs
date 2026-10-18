@@ -3,36 +3,37 @@ mod artifact_feedback;
 mod artifact_generated_evals;
 mod artifact_optimizer;
 mod artifact_payloads;
-mod artifact_policy;
 mod artifact_refs;
 pub mod artifacts;
 pub mod automatic_facts;
 pub mod backend;
 pub mod backend_identity;
+pub mod combined_effect;
 pub mod config;
+pub mod effect_recovery;
 pub mod effect_runtime;
+pub mod executable_lookup;
 pub mod hermes_skill_bridge;
 pub mod host_io;
 pub mod host_receipts;
 mod job_webhook;
 pub mod jobs;
 mod lifecycle;
-mod managed_skill_model;
-mod managed_skill_validation;
+pub mod maintenance_termination;
 pub mod managed_skills;
 pub mod memory_curator;
+pub mod observation;
 pub mod outcomes;
 pub mod run_ledger;
 pub mod runner;
 pub mod scheduler;
-mod scheduler_metrics;
+pub mod scheduler_stop;
+mod scheduler_trace;
 pub mod session_reflector;
-pub mod skill_frontmatter;
 pub mod skill_materialization;
 pub mod skill_targets;
 pub mod skill_usage;
 pub mod skill_writer;
-pub mod text;
 
 pub use jobs::effect_receipt::{
     ExternalAutomationEffectDisposition, ExternalAutomationEffectReceipt,
@@ -46,8 +47,33 @@ pub use lifecycle::{
 /// Canonical home for the `config_error` helper duplicated across the
 /// automation module tree; other automation submodules should call this
 /// instead of re-declaring their own copy.
-pub fn config_error(message: impl Into<String>) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Config {
+pub fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),
+    }
+}
+
+/// Runs filesystem `work` on the native blocking pool, as `tokio::fs` did on
+/// Tokio's. A pool failure becomes an `io::Error`, so callers keep one mapping.
+pub(crate) async fn blocking_fs<T, F>(work: F) -> std::io::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+{
+    tracedecay_runtime_core::native_runtime::spawn_blocking(work)
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+pub(crate) fn job_error<T>(message: &str) -> tracedecay_domain::errors::Result<T> {
+    Err(config_error(message))
+}
+
+pub(crate) fn normalized_non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }

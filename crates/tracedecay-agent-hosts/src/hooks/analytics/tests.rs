@@ -1,12 +1,13 @@
 use super::*;
-use crate::config::USER_DATA_DIR_ENV;
 use std::time::Duration;
+use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use super::super::EnvGuard;
-
-fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
-    crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();
-    let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
+fn enroll_project(project_root: &Path, profile_root: &Path, project_id: &str) -> PathBuf {
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id)
+        .unwrap();
+    let layout =
+        tracedecay_runtime_core::storage::resolve_layout(project_root, profile_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     layout.data_root
 }
@@ -20,42 +21,123 @@ fn read_analytics_rows(path: &Path) -> Vec<Value> {
         .collect()
 }
 
-#[test]
-fn unbound_hook_analytics_do_not_create_a_missing_profile() {
-    let _lock = crate::hooks::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    let profile_root = home.path().join(".tracedecay");
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    assert!(!profile_root.exists());
-
-    let event = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
-    let parsed = serde_json::from_str(event).unwrap();
+fn record_stop(profile: &ProfileRoot, event: &str, parsed: &Value) {
     drop(record_hook_invoked_parsed(
+        &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
         None,
-        HintAgent::Claude,
+        HostIntegrationIdV1::Claude,
         "Stop",
         event,
-        &parsed,
+        parsed,
     ));
+}
 
-    assert!(
-        !profile_root.exists(),
-        "unbound hook analytics created a missing profile"
+#[test]
+fn hook_analytics_do_not_recreate_stores_during_profile_maintenance() {
+    let home = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(home.path());
+    let store = enroll_project(checkout.path(), profile.data_dir(), "proj_hook_maintenance");
+    let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+        profile.data_dir(),
+        "wipe",
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&store).unwrap();
+
+    for root in [None, Some(checkout.path())] {
+        record_hook_analytics(
+            profile.data_dir(),
+            root,
+            "hook_invoked",
+            serde_json::json!({}),
+        );
+    }
+    assert!(!store.exists());
+    assert!(!profile.data_dir().join(HOOK_ANALYTICS_FILENAME).exists());
+
+    drop(lease);
+    record_hook_analytics(
+        profile.data_dir(),
+        None,
+        "hook_invoked",
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        read_analytics_rows(&profile.data_dir().join(HOOK_ANALYTICS_FILENAME)).len(),
+        1
     );
 }
 
 #[test]
-fn telemetry_contract_is_canonical_and_bounded() {
-    let contract = host_hook_telemetry_contract();
-    assert_eq!(
-        contract["schema_version"],
-        HOST_HOOK_TELEMETRY_SCHEMA_VERSION
+fn unbound_hook_analytics_do_not_create_a_missing_profile() {
+    let home = tempfile::tempdir().unwrap();
+    let profile_root = home.path().join(".tracedecay");
+    let event = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
+    let parsed = serde_json::from_str(event).unwrap();
+    record_stop(&ProfileRoot::new(&profile_root), event, &parsed);
+    assert!(
+        !profile_root.exists(),
+        "unbound hook analytics created a missing profile"
     );
-    assert_eq!(contract["provider_coverage"].as_array().unwrap().len(), 5);
+
+    let present = tempfile::tempdir().unwrap();
+    let present_root = present.path().join(".tracedecay");
+    std::fs::create_dir(&present_root).unwrap();
+    record_stop(&ProfileRoot::new(&present_root), event, &parsed);
+    let rows = read_analytics_rows(&present_root.join("hook_analytics.jsonl"));
     assert_eq!(
-        contract["metrics"]["timeout"],
-        serde_json::json!(["timeout.budget_ms", "timeout.timed_out"])
+        rows.len(),
+        2,
+        "an existing profile records invoke and completion"
     );
+    let invoked = rows
+        .iter()
+        .find(|row| row["event"] == "hook_invoked")
+        .expect("hook_invoked row");
+    let mut invoked_fields = invoked
+        .as_object()
+        .cloned()
+        .expect("hook_invoked row is an object");
+    let recorded_at = invoked_fields
+        .remove("ts_unix_ms")
+        .and_then(|value| value.as_u64())
+        .expect("hook_invoked carries a unix millisecond timestamp");
+    assert!(recorded_at >= 1_700_000_000_000);
+    assert_eq!(
+        Value::Object(invoked_fields),
+        serde_json::json!({
+            "event": "hook_invoked",
+            "schema_version": 1,
+            "coverage": "host_measured",
+            "agent": "claude",
+            "hook_name": "Stop",
+            "session_id": "s1",
+            "prompt_category": null,
+            "payload_bytes": event.len() as u64,
+        })
+    );
+    let completed = rows
+        .iter()
+        .find(|row| row["event"] == "hook_completed")
+        .expect("hook_completed row");
+    assert!(
+        completed["ts_unix_ms"]
+            .as_u64()
+            .expect("completed timestamp")
+            >= recorded_at
+    );
+    assert_eq!(completed["agent"], "claude");
+    assert_eq!(completed["hook_name"], "Stop");
+    assert_eq!(completed["session_id"], "s1");
+    assert_eq!(completed["payload_bytes"], event.len() as u64);
+    assert_eq!(completed["disposition"]["status"], "unknown");
+    assert_eq!(completed["disposition"]["retryable"], false);
+    assert_eq!(
+        completed["disposition"]["reason_code"],
+        "disposition_absent"
+    );
+    assert_eq!(completed["disposition"]["class"], "unknown");
 }
 
 #[test]
@@ -107,14 +189,20 @@ fn native_dispatch_dispositions_remain_distinct_in_telemetry() {
     assert_eq!(spooled.status, HostAdmissionStatus::AcceptedForReplay);
     assert_eq!(spooled.reason_code.as_deref(), Some("hook_v2_spooled"));
     assert_eq!(catchup.status, HostAdmissionStatus::Degraded);
+    assert_eq!(spooled.retryable, Some(true), "the spool replays it");
+    assert_eq!(
+        catchup.retryable,
+        Some(false),
+        "nothing replays a dropped event"
+    );
     assert_eq!(
         catchup.reason_code.as_deref(),
         Some("hook_v2_catchup_required")
     );
 }
 
-/// A hook subprocess never has a published snapshot — nothing in the hook
-/// path opens a store or contacts the daemon before the span is built — so
+/// A hook subprocess never has a published snapshot, nothing in the hook
+/// path opens a store or contacts the daemon before the span is built, so
 /// treating absence as "timings off" suppressed `hook_completed` for every
 /// real hook while `hook_invoked` kept being written. Absence must behave
 /// like the invocation half; only an authority that says off turns it off.
@@ -122,9 +210,12 @@ fn native_dispatch_dispositions_remain_distinct_in_telemetry() {
 fn timing_span_defaults_to_recording_without_a_registered_authority() {
     let project = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
     let span = HookTimingSpan::new(
+        &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
         Some(&project_root),
-        HintAgent::Claude,
+        HostIntegrationIdV1::Claude,
         "missingConfiguration",
         None,
         None,
@@ -149,19 +240,24 @@ fn payload_bytes_are_length_only_and_omit_forbidden_content() {
     let measured = measure_host_event_payload_bytes(&event).unwrap();
     assert_eq!(measured, event.len() as u64);
 
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::Builder::new()
         .prefix("benchmark-secret-project-path-")
         .tempdir()
         .unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_privacy");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_hook_privacy");
 
     {
-        let span = record_hook_invoked(Some(&project_root), HintAgent::Claude, "Stop", &event);
+        let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
+            Some(&project_root),
+            HostIntegrationIdV1::Claude,
+            "Stop",
+            &event,
+        );
         span.note_timeout_budget(Duration::from_millis(750));
         span.note_timed_out(false);
         span.note_completed_daemon_call(
@@ -211,13 +307,13 @@ fn payload_bytes_are_length_only_and_omit_forbidden_content() {
             "analytics leaked forbidden content `{forbidden}`: {analytics_jsonl}"
         );
     }
-    for forbidden_field in [
-        "project_root",
-        "event_cwd",
-        "command",
-        "session_id",
-        "tool_name",
-    ] {
+    // The session the payload names is attribution, not content: both rows
+    // carry it so analytics can join a hook to its session.
+    for row in analytics_jsonl.lines() {
+        let row: Value = serde_json::from_str(row).unwrap();
+        assert_eq!(row["session_id"], "s1", "{row}");
+    }
+    for forbidden_field in ["project_root", "event_cwd", "command", "tool_name"] {
         assert!(
             !analytics_jsonl.contains(&format!("\"{forbidden_field}\"")),
             "telemetry persisted forbidden field `{forbidden_field}`: {analytics_jsonl}"
@@ -227,13 +323,13 @@ fn payload_bytes_are_length_only_and_omit_forbidden_content() {
 
 #[test]
 fn daemon_hook_action_records_completed_rtt_and_wire_length() {
-    crate::hooks::run_with_test_env_lock(async {
+    crate::hooks::block_on_hook_test_runtime(async {
         let project = tempfile::tempdir().unwrap();
-        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
-        let profile_root = profile.path().canonicalize().unwrap();
-        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-        let data_root = enroll_project(&project_root, "proj_hook_daemon_boundary");
+        let profile_root = profile_dir.path().canonicalize().unwrap();
+        let profile = ProfileRoot::new(&profile_root);
+        let data_root = enroll_project(&project_root, &profile_root, "proj_hook_daemon_boundary");
 
         {
             let _guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
@@ -241,14 +337,16 @@ fn daemon_hook_action_records_completed_rtt_and_wire_length() {
                 "reset": true,
             })]);
             let span = record_hook_invoked(
+                &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
                 Some(&project_root),
-                HintAgent::Cursor,
+                HostIntegrationIdV1::Cursor,
                 "daemonBoundary",
                 r#"{"hook_event_name":"daemonBoundary"}"#,
             );
             let result = crate::hooks::daemon_hook_action(
+                &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
                 Some(&project_root),
-                serde_json::json!({ "action": "reset_counter" }),
+                HookRuntimeSurfaceRequestV1::ResetCounter {},
                 Some(&span),
             )
             .await;
@@ -270,18 +368,22 @@ fn daemon_hook_action_records_completed_rtt_and_wire_length() {
 
 #[test]
 fn one_way_notification_does_not_claim_round_trip_time() {
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_notification_boundary");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(
+        &project_root,
+        &profile_root,
+        "proj_hook_notification_boundary",
+    );
 
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             "notificationBoundary",
             r#"{"hook_event_name":"notificationBoundary"}"#,
         );
@@ -305,13 +407,12 @@ fn one_way_notification_does_not_claim_round_trip_time() {
 
 #[test]
 fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_aggregation");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_hook_aggregation");
     let success = Ok(serde_json::json!({
         "admission": { "status": "supported", "retryable": false }
     }));
@@ -332,8 +433,9 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
 
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Claude,
+            HostIntegrationIdV1::Claude,
             "failureThenSuccess",
             "{}",
         );
@@ -342,8 +444,9 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Codex,
+            HostIntegrationIdV1::Codex,
             "successThenFailure",
             "{}",
         );
@@ -352,8 +455,9 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Kiro,
+            HostIntegrationIdV1::Kiro,
             "backpressureThenSuccess",
             "{}",
         );
@@ -362,8 +466,9 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             "stickyTimeout",
             "{}",
         );
@@ -403,13 +508,12 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
 
 #[test]
 fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_unknown_order");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_hook_unknown_order");
     let success = Ok(serde_json::json!({
         "admission": { "status": "supported", "retryable": false }
     }));
@@ -430,8 +534,9 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
 
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Claude,
+            HostIntegrationIdV1::Claude,
             "unknownThenSuccess",
             "{}",
         );
@@ -440,8 +545,9 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Codex,
+            HostIntegrationIdV1::Codex,
             "unknownThenFailure",
             "{}",
         );
@@ -450,8 +556,9 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Kiro,
+            HostIntegrationIdV1::Kiro,
             "successThenUnknown",
             "{}",
         );
@@ -460,8 +567,9 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             "failureThenUnknown",
             "{}",
         );
@@ -470,8 +578,9 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Claude,
+            HostIntegrationIdV1::Claude,
             "unknownThenTimeout",
             "{}",
         );
@@ -480,8 +589,9 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Codex,
+            HostIntegrationIdV1::Codex,
             "timeoutThenUnknown",
             "{}",
         );
@@ -490,8 +600,9 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Kiro,
+            HostIntegrationIdV1::Kiro,
             "unknownThenCancel",
             "{}",
         );
@@ -500,8 +611,9 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             "cancelThenUnknown",
             "{}",
         );
@@ -570,22 +682,24 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
 
 #[test]
 fn concurrent_spans_keep_rtt_payload_and_disposition_isolated() {
-    crate::hooks::run_with_test_env_lock(async {
+    crate::hooks::block_on_hook_test_runtime(async {
         let project = tempfile::tempdir().unwrap();
-        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
-        let profile_root = profile.path().canonicalize().unwrap();
-        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-        let data_root = enroll_project(&project_root, "proj_hook_concurrent");
+        let profile_root = profile_dir.path().canonicalize().unwrap();
+        let profile = ProfileRoot::new(&profile_root);
+        let data_root = enroll_project(&project_root, &profile_root, "proj_hook_concurrent");
         let first = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             "firstHook",
             r#"{"hook_event_name":"firstHook"}"#,
         );
         let second = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
-            HintAgent::Kiro,
+            HostIntegrationIdV1::Kiro,
             "secondHook",
             r#"{"hook_event_name":"secondHook"}"#,
         );
@@ -639,16 +753,21 @@ fn concurrent_spans_keep_rtt_payload_and_disposition_isolated() {
 
 #[test]
 fn untyped_ok_daemon_output_emits_unknown_not_default_success() {
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_untyped_ok_disposition");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_untyped_ok_disposition");
 
     {
-        let span = record_hook_invoked(Some(&project_root), HintAgent::Claude, "untypedOk", "{}");
+        let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
+            Some(&project_root),
+            HostIntegrationIdV1::Claude,
+            "untypedOk",
+            "{}",
+        );
         span.note_daemon_result(&Ok(serde_json::json!({"result": {}})));
     }
 
@@ -1135,41 +1254,6 @@ fn readiness_aggregation_tie_order_is_stable_under_cap() {
     );
 }
 
-#[test]
-fn empty_readiness_distributions_are_honest_no_samples_not_zero_fill() {
-    let empty = empty_hook_completed_readiness_distributions();
-    assert_eq!(empty.collection_status, MetricAvailability::NoSamples);
-    assert_eq!(empty.input_rows_received, 0);
-    assert_eq!(empty.input_rows_processed, 0);
-    assert_eq!(empty.input_rows_dropped_at_cap, 0);
-    assert_eq!(empty.events_considered, 0);
-    assert!(empty.hook_wall_time_distribution.is_empty());
-    assert!(empty.host_ipc_rtt_distribution.is_empty());
-    assert!(empty.payload_bytes_distribution.is_empty());
-    assert!(empty.timeout_outcomes_by_host.is_empty());
-    assert!(empty.disposition_counts_by_host.is_empty());
-    assert_eq!(empty.unavailable_metrics.len(), 1);
-    assert_eq!(
-        empty.unavailable_metrics[0].blocker,
-        "hook_completed_does_not_emit_daemon_processing_duration"
-    );
-    assert_eq!(empty.bounds.max_input_rows, MAX_READINESS_INPUT_ROWS as u64);
-    assert_eq!(empty.bounds.host_buckets, READINESS_HOST_BUCKETS as u64);
-}
-
-#[test]
-fn telemetry_contract_separates_host_ipc_rtt_from_daemon_processing() {
-    let contract = host_hook_telemetry_contract();
-    assert_eq!(
-        contract["latency_semantics"]["host_ipc_rtt"]["event_field"],
-        "daemon_rtt_us"
-    );
-    assert_eq!(
-        contract["latency_semantics"]["daemon_processing_duration"]["status"],
-        "unavailable"
-    );
-}
-
 /// The canonical readiness aggregate must report measured rows without ever
 /// echoing attacker-controlled dimensions back into the dashboard projection.
 #[test]
@@ -1225,5 +1309,63 @@ fn readiness_aggregate_bounds_untrusted_hook_dimensions() {
             !encoded.contains(forbidden),
             "readiness must not leak {forbidden}: {encoded}"
         );
+    }
+}
+
+/// Two owners in one process, each with its own profile, record hook analytics
+/// for the same checkout at the same time. Each owner's rows land only in its
+/// own profile's store for that checkout.
+#[test]
+fn two_owner_profiles_record_hook_analytics_into_their_own_stores() {
+    const ROWS_PER_OWNER: usize = 25;
+    let checkout = tempfile::tempdir().unwrap();
+    let owners: Vec<(tempfile::TempDir, ProfileRoot, PathBuf, &str)> = ["owner-a", "owner-b"]
+        .into_iter()
+        .map(|hook_name| {
+            let home = tempfile::tempdir().unwrap();
+            let profile = ProfileRoot::under_home(home.path());
+            let data_root =
+                enroll_project(checkout.path(), profile.data_dir(), "proj_two_owner_hooks");
+            (home, profile, data_root, hook_name)
+        })
+        .collect();
+    assert_ne!(owners[0].2, owners[1].2);
+
+    let start = std::sync::Barrier::new(owners.len());
+    std::thread::scope(|scope| {
+        for (_, profile, _, hook_name) in &owners {
+            let start = &start;
+            let checkout = checkout.path();
+            scope.spawn(move || {
+                let runtime = crate::ports::hook_runtime::crate_test_runtime(profile.clone());
+                start.wait();
+                for _ in 0..ROWS_PER_OWNER {
+                    drop(record_native_hook_invoked_parsed(
+                        &runtime,
+                        Some(checkout),
+                        NativeHostIdentityV1::FactoryDroid,
+                        hook_name,
+                        r#"{"hook_event_name":"Stop"}"#,
+                        &serde_json::json!({"hook_event_name": "Stop"}),
+                    ));
+                }
+            });
+        }
+    });
+
+    for (_, profile, data_root, hook_name) in &owners {
+        assert!(data_root.starts_with(profile.data_dir()));
+        let rows = read_analytics_rows(&data_root.join(HOOK_ANALYTICS_FILENAME));
+        let foreign: Vec<&Value> = rows
+            .iter()
+            .filter(|row| row["hook_name"] != *hook_name)
+            .collect();
+        assert_eq!(foreign, Vec::<&Value>::new());
+        let invoked = rows
+            .iter()
+            .filter(|row| row["event"] == "hook_invoked")
+            .count();
+        assert_eq!(invoked, ROWS_PER_OWNER);
+        assert!(!profile.data_dir().join(HOOK_ANALYTICS_FILENAME).exists());
     }
 }

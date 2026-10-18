@@ -8,7 +8,8 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
     let socket_path = common::daemon_socket_path(&home_path);
     let daemon_stderr_path = home_path.join("daemon.stderr.log");
     let daemon_stderr = std::fs::File::create(&daemon_stderr_path).expect("create daemon stderr");
-    let mut daemon = spawn_daemon_with_stderr(&home_path, &socket_path, daemon_stderr);
+    let mut daemon =
+        spawn_daemon_with_stderr(&home_path, &socket_path, &daemon_stderr_path, daemon_stderr);
     let profile_db_path = init_project(&home_path, &project_path, &socket_path);
 
     let mut clients = (0..CLIENT_COUNT)
@@ -49,12 +50,17 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
     );
 
     let db_identity = file_identity(&profile_db_path).expect("profile database identity");
-    let hook_event = json!({
-        "hook_event_name": "afterFileEdit",
-        "file_path": project_path.join("src/lib.rs"),
-        "workspace_roots": [&project_path],
-    })
-    .to_string();
+    let mut hook_event: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
+    )))
+    .expect("recorded Cursor native fixture");
+    hook_event["file_path"] = json!(project_path.join("src/lib.rs"));
+    hook_event["workspace_roots"] = json!([&project_path]);
+    hook_event["edits"] = json!([{
+        "old_string": "pub fn broker_fixture() -> u32 { 41 }",
+        "new_string": "pub fn broker_fixture() -> u32 { 42 }",
+    }]);
     std::thread::scope(|scope| {
         let start = Arc::new(Barrier::new(3 * CONCURRENT_CLIENTS_PER_PATH + 1));
         let mut requests = Vec::new();
@@ -100,27 +106,45 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
                         .spawn()
                         .expect("spawn brokered tool status"),
                 );
-                let status = wait_for_exit(&mut tool)
-                    .unwrap_or_else(|| panic!("tool client exceeded {PROCESS_TIMEOUT:?}"));
-                assert!(status.success(), "brokered tool status failed");
+                let status = wait_for_exit(&mut tool).unwrap_or_else(|| {
+                    panic!(
+                        "tool client exceeded {PROCESS_TIMEOUT:?}\ndaemon stderr:\n{}",
+                        daemon_stderr_tail()
+                    )
+                });
+                assert!(
+                    status.success(),
+                    "brokered tool status failed\ndaemon stderr:\n{}",
+                    daemon_stderr_tail()
+                );
             }));
         }
-        for _ in 0..CONCURRENT_CLIENTS_PER_PATH {
+        for ordinal in 0..CONCURRENT_CLIENTS_PER_PATH {
             let home_path = &home_path;
             let project_path = &project_path;
             let socket_path = &socket_path;
-            let hook_event = &hook_event;
+            let mut hook_event = hook_event.clone();
+            hook_event["conversation_id"] = json!(format!("conversation-{ordinal}"));
+            hook_event["generation_id"] = json!(format!("generation-{ordinal}"));
+            hook_event["session_id"] = json!(format!("session-{ordinal}"));
+            hook_event["transcript_path"] =
+                json!(home_path.join(format!("transcripts/session-{ordinal}.jsonl")));
+            let hook_event = hook_event.to_string();
             let start = Arc::clone(&start);
             requests.push(scope.spawn(move || {
                 start.wait();
+                let stdout_path = home_path.join(format!("hook-{ordinal}.stdout.log"));
+                let stderr_path = home_path.join(format!("hook-{ordinal}.stderr.log"));
+                let stdout = std::fs::File::create(&stdout_path).expect("create hook stdout");
+                let stderr = std::fs::File::create(&stderr_path).expect("create hook stderr");
                 let mut hook = ChildGuard::new(
                     common::tracedecay_command_with_home(home_path)
                         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
                         .arg("hook-cursor-after-file-edit")
                         .current_dir(project_path)
                         .stdin(Stdio::piped())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
+                        .stdout(Stdio::from(stdout))
+                        .stderr(Stdio::from(stderr))
                         .spawn()
                         .expect("spawn hook client"),
                 );
@@ -131,7 +155,13 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
                 drop(stdin);
                 let status = wait_for_exit(&mut hook)
                     .unwrap_or_else(|| panic!("hook client exceeded {PROCESS_TIMEOUT:?}"));
-                assert!(status.success(), "hook client failed");
+                let stdout = std::fs::read_to_string(stdout_path).expect("read hook stdout");
+                let stderr = std::fs::read_to_string(stderr_path).expect("read hook stderr");
+                assert!(
+                    status.success(),
+                    "hook client {ordinal} failed: {status}; stdout: {stdout}; stderr: {stderr}"
+                );
+                assert_eq!(stdout.trim(), "{}", "native capture transport response");
             }));
         }
         start.wait();
@@ -142,12 +172,19 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
 
     let doctor = common::tracedecay_command_with_home(&home_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        // `doctor` takes no arguments: it checks every agent integration in one
+        // pass, so the retired `--agent` selector is a hard parse failure.
         .arg("doctor")
-        .args(["--agent", "claude"])
         .current_dir(&project_path)
         .output()
         .expect("run doctor probe");
-    assert_command_success("brokered doctor", &doctor);
+    assert!(
+        doctor.status.success(),
+        "brokered doctor failed\nstdout:\n{}\nstderr:\n{}\ndaemon stderr:\n{}",
+        String::from_utf8_lossy(&doctor.stdout),
+        String::from_utf8_lossy(&doctor.stderr),
+        daemon_stderr_tail()
+    );
     assert_eq!(
         file_identity(&profile_db_path),
         Some(db_identity),
@@ -167,6 +204,23 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
         );
     }
     stop_child(&mut daemon);
+    let project_id = tracedecay_runtime_core::storage::default_profile_project_id(&project_path);
+    let data_root =
+        tracedecay_runtime_core::storage::profile_sharded_data_root(&profile_root, &project_id);
+    let host = tracedecay_domain::NativeHostIdentityV1::CursorDesktop;
+    let (_, capture_report) = tracedecay_hooks::HookSpoolV1::open(
+        data_root.join("hook-v2-spool").join(host.hook_key()),
+        tracedecay_hooks::HookSpoolConfigV1::stock(host),
+        tracedecay_contracts::now_micros(),
+    )
+    .expect("open native capture receipt");
+    // Sequence survives daemon replay/acknowledgement, so this proves each
+    // callback was captured even if the owner already drained its envelope.
+    assert_eq!(
+        capture_report.next_sequence,
+        1 + CONCURRENT_CLIENTS_PER_PATH as u64,
+        "every native callback must be captured, not merely accepted as unbound"
+    );
     let daemon_stderr = std::fs::read_to_string(&daemon_stderr_path).expect("read daemon stderr");
     assert!(
         !daemon_stderr.contains("database is locked"),

@@ -11,9 +11,6 @@ fn entry_script(html: &str) -> String {
 
 #[test]
 fn dashboard_root_serves_the_embedded_single_app_bundle() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -61,7 +58,7 @@ fn dashboard_root_serves_the_embedded_single_app_bundle() {
         // The suite serves the fixture bundle byte-exact; production
         // bundle-size and placeholder guards live with the CLI build script's
         // manifest validation and the product-runtime provider validation.
-        let fixture_script = tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS
+        let fixture_script = tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS
             .assets
             .iter()
             .find(|asset| asset.path == "static/js/index.fixture.js")
@@ -103,9 +100,6 @@ fn dashboard_root_serves_the_embedded_single_app_bundle() {
 
 #[test]
 fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -152,10 +146,14 @@ fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
         );
         assert_eq!(cross_origin["error"], "dashboard_request_forbidden");
 
+        let (_, authority) = fixture
+            .base_url
+            .rsplit_once('@')
+            .expect("fixture base URL carries the access token as userinfo");
         let (status, same_origin) = response_to_json(
             agent
                 .get(&capabilities_url)
-                .header("Origin", &fixture.base_url)
+                .header("Origin", &format!("http://{authority}"))
                 .call()
                 .expect("same-origin request should remain admitted"),
         );
@@ -164,5 +162,17 @@ fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
             "the dashboard's own Origin must remain admitted"
         );
         assert!(same_origin["features"].is_object(), "{same_origin}");
+
+        let (status, anonymous) = response_to_json(
+            agent
+                .get(&format!("http://{authority}/api/capabilities"))
+                .call()
+                .expect("an unauthenticated request should return a concealed HTTP response"),
+        );
+        assert_eq!(
+            status, 401,
+            "a same-host request without the listener token must be refused"
+        );
+        assert_eq!(anonymous["error"], "dashboard_request_unauthenticated");
     });
 }

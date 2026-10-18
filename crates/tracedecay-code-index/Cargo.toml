@@ -9,40 +9,12 @@ description = "In-process structural code search for TraceDecay"
 include = ["/src/**"]
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "tracedecay-application/hotpath",
-    "tracedecay-code-extraction/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-private-fs/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-    "tracedecay-code-extraction/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
-    "tracedecay-code-extraction/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-]
 default = [
     "lite",
     "medium",
     "full",
 ]
-# Markdown is admitted by every tier, not just `full` — see the note on the
+# Markdown is admitted by every tier, not just `full`, see the note on the
 # extraction crate's `lite` feature. The local alias keeps this crate's
 # Markdown-specific tests aligned with the forwarded extraction tier.
 lite = ["tracedecay-code-extraction/lite", "lang-markdown"]
@@ -78,6 +50,7 @@ lang-wgsl = ["tracedecay-code-extraction/lang-wgsl"]
 lang-hlsl = ["tracedecay-code-extraction/lang-hlsl"]
 lang-metal = ["tracedecay-code-extraction/lang-metal"]
 lang-markdown = ["tracedecay-code-extraction/lang-markdown"]
+lang-json = ["tracedecay-code-extraction/lang-json"]
 lang-r = ["tracedecay-code-extraction/lang-r"]
 lang-sql = ["tracedecay-code-extraction/lang-sql"]
 lang-julia = ["tracedecay-code-extraction/lang-julia"]
@@ -92,9 +65,10 @@ lang-toml = ["tracedecay-code-extraction/lang-toml"]
 lang-lean = ["tracedecay-code-extraction/lang-lean"]
 
 [dependencies]
-ast-grep-core = "0.44"
+ast-grep-core = "0.50"
+flate2 = "1"
+base64 = "0.23"
 hex = "0.4"
-hotpath.workspace = true
 ignore = "0.4"
 rayon = "1"
 regex = "1"
@@ -102,39 +76,51 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.11"
 thiserror = "2"
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+toml = "1"
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracing = "0.1"
+tree-sitter = "0.27"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+# Self dev-dependency: the integration suite forces indexing width through
+# the `test-helpers` hooks; production builds never select them.
+tracedecay-code-index = { path = ".", default-features = false, features = ["test-helpers"] }
+criterion = "0.8"
 tempfile = "3"
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false, features = ["lite", "test-helpers"] }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tree-sitter = "0.26"
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false, features = ["lite", "test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-store = { path = "../tracedecay-store" }
 
-# Profiling benches: built only under the opt-in `hotpath` feature so a
-# default `cargo bench` / `cargo test --all-targets` never compiles hotpath
-# instrumentation. Run with `cargo bench -p tracedecay-code-index
-# --features hotpath --bench <name>`. A `--no-default-features` retained-parse
-# reproduction must keep `hotpath` selected (for example
-# `--features lite,hotpath`) or Cargo cannot select the target.
 [[bench]]
 name = "code_index_chunks"
 harness = false
 test = false
-required-features = ["hotpath"]
 
 [[bench]]
 name = "retained_parse"
 harness = false
 test = false
-required-features = ["hotpath"]
+
+[[bench]]
+name = "partitioned_codec"
+harness = false
+test = false
+
+[[bench]]
+name = "sealed_storage"
+harness = false
+test = false
+
+[[bench]]
+name = "restore_generation"
+harness = false
+test = false
 
 [[bench]]
 name = "source_search"

@@ -1,12 +1,12 @@
 use tracedecay_domain::{
-    ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
+    ComponentRevision, CursorBindingMismatchV1, EphemeralSanitizedQueryViewV1, RetrievalRequest,
+    ScoreDomainId,
 };
 use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
 use tracedecay_session_temporal_store::execution::{
     AuthorizedTaskSessionExecutionRequestV1, TaskSessionExecutionOmissionV1,
     TaskSessionRankSelectorV1, TaskSessionSelectionCallbackErrorV1,
-    TaskSessionTemporalExecutionOutcomeV1, TaskSessionTemporalExecutionPortV1,
-    TaskSessionTemporalExecutionReportV1,
+    TaskSessionTemporalExecutionOutcomeV1, TaskSessionTemporalExecutionReportV1,
 };
 
 use crate::session::SessionRetrievalBudgetStageV1;
@@ -32,17 +32,21 @@ pub enum TaskSessionRetrievalOutcomeV1 {
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
     },
+    /// The presented cursor pages a candidate cohort that no longer exists.
+    CursorStale,
+    /// The presented cursor was minted for another operation or request.
+    CursorRefused(CursorBindingMismatchV1),
     TimedOut,
     Cancelled,
 }
 
-pub(super) struct AdmittedSessionTemporalExecution {
-    pub(super) execution: AuthorizedTemporalExecutionRequest,
+pub(crate) struct AdmittedSessionTemporalExecution {
+    pub(crate) execution: AuthorizedTemporalExecutionRequest,
     pub(super) cancellation_control: ExecutionControl,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum SessionExecutionAdmissionFailure {
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SessionExecutionAdmissionFailure {
     WrongScope,
     Denied,
     Unavailable,
@@ -58,21 +62,24 @@ impl SessionExecutionAdmissionFailure {
         match self {
             Self::WrongScope => SessionRetrievalOutcome::WrongScope,
             Self::Denied => SessionRetrievalOutcome::Denied,
-            Self::Unavailable => SessionRetrievalOutcome::Unavailable,
-            Self::BudgetExhausted { stage } => super::budget_exhausted(stage),
+            Self::Unavailable => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::AuthorityAbsent,
+            ),
+            Self::BudgetExhausted { stage } => super::budget_exhausted(stage, None),
             Self::TimedOut => SessionRetrievalOutcome::TimedOut,
             Self::Cancelled => SessionRetrievalOutcome::Cancelled,
         }
     }
 }
 
-impl<A, P, E> SessionRetrievalService<A, P, E>
+impl<A, D, E> SessionRetrievalService<'_, A, D, E>
 where
     A: SessionScopeAuthorizer,
+    D: SessionTemporalRegisteredDb,
     E: VersionedTokenEstimator + Sync,
 {
-    #[hotpath::measure(label = "usecases.session.admit")]
-    pub(super) fn admit_execution(
+    #[tracing::instrument(name = "usecases.session.admit", level = "trace", skip_all)]
+    pub(crate) fn admit_execution(
         &self,
         context: &RequestContext,
         binding: &SessionRequestBinding,
@@ -143,7 +150,7 @@ where
         if binding.cancellation().is_cancelled() || context.cancellation().is_cancelled() {
             control.cancel();
         }
-        let snapshot_request = tracedecay_temporal_query::ports::TemporalSnapshotRequest::new(
+        let snapshot_request = tracedecay_temporal_query::snapshot::TemporalSnapshotRequest::new(
             query.session_id.clone(),
             root_digest,
             request_digest,
@@ -166,6 +173,8 @@ where
         .with_execution_control(control);
         let execution = AuthorizedTemporalExecutionRequest::new(
             snapshot_request,
+            session_cursor_binding(query)
+                .map_err(|_| SessionExecutionAdmissionFailure::Unavailable)?,
             query.query.clone(),
             query.cursor.clone(),
             query.limit,
@@ -205,14 +214,14 @@ fn map_authorization_failure(error: SessionAuthorizationError) -> SessionExecuti
     }
 }
 
-impl<A, P, E> SessionRetrievalService<A, P, E>
+impl<A, D, E> SessionRetrievalService<'_, A, D, E>
 where
     A: SessionScopeAuthorizer,
-    P: SessionTemporalExecutionPort + TaskSessionTemporalExecutionPortV1,
+    D: SessionTemporalRegisteredDb + Sync,
     E: VersionedTokenEstimator + Sync,
 {
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "usecases.session.task_session")]
+    #[tracing::instrument(name = "usecases.session.task_session", level = "trace", skip_all)]
     pub async fn execute_task_session(
         &self,
         context: &RequestContext,
@@ -243,15 +252,17 @@ where
             Ok(request) => request,
             Err(error) => return map_task_session_callback_error(error),
         };
-        let result = match hotpath::future!(
+        let result = match tracing::Instrument::instrument(
             run_application_request_interruptible(
                 context,
                 session_binding.cancellation(),
-                self.execution
-                    .execute_task_session(request, selector, &self.estimator),
+                Box::pin(
+                    self.execution
+                        .execute_task_session(request, selector, &self.estimator),
+                ),
                 || admitted.cancellation_control.cancel(),
             ),
-            label = "usecases.session.task_session.execute"
+            tracing::trace_span!("usecases.session.task_session.execute"),
         )
         .await
         {
@@ -326,14 +337,17 @@ fn map_task_session_execution_error(
         SessionRetrievalOutcome::Stale { freshness } => {
             TaskSessionRetrievalOutcomeV1::Stale { freshness }
         }
-        SessionRetrievalOutcome::BudgetExhausted { stage } => {
+        SessionRetrievalOutcome::BudgetExhausted { stage, .. } => {
             TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
         }
         SessionRetrievalOutcome::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
         SessionRetrievalOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
         SessionRetrievalOutcome::ResetRequired => TaskSessionRetrievalOutcomeV1::ResetRequired,
-        SessionRetrievalOutcome::Unavailable
-        | SessionRetrievalOutcome::CursorStale
+        SessionRetrievalOutcome::CursorStale => TaskSessionRetrievalOutcomeV1::CursorStale,
+        SessionRetrievalOutcome::CursorRefused(mismatch) => {
+            TaskSessionRetrievalOutcomeV1::CursorRefused(mismatch)
+        }
+        SessionRetrievalOutcome::Unavailable(_)
         | SessionRetrievalOutcome::Complete { .. }
         | SessionRetrievalOutcome::Partial { .. }
         | SessionRetrievalOutcome::CompleteZero { .. }
@@ -356,7 +370,7 @@ fn map_task_session_execution_error(
 mod tests {
     use tracedecay_domain::CursorManifestLimitKindV1;
     use tracedecay_temporal_query::TemporalKernelError;
-    use tracedecay_temporal_query::ports::TemporalPortError;
+    use tracedecay_temporal_query::execution::TemporalPortError;
 
     use super::*;
 

@@ -1,21 +1,21 @@
 //! Durable journal and compare-and-swap authority for remote recovery.
 //!
 //! All state changes use the already registered remote-node runtime handle.
-//! Physical backup and publication locations remain private behind the effect
-//! port; caller-provided paths or database handles never cross this boundary.
+//! Physical promotion effects remain private behind the effect port;
+//! caller-provided paths or database handles never cross this boundary.
 
 use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
-use tracedecay_application::remote::{
+use tracedecay_contracts::remote::{
     capture::RemoteWriterAuthorityV1,
     protocol::RemoteProtocolRequestV1,
     recovery::{
-        BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
-        RecoveryAuthorityExpectationV1, RemoteRecoveryCallerV1, RemoteRecoveryCommittedV1,
-        RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1, RemoteRecoveryOperationErrorV1,
+        PromotionCasReceiptV1, PromotionConfirmationV1, RecoveryAuthorityExpectationV1,
+        RemoteRecoveryCallerV1, RemoteRecoveryCommittedV1, RemoteRecoveryControlPortV1,
+        RemoteRecoveryInterruptionV1, RemoteRecoveryOperationErrorV1,
         RemoteRecoveryOperationPortV1, RemoteRecoveryOperationReceiptV1,
-        RemoteRecoveryTerminationV1, StagedRestoreConfirmationV1, StagedRestoreProgressV1,
+        RemoteRecoveryPromotionFutureV1, RemoteRecoveryTerminationV1,
     },
 };
 use tracedecay_domain::{
@@ -46,70 +46,50 @@ pub struct RemoteRecoveryPhysicalCommitV1<T> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteRecoveryPhysicalEffectErrorV1 {
-    RolledBack,
     ForwardRecoveryRequired,
     Cancelled,
     TimedOut,
     Unavailable,
     Corruption,
+    WriterAuthorityUnpublished,
 }
 
 /// Idempotent private effects used by the durable journal.
 ///
 /// An exact retry after process death must either return the original physical
 /// result or continue recovery of that same operation identity. Implementations
-/// must never expose a partially published restore or promotion.
+/// must never expose a partially published promotion.
 pub trait RemoteRecoveryPhysicalEffectsV1: Send + Sync {
-    fn current_authority(
-        &self,
-        expected: &RecoveryAuthorityExpectationV1,
-        caller: &RemoteRecoveryCallerV1,
-    ) -> Result<(CurrentRemoteAuthorityV1, u64), RemoteRecoveryPhysicalEffectErrorV1>;
+    fn current_authority<'a>(
+        &'a self,
+        expected: &'a RecoveryAuthorityExpectationV1,
+        caller: &'a RemoteRecoveryCallerV1,
+    ) -> RemoteRecoveryPhysicalEffectFutureV1<'a, (CurrentRemoteAuthorityV1, u64)>;
 
     fn required_promotion_sink_ids(
         &self,
         expected: &RecoveryAuthorityExpectationV1,
     ) -> Result<Vec<String>, RemoteRecoveryPhysicalEffectErrorV1>;
 
-    fn create_backup(
-        &self,
-        operation_id: &str,
-        expected: &RecoveryAuthorityExpectationV1,
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-        request_id: &tracedecay_application::RequestId,
-    ) -> Result<
-        RemoteRecoveryPhysicalCommitV1<BackupOperationStateV1>,
-        RemoteRecoveryPhysicalEffectErrorV1,
-    >;
-
-    fn publish_staged_restore(
-        &self,
-        request: &StagedRestoreConfirmationV1,
-        expected: &RecoveryAuthorityExpectationV1,
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-        request_id: &tracedecay_application::RequestId,
-    ) -> Result<
-        RemoteRecoveryPhysicalCommitV1<StagedRestoreProgressV1>,
-        RemoteRecoveryPhysicalEffectErrorV1,
-    >;
-
     #[allow(clippy::too_many_arguments)]
-    fn promote(
-        &self,
-        operation_id: &str,
-        expected: &RecoveryAuthorityExpectationV1,
-        replacement: &RemoteWriterFenceV1,
-        required_sink_ids: &[String],
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-        request_id: &tracedecay_application::RequestId,
-    ) -> Result<
+    fn promote<'a>(
+        &'a self,
+        operation_id: &'a str,
+        expected: &'a RecoveryAuthorityExpectationV1,
+        replacement: &'a RemoteWriterFenceV1,
+        required_sink_ids: &'a [String],
+        caller: &'a RemoteRecoveryCallerV1,
+        control: Arc<dyn RemoteRecoveryControlPortV1>,
+        request_id: &'a tracedecay_contracts::RequestId,
+    ) -> RemoteRecoveryPhysicalEffectFutureV1<
+        'a,
         RemoteRecoveryPhysicalCommitV1<PromotionCasReceiptV1>,
-        RemoteRecoveryPhysicalEffectErrorV1,
     >;
 }
+
+pub type RemoteRecoveryPhysicalEffectFutureV1<'a, T> = std::pin::Pin<
+    Box<dyn Future<Output = Result<T, RemoteRecoveryPhysicalEffectErrorV1>> + Send + 'a>,
+>;
 
 #[derive(Clone)]
 pub struct RemoteRecoverySqliteAuthorityV1 {
@@ -191,7 +171,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
     /// becomes available. The original admitted request and caller binding are
     /// journaled before the write gate is visible, so recovery never depends
     /// on an API caller retrying.
-    pub fn reconcile_interrupted_promotions(
+    pub async fn reconcile_interrupted_promotions(
         &self,
         project_id: &tracedecay_domain::ProjectId,
     ) -> Result<u64, RemoteRecoveryOperationErrorV1> {
@@ -216,7 +196,8 @@ impl RemoteRecoverySqliteAuthorityV1 {
             if &caller.scope.project_id != project_id {
                 continue;
             }
-            self.promote(&request, &caller, &RecoveryReconciliationControlV1)?;
+            self.promote(&request, &caller, Arc::new(RecoveryReconciliationControlV1))
+                .await?;
             reconciled = reconciled
                 .checked_add(1)
                 .ok_or(RemoteRecoveryOperationErrorV1::Corruption)?;
@@ -224,7 +205,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
         Ok(reconciled)
     }
 
-    fn ensure_authority_seeded(
+    async fn ensure_authority_seeded(
         &self,
         expected: &RecoveryAuthorityExpectationV1,
         caller: &RemoteRecoveryCallerV1,
@@ -248,6 +229,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
         let (authority, frontier_sequence) = self
             .effects
             .current_authority(expected, caller)
+            .await
             .map_err(map_physical_error)?;
         if !expected.matches_writer(&authority.fence) {
             return Err(RemoteRecoveryOperationErrorV1::StaleAuthority);
@@ -276,120 +258,6 @@ impl RemoteRecoverySqliteAuthorityV1 {
             _ => Err(RemoteRecoveryOperationErrorV1::Corruption),
         }
     }
-
-    #[allow(clippy::too_many_arguments)]
-    fn execute_operation<Request, Output>(
-        &self,
-        kind: &'static str,
-        operation_id: &str,
-        request: &RemoteProtocolRequestV1<Request>,
-        expected: RecoveryAuthorityExpectationV1,
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-        effect: impl FnOnce(
-            &dyn RemoteRecoveryPhysicalEffectsV1,
-        ) -> Result<
-            RemoteRecoveryPhysicalCommitV1<Output>,
-            RemoteRecoveryPhysicalEffectErrorV1,
-        >,
-    ) -> Result<RemoteRecoveryCommittedV1<Output>, RemoteRecoveryOperationErrorV1>
-    where
-        Request: Serialize,
-        Output: Clone + DeserializeOwned + Serialize,
-    {
-        expected
-            .validate()
-            .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
-        self.ensure_authority_seeded(&expected, caller)?;
-        let input_digest = canonical_sha256(request)
-            .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
-        let context_json = serde_json::to_string(&(request, caller))
-            .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
-        let authority_key = authority_key_for_expectation(&expected)
-            .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
-        let started_at = request.sent_at;
-        match begin_operation(
-            self.handle(),
-            kind,
-            operation_id,
-            &input_digest,
-            &context_json,
-            &authority_key,
-            &expected,
-            false,
-            None,
-            started_at,
-        )? {
-            BeginOperationV1::Completed(committed) => Ok(*committed),
-            BeginOperationV1::Execute { pre_state_digest } => {
-                if let Some(interruption) = control.interruption(&request.request_id) {
-                    record_interruption(
-                        self.handle(),
-                        operation_id,
-                        &input_digest,
-                        interruption,
-                        started_at,
-                    )?;
-                    return Err(match interruption {
-                        RemoteRecoveryInterruptionV1::Cancelled => {
-                            RemoteRecoveryOperationErrorV1::Cancelled
-                        }
-                        RemoteRecoveryInterruptionV1::DeadlineExceeded => {
-                            RemoteRecoveryOperationErrorV1::TimedOut
-                        }
-                    });
-                }
-                let physical = match effect(self.effects.as_ref()) {
-                    Ok(physical) => physical,
-                    Err(error) => {
-                        record_physical_failure(
-                            self.handle(),
-                            operation_id,
-                            &input_digest,
-                            error,
-                            started_at,
-                        )?;
-                        return Err(map_physical_error(error));
-                    }
-                };
-                let receipt = RemoteRecoveryOperationReceiptV1 {
-                    request_id: request.request_id.clone(),
-                    operation_id: operation_id.to_owned(),
-                    caller: caller.clone(),
-                    expected,
-                    input_digest: input_digest.clone(),
-                    pre_state_digest,
-                    committed_state_digest: Some(physical.committed_state_digest),
-                    policy_digest: physical.policy_digest,
-                    started_at,
-                    committed_at: physical.committed_at,
-                    units_consumed: physical.units_consumed,
-                    bytes_consumed: physical.bytes_consumed,
-                    termination: RemoteRecoveryTerminationV1::Completed,
-                    interruption_observed_after_commit: physical.interruption_observed_after_commit,
-                };
-                receipt
-                    .validate()
-                    .map_err(|_| RemoteRecoveryOperationErrorV1::Corruption)?;
-                finish_operation(
-                    self.handle(),
-                    operation_id,
-                    &input_digest,
-                    &physical.output,
-                    &receipt,
-                )?;
-                Ok(RemoteRecoveryCommittedV1 {
-                    authority: available_authority_state(
-                        self.handle(),
-                        &receipt.expected,
-                        physical.committed_at,
-                    ),
-                    receipt,
-                    output: physical.output,
-                })
-            }
-        }
-    }
 }
 
 struct RecoveryReconciliationControlV1;
@@ -397,7 +265,7 @@ struct RecoveryReconciliationControlV1;
 impl RemoteRecoveryControlPortV1 for RecoveryReconciliationControlV1 {
     fn interruption(
         &self,
-        _request_id: &tracedecay_application::RequestId,
+        _request_id: &tracedecay_contracts::RequestId,
     ) -> Option<RemoteRecoveryInterruptionV1> {
         None
     }
@@ -408,18 +276,7 @@ impl RemoteSqliteStorageV1 {
         &self,
         expected: &RecoveryAuthorityExpectationV1,
     ) -> Result<RemoteWriterAuthorityV1, RemoteSqliteStorageErrorV1> {
-        expected
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let rows = query(
-            self.handle(),
-            "SELECT writer_json FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(&expected.brain_id)],
-        )?;
-        let row = one_row(rows)?;
-        let encoded = row_text(&row, 0)?;
-        let writer: RemoteWriterAuthorityV1 =
-            serde_json::from_str(encoded).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let writer = self.published_recovery_writer(expected)?;
         if !expected.matches_writer(&writer.authority.fence) {
             return Err(RemoteSqliteStorageErrorV1::Conflict);
         }
@@ -430,18 +287,7 @@ impl RemoteSqliteStorageV1 {
         &self,
         expected: &RecoveryAuthorityExpectationV1,
     ) -> Result<RemoteWriterAuthorityV1, RemoteSqliteStorageErrorV1> {
-        expected
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let rows = query(
-            self.handle(),
-            "SELECT writer_json FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(&expected.brain_id)],
-        )?;
-        let row = one_row(rows)?;
-        let encoded = row_text(&row, 0)?;
-        let writer: RemoteWriterAuthorityV1 =
-            serde_json::from_str(encoded).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let writer = self.published_recovery_writer(expected)?;
         let fence = &writer.authority.fence;
         if fence.brain_id.as_str() != expected.brain_id
             || fence.shard_id.as_str() != expected.shard_id
@@ -451,6 +297,19 @@ impl RemoteSqliteStorageV1 {
             return Err(RemoteSqliteStorageErrorV1::Conflict);
         }
         Ok(writer)
+    }
+
+    fn published_recovery_writer(
+        &self,
+        expected: &RecoveryAuthorityExpectationV1,
+    ) -> Result<RemoteWriterAuthorityV1, RemoteSqliteStorageErrorV1> {
+        expected
+            .validate()
+            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let brain_id = tracedecay_domain::BrainId::new(expected.brain_id.clone())
+            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let row = authority_row(self.handle(), "writer_json", &brain_id)?;
+        serde_json::from_str(row_text(&row, 0)?).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
     }
 }
 
@@ -463,192 +322,147 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
         available_authority_state(self.handle(), expected, observed_at)
     }
 
-    fn create_backup(
-        &self,
-        request: &RemoteProtocolRequestV1<BackupRequestV1>,
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-    ) -> Result<RemoteRecoveryCommittedV1<BackupOperationStateV1>, RemoteRecoveryOperationErrorV1>
-    {
-        let expected = request.body.expected.clone();
-        self.execute_operation(
-            "backup",
-            &request.body.operation_id,
-            request,
-            expected.clone(),
-            caller,
-            control,
-            |effects| {
-                effects.create_backup(
-                    &request.body.operation_id,
-                    &expected,
-                    caller,
-                    control,
-                    &request.request_id,
-                )
-            },
-        )
-    }
-
-    fn publish_staged_restore(
-        &self,
-        request: &RemoteProtocolRequestV1<StagedRestoreConfirmationV1>,
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-    ) -> Result<RemoteRecoveryCommittedV1<StagedRestoreProgressV1>, RemoteRecoveryOperationErrorV1>
-    {
-        let expected = expectation_for_restore(request)?;
-        self.execute_operation(
-            "restore",
-            &request.body.preview_id,
-            request,
-            expected.clone(),
-            caller,
-            control,
-            |effects| {
-                effects.publish_staged_restore(
-                    &request.body,
-                    &expected,
-                    caller,
-                    control,
-                    &request.request_id,
-                )
-            },
-        )
-    }
-
-    fn promote(
-        &self,
-        request: &RemoteProtocolRequestV1<PromotionConfirmationV1>,
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-    ) -> Result<RemoteRecoveryCommittedV1<PromotionCasReceiptV1>, RemoteRecoveryOperationErrorV1>
-    {
-        let expected = expectation_for_promotion(request)?;
-        if !self.promotion_is_pending(&request.body.preview_id)? {
-            self.ensure_authority_seeded(&expected, caller)?;
-        }
-        let replacement = replacement_writer(request, caller)?;
-        let required_sink_ids = self
-            .effects
-            .required_promotion_sink_ids(&expected)
-            .map_err(map_physical_error)?;
-        validate_sink_inventory(&required_sink_ids)?;
-        let input_digest = canonical_sha256(&(request, &required_sink_ids))
-            .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
-        let context_json = serde_json::to_string(&(request, caller))
-            .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
-        let authority_key = authority_key_for_expectation(&expected)
-            .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
-        match begin_operation::<PromotionCasReceiptV1>(
-            self.handle(),
-            "promotion",
-            &request.body.preview_id,
-            &input_digest,
-            &context_json,
-            &authority_key,
-            &expected,
-            true,
-            Some(&replacement),
-            request.sent_at,
-        )? {
-            BeginOperationV1::Completed(committed) => Ok(*committed),
-            BeginOperationV1::Execute { pre_state_digest } => {
-                if let Some(interruption) = control.interruption(&request.request_id) {
-                    record_interruption(
-                        self.handle(),
-                        &request.body.preview_id,
-                        &input_digest,
-                        interruption,
-                        request.sent_at,
-                    )?;
-                    return Err(match interruption {
-                        RemoteRecoveryInterruptionV1::Cancelled => {
-                            RemoteRecoveryOperationErrorV1::Cancelled
-                        }
-                        RemoteRecoveryInterruptionV1::DeadlineExceeded => {
-                            RemoteRecoveryOperationErrorV1::TimedOut
-                        }
-                    });
-                }
-                let physical = match self.effects.promote(
-                    &request.body.preview_id,
-                    &expected,
-                    &replacement,
-                    &required_sink_ids,
-                    caller,
-                    control,
-                    &request.request_id,
-                ) {
-                    Ok(physical) => physical,
-                    Err(error) => {
-                        record_physical_failure(
+    fn promote<'a>(
+        &'a self,
+        request: &'a RemoteProtocolRequestV1<PromotionConfirmationV1>,
+        caller: &'a RemoteRecoveryCallerV1,
+        control: Arc<dyn RemoteRecoveryControlPortV1>,
+    ) -> RemoteRecoveryPromotionFutureV1<'a> {
+        Box::pin(async move {
+            let expected = expectation_for_promotion(request)?;
+            if !self.promotion_is_pending(&request.body.preview_id)? {
+                self.ensure_authority_seeded(&expected, caller).await?;
+            }
+            let replacement = replacement_writer(request, caller)?;
+            let required_sink_ids = self
+                .effects
+                .required_promotion_sink_ids(&expected)
+                .map_err(map_physical_error)?;
+            validate_sink_inventory(&required_sink_ids)?;
+            let input_digest = canonical_sha256(&(request, &required_sink_ids))
+                .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
+            let context_json = serde_json::to_string(&(request, caller))
+                .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
+            let authority_key = authority_key_for_expectation(&expected)
+                .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
+            match begin_operation::<PromotionCasReceiptV1>(
+                self.handle(),
+                "promotion",
+                &request.body.preview_id,
+                &input_digest,
+                &context_json,
+                &authority_key,
+                &expected,
+                true,
+                Some(&replacement),
+                request.sent_at,
+            )? {
+                BeginOperationV1::Completed(committed) => Ok(*committed),
+                BeginOperationV1::Execute { pre_state_digest } => {
+                    if let Some(interruption) = control.interruption(&request.request_id) {
+                        record_interruption(
                             self.handle(),
                             &request.body.preview_id,
                             &input_digest,
-                            RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired,
+                            interruption,
                             request.sent_at,
                         )?;
-                        return Err(map_physical_error(error));
+                        return Err(match interruption {
+                            RemoteRecoveryInterruptionV1::Cancelled => {
+                                RemoteRecoveryOperationErrorV1::Cancelled
+                            }
+                            RemoteRecoveryInterruptionV1::DeadlineExceeded => {
+                                RemoteRecoveryOperationErrorV1::TimedOut
+                            }
+                        });
                     }
-                };
-                validate_promotion_output(
-                    &physical.output,
-                    &expected,
-                    &replacement,
-                    &required_sink_ids,
-                )?;
-                publish_promoted_authorities(
-                    self.handle(),
-                    &authority_key,
-                    &expected,
-                    &replacement,
-                    physical.output.published_frontier_sequence,
-                    physical.committed_at,
-                )?;
-                persist_sink_receipts(
-                    self.handle(),
-                    &request.body.preview_id,
-                    &physical.output,
-                    physical.committed_at,
-                )?;
-                let receipt = RemoteRecoveryOperationReceiptV1 {
-                    request_id: request.request_id.clone(),
-                    operation_id: request.body.preview_id.clone(),
-                    caller: caller.clone(),
-                    expected,
-                    input_digest: input_digest.clone(),
-                    pre_state_digest,
-                    committed_state_digest: Some(physical.committed_state_digest),
-                    policy_digest: physical.policy_digest,
-                    started_at: request.sent_at,
-                    committed_at: physical.committed_at,
-                    units_consumed: physical.units_consumed,
-                    bytes_consumed: physical.bytes_consumed,
-                    termination: RemoteRecoveryTerminationV1::Completed,
-                    interruption_observed_after_commit: physical.interruption_observed_after_commit,
-                };
-                receipt
-                    .validate()
-                    .map_err(|_| RemoteRecoveryOperationErrorV1::Corruption)?;
-                finish_operation(
-                    self.handle(),
-                    &request.body.preview_id,
-                    &input_digest,
-                    &physical.output,
-                    &receipt,
-                )?;
-                Ok(RemoteRecoveryCommittedV1 {
-                    authority: available_authority_state(
+                    let physical = match self
+                        .effects
+                        .promote(
+                            &request.body.preview_id,
+                            &expected,
+                            &replacement,
+                            &required_sink_ids,
+                            caller,
+                            control,
+                            &request.request_id,
+                        )
+                        .await
+                    {
+                        Ok(physical) => physical,
+                        Err(error) => {
+                            record_physical_failure(
+                                self.handle(),
+                                &request.body.preview_id,
+                                &input_digest,
+                                RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired,
+                                request.sent_at,
+                            )?;
+                            return Err(map_physical_error(error));
+                        }
+                    };
+                    validate_promotion_output(
+                        &physical.output,
+                        &expected,
+                        &replacement,
+                        &required_sink_ids,
+                    )?;
+                    publish_promoted_authorities(
                         self.handle(),
-                        &receipt.expected,
+                        &authority_key,
+                        &expected,
+                        &CurrentRemoteAuthorityV1 {
+                            fence: replacement.clone(),
+                            credential_revision: caller.enrollment_revision,
+                            observed_at: physical.committed_at,
+                        },
+                        physical.output.published_frontier_sequence,
+                    )?;
+                    persist_sink_receipts(
+                        self.handle(),
+                        &request.body.preview_id,
+                        &physical.output,
                         physical.committed_at,
-                    ),
-                    receipt,
-                    output: physical.output,
-                })
+                    )?;
+                    let receipt = RemoteRecoveryOperationReceiptV1 {
+                        request_id: request.request_id.clone(),
+                        operation_id: request.body.preview_id.clone(),
+                        caller: caller.clone(),
+                        expected,
+                        input_digest: input_digest.clone(),
+                        pre_state_digest,
+                        committed_state_digest: Some(physical.committed_state_digest),
+                        policy_digest: physical.policy_digest,
+                        started_at: request.sent_at,
+                        committed_at: physical.committed_at,
+                        units_consumed: physical.units_consumed,
+                        bytes_consumed: physical.bytes_consumed,
+                        termination: RemoteRecoveryTerminationV1::Completed,
+                        interruption_observed_after_commit: physical
+                            .interruption_observed_after_commit,
+                    };
+                    receipt
+                        .validate()
+                        .map_err(|_| RemoteRecoveryOperationErrorV1::Corruption)?;
+                    finish_operation(
+                        self.handle(),
+                        &request.body.preview_id,
+                        &input_digest,
+                        &physical.output,
+                        &receipt,
+                    )?;
+                    Ok(RemoteRecoveryCommittedV1 {
+                        authority: available_authority_state(
+                            self.handle(),
+                            &receipt.expected,
+                            physical.committed_at,
+                        ),
+                        receipt,
+                        output: physical.output,
+                    })
+                }
             }
-        }
+        })
     }
 }
 
@@ -674,10 +488,7 @@ fn available_authority_state(
         );
     };
     let Ok(row) = one_row(rows) else {
-        return unavailable(
-            RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
-            observed_at,
-        );
+        return unavailable(unseeded_authority_reason(handle, expected), observed_at);
     };
     let Some(ExactSqlValue::Text(encoded)) = row.values.first() else {
         return unavailable(
@@ -694,6 +505,24 @@ fn available_authority_state(
     }
 }
 
+/// Recovery authority is seeded from the published writer, so an unseeded one
+/// is unpublished exactly when this node holds no writer authority.
+fn unseeded_authority_reason(
+    handle: &ExactSqlHandle,
+    expected: &RecoveryAuthorityExpectationV1,
+) -> RemoteAuthorityUnavailableReasonV1 {
+    let published = tracedecay_domain::BrainId::new(expected.brain_id.clone())
+        .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
+        .and_then(|brain_id| authority_row(handle, "brain_id", &brain_id));
+    match published {
+        Ok(_) => RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+        Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished) => {
+            RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished
+        }
+        Err(_) => RemoteAuthorityUnavailableReasonV1::RegistryUnavailable,
+    }
+}
+
 fn unavailable(
     reason: RemoteAuthorityUnavailableReasonV1,
     observed_at: UtcMicros,
@@ -702,19 +531,6 @@ fn unavailable(
         reason,
         observed_at,
     }
-}
-
-fn expectation_for_restore(
-    request: &RemoteProtocolRequestV1<StagedRestoreConfirmationV1>,
-) -> Result<RecoveryAuthorityExpectationV1, RemoteRecoveryOperationErrorV1> {
-    expectation_from_writer(
-        request
-            .expected_authority
-            .as_ref()
-            .ok_or(RemoteRecoveryOperationErrorV1::InvalidRequest)?,
-        request.body.expected_authority_epoch,
-        request.body.expected_placement_revision,
-    )
 }
 
 fn expectation_for_promotion(
@@ -896,12 +712,11 @@ fn current_authority_from_receipt(
 fn authority_key_for_expectation(
     expected: &RecoveryAuthorityExpectationV1,
 ) -> Result<String, RemoteSqliteStorageErrorV1> {
-    canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
+    tracedecay_domain::remote_recovery_authority_key(
         &expected.brain_id,
         &expected.shard_id,
         &expected.generation_id,
-    ))
+    )
     .map(|digest| digest.as_str().to_owned())
     .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
@@ -909,22 +724,17 @@ fn authority_key_for_expectation(
 fn authority_key_for_writer(
     writer: &RemoteWriterFenceV1,
 ) -> Result<String, RemoteSqliteStorageErrorV1> {
-    canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &writer.brain_id,
-        &writer.shard_id,
-        &writer.generation_id,
-    ))
-    .map(|digest| digest.as_str().to_owned())
-    .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
+    writer
+        .recovery_authority_key()
+        .map(|digest| digest.as_str().to_owned())
+        .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
 fn map_physical_error(
     error: RemoteRecoveryPhysicalEffectErrorV1,
 ) -> RemoteRecoveryOperationErrorV1 {
     match error {
-        RemoteRecoveryPhysicalEffectErrorV1::RolledBack
-        | RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired => {
+        RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired => {
             RemoteRecoveryOperationErrorV1::RecoveryRequired
         }
         RemoteRecoveryPhysicalEffectErrorV1::Cancelled => RemoteRecoveryOperationErrorV1::Cancelled,
@@ -934,6 +744,9 @@ fn map_physical_error(
         }
         RemoteRecoveryPhysicalEffectErrorV1::Corruption => {
             RemoteRecoveryOperationErrorV1::Corruption
+        }
+        RemoteRecoveryPhysicalEffectErrorV1::WriterAuthorityUnpublished => {
+            RemoteRecoveryOperationErrorV1::WriterAuthorityUnpublished
         }
     }
 }

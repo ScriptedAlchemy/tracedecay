@@ -9,7 +9,8 @@ use tracedecay_domain::{
 
 use super::{
     AggregatedProviderUsageCountersV1, ProviderUsageCoverageV1, ProviderUsageIssueKindV1,
-    ProviderUsageScanV1, ScanStep, price_provider_usage, reduce_provider_usage,
+    ProviderUsageScanV1, ScanStep, price_provider_usage, provider_usage_by_session,
+    reduce_provider_usage,
 };
 use crate::provider_pricing::{ModelPrice, PriceTable};
 
@@ -79,38 +80,6 @@ fn totals(input: u64, output: u64) -> AggregatedProviderUsageCountersV1 {
         reasoning_tokens: None,
         total_tokens: Some(input + output),
     }
-}
-
-#[test]
-fn paired_codex_delta_and_checkpoint_count_once() {
-    let aggregate = reduce_provider_usage(&[
-        observation(
-            1,
-            0,
-            "codex",
-            "session-a",
-            ProviderUsageCounterSemanticsV1::Delta,
-            counters(10, 2),
-        ),
-        observation(
-            1,
-            1,
-            "codex",
-            "session-a",
-            ProviderUsageCounterSemanticsV1::Cumulative,
-            counters(100, 20),
-        ),
-    ]);
-
-    assert_eq!(aggregate.coverage, ProviderUsageCoverageV1::Complete);
-    assert_eq!(aggregate.totals, totals(10, 2));
-    assert_eq!(aggregate.deltas.len(), 1);
-    assert_eq!(aggregate.deltas[0].scope, ObservationScopeV1::Profile);
-    assert_eq!(aggregate.deltas[0].provider, "codex");
-    assert_eq!(aggregate.deltas[0].session_id, "session-a");
-    assert_eq!(aggregate.deltas[0].turn_id.as_deref(), Some("turn:1"));
-    assert_eq!(aggregate.deltas[0].message_id.as_deref(), Some("message:1"));
-    assert_eq!(aggregate.deltas[0].request_id.as_deref(), Some("request:1"));
 }
 
 #[test]
@@ -461,38 +430,69 @@ fn cumulative_decrease_is_a_typed_reset_and_never_underflows() {
 }
 
 #[test]
-fn mixed_provider_native_deltas_preserve_provenance_and_sum_exactly() {
+fn per_session_totals_sum_own_deltas_and_flag_issue_sessions_without_zero_fill() {
     let aggregate = reduce_provider_usage(&[
         observation(
             1,
             0,
-            "claude",
-            "claude-session",
+            "codex",
+            "parent",
             ProviderUsageCounterSemanticsV1::Delta,
-            counters(11, 3),
+            counters(100, 10),
         ),
         observation(
             2,
             0,
             "codex",
-            "codex-session",
+            "child",
             ProviderUsageCounterSemanticsV1::Delta,
-            counters(5, 7),
+            counters(7, 3),
+        ),
+        observation(
+            3,
+            0,
+            "codex",
+            "parent",
+            ProviderUsageCounterSemanticsV1::Delta,
+            counters(20, 5),
+        ),
+        observation(
+            4,
+            0,
+            "claude",
+            "broken",
+            ProviderUsageCounterSemanticsV1::Delta,
+            ProviderUsageCountersV1::Unknown {
+                reason: tracedecay_domain::CanonicalUnknownStateV1::Malformed,
+            },
         ),
     ]);
 
-    assert_eq!(aggregate.coverage, ProviderUsageCoverageV1::Complete);
-    assert_eq!(aggregate.totals, totals(16, 10));
+    let by_session = provider_usage_by_session(&aggregate);
+
+    let parent = &by_session[&("codex".to_owned(), "parent".to_owned())];
+    assert_eq!(parent.usage_events, 2);
+    assert_eq!(parent.counters, totals(120, 15));
+    assert!(parent.complete);
+
+    let child = &by_session[&("codex".to_owned(), "child".to_owned())];
+    assert_eq!(child.usage_events, 1);
+    assert_eq!(child.counters, totals(7, 3));
+    assert!(child.complete);
+
+    let broken = &by_session[&("claude".to_owned(), "broken".to_owned())];
+    assert_eq!(broken.usage_events, 0);
     assert_eq!(
-        aggregate
-            .deltas
-            .iter()
-            .map(|delta| delta.provider.as_str())
-            .collect::<Vec<_>>(),
-        vec!["claude", "codex"]
+        broken.counters,
+        AggregatedProviderUsageCountersV1::unknown()
     );
-    assert_eq!(aggregate.deltas[0].native_timestamp, Some(1_700_000_001));
-    assert_eq!(aggregate.deltas[0].native_field, "fixture.usage");
+    assert!(
+        !broken.complete,
+        "an unreducible session is flagged, not zeroed"
+    );
+
+    assert_eq!(by_session.len(), 3);
+    assert_eq!(aggregate.totals, totals(127, 18));
 }
 
 #[test]

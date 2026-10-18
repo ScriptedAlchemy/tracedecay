@@ -88,10 +88,10 @@ async fn register_or_reconcile_cannot_republish_under_a_quiesced_root() {
         .expect("recovery quiescence");
 
     let rejected = registry
-        .register_or_reconcile::<Component, ProjectRuntimeRegistryError, _, _>(
+        .register_or_reconcile::<Component, ProjectRuntimeRegistryError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || Ok(component(2)),
+            || async { Ok(component(2)) },
         )
         .await;
 
@@ -100,10 +100,10 @@ async fn register_or_reconcile_cannot_republish_under_a_quiesced_root() {
     assert!(registry.holds::<Component>(&retained).await);
     drop(quiescence);
     registry
-        .register_or_reconcile::<Component, ProjectRuntimeRegistryError, _, _>(
+        .register_or_reconcile::<Component, ProjectRuntimeRegistryError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || Ok(component(3)),
+            || async { Ok(component(3)) },
         )
         .await
         .expect("publication resumes only after recovery releases the root");
@@ -197,7 +197,7 @@ async fn request_admission_cannot_cross_project_runtime_registries() {
         .admit_request(&project, None)
         .expect("first registry admission");
 
-    let snapshot = second.request_runtimes_with_admission(&project, None, &admission);
+    let snapshot = second.request_runtimes_with_admission(&project, &admission);
     assert!(!snapshot.is_admitted());
     assert!(snapshot.feedback.is_none());
     assert!(snapshot.lsp_owner.is_none());
@@ -229,7 +229,7 @@ async fn captured_admission_continues_after_quiescence_installs_its_fence() {
     .await
     .expect("quiescence installs its fence");
 
-    let continuation = registry.request_runtimes_with_admission(&project, None, &admission);
+    let continuation = registry.request_runtimes_with_admission(&project, &admission);
     assert!(
         continuation.is_admitted(),
         "a nested route must settle through the exact captured outer admission"
@@ -249,7 +249,7 @@ async fn captured_admission_continues_after_quiescence_installs_its_fence() {
 }
 
 /// Recovery owners used to be cancelled deep inside the async `shut_down_all`
-/// drain, so they kept running through every shutdown phase in front of it —
+/// drain, so they kept running through every shutdown phase in front of it,
 /// blocked-interval and workflow-census scans were still logging seconds after
 /// the daemon began shutting down. `begin_shutdown` runs in the synchronous
 /// `cancel_admissions` half of shutdown, so the cancellation must already have
@@ -281,7 +281,7 @@ async fn begin_shutdown_cancels_project_recovery_owners_before_it_returns() {
 /// owner starts another cycle.
 ///
 /// Time is paused on a current-thread runtime, so the worker cannot be polled
-/// while the synchronous `begin_shutdown` runs — the cycle count read after it
+/// while the synchronous `begin_shutdown` runs, the cycle count read after it
 /// returns is exactly the count at the moment it returned.
 #[tokio::test(start_paused = true)]
 async fn no_recovery_cycle_starts_after_begin_shutdown_returns() {
@@ -334,8 +334,8 @@ async fn no_recovery_cycle_starts_after_begin_shutdown_returns() {
 }
 
 /// Cancelling at prepare time is only safe because registry admission is
-/// one-way. `shut_down_all` is retryable — a failed drain clears
-/// `shutdown_started` — so a retry re-enters `begin_shutdown`; this pins the
+/// one-way. `shut_down_all` is retryable, a failed drain clears
+/// `shutdown_started`, so a retry re-enters `begin_shutdown`; this pins the
 /// property that makes that harmless: nothing can re-admit an owner for the
 /// retry to run, and the sweep is idempotent.
 #[tokio::test]
@@ -362,7 +362,10 @@ async fn a_retried_shutdown_cannot_readmit_a_cancelled_recovery_owner() {
     // A retried attempt re-enters the sweep; it must stay a no-op.
     registry.begin_shutdown();
     assert!(probe.is_cancelled());
-    assert!(registry.shut_down_all().await);
+    assert_eq!(
+        registry.shut_down_all(None).await,
+        super::ProjectRuntimesStop::Stopped
+    );
     assert_eq!(
         registry
             .publish(project, RecoveryCancelProbe::default())
@@ -413,7 +416,7 @@ async fn daemon_shutdown_drains_admitted_requests_before_removing_runtimes() {
 
     let shutdown_registry = registry.clone();
     let shutdown = tokio::spawn(async move {
-        shutdown_registry.shut_down_all().await;
+        shutdown_registry.shut_down_all(None).await;
     });
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while !registry.closed.load(std::sync::atomic::Ordering::Acquire) {

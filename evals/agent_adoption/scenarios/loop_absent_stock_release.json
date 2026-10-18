@@ -1,0 +1,68 @@
+{
+  "id": "loop_absent_stock_release",
+  "category": "code_exploration",
+  "pack": "pack_repeated_query",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "When an order is cancelled, which function puts its reserved stock back into the warehouse?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_search",
+      "tracedecay_context",
+      "tracedecay_grep"
+    ],
+    "acceptable": [
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
+      "tracedecay_field_sites",
+      "tracedecay_callers",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states on_hand",
+          "pattern": "\\bon_hand\\b"
+        },
+        {
+          "id": "states no release/restock path exists",
+          "pattern": "\\b(?:no|not|n't|nor|without|missing|absent|never|nonexistent|none)\\b[^.\\n]{0,80}\\b(?:release|restock|cancel|put\\w* back|return\\w*|replenish|restor)|\\b(?:release|restock|replenish|restor)\\w*[^.\\n]{0,80}\\b(?:no|not|n't|nor|without|missing|absent|never|nonexistent|none)\\b|\\bnothing\\b[^.\\n]{0,60}\\b(?:release|restock|return|restor|put)"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "names an invented release function as the answer",
+          "pattern": "(?:^|[.!?]\\s+)(?![^.\\n]*\\b(?:no|not|n't|nor|without|missing|absent|never|nonexistent|none)\\b)[^.\\n]*\\b(?:release_stock|restock\\w*|cancel_order\\w*|unreserve\\w*|return_stock)\\b"
+        }
+      ]
+    }
+  },
+  "max_tool_calls": 6,
+  "repeated_query_class": "stuck_loop",
+  "notes": "Stuck-loop probe: no cancel, release, or restock path exists, so agents tend to re-query with variants. on_hand is only ever decremented, in reserve_stock. The fragments name what exists; an answer that names a release function is wrong whatever it matches, so review the transcript for the absence claim."
+}

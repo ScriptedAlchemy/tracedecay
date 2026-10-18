@@ -4,7 +4,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
-use tracedecay::daemon::{DaemonHandshake, call_default_tool};
+use tracedecay::daemon::call_default_tool;
+use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 fn initialize_project(home: &Path, project: &Path, marker: &str) {
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
@@ -45,16 +47,16 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let envelope: Value =
-        serde_json::from_slice(&output.stdout).expect("storage status application envelope");
+    let envelope: Value = common::tool_json_structured_content(&output.stdout);
     envelope["scope"]["project_id"]
         .as_str()
         .unwrap_or_else(|| panic!("storage status omitted project identity: {envelope}"))
         .to_owned()
 }
 
-fn project_handshake(project: &Path) -> DaemonHandshake {
+fn project_handshake(environment: &common::IsolatedHome, project: &Path) -> DaemonHandshake {
     tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
         Some(project.to_path_buf()),
         None,
         false,
@@ -64,12 +66,14 @@ fn project_handshake(project: &Path) -> DaemonHandshake {
 }
 
 async fn assert_selected_target_source(
+    profile: &ProfileRoot,
     caller: &DaemonHandshake,
     target_project_id: &str,
     target_marker: &str,
     caller_marker: &str,
 ) {
     let result = call_default_tool(
+        profile,
         caller,
         "tracedecay_grep",
         json!({
@@ -105,7 +109,7 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
     const CALLER_MARKER: &str = "private-route-caller-alpha";
     const TARGET_MARKER: &str = "private-route-target-beta";
 
-    let (environment, project_a) = common::IsolatedEnv::acquire().await;
+    let (environment, project_a) = common::IsolatedHome::new();
     let project_b = environment.scratch().join("project-b");
     let mut daemon = common::spawn_tracedecay_daemon(environment.home());
     initialize_project(environment.home(), &project_a, CALLER_MARKER);
@@ -113,9 +117,16 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
     let project_a_id = admitted_project_id(environment.home(), &project_a);
     let project_b_id = admitted_project_id(environment.home(), &project_b);
     assert_ne!(project_a_id, project_b_id);
-    let caller = project_handshake(&project_a);
+    let caller = project_handshake(&environment, &project_a);
 
-    assert_selected_target_source(&caller, &project_b_id, TARGET_MARKER, CALLER_MARKER).await;
+    assert_selected_target_source(
+        environment.profile(),
+        &caller,
+        &project_b_id,
+        TARGET_MARKER,
+        CALLER_MARKER,
+    )
+    .await;
 
     let first_pid = daemon.id();
     let stopped = daemon
@@ -138,5 +149,48 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
         project_a_id,
         "caller project identity changed after restart"
     );
-    assert_selected_target_source(&caller, &project_b_id, TARGET_MARKER, CALLER_MARKER).await;
+    await_published_code_index(environment.home(), &project_b);
+    assert_selected_target_source(
+        environment.profile(),
+        &caller,
+        &project_b_id,
+        TARGET_MARKER,
+        CALLER_MARKER,
+    )
+    .await;
+}
+
+/// Wait for the readiness a selected-source route depends on after a physical
+/// restart: a published generation whose native graph serves, with no
+/// convergence park. A sleep cannot stand in for catalog publication.
+///
+/// `graph_ready`, not `fresh`, is the predicate: freshness also reports
+/// whether a reconcile pass is in flight, and this read admits a query that
+/// arms one, so a freshness wait would perturb the very state it samples.
+pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
+    let project_arg = project.to_string_lossy().into_owned();
+    let output = common::tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "status",
+            "--args",
+            r#"{"format":"json","wait_for":{"state":"graph_ready","timeout_ms":110000}}"#,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run status");
+    assert!(
+        output.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+    assert_eq!(
+        status["wait"],
+        json!({ "outcome": "reached" }),
+        "daemon never published a serving code-index generation: {status}"
+    );
 }

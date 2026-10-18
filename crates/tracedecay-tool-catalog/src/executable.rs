@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
+use tracedecay_domain::canonical_sha256;
 
 use crate::binding::SurfaceOperationName;
 use crate::id::{BindingId, CapabilityId, CatalogDigest, CodecBindingKey, OperationId, ServiceId};
@@ -59,17 +60,20 @@ impl SchemaBodyAuthorityV1 {
                 reason: "Rust schema authority could not be serialized",
             }
         })?;
-        let body = canonicalize_json(body);
-        let bytes =
-            serde_json::to_vec(&body).map_err(|_| CatalogValidationError::InvalidValue {
-                field: "schema body",
-                reason: "canonical schema body could not be encoded",
-            })?;
+        let digest = canonical_sha256(&body).map_err(|_| CatalogValidationError::InvalidValue {
+            field: "schema body",
+            reason: "canonical schema body could not be hashed",
+        })?;
         Ok(Self {
             schema_ref,
             body,
             rust_type_path: RustTypePathV1::new(rust_type_path)?,
-            digest: CatalogDigest::sha256(bytes),
+            digest: CatalogDigest::from_manifest_digest(digest).map_err(|_| {
+                CatalogValidationError::InvalidValue {
+                    field: "schema body digest",
+                    reason: "domain digest was not canonical SHA-256",
+                }
+            })?,
         })
     }
 
@@ -86,8 +90,8 @@ impl SchemaBodyAuthorityV1 {
         self.rust_type_path.as_str()
     }
 
-    pub const fn digest(&self) -> CatalogDigest {
-        self.digest
+    pub fn digest(&self) -> CatalogDigest {
+        self.digest.clone()
     }
 }
 
@@ -95,7 +99,7 @@ impl SchemaBodyAuthorityV1 {
 /// application module.
 ///
 /// Most catalog entries need only stable schema references. Public SDK
-/// generation additionally needs the Rust-owned bodies, so capabilities opt in
+/// generation also needs the Rust-owned bodies, so capabilities opt in
 /// beside their manifest instead of being copied into an SDK-only inventory.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ExecutableSchemaAuthority {
@@ -160,21 +164,6 @@ impl ExecutableSchemaAuthority {
     }
 }
 
-fn canonicalize_json(value: Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, canonicalize_json(value)))
-                .collect::<BTreeMap<_, _>>()
-                .into_iter()
-                .collect(),
-        ),
-        scalar => scalar,
-    }
-}
-
 /// Runtime composition owner. Provider differences remain explicit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "mode")]
@@ -183,27 +172,11 @@ pub enum ExecutionOwnerV1 {
     DaemonOwned { service_id: ServiceId },
 }
 
-impl ExecutionOwnerV1 {
-    pub fn service_id(&self) -> &ServiceId {
-        match self {
-            Self::Direct { service_id } | Self::DaemonOwned { service_id } => service_id,
-        }
-    }
-}
-
 /// Exact codec and adapter key used for request/result encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "codec")]
 pub enum ExecutableCodecV1 {
     Json { binding_key: CodecBindingKey },
-}
-
-impl ExecutableCodecV1 {
-    pub fn binding_key(&self) -> &CodecBindingKey {
-        match self {
-            Self::Json { binding_key } => binding_key,
-        }
-    }
 }
 
 /// Whether the operation is private composition or exposed by a catalog route.
@@ -351,12 +324,21 @@ impl ExecutableBindingV1 {
         &self.result_schema
     }
 
-    pub fn codec(&self) -> &ExecutableCodecV1 {
-        &self.codec
-    }
-
     pub fn exposure(&self) -> &RouteExposureV1 {
         &self.exposure
+    }
+
+    /// The catalog route when this binding is public. Internal composition
+    /// returns `None` so a missing route and a private binding stay indistinguishable
+    /// to adapters.
+    pub fn public_route(&self) -> Option<(&BindingId, &str)> {
+        match &self.exposure {
+            RouteExposureV1::Public {
+                binding_id,
+                route_path,
+            } => Some((binding_id, route_path.as_str())),
+            RouteExposureV1::Internal => None,
+        }
     }
 
     pub const fn effect(&self) -> EffectClass {
@@ -402,9 +384,9 @@ pub enum ExecutableUnavailableDispositionV1 {
 /// Truthful executable lookup state; unavailable records cannot carry a binding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
-pub enum ExecutableBindingAvailabilityV1 {
+pub enum BindingAvailabilityV1<T> {
     Available {
-        binding: Box<ExecutableBindingV1>,
+        binding: Box<T>,
     },
     Unavailable {
         operation_id: OperationId,
@@ -412,8 +394,18 @@ pub enum ExecutableBindingAvailabilityV1 {
     },
 }
 
-impl ExecutableBindingAvailabilityV1 {
-    pub fn available(binding: ExecutableBindingV1) -> Self {
+pub trait ExecutableBindingMetadataV1 {
+    fn operation_id(&self) -> &OperationId;
+}
+
+impl ExecutableBindingMetadataV1 for ExecutableBindingV1 {
+    fn operation_id(&self) -> &OperationId {
+        self.operation_id()
+    }
+}
+
+impl<T: ExecutableBindingMetadataV1> BindingAvailabilityV1<T> {
+    pub fn available(binding: T) -> Self {
         Self::Available {
             binding: Box::new(binding),
         }
@@ -426,7 +418,7 @@ impl ExecutableBindingAvailabilityV1 {
         }
     }
 
-    pub fn binding(&self) -> Option<&ExecutableBindingV1> {
+    pub fn binding(&self) -> Option<&T> {
         match self {
             Self::Available { binding } => Some(binding),
             Self::Unavailable { .. } => None,
@@ -436,14 +428,12 @@ impl ExecutableBindingAvailabilityV1 {
 
 /// Canonically ordered executable lookup assembled by the application root.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecutableBindingRegistryV1 {
-    bindings: BTreeMap<OperationId, ExecutableBindingAvailabilityV1>,
+pub struct BindingRegistryV1<T> {
+    bindings: BTreeMap<OperationId, BindingAvailabilityV1<T>>,
 }
 
-impl ExecutableBindingRegistryV1 {
-    pub fn new(
-        bindings: Vec<ExecutableBindingAvailabilityV1>,
-    ) -> Result<Self, CatalogValidationError> {
+impl<T: ExecutableBindingMetadataV1> BindingRegistryV1<T> {
+    pub fn new(bindings: Vec<BindingAvailabilityV1<T>>) -> Result<Self, CatalogValidationError> {
         let mut registry = BTreeMap::new();
         for binding in bindings {
             if registry
@@ -458,14 +448,17 @@ impl ExecutableBindingRegistryV1 {
         Ok(Self { bindings: registry })
     }
 
-    pub fn get(&self, operation_id: &OperationId) -> Option<&ExecutableBindingAvailabilityV1> {
+    pub fn get(&self, operation_id: &OperationId) -> Option<&BindingAvailabilityV1<T>> {
         self.bindings.get(operation_id)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &ExecutableBindingAvailabilityV1> {
+    pub fn iter(&self) -> impl Iterator<Item = &BindingAvailabilityV1<T>> {
         self.bindings.values()
     }
 }
+
+pub type ExecutableBindingAvailabilityV1 = BindingAvailabilityV1<ExecutableBindingV1>;
+pub type ExecutableBindingRegistryV1 = BindingRegistryV1<ExecutableBindingV1>;
 
 /// The concrete transport a generated, named SDK method invokes.
 ///
@@ -531,27 +524,28 @@ impl SdkExecutableBindingV1 {
         transport: SdkTransportBindingV1,
     ) -> Result<Self, CatalogValidationError> {
         transport.validate()?;
-        match (&transport, executable.exposure()) {
-            (
-                SdkTransportBindingV1::Http { route_path },
-                RouteExposureV1::Public {
-                    binding_id: executable_binding_id,
-                    route_path: executable_route_path,
-                },
-            ) if binding_id == *executable_binding_id && route_path == executable_route_path => {}
-            (SdkTransportBindingV1::Http { .. }, _) => {
-                return Err(CatalogValidationError::InvalidValue {
-                    field: "SDK HTTP binding",
-                    reason: "must exactly match the executable public route",
-                });
+        match &transport {
+            SdkTransportBindingV1::Http { route_path } => {
+                let matches_public = executable.public_route().is_some_and(
+                    |(executable_binding_id, executable_route_path)| {
+                        &binding_id == executable_binding_id
+                            && route_path.as_str() == executable_route_path
+                    },
+                );
+                if !matches_public {
+                    return Err(CatalogValidationError::InvalidValue {
+                        field: "SDK HTTP binding",
+                        reason: "must exactly match the executable public route",
+                    });
+                }
             }
-            (SdkTransportBindingV1::McpTool { .. }, RouteExposureV1::Internal) => {}
-            (SdkTransportBindingV1::McpTool { .. }, RouteExposureV1::Public { .. }) => {
+            SdkTransportBindingV1::McpTool { .. } if executable.public_route().is_some() => {
                 return Err(CatalogValidationError::InvalidValue {
                     field: "SDK MCP binding",
                     reason: "must not alias an HTTP executable route",
                 });
             }
+            SdkTransportBindingV1::McpTool { .. } => {}
         }
         Ok(Self {
             executable,
@@ -561,13 +555,9 @@ impl SdkExecutableBindingV1 {
         })
     }
 
-    pub fn executable(&self) -> &ExecutableBindingV1 {
-        &self.executable
-    }
-
     /// Canonical execution metadata retained by this SDK binding.
     pub fn binding(&self) -> &ExecutableBindingV1 {
-        self.executable()
+        &self.executable
     }
 
     pub fn operation_id(&self) -> &OperationId {
@@ -623,72 +613,12 @@ impl SdkExecutableBindingV1 {
     }
 }
 
-/// Truthful SDK lookup state. Unsupported product capabilities remain
-/// explicit, while every available entry has a concrete named transport.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "state")]
-pub enum SdkExecutableBindingAvailabilityV1 {
-    Available {
-        binding: Box<SdkExecutableBindingV1>,
-    },
-    Unavailable {
-        operation_id: OperationId,
-        disposition: ExecutableUnavailableDispositionV1,
-    },
-}
-
-impl SdkExecutableBindingAvailabilityV1 {
-    pub fn available(binding: SdkExecutableBindingV1) -> Self {
-        Self::Available {
-            binding: Box::new(binding),
-        }
-    }
-
-    pub fn operation_id(&self) -> &OperationId {
-        match self {
-            Self::Available { binding } => binding.operation_id(),
-            Self::Unavailable { operation_id, .. } => operation_id,
-        }
-    }
-
-    pub fn binding(&self) -> Option<&SdkExecutableBindingV1> {
-        match self {
-            Self::Available { binding } => Some(binding),
-            Self::Unavailable { .. } => None,
-        }
+impl ExecutableBindingMetadataV1 for SdkExecutableBindingV1 {
+    fn operation_id(&self) -> &OperationId {
+        self.operation_id()
     }
 }
 
-/// Canonically ordered SDK executable lookup assembled by application
-/// composition from actual mounted surface bindings.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SdkExecutableBindingRegistryV1 {
-    bindings: BTreeMap<OperationId, SdkExecutableBindingAvailabilityV1>,
-}
+pub type SdkExecutableBindingAvailabilityV1 = BindingAvailabilityV1<SdkExecutableBindingV1>;
 
-impl SdkExecutableBindingRegistryV1 {
-    pub fn new(
-        bindings: Vec<SdkExecutableBindingAvailabilityV1>,
-    ) -> Result<Self, CatalogValidationError> {
-        let mut registry = BTreeMap::new();
-        for binding in bindings {
-            if registry
-                .insert(binding.operation_id().clone(), binding)
-                .is_some()
-            {
-                return Err(CatalogValidationError::DuplicateValue {
-                    field: "SDK executable operation IDs",
-                });
-            }
-        }
-        Ok(Self { bindings: registry })
-    }
-
-    pub fn get(&self, operation_id: &OperationId) -> Option<&SdkExecutableBindingAvailabilityV1> {
-        self.bindings.get(operation_id)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &SdkExecutableBindingAvailabilityV1> {
-        self.bindings.values()
-    }
-}
+pub type SdkExecutableBindingRegistryV1 = BindingRegistryV1<SdkExecutableBindingV1>;

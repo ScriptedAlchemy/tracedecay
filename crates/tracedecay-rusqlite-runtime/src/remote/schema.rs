@@ -65,7 +65,7 @@ CREATE TABLE remote_recovery_authorities (
 CREATE TABLE remote_recovery_operations (
     operation_id TEXT PRIMARY KEY,
     operation_kind TEXT NOT NULL CHECK (
-        operation_kind IN ('backup', 'restore', 'promotion')
+        operation_kind = 'promotion'
     ),
     request_digest TEXT NOT NULL,
     expected_authority_key TEXT NOT NULL,
@@ -74,7 +74,7 @@ CREATE TABLE remote_recovery_operations (
     state TEXT NOT NULL CHECK (
         state IN (
             'executing', 'completed', 'cancelled', 'timed_out',
-            'rolled_back', 'forward_recovery_required'
+            'forward_recovery_required'
         )
     ),
     output_json TEXT CHECK (output_json IS NULL OR json_valid(output_json)),

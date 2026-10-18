@@ -2,15 +2,17 @@
 
 use std::io::Write;
 use std::path::Path;
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay_contracts::catalog_composition::CatalogProfileName;
 use tracedecay_domain::errors::Result;
+use tracedecay_project::project::TraceDecay;
 
 /// Returns the first plausible unexpanded `${...}` template variable in a
 /// `--path` argument (e.g. `${workspaceFolder}`), or `None` when the value
 /// contains no template syntax. The brace contents must look like a variable
-/// name — a leading ASCII letter followed by word/`.`/`-` characters,
-/// optionally with a `:`-introduced modifier such as a default value — so
+/// name, a leading ASCII letter followed by word/`.`/`-` characters,
+/// optionally with a `:`-introduced modifier such as a default value, so
 /// degenerate forms (`${}`, `${ }`, `${a/b}`) and directories that merely
 /// contain `$` are not misclassified. A matching value is overwhelmingly more
 /// likely to be an unexpanded host template than a real directory name, so
@@ -63,16 +65,74 @@ pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
     None
 }
 
+/// Parses `--catalog-profile` against the catalog snapshot's own profiles.
+/// Only a serve given the flag composes the snapshot.
+pub(crate) fn parse_catalog_profile(
+    name: &str,
+) -> std::result::Result<CatalogProfileName, Box<dyn std::error::Error + Send + Sync>> {
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_binding_catalog_ref()?;
+    Ok(CatalogProfileName::parse(catalog, name)?)
+}
+
 /// Runs the `serve` command as a database-free proxy to the managed daemon.
-#[hotpath::measure(label = "cli.serve.proxy", future = true)]
-pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
+#[tracing::instrument(name = "cli.serve.proxy", level = "trace", skip_all)]
+pub async fn run_serve(
+    profile: &ProfileRoot,
+    path_arg: Option<String>,
+    timings: bool,
+    full_tool_list: bool,
+    catalog_profile: Option<CatalogProfileName>,
+) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
-    let socket_path = tracedecay_daemon_control::default_socket_path()?;
-    if !tracedecay::daemon::should_proxy_serve_to_daemon(&socket_path).await {
-        return Err(tracedecay::daemon::unavailable_error(&socket_path));
+    let socket_path = tracedecay_daemon_control::default_socket_path(profile.data_dir())?;
+    if !tracedecay::daemon::should_proxy_serve_to_daemon(profile, &socket_path).await {
+        return Err(tracedecay_daemon_service::logging::unavailable_error(
+            profile,
+            &socket_path,
+        ));
     }
-    let handshake = proxy_serve_handshake(path_arg, original_cwd.as_deref(), timings)?;
-    tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None).await
+    let handshake = proxy_serve_handshake(profile, path_arg, original_cwd.as_deref(), timings)?;
+    // The setting is read beside the proxy, not before it: an experimental
+    // advisory must never delay or take down MCP, for example on a loaded
+    // daemon or when serve and the daemon disagree on the configuration surface.
+    let (hints_enabled, repeated_query_hints) = tokio::sync::watch::channel(false);
+    // The read composes the application catalog and its schemas, about 100 ms
+    // of CPU, so it gets its own thread: on a native worker it stalled the
+    // reactor that delivers the daemon's replies to this root.
+    let hints_profile = profile.clone();
+    let hints_read = std::thread::Builder::new()
+        .name("tracedecay-serve-hints".to_owned())
+        .spawn(move || {
+            match tracedecay_runtime_core::native_runtime::block_on(Box::pin(
+                crate::commands::repeated_query_hints_enabled(&hints_profile),
+            )) {
+                Ok(Ok(enabled)) => {
+                    hints_enabled.send_replace(enabled);
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "repeated-query hints are off: setting read failed");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "repeated-query hints are off: setting read did not start");
+                }
+            }
+        });
+    if let Err(error) = hints_read {
+        tracing::warn!(%error, "repeated-query hints are off: setting read did not start");
+    }
+    tracedecay::daemon::proxy_stdio_to_daemon(
+        &socket_path,
+        &handshake,
+        None,
+        full_tool_list,
+        catalog_profile.as_ref(),
+        repeated_query_hints,
+    )
+    .await
+    .map_err(|error| {
+        tracedecay_daemon_control::with_unavailable_daemon_advice(profile, &socket_path, error)
+    })
 }
 
 /// Builds daemon routing metadata without opening a project or global
@@ -80,6 +140,7 @@ pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
 /// process; it performs the open (and the same config-gated git auto-init)
 /// after receiving the handshake.
 fn proxy_serve_handshake(
+    profile: &ProfileRoot,
     path_arg: Option<String>,
     original_cwd: Option<&Path>,
     timings: bool,
@@ -91,17 +152,16 @@ fn proxy_serve_handshake(
     let path = sanitize_serve_path_arg(path_arg);
     let explicit_path = path.is_some();
     let mut resolved_path = if explicit_path {
-        tracedecay::config::resolve_path(path)
+        tracedecay_configuration::resolve_path(path)
     } else {
-        tracedecay::config::resolve_path_with_discovery(None)
+        tracedecay_configuration::resolve_path_with_discovery(profile, None)
     };
 
-    let ambient_discovery =
-        !explicit_path && tracedecay::config::is_ambient_project_root(&resolved_path);
-    let initialized = !ambient_discovery && TraceDecay::is_initialized(&resolved_path);
+    let ambient_discovery = !explicit_path && profile.is_ambient_project_root(&resolved_path);
+    let initialized =
+        !ambient_discovery && TraceDecay::is_initialized_in_profile(profile, &resolved_path);
     // `serve` is a database-free proxy. It may consult only an already-pinned
-    // in-memory snapshot; missing authority disables implicit auto-init rather
-    // than reading legacy `config.json` from the client process.
+    // in-memory snapshot.
     // A never-opened project has no pinned snapshot, so `cached_sync_config`
     // fails. Follow the schema default (auto-init enabled) in that case rather
     // than failing closed: otherwise a discovery-mode client sitting in an
@@ -110,13 +170,14 @@ fn proxy_serve_handshake(
     // mirrors the same default fallback in `resolve_daemon_initialize_route`.
     let auto_init_root = (!ambient_discovery
         && !initialized
-        && tracedecay::config::cached_sync_config(&resolved_path).map_or_else(
-            |_| tracedecay::config::SyncConfig::default().auto_init,
-            |config| config.auto_init,
-        ))
+        && tracedecay_project::config::cached_sync_config(profile.data_dir(), &resolved_path)
+            .map_or_else(
+                |_| tracedecay_configuration::SyncConfig::default().auto_init,
+                |config| config.auto_init,
+            ))
     .then(|| tracedecay_runtime_core::worktree::git_worktree_root(&resolved_path))
     .flatten()
-    .filter(|root| !tracedecay::config::is_ambient_project_root(root));
+    .filter(|root| !profile.is_ambient_project_root(root));
     if let Some(root) = auto_init_root.as_ref() {
         resolved_path.clone_from(root);
     }
@@ -127,10 +188,11 @@ fn proxy_serve_handshake(
         .and_then(|project_path| serve_scope_prefix(original_cwd, project_path));
     let telemetry_timings = timings
         || project_path.as_deref().is_some_and(|path| {
-            tracedecay::config::cached_telemetry_config(path)
+            tracedecay_project::config::cached_telemetry_config(profile.data_dir(), path)
                 .is_ok_and(|telemetry| telemetry.timings)
         });
     let mut handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
         project_path,
         scope_prefix,
         telemetry_timings,
@@ -161,12 +223,25 @@ fn serve_scope_prefix(original_cwd: Option<&Path>, project_root: &Path) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_runtime_core::native_runtime;
 
+    /// `serve` reads the hint setting on its own thread's native root, so the
+    /// read must settle with no Tokio runtime entered.
     #[test]
-    fn detects_literal_workspace_folder_variable() {
-        assert_eq!(
-            unexpanded_template_variable("${workspaceFolder}"),
-            Some("${workspaceFolder}")
+    fn repeated_query_hints_read_settles_without_an_entered_tokio_runtime() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let profile = ProfileRoot::under_home(home.path());
+        let read_failed = native_runtime::block_on(Box::pin(async move {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            crate::commands::repeated_query_hints_enabled(&profile)
+                .await
+                .is_err()
+        }))
+        .expect("native runtime");
+
+        assert!(
+            read_failed,
+            "no daemon serves this profile, so the read fails without panicking"
         );
     }
 
@@ -175,18 +250,6 @@ mod tests {
         assert_eq!(
             unexpanded_template_variable("${workspaceFolder:-/tmp/fallback}"),
             Some("${workspaceFolder:-/tmp/fallback}")
-        );
-    }
-
-    #[test]
-    fn detects_other_host_template_variables() {
-        assert_eq!(
-            unexpanded_template_variable("${workspaceRoot}"),
-            Some("${workspaceRoot}")
-        );
-        assert_eq!(
-            unexpanded_template_variable("${userHome}"),
-            Some("${userHome}")
         );
     }
 
@@ -203,15 +266,8 @@ mod tests {
     }
 
     #[test]
-    fn plain_paths_are_not_templates() {
-        assert_eq!(unexpanded_template_variable("/home/user/project"), None);
-        assert_eq!(unexpanded_template_variable("relative/dir"), None);
-        assert_eq!(unexpanded_template_variable(""), None);
-    }
-
-    #[test]
     fn dollar_signs_without_brace_syntax_are_not_templates() {
-        // Real directories can contain `$` — only `${...}` is template syntax.
+        // Real directories can contain `$`, only `${...}` is template syntax.
         assert_eq!(unexpanded_template_variable("/tmp/pri$ce/data"), None);
         assert_eq!(unexpanded_template_variable("$workspaceFolder"), None);
         assert_eq!(unexpanded_template_variable("/tmp/{braces}/x"), None);

@@ -8,19 +8,6 @@ use super::types::{CheckpointMode, CheckpointReport, WalSample};
 const WAL_HEADER_BYTES: u64 = 32;
 const WAL_FRAME_HEADER_BYTES: u64 = 24;
 
-/// Narrow physical-driver seam used by the writer-owned policy.
-///
-/// Implementations may configure and checkpoint only their already-open writer
-/// connection. There is deliberately no path, open, close, delete, scheduling,
-/// transaction, or arbitrary-SQL capability in this interface.
-pub(crate) trait CheckpointDriver {
-    type Error;
-
-    fn disable_auto_checkpoint(&mut self) -> Result<(), Self::Error>;
-    fn sample_wal(&mut self) -> Result<WalSample, Self::Error>;
-    fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointReport, Self::Error>;
-}
-
 #[derive(Debug)]
 pub(crate) enum RusqliteCheckpointError {
     Sqlite(rusqlite::Error),
@@ -62,10 +49,8 @@ impl RusqliteCheckpointDriver {
     }
 }
 
-impl CheckpointDriver for RusqliteCheckpointDriver {
-    type Error = RusqliteCheckpointError;
-
-    fn disable_auto_checkpoint(&mut self) -> Result<(), Self::Error> {
+impl RusqliteCheckpointDriver {
+    pub(crate) fn disable_auto_checkpoint(&mut self) -> Result<(), RusqliteCheckpointError> {
         self.connection
             .pragma_update(None, "wal_autocheckpoint", 0_i64)
             .map_err(Into::into)
@@ -75,42 +60,50 @@ impl CheckpointDriver for RusqliteCheckpointDriver {
     /// so it is measured apart from `rusqlite.wal_checkpoint`: a hot writer
     /// span with cold checkpoints means the per-commit NOOP probe itself is
     /// the cost, not WAL copy-back.
-    fn sample_wal(&mut self) -> Result<WalSample, Self::Error> {
-        hotpath::measure_block!("rusqlite.wal_sample", {
-            let (_, frames, _) = self.checkpoint_row("PRAGMA wal_checkpoint(NOOP)")?;
-            let page_size = self
-                .connection
-                .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))
-                .map_err(RusqliteCheckpointError::Sqlite)
-                .and_then(|value| {
-                    nonnegative_integer(value, 0).map_err(RusqliteCheckpointError::Sqlite)
-                })?;
-            let frame_bytes = page_size.saturating_add(WAL_FRAME_HEADER_BYTES);
-            let bytes = if frames > 0 {
-                frames
-                    .saturating_mul(frame_bytes)
-                    .saturating_add(WAL_HEADER_BYTES)
-            } else {
-                0
-            };
-            Ok(WalSample { frames, bytes })
-        })
+    pub(crate) fn sample_wal(&mut self) -> Result<WalSample, RusqliteCheckpointError> {
+        {
+            let _span = tracing::trace_span!("rusqlite.wal_sample").entered();
+            {
+                let (_, frames, _) = self.checkpoint_row("PRAGMA wal_checkpoint(NOOP)")?;
+                let page_size = self
+                    .connection
+                    .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))
+                    .map_err(RusqliteCheckpointError::Sqlite)
+                    .and_then(|value| {
+                        nonnegative_integer(value, 0).map_err(RusqliteCheckpointError::Sqlite)
+                    })?;
+                let frame_bytes = page_size.saturating_add(WAL_FRAME_HEADER_BYTES);
+                let bytes = if frames > 0 {
+                    frames
+                        .saturating_mul(frame_bytes)
+                        .saturating_add(WAL_HEADER_BYTES)
+                } else {
+                    0
+                };
+                Ok(WalSample { frames, bytes })
+            }
+        }
     }
 
-    fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointReport, Self::Error> {
-        hotpath::measure_block!("rusqlite.wal_checkpoint", {
-            let sql = match mode {
-                CheckpointMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
-                CheckpointMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
-                CheckpointMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
-            };
-            let row = self.checkpoint_row(sql)?;
-            Ok(CheckpointReport {
-                busy: row.0 != 0,
-                log_frames: row.1,
-                checkpointed_frames: row.2,
-            })
-        })
+    pub(crate) fn checkpoint(
+        &mut self,
+        mode: CheckpointMode,
+    ) -> Result<CheckpointReport, RusqliteCheckpointError> {
+        {
+            let _span = tracing::trace_span!("rusqlite.wal_checkpoint").entered();
+            {
+                let sql = match mode {
+                    CheckpointMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
+                    CheckpointMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
+                };
+                let row = self.checkpoint_row(sql)?;
+                Ok(CheckpointReport {
+                    busy: row.0 != 0,
+                    log_frames: row.1,
+                    checkpointed_frames: row.2,
+                })
+            }
+        }
     }
 }
 
@@ -129,11 +122,16 @@ impl RusqliteCheckpointDriver {
             .map_err(RusqliteCheckpointError::Sqlite)?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
             .map_err(RusqliteCheckpointError::Sqlite)?;
-        Ok((
-            row.0,
-            nonnegative_integer(row.1, 1).map_err(RusqliteCheckpointError::Sqlite)?,
-            nonnegative_integer(row.2, 2).map_err(RusqliteCheckpointError::Sqlite)?,
-        ))
+        // A checkpoint that cannot take the checkpoint lock because another
+        // connection is checkpointing answers `(1, -1, -1)`: it ran nothing.
+        let frames = |value: i64, column| {
+            if row.0 != 0 && value == -1 {
+                Ok(0)
+            } else {
+                nonnegative_integer(value, column).map_err(RusqliteCheckpointError::Sqlite)
+            }
+        };
+        Ok((row.0, frames(row.1, 1)?, frames(row.2, 2)?))
     }
 }
 

@@ -1,12 +1,12 @@
 //! Canonical daemon invocation constructors for the Git surface.
 
-use tracedecay_application::{CancellationContext, Deadline};
+use tracedecay_contracts::{CancellationContext, Deadline};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::surface::GitReadSurfaceRequest;
-use tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
-use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
+use tracedecay_contracts::git::GitHubStackSignalExpandSurfaceRequest;
+use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 
 use super::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonInvocationPayload,

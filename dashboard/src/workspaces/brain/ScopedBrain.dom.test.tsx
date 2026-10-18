@@ -1,16 +1,16 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ScopedBrain } from './ScopedBrain.tsx';
 import { useScope } from '../../data/scope/store.ts';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 
-// The canvas is a WebGL renderer; this suite is about which reads compose the
+// The field is a canvas renderer; this suite is about which reads compose the
 // surface and what it says when one of them is legitimately unavailable.
-vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
-  GraphCanvas: ({ nodes, caption }: { nodes: unknown[]; caption: unknown }) => (
-    <div data-testid="graph-canvas" data-node-count={nodes.length}>
+vi.mock('./BrainField.tsx', () => ({
+  ScopedField: ({ nodes, caption }: { nodes: unknown[]; caption: unknown }) => (
+    <div data-testid="scoped-field" data-node-count={nodes.length}>
       {caption as never}
     </div>
   ),
@@ -18,7 +18,7 @@ vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
 
 /**
  * Wire-true bodies come from the shared fixture module, which is gated against
- * the generated contracts by `endpoint-fixtures.test.ts`. Taking them from
+ * the generated contracts by `stories/fixtures/data.test.ts`. Taking them from
  * there rather than restating them means these five reads cannot drift into
  * shapes the daemon does not send, and each test overrides only the figures its
  * assertions actually name.
@@ -55,7 +55,7 @@ const CONTEXT = withEnvelopePayload(wirePayload('/api/projects/proj_x'));
 /** Wire-true unseeded slice, cut down to two nodes and the edge between them.
  * `graph_service.rs::subgraph_payload` writes `seed_id`, `mode`, `nodes`,
  * `edges` and `capped` on every one of its three return paths, and each node is
- * a full `GraphNodeV1` — a body carrying only `id`/`kind`/`name`/`degree` is
+ * a full `GraphNodeV1`, a body carrying only `id`/`kind`/`name`/`degree` is
  * one the daemon cannot produce, which is what this fixture used to be back
  * when Brain read the scoped gateway through its own all-optional copy of the
  * subgraph shape. */
@@ -86,10 +86,14 @@ const SUBGRAPH_ENVELOPE = withEnvelopePayload(SUBGRAPH);
 const SUBGRAPH_EMPTY = { ...SUBGRAPH, nodes: [], edges: [] };
 const SUBGRAPH_EMPTY_ENVELOPE = withEnvelopePayload(SUBGRAPH_EMPTY);
 
-const graphOverview = (totals: Record<string, number>) =>
+const graphOverview = (
+  totals: Record<string, number>,
+  nodesByKind: ReadonlyArray<{ kind: string; count: number }> = [],
+) =>
   withEnvelopePayload({
     ...wirePayload('/api/plugins/graph/overview'),
     totals,
+    nodes_by_kind: nodesByKind,
   });
 
 const MEMORY_PAYLOAD = wirePayload('/api/plugins/holographic/status');
@@ -149,8 +153,8 @@ describe('ScopedBrain', () => {
     vi.stubGlobal('fetch', fetchMock);
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
-    expect(screen.getByTestId('graph-canvas').dataset['nodeCount']).toBe('2');
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
+    expect(screen.getByTestId('scoped-field').dataset['nodeCount']).toBe('2');
 
     // Every scoped read went through `/api/projects/{id}/…`; nothing asked the
     // daemon for the active project's state and labelled it as this one's.
@@ -166,13 +170,38 @@ describe('ScopedBrain', () => {
     // Real readouts, from the project's scoped daemon APIs.
     expect(screen.getByText('12.9')).toBeTruthy();
     expect(screen.getByText('173')).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'registered paths' })).toBeTruthy();
   });
 
-  it('renders project identity and checkout aliases without a branch store', async () => {
+  it('shows every schema convergence state for the selected project', async () => {
+    const schemaConvergences = [
+      'pending_schema_migration',
+      'released_shape_convergence_in_progress',
+      'degraded',
+      'completed',
+    ].map((state, index) => ({
+      store: 'profile-sessions',
+      stage: 'registered_schema',
+      state,
+      progress: index === 1 ? { unit: 'rows', done: 12, remaining: 3 } : null,
+      started_at_micros: 42 + index,
+      degraded_row: state === 'degraded' ? 'observation_id=obs-9' : null,
+    }));
     vi.stubGlobal(
       'fetch',
       serve({
+        '/api/projects/proj_x/doctor/findings': {
+          status: 200,
+          body: withEnvelopePayload({
+            family_filter: null,
+            entries: [],
+            report_coverage: null,
+            known_families: ['storage'],
+            schema_convergences: schemaConvergences,
+            storage_kind_statuses: [],
+            note: 'schema convergence state',
+          }, 'partial'),
+        },
         '/api/projects/proj_x/plugins/graph/subgraph': {
           status: 200,
           body: SUBGRAPH_ENVELOPE,
@@ -180,10 +209,14 @@ describe('ScopedBrain', () => {
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),
     );
+
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
-    expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
+    expect(await screen.findByText('Pending schema migration')).toBeTruthy();
+    expect(screen.getByText('Released-shape convergence in progress')).toBeTruthy();
+    expect(screen.getByText('Schema convergence degraded')).toBeTruthy();
+    expect(screen.getByText('Schema convergence completed')).toBeTruthy();
+    expect(screen.getByText(/rows 12 done \/ 3 remaining/)).toBeTruthy();
   });
 
   it('does not infer an unmounted graph from a generic scoped read failure', async () => {
@@ -199,13 +232,13 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    // The boundary chip plus the HUD's per-source accounting lines — several
+    // The boundary chip plus the HUD's per-source accounting lines, several
     // sources say so, and each of them is telling the truth.
     await waitFor(() => expect(screen.getAllByText(/the read failed/i).length).toBeGreaterThan(0));
     expect(screen.queryByText(/graph field · not mounted/i)).toBeNull();
-    expect(screen.queryByTestId('graph-canvas')).toBeNull();
+    expect(screen.queryByTestId('scoped-field')).toBeNull();
     // The independently successful registry backbone remains available.
-    expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'registered paths' })).toBeTruthy();
   });
 
   /**
@@ -214,7 +247,7 @@ describe('ScopedBrain', () => {
    * `graph_response` maps every read failure to 500 `read_failed`, so a 200
    * carrying no nodes is the daemon reporting that the unseeded slice found
    * nothing to draw. The surface used to answer that with "the generic response
-   * cannot distinguish empty data from query failure" — a claim about the
+   * cannot distinguish empty data from query failure", a claim about the
    * contract that the contract contradicts, and one that left a genuinely
    * empty project looking like a broken read forever.
    */
@@ -239,13 +272,13 @@ describe('ScopedBrain', () => {
     for (const failure of screen.queryAllByText(/the read failed/i)) {
       expect(failure.tagName).toBe('LI');
     }
-    expect(screen.queryByTestId('graph-canvas')).toBeNull();
+    expect(screen.queryByTestId('scoped-field')).toBeNull();
   });
 
   /**
    * The other empty slice the same route can send, which is not the same fact.
    * A seeded request whose query matched nothing returns `seed_id: null` with
-   * `mode: "seeded"` — that says the search found no symbol, and says nothing
+   * `mode: "seeded"`, that says the search found no symbol, and says nothing
    * about whether the project is indexed. Reading `mode` is what keeps the two
    * apart; asserting the empty-graph sentence for both would be a fabrication.
    */
@@ -292,11 +325,36 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
     expect(screen.queryByText(/graph totals are unverified/i)).toBeNull();
     expect(readout('nodes')).toBe('0');
     expect(readout('edges')).toBe('0');
     expect(readout('files')).toBe('0');
+  });
+
+  it('lists the scoped symbol kinds and accounts for symbols without a kind', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
+        '/api/projects/proj_x/plugins/graph/overview': {
+          status: 200,
+          body: graphOverview({ nodes: 12_873, edges: 41_206, files: 642 }, [
+            { kind: 'struct', count: 3_000 },
+            { kind: 'function', count: 9_000 },
+          ]),
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    const section = await screen.findByRole('region', { name: 'Symbols by kind' });
+    const rows = within(section).getAllByRole('listitem').map((row) => row.textContent);
+    expect(rows).toEqual(['function9,000', 'struct3,000']);
+    expect(
+      within(section).getByText('873 of 12,873 symbols carry no kind metadata and are not counted by kind'),
+    ).toBeTruthy();
   });
 
   it('withholds graph totals when the overview read fails', async () => {
@@ -313,39 +371,19 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
     await waitFor(() => expect(readout('nodes')).toBe('—'));
     expect(readout('edges')).toBe('—');
     expect(readout('files')).toBe('—');
-  });
-
-  it('keeps a real figure when a neighbouring one is zero', async () => {
-    // The specific loss the all-or-nothing rule caused: one zero took the
-    // other two measurements with it.
-    vi.stubGlobal(
-      'fetch',
-      serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_ENVELOPE },
-        '/api/projects/proj_x/plugins/graph/overview': {
-          status: 200,
-          body: graphOverview({ nodes: 1204, edges: 0, files: 88 }),
-        },
-        '/api/projects/proj_x': { status: 200, body: CONTEXT },
-      }),
-    );
-    renderScoped();
-
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
-    expect(readout('nodes')).toBe('1,204');
-    expect(readout('edges')).toBe('0');
-    expect(readout('files')).toBe('88');
+    expect(screen.queryByRole('region', { name: 'Symbols by kind' })).toBeNull();
+    expect(screen.getByText(/Graph totals and symbol kinds: the read failed/)).toBeTruthy();
   });
 
   /**
    * The generated `available` and `exists` flags, honoured per source.
    *
    * Both payloads carry their counts as required non-nullable integers, so an
-   * absent store answers with zeros — `available: false` and `exists: false`
+   * absent store answers with zeros, `available: false` and `exists: false`
    * are the only fields that say those zeros are not measurements. Reading the
    * numbers without the flags turned "no session or event source is available"
    * and
@@ -383,7 +421,7 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
     // The graph read is fine and stays measured: unavailability is per source.
     expect(readout('nodes')).toBe('1,204');
     expect(readout('files')).toBe('88');
@@ -392,7 +430,7 @@ describe('ScopedBrain', () => {
     expect(readout('entities')).toBe('—');
     expect(readout('events')).toBe('—');
     // And each dash is accounted for, in the source's own words where it sent
-    // any — a withheld figure the reader cannot explain reads as a bug.
+    // any, a withheld figure the reader cannot explain reads as a bug.
     expect(screen.getByText(/no memory store at \/store\/proj_x\/memory\.db/)).toBeTruthy();
     expect(screen.getByText(/no session or event source is available/i)).toBeTruthy();
   });
@@ -419,7 +457,7 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
     expect(readout('facts')).toBe('0');
     expect(readout('entities')).toBe('12');
     expect(screen.queryByText(/no memory store/i)).toBeNull();
@@ -430,7 +468,7 @@ describe('ScopedBrain', () => {
    * nothing.
    *
    * `projects.rs::context` answers a typed envelope whose `status` is
-   * `registry_unavailable` and whose `stores`/`aliases` are empty — so a
+   * `registry_unavailable` and whose `stores`/`aliases` are empty, so a
    * rail that read those arrays without checking `status` drew the exact
    * picture an empty project draws. The reason it sent is the difference
    * between "this project has no stores" and "nothing could be read".

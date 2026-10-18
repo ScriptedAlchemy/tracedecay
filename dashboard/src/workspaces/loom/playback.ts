@@ -6,7 +6,7 @@
  * viewing speed, but it never invents an event, a timestamp, or duration.
  */
 export interface LoomPlaybackFrame {
-  /** Stable LCM message identity — selection survives a render or refetch. */
+  /** Stable LCM message identity, selection survives a render or refetch. */
   id: string;
   /** The session store's ordering key, when it supplied one. */
   ordinal: number | null;
@@ -43,36 +43,12 @@ export function initialPlaybackState(frameCount: number): LoomPlaybackState {
 }
 
 /** The loaded tail is the only honest "live" point when no stream exists. */
-export function latestCursor(frameCount: number): number {
+function latestCursor(frameCount: number): number {
   return Math.max(frameCount - 1, 0);
 }
 
 export function clampPlaybackCursor(cursor: number, frameCount: number): number {
   return Math.min(Math.max(cursor, 0), latestCursor(frameCount));
-}
-
-/**
- * Preserve the current stable event across a canonical refetch. A live
- * follower instead moves to the new loaded tail. If the selected event was
- * compacted or fell outside the loaded page, clamp it rather than pretending a
- * nearby event is the same event.
- */
-export function reconcilePlaybackState(
-  previous: LoomPlaybackState,
-  previousFrameId: string | null,
-  frames: readonly LoomPlaybackFrame[],
-): LoomPlaybackState {
-  if (frames.length === 0) return { ...previous, cursor: 0, playing: false };
-  if (previous.followLive) {
-    return { ...previous, cursor: latestCursor(frames.length) };
-  }
-  const retained = previousFrameId == null
-    ? -1
-    : frames.findIndex((frame) => frame.id === previousFrameId);
-  return {
-    ...previous,
-    cursor: retained >= 0 ? retained : clampPlaybackCursor(previous.cursor, frames.length),
-  };
 }
 
 /** One discrete frame at a time. End-of-page stops rather than wrapping. */
@@ -119,4 +95,18 @@ export function returnToLive(
 /** Viewing speed controls only the interval between discrete frame changes. */
 export function playbackTickMillis(speed: LoomPlaybackSpeed): number {
   return 800 / speed;
+}
+
+/** The same reveal boundary feeds geometry, exact rows and the inspector. */
+export function revealedFrames(
+  frames: readonly LoomPlaybackFrame[],
+  cursor: number,
+  following: boolean,
+): LoomPlaybackFrame[] {
+  if (following) return [...frames];
+  const active = frames[cursor];
+  if (!active) return [];
+  return frames.filter((frame, index) => index <= cursor && (
+    active.timestamp == null || frame.timestamp == null || frame.timestamp <= active.timestamp
+  ));
 }

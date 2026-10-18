@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 
 SCORECARD_PATH = Path(__file__).with_name("efficiency-scorecard.py")
@@ -19,6 +22,220 @@ def load_scorecard() -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class ScorecardBuildTests(unittest.TestCase):
+    def test_resolves_binary_from_configured_bazel_output(self) -> None:
+        scorecard = load_scorecard()
+        with tempfile.TemporaryDirectory(prefix="scorecard build ") as scratch:
+            output = Path(scratch)
+            binary = output / "crates" / "tracedecay-cli" / "tracedecay"
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            with mock.patch.object(
+                scorecard.subprocess,
+                "run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0),
+                    subprocess.CompletedProcess([], 0, f"{output}\n", ""),
+                ],
+            ) as run:
+                self.assertEqual(scorecard.build_binary(), binary)
+            self.assertEqual(
+                [call.args[0] for call in run.call_args_list],
+                [
+                    ("bazel", "build", "--config=release", "//crates/tracedecay-cli:tracedecay"),
+                    ("bazel", "info", "--config=release", "bazel-bin"),
+                ],
+            )
+
+    def test_failed_build_does_not_use_an_old_binary(self) -> None:
+        scorecard = load_scorecard()
+        with mock.patch.object(
+            scorecard.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)
+        ) as run:
+            with self.assertRaisesRegex(scorecard.HarnessError, "release build failed"):
+                scorecard.build_binary()
+            self.assertEqual(run.call_count, 1)
+
+    def test_failed_or_empty_output_discovery_is_an_error(self) -> None:
+        scorecard = load_scorecard()
+        for discovery in (
+            subprocess.CompletedProcess([], 1, "", "configuration failed"),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ):
+            with self.subTest(discovery=discovery), mock.patch.object(
+                scorecard.subprocess,
+                "run",
+                side_effect=[subprocess.CompletedProcess([], 0), discovery],
+            ):
+                with self.assertRaisesRegex(scorecard.HarnessError, "resolve the Bazel output"):
+                    scorecard.build_binary()
+
+
+class FakeStatusObserver:
+    def __init__(
+        self,
+        payloads: list[dict | None],
+        *,
+        become_unusable: bool = False,
+        log_path: Path | None = None,
+    ) -> None:
+        self.payloads = iter(payloads)
+        self.request_count = 0
+        self.close_count = 0
+        self.usable = True
+        self.become_unusable = become_unusable
+        self.log_path = log_path or Path("/tmp/fake-status-observer.log")
+
+    def __enter__(self) -> FakeStatusObserver:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close_count += 1
+
+    def status_payload(self) -> dict | None:
+        self.request_count += 1
+        payload = next(self.payloads)
+        if self.become_unusable:
+            self.usable = False
+        return payload
+
+
+class FakeSandbox:
+    def __init__(
+        self,
+        payloads: list[dict | None] | None = None,
+        *,
+        observers: list[FakeStatusObserver] | None = None,
+    ) -> None:
+        if observers is not None:
+            self._observers = list(observers)
+            self.observer = observers[0]
+        else:
+            self.observer = FakeStatusObserver(payloads or [])
+            self._observers = [self.observer]
+        self._next_observer = 0
+        self.observer_process_count = 0
+        self.observer_connection_count = 0
+
+    def open_status_observer(self) -> FakeStatusObserver:
+        if self._next_observer >= len(self._observers):
+            raise AssertionError("unexpected extra status observer")
+        observer = self._observers[self._next_observer]
+        self._next_observer += 1
+        self.observer = observer
+        self.observer_process_count += 1
+        self.observer_connection_count += 1
+        return observer
+
+    def daemon_alive(self) -> bool:
+        return True
+
+    def daemon_log_tail(self) -> str:
+        return "unused"
+
+
+class ScorecardStatusObserverTests(unittest.TestCase):
+    def test_wait_reuses_one_observer_and_returns_identical_terminal_payload(self) -> None:
+        scorecard = load_scorecard()
+        stale = {"code_index_freshness": {"status": "building"}}
+        terminal = {"code_index_freshness": {"status": "current"}, "sentinel": [1, 2, 3]}
+        sandbox = FakeSandbox([None, stale, terminal])
+
+        with (
+            mock.patch.object(
+                scorecard.time, "monotonic", side_effect=[10.0, 10.1, 10.2, 10.3]
+            ),
+            mock.patch.object(scorecard.time, "time", side_effect=[100.0, 101.0, 102.0]),
+            mock.patch.object(scorecard.time, "sleep"),
+        ):
+            _wall, payload, _observed_at = scorecard.wait_for(
+                sandbox, "cold_index", 30.0, scorecard.freshness_current
+            )
+
+        self.assertIs(payload, terminal)
+        self.assertEqual(sandbox.observer_process_count, 1)
+        self.assertEqual(sandbox.observer_connection_count, 1)
+        self.assertEqual(sandbox.observer.request_count, 3)
+        self.assertEqual(sandbox.observer.close_count, 1)
+
+    def test_wait_timeout_preserves_failure_and_observer_request_count(self) -> None:
+        scorecard = load_scorecard()
+        sandbox = FakeSandbox([{"code_index_freshness": {"status": "building"}}])
+
+        with (
+            mock.patch.object(scorecard.time, "monotonic", side_effect=[10.0, 10.6]),
+            mock.patch.object(scorecard.time, "time", return_value=100.0),
+        ):
+            with self.assertRaisesRegex(
+                scorecard.PhaseFailure,
+                (
+                    r"incremental_sync: not ready within 0\.5s "
+                    r'\(last freshness: \{"status": "building"\}\)'
+                ),
+            ):
+                scorecard.wait_for(
+                    sandbox, "incremental_sync", 0.5, scorecard.freshness_current
+                )
+
+        self.assertEqual(sandbox.observer_process_count, 1)
+        self.assertEqual(sandbox.observer_connection_count, 1)
+        self.assertEqual(sandbox.observer.request_count, 1)
+        self.assertEqual(sandbox.observer.close_count, 1)
+
+    def test_wait_reopens_unusable_observer_and_returns_identical_terminal_payload(
+        self,
+    ) -> None:
+        scorecard = load_scorecard()
+        terminal = {"code_index_freshness": {"status": "current"}, "sentinel": [1, 2, 3]}
+        first = FakeStatusObserver([None], become_unusable=True)
+        second = FakeStatusObserver([terminal])
+        sandbox = FakeSandbox(observers=[first, second])
+
+        with (
+            mock.patch.object(
+                scorecard.time, "monotonic", side_effect=[10.0, 10.1, 10.2]
+            ),
+            mock.patch.object(scorecard.time, "time", side_effect=[100.0, 101.0]),
+            mock.patch.object(scorecard.time, "sleep"),
+        ):
+            _wall, payload, _observed_at = scorecard.wait_for(
+                sandbox, "cold_index", 30.0, scorecard.freshness_current
+            )
+
+        self.assertIs(payload, terminal)
+        self.assertEqual(sandbox.observer_process_count, 2)
+        self.assertEqual(sandbox.observer_connection_count, 2)
+        self.assertEqual(first.request_count, 1)
+        self.assertEqual(second.request_count, 1)
+        self.assertEqual(first.close_count, 1)
+        self.assertEqual(second.close_count, 1)
+        self.assertFalse(first.usable)
+        self.assertTrue(second.usable)
+
+    def test_wait_timeout_mentions_unusable_observer_stderr_log(self) -> None:
+        scorecard = load_scorecard()
+        log_path = Path("/tmp/status-observer-unusable.log")
+        sandbox = FakeSandbox(
+            observers=[FakeStatusObserver([None], become_unusable=True, log_path=log_path)]
+        )
+
+        with (
+            mock.patch.object(scorecard.time, "monotonic", side_effect=[10.0, 10.6]),
+            mock.patch.object(scorecard.time, "time", return_value=100.0),
+        ):
+            with self.assertRaisesRegex(
+                scorecard.PhaseFailure,
+                (
+                    r"daemon_restart: not ready within 0\.5s "
+                    r"\(last freshness: unanswered\); "
+                    r"last observer unusable, stderr: /tmp/status-observer-unusable\.log"
+                ),
+            ):
+                scorecard.wait_for(
+                    sandbox, "daemon_restart", 0.5, scorecard.freshness_current
+                )
 
 
 class ScorecardVerdictTests(unittest.TestCase):

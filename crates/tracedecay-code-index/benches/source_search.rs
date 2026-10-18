@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tracedecay_code_index::grep_search::{GrepSearchQuery, search_tree_with_cancel};
+use tracedecay_domain::IndexPathPolicyV1;
 
 const TRACKED_FILES: usize = 128;
 const GENERATED_FILES: usize = 2_048;
@@ -34,6 +35,7 @@ fn run() -> Result<(), String> {
         pattern: "benchmark_target".to_owned(),
         fixed_strings: true,
         path_glob: None,
+        scope_prefix: None,
         case_sensitive: true,
         context_lines: 0,
         max_results: TRACKED_FILES,
@@ -42,6 +44,7 @@ fn run() -> Result<(), String> {
         pattern: "generated_target".to_owned(),
         fixed_strings: true,
         path_glob: Some("dist/**/*.js".to_owned()),
+        scope_prefix: None,
         case_sensitive: true,
         context_lines: 0,
         max_results: GENERATED_FILES,
@@ -58,6 +61,16 @@ fn run() -> Result<(), String> {
         measure(corpus.path(), &generated_query)?,
     );
     Ok(())
+}
+
+/// The shipped `index.exclude.v1` shape for `dist/`, the generated directory
+/// this corpus prunes.
+fn generated_dirs_excluded() -> Result<IndexPathPolicyV1, String> {
+    IndexPathPolicyV1::new(
+        vec!["dist/**".to_owned(), "**/dist/**".to_owned()],
+        Vec::new(),
+    )
+    .map_err(|error| format!("bench path policy: {error}"))
 }
 
 fn build_corpus(root: &Path) -> Result<(), String> {
@@ -89,7 +102,8 @@ fn verify_workload(
     query: &GrepSearchQuery,
     expected_hits: usize,
 ) -> Result<(), String> {
-    let result = search_tree_with_cancel(root, query, || false)
+    let path_policy = generated_dirs_excluded()?;
+    let result = search_tree_with_cancel(root, query, &path_policy, || false)
         .map_err(|error| format!("verify workload: {error}"))?;
     if result.cancelled || result.hits.len() != expected_hits {
         return Err(format!(
@@ -102,15 +116,16 @@ fn verify_workload(
 }
 
 fn measure(root: &Path, query: &GrepSearchQuery) -> Result<Vec<Duration>, String> {
+    let path_policy = generated_dirs_excluded()?;
     for _ in 0..WARMUPS {
-        search_tree_with_cancel(root, query, || false)
+        search_tree_with_cancel(root, query, &path_policy, || false)
             .map_err(|error| format!("warm source search: {error}"))?;
     }
 
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let start = Instant::now();
-        search_tree_with_cancel(root, query, || false)
+        search_tree_with_cancel(root, query, &path_policy, || false)
             .map_err(|error| format!("measure source search: {error}"))?;
         samples.push(start.elapsed());
     }

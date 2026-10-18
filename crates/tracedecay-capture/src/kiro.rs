@@ -17,6 +17,7 @@ pub struct KiroSnapshotMessage<'a> {
     pub text: &'a str,
     pub kind: Option<&'a str>,
     pub model: Option<&'a str>,
+    pub transcript_path: Option<&'a str>,
 }
 
 /// Shapes only the Kiro fields evidenced by checked-in transcript fixtures.
@@ -25,15 +26,11 @@ pub struct KiroSnapshotMessage<'a> {
 /// the root adapter can admit this bounded payload through sanitization before
 /// any durable write.
 pub fn snapshot_native_payload(message: KiroSnapshotMessage<'_>) -> Value {
-    // Kiro snapshots come from a database, not a byte-ranged file; the message
-    // text is the corpus-scale payload, so its length is the bytes gauge.
-    // Composition is infallible, so entries are the snapshot span's call count.
-    hotpath::gauge!("capture.kiro.snapshot_text_bytes").inc(message.text.len());
     snapshot_kiro_record(message)
 }
 
 /// One snapshot-message composition, not a per-field walk.
-#[hotpath::measure(label = "capture.kiro.snapshot")]
+#[tracing::instrument(name = "capture.kiro.snapshot", level = "trace", skip_all)]
 fn snapshot_kiro_record(message: KiroSnapshotMessage<'_>) -> Value {
     let mut fields = Map::new();
     fields.insert("provider".to_string(), Value::String(PROVIDER.to_string()));
@@ -56,6 +53,12 @@ fn snapshot_kiro_record(message: KiroSnapshotMessage<'_>) -> Value {
     }
     if let Some(model) = message.model {
         fields.insert("model".to_string(), Value::String(model.to_string()));
+    }
+    if let Some(transcript_path) = message.transcript_path {
+        fields.insert(
+            "transcript_path".to_string(),
+            Value::String(transcript_path.to_string()),
+        );
     }
     Value::Object(fields)
 }

@@ -1,7 +1,6 @@
-import { useMemo, useRef } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
-import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
-import { useActivationField } from '../../viz/graph/useActivationField.ts';
+import { ScopedField } from './BrainField.tsx';
 import {
   CenteredState,
   ReadSection,
@@ -18,18 +17,20 @@ import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { relativeAge } from '../../ui/time.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
+  DoctorFindingsPayloadV1Schema,
   GraphOverviewPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
   MemoryStatusPayloadV1Schema,
   type GraphSubgraphPayloadV1,
   type ProjectContextPayloadV1,
 } from '../../contracts/generated.ts';
+import { SchemaConvergencePanel } from '../observatory/DoctorInspector.tsx';
 
 /**
  * The Brain, scoped to one project: "what does TraceDecay actually know about
  * this project?"
  *
- * Selecting a project used to change nothing here — the surface still drew the
+ * Selecting a project used to change nothing here, the surface still drew the
  * whole registry, so the one gesture that should have produced the most
  * detailed view produced the least. It is composed from exactly two tiers of
  * real daemon reads, and it never blurs them together:
@@ -45,6 +46,7 @@ import {
  *   guesses that a generic failure means "not mounted".
  */
 export function ScopedBrain({ projectId, label }: { projectId: string; label: string }) {
+  const [inspectedId, setInspectedId] = useState<string | null>(null);
   const selectAllProjects = useScope((s) => s.selectAllProjects);
 
   // The holdings rail is a scroll container at `lg` and an ordinary block
@@ -54,7 +56,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   const holdingsTabStop = useScrollTabStop(holdingsRef);
 
   // The registry backbone. Read by absolute id rather than through the scoped
-  // gateway — `/api/projects` is deliberately never rewritten by scope (see
+  // gateway, `/api/projects` is deliberately never rewritten by scope (see
   // `scopedUrl`), and this read must resolve for a project whose graph is not
   // mounted, which is exactly when the rest of this surface cannot.
   // The shared per-project registry read: the same key and route the scope bar
@@ -82,8 +84,12 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
     '/api/plugins/analytics/overview',
     AnalyticsOverviewPayloadV1Schema,
   );
+  const doctor = useEnvelope(
+    ['brain', 'doctor-convergence'],
+    '/api/doctor/findings',
+    DoctorFindingsPayloadV1Schema,
+  );
 
-  const activation = useActivationField(3200);
   const graph = envelopePayload(subgraph.data);
   const nodes = useMemo(
     () =>
@@ -109,10 +115,11 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   // count query fails, so a 200 carries counts that were really taken and a
   // zero among them is an empty graph. The rule here used to blank all three
   // whenever any one was zero, on the stated grounds that the response "cannot
-  // distinguish zero data from a query failure" — it can, by status code, and
+  // distinguish zero data from a query failure", it can, by status code, and
   // the rule cost a project with an indexed graph and no edges its node count
   // as well.
-  const totals = envelopePayload(overview.data)?.totals ?? null;
+  const overviewRead = envelopePayload(overview.data);
+  const totals = overviewRead?.totals ?? null;
 
   const memoryStatusRead = envelopePayload(memoryStatus.data);
   const memory = memoryStatusRead?.exists === true ? memoryStatusRead.memory : null;
@@ -123,7 +130,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
 
   // Named per source, so a dash in the readout is accounted for rather than
   // being left to read as zero. Of the HUD's sources only the subgraph has its
-  // own boundary; the overview, memory and analytics reads report here — a
+  // own boundary; the overview, memory and analytics reads report here, a
   // read still in flight, a failed read and a source that declared itself
   // unavailable are three different sentences, not one shared dash.
   const readAbsence = (
@@ -136,7 +143,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
         ? `${name}: the read failed${read.data.detail ? ` (${read.data.detail})` : ''}.`
         : null;
   const unmeasured = [
-    readAbsence('Graph totals', overview),
+    readAbsence('Graph totals and symbol kinds', overview),
     readAbsence('Memory', memoryStatus),
     readAbsence('Analytics', analytics),
     memoryStatusRead?.exists === false
@@ -172,9 +179,8 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           * narrow column (the shell's `main` is the scroll container), split
           * panes from `lg`. */}
         <div className="relative flex shrink-0 flex-col p-3 lg:min-h-0 lg:flex-1">
-          {/* Same HUD geometry as the all-projects field, so the two Brains
-            * read as one instrument in two states rather than two designs. */}
-          <div className="pointer-events-none static z-10 mb-2 flex flex-col items-start gap-2 md:absolute md:inset-x-6 md:top-6 md:mb-0">
+          {/* Readouts reserve space above the graph at every viewport. */}
+          <div className="pointer-events-none mb-2 flex shrink-0 flex-wrap items-start gap-2">
             <ScopedReadout
               items={[
                 { label: 'nodes', ...splitCount(totals?.nodes ?? null) },
@@ -204,21 +210,12 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
             {(envelope) => {
               const slice = envelope.payload;
               return nodes.length > 0 ? (
-                <GraphCanvas
+                <ScopedField
                   nodes={nodes}
                   edges={edges}
-                  fill
-                  canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
-                  activation={activation}
-                  ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The project identity and checkouts listed alongside remain available as context.`}
-                  fallbackDescription="the project identity and checkouts beside this field remain available as a text alternative"
-                  encoding={{
-                    body: 'symbol',
-                    size: 'connectedness',
-                    hue: 'symbol kind',
-                    signal: 'click activation',
-                    relation: 'relation; activation thickens',
-                  }}
+                  inspectedId={inspectedId}
+                  onInspect={setInspectedId}
+                  label={label}
                   caption={
                     <>
                       {nodes.length} returned symbols · {edges.length} returned relations
@@ -229,8 +226,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                           ]
                             .filter(Boolean)
                             .join(' and ')}`
-                        : ''}{' '}
-                      · size = connectedness · hover isolates a neighbourhood, click fires it
+                        : ''}
                     </>
                   }
                 />
@@ -244,13 +240,16 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           ref={holdingsRef}
           aria-label={`What TraceDecay holds for ${label}`}
           // Only where it is really a scroller. Its overflow is applied at `lg`,
-          // so below that this is an ordinary block in the page flow — measured
-          // at 320 and 768 CSS px as `overflow-y: visible` — and a literal
+          // so below that this is an ordinary block in the page flow, measured
+          // at 320 and 768 CSS px as `overflow-y: visible`, and a literal
           // `tabIndex={0}` put a stop that does nothing in front of the holdings
           // on exactly the screens where tabbing is most of the navigation.
           tabIndex={holdingsTabStop}
           className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
         >
+          <SchemaConvergencePanel
+            findings={envelopePayload(doctor.data)?.schema_convergences ?? []}
+          />
           <ReadSection
             title="Project"
             chrome="centered"
@@ -258,9 +257,27 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           >
             {(data) => <ProjectHoldings data={data} />}
           </ReadSection>
+          {overviewRead && overviewRead.totals.nodes > 0 ? (
+            <SymbolsByKind kinds={overviewRead.nodes_by_kind} total={overviewRead.totals.nodes} />
+          ) : null}
           {usage && usage.by_category.length > 0 ? (
             <ActivityByCategory categories={usage.by_category} total={usage.event_count} />
           ) : null}
+          {nodes.length > 0 ? <section aria-label="Returned symbols" className="text-xs">
+            <h2 className="font-semibold">Returned symbols ({nodes.length})</h2>
+            <ul className="mt-2 space-y-1">
+              {nodes.map((node) => <li key={node.id}>
+                <button type="button" className="td-hit w-full break-all border border-edge-subtle p-2 text-left" aria-pressed={inspectedId === node.id} onFocus={() => setInspectedId(node.id)} onClick={() => setInspectedId(node.id)} onKeyDown={(event) => { if (event.key === 'Escape') setInspectedId(null); }}>
+                  {node.label} · {node.kind}
+                </button>
+                {inspectedId === node.id ? <dl className="space-y-1 p-2 text-2xs [&>dd]:break-all">
+                  <dt>Exact symbol ID</dt><dd>{node.id}</dd>
+                  <dt>Connectedness</dt><dd>{node.degree ?? 'not measured'}</dd>
+                  <dt>Returned relationships</dt><dd>{edges.filter((edge) => edge.source === node.id || edge.target === node.id).map((edge) => `${edge.source} → ${edge.target} (${edge.kind})`).join('; ') || 'none in this slice'}</dd>
+                </dl> : null}
+              </li>)}
+            </ul>
+          </section> : null}
         </aside>
       </div>
     </div>
@@ -308,13 +325,13 @@ function projectContextReadState(
  * account of what it went looking for.
  *
  * The route (`graph_service.rs::subgraph_payload`) fails with 500
- * `read_failed`, so an empty 200 is always an answered read — but *what* it
+ * `read_failed`, so an empty 200 is always an answered read, but *what* it
  * answers depends on the mode it ran in, and the two are not the same claim.
  * An unseeded slice draws from the whole graph, so empty means the graph holds
  * nothing. A seeded slice that found no seed means the search matched nothing,
  * which says nothing at all about whether the project is indexed. This surface
  * only ever requests the default slice, but reading `mode` rather than
- * assuming it keeps the sentence true if that ever changes — and the previous
+ * assuming it keeps the sentence true if that ever changes, and the previous
  * text ("cannot distinguish empty data from query failure") was false either
  * way, since the status code distinguishes them.
  */
@@ -370,7 +387,7 @@ function ScopedReadout({
 function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
   // The route's own discriminant, honoured before its arrays are read. A
   // non-`ok` body sends `project: null` with empty `aliases`, which
-  // rendered as a project that simply holds nothing — the same picture a real
+  // rendered as a project that simply holds nothing, the same picture a real
   // empty project draws, for a response that measured nothing at all.
   if (data.status !== 'ok') {
     return (
@@ -407,10 +424,10 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
               {project.project_root}
             </span>
             <span className="flex items-baseline gap-2">
-              {project.default_branch ? (
+              {project.head_branch ? (
                 <span className="inline-flex min-w-0 items-center gap-1 text-2xs text-text-secondary">
                   <GitBranch aria-hidden size={11} className="shrink-0" />
-                  <span className="truncate">{project.default_branch}</span>
+                  <span className="truncate">{project.head_branch}</span>
                 </span>
               ) : null}
               <span aria-hidden className="td-rule" />
@@ -424,7 +441,7 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
       {aliases.length > 0 ? (
         <section className="rounded-[var(--radius-card)] border border-edge-subtle bg-surface-1">
           <header className="flex items-center gap-2 border-b border-edge-subtle px-3 py-2">
-            <h2 className="text-xs font-semibold">checkouts</h2>
+            <h2 className="text-xs font-semibold">registered paths</h2>
             <span aria-hidden className="td-rule" />
             <span className="td-legend shrink-0 text-text-muted" data-cell="numeric">
               {aliases.length}
@@ -459,6 +476,58 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
         </section>
       ) : null}
     </>
+  );
+}
+
+/** The project's indexed symbols by kind, as the code index counted them for
+ * the overview. `graph_service.rs` tallies a kind only for symbols carrying
+ * metadata while `totals.nodes` counts every symbol, so the difference is
+ * stated rather than left to read as a rounding gap. */
+function SymbolsByKind({
+  kinds,
+  total,
+}: {
+  kinds: ReadonlyArray<{ kind: string; count: number }>;
+  total: number;
+}) {
+  const ranked = [...kinds].sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
+  const ceiling = ranked.reduce((max, row) => Math.max(max, row.count), 0);
+  const unkinded = total - ranked.reduce((sum, row) => sum + row.count, 0);
+  return (
+    <section
+      aria-label="Symbols by kind"
+      className="rounded-[var(--radius-card)] border border-edge-subtle bg-surface-1"
+    >
+      <header className="flex items-center gap-2 border-b border-edge-subtle px-3 py-2">
+        <h2 className="text-xs font-semibold">symbols by kind</h2>
+        <span aria-hidden className="td-rule" />
+        <span className="td-legend shrink-0 text-text-muted" data-cell="numeric">
+          {ranked.length} kinds
+        </span>
+      </header>
+      <ul className="flex flex-col">
+        {ranked.map((row) => (
+          <li
+            key={row.kind}
+            className="flex items-center gap-2 border-b border-edge-subtle px-3 py-1.5 last:border-b-0"
+          >
+            <span className="td-value min-w-0 flex-1 truncate text-2xs text-text-secondary">
+              {row.kind}
+            </span>
+            <FigureRail
+              value={row.count.toLocaleString()}
+              fraction={ceiling > 0 ? row.count / ceiling : null}
+            />
+          </li>
+        ))}
+      </ul>
+      {unkinded > 0 ? (
+        <p className="td-legend border-t border-edge-subtle px-3 py-1.5 text-text-muted">
+          {unkinded.toLocaleString()} of {total.toLocaleString()} symbols carry no kind metadata
+          and are not counted by kind
+        </p>
+      ) : null}
+    </section>
   );
 }
 

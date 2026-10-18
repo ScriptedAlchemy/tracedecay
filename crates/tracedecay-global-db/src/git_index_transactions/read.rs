@@ -5,7 +5,7 @@
 //! [`RepositoryReadOperationV1::Code`](tracedecay_store::RepositoryReadOperationV1)
 //! ("repository attachment does not own code reads") because the git-index
 //! transaction tables live in the daemon `RegisteredGlobalDb`, not in the runtime crate's
-//! writer ledger. This executor answers that family here — the mirror image of
+//! writer ledger. This executor answers that family here, the mirror image of
 //! how [`EffectsLedgerReadExecutor`](tracedecay_rusqlite_runtime) answers the
 //! effects family in the runtime crate, where those tables happen to live.
 //!
@@ -32,7 +32,6 @@ pub struct GitIndexReadExecutor<'store, 'db> {
 }
 
 impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
-    #[hotpath::skip]
     pub const fn new(store: &'store GlobalDbGitIndexTransactionStore<'db>) -> Self {
         Self { store }
     }
@@ -69,7 +68,6 @@ impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
     /// idempotency key. The store returns the whole recovery set (bounded by the
     /// number of active transactions, not the repository's full history); the
     /// walk is applied here so the contract cursor stays store-neutral.
-    #[hotpath::skip]
     async fn recovery_candidates(
         &self,
         query: &CodeRecoveryCandidatesQueryV1,
@@ -90,7 +88,6 @@ impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
 
     /// Keyset page over the repositories that hold recovery records, ordered by
     /// repository id.
-    #[hotpath::skip]
     async fn recovery_repositories(
         &self,
         query: &CodeRecoveryRepositoriesQueryV1,

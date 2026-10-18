@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_domain::ObservationSourceCursorV1;
 
 use super::{DurabilityClassV1, StoreIncarnationV1};
+use crate::observation::CursorAdvanceLedgerDisagreementV1;
 
 /// Validation failures for pure runtime contract DTOs.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -57,7 +59,7 @@ pub enum StorageRuntimeContractErrorV1 {
     IdempotencyConflict,
     #[error("repository payload for {payload} failed its owning store contract")]
     InvalidRepositoryPayload { payload: &'static str },
-    #[error("{field} does not bind to the request or effect identity")]
+    #[error("{field} does not bind to the request identity")]
     ReceiptBindingMismatch { field: &'static str },
     #[error("{field} is not a valid lease interval")]
     InvalidLeaseInterval { field: &'static str },
@@ -70,17 +72,6 @@ pub enum StorageRuntimeContractErrorV1 {
     ReaderHealthLaneRequired,
     #[error("runtime batch is incompatible at {field}")]
     BatchIncompatible { field: &'static str },
-    #[error("invalid effect state transition from {from} to {to}")]
-    InvalidEffectTransition {
-        from: &'static str,
-        to: &'static str,
-    },
-    #[error("an acknowledged outbox entry requires a typed acknowledgment receipt")]
-    AcknowledgementReceiptRequired,
-    #[error("authority epoch mismatch for {side} effect sink")]
-    EffectEpochMismatch { side: &'static str },
-    #[error("store incarnation mismatch for {side} effect sink")]
-    EffectIncarnationMismatch { side: &'static str },
     #[error("{field} has an unexpected store incarnation")]
     IncarnationMismatch {
         field: &'static str,
@@ -106,6 +97,9 @@ pub enum UnavailableReasonV1 {
     Draining,
     Maintenance,
     Faulted,
+    /// The store's file was unlinked or replaced under the runtime, which
+    /// closed every connection to it.
+    FileLost,
     SnapshotExpired,
     SnapshotNotRetained,
     WatermarkNotReached,
@@ -144,7 +138,8 @@ pub enum RuntimeCancellationStageV1 {
 ///
 /// Expected admission, interruption, fencing, consistency, and unsupported
 /// decisions belong in submit outcomes or read coverage. This error channel is
-/// reserved for infrastructure failure and detected corruption.
+/// reserved for infrastructure failure, detected corruption, and the two
+/// observation-writer refusals that callers must classify structurally.
 #[derive(Clone, Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StorageRuntimeErrorV1 {
@@ -152,6 +147,17 @@ pub enum StorageRuntimeErrorV1 {
     Infrastructure { operation: String },
     #[error("storage corruption detected: {class:?}")]
     Corrupt { class: CorruptionClassV1 },
+    #[error("observation source cursor conflict: expected {expected:?}, found {actual:?}")]
+    ObservationSourceCursorConflict {
+        expected: Box<Option<ObservationSourceCursorV1>>,
+        actual: Box<Option<ObservationSourceCursorV1>>,
+    },
+    #[error("observation cursor advance receipt collided with different contents")]
+    ObservationCursorAdvanceCollision,
+    #[error("observation cursor-advance ledger disagrees with immutable coverage")]
+    ObservationCursorAdvanceLedgerDisagreement {
+        disagreement: Box<CursorAdvanceLedgerDisagreementV1>,
+    },
+    #[error("duplicate operation {operation_id} is already in the persistent writer")]
+    DuplicateOperationInFlight { operation_id: String },
 }
-
-pub type StorageRuntimeResultV1<T> = Result<T, StorageRuntimeErrorV1>;

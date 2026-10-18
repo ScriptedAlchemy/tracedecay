@@ -1,0 +1,1411 @@
+use tracedecay_code_extraction::LanguageExtractor;
+use tracedecay_code_extraction::TypeScriptExtractor;
+use tracedecay_domain::*;
+
+include!("support/calls.rs");
+include!("support/edges.rs");
+
+#[test]
+fn test_ts_file_node_is_root() {
+    let source = r#"function main() {}"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("test.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let files: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::File)
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "test.ts");
+    assert_eq!(files[0].visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_ts_exported_function_is_pub() {
+    let source = r#"
+export function greet(name: string): string {
+    return "Hello, " + name;
+}
+
+function internal(): void {}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("greet.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    assert_eq!(fns.len(), 2);
+    let greet_fn = fns.iter().find(|f| f.name == "greet").unwrap();
+    assert_eq!(greet_fn.visibility, Visibility::Pub);
+    let internal_fn = fns.iter().find(|f| f.name == "internal").unwrap();
+    assert_eq!(internal_fn.visibility, Visibility::Private);
+}
+
+#[test]
+fn test_ts_empty_jsdoc_comment_does_not_panic() {
+    let source = r#"
+/**/
+export function documented(): void {}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("empty-jsdoc.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let function = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Function && n.name == "documented")
+        .expect("function should be extracted");
+    assert_eq!(function.docstring.as_deref(), Some(""));
+}
+
+#[test]
+fn test_ts_anonymous_generator_method_does_not_panic() {
+    let source = r#"
+class C {
+    *() {}
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor
+        .extract_artifact("anonymous-generator-method.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Method && n.name == "<anonymous>")
+    );
+}
+
+#[test]
+fn test_ts_empty_decorator_name_does_not_panic() {
+    let source = r#"
+@(() => {})
+class C {}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor
+        .extract_artifact("empty-decorator.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert!(
+        result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Class && n.name == "C")
+    );
+}
+
+#[test]
+fn test_ts_arrow_function() {
+    let source = r#"
+const add = (a: number, b: number): number => a + b;
+
+export const multiply = (a: number, b: number) => {
+    return a * b;
+};
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("arrow.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let arrows: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::ArrowFunction)
+        .collect();
+    assert_eq!(arrows.len(), 2);
+    let add = arrows.iter().find(|f| f.name == "add").unwrap();
+    assert_eq!(add.visibility, Visibility::Private);
+    let multiply = arrows.iter().find(|f| f.name == "multiply").unwrap();
+    assert_eq!(multiply.visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_ts_class_with_methods() {
+    let source = r#"
+export class MyClass {
+    private name: string;
+    public age: number;
+
+    constructor(name: string) {
+        this.name = name;
+    }
+
+    getName(): string {
+        return this.name;
+    }
+
+    private helper(): void {}
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("class.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    // Check class
+    let classes: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class)
+        .collect();
+    assert_eq!(classes.len(), 1);
+    assert_eq!(classes[0].name, "MyClass");
+    assert_eq!(classes[0].visibility, Visibility::Pub);
+
+    // Check methods
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 2); // getName + helper
+    let get_name = methods.iter().find(|m| m.name == "getName").unwrap();
+    assert_eq!(get_name.visibility, Visibility::Pub); // no modifier = public
+    let helper = methods.iter().find(|m| m.name == "helper").unwrap();
+    assert_eq!(helper.visibility, Visibility::Private);
+
+    // Check constructor
+    let constructors: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Constructor)
+        .collect();
+    assert_eq!(constructors.len(), 1);
+
+    // Check fields
+    let fields: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Field)
+        .collect();
+    assert_eq!(fields.len(), 2);
+    let name_field = fields.iter().find(|f| f.name == "name").unwrap();
+    assert_eq!(name_field.visibility, Visibility::Private);
+    let age_field = fields.iter().find(|f| f.name == "age").unwrap();
+    assert_eq!(age_field.visibility, Visibility::Pub);
+
+    // Check Contains edges: class -> methods/fields
+    let class_id = &classes[0].id;
+    let contains_edges: Vec<_> = result
+        .edges
+        .iter()
+        .filter(|e| e.source == *class_id && e.kind == EdgeKind::Contains)
+        .collect();
+    // Should contain: constructor, getName, helper, name field, age field
+    assert_eq!(contains_edges.len(), 5);
+}
+
+#[test]
+fn test_ts_interface() {
+    let source = r#"
+export interface Printable {
+    print(): void;
+    toString(): string;
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("iface.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let interfaces: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Interface)
+        .collect();
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].name, "Printable");
+    assert_eq!(interfaces[0].visibility, Visibility::Pub);
+
+    // Check interface methods
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 2);
+}
+
+#[test]
+fn test_ts_enum() {
+    let source = r#"
+export enum Color {
+    Red,
+    Green,
+    Blue
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("color.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let enums: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Enum)
+        .collect();
+    assert_eq!(enums.len(), 1);
+    assert_eq!(enums[0].name, "Color");
+    assert_eq!(enums[0].visibility, Visibility::Pub);
+
+    // Check enum variants
+    let variants: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::EnumVariant)
+        .collect();
+    assert_eq!(variants.len(), 3);
+    assert!(variants.iter().any(|v| v.name == "Red"));
+    assert!(variants.iter().any(|v| v.name == "Green"));
+    assert!(variants.iter().any(|v| v.name == "Blue"));
+}
+
+#[test]
+fn test_ts_import_export() {
+    let source = r#"
+import { foo, bar } from './utils';
+import * as path from 'path';
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("imports.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let uses: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Use)
+        .collect();
+    assert_eq!(uses.len(), 2);
+    assert!(uses.iter().any(|u| u.name == "./utils"));
+    assert!(uses.iter().any(|u| u.name == "path"));
+
+    // Check unresolved Uses references
+    let use_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Uses)
+        .collect();
+    assert_eq!(use_refs.len(), 2);
+}
+
+#[test]
+fn test_ts_import_type_does_not_pollute_unresolved_refs_with_dependency_candidates() {
+    let source = r#"
+import type { Foo, Bar as Baz } from "pkg";
+import { localThing } from "./local";
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("imports.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let use_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Uses)
+        .collect();
+
+    assert!(
+        !use_refs
+            .iter()
+            .any(|r| r.reference_name.starts_with("npm:")),
+        "dependency candidates should not be encoded as unresolved refs: {use_refs:#?}"
+    );
+}
+
+#[test]
+fn test_ts_async_function() {
+    let source = r#"
+export async function fetchData(url: string): Promise<string> {
+    const response = await fetch(url);
+    return response.text();
+}
+
+function syncHelper(): void {}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("async.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    let fetch_fn = fns.iter().find(|f| f.name == "fetchData").unwrap();
+    assert!(fetch_fn.is_async, "fetchData should be async");
+    let sync_fn = fns.iter().find(|f| f.name == "syncHelper").unwrap();
+    assert!(!sync_fn.is_async, "syncHelper should not be async");
+}
+
+#[test]
+fn test_ts_decorator() {
+    let source = r#"
+@Injectable()
+class Service {
+    getData(): string { return "data"; }
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("service.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let decorators: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Decorator)
+        .collect();
+    assert_eq!(decorators.len(), 1);
+    assert_eq!(decorators[0].name, "Injectable");
+
+    // Check Annotates edge
+    let annotates: Vec<_> = result
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Annotates)
+        .collect();
+    assert_eq!(annotates.len(), 1);
+
+    // The Annotates edge should point to the class
+    let classes: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class)
+        .collect();
+    assert_eq!(annotates[0].target, classes[0].id);
+}
+
+#[test]
+fn test_ts_field_decorator_annotates_the_field() {
+    let source = r#"
+class Card {
+    @Input() name: string;
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("card.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [("Input", "name")]
+    );
+    assert_eq!(
+        calls_by_owner(&result),
+        [("field", "name", 2, vec!["Input"])]
+    );
+}
+
+#[test]
+fn test_ts_namespace() {
+    let source = r#"
+namespace MyNamespace {
+    export function inner(): void {}
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("ns.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let namespaces: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Namespace)
+        .collect();
+    assert_eq!(namespaces.len(), 1);
+    assert_eq!(namespaces[0].name, "MyNamespace");
+
+    // Check that inner function is inside the namespace
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    assert_eq!(fns.len(), 1);
+    assert_eq!(fns[0].name, "inner");
+    assert_eq!(fns[0].visibility, Visibility::Pub); // exported from namespace
+}
+
+#[test]
+fn test_ts_exported_nested_and_module_namespaces() {
+    let source = r#"
+export namespace Outer {
+    function hidden(): void {}
+    export namespace Inner {
+        export function deep(): void {}
+    }
+}
+module Legacy {
+    export function old(): void {}
+}
+namespace A.B {
+    export function dotted(): void {}
+}
+"#;
+    let result = TypeScriptExtractor.extract_artifact("ns.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let mut functions: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .map(|n| (n.qualified_name.as_str(), n.visibility.clone()))
+        .collect();
+    functions.sort_by_key(|(name, _)| *name);
+    assert_eq!(
+        functions,
+        [
+            ("ns.ts::A::B::dotted", Visibility::Pub),
+            ("ns.ts::Legacy::old", Visibility::Pub),
+            ("ns.ts::Outer::Inner::deep", Visibility::Pub),
+            ("ns.ts::Outer::hidden", Visibility::Private),
+        ]
+    );
+}
+
+#[test]
+fn test_ts_jsdoc_docstring() {
+    let source = r#"
+/** Adds two numbers together. */
+function add(a: number, b: number): number {
+    return a + b;
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("doc.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    assert_eq!(fns.len(), 1);
+    let docstring = fns[0].docstring.as_ref().expect("should have docstring");
+    assert!(
+        docstring.contains("Adds two numbers together"),
+        "docstring should contain the JSDoc text, got: {docstring}"
+    );
+}
+
+#[test]
+fn test_ts_jsdoc_on_exported_function() {
+    let source = r#"
+/** Greets someone by name. */
+export function greet(name: string): string {
+    return "Hello, " + name;
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("doc_export.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    assert_eq!(fns.len(), 1);
+    let docstring = fns[0]
+        .docstring
+        .as_ref()
+        .expect("exported function should have docstring");
+    assert!(
+        docstring.contains("Greets someone by name"),
+        "docstring should contain the JSDoc text, got: {docstring}"
+    );
+}
+
+#[test]
+fn test_ts_call_site_tracking() {
+    let source = r#"
+function greet(name: string): void {
+    console.log("Hello", name);
+}
+
+function main(): void {
+    greet("world");
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("calls.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let call_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .collect();
+    let callees: Vec<&str> = call_refs
+        .iter()
+        .map(|r| r.reference_name.as_str())
+        .collect();
+    assert_eq!(callees, ["console.log", "greet"]);
+}
+
+#[test]
+fn test_ts_type_alias() {
+    let source = r#"
+export type StringOrNum = string | number;
+type ID = string;
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("types.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let aliases: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::TypeAlias)
+        .collect();
+    assert_eq!(aliases.len(), 2);
+    let son = aliases.iter().find(|a| a.name == "StringOrNum").unwrap();
+    assert_eq!(son.visibility, Visibility::Pub);
+    let id_type = aliases.iter().find(|a| a.name == "ID").unwrap();
+    assert_eq!(id_type.visibility, Visibility::Private);
+}
+
+#[test]
+fn test_ts_class_extends_implements() {
+    let source = r#"
+interface Printable {
+    print(): void;
+}
+
+class Base {}
+
+export class Child extends Base implements Printable {
+    print(): void {}
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("inherit.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    // Check for Extends unresolved ref
+    let extends_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Extends)
+        .collect();
+    assert!(extends_refs.iter().any(|r| r.reference_name == "Base"));
+
+    // Check for Implements unresolved ref
+    let impl_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Implements)
+        .collect();
+    assert!(impl_refs.iter().any(|r| r.reference_name == "Printable"));
+}
+
+#[test]
+fn test_ts_contains_edges() {
+    let source = r#"
+function foo(): void {}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("edges.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let file_node = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::File)
+        .unwrap();
+    let fn_node = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Function)
+        .unwrap();
+
+    let contains = result
+        .edges
+        .iter()
+        .find(|e| e.source == file_node.id && e.target == fn_node.id);
+    assert!(
+        contains.is_some(),
+        "File should contain the function via Contains edge"
+    );
+    assert_eq!(contains.unwrap().kind, EdgeKind::Contains);
+}
+
+#[test]
+fn test_js_file_uses_js_grammar() {
+    let source = r#"
+/** Adds two numbers */
+function add(a, b) {
+    return a + b;
+}
+
+export default class Foo {
+    bar() { return 1; }
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("test.js", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    assert_eq!(fns.len(), 1);
+    assert_eq!(fns[0].name, "add");
+
+    let classes: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class)
+        .collect();
+    assert_eq!(classes.len(), 1);
+    assert_eq!(classes[0].name, "Foo");
+    assert_eq!(classes[0].visibility, Visibility::Pub); // exported
+
+    // Methods
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 1);
+    assert_eq!(methods[0].name, "bar");
+}
+
+#[test]
+fn test_ts_unknown_language_key_surfaces_parse_error() {
+    let extractor = TypeScriptExtractor;
+    let result = extractor
+        .extract_artifact("test.definitely-not-registered", "const value = 1;")
+        .result;
+
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|err| err.contains("unknown language key 'definitely-not-registered'")),
+        "unknown TypeScript provider keys should be returned as parse errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.nodes.is_empty(),
+        "parse errors should stop extraction before creating graph nodes"
+    );
+}
+
+#[test]
+fn test_ts_jsx_file() {
+    let source = r#"
+import React from 'react';
+
+export function App() {
+    return <div>Hello</div>;
+}
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("app.jsx", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    assert!(
+        fns.iter().any(|f| f.name == "App"),
+        "should extract App function from JSX"
+    );
+}
+
+#[test]
+fn test_ts_tsx_file() {
+    let source = r#"
+import React from 'react';
+
+interface Props {
+    name: string;
+}
+
+export const Greeting: React.FC<Props> = ({ name }) => {
+    return <div>Hello, {name}</div>;
+};
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("greeting.tsx", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let interfaces: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Interface)
+        .collect();
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].name, "Props");
+
+    // Arrow function component
+    let arrows: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::ArrowFunction)
+        .collect();
+    assert_eq!(arrows.len(), 1);
+    assert_eq!(arrows[0].name, "Greeting");
+    assert_eq!(arrows[0].visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_js_commonjs_exports_are_public_consts() {
+    let babel = r#"
+module.exports = {
+  presets: ["@babel/preset-env", "@babel/preset-react"],
+  plugins: ["@babel/plugin-transform-runtime"]
+};
+"#;
+    let babel_result = TypeScriptExtractor
+        .extract_artifact("babel.config.js", babel)
+        .result;
+    assert!(
+        babel_result.errors.is_empty(),
+        "errors: {:?}",
+        babel_result.errors
+    );
+    let babel_consts: Vec<_> = babel_result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .collect();
+    assert_eq!(babel_consts.len(), 1, "{:?}", babel_result.nodes);
+    assert_eq!(babel_consts[0].name, "module.exports");
+    assert_eq!(babel_consts[0].visibility, Visibility::Pub);
+    assert!(
+        !babel_result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::InitBlock),
+        "an object-only CommonJS export must not need a <module> init block: {:?}",
+        babel_result.nodes
+    );
+
+    let named = r#"
+exports.presets = ["@babel/preset-env"];
+module.exports.plugins = [];
+"#;
+    let named_result = TypeScriptExtractor
+        .extract_artifact("named-exports.js", named)
+        .result;
+    assert!(
+        named_result.errors.is_empty(),
+        "errors: {:?}",
+        named_result.errors
+    );
+    let mut named_consts: Vec<_> = named_result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .map(|n| n.name.as_str())
+        .collect();
+    named_consts.sort_unstable();
+    assert_eq!(
+        named_consts,
+        ["exports.presets", "module.exports.plugins"],
+        "{:?}",
+        named_result.nodes
+    );
+
+    let comments = "// leftover scratch, no declarations\n";
+    let comments_result = TypeScriptExtractor
+        .extract_artifact("scratch.js", comments)
+        .result;
+    assert!(
+        comments_result.errors.is_empty(),
+        "errors: {:?}",
+        comments_result.errors
+    );
+    assert!(
+        !comments_result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Const),
+        "comment-only JavaScript must not grow a fake export: {:?}",
+        comments_result.nodes
+    );
+}
+
+#[test]
+fn test_ts_const_declaration() {
+    let source = r#"
+export const MAX_SIZE = 1024;
+const SECRET = "hidden";
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("consts.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let consts: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .collect();
+    assert_eq!(consts.len(), 2);
+    let max = consts.iter().find(|c| c.name == "MAX_SIZE").unwrap();
+    assert_eq!(max.visibility, Visibility::Pub);
+    let secret = consts.iter().find(|c| c.name == "SECRET").unwrap();
+    assert_eq!(secret.visibility, Visibility::Private);
+}
+
+#[test]
+fn test_ts_async_arrow_function() {
+    let source = r#"
+const fetchData = async (url: string) => {
+    return await fetch(url);
+};
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("async_arrow.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let arrows: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::ArrowFunction)
+        .collect();
+    assert_eq!(arrows.len(), 1);
+    assert_eq!(arrows[0].name, "fetchData");
+    assert!(arrows[0].is_async, "fetchData arrow should be async");
+}
+
+// ── Test-framework attribution (describe/it/test) ───────────────────────────
+
+/// Helper: collect Function nodes emitted for a source.
+fn ts_functions(result: &ExtractionResult) -> Vec<&Node> {
+    result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect()
+}
+
+/// Helper: does any Calls unresolved ref from `from_id` target `name`?
+fn has_call_ref(result: &ExtractionResult, from_id: &str, name: &str) -> bool {
+    result.unresolved_refs.iter().any(|r| {
+        r.reference_kind == EdgeKind::Calls && r.from_node_id == from_id && r.reference_name == name
+    })
+}
+
+/// Helper: find a Contains edge source->target.
+fn has_contains(result: &ExtractionResult, source: &str, target: &str) -> bool {
+    result
+        .edges
+        .iter()
+        .any(|e| e.kind == EdgeKind::Contains && e.source == source && e.target == target)
+}
+
+#[test]
+fn test_ts_describe_it_creates_function_named_by_title_with_calls() {
+    // Nested describe > describe > it, where it() calls an imported function.
+    let source = r#"
+import { add } from "./math";
+
+describe('math', () => {
+  describe('add', () => {
+    it('adds two numbers', () => {
+      const result = add(1, 2);
+    });
+  });
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("math.test.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns = ts_functions(&result);
+    // Three test nodes: the two describes and the it.
+    let describe_math = fns
+        .iter()
+        .find(|f| f.name == "math")
+        .expect("math describe");
+    let describe_add = fns.iter().find(|f| f.name == "add").expect("add describe");
+    let it_node = fns
+        .iter()
+        .find(|f| f.name == "adds two numbers")
+        .expect("it title node");
+
+    // The it-callback's call site is attributed to the it node, not the describe.
+    assert!(
+        has_call_ref(&result, &it_node.id, "add"),
+        "it node should have a Calls ref to add; refs: {:?}",
+        result.unresolved_refs
+    );
+
+    // Contains chain: math > add > it.
+    assert!(
+        has_contains(&result, &describe_math.id, &describe_add.id),
+        "math describe should contain add describe"
+    );
+    assert!(
+        has_contains(&result, &describe_add.id, &it_node.id),
+        "add describe should contain the it node"
+    );
+
+    // The test nodes are marked public/callable.
+    assert_eq!(it_node.visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_ts_helper_inside_describe_is_extracted() {
+    let source = r#"
+describe('suite', () => {
+  function makeUser(name: string) {
+    return build(name);
+  }
+  it('uses helper', () => {
+    const u = makeUser('a');
+  });
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("s.test.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    // Helper function inside describe becomes its own Function node.
+    let helper = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name == "makeUser")
+        .expect("makeUser helper node");
+
+    // The helper's own body call (build) is attributed to the helper,
+    // NOT double-counted onto the describe test node.
+    assert!(
+        has_call_ref(&result, &helper.id, "build"),
+        "helper should own its build() call"
+    );
+    let describe = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name == "suite")
+        .expect("suite describe");
+    assert!(
+        !has_call_ref(&result, &describe.id, "build"),
+        "describe should not double-count the helper's build() call"
+    );
+
+    // The it node still captures the makeUser() call site.
+    let it_node = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name == "uses helper")
+        .expect("it node");
+    assert!(has_call_ref(&result, &it_node.id, "makeUser"));
+}
+
+#[test]
+fn test_ts_test_modifiers_and_titles() {
+    let source = r#"
+describe('mods', () => {
+  it.only('focused', () => { focused(); });
+  test.skip('skipped', () => { skipped(); });
+  it.each([1, 2])('param', (n) => { paramd(n); });
+  test.each([1])('curried')('curried title', () => { curriedFn(); });
+  it('async case', async () => { await asyncFn(); });
+  it('expr body', () => exprCall());
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("mods.test.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns = ts_functions(&result);
+    let by_name = |name: &str| fns.iter().find(|f| f.name == name).copied();
+
+    let focused = by_name("focused").expect("it.only title -> focused");
+    assert!(has_call_ref(&result, &focused.id, "focused"));
+
+    let skipped = by_name("skipped").expect("test.skip title -> skipped");
+    assert!(has_call_ref(&result, &skipped.id, "skipped"));
+
+    let param = by_name("param").expect("it.each title -> param");
+    assert!(has_call_ref(&result, &param.id, "paramd"));
+
+    // Curried test.each([...])('title', fn) uses the SECOND arg list's title.
+    let curried = by_name("curried title").expect("curried title node");
+    assert!(has_call_ref(&result, &curried.id, "curriedFn"));
+
+    let async_case = by_name("async case").expect("async case node");
+    assert!(async_case.is_async, "async callback should mark node async");
+    assert!(has_call_ref(&result, &async_case.id, "asyncFn"));
+
+    // Expression-bodied callback still attributes its call.
+    let expr = by_name("expr body").expect("expr body node");
+    assert!(
+        has_call_ref(&result, &expr.id, "exprCall"),
+        "expression-bodied it callback should attribute exprCall"
+    );
+}
+
+#[test]
+fn test_ts_it_todo_has_no_callback_but_creates_node() {
+    let source = r#"
+describe('todos', () => {
+  it.todo('later');
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("todo.test.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    // it.todo has no callback -> a node is still emitted for the title,
+    // but no calls are attributed.
+    let later = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name == "later");
+    assert!(later.is_some(), "it.todo should still emit a titled node");
+}
+
+#[test]
+fn test_ts_function_expression_callback_and_template_title() {
+    let source = r#"
+describe('fnexpr', function () {
+  it(`templated ${'x'} title`, function () { fromFnExpr(); });
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("fnexpr.test.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    // The template-literal title is captured (backticks stripped).
+    let node = ts_functions(&result)
+        .into_iter()
+        .find(|f| f.name.contains("templated"))
+        .expect("templated title node");
+    assert!(has_call_ref(&result, &node.id, "fromFnExpr"));
+}
+
+#[test]
+fn test_ts_expression_bodied_arrow_extracts_calls() {
+    // FIX 3: expression-bodied arrow (no statement_block) still extracts calls.
+    let source = r#"
+export const compute = (x: number) => transform(x);
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract_artifact("compute.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let arrow = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ArrowFunction && n.name == "compute")
+        .expect("compute arrow");
+    assert!(
+        has_call_ref(&result, &arrow.id, "transform"),
+        "expression-bodied arrow should attribute transform() call"
+    );
+}
+
+/// Reduced from a real `test.describe("", ...)` suite.
+#[test]
+fn test_ts_empty_test_title_uses_anonymous_placeholder() {
+    let source = r#"
+import { add } from "./math";
+
+test.describe("", () => {
+  test("adds", () => {
+    add(1, 2);
+  });
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor
+        .extract_artifact("integration/fs-routes-test.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns = ts_functions(&result);
+    assert_eq!(
+        fns.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["<anonymous>", "adds"]
+    );
+    let suite = fns
+        .iter()
+        .find(|f| f.name == "<anonymous>")
+        .expect("empty-titled describe should be named <anonymous>");
+    let inner = fns.iter().find(|f| f.name == "adds").expect("inner test");
+
+    // The anonymous suite is kept, not dropped: its containment and call
+    // attribution are exactly what a titled suite would produce.
+    assert!(
+        has_contains(&result, &suite.id, &inner.id),
+        "anonymous suite should still contain its inner test"
+    );
+    assert!(
+        has_call_ref(&result, &inner.id, "add"),
+        "inner test keeps call attribution; refs: {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// Calls-reference names attributed to the extracted node named `owner`.
+fn calls_from<'a>(result: &'a ExtractionResult, owner: &str) -> Vec<&'a str> {
+    let owner = result
+        .nodes
+        .iter()
+        .find(|node| node.name == owner)
+        .unwrap_or_else(|| panic!("no node named {owner}"));
+    result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls && r.from_node_id == owner.id)
+        .map(|r| r.reference_name.as_str())
+        .collect()
+}
+
+#[test]
+fn test_jsx_calls_in_callbacks_fields_and_initializers_keep_their_owner() {
+    let source = r#"
+var registry = createRegistry();
+
+export function List({ rows }) {
+  return <ul>{rows.map((row) => <Row key={row.id} onPick={() => pick(row)} />)}</ul>;
+}
+
+class Panel {
+  onClose = () => close();
+}
+
+function outer() {
+  function inner() {
+    helperCall();
+  }
+  inner();
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("list.jsx", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    assert_eq!(calls_from(&result, "registry"), ["createRegistry"]);
+    assert_eq!(calls_from(&result, "List"), ["rows.map", "Row", "pick"]);
+    assert_eq!(calls_from(&result, "onClose"), ["close"]);
+    // `inner` is a local binding, not the graph symbol of that name.
+    assert_eq!(calls_from(&result, "outer"), ["helperCall"]);
+}
+
+#[test]
+fn test_module_scope_calls_belong_to_module_init_blocks_and_declarations() {
+    let source = r#"import { render } from "./render";
+
+createRoot(document.body).render(<App />);
+
+if (import.meta.env.DEV) {
+  enableDevtools();
+}
+
+export default defineConfig({ plugins: [react()] });
+
+@Component({ selector: "panel" })
+abstract class Panel {
+  static {
+    register(Panel);
+  }
+  abstract draw(): void;
+  @memo()
+  paint(size = defaultSize()) {
+    paintAll(size);
+  }
+}
+
+enum Size {
+  Small = compute(),
+}
+
+namespace Setup {
+  configure();
+}
+
+describe("panel", () => {
+  it("paints", () => {
+    expect(paint()).toBe(true);
+  });
+});
+
+function helper(options = defaults()) {
+  return work(options);
+}
+
+export = createApi();
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("main.tsx", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    assert_eq!(
+        calls_by_owner(&result),
+        [
+            (
+                "init_block",
+                "<module>",
+                2,
+                vec!["createRoot", "createRoot(document.body).render", "App"]
+            ),
+            ("init_block", "<module>", 4, vec!["enableDevtools"]),
+            ("init_block", "<module>", 8, vec!["defineConfig", "react"]),
+            ("class", "Panel", 11, vec!["Component", "register", "memo"]),
+            ("method", "paint", 17, vec!["defaultSize", "paintAll"]),
+            ("enum", "Size", 22, vec!["compute"]),
+            ("namespace", "Setup", 26, vec!["configure"]),
+            (
+                "function",
+                "paints",
+                31,
+                vec!["expect", "expect(paint()).toBe", "paint"]
+            ),
+            ("function", "helper", 36, vec!["defaults", "work"]),
+            ("init_block", "<module>", 40, vec!["createApi"]),
+        ]
+    );
+}
+
+#[test]
+fn typescript_declaration_line_is_past_its_decorators() {
+    let source = "@Component({})\n\
+class Circle {\n\
+    @Input()\n\
+    r = 1;\n\
+\n\
+    @Memo()\n\
+    @Trace()\n\
+    area(): number { return this.r; }\n\
+\n\
+    name(): string { return \"c\"; }\n\
+}\n";
+    let result = TypeScriptExtractor
+        .extract_artifact("circle.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let lines: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| ["Circle", "r", "area", "name"].contains(&n.name.as_str()))
+        .filter(|n| n.kind != NodeKind::Decorator)
+        .map(|n| (n.name.as_str(), n.start_line, n.attrs_start_line))
+        .collect();
+    // Method decorators are `class_body` siblings of the method; class and
+    // field decorators are leading children of the declaration.
+    assert_eq!(
+        lines,
+        vec![
+            ("Circle", 1, 0),
+            ("r", 3, 2),
+            ("area", 7, 7),
+            ("name", 9, 9)
+        ]
+    );
+}
+
+/// A class method's typed parameter is a Uses site of that type. Missing it
+/// is why callers of a type-imported class stayed empty.
+#[test]
+fn test_ts_typed_parameter_is_a_uses_site() {
+    let source = r#"
+import type { Compiler } from './Compiler';
+export default class JsonpTemplatePlugin {
+    apply(compiler: Compiler) {
+        compiler.run();
+    }
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("JsonpTemplatePlugin.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let uses: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Uses && reference.reference_name == "Compiler"
+        })
+        .collect();
+    assert_eq!(
+        uses.len(),
+        1,
+        "apply(compiler: Compiler) must be a Uses ref: {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// A class that constructs another instance of itself (`new RsdoctorRspackPlugin`
+/// inside `registerChildCompiler`) is still a caller of that class.
+#[test]
+fn test_ts_new_expression_inside_owning_class_is_a_calls_site() {
+    let source = r#"
+export class RsdoctorRspackPlugin {
+  registerChildCompiler() {
+    const childPlugin = new RsdoctorRspackPlugin({});
+    return childPlugin;
+  }
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("packages/core/src/rspack-plugin/plugin.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        calls_from(&result, "registerChildCompiler"),
+        ["RsdoctorRspackPlugin"],
+        "same-class constructor sites must be Calls refs, got {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// `new Foo()` is a call site of `Foo`. Missing it is why callers of a class
+/// stayed empty while the disk still had constructor invocations.
+#[test]
+fn test_ts_new_expression_is_a_calls_site() {
+    let source = r#"
+export class URLImportPlugin {}
+
+export function build() {
+    return new URLImportPlugin();
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("factory.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        calls_from(&result, "build"),
+        ["URLImportPlugin"],
+        "constructor sites must be Calls refs, got {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// CommonJS factory files construct plugins at module scope, not inside a
+/// named function. The module-scope owner must still keep the `new`.
+#[test]
+fn test_js_module_scope_new_expression_is_a_calls_site() {
+    let source = r#"
+const URLImportPlugin = require("../../webpack");
+module.exports = (siteId) => {
+  return new URLImportPlugin({ manifestName: `website-${siteId}` });
+};
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("manual/webpack/webpackConfigFactory.js", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let news = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Calls
+                && reference.reference_name == "URLImportPlugin"
+        })
+        .count();
+    assert_eq!(
+        news, 1,
+        "module-scope new URLImportPlugin must be a Calls ref: {:?}",
+        result.unresolved_refs
+    );
+}

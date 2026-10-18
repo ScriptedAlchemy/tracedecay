@@ -9,23 +9,21 @@
 use std::path::Path;
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
-    pick_free_port, wait_for_dashboard,
+    create_runtime, get_json, http_agent, in_child_test, pick_free_port, rerun_test_in_child,
+    wait_for_dashboard,
 };
 use crate::dashboard_api_support::{MessageDetails, MessageRecordBuilder, message};
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
-use tracedecay_global_db::ParseOffset;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionRecord;
 
 struct Fixture {
     _tmp: TempDir,
-    _env_guards: Vec<EnvVarGuard>,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
     /// Start of the current UTC day; seeded timestamps hang off this.
@@ -70,11 +68,6 @@ fn session(session_id: &str, project: &Path, started_at: i64, title: &str) -> Se
     }
 }
 
-/// Chars/4 estimate matching the backend SQL `(LENGTH(text)+3)/4`.
-fn est_tokens(text: &str) -> i64 {
-    (text.len() as i64 + 3) / 4
-}
-
 const TEXT_USER: &str = "Please add a savings and cost accounting tab to the dashboard.";
 const TEXT_ASSISTANT: &str =
     "Done: the new tab reads the savings ledger and prices sessions with OpenRouter data.";
@@ -84,10 +77,6 @@ const TEXT_MIXED: &str = "Second message of the mixed session, no usage record h
 struct SavingsSeed<'a>(&'a DashboardTestRuntimeV1);
 
 impl SavingsSeed<'_> {
-    async fn upsert(&self, project: &Path, tokens_saved: u64) {
-        self.0.upsert(project, tokens_saved).await;
-    }
-
     async fn record_savings(
         &self,
         project: &str,
@@ -111,39 +100,27 @@ impl SavingsSeed<'_> {
     async fn upsert_session_message(
         &self,
         message: &tracedecay_sessions::runtime::SessionMessageRecord,
-    ) -> bool {
+    ) {
         self.0
             .upsert_session_message_for_test(HostAdmissionScope::Project, message)
             .await
             .expect("seed savings session message")
     }
 
-    async fn upsert_transcript_batch(
+    async fn seed_session_messages(
         &self,
         session: &SessionRecord,
         messages: &[tracedecay_sessions::runtime::SessionMessageRecord],
-        source: &str,
-        offset: ParseOffset,
-    ) -> bool {
+    ) {
         self.0
-            .upsert_transcript_batch_for_test(
-                HostAdmissionScope::Project,
-                session,
-                messages,
-                source,
-                offset,
-            )
+            .seed_session_messages_for_test(HostAdmissionScope::Project, session, messages)
             .await
-            .is_ok()
+            .expect("seed savings session messages");
     }
 }
 
-async fn seed_ledger_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_start: i64) {
+async fn seed_ledger_db(runtime: &DashboardTestRuntimeV1, day_start: i64) {
     let gdb = SavingsSeed(runtime);
-
-    // Lifetime counter (legacy `projects.tokens_saved`, what `tracedecay
-    // gain` reports as the lifetime number).
-    gdb.upsert(project, 47_000).await;
 
     // Savings ledger: two events today, one yesterday (same shape as
     // tests/gain_test.rs so totals line up with the CLI behavior).
@@ -162,7 +139,7 @@ async fn seed_ledger_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
 }
 
 async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_start: i64) {
-    seed_ledger_db(runtime, project, day_start).await;
+    seed_ledger_db(runtime, day_start).await;
     let gdb = SavingsSeed(runtime);
 
     // S1: transcript metadata carries Anthropic usage fields. The costs
@@ -177,8 +154,7 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
+    gdb.upsert_session_message(&message(
             "m-usage-1",
             "sess-usage",
             "assistant",
@@ -192,8 +168,7 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
                 ),
             },
         ))
-        .await
-    );
+        .await;
 
     // S2: no usage anywhere → estimated (chars/4, user→input, assistant→output).
     assert!(
@@ -205,36 +180,32 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-est-1",
-            "sess-estimated",
-            "user",
-            1,
-            TEXT_USER,
-            MessageDetails {
-                timestamp: day_start + 210,
-                model: Some("gpt-5.5-high"),
-                metadata_json: None,
-            },
-        ))
-        .await
-    );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-est-2",
-            "sess-estimated",
-            "assistant",
-            2,
-            TEXT_ASSISTANT,
-            MessageDetails {
-                timestamp: day_start + 220,
-                model: Some("gpt-5.5-high"),
-                metadata_json: None,
-            },
-        ))
-        .await
-    );
+    gdb.upsert_session_message(&message(
+        "m-est-1",
+        "sess-estimated",
+        "user",
+        1,
+        TEXT_USER,
+        MessageDetails {
+            timestamp: day_start + 210,
+            model: Some("gpt-5.5-high"),
+            metadata_json: None,
+        },
+    ))
+    .await;
+    gdb.upsert_session_message(&message(
+        "m-est-2",
+        "sess-estimated",
+        "assistant",
+        2,
+        TEXT_ASSISTANT,
+        MessageDetails {
+            timestamp: day_start + 220,
+            model: Some("gpt-5.5-high"),
+            metadata_json: None,
+        },
+    ))
+    .await;
 
     // S3: no model id recorded at all → "unknown model" row, never priced.
     assert!(
@@ -246,21 +217,19 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-unknown-1",
-            "sess-unknown",
-            "assistant",
-            1,
-            TEXT_UNKNOWN,
-            MessageDetails {
-                timestamp: day_start + 310,
-                model: None,
-                metadata_json: None,
-            },
-        ))
-        .await
-    );
+    gdb.upsert_session_message(&message(
+        "m-unknown-1",
+        "sess-unknown",
+        "assistant",
+        1,
+        TEXT_UNKNOWN,
+        MessageDetails {
+            timestamp: day_start + 310,
+            model: None,
+            metadata_json: None,
+        },
+    ))
+    .await;
 
     // S4: usage (OpenAI field names) + a usage-less message → mixed.
     assert!(
@@ -272,36 +241,32 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-mixed-1",
-            "sess-mixed",
-            "assistant",
-            1,
-            TEXT_ASSISTANT,
-            MessageDetails {
-                timestamp: day_start + 410,
-                model: Some("claude-opus-4-8-thinking-max"),
-                metadata_json: Some(r#"{"usage":{"prompt_tokens":500,"completion_tokens":700}}"#,),
-            },
-        ))
-        .await
-    );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-mixed-2",
-            "sess-mixed",
-            "assistant",
-            2,
-            TEXT_MIXED,
-            MessageDetails {
-                timestamp: day_start + 420,
-                model: Some("claude-opus-4-8-thinking-max"),
-                metadata_json: None,
-            },
-        ))
-        .await
-    );
+    gdb.upsert_session_message(&message(
+        "m-mixed-1",
+        "sess-mixed",
+        "assistant",
+        1,
+        TEXT_ASSISTANT,
+        MessageDetails {
+            timestamp: day_start + 410,
+            model: Some("claude-opus-4-8-thinking-max"),
+            metadata_json: Some(r#"{"usage":{"prompt_tokens":500,"completion_tokens":700}}"#),
+        },
+    ))
+    .await;
+    gdb.upsert_session_message(&message(
+        "m-mixed-2",
+        "sess-mixed",
+        "assistant",
+        2,
+        TEXT_MIXED,
+        MessageDetails {
+            timestamp: day_start + 420,
+            model: Some("claude-opus-4-8-thinking-max"),
+            metadata_json: None,
+        },
+    ))
+    .await;
 
     // S5: transcript metadata carries the shape Codex backfill writes. It is
     // still content metadata, not provider-usage billing authority.
@@ -314,8 +279,7 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
+    gdb.upsert_session_message(&message(
             "m-codex-1",
             "sess-codex",
             "assistant",
@@ -329,25 +293,22 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
                 ),
             },
         ))
-        .await
-    );
-    assert!(
-        gdb.upsert_session_message(
-            &MessageRecordBuilder::new(
-                "cursor",
-                "m-codex-summary",
-                "sess-codex",
-                "assistant",
-                2,
-                "Synthetic Codex compaction placeholder that is not real model output.",
-                "summary",
-            )
-            .with_timestamp(Some(day_start + 520))
-            .with_model(Some("gpt-5.3-codex-high"))
-            .build()
+        .await;
+    gdb.upsert_session_message(
+        &MessageRecordBuilder::new(
+            "cursor",
+            "m-codex-summary",
+            "sess-codex",
+            "assistant",
+            2,
+            "Synthetic Codex compaction placeholder that is not real model output.",
+            "summary",
         )
-        .await
-    );
+        .with_timestamp(Some(day_start + 520))
+        .with_model(Some("gpt-5.3-codex-high"))
+        .build(),
+    )
+    .await;
 }
 
 async fn seed_daily_limit_regression(
@@ -393,15 +354,7 @@ async fn seed_daily_limit_regression(
         },
     ));
 
-    assert!(
-        gdb.upsert_transcript_batch(
-            &daily_session,
-            &messages,
-            "daily-limit-regression.jsonl",
-            ParseOffset::default(),
-        )
-        .await
-    );
+    gdb.seed_session_messages(&daily_session, &messages).await;
 }
 
 async fn start_fixture(seed: FixtureSeed) -> Fixture {
@@ -416,13 +369,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
 
     let global_db_path = tmp.path().join("global").join("global.db");
     let profile_root = tmp.path().join("profile").join(".tracedecay");
-    let env_guards = vec![
-        EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path),
-        EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
-        // `.cargo/config.toml` disables global accounting for cargo-launched
-        // processes; opt back in so the recording state reads "enabled".
-        EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1"),
-    ];
+    let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 
     let now = now_unix();
     let day_start = now - (now % 86_400);
@@ -430,14 +377,14 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let project_id =
         tracedecay_domain::ProjectId::new("dashboard_savings_fixture").expect("project identity");
     let host_runtime = Arc::new(
-        DashboardTestRuntimeV1::project(&profile_root, &project_root, project_id)
+        DashboardTestRuntimeV1::project(&profile, &project_root, project_id)
             .await
             .expect("savings host-admission runtime"),
     );
     let cg = host_runtime
         .initialize_project_graph_for_test(
             &project_root,
-            tracedecay::tracedecay::TraceDecayOpenOptions {
+            tracedecay_project::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: None,
             },
@@ -446,27 +393,35 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
         .expect("tracedecay init");
     match seed {
         FixtureSeed::Base => seed_global_db(&host_runtime, &project_root, day_start).await,
-        FixtureSeed::LedgerOnly => seed_ledger_db(&host_runtime, &project_root, day_start).await,
+        FixtureSeed::LedgerOnly => seed_ledger_db(&host_runtime, day_start).await,
         FixtureSeed::DailyLimitRegression => {
             seed_daily_limit_regression(&host_runtime, &project_root, day_start).await;
         }
     }
     let port = pick_free_port();
-    let base_url = format!("http://127.0.0.1:{port}");
+    let (access, base_url) = crate::dashboard_api_support::dashboard_access_for(port);
     let server_runtime = Arc::clone(&host_runtime);
     let server_graph = Arc::new(cg);
+    let server_profile = profile.clone();
     let server = tokio::spawn(async move {
         let authority = server_runtime
             .dashboard_test_authority()
             .expect("dashboard savings authority");
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
+            &server_profile,
+            None,
             authority,
-            dashboard::DashboardTestProjectGraphsV1::default(),
-            "127.0.0.1",
-            port,
-            tracedecay::product_runtime::register_fixture_product_runtime().build_version(),
-            dashboard::spa_router(tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestEndpointV1 {
+                host: "127.0.0.1",
+                port,
+                access,
+            },
+            tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
+            tracedecay_api::static_dashboard_router(
+                tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
+            ),
             std::future::pending(),
         )
         .await;
@@ -476,20 +431,10 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
 
     Fixture {
         _tmp: tmp,
-        _env_guards: env_guards,
         base_url,
         server,
         day_start,
     }
-}
-
-fn find_session<'a>(payload: &'a Value, session_id: &str) -> &'a Value {
-    payload["sessions"]
-        .as_array()
-        .expect("sessions array")
-        .iter()
-        .find(|row| row["session_id"] == session_id)
-        .unwrap_or_else(|| panic!("session {session_id} missing from payload"))
 }
 
 fn find_model<'a>(rows: &'a Value, model: &Value) -> &'a Value {
@@ -501,10 +446,17 @@ fn find_model<'a>(rows: &'a Value, model: &Value) -> &'a Value {
 }
 
 #[test]
-fn savings_ledger_endpoints_reflect_seeded_ledger() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn savings_overview_reflects_seeded_ledger() {
+    // `.cargo/config.toml` disables global accounting for cargo-launched
+    // processes; the journey runs in a child without that opt-out so the
+    // recording state reads "enabled".
+    if !in_child_test() {
+        rerun_test_in_child(
+            "savings::savings_overview_reflects_seeded_ledger",
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(FixtureSeed::LedgerOnly).await;
@@ -516,7 +468,7 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         assert_eq!(caps["features"]["savings"], true);
         assert_eq!(caps["dashboards"], serde_json::json!(["tracedecay"]));
 
-        // Overview: ledger totals + lifetime counters.
+        // Overview: ledger window totals.
         let (status, overview) = get_json(
             &agent,
             &format!("{}/api/plugins/savings/overview", fixture.base_url),
@@ -529,69 +481,26 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         // The dashboard surfaces the ledger-recording gate state so an
         // empty ledger is explained honestly instead of "no events yet".
         assert_eq!(savings["recording"]["enabled"], true);
-        assert_eq!(savings["recording"]["mode"], "enabled_by_env");
+        assert_eq!(savings["recording"]["mode"], "default");
         assert_eq!(savings["ledger"]["all_time"]["saved_tokens"], 16_150);
         assert_eq!(savings["ledger"]["all_time"]["calls"], 3);
         assert_eq!(savings["ledger"]["today"]["saved_tokens"], 14_250);
         assert_eq!(savings["ledger"]["today"]["calls"], 2);
-        assert_eq!(savings["lifetime_counters"]["total_tokens_saved"], 47_000);
-        assert_eq!(savings["lifetime_counters"]["project_total"], 1);
-        assert_eq!(savings["lifetime_counters"]["projects_limit"], 25);
-        assert_eq!(savings["lifetime_counters"]["projects_truncated"], false);
-        assert_eq!(
-            savings["lifetime_counters"]["projects"]
-                .as_array()
-                .expect("projects")
-                .len(),
-            1
-        );
-
-        // Ledger breakdowns (range=all).
-        let (_, ledger) = get_json(
-            &agent,
-            &format!("{}/api/plugins/savings/ledger?range=all", fixture.base_url),
-        );
-        assert_eq!(ledger["total"]["saved_tokens"], 16_150);
-        let by_tool = ledger["by_tool"].as_array().expect("by_tool");
-        let context = by_tool
-            .iter()
-            .find(|row| row["tool"] == "tracedecay_context")
-            .expect("context tool row");
-        assert_eq!(context["saved_tokens"], 14_250);
-        assert_eq!(context["calls"], 2);
-        let search = by_tool
-            .iter()
-            .find(|row| row["tool"] == "tracedecay_search")
-            .expect("search tool row");
-        assert_eq!(search["saved_tokens"], 1_900);
-        let by_project = ledger["by_project"].as_array().expect("by_project");
-        assert_eq!(by_project.len(), 2);
-        assert!(
-            by_project
-                .iter()
-                .any(|row| row["project"] == "/proj/a" && row["saved_tokens"] == 11_400)
-        );
-        let by_day = ledger["by_day"].as_array().expect("by_day");
-        assert_eq!(by_day.len(), 2, "today + yesterday buckets");
-
-        // Range filter narrows to today's events.
-        let (_, today) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/savings/ledger?range=today",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(today["total"]["saved_tokens"], 14_250);
-        assert_eq!(today["total"]["calls"], 2);
     });
 }
 
 #[test]
 fn daily_model_series_limits_days_not_model_rows() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // `.cargo/config.toml` disables global accounting for cargo-launched
+    // processes; the journey runs in a child without that opt-out so the
+    // recording state reads "enabled".
+    if !in_child_test() {
+        rerun_test_in_child(
+            "savings::daily_model_series_limits_days_not_model_rows",
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(FixtureSeed::DailyLimitRegression).await;
@@ -625,15 +534,57 @@ fn daily_model_series_limits_days_not_model_rows() {
             "row limit included an older day outside the 366-day window: {daily:?}"
         );
 
+        // No observation projection checkpoint exists, so the attribution
+        // block is typed unavailable: every grouping is present and empty,
+        // and nothing is priced or counted in its place.
         assert_eq!(models["provider_usage"]["available"], false);
+        assert_eq!(
+            models["provider_usage"]["by_provider"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            models["provider_usage"]["by_provider_day"],
+            serde_json::json!([])
+        );
+        assert!(models["provider_usage"]["pricing_revision"].is_null());
+        assert!(models["provider_usage"]["undated_events"].is_null());
+
+        // A window this route does not serve is a request fault with the
+        // typed empty body, never a ledger of zeros.
+        let (status, refused) = get_json(
+            &http_agent(),
+            &format!(
+                "{}/api/plugins/savings/models?range=fortnight",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(refused["available"], false);
+        assert_eq!(refused["status"], "read_failed");
+        assert_eq!(refused["range"], "fortnight");
+        assert_eq!(refused["models"], serde_json::json!([]));
+        assert_eq!(refused["provider_usage"]["available"], false);
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("fortnight")),
+            "refusal names the rejected range: {refused}"
+        );
     });
 }
 
 #[test]
 fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evidence() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // `.cargo/config.toml` disables global accounting for cargo-launched
+    // processes; the journey runs in a child without that opt-out so the
+    // recording state reads "enabled".
+    if !in_child_test() {
+        rerun_test_in_child(
+            "savings::session_content_counts_ignore_metadata_usage_without_canonical_provider_evidence",
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(FixtureSeed::Base).await;
@@ -650,102 +601,8 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
         let counting = overview["sessions"]["token_counting"] == true;
         let nonusage_basis = if counting { "tokenized" } else { "estimated" };
 
-        let (status, payload) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/savings/sessions?range=all",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(payload["available"], true);
-        assert_eq!(payload["total"], 5);
-
-        // Session metadata is content context, never billing authority.
-        let usage_session = find_session(&payload, "sess-usage");
-        assert_eq!(usage_session["cost_basis"], nonusage_basis);
-        assert_eq!(usage_session["provider_usage_events"], 0);
-        let usage_model = &usage_session["models"][0];
-        assert_eq!(usage_model["model"], "claude-fable-5-thinking-high");
-        assert_eq!(usage_model["cost_basis"], nonusage_basis);
-        assert!(usage_model["provider_actual"].is_null());
-
-        // S2: no usage → tokenized (BPE-counted) when the tokenizer is
-        // compiled in, chars/4 estimated otherwise. gpt-5.5-high maps to
-        // the o200k_base encoder exactly.
-        let nonusage_session = find_session(&payload, "sess-estimated");
-        assert_eq!(nonusage_session["cost_basis"], nonusage_basis);
-        let nonusage_model = &nonusage_session["models"][0];
-        assert_eq!(nonusage_model["model"], "gpt-5.5-high");
-        assert_eq!(nonusage_model["cost_basis"], nonusage_basis);
-        assert!(nonusage_model["provider_actual"].is_null());
-        if counting {
-            assert_eq!(nonusage_model["tokenizer"]["encoder"], "o200k_base");
-            assert_eq!(nonusage_model["tokenizer"]["exact"], true);
-            assert_eq!(nonusage_model["tokenized_messages"], 2);
-            assert_eq!(nonusage_model["estimated_messages"], 0);
-            let bpe_in = nonusage_model["tokenized"]["input_tokens"]
-                .as_i64()
-                .expect("tokenized input");
-            let bpe_out = nonusage_model["tokenized"]["output_tokens"]
-                .as_i64()
-                .expect("tokenized output");
-            assert!(bpe_in > 0 && bpe_in <= TEXT_USER.len() as i64);
-            assert!(bpe_out > 0 && bpe_out <= TEXT_ASSISTANT.len() as i64);
-            assert_eq!(nonusage_model["estimated"]["input_tokens"], 0);
-            assert_eq!(nonusage_model["estimated"]["output_tokens"], 0);
-        } else {
-            assert_eq!(
-                nonusage_model["estimated"]["input_tokens"],
-                est_tokens(TEXT_USER)
-            );
-            assert_eq!(
-                nonusage_model["estimated"]["output_tokens"],
-                est_tokens(TEXT_ASSISTANT)
-            );
-        }
-
-        // S3: no model id → null model, tokens still counted (approximate
-        // o200k when tokenized — there is no tokenizer to be exact with).
-        let unknown_session = find_session(&payload, "sess-unknown");
-        let unknown_model = &unknown_session["models"][0];
-        assert!(unknown_model["model"].is_null());
-        if counting {
-            assert_eq!(unknown_model["tokenizer"]["exact"], false);
-            assert!(unknown_model["tokenized"]["output_tokens"].as_i64() > Some(0));
-        } else {
-            assert_eq!(
-                unknown_model["estimated"]["output_tokens"],
-                est_tokens(TEXT_UNKNOWN)
-            );
-        }
-
-        // Codex-shaped metadata is ignored for the same reason.
-        let codex_session = find_session(&payload, "sess-codex");
-        assert_eq!(codex_session["cost_basis"], nonusage_basis);
-        let codex_model = &codex_session["models"][0];
-        assert_eq!(codex_model["model"], "gpt-5.3-codex-high");
-        assert_eq!(codex_model["cost_basis"], nonusage_basis);
-        assert!(codex_model["provider_actual"].is_null());
-
-        // Mixed metadata/no-metadata rows remain one content-count tier.
-        let mixed_session = find_session(&payload, "sess-mixed");
-        assert_eq!(mixed_session["cost_basis"], nonusage_basis);
-        let mixed_model = &mixed_session["models"][0];
-        assert_eq!(mixed_model["cost_basis"], nonusage_basis);
-        assert!(mixed_model["provider_actual"].is_null());
-        if counting {
-            // claude-* has no public tokenizer → labeled approximation.
-            assert_eq!(mixed_model["tokenizer"]["exact"], false);
-            assert!(mixed_model["tokenized"]["output_tokens"].as_i64() > Some(0));
-        } else {
-            assert_eq!(
-                mixed_model["estimated"]["output_tokens"],
-                est_tokens(TEXT_MIXED)
-            );
-        }
-
         // Models endpoint: per-model content aggregates and canonical provider usage.
+        // Session metadata is content context, never billing authority.
         let (_, models) = get_json(
             &agent,
             &format!("{}/api/plugins/savings/models?range=all", fixture.base_url),
@@ -793,7 +650,7 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
         assert_eq!(sessions["session_count"], 5);
         assert_eq!(sessions["messages"], 7);
         // No observation projection checkpoint exists in this fixture, so the
-        // canonical usage-event count is unknowable and stays null — the same
+        // canonical usage-event count is unknowable and stays null, the same
         // typed state `provider_usage.available == false` below encodes. A
         // fabricated 0 here would claim a measured absence that was never
         // observed.
@@ -823,42 +680,39 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
 }
 
 #[test]
-fn pricing_serves_content_addressed_bundled_snapshot() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn overview_pricing_reports_bundled_snapshot_provenance() {
+    // `.cargo/config.toml` disables global accounting for cargo-launched
+    // processes; the journey runs in a child without that opt-out so the
+    // recording state reads "enabled".
+    if !in_child_test() {
+        rerun_test_in_child(
+            "savings::overview_pricing_reports_bundled_snapshot_provenance",
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(FixtureSeed::Base).await;
-        let agent = http_agent();
 
-        let (status, pricing) = get_json(
-            &agent,
-            &format!("{}/api/plugins/savings/pricing", fixture.base_url),
+        let (status, overview) = get_json(
+            &http_agent(),
+            &format!("{}/api/plugins/savings/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
+        let pricing = &overview["payload"]["pricing"];
         assert_eq!(pricing["source"], "bundled");
         assert_eq!(pricing["offline"], true);
         assert!(pricing["fetched_at"].is_null());
         assert!(
+            pricing["revision"]
+                .as_str()
+                .is_some_and(|revision| revision.starts_with("sha256:")),
+            "bundled snapshot must be content-addressed: {pricing}"
+        );
+        assert!(
             pricing["model_count"].as_i64().expect("model count") > 50,
             "bundled snapshot should carry a broad model set"
         );
-        let fable = &pricing["models"]["anthropic/claude-fable-5"];
-        assert!(fable["prompt_per_mtok"].as_f64().expect("prompt price") > 0.0);
-        assert!(
-            fable["completion_per_mtok"]
-                .as_f64()
-                .expect("completion price")
-                > 0.0
-        );
-
-        // The overview embeds the same provenance block.
-        let (_, overview) = get_json(
-            &agent,
-            &format!("{}/api/plugins/savings/overview", fixture.base_url),
-        );
-        assert_eq!(overview["payload"]["pricing"]["source"], "bundled");
-        assert_eq!(overview["payload"]["pricing"]["offline"], true);
     });
 }

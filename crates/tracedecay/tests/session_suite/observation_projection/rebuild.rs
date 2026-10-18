@@ -75,20 +75,24 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let anchor_store_id = raw_store_ids_before[0].1;
     let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
-        .execute(
-            "INSERT INTO lcm_summary_nodes (
-                node_id, provider, conversation_id, session_id, depth, summary_text,
-                summary_hash, summary_token_count, source_token_count
+        .execute_batch(
+            "INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES ('summary.rebuild-store-id.anchor', '{}', '{}', 'test');
+             INSERT INTO session_summary_nodes (
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
+                source_horizon_json, created_at
              ) VALUES (
-                'summary.rebuild-store-id', 'claude', 'session-rebuild',
-                'session-rebuild', 0, 'stable raw identity summary', 'hash.fixture', 4, 8
+                'summary.rebuild-store-id', 'session-rebuild', 'claude', 'session-rebuild', 0,
+                'summary.rebuild-store-id.anchor', 'stable raw identity summary',
+                'hash.fixture', 4, 8, '{}', 1
              )",
-            (),
         )
         .unwrap();
     raw_conn
         .execute(
-            "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+            "INSERT INTO session_summary_sources (summary_id, source_kind, source_id, ordinal)
              VALUES ('summary.rebuild-store-id', 'raw_message', ?1, 0)",
             rusqlite::params![anchor_store_id.to_string()],
         )
@@ -118,11 +122,11 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let identity = raw_conn
         .query_row(
             "SELECT source.source_id, lifecycle.current_frontier_store_id
-             FROM lcm_summary_sources AS source
+             FROM session_summary_sources AS source
              JOIN lcm_lifecycle_state AS lifecycle
                ON lifecycle.provider = 'claude'
               AND lifecycle.conversation_id = 'session-rebuild'
-             WHERE source.node_id = 'summary.rebuild-store-id'",
+             WHERE source.summary_id = 'summary.rebuild-store-id'",
             (),
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
@@ -173,7 +177,6 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 0);
     assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 0);
-    assert_eq!(table_count(&tmp, "session_messages_fts").await, 0);
 
     let rebuilt_full = rebuild_projection_to_completion(&store, 3).await;
     assert_eq!(rebuilt_full.projected_rows(), 3);
@@ -181,7 +184,6 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(projection_counts(&tmp).await, (1, 3, 3, 1, 0, 0));
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
     assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 3);
-    assert_eq!(table_count(&tmp, "session_messages_fts").await, 3);
     assert_eq!(
         projected_message_texts(&tmp).await,
         incrementally_projected_texts
@@ -335,8 +337,9 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
             .map(|row| row.6.as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        3,
-        "generation-owned metadata and replacement content retain distinct lineage digests"
+        2,
+        "unchanged content re-observed in a later generation shares its output digest; \
+         replacement content has its own"
     );
     let texts = projected_message_texts(&tmp).await;
     assert_eq!(texts.len(), 1);
@@ -402,7 +405,7 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
             .unwrap()
             .unwrap()
             .observation()
-            .payload()["message"]["id"],
+            .payload()["stable_record_id"],
         "message-alias"
     );
 
@@ -434,14 +437,14 @@ async fn rebuild_preserves_output_referenced_by_another_projector_version() {
     add_other_projector_owner(&tmp, candidate.observation_id()).await;
 
     rebuild_projection_to_completion(&store, 0).await;
-    assert_eq!(table_count(&tmp, "session_messages").await, 1);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
         2
     );
 
     rebuild_projection_to_completion(&store, 1).await;
-    assert_eq!(table_count(&tmp, "session_messages").await, 1);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
         2
@@ -473,14 +476,22 @@ async fn v5_predecessor_cutover_rebuilds_stale_provenance_and_preserves_unrelate
     persist(&store, predecessor.clone(), None).await;
     persist(&store, unrelated.clone(), None).await;
     drain_projection_queue(&store).await;
-    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
+    seed_v5_predecessor_with_stale_split_output(&tmp, predecessor.observation_id());
     add_other_projector_owner(&tmp, unrelated.observation_id()).await;
+    drop(store);
+    drop(runtime);
+    checkpoint_database(&tmp).await;
+
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .expect("v5 projection state must remain admissible for convergence");
 
     let rebuilt = rebuild_projection_to_completion(&store, 2).await;
     assert_eq!(rebuilt.projected_rows(), 2);
     assert_eq!(rebuilt.skipped_observations(), 0);
     assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V5),
         0
     );
     assert_eq!(
@@ -489,6 +500,13 @@ async fn v5_predecessor_cutover_rebuilds_stale_provenance_and_preserves_unrelate
     );
     assert_eq!(projection_owner_count(&tmp, "test-projector-v2"), 1);
     assert_eq!(projected_message_texts(&tmp).await.len(), 2);
+    assert!(
+        projected_message_texts(&tmp)
+            .await
+            .iter()
+            .all(|text| text != "obsolete split projection output"),
+        "v5 outputs retired by the one-row projector must not remain searchable"
+    );
 
     let provenance = projection_provenance_rows(&tmp).await;
     let repeated = rebuild_projection_to_completion(&store, 2).await;
@@ -576,7 +594,7 @@ async fn host_drain_converges_predecessor_before_ordinary_projection_and_is_idem
     persist(&store, predecessor.clone(), None).await;
     persist(&store, unrelated.clone(), None).await;
     drain_projection_queue(&store).await;
-    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
+    seed_v5_predecessor_with_stale_split_output(&tmp, predecessor.observation_id());
     add_other_projector_owner(&tmp, unrelated.observation_id()).await;
 
     let scope = ObservationScopeV1::Profile;
@@ -589,7 +607,7 @@ async fn host_drain_converges_predecessor_before_ordinary_projection_and_is_idem
     assert!(!drained.deferred);
     assert_eq!(drained.projected, 0);
     assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V5),
         0
     );
     assert_eq!(
@@ -597,6 +615,13 @@ async fn host_drain_converges_predecessor_before_ordinary_projection_and_is_idem
         2
     );
     assert_eq!(projection_owner_count(&tmp, "test-projector-v2"), 1);
+    assert!(
+        projected_message_texts(&tmp)
+            .await
+            .iter()
+            .all(|text| text != "obsolete split projection output"),
+        "v5 outputs retired by the one-row projector must not remain searchable"
+    );
 
     let provenance = projection_provenance_rows(&tmp).await;
     let repeated = runtime
@@ -1290,12 +1315,16 @@ async fn cross_provider_projection_duplicate_reorder_conflict_and_restart_are_id
             .persist_observation(conflict_write)
             .await
             .expect_err("{provider}: conflicting identity must fail");
+        // The committed cursor already covers this range, so a conflicting
+        // re-submission is a covered replay: it is indistinguishable from a
+        // stale writer that lost a cursor race, and the typed verdict is the
+        // retryable cursor conflict rather than a terminal content refusal.
         assert!(
             matches!(
                 conflict,
-                tracedecay_store::ObservationStoreError::ObservationCollision { .. }
+                tracedecay_store::ObservationStoreError::CursorConflict { .. }
             ),
-            "{provider}: expected ObservationCollision, got {conflict:?}"
+            "{provider}: expected a retryable CursorConflict, got {conflict:?}"
         );
 
         let reorder_error = store

@@ -2,7 +2,7 @@ import type {
   WorkGraphReadV1,
   WorkGraphVersionEntryV1,
   WorkItemV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkResult } from '../work/workApi.ts';
 
@@ -33,7 +33,7 @@ import type { WorkResult } from '../work/workApi.ts';
  */
 
 /** One handoff, flattened onto the task it belongs to. */
-export interface AgentHandoff {
+interface AgentHandoff {
   readonly handoffId: string;
   readonly taskId: string;
   readonly fromActor: string;
@@ -51,7 +51,7 @@ export interface AgentHandoff {
 }
 
 /** One actor's part in the frontier: what it handed on, and what it was given. */
-export interface AgentHandoffActor {
+interface AgentHandoffActor {
   readonly actor: string;
   readonly handedOff: number;
   readonly received: number;
@@ -62,12 +62,15 @@ export type AgentHandoffReading =
   | { readonly state: 'pending' }
   /** The daemon refused, or answered something this build cannot read. */
   | { readonly state: 'refused'; readonly chip: DomainStateKind; readonly detail: string }
+  /** The selection is authorized and no Work graph exists yet: there is no
+   * frontier to count, and the legal action is creating a task. */
+  | { readonly state: 'absent' }
   /** The graph answered. `handoffs` may be empty, which is a measurement. */
   | {
       readonly state: 'read';
       readonly handoffs: readonly AgentHandoff[];
       readonly actors: readonly AgentHandoffActor[];
-      /** Every task on the version that was read — the population the frontier
+      /** Every task on the version that was read, the population the frontier
        * is a subset of, and the only honest denominator for it. */
       readonly tasksRead: number;
       /** Tasks carrying at least one handoff. */
@@ -86,8 +89,8 @@ export type AgentHandoffReading =
  * The graph version a read carries.
  *
  * `current` and `as_of` answer with one entry. The two timeline modes answer
- * with a series, and this build reads the LAST of them — the newest version in
- * the window — rather than merging entries, because handoffs from two graph
+ * with a series, and this build reads the LAST of them, the newest version in
+ * the window, rather than merging entries, because handoffs from two graph
  * versions summed together would be a frontier that never existed at any one
  * instant. The dashboard only ever asks `current`; the other three are handled
  * because the contract admits them, not because they are requested.
@@ -105,6 +108,8 @@ export function latestGraphEntry(read: WorkGraphReadV1): {
       const entry = read.timeline.entries[read.timeline.entries.length - 1];
       return entry ? { entry, fromTimeline: true } : null;
     }
+    case 'absent':
+      return null;
     default: {
       const unhandled: never = read;
       return unhandled;
@@ -125,7 +130,7 @@ function handoffsOf(item: WorkItemV1): readonly AgentHandoff[] {
 }
 
 /** Who handed what to whom, ranked by how much passed through each actor. */
-export function handoffActors(
+function handoffActors(
   handoffs: readonly AgentHandoff[],
 ): readonly AgentHandoffActor[] {
   const tally = new Map<string, { handedOff: number; received: number }>();
@@ -151,8 +156,8 @@ export function handoffActors(
 /**
  * The frontier, from the Work views read.
  *
- * `undefined` is a read that has not landed — react-query has no data for a
- * query that is still in flight — and is reported as pending rather than as an
+ * `undefined` is a read that has not landed, react-query has no data for a
+ * query that is still in flight, and is reported as pending rather than as an
  * empty frontier, which is the whole point of keeping the two apart.
  */
 export function readHandoffFrontier(
@@ -162,6 +167,7 @@ export function readHandoffFrontier(
   if (result.outcome === 'refused') {
     return { state: 'refused', chip: result.state, detail: result.detail };
   }
+  if (result.value.mode === 'absent') return { state: 'absent' };
   const latest = latestGraphEntry(result.value);
   if (latest === null) {
     return {

@@ -7,7 +7,7 @@
  *
  * A pause takes a round trip, and a reader can change project inside it. The
  * hook derives its key from the scope of the render it last ran in, and React
- * Query calls settlement callbacks from the current options — so unless the
+ * Query calls settlement callbacks from the current options, so unless the
  * dispatch scope is captured when the request goes out, project A's answer
  * settles against project B's key. The two ways that shows up are both here:
  * A's reading written into B's entry, and B's entry invalidated because A's
@@ -156,7 +156,7 @@ describe("a scheduler control answered after the reader changed project", () => 
     // The other half of the same defect: a failed control re-reads, and the
     // re-read must be of the project that was asked, not the one now on
     // screen. `staleTime: Infinity` makes an invalidation observable as the
-    // entry becoming stale — nothing else would mark it so.
+    // entry becoming stale, nothing else would mark it so.
     client.setQueryData(statusKeyFor(PROJECT_A), {
       outcome: "ok",
       data: schedulerBody(false),

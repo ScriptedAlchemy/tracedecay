@@ -4,7 +4,7 @@
  * `expansionTargets` IS the cost of drawing two hops over a one-hop endpoint:
  * how many extra reads the field asks for, and which. Until the backend serves
  * a bounded two-hop neighbourhood there is no server-side contract to hold that
- * to, so it is held here — one read per DISTINCT drawn neighbour, never the
+ * to, so it is held here, one read per DISTINCT drawn neighbour, never the
  * focus, never more than `TRACE_BUDGET.expand`, in the endpoint's own order.
  *
  * Wire-true fixture throughout (`stories/fixtures/data.ts`, mirrored from
@@ -29,7 +29,7 @@ function neighbors(id: string): GraphNeighborsPayloadV1 {
   ).payload;
 }
 
-/** First appearance across both arms, callers first — the endpoint's order. */
+/** First appearance across both arms, callers first, the endpoint's order. */
 function firstSeen(payload: GraphNeighborsPayloadV1, focusId: string): string[] {
   const ids = new Set<string>();
   for (const row of [...payload.callers, ...payload.callees]) {
@@ -57,7 +57,9 @@ describe('expansionTargets', () => {
     // A recursive symbol is a real `calls` row from the focus to itself, so it
     // does appear in these lists.
     const recursive = { ...payload, callers: [{ ...row, id: 'sym-0' }, ...payload.callers] };
-    expect(expansionTargets(recursive, 'sym-0')).not.toContain('sym-0');
+    expect(expansionTargets(recursive, 'sym-0')).toEqual(
+      firstSeen(payload, 'sym-0').slice(0, TRACE_BUDGET.expand),
+    );
   });
 
   it('stops at the stated budget however many neighbours the payload names', () => {

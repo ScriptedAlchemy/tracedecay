@@ -6,7 +6,7 @@ status matrix that flags tools needing investigation (errors, timeouts,
 empty results, performance regressions).
 
 Used as both:
-- **Bug probe.** New language support, new tool, or refactor — re-run the
+- **Bug probe.** New language support, new tool, or refactor, re-run the
   matrix and any regression shows up as a flagged cell.
 - **Benchmark.** Timings per call are logged; the same repos serve as a
   fixed corpus for cross-version perf comparison.
@@ -31,8 +31,8 @@ Each module exposes a `probes_for(discovered)` function that returns
 ## Quick run
 
 ```sh
-# 1. Build the release binary (driver shells out to ../../target/release/tracedecay)
-cargo build -p tracedecay-cli --release --bin tracedecay
+# 1. Build the release binary (driver uses bazel-bin/crates/tracedecay-cli/tracedecay)
+bazel build --config=release //crates/tracedecay-cli:tracedecay
 
 # 2. Run the matrix
 python3 scripts/mcp_probe/probe.py

@@ -1,17 +1,34 @@
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{Confidence, FactCategoryV1, PayloadAccessState};
-use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
+use tracedecay_session_memory::memory::{
+    MemoryApplicationError, ProjectMemoryFactAddRequest, memory_application_error,
+};
 use tracedecay_store::{
     ProjectMemoryFactProjectionV1, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
 };
 
-use crate::application::memory::MemoryApplication;
+use super::normalized_non_empty;
 use crate::automation::lifecycle::AutomationRunControl;
-use crate::errors::{Result, TraceDecayError};
-use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_session_memory::memory::trust::{
+    DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE,
+};
+
+fn map_session_reflector_memory_error(
+    operation: &'static str,
+    error: MemoryApplicationError,
+) -> TraceDecayError {
+    if error.is_cancellation() {
+        return memory_application_error(error);
+    }
+    TraceDecayError::database_operation(operation, error)
+}
 
 pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
@@ -23,7 +40,14 @@ pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     let mut accepted = Vec::new();
     let mut quarantined = Vec::new();
     for proposal in proposals {
-        match validate_fact_candidate(memory, run_control, proposal, &citations).await? {
+        let validated: Pin<Box<dyn Future<Output = Result<FactCandidateValidation>> + Send + '_>> =
+            Box::pin(validate_fact_candidate(
+                memory,
+                run_control,
+                proposal,
+                &citations,
+            ));
+        match validated.await? {
             FactCandidateValidation::Accepted(value) => accepted.push(value),
             FactCandidateValidation::Quarantined(value) => quarantined.push(value),
         }
@@ -281,7 +305,7 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
         .find_exact_fact_by_content(&content, run_control.read_control())
         .await
         .map_err(|error| {
-            TraceDecayError::database_operation(
+            map_session_reflector_memory_error(
                 "validate session reflector exact duplicate through memory authority",
                 error,
             )
@@ -337,7 +361,7 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
         .search_project_memory_facts(query, run_control.read_control())
         .await
         .map_err(|error| {
-            TraceDecayError::database_operation(
+            map_session_reflector_memory_error(
                 "validate session reflector near duplicate through memory authority",
                 error,
             )
@@ -432,14 +456,14 @@ fn session_fact_category(category: &str) -> Option<FactCategoryV1> {
 
 /// Accepts numeric trust in `[0, 1]` plus the `low`/`medium`/`high` bucket
 /// labels models frequently emit despite the numeric prompt instruction.
-/// Buckets map to the representative scores defined next to
-/// [`crate::memory::trust::trust_bucket`], so they cannot drift out of their
+/// Buckets map to the representative scores in
+/// [`tracedecay_session_memory::memory::trust`], so they cannot drift out of their
 /// documented ranges.
 ///
 /// Deliberate decision: the prompt forbids string labels, but they are
 /// accepted defensively rather than rejecting an otherwise valid fact. Note
-/// that the "high" representative can clear automatic-apply thresholds —
-/// this is intentional.
+/// that the "high" representative can clear automatic-apply thresholds.
+/// This is intentional.
 fn candidate_trust_value(value: &Value) -> Option<f64> {
     if let Some(trust) = value.as_f64() {
         return (0.0..=1.0).contains(&trust).then_some(trust);
@@ -544,13 +568,4 @@ fn quarantined_fact_with_validation(
         "reason": reason,
         "validation": validation,
     }))
-}
-
-fn normalized_non_empty(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
 }

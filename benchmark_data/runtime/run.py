@@ -354,27 +354,6 @@ def _run_capture(
     abba_position: int = 0,
 ) -> None:
     scenario, workload = runtime_scenario()
-    try:
-        initialized = subprocess.run(
-            (
-                os.fspath(binary),
-                "init",
-                os.fspath(prepared.project),
-            ),
-            cwd=prepared.project,
-            env=prepared.environment,
-            capture_output=True,
-            check=False,
-            timeout=30.0,
-        )
-    except subprocess.TimeoutExpired as exc:
-        fail(f"fixture enrollment timed out: {exc}")
-    if initialized.returncode != 0:
-        detail = initialized.stderr.decode("utf-8", errors="replace").strip()
-        fail(
-            f"fixture enrollment failed with exit {initialized.returncode}: "
-            f"{detail or 'no stderr'}"
-        )
     run_id = f"run-{uuid.uuid4().hex}"
     capture_id = f"capture-{uuid.uuid4().hex}"
     runtime_identity = prepared.runtime_identity
@@ -419,9 +398,73 @@ def _run_capture(
         termination_grace=1.0,
     )
     with daemon:
-        admission_ns = time.monotonic_ns() - daemon_started_ns
         if daemon.process is None:
             fail("owned daemon process is missing after readiness")
+        try:
+            initialized = subprocess.run(
+                (
+                    os.fspath(binary),
+                    "init",
+                    os.fspath(prepared.project),
+                ),
+                cwd=prepared.project,
+                env=prepared.environment,
+                capture_output=True,
+                check=False,
+                timeout=30.0,
+            )
+        except subprocess.TimeoutExpired as exc:
+            fail(f"fixture enrollment timed out: {exc}")
+        if initialized.returncode != 0:
+            detail = initialized.stderr.decode("utf-8", errors="replace").strip()
+            fail(
+                f"fixture enrollment failed with exit {initialized.returncode}: "
+                f"{detail or 'no stderr'}"
+            )
+        readiness = subprocess.run(
+            (
+                os.fspath(binary),
+                "tool",
+                "tracedecay_status",
+                "--project",
+                os.fspath(prepared.project),
+                "--args",
+                json.dumps(
+                    {
+                        "format": "json",
+                        "wait_for": {"state": "ready", "timeout_ms": 110_000},
+                    },
+                    separators=(",", ":"),
+                ),
+                "--json",
+            ),
+            cwd=prepared.project,
+            env=prepared.environment,
+            capture_output=True,
+            check=False,
+            timeout=120.0,
+        )
+        if readiness.returncode != 0:
+            detail = readiness.stderr.decode("utf-8", errors="replace").strip()
+            fail(
+                "fixture code-index readiness failed with exit "
+                f"{readiness.returncode}: {detail or 'no stderr'}"
+            )
+        try:
+            readiness_document = json.loads(readiness.stdout.strip())
+        except json.JSONDecodeError as exc:
+            fail(f"fixture code-index readiness returned malformed JSON: {exc}")
+        wait_outcome = (
+            readiness_document.get("structuredContent", {})
+            .get("wait", {})
+            .get("outcome")
+        )
+        if wait_outcome != "reached":
+            fail(
+                "fixture code-index readiness returned unexpected wait outcome: "
+                f"{wait_outcome!r}"
+            )
+        admission_ns = time.monotonic_ns() - daemon_started_ns
         resources_before = _process_observations(daemon.process.pid)
         cli_started_ns = time.monotonic_ns()
         try:
@@ -447,10 +490,24 @@ def _run_capture(
             response_document = json.loads(response)
         except json.JSONDecodeError as exc:
             fail(f"tool command returned malformed JSON: {exc}")
-        if expected_symbol not in json.dumps(
-            response_document, ensure_ascii=False, sort_keys=True
+        if response_document.get("isError") is True or "error" in response_document:
+            fail("exact-symbol capture returned a tool error")
+        result = response_document.get("structuredContent")
+        if not isinstance(result, dict):
+            fail("exact-symbol capture returned no structured result")
+        matches = result.get("matches")
+        if (
+            result.get("name") != expected_symbol
+            or result.get("count") != 1
+            or not isinstance(matches, list)
+            or len(matches) != 1
+            or not isinstance(matches[0], dict)
+            or matches[0].get("name") != expected_symbol
+            or matches[0].get("line") != 15
+            or not isinstance(matches[0].get("file"), str)
+            or Path(matches[0]["file"]).parts[-2:] != ("src", "catalog.py")
         ):
-            fail(f"exact-symbol smoke response did not contain {expected_symbol}")
+            fail("exact-symbol capture did not return the fixture definition")
         daemon_survived = daemon.is_alive
         process_count = daemon.evidence.process_count
         resources_after = _process_observations(daemon.process.pid)
@@ -808,10 +865,7 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
             fail(f"incident output already exists: {path}")
     test_binary_sha256 = sha256_file(test_binary)
     captured: list[dict[str, Any]] = []
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         validation = run_host(
             validation_command,
             env=environment,
@@ -991,10 +1045,7 @@ def _capture_diagnostic_flood(args: argparse.Namespace) -> int:
     candidate_id = sha256_file(binary)[:16]
     captured: list[dict[str, Any]] = []
     output.parent.mkdir(parents=True, exist_ok=True)
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         base = prepare_fixture_snapshot(
             workspace.path / "base",
             prebuilt_binary=binary,
@@ -1307,10 +1358,7 @@ def capture_incident(args: argparse.Namespace) -> int:
     candidate_id = sha256_file(binary)[:16]
     captured: list[dict[str, Any]] = []
     output.parent.mkdir(parents=True, exist_ok=True)
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         base = prepare_fixture_snapshot(
             workspace.path / "base",
             prebuilt_binary=binary,
@@ -1584,10 +1632,7 @@ def capture(args: argparse.Namespace) -> int:
         else None
     )
     output.parent.mkdir(parents=True, exist_ok=True)
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         if prepared_source is None:
             prepared = prepare_fixture_snapshot(
                 workspace.path / "fixture",
@@ -1640,10 +1685,7 @@ def paired(args: argparse.Namespace) -> int:
     )
     samples: list[dict[str, Any]] = []
     output.parent.mkdir(parents=True, exist_ok=True)
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         base = prepare_fixture_snapshot(
             workspace.path / "base",
             prebuilt_binary=baseline,

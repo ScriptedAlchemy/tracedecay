@@ -59,12 +59,6 @@ pub struct ScopeRequirement {
 }
 
 impl ScopeRequirement {
-    pub fn none() -> Self {
-        Self {
-            dimensions: Vec::new(),
-        }
-    }
-
     pub fn new(mut dimensions: Vec<ScopeDimension>) -> Result<Self, CatalogValidationError> {
         canonicalize_set(&mut dimensions, "scope dimensions")?;
         Ok(Self { dimensions })
@@ -132,14 +126,47 @@ pub enum EffectClass {
     SourceEdit,
     GitIndexStage,
     GitIndexUnstage,
-    GitIndexCommit,
     ConfigurationWrite,
     Administrative,
+    /// Runs a child process in the project (e.g. the project's test runner).
+    SpawnsProcess,
+    /// Binds a listening server in the daemon process.
+    BindsServer,
+    /// Queues work on a daemon-owned scheduler; the call answers with the
+    /// scheduler's admission, not the finished work.
+    SchedulesWork,
+    /// Maintains bookkeeping the daemon keeps for the project or profile it
+    /// serves: resets a usage counter, records registry token accounting, or
+    /// reconciles automation schedulers with the saved configuration. Each
+    /// write settles within the call and answers its new state.
+    MaintainsOwnerState,
+    /// Reads and rewrites the daemon profile's own state: its project
+    /// registry, accounting ledgers, and session stores. Unlike bookkeeping,
+    /// it includes long work, a registry collection or a transcript import,
+    /// that a cancelled call stops.
+    MaintainsProfileState,
+    /// Records a host's session evidence (transcripts, hook admissions,
+    /// receipts) in daemon-owned session stores.
+    RecordsHostEvidence,
 }
 
 impl EffectClass {
     pub const fn is_effect(self) -> bool {
         !matches!(self, Self::Read | Self::Preview)
+    }
+
+    /// An effect of an owner-served operation that settles within the call:
+    /// it answers with an operation receipt and takes no idempotency key.
+    pub const fn is_owner_side_effect(self) -> bool {
+        matches!(
+            self,
+            Self::SpawnsProcess
+                | Self::BindsServer
+                | Self::SchedulesWork
+                | Self::MaintainsOwnerState
+                | Self::MaintainsProfileState
+                | Self::RecordsHostEvidence
+        )
     }
 
     pub const fn is_read_only(self) -> bool {
@@ -411,6 +438,32 @@ pub enum TerminalState {
     Unavailable,
     EffectUnknown,
     Partial,
+}
+
+impl TerminalState {
+    /// Every terminal state, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::Completed,
+        Self::Cancelled,
+        Self::TimedOut,
+        Self::Failed,
+        Self::Unavailable,
+        Self::EffectUnknown,
+        Self::Partial,
+    ];
+
+    /// The wire name shared by operation receipts and terminal stream events.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Failed => "failed",
+            Self::Unavailable => "unavailable",
+            Self::EffectUnknown => "effect_unknown",
+            Self::Partial => "partial",
+        }
+    }
 }
 
 /// The exhaustive terminal-state set a manifest promises to preserve.
@@ -795,7 +848,21 @@ impl CapabilityManifestV1 {
             );
         }
 
-        if self.effect.is_effect() {
+        if self.effect.is_owner_side_effect() {
+            if self.receipt != ReceiptContract::Operation
+                || self.idempotency != IdempotencyContract::NotRequired
+                || self.reconciliation != ReconciliationContract::NotRequired
+                || !matches!(
+                    self.authority_revalidation,
+                    RevalidationContract::Required { .. }
+                )
+                || self.terminal_states.contains(TerminalState::EffectUnknown)
+            {
+                return Err(self.invalid(
+                    "owner side effects settle within the call: operation receipt, no idempotency key or reconciliation, revalidated authority, and no unknown-effect terminal",
+                ));
+            }
+        } else if self.effect.is_effect() {
             if self.receipt != ReceiptContract::DurableEffect
                 || self.idempotency != IdempotencyContract::Required
                 || self.reconciliation != ReconciliationContract::Required
@@ -870,4 +937,31 @@ pub(crate) fn canonicalize_set<T: Ord>(
         return Err(CatalogValidationError::DuplicateValue { field });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod terminal_state_tests {
+    use super::TerminalState;
+
+    #[test]
+    fn all_lists_every_variant_once_under_its_serialized_name() {
+        for (index, state) in TerminalState::ALL.into_iter().enumerate() {
+            // Exhaustive without a wildcard: a new variant fails to compile here
+            // until it is placed in `ALL`.
+            let position = match state {
+                TerminalState::Completed => 0,
+                TerminalState::Cancelled => 1,
+                TerminalState::TimedOut => 2,
+                TerminalState::Failed => 3,
+                TerminalState::Unavailable => 4,
+                TerminalState::EffectUnknown => 5,
+                TerminalState::Partial => 6,
+            };
+            assert_eq!(position, index);
+            assert_eq!(
+                serde_json::to_value(state).unwrap(),
+                serde_json::Value::String(state.as_str().to_owned())
+            );
+        }
+    }
 }

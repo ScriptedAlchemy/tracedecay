@@ -1,0 +1,29 @@
+{
+  "id": "routing_known_file_read",
+  "category": "routing",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Read Cargo.toml and tell me the package name and edition.",
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states orders_fixture",
+          "pattern": "\\borders_fixture\\b"
+        },
+        {
+          "id": "states 2021",
+          "pattern": "\\b2021\\b"
+        }
+      ]
+    }
+  },
+  "max_tool_calls": 2,
+  "allowed_skills": [],
+  "max_tracedecay_calls": 0
+}

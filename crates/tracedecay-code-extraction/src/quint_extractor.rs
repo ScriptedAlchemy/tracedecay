@@ -19,22 +19,24 @@
 /// sufficient to populate `Module` / `Function` / `Const` / `Static` /
 /// `TypeAlias` nodes and `Contains` edges from each definition to its
 /// enclosing scope.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 
 pub struct QuintExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     errors: Vec<String>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
     /// Nested scopes. The first entry is the file; subsequent entries are
@@ -44,31 +46,24 @@ struct ExtractionState {
     scope_stack: Vec<(String, String, u32)>,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         let file_node_id = generate_node_id(file_path, &NodeKind::File, file_path, 0);
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
             errors: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
             scope_stack: Vec::new(),
         }
     }
 
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
-    }
-
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        self.node_str(node).to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -97,7 +92,7 @@ impl TokenWalker {
         // The `.` operator extends an import path; everything else
         // is a terminator handled below.
         let extends_import =
-            matches!(kind, "identifier") || (kind == "operator" && state.node_str(child) == ".");
+            matches!(kind, "identifier") || (kind == "operator" && state.node_text(child) == ".");
         if !extends_import && let Some((parts, line)) = self.import_collect.take() {
             QuintExtractor::commit_import(state, &parts, line);
         }
@@ -126,7 +121,7 @@ impl TokenWalker {
                 }
             }
             "keyword" => {
-                let text = state.node_str(child);
+                let text = state.node_text(child);
                 if text == "module" {
                     self.pending = Some(PendingKind::Module);
                 } else if text == "import" {
@@ -137,20 +132,20 @@ impl TokenWalker {
             "storage_modifier" => {
                 // `pure` prefixes `def`/`val`; we just keep updating `pending`
                 // until the meaningful storage modifier arrives.
-                if let Some(kind) = quint_storage_kind(state.node_str(child)) {
+                if let Some(kind) = quint_storage_kind(state.node_text(child)) {
                     self.pending = Some(kind);
                 }
             }
             "identifier" => {
                 if let Some((parts, _)) = self.import_collect.as_mut() {
-                    parts.push(state.node_text(child));
+                    parts.push(state.node_text(child).to_string());
                 } else if let Some(pending) = self.pending.take() {
                     let name = state.node_text(child);
-                    let id = QuintExtractor::emit_node(state, child, pending, &name);
+                    let id = QuintExtractor::emit_node(state, child, pending, name);
                     if matches!(pending, PendingKind::Module) {
                         let qualified = match state.scope_stack.last() {
                             Some((qualified_name, _, _)) => format!("{qualified_name}::{name}"),
-                            None => name.clone(),
+                            None => name.to_string(),
                         };
                         self.pending_open = Some((qualified, id));
                     }
@@ -185,27 +180,6 @@ impl TokenWalker {
 }
 
 impl QuintExtractor {
-    pub fn extract_quint(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                // Parse failed; record the error and skip extraction rather
-                // than emitting bogus structure.
-                let start = Instant::now();
-                let mut state = Self::initialize_state(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -213,7 +187,11 @@ impl QuintExtractor {
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
-        let mut state = Self::initialize_state(file_path, source);
+        let mut state = Self::initialize_state(
+            file_path,
+            source,
+            crate::common::file_end_line(source, tree),
+        );
 
         let mut walker = TokenWalker::default();
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
@@ -228,7 +206,11 @@ impl QuintExtractor {
         )
     }
 
-    fn initialize_state(file_path: &str, source: &str) -> ExtractionState {
+    fn initialize_state<'s>(
+        file_path: &str,
+        source: &'s str,
+        end_line: u32,
+    ) -> ExtractionState<'s> {
         let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -238,7 +220,7 @@ impl QuintExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -252,6 +234,7 @@ impl QuintExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -260,10 +243,6 @@ impl QuintExtractor {
             .scope_stack
             .push((file_path.to_string(), state.file_node_id.clone(), 0));
         state
-    }
-
-    fn parse(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("quint", "Quint", source)
     }
 
     fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
@@ -278,7 +257,7 @@ impl QuintExtractor {
 
     /// Joins the collected dotted-path parts and emits a `Uses` edge from
     /// the current scope to a synthetic file node for the imported module.
-    /// `parts` may be empty (e.g. `import` with nothing after it) — in
+    /// `parts` may be empty (e.g. `import` with nothing after it). In
     /// that case nothing is emitted.
     fn commit_import(state: &mut ExtractionState, parts: &[String], line: u32) {
         if parts.is_empty() {
@@ -323,7 +302,7 @@ impl QuintExtractor {
             None => state.file_path.clone(),
         };
         let qualified_name = format!("{parent_qn}::{name}");
-        let id = generate_node_id(&state.file_path, &kind, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, name, ident_node);
 
         let node_obj = Node {
             id: id.clone(),
@@ -347,6 +326,7 @@ impl QuintExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -388,17 +368,16 @@ impl crate::LanguageExtractor for QuintExtractor {
         "Quint"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_quint(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

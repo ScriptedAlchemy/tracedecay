@@ -1,127 +1,46 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{
-    AnchorProvenanceRelationV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    AnchorProvenanceRelation, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CopyProofV1, DurableObservationV1, LogicalCopyRecordV1, ObservationId,
+    CopyProofV1, DurableObservationV1, LogicalCopyRecordV1, MessageOccurrenceIdV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
-    RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, TemporalAssertionKindV1, TemporalValidityV1, UtcMicros,
-    derive_exact_observation_anchor_id,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId,
+    ProjectionOutputOrdinalV1, ProviderId, RetentionClass, RetrievalAnchorId,
+    RetrievalAnchorRecord, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, TemporalAssertionKindV1, TemporalValidityV1,
+    UserProfileId, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjection, ObservationProjectionStore, ObservationStore,
     ObservationWrite, ProjectionSkipReason, ProjectionStoreError,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
-    SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshStore,
-    SessionRefreshTerminalStateV1, SessionStoreError, SessionTemporalProjectionBatchV1,
+    SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshReceiptRequestV1,
+    SessionRefreshStore, SessionRefreshTerminalStateV1, SessionRetrievalStore, SessionStoreError,
+    SessionStoreResult, SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
-use super::persist::persist_occurrences;
 use super::record_canonical_observation_effect;
-use crate::GlobalDbSessionTemporalStore;
 use crate::handle::SessionTemporalRegisteredDb;
+use crate::relations::{SessionRelationProjection, SessionRelationScope};
+use crate::test_support::{FailingRegisteredDb, QueryCountingConnection};
+use crate::{SessionTemporalAccess, SessionTemporalRefreshDiscoveryCursor, SessionTemporalStore};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
     open_registered_test_database_fixture,
 };
+use tracedecay_lcm::retrieval_content::derived_text_for_index;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
-use tracedecay_runtime_core::db::engine::{
-    Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
-};
-
-struct QueryCountingConnection<'a, T> {
-    inner: &'a T,
-    queries: AtomicUsize,
-}
-
-impl<'a, T> QueryCountingConnection<'a, T> {
-    fn new(inner: &'a T) -> Self {
-        Self {
-            inner,
-            queries: AtomicUsize::new(0),
-        }
-    }
-
-    fn query_count(&self) -> usize {
-        self.queries.load(Ordering::Relaxed)
-    }
-}
-
-impl<T: QueryExecutor> QueryExecutor for QueryCountingConnection<'_, T> {
-    async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
-    where
-        P: IntoParams,
-    {
-        self.queries.fetch_add(1, Ordering::Relaxed);
-        self.inner.query(sql, params).await
-    }
-}
-
-impl<T: Executor> Executor for QueryCountingConnection<'_, T> {
-    async fn execute<P>(&self, sql: &str, params: P) -> EngineResult<u64>
-    where
-        P: IntoParams,
-    {
-        self.inner.execute(sql, params).await
-    }
-
-    async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
-        self.inner.execute_batch(sql).await
-    }
-}
-
-impl<T: crate::handle::SessionTemporalQuery> crate::handle::SessionTemporalQuery
-    for QueryCountingConnection<'_, T>
-{
-    fn query<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> impl std::future::Future<Output = Result<Rows, tracedecay_runtime_core::db::engine::Error>> + Send
-    where
-        P: IntoParams + Send,
-    {
-        self.queries.fetch_add(1, Ordering::Relaxed);
-        crate::handle::SessionTemporalQuery::query(self.inner, sql, params)
-    }
-}
-
-impl<T: crate::handle::SessionTemporalExec> crate::handle::SessionTemporalExec
-    for QueryCountingConnection<'_, T>
-{
-    fn execute<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> impl std::future::Future<Output = Result<u64, tracedecay_runtime_core::db::engine::Error>> + Send
-    where
-        P: IntoParams + Send,
-    {
-        crate::handle::SessionTemporalExec::execute(self.inner, sql, params)
-    }
-
-    fn execute_batch(
-        &self,
-        sql: &str,
-    ) -> impl std::future::Future<Output = Result<(), tracedecay_runtime_core::db::engine::Error>> + Send
-    {
-        crate::handle::SessionTemporalExec::execute_batch(self.inner, sql)
-    }
-}
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+use tracedecay_sessions::runtime::user_sessions_db_path;
 
 fn fixture_session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
@@ -129,8 +48,8 @@ fn fixture_session(value: &str) -> SessionId {
 
 fn temporal_store(
     runtime: &HostAdmissionTestRuntimeV1,
-) -> GlobalDbSessionTemporalStore<'_, RegisteredGlobalDb> {
-    GlobalDbSessionTemporalStore::new(
+) -> SessionTemporalStore<'_, RegisteredGlobalDb> {
+    SessionTemporalStore::new(
         runtime
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile session-temporal store"),
@@ -154,7 +73,7 @@ fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
 fn fixture_observation(
     session_id: &SessionId,
     ordinal: u64,
-    lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
+    lineage: Option<(AnchorProvenanceRelation, RetrievalAnchorId)>,
     include_parent: bool,
 ) -> (DurableObservationV1, AnchoredObservationWrite) {
     let provider = ProviderId::new(format!("projector-test-{ordinal}")).unwrap();
@@ -185,53 +104,6 @@ fn fixture_observation(
     )
 }
 
-fn fixture_multi_output_observation(
-    session_id: &SessionId,
-    ordinal: u64,
-    lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
-    output_count: usize,
-) -> (DurableObservationV1, AnchoredObservationWrite) {
-    assert!(output_count > 1);
-    let provider = ProviderId::new("cursor").unwrap();
-    let record_id = ObservationId::new(format!("record.projector.multi.{ordinal}")).unwrap();
-    let relations = CanonicalObservationRelationsV1::new(session_id.clone())
-        .with_thread_id(ObservationId::new("thread.projector.multi").unwrap())
-        .with_turn_id(ObservationId::new("turn.projector.multi").unwrap())
-        .with_message_id(ObservationId::new(format!("message.projector.multi.{ordinal}")).unwrap())
-        .with_agent_id(ObservationId::new("agent.projector.multi").unwrap());
-    let mut facts = vec![
-        CanonicalObservationFactV1::Session {
-            project_path: None,
-            location_path: None,
-            transcript_path: None,
-            title: None,
-            started_at: None,
-            ended_at: None,
-            source: Some("cursor_composer".to_owned()),
-            native_source: None,
-            profile: None,
-            location_provenance: None,
-        },
-        CanonicalObservationFactV1::Message {
-            role: CanonicalMessageRoleV1::Assistant,
-            content: json!({"text": "multi-output primary"}),
-            model: Some("model.projector".to_owned()),
-            timestamp: Some(1_750_000_000 + i64::try_from(ordinal).unwrap()),
-        },
-    ];
-    facts.extend(
-        (1..output_count).map(|index| CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: ObservationId::new(format!("tool.projector.multi.{ordinal}.{index}"))
-                .unwrap(),
-            name: "Read".to_owned(),
-            arguments: json!({"index": index}),
-        }),
-    );
-    fixture_observation_from_facts(
-        session_id, ordinal, provider, record_id, relations, facts, lineage,
-    )
-}
-
 fn fixture_observation_from_facts(
     session_id: &SessionId,
     ordinal: u64,
@@ -239,7 +111,7 @@ fn fixture_observation_from_facts(
     record_id: ObservationId,
     relations: CanonicalObservationRelationsV1,
     facts: Vec<CanonicalObservationFactV1>,
-    lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
+    lineage: Option<(AnchorProvenanceRelation, RetrievalAnchorId)>,
 ) -> (DurableObservationV1, AnchoredObservationWrite) {
     let source =
         ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
@@ -254,6 +126,7 @@ fn fixture_observation_from_facts(
     )
     .unwrap();
     let payload = serde_json::to_value(envelope).unwrap();
+    let receipt_id = format!("receipt.projector.{}", record_id.as_str());
     let identity = ObservationIdentityMaterialV1::for_native_record(
         source,
         ObservationScopeV1::Profile,
@@ -265,7 +138,7 @@ fn fixture_observation_from_facts(
     .unwrap();
     let observation = DurableObservationV1::new(
         identity,
-        fixture_receipt(&format!("receipt.projector.{ordinal}"), &payload),
+        fixture_receipt(&receipt_id, &payload),
         RetentionClass::new("retention.projector-test").unwrap(),
         payload,
     )
@@ -286,7 +159,7 @@ fn fixture_observation_from_facts(
         "projector-test",
     )
     .unwrap();
-    let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+    let anchor = tracedecay_store::build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -301,7 +174,7 @@ fn fixture_observation_from_facts(
             "owner": write.observation().scope(),
         }]);
     }
-    let anchor: RetrievalAnchorRecordV2 = serde_json::from_value(anchor_json).unwrap();
+    let anchor: RetrievalAnchorRecord = serde_json::from_value(anchor_json).unwrap();
     let anchored = AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap();
     (observation, anchored)
 }
@@ -350,7 +223,7 @@ fn fixture_goal_observation() -> (DurableObservationV1, AnchoredObservationWrite
         "projector-test",
     )
     .unwrap();
-    let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+    let anchor = tracedecay_store::build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -436,7 +309,7 @@ async fn ready_single_observation_completion(
     (tmp, runtime, request, generation)
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn checked_in_codex_goal_materializes_one_generation_bound_occurrence() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -488,151 +361,7 @@ async fn checked_in_codex_goal_materializes_one_generation_bound_occurrence() {
     );
 }
 
-#[tokio::test]
-async fn multi_output_projection_reuses_source_derivation_and_activates_shared_anchor_assertions() {
-    const OUTPUT_COUNT: usize = 64;
-
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let store = temporal_store(&runtime);
-    let session_id = fixture_session("session.projector.multi-output");
-    let (first, first_write) = fixture_observation(&session_id, 0, None, false);
-    let first_observation_id = first.observation_id().clone();
-    let first_anchor =
-        derive_exact_observation_anchor_id(first.scope(), first.observation_id()).unwrap();
-    Box::pin(persist_fixture(&runtime, first, first_write)).await;
-    let (multi, multi_write) = fixture_multi_output_observation(
-        &session_id,
-        1,
-        Some((AnchorProvenanceRelationV2::Supersedes, first_anchor)),
-        OUTPUT_COUNT,
-    );
-    let multi_observation_id = multi.observation_id().clone();
-    Box::pin(persist_fixture(&runtime, multi, multi_write)).await;
-
-    let begin = store
-        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
-            session_id.clone(),
-            SessionRefreshFrontierV1::new(2, 0).unwrap(),
-        ))
-        .await
-        .unwrap();
-    let recovery = store
-        .session_refresh_recovery(&session_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let (progress, batch) = store
-        .materialize_session_temporal_refresh_batch_for_test(&recovery)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(batch.occurrences().len(), OUTPUT_COUNT + 1);
-    assert_eq!(batch.assertions().len(), 1);
-    assert_eq!(
-        batch.assertions()[0].kind,
-        TemporalAssertionKindV1::Supersedes
-    );
-
-    let database = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-    let transaction = database.begin_write_transaction().await.unwrap();
-    let effects = [
-        (first_observation_id, 0, 1),
-        (multi_observation_id, 1, OUTPUT_COUNT),
-    ];
-    let (rematerialized_occurrences, materialization_work) =
-        materialize_effect_occurrences(&transaction, &effects, batch.occurrences().len())
-            .await
-            .unwrap();
-    assert_eq!(rematerialized_occurrences.as_slice(), batch.occurrences());
-    assert_eq!(materialization_work.envelope_parses, 2);
-    let (_, relation_assertions, relation_work) = derive_retained_projection_relations(
-        &transaction,
-        &session_id,
-        batch.occurrences(),
-        &ParentMessageResolver::default(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(relation_assertions.len(), 1);
-    assert_eq!(relation_work.envelope_parses, 2);
-    let counted = QueryCountingConnection::new(&transaction);
-    let work = persist_occurrences(&counted, &batch, &ExecutionControl::default())
-        .await
-        .unwrap();
-    assert_eq!(work.source_projections, 2);
-    assert_eq!(work.envelope_parses, 2);
-    assert_eq!(
-        work.indexed_outputs,
-        u64::try_from(batch.occurrences().len()).unwrap()
-    );
-    assert_eq!(
-        work.output_lookups,
-        u64::try_from(batch.occurrences().len()).unwrap()
-    );
-    assert_eq!(
-        materialization_work
-            .envelope_parses
-            .saturating_add(relation_work.envelope_parses)
-            .saturating_add(work.envelope_parses),
-        6
-    );
-    assert!(
-        counted.query_count() <= batch.occurrences().len() + 4,
-        "each occurrence needs one anchor lookup and each of the two source observations needs one observation/effect pair, but persistence ran {} queries for {} occurrences",
-        counted.query_count(),
-        batch.occurrences().len()
-    );
-    // `counted` holds no Drop impl, so dropping it only extends its borrows.
-    drop(transaction);
-
-    store
-        .persist_session_refresh_projection_batch(progress, batch)
-        .await
-        .unwrap();
-    let recovery = store
-        .session_refresh_recovery(&session_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let progress = recovery.progress().unwrap();
-    let request = SessionRefreshCompletionRequestV1::new(
-        begin.operation_id().clone(),
-        session_id.clone(),
-        progress.frontier(),
-        *progress.coverage(),
-    )
-    .unwrap();
-    assert_eq!(
-        store
-            .complete_session_refresh(request, ExecutionControl::default())
-            .await
-            .unwrap()
-            .state(),
-        SessionRefreshTerminalStateV1::Complete
-    );
-    for (kind, expected) in [
-        (
-            SessionTemporalFixtureCountV1::Occurrences,
-            i64::try_from(OUTPUT_COUNT + 1).unwrap(),
-        ),
-        (SessionTemporalFixtureCountV1::Assertions, 1),
-    ] {
-        assert_eq!(
-            runtime
-                .session_temporal_fixture_count_for_test(HostAdmissionScope::Profile, kind)
-                .await
-                .unwrap(),
-            expected
-        );
-    }
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
     let tmp = TempDir::new().unwrap();
     let session_id = fixture_session("session.projector.relation-restart");
@@ -649,7 +378,7 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
         let (second, second_write) = fixture_observation(
             &session_id,
             1,
-            Some((AnchorProvenanceRelationV2::Supersedes, first_anchor)),
+            Some((AnchorProvenanceRelation::Supersedes, first_anchor)),
             true,
         );
         Box::pin(persist_fixture(&runtime, second, second_write)).await;
@@ -742,7 +471,266 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn all_skipped_refresh_persists_reopens_and_completes_idempotently() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = fixture_session("session.projector.all-skipped");
+    let request;
+    {
+        let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+            .await
+            .unwrap();
+        let (observation, write) = fixture_observation(&session_id, 0, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        let store = temporal_store(&runtime);
+        refresh_through(&store, &session_id, 1, 0).await;
+        for ordinal in 1..=2 {
+            let (observation, write) = fixture_observation_from_facts(
+                &session_id,
+                ordinal,
+                ProviderId::new(format!("projector-test-{ordinal}")).unwrap(),
+                ObservationId::new(format!("record.projector.{ordinal}")).unwrap(),
+                CanonicalObservationRelationsV1::new(session_id.clone()),
+                vec![CanonicalObservationFactV1::Boundary {
+                    boundary_kind: tracedecay_domain::CanonicalBoundaryKindV1::TurnStart,
+                }],
+                None,
+            );
+            assert_eq!(
+                tracedecay_store::derive_canonical_projection(&observation)
+                    .unwrap()
+                    .skip_reason(),
+                Some(ProjectionSkipReason::NonConversationalRecord)
+            );
+            Box::pin(persist_fixture(&runtime, observation, write)).await;
+        }
+        store
+            .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+                session_id.clone(),
+                SessionRefreshFrontierV1::new(3, 1).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let recovery = store
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (progress, batch) = store
+            .materialize_session_temporal_refresh_batch_for_test(&recovery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(batch.occurrences().is_empty());
+        assert_eq!(batch.item_count(), 0);
+        assert_eq!(progress.frontier().committed_through(), 3);
+        request = SessionRefreshCompletionRequestV1::new(
+            progress.operation_id().clone(),
+            session_id.clone(),
+            progress.frontier(),
+            *progress.coverage(),
+        )
+        .unwrap();
+        store
+            .persist_session_refresh_projection_batch(progress, batch)
+            .await
+            .unwrap();
+    }
+    let receipt = {
+        let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+            .await
+            .unwrap();
+        let store = temporal_store(&runtime);
+        let recovery = store
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovery.restart_state(),
+            SessionRefreshRestartStateV1::ReadyToComplete
+        );
+        let receipt = store
+            .complete_session_refresh(request.clone(), ExecutionControl::default())
+            .await
+            .unwrap();
+        assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+        receipt
+    };
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    assert_eq!(
+        temporal_store(&runtime)
+            .complete_session_refresh(request, ExecutionControl::default())
+            .await
+            .unwrap(),
+        receipt
+    );
+    for (kind, expected) in [
+        (SessionTemporalFixtureCountV1::Occurrences, 1),
+        (SessionTemporalFixtureCountV1::RefreshReceipts, 2),
+    ] {
+        assert_eq!(
+            runtime
+                .session_temporal_fixture_count_for_test(HostAdmissionScope::Profile, kind)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[asupersync::test]
+async fn refresh_at_committed_frontier_needs_no_new_observation_effect() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let session_id = fixture_session("session.projector.unchanged-frontier");
+    let (observation, write) = fixture_observation(&session_id, 0, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let store = temporal_store(&runtime);
+    let baseline = refresh_through(&store, &session_id, 1, 0).await;
+    let refreshed = refresh_through(&store, &session_id, 1, 1).await;
+    assert_ne!(refreshed, baseline);
+    assert_eq!(
+        runtime
+            .session_temporal_fixture_count_for_test(
+                HostAdmissionScope::Profile,
+                SessionTemporalFixtureCountV1::Occurrences
+            )
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[asupersync::test]
+async fn refresh_frontier_without_observation_effects_cannot_activate() {
+    assert_unsupported_frontier_cannot_activate(FrontierPrefix::Absent, false).await;
+}
+
+#[asupersync::test]
+async fn skipped_prefix_cannot_prove_an_unsupported_target_frontier() {
+    for foreign_target in [false, true] {
+        assert_unsupported_frontier_cannot_activate(FrontierPrefix::Skipped, foreign_target).await;
+    }
+}
+
+#[asupersync::test]
+async fn message_prefix_cannot_prove_an_unsupported_target_frontier() {
+    assert_unsupported_frontier_cannot_activate(FrontierPrefix::Message, false).await;
+}
+
+enum FrontierPrefix {
+    Absent,
+    Skipped,
+    Message,
+}
+
+async fn assert_unsupported_frontier_cannot_activate(prefix: FrontierPrefix, foreign_target: bool) {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let session_id = fixture_session("session.projector.unsupported-frontier");
+    let (observation, write) = fixture_observation(&session_id, 0, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let store = temporal_store(&runtime);
+    refresh_through(&store, &session_id, 1, 0).await;
+    let target = if matches!(prefix, FrontierPrefix::Skipped) {
+        let (observation, write) = fixture_observation_from_facts(
+            &session_id,
+            1,
+            ProviderId::new("projector-test-1").unwrap(),
+            ObservationId::new("record.projector.1").unwrap(),
+            CanonicalObservationRelationsV1::new(session_id.clone()),
+            vec![CanonicalObservationFactV1::Boundary {
+                boundary_kind: tracedecay_domain::CanonicalBoundaryKindV1::TurnStart,
+            }],
+            None,
+        );
+        assert_eq!(
+            tracedecay_store::derive_canonical_projection(&observation)
+                .unwrap()
+                .skip_reason(),
+            Some(ProjectionSkipReason::NonConversationalRecord)
+        );
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        3
+    } else if matches!(prefix, FrontierPrefix::Message) {
+        let (observation, write) = fixture_observation(&session_id, 1, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        3
+    } else {
+        2
+    };
+    if foreign_target {
+        let foreign_session = fixture_session("session.projector.foreign-frontier");
+        let (observation, write) = fixture_observation(&foreign_session, 2, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+    }
+    store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(target, 1).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let recovery = store
+        .session_refresh_recovery(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (progress, batch) = store
+        .materialize_session_temporal_refresh_batch_for_test(&recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        batch.occurrences().len(),
+        usize::from(matches!(prefix, FrontierPrefix::Message))
+    );
+    assert_eq!(progress.frontier().committed_through(), target);
+    let request = SessionRefreshCompletionRequestV1::new(
+        progress.operation_id().clone(),
+        session_id.clone(),
+        progress.frontier(),
+        *progress.coverage(),
+    )
+    .unwrap();
+    store
+        .persist_session_refresh_projection_batch(progress, batch)
+        .await
+        .unwrap();
+    let error = store
+        .complete_session_refresh(request, ExecutionControl::default())
+        .await
+        .expect_err("a prefix batch cannot prove an unsupported source frontier");
+    assert!(matches!(error, SessionStoreError::Storage { .. }));
+    assert_eq!(
+        store
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .restart_state(),
+        SessionRefreshRestartStateV1::ReadyToComplete
+    );
+    assert_eq!(
+        runtime
+            .session_temporal_fixture_count_for_test(
+                HostAdmissionScope::Profile,
+                SessionTemporalFixtureCountV1::RefreshReceipts
+            )
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[asupersync::test]
 async fn terminal_receipt_rejects_corrupted_derived_evidence() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -813,7 +801,192 @@ async fn terminal_receipt_rejects_corrupted_derived_evidence() {
     assert!(matches!(error, SessionStoreError::Storage { .. }));
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn grouped_completion_revalidates_evidence_after_staging() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let session_id = fixture_session("session.projector.staged-evidence-corruption");
+    for ordinal in 0..3 {
+        let (observation, write) = fixture_observation(&session_id, ordinal, None, ordinal > 0);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+    }
+    let begin = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(3, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let recovery = store
+        .session_refresh_recovery(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (progress, batch) = store
+        .materialize_session_temporal_refresh_batch_for_test(&recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .persist_session_refresh_projection_batch(progress.clone(), batch)
+        .await
+        .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let access = SessionTemporalAccess::new(database);
+    let control = ExecutionControl::default();
+    let request = SessionRefreshCompletionRequestV1::new(
+        begin.operation_id().clone(),
+        session_id.clone(),
+        progress.frontier(),
+        *progress.coverage(),
+    )
+    .unwrap();
+    let crate::SessionRefreshCompletionStage::Ready {
+        request,
+        relation_projection,
+    } = access
+        .stage_session_refresh_completion(request, &control)
+        .await
+        .unwrap()
+    else {
+        panic!("fresh completion must be staged");
+    };
+    access
+        .record_relation_receipts_group(
+            std::slice::from_ref(relation_projection.as_ref()),
+            &control,
+        )
+        .await
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    let snapshot = database.read_snapshot().await.unwrap();
+    let verified = access
+        .apply_candidate_relation_projection(&snapshot, &relation_projection, &control)
+        .await
+        .unwrap();
+    drop(snapshot);
+    let generation =
+        tracedecay_domain::SessionProjectionGenerationV1::new(verified.generation).unwrap();
+    let validation_snapshot = database.read_snapshot().await.unwrap();
+    super::validate_final_projection_receipt(
+        &validation_snapshot,
+        &session_id,
+        generation,
+        recovery.frozen_watermarks(),
+        &verified,
+        &control,
+    )
+    .await
+    .unwrap();
+    drop(validation_snapshot);
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    let changed = transaction.execute(
+        "UPDATE session_derived_evidence SET evidence_json = json_set(evidence_json, '$.corrupted', 1)
+         WHERE session_id = ?1 AND generation = ?2",
+        params![session_id.as_str(), i64::try_from(generation.value()).unwrap()],
+    ).await.unwrap();
+    assert!(
+        changed > 0,
+        "fixture must produce receipt-bound derived evidence"
+    );
+    transaction.commit().await.unwrap();
+
+    let error = access
+        .complete_session_refresh_group(&[(request, verified)], control)
+        .await
+        .unwrap()
+        .remove(0)
+        .expect_err("staged validation must not authorize changed evidence at commit");
+    assert!(matches!(error, SessionStoreError::Storage { .. }));
+    assert!(
+        access
+            .session_refresh_receipt_result(SessionRefreshReceiptRequestV1::new(
+                begin.operation_id().clone(),
+                session_id
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[asupersync::test]
+async fn refresh_begin_reports_busy_only_for_a_running_operation() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let busy_session = fixture_session("session.refresh.busy");
+    let refused_session = fixture_session("session.refresh.refused-row");
+    for ordinal in 0..2 {
+        let (observation, write) = fixture_observation(&busy_session, ordinal, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+    }
+    let (observation, write) = fixture_observation(&refused_session, 2, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+
+    store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            busy_session.clone(),
+            SessionRefreshFrontierV1::new(1, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let busy = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            busy_session,
+            SessionRefreshFrontierV1::new(2, 0).unwrap(),
+        ))
+        .await
+        .expect_err("a second target while one refresh runs is busy");
+    assert_eq!(
+        busy.to_string(),
+        "session temporal idempotency conflict in session refresh busy"
+    );
+
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "CREATE TRIGGER refuse_refresh_operation_row
+             BEFORE INSERT ON session_refresh_operations
+             WHEN NEW.session_id = 'session.refresh.refused-row'
+             BEGIN SELECT RAISE(ABORT, 'session_refresh_operations row refused'); END",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let refused = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            refused_session,
+            SessionRefreshFrontierV1::new(1, 0).unwrap(),
+        ))
+        .await
+        .expect_err("a refused operation row fails the begin");
+    assert!(
+        matches!(
+            refused,
+            SessionStoreError::Storage {
+                operation: "begin or join session refresh",
+                ..
+            }
+        ),
+        "a refused row with no running refresh is a storage fault, got {refused}"
+    );
+}
+
+#[asupersync::test]
 async fn cancelled_terminal_persistence_rolls_back_candidate_state() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -896,7 +1069,7 @@ async fn cancelled_terminal_persistence_rolls_back_candidate_state() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn cancellation_at_final_precommit_checkpoint_rolls_back_all_projection_writes() {
     const WORK_LIMIT: usize = 4_096;
 
@@ -975,14 +1148,14 @@ async fn cancellation_at_final_precommit_checkpoint_rolls_back_all_projection_wr
     );
 }
 
-#[tokio::test]
-async fn cancellation_at_completion_precommit_rolls_back_activation_and_terminal_receipt() {
+#[asupersync::test]
+async fn cancellation_at_completion_precommit_rolls_back_and_the_retry_completes() {
     const WORK_LIMIT: usize = 4_096;
     // Sync point, not a performance budget: one less than the successful
     // completion's checkpoint count so cancellation fires on the pre-commit
     // checkpoint after activation and the terminal receipt. The measured
     // count includes identity-index cancellation polls during relation load.
-    const COMPLETION_PRECOMMIT_WORK_LIMIT: usize = 80;
+    const COMPLETION_PRECOMMIT_WORK_LIMIT: usize = 82;
 
     let (_successful_tmp, successful_runtime, successful_request, _) =
         ready_single_observation_completion("session.projector.completion-meter").await;
@@ -1009,7 +1182,7 @@ async fn cancellation_at_completion_precommit_rolls_back_activation_and_terminal
     let operation_id = cancelled_request.operation_id().clone();
     let error = temporal_store(&cancelled_runtime)
         .complete_session_refresh(
-            cancelled_request,
+            cancelled_request.clone(),
             ExecutionControl::default().with_work_limit(COMPLETION_PRECOMMIT_WORK_LIMIT),
         )
         .await
@@ -1069,121 +1242,37 @@ async fn cancellation_at_completion_precommit_rolls_back_activation_and_terminal
             .unwrap(),
         0
     );
-}
 
-#[tokio::test]
-async fn cancellation_during_active_generation_seed_rolls_back_copied_rows() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+    // The cancelled attempt already applied the candidate's relation graph,
+    // so the retry must replay that receipt rather than refuse it.
+    let receipt = temporal_store(&cancelled_runtime)
+        .complete_session_refresh(cancelled_request, ExecutionControl::default())
         .await
         .unwrap();
-    let store = temporal_store(&runtime);
-    let session_id = fixture_session("session.projector.cancelled-seed");
-    let (first, first_write) = fixture_observation(&session_id, 0, None, false);
-    Box::pin(persist_fixture(&runtime, first, first_write)).await;
-    let begin = store
-        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
-            session_id.clone(),
-            SessionRefreshFrontierV1::new(1, 0).unwrap(),
-        ))
-        .await
-        .unwrap();
-    let recovery = store
-        .session_refresh_recovery(&session_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let (progress, batch) = store
-        .materialize_session_temporal_refresh_batch_for_test(&recovery)
-        .await
-        .unwrap()
-        .unwrap();
-    store
-        .persist_session_refresh_projection_batch(progress, batch)
-        .await
-        .unwrap();
-    let recovery = store
-        .session_refresh_recovery(&session_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let progress = recovery.progress().unwrap();
-    store
-        .complete_session_refresh(
-            SessionRefreshCompletionRequestV1::new(
-                begin.operation_id().clone(),
-                session_id.clone(),
-                progress.frontier(),
-                *progress.coverage(),
-            )
-            .unwrap(),
-            ExecutionControl::default(),
-        )
-        .await
-        .unwrap();
-
-    let (second, second_write) = fixture_observation(&session_id, 1, None, true);
-    Box::pin(persist_fixture(&runtime, second, second_write)).await;
-    store
-        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
-            session_id.clone(),
-            SessionRefreshFrontierV1::new(2, 1).unwrap(),
-        ))
-        .await
-        .unwrap();
-    let recovery = store
-        .session_refresh_recovery(&session_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let (progress, batch) = store
-        .materialize_session_temporal_refresh_batch_for_test(&recovery)
-        .await
-        .unwrap()
-        .unwrap();
-    let candidate_generation = i64::try_from(batch.generation().value()).unwrap();
-    let error = store
-        .persist_session_refresh_projection_batch_controlled(
-            progress,
-            batch,
-            // Admission and the first pre-copy checkpoint succeed; the
-            // post-copy checkpoint cancels after session_turns was copied.
-            ExecutionControl::default().with_work_limit(2),
-        )
-        .await
-        .expect_err("cancellation during active-generation seeding must abort the transaction");
-    assert!(matches!(error, SessionStoreError::BudgetExceeded { .. }));
-
-    let database = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
     let transaction = database.begin_write_transaction().await.unwrap();
-    let mut rows = transaction
+    let mut generation_rows = transaction
         .query(
-            "SELECT COUNT(*) FROM session_turns
-             WHERE session_id = ?1 AND generation = ?2",
-            params![session_id.as_str(), candidate_generation],
+            "SELECT generation || ':' || state FROM session_temporal_generations
+             WHERE session_id = ?1 ORDER BY generation",
+            params![session_id.as_str()],
         )
         .await
         .unwrap();
+    let mut generations = Vec::new();
+    while let Some(row) = generation_rows.next().await.unwrap() {
+        generations.push(row.get::<String>(0).unwrap());
+    }
     assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0
-    );
-    drop(rows);
-    drop(transaction);
-    assert_eq!(
-        store
-            .session_refresh_recovery(&session_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .restart_state(),
-        SessionRefreshRestartStateV1::BeginProjection
+        generations,
+        vec![
+            "1:superseded".to_owned(),
+            format!("{candidate_generation}:active")
+        ]
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn copied_from_lineage_is_not_auto_emitted_by_materializer() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1198,7 +1287,7 @@ async fn copied_from_lineage_is_not_auto_emitted_by_materializer() {
     let (second, second_write) = fixture_observation(
         &session_id,
         1,
-        Some((AnchorProvenanceRelationV2::CopiedFrom, first_anchor)),
+        Some((AnchorProvenanceRelation::CopiedFrom, first_anchor)),
         false,
     );
     Box::pin(persist_fixture(&runtime, second, second_write)).await;
@@ -1225,7 +1314,7 @@ async fn copied_from_lineage_is_not_auto_emitted_by_materializer() {
     assert_eq!(progress.committed_records(), batch.item_count() as u64);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn relation_derivation_backs_off_to_the_total_batch_limit() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1242,7 +1331,7 @@ async fn relation_derivation_backs_off_to_the_total_batch_limit() {
     for ordinal in 0..501 {
         let lineage = previous_anchor
             .take()
-            .map(|anchor| (AnchorProvenanceRelationV2::Supersedes, anchor));
+            .map(|anchor| (AnchorProvenanceRelation::Supersedes, anchor));
         let (observation, write) = fixture_observation(&session_id, ordinal, lineage, ordinal > 0);
         previous_anchor = Some(
             derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
@@ -1330,22 +1419,25 @@ fn assertion_identity_includes_both_anchors() {
     assert_eq!(first_id.len(), 71);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn parent_resolver_rejects_ambiguous_session_message_ids() {
     let mut resolver = ParentMessageResolver::default();
     resolver.register("message.shared", "occurrence.a");
     resolver.register("message.shared", "occurrence.b");
     let error = resolver
-        .reject_ambiguity("test parent ambiguity")
+        .reject_ambiguity()
         .expect_err("duplicate message ids must be rejected");
-    let detail = format!("{error:?}");
     assert!(
-        detail.contains("message.shared") || detail.contains("resolves to 2 occurrences"),
-        "{detail}"
+        matches!(
+            &error,
+            SessionStoreError::AmbiguousMessageOccurrence { message_id, occurrences: 2 }
+                if message_id == "message.shared"
+        ),
+        "{error:?}"
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn parent_resolver_pages_live_sized_observation_history() {
     let directory = TempDir::new().unwrap();
     let connection = TestConnection::open(&directory.path().join("resolver-pages.db"));
@@ -1363,7 +1455,20 @@ async fn parent_resolver_pages_live_sized_observation_history() {
                 output_count INTEGER NOT NULL
              );
              CREATE INDEX idx_session_temporal_observation_effects_session
-                ON session_temporal_observation_effects(session_id, observation_sequence);",
+                ON session_temporal_observation_effects(session_id, observation_sequence);
+             CREATE TABLE observation_projection_dispositions (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                PRIMARY KEY(projector_version, observation_id)
+             );
+             CREATE TABLE observation_projection_provenance (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                output_provider TEXT NOT NULL,
+                output_message_id TEXT NOT NULL,
+                message_created INTEGER NOT NULL
+             );",
         )
         .await
         .unwrap();
@@ -1397,6 +1502,7 @@ async fn parent_resolver_pages_live_sized_observation_history() {
     let resolver = canonical_parent_message_resolver(
         &*connection,
         session_id.as_str(),
+        0,
         10001,
         "test paged parent resolver",
         None,
@@ -1405,10 +1511,20 @@ async fn parent_resolver_pages_live_sized_observation_history() {
     .await
     .unwrap();
 
-    assert!(resolver.resolve("message.projector.0").is_some());
+    assert_eq!(
+        resolver.resolve("message.projector.0"),
+        Some(
+            MessageOccurrenceIdV1::derive(
+                observation.observation_id(),
+                tracedecay_domain::ProjectionOutputOrdinalV1::new(0),
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(resolver.resolve("message.missing"), None);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn parent_resolver_has_bounded_cancellable_session_traversal() {
     const UNRELATED_OBSERVATIONS: i64 = 2_048;
 
@@ -1428,7 +1544,20 @@ async fn parent_resolver_has_bounded_cancellable_session_traversal() {
                 output_count INTEGER NOT NULL
              );
              CREATE INDEX idx_session_temporal_observation_effects_session
-                ON session_temporal_observation_effects(session_id, observation_sequence);",
+                ON session_temporal_observation_effects(session_id, observation_sequence);
+             CREATE TABLE observation_projection_dispositions (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                PRIMARY KEY(projector_version, observation_id)
+             );
+             CREATE TABLE observation_projection_provenance (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                output_provider TEXT NOT NULL,
+                output_message_id TEXT NOT NULL,
+                message_created INTEGER NOT NULL
+             );",
         )
         .await
         .unwrap();
@@ -1487,6 +1616,7 @@ async fn parent_resolver_has_bounded_cancellable_session_traversal() {
     let resolver = canonical_parent_message_resolver(
         &counted,
         session_id.as_str(),
+        0,
         u64::try_from(UNRELATED_OBSERVATIONS + 1).unwrap(),
         "test session-bounded parent resolver",
         None,
@@ -1495,7 +1625,17 @@ async fn parent_resolver_has_bounded_cancellable_session_traversal() {
     .await
     .unwrap();
 
-    assert!(resolver.resolve("message.projector.0").is_some());
+    assert_eq!(
+        resolver.resolve("message.projector.0"),
+        Some(
+            MessageOccurrenceIdV1::derive(
+                observation.observation_id(),
+                ProjectionOutputOrdinalV1::new(0),
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(resolver.resolve("message.missing"), None);
     assert!(
         counted.query_count() <= 2,
         "one relevant history page plus the terminal probe is sufficient, but {} queries visited unrelated profile history",
@@ -1506,6 +1646,7 @@ async fn parent_resolver_has_bounded_cancellable_session_traversal() {
     let error = canonical_parent_message_resolver(
         &connection,
         session_id.as_str(),
+        0,
         u64::try_from(UNRELATED_OBSERVATIONS + 1).unwrap(),
         "test cancellable parent resolver",
         Some(&control),
@@ -1514,18 +1655,6 @@ async fn parent_resolver_has_bounded_cancellable_session_traversal() {
     .await
     .expect_err("the resolver must checkpoint while visiting its first row");
     assert!(matches!(error, SessionStoreError::BudgetExceeded { .. }));
-}
-
-#[test]
-fn parent_resolver_registers_same_batch_effects_only_after_derivation() {
-    let mut resolver = ParentMessageResolver::default();
-    assert_eq!(resolver.resolve("message.reemitted"), None);
-
-    resolver.register("message.reemitted", "occurrence.first-effect");
-    assert_eq!(
-        resolver.resolve("message.reemitted"),
-        Some("occurrence.first-effect")
-    );
 }
 
 #[test]
@@ -1544,7 +1673,7 @@ fn parent_resolver_prefers_a_persisted_cross_batch_predecessor() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1559,7 +1688,7 @@ async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
     let (second, second_write) = fixture_observation(
         &session_id,
         1,
-        Some((AnchorProvenanceRelationV2::CopiedFrom, first_anchor.clone())),
+        Some((AnchorProvenanceRelation::CopiedFrom, first_anchor.clone())),
         false,
     );
     Box::pin(persist_fixture(&runtime, second, second_write)).await;
@@ -1670,7 +1799,7 @@ async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn multi_batch_refresh_progress_survives_restart_under_guard() {
     const OBSERVATION_COUNT: u64 = 501;
 
@@ -1690,7 +1819,7 @@ async fn multi_batch_refresh_progress_survives_restart_under_guard() {
             let (observation, write) = fixture_observation(
                 &session_id,
                 ordinal,
-                Some((AnchorProvenanceRelationV2::Supersedes, first_anchor.clone())),
+                Some((AnchorProvenanceRelation::Supersedes, first_anchor.clone())),
                 false,
             );
             Box::pin(persist_fixture(&runtime, observation, write)).await;
@@ -1874,33 +2003,10 @@ async fn open_effect_store(name: &str) -> (TempDir, TestConnection) {
     (directory, TestConnection::open(&database_path))
 }
 
-/// Case 1 — fresh insert. The durable tuple is exactly the derived one.
-#[tokio::test]
-async fn canonical_effect_insert_persists_the_derived_tuple() {
-    let (_directory, connection) = open_effect_store("effect-fresh-insert").await;
-    let session_id = fixture_session("session.projector.effect-fresh");
-    let (observation, _) = fixture_observation(&session_id, 0, None, false);
-    let sequence = seed_effect_observation(&connection, &observation).await;
-    let effect = ObservationProjection::Skipped(ProjectionSkipReason::NonConversationalRecord);
-
-    record_canonical_observation_effect(&connection, sequence, &observation, &effect)
-        .await
-        .unwrap();
-
-    let (recorded_sequence, recorded_session, digest, output_count) =
-        recorded_effect(&connection, &observation)
-            .await
-            .expect("fresh insert records one effect row");
-    assert_eq!(recorded_sequence, i64::try_from(sequence).unwrap());
-    assert_eq!(recorded_session, session_id.as_str());
-    assert_eq!(output_count, 0);
-    assert!(digest.starts_with("sha256:"), "{digest}");
-}
-
-/// Case 2 — idempotent replay. Re-projecting an observation at or below the
+/// Case 2, idempotent replay. Re-projecting an observation at or below the
 /// checkpoint conflicts on the primary key, and the conflict branch's
 /// field-by-field comparison must converge instead of erroring.
-#[tokio::test]
+#[asupersync::test]
 async fn canonical_effect_replay_converges_on_an_identical_row() {
     let (_directory, connection) = open_effect_store("effect-identical-replay").await;
     let session_id = fixture_session("session.projector.effect-replay");
@@ -1923,10 +2029,10 @@ async fn canonical_effect_replay_converges_on_an_identical_row() {
     );
 }
 
-/// Case 3 — conflict with a divergent payload. The durable row satisfies the
+/// Case 3, conflict with a divergent payload. The durable row satisfies the
 /// insert guard (same observation, sequence, and receipt) yet disagrees on the
 /// projected effect, so the conflict-only read-back must still reject it.
-#[tokio::test]
+#[asupersync::test]
 async fn canonical_effect_replay_rejects_a_divergent_durable_row() {
     let (_directory, connection) = open_effect_store("effect-divergent-row").await;
     let session_id = fixture_session("session.projector.effect-divergent");
@@ -2057,7 +2163,7 @@ async fn seed_output_session_with_history_only_effects(
 /// HEAD grouped every historical effect for a pending session. Discovery must
 /// visit only output-producing rows past the frontier, not the history-only
 /// prefix on the same session.
-#[tokio::test]
+#[asupersync::test]
 async fn explicit_discovery_visits_only_output_effects_past_frontier() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2078,20 +2184,117 @@ async fn explicit_discovery_visits_only_output_effects_past_frontier() {
     );
     assert_eq!(filtered, 1, "one output-producing effect is pending");
 
-    let pending = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("profile registered database")
-        .pending_session_temporal_refresh_page_result(128, 1, None)
-        .await
-        .unwrap()
-        .into_parts()
-        .0;
+    let pending = SessionTemporalAccess::new(
+        runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile registered database"),
+    )
+    .pending_session_temporal_refresh_page_result(
+        128,
+        1,
+        &SessionTemporalRefreshDiscoveryCursor::default(),
+    )
+    .await
+    .unwrap()
+    .into_parts()
+    .0;
 
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].session_id(), &session_id);
 }
 
-#[tokio::test]
+/// Discovery reads only effects past its cursor, so an effect that commits
+/// while its session's refresh is running must be rediscovered once that
+/// refresh ends, and an unchanged store must yield no request.
+#[asupersync::test]
+async fn discovery_cursor_rediscovers_effects_that_arrived_during_a_refresh() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database");
+    let session_id = fixture_session("session.projector.cursor-running");
+    let discover = |cursor: SessionTemporalRefreshDiscoveryCursor| async move {
+        SessionTemporalAccess::new(db)
+            .pending_session_temporal_refresh_page_result(8, 1, &cursor)
+            .await
+            .unwrap()
+            .into_parts()
+    };
+    let frontiers = |requests: &[tracedecay_store::SessionRefreshBeginOrJoinRequestV1]| {
+        requests
+            .iter()
+            .map(|request| {
+                (
+                    request.session_id().as_str().to_owned(),
+                    request.target_frontier().committed_through(),
+                    request.target_frontier().observed_through(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let (observation, write) = fixture_observation(&session_id, 0, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let (requests, cursor, _) = discover(SessionTemporalRefreshDiscoveryCursor::default()).await;
+    let first = frontiers(&requests);
+    assert_eq!(first.len(), 1, "{first:?}");
+    let first_observed = first[0].2;
+    assert_eq!(
+        first[0],
+        (session_id.as_str().to_owned(), 0, first_observed)
+    );
+    let store = temporal_store(&runtime);
+    store
+        .begin_or_join_session_refresh(requests.into_iter().next().unwrap())
+        .await
+        .unwrap();
+
+    let (observation, write) = fixture_observation(&session_id, 1, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let (requests, cursor, _) = discover(cursor).await;
+    assert!(
+        requests.is_empty(),
+        "a running session is not offered again: {:?}",
+        frontiers(&requests)
+    );
+
+    store
+        .complete_running_session_refresh_for_test(&session_id)
+        .await
+        .unwrap();
+    let (requests, cursor, _) = discover(cursor).await;
+    let resumed = frontiers(&requests);
+    assert_eq!(resumed.len(), 1, "{resumed:?}");
+    assert_eq!(resumed[0].0, session_id.as_str());
+    assert_eq!(
+        resumed[0].1, first_observed,
+        "the completed refresh committed the first effect"
+    );
+    assert!(
+        resumed[0].2 > first_observed,
+        "the effect that arrived during the refresh is rediscovered: {resumed:?}"
+    );
+
+    store
+        .begin_or_join_session_refresh(requests.into_iter().next().unwrap())
+        .await
+        .unwrap();
+    store
+        .complete_running_session_refresh_for_test(&session_id)
+        .await
+        .unwrap();
+    let (requests, _, has_more) = discover(cursor).await;
+    assert!(requests.is_empty(), "{:?}", frontiers(&requests));
+    assert!(
+        !has_more,
+        "an unchanged, swept store has nothing more to discover"
+    );
+}
+
+#[asupersync::test]
 async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2144,18 +2347,18 @@ async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
     ))
     .await;
 
-    let mut cursor = None;
+    let mut cursor = SessionTemporalRefreshDiscoveryCursor::default();
     let mut discovered = Vec::new();
     let mut pending_pages = 0usize;
     let mut active_rows_scanned = 0usize;
     let mut pages = 0usize;
     loop {
-        let page = db
-            .pending_session_temporal_refresh_page_result(2, 1, cursor.as_ref())
+        let page = SessionTemporalAccess::new(db)
+            .pending_session_temporal_refresh_page_result(2, 1, &cursor)
             .await
             .expect("discover missing native relation projection");
         active_rows_scanned = active_rows_scanned.saturating_add(page.active_rows_scanned());
-        let (requests, scanned_through, has_more) = page.into_parts();
+        let (requests, next_cursor, has_more) = page.into_parts();
         pages = pages.saturating_add(1);
         for request in requests {
             if request.session_id() == &pending_session_id {
@@ -2171,7 +2374,7 @@ async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
         if !has_more {
             break;
         }
-        cursor = scanned_through;
+        cursor = next_cursor;
     }
 
     assert_eq!(
@@ -2188,8 +2391,8 @@ async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
         "cursor paging must visit each active row exactly once per sweep"
     );
     assert_eq!(
-        pending_pages, 4,
-        "a full pending-effect lane must not consume the reserved active scan slot"
+        pending_pages, 1,
+        "the pending lane reports its session once, beside the reserved active scan slot"
     );
     let snapshot = db.read_snapshot().await.expect("relation receipt snapshot");
     let mut rows = snapshot
@@ -2251,4 +2454,1068 @@ async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
         "repair discovery must stop at the arm-local limit without sorting all active sessions: \
          {plan:?}"
     );
+}
+
+/// Completes one refresh of `session_id` through `observed_through`,
+/// persisting every materialized batch.
+async fn refresh_through(
+    store: &SessionTemporalStore<'_, RegisteredGlobalDb>,
+    session_id: &SessionId,
+    observed_through: u64,
+    committed_through: u64,
+) -> tracedecay_domain::SessionProjectionGenerationV1 {
+    let begin = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(observed_through, committed_through).unwrap(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let recovery = store
+            .session_refresh_recovery(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let Some((progress, batch)) = store
+            .materialize_session_temporal_refresh_batch_for_test(&recovery)
+            .await
+            .unwrap()
+        else {
+            let progress = recovery.progress().unwrap();
+            store
+                .complete_session_refresh(
+                    SessionRefreshCompletionRequestV1::new(
+                        begin.operation_id().clone(),
+                        session_id.clone(),
+                        progress.frontier(),
+                        *progress.coverage(),
+                    )
+                    .unwrap(),
+                    ExecutionControl::default(),
+                )
+                .await
+                .unwrap();
+            return recovery.candidate_generation();
+        };
+        store
+            .persist_session_refresh_projection_batch(progress, batch)
+            .await
+            .unwrap();
+    }
+}
+
+/// One observation of a live session: the thread changes every third
+/// message, each message replies to the previous one, and every fourth
+/// message supersedes the one before it.
+fn live_observation(
+    session_id: &SessionId,
+    ordinal: u64,
+    previous_anchor: Option<RetrievalAnchorId>,
+) -> (DurableObservationV1, AnchoredObservationWrite) {
+    let mut relations = CanonicalObservationRelationsV1::new(session_id.clone())
+        .with_thread_id(ObservationId::new(format!("thread.live.{}", ordinal / 3)).unwrap())
+        .with_message_id(ObservationId::new(format!("message.live.{ordinal}")).unwrap())
+        .with_agent_id(ObservationId::new(format!("agent.live.{}", ordinal % 2)).unwrap());
+    if ordinal > 0 {
+        relations = relations
+            .with_parent_message_id(
+                ObservationId::new(format!("message.live.{}", ordinal - 1)).unwrap(),
+            )
+            .with_parent_agent_id(ObservationId::new("agent.live.root").unwrap());
+    }
+    fixture_observation_from_facts(
+        session_id,
+        ordinal,
+        ProviderId::new(format!("live-{ordinal}")).unwrap(),
+        ObservationId::new(format!("record.live.{ordinal}")).unwrap(),
+        relations,
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": format!("live message {ordinal}")}),
+            model: Some("model.live".to_owned()),
+            timestamp: Some(1_750_000_000 + i64::try_from(ordinal).unwrap()),
+        }],
+        previous_anchor
+            .filter(|_| ordinal % 4 == 3)
+            .map(|anchor| (AnchorProvenanceRelation::Supersedes, anchor)),
+    )
+}
+
+#[asupersync::test]
+async fn incremental_refresh_receipts_and_relations_equal_a_from_scratch_recomputation() {
+    const MESSAGES: u64 = 13;
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let (scope, relation_store) =
+        SessionTemporalRegisteredDb::session_relation_store(database).unwrap();
+    let session_id = fixture_session("session.projector.live-extension");
+    let mut previous_anchor = None;
+    let mut generations = Vec::new();
+    for ordinal in 0..MESSAGES {
+        let (observation, write) = live_observation(&session_id, ordinal, previous_anchor.clone());
+        previous_anchor = Some(
+            derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
+                .unwrap(),
+        );
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        let generation = refresh_through(&store, &session_id, ordinal + 1, ordinal).await;
+        generations.push(generation);
+
+        let snapshot = database.read_snapshot().await.unwrap();
+        let reconstructed =
+            super::super::relation_projection::reconstruct_session_relation_projection(
+                &snapshot,
+                &scope,
+                &session_id,
+                generation,
+                1_000,
+                1_000,
+                Arc::new(NeverCancelled),
+            )
+            .await
+            .unwrap();
+        let applied = relation_store
+            .load_projection(
+                &scope,
+                &session_id,
+                generation.value(),
+                1_000,
+                1_000,
+                Arc::new(NeverCancelled),
+            )
+            .unwrap();
+        assert_eq!(
+            applied, reconstructed,
+            "message {ordinal}: the extended relation projection must equal a from-scratch \
+             reconstruction"
+        );
+        let recomputed = super::full_projection_coverage(
+            &snapshot,
+            &session_id,
+            generation,
+            &reconstructed.logical_copies,
+            &ExecutionControl::default(),
+        )
+        .await
+        .unwrap();
+        let receipted = super::receipts::base_projection_coverage(
+            &snapshot,
+            &session_id,
+            i64::try_from(generation.value()).unwrap() + 1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            receipted, recomputed,
+            "message {ordinal}: the incremental receipt must equal a digest recomputed over \
+             every row the generation reads"
+        );
+        assert_eq!(
+            recomputed.record_count(),
+            usize::try_from(ordinal + 1 + ordinal.saturating_add(1) / 4).unwrap(),
+            "message {ordinal}: occurrences plus supersession assertions"
+        );
+    }
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| generation.value())
+            .collect::<Vec<_>>(),
+        (2..MESSAGES + 2).collect::<Vec<_>>()
+    );
+
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT
+                 (SELECT COUNT(*) FROM session_occurrences WHERE session_id = ?1),
+                 (SELECT COUNT(*) FROM session_derived_evidence
+                  WHERE session_id = ?1 AND evidence_kind = 'burst'),
+                 (SELECT COUNT(*) FROM session_derived_evidence_members
+                  WHERE session_id = ?1 AND evidence_kind = 'burst'),
+                 (SELECT COUNT(*) FROM session_threads WHERE session_id = ?1)",
+            params![session_id.as_str()],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(
+        (
+            row.get::<i64>(0).unwrap(),
+            row.get::<i64>(1).unwrap(),
+            row.get::<i64>(2).unwrap(),
+            row.get::<i64>(3).unwrap(),
+        ),
+        (13, 5, 13, 5),
+        "each message is stored once, and the superseded burst versions and \
+         re-roled members are retired when their successor activates"
+    );
+}
+
+async fn page_occurrence_ids(
+    store: &SessionTemporalStore<'_, RegisteredGlobalDb>,
+    snapshot: tracedecay_store::SessionTemporalSnapshotV1,
+) -> SessionStoreResult<Vec<String>> {
+    let session_id = snapshot.session_id().clone();
+    let page = store
+        .retrieve_session_temporal_page(
+            tracedecay_store::SessionTemporalRetrievalRequestV1::new(
+                session_id,
+                tracedecay_domain::TemporalModeV1::Evolution,
+                tracedecay_domain::RetrievalGrainV1::Occurrence,
+                snapshot,
+                64,
+                None,
+                ExecutionControl::default(),
+            )
+            .unwrap(),
+        )
+        .await?;
+    Ok(page
+        .occurrences()
+        .iter()
+        .map(|occurrence| occurrence.occurrence_id.as_str().to_owned())
+        .collect())
+}
+
+#[asupersync::test]
+async fn readers_see_whole_generations_while_an_append_builds_and_after_it_is_cancelled() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let session_id = fixture_session("session.projector.append-isolation");
+    let mut occurrence_ids = Vec::new();
+    for ordinal in 0..3 {
+        let (observation, write) = live_observation(&session_id, ordinal, None);
+        occurrence_ids.push(
+            MessageOccurrenceIdV1::derive(
+                observation.observation_id(),
+                ProjectionOutputOrdinalV1::new(0),
+            )
+            .as_str()
+            .to_owned(),
+        );
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        refresh_through(&store, &session_id, ordinal + 1, ordinal).await;
+    }
+    let freeze = || {
+        store.freeze_session_temporal_snapshot(
+            tracedecay_store::SessionTemporalSnapshotRequestV1::new(session_id.clone()),
+        )
+    };
+    let settled = freeze().await.unwrap();
+    let settled_ids = {
+        let mut ids = occurrence_ids.clone();
+        ids.sort_unstable();
+        ids
+    };
+    let mut page = page_occurrence_ids(&store, settled.clone()).await.unwrap();
+    page.sort_unstable();
+    assert_eq!(page, settled_ids);
+
+    // A fourth message builds a candidate that shares the settled rows.
+    let (observation, write) = live_observation(&session_id, 3, None);
+    let appended_id = MessageOccurrenceIdV1::derive(
+        observation.observation_id(),
+        ProjectionOutputOrdinalV1::new(0),
+    )
+    .as_str()
+    .to_owned();
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let begin = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(4, 3).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let recovery = store
+        .session_refresh_recovery(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (progress, batch) = store
+        .materialize_session_temporal_refresh_batch_for_test(&recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .persist_session_refresh_projection_batch(progress.clone(), batch)
+        .await
+        .unwrap();
+    let mut during = page_occurrence_ids(&store, settled.clone()).await.unwrap();
+    during.sort_unstable();
+    assert_eq!(
+        during, settled_ids,
+        "a reader of the active generation must not see the building candidate's rows"
+    );
+    assert_eq!(
+        freeze().await.unwrap().watermarks().active_generation(),
+        settled.watermarks().active_generation()
+    );
+
+    // Cancelling the candidate removes its rows; the settled generation is intact.
+    store
+        .cancel_session_refresh(tracedecay_store::SessionRefreshCancellationRequestV1::new(
+            begin.operation_id().clone(),
+            session_id.clone(),
+            progress.frontier(),
+            *progress.coverage(),
+        ))
+        .await
+        .unwrap();
+    let mut after_cancel = page_occurrence_ids(&store, settled.clone()).await.unwrap();
+    after_cancel.sort_unstable();
+    assert_eq!(after_cancel, settled_ids);
+    assert_eq!(
+        runtime
+            .session_temporal_fixture_count_for_test(
+                HostAdmissionScope::Profile,
+                SessionTemporalFixtureCountV1::Occurrences,
+            )
+            .await
+            .unwrap(),
+        3,
+        "the cancelled candidate's occurrence must be deleted with it"
+    );
+
+    // A fresh append activates; the old snapshot is refused rather than
+    // silently mixing generations, and the new one reads every row once.
+    let appended = refresh_through(&store, &session_id, 4, 3).await;
+    assert!(
+        page_occurrence_ids(&store, settled).await.is_err(),
+        "a snapshot of the superseded generation must be refused"
+    );
+    let current = freeze().await.unwrap();
+    assert_eq!(current.watermarks().active_generation(), appended);
+    let mut after = page_occurrence_ids(&store, current).await.unwrap();
+    after.sort_unstable();
+    let mut expected = settled_ids.clone();
+    expected.push(appended_id);
+    expected.sort_unstable();
+    assert_eq!(after, expected);
+}
+
+fn fixture_observation_with_text(
+    session_id: &SessionId,
+    unique: u64,
+    text: String,
+) -> (DurableObservationV1, AnchoredObservationWrite) {
+    fixture_observation_from_facts(
+        session_id,
+        0,
+        ProviderId::new(format!("projector-test-{unique}")).unwrap(),
+        ObservationId::new(format!("record.projector.{unique}")).unwrap(),
+        CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_thread_id(ObservationId::new(format!("thread.projector.{unique}")).unwrap())
+            .with_turn_id(ObservationId::new(format!("turn.projector.{unique}")).unwrap())
+            .with_message_id(ObservationId::new(format!("message.projector.{unique}")).unwrap())
+            .with_agent_id(ObservationId::new(format!("agent.projector.{unique}")).unwrap()),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": text}),
+            model: Some("model.projector".to_owned()),
+            timestamp: Some(1_750_000_000 + i64::try_from(unique).unwrap()),
+        }],
+        None,
+    )
+}
+
+async fn session_effect_sequence(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+) -> u64 {
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database")
+        .read_snapshot()
+        .await
+        .expect("effect sequence snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT observation_sequence
+             FROM session_temporal_observation_effects
+             WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .expect("effect sequence query");
+    let row = rows
+        .next()
+        .await
+        .expect("effect sequence row")
+        .expect("projected observation must leave a session effect");
+    u64::try_from(row.get::<i64>(0).expect("observation_sequence")).expect("sequence fits u64")
+}
+
+fn sqlite_family_bytes(path: &std::path::Path) -> u64 {
+    ["", "-wal", "-shm"].iter().fold(0u64, |total, suffix| {
+        let member = if suffix.is_empty() {
+            path.to_path_buf()
+        } else {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(*suffix);
+            std::path::PathBuf::from(name)
+        };
+        total.saturating_add(std::fs::metadata(member).map_or(0, |meta| meta.len()))
+    })
+}
+
+#[asupersync::test]
+async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
+    const PAYLOAD_CHARS: usize = 80_000;
+    const SESSION_COUNTS: [usize; 3] = [4, 8, 16];
+    let payload_stem = "m".repeat(PAYLOAD_CHARS);
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let derived = derived_text_for_index(&format!("payload-00-{payload_stem}"));
+    assert!(
+        derived.len() < PAYLOAD_CHARS,
+        "the synthetic payload must exceed the derived index budget"
+    );
+
+    let mut next_ordinal = 0u64;
+    let mut previous_family_bytes = 0u64;
+    for n in SESSION_COUNTS {
+        while next_ordinal < n as u64 {
+            let session_id = fixture_session(&format!("session.user-sessions.n{next_ordinal}"));
+            let text = format!("payload-{next_ordinal:02}-{payload_stem}");
+            let (observation, write) =
+                fixture_observation_with_text(&session_id, next_ordinal, text);
+            Box::pin(persist_fixture(&runtime, observation, write)).await;
+            let sequence = session_effect_sequence(&runtime, &session_id).await;
+            refresh_through(&store, &session_id, sequence, sequence.saturating_sub(1)).await;
+            next_ordinal += 1;
+        }
+
+        let snapshot = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile registered database")
+            .read_snapshot()
+            .await
+            .expect("user-sessions size snapshot");
+        let mut rows = snapshot
+            .query(
+                "SELECT SUM(length(index_text)), MAX(length(index_text)), COUNT(*)
+                 FROM session_occurrences",
+                (),
+            )
+            .await
+            .expect("index_text size query");
+        let row = rows
+            .next()
+            .await
+            .expect("index_text size row")
+            .expect("index_text size missing row");
+        let stored_index_bytes: i64 = row.get(0).expect("sum index_text");
+        let max_index_bytes: i64 = row.get(1).expect("max index_text");
+        let occurrence_count: i64 = row.get(2).expect("occurrence count");
+        let expected_index_bytes = i64::try_from(n * derived.len()).unwrap();
+        let uncapped_index_bytes =
+            i64::try_from(n * format!("payload-00-{payload_stem}").len()).unwrap();
+        assert_eq!(occurrence_count, i64::try_from(n).unwrap());
+        assert_eq!(
+            stored_index_bytes, expected_index_bytes,
+            "N={n}: index_text must store the derived budget, not the full body"
+        );
+        assert_eq!(
+            max_index_bytes,
+            i64::try_from(derived.len()).unwrap(),
+            "N={n}: no occurrence may store more than the derived budget"
+        );
+        assert!(
+            stored_index_bytes < uncapped_index_bytes,
+            "N={n}: capped index_text ({stored_index_bytes}) must be smaller than the full body ({uncapped_index_bytes})"
+        );
+
+        let family_bytes = sqlite_family_bytes(&user_sessions_db_path(tmp.path()));
+        assert!(
+            family_bytes > previous_family_bytes,
+            "N={n}: user-sessions family must grow with sessions ({family_bytes} vs {previous_family_bytes})"
+        );
+        let mut body_rows = snapshot
+            .query(
+                "SELECT COUNT(*), COALESCE(SUM(length(body)), 0), COALESCE(SUM(uncompressed_bytes), 0)
+                 FROM session_canonical_bodies",
+                (),
+            )
+            .await
+            .expect("canonical body census");
+        let body_row = body_rows
+            .next()
+            .await
+            .expect("canonical body census row")
+            .expect("canonical body census missing row");
+        let stored_bodies: i64 = body_row.get(0).expect("body count");
+        let stored_body_bytes: i64 = body_row.get(1).expect("stored body bytes");
+        let uncompressed_body_bytes: i64 = body_row.get(2).expect("uncompressed body bytes");
+        assert_eq!(stored_bodies, i64::try_from(n).unwrap());
+        assert_eq!(uncompressed_body_bytes, uncapped_index_bytes);
+        assert!(
+            stored_body_bytes < uncompressed_body_bytes,
+            "N={n}: large bodies must be stored compressed ({stored_body_bytes} vs {uncompressed_body_bytes})"
+        );
+
+        let observation_copy: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM observations WHERE instr(observation_json, ?1) > 0",
+                params![payload_stem.as_str()],
+            )
+            .await
+            .expect("observation body leak query")
+            .next()
+            .await
+            .expect("observation body leak row")
+            .expect("observation body leak missing row")
+            .get(0)
+            .expect("observation body leak count");
+        assert_eq!(
+            observation_copy, 0,
+            "N={n}: observation_json must not keep the canonical body"
+        );
+        let lcm_copy: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE content IS NOT NULL AND length(content) >= 4096",
+                (),
+            )
+            .await
+            .expect("lcm body leak query")
+            .next()
+            .await
+            .expect("lcm body leak row")
+            .expect("lcm body leak missing row")
+            .get(0)
+            .expect("lcm body leak count");
+        assert_eq!(
+            lcm_copy, 0,
+            "N={n}: lcm_raw_messages.content must not keep the canonical body"
+        );
+        let placeholder_copy: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE length(COALESCE(placeholder_text, '')) > 4096",
+                (),
+            )
+            .await
+            .expect("lcm placeholder leak query")
+            .next()
+            .await
+            .expect("lcm placeholder leak row")
+            .expect("lcm placeholder leak missing row")
+            .get(0)
+            .expect("lcm placeholder leak count");
+        assert_eq!(
+            placeholder_copy, 0,
+            "N={n}: placeholder_text must not keep a second full body"
+        );
+        println!(
+            "user-sessions ingest N={n} family_bytes={family_bytes} stored_index_bytes={stored_index_bytes} uncapped_index_bytes={uncapped_index_bytes} unique_payload_bytes={uncapped_index_bytes} stored_body_bytes={stored_body_bytes}"
+        );
+        previous_family_bytes = family_bytes;
+    }
+}
+
+#[asupersync::test]
+async fn occurrence_replay_accepts_existing_full_text_and_rejects_changed_content() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let session_id = fixture_session("session.projector.existing-full-text");
+    let text = "canonical message ".repeat(8_000);
+    assert!(derived_text_for_index(&text).len() < text.len());
+    let (observation, write) = fixture_observation_with_text(&session_id, 0, text.clone());
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let store = temporal_store(&runtime);
+    let sequence = session_effect_sequence(&runtime, &session_id).await;
+    store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(sequence, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let recovery = store
+        .session_refresh_recovery(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, batch) = store
+        .materialize_session_temporal_refresh_batch_for_test(&recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.occurrences().len(), 1);
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
+        .await
+        .unwrap();
+    // Master persisted the full sanitized body before the derived-index cap.
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE session_occurrences SET index_text = ?2 WHERE session_id = ?1",
+                params![session_id.as_str(), &text],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
+        .await
+        .expect("unchanged canonical content must replay across the index cap");
+    let mut rows = transaction.query(
+        "SELECT index_text, sanitized_content_bytes FROM session_occurrences WHERE session_id = ?1",
+        params![session_id.as_str()],
+    ).await.unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), text);
+    assert_eq!(
+        row.get::<i64>(1).unwrap(),
+        i64::try_from(text.len()).unwrap()
+    );
+    drop(rows);
+    transaction.execute(
+        "UPDATE session_occurrences SET index_text = index_text || 'corrupt' WHERE session_id = ?1",
+        params![session_id.as_str()],
+    ).await.unwrap();
+    super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
+        .await
+        .expect_err("matching digest cannot excuse changed stored text");
+    transaction
+        .execute(
+            "UPDATE session_occurrences SET index_text = ?2 WHERE session_id = ?1",
+            params![session_id.as_str(), &text],
+        )
+        .await
+        .unwrap();
+    assert_eq!(transaction.execute(
+        "UPDATE session_occurrences SET sanitized_content_digest = '0000000000000000000000000000000000000000000000000000000000000000' WHERE session_id = ?1",
+        params![session_id.as_str()],
+    ).await.unwrap(), 1);
+    super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
+        .await
+        .expect_err("a divergent canonical digest must still reject replay");
+}
+
+fn realistic_words(seed: u64, bytes: usize) -> String {
+    const WORDS: [&str; 16] = [
+        "select", "from", "where", "join", "index", "session", "tool", "output", "error", "trace",
+        "payload", "cursor", "anchor", "query", "store", "graph",
+    ];
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
+    let mut out = String::with_capacity(bytes + 16);
+    while out.len() < bytes {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push_str(WORDS[(state % WORDS.len() as u64) as usize]);
+        out.push(' ');
+    }
+    out.truncate(bytes);
+    out
+}
+
+fn fixture_realistic_observation(
+    session_id: &SessionId,
+    session: usize,
+    ordinal: u64,
+    facts: Vec<CanonicalObservationFactV1>,
+) -> (DurableObservationV1, AnchoredObservationWrite) {
+    fixture_observation_from_facts(
+        session_id,
+        ordinal,
+        ProviderId::new(format!("codex-{session}-{ordinal}")).unwrap(),
+        ObservationId::new(format!("record.realistic.{session}.{ordinal}")).unwrap(),
+        CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_thread_id(ObservationId::new(format!("thread.realistic.{session}")).unwrap())
+            .with_turn_id(
+                ObservationId::new(format!("turn.realistic.{session}.{}", ordinal / 4)).unwrap(),
+            )
+            .with_message_id(
+                ObservationId::new(format!("message.realistic.{session}.{ordinal}")).unwrap(),
+            )
+            .with_agent_id(ObservationId::new(format!("agent.realistic.{session}")).unwrap()),
+        facts,
+        None,
+    )
+}
+
+async fn print_user_sessions_dbstat(snapshot: &impl QueryExecutor, family_bytes: u64, n: usize) {
+    let mut rows = snapshot
+        .query(
+            "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name ORDER BY SUM(pgsize) DESC",
+            (),
+        )
+        .await
+        .expect("dbstat query");
+    let mut accounted = 0u64;
+    while let Some(row) = rows.next().await.expect("dbstat row") {
+        let name: String = row.get(0).expect("dbstat name");
+        let bytes = u64::try_from(row.get::<i64>(1).expect("dbstat pgsize")).unwrap();
+        accounted = accounted.saturating_add(bytes);
+        if bytes >= 32_768 {
+            println!("user-sessions dbstat N={n} name={name} pgsize={bytes}");
+        }
+    }
+    let unused_sql = "SELECT name, SUM(pgsize), SUM(unused), SUM(payload)
+         FROM dbstat
+         WHERE name IN (
+            'lcm_raw_messages', 'observations', 'retrieval_anchors',
+            'lcm_raw_messages_fts_data', 'session_canonical_bodies',
+            'sanitization_receipts', 'observation_projection_provenance'
+         )
+         GROUP BY name
+         ORDER BY SUM(pgsize) DESC";
+    let mut unused_rows = snapshot.query(unused_sql, ()).await.expect("dbstat unused");
+    while let Some(row) = unused_rows.next().await.expect("unused row") {
+        println!(
+            "user-sessions unused N={n} name={} pgsize={} unused={} payload={}",
+            row.get::<String>(0).unwrap(),
+            row.get::<i64>(1).unwrap(),
+            row.get::<i64>(2).unwrap(),
+            row.get::<i64>(3).unwrap(),
+        );
+    }
+    let lcm_sql = "SELECT
+            COALESCE(SUM(length(COALESCE(content, ''))), 0),
+            COALESCE(SUM(length(COALESCE(metadata_json, ''))), 0),
+            COALESCE(SUM(length(COALESCE(placeholder_text, ''))), 0),
+            COALESCE(SUM(length(COALESCE(payload_ref, ''))), 0),
+            COALESCE(SUM(length(content_hash)), 0),
+            COALESCE(SUM(length(provider)+length(message_id)+length(session_id)+length(role)+length(storage_kind)), 0)
+         FROM lcm_raw_messages";
+    let mut lcm = snapshot.query(lcm_sql, ()).await.expect("lcm census");
+    let lcm_row = lcm.next().await.expect("lcm row").expect("lcm");
+    println!(
+        "user-sessions lcm-cols N={n} content={} metadata={} placeholder={} payload_ref={} content_hash={} ids={}",
+        lcm_row.get::<i64>(0).unwrap(),
+        lcm_row.get::<i64>(1).unwrap(),
+        lcm_row.get::<i64>(2).unwrap(),
+        lcm_row.get::<i64>(3).unwrap(),
+        lcm_row.get::<i64>(4).unwrap(),
+        lcm_row.get::<i64>(5).unwrap(),
+    );
+    let column_sql = "SELECT
+            (SELECT COUNT(*) FROM observations),
+            (SELECT COALESCE(SUM(length(observation_json)), 0) FROM observations),
+            (SELECT COALESCE(SUM(length(anchor_json)), 0) FROM retrieval_anchors),
+            (SELECT COALESCE(SUM(length(availability_json)), 0) FROM observation_repository_provenance),
+            (SELECT COALESCE(SUM(length(COALESCE(capture_json, ''))), 0) FROM observation_repository_provenance),
+            (SELECT COALESCE(SUM(length(COALESCE(content, ''))), 0) FROM lcm_raw_messages),
+            (SELECT COALESCE(SUM(length(index_text)), 0) FROM session_occurrences),
+            (SELECT COUNT(*) FROM session_canonical_bodies),
+            (SELECT COALESCE(SUM(length(body)), 0) FROM session_canonical_bodies),
+            (SELECT COALESCE(SUM(uncompressed_bytes), 0) FROM session_canonical_bodies)";
+    let mut cols = snapshot.query(column_sql, ()).await.expect("column census");
+    let row = cols
+        .next()
+        .await
+        .expect("column census row")
+        .expect("column census");
+    println!(
+        "user-sessions census N={n} family_bytes={family_bytes} dbstat_accounted={accounted} observations={} observation_json={} anchor_json={} availability_json={} capture_json={} lcm_content={} occurrence_index_text={} cas_rows={} cas_stored={} cas_uncompressed={}",
+        row.get::<i64>(0).unwrap(),
+        row.get::<i64>(1).unwrap(),
+        row.get::<i64>(2).unwrap(),
+        row.get::<i64>(3).unwrap(),
+        row.get::<i64>(4).unwrap(),
+        row.get::<i64>(5).unwrap(),
+        row.get::<i64>(6).unwrap(),
+        row.get::<i64>(7).unwrap(),
+        row.get::<i64>(8).unwrap(),
+        row.get::<i64>(9).unwrap(),
+    );
+}
+
+#[asupersync::test]
+async fn realistic_user_sessions_dbstat_names_dominant_bytes() {
+    const SESSION_COUNTS: [usize; 2] = [4, 8];
+    const TURNS: usize = 32;
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let mut next_session = 0usize;
+    let mut previous_family = 0u64;
+    for n in SESSION_COUNTS {
+        while next_session < n {
+            let session_id = fixture_session(&format!("session.realistic.{next_session}"));
+            let mut ordinal = 0u64;
+            for turn in 0..TURNS {
+                let seed = ((next_session as u64) << 32) | (turn as u64);
+                let user = realistic_words(seed, 280);
+                let assistant = realistic_words(seed ^ 1, 280);
+                let tool_out = if turn % 4 == 3 {
+                    realistic_words(seed ^ 2, 48_000)
+                } else {
+                    realistic_words(seed ^ 2, 1_200)
+                };
+                let wrap = realistic_words(seed ^ 3, 280);
+                let call =
+                    ObservationId::new(format!("tool.realistic.{next_session}.{turn}")).unwrap();
+                let facts = [
+                    vec![CanonicalObservationFactV1::Message {
+                        role: CanonicalMessageRoleV1::User,
+                        content: json!({"text": user}),
+                        model: None,
+                        timestamp: Some(1_750_000_000 + ordinal as i64),
+                    }],
+                    vec![
+                        CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::Assistant,
+                            content: json!({"text": assistant}),
+                            model: Some("gpt-bench".to_owned()),
+                            timestamp: Some(1_750_000_001 + ordinal as i64),
+                        },
+                        CanonicalObservationFactV1::ToolInvocation {
+                            invocation_id: Some(call.clone()),
+                            name: "Bash".to_owned(),
+                            arguments: json!({"command": "rg --json tracedecay crates"}),
+                        },
+                    ],
+                    vec![CanonicalObservationFactV1::tool_result(
+                        Some(call),
+                        json!({"text": tool_out}),
+                        Some(true),
+                        None,
+                        None,
+                    )],
+                    vec![CanonicalObservationFactV1::Message {
+                        role: CanonicalMessageRoleV1::Assistant,
+                        content: json!({"text": wrap}),
+                        model: Some("gpt-bench".to_owned()),
+                        timestamp: Some(1_750_000_003 + ordinal as i64),
+                    }],
+                ];
+                for fact in facts {
+                    let (observation, write) =
+                        fixture_realistic_observation(&session_id, next_session, ordinal, fact);
+                    Box::pin(persist_fixture(&runtime, observation, write)).await;
+                    ordinal += 1;
+                }
+            }
+            let sequence = session_effect_sequence(&runtime, &session_id).await;
+            refresh_through(&store, &session_id, sequence, 0).await;
+            next_session += 1;
+        }
+        let snapshot = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile registered database")
+            .read_snapshot()
+            .await
+            .expect("dbstat snapshot");
+        let family = sqlite_family_bytes(&user_sessions_db_path(tmp.path()));
+        assert!(
+            family > previous_family,
+            "N={n}: family must grow ({family} vs {previous_family})"
+        );
+        let oversized: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE length(COALESCE(placeholder_text, '')) > 4096",
+                (),
+            )
+            .await
+            .expect("placeholder cap query")
+            .next()
+            .await
+            .expect("placeholder cap row")
+            .expect("placeholder cap missing row")
+            .get(0)
+            .expect("placeholder cap count");
+        assert_eq!(
+            oversized, 0,
+            "N={n}: LCM placeholder must stay on the snippet budget"
+        );
+        print_user_sessions_dbstat(&snapshot, family, n).await;
+        previous_family = family;
+    }
+}
+
+#[asupersync::test]
+async fn grouped_receipt_savepoint_failure_aborts_the_group() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database");
+    let scope = SessionRelationScope::profile_sessions(
+        UserProfileId::new("profile.savepoint-abort").expect("profile"),
+    );
+    let projections = ["session.savepoint-abort-a", "session.savepoint-abort-b"]
+        .iter()
+        .map(|name| SessionRelationProjection {
+            scope: scope.clone(),
+            session_id: fixture_session(name),
+            generation: 1,
+            summaries: Vec::new(),
+            logical_copies: Vec::new(),
+            thread_hierarchy: Vec::new(),
+            agent_hierarchy: Vec::new(),
+            parent_session_id: None,
+            workflow_agents: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let failing = FailingRegisteredDb::fail_nth_prefixed_execute(database, "SAVEPOINT", 2);
+    let access = SessionTemporalAccess::new(&failing);
+    let error = access
+        .record_relation_receipts_group(&projections, &ExecutionControl::default())
+        .await
+        .expect_err("savepoint failure must abort the grouped commit");
+    assert_eq!(
+        error.to_string(),
+        "session-temporal storage operation complete session refresh failed: \
+         SQLite runtime failed: injected savepoint failure"
+    );
+    assert_eq!(
+        fixture_receipt_state(&runtime, &projections[0].session_id).await,
+        None,
+        "the aborted group must not leave the first item's receipt committed"
+    );
+    assert_eq!(
+        fixture_receipt_state(&runtime, &projections[1].session_id).await,
+        None,
+        "the aborted group must not leave a later item's receipt committed"
+    );
+}
+
+async fn fixture_receipt_state(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+) -> Option<String> {
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database")
+        .read_snapshot()
+        .await
+        .expect("receipt snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT state FROM session_relation_receipts WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .expect("receipt query");
+    rows.next()
+        .await
+        .expect("receipt row")
+        .map(|row| row.get::<String>(0).expect("state"))
+}
+
+/// A failed `{savepoint}_alone` create after a refused batch is the same
+/// transaction boundary failure as a failed base savepoint: the whole
+/// group rolls back, including an earlier item whose refused-batch
+/// fallback already committed a begin under its own savepoint.
+#[asupersync::test]
+async fn grouped_begin_alone_savepoint_failure_aborts_the_group() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database");
+    let store = temporal_store(&runtime);
+    let mut items = Vec::new();
+    for (ordinal, session_name) in ["session.savepoint-alone-a", "session.savepoint-alone-b"]
+        .into_iter()
+        .enumerate()
+    {
+        let session_id = fixture_session(session_name);
+        let (observation, write) = fixture_observation(&session_id, ordinal as u64, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        let request = SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(1, 0).unwrap(),
+        );
+        let crate::SessionRefreshBeginPlanV1::Prepared(recovery) = store
+            .plan_session_refresh_begin(request.clone())
+            .await
+            .expect("plan begin")
+        else {
+            panic!("fresh session must plan a prepared begin");
+        };
+        let (progress, batch) = store
+            .materialize_session_temporal_refresh_batch_for_test(&recovery)
+            .await
+            .expect("materialize batch")
+            .expect("fresh session has a first batch");
+        items.push(crate::SessionRefreshBeginBatchItemV1 {
+            request,
+            accepted_at: recovery.accepted_at(),
+            progress,
+            batch,
+        });
+    }
+    // Item 0's batch refuses at its receipt insert, so its durable begin
+    // commits under `refresh_begin_item_0_alone`. Item 1's batch refuses
+    // the same way, then its `_alone` create fails — a boundary failure
+    // that must abort the whole group rather than acknowledge item 0.
+    let failing = FailingRegisteredDb::fail_prefixed_executes(
+        database,
+        &[
+            ("INSERT INTO session_temporal_projection_receipts", 1),
+            ("SAVEPOINT refresh_begin_item_1_alone", 1),
+        ],
+    );
+    let access = SessionTemporalAccess::new(&failing);
+    let error = access
+        .commit_session_refresh_begin_batch_group(&items, ExecutionControl::default())
+        .await
+        .expect_err("the failed _alone savepoint must abort the grouped commit");
+    assert_eq!(
+        error.to_string(),
+        "session-temporal storage operation persist session refresh progress failed: \
+         SQLite runtime failed: injected savepoint failure"
+    );
+    for item in ["session.savepoint-alone-a", "session.savepoint-alone-b"] {
+        assert_eq!(
+            fixture_refresh_state(&runtime, &fixture_session(item)).await,
+            None,
+            "the aborted group must not leave {item}'s begin committed"
+        );
+    }
+}
+
+async fn fixture_refresh_state(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+) -> Option<String> {
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database")
+        .read_snapshot()
+        .await
+        .expect("refresh snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT state FROM session_refresh_operations WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .expect("refresh query");
+    rows.next()
+        .await
+        .expect("refresh row")
+        .map(|row| row.get::<String>(0).expect("state"))
 }

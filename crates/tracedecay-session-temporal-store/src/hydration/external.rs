@@ -209,7 +209,7 @@ pub(crate) async fn resolve_external_target(
              JOIN session_occurrences AS occurrence
                ON occurrence.session_id = raw.session_id
               AND occurrence.source_provider = raw.provider
-              AND occurrence.generation = ?4
+              AND +occurrence.generation <= ?4
               AND occurrence.message_id = raw.message_id
               AND occurrence.retrieval_anchor_id = ?5
              WHERE raw.provider = ?1
@@ -256,5 +256,5 @@ pub(crate) async fn resolve_external_target(
 }
 
 fn unverifiable() -> HydrationResolution {
-    HydrationResolution::Unavailable(HydrationStateV1::UnverifiableLegacy)
+    HydrationResolution::Unavailable(HydrationStateV1::Unverifiable)
 }

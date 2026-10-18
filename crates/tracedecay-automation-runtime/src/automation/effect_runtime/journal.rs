@@ -10,20 +10,19 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, CapabilityGrantId, DisclosureClass, EffectReceipt, RequestId,
     ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
-use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
+use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest, RunId};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
 
 use super::contract::contract_error;
-use super::retirement::RetirementBinding;
 use super::terminal::{AutomationSettledProblem, AutomationSettledTerminal};
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Production builds keep the item crate-private. Test / `test-helpers` builds
 /// expose it so composition-root journal tests can drive internals without
@@ -104,8 +103,6 @@ pub enum AutomationRecoveryBinding {
     Memory {
         owner: FactOwnerV1,
         recovery_problem: AutomationSettledProblem,
-        retirement: Option<RetirementBinding>,
-        reset_source_digest: Option<String>,
     },
     /// External effects have no canonical destination-side receipt store.
     /// Restart recovery must close them with this typed indeterminate problem
@@ -128,23 +125,6 @@ impl DurableAutomationAdmission {
     pub fn memory_owner(&self) -> Option<&FactOwnerV1> {
         match &self.recovery {
             AutomationRecoveryBinding::Memory { owner, .. } => Some(owner),
-            AutomationRecoveryBinding::External { .. } => None,
-        }
-    }
-
-    pub fn retirement(&self) -> Option<&RetirementBinding> {
-        match &self.recovery {
-            AutomationRecoveryBinding::Memory { retirement, .. } => retirement.as_ref(),
-            AutomationRecoveryBinding::External { .. } => None,
-        }
-    }
-
-    pub fn reset_source_digest(&self) -> Option<&str> {
-        match &self.recovery {
-            AutomationRecoveryBinding::Memory {
-                reset_source_digest,
-                ..
-            } => reset_source_digest.as_deref(),
             AutomationRecoveryBinding::External { .. } => None,
         }
     }
@@ -199,7 +179,7 @@ impl DurableAutomationTerminalBinding {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DurableAutomationRecord {
     #[cfg(any(test, feature = "test-helpers"))]
@@ -210,74 +190,6 @@ pub struct DurableAutomationRecord {
     pub state: DurableAutomationState,
     #[cfg(not(any(test, feature = "test-helpers")))]
     state: DurableAutomationState,
-    #[serde(skip)]
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub legacy_terminal: Option<AutomationSettledTerminal>,
-    #[serde(skip)]
-    #[cfg(not(any(test, feature = "test-helpers")))]
-    legacy_terminal: Option<AutomationSettledTerminal>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CurrentDurableAutomationRecord {
-    admission: DurableAutomationAdmission,
-    state: DurableAutomationState,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyDurableAutomationRecord {
-    admission: DurableAutomationAdmission,
-    state: LegacyDurableAutomationState,
-}
-
-#[derive(Deserialize)]
-#[serde(
-    tag = "state",
-    content = "terminal",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-enum LegacyDurableAutomationState {
-    Reserved,
-    Terminal(Box<AutomationSettledTerminal>),
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum DurableAutomationRecordWire {
-    Current(CurrentDurableAutomationRecord),
-    Legacy(LegacyDurableAutomationRecord),
-}
-
-impl<'de> Deserialize<'de> for DurableAutomationRecord {
-    fn deserialize<Deserializer>(
-        deserializer: Deserializer,
-    ) -> std::result::Result<Self, Deserializer::Error>
-    where
-        Deserializer: serde::Deserializer<'de>,
-    {
-        match DurableAutomationRecordWire::deserialize(deserializer)? {
-            DurableAutomationRecordWire::Current(record) => Ok(Self {
-                admission: record.admission,
-                state: record.state,
-                legacy_terminal: None,
-            }),
-            DurableAutomationRecordWire::Legacy(record) => match record.state {
-                LegacyDurableAutomationState::Reserved => Ok(Self {
-                    admission: record.admission,
-                    state: DurableAutomationState::Reserved,
-                    legacy_terminal: None,
-                }),
-                LegacyDurableAutomationState::Terminal(terminal) => Ok(Self {
-                    admission: record.admission,
-                    state: DurableAutomationState::Reserved,
-                    legacy_terminal: Some(*terminal),
-                }),
-            },
-        }
-    }
 }
 
 impl DurableAutomationRecord {
@@ -308,30 +220,27 @@ impl DurableAutomationRecord {
 pub enum ReservationResult {
     Execute {
         claim: AutomationReservationClaim,
-        retirement: Option<RetirementBinding>,
     },
     Replay {
         terminal: AutomationSettledTerminal,
         publication: Option<ExactRunPublication>,
-        retirement: Option<RetirementBinding>,
     },
     /// A prior process durably reserved this exact admission but did not
     /// publish its outer terminal. The caller must reconcile against the
     /// canonical memory receipt authority before this reservation can close.
-    Recover {
-        retirement: Option<RetirementBinding>,
-    },
+    Recover,
     /// A terminal was accepted and its exact ledger row was durably staged,
     /// but publication did not finish before the prior process stopped.
     RecoverPrepared {
         terminal: AutomationSettledTerminal,
         publication: ExactRunPublication,
-        retirement: Option<RetirementBinding>,
     },
     /// The run identity already has a valid durable record, but the newly
     /// prepared admission does not match the authority bound to that record.
     /// This is an idempotency conflict, not a journal I/O or shape failure.
-    Conflict { terminal: bool },
+    Conflict {
+        terminal: bool,
+    },
 }
 
 /// Process-local proof that an `Execute` admission still has a live owner.
@@ -343,15 +252,34 @@ pub enum ReservationResult {
 /// async cleanup path or a second durable lease authority.
 pub struct AutomationReservationClaim {
     path: PathBuf,
-    token: Arc<()>,
+    token: Arc<ReservationClaimState>,
+}
+
+/// What the live owner has itself made durable.
+///
+/// A visible journal replacement is not proof of durability, so a read that
+/// acts on journal state first republishes it. The claim owner already knows
+/// which state its own completed writes made durable; a read that observes
+/// exactly that state needs no second commit. Any failed write forgets it.
+#[derive(Default)]
+struct ReservationClaimState {
+    durable: Mutex<Option<DurableAutomationRecord>>,
+}
+
+impl ReservationClaimState {
+    fn durable(&self) -> MutexGuard<'_, Option<DurableAutomationRecord>> {
+        match self.durable.lock() {
+            Ok(durable) => durable,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 }
 
 impl Drop for AutomationReservationClaim {
     fn drop(&mut self) {
-        // Each claim incremented the in-flight gauge exactly once at
+        // Each claim registered itself exactly once at
         // acquisition; dropping the owner (settled, abandoned, panicked, or
         // cancelled) is the one release point.
-        hotpath::gauge!("daemon.automation.effect.in_flight").dec(1_u64);
         let mut claims = reservation_claims_guard();
         if claims
             .get(&self.path)
@@ -362,12 +290,14 @@ impl Drop for AutomationReservationClaim {
     }
 }
 
-fn reservation_claims() -> &'static Mutex<HashMap<PathBuf, Weak<()>>> {
-    static CLAIMS: OnceLock<Mutex<HashMap<PathBuf, Weak<()>>>> = OnceLock::new();
+type ReservationClaims = HashMap<PathBuf, Weak<ReservationClaimState>>;
+
+fn reservation_claims() -> &'static Mutex<ReservationClaims> {
+    static CLAIMS: OnceLock<Mutex<ReservationClaims>> = OnceLock::new();
     CLAIMS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn reservation_claims_guard() -> MutexGuard<'static, HashMap<PathBuf, Weak<()>>> {
+fn reservation_claims_guard() -> MutexGuard<'static, ReservationClaims> {
     match reservation_claims().lock() {
         Ok(claims) => claims,
         Err(poisoned) => poisoned.into_inner(),
@@ -381,9 +311,8 @@ fn acquire_reservation_claim(path: &Path) -> Result<AutomationReservationClaim> 
             "an identical memory automation run is already in flight",
         ));
     }
-    let token = Arc::new(());
+    let token = Arc::new(ReservationClaimState::default());
     claims.insert(path.to_path_buf(), Arc::downgrade(&token));
-    hotpath::gauge!("daemon.automation.effect.in_flight").inc(1_u64);
     Ok(AutomationReservationClaim {
         path: path.to_path_buf(),
         token,
@@ -391,25 +320,23 @@ fn acquire_reservation_claim(path: &Path) -> Result<AutomationReservationClaim> 
 }
 
 fn reservation_claim_is_live(path: &Path) -> bool {
-    reservation_claims_guard()
-        .get(path)
-        .and_then(Weak::upgrade)
-        .is_some()
+    live_reservation_claim(path).is_some()
 }
 
-pub fn retained_source_bindings(
-    path: &Path,
-) -> Result<(Option<RetirementBinding>, Option<String>)> {
-    with_journal_lock(path, || {
-        Ok(read_stabilized_record(path)?
-            .map(|record| {
-                (
-                    record.admission.retirement().cloned(),
-                    record.admission.reset_source_digest().map(str::to_owned),
-                )
-            })
-            .unwrap_or_default())
-    })
+fn live_reservation_claim(path: &Path) -> Option<Arc<ReservationClaimState>> {
+    reservation_claims_guard().get(path).and_then(Weak::upgrade)
+}
+
+/// Records the journal state the live owner just made durable, or forgets it
+/// after a write whose durability is unknown.
+fn note_owner_durable_record(path: &Path, record: Option<&DurableAutomationRecord>) {
+    if let Some(claim) = live_reservation_claim(path) {
+        *claim.durable() = record.cloned();
+    }
+}
+
+fn owner_made_durable(path: &Path, record: &DurableAutomationRecord) -> bool {
+    live_reservation_claim(path).is_some_and(|claim| claim.durable().as_ref() == Some(record))
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -420,7 +347,11 @@ pub fn reserve_or_replay_blocking(
     reserve_or_replay_with_index(path, requested, || Ok(()), || Ok(()))
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.reserve_or_replay")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.reserve_or_replay",
+    level = "trace",
+    skip_all
+)]
 pub fn reserve_or_replay_indexed_blocking(
     path: &Path,
     requested: DurableAutomationAdmission,
@@ -454,16 +385,14 @@ fn reserve_or_replay_with_index_and_writer(
             None => {
                 let claim = acquire_reservation_claim(path)?;
                 ensure_pending()?;
-                let retirement = requested.retirement().cloned();
                 write_fresh(
                     path,
                     &DurableAutomationRecord {
                         admission: requested,
                         state: DurableAutomationState::Reserved,
-                        legacy_terminal: None,
                     },
                 )?;
-                Ok(ReservationResult::Execute { claim, retirement })
+                Ok(ReservationResult::Execute { claim })
             }
             Some(record) => {
                 if !stable_admission_matches(&record.admission, &requested) {
@@ -481,7 +410,6 @@ fn reserve_or_replay_with_index_and_writer(
                     } => Ok(ReservationResult::Replay {
                         terminal: read_terminal_sidecar(path, &binding)?,
                         publication,
-                        retirement: record.admission.retirement().cloned(),
                     }),
                     DurableAutomationState::Prepared {
                         terminal: binding,
@@ -489,14 +417,11 @@ fn reserve_or_replay_with_index_and_writer(
                     } => Ok(ReservationResult::RecoverPrepared {
                         terminal: read_terminal_sidecar(path, &binding)?,
                         publication,
-                        retirement: record.admission.retirement().cloned(),
                     }),
                     DurableAutomationState::Reserved if reservation_claim_is_live(path) => Err(
                         contract_error("an identical memory automation run is already in flight"),
                     ),
-                    DurableAutomationState::Reserved => Ok(ReservationResult::Recover {
-                        retirement: record.admission.retirement().cloned(),
-                    }),
+                    DurableAutomationState::Reserved => Ok(ReservationResult::Recover),
                 }
             }
         }
@@ -519,6 +444,40 @@ pub fn read_indexed_terminal_blocking(path: &Path) -> Result<Option<AutomationSe
             DurableAutomationState::Reserved => return Ok(None),
         };
         read_terminal_sidecar(path, &terminal).map(Some)
+    })
+}
+
+pub enum JournalShapeProbe {
+    Missing,
+    Current(Box<DurableAutomationRecord>),
+    /// The persisted shape was refused and the journal with its sidecar was
+    /// durably removed. No current writer produces a refused shape, so its
+    /// admission can never be reconciled or replayed.
+    Discarded(TraceDecayError),
+}
+
+pub fn read_or_discard_unsupported_record_blocking(path: &Path) -> Result<JournalShapeProbe> {
+    with_journal_lock(path, || {
+        let refusal = match read_record(path) {
+            Ok(None) => return Ok(JournalShapeProbe::Missing),
+            Ok(Some(record)) => return Ok(JournalShapeProbe::Current(Box::new(record))),
+            Err(error) if error.reset_required_context().is_some() => error,
+            Err(error) => return Err(error),
+        };
+        remove_terminal_sidecar_if_present(path)?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path).map_err(
+            |error| {
+                contract_error(format!(
+                    "unsupported automation journal reset failed: {error}"
+                ))
+            },
+        )?;
+        sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(|error| {
+            contract_error(format!(
+                "unsupported automation journal reset directory sync failed: {error}"
+            ))
+        })?;
+        Ok(JournalShapeProbe::Discarded(refusal))
     })
 }
 
@@ -576,9 +535,12 @@ fn classify_durable_settlement_with_stabilizer(
         publication.validate().map_err(contract_error)?;
     }
     with_journal_lock(path, || {
-        let Some(record) = read_stabilized_record_with_writer(path, stabilize_record)? else {
+        // Classification revalidates an uncertain settlement, so it republishes
+        // whatever it observes, including state its owner believes durable.
+        let Some(record) = read_record(path)? else {
             return Ok(DurableSettlementClassification::Missing);
         };
+        let record = stabilize_bound_record_after_visibility_with(path, &record, stabilize_record)?;
         validate_stable_admission(&record.admission, requested)?;
         match record.state {
             DurableAutomationState::Reserved => Ok(DurableSettlementClassification::Reserved),
@@ -637,7 +599,11 @@ pub fn unbound_reserved_cleanup_is_safe_blocking(
 /// Persists the terminal produced by canonical receipt reconciliation for a
 /// reservation owned by a prior process. This is the only path allowed to
 /// close a foreign reservation, and it retains the original admission bytes.
-#[hotpath::measure(label = "daemon.automation.effect.persist_recovered")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.persist_recovered",
+    level = "trace",
+    skip_all
+)]
 pub fn persist_recovered_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -688,7 +654,9 @@ pub fn persist_recovered_terminal_blocking(
             publication: None,
         };
         write_record(path, &record)?;
-        let stored = read_stabilized_record(path)?.ok_or_else(|| {
+        // `write_record` returned only after a durable replacement read back
+        // byte-identically, so this read verifies it without a second commit.
+        let stored = read_record(path)?.ok_or_else(|| {
             contract_error("recovered memory automation terminal disappeared after write")
         })?;
         validate_stable_admission(&stored.admission, requested)?;
@@ -703,7 +671,11 @@ pub fn persist_recovered_terminal_blocking(
     })
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.persist_prepared")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.persist_prepared",
+    level = "trace",
+    skip_all
+)]
 pub fn persist_prepared_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -755,7 +727,9 @@ pub fn persist_prepared_terminal_blocking(
             publication,
         };
         write_record(path, &record)?;
-        let stored = read_stabilized_record(path)?.ok_or_else(|| {
+        // `write_record` returned only after a durable replacement read back
+        // byte-identically, so this read verifies it without a second commit.
+        let stored = read_record(path)?.ok_or_else(|| {
             contract_error("prepared automation terminal disappeared after durable write")
         })?;
         validate_stable_admission(&stored.admission, requested)?;
@@ -813,7 +787,11 @@ pub fn replay_exact_binding_after_error_blocking(
     })
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.promote_prepared")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.promote_prepared",
+    level = "trace",
+    skip_all
+)]
 pub fn promote_prepared_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -903,7 +881,9 @@ fn promote_prepared_terminal_with_writers(
             publication: Some(publication.clone()),
         };
         write_terminal_record(path, &record)?;
-        let stored = read_stabilized_record(path)?.ok_or_else(|| {
+        // `write_record` returned only after a durable replacement read back
+        // byte-identically, so this read verifies it without a second commit.
+        let stored = read_record(path)?.ok_or_else(|| {
             contract_error("promoted automation terminal disappeared after durable write")
         })?;
         match stored.state {
@@ -923,7 +903,11 @@ fn promote_prepared_terminal_with_writers(
 }
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.persist_terminal")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.persist_terminal",
+    level = "trace",
+    skip_all
+)]
 pub fn persist_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -978,7 +962,9 @@ pub fn persist_terminal_blocking(
             publication: None,
         };
         write_record(path, &record)?;
-        let stored = read_stabilized_record(path)?.ok_or_else(|| {
+        // `write_record` returned only after a durable replacement read back
+        // byte-identically, so this read verifies it without a second commit.
+        let stored = read_record(path)?.ok_or_else(|| {
             contract_error("memory automation terminal disappeared after durable write")
         })?;
         validate_stable_admission(&stored.admission, requested)?;
@@ -994,7 +980,7 @@ pub fn persist_terminal_blocking(
     })
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.abandon")]
+#[tracing::instrument(name = "daemon.automation.effect.abandon", level = "trace", skip_all)]
 pub fn abandon_reservation_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -1058,7 +1044,8 @@ fn with_journal_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> R
     let lock = open_lock_nofollow(&lock_path)
         .map_err(|error| contract_error(format!("automation terminal lock failed: {error}")))?;
     let result = operation();
-    let unlock = fs2::FileExt::unlock(&lock)
+    let unlock = lock
+        .unlock()
         .map_err(|error| contract_error(format!("automation terminal unlock failed: {error}")));
     match (result, unlock) {
         (Err(error), _) => Err(error),
@@ -1072,10 +1059,7 @@ fn with_journal_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> R
 /// can become visible and still return an error after publication, so
 /// visibility alone is not settlement evidence.
 fn read_stabilized_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
-    let Some(record) = read_record(path)? else {
-        return Ok(None);
-    };
-    stabilize_bound_record_after_visibility(path, &record).map(Some)
+    read_stabilized_record_with_writer(path, write_record)
 }
 
 fn read_stabilized_record_with_writer(
@@ -1085,14 +1069,10 @@ fn read_stabilized_record_with_writer(
     let Some(record) = read_record(path)? else {
         return Ok(None);
     };
+    if owner_made_durable(path, &record) {
+        return Ok(Some(record));
+    }
     stabilize_bound_record_after_visibility_with(path, &record, stabilize_record).map(Some)
-}
-
-fn stabilize_bound_record_after_visibility(
-    path: &Path,
-    expected: &DurableAutomationRecord,
-) -> Result<DurableAutomationRecord> {
-    stabilize_bound_record_after_visibility_with(path, expected, write_record)
 }
 
 test_helpers_pub! {
@@ -1126,8 +1106,7 @@ fn stabilize_bound_record_after_visibility_with(
 }
 }
 
-test_helpers_pub! {
-fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
+fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     let Some(file) = open_regular_nofollow(path)? else {
         return Ok(None);
     };
@@ -1146,23 +1125,46 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
             "automation terminal grew beyond its durable byte bound",
         ));
     }
+    Ok(Some(bytes))
+}
+
+/// A journal whose persisted shape no current reader accepts.
+pub struct RefusedJournalShape {
+    pub reason: String,
+    /// The run id the journal's admission names, when it still parses as one.
+    /// It is only a claim until checked against the journal's filename digest.
+    pub claimed_run_id: Option<RunId>,
+}
+
+/// Read-only shape probe for diagnostics: takes no journal lock and changes
+/// nothing, so it never stands in for the locked recovery read.
+pub fn refused_journal_shape_blocking(path: &Path) -> Result<Option<RefusedJournalShape>> {
+    let Some(bytes) = read_journal_bytes(path)? else {
+        return Ok(None);
+    };
+    let Err(error) = serde_json::from_slice::<DurableAutomationRecord>(&bytes) else {
+        return Ok(None);
+    };
+    let claimed_run_id = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|journal| journal.pointer("/admission/request/run_id").cloned())
+        .and_then(|run_id| serde_json::from_value::<RunId>(run_id).ok());
+    Ok(Some(RefusedJournalShape {
+        reason: error.to_string(),
+        claimed_run_id,
+    }))
+}
+
+test_helpers_pub! {
+fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
+    let Some(bytes) = read_journal_bytes(path)? else {
+        return Ok(None);
+    };
     {
-        let mut record =
-            serde_json::from_slice::<DurableAutomationRecord>(&bytes).map_err(contract_error)?;
+        let record = serde_json::from_slice::<DurableAutomationRecord>(&bytes).map_err(|error| {
+            TraceDecayError::reset_required("automation effect journal", error.to_string())
+        })?;
         validate_admission_shape(&record.admission)?;
-        if let Some(legacy_terminal) = record.legacy_terminal.take() {
-            if !legacy_terminal.matches_admission(&record.admission) {
-                return Err(contract_error(
-                    "legacy automation terminal is inconsistent with its admission",
-                ));
-            }
-            let binding = write_terminal_sidecar(path, &legacy_terminal)?;
-            record.state = DurableAutomationState::Terminal {
-                terminal: binding,
-                publication: None,
-            };
-            write_record(path, &record)?;
-        }
         match &record.state {
             DurableAutomationState::Reserved => {
                 // A terminal sidecar without Prepared is the crash residue of
@@ -1231,7 +1233,10 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
         .write(true)
         .create(true)
         .follow(FollowSymlinks::No);
-    let file = directory.open_with(name, &options)?;
+    // Concurrent settlements race the first creation of this lock; the shared
+    // helper absorbs the spurious Darwin `ENOENT` the losers are handed.
+    let file =
+        tracedecay_private_fs::capability_dir::open_or_create_with(&directory, name, &options)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1239,16 +1244,22 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
         ));
     }
     let file = file.into_std();
-    fs2::FileExt::lock_exclusive(&file)?;
+    file.lock()?;
     Ok(file)
 }
 
 test_helpers_pub! {
-#[hotpath::measure(label = "daemon.automation.effect.journal_write")]
+#[tracing::instrument(name = "daemon.automation.effect.journal_write", level = "trace", skip_all)]
 fn write_record(path: &Path, record: &DurableAutomationRecord) -> Result<()> {
-    write_record_with_publisher(path, record, |temporary, destination| {
+    let written = write_record_with_publisher(path, record, |temporary, destination| {
         replace_automation_file_atomically(temporary, destination, "automation terminal journal")
-    })
+    });
+    note_owner_durable_record(path, written.is_ok().then_some(record));
+    #[cfg(test)]
+    if written.is_ok() {
+        durable_write_census::note(path, DurableWriteKind::Journal);
+    }
+    written
 }
 }
 
@@ -1349,7 +1360,7 @@ fn terminal_binding(
 }
 
 test_helpers_pub! {
-#[hotpath::measure(label = "daemon.automation.effect.sidecar_write")]
+#[tracing::instrument(name = "daemon.automation.effect.sidecar_write", level = "trace", skip_all)]
 fn write_terminal_sidecar(
     journal_path: &Path,
     terminal: &AutomationSettledTerminal,
@@ -1393,6 +1404,8 @@ fn write_terminal_sidecar_with_publisher(
             "automation terminal sidecar did not replay byte-identically",
         ));
     }
+    #[cfg(test)]
+    durable_write_census::note(journal_path, DurableWriteKind::Sidecar);
     Ok(binding)
 }
 }
@@ -1609,33 +1622,6 @@ fn validate_admission_shape(admission: &DurableAutomationAdmission) -> Result<()
             "automation recovery binding does not match the admitted task",
         ));
     }
-    if let AutomationRecoveryBinding::Memory {
-        retirement,
-        reset_source_digest,
-        ..
-    } = &admission.recovery
-    {
-        if retirement.is_some() && reset_source_digest.is_some() {
-            return Err(contract_error(
-                "automation recovery cannot retire and reset the same source",
-            ));
-        }
-        if let Some(retirement) = retirement {
-            validate_sha256_text(&retirement.source_digest)?;
-            let expected = format!(
-                "fact_proposals.{}.json",
-                retirement.source_digest.trim_start_matches("sha256:")
-            );
-            if retirement.archive_name != expected {
-                return Err(contract_error(
-                    "automation retirement archive identity is inconsistent",
-                ));
-            }
-        }
-        if let Some(source_digest) = reset_source_digest {
-            validate_sha256_text(source_digest)?;
-        }
-    }
     admission.scope.validate().map_err(contract_error)?;
     admission.input_digest.validate().map_err(contract_error)?;
     admission
@@ -1675,29 +1661,11 @@ fn validate_admission_shape(admission: &DurableAutomationAdmission) -> Result<()
         || template.configuration_digest != admission.configuration_digest
         || template.policy_digest != admission.grant_digest
         || admission.grant_revision == 0
-        || template.outcome != tracedecay_application::EffectTermination::Partial
+        || template.outcome != tracedecay_contracts::EffectTermination::Partial
         || template.committed_state.is_some()
     {
         return Err(contract_error(
             "memory automation prepared effect binding is inconsistent",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_sha256_text(digest: &str) -> Result<()> {
-    let Some(raw) = digest.strip_prefix("sha256:") else {
-        return Err(contract_error(
-            "automation recovery source digest is not canonical SHA-256",
-        ));
-    };
-    if raw.len() != 64
-        || !raw
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(contract_error(
-            "automation recovery source digest is not canonical SHA-256",
         ));
     }
     Ok(())
@@ -1722,4 +1690,47 @@ fn stable_admission_matches(
         && stored.scope == requested.scope
         && stored.request_id == requested.request_id
         && stored.recovery == requested.recovery
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum DurableWriteKind {
+    Journal,
+    Sidecar,
+}
+
+/// Completed durable journal and sidecar replacements, per journal.
+#[cfg(test)]
+pub(crate) mod durable_write_census {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    use super::DurableWriteKind;
+
+    fn writes() -> &'static Mutex<HashMap<PathBuf, (usize, usize)>> {
+        static WRITES: OnceLock<Mutex<HashMap<PathBuf, (usize, usize)>>> = OnceLock::new();
+        WRITES.get_or_init(Mutex::default)
+    }
+
+    pub(crate) fn note(journal: &Path, kind: DurableWriteKind) {
+        let mut writes = writes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let counts = writes.entry(journal.to_path_buf()).or_default();
+        match kind {
+            DurableWriteKind::Journal => counts.0 += 1,
+            DurableWriteKind::Sidecar => counts.1 += 1,
+        }
+    }
+
+    /// `(journal, sidecar)` durable writes for `journal` so far.
+    pub(crate) fn counts(journal: &Path) -> (usize, usize) {
+        writes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(journal)
+            .copied()
+            .unwrap_or_default()
+    }
 }

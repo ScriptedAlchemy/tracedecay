@@ -1,11 +1,12 @@
-//! End-to-end hook replay: drives every provider's hook subcommands through
+//! End-to-end hook replay: drives response and capture hook subcommands through
 //! the real binary with representative event payloads, then asserts the full
-//! telemetry wiring — each invocation records an attributed
-//! `hook_analytics.jsonl` row in the project store, and `tracedecay analytics
-//! sync` bridges those rows into the durable `analytics_events` table.
+//! telemetry wiring, every native callback, response-capable or capture-only,
+//! records one attributed `hook_analytics.jsonl` row, and `tracedecay analytics
+//! sync` bridges those rows into durable analytics events. Capture-only
+//! callbacks also persist delivery receipts; that durable spool journey
+//! is covered by the lifecycle suite.
 //!
-//! Uses only child-process env (no process-global mutation), so it does not
-//! need `GLOBAL_DB_ENV_LOCK`.
+//! Uses only child-process env (no process-global mutation).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -14,8 +15,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_global_db::AnalyticsEventQuery;
+use tracedecay_global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::{StorageMode, default_profile_sharded_layout};
 
 use crate::common::{git_program, spawn_tracedecay_daemon_with, tracedecay_command_with_home};
@@ -24,15 +25,17 @@ use crate::common::{git_program, spawn_tracedecay_daemon_with, tracedecay_comman
 /// processes never touch the operator's real accounting store. This test's
 /// subject is the bridge from hook JSONL into the durable `analytics_events`
 /// table, which lives in the registered profile accounting database, so it must
-/// opt back in — against its own hermetic temp profile, never a live one.
+/// drop that opt-out, against its own hermetic temp profile, never a live one.
 fn enable_profile_accounting(command: &mut Command) -> &mut Command {
-    command.env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+    command.env_remove("TRACEDECAY_DISABLE_GLOBAL_DB")
 }
 
 struct Replay {
     subcommand: &'static str,
     agent: &'static str,
     hook_name: &'static str,
+    /// The session the host payload names, which the row must carry.
+    session: &'static str,
     /// JSON piped to stdin; `None` for the legacy Claude `preToolUse` contract
     /// which reads `TOOL_INPUT` from the environment instead.
     stdin: Option<Value>,
@@ -45,6 +48,7 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-claude-session-start",
             agent: "claude",
             hook_name: "SessionStart",
+            session: "claude-s1",
             stdin: Some(json!({
                 "session_id": "claude-s1",
                 "cwd": root,
@@ -57,11 +61,19 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-claude-post-tool-use",
             agent: "claude",
             hook_name: "PostToolUse",
+            session: "claude-s1",
             stdin: Some(json!({
                 "session_id": "claude-s1",
                 "cwd": root,
+                "hook_event_name": "PostToolUse",
                 "tool_name": "Edit",
+                "tool_use_id": "claude-edit-1",
                 "tool_input": { "file_path": format!("{root}/src/lib.rs") },
+                "tool_response": { "success": true },
+                "transcript_path": null,
+                "prompt_id": "claude-prompt-1",
+                "permission_mode": "default",
+                "duration_ms": 1,
             })),
             tool_input_env: None,
         },
@@ -69,27 +81,33 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-pre-tool-use",
             agent: "claude",
             hook_name: "preToolUse",
+            session: "claude-s1",
             stdin: None,
             tool_input_env: Some(json!({
                 "session_id": "claude-s1",
-                "subagent_type": "general-purpose",
-                "prompt": "implement the parser",
+                "subagent_type": "Explore",
+                "prompt": "explore the codebase and find where the parser is defined",
             })),
         },
         Replay {
             subcommand: "hook-codex-session-start",
             agent: "codex",
             hook_name: "SessionStart",
-            stdin: Some(json!({ "session_id": "codex-s1", "cwd": root })),
+            session: "codex-s1",
+            stdin: Some(
+                json!({ "hook_event_name": "SessionStart", "session_id": "codex-s1", "cwd": root }),
+            ),
             tool_input_env: None,
         },
         Replay {
             subcommand: "hook-codex-user-prompt-submit",
             agent: "codex",
             hook_name: "UserPromptSubmit",
+            session: "codex-s1",
             stdin: Some(json!({
                 "session_id": "codex-s1",
                 "cwd": root,
+                "hook_event_name": "UserPromptSubmit",
                 "prompt": "fix the failing test",
             })),
             tool_input_env: None,
@@ -98,36 +116,58 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-codex-post-tool-use",
             agent: "codex",
             hook_name: "PostToolUse",
+            session: "codex-s1",
             stdin: Some(json!({
                 "session_id": "codex-s1",
                 "cwd": root,
+                "hook_event_name": "PostToolUse",
+                "turn_id": "codex-turn-1",
                 "tool_name": "shell",
-                "command": "cargo build",
+                "tool_use_id": "codex-shell-1",
+                "tool_input": { "command": "cargo build" },
+                "tool_response": "Finished",
             })),
             tool_input_env: None,
         },
+        // Capture-only callbacks are decoded by the production native decoder,
+        // so their payloads must carry the host's documented Stop shape rather
+        // than the identity subset the response-capable hooks read.
         Replay {
             subcommand: "hook-codex-stop",
             agent: "codex",
             hook_name: "Stop",
-            stdin: Some(json!({ "session_id": "codex-s1", "cwd": root })),
+            session: "codex-s1",
+            stdin: Some(json!({
+                "session_id": "codex-s1",
+                "turn_id": "codex-t1",
+                "transcript_path": null,
+                "cwd": root,
+                "hook_event_name": "Stop",
+                "model": "gpt-5-codex",
+                "permission_mode": "acceptEdits",
+                "stop_hook_active": false,
+                "last_assistant_message": "done",
+            })),
             tool_input_env: None,
         },
         Replay {
             subcommand: "hook-cursor-session-start",
             agent: "cursor",
             hook_name: "sessionStart",
-            stdin: Some(json!({ "conversation_id": "cursor-s1", "cwd": root })),
+            session: "cursor-s1",
+            stdin: Some(
+                json!({ "hook_event_name": "sessionStart", "conversation_id": "cursor-s1", "cwd": root }),
+            ),
             tool_input_env: None,
         },
         Replay {
             subcommand: "hook-cursor-post-tool-use",
             agent: "cursor",
             hook_name: "postToolUse",
+            session: "cursor-s1",
             stdin: Some(json!({
                 "conversation_id": "cursor-s1",
                 "cwd": root,
-                "hook_event_name": "postToolUse",
                 "tool_name": "Read",
             })),
             tool_input_env: None,
@@ -136,17 +176,31 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-cursor-stop",
             agent: "cursor",
             hook_name: "stop",
-            stdin: Some(json!({ "conversation_id": "cursor-s1", "cwd": root })),
+            session: "cursor-s1",
+            stdin: Some(json!({
+                "hook_event_name": "stop",
+                "conversation_id": "cursor-s1",
+                "generation_id": "cursor-g1",
+                "model": "auto",
+                "status": "completed",
+                "loop_count": 1,
+                "cwd": root,
+            })),
             tool_input_env: None,
         },
         Replay {
             subcommand: "hook-kiro-pre-tool-use",
             agent: "kiro",
             hook_name: "preToolUse",
+            session: "kiro-s1",
             stdin: Some(json!({
+                "hook_event_name": "preToolUse",
                 "session_id": "kiro-s1",
                 "cwd": root,
-                "tool_name": "fsWrite",
+                "tool_name": "delegate",
+                "tool_input": {
+                    "task": "explore the codebase and find where the parser is defined",
+                },
             })),
             tool_input_env: None,
         },
@@ -154,9 +208,11 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-kiro-prompt-submit",
             agent: "kiro",
             hook_name: "userPromptSubmit",
+            session: "kiro-s1",
             stdin: Some(json!({
                 "session_id": "kiro-s1",
                 "cwd": root,
+                "hook_event_name": "userPromptSubmit",
                 "prompt": "add a feature",
             })),
             tool_input_env: None,
@@ -165,11 +221,82 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-kiro-post-tool-use",
             agent: "kiro",
             hook_name: "postToolUse",
+            session: "kiro-s1",
             stdin: Some(json!({
+                "hook_event_name": "postToolUse",
                 "session_id": "kiro-s1",
                 "cwd": root,
                 "tool_name": "fsWrite",
                 "file_path": format!("{root}/src/lib.rs"),
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-pi-event",
+            agent: "pi",
+            hook_name: "session_start",
+            session: "pi-s1",
+            stdin: Some(json!({
+                "hook_event_name": "session_start",
+                "id": "pi-e1",
+                "session_id": "pi-s1",
+                "cwd": root,
+                "reason": "startup",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-pi-event",
+            agent: "pi",
+            hook_name: "agent_end",
+            session: "pi-s1",
+            stdin: Some(json!({
+                "hook_event_name": "agent_end",
+                "id": "pi-e2",
+                "session_id": "pi-s1",
+                "cwd": root,
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-kimi-event",
+            agent: "kimi",
+            hook_name: "PostToolUse",
+            session: "kimi-s1",
+            stdin: Some(json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "kimi-s1",
+                "cwd": root,
+                "tool_name": "Shell",
+                "tool_input": { "command": "cargo build" },
+                "tool_call_id": "kimi-call-1",
+                "tool_output": "Finished",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-kimi-event",
+            agent: "kimi",
+            hook_name: "Stop",
+            session: "kimi-s1",
+            stdin: Some(json!({
+                "hook_event_name": "Stop",
+                "session_id": "kimi-s1",
+                "cwd": root,
+                "stop_hook_active": false,
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-opencode-event",
+            agent: "opencode",
+            hook_name: "session.execution.succeeded",
+            session: "ses_opencode_s1",
+            stdin: Some(json!({
+                "id": "evt_opencode_s1",
+                "created": 0,
+                "type": "session.execution.succeeded",
+                "data": { "sessionID": "ses_opencode_s1" },
             })),
             tool_input_env: None,
         },
@@ -209,6 +336,17 @@ fn run_replay(home: &Path, project_root: &Path, replay: &Replay) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    // Research-shaped pre-tool payloads must reach the host as an allow: no
+    // permission decision on stdout, nothing for the model on stderr.
+    if replay.hook_name == "preToolUse" {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            matches!(stdout.trim(), "" | "{}") && output.stderr.is_empty(),
+            "{} must not refuse research\nstdout: {stdout}\nstderr: {}",
+            replay.subcommand,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }
 
 fn read_jsonl_rows(path: &Path) -> Vec<Value> {
@@ -298,6 +436,11 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
                     && str_field(row, "hook_name") == replay.hook_name
             })
             .collect();
+        // The capture-only fast path and the retired Claude pre-tool callback
+        // never reach a response handler, so they record the invocation
+        // themselves: a host firing a hook is adoption evidence whatever the
+        // capture outcome, and a silent callback is indistinguishable from a
+        // broken install.
         assert_eq!(
             matched.len(),
             1,
@@ -308,8 +451,15 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             hook_invoked
         );
         assert!(
-            matched[0].get("project_root").is_none(),
+            matched.iter().all(|row| row.get("project_root").is_none()),
             "{}/{} row must not persist a raw project path",
+            replay.agent,
+            replay.hook_name
+        );
+        assert_eq!(
+            str_field(matched[0], "session_id"),
+            replay.session,
+            "{}/{} row must carry the session its payload names",
             replay.agent,
             replay.hook_name
         );
@@ -321,6 +471,10 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     );
 
     // Bridge: `analytics sync` imports the JSONL rows into the durable table.
+    // Hook callbacks already advance the same per-file import cursor while the
+    // daemon settles hint outcomes after a project-scope transcript ingest, so
+    // the explicit sync only ever imports the tail written since the last one.
+    // The durable table below is the completeness authority.
     let sync = enable_profile_accounting(&mut tracedecay_command_with_home(&home_root))
         .args(["analytics", "sync"])
         .current_dir(&project_root)
@@ -338,10 +492,20 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             String::from_utf8_lossy(&sync.stdout)
         )
     });
-    assert_eq!(
-        sync_outcome.get("imported").and_then(Value::as_u64),
-        Some(store_rows.len() as u64),
-        "analytics sync must import every emitted hook analytics row: {sync_outcome:#}"
+    assert!(
+        sync_outcome
+            .get("imported")
+            .and_then(Value::as_u64)
+            .is_some_and(|imported| imported <= store_rows.len() as u64),
+        "analytics sync must report the imported tail: {sync_outcome:#}"
+    );
+    assert!(
+        sync_outcome["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|source| source["error"].is_null() && source["skipped"] == 0),
+        "analytics sync must map every remaining row: {sync_outcome:#}"
     );
     drop(daemon);
 
@@ -353,7 +517,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             provider: None,
             project_id: None,
             session_id: None,
-            event_kind: Some("hook_invoked".to_string()),
+            event_kind: None,
             since: None,
             until: None,
             before_id: None,
@@ -361,12 +525,25 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         })
         .await
         .expect("query analytics events");
+    let hook_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.provider.starts_with("hook_"))
+        .collect();
+    assert_eq!(
+        hook_events.len(),
+        store_rows.len(),
+        "every emitted hook analytics row must be durable exactly once"
+    );
+    let events: Vec<_> = hook_events
+        .into_iter()
+        .filter(|event| event.event_kind == "hook_invoked")
+        .collect();
     assert_eq!(
         events.len(),
         replays.len(),
-        "every replayed hook must bridge into analytics_events"
+        "every native callback's timing row must bridge into analytics_events"
     );
-    let canonical_project = HostAdmissionTestRuntimeV1::canonical_project_key(&project_root);
+    let canonical_project = RegisteredGlobalDb::canonical_project_key(&project_root);
     for replay in &replays {
         let provider = format!("hook_{}", replay.agent);
         let event = events
@@ -387,6 +564,12 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         assert_eq!(
             event.project_id, canonical_project,
             "{provider}/{} must be attributed to the replay project",
+            replay.hook_name
+        );
+        assert_eq!(
+            event.session_id.as_deref(),
+            Some(replay.session),
+            "{provider}/{} must bridge the session its payload names",
             replay.hook_name
         );
     }

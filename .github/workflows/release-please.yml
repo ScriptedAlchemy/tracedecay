@@ -1,9 +1,37 @@
+# Release channels.
+#
+# Every push to master proposes the next beta prerelease: release-please
+# (release-please-config.json, versioning "prerelease") opens or updates a
+# "chore(release): release X.Y.Z-beta.N" PR. Merging it tags the merge commit
+# and publishes a GitHub *prerelease*, which release-beta.yml turns into
+# attested `tracedecay-beta-<tag>-<platform>` assets, the names the CLI beta
+# upgrade channel resolves.
+#
+# A stable release never happens on its own. Dispatch this workflow with
+# channel=stable and the exact version to ship; release-please then opens a
+# "chore(release): release X.Y.Z" PR from release-please-config-stable.json,
+# and merging that publishes a full release for release.yml.
+#
+# Recover assets for an existing tag:
+#   gh workflow run release-beta.yml --ref master -f release_tag=vX.Y.Z-beta.N
+#   gh workflow run release.yml      --ref master -f release_tag=vX.Y.Z
+
 name: Release Please
 
 on:
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "beta proposes the next prerelease; stable opens a release PR for the exact version below"
+        type: choice
+        options: [beta, stable]
+        default: beta
+      version:
+        description: "Stable version to ship, e.g. 0.1.0 (required when channel=stable)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -17,17 +45,85 @@ jobs:
     name: Open release PR or create GitHub release
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
+      actions: write
       contents: write
       issues: write
       pull-requests: write
     steps:
+      - name: Resolve the release channel
+        id: channel
+        env:
+          CHANNEL: ${{ inputs.channel || 'beta' }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "channel=$CHANNEL" >>"$GITHUB_OUTPUT"
+          case "$CHANNEL" in
+            beta)
+              [[ -z "$VERSION" ]] ||
+                { echo "channel=beta does not take a version; release-please derives the next prerelease" >&2; exit 1; }
+              echo "config=release-please-config.json" >>"$GITHUB_OUTPUT"
+              echo "release_as=" >>"$GITHUB_OUTPUT"
+              ;;
+            stable)
+              [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+                { echo "channel=stable requires an exact X.Y.Z version, got '${VERSION}'" >&2; exit 1; }
+              echo "config=release-please-config-stable.json" >>"$GITHUB_OUTPUT"
+              echo "release_as=$VERSION" >>"$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "unknown channel: $CHANNEL" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Open release PR or create GitHub release
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
           target-branch: master
+          config-file: ${{ steps.channel.outputs.config }}
+          manifest-file: .release-please-manifest.json
+          release-as: ${{ steps.channel.outputs.release_as }}
+
+      # The runner has no checkout yet. The rewrite script is the one on
+      # master, not the release PR branch: a later release-please update
+      # restores closing keywords, and this step has to run on that update too.
+      - name: Checkout master for the release PR body rewrite
+        if: steps.release.outputs.pr != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          persist-credentials: false
+
+      # Release-please copies commit bodies into the PR body, and GitHub
+      # closes every issue those keywords name when the release PR merges.
+      # The config schema has no keyword rewrite.
+      - name: Neutralize closing keywords in the release PR body
+        if: steps.release.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          RELEASE_PR_JSON: ${{ steps.release.outputs.pr }}
+        run: scripts/neutralize-release-pr-closing-keywords.sh
+
+      # Build on the default-branch run ref, not the unique tag ref. The build
+      # still checks out and validates the immutable tag, but GitHub permits
+      # this run to restore the previous release's dependency cache.
+      - name: Dispatch beta asset build on master
+        if: steps.release.outputs.release_created == 'true' && steps.channel.outputs.channel == 'beta'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run release-beta.yml --repo "$GITHUB_REPOSITORY" --ref master --field "release_tag=$RELEASE_TAG"
+
+      - name: Dispatch stable asset build on master
+        if: steps.release.outputs.release_created == 'true' && steps.channel.outputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref master --field "release_tag=$RELEASE_TAG"
 
       - name: Checkout release PR
         if: steps.release.outputs.prs_created == 'true'
@@ -36,11 +132,37 @@ jobs:
           ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      - name: Update release PR lockfile
+      # The release PR is opened as a draft and stays one until it carries a
+      # lockfile matching the bumped Cargo.toml, the same invariant the later
+      # locked release build enforces.
+      # The bumped manifests deliberately precede Cargo.lock. Bootstrap pnpm
+      # here; the updater repairs Cargo.lock before its frozen installation.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        if: steps.release.outputs.prs_created == 'true'
+        with:
+          cache: true
+          cache_dependency_path: |
+            pnpm-lock.yaml
+            Cargo.lock
+
+      - uses: ./.github/actions/setup-bazel
+        if: steps.release.outputs.prs_created == 'true'
+        with:
+          cache-key: release-metadata-ubuntu-latest
+
+      - name: Update release PR generated metadata
         if: steps.release.outputs.prs_created == 'true'
         env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           RELEASE_PR_JSON: ${{ steps.release.outputs.pr }}
-        run: scripts/update-release-pr-lockfile.sh
+        run: |
+          RELEASE_PR_NUMBER=$(
+            jq --exit-status --raw-output \
+              '.number | select(type == "number")' \
+              <<<"$RELEASE_PR_JSON"
+          )
+          scripts/update-release-pr-lockfile.sh
+          gh pr ready "$RELEASE_PR_NUMBER" --repo "$GITHUB_REPOSITORY"
 
       - name: Checkout master
         if: always()

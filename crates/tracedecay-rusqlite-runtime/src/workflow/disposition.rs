@@ -2,19 +2,18 @@
 //!
 //! `candidate`, `validate`, `activate`, `retire`, and `reject` are retained
 //! lifecycle operations over immutable definition versions. The definition
-//! payload never changes — editing creates a new version and admitted runs
-//! remain pinned — so the disposition is a separate compare-and-swap
+//! payload never changes, editing creates a new version and admitted runs
+//! remain pinned, so the disposition is a separate compare-and-swap
 //! aggregate, and every state a transition passes through is appended to an
 //! immutable journal.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,
-    WorkflowDefinitionLifecycleState, WorkflowDefinitionTransitionEntry,
-    WorkflowDefinitionTransitionOutcome,
+    WorkflowDefinitionLifecycleState, WorkflowDefinitionTransitionOutcome,
 };
 use tracedecay_domain::{UtcMicros, WorkflowDefinitionId};
 
-use crate::exact_sql::{ExactSqlError, ExactSqlRow, ExactSqlTransaction, ExactSqlValue};
+use crate::exact_sql::{ExactSqlError, ExactSqlRow, ExactSqlValue};
 
 use super::{execute_tx, execute_tx_changed, query_tx, sql_integer, sql_text, version_i64};
 
@@ -35,19 +34,13 @@ const DISPOSITION_SELECT: &str = "SELECT state, revision, transitioned_at
  FROM workflow_definition_disposition
  WHERE definition_id = ?1 AND definition_version = ?2";
 
-const TRANSITION_SELECT: &str = "SELECT to_revision, from_revision, operation,
-        from_state, to_state, transitioned_at
- FROM workflow_definition_transition_journal
- WHERE definition_id = ?1 AND definition_version = ?2
- ORDER BY to_revision";
-
 /// Seeds the `candidate` disposition a freshly registered version starts in.
 ///
 /// Registration is the only writer of revision 1, and replayed registration of
 /// a byte-identical definition must not disturb an already advanced
 /// disposition, so the insert is unconditionally ignored when a row exists.
 pub(super) fn seed_candidate_disposition(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     definition_id: &WorkflowDefinitionId,
     definition_version: u64,
     registered_at: UtcMicros,
@@ -68,7 +61,7 @@ pub(super) fn seed_candidate_disposition(
 }
 
 pub(super) fn load_disposition_tx(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkQuery,
     definition_id: &WorkflowDefinitionId,
     definition_version: u64,
 ) -> Result<Option<WorkflowDefinitionDisposition>, DispositionError> {
@@ -87,26 +80,6 @@ pub(super) fn load_disposition_tx(
     decode_disposition(definition_id, definition_version, row).map(Some)
 }
 
-pub(super) fn transition_history_tx(
-    transaction: &ExactSqlTransaction,
-    definition_id: &WorkflowDefinitionId,
-    definition_version: u64,
-) -> Result<Vec<WorkflowDefinitionTransitionEntry>, DispositionError> {
-    let version = version_i64(definition_version).map_err(|()| DispositionError::Corrupt)?;
-    let rows = query_tx(
-        transaction,
-        TRANSITION_SELECT,
-        vec![
-            ExactSqlValue::Text(definition_id.as_str().to_owned()),
-            ExactSqlValue::Integer(version),
-        ],
-    )?;
-    rows.rows
-        .iter()
-        .map(|row| decode_transition(definition_id, definition_version, row))
-        .collect()
-}
-
 /// Applies one compare-and-swap lifecycle transition.
 ///
 /// The stored revision must equal `command.expected_revision`; a mismatch that
@@ -115,7 +88,7 @@ pub(super) fn transition_history_tx(
 /// typed revision conflict. Every state on the operation's path gets its own
 /// journal entry before the disposition is swapped.
 pub(super) fn apply_lifecycle_transition(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     command: &WorkflowDefinitionLifecycleCommand,
 ) -> Result<WorkflowDefinitionTransitionOutcome, DispositionError> {
     let version =
@@ -225,31 +198,6 @@ fn decode_disposition(
         definition_version,
         state,
         revision,
-        transitioned_at: UtcMicros(transitioned_at),
-    })
-}
-
-fn decode_transition(
-    definition_id: &WorkflowDefinitionId,
-    definition_version: u64,
-    row: &ExactSqlRow,
-) -> Result<WorkflowDefinitionTransitionEntry, DispositionError> {
-    let to_revision = decode_revision(sql_integer(&row.values, 0))?;
-    let from_revision = decode_revision(sql_integer(&row.values, 1))?;
-    let operation = sql_text(&row.values, 2)
-        .and_then(tracedecay_application::WorkflowLifecycleOperation::from_operation_key)
-        .ok_or(DispositionError::Corrupt)?;
-    let from_state = decode_state(sql_text(&row.values, 3))?;
-    let to_state = decode_state(sql_text(&row.values, 4))?;
-    let transitioned_at = sql_integer(&row.values, 5).ok_or(DispositionError::Corrupt)?;
-    Ok(WorkflowDefinitionTransitionEntry {
-        definition_id: definition_id.clone(),
-        definition_version,
-        operation,
-        from_state,
-        to_state,
-        from_revision,
-        to_revision,
         transitioned_at: UtcMicros(transitioned_at),
     })
 }

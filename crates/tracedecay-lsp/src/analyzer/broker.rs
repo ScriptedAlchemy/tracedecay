@@ -4,22 +4,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use url::Url;
 
 use super::activity::{adapter_workspace_root_from_canonical_root, canonicalize_project_root};
 use super::adapters::{LspAdapterDefinition, LspInstallOption};
-use super::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
+use super::client::{LspDocument, LspRefreshTimeouts, file_uri};
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
-use super::host_ownership::HostAnalyzerOwnership;
+pub use super::launch::command_available;
+use super::launch::{AnalyzerLaunch, AnalyzerLaunchError, AnalyzerLaunchResolver};
 use super::settings::CodeDiagnosticsSettings;
+use crate::AdmittedRoot;
 mod refresh;
 mod semantic_authority;
+mod shared_client;
 #[cfg(test)]
 #[path = "broker/tests.rs"]
 mod tests;
 
-use refresh::{BrokerRefreshCapacity, RefreshBatch};
+use refresh::{AnalyzerSpawn, BrokerRefreshCapacity, RefreshBatch};
 pub use refresh::{
     CompletedRefresh, MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS, MAX_ANALYZER_QUEUED_ROOT_BATCHES,
     PreparedRefresh,
@@ -27,6 +29,7 @@ pub use refresh::{
 pub use semantic_authority::StdioLspSemanticAuthority;
 #[cfg(test)]
 pub(crate) use semantic_authority::{analyzer_start_failure, semantic_operation_outcome};
+use shared_client::SharedAnalyzerClient;
 
 /// Normalized code diagnostic shared by the LSP broker and dashboard API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +50,7 @@ pub struct CodeDiagnostic {
 
 /// Minimal indexed-symbol span used to attribute a diagnostic to the smallest
 /// enclosing code-graph node. Line numbers are 0-based, matching
-/// [`crate::types::Node`]; they are compared against a diagnostic's 1-based line
+/// `crate::types::Node`; they are compared against a diagnostic's 1-based line
 /// inside [`enclosing_node_for_line`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeSpan {
@@ -71,7 +74,7 @@ pub fn enclosing_node_for_line(spans: &[NodeSpan], line_1based: u32) -> Option<S
         .map(|span| span.qualified_name.clone())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticSeverity {
     Error,
@@ -104,6 +107,15 @@ pub struct EngineStatus {
     pub install_options: Vec<LspInstallOption>,
     pub last_error: Option<String>,
     pub last_diagnostic_update: Option<i64>,
+}
+
+/// One adapter's live status with the two facts the Doctor read needs beyond
+/// the state itself: project membership and the daemon-PATH executable probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEngineStatus {
+    pub status: EngineStatus,
+    pub active: bool,
+    pub executable_found: bool,
 }
 
 /// One project-active diagnostic provider whose configured command is mounted.
@@ -157,7 +169,7 @@ pub struct DiagnosticsSummary {
 /// Why a broker holds default analyzer settings instead of the project's
 /// persisted ones.
 ///
-/// A project that never configured settings is not degraded — `load_settings`
+/// A project that never configured settings is not degraded, `load_settings`
 /// returns the defaults as `Ok` for an absent file. This is set only when a
 /// settings file exists and could not be read or parsed, in which case every
 /// custom analyzer the user configured is missing from this broker.
@@ -196,7 +208,19 @@ pub struct DiagnosticBroker {
     adapters: Vec<LspAdapterDefinition>,
     settings: CodeDiagnosticsSettings,
     diagnostics: Vec<CodeDiagnostic>,
-    clients: BTreeMap<LspSessionKey, Arc<Mutex<Option<StdioLspClient>>>>,
+    clients: BTreeMap<LspSessionKey, Arc<SharedAnalyzerClient>>,
+    /// Launches already resolved, keyed by configured command and the
+    /// workspace root the probe ran from. Only successes are retained: a
+    /// refused root is probed again so an operator's `rustup component add`
+    /// is seen without a restart.
+    launches: BTreeMap<(String, PathBuf), AnalyzerLaunch>,
+    /// Probes rustup and remembers each rustup binary's version for as long
+    /// as `launches` is retained.
+    launch_resolver: AnalyzerLaunchResolver,
+    /// Languages whose current `Unavailable` state and error were recorded by
+    /// a launch refusal, with the recorded error, so a later successful
+    /// resolution clears exactly that refusal and nothing recorded since.
+    launch_refusals: BTreeMap<String, String>,
     engine_overrides: BTreeMap<String, EngineState>,
     engine_errors: BTreeMap<String, String>,
     refresh_epochs: BTreeMap<String, u64>,
@@ -204,7 +228,6 @@ pub struct DiagnosticBroker {
     backfill: BTreeMap<String, BackfillProgress>,
     settings_unavailable: Option<SettingsUnavailable>,
     refresh_capacity: BrokerRefreshCapacity,
-    host_analyzer_ownership: HostAnalyzerOwnership,
 }
 
 impl DiagnosticBroker {
@@ -214,18 +237,15 @@ impl DiagnosticBroker {
         settings: CodeDiagnosticsSettings,
     ) -> Self {
         let project_root = project_root.into();
-        // The host owns its analyzers. Reading the project's own OpenCode
-        // registration here is what turns `duplicateAnalyzerAvoidance` from a
-        // recorded intention into an enforced one: every analyzer this broker
-        // could start goes through the gates below.
-        let host_analyzer_ownership =
-            HostAnalyzerOwnership::from_opencode_project_root(&project_root);
         Self {
             project_root,
             adapters,
             settings,
             diagnostics: Vec::new(),
             clients: BTreeMap::new(),
+            launches: BTreeMap::new(),
+            launch_resolver: AnalyzerLaunchResolver::new(),
+            launch_refusals: BTreeMap::new(),
             engine_overrides: BTreeMap::new(),
             engine_errors: BTreeMap::new(),
             refresh_epochs: BTreeMap::new(),
@@ -233,7 +253,6 @@ impl DiagnosticBroker {
             backfill: BTreeMap::new(),
             settings_unavailable: None,
             refresh_capacity: BrokerRefreshCapacity::new(),
-            host_analyzer_ownership,
         }
     }
 
@@ -244,66 +263,6 @@ impl DiagnosticBroker {
         self.settings_unavailable = Some(SettingsUnavailable {
             reason: reason.into(),
         });
-    }
-
-    /// Adopts a host's declared analyzer ownership, tearing down any analyzer
-    /// this broker already started for a language the host now retains.
-    ///
-    /// The daemon calls this with the home-level `OpenCode` registration; the
-    /// project-level one is already read at construction. Adopting mid-session
-    /// has to drop the warm clients, otherwise install/repair would leave the
-    /// second analyzer running for the rest of the session and the "exactly one
-    /// analyzer per language" claim would only hold for new brokers.
-    pub fn adopt_host_analyzer_ownership(&mut self, ownership: HostAnalyzerOwnership) {
-        self.host_analyzer_ownership = ownership;
-        for language in self.host_retained_languages() {
-            let owner = self
-                .host_retained_analyzer(&language)
-                .unwrap_or_default()
-                .to_owned();
-            self.remove_language_clients(&language);
-            self.clear_language(&language);
-            self.engine_overrides
-                .insert(language.clone(), EngineState::Disabled);
-            self.engine_errors.insert(
-                language.clone(),
-                host_retained_analyzer_reason(&owner, &language),
-            );
-        }
-    }
-
-    /// The host analyzer ownership this broker currently enforces.
-    ///
-    /// Callers that learn about a second declaration level (the daemon reads
-    /// the home-level `OpenCode` registration) union it with this one and adopt
-    /// the result, so one level never silently revokes the other.
-    pub fn host_analyzer_ownership(&self) -> &HostAnalyzerOwnership {
-        &self.host_analyzer_ownership
-    }
-
-    /// The host-owned analyzer that already covers `language`, if any.
-    ///
-    /// The host declares ownership per file extension; adapters are per
-    /// language, so one retained extension retains the whole adapter.
-    pub fn host_retained_analyzer(&self, language: &str) -> Option<&str> {
-        if !self.host_analyzer_ownership.is_engaged() {
-            return None;
-        }
-        let adapter = self
-            .adapters
-            .iter()
-            .find(|adapter| adapter.language == language)?;
-        self.host_analyzer_ownership
-            .retained_owner_for_extensions(adapter.extensions.iter().map(String::as_str))
-    }
-
-    /// Every adapter language the host already runs an analyzer for.
-    pub fn host_retained_languages(&self) -> Vec<String> {
-        self.adapters
-            .iter()
-            .filter(|adapter| self.host_retained_analyzer(&adapter.language).is_some())
-            .map(|adapter| adapter.language.clone())
-            .collect()
     }
 
     pub fn new_for_test(
@@ -334,14 +293,20 @@ impl DiagnosticBroker {
         }
     }
 
-    /// Current statuses for only the languages active in this project.
+    /// Every adapter's status as Doctor and `lsp servers` consume it: paired
+    /// with project activity and with the executable probe this broker itself
+    /// uses, so both surfaces read one resolution on the daemon's PATH.
     ///
-    /// Doctor consumes this live owner view so disabled adapters for languages
-    /// absent from the project cannot be misreported as project degradation.
-    pub fn project_engine_statuses(&self) -> Vec<EngineStatus> {
+    /// A `Disabled` override survives a language leaving the project, so
+    /// activity is decided by membership, never by the state.
+    pub fn resolved_engine_statuses(&self) -> Vec<ResolvedEngineStatus> {
         self.engine_statuses()
             .into_iter()
-            .filter(|status| self.project_languages.contains(&status.language))
+            .map(|status| ResolvedEngineStatus {
+                active: self.project_languages.contains(&status.language),
+                executable_found: command_available(&status.command),
+                status,
+            })
             .collect()
     }
 
@@ -354,7 +319,7 @@ impl DiagnosticBroker {
 
     /// Returns a retained semantic authority over the same stdio client slot
     /// used by diagnostic refreshes, or `None` when the executable is absent.
-    pub fn semantic_authority_if_available(
+    pub async fn semantic_authority_if_available(
         &mut self,
         language: &str,
         workspace_root: PathBuf,
@@ -362,45 +327,57 @@ impl DiagnosticBroker {
         timeouts: LspRefreshTimeouts,
     ) -> Result<Option<Arc<StdioLspSemanticAuthority>>> {
         let root_uri = root_uri.into();
-        self.validate_semantic_scope(&workspace_root, &root_uri)?;
-        if self.host_retained_analyzer(language).is_some() {
-            // Semantic requests share the same stdio client slot as refreshes,
-            // so answering one here would start the very analyzer process the
-            // host already owns.
-            return Ok(None);
-        }
+        // Keyed by the canonical root, exactly as `prepare_refresh` keys its
+        // batches: the point of the shared slot is that both lanes reach one
+        // process, and a textually different spelling of the same root would
+        // mint a second one.
+        let workspace_root = self.validate_semantic_scope(&workspace_root, &root_uri)?;
         let adapter = self
             .adapter_for(language)
             .ok_or_else(|| TraceDecayError::Config {
                 message: format!("no LSP adapter registered for language '{language}'"),
             })?;
         let command = self.settings.command_for(language, &adapter.command);
-        if !command_available(&command) {
+        let Ok(launch) = self
+            .resolve_launch(language, &command, &workspace_root)
+            .await
+        else {
             return Ok(None);
-        }
+        };
         let key = LspSessionKey {
             language: language.to_owned(),
             command: command.clone(),
             workspace_root: workspace_root.clone(),
         };
-        let client = self
+        let shared = self
             .clients
             .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .or_insert_with(|| {
+                SharedAnalyzerClient::new(AdmittedRoot::new(file_uri(&workspace_root)))
+            })
             .clone();
         Ok(Some(StdioLspSemanticAuthority::from_shared_client(
-            command,
+            launch,
             adapter.args,
+            adapter.language,
             workspace_root,
             root_uri,
             timeouts,
-            client,
+            shared,
         )))
     }
 
     pub fn update_adapters(&mut self, adapters: Vec<LspAdapterDefinition>) {
         self.adapters = adapters;
         self.clients.clear();
+        self.clear_launches();
+    }
+
+    /// Forgets every retained launch and rustup version; the next spawn
+    /// re-probes.
+    fn clear_launches(&mut self) {
+        self.launches.clear();
+        self.launch_resolver.clear();
     }
 
     pub fn update_project_languages(&mut self, languages: BTreeSet<String>) {
@@ -428,38 +405,51 @@ impl DiagnosticBroker {
 
     /// Reconciles enabled project language activity without requiring the
     /// external analyzer executable to be installed.
-    pub fn admitted_providers_for_files(&mut self, files: &[String]) -> Vec<AdmittedLspProvider> {
+    pub async fn admitted_providers_for_files(
+        &mut self,
+        files: &[String],
+    ) -> Vec<AdmittedLspProvider> {
         let languages =
             super::activity::active_languages_for_files(&self.project_root, &self.adapters, files);
         self.update_project_languages(languages);
-        let host_retained: BTreeSet<String> = self.host_retained_languages().into_iter().collect();
-        self.adapters
+        let admitted: Vec<(String, String)> = self
+            .adapters
             .iter()
             .filter(|adapter| {
                 self.project_languages.contains(&adapter.language)
                     && self.settings.language_enabled(&adapter.language)
             })
             .map(|adapter| {
-                let command = self
-                    .settings
-                    .command_for(&adapter.language, &adapter.command);
-                AdmittedLspProvider {
-                    language: adapter.language.clone(),
-                    // A host-retained language stays admitted so graph-backed
-                    // TraceDecay findings still project, but it is never
-                    // reported as mountable: mounting is what starts the second
-                    // analyzer process.
-                    analyzer_available: !host_retained.contains(&adapter.language)
-                        && command_available(&command),
-                    command,
-                }
+                (
+                    adapter.language.clone(),
+                    self.settings
+                        .command_for(&adapter.language, &adapter.command),
+                )
             })
-            .collect()
+            .collect();
+        let project_root = self.project_root.clone();
+        let mut providers = Vec::with_capacity(admitted.len());
+        for (language, command) in admitted {
+            let analyzer_available = self
+                .resolve_launch(&language, &command, &project_root)
+                .await
+                .is_ok();
+            providers.push(AdmittedLspProvider {
+                language,
+                command,
+                analyzer_available,
+            });
+        }
+        providers
     }
 
     /// Returns only analyzer-backed providers that are executable now.
-    pub fn mounted_providers_for_files(&mut self, files: &[String]) -> Vec<MountedLspProvider> {
+    pub async fn mounted_providers_for_files(
+        &mut self,
+        files: &[String],
+    ) -> Vec<MountedLspProvider> {
         self.admitted_providers_for_files(files)
+            .await
             .iter()
             .filter_map(AdmittedLspProvider::mounted)
             .collect()
@@ -477,8 +467,8 @@ impl DiagnosticBroker {
         }
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_prepare_refresh", impl_type = "DiagnosticBroker")]
-    pub fn prepare_refresh(
+    #[tracing::instrument(name = "lsp_analyzer_prepare_refresh", level = "trace", skip_all)]
+    pub async fn prepare_refresh(
         &mut self,
         language: &str,
         documents: Vec<LspDocument>,
@@ -498,19 +488,6 @@ impl DiagnosticBroker {
             self.clear_language(language);
             return Ok(None);
         }
-        if let Some(owner) = self.host_retained_analyzer(language).map(str::to_owned) {
-            // The host already runs an analyzer for this language. Preparing a
-            // refresh is the only path that spawns one, so refusing here is
-            // what keeps exactly one analyzer per language.
-            self.engine_overrides
-                .insert(language.to_string(), EngineState::Disabled);
-            self.engine_errors.insert(
-                language.to_string(),
-                host_retained_analyzer_reason(&owner, language),
-            );
-            self.remove_language_clients(language);
-            return Ok(None);
-        }
         let adapter = self
             .adapters
             .iter()
@@ -521,16 +498,6 @@ impl DiagnosticBroker {
             })?;
 
         let command = self.settings.command_for(language, &adapter.command);
-        if !command_available(&command) {
-            let message = format!("LSP command '{command}' is not available on PATH");
-            self.engine_errors
-                .insert(language.to_string(), message.clone());
-            self.engine_overrides
-                .insert(language.to_string(), EngineState::Unavailable);
-            self.remove_language_clients(language);
-            return Err(TraceDecayError::Config { message });
-        }
-
         let project_root = self.project_root.clone();
         let canonical_project_root = canonicalize_project_root(&project_root).map_err(|error| {
             let message = format!("failed to resolve admitted project root: {error}");
@@ -541,9 +508,6 @@ impl DiagnosticBroker {
             self.remove_language_clients(language);
             TraceDecayError::Config { message }
         })?;
-        self.engine_overrides
-            .insert(language.to_string(), EngineState::Refreshing);
-        let epoch = self.next_refresh_epoch(language);
         let mut documents_by_root: BTreeMap<PathBuf, Vec<LspDocument>> = BTreeMap::new();
         for document in documents {
             let workspace_root = adapter_workspace_root_from_canonical_root(
@@ -568,22 +532,39 @@ impl DiagnosticBroker {
                 .insert(language.to_string(), EngineState::Unavailable);
             return Err(TraceDecayError::Config { message });
         }
+        // Each root resolves its own binary: rustup reads the toolchain
+        // override from the directory the analyzer starts in, and nested
+        // roots may pin a toolchain the project root does not. A refusal for
+        // any root is the language's typed `Unavailable` state; nothing spawns.
+        let mut resolved_roots = Vec::with_capacity(documents_by_root.len());
+        for (workspace_root, documents) in documents_by_root {
+            let launch = self
+                .resolve_launch(language, &command, &workspace_root)
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: error.engine_error(),
+                })?;
+            resolved_roots.push((workspace_root, launch, documents));
+        }
+        self.engine_overrides
+            .insert(language.to_string(), EngineState::Refreshing);
+        let epoch = self.next_refresh_epoch(language);
         let reservation = self
             .refresh_capacity
-            .reserve(documents_by_root.len())
+            .reserve(resolved_roots.len())
             .ok_or_else(|| {
                 let message = format!(
                     "analyzer root queue saturated: {} batches exceed the {MAX_ANALYZER_QUEUED_ROOT_BATCHES} limit",
-                    documents_by_root.len()
+                    resolved_roots.len()
                 );
                 self.engine_errors.insert(language.to_string(), message.clone());
                 self.engine_overrides
                     .insert(language.to_string(), EngineState::Unavailable);
                 TraceDecayError::Config { message }
             })?;
-        let batches = documents_by_root
+        let batches = resolved_roots
             .into_iter()
-            .map(|(workspace_root, documents)| {
+            .map(|(workspace_root, launch, documents)| {
                 let session_key = LspSessionKey {
                     language: language.to_string(),
                     command: command.clone(),
@@ -592,10 +573,13 @@ impl DiagnosticBroker {
                 let client = self
                     .clients
                     .entry(session_key)
-                    .or_insert_with(|| Arc::new(Mutex::new(None)))
+                    .or_insert_with(|| {
+                        SharedAnalyzerClient::new(AdmittedRoot::new(file_uri(&workspace_root)))
+                    })
                     .clone();
                 RefreshBatch {
                     workspace_root,
+                    launch,
                     documents,
                     client,
                 }
@@ -604,12 +588,73 @@ impl DiagnosticBroker {
         Ok(Some(PreparedRefresh::new(
             language.to_string(),
             canonical_project_root,
-            command,
-            adapter.args,
+            AnalyzerSpawn {
+                command,
+                args: adapter.args,
+            },
             epoch,
             batches,
             reservation,
         )))
+    }
+
+    /// Resolves the executable for `command` as started from `workspace_root`,
+    /// recording a refusal as the language's typed `Unavailable` state so the
+    /// snapshot reports why no analyzer runs instead of an `Available` engine
+    /// that `TraceDecay` will never start. Successful resolutions are retained
+    /// per root, and a success clears the refusal this method recorded
+    /// earlier, so an operator's `rustup component add` shows on the very
+    /// next admission probe.
+    async fn resolve_launch(
+        &mut self,
+        language: &str,
+        command: &str,
+        workspace_root: &Path,
+    ) -> std::result::Result<AnalyzerLaunch, AnalyzerLaunchError> {
+        let key = (command.to_owned(), workspace_root.to_path_buf());
+        if let Some(launch) = self.launches.get(&key) {
+            return Ok(launch.clone());
+        }
+        self.launch_resolver
+            .resolve(command, workspace_root)
+            .await
+            .inspect(|launch| {
+                self.launches.insert(key, launch.clone());
+                self.clear_launch_refusal(language);
+            })
+            .inspect_err(|error| {
+                let message = error.engine_error();
+                self.engine_errors
+                    .insert(language.to_string(), message.clone());
+                self.launch_refusals.insert(language.to_string(), message);
+                self.engine_overrides
+                    .insert(language.to_string(), EngineState::Unavailable);
+                self.remove_language_clients(language);
+            })
+    }
+
+    /// Restores the engine to its pre-refusal default when the recorded
+    /// error is still the one a launch refusal wrote. A state or error
+    /// recorded since (a crash, a disabled setting) is left alone.
+    fn clear_launch_refusal(&mut self, language: &str) {
+        let Some(recorded) = self.launch_refusals.remove(language) else {
+            return;
+        };
+        if self.engine_errors.get(language) != Some(&recorded) {
+            return;
+        }
+        self.engine_errors.remove(language);
+        if self.engine_overrides.get(language) == Some(&EngineState::Unavailable) {
+            self.engine_overrides.remove(language);
+        }
+    }
+
+    /// Forgets the retained launch a refresh could not start from, so the
+    /// next refresh probes rustup again instead of spawning a program that
+    /// is no longer there.
+    fn evict_launch(&mut self, command: &str, workspace_root: &Path) {
+        self.launches
+            .remove(&(command.to_owned(), workspace_root.to_path_buf()));
     }
 
     pub async fn refresh_documents(
@@ -626,14 +671,14 @@ impl DiagnosticBroker {
         .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_refresh", impl_type = "DiagnosticBroker")]
+    #[tracing::instrument(name = "lsp_analyzer_refresh", level = "trace", skip_all)]
     pub async fn refresh_documents_with_timeouts(
         &mut self,
         language: &str,
         documents: Vec<LspDocument>,
         timeouts: LspRefreshTimeouts,
     ) -> Result<()> {
-        let Some(prepared) = self.prepare_refresh(language, documents)? else {
+        let Some(prepared) = self.prepare_refresh(language, documents).await? else {
             return Ok(());
         };
         let result = prepared.collect_diagnostics_with_timeouts(timeouts).await;
@@ -644,7 +689,7 @@ impl DiagnosticBroker {
         self.finish_refresh_snapshot(completed).map(|_| ())
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_finish_refresh", impl_type = "DiagnosticBroker")]
+    #[tracing::instrument(name = "lsp_analyzer_finish_refresh", level = "trace", skip_all)]
     pub fn finish_refresh_snapshot(
         &mut self,
         completed: CompletedRefresh,
@@ -673,11 +718,18 @@ impl DiagnosticBroker {
                 Ok(RefreshCommitOutcome::Applied(self.snapshot()))
             }
             Err(failure) => {
+                if let Some(workspace_root) = &failure.unstartable_launch_root {
+                    self.evict_launch(&completed.command, workspace_root);
+                }
                 let message = failure.message;
                 self.engine_errors.insert(language.clone(), message.clone());
                 self.engine_overrides
                     .insert(language.clone(), failure.state);
-                self.remove_language_clients(&language);
+                // The failed batch already released its client
+                // (`collect_refresh_batch`), and the semantic lane holds this
+                // same slot: dropping the entry would hand the next refresh a
+                // second slot, and a second analyzer process, while the
+                // semantic lane kept restarting the first.
                 Err(TraceDecayError::Config { message })
             }
         }
@@ -689,6 +741,8 @@ impl DiagnosticBroker {
         // read at mount time is no longer what it is serving.
         self.settings_unavailable = None;
         self.clients.clear();
+        self.clear_launches();
+        self.launch_refusals.clear();
         self.engine_overrides.clear();
         let disabled_languages: Vec<String> = self
             .settings
@@ -752,7 +806,7 @@ impl DiagnosticBroker {
         );
     }
 
-    fn validate_semantic_scope(&self, workspace_root: &Path, root_uri: &str) -> Result<()> {
+    fn validate_semantic_scope(&self, workspace_root: &Path, root_uri: &str) -> Result<PathBuf> {
         let project_root =
             self.project_root
                 .canonicalize()
@@ -780,7 +834,7 @@ impl DiagnosticBroker {
                 message: "analyzer root URI does not match the admitted project root".to_owned(),
             });
         }
-        Ok(())
+        Ok(workspace_root)
     }
 
     fn clear_language(&mut self, language: &str) {
@@ -839,18 +893,11 @@ impl DiagnosticBroker {
                 let command = self
                     .settings
                     .command_for(&adapter.language, &adapter.command);
-                let host_owner = self.host_retained_analyzer(&adapter.language);
                 let state = self
                     .engine_overrides
                     .get(&adapter.language)
                     .copied()
                     .unwrap_or_else(|| {
-                        if host_owner.is_some() {
-                            // Reported before any refresh is attempted, so the
-                            // operator sees the retained analyzer rather than an
-                            // `Available` engine TraceDecay will never start.
-                            return EngineState::Disabled;
-                        }
                         default_state(
                             enabled,
                             self.project_languages.contains(&adapter.language),
@@ -872,27 +919,12 @@ impl DiagnosticBroker {
                     enabled,
                     state,
                     install_options: adapter.install_options.clone(),
-                    last_error: self
-                        .engine_errors
-                        .get(&adapter.language)
-                        .cloned()
-                        .or_else(|| {
-                            host_owner.map(|owner| {
-                                host_retained_analyzer_reason(owner, &adapter.language)
-                            })
-                        }),
+                    last_error: self.engine_errors.get(&adapter.language).cloned(),
                     last_diagnostic_update,
                 }
             })
             .collect()
     }
-}
-
-/// Operator-facing reason a language reports `Disabled` while the host owns it.
-fn host_retained_analyzer_reason(owner: &str, language: &str) -> String {
-    format!(
-        "host analyzer '{owner}' already owns '{language}'; TraceDecay stays projection-only for it"
-    )
 }
 
 fn default_state(enabled: bool, active: bool, command: &str) -> EngineState {
@@ -907,49 +939,4 @@ fn default_state(enabled: bool, active: bool, command: &str) -> EngineState {
     } else {
         EngineState::Unavailable
     }
-}
-
-pub fn command_available(command: &str) -> bool {
-    if Path::new(command).components().count() > 1 {
-        return Path::new(command).is_file();
-    }
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    let candidates = command_candidates(command);
-    std::env::split_paths(&paths).any(|path| {
-        candidates
-            .iter()
-            .any(|candidate| path.join(candidate).is_file())
-    })
-}
-
-#[cfg(windows)]
-fn command_candidates(command: &str) -> Vec<String> {
-    if Path::new(command).extension().is_some() {
-        return vec![command.to_string()];
-    }
-
-    let pathext = std::env::var_os("PATHEXT").map_or_else(
-        || ".COM;.EXE;.BAT;.CMD".to_string(),
-        |value| value.to_string_lossy().into_owned(),
-    );
-
-    let mut candidates = vec![command.to_string()];
-    candidates.extend(pathext.split(';').filter_map(|extension| {
-        let extension = extension.trim();
-        if extension.is_empty() {
-            None
-        } else if extension.starts_with('.') {
-            Some(format!("{command}{extension}"))
-        } else {
-            Some(format!("{command}.{extension}"))
-        }
-    }));
-    candidates
-}
-
-#[cfg(not(windows))]
-fn command_candidates(command: &str) -> Vec<String> {
-    vec![command.to_string()]
 }

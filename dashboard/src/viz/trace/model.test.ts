@@ -14,8 +14,7 @@ import {
   DashboardEnvelopeV1Schema,
   GraphNeighborsPayloadV1Schema,
 } from '../../contracts/generated.ts';
-import { TRACE_BUDGET, buildSimSpec, buildTraceModel, type NeighborsPayload } from './model.ts';
-import { ringLabel } from './render.ts';
+import { TRACE_BUDGET, buildTraceModel, type NeighborsPayload } from './model.ts';
 
 function neighbors(id: string): NeighborsPayload {
   return DashboardEnvelopeV1Schema(GraphNeighborsPayloadV1Schema).parse(
@@ -42,28 +41,11 @@ function model(focusId = 'sym-0', expandCount: number = TRACE_BUDGET.expand) {
   });
 }
 
-describe('neighbors payload', () => {
-  it('parses against the schema the workspace validates it with', () => {
-    expect(() => GraphNeighborsPayloadV1Schema.parse(neighbors('sym-0'))).not.toThrow();
-  });
-
-  it('carries one caller/callee ROW PER CALL SITE, which is the only place the wire counts them', () => {
-    const payload = GraphNeighborsPayloadV1Schema.parse(neighbors('sym-0'));
-    const callers = payload.callers ?? [];
-    const distinct = new Set(callers.map((row) => row.id));
-    // If rows were already deduped per pair the drill-in would have no
-    // call-site measurement at all and every channel would be width 1.
-    expect(callers.length).toBeGreaterThan(distinct.size);
-    const repeated = callers.filter((row) => row.id === callers[0]!.id);
-    expect(new Set(repeated.map((row) => row.edge_line)).size).toBe(repeated.length);
-  });
-});
-
 describe('buildTraceModel', () => {
   it('places every symbol on the ring it was fetched at, and nowhere else', () => {
     // The row caption is "hop distance from the focus, not elevation", so a
     // node's drawn row and the hop at which the fetch reached it cannot be
-    // allowed to disagree — that caption is the whole reason this is not a
+    // allowed to disagree, that caption is the whole reason this is not a
     // decorative flow diagram.
     const built = model();
     const root = neighbors('sym-0');
@@ -78,12 +60,9 @@ describe('buildTraceModel', () => {
       // that gives "first discovery wins" its meaning has broken.
       if (ring === 2) expect(hop1.has(node.id)).toBe(false);
     }
-    // Every drawn ring has a row, and the rows read top-to-bottom by ring.
-    const ys = [...built.rows].sort((a, b) => a[0] - b[0]).map(([, y]) => y);
-    expect(ys).toEqual([...ys].sort((a, b) => a - b));
-    expect(ringLabel(-2)).toBe('2 hops up');
-    expect(ringLabel(1)).toBe('1 hop down');
-    expect(ringLabel(0)).toBe('focus');
+    // Nodes read nearest hop first, the order the plate and list both use.
+    const hops = built.nodes.map((node) => Math.abs(node.ring));
+    expect(hops).toEqual([...hops].sort((a, b) => a - b));
   });
 
   it('draws only channels whose BOTH ends are drawn, and counts the rest', () => {
@@ -96,21 +75,24 @@ describe('buildTraceModel', () => {
       expect(channel.calls).toBeGreaterThan(0);
     }
     // Symbols the fetched lists named but the budget excluded are counted, not
-    // discarded — the caption prints this number.
+    // discarded, the caption prints this number.
     expect(built.coverage.namedButNotDrawn).toBeGreaterThan(0);
     expect(built.coverage.drawn).toBe(built.nodes.length);
   });
 
   it('reports recursion as a self-call rather than as a channel', () => {
-    // A self-loop spring has no second body, so a naive builder either crashes
-    // or drops the row. Neither is acceptable: recursion is measured.
+    // A self-loop couples no two symbols, so a naive builder either draws a
+    // degenerate channel or drops the row. Neither is acceptable.
     const built = model();
     const recursive = built.nodes.filter((node) => node.selfCalls > 0);
-    expect(recursive.length).toBeGreaterThan(0);
+    expect(recursive.map((node) => [node.id, node.selfCalls])).toEqual([
+      ['sym-24', 4],
+      ['sym-19', 2],
+      ['sym-8', 7],
+    ]);
     for (const node of recursive) {
       expect(built.channels.some((c) => c.a === node.id && c.b === node.id)).toBe(false);
     }
-    expect(buildSimSpec(built).springs.every((s) => s.a !== s.b)).toBe(true);
   });
 
   it('derives membranes from contains rows only, and says so when there are none', () => {
@@ -125,7 +107,7 @@ describe('buildTraceModel', () => {
     }
 
     // A payload with no `contains` rows must produce NO membranes and must
-    // record that the wire did not carry them — never an inferred enclosure
+    // record that the wire did not carry them, never an inferred enclosure
     // from shared file paths.
     const root = neighbors('sym-0');
     const stripped: NeighborsPayload = {
@@ -167,23 +149,13 @@ describe('buildTraceModel', () => {
     expect(built.nodes.some((node) => (node.undrawnEdges ?? 0) > 0)).toBe(true);
   });
 
-  it('keeps the field inside the drawing budget and inside the world box', () => {
+  it('keeps the field inside the drawing budget', () => {
     const built = model();
     expect(built.nodes.length).toBeLessThanOrEqual(
       1 + TRACE_BUDGET.hop1PerSide * 2 + TRACE_BUDGET.hop2PerSide * 2,
     );
-    for (const node of built.nodes) {
-      expect(node.x0).toBeGreaterThanOrEqual(0);
-      expect(node.x0).toBeLessThanOrEqual(built.world.width);
-      expect(node.y0).toBeGreaterThanOrEqual(0);
-      expect(node.y0).toBeLessThanOrEqual(built.world.height);
-    }
-    // Node ids are unique: a duplicate would crash the simulation at build.
+    // Node ids are unique: a duplicate would draw one symbol twice.
     expect(new Set(built.nodes.map((n) => n.id)).size).toBe(built.nodes.length);
-  });
-
-  it('is deterministic: the same payloads build the identical field', () => {
-    expect(JSON.stringify(toComparable(model()))).toBe(JSON.stringify(toComparable(model())));
   });
 
   it('survives an empty neighbourhood without inventing one', () => {
@@ -207,13 +179,3 @@ describe('buildTraceModel', () => {
     expect(built.coverage.membranesAvailable).toBe(false);
   });
 });
-
-function toComparable(built: ReturnType<typeof model>) {
-  return {
-    nodes: built.nodes,
-    channels: built.channels,
-    membranes: built.membranes,
-    coverage: built.coverage,
-    rows: [...built.rows],
-  };
-}

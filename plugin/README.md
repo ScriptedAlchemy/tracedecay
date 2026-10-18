@@ -1,11 +1,23 @@
-# TraceDecay Plugin Bundle
+# TraceDecay plugin bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
-Cursor, Kimi Code, and OpenCode. The installed bundles expose a host-specific MCP server
-key (`graph` for Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode), shared
-workflow skills, and host-specific lifecycle hooks. Each hook is a bounded
+Cursor, Kimi Code, OpenCode, Pi, and ChatGPT. The Claude, Codex, Cursor, Kimi Code, and
+OpenCode bundles expose a host-specific MCP server key (`graph` for
+Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode). Pi has no MCP
+route: its extension registers the catalog tools over the CLI bridge. Every
+bundle ships shared workflow skills and host-specific lifecycle hooks. Each hook is a bounded
 daemon-admission adapter; capture, sync, compaction, and advisory work stay in
 the daemon.
+
+The plugin root also carries the portable Agent Plugins manifest pair
+(`plugin.json` + `mcp.json`) that the ChatGPT lifecycle stages into
+`~/.tracedecay/host-bundle-stage/chatgpt/` for ChatGPT's own plugin or
+connector flow. Its `extensions.com.openai` block supplies the OpenAI
+presentation and hook mapping, and `mcp.json` launches both the `graph`
+server (`tracedecay serve`) and the `tracedecay-explorer` MCP App server
+from `chatgpt-extension/`. Codex still reads the `.codex-plugin/plugin.json`
+overlay its own lifecycle deploys. Its rendered MCP configuration includes
+both servers and the same explorer app assets.
 
 The manifest-driven package inventory also exposes an MCP-free core and
 independently installable MCP companions. See `README-host-bundles.md` for the
@@ -18,27 +30,28 @@ The plugin is named `tracedecay`, and hosts namespace a plugin's MCP tools by
 the plugin name plus the **server key**. Claude and Codex keep the MCP server
 key as `graph` (see `.mcp.json`) so those hosts render `plugin tracedecay graph`
 / `graph:…` instead of the redundant `tracedecay tracedecay`. Cursor uses the
-server key `tracedecay` in `mcp-cursor.json` because Cursor Settings surfaces
+server key `tracedecay` in `mcp-cursor.json` because Cursor Settings displays
 that key literally (`plugin-tracedecay-graph` looked like a bare "graph"
-entry). Kimi Code also uses `tracedecay`, embedded inline in
-`.kimi-plugin/plugin.json`. The individual tool names keep their
+entry). Kimi Code also uses `tracedecay`, registered in session/user
+`mcp.json` (not the plugin manifest). The individual tool names keep their
 `tracedecay_` prefix (they are stable identifiers referenced by skills, docs,
 and analytics), and non-plugin/direct installs still register the server under
-the `tracedecay` key (the `mcp__tracedecay__*` namespace). Skills announce
-themselves as `Using tracedecay:<skill-slug>` — the host prefix plus the
-skill slug, never a doubled `tracedecay` — and that single convention is
-applied to every `Announce:` line.
+the `tracedecay` key (the `mcp__tracedecay__*` namespace). Skills are
+referenced as `tracedecay:<skill-slug>`, the host prefix plus the skill slug,
+never a doubled `tracedecay`.
 
-## Source Layout
+## Source layout
 
 - `skills/`: shared `SKILL.md` workflow instructions.
-- `commands/`: Claude/shared slash-command sources (numbered tool steps).
+- `commands/`: Claude/shared slash commands for workflows no skill triggers
+  on: a repository safety audit, dead-code cleanup, branch comparison, commit
+  and PR drafting, porting, and running the tests for a change. A workflow a
+  skill already covers has no command; hosts invoke the skill by name
+  (`/tracedecay:assessing-impact` on Claude, `/assessing-impact` on Cursor).
 - `overlays/cursor/commands/`: independently authored Cursor slash commands
-  (`tracedecay-*`). Install maps them into Cursor's command directory. They are
-  skill-handoff wrappers with Cursor approval notes, not generated copies of
-  `commands/`, and they may differ on purpose (for example Claude
-  `review-diff.md` hands off to `/tracedecay:test-changes` while the Cursor
-  twin hands off to `tracedecay:assessing-impact` and omits the metrics line).
+  (`tracedecay-*`), one per `commands/` file. Install maps them into Cursor's
+  command directory. They are skill-handoff wrappers with Cursor approval
+  notes, not generated copies of `commands/`, and they may differ on purpose.
 - `hooks/hooks-claude.json`: Claude Code lifecycle hooks for session, stop,
   and saved-edit admission. They do not route tools or run local follow-up
   work.
@@ -46,16 +59,36 @@ applied to every `Announce:` line.
   empty; the global Codex plugin fills hooks at install time.
 - `hooks/hooks-cursor.json`: Cursor lifecycle hooks.
 - `.lsp.json`: Claude Code's single configured-language TraceDecay LSP bridge.
-- `.mcp.json`: shared Claude/Codex MCP config. Codex rewrites args/env by
-  install scope; Claude rewrites the command to the resolved binary path.
+- `plugin.json` + `mcp.json`: portable Agent Plugins manifests (ChatGPT and
+  Codex plugin loading). `mcp.json` declares transports explicitly and adds
+  the `tracedecay-explorer` stdio server beside `graph`.
+- `chatgpt-extension/`: the ChatGPT extension (MCP App UI + read-only MCP
+  adapter over `tracedecay serve` and the daemon application API). Commits
+  `embedded/server.mjs` and `embedded/app.html` like the Cursor native
+  extension; `pnpm run check:embedded` guards drift. See
+  `chatgpt-extension/README.md`.
+- `.mcp.json`: Claude MCP config. Claude rewrites the command to the resolved
+  binary path. It passes `serve --full-tool-list` because Claude Code defers
+  tool schemas itself; plain `serve` lists tools outside the always-loaded set
+  as stubs.
 - `mcp-cursor.json`: Cursor MCP config, deployed as `mcp.json`.
-- `.kimi-plugin/plugin.json`: Kimi Code manifest. It embeds
-  `mcpServers.tracedecay` inline, so there is no separate Kimi MCP config file.
+- `.kimi-plugin/plugin.json`: Kimi Code manifest (skills, commands, hooks).
+  MCP is registered in Kimi session/user `mcp.json`, not the plugin manifest.
 - `opencode/`: OpenCode native plugin (`tracedecay.ts`), MCP companion
   (`tracedecay-mcp.ts`), and registration JSON (`opencode.registration.json`).
   OpenCode has no `plugin.json`; the host discovers the TypeScript module.
-- `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`:
-  host README files, deployed as `README.md`.
+- `pi/`: the Pi extension (`index.ts`, tested by `index.test.ts`) plus its
+  `package.json` and the `tracedecay-cli` routing skill. The installer renders
+  the resolved binary path into the extension source like the OpenCode plugin
+  renderer and writes `schemas.json` beside it from the MCP catalog, the same
+  generated tool definitions the Hermes bridge uses. The extension registers
+  one Pi tool per catalog entry; mutating tools need operator approval and
+  refuse an explicit project selector. Pi's `session_start` and `agent_end`
+  events reach `tracedecay hook-pi-event`, record analytics under the `pi`
+  host, and land that session's `~/.pi/agent/sessions` transcript (or the
+  `PI_CODING_AGENT_DIR` one) through the Pi transcript source.
+- `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`,
+  `README-chatgpt.md`: host README files, deployed as `README.md`.
 - `README-opencode.md`: OpenCode host README. It is source documentation;
   OpenCode has no plugin-manifest README deploy slot.
 - `README-host-bundles.md`: catalog/lifecycle contract and the host
@@ -65,12 +98,18 @@ applied to every `Announce:` line.
 
 Use `tracedecay_grep` for literal strings, regexes, and config keys inside
 indexed code. Use `tracedecay_search` for symbol names, `tracedecay_context`
-for concepts, `tracedecay_files` for path discovery, and `tracedecay_read` or
-`tracedecay_outline` for bounded reads after a file is known.
+for concepts, `tracedecay_files` for path discovery, and
+`tracedecay_source_outline` or `tracedecay_source_body` for bounded reads after
+a file or symbol is known.
 
-Every MCP tool also has a CLI fallback:
+Every MCP tool also has a CLI transport:
 
 ```bash
 tracedecay tool
 tracedecay tool tracedecay_grep --help
 ```
+
+The CLI uses the same daemon authority as MCP and is not an availability
+guarantee. Neither transport starts a missing or stopped daemon service. If the
+daemon is unavailable or intentionally held, report that state and use scoped
+native tools; do not retry or change daemon lifecycle unless the operator asks.

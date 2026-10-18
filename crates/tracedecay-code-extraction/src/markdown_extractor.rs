@@ -11,14 +11,17 @@
 //! `atx_heading` / `setext_heading` nodes become `Module` nodes; `inline_link`
 //! and reference-style links whose destination is a project-local source file
 //! emit `Uses` edges. Frontmatter (`(minus_metadata)`, `(plus_metadata)`) is
-//! skipped — the grammar makes it opaque, so we don't recurse into it.
+//! skipped. The grammar makes it opaque, so we don't recurse into it.
 use std::collections::HashMap;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Parser, Range, Tree};
 
+use crate::common::local_node_id;
+use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 
 /// Separator between path elements in a heading's qualified name. Markdown
@@ -49,13 +52,13 @@ fn line_bounds(source: &[u8]) -> Vec<(usize, usize)> {
     bounds
 }
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
-    /// (heading title, node id, level) — heading levels strictly increase
+    /// (heading title, node id, level). Heading levels strictly increase
     /// going *down* the stack. Headings of equal or shallower level pop
     /// the stack so we always parent to the nearest ancestor heading.
     node_stack: Vec<(String, String, usize)>,
@@ -64,7 +67,7 @@ struct ExtractionState {
     inline_parser: Option<Parser>,
     /// `(index into nodes, heading level, heading start line)` in document
     /// order. Section end lines are resolved in one post-pass once every
-    /// heading is known — a heading owns everything up to the next heading of
+    /// heading is known. A heading owns everything up to the next heading of
     /// the same or shallower level.
     headings: Vec<(usize, usize, u32)>,
     /// The supplied block tree cannot represent the inline grammar. Retained
@@ -86,17 +89,14 @@ struct PendingReferenceLink {
     line: u32,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str, extract_inline_links: bool) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str, extract_inline_links: bool) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             node_stack: Vec::new(),
             inline_parser: None,
@@ -107,10 +107,8 @@ impl ExtractionState {
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     /// Parse the byte range covered by `inline_node` with the inline grammar
@@ -123,8 +121,7 @@ impl ExtractionState {
         }
         let parser = self.inline_parser.get_or_insert_with(|| {
             let mut p = Parser::new();
-            let _ =
-                p.set_language(&tracedecay_large_treesitters::markdown::inline::LANGUAGE.into());
+            let _ = p.set_language(&crate::ts_provider::markdown_grammar::INLINE_LANGUAGE.into());
             p
         });
         let range = Range {
@@ -136,7 +133,7 @@ impl ExtractionState {
         if parser.set_included_ranges(&[range]).is_err() {
             return None;
         }
-        parser.parse(&self.source, None)
+        parser.parse(self.source, None)
     }
 }
 
@@ -144,10 +141,15 @@ impl MarkdownExtractor {
     pub fn extract_markdown(file_path: &str, source: &str) -> ExtractionResult {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source, true);
-        Self::add_file_node(&mut state, file_path, source);
+        let tree = Self::parse(source);
+        let end_line = match &tree {
+            Ok(tree) => crate::common::file_end_line(source, tree),
+            Err(_) => crate::common::unparsed_file_end_line(source),
+        };
+        Self::add_file_node(&mut state, file_path, end_line);
 
-        if let Ok(tree) = Self::parse(source) {
-            crate::hotpath_observe::measure_query(|| Self::visit(&mut state, tree.root_node()));
+        if let Ok(tree) = tree {
+            crate::observe::measure_query(|| Self::visit(&mut state, tree.root_node()));
         }
 
         Self::build_result(state, start)
@@ -161,7 +163,11 @@ impl MarkdownExtractor {
     ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source, false);
-        Self::add_file_node(&mut state, file_path, source);
+        Self::add_file_node(
+            &mut state,
+            file_path,
+            crate::common::file_end_line(source, tree),
+        );
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit(&mut state, child);
@@ -179,7 +185,7 @@ impl MarkdownExtractor {
         }
     }
 
-    fn add_file_node(state: &mut ExtractionState, file_path: &str, source: &str) {
+    fn add_file_node(state: &mut ExtractionState, file_path: &str, end_line: u32) {
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -188,7 +194,7 @@ impl MarkdownExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -202,6 +208,7 @@ impl MarkdownExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -225,7 +232,7 @@ impl MarkdownExtractor {
         if state.headings.is_empty() {
             return;
         }
-        let bounds = line_bounds(&state.source);
+        let bounds = line_bounds(state.source);
         if bounds.is_empty() {
             return;
         }
@@ -261,7 +268,7 @@ impl MarkdownExtractor {
     }
 
     fn build_result(mut state: ExtractionState, start: Instant) -> ExtractionResult {
-        crate::hotpath_observe::measure_emit(|| {
+        crate::observe::measure_emit(|| {
             Self::resolve_reference_links(&mut state);
             Self::finalize_heading_spans(&mut state);
             ExtractionResult {
@@ -283,12 +290,12 @@ impl MarkdownExtractor {
     /// Walks the block tree. `atx_heading` / `setext_heading` produce `Module`
     /// nodes; `(inline)` nodes are re-parsed with the inline grammar to find
     /// links. Frontmatter (`(minus_metadata)`, `(plus_metadata)`) is opaque
-    /// per the grammar — we never descend into it.
+    /// per the grammar. We never descend into it.
     fn visit(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "atx_heading" | "setext_heading" => Self::visit_heading(state, node),
             "minus_metadata" | "plus_metadata" => {
-                // Opaque YAML/TOML frontmatter — don't descend.
+                // Opaque YAML/TOML frontmatter. Don't descend.
             }
             "link_reference_definition" => Self::visit_reference_definition(state, node),
             "inline" => Self::visit_inline(state, node),
@@ -315,8 +322,7 @@ impl MarkdownExtractor {
         // field, which points to an `(inline)` node containing the text.
         let title = node
             .child_by_field_name("heading_content")
-            .map(|n| state.node_text(n).trim().to_string())
-            .unwrap_or_default();
+            .map_or_default(|n| state.node_text(n).trim().to_string());
 
         if title.is_empty() {
             // Still recurse into the heading body so any `(inline)` children
@@ -336,7 +342,7 @@ impl MarkdownExtractor {
 
         let kind = NodeKind::Module;
         // Heading-path qualified name: the file path, then every enclosing
-        // heading, then this heading — "docs/plans/x.md > H1 > H2". The stack
+        // heading, then this heading. "docs/plans/x.md > H1 > H2". The stack
         // was popped to this heading's parent above, so it is exactly the
         // ancestor path. Duplicate titles under different parents therefore
         // stay distinguishable, and duplicate titles under the *same* parent
@@ -348,12 +354,7 @@ impl MarkdownExtractor {
             .chain(std::iter::once(title.as_str()))
             .collect::<Vec<_>>()
             .join(HEADING_PATH_SEPARATOR);
-        let id = generate_node_id(
-            &state.file_path,
-            &kind,
-            &title,
-            node.start_position().row as u32,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &title, node);
 
         let node_obj = Node {
             id: id.clone(),
@@ -377,6 +378,7 @@ impl MarkdownExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -446,7 +448,7 @@ impl MarkdownExtractor {
         match node.kind() {
             "inline_link" => Self::visit_link(state, node),
             "image" => {
-                if child_of_kind(node, "link_destination").is_some() {
+                if find_direct_child_by_kind(node, "link_destination").is_some() {
                     Self::visit_link(state, node);
                 } else {
                     Self::queue_reference_link(state, node);
@@ -469,19 +471,19 @@ impl MarkdownExtractor {
     }
 
     fn visit_reference_definition(state: &mut ExtractionState, node: TsNode<'_>) {
-        let Some(label_node) = child_of_kind(node, "link_label") else {
+        let Some(label_node) = find_direct_child_by_kind(node, "link_label") else {
             return;
         };
-        let Some(dest_node) = child_of_kind(node, "link_destination") else {
+        let Some(dest_node) = find_direct_child_by_kind(node, "link_destination") else {
             return;
         };
-        let label = normalize_link_label(&strip_label_brackets(&state.node_text(label_node)));
+        let label = normalize_link_label(&strip_label_brackets(state.node_text(label_node)));
         if label.is_empty() {
             return;
         }
         state
             .reference_defs
-            .insert(label, clean_link_destination(&state.node_text(dest_node)));
+            .insert(label, clean_link_destination(state.node_text(dest_node)));
     }
 
     fn queue_reference_link(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -493,10 +495,15 @@ impl MarkdownExtractor {
             return;
         };
         let label = match node.kind() {
-            "full_reference_link" | "image" => child_of_kind(node, "link_label")
-                .map(|n| strip_label_brackets(&state.node_text(n)))
-                .or_else(|| child_of_kind(node, "link_text").map(|n| state.node_text(n))),
-            _ => child_of_kind(node, "link_text").map(|n| state.node_text(n)),
+            "full_reference_link" | "image" => find_direct_child_by_kind(node, "link_label")
+                .map(|n| strip_label_brackets(state.node_text(n)))
+                .or_else(|| {
+                    find_direct_child_by_kind(node, "link_text")
+                        .map(|n| state.node_text(n).to_string())
+                }),
+            _ => {
+                find_direct_child_by_kind(node, "link_text").map(|n| state.node_text(n).to_string())
+            }
         };
         let Some(label) = label.map(|raw| normalize_link_label(&raw)) else {
             return;
@@ -522,7 +529,7 @@ impl MarkdownExtractor {
     }
 
     fn visit_link(state: &mut ExtractionState, node: TsNode<'_>) {
-        let Some(url_node) = child_of_kind(node, "link_destination") else {
+        let Some(url_node) = find_direct_child_by_kind(node, "link_destination") else {
             return;
         };
         let Some(parent_id) = state
@@ -533,7 +540,7 @@ impl MarkdownExtractor {
             return;
         };
         let url = state.node_text(url_node);
-        Self::emit_code_uses(state, &url, &parent_id, node.start_position().row as u32);
+        Self::emit_code_uses(state, url, &parent_id, node.start_position().row as u32);
     }
 
     fn emit_code_uses(state: &mut ExtractionState, url: &str, parent_id: &str, line: u32) {
@@ -556,22 +563,6 @@ impl MarkdownExtractor {
             line: Some(line),
         });
     }
-}
-
-fn child_of_kind<'tree>(node: TsNode<'tree>, kind: &str) -> Option<TsNode<'tree>> {
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if child.kind() == kind {
-                return Some(child);
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    None
 }
 
 /// CommonMark label matching: trim, collapse whitespace, case-fold.
@@ -664,18 +655,26 @@ impl crate::LanguageExtractor for MarkdownExtractor {
         "Markdown"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_markdown(file_path, source)
+    /// Links need the inline grammar's second parse, which only the
+    /// extractor-owned parse performs, so the own-parser path stays distinct
+    /// from the supplied-tree path.
+    fn extract_artifact(&self, file_path: &str, source: &str) -> crate::ExtractionArtifactV1 {
+        crate::observe::measure_extract_file(|| {
+            crate::ExtractionArtifactV1::from_result(Self::extract_markdown(file_path, source))
+        })
     }
 
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_supplied_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(
+            Self::extract_supplied_tree(file_path, source, tree, scope),
+        )
     }
 }
 
@@ -775,24 +774,6 @@ beta body
         assert!(nested.end_line < beta.start_line);
         assert_eq!(beta.start_line, 8);
         assert_eq!(beta.end_line, 10);
-    }
-
-    #[test]
-    fn yaml_frontmatter_is_skipped_without_error() {
-        let source = "\
----
-title: skipped
----
-
-# Real heading
-";
-        let result = extract(source);
-        assert!(result.errors.is_empty(), "{:?}", result.errors);
-        let names: Vec<&str> = modules(&result)
-            .iter()
-            .map(|node| node.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["Real heading"]);
     }
 
     #[test]

@@ -1,16 +1,24 @@
 //! application primitive, callable-code, and context-scout daemon invocation handlers.
 
 use super::*;
-use tracedecay_agent_hosts::agents::context_scout_v2::{
+use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
+    ContextScoutExplanationV1, ContextScoutMutationBindingV1, ContextScoutMutationOperationV1,
+    ContextScoutMutationResultV1, ContextScoutMutationSettlementOutcomeV1,
+    ContextScoutPublicMutationV1, ContextScoutRecentStateV1,
 };
-use tracedecay_application::CallableCodeSurfaceRequest;
-use tracedecay_application::context_scout::{
-    ContextScoutAddressV1, ContextScoutDeliveryWindowV1, ContextScoutLeaseV1,
+use tracedecay_application::primitives::{
+    ProductionPrimitiveOpenRequestV1, open_production_primitive_runtime,
 };
-use tracedecay_daemon_protocol::{
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+use tracedecay_contracts::CallableCodeSurfaceRequest;
+use tracedecay_contracts::context_scout::{
+    ContextScoutAddressV1, ContextScoutClaimHandleV1, ContextScoutClaimResultV1,
+    ContextScoutControlRequestV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryResultV1,
+    ContextScoutEvidenceProjectionV1, ContextScoutRecentResultV1,
+    ContextScoutSuggestionProjectionV1, ContextScoutSurfaceRequestV1,
 };
+use tracedecay_domain::sha256_hex_suffix;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod context_scout_registry;
@@ -20,23 +28,46 @@ pub use context_scout_registry::{
 };
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.primitive.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.primitive.execute", level = "trace", skip_all)]
 pub(super) async fn execute_primitive(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
     wire_request_id: String,
     surface_operation: ApplicationSurfaceOperation,
     request: PrimitiveRequest,
+    resolved_scope: Option<&ResolvedScope>,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
+    if request.surface_operation() != Some(surface_operation) {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
+    }
+    let operation = match request.application_operation() {
+        Ok(Some(operation)) => operation,
+        Ok(None) => {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::InvalidRequest,
+            );
+        }
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::ApplicationContractViolation,
+            );
+        }
+    };
     let Some(project_root) = project_root else {
         return concealed_application_problem(wire_request_id);
     };
     // The route reaching here already passed project resolution and an
     // admitted project open, so a missing per-project runtime is the
-    // registration still mounting behind the core publication — a retryable
+    // registration still mounting behind the core publication, a retryable
     // unavailable state. Concealing it as not-found would misreport an
     // authenticated project the caller is standing in.
     let dispatch = service
@@ -44,36 +75,24 @@ pub(super) async fn execute_primitive(
         .read(project_root, PrimitiveProjectRuntime::dispatch)
         .await;
     let Some(dispatch) = dispatch else {
-        return runtime_mounting_problem(wire_request_id);
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     let registered = service
         .project_runtimes
         .get::<RegisteredCallableCodeRuntime>(project_root)
         .await;
     let Some(registered) = registered else {
-        return runtime_mounting_problem(wire_request_id);
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
+    // A cross-project selection executes only on the runtime registered for
+    // exactly that scope; anything else is concealed rather than served from
+    // whichever project this route reached.
+    if !resolved_scope.is_none_or(|scope| scope == &registered.scope) {
+        return concealed_application_problem(wire_request_id);
+    }
     let access = match registered.authorization.current(observed_at).await {
-        Ok(access) if access.scope == registered.scope => access,
-        Ok(_) | Err(_) => return concealed_application_problem(wire_request_id),
-    };
-    let Ok(Some(operation)) =
-        tracedecay_application::feedback::feedback_surface_operation(surface_operation.as_str())
-            .and_then(|operation| {
-                operation.map_or_else(
-                    || {
-                        tracedecay_application::retrieval::catalog::primitive_read_operation(
-                            surface_operation.as_str(),
-                        )
-                    },
-                    |operation| Ok(Some(operation)),
-                )
-            })
-    else {
-        return DaemonInvocationResponse::problem(
-            wire_request_id,
-            DaemonInvocationProblem::InvalidRequest,
-        );
+        Ok(access) => access,
+        Err(problem) => return application_problem(wire_request_id, problem),
     };
     let context = match callable_code_request_context(
         &registered.scope,
@@ -112,7 +131,7 @@ pub(super) async fn execute_primitive(
         }
     };
     if result.is_ok() {
-        let finished_at = current_micros();
+        let finished_at = now_micros();
         let publication_authority = match authorization
             .recheck_publication(&context, &operation, &admission, finished_at)
             .await
@@ -120,7 +139,7 @@ pub(super) async fn execute_primitive(
             Ok(authority) => authority,
             Err(problem) => return application_problem(wire_request_id, problem),
         };
-        if !tracedecay_usecases::primitives::runtime::reauthorize_primitive_evidence(
+        if !tracedecay_application::primitives::runtime::reauthorize_primitive_evidence(
             &mut result,
             publication_authority,
         ) {
@@ -135,7 +154,9 @@ pub(super) async fn execute_primitive(
             wire_request_id,
             DaemonInvocationOutcome::Primitive {
                 scope: result.scope,
-                result: DaemonFeedbackResult::from_application(result.evidence),
+                result: DaemonFeedbackResult::from_application(result.evidence)
+                    .with_touched_files(result.touched_files)
+                    .with_cost(result.cost),
             },
         ),
         Err(problem) => application_problem(wire_request_id, problem),
@@ -143,14 +164,20 @@ pub(super) async fn execute_primitive(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.callable_code.execute", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.callable_code.execute",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_callable_code(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
     wire_request_id: String,
     surface_operation: ApplicationSurfaceOperation,
     request: CallableCodeSurfaceRequest,
     page: PageRequest,
+    resolved_scope: Option<&ResolvedScope>,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -163,10 +190,16 @@ pub(super) async fn execute_callable_code(
         .get::<RegisteredCallableCodeRuntime>(project_root)
         .await;
     let Some(registered) = registered else {
-        // Same admitted-route contract as `execute_primitive`: the runtime is
-        // still mounting, which is retryable rather than concealment-worthy.
-        return runtime_mounting_problem(wire_request_id);
+        // Same admitted-route contract as `execute_primitive`: a miss is
+        // warming unless project-open already recorded a terminal failure.
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
+    // A cross-project selection executes only on the runtime registered for
+    // exactly that scope; anything else is concealed rather than served from
+    // whichever project this route reached.
+    if !resolved_scope.is_none_or(|scope| scope == &registered.scope) {
+        return concealed_application_problem(wire_request_id);
+    }
     let access = match registered.authorization.current(observed_at).await {
         Ok(access) => access,
         Err(problem) => return application_problem(wire_request_id, problem),
@@ -193,10 +226,6 @@ pub(super) async fn execute_callable_code(
             CallableCodeSurfaceRequest::Declaration(_),
             ApplicationSurfaceOperation::CodeDeclaration,
         ) => CallableCodeOperationKind::Declaration,
-        (
-            CallableCodeSurfaceRequest::Definition(_),
-            ApplicationSurfaceOperation::CodeDefinition,
-        ) => CallableCodeOperationKind::Definition,
         (
             CallableCodeSurfaceRequest::TypeDefinition(_),
             ApplicationSurfaceOperation::CodeTypeDefinition,
@@ -296,14 +325,6 @@ pub(super) async fn execute_callable_code(
                 query.declaration(&context, request, observed_at).await,
             )
         }
-        CallableCodeSurfaceRequest::Definition(request) => {
-            let request = request.into_application_request(page);
-            callable_code_response(
-                wire_request_id,
-                &registered.scope,
-                query.definition(&context, request, observed_at).await,
-            )
-        }
         CallableCodeSurfaceRequest::TypeDefinition(request) => {
             let request = request.into_application_request(page);
             callable_code_response(
@@ -326,14 +347,10 @@ pub(super) async fn execute_callable_code(
 fn invalid_callable_code_request(wire_request_id: String) -> DaemonInvocationResponse {
     application_problem(
         wire_request_id,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "callable_code.invalid_query".to_owned(),
-                message: "The callable code query is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(
+            "callable_code.invalid_query",
+            "The callable code query is invalid",
+        ),
     )
 }
 
@@ -354,7 +371,7 @@ pub fn callable_code_request_context(
     if cancellation.is_cancelled() {
         return Err(ApplicationProblem::cancelled_before_admission());
     }
-    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(now_micros()) {
         return Err(ApplicationProblem::timed_out_before_admission());
     }
     let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
@@ -363,15 +380,12 @@ pub fn callable_code_request_context(
             RetryDirective::Never,
         ));
     }
-    let request_id =
-        RequestId::new(wire_request_id).map_err(|_| ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "callable_code.invalid_request_id".to_owned(),
-                message: "The callable code request identifier is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        })?;
+    let request_id = RequestId::new(wire_request_id).map_err(|_| {
+        ApplicationProblem::invalid_request_without_action(
+            "callable_code.invalid_request_id",
+            "The callable code request identifier is invalid",
+        )
+    })?;
     // Correlation IDs stay on the RequestContext. The route authority is a
     // function of the access and the operation, so the same authorized call
     // resolves the same grant from any surface and across durable retries.
@@ -454,7 +468,9 @@ fn callable_code_response<T: Serialize>(
             wire_request_id,
             DaemonInvocationOutcome::CallableCode {
                 scope: result.scope,
-                result: DaemonFeedbackResult::from_application(result.evidence),
+                result: DaemonFeedbackResult::from_application(result.evidence)
+                    .with_touched_files(result.touched_files)
+                    .with_cost(result.cost),
             },
         ),
         Ok(_) => concealed_application_problem(wire_request_id),
@@ -463,16 +479,21 @@ fn callable_code_response<T: Serialize>(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.context_scout.execute", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.context_scout.execute",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_context_scout(
     service: &DaemonInvocationService,
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
     surface_operation: ApplicationSurfaceOperation,
-    request: ContextScoutSurfaceRequest,
+    request: ContextScoutSurfaceRequestV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
+    request_cancellation: CancellationToken,
 ) -> DaemonInvocationResponse {
     let Some(registered) = registered else {
         return DaemonInvocationResponse::problem(
@@ -480,17 +501,26 @@ pub(super) async fn execute_context_scout(
             DaemonInvocationProblem::NotFoundOrNotAuthorized,
         );
     };
+    if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::cancelled_before_admission(),
+        );
+    }
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(now_micros()) {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::timed_out_before_admission(),
+        );
+    }
     let current = match registered.runtime.client().current().await {
-        Ok(current) => tracedecay_configuration::ConfigurationCurrentStateV1 {
-            revision_id: current.revision_id,
-            snapshot: current.snapshot,
-        },
+        Ok(current) => current.into_current_state(),
         Err(error) => {
             return application_problem(wire_request_id, configuration_problem(error));
         }
     };
     let Some(configuration) =
-        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+        tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1::from_current(&current)
     else {
         return DaemonInvocationResponse::problem(
             wire_request_id,
@@ -512,7 +542,7 @@ pub(super) async fn execute_context_scout(
     let address = request.address();
     let is_state_control = matches!(
         &request,
-        ContextScoutSurfaceRequest::Pause(_) | ContextScoutSurfaceRequest::Resume(_)
+        ContextScoutSurfaceRequestV1::Pause(_) | ContextScoutSurfaceRequestV1::Resume(_)
     );
     let address_authorized = if is_state_control {
         registry
@@ -531,7 +561,7 @@ pub(super) async fn execute_context_scout(
     }
     let mut owner = None;
     for candidate in
-        tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+        tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
             address.project_id,
         )
     {
@@ -555,14 +585,14 @@ pub(super) async fn execute_context_scout(
             DaemonInvocationProblem::NotFoundOrNotAuthorized,
         );
     };
-    if let ContextScoutSurfaceRequest::Pause(control)
-    | ContextScoutSurfaceRequest::Resume(control) = &request
+    if let ContextScoutSurfaceRequestV1::Pause(control)
+    | ContextScoutSurfaceRequestV1::Resume(control) = &request
     {
         let target = match &request {
-            ContextScoutSurfaceRequest::Pause(_) => {
+            ContextScoutSurfaceRequestV1::Pause(_) => {
                 tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Paused
             }
-            ContextScoutSurfaceRequest::Resume(_) => {
+            ContextScoutSurfaceRequestV1::Resume(_) => {
                 tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active
             }
             _ => unreachable!("pause/resume matched above"),
@@ -583,135 +613,70 @@ pub(super) async fn execute_context_scout(
     }
     let authority = match context_scout_request_authority(
         &registered,
+        &current,
         &wire_request_id,
         surface_operation,
         observed_at,
         deadline.clone(),
-        cancellation,
+        cancellation.clone(),
     ) {
         Ok(authority) => authority,
         Err(problem) => return application_problem(wire_request_id, problem),
     };
+    if matches!(
+        request,
+        ContextScoutSurfaceRequestV1::Cancel(_)
+            | ContextScoutSurfaceRequestV1::Claim(_)
+            | ContextScoutSurfaceRequestV1::Delivery(_)
+            | ContextScoutSurfaceRequestV1::Feedback(_)
+    ) {
+        return execute_context_scout_mutation(
+            wire_request_id,
+            registered,
+            owner,
+            request,
+            authority,
+            configuration,
+            observed_at,
+            deadline,
+            cancellation,
+            request_cancellation,
+        )
+        .await;
+    }
     let payload = match request {
-        ContextScoutSurfaceRequest::Status(_) => owner
+        ContextScoutSurfaceRequestV1::Status(_) => owner
             .configured_status()
             .await
             .ok()
             .and_then(|status| serde_json::to_value(status).ok()),
-        ContextScoutSurfaceRequest::Recent(request) => owner
+        ContextScoutSurfaceRequestV1::Recent(request) => owner
             .recent_exact(request.address, request.limit)
             .await
             .ok()
+            .map(public_context_scout_recent)
             .and_then(|recent| serde_json::to_value(recent).ok()),
-        ContextScoutSurfaceRequest::Explain(request) => owner
+        ContextScoutSurfaceRequestV1::Explain(request) => owner
             .explain_exact(request.address, request.limit)
             .await
             .ok()
-            .and_then(|explanation| serde_json::to_value(explanation).ok()),
-        ContextScoutSurfaceRequest::Capability(_) => owner
+            .map(public_context_scout_explanation),
+        ContextScoutSurfaceRequestV1::Capability(_) => owner
             .capability()
             .await
             .ok()
             .and_then(|capability| serde_json::to_value(capability).ok()),
-        ContextScoutSurfaceRequest::Budget(_) => owner
+        ContextScoutSurfaceRequestV1::Budget(_) => owner
             .budget()
             .await
             .ok()
             .and_then(|budget| serde_json::to_value(budget).ok()),
-        ContextScoutSurfaceRequest::Cancel(request) if request.work.address == request.address => {
-            owner
-                .cancel(request.work)
-                .await
-                .ok()
-                .filter(|outcome| {
-                    *outcome
-                        != ContextScoutDurableStoreOutcomeV1::Unavailable
-                })
-                .map(|outcome| {
-                    serde_json::json!({ "outcome": context_scout_store_outcome(outcome) })
-                })
-        }
-        ContextScoutSurfaceRequest::Claim(request) => {
-            let window = match request.window {
-                ContextScoutClaimWindowSurfaceV1::IdleWindow => {
-                    ContextScoutDeliveryWindowV1::IdleWindow
-                }
-                ContextScoutClaimWindowSurfaceV1::OnRequest => {
-                    ContextScoutDeliveryWindowV1::OnRequest
-                }
-            };
-            let digest = canonical_sha256(&(
-                "tracedecay.context-scout.delivery-lease.v1",
-                &wire_request_id,
-                request.address,
-                request.window,
-                observed_at,
-            ))
-            .ok();
-            let lease = digest.and_then(|digest| {
-                let bytes = digest.as_str().as_bytes();
-                (bytes.len() >= 16).then(|| {
-                    let mut lease_id = [0; 16];
-                    lease_id.copy_from_slice(&bytes[..16]);
-                    ContextScoutLeaseV1 {
-                        lease_id,
-                        expires_at: UtcMicros(
-                            deadline
-                                .expires_at
-                                .0
-                                .min(observed_at.0.saturating_add(30_000_000)),
-                        ),
-                    }
-                })
-            });
-            match lease {
-                Some(lease) => match owner
-                    .claim_delivery_exact(request.address, window, observed_at, lease)
-                    .await
-                {
-                    ContextScoutDurableClaimOutcomeV1::Claimed(
-                        claim,
-                    ) => serde_json::to_value(claim).ok(),
-                    ContextScoutDurableClaimOutcomeV1::Empty => {
-                        Some(serde_json::json!({ "outcome": "empty" }))
-                    }
-                    ContextScoutDurableClaimOutcomeV1::Unavailable => {
-                        None
-                    }
-                },
-                None => None,
-            }
-        }
-        ContextScoutSurfaceRequest::Delivery(request)
-            if request.claim.entry.work.address == request.address =>
-        {
-            let outcome = owner
-                .record_delivery(&request.claim, &request.receipt)
-                .await;
-            (outcome
-                != ContextScoutDurableStoreOutcomeV1::Unavailable)
-                .then(|| {
-                    serde_json::json!({
-                        "outcome": context_scout_store_outcome(outcome)
-                    })
-                })
-        }
-        ContextScoutSurfaceRequest::Feedback(request) => {
-            let outcome = owner
-                .record_feedback_exact(request.address, &request.receipt, request.feedback)
-                .await;
-            (outcome
-                != ContextScoutDurableStoreOutcomeV1::Unavailable)
-                .then(|| {
-                    serde_json::json!({
-                        "outcome": context_scout_store_outcome(outcome)
-                    })
-                })
-        }
-        ContextScoutSurfaceRequest::Pause(_)
-        | ContextScoutSurfaceRequest::Resume(_)
-        | ContextScoutSurfaceRequest::Cancel(_)
-        | ContextScoutSurfaceRequest::Delivery(_) => None,
+        ContextScoutSurfaceRequestV1::Pause(_)
+        | ContextScoutSurfaceRequestV1::Resume(_)
+        | ContextScoutSurfaceRequestV1::Cancel(_)
+        | ContextScoutSurfaceRequestV1::Claim(_)
+        | ContextScoutSurfaceRequestV1::Delivery(_)
+        | ContextScoutSurfaceRequestV1::Feedback(_) => None,
     };
     let Some(payload) = payload else {
         return application_problem(
@@ -722,7 +687,7 @@ pub(super) async fn execute_context_scout(
             }),
         );
     };
-    match configuration_evidence(payload, authority, observed_at, deadline) {
+    match configuration_evidence(payload, authority.receipt, observed_at, deadline) {
         Ok(outcome) => DaemonInvocationResponse::with_outcome(
             wire_request_id,
             DaemonInvocationOutcome::ContextScout {
@@ -734,15 +699,484 @@ pub(super) async fn execute_context_scout(
     }
 }
 
-#[hotpath::measure(label = "daemon.service.context_scout.transition", future = true)]
+#[allow(clippy::too_many_arguments)]
+async fn execute_context_scout_mutation(
+    wire_request_id: String,
+    registered: RegisteredConfigurationRuntime,
+    owner: Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>,
+    request: ContextScoutSurfaceRequestV1,
+    mut authority: ContextScoutRequestAuthorityV1,
+    configuration: tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+    request_cancellation: CancellationToken,
+) -> DaemonInvocationResponse {
+    let (operation, idempotency_key) = match &request {
+        ContextScoutSurfaceRequestV1::Cancel(request) => (
+            ContextScoutMutationOperationV1::Cancel,
+            request.idempotency_key.clone(),
+        ),
+        ContextScoutSurfaceRequestV1::Claim(request) => (
+            ContextScoutMutationOperationV1::Claim,
+            request.idempotency_key.clone(),
+        ),
+        ContextScoutSurfaceRequestV1::Delivery(request) => (
+            ContextScoutMutationOperationV1::Delivery,
+            request.idempotency_key.clone(),
+        ),
+        ContextScoutSurfaceRequestV1::Feedback(request) => (
+            ContextScoutMutationOperationV1::Feedback,
+            request.idempotency_key.clone(),
+        ),
+        _ => return concealed_application_problem(wire_request_id),
+    };
+    let effect_identity = match derive_logical_effect_idempotency(
+        LogicalEffectIdempotencyDomain::ContextScoutEffect,
+        &(
+            &registered.actor,
+            &registered.scope,
+            operation.as_str(),
+            &idempotency_key,
+        ),
+    ) {
+        Ok(identity) => identity,
+        Err(_) => return concealed_application_problem(wire_request_id),
+    };
+    let explicit_claim = match &request {
+        ContextScoutSurfaceRequestV1::Claim(request)
+            if request.window
+                == tracedecay_contracts::context_scout::ContextScoutClaimWindowV1::OnRequest =>
+        {
+            Some(request.clone())
+        }
+        _ => None,
+    };
+    let configuration_revision = configuration.control().configuration_revision;
+    let mut mutation = match request {
+        ContextScoutSurfaceRequestV1::Cancel(request)
+            if request.work.address == request.address =>
+        {
+            ContextScoutPublicMutationV1::Cancel { work: request.work }
+        }
+        ContextScoutSurfaceRequestV1::Claim(request) => {
+            let Some(mutation) = owner
+                .public_claim_mutation(
+                    &request,
+                    observed_at,
+                    UtcMicros(
+                        deadline
+                            .expires_at
+                            .0
+                            .min(observed_at.0.saturating_add(30_000_000)),
+                    ),
+                )
+                .await
+            else {
+                return context_scout_mutation_unavailable(wire_request_id);
+            };
+            mutation
+        }
+        ContextScoutSurfaceRequestV1::Delivery(request)
+            if request.claim.work.address == request.address =>
+        {
+            let Some(receipt_id) =
+                context_scout_effect_receipt_id(&effect_identity, request.claim.envelope_id)
+            else {
+                return context_scout_mutation_unavailable(wire_request_id);
+            };
+            ContextScoutPublicMutationV1::Delivery {
+                work: request.claim.work,
+                envelope_id: request.claim.envelope_id,
+                lease: tracedecay_contracts::context_scout::ContextScoutLeaseV1 {
+                    lease_id: request.claim.lease_id,
+                    expires_at: request.claim.lease_expires_at,
+                },
+                configuration_revision,
+                receipt: ContextScoutDeliveryReceiptV1 {
+                    receipt_id,
+                    envelope_id: request.claim.envelope_id,
+                    delivered_at: request.delivered_at,
+                    outcome: request.outcome,
+                },
+            }
+        }
+        ContextScoutSurfaceRequestV1::Feedback(request) => ContextScoutPublicMutationV1::Feedback {
+            address: request.address,
+            receipt: request.receipt,
+            feedback: request.feedback,
+        },
+        _ => return concealed_application_problem(wire_request_id),
+    };
+    let Some(input_digest) = mutation.input_digest() else {
+        return context_scout_mutation_unavailable(wire_request_id);
+    };
+    let binding = ContextScoutMutationBindingV1 {
+        effect_identity: effect_identity.clone(),
+        actor: registered.actor.clone(),
+        scope: registered.scope.clone(),
+        operation,
+        idempotency_key: idempotency_key.clone(),
+        input_digest,
+    };
+    let store = owner.store();
+    let retained = store.retained_public_mutation(&binding).await;
+    let settlement = match retained {
+        Some(settlement) => settlement,
+        None => {
+            if let Some(claim) = explicit_claim {
+                match store
+                    .needs_explicit_production(claim.address, configuration_revision, now_micros())
+                    .await
+                {
+                    Some(true) => {
+                        let Some((hook, lifecycle, hook_revision)) = owner
+                            .current_producer_input(
+                                claim.address,
+                                &configuration,
+                                &registered.scope,
+                            )
+                            .await
+                        else {
+                            return context_scout_mutation_unavailable(wire_request_id);
+                        };
+                        let now = now_micros();
+                        let expires_at = deadline.expires_at.0.min(mounted_grant_expires_at(now).0);
+                        let Ok(remaining) = u64::try_from(expires_at.saturating_sub(now.0)) else {
+                            return application_problem(
+                                wire_request_id,
+                                ApplicationProblem::timed_out_before_admission(),
+                            );
+                        };
+                        let producer_deadline =
+                            tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+                                std::time::Instant::now()
+                                    + std::time::Duration::from_micros(remaining),
+                            );
+                        if let Err(problem) = super::types::run_registered_context_scout_request(
+                            hook,
+                            lifecycle,
+                            hook_revision,
+                            effect_identity.clone(),
+                            producer_deadline,
+                            request_cancellation.clone(),
+                        )
+                        .await
+                        {
+                            return application_problem(wire_request_id, problem);
+                        }
+                        let current = match registered.runtime.client().current().await {
+                            Ok(current) => current.into_current_state(),
+                            Err(error) => {
+                                return application_problem(
+                                    wire_request_id,
+                                    configuration_problem(error),
+                                );
+                            }
+                        };
+                        if !configuration.matches_current(&current)
+                            || owner
+                                .current_producer_input(
+                                    claim.address,
+                                    &configuration,
+                                    &registered.scope,
+                                )
+                                .await
+                                .is_none()
+                        {
+                            return context_scout_mutation_unavailable(wire_request_id);
+                        }
+                        let now = now_micros();
+                        authority = match context_scout_request_authority(
+                            &registered,
+                            &current,
+                            &wire_request_id,
+                            ApplicationSurfaceOperation::ContextScoutClaim,
+                            now,
+                            deadline.clone(),
+                            cancellation.clone(),
+                        ) {
+                            Ok(authority) => authority,
+                            Err(problem) => return application_problem(wire_request_id, problem),
+                        };
+                        let Some(refreshed_mutation) = owner
+                            .public_claim_mutation(
+                                &claim,
+                                now,
+                                UtcMicros(
+                                    deadline.expires_at.0.min(now.0.saturating_add(30_000_000)),
+                                ),
+                            )
+                            .await
+                        else {
+                            return context_scout_mutation_unavailable(wire_request_id);
+                        };
+                        mutation = refreshed_mutation;
+                    }
+                    Some(false) => {}
+                    None => return context_scout_mutation_unavailable(wire_request_id),
+                }
+            }
+            if request_cancellation.is_cancelled() {
+                return application_problem(
+                    wire_request_id,
+                    ApplicationProblem::cancelled_before_admission(),
+                );
+            }
+            if deadline.is_elapsed_at(now_micros()) {
+                return application_problem(
+                    wire_request_id,
+                    ApplicationProblem::timed_out_before_admission(),
+                );
+            }
+            owner.commit_public_mutation(binding, mutation).await
+        }
+    };
+    let settlement = match settlement {
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(settlement) => settlement,
+        ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict => {
+            return application_problem(
+                wire_request_id,
+                ApplicationProblem::stale(SafeDiagnostic {
+                    code: "context_scout.idempotency_conflict".to_owned(),
+                    message: "The Context Scout idempotency key is bound to another input"
+                        .to_owned(),
+                }),
+            );
+        }
+        ContextScoutMutationSettlementOutcomeV1::Unavailable => {
+            return context_scout_mutation_unavailable(wire_request_id);
+        }
+    };
+    let payload = match &settlement.result {
+        ContextScoutMutationResultV1::Cancel(outcome)
+        | ContextScoutMutationResultV1::Feedback(outcome) => {
+            let Some(outcome) = context_scout_store_outcome(*outcome) else {
+                return context_scout_mutation_unavailable(wire_request_id);
+            };
+            serde_json::to_value(
+                tracedecay_contracts::context_scout::ContextScoutMutationResultV1 { outcome },
+            )
+        }
+        ContextScoutMutationResultV1::Claim(outcome) => match outcome.as_ref() {
+            ContextScoutDurableClaimOutcomeV1::Claimed(claim) => {
+                let Some(claimed) = public_context_scout_claim(claim) else {
+                    return context_scout_mutation_unavailable(wire_request_id);
+                };
+                serde_json::to_value(claimed)
+            }
+            ContextScoutDurableClaimOutcomeV1::Empty => {
+                serde_json::to_value(ContextScoutClaimResultV1::Empty)
+            }
+            ContextScoutDurableClaimOutcomeV1::Unavailable => {
+                return context_scout_mutation_unavailable(wire_request_id);
+            }
+        },
+        ContextScoutMutationResultV1::Delivery { outcome, receipt } => {
+            let Some(outcome) = context_scout_store_outcome(*outcome) else {
+                return context_scout_mutation_unavailable(wire_request_id);
+            };
+            serde_json::to_value(ContextScoutDeliveryResultV1 {
+                outcome,
+                receipt: receipt.clone(),
+            })
+        }
+    };
+    let Ok(payload) = payload else {
+        return context_scout_mutation_unavailable(wire_request_id);
+    };
+    let request_id = match RequestId::new(wire_request_id.clone()) {
+        Ok(request_id) => request_id,
+        Err(_) => return concealed_application_problem(wire_request_id),
+    };
+    let execution = match OperationReceipt::completed(
+        observed_at,
+        now_micros(),
+        deadline,
+        OperationBudgetUsage::default(),
+    ) {
+        Ok(execution) => execution,
+        Err(_) => return context_scout_mutation_unavailable(wire_request_id),
+    };
+    let receipt = EffectReceipt {
+        operation: authority.use_case,
+        request_id,
+        actor: registered.actor.clone(),
+        scope: registered.scope.clone(),
+        effect_class: EffectClass::Administrative,
+        idempotency_key: idempotency_key.clone(),
+        input_digest: settlement.binding.input_digest.clone(),
+        expected_state: settlement.expected_state.clone(),
+        policy_digest: authority.receipt.policy.digest.clone(),
+        configuration_digest: authority.configuration_digest,
+        catalog_digest: authority.catalog_digest,
+        privacy_digest: authority.privacy_digest,
+        outcome: EffectTermination::Completed,
+        committed_state: Some(settlement.committed_state.clone()),
+        external_proof: None,
+    };
+    let effect_id = match sha256_hex_suffix(effect_identity.as_str())
+        .map(|suffix| format!("effect.context-scout.{suffix}"))
+        .and_then(|identity| EffectId::new(identity).ok())
+    {
+        Some(effect_id) => effect_id,
+        None => return context_scout_mutation_unavailable(wire_request_id),
+    };
+    let outcome = match EffectResult::new(
+        effect_id,
+        EffectClass::Administrative,
+        idempotency_key,
+        authority.receipt,
+        settlement.expected_state,
+        execution,
+        ReconciliationState::Reconciled,
+        receipt,
+        Some(payload),
+    ) {
+        Ok(effect) => ApplicationOutcome::Effect(effect),
+        Err(_) => return context_scout_mutation_unavailable(wire_request_id),
+    };
+    DaemonInvocationResponse::with_outcome(
+        wire_request_id,
+        DaemonInvocationOutcome::ContextScout {
+            scope: registered.scope,
+            outcome,
+        },
+    )
+}
+
+fn context_scout_effect_receipt_id(
+    effect_identity: &ManifestDigest,
+    envelope_id: [u8; 16],
+) -> Option<[u8; 16]> {
+    let digest = canonical_sha256(&(
+        "tracedecay.context-scout.public-delivery-receipt.v1",
+        effect_identity,
+        envelope_id,
+    ))
+    .ok()?;
+    let encoded = sha256_hex_suffix(digest.as_str())?.get(..32)?;
+    let mut receipt_id = [0; 16];
+    hex::decode_to_slice(encoded, &mut receipt_id).ok()?;
+    Some(receipt_id)
+}
+
+fn context_scout_mutation_unavailable(wire_request_id: String) -> DaemonInvocationResponse {
+    application_problem(
+        wire_request_id,
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "context_scout.unavailable".to_owned(),
+            message: "The exact-address Context Scout mutation is unavailable".to_owned(),
+        }),
+    )
+}
+
+fn public_context_scout_claim(
+    claim: &tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+) -> Option<ContextScoutClaimResultV1> {
+    let entry = &claim.entry;
+    let envelope = &entry.envelope;
+    Some(ContextScoutClaimResultV1::Claimed {
+        claim: Box::new(ContextScoutClaimHandleV1 {
+            work: entry.work,
+            envelope_id: envelope.envelope_id,
+            lease_id: claim.lease.lease_id,
+            lease_expires_at: claim.lease.expires_at,
+        }),
+        suggestion: Box::new(public_context_scout_suggestion(entry)?),
+    })
+}
+
+/// Public projection of one durable entry. `None` only for session evidence
+/// that pins no code generation, which durable validation already refuses.
+fn public_context_scout_suggestion(
+    entry: &tracedecay_contracts::context_scout::ContextScoutDurableQueueEntryV1,
+) -> Option<ContextScoutSuggestionProjectionV1> {
+    let envelope = &entry.envelope;
+    let candidate = &envelope.candidate;
+    Some(ContextScoutSuggestionProjectionV1 {
+        work: entry.work,
+        envelope_id: envelope.envelope_id,
+        configuration_revision: envelope.configuration_revision,
+        delivery_window: envelope.delivery_window,
+        route: entry.route,
+        model_outcome: entry.model_outcome,
+        model_receipt: entry.model_receipt.clone(),
+        dedupe_key: candidate.dedupe_key,
+        category: candidate.category,
+        relevance_score: candidate.relevance_score,
+        suggestion_text: candidate.suggestion_text.clone(),
+        evidence: ContextScoutEvidenceProjectionV1 {
+            content_generation: candidate.evidence.code_generation_id()?.clone(),
+            availability: candidate.evidence.availability(),
+            anchor_ids: candidate
+                .evidence
+                .as_code()
+                .into_iter()
+                .flat_map(|evidence| evidence.sources.iter())
+                .flat_map(|source| source.anchors.iter().cloned())
+                .collect(),
+            claim_digest: candidate.evidence.claim_digest().clone(),
+            session_window: candidate
+                .evidence
+                .as_session()
+                .map(|evidence| evidence.window.clone()),
+        },
+        expires_at: candidate.expires_at,
+    })
+}
+
+fn public_context_scout_recent(recent: ContextScoutRecentStateV1) -> ContextScoutRecentResultV1 {
+    let pending = recent
+        .pending
+        .iter()
+        .filter_map(public_context_scout_suggestion)
+        .collect::<Vec<_>>();
+    let deliveries = recent
+        .deliveries
+        .iter()
+        .filter_map(|delivery| {
+            Some(
+                tracedecay_contracts::context_scout::ContextScoutRecentDeliveryV1 {
+                    suggestion: public_context_scout_suggestion(&delivery.entry)?,
+                    receipt: delivery.receipt.clone(),
+                    feedback: delivery.feedback,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    // An entry without a public projection is counted, never silently lost.
+    let unprojected =
+        (recent.pending.len() - pending.len()) + (recent.deliveries.len() - deliveries.len());
+    ContextScoutRecentResultV1 {
+        configuration_revision: recent.configuration_revision,
+        observed_at: recent.observed_at,
+        pending,
+        deliveries,
+        omitted: recent.omitted.saturating_add(unprojected),
+    }
+}
+
+fn public_context_scout_explanation(explanation: ContextScoutExplanationV1) -> serde_json::Value {
+    serde_json::json!({
+        "status": explanation.status,
+        "recent": public_context_scout_recent(explanation.recent),
+    })
+}
+
+#[tracing::instrument(
+    name = "daemon.service.context_scout.transition",
+    level = "trace",
+    skip_all
+)]
 async fn execute_context_scout_state_transition(
     wire_request_id: String,
     registered: RegisteredConfigurationRuntime,
-    owner: Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    owner: Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>,
     registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    control: &ContextScoutControlSurfaceRequest,
+    control: &ContextScoutControlRequestV1,
     target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
-    current: tracedecay_configuration::ConfigurationCurrentStateV1,
+    current: tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -770,7 +1204,7 @@ async fn execute_context_scout_state_transition(
         wire_request_id,
         Some(registered.clone()),
         ApplicationSurfaceOperation::ConfigurationSet,
-        ConfigurationWireRequestV1::Set(tracedecay_application::ConfigurationSetRequestV1 {
+        ConfigurationWireRequestV1::Set(tracedecay_contracts::ConfigurationSetRequestV1 {
             layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
                 project_id: registered.scope.project_id.clone(),
             },
@@ -806,42 +1240,41 @@ async fn execute_context_scout_state_transition(
         &registry,
         control.address,
         &registered.scope,
-        current_micros(),
     )
     .await
     {
+        tracing::warn!(
+            %error,
+            "Context Scout configuration activation scheduled for reconciliation"
+        );
         let runtime = Arc::clone(&registered.runtime);
         let reconciliation_owner = Arc::clone(&owner);
         let reconciliation_registry = Arc::clone(&registry);
         let reconciliation_scope = registered.scope.clone();
         let reconciliation_address = control.address;
-        let error_code = error.code().to_owned();
-        if let Err(observation_error) = runtime
-            .record_runtime_activation(None, Some(error_code), current_micros())
-            .await
-        {
+        let reconciliation =
+            tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+                if let Err(reconciliation_error) = reconcile_context_scout_configuration(
+                    &runtime,
+                    &reconciliation_owner,
+                    &reconciliation_registry,
+                    reconciliation_address,
+                    &reconciliation_scope,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        %reconciliation_error,
+                        "Context Scout configuration activation remains pending reconciliation"
+                    );
+                }
+            });
+        if let Err(error) = reconciliation {
             tracing::warn!(
-                %observation_error,
-                "Context Scout activation degradation could not be recorded"
+                %error,
+                "Context Scout configuration activation retry could not start"
             );
         }
-        tokio::spawn(async move {
-            if let Err(reconciliation_error) = reconcile_context_scout_configuration(
-                &runtime,
-                &reconciliation_owner,
-                &reconciliation_registry,
-                reconciliation_address,
-                &reconciliation_scope,
-                current_micros(),
-            )
-            .await
-            {
-                tracing::warn!(
-                    %reconciliation_error,
-                    "Context Scout configuration activation remains pending reconciliation"
-                );
-            }
-        });
     }
     DaemonInvocationResponse::with_outcome(
         request_id,
@@ -859,45 +1292,28 @@ enum ContextScoutActivationReconciliationError {
     ActivationRejected,
     #[error("the Context Scout exact-address pin could not be advanced")]
     AddressActivationRejected,
-    #[error("the Context Scout activation observation could not be recorded")]
-    ObservationUnavailable,
 }
 
-impl ContextScoutActivationReconciliationError {
-    #[hotpath::skip]
-    const fn code(self) -> &'static str {
-        match self {
-            Self::ConfigurationUnavailable => "context_scout.activation.configuration_unavailable",
-            Self::InvalidConfiguration => "context_scout.activation.configuration_invalid",
-            Self::ActivationRejected => "context_scout.activation.reconciliation_pending",
-            Self::AddressActivationRejected => {
-                "context_scout.activation.address_reconciliation_pending"
-            }
-            Self::ObservationUnavailable => "context_scout.activation.observation_unavailable",
-        }
-    }
-}
-
-#[hotpath::measure(label = "daemon.service.context_scout.reconcile", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.context_scout.reconcile",
+    level = "trace",
+    skip_all
+)]
 async fn reconcile_context_scout_configuration(
     runtime: &Arc<ProjectConfigurationRuntime>,
-    owner: &Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    owner: &Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>,
     registry: &Arc<ProjectContextScoutAddressRegistryV1>,
     address: ContextScoutAddressV1,
     scope: &ResolvedScope,
-    observed_at: UtcMicros,
 ) -> Result<(), ContextScoutActivationReconciliationError> {
     let current = runtime
         .client()
         .current()
         .await
         .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
-    let current = tracedecay_configuration::ConfigurationCurrentStateV1 {
-        revision_id: current.revision_id,
-        snapshot: current.snapshot,
-    };
+    let current = current.into_current_state();
     let refreshed =
-        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+        tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1::from_current(&current)
             .ok_or(ContextScoutActivationReconciliationError::InvalidConfiguration)?;
     if !registry
         .advance_control_exact_address(address, scope, &refreshed)
@@ -914,27 +1330,36 @@ async fn reconcile_context_scout_configuration(
             .await
             .map_err(|_| ContextScoutActivationReconciliationError::ActivationRejected)?;
     }
-    runtime
-        .record_runtime_activation(Some(current.revision_id), None, observed_at)
-        .await
-        .map_err(|_| ContextScoutActivationReconciliationError::ObservationUnavailable)
+    Ok(())
 }
 
-const fn context_scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1) -> &'static str {
+const fn context_scout_store_outcome(
+    outcome: ContextScoutDurableStoreOutcomeV1,
+) -> Option<tracedecay_contracts::context_scout::ContextScoutStoreOutcomeV1> {
     match outcome {
-        ContextScoutDurableStoreOutcomeV1::Stored => "stored",
-        ContextScoutDurableStoreOutcomeV1::Duplicate => "duplicate",
-        ContextScoutDurableStoreOutcomeV1::Superseded => "superseded",
-        ContextScoutDurableStoreOutcomeV1::Unavailable => "unavailable",
+        ContextScoutDurableStoreOutcomeV1::Stored => {
+            Some(tracedecay_contracts::context_scout::ContextScoutStoreOutcomeV1::Stored)
+        }
+        ContextScoutDurableStoreOutcomeV1::Duplicate => {
+            Some(tracedecay_contracts::context_scout::ContextScoutStoreOutcomeV1::Duplicate)
+        }
+        ContextScoutDurableStoreOutcomeV1::Superseded => {
+            Some(tracedecay_contracts::context_scout::ContextScoutStoreOutcomeV1::Superseded)
+        }
+        ContextScoutDurableStoreOutcomeV1::Unavailable => None,
     }
 }
 
 #[derive(Debug, Error)]
 pub enum DaemonPrimitiveRuntimeRegistrationError {
-    #[error("a application primitive runtime is already mounted for this project")]
+    #[error("an application primitive runtime is already mounted for this project")]
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
+    #[error("a concurrent primitive runtime build failed: {detail}")]
+    ConcurrentBuildFailed { detail: String },
+    #[error("the application primitive runtime could not be opened: {0}")]
+    Open(#[from] ApplicationContractError),
 }
 
 /// Central project-open registration for the owned primitive facade.
@@ -952,7 +1377,6 @@ impl DaemonPrimitiveRuntimeRegistrar {
 
     /// Retains the already-opened project runtime as its teardown owner.
     /// Scope/access were bound by the concrete project-open factory.
-    #[hotpath::skip]
     pub async fn register(
         &self,
         project_root: PathBuf,
@@ -970,7 +1394,22 @@ impl DaemonPrimitiveRuntimeRegistrar {
                 ProjectRuntimeRegistryError::Closed => {
                     DaemonPrimitiveRuntimeRegistrationError::RegistryClosed
                 }
+                ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail } => {
+                    DaemonPrimitiveRuntimeRegistrationError::ConcurrentBuildFailed { detail }
+                }
             })?;
         Ok(dispatch)
+    }
+
+    pub async fn open_and_register(
+        &self,
+        project_root: PathBuf,
+        request: ProductionPrimitiveOpenRequestV1,
+    ) -> Result<(), DaemonPrimitiveRuntimeRegistrationError> {
+        let runtime = open_production_primitive_runtime(request).await?;
+        match self.register(project_root, runtime).await {
+            Ok(_) | Err(DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }

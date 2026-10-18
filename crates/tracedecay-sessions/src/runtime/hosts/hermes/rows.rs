@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 use crate::runtime::shared::StoredCursor;
-use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
+use tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES;
 
 use super::MAX_HERMES_VALUE_BYTES;
 

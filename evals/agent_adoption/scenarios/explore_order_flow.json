@@ -12,36 +12,41 @@
     "required_first": [
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body",
-      "tracedecay_outline",
-      "tracedecay_read",
+      "tracedecay_find_exact_symbol",
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
       "tracedecay_grep"
     ],
     "acceptable": [
       "tracedecay_callees",
       "tracedecay_callers",
       "Read"
-    ],
-    "forbidden_first": [
-      "Grep",
-      "Glob"
-    ],
-    "forbidden_bash": [
-      "grep",
-      "rg ",
-      "rg\t",
-      "find ",
-      "cat ",
-      "sed ",
-      "awk ",
-      "ack "
     ]
   },
-  "ground_truth": [
-    "place_order",
-    "reserve_stock",
-    "compute_total"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        },
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states compute_total",
+          "pattern": "\\bcompute_total\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 7,
-  "notes": "Flow question; graph traversal (context/callees) beats file scanning."
+  "notes": "Flow question; graph traversal (context/callees) beats file scanning.",
+  "expected_skill": "exploring-code",
+  "allowed_skills": [
+    "exploring-code"
+  ],
+  "max_tracedecay_calls": 7
 }

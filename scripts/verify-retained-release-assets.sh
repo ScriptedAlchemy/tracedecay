@@ -16,13 +16,21 @@
 #   --tag TAG                  release tag; the source ref is refs/tags/TAG
 #   --repo OWNER/REPO
 #   --signer-workflow PATH     e.g. OWNER/REPO/.github/workflows/release.yml
-#   --source-digest SHA        commit the tag must attest to
+#   --source-digest SHA        commit the tag points at
+# Optional, repeatable:
+#   --signer-ref REF           accepted workflow run ref; defaults to refs/tags/TAG
 #
-# Requires an authenticated `gh` (GH_TOKEN or ambient credentials).
+# Build provenance attests the commit the workflow ran at, not the checkout it
+# built. A tag-ref attestation must name SHA exactly. A branch-ref attestation
+# (a master-dispatched release or recovery run) names that branch's head at
+# dispatch, which must descend from SHA, the same rule the workflows enforce
+# with `merge-base --is-ancestor` before building.
+#
+# Requires an authenticated `gh` (GH_TOKEN or ambient credentials) and `jq`.
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --tag TAG --repo OWNER/REPO --signer-workflow PATH --source-digest SHA (--asset-names FILE --download-dir DIR | --files FILE...)" >&2
+  echo "usage: $0 --tag TAG --repo OWNER/REPO --signer-workflow PATH --source-digest SHA [--signer-ref REF]... (--asset-names FILE --download-dir DIR | --files FILE...)" >&2
   exit 2
 }
 
@@ -30,6 +38,7 @@ tag=""
 repo=""
 signer_workflow=""
 source_digest=""
+signer_refs=()
 asset_names=""
 download_dir=""
 files=()
@@ -40,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --repo) repo="$2"; shift 2 ;;
     --signer-workflow) signer_workflow="$2"; shift 2 ;;
     --source-digest) source_digest="$2"; shift 2 ;;
+    --signer-ref) signer_refs+=("$2"); shift 2 ;;
     --asset-names) asset_names="$2"; shift 2 ;;
     --download-dir) download_dir="$2"; shift 2 ;;
     --files) shift; files=("$@"); break ;;
@@ -48,14 +58,37 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$tag" && -n "$repo" && -n "$signer_workflow" && -n "$source_digest" ]] || usage
+if [[ ${#signer_refs[@]} -eq 0 ]]; then
+  signer_refs=("refs/tags/${tag}")
+fi
+
+attested_source_matches() {
+  local source_ref="$1" digest="$2"
+  [[ "$digest" == "$source_digest" ]] && return 0
+  [[ "$source_ref" == refs/heads/* ]] || return 1
+  [[ "$(gh api "repos/${repo}/compare/${source_digest}...${digest}" --jq .status)" == "ahead" ]]
+}
 
 verify_asset() {
-  gh attestation verify "$1" \
-    --repo "$repo" \
-    --signer-workflow "$signer_workflow" \
-    --source-ref "refs/tags/${tag}" \
-    --source-digest "$source_digest" \
-    --deny-self-hosted-runners >/dev/null
+  local asset="$1"
+  local source_ref digests digest
+  for source_ref in "${signer_refs[@]}"; do
+    digests="$(gh attestation verify "$asset" \
+      --repo "$repo" \
+      --signer-workflow "$signer_workflow" \
+      --source-ref "$source_ref" \
+      --deny-self-hosted-runners \
+      --format json 2>/dev/null \
+      | jq -r '.[].verificationResult.signature.certificate.sourceRepositoryDigest')" || continue
+    while IFS= read -r digest; do
+      [[ -n "$digest" ]] || continue
+      if attested_source_matches "$source_ref" "$digest"; then
+        return 0
+      fi
+    done <<< "$digests"
+  done
+  echo "release asset attestation did not match an allowed signer ref: $asset" >&2
+  return 1
 }
 
 if [[ -n "$asset_names" ]]; then

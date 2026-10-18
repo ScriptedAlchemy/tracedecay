@@ -5,6 +5,12 @@
 //! usecases, application, agent-hosts, and code-index-runtime, and below the
 //! composition root. OS lifecycle management (install/start/stop/probe) lives
 //! in `tracedecay-daemon-control`.
+//!
+//! [`application_surface`] is the transport adaptation shared by HTTP, MCP,
+//! and the CLI: it resolves catalog bindings, normalizes request controls, and
+//! projects canonical application envelopes. Route descriptors and encoding
+//! stay in `tracedecay-api`; the composition root only injects the
+//! authenticated executor into the routers assembled here.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -44,55 +50,94 @@
 #![allow(clippy::single_match_else)]
 #![allow(clippy::large_futures)]
 
-/// Abort bound for in-flight invocation tasks during shutdown.
-///
-/// Re-exported here as the daemon-service authority while the lower runtime
-/// crate remains the cycle-free owner shared with code-index runtime.
-pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
-
+pub mod adoption_observation;
+pub mod application_surface;
+pub mod automation_effect;
+pub mod automation_observation;
+#[cfg(unix)]
+pub mod bounded_stderr_log;
+pub mod callable_code_authorization;
+pub mod context_scout_lifecycle;
+pub mod doctor_kernel;
 pub mod invocation;
+pub mod logging;
+mod mcp_project_registry;
+mod mcp_workflow_index;
+pub mod profile_host_admission_replay;
+pub mod project_owner_registration;
 pub mod project_runtime;
+pub mod query_mcp_admission;
+pub mod remote_http_transport;
+mod remote_protocol;
 pub mod request_cancellation;
+pub mod retained_owner;
+pub mod session_refresh;
+pub mod shutdown;
+mod shutdown_coordination;
 
-mod multi_root;
-
-pub use invocation::semantic_evaluation::SemanticInvocationControlV1;
+pub use callable_code_authorization::{
+    DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission, GRANT_HORIZON,
+    daemon_owned_project_source_access_at, project_open_source_access_authority,
+};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use invocation::{
-    AuthorizedDaemonLspWorkspace, DaemonFeedbackPublicationTestGate,
-    InvocationProjectRuntimeIdentityV1, LspLeaseTaskRegistry, RuntimeLspSession,
-    WorkAttemptProcessRegistryV1, canonicalize_lsp_roots, current_micros, execute_work_application,
-    lsp_delivery_attempt, mounted_configuration_layers, now_millis, retain_lsp_delivery_attempt,
+    AuthorizedDaemonLspWorkspace, DaemonConfigurationRuntimeRegistrationPauseV1,
+    DaemonFeedbackPublicationTestGate, InvocationProjectRuntimeIdentityV1, LspLeaseTaskRegistry,
+    RuntimeLspSession, WorkAttemptProcessRegistryV1, canonicalize_lsp_roots,
+    execute_work_application, lsp_delivery_attempt, mounted_configuration_layers, now_millis,
+    retain_lsp_delivery_attempt,
 };
 pub use invocation::{
-    BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
-    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
-    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrar,
+    BoundedHookOrchestratorV1, ConfigurationRuntimeRefreshFuture, ConfigurationRuntimeRefreshPort,
+    DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
+    DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    DaemonAdvisoryCycleMountChangedFuture, DaemonAdvisoryCycleMountFuture,
+    DaemonAdvisoryCycleMountV1, DaemonAdvisoryRuntimeRegistrar,
     DaemonAdvisoryRuntimeRegistrationError, DaemonConfigurationGrantAuthority,
     DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackInvocationOwner,
+    DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationService, DaemonLspInvocationOwner, DaemonLspOwnerRegistrar,
-    DaemonNativeIntegrationRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrar,
+    DaemonGraphToolOwnerRegistrationError, DaemonInvocationService, DaemonLspInvocationOwner,
+    DaemonLspOwnerRegistrar, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonRetainedRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
-    DaemonWorkProposalRoutingAuthorityV1, DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1,
-    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
-    LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1, MAX_COALESCED_HOOK_COMPLETIONS,
-    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
+    DaemonSourceEditOwnerRegistrationError, DaemonWorkProposalRoutingAuthorityV1,
+    DaemonWorkRuntimeRegistrar, FeedbackCycleRuntimeBuilderV1, GraphToolFuture,
+    GraphToolInvocationV1, HookOrchestrationAdmissionV1, HookOrchestrationRequestV1,
+    HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1, LSP_WORKSPACE_CAPABILITY_ID_V1,
+    LSP_WORKSPACE_USE_CASE_ID_V1, LspDeliverySettlementAdmissionV1, MAX_COALESCED_HOOK_COMPLETIONS,
+    ProfileConfigurationAuthorityV1, ProjectGraphToolPortV1, RegisteredCallableCodeRuntime,
+    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredGraphToolOwnerV1,
     RegisteredRetainedRequestContextError, RegisteredRetainedRuntime, RegisteredWorkRuntime,
     SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
     admit_registered_hook_orchestration, advisory_cycle_invocation_result,
-    callable_code_request_context, daemon_operation_event_authority,
-    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
+    callable_code_request_context, daemon_operation_event_authority, execute_profile_configuration,
+    feedback_proximity_invocation_result, register_hook_orchestration_runtime,
+    unregister_hook_orchestration_runtime,
+};
+pub use mcp_project_registry::DaemonProjectRegistryReadService;
+pub use mcp_workflow_index::DaemonWorkflowIndexReadService;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use profile_host_admission_replay::BootstrapCompletion;
+pub use profile_host_admission_replay::{
+    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
+    ProfileHostAdmissionReplayPass, ProfileHostAdmissionReplayRegistry,
 };
 pub use project_runtime::{
-    FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
-    ProjectRuntimeRegistryV1, ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1,
+    FeedbackCyclePublicationError, ProjectRuntimePublicationAttemptV1,
+    ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
+    ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1,
     RegisteredDeliveryReadAuthorityV1, RegisteredObservabilityProducerV1,
     StoreObservabilityMountErrorV1, StoreObservabilityMountV1, StoreObservabilityRegistryV1,
 };
-pub use request_cancellation::{Lease, cancel, register};
+pub use query_mcp_admission::{
+    QUERY_MCP_READ_CAPABILITY_V1, QueryMcpAdmissionUnavailableV1, QueryMcpReadAdmissionProviderV1,
+    QueryMcpReadAdmissionV1, admit_query_mcp_read,
+};
+pub use remote_protocol::build_daemon_remote_protocol_router;
+pub use request_cancellation::{Lease, RequestCancellationRegistryV1};
+pub use session_refresh::DaemonSessionRefreshService;
+pub use shutdown_coordination::ShutdownCoordinatorV1;
 pub use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonFeedbackResult,
     DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,

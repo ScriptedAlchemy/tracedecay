@@ -1,50 +1,58 @@
 //! Stdio MCP proxy: forwards host traffic to the daemon over the broker
 //! transport, tracking initialize-route and tool-catalog metadata.
 
-#[cfg(unix)]
+use std::borrow::Cow;
 use std::collections::VecDeque;
-#[cfg(unix)]
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
+use asupersync::io::AsyncWriteExt;
+use asupersync::time::wall_now;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
-use tokio::time::{Duration, Instant};
 
+use super::binary_version;
+#[cfg(unix)]
+use super::connect_with_restart_grace;
+use super::repeat_reads::RepeatReads;
+use super::repeated_queries::RepeatedQueries;
+use super::tool_surface::ToolSurface;
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
     PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
-    connect_to_current_daemon_within, json_rpc_error_is_project_open_retryable,
-    next_daemon_response_line, write_daemon_preamble,
+    REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, connect_to_current_daemon_within,
+    json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
 };
-#[cfg(unix)]
-use super::{binary_version, connect_with_restart_grace, log_daemon_event, version_skew_action};
-#[cfg(unix)]
-use tracedecay_daemon_identity::connection_for_socket_path;
+use tracedecay_contracts::catalog_composition::CatalogProfileName;
+use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, version_skew_action};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
-#[cfg(not(unix))]
-use tracedecay_mcp::McpTransport;
+use tracedecay_mcp::server::attach_stateless_request_context;
 use tracedecay_mcp::transport::StdioTransport;
-#[cfg(unix)]
 use tracedecay_mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
-#[cfg(unix)]
 use tracedecay_mcp::{ErrorCode, JsonRpcResponse};
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
 ///
-/// A missing socket usually means "no daemon", but `tracedecay update`
-/// restarts the daemon service and shutdown unlinks the socket before the new
-/// daemon rebinds it; a serve process starting inside that window would
-/// otherwise silently commit to in-process mode for its whole lifetime. When
-/// a daemon service is installed for this socket, wait out that window with
-/// the same grace used for per-request connects before falling back.
+/// A missing socket usually means "no daemon", but an explicit restart or an
+/// update of a service that was already running unlinks the socket before the
+/// replacement daemon rebinds it. A serve process starting inside that window
+/// would otherwise silently commit to in-process mode for its whole lifetime.
+/// When a service unit names this exact socket, wait for one bounded restart
+/// grace before falling back. This probe never starts or changes the service;
+/// an intentionally stopped service remains stopped.
 #[cfg(unix)]
-pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
-    let installed_socket = tracedecay_daemon_control::installed_service_socket_path()
+pub async fn should_proxy_serve_to_daemon(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    socket_path: &Path,
+) -> bool {
+    let installed_socket = tracedecay_daemon_control::installed_service_socket_path(profile)
         .ok()
         .flatten();
     should_proxy_serve_to_daemon_with(
+        profile.data_dir(),
         socket_path,
         installed_socket.as_deref(),
         super::DAEMON_RESTART_GRACE,
@@ -53,48 +61,48 @@ pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
     .await
 }
 
-#[cfg(any(test, not(unix)))]
-pub(crate) fn proxy_required_by_platform(transport_supported: bool, endpoint_exists: bool) -> bool {
-    !transport_supported || endpoint_exists
-}
-
-/// Non-Unix clients always use the authenticated loopback broker. There is no
-/// in-process `SQLite` fallback.
+/// Non-Unix clients reach the daemon only through the loopback endpoint its
+/// authority record publishes, so a profile without that record has no daemon
+/// to proxy to. A present but unreadable record still proxies, so the request
+/// reports the record's own failure.
 #[cfg(not(unix))]
 #[allow(clippy::unused_async)] // Preserve parity with the Unix async routing probe.
-pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
-    proxy_required_by_platform(false, socket_path.exists())
+pub async fn should_proxy_serve_to_daemon(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    socket_path: &Path,
+) -> bool {
+    !matches!(
+        tracedecay_daemon_identity::client_connection(profile.data_dir(), socket_path),
+        Err(error) if super::core_client::authority_absent(&error)
+    )
 }
 
-#[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.proxy.stdio", future = true)]
+/// `full_tool_list` serves the daemon's catalog unchanged; otherwise tools the
+/// catalog does not mark always-loaded are listed as stubs. `catalog_profile`
+/// omits the tools that profile excludes; `None` lists the default profile.
+#[tracing::instrument(name = "daemon.engine.proxy.stdio", level = "trace", skip_all)]
 pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
+    full_tool_list: bool,
+    catalog_profile: Option<&CatalogProfileName>,
+    repeated_query_hints: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut transport = StdioTransport::new();
-    proxy_transport_to_daemon(socket_path, handshake, replay_line, &mut transport).await
+    let surface = ToolSurface::new(full_tool_list, catalog_profile)?;
+    let mut transport = StdioTransport::new()?;
+    proxy_transport_to_daemon_with_drain_bound(
+        socket_path,
+        handshake,
+        replay_line,
+        &mut transport,
+        None,
+        surface,
+        repeated_query_hints,
+    )
+    .await
 }
 
-#[cfg(not(unix))]
-#[hotpath::measure(label = "daemon.engine.proxy.stdio", future = true)]
-pub async fn proxy_stdio_to_daemon(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    replay_line: Option<String>,
-) -> Result<()> {
-    let mut transport = StdioTransport::new();
-    if let Some(line) = replay_line {
-        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
-    }
-    while let Some(line) = transport.read_line().await? {
-        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
 #[derive(Default)]
 pub(crate) struct ProxyInitializeMetadata {
     daemon_version: Option<String>,
@@ -111,6 +119,7 @@ pub(crate) struct InitializeRouteMetadata {
 
 #[cfg(unix)]
 pub(crate) async fn should_proxy_serve_to_daemon_with(
+    profile_root: &Path,
     socket_path: &Path,
     installed_service_socket: Option<&Path>,
     grace: Duration,
@@ -124,39 +133,51 @@ pub(crate) async fn should_proxy_serve_to_daemon_with(
     if installed_service_socket != Some(socket_path) {
         return false;
     }
-    let connection = connection_for_socket_path(socket_path);
-    connect_with_restart_grace(&connection, grace, poll_interval)
+    connect_with_restart_grace(profile_root, socket_path, grace, poll_interval)
         .await
         .is_ok()
 }
 
-#[cfg(unix)]
 pub async fn proxy_transport_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
 ) -> Result<()> {
-    proxy_transport_to_daemon_with_drain_bound(socket_path, handshake, replay_line, transport, None)
-        .await
+    proxy_transport_to_daemon_with_drain_bound(
+        socket_path,
+        handshake,
+        replay_line,
+        transport,
+        None,
+        ToolSurface::new(true, None)?,
+        tokio::sync::watch::channel(false).1,
+    )
+    .await
 }
 
 /// `drain_bound` overrides the per-request bound derived by
 /// [`disconnect_drain_bound`]; production passes `None` and always derives it.
-#[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.proxy.transport", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.transport", level = "trace", skip_all)]
 pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
     drain_bound: Option<Duration>,
+    surface: ToolSurface,
+    repeated_query_hints: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let (mut reader, mut writer) = transport.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
     let (eof_tx, mut eof_rx) = tokio::sync::watch::channel(false);
+    // Keep a Sender alive for the whole proxy lifetime. `read_host` only
+    // marks EOF; if it owned the sole Sender, dropping it on host close would
+    // make later `eof.changed()` calls fail as "monitor closed" and abort
+    // before the in-flight daemon response could be drained to the host.
+    let eof_signal = eof_tx.clone();
 
-    let read_host = async {
+    let read_host = async move {
         loop {
             match reader.read_line().await {
                 Ok(Some(line)) => {
@@ -165,7 +186,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
                     }
                 }
                 Ok(None) => {
-                    let _ = eof_tx.send(true);
+                    let _ = eof_signal.send(true);
                     return Ok(());
                 }
                 Err(error) => return Err(error.into()),
@@ -180,8 +201,13 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut eof_rx,
         &mut writer,
         drain_bound,
+        surface,
+        RepeatedQueries::new(repeated_query_hints),
+        RepeatReads::from_env()?,
     );
-    tokio::try_join!(read_host, proxy)?;
+    let result = tokio::try_join!(read_host, proxy);
+    drop(eof_tx);
+    result?;
     Ok(())
 }
 
@@ -189,37 +215,77 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 /// request it has already been handed.
 ///
 /// This is *not* a timeout invented here: it is the daemon's own published
-/// dispatch ceiling for that exact request — "nothing may run unbounded", per
-/// [`tool_dispatch_ceiling`](crate::mcp::tools::handlers::tool_dispatch_ceiling)
-/// — plus
-/// [`DAEMON_TOOL_RESPONSE_GRACE`](super::DAEMON_TOOL_RESPONSE_GRACE), the grace
+/// dispatch ceiling for that exact request, "nothing may run unbounded", per
+/// [`tool_dispatch_ceiling`](tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling)
+///, plus
+/// [`DAEMON_TOOL_RESPONSE_GRACE`](tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE), the grace
 /// this crate already keeps reading for beyond a request deadline. A daemon
 /// honouring its own contract always answers first, so the bound cannot cut
 /// short correct work, including a slow `tools/call` from a batch client. Only a
-/// daemon that has already blown its own ceiling reaches it — and by then the
+/// daemon that has already blown its own ceiling reaches it, and by then the
 /// client that would have received the answer is gone.
 ///
 /// A line that is not a `tools/call` (initialize, tools/list, resources/*) has
 /// no tool of its own and takes the unnamed-tool default ceiling
-/// ([`tool_dispatch_ceiling`](crate::mcp::tools::handlers::tool_dispatch_ceiling)
+/// ([`tool_dispatch_ceiling`](tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling)
 /// with an empty name), not a named catalog tool's possibly shorter deadline.
-#[cfg(unix)]
-fn disconnect_drain_bound(line: &str) -> Duration {
-    let ceiling = request_tool_name(line)
-        .and_then(|tool| crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool).ok())
-        .unwrap_or_else(|| crate::mcp::tools::handlers::tool_dispatch_ceiling(""));
-    ceiling.saturating_add(super::DAEMON_TOOL_RESPONSE_GRACE)
+struct DaemonProxyRequest<'a> {
+    raw: Cow<'a, str>,
+    parsed: Option<JsonRpcRequest>,
+}
+
+impl<'a> DaemonProxyRequest<'a> {
+    /// Every host request after `initialize` travels on its own daemon
+    /// connection, so it carries this proxy's SEP-2575 per-request context
+    /// instead of an `initialize` session.
+    fn new(raw: &'a str) -> Self {
+        let mut parsed = JsonRpcRequest::decode(raw.trim()).ok();
+        let attached = parsed
+            .as_mut()
+            .is_some_and(attach_stateless_request_context);
+        let raw = match parsed.as_ref() {
+            Some(request) if attached => {
+                serde_json::to_string(request).map_or(Cow::Borrowed(raw), Cow::Owned)
+            }
+            _ => Cow::Borrowed(raw),
+        };
+        Self { raw, parsed }
+    }
+
+    fn is_matching_cancellation(&self, line: &str) -> bool {
+        let Some(id) = self.parsed.as_ref().and_then(|request| request.id.as_ref()) else {
+            return false;
+        };
+        JsonRpcRequest::decode(line.trim()).is_ok_and(|notification| {
+            notification.id.is_none()
+                && notification.method == "notifications/cancelled"
+                && notification
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("requestId"))
+                    == Some(id)
+        })
+    }
+}
+
+fn disconnect_drain_bound(request: &DaemonProxyRequest<'_>) -> Duration {
+    let ceiling = request_tool_name(request.parsed.as_ref())
+        .and_then(|tool| {
+            tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool).ok()
+        })
+        .unwrap_or_else(|| tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling(""));
+    ceiling.saturating_add(DAEMON_TOOL_RESPONSE_GRACE)
 }
 
 /// The tool a `tools/call` line names, or `None` for any other method.
-#[cfg(unix)]
-fn request_tool_name(line: &str) -> Option<String> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
+fn request_tool_name(request: Option<&JsonRpcRequest>) -> Option<String> {
+    let request = request?;
     if request.method != "tools/call" {
         return None;
     }
     request
-        .params?
+        .params
+        .as_ref()?
         .get("name")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
@@ -231,16 +297,15 @@ fn request_tool_name(line: &str) -> Option<String> {
 /// The wait itself is still required: a batch client (`echo request |
 /// tracedecay serve`) closes stdin the instant it finishes writing, and its
 /// response must still be produced. What must not survive is an *ownerless*
-/// `tracedecay serve` waiting forever on a daemon that never answers — that is
+/// `tracedecay serve` waiting forever on a daemon that never answers, that is
 /// how a disconnected session turns into a long-lived orphan holding its fds
 /// and daemon connection.
-#[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.proxy.drain", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.drain", level = "trace", skip_all)]
 async fn drain_daemon_request_after_disconnect(
     daemon_request: impl Future<Output = Result<Vec<String>>>,
     drain_bound: Duration,
 ) -> Result<Vec<String>> {
-    tokio::time::timeout(drain_bound, daemon_request)
+    asupersync::time::timeout(wall_now(), drain_bound, daemon_request)
         .await
         .unwrap_or_else(|_| {
             Err(TraceDecayError::Config {
@@ -253,8 +318,8 @@ async fn drain_daemon_request_after_disconnect(
         })
 }
 
-#[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.proxy.host_input", future = true)]
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(name = "daemon.engine.proxy.host_input", level = "trace", skip_all)]
 async fn proxy_host_input_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -263,6 +328,9 @@ async fn proxy_host_input_to_daemon(
     eof: &mut tokio::sync::watch::Receiver<bool>,
     writer: &mut impl McpTransportWriter,
     drain_bound: Option<Duration>,
+    mut surface: ToolSurface,
+    mut repeated_queries: RepeatedQueries,
+    mut repeat_reads: Option<RepeatReads>,
 ) -> Result<()> {
     let mut routed_handshake = handshake.clone();
     let mut pending = VecDeque::new();
@@ -271,9 +339,7 @@ async fn proxy_host_input_to_daemon(
     }
 
     loop {
-        while let Ok(line) = input.try_recv() {
-            pending.push_back(line);
-        }
+        drain_host_input(input, &mut pending);
         if *eof.borrow() && pending.is_empty() {
             return Ok(());
         }
@@ -286,9 +352,7 @@ async fn proxy_host_input_to_daemon(
                             message: format!("host EOF monitor closed unexpectedly: {error}"),
                         })?;
                         if *eof.borrow() {
-                            while let Ok(line) = input.try_recv() {
-                                pending.push_back(line);
-                            }
+                            drain_host_input(input, &mut pending);
                             if pending.is_empty() {
                                 return Ok(());
                             }
@@ -304,25 +368,43 @@ async fn proxy_host_input_to_daemon(
                 }
             }
         };
-        reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
         if line.trim().is_empty() {
             continue;
         }
+        let request = DaemonProxyRequest::new(&line);
+        reset_proxy_handshake_for_initialize_request(
+            handshake,
+            &mut routed_handshake,
+            request.parsed.as_ref(),
+        );
+        repeated_queries.reset_for_initialize(request.parsed.as_ref());
 
+        let (cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
+        for queued in std::mem::take(&mut pending) {
+            route_host_line(&request, queued, &cancellation_tx, &mut pending);
+        }
         let result = {
-            let daemon_request = send_daemon_request_line_with_project_open_retry(
+            let daemon_request = send_host_request(
+                &mut surface,
+                &mut repeated_queries,
+                repeat_reads.as_mut(),
                 socket_path,
                 &routed_handshake,
-                &line,
+                &request,
+                &mut cancellation_rx,
             );
             tokio::pin!(daemon_request);
             // The catalog-backed drain ceiling is only meaningful after the
             // owning client is gone. Computing it eagerly would stall every
             // live `tools/call` on catalog load before the daemon is even
             // contacted.
-            let disconnect_bound = || drain_bound.unwrap_or_else(|| disconnect_drain_bound(&line));
+            let disconnect_bound =
+                || drain_bound.unwrap_or_else(|| disconnect_drain_bound(&request));
             loop {
                 if *eof.borrow() {
+                    while let Ok(next) = input.try_recv() {
+                        route_host_line(&request, next, &cancellation_tx, &mut pending);
+                    }
                     break drain_daemon_request_after_disconnect(
                         &mut daemon_request,
                         disconnect_bound(),
@@ -335,11 +417,6 @@ async fn proxy_host_input_to_daemon(
                         changed.map_err(|error| TraceDecayError::Config {
                             message: format!("host EOF monitor closed unexpectedly: {error}"),
                         })?;
-                        if *eof.borrow() {
-                            while let Ok(line) = input.try_recv() {
-                                pending.push_back(line);
-                            }
-                        }
                     }
                     next = input.recv() => {
                         let Some(next) = next else {
@@ -351,17 +428,41 @@ async fn proxy_host_input_to_daemon(
                             )
                             .await;
                         };
-                        pending.push_back(next);
+                        route_host_line(&request, next, &cancellation_tx, &mut pending);
                     }
                 }
             }
         };
-        let metadata = write_proxy_request_result(&line, result, writer).await?;
+        let metadata = write_proxy_request_result(&request, result, writer).await?;
         apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
     }
 }
 
-#[cfg(unix)]
+/// Queues every already-received host line behind the in-flight request.
+fn drain_host_input(
+    input: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    pending: &mut VecDeque<String>,
+) {
+    while let Ok(line) = input.try_recv() {
+        pending.push_back(line);
+    }
+}
+
+/// A host cancellation of the in-flight request goes to that request's daemon
+/// connection; every other line waits its turn.
+fn route_host_line(
+    request: &DaemonProxyRequest<'_>,
+    line: String,
+    cancellation: &tokio::sync::watch::Sender<Option<String>>,
+    pending: &mut VecDeque<String>,
+) {
+    if request.is_matching_cancellation(&line) {
+        cancellation.send_replace(Some(line));
+    } else {
+        pending.push_back(line);
+    }
+}
+
 pub(crate) fn apply_proxy_initialize_metadata(
     handshake: &mut DaemonHandshake,
     metadata: ProxyInitializeMetadata,
@@ -381,13 +482,26 @@ pub(crate) fn apply_proxy_initialize_metadata(
     }
 }
 
-#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn reset_proxy_handshake_for_initialize(
     base_handshake: &DaemonHandshake,
     handshake: &mut DaemonHandshake,
     line: &str,
 ) {
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
+    let request = DaemonProxyRequest::new(line);
+    reset_proxy_handshake_for_initialize_request(
+        base_handshake,
+        handshake,
+        request.parsed.as_ref(),
+    );
+}
+
+fn reset_proxy_handshake_for_initialize_request(
+    base_handshake: &DaemonHandshake,
+    handshake: &mut DaemonHandshake,
+    request: Option<&JsonRpcRequest>,
+) {
+    let Some(request) = request else {
         return;
     };
     if request.method != "initialize" {
@@ -396,15 +510,23 @@ pub(crate) fn reset_proxy_handshake_for_initialize(
     *handshake = base_handshake.clone();
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.initialize_route", future = true)]
+#[tracing::instrument(
+    name = "daemon.engine.proxy.initialize_route",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn resolve_daemon_initialize_route(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     params: Option<&serde_json::Value>,
     registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> tracedecay_domain::errors::Result<Option<InitializeRouteMetadata>> {
     let roots = crate::mcp::server::initialize_root_paths(params);
+    // One parent discovery budget for the whole initialize request, not N×
+    // REPOSITORY_DISCOVERY_DEADLINE across roots / registry then fallback loops.
+    let discovery_deadline = repository_discovery_parent_deadline();
     if let Some(registry) = registry {
         for root in &roots {
-            let mut candidate = root.canonicalize().unwrap_or_else(|_| root.clone());
+            let mut candidate = canonical_existing_identity(root).unwrap_or_else(|_| root.clone());
             loop {
                 if registry
                     .project_registry_context_by_alias(&candidate)
@@ -420,7 +542,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
                     break;
                 }
             }
-            match bounded_repository_identity(root).await {
+            match bounded_repository_identity(root, discovery_deadline).await {
                 tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
                     identity,
                 ) => {
@@ -446,14 +568,16 @@ pub(crate) async fn resolve_daemon_initialize_route(
         }
     }
     for root in roots {
-        let repository_identity = bounded_repository_identity(&root).await;
+        let repository_identity = bounded_repository_identity(&root, discovery_deadline).await;
         if let tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(
             reason,
         ) = &repository_identity
         {
+            // Deferred is uncertainty, not a decided root, never fall through
+            // to discover_project_root / Resolved admission.
             return Err(repository_discovery_deferred(&root, *reason));
         }
-        if let Some(project_path) = crate::config::discover_project_root(&root) {
+        if let Some(project_path) = profile.discover_project_root(&root) {
             return Ok(Some(InitializeRouteMetadata {
                 project_path,
                 allow_init: false,
@@ -464,16 +588,19 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 identity,
             ) => {
                 // An initialize route has no retained configuration authority.
-                // Never revive legacy-file fallback here — but a fresh repo with
+                // Never revive legacy-file fallback here, but a fresh repo with
                 // no published snapshot follows the schema default (auto-init
                 // enabled), not fail-closed: treating a missing snapshot as
                 // "disabled" contradicted the config default and left explicit
                 // initialize-roots repos unable to open at all.
-                let allow_init = crate::config::cached_sync_config(&identity.worktree_root)
-                    .map_or_else(
-                        |_| crate::config::SyncConfig::default().auto_init,
-                        |config| config.auto_init,
-                    );
+                let allow_init = tracedecay_project::config::cached_sync_config(
+                    profile.data_dir(),
+                    &identity.worktree_root,
+                )
+                .map_or_else(
+                    |_| tracedecay_configuration::SyncConfig::default().auto_init,
+                    |config| config.auto_init,
+                );
                 return Ok(Some(InitializeRouteMetadata {
                     project_path: identity.worktree_root,
                     allow_init,
@@ -487,13 +614,23 @@ pub(crate) async fn resolve_daemon_initialize_route(
     Ok(None)
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.repository_identity", future = true)]
+/// Parent deadline for one daemon/MCP composition edge's repository discovery.
+pub(super) fn repository_discovery_parent_deadline()
+-> tracedecay_runtime_core::cancellation::MonotonicDeadline {
+    tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+        std::time::Instant::now() + super::REPOSITORY_DISCOVERY_DEADLINE,
+    )
+}
+
+#[tracing::instrument(
+    name = "daemon.engine.proxy.repository_identity",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn bounded_repository_identity(
     path: &Path,
+    deadline: tracedecay_runtime_core::cancellation::MonotonicDeadline,
 ) -> tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome {
-    let deadline = tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
-        std::time::Instant::now() + Duration::from_secs(2),
-    );
     tracedecay_runtime_core::git_discovery::discover_repository_identity(
         path,
         deadline,
@@ -506,36 +643,68 @@ pub(super) async fn bounded_repository_identity(
 /// unresolved and the caller retries within its own budget, exactly like a
 /// warming project open. Spawn and probe failures are terminal because retrying
 /// them until the caller's budget expires only hides the actionable error.
+///
+/// A deferral names the checkout whose walk is blocked and when to come back.
+/// The in-flight identity slot is optional: a probe can be parked in `open()`
+/// without that slot, and the refusal still has to name the path so status
+/// and doctor can tell this project from every other one.
 pub(super) fn repository_discovery_deferred(
     path: &Path,
     reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
 ) -> TraceDecayError {
-    let retry_hint = matches!(
+    let deferred = matches!(
         reason,
         tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded
-    )
-    .then_some(PROJECT_WARMING_RETRY_HINT)
-    .unwrap_or("cannot be resolved");
-    TraceDecayError::Config {
-        message: format!(
-            "repository discovery for '{}' is deferred ({reason:?}); the project route {retry_hint}",
-            path.display()
-        ),
+    );
+    let progress = if deferred {
+        let retry_after_ms = super::REPOSITORY_DISCOVERY_DEADLINE.as_millis();
+        let blocked = format!("repository discovery blocked on {}", path.display());
+        match tracedecay_runtime_core::git_discovery::identity_resolution_elapsed(path) {
+            Some(elapsed) => format!(
+                "; {blocked} for {:.1}s; retry after {retry_after_ms}ms",
+                elapsed.as_secs_f64()
+            ),
+            None => format!("; {blocked}; retry after {retry_after_ms}ms"),
+        }
+    } else {
+        String::new()
+    };
+    let detail = format!(
+        "repository discovery for '{}' is deferred ({reason:?}){progress}; the project route {}",
+        path.display(),
+        if deferred {
+            PROJECT_WARMING_RETRY_HINT
+        } else {
+            "cannot be resolved"
+        }
+    );
+    if deferred {
+        TraceDecayError::project_route(REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, detail)
+    } else {
+        TraceDecayError::Config { message: detail }
     }
 }
 
-#[cfg(unix)]
 async fn write_proxy_request_result(
-    line: &str,
+    request: &DaemonProxyRequest<'_>,
     result: Result<Vec<String>>,
     writer: &mut impl McpTransportWriter,
 ) -> Result<ProxyInitializeMetadata> {
     match result {
         Ok(responses) => {
-            let metadata = proxy_initialize_metadata(line, &responses);
-            if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()?)
+            let metadata =
+                proxy_initialize_metadata_for_request(request.parsed.as_ref(), &responses);
+            // Skew is a warning. A process with no registered product runtime
+            // has no version to compare, and that must not drop the response
+            // the daemon already produced.
+            if let Ok(version) = binary_version()
+                && let Some(warning) = daemon_version_skew_warning_for_request(
+                    request.parsed.as_ref(),
+                    &responses,
+                    version,
+                )
             {
-                eprintln!("[tracedecay] warning: {warning}");
+                log_daemon_event("core_proxy_warning", &[("warning", warning)]);
             }
             for response in responses {
                 writer.write_line(&response).await?;
@@ -547,7 +716,7 @@ async fn write_proxy_request_result(
             Ok(metadata)
         }
         Err(err) => {
-            if let Some(response) = daemon_proxy_error_response(line, &err) {
+            if let Some(response) = daemon_proxy_error_response(request.parsed.as_ref(), &err) {
                 let json_line = serde_json::to_string(&response)?;
                 writer.write_line(&json_line).await?;
                 writer.write_line("\n").await?;
@@ -566,6 +735,7 @@ async fn write_proxy_request_result(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn send_daemon_request_line(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -590,28 +760,56 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.request_retry", future = true)]
-async fn send_daemon_request_line_with_project_open_retry(
+/// Sends one host request and fits the daemon's answer to this session's tool
+/// surface; a call to a stubbed tool also hydrates its full schema, a
+/// repeated identical read answers with a pointer, and a near-repeat of a
+/// recent tool call carries a hint.
+async fn send_host_request(
+    surface: &mut ToolSurface,
+    repeated_queries: &mut RepeatedQueries,
+    repeat_reads: Option<&mut RepeatReads>,
     socket_path: &Path,
     handshake: &DaemonHandshake,
-    line: &str,
+    request: &DaemonProxyRequest<'_>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
+) -> Result<Vec<String>> {
+    let mut responses =
+        send_daemon_request_with_project_open_retry(socket_path, handshake, request, cancellation)
+            .await?;
+    surface.rewrite(request.parsed.as_ref(), &mut responses);
+    surface.hydrate_called_stub(request.parsed.as_ref(), &mut responses);
+    let pointed = repeat_reads
+        .is_some_and(|repeat_reads| repeat_reads.rewrite(request.parsed.as_ref(), &mut responses));
+    repeated_queries.rewrite(request.parsed.as_ref(), &mut responses, pointed);
+    Ok(responses)
+}
+
+#[tracing::instrument(name = "daemon.engine.proxy.request_retry", level = "trace", skip_all)]
+async fn send_daemon_request_with_project_open_retry(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    request: &DaemonProxyRequest<'_>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<Vec<String>> {
     let deadline = Instant::now() + PROJECT_OPEN_RETRY_GRACE;
-    let mut responses = send_daemon_request_line(socket_path, handshake, line).await?;
-    while responses_are_project_open_retryable(&responses) {
+    let mut responses = send_daemon_request(socket_path, handshake, request, cancellation).await?;
+    while cancellation.borrow().is_none() && responses_are_project_open_retryable(&responses) {
         let Some(remaining) = deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
         else {
             break;
         };
-        tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
-        responses = send_daemon_request_line(socket_path, handshake, line).await?;
+        asupersync::time::sleep(wall_now(), remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
+        if cancellation.borrow().is_some() {
+            break;
+        }
+        responses = send_daemon_request(socket_path, handshake, request, cancellation).await?;
     }
     Ok(responses)
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.request", future = true)]
+#[cfg(test)]
 pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -619,41 +817,83 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     liveness_poll_interval: Duration,
     client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<Vec<String>> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line).ok();
-    let request_id = request.as_ref().and_then(|request| request.id.clone());
+    let request = DaemonProxyRequest::new(line);
+    let (_cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
+    send_daemon_request_with_liveness_poll(
+        socket_path,
+        handshake,
+        &request,
+        liveness_poll_interval,
+        client_deadline,
+        &mut cancellation_rx,
+    )
+    .await
+}
+
+async fn send_daemon_request(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    request: &DaemonProxyRequest<'_>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
+) -> Result<Vec<String>> {
+    send_daemon_request_with_liveness_poll(
+        socket_path,
+        handshake,
+        request,
+        DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        None,
+        cancellation,
+    )
+    .await
+}
+
+#[tracing::instrument(name = "daemon.engine.proxy.request", level = "trace", skip_all)]
+async fn send_daemon_request_with_liveness_poll(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    request: &DaemonProxyRequest<'_>,
+    liveness_poll_interval: Duration,
+    client_deadline: Option<DaemonClientDeadline>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
+) -> Result<Vec<String>> {
+    let request_id = request
+        .parsed
+        .as_ref()
+        .and_then(|request| request.id.clone());
     let request_label = request
+        .parsed
         .as_ref()
         .map_or("daemon request", |request| request.method.as_str())
         .to_string();
-    let (connection, stream) = match client_deadline {
-        Some(deadline) => {
-            deadline
-                .run("connect", &request_label, async {
-                    connect_to_current_daemon_within(socket_path, Some(deadline)).await
-                })
-                .await?
-        }
-        None => connect_to_current_daemon_within(socket_path, None).await?,
-    };
-    let (reader, mut writer) = stream.into_owned_split();
+    let profile_root = &handshake.client_identity.profile_root;
+    let (connection, stream) = DaemonClientDeadline::run_optional(
+        client_deadline,
+        "connect",
+        &request_label,
+        connect_to_current_daemon_within(profile_root, socket_path, client_deadline),
+    )
+    .await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader =
+        tracedecay_framing::BoundedLineReader::new(asupersync::io::BufReader::new(reader));
 
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;
-        writer.write_all(line.as_bytes()).await?;
-        if !line.ends_with('\n') {
+        writer.write_all(request.raw.as_bytes()).await?;
+        if !request.raw.ends_with('\n') {
             writer.write_all(b"\n").await?;
         }
         writer.flush().await?;
         Ok(())
     };
-    match client_deadline {
-        Some(deadline) => deadline.run("write", &request_label, write).await?,
-        None => write.await?,
-    }
+    let written =
+        DaemonClientDeadline::run_optional(client_deadline, "write", &request_label, write);
+    tracedecay_daemon_protocol::refusal_behind_failed_write(written.await, &mut reader, handshake)
+        .await?;
 
-    let mut reader = tokio::io::BufReader::new(reader);
     let mut responses = Vec::new();
     let mut matched_response = request_id.is_none();
+    let mut cancellation_open = true;
     loop {
         let read = next_daemon_response_line(
             &mut reader,
@@ -661,38 +901,35 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
             &request_label,
             liveness_poll_interval,
         );
-        let response_line = match client_deadline {
-            Some(deadline) => deadline.run("read", &request_label, read).await?,
-            None => read.await?,
-        };
+        let read =
+            DaemonClientDeadline::run_optional(client_deadline, "read", &request_label, read);
+        let response_line =
+            read_forwarding_cancellation(read, cancellation, &mut cancellation_open, &mut writer)
+                .await?;
         let Some(response_line) = response_line else {
             break;
         };
         if response_line.trim().is_empty() {
             continue;
         }
-        let is_matching_response = match client_deadline {
-            Some(deadline) => {
-                deadline
-                    .run("decode", &request_label, async {
-                        Ok(request_id.as_ref().is_some_and(|id| {
-                            serde_json::from_str::<serde_json::Value>(&response_line)
-                                .ok()
-                                .and_then(|value| value.get("id").cloned())
-                                .as_ref()
-                                == Some(id)
-                        }))
-                    })
-                    .await?
-            }
-            None => request_id.as_ref().is_some_and(|id| {
-                serde_json::from_str::<serde_json::Value>(&response_line)
-                    .ok()
-                    .and_then(|value| value.get("id").cloned())
-                    .as_ref()
-                    == Some(id)
-            }),
-        };
+        if let Some(refusal) =
+            tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&response_line)
+        {
+            return Err(tracedecay_daemon_protocol::handshake_refusal_error(
+                &refusal, handshake,
+            ));
+        }
+        let is_matching_response =
+            DaemonClientDeadline::run_optional(client_deadline, "decode", &request_label, async {
+                Ok(request_id.as_ref().is_some_and(|id| {
+                    serde_json::from_str::<serde_json::Value>(&response_line)
+                        .ok()
+                        .and_then(|value| value.get("id").cloned())
+                        .as_ref()
+                        == Some(id)
+                }))
+            })
+            .await?;
         responses.push(format!("{response_line}\n"));
         if is_matching_response {
             matched_response = true;
@@ -708,18 +945,59 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     Ok(responses)
 }
 
+/// Cancellation belongs to the running request's RMCP connection, so it is
+/// written there while the response read stays alive.
+async fn read_forwarding_cancellation<W>(
+    read: impl Future<Output = Result<Option<String>>>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
+    cancellation_open: &mut bool,
+    writer: &mut W,
+) -> Result<Option<String>>
+where
+    W: asupersync::io::AsyncWrite + Unpin,
+{
+    tokio::pin!(read);
+    loop {
+        tokio::select! {
+            response = &mut read => return response,
+            changed = cancellation.changed(), if *cancellation_open => {
+                if changed.is_err() {
+                    *cancellation_open = false;
+                    continue;
+                }
+                let notification = cancellation.borrow_and_update().clone();
+                if let Some(notification) = notification {
+                    writer.write_all(notification.as_bytes()).await?;
+                    if !notification.ends_with('\n') {
+                        writer.write_all(b"\n").await?;
+                    }
+                    writer.flush().await?;
+                }
+            }
+        }
+    }
+}
+
 /// Extracts the daemon's advertised version from a proxied `initialize`
 /// response (`result.serverInfo.version`, which daemons have always sent).
 ///
 /// This works against daemons older than the handshake version field, so a
 /// freshly-updated client can still detect a stale daemon left running by a
 /// non-systemd setup or a plain `tracedecay upgrade`.
-#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn proxy_initialize_metadata(
     request_line: &str,
     responses: &[String],
 ) -> ProxyInitializeMetadata {
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line) else {
+    let request = DaemonProxyRequest::new(request_line);
+    proxy_initialize_metadata_for_request(request.parsed.as_ref(), responses)
+}
+
+fn proxy_initialize_metadata_for_request(
+    request: Option<&JsonRpcRequest>,
+    responses: &[String],
+) -> ProxyInitializeMetadata {
+    let Some(request) = request else {
         return ProxyInitializeMetadata::default();
     };
     if request.method != "initialize" {
@@ -750,66 +1028,34 @@ pub(crate) fn proxy_initialize_metadata(
     metadata
 }
 
-#[cfg(unix)]
-fn daemon_version_from_initialize_response(
-    request_line: &str,
-    responses: &[String],
-) -> Option<String> {
-    proxy_initialize_metadata(request_line, responses).daemon_version
-}
-
-/// The warning to surface when the daemon behind an `initialize` response is
-/// running a different binary version than this client.
-#[cfg(unix)]
-pub(crate) fn daemon_version_skew_warning(
-    request_line: &str,
+fn daemon_version_skew_warning_for_request(
+    request: Option<&JsonRpcRequest>,
     responses: &[String],
     client_version: &str,
 ) -> Option<String> {
-    let daemon_version = daemon_version_from_initialize_response(request_line, responses)?;
-    if daemon_version == client_version {
+    let daemon_version = proxy_initialize_metadata_for_request(request, responses).daemon_version?;
+    if tracedecay_daemon_protocol::versions_name_same_build(&daemon_version, client_version) {
         return None;
     }
     let action = version_skew_action(&daemon_version, client_version);
     Some(format!(
-        "TraceDecay daemon is version {daemon_version} but this client is {client_version} — \
+        "TraceDecay daemon is version {daemon_version} but this client is {client_version}, \
          {action}"
     ))
 }
 
-#[cfg(unix)]
-fn daemon_proxy_error_response(line: &str, err: &TraceDecayError) -> Option<JsonRpcResponse> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line).ok()?;
-    request.id.map(|id| {
+fn daemon_proxy_error_response(
+    request: Option<&JsonRpcRequest>,
+    err: &TraceDecayError,
+) -> Option<JsonRpcResponse> {
+    let request = request?;
+    request.id.clone().map(|id| {
         JsonRpcResponse::error(
             id,
             ErrorCode::InternalError,
             format!("TraceDecay daemon connection failed: {err}"),
         )
     })
-}
-
-#[cfg(not(unix))]
-#[hotpath::measure(label = "daemon.engine.proxy.one_request", future = true)]
-async fn proxy_one_request(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    line: &str,
-    transport: &mut impl McpTransport,
-) -> Result<()> {
-    if line.trim().is_empty() {
-        return Ok(());
-    }
-    for response in
-        send_daemon_request_line_with_project_open_retry(socket_path, handshake, line).await?
-    {
-        transport.write_line(&response).await?;
-        if !response.ends_with('\n') {
-            transport.write_line("\n").await?;
-        }
-    }
-    transport.flush().await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -826,7 +1072,13 @@ mod tests {
                 "id": 1,
                 "error": {
                     "code": -32603,
-                    "message": "project is warming in the background; retry the same tool shortly"
+                    "message": "project is warming in the background; retry the same tool shortly",
+                    "data": {
+                        "reason_code": "project_warming",
+                        "retryable": true,
+                        "detail": "project is warming in the background; retry the same tool shortly",
+                        "kind": "project_warming"
+                    }
                 }
             }),
             json!({
@@ -836,6 +1088,7 @@ mod tests {
                     "code": -32603,
                     "message": "daemon project open task capacity reached",
                     "data": {
+                        "reason_code": "project_open_task_capacity_reached",
                         "kind": "project_open_task_capacity_reached",
                         "retryable": true,
                         "capacity": 8
@@ -849,6 +1102,7 @@ mod tests {
                     "code": -32603,
                     "message": "daemon project server capacity reached",
                     "data": {
+                        "reason_code": "project_server_capacity_reached",
                         "kind": "project_server_capacity_reached",
                         "retryable": true,
                         "capacity": 8
@@ -875,15 +1129,31 @@ mod tests {
             }
         })
         .to_string()]));
+        assert!(
+            !responses_are_project_open_retryable(&[json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "error": {
+                    "code": -32603,
+                    "message": "daemon project server capacity reached",
+                    "data": {
+                        "kind": "project_server_capacity_reached",
+                        "retryable": true,
+                        "capacity": 8
+                    }
+                }
+            })
+            .to_string()]),
+            "capacity prose and kind without reason_code must not decide proxy retry"
+        );
     }
 
     /// The post-disconnect drain must never cut short work the daemon is still
-    /// entitled to be doing — a batch client closes stdin immediately, so every
+    /// entitled to be doing, a batch client closes stdin immediately, so every
     /// one of its requests drains under this bound.
-    #[cfg(unix)]
     #[test]
     fn disconnect_drain_bound_always_outlives_the_daemon_dispatch_ceiling() {
-        use super::{disconnect_drain_bound, request_tool_name};
+        use super::{DaemonProxyRequest, disconnect_drain_bound, request_tool_name};
 
         let long = json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -896,10 +1166,14 @@ mod tests {
         })
         .to_string();
         let non_tool = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }).to_string();
+        let long = DaemonProxyRequest::new(&long);
+        let interactive = DaemonProxyRequest::new(&interactive);
+        let non_tool = DaemonProxyRequest::new(&non_tool);
 
         for line in [&long, &interactive] {
-            let tool = request_tool_name(line).expect("a tools/call names its tool");
-            let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool)
+            let tool =
+                request_tool_name(line.parsed.as_ref()).expect("a tools/call names its tool");
+            let ceiling = tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool)
                 .expect("every tool has a dispatch ceiling");
             assert!(
                 disconnect_drain_bound(line) > ceiling,
@@ -909,11 +1183,11 @@ mod tests {
 
         // Unnamed methods resolve the unnamed-tool default
         // (`tool_dispatch_ceiling("")`), not a named catalog tool such as
-        // `tracedecay_context`. The drain must outlive that resolved ceiling —
-        // the longest bound that actually applies to this request — rather
+        // `tracedecay_context`. The drain must outlive that resolved ceiling,
+        // the longest bound that actually applies to this request, rather
         // than a hardcoded catalog value.
-        assert_eq!(request_tool_name(&non_tool), None);
-        let unnamed_ceiling = crate::mcp::tools::handlers::tool_dispatch_ceiling("");
+        assert_eq!(request_tool_name(non_tool.parsed.as_ref()), None);
+        let unnamed_ceiling = tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling("");
         assert!(
             disconnect_drain_bound(&non_tool) > unnamed_ceiling,
             "tools/list must drain past the unnamed-tool default ceiling {unnamed_ceiling:?}"

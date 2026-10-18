@@ -3,9 +3,17 @@ use serde_json::json;
 
 #[test]
 fn settings_dashboard_api_aggregates_and_updates_config() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The environment panel reports the serving process's own variables, so
+    // the journey runs in a child test process that pins the global DB.
+    if !crate::common::in_child_test() {
+        let pinned = tempdir_or_panic();
+        let global_db = pinned.path().join("global.db");
+        crate::common::rerun_test_in_child(
+            "settings::settings_dashboard_api_aggregates_and_updates_config",
+            &[("TRACEDECAY_GLOBAL_DB", Some(global_db.as_os_str()))],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -19,7 +27,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(settings_envelope["coverage"]["completeness"], "complete");
         let settings = settings_envelope["payload"].clone();
 
-        assert_eq!(settings["project"]["config"]["git_ignore"], true);
+        assert!(
+            settings["project"]["config"].get("git_ignore").is_none(),
+            "the retired gitignore toggle must not be offered: {settings}"
+        );
         assert_eq!(settings["project"]["config"]["extract_docstrings"], true);
         assert_eq!(settings["project"]["config"]["track_call_sites"], true);
         assert_eq!(settings["project"]["config"]["max_file_size"], 1_048_576);
@@ -30,13 +41,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             exclude.iter().any(|glob| glob == "**/node_modules/**"),
             "default excludes should include node_modules: {settings}"
         );
-        assert!(
-            settings["project"]["config_path"]
-                .as_str()
-                .unwrap_or_default()
-                .ends_with("config.json")
-        );
-        assert_eq!(settings["project"]["legacy_config_read_only"], true);
+        assert!(settings["project"].get("config_path").is_none());
         assert!(
             settings["project"]["configuration_snapshot_id"]
                 .as_str()
@@ -62,32 +67,24 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .unwrap_or_else(|| panic!("missing profile worker revision: {settings}"))
             .to_owned();
         assert_eq!(
-            user_revision, revision,
-            "project and profile values must share one configuration revision"
+            user_revision, worker_revision,
+            "every profile setting shares the profile store's revision"
         );
-        let user_legacy_config_path = std::path::PathBuf::from(
-            settings["user"]["legacy_config_path"]
-                .as_str()
-                .unwrap_or_else(|| panic!("missing legacy user config path: {settings}")),
+        assert_ne!(
+            user_revision, revision,
+            "profile settings never share the project's configuration revision"
+        );
+        let user_legacy_config_path = tracedecay_session_memory::user_config::config_path(
+            fixture.host_runtime.profile_root(),
         );
         let user_legacy_config_before = std::fs::read(&user_legacy_config_path).ok();
-        assert_eq!(settings["user"]["legacy_config_read_only"], true);
+        assert!(settings["user"].get("legacy_config_path").is_none());
         assert!(
             settings["user"]["code_index_worker_configuration_snapshot_id"]
                 .as_str()
                 .is_some_and(|value| !value.is_empty()),
             "settings must expose the profile worker snapshot: {settings}"
         );
-        let legacy_config_path = std::path::PathBuf::from(
-            settings["project"]["legacy_config_path"]
-                .as_str()
-                .unwrap_or_else(|| panic!("missing legacy config path: {settings}")),
-        );
-        assert!(
-            !legacy_config_path.exists(),
-            "fresh initialization must not create a writable config.json"
-        );
-        let legacy_config_before = std::fs::read(&legacy_config_path).ok();
 
         assert_eq!(settings["user"]["upload_enabled"], false);
         assert_eq!(
@@ -127,10 +124,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 .is_empty()
         );
 
-        tracedecay::product_runtime::register_fixture_product_runtime();
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
         assert_eq!(
             settings["version"]["version"],
-            tracedecay::version::build_version().expect("fixture product runtime registered")
+            tracedecay_project::version::build_version().expect("fixture product runtime registered")
         );
         let channel = settings["version"]["channel"].as_str().unwrap_or_default();
         assert!(
@@ -142,7 +139,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .as_array()
             .unwrap_or_else(|| panic!("expected environment variables array: {settings}"));
         for name in [
-            "TRACEDECAY_ENABLE_GLOBAL_DB",
             "TRACEDECAY_DISABLE_GLOBAL_DB",
             "TRACEDECAY_GLOBAL_DB",
             "TRACEDECAY_DATA_DIR",
@@ -159,6 +155,12 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 "env variable {name} needs a description"
             );
         }
+        assert!(
+            variables
+                .iter()
+                .all(|variable| variable["name"] != "TRACEDECAY_ENABLE_GLOBAL_DB"),
+            "the retired enable override must not be advertised: {settings}"
+        );
         let global_db_var = variables
             .iter()
             .find(|variable| variable["name"] == "TRACEDECAY_GLOBAL_DB")
@@ -206,7 +208,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         );
 
         // A patch that really changes configuration needs the absent control
-        // plane. It is a typed unavailable — never a fabricated success, and
+        // plane. It is a typed unavailable, never a fabricated success, and
         // never a write that quietly lands somewhere else.
         let (status, unavailable) = patch_json_body(
             &agent,
@@ -224,11 +226,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             "a project mutation without its authority must be unavailable: {unavailable}"
         );
         assert_eq!(unavailable["code"], "configuration_authority_unavailable");
-        assert_eq!(
-            std::fs::read(&legacy_config_path).ok(),
-            legacy_config_before,
-            "a rejected mutation must not fall back to config.json"
-        );
         let (status, after_unavailable) = get_json(&agent, &url);
         assert_eq!(status, 200);
         assert_eq!(
@@ -447,9 +444,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
 
 #[test]
 fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_patch() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;
@@ -494,10 +488,10 @@ fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_pa
             .as_str()
             .unwrap_or_else(|| panic!("worker patch omitted profile worker revision: {patched_envelope}"));
         assert_ne!(patched_revision, worker_revision);
+        assert_eq!(user_revision, worker_revision);
         assert_eq!(
-            patched_envelope["payload"]["user"]["configuration_revision_id"],
-            user_revision,
-            "a profile worker write must not advance the ordinary user revision"
+            patched_envelope["payload"]["user"]["configuration_revision_id"], patched_revision,
+            "a profile worker write advances the one profile revision user settings share"
         );
 
         let worker_status = &patched_envelope["payload"]["user"]["code_index_worker_status"];
@@ -530,8 +524,37 @@ fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_pa
         );
         assert_eq!(
             refreshed_envelope["payload"]["user"]["configuration_revision_id"],
-            user_revision,
-            "refresh must retain the unrelated user configuration revision"
+            patched_revision,
+            "refresh must show the profile revision the worker write committed"
         );
+    });
+}
+
+#[test]
+fn settings_patch_rejects_unreadable_pr_state_before_mutation() {
+    create_runtime().block_on(async {
+        let fixture = start_dashboard_configuration_fixture().await;
+        let agent = http_agent();
+        let url = format!("{}/api/settings", fixture.base_url);
+        let (status, before) = get_json(&agent, &url);
+        assert_eq!(status, 200, "{before}");
+        let payload = &before["payload"];
+        let pr_state = std::path::Path::new(payload["storage"]["store_root"].as_str().unwrap()).join("pr-autotrack.json");
+        std::fs::write(&pr_state, "{broken").unwrap();
+        for (route, patch) in [
+            ("project", json!({"expected_revision_id": payload["project"]["configuration_revision_id"], "idempotency_key": "configuration.idempotency.corrupt-pr-project", "max_file_size": 4096})),
+            ("user", json!({"expected_revision_id": payload["user"]["configuration_revision_id"], "idempotency_key": "configuration.idempotency.corrupt-pr-user", "watcher_debounce": "3s"})),
+            ("user/code-index-workers", json!({"expected_revision_id": payload["user"]["code_index_worker_configuration_revision_id"], "idempotency_key": "configuration.idempotency.corrupt-pr-workers", "code_index_workers": {"mode": "exact", "workers": 1}})),
+        ] {
+            let (status, error) = patch_json_body(&agent, &format!("{url}/{route}"), &patch);
+            assert_eq!(status, 503, "{route}: {error}");
+            assert_eq!(error["code"], "configuration_authority_unavailable");
+        }
+        std::fs::remove_file(pr_state).unwrap();
+        let (status, after) = get_json(&agent, &url);
+        assert_eq!(status, 200, "{after}");
+        for (scope, field) in [("project", "configuration_revision_id"), ("user", "configuration_revision_id"), ("user", "code_index_worker_configuration_revision_id")] {
+            assert_eq!(after["payload"][scope][field], payload[scope][field], "failed PATCH must not commit {scope}/{field}");
+        }
     });
 }

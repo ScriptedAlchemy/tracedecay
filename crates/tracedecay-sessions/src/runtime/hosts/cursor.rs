@@ -1,68 +1,61 @@
-use std::collections::HashMap;
-use std::fs::File;
 use std::future::Future;
 use std::hash::BuildHasher;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Mutex;
 
 use serde_json::Value;
 #[cfg(test)]
 pub use tracedecay_capture::cursor::normalize_cursor_observation;
+#[cfg(test)]
+use tracedecay_capture::cursor::observation_native_record_id;
 use tracedecay_capture::cursor::{
-    cursor_projected_message_id, normalize_cursor_observation_with_message_id,
-    observation_native_record_id, timestamp_tag_from_record,
+    cursor_observation_identity, cursor_projected_message_id,
+    normalize_cursor_observation_with_message_id, timestamp_tag_from_record,
 };
 #[cfg(test)]
 use tracedecay_domain::CanonicalObservationFactV1;
 use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1, ProjectId,
-    ProviderId, RetentionClass, SessionId,
+    ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceRangeV1,
+    ProjectId, RetentionClass,
 };
-use tracedecay_store::cursor_dispatch::{
-    cursor_dispatch_model, cursor_model_string, dispatch_text, is_subagent_dispatch_tool,
-};
+use tracedecay_store::ParseOffset;
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use crate::runtime::SessionMessageRecord;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
-    admit_jsonl_observations, namespace_replacement_message_ids, preflight_and_parse_new,
+    admit_jsonl_observations,
 };
-use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
-    content_storage_text_and_tools, paths_equal, title_from_messages,
-};
+use crate::runtime::native_ingest_source_identity;
+use crate::runtime::shared::paths_equal;
+use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
-    HostProviderCoverage, MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame,
-    RawJsonlFrameReader, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded,
-    persist_host_provider_coverage, run_blocking_transcript_section, stream_new_jsonl,
+    HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult,
+    TranscriptSource, collect_files_with_ext_bounded, persist_host_provider_coverage,
+    run_blocking_transcript_section,
 };
-use tracedecay_runtime_core::privacy::{
-    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
-const CURSOR_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
-    TranscriptLocationMetadataKeys::new(
-        "cursor_session_cwd",
-        "cursor_session_worktree",
-        "cursor_session_location_provenance",
-    );
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 const MAX_CURSOR_PROJECTIONS_PER_PASS: usize = 256;
 
+mod parent_dispatch_index;
 pub(in crate::runtime) mod projection;
+mod sweep_page;
+pub use parent_dispatch_index::{
+    DispatchScanReceipt, parent_dispatch_model_for_subagent,
+    parent_dispatch_model_for_subagent_with_receipt,
+};
 pub(in crate::runtime) use projection::CursorSweepIngestOutcome;
+pub(super) use projection::drain_cursor_observation_projections;
 pub use projection::{
     CursorTranscriptIngestStats, try_ingest_cursor_project_sweep_capped,
-    try_ingest_cursor_project_sweep_capped_with_admission, try_ingest_cursor_user_sweep_capped,
+    try_ingest_cursor_project_sweep_capped_with_admission,
     try_ingest_cursor_user_sweep_capped_with_admission,
 };
-pub(super) use projection::{cursor_ingest_or_default, drain_cursor_observation_projections};
+pub(in crate::runtime) use sweep_page::CursorSweepCoverage;
+use sweep_page::{CURSOR_SWEEP_FRONTIER_KEY, CursorSweepPage, list_cursor_sweep_corpus};
 
 #[derive(Clone)]
 struct CursorObservationContext {
@@ -93,52 +86,12 @@ fn cursor_observation_context(
     }
 }
 
-/// Memoizes parent-transcript dispatch-model lookups per parent transcript
-/// and agent id. A dispatch record never changes once written, so a found
-/// model holds for every later incremental batch of the same subagent
-/// transcript; misses stay uncached because the parent transcript may simply
-/// not have recorded the dispatch yet.
-#[derive(Default)]
-struct DispatchModelCache {
-    models: Mutex<HashMap<(PathBuf, String), String>>,
-}
-
-impl DispatchModelCache {
-    fn parent_dispatch_model(
-        &self,
-        path: &Path,
-        parent_session_id: &str,
-        agent_id: &str,
-    ) -> Option<String> {
-        let parent_path = path
-            .parent()?
-            .parent()?
-            .join(format!("{parent_session_id}.jsonl"));
-        let key = (parent_path, agent_id.to_string());
-        if let Some(model) = self
-            .models
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&key)
-        {
-            return Some(model.clone());
-        }
-        let model = parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)?;
-        self.models
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, model.clone());
-        Some(model)
-    }
-}
-
 /// A Cursor hook event scoped to one transcript file.
+#[derive(Clone)]
 struct CursorEventSource {
     event: Value,
     transcript_path: PathBuf,
     include_subagents: bool,
-    user_scope: bool,
-    dispatch_models: DispatchModelCache,
 }
 
 impl TranscriptSource for CursorEventSource {
@@ -157,37 +110,6 @@ impl TranscriptSource for CursorEventSource {
         }
         paths
     }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        _project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        let parent_session_id = event_session_id(&self.event, &self.transcript_path);
-        parse_cursor_jsonl(
-            &self.event,
-            &parent_session_id,
-            path,
-            prev,
-            max_new_bytes,
-            self.user_scope,
-            &self.dispatch_models,
-        )
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_and_parse_new("cursor", path, prev, max_new_bytes, || {
-            self.parse_new(path, prev, project_root, max_new_bytes)
-        })
-    }
 }
 
 const CURSOR_OBSERVATION_RETENTION: &str = "retention.provider-observation";
@@ -197,6 +119,84 @@ struct CursorJsonlAdmitState {
     generation: u64,
     namespace_replacement: bool,
     carry: TimestampCarry,
+}
+
+fn cursor_admission_record_id(
+    native: &Value,
+    session_id: &str,
+    range: ObservationSourceRangeV1,
+    identity_collision_retry: bool,
+) -> Result<(ObservationId, bool), ObservationRecordParseErrorV1> {
+    let identity = cursor_observation_identity(session_id, native, range)?;
+    if identity_collision_retry {
+        return identity
+            .into_collision_disambiguation()
+            .map(|record_id| (record_id, false))
+            .ok_or(ObservationRecordParseErrorV1::NormalizationFailed);
+    }
+    let retry_eligible = identity.collision_disambiguation().is_some();
+    Ok((identity.into_primary(), retry_eligible))
+}
+
+/// What one Cursor ingest pass did to the sources it scanned, independently of
+/// what its own projection drain happened to catch.
+///
+/// The projection queue is shared per scope and consumed on projection, so the
+/// project catch-up sweep in [`crate::runtime::ingest::project_provider`] can
+/// drain the rows this pass just admitted before this pass drains them itself.
+/// Projection-output counts alone therefore cannot answer whether the pass's
+/// transcript is durable, and both of the states below report zero outputs:
+///
+/// - `observations_committed > 0`: this pass persisted new observations. They
+///   are durable at admission; which drainer materializes them is not the
+///   host's question.
+/// - `fully_replayed()`: every scanned source resumed at its stored cursor
+///   with nothing new to persist, so its observations were already durable.
+#[derive(Debug, Default, Clone, Copy)]
+struct CursorSourceAdmissionTally {
+    scanned: u64,
+    replayed: u64,
+    observations_committed: u64,
+}
+
+impl CursorSourceAdmissionTally {
+    fn record(&mut self, progress: &JsonlObservationAdmissionProgress) {
+        self.scanned = self.scanned.saturating_add(1);
+        self.observations_committed = self
+            .observations_committed
+            .saturating_add(progress.frames_persisted);
+        if progress.resumed && progress.frames_persisted == 0 {
+            self.replayed = self.replayed.saturating_add(1);
+        }
+    }
+
+    /// True only when at least one source was scanned and every one of them
+    /// was a pure replay. One source with new frames makes the pass a commit,
+    /// not a duplicate.
+    const fn fully_replayed(self) -> bool {
+        self.scanned > 0 && self.scanned == self.replayed
+    }
+}
+
+/// Fold one hook pass's admission over the projection drain it happened to run.
+///
+/// The projection queue is per scope. The project catch-up drains it too, so
+/// `drain.source_deferred`, `drain.exact_duplicate`, and `drain.messages_upserted`
+/// describe whoever last touched that queue, not this pass. A residual there
+/// must not hide a commit, invent a duplicate, or turn a byte-finished pass
+/// into backpressure. Admission is the commit.
+fn account_hook_admission(
+    mut drain: projection::CursorTranscriptIngestStats,
+    observations_committed: u64,
+    fully_replayed: bool,
+    admission_deferred: bool,
+    bytes_consumed: u64,
+) -> projection::CursorTranscriptIngestStats {
+    drain.bytes_consumed = bytes_consumed;
+    drain.source_deferred = admission_deferred;
+    drain.observations_committed = observations_committed;
+    drain.exact_duplicate = observations_committed == 0 && fully_replayed;
+    drain
 }
 
 // Cursor JSONL admission chokepoint: the whole per-file admission future is
@@ -218,10 +218,7 @@ fn admit_cursor_jsonl_observations<'a>(
         let native_session_id = subagent
             .as_ref()
             .map_or(parent_session_id, |(session_id, _)| session_id.as_str());
-        let source = ObservationSourceIdentityV1::for_provider(
-            ProviderId::new("cursor")?,
-            SessionId::new(native_session_id.to_owned())?,
-        )?;
+        let source = native_ingest_source_identity("cursor", native_session_id, None)?;
         let request = JsonlObservationAdmissionRequest::new(
             "cursor",
             path,
@@ -232,14 +229,19 @@ fn admit_cursor_jsonl_observations<'a>(
         )
         .with_max_new_bytes(max_new_bytes)
         .with_cancellation(cancellation.clone());
-        let subagent_model = hotpath::measure_block!(
-            "sessions.hosts.cursor.dispatch_model_blocking",
-            run_blocking_transcript_section(|| {
-                subagent.as_ref().and_then(|(_, agent_id)| {
-                    parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
-                })
+        let subagent_model = {
+            run_blocking_transcript_section("cursor", {
+                let path = path.to_path_buf();
+                let parent_session_id = parent_session_id.to_string();
+                let agent_id = subagent.as_ref().map(|(_, agent_id)| agent_id.clone());
+                move || {
+                    agent_id.as_ref().and_then(|agent_id| {
+                        parent_dispatch_model_for_subagent(&path, &parent_session_id, agent_id)
+                    })
+                }
             })
-        );
+            .await?
+        };
         let progress = admit_jsonl_observations(
             request,
             |scan| CursorJsonlAdmitState {
@@ -247,8 +249,9 @@ fn admit_cursor_jsonl_observations<'a>(
                 namespace_replacement: scan.replacement_rescan,
                 carry: TimestampCarry::new(i64::try_from(scan.mtime).ok()),
             },
-            |state, bytes, range, source_offset, _prepared, _hints| {
+            |state, bytes, range, source_offset, _prepared, hints| {
                 let mut stable_record_id = None;
+                let mut identity_collision_retry = false;
                 let mut unsupported_record = false;
                 let parsed = parse_normalized_observation_record_v1(
                     bytes,
@@ -259,9 +262,12 @@ fn admit_cursor_jsonl_observations<'a>(
                             unsupported_record = true;
                             return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                         }
-                        let record_id =
-                            observation_native_record_id("cursor", native_session_id, &native)
-                                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
+                        let (record_id, retry_eligible) = cursor_admission_record_id(
+                            &native,
+                            native_session_id,
+                            range,
+                            hints.identity_collision_retry,
+                        )?;
                         let message_id = cursor_projected_message_id(
                             &native,
                             native_session_id,
@@ -292,16 +298,25 @@ fn admit_cursor_jsonl_observations<'a>(
                             parent_agent_id,
                         )?;
                         stable_record_id = Some(record_id);
+                        identity_collision_retry = retry_eligible;
                         Ok(envelope)
                     },
                 );
                 match parsed {
-                    Ok(parsed) => Ok(JsonlFrameAdmission::durable(
-                        parsed,
-                        stable_record_id.ok_or(TranscriptIngestError::InvalidFrameState {
-                            provider: "cursor",
-                        })?,
-                    )),
+                    Ok(parsed) => {
+                        let stable_record_id =
+                            stable_record_id.ok_or(TranscriptIngestError::InvalidFrameState {
+                                provider: "cursor",
+                            })?;
+                        Ok(if identity_collision_retry {
+                            JsonlFrameAdmission::durable_with_identity_collision_retry(
+                                parsed,
+                                stable_record_id,
+                            )
+                        } else {
+                            JsonlFrameAdmission::durable(parsed, stable_record_id)
+                        })
+                    }
                     Err(_) => Ok(JsonlFrameAdmission::non_durable(if unsupported_record {
                         ObservationCoverageReason::UnsupportedFact
                     } else {
@@ -355,189 +370,21 @@ fn cursor_native_with_context(
     native
 }
 
-/// Parse the newly-appended portion of one Cursor transcript file into a
-/// provider-neutral [`ParsedTranscript`]. Shared by the hook path
-/// ([`CursorEventSource`]) and the startup catch-up sweep
-/// ([`CursorSweepSource`]); both derive identical session/message ids for the
-/// same file (the hook event's `session_id` always equals the transcript file
-/// stem), so whichever runs second is an idempotent no-op.
-#[hotpath::measure(label = "sessions.hosts.cursor.parse")]
-fn parse_cursor_jsonl(
-    event: &Value,
-    parent_session_id: &str,
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    user_scope: bool,
-    dispatch_models: &DispatchModelCache,
-) -> Option<ParsedTranscript> {
-    let new = stream_new_jsonl(path, prev, max_new_bytes)?;
-    // A truncate-and-rewrite can reuse every byte offset from the previous
-    // file generation. Legacy projection keys are offset-based, so keep
-    // replacement rows distinct instead of overwriting retained history. The
-    // scan reports this from the stored cursor generation, so a rewrite spread
-    // over several batches namespaces all of them, not just the first.
-    let namespace_replacement = new.replacement_generation;
-    let subagent = cursor_subagent_identity(path, parent_session_id);
-    let session_id = subagent.as_ref().map_or_else(
-        || parent_session_id.to_string(),
-        |(session_id, _agent_id)| session_id.clone(),
-    );
-    // The dispatch-model lookup rescans the parent transcript, so a no-change
-    // poll (no new lines, and therefore no message needing the fallback)
-    // skips it entirely.
-    let subagent_model = if new.lines.is_empty() {
-        None
-    } else {
-        subagent.as_ref().and_then(|(_, agent_id)| {
-            dispatch_models.parent_dispatch_model(path, parent_session_id, agent_id)
-        })
-    };
-    let event_cwd = event_cwd(event);
-    let event_location_provenance = event_location_provenance(event);
-    let mut carry = TimestampCarry::new(i64::try_from(new.new_cursor.mtime).ok());
-    let mut messages = Vec::new();
-    for line in &new.lines {
-        let derived_timestamp = carry.observe(&line.value);
-        let context = CursorMessageContext {
-            transcript_path: path,
-            source_offset: line.offset,
-            derived_timestamp,
-            model_fallback: subagent_model.as_deref(),
-            event_cwd: event_cwd.as_deref(),
-            event_location_provenance,
-        };
-        // The byte offset doubles as the message ordinal and source_offset,
-        // matching the original Cursor ingestion.
-        if let Some(message) = event_message(&line.value, event, &session_id, line.offset, context)
-        {
-            messages.push(message);
-        }
-        messages.extend(event_dispatch_messages(
-            &line.value,
-            event,
-            &session_id,
-            context,
-        ));
-    }
-    if namespace_replacement {
-        namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
-    }
-
-    // Defer the (filesystem-walking) project/title/metadata derivation until
-    // we actually have new messages; the driver ignores the draft otherwise.
-    let draft = if messages.is_empty() {
-        SessionDraft {
-            session_id,
-            project_key: String::new(),
-            project_path: String::new(),
-            title: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        }
-    } else {
-        let (project_key, project_path) = if user_scope {
-            ("user".to_string(), "user".to_string())
-        } else {
-            event_project(event)
-        };
-        let (draft_parent_session_id, agent_id) = subagent
-            .map_or((None, None), |(_session_id, agent_id)| {
-                (Some(parent_session_id.to_string()), Some(agent_id))
-            });
-        let is_subagent = draft_parent_session_id.is_some();
-        SessionDraft {
-            session_id,
-            project_key,
-            project_path,
-            title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&session_metadata(
-                event,
-                event_cwd.as_deref(),
-                event_location_provenance,
-            ))
-            .ok(),
-            parent_session_id: draft_parent_session_id,
-            is_subagent,
-            agent_id,
-            parent_tool_use_id: None,
-        }
-    };
-
-    Some(ParsedTranscript {
-        draft,
-        messages,
-        new_cursor: new.new_cursor,
-    })
-}
-
 /// Ingest the Cursor transcript referenced by a hook payload into the
 /// provider-neutral session/message tables for the provided database. Project
 /// hooks pass both the daemon-resolved project DB and canonical project id.
 ///
-/// Ingestion is **incremental**: it resumes from the byte offset recorded in the
-/// DB's `parse_offsets` table (via the shared [`crate::runtime::source`]
-/// driver), so each call only parses and upserts transcript lines appended since
-/// the last run rather than re-reading the whole file. Repeated calls on an
-/// unchanged file are a no-op.
-pub async fn ingest_cursor_transcript_event(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    project_id: ProjectId,
-) -> CursorTranscriptIngestStats {
-    cursor_ingest_or_default(
-        &try_ingest_cursor_transcript_event(event_json, admission, project_id).await,
-    )
-}
-
-pub async fn try_ingest_cursor_transcript_event(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    project_id: ProjectId,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_transcript_event_capped(event_json, admission, project_id, None).await
-}
-
-/// Like [`ingest_cursor_transcript_event`], but bounds how many newly-appended
-/// bytes a single call will read. Cursor hooks pass byte caps to stay within hook
-/// budgets. The cap is shared across the parent and every discovered subagent
-/// transcript.
-pub async fn ingest_cursor_transcript_event_capped(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    project_id: ProjectId,
-    max_new_bytes: Option<u64>,
-) -> CursorTranscriptIngestStats {
-    cursor_ingest_or_default(
-        &try_ingest_cursor_transcript_event_capped(
-            event_json,
-            admission,
-            project_id,
-            max_new_bytes,
-        )
-        .await,
-    )
-}
-
-pub async fn try_ingest_cursor_transcript_event_capped(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    project_id: ProjectId,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_transcript_event_capped_with_admission(
-        event_json,
-        project_id,
-        admission,
-        max_new_bytes,
-    )
-    .await
-}
-
-#[hotpath::measure(label = "sessions.hosts.cursor.ingest_event_capped", future = true)]
+/// Admission is **incremental**: it resumes from each transcript's committed
+/// observation source cursor, so each call only admits lines appended since
+/// the last run. Repeated calls on an unchanged file are a no-op.
+/// `max_new_bytes` bounds the newly appended bytes one call reads, shared
+/// across the parent and every discovered subagent transcript, so hooks stay
+/// within their budgets.
+#[tracing::instrument(
+    name = "sessions.hosts.cursor.ingest_event_capped",
+    level = "trace",
+    skip_all
+)]
 pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
     event_json: &str,
     project_id: ProjectId,
@@ -556,9 +403,9 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         return Ok(CursorTranscriptIngestStats::default());
     };
 
-    // Cursor derives its project from the event, so the driver's project_root
-    // argument is unused by `CursorEventSource`; the transcript path's parent is
-    // a cheap, side-effect-free placeholder.
+    // Cursor derives its project from the event, so `transcript_paths` ignores
+    // its project_root argument; the transcript path's parent is a cheap,
+    // side-effect-free placeholder.
     let project_root = transcript_path
         .parent()
         .map_or_else(|| transcript_path.clone(), Path::to_path_buf);
@@ -566,8 +413,6 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         event,
         transcript_path,
         include_subagents: true,
-        user_scope: false,
-        dispatch_models: DispatchModelCache::default(),
     };
     let scope = ObservationScopeV1::Project { project_id };
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
@@ -575,10 +420,15 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
-    let paths = hotpath::measure_block!(
-        "sessions.hosts.cursor.discover_blocking",
-        run_blocking_transcript_section(|| source.transcript_paths(&project_root))
-    );
+    let paths = {
+        run_blocking_transcript_section("cursor", {
+            let source = source.clone();
+            let project_root = project_root.clone();
+            move || source.transcript_paths(&project_root)
+        })
+        .await?
+    };
+    let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
         let context = cursor_observation_context(&source.event, &path, false);
         let progress = admit_cursor_jsonl_observations(
@@ -591,75 +441,22 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
             &ObservationCancellation::default(),
         )
         .await?;
+        admitted.record(&progress);
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(
+    let drain = drain_cursor_observation_projections(
         admission,
         &scope,
         &ObservationCancellation::default(),
     )
     .await?;
-    stats.bytes_consumed = budget.consumed();
-    stats.source_deferred |= budget.deferred();
-    Ok(stats)
-}
-
-pub async fn ingest_cursor_user_transcript_event_capped(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-) -> CursorTranscriptIngestStats {
-    cursor_ingest_or_default(
-        &try_ingest_cursor_user_transcript_event_capped(event_json, admission, max_new_bytes).await,
-    )
-}
-
-pub async fn try_ingest_cursor_user_transcript_event_capped(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
-        event_json,
-        admission,
-        max_new_bytes,
-        &[],
-    )
-    .await
-}
-
-/// User-scope live ingest guarded by a registry snapshot. The unguarded
-/// wrapper remains useful for isolated parsing without a profile registry.
-pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-    registered_roots: &[PathBuf],
-) -> CursorTranscriptIngestStats {
-    cursor_ingest_or_default(
-        &try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
-            event_json,
-            admission,
-            max_new_bytes,
-            registered_roots,
-        )
-        .await,
-    )
-}
-
-pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-    registered_roots: &[PathBuf],
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_user_transcript_event_capped_with_admission(
-        event_json,
-        admission,
-        max_new_bytes,
-        registered_roots,
-    )
-    .await
+    Ok(account_hook_admission(
+        drain,
+        admitted.observations_committed,
+        admitted.fully_replayed(),
+        budget.deferred(),
+        budget.consumed(),
+    ))
 }
 
 pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
@@ -711,8 +508,6 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         event,
         transcript_path,
         include_subagents: true,
-        user_scope: true,
-        dispatch_models: DispatchModelCache::default(),
     };
     let scope = ObservationScopeV1::Profile;
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
@@ -720,10 +515,14 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
-    let paths = hotpath::measure_block!(
-        "sessions.hosts.cursor.discover_blocking",
-        run_blocking_transcript_section(|| source.transcript_paths(&placeholder))
-    );
+    let paths = {
+        run_blocking_transcript_section("cursor", {
+            let source = source.clone();
+            move || source.transcript_paths(&placeholder)
+        })
+        .await?
+    };
+    let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
         let context = cursor_observation_context(&source.event, &path, true);
         let progress = admit_cursor_jsonl_observations(
@@ -736,17 +535,22 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
             &ObservationCancellation::default(),
         )
         .await?;
+        admitted.record(&progress);
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(
+    let drain = drain_cursor_observation_projections(
         admission,
         &scope,
         &ObservationCancellation::default(),
     )
     .await?;
-    stats.bytes_consumed = budget.consumed();
-    stats.source_deferred |= budget.deferred();
-    Ok(stats)
+    Ok(account_hook_admission(
+        drain,
+        admitted.observations_committed,
+        admitted.fully_replayed(),
+        budget.deferred(),
+        budget.consumed(),
+    ))
 }
 
 pub(in crate::runtime) fn try_ingest_cursor_project_sweep_capped_with_session_ids<
@@ -759,6 +563,7 @@ pub(in crate::runtime) fn try_ingest_cursor_project_sweep_capped_with_session_id
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
     cancellation: &'a ObservationCancellation,
+    sweep: &'a mut SourceSweep,
 ) -> Pin<Box<dyn Future<Output = TranscriptIngestResult<CursorSweepIngestOutcome>> + Send + 'a>> {
     // Rehash into the default (Send) hasher before boxing so the returned
     // future never captures the caller's `S` hasher and stays `Send`.
@@ -775,6 +580,7 @@ pub(in crate::runtime) fn try_ingest_cursor_project_sweep_capped_with_session_id
             max_new_bytes,
             ObservationScopeV1::Project { project_id },
             cancellation,
+            sweep,
         )
         .await
     })
@@ -788,6 +594,7 @@ pub(in crate::runtime) async fn try_ingest_cursor_user_sweep_capped_with_session
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
     cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> TranscriptIngestResult<CursorSweepIngestOutcome> {
     let Some(source) = CursorSweepSource::new() else {
         return Ok(CursorSweepIngestOutcome::default());
@@ -801,10 +608,23 @@ pub(in crate::runtime) async fn try_ingest_cursor_user_sweep_capped_with_session
         max_new_bytes,
         ObservationScopeV1::Profile,
         cancellation,
+        sweep,
     )
     .await
 }
 
+fn retryable_cursor_conflict(error: &TranscriptIngestError) -> bool {
+    matches!(
+        error,
+        TranscriptIngestError::HostAdmission {
+            reason: "cursor_conflict",
+            retryable: true,
+            ..
+        }
+    )
+}
+
+#[tracing::instrument(name = "sessions.hosts.cursor.sweep_admit", level = "trace", skip_all)]
 async fn admit_cursor_sweep_observations_with_session_ids(
     source: &CursorSweepSource,
     project_root: &Path,
@@ -812,6 +632,7 @@ async fn admit_cursor_sweep_observations_with_session_ids(
     max_new_bytes: Option<u64>,
     scope: ObservationScopeV1,
     cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> TranscriptIngestResult<CursorSweepIngestOutcome> {
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
@@ -820,49 +641,111 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
-    let paths = hotpath::measure_block!(
-        "sessions.hosts.cursor.discover_blocking",
-        run_blocking_transcript_section(|| source.transcript_paths(project_root))
-    );
-    for path in paths {
-        if cancellation.is_cancelled() {
-            return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
+    let frontier = admission
+        .get_parse_offset(&scope, CURSOR_SWEEP_FRONTIER_KEY)
+        .await
+        .map_err(|outcome| host_admission_error("cursor", outcome))?
+        .unwrap_or_default();
+    let page = {
+        run_blocking_transcript_section("cursor", {
+            let source = source.clone();
+            let project_root = project_root.to_path_buf();
+            let byte_offset = frontier.byte_offset;
+            move || source.sweep_page(&project_root, byte_offset)
+        })
+        .await?
+    };
+    let mut admitted = CursorSourceAdmissionTally::default();
+    let mut unfinished = None;
+    for (offset, files) in page.sessions.iter().enumerate() {
+        for path in files {
+            if cancellation.is_cancelled() {
+                return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
+            }
+            let Some(parent_session_id) = sweep_parent_session_id(path) else {
+                continue;
+            };
+            let Some(claim) = sweep.observe_file(path).await? else {
+                continue;
+            };
+            let event = cursor_sweep_event(
+                &parent_session_id,
+                project_root,
+                matches!(&scope, ObservationScopeV1::Profile),
+            );
+            let context = cursor_observation_context(
+                &event,
+                path,
+                matches!(&scope, ObservationScopeV1::Profile),
+            );
+            let admit_file = || {
+                admit_cursor_jsonl_observations(
+                    &parent_session_id,
+                    path,
+                    &context,
+                    admission,
+                    &scope,
+                    budget.remaining(),
+                    cancellation,
+                )
+            };
+            // A lost compare-and-swap fails this file before any later file is
+            // scanned. One rescan starts from the peer's durable cursor. If that
+            // also loses, the file's cursor is unchanged and the next pass resumes
+            // at its session. Do not fail the rest of the sweep.
+            let admitted_file = match admit_file().await {
+                Err(error) if retryable_cursor_conflict(&error) => match admit_file().await {
+                    Err(error) if retryable_cursor_conflict(&error) => {
+                        unfinished.get_or_insert(page.start + offset);
+                        continue;
+                    }
+                    other => other,
+                },
+                other => other,
+            };
+            let progress = match admitted_file {
+                Ok(progress) => progress,
+                Err(error) => {
+                    sweep.refused(claim, error)?;
+                    continue;
+                }
+            };
+            if progress.source_deferred {
+                unfinished.get_or_insert(page.start + offset);
+            }
+            admitted.record(&progress);
+            budget.record_progress(progress.bytes_consumed, progress.source_deferred);
         }
-        let Some(parent_session_id) = sweep_parent_session_id(&path) else {
-            continue;
-        };
-        let event = cursor_sweep_event(
-            &parent_session_id,
-            project_root,
-            matches!(&scope, ObservationScopeV1::Profile),
+    }
+    let coverage = page.coverage(unfinished);
+    let next_frontier = ParseOffset {
+        byte_offset: coverage.next_position(),
+        ..ParseOffset::default()
+    };
+    if next_frontier != frontier {
+        admission
+            .replace_parse_offset(&scope, CURSOR_SWEEP_FRONTIER_KEY, frontier, next_frontier)
+            .await
+            .map_err(|outcome| host_admission_error("cursor", outcome))?;
+    }
+    if let CursorSweepCoverage::Continuing { resume_at, total } = coverage {
+        tracing::debug!(
+            resume_at,
+            total,
+            "Cursor transcript sweep covered part of the corpus; the next pass continues"
         );
-        let context = cursor_observation_context(
-            &event,
-            &path,
-            matches!(&scope, ObservationScopeV1::Profile),
-        );
-        let progress = admit_cursor_jsonl_observations(
-            &parent_session_id,
-            &path,
-            &context,
-            admission,
-            &scope,
-            budget.remaining(),
-            cancellation,
-        )
-        .await?;
-        budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
     }
-    let outcome = projection::drain_cursor_observation_projections_with_sessions(
+    let mut outcome = projection::drain_cursor_observation_projections_with_sessions(
         admission,
         &scope,
         cancellation,
     )
     .await
-    .map(|stats| stats.into_sweep_outcome(budget.consumed(), budget.deferred()))?;
+    .map(|stats| stats.into_sweep_outcome(budget.consumed(), budget.deferred(), coverage))?;
+    outcome.stats.observations_committed = admitted.observations_committed;
     persist_host_provider_coverage(
         admission,
         &scope,
@@ -872,7 +755,10 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         } else {
             HostProviderCoverage::Complete
         },
-        u64::from(outcome.stats.source_deferred),
+        coverage
+            .deferred_sessions()
+            .max(u64::from(outcome.stats.source_deferred)),
+        None,
     )
     .await?;
     Ok(outcome)
@@ -901,8 +787,7 @@ fn cursor_hook_workspace_roots(event: &Value) -> Vec<PathBuf> {
     };
     let mut roots: Vec<PathBuf> = Vec::new();
     for candidate in candidates {
-        let root =
-            tracedecay_runtime_core::config::discover_project_root(&candidate).unwrap_or(candidate);
+        let root = discover_project_root(&candidate).unwrap_or(candidate);
         if !roots.iter().any(|seen| paths_equal(seen, &root)) {
             roots.push(root);
         }
@@ -930,22 +815,23 @@ const SLUG_DECODE_PROBE_BUDGET: u32 = 4096;
 
 /// Startup catch-up source for Cursor transcripts.
 ///
-/// The live hook path ([`ingest_cursor_transcript_event`]) only sees turns
-/// that fire while the tracedecay hooks are installed, so transcripts written
+/// The live hook path
+/// ([`try_ingest_cursor_transcript_event_capped_with_admission`]) only sees
+/// turns that fire while the tracedecay hooks are installed, so transcripts written
 /// before a project was indexed could never ingest. This source sweeps
 /// `~/.cursor/projects/<slug>/agent-transcripts/**.jsonl` for the slug that
 /// encodes `project_root`, feeding every file through the same
-/// [`parse_cursor_jsonl`] parser and (path-keyed) `parse_offsets` cursors as
-/// the hook path — files either path has already ingested are byte-offset
+/// `parse_cursor_jsonl` parser and (path-keyed) `parse_offsets` cursors as
+/// the hook path, files either path has already ingested are byte-offset
 /// no-ops for the other, so sweep and hooks never double-ingest.
+#[derive(Clone)]
 pub struct CursorSweepSource {
     cursor_projects_dir: PathBuf,
     /// Session ids already owned by the richer composer store
-    /// ([`crate::runtime::cursor_composer`]). Transcript files whose stem is
+    /// ([`crate::runtime::hosts::cursor_composer`]). Transcript files whose stem is
     /// one of these are skipped so the two Cursor sources never double-ingest.
     skip_session_ids: std::collections::HashSet<String>,
     user_registered_slugs: Option<std::collections::HashSet<String>>,
-    dispatch_models: DispatchModelCache,
 }
 
 impl CursorSweepSource {
@@ -962,7 +848,6 @@ impl CursorSweepSource {
             cursor_projects_dir: home.join(".cursor").join("projects"),
             skip_session_ids: std::collections::HashSet::new(),
             user_registered_slugs: None,
-            dispatch_models: DispatchModelCache::default(),
         }
     }
 
@@ -984,22 +869,47 @@ impl CursorSweepSource {
         );
         self
     }
-}
 
-impl TranscriptSource for CursorSweepSource {
-    fn provider(&self) -> &'static str {
-        "cursor"
+    /// The bounded sweep page that starts at corpus position `resume_at`.
+    #[tracing::instrument(
+        name = "sessions.hosts.cursor.sweep_discover",
+        level = "trace",
+        skip_all
+    )]
+    fn sweep_page(&self, project_root: &Path, resume_at: u64) -> CursorSweepPage {
+        let corpus = list_cursor_sweep_corpus(&self.transcripts_dirs(project_root));
+        let user_scope = self.user_registered_slugs.is_some();
+        let mut page = corpus.page(
+            resume_at,
+            TranscriptDiscoveryBounds::default_walk(),
+            |path| {
+                // Composer-owned sessions are ingested (richer) by the composer
+                // sweep; skip the JSONL copy so neither path double-ingests.
+                user_scope
+                    || self.skip_session_ids.is_empty()
+                    || path
+                        .file_stem()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_none_or(|stem| !self.skip_session_ids.contains(stem))
+            },
+        );
+        if user_scope {
+            for files in &mut page.sessions {
+                *files = select_cursor_session_authorities(std::mem::take(files));
+            }
+        }
+        page
     }
 
-    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+    /// `agent-transcripts` directories swept for `project_root`: every
+    /// unregistered project in user scope, otherwise the project's own
+    /// directory when its slug attributes it unambiguously.
+    fn transcripts_dirs(&self, project_root: &Path) -> Vec<PathBuf> {
         if let Some(registered_slugs) = &self.user_registered_slugs {
             let Ok(entries) = std::fs::read_dir(&self.cursor_projects_dir) else {
                 return Vec::new();
             };
-            let default_bounds = TranscriptDiscoveryBounds::default_walk();
-            let mut paths = Vec::new();
-            let mut remaining_bytes = default_bounds.max_discovery_bytes;
-            for entry in entries
+            return entries
                 .filter_map(std::result::Result::ok)
                 .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
                 .filter(|entry| {
@@ -1008,26 +918,8 @@ impl TranscriptSource for CursorSweepSource {
                         .to_str()
                         .is_some_and(|slug| !registered_slugs.contains(slug))
                 })
-            {
-                let remaining_files = default_bounds.max_files.saturating_sub(paths.len());
-                if remaining_files == 0 || remaining_bytes == 0 {
-                    break;
-                }
-                let bounds = TranscriptDiscoveryBounds {
-                    max_files: remaining_files,
-                    max_discovery_bytes: remaining_bytes,
-                    ..default_bounds
-                };
-                let report = collect_files_with_ext_bounded(
-                    &entry.path().join("agent-transcripts"),
-                    "jsonl",
-                    MAX_SWEEP_SCAN_DEPTH,
-                    bounds,
-                );
-                remaining_bytes = remaining_bytes.saturating_sub(report.bytes_charged);
-                paths.extend(report.paths);
-            }
-            return paths;
+                .map(|entry| entry.path().join("agent-transcripts"))
+                .collect();
         }
         let Some(slug) = cursor_project_slug(project_root) else {
             return Vec::new();
@@ -1047,91 +939,71 @@ impl TranscriptSource for CursorSweepSource {
             Some(candidates)
                 if candidates
                     .iter()
-                    .all(|candidate| paths_equal(candidate, project_root)) => {}
+                    .all(|candidate| paths_equal(candidate, project_root)) =>
+            {
+                vec![transcripts_dir]
+            }
             _ => {
                 tracing::warn!(
                     project_root = %project_root.display(),
                     %slug,
                     "skipping Cursor transcript sweep because project slug is ambiguous"
                 );
-                return Vec::new();
+                Vec::new()
             }
         }
-        let files = collect_files_with_ext_bounded(
-            &transcripts_dir,
-            "jsonl",
-            MAX_SWEEP_SCAN_DEPTH,
-            TranscriptDiscoveryBounds::default_walk(),
-        )
-        .paths;
-        // Cursor materializes some subagent sessions twice: under their
-        // parent's `subagents/` dir and again as a top-level
-        // `<id>/<id>.jsonl` copy whose content drifts slightly (so byte
-        // offsets — and therefore message ids — diverge). Ingesting both
-        // would duplicate messages and overwrite the parent linkage; keep
-        // the subagent copy (it carries parentage, and it is the copy the
-        // live hook path ingests) and skip the top-level duplicate.
-        let subagent_stems: std::collections::HashSet<std::ffi::OsString> = files
-            .iter()
-            .filter(|path| is_subagent_transcript(path))
-            .filter_map(|path| path.file_stem().map(std::ffi::OsStr::to_os_string))
-            .collect();
-        files
-            .into_iter()
-            .filter(|path| {
-                is_subagent_transcript(path)
-                    || path
-                        .file_stem()
-                        .is_none_or(|stem| !subagent_stems.contains(stem))
-            })
-            .filter(|path| {
-                // Composer-owned sessions are ingested (richer) by the composer
-                // sweep; skip the JSONL copy so neither path double-ingests.
-                self.skip_session_ids.is_empty()
-                    || path
-                        .file_stem()
-                        .and_then(std::ffi::OsStr::to_str)
-                        .is_none_or(|stem| !self.skip_session_ids.contains(stem))
-            })
-            .collect()
+    }
+}
+
+impl TranscriptSource for CursorSweepSource {
+    fn provider(&self) -> &'static str {
+        "cursor"
     }
 
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        let parent_session_id = sweep_parent_session_id(path)?;
-        // Synthesize the minimal hook-shaped event the shared parser expects:
-        // the same session id a live hook would carry (Cursor names parent
-        // transcripts `<session-id>.jsonl`) and the project root as `cwd` so
-        // `event_project` scopes the session exactly like the hook path.
-        let user_scope = self.user_registered_slugs.is_some();
-        let event = cursor_sweep_event(&parent_session_id, project_root, user_scope);
-        parse_cursor_jsonl(
-            &event,
-            &parent_session_id,
-            path,
-            prev,
-            max_new_bytes,
-            user_scope,
-            &self.dispatch_models,
-        )
+    /// The first sweep page; production passes resume from their durable
+    /// frontier through [`CursorSweepSource::sweep_page`].
+    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+        self.sweep_page(project_root, 0).into_paths()
     }
+}
 
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_and_parse_new("cursor", path, prev, max_new_bytes, || {
-            self.parse_new(path, prev, project_root, max_new_bytes)
-        })
+fn select_cursor_session_authorities(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut authorities = std::collections::BTreeMap::<String, PathBuf>::new();
+    for path in paths {
+        let Some(session_id) = path
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .filter(|session_id| !session_id.is_empty())
+        else {
+            continue;
+        };
+        match authorities.entry(session_id.to_owned()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(path);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry)
+                if cursor_transcript_authority_rank(&path)
+                    > cursor_transcript_authority_rank(entry.get()) =>
+            {
+                entry.insert(path);
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
     }
+    authorities.into_values().collect()
+}
+
+fn cursor_transcript_authority_rank(path: &Path) -> (bool, std::time::SystemTime, u64, &Path) {
+    let metadata = std::fs::metadata(path).ok();
+    (
+        is_subagent_transcript(path),
+        metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        metadata.as_ref().map_or(0, std::fs::Metadata::len),
+        path,
+    )
 }
 
 /// Synthesizes the minimal hook-shaped event used by startup sweeps so their
@@ -1292,84 +1164,6 @@ fn cursor_subagent_identity(path: &Path, parent_session_id: &str) -> Option<(Str
     Some((session_id.clone(), session_id))
 }
 
-fn parent_dispatch_model_for_subagent(
-    path: &Path,
-    parent_session_id: &str,
-    agent_id: &str,
-) -> Option<String> {
-    let parent_dir = path.parent()?.parent()?;
-    let candidates = [
-        parent_dir.join(format!("{parent_session_id}.jsonl")),
-        parent_dir.with_extension("jsonl"),
-    ];
-    for candidate in candidates {
-        if let Some(model) = dispatch_model_for_agent(&candidate, agent_id) {
-            return Some(model);
-        }
-    }
-    None
-}
-
-fn dispatch_model_for_agent(path: &Path, agent_id: &str) -> Option<String> {
-    let file = File::open(path).ok()?;
-    let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
-    loop {
-        let frame = frames.next_frame().ok()?;
-        let record = match frame {
-            RawJsonlFrame::Eof => return None,
-            RawJsonlFrame::Complete { .. } | RawJsonlFrame::Partial { .. } => {
-                let Ok(record) = serde_json::from_slice::<Value>(frames.record()) else {
-                    continue;
-                };
-                record
-            }
-            RawJsonlFrame::Oversized { .. } | RawJsonlFrame::BudgetExhausted { .. } => {
-                continue;
-            }
-        };
-        if frames.record().is_empty() {
-            continue;
-        }
-        let message = record.get("message").unwrap_or(&record);
-        let content = message.get("content").unwrap_or(message);
-        let Some(items) = content.as_array() else {
-            continue;
-        };
-        for item in items {
-            let Some(name) = item.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            if is_subagent_dispatch_tool(name)
-                && dispatch_targets_agent(item, agent_id)
-                && let Some(model) = cursor_dispatch_model(item)
-            {
-                return Some(model);
-            }
-        }
-    }
-}
-
-fn dispatch_targets_agent(item: &Value, agent_id: &str) -> bool {
-    let input = item.get("input").unwrap_or(item);
-    [
-        "agent_id",
-        "agentId",
-        "subagent_id",
-        "subagentId",
-        "session_id",
-        "sessionId",
-        "id",
-    ]
-    .into_iter()
-    .any(|key| {
-        input
-            .get(key)
-            .or_else(|| item.get(key))
-            .and_then(Value::as_str)
-            == Some(agent_id)
-    })
-}
-
 /// Per-line timestamp derivation for Cursor transcripts, which carry no
 /// structured per-message timestamps. The injected `<timestamp>…</timestamp>`
 /// tag in user prompts is parsed and carried forward across subsequent lines
@@ -1400,186 +1194,6 @@ impl TimestampCarry {
     }
 }
 
-#[derive(Clone, Copy)]
-struct CursorMessageContext<'a> {
-    transcript_path: &'a Path,
-    source_offset: i64,
-    derived_timestamp: Option<i64>,
-    model_fallback: Option<&'a str>,
-    event_cwd: Option<&'a Path>,
-    event_location_provenance: &'a str,
-}
-
-fn event_message(
-    record: &Value,
-    event: &Value,
-    session_id: &str,
-    ordinal: i64,
-    context: CursorMessageContext<'_>,
-) -> Option<SessionMessageRecord> {
-    let role = record
-        .get("role")
-        .and_then(Value::as_str)
-        .filter(|role| !role.is_empty())?;
-    let message = record.get("message").unwrap_or(record);
-    let content = message.get("content").unwrap_or(message);
-    if content_is_only_subagent_dispatch(content) {
-        return None;
-    }
-    let (text, tool_names) = content_storage_text_and_tools(
-        content,
-        message
-            .get("tool_calls")
-            .or_else(|| record.get("tool_calls")),
-    );
-    if text.trim().is_empty() {
-        return None;
-    }
-
-    let message_id = record
-        .get("id")
-        .or_else(|| message.get("id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map_or_else(
-            || format!("{session_id}:{ordinal}"),
-            std::string::ToString::to_string,
-        );
-    let model = cursor_record_message_model(record, message)
-        .or_else(|| context.model_fallback.map(str::to_string))
-        .or_else(|| cursor_model_string(event));
-
-    Some(SessionMessageRecord {
-        provider: "cursor".to_string(),
-        message_id,
-        session_id: session_id.to_string(),
-        role: role.to_string(),
-        timestamp: record_timestamp(record)
-            .or_else(|| record_timestamp(event))
-            .or(context.derived_timestamp),
-        ordinal,
-        text,
-        kind: content_kind(content).map(str::to_string),
-        model,
-        tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-        source_path: Some(context.transcript_path.to_string_lossy().to_string()),
-        source_offset: Some(context.source_offset),
-        metadata_json: serde_json::to_string(&message_metadata(
-            record,
-            message,
-            content,
-            event,
-            context.source_offset,
-            context.event_cwd,
-            context.event_location_provenance,
-        ))
-        .ok(),
-    })
-}
-
-fn event_dispatch_messages(
-    record: &Value,
-    event: &Value,
-    session_id: &str,
-    context: CursorMessageContext<'_>,
-) -> Vec<SessionMessageRecord> {
-    let Some(role) = record
-        .get("role")
-        .and_then(Value::as_str)
-        .filter(|role| !role.is_empty())
-    else {
-        return Vec::new();
-    };
-    let message = record.get("message").unwrap_or(record);
-    let content = message.get("content").unwrap_or(message);
-    let Some(items) = content.as_array() else {
-        return Vec::new();
-    };
-
-    let mut out = Vec::new();
-    for (index, item) in items.iter().enumerate() {
-        let Some(name) = item.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        if !is_subagent_dispatch_tool(name) {
-            continue;
-        }
-        let Some(text) = dispatch_text(item) else {
-            continue;
-        };
-        let tool_use_id = item
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty());
-        let message_id = tool_use_id.map_or_else(
-            || {
-                format!(
-                    "{}:tool_dispatch:{}:{index}",
-                    session_id, context.source_offset
-                )
-            },
-            |id| format!("{session_id}:tool_dispatch:{id}"),
-        );
-        out.push(SessionMessageRecord {
-            provider: "cursor".to_string(),
-            message_id,
-            session_id: session_id.to_string(),
-            role: role.to_string(),
-            timestamp: record_timestamp(record)
-                .or_else(|| record_timestamp(event))
-                .or(context.derived_timestamp),
-            ordinal: context.source_offset.saturating_add(index as i64),
-            text,
-            kind: Some("tool_dispatch".to_string()),
-            model: cursor_dispatch_model(item)
-                .or_else(|| cursor_record_message_model(record, message))
-                .or_else(|| context.model_fallback.map(str::to_string))
-                .or_else(|| cursor_model_string(event)),
-            tool_names: Some(name.to_string()),
-            source_path: Some(context.transcript_path.to_string_lossy().to_string()),
-            source_offset: Some(context.source_offset),
-            metadata_json: serde_json::to_string(&dispatch_message_metadata(
-                record,
-                event,
-                context.source_offset,
-                tool_use_id,
-                context.event_cwd,
-                context.event_location_provenance,
-            ))
-            .ok(),
-        });
-    }
-    out
-}
-
-fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {
-    cursor_model_string(record).or_else(|| cursor_model_string(message))
-}
-
-fn content_is_only_subagent_dispatch(content: &Value) -> bool {
-    let Some(items) = content.as_array() else {
-        return false;
-    };
-    !items.is_empty()
-        && items.iter().all(|item| {
-            item.get("type").and_then(Value::as_str) == Some("tool_use")
-                && item
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(is_subagent_dispatch_tool)
-        })
-}
-
-fn content_kind(content: &Value) -> Option<&'static str> {
-    if content.is_array() {
-        Some("message")
-    } else if content.is_string() {
-        Some("text")
-    } else {
-        None
-    }
-}
-
 fn event_session_id(event: &Value, transcript_path: &Path) -> String {
     event
         .get("session_id")
@@ -1600,12 +1214,11 @@ fn event_session_id(event: &Value, transcript_path: &Path) -> String {
 }
 
 fn event_project(event: &Value) -> (String, String) {
-    let cwd_root = event_cwd(event)
-        .and_then(|cwd| tracedecay_runtime_core::config::discover_project_root(&cwd));
+    let cwd_root = event_cwd(event).and_then(|cwd| discover_project_root(&cwd));
     let candidates = event_project_candidates(event);
     let resolved = candidates
         .iter()
-        .find_map(|candidate| tracedecay_runtime_core::config::discover_project_root(candidate))
+        .find_map(|candidate| discover_project_root(candidate))
         .or_else(|| candidates.into_iter().next());
     let project_path = match (cwd_root, resolved) {
         (Some(cwd_root), Some(resolved)) if !paths_equal(&cwd_root, &resolved) => cwd_root,
@@ -1615,6 +1228,11 @@ fn event_project(event: &Value) -> (String, String) {
     };
     let project = project_path.to_string_lossy().to_string();
     (project.clone(), project)
+}
+
+/// Project discovery in the enclosing transcript source profile.
+fn discover_project_root(start: &Path) -> Option<PathBuf> {
+    crate::runtime::transcript_source_profile()?.discover_project_root(start)
 }
 
 fn event_cwd(event: &Value) -> Option<PathBuf> {
@@ -1665,155 +1283,11 @@ fn event_project_candidates(event: &Value) -> Vec<PathBuf> {
     candidates
 }
 
-fn record_timestamp(value: &Value) -> Option<i64> {
-    value
-        .get("timestamp")
-        .or_else(|| value.get("created_at"))
-        .and_then(|timestamp| {
-            timestamp
-                .as_i64()
-                .or_else(|| timestamp.as_str().and_then(|s| s.parse::<i64>().ok()))
-        })
-}
-
-fn event_location_provenance(event: &Value) -> &str {
-    event
-        .get("tracedecay_location_provenance")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("hook_event")
-}
-
-fn session_metadata(event: &Value, event_cwd: Option<&Path>, location_provenance: &str) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("cursor_transcript".to_string()),
-    );
-    metadata.insert(
-        "conversation_id".to_string(),
-        event.get("conversation_id").cloned().unwrap_or(Value::Null),
-    );
-    metadata.insert(
-        "hook_event_name".to_string(),
-        event.get("hook_event_name").cloned().unwrap_or(Value::Null),
-    );
-    metadata.insert(
-        "cursor_version".to_string(),
-        event.get("cursor_version").cloned().unwrap_or(Value::Null),
-    );
-    if let Some(roots) = event.get("workspace_roots") {
-        metadata.insert("workspace_roots".to_string(), roots.clone());
-    }
-    append_location_metadata(
-        &mut metadata,
-        CURSOR_SESSION_LOCATION_KEYS,
-        TranscriptLocation::new(event_cwd, location_provenance),
-    );
-    Value::Object(metadata)
-}
-
-fn message_metadata(
-    record: &Value,
-    message: &Value,
-    content: &Value,
-    event: &Value,
-    source_offset: i64,
-    event_cwd: Option<&Path>,
-    location_provenance: &str,
-) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("cursor_transcript".to_string()),
-    );
-    metadata.insert(
-        "raw_type".to_string(),
-        record.get("type").cloned().unwrap_or(Value::Null),
-    );
-    append_host_event_ordering(&mut metadata, event, source_offset);
-    append_location_metadata(
-        &mut metadata,
-        CURSOR_SESSION_LOCATION_KEYS,
-        TranscriptLocation::new(event_cwd, location_provenance),
-    );
-    append_tool_calls_metadata(&mut metadata, message);
-    append_tool_event_metadata(&mut metadata, content);
-    // These JSONL agent-transcript lines carry no token counters (verified
-    // across 100k+ real lines). Cursor *does* record per-turn token counts, but
-    // only in the composer store (`state.vscdb` bubbles), which the richer
-    // `cursor_composer` sweep reads and maps to `usage`. This probe stays as
-    // future-proofing in case the JSONL format gains counters too.
-    append_usage_metadata(&mut metadata, &[record, message]);
-    Value::Object(metadata)
-}
-
-fn append_host_event_ordering(
-    metadata: &mut serde_json::Map<String, Value>,
-    event: &Value,
-    transcript_offset: i64,
-) {
-    metadata.insert(
-        "cursor_transcript_offset".to_string(),
-        Value::from(transcript_offset),
-    );
-    if let Some(event_id) = ["event_id", "eventId"]
-        .into_iter()
-        .find_map(|key| event.get(key).and_then(Value::as_str))
-        .filter(|value| !value.is_empty())
-    {
-        metadata.insert(
-            "cursor_host_event_id".to_string(),
-            Value::String(event_id.to_string()),
-        );
-    }
-    if let Some(sequence) = ["event_sequence", "eventSequence", "sequence"]
-        .into_iter()
-        .find_map(|key| event.get(key))
-        .filter(|value| value.is_i64() || value.is_u64() || value.is_string())
-    {
-        metadata.insert("cursor_host_event_sequence".to_string(), sequence.clone());
-    }
-    if let Some(timestamp) = record_timestamp(event) {
-        metadata.insert(
-            "cursor_host_event_timestamp".to_string(),
-            Value::from(timestamp),
-        );
-    }
-}
-
-fn dispatch_message_metadata(
-    record: &Value,
-    event: &Value,
-    source_offset: i64,
-    tool_use_id: Option<&str>,
-    event_cwd: Option<&Path>,
-    location_provenance: &str,
-) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("cursor_transcript".to_string()),
-    );
-    metadata.insert(
-        "raw_type".to_string(),
-        record.get("type").cloned().unwrap_or(Value::Null),
-    );
-    metadata.insert(
-        "tool_use_id".to_string(),
-        tool_use_id.map_or(Value::Null, |id| Value::String(id.to_string())),
-    );
-    append_host_event_ordering(&mut metadata, event, source_offset);
-    append_location_metadata(
-        &mut metadata,
-        CURSOR_SESSION_LOCATION_KEYS,
-        TranscriptLocation::new(event_cwd, location_provenance),
-    );
-    Value::Object(metadata)
-}
-
 #[cfg(test)]
 mod cancellation_tests;
+
+#[cfg(test)]
+mod sweep_page_tests;
 
 #[cfg(test)]
 mod tests;

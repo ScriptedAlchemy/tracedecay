@@ -1,0 +1,237 @@
+//! UTF-8, whitespace, and path-text cuts shared by crates that sit below the
+//! runtime kernel.
+//!
+//! Boundary behavior is the contract: a byte budget that lands inside a
+//! multibyte character walks back, and an empty budget or an empty string
+//! stays empty. Callers that trim, mark truncation, or refuse a mid-character
+//! budget still do that themselves.
+
+/// Replace Unicode control characters with an ASCII space.
+///
+/// Newline, carriage return, and tab are controls, so they become spaces.
+/// Non-controls, including ordinary spaces and `/`, are unchanged. An empty
+/// string stays empty. This does not trim.
+#[must_use]
+pub fn fold_control_characters(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// Replace `//` and `/* … */` comments in JSON-with-comments (`tsconfig.json`,
+/// editor settings) with spaces, leaving string contents and every newline in
+/// place.
+///
+/// The output has the same byte length and line structure as the input, so a
+/// strict JSON parser accepts it and any value it locates is at the same
+/// offset in the original text.
+#[must_use]
+pub fn blank_json_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(current) = chars.next() {
+        match current {
+            '"' => {
+                out.push(current);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    match inner {
+                        '\\' => {
+                            if let Some(escaped) = chars.next() {
+                                out.push(escaped);
+                            }
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                out.push(' ');
+                for inner in chars.by_ref() {
+                    if inner == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                    out.push(' ');
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                out.push(' ');
+                let mut previous = '\0';
+                for inner in chars.by_ref() {
+                    out.push(if inner == '\n' { '\n' } else { ' ' });
+                    if previous == '*' && inner == '/' {
+                        break;
+                    }
+                    previous = inner;
+                }
+            }
+            _ => out.push(current),
+        }
+    }
+    out
+}
+
+/// Replace `\` with `/`.
+///
+/// Trailing separators stay. `\` becomes `/`, `foo\` becomes `foo/`, and
+/// `foo/` is unchanged. An empty string stays empty. This does not trim,
+/// lowercase a drive letter, or strip a `\\?\` prefix.
+#[must_use]
+pub fn forward_slash_text(text: &str) -> String {
+    text.replace('\\', "/")
+}
+
+/// [`forward_slash_text`] of a path's lossy display form.
+///
+/// A trailing separator on the path is kept. A non-UTF-8 component is the
+/// usual `U+FFFD` replacement, the same spelling `to_string_lossy` already
+/// produced at the deleted call sites.
+#[must_use]
+pub fn forward_slash_path(path: &std::path::Path) -> String {
+    forward_slash_text(&path.to_string_lossy())
+}
+
+/// Join Unicode whitespace-separated pieces with a single ASCII space.
+///
+/// Leading, trailing, and repeated whitespace disappear. An empty or
+/// all-whitespace input stays empty. Newlines become spaces. Characters
+/// that are not whitespace, including a trailing `/`, are preserved.
+#[must_use]
+pub fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Longest prefix of `text` whose byte length is at most `max_bytes`.
+///
+/// A cut inside a multibyte character walks back to the previous char
+/// boundary. `max_bytes == 0`, and a leading multibyte character whose
+/// budget cannot hold it, both yield an empty prefix. An index past the
+/// end returns the whole string.
+#[must_use]
+pub fn utf8_prefix_at_or_before(text: &str, max_bytes: usize) -> &str {
+    &text[..text.floor_char_boundary(max_bytes)]
+}
+
+/// Levenshtein distance between `left` and `right` when it is at most
+/// `limit`, counted in characters. `None` means more than `limit` edits.
+#[must_use]
+pub fn edit_distance_within(left: &str, right: &str, limit: usize) -> Option<usize> {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    if left.len().abs_diff(right.len()) > limit {
+        return None;
+    }
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_character) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_character) in right.iter().enumerate() {
+            current[right_index + 1] = (previous[right_index]
+                + usize::from(left_character != right_character))
+            .min(previous[right_index + 1] + 1)
+            .min(current[right_index] + 1);
+        }
+        // A row's minimum never decreases in later rows.
+        if current.iter().min().is_some_and(|minimum| *minimum > limit) {
+            return None;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    Some(previous[right.len()]).filter(|distance| *distance <= limit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        blank_json_comments, collapse_whitespace, edit_distance_within, fold_control_characters,
+        forward_slash_text, utf8_prefix_at_or_before,
+    };
+
+    #[test]
+    fn edit_distance_within_counts_character_edits_up_to_the_limit() {
+        assert_eq!(edit_distance_within("limit", "limit", 0), Some(0));
+        assert_eq!(edit_distance_within("limt", "limit", 1), Some(1));
+        assert_eq!(edit_distance_within("", "abc", 3), Some(3));
+        assert_eq!(edit_distance_within("", "abc", 2), None);
+        assert_eq!(edit_distance_within("kitten", "sitting", 3), Some(3));
+        assert_eq!(edit_distance_within("kitten", "sitting", 2), None);
+        assert_eq!(edit_distance_within("caf\u{e9}", "cafe", 1), Some(1));
+    }
+
+    #[test]
+    fn json_comments_become_spaces_and_keep_offsets_and_strings() {
+        let text = "{\n // a\n \"url\": \"http://x/y\", /* b\n c */ \"n\": 1\n}";
+        let blanked = blank_json_comments(text);
+        assert_eq!(blanked.len(), text.len());
+        assert_eq!(blanked.matches('\n').count(), text.matches('\n').count());
+        assert_eq!(
+            blanked,
+            "{\n     \n \"url\": \"http://x/y\",     \n      \"n\": 1\n}"
+        );
+        assert_eq!(
+            blank_json_comments("\"//not a comment\""),
+            "\"//not a comment\""
+        );
+        assert_eq!(
+            blank_json_comments("\"esc\\\" // still\""),
+            "\"esc\\\" // still\""
+        );
+    }
+
+    #[test]
+    fn control_characters_become_spaces_without_trimming() {
+        assert_eq!(fold_control_characters(""), "");
+        assert_eq!(fold_control_characters("a\nb\tc\r"), "a b c ");
+        assert_eq!(fold_control_characters(" src/ "), " src/ ");
+        assert_eq!(fold_control_characters("é"), "é");
+    }
+
+    #[test]
+    fn forward_slashes_keep_trailing_separators_and_an_empty_string() {
+        assert_eq!(forward_slash_text(""), "");
+        assert_eq!(forward_slash_text(r"\"), "/");
+        assert_eq!(forward_slash_text(r"foo\"), "foo/");
+        assert_eq!(forward_slash_text("foo/"), "foo/");
+        assert_eq!(forward_slash_text(r"C:\repo\\"), "C:/repo//");
+        assert_eq!(forward_slash_text(r"\\?\C:\repo"), "//?/C:/repo");
+        assert_eq!(
+            super::forward_slash_path(std::path::Path::new(r"foo\bar\")),
+            "foo/bar/"
+        );
+    }
+
+    #[test]
+    fn collapse_whitespace_keeps_non_space_and_drops_only_whitespace() {
+        assert_eq!(collapse_whitespace("  a \n\t b  "), "a b");
+        assert_eq!(collapse_whitespace("   "), "");
+        assert_eq!(collapse_whitespace(""), "");
+        assert_eq!(collapse_whitespace("src/"), "src/");
+    }
+
+    #[test]
+    fn walks_back_when_the_cut_lands_inside_a_multibyte_char() {
+        let text = format!("{}é", "a".repeat(20));
+        assert_eq!(utf8_prefix_at_or_before(&text, 21), "a".repeat(20));
+    }
+
+    #[test]
+    fn empty_budget_on_a_leading_multibyte_char_is_empty() {
+        assert_eq!(utf8_prefix_at_or_before("🦀tail", 2), "");
+        assert_eq!(utf8_prefix_at_or_before("🦀tail", 0), "");
+    }
+
+    #[test]
+    fn budget_past_the_end_returns_the_whole_string() {
+        assert_eq!(utf8_prefix_at_or_before("abc", 10), "abc");
+        assert_eq!(utf8_prefix_at_or_before("", 4), "");
+    }
+}

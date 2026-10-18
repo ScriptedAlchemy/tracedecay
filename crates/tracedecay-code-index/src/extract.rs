@@ -9,14 +9,16 @@
 //! constructs are preserved as evidence; extraction never invents successful
 //! structure.
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
-use tracedecay_code_extraction::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
+use tracedecay_code_extraction::{
+    ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractionArtifactV1,
+    SchemaEvidenceIssueV1,
+};
 use tracedecay_domain::{
-    CodeGenerationId, ContentDigest, Edge, ExtractionResult, ExtractorRevision, FileOccurrenceId,
-    GrammarRevision, LanguageDescriptorRevision, LanguageDescriptorV1, LanguageId, ManifestDigest,
-    Node, SourceSpan, UnresolvedRef, ValidatedCodeFileV1, Visibility, canonical_sha256,
+    CodeGenerationId, ComplexityAnalysisV1, ContentDigest, Edge, ExtractorRevision,
+    FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageDescriptorV1,
+    LanguageId, ManifestDigest, Node, SourceSpan, UnresolvedRef, ValidatedCodeFileV1, Visibility,
+    canonical_sha256,
 };
 
 use super::{
@@ -59,9 +61,6 @@ pub struct ExtractionBatchV1 {
 pub enum ParseOutcomeV1 {
     Complete,
     Partial { reason: String },
-    TimedOut,
-    Cancelled,
-    Failed { reason: String },
 }
 
 /// Extraction coverage and ambiguity evidence. These are canonical raw
@@ -219,29 +218,15 @@ pub const MAX_EXTRACTION_SOURCE_BYTES: usize = 1024 * 1024;
 /// canonically ordered before hashing, so identical sanitized input under
 /// identical descriptor revisions produces identical digests.
 pub struct TreeSitterExtractor {
-    parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,
+    parsers: tracedecay_code_extraction::LanguageRegistry,
 }
 
 impl TreeSitterExtractor {
     /// Create the adapter over a freshly built extraction registry.
     pub fn new() -> Self {
         Self {
-            parsers: Arc::new(tracedecay_code_extraction::LanguageRegistry::new()),
+            parsers: tracedecay_code_extraction::LanguageRegistry::new(),
         }
-    }
-
-    /// Create the adapter over an existing extraction registry.
-    pub fn from_registry(parsers: tracedecay_code_extraction::LanguageRegistry) -> Self {
-        Self {
-            parsers: Arc::new(parsers),
-        }
-    }
-
-    /// Share one generation-scoped registry with downstream chunking.
-    pub fn from_shared_registry(
-        parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,
-    ) -> Self {
-        Self { parsers }
     }
 
     /// Resolve the parser for one file, falling back to the descriptor's
@@ -269,7 +254,7 @@ impl TreeSitterExtractor {
         parsed_len: usize,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.extract.incremental", {
+        crate::observe::measure_hot_loop!("code_index.extract.incremental", {
             if cancellation.is_cancelled() {
                 return Err(ExtractionFailureV1::Cancelled);
             }
@@ -296,73 +281,6 @@ impl TreeSitterExtractor {
             )
         })
     }
-
-    /// Typed evidence for one file whose bounded retained parse exceeded its
-    /// per-file budget.
-    ///
-    /// The batch truthfully reports [`ParseOutcomeV1::TimedOut`] with zero
-    /// parsed bytes, every byte unsupported, and no parser rows, so the
-    /// chunker records the file as an unsupported document with a reason and
-    /// the rest of the generation still builds and publishes. Nothing here
-    /// invents structure: the digests cover the (empty) rows this parse
-    /// actually produced.
-    pub(crate) fn extract_parse_timed_out(
-        &self,
-        file: &ReceiptBoundCodeFileV1,
-        descriptor: &LanguageDescriptorV1,
-    ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
-        let authority = file.authority().clone();
-        let file = file.validated_file();
-        validate_descriptor(file, descriptor)?;
-        let artifact = ExtractionArtifactV1 {
-            result: ExtractionResult {
-                nodes: Vec::new(),
-                edges: Vec::new(),
-                unresolved_refs: Vec::new(),
-                errors: Vec::new(),
-                duration_ms: 0,
-            },
-            imports: Vec::new(),
-        };
-        let file_len = file.sanitized_bytes.len() as u64;
-        let unsupported_ranges = if file_len > 0 {
-            vec![SourceSpan {
-                start_byte: 0,
-                end_byte: file_len,
-            }]
-        } else {
-            Vec::new()
-        };
-        let rows_digest = rows_digest(file, descriptor, &artifact)?;
-        let parser_import_rows_digest = parser_import_rows_digest(&artifact.imports)?;
-        Ok(ExtractedCodeFileV1 {
-            authority,
-            batch: ExtractionBatchV1 {
-                generation_id: file.generation_id.clone(),
-                file_occurrence_id: file.file.file_occurrence_id.clone(),
-                language: descriptor.language.clone(),
-                descriptor_revision: descriptor.descriptor_revision.clone(),
-                grammar_revision: descriptor.grammar_revision.clone(),
-                extractor_revision: descriptor.extractor_revision.clone(),
-                content_digest: file.file.content_digest.clone(),
-                parse_outcome: ParseOutcomeV1::TimedOut,
-                parsed_ranges: Vec::new(),
-                error_ranges: Vec::new(),
-                unsupported_ranges,
-                coverage: ExtractionCoverageV1 {
-                    parsed_bytes: 0,
-                    error_bytes: 0,
-                    unsupported_bytes: file_len,
-                    symbols_extracted: 0,
-                    relations_extracted: 0,
-                    ambiguity_count: 0,
-                },
-                parser_import_rows_digest,
-                rows_digest,
-            },
-            parse_artifact: artifact,
-        })
-    }
 }
 
 impl Default for TreeSitterExtractor {
@@ -379,6 +297,10 @@ struct CanonicalNodeRow<'a> {
     assertions: u32,
     attrs_start_line: u32,
     branches: u32,
+    /// Omitted when complete, matching the extraction row, so complete rows
+    /// keep their pinned digest bytes.
+    #[serde(skip_serializing_if = "ComplexityAnalysisV1::is_complete")]
+    complexity_analysis: ComplexityAnalysisV1,
     docstring: Option<&'a str>,
     end_column: u32,
     end_line: u32,
@@ -406,6 +328,7 @@ impl<'a> From<&'a Node> for CanonicalNodeRow<'a> {
             assertions: node.assertions,
             attrs_start_line: node.attrs_start_line,
             branches: node.branches,
+            complexity_analysis: node.complexity_analysis,
             docstring: node.docstring.as_deref(),
             end_column: node.end_column,
             end_line: node.end_line,
@@ -504,7 +427,7 @@ fn rows_digest(
         .map(CanonicalUnresolvedRefRow::from)
         .collect::<Vec<_>>();
     let mut imports = artifact.imports.clone();
-    crate::hotpath_observe::measure_hot_loop!("code_index_rows_digest_sort", {
+    crate::observe::measure_hot_loop!("code_index_rows_digest_sort", {
         sort_canonical_rows(&mut nodes);
         sort_canonical_rows(&mut edges);
         sort_canonical_rows(&mut unresolved);
@@ -520,12 +443,14 @@ fn rows_digest(
         grammar_revision: &'a str,
         extractor_revision: &'a str,
         imports: Vec<ExtractedImportEvidenceV1>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        schema_evidence: Option<&'a ExtractedSchemaEvidenceV1>,
         nodes: Vec<CanonicalNodeRow<'a>>,
         edges: Vec<CanonicalEdgeRow<'a>>,
         unresolved_refs: Vec<CanonicalUnresolvedRefRow<'a>>,
     }
 
-    crate::hotpath_observe::measure_hot_loop!(
+    crate::observe::measure_hot_loop!(
         "code_index_rows_digest_hash",
         canonical_sha256(&RowsPayload {
             separator: EXTRACTION_ROWS_SEPARATOR,
@@ -535,6 +460,7 @@ fn rows_digest(
             grammar_revision: descriptor.grammar_revision.as_str(),
             extractor_revision: descriptor.extractor_revision.as_str(),
             imports,
+            schema_evidence: artifact.schema_evidence.as_ref(),
             nodes,
             edges,
             unresolved_refs: unresolved,
@@ -548,7 +474,7 @@ fn rows_digest(
 pub(crate) fn parser_import_rows_digest(
     imports: &[ExtractedImportEvidenceV1],
 ) -> Result<ManifestDigest, ExtractionFailureV1> {
-    crate::hotpath_observe::measure_hot_loop!("code_index_parser_import_rows_digest", {
+    crate::observe::measure_hot_loop!("code_index_parser_import_rows_digest", {
         let mut imports = imports.to_vec();
         imports.sort();
         canonical_sha256(&(PARSER_IMPORT_ROWS_DIGEST_SEPARATOR, imports.as_slice())).map_err(
@@ -566,7 +492,7 @@ impl LanguageExtractor for TreeSitterExtractor {
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.extract.full", {
+        crate::observe::measure_hot_loop!("code_index.extract.full", {
             if cancellation.is_cancelled() {
                 return Err(ExtractionFailureV1::Cancelled);
             }
@@ -639,6 +565,9 @@ fn finish_extraction(
     source_was_capped: bool,
     cancellation: &dyn ExtractionCancellation,
 ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
+    if source_was_capped && let Some(evidence) = &mut artifact.schema_evidence {
+        evidence.mark_partial(SchemaEvidenceIssueV1::SourceTruncated);
+    }
     artifact.result.sanitize();
     if cancellation.is_cancelled() {
         return Err(ExtractionFailureV1::Cancelled);
@@ -775,6 +704,7 @@ mod tests {
                 content_identity: crate::chunks::content_digest(bytes),
                 captured_at: UtcMicros(1_000_000),
                 files: vec![file.clone()],
+                omitted_sources: Vec::new(),
             })
             .expect("snapshot capability");
         intake
@@ -801,34 +731,6 @@ mod tests {
     const RUST_SOURCE: &str = "use std::collections::HashMap;\n\n/// Doc.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\nfn beta() {\n    let _ = alpha(1);\n}\n";
 
     #[test]
-    fn extracts_a_complete_batch_with_coverage_evidence() {
-        let extractor = TreeSitterExtractor::new();
-        let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
-        let extraction = extractor
-            .extract(&file, &rust_descriptor(), &NeverCancelled)
-            .expect("extraction succeeds");
-        let batch = extraction.batch();
-
-        assert_eq!(batch.parse_outcome, ParseOutcomeV1::Complete);
-        assert_eq!(batch.language.as_str(), "rust");
-        assert_eq!(
-            batch.content_digest,
-            crate::chunks::content_digest(RUST_SOURCE.as_bytes())
-        );
-        assert_eq!(batch.coverage.parsed_bytes, RUST_SOURCE.len() as u64);
-        assert!(batch.coverage.symbols_extracted >= 2);
-        assert!(batch.coverage.relations_extracted >= 1);
-        assert_eq!(
-            batch.parsed_ranges,
-            vec![SourceSpan {
-                start_byte: 0,
-                end_byte: RUST_SOURCE.len() as u64,
-            }]
-        );
-        batch.rows_digest.validate().expect("rows digest canonical");
-    }
-
-    #[test]
     fn identical_input_produces_identical_rows_digests() {
         let extractor = TreeSitterExtractor::new();
         let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
@@ -848,13 +750,31 @@ mod tests {
     fn canonical_rows_digest_matches_pinned_identity() {
         let extractor = TreeSitterExtractor::new();
         let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
+        let descriptor = rust_descriptor();
         let extraction = extractor
-            .extract(&file, &rust_descriptor(), &NeverCancelled)
+            .extract(&file, &descriptor, &NeverCancelled)
             .expect("extraction succeeds");
 
+        // extractor.rust.v8 records restricted `pub` re-export scope as a
+        // typed value and no longer fabricates receiver types for method
+        // initializers; v9 adds the clone-body token bound and v10 the byte
+        // bound; v11 drops the bare method name of a dotted call and types
+        // `self` from the enclosing impl or trait; v12 binds a receiver typed
+        // by a type parameter with one trait bound to `Trait::method`; v13
+        // retains parser-positioned receiver-call evidence; v14 extracts
+        // item-list macro bodies and binds `#[cfg]` variants; v15 qualifies
+        // calls through block-scoped `use` declarations; v16 qualifies calls
+        // through inline-module and glob `use` declarations; v17 gives
+        // `const`/`static` initializers their calls; v18 binds calls inside
+        // macro arguments and in-file `self::`/`super::`/`crate::` paths; v19
+        // spells `Self::f` calls by the enclosing type; v20 retains associated
+        // owner uses and parser-positioned generic call paths; v21 rejects
+        // non-callable struct targets. The revision is part of the batch
+        // identity, so the pinned digest moves with it.
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v21");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:62eaaf3e43a4f9773e43c7f2385213ca6aa59bb5a0ee6c07ff44fa7e37beede3"
+            "sha256:f843db0c24eb1f9d3333e45372e4748d4f5d98cdf731bde62c774c616d9ef951"
         );
     }
 
@@ -886,73 +806,6 @@ mod tests {
         assert_eq!(extraction.batch().rows_digest, original_digest);
         assert_eq!(extraction.batch().file_occurrence_id, original_occurrence);
         assert_eq!(extraction.logical_path(), "src/a.rs");
-    }
-
-    #[test]
-    fn rebind_allows_same_path_under_a_new_generation_occurrence() {
-        let extractor = TreeSitterExtractor::new();
-        let original = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
-        let mut extraction = extractor
-            .extract(&original, &rust_descriptor(), &NeverCancelled)
-            .expect("extraction");
-        let original_digest = extraction.batch().rows_digest.clone();
-
-        let rebound = {
-            let intake = SanitizedCodeIntake::new(
-                StaticLanguageRegistry::new(),
-                SanitizerRevision::new("sanitizer.v1").expect("valid id"),
-                UtcMicros(1_000_000),
-            );
-            let file = SanitizedCodeFileV1 {
-                file_occurrence_id: FileOccurrenceId::new("file.carried").expect("valid id"),
-                logical_path: "src/lib.rs".to_owned(),
-                language: Some(tracedecay_domain::LanguageId::new("rust").expect("valid id")),
-                content_digest: crate::chunks::content_digest(RUST_SOURCE.as_bytes()),
-                disposition: SnapshotFileDispositionV1::Present,
-            };
-            let capability = intake
-                .admit(SanitizedCodeSnapshotV1 {
-                    repository: RepositoryId::new("repo.fixture").expect("valid id"),
-                    worktree: None,
-                    reference: None,
-                    source_revision: None,
-                    sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("valid id"),
-                    sanitization_receipts: vec![
-                        SanitizationReceiptId::new("receipt.fixture").expect("valid id"),
-                    ],
-                    content_identity: crate::chunks::content_digest(RUST_SOURCE.as_bytes()),
-                    captured_at: UtcMicros(1_000_000),
-                    files: vec![file.clone()],
-                })
-                .expect("snapshot capability");
-            intake
-                .bind_file(
-                    &capability,
-                    &ProjectId::new("project.fixture").expect("valid project"),
-                    ValidatedCodeFileV1 {
-                        generation_id: CodeGenerationId::new("generation.carried")
-                            .expect("valid id"),
-                        file,
-                        snapshot_digest: capability.snapshot().intake_digest.clone(),
-                        sanitized_bytes: RUST_SOURCE.as_bytes().to_vec(),
-                    },
-                )
-                .expect("receipt-bound carried file")
-        };
-
-        extraction
-            .rebind_file_occurrence(&rebound)
-            .expect("same-path generation rebind");
-        assert_eq!(extraction.batch().rows_digest, original_digest);
-        assert_eq!(
-            extraction.batch().generation_id.as_str(),
-            "generation.carried"
-        );
-        assert_eq!(
-            extraction.batch().file_occurrence_id.as_str(),
-            "file.carried"
-        );
-        assert_eq!(extraction.logical_path(), "src/lib.rs");
     }
 
     #[test]

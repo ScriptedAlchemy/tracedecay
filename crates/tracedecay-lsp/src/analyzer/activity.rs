@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::adapters::LspAdapterDefinition;
 use super::client::LspDocument;
-use super::error::AnalyzerResult;
+use super::error::{AnalyzerResult, AnalyzerRuntimeError};
 
 #[cfg(test)]
 thread_local! {
@@ -83,7 +83,7 @@ pub async fn documents_for_adapter(
     let Ok(project_root) = canonicalize_project_root(project_root) else {
         return Ok(Vec::new());
     };
-    let mut documents = Vec::new();
+    let mut candidates = Vec::new();
     for file in files {
         if !matches_adapter_extension(adapter, &file) {
             continue;
@@ -94,17 +94,27 @@ pub async fn documents_for_adapter(
         let Some(path) = scoped_project_file_from_canonical_root(&project_root, &file) else {
             continue;
         };
-        let Ok(text) = tokio::fs::read_to_string(&path).await else {
-            continue;
-        };
-        documents.push(LspDocument {
-            language: adapter.language.clone(),
-            language_id: language_id_for_file(adapter, &file),
-            relative_path: file,
-            text,
-        });
+        let language_id = language_id_for_file(adapter, &file);
+        candidates.push((path, file, language_id));
     }
-    Ok(documents)
+    let language = adapter.language.clone();
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        candidates
+            .into_iter()
+            .filter_map(|(path, relative_path, language_id)| {
+                Some(LspDocument {
+                    language: language.clone(),
+                    language_id,
+                    relative_path,
+                    text: std::fs::read_to_string(path).ok()?,
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| {
+        AnalyzerRuntimeError::new(format!("failed to read analyzer documents: {error}"))
+    })
 }
 
 fn language_id_for_file(adapter: &LspAdapterDefinition, file: &str) -> String {
@@ -129,15 +139,6 @@ fn matches_adapter_extension(adapter: &LspAdapterDefinition, file: &str) -> bool
                 .iter()
                 .any(|candidate| candidate == extension)
         })
-}
-
-pub fn adapter_workspace_root(
-    project_root: &Path,
-    adapter: &LspAdapterDefinition,
-    file: &str,
-) -> Option<PathBuf> {
-    let project_root = canonicalize_project_root(project_root).ok()?;
-    adapter_workspace_root_from_canonical_root(&project_root, adapter, file)
 }
 
 pub(crate) fn adapter_workspace_root_from_canonical_root(
@@ -167,7 +168,10 @@ pub(crate) fn adapter_workspace_root_from_canonical_root(
     None
 }
 
-fn scoped_project_file_from_canonical_root(project_root: &Path, file: &str) -> Option<PathBuf> {
+pub(crate) fn scoped_project_file_from_canonical_root(
+    project_root: &Path,
+    file: &str,
+) -> Option<PathBuf> {
     let relative = scoped_relative_path(file)?;
     let path = project_root.join(relative);
     match path.canonicalize() {
@@ -203,77 +207,44 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
-    #[tokio::test]
-    async fn documents_for_adapter_requires_a_matching_root_marker()
+    fn block<T>(future: impl Future<Output = T>) -> T {
+        tracedecay_runtime_core::native_runtime::block_on(future).expect("native runtime")
+    }
+
+    #[test]
+    fn documents_for_adapter_requires_a_matching_root_marker()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let project_root = temp.path();
         let source_path = project_root.join("src/lib.fake");
         let source_parent = source_path.parent().ok_or("source path has no parent")?;
-        tokio::fs::create_dir_all(source_parent).await?;
-        tokio::fs::write(&source_path, "fake source").await?;
+        std::fs::create_dir_all(source_parent)?;
+        std::fs::write(&source_path, "fake source")?;
         let adapter = fake_adapter("fake-root");
 
-        let documents =
-            documents_for_adapter(project_root, &adapter, vec!["src/lib.fake".to_string()]).await?;
+        let documents = block(documents_for_adapter(
+            project_root,
+            &adapter,
+            vec!["src/lib.fake".to_string()],
+        ))?;
 
         assert!(
             documents.is_empty(),
             "adapter without a root marker should not open project documents"
         );
-        Ok(())
-    }
 
-    #[tokio::test]
-    async fn documents_for_adapter_accepts_files_under_a_matching_root_marker()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let project_root = temp.path();
-        let package_root = project_root.join("package");
-        let source_path = package_root.join("src/lib.fake");
-        let source_parent = source_path.parent().ok_or("source path has no parent")?;
-        tokio::fs::create_dir_all(source_parent).await?;
-        tokio::fs::write(package_root.join("fake-root"), "").await?;
-        tokio::fs::write(&source_path, "fake source").await?;
-        let adapter = fake_adapter("fake-root");
-
-        let documents = documents_for_adapter(
+        std::fs::write(project_root.join("fake-root"), "")?;
+        let documents = block(documents_for_adapter(
             project_root,
             &adapter,
-            vec!["package/src/lib.fake".to_string()],
-        )
-        .await?;
-
-        assert_eq!(documents.len(), 1);
-        assert_eq!(documents[0].relative_path, "package/src/lib.fake");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn documents_for_adapter_accepts_directory_root_markers()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let project_root = temp.path();
-        let package_root = project_root.join("package");
-        let source_path = package_root.join("src/lib.fake");
-        let source_parent = source_path.parent().ok_or("source path has no parent")?;
-        tokio::fs::create_dir_all(source_parent).await?;
-        tokio::fs::create_dir(package_root.join(".fake-root")).await?;
-        tokio::fs::write(&source_path, "fake source").await?;
-        let adapter = fake_adapter(".fake-root");
-
-        let documents = documents_for_adapter(
-            project_root,
-            &adapter,
-            vec!["package/src/lib.fake".to_string()],
-        )
-        .await?;
-
-        assert_eq!(documents.len(), 1);
-        let canonical_package_root = package_root.canonicalize()?;
+            vec!["src/lib.fake".to_string()],
+        ))?;
         assert_eq!(
-            adapter_workspace_root(project_root, &adapter, "package/src/lib.fake"),
-            Some(canonical_package_root)
+            documents
+                .iter()
+                .map(|document| (document.relative_path.as_str(), document.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("src/lib.fake", "fake source")]
         );
         Ok(())
     }

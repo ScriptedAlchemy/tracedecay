@@ -5,9 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, Mutex};
 
-#[cfg(any(test, feature = "test-transport"))]
-use fs2::FileExt;
-
 /// Canonical daemon-authority state names live in [`crate::storage`]; the
 /// ambient-Test authority probe shares that single definition with the
 /// `tracedecay-daemon-identity` crate that elects the lock.
@@ -33,18 +30,13 @@ pub use bootstrap::windows_hard_link_count;
 pub use lease::enter_maintenance_database_scope;
 #[cfg(not(test))]
 pub use lease::enter_owned_maintenance_database_scope;
-#[cfg(test)]
-use lease::fallback_scoped_runtime_role;
-use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};
+use lease::{acquire_process_lease, exact_scoped_runtime_role};
 pub use lease::{enter_daemon_database_scope, probe_writer_owner};
-pub use owner_io::is_lock_contended;
 use owner_io::{
     authority_token, epoch_ms, publish_record_atomically, read_record_strict, writer_owner,
 };
-use path_layout::{
-    canonical_profile_root, database_profile_root, is_legacy_repository_database,
-    platform_identity_key,
-};
+use path_layout::{canonical_profile_root, database_profile_root, platform_identity_key};
+pub use tracedecay_private_fs::is_lock_contended;
 
 static PROCESS_LEASES: LazyLock<Mutex<HashMap<PathBuf, ProcessLease>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -184,7 +176,6 @@ struct DatabaseIdentity {
     database_path: PathBuf,
     database_key: PathBuf,
     profile_root: PathBuf,
-    allows_ambient_profile_scope: bool,
 }
 
 #[derive(Debug)]
@@ -250,9 +241,6 @@ impl DatabaseAuthority {
         if maintenance_active {
             return Self::acquire_identity(identity, DatabaseAuthorityRole::Maintenance, intent);
         }
-        if let Some(role) = scoped_runtime_role(&identity, intent)? {
-            return Self::acquire_identity(identity, role, intent);
-        }
         Err(access_error(
             intent,
             &identity.database_path,
@@ -300,9 +288,6 @@ impl DatabaseAuthority {
         {
             return Self::acquire_identity(identity, DatabaseAuthorityRole::Test, intent);
         }
-        if let Some(role) = scoped_runtime_role(&identity, intent)? {
-            return Self::acquire_identity(identity, role, intent);
-        }
         Err(access_error(
             intent,
             &identity.database_path,
@@ -342,16 +327,14 @@ impl DatabaseAuthority {
             return Ok(());
         }
 
-        let active = match exact_scoped_runtime_role(&self.inner.identity.profile_root, intent)? {
-            Some(role) => role,
-            None => scoped_runtime_role(&self.inner.identity, intent)?.ok_or_else(|| {
+        let active = exact_scoped_runtime_role(&self.inner.identity.profile_root, intent)?
+            .ok_or_else(|| {
                 access_error(
                     intent,
                     &self.inner.identity.database_path,
                     "database write requires an active daemon or exclusive maintenance scope",
                 )
-            })?,
-        };
+            })?;
         if active == self.inner.role {
             return Ok(());
         }
@@ -386,22 +369,6 @@ impl DatabaseAuthority {
         record_name: &str,
     ) -> Result<()> {
         owner_io::replace_file_atomically(temporary, destination, record_name)
-    }
-
-    pub fn replace_sqlite_with_rollback_atomically(
-        staging: &Path,
-        destination: &Path,
-        rollback: &Path,
-        expected_destination_identity: u64,
-        expected_staging_identity: u64,
-    ) -> Result<()> {
-        owner_io::replace_sqlite_with_rollback_atomically(
-            staging,
-            destination,
-            rollback,
-            expected_destination_identity,
-            expected_staging_identity,
-        )
     }
 
     #[cfg(test)]
@@ -486,7 +453,6 @@ impl DatabaseIdentity {
         let database_key = platform_identity_key(&database_path);
         let profile_root = database_profile_root(&database_path, parent);
         Ok(Self {
-            allows_ambient_profile_scope: is_legacy_repository_database(&database_path),
             database_path,
             database_key,
             profile_root: platform_identity_key(&profile_root),
@@ -510,10 +476,10 @@ pub fn is_isolated_test_path(path: &Path) -> bool {
     if under_isolated_root(path, std::env::temp_dir()) {
         return true;
     }
-    std::env::var_os("TRACEDECAY_DATA_DIR")
+    std::env::var_os(crate::config::USER_DATA_DIR_ENV)
         .filter(|root| !root.is_empty())
-        .and_then(|_| crate::config::user_data_dir())
-        .is_some_and(|root| under_isolated_root(path, root))
+        .and_then(|_| crate::config::ProfileRoot::from_env().ok())
+        .is_some_and(|profile| under_isolated_root(path, profile.data_dir().to_path_buf()))
 }
 
 /// Whether `path` lives under `root`, comparing both sides in one spelling.
@@ -531,7 +497,7 @@ pub fn is_isolated_test_path(path: &Path) -> bool {
 /// short and long names agree, so only the other two hosts ever saw it.
 ///
 /// Both sides resolve through their deepest existing ancestor, so a database
-/// file whose final component has not been created yet still compares — the
+/// file whose final component has not been created yet still compares, the
 /// same rule [`crate::path_safety::same_canonical_path`] applies to registry
 /// locators.
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -545,7 +511,7 @@ fn under_isolated_root(path: &Path, root: PathBuf) -> bool {
 
 /// Returns true when another process currently holds the profile's exclusive
 /// daemon-authority lock. Used to keep ambient Test opens from mutating a
-/// store while a live daemon owner is elected — its sole caller is the
+/// store while a live daemon owner is elected, its sole caller is the
 /// cfg-gated ambient-Test branch, so the probe carries the same gate.
 #[cfg(any(test, feature = "test-transport"))]
 fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
@@ -562,9 +528,11 @@ fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
     let Ok(file) = options.open(&lock_path) else {
         return false;
     };
-    match file.try_lock_exclusive() {
+    match file.try_lock().map_err(std::io::Error::from) {
         Ok(()) => {
-            let _ = FileExt::unlock(&file);
+            if let Err(error) = file.unlock() {
+                tracing::warn!(%error, "daemon authority probe lock could not be released");
+            }
             false
         }
         Err(error) if is_lock_contended(&error) => true,
@@ -584,14 +552,6 @@ impl ExactSqlWriteAuthority for DatabaseAuthority {
             ExactSqlWriteIntent::Query => "query registered global database writer",
             ExactSqlWriteIntent::ExecuteBatch => {
                 "execute registered global database statement batch"
-            }
-            ExactSqlWriteIntent::Vacuum => {
-                if self.role() != DatabaseAuthorityRole::Maintenance {
-                    return Err(ExactSqlError::AuthorityDenied(
-                        "whole-database vacuum requires exclusive maintenance authority".to_owned(),
-                    ));
-                }
-                "vacuum registered global database under exclusive maintenance"
             }
             ExactSqlWriteIntent::BeginTransaction => "begin registered global database transaction",
             ExactSqlWriteIntent::Commit => "commit registered global database transaction",

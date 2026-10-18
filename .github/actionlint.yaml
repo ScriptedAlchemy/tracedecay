@@ -1,1 +1,13 @@
 config-variables: null
+# actionlint 1.7.12 does not know the GitHub-hosted Ubuntu 26 labels yet.
+# List them so `actionlint .github/workflows/ci.yml` can check syntax.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
+# actionlint 1.7.12 (latest) does not know concurrency `queue: max`, which
+# GitHub accepts and pr-run-cleanup.yml needs so every close event runs.
+paths:
+  .github/workflows/pr-run-cleanup.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'

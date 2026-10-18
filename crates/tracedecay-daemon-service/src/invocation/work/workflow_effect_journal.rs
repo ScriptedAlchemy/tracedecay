@@ -1,25 +1,32 @@
 //! Workflow effect journaling and receipt-to-outcome translation.
 
 use serde::Serialize;
-use tracedecay_application::{
-    ApplicationContractError, ApplicationOutcome, AuthorityReceipt, Deadline, EffectId,
-    EffectTermination, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
-    TaskHandoffError, TaskHandoffGrant, TaskHandoffRedeemed, WorkflowDefinitionDisposition,
-    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectOperationV1,
-    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectProblemV1,
-    WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1, WorkflowEffectTerminalV1,
+use tracedecay_contracts::{
+    ApplicationContractError, ApplicationOutcome, ApplicationProblem, ApplicationProblemDetailV1,
+    AuthorityReceipt, Deadline, EffectId, EffectTermination, IdempotencyKey, LegalAction,
+    PolicyDecisionRef, RequestContext, RequestId, RetryDirective, SafeDiagnostic, TaskHandoffError,
+    TaskHandoffGrant, TaskHandoffRedeemed, WorkflowCoordinationError,
+    WorkflowDefinitionDisposition, WorkflowEffectAuthorityErrorV1, WorkflowEffectIdentityV1,
+    WorkflowEffectOperationV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
+    WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1,
+    WorkflowEffectTerminalV1,
 };
-use tracedecay_domain::{ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
+};
 use tracedecay_tool_catalog::UseCaseId;
 
 use tracedecay_daemon_protocol::{
-    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
-    WorkflowApplicationOutcome,
+    DaemonInvocationOutcome, DaemonInvocationResponse, WorkflowApplicationOutcome,
 };
 use tracedecay_domain::errors::TraceDecayError;
 
-use super::super::current_micros;
+use super::workflow_run_control::{
+    workflow_coordination_problem, workflow_final_conflict, workflow_invalid_request,
+    workflow_not_found, workflow_reset_required, workflow_runtime_unavailable,
+};
 use super::{RegisteredWorkRuntime, work_command_effect, work_effect, work_evidence_packet};
+use tracedecay_contracts::now_micros;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn complete_workflow_run_effect(
@@ -30,7 +37,7 @@ pub(super) fn complete_workflow_run_effect(
     operation_key: &str,
     use_case: UseCaseId,
     input_digest: ManifestDigest,
-    result: Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem>,
+    result: Result<tracedecay_domain::WorkflowRunProjection, ApplicationProblem>,
     observed_at: UtcMicros,
     deadline: Deadline,
     wrap: fn(
@@ -39,7 +46,7 @@ pub(super) fn complete_workflow_run_effect(
 ) -> DaemonInvocationResponse {
     let result = match result {
         Ok(result) => result,
-        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+        Err(problem) => return DaemonInvocationResponse::application_problem(request_id, problem),
     };
     let outcome = match work_command_effect(
         registered,
@@ -54,9 +61,9 @@ pub(super) fn complete_workflow_run_effect(
     ) {
         Ok(outcome) => wrap(outcome),
         Err(_) => {
-            return DaemonInvocationResponse::problem(
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::Unavailable,
+                workflow_runtime_unavailable(),
             );
         }
     };
@@ -78,7 +85,7 @@ pub(super) fn complete_workflow_read<T>(
     operation_key: &str,
     use_case: UseCaseId,
     input_digest: ManifestDigest,
-    result: Result<T, DaemonInvocationProblem>,
+    result: Result<T, ApplicationProblem>,
     observed_at: UtcMicros,
     deadline: Deadline,
     wrap: fn(ApplicationOutcome<T>) -> WorkflowApplicationOutcome,
@@ -88,7 +95,7 @@ where
 {
     let result = match result {
         Ok(result) => result,
-        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+        Err(problem) => return DaemonInvocationResponse::application_problem(request_id, problem),
     };
     let outcome = match work_evidence_packet(
         registered,
@@ -103,9 +110,9 @@ where
     ) {
         Ok(evidence) => wrap(ApplicationOutcome::Evidence(evidence)),
         Err(_) => {
-            return DaemonInvocationResponse::problem(
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::Unavailable,
+                workflow_runtime_unavailable(),
             );
         }
     };
@@ -119,9 +126,9 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn execute_journaled_workflow_effect(
+pub(super) async fn execute_journaled_workflow_effect(
     registered: &RegisteredWorkRuntime,
-    authority: &impl WorkflowEffectAuthorityPortV1,
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
@@ -135,9 +142,9 @@ pub(super) fn execute_journaled_workflow_effect(
     let operation = match workflow_effect_operation(operation_key) {
         Some(operation) => operation,
         None => {
-            return DaemonInvocationResponse::problem(
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::InvalidRequest,
+                workflow_invalid_request(),
             );
         }
     };
@@ -151,18 +158,18 @@ pub(super) fn execute_journaled_workflow_effect(
     ) {
         Ok(receipt_context) => receipt_context,
         Err(_) => {
-            return DaemonInvocationResponse::problem(
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::Unavailable,
+                workflow_runtime_unavailable(),
             );
         }
     };
     let receipt_binding_digest = match receipt_context.binding_digest() {
         Ok(digest) => digest,
         Err(_) => {
-            return DaemonInvocationResponse::problem(
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::Unavailable,
+                workflow_runtime_unavailable(),
             );
         }
     };
@@ -176,9 +183,9 @@ pub(super) fn execute_journaled_workflow_effect(
     ) {
         Ok(key) => key,
         Err(_) => {
-            return DaemonInvocationResponse::problem(
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::Unavailable,
+                workflow_runtime_unavailable(),
             );
         }
     };
@@ -195,13 +202,13 @@ pub(super) fn execute_journaled_workflow_effect(
     ) {
         Ok(identity) => identity,
         Err(_) => {
-            return DaemonInvocationResponse::problem(
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::Unavailable,
+                workflow_runtime_unavailable(),
             );
         }
     };
-    let prepared = if identity.deadline().is_elapsed_at(current_micros()) {
+    let prepared = if identity.deadline().is_elapsed_at(now_micros()) {
         WorkflowEffectPreparedV1::problem(
             identity.input_digest().clone(),
             WorkflowEffectProblemV1::TimedOut,
@@ -209,21 +216,40 @@ pub(super) fn execute_journaled_workflow_effect(
     } else {
         prepared
     };
-    let record = match authority.execute_effect(&identity, &prepared, current_micros()) {
+    let record = match services
+        .execute_effect(identity, prepared, now_micros())
+        .await
+    {
         Ok(record) => record,
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
+        Err(WorkflowEffectAuthorityErrorV1::ResetRequired) => {
+            return DaemonInvocationResponse::application_problem(
                 request_id,
-                DaemonInvocationProblem::Unavailable,
+                workflow_reset_required(),
+            );
+        }
+        Err(
+            WorkflowEffectAuthorityErrorV1::IdentityConflict
+            | WorkflowEffectAuthorityErrorV1::InvalidTransition
+            | WorkflowEffectAuthorityErrorV1::Unavailable(_),
+        ) => {
+            return DaemonInvocationResponse::application_problem(
+                request_id,
+                workflow_runtime_unavailable(),
             );
         }
     };
     let Some(terminal) = record.terminal() else {
-        return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            workflow_runtime_unavailable(),
+        );
     };
+    // `execute_effect` has durably published this terminal before returning
+    // it. Wake project recovery even if response translation below fails.
+    registered.durable_write_signal.bump();
     let outcome = match workflow_effect_outcome(terminal) {
         Ok(outcome) => outcome,
-        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+        Err(problem) => return DaemonInvocationResponse::application_problem(request_id, problem),
     };
     DaemonInvocationResponse::with_outcome(
         request_id,
@@ -259,12 +285,9 @@ fn workflow_effect_idempotency_key(
         receipt_binding_digest,
     ))?;
     let suffix =
-        digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "Workflow effect idempotency digest",
-            })?;
+        sha256_hex_suffix(digest.as_str()).ok_or(ApplicationContractError::Inconsistent {
+            field: "Workflow effect idempotency digest",
+        })?;
     IdempotencyKey::new(format!("workflow.{operation_key}.{suffix}"))
 }
 
@@ -294,11 +317,10 @@ fn workflow_effect_receipt_context(
         })?,
     )?;
     let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
-    let suffix = input_digest.as_str().strip_prefix("sha256:").ok_or(
-        ApplicationContractError::Inconsistent {
+    let suffix =
+        sha256_hex_suffix(input_digest.as_str()).ok_or(ApplicationContractError::Inconsistent {
             field: "Work input digest",
-        },
-    )?;
+        })?;
     let expected_state = canonical_sha256(&(
         "tracedecay.work.expected-state.v1",
         operation_key,
@@ -344,46 +366,100 @@ fn workflow_effect_operation(operation_key: &str) -> Option<WorkflowEffectOperat
     }
 }
 
-pub(super) fn workflow_storage_problem(error: &TraceDecayError) -> DaemonInvocationProblem {
+pub(super) fn workflow_storage_problem(error: &TraceDecayError) -> ApplicationProblem {
     match error {
         tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, .. }
             if authority == "workflow" =>
         {
-            DaemonInvocationProblem::ResetRequired
+            workflow_reset_required()
         }
-        _ => DaemonInvocationProblem::Unavailable,
+        _ => workflow_runtime_unavailable(),
     }
 }
 
-pub(super) fn workflow_effect_problem(problem: DaemonInvocationProblem) -> WorkflowEffectProblemV1 {
-    match problem {
-        DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-            WorkflowEffectProblemV1::NotFoundOrNotAuthorized
-        }
-        DaemonInvocationProblem::InvalidRequest
-        | DaemonInvocationProblem::UnsupportedRevision
-        | DaemonInvocationProblem::ResetRequired => WorkflowEffectProblemV1::InvalidRequest,
-        DaemonInvocationProblem::ApplicationContractViolation
-        | DaemonInvocationProblem::Unavailable => WorkflowEffectProblemV1::Conflict,
+/// Journals a refusal decided before the effect ran, or returns the problem
+/// to answer unjournaled when it is not a final answer for this request.
+pub(super) fn prepared_refusal(
+    input_digest: &ManifestDigest,
+    problem: ApplicationProblem,
+) -> Result<WorkflowEffectPreparedV1, ApplicationProblem> {
+    WorkflowEffectProblemV1::refused(problem)
+        .map(|problem| WorkflowEffectPreparedV1::problem(input_digest.clone(), problem))
+}
+
+fn handoff_token_conflict() -> ApplicationProblem {
+    workflow_final_conflict(
+        "workflow.handoff.token_conflict",
+        "another handoff already uses this secret; issue the handoff with a new secret",
+        LegalAction::CorrectRequest,
+    )
+}
+
+fn handoff_replayed() -> ApplicationProblem {
+    workflow_final_conflict(
+        "workflow.handoff.replayed",
+        "this handoff was already redeemed; ask its issuer for a new handoff",
+        LegalAction::Reauthorize,
+    )
+}
+
+fn handoff_expired() -> ApplicationProblem {
+    ApplicationProblem::Stale {
+        diagnostic: SafeDiagnostic {
+            code: "workflow.handoff.expired".to_owned(),
+            message:
+                "this handoff expired before it was redeemed; ask its issuer for a new handoff"
+                    .to_owned(),
+        },
+        retry: RetryDirective::Never,
+        legal_actions: vec![LegalAction::Reauthorize],
+        detail: None,
     }
 }
 
-fn workflow_effect_daemon_problem(problem: WorkflowEffectProblemV1) -> DaemonInvocationProblem {
-    match problem {
-        WorkflowEffectProblemV1::NotFoundOrNotAuthorized => {
-            DaemonInvocationProblem::NotFoundOrNotAuthorized
+/// The typed answer for a journaled refusal. A timed-out effect is not a
+/// refusal: it is answered as an effect whose termination is `timed_out`.
+fn workflow_effect_refusal(problem: &WorkflowEffectProblemV1) -> Option<ApplicationProblem> {
+    Some(match problem {
+        WorkflowEffectProblemV1::Refused(problem) => problem.clone(),
+        WorkflowEffectProblemV1::NotFoundOrNotAuthorized => workflow_not_found(),
+        WorkflowEffectProblemV1::DefinitionContentConflict => {
+            workflow_coordination_problem(WorkflowCoordinationError::ImmutableDefinitionConflict)
         }
-        WorkflowEffectProblemV1::InvalidRequest
-        | WorkflowEffectProblemV1::Conflict
-        | WorkflowEffectProblemV1::TimedOut => DaemonInvocationProblem::InvalidRequest,
-    }
+        WorkflowEffectProblemV1::LifecycleRevisionStale {
+            requested_revision,
+            current_revision,
+        } => ApplicationProblem::from_detail(ApplicationProblemDetailV1::StalePrecondition {
+            field: "expected_revision".to_owned(),
+            requested: *requested_revision,
+            current: *current_revision,
+        }),
+        WorkflowEffectProblemV1::IllegalLifecycleTransition {
+            current_state,
+            current_revision,
+        } => ApplicationProblem::conflict(
+            "workflow.lifecycle.illegal_transition",
+            format!(
+                "the definition disposition is {state} at revision {current_revision}; this lifecycle operation has no transition from {state}",
+                state = current_state.as_str()
+            ),
+        ),
+        WorkflowEffectProblemV1::HandoffTokenConflict => handoff_token_conflict(),
+        WorkflowEffectProblemV1::HandoffReplayed => handoff_replayed(),
+        WorkflowEffectProblemV1::HandoffExpired => handoff_expired(),
+        WorkflowEffectProblemV1::TimedOut => return None,
+    })
 }
 
 fn workflow_effect_outcome(
     terminal: &WorkflowEffectTerminalV1,
-) -> Result<WorkflowApplicationOutcome, DaemonInvocationProblem> {
+) -> Result<WorkflowApplicationOutcome, ApplicationProblem> {
+    let unavailable = |_| workflow_runtime_unavailable();
     match terminal.outcome() {
-        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::TimedOut) => {
+        WorkflowEffectOutcomeV1::Problem(problem) => {
+            if let Some(problem) = workflow_effect_refusal(problem) {
+                return Err(problem);
+            }
             let termination = EffectTermination::TimedOut;
             match terminal.identity().operation() {
                 WorkflowEffectOperationV1::RegisterDefinition => work_effect::<
@@ -392,35 +468,34 @@ fn workflow_effect_outcome(
                     terminal, None, termination
                 )
                 .map(WorkflowApplicationOutcome::RegisterDefinition)
-                .map_err(|_| DaemonInvocationProblem::Unavailable),
+                .map_err(unavailable),
                 WorkflowEffectOperationV1::ActivateDefinition => {
                     work_effect::<WorkflowDefinitionDisposition>(terminal, None, termination)
                         .map(WorkflowApplicationOutcome::ActivateDefinition)
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                        .map_err(unavailable)
                 }
                 WorkflowEffectOperationV1::RetireDefinition => {
                     work_effect::<WorkflowDefinitionDisposition>(terminal, None, termination)
                         .map(WorkflowApplicationOutcome::RetireDefinition)
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                        .map_err(unavailable)
                 }
                 WorkflowEffectOperationV1::RejectDefinition => {
                     work_effect::<WorkflowDefinitionDisposition>(terminal, None, termination)
                         .map(WorkflowApplicationOutcome::RejectDefinition)
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                        .map_err(unavailable)
                 }
                 WorkflowEffectOperationV1::HandoffIssue => {
                     work_effect::<TaskHandoffGrant>(terminal, None, termination)
                         .map(WorkflowApplicationOutcome::HandoffIssue)
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                        .map_err(unavailable)
                 }
                 WorkflowEffectOperationV1::HandoffRedeem => {
                     work_effect::<TaskHandoffRedeemed>(terminal, None, termination)
                         .map(WorkflowApplicationOutcome::HandoffRedeem)
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                        .map_err(unavailable)
                 }
             }
         }
-        WorkflowEffectOutcomeV1::Problem(problem) => Err(workflow_effect_daemon_problem(*problem)),
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(result)) => {
             work_effect(
                 terminal,
@@ -428,7 +503,7 @@ fn workflow_effect_outcome(
                 EffectTermination::Completed,
             )
             .map(WorkflowApplicationOutcome::RegisterDefinition)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
+            .map_err(unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionActivated(result)) => {
             work_effect(
@@ -437,7 +512,7 @@ fn workflow_effect_outcome(
                 EffectTermination::Completed,
             )
             .map(WorkflowApplicationOutcome::ActivateDefinition)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
+            .map_err(unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRetired(result)) => {
             work_effect(
@@ -446,7 +521,7 @@ fn workflow_effect_outcome(
                 EffectTermination::Completed,
             )
             .map(WorkflowApplicationOutcome::RetireDefinition)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
+            .map_err(unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRejected(result)) => {
             work_effect(
@@ -455,7 +530,7 @@ fn workflow_effect_outcome(
                 EffectTermination::Completed,
             )
             .map(WorkflowApplicationOutcome::RejectDefinition)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
+            .map_err(unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(result)) => {
             work_effect(
@@ -464,7 +539,7 @@ fn workflow_effect_outcome(
                 EffectTermination::Completed,
             )
             .map(WorkflowApplicationOutcome::HandoffIssue)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
+            .map_err(unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(result)) => {
             work_effect(
@@ -473,24 +548,38 @@ fn workflow_effect_outcome(
                 EffectTermination::Completed,
             )
             .map(WorkflowApplicationOutcome::HandoffRedeem)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
+            .map_err(unavailable)
         }
     }
 }
 
-pub(super) fn task_handoff_problem(error: TaskHandoffError) -> DaemonInvocationProblem {
+/// Handoff denial shares the concealed not-found answer with absence, so a
+/// probe cannot learn whether a scope exists for another actor.
+pub(super) fn task_handoff_refusal(error: TaskHandoffError) -> ApplicationProblem {
+    let invalid = ApplicationProblem::invalid_request;
     match error {
-        TaskHandoffError::AuthorityUnavailable(_) => DaemonInvocationProblem::Unavailable,
-        TaskHandoffError::Missing | TaskHandoffError::ScopeMismatch => {
-            DaemonInvocationProblem::NotFoundOrNotAuthorized
-        }
-        TaskHandoffError::InvalidToken
-        | TaskHandoffError::InvalidScope
-        | TaskHandoffError::InvalidFrontier
-        | TaskHandoffError::Unauthorized
-        | TaskHandoffError::InvalidExpiry
-        | TaskHandoffError::Conflict
-        | TaskHandoffError::Expired
-        | TaskHandoffError::Replay => DaemonInvocationProblem::InvalidRequest,
+        TaskHandoffError::AuthorityUnavailable(_) => workflow_runtime_unavailable(),
+        TaskHandoffError::Missing
+        | TaskHandoffError::ScopeMismatch
+        | TaskHandoffError::Unauthorized => workflow_not_found(),
+        TaskHandoffError::InvalidToken => invalid(
+            "workflow.handoff.invalid_secret",
+            "secret is not a valid handoff bearer secret",
+        ),
+        TaskHandoffError::InvalidScope => invalid(
+            "workflow.handoff.invalid_scope",
+            "scope failed structural validation",
+        ),
+        TaskHandoffError::InvalidFrontier => invalid(
+            "workflow.handoff.invalid_frontier",
+            "frontier must name the scope's task_id and be issued by its from_actor_id",
+        ),
+        TaskHandoffError::InvalidExpiry => invalid(
+            "workflow.handoff.invalid_expiry",
+            "handoff lifetime could not be derived from the issue time",
+        ),
+        TaskHandoffError::Conflict => handoff_token_conflict(),
+        TaskHandoffError::Expired => handoff_expired(),
+        TaskHandoffError::Replay => handoff_replayed(),
     }
 }

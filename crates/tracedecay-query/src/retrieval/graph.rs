@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::retrieval::{MAX_APPLICATION_PAGE_SIZE, MAX_CALLABLE_CODE_DEPTH};
+use tracedecay_contracts::retrieval::{MAX_APPLICATION_PAGE_SIZE, MAX_CALLABLE_CODE_DEPTH};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, CursorPayloadDigest, EdgeAuthorityV1, RelationEdgeKindV1,
     RetrievalBudget, RetrievalFailure, RetrievalRequest, RetrieverBatch, RetrieverContinuation,
@@ -21,33 +21,13 @@ use tracedecay_domain::{
 
 use super::ports::{
     CodeCandidateBindingV1, GraphEvidenceReadPort, LaneBoundEvidence, LaneEvidenceRejections,
-    RetrievalPortError, checkpoint_digest, contract_error, lane_bound_evidence, lane_candidate_cap,
+    RetrievalExecutionControl, RetrievalPortError, checkpoint_digest, contract_error,
+    lane_bound_evidence, lane_candidate_cap,
 };
 
 mod projection;
 
-pub use self::projection::production_code_index_freshness;
-
-/// Live request authority consulted throughout one graph traversal.
-pub trait GraphExecutionControl: Send + Sync {
-    fn is_cancelled(&self) -> bool;
-    /// Monotonic elapsed time in the request-relative domain used by
-    /// [`RetrievalBudget::deadline_micros`].
-    fn elapsed_micros(&self) -> u64;
-}
-
-impl<T> GraphExecutionControl for T
-where
-    T: super::semantic::SemanticExecutionControl + Send + Sync + ?Sized,
-{
-    fn is_cancelled(&self) -> bool {
-        super::semantic::SemanticExecutionControl::is_cancelled(self)
-    }
-
-    fn elapsed_micros(&self) -> u64 {
-        super::semantic::SemanticExecutionControl::elapsed_micros(self)
-    }
-}
+pub use self::projection::{graph_read_cancellation, production_code_index_freshness};
 
 /// Wording the graph lane uses when a port-emitted batch fails the shared
 /// candidate/evidence binding checks.
@@ -250,16 +230,6 @@ impl GraphLaneEvidence {
     }
 }
 
-/// Graph-lane retriever contract over generation-matched evidence.
-pub trait GraphLaneRetriever {
-    /// Retrieve the committed graph candidate prefix for `request`.
-    fn retrieve_graph(
-        &self,
-        request: &GraphLaneRequest,
-        control: Arc<dyn GraphExecutionControl>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
-}
-
 /// Adapter over one read-only, generation-bound graph evidence port.
 /// It validates path identity and authority, commits a deterministic compact
 /// candidate prefix, and never owns graph traversal storage.
@@ -278,12 +248,12 @@ impl<P> GraphLane<P>
 where
     P: GraphEvidenceReadPort,
 {
-    #[hotpath::measure(label = "query.graph.enforce")]
+    #[tracing::instrument(name = "query.graph.enforce", level = "trace", skip_all)]
     fn enforce_batch(
         &self,
         request: &GraphLaneRequest,
         batch: &RetrieverBatch<GraphLaneEvidence>,
-        control: &dyn GraphExecutionControl,
+        control: &dyn RetrievalExecutionControl,
     ) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
         if batch.coverage.eligible < batch.candidates.len() as u64 {
             return Err(RetrievalPortError::Contract(
@@ -351,17 +321,13 @@ where
         check_graph_control(request, control)?;
         Ok(rebuilt)
     }
-}
 
-impl<P> GraphLaneRetriever for GraphLane<P>
-where
-    P: GraphEvidenceReadPort,
-{
-    #[hotpath::measure(label = "query.lane.graph")]
-    fn retrieve_graph(
+    /// Retrieve the committed graph candidate prefix for `request`.
+    #[tracing::instrument(name = "query.lane.graph", level = "trace", skip_all)]
+    pub fn retrieve_graph(
         &self,
         request: &GraphLaneRequest,
-        control: Arc<dyn GraphExecutionControl>,
+        control: Arc<dyn RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
         let outcome = match self
@@ -375,7 +341,6 @@ where
                 ));
             }
             Err(RetrievalPortError::Cancelled) => {
-                hotpath::gauge!("query.cancel.count").inc(1u32);
                 return Ok(RetrieverOutcome::Cancelled);
             }
             Err(error) => return Err(error),
@@ -390,13 +355,7 @@ where
             },
             outcome => outcome,
         };
-        crate::hotpath_metrics::record_lane(
-            "query.lane.graph.candidates",
-            "query.lane.graph.examined",
-            "query.lane.graph.results",
-            "query.lane.graph.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.graph.residency", &outcome);
         Ok(outcome)
     }
 }
@@ -411,19 +370,19 @@ fn compare_graph_candidates(
         .cmp(&left.0.raw_score)
         .then_with(|| {
             left.0
-                .source_occurrence_id
-                .cmp(&right.0.source_occurrence_id)
+                .retriever_evidence_anchor
+                .cmp(&right.0.retriever_evidence_anchor)
         })
         .then_with(|| {
             left.0
-                .retriever_evidence_anchor
-                .cmp(&right.0.retriever_evidence_anchor)
+                .source_occurrence_id
+                .cmp(&right.0.source_occurrence_id)
         })
 }
 
 fn check_graph_control(
     request: &GraphLaneRequest,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> Result<(), RetrievalPortError> {
     if control.is_cancelled() {
         return Err(RetrievalPortError::Cancelled);
@@ -442,7 +401,7 @@ fn graph_checkpoint_digest(
     request: &GraphLaneRequest,
     candidates: &[CompactCandidate],
     evidence_by_occurrence: &BTreeMap<SourceOccurrenceId, GraphLaneEvidence>,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> Result<CursorPayloadDigest, RetrievalPortError> {
     let mut prefix = Vec::with_capacity(candidates.len());
     for candidate in candidates {

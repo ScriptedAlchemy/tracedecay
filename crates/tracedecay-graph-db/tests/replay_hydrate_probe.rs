@@ -19,7 +19,7 @@
 //! # Why this measures phases and not one inline round trip
 //!
 //! `MAX_GRAPH_REPLAY_SOURCE_BYTES_V1` is 4 MiB, so a corpus-scale generation
-//! cannot travel as an inline replay payload at all — `relational_replay`
+//! cannot travel as an inline replay payload at all, `relational_replay`
 //! refuses it. Production hydrates a corpus through the *sealed* provider
 //! instead: `from_replay` decodes a small pointer, hands off to
 //! `hydrate_sealed_code_generation`, and then runs two corpus-scale sweeps of
@@ -27,10 +27,10 @@
 //! prices, because they are what is left of `replay.hydrate` once the sealed
 //! decode underneath it is accounted for separately:
 //!
-//! * `manifest new` — `checked_sorted_entities` / `checked_sorted_relations`
+//! * `manifest new`, `checked_sorted_entities` / `checked_sorted_relations`
 //!   plus the `validate_checked` per-row sweep. The sealed provider pays this
 //!   building the manifest it returns.
-//! * `recovered digest` — `recovered_generation_digest`: a canonical re-encode
+//! * `recovered digest`, `recovered_generation_digest`: a canonical re-encode
 //!   of every entity and relation frame, absorbed into one SHA-256. Measured
 //!   on a cold instance so no memo can serve it.
 //!

@@ -1,9 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use tracedecay_semantic_contracts::{
-    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
-};
 
 /// Any component exercises the registry the same way, so this test-only marker
 /// keeps generic registry checks independent of a production capability slot.
@@ -21,62 +18,50 @@ fn root(name: &str) -> PathBuf {
     PathBuf::from("/projects").join(name)
 }
 
-fn reservation_for<C>() -> ProjectRuntimeReservation
-where
+async fn wait_for_registration_build_waiters<C>(
+    registry: &ProjectRuntimeRegistryV1,
+    project: &Path,
+    expected: usize,
+) where
     C: ProjectRuntimeComponent,
 {
-    let mut reservation = ProjectRuntimeReservation::default();
-    reservation.reserve::<C>();
-    reservation
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let waiters = registry
+                .lock_runtimes()
+                .get(project)
+                .and_then(|runtime| runtime.registration_builds.get(&TypeId::of::<C>()))
+                .map_or(0, |reservation| reservation.outcome.receiver_count());
+            if waiters >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("concurrent registrations must park on the build reservation");
 }
 
-fn two_component_reservation() -> ProjectRuntimeReservation {
-    let mut reservation = reservation_for::<TestFirst>();
-    reservation.reserve::<TestSecond>();
-    reservation
-}
-
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 enum TestReconcileError {
+    #[error("registry closed")]
     RegistryClosed,
+    #[error("{0}")]
     Provider(&'static str),
+    #[error("concurrent build failed: {detail}")]
+    ConcurrentBuildFailed { detail: String },
 }
 
 impl From<ProjectRuntimeRegistryError> for TestReconcileError {
-    fn from(_: ProjectRuntimeRegistryError) -> Self {
-        Self::RegistryClosed
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        match error {
+            ProjectRuntimeRegistryError::AlreadyRegistered
+            | ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
+            ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail } => {
+                Self::ConcurrentBuildFailed { detail }
+            }
+        }
     }
-}
-
-#[test]
-fn a_publication_cannot_stage_a_component_outside_its_reservation() {
-    let mut publication = ProjectRuntimePublication::new(reservation_for::<TestFirst>());
-
-    assert_eq!(
-        publication.stage(TestSecond(2)),
-        Err(ProjectRuntimeAlreadyRegistered),
-        "the reservation is the structural source of preflight coverage"
-    );
-}
-
-#[test]
-fn omitted_publish_slot_panics_before_mutating_the_incumbent() {
-    let mut reservation = reservation_for::<TestFirst>();
-    reservation.reserve::<TestOmitted>();
-    let mut publication = ProjectRuntimePublication::new(reservation);
-    publication.stage(TestFirst(1)).unwrap();
-    publication.stage(TestOmitted(1)).unwrap();
-    let mut incumbent = ProjectRuntime::default();
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        publication.commit_into(&mut incumbent)
-    }));
-
-    assert!(result.is_err(), "an omitted publish slot must panic");
-    assert_eq!(
-        incumbent.test_first, None,
-        "validation must finish before any staged component becomes visible"
-    );
 }
 
 #[tokio::test]
@@ -103,328 +88,14 @@ async fn a_second_registration_is_refused_and_leaves_the_incumbent_live() {
 }
 
 #[tokio::test]
-async fn publishing_replaces_the_incumbent() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    let project = root("alpha");
-
-    registry
-        .publish(project.clone(), component(1))
-        .await
-        .unwrap();
-    registry
-        .publish(project.clone(), component(2))
-        .await
-        .unwrap();
-
-    assert_eq!(
-        registry
-            .get::<Component>(&project)
-            .await
-            .as_ref()
-            .and_then(mark),
-        Some(2)
-    );
-}
-
-#[tokio::test]
-async fn atomic_publication_rejects_a_conflicting_bundle_without_a_partial_commit() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    let project = root("alpha");
-
-    let published: Result<(), ProjectRuntimeRegistryError> = registry
-        .publish_atomically_after_preflight(
-            project.clone(),
-            reservation_for::<TestFirst>(),
-            |mut publication| async move {
-                publication.stage(TestFirst(1))?;
-                Ok((publication, ()))
-            },
-        )
-        .await;
-    published.unwrap();
-
-    let conflicting: Result<(), ProjectRuntimeRegistryError> = registry
-        .publish_atomically_after_preflight(
-            project.clone(),
-            two_component_reservation(),
-            |mut publication| async move {
-                publication.stage(TestFirst(2))?;
-                publication.stage(TestSecond(2))?;
-                Ok((publication, ()))
-            },
-        )
-        .await;
-    assert_eq!(
-        conflicting,
-        Err(ProjectRuntimeRegistryError::AlreadyRegistered),
-        "a collision in one staged component must reject the whole publication"
-    );
-    assert_eq!(
-        registry.get::<TestFirst>(&project).await,
-        Some(TestFirst(1)),
-        "the incumbent component must remain live"
-    );
-    assert!(
-        registry.get::<TestSecond>(&project).await.is_none(),
-        "a non-conflicting component must not leak from a rejected bundle"
-    );
-}
-
-#[tokio::test]
-async fn racing_atomic_publications_leave_one_complete_bundle() {
-    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
-    let project = root("alpha");
-    let barrier = Arc::new(tokio::sync::Barrier::new(3));
-    let mut attempts = tokio::task::JoinSet::new();
-
-    for mark in [1, 2] {
-        let registry = Arc::clone(&registry);
-        let project = project.clone();
-        let barrier = Arc::clone(&barrier);
-        attempts.spawn(async move {
-            barrier.wait().await;
-            let result: Result<(), ProjectRuntimeRegistryError> = registry
-                .publish_atomically_after_preflight(
-                    project,
-                    two_component_reservation(),
-                    move |mut publication| async move {
-                        publication.stage(TestFirst(mark))?;
-                        publication.stage(TestSecond(mark))?;
-                        Ok((publication, ()))
-                    },
-                )
-                .await;
-            result
-        });
-    }
-
-    barrier.wait().await;
-    let mut successful = 0;
-    while let Some(result) = attempts.join_next().await {
-        if result.unwrap().is_ok() {
-            successful += 1;
-        }
-    }
-
-    assert_eq!(successful, 1, "exactly one racing bundle may publish");
-    let first = registry.get::<TestFirst>(&project).await.unwrap();
-    let second = registry.get::<TestSecond>(&project).await.unwrap();
-    assert_eq!(
-        first.0, second.0,
-        "readers must see components from one publication, never a mixed runtime"
-    );
-}
-
-#[tokio::test]
-async fn synchronized_reader_never_observes_a_partial_publication() {
-    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
-    let project = root("observed");
-    let samples = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let publisher_registry = Arc::clone(&registry);
-    let publisher_project = project.clone();
-    let (build_started, build_is_started) = tokio::sync::oneshot::channel();
-    let (continue_build, build_may_continue) = tokio::sync::oneshot::channel();
-    let publisher = tokio::spawn(async move {
-        let result: Result<(), ProjectRuntimeRegistryError> = publisher_registry
-            .publish_atomically_after_preflight(
-                publisher_project,
-                two_component_reservation(),
-                move |mut publication| async move {
-                    build_started.send(()).expect("build-start receiver");
-                    build_may_continue.await.expect("continue-build sender");
-                    publication.stage(TestFirst(7))?;
-                    publication.stage(TestSecond(7))?;
-                    Ok((publication, ()))
-                },
-            )
-            .await;
-        result
-    });
-    build_is_started.await.expect("publication build started");
-
-    tokio::time::timeout(
-        std::time::Duration::from_millis(250),
-        registry.request_runtimes(Some(&project), None),
-    )
-    .await
-    .expect("request dispatch must not stall while publication builds");
-
-    let observer_registry = Arc::clone(&registry);
-    let observer_project = project.clone();
-    let observer_samples = Arc::clone(&samples);
-    let (observer_sampled, observer_has_sampled) = tokio::sync::oneshot::channel();
-    let observer = tokio::spawn(async move {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async move {
-            let mut observer_sampled = Some(observer_sampled);
-            loop {
-                let sample = {
-                    let runtimes = observer_registry.lock_runtimes();
-                    let runtime = runtimes.get(&observer_project);
-                    (
-                        runtime.and_then(|runtime| runtime.test_first.map(|value| value.0)),
-                        runtime.and_then(|runtime| runtime.test_second.map(|value| value.0)),
-                    )
-                };
-                observer_samples
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(sample);
-                if let Some(sampled) = observer_sampled.take() {
-                    sampled.send(()).expect("observer sample receiver");
-                }
-                if sample.0.is_some() && sample.1.is_some() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("observer must reach the complete publication");
-    });
-    observer_has_sampled
-        .await
-        .expect("observer sampled during build");
-    continue_build.send(()).expect("publication build receiver");
-
-    tokio::time::timeout(std::time::Duration::from_secs(2), publisher)
-        .await
-        .expect("publisher must not deadlock at commit")
-        .expect("publisher task")
-        .expect("atomic publication");
-    tokio::time::timeout(std::time::Duration::from_secs(2), observer)
-        .await
-        .expect("observer must finish after publication")
-        .expect("observer task");
-
-    let samples = samples
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!(
-        samples.len() >= 2,
-        "the synchronized observer must sample before and after publication"
-    );
-    assert_eq!(samples.first(), Some(&(None, None)));
-    assert_eq!(samples.last(), Some(&(Some(7), Some(7))));
-    assert!(
-        samples
-            .iter()
-            .all(|sample| matches!(sample, (None, None) | (Some(7), Some(7)))),
-        "a reader observed an intermediate runtime state: {samples:?}"
-    );
-}
-
-#[tokio::test]
-async fn conflicting_preflight_never_starts_the_publication_builder() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    let project = root("alpha");
-    registry
-        .publish(project.clone(), TestFirst(1))
-        .await
-        .unwrap();
-    let builds = AtomicUsize::new(0);
-
-    let result: Result<(), ProjectRuntimeRegistryError> = registry
-        .publish_atomically_after_preflight(
-            project.clone(),
-            two_component_reservation(),
-            |mut publication| async {
-                builds.fetch_add(1, Ordering::SeqCst);
-                publication.stage(TestSecond(2))?;
-                Ok((publication, ()))
-            },
-        )
-        .await;
-
-    assert_eq!(result, Err(ProjectRuntimeRegistryError::AlreadyRegistered));
-    assert_eq!(
-        builds.load(Ordering::SeqCst),
-        0,
-        "a rejected publication must not start side-effectful construction"
-    );
-    assert!(
-        registry.get::<TestSecond>(&project).await.is_none(),
-        "a rejected builder must not publish any staged component"
-    );
-}
-
-#[tokio::test]
-async fn failed_commit_drops_every_prepared_component_without_publication() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    let project = root("rollback");
-    let spy = Arc::new(TestLifecycleSpy::default());
-    let mut reservation = two_component_reservation();
-    reservation.reserve::<RecordingComponent<1>>();
-    reservation.reserve::<RecordingComponent<2>>();
-
-    let result: Result<(), ProjectRuntimeRegistryError> = registry
-        .publish_atomically_after_preflight(project.clone(), reservation, |mut publication| {
-            let spy = Arc::clone(&spy);
-            async move {
-                publication.record_lifecycle_with(Arc::clone(&spy));
-                publication.stage(TestFirst(2))?;
-
-                let first = RecordingComponent::<1>::new(2, Arc::clone(&spy));
-                publication.stage(first)?;
-                spy.record(TestLifecycleEvent::Stage(1));
-
-                let second = RecordingComponent::<2>::new(2, Arc::clone(&spy));
-                publication.stage(second)?;
-                spy.record(TestLifecycleEvent::Stage(2));
-                Ok((publication, ()))
-            }
-        })
-        .await;
-
-    assert_eq!(result, Err(ProjectRuntimeRegistryError::AlreadyRegistered));
-    assert!(
-        registry.get::<TestFirst>(&project).await.is_none(),
-        "an incomplete prepared bundle must not publish its staged component"
-    );
-    assert!(
-        !registry.holds::<RecordingComponent<1>>(&project).await,
-        "the first prepared component must never become visible"
-    );
-    assert!(
-        !registry.holds::<RecordingComponent<2>>(&project).await,
-        "the second prepared component must never become visible"
-    );
-    assert_eq!(
-        spy.live.load(Ordering::SeqCst),
-        0,
-        "every prepared resource must be dropped after rollback"
-    );
-    let events = spy.events();
-    assert_eq!(
-        &events[..5],
-        &[
-            TestLifecycleEvent::Construct { slot: 1, mark: 2 },
-            TestLifecycleEvent::Stage(1),
-            TestLifecycleEvent::Construct { slot: 2, mark: 2 },
-            TestLifecycleEvent::Stage(2),
-            TestLifecycleEvent::Publish,
-        ],
-        "construction and staging must complete before the real commit attempt"
-    );
-    assert_eq!(events.len(), 7, "both staged resources must be dropped");
-    assert!(events[5..].contains(&TestLifecycleEvent::Drop { slot: 1, mark: 2 }));
-    assert!(events[5..].contains(&TestLifecycleEvent::Drop { slot: 2, mark: 2 }));
-    assert!(
-        !registry.lock_runtimes().contains_key(&project),
-        "rollback must remove the reservation-only project entry"
-    );
-}
-
-#[tokio::test]
 async fn failed_publication_builder_leaves_no_empty_project_entry() {
     let registry = ProjectRuntimeRegistryV1::default();
     let project = root("failed");
 
     let result: Result<(), ProjectRuntimeRegistryError> = registry
-        .publish_atomically_after_preflight(
-            project.clone(),
-            reservation_for::<TestFirst>(),
-            |_| async { Err(ProjectRuntimeRegistryError::AlreadyRegistered) },
-        )
+        .publish_feedback_atomically(project.clone(), || async {
+            Err(ProjectRuntimeRegistryError::AlreadyRegistered)
+        })
         .await;
 
     assert_eq!(result, Err(ProjectRuntimeRegistryError::AlreadyRegistered));
@@ -444,14 +115,10 @@ async fn cancelled_publication_releases_its_slot_reservation() {
 
     let publisher = tokio::spawn(async move {
         let result: Result<(), ProjectRuntimeRegistryError> = publisher_registry
-            .publish_atomically_after_preflight(
-                publisher_project,
-                reservation_for::<TestFirst>(),
-                move |_| async move {
-                    build_started.send(()).expect("build-start receiver");
-                    std::future::pending().await
-                },
-            )
+            .publish_feedback_atomically(publisher_project, move || async move {
+                build_started.send(()).expect("build-start receiver");
+                std::future::pending().await
+            })
             .await;
         result
     });
@@ -462,7 +129,13 @@ async fn cancelled_publication_releases_its_slot_reservation() {
     let (writer_started, writer_is_started) = tokio::sync::oneshot::channel();
     let mut writer = tokio::spawn(async move {
         writer_started.send(()).expect("writer-start receiver");
-        writer_registry.register(writer_project, TestFirst(1)).await
+        writer_registry
+            .register_or_reconcile::<RegisteredCallableCodeRuntime, ProjectRuntimeRegistryError, _, _, _>(
+                writer_project,
+                |_| Ok(()),
+                || async { Err(ProjectRuntimeRegistryError::AlreadyRegistered) },
+            )
+            .await
     });
     writer_is_started.await.expect("blocked writer started");
     assert!(
@@ -479,10 +152,10 @@ async fn cancelled_publication_releases_its_slot_reservation() {
         .await
         .expect("cancelled reservation cleanup must wake a blocked writer")
         .expect("writer task")
-        .expect("the released slot must accept the next registration");
-    assert_eq!(
-        registry.get::<TestFirst>(&project).await,
-        Some(TestFirst(1))
+        .expect_err("the released slot must reach its refusing builder");
+    assert!(
+        registry.is_empty(),
+        "failed builders must release every reservation"
     );
 }
 
@@ -497,15 +170,11 @@ async fn failed_builder_releases_and_wakes_a_blocked_writer() {
 
     let publisher = tokio::spawn(async move {
         let result: Result<(), ProjectRuntimeRegistryError> = publisher_registry
-            .publish_atomically_after_preflight(
-                publisher_project,
-                reservation_for::<TestFirst>(),
-                move |_| async move {
-                    build_started.send(()).expect("build-start receiver");
-                    build_must_fail.await.expect("fail-build sender");
-                    Err(ProjectRuntimeRegistryError::AlreadyRegistered)
-                },
-            )
+            .publish_feedback_atomically(publisher_project, move || async move {
+                build_started.send(()).expect("build-start receiver");
+                build_must_fail.await.expect("fail-build sender");
+                Err(ProjectRuntimeRegistryError::AlreadyRegistered)
+            })
             .await;
         result
     });
@@ -516,7 +185,13 @@ async fn failed_builder_releases_and_wakes_a_blocked_writer() {
     let (writer_started, writer_is_started) = tokio::sync::oneshot::channel();
     let mut writer = tokio::spawn(async move {
         writer_started.send(()).expect("writer-start receiver");
-        writer_registry.register(writer_project, TestFirst(1)).await
+        writer_registry
+            .register_or_reconcile::<RegisteredCallableCodeRuntime, ProjectRuntimeRegistryError, _, _, _>(
+                writer_project,
+                |_| Ok(()),
+                || async { Err(ProjectRuntimeRegistryError::AlreadyRegistered) },
+            )
+            .await
     });
     writer_is_started.await.expect("blocked writer started");
     assert!(
@@ -535,10 +210,10 @@ async fn failed_builder_releases_and_wakes_a_blocked_writer() {
         .await
         .expect("failed builder cleanup must wake a blocked writer")
         .expect("writer task")
-        .expect("the released slot must accept the next registration");
-    assert_eq!(
-        registry.get::<TestFirst>(&project).await,
-        Some(TestFirst(1))
+        .expect_err("the released slot must reach its refusing builder");
+    assert!(
+        registry.is_empty(),
+        "failed builders must release every reservation"
     );
 }
 
@@ -570,17 +245,17 @@ async fn one_project_s_components_are_not_another_s() {
 #[tokio::test]
 async fn a_sole_component_is_only_answered_while_exactly_one_project_holds_it() {
     let registry = ProjectRuntimeRegistryV1::default();
-    assert!(registry.sole::<Component>().await.is_none(), "none held");
+    assert!(registry.sole::<Component>().is_none(), "none held");
 
     registry.publish(root("alpha"), component(1)).await.unwrap();
     assert_eq!(
-        registry.sole::<Component>().await.as_ref().and_then(mark),
+        registry.sole::<Component>().as_ref().and_then(mark),
         Some(1)
     );
 
     registry.publish(root("beta"), component(2)).await.unwrap();
     assert!(
-        registry.sole::<Component>().await.is_none(),
+        registry.sole::<Component>().is_none(),
         "answering while two projects hold one would attach a request to \
          whichever project sorted first"
     );
@@ -597,10 +272,10 @@ async fn reconciling_an_occupied_slot_never_builds_a_replacement() {
     let builds = AtomicUsize::new(0);
 
     let accepted = registry
-        .register_or_reconcile::<Component, TestReconcileError, _, _>(
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || {
+            || async {
                 builds.fetch_add(1, Ordering::SeqCst);
                 Ok(component(2))
             },
@@ -630,10 +305,10 @@ async fn reconciling_an_empty_slot_builds_once_and_keeps_the_build_error() {
     let project = root("alpha");
 
     let failed = registry
-        .register_or_reconcile::<Component, TestReconcileError, _, _>(
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || {
+            || async {
                 Err(TestReconcileError::Provider(
                     "the provider runtime would not open",
                 ))
@@ -652,10 +327,10 @@ async fn reconciling_an_empty_slot_builds_once_and_keeps_the_build_error() {
     );
 
     let built = registry
-        .register_or_reconcile::<Component, TestReconcileError, _, _>(
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || Ok(component(1)),
+            || async { Ok(component(1)) },
         )
         .await;
     assert_eq!(built, Ok(()));
@@ -669,6 +344,276 @@ async fn reconciling_an_empty_slot_builds_once_and_keeps_the_build_error() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stalled_registration_build_does_not_block_an_established_project() {
+    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
+    let building = root("building");
+    let established = root("established");
+    registry
+        .publish(established.clone(), TestFirst(7))
+        .await
+        .expect("established project publication");
+    let (build_started, build_is_started) = tokio::sync::oneshot::channel();
+    let (continue_build, build_may_continue) = tokio::sync::oneshot::channel();
+    let building_registry = Arc::clone(&registry);
+    let registration = tokio::spawn(async move {
+        building_registry
+            .register_or_reconcile::<TestFirst, ProjectRuntimeRegistryError, _, _, _>(
+                building,
+                |_| Ok(()),
+                move || async move {
+                    build_started.send(()).expect("build-start receiver");
+                    build_may_continue.await.expect("continue-build sender");
+                    Ok(TestFirst(1))
+                },
+            )
+            .await
+    });
+    build_is_started
+        .await
+        .expect("registration builder started");
+
+    let reading_registry = Arc::clone(&registry);
+    let mut read = tokio::spawn(async move {
+        reading_registry.read_now::<TestFirst, _, _>(&established, |value| value.0)
+    });
+    let completed_while_building =
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut read)
+            .await
+            .ok();
+
+    continue_build
+        .send(())
+        .expect("registration builder receiver");
+    registration
+        .await
+        .expect("registration task")
+        .expect("registration result");
+    let read_completed_while_building = completed_while_building.is_some();
+    let read = match completed_while_building {
+        Some(read) => read,
+        None => read.await,
+    }
+    .expect("established-project read task");
+    assert_eq!(read, Some(7));
+    assert!(
+        read_completed_while_building,
+        "an unrelated established-project read must complete while another project's builder is stalled"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_failed_registrations_build_only_once() {
+    const REGISTRATIONS: usize = 8;
+
+    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
+    let project = root("failed-wave");
+    let builds = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(tokio::sync::Barrier::new(REGISTRATIONS + 1));
+    let release_build = Arc::new(tokio::sync::Notify::new());
+    let (build_started, build_is_started) = tokio::sync::oneshot::channel();
+    let build_started = Arc::new(std::sync::Mutex::new(Some(build_started)));
+    let mut registrations = tokio::task::JoinSet::new();
+    for _ in 0..REGISTRATIONS {
+        let registry = Arc::clone(&registry);
+        let project = project.clone();
+        let builds = Arc::clone(&builds);
+        let barrier = Arc::clone(&barrier);
+        let release_build = Arc::clone(&release_build);
+        let build_started = Arc::clone(&build_started);
+        registrations.spawn(async move {
+            barrier.wait().await;
+            registry
+                .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+                    project,
+                    |_| Ok(()),
+                    || async move {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        if let Some(started) = build_started
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            started.send(()).expect("build-start receiver");
+                        }
+                        release_build.notified().await;
+                        Err(TestReconcileError::Provider("fixture build failed"))
+                    },
+                )
+                .await
+        });
+    }
+    barrier.wait().await;
+    build_is_started.await.expect("one builder started");
+    wait_for_registration_build_waiters::<Component>(
+        registry.as_ref(),
+        &project,
+        REGISTRATIONS - 1,
+    )
+    .await;
+    release_build.notify_one();
+
+    let mut original_failures = 0;
+    let mut concurrent_failures = 0;
+    while let Some(result) = registrations.join_next().await {
+        match result.expect("registration task") {
+            Err(TestReconcileError::Provider("fixture build failed")) => {
+                original_failures += 1;
+            }
+            Err(TestReconcileError::ConcurrentBuildFailed { detail }) => {
+                assert_eq!(detail, "fixture build failed");
+                concurrent_failures += 1;
+            }
+            result => panic!("unexpected registration outcome: {result:?}"),
+        }
+    }
+    assert_eq!(original_failures, 1);
+    assert_eq!(concurrent_failures, REGISTRATIONS - 1);
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "one failed build outcome must be handed to the whole concurrent wave"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_successful_registrations_build_only_once() {
+    const REGISTRATIONS: usize = 8;
+
+    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
+    let project = root("successful-wave");
+    let builds = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(tokio::sync::Barrier::new(REGISTRATIONS + 1));
+    let release_build = Arc::new(tokio::sync::Notify::new());
+    let mut registrations = tokio::task::JoinSet::new();
+    for _ in 0..REGISTRATIONS {
+        let registry = Arc::clone(&registry);
+        let project = project.clone();
+        let builds = Arc::clone(&builds);
+        let barrier = Arc::clone(&barrier);
+        let release_build = Arc::clone(&release_build);
+        registrations.spawn(async move {
+            barrier.wait().await;
+            registry
+                .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+                    project,
+                    |incumbent| {
+                        assert_eq!(mark(incumbent), Some(11));
+                        Ok(())
+                    },
+                    || async move {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        release_build.notified().await;
+                        Ok(component(11))
+                    },
+                )
+                .await
+        });
+    }
+    barrier.wait().await;
+    wait_for_registration_build_waiters::<Component>(
+        registry.as_ref(),
+        &project,
+        REGISTRATIONS - 1,
+    )
+    .await;
+    release_build.notify_one();
+
+    let mut successes = 0;
+    while let Some(result) = registrations.join_next().await {
+        result
+            .expect("registration task")
+            .expect("joined registration succeeds");
+        successes += 1;
+    }
+    assert_eq!(successes, REGISTRATIONS);
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        registry
+            .get::<Component>(&project)
+            .await
+            .as_ref()
+            .and_then(mark),
+        Some(11)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_registration_preserves_other_components_and_wakes_waiters() {
+    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
+    let project = root("cancelled-registration");
+    registry
+        .publish(project.clone(), TestFirst(9))
+        .await
+        .expect("existing component publication");
+    let (build_started, build_is_started) = tokio::sync::oneshot::channel();
+    let building_registry = Arc::clone(&registry);
+    let building_project = project.clone();
+    let builder = tokio::spawn(async move {
+        building_registry
+            .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+                building_project,
+                |_| Ok(()),
+                || async move {
+                    build_started.send(()).expect("build-start receiver");
+                    std::future::pending().await
+                },
+            )
+            .await
+    });
+    build_is_started
+        .await
+        .expect("registration builder started");
+
+    let waiting_registry = Arc::clone(&registry);
+    let waiting_project = project.clone();
+    let waiter = tokio::spawn(async move {
+        waiting_registry
+            .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+                waiting_project,
+                |_| Ok(()),
+                || async { Ok(component(3)) },
+            )
+            .await
+    });
+    wait_for_registration_build_waiters::<Component>(registry.as_ref(), &project, 1).await;
+    builder.abort();
+    assert!(
+        builder
+            .await
+            .expect_err("builder task must be cancelled")
+            .is_cancelled()
+    );
+    assert_eq!(
+        waiter.await.expect("waiter task"),
+        Err(TestReconcileError::ConcurrentBuildFailed {
+            detail: "project runtime component build was cancelled".to_owned(),
+        })
+    );
+    assert_eq!(
+        registry.get::<TestFirst>(&project).await,
+        Some(TestFirst(9))
+    );
+    assert!(!registry.holds::<Component>(&project).await);
+
+    registry
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+            project.clone(),
+            |_| Ok(()),
+            || async { Ok(component(4)) },
+        )
+        .await
+        .expect("cancelled reservation releases the exact slot");
+    assert_eq!(
+        registry
+            .get::<Component>(&project)
+            .await
+            .as_ref()
+            .and_then(mark),
+        Some(4)
+    );
+}
+
 #[tokio::test]
 async fn a_refusing_reconcile_keeps_the_incumbent() {
     let registry = ProjectRuntimeRegistryV1::default();
@@ -679,14 +624,14 @@ async fn a_refusing_reconcile_keeps_the_incumbent() {
         .unwrap();
 
     let refused = registry
-        .register_or_reconcile::<Component, TestReconcileError, _, _>(
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
             project.clone(),
             |_| {
                 Err(TestReconcileError::Provider(
                     "a different authority is already registered",
                 ))
             },
-            || Ok(component(2)),
+            || async { Ok(component(2)) },
         )
         .await;
 
@@ -727,40 +672,137 @@ async fn reading_answers_only_for_a_project_that_holds_the_component() {
     );
 }
 
+/// Project-open registers owners under `Path::canonicalize()` (`\\?\C:\...` on
+/// Windows). Later storage-status / primitive lookups arrive with the ordinary
+/// handshake spelling. Admission already treats those as one project; `get`
+/// and `read` must resolve the same registered owner instead of answering
+/// "still mounting" forever.
 #[tokio::test]
-async fn request_resolution_answers_nothing_for_an_absent_or_unnamed_project() {
+async fn get_and_read_resolve_an_owner_registered_under_a_windows_verbatim_spelling() {
     let registry = ProjectRuntimeRegistryV1::default();
-    registry.publish(root("alpha"), component(1)).await.unwrap();
+    let registered = PathBuf::from(r"\\?\C:\Users\test\project");
+    let request = PathBuf::from(r"C:\Users\test\project");
+    registry.publish(registered, TestFirst(7)).await.unwrap();
 
-    for project_root in [None, Some(root("beta").as_path())] {
-        let resolved = registry.request_runtimes(project_root, None).await;
-        assert!(resolved.feedback.is_none());
-        assert!(resolved.feedback_owner.is_none());
-        assert!(resolved.configuration.is_none());
-        assert!(resolved.work.is_none());
-        assert!(resolved.lsp_owner.is_none());
-    }
+    assert_eq!(
+        registry.get::<TestFirst>(&request).await,
+        Some(TestFirst(7)),
+        "an ordinary Windows request spelling must reach the verbatim registered owner"
+    );
+    assert_eq!(
+        registry
+            .read::<TestFirst, _, _>(&request, |owner| owner.0)
+            .await,
+        Some(7),
+        "primitive-style read must use the same admitted-root resolution as get"
+    );
+    assert_eq!(
+        registry.publication_state(&request),
+        Some(ProjectRuntimePublicationStateV1::Warming),
+        "publication stage must resolve through the same admitted root as get"
+    );
 }
 
 #[tokio::test]
-async fn canonical_fallback_finds_a_component_without_an_alias_runtime() {
+async fn ambiguous_registered_spellings_refuse_instead_of_selecting_an_owner() {
     let registry = ProjectRuntimeRegistryV1::default();
-    let alias = root("alias");
-    let canonical = root("canonical");
+    let ordinary = PathBuf::from(r"C:\Users\test\ambiguous");
+    let verbatim = PathBuf::from(r"\\?\C:\Users\test\ambiguous");
     registry
-        .publish(canonical.clone(), TestFirst(7))
+        .publish(ordinary.clone(), TestFirst(1))
         .await
         .unwrap();
+    registry.publish(verbatim, TestFirst(2)).await.unwrap();
 
-    let runtimes = registry.lock_runtimes();
+    assert!(
+        registry.get::<TestFirst>(&ordinary).await.is_none(),
+        "two registered spellings that could name different authorities must not select the first map entry"
+    );
+    assert!(
+        !registry
+            .request_runtimes(Some(&ordinary), None)
+            .await
+            .is_admitted(),
+        "an ambiguous root is a lookup miss, not a warming admitted runtime"
+    );
+}
+
+#[tokio::test]
+async fn stale_publication_failure_cannot_poison_a_newer_ready_attempt() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("publication-attempt-fence");
+    registry
+        .publish(project.clone(), TestFirst(1))
+        .await
+        .unwrap();
+    let stale = registry
+        .begin_publication(&project)
+        .expect("first publication attempt");
+    let quiescence = registry
+        .quiesce_roots(&BTreeSet::from([project.clone()]))
+        .await
+        .expect("retire the first runtime under a replacement fence");
+    drop(quiescence);
+    registry
+        .publish(project.clone(), TestFirst(2))
+        .await
+        .expect("replacement runtime");
+    let current = registry
+        .begin_publication(&project)
+        .expect("replacement publication attempt");
+
+    assert!(!registry.mark_publication_failed(&stale));
+    assert!(registry.mark_publication_ready(&current));
     assert_eq!(
-        ProjectRuntimeRegistryV1::component_with_canonical_fallback::<TestFirst>(
-            &runtimes,
-            &alias,
-            Some(&canonical),
-        ),
-        Some(TestFirst(7)),
-        "a request through an unregistered alias must still reach the canonical component"
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Ready)
+    );
+}
+
+#[tokio::test]
+async fn failed_publication_can_reopen_and_reach_ready() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("publication-reopen");
+    registry
+        .publish(project.clone(), TestFirst(1))
+        .await
+        .unwrap();
+    let failed = registry
+        .begin_publication(&project)
+        .expect("failed publication attempt");
+
+    assert!(registry.mark_publication_failed(&failed));
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Failed)
+    );
+
+    let reopened = registry
+        .begin_publication(&project)
+        .expect("fresh publication attempt");
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Warming)
+    );
+    assert!(registry.mark_publication_ready(&reopened));
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Ready)
+    );
+}
+
+#[tokio::test]
+async fn get_does_not_treat_a_different_project_as_an_equivalent_root() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    registry.publish(root("alpha"), TestFirst(1)).await.unwrap();
+
+    assert_eq!(
+        registry.get::<TestFirst>(&root("alpha")).await,
+        Some(TestFirst(1))
+    );
+    assert!(
+        registry.get::<TestFirst>(&root("beta")).await.is_none(),
+        "linked or foreign roots must not collapse onto another project's owner"
     );
 }
 
@@ -774,25 +816,17 @@ async fn cancelled_shutdown_caller_does_not_abandon_the_registry_drain() {
     let (continue_build, build_may_continue) = tokio::sync::oneshot::channel();
 
     let publisher = tokio::spawn(async move {
-        let result: Result<(), ProjectRuntimeRegistryError> = publisher_registry
-            .publish_atomically_after_preflight(
-                publisher_project,
-                reservation_for::<TestFirst>(),
-                move |mut publication| async move {
-                    build_started.send(()).expect("build-start receiver");
-                    build_may_continue.await.expect("continue-build sender");
-                    publication.stage(TestFirst(1))?;
-                    Ok((publication, ()))
-                },
-            )
-            .await;
-        result
+        let lease = publisher_registry.reserve_feedback(publisher_project)?;
+        build_started.send(()).expect("build-start receiver");
+        build_may_continue.await.expect("continue-build sender");
+        drop(lease);
+        Ok::<_, ProjectRuntimeRegistryError>(())
     });
     build_is_started.await.expect("publication build started");
 
     let shutdown_registry = Arc::clone(&registry);
     let shutdown = tokio::spawn(async move {
-        shutdown_registry.shut_down_all().await;
+        shutdown_registry.shut_down_all(None).await;
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !registry.closed.load(Ordering::Acquire) {
@@ -813,13 +847,16 @@ async fn cancelled_shutdown_caller_does_not_abandon_the_registry_drain() {
 
     assert_eq!(
         publisher.await.expect("publisher task"),
-        Err(ProjectRuntimeRegistryError::Closed),
-        "a publication reserved before shutdown must not commit afterward"
+        Ok(()),
+        "the reservation owner must be able to release during shutdown"
     );
-    tokio::time::timeout(std::time::Duration::from_secs(2), registry.shut_down_all())
-        .await
-        .expect("a replacement shutdown caller must observe the completed background drain");
-    assert!(registry.is_empty().await);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        registry.shut_down_all(None),
+    )
+    .await
+    .expect("a replacement shutdown caller must observe the completed background drain");
+    assert!(registry.is_empty());
 }
 
 #[tokio::test]
@@ -828,22 +865,15 @@ async fn cancelled_publication_releases_while_shutdown_drain_is_waiting() {
     let project = root("shutdown-drain-split");
     let publisher_registry = Arc::clone(&registry);
     let (build_started, build_is_started) = tokio::sync::oneshot::channel();
-    let (_continue_build, build_may_continue) = tokio::sync::oneshot::channel::<()>();
     let (drain_waiting, drain_is_waiting) = tokio::sync::oneshot::channel();
     registry.arm_shutdown_drain_waiting(drain_waiting);
 
     let publisher = tokio::spawn(async move {
         let result: Result<(), ProjectRuntimeRegistryError> = publisher_registry
-            .publish_atomically_after_preflight(
-                project,
-                reservation_for::<TestFirst>(),
-                move |mut publication| async move {
-                    build_started.send(()).expect("build-start receiver");
-                    build_may_continue.await.expect("continue-build sender");
-                    publication.stage(TestFirst(1))?;
-                    Ok((publication, ()))
-                },
-            )
+            .publish_feedback_atomically(project, move || async move {
+                build_started.send(()).expect("build-start receiver");
+                std::future::pending().await
+            })
             .await;
         result
     });
@@ -851,7 +881,7 @@ async fn cancelled_publication_releases_while_shutdown_drain_is_waiting() {
 
     let shutdown_registry = Arc::clone(&registry);
     let shutdown = tokio::spawn(async move {
-        shutdown_registry.shut_down_all().await;
+        shutdown_registry.shut_down_all(None).await;
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), drain_is_waiting)
         .await
@@ -869,7 +899,32 @@ async fn cancelled_publication_releases_while_shutdown_drain_is_waiting() {
         .await
         .expect("separate reservation cleanup must unblock shutdown")
         .expect("shutdown task");
-    assert!(registry.is_empty().await);
+    assert!(registry.is_empty());
+}
+
+/// The drain task runs on the native runtime, so a caller with no Tokio
+/// runtime still shuts every project runtime down.
+#[test]
+fn shutting_down_off_tokio_empties_the_registry() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
+    let shut_down = tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        registry.publish(root("alpha"), component(1)).await.unwrap();
+        registry.shut_down_all(None).await
+    })
+    .expect("native runtime");
+
+    assert_eq!(
+        shut_down,
+        super::ProjectRuntimesStop::Stopped,
+        "the off-Tokio drain completes"
+    );
+    assert!(registry.is_empty());
+    assert_eq!(
+        tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits(),
+        writer_waits
+    );
 }
 
 #[tokio::test]
@@ -878,9 +933,9 @@ async fn shutting_down_empties_the_registry() {
     registry.publish(root("alpha"), component(1)).await.unwrap();
     registry.publish(root("beta"), component(2)).await.unwrap();
 
-    registry.shut_down_all().await;
+    registry.shut_down_all(None).await;
 
-    assert!(registry.is_empty().await);
+    assert!(registry.is_empty());
     assert!(!registry.holds::<Component>(&root("alpha")).await);
     assert_eq!(
         registry.register(root("late"), component(3)).await,
@@ -893,7 +948,7 @@ async fn shutting_down_empties_the_registry() {
         "publishing must report closed admission"
     );
     assert!(
-        registry.is_empty().await,
+        registry.is_empty(),
         "a delayed publisher must not resurrect the drained registry"
     );
 }
@@ -940,58 +995,50 @@ async fn retiring_exact_roots_fences_republication_without_closing_other_project
         .expect("unrelated project remains open");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    let retired = root("semantic-worker-retirement");
-    let semantic = tracedecay_semantic::DaemonSemanticRuntimeHandleV1::new(1, 1, 4096)
-        .expect("semantic runtime");
-    registry
-        .publish(retired.clone(), semantic.clone())
-        .await
-        .expect("publish semantic runtime");
+/// Test-only component whose drop parks until the test releases it: a stand-in
+/// for a generation-sized owner whose deallocation takes seconds.
+struct BlockingDropComponent {
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    dropped: std::sync::mpsc::SyncSender<()>,
+}
 
-    let (started, worker_started) = tokio::sync::oneshot::channel();
-    let (cancelled, worker_cancelled) = tokio::sync::oneshot::channel();
-    let (release, worker_release) = tokio::sync::oneshot::channel();
-    assert!(
-        semantic.schedule(tracedecay_semantic::SemanticRuntimeWorkV1::new(
-            tracedecay_domain::CodeGenerationId::new("code-generation.targeted-retirement")
-                .expect("code generation"),
-            1,
-            move |cancellation| async move {
-                started.send(()).expect("worker-start receiver");
-                while !cancellation.cancelled() {
-                    tokio::task::yield_now().await;
-                }
-                cancelled.send(()).expect("worker-cancel receiver");
-                worker_release.await.expect("worker-release sender");
-                Err(SemanticRuntimeScheduleFailureV1::Cancelled)
-            },
-        ))
-    );
-    worker_started.await.expect("semantic worker started");
-
-    let retiring_registry = registry.clone();
-    let retirement = tokio::spawn(async move {
-        retiring_registry
-            .retire_roots(&BTreeSet::from([retired]))
-            .await
-    });
-    worker_cancelled
-        .await
-        .expect("targeted retirement cancels the semantic worker");
-    assert!(
-        !retirement.is_finished(),
-        "targeted retirement must join, not merely cancel, the semantic worker"
-    );
-    release.send(()).expect("semantic worker release receiver");
-    assert!(retirement.await.expect("retirement task"));
-    assert!(matches!(
-        semantic.status(),
-        SemanticRuntimeScheduleStatusV1::Failed {
-            reason: SemanticRuntimeScheduleFailureV1::Cancelled,
-            ..
+impl Drop for BlockingDropComponent {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.lock().unwrap().take() {
+            let _ = release.recv();
         }
-    ));
+        let _ = self.dropped.send(());
+    }
+}
+
+#[tokio::test]
+async fn daemon_shutdown_does_not_wait_for_drained_runtime_deallocation() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let (dropped_tx, dropped) = std::sync::mpsc::sync_channel::<()>(1);
+    let component: Component = Arc::new(BlockingDropComponent {
+        release: std::sync::Mutex::new(Some(release_rx)),
+        dropped: dropped_tx,
+    });
+    registry
+        .publish(root("slow-drop"), component)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        registry.shut_down_all(None),
+    )
+    .await
+    .expect("shutdown must not park behind a drained runtime's deallocation");
+    assert!(registry.is_empty());
+    assert!(
+        dropped.try_recv().is_err(),
+        "the drained runtime is still being released off the shutdown path"
+    );
+
+    release.send(()).expect("blocked drop receiver");
+    dropped
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the detached release must still free the drained runtime");
 }

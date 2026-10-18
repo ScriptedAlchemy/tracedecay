@@ -1,0 +1,79 @@
+name: Build the tracedecay CLI
+description: >-
+  Build //crates/tracedecay-cli:tracedecay with Bazel and stage it at a fixed
+  path for the steps that package, upload, or spawn it.
+
+inputs:
+  config:
+    description: >-
+      Bazel config. `dist` is the shipping-tuned compile (thin LTO, strip,
+      codegen-units=1). `release` is opt-level 3 without LTO, the CI / cargo
+      `--release` equivalent; tracedecay-cli's default features are
+      `production`, the release source profile. `ci` is a dev-profile build.
+    required: true
+  dest:
+    description: Directory the binary is copied into, as tracedecay[.exe].
+    required: true
+  cache-key:
+    description: Disk-cache name (see the setup-bazel action).
+    required: true
+  tailscale-client-id:
+    description: Restricted OIDC client for compatible trusted CI builds.
+    default: ""
+
+outputs:
+  path:
+    description: The staged binary.
+    value: ${{ steps.stage.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-bazel
+      id: bazel
+      with:
+        cache-key: ${{ inputs.cache-key }}
+        tailscale-client-id: ${{ inputs.tailscale-client-id }}
+
+    - name: Build and stage the binary
+      id: stage
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+        DEST: ${{ inputs.dest }}
+      run: |
+        set -euo pipefail
+        exe=""
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          exe=".exe"
+        fi
+        # A cold repository cache downloads every external repository. Bazel
+        # retries a 5xx for only ~17 s, and a longer GitHub release-host outage
+        # failed beta.86's macOS build (#3756). Analysis fetches every
+        # repository and the next command refetches a failed one, so retry
+        # only that phase, over about six minutes.
+        for attempt in 1 2 3 4; do
+          bazel build --nobuild --config="$CONFIG" --config=ci //crates/tracedecay-cli:tracedecay && break
+          (( attempt < 4 )) || exit 1
+          sleep $((attempt * 60))
+        done
+        bazel build --config="$CONFIG" --config=ci //crates/tracedecay-cli:tracedecay
+        mkdir -p "$DEST"
+        cp "$(bazel info --config="$CONFIG" --config=ci bazel-bin)/crates/tracedecay-cli/tracedecay${exe}" "$DEST/tracedecay${exe}"
+        chmod u+w "$DEST/tracedecay${exe}"
+        echo "path=${GITHUB_WORKSPACE}/${DEST}/tracedecay${exe}" >> "$GITHUB_OUTPUT"
+
+    # Cargo's macOS link wrapper gave the product a stable ad-hoc identity;
+    # Bazel links directly, so sign the staged file the way install.sh and
+    # `tracedecay update` do.
+    - name: Sign the macOS binary
+      if: runner.os == 'macOS'
+      shell: bash
+      run: scripts/macos-stable-codesign.sh "${{ steps.stage.outputs.path }}"
+
+    - name: Save compiled Bazel actions
+      if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.bazel.outputs.disk-cache-path }}
+        key: ${{ steps.bazel.outputs.disk-cache-key }}

@@ -9,12 +9,11 @@ use std::path::Path;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
-use fs2::FileExt;
 use same_file::Handle;
 use tracedecay_domain::canonical_text::sha256_hex;
 
 use super::HostFileMetadataIdentityV1;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Sibling lock held across host-file observation, intent, and rename.
 ///
@@ -46,7 +45,7 @@ impl Drop for HostFileWriteLock {
                 "host config lock file could not be unlinked while held"
             );
         }
-        if let Err(error) = FileExt::unlock(self.handle.as_file()) {
+        if let Err(error) = self.handle.as_file().unlock() {
             tracing::warn!(
                 lock_name = %self.lock_name,
                 error = %error,
@@ -141,29 +140,36 @@ pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
                 ),
             });
         }
-        lock.lock_exclusive()
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("failed to lock host config {}: {error}", path.display()),
-            })?;
         let locked = Handle::from_file(lock).map_err(|error| TraceDecayError::Config {
             message: format!(
                 "failed to identify host config lock {}: {error}",
                 parent.join(&lock_name).display()
             ),
         })?;
+        locked
+            .as_file()
+            .lock()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to lock host config {}: {error}", path.display()),
+            })?;
         // A prior holder may have unlinked the inode we waited on; the lock is
         // valid only while the directory entry still names the locked file.
         let current = match directory.open_with(&lock_name, &probe) {
-            Ok(file) => {
-                Handle::from_file(file.into_std()).map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to identify host config lock {}: {error}",
-                        parent.join(&lock_name).display()
-                    ),
-                })?
+            Ok(file) => Handle::from_file(file.into_std()).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        };
+        match current {
+            Ok(Some(current)) if current == locked => {
+                return Ok(HostFileWriteLock {
+                    directory,
+                    lock_name,
+                    handle: locked,
+                });
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Ok(_) => release_abandoned_lock(&locked, &lock_name),
             Err(error) => {
+                release_abandoned_lock(&locked, &lock_name);
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "failed to inspect host config lock {}: {error}",
@@ -171,13 +177,6 @@ pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
                     ),
                 });
             }
-        };
-        if current == locked {
-            return Ok(HostFileWriteLock {
-                directory,
-                lock_name,
-                handle: locked,
-            });
         }
     }
     Err(TraceDecayError::Config {
@@ -188,6 +187,20 @@ pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
     })
 }
 
+/// Closing does not release an `flock` while a forked child still shares the
+/// descriptor, so a lock that is not kept must be unlocked explicitly.
+fn release_abandoned_lock(locked: &Handle, lock_name: &str) {
+    if let Err(error) = locked.as_file().unlock() {
+        tracing::warn!(
+            lock_name = %lock_name,
+            error = %error,
+            "abandoned host config lock could not be released"
+        );
+    }
+}
+
+/// Brackets one read of a host file. The snapshot carries the bytes and every
+/// comparison compares them, so an equal identity is never a proof by itself.
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HostFileObjectIdentity {
@@ -381,14 +394,37 @@ fn verify_host_file_snapshot(path: &Path, expected: &HostFileSnapshot) -> std::i
 pub(super) fn write_bytes_file_locked(
     path: &Path,
     contents: &[u8],
-    backup: Option<&Path>,
     replacement_metadata: Option<&HostFileMetadataIdentityV1>,
 ) -> Result<()> {
     let _lock = lock_host_file_write(path)?;
     let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
         message: format!("failed to capture metadata for {}: {error}", path.display()),
     })?;
-    safe_write_bytes_file_from_snapshot(path, contents, backup, replacement_metadata, &observed)
+    safe_write_bytes_file_from_snapshot(path, contents, replacement_metadata, &observed)
+}
+
+pub(super) fn restore_bytes_file_if_unchanged(
+    path: &Path,
+    expected_current: Option<&[u8]>,
+    original: &[u8],
+    original_metadata: &HostFileMetadataIdentityV1,
+) -> Result<()> {
+    let _lock = lock_host_file_write(path)?;
+    let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to inspect {} before restore: {error}",
+            path.display()
+        ),
+    })?;
+    if observed.contents() != expected_current {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refused to restore {} because the host config changed after the failed command",
+                path.display()
+            ),
+        });
+    }
+    safe_write_bytes_file_from_snapshot(path, original, Some(original_metadata), &observed)
 }
 
 pub(crate) enum TextFileMutation {
@@ -397,92 +433,156 @@ pub(crate) enum TextFileMutation {
     Remove,
 }
 
-/// Whether a mutating transaction leaves a `.bak` of the observed bytes.
-#[derive(Clone, Copy)]
-enum MutationBackup {
-    /// Prompt/rule files: publish without a recovery copy.
-    None,
-    /// Structured host configs: every rewrite or removal of an existing file
-    /// leaves a `.bak` the operator can restore (issue #63).
-    BackupExisting,
-}
-
 /// Run a strict UTF-8 read-transform-mutate while holding the host-file lock.
 pub(crate) fn update_text_file_transactionally<T>(
     path: &Path,
-    update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
-) -> Result<T> {
-    update_file_transactionally(path, MutationBackup::None, update)
-}
-
-/// [`update_text_file_transactionally`] for structured host configs
-/// (JSON/JSONC/TOML): identical read-under-lock → transform →
-/// publish-from-snapshot shape, except that rewriting or removing an existing
-/// file first leaves a `.bak` recovery copy whose path is threaded into the
-/// publish error hint.
-pub(crate) fn update_config_file_transactionally<T>(
-    path: &Path,
-    update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
-) -> Result<T> {
-    update_file_transactionally(path, MutationBackup::BackupExisting, update)
-}
-
-fn update_file_transactionally<T>(
-    path: &Path,
-    backup: MutationBackup,
     update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
 ) -> Result<T> {
     let _lock = lock_host_file_write(path)?;
     let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
         message: format!("failed to read {}: {error}", path.display()),
     })?;
-    let existing = match observed.contents() {
-        Some(contents) => {
-            std::str::from_utf8(contents).map_err(|error| TraceDecayError::Config {
-                message: format!("failed to read {} as UTF-8: {error}", path.display()),
-            })?
-        }
-        None => "",
-    };
+    let existing = snapshot_utf8(path, &observed)?;
     let (output, mutation) = update(existing)?;
-    let backup = match (&mutation, backup, &observed) {
-        (TextFileMutation::Unchanged, _, _)
-        | (_, MutationBackup::None, _)
-        | (_, MutationBackup::BackupExisting, HostFileSnapshot::Missing) => None,
-        (_, MutationBackup::BackupExisting, HostFileSnapshot::Present { .. }) => {
-            super::backup_config_file(path)?
-        }
+    apply_file_mutation(path, &observed, &mutation)?;
+    Ok(output)
+}
+
+/// Mutate two structured host documents as one rollback boundary.
+///
+/// Both path locks and both byte snapshots are acquired before either publish.
+/// If the second publish fails, the first is restored from its exact snapshot
+/// while both locks remain held. This is intentionally a two-file primitive:
+/// Antigravity is the only host contract with one component registration
+/// spanning two independently discovered documents.
+pub(crate) fn update_two_config_files_transactionally<T>(
+    first_path: &Path,
+    second_path: &Path,
+    update: impl FnOnce(&str, &str) -> Result<(T, TextFileMutation, TextFileMutation)>,
+) -> Result<T> {
+    if first_path == second_path {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "two-file host config transaction repeats {}",
+                first_path.display()
+            ),
+        });
+    }
+    let (lower, upper) = if first_path < second_path {
+        (first_path, second_path)
+    } else {
+        (second_path, first_path)
     };
-    match mutation {
-        TextFileMutation::Unchanged => {}
-        TextFileMutation::Write(replacement) => {
-            safe_write_bytes_file_from_snapshot(
-                path,
-                replacement.as_bytes(),
-                backup.as_deref(),
-                None,
-                &observed,
-            )?;
-        }
-        TextFileMutation::Remove => {
-            remove_host_file_from_snapshot(path, &observed)?;
-        }
+    let _locks = [lock_host_file_write(lower)?, lock_host_file_write(upper)?];
+    let first_snapshot =
+        capture_host_file_snapshot(first_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", first_path.display()),
+        })?;
+    let second_snapshot =
+        capture_host_file_snapshot(second_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", second_path.display()),
+        })?;
+    let first_existing = snapshot_utf8(first_path, &first_snapshot)?;
+    let second_existing = snapshot_utf8(second_path, &second_snapshot)?;
+    let (output, first_mutation, second_mutation) = update(first_existing, second_existing)?;
+    let expected_first = mutation_result_bytes(&first_snapshot, &first_mutation);
+    apply_file_mutation(first_path, &first_snapshot, &first_mutation)?;
+    if let Err(second_error) = apply_file_mutation(second_path, &second_snapshot, &second_mutation)
+    {
+        return match restore_group_snapshot(first_path, &first_snapshot, expected_first.as_deref())
+        {
+            Ok(()) => Err(second_error),
+            Err(rollback_error) => Err(TraceDecayError::Config {
+                message: format!(
+                    "{second_error}; failed to roll back {}: {rollback_error}",
+                    first_path.display()
+                ),
+            }),
+        };
     }
     Ok(output)
+}
+
+fn snapshot_utf8<'a>(path: &Path, snapshot: &'a HostFileSnapshot) -> Result<&'a str> {
+    match snapshot.contents() {
+        Some(contents) => std::str::from_utf8(contents).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {} as UTF-8: {error}", path.display()),
+        }),
+        None => Ok(""),
+    }
+}
+
+fn mutation_result_bytes(
+    snapshot: &HostFileSnapshot,
+    mutation: &TextFileMutation,
+) -> Option<Vec<u8>> {
+    match mutation {
+        TextFileMutation::Unchanged => snapshot.contents().map(<[u8]>::to_vec),
+        TextFileMutation::Write(replacement) => Some(replacement.as_bytes().to_vec()),
+        TextFileMutation::Remove => None,
+    }
+}
+
+fn apply_file_mutation(
+    path: &Path,
+    snapshot: &HostFileSnapshot,
+    mutation: &TextFileMutation,
+) -> Result<()> {
+    match mutation {
+        TextFileMutation::Unchanged => Ok(()),
+        // Republishing identical bytes still replaces the file, churning its
+        // inode and mtime under the host that owns it.
+        TextFileMutation::Write(replacement)
+            if snapshot.contents() == Some(replacement.as_bytes()) =>
+        {
+            Ok(())
+        }
+        TextFileMutation::Write(replacement) => {
+            safe_write_bytes_file_from_snapshot(path, replacement.as_bytes(), None, snapshot)
+        }
+        TextFileMutation::Remove => remove_host_file_from_snapshot(path, snapshot),
+    }
+}
+
+fn restore_group_snapshot(
+    path: &Path,
+    original: &HostFileSnapshot,
+    expected_current: Option<&[u8]>,
+) -> Result<()> {
+    let current = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to inspect {} during rollback: {error}",
+            path.display()
+        ),
+    })?;
+    if current.contents() != expected_current {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refused to restore {} because it changed after publication",
+                path.display()
+            ),
+        });
+    }
+    match original {
+        HostFileSnapshot::Missing => remove_host_file_from_snapshot(path, &current),
+        HostFileSnapshot::Present {
+            contents, metadata, ..
+        } => safe_write_bytes_file_from_snapshot(path, contents, Some(metadata), &current),
+    }
 }
 
 fn remove_host_file_from_snapshot(path: &Path, observed: &HostFileSnapshot) -> Result<()> {
     if matches!(observed, HostFileSnapshot::Missing) {
         return Ok(());
     }
-    super::persist_host_config_remove_intent(path)?;
+    super::host_config_io::persist_host_config_remove_intent(path)?;
     tracedecay_private_fs::framed_log::remove_conditionally(
         path,
         || {
             #[cfg(test)]
-            super::test_pause_host_config_write(
+            super::host_config_io::test_pause_host_config_write(
                 path,
-                super::TestHostConfigWriteBoundary::Publication,
+                super::host_config_io::TestHostConfigWriteBoundary::Publication,
             );
         },
         |displaced| {
@@ -499,7 +599,6 @@ fn remove_host_file_from_snapshot(path: &Path, observed: &HostFileSnapshot) -> R
 fn safe_write_bytes_file_from_snapshot(
     path: &Path,
     contents: &[u8],
-    backup: Option<&Path>,
     replacement_metadata: Option<&HostFileMetadataIdentityV1>,
     observed: &HostFileSnapshot,
 ) -> Result<()> {
@@ -525,29 +624,33 @@ fn safe_write_bytes_file_from_snapshot(
                 }
                 let expected_metadata = super::capture_host_file_metadata(temporary)?;
                 staged_snapshot.replace(Some(capture_host_file_snapshot(temporary)?));
-                super::persist_host_config_write_intent(path, contents, Some(&expected_metadata))
-                    .map_err(std::io::Error::other)?;
+                super::host_config_io::persist_host_config_write_intent(
+                    path,
+                    contents,
+                    Some(&expected_metadata),
+                )
+                .map_err(std::io::Error::other)?;
                 verify_host_file_snapshot(path, observed)?;
                 #[cfg(test)]
-                super::test_pause_host_config_write(
+                super::host_config_io::test_pause_host_config_write(
                     path,
-                    super::TestHostConfigWriteBoundary::Validation,
+                    super::host_config_io::TestHostConfigWriteBoundary::Validation,
                 );
                 verify_host_file_snapshot(path, observed)?;
                 Ok(())
             },
             before_publish: || {
                 #[cfg(test)]
-                super::test_pause_host_config_write(
+                super::host_config_io::test_pause_host_config_write(
                     path,
-                    super::TestHostConfigWriteBoundary::Publication,
+                    super::host_config_io::TestHostConfigWriteBoundary::Publication,
                 );
             },
             after_publish: || {
                 #[cfg(test)]
-                super::test_pause_host_config_write(
+                super::host_config_io::test_pause_host_config_write(
                     path,
-                    super::TestHostConfigWriteBoundary::Published,
+                    super::host_config_io::TestHostConfigWriteBoundary::Published,
                 );
             },
             verify_displaced: |displaced: &Path| {
@@ -564,20 +667,17 @@ fn safe_write_bytes_file_from_snapshot(
         },
         tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
     ) {
-        let hint = if let Some(b) = backup {
-            format!(
-                "\n  Backup is at: {}\n  \
-                 The original file was NOT modified.",
-                b.display()
-            )
-        } else {
-            "\n  The original file was NOT modified.".to_string()
-        };
         return Err(TraceDecayError::Config {
-            message: format!("failed to atomically replace {}: {e}{hint}", path.display()),
+            message: format!(
+                "failed to atomically replace {}: {e}\n  The original file was NOT modified.",
+                path.display()
+            ),
         });
     }
+    if matches!(observed, HostFileSnapshot::Missing) {
+        super::host_config_io::note_created_file(path);
+    }
     #[cfg(feature = "test-transport")]
-    super::test_abort_after_host_config_write(path);
+    super::host_config_io::test_abort_after_host_config_write(path);
     Ok(())
 }

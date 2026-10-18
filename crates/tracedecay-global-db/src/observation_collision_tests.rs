@@ -2,26 +2,26 @@
 //! collision failures observed on 5ddd16271 (ancestral on 2be2b9478 /
 //! 0.1.0-beta.34):
 //!
-//! 1. `observation_identity_collision` — a rewritten native record presents
+//! 1. `observation_identity_collision`, a rewritten native record presents
 //!    the same canonical observation id with a different payload digest. The
 //!    refusal is deterministic and non-retryable, so it must record durable
 //!    terminal coverage in the typed cursor-advance ledger; later catch-up and
 //!    temporal triggers must not decode, classify, canonicalize, or hash that
 //!    row again, and the retained row must stay byte-identical.
-//! 2. projection-drain provenance collision with an existing output — a
+//! 2. projection-drain provenance collision with an existing output, a
 //!    queued observation whose drain collides with an already-persisted
 //!    provenance row must converge to a durable `output_collision` skip
 //!    (checkpoint advances, queue drains) instead of permanently wedging.
 //!    The converged skip must satisfy the skip authority contract
 //!    (`schema_contract::invariants`): zero provenance rows for the
-//!    observation plus exactly one disposition — never a skip that
+//!    observation plus exactly one disposition, never a skip that
 //!    contradicts a retained provenance binding.
 //!
 //! Pinned contracts:
 //! * the refusal terminal survives cursor-advance retention and is bound to
 //!   the exact refused candidate digest, so a later canonical payload
 //!   revision replay still converges as `CoveredDuplicate`;
-//! * coverage is recorded only at the sequential scan frontier — covered
+//! * coverage is recorded only at the sequential scan frontier, covered
 //!   replays and gap-shaped candidates leave every ledger untouched;
 //! * only the narrow existing-output collision converges on drain; divergent
 //!   workflow/effect state stays a hard error;
@@ -32,7 +32,7 @@
 //!   post-admission corruption setup). The marker fast path never touches
 //!   that row, so re-admission still returns the typed `IdentityCollision`
 //!   with converged coverage; any regression that re-decodes, re-derives, or
-//!   re-hashes stored data hits the corrupted bytes and fails loudly — and by
+//!   re-hashes stored data hits the corrupted bytes and fails loudly, and by
 //!   the real sessions JSONL `FileBytes` path: zero bytes consumed and zero
 //!   calls at the fully materialized host-admission boundary means no frame
 //!   was deserialized on a subsequent trigger.
@@ -52,17 +52,22 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, UtcMicros,
 };
+use tracedecay_store::observation::ObservationIdentityCollisionDispositionV1;
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationCoverageReason, ObservationPersistOutcome,
-    ObservationProjectionStore, ObservationStore, ObservationStoreError, ObservationWrite,
-    ProjectionPersistOutcome, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
+    AnchoredObservationWrite, CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
+    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
+    ObservationWrite, ProjectionPersistOutcome, ProjectionSkipReason,
+    SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Dispatch, Event, Metadata, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
 
+use crate::schema_contract::invariants::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
+use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::COMMIT_SOURCE_CURSOR_SQL;
 
 const COLLISION_PROVIDER: &str = "collision-test";
 const OBSERVATION_DISPATCH_TRACE_TARGET: &str = "tracedecay::observation_admission_work";
@@ -198,7 +203,7 @@ async fn overwrite_stored_observation_row(
 }
 
 /// Original stored-row authority bytes captured before the tripwire arms, so
-/// restart-bearing tests can restore the row before remount — mount-time
+/// restart-bearing tests can restore the row before remount, mount-time
 /// invariant convergence legitimately decodes committed observation rows.
 struct StoredRowBytes {
     payload_digest: String,
@@ -206,7 +211,7 @@ struct StoredRowBytes {
     committed_cursor_json: String,
 }
 
-/// Arms the no-rework corruption tripwire on one retained observation row —
+/// Arms the no-rework corruption tripwire on one retained observation row,
 /// an engine fixture for post-admission corruption setup, which the harness
 /// doc explicitly sanctions.
 ///
@@ -335,7 +340,7 @@ fn anchored_write_with_cursor(
         "collision-test",
     )
     .unwrap();
-    let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+    let anchor = tracedecay_store::build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -412,7 +417,7 @@ fn decode_raw_source_record(
 
 /// One sanitized native transcript record at an explicit source range.
 /// Candidates built with the same `record_id` share a canonical observation
-/// id regardless of `generation`, range, or payload text — exactly the shape
+/// id regardless of `generation`, range, or payload text, exactly the shape
 /// a rewritten source file produces.
 fn collision_observation_at(
     session_id: &SessionId,
@@ -507,7 +512,7 @@ fn collision_candidate(
     )
 }
 
-async fn admission_refused_advance_count(
+async fn identity_collision_advance_count(
     runtime: &HostAdmissionTestRuntimeV1,
     observation: &DurableObservationV1,
 ) -> i64 {
@@ -524,7 +529,7 @@ async fn admission_refused_advance_count(
             params![
                 source_json,
                 scope_json,
-                ObservationCoverageReason::AdmissionRefused.as_str()
+                ObservationCoverageReason::ObservationIdentityCollision.as_str()
             ],
         )
         .await
@@ -554,7 +559,7 @@ async fn table_count(runtime: &HostAdmissionTestRuntimeV1, table: &str) -> i64 {
         .expect("decode table count")
 }
 
-async fn admission_refused_total(runtime: &HostAdmissionTestRuntimeV1) -> i64 {
+async fn identity_collision_advance_total(runtime: &HostAdmissionTestRuntimeV1) -> i64 {
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database");
@@ -562,16 +567,16 @@ async fn admission_refused_total(runtime: &HostAdmissionTestRuntimeV1) -> i64 {
     let mut rows = snapshot
         .query(
             "SELECT COUNT(*) FROM source_cursor_advances WHERE reason = ?1",
-            params![ObservationCoverageReason::AdmissionRefused.as_str()],
+            params![ObservationCoverageReason::ObservationIdentityCollision.as_str()],
         )
         .await
-        .expect("query admission-refused advances");
+        .expect("query identity-collision advances");
     rows.next()
         .await
-        .expect("read admission-refused count")
-        .expect("admission-refused count row")
+        .expect("read identity-collision count")
+        .expect("identity-collision count row")
         .get::<i64>(0)
-        .expect("decode admission-refused count")
+        .expect("decode identity-collision count")
 }
 
 async fn only_source_cursor(runtime: &HostAdmissionTestRuntimeV1) -> ObservationSourceCursorV1 {
@@ -600,6 +605,50 @@ async fn only_source_cursor(runtime: &HostAdmissionTestRuntimeV1) -> Observation
     serde_json::from_str(&encoded).expect("decode typed source cursor")
 }
 
+async fn seed_cursor_replay(
+    runtime: &HostAdmissionTestRuntimeV1,
+    advance: &ObservationCursorAdvance,
+    ledger_reason: Option<ObservationCoverageReason>,
+) {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let source_json = serde_json::to_string(advance.next_cursor().source()).unwrap();
+    let scope_json = serde_json::to_string(advance.next_cursor().scope()).unwrap();
+    let next_cursor_json = serde_json::to_string(advance.next_cursor()).unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "INSERT INTO source_cursors (source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                next_cursor_json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    if let Some(reason) = ledger_reason {
+        let coverage_json = serde_json::to_string(&advance.coverage()).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO source_cursor_advances
+                    (source_json, scope_json, coverage_json, reason, receipt_id)
+                 VALUES (?1, ?2, ?3, ?4, NULL)",
+                params![
+                    source_json.as_str(),
+                    scope_json.as_str(),
+                    coverage_json.as_str(),
+                    reason.as_str()
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+}
+
 type ProvenanceRow = (String, String, i64, String, String, String, String, i64);
 
 /// Projected `sessions` row captured verbatim from a clean drain.
@@ -619,7 +668,7 @@ type ProjectedSessionRow = (
     Option<String>,
 );
 
-/// Projected `session_messages` row captured verbatim from a clean drain.
+/// Projected message row captured verbatim from a clean drain.
 type ProjectedMessageRow = (
     String,
     String,
@@ -634,6 +683,7 @@ type ProjectedMessageRow = (
     Option<String>,
     Option<i64>,
     Option<String>,
+    String,
 );
 
 async fn provenance_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<ProvenanceRow> {
@@ -668,11 +718,12 @@ async fn provenance_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<Provenance
 }
 
 /// The first non-retryable identity collision must keep the retained row
-/// byte-identical and record durable terminal coverage — the typed source
+/// byte-identical and record durable terminal coverage, the typed source
 /// cursor converges past the colliding record and the refusal lands in the
-/// `source_cursor_advances` ledger with the typed `admission_refused` reason.
-#[tokio::test]
-async fn identity_collision_records_durable_admission_refused_coverage() {
+/// `source_cursor_advances` ledger with the typed
+/// `observation_identity_collision` reason.
+#[asupersync::test]
+async fn identity_collision_records_durable_typed_coverage() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -755,10 +806,244 @@ async fn identity_collision_records_durable_admission_refused_coverage() {
     );
     // ...and the refusal is durable in the typed cursor-advance ledger.
     assert_eq!(
-        admission_refused_advance_count(&runtime, &original).await,
+        identity_collision_advance_count(&runtime, &original).await,
         1,
-        "identity collision must record one durable admission_refused advance"
+        "identity collision must record one durable typed advance"
     );
+}
+
+/// A provider that can derive a second stable identity must be able to prove
+/// the primary identity collision without consuming the source frontier. The
+/// alternate identity then owns the ordinary exact-CAS write; if it persists,
+/// the primary candidate was never a terminal refusal and therefore must not
+/// leave refusal or coverage state behind.
+#[asupersync::test]
+async fn retryable_primary_collision_leaves_frontier_for_positional_fallback() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.identity-collision.positional-fallback").unwrap();
+    let (original, original_write) = collision_candidate(
+        &session_id,
+        "record.legacy-content-hash",
+        1,
+        "first occurrence",
+        "receipt.identity-collision.positional.original",
+        None,
+    );
+    assert!(matches!(
+        store.persist_observation(original_write).await.unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    let committed_cursor = store
+        .get_source_cursor(original.source(), original.scope())
+        .await
+        .unwrap();
+
+    let (primary, primary_write) = collision_candidate(
+        &session_id,
+        "record.legacy-content-hash",
+        2,
+        "second occurrence",
+        "receipt.identity-collision.positional.primary",
+        committed_cursor.clone(),
+    );
+    let primary_write = primary_write.with_identity_collision_disposition(
+        ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+    );
+    let error = store
+        .persist_observation(primary_write)
+        .await
+        .expect_err("the legacy content hash must prove its collision");
+    assert!(matches!(
+        error,
+        ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        }
+    ));
+    assert_eq!(
+        store
+            .get_source_cursor(primary.source(), primary.scope())
+            .await
+            .unwrap(),
+        committed_cursor,
+        "a retryable primary collision must leave the exact-CAS frontier untouched"
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(identity_collision_advance_total(&runtime).await, 0);
+
+    let (fallback, fallback_write) = collision_candidate(
+        &session_id,
+        "record.positional-occurrence.2",
+        2,
+        "second occurrence",
+        "receipt.identity-collision.positional.fallback",
+        committed_cursor.clone(),
+    );
+    assert!(matches!(
+        store
+            .persist_observation(fallback_write.clone())
+            .await
+            .unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    assert_eq!(
+        store
+            .get_source_cursor(fallback.source(), fallback.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(fallback_write.next_cursor())
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(identity_collision_advance_total(&runtime).await, 0);
+    assert_eq!(table_count(&runtime, "observations").await, 2);
+
+    assert!(matches!(
+        store.persist_observation(fallback_write).await.unwrap(),
+        ObservationPersistOutcome::ExactDuplicate(_)
+    ));
+    assert_eq!(
+        table_count(&runtime, "observations").await,
+        2,
+        "the positional fallback must persist exactly once"
+    );
+
+    let (_, stale_primary_write) = collision_candidate(
+        &session_id,
+        "record.legacy-content-hash",
+        3,
+        "stale third occurrence",
+        "receipt.identity-collision.positional.stale",
+        committed_cursor,
+    );
+    let stale_error = store
+        .persist_observation(stale_primary_write.with_identity_collision_disposition(
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(stale_error, ObservationStoreError::CursorConflict { .. }),
+        "a retryable identity verdict may not hide a lost cursor CAS: {stale_error:?}"
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(identity_collision_advance_total(&runtime).await, 0);
+    assert_eq!(table_count(&runtime, "observations").await, 2);
+}
+
+#[asupersync::test]
+async fn exhausted_positional_fallback_settles_terminal_collision_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.identity-collision.positional-exhausted").unwrap();
+    let (legacy, legacy_write) = collision_candidate_at(
+        &session_id,
+        "record.legacy-content-hash.exhausted",
+        1,
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationSourceRangeV1::new(0, 1).unwrap(),
+        ),
+        "retained legacy identity",
+        "receipt.identity-collision.exhausted.legacy",
+        None,
+    );
+    store.persist_observation(legacy_write).await.unwrap();
+    let after_legacy = store
+        .get_source_cursor(legacy.source(), legacy.scope())
+        .await
+        .unwrap();
+    let (positional, positional_write) = collision_candidate_at(
+        &session_id,
+        "record.positional-occurrence.exhausted",
+        1,
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ),
+        "retained positional identity",
+        "receipt.identity-collision.exhausted.positional",
+        after_legacy,
+    );
+    store.persist_observation(positional_write).await.unwrap();
+    let committed_cursor = store
+        .get_source_cursor(positional.source(), positional.scope())
+        .await
+        .unwrap();
+
+    let (_, primary_write) = collision_candidate(
+        &session_id,
+        "record.legacy-content-hash.exhausted",
+        2,
+        "new primary contents",
+        "receipt.identity-collision.exhausted.primary",
+        committed_cursor.clone(),
+    );
+    let primary_error = store
+        .persist_observation(primary_write.with_identity_collision_disposition(
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        primary_error,
+        ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        }
+    ));
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(identity_collision_advance_total(&runtime).await, 0);
+    assert_eq!(
+        store
+            .get_source_cursor(positional.source(), positional.scope())
+            .await
+            .unwrap(),
+        committed_cursor
+    );
+
+    let (_, fallback_write) = collision_candidate(
+        &session_id,
+        "record.positional-occurrence.exhausted",
+        2,
+        "new fallback contents",
+        "receipt.identity-collision.exhausted.fallback",
+        committed_cursor,
+    );
+    let fallback_error = store
+        .persist_observation(fallback_write.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        fallback_error,
+        ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        }
+    ));
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    assert_eq!(identity_collision_advance_total(&runtime).await, 1);
+    assert_eq!(
+        store
+            .get_source_cursor(positional.source(), positional.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(fallback_write.next_cursor()),
+        "the exhausted fallback owns terminal coverage and advances the cursor"
+    );
+    assert_eq!(table_count(&runtime, "observations").await, 2);
 }
 
 /// Once the collision is durably terminal, a re-admitted candidate (late
@@ -766,7 +1051,7 @@ async fn identity_collision_records_durable_admission_refused_coverage() {
 /// the same typed error without accessing the retained observation row and
 /// without any point-read runtime dispatches: the bounded preflight snapshot
 /// supplies the refusal, retained identity, and source-cursor authorities.
-#[tokio::test]
+#[asupersync::test]
 async fn re_admitted_identity_collision_uses_marker_without_retained_row_access() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -800,15 +1085,11 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
         "receipt.identity-collision.readmitted.rewritten",
         committed_cursor,
     );
-    // Without this, a foreign test thread can cache `Interest::never()` for the
-    // dispatch callsite and make the `runtime_commands == 0` assertions below
-    // pass vacuously; see the helper's documentation.
-    crate::tests::harness::install_tracing_callsite_keepalive();
     let first_dispatch_trace = Arc::new(ObservationDispatchTrace::default());
-    let first_dispatch = Dispatch::new(ObservationDispatchSubscriber {
-        trace: Arc::clone(&first_dispatch_trace),
-    });
-    let first_trace_guard = tracing::dispatcher::set_default(&first_dispatch);
+    let first_trace_guard =
+        tracedecay_runtime_core::logging::set_tracing_capture(ObservationDispatchSubscriber {
+            trace: Arc::clone(&first_dispatch_trace),
+        });
     let first = store
         .persist_observation(rewritten_write.clone())
         .await
@@ -843,10 +1124,10 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     // A later catch-up pass or temporal trigger re-presents the exact same
     // candidate with its now-stale expected cursor.
     let dispatch_trace = Arc::new(ObservationDispatchTrace::default());
-    let dispatch = Dispatch::new(ObservationDispatchSubscriber {
-        trace: Arc::clone(&dispatch_trace),
-    });
-    let trace_guard = tracing::dispatcher::set_default(&dispatch);
+    let trace_guard =
+        tracedecay_runtime_core::logging::set_tracing_capture(ObservationDispatchSubscriber {
+            trace: Arc::clone(&dispatch_trace),
+        });
     let second = store
         .persist_observation(rewritten_write.clone())
         .await
@@ -861,7 +1142,7 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
             }
         ),
         "re-admission over the corrupted retained row must stay the typed terminal \
-         collision — any stored-row decode, identity re-derivation, or payload re-hash \
+         collision, any stored-row decode, identity re-derivation, or payload re-hash \
          would have failed on the tripwire bytes; {second:?}"
     );
     assert_eq!(
@@ -871,8 +1152,8 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
         },
         "the terminal marker path must use the bounded preflight snapshot"
     );
-    // Any access to the retained row — including an ignored bare-column read
-    // that would evade a byte-corruption tripwire — would have failed because
+    // Any access to the retained row, including an ignored bare-column read
+    // that would evade a byte-corruption tripwire, would have failed because
     // the production table name is no longer present.
     assert_eq!(
         raw_hidden_observation_json(&runtime, original.observation_id().as_str()).await,
@@ -881,7 +1162,7 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     );
     // The terminal coverage stays single-row and the cursor stays put.
     assert_eq!(
-        admission_refused_advance_count(&runtime, &original).await,
+        identity_collision_advance_count(&runtime, &original).await,
         1
     );
     assert_eq!(
@@ -898,7 +1179,7 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
 /// cursor-transition authority accepts that shape when the FileBytes range
 /// restarts at zero, so collision refusal must commit the same terminal
 /// coverage and keep later re-admission on the zero-record-work fast path.
-#[tokio::test]
+#[asupersync::test]
 async fn replacement_domain_collision_records_terminal_coverage_without_rework() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -964,7 +1245,7 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
         "the FileBytes replacement must commit terminal coverage from position zero"
     );
     assert_eq!(
-        admission_refused_advance_count(&runtime, &original).await,
+        identity_collision_advance_count(&runtime, &original).await,
         1
     );
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
@@ -996,11 +1277,11 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
 
 /// A projection drain that collides with an existing provenance row for the
 /// same observation (an earlier projection era left a divergent output
-/// binding behind) must converge to a durable `output_collision` skip —
-/// checkpoint advances, the queue drains, replay is an exact duplicate —
+/// binding behind) must converge to a durable `output_collision` skip,
+/// checkpoint advances, the queue drains, replay is an exact duplicate,
 /// while the real pre-existing output stays durable and no partial
 /// replacement output rows leak.
-#[tokio::test]
+#[asupersync::test]
 async fn drain_provenance_collision_with_existing_output_converges_to_durable_skip() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1044,9 +1325,10 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
         .unwrap();
     transaction
         .execute(
-            "INSERT INTO session_messages
-                (provider, message_id, session_id, role, ordinal, text)
-             VALUES (?1, ?2, ?3, 'assistant', 0, 'stale era output')",
+            "INSERT INTO lcm_raw_messages
+                (provider, message_id, session_id, role, ordinal, content, content_hash,
+                 storage_kind)
+             VALUES (?1, ?2, ?3, 'assistant', 0, 'stale era output', 'h', 'inline')",
             params![COLLISION_PROVIDER, "stale-era-output", session_id.as_str()],
         )
         .await
@@ -1115,7 +1397,7 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
         0
     );
     assert_eq!(table_count(&runtime, "observation_workflow_facts").await, 0);
-    assert_eq!(table_count(&runtime, "session_messages").await, 1);
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
     assert_eq!(table_count(&runtime, "sessions").await, 1);
     // The retained observation row itself stays immutable.
     let stored = store
@@ -1159,10 +1441,10 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
 }
 
 /// A provenance binding that names a different output but has no backing
-/// `session_messages` row is corrupt authority, not an existing-output
+/// message row is corrupt authority, not an existing-output
 /// collision. It must stay a hard `ProvenanceCollision`: the checkpoint and
 /// queue remain in place and the ghost provenance row is not deleted.
-#[tokio::test]
+#[asupersync::test]
 async fn drain_keeps_ghost_provenance_binding_a_hard_error() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1216,7 +1498,7 @@ async fn drain_keeps_ghost_provenance_binding_a_hard_error() {
     transaction.commit().await.unwrap();
     let stale_rows = provenance_rows(&runtime).await;
     assert_eq!(stale_rows.len(), 1);
-    assert_eq!(table_count(&runtime, "session_messages").await, 0);
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 0);
 
     let error = store
         .project_observation(observation.observation_id())
@@ -1337,7 +1619,7 @@ async fn raw_hidden_observation_json(
 /// One real catch-up pass over raw persisted source input: read the durable
 /// cursor, decode only the records the cursor does not cover, and persist
 /// each decoded candidate exactly as ingest would. Mirrors production provider ingest by
-/// ABORTING the pass on a persist error — an identity collision ends the
+/// ABORTING the pass on a persist error, an identity collision ends the
 /// pass, it does not skip to the next record.
 async fn run_catch_up_pass(
     store: &crate::GlobalDbObservationStore,
@@ -1384,13 +1666,12 @@ async fn run_catch_up_pass(
     (decoded, receipts)
 }
 
-/// Linux P1-3, covered-replay shape: an identity collision whose range the
-/// durable cursor already covers is a replayed verification probe, not the
-/// scan frontier. It must stay a typed fail-closed error and leave every
-/// coverage ledger untouched — no `admission_refused` advance row, no
-/// refusal-authority row, no cursor movement.
-#[tokio::test]
-async fn covered_replay_collision_leaves_coverage_state_untouched() {
+/// A collision read from a stale preflight after another writer already moved
+/// the cursor is a retryable cursor race, not proof that the candidate itself
+/// is permanently invalid. With no matching refusal terminal, the loser must
+/// leave every coverage ledger untouched and retry from the winning cursor.
+#[asupersync::test]
+async fn covered_collision_without_a_terminal_is_a_retryable_cursor_conflict() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -1428,20 +1709,14 @@ async fn covered_replay_collision_leaves_coverage_state_untouched() {
     );
     let error = store.persist_observation(covered_write).await.unwrap_err();
     assert!(
-        matches!(
-            error,
-            ObservationStoreError::ObservationCollision {
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-                ..
-            }
-        ),
-        "{error:?}"
+        matches!(error, ObservationStoreError::CursorConflict { .. }),
+        "a stale writer must retry from the winning cursor, got {error:?}"
     );
 
     assert_eq!(
-        admission_refused_advance_count(&runtime, &original).await,
+        identity_collision_advance_count(&runtime, &original).await,
         0,
-        "a covered replay must not write an admission_refused advance row"
+        "a covered replay must not write an identity-collision advance row"
     );
     assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
     assert_eq!(
@@ -1454,12 +1729,11 @@ async fn covered_replay_collision_leaves_coverage_state_untouched() {
     );
 }
 
-/// Linux P1-3, stale-expected shape: a colliding candidate whose expected
-/// cursor does not match the durable one is not the scan frontier. The
-/// refusal must stay the typed identity collision — never a cursor conflict,
-/// never recorded coverage.
-#[tokio::test]
-async fn stale_expected_cursor_collision_stays_a_typed_collision() {
+/// A colliding candidate whose expected cursor does not match the durable one
+/// has not established a terminal content refusal. It must surface the typed
+/// retryable cursor conflict and never record coverage.
+#[asupersync::test]
+async fn stale_expected_cursor_collision_is_a_retryable_cursor_conflict() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -1509,18 +1783,12 @@ async fn stale_expected_cursor_collision_stays_a_typed_collision() {
     );
     let error = store.persist_observation(gap_write).await.unwrap_err();
     assert!(
-        matches!(
-            error,
-            ObservationStoreError::ObservationCollision {
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-                ..
-            }
-        ),
-        "a stale-expected collision must stay the typed collision, got {error:?}"
+        matches!(error, ObservationStoreError::CursorConflict { .. }),
+        "a stale-expected collision must retry from durable authority, got {error:?}"
     );
 
     assert_eq!(
-        admission_refused_advance_count(&runtime, &original).await,
+        identity_collision_advance_count(&runtime, &original).await,
         0
     );
     assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
@@ -1533,10 +1801,122 @@ async fn stale_expected_cursor_collision_stays_a_typed_collision() {
     );
 }
 
+/// Two writers may classify against the same committed cursor before either
+/// enters the canonical writer lane. If the winner advances that cursor while
+/// the collision loser is waiting for the refusal transaction, the loser has
+/// lost a CAS; it has not established a permanent content refusal.
+#[asupersync::test(flavor = "multi_thread", workers = 2)]
+async fn refusal_cursor_cas_loser_is_retryable_and_writes_no_terminal(cx: &asupersync::Cx) {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.identity-collision.lost-cas").unwrap();
+    let (original, original_write) = collision_candidate(
+        &session_id,
+        "record.lost-cas",
+        1,
+        "original transcript record",
+        "receipt.lost-cas.original",
+        None,
+    );
+    assert!(matches!(
+        store.persist_observation(original_write).await.unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    let committed_cursor = store
+        .get_source_cursor(original.source(), original.scope())
+        .await
+        .unwrap();
+    let (rewritten, rewritten_write) = collision_candidate(
+        &session_id,
+        "record.lost-cas",
+        2,
+        "rewritten transcript record",
+        "receipt.lost-cas.rewritten",
+        committed_cursor.clone(),
+    );
+
+    // Hold the canonical writer lane before starting the loser. Its immutable
+    // preflight snapshot can still read the committed cursor, but its refusal
+    // transaction cannot enter until this winner publishes the next cursor.
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let winner = database.begin_write_transaction().await.unwrap();
+    let losing_store = store.clone();
+    let mut losing_write = cx
+        .spawn(move |_| async move { losing_store.persist_observation(rewritten_write).await })
+        .expect("spawn losing write");
+    let mut losing_write = std::pin::pin!(losing_write.join(cx));
+    assert!(
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(100),
+            &mut losing_write
+        )
+        .await
+        .is_err(),
+        "the loser must wait behind the held writer lane"
+    );
+
+    let source_json = serde_json::to_string(rewritten.source()).unwrap();
+    let scope_json = serde_json::to_string(rewritten.scope()).unwrap();
+    let winning_cursor = ObservationSourceCursorV1::for_ordering(
+        rewritten.source().clone(),
+        rewritten.scope().clone(),
+        rewritten.identity().generation(),
+        rewritten.identity().ordering_domain(),
+        rewritten.identity().position().end(),
+    )
+    .unwrap();
+    let winning_cursor_json = serde_json::to_string(&winning_cursor).unwrap();
+    winner
+        .execute(
+            COMMIT_SOURCE_CURSOR_SQL,
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                winning_cursor_json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    winner.commit().await.unwrap();
+
+    let error = losing_write.await.unwrap().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ObservationStoreError::CursorConflict {
+                ref expected,
+                ref actual,
+            } if **expected == committed_cursor && **actual == Some(winning_cursor.clone())
+        ),
+        "the CAS loser must retry from the winner's exact cursor, got {error:?}"
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(
+        identity_collision_advance_count(&runtime, &rewritten).await,
+        0,
+        "a lost CAS must not be made permanent through refusal coverage"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(original.source(), original.scope())
+            .await
+            .unwrap(),
+        Some(winning_cursor)
+    );
+}
+
 /// FileBytes replacement generations must restart at zero. The canonical
 /// observation-write contract rejects a mid-file replacement before it can
 /// reach persistence, so no refusal, coverage, or cursor mutation can occur.
-#[tokio::test]
+#[asupersync::test]
 async fn file_bytes_generation_jump_is_rejected_before_persistence() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1591,9 +1971,9 @@ async fn file_bytes_generation_jump_is_rejected_before_persistence() {
     );
 
     assert_eq!(
-        admission_refused_advance_count(&runtime, &original).await,
+        identity_collision_advance_count(&runtime, &original).await,
         0,
-        "a generation jump must not record admission_refused coverage over unscanned bytes"
+        "a generation jump must not record identity-collision coverage over unscanned bytes"
     );
     assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
     assert_eq!(
@@ -1608,7 +1988,7 @@ async fn file_bytes_generation_jump_is_rejected_before_persistence() {
 
 /// The refusal CAS compares typed cursor authority. JSON whitespace is not
 /// part of that authority and must not prevent atomic coverage.
-#[tokio::test]
+#[asupersync::test]
 async fn refusal_cas_accepts_equivalent_cursor_json_spelling() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1686,7 +2066,7 @@ async fn refusal_cas_accepts_equivalent_cursor_json_spelling() {
     ));
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
     assert_eq!(
-        admission_refused_advance_count(&runtime, &original).await,
+        identity_collision_advance_count(&runtime, &original).await,
         1
     );
     assert_eq!(
@@ -1783,7 +2163,7 @@ fn codex_revision_observation(
 /// canonical payload revision replay must still converge as
 /// `CoveredDuplicate`. The terminal is bound to the exact refused candidate
 /// digest, so it can never blanket-reject every differing digest.
-#[tokio::test]
+#[asupersync::test]
 async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1839,7 +2219,7 @@ async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
         ),
         "{refusal:?}"
     );
-    assert_eq!(admission_refused_advance_count(&runtime, &legacy).await, 1);
+    assert_eq!(identity_collision_advance_count(&runtime, &legacy).await, 1);
 
     // The recognized revision replay arrives at the SAME generation and range
     // as the refusal: same canonical id, same authored content, only the
@@ -1875,536 +2255,13 @@ async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
     assert_eq!(stored.observation().payload(), legacy.payload());
 }
 
-/// Store-level retention/restart contract driven from raw persisted source
-/// input; the real provider-boundary proof is the Vibe journey below:
-///
-/// 1. a real gen-1 catch-up pass ingests the original record from its raw
-///    JSONL line;
-/// 2. the file is rewritten (generation 2): the real rescan pass decodes the
-///    rewritten record, refuses it terminally, and continues past it;
-/// 3. later catch-up passes read the durable cursor and reopen ZERO source
-///    records — no decode, no identity derivation, no hashing;
-/// 4. production cursor-advance retention reclaims the superseded
-///    `admission_refused` advance row, and the terminal STILL holds: a stale
-///    in-flight re-admission answers from the retained refusal authority with
-///    zero adapter-side stored-row work;
-/// 5. the same holds across a full store restart, and the retained row stays
-///    byte-identical throughout.
-#[tokio::test]
-async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_record() {
-    use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
-
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let session_id = SessionId::new("session.terminal-refusal.retention").unwrap();
-
-    // Raw persisted source input.
-    let original_lines = vec![(
-        (0, 1),
-        raw_source_line(
-            &session_id,
-            "record.retention.0",
-            (0, 1),
-            "original record zero",
-        ),
-    )];
-    let rewritten_lines = vec![
-        (
-            (0, 1),
-            raw_source_line(
-                &session_id,
-                "record.retention.0",
-                (0, 1),
-                "rewritten record zero",
-            ),
-        ),
-        (
-            (1, 2),
-            raw_source_line(
-                &session_id,
-                "record.retention.1",
-                (1, 2),
-                "appended record one",
-            ),
-        ),
-    ];
-
-    // Pass 0: gen-1 ingest of the original file.
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
-    assert_eq!(decoded, 1);
-    assert!(matches!(
-        receipts[0],
-        Ok(ObservationPersistOutcome::Committed(_))
-    ));
-
-    // Pass 1: gen-2 rescan of the rewritten file. Record zero collides, is
-    // terminally refused, and — like production ingest — ABORTS the pass. The
-    // refusal's own coverage advance lets the follow-up pass move on to
-    // record one and converge.
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
-    assert_eq!(decoded, 1, "the collision aborts the pass");
-    assert!(matches!(
-        receipts[0],
-        Err(ObservationStoreError::ObservationCollision {
-            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-            ..
-        })
-    ));
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-resume").await;
-    assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
-    assert!(matches!(
-        receipts[0],
-        Ok(ObservationPersistOutcome::Committed(_))
-    ));
-    let refused = decode_raw_source_record(
-        &session_id,
-        &rewritten_lines[0].1,
-        2,
-        (0, 1),
-        "receipt.catch-up.gen2.0",
-    );
-    let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
-    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
-
-    // The terminal marker exists: arm the corruption tripwire on the retained
-    // row. Every later pass in this test — catch-up, production retention,
-    // the stale re-admission — must complete without touching it.
-    let original_row =
-        corrupt_stored_observation_row(&runtime, refused.observation_id().as_str()).await;
-
-    // Pass 2: a later catch-up pass reopens nothing.
-    let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
-    assert_eq!(
-        decoded, 0,
-        "catch-up must not reopen covered source records"
-    );
-
-    // Production retention reclaims the superseded admission_refused advance
-    // row (the cursor has moved strictly past its coverage).
-    let database = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("registered profile database");
-    let report = database
-        .run_observation_retention(
-            None,
-            &ObservationRetentionConfig::default(),
-            RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
-        )
-        .await
-        .expect("apply observation retention");
-    assert!(report.applied);
-    let legacy_observation = decode_raw_source_record(
-        &session_id,
-        &original_lines[0].1,
-        1,
-        (0, 1),
-        "receipt.catch-up.gen1.0",
-    );
-    assert_eq!(
-        admission_refused_advance_count(&runtime, &legacy_observation).await,
-        0,
-        "retention must reclaim the superseded admission_refused advance row"
-    );
-    // The refusal terminal itself is a retained authority.
-    assert_eq!(
-        admission_refusal_rows(&runtime).await.len(),
-        1,
-        "the refusal terminal must survive cursor-advance retention"
-    );
-
-    // A stale in-flight re-admission (a temporal trigger re-presenting the
-    // refused candidate without a current frontier view) still terminates.
-    // The armed tripwire is the no-rework proof: any stored-row decode,
-    // identity re-derivation, or payload re-hash would fail on the corrupted
-    // bytes instead of producing this typed refusal.
-    let stale_replay = anchored_write_for(refused.clone(), None);
-    let error = store.persist_observation(stale_replay).await.unwrap_err();
-    assert!(
-        matches!(
-            error,
-            ObservationStoreError::ObservationCollision {
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-                ..
-            }
-        ),
-        "{error:?}"
-    );
-    assert_eq!(
-        raw_observation_json(&runtime, refused.observation_id().as_str()).await,
-        tripwire_observation_json(refused.observation_id().as_str()),
-        "no pass may read back, repair, or rewrite the corrupted retained row"
-    );
-
-    // Disarm the tripwire before remount: mount-time invariant convergence
-    // legitimately decodes committed observation rows.
-    restore_stored_observation_row(&runtime, refused.observation_id().as_str(), &original_row)
-        .await;
-
-    // Restart: the terminal and coverage are durable, catch-up still reopens
-    // nothing, and the retained row is byte-identical.
-    drop(store);
-    drop(runtime);
-    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let reopened_store = reopened
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let (decoded, _) =
-        run_catch_up_pass(&reopened_store, &session_id, 2, &rewritten_lines, "gen2-c").await;
-    assert_eq!(decoded, 0);
-    assert_eq!(admission_refusal_rows(&reopened).await.len(), 1);
-    assert_eq!(
-        raw_observation_json(&reopened, refused.observation_id().as_str()).await,
-        retained_row,
-        "the retained observation row must stay byte-identical"
-    );
-}
-
-/// Items 3 and 6 of the owner review, closed together: after production
-/// cursor-advance retention has reclaimed the `admission_refused` advance
-/// row, a REAL subsequent catch-up/temporal pass — a generation-3 rescan that
-/// re-reads the rewritten file from raw persisted source input and rebuilds
-/// every candidate through the ingest pipeline, NOT a preconstructed write —
-/// re-admits the refused record and must be suppressed by the retained
-/// terminal with ZERO store-side decode/canonicalize/SHA work.
-///
-/// The no-rework proof is the corruption tripwire: the retained row's
-/// payload bytes and identity-derivation source columns are garbage for the
-/// whole re-admission window, so the typed suppression can only come from
-/// the marker fast path — the retained row is never read back, decoded,
-/// collision classified, or revision-probed. The real Vibe journey below
-/// separately proves the production source boundary performs no subsequent
-/// frame materialization.
-#[tokio::test]
-async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework() {
-    use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
-
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let session_id = SessionId::new("session.terminal-refusal.rescan").unwrap();
-    let original_lines = vec![(
-        (0, 1),
-        raw_source_line(
-            &session_id,
-            "record.rescan.0",
-            (0, 1),
-            "original record zero",
-        ),
-    )];
-    let rewritten_lines = vec![
-        (
-            (0, 1),
-            raw_source_line(
-                &session_id,
-                "record.rescan.0",
-                (0, 1),
-                "rewritten record zero",
-            ),
-        ),
-        (
-            (1, 2),
-            raw_source_line(
-                &session_id,
-                "record.rescan.1",
-                (1, 2),
-                "appended record one",
-            ),
-        ),
-    ];
-
-    // Collide at N: gen-1 ingest, then the gen-2 rescan refuses the rewritten
-    // record terminally and commits the appended record, advancing the cursor
-    // strictly past the refused coverage.
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
-    assert_eq!(decoded, 1);
-    assert!(matches!(
-        receipts[0],
-        Ok(ObservationPersistOutcome::Committed(_))
-    ));
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
-    assert_eq!(decoded, 1, "the collision aborts the pass like production");
-    assert!(matches!(
-        receipts[0],
-        Err(ObservationStoreError::ObservationCollision {
-            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-            ..
-        })
-    ));
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-resume").await;
-    assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
-    assert!(matches!(
-        receipts[0],
-        Ok(ObservationPersistOutcome::Committed(_))
-    ));
-    let refused = decode_raw_source_record(
-        &session_id,
-        &rewritten_lines[0].1,
-        2,
-        (0, 1),
-        "receipt.catch-up.gen2.0",
-    );
-    let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
-
-    // Arm the corruption tripwire: retention, the gen-3 re-admission, and
-    // every later pass must complete without touching the retained row.
-    let original_row =
-        corrupt_stored_observation_row(&runtime, refused.observation_id().as_str()).await;
-
-    // Run production retention: the superseded admission_refused advance row
-    // is reclaimed, the refusal terminal survives.
-    let database = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("registered profile database");
-    database
-        .run_observation_retention(
-            None,
-            &ObservationRetentionConfig::default(),
-            RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
-        )
-        .await
-        .expect("apply observation retention");
-    assert_eq!(
-        admission_refused_advance_count(&runtime, &refused).await,
-        0,
-        "retention must reclaim the superseded admission_refused advance row"
-    );
-
-    // The file changes again: a REAL gen-3 rescan re-reads the raw source and
-    // re-admits the refused record through the ingest pipeline itself. The
-    // fast path answers from the terminal, converges coverage with one typed
-    // cursor-advance write, and aborts the pass like production.
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3").await;
-    assert_eq!(
-        decoded, 1,
-        "a rescan after a real file change re-reads the raw source and aborts on the collision"
-    );
-    assert!(
-        matches!(
-            receipts[0],
-            Err(ObservationStoreError::ObservationCollision {
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-                ..
-            })
-        ),
-        "the re-admission over the corrupted retained row must stay the typed terminal \
-         collision — any stored-row decode, identity re-derivation, or payload re-hash \
-         would have failed on the tripwire bytes; {:?}",
-        receipts[0]
-    );
-    // The suppression above was answered by the retained refusal terminal:
-    // it must have survived cursor-advance retention.
-    assert_eq!(
-        admission_refusal_rows(&runtime).await.len(),
-        1,
-        "the refusal terminal must survive cursor-advance retention"
-    );
-    // The resumed pass commits the appended record past the converged
-    // coverage, and the NEXT pass reopens zero source records.
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-resume").await;
-    assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
-    assert!(receipts[0].is_ok(), "{:?}", receipts[0]);
-    let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
-    assert_eq!(decoded, 0, "the converged rescan reopens no source records");
-
-    // The corrupted bytes are untouched: no pass read back, repaired, or
-    // rewrote the retained row.
-    assert_eq!(
-        raw_observation_json(&runtime, refused.observation_id().as_str()).await,
-        tripwire_observation_json(refused.observation_id().as_str()),
-        "no pass may read back, repair, or rewrite the corrupted retained row"
-    );
-    // Disarm the tripwire; the restored row is byte-identical to the
-    // pre-corruption capture.
-    restore_stored_observation_row(&runtime, refused.observation_id().as_str(), &original_row)
-        .await;
-    assert_eq!(
-        raw_observation_json(&runtime, refused.observation_id().as_str()).await,
-        retained_row,
-        "the retained observation row must stay byte-identical"
-    );
-}
-
-/// EOF gate: the refused record is the LAST record of its file, and
-/// production ingest ABORTS a pass on the collision, so no following
-/// committed record can ever advance coverage on its behalf. Across
-/// production retention, a new generation, and a full restart, the refusal
-/// fast path itself must converge each new scan frontier so later passes
-/// reopen nothing — zero decode, zero identity derivation, zero hashing,
-/// proven by keeping the retained row corrupted for the whole window.
-#[tokio::test]
-async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
-    use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
-
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let session_id = SessionId::new("session.terminal-refusal.eof").unwrap();
-    // The refused record is the ONLY record: nothing follows it, ever.
-    let original_lines = vec![(
-        (0, 1),
-        raw_source_line(&session_id, "record.eof.0", (0, 1), "original eof record"),
-    )];
-    let rewritten_lines = vec![(
-        (0, 1),
-        raw_source_line(&session_id, "record.eof.0", (0, 1), "rewritten eof record"),
-    )];
-
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
-    assert_eq!(decoded, 1);
-    assert!(matches!(
-        receipts[0],
-        Ok(ObservationPersistOutcome::Committed(_))
-    ));
-
-    // Gen-2 rescan: the EOF record collides and the pass aborts. The refusal
-    // records terminal + coverage, so the SAME generation never reopens it.
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
-    assert_eq!(decoded, 1);
-    assert!(matches!(
-        receipts[0],
-        Err(ObservationStoreError::ObservationCollision {
-            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-            ..
-        })
-    ));
-    let refused = decode_raw_source_record(
-        &session_id,
-        &rewritten_lines[0].1,
-        2,
-        (0, 1),
-        "receipt.catch-up.gen2.0",
-    );
-    let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
-
-    // Arm the corruption tripwire: retention, the gen-3 re-admission, and
-    // every later pass must complete without touching the retained row.
-    let original_row =
-        corrupt_stored_observation_row(&runtime, refused.observation_id().as_str()).await;
-    let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
-    assert_eq!(
-        decoded, 0,
-        "the refused EOF coverage holds within its generation"
-    );
-
-    // Production retention runs (the EOF advance is the frontier itself, so
-    // it is not reclaimable yet — the terminal must not depend on that).
-    let database = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("registered profile database");
-    database
-        .run_observation_retention(
-            None,
-            &ObservationRetentionConfig::default(),
-            RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
-        )
-        .await
-        .expect("apply observation retention");
-
-    // Gen-3 rescan (file touched again): the re-admit is answered from the
-    // terminal AND converges the new generation's coverage, so this exact
-    // decode happens once per real file change — never again for gen 3.
-    let (decoded, receipts) =
-        run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3").await;
-    assert_eq!(decoded, 1);
-    assert!(
-        matches!(
-            receipts[0],
-            Err(ObservationStoreError::ObservationCollision {
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-                ..
-            })
-        ),
-        "the EOF re-admit over the corrupted retained row must stay the typed terminal \
-         collision — any stored-row decode, identity re-derivation, or payload re-hash \
-         would have failed on the tripwire bytes; {:?}",
-        receipts[0]
-    );
-    let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
-    assert_eq!(
-        decoded, 0,
-        "later gen-3 passes must never reopen the refused EOF record"
-    );
-
-    // Retention now reclaims the superseded gen-2 advance; the terminal and
-    // the converged coverage survive.
-    database
-        .run_observation_retention(
-            None,
-            &ObservationRetentionConfig::default(),
-            RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
-        )
-        .await
-        .expect("apply observation retention");
-    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
-    assert_eq!(
-        raw_observation_json(&runtime, refused.observation_id().as_str()).await,
-        tripwire_observation_json(refused.observation_id().as_str()),
-        "no pass may read back, repair, or rewrite the corrupted retained row"
-    );
-
-    // Disarm the tripwire before remount: mount-time invariant convergence
-    // legitimately decodes committed observation rows.
-    restore_stored_observation_row(&runtime, refused.observation_id().as_str(), &original_row)
-        .await;
-
-    // Restart: coverage and terminal are durable; nothing reopens.
-    drop(store);
-    drop(runtime);
-    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let reopened_store = reopened
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let (decoded, _) =
-        run_catch_up_pass(&reopened_store, &session_id, 3, &rewritten_lines, "gen3-c").await;
-    assert_eq!(
-        decoded, 0,
-        "restarted rescans must never reopen the refused EOF record"
-    );
-    assert_eq!(
-        raw_observation_json(&reopened, refused.observation_id().as_str()).await,
-        retained_row,
-        "the retained observation row must stay byte-identical"
-    );
-}
-
 /// Atomicity gate: the refusal marker commits before its cursor advance, so a
-/// failure between the two — the injected cursor-advance failure state, here
-/// seeded durably as exactly what such a crash leaves behind — produces a
+/// failure between the two, the injected cursor-advance failure state, here
+/// seeded durably as exactly what such a crash leaves behind, produces a
 /// marker with unconverged coverage. That orphan must be self-repairing: the
 /// next frontier pass answers from the marker AND repairs coverage, so the
 /// record is reopened at most once and never again.
-#[tokio::test]
+#[asupersync::test]
 async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2431,7 +2288,7 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     ));
 
     // Injected cursor-advance failure: the marker transaction committed, the
-    // advance did not. Seed exactly that durable state — the refusal marker
+    // advance did not. Seed exactly that durable state, the refusal marker
     // exists while the cursor still sits at generation 1.
     let refused = decode_raw_source_record(
         &session_id,
@@ -2487,7 +2344,7 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
             })
         ),
         "the orphan-marker re-admit over the corrupted retained row must stay the typed \
-         terminal collision — any stored-row decode, identity re-derivation, or payload \
+         terminal collision, any stored-row decode, identity re-derivation, or payload \
          re-hash would have failed on the tripwire bytes; {:?}",
         receipts[0]
     );
@@ -2549,12 +2406,11 @@ impl ProductionJsonlAdmission {
         tracedecay_sessions::observation::ObservationApplication<crate::GlobalDbObservationStore>,
         tracedecay_sessions::admission::HostAdmissionOutcome,
     > {
-        let sanitizer = tracedecay_runtime_core::privacy::RecordSanitizerV1::observation_v1()
-            .map_err(|_| {
-                tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
-                    "sanitizer_unavailable",
-                )
-            })?;
+        let sanitizer = tracedecay_privacy::RecordSanitizerV1::observation_v1().map_err(|_| {
+            tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
+                "sanitizer_unavailable",
+            )
+        })?;
         Ok(
             tracedecay_sessions::observation::ObservationApplication::new(
                 self.store.clone(),
@@ -2603,9 +2459,9 @@ impl ProductionJsonlAdmission {
                     "observation_batch_non_durable",
                 )
             }
-            ObservationApplicationError::BatchWorkerStopped => {
+            ObservationApplicationError::PreparationWorkerStopped => {
                 tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
-                    "observation_batch_worker_stopped",
+                    "observation_preparation_worker_stopped",
                 )
             }
             ObservationApplicationError::Store(_) => {
@@ -2671,6 +2527,44 @@ impl tracedecay_sessions::admission::HostAdmission for ProductionJsonlAdmission 
                     )
                 })
         })
+    }
+
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        Box::pin(async move {
+            self.store
+                .committed_source_cursors(source, scope)
+                .await
+                .map_err(|_| {
+                    tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
+                        "authority_read_failed",
+                    )
+                })
+        })
+    }
+
+    // This seam drains no projection, so a rewrite has nothing to retire.
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+        _previous: tracedecay_domain::ObservationSourceGenerationV1,
+        _generation: tracedecay_domain::ObservationSourceGenerationV1,
+        _retained_through: u64,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+        _generation: tracedecay_domain::ObservationSourceGenerationV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, u64> {
+        Box::pin(async { Ok(0) })
     }
 
     fn drain_projection_queue<'a>(
@@ -2754,14 +2648,14 @@ fn replace_vibe_eof(transcript: &Path, body: &str) {
 }
 
 async fn run_vibe_trigger(
-    source: &tracedecay_sessions::runtime::vibe::VibeSource,
+    source: &tracedecay_sessions::runtime::hosts::vibe::VibeSource,
     workspace: &Path,
     admission: &ProductionJsonlAdmission,
 ) -> Result<
-    tracedecay_sessions::runtime::vibe::VibeCaptureOutcome,
+    tracedecay_sessions::runtime::hosts::vibe::VibeCaptureOutcome,
     tracedecay_sessions::runtime::source::TranscriptIngestError,
 > {
-    tracedecay_sessions::runtime::vibe::capture_vibe_observations(
+    tracedecay_sessions::runtime::hosts::vibe::capture_vibe_observations(
         admission,
         source,
         workspace,
@@ -2777,7 +2671,7 @@ async fn run_vibe_trigger(
 /// A rewritten EOF record collides once; the global-db transaction records the
 /// refusal and cursor together. Retention, another file generation, the next
 /// trigger, and a full store restart must never rematerialize that record.
-#[tokio::test]
+#[asupersync::test]
 async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_without_rework() {
     use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
 
@@ -2786,7 +2680,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
     std::fs::create_dir_all(&workspace).unwrap();
     let vibe_home = tmp.path().join("vibe-home");
     let transcript = write_vibe_fixture(&vibe_home, &workspace, "original eof record");
-    let source = tracedecay_sessions::runtime::vibe::VibeSource::with_vibe_home(&vibe_home)
+    let source = tracedecay_sessions::runtime::hosts::vibe::VibeSource::with_vibe_home(&vibe_home)
         .for_user_scope(Vec::new());
     let runtime = HostAdmissionTestRuntimeV1::profile_with_session_capture_resources(
         tmp.path().join("profile"),
@@ -2832,12 +2726,13 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             provider: "vibe",
             reason: "observation_identity_collision",
             retryable: false,
+            ..
         }
     ));
     assert_eq!(admission.capture_count() - collision_calls, 1);
     let refusals = admission_refusal_rows(&runtime).await;
     assert_eq!(refusals.len(), 1);
-    assert_eq!(admission_refused_total(&runtime).await, 1);
+    assert_eq!(identity_collision_advance_total(&runtime).await, 1);
     let refused_cursor = only_source_cursor(&runtime).await;
     assert_ne!(refused_cursor.generation(), original_cursor.generation());
     assert_eq!(
@@ -2866,13 +2761,22 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros(),
         )
         .await
         .expect("apply observation retention");
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
 
     replace_vibe_eof(&transcript, "rewritten eof record");
+    let identical_calls = admission.capture_count();
+    let identical = run_vibe_trigger(&source, &workspace, &admission)
+        .await
+        .expect("a byte-identical replacement resumes its recorded prefix");
+    assert_eq!(identical.bytes_consumed, 0);
+    assert_eq!(admission.capture_count() - identical_calls, 0);
+    assert_eq!(only_source_cursor(&runtime).await, refused_cursor);
+
+    replace_vibe_eof(&transcript, "rewritten eof record again");
     let generation_calls = admission.capture_count();
     let generation_collision = run_vibe_trigger(&source, &workspace, &admission)
         .await
@@ -2883,6 +2787,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             provider: "vibe",
             reason: "observation_identity_collision",
             retryable: false,
+            ..
         }
     ));
     assert_eq!(admission.capture_count() - generation_calls, 1);
@@ -2908,12 +2813,13 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_application::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros(),
         )
         .await
         .expect("apply post-generation observation retention");
-    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
-    assert!(admission_refused_total(&runtime).await >= 1);
+    // One marker per distinct refused EOF body.
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 2);
+    assert!(identity_collision_advance_total(&runtime).await >= 1);
     assert_eq!(
         raw_observation_json(&runtime, &retained_observation_id).await,
         retained_row,
@@ -2937,21 +2843,21 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
     assert_eq!(restart.bytes_consumed, 0);
     assert_eq!(reopened_admission.capture_count() - restart_calls, 0);
     assert_eq!(only_source_cursor(&reopened).await, generation_cursor);
-    assert_eq!(admission_refusal_rows(&reopened).await.len(), 1);
+    assert_eq!(admission_refusal_rows(&reopened).await.len(), 2);
     assert_eq!(
         raw_observation_json(&reopened, &retained_observation_id).await,
         retained_row
     );
 }
 
-/// Linux gate 2: a REAL injected cursor-advance failure — a conflicting
+/// Linux gate 2: a REAL injected cursor-advance failure, a conflicting
 /// coverage row already owns the exact advance-ledger key the refusal must
 /// claim, so recording coverage genuinely fails inside the authority
 /// transaction. Marker and coverage are one atomic transaction: the failure
 /// must leave NO visible refusal marker (no orphan), no cursor movement, and
 /// the injected row untouched; clearing the conflict lets the next frontier
 /// pass record marker + coverage together.
-#[tokio::test]
+#[asupersync::test]
 async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3029,11 +2935,36 @@ async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
         Vec::new(),
         "a failed coverage advance must not leave a visible refusal marker"
     );
-    assert!(
-        matches!(error, ObservationStoreError::CursorAdvanceCollision),
-        "the injected advance failure must surface as the typed cursor-advance \
-         collision, got {error:?}"
+    let ObservationStoreError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
+        panic!("the injected advance failure must expose the immutable ledger mismatch");
+    };
+    assert_eq!(disagreement.source(), rewritten.source());
+    assert_eq!(disagreement.scope(), rewritten.scope());
+    assert_eq!(
+        disagreement.coverage(),
+        tracedecay_store::observation::ObservationCoverageV1::new(
+            rewritten.identity().generation(),
+            rewritten.identity().ordering_domain(),
+            rewritten.identity().position(),
+        )
     );
+    assert!(matches!(
+        disagreement.stored().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::CanonicalPayloadRevision)
+    ));
+    assert!(matches!(
+        disagreement.stored().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Known(receipt_id)
+            if receipt_id == original.receipt().receipt().receipt_id()
+    ));
+    assert!(matches!(
+        disagreement.candidate().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::ObservationIdentityCollision)
+    ));
+    assert!(matches!(
+        disagreement.candidate().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Absent
+    ));
     assert_eq!(
         store
             .get_source_cursor(original.source(), original.scope())
@@ -3063,11 +2994,7 @@ async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
         .await
         .unwrap();
     transaction
-        .execute_batch(
-            "CREATE TRIGGER source_cursor_advances_immutable_delete_v1 BEFORE DELETE ON \
-             source_cursor_advances BEGIN SELECT RAISE(ABORT, \
-             'source cursor advances are immutable'); END",
-        )
+        .execute_batch(SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -3097,13 +3024,516 @@ async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
     );
 }
 
+#[asupersync::test]
+async fn covered_frontier_keeps_the_first_reason_when_a_second_owner_advances() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.cursor-owned-frontier").unwrap();
+    let (observation, _) = collision_candidate(
+        &session_id,
+        "record.cursor-owned-frontier",
+        1,
+        "owned frontier fixture",
+        "receipt.cursor-owned-frontier",
+        None,
+    );
+    let advance = ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        None,
+        observation.identity().position(),
+        ObservationCoverageReason::OutOfScope,
+    )
+    .unwrap();
+    seed_cursor_replay(
+        &runtime,
+        &advance,
+        Some(ObservationCoverageReason::BlankFrame),
+    )
+    .await;
+
+    assert_eq!(
+        store.advance_source_cursor(advance.clone()).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT reason, COUNT(*) FROM source_cursor_advances GROUP BY reason",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("owned ledger row");
+    assert_eq!(row.get::<String>(0).unwrap(), "blank_frame");
+    assert_eq!(row.get::<i64>(1).unwrap(), 1);
+    assert!(rows.next().await.unwrap().is_none());
+    drop(rows);
+    assert_eq!(
+        store
+            .get_source_cursor(observation.source(), observation.scope())
+            .await
+            .unwrap()
+            .as_ref()
+            .map(ObservationSourceCursorV1::position),
+        Some(advance.next_cursor().position())
+    );
+}
+
+#[asupersync::test]
+async fn runtime_cursor_replay_preserves_structured_ledger_disagreement() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.cursor-ledger-runtime-mismatch").unwrap();
+    let (observation, _) = collision_candidate(
+        &session_id,
+        "record.cursor-ledger-runtime-mismatch",
+        1,
+        "runtime mismatch fixture",
+        "receipt.cursor-ledger-runtime-mismatch",
+        None,
+    );
+    let advance = ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        None,
+        observation.identity().position(),
+        ObservationCoverageReason::OutOfScope,
+    )
+    .unwrap();
+    seed_cursor_replay(
+        &runtime,
+        &advance,
+        Some(ObservationCoverageReason::BlankFrame),
+    )
+    .await;
+    // The seeded cursor already stands at `next`. Pull it back so this
+    // advance is the write that would move the frontier, where a stored
+    // reason still disagrees.
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute("DELETE FROM source_cursors", ())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let error = store
+        .advance_source_cursor(advance.clone())
+        .await
+        .unwrap_err();
+    let ObservationStoreError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
+        panic!("runtime disagreement must survive the global adapter boundary");
+    };
+    assert_eq!(disagreement.source(), observation.source());
+    assert_eq!(disagreement.scope(), observation.scope());
+    assert_eq!(disagreement.coverage(), advance.coverage());
+    assert!(matches!(
+        disagreement.stored().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::BlankFrame)
+    ));
+    assert!(matches!(
+        disagreement.stored().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Absent
+    ));
+    assert!(matches!(
+        disagreement.candidate().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::OutOfScope)
+    ));
+    assert!(matches!(
+        disagreement.candidate().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Absent
+    ));
+}
+
+#[asupersync::test]
+async fn covered_cursor_without_a_ledger_row_is_already_owned() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.cursor-runtime-generic-collision").unwrap();
+    let (observation, _) = collision_candidate(
+        &session_id,
+        "record.cursor-runtime-generic-collision",
+        1,
+        "runtime generic collision fixture",
+        "receipt.cursor-runtime-generic-collision",
+        None,
+    );
+    let advance = ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        None,
+        observation.identity().position(),
+        ObservationCoverageReason::OutOfScope,
+    )
+    .unwrap();
+    seed_cursor_replay(&runtime, &advance, None).await;
+
+    assert_eq!(
+        store.advance_source_cursor(advance).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
+}
+
+#[asupersync::test]
+async fn concurrent_cursor_owners_with_different_reasons_share_one_frontier(cx: &asupersync::Cx) {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.cursor-concurrent-owners").unwrap();
+    let (observation, _) = collision_candidate(
+        &session_id,
+        "record.cursor-concurrent-owners",
+        1,
+        "concurrent owners fixture",
+        "receipt.cursor-concurrent-owners",
+        None,
+    );
+    let blank = ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        None,
+        observation.identity().position(),
+        ObservationCoverageReason::BlankFrame,
+    )
+    .unwrap();
+    let out_of_scope = ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        None,
+        observation.identity().position(),
+        ObservationCoverageReason::OutOfScope,
+    )
+    .unwrap();
+    // Hold the writer so both owners pass the pre-check against the empty
+    // frontier and only then race the same coverage key. A short-circuit
+    // after one has already committed would not exercise the conflict path.
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let gate = database.begin_write_transaction().await.unwrap();
+    let left_store = store.clone();
+    let right_store = store.clone();
+    let mut left_task = cx
+        .spawn(move |_| async move { left_store.advance_source_cursor(blank).await })
+        .expect("spawn blank-frame owner");
+    let mut right_task = cx
+        .spawn(move |_| async move { right_store.advance_source_cursor(out_of_scope).await })
+        .expect("spawn out-of-scope owner");
+    let mut left_task = std::pin::pin!(left_task.join(cx));
+    let mut right_task = std::pin::pin!(right_task.join(cx));
+    assert!(
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(200),
+            &mut left_task
+        )
+        .await
+        .is_err(),
+        "the blank-frame owner must wait behind the held writer"
+    );
+    assert!(
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(200),
+            &mut right_task
+        )
+        .await
+        .is_err(),
+        "the out-of-scope owner must wait behind the held writer"
+    );
+    gate.rollback().await.unwrap();
+    let left = left_task
+        .await
+        .unwrap()
+        .expect("blank-frame owner must not collide");
+    let right = right_task
+        .await
+        .unwrap()
+        .expect("out-of-scope owner must not collide");
+    let outcomes = [left, right];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == CursorAdvanceOutcome::Committed)
+            .count(),
+        1,
+        "exactly one owner commits the frontier, got {outcomes:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == CursorAdvanceOutcome::ExactDuplicate)
+            .count(),
+        1,
+        "the other owner observes the owned frontier, got {outcomes:?}"
+    );
+    assert_eq!(table_count(&runtime, "source_cursor_advances").await, 1);
+    assert_eq!(table_count(&runtime, "source_cursors").await, 1);
+    let cursor = only_source_cursor(&runtime).await;
+    assert_eq!(cursor.position(), observation.identity().position().end());
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query("SELECT reason FROM source_cursor_advances", ())
+        .await
+        .unwrap();
+    let reason = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("one ledger reason")
+        .get::<String>(0)
+        .unwrap();
+    assert!(
+        reason == "blank_frame" || reason == "out_of_scope",
+        "the retained reason must be one of the two owners, got {reason}"
+    );
+}
+
+/// Overwrites the durable cursor for one source, the shape a retained-history
+/// rescan sees when it resumes behind the admitted frontier.
+async fn rewind_source_cursor(
+    runtime: &HostAdmissionTestRuntimeV1,
+    cursor: &ObservationSourceCursorV1,
+) {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            COMMIT_SOURCE_CURSOR_SQL,
+            params![
+                serde_json::to_string(cursor.source()).unwrap().as_str(),
+                serde_json::to_string(cursor.scope()).unwrap().as_str(),
+                serde_json::to_string(cursor).unwrap().as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+/// A cursor advance is idempotency-keyed by its coverage, not by the whole
+/// command, so a retained-history rescan replays an already-admitted coverage
+/// with different command bytes: the `expected_cursor` it resumed from carries
+/// a freshly computed resume checkpoint. The writer answers with a conflict
+/// against the earlier receipt, and treating that as a permanent collision is
+/// what wedges retained ingest. The durable cursor already sits exactly at
+/// `next_cursor`, so the coverage is applied and the replay is a duplicate.
+/// A conflict whose ledger already records this coverage restores the cursor.
+/// A pruned ledger row is recorded again from the durable cursor.
+#[asupersync::test]
+async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate() {
+    const FILE_IDENTITY: u64 = 41;
+
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(COLLISION_PROVIDER).unwrap(),
+        SessionId::new("session.cursor-replay-new-command-bytes").unwrap(),
+    )
+    .unwrap();
+    let generation = ObservationSourceGenerationV1::new(7).unwrap();
+    let cursor_at = |offset: u64, resume_fingerprint: u64| {
+        ObservationSourceCursorV1::for_ordering(
+            source.clone(),
+            ObservationScopeV1::Profile,
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            offset,
+        )
+        .unwrap()
+        .with_resume_checkpoint(FILE_IDENTITY, resume_fingerprint)
+    };
+    let advance_over = |expected: Option<ObservationSourceCursorV1>,
+                        covered: (u64, u64),
+                        resume_fingerprint: u64| {
+        ObservationCursorAdvance::new(
+            source.clone(),
+            ObservationScopeV1::Profile,
+            generation,
+            expected,
+            ObservationSourceRangeV1::new(covered.0, covered.1).unwrap(),
+            ObservationCoverageReason::BlankFrame,
+        )
+        .unwrap()
+        .with_resume_checkpoint(FILE_IDENTITY, resume_fingerprint)
+    };
+
+    assert_eq!(
+        store
+            .advance_source_cursor(advance_over(None, (0, 5), 11))
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::Committed
+    );
+    let admitted = advance_over(Some(cursor_at(5, 11)), (5, 10), 22);
+    assert_eq!(
+        store.advance_source_cursor(admitted.clone()).await.unwrap(),
+        CursorAdvanceOutcome::Committed
+    );
+
+    let replay = advance_over(Some(cursor_at(5, 33)), (5, 10), 22);
+    assert_eq!(
+        replay.coverage(),
+        admitted.coverage(),
+        "the replay must reuse the admitted coverage idempotency key"
+    );
+    assert_ne!(
+        replay, admitted,
+        "the replay must carry different command bytes"
+    );
+    assert_eq!(
+        store.advance_source_cursor(replay).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate,
+        "a coverage replay whose cursor is already at next must not wedge history"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap(),
+        Some(cursor_at(10, 22)),
+        "a duplicate advance must leave the admitted frontier untouched"
+    );
+
+    rewind_source_cursor(&runtime, &cursor_at(5, 11)).await;
+    assert_eq!(
+        store
+            .advance_source_cursor(advance_over(Some(cursor_at(5, 11)), (5, 10), 44))
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::Committed,
+        "a coverage the ledger already admitted must restore the cursor"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap(),
+        Some(cursor_at(10, 44))
+    );
+}
+
+#[asupersync::test]
+async fn runtime_cursor_replay_preserves_storage_failure() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.cursor-runtime-storage-failure").unwrap();
+    let (observation, _) = collision_candidate(
+        &session_id,
+        "record.cursor-runtime-storage-failure",
+        1,
+        "runtime storage failure fixture",
+        "receipt.cursor-runtime-storage-failure",
+        None,
+    );
+    let advance = ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        None,
+        observation.identity().position(),
+        ObservationCoverageReason::OutOfScope,
+    )
+    .unwrap();
+    seed_cursor_replay(&runtime, &advance, None).await;
+
+    assert_eq!(
+        store.advance_source_cursor(advance.clone()).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
+
+    let advance = ObservationCursorAdvance::for_ordering(
+        ObservationSourceIdentityV1::for_provider(
+            ProviderId::new(COLLISION_PROVIDER).unwrap(),
+            SessionId::new("session.cursor-runtime-storage-uncovered").unwrap(),
+        )
+        .unwrap(),
+        ObservationScopeV1::Profile,
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        None,
+        observation.identity().position(),
+        ObservationCoverageReason::OutOfScope,
+    )
+    .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "DROP TABLE td_runtime_writer_idempotency_v2;
+             CREATE VIEW td_runtime_writer_idempotency_v2 AS SELECT 1 AS invalid_shape;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let error = store.advance_source_cursor(advance).await.unwrap_err();
+    assert!(
+        matches!(error, ObservationStoreError::Storage { .. }),
+        "runtime storage failure was misclassified as a durable cursor collision: {error:?}"
+    );
+}
+
 /// Narrow-collision gate: a durable provenance row that names the SAME output
-/// as the drain now derives but disagrees on its content — corrupt digest,
-/// receipt, or anchor — is corrupt provenance authority, not an
+/// as the drain now derives but disagrees on its content, corrupt digest,
+/// receipt, or anchor, is corrupt provenance authority, not an
 /// existing-output collision. It must stay a hard `ProvenanceCollision` with
 /// the queue item retained and the checkpoint unmoved; only a row binding a
 /// DIFFERENT output converges to the durable skip.
-#[tokio::test]
+#[asupersync::test]
 async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
     // Learn the derived output binding from a clean drain of the identical
     // fixture in a scratch store (the derivation is deterministic).
@@ -3174,9 +3604,9 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
     drop(rows);
     let mut rows = scratch_snapshot
         .query(
-            "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
-                    model, tool_names, source_path, source_offset, metadata_json
-             FROM session_messages",
+            "SELECT provider, message_id, session_id, role, timestamp, ordinal, content, kind,
+                    model, tool_names, source_path, source_offset, metadata_json, content_hash
+             FROM lcm_raw_messages",
             (),
         )
         .await
@@ -3196,11 +3626,12 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
         message_row.get(10).unwrap(),
         message_row.get(11).unwrap(),
         message_row.get(12).unwrap(),
+        message_row.get(13).unwrap(),
     );
     drop(rows);
 
     // Main store: the SAME observation with its projected output rows already
-    // durable — but the provenance row naming that SAME output carries a
+    // durable, but the provenance row naming that SAME output carries a
     // corrupt digest. This is discordant provenance authority, not an
     // existing-output collision.
     let tmp = TempDir::new().unwrap();
@@ -3258,10 +3689,11 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
         .unwrap();
     transaction
         .execute(
-            "INSERT INTO session_messages
-                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
-                 tool_names, source_path, source_offset, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO lcm_raw_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, content, kind, model,
+                 tool_names, source_path, source_offset, metadata_json, content_hash,
+                 storage_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'inline')",
             params![
                 projected_message.0.as_str(),
                 projected_message.1.as_str(),
@@ -3276,6 +3708,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
                 projected_message.10.as_deref(),
                 projected_message.11,
                 projected_message.12.as_deref(),
+                projected_message.13.as_str(),
             ],
         )
         .await
@@ -3332,9 +3765,9 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
 
 /// Linux P1-2: only the narrow existing-output collision converges to a
 /// durable skip. Divergent durable workflow-fact state is corrupt authority,
-/// not an output collision — it must stay a hard `ProvenanceCollision` error
+/// not an output collision, it must stay a hard `ProvenanceCollision` error
 /// with the queue item retained and the checkpoint unmoved.
-#[tokio::test]
+#[asupersync::test]
 async fn drain_keeps_divergent_workflow_fact_state_a_hard_error() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3439,4 +3872,312 @@ async fn drain_keeps_divergent_workflow_fact_state_a_hard_error() {
         store.projection_checkpoint().await.unwrap().last_sequence(),
         0
     );
+}
+
+fn file_bytes_advance(
+    observation: &DurableObservationV1,
+    expected: Option<&ObservationCursorAdvance>,
+    range: (u64, u64),
+    reason: ObservationCoverageReason,
+) -> ObservationCursorAdvance {
+    ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        ObservationOrderingDomainV1::FileBytes,
+        expected.map(|advance| advance.next_cursor().clone()),
+        ObservationSourceRangeV1::new(range.0, range.1).unwrap(),
+        reason,
+    )
+    .unwrap()
+}
+
+/// Admits `[0, 5)`, `[5, 10)` and `[10, 20)`, so the durable cursor sits two
+/// advances past `[5, 10)` and that range's ledger row is already pruned.
+async fn admitted_three_ranges(
+    name: &str,
+) -> (
+    TempDir,
+    HostAdmissionTestRuntimeV1,
+    DurableObservationV1,
+    [ObservationCursorAdvance; 3],
+) {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new(format!("session.{name}")).unwrap();
+    let (observation, _) = collision_candidate(
+        &session_id,
+        &format!("record.{name}"),
+        1,
+        "admitted ranges fixture",
+        &format!("receipt.{name}"),
+        None,
+    );
+    let first = file_bytes_advance(
+        &observation,
+        None,
+        (0, 5),
+        ObservationCoverageReason::BlankFrame,
+    );
+    let second = file_bytes_advance(
+        &observation,
+        Some(&first),
+        (5, 10),
+        ObservationCoverageReason::OutOfScope,
+    );
+    let third = file_bytes_advance(
+        &observation,
+        Some(&second),
+        (10, 20),
+        ObservationCoverageReason::BlankFrame,
+    );
+    for advance in [&first, &second, &third] {
+        assert_eq!(
+            store.advance_source_cursor(advance.clone()).await.unwrap(),
+            CursorAdvanceOutcome::Committed
+        );
+    }
+    (tmp, runtime, observation, [first, second, third])
+}
+
+/// Issue #4012: a rescan that resumes more than one advance behind the
+/// admitted frontier replays a coverage whose runtime receipt is committed
+/// and whose ledger row was pruned. That failed every pass with a
+/// non-retryable `observation_cursor_advance_collision`, and the cursor never
+/// moved again.
+#[asupersync::test]
+async fn rescan_behind_a_pruned_ledger_row_reconciles_from_the_durable_cursor() {
+    let (_tmp, runtime, observation, [first, second, _]) =
+        admitted_three_ranges("rescan-pruned-row").await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    rewind_source_cursor(&runtime, first.next_cursor()).await;
+    let rescan = file_bytes_advance(
+        &observation,
+        Some(&first),
+        (5, 10),
+        ObservationCoverageReason::BlankFrame,
+    );
+    assert_eq!(rescan.coverage(), second.coverage());
+
+    assert_eq!(
+        store.advance_source_cursor(rescan.clone()).await.unwrap(),
+        CursorAdvanceOutcome::Committed,
+        "the rescan must advance from the durable cursor"
+    );
+    assert_eq!(
+        store.advance_source_cursor(rescan.clone()).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate,
+        "the next pass finds the range owned"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(observation.source(), observation.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(rescan.next_cursor())
+    );
+}
+
+/// The same rescan with the original command bytes is an exact runtime
+/// replay. Reporting it as a duplicate left the cursor behind, so the next
+/// advance lost its compare-and-swap on every pass.
+#[asupersync::test]
+async fn exact_replay_behind_the_frontier_moves_the_cursor() {
+    let (_tmp, runtime, observation, [first, second, _]) =
+        admitted_three_ranges("rescan-exact-replay").await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    rewind_source_cursor(&runtime, first.next_cursor()).await;
+
+    store.advance_source_cursor(second.clone()).await.unwrap();
+    assert_eq!(
+        store
+            .get_source_cursor(observation.source(), observation.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(second.next_cursor())
+    );
+}
+
+/// A rescan behind a retained ledger row that names another reason is the
+/// runtime write path's typed ledger disagreement, not an anonymous
+/// collision.
+#[asupersync::test]
+async fn rescan_behind_a_retained_row_reports_the_ledger_disagreement() {
+    let (_tmp, runtime, observation, [_, second, third]) =
+        admitted_three_ranges("rescan-retained-row").await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    rewind_source_cursor(&runtime, second.next_cursor()).await;
+    let rescan = file_bytes_advance(
+        &observation,
+        Some(&second),
+        (10, 20),
+        ObservationCoverageReason::OutOfScope,
+    );
+    assert_eq!(rescan.coverage(), third.coverage());
+
+    let error = store.advance_source_cursor(rescan).await.unwrap_err();
+    let ObservationStoreError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
+        panic!("a retained row with another reason is a ledger disagreement, got {error:?}");
+    };
+    assert!(matches!(
+        disagreement.stored().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::BlankFrame)
+    ));
+    assert!(matches!(
+        disagreement.candidate().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::OutOfScope)
+    ));
+}
+
+/// Output ownership is durable provenance, read fresh by every projection.
+///
+/// Retiring a quarantined projection removes the output the observation
+/// created and its provenance through the same writer connection that
+/// projects (`retire_quarantined_projection`). The next observation of that
+/// output must then create it, exactly as it would on a freshly opened store,
+/// instead of acting on ownership the writer remembered from before.
+#[asupersync::test]
+async fn retired_output_is_created_by_the_next_observation_of_it() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.retired-output-owner").unwrap();
+    let record_id = "record.retired-output-owner";
+    let output_message_id = format!("message.{record_id}");
+    let (first, write) = collision_candidate(
+        &session_id,
+        record_id,
+        1,
+        "first rendering",
+        "receipt.retired-output-owner.first",
+        None,
+    );
+    store.persist_observation(write).await.unwrap();
+    assert!(matches!(
+        store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+            params![COLLISION_PROVIDER, output_message_id.as_str()],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "DELETE FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                first.observation_id().as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO observation_projection_dispositions
+                (projector_version, observation_id, receipt_id, reason)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                first.observation_id().as_str(),
+                first.receipt().receipt().receipt_id().as_str(),
+                ProjectionSkipReason::SanitizationRefused.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let cursor = store
+        .get_source_cursor(first.source(), first.scope())
+        .await
+        .unwrap();
+    let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
+    let next_record = ObservationId::new("record.retired-output-owner.next").unwrap();
+    let range = ObservationSourceRangeV1::new(1, 2).unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider.clone(),
+        "message",
+        next_record.clone(),
+        CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_message_id(ObservationId::new(output_message_id.as_str()).unwrap()),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": "second rendering"}),
+            model: None,
+            timestamp: Some(1_750_000_001),
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    let second = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            next_record,
+        )
+        .unwrap(),
+        fixture_receipt("receipt.retired-output-owner.second", &payload),
+        RetentionClass::new("retention.collision-test").unwrap(),
+        payload,
+    )
+    .unwrap();
+    assert_ne!(second.observation_id(), first.observation_id());
+    store
+        .persist_observation(anchored_write_for(second.clone(), cursor))
+        .await
+        .unwrap();
+    let outcome = store
+        .project_observation(second.observation_id())
+        .await
+        .expect("the next observation of a retired output must project");
+    assert!(
+        matches!(outcome, ProjectionPersistOutcome::Projected(_)),
+        "{outcome:?}"
+    );
+
+    let owners = provenance_rows(&runtime)
+        .await
+        .into_iter()
+        .filter(|row| row.5 == output_message_id)
+        .map(|row| (row.1, row.7))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        vec![(second.observation_id().as_str().to_owned(), 1)],
+        "the retired output's next observation must own and create it"
+    );
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
 }

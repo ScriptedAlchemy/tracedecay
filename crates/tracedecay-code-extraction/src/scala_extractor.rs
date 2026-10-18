@@ -3,21 +3,23 @@
 /// Parses Scala source files and emits nodes and edges for the code graph.
 /// Supports Scala 2 and Scala 3 constructs including classes, case classes,
 /// traits, objects, enums, and extension methods.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{SCALA_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Scala source files using tree-sitter.
 pub struct ScalaExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -25,7 +27,7 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Track nesting depth to distinguish inner classes from top-level classes.
     class_depth: usize,
@@ -33,12 +35,9 @@ struct ExtractionState {
     inside_trait: bool,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -46,7 +45,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
             inside_trait: false,
@@ -57,8 +56,7 @@ impl ExtractionState {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -73,34 +71,12 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl ScalaExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_scala(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -118,7 +94,7 @@ impl ScalaExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -132,6 +108,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -150,11 +127,6 @@ impl ScalaExtractor {
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("scala", "Scala", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -180,8 +152,12 @@ impl ScalaExtractor {
             "enum_definition" => Self::visit_enum(state, node),
             "function_definition" => Self::visit_function_def(state, node),
             "function_declaration" => Self::visit_function_decl(state, node),
-            "val_definition" | "val_declaration" => Self::visit_val(state, node),
-            "var_definition" | "var_declaration" => Self::visit_var(state, node),
+            "val_definition" | "val_declaration" => {
+                Self::visit_val_or_var(state, node, NodeKind::ValField);
+            }
+            "var_definition" | "var_declaration" => {
+                Self::visit_val_or_var(state, node, NodeKind::VarField);
+            }
             "type_definition" => Self::visit_type_def(state, node),
             _ => {
                 Self::visit_children(state, node);
@@ -191,16 +167,23 @@ impl ScalaExtractor {
 
     /// Extract a package clause.
     fn visit_package(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<unknown>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::ScalaPackage, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::ScalaPackage,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -231,6 +214,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -256,7 +240,7 @@ impl ScalaExtractor {
         let path = text
             .trim()
             .strip_prefix("import ")
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .to_string();
 
@@ -265,7 +249,7 @@ impl ScalaExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &path, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -289,6 +273,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -310,6 +295,8 @@ impl ScalaExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
+            argument_count: None,
         });
     }
 
@@ -334,7 +321,7 @@ impl ScalaExtractor {
             NodeKind::Class
         };
 
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -358,6 +345,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -397,7 +385,13 @@ impl ScalaExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Trait, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Trait,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -421,6 +415,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -462,7 +457,13 @@ impl ScalaExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::ScalaObject, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::ScalaObject,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -486,6 +487,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -523,7 +525,7 @@ impl ScalaExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -547,6 +549,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -604,7 +607,7 @@ impl ScalaExtractor {
             .or_else(|| find_direct_child_by_kind(node, "identifier"))
             .map_or_else(
                 || state.node_text(node).trim().to_string(),
-                |n| state.node_text(n),
+                |n| state.node_text(n).to_string(),
             );
 
         let start_line = node.start_position().row as u32;
@@ -612,7 +615,13 @@ impl ScalaExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -636,6 +645,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -669,8 +679,8 @@ impl ScalaExtractor {
             NodeKind::Function
         };
 
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &SCALA_COMPLEXITY, &state.source);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
+        let metrics = count_complexity(node, &SCALA_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -694,6 +704,7 @@ impl ScalaExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -733,7 +744,7 @@ impl ScalaExtractor {
             NodeKind::Method
         };
 
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -757,6 +768,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -774,8 +786,8 @@ impl ScalaExtractor {
         Self::extract_annotations(state, node, &id);
     }
 
-    /// Extract a val definition or declaration as a `ValField` node.
-    fn visit_val(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Extract a val (`ValField`) or var (`VarField`) definition or declaration.
+    fn visit_val_or_var(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
         let name = Self::extract_val_var_name(state, node);
         let visibility = Self::extract_visibility(node, state);
         let start_line = node.start_position().row as u32;
@@ -783,11 +795,11 @@ impl ScalaExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::ValField, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::ValField,
+            kind,
             name,
             qualified_name,
             file_path: state.file_path.clone(),
@@ -815,68 +827,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        Self::extract_annotations(state, node, &id);
-
-        if let Some(value) = node.child_by_field_name("value") {
-            Self::extract_call_sites(state, value, &id);
-        }
-    }
-
-    /// Extract a var definition or declaration as a `VarField` node.
-    fn visit_var(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::extract_val_var_name(state, node);
-        let visibility = Self::extract_visibility(node, state);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::VarField, &name, start_line);
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::VarField,
-            name,
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(
-                state
-                    .node_text(node)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string(),
-            ),
-            docstring: Self::extract_scaladoc(state, node),
-            visibility,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -900,16 +851,23 @@ impl ScalaExtractor {
 
     /// Extract a type alias definition.
     fn visit_type_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let visibility = Self::extract_visibility(node, state);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::TypeAlias, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::TypeAlias,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -933,6 +891,7 @@ impl ScalaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -950,7 +909,8 @@ impl ScalaExtractor {
 
     /// Extract the name from a node's "name" field.
     fn extract_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        node.child_by_field_name("name").map(|n| state.node_text(n))
+        node.child_by_field_name("name")
+            .map(|n| state.node_text(n).to_string())
     }
 
     /// Extract the name from a val/var definition.
@@ -958,13 +918,13 @@ impl ScalaExtractor {
     /// `val_definition` uses a "pattern" field; `val_declaration` uses "name".
     fn extract_val_var_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(name_node) = node.child_by_field_name("name") {
-            return state.node_text(name_node);
+            return state.node_text(name_node).to_string();
         }
         if let Some(pattern_node) = node.child_by_field_name("pattern") {
             let text = state.node_text(pattern_node);
             // For simple patterns like `x`, return the text directly.
             // For tuple patterns like `(a, b)`, return the whole thing.
-            return text;
+            return text.to_string();
         }
         "<anonymous>".to_string()
     }
@@ -1065,7 +1025,7 @@ impl ScalaExtractor {
                 "block_comment" => {
                     let text = state.node_text(sibling);
                     if text.starts_with("/**") {
-                        return Some(Self::clean_scaladoc(&text));
+                        return Some(Self::clean_scaladoc(text));
                     }
                     current = sibling.prev_named_sibling();
                 }
@@ -1113,7 +1073,7 @@ impl ScalaExtractor {
                         let base_name = type_name
                             .split('[')
                             .next()
-                            .unwrap_or(&type_name)
+                            .unwrap_or(type_name)
                             .trim()
                             .to_string();
                         if !base_name.is_empty() {
@@ -1124,6 +1084,8 @@ impl ScalaExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
                     }
@@ -1148,13 +1110,17 @@ impl ScalaExtractor {
                     if child.is_named() && child.kind().contains("type_parameter") {
                         let param_name = find_direct_child_by_kind(child, "identifier")
                             .or_else(|| find_direct_child_by_kind(child, "type_identifier"))
-                            .map_or_else(|| state.node_text(child), |n| state.node_text(n));
+                            .map_or_else(
+                                || state.node_text(child).to_string(),
+                                |n| state.node_text(n).to_string(),
+                            );
                         let start_line = child.start_position().row as u32;
-                        let id = generate_node_id(
+                        let id = local_node_id(
                             &state.file_path,
+                            state.source,
                             &NodeKind::GenericParam,
                             &param_name,
-                            start_line,
+                            child,
                         );
                         state.nodes.push(Node {
                             id: id.clone(),
@@ -1167,7 +1133,7 @@ impl ScalaExtractor {
                             end_line: child.end_position().row as u32,
                             start_column: child.start_position().column as u32,
                             end_column: child.end_position().column as u32,
-                            signature: Some(state.node_text(child)),
+                            signature: Some(state.node_text(child).to_string()),
                             docstring: None,
                             visibility: Visibility::Private,
                             is_async: false,
@@ -1178,6 +1144,7 @@ impl ScalaExtractor {
                             unsafe_blocks: 0,
                             unchecked_calls: 0,
                             assertions: 0,
+                            complexity_analysis: ComplexityAnalysisV1::Complete,
                             updated_at: state.timestamp,
                             parent_id: None,
                         });
@@ -1212,9 +1179,10 @@ impl ScalaExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "class_parameter" {
-                        let param_name = child
-                            .child_by_field_name("name")
-                            .map_or_else(|| "<param>".to_string(), |n| state.node_text(n));
+                        let param_name = child.child_by_field_name("name").map_or_else(
+                            || "<param>".to_string(),
+                            |n| state.node_text(n).to_string(),
+                        );
 
                         let text = state.node_text(child);
                         let is_val = text.contains("val ");
@@ -1231,7 +1199,13 @@ impl ScalaExtractor {
                         };
 
                         let start_line = child.start_position().row as u32;
-                        let id = generate_node_id(&state.file_path, &kind, &param_name, start_line);
+                        let id = local_node_id(
+                            &state.file_path,
+                            state.source,
+                            &kind,
+                            &param_name,
+                            child,
+                        );
 
                         state.nodes.push(Node {
                             id: id.clone(),
@@ -1255,6 +1229,7 @@ impl ScalaExtractor {
                             unsafe_blocks: 0,
                             unchecked_calls: 0,
                             assertions: 0,
+                            complexity_analysis: ComplexityAnalysisV1::Complete,
                             updated_at: state.timestamp,
                             parent_id: None,
                         });
@@ -1289,6 +1264,8 @@ impl ScalaExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
@@ -1301,6 +1278,8 @@ impl ScalaExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
@@ -1329,21 +1308,21 @@ impl ScalaExtractor {
             let child = cursor.node();
             if child.kind() == "field_expression" {
                 // e.g. obj.method(...)
-                return state.node_text(child);
+                return state.node_text(child).to_string();
             }
             if child.kind() == "identifier" {
-                return state.node_text(child);
+                return state.node_text(child).to_string();
             }
             // generic_function wraps the callee
             if child.kind() == "generic_function"
                 && let Some(inner) = child.child(0)
             {
-                return state.node_text(inner);
+                return state.node_text(inner).to_string();
             }
-            return state.node_text(child);
+            return state.node_text(child).to_string();
         }
         let text = state.node_text(node);
-        text.split('(').next().unwrap_or(&text).trim().to_string()
+        text.split('(').next().unwrap_or(text).trim().to_string()
     }
 
     /// Extract the type name from an `instance_expression` (new Foo(...)).
@@ -1357,7 +1336,7 @@ impl ScalaExtractor {
                         || child.kind() == "generic_type"
                         || child.kind() == "stable_type_identifier")
                 {
-                    return state.node_text(child);
+                    return state.node_text(child).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1384,11 +1363,12 @@ impl ScalaExtractor {
                     let start_column = child.start_position().column as u32;
                     let end_column = child.end_position().column as u32;
                     let qualified_name = format!("{}::@{}", state.qualified_prefix(), annot_name);
-                    let id = generate_node_id(
+                    let id = local_node_id(
                         &state.file_path,
+                        state.source,
                         &NodeKind::AnnotationUsage,
                         &annot_name,
-                        start_line,
+                        child,
                     );
 
                     let graph_node = Node {
@@ -1413,6 +1393,7 @@ impl ScalaExtractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     };
@@ -1425,6 +1406,8 @@ impl ScalaExtractor {
                         line: start_line,
                         column: start_column,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                        argument_count: None,
                     });
 
                     state.edges.push(Edge {
@@ -1447,16 +1430,16 @@ impl ScalaExtractor {
     /// stripping `@` prefix and `(` suffix from the text.
     fn extract_annotation_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(ti) = find_direct_child_by_kind(node, "type_identifier") {
-            return state.node_text(ti);
+            return state.node_text(ti).to_string();
         }
         // Fallback: text after '@', before '('
         let text = state.node_text(node);
         text.trim()
             .strip_prefix('@')
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .split('(')
             .next()
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .to_string()
     }
@@ -1482,17 +1465,16 @@ impl crate::LanguageExtractor for ScalaExtractor {
         "Scala"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        ScalaExtractor::extract_scala(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        ScalaExtractor::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(
+            ScalaExtractor::extract_tree(file_path, source, tree, scope),
+        )
     }
 }

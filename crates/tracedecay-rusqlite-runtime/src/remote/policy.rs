@@ -1,10 +1,10 @@
-use tracedecay_application::ResolvedScope;
-use tracedecay_application::remote::capture_protocol::RemoteCapturePolicyEvidencePortV1;
-use tracedecay_application::remote::query::{
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::remote::capture_protocol::RemoteCapturePolicyEvidencePortV1;
+use tracedecay_contracts::remote::query::{
     RemoteExactObservationQueryErrorV1, RemoteQueryAuthorizationEvidenceV1,
     RemoteQueryAuthorizationPortV1, RemoteQueryPolicyRecordV1,
 };
-use tracedecay_application::remote::replay::{
+use tracedecay_contracts::remote::replay::{
     RemoteReplayApplicationErrorV1, RemoteReplayFrameV1, RemoteReplayPolicyDecisionV1,
     RemoteReplayPolicyEvidencePortV1, RemoteReplayPolicyEvidenceV1, RemoteReplayPolicyPortV1,
 };
@@ -64,48 +64,7 @@ impl RemoteSqliteStorageV1 {
         Ok(())
     }
 
-    pub fn store_query_policy(
-        &self,
-        record: &RemoteQueryPolicyRecordV1,
-    ) -> Result<(), RemoteExactObservationQueryErrorV1> {
-        record.validate()?;
-        let scope_digest = query_scope_digest(&record.repository_scope)?;
-        let encoded = serde_json::to_string(record)
-            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
-        self.handle()
-            .execute(
-                statement(
-                    "INSERT INTO remote_query_policies (
-                        scope_digest, policy_revision, record_json
-                     ) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(scope_digest) DO UPDATE SET
-                        policy_revision = excluded.policy_revision,
-                        record_json = excluded.record_json
-                     WHERE excluded.policy_revision > remote_query_policies.policy_revision
-                        OR (
-                            excluded.policy_revision = remote_query_policies.policy_revision
-                            AND excluded.record_json = remote_query_policies.record_json
-                        )",
-                    vec![
-                        text(scope_digest.as_str()),
-                        ExactSqlValue::Integer(
-                            i64::try_from(record.policy_revision).map_err(|_| {
-                                RemoteExactObservationQueryErrorV1::PolicyUnavailable
-                            })?,
-                        ),
-                        text(&encoded),
-                    ],
-                )
-                .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?,
-            )
-            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
-        if self.load_query_policy(&record.repository_scope)? != *record {
-            return Err(RemoteExactObservationQueryErrorV1::PolicyUnavailable);
-        }
-        Ok(())
-    }
-
-    fn load_replay_policy(
+    pub(super) fn load_replay_policy(
         &self,
         scope: &RemoteRepositoryScopeV1,
     ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
@@ -213,14 +172,14 @@ impl RemoteQueryAuthorizationPortV1 for RemoteSqliteStorageV1 {
     }
 }
 
-fn replay_scope_digest(
+pub(super) fn replay_scope_digest(
     scope: &RemoteRepositoryScopeV1,
 ) -> Result<ManifestDigest, RemoteReplayApplicationErrorV1> {
     canonical_sha256(&("tracedecay.remote-replay-policy-scope.v2", scope))
         .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)
 }
 
-fn query_scope_digest(
+pub(super) fn query_scope_digest(
     scope: &RemoteRepositoryScopeV1,
 ) -> Result<ManifestDigest, RemoteExactObservationQueryErrorV1> {
     canonical_sha256(&("tracedecay.remote-query-policy-scope.v2", scope))

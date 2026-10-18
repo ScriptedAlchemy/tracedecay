@@ -1,0 +1,1575 @@
+//! SQLite-backed persistence for generation-bound diagnostics (Plan 35,
+//! "Universal managed diagnostics"; query/12-diagnostic-persistence authority
+//! packet).
+//!
+//! Durable `GenerationDiagnosticV1` records persist in the project store and
+//! survive restarts. Publication is version-monotone: a newer clean
+//! generation clears prior current records deterministically, and
+//! stale findings never cross snapshots.
+
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+
+use tracedecay_domain::{
+    CodeGenerationId, DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
+    DiagnosticRecordStateV1, DiagnosticSeverityV1, FileOccurrenceId, GenerationDiagnosticV1,
+    RetrievalAnchorId, SourceSpan, UtcMicros,
+};
+use tracedecay_store::{
+    CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL, CLEAR_CURRENT_DIAGNOSTICS_SQL,
+    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DiagnosticRecordStateKindV1,
+    DiagnosticStore, DiagnosticStoreError, DiagnosticStoreResult, diagnostic_evidence_class_name,
+    diagnostic_producer_kind_name, diagnostic_severity_name, diagnostic_snapshot_observation_eq,
+    diagnostic_state_columns, parse_diagnostic_evidence_class, parse_diagnostic_producer_kind,
+    parse_diagnostic_severity,
+};
+
+use tracedecay_domain::errors::{Result, TraceDecayError};
+#[cfg(test)]
+use tracedecay_runtime_core::db::MemoryConnection;
+#[cfg(test)]
+use tracedecay_runtime_core::db::engine::TransactionBehavior;
+use tracedecay_runtime_core::db::engine::{IntoParams, Row, Rows, Value, params};
+use tracedecay_runtime_core::db::{Database, DatabaseMemoryTransaction};
+use tracedecay_runtime_core::tracedecay::current_timestamp;
+
+/// Durable tables for generation-bound diagnostic records.
+///
+/// The DDL lives in `tracedecay-store` because the rusqlite-runtime
+/// `DiagnosticExecutor` writes the same tables and its fixtures must not be
+/// weaker than what this engine installs.
+pub const SCHEMA: &str = tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL;
+
+// The stored column text is owned by `tracedecay_store::diagnostics::codec` so
+// this engine and the rusqlite-runtime `DiagnosticExecutor` cannot drift apart
+// across a cutover. These aliases keep the SQL below readable.
+const STATE_CURRENT: &str = DIAGNOSTIC_STATE_CURRENT;
+const STATE_CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
+
+// Names the `'current'` literal of the `idx_diagnostic_generation_current`
+// predicate: the connection plans once without bound values, so a bound state
+// would scan the publication table.
+const CURRENT_GENERATION_SQL: &str = "SELECT generation_id
+     FROM diagnostic_generation_publications
+     WHERE record_state = 'current'";
+
+/// SQLite-backed store for durable generation-bound diagnostics.
+///
+/// Records are immutable once persisted; clearing updates only the
+/// `record_state`/`state_generation` columns so cleared records stay
+/// queryable while active publication reads only current rows (Plan 35: "Stale and historical diagnostics remain queryable
+/// through `TraceDecay` application APIs but are excluded from active
+/// publication").
+pub struct DiagnosticsStore<'a> {
+    conn: DiagnosticsConnection<'a>,
+}
+
+enum DiagnosticsConnection<'a> {
+    /// A retained canonical database client. Reads mint a guarded engine
+    /// facade for exactly the query lifetime; writes must first acquire a
+    /// canonical memory write transaction.
+    Database(Database),
+    /// Test-only direct engine fixture support. Production callers must use
+    /// `Database` so runtime retirement remains guarded.
+    #[cfg(test)]
+    Runtime(MemoryConnection<'a>),
+    /// An already-authorized production write transaction. The transaction
+    /// remains owned by `with_immediate_tx`, which commits or rolls it back
+    /// after the callback completes.
+    Transaction(&'a dyn DiagnosticsExecutor),
+}
+
+/// Object-safe executor used only to borrow an already-authorized transaction
+/// through the diagnostics helpers. Parameters cross this boundary as the
+/// engine's canonical owned values, so no raw connection escapes the runtime
+/// capability that issued it.
+trait DiagnosticsExecutor: Sync {
+    fn query_values<'a>(
+        &'a self,
+        sql: &'a str,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<Rows>> + Send + 'a>>;
+
+    fn execute_values<'a>(
+        &'a self,
+        sql: &'a str,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64>> + Send + 'a>>;
+
+    fn execute_batch<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+}
+
+impl DiagnosticsExecutor for DatabaseMemoryTransaction<'_> {
+    fn query_values<'a>(
+        &'a self,
+        sql: &'a str,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<Rows>> + Send + 'a>> {
+        Box::pin(async move {
+            DatabaseMemoryTransaction::query(self, sql, params)
+                .await
+                .map_err(|error| db_error("diagnostics transaction query", error))
+        })
+    }
+
+    fn execute_values<'a>(
+        &'a self,
+        sql: &'a str,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64>> + Send + 'a>> {
+        Box::pin(async move {
+            DatabaseMemoryTransaction::execute(self, sql, params)
+                .await
+                .map_err(|error| db_error("diagnostics transaction write", error))
+        })
+    }
+
+    fn execute_batch<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            DatabaseMemoryTransaction::execute_batch(self, sql)
+                .await
+                .map_err(|error| db_error("diagnostics transaction write", error))
+        })
+    }
+}
+
+impl DiagnosticsConnection<'_> {
+    async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        tracing::Instrument::instrument(
+            async {
+                let params = params
+                    .into_params()
+                    .map_err(|error| db_error("diagnostics query parameters", error))?;
+                match self {
+                    Self::Database(database) => database
+                        .read_connection()
+                        .query(sql, params)
+                        .await
+                        .map_err(|error| db_error("diagnostics guarded query", error)),
+                    #[cfg(test)]
+                    Self::Runtime(connection) => MemoryConnection::query(connection, sql, params)
+                        .await
+                        .map_err(|error| db_error("diagnostics runtime query", error)),
+                    Self::Transaction(transaction) => transaction.query_values(sql, params).await,
+                }
+            },
+            tracing::trace_span!("usecases.diagnostics_store.query"),
+        )
+        .await
+    }
+
+    async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
+    where
+        P: IntoParams,
+    {
+        tracing::Instrument::instrument(
+            async {
+                let params = params
+                    .into_params()
+                    .map_err(|error| db_error("diagnostics write parameters", error))?;
+                match self {
+                    Self::Database(_) => Err(db_message(
+                        "diagnostics guarded write",
+                        "diagnostics writes require a canonical memory write transaction",
+                    )),
+                    #[cfg(test)]
+                    Self::Runtime(connection) => MemoryConnection::execute(connection, sql, params)
+                        .await
+                        .map_err(|error| db_error("diagnostics runtime write", error)),
+                    Self::Transaction(transaction) => transaction.execute_values(sql, params).await,
+                }
+            },
+            tracing::trace_span!("usecases.diagnostics_store.execute"),
+        )
+        .await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<()> {
+        tracing::Instrument::instrument(
+            async {
+                match self {
+                    Self::Database(_) => Err(db_message(
+                        "diagnostics guarded write",
+                        "diagnostics writes require a canonical memory write transaction",
+                    )),
+                    #[cfg(test)]
+                    Self::Runtime(connection) => MemoryConnection::execute_batch(connection, sql)
+                        .await
+                        .map_err(|error| db_error("diagnostics runtime write", error)),
+                    Self::Transaction(transaction) => transaction.execute_batch(sql).await,
+                }
+            },
+            tracing::trace_span!("usecases.diagnostics_store.execute_batch"),
+        )
+        .await
+    }
+}
+
+impl DiagnosticsStore<'static> {
+    /// Creates a production diagnostics store over the canonical retained
+    /// database capability. Each read and write retains the issuing client's
+    /// guard through the corresponding engine operation or transaction.
+    pub fn new(database: Database) -> Self {
+        Self {
+            conn: DiagnosticsConnection::Database(database),
+        }
+    }
+
+    pub(crate) fn cloned_database(&self) -> Option<Database> {
+        match &self.conn {
+            DiagnosticsConnection::Database(database) => Some(database.clone()),
+            #[cfg(test)]
+            DiagnosticsConnection::Runtime(_) => None,
+            DiagnosticsConnection::Transaction(_) => None,
+        }
+    }
+}
+
+impl<'a> DiagnosticsStore<'a> {
+    #[cfg(test)]
+    pub const fn new_runtime(conn: &'a tracedecay_runtime_core::db::engine::Connection) -> Self {
+        Self {
+            conn: DiagnosticsConnection::Runtime(MemoryConnection::runtime(conn)),
+        }
+    }
+
+    /// Creates the diagnostics schema idempotently. Safe to call on every
+    /// open; existing rows are never touched.
+    pub async fn ensure_schema(&self) -> Result<()> {
+        tracing::Instrument::instrument(
+            self.with_immediate_tx("diagnostics ensure_schema", |store| {
+                Box::pin(async move {
+                    store
+                        .conn
+                        .execute_batch(SCHEMA)
+                        .await
+                        .map_err(|error| db_error("diagnostics ensure_schema", error))
+                })
+            }),
+            tracing::trace_span!("usecases.diagnostics_store.ensure_schema"),
+        )
+        .await
+    }
+
+    /// The exact clean generation whose diagnostic snapshot is current.
+    ///
+    /// Generation publication is recorded even when the snapshot contains no
+    /// diagnostics, preserving clean-generation identity across restarts.
+    pub async fn current_generation(&self) -> Result<Option<CodeGenerationId>> {
+        tracing::Instrument::instrument(
+            async {
+                let operation = "diagnostics current_generation";
+                let mut rows = self
+                    .conn
+                    .query(CURRENT_GENERATION_SQL, params![])
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                let generation = rows
+                    .next()
+                    .await
+                    .map_err(|e| db_error(operation, e))?
+                    .map(|row| {
+                        row.get::<String>(0)
+                            .map_err(|e| db_error(operation, e))
+                            .and_then(|value| stored_id(value, operation, "generation_id"))
+                    })
+                    .transpose()?;
+                if rows
+                    .next()
+                    .await
+                    .map_err(|e| db_error(operation, e))?
+                    .is_some()
+                {
+                    return Err(db_message(
+                        operation,
+                        "multiple current diagnostic generations",
+                    ));
+                }
+                Ok(generation)
+            },
+            tracing::trace_span!("usecases.diagnostics_store.current_generation"),
+        )
+        .await
+    }
+
+    /// Runs `work` inside an immediate transaction, committing on success and
+    /// rolling back on error or cancellation. The transactional store routes
+    /// every statement through that exact transaction.
+    #[tracing::instrument(
+        name = "usecases.diagnostics_store.immediate_tx",
+        level = "trace",
+        skip_all
+    )]
+    async fn with_immediate_tx<T>(
+        &self,
+        operation: &str,
+        work: impl Send
+        + for<'tx> FnOnce(
+            &'tx DiagnosticsStore<'tx>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T>> + Send + 'tx>,
+        >,
+    ) -> Result<T>
+    where
+        T: Send,
+    {
+        match &self.conn {
+            DiagnosticsConnection::Database(database) => {
+                let transaction = database.begin_memory_write_transaction(operation).await?;
+                let transactional_store = DiagnosticsStore {
+                    conn: DiagnosticsConnection::Transaction(&transaction),
+                };
+                let result = work(&transactional_store).await;
+                drop(transactional_store);
+                match result {
+                    Ok(value) => {
+                        transaction.commit().await?;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        let _ = transaction.rollback().await;
+                        Err(error)
+                    }
+                }
+            }
+            #[cfg(test)]
+            DiagnosticsConnection::Runtime(connection) => {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .await
+                    .map_err(|error| db_error(operation, error))?;
+                let transactional_store = DiagnosticsStore {
+                    conn: DiagnosticsConnection::Runtime(MemoryConnection::transaction(
+                        &transaction,
+                    )),
+                };
+                let result = work(&transactional_store).await;
+                drop(transactional_store);
+                match result {
+                    Ok(value) => {
+                        transaction
+                            .commit()
+                            .await
+                            .map_err(|error| db_error(operation, error))?;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        let _ = transaction.rollback().await;
+                        Err(error)
+                    }
+                }
+            }
+            DiagnosticsConnection::Transaction(_) => Err(db_message(
+                operation,
+                "nested diagnostics transactions are unsupported",
+            )),
+        }
+    }
+
+    /// Publishes one clean generation's diagnostic set atomically and
+    /// deterministically:
+    ///
+    /// 1. every supplied record must validate, be in the `Current` state, and
+    ///    name exactly `generation` (a clean publication is single-generation
+    ///    and carries no stale rows);
+    /// 2. every prior `Current` record from any other generation is marked
+    ///    `Cleared` by this generation, a clean generation clears prior
+    ///    diagnostics, including the empty publication (Plan 35: "A newer
+    ///    version clears or supersedes the prior publication
+    ///    deterministically");
+    /// 3. the new records are inserted idempotently by anchor so republishing
+    ///    an unchanged clean generation converges.
+    ///
+    /// Returns `(inserted, cleared)`.
+    pub async fn publish_clean_generation(
+        &self,
+        generation: &CodeGenerationId,
+        records: &[GenerationDiagnosticV1],
+    ) -> Result<(u64, u64)> {
+        let (inserted, cleared, _, _) = self
+            .publish_clean_generation_with_disposition(generation, records)
+            .await?;
+        Ok((inserted, cleared))
+    }
+
+    pub(crate) async fn publish_clean_generation_with_disposition(
+        &self,
+        generation: &CodeGenerationId,
+        records: &[GenerationDiagnosticV1],
+    ) -> Result<(u64, u64, bool, u64)> {
+        let operation = "diagnostics publish_clean_generation";
+        for record in records {
+            record.validate().map_err(|error| {
+                db_message(
+                    operation,
+                    format!(
+                        "invalid diagnostic record {}: {error}",
+                        record.diagnostic_anchor
+                    ),
+                )
+            })?;
+            if record.generation_id != *generation {
+                return Err(db_message(
+                    operation,
+                    format!(
+                        "record {} names generation {} but publication targets {}",
+                        record.diagnostic_anchor, record.generation_id, generation
+                    ),
+                ));
+            }
+            if !record.state.is_current() {
+                return Err(db_message(
+                    operation,
+                    format!(
+                        "record {} is not current; stale findings cannot cross snapshots",
+                        record.diagnostic_anchor
+                    ),
+                ));
+            }
+        }
+        let mut records = records.to_vec();
+        records.sort_by(|left, right| {
+            left.diagnostic_anchor
+                .as_str()
+                .cmp(right.diagnostic_anchor.as_str())
+        });
+        if records
+            .windows(2)
+            .any(|pair| pair[0].diagnostic_anchor == pair[1].diagnostic_anchor)
+        {
+            return Err(db_message(
+                operation,
+                "one clean publication cannot contain duplicate diagnostic anchors",
+            ));
+        }
+        let generation = generation.clone();
+        tracing::Instrument::instrument(self.with_immediate_tx(operation, move |store| Box::pin(async move {
+            let publication_revision = if let Some((revision, state)) = store
+                .latest_generation_publication(&generation)
+                .await?
+            {
+                if state != STATE_CURRENT {
+                    return Err(db_message(
+                        operation,
+                        format!(
+                            "generation {generation} is already historical and cannot be republished"
+                        ),
+                    ));
+                }
+                let existing = store.current_records(&generation).await?;
+                if diagnostic_snapshot_observation_eq(&existing, &records) {
+                    return Ok((0, 0, true, revision));
+                }
+                revision.checked_add(1).ok_or_else(|| {
+                    db_message(operation, format!("diagnostic publication revision overflow for {generation}"))
+                })?
+            } else {
+                1
+            };
+
+            for record in &records {
+                let mut rows = store
+                    .conn
+                    .query(
+                        "SELECT generation_id FROM generation_diagnostics
+                         WHERE diagnostic_anchor = ?1 AND generation_id != ?2 LIMIT 1",
+                        params![record.diagnostic_anchor.as_str(), generation.as_str()],
+                    )
+                    .await
+                    .map_err(|error| db_error(operation, error))?;
+                if rows
+                    .next()
+                    .await
+                    .map_err(|error| db_error(operation, error))?
+                    .is_some()
+                {
+                    return Err(db_message(
+                        operation,
+                        format!(
+                            "diagnostic anchor {} is already bound to another generation",
+                            record.diagnostic_anchor
+                        ),
+                    ));
+                }
+            }
+
+            let cleared = store
+                .conn
+                .execute(
+                    CLEAR_CURRENT_DIAGNOSTICS_SQL,
+                    params![STATE_CLEARED, generation.as_str(), STATE_CURRENT],
+                )
+                .await
+                .map_err(|e| db_error(operation, e))?;
+
+            store.conn
+                .execute(
+                    CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL,
+                    params![STATE_CLEARED, generation.as_str()],
+                )
+                .await
+                .map_err(|e| db_error(operation, e))?;
+
+            for record in &records {
+                store.insert_record(publication_revision, record).await?;
+            }
+            store.conn
+                .execute(
+                    "INSERT INTO diagnostic_generation_publications (
+                        generation_id, publication_revision, record_state,
+                        state_generation, published_at
+                     ) VALUES (?1, ?2, ?3, NULL, ?4)",
+                    params![
+                        generation.as_str(),
+                        publication_revision,
+                        STATE_CURRENT,
+                        current_timestamp()
+                    ],
+                )
+                .await
+                .map_err(|e| db_error(operation, e))?;
+            Ok((records.len() as u64, cleared, false, publication_revision))
+        })), tracing::trace_span!("usecases.diagnostics_store.publish"))
+        .await
+    }
+
+    /// Records in the latest immutable publication for `generation`, ordered by anchor.
+    pub async fn records_for_generation(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> Result<Vec<GenerationDiagnosticV1>> {
+        tracing::Instrument::instrument(
+            self.query_generation(generation, None),
+            tracing::trace_span!("usecases.diagnostics_store.records_for_generation"),
+        )
+        .await
+    }
+
+    /// Current records bound to `generation`, the only set eligible for
+    /// active publication.
+    pub async fn current_records(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> Result<Vec<GenerationDiagnosticV1>> {
+        tracing::Instrument::instrument(
+            self.query_generation(generation, Some(STATE_CURRENT)),
+            tracing::trace_span!("usecases.diagnostics_store.current_records"),
+        )
+        .await
+    }
+
+    /// One bounded page of current records plus the exact lane cardinality.
+    pub(crate) async fn current_records_page(
+        &self,
+        generation: &CodeGenerationId,
+        file_occurrence_id: Option<&FileOccurrenceId>,
+        after_anchor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<GenerationDiagnosticV1>, usize, bool)> {
+        tracing::Instrument::instrument(
+            async {
+                let operation = "diagnostics current_records_page";
+                let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
+                    db_message(
+                        operation,
+                        "diagnostic page limit exceeds the SQLite integer range",
+                    )
+                })?;
+                let (sql, query_params) = match (file_occurrence_id, after_anchor) {
+                    (None, None) => (
+                        format!(
+                            "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?1 \
+                     AND record_state = 'current') \
+                     ORDER BY diagnostic_anchor LIMIT ?3"
+                        ),
+                        params![generation.as_str(), STATE_CURRENT, fetch_limit],
+                    ),
+                    (None, Some(anchor)) => (
+                        format!(
+                            "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?1 \
+                     AND record_state = 'current') \
+                     AND diagnostic_anchor > ?3 ORDER BY diagnostic_anchor LIMIT ?4"
+                        ),
+                        params![generation.as_str(), STATE_CURRENT, anchor, fetch_limit],
+                    ),
+                    (Some(file), None) => (
+                        format!(
+                            "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?2 \
+                     AND record_state = 'current') \
+                     AND record_state = ?3 ORDER BY diagnostic_anchor LIMIT ?4"
+                        ),
+                        params![
+                            file.as_str(),
+                            generation.as_str(),
+                            STATE_CURRENT,
+                            fetch_limit
+                        ],
+                    ),
+                    (Some(file), Some(anchor)) => (
+                        format!(
+                            "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?2 \
+                     AND record_state = 'current') \
+                     AND record_state = ?3 AND diagnostic_anchor > ?4 \
+                     ORDER BY diagnostic_anchor LIMIT ?5"
+                        ),
+                        params![
+                            file.as_str(),
+                            generation.as_str(),
+                            STATE_CURRENT,
+                            anchor,
+                            fetch_limit
+                        ],
+                    ),
+                };
+                let mut rows = self
+                    .conn
+                    .query(&sql, query_params)
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                let mut records = collect_rows(&mut rows, operation).await?;
+                let has_more = records.len() > limit;
+                records.truncate(limit);
+
+                let (count_sql, count_params) = match file_occurrence_id {
+                    None => (
+                        "SELECT COUNT(*) FROM generation_diagnostics \
+                 WHERE generation_id = ?1 AND record_state = ?2 AND publication_revision = (\
+                 SELECT publication_revision FROM diagnostic_generation_publications \
+                 WHERE generation_id = ?1 AND record_state = 'current')",
+                        params![generation.as_str(), STATE_CURRENT],
+                    ),
+                    Some(file) => (
+                        "SELECT COUNT(*) FROM generation_diagnostics \
+                 WHERE file_occurrence_id = ?1 AND generation_id = ?2 AND record_state = ?3 \
+                 AND publication_revision = (SELECT publication_revision FROM \
+                 diagnostic_generation_publications WHERE generation_id = ?2 \
+                 AND record_state = 'current')",
+                        params![file.as_str(), generation.as_str(), STATE_CURRENT],
+                    ),
+                };
+                let mut count_rows = self
+                    .conn
+                    .query(count_sql, count_params)
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                let total = count_rows
+                    .next()
+                    .await
+                    .map_err(|e| db_error(operation, e))?
+                    .ok_or_else(|| db_message(operation, "diagnostic count returned no row"))?
+                    .get::<i64>(0)
+                    .map_err(|e| db_error(operation, e))?;
+                let total = usize::try_from(total).map_err(|_| {
+                    db_message(operation, "diagnostic count is outside the usize range")
+                })?;
+                Ok((records, total, has_more))
+            },
+            tracing::trace_span!("usecases.diagnostics_store.current_records_page"),
+        )
+        .await
+    }
+
+    /// Current records for one file occurrence inside `generation`.
+    pub async fn current_records_for_file(
+        &self,
+        generation: &CodeGenerationId,
+        file_occurrence_id: &FileOccurrenceId,
+    ) -> Result<Vec<GenerationDiagnosticV1>> {
+        tracing::Instrument::instrument(
+            async {
+                let operation = "diagnostics current_records_for_file";
+                let mut rows = self
+                    .conn
+                    .query(
+                        &format!(
+                            "{SELECT_RECORDS} WHERE generation_id = ?1 AND file_occurrence_id = ?2 \
+                     AND record_state = ?3 AND publication_revision = (SELECT \
+                     publication_revision FROM diagnostic_generation_publications \
+                     WHERE generation_id = ?1 AND record_state = 'current') \
+                     ORDER BY diagnostic_anchor"
+                        ),
+                        params![
+                            generation.as_str(),
+                            file_occurrence_id.as_str(),
+                            STATE_CURRENT
+                        ],
+                    )
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                collect_rows(&mut rows, operation).await
+            },
+            tracing::trace_span!("usecases.diagnostics_store.current_records_for_file"),
+        )
+        .await
+    }
+
+    /// Fetches one record by its Plan 13 anchor.
+    pub async fn record_by_anchor(
+        &self,
+        anchor: &RetrievalAnchorId,
+    ) -> Result<Option<GenerationDiagnosticV1>> {
+        tracing::Instrument::instrument(
+            async {
+                let operation = "diagnostics record_by_anchor";
+                let mut rows = self
+                    .conn
+                    .query(
+                        &format!(
+                            "{SELECT_RECORDS} WHERE diagnostic_anchor = ?1 \
+                             ORDER BY CASE WHEN EXISTS (SELECT 1 FROM \
+                             diagnostic_generation_publications AS publication WHERE \
+                             publication.generation_id = generation_diagnostics.generation_id \
+                             AND publication.publication_revision = \
+                             generation_diagnostics.publication_revision AND \
+                             publication.record_state = 'current') THEN 0 ELSE 1 END, \
+                             publication_revision DESC LIMIT 1"
+                        ),
+                        params![anchor.as_str()],
+                    )
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                let mut records = collect_rows(&mut rows, operation).await?;
+                Ok(records.pop())
+            },
+            tracing::trace_span!("usecases.diagnostics_store.record_by_anchor"),
+        )
+        .await
+    }
+
+    #[tracing::instrument(
+        name = "usecases.diagnostics_store.insert_record",
+        level = "trace",
+        skip_all
+    )]
+    async fn insert_record(
+        &self,
+        publication_revision: u64,
+        record: &GenerationDiagnosticV1,
+    ) -> Result<()> {
+        let operation = "diagnostics insert_record";
+        let (state, state_generation) = state_columns(&record.state);
+        self.conn
+            .execute(
+                "INSERT INTO generation_diagnostics (
+                    diagnostic_anchor, generation_id, publication_revision,
+                    repository, worktree, reference,
+                    source_revision, file_occurrence_id, content_digest, symbol_occurrence_id,
+                    span_start, span_end, code, severity, message, message_digest,
+                    producer_kind, producer, analyzer_revision, configuration_revision,
+                    sanitization_receipt, evidence_class, collected_at, record_state,
+                    state_generation, persisted_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                    ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+                 )",
+                params![
+                    record.diagnostic_anchor.as_str(),
+                    record.generation_id.as_str(),
+                    publication_revision,
+                    record.repository.as_str(),
+                    record
+                        .worktree
+                        .as_ref()
+                        .map(tracedecay_domain::WorktreeId::as_str),
+                    record
+                        .reference
+                        .as_ref()
+                        .map(tracedecay_domain::RefId::as_str),
+                    record
+                        .source_revision
+                        .as_ref()
+                        .map(tracedecay_domain::CommitId::as_str),
+                    record.file_occurrence_id.as_str(),
+                    record.content_digest.as_str(),
+                    record
+                        .symbol_occurrence_id
+                        .as_ref()
+                        .map(tracedecay_domain::SymbolOccurrenceId::as_str),
+                    record.span.start_byte as i64,
+                    record.span.end_byte as i64,
+                    record.code.as_str(),
+                    diagnostic_severity_name(record.severity),
+                    record.message.as_str(),
+                    record.message_digest.as_str(),
+                    diagnostic_producer_kind_name(record.provenance.producer_kind),
+                    record.provenance.producer.as_str(),
+                    record.provenance.analyzer_revision.as_str(),
+                    record.provenance.configuration_revision.as_str(),
+                    record
+                        .provenance
+                        .sanitization_receipt
+                        .as_ref()
+                        .map(tracedecay_domain::SanitizationReceiptId::as_str),
+                    diagnostic_evidence_class_name(record.evidence_class),
+                    record.collected_at.0,
+                    state,
+                    state_generation,
+                    current_timestamp(),
+                ],
+            )
+            .await
+            .map_err(|e| db_error(operation, e))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "usecases.diagnostics_store.publication_state",
+        level = "trace",
+        skip_all
+    )]
+    async fn latest_generation_publication(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> Result<Option<(u64, String)>> {
+        let operation = "diagnostics latest_generation_publication";
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT publication_revision, record_state
+                 FROM diagnostic_generation_publications
+                 WHERE generation_id = ?1
+                 ORDER BY publication_revision DESC LIMIT 1",
+                params![generation.as_str()],
+            )
+            .await
+            .map_err(|e| db_error(operation, e))?;
+        rows.next()
+            .await
+            .map_err(|e| db_error(operation, e))?
+            .map(|row| {
+                let revision = row.get::<i64>(0).map_err(|e| db_error(operation, e))?;
+                let revision = u64::try_from(revision).map_err(|_| {
+                    db_message(operation, "negative diagnostic publication revision")
+                })?;
+                let state = row.get::<String>(1).map_err(|e| db_error(operation, e))?;
+                Ok((revision, state))
+            })
+            .transpose()
+    }
+
+    #[tracing::instrument(
+        name = "usecases.diagnostics_store.query_generation",
+        level = "trace",
+        skip_all
+    )]
+    async fn query_generation(
+        &self,
+        generation: &CodeGenerationId,
+        state: Option<&str>,
+    ) -> Result<Vec<GenerationDiagnosticV1>> {
+        let operation = "diagnostics records_for_generation";
+        let (sql, params_vec): (String, Vec<Value>) = match state {
+            Some(state) => (
+                format!(
+                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+                     AND publication_revision = (SELECT publication_revision FROM \
+                     diagnostic_generation_publications WHERE generation_id = ?1 \
+                     AND record_state = 'current') \
+                     ORDER BY diagnostic_anchor"
+                ),
+                vec![
+                    Value::Text(generation.as_str().to_owned()),
+                    Value::Text(state.to_owned()),
+                ],
+            ),
+            None => (
+                format!(
+                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND publication_revision = (\
+                     SELECT MAX(publication_revision) FROM diagnostic_generation_publications \
+                     WHERE generation_id = ?1) ORDER BY diagnostic_anchor"
+                ),
+                vec![Value::Text(generation.as_str().to_owned())],
+            ),
+        };
+        let mut rows = self
+            .conn
+            .query(&sql, params_vec)
+            .await
+            .map_err(|e| db_error(operation, e))?;
+        collect_rows(&mut rows, operation).await
+    }
+}
+
+impl DiagnosticStore for DiagnosticsStore<'_> {
+    async fn current_diagnostic_generation(
+        &self,
+    ) -> DiagnosticStoreResult<Option<CodeGenerationId>> {
+        DiagnosticsStore::current_generation(self)
+            .await
+            .map_err(|error| port_error("current_diagnostic_generation", error))
+    }
+
+    #[tracing::instrument(
+        name = "usecases.diagnostics.for_generation",
+        level = "trace",
+        skip_all
+    )]
+    async fn diagnostics_for_generation(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        let records = self
+            .records_for_generation(generation)
+            .await
+            .map_err(|error| port_error("diagnostics_for_generation", error))?;
+        Ok(records)
+    }
+
+    #[tracing::instrument(name = "usecases.diagnostics.current", level = "trace", skip_all)]
+    async fn current_diagnostics(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        let records = self
+            .current_records(generation)
+            .await
+            .map_err(|error| port_error("current_diagnostics", error))?;
+        Ok(records)
+    }
+
+    #[tracing::instrument(name = "usecases.diagnostics.current_file", level = "trace", skip_all)]
+    async fn current_diagnostics_for_file(
+        &self,
+        generation: &CodeGenerationId,
+        file_occurrence_id: &FileOccurrenceId,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        self.current_records_for_file(generation, file_occurrence_id)
+            .await
+            .map_err(|error| port_error("current_diagnostics_for_file", error))
+    }
+
+    #[tracing::instrument(name = "usecases.diagnostics.by_anchor", level = "trace", skip_all)]
+    async fn diagnostic_by_anchor(
+        &self,
+        anchor: &RetrievalAnchorId,
+    ) -> DiagnosticStoreResult<Option<GenerationDiagnosticV1>> {
+        self.record_by_anchor(anchor)
+            .await
+            .map_err(|error| port_error("diagnostic_by_anchor", error))
+    }
+}
+
+const SELECT_RECORDS: &str = "SELECT diagnostic_anchor, generation_id, repository, worktree,
+        reference, source_revision, file_occurrence_id, content_digest, symbol_occurrence_id,
+        span_start, span_end, code, severity, message, message_digest, producer_kind, producer,
+        analyzer_revision, configuration_revision, sanitization_receipt, evidence_class,
+        collected_at, record_state, state_generation
+     FROM generation_diagnostics";
+
+#[tracing::instrument(
+    name = "usecases.diagnostics_store.collect_rows",
+    level = "trace",
+    skip_all
+)]
+async fn collect_rows(rows: &mut Rows, operation: &str) -> Result<Vec<GenerationDiagnosticV1>> {
+    let mut records = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| db_error(operation, e))? {
+        records.push(record_from_row(&row, operation)?);
+    }
+    Ok(records)
+}
+
+fn record_from_row(row: &Row, operation: &str) -> Result<GenerationDiagnosticV1> {
+    let text = |index: i32| row.get::<String>(index).map_err(|e| db_error(operation, e));
+    let optional_text = |index: i32| {
+        row.get::<Option<String>>(index)
+            .map_err(|e| db_error(operation, e))
+    };
+
+    let stored_state = text(22)?;
+    let kind = DiagnosticRecordStateKindV1::parse(&stored_state).ok_or_else(|| {
+        db_message(
+            operation,
+            format!("unknown diagnostic record state: {stored_state}"),
+        )
+    })?;
+    let state_generation = match kind.state_generation_field() {
+        Some(field) => Some(stored_id(
+            optional_text(23)?
+                .ok_or_else(|| db_message(operation, "cleared record missing state_generation"))?,
+            operation,
+            field,
+        )?),
+        None => None,
+    };
+    let state = kind
+        .into_state(state_generation)
+        .ok_or_else(|| db_message(operation, "current record carries a state_generation"))?;
+
+    Ok(GenerationDiagnosticV1 {
+        diagnostic_anchor: stored_id(text(0)?, operation, "diagnostic_anchor")?,
+        generation_id: stored_id(text(1)?, operation, "generation_id")?,
+        repository: stored_id(text(2)?, operation, "repository")?,
+        worktree: optional_text(3)?
+            .map(|value| stored_id(value, operation, "worktree"))
+            .transpose()?,
+        reference: optional_text(4)?
+            .map(|value| stored_id(value, operation, "reference"))
+            .transpose()?,
+        source_revision: optional_text(5)?
+            .map(|value| stored_id(value, operation, "source_revision"))
+            .transpose()?,
+        file_occurrence_id: stored_id(text(6)?, operation, "file_occurrence_id")?,
+        content_digest: stored_id(text(7)?, operation, "content_digest")?,
+        symbol_occurrence_id: optional_text(8)?
+            .map(|value| stored_id(value, operation, "symbol_occurrence_id"))
+            .transpose()?,
+        span: SourceSpan {
+            start_byte: row.get::<i64>(9).map_err(|e| db_error(operation, e))? as u64,
+            end_byte: row.get::<i64>(10).map_err(|e| db_error(operation, e))? as u64,
+        },
+        code: text(11)?,
+        severity: parse_severity(&text(12)?, operation)?,
+        message: text(13)?,
+        message_digest: stored_id(text(14)?, operation, "message_digest")?,
+        provenance: DiagnosticProvenanceV1 {
+            producer_kind: parse_producer_kind(&text(15)?, operation)?,
+            producer: stored_id(text(16)?, operation, "producer")?,
+            analyzer_revision: stored_id(text(17)?, operation, "analyzer_revision")?,
+            configuration_revision: stored_id(text(18)?, operation, "configuration_revision")?,
+            sanitization_receipt: optional_text(19)?
+                .map(|value| stored_id(value, operation, "sanitization_receipt"))
+                .transpose()?,
+        },
+        evidence_class: parse_evidence_class(&text(20)?, operation)?,
+        collected_at: UtcMicros(row.get::<i64>(21).map_err(|e| db_error(operation, e))?),
+        state,
+    })
+}
+
+/// Rebuilds a strongly typed domain identity from its stored text form.
+fn stored_id<T>(value: String, operation: &str, field: &'static str) -> Result<T>
+where
+    T: TryFrom<String, Error = tracedecay_domain::DomainError>,
+{
+    T::try_from(value).map_err(|error| db_message(operation, format!("{field}: {error}")))
+}
+
+// The mappings below delegate to the shared store codec; only the failure
+// wording stays local, because it is observable in this engine's errors.
+
+fn state_columns(state: &DiagnosticRecordStateV1) -> (&'static str, Option<String>) {
+    let (column, state_generation) = diagnostic_state_columns(state);
+    (column, state_generation.map(str::to_owned))
+}
+
+fn parse_severity(value: &str, operation: &str) -> Result<DiagnosticSeverityV1> {
+    parse_diagnostic_severity(value).ok_or_else(|| {
+        db_message(
+            operation,
+            format!("failed to parse diagnostic severity: {value}"),
+        )
+    })
+}
+
+fn parse_producer_kind(value: &str, operation: &str) -> Result<DiagnosticProducerKindV1> {
+    parse_diagnostic_producer_kind(value).ok_or_else(|| {
+        db_message(
+            operation,
+            format!("failed to parse diagnostic producer kind: {value}"),
+        )
+    })
+}
+
+fn parse_evidence_class(value: &str, operation: &str) -> Result<DiagnosticEvidenceClassV1> {
+    parse_diagnostic_evidence_class(value).ok_or_else(|| {
+        db_message(
+            operation,
+            format!("failed to parse diagnostic evidence class: {value}"),
+        )
+    })
+}
+
+fn port_error(operation: &'static str, source: TraceDecayError) -> DiagnosticStoreError {
+    DiagnosticStoreError::Storage {
+        operation,
+        source: Box::new(source),
+    }
+}
+
+fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: error.to_string(),
+        operation: operation.to_string(),
+    }
+}
+
+fn db_message(operation: &str, message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: message.into(),
+        operation: operation.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tracedecay_domain::test_fixtures::id;
+
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
+
+    fn fixture_record(generation: &str, anchor: &str) -> GenerationDiagnosticV1 {
+        let mut record = GenerationDiagnosticV1 {
+            diagnostic_anchor: id(anchor),
+            generation_id: id(generation),
+            repository: id("repository.fixture"),
+            worktree: Some(id("worktree.fixture")),
+            reference: Some(id("ref.main")),
+            source_revision: Some(id("commit.abc123")),
+            file_occurrence_id: id("file.occurrence.1"),
+            content_digest: id(&digest('a')),
+            span: SourceSpan {
+                start_byte: 10,
+                end_byte: 42,
+            },
+            symbol_occurrence_id: Some(id("symbol.occurrence.1")),
+            code: "E0308".to_owned(),
+            severity: DiagnosticSeverityV1::Error,
+            message: "mismatched types".to_owned(),
+            message_digest: id(&digest('b')),
+            provenance: DiagnosticProvenanceV1 {
+                producer_kind: DiagnosticProducerKindV1::UpstreamCompiler,
+                producer: id("producer.rustc"),
+                analyzer_revision: id("analyzer.v1"),
+                configuration_revision: id("config.v1"),
+                sanitization_receipt: Some(id("receipt.sanitization.1")),
+            },
+            evidence_class: DiagnosticEvidenceClassV1::ProducerReported,
+            collected_at: UtcMicros(1_700_000_000_000_000),
+            state: DiagnosticRecordStateV1::Current,
+        };
+        record.message_digest = record
+            .compute_message_digest()
+            .expect("canonical message digest");
+        record
+    }
+
+    fn with_message(
+        base: GenerationDiagnosticV1,
+        code: &str,
+        message: &str,
+    ) -> GenerationDiagnosticV1 {
+        let mut record = GenerationDiagnosticV1 {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            ..base
+        };
+        record.message_digest = record
+            .compute_message_digest()
+            .expect("canonical message digest");
+        record
+    }
+
+    async fn open_store(
+        path: &std::path::Path,
+    ) -> tracedecay_runtime_core::db::engine::TestConnection {
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(path);
+        DiagnosticsStore::new_runtime(&conn)
+            .ensure_schema()
+            .await
+            .expect("ensure diagnostics schema");
+        conn
+    }
+
+    fn assert_database_refusal(error: TraceDecayError, operation: &str, message: impl AsRef<str>) {
+        match error {
+            TraceDecayError::Database {
+                operation: actual_operation,
+                message: actual_message,
+            } => {
+                assert_eq!(actual_operation, operation);
+                assert_eq!(actual_message, message.as_ref());
+            }
+            other => panic!("expected a database refusal, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_generation_lookup_searches_its_partial_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
+        let mut rows = conn
+            .query(&format!("EXPLAIN QUERY PLAN {CURRENT_GENERATION_SQL}"), ())
+            .await
+            .expect("explain current-generation lookup");
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.expect("read query plan") {
+            plan.push(row.get::<String>(3).expect("query plan detail"));
+        }
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_diagnostic_generation_current")),
+            "the current-generation lookup must search its partial index: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_restart_read_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let gen1 = "generation.clean.1";
+        let first = fixture_record(gen1, "anchor.diagnostic.1");
+        let second = GenerationDiagnosticV1 {
+            severity: DiagnosticSeverityV1::Warning,
+            ..with_message(
+                fixture_record(gen1, "anchor.diagnostic.2"),
+                "dead_code",
+                "function is never used",
+            )
+        };
+
+        {
+            let conn = open_store(&path).await;
+            let store = DiagnosticsStore::new_runtime(&conn);
+            let (inserted, cleared) = store
+                .publish_clean_generation(&id(gen1), &[first.clone(), second.clone()])
+                .await
+                .expect("publish generation");
+            assert_eq!((inserted, cleared), (2, 0));
+        }
+
+        // Simulate a restart: new database handle and connection on the same
+        // file, with the schema ensured again idempotently.
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        let records = store
+            .records_for_generation(&id(gen1))
+            .await
+            .expect("read back after restart");
+        assert_eq!(records, vec![first.clone(), second.clone()]);
+        assert_eq!(
+            store
+                .record_by_anchor(&id("anchor.diagnostic.1"))
+                .await
+                .expect("anchor read"),
+            Some(first)
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_generation_clears_prior_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        let gen1 = "generation.clean.1";
+        let gen2 = "generation.clean.2";
+
+        store
+            .publish_clean_generation(
+                &id(gen1),
+                &[
+                    fixture_record(gen1, "anchor.diagnostic.1"),
+                    fixture_record(gen1, "anchor.diagnostic.2"),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // A clean generation with no findings deterministically clears the
+        // prior publication.
+        let (inserted, cleared) = store
+            .publish_clean_generation(&id(gen2), &[])
+            .await
+            .expect("empty clean publication");
+        assert_eq!((inserted, cleared), (0, 2));
+
+        assert!(store.current_records(&id(gen1)).await.unwrap().is_empty());
+        // History stays queryable after clearing.
+        let history = store.records_for_generation(&id(gen1)).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|record| matches!(
+            &record.state,
+            DiagnosticRecordStateV1::Cleared {
+                cleared_in_generation
+            } if cleared_in_generation.as_str() == gen2
+        )));
+    }
+
+    #[tokio::test]
+    async fn queries_filter_by_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        let gen1 = "generation.clean.1";
+        let gen2 = "generation.clean.2";
+
+        store
+            .publish_clean_generation(
+                &id(gen1),
+                &[
+                    fixture_record(gen1, "anchor.diagnostic.1"),
+                    fixture_record(gen1, "anchor.diagnostic.2"),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .publish_clean_generation(
+                &id(gen2),
+                std::slice::from_ref(&fixture_record(gen2, "anchor.diagnostic.3")),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.records_for_generation(&id(gen1)).await.unwrap().len(),
+            2
+        );
+        let gen2_records = store.records_for_generation(&id(gen2)).await.unwrap();
+        assert_eq!(gen2_records.len(), 1);
+        assert!(
+            gen2_records
+                .iter()
+                .all(|record| record.generation_id.as_str() == gen2)
+        );
+        assert_eq!(
+            store
+                .current_records_for_file(&id(gen2), &id("file.occurrence.1"))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .current_records_for_file(&id(gen1), &id("file.occurrence.1"))
+                .await
+                .unwrap()
+                .is_empty(),
+            "gen1 rows were cleared by the gen2 clean publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_rejects_stale_or_mixed_generation_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        let gen1 = "generation.clean.1";
+        let gen2 = "generation.clean.2";
+
+        // Stale findings cannot cross snapshots: publishing a non-current
+        // record is rejected.
+        let stale = fixture_record(gen1, "anchor.diagnostic.1")
+            .clear(id(gen2))
+            .unwrap();
+        assert_database_refusal(
+            store
+                .publish_clean_generation(&id(gen1), std::slice::from_ref(&stale))
+                .await
+                .unwrap_err(),
+            "diagnostics publish_clean_generation",
+            format!(
+                "record {} is not current; stale findings cannot cross snapshots",
+                stale.diagnostic_anchor
+            ),
+        );
+
+        // A clean publication is single-generation.
+        let mixed = fixture_record(gen2, "anchor.diagnostic.2");
+        assert_database_refusal(
+            store
+                .publish_clean_generation(
+                    &id(gen1),
+                    &[fixture_record(gen1, "anchor.diagnostic.1"), mixed.clone()],
+                )
+                .await
+                .unwrap_err(),
+            "diagnostics publish_clean_generation",
+            format!(
+                "record {} names generation {} but publication targets {}",
+                mixed.diagnostic_anchor,
+                mixed.generation_id,
+                id::<tracedecay_domain::CodeGenerationId>(gen1)
+            ),
+        );
+
+        assert!(
+            store
+                .records_for_generation(&id(gen1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_clean_generation_identity_survives_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let gen1 = id("generation.clean.empty");
+
+        {
+            let conn = open_store(&path).await;
+            let store = DiagnosticsStore::new_runtime(&conn);
+            assert_eq!(
+                store.publish_clean_generation(&gen1, &[]).await.unwrap(),
+                (0, 0)
+            );
+        }
+
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        assert_eq!(
+            store.current_generation().await.unwrap(),
+            Some(gen1.clone())
+        );
+        assert_eq!(
+            store.publish_clean_generation(&gen1, &[]).await.unwrap(),
+            (0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_clean_generation_republication_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        let gen1 = "generation.clean.1";
+        let record = fixture_record(gen1, "anchor.diagnostic.1");
+
+        assert_eq!(
+            store
+                .publish_clean_generation(&id(gen1), std::slice::from_ref(&record))
+                .await
+                .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(
+            store
+                .publish_clean_generation(&id(gen1), std::slice::from_ref(&record))
+                .await
+                .unwrap(),
+            (0, 0)
+        );
+        assert_eq!(
+            store.records_for_generation(&id(gen1)).await.unwrap(),
+            vec![record]
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_read_follows_current_publication_when_newer_observation_time_is_older() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        let generation = id("generation.clean.revised");
+        let first = fixture_record("generation.clean.revised", "anchor.diagnostic.revised");
+        let mut second = first.clone();
+        second.collected_at = UtcMicros(first.collected_at.0 - 1);
+        second.provenance.configuration_revision = id("config.v2");
+
+        store
+            .publish_clean_generation(&generation, std::slice::from_ref(&first))
+            .await
+            .unwrap();
+        store
+            .publish_clean_generation(&generation, std::slice::from_ref(&second))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .record_by_anchor(&second.diagnostic_anchor)
+                .await
+                .unwrap(),
+            Some(second.clone()),
+            "anchor lookup must follow the current publication header"
+        );
+    }
+
+    #[tokio::test]
+    async fn immutable_anchor_collision_rolls_back_current_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        let gen1 = "generation.clean.1";
+        let gen2 = "generation.clean.2";
+        let original = fixture_record(gen1, "anchor.diagnostic.shared");
+
+        store
+            .publish_clean_generation(&id(gen1), std::slice::from_ref(&original))
+            .await
+            .unwrap();
+
+        let collision = fixture_record(gen2, "anchor.diagnostic.shared");
+        assert_database_refusal(
+            store
+                .publish_clean_generation(&id(gen2), std::slice::from_ref(&collision))
+                .await
+                .unwrap_err(),
+            "diagnostics publish_clean_generation",
+            format!(
+                "diagnostic anchor {} is already bound to another generation",
+                collision.diagnostic_anchor
+            ),
+        );
+        assert_eq!(
+            store.current_records(&id(gen1)).await.unwrap(),
+            vec![original]
+        );
+        assert!(
+            store
+                .records_for_generation(&id(gen2))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cleared_generation_cannot_be_reactivated() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("diagnostics.db");
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
+        let gen1 = "generation.clean.1";
+        let gen2 = "generation.clean.2";
+        let cleared = fixture_record(gen1, "anchor.diagnostic.cleared");
+
+        store
+            .publish_clean_generation(&id(gen1), std::slice::from_ref(&cleared))
+            .await
+            .unwrap();
+        store
+            .publish_clean_generation(&id(gen2), &[])
+            .await
+            .unwrap();
+        assert_database_refusal(
+            store
+                .publish_clean_generation(&id(gen1), std::slice::from_ref(&cleared))
+                .await
+                .unwrap_err(),
+            "diagnostics publish_clean_generation",
+            format!(
+                "generation {} is already historical and cannot be republished",
+                id::<tracedecay_domain::CodeGenerationId>(gen1)
+            ),
+        );
+    }
+}

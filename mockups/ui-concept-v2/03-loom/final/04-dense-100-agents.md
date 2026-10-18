@@ -2,7 +2,7 @@
 design_status: current
 ---
 
-# Loom 04 — Dense 100+ agents
+# Loom 04, Dense 100+ agents
 
 - **Asset:** `04-dense-100-agents.png`
 - **Lifecycle:** `current`

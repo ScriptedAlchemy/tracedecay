@@ -1,0 +1,732 @@
+//! Handler for the `tracedecay_analytics` MCP tool.
+//!
+//! Read-only adoption/telemetry rollup so an agent can see its own usage
+//! without querying `.tracedecay` databases directly. Reuses the same
+//! durable-analytics service functions the `tracedecay analytics
+//! diagnostics` CLI and dashboard analytics API use
+//! ([`tracedecay_global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
+//! [`tracedecay_global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
+//! [`tracedecay_dashboard_api::analytics_api::hint_summary_from_counts`],
+//! [`tracedecay_automation_runtime::automation::run_ledger::load_run_records`]) rather than
+//! re-implementing queries against those tables.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
+use tracedecay_contracts::retrieval::{
+    ANALYTICS_DEFAULT_WINDOW_DAYS, ANALYTICS_MAX_WINDOW_DAYS, ANALYTICS_MIN_WINDOW_DAYS,
+    AnalyticsAutomationJobOutcomesV1, AnalyticsAutomationOutcomesV1, AnalyticsAutomationSectionV1,
+    AnalyticsCanonicalCallNameV1, AnalyticsEventCallNameV1, AnalyticsFactFunnelV1,
+    AnalyticsFactsSectionV1, AnalyticsLedgerUnavailableV1, AnalyticsProjectSectionUnavailableV1,
+    AnalyticsReportStatusV1, AnalyticsResultV1, AnalyticsScopeV1, AnalyticsSectionUnavailableV1,
+    AnalyticsSectionV1, AnalyticsSurfaceRequestV1, AnalyticsTierCountsV1, AnalyticsToolsSectionV1,
+    AnalyticsTopToolV1, AnalyticsZeroCallToolsV1,
+};
+use tracedecay_contracts::{
+    CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
+};
+use tracedecay_domain::{FactOwnerV1, ObservationScopeV1, ProjectId};
+use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_store::{FactReadControl, StoreShardScopeV1};
+
+use tracedecay_automation_runtime::automation::backend::task_key;
+use tracedecay_automation_runtime::automation::run_ledger::{
+    AutomationRunStatus, canonical_record_started_at_seconds, load_run_records,
+};
+use tracedecay_daemon_service::retained_owner::open_project_retained_memory_target;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
+use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
+use tracedecay_store_runtime::retained_memory::MemoryTargetAccessV1;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
+use crate::ToolCategory;
+use crate::handlers::graph::graph_tool_completion;
+use crate::handlers::support::decode_primitive_request;
+
+/// Bound on how many automation run-ledger rows a single call will scan.
+const AUTOMATION_RECORD_LIMIT: usize = 200;
+/// Top-N tools shown by call volume.
+const TOP_TOOLS_LIMIT: usize = 10;
+/// Bound on how many zero-call tool names are listed inline.
+const ZERO_CALL_SAMPLE_LIMIT: usize = 30;
+
+/// Analytics tier labels in output order. The labels are emitted in the
+/// analytics payload, so they stay stable when the catalog regroups tools.
+const TIERS: &[&str] = &[
+    "navigation",
+    "analysis",
+    "session",
+    "memory",
+    "edit",
+    "admin",
+    "work",
+];
+
+fn config_error(message: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: message.to_string(),
+    }
+}
+
+/// Strips a `tracedecay_`/`mcp__tracedecay__` prefix and returns the bucket
+/// name for a tool. Unknown/non-tracedecay tool names bucket as `"other"`.
+fn tool_tier(tool_name: &str) -> &'static str {
+    let normalized = tracedecay_automation::analytics::normalize_tool_name(tool_name);
+    let normalized = normalized
+        .strip_prefix("tracedecay_")
+        .unwrap_or(normalized.as_str());
+    // These tools reported a tier other than their category's before tiers
+    // were derived from the catalog category; keep their reported tier.
+    match normalized {
+        "runtime" => return "analysis",
+        "diagnose" | "run_affected_tests" => return "admin",
+        _ => {}
+    }
+    match ToolCategory::of(normalized) {
+        Some(
+            ToolCategory::CodeSearch
+            | ToolCategory::CodeNavigation
+            | ToolCategory::GitReview
+            | ToolCategory::ProjectRuntime,
+        ) => "navigation",
+        Some(ToolCategory::CodeAnalysis) => "analysis",
+        Some(ToolCategory::Sessions) => "session",
+        Some(ToolCategory::Memory) => "memory",
+        Some(ToolCategory::Edit) => "edit",
+        Some(ToolCategory::Operations) => "admin",
+        Some(ToolCategory::Work) => "work",
+        None => "other",
+    }
+}
+
+/// Maps host-neutral public names and short aliases to their canonical route.
+fn public_name_to_canonical(definitions: &[String]) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    for canonical_name in definitions {
+        names.insert(
+            tracedecay_automation::analytics::normalize_tool_name(canonical_name),
+            canonical_name.clone(),
+        );
+        names
+            .entry(tracedecay_automation::analytics::normalize_tool_name(
+                crate::short_tool_name(canonical_name),
+            ))
+            .or_insert_with(|| canonical_name.clone());
+    }
+    names
+}
+
+/// Bound routes which are intentionally absent from the public MCP catalog.
+///
+/// Dispatch binding and the catalog's internal operations, which are served by
+/// name and never advertised, are the authority for whether a persisted event
+/// name was a real daemon route. Subtracting advertised definitions leaves the
+/// private host/runtime routes without duplicating a route inventory here.
+fn bound_but_unadvertised_tool_names(defined: &[String]) -> BTreeSet<&'static str> {
+    let public_names: BTreeSet<String> = defined
+        .iter()
+        .map(|name| tracedecay_automation::analytics::normalize_tool_name(name))
+        .collect();
+    crate::tools::binding::MCP_TOOL_BINDINGS
+        .iter()
+        .map(|binding| binding.name)
+        .chain(
+            ApplicationSurfaceOperation::INTERNAL_OPERATIONS
+                .iter()
+                .map(|operation| operation.mcp_tool_name()),
+        )
+        .filter(|name| {
+            !public_names.contains(&tracedecay_automation::analytics::normalize_tool_name(name))
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct ToolCallCounts {
+    calls: i64,
+    errors: i64,
+}
+
+fn wants_section(filter: Option<AnalyticsSectionV1>, section: AnalyticsSectionV1) -> bool {
+    filter.is_none_or(|requested| requested == section)
+}
+
+struct ResolvedScope {
+    /// `None` when `scope: "all"`; the canonical `analytics_events` project
+    /// key otherwise.
+    filter: Option<String>,
+    /// Always resolved to a concrete project (used for the project-scoped
+    /// facts/automation sections regardless of `scope`).
+    root: PathBuf,
+    display_root: String,
+    project_id: ProjectId,
+}
+
+fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedScope> {
+    let FactOwnerV1::Project { project_id } = cg.project_memory_owner().map_err(config_error)?
+    else {
+        return Err(config_error("active analytics target is not a project"));
+    };
+    let project_root = cg.project_root().to_path_buf();
+    let project_display = cg.project_root().to_string_lossy().to_string();
+    let filter = if all_projects {
+        None
+    } else {
+        Some(RegisteredGlobalDb::canonical_project_key(&project_root))
+    };
+    Ok(ResolvedScope {
+        filter,
+        root: project_root,
+        display_root: project_display,
+        project_id,
+    })
+}
+
+/// Provider usage is scoped to the active project only when the request is
+/// project-scoped and the sessions shard's `project_id` matches the active
+/// store identity; any other combination reads all-project usage rather than
+/// a neighbouring project's.
+async fn observatory_and_costs_sections(
+    cg: &TraceDecay,
+    gdb: &RegisteredGlobalDb,
+    project_sessions: Option<&RegisteredGlobalDb>,
+    scope: &ResolvedScope,
+    all_projects: bool,
+    since: i64,
+    report: &mut AnalyticsResultV1,
+) {
+    let observatory = tracing::Instrument::instrument(
+        tracedecay_application::observability::observatory_read_model(
+            gdb,
+            scope.filter.as_deref(),
+            since,
+        ),
+        tracing::trace_span!("mcp.analytics.report.observatory"),
+    )
+    .await;
+    let provider_scope = if all_projects {
+        None
+    } else {
+        project_sessions.and_then(|sessions| {
+            let StoreShardScopeV1::ProjectSessions { project_id } =
+                &sessions.binding().shard_id.scope
+            else {
+                return None;
+            };
+            (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str())).then(
+                || ObservationScopeV1::Project {
+                    project_id: project_id.clone(),
+                },
+            )
+        })
+    };
+    let provider_usage_db = if all_projects { None } else { project_sessions };
+    let costs = tracing::Instrument::instrument(
+        tracedecay_application::observability::costs_read_model(
+            gdb,
+            provider_usage_db,
+            provider_scope.as_ref(),
+            scope.filter.as_deref(),
+            since,
+        ),
+        tracing::trace_span!("mcp.analytics.report.costs"),
+    )
+    .await;
+    report.observatory = Some(observatory);
+    report.costs = Some(costs);
+}
+
+/// The authorities an analytics report reads beside the project itself.
+pub struct AnalyticsAuthority<'a> {
+    pub profile_root: Option<&'a Path>,
+    pub analytics_db: Option<&'a RegisteredGlobalDb>,
+    pub project_sessions: Option<&'a RegisteredGlobalDb>,
+    pub deadline: Deadline,
+    pub cancellation: CancellationSignal,
+}
+
+#[tracing::instrument(name = "mcp.analytics.report.total", level = "trace", skip_all)]
+pub async fn compute_analytics(
+    cg: &TraceDecay,
+    args: &Value,
+    authority: AnalyticsAuthority<'_>,
+) -> Result<GraphToolCompletionV1> {
+    let request: AnalyticsSurfaceRequestV1 =
+        decode_primitive_request(args, "tracedecay_analytics")?;
+    let window_days = request.window_days.unwrap_or(ANALYTICS_DEFAULT_WINDOW_DAYS);
+    if !(ANALYTICS_MIN_WINDOW_DAYS..=ANALYTICS_MAX_WINDOW_DAYS).contains(&window_days) {
+        return Err(config_error(format!(
+            "invalid arguments for tracedecay_analytics: window_days must be between {ANALYTICS_MIN_WINDOW_DAYS} and {ANALYTICS_MAX_WINDOW_DAYS}"
+        )));
+    }
+    let scope_kind = request.scope.unwrap_or_default();
+    let all_projects = scope_kind == AnalyticsScopeV1::All;
+    let section = request.section;
+    let AnalyticsAuthority {
+        profile_root,
+        analytics_db,
+        project_sessions,
+        deadline,
+        cancellation,
+    } = authority;
+    let read_control = FactReadControl::new(Arc::new(move || {
+        cancellation.is_cancelled() || deadline.is_elapsed_at(now_micros())
+    }));
+
+    let gdb = analytics_db.ok_or_else(|| {
+        config_error("registered global analytics store is unavailable for tracedecay_analytics")
+    })?;
+
+    let scope = resolve_scope(cg, all_projects)?;
+
+    let since = current_timestamp().saturating_sub(i64::from(window_days).saturating_mul(86_400));
+    let event_count = tracing::Instrument::instrument(
+        gdb.count_analytics_events(scope.filter.as_deref(), since),
+        tracing::trace_span!("mcp.analytics.report.events"),
+    )
+    .await
+    .map_err(config_error)?;
+    let mut report = AnalyticsResultV1 {
+        status: AnalyticsReportStatusV1::Ok,
+        scope: scope_kind,
+        project_id: scope.filter.clone(),
+        project_root: scope.display_root.clone(),
+        window_days,
+        since,
+        event_count,
+        event_count_truncated: false,
+        observatory: None,
+        costs: None,
+        tools: None,
+        hints: None,
+        facts: None,
+        automation: None,
+    };
+
+    if section.is_none() {
+        observatory_and_costs_sections(
+            cg,
+            gdb,
+            project_sessions,
+            &scope,
+            all_projects,
+            since,
+            &mut report,
+        )
+        .await;
+    }
+
+    if wants_section(section, AnalyticsSectionV1::Tools) {
+        let counts = tracing::Instrument::instrument(
+            gdb.query_analytics_tool_counts(scope.filter.as_deref(), since),
+            tracing::trace_span!("mcp.analytics.report.tools"),
+        )
+        .await
+        .map_err(config_error)?;
+        report.tools = Some(tools_section(&counts)?);
+    }
+    if wants_section(section, AnalyticsSectionV1::Hints) {
+        let counts = tracing::Instrument::instrument(
+            gdb.query_analytics_hint_counts(scope.filter.as_deref(), since),
+            tracing::trace_span!("mcp.analytics.report.hints"),
+        )
+        .await
+        .map_err(config_error)?;
+        report.hints =
+            Some(tracedecay_dashboard_api::analytics_api::hint_summary_from_counts(&counts));
+    }
+    if wants_section(section, AnalyticsSectionV1::Facts) {
+        report.facts = Some(
+            tracing::Instrument::instrument(
+                facts_section(cg, &scope, &read_control),
+                tracing::trace_span!("mcp.analytics.report.facts"),
+            )
+            .await,
+        );
+    }
+    if wants_section(section, AnalyticsSectionV1::Automation) {
+        report.automation = Some(
+            tracing::Instrument::instrument(
+                automation_section(profile_root, &scope.root, since),
+                tracing::trace_span!("mcp.analytics.report.automation"),
+            )
+            .await,
+        );
+    }
+
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Analytics(Box::new(report)),
+        Vec::new(),
+    ))
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "The tools analytics section ranks every cataloged tool from one usage read."
+)]
+fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<AnalyticsToolsSectionV1> {
+    let mut per_tool: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
+    for row in rows {
+        let counts = per_tool.entry(row.tool_name.clone()).or_default();
+        counts.calls += row.calls;
+        counts.errors += row.errors;
+    }
+
+    let available_defined: Vec<String> = crate::get_tool_definitions()
+        .map_err(config_error)?
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    let available_public_name_to_canonical = public_name_to_canonical(&available_defined);
+    let bound_but_unadvertised = bound_but_unadvertised_tool_names(&available_defined);
+    let mut called_available_defined = BTreeSet::new();
+    let mut aliased_call_names = Vec::new();
+    let mut bound_internal_call_names = Vec::new();
+    let mut unknown_or_retired_call_names = Vec::new();
+    let mut logical_tool_counts: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
+    for (event_name, counts) in &per_tool {
+        let normalized_event_name =
+            tracedecay_automation::analytics::normalize_tool_name(event_name);
+        let canonical = |canonical_tool_name: &String| AnalyticsCanonicalCallNameV1 {
+            event_name: event_name.clone(),
+            canonical_tool_name: canonical_tool_name.clone(),
+            calls: counts.calls,
+            errors: counts.errors,
+        };
+        let event = || AnalyticsEventCallNameV1 {
+            event_name: event_name.clone(),
+            calls: counts.calls,
+            errors: counts.errors,
+        };
+        let logical_tool_name = if let Some(canonical_tool_name) =
+            available_public_name_to_canonical.get(&normalized_event_name)
+        {
+            called_available_defined.insert(canonical_tool_name.clone());
+            if event_name != canonical_tool_name {
+                aliased_call_names.push(canonical(canonical_tool_name));
+            }
+            canonical_tool_name
+        } else if bound_but_unadvertised.contains(normalized_event_name.as_str()) {
+            bound_internal_call_names.push(event());
+            event_name
+        } else {
+            unknown_or_retired_call_names.push(event());
+            event_name
+        };
+        let logical_counts = logical_tool_counts
+            .entry(logical_tool_name.clone())
+            .or_default();
+        logical_counts.calls += counts.calls;
+        logical_counts.errors += counts.errors;
+    }
+
+    let mut per_tier: BTreeMap<&'static str, ToolCallCounts> = BTreeMap::new();
+    for (tool_name, counts) in &logical_tool_counts {
+        let tier = per_tier.entry(tool_tier(tool_name)).or_default();
+        tier.calls += counts.calls;
+        tier.errors += counts.errors;
+    }
+    let tiers = TIERS
+        .iter()
+        .copied()
+        .chain(std::iter::once("other"))
+        .filter_map(|tier| {
+            per_tier.get(tier).map(|counts| AnalyticsTierCountsV1 {
+                tier: tier.to_owned(),
+                calls: counts.calls,
+                errors: counts.errors,
+            })
+        })
+        .collect();
+
+    let mut top_tools: Vec<(&String, &ToolCallCounts)> = logical_tool_counts.iter().collect();
+    top_tools.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(b.0)));
+    let top_tools = top_tools
+        .into_iter()
+        .take(TOP_TOOLS_LIMIT)
+        .map(|(tool_name, counts)| AnalyticsTopToolV1 {
+            tool_name: tool_name.clone(),
+            tier: tool_tier(tool_name).to_owned(),
+            calls: counts.calls,
+            errors: counts.errors,
+        })
+        .collect();
+
+    let mut zero_call: Vec<&String> = available_defined
+        .iter()
+        .filter(|name| !called_available_defined.contains(*name))
+        .collect();
+    zero_call.sort();
+    let zero_call_count = zero_call.len();
+    let sample: Vec<String> = zero_call
+        .into_iter()
+        .take(ZERO_CALL_SAMPLE_LIMIT)
+        .cloned()
+        .collect();
+
+    Ok(AnalyticsToolsSectionV1 {
+        available: !rows.is_empty(),
+        tiers,
+        top_tools,
+        raw_distinct_event_name_count: per_tool.len(),
+        called_available_defined_tool_count: called_available_defined.len(),
+        available_defined_tool_count: available_defined.len(),
+        aliased_call_names,
+        bound_internal_call_names,
+        unknown_or_retired_call_names,
+        zero_call_available_defined_tools: AnalyticsZeroCallToolsV1 {
+            count: zero_call_count,
+            sample_truncated: zero_call_count > sample.len(),
+            sample,
+        },
+    })
+}
+
+async fn facts_section(
+    cg: &TraceDecay,
+    scope: &ResolvedScope,
+    read_control: &FactReadControl,
+) -> AnalyticsFactsSectionV1 {
+    let project_unavailable = |reason: String| {
+        AnalyticsFactsSectionV1::ProjectUnavailable(AnalyticsProjectSectionUnavailableV1 {
+            available: false,
+            reason,
+            project_root: scope.root.display().to_string(),
+        })
+    };
+    let admitted_owner = match cg.project_memory_owner() {
+        Ok(FactOwnerV1::Project { project_id }) => project_id,
+        Ok(FactOwnerV1::Profile) | Err(_) => {
+            return AnalyticsFactsSectionV1::Unavailable(AnalyticsSectionUnavailableV1::new(
+                "active analytics target has no project memory owner",
+            ));
+        }
+    };
+    let selector = (scope.project_id != admitted_owner).then(|| RetainedProjectSelectorV1 {
+        project_id: scope.project_id.clone(),
+    });
+    let target = match open_project_retained_memory_target(
+        cg,
+        cg.project_root(),
+        &admitted_owner,
+        Some(MemoryScopeV1::Project),
+        selector.as_ref(),
+        MemoryTargetAccessV1::Read,
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(err) => {
+            let problem = retained_surface_execution_problem(err);
+            return AnalyticsFactsSectionV1::Unavailable(AnalyticsSectionUnavailableV1::new(
+                problem.canonical_code(),
+            ));
+        }
+    };
+    let memory = match MemoryApplication::new(
+        target.owner().clone(),
+        DatabaseFactStore::new(target.database()),
+    ) {
+        Ok(memory) => memory,
+        Err(err) => return project_unavailable(format!("fact-store funnel unavailable: {err}")),
+    };
+    let status = match memory.project_memory_status(read_control).await {
+        Ok(status) => status,
+        Err(err) => return project_unavailable(format!("fact-store funnel unavailable: {err}")),
+    };
+    let funnel = status.feedback_funnel();
+    AnalyticsFactsSectionV1::Available(AnalyticsFactFunnelV1 {
+        available: true,
+        project_root: scope.root.display().to_string(),
+        facts: status.fact_count(),
+        retrievals: funnel.retrieval_count_total(),
+        facts_retrieved: funnel.retrieved_fact_count(),
+        helpful_feedback: status.helpful_count(),
+        unhelpful_feedback: status.unhelpful_count(),
+        facts_rated: funnel.rated_fact_count(),
+    })
+}
+
+async fn automation_section(
+    profile_root: Option<&Path>,
+    project_root: &Path,
+    since: i64,
+) -> AnalyticsAutomationSectionV1 {
+    let unavailable = |reason: String| {
+        AnalyticsAutomationSectionV1::Unavailable(AnalyticsSectionUnavailableV1::new(reason))
+    };
+    let Some(profile_root) = profile_root else {
+        return unavailable("profile root unavailable".to_owned());
+    };
+    // Only an enrolled project has an automation ledger; resolving through the
+    // path-derived default layout would name a shard this directory never
+    // owned and the read below would mint it.
+    let dashboard_root = match tracedecay_runtime_core::storage::resolve_persisted_layout(
+        project_root,
+        profile_root,
+    ) {
+        Ok(Some(layout)) => layout.dashboard_root,
+        Ok(None) => return unavailable("project is not enrolled in this profile".to_owned()),
+        Err(err) => {
+            return unavailable(format!(
+                "could not resolve automation dashboard root: {err}"
+            ));
+        }
+    };
+    let records = match load_run_records(&dashboard_root, AUTOMATION_RECORD_LIMIT).await {
+        Ok(records) => records,
+        Err(err) => {
+            return AnalyticsAutomationSectionV1::LedgerUnavailable(AnalyticsLedgerUnavailableV1 {
+                available: false,
+                reason: format!("could not read automation run ledger: {err}"),
+                dashboard_root: dashboard_root.display().to_string(),
+            });
+        }
+    };
+
+    let mut in_window = 0usize;
+    let mut by_job: BTreeMap<String, AnalyticsAutomationJobOutcomesV1> = BTreeMap::new();
+    for record in &records {
+        if let Ok(started_at) = canonical_record_started_at_seconds(record, "analytics window")
+            && started_at < since
+        {
+            continue;
+        }
+        in_window += 1;
+        let job = task_key(record.task).to_owned();
+        let outcomes =
+            by_job
+                .entry(job.clone())
+                .or_insert_with(|| AnalyticsAutomationJobOutcomesV1 {
+                    job,
+                    succeeded: 0,
+                    failed: 0,
+                    skipped: 0,
+                    other: 0,
+                });
+        let count = match record.status {
+            AutomationRunStatus::Succeeded => &mut outcomes.succeeded,
+            AutomationRunStatus::Failed => &mut outcomes.failed,
+            AutomationRunStatus::Skipped => &mut outcomes.skipped,
+            AutomationRunStatus::Queued | AutomationRunStatus::Running => &mut outcomes.other,
+        };
+        *count += 1;
+    }
+
+    AnalyticsAutomationSectionV1::Available(AnalyticsAutomationOutcomesV1 {
+        available: true,
+        dashboard_root: dashboard_root.display().to_string(),
+        records_considered: records.len(),
+        records_in_window: in_window,
+        records_truncated: records.len() >= AUTOMATION_RECORD_LIMIT,
+        by_job: by_job.into_values().collect(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bound_but_unadvertised_tool_names, public_name_to_canonical, tool_tier};
+
+    #[test]
+    fn bound_unadvertised_tool_names_use_the_public_catalog() {
+        let defined: Vec<String> = crate::get_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        let bound_unadvertised = bound_but_unadvertised_tool_names(&defined);
+
+        // Served by name as an internal owner operation, with no dispatch
+        // binding row and no advertised definition.
+        assert!(
+            !crate::tools::binding::MCP_TOOL_BINDINGS
+                .iter()
+                .any(|binding| binding.name == "tracedecay_admin_cli")
+        );
+        assert!(!defined.iter().any(|name| name == "tracedecay_admin_cli"));
+        assert!(bound_unadvertised.contains("tracedecay_admin_cli"));
+        assert!(bound_unadvertised.contains("tracedecay_admin_sync"));
+        assert!(
+            defined
+                .iter()
+                .any(|name| name == "tracedecay_ast_grep_rewrite")
+        );
+        assert!(!bound_unadvertised.contains("tracedecay_ast_grep_rewrite"));
+    }
+
+    #[test]
+    fn public_lookup_normalizes_host_namespaces() {
+        let defined: Vec<String> = crate::get_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        let names = public_name_to_canonical(&defined);
+
+        let namespaced_context = tracedecay_automation::analytics::normalize_tool_name(
+            "mcp__tracedecay__tracedecay_context",
+        );
+        assert_eq!(
+            names.get(&namespaced_context),
+            Some(&"tracedecay_context".to_string())
+        );
+    }
+
+    #[test]
+    fn exact_fact_store_routes_remain_in_the_memory_tier() {
+        for route in [
+            "add",
+            "search",
+            "probe",
+            "related",
+            "reason",
+            "contradict",
+            "get",
+            "update",
+            "remove",
+            "list",
+        ] {
+            assert_eq!(
+                tool_tier(&format!("tracedecay_fact_store_{route}")),
+                "memory"
+            );
+        }
+        assert_eq!(tool_tier("tracedecay_fact_store"), "other");
+        assert_eq!(tool_tier("tracedecay_fact_store_unknown"), "other");
+    }
+
+    #[test]
+    fn every_catalog_tool_reports_a_named_tier() {
+        let other: Vec<String> = crate::get_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .filter(|name| tool_tier(name) == "other")
+            .collect();
+        assert!(
+            other.is_empty(),
+            "catalog tools in the other tier: {other:?}"
+        );
+    }
+
+    #[test]
+    fn regrouped_tools_keep_their_reported_tier() {
+        for (tool, tier) in [
+            ("tracedecay_runtime", "analysis"),
+            ("tracedecay_diagnose", "admin"),
+            ("tracedecay_run_affected_tests", "admin"),
+            ("tracedecay_status", "navigation"),
+        ] {
+            assert_eq!(tool_tier(tool), tier, "{tool}");
+        }
+    }
+}

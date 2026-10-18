@@ -1,22 +1,25 @@
-use tracedecay::agents::codex::export_codex_plugin_artifact;
-use tracedecay::agents::{export_managed_skills_to_agent_hosts, export_managed_skills_to_agents};
+use tracedecay_agent_hosts::agents::codex::export_codex_plugin_artifact;
+use tracedecay_agent_hosts::agents::{
+    export_managed_skills_to_agent_hosts, export_managed_skills_to_agents,
+};
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    create_managed_skill, default_managed_skill_targets, disable_managed_skill, load_managed_skill,
-    managed_skill_dir,
+    ManagedSupportFileExt, create_managed_skill, default_managed_skill_targets,
+    disable_managed_skill, load_managed_skill, managed_skill_dir,
 };
 use tracedecay_automation_runtime::automation::skill_targets::{
     SkillInstallTarget, export_native_skill_overlay, export_prompt_skill_index,
-    install_managed_skills, remove_prompt_skill_index, remove_prompt_skill_index_for_target,
+    install_managed_skills, remove_prompt_skill_index_for_target, stale_prompt_index_ids,
 };
+use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_at;
 
-/// Temp root for a test. Also installs the production agent-hosts adapters
-/// into the automation-runtime host-config write surface — the same wiring
-/// the composition root performs at process start — because skill exports and
-/// prompt-index writes fail closed when the surface is unregistered.
-/// Idempotent, so every test entry point calls it.
+/// The production host I/O bundle prompt-index writes go through the same
+/// value the host installers hand `skill_targets`.
+fn host_io() -> tracedecay_automation_runtime::automation::host_io::HostIo {
+    tracedecay_agent_hosts::host_io()
+}
+
 fn tempdir() -> tempfile::TempDir {
-    tracedecay_agent_hosts::register_automation_host_io();
     tempfile::tempdir().unwrap()
 }
 
@@ -25,6 +28,7 @@ fn draft(id: &str, title: &str) -> ManagedSkillDraft {
         id: id.to_string(),
         title: title.to_string(),
         summary: format!("{title} summary"),
+        routing_description: format!("Use when {title} summary"),
         category: "workflow".to_string(),
         targets: default_managed_skill_targets(),
         body_markdown: format!("Use {title} when the workflow repeats."),
@@ -45,24 +49,6 @@ fn targeted_draft(id: &str, title: &str, targets: Vec<SkillInstallTarget>) -> Ma
         targets,
         ..draft(id, title)
     }
-}
-
-#[test]
-fn managed_skill_defaults_target_supported_hosts() {
-    let targets = default_managed_skill_targets();
-    assert_eq!(
-        targets,
-        vec![
-            SkillInstallTarget::Cursor,
-            SkillInstallTarget::Codex,
-            SkillInstallTarget::Claude,
-            SkillInstallTarget::Agents,
-            SkillInstallTarget::OpenCode,
-            SkillInstallTarget::Kimi,
-            SkillInstallTarget::Kiro,
-            SkillInstallTarget::Hermes,
-        ]
-    );
 }
 
 #[tokio::test]
@@ -165,34 +151,6 @@ async fn native_overlay_exports_automatically_active_skills_and_prunes_generated
 }
 
 #[tokio::test]
-async fn codex_native_overlay_uses_agent_managed_namespace() {
-    let temp = tempdir();
-    let profile_root = temp.path().join("profile");
-    let plugin_root = temp.path().join("codex-plugin");
-
-    create_managed_skill(
-        &profile_root,
-        targeted_draft(
-            "repo-hygiene",
-            "Repository hygiene",
-            vec![SkillInstallTarget::Codex],
-        ),
-    )
-    .await
-    .unwrap();
-
-    let summary =
-        export_native_skill_overlay(&profile_root, SkillInstallTarget::Codex, &plugin_root)
-            .unwrap();
-    assert_eq!(summary.exported_count, 1);
-    assert!(
-        plugin_root
-            .join("skills/agent-managed/repo-hygiene/SKILL.md")
-            .is_file()
-    );
-}
-
-#[tokio::test]
 async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
     let temp = tempdir();
     let profile_root = temp.path().join("profile");
@@ -243,9 +201,28 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
     assert!(!codex_skill.contains("targets:"));
     assert!(!codex_skill.contains("checksum:"));
 
-    let mcp = std::fs::read_to_string(plugin_root.join(".mcp.json")).unwrap();
-    assert!(mcp.contains("\"command\": \"tracedecay-bin\""));
-    assert!(mcp.contains("\"TRACEDECAY_ENABLE_GLOBAL_DB\": \"1\""));
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(plugin_root.join(".mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        mcp,
+        serde_json::json!({
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+            "mcpServers": {
+                "graph": {"type": "stdio", "command": "tracedecay-bin",
+                    "args": ["serve", "--full-tool-list"],
+                    "startup_timeout_sec": 120, "tool_timeout_sec": 900},
+                "tracedecay-explorer": {"type": "stdio", "command": "node",
+                    "args": ["chatgpt-extension/embedded/server.mjs", "--binary", "tracedecay-bin"],
+                    "cwd": "./"}
+            }
+        })
+    );
+    assert!(
+        plugin_root
+            .join("chatgpt-extension/embedded/server.mjs")
+            .is_file()
+    );
 }
 
 #[tokio::test]
@@ -281,6 +258,7 @@ async fn native_overlay_sanitizes_legacy_native_frontmatter_without_blocking_pee
             vec![SkillInstallTarget::Cursor],
         );
         legacy.summary = "a".repeat(1020);
+        legacy.routing_description = format!("Use when {}", "a".repeat(1015));
         create_managed_skill(&profile_root, legacy).await.unwrap();
 
         let summary =
@@ -359,6 +337,7 @@ async fn exports_only_skills_targeted_to_requested_host() {
     assert_eq!(codex.exported[0].id, "codex-only");
 
     let opencode = export_prompt_skill_index(
+        &host_io(),
         &profile_root,
         SkillInstallTarget::OpenCode,
         &opencode_prompt,
@@ -397,8 +376,13 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     .unwrap();
 
     std::fs::write(&prompt_path, "# User rules\n\nKeep this line.\n").unwrap();
-    let summary =
-        export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+    let summary = export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
     assert_eq!(summary.exported_count, 1);
 
     let first = std::fs::read_to_string(&prompt_path).unwrap();
@@ -409,14 +393,119 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     assert!(first.contains("tracedecay_skill_view"));
     assert!(!first.contains("codex-flow"));
 
-    let second =
-        export_prompt_skill_index(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
+    let second = export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Claude,
+        &prompt_path,
+    )
+    .unwrap();
     assert_eq!(second.exported_count, 1);
     let second = std::fs::read_to_string(&prompt_path).unwrap();
     assert_eq!(second.matches("TRACEDECAY MANAGED SKILLS START").count(), 2);
     assert!(second.contains("TRACEDECAY MANAGED SKILLS START agents"));
     assert!(second.contains("TRACEDECAY MANAGED SKILLS START claude"));
     assert!(second.contains("This Claude index lists"));
+}
+
+#[tokio::test]
+async fn released_unslugged_prompt_index_is_a_typed_reset_until_deleted() {
+    let temp = tempdir();
+    let profile_root = temp.path().join("profile");
+    let prompt_path = temp.path().join("AGENTS.md");
+    create_managed_skill(
+        &profile_root,
+        targeted_draft(
+            "repo-hygiene",
+            "Repository hygiene",
+            vec![SkillInstallTarget::Agents],
+        ),
+    )
+    .await
+    .unwrap();
+    let fixtures = [
+        (
+            concat!(
+                "# User rules\n\nKeep this line.\n\n",
+                "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+                "## TraceDecay managed skills\n\n",
+                "- `repo-hygiene`: Repository hygiene\n",
+                "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+            ),
+            "<!-- TRACEDECAY MANAGED SKILLS START -->",
+        ),
+        (
+            concat!(
+                "# User rules\n\nKeep this line.\n\n",
+                "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+                "- `repo-hygiene`: Repository hygiene\n",
+            ),
+            "<!-- TRACEDECAY MANAGED SKILLS START -->",
+        ),
+        (
+            concat!(
+                "# User rules\n\nKeep this line.\n\n",
+                "- `repo-hygiene`: Repository hygiene\n",
+                "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+            ),
+            "<!-- TRACEDECAY MANAGED SKILLS END -->",
+        ),
+    ];
+    for (released, marker) in fixtures {
+        std::fs::write(&prompt_path, released).unwrap();
+        let expected_reason = format!(
+            "'{}' carries the released unslugged managed-skill index marker `{marker}`",
+            prompt_path.display()
+        );
+        for (path, error) in [
+            (
+                "export",
+                export_prompt_skill_index(
+                    &host_io(),
+                    &profile_root,
+                    SkillInstallTarget::Agents,
+                    &prompt_path,
+                )
+                .unwrap_err(),
+            ),
+            (
+                "removal",
+                remove_prompt_skill_index_for_target(
+                    &host_io(),
+                    &prompt_path,
+                    SkillInstallTarget::Agents,
+                )
+                .unwrap_err(),
+            ),
+            (
+                "stale detection",
+                stale_prompt_index_ids(&profile_root, &prompt_path, SkillInstallTarget::Agents)
+                    .unwrap_err(),
+            ),
+        ] {
+            assert_eq!(
+                error.reset_required_context(),
+                Some(("managed skill prompt index", expected_reason.as_str())),
+                "{path} over {marker}: {error:?}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), released);
+    }
+
+    std::fs::write(&prompt_path, "# User rules\n\nKeep this line.\n").unwrap();
+    let summary = export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
+    assert_eq!(summary.exported_count, 1);
+    assert!(
+        std::fs::read_to_string(&prompt_path)
+            .unwrap()
+            .contains("<!-- TRACEDECAY MANAGED SKILLS START agents -->")
+    );
 }
 
 #[tokio::test]
@@ -436,14 +525,26 @@ async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
     .await
     .unwrap();
     std::fs::write(&prompt_path, "# User rules\n\nKeep before.\n").unwrap();
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+    export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
 
     let stale = std::fs::read_to_string(&prompt_path)
         .unwrap()
         .replace("<!-- TRACEDECAY MANAGED SKILLS START agents -->\n", "");
     std::fs::write(&prompt_path, format!("{stale}\nKeep after.\n")).unwrap();
 
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+    export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
     let repaired = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(repaired.contains("Keep before."));
     assert!(repaired.contains("Keep after."));
@@ -454,33 +555,13 @@ async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
         1
     );
 
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
-    assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), repaired);
-}
-
-#[test]
-fn uninstall_repairs_legacy_orphan_end_without_claiming_user_text() {
-    let temp = tempdir();
-    let prompt_path = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# User rules\n\nKeep before.\n\n",
-        "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `generated`: Generated.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
-        "Keep after.\n",
-    );
-    std::fs::write(&prompt_path, contents).unwrap();
-
-    remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents).unwrap();
-
-    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
-    assert!(repaired.contains("Keep before."));
-    assert!(repaired.contains("Keep after."));
-    assert!(!repaired.contains("TraceDecay managed skills"));
-    assert!(!repaired.contains("`generated`"));
-
-    remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents).unwrap();
+    export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), repaired);
 }
 
@@ -497,65 +578,10 @@ fn prompt_index_start_only_remains_ambiguous_and_fails_closed() {
     std::fs::write(&prompt_path, contents).unwrap();
 
     let error =
-        remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents).unwrap_err();
+        remove_prompt_skill_index_for_target(&host_io(), &prompt_path, SkillInstallTarget::Agents)
+            .unwrap_err();
     assert!(error.to_string().contains("markers are unbalanced"));
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), contents);
-}
-
-#[test]
-fn uninstall_all_removes_legacy_orphan_alongside_slugged_block() {
-    let temp = tempdir();
-    let prompt_path = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# User rules\n\nKeep before.\n\n",
-        "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `legacy`: Legacy.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
-        "## TraceDecay managed skills\n\n",
-        "This Claude index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `slugged`: Slugged.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
-        "Keep after.\n",
-    );
-    std::fs::write(&prompt_path, contents).unwrap();
-
-    remove_prompt_skill_index(&prompt_path).unwrap();
-
-    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
-    assert!(repaired.contains("Keep before."));
-    assert!(repaired.contains("Keep after."));
-    assert!(!repaired.contains("TraceDecay managed skills"));
-    assert!(!repaired.contains("`legacy`"));
-    assert!(!repaired.contains("`slugged`"));
-}
-
-#[test]
-fn uninstall_all_removes_inverse_order_legacy_orphan_and_slugged_block() {
-    let temp = tempdir();
-    let prompt_path = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# User rules\n\nKeep before.\n\n",
-        "## TraceDecay managed skills\n\n",
-        "This Claude index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `legacy`: Legacy.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
-        "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `slugged`: Slugged.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n\n",
-        "Keep after.\n",
-    );
-    std::fs::write(&prompt_path, contents).unwrap();
-
-    remove_prompt_skill_index(&prompt_path).unwrap();
-
-    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
-    assert!(repaired.contains("Keep before."));
-    assert!(repaired.contains("Keep after."));
-    assert!(!repaired.contains("TraceDecay managed skills"));
 }
 
 #[test]
@@ -571,90 +597,19 @@ fn prompt_index_duplicate_balanced_blocks_fail_closed() {
     let contents = format!("# User rules\n\n{block}\n{block}");
     std::fs::write(&prompt_path, &contents).unwrap();
 
-    let error = remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents)
-        .unwrap_err()
-        .to_string();
+    let error =
+        remove_prompt_skill_index_for_target(&host_io(), &prompt_path, SkillInstallTarget::Agents)
+            .unwrap_err()
+            .to_string();
 
     assert!(error.contains("markers are ambiguous"));
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), contents);
 }
 
 #[tokio::test]
-async fn prompt_index_keeps_separate_sections_for_shared_agents_md_hosts() {
-    let temp = tempdir();
-    let profile_root = temp.path().join("profile");
-    let agents_md = temp.path().join("AGENTS.md");
-
-    create_managed_skill(
-        &profile_root,
-        targeted_draft(
-            "opencode-only",
-            "OpenCode only",
-            vec![SkillInstallTarget::OpenCode],
-        ),
-    )
-    .await
-    .unwrap();
-    create_managed_skill(
-        &profile_root,
-        targeted_draft("kimi-only", "Kimi only", vec![SkillInstallTarget::Kimi]),
-    )
-    .await
-    .unwrap();
-
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::OpenCode, &agents_md).unwrap();
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::Kimi, &agents_md).unwrap();
-
-    let prompt = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(prompt.contains("TRACEDECAY MANAGED SKILLS START opencode"));
-    assert!(prompt.contains("TRACEDECAY MANAGED SKILLS START kimi"));
-    assert!(prompt.contains("This OpenCode index lists"));
-    assert!(prompt.contains("This Kimi index lists"));
-    assert!(prompt.contains("`opencode-only`"));
-    assert!(prompt.contains("`kimi-only`"));
-}
-
-#[tokio::test]
-async fn uninstall_preserves_legacy_block_on_shared_file_mid_migration() {
-    // A shared AGENTS.md mid-migration: host A migrated to a slugged `claude`
-    // block, host B is still using the legacy unslugged block. Uninstalling a
-    // third target (`agents`, which has no slugged block here) must NOT fall
-    // back to deleting the legacy block, since another host's slugged block is
-    // present the legacy block cannot be assumed to be ours.
-    let temp = tempdir();
-    let agents_md = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# Shared prompt\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
-        "Claude host index.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
-        "Legacy host B index.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
-    );
-    std::fs::write(&agents_md, contents).unwrap();
-
-    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Agents).unwrap();
-
-    let after = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(
-        after.contains("Legacy host B index."),
-        "legacy block belonging to another host must be preserved: {after}"
-    );
-    assert!(
-        after.contains("<!-- TRACEDECAY MANAGED SKILLS START -->"),
-        "legacy markers must be preserved: {after}"
-    );
-    assert!(
-        after.contains("<!-- TRACEDECAY MANAGED SKILLS START claude -->"),
-        "unrelated slugged block must be preserved: {after}"
-    );
-}
-
-#[tokio::test]
 async fn uninstall_removes_own_slugged_block_on_shared_file() {
     // Uninstalling a target with its own slugged block removes only that block
-    // and leaves the legacy block for a still-migrating host untouched.
+    // and leaves another host's block untouched.
     let temp = tempdir();
     let agents_md = temp.path().join("AGENTS.md");
     let contents = concat!(
@@ -662,13 +617,14 @@ async fn uninstall_removes_own_slugged_block_on_shared_file() {
         "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
         "Claude host index.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
-        "Legacy host B index.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
+        "Agents host index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n",
     );
     std::fs::write(&agents_md, contents).unwrap();
 
-    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Claude).unwrap();
+    remove_prompt_skill_index_for_target(&host_io(), &agents_md, SkillInstallTarget::Claude)
+        .unwrap();
 
     let after = std::fs::read_to_string(&agents_md).unwrap();
     assert!(
@@ -676,31 +632,8 @@ async fn uninstall_removes_own_slugged_block_on_shared_file() {
         "own block removed: {after}"
     );
     assert!(
-        after.contains("Legacy host B index."),
-        "legacy block preserved: {after}"
-    );
-}
-
-#[tokio::test]
-async fn uninstall_removes_legacy_block_when_no_slugged_blocks_remain() {
-    // When only a legacy unslugged block exists (no other host has migrated),
-    // per-target uninstall may safely reclaim it.
-    let temp = tempdir();
-    let agents_md = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# Shared prompt\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
-        "Legacy index.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
-    );
-    std::fs::write(&agents_md, contents).unwrap();
-
-    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Agents).unwrap();
-
-    let after = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(
-        !after.contains("Legacy index."),
-        "legacy block removed: {after}"
+        after.contains("Agents host index."),
+        "other host's block preserved: {after}"
     );
 }
 
@@ -1015,19 +948,88 @@ async fn hermes_target_uses_native_plugin_overlay() {
         .await
         .unwrap();
 
-    let err = export_prompt_skill_index(&profile_root, SkillInstallTarget::Hermes, &prompt_path)
-        .unwrap_err()
-        .to_string();
+    let err = export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Hermes,
+        &prompt_path,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("Hermes owns profile skills"));
     assert!(!prompt_path.exists());
 
-    let summary =
-        install_managed_skills(&profile_root, SkillInstallTarget::Hermes, &plugin_root).unwrap();
+    let summary = install_managed_skills(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Hermes,
+        &plugin_root,
+    )
+    .unwrap();
     assert_eq!(summary.exported_count, 1);
     assert_eq!(summary.exported[0].id, "repo-hygiene");
     assert!(
         plugin_root
             .join("skills/agent-managed/repo-hygiene/SKILL.md")
             .is_file()
+    );
+}
+
+/// A lifecycle pass must converge a host prompt index against the store.
+///
+/// Reconciling only the materialized `SKILL.md` files left the index writing
+/// solely as a side effect of a successful store mutation, so a store that
+/// emptied without one kept every host advertising skills that no longer exist.
+#[test]
+fn lifecycle_deploy_clears_a_prompt_index_whose_store_emptied() {
+    let home = tempdir();
+    let home_path = home.path();
+    let profile_root = home_path.join(".tracedecay");
+    std::fs::create_dir_all(profile_root.join("agent_managed").join("skills")).unwrap();
+
+    // Claude reads as integrated once its marketplace manifest is deployed.
+    let manifest =
+        home_path.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json");
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(&manifest, "{}").unwrap();
+
+    let claude_md = home_path.join(".claude").join("CLAUDE.md");
+    std::fs::write(
+        &claude_md,
+        "# Working preferences\n\n\
+         <!-- TRACEDECAY MANAGED SKILLS START claude -->\n\
+         ## TraceDecay managed skills\n\n\
+         This Claude index lists approved profile-managed skills.\n\n\
+         - `retired-skill`: Retired Skill. Summary: no longer in the store.\n\
+         <!-- TRACEDECAY MANAGED SKILLS END claude -->\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        stale_prompt_index_ids(&profile_root, &claude_md, SkillInstallTarget::Claude).unwrap(),
+        vec!["retired-skill".to_string()],
+        "an empty store must make every advertised id stale"
+    );
+
+    let receipt = deploy_managed_skills_at(&host_io(), home_path, &profile_root, home_path);
+    assert!(
+        receipt.errors.is_empty(),
+        "lifecycle deploy reported errors: {:?}",
+        receipt.errors
+    );
+
+    let updated = std::fs::read_to_string(&claude_md).unwrap();
+    assert!(
+        !updated.contains("retired-skill"),
+        "lifecycle deploy left the stale index in place:\n{updated}"
+    );
+    assert!(
+        updated.contains("# Working preferences"),
+        "lifecycle deploy must keep user-authored text:\n{updated}"
+    );
+    assert!(
+        stale_prompt_index_ids(&profile_root, &claude_md, SkillInstallTarget::Claude)
+            .unwrap()
+            .is_empty()
     );
 }

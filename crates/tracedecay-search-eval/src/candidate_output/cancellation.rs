@@ -5,8 +5,9 @@ use std::{collections::BTreeSet, sync::Arc};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1,
-    CodeIndexRepositoryParseIdentityV1,
+    CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionConfigV1,
+    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexRepositoryParseIdentityV1,
+    MemorySealedPublicationStoreV1,
 };
 use tracedecay_domain::{
     ChunkerRevision, FileOccurrenceId, LanguageId, PolicyRevisionId, PrivacyDomainId, ProjectId,
@@ -16,10 +17,7 @@ use tracedecay_domain::{
 };
 
 use super::control::CancelledControl;
-use super::{
-    ApplyingProjectionSink, CandidateOutputError, CandidateWorkloadV1, SharedPublicationStore, id,
-    lexical_projection_profile_digest,
-};
+use super::{CandidateOutputError, CandidateWorkloadV1, id, lexical_projection_profile_digest};
 
 pub(super) fn prove_cancellation(
     repo_root: &Path,
@@ -59,6 +57,7 @@ pub(super) fn prove_cancellation(
         content_identity: content_digest(&bytes),
         captured_at: UtcMicros(1_000_000),
         files,
+        omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
         snapshot,
@@ -88,8 +87,8 @@ pub(super) fn prove_cancellation(
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
     let error = match owner.build_and_publish(request, &CancelledControl) {
         Err(error) => error,
@@ -99,7 +98,10 @@ pub(super) fn prove_cancellation(
             ));
         }
     };
-    if !format!("{error:?}").contains("Cancelled") {
+    if !matches!(
+        error,
+        CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+    ) {
         return Err(CandidateOutputError::Contract(format!(
             "expected cancelled interruption, got {error:?}"
         )));

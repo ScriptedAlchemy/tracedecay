@@ -1,28 +1,31 @@
 //! Project-open authority accessors installed on an MCP server.
 
-use super::{
-    CodeGraphProjectionReadPort, CodeIndexIgnoredDependencyAdmissionPort, McpServer,
-    SourceEditExecutor, SourceEditReconciliationExecutor, SourceEditRollbackExecutor,
-};
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_query::code_search::{CodeIndexSearchAuthorityV1, CodeIndexSimilarExecutor};
+
+use super::{CodeGraphProjectionReadPort, CodeIndexIgnoredDependencyAdmissionPort, McpServer};
 
 impl McpServer {
-    /// Installs the sole source-edit invocation owner resolved during
-    /// project-open admission. Reinstallation is rejected so a later caller
-    /// cannot replace the authority behind an already-serving MCP instance.
-    pub(crate) fn install_source_edit_executor(
+    pub(crate) fn daemon_invocation_service(
         &self,
-        executor: SourceEditExecutor,
-    ) -> std::result::Result<(), SourceEditExecutor> {
-        self.source_edit_executor
-            .set(executor)
-            .map_err(|error| match error {
-                tokio::sync::SetError::AlreadyInitializedError(executor)
-                | tokio::sync::SetError::InitializingError(executor) => executor,
-            })
+    ) -> Option<&tracedecay_daemon_service::DaemonInvocationService> {
+        self.daemon_invocation_service.as_ref()
     }
 
     pub(crate) fn code_graph_projection_read_port(&self) -> Option<CodeGraphProjectionReadPort> {
         self.code_graph_projection_read_port.clone()
+    }
+
+    pub(crate) fn code_index_similar_executor(&self) -> Option<CodeIndexSimilarExecutor> {
+        self.code_index_similar_executor.clone()
+    }
+
+    pub(crate) fn code_index_search_authority(&self) -> Option<CodeIndexSearchAuthorityV1> {
+        self.code_index_search_authority.clone()
+    }
+
+    pub(crate) fn admitted_project_scope(&self) -> Option<ResolvedScope> {
+        self.admitted_project_scope.clone()
     }
 
     pub(crate) fn code_index_ignored_dependency_admission(
@@ -33,8 +36,8 @@ impl McpServer {
 
     pub(crate) fn install_generation_census_reader(
         &self,
-        reader: tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
-    ) -> std::result::Result<(), tracedecay_session_memory::runtime_telemetry::GenerationCensusReader>
+        reader: tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader,
+    ) -> std::result::Result<(), tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader>
     {
         self.generation_census_reader
             .set(reader)
@@ -46,31 +49,7 @@ impl McpServer {
 
     pub(crate) fn generation_census_reader(
         &self,
-    ) -> Option<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader> {
+    ) -> Option<tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader> {
         self.generation_census_reader.get().cloned()
-    }
-
-    pub(crate) fn install_source_edit_reconciliation_executor(
-        &self,
-        executor: SourceEditReconciliationExecutor,
-    ) -> std::result::Result<(), SourceEditReconciliationExecutor> {
-        self.source_edit_reconciliation_executor
-            .set(executor)
-            .map_err(|error| match error {
-                tokio::sync::SetError::AlreadyInitializedError(executor)
-                | tokio::sync::SetError::InitializingError(executor) => executor,
-            })
-    }
-
-    pub(crate) fn install_source_edit_rollback_executor(
-        &self,
-        executor: SourceEditRollbackExecutor,
-    ) -> std::result::Result<(), SourceEditRollbackExecutor> {
-        self.source_edit_rollback_executor
-            .set(executor)
-            .map_err(|error| match error {
-                tokio::sync::SetError::AlreadyInitializedError(executor)
-                | tokio::sync::SetError::InitializingError(executor) => executor,
-            })
     }
 }

@@ -4,180 +4,172 @@ use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracedecay_application::remote::composition::{
+use tracedecay_contracts::remote::composition::{
     PendingLocalEvidenceV1, PendingLocalUnavailableReasonV1, ShardCoverageStateV1,
 };
-use tracedecay_application::remote::protocol::{
+use tracedecay_contracts::remote::protocol::{
     EnrollmentRequestV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
 };
-use tracedecay_application::remote::query::{RemoteExactObservationResultV1, RemoteQueryResultV1};
-use tracedecay_application::remote::status::{
+use tracedecay_contracts::remote::query::{RemoteExactObservationResultV1, RemoteQueryResultV1};
+use tracedecay_contracts::remote::status::{
     RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1, RemoteOperationalStatusV1,
     RemoteSpoolOperationalStatusV1,
 };
-use tracedecay_application::{ApplicationOutcome, RemoteListenerReadV1};
-use tracedecay_domain::CurrentRemoteAuthorityStateV1;
+use tracedecay_contracts::{ApplicationOutcome, RemoteListenerReadV1};
+use tracedecay_domain::{BrainNodeId, CurrentRemoteAuthorityStateV1};
 use tracedecay_sdk::remote_client::{EnrolledRemoteClient, RemoteClientError};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+use crate::cli::{RemoteAction, RemoteAuthorityArgs};
+
 pub const DEFAULT_REMOTE_TIMEOUT_SECS: u64 = 30;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteProtocolArgs {
-    pub endpoint: String,
-    pub credential_file: PathBuf,
-    pub trust_root_file: Option<PathBuf>,
-    pub timeout_secs: u64,
-    pub request_file: PathBuf,
-    pub json: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RemoteCommand {
-    Status {
-        json: bool,
-    },
-    Enroll {
-        args: RemoteProtocolArgs,
-        enrollment_credential_file: PathBuf,
-    },
-    Capture {
-        args: RemoteProtocolArgs,
-    },
-    Query {
-        args: RemoteProtocolArgs,
-    },
-    TransferFrame {
-        args: RemoteProtocolArgs,
-    },
-    Replay {
-        args: RemoteProtocolArgs,
-    },
-    Backup {
-        args: RemoteProtocolArgs,
-    },
-    Restore {
-        args: RemoteProtocolArgs,
-    },
-    Failover {
-        args: RemoteProtocolArgs,
-    },
-}
-
-#[hotpath::measure(label = "serve.remote.run")]
-pub fn run(command: RemoteCommand) -> Result<()> {
-    match command {
-        RemoteCommand::Status { json } => run_status(json),
-        RemoteCommand::Enroll {
-            args,
+#[tracing::instrument(name = "serve.remote.run", level = "trace", skip_all)]
+pub fn run(profile: &ProfileRoot, action: RemoteAction) -> Result<()> {
+    match action {
+        RemoteAction::Status { json } => run_status(profile, json),
+        RemoteAction::Enroll {
+            authority,
             enrollment_credential_file,
-        } => run_enroll(args, enrollment_credential_file),
-        RemoteCommand::Capture { args } => {
+        } => run_enroll(authority, enrollment_credential_file),
+        RemoteAction::Join { authority } => run_join(profile, authority),
+        RemoteAction::Drain { authority } => run_drain(profile, authority),
+        RemoteAction::Capture { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.capture",
+                &{
+                    let _span = tracing::trace_span!("serve.remote.capture").entered();
                     client.capture(&request).map_err(map_remote_client_error)?
-                ),
+                },
                 args.json,
             )
         }
-        RemoteCommand::Query { args } => {
+        RemoteAction::Query { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
-            let response = hotpath::measure_block!(
-                "serve.remote.query",
+            let response = {
+                let _span = tracing::trace_span!("serve.remote.query").entered();
                 client.query(&request).map_err(map_remote_client_error)?
-            );
+            };
             // `--json` emits exactly the canonical wire response.
             let local_spool = if args.json {
                 None
             } else {
-                caller_local_spool_evidence(&response)
+                caller_local_spool_evidence(profile, &response)
             };
             emit_query_response(&response, local_spool.as_ref(), args.json)
         }
-        RemoteCommand::TransferFrame { args } => {
+        RemoteAction::TransferFrame { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.transfer_frame",
+                &{
+                    let _span = tracing::trace_span!("serve.remote.transfer_frame").entered();
                     client
                         .transfer_frame(&request)
                         .map_err(map_remote_client_error)?
-                ),
+                },
                 args.json,
             )
         }
-        RemoteCommand::Replay { args } => {
+        RemoteAction::Replay { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.replay",
+                &{
+                    let _span = tracing::trace_span!("serve.remote.replay").entered();
                     client.replay(&request).map_err(map_remote_client_error)?
-                ),
+                },
                 args.json,
             )
         }
-        RemoteCommand::Backup { args } => {
+        RemoteAction::ReplayPending { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.backup",
-                    client.backup(&request).map_err(map_remote_client_error)?
-                ),
+                &{
+                    let _span = tracing::trace_span!("serve.remote.replay_pending").entered();
+                    client
+                        .replay_pending(&request)
+                        .map_err(map_remote_client_error)?
+                },
                 args.json,
             )
         }
-        RemoteCommand::Restore { args } => {
+        RemoteAction::Failover { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.restore",
-                    client.restore(&request).map_err(map_remote_client_error)?
-                ),
-                args.json,
-            )
-        }
-        RemoteCommand::Failover { args } => {
-            let request = read_protocol_request(&args.request_file)?;
-            let client = build_client(&args)?;
-            emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.failover",
+                &{
+                    let _span = tracing::trace_span!("serve.remote.failover").entered();
                     client.failover(&request).map_err(map_remote_client_error)?
-                ),
+                },
                 args.json,
             )
         }
+        RemoteAction::Revoke { node_id, json } => run_revoke(profile, &node_id, json),
     }
 }
 
-#[hotpath::measure(label = "serve.remote.status")]
-fn run_status(json: bool) -> Result<()> {
-    let status = hotpath::measure_block!(
-        "serve.remote.status.read",
-        tracedecay::daemon::live_remote_operational_status()?
-    );
+#[tracing::instrument(name = "serve.remote.revoke", level = "trace", skip_all)]
+fn run_revoke(profile: &ProfileRoot, node_id: &str, json: bool) -> Result<()> {
+    let node_id = BrainNodeId::new(node_id).map_err(|error| TraceDecayError::Config {
+        message: format!("Remote Brain --node-id is not a node identity: {error}"),
+    })?;
+    let revocation = tracedecay::daemon::live_remote_node_revocation(profile, &node_id)?;
     if json {
-        print!("{}", status_json_line(&status)?);
+        print!("{}", canonical_json_line(&revocation)?);
+    } else {
+        print!("{}", render_revocation_human(&node_id, &revocation));
+    }
+    Ok(())
+}
+
+fn render_revocation_human(
+    node_id: &BrainNodeId,
+    revocation: &tracedecay::daemon::RemoteNodeRevocationV1,
+) -> String {
+    if revocation.revocations.is_empty() && revocation.revoked_grants.is_empty() {
+        return format!("Node {node_id} holds no enrollments or unredeemed grants\n");
+    }
+    let enrollments = revocation.revocations.iter().map(|receipt| {
+        format!(
+            "Revoked enrollment {} on node {} (revision {} -> {})\n",
+            receipt.enrollment_id,
+            receipt.node_id,
+            receipt.prior_revision,
+            receipt.current_revision
+        )
+    });
+    let grants = revocation
+        .revoked_grants
+        .iter()
+        .map(|grant_id| format!("Revoked unredeemed grant {grant_id} for node {node_id}\n"));
+    grants.chain(enrollments).collect()
+}
+
+#[tracing::instrument(name = "serve.remote.status", level = "trace", skip_all)]
+fn run_status(profile: &ProfileRoot, json: bool) -> Result<()> {
+    let status = {
+        let _span = tracing::trace_span!("serve.remote.status.read").entered();
+        tracedecay::daemon::live_remote_operational_status(profile)?
+    };
+    if json {
+        print!("{}", canonical_json_line(&status)?);
     } else {
         print!("{}", render_status_human(&status));
     }
     Ok(())
 }
 
-#[hotpath::measure(label = "serve.remote.enroll")]
-fn run_enroll(args: RemoteProtocolArgs, enrollment_credential_file: PathBuf) -> Result<()> {
+#[tracing::instrument(name = "serve.remote.enroll", level = "trace", skip_all)]
+fn run_enroll(args: RemoteAuthorityArgs, enrollment_credential_file: PathBuf) -> Result<()> {
     let request: RemoteProtocolRequestV1<EnrollmentRequestV1> =
         read_protocol_request(&args.request_file)?;
     let enrollment_credential =
@@ -187,18 +179,87 @@ fn run_enroll(args: RemoteProtocolArgs, enrollment_credential_file: PathBuf) -> 
         })?;
     let client = build_client(&args)?;
     emit_protocol_response(
-        &hotpath::measure_block!(
-            "serve.remote.enroll_rpc",
+        &{
+            let _span = tracing::trace_span!("serve.remote.enroll_rpc").entered();
             client
                 .enroll(&request, enrollment_credential)
                 .map_err(map_remote_client_error)?
-        ),
+        },
         args.json,
     )
 }
 
-#[hotpath::measure(label = "serve.remote.client")]
-fn build_client(args: &RemoteProtocolArgs) -> Result<EnrolledRemoteClient> {
+#[tracing::instrument(name = "serve.remote.join", level = "trace", skip_all)]
+fn run_join(profile: &ProfileRoot, args: RemoteAuthorityArgs) -> Result<()> {
+    let json = args.json;
+    let (request, credential) = node_operation_request(args)?;
+    let discovery = tracedecay::daemon::live_remote_join(profile, &request, &credential)?;
+    if json {
+        print!("{}", canonical_json_line(&discovery)?);
+    } else {
+        let enrollment = &discovery.enrollment.enrollment;
+        println!(
+            "Joined Brain {} as node {} (enrollment {} revision {})",
+            enrollment.brain_id.as_str(),
+            enrollment.node_id.as_str(),
+            enrollment.enrollment_id.as_str(),
+            enrollment.revision
+        );
+    }
+    Ok(())
+}
+
+#[tracing::instrument(name = "serve.remote.drain", level = "trace", skip_all)]
+fn run_drain(profile: &ProfileRoot, args: RemoteAuthorityArgs) -> Result<()> {
+    let json = args.json;
+    let (request, credential) = node_operation_request(args)?;
+    let drained = tracedecay::daemon::live_remote_drain(profile, &request, &credential)?;
+    if json {
+        print!("{}", canonical_json_line(&drained)?);
+    } else {
+        println!(
+            "Drained {} pending frame(s) to the authority",
+            drained.transferred.len()
+        );
+    }
+    Ok(())
+}
+
+/// The node operation request and enrollment credential `args` name.
+fn node_operation_request(
+    args: RemoteAuthorityArgs,
+) -> Result<(tracedecay::daemon::RemoteNodeJoinRequestV1, Vec<u8>)> {
+    if args.timeout_secs == 0 {
+        return Err(TraceDecayError::Config {
+            message: "Remote Brain --timeout-secs must be greater than zero".to_owned(),
+        });
+    }
+    let credential =
+        std::fs::read(&args.credential_file).map_err(|error| TraceDecayError::File {
+            message: format!("failed to read Remote Brain credential file: {error}"),
+            path: args.credential_file.display().to_string(),
+        })?;
+    let trust_root_pem = args
+        .trust_root_file
+        .as_ref()
+        .map(|path| {
+            std::fs::read_to_string(path).map_err(|error| TraceDecayError::File {
+                message: format!("failed to read Remote Brain trust-root file: {error}"),
+                path: path.display().to_string(),
+            })
+        })
+        .transpose()?;
+    let request = tracedecay::daemon::RemoteNodeJoinRequestV1 {
+        endpoint: args.endpoint,
+        trust_root_pem,
+        timeout_secs: args.timeout_secs,
+        discovery: read_protocol_request(&args.request_file)?,
+    };
+    Ok((request, credential))
+}
+
+#[tracing::instrument(name = "serve.remote.client", level = "trace", skip_all)]
+fn build_client(args: &RemoteAuthorityArgs) -> Result<EnrolledRemoteClient> {
     if args.timeout_secs == 0 {
         return Err(TraceDecayError::Config {
             message: "Remote Brain --timeout-secs must be greater than zero".to_owned(),
@@ -240,7 +301,7 @@ fn build_client(args: &RemoteProtocolArgs) -> Result<EnrolledRemoteClient> {
     .map_err(map_remote_client_error)
 }
 
-#[hotpath::measure(label = "serve.remote.request")]
+#[tracing::instrument(name = "serve.remote.request", level = "trace", skip_all)]
 fn read_protocol_request<T: DeserializeOwned>(path: &Path) -> Result<RemoteProtocolRequestV1<T>> {
     let payload = if path == Path::new("-") {
         let mut payload = String::new();
@@ -294,12 +355,11 @@ fn emit_query_response(
 fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()> {
     match &response.result {
         Ok(_) => Ok(()),
-        Err(problem) => Err(TraceDecayError::Config {
-            message: format!(
-                "Remote Brain request {} failed: {}: {}",
-                response.request_id, problem.problem.code, problem.problem.message
-            ),
-        }),
+        Err(problem) => Err(TraceDecayError::tool_refused(
+            format!("remote request {}", response.request_id),
+            Some(problem.problem.code.clone()),
+            Some(problem.problem.message.clone()),
+        )),
     }
 }
 
@@ -309,6 +369,7 @@ fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()>
 /// answer keeps the serving node's own evidence, and a local daemon that
 /// cannot answer leaves the wire's typed absence in place.
 fn caller_local_spool_evidence(
+    profile: &ProfileRoot,
     response: &RemoteProtocolResponseV1<RemoteQueryResultV1>,
 ) -> Option<RemoteSpoolOperationalStatusV1> {
     let payload = query_payload(response)?;
@@ -320,7 +381,7 @@ fn caller_local_spool_evidence(
     ) {
         return None;
     }
-    match tracedecay::daemon::live_remote_operational_status() {
+    match tracedecay::daemon::live_remote_operational_status(profile) {
         Ok(RemoteOperationalStatusReadV1::Observed { status, .. }) => Some(status.spool),
         Ok(
             RemoteOperationalStatusReadV1::Unconfigured
@@ -336,7 +397,9 @@ fn query_payload(
     match &response.result {
         Ok(envelope) => match &envelope.outcome {
             ApplicationOutcome::Evidence(packet) => packet.payload.as_ref(),
-            ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => None,
+            ApplicationOutcome::Preview(_)
+            | ApplicationOutcome::Effect(_)
+            | ApplicationOutcome::Result(_) => None,
         },
         Err(_) => None,
     }
@@ -425,8 +488,15 @@ fn pending_local_unavailable_label(reason: PendingLocalUnavailableReasonV1) -> &
 }
 
 fn map_remote_client_error(error: RemoteClientError) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: error.to_string(),
+    match error {
+        RemoteClientError::Problem(problem) => TraceDecayError::tool_refused(
+            "remote request",
+            Some(problem.code),
+            Some(problem.message),
+        ),
+        error => TraceDecayError::Config {
+            message: error.to_string(),
+        },
     }
 }
 
@@ -434,10 +504,6 @@ fn canonical_json_line<T: Serialize>(value: &T) -> serde_json::Result<String> {
     let mut rendered = serde_json::to_string(value)?;
     rendered.push('\n');
     Ok(rendered)
-}
-
-fn status_json_line(status: &RemoteOperationalStatusReadV1) -> serde_json::Result<String> {
-    canonical_json_line(status)
 }
 
 fn render_status_human(status: &RemoteOperationalStatusReadV1) -> String {
@@ -463,7 +529,6 @@ Spool pending: {}\n\
 Spool quarantined: {}\n\
 Sequence gap: {}\n\
 Replay coverage complete: {}\n\
-Current backup verified: {}\n\
 Failover in progress: {}\n\
 Recovery required: {}\n",
         readiness_label(status.readiness),
@@ -474,7 +539,6 @@ Recovery required: {}\n",
         status.spool.quarantined_count,
         yes_no(status.spool.has_sequence_gap),
         yes_no(status.replay_coverage_complete),
-        yes_no(status.current_backup_verified),
         yes_no(status.failover_in_progress),
         yes_no(status.recovery_required),
     )
@@ -483,7 +547,7 @@ Recovery required: {}\n",
 fn render_protocol_response<T>(response: &RemoteProtocolResponseV1<T>) -> String {
     let outcome = match &response.result {
         Ok(_) => "ok".to_owned(),
-        Err(problem) => format!("{}: {}", problem.problem.code, problem.problem.message),
+        Err(problem) => problem.problem.summary(),
     };
     format!(
         "Request: {}\nAuthority: {}\nOutcome: {}\n",
@@ -527,17 +591,17 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        RemoteProtocolArgs, build_client, canonical_json_line, emit_protocol_response,
-        render_protocol_response, render_status_human, status_json_line,
+        RemoteAuthorityArgs, build_client, canonical_json_line, emit_protocol_response,
+        render_protocol_response,
     };
-    use tracedecay_application::remote::protocol::{
+    use tracedecay_contracts::remote::protocol::{
         RemoteProtocolFailureV1, RemoteProtocolResponseV1, remote_enrollment_result_contract_v1,
         remote_protocol_problem,
     };
-    use tracedecay_application::remote::status::{
+    use tracedecay_contracts::remote::status::{
         RemoteOperationalStatusReadV1, RemoteOperationalStatusV1,
     };
-    use tracedecay_application::{DoctorCoverageCompletenessV1, RemoteListenerReadV1, RequestId};
+    use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1, RequestId};
     use tracedecay_domain::{
         CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1, UtcMicros,
     };
@@ -569,7 +633,6 @@ mod tests {
                 "has_sequence_gap": true
             },
             "replay_coverage_complete": false,
-            "current_backup_verified": true,
             "failover_in_progress": false,
             "recovery_required": false,
             "observed_at": 10
@@ -589,38 +652,13 @@ mod tests {
             RemoteOperationalStatusReadV1::Unconfigured,
             RemoteOperationalStatusReadV1::Unavailable,
         ] {
-            let rendered = status_json_line(&status).expect("status JSON line");
+            let rendered = canonical_json_line(&status).expect("status JSON line");
             assert!(rendered.ends_with('\n'));
             assert_eq!(rendered.lines().count(), 1);
             let decoded: RemoteOperationalStatusReadV1 =
                 serde_json::from_str(rendered.trim_end()).expect("round-trip status JSON");
             assert_eq!(decoded, status);
         }
-    }
-
-    #[test]
-    fn status_human_render_covers_all_read_variants() {
-        let observed = render_status_human(&observed_fixture());
-        assert!(observed.contains("Remote Brain: partial"));
-        assert!(observed.contains("Listener: serving"));
-        assert!(observed.contains("Authority: available"));
-        assert!(observed.contains("Enrollment configured: yes"));
-        assert!(observed.contains("Spool pending: 3"));
-        assert!(observed.contains("Spool quarantined: 1"));
-        assert!(observed.contains("Sequence gap: yes"));
-        assert!(observed.contains("Replay coverage complete: no"));
-        assert!(observed.contains("Current backup verified: yes"));
-        assert!(observed.contains("Failover in progress: no"));
-        assert!(observed.contains("Recovery required: no"));
-
-        assert_eq!(
-            render_status_human(&RemoteOperationalStatusReadV1::Unconfigured),
-            "Remote Brain: unconfigured\n"
-        );
-        assert_eq!(
-            render_status_human(&RemoteOperationalStatusReadV1::Unavailable),
-            "Remote Brain: unavailable\n"
-        );
     }
 
     fn protocol_problem_response() -> RemoteProtocolResponseV1<()> {
@@ -653,7 +691,7 @@ mod tests {
         let Err(problem) = &response.result else {
             panic!("expected typed protocol problem");
         };
-        let outcome = format!("{}: {}", problem.problem.code, problem.problem.message);
+        let outcome = problem.problem.summary();
         assert_eq!(
             render_protocol_response(&response),
             format!("Request: request.cli.remote.7\nAuthority: unavailable\nOutcome: {outcome}\n")
@@ -661,99 +699,30 @@ mod tests {
     }
 
     #[test]
-    fn emit_protocol_response_returns_config_error_for_typed_problem() {
+    fn emit_protocol_response_returns_a_tool_refusal_for_typed_problem() {
         let response = protocol_problem_response();
         let error = emit_protocol_response(&response, true)
             .expect_err("typed Remote Brain problem must be non-zero");
+        let expected = response.result.as_ref().unwrap_err();
         match error {
-            TraceDecayError::Config { message } => {
-                assert!(message.contains("request.cli.remote.7"));
-                assert!(message.contains(&response.result.as_ref().unwrap_err().problem.code));
+            TraceDecayError::ToolRefused(refusal) => {
+                assert_eq!(refusal.tool, "remote request request.cli.remote.7");
+                assert_eq!(
+                    refusal.code.as_deref(),
+                    Some(expected.problem.code.as_str())
+                );
+                assert_eq!(
+                    refusal.reason.as_deref(),
+                    Some(expected.problem.message.as_str())
+                );
             }
-            other => panic!("expected config error, got {other:?}"),
+            other => panic!("expected tool refusal, got {other:?}"),
         }
     }
 
     #[test]
-    fn query_human_render_surfaces_remote_and_local_coverage_honestly() {
-        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
-            serde_json::from_value(serde_json::json!({
-                "composition": {
-                    "contributions": [{
-                        "manifest": {
-                            "brain_id": "brain.query",
-                            "shard_id": "shard.project",
-                            "generation_id": "generation.7",
-                            "schema_digest": vec![1u8; 32],
-                            "watermark_sequence": 9,
-                            "placement_revision": 3,
-                            "authority_epoch": 4,
-                            "cache_age_millis": 10,
-                            "cache_lag_commits": 0
-                        },
-                        "integrity": "verified",
-                        "authenticity": "authenticated",
-                        "freshness": "current",
-                        "completeness": "complete",
-                        "authorization": "authorized",
-                        "coverage": "partial",
-                        "authority_receipt": null,
-                        "value": null,
-                        "reason_code": "authorization_receipt_unavailable"
-                    }],
-                    "pending_local": {
-                        "availability": "available",
-                        "evidence": {
-                            "count": 2,
-                            "oldest_age_millis": 50,
-                            "has_sequence_gap": true,
-                            "has_quarantined": false
-                        }
-                    },
-                    "coverage": "partial"
-                },
-                "observation": { "state": "not_found" }
-            }))
-            .expect("query result fixture");
-
-        let rendered = super::render_query_coverage(&result, None);
-        assert!(rendered.contains("Coverage: partial"));
-        assert!(rendered.contains(
-            "Remote shard shard.project@generation.7: partial (authorization_receipt_unavailable)"
-        ));
-        assert!(rendered.contains("Local pending captures: 2"));
-        assert!(rendered.contains("Local sequence gap: yes"));
-        assert!(rendered.contains("Local quarantined captures: no"));
-        assert!(rendered.contains("Observation: not_found"));
-    }
-
-    #[test]
-    fn query_human_render_names_an_unavailable_local_spool() {
-        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
-            serde_json::from_value(serde_json::json!({
-                "composition": {
-                    "contributions": [],
-                    "pending_local": {
-                        "availability": "unavailable",
-                        "reason": "requesting_node_spool_not_supplied"
-                    },
-                    "coverage": "unknown"
-                },
-                "observation": { "state": "not_found" }
-            }))
-            .expect("query result fixture");
-
-        let rendered = super::render_query_coverage(&result, None);
-        assert!(
-            rendered.contains(
-                "Local pending captures: unavailable (requesting node spool not supplied)"
-            )
-        );
-    }
-
-    #[test]
     fn query_human_render_composes_the_callers_own_spool_when_not_supplied() {
-        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+        let result: tracedecay_contracts::remote::query::RemoteQueryResultV1 =
             serde_json::from_value(serde_json::json!({
                 "composition": {
                     "contributions": [],
@@ -766,7 +735,7 @@ mod tests {
                 "observation": { "state": "not_found" }
             }))
             .expect("query result fixture");
-        let spool = tracedecay_application::remote::status::RemoteSpoolOperationalStatusV1 {
+        let spool = tracedecay_contracts::remote::status::RemoteSpoolOperationalStatusV1 {
             pending_count: 4,
             quarantined_count: 1,
             has_sequence_gap: true,
@@ -784,7 +753,7 @@ mod tests {
 
     #[test]
     fn query_human_render_keeps_other_absences_typed_even_with_local_evidence() {
-        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+        let result: tracedecay_contracts::remote::query::RemoteQueryResultV1 =
             serde_json::from_value(serde_json::json!({
                 "composition": {
                     "contributions": [],
@@ -797,7 +766,7 @@ mod tests {
                 "observation": { "state": "not_found" }
             }))
             .expect("query result fixture");
-        let spool = tracedecay_application::remote::status::RemoteSpoolOperationalStatusV1 {
+        let spool = tracedecay_contracts::remote::status::RemoteSpoolOperationalStatusV1 {
             pending_count: 4,
             quarantined_count: 0,
             has_sequence_gap: false,
@@ -812,7 +781,7 @@ mod tests {
 
     #[test]
     fn build_client_rejects_a_trust_root_for_a_local_daemon_endpoint() {
-        let error = build_client(&RemoteProtocolArgs {
+        let error = build_client(&RemoteAuthorityArgs {
             endpoint: "http://127.0.0.1:39181/remote/".to_owned(),
             credential_file: PathBuf::from("/this/file/must-not-be-read.bin"),
             trust_root_file: Some(PathBuf::from("/this/file/must-not-be-read.pem")),
@@ -831,7 +800,7 @@ mod tests {
 
     #[test]
     fn build_client_rejects_zero_timeout_before_reading_files() {
-        let error = build_client(&RemoteProtocolArgs {
+        let error = build_client(&RemoteAuthorityArgs {
             endpoint: "https://brain.example/remote/".to_owned(),
             credential_file: PathBuf::from("/this/file/must-not-be-read.bin"),
             trust_root_file: None,

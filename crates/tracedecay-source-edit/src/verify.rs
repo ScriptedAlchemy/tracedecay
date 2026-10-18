@@ -1,18 +1,19 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     SourceEditDiagnosticV1, SourceEditVerificationStateV1, SourceEditVerificationV1,
 };
 
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
-#[hotpath::measure(label = "usecases.edit.verify.file", future = true)]
+use super::port::SourceEditRuntime;
+
+#[tracing::instrument(name = "usecases.edit.verify.file", level = "trace", skip_all)]
 async fn run_edit_verification(
     graph: &SourceEditRuntime,
     file_path: &str,
 ) -> SourceEditVerificationV1 {
-    let diagnostics = match hotpath::future!(
+    let diagnostics = match tracing::Instrument::instrument(
         graph.run_diagnostics(file_path),
-        label = "usecases.edit.verify.diagnostics"
+        tracing::trace_span!("usecases.edit.verify.diagnostics"),
     )
     .await
     {
@@ -56,7 +57,7 @@ async fn run_edit_verification(
     }
 }
 
-#[hotpath::measure(label = "usecases.edit.verify", future = true)]
+#[tracing::instrument(name = "usecases.edit.verify", level = "trace", skip_all)]
 pub(super) async fn run_edit_verifications(
     graph: &SourceEditRuntime,
     file_paths: &[String],
@@ -120,7 +121,7 @@ fn failed_edit_verification(error: TraceDecayError) -> SourceEditVerificationV1 
 }
 
 pub(super) fn application_contract_error(
-    error: tracedecay_application::ApplicationContractError,
+    error: tracedecay_contracts::ApplicationContractError,
 ) -> TraceDecayError {
     config_error(format!(
         "source edit application contract is invalid: {error}"
@@ -128,9 +129,9 @@ pub(super) fn application_contract_error(
 }
 
 pub(super) fn application_problem(
-    _error: tracedecay_application::ApplicationProblem,
+    _error: tracedecay_contracts::ApplicationProblem,
 ) -> TraceDecayError {
-    config_error("source edit was not found or not authorized")
+    TraceDecayError::not_found("source edit was not found or not authorized")
 }
 
 pub(super) fn domain_error(error: tracedecay_domain::DomainError) -> TraceDecayError {
@@ -147,6 +148,17 @@ pub(super) fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
+pub(super) const SOURCE_EDIT_EXPECTED_STATE_MISMATCH: &str = "source_edit.expected_state_mismatch";
+pub(super) const SOURCE_EDIT_IDEMPOTENCY_CONFLICT: &str = "source_edit.idempotency_conflict";
+
+pub(super) fn expected_state_mismatch(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route(SOURCE_EDIT_EXPECTED_STATE_MISMATCH, true, detail)
+}
+
+pub(super) fn idempotency_conflict(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route(SOURCE_EDIT_IDEMPOTENCY_CONFLICT, false, detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,19 +172,30 @@ mod tests {
             unavailable.state,
             SourceEditVerificationStateV1::Unavailable
         );
-        assert!(unavailable.message.is_some());
+        assert_eq!(unavailable.verdict, "unavailable");
+        assert_message_retains(&unavailable, "diagnostics unavailable");
 
         let cancelled = failed_edit_verification(TraceDecayError::Io(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "diagnostics cancelled",
         )));
         assert_eq!(cancelled.state, SourceEditVerificationStateV1::Cancelled);
-        assert!(cancelled.message.is_some());
+        assert_eq!(cancelled.verdict, "cancelled");
+        assert_message_retains(&cancelled, "diagnostics cancelled");
 
         let failed = failed_edit_verification(TraceDecayError::Config {
             message: "diagnostics failed".to_owned(),
         });
         assert_eq!(failed.state, SourceEditVerificationStateV1::Failed);
-        assert!(failed.message.is_some());
+        assert_eq!(failed.verdict, "failed");
+        assert_message_retains(&failed, "diagnostics failed");
+    }
+
+    fn assert_message_retains(verification: &SourceEditVerificationV1, cause: &str) {
+        let message = verification.message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains(cause),
+            "verification message {message:?} dropped the cause {cause:?}"
+        );
     }
 }

@@ -5,7 +5,7 @@
 //! profile- or session-scoped shard until the composition root registers the
 //! real schema installer, because an uninitialised registered store is not safe
 //! to publish. The kernel relaxes that to an empty sidecar under `cfg(test)`
-//! for *its own* fixtures only — it sits below `tracedecay-global-db` and can
+//! for *its own* fixtures only, it sits below `tracedecay-global-db` and can
 //! never install the real schema.
 //!
 //! This lives in its own integration-test binary on purpose:
@@ -25,7 +25,7 @@ use tracedecay_runtime_core::db::{
     Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
 };
 
-#[tokio::test]
+#[asupersync::test]
 async fn unregistered_installer_refuses_to_initialize_a_registered_shard() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("registered.db");

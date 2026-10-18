@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config;
 
-pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
 pub const PROFILE_IDENTITY_FILENAME: &str = "profile-identity.json";
 /// File name of the profile-scoped exclusive daemon-authority lock. Single
@@ -21,11 +20,17 @@ pub const DAEMON_AUTHORITY_LOCK_FILE: &str = "daemon-authority.lock";
 /// state lives directly in the profile root.
 pub const DAEMON_AUTHORITY_DIRECTORY: &str = "daemon-authority";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
+/// Profile-wide session store. A project's sessions stay in [`SESSIONS_DB_FILENAME`].
+pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
+/// Profile-wide memory for conversations that have no code project.
+pub const USER_MEMORY_DB_FILENAME: &str = "user-memory.db";
+/// Remote-node store file under `remote/nodes/<digest>/`.
+pub const REMOTE_DB_FILENAME: &str = "remote.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
+/// Directory holding truncated tool responses: under an enrolled project's
+/// store shard, or directly under the profile root for any other checkout.
+pub const RESPONSE_HANDLES_DIRECTORY: &str = "response-handles";
 pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
-/// Legacy filename prefix used to recognize already-quarantined branch
-/// metadata as non-authoritative debris.
-pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const DURABLE_REMOVAL_TOMBSTONE_PREFIX: &str = ".tracedecay-deleted-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
@@ -153,7 +158,6 @@ pub fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageMode {
-    ProjectLocal,
     ProfileSharded,
 }
 
@@ -161,12 +165,6 @@ pub enum StorageMode {
 #[serde(rename_all = "snake_case")]
 pub enum StoreKind {
     CodeProject,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnrollmentMarker {
-    pub project_id: String,
-    pub storage_mode: StorageMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,8 +177,6 @@ pub struct RepositoryIdentityMarker {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectIdentity {
     pub project_id: Option<String>,
-    pub display_root: PathBuf,
-    pub primary_alias: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,21 +187,18 @@ pub struct StoreLayout {
     pub project_root: PathBuf,
     pub data_root: PathBuf,
     pub graph_db_path: PathBuf,
-    pub config_path: PathBuf,
     pub branch_meta_path: PathBuf,
     pub sessions_db_path: PathBuf,
     pub response_handle_root: PathBuf,
     pub lcm_payload_root: PathBuf,
     pub dashboard_root: PathBuf,
     pub manifest_path: Option<PathBuf>,
-    pub dirty_path: PathBuf,
     pub sync_lock_path: PathBuf,
     pub branch_add_lock_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectStorageStatus {
-    RepoLocal,
     ProfileSharded,
     ManifestReconstructable,
     Stale,
@@ -215,34 +208,65 @@ pub enum ProjectStorageStatus {
 pub struct ProjectStorageLocation {
     pub project_root: PathBuf,
     pub data_root: PathBuf,
-    pub marker_root: Option<PathBuf>,
     pub status: ProjectStorageStatus,
 }
 
 impl ProjectStorageStatus {
     pub fn label(self) -> &'static str {
         match self {
-            Self::RepoLocal => "repo-local",
             Self::ProfileSharded => "profile-sharded",
             Self::ManifestReconstructable => "manifest-reconstructable",
             Self::Stale => "stale",
         }
     }
-
-    pub fn is_live(self) -> bool {
-        matches!(self, Self::RepoLocal | Self::ProfileSharded)
-    }
 }
 
-pub fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
-    match resolve_layout_for_current_profile(project_root) {
-        Ok(layout) => classify_layout_storage(project_root, layout),
-        Err(_) => ProjectStorageLocation {
-            project_root: project_root.to_path_buf(),
-            data_root: config::get_tracedecay_dir(project_root),
-            marker_root: None,
-            status: ProjectStorageStatus::Stale,
-        },
+pub fn classify_project_storage(
+    profile_root: &Path,
+    project_root: &Path,
+) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
+    resolve_layout(project_root, profile_root)
+        .map(|layout| classify_layout_storage(project_root, layout))
+}
+
+/// Files only a retired binary wrote into a checkout's `.tracedecay/`
+/// directory: the working-tree enrollment marker and the repo-local config and
+/// graph store. Current identity lives under `.git/` and every store lives in
+/// the profile, so nothing reads these.
+const RETIRED_CHECKOUT_LAYOUT_FILES: [&str; 3] =
+    ["enrollment.json", "config.json", config::DB_FILENAME];
+
+/// The checkout-local `.tracedecay/` directory when it still carries the
+/// retired layout. The profile root is never a checkout layout, even when a
+/// project root is the directory that hosts it.
+pub fn retired_checkout_layout_dir(profile_root: &Path, project_root: &Path) -> Option<PathBuf> {
+    let dir = config::get_tracedecay_dir(project_root);
+    if profile_root == dir || dir.canonicalize().is_ok_and(|dir| dir == profile_root) {
+        return None;
+    }
+    RETIRED_CHECKOUT_LAYOUT_FILES
+        .iter()
+        .any(|name| dir.join(name).exists())
+        .then_some(dir)
+}
+
+/// Typed reset refusal for a checkout still carrying the retired
+/// checkout-local layout. It is never read or migrated; the scoped project
+/// store reset deletes the directory.
+pub fn refuse_retired_checkout_layout(
+    profile_root: &Path,
+    project_root: &Path,
+) -> tracedecay_domain::errors::Result<()> {
+    match retired_checkout_layout_dir(profile_root, project_root) {
+        None => Ok(()),
+        Some(dir) => Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+            "project store",
+            format!(
+                "{} is the retired checkout-local layout; this binary never reads it and \
+                 the reset deletes it",
+                dir.display()
+            ),
+        )),
     }
 }
 
@@ -252,20 +276,16 @@ fn classify_layout_storage(project_root: &Path, layout: StoreLayout) -> ProjectS
         .manifest_path
         .as_ref()
         .is_some_and(|path| path.is_file());
-    let status = match layout.storage_mode {
-        StorageMode::ProjectLocal if graph_exists => ProjectStorageStatus::RepoLocal,
-        StorageMode::ProfileSharded if graph_exists => ProjectStorageStatus::ProfileSharded,
-        StorageMode::ProfileSharded if manifest_exists => {
-            ProjectStorageStatus::ManifestReconstructable
-        }
-        _ => ProjectStorageStatus::Stale,
+    let status = if graph_exists {
+        ProjectStorageStatus::ProfileSharded
+    } else if manifest_exists {
+        ProjectStorageStatus::ManifestReconstructable
+    } else {
+        ProjectStorageStatus::Stale
     };
-    let marker_root = (layout.storage_mode == StorageMode::ProfileSharded)
-        .then(|| project_root.join(config::TRACEDECAY_DIR));
     ProjectStorageLocation {
         project_root: project_root.to_path_buf(),
         data_root: layout.data_root,
-        marker_root,
         status,
     }
 }
@@ -312,12 +332,11 @@ pub fn classify_registry_storage_fields(
             |relpath| {
                 [&profile_root, &data_root].iter().any(|root| {
                     StoreArtifactPath::resolve(root, relpath)
-                        .ok()
-                        .is_some_and(|path| path.absolute_path().is_file())
+                        .is_ok_and(|path| path.absolute_path().is_file())
                 })
             },
         );
-        let status = if data_root.join(config::db_filename(&data_root)).exists() {
+        let status = if data_root.join(config::DB_FILENAME).exists() {
             ProjectStorageStatus::ProfileSharded
         } else if manifest_exists {
             ProjectStorageStatus::ManifestReconstructable
@@ -327,7 +346,6 @@ pub fn classify_registry_storage_fields(
         let location = ProjectStorageLocation {
             project_root: project_root.to_path_buf(),
             data_root,
-            marker_root: Some(project_root.join(config::TRACEDECAY_DIR)),
             status,
         };
         match location.status {
@@ -380,24 +398,11 @@ pub struct StoreManifest {
     pub graph_db_relpath: PathBuf,
     pub sessions_db_relpath: PathBuf,
     pub branch_meta_relpath: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GraphScopeId {
-    Project,
-    Branch(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueryTarget {
-    pub graph_db_path: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActiveProjectContext {
-    pub layout: StoreLayout,
-    pub scope_id: GraphScopeId,
-    pub query_target: QueryTarget,
+    /// Registered-schema admission digest the sessions database was last
+    /// admitted under. Absent until its first admission: the startup census
+    /// then inspects the store in full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions_schema_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,34 +427,79 @@ pub struct ValidatedProfileShard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileShardValidationError {
-    Unavailable { path: PathBuf },
-    NonCanonical { reason: String },
+    Unavailable {
+        path: PathBuf,
+    },
+    NonCanonical {
+        reason: ProfileShardNonCanonicalReasonV1,
+    },
+}
+
+/// Closed set of profile-shard layout / manifest violations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileShardNonCanonicalReasonV1 {
+    StoreRootOutsideExpected,
+    SessionsDbNotSqlite,
+    ArtifactNotRegularDirectory,
+    ArtifactNotRegularFile,
+    ManifestInvalid,
+    ManifestSchemaMismatch,
+    ManifestProjectIdMismatch,
+    ManifestStoreKindMismatch,
+    ManifestSessionsDbPathMismatch,
+    ManifestDataRootUnavailable,
+    ManifestDataRootMismatch,
+}
+
+impl ProfileShardNonCanonicalReasonV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StoreRootOutsideExpected => "store_root_outside_expected",
+            Self::SessionsDbNotSqlite => "sessions_db_not_sqlite",
+            Self::ArtifactNotRegularDirectory => "artifact_not_regular_directory",
+            Self::ArtifactNotRegularFile => "artifact_not_regular_file",
+            Self::ManifestInvalid => "manifest_invalid",
+            Self::ManifestSchemaMismatch => "manifest_schema_mismatch",
+            Self::ManifestProjectIdMismatch => "manifest_project_id_mismatch",
+            Self::ManifestStoreKindMismatch => "manifest_store_kind_mismatch",
+            Self::ManifestSessionsDbPathMismatch => "manifest_sessions_db_path_mismatch",
+            Self::ManifestDataRootUnavailable => "manifest_data_root_unavailable",
+            Self::ManifestDataRootMismatch => "manifest_data_root_mismatch",
+        }
+    }
+}
+
+impl std::fmt::Display for ProfileShardNonCanonicalReasonV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 pub struct PrivateStoreIo;
 
 mod identity;
 mod layout;
-mod legacy_layouts;
 mod manifest;
 mod paths_and_io;
 mod profile_identity;
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use identity::pin_fixture_repository_identity;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use identity::root_commit_walk_count_for_test;
 pub use identity::{
-    has_repository_identity_marker, legacy_enrollment_marker_path, read_legacy_enrollment_marker,
-    read_repository_identity_marker, repository_identity_path, write_repository_identity_marker,
+    IdentityAnchor, claim_repository_identity_marker, has_repository_identity_marker,
+    read_repository_identity_marker, repository_identity_anchors,
+    repository_identity_anchors_off_executor, repository_identity_path,
+    walked_repository_identity_anchors, write_repository_identity_marker,
 };
-pub(crate) use layout::has_path_local_profile_store;
 pub use layout::{
-    default_profile_project_id, default_profile_root, default_profile_sharded_layout,
-    path_local_profile_project_id, profile_sharded_data_root, profile_sharded_layout,
-    resolve_enrolled_layout_for_current_profile, resolve_layout,
-    resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_persisted_layout,
-    resolve_project_session_db_path, resolve_response_handle_root,
+    default_profile_project_id, default_profile_sharded_layout, enrolled_project_roots,
+    path_local_profile_project_id, profile_root_of_sharded_data_root, profile_sharded_data_root,
+    profile_sharded_layout, profile_shards_root, registered_project_id, resolve_layout,
+    resolve_persisted_layout,
 };
-pub use legacy_layouts::matching_legacy_profile_layouts;
+pub(crate) use layout::{has_path_local_profile_store, has_repository_profile_store};
 pub use manifest::{read_store_manifest, write_store_manifest, write_store_manifest_to_path};
 pub use paths_and_io::{
     acquire_sidecar_lock_blocking, append_lock_path, reject_symlink_components,
@@ -461,9 +511,8 @@ pub use profile_identity::{
     read_existing_profile_identity_record,
 };
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use paths_and_io::open_lock_file;
-use paths_and_io::validate_enrollment_marker;
 
 include!("storage/tests.rs");
 include!("storage/identity_tests.rs");

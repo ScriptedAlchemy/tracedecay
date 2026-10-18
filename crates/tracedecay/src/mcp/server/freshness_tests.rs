@@ -1,12 +1,15 @@
 use super::{DatabaseOwnerReconciler, McpServer, McpServerConstructionContext};
-use crate::config::PinnedUserDataDir;
-use crate::tracedecay::TraceDecay;
+use crate::test_support::git::git;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
+use tracedecay_contracts::code_index_freshness::{
+    CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT, CodeIndexConvergenceParkedV1,
+};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::tool_error_response;
+use tracedecay_project::project::TraceDecay;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 struct FreshnessRuntime {
@@ -44,27 +47,13 @@ impl FreshnessRuntime {
     }
 }
 
-fn git(root: &std::path::Path, args: &[&str]) {
-    let ok = std::process::Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(root)
-    .args(args)
-    .output()
-    .expect("git runs")
-    .status
-    .success();
-    assert!(ok, "git {args:?} failed");
-}
-
 struct FreshnessFixtureAuthority {
-    _pin: PinnedUserDataDir,
-    _runtime: Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
+    profile: TempDir,
+    _runtime: Arc<tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1>,
 }
 
 async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority) {
-    let pin = PinnedUserDataDir::new();
+    let profile = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
@@ -75,15 +64,18 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority)
     std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "initial"]);
-    let (cg, runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(root, "project.mcp-freshness")
-            .await
-            .expect("init");
+    let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
+        root,
+        "project.mcp-freshness",
+    )
+    .await
+    .expect("init");
     (
         cg,
         dir,
         FreshnessFixtureAuthority {
-            _pin: pin,
+            profile,
             _runtime: runtime,
         },
     )
@@ -101,20 +93,46 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
     drop(cg);
 
     let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
-    meta.add_branch("feature", "branches/feature.db", "main");
+    meta.add_branch("feature", "main");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
-    std::fs::create_dir_all(layout.data_root.join("branches")).unwrap();
-    std::fs::copy(
-        &layout.graph_db_path,
-        layout.data_root.join("branches/feature.db"),
+    // `add_branch` only admits the branch; until its exact graph source is
+    // published the branch is still indexing and a reopen legitimately keeps
+    // serving the nearest published ancestor (`main`). This test pins the
+    // serve-old/await-new swap, so publish the feature provenance up front.
+    let published = tracedecay_runtime_core::branch_meta::publish_graph_source(
+        &layout.data_root,
+        "feature",
+        None,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
+            project_id: "project.mcp-freshness".to_owned(),
+            repository_id: "repository.mcp-freshness".to_owned(),
+            worktree_id: "worktree.mcp-freshness".to_owned(),
+            worktree_root: root.to_string_lossy().into_owned(),
+            reference: "refs/heads/feature".to_owned(),
+            source_oid: "a".repeat(40),
+        },
     )
     .unwrap();
+    assert!(
+        matches!(
+            published,
+            tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+        ),
+        "the feature branch must be query-eligible before the drift"
+    );
 
     git(root, &["checkout", "-q", "-b", "feature"]);
     git(root, &["checkout", "-q", "main"]);
     let main = fixture_authority
         ._runtime
-        .open_project_graph_for_test(root, crate::tracedecay::TraceDecayOpenOptions::default())
+        .open_project_graph_for_test(
+            root,
+            tracedecay_project::project::TraceDecayOpenOptions::for_profile(
+                &tracedecay_runtime_core::config::ProfileRoot::new(
+                    fixture_authority.profile.path(),
+                ),
+            ),
+        )
         .await
         .unwrap();
     let observed = Arc::new(Mutex::new(Vec::new()));
@@ -168,7 +186,7 @@ async fn startup_catch_up_spawned_once_per_server() {
     let server = McpServer::new(cg, None).await;
     // The D1 spawn should have claimed the one-shot flag.
     assert!(
-        server.startup_catch_up.dispatch_claimed(),
+        !server.startup_catch_up.try_claim_dispatch(),
         "startup catch-up should have been dispatched by new_with_dbs"
     );
     assert!(
@@ -197,50 +215,54 @@ async fn startup_catch_up_spawned_once_per_server() {
 /// that landed in between observed a false "ready".
 #[tokio::test]
 async fn a_claimed_dispatch_is_never_observed_as_settled() {
-    use crate::mcp::server::lifecycle::StartupCatchUpMachineV1;
+    use tracedecay_mcp::server::StartupCatchUpMachineV1;
 
     let machine = StartupCatchUpMachineV1::default();
     // Undispatched machines are ready: nothing will ever run.
-    assert!(machine.settled_for_test());
+    assert!(machine.settled());
 
     assert!(machine.try_claim_dispatch());
-    assert!(machine.dispatch_claimed());
+    assert!(!machine.try_claim_dispatch());
     // Claiming dispatch is itself the transition into `Syncing`.
-    assert!(!machine.settled_for_test());
+    assert!(!machine.settled());
 
-    machine.settle_for_test();
-    assert!(machine.settled_for_test());
+    machine.settle();
+    assert!(machine.settled());
 }
 
 /// Shutdown must leave the startup sync readable as settled.
 #[tokio::test]
 async fn a_cancelled_machine_reads_as_settled_and_refuses_further_phases() {
-    use crate::mcp::server::lifecycle::StartupCatchUpMachineV1;
+    use tracedecay_mcp::server::StartupCatchUpMachineV1;
 
     let machine = StartupCatchUpMachineV1::default();
     assert!(machine.try_claim_dispatch());
-    machine.mark_cancelled_for_test();
-    assert!(machine.settled_for_test());
+    machine.mark_cancelled();
+    assert!(machine.settled());
 
     // A late in-flight task settling after shutdown cannot resurrect it.
-    machine.settle_for_test();
-    assert!(machine.settled_for_test());
+    machine.settle();
+    assert!(machine.settled());
     assert!(!machine.try_claim_dispatch());
 }
 
 #[tokio::test]
 async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db() {
-    let (cg, dir, _pin) = init_indexed_repo().await;
-    let profile_root = crate::config::user_data_dir().expect("configured profile root");
+    let (cg, dir, fixture_authority) = init_indexed_repo().await;
+    let profile =
+        tracedecay_runtime_core::config::ProfileRoot::new(fixture_authority.profile.path());
     let override_root = dir.path().join("registry-override");
     let runtime = FreshnessRuntime::open(&override_root).await;
     let registry = runtime.profile_database().await;
 
-    let server = McpServer::new_with_dbs(cg, None, None, Some(registry), true).await;
+    let server =
+        McpServer::new_with_dbs(cg, None, None, Some(registry), Some(profile.clone())).await;
 
-    assert_eq!(server.profile_root.as_deref(), Some(profile_root.as_path()));
+    assert_eq!(server.owner_profile(), Some(&profile));
     assert_ne!(
-        server.profile_root.as_deref(),
+        server
+            .owner_profile()
+            .map(tracedecay_runtime_core::config::ProfileRoot::data_dir),
         server
             .registry_db
             .as_deref()
@@ -249,31 +271,12 @@ async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db
 }
 
 #[test]
-fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
-    let error = tracedecay_domain::errors::TraceDecayError::hook_runtime_with_status(
-        "observation_cursor_conflict",
-        true,
-        "Claude observation store operation failed",
-        tracedecay_sessions::admission::HostAdmissionStatus::Backpressured.as_wire(),
-    );
-
-    let response = tool_error_response(serde_json::json!(7), "tracedecay_hook_runtime", &error);
-    let data = response.error.unwrap().data.unwrap();
-
-    assert_eq!(data["reason_code"], "observation_cursor_conflict");
-    assert_eq!(data["retryable"], true);
-    assert_eq!(data["detail"], "Claude observation store operation failed");
-    // The authority's own status survives to the JSON-RPC boundary instead of
-    // being re-derived there from the reason code.
-    assert_eq!(data["status"], "backpressured");
-}
-
-#[test]
 fn project_route_error_messages_keep_retry_authority_when_clients_hide_error_data() {
     let error = tracedecay_domain::errors::TraceDecayError::ProjectRoute {
         reason_code: "code-graph-unavailable".to_owned(),
         retryable: true,
         detail: "the verified code graph is not ready for the exact project root".to_owned(),
+        typed_detail: None,
     };
 
     let response = tool_error_response(serde_json::json!(9), "tracedecay_test_map", &error);
@@ -286,6 +289,39 @@ fn project_route_error_messages_keep_retry_authority_when_clients_hide_error_dat
     let data = rpc_error.data.expect("structured project-route data");
     assert_eq!(data["reason_code"], "code-graph-unavailable");
     assert_eq!(data["retryable"], true);
+}
+
+#[test]
+fn publication_corruption_keeps_park_facts_typed_at_the_rpc_boundary() {
+    let error = CodeIndexConvergenceParkedV1 {
+        reason: "source mode is not owner-private".to_owned(),
+        blocked_reason: None,
+        remediation: "restore mode 0600".to_owned(),
+        parked_at_micros: 1,
+        observed_passes: 2,
+        retries_on_wake: true,
+    }
+    .publication_authority_corrupt_error();
+    let response = tool_error_response(serde_json::json!(10), "tracedecay_sync", &error);
+    let data = response
+        .error
+        .expect("JSON-RPC error")
+        .data
+        .expect("structured route data");
+
+    assert_eq!(
+        data["reason_code"],
+        CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT
+    );
+    assert_eq!(
+        data["detail"],
+        serde_json::json!({
+            "kind": "parked",
+            "cause": "source mode is not owner-private",
+            "remedy": "restore mode 0600",
+            "retries_on_wake": true,
+        })
+    );
 }
 
 // ---- ledger settle is bounded when a recorder task wedges ---------
@@ -361,7 +397,7 @@ async fn read_refresh_is_non_blocking_and_single_flighted() {
         elapsed < Duration::from_millis(100),
         "maybe_spawn_read_refresh must not block on the sync (took {elapsed:?})"
     );
-    // The refresh should have been claimed (running flag set) — proving a
+    // The refresh should have been claimed (running flag set), proving a
     // task was spawned rather than run inline.
     // (It may already have finished on a very fast machine; in that case
     // the cooldown stamp still advanced, which we assert below.)

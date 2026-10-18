@@ -5,23 +5,24 @@
 //! capture path, and depends on remaining usecases for those edges.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 
 use tracedecay_domain::{
-    BrainId, FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ProjectId, RetrievalAnchorId, UserProfileId,
+    CanonicalObservationIdV1, FactOwnerV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    RetrievalAnchorId,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
-    ObservationStore, ObservationStoreError, ParseOffset, ProjectionStoreError, StoreShardScopeV1,
+    ObservationStore, ObservationStoreError, ParseOffset, ProjectionStoreError,
     build_scope_resolution_authorization_v1,
 };
 
 use tracedecay_global_db::GlobalDbObservationStore;
-use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_private_fs::background_cpu::process_background_cpu;
-use tracedecay_runtime_core::privacy::{PrivacySanitizerError, RecordSanitizerV1};
+use tracedecay_global_db::{ObservationSourcePresenceV1, RegisteredGlobalDb};
+use tracedecay_privacy::{PrivacySanitizerError, RecordSanitizerV1};
 use tracedecay_session_memory::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
 };
@@ -37,9 +38,14 @@ use tracedecay_sessions::observation::{
     ObservationApplicationError, ObservationCancellation,
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
+use tracedecay_sessions::runtime::SessionProvider;
+use tracedecay_sessions::runtime::git_correlation::{
+    AdmittedWorktrees, DEFAULT_SPAN_MERGE_GAP_SECS, GitEvidenceBatch, GitEvidenceWriter,
+    canonical_observation_git_evidence,
+};
 
+mod authorities;
 mod discovery_queue;
-mod hotpath_observe;
 mod projection_drain;
 mod replay;
 mod runtime;
@@ -52,75 +58,134 @@ pub use replay::{
     REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, classify_replay_pass, replay_backoff,
 };
 
+pub use authorities::HostAdmissionAuthorities;
 pub use runtime::{DurableHostAdmission, HostAdmissionRuntime};
 pub type SharedHostAdmissionBroker = Arc<HostAdmissionBroker>;
 
 pub struct HostAdmissionBroker {
     runtime: Arc<Mutex<HostAdmissionRuntime>>,
-    replay: tokio::sync::Mutex<()>,
-    /// Coalesced wake for daemon-owned profile/project replay workers.
-    replay_wake: tokio::sync::Notify,
+    /// Admissions awaiting the next group commit: whichever admission holds
+    /// the runtime next appends every queued item as one durable batch.
+    appends: Arc<Mutex<Vec<QueuedAppend>>>,
+    replay: futures_util::lock::Mutex<()>,
+    /// Coalesced wake for daemon-owned profile/project replay workers: at most
+    /// one request is pending however many admissions raise it.
+    replay_requested: AtomicBool,
+    replay_wake: asupersync::sync::Notify,
+}
+
+struct QueuedAppend {
+    source: String,
+    payload: Vec<u8>,
+    admitted: mpsc::Sender<Result<DurableHostAdmission, HostAdmissionOutcome>>,
 }
 
 pub struct HostAdmissionReplay<'a> {
     broker: &'a HostAdmissionBroker,
-    _guard: tokio::sync::MutexGuard<'a, ()>,
+    _guard: futures_util::lock::MutexGuard<'a, ()>,
+}
+
+fn spool_runtime_unavailable() -> HostAdmissionOutcome {
+    HostAdmissionOutcome::retained_unavailable("spool_runtime_unavailable")
+}
+
+/// Append every queued admission as one batch and answer each admitter.
+fn commit_queued_appends(runtime: &mut HostAdmissionRuntime, queued: Vec<QueuedAppend>) {
+    if queued.is_empty() {
+        return;
+    }
+    let items = queued
+        .iter()
+        .map(|append| (append.source.as_str(), append.payload.as_slice()))
+        .collect::<Vec<_>>();
+    let admitted = runtime.admit_batch(&items);
+    for (append, admitted) in queued.into_iter().zip(admitted) {
+        // A dropped receiver is a cancelled admitter; its durable record
+        // still replays through the worker.
+        let _ = append.admitted.send(admitted);
+    }
 }
 
 impl HostAdmissionBroker {
     pub fn new(runtime: HostAdmissionRuntime) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
-            replay: tokio::sync::Mutex::new(()),
-            replay_wake: tokio::sync::Notify::new(),
+            appends: Arc::new(Mutex::new(Vec::new())),
+            replay: futures_util::lock::Mutex::new(()),
+            replay_requested: AtomicBool::new(false),
+            replay_wake: asupersync::sync::Notify::new(),
         }
     }
 
-    #[hotpath::measure(label = "host_admission.with_runtime", future = true)]
+    #[tracing::instrument(name = "host_admission.with_runtime", level = "trace", skip_all)]
     async fn with_runtime<T, F>(&self, operation: F) -> Result<T, HostAdmissionOutcome>
     where
         T: Send + 'static,
         F: FnOnce(&mut HostAdmissionRuntime) -> Result<T, HostAdmissionOutcome> + Send + 'static,
     {
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || {
-            let mut runtime = runtime.lock().map_err(|_| {
-                HostAdmissionOutcome::retained_unavailable("spool_runtime_unavailable")
-            })?;
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            let mut runtime = runtime.lock().map_err(|_| spool_runtime_unavailable())?;
             operation(&mut runtime)
         })
         .await
-        .unwrap_or_else(|_| {
-            Err(HostAdmissionOutcome::retained_unavailable(
-                "spool_runtime_unavailable",
-            ))
-        })
+        .unwrap_or_else(|_| Err(spool_runtime_unavailable()))
     }
 
-    #[hotpath::measure(label = "usecases.admission.admit", future = true)]
+    /// Durably admit one record, group-committed with every concurrent
+    /// admission queued while an earlier batch holds the spool.
+    #[tracing::instrument(name = "usecases.admission.admit", level = "trace", skip_all)]
     pub async fn admit(
         &self,
         source: &str,
         payload: &[u8],
     ) -> Result<DurableHostAdmission, HostAdmissionOutcome> {
-        let source = source.to_owned();
-        let payload = payload.to_vec();
-        let admitted = self
-            .with_runtime(move |runtime| runtime.admit(&source, &payload))
-            .await?;
+        let (admitted, durable) = mpsc::channel();
+        self.appends
+            .lock()
+            .map_err(|_| spool_runtime_unavailable())?
+            .push(QueuedAppend {
+                source: source.to_owned(),
+                payload: payload.to_vec(),
+                admitted,
+            });
+        let appends = Arc::clone(&self.appends);
+        self.with_runtime(move |runtime| {
+            let queued =
+                std::mem::take(&mut *appends.lock().map_err(|_| spool_runtime_unavailable())?);
+            commit_queued_appends(runtime, queued);
+            Ok(())
+        })
+        .await?;
+        // This admission was queued before its own runtime turn, so that turn
+        // or an earlier one already answered it.
+        let admitted = durable
+            .try_recv()
+            .map_err(|_| spool_runtime_unavailable())??;
         self.request_replay();
         Ok(admitted)
     }
 
     /// Wake any coalesced replay worker without holding client permits.
     pub fn request_replay(&self) {
-        // notify_one retains one permit when the worker has not subscribed yet,
-        // closing the broker-creation/admission lost-wake window.
-        self.replay_wake.notify_one();
+        // The flag outlives a worker that has not subscribed yet, closing the
+        // broker-creation/admission lost-wake window.
+        self.replay_requested.store(true, Ordering::Release);
+        self.replay_wake.notify_waiters();
+    }
+
+    /// Consume the pending replay request, if any. A worker calls this as a
+    /// pass starts: the pass reads the spool after this point, so it answers
+    /// every request raised before it, and a stale request would only buy a
+    /// redundant pass.
+    pub fn clear_replay_request(&self) {
+        self.replay_requested.store(false, Ordering::Release);
     }
 
     pub async fn wait_for_replay_request(&self) {
-        self.replay_wake.notified().await;
+        self.replay_wake
+            .wait_until(|| self.replay_requested.swap(false, Ordering::AcqRel))
+            .await;
     }
 
     pub async fn pending_replay_count(&self) -> Result<usize, HostAdmissionOutcome> {
@@ -134,7 +199,7 @@ impl HostAdmissionBroker {
             .is_ok_and(|count| count > 0)
     }
 
-    #[hotpath::measure(label = "usecases.admission.begin_replay", future = true)]
+    #[tracing::instrument(name = "usecases.admission.begin_replay", level = "trace", skip_all)]
     pub async fn begin_replay(&self) -> Result<HostAdmissionReplay<'_>, HostAdmissionOutcome> {
         let guard = self.replay.lock().await;
         self.with_runtime(HostAdmissionRuntime::recover_leases)
@@ -159,28 +224,32 @@ impl HostAdmissionBroker {
 }
 
 impl HostAdmissionReplay<'_> {
-    #[hotpath::measure(label = "usecases.admission.replay.lease", future = true)]
+    #[tracing::instrument(name = "usecases.admission.replay.lease", level = "trace", skip_all)]
     pub async fn lease_next(&self) -> Result<Option<SpoolRecord>, HostAdmissionOutcome> {
         self.broker
             .with_runtime(HostAdmissionRuntime::try_lease_next)
             .await
     }
 
-    #[hotpath::measure(label = "usecases.admission.replay.defer", future = true)]
+    #[tracing::instrument(name = "usecases.admission.replay.defer", level = "trace", skip_all)]
     pub async fn defer(&self, seq: u64) -> Result<(), HostAdmissionOutcome> {
         self.broker
             .with_runtime(move |runtime| runtime.defer(seq))
             .await
     }
 
-    #[hotpath::measure(label = "usecases.admission.replay.commit", future = true)]
+    #[tracing::instrument(name = "usecases.admission.replay.commit", level = "trace", skip_all)]
     pub async fn commit(&self, seq: u64) -> Result<usize, HostAdmissionOutcome> {
         self.broker
             .with_runtime(move |runtime| runtime.commit(seq))
             .await
     }
 
-    #[hotpath::measure(label = "usecases.admission.replay.quarantine", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.replay.quarantine",
+        level = "trace",
+        skip_all
+    )]
     pub async fn quarantine(
         &self,
         seq: u64,
@@ -193,6 +262,8 @@ impl HostAdmissionReplay<'_> {
 }
 
 pub(crate) use schedule::{FairEnqueueOutcome, FairScheduleBounds, FairSourceScheduler};
+#[cfg(test)]
+pub(crate) use spool::take_cloned_payload_bytes;
 pub(crate) use spool::{HostAdmissionSpool, SpoolError, SpoolIntegrity};
 pub use spool::{SpoolBounds, SpoolOpenReport, SpoolRecord, TerminalReason};
 
@@ -209,6 +280,7 @@ pub(crate) const fn admission_outcome(
         retryable,
         reason_code,
         recovery: None,
+        cause: None,
     }
 }
 
@@ -219,185 +291,6 @@ const fn external_source_projection_pending() -> HostAdmissionOutcome {
         false,
         Some("external_source_projection_pending"),
     )
-}
-
-#[derive(Clone, Default)]
-pub struct HostAdmissionAuthorities<'a> {
-    project_id: Option<ProjectId>,
-    project_registered: Option<&'a RegisteredGlobalDb>,
-    brain_id: Option<BrainId>,
-    profile_id: Option<UserProfileId>,
-    profile_registered: Option<&'a RegisteredGlobalDb>,
-    repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
-}
-
-impl<'a> HostAdmissionAuthorities<'a> {
-    pub fn registered_for_project(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        project_id: ProjectId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self {
-            project_id: Some(project_id),
-            project_registered: Some(registered),
-            brain_id: Some(brain_id),
-            profile_id: Some(profile_id),
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    pub(crate) fn registered_for_profile(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self {
-            project_id: None,
-            project_registered: None,
-            brain_id: Some(brain_id),
-            profile_id: Some(profile_id),
-            profile_registered: Some(registered),
-            repository_provenance: None,
-        }
-    }
-
-    pub fn for_project(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        project_id: ProjectId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self::registered_for_project(brain_id, profile_id, project_id, registered)
-    }
-
-    pub fn for_profile(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self::registered_for_profile(brain_id, profile_id, registered)
-    }
-
-    /// Adds the registered profile-session authority to project admission.
-    #[must_use]
-    pub fn with_profile_registered(
-        mut self,
-        profile_id: UserProfileId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        self.profile_id = Some(profile_id);
-        self.profile_registered = Some(registered);
-        self
-    }
-
-    /// Admission bound to a project identity with **no** registered database
-    /// and no resolved profile identity behind it.
-    ///
-    /// Standalone callers (a CLI invocation with no daemon-owned registry
-    /// mount) still need an admission handle to walk a transcript and count
-    /// what it *would* admit. Every capture fails closed; only scope
-    /// validation against `project_id` is authoritative.
-    pub fn unregistered_for_project(project_id: ProjectId) -> Self {
-        Self {
-            project_id: Some(project_id),
-            project_registered: None,
-            brain_id: None,
-            profile_id: None,
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    /// Profile-scoped counterpart of [`Self::unregistered_for_project`].
-    #[must_use]
-    pub const fn unregistered_for_profile() -> Self {
-        Self {
-            project_id: None,
-            project_registered: None,
-            brain_id: None,
-            profile_id: None,
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    pub fn unavailable_for_project(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        project_id: ProjectId,
-    ) -> Self {
-        Self {
-            project_id: Some(project_id),
-            project_registered: None,
-            brain_id: Some(brain_id),
-            profile_id: Some(profile_id),
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    pub fn unavailable_for_profile(brain_id: BrainId, profile_id: UserProfileId) -> Self {
-        Self {
-            project_id: None,
-            project_registered: None,
-            brain_id: Some(brain_id),
-            profile_id: Some(profile_id),
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_repository_provenance(
-        mut self,
-        repository_provenance: RepositoryProvenanceAdmissionContext,
-    ) -> Self {
-        self.repository_provenance = Some(repository_provenance);
-        self
-    }
-
-    fn registered_database(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> Result<Option<&'a RegisteredGlobalDb>, HostAdmissionOutcome> {
-        let database = match scope {
-            HostAdmissionScope::Project => self.project_registered,
-            HostAdmissionScope::Profile => self.profile_registered,
-        };
-        let Some(database) = database else {
-            return Ok(None);
-        };
-        let shard = &database.binding().shard_id;
-        let profile_matches = self.brain_id.as_ref() == Some(&shard.brain_id)
-            && self.profile_id.as_ref() == Some(&shard.profile_id);
-        let valid = profile_matches
-            && match (scope, &shard.scope) {
-                (
-                    HostAdmissionScope::Project,
-                    StoreShardScopeV1::ProjectSessions { project_id },
-                ) => self.project_id.as_ref() == Some(project_id),
-                (HostAdmissionScope::Profile, StoreShardScopeV1::ProfileSessions) => true,
-                _ => false,
-            };
-        if valid {
-            Ok(Some(database))
-        } else {
-            Err(HostAdmissionOutcome::project_authority_mismatch())
-        }
-    }
-
-    fn validate_scope(&self, scope: &ObservationScopeV1) -> Result<(), HostAdmissionOutcome> {
-        let ObservationScopeV1::Project { project_id } = scope else {
-            return Ok(());
-        };
-        match self.project_id.as_ref() {
-            Some(expected) if expected == project_id => Ok(()),
-            Some(_) => Err(HostAdmissionOutcome::project_authority_mismatch()),
-            None => Err(HostAdmissionOutcome::project_authority_unbound()),
-        }
-    }
 }
 
 pub struct HostAdmissionFacade<'a> {
@@ -440,6 +333,45 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         Box::pin(HostAdmissionFacade::get_source_cursor(self, source, scope))
     }
 
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        Box::pin(HostAdmissionFacade::committed_source_cursors(
+            self, source, scope,
+        ))
+    }
+
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
+        Box::pin(HostAdmissionFacade::begin_source_rewrite(
+            self,
+            source,
+            scope,
+            previous,
+            generation,
+            retained_through,
+        ))
+    }
+
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, u64> {
+        Box::pin(HostAdmissionFacade::complete_source_rewrite(
+            self, source, scope, generation,
+        ))
+    }
+
     fn drain_projection_queue<'a>(
         &'a self,
         provider: &'a str,
@@ -465,6 +397,87 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         Box::pin(HostAdmissionFacade::has_session_message(
             self, scope, provider, message_id,
         ))
+    }
+
+    fn existing_session_message_ids<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        provider: &'a str,
+        message_ids: Vec<String>,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<String>> {
+        Box::pin(HostAdmissionFacade::existing_session_message_ids(
+            self,
+            scope,
+            provider,
+            message_ids,
+        ))
+    }
+
+    fn read_session_backfill_state<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<String>> {
+        Box::pin(HostAdmissionFacade::read_session_backfill_state(
+            self, scope, key,
+        ))
+    }
+
+    fn list_session_backfill_state_page<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key_prefix: &'a str,
+        after_key: Option<&'a str>,
+        through_key: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<(String, String)>> {
+        Box::pin(HostAdmissionFacade::list_session_backfill_state_page(
+            self,
+            scope,
+            key_prefix,
+            after_key,
+            through_key,
+        ))
+    }
+
+    fn session_backfill_state_high_water<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key_prefix: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<String>> {
+        Box::pin(HostAdmissionFacade::session_backfill_state_high_water(
+            self, scope, key_prefix,
+        ))
+    }
+
+    fn compare_and_swap_session_backfill_state<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key: &'a str,
+        expected: Option<&'a str>,
+        replacement: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, bool> {
+        Box::pin(
+            HostAdmissionFacade::compare_and_swap_session_backfill_state(
+                self,
+                scope,
+                key,
+                expected,
+                replacement,
+            ),
+        )
+    }
+
+    fn compare_and_delete_session_backfill_state<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key: &'a str,
+        expected: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, bool> {
+        Box::pin(
+            HostAdmissionFacade::compare_and_delete_session_backfill_state(
+                self, scope, key, expected,
+            ),
+        )
     }
 
     fn get_parse_offset<'a>(
@@ -562,8 +575,18 @@ impl<'a> HostAdmissionFacade<'a> {
         Self { authorities }
     }
 
+    /// Direct host-call admission, the gate every host route consults before
+    /// it captures through this façade.
     pub fn probe(&self, provider: &str, scope: HostAdmissionScope) -> HostAdmissionOutcome {
-        if !supported_provider(provider) {
+        self.authority_probe(admits_direct_host_call(provider), scope)
+    }
+
+    fn authority_probe(
+        &self,
+        provider_admitted: bool,
+        scope: HostAdmissionScope,
+    ) -> HostAdmissionOutcome {
+        if !provider_admitted {
             return admission_outcome(
                 HostAdmissionStatus::Unknown,
                 false,
@@ -589,7 +612,11 @@ impl<'a> HostAdmissionFacade<'a> {
         }
     }
 
-    #[hotpath::measure(label = "usecases.admission.get_source_cursor", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.get_source_cursor",
+        level = "trace",
+        skip_all
+    )]
     pub async fn get_source_cursor(
         &self,
         source: &ObservationSourceIdentityV1,
@@ -602,7 +629,28 @@ impl<'a> HostAdmissionFacade<'a> {
             .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
     }
 
-    #[hotpath::measure(label = "usecases.admission.capture_observation", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.committed_source_cursors",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn committed_source_cursors(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> Result<Vec<ObservationSourceCursorV1>, HostAdmissionOutcome> {
+        let store = self.store(source.provider().as_str(), scope)?;
+        store
+            .committed_source_cursors(source, scope)
+            .await
+            .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
+    }
+
+    #[tracing::instrument(
+        name = "usecases.admission.capture_observation",
+        level = "trace",
+        skip_all
+    )]
     pub async fn capture_observation(
         &self,
         request: CaptureObservationRequest,
@@ -614,6 +662,7 @@ impl<'a> HostAdmissionFacade<'a> {
             .authorities
             .registered_database(host_scope(&scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        record_source_presence(database, std::slice::from_ref(&request)).await?;
         let application = self.application(&provider, &scope)?;
         let outcome = application
             .capture_observation(
@@ -621,7 +670,15 @@ impl<'a> HostAdmissionFacade<'a> {
             )
             .await
             .map_err(|error| classify_error(&error))?;
-        project_captured_outcome(database, outcome).await
+        let mut projected = project_captured_outcomes(
+            database,
+            self.authorities.repository_provenance.as_ref(),
+            vec![outcome],
+        )
+        .await?;
+        projected.pop().ok_or_else(|| {
+            HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+        })
     }
 
     /// Sanitize then persist a bounded window through one store-owned batch.
@@ -629,7 +686,11 @@ impl<'a> HostAdmissionFacade<'a> {
     /// This overrides the trait default, which still walks
     /// [`Self::capture_observation`] one frame at a time. An empty window
     /// returns empty without minting a skipped-authority success.
-    #[hotpath::measure(label = "usecases.admission.capture_observations", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.capture_observations",
+        level = "trace",
+        skip_all
+    )]
     pub async fn capture_observations(
         &self,
         requests: Vec<CaptureObservationRequest>,
@@ -637,7 +698,6 @@ impl<'a> HostAdmissionFacade<'a> {
         let Some(first) = requests.first() else {
             return Ok(Vec::new());
         };
-        crate::hotpath_observe::admission_capture_frames(requests.len());
         let provider = first.provider().to_owned();
         let scope = first.scope().clone();
         self.authorities.validate_scope(&scope)?;
@@ -654,6 +714,7 @@ impl<'a> HostAdmissionFacade<'a> {
             .authorities
             .registered_database(host_scope(&scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        record_source_presence(database, &requests).await?;
         let application = self.application(&provider, &scope)?;
         let provenance = self.authorities.repository_provenance.clone();
         let requests = requests
@@ -664,11 +725,61 @@ impl<'a> HostAdmissionFacade<'a> {
             .capture_observations(requests)
             .await
             .map_err(|error| classify_error(&error))?;
-        project_captured_outcomes(database, outcomes).await
+        project_captured_outcomes(database, provenance.as_ref(), outcomes).await
+    }
+
+    #[tracing::instrument(
+        name = "usecases.admission.begin_source_rewrite",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn begin_source_rewrite(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    ) -> Result<(), HostAdmissionOutcome> {
+        self.authorities.validate_scope(scope)?;
+        let database = self
+            .authorities
+            .registered_database(host_scope(scope))?
+            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        database
+            .begin_observation_source_rewrite(source, scope, previous, generation, retained_through)
+            .await
+            .map_err(|error| projection_error_outcome(&error))
+    }
+
+    #[tracing::instrument(
+        name = "usecases.admission.complete_source_rewrite",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn complete_source_rewrite(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+    ) -> Result<u64, HostAdmissionOutcome> {
+        self.authorities.validate_scope(scope)?;
+        let database = self
+            .authorities
+            .registered_database(host_scope(scope))?
+            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        database
+            .complete_observation_source_rewrite(source, scope, generation)
+            .await
+            .map_err(|error| projection_error_outcome(&error))
     }
 
     /// Persist one sanitized write through the store the façade already holds.
-    #[hotpath::measure(label = "usecases.admission.persist_observation", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.persist_observation",
+        level = "trace",
+        skip_all
+    )]
     pub async fn persist_observation(
         &self,
         provider: &str,
@@ -696,7 +807,11 @@ impl<'a> HostAdmissionFacade<'a> {
     ///
     /// An empty window returns empty without opening the store or minting a
     /// skipped-authority success. Mixed provider or scope writes fail closed.
-    #[hotpath::measure(label = "usecases.admission.persist_observations", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.persist_observations",
+        level = "trace",
+        skip_all
+    )]
     pub async fn persist_observations(
         &self,
         provider: &str,
@@ -706,7 +821,6 @@ impl<'a> HostAdmissionFacade<'a> {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
-        crate::hotpath_observe::admission_persist_frames(writes.len());
         self.authorities.validate_scope(scope)?;
         for write in &writes {
             if write.observation().source().provider().as_str() != provider
@@ -739,7 +853,7 @@ impl<'a> HostAdmissionFacade<'a> {
         }
     }
 
-    #[hotpath::measure(label = "usecases.admission.advance_cursor", future = true)]
+    #[tracing::instrument(name = "usecases.admission.advance_cursor", level = "trace", skip_all)]
     pub async fn advance_non_durable_source_cursor(
         &self,
         advance: ObservationCursorAdvance,
@@ -769,7 +883,7 @@ impl<'a> HostAdmissionFacade<'a> {
                 Some("sanitizer_unavailable"),
             )
         })?;
-        let background_cpu = process_background_cpu().ok_or_else(|| {
+        let background_cpu = self.authorities.background_cpu.clone().ok_or_else(|| {
             admission_outcome(
                 HostAdmissionStatus::Unavailable,
                 false,
@@ -786,7 +900,7 @@ impl<'a> HostAdmissionFacade<'a> {
     ) -> Result<GlobalDbObservationStore, HostAdmissionOutcome> {
         self.authorities.validate_scope(scope)?;
         let scope = host_scope(scope);
-        let probe = self.probe(provider, scope);
+        let probe = self.authority_probe(admits_provider_capture(provider), scope);
         if probe.status != HostAdmissionStatus::Supported {
             return Err(probe);
         }
@@ -798,7 +912,11 @@ impl<'a> HostAdmissionFacade<'a> {
 }
 
 impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
-    #[hotpath::measure(label = "usecases.admission.resolve_evidence_anchor", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.resolve_evidence_anchor",
+        level = "trace",
+        skip_all
+    )]
     async fn resolve_evidence_anchor(
         &self,
         owner: FactOwnerV1,
@@ -866,9 +984,10 @@ impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
 const EVIDENCE_ANCHOR_RESOLUTION_NAMESPACE: &str = "observation-resolution.v1";
 
 impl EvidenceAnchorReportResolver for HostAdmissionFacade<'_> {
-    #[hotpath::measure(
-        label = "usecases.admission.resolve_evidence_anchor_report",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.admission.resolve_evidence_anchor_report",
+        level = "trace",
+        skip_all
     )]
     async fn resolve_evidence_anchor_report(
         &self,
@@ -945,8 +1064,14 @@ const fn projection_store_unavailable() -> HostAdmissionOutcome {
     )
 }
 
-const fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmissionOutcome {
+fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmissionOutcome {
     match error {
+        ProjectionStoreError::Corrupt { .. } => {
+            HostAdmissionOutcome::terminal_unavailable("projection_store_corrupt")
+        }
+        ProjectionStoreError::Storage { .. } if error.is_sqlite_disk_image_corrupt() => {
+            HostAdmissionOutcome::terminal_unavailable("projection_store_corrupt")
+        }
         ProjectionStoreError::Storage { .. } => {
             HostAdmissionOutcome::retained_unavailable("projection_storage_retry_scheduled")
         }
@@ -968,12 +1093,88 @@ const fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmission
         ProjectionStoreError::OutputCollision { .. } => {
             HostAdmissionOutcome::degraded("projection_output_collision")
         }
+        ProjectionStoreError::SessionOutputCollision { .. } => {
+            HostAdmissionOutcome::degraded("projection_session_collision")
+        }
         ProjectionStoreError::Contract(_) => {
             HostAdmissionOutcome::degraded("projection_contract_rejected")
         }
         ProjectionStoreError::SanitizationRefused { .. } => {
             HostAdmissionOutcome::degraded("projection_sanitization_refused")
         }
+    }
+}
+
+#[cfg(test)]
+mod projection_error_outcome_tests {
+    use super::projection_error_outcome;
+    use tracedecay_sessions::admission::HostAdmissionStatus;
+    use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
+
+    fn malformed_disk_image_error(operation: &'static str) -> ProjectionStoreError {
+        ProjectionStoreError::Storage {
+            operation,
+            source: Box::new(std::io::Error::other(
+                "SQLite execute failed: database disk image is malformed",
+            )),
+        }
+    }
+
+    fn not_a_database_error(operation: &'static str) -> ProjectionStoreError {
+        ProjectionStoreError::Storage {
+            operation,
+            source: Box::new(std::io::Error::other(
+                "SQLite execute failed: file is not a database",
+            )),
+        }
+    }
+
+    fn reader_pool_saturated_head_error() -> ProjectionStoreError {
+        ProjectionStoreError::Storage {
+            operation: "dispatch observation projection runtime operation",
+            source: Box::new(ObservationStoreError::Storage {
+                operation: "dispatch observation runtime read",
+                source: Box::new(std::io::Error::other(
+                    "reader acquisition saturated: ReaderPool",
+                )),
+            }),
+        }
+    }
+
+    /// The reporting host retried a malformed page every 5 minutes because
+    /// SQLITE_CORRUPT arrived as `ProjectionStoreError::Storage` and mapped to
+    /// retryable `projection_storage_retry_scheduled`. Corruption cannot
+    /// succeed on retry; status must block and name repair.
+    #[test]
+    fn sqlite_corrupt_head_classifies_as_blocked_projection_store_corrupt() {
+        let outcome = projection_error_outcome(&malformed_disk_image_error(
+            "update projection output state",
+        ));
+        assert_eq!(outcome.reason_code, Some("projection_store_corrupt"));
+        assert!(
+            !outcome.retryable,
+            "a malformed projection store must not stay on the 5-minute retry loop"
+        );
+        assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+    }
+
+    #[test]
+    fn sqlite_notadb_head_classifies_as_blocked_projection_store_corrupt() {
+        let outcome =
+            projection_error_outcome(&not_a_database_error("update projection output state"));
+        assert_eq!(outcome.reason_code, Some("projection_store_corrupt"));
+        assert!(!outcome.retryable);
+        assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+    }
+
+    #[test]
+    fn transient_storage_failures_stay_retryable() {
+        let outcome = projection_error_outcome(&reader_pool_saturated_head_error());
+        assert_eq!(
+            outcome.reason_code,
+            Some("projection_storage_retry_scheduled")
+        );
+        assert!(outcome.retryable);
     }
 }
 
@@ -984,10 +1185,14 @@ fn host_scope(scope: &ObservationScopeV1) -> HostAdmissionScope {
     }
 }
 
-fn supported_provider(provider: &str) -> bool {
-    matches!(provider, "kimi" | "opencode")
-        || tracedecay_sessions::runtime::SessionProvider::parse(provider)
-            .is_some_and(tracedecay_sessions::runtime::SessionProvider::supports_host_admission)
+fn admits_direct_host_call(provider: &str) -> bool {
+    SessionProvider::parse(provider).is_some_and(SessionProvider::supports_host_admission)
+}
+
+/// Observation-store access admits every session provider: canonical capture
+/// from provider ingestion includes providers with no direct host surface.
+fn admits_provider_capture(provider: &str) -> bool {
+    SessionProvider::parse(provider).is_some()
 }
 
 fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome {
@@ -1033,48 +1238,74 @@ fn classify_external_source_error(
 ) -> HostAdmissionOutcome {
     tracing::warn!(%error, "registered external-source commit failed");
     match error {
-        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
+        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::Dispatch { .. }
+        | tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::ReadUnavailable { .. } => {
             HostAdmissionOutcome::retained_unavailable("external_source_runtime_unavailable")
+        }
+        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::SubmitRejected { .. } => {
+            HostAdmissionOutcome::retained_unavailable("external_source_runtime_rejected")
         }
         _ => HostAdmissionOutcome::retained_unavailable("external_source_commit_failed"),
     }
 }
 
-async fn project_captured_outcome(
+/// Records where each file-byte record sits in its source's current layout,
+/// before capture, so a rewrite can tell the records it offered again from
+/// the ones it dropped. An identity the contract refuses names no record; its
+/// capture reports the refusal.
+async fn record_source_presence(
     database: &RegisteredGlobalDb,
-    outcome: CaptureObservationOutcome,
-) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
-    let CaptureObservationOutcome::Persisted {
-        outcome: persisted, ..
-    } = &outcome
-    else {
-        return Ok(outcome);
-    };
-    let projection =
-        tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
-            database.runtime_client(),
-        )
-        .capture_host_observation(persisted.receipt())
-        .await
-        .map_err(classify_external_source_error)?;
-    if let tracedecay_session_memory::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) =
-        projection
-    {
-        return accepted_for_external_source_replay(outcome, receipt);
+    requests: &[CaptureObservationRequest],
+) -> Result<(), HostAdmissionOutcome> {
+    let mut by_source: Vec<(&ObservationSourceIdentityV1, &ObservationScopeV1, Vec<_>)> =
+        Vec::new();
+    for request in requests {
+        let identity = request.identity();
+        if identity.ordering_domain() != ObservationOrderingDomainV1::FileBytes {
+            continue;
+        }
+        let Ok(observation_id) = CanonicalObservationIdV1::derive(identity) else {
+            continue;
+        };
+        let presence = ObservationSourcePresenceV1 {
+            observation_id,
+            generation: identity.generation(),
+            start_offset: identity.position().start(),
+        };
+        match by_source
+            .iter_mut()
+            .find(|(source, scope, _)| *source == identity.source() && *scope == identity.scope())
+        {
+            Some((_, _, records)) => records.push(presence),
+            None => by_source.push((identity.source(), identity.scope(), vec![presence])),
+        }
     }
-    Ok(outcome)
+    for (source, scope, records) in by_source {
+        database
+            .record_observation_source_presence(source, scope, &records)
+            .await
+            .map_err(|error| projection_error_outcome(&error))?;
+    }
+    Ok(())
 }
 
 async fn project_captured_outcomes(
     database: &RegisteredGlobalDb,
+    repository_provenance: Option<&RepositoryProvenanceAdmissionContext>,
     outcomes: Vec<CaptureObservationOutcome>,
 ) -> Result<Vec<CaptureObservationOutcome>, HostAdmissionOutcome> {
     let mut receipts = Vec::new();
     let mut persisted_slots = Vec::new();
     for (slot, outcome) in outcomes.iter().enumerate() {
+        // A covered duplicate writes no row: its retained observation was
+        // projected under its original receipt, and only the cursor moved.
         if let CaptureObservationOutcome::Persisted {
             outcome: persisted, ..
         } = outcome
+            && !matches!(
+                persisted.as_ref(),
+                ObservationPersistOutcome::CoveredDuplicate(_)
+            )
         {
             persisted_slots.push(slot);
             receipts.push(persisted.receipt().clone());
@@ -1095,6 +1326,7 @@ async fn project_captured_outcomes(
             "external_source_commit_failed",
         ));
     }
+    publish_canonical_git_evidence(database, repository_provenance, &outcomes).await?;
     let mut next = persisted_slots.into_iter().zip(projections);
     let mut pending = next.next();
     let mut projected = Vec::with_capacity(outcomes.len());
@@ -1119,9 +1351,66 @@ async fn project_captured_outcomes(
     Ok(projected)
 }
 
+async fn publish_canonical_git_evidence(
+    database: &RegisteredGlobalDb,
+    repository_provenance: Option<&RepositoryProvenanceAdmissionContext>,
+    outcomes: &[CaptureObservationOutcome],
+) -> Result<(), HostAdmissionOutcome> {
+    let Some(repository_provenance) = repository_provenance else {
+        return Ok(());
+    };
+    let mut batch = GitEvidenceBatch {
+        merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+        ..GitEvidenceBatch::default()
+    };
+    let mut worktrees = AdmittedWorktrees::new(repository_provenance.admitted_project_root());
+    for outcome in outcomes {
+        let CaptureObservationOutcome::Persisted {
+            sanitized_record, ..
+        } = outcome
+        else {
+            continue;
+        };
+        let (commit_records, span_observations) =
+            canonical_observation_git_evidence(sanitized_record.payload(), &mut worktrees)
+                .map_err(classify_git_evidence_error)?;
+        batch.commits.extend(commit_records);
+        batch.observations.extend(span_observations);
+    }
+    if batch.commits.is_empty() && batch.observations.is_empty() {
+        return Ok(());
+    }
+    let transaction = database.begin_write_transaction().await.map_err(|error| {
+        tracing::warn!(%error, "canonical Git evidence transaction failed");
+        HostAdmissionOutcome::retained_unavailable("git_evidence_write_unavailable")
+    })?;
+    let mut writer = GitEvidenceWriter::open(&transaction)
+        .await
+        .map_err(classify_git_evidence_error)?;
+    writer
+        .apply(batch)
+        .await
+        .map_err(classify_git_evidence_error)?;
+    writer.finish().await.map_err(classify_git_evidence_error)?;
+    transaction.commit().await.map_err(|error| {
+        tracing::warn!(%error, "canonical Git evidence commit failed");
+        HostAdmissionOutcome::retained_unavailable("git_evidence_write_unavailable")
+    })?;
+    Ok(())
+}
+
+fn classify_git_evidence_error(
+    error: tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
+) -> HostAdmissionOutcome {
+    tracing::warn!(%error, "canonical Git evidence write failed");
+    let mut outcome = HostAdmissionOutcome::retained_unavailable("git_evidence_write_unavailable");
+    outcome.cause = Some(error.to_string());
+    outcome
+}
+
 fn accepted_for_external_source_replay(
     outcome: CaptureObservationOutcome,
-    receipt: tracedecay_store::SourceCommitReceiptV1,
+    receipt: tracedecay_store::SourceCommitReceiptSummaryV1,
 ) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
     let CaptureObservationOutcome::Persisted {
         outcome,
@@ -1136,7 +1425,7 @@ fn accepted_for_external_source_replay(
     };
     let durable_observation_id = outcome.receipt().observation().observation_id().clone();
     let retry_handle = ExternalSourceProjectionRetryHandleV1::new(
-        receipt.source_frontier().binding().clone(),
+        receipt.binding().clone(),
         receipt.receipt_digest().clone(),
     );
     Ok(CaptureObservationOutcome::AcceptedForReplay {
@@ -1151,13 +1440,11 @@ fn accepted_for_external_source_replay(
 }
 
 fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
-    match error {
-        ObservationStoreError::BatchRequiresScalarFallback { cause } => {
-            return HostAdmissionOutcome::batch_requires_scalar_fallback(*cause);
-        }
+    let reason_code = match error {
         ObservationStoreError::ObservationCollision { .. } => {
-            return HostAdmissionOutcome::deterministic_content_refusal(
+            return HostAdmissionOutcome::deterministic_content_refusal_with_cause(
                 "observation_identity_collision",
+                error,
             );
         }
         ObservationStoreError::SanitizationReceiptCollision => {
@@ -1170,18 +1457,20 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
                 "observation_retrieval_anchor_alias_collision",
             );
         }
-        _ => {}
-    }
-    let reason_code = match error {
+        ObservationStoreError::CursorConflict { .. }
+        | ObservationStoreError::ReaderSaturated { .. }
+        | ObservationStoreError::WriterSaturated { .. }
+        | ObservationStoreError::Storage { .. } => {
+            unreachable!("retryable store failures are classified before static reason mapping")
+        }
         ObservationStoreError::CursorObservationMismatch => "observation_cursor_mismatch",
         ObservationStoreError::CursorCoverageMismatch => "observation_cursor_coverage_mismatch",
         ObservationStoreError::CursorAdvanceCollision => "observation_cursor_advance_collision",
+        ObservationStoreError::CursorAdvanceLedgerDisagreement { .. } => {
+            "observation_cursor_advance_ledger_disagreement"
+        }
         ObservationStoreError::CursorSanitizationReceiptMismatch => {
             "observation_cursor_sanitization_receipt_mismatch"
-        }
-        ObservationStoreError::ObservationCollision { .. } => "observation_identity_collision",
-        ObservationStoreError::SanitizationReceiptCollision => {
-            "observation_sanitization_receipt_collision"
         }
         ObservationStoreError::RetrievalAnchorObservationMismatch => {
             "observation_retrieval_anchor_observation_mismatch"
@@ -1211,14 +1500,8 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
         ObservationStoreError::RepositoryProvenanceContract(_) => {
             "observation_repository_provenance_contract_invalid"
         }
-        ObservationStoreError::RetrievalAnchorAliasCollision { .. } => {
-            "observation_retrieval_anchor_alias_collision"
-        }
         ObservationStoreError::InvalidReplayLimit { .. } => "observation_replay_limit_invalid",
         ObservationStoreError::Contract(_) => "observation_store_contract_invalid",
-        ObservationStoreError::CursorConflict { .. } | ObservationStoreError::Storage { .. } => {
-            unreachable!("retryable store failures are classified before static reason mapping")
-        }
         _ => "observation_store_failed",
     };
     admission_outcome(HostAdmissionStatus::Degraded, false, Some(reason_code))
@@ -1234,8 +1517,8 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
         // A worker that stopped before finishing left the batch unapplied
         // without saying anything about the observations themselves, so this
         // is an availability failure the caller re-drives once a worker is
-        // back — not a rejection of the payload.
-        ObservationApplicationError::BatchWorkerStopped => admission_outcome(
+        // back, not a rejection of the payload.
+        ObservationApplicationError::PreparationWorkerStopped => admission_outcome(
             HostAdmissionStatus::Unavailable,
             true,
             Some("batch_worker_stopped"),
@@ -1250,12 +1533,29 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
                 Some("cursor_conflict"),
             )
         }
-        ObservationApplicationError::Store(ObservationStoreError::Storage { .. }) => {
-            admission_outcome(
+        ObservationApplicationError::Store(ObservationStoreError::ReaderSaturated { .. }) => {
+            HostAdmissionOutcome::retained_backpressured("reader_pool_saturated")
+        }
+        ObservationApplicationError::Store(ObservationStoreError::WriterSaturated { .. }) => {
+            HostAdmissionOutcome::retained_backpressured("writer_lane_saturated")
+        }
+        ObservationApplicationError::Store(ObservationStoreError::Storage {
+            operation,
+            source,
+        }) => {
+            tracing::warn!(
+                operation,
+                error = %source,
+                reason_code = "authority_write_failed",
+                "observation store storage failure classified as authority_write_failed"
+            );
+            let mut outcome = admission_outcome(
                 HostAdmissionStatus::Unavailable,
                 true,
                 Some("authority_write_failed"),
-            )
+            );
+            outcome.cause = Some(format!("{operation}: {source}"));
+            outcome
         }
         ObservationApplicationError::Contract(_) => {
             HostAdmissionOutcome::deterministic_content_refusal("invalid_observation_contract")
@@ -1267,13 +1567,19 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
             true,
             Some("privacy_authority_unavailable"),
         ),
-        ObservationApplicationError::Privacy(_) => {
-            HostAdmissionOutcome::deterministic_content_refusal("privacy_boundary_failed")
+        ObservationApplicationError::Privacy(error) => {
+            HostAdmissionOutcome::deterministic_content_refusal_with_cause(
+                "privacy_boundary_failed",
+                error,
+            )
         }
         ObservationApplicationError::Store(error) => classify_store_error(error),
     }
 }
 
+#[cfg(test)]
+#[path = "broker_group_commit_test.rs"]
+mod broker_group_commit_test;
 #[cfg(test)]
 #[path = "host_admission_batch_test.rs"]
 mod host_admission_batch_test;

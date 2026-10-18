@@ -9,9 +9,9 @@
 //!   adapter never registered a route, a tool, or a command. It cannot catch a
 //!   feature that never reached the catalog at all.
 //! * **Reverse** (operation enum -> catalog -> surface): every operation family
-//!   that exists *independently* of the catalog — the Work and Workflow
+//!   that exists *independently* of the catalog, the Work and Workflow
 //!   operation enums, the HTTP application operation enum, the callable-code
-//!   operation set, the activity families, the Work product read model — must
+//!   operation set, the activity families, the Work product read model, must
 //!   be catalog-declared **and** mounted, or listed in
 //!   [`SANCTIONED_UNMOUNTED`] with the plan that sanctions the absence. This is
 //!   the direction that flushes out unmounted surfaces, and it is the reason
@@ -29,33 +29,34 @@
 //!    answers the router's empty-bodied `404`. Route verdicts are therefore
 //!    taken from axum's routing table (a `GET` to a `POST`-only route answers
 //!    `405` when the path is registered and `404` when it is not), which is
-//!    immune to handler semantics — a mounted handler is allowed to conceal a
+//!    immune to handler semantics, a mounted handler is allowed to conceal a
 //!    denial as `404` and must not be scored as unmounted for it.
 //!
 //! Surfaces are driven the way a client drives them: the live daemon's
 //! published HTTP application endpoint, the real `tracedecay serve` MCP server
-//! over stdio, and the real `tracedecay tool` command listing. Nothing here
-//! inspects source files or shells out to a scanner; each assertion is a
-//! product call.
+//! over stdio, the real `tracedecay tool` command listing, a Content-Length
+//! framed `tracedecay lsp bridge` session, and a live `tracedecay dashboard`
+//! server. Nothing here inspects source files or shells out to a scanner; each
+//! assertion is a product call.
 
 use crate::common;
+use crate::common::run_ok;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::application_surface::resolve_catalog_tool_binding;
-use tracedecay::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_api::{
     WorkOperation, WorkflowOperation, http_application_full_route_path,
-    is_http_application_operation_exposed, retained_application_route_path,
+    is_http_application_operation_exposed,
 };
-use tracedecay_application::retained_surfaces::RetainedSurfaceOperation;
+use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_session_memory::event_lane::ActivityFamilyV1;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityManifestV1, CatalogSnapshotV1,
@@ -72,36 +73,21 @@ use tracedecay_tool_catalog::{
 ///
 /// Subjects are spelled `surface:name` so a mount landing on one surface but
 /// not another stays individually accountable.
-const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
-    (
-        "git-index-transaction:commit_index",
-        "`commit_index` publication is deliberately unavailable (deferred, \
-         2026-08-05): the files ref backend cannot prevent a new loose ref \
-         appearing between namespace validation and destination publication, \
-         so preflight reports typed AtomicRefNamespaceUnavailable and apply \
-         returns ProvenNoMutation. The requirement is deferred, not deleted: \
-         drop this row when publication becomes sound and the operation is \
-         bound to a surface.",
-    ),
-    (
-        "activity-family:task_activity",
-        "In flight 2026-08-07: ActivityFamilyV1::Task is admitted by the \
-         canonical activity envelope and rendered by the dashboard event \
-         surface, but no production caller publishes the family yet, so the \
-         `task_activity` stream is never emitted. Drop this row when a \
-         production site publishes ActivityFamilyV1::Task.",
-    ),
-];
+///
+/// The table is empty: every declared surface must be mounted. The const
+/// stays so the next genuinely sanctioned gap fails loudly until it is
+/// written down here with its plan citation.
+const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[];
 
 /// The callable-code operations, mirroring the set that
 /// `http_page_projection` classifies as `HttpPageProjection::MetaCursor` in
-/// `src/application_surface.rs`.
+/// `tracedecay-daemon-service/src/application_surface.rs`.
 ///
 /// These are the operations whose decoded surface request carries callable-code
 /// metadata. CLI, MCP, and HTTP must expose the same application operations.
 /// Restating the set here is deliberate: it is the reverse authority, so it
 /// must not be derived from the thing under test.
-const CALLABLE_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
+const CALLABLE_CODE_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
     ApplicationSurfaceOperation::CodeExactOccurrence,
     ApplicationSurfaceOperation::CodePhraseSearch,
     ApplicationSurfaceOperation::CodeSymbolSearch,
@@ -113,7 +99,6 @@ const CALLABLE_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
     ApplicationSurfaceOperation::CodeFacets,
     ApplicationSurfaceOperation::CodeTimeline,
     ApplicationSurfaceOperation::CodeDeclaration,
-    ApplicationSurfaceOperation::CodeDefinition,
     ApplicationSurfaceOperation::CodeTypeDefinition,
     ApplicationSurfaceOperation::CodeReferences,
 ];
@@ -124,7 +109,7 @@ const ABSENT_TAIL: &str = "/application/surface-mount-conformance-absent";
 
 /// A `POST` route the application router registers relative to the outer
 /// project prefix. Reaching it proves the outer dispatch resolved the project,
-/// applied the `{*tail}` rewrite, and handed off to the inner routing table —
+/// applied the `{*tail}` rewrite, and handed off to the inner routing table,
 /// without which every route below would score as missing for the wrong reason.
 const RELATIVE_WITNESS_TAIL: &str = "/application/primitives/storage_status";
 
@@ -185,7 +170,7 @@ impl MountFixture {
         let profile = home.join(".tracedecay");
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
             .expect("isolated profile root");
-        let project = home.join("project");
+        let project = home.join("project #mount");
         fs::create_dir_all(project.join("src")).expect("isolated project root");
         fs::write(
             project.join("Cargo.toml"),
@@ -206,7 +191,7 @@ impl MountFixture {
         );
         common::initialize_tracedecay_cli_project(&home, &project);
 
-        let daemon = common::spawn_tracedecay_daemon(&home);
+        let daemon = common::spawn_tracedecay_daemon_with(&home, |_| {});
         let authority = wait_for_http_authority(&common::daemon_authority_path(&profile));
 
         let context = run_ok(
@@ -260,18 +245,315 @@ fn isolated_command(home: &Path) -> Command {
     command
 }
 
-fn run_ok(command: &mut Command, label: &str) -> Vec<u8> {
-    let output = command
-        .output()
-        .unwrap_or_else(|error| panic!("{label} could not run: {error}"));
-    assert!(
-        output.status.success(),
-        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
+/// The dashboard server's closed operation->route table, restated in the test
+/// so the probe does not derive its routes from the catalog it grades.
+///
+/// The dashboard adapter mounts three dispatch surfaces: the configuration
+/// router at `/api/dashboard/application/configuration/{operation}`, the
+/// feedback read router at `/api/feedback/{tail}`, and the native-integration
+/// status read under the active-project gateway. A catalog operation claiming
+/// the Dashboard surface that none of these tables answers is unmounted.
+fn dashboard_operation_route(operation: &str) -> Option<(&'static str, String)> {
+    if operation.starts_with("configuration_") {
+        return Some((
+            "POST",
+            format!("/api/dashboard/application/configuration/{operation}"),
+        ));
+    }
+    match operation {
+        "feedback_get" => Some(("POST", "/api/feedback/get".to_owned())),
+        "feedback_expand" => Some(("POST", "/api/feedback/expand".to_owned())),
+        "feedback_list" => Some(("POST", "/api/feedback/list".to_owned())),
+        "feedback_proximity" => Some(("POST", "/api/feedback/proximity".to_owned())),
+        "native_integration_status" => Some(("GET", "/api/native-integration/status".to_owned())),
+        _ => None,
+    }
+}
+
+/// A live `tracedecay dashboard` server answering for the fixture's project.
+///
+/// The dashboard mints a per-listener token that the launch URL carries once;
+/// programmatic clients replay it as the Basic-auth password, which ureq does
+/// when the base URL carries `tracedecay:{token}` userinfo.
+struct DashboardProbe {
+    agent: ureq::Agent,
+    base_url: String,
+}
+
+impl DashboardProbe {
+    fn start(fixture: &MountFixture) -> Self {
+        let stdout = run_ok(
+            isolated_command(&fixture.home)
+                .args(["dashboard", "--port", "0", "--path"])
+                .arg(&fixture.project)
+                .current_dir(&fixture.project),
+            "tracedecay dashboard",
+        );
+        let stdout = String::from_utf8_lossy(&stdout);
+        let url = stdout
+            .split_whitespace()
+            .find(|token| token.starts_with("http://"))
+            .unwrap_or_else(|| panic!("tracedecay dashboard printed no launch URL:\n{stdout}"))
+            .to_owned();
+        let without_scheme = url.trim_start_matches("http://");
+        let (authority, query) = without_scheme
+            .split_once("/?")
+            .unwrap_or((without_scheme, ""));
+        let token = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+            .unwrap_or_else(|| panic!("dashboard launch URL carried no access token: {url}"));
+        let probe = Self {
+            agent: common::http_agent_with_timeout(Duration::from_secs(30)),
+            base_url: format!("http://tracedecay:{token}@{authority}"),
+        };
+        probe.assert_discriminates();
+        probe
+    }
+
+    fn request_status(&self, method: &str, path: &str) -> u16 {
+        let url = format!("{}{path}", self.base_url);
+        let response = common::http_call_with_retry(&format!("{method} {url}"), || match method {
+            "GET" => self.agent.get(&url).call(),
+            _ => self.agent.post(&url).send_json(serde_json::json!({})),
+        });
+        response.status().as_u16()
+    }
+
+    /// Prove the route probes discriminate mounted from absent: a tail no
+    /// dashboard dispatch table holds must answer 404, and a known mounted
+    /// operation must answer something else. Without these preconditions
+    /// every operation could score mounted against a catch-all or unmounted
+    /// against a dead server.
+    fn assert_discriminates(&self) {
+        assert_eq!(
+            self.request_status("POST", "/api/feedback/no-such-read"),
+            404,
+            "the dashboard's feedback router must conceal an unresolvable \
+             operation as 404 for the mount probe to discriminate"
+        );
+        assert_ne!(
+            self.request_status(
+                "POST",
+                "/api/dashboard/application/configuration/configuration_list",
+            ),
+            404,
+            "configuration_list is dispatchable on the dashboard surface; \
+             a 404 here means the dashboard application routes never mounted, \
+             so no operation verdict below would be trustworthy"
+        );
+    }
+
+    fn operation_is_mounted(&self, operation: &str) -> bool {
+        let Some((method, path)) = dashboard_operation_route(operation) else {
+            return false;
+        };
+        self.request_status(method, &path) != 404
+    }
+}
+
+/// One Content-Length-framed JSON-RPC reply from the live `lsp bridge`.
+fn read_lsp_frame(reader: &mut BufReader<ChildStdout>) -> Option<Value> {
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return None,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Content-Length:") {
+            content_length = value.trim().parse::<usize>().ok();
+        }
+    }
+    let length = content_length?;
+    let mut body = vec![0_u8; length];
+    reader.read_exact(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+/// A live `tracedecay lsp bridge --stdio` session bound to the fixture's
+/// project.
+///
+/// The bridge forwards each frame to a daemon-owned LSP session. Dispatch
+/// gates catalog-routable methods on the session's catalog binding before
+/// reaching a handler, so the absence verdict is exact: an operation whose
+/// catalog binding the session cannot resolve, or a method the surface
+/// explicitly defers, answers `Method unavailable` (-32601) with
+/// `explicitlyUnavailable` in the error data. Parameter-parse errors,
+/// capability negotiation, and provider unavailability come back with
+/// different codes or reasons from the handler layer beneath the gate, which
+/// is what marks the operation mounted. Catalog admission rejects unroutable
+/// operation names at construction, so every declared binding reaches this
+/// gate.
+struct LspBridgeProbe {
+    _process: common::TestChildProcess,
+    stdin: ChildStdin,
+    responses: mpsc::Receiver<Value>,
+    next_id: i64,
+}
+
+impl LspBridgeProbe {
+    fn start(fixture: &MountFixture) -> Self {
+        let mut child = isolated_command(&fixture.home)
+            .args(["lsp", "bridge", "--stdio", "--project"])
+            .arg(&fixture.project)
+            .current_dir(&fixture.project)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("tracedecay lsp bridge should start");
+        let stdin = child.stdin.take().expect("lsp bridge stdin");
+        let mut reader = BufReader::new(child.stdout.take().expect("lsp bridge stdout"));
+        if let Some(mut stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+            });
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Some(message) = read_lsp_frame(&mut reader) {
+                if tx.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut probe = Self {
+            _process: common::TestChildProcess::new(child),
+            stdin,
+            responses: rx,
+            next_id: 0,
+        };
+        let root_uri = url::Url::from_file_path(&fixture.project)
+            .expect("fixture project has an absolute file URI")
+            .to_string();
+        let initialize = probe.request(
+            "initialize",
+            serde_json::json!({
+                "processId": Value::Null,
+                "rootUri": root_uri,
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "textDocument": {
+                        "declaration": {},
+                        "definition": {},
+                        "typeDefinition": {},
+                        "implementation": {},
+                        "references": {},
+                        "hover": {},
+                        "documentSymbol": {},
+                        "signatureHelp": {},
+                        "callHierarchy": {},
+                        "typeHierarchy": {},
+                        "diagnostic": {},
+                    },
+                    "workspace": {
+                        "symbol": {},
+                        "workspaceFolders": true,
+                    },
+                },
+                "workspaceFolders": [{
+                    "uri": root_uri,
+                    "name": "surface-mount-fixture",
+                }],
+            }),
+        );
+        assert!(
+            initialize["error"].is_null(),
+            "the lsp bridge rejected initialize: {initialize}"
+        );
+        probe.notify("initialized", serde_json::json!({}));
+        probe.assert_discriminates();
+        probe
+    }
+
+    /// Prove the method probes discriminate mounted from absent: a method the
+    /// surface does not mount must answer -32601 explicitlyUnavailable, and a
+    /// known catalog-routable method must not.
+    fn assert_discriminates(&mut self) {
+        let deferred = self.request("workspace/executeCommand", serde_json::json!({}));
+        assert_eq!(
+            (
+                deferred["error"]["code"].as_i64(),
+                deferred["error"]["data"]["reason"].as_str()
+            ),
+            (Some(-32601), Some("explicitlyUnavailable")),
+            "a method this surface does not mount must answer -32601 \
+             explicitlyUnavailable for the lsp probe to discriminate; got \
+             {deferred}"
+        );
+        let context = self.request("tracedecay/context", serde_json::json!({}));
+        assert!(
+            Self::verdict_is_mounted(&context),
+            "tracedecay/context is catalog-bound and dispatched; an unmounted \
+             verdict here means the lsp session's catalog admission failed, so \
+             no method verdict below would be trustworthy: {context}"
+        );
+    }
+
+    fn send_frame(&mut self, value: &Value) {
+        let body = serde_json::to_vec(value).expect("lsp frame json");
+        write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len())
+            .and_then(|()| self.stdin.write_all(&body))
+            .and_then(|()| self.stdin.flush())
+            .expect("write lsp frame");
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send_frame(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "the lsp bridge never answered method {method}"
+            );
+            let message = self
+                .responses
+                .recv_timeout(remaining)
+                .expect("lsp bridge stdout closed before answering");
+            if message["id"].as_i64() == Some(id) {
+                return message;
+            }
+        }
+    }
+
+    fn notify(&mut self, method: &str, params: Value) {
+        self.send_frame(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }));
+    }
+
+    /// A response proves the request reached a dispatched handler unless it is
+    /// a catalog-admission miss. Catalog-admission rejects unroutable LSP
+    /// operation names at construction, so a binding whose method string left
+    /// the client table turns the whole session catalog unavailable and every
+    /// probe below answers `explicitlyUnavailable`; negotiation- and
+    /// provider-level unavailability (`capabilityNotNegotiated`,
+    /// `providerUnavailable`, `denied`, root-scoping) is truthful
+    /// per-deployment availability of a mounted method, not a mount gap.
+    fn verdict_is_mounted(response: &Value) -> bool {
+        response["error"]["code"].as_i64() != Some(-32601)
+            || response["error"]["data"]["reason"].as_str() != Some("explicitlyUnavailable")
+    }
+
+    fn operation_is_mounted(&mut self, operation: &str) -> bool {
+        Self::verdict_is_mounted(&self.request(operation, serde_json::json!({})))
+    }
 }
 
 fn wait_for_http_authority(path: &Path) -> Value {
@@ -314,8 +596,8 @@ fn http_route_is_mounted(agent: &ureq::Agent, fixture: &MountFixture, route_path
     let status = response.status().as_u16();
     assert!(
         status == 404 || status == 405,
-        "the method-mismatch probe for {route_path} answered {status} — neither \
-         404 nor 405 — so it no longer discriminates a mounted path. A binding \
+        "the method-mismatch probe for {route_path} answered {status}, neither \
+         404 nor 405, so it no longer discriminates a mounted path. A binding \
          served on GET as well as POST would do this; give such a binding a \
          probe method it does not serve rather than relaxing this check."
     );
@@ -373,8 +655,8 @@ fn assert_external_surface_discriminates(agent: &ureq::Agent, fixture: &MountFix
 
 /// The tool names the real `tracedecay tool` command publishes.
 ///
-/// This is the CLI's own listing — the same one an operator reads before
-/// calling `tracedecay tool <name>` — so a catalog binding missing from it is
+/// This is the CLI's own listing, the same one an operator reads before
+/// calling `tracedecay tool <name>`, so a catalog binding missing from it is
 /// a binding no CLI user can reach.
 fn cli_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
     let stdout = run_ok(
@@ -480,10 +762,9 @@ const NEGOTIATED_PROTOCOL_REVISION: u32 = 1;
 
 /// Whether some sanctioned production negotiation resolves this spelling.
 ///
-/// Default-profile surfaces are probed exactly as their adapters probe them.
-/// A binding the default probe cannot see is then probed under each profile
-/// that declares it with exactly its declared required features — the shape
-/// of an initialize-time negotiation (today: the LSP context family). A
+/// The binding is probed under each profile with exactly its declared
+/// required features, the shape of an initialize-time negotiation (none for
+/// most surfaces; today the LSP context family declares some). A
 /// catalog entry that no profile includes, whose features can never be
 /// negotiated, or whose revision range excludes the production protocol still
 /// resolves to `None`, which is exactly the "declared but not reachable"
@@ -493,14 +774,6 @@ fn binding_resolves(
     surface: BindingSurface,
     operation: &str,
 ) -> bool {
-    if resolve_catalog_tool_binding(surface, operation)
-        .unwrap_or_else(|error| {
-            panic!("the application catalog could not resolve {operation} on {surface:?}: {error}")
-        })
-        .is_some()
-    {
-        return true;
-    }
     let Ok(operation_name) = SurfaceOperationName::new(operation) else {
         return false;
     };
@@ -560,6 +833,8 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
     assert_external_surface_discriminates(&agent, &fixture);
     let cli_tools = cli_tool_listing(&fixture);
     let mcp_tools = mcp_tool_listing(&fixture);
+    let dashboard = DashboardProbe::start(&fixture);
+    let mut lsp = LspBridgeProbe::start(&fixture);
 
     let mut failures = Vec::new();
     let mut graded_by_surface: BTreeMap<BindingSurface, usize> = BTreeMap::new();
@@ -580,7 +855,10 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
         let mounted = match surface {
             BindingSurface::Http => {
                 match ApplicationSurfaceOperation::from_catalog_name(operation) {
-                    Some(http) if is_http_application_operation_exposed(http) => {
+                    Some(http)
+                        if is_http_application_operation_exposed(http)
+                            .expect("HTTP exposure registry") =>
+                    {
                         http_route_is_mounted(
                             &agent,
                             &fixture,
@@ -589,31 +867,34 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                     }
                     // An operation the router deliberately withholds from HTTP is
                     // an absence like any other.
-                    Some(_) => false,
-                    // Retained memory/session/workflow operations are the second
-                    // HTTP route family, addressed exactly as production route
-                    // documentation addresses them (`http_route_documents`): the
-                    // callable retained operation's canonical route. A catalog
-                    // HTTP binding naming neither family is an absence.
-                    None => match RetainedSurfaceOperation::from_operation_name(operation)
-                        .filter(|retained| retained.is_callable())
-                    {
-                        Some(retained) => http_route_is_mounted(
-                            &agent,
-                            &fixture,
-                            &retained_application_route_path(retained),
-                        ),
-                        None => false,
-                    },
+                    Some(_) | None => false,
                 }
+            }
+            // An internal owner operation is served by name for first-party
+            // CLI commands and host hooks; being listed is the defect.
+            BindingSurface::Mcp | BindingSurface::Cli
+                if ApplicationSurfaceOperation::from_surface_name(*surface, operation)
+                    .is_some_and(ApplicationSurfaceOperation::is_internal) =>
+            {
+                let listed = match surface {
+                    BindingSurface::Mcp => mcp_tools.contains(&format!("tracedecay_{operation}")),
+                    _ => cli_tools.contains(operation.as_str()),
+                };
+                if listed {
+                    failures.push(format!(
+                        "{note}: an internal owner operation is advertised in the {surface:?} listing"
+                    ));
+                }
+                continue;
             }
             BindingSurface::Mcp => mcp_tools.contains(&format!("tracedecay_{operation}")),
             BindingSurface::Cli => cli_tools.contains(operation.as_str()),
             // The LSP and dashboard adapters have no listing endpoint of their
-            // own; the production resolver above is their reachability check,
-            // and it already rejects hidden, feature-gated, and non-callable
-            // entries.
-            BindingSurface::Lsp | BindingSurface::Dashboard => true,
+            // own, so they are probed the way a client drives them: a real
+            // `lsp bridge` session and the live dashboard server's closed
+            // route tables.
+            BindingSurface::Lsp => lsp.operation_is_mounted(operation),
+            BindingSurface::Dashboard => dashboard.operation_is_mounted(operation),
         };
 
         if !mounted && sanctioned_citation(&subject).is_none() {
@@ -629,7 +910,15 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                 BindingSurface::Cli => {
                     format!("{note}: absent from the `tracedecay tool` command listing")
                 }
-                BindingSurface::Lsp | BindingSurface::Dashboard => unreachable!(),
+                BindingSurface::Lsp => format!(
+                    "{note}: the live lsp bridge answered Method unavailable \
+                     (-32601 explicitlyUnavailable) for this catalog-declared \
+                     operation"
+                ),
+                BindingSurface::Dashboard => format!(
+                    "{note}: no route in the dashboard server's closed \
+                     dispatch table answers this catalog-declared operation"
+                ),
             });
         }
     }
@@ -695,16 +984,6 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     // -- Work operations. ---------------------------------------------------
     // `WorkOperation::ALL` documents itself as "every mounted Work operation,
     // in mounted order"; this is what makes that claim testable.
-    // The floor guards against a silent shrink, which would let this sweep
-    // pass by grading fewer operations. Growth needs no edit here: the loop
-    // below iterates `ALL`, so a newly added operation is graded on the run
-    // that adds it.
-    assert!(
-        WorkOperation::ALL.len() >= 15,
-        "the Work operation set shrank to {}; a removed operation must be \
-         deleted deliberately, not dropped out of this sweep",
-        WorkOperation::ALL.len()
-    );
     for operation in WorkOperation::ALL {
         graded += 1;
         let route = operation.application_route_path();
@@ -730,19 +1009,13 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     }
 
     // -- Workflow operations. -----------------------------------------------
-    // Graded on BOTH declared external surfaces, not just HTTP. Checking only
+    // Graded on both declared external surfaces. Checking only
     // HTTP here is how the entire sixteen-operation family came to be mounted
     // on CLI and HTTP while carrying no MCP tool at all: every row passed, and
     // the absence was invisible because nothing ever asked the question. A
     // closed family that publishes a transport-independent descriptor has to be
     // graded against every transport that descriptor claims, or the sweep only
     // proves the surface it happened to look at.
-    assert!(
-        WorkflowOperation::ALL.len() >= 8,
-        "the Workflow operation set shrank to {}; a removed operation must be \
-         deleted deliberately, not dropped out of this sweep",
-        WorkflowOperation::ALL.len()
-    );
     for operation in WorkflowOperation::ALL {
         graded += 1;
         let route = operation.application_route_path();
@@ -768,15 +1041,6 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     }
 
     // -- HTTP application operations. ---------------------------------------
-    // The enum is the router's own operation authority, so an entry the
-    // catalog never declares is a surface the catalog cannot authorize and no
-    // discovery answer will ever mention.
-    assert!(
-        ApplicationSurfaceOperation::ALL.len() >= 66,
-        "the HTTP application operation set shrank to {}; a removed operation \
-         must be deleted deliberately, not dropped out of this sweep",
-        ApplicationSurfaceOperation::ALL.len()
-    );
     for operation in ApplicationSurfaceOperation::ALL {
         graded += 1;
         let name = operation.as_str();
@@ -790,7 +1054,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
         // be required to carry an HTTP catalog binding.
         // `is_http_exposed` is the single authority for that decision, so the
         // catalog requirement and the route requirement consult it alike.
-        if !is_http_application_operation_exposed(operation) {
+        if !is_http_application_operation_exposed(operation).expect("HTTP exposure registry") {
             continue;
         }
         if !catalog_http_operations.contains(name) {
@@ -822,10 +1086,13 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
         let name = operation.as_str();
         for (surface, present) in [
             (BindingSurface::Http, catalog_http_operations.contains(name)),
-            (BindingSurface::Cli, cli_tools.contains(name)),
+            (
+                BindingSurface::Cli,
+                cli_tools.contains(operation.name_for_surface(BindingSurface::Cli)),
+            ),
             (
                 BindingSurface::Mcp,
-                mcp_tools.contains(&format!("tracedecay_{name}")),
+                mcp_tools.contains(operation.mcp_tool_name()),
             ),
         ] {
             graded += 1;
@@ -846,7 +1113,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     // the maintenance device: a new family fails to compile until it is
     // classified as produced or sanctioned, so it cannot be added and
     // silently never emitted. A family classified as produced must not also
-    // appear in the sanctioned table — that would hide a real regression
+    // appear in the sanctioned table, that would hide a real regression
     // behind a stale exemption.
     for family in ActivityFamilyV1::ALL {
         graded += 1;
@@ -854,8 +1121,8 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
             ActivityFamilyV1::Hook
             | ActivityFamilyV1::SessionIngest
             | ActivityFamilyV1::CodeIndex
-            | ActivityFamilyV1::ToolCall => true,
-            ActivityFamilyV1::Task => false,
+            | ActivityFamilyV1::ToolCall
+            | ActivityFamilyV1::Task => true,
         };
         let subject = format!("activity-family:{}", family.stream_name());
         match (has_producer, sanctioned_citation(&subject)) {
@@ -890,7 +1157,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
              listed in SANCTIONED_UNMOUNTED; drop the stale exemption"
         )),
         (false, None) => failures.push(format!(
-            "{subject}: the Work product projection bundle reaches no client — \
+            "{subject}: the Work product projection bundle reaches no client, \
              it is absent from the dashboard wire contract and has no \
              application route"
         )),

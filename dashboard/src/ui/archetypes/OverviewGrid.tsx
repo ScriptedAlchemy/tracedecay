@@ -6,7 +6,7 @@ import { Panel } from '../instrument.tsx';
  * strip; no panel renders a computed grade.
  *
  * The gutter is one grid cell so panels land on the same rhythm the graticule
- * and the readout bars use — the whole console is ruled to a single module. */
+ * and the readout bars use, the whole console is ruled to a single module. */
 export function OverviewGrid({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <div

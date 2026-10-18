@@ -1,0 +1,406 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
+
+use tracedecay_code_index::production::{
+    CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+};
+use tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_lock;
+
+use super::*;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+
+struct BlockingNthControl {
+    checks: AtomicUsize,
+    block_on: usize,
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    released: Mutex<bool>,
+    release: Condvar,
+}
+
+impl BlockingNthControl {
+    fn new(block_on: usize) -> (Arc<Self>, std::sync::mpsc::Receiver<()>) {
+        let (entered, observed) = std::sync::mpsc::channel();
+        (
+            Arc::new(Self {
+                checks: AtomicUsize::new(0),
+                block_on,
+                entered: Mutex::new(Some(entered)),
+                released: Mutex::new(false),
+                release: Condvar::new(),
+            }),
+            observed,
+        )
+    }
+
+    fn release(&self) {
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.release.notify_all();
+    }
+}
+
+impl CodeIndexExecutionControlV1 for BlockingNthControl {
+    fn is_cancelled(&self) -> bool {
+        let check = self.checks.fetch_add(1, Ordering::AcqRel) + 1;
+        if check != self.block_on {
+            return false;
+        }
+        if let Some(entered) = self
+            .entered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            entered.send(()).expect("signal blocked admission");
+        }
+        let mut released = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*released {
+            released = self
+                .release
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
+struct ObservingControl(Mutex<Option<std::sync::mpsc::Sender<()>>>);
+
+impl ObservingControl {
+    fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>) {
+        let (entered, observed) = std::sync::mpsc::channel();
+        (Arc::new(Self(Mutex::new(Some(entered)))), observed)
+    }
+}
+
+impl CodeIndexExecutionControlV1 for ObservingControl {
+    fn is_cancelled(&self) -> bool {
+        if let Some(entered) = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            entered.send(()).expect("signal follower flight wait");
+        }
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
+struct SchedulerHold {
+    release: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SchedulerHold {
+    async fn acquire(registry: &CodeIndexSchedulerRegistryV1, project_root: &Path) -> Self {
+        let scheduler = registry
+            .scheduler_handle(project_root)
+            .await
+            .expect("mounted scheduler");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let _scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held_tx.send(()).expect("signal scheduler hold");
+            released.recv().expect("release scheduler hold");
+        });
+        held_rx.recv().expect("scheduler is held");
+        Self {
+            release,
+            thread: Some(thread),
+        }
+    }
+
+    fn release(mut self) {
+        self.release.send(()).expect("release scheduler");
+        self.thread
+            .take()
+            .expect("scheduler holder")
+            .join()
+            .expect("scheduler holder joins");
+    }
+}
+
+fn fixture() -> GitFixture {
+    let fixture = GitFixture::new(
+        r#"import type { PublicWidget } from "pkg";
+export function GenerationAnchor(value: PublicWidget) { return value; }
+"#,
+    );
+    write_types_package(
+        fixture.path(),
+        "pkg",
+        "export interface PublicWidget { value: string }\n",
+    );
+    fixture
+}
+
+fn assert_publication_error(error: CodeIndexSchedulerErrorV1) {
+    let CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(
+        CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(detail),
+    )) = &error
+    else {
+        panic!(
+            "coalesced failure must stay in the scheduler publication family, not an EISDIR misclass: {error:?}"
+        );
+    };
+    assert!(
+        detail.contains("not a regular file"),
+        "a directory pointer slot is publication corruption, got {detail}"
+    );
+    assert!(
+        !detail.contains("Is a directory") && !detail.contains("os error 21"),
+        "publication corruption must not carry the raw EISDIR OS error: {detail}"
+    );
+}
+
+/// Hold the only background permit once no pass is in flight.
+///
+/// Text seating keeps `reconcile_in_progress` after it drops the scheduler
+/// mutex, and that pass can still rename a valid active pointer. A truncated
+/// pointer written in that window is not a closed fault. Occupying the permit
+/// while the owner has not entered its pass stops that rewrite.
+async fn hold_idle_background_admission(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) -> tokio::sync::OwnedSemaphorePermit {
+    let admission = registry.background_reconcile_admission();
+    wait_for_owner(registry, project_root, || {
+        let admission = Arc::clone(&admission);
+        async move {
+            if registry.memory_stats().await.reconciling_worktrees != 0 {
+                return None;
+            }
+            let permit = admission
+                .acquire_owned()
+                .await
+                .expect("background reconcile admission remains open");
+            (registry.memory_stats().await.reconciling_worktrees == 0).then_some(permit)
+        }
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn aborted_flight_owner_wakes_follower_and_allows_a_fresh_owner() {
+    let fixture = fixture();
+    let store = TempDir::new().expect("store root");
+    let registry = Arc::new(mount(fixture.path(), &store, 1).await);
+    let baseline = latest(&registry, fixture.path()).await;
+    let request = request_for(&baseline, "pkg");
+    let hold = SchedulerHold::acquire(&registry, fixture.path()).await;
+    let (owner_control, owner_entered) = BlockingNthControl::new(4);
+
+    let owner_registry = Arc::clone(&registry);
+    let owner_root = fixture.path().to_path_buf();
+    let owner_request = request.clone();
+    let owner_control_for_task = Arc::clone(&owner_control);
+    let owner = tokio::spawn(async move {
+        index_dependency(
+            &owner_registry,
+            &owner_root,
+            owner_request,
+            owner_control_for_task,
+        )
+        .await
+    });
+    owner_entered
+        .recv()
+        .expect("owner inserts its flight and starts the blocked build");
+
+    let follower_registry = Arc::clone(&registry);
+    let follower_root = fixture.path().to_path_buf();
+    let follower_request = request.clone();
+    let (follower_control, follower_entered) = ObservingControl::new();
+    let follower = tokio::spawn(async move {
+        index_dependency(
+            &follower_registry,
+            &follower_root,
+            follower_request,
+            follower_control,
+        )
+        .await
+    });
+    follower_entered
+        .recv()
+        .expect("follower joins the existing flight");
+    owner.abort();
+    owner_control.release();
+    assert!(
+        owner
+            .await
+            .expect_err("owner task is aborted")
+            .is_cancelled()
+    );
+    hold.release();
+
+    let follower_error = follower
+        .await
+        .expect("follower task joins")
+        .expect_err("dropped owner completes its flight as a refusal");
+    assert_refusal(
+        follower_error,
+        CodeIndexIgnoredDependencyRefusalV1::Cancelled,
+    );
+    assert_eq!(
+        latest(&registry, fixture.path())
+            .await
+            .generation()
+            .manifest()
+            .generation_id,
+        baseline.generation().manifest().generation_id,
+        "a pre-publication owner abort must not schedule a superseding generation"
+    );
+
+    index_dependency(&registry, fixture.path(), request, StaticControl::active())
+        .await
+        .expect("the cleaned flight admits a later fresh owner");
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
+    let fixture = fixture();
+    let store = TempDir::new().expect("store root");
+    let registry = Arc::new(mount(fixture.path(), &store, 1).await);
+    let baseline = latest(&registry, fixture.path()).await;
+    let request = request_for(&baseline, "pkg");
+    // A background pass that reaches the faulted store resets it, deleting
+    // the injected directory, so the owner refuses the missing publication
+    // as `StaleGeneration`. The park turns every later wake away before it
+    // queues for the permit. A pass already running holds the build gate
+    // until it ends, so a refused admission through that gate proves none
+    // remains.
+    assert!(
+        registry
+            .plant_terminal_publication_authority_park_for_test(
+                fixture.path(),
+                "only the admission owner may observe the injected pointer fault",
+            )
+            .await
+    );
+    let mut unverified = request.clone();
+    unverified.verified_imports[0].imported_name = Some("FabricatedWidget".to_owned());
+    assert_refusal(
+        index_dependency(
+            &registry,
+            fixture.path(),
+            unverified,
+            StaticControl::active(),
+        )
+        .await
+        .expect_err("fabricated import evidence is refused behind the build gate"),
+        CodeIndexIgnoredDependencyRefusalV1::UnverifiedImportEvidence,
+    );
+    let idle_admission = hold_idle_background_admission(&registry, fixture.path()).await;
+    registry.clear_pending_wake_for_scope(&request.scope).await;
+    let hold = SchedulerHold::acquire(&registry, fixture.path()).await;
+    let (owner_control, owner_entered) = BlockingNthControl::new(4);
+
+    let owner_registry = Arc::clone(&registry);
+    let owner_root = fixture.path().to_path_buf();
+    let owner_request = request.clone();
+    let owner_control_for_task = Arc::clone(&owner_control);
+    let owner = tokio::spawn(async move {
+        index_dependency(
+            &owner_registry,
+            &owner_root,
+            owner_request,
+            owner_control_for_task,
+        )
+        .await
+    });
+    owner_entered
+        .recv()
+        .expect("owner inserts its flight and starts the blocked build");
+    let follower_registry = Arc::clone(&registry);
+    let follower_root = fixture.path().to_path_buf();
+    let (follower_control, follower_entered) = ObservingControl::new();
+    let follower = tokio::spawn(async move {
+        index_dependency(
+            &follower_registry,
+            &follower_root,
+            request,
+            follower_control,
+        )
+        .await
+    });
+    follower_entered
+        .recv()
+        .expect("follower joins the existing flight");
+
+    let scoped_store =
+        tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
+            store.path(),
+            &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
+        );
+    let pointer_path = scoped_store.join("active-code-generation-v1.json");
+    // Writers rename a temporary over the active pointer while holding the
+    // generation-store lock. A truncated file is not a closed fault: a pass
+    // that already read a valid pointer can rename it back. A directory cannot
+    // be renamed over. Taking the lock first means no writer is mid-transaction
+    // when the slot stops being a regular file.
+    let pointer_bytes = {
+        let store_lock = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(lock) = try_acquire_code_generation_store_lock(&scoped_store)
+                    .expect("generation store lock")
+                {
+                    break lock;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("no generation-store writer is mid-transaction");
+        let pointer_bytes = std::fs::read(&pointer_path).expect("read active pointer");
+        // `rename(2)` replaces a truncated file with a valid pointer. A
+        // directory cannot be renamed over, so the fault stays closed. The
+        // scheduler must report publication corruption, not the EISDIR that
+        // read and rename return for that directory.
+        std::fs::remove_file(&pointer_path).expect("remove active pointer");
+        std::fs::create_dir(&pointer_path).expect("replace active pointer with a directory");
+        drop(store_lock);
+        pointer_bytes
+    };
+    drop(idle_admission);
+    owner_control.release();
+    hold.release();
+
+    let owner_error = owner
+        .await
+        .expect("owner task joins")
+        .expect_err("owner publication fails closed");
+    let follower_error = follower
+        .await
+        .expect("follower task joins")
+        .expect_err("follower publication fails closed");
+    assert_publication_error(owner_error);
+    assert_publication_error(follower_error);
+    assert!(
+        std::fs::symlink_metadata(&pointer_path)
+            .expect("faulted pointer remains")
+            .is_dir(),
+        "publication must not replace a directory pointer it did not observe"
+    );
+
+    std::fs::remove_dir_all(&pointer_path).expect("remove faulted pointer node");
+    std::fs::write(pointer_path, pointer_bytes).expect("restore active pointer");
+    registry.shutdown().await;
+}

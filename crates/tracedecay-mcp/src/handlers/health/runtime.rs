@@ -1,0 +1,342 @@
+//! `tracedecay_runtime`, daemon, store, and session-observation health, including the optional doctor report.
+
+use std::time::Duration;
+
+use serde_json::{Value, json};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
+
+use tracedecay_contracts::doctor::LanguageServerReadV1;
+use tracedecay_contracts::retrieval::{
+    RuntimeDoctorReportV1, RuntimeResultV1, RuntimeSurfaceRequestV1,
+};
+
+use crate::{McpDoctorReportV1, McpToolContext};
+
+/// Bound for the session-temporal doctor probe so a wedged sessions DB cannot
+/// monopolize a `tracedecay_runtime` request indefinitely.
+const SESSION_TEMPORAL_HEALTH_BUDGET: Duration = Duration::from_secs(8);
+
+async fn session_temporal_health_value(
+    project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> Value {
+    match project_session_db {
+        Some(db) => match native_runtime::timeout(
+            SESSION_TEMPORAL_HEALTH_BUDGET,
+            SessionTemporalAccess::new(db).session_temporal_doctor_health(),
+        )
+        .await
+        {
+            Ok(health) => serde_json::to_value(health).unwrap_or_else(|_| {
+                json!({
+                    "status": "unavailable",
+                    "findings": [],
+                    "message": "session temporal health serialization failed",
+                })
+            }),
+            Err(TimeoutError::Elapsed) => json!({
+                "status": "timed_out",
+                "findings": [],
+                "message": "session temporal health exceeded deadline",
+            }),
+            Err(TimeoutError::TimerUnavailable(error)) => json!({
+                "status": "unavailable",
+                "findings": [],
+                "message": format!("session temporal health deadline is unenforceable: {error}"),
+            }),
+        },
+        None => json!({
+            "status": "unavailable",
+            "findings": [],
+        }),
+    }
+}
+
+/// Runs the exhaustive observation-authority audit for the routed project
+/// owner.
+///
+/// Returns `(ok, typed reason, observed detail)`. `ok` is tri-state: `Some(true)`
+/// only when the audit ran and passed, `Some(false)` when it ran and failed, and
+/// `None` when it could not run or did not finish inside its budget. The typed
+/// reason uses the vocabulary Doctor already understands
+/// (`authority_invariant_failed`, `authority_store_unavailable`,
+/// `authority_audit_budget_exceeded`) so the CLI can classify without parsing
+/// the free-form detail.
+async fn observation_authority_audit(
+    registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> (Option<bool>, Option<&'static str>, Option<String>) {
+    match registry {
+        Some(registry) => {
+            let audit = registry.observation_authority_audit().await;
+            (audit.verdict(), audit.reason(), audit.detail())
+        }
+        // This handler is only reached with a routed project owner, so a missing
+        // handle means the registry could not be attached here; the daemon core
+        // route is the producer that can distinguish a store that is absent on
+        // disk (`authority_store_missing`).
+        None => (
+            None,
+            Some("authority_store_unavailable"),
+            Some("authoritative global registry is unavailable".to_string()),
+        ),
+    }
+}
+
+/// Registered-runtime implementation of literal workspace-placeholder paths
+/// over a registered read snapshot.
+async fn literal_workspace_placeholder_transcript_paths(
+    conn: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
+    limit: usize,
+) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT DISTINCT transcript_path FROM sessions
+             WHERE transcript_path IS NOT NULL
+               AND transcript_path != ''
+               AND (transcript_path LIKE '%${workspaceFolder}%'
+                    OR transcript_path LIKE '%$workspaceFolder%')
+             ORDER BY transcript_path
+             LIMIT ?1",
+            tracedecay_runtime_core::db::engine::params![i64::try_from(limit).unwrap_or(i64::MAX)],
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    while let Ok(Some(row)) = rows.next().await {
+        if let Ok(path) = row.get::<String>(0) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn runtime_doctor_report(report: McpDoctorReportV1<'_>) -> RuntimeDoctorReportV1 {
+    match report {
+        McpDoctorReportV1::Read(admitted) => RuntimeDoctorReportV1::Observed {
+            report: admitted.report.clone(),
+            table_growth_evidence: admitted.table_growth_evidence.clone(),
+            schema_convergences: admitted.schema_convergences.clone(),
+            language_servers: admitted.language_servers.clone(),
+        },
+        McpDoctorReportV1::ReadFailed => RuntimeDoctorReportV1::Unknown {
+            table_growth_evidence: Vec::new(),
+            schema_convergences: Vec::new(),
+            language_servers: LanguageServerReadV1::Unknown,
+        },
+        McpDoctorReportV1::NotAttached => RuntimeDoctorReportV1::Unsupported {
+            table_growth_evidence: Vec::new(),
+            schema_convergences: Vec::new(),
+            language_servers: LanguageServerReadV1::Unsupported,
+        },
+    }
+}
+
+pub async fn collect_database_snapshot(
+    ctx: &McpToolContext<'_>,
+    include_integrity: bool,
+    generation_census: Option<
+        &tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot,
+    >,
+) -> Result<tracedecay_runtime_core::runtime_telemetry::DatabaseSnapshot> {
+    let database = ctx.graph_database();
+    let db_path = ctx.graph_db_path();
+    let store_runtime = ctx.store_runtime();
+    let collected = tracedecay_runtime_core::store_telemetry::collect_store_telemetry(
+        database,
+        ctx.project_root().to_path_buf(),
+        db_path.to_path_buf(),
+        include_integrity,
+    )
+    .await?;
+    let generation_census = generation_census.cloned().unwrap_or(
+        tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+            reason: tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+        },
+    );
+    Ok(
+        tracedecay_runtime_core::runtime_telemetry::DatabaseSnapshot::from_collected(
+            collected,
+            tracedecay_runtime_core::runtime_telemetry::read_dirty_marker(
+                &tracedecay_runtime_core::runtime_telemetry::with_suffix(db_path, ".dirty"),
+            ),
+            generation_census,
+            tracedecay_runtime_core::runtime_telemetry::RuntimeRegistrySnapshot::from_projection(
+                store_runtime.runtime_telemetry(),
+            ),
+        ),
+    )
+}
+
+async fn collect_runtime_snapshot(
+    ctx: &McpToolContext<'_>,
+    include_integrity: bool,
+    tracedecay_version: &str,
+) -> Result<tracedecay_runtime_core::runtime_telemetry::RuntimeSnapshot> {
+    tracedecay_runtime_core::runtime_telemetry::read_cached_process_sample();
+    let database =
+        collect_database_snapshot(ctx, include_integrity, ctx.generation_census()).await?;
+    let process = tracedecay_runtime_core::runtime_telemetry::read_cached_process_sample_at_response_boundary()
+        .await;
+    Ok(
+        tracedecay_runtime_core::runtime_telemetry::RuntimeSnapshot {
+            captured_at: tracedecay_runtime_core::runtime_telemetry::unix_epoch_secs()?,
+            tracedecay_version: tracedecay_version.to_owned(),
+            host_os: std::env::consts::OS.to_owned(),
+            process,
+            database,
+        },
+    )
+}
+
+/// Surfaces process and database telemetry so users hitting unexpected
+/// CPU/RAM pressure can attach a structured snapshot to a bug report.
+#[tracing::instrument(name = "mcp.health.runtime.total", level = "trace", skip_all)]
+pub async fn compute_runtime(
+    ctx: &McpToolContext<'_>,
+    request: &RuntimeSurfaceRequestV1,
+    registry: Option<&RegisteredGlobalDb>,
+    tracedecay_version: &str,
+) -> Result<RuntimeResultV1> {
+    let authority_audit = request.authority_audit;
+    let snap = tracing::Instrument::instrument(
+        collect_runtime_snapshot(ctx, authority_audit, tracedecay_version),
+        tracing::trace_span!("mcp.health.runtime.telemetry"),
+    )
+    .await?;
+    // A snapshot that cannot be serialized is a contract bug, not an empty
+    // status: swallowing it into `{}` made doctor report "omitted database
+    // telemetry" with no trace of the cause.
+    let serialization_error = |error: serde_json::Error| TraceDecayError::Config {
+        message: format!("runtime telemetry snapshot could not be serialized: {error}"),
+    };
+    let mut database = serde_json::to_value(&snap.database).map_err(serialization_error)?;
+    let mut runtime = RuntimeResultV1 {
+        captured_at: snap.captured_at,
+        tracedecay_version: snap.tracedecay_version,
+        host_os: snap.host_os,
+        process: serde_json::to_value(&snap.process).map_err(serialization_error)?,
+        database: Value::Null,
+        session_temporal_health: None,
+        cursor_session_ingest: None,
+        cursor_session_placeholder_paths: None,
+        doctor_report: None,
+    };
+    // Doctor historically keys temporal health off `authority_audit`. Keep that
+    // coupling, and also allow an explicit independent opt-in.
+    let include_session_temporal_health = authority_audit || request.session_temporal_health;
+    if include_session_temporal_health {
+        let (authority, temporal) = tokio::join!(
+            async {
+                if authority_audit {
+                    Some(
+                        tracing::Instrument::instrument(
+                            observation_authority_audit(registry),
+                            tracing::trace_span!("mcp.health.runtime.authority_audit"),
+                        )
+                        .await,
+                    )
+                } else {
+                    None
+                }
+            },
+            tracing::Instrument::instrument(
+                session_temporal_health_value(
+                    ctx.authorized_project_session_db()
+                        .map(|(lease, _)| lease.as_ref()),
+                ),
+                tracing::trace_span!("mcp.health.runtime.session_temporal")
+            )
+        );
+        if let Some((authority_audit_ok, authority_audit_reason, authority_audit_error)) = authority
+            && let Some(database) = database.as_object_mut()
+        {
+            database.insert("authority_audit_ok".to_string(), json!(authority_audit_ok));
+            database.insert(
+                "authority_audit_reason".to_string(),
+                json!(authority_audit_reason),
+            );
+            database.insert(
+                "authority_audit_error".to_string(),
+                json!(authority_audit_error),
+            );
+        }
+        runtime.session_temporal_health = Some(temporal);
+    }
+    runtime.database = database;
+    if request.session_ingest_health {
+        match ctx.authorized_project_session_db() {
+            Some((lease, _)) => {
+                let db = lease.as_ref();
+                runtime.cursor_session_ingest = Some(
+                    match tracing::Instrument::instrument(
+                        db.cursor_session_ingest_health(),
+                        tracing::trace_span!("mcp.health.runtime.session_ingest"),
+                    )
+                    .await
+                    {
+                        Ok(health) => serde_json::to_value(health).map_err(serialization_error)?,
+                        Err(error) => json!({
+                            "status": "unavailable",
+                            "reason": "session_ingest_query_failed",
+                            "message": error,
+                        }),
+                    },
+                );
+                runtime.cursor_session_placeholder_paths = Some(
+                    match tracing::Instrument::instrument(
+                        db.read_snapshot(),
+                        tracing::trace_span!("mcp.health.runtime.session_snapshot"),
+                    )
+                    .await
+                    {
+                        Ok(snapshot) => {
+                            tracing::Instrument::instrument(
+                                literal_workspace_placeholder_transcript_paths(&snapshot, 10),
+                                tracing::trace_span!("mcp.health.runtime.placeholder_paths"),
+                            )
+                            .await
+                        }
+                        Err(_) => Vec::new(),
+                    },
+                );
+            }
+            None => {
+                runtime.cursor_session_ingest = Some(json!({
+                    "status": "unavailable",
+                    "reason": "session_store_denied",
+                    "message": "this request is not authorized to read the admitted project session store",
+                }));
+            }
+        }
+    }
+    if request.doctor_report {
+        runtime.doctor_report = Some(runtime_doctor_report(ctx.doctor_report()));
+    }
+    Ok(runtime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_doctor_report_is_typed_unsupported_without_reader() {
+        assert_eq!(
+            serde_json::to_value(runtime_doctor_report(McpDoctorReportV1::NotAttached))
+                .expect("doctor report serializes"),
+            json!({
+                "kind": "unsupported",
+                "table_growth_evidence": [],
+                "schema_convergences": [],
+                "language_servers": { "kind": "unsupported" },
+            })
+        );
+    }
+}

@@ -3,22 +3,18 @@ import type {
   WorkflowDefinition,
   WorkflowDefinitionDisposition,
   WorkflowRunProjection,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, scopeWritable, useScope } from '../../data/scope/store.ts';
-import { callWork, type WorkResult } from '../work/workApi.ts';
+import { callWork, workResultInvalidatesReads, type WorkResult } from '../work/workApi.ts';
+import type { WorkflowLifecycleAction } from './workflowLedger.ts';
 import {
   WORKFLOW_ACTIVATE_DEFINITION_ROUTE,
+  WORKFLOW_DEFINITION_HISTORY_ROUTE,
   WORKFLOW_GET_RUN_ROUTE,
   WORKFLOW_LIST_DEFINITIONS_ROUTE,
   WORKFLOW_REJECT_DEFINITION_ROUTE,
   WORKFLOW_RETIRE_DEFINITION_ROUTE,
 } from './workflowRoutes.ts';
-
-/**
- * The reads and lifecycle commands behind the Workflows workspace. Every call
- * goes through the same application envelope walker the Work surface uses
- * (`callWork`) and the same `scopedUrl` project-gateway rewrite.
- */
 
 function workflowQueryKey(scope: string, ...parts: readonly (string | number)[]) {
   return ['workflow', scope, ...parts] as const;
@@ -29,11 +25,30 @@ export function useWorkflowDefinitions() {
   const key = scopeKey(scope);
   return useQuery<WorkResult<WorkflowDefinition[]>>({
     queryKey: workflowQueryKey(key, 'list-definitions'),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORKFLOW_LIST_DEFINITIONS_ROUTE,
         {},
         scopedUrl(scope, WORKFLOW_LIST_DEFINITIONS_ROUTE.path),
+        signal,
+      ),
+  });
+}
+
+/** The version track of one definition identity; disabled until one is
+ * selected. */
+export function useWorkflowDefinitionHistory(definitionId: string | null) {
+  const scope = useScope((state) => state.scope);
+  const key = scopeKey(scope);
+  return useQuery<WorkResult<WorkflowDefinition[]>>({
+    queryKey: workflowQueryKey(key, 'definition-history', definitionId ?? ''),
+    enabled: definitionId !== null,
+    queryFn: ({ signal }) =>
+      callWork(
+        WORKFLOW_DEFINITION_HISTORY_ROUTE,
+        { definition_id: definitionId ?? '' },
+        scopedUrl(scope, WORKFLOW_DEFINITION_HISTORY_ROUTE.path),
+        signal,
       ),
   });
 }
@@ -45,18 +60,17 @@ export function useWorkflowRun(runId: string | null) {
   return useQuery<WorkResult<WorkflowRunProjection>>({
     queryKey: workflowQueryKey(key, 'get-run', runId ?? ''),
     enabled: runId !== null,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORKFLOW_GET_RUN_ROUTE,
         { run_id: runId ?? '' },
         scopedUrl(scope, WORKFLOW_GET_RUN_ROUTE.path),
+        signal,
       ),
   });
 }
 
-export type WorkflowLifecycleAction = 'activate' | 'retire' | 'reject';
-
-export interface WorkflowLifecycleCommand {
+interface WorkflowLifecycleCommand {
   readonly action: WorkflowLifecycleAction;
   readonly definitionId: string;
   readonly definitionVersion: number;
@@ -79,16 +93,12 @@ function lifecycleRoute(action: WorkflowLifecycleAction) {
 }
 
 /** The refusal a lifecycle command outside the writable scope reports without
- * issuing a request — the same `locked` reading Work commands answer, because
+ * issuing a request, the same `locked` reading Work commands answer, because
  * the gateway rule it repeats is the same one (`scopeWritable`). */
 function notWritable(reason: string): WorkResult<WorkflowDefinitionDisposition> {
   return { outcome: 'refused', state: 'locked', detail: reason };
 }
 
-/** One compare-and-swap lifecycle transition; resolves to the daemon's own
- * `WorkResult` and re-reads the definitions list afterwards. A scope the
- * gateway serves read-only is refused here without dispatching, exactly as
- * Work commands are. */
 export function useWorkflowLifecycle() {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
@@ -110,8 +120,12 @@ export function useWorkflowLifecycle() {
         scopedUrl(scope, route.path),
       );
     },
-    onSettled: () => {
+    onSuccess: (result, command) => {
+      if (!workResultInvalidatesReads(result)) return;
       void client.invalidateQueries({ queryKey: workflowQueryKey(key, 'list-definitions') });
+      void client.invalidateQueries({
+        queryKey: workflowQueryKey(key, 'definition-history', command.definitionId),
+      });
     },
   });
 }

@@ -12,70 +12,91 @@ include = [
     "/fixtures/**",
     "/tests/**",
     "/vendor/tree-sitter-wgsl/src/**",
+    "/vendor/tree-sitter-wgsl/LICENSE",
+    "/vendor/tree-sitter-wgsl/PROVENANCE.md",
     "/build.rs",
 ]
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = ["hotpath/hotpath", "tracedecay-domain/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "tracedecay-domain/hotpath-alloc"]
-hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-domain/hotpath-cpu"]
 default = ["lite", "medium", "full"]
 test-helpers = []
 # Markdown rides in `lite` as well as `full`: docs are architecture content and
 # every repository has them, so no shipped tier may index code without also
-# indexing its documentation.
-lite = ["dep:tracedecay-medium-treesitters", "lang-markdown"]
+# indexing its documentation. Its grammar is the dedicated `tree-sitter-md`
+# crate (byte-identical parser/scanner sources to the copy vendored in the
+# large bundle), so `lite` never links the large bundle.
+# Kotlin is registered from arborium-kotlin (through `medium-grammars`), not from the
+# medium bundle's former tree-sitter-kotlin-sg dependency, so `full` never
+# links two Kotlin parse tables.
+lite = ["medium-grammars", "lang-markdown", "lang-json"]
+# The two grammar bundles supply native parse tables. Every `lang-*` feature
+# names the bundle that ships its grammar, and `ts_provider` registers only the
+# languages whose features are on so unused tables can be linker-GC'd when a
+# tier omits a language. The shipping `full` set matches master.
+medium-grammars = ["dep:tracedecay-medium-treesitters", "dep:arborium-kotlin"]
+large-grammars = ["dep:tracedecay-large-treesitters"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
-lang-dart = ["dep:tracedecay-medium-treesitters"]
-lang-pascal = ["dep:tracedecay-large-treesitters"]
-lang-php = ["dep:tracedecay-medium-treesitters"]
-lang-ruby = ["dep:tracedecay-medium-treesitters"]
-lang-bash = ["dep:tracedecay-medium-treesitters"]
-lang-protobuf = ["dep:tracedecay-large-treesitters"]
-lang-powershell = ["dep:tracedecay-large-treesitters"]
-lang-nix = ["dep:tracedecay-large-treesitters"]
-lang-vbnet = ["dep:tracedecay-large-treesitters"]
-lang-lua = ["dep:tracedecay-medium-treesitters"]
-lang-zig = ["dep:tracedecay-large-treesitters"]
-lang-objc = ["dep:tracedecay-large-treesitters"]
-lang-perl = ["dep:tracedecay-large-treesitters"]
-lang-batch = ["dep:tracedecay-large-treesitters"]
-lang-fortran = ["dep:tracedecay-large-treesitters"]
-lang-cobol = ["dep:tracedecay-large-treesitters"]
-lang-msbasic2 = ["dep:tracedecay-large-treesitters"]
-lang-gwbasic = ["dep:tracedecay-large-treesitters"]
-lang-qbasic = ["dep:tracedecay-large-treesitters"]
-lang-dockerfile = ["dep:tracedecay-large-treesitters"]
-lang-glsl = ["dep:tracedecay-large-treesitters"]
+lang-dart = ["medium-grammars"]
+lang-pascal = ["large-grammars"]
+lang-php = ["medium-grammars"]
+lang-ruby = ["medium-grammars"]
+lang-bash = ["medium-grammars"]
+lang-protobuf = ["large-grammars"]
+lang-powershell = ["large-grammars"]
+lang-nix = ["large-grammars"]
+lang-vbnet = ["large-grammars"]
+lang-lua = ["medium-grammars"]
+lang-zig = ["large-grammars"]
+lang-objc = ["large-grammars"]
+lang-perl = ["large-grammars"]
+lang-batch = ["large-grammars"]
+lang-fortran = ["large-grammars"]
+lang-cobol = ["large-grammars"]
+lang-msbasic2 = ["large-grammars"]
+lang-gwbasic = ["large-grammars"]
+lang-qbasic = ["large-grammars"]
+lang-dockerfile = ["large-grammars"]
+lang-glsl = ["large-grammars"]
 lang-wgsl = []
 lang-hlsl = ["dep:tree-sitter-hlsl"]
-lang-metal = ["dep:tracedecay-large-treesitters"]
-lang-markdown = ["dep:tracedecay-large-treesitters"]
-lang-r = ["dep:tracedecay-large-treesitters"]
-lang-sql = ["dep:tracedecay-large-treesitters"]
-lang-julia = ["dep:tracedecay-large-treesitters"]
-lang-haskell = ["dep:tracedecay-large-treesitters"]
-lang-ocaml = ["dep:tracedecay-large-treesitters"]
-lang-clojure = ["dep:tracedecay-large-treesitters"]
-lang-erlang = ["dep:tracedecay-large-treesitters"]
-lang-elixir = ["dep:tracedecay-large-treesitters"]
-lang-fsharp = ["dep:tracedecay-large-treesitters"]
-lang-quint = ["dep:tracedecay-large-treesitters"]
-lang-toml = ["dep:tracedecay-large-treesitters"]
-lang-lean = ["dep:tracedecay-large-treesitters"]
+# Metal is a C++ superset parsed by the C++ grammar; the medium bundle already
+# ships that grammar, so the adapter never needs the large bundle.
+lang-metal = ["medium-grammars"]
+lang-markdown = ["dep:tree-sitter-md"]
+# JSON rides in `lite` because TypeScript does: `package.json` and `tsconfig`
+# are the module-resolution authority the TypeScript cross-file resolver reads
+# from the sealed file set, exactly as Rust reads `Cargo.toml` through TOML.
+lang-json = ["dep:tree-sitter-json"]
+lang-r = ["large-grammars"]
+lang-sql = ["large-grammars"]
+lang-julia = ["large-grammars"]
+lang-haskell = ["large-grammars"]
+lang-ocaml = ["large-grammars"]
+lang-clojure = ["large-grammars"]
+lang-erlang = ["large-grammars"]
+lang-elixir = ["large-grammars"]
+lang-fsharp = ["large-grammars"]
+lang-quint = ["large-grammars"]
+lang-toml = ["large-grammars"]
+lang-lean = ["large-grammars"]
 
 [dependencies]
-hotpath.workspace = true
-serde = { version = "1", features = ["derive"] }
-sha2 = "0.11"
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", optional = true }
+serde = { version = "1", features = ["derive", "rc"] }
+tracedecay-domain = { path = "../tracedecay-domain" }
+# v0.5.0 plus the COBOL external-scanner fix (yutaro-sakamoto/tree-sitter-cobol#42,
+# unmerged upstream, #1104): the published scanner spins forever at end of
+# input when a token starts in the sequence-number area with no six-column
+# line before EOF, and no parse deadline can interrupt a scanner call.
+# The next commit only raises its `tree-sitter` requirement to 0.27.
+arborium-kotlin = { version = "2.18", optional = true }
+tracedecay-large-treesitters = { package = "tokensave-large-treesitters", git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters", rev = "c79cf9b77a4ec49d1d30af2d1a8279a37ca1aea4", optional = true }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
-tree-sitter = "0.26"
+tracing = "0.1"
+tree-sitter = "0.27"
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
+tree-sitter-md = { version = "=0.5.3", default-features = false, optional = true }
 tree-sitter-language = "0.1"
 # Resolved through the workspace [patch.crates-io] git pin, which carries the
 # struct-pattern field attribute fix (tree-sitter/tree-sitter-rust#301).
@@ -84,6 +105,13 @@ thiserror = "2"
 
 [dev-dependencies]
 serde_json = "1"
+sha2 = "0.11"
 
 [build-dependencies]
-cc = "1"
+cc = "1.8"
+
+# Names every shipped extractor to prove signature identity across the whole
+# language set, so it only builds once the full tier registers them.
+[[test]]
+name = "extract_alloc"
+required-features = ["full"]

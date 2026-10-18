@@ -131,6 +131,7 @@ fn checkpoint_sample_records_wal_blockers_and_reclaimed_frames() {
         hard_pressure: true,
         completed: true,
     });
+    recorder.checkpoint_hard_retry();
     let snapshot = recorder.snapshot();
     assert_eq!(snapshot.wal.wal_frames, 12);
     assert_eq!(snapshot.wal.wal_bytes, 4096);
@@ -139,4 +140,5 @@ fn checkpoint_sample_records_wal_blockers_and_reclaimed_frames() {
     assert_eq!(snapshot.wal.busy_events, 1);
     assert_eq!(snapshot.wal.blocker_count, 2);
     assert_eq!(snapshot.wal.hard_pressure_events, 1);
+    assert_eq!(snapshot.wal.hard_retry_wakes, 1);
 }

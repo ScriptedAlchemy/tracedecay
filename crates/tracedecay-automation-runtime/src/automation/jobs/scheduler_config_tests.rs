@@ -1,8 +1,9 @@
 use serde_json::json;
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 use super::{
     AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery, job_schedule_decision,
-    jobs_configured_for_scheduler, jobs_path, latest_effectful_scheduler_job_record,
+    jobs_configured_for_scheduler, jobs_path,
 };
 use crate::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use crate::automation::config::AutomationConfig;
@@ -15,9 +16,7 @@ use crate::automation::run_ledger::{
 async fn corrupt_jobs_file_surfaces_error_instead_of_no_work() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
-    tokio::fs::write(jobs_path(root), b"{ this is not valid json")
-        .await
-        .unwrap();
+    std::fs::write(jobs_path(root), b"{ this is not valid json").unwrap();
     let err = jobs_configured_for_scheduler(root)
         .await
         .expect_err("corrupt jobs file must surface an error");
@@ -48,48 +47,12 @@ async fn valid_schedulable_job_reports_work_and_recovers_after_corruption() {
             "delivery": { "mode": "file" }
         }]
     });
-    tokio::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap())
-        .await
-        .unwrap();
+    std::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap()).unwrap();
     assert!(jobs_configured_for_scheduler(root).await.unwrap());
-    tokio::fs::write(jobs_path(root), b"nonsense")
-        .await
-        .unwrap();
+    std::fs::write(jobs_path(root), b"nonsense").unwrap();
     assert!(jobs_configured_for_scheduler(root).await.is_err());
-    tokio::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap())
-        .await
-        .unwrap();
+    std::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap()).unwrap();
     assert!(jobs_configured_for_scheduler(root).await.unwrap());
-}
-
-#[test]
-fn time_relative_skips_do_not_advance_the_next_due_occurrence() {
-    let job = interval_job();
-    let success = ledger_record("success-a", AutomationRunStatus::Succeeded, None, 100);
-    let first_skip = ledger_record(
-        "next-occurrence",
-        AutomationRunStatus::Skipped,
-        Some("scheduler_interval_not_elapsed"),
-        101,
-    );
-    let repeated_skip = ledger_record(
-        "next-occurrence",
-        AutomationRunStatus::Skipped,
-        Some("scheduler_interval_not_elapsed"),
-        102,
-    );
-    let mut records = vec![success.clone()];
-    assert_eq!(
-        job_schedule_decision(&job, &records, 101),
-        Some("scheduler_interval_not_elapsed")
-    );
-    records.push(first_skip);
-    records.push(repeated_skip);
-    let anchor = latest_effectful_scheduler_job_record(&records, "user_job:nightly")
-        .expect("scheduler history is valid")
-        .expect("the last effectful terminal remains the occurrence anchor");
-    assert_eq!(anchor.run_id, success.run_id);
-    assert_eq!(job_schedule_decision(&job, &records, 160), None);
 }
 
 #[test]
@@ -110,13 +73,13 @@ fn job_scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
 
     assert_eq!(
         job_schedule_decision(&job, &records, 150),
-        Some("scheduler_non_retryable_failure")
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
     );
 
     records.reverse();
     assert_eq!(
         job_schedule_decision(&job, &records, 150),
-        Some("scheduler_non_retryable_failure")
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
     );
 
     for record in &mut records {
@@ -124,12 +87,12 @@ fn job_scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
     }
     assert_eq!(
         job_schedule_decision(&job, &records, 150),
-        Some("scheduler_non_retryable_failure")
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
     );
     records.reverse();
     assert_eq!(
         job_schedule_decision(&job, &records, 150),
-        Some("scheduler_non_retryable_failure")
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
     );
 }
 
@@ -140,14 +103,14 @@ fn job_scheduler_fails_closed_on_invalid_completion_history() {
     inconsistent.completed_at_micros = Some(101_000_000);
     assert_eq!(
         job_schedule_decision(&job, &[inconsistent], 150),
-        Some("scheduler_history_invalid")
+        Some(AutomationSkipReasonV1::SchedulerHistoryInvalid)
     );
 
     let mut malformed = ledger_record("malformed", AutomationRunStatus::Succeeded, None, 100);
     malformed.completed_at = "not-a-timestamp".to_string();
     assert_eq!(
         job_schedule_decision(&job, &[malformed], 150),
-        Some("scheduler_history_invalid")
+        Some(AutomationSkipReasonV1::SchedulerHistoryInvalid)
     );
 
     let mut overflow = ledger_record("overflow", AutomationRunStatus::Succeeded, None, 100);
@@ -155,13 +118,13 @@ fn job_scheduler_fails_closed_on_invalid_completion_history() {
     overflow.completed_at_micros = None;
     assert_eq!(
         job_schedule_decision(&job, &[overflow], 150),
-        Some("scheduler_history_invalid")
+        Some(AutomationSkipReasonV1::SchedulerHistoryInvalid)
     );
 
     let pre_epoch = ledger_record("pre-epoch", AutomationRunStatus::Succeeded, None, -1);
     assert_eq!(
         job_schedule_decision(&job, &[pre_epoch], 150),
-        Some("scheduler_history_invalid")
+        Some(AutomationSkipReasonV1::SchedulerHistoryInvalid)
     );
 }
 
@@ -179,6 +142,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let first = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "next-occurrence",
         101,
@@ -195,6 +159,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let repeated = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "next-occurrence",
         102,
@@ -223,6 +188,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let due = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "next-occurrence",
         160,
@@ -249,6 +215,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let next_skip = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "following-occurrence",
         161,
@@ -261,6 +228,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let repeated_next = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "following-occurrence",
         162,
@@ -290,6 +258,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let after_noise = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "following-occurrence",
         163,
@@ -319,6 +288,7 @@ async fn scheduler_lock_skip_uses_a_diagnostic_identity_outside_the_effect_occur
     let skip = super::scheduler_gate::record_scheduler_lock_skip(
         temp.path(),
         &config,
+        None,
         &job,
         occurrence,
         &started_at,

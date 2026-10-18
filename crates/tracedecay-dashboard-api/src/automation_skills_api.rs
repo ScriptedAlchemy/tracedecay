@@ -3,25 +3,24 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::util::{JsonError, http_detail, internal_error};
+use super::util::{JsonError, internal_error, json_error};
 use super::{
     DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandV1, DashboardState,
     automation_authority_error_response, exact_automation_authority,
 };
 use tracedecay_automation_runtime::automation::managed_skills::{
-    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, list_managed_skills,
-    load_managed_skill, managed_skill_dir, managed_skill_root,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillReadError,
+    ManagedSkillSource, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
+    list_managed_skills, load_managed_skill, managed_skill_dir, managed_skill_root,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
-    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
-    summarize_skill_usage_for,
+    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage_for,
 };
 use tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploymentReceipt;
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
@@ -30,6 +29,7 @@ pub struct ManagedSkillCreateRequest {
     id: String,
     title: String,
     summary: String,
+    routing_description: String,
     category: String,
     #[serde(
         default = "tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets"
@@ -51,44 +51,45 @@ pub struct ManagedSkillUpdateRequest {
     update: ManagedSkillUpdate,
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.list", future = true)]
-pub async fn list(State(state): State<DashboardState>) -> ApiResult {
+/// `GET /api/automation/skills`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct AutomationSkillsPayloadV1 {
+    skills: Vec<ManagedSkill>,
+    count: usize,
+}
+
+#[tracing::instrument(name = "dashboard_api.skills.list", level = "trace", skip_all)]
+pub async fn list(
+    State(state): State<DashboardState>,
+) -> std::result::Result<Json<AutomationSkillsPayloadV1>, JsonError> {
     let profile_root = profile_root(&state)?;
     let skills = list_managed_skills(profile_root)
         .await
         .map_err(|err| internal_error(&err))?;
-    let skill_metadata = skills
-        .iter()
-        .map(|skill| skill.metadata.clone())
-        .collect::<Vec<_>>();
-    let usage_summaries = summarize_skill_usage(profile_root, &skills)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let stale_recommendations =
-        stale_skill_recommendations(&usage_summaries, current_timestamp(), 60 * 60 * 24 * 90);
-    let improvement_recommendations = skill_improvement_recommendations(&usage_summaries);
-    Ok(Json(json!({
-        "profile_root": profile_root.display().to_string(),
-        "skills_root": managed_skill_root(profile_root).display().to_string(),
-        "count": skills.len(),
-        "skills": skills,
-        "skill_metadata": skill_metadata,
-        "usage_summaries": usage_summaries,
-        "stale_recommendations": stale_recommendations,
-        "improvement_recommendations": improvement_recommendations,
-    })))
+    Ok(Json(AutomationSkillsPayloadV1 {
+        count: skills.len(),
+        skills,
+    }))
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.view", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.view", level = "trace", skip_all)]
 pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     let profile_root = profile_root(&state)?;
     let skill = load_managed_skill(profile_root, &id)
         .await
-        .map_err(|err| not_found_or_internal(&err))?;
-    skill_payload(profile_root, skill).await
+        .map_err(|err| match err {
+            ManagedSkillReadError::InvalidId(_) => {
+                json_error(StatusCode::BAD_REQUEST, err.to_string())
+            }
+            ManagedSkillReadError::NotFound { .. } => {
+                json_error(StatusCode::NOT_FOUND, err.to_string())
+            }
+            ManagedSkillReadError::Failed(_) => internal_error(err),
+        })?;
+    skill_payload_with_deployment(profile_root, skill, None).await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.create", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.create", level = "trace", skip_all)]
 pub async fn create(
     State(state): State<DashboardState>,
     Json(request): Json<ManagedSkillCreateRequest>,
@@ -96,7 +97,7 @@ pub async fn create(
     execute_skill_command(&state, request.into_create_command()).await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.update", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.update", level = "trace", skip_all)]
 pub async fn update(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
@@ -113,17 +114,17 @@ pub async fn update(
     .await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.disable", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.disable", level = "trace", skip_all)]
 pub async fn disable(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     execute_skill_command(&state, DashboardManagedSkillCommandV1::Disable { id }).await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.archive", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.archive", level = "trace", skip_all)]
 pub async fn archive(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     execute_skill_command(&state, DashboardManagedSkillCommandV1::Archive { id }).await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.restore", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.restore", level = "trace", skip_all)]
 pub async fn restore(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     execute_skill_command(&state, DashboardManagedSkillCommandV1::Restore { id }).await
 }
@@ -136,6 +137,7 @@ impl ManagedSkillCreateRequest {
                 id: self.id,
                 title: self.title,
                 summary: self.summary,
+                routing_description: self.routing_description,
                 category: self.category,
                 targets: self.targets,
                 body_markdown: self.body_markdown,
@@ -162,27 +164,19 @@ async fn execute_skill_command(
     skill_payload_with_deployment(authority.profile_root(), skill, Some(deployment)).await
 }
 
-async fn skill_payload(profile_root: &std::path::Path, skill: ManagedSkill) -> ApiResult {
-    skill_payload_with_deployment(profile_root, skill, None).await
-}
-
 async fn skill_payload_with_deployment(
     profile_root: &std::path::Path,
     skill: ManagedSkill,
     deployment: Option<ManagedSkillDeploymentReceipt>,
 ) -> ApiResult {
-    let skill_dir = managed_skill_dir(profile_root, &skill.metadata.id)
-        .map_err(|err| bad_request_or_internal(&err))?;
+    let skill_dir =
+        managed_skill_dir(profile_root, &skill.metadata.id).map_err(|err| internal_error(&err))?;
     let usage_summary = summarize_skill_usage_for(profile_root, &skill)
         .await
         .map_err(|err| internal_error(&err))?;
-    let stale_recommendation = stale_skill_recommendations(
-        std::slice::from_ref(&usage_summary),
-        current_timestamp(),
-        60 * 60 * 24 * 90,
-    )
-    .into_iter()
-    .next();
+    let stale_recommendation = stale_skill_recommendations(std::slice::from_ref(&usage_summary))
+        .into_iter()
+        .next();
     let improvement_recommendation =
         skill_improvement_recommendations(std::slice::from_ref(&usage_summary))
             .into_iter()
@@ -211,55 +205,6 @@ fn automation_authority(
 
 fn profile_root(state: &DashboardState) -> std::result::Result<&std::path::Path, JsonError> {
     Ok(automation_authority(state)?.profile_root())
-}
-
-fn bad_request(err: &impl ToString) -> JsonError {
-    (StatusCode::BAD_REQUEST, Json(http_detail(&err.to_string())))
-}
-
-fn bad_request_or_internal(err: &impl ToString) -> JsonError {
-    client_error_or_internal(err, false, true)
-}
-
-fn not_found_or_internal(err: &impl ToString) -> JsonError {
-    client_error_or_internal(err, true, false)
-}
-
-fn client_error_or_internal(
-    err: &impl ToString,
-    allow_not_found: bool,
-    allow_bad_request: bool,
-) -> JsonError {
-    let message = err.to_string();
-    if allow_not_found && is_not_found(&message) {
-        not_found(&message)
-    } else if allow_bad_request && is_bad_request(&message) {
-        bad_request(&message)
-    } else {
-        internal_error(&message)
-    }
-}
-
-fn is_not_found(message: &str) -> bool {
-    message.contains("No such file") || message.contains("not found")
-}
-
-fn not_found(message: &str) -> JsonError {
-    (StatusCode::NOT_FOUND, Json(http_detail(message)))
-}
-
-fn is_bad_request(message: &str) -> bool {
-    message.contains("unsafe")
-        || message.contains("cannot be empty")
-        || message.contains("duplicate")
-        || message.contains("conflicts with")
-        || message.contains("exceeds")
-        || message.contains("must be under")
-        || message.contains("must name a file")
-        || message.contains("failed to parse")
-        || message.contains("base_checksum")
-        || message.contains("stale")
-        || message.contains("does not change")
 }
 
 #[cfg(test)]

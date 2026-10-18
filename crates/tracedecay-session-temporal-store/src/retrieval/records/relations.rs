@@ -1,14 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracedecay_domain::{MessageOccurrenceIdV1, SessionId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_temporal_query::candidates::CandidateChannel;
-use tracedecay_temporal_query::ports::{
-    ExecutionControl, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
-    TemporalRetrievalScope,
-};
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::execution::{ReadBudgetAccounting, TemporalPortError};
+use tracedecay_temporal_query::paging::PageRequest;
 use tracedecay_temporal_query::ranking::RankingCandidate;
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
+use tracedecay_temporal_query::snapshot::TemporalRetrievalScope;
 
 use super::super::super::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceRef,
@@ -34,6 +35,18 @@ impl RecordRelationBatch {
             summary_sources: Vec::new(),
             retained_summary_anchors: Vec::new(),
         }
+    }
+
+    pub(in crate::retrieval) fn append(&mut self, other: Self) {
+        self.copies.extend(other.copies);
+        self.summaries.extend(other.summaries);
+        self.summary_sources.extend(other.summary_sources);
+        self.retained_summary_anchors
+            .extend(other.retained_summary_anchors);
+    }
+
+    pub(in crate::retrieval) fn copy_candidates(&self) -> Vec<usize> {
+        self.copies.iter().map(|copy| copy.candidate).collect()
     }
 }
 
@@ -98,7 +111,8 @@ pub(in crate::retrieval) fn load_record_relations(
     let relation_limit = request.page_item_limit().saturating_add(1);
     if relation_limit == 0 {
         return Err(TemporalPortError::BudgetExceeded {
-            resource: "record relations",
+            resource: RELATION_RESOURCE,
+            accounting: None,
         });
     }
     let cancellation: Arc<dyn GraphCancellation> =
@@ -123,15 +137,30 @@ pub(in crate::retrieval) fn load_record_relations(
             })
             .collect::<HashMap<_, _>>()
     });
-    for (local, candidate) in candidates.iter().enumerate() {
+    // Identities are checked up front so logical copies can be read once per
+    // (session, generation) group. The first failing candidate ends the plan;
+    // its error surfaces after the candidates before it hydrate, where a
+    // per-candidate walk raises it.
+    let mut planned = Vec::with_capacity(candidates.len());
+    let mut planning_failure = None;
+    for candidate in candidates {
+        match plan_candidate(scope, snapshot, participant_generations.as_ref(), candidate) {
+            Ok(plan) => planned.push(plan),
+            Err(error) => {
+                planning_failure = Some(error);
+                break;
+            }
+        }
+    }
+    let mut read_groups = HashSet::new();
+    let mut prefetched_copies = HashMap::new();
+    for (local, (candidate, plan)) in candidates.iter().zip(&planned).enumerate() {
         control.checkpoint()?;
-        let session_id = candidate_session_id(scope, candidate)?;
-        let generation = candidate_generation(
-            snapshot,
-            participant_generations.as_ref(),
-            candidate,
-            &session_id,
-        )?;
+        let PlannedCandidate {
+            session_id,
+            generation,
+            occurrence_id,
+        } = plan.clone();
         if names_summary_record(candidate) {
             let candidate_index = candidate_offset.saturating_add(local);
             let summary_id = candidate.retriever_record_id.clone();
@@ -164,6 +193,7 @@ pub(in crate::retrieval) fn load_record_relations(
                 if source_bytes > request.max_item_bytes() {
                     return Err(TemporalPortError::BudgetExceeded {
                         resource: "summary source bytes",
+                        accounting: None,
                     });
                 }
                 relation_bytes = relation_bytes.saturating_add(source_bytes);
@@ -208,39 +238,58 @@ pub(in crate::retrieval) fn load_record_relations(
             });
             continue;
         }
-        if matches!(
-            candidate.channel,
-            CandidateChannel::Span | CandidateChannel::Burst
-        ) {
+        let Some(occurrence_id) = occurrence_id else {
             continue;
-        }
-        let occurrence_id = MessageOccurrenceIdV1::new(&candidate.retriever_record_id)
-            .map_err(|error| read_error(RECORD_OPERATION, error))?;
+        };
         let remaining = relation_limit.saturating_sub(copies.len());
         if remaining == 0 {
-            return Err(TemporalPortError::BudgetExceeded {
-                resource: "record relations",
-            });
+            return Err(relations_exhausted(relation_limit));
         }
-        let batches = store
-            .logical_copies(
+        if read_groups.insert((session_id.clone(), generation)) {
+            let (members, occurrence_ids): (Vec<_>, Vec<_>) = planned
+                .iter()
+                .enumerate()
+                .skip(local)
+                .filter(|(_, other)| {
+                    other.session_id == session_id && other.generation == generation
+                })
+                .filter_map(|(member, other)| Some((member, other.occurrence_id.clone()?)))
+                .unzip();
+            // A failed group read is not an answer: each member then reads
+            // alone and raises its own typed failure at its own position.
+            if let Ok(batches) = store.logical_copies(
                 relation_scope,
                 &session_id,
                 generation,
-                std::slice::from_ref(&occurrence_id),
+                &occurrence_ids,
                 remaining,
                 Arc::clone(&cancellation),
-            )
-            .map_err(|error| map_relation_error(error, control))?;
-        let relations = batches
-            .into_iter()
-            .next()
-            .ok_or_else(|| read_message(RECORD_OPERATION, "logical-copy batch is missing"))?;
+            ) {
+                prefetched_copies.extend(members.into_iter().zip(batches));
+            }
+        }
+        let relations = match prefetched_copies.remove(&local) {
+            Some(relations) if relations.len() <= remaining => relations,
+            // The group read charged its budget before earlier candidates
+            // spent theirs; a member that no longer fits re-reads alone so
+            // the refusal stays the per-candidate one.
+            _ => store
+                .logical_copies(
+                    relation_scope,
+                    &session_id,
+                    generation,
+                    std::slice::from_ref(&occurrence_id),
+                    remaining,
+                    Arc::clone(&cancellation),
+                )
+                .map_err(|error| map_relation_error(error, control))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| read_message(RECORD_OPERATION, "logical-copy batch is missing"))?,
+        };
         for relation in relations {
             if copies.len() == relation_limit {
-                return Err(TemporalPortError::BudgetExceeded {
-                    resource: "record relations",
-                });
+                return Err(relations_exhausted(relation_limit));
             }
             let proof_json = serde_json::to_string(&relation.proof)
                 .map_err(|error| read_error(RECORD_OPERATION, error))?;
@@ -256,6 +305,7 @@ pub(in crate::retrieval) fn load_record_relations(
             if copy_bytes > request.max_item_bytes() {
                 return Err(TemporalPortError::BudgetExceeded {
                     resource: "record relation bytes",
+                    accounting: None,
                 });
             }
             relation_bytes = relation_bytes.saturating_add(copy_bytes);
@@ -270,9 +320,14 @@ pub(in crate::retrieval) fn load_record_relations(
             });
         }
     }
+    if let Some(failure) = planning_failure {
+        control.checkpoint()?;
+        return Err(failure);
+    }
     if relation_bytes > request.page_total_byte_limit() {
         return Err(TemporalPortError::BudgetExceeded {
             resource: "record relation batch bytes",
+            accounting: None,
         });
     }
     control.checkpoint()?;
@@ -284,6 +339,42 @@ pub(in crate::retrieval) fn load_record_relations(
     })
 }
 
+/// A window candidate whose session and frozen generation passed their checks.
+/// Summaries, spans and bursts carry no occurrence whose copies could load.
+#[derive(Clone)]
+struct PlannedCandidate {
+    session_id: SessionId,
+    generation: u64,
+    occurrence_id: Option<MessageOccurrenceIdV1>,
+}
+
+fn plan_candidate(
+    scope: &TemporalRetrievalScope,
+    snapshot: &TemporalExecutionSnapshot,
+    participants: Option<&ParticipantGenerations<'_>>,
+    candidate: &RankingCandidate,
+) -> Result<PlannedCandidate, TemporalPortError> {
+    let session_id = candidate_session_id(scope, candidate)?;
+    let generation = candidate_generation(snapshot, participants, candidate, &session_id)?;
+    let occurrence_id = if names_summary_record(candidate)
+        || matches!(
+            candidate.channel,
+            CandidateChannel::Span | CandidateChannel::Burst
+        ) {
+        None
+    } else {
+        Some(
+            MessageOccurrenceIdV1::new(&candidate.retriever_record_id)
+                .map_err(|error| read_error(RECORD_OPERATION, error))?,
+        )
+    };
+    Ok(PlannedCandidate {
+        session_id,
+        generation,
+        occurrence_id,
+    })
+}
+
 /// The evidence role every candidate query reports for a summary node row.
 const SUMMARY_EVIDENCE_ROLE: &str = "summary";
 
@@ -291,7 +382,7 @@ const SUMMARY_EVIDENCE_ROLE: &str = "summary";
 ///
 /// The summary channel's listing and full-text matches are summaries by
 /// construction, and an anchor lookup resolves either an occurrence or a
-/// summary node — a summary describe hydrates over its summary anchor and lands
+/// summary node, a summary describe hydrates over its summary anchor and lands
 /// on the anchor channel. Both carry the summary identity in
 /// `retriever_record_id` and the summary evidence role, and neither has an
 /// occurrence identity whose logical copies could be loaded.
@@ -307,6 +398,7 @@ fn names_summary_record(candidate: &RankingCandidate) -> bool {
         | CandidateChannel::Entity
         | CandidateChannel::Time
         | CandidateChannel::Lexical
+        | CandidateChannel::LexicalRelaxed
         | CandidateChannel::Span
         | CandidateChannel::Burst => false,
     }
@@ -377,6 +469,19 @@ fn candidate_generation(
     Ok(candidate.participant_generation)
 }
 
+const RELATION_RESOURCE: &str = "record relations";
+
+/// The relation budget spent its whole ceiling with more relations to read.
+fn relations_exhausted(limit: usize) -> TemporalPortError {
+    TemporalPortError::BudgetExceeded {
+        resource: RELATION_RESOURCE,
+        accounting: Some(ReadBudgetAccounting::consumed_with_more(
+            limit as u64,
+            limit as u64,
+        )),
+    }
+}
+
 fn map_relation_error(
     error: SessionRelationError,
     control: &ExecutionControl,
@@ -386,7 +491,8 @@ fn map_relation_error(
     }
     match error {
         SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded {
-            resource: "record relations",
+            resource: RELATION_RESOURCE,
+            accounting: None,
         },
         SessionRelationError::Cancelled => TemporalPortError::Cancelled,
         SessionRelationError::DeadlineExceeded => TemporalPortError::DeadlineExceeded,

@@ -120,7 +120,7 @@ pub fn is_qualified_name_token(value: &str) -> bool {
 }
 
 /// Slash-separated non-empty segments of identifier, hyphen, and dot
-/// characters — the segment shape shared by the extraction Path grammar and
+/// characters, the segment shape shared by the extraction Path grammar and
 /// query-side logical-path matching (which additionally admits extensionless
 /// files because every chunk's logical path is a posting).
 pub fn is_path_shape(value: &str) -> bool {
@@ -196,7 +196,7 @@ pub fn is_configuration_key_token(value: &str) -> bool {
 pub fn is_tool_name_token(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
-        "cargo" | "rustc" | "tracedecay" | "pytest" | "kubectl" | "fastembed" | "ast-grep"
+        "cargo" | "rustc" | "tracedecay" | "pytest" | "kubectl" | "ast-grep"
     )
 }
 

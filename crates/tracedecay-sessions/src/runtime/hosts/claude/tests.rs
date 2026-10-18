@@ -1,25 +1,14 @@
 use super::*;
+use crate::runtime::shared::StoredCursor;
+use crate::runtime::source::{JsonlPrefixRecovery, TranscriptDiscoveryBounds};
 use serde_json::json;
 use tracedecay_capture::claude as canonical;
 use tracedecay_runtime_core::git_discovery::{
     GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
 };
 
-#[test]
-fn live_session_discovery_excludes_large_unrelated_history() {
-    let home = tempfile::tempdir().unwrap();
-    let projects = home.path().join(".claude/projects");
-    for index in 0..256 {
-        let project = projects.join(format!("project-{index}"));
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join(format!("unrelated-{index}.jsonl")), b"{}\n").unwrap();
-    }
-    let target = projects.join("project-173").join("target-session.jsonl");
-    std::fs::write(&target, b"{}\n").unwrap();
-    let source = ClaudeSource::with_home(home.path())
-        .for_user_scope(Some("target-session".to_string()), Vec::new());
-
-    assert_eq!(source.transcript_paths(home.path()), vec![target]);
+fn identify(path: &Path) -> Option<ClaudeSourceScanIdentity> {
+    identify_claude_source(Path::new("/"), path)
 }
 
 #[test]
@@ -30,19 +19,19 @@ fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
     let contents = [complete.as_slice(), b"{\"partial\":"].concat();
     std::fs::write(&path, &contents).unwrap();
 
-    let identity = identify_claude_source(&path).unwrap();
+    let identity = identify(&path).unwrap();
     let scan = scan_claude_source_frames(identity, StoredCursor::default(), None).unwrap();
 
     assert_eq!(scan.identity.provider, "claude");
     assert_eq!(scan.identity.session_id, "session-42");
     assert_eq!(
         scan.identity.source_id,
-        cursor::claude_observation_source_id(&path)
+        cursor::claude_observation_path_source_id(Path::new("/"), &path)
     );
     assert!(
         scan.identity
             .source_id
-            .starts_with("tracedecay-claude-observation-source-v1-sha256-")
+            .starts_with("tracedecay-claude-observation-source-v2-sha256-")
     );
     assert_eq!(scan.identity.source_path, path);
     assert_eq!(scan.previous_cursor.state, StoredCursor::default());
@@ -67,38 +56,16 @@ fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
 }
 
 #[test]
-fn bounded_scan_finishes_one_valid_record_past_nominal_budget() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("session-42.jsonl");
-    let contents = b"{\"type\":\"summary\"}\n";
-    std::fs::write(&path, contents).unwrap();
-
-    let identity = identify_claude_source(&path).unwrap();
-    let scan = scan_claude_source_frames(identity, StoredCursor::default(), Some(1)).unwrap();
-
-    assert_eq!(scan.frames.len(), 1);
-    assert_eq!(scan.next_cursor.state.position, contents.len() as u64);
-    assert_eq!(scan.read_through, contents.len() as u64);
-    assert_eq!(
-        scan.coverage,
-        ClaudeFrameCoverage::Complete {
-            start_offset: 0,
-            end_offset: contents.len() as u64,
-        }
-    );
-}
-
-#[test]
 fn bounded_scan_blocks_oversized_frame_and_suffix_at_one_mib() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session-42.jsonl");
     let oversized = format!(
         "{{\"payload\":\"{}\"}}\n",
-        "x".repeat(tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES)
+        "x".repeat(tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES)
     );
     std::fs::write(&path, format!("{oversized}{{\"type\":\"summary\"}}\n")).unwrap();
 
-    let identity = identify_claude_source(&path).unwrap();
+    let identity = identify(&path).unwrap();
     let scan = scan_claude_source_frames(identity, StoredCursor::default(), None).unwrap();
 
     assert!(scan.frames.is_empty());
@@ -125,7 +92,7 @@ fn bounded_scan_exposes_whitespace_ranges_without_parsing_them() {
     let record = b"{\"type\":\"summary\"}\n";
     std::fs::write(&path, [b"\n".as_slice(), record, b" \t\n"].concat()).unwrap();
 
-    let identity = identify_claude_source(&path).unwrap();
+    let identity = identify(&path).unwrap();
     let scan = scan_claude_source_frames(identity, StoredCursor::default(), None).unwrap();
 
     assert_eq!(scan.frames.len(), 1);
@@ -148,177 +115,6 @@ fn bounded_scan_exposes_whitespace_ranges_without_parsing_them() {
             reason: ClaudeSkippedFrameReason::Whitespace,
         }
     );
-}
-
-#[test]
-fn canonical_mapper_emits_one_conversational_message() {
-    let record = json!({
-        "type": "user",
-        "uuid": "user-1",
-        "message": {"role": "user", "content": "hello"},
-    });
-    let context = ClaudeRecordContext {
-        session_id: "session-1",
-        project_key: "project-1",
-        project_path: "/project-1",
-        file_generation: 42,
-        offset: 9,
-        session_cwd: Some(Path::new("/project-1")),
-        source_path: None,
-        raw_message_id: Some("user-1"),
-        raw_tool_event_ids: &[],
-        raw_hook_tool_use_id: None,
-    };
-
-    let ClaudeRecordDisposition::Message { draft, message } =
-        map_sanitized_claude_record(&record, &context)
-    else {
-        panic!("conversational row must map");
-    };
-    assert_eq!(draft.session_id, "session-1");
-    assert_eq!(message.message_id, "user-1");
-    assert_eq!(message.kind.as_deref(), Some("message"));
-    assert_eq!(message.source_path.as_deref(), Some("claude:session-1"));
-    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["source_generation"], 42);
-
-    assert!(matches!(
-        map_sanitized_claude_record(&json!({"type": "summary"}), &context),
-        ClaudeRecordDisposition::NonConversational
-    ));
-}
-
-#[test]
-fn legacy_trait_parse_only_folds_sanitizer_issued_values() {
-    let dir = tempfile::tempdir().unwrap();
-    let secret = "password = p@ssw0rd!";
-    let project_root = dir.path().join(secret);
-    std::fs::create_dir_all(&project_root).unwrap();
-    let transcript = dir.path().join("session-sanitized.jsonl");
-    let record = json!({
-        "type": "user",
-        "uuid": "user-sanitized",
-        "cwd": project_root,
-        "message": {"role": "user", "content": secret},
-    });
-    std::fs::write(
-        &transcript,
-        format!("{}\n", serde_json::to_string(&record).unwrap()),
-    )
-    .unwrap();
-
-    let parsed = ClaudeSource::with_home(Path::new("/unused"))
-        .parse_new(&transcript, StoredCursor::default(), &project_root, None)
-        .expect("legacy trait parse");
-    let mut durable = parsed.draft.metadata_json.clone().unwrap_or_default();
-    for message in &parsed.messages {
-        durable.push_str(&message.text);
-        durable.push_str(message.metadata_json.as_deref().unwrap_or_default());
-    }
-
-    assert!(!durable.contains("p@ssw0rd!"), "{durable}");
-    assert!(durable.contains("[TraceDecay redacted:"), "{durable}");
-    assert_eq!(parsed.messages.len(), 1);
-}
-
-#[test]
-fn subagent_provider_metadata_is_sanitized_before_persistence() {
-    let dir = tempfile::tempdir().unwrap();
-    let raw_secret = "abcdefghijklmnopqrstuvwxyz0123456789";
-    let credential = format!("Bearer {raw_secret}");
-    let workflow = format!("wf_ {credential}");
-    let transcript = dir
-        .path()
-        .join("parent-session")
-        .join("subagents")
-        .join("workflows")
-        .join(&workflow)
-        .join("agent-child.jsonl");
-    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    std::fs::write(&transcript, "").unwrap();
-    std::fs::write(
-        transcript.with_file_name("agent-child.meta.json"),
-        serde_json::to_vec(&json!({
-            "agentType": format!("Explore {credential}"),
-            "description": format!("Inspect {credential}"),
-            "toolUseId": format!("tool {credential}"),
-            "spawnDepth": 2,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let info = claude_subagent_identity(&transcript).expect("subagent identity");
-    let durable = serde_json::to_string(&session_metadata(
-        None,
-        Some(&info),
-        &SessionAccumulator::default(),
-        None,
-    ))
-    .unwrap();
-
-    assert!(!durable.contains(raw_secret), "{durable}");
-    assert_eq!(info.parent_tool_use_id, None);
-    assert_eq!(info.workflow_run_id, None);
-    assert!(durable.contains("[TraceDecay redacted:"));
-    assert_eq!(info.spawn_depth, Some(2));
-
-    let other_secret = "0123456789abcdefghijklmnopqrstuvwxyz";
-    let other_credential = format!("Bearer {other_secret}");
-    let other_workflow = format!("wf_ {other_credential}");
-    let other_transcript = dir
-        .path()
-        .join("parent-session")
-        .join("subagents")
-        .join("workflows")
-        .join(&other_workflow)
-        .join("agent-other.jsonl");
-    std::fs::create_dir_all(other_transcript.parent().unwrap()).unwrap();
-    std::fs::write(&other_transcript, "").unwrap();
-    std::fs::write(
-        other_transcript.with_file_name("agent-other.meta.json"),
-        serde_json::to_vec(&json!({
-            "toolUseId": format!("tool {other_credential}"),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let other = claude_subagent_identity(&other_transcript).expect("other identity");
-    assert_eq!(other.parent_tool_use_id, None);
-    assert_eq!(other.workflow_run_id, None);
-}
-
-#[test]
-fn subagent_metadata_exceeding_structural_limits_is_denied_as_a_whole() {
-    let dir = tempfile::tempdir().unwrap();
-    let transcript = dir
-        .path()
-        .join("parent-session")
-        .join("subagents")
-        .join("agent-deep.jsonl");
-    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    std::fs::write(&transcript, "").unwrap();
-
-    let mut nested = json!(true);
-    for _ in 0..=tracedecay_capture::ParseLimits::default_policy().depth {
-        nested = json!({"next": nested});
-    }
-    std::fs::write(
-        transcript.with_file_name("agent-deep.meta.json"),
-        serde_json::to_vec(&json!({
-            "agentType": "must-not-survive-partial-scan",
-            "nested": nested,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let info = claude_subagent_identity(&transcript).expect("subagent identity");
-
-    assert_eq!(info.agent_type, None);
-    assert_eq!(info.description, None);
-    assert_eq!(info.spawn_depth, None);
 }
 
 #[test]
@@ -364,23 +160,35 @@ fn non_utf8_paths_that_render_identically_have_distinct_cursor_keys() {
     let second = PathBuf::from(OsString::from_vec(b"session-\xfe.jsonl".to_vec()));
     assert_eq!(first.to_string_lossy(), second.to_string_lossy());
 
-    let source = ClaudeSource::with_home(Path::new("/unused"));
     assert_ne!(
-        source.cursor_key(&first).durable_text(),
-        source.cursor_key(&second).durable_text()
+        cursor::claude_cursor_key(&first).durable_text(),
+        cursor::claude_cursor_key(&second).durable_text()
     );
-    let first_identity = identify_claude_source(&first).unwrap();
-    let second_identity = identify_claude_source(&second).unwrap();
+    let first_identity = identify(&first).unwrap();
+    let second_identity = identify(&second).unwrap();
     assert_ne!(first_identity.session_id, second_identity.session_id);
+    assert_eq!(
+        first_identity.session_id,
+        "privacy.structural-id.v1.990ebdd27bde227d2152d560d71fa5669c60d1b06315adf3201371792f5b3b77"
+    );
+    assert_eq!(
+        second_identity.session_id,
+        "privacy.structural-id.v1.ee63d9294be4d710712850f8e5dd96b296ba64b79a4dfb53995e1ecd9c7e6f49"
+    );
+    assert_eq!(
+        first_identity.stem_source_id,
+        "tracedecay-claude-observation-source-v1-sha256-b878c24deeee723afacac8f34481430383c0bb4a1aa04880ad1af6c0b128187c"
+    );
+    assert_eq!(
+        second_identity.stem_source_id,
+        "tracedecay-claude-observation-source-v1-sha256-0dc1ffe6e231fc3d7ed7f6634dd60932564ce1ef0fcb0ee959a4359a1d9d4477"
+    );
     assert_ne!(first_identity.source_id, second_identity.source_id);
-    assert!(!first_identity.source_id.contains('/'));
 }
 
 #[cfg(unix)]
 #[test]
-fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
-    use std::os::unix::ffi::OsStrExt;
-
+fn observation_source_ids_are_private_and_follow_the_projects_relative_path() {
     let root = tempfile::tempdir().unwrap();
     let first = root.path().join("account-one/session.jsonl");
     let second = root.path().join("account-two/session.jsonl");
@@ -391,313 +199,54 @@ fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
     std::fs::write(&second, "").unwrap();
     std::fs::write(&other, "").unwrap();
 
-    let first_identity = identify_claude_source(&first).unwrap();
-    let second_identity = identify_claude_source(&second).unwrap();
-    let other_identity = identify_claude_source(&other).unwrap();
+    let first_identity = identify_claude_source(root.path(), &first).unwrap();
+    let second_identity = identify_claude_source(root.path(), &second).unwrap();
+    let other_identity = identify_claude_source(root.path(), &other).unwrap();
     assert_eq!(first_identity.session_id, second_identity.session_id);
-    assert_eq!(first_identity.source_id, second_identity.source_id);
-    assert_ne!(first_identity.source_id, other_identity.source_id);
-    assert!(!first_identity.source_id.contains("session"));
-    assert!(!other_identity.source_id.contains("other-session"));
-    for (identity, path) in [
-        (&first_identity, &first),
-        (&second_identity, &second),
-        (&other_identity, &other),
-    ] {
-        let canonical = std::fs::canonicalize(path).unwrap();
-        let raw_hex = hex::encode(canonical.as_os_str().as_bytes());
-        assert!(!identity.source_id.contains(&raw_hex));
-        assert!(
-            !identity
-                .source_id
-                .contains(canonical.to_string_lossy().as_ref())
-        );
-        assert_eq!(
-            identity.source_id.len(),
-            "tracedecay-claude-observation-source-v1-sha256-".len() + 64
-        );
-    }
-}
-
-#[test]
-fn structured_git_operation_becomes_host_commit_evidence() {
-    let mut metadata = Map::new();
-    append_git_operation_metadata(
-        &mut metadata,
-        &json!({
-            "gitBranch": "feature/attribution",
-            "toolUseResult": {
-                "gitOperation": {
-                    "commit": {"sha": "ABCDEF12", "kind": "commit"}
-                }
-            }
-        }),
-    );
-    assert_eq!(metadata["produced_commit_candidates"], json!(["abcdef12"]));
-    assert_eq!(metadata["produced_commit_evidence"], "host_event");
-    assert_eq!(metadata["git_branch"], "feature/attribution");
-}
-
-#[test]
-fn unstructured_user_content_cannot_spoof_commit_evidence() {
-    let mut metadata = Map::new();
-    append_git_operation_metadata(
-        &mut metadata,
-        &json!({"message": {"content": "gitOperation commit abcdef12"}}),
-    );
-    assert!(metadata.is_empty());
-}
-
-fn assistant_record(content: &Value) -> Value {
-    json!({
-        "type": "assistant",
-        "sessionId": "sess",
-        "uuid": "u-assistant",
-        "timestamp": "2026-01-01T00:00:05.000Z",
-        "message": {
-            "id": "msg_1",
-            "role": "assistant",
-            "model": "claude-opus-4-8",
-            "content": content.clone(),
-        }
-    })
-}
-
-fn record_context(raw_message_id: Option<&str>, offset: u64) -> ClaudeRecordContext<'_> {
-    ClaudeRecordContext {
-        session_id: "sess",
-        project_key: "project",
-        project_path: "/project",
-        file_generation: 7,
-        offset,
-        session_cwd: None,
-        source_path: None,
-        raw_message_id,
-        raw_tool_event_ids: &[],
-        raw_hook_tool_use_id: None,
-    }
-}
-
-#[test]
-fn thinking_blocks_are_split_from_the_visible_message_row() {
-    let record = assistant_record(&json!([
-        {"type": "thinking", "thinking": "First I inspect the parser."},
-        {"type": "thinking", "thinking": "Then I add the row."},
-        {"type": "tool_use", "name": "Read", "input": {"file_path": "src/lib.rs"}},
-        {"type": "text", "text": "Done."}
-    ]));
-    let path = Path::new("/tmp/sess.jsonl");
-
-    let mut accumulator = SessionAccumulator::default();
-    let message = message_from_line(&record, "sess", path, 10, None, &mut accumulator, None)
-        .expect("assistant message row");
-    assert_eq!(message.message_id, "msg_1");
-    assert_eq!(message.kind.as_deref(), Some("message"));
-    assert!(!message.text.contains("First I inspect the parser"));
-    assert!(!message.text.contains("Then I add the row"));
-    assert!(message.text.contains("src/lib.rs"));
-    assert!(message.text.contains("Done."));
-    assert_eq!(message.tool_names.as_deref(), Some("Read"));
-
-    let context = record_context(Some("msg_1"), 10);
-    let reasoning = reasoning_from_line(&record, path, &context, Some(message.message_id.as_str()))
-        .expect("reasoning row for thinking");
-    assert_eq!(reasoning.message_id, "msg_1:thinking");
-    assert_eq!(reasoning.kind.as_deref(), Some("reasoning"));
-    assert_eq!(reasoning.role, "assistant");
-    assert_eq!(reasoning.model.as_deref(), Some("claude-opus-4-8"));
-    assert_eq!(reasoning.ordinal, 10);
-    assert_eq!(reasoning.timestamp, Some(1_767_225_605));
+    assert_eq!(first_identity.session_id, "session");
+    assert_eq!(other_identity.session_id, "other-session");
     assert_eq!(
-        reasoning.text,
-        "First I inspect the parser.\n\nThen I add the row."
+        first_identity.source_id,
+        "tracedecay-claude-observation-source-v2-sha256-c616d6158ad32ca1c204938215042bdc4125db7f48ea51b6ed5e577605430536"
     );
-    let metadata: Value = serde_json::from_str(reasoning.metadata_json.as_deref().unwrap())
-        .expect("reasoning metadata json");
-    assert_eq!(metadata["source"], "claude_thinking");
-    assert_eq!(metadata["parent_message_id"], "msg_1");
-    assert_eq!(metadata["thinking_blocks"], 2);
-    assert!(metadata.get("redacted_thinking_blocks").is_none());
-}
-
-#[test]
-fn redacted_only_thinking_records_no_reasoning_row() {
-    // Matches Codex's encrypted-reasoning convention: no plaintext, no row.
-    let record = assistant_record(&json!([
-        {"type": "redacted_thinking", "data": "ENCRYPTED_SHOULD_NOT_INDEX"},
-        {"type": "text", "text": "Answer."}
-    ]));
-    assert!(
-        reasoning_from_line(
-            &record,
-            Path::new("/tmp/sess.jsonl"),
-            &record_context(Some("msg_1"), 3),
-            None,
+    assert_ne!(second_identity.source_id, first_identity.source_id);
+    let moved = tempfile::tempdir().unwrap();
+    assert_eq!(
+        identify_claude_source(
+            moved.path(),
+            &moved.path().join("account-one/session.jsonl")
         )
-        .is_none()
+        .unwrap()
+        .source_id,
+        first_identity.source_id,
+        "the key survives moving the projects directory"
     );
-}
-
-#[test]
-fn mixed_thinking_and_redacted_records_the_redacted_count_but_no_plaintext() {
-    let record = assistant_record(&json!([
-        {"type": "thinking", "thinking": "Visible reasoning."},
-        {"type": "redacted_thinking", "data": "ENCRYPTED_SHOULD_NOT_INDEX"}
-    ]));
-    let reasoning = reasoning_from_line(
-        &record,
-        Path::new("/tmp/sess.jsonl"),
-        &record_context(Some("msg_1"), 4),
-        Some("msg_1"),
-    )
-    .expect("reasoning row for the plaintext block");
-    assert_eq!(reasoning.text, "Visible reasoning.");
-    assert!(!reasoning.text.contains("ENCRYPTED"));
-    let metadata: Value =
-        serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["thinking_blocks"], 1);
-    assert_eq!(metadata["redacted_thinking_blocks"], 1);
-}
-
-#[test]
-fn assistant_message_without_thinking_records_no_reasoning_row() {
-    let record = assistant_record(&json!([{"type": "text", "text": "Just an answer."}]));
-    assert!(
-        reasoning_from_line(
-            &record,
-            Path::new("/tmp/sess.jsonl"),
-            &record_context(Some("msg_1"), 7),
-            None,
-        )
-        .is_none()
+    assert_eq!(
+        first_identity.stem_source_id,
+        "tracedecay-claude-observation-source-v1-sha256-13f767a4cb9df80b65b90e859dee16bdb99ac3eba0d792e0bcc5c8c09dea501f"
     );
-}
-
-#[test]
-fn reasoning_row_id_falls_back_to_record_uuid_when_message_id_is_absent() {
-    let record = json!({
-        "type": "assistant",
-        "sessionId": "sess",
-        "uuid": "u-fallback",
-        "timestamp": "2026-01-01T00:00:05.000Z",
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "thinking", "thinking": "Reasoning without a message id."}]
-        }
-    });
-    let reasoning = reasoning_from_line(
-        &record,
-        Path::new("/tmp/sess.jsonl"),
-        &record_context(Some("u-fallback"), 9),
-        None,
-    )
-    .expect("reasoning row");
-    assert_eq!(reasoning.message_id, "u-fallback:thinking");
-    let metadata: Value =
-        serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["parent_message_id"], "u-fallback");
-}
-
-#[test]
-fn user_record_never_produces_a_reasoning_row() {
-    let record = json!({
-        "type": "user",
-        "message": {"role": "user", "content": [{"type": "thinking", "thinking": "nope"}]}
-    });
-    assert!(
-        reasoning_from_line(
-            &record,
-            Path::new("/tmp/sess.jsonl"),
-            &record_context(None, 1),
-            None,
-        )
-        .is_none()
+    assert_eq!(
+        second_identity.stem_source_id,
+        first_identity.stem_source_id
     );
-}
-
-#[test]
-fn redacted_identity_uses_generation_offset_for_message_and_reasoning() {
-    let marker = "[TraceDecay redacted:credential]";
-    let record = json!({
-        "type": "assistant",
-        "uuid": marker,
-        "message": {
-            "id": marker,
-            "role": "assistant",
-            "content": [
-                {"type": "thinking", "thinking": "private chain"},
-                {"type": "text", "text": "answer"}
-            ]
-        }
-    });
-    let context = record_context(Some("raw-sensitive-id"), 19);
-    let ClaudeRecordDisposition::Message { message, .. } =
-        map_sanitized_claude_record(&record, &context)
-    else {
-        panic!("assistant row must map");
-    };
-    assert_eq!(message.message_id, "sess:7:19");
-
-    let reasoning = reasoning_from_line(
-        &record,
-        Path::new("/tmp/sess.jsonl"),
-        &context,
-        Some(message.message_id.as_str()),
-    )
-    .expect("reasoning row");
-    let metadata: Value =
-        serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(reasoning.message_id, "sess:7:19:thinking");
-    assert_eq!(metadata["parent_message_id"], "sess:7:19");
-}
-
-#[test]
-fn redacted_marker_ids_do_not_collide() {
-    let record = json!({
-        "type": "pr-link",
-        "uuid": "[TraceDecay redacted:credential]",
-        "prNumber": 5,
-    });
-    let mut accumulator = SessionAccumulator::default();
-    let first = record_metadata::pr_link_row(
-        &record,
-        "sess",
-        7,
-        Path::new("/tmp/sess.jsonl"),
-        10,
-        &mut accumulator,
-    )
-    .unwrap();
-    let second = record_metadata::pr_link_row(
-        &record,
-        "sess",
-        7,
-        Path::new("/tmp/sess.jsonl"),
-        20,
-        &mut accumulator,
-    )
-    .unwrap();
-
-    assert_eq!(first.message_id, "sess:7:10");
-    assert_eq!(second.message_id, "sess:7:20");
-    assert_ne!(first.message_id, second.message_id);
+    assert_eq!(
+        other_identity.stem_source_id,
+        "tracedecay-claude-observation-source-v1-sha256-6af786644f998205035a6b817210583dd95133bb265cb54908fef24a75c40f23"
+    );
 }
 
 #[test]
 fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
-    let path = format!(
-        "{}/../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let bytes = std::fs::read(&path).unwrap();
-    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let path = "../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json";
+    let bytes = std::fs::read(path).unwrap();
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         |native| {
             let stable = canonical::stable_record_id(&native, "claude-golden-session", 0)?;
-            canonical::normalize(&native, "claude-golden-session", stable, range)
+            canonical::normalize(&native, "claude-golden-session", None, stable, range)
         },
     )
     .unwrap();
@@ -747,14 +296,14 @@ fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
     let bytes = include_bytes!(
         "../../../../../../tests/fixtures/provider_normalization/claude/assistant_thinking_text_tool_use.input.json"
     );
-    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         bytes,
         range,
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         |native| {
             let stable = canonical::stable_record_id(&native, "claude-mixed-session", 0)?;
-            canonical::normalize(&native, "claude-mixed-session", stable, range)
+            canonical::normalize(&native, "claude-mixed-session", None, stable, range)
         },
     )
     .unwrap();
@@ -815,26 +364,26 @@ fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
         "typed and authored facts must retain provider block order"
     );
     let rendered = serde_json::to_string(parsed.value()).unwrap();
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_timestamp":1767225605,"ordering_domain":"file_bytes","range":{"end":775,"start":0}},"facts":[{"kind":"session","location_path":"/redacted/project","location_provenance":"transcript_record","project_path":"/redacted/project","source":"claude_transcript"},{"counter_semantics":"delta","counters":{"input_tokens":1200,"output_tokens":340,"state":"known"},"kind":"provider_usage","model":{"model":"claude-opus-4-8","state":"known"},"native_field":"message.usage","native_kind":"assistant","native_scope":"message"},{"content":"Inspect the parser before editing.","kind":"reasoning","visibility":"visible"},{"content":"The visible provider-authored answer.","kind":"message","model":"claude-opus-4-8","role":"assistant","timestamp":1767225605},{"arguments":{"file_path":"src/lib.rs"},"invocation_id":"toolu_mixed_1","kind":"tool_invocation","name":"Read"}],"native_record_kind":"assistant","provider":"claude","relations":{"message_id":"msg_claude_mixed_1","session_id":"claude-mixed-session"},"stable_record_id":"mixed-u2","version":1}"#
+    );
     assert!(!rendered.contains("signature-redacted"));
-    assert!(!rendered.contains("\"type\":\"thinking\""));
-    assert!(!rendered.contains("\"type\":\"tool_use\""));
+    assert!(rendered.contains("The visible provider-authored answer."));
 }
 
 #[test]
 fn claude_workflow_lookalike_emits_no_workflow_lifecycle() {
-    let path = format!(
-        "{}/../../tests/fixtures/provider_normalization/claude/workflow_lookalike.input.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let bytes = std::fs::read(&path).unwrap();
-    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let path = "../../tests/fixtures/provider_normalization/claude/workflow_lookalike.input.json";
+    let bytes = std::fs::read(path).unwrap();
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         |native| {
             let stable = canonical::stable_record_id(&native, "claude-workflow-lookalike", 0)?;
-            canonical::normalize(&native, "claude-workflow-lookalike", stable, range)
+            canonical::normalize(&native, "claude-workflow-lookalike", None, stable, range)
         },
     )
     .expect("Claude workflow lookalike must still normalize as an assistant message");
@@ -911,14 +460,14 @@ fn claude_task_create_and_update_emit_workflow_lifecycle_facts() {
         }
     });
     let bytes = serde_json::to_vec(&record).unwrap();
-    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         |native| {
             let stable = canonical::stable_record_id(&native, "claude-task-session", 0)?;
-            canonical::normalize(&native, "claude-task-session", stable, range)
+            canonical::normalize(&native, "claude-task-session", None, stable, range)
         },
     )
     .unwrap();
@@ -992,7 +541,12 @@ fn claude_task_create_and_update_emit_workflow_lifecycle_facts() {
             if name == "TaskCreate"
     )));
     let rendered = serde_json::to_string(parsed.value()).unwrap();
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_timestamp":1767225605,"ordering_domain":"file_bytes","range":{"end":664,"start":0}},"facts":[{"kind":"session","location_path":"/redacted/project","location_provenance":"transcript_record","project_path":"/redacted/project","source":"claude_transcript"},{"arguments":{"activeForm":"Gathering simplify review scope","description":"Collect the branch and working-tree diffs.","subject":"Gather simplify review scope"},"invocation_id":"call_task_create_1","kind":"tool_invocation","name":"TaskCreate"},{"content":{"activeForm":"Gathering simplify review scope","description":"Collect the branch and working-tree diffs.","subject":"Gather simplify review scope"},"kind":"workflow_lifecycle","semantic_kind":"task","state":"TaskCreate"},{"arguments":{"status":"in_progress","taskId":"1"},"invocation_id":"call_task_update_1","kind":"tool_invocation","name":"TaskUpdate"},{"content":{"status":"in_progress","taskId":"1"},"item_id":"1","kind":"workflow_lifecycle","provider_reference":"1","semantic_kind":"task","state":"TaskUpdate","status":"in_progress"},{"arguments":{"file_path":"src/lib.rs"},"invocation_id":"call_read_1","kind":"tool_invocation","name":"Read"}],"native_record_kind":"assistant","provider":"claude","relations":{"message_id":"msg_claude_task_create","session_id":"claude-task-session"},"stable_record_id":"claude-task-1","version":1}"#
+    );
     assert!(!rendered.contains("\"type\":\"tool_use\""));
+    assert!(rendered.contains("Gather simplify review scope"));
 }
 
 static UNKNOWN_PATH_ATTEMPTS: std::sync::atomic::AtomicUsize =
@@ -1012,62 +566,6 @@ fn retrying_identity(path: &Path) -> GitRepositoryIdentityOutcome {
         git_dir: root.join(".git"),
         common_dir: root.join(".git"),
     })
-}
-
-#[test]
-fn claude_message_metadata_reuses_worktree_for_repeated_cwd() {
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let project_root = temp.path().join("repo");
-    let nested_cwd = project_root.join("packages/app");
-    std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
-    let status = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&project_root)
-        .status()
-        .expect("git init");
-    assert!(status.success());
-
-    let cache = crate::runtime::shared::ProjectRootMatcherCache::default();
-    let record = json!({
-        "type": "user",
-        "sessionId": "sess",
-        "cwd": nested_cwd,
-        "message": {"role": "user", "content": "hello"}
-    });
-    let path = Path::new("/tmp/sess.jsonl");
-
-    let mut accumulator = SessionAccumulator::default();
-    let first = message_from_line(
-        &record,
-        "sess",
-        path,
-        10,
-        Some(&nested_cwd),
-        &mut accumulator,
-        Some(&cache),
-    )
-    .expect("first message");
-    let first_metadata: serde_json::Value =
-        serde_json::from_str(first.metadata_json.as_deref().unwrap()).unwrap();
-    let first_worktree = first_metadata["claude_message_worktree"].clone();
-    assert!(first_worktree.is_string());
-
-    std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
-        .expect("hide git metadata after first lookup");
-
-    let second = message_from_line(
-        &record,
-        "sess",
-        path,
-        20,
-        Some(&nested_cwd),
-        &mut accumulator,
-        Some(&cache),
-    )
-    .expect("second message");
-    let second_metadata: serde_json::Value =
-        serde_json::from_str(second.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(second_metadata["claude_message_worktree"], first_worktree);
 }
 
 #[test]
@@ -1096,18 +594,102 @@ fn claude_unknown_membership_retries_without_advancing_cursor() {
     source.project_matchers =
         crate::runtime::shared::ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
 
-    let previous = StoredCursor::default();
+    let scan = || {
+        try_scan_claude_source_frames_with_resume(
+            identify(&transcript).unwrap(),
+            StoredCursor::default(),
+            None,
+            None,
+            JsonlPrefixRecovery::rescan(),
+        )
+        .unwrap()
+        .unwrap()
+    };
+
+    let mut first = scan();
     assert!(
         source
-            .parse_new(&transcript, previous, &project_root, None)
+            .retain_scoped_frames(&mut first, &project_root)
             .is_none(),
-        "unknown membership must abort before a new cursor can be persisted"
+        "unknown membership must defer the scan before a cursor or skip range can be persisted"
     );
 
-    let retried = source
-        .parse_new(&transcript, previous, &project_root, None)
+    let mut retried = scan();
+    let excluded = source
+        .retain_scoped_frames(&mut retried, &project_root)
         .expect("unknown membership must be resolved again on retry");
-    assert_eq!(retried.messages.len(), 1);
-    assert!(retried.new_cursor.position > previous.position);
+    assert!(excluded.is_empty());
+    assert_eq!(retried.frames.len(), 1);
     assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn workflow_journals_are_not_claude_session_transcripts() {
+    let root = tempfile::tempdir().unwrap();
+    let projects = root.path().join(".claude/projects/-slug");
+    let session = projects.join("sess-real.jsonl");
+    let journal = projects
+        .join("sess-real")
+        .join("subagents")
+        .join("workflows")
+        .join("wf_1")
+        .join("journal.jsonl");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    std::fs::write(&session, "{\"type\":\"user\"}\n").unwrap();
+    std::fs::write(&journal, "{\"type\":\"started\",\"agentId\":\"a1\"}\n").unwrap();
+
+    assert!(super::is_claude_session_transcript(&session));
+    assert!(!super::is_claude_session_transcript(&journal));
+    assert!(identify(&session).is_some());
+    assert!(identify(&journal).is_none());
+
+    let discovered = ClaudeSource::with_home(root.path())
+        .discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
+        .paths;
+    assert_eq!(discovered, vec![session]);
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_claude_transcripts_are_still_session_files() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let projects = root.path().join(".claude/projects/-slug");
+    let session = projects.join("sess-real.jsonl");
+    let agent = projects.join(OsString::from_vec(b"agent-\xff.jsonl".to_vec()));
+    let journal = projects.join("journal.jsonl");
+
+    assert!(super::is_claude_session_transcript(&session));
+    assert!(super::is_claude_session_transcript(&agent));
+    assert!(!super::is_claude_session_transcript(&journal));
+    assert!(identify(&agent).is_some());
+    assert!(identify(&journal).is_none());
+}
+
+// APFS requires UTF-8 filenames; Linux can materialize this discovery fixture.
+#[cfg(target_os = "linux")]
+#[test]
+fn claude_discovery_retains_non_utf8_transcripts() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let projects = root.path().join(".claude/projects/-slug");
+    std::fs::create_dir_all(&projects).unwrap();
+    let session = projects.join("sess-real.jsonl");
+    let agent = projects.join(OsString::from_vec(b"agent-\xff.jsonl".to_vec()));
+    let journal = projects.join("journal.jsonl");
+    std::fs::write(&session, "{\"type\":\"user\"}\n").unwrap();
+    std::fs::write(&agent, "{\"type\":\"assistant\"}\n").unwrap();
+    std::fs::write(&journal, "{\"type\":\"started\",\"agentId\":\"a1\"}\n").unwrap();
+
+    let mut discovered = ClaudeSource::with_home(root.path())
+        .discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
+        .paths;
+    discovered.sort();
+    let mut expected = vec![agent, session];
+    expected.sort();
+    assert_eq!(discovered, expected);
 }

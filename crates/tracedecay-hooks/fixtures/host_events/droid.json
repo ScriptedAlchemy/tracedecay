@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "provider": "droid",
+  "sources": [
+    {
+      "kind": "live_native_hook_capture",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/droid/session-start.json",
+      "droid_version": "1.x",
+      "captured_on": "2026-09-25"
+    },
+    {
+      "kind": "live_native_hook_capture",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/droid/stop.json",
+      "droid_version": "1.x",
+      "captured_on": "2026-09-25"
+    },
+    {
+      "kind": "official_documentation_example",
+      "url": "https://docs.factory.ai/harness/hooks",
+      "sections": ["Hook input", "Hook events"],
+      "retrieved_at": "2026-09-25"
+    }
+  ],
+  "events": [
+    {
+      "identity": "session_start",
+      "family": "session_boundary",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/droid/session-start.json",
+      "request": {
+        "session_id": "<SESSION_ID>",
+        "transcript_path": "<TRANSCRIPT_PATH>",
+        "cwd": "<PROJECT_ROOT>",
+        "permission_mode": "auto-high",
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "CLAUDE_ENV_FILE": "<ENV_FILE>"
+      }
+    },
+    {
+      "identity": "stop",
+      "family": "session_boundary",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/droid/stop.json",
+      "request": {
+        "session_id": "<SESSION_ID>",
+        "transcript_path": "<TRANSCRIPT_PATH>",
+        "cwd": "<PROJECT_ROOT>",
+        "permission_mode": "auto-high",
+        "hook_event_name": "Stop",
+        "message_id": "<MESSAGE_ID>",
+        "stop_hook_active": false,
+        "tool_execution_count": 0,
+        "elapsed_time": 0
+      }
+    }
+  ]
+}

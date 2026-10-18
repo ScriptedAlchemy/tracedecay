@@ -174,7 +174,7 @@ async fn fact_feedback_persists_canonical_trust_events_and_status() {
         .await
         .expect("canonical memory status");
     assert!(status.get("status").is_none());
-    assert!(status["memory"]["fact_count"].as_u64().unwrap() >= 1);
+    assert_eq!(status["memory"]["fact_count"], 1);
     assert_eq!(status["memory"]["helpful_count"], 1);
     assert_eq!(status["memory"]["unhelpful_count"], 1);
 
@@ -193,18 +193,47 @@ async fn fact_feedback_rejects_missing_action_numeric_ids_and_legacy_aliases() {
     .expect("canonical fact add");
     let fact_id = committed_fact_id(&added);
 
+    let mut refusals = Vec::new();
     for invalid in [
         json!({"fact_id": fact_id.clone()}),
         json!({"fact_id": 41, "action": "helpful"}),
         json!({"fact_id": fact_id.clone(), "helpful": true}),
-        json!({"fact_id": fact_id, "action": "helpful", "source": "legacy"}),
+        json!({"fact_id": fact_id.clone(), "action": "helpful", "source": "legacy"}),
     ] {
-        assert!(
-            invoke_production_tool(&fixture, "tracedecay_fact_feedback", invalid)
-                .await
-                .is_err()
+        let error = invoke_production_tool(&fixture, "tracedecay_fact_feedback", invalid.clone())
+            .await
+            .expect_err("a non-canonical feedback shape must be refused");
+        refusals.push(error.to_string());
+    }
+    for (refusal, expected) in refusals.iter().zip([
+        "missing field `action`",
+        "fact_id: invalid type: integer `41`, expected a string",
+        "helpful: unknown field `helpful`, expected one of `fact_id`, \
+         `expected_last_event_id`, `action`, `source_label`, `reason`, `memory_scope`, \
+         `project_selector`",
+        "source: unknown field `source`, expected one of `fact_id`, \
+         `expected_last_event_id`, `action`, `source_label`, `reason`, `memory_scope`, \
+         `project_selector`",
+    ]) {
+        let envelope: serde_json::Value = serde_json::from_str(
+            refusal
+                .strip_prefix("config error: ")
+                .unwrap_or_else(|| panic!("{refusal}")),
+        )
+        .unwrap_or_else(|error| panic!("{refusal}: {error}"));
+        assert_eq!(
+            crate::support::refusal_summary(&envelope["problem"]),
+            crate::support::application_invalid_request_error(expected),
+            "{refusal}"
         );
     }
+    invoke_production_tool(
+        &fixture,
+        "tracedecay_fact_feedback",
+        json!({"fact_id": fact_id, "action": "helpful"}),
+    )
+    .await
+    .expect("the canonical feedback shape must be accepted");
 
     close_test_graph(fixture).await;
 }

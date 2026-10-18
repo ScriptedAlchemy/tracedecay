@@ -1,14 +1,14 @@
-//! The shared fixture authority: one isolated environment, one profile, and
+//! The shared fixture authority: one isolated home, one profile, and
 //! project identities resolved and registered through the production paths.
 //!
-//! Test setup used to reimplement identity resolution — synthesizing a profile
+//! Test setup used to reimplement identity resolution, synthesizing a profile
 //! root, re-deriving a store layout, writing an enrollment marker by hand,
-//! running a fresh `git init` per fixture — and each reimplementation got some
+//! running a fresh `git init` per fixture, and each reimplementation got some
 //! part of it subtly wrong in a different way. The pieces here compose instead,
 //! and every one of them delegates to the authority production uses:
 //!
 //! ```ignore
-//! let profile = TestProfile::acquire().await;              // isolated HOME, one profile
+//! let profile = TestProfile::isolated();                   // isolated home, one profile
 //! let repo = GitFixture::primary(profile.path("project")); // template-seeded checkout
 //! let project = profile.enroll(repo.root()).await;         // registered + enrolled
 //! let data_root = project.data_root();                     // taken from the opened graph
@@ -16,8 +16,8 @@
 //!
 //! What each piece owns:
 //!
-//! * [`TestProfile`] wraps [`super::IsolatedEnv`], so `HOME`,
-//!   `TRACEDECAY_DATA_DIR`, and the global-DB override always point inside a
+//! * [`TestProfile`] wraps [`super::IsolatedHome`], so the home, profile
+//!   data directory, and global DB it hands out always point inside a
 //!   throwaway directory. It is also the *only* source of
 //!   [`TraceDecayOpenOptions`] in a fixture, which is what keeps N projects in
 //!   ONE profile: an open with default options synthesizes a per-project
@@ -41,79 +41,61 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 
-use super::IsolatedEnv;
+use super::IsolatedHome;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 // ---------------------------------------------------------------------------
-// Profile: one isolated environment, one profile, N projects
+// Profile: one isolated home, one profile, N projects
 // ---------------------------------------------------------------------------
 
 struct TestProfileInner {
-    env: IsolatedEnv,
-    root: PathBuf,
-    global_db_path: PathBuf,
+    env: IsolatedHome,
 }
 
-/// One isolated environment plus the single profile every project in a fixture
-/// is enrolled in.
+/// One isolated home plus the single profile every project in a fixture is
+/// enrolled in.
 ///
-/// Cloning is cheap and shares the isolated environment, so a
-/// [`RegisteredProject`] keeps the throwaway `HOME` and the process-wide env
-/// lock alive for as long as any handle to it exists. A fixture therefore
-/// cannot drop its environment guard while still using a store.
+/// Cloning is cheap and shares the isolated home, so a [`RegisteredProject`]
+/// keeps the throwaway directory alive for as long as any handle to it exists.
 #[derive(Clone)]
 pub struct TestProfile {
-    inner: Arc<TestProfileInner>,
+    inner: Rc<TestProfileInner>,
 }
 
 impl TestProfile {
-    /// Acquires the isolated environment and pins this fixture's profile.
-    pub async fn acquire() -> Self {
-        Self::build(IsolatedEnv::acquire().await.0)
-    }
-
-    /// Sync counterpart of [`Self::acquire`] for plain `#[test]` fns.
-    ///
-    /// Panics if called from within an async context; use [`Self::acquire`]
-    /// there.
-    pub fn acquire_blocking() -> Self {
-        Self::build(IsolatedEnv::acquire_blocking().0)
-    }
-
-    fn build(env: IsolatedEnv) -> Self {
-        let root = env.home().join(".tracedecay");
-        fs::create_dir_all(&root).unwrap_or_else(|err| {
-            panic!(
-                "failed to create fixture profile '{}': {err}",
-                root.display()
-            )
-        });
-        let global_db_path = root.join("global.db");
+    pub fn isolated() -> Self {
         Self {
-            inner: Arc::new(TestProfileInner {
-                env,
-                root,
-                global_db_path,
+            inner: Rc::new(TestProfileInner {
+                env: IsolatedHome::new().0,
             }),
         }
     }
 
     /// This fixture's profile root (`<home>/.tracedecay`).
     pub fn root(&self) -> &Path {
-        &self.inner.root
+        self.inner.env.profile_root()
+    }
+
+    /// This fixture's profile, for APIs that take it explicitly.
+    pub fn profile(&self) -> &tracedecay_runtime_core::config::ProfileRoot {
+        self.inner.env.profile()
     }
 
     pub fn home(&self) -> &Path {
         self.inner.env.home()
     }
 
-    /// The throwaway directory holding the isolated `HOME` and every checkout,
+    /// The throwaway directory holding the isolated home and every checkout,
     /// for fixtures that need siblings (a bare `origin`, a linked worktree).
     pub fn scratch(&self) -> &Path {
         self.inner.env.scratch()
@@ -131,7 +113,7 @@ impl TestProfile {
                 path.display()
             )
         });
-        path.canonicalize().unwrap_or_else(|err| {
+        canonical_existing_identity(&path).unwrap_or_else(|err| {
             panic!(
                 "failed to canonicalize fixture directory '{}': {err}",
                 path.display()
@@ -145,10 +127,7 @@ impl TestProfile {
     /// test builds synthesize a per-project standalone profile, which silently
     /// puts two projects of one fixture in two profiles.
     pub fn open_options(&self) -> TraceDecayOpenOptions {
-        TraceDecayOpenOptions {
-            profile_root: Some(self.inner.root.clone()),
-            global_db_path: Some(self.inner.global_db_path.clone()),
-        }
+        self.inner.env.open_options()
     }
 
     /// Registers, enrolls, and initializes `project_root` in this profile.
@@ -157,7 +136,7 @@ impl TestProfile {
     }
 
     async fn enroll_inner(&self, project_root: &Path) -> RegisteredProject {
-        let project_root = project_root.canonicalize().unwrap_or_else(|err| {
+        let project_root = canonical_existing_identity(project_root).unwrap_or_else(|err| {
             panic!(
                 "fixture project root '{}' must exist to be enrolled: {err}",
                 project_root.display()
@@ -190,21 +169,18 @@ impl TestProfile {
             }),
         );
 
-        // Initialize through that same runtime wherever the registered seam
-        // exists, so a fixture never opens a second database scope on one
-        // profile. The public entry point is the fallback for builds without
-        // the seam; it resolves the same identity from the marker just written.
+        // Initialize through that same runtime, so a fixture never opens a
+        // second database scope on one profile. The public entry point is not
+        // an alternative here: outside `test-transport` builds
+        // `TraceDecay::init_with_options` takes a *maintenance* database scope
+        // on this profile root, the registered runtime above already holds a
+        // *daemon* scope on it, and every later exact-scoped call (the
+        // `upsert_code_project` below first of all) then fails with "daemon and
+        // maintenance database scopes overlap".
         let open_options = self.open_options();
-        #[cfg(feature = "test-transport")]
         let graph = Box::pin(
             registry.initialize_project_graph_for_test(&project_root, open_options.clone()),
         )
-        .await;
-        #[cfg(not(feature = "test-transport"))]
-        let graph = Box::pin(TraceDecay::init_with_options(
-            &project_root,
-            open_options.clone(),
-        ))
         .await;
         let graph = graph.unwrap_or_else(|err| {
             panic!(
@@ -262,12 +238,7 @@ impl TestProfile {
     pub fn unenrolled(&self, name: impl AsRef<Path>) -> UnenrolledProject {
         let root = self.path(name);
         assert!(
-            !storage::has_repository_identity_marker(&root)
-                && storage::read_legacy_enrollment_marker(&root)
-                    .unwrap_or_else(|err| {
-                        panic!("failed to read fixture enrollment marker: {err}")
-                    })
-                    .is_none(),
+            !storage::has_repository_identity_marker(&root),
             "an unenrolled fixture root must not carry an identity marker: {}",
             root.display()
         );
@@ -350,22 +321,6 @@ impl RegisteredProject {
         .unwrap_or_else(|err| {
             panic!(
                 "failed to reopen fixture graph '{}': {err}",
-                self.root.display()
-            )
-        })
-    }
-
-    /// Opens one tracked branch's graph in the same profile.
-    pub async fn open_branch(&self, branch_name: &str) -> TraceDecay {
-        Box::pin(TraceDecay::open_branch_with_options(
-            &self.root,
-            branch_name,
-            self.open_options.clone(),
-        ))
-        .await
-        .unwrap_or_else(|err| {
-            panic!(
-                "failed to open fixture branch '{branch_name}' of '{}': {err}",
                 self.root.display()
             )
         })
@@ -470,22 +425,6 @@ impl ClosedRegisteredProject {
             )
         })
     }
-
-    /// Opens one tracked branch's graph in the same profile.
-    pub async fn open_branch(&self, branch_name: &str) -> TraceDecay {
-        Box::pin(TraceDecay::open_branch_with_options(
-            &self.root,
-            branch_name,
-            self.open_options.clone(),
-        ))
-        .await
-        .unwrap_or_else(|err| {
-            panic!(
-                "failed to open fixture branch '{branch_name}' of '{}': {err}",
-                self.root.display()
-            )
-        })
-    }
 }
 
 impl std::ops::Deref for RegisteredProject {
@@ -498,7 +437,7 @@ impl std::ops::Deref for RegisteredProject {
 
 /// A checkout inside a fixture profile that was never enrolled or registered.
 pub struct UnenrolledProject {
-    // Keeps the isolated environment alive for the negative case too.
+    // Keeps the isolated home alive for the negative case too.
     _profile: TestProfile,
     root: PathBuf,
 }
@@ -517,9 +456,13 @@ impl UnenrolledProject {
 impl RegisteredProject {
     /// This project's runtime, promoted to the project scope that project-graph
     /// and project-session seams require.
-    pub fn project_scoped_runtime(&self) -> tracedecay::host_admission::ProjectScopedTestRuntimeV1 {
-        tracedecay::host_admission::ProjectScopedTestRuntimeV1::new(Arc::clone(&self.registry))
-            .unwrap_or_else(|err| panic!("fixture project runtime must be project-scoped: {err}"))
+    pub fn project_scoped_runtime(
+        &self,
+    ) -> tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1 {
+        tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1::new(
+            Arc::clone(&self.registry),
+        )
+        .unwrap_or_else(|err| panic!("fixture project runtime must be project-scoped: {err}"))
     }
 
     /// An MCP server for this project with its registry database, retained
@@ -629,7 +572,7 @@ impl GitFixture {
     /// built once per target directory.
     ///
     /// The template carries the `git init`, the branch rename, and the initial
-    /// commit — including a `.gitignore` for `.tracedecay/`, so a fixture that
+    /// commit, including a `.gitignore` for `.tracedecay/`, so a fixture that
     /// stages its working tree can never commit enrollment state. Falls back to
     /// building in place when the template is unavailable, so a template
     /// failure can never change what a test exercises.
@@ -704,7 +647,7 @@ impl GitFixture {
         if !seeded {
             self.run(&["init", "--bare", &origin.to_string_lossy()]);
         }
-        let origin = origin.canonicalize().unwrap_or_else(|err| {
+        let origin = canonical_existing_identity(&origin).unwrap_or_else(|err| {
             panic!(
                 "failed to canonicalize fixture origin '{}': {err}",
                 origin.display()
@@ -733,16 +676,13 @@ impl GitFixture {
     }
 
     fn assert_collapses_onto_primary(&self, path: &Path) -> PathBuf {
-        let path = path.canonicalize().unwrap_or_else(|err| {
+        let path = canonical_existing_identity(path).unwrap_or_else(|err| {
             panic!(
                 "failed to canonicalize fixture worktree '{}': {err}",
                 path.display()
             )
         });
-        let primary = self
-            .root
-            .canonicalize()
-            .unwrap_or_else(|_| self.root.clone());
+        let primary = canonical_existing_identity(&self.root).unwrap_or_else(|_| self.root.clone());
         assert_eq!(
             tracedecay_runtime_core::worktree::repository_identity_root(&path),
             Some(primary.clone()),
@@ -775,8 +715,15 @@ fn git_template_root() -> Option<&'static Path> {
         .as_deref()
 }
 
+/// Cargo's per-target scratch directory: the Bazel test launcher passes a
+/// private one at run time, Cargo compiles it in.
+pub fn cargo_target_tmpdir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_TMPDIR")
+        .map_or_else(|| env!("CARGO_TARGET_TMPDIR").into(), PathBuf::from)
+}
+
 fn ensure_git_template() -> Option<PathBuf> {
-    let tmp_root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let tmp_root = &cargo_target_tmpdir();
     let shared = tmp_root.join(GIT_TEMPLATE_DIR_NAME);
     if shared.join("READY").is_file() {
         return Some(shared);
@@ -790,11 +737,11 @@ fn ensure_git_template() -> Option<PathBuf> {
         .write(true)
         .open(&lock_path)
         .ok()?;
-    fs2::FileExt::lock_exclusive(&lock_file).ok()?;
+    lock_file.lock().ok()?;
 
     // Another process may have finished the build while we waited.
     if shared.join("READY").is_file() {
-        let _ = fs2::FileExt::unlock(&lock_file);
+        let _ = lock_file.unlock();
         return Some(shared);
     }
 
@@ -819,7 +766,7 @@ fn ensure_git_template() -> Option<PathBuf> {
             None
         }
     };
-    let _ = fs2::FileExt::unlock(&lock_file);
+    let _ = lock_file.unlock();
     result
 }
 
@@ -868,20 +815,267 @@ fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
             format!("{} already holds a git repository", dest.display()),
         ));
     }
-    copy_tree_contents(src, dest)
+    copy_fixture_tree(src, dest)
 }
 
-fn copy_tree_contents(src: &Path, dest: &Path) -> io::Result<()> {
+/// Copies fixture inputs into writable scratch, retaining executable bits.
+pub fn copy_fixture_tree(src: &Path, dest: &Path) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let from = entry.path();
         let to = dest.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_tree_contents(&from, &to)?;
+            copy_fixture_tree(&from, &to)?;
         } else {
             fs::copy(&from, &to)?;
+            let mut permissions = fs::metadata(&to)?.permissions();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                permissions.set_mode(permissions.mode() | 0o200);
+            }
+            #[cfg(not(unix))]
+            permissions.set_readonly(false);
+            fs::set_permissions(&to, permissions)?;
         }
     }
     Ok(())
+}
+
+#[test]
+fn readonly_fixture_copies_can_be_overlaid_and_edited() {
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("source");
+    fs::create_dir_all(source.join("nested")).unwrap();
+    let input = source.join("nested/input.rs");
+    fs::write(&input, "original").unwrap();
+    let mut permissions = fs::metadata(&input).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&input, permissions).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = source.join("executable");
+        fs::write(&executable, "executable").unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    let destination = scratch.path().join("destination");
+    copy_fixture_tree(&source, &destination).unwrap();
+    copy_fixture_tree(&source, &destination).unwrap();
+    fs::write(destination.join("nested/input.rs"), "edited").unwrap();
+    assert_eq!(fs::read_to_string(&input).unwrap(), "original");
+    assert!(fs::metadata(&input).unwrap().permissions().readonly());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(destination.join("executable"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0o111,
+        );
+        assert_eq!(
+            fs::metadata(&input).unwrap().permissions().mode() & 0o111,
+            fs::metadata(destination.join("nested/input.rs"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+        );
+    }
+    #[cfg(windows)]
+    {
+        let mut permissions = fs::metadata(&input).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&input, permissions).unwrap();
+    }
+}
+
+/// The one report the TypeScript fixture's compiler prints, byte-for-byte the
+/// `tsc --noEmit --pretty false` shape for a real `TS4023` on `src/index.ts`
+/// line 3 column 14, where `value` is declared.
+pub const TYPESCRIPT_FIXTURE_TSC_REPORT: &str = "src/index.ts(3,14): error TS4023: Exported variable 'value' has or is using name 'Hidden' from external module \"./src/dep\" but cannot be named.\n";
+
+/// Where the fixture compiler records each invocation: one line per run with
+/// the working directory and the arguments it received.
+pub const TYPESCRIPT_FIXTURE_TSC_INVOCATIONS: &str = "node_modules/tsc-invocations.log";
+
+/// The file whose creation lets a [`TypeScriptFixtureCompiler::Held`]
+/// compiler finish its run.
+pub const TYPESCRIPT_FIXTURE_TSC_RELEASE: &str = "node_modules/tsc-release";
+
+/// Whether the TypeScript fixture project carries its own compiler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeScriptFixtureCompiler {
+    /// `node_modules/.bin/tsc` exists and reports [`TYPESCRIPT_FIXTURE_TSC_REPORT`].
+    Present,
+    /// No `node_modules` at all: a checkout before `npm install`.
+    Missing,
+    /// Like `Present`, but each run of the single-project fixture's compiler
+    /// waits for [`TYPESCRIPT_FIXTURE_TSC_RELEASE`] before reporting, so the
+    /// producer stays pending until the test lets it publish.
+    Held,
+}
+
+/// A small TypeScript project whose sources genuinely produce `TS4023` under
+/// `declaration: true`: `index.ts` exports a value typed by an interface
+/// `dep.ts` does not export. With [`TypeScriptFixtureCompiler::Present`] the
+/// project's own `node_modules/.bin/tsc` reports that finding, so the daemon's
+/// producer must run exactly that binary from the project root.
+#[cfg(unix)]
+pub fn write_typescript_diagnostics_fixture(project: &Path, compiler: TypeScriptFixtureCompiler) {
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("package.json"),
+        "{\n  \"name\": \"diagnostics-fixture\",\n  \"private\": true\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("tsconfig.json"),
+        "{\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"declaration\": true,\n    \"module\": \"es2022\",\n    \"target\": \"es2022\"\n  },\n  \"include\": [\"src\"]\n}\n",
+    )
+    .unwrap();
+    fs::write(project.join(".gitignore"), "node_modules/\n").unwrap();
+    fs::write(
+        project.join("src/dep.ts"),
+        "interface Hidden {\n  a: number;\n}\n\nexport function make(): Hidden {\n  return { a: 1 };\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/index.ts"),
+        "import { make } from \"./dep\";\n\nexport const value = make();\n",
+    )
+    .unwrap();
+    if compiler == TypeScriptFixtureCompiler::Missing {
+        return;
+    }
+    let bin = project.join("node_modules/.bin");
+    fs::create_dir_all(&bin).unwrap();
+    let tsc = bin.join("tsc");
+    let hold = if compiler == TypeScriptFixtureCompiler::Held {
+        format!(
+            "while [ ! -e \"{}\" ]; do sleep 0.1; done\n",
+            project.join(TYPESCRIPT_FIXTURE_TSC_RELEASE).display()
+        )
+    } else {
+        String::new()
+    };
+    write_executable_script(
+        &tsc,
+        format!(
+            "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"$*\" >> \"{}\"\n{hold}cat <<'TSC_REPORT'\n{}TSC_REPORT\nexit 2\n",
+            project.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS).display(),
+            TYPESCRIPT_FIXTURE_TSC_REPORT
+        ),
+    )
+    .unwrap();
+}
+
+/// The build-info file a logged fixture-compiler invocation names when it is
+/// the producer's exact incremental check of `tsconfig` from `root`; `None`
+/// for an invocation of any other shape or tsconfig.
+#[cfg(unix)]
+pub fn typescript_fixture_build_info(
+    invocation: &str,
+    root: &Path,
+    tsconfig: &str,
+) -> Option<PathBuf> {
+    let root = root.display();
+    let build_info = PathBuf::from(invocation.strip_prefix(&format!(
+        "{root} -p {root}/{tsconfig} --noEmit --pretty false --incremental --tsBuildInfoFile "
+    ))?);
+    (build_info.extension() == Some("tsbuildinfo".as_ref())
+        && build_info.parent().and_then(Path::file_name) == Some("typescript-build-info".as_ref()))
+    .then_some(build_info)
+}
+
+/// The package file the monorepo fixture's `TS4023` is reported on.
+pub const TYPESCRIPT_MONOREPO_APP_FILE: &str = "packages/app/src/index.ts";
+
+/// A TypeScript file in the monorepo fixture that no tsconfig owns.
+pub const TYPESCRIPT_MONOREPO_UNOWNED_FILE: &str = "scripts/release.ts";
+
+/// The issue #2025 layout: a pnpm workspace whose packages each carry a
+/// `tsconfig.json` extending a root `tsconfig.base.json`, with no root
+/// `tsconfig.json`. `packages/app` has the same genuine `TS4023` sources as
+/// [`write_typescript_diagnostics_fixture`]; `packages/lib` is clean.
+///
+/// With [`TypeScriptFixtureCompiler::Present`] the workspace root's
+/// `node_modules/.bin/tsc` (pnpm hoists the binary of a root dev dependency)
+/// logs every invocation to [`TYPESCRIPT_FIXTURE_TSC_INVOCATIONS`] and reports
+/// the finding only when pointed at `packages/app/tsconfig.json`, so a record
+/// on [`TYPESCRIPT_MONOREPO_APP_FILE`] proves the producer checked that
+/// package's own tsconfig.
+#[cfg(unix)]
+pub fn write_typescript_monorepo_diagnostics_fixture(
+    project: &Path,
+    compiler: TypeScriptFixtureCompiler,
+) {
+    let files = [
+        (
+            "package.json",
+            "{\n  \"name\": \"monorepo-fixture\",\n  \"private\": true,\n  \"devDependencies\": { \"typescript\": \"5.6.3\" }\n}\n",
+        ),
+        ("pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n"),
+        ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+        (".gitignore", "node_modules/\n"),
+        (
+            "tsconfig.base.json",
+            "{\n  // shared by every package\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"declaration\": true,\n    \"module\": \"es2022\",\n    \"target\": \"es2022\",\n  },\n}\n",
+        ),
+        (
+            "packages/app/package.json",
+            "{ \"name\": \"@fixture/app\", \"private\": true }\n",
+        ),
+        (
+            "packages/app/tsconfig.json",
+            "{ \"extends\": \"../../tsconfig.base.json\", \"include\": [\"src\"] }\n",
+        ),
+        (
+            "packages/app/src/dep.ts",
+            "interface Hidden {\n  a: number;\n}\n\nexport function make(): Hidden {\n  return { a: 1 };\n}\n",
+        ),
+        (
+            TYPESCRIPT_MONOREPO_APP_FILE,
+            "import { make } from \"./dep\";\n\nexport const value = make();\n",
+        ),
+        (
+            "packages/lib/package.json",
+            "{ \"name\": \"@fixture/lib\", \"private\": true }\n",
+        ),
+        (
+            "packages/lib/tsconfig.json",
+            "{ \"extends\": \"../../tsconfig.base.json\", \"include\": [\"src\"] }\n",
+        ),
+        (
+            "packages/lib/src/lib.ts",
+            "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+        ),
+        (
+            TYPESCRIPT_MONOREPO_UNOWNED_FILE,
+            "export const release = \"v1\";\n",
+        ),
+    ];
+    for (path, contents) in files {
+        let path = project.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    if compiler == TypeScriptFixtureCompiler::Missing {
+        return;
+    }
+    let bin = project.join("node_modules/.bin");
+    fs::create_dir_all(&bin).unwrap();
+    let tsc = bin.join("tsc");
+    write_executable_script(
+        &tsc,
+        format!(
+            "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"$*\" >> \"{}\"\ncase \"$2\" in\n  */packages/app/tsconfig.json)\n    echo \"{TYPESCRIPT_MONOREPO_APP_FILE}(3,14): error TS4023: Exported variable 'value' has or is using name 'Hidden' from external module \\\"./dep\\\" but cannot be named.\"\n    exit 2 ;;\nesac\nexit 0\n",
+            project.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS).display(),
+        ),
+    )
+    .unwrap();
 }

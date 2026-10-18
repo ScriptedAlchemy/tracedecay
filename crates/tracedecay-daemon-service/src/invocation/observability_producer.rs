@@ -11,14 +11,14 @@ fn daemon_observability_producer_identity(
     project_id: &ProjectId,
     configuration_revision: &ManifestDigest,
     policy_revision: &ManifestDigest,
-) -> Result<tracedecay_usecases::observability::ObservabilityProducerIdentityV1, &'static str> {
+) -> Result<tracedecay_application::observability::ObservabilityProducerIdentityV1, &'static str> {
     let registration = NEXT_DAEMON_OBSERVABILITY_PRODUCER_REGISTRATION
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current.checked_add(1)
         })
         .map_err(|_| "daemon_observability_producer_registrations_exhausted")?;
     Ok(
-        tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+        tracedecay_application::observability::ObservabilityProducerIdentityV1 {
             authorized_scope_ref: project_id.as_str().to_owned(),
             process_boot_id: format!(
                 "daemon:{}:{registration}",
@@ -31,74 +31,63 @@ fn daemon_observability_producer_identity(
     )
 }
 
-fn registered_observability_producer_matches_mount(
-    registered: &RegisteredObservabilityProducerV1,
-    database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    project_id: &ProjectId,
-    configuration_revision: &ManifestDigest,
-    configuration_provenance_revision: &ManifestDigest,
-    policy_revision: &ManifestDigest,
-) -> bool {
-    let incumbent = registered.producer();
-    registered.matches(
-        database,
-        configuration_provenance_revision,
-        &tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
-            authorized_scope_ref: project_id.as_str().to_owned(),
-            process_boot_id: incumbent.identity().process_boot_id.clone(),
-            producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION.to_owned(),
-            configuration_revision: configuration_revision.as_str().to_owned(),
-            policy_revision: policy_revision.as_str().to_owned(),
-        },
-    )
-}
-
 impl DaemonInvocationService {
-    #[hotpath::measure(label = "daemon.service.observability.mount", future = true)]
+    #[tracing::instrument(name = "daemon.service.observability.mount", level = "trace", skip_all)]
     pub async fn mount_observability_producer(
         &self,
         project_root: PathBuf,
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         project_id: ProjectId,
         configuration_revision: ManifestDigest,
-        configuration_provenance_revision: ManifestDigest,
         policy_revision: ManifestDigest,
     ) -> Result<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
         TraceDecayError,
     > {
         self.project_runtimes
             .register_or_reconcile(
                 project_root.clone(),
                 |registered: &mut RegisteredObservabilityProducerV1| {
-                    registered_observability_producer_matches_mount(
-                        registered,
+                    if !registered.matches(
                         &database,
-                        &project_id,
-                        &configuration_revision,
-                        &configuration_provenance_revision,
-                        &policy_revision,
-                    )
-                    .then_some(())
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message:
-                            "a different observability producer is already mounted for this project"
-                                .to_owned(),
-                    })
+                        project_id.as_str(),
+                        DAEMON_OBSERVABILITY_PRODUCER_REVISION,
+                    ) {
+                        return Err(TraceDecayError::Config {
+                            message:
+                                "a different observability producer is already mounted for this project"
+                                    .to_owned(),
+                        });
+                    }
+                    // This remount resolved the store's configuration and
+                    // policy provenance again. Those are the root's own at its
+                    // own open time, so the incumbent alias re-stamps them:
+                    // otherwise a remount under a newer configuration would
+                    // keep stamping the revision frozen at the first mount for
+                    // the life of the daemon. Already-admitted observations
+                    // retain the provenance stamped when they were admitted.
+                    registered
+                        .restamp_provenance(
+                            configuration_revision.as_str(),
+                            policy_revision.as_str(),
+                        )
+                        .map_err(|reason| TraceDecayError::Config {
+                            message: format!(
+                                "project observability provenance could not be renewed: {reason}"
+                            ),
+                        })
                 },
-                || {
+                || async {
                     // The producer and its store-keyed settlement recorder are
                     // acquired per exact registered-store authority: a linked
                     // root of an already-mounted store attaches an alias to
                     // the incumbent owners instead of starting a second
                     // recorder for the same store.
-                    hotpath::measure_block!("daemon.service.observability.acquire", {
+                    { let _span = tracing::trace_span!("daemon.service.observability.acquire").entered(); {
                     self.store_observability
                         .acquire_or_start(
                             &database,
                             &StoreObservabilityMountV1 {
-                                configuration_provenance_revision:
-                                    configuration_provenance_revision.clone(),
                                 authorized_scope_ref: project_id.as_str().to_owned(),
                                 producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION
                                     .to_owned(),
@@ -115,7 +104,7 @@ impl DaemonInvocationService {
                                     &policy_revision,
                                 )
                                 .map_err(StoreObservabilityMountErrorV1::Unavailable)?;
-                                tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+                                tracedecay_application::observability::BoundedObservabilityProducerV1::start(
                                     database.clone(),
                                     identity,
                                     DAEMON_OBSERVABILITY_QUEUE_CAPACITY,
@@ -129,8 +118,12 @@ impl DaemonInvocationService {
                                     "a different observability producer is already mounted for this project store"
                                         .to_owned(),
                             },
-                            error @ (StoreObservabilityMountErrorV1::Retiring
-                            | StoreObservabilityMountErrorV1::ShutdownFailed
+                            StoreObservabilityMountErrorV1::Retiring => TraceDecayError::project_route(
+                                StoreObservabilityMountErrorV1::RETIRING_REASON_CODE,
+                                true,
+                                "The previous observability owner is settling; retry this project shortly",
+                            ),
+                            error @ (StoreObservabilityMountErrorV1::ShutdownFailed
                             | StoreObservabilityMountErrorV1::Unavailable(_)) => {
                                 TraceDecayError::Config {
                                     message: format!(
@@ -139,7 +132,7 @@ impl DaemonInvocationService {
                                 }
                             }
                         })
-                    })
+                    } }
                 },
             )
             .await?;
@@ -150,11 +143,10 @@ impl DaemonInvocationService {
             })
     }
 
-    #[hotpath::skip]
     pub async fn observability_producer(
         &self,
         project_root: Option<&Path>,
-    ) -> Option<Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>> {
+    ) -> Option<Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>> {
         self.project_runtimes
             .read::<RegisteredObservabilityProducerV1, _, _>(project_root?, |registered| {
                 registered.producer()
@@ -165,7 +157,7 @@ impl DaemonInvocationService {
     pub fn observability_producer_for_project_root(
         &self,
         project_root: &Path,
-    ) -> Option<Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>> {
+    ) -> Option<Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>> {
         self.project_runtimes
             .read_now::<RegisteredObservabilityProducerV1, _, _>(project_root, |registered| {
                 registered.producer()
@@ -177,7 +169,7 @@ impl DaemonInvocationService {
         brain_id: &tracedecay_domain::BrainId,
         profile_id: &tracedecay_domain::UserProfileId,
         project_id: &ProjectId,
-    ) -> Option<Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>> {
+    ) -> Option<Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>> {
         self.project_runtimes
             .find_equivalent::<RegisteredObservabilityProducerV1, _, _, _>(|registered| {
                 let database = registered.database();
@@ -204,12 +196,11 @@ impl DaemonInvocationService {
             })
     }
 
-    #[hotpath::skip]
     pub async fn delivery_settlement_authority(
         &self,
         project_root: Option<&Path>,
     ) -> Result<
-        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
+        Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
         &'static str,
     > {
         let Some(project_root) = project_root else {
@@ -223,11 +214,11 @@ impl DaemonInvocationService {
             .await)
     }
 
-    #[hotpath::skip]
     pub async fn delivery_settlement_recorder(
         &self,
         project_root: Option<&Path>,
-    ) -> Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>> {
+    ) -> Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>
+    {
         self.project_runtimes
             .read::<RegisteredObservabilityProducerV1, _, _>(project_root?, |registered| {
                 registered.delivery_settlement_recorder()
@@ -238,24 +229,29 @@ impl DaemonInvocationService {
     /// Resolve the durable workflow owner for an exact Work attempt without
     /// widening response-path reads to every run. The production `SQLite` port
     /// answers this through the run journal primary key.
-    #[hotpath::skip]
     pub async fn work_fan_out_binding(
         &self,
         project_root: Option<&Path>,
         identity: &tracedecay_domain::WorkAttemptIdentityV1,
-    ) -> Option<tracedecay_application::WorkflowFanOutAttemptBindingV1> {
+    ) -> Option<tracedecay_contracts::WorkflowFanOutAttemptBindingV1> {
         let runtime = self
             .project_runtimes
             .get::<RegisteredWorkRuntime>(project_root?)
             .await?;
-        let workflow = tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
+        let identity = identity.clone();
+        tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
             &runtime.database,
         )
-        .ok()?;
-        tracedecay_application::WorkflowRunStoragePort::fan_out_binding(
-            workflow.effects(),
-            identity,
-        )
+        .await
+        .ok()?
+        .read(move |workflow| {
+            Ok(tracedecay_contracts::WorkflowRunReadPort::fan_out_binding(
+                workflow.effects(),
+                &identity,
+            ))
+        })
+        .await
+        .ok()?
         .ok()
         .flatten()
     }

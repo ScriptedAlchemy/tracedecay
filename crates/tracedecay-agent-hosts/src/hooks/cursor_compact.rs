@@ -7,7 +7,10 @@
 
 use std::time::Duration;
 
+use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
 use tracedecay_lcm::LcmRelationProjectionStatus;
+
+use crate::ports::hook_runtime::HookRuntimeV1;
 
 /// A hook only waits for the daemon's typed pressure acknowledgement; the
 /// daemon owns any eventual transcript capture and compaction work. The budget
@@ -47,20 +50,30 @@ impl CursorPreCompactOutcome {
     }
 }
 
-pub async fn cursor_pre_compact_via_daemon(event_json: &str) -> CursorPreCompactOutcome {
-    cursor_pre_compact_via_daemon_with_telemetry(event_json, None).await
+pub async fn cursor_pre_compact_via_daemon(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+) -> CursorPreCompactOutcome {
+    cursor_pre_compact_via_daemon_with_telemetry(runtime, event_json, None).await
 }
 
+#[tracing::instrument(
+    name = "agent_hosts.hooks.cursor.compact_via_daemon",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn cursor_pre_compact_via_daemon_with_telemetry(
+    runtime: &HookRuntimeV1,
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> CursorPreCompactOutcome {
     if let Some(telemetry) = telemetry {
         telemetry.note_timeout_budget(CURSOR_PRE_COMPACT_BUDGET);
     }
-    if let Ok(outcome) = tokio::time::timeout(
+    if let Ok(outcome) = asupersync::time::timeout(
+        asupersync::time::wall_now(),
         CURSOR_PRE_COMPACT_BUDGET,
-        cursor_pre_compact_via_daemon_inner(event_json, telemetry),
+        cursor_pre_compact_via_daemon_inner(runtime, event_json, telemetry),
     )
     .await
     {
@@ -77,22 +90,25 @@ pub(super) async fn cursor_pre_compact_via_daemon_with_telemetry(
 }
 
 async fn cursor_pre_compact_via_daemon_inner(
+    runtime: &HookRuntimeV1,
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> CursorPreCompactOutcome {
     let root = serde_json::from_str::<serde_json::Value>(event_json)
         .ok()
         .as_ref()
-        .and_then(super::cursor::cursor_project_root_from_parsed_event);
+        .and_then(|parsed| {
+            super::cursor::cursor_project_root_from_parsed_event(&runtime.profile, parsed)
+        });
     let Some(root) = root else {
         return CursorPreCompactOutcome::skipped("no project root");
     };
     let result = match super::daemon_hook_action(
+        runtime,
         Some(&root),
-        serde_json::json!({
-            "action": "cursor_compact",
-            "event_json": event_json,
-        }),
+        HookRuntimeSurfaceRequestV1::CursorCompact {
+            event_json: event_json.to_owned(),
+        },
         telemetry,
     )
     .await
@@ -112,13 +128,17 @@ async fn cursor_pre_compact_via_daemon_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_runtime_core::config::ProfileRoot;
 
     #[tokio::test]
     async fn native_compaction_routes_once_to_daemon_within_hook_budget() {
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
-        crate::storage::pin_fixture_repository_identity(&project_root, "proj_cursor_compaction")
-            .unwrap();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            "proj_cursor_compaction",
+        )
+        .unwrap();
         let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
             "status": "scheduled",
             "reason": "accepted",
@@ -134,7 +154,11 @@ mod tests {
         .to_string();
 
         let started = std::time::Instant::now();
-        let outcome = cursor_pre_compact_via_daemon(&event_json).await;
+        let profile_home = tempfile::tempdir().unwrap();
+        let runtime = crate::ports::hook_runtime::crate_test_runtime(ProfileRoot::under_home(
+            profile_home.path(),
+        ));
+        let outcome = cursor_pre_compact_via_daemon(&runtime, &event_json).await;
 
         assert!(
             started.elapsed() < Duration::from_millis(100),

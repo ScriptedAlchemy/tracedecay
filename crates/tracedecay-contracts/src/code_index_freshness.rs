@@ -1,0 +1,1411 @@
+//! Per-mounted-worktree code-index generation and freshness wire contract.
+//!
+//! The daemon-owned code-index scheduler registry produces these values; the
+//! dashboard `GET /api/code-index/freshness` route, the MCP status/search
+//! handlers, and the CLI status command consume them.
+
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::ApplicationProblemDetailV1;
+use tracedecay_domain::errors::TraceDecayError;
+
+/// The durable build phase whose committed boundary the dashboard is reading.
+///
+/// A phase is not inferred from scheduler state. The mounted registry publishes
+/// the exact phase that owns the active generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexBuildPhaseV1 {
+    SourceScan,
+    RelationalPreparation,
+    BulkCommit,
+    IndexBuild,
+    Verification,
+    /// Text serving is built and the pass that sealed the generation is
+    /// still publishing its native graph.
+    GraphPublication,
+    Ready,
+}
+
+/// Project-route reason code for a code-index publication authority that only
+/// an explicit operator reset clears. Every producer (scheduler admission,
+/// branch publication, MCP sync, host admission) and every test asserting the
+/// refusal shares this one spelling.
+pub const CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT: &str =
+    "code_index_publication_authority_corrupt";
+
+/// A typed reason an otherwise active generation cannot make durable progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexBuildBlockedReasonV1 {
+    ResidentMemory,
+    SourceUnavailable,
+    ArtifactStoreUnavailable,
+    RetryBackoff,
+    PublicationAuthorityCorrupt,
+}
+
+/// The latest committed progress boundary for one active code-index generation.
+///
+/// Every count is scoped to `generation_id`. The snapshot never includes a
+/// staged page: work is reported only after the batch that owns it commits.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexBuildProgressV1 {
+    /// Exact generation receiving the committed build work.
+    pub generation_id: String,
+    /// Durable daemon-authority epoch that produced this snapshot.
+    ///
+    /// This orders snapshots across daemon restarts without relying on wall
+    /// clock time.
+    pub daemon_incarnation: u64,
+    /// Registry-minted scheduler incarnation within one daemon.
+    ///
+    /// A worktree retirement/remount creates a new value. `progress_epoch` is
+    /// comparable only when both incarnation fields match.
+    pub producer_incarnation: u64,
+    /// Monotonic publication epoch for replacing delayed progress reads.
+    pub progress_epoch: u64,
+    /// Identity of the sealed source whose authenticated bounds define progress.
+    pub sealed_source_digest: String,
+    /// Durable pipeline phase that published this snapshot.
+    pub phase: CodeIndexBuildPhaseV1,
+    /// Source pages committed to the artifact database.
+    pub committed_pages: u64,
+    /// Search chunks committed to the artifact database.
+    pub committed_chunks: u64,
+    /// Import evidence rows committed to the artifact database.
+    pub committed_imports: u64,
+    /// Payload bytes committed to the artifact database.
+    pub committed_payload_bytes: u64,
+    /// Authenticated sealed-source file boundary completed by committed work.
+    pub completed_files: u64,
+    /// Authenticated sealed-source file bound for this generation.
+    pub total_files: u64,
+    /// Authenticated lexical-span boundary completed by committed work, in the
+    /// sealed source's own advance unit.
+    ///
+    /// The unit is the source's, not this surface's: a sealed-layout source
+    /// advances over the files-array byte span, while a published or
+    /// partitioned source advances over file ordinals because its file records
+    /// are not a contiguous byte range at all. Both are monotone and share the
+    /// denominator below, so completion and the derived estimate are truthful;
+    /// naming them bytes was not, and a consumer that multiplied this by an
+    /// average file size was wrong by orders of magnitude (issue #1205).
+    pub completed_lexical_units: u64,
+    /// Authenticated lexical-span bound for this generation, in the same unit
+    /// as [`Self::completed_lexical_units`].
+    pub total_lexical_units: u64,
+    /// Source pages in the batch currently being processed.
+    pub current_batch_pages: u64,
+    /// Sealed payload bytes in the batch currently being processed.
+    pub current_batch_payload_bytes: u64,
+    /// Monotonic elapsed time for this process's active generation build.
+    pub elapsed_micros: u64,
+    /// Duration of the last committed SQLite batch, when one exists.
+    pub last_commit_latency_micros: Option<u64>,
+    /// Rolling committed-file throughput, absent until it is established.
+    pub files_per_second: Option<f64>,
+    /// Rolling committed lexical-span throughput in units per second, absent
+    /// until it is established. Not a byte rate; see
+    /// [`Self::completed_lexical_units`].
+    pub lexical_units_per_second: Option<f64>,
+    /// Estimated remaining build duration, absent without a truthful rate.
+    pub estimated_remaining_seconds: Option<u64>,
+    /// Unix-epoch timestamp of the last durable progress publication.
+    pub last_progress_micros: i64,
+    /// Reason the active generation cannot currently advance, when known.
+    pub blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
+}
+
+/// A deterministic contract violation that parked background convergence.
+///
+/// Parked is not dead: the worker keeps re-observing the violation on its
+/// ordinary wake cadence, so an operator fix (for example restoring an
+/// owner-private mode) is picked up on the next wake without a restart. The
+/// state exists so `status`, doctor, and the dashboard report the violation
+/// typed instead of an indefinite "warming".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexConvergenceParkedV1 {
+    /// Exact typed failure that parked convergence.
+    pub reason: String,
+    /// Stable class for callers that must decide whether new work is admissible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
+    /// Operator action that clears the violation.
+    pub remediation: String,
+    /// When the violation was first observed (microseconds since the Unix epoch).
+    pub parked_at_micros: i64,
+    /// Background passes that re-observed the violation since parking.
+    pub observed_passes: u64,
+    /// Whether the worker re-checks this violation on every ordinary wake.
+    /// True for filesystem/contract violations an operator fix clears in
+    /// place; false for an abnormal task failure that only changed input (a
+    /// new sealed generation) retries.
+    pub retries_on_wake: bool,
+}
+
+impl CodeIndexConvergenceParkedV1 {
+    /// The route refusal of a worktree parked on a corrupt publication
+    /// authority. The park travels as its typed detail, so every adapter
+    /// renders `cause` and `remedy` as fields rather than one bounded sentence.
+    pub fn publication_authority_corrupt_error(self) -> TraceDecayError {
+        TraceDecayError::project_route_with_detail(
+            CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT,
+            false,
+            ApplicationProblemDetailV1::Parked {
+                cause: self.reason,
+                remedy: self.remediation,
+                retries_on_wake: self.retries_on_wake,
+            },
+        )
+    }
+}
+
+/// Recovery state for a durable generation sealed under a different production
+/// owner configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexGenerationRecoveryV1 {
+    /// Generation retired from incremental reuse.
+    pub incompatible_generation_id: String,
+    /// Stable owner-input reason codes reported by the code-index authority.
+    pub incompatibilities: Vec<String>,
+    /// Whether the prior generation may continue serving while its replacement
+    /// builds under the current configuration.
+    pub serving: CodeIndexGenerationRecoveryServingV1,
+}
+
+/// Serving disposition of an incompatible generation during recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexGenerationRecoveryServingV1 {
+    Preserved,
+    Refused,
+}
+
+/// Interactive graph-serving state for the latest sealed generation.
+///
+/// A sealed generation can expose truthful census statistics before its graph
+/// projection is ready to serve queries, so readiness is reported separately.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CodeGraphServingReadinessV1 {
+    /// No graph-serving authority exists for this worktree or generation.
+    Unavailable { reason: String },
+    /// The sealed generation exists, but graph activation has not completed.
+    Pending,
+    /// Graph activation completed without a serving projection.
+    Refused { reason: String },
+    /// The verified graph projection is installed, but the engine or catalog
+    /// its reads need is not resident: it is still being built, or it was
+    /// released for memory. Graph reads answer the retryable warming state
+    /// and restore it.
+    Warming { reason: String },
+    /// The verified graph projection is installed for interactive reads.
+    Ready,
+}
+
+/// Typed reason a sealed generation reports once native graph publication
+/// spent its background budget. The build is a pure function of that
+/// generation, so the verdict stands until a new generation seals. Resident-
+/// memory refusals use a different reason and stay parked so they can retry.
+pub const GRAPH_PUBLICATION_DEADLINE_REASON: &str = "the sealed code graph publication \
+     exceeded its background budget; this generation serves exact and lexical without a \
+     native graph until the next generation seals";
+
+impl CodeGraphServingReadinessV1 {
+    /// The generation's graph activated: it is ready, or warming back to
+    /// ready on the next graph read.
+    #[must_use]
+    pub const fn is_activated(&self) -> bool {
+        matches!(self, Self::Ready | Self::Warming { .. })
+    }
+
+    /// Activation reached a lasting verdict for this sealed generation.
+    ///
+    /// `Ready` and `Warming` can serve. A spent publication-budget `Refused`
+    /// cannot, but waiting cannot change that answer. Resident-memory
+    /// `Refused` is not a verdict: memory can come back. `Pending` and
+    /// `Unavailable` are incomplete coverage.
+    #[must_use]
+    pub fn is_terminal_verdict(&self) -> bool {
+        match self {
+            Self::Ready | Self::Warming { .. } => true,
+            Self::Refused { reason } => reason == GRAPH_PUBLICATION_DEADLINE_REASON,
+            Self::Pending | Self::Unavailable { .. } => false,
+        }
+    }
+}
+
+/// Coverage retained by one clone-index artifact or in-progress successor.
+///
+/// Counts are `None` until the clone artifact has observed the corresponding
+/// denominator. A complete empty repository reports `Some(0)`, which keeps a
+/// designed zero distinct from unavailable coverage.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeCloneIndexCoverageV1 {
+    /// Clone body occurrences observed in the sealed lexical source.
+    pub source_bodies: Option<u64>,
+    /// Source bodies admitted for automatic clone discovery.
+    pub eligible_source_bodies: Option<u64>,
+    /// Eligible bodies with a conservative exact posting.
+    pub conservative_normalized_bodies: Option<u64>,
+    /// Eligible bodies with a complete rename-normalized exact posting.
+    pub rename_normalized_bodies: Option<u64>,
+    /// Distinct content-addressed payloads retained by the artifact.
+    pub unique_payloads: Option<u64>,
+    /// Current payload occurrences reused from the preceding generation.
+    pub payloads_reused: Option<u64>,
+    /// Conservative and rename-normalized exact posting rows.
+    pub exact_postings: Option<u64>,
+    /// Bodies excluded because they are below the automatic-discovery minimum.
+    pub excluded_too_small_bodies: Option<u64>,
+    /// Bodies excluded because they exceed the automatic-discovery token maximum.
+    pub excluded_too_large_bodies: Option<u64>,
+    /// Bodies excluded because conservative tokenization was incomplete.
+    pub excluded_incomplete_tokenization_bodies: Option<u64>,
+    /// Eligible bodies whose rename normalization is partial.
+    pub rename_partial_bodies: Option<u64>,
+    /// Eligible bodies whose language has no rename normalization.
+    pub rename_unsupported_bodies: Option<u64>,
+}
+
+/// Fixed automatic clone-discovery limits.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeCloneIndexBudgetsV1 {
+    pub minimum_body_tokens: u64,
+}
+
+/// Measured resources and update accounting for one clone-index generation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeCloneIndexResourcesV1 {
+    /// Durable artifact bytes.
+    pub bytes_on_disk: Option<u64>,
+    /// Largest measured clone-row serialization scratch during the build.
+    pub peak_scratch_memory_bytes: Option<u64>,
+    /// Latest observed source-edit arrival through clone-ready publication.
+    pub changed_symbol_update_micros: Option<u64>,
+    /// Prior clone payload bindings invalidated by the latest publication.
+    pub stale_invalidations: Option<u64>,
+}
+
+/// Generation-pinned clone-index evidence shared by non-error readiness states.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeCloneIndexObservationV1 {
+    pub generation_id: String,
+    pub source_revision: Option<String>,
+    pub artifact_format_revision: Option<u32>,
+    pub conservative_normalization_revision: u16,
+    pub rename_normalization_revision: u16,
+    pub coverage: CodeCloneIndexCoverageV1,
+    pub budgets: CodeCloneIndexBudgetsV1,
+    pub resources: CodeCloneIndexResourcesV1,
+}
+
+/// Clone readiness, independent from lexical and graph serving.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CodeCloneIndexStatusV1 {
+    /// The sealed lexical artifact or its clone rows cannot be read.
+    Unavailable { reason: String },
+    /// Some clone evidence is readable, but required postings are missing.
+    Partial {
+        observation: CodeCloneIndexObservationV1,
+        omission_reasons: Vec<String>,
+    },
+    /// Required exact postings cover every eligible body.
+    Ready {
+        observation: CodeCloneIndexObservationV1,
+    },
+    /// The artifact is readable but belongs to a superseded source generation.
+    Stale {
+        observation: CodeCloneIndexObservationV1,
+        reason: String,
+    },
+}
+
+impl Default for CodeCloneIndexStatusV1 {
+    fn default() -> Self {
+        Self::Unavailable {
+            reason: "clone index authority is unavailable".to_owned(),
+        }
+    }
+}
+
+/// Closed staleness ladder for one mounted worktree.
+///
+/// The scheduler publishes one of these tokens. MCP, the dashboard, and the
+/// CLI must match the variant, not a hand-copied string, so a new ladder
+/// state cannot appear at one caller and be missed at the others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexStalenessStateV1 {
+    Fresh,
+    Stale,
+    Indexing,
+    Refreshing,
+    Restoring,
+    Verifying,
+    Parked,
+}
+
+impl CodeIndexStalenessStateV1 {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Indexing => "indexing",
+            Self::Refreshing => "refreshing",
+            Self::Restoring => "restoring",
+            Self::Verifying => "verifying",
+            Self::Parked => "parked",
+        }
+    }
+
+    #[must_use]
+    pub fn from_wire(token: &str) -> Option<Self> {
+        match token {
+            "fresh" => Some(Self::Fresh),
+            "stale" => Some(Self::Stale),
+            "indexing" => Some(Self::Indexing),
+            "refreshing" => Some(Self::Refreshing),
+            "restoring" => Some(Self::Restoring),
+            "verifying" => Some(Self::Verifying),
+            "parked" => Some(Self::Parked),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for CodeIndexStalenessStateV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Coverage of one freshness read. Distinct from [`CodeIndexStalenessStateV1`]:
+/// a generation can be fresh and still omit hook-hint counts, or unverified
+/// while the ladder would otherwise say ready.
+///
+/// `Unobserved` is only the constructed default. A projected read never emits
+/// it, so an absent observation cannot be mistaken for `complete`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexFreshnessCoverageV1 {
+    #[default]
+    Unobserved,
+    Complete,
+    PartialRefreshInProgress,
+    PartialArtifactRestore,
+    PartialSourceVerification,
+    PartialUnverifiedRestore,
+    PartialHookHintOverflow,
+    /// The sealed generation is fresh for every source it can index, and
+    /// [`CodeIndexWorktreeFreshnessV1::omitted_sources`] names the sources it
+    /// cannot. Waiting cannot change it.
+    PartialOmittedSources,
+}
+
+impl CodeIndexFreshnessCoverageV1 {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unobserved => "unobserved",
+            Self::Complete => "complete",
+            Self::PartialRefreshInProgress => "partial_refresh_in_progress",
+            Self::PartialArtifactRestore => "partial_artifact_restore",
+            Self::PartialSourceVerification => "partial_source_verification",
+            Self::PartialUnverifiedRestore => "partial_unverified_restore",
+            Self::PartialHookHintOverflow => "partial_hook_hint_overflow",
+            Self::PartialOmittedSources => "partial_omitted_sources",
+        }
+    }
+
+    #[must_use]
+    pub fn from_wire(token: &str) -> Option<Self> {
+        match token {
+            "unobserved" => Some(Self::Unobserved),
+            "complete" => Some(Self::Complete),
+            "partial_refresh_in_progress" => Some(Self::PartialRefreshInProgress),
+            "partial_artifact_restore" => Some(Self::PartialArtifactRestore),
+            "partial_source_verification" => Some(Self::PartialSourceVerification),
+            "partial_unverified_restore" => Some(Self::PartialUnverifiedRestore),
+            "partial_hook_hint_overflow" => Some(Self::PartialHookHintOverflow),
+            "partial_omitted_sources" => Some(Self::PartialOmittedSources),
+            _ => None,
+        }
+    }
+
+    /// Whether the read covers every source the sealed snapshot can index.
+    /// Omitted sources are a property of the source tree, not of the read.
+    #[must_use]
+    pub const fn covers_indexable_sources(self) -> bool {
+        matches!(self, Self::Complete | Self::PartialOmittedSources)
+    }
+}
+
+impl std::fmt::Display for CodeIndexFreshnessCoverageV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Inputs to the single freshness ladder.
+///
+/// `source_verified` is `None` when the scheduler lock was not held, so that
+/// read must not claim an unverified restore. A park with `retries_on_wake`
+/// false is terminal for this observation: a racing wake must not make the
+/// worktree look like a rebuild.
+#[derive(Clone, Copy, Debug)]
+pub struct CodeIndexFreshnessLadderInputsV1<'a> {
+    pub ready: bool,
+    pub refresh_in_flight: bool,
+    pub restore_in_flight: bool,
+    pub source_change_pending: bool,
+    pub parked: Option<&'a CodeIndexConvergenceParkedV1>,
+    pub source_verified: Option<bool>,
+    pub hook_hint_count: Option<u64>,
+    /// Whether the serving snapshot omits any source it captured.
+    pub sources_omitted: bool,
+}
+
+/// The ladder plus the two fields that must stay consistent with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeIndexFreshnessLadderV1 {
+    pub staleness_state: CodeIndexStalenessStateV1,
+    pub rebuild_in_flight: bool,
+    pub coverage: CodeIndexFreshnessCoverageV1,
+}
+
+impl CodeIndexFreshnessLadderV1 {
+    #[must_use]
+    pub fn project(inputs: CodeIndexFreshnessLadderInputsV1<'_>) -> Self {
+        let terminal_park = inputs.parked.is_some_and(|parked| !parked.retries_on_wake);
+        let refresh_in_flight = inputs.refresh_in_flight && !terminal_park;
+        let verifying = inputs.ready && refresh_in_flight && !inputs.source_change_pending;
+        let refreshing = refresh_in_flight && !verifying && !inputs.restore_in_flight;
+        let hints_outstanding = inputs.hook_hint_count != Some(0);
+        let source_unverified = inputs.source_verified == Some(false);
+        let admitted_stale = source_unverified || hints_outstanding;
+        let staleness_state = if inputs.parked.is_some() && !inputs.ready {
+            CodeIndexStalenessStateV1::Parked
+        } else if inputs.restore_in_flight && !inputs.ready {
+            CodeIndexStalenessStateV1::Restoring
+        } else if verifying {
+            CodeIndexStalenessStateV1::Verifying
+        } else if refreshing {
+            if inputs.ready {
+                CodeIndexStalenessStateV1::Refreshing
+            } else {
+                CodeIndexStalenessStateV1::Indexing
+            }
+        } else if admitted_stale && inputs.ready {
+            CodeIndexStalenessStateV1::Stale
+        } else if admitted_stale || !inputs.ready {
+            CodeIndexStalenessStateV1::Indexing
+        } else {
+            CodeIndexStalenessStateV1::Fresh
+        };
+        let coverage = if inputs.restore_in_flight {
+            CodeIndexFreshnessCoverageV1::PartialArtifactRestore
+        } else if refreshing {
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
+        } else if verifying {
+            CodeIndexFreshnessCoverageV1::PartialSourceVerification
+        } else if source_unverified {
+            CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore
+        } else if inputs.hook_hint_count.is_some() {
+            if inputs.sources_omitted {
+                CodeIndexFreshnessCoverageV1::PartialOmittedSources
+            } else {
+                CodeIndexFreshnessCoverageV1::Complete
+            }
+        } else {
+            CodeIndexFreshnessCoverageV1::PartialHookHintOverflow
+        };
+        Self {
+            staleness_state,
+            rebuild_in_flight: refreshing,
+            coverage,
+        }
+    }
+}
+
+/// Bounded authentication work required to restore one immutable lexical
+/// artifact as a serving reader.
+///
+/// The unit is a fixed restore check, not bytes or build work. Completed
+/// checks are published only after they pass. `authenticated_remaining` is
+/// always `authenticated_total - authenticated_completed`, so a caller can
+/// distinguish bounded cold restore from an unbounded rebuild.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexRestoreProgressV1 {
+    /// Generation whose lexical serving seat is being restored.
+    pub generation_id: String,
+    /// Whole-file content address from the durable artifact descriptor.
+    pub artifact_digest: String,
+    /// Successfully completed authentication checks.
+    pub authenticated_completed: u64,
+    /// Fixed number of authentication checks for this restore.
+    pub authenticated_total: u64,
+    /// Checks that have not completed yet.
+    pub authenticated_remaining: u64,
+}
+
+/// Freshness/generation state for one mounted worktree.
+///
+/// `Deserialize` is part of the wire contract: the CLI status command decodes
+/// exactly this type back out of the daemon's `tracedecay_status` response,
+/// keeping one authority for the freshness shape.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexWorktreeFreshnessV1 {
+    /// Display path of the mounted worktree root.
+    pub worktree_root: String,
+    /// Stable repository identity resolved by the scheduler.
+    pub repository_id: Option<String>,
+    /// Stable worktree identity resolved by the scheduler.
+    pub worktree_id: Option<String>,
+    /// Exact source reference captured by the sealed generation.
+    pub source_reference: Option<String>,
+    /// Exact source revision captured by the sealed generation.
+    pub source_revision: Option<String>,
+    /// Latest sealed generation identity, when a complete generation exists.
+    pub latest_generation_id: Option<String>,
+    /// Whether that generation's verified graph projection can serve reads.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_graph_serving: Option<CodeGraphServingReadinessV1>,
+    /// Clone readiness from the same sealed lexical artifact.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clone_index: Option<CodeCloneIndexStatusV1>,
+    /// Content identity of the complete source snapshot.
+    pub snapshot_content_identity: Option<String>,
+    /// Time the complete generation was durably sealed.
+    pub sealed_at_micros: Option<i64>,
+    /// Last reconcile observation time (microseconds since the Unix epoch).
+    pub last_reconcile_micros: Option<i64>,
+    /// Staleness-ladder state from the last scheduler execution. `fresh` means
+    /// the scheduler most recently observed a fresh source; the status read
+    /// does not probe the worktree to revalidate that observation.
+    pub staleness_state: Option<CodeIndexStalenessStateV1>,
+    /// Whether the exact scheduler route owns a reconcile pass or has a
+    /// pending wake. A stale seated generation with this false is stalled,
+    /// not in a routine rebuild window.
+    #[serde(default)]
+    pub rebuild_in_flight: bool,
+    /// Pending hook-hint count, when cheaply available.
+    pub hook_hint_count: Option<u64>,
+    /// Whether this read covers the complete mounted scheduler state.
+    pub coverage: CodeIndexFreshnessCoverageV1,
+    /// Sources the serving snapshot captured but does not index, when any.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omitted_sources: Option<CodeIndexOmittedSourcesV1>,
+    /// Latest committed progress for the active generation, if one is mounted.
+    pub progress: Option<CodeIndexBuildProgressV1>,
+    /// Bounded immutable-artifact restore work currently in flight. This is
+    /// separate from build progress because restore commits no index data.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_progress: Option<CodeIndexRestoreProgressV1>,
+    /// Deterministic contract violation currently parking background
+    /// convergence, when one is observed. `staleness_state` reads `parked`
+    /// while this is set and no generation serves.
+    pub parked: Option<CodeIndexConvergenceParkedV1>,
+    /// One-shot owner-configuration recovery currently replacing an
+    /// incompatible durable generation.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_recovery: Option<CodeIndexGenerationRecoveryV1>,
+}
+
+/// Most omitted sources one freshness read lists; `count` carries the total.
+pub const CODE_INDEX_OMITTED_SOURCE_LIST_LIMIT: usize = 16;
+
+/// Sources a sealed snapshot captured but does not index.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexOmittedSourcesV1 {
+    /// Every omitted source in the snapshot.
+    pub count: u64,
+    /// The first omitted sources in Git path order, at most
+    /// [`CODE_INDEX_OMITTED_SOURCE_LIST_LIMIT`].
+    pub sources: Vec<CodeIndexOmittedSourceV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexOmittedSourceV1 {
+    /// The exact Git path bytes, which need not be UTF-8.
+    pub git_path_bytes: Vec<u8>,
+    /// `git_path_bytes` decoded for display, invalid UTF-8 replaced.
+    pub display_path: String,
+    pub reason: CodeIndexSourceOmissionReasonV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CodeIndexSourceOmissionReasonV1 {
+    /// No logical path can carry the Git path: not UTF-8, a backslash, a
+    /// control character, or leading or trailing whitespace.
+    UnrepresentablePath,
+    /// The privacy boundary withheld the file's bytes.
+    PrivacyWithheld { detail: String },
+}
+
+impl CodeIndexOmittedSourcesV1 {
+    /// The projection of one sealed snapshot's omitted sources, `None` when
+    /// it omits none.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &tracedecay_domain::SanitizedCodeSnapshotV1) -> Option<Self> {
+        if snapshot.omitted_sources.is_empty() {
+            return None;
+        }
+        Some(Self {
+            count: snapshot.omitted_sources.len() as u64,
+            sources: snapshot
+                .omitted_sources
+                .iter()
+                .take(CODE_INDEX_OMITTED_SOURCE_LIST_LIMIT)
+                .map(|source| CodeIndexOmittedSourceV1 {
+                    git_path_bytes: source.git_path.clone(),
+                    display_path: String::from_utf8_lossy(&source.git_path).into_owned(),
+                    reason: match &source.reason {
+                        tracedecay_domain::CodeSourceOmissionReasonV1::UnrepresentablePath => {
+                            CodeIndexSourceOmissionReasonV1::UnrepresentablePath
+                        }
+                        tracedecay_domain::CodeSourceOmissionReasonV1::PrivacyWithheld {
+                            detail,
+                        } => CodeIndexSourceOmissionReasonV1::PrivacyWithheld {
+                            detail: detail.clone(),
+                        },
+                    },
+                })
+                .collect(),
+        })
+    }
+}
+
+/// A freshness read failed. Distinct from an unmounted route, which is `Ok(None)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexFreshnessReadFailureV1 {
+    ReadFailed,
+    /// The route's last code-index mount failed and no later attempt mounted.
+    MountFailed,
+    /// A linked worktree the watch policy keeps out of automatic indexing,
+    /// with nothing mounted or mounting for it.
+    LinkedWorktreeDisabled,
+}
+
+/// Safe operator-facing status for a failed code-index mount.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct CodeIndexMountFailureV1 {
+    pub message: String,
+    pub remediation: String,
+}
+
+/// A policy that keeps the route from being indexed, with the operator step
+/// that lifts it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct CodeIndexRouteRefusalV1 {
+    pub reason: String,
+    pub remediation: String,
+}
+
+pub type CodeIndexFreshnessReadFuture = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    Option<CodeIndexWorktreeFreshnessV1>,
+                    CodeIndexFreshnessReadFailureV1,
+                >,
+            > + Send
+            + 'static,
+    >,
+>;
+pub type CodeIndexFreshnessReader =
+    Arc<dyn Fn(PathBuf) -> CodeIndexFreshnessReadFuture + Send + Sync + 'static>;
+
+/// The readiness a status caller can wait for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexReadinessTargetV1 {
+    /// A sealed complete generation serves exact and lexical reads for the
+    /// current source: `code_index_freshness.status` is `current`.
+    Fresh,
+    /// `fresh`, and the generation's native code graph also serves.
+    Ready,
+    /// A published generation's native code graph serves and no convergence
+    /// park is set, whatever the source freshness. Waiting for it never
+    /// sweeps the source, so it cannot arm the reconcile it would observe.
+    GraphReady,
+}
+
+/// `tracedecay_status` `wait_for`: hold the status read until the worktree
+/// reaches `state`, for at most the caller's `timeout_ms`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexReadinessWaitV1 {
+    pub state: CodeIndexReadinessTargetV1,
+    pub timeout_ms: u64,
+}
+
+/// How a `wait_for` status read ended. The status payload beside it is read
+/// after the wait ends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CodeIndexReadinessWaitOutcomeV1 {
+    Reached,
+    /// The caller's budget elapsed; `last_state` is the last observed
+    /// `code_index_freshness.status`.
+    TimedOut {
+        last_state: String,
+    },
+    /// Waiting cannot reach the target: no scheduler is mounted, graph
+    /// serving was refused, convergence is parked, or the request ended.
+    Unavailable {
+        reason: String,
+    },
+}
+
+/// Reason code of a refusal reporting a `timed_out` wait outcome; retrying
+/// the wait may reach the target.
+pub const CODE_INDEX_READINESS_WAIT_TIMED_OUT: &str = "code_index_readiness_wait_timed_out";
+
+/// Reason code of a refusal reporting an `unavailable` wait outcome.
+pub const CODE_INDEX_READINESS_WAIT_UNAVAILABLE: &str = "code_index_readiness_wait_unavailable";
+
+/// Whether one freshness reading satisfies a readiness target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexReadinessV1 {
+    Reached,
+    Pending,
+    /// Waiting cannot change the answer.
+    Unreachable {
+        reason: String,
+    },
+}
+
+impl CodeIndexWorktreeFreshnessV1 {
+    /// A sealed complete generation verified against the current source.
+    #[must_use]
+    pub fn is_authoritative(&self) -> bool {
+        self.latest_generation_id.is_some()
+            && self.coverage.covers_indexable_sources()
+            && self.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+    }
+
+    #[must_use]
+    pub fn readiness(&self, target: CodeIndexReadinessTargetV1) -> CodeIndexReadinessV1 {
+        if self.staleness_state == Some(CodeIndexStalenessStateV1::Parked) {
+            return CodeIndexReadinessV1::Unreachable {
+                reason: "code_index_convergence_parked".to_owned(),
+            };
+        }
+        if target != CodeIndexReadinessTargetV1::Fresh {
+            match &self.code_graph_serving {
+                Some(CodeGraphServingReadinessV1::Refused { reason }) => {
+                    return CodeIndexReadinessV1::Unreachable {
+                        reason: format!("code_graph_refused: {reason}"),
+                    };
+                }
+                Some(CodeGraphServingReadinessV1::Unavailable { reason })
+                    if reason == "graph_activation_disabled" =>
+                {
+                    return CodeIndexReadinessV1::Unreachable {
+                        reason: reason.clone(),
+                    };
+                }
+                _ => {}
+            }
+        }
+        let graph_serving = self
+            .code_graph_serving
+            .as_ref()
+            .is_some_and(CodeGraphServingReadinessV1::is_activated);
+        let reached = match target {
+            CodeIndexReadinessTargetV1::Fresh => self.is_authoritative(),
+            CodeIndexReadinessTargetV1::Ready => self.is_authoritative() && graph_serving,
+            CodeIndexReadinessTargetV1::GraphReady => {
+                self.latest_generation_id.is_some() && graph_serving && self.parked.is_none()
+            }
+        };
+        if reached {
+            CodeIndexReadinessV1::Reached
+        } else {
+            CodeIndexReadinessV1::Pending
+        }
+    }
+}
+
+/// What a readiness wait observed when it ended.
+#[derive(Clone, Debug)]
+pub enum CodeIndexReadinessWaitReadV1 {
+    /// `reading` is the reading that satisfied the target; a response built
+    /// on the wait describes this reading, not a later one.
+    Reached {
+        reading: Box<CodeIndexWorktreeFreshnessV1>,
+    },
+    /// The budget elapsed; `last` is the last reading, `None` while the root
+    /// was never mounted.
+    TimedOut {
+        last: Option<Box<CodeIndexWorktreeFreshnessV1>>,
+    },
+    Unreachable {
+        reason: String,
+    },
+}
+
+pub type CodeIndexReadinessWaitFuture = Pin<
+    Box<
+        dyn Future<Output = Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1>>
+            + Send
+            + 'static,
+    >,
+>;
+/// Waits on the scheduler registry's own change signals until a project
+/// root reaches a readiness target or the budget elapses. Dropping the
+/// future abandons the wait without side effects.
+pub type CodeIndexReadinessWaiter = Arc<
+    dyn Fn(PathBuf, CodeIndexReadinessTargetV1, std::time::Duration) -> CodeIndexReadinessWaitFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct CodeIndexFreshnessPayloadV1 {
+    pub worktrees: Vec<CodeIndexWorktreeFreshnessV1>,
+    pub note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_failure: Option<CodeIndexMountFailureV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<CodeIndexRouteRefusalV1>,
+}
+
+const LIVE_NOTE: &str = "last daemon scheduler execution state; generation and scope come from the durable sealed generation";
+const UNMOUNTED_NOTE: &str =
+    "the daemon scheduler registry has no mounted scheduler for this project";
+const UNAVAILABLE_NOTE: &str =
+    "the dashboard is not attached to a daemon-owned code-index scheduler registry";
+const READ_FAILED_NOTE: &str = "code-index freshness read failed";
+const MOUNT_FAILED_NOTE: &str = "the last code-index mount for this project failed";
+const MOUNT_FAILED_MESSAGE: &str = "the code-index scheduler could not mount for this project";
+const MOUNT_FAILED_REMEDIATION: &str = "run `tracedecay sync` to retry the code-index mount";
+/// Stable reason code for a failed demand-driven code-index mount.
+pub const CODE_INDEX_MOUNT_FAILED: &str = "code_index_mount_failed";
+const LINKED_WORKTREE_DISABLED_NOTE: &str =
+    "the watch policy keeps this linked worktree out of automatic indexing";
+const LINKED_WORKTREE_DISABLED_REMEDIATION: &str = "this linked worktree is not indexed automatically (sync.watch_linked_worktrees.v1 is false); run `tracedecay sync` in it to index it once, or set sync.watch_linked_worktrees.v1 to true at the project layer to index linked worktrees automatically";
+/// Stable reason code for a linked worktree the watch policy keeps out of
+/// automatic indexing.
+pub const CODE_INDEX_LINKED_WORKTREE_DISABLED: &str = "linked_worktree_disabled";
+
+impl CodeIndexFreshnessPayloadV1 {
+    /// Payload after the daemon scheduler registry answered for this project.
+    ///
+    /// The `note` is owned here. MCP dispatch and the HTTP freshness route
+    /// must not spell it a second time.
+    pub fn from_scheduler_observation(
+        worktrees: impl IntoIterator<Item = CodeIndexWorktreeFreshnessV1>,
+    ) -> Self {
+        Self {
+            worktrees: worktrees.into_iter().collect(),
+            note: LIVE_NOTE.to_owned(),
+            mount_failure: None,
+            refusal: None,
+        }
+    }
+
+    /// Reader attached, but no mounted scheduler for this project.
+    pub fn from_unmounted_scheduler() -> Self {
+        Self {
+            worktrees: Vec::new(),
+            note: UNMOUNTED_NOTE.to_owned(),
+            mount_failure: None,
+            refusal: None,
+        }
+    }
+
+    /// No scheduler-registry reader is attached.
+    pub fn from_unattached_registry() -> Self {
+        Self {
+            worktrees: Vec::new(),
+            note: UNAVAILABLE_NOTE.to_owned(),
+            mount_failure: None,
+            refusal: None,
+        }
+    }
+
+    /// One scheduler read: a live worktree, or the unmounted-empty payload.
+    pub fn from_scheduler_read(worktree: Option<CodeIndexWorktreeFreshnessV1>) -> Self {
+        match worktree {
+            Some(worktree) => Self::from_scheduler_observation([worktree]),
+            None => Self::from_unmounted_scheduler(),
+        }
+    }
+
+    /// A scheduler read that could not answer with a worktree.
+    pub fn from_read_failure(failure: CodeIndexFreshnessReadFailureV1) -> Self {
+        match failure {
+            CodeIndexFreshnessReadFailureV1::ReadFailed => Self {
+                worktrees: Vec::new(),
+                note: READ_FAILED_NOTE.to_owned(),
+                mount_failure: None,
+                refusal: None,
+            },
+            CodeIndexFreshnessReadFailureV1::MountFailed => Self {
+                worktrees: Vec::new(),
+                note: MOUNT_FAILED_NOTE.to_owned(),
+                mount_failure: Some(CodeIndexMountFailureV1 {
+                    message: MOUNT_FAILED_MESSAGE.to_owned(),
+                    remediation: MOUNT_FAILED_REMEDIATION.to_owned(),
+                }),
+                refusal: None,
+            },
+            CodeIndexFreshnessReadFailureV1::LinkedWorktreeDisabled => Self {
+                worktrees: Vec::new(),
+                note: LINKED_WORKTREE_DISABLED_NOTE.to_owned(),
+                mount_failure: None,
+                refusal: Some(CodeIndexRouteRefusalV1 {
+                    reason: CODE_INDEX_LINKED_WORKTREE_DISABLED.to_owned(),
+                    remediation: LINKED_WORKTREE_DISABLED_REMEDIATION.to_owned(),
+                }),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod clone_status_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_observation_payload_owns_the_live_note() {
+        let payload = CodeIndexFreshnessPayloadV1::from_scheduler_observation([]);
+        assert_eq!(payload.note, LIVE_NOTE);
+        assert!(payload.worktrees.is_empty());
+    }
+
+    #[test]
+    fn unmounted_and_unattached_payloads_own_their_notes() {
+        let unmounted = CodeIndexFreshnessPayloadV1::from_unmounted_scheduler();
+        assert_eq!(unmounted.note, UNMOUNTED_NOTE);
+        assert!(unmounted.worktrees.is_empty());
+        assert_eq!(
+            CodeIndexFreshnessPayloadV1::from_scheduler_read(None).note,
+            UNMOUNTED_NOTE
+        );
+        let unattached = CodeIndexFreshnessPayloadV1::from_unattached_registry();
+        assert_eq!(unattached.note, UNAVAILABLE_NOTE);
+        assert!(unattached.worktrees.is_empty());
+    }
+
+    #[test]
+    fn mount_failure_payload_names_the_failure_and_retry() {
+        let payload = CodeIndexFreshnessPayloadV1::from_read_failure(
+            CodeIndexFreshnessReadFailureV1::MountFailed,
+        );
+        let failure = payload
+            .mount_failure
+            .expect("a failed mount carries its typed status");
+
+        assert_eq!(payload.note, MOUNT_FAILED_NOTE);
+        assert_eq!(
+            failure.message,
+            "the code-index scheduler could not mount for this project"
+        );
+        assert_eq!(
+            failure.remediation,
+            "run `tracedecay sync` to retry the code-index mount"
+        );
+    }
+
+    #[test]
+    fn graph_serving_readiness_is_additive_for_older_daemon_responses() {
+        let mut value = serde_json::to_value(CodeIndexWorktreeFreshnessV1::default())
+            .expect("freshness serializes");
+        value
+            .as_object_mut()
+            .expect("freshness object")
+            .remove("code_graph_serving");
+        value
+            .as_object_mut()
+            .expect("freshness object")
+            .remove("rebuild_in_flight");
+
+        let decoded: CodeIndexWorktreeFreshnessV1 =
+            serde_json::from_value(value).expect("older response remains readable");
+        assert_eq!(decoded.code_graph_serving, None);
+        assert!(!decoded.rebuild_in_flight);
+
+        assert!(CodeGraphServingReadinessV1::Ready.is_terminal_verdict());
+        assert!(
+            CodeGraphServingReadinessV1::Warming {
+                reason: "catalog".to_owned()
+            }
+            .is_terminal_verdict()
+        );
+        assert!(
+            CodeGraphServingReadinessV1::Refused {
+                reason: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned()
+            }
+            .is_terminal_verdict()
+        );
+        assert!(
+            !CodeGraphServingReadinessV1::Refused {
+                reason: "code graph activation was refused by the resident-memory policy"
+                    .to_owned()
+            }
+            .is_terminal_verdict(),
+            "a resident-memory refusal stays parked so it can retry"
+        );
+        assert!(!CodeGraphServingReadinessV1::Pending.is_terminal_verdict());
+        assert!(
+            !CodeGraphServingReadinessV1::Unavailable {
+                reason: "missing".to_owned()
+            }
+            .is_terminal_verdict()
+        );
+        assert!(
+            !CodeGraphServingReadinessV1::Refused {
+                reason: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned()
+            }
+            .is_activated()
+        );
+
+        let ready = serde_json::to_value(CodeGraphServingReadinessV1::Ready)
+            .expect("ready state serializes");
+        assert_eq!(ready, serde_json::json!({ "state": "ready" }));
+    }
+
+    #[test]
+    fn generation_recovery_serializes_typed_serving_disposition() {
+        let recovery = CodeIndexGenerationRecoveryV1 {
+            incompatible_generation_id: "generation.config-a".to_owned(),
+            incompatibilities: vec!["policy_revision".to_owned()],
+            serving: CodeIndexGenerationRecoveryServingV1::Refused,
+        };
+
+        assert_eq!(
+            serde_json::to_value(recovery).expect("generation recovery serializes"),
+            serde_json::json!({
+                "incompatible_generation_id": "generation.config-a",
+                "incompatibilities": ["policy_revision"],
+                "serving": "refused"
+            })
+        );
+    }
+
+    fn ladder(inputs: CodeIndexFreshnessLadderInputsV1<'_>) -> CodeIndexFreshnessLadderV1 {
+        CodeIndexFreshnessLadderV1::project(inputs)
+    }
+
+    fn settled() -> CodeIndexFreshnessLadderInputsV1<'static> {
+        CodeIndexFreshnessLadderInputsV1 {
+            ready: true,
+            refresh_in_flight: false,
+            restore_in_flight: false,
+            source_change_pending: false,
+            parked: None,
+            source_verified: Some(true),
+            hook_hint_count: Some(0),
+            sources_omitted: false,
+        }
+    }
+
+    #[test]
+    fn freshness_ladder_tokens_round_trip_the_wire_spelling() {
+        for state in [
+            CodeIndexStalenessStateV1::Fresh,
+            CodeIndexStalenessStateV1::Stale,
+            CodeIndexStalenessStateV1::Indexing,
+            CodeIndexStalenessStateV1::Refreshing,
+            CodeIndexStalenessStateV1::Restoring,
+            CodeIndexStalenessStateV1::Verifying,
+            CodeIndexStalenessStateV1::Parked,
+        ] {
+            assert_eq!(
+                CodeIndexStalenessStateV1::from_wire(state.as_str()),
+                Some(state)
+            );
+            assert_eq!(
+                serde_json::to_value(state).expect("staleness serializes"),
+                serde_json::json!(state.as_str())
+            );
+        }
+        for coverage in [
+            CodeIndexFreshnessCoverageV1::Complete,
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress,
+            CodeIndexFreshnessCoverageV1::PartialArtifactRestore,
+            CodeIndexFreshnessCoverageV1::PartialSourceVerification,
+            CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore,
+            CodeIndexFreshnessCoverageV1::PartialHookHintOverflow,
+            CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+        ] {
+            assert_eq!(
+                CodeIndexFreshnessCoverageV1::from_wire(coverage.as_str()),
+                Some(coverage)
+            );
+        }
+        assert_eq!(
+            CodeIndexFreshnessCoverageV1::default(),
+            CodeIndexFreshnessCoverageV1::Unobserved
+        );
+    }
+
+    #[test]
+    fn settled_ready_generation_is_fresh_and_complete() {
+        let observed = ladder(settled());
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Fresh);
+        assert!(!observed.rebuild_in_flight);
+        assert_eq!(observed.coverage, CodeIndexFreshnessCoverageV1::Complete);
+    }
+
+    /// A source no generation can index makes coverage partial, but waiting
+    /// for `fresh` still ends: no later generation could index it either.
+    #[test]
+    fn omitted_sources_are_partial_coverage_that_still_reaches_fresh() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            sources_omitted: true,
+            ..settled()
+        });
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Fresh);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialOmittedSources
+        );
+        let freshness = CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(observed.staleness_state),
+            coverage: observed.coverage,
+            ..Default::default()
+        };
+        assert_eq!(
+            freshness.readiness(CodeIndexReadinessTargetV1::Fresh),
+            CodeIndexReadinessV1::Reached
+        );
+
+        let refreshing = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: false,
+            refresh_in_flight: true,
+            sources_omitted: true,
+            ..settled()
+        });
+        assert_eq!(
+            refreshing.coverage,
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
+        );
+    }
+
+    #[test]
+    fn verifying_is_not_a_rebuild() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: true,
+            refresh_in_flight: true,
+            source_change_pending: false,
+            ..settled()
+        });
+        assert_eq!(
+            observed.staleness_state,
+            CodeIndexStalenessStateV1::Verifying
+        );
+        assert!(!observed.rebuild_in_flight);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialSourceVerification
+        );
+    }
+
+    #[test]
+    fn bounded_artifact_restore_is_not_a_rebuild() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: false,
+            refresh_in_flight: true,
+            restore_in_flight: true,
+            ..settled()
+        });
+        assert_eq!(
+            observed.staleness_state,
+            CodeIndexStalenessStateV1::Restoring
+        );
+        assert!(!observed.rebuild_in_flight);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialArtifactRestore
+        );
+    }
+
+    #[test]
+    fn source_change_while_ready_is_a_refresh() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: true,
+            refresh_in_flight: true,
+            source_change_pending: true,
+            ..settled()
+        });
+        assert_eq!(
+            observed.staleness_state,
+            CodeIndexStalenessStateV1::Refreshing
+        );
+        assert!(observed.rebuild_in_flight);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
+        );
+    }
+
+    #[test]
+    fn locked_read_reports_unverified_restore_separately_from_a_busy_read() {
+        let locked = ladder(CodeIndexFreshnessLadderInputsV1 {
+            source_verified: Some(false),
+            ..settled()
+        });
+        assert_eq!(locked.staleness_state, CodeIndexStalenessStateV1::Stale);
+        assert_eq!(
+            locked.coverage,
+            CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore
+        );
+        let busy = ladder(CodeIndexFreshnessLadderInputsV1 {
+            source_verified: None,
+            ..settled()
+        });
+        assert_eq!(busy.staleness_state, CodeIndexStalenessStateV1::Fresh);
+        assert_eq!(busy.coverage, CodeIndexFreshnessCoverageV1::Complete);
+    }
+
+    #[test]
+    fn unknown_hint_count_is_stale_when_ready_and_overflow_coverage() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            hook_hint_count: None,
+            ..settled()
+        });
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Stale);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialHookHintOverflow
+        );
+    }
+
+    #[test]
+    fn terminal_park_is_not_a_racing_rebuild() {
+        let parked = CodeIndexConvergenceParkedV1 {
+            reason: "corrupt".to_owned(),
+            blocked_reason: Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt),
+            remediation: "reset".to_owned(),
+            parked_at_micros: 1,
+            observed_passes: 1,
+            retries_on_wake: false,
+        };
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: false,
+            refresh_in_flight: true,
+            restore_in_flight: false,
+            parked: Some(&parked),
+            source_verified: Some(true),
+            hook_hint_count: Some(0),
+            source_change_pending: false,
+            sources_omitted: false,
+        });
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Parked);
+        assert!(!observed.rebuild_in_flight);
+        assert_eq!(observed.coverage, CodeIndexFreshnessCoverageV1::Complete);
+    }
+
+    #[test]
+    fn retryable_park_keeps_a_racing_rebuild_visible() {
+        let parked = CodeIndexConvergenceParkedV1 {
+            reason: "mode".to_owned(),
+            blocked_reason: None,
+            remediation: "chmod".to_owned(),
+            parked_at_micros: 1,
+            observed_passes: 1,
+            retries_on_wake: true,
+        };
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: false,
+            refresh_in_flight: true,
+            restore_in_flight: false,
+            parked: Some(&parked),
+            source_verified: Some(true),
+            hook_hint_count: Some(0),
+            source_change_pending: false,
+            sources_omitted: false,
+        });
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Parked);
+        assert!(observed.rebuild_in_flight);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
+        );
+    }
+
+    /// `graph_ready` is reached by a published generation whose native graph
+    /// serves even while the source is stale, where `fresh` and `ready` still
+    /// wait; it waits for a pending graph and a set convergence park.
+    #[test]
+    fn graph_ready_is_graph_serving_whatever_the_freshness() {
+        let stale_serving = CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Stale),
+            coverage: CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore,
+            code_graph_serving: Some(CodeGraphServingReadinessV1::Ready),
+            ..Default::default()
+        };
+        let graph_pending = CodeIndexWorktreeFreshnessV1 {
+            code_graph_serving: Some(CodeGraphServingReadinessV1::Pending),
+            ..stale_serving.clone()
+        };
+        let parked = CodeIndexWorktreeFreshnessV1 {
+            parked: Some(CodeIndexConvergenceParkedV1 {
+                reason: "mode".to_owned(),
+                blocked_reason: None,
+                remediation: "chmod".to_owned(),
+                parked_at_micros: 1,
+                observed_passes: 1,
+                retries_on_wake: true,
+            }),
+            ..stale_serving.clone()
+        };
+        let refused = CodeIndexWorktreeFreshnessV1 {
+            code_graph_serving: Some(CodeGraphServingReadinessV1::Refused {
+                reason: "shape".to_owned(),
+            }),
+            ..stale_serving.clone()
+        };
+        let readiness = |freshness: &CodeIndexWorktreeFreshnessV1| {
+            [
+                CodeIndexReadinessTargetV1::GraphReady,
+                CodeIndexReadinessTargetV1::Fresh,
+                CodeIndexReadinessTargetV1::Ready,
+            ]
+            .map(|target| freshness.readiness(target))
+        };
+
+        assert_eq!(
+            readiness(&stale_serving),
+            [
+                CodeIndexReadinessV1::Reached,
+                CodeIndexReadinessV1::Pending,
+                CodeIndexReadinessV1::Pending,
+            ]
+        );
+        assert_eq!(readiness(&graph_pending)[0], CodeIndexReadinessV1::Pending);
+        assert_eq!(readiness(&parked)[0], CodeIndexReadinessV1::Pending);
+        assert_eq!(
+            readiness(&refused)[0],
+            CodeIndexReadinessV1::Unreachable {
+                reason: "code_graph_refused: shape".to_owned(),
+            }
+        );
+    }
+}

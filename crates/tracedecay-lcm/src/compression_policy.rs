@@ -5,6 +5,23 @@ use super::replay_transactions;
 
 pub const DEFAULT_INCREMENTAL_MAX_DEPTH: i64 = 1;
 
+/// Roles compression pins as `pinned_anchors` and excludes from the
+/// conversational backlog. Predecessor-range SQL must use this same list so
+/// persisted ranges match the backlog native evidence is compared against.
+pub(crate) const POLICY_ANCHOR_ROLES: &[&str] = &["system", "developer"];
+
+pub(crate) fn is_policy_anchor_role(role: &str) -> bool {
+    POLICY_ANCHOR_ROLES.contains(&role)
+}
+
+pub(crate) fn policy_anchor_role_sql_in_list() -> String {
+    POLICY_ANCHOR_ROLES
+        .iter()
+        .map(|role| format!("'{role}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssemblyCapInput {
     pub max_assembly_tokens: Option<i64>,
@@ -80,7 +97,7 @@ pub fn effective_assembly_token_cap(input: AssemblyCapInput) -> Option<i64> {
         .map(|cap| cap.max(1))
 }
 
-#[hotpath::measure(label = "sessions.lcm.overflow_cap")]
+#[tracing::instrument(name = "sessions.lcm.overflow_cap", level = "trace", skip_all)]
 pub fn overflow_recovery_assembly_cap(input: OverflowRecoveryCapInput<'_>) -> Option<i64> {
     let assembly_cap = input.max_assembly_tokens?;
     let Some(current_tokens) = input.current_tokens.filter(|tokens| *tokens > 0) else {
@@ -127,7 +144,7 @@ pub fn effective_leaf_chunk_tokens(
     Some(working)
 }
 
-#[hotpath::measure(label = "sessions.lcm.leaf_chunk")]
+#[tracing::instrument(name = "sessions.lcm.leaf_chunk", level = "trace", skip_all)]
 pub fn bounded_leaf_chunk_len(
     backlog: &[LcmRawMessage],
     leaf_chunk_tokens: Option<i64>,
@@ -186,12 +203,7 @@ pub fn forced_overflow_pressure(
     current_tokens: Option<i64>,
     max_assembly_tokens: Option<i64>,
 ) -> bool {
-    match (current_tokens, max_assembly_tokens) {
-        (Some(current_tokens), Some(max_assembly_tokens)) if max_assembly_tokens > 0 => {
-            current_tokens >= max_assembly_tokens
-        }
-        _ => false,
-    }
+    threshold_pressure(current_tokens, max_assembly_tokens)
 }
 
 pub fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {

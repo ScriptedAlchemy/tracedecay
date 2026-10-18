@@ -1,6 +1,48 @@
 use super::harness::RegisteredGlobalDbHarness;
 
-#[tokio::test]
+#[asupersync::test]
+async fn registered_session_message_batch_executes_json_rowset_with_exact_provider_identity() {
+    let harness = RegisteredGlobalDbHarness::open("session-message-identity-batch").await;
+    let writer = harness.registered.writer_connection().unwrap();
+    for provider in ["cursor", "codex"] {
+        writer
+            .execute(
+                "INSERT INTO sessions(provider, session_id, project_key, project_path)
+                 VALUES (?1, 'session.fixture', '/tmp/project', '/tmp/project')",
+                tracedecay_runtime_core::db::engine::params![provider],
+            )
+            .await
+            .unwrap();
+    }
+    writer
+        .execute(
+            "INSERT INTO lcm_raw_messages(
+                provider, message_id, session_id, role, ordinal, content, content_hash,
+                storage_kind
+             )
+             VALUES ('cursor', 'comp:b2', 'session.fixture', 'user', 1, 'cursor', 'h', 'inline'),
+                    ('codex', 'comp:b1', 'session.fixture', 'user', 1, 'codex', 'h', 'inline')",
+            (),
+        )
+        .await
+        .unwrap();
+
+    let existing = harness
+        .registered
+        .existing_session_message_ids(
+            "cursor",
+            &[
+                "comp:b1".to_string(),
+                "comp:b2".to_string(),
+                "comp:b3".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(existing, vec!["comp:b2"]);
+}
+
+#[asupersync::test]
 async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal").await;
     let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
@@ -11,10 +53,11 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     let scope = tracedecay_domain::ObservationScopeV1::Project {
         project_id: tracedecay_domain::ProjectId::new("project.fixture").unwrap(),
     };
-    let cursor = tracedecay_domain::ObservationSourceCursorV1::new(
+    let cursor = tracedecay_domain::ObservationSourceCursorV1::for_ordering(
         source.clone(),
         scope.clone(),
         tracedecay_domain::ObservationSourceGenerationV1::new(1).unwrap(),
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         72,
     )
     .unwrap();
@@ -90,12 +133,86 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     );
 }
 
+#[asupersync::test]
+async fn session_sync_journal_cycle_bound_and_exact_delete_are_authoritative() {
+    let harness = RegisteredGlobalDbHarness::open("session-sync-journal-cycle-bound").await;
+    for suffix in ["a", "m", "z"] {
+        assert!(
+            harness
+                .registered
+                .insert_session_sync_journal(
+                    &format!("cursor-composer.retry.{suffix}"),
+                    &format!(r#"{{"nonce":"{suffix}"}}"#),
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    let high_water = harness
+        .registered
+        .session_sync_journal_high_water("cursor-composer.retry.")
+        .await
+        .unwrap();
+    assert_eq!(high_water.as_deref(), Some("cursor-composer.retry.z"));
+
+    assert!(
+        harness
+            .registered
+            .insert_session_sync_journal("cursor-composer.retry.zz", r#"{"nonce":"later"}"#,)
+            .await
+            .unwrap()
+    );
+    let page = harness
+        .registered
+        .list_incomplete_session_sync_journal_page_through(
+            "cursor-composer.retry.",
+            Some("cursor-composer.retry.m"),
+            high_water.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page,
+        vec![(
+            "cursor-composer.retry.z".to_string(),
+            r#"{"nonce":"z"}"#.to_string(),
+        )]
+    );
+
+    assert!(
+        !harness
+            .registered
+            .compare_and_delete_session_sync_journal(
+                "cursor-composer.retry.z",
+                r#"{"nonce":"stale"}"#,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        harness
+            .registered
+            .compare_and_delete_session_sync_journal("cursor-composer.retry.z", r#"{"nonce":"z"}"#,)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        harness
+            .registered
+            .read_session_sync_journal("cursor-composer.retry.z")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
 /// A profile store keeps one `source_cursors` row per observed session
 /// source, so a long-lived profile holds far more rows than the `SQLite`
 /// runtime materializes for a single exact-SQL query. The frontier listing
 /// must page and still return the complete scan; before it paged, every
 /// project open against such a profile degraded its full session upgrade.
-#[tokio::test]
+#[asupersync::test]
 async fn source_frontier_listing_pages_past_the_exact_sql_row_limit() {
     const ROWS: i64 = 10_001;
     let harness = RegisteredGlobalDbHarness::open("session-sync-frontier-pages").await;
@@ -137,7 +254,7 @@ async fn source_frontier_listing_pages_past_the_exact_sql_row_limit() {
 /// journal value in its own single-row query. Before that split, eight live
 /// multi-megabyte journals refused the whole page and recovery could never
 /// terminate them.
-#[tokio::test]
+#[asupersync::test]
 async fn incomplete_journal_page_survives_values_beyond_the_query_byte_budget() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal-page-bytes").await;
     // Eight live journals of ~9 MiB each: materialized together, one 8-row
@@ -168,7 +285,7 @@ async fn incomplete_journal_page_survives_values_beyond_the_query_byte_budget() 
 /// A single journal value past the per-query byte budget is a genuine
 /// over-limit row: both the direct read and the recovery page must refuse it
 /// typed rather than truncate or mask it.
-#[tokio::test]
+#[asupersync::test]
 async fn single_over_limit_journal_value_still_refuses_typed() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal-over-limit").await;
     let key = "session-sync.v1.oversized";
@@ -212,7 +329,7 @@ async fn single_over_limit_journal_value_still_refuses_typed() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn session_sync_recovery_reads_only_nonterminal_journals() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-recovery-journals").await;
     for (key, value) in [

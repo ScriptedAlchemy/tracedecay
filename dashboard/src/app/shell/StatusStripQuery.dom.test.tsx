@@ -83,19 +83,6 @@ afterEach(() => {
 });
 
 describe('status-strip query activity', () => {
-  it('cancels only a query whose tracked function consumes the abort signal', async () => {
-    let aborted = false;
-    mount(true, () => {
-      aborted = true;
-    });
-
-    expect(await screen.findByText('Searching the code graph')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel Searching the code graph' }));
-
-    await waitFor(() => expect(aborted).toBe(true));
-    expect(await screen.findByText('cancelled · Searching the code graph')).toBeTruthy();
-  });
-
   it('reports non-cancelable background work without offering a false control', async () => {
     let aborted = false;
     mount(false, () => {

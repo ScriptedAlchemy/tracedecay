@@ -5,6 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
+use tracedecay_domain::sha256_hex_suffix;
 
 use crate::runtime::git_correlation::backfill::history_progress::initial_reflog_content_chain;
 
@@ -134,14 +135,95 @@ pub(in super::super) struct GraphChunk {
     pub budget_exhausted: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in super::super) struct UnbornSource {
+    repository: RepositorySeal,
+    head: HeadSeal,
+    reflog_path: PathBuf,
+    source_generation: String,
+}
+
+pub(in super::super) enum HistorySource {
+    Unborn(Box<UnbornSource>),
+    Reflog(Box<ReflogCursor>),
+}
+
+pub(in super::super) fn initialize_history_source(
+    project_path: &Path,
+    window_end: i64,
+    control: &BoundedGitControl,
+) -> Result<HistorySource, BoundedBackfillInterruption> {
+    match capture_unborn_source(project_path, control)? {
+        Some(source) => Ok(HistorySource::Unborn(Box::new(source))),
+        None => initialize_reflog_cursor(project_path, window_end, control)
+            .map(Box::new)
+            .map(HistorySource::Reflog),
+    }
+}
+
+pub(in super::super) fn capture_unborn_source(
+    project_path: &Path,
+    control: &BoundedGitControl,
+) -> Result<Option<UnbornSource>, BoundedBackfillInterruption> {
+    control.check()?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let head = capture_head(&repository)?;
+    if head.target.is_some() {
+        return Ok(None);
+    }
+    // A missing target proves no history only for a local unborn HEAD with
+    // no retained HEAD reflog. An orphan checkout may retain prior history.
+    if !head
+        .referent
+        .as_deref()
+        .is_some_and(|name| name.starts_with(b"refs/heads/"))
+    {
+        return Err(BoundedBackfillInterruption::SourceUnavailable);
+    }
+    let platform = repository
+        .head()
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+        .log_iter();
+    let reflog_path =
+        head_reflog_path(&platform).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let source_generation = match std::fs::metadata(&reflog_path) {
+        Ok(metadata) if metadata.len() == 0 => present_source_generation(&reflog_path, &metadata)?,
+        Ok(_) => return Err(BoundedBackfillInterruption::UnsupportedSourceFraming),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            absent_source_generation(&reflog_path)?
+        }
+        Err(_) => return Err(BoundedBackfillInterruption::SourceUnavailable),
+    };
+    let source = UnbornSource {
+        repository: capture_repository_seal(&repository)?,
+        head,
+        reflog_path,
+        source_generation,
+    };
+    control.check()?;
+    Ok(Some(source))
+}
+
+pub(in super::super) fn verify_unborn_source(
+    project_path: &Path,
+    source: &UnbornSource,
+    control: &BoundedGitControl,
+) -> Result<(), BoundedBackfillInterruption> {
+    if capture_unborn_source(project_path, control)?.as_ref() != Some(source) {
+        return Err(BoundedBackfillInterruption::SourceChanged);
+    }
+    Ok(())
+}
+
 pub(in super::super) fn initialize_reflog_cursor(
     project_path: &Path,
     window_end: i64,
     control: &BoundedGitControl,
 ) -> Result<ReflogCursor, BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let repository_seal = capture_repository_seal(&repository)?;
     let head = capture_head(&repository)?;
     let state = super::head_state(&head)?;
@@ -152,11 +234,8 @@ pub(in super::super) fn initialize_reflog_cursor(
         .head()
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
         .log_iter();
-    let relative = platform.store.namespace.as_ref().map_or_else(
-        || platform.name.to_path().to_owned(),
-        |namespace| namespace.to_path().join(platform.name.to_path()),
-    );
-    let unresolved_reflog_path = platform.store.git_dir().join("logs").join(relative);
+    let unresolved_reflog_path =
+        head_reflog_path(&platform).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let (reflog_path, source_generation, source_length) =
         match std::fs::metadata(&unresolved_reflog_path) {
             Ok(metadata) => {
@@ -204,8 +283,8 @@ pub(in super::super) fn scan_reflog_chunk(
     control: &BoundedGitControl,
 ) -> Result<ReflogChunk, BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     verify_source(&repository, &cursor)?;
     let mut consulted_refs = decode_ref_seal(&cursor.consulted_refs)?;
     let mut state: HeadState = cursor.state.clone().into();
@@ -324,8 +403,8 @@ pub(in super::super) fn scan_reflog_verification_chunk(
     control: &BoundedGitControl,
 ) -> Result<ReflogVerificationChunk, BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     verify_source(&repository, source)?;
     if cursor.byte_offset < target_byte_offset {
         return Err(BoundedBackfillInterruption::SourceUnavailable);
@@ -389,8 +468,8 @@ pub(in super::super) fn scan_graph_chunk(
     if remaining_examined_nodes == 0 || remaining_examined_bytes == 0 {
         return Err(BoundedBackfillInterruption::HistoryTraversalBudgetReached);
     }
-    let mut repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let mut repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     repository.object_cache_size_if_unset(4 * 1024 * 1024);
     verify_repository_identity(&repository, repository_seal)?;
     let mut carry = pending
@@ -476,6 +555,17 @@ pub(in super::super) fn scan_graph_chunk(
         examined_bytes: bytes_read,
         budget_exhausted,
     })
+}
+
+fn head_reflog_path(
+    platform: &gix::refs::file::log::iter::Platform<'_, '_>,
+) -> gix::Result<PathBuf> {
+    let name = platform.name.to_path()?;
+    let relative = match platform.store.namespace.as_ref() {
+        Some(namespace) => namespace.to_path()?.join(name),
+        None => name.to_owned(),
+    };
+    Ok(platform.store.git_dir().join("logs").join(relative))
 }
 
 fn cross_entry(
@@ -597,6 +687,9 @@ fn parse_oid(value: &str) -> Result<gix::ObjectId, BoundedBackfillInterruption> 
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)
 }
 
+/// Refuses a reflog replaced or visibly rewritten between chunks. Completion
+/// is proven by the content chain re-derived from the bytes, never by an
+/// equal generation, so no change-time settledness is needed here.
 fn present_source_generation(
     path: &Path,
     metadata: &std::fs::Metadata,
@@ -723,9 +816,8 @@ fn extend_content_chain(
     absolute_line_start: u64,
     line: &[u8],
 ) -> Result<String, BoundedBackfillInterruption> {
-    let previous = previous
-        .strip_prefix("sha256:")
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+    let previous =
+        sha256_hex_suffix(previous).ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
     let previous =
         hex::decode(previous).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     if previous.len() != 32 {
@@ -780,8 +872,8 @@ pub(in super::super) fn verify_reflog_source(
     control: &BoundedGitControl,
 ) -> Result<(), BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     verify_source(&repository, cursor)?;
     control.check()
 }
@@ -823,8 +915,10 @@ pub(in super::super) fn decode_path(
         return Err(BoundedBackfillInterruption::SourceUnavailable);
     }
     let wide = encoded
-        .chunks_exact(2)
-        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| u16::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     Ok(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
 }

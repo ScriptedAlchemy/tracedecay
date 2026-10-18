@@ -1,15 +1,16 @@
 //! Git index transaction daemon invocation handlers (`execute_git_read`/`execute_git_preview`/`execute_git_apply`).
 
 use super::*;
+use crate::project_runtime::ProjectRuntimePublicationStateV1;
 use tracedecay_domain::GitIndexPreviewV1;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn git_read_evidence_packet(
     request_id: &str,
-    request: &tracedecay_application::git::GitReadRequestV1,
+    request: &tracedecay_contracts::git::GitReadRequestV1,
     current: &DaemonGitAuthorityStateV1,
-    result: tracedecay_usecases::git_reads::GitReadResultV1,
+    result: tracedecay_application::git_reads::GitReadResultV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -72,11 +73,11 @@ pub(super) fn git_read_evidence_packet(
     )
     .map_err(|_| invalid_git_request())?;
     let native_coverage = match &result {
-        tracedecay_usecases::git_reads::GitReadResultV1::Status(envelope) => &envelope.coverage,
-        tracedecay_usecases::git_reads::GitReadResultV1::Diff(envelope) => &envelope.coverage,
-        tracedecay_usecases::git_reads::GitReadResultV1::History(envelope) => &envelope.coverage,
-        tracedecay_usecases::git_reads::GitReadResultV1::Blame(envelope) => &envelope.coverage,
-        tracedecay_usecases::git_reads::GitReadResultV1::Hunks(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::Status(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::Diff(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::History(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::Blame(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::Hunks(envelope) => &envelope.coverage,
     };
     let coverage = if native_coverage.is_complete() {
         EvidenceCoverage::complete(vec![EvidenceDomain::Source], 1, 1, 1)
@@ -129,7 +130,7 @@ pub(super) fn git_read_evidence_packet(
         .collect();
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )
@@ -181,11 +182,12 @@ pub(super) fn git_read_evidence_packet(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.git.read", future = true)]
+#[tracing::instrument(name = "daemon.service.git.read", level = "trace", skip_all)]
 pub(super) async fn execute_git_read(
     wire_request_id: String,
     project_root: Option<&Path>,
     owner: Option<DaemonGitInvocationOwner>,
+    publication: Option<ProjectRuntimePublicationStateV1>,
     surface_operation: ApplicationSurfaceOperation,
     request: GitReadSurfaceRequest,
     observed_at: UtcMicros,
@@ -194,28 +196,25 @@ pub(super) async fn execute_git_read(
     request_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        // The route reaching here already passed project resolution and an
-        // admitted project open; the git transaction owner registers behind
-        // the core publication, so a miss here is a retryable mounting state.
-        return runtime_mounting_problem(wire_request_id);
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     let Some(project_root) = project_root.map(Path::to_path_buf) else {
         return concealed_application_problem(wire_request_id);
     };
     let expected_operation = match &request.request {
-        tracedecay_application::git::GitReadRequestV1::Status => {
+        tracedecay_contracts::git::GitReadRequestV1::Status => {
             ApplicationSurfaceOperation::GitStatus
         }
-        tracedecay_application::git::GitReadRequestV1::Diff { .. } => {
+        tracedecay_contracts::git::GitReadRequestV1::Diff { .. } => {
             ApplicationSurfaceOperation::GitDiff
         }
-        tracedecay_application::git::GitReadRequestV1::History { .. } => {
+        tracedecay_contracts::git::GitReadRequestV1::History { .. } => {
             ApplicationSurfaceOperation::GitHistory
         }
-        tracedecay_application::git::GitReadRequestV1::Blame { .. } => {
+        tracedecay_contracts::git::GitReadRequestV1::Blame { .. } => {
             ApplicationSurfaceOperation::GitBlame
         }
-        tracedecay_application::git::GitReadRequestV1::Hunks { .. } => {
+        tracedecay_contracts::git::GitReadRequestV1::Hunks { .. } => {
             ApplicationSurfaceOperation::GitHunks
         }
     };
@@ -231,25 +230,21 @@ pub(super) async fn execute_git_read(
             ApplicationProblem::cancelled_before_admission(),
         );
     }
-    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(now_micros()) {
         return application_problem(
             wire_request_id,
             ApplicationProblem::timed_out_before_admission(),
         );
     }
-    let initial = match owner.current_read_authority(&request.request) {
+    let initial = match current_read_authority(&owner, &request.request).await {
         Ok(authority) => authority,
-        Err(_) => return concealed_application_problem(wire_request_id),
+        Err(error) => return application_problem(wire_request_id, map_git_port_problem(error)),
     };
-    let remaining_micros = deadline
-        .expires_at
-        .0
-        .saturating_sub(current_micros().0)
-        .max(0) as u64;
-    let bounds = tracedecay_usecases::git_query::GitQueryBounds {
+    let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0).max(0) as u64;
+    let bounds = tracedecay_application::git_query::GitQueryBounds {
         max_entries: if matches!(
             &request.request,
-            tracedecay_application::git::GitReadRequestV1::Hunks { .. }
+            tracedecay_contracts::git::GitReadRequestV1::Hunks { .. }
         ) {
             request
                 .max_entries
@@ -259,11 +254,11 @@ pub(super) async fn execute_git_read(
         },
         max_bytes: request.max_bytes,
         deadline: Some(std::time::Instant::now() + Duration::from_micros(remaining_micros)),
-        cancel: Some(request_cancellation),
+        cancel: Some(request_cancellation.clone()),
     };
     let selected_scope = initial.scope.clone();
     let mut read_request = request.request.clone();
-    let hunk_capture = if let tracedecay_application::git::GitReadRequestV1::Hunks {
+    let hunk_capture = if let tracedecay_contracts::git::GitReadRequestV1::Hunks {
         scope,
         daemon_binding,
     } = &mut read_request
@@ -289,40 +284,36 @@ pub(super) async fn execute_git_read(
         let project_id = selected_scope.project_id.clone();
         let repository_id = selected_scope.repository_id.clone();
         let worktree_id = selected_scope.worktree_id.clone();
-        let snapshot = match tokio::task::spawn_blocking(move || {
+        let snapshot_bounds = tracedecay_runtime_core::git::GitCommandBounds {
+            deadline: std::time::Instant::now() + Duration::from_micros(remaining_micros),
+            cancel: Some(request_cancellation.clone()),
+            max_stdout_bytes: 64 * 1024 * 1024,
+            max_stderr_bytes: 64 * 1024,
+        };
+        let worker = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             capture_exact_snapshot(
                 &root,
                 project_id,
                 repository_id,
                 worktree_id,
                 input_created_at,
+                Some(&snapshot_bounds),
             )
-        })
+        });
+        let snapshot = match settle_blocking_git_worker(
+            worker,
+            &request_cancellation,
+            &deadline,
+            &cancellation,
+        )
         .await
         {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => {
                 return application_problem(wire_request_id, map_git_port_problem(error));
             }
-            Err(_) => {
-                return DaemonInvocationResponse::problem(
-                    wire_request_id,
-                    DaemonInvocationProblem::Unavailable,
-                );
-            }
+            Err(problem) => return application_problem(wire_request_id, problem),
         };
-        if cancellation.is_cancelled() {
-            return application_problem(
-                wire_request_id,
-                ApplicationProblem::cancelled_before_admission(),
-            );
-        }
-        if deadline.is_elapsed_at(current_micros()) {
-            return application_problem(
-                wire_request_id,
-                ApplicationProblem::timed_out_before_admission(),
-            );
-        }
         let snapshot_digest = match GitIndexPreviewV1::repository_snapshot_digest(&snapshot) {
             Ok(digest) => digest,
             Err(_) => {
@@ -332,7 +323,7 @@ pub(super) async fn execute_git_read(
                 );
             }
         };
-        *daemon_binding = Some(tracedecay_application::git::DaemonGitHunkPreviewBindingV1 {
+        *daemon_binding = Some(tracedecay_contracts::git::DaemonGitHunkPreviewBindingV1 {
             preview_id,
             snapshot_digest,
             expires_at,
@@ -341,46 +332,47 @@ pub(super) async fn execute_git_read(
     } else {
         None
     };
-    let authority = tracedecay_usecases::git_reads::GitReadAuthorityV1::new(
+    let authority = tracedecay_application::git_reads::GitReadAuthorityV1::new(
         project_root,
         selected_scope.clone(),
     );
-    let outcome = tokio::task::spawn_blocking(move || {
-        tracedecay_usecases::git_reads::execute_git_read(
+    let worker = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        tracedecay_application::git_reads::execute_git_read(
             Some(&authority),
             &selected_scope,
             &read_request,
             &bounds,
         )
-    })
-    .await
-    .unwrap_or(
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable {
-            reason: tracedecay_usecases::git_reads::GitReadUnavailableReasonV1::ReadFailed,
-        },
-    );
-    let terminal = match owner.current_read_authority(&request.request) {
+    });
+    let outcome =
+        match settle_blocking_git_worker(worker, &request_cancellation, &deadline, &cancellation)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(problem) => return application_problem(wire_request_id, problem),
+        };
+    let terminal = match current_read_authority(&owner, &request.request).await {
         Ok(authority) => authority,
-        Err(_) => return concealed_application_problem(wire_request_id),
+        Err(error) => return application_problem(wire_request_id, map_git_port_problem(error)),
     };
     if initial.scope != terminal.scope
         || initial.requester != terminal.requester
         || initial.effective_capabilities != terminal.effective_capabilities
-        || initial.grant_expires_at != terminal.grant_expires_at
         || initial.policy_revision != terminal.policy_revision
         || initial.policy_digest != terminal.policy_digest
         || initial.configuration_digest != terminal.configuration_digest
         || initial.catalog_digest != terminal.catalog_digest
         || initial.privacy_digest != terminal.privacy_digest
-        || current_micros() >= terminal.grant_expires_at
+        || now_micros() >= terminal.grant_expires_at
     {
         return concealed_application_problem(wire_request_id);
     }
     match outcome {
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Complete { scope, mut result }
+        tracedecay_application::git_reads::GitReadOutcomeV1::Complete { scope, mut result }
             if scope == terminal.scope =>
         {
-            if let tracedecay_usecases::git_reads::GitReadResultV1::Hunks(envelope) = &mut result {
+            if let tracedecay_application::git_reads::GitReadResultV1::Hunks(envelope) = &mut result
+            {
                 for entry in &envelope.value.hunks {
                     if entry.hunk.verify_digest(&entry.digest).is_err() {
                         return DaemonInvocationResponse::problem(
@@ -396,7 +388,7 @@ pub(super) async fn execute_git_read(
             }
             if let (
                 Some((operation, snapshot)),
-                tracedecay_usecases::git_reads::GitReadResultV1::Hunks(envelope),
+                tracedecay_application::git_reads::GitReadResultV1::Hunks(envelope),
             ) = (&hunk_capture, &result)
             {
                 let input = match GitIndexPreviewInputV1::new_hunk_selection(
@@ -420,18 +412,8 @@ pub(super) async fn execute_git_read(
                         );
                     }
                 };
-                let service = Arc::clone(&owner.service);
-                match tokio::task::spawn_blocking(move || service.save_preview_input(input)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        return application_problem(wire_request_id, map_git_port_problem(error));
-                    }
-                    Err(_) => {
-                        return DaemonInvocationResponse::problem(
-                            wire_request_id,
-                            DaemonInvocationProblem::Unavailable,
-                        );
-                    }
+                if let Err(error) = Box::pin(owner.service.save_preview_input(input)).await {
+                    return application_problem(wire_request_id, map_git_port_problem(error));
                 }
             }
             let packet = match git_read_evidence_packet(
@@ -454,26 +436,42 @@ pub(super) async fn execute_git_read(
                 },
             )
         }
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable {
-            reason: tracedecay_usecases::git_reads::GitReadUnavailableReasonV1::Cancelled,
+        tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: tracedecay_application::git_reads::GitReadUnavailableReasonV1::Cancelled,
         } => application_problem(
             wire_request_id,
             ApplicationProblem::cancelled_before_admission(),
         ),
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable {
-            reason: tracedecay_usecases::git_reads::GitReadUnavailableReasonV1::TimedOut,
+        tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: tracedecay_application::git_reads::GitReadUnavailableReasonV1::TimedOut,
         } => application_problem(
             wire_request_id,
             ApplicationProblem::timed_out_before_admission(),
         ),
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable {
-            reason: tracedecay_usecases::git_reads::GitReadUnavailableReasonV1::OutputLimitExceeded,
+        tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason:
+                tracedecay_application::git_reads::GitReadUnavailableReasonV1::OutputLimitExceeded,
         } => application_problem(wire_request_id, git_read_output_limit_problem()),
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Complete { .. }
-        | tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable { .. } => {
+        tracedecay_application::git_reads::GitReadOutcomeV1::Complete { .. }
+        | tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable { .. } => {
             DaemonInvocationResponse::problem(wire_request_id, DaemonInvocationProblem::Unavailable)
         }
     }
+}
+
+/// The authority blocks its caller on the configuration store, so it runs on
+/// the blocking pool rather than on the worker polling this request.
+async fn current_read_authority(
+    owner: &DaemonGitInvocationOwner,
+    request: &tracedecay_contracts::git::GitReadRequestV1,
+) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+    let owner = owner.clone();
+    let request = request.clone();
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        owner.current_read_authority(&request)
+    })
+    .await
+    .unwrap_or(Err(GitIndexTransactionPortError::DaemonUnavailable))
 }
 
 pub(super) fn git_read_output_limit_problem() -> ApplicationProblem {
@@ -483,30 +481,32 @@ pub(super) fn git_read_output_limit_problem() -> ApplicationProblem {
             message: "The Git read exceeded its output byte limit".to_owned(),
         },
         retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+        legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
+        detail: None,
     }
 }
 
-#[hotpath::measure(label = "daemon.service.git.preview", future = true)]
+#[tracing::instrument(name = "daemon.service.git.preview", level = "trace", skip_all)]
 pub(super) async fn execute_git_preview(
     operation_events: &OperationEventAuthority,
     wire_request_id: String,
     owner: Option<DaemonGitInvocationOwner>,
+    publication: Option<ProjectRuntimePublicationStateV1>,
     request: GitPreviewSurfaceRequest,
     _observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        return runtime_mounting_problem(wire_request_id);
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     // Snapshot, preview input, and the built request are too large to live in
     // this async state machine: constructing that future on the socket poll
     // stack overflows. Keep every payload on a blocking thread or the heap.
     let join_id = wire_request_id.clone();
-    let prepared = match tokio::task::spawn_blocking(move || {
-        prepare_git_preview(wire_request_id, owner, request, deadline, cancellation)
-    })
+    let prepared = match tracedecay_runtime_core::native_runtime::on_blocking_pool(
+        prepare_git_preview(wire_request_id, owner, request, deadline, cancellation),
+    )
     .await
     {
         Ok(Ok(prepared)) => prepared,
@@ -521,23 +521,24 @@ pub(super) async fn execute_git_preview(
     Box::pin(settle_prepared_git_preview(operation_events, prepared)).await
 }
 
-#[hotpath::measure(label = "daemon.service.git.apply", future = true)]
+#[tracing::instrument(name = "daemon.service.git.apply", level = "trace", skip_all)]
 pub(super) async fn execute_git_apply(
     operation_events: &OperationEventAuthority,
     wire_request_id: String,
     owner: Option<DaemonGitInvocationOwner>,
+    publication: Option<ProjectRuntimePublicationStateV1>,
     request: GitApplySurfaceRequest,
     _observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        return runtime_mounting_problem(wire_request_id);
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     let join_id = wire_request_id.clone();
-    let prepared = match tokio::task::spawn_blocking(move || {
-        prepare_git_apply(wire_request_id, owner, request, deadline, cancellation)
-    })
+    let prepared = match tracedecay_runtime_core::native_runtime::on_blocking_pool(
+        prepare_git_apply(wire_request_id, owner, request, deadline, cancellation),
+    )
     .await
     {
         Ok(Ok(prepared)) => prepared,
@@ -564,7 +565,7 @@ struct PreparedGitApply {
     request: GitIndexApplyRequestV1,
 }
 
-fn prepare_git_preview(
+async fn prepare_git_preview(
     wire_request_id: String,
     owner: DaemonGitInvocationOwner,
     request: GitPreviewSurfaceRequest,
@@ -579,81 +580,29 @@ fn prepare_git_preview(
             map_git_port_problem(error),
         ))
     })?;
-    let preview_input = match operation {
-        GitIndexTransactionOperationV1::CommitIndex => {
-            let Some(commit_intent) = request.commit_intent.clone() else {
-                return Err(Box::new(application_problem(
-                    wire_request_id,
-                    invalid_git_request(),
-                )));
-            };
-            if request.preview_input_id.is_some() || !request.selected_hunk_digests.is_empty() {
-                return Err(Box::new(application_problem(
-                    wire_request_id,
-                    invalid_git_request(),
-                )));
-            }
-            let preview_id = mint_git_preview_id().map_err(|problem| {
-                Box::new(application_problem(wire_request_id.clone(), problem))
-            })?;
-            let snapshot = capture_exact_snapshot(
-                &owner.repository_root,
-                authority.scope.project_id.clone(),
-                authority.scope.repository_id.clone(),
-                authority.scope.worktree_id.clone(),
-                authority.evaluated_at,
-            )
-            .map_err(|error| {
-                Box::new(application_problem(
-                    wire_request_id.clone(),
-                    map_git_port_problem(error),
-                ))
-            })?;
-            let input = GitIndexPreviewInputV1::new_commit(
-                preview_id,
-                snapshot,
-                commit_intent,
-                authority.evaluated_at,
-                UtcMicros(authority.evaluated_at.0.saturating_add(30_000_000)),
-            )
-            .map_err(|_| {
-                Box::new(application_problem(
-                    wire_request_id.clone(),
-                    invalid_git_request(),
-                ))
-            })?;
-            service.save_preview_input(input.clone()).map_err(|error| {
-                Box::new(application_problem(
-                    wire_request_id.clone(),
-                    map_git_port_problem(error),
-                ))
-            })?;
-            input
-        }
-        GitIndexTransactionOperationV1::StageHunks
-        | GitIndexTransactionOperationV1::UnstageHunks => {
-            if request.commit_intent.is_some() || request.selected_hunk_digests.is_empty() {
-                return Err(Box::new(application_problem(
-                    wire_request_id,
-                    invalid_git_request(),
-                )));
-            }
-            let Some(preview_input_id) = request.preview_input_id.clone() else {
-                return Err(Box::new(application_problem(
-                    wire_request_id,
-                    invalid_git_request(),
-                )));
-            };
-            match service.read_preview_input(&preview_input_id, authority.evaluated_at) {
-                Ok(input) if input.operation == operation => input,
-                Ok(_) => return Err(Box::new(concealed_application_problem(wire_request_id))),
-                Err(error) => {
-                    return Err(Box::new(application_problem(
-                        wire_request_id,
-                        map_git_port_problem(error),
-                    )));
-                }
-            }
+    if request.selected_hunk_digests.is_empty() {
+        return Err(Box::new(application_problem(
+            wire_request_id,
+            invalid_git_request(),
+        )));
+    }
+    let Some(preview_input_id) = request.preview_input_id.clone() else {
+        return Err(Box::new(application_problem(
+            wire_request_id,
+            invalid_git_request(),
+        )));
+    };
+    let preview_input = match service
+        .read_preview_input(&preview_input_id, authority.evaluated_at)
+        .await
+    {
+        Ok(input) if input.operation == operation => input,
+        Ok(_) => return Err(Box::new(concealed_application_problem(wire_request_id))),
+        Err(error) => {
+            return Err(Box::new(application_problem(
+                wire_request_id,
+                map_git_port_problem(error),
+            )));
         }
     };
     if preview_input.repository_snapshot.project_id != owner.project_id {
@@ -675,7 +624,7 @@ fn prepare_git_preview(
     }))
 }
 
-fn prepare_git_apply(
+async fn prepare_git_apply(
     wire_request_id: String,
     owner: DaemonGitInvocationOwner,
     request: GitApplySurfaceRequest,
@@ -683,12 +632,15 @@ fn prepare_git_apply(
     cancellation: CancellationContext,
 ) -> Result<Box<PreparedGitApply>, Box<DaemonInvocationResponse>> {
     let service = Arc::clone(&owner.service);
-    let preview = service.read_preview(&request.preview_id).map_err(|error| {
-        Box::new(application_problem(
-            wire_request_id.clone(),
-            map_git_port_problem(error),
-        ))
-    })?;
+    let preview = service
+        .read_preview(&request.preview_id)
+        .await
+        .map_err(|error| {
+            Box::new(application_problem(
+                wire_request_id.clone(),
+                map_git_port_problem(error),
+            ))
+        })?;
     if preview.preview_digest != request.preview_digest
         || preview.repository_snapshot.project_id != owner.project_id
     {
@@ -718,7 +670,7 @@ fn prepare_git_apply(
     }))
 }
 
-#[hotpath::measure(label = "daemon.service.git.settle_preview", future = true)]
+#[tracing::instrument(name = "daemon.service.git.settle_preview", level = "trace", skip_all)]
 async fn settle_prepared_git_preview(
     operation_events: &OperationEventAuthority,
     prepared: Box<PreparedGitPreview>,
@@ -741,12 +693,13 @@ async fn settle_prepared_git_preview(
     let started_at = prepared.request.observed_at;
     let effective_deadline = prepared.request.context.deadline().clone();
     let wire_request_id = prepared.wire_request_id.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
         GitIndexTransactionService::new(SharedGitTransactionPort {
             service: prepared.service,
             cancellation: None,
         })
         .preview(prepared.request)
+        .await
     })
     .await;
     let response = match result {
@@ -769,7 +722,7 @@ async fn settle_prepared_git_preview(
     response
 }
 
-#[hotpath::measure(label = "daemon.service.git.settle_apply", future = true)]
+#[tracing::instrument(name = "daemon.service.git.settle_apply", level = "trace", skip_all)]
 async fn settle_prepared_git_apply(
     operation_events: &OperationEventAuthority,
     prepared: Box<PreparedGitApply>,
@@ -793,12 +746,13 @@ async fn settle_prepared_git_apply(
     let effective_deadline = prepared.request.context.deadline().clone();
     let wire_request_id = prepared.wire_request_id.clone();
     let cancellation = emitter.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
         GitIndexTransactionService::new(SharedGitTransactionPort {
             service: prepared.service,
             cancellation: Some(cancellation),
         })
         .apply(prepared.request)
+        .await
     })
     .await;
     let response = match result {
@@ -827,7 +781,7 @@ async fn publish_invocation_terminal(
     started_at: UtcMicros,
     effective_deadline: Deadline,
 ) {
-    let ended_at = current_micros();
+    let ended_at = now_micros();
     let ended_at = if ended_at < started_at {
         started_at
     } else {
@@ -907,7 +861,6 @@ fn build_git_preview_request(
         preview_id: input.preview_id,
         repository_snapshot: input.repository_snapshot,
         selected_hunks,
-        commit_intent: input.commit_intent,
         observed_at,
     })
 }
@@ -1066,13 +1019,58 @@ pub(super) fn stable_digest(
 }
 
 fn invalid_git_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "git_index.invalid_request".to_owned(),
-            message: "The Git index request is invalid".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: Vec::new(),
+    ApplicationProblem::invalid_request_without_action(
+        "git_index.invalid_request",
+        "The Git index request is invalid",
+    )
+}
+
+async fn settle_blocking_git_worker<T>(
+    worker: impl Future<Output = Result<T, String>>,
+    request_cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+    deadline: &Deadline,
+    cancellation: &CancellationContext,
+) -> Result<T, ApplicationProblem> {
+    tokio::pin!(worker);
+    let joined = tokio::select! {
+        biased;
+        joined = &mut worker => joined,
+        () = request_cancellation.cancelled() => {
+            let _ = worker.await;
+            return Err(ApplicationProblem::cancelled_before_admission());
+        }
+        () = sleep_until_deadline(deadline) => {
+            let _ = worker.await;
+            return Err(ApplicationProblem::timed_out_before_admission());
+        }
+    };
+    joined
+        .map_err(|_| {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "git_index.unavailable".to_owned(),
+                message: "The Git index transaction owner is not ready".to_owned(),
+            })
+        })
+        .and_then(|value| {
+            if request_cancellation.is_cancelled() || cancellation.is_cancelled() {
+                Err(ApplicationProblem::cancelled_before_admission())
+            } else if deadline.is_elapsed_at(now_micros()) {
+                Err(ApplicationProblem::timed_out_before_admission())
+            } else {
+                Ok(value)
+            }
+        })
+}
+
+async fn sleep_until_deadline(deadline: &Deadline) {
+    if let Some(remaining) = tracedecay_daemon_protocol::deadline_remaining(deadline) {
+        // A deadline past the clock's range never fires; an unavailable timer
+        // reads as elapsed.
+        let _ = tracedecay_runtime_core::native_runtime::timeout(
+            remaining,
+            std::future::pending::<()>(),
+        )
+        .await;
     }
 }
 
@@ -1103,6 +1101,7 @@ fn map_git_port_problem(error: GitIndexTransactionPortError) -> ApplicationProbl
             },
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
+            detail: None,
         },
         GitIndexTransactionPortError::Unsupported => ApplicationProblem::Unsupported {
             diagnostic: SafeDiagnostic {
@@ -1112,6 +1111,7 @@ fn map_git_port_problem(error: GitIndexTransactionPortError) -> ApplicationProbl
             },
             retry: RetryDirective::AfterRevalidate,
             legal_actions: Vec::new(),
+            detail: None,
         },
         GitIndexTransactionPortError::DaemonUnavailable
         | GitIndexTransactionPortError::RecoveryRequired
@@ -1128,5 +1128,27 @@ fn map_git_port_problem(error: GitIndexTransactionPortError) -> ApplicationProbl
                 message: "The Git index transaction owner is not ready".to_owned(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panicking_git_worker_settles_as_unavailable() {
+        let settled = settle_blocking_git_worker(
+            tracedecay_runtime_core::native_runtime::spawn_blocking(|| -> u8 {
+                panic!("git worker panicked");
+            }),
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+            &Deadline::new(UtcMicros(now_micros().0.saturating_add(60_000_000))).expect("deadline"),
+            &CancellationContext::active("git-worker-panic").expect("cancellation"),
+        )
+        .await;
+        let Err(ApplicationProblem::Unavailable { diagnostic, .. }) = settled else {
+            panic!("a panicking Git worker must settle as unavailable");
+        };
+        assert_eq!(diagnostic.code, "git_index.unavailable");
     }
 }

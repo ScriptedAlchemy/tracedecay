@@ -4,11 +4,11 @@ use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, UtcMicros};
 use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionStateV1,
     RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    RetrievalAnchorDispositionStore, RetrievalAnchorOwnerV1, RetrievalAnchorStoreError,
-    RetrievalAnchorStoreResult, RetrievalAnchorTombstoneV1,
+    RetrievalAnchorDispositionStore, RetrievalAnchorStoreError, RetrievalAnchorStoreResult,
+    RetrievalAnchorTombstoneV1,
 };
 
-use crate::db::engine::{QueryExecutor, params};
+use crate::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const OPERATION: &str = "retrieval anchor authority";
@@ -54,7 +54,7 @@ fn suppresses_derivatives(state: AnchorDispositionStateV1) -> bool {
 }
 
 async fn current_disposition(
-    connection: &(impl QueryExecutor + Sync),
+    connection: &impl QueryExecutor,
     anchor_id: &RetrievalAnchorId,
     owner: &str,
 ) -> Result<Option<AnchorDispositionStateV1>> {
@@ -77,14 +77,18 @@ async fn current_disposition(
         .transpose()?)
 }
 
-#[hotpath::measure(label = "runtime_core.db.anchor_derivatives_resolve")]
+#[tracing::instrument(
+    name = "runtime_core.db.anchor_derivatives_resolve",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn resolve_anchor_derivatives<O>(
     connection: &(impl QueryExecutor + Sync),
     owner: &O,
     anchor_id: &RetrievalAnchorId,
 ) -> Result<Vec<RetrievalAnchorDerivativeV1>>
 where
-    O: serde::Serialize + Clone + Into<RetrievalAnchorOwnerV1>,
+    O: serde::Serialize + Clone + Into<FactOwnerV1>,
 {
     let owner_json = owner_json(owner)?;
     if !AnchorDispositionStateV1::serves_derivatives(
@@ -164,7 +168,7 @@ pub(crate) async fn resolve_anchor_derivative(
         .map(|row| row.is_some())
 }
 
-pub(crate) async fn tombstone_fact_derivatives_tx<E>(
+pub async fn tombstone_fact_derivatives_tx<E>(
     transaction: &E,
     owner: &FactOwnerV1,
     fact_id: &str,
@@ -216,7 +220,7 @@ where
         .map_err(database_error)
 }
 
-pub(crate) async fn publish_fact_feedback_finding_tx<E>(
+pub async fn publish_fact_feedback_finding_tx<E>(
     transaction: &E,
     owner: &FactOwnerV1,
     fact_id: &str,
@@ -262,163 +266,184 @@ where
         .map_err(database_error)
 }
 
-impl super::Database {
-    #[hotpath::measure(label = "runtime_core.db.anchor_disposition_append")]
-    pub(crate) async fn append_retrieval_anchor_disposition(
-        &self,
-        record: &RetrievalAnchorDispositionRecordV1,
-    ) -> Result<AnchorDispositionAppendOutcomeV1> {
-        record.validate()?;
-        let transaction = self.begin_write_transaction(OPERATION).await?;
-        let owner = owner_json(record.owner())?;
-        let record_json = serde_json::to_string(record).map_err(database_error)?;
-        let mut replay = transaction
-            .query(
-                "SELECT record_json FROM retrieval_anchor_dispositions
-                 WHERE disposition_id = ?1 AND owner_json = ?2",
-                params![record.disposition_id(), owner.as_str()],
-            )
-            .await
-            .map_err(database_error)?;
-        if let Some(row) = replay.next().await.map_err(database_error)? {
-            let outcome = if row.get::<String>(0).map_err(database_error)? == record_json {
-                AnchorDispositionAppendOutcomeV1::Replayed
-            } else {
-                return Err(authority_error("anchor disposition identity collision"));
-            };
-            drop(replay);
-            transaction.commit().await?;
-            return Ok(outcome);
-        }
+/// Append within the caller's transaction so alias activation and derivative
+/// suppression share one commit. The caller must roll back on any error.
+pub async fn append_retrieval_anchor_disposition_on(
+    transaction: &impl Executor,
+    record: &RetrievalAnchorDispositionRecordV1,
+) -> Result<AnchorDispositionAppendOutcomeV1> {
+    record.validate()?;
+    let owner = owner_json(record.owner())?;
+    let record_json = serde_json::to_string(record).map_err(database_error)?;
+    let mut replay = transaction
+        .query(
+            "SELECT record_json FROM retrieval_anchor_dispositions
+             WHERE disposition_id = ?1 AND owner_json = ?2",
+            params![record.disposition_id(), owner.as_str()],
+        )
+        .await
+        .map_err(database_error)?;
+    if let Some(row) = replay.next().await.map_err(database_error)? {
+        let outcome = if row.get::<String>(0).map_err(database_error)? == record_json {
+            AnchorDispositionAppendOutcomeV1::Replayed
+        } else {
+            return Err(authority_error("anchor disposition identity collision"));
+        };
         drop(replay);
-        if !disposition_transition_allowed(
-            current_disposition(&transaction, record.anchor_id(), &owner).await?,
-            record.state(),
-        ) {
-            return Err(authority_error("invalid anchor disposition transition"));
-        }
+        return Ok(outcome);
+    }
+    drop(replay);
+    if !disposition_transition_allowed(
+        current_disposition(transaction, record.anchor_id(), &owner).await?,
+        record.state(),
+    ) {
+        return Err(authority_error("invalid anchor disposition transition"));
+    }
+    transaction
+        .execute(
+            "INSERT INTO retrieval_anchor_dispositions (
+                disposition_id, anchor_id, owner_json, state, superseded_by,
+                reason_class, effective_at, record_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                record.disposition_id(),
+                record.anchor_id().as_str(),
+                owner.as_str(),
+                record.state().as_str(),
+                record.superseded_by().map(RetrievalAnchorId::as_str),
+                record.reason_class().as_str(),
+                record.effective_at().0,
+                record_json,
+            ],
+        )
+        .await
+        .map_err(database_error)?;
+    if suppresses_derivatives(record.state()) {
         transaction
             .execute(
-                "INSERT INTO retrieval_anchor_dispositions (
-                    disposition_id, anchor_id, owner_json, state, superseded_by,
-                    reason_class, effective_at, record_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO retrieval_anchor_derivative_tombstones (
+                    source_anchor_id, owner_json, derivative_kind, derivative_id,
+                    disposition_id, effective_at
+                 )
+                 SELECT source_anchor_id, owner_json, derivative_kind, derivative_id, ?3, ?4
+                 FROM retrieval_anchor_reverse_lineage
+                 WHERE source_anchor_id = ?1 AND owner_json = ?2",
                 params![
-                    record.disposition_id(),
                     record.anchor_id().as_str(),
                     owner.as_str(),
-                    record.state().as_str(),
-                    record.superseded_by().map(RetrievalAnchorId::as_str),
-                    record.reason_class().as_str(),
+                    record.disposition_id(),
                     record.effective_at().0,
-                    record_json,
                 ],
             )
             .await
             .map_err(database_error)?;
-        if suppresses_derivatives(record.state()) {
-            transaction
-                .execute(
-                    "INSERT INTO retrieval_anchor_derivative_tombstones (
-                        source_anchor_id, owner_json, derivative_kind, derivative_id,
-                        disposition_id, effective_at
-                     )
-                     SELECT source_anchor_id, owner_json, derivative_kind, derivative_id, ?3, ?4
-                     FROM retrieval_anchor_reverse_lineage
-                     WHERE source_anchor_id = ?1 AND owner_json = ?2",
-                    params![
-                        record.anchor_id().as_str(),
-                        owner.as_str(),
-                        record.disposition_id(),
-                        record.effective_at().0,
-                    ],
-                )
-                .await
-                .map_err(database_error)?;
-        }
-        transaction.commit().await?;
-        Ok(AnchorDispositionAppendOutcomeV1::Appended)
     }
+    Ok(AnchorDispositionAppendOutcomeV1::Appended)
+}
 
-    #[hotpath::skip]
-    pub(crate) async fn publish_retrieval_anchor_derivative(
-        &self,
-        derivative: &RetrievalAnchorDerivativeV1,
-    ) -> Result<AnchorDispositionAppendOutcomeV1> {
-        derivative.validate()?;
-        let transaction = self.begin_write_transaction(OPERATION).await?;
-        let owner = owner_json(derivative.owner())?;
-        if !AnchorDispositionStateV1::serves_derivatives(
-            current_disposition(&transaction, derivative.source_anchor_id(), &owner).await?,
-        ) {
-            return Err(authority_error(
-                "cannot publish lineage from an unavailable anchor",
-            ));
-        }
-        let changed = transaction
-            .execute(
-                "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
-                    source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+async fn publish_retrieval_anchor_derivative_on(
+    transaction: &impl Executor,
+    derivative: &RetrievalAnchorDerivativeV1,
+) -> Result<AnchorDispositionAppendOutcomeV1> {
+    let owner = owner_json(derivative.owner())?;
+    if !AnchorDispositionStateV1::serves_derivatives(
+        current_disposition(transaction, derivative.source_anchor_id(), &owner).await?,
+    ) {
+        return Err(authority_error(
+            "cannot publish lineage from an unavailable anchor",
+        ));
+    }
+    let changed = transaction
+        .execute(
+            "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
+                source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                derivative.source_anchor_id().as_str(),
+                owner.as_str(),
+                derivative.kind().as_str(),
+                derivative.derivative_id(),
+                i64::from(derivative.is_direct_evidence()),
+            ],
+        )
+        .await
+        .map_err(database_error)?;
+    let outcome = if changed == 1 {
+        AnchorDispositionAppendOutcomeV1::Appended
+    } else {
+        let mut rows = transaction
+            .query(
+                "SELECT direct_evidence FROM retrieval_anchor_reverse_lineage
+                 WHERE source_anchor_id = ?1 AND owner_json = ?2
+                   AND derivative_kind = ?3 AND derivative_id = ?4",
                 params![
                     derivative.source_anchor_id().as_str(),
                     owner.as_str(),
                     derivative.kind().as_str(),
                     derivative.derivative_id(),
-                    i64::from(derivative.is_direct_evidence()),
                 ],
             )
             .await
             .map_err(database_error)?;
-        let outcome = if changed == 1 {
-            AnchorDispositionAppendOutcomeV1::Appended
-        } else {
-            let mut rows = transaction
-                .query(
-                    "SELECT direct_evidence FROM retrieval_anchor_reverse_lineage
-                     WHERE source_anchor_id = ?1 AND owner_json = ?2
-                       AND derivative_kind = ?3 AND derivative_id = ?4",
-                    params![
-                        derivative.source_anchor_id().as_str(),
-                        owner.as_str(),
-                        derivative.kind().as_str(),
-                        derivative.derivative_id(),
-                    ],
-                )
-                .await
-                .map_err(database_error)?;
-            let replayed = rows
-                .next()
-                .await
-                .map_err(database_error)?
-                .is_some_and(|row| {
-                    row.get::<i64>(0).ok() == Some(i64::from(derivative.is_direct_evidence()))
-                });
-            drop(rows);
-            if !replayed {
-                return Err(authority_error("anchor derivative identity collision"));
-            }
-            AnchorDispositionAppendOutcomeV1::Replayed
-        };
-        transaction.commit().await?;
-        Ok(outcome)
+        let replayed = rows
+            .next()
+            .await
+            .map_err(database_error)?
+            .is_some_and(|row| {
+                row.get::<i64>(0).ok() == Some(i64::from(derivative.is_direct_evidence()))
+            });
+        drop(rows);
+        if !replayed {
+            return Err(authority_error("anchor derivative identity collision"));
+        }
+        AnchorDispositionAppendOutcomeV1::Replayed
+    };
+    Ok(outcome)
+}
+
+impl super::Database {
+    #[tracing::instrument(
+        name = "runtime_core.db.anchor_disposition_append",
+        level = "trace",
+        skip_all
+    )]
+    pub(crate) async fn append_retrieval_anchor_disposition(
+        &self,
+        record: &RetrievalAnchorDispositionRecordV1,
+    ) -> Result<AnchorDispositionAppendOutcomeV1> {
+        record.validate()?;
+        let record = record.clone();
+        self.transact(OPERATION, async move |tx| {
+            append_retrieval_anchor_disposition_on(tx, &record).await
+        })
+        .await?
     }
 
-    #[hotpath::skip]
+    pub(crate) async fn publish_retrieval_anchor_derivative(
+        &self,
+        derivative: &RetrievalAnchorDerivativeV1,
+    ) -> Result<AnchorDispositionAppendOutcomeV1> {
+        derivative.validate()?;
+        let derivative = derivative.clone();
+        self.transact(OPERATION, async move |tx| {
+            publish_retrieval_anchor_derivative_on(tx, &derivative).await
+        })
+        .await?
+    }
+
     pub(crate) async fn resolve_retrieval_anchor_derivatives<O>(
         &self,
         owner: &O,
         anchor_id: &RetrievalAnchorId,
     ) -> Result<Vec<RetrievalAnchorDerivativeV1>>
     where
-        O: serde::Serialize + Clone + Into<RetrievalAnchorOwnerV1>,
+        O: serde::Serialize + Clone + Into<FactOwnerV1>,
     {
         let connection = self.read_connection();
         resolve_anchor_derivatives(&connection, owner, anchor_id).await
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn resolve_retrieval_anchor_derivative(
         &self,
         owner: &FactOwnerV1,
@@ -429,7 +454,6 @@ impl super::Database {
         resolve_anchor_derivative(&connection, owner, kind, derivative_id).await
     }
 
-    #[hotpath::skip]
     pub(crate) async fn retrieval_anchor_disposition_history(
         &self,
         owner: &impl serde::Serialize,
@@ -494,7 +518,7 @@ impl RetrievalAnchorDispositionStore for super::Database {
     fn current_disposition(
         &self,
         anchor_id: &RetrievalAnchorId,
-        owner: &RetrievalAnchorOwnerV1,
+        owner: &FactOwnerV1,
     ) -> impl std::future::Future<
         Output = RetrievalAnchorStoreResult<Option<RetrievalAnchorDispositionRecordV1>>,
     > + Send {
@@ -509,7 +533,7 @@ impl RetrievalAnchorDispositionStore for super::Database {
     fn tombstone(
         &self,
         anchor_id: &RetrievalAnchorId,
-        owner: &RetrievalAnchorOwnerV1,
+        owner: &FactOwnerV1,
     ) -> impl std::future::Future<
         Output = RetrievalAnchorStoreResult<Option<RetrievalAnchorTombstoneV1>>,
     > + Send {
@@ -544,7 +568,7 @@ impl RetrievalAnchorDispositionStore for super::Database {
     fn derivatives(
         &self,
         anchor_id: &RetrievalAnchorId,
-        owner: &RetrievalAnchorOwnerV1,
+        owner: &FactOwnerV1,
     ) -> impl std::future::Future<
         Output = RetrievalAnchorStoreResult<Vec<RetrievalAnchorDerivativeV1>>,
     > + Send {
@@ -654,7 +678,7 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn disposition_replay_survives_restart_without_resurrection() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("anchors.db");
@@ -707,7 +731,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn deletion_tombstones_reverse_lineage_for_every_derivative_kind() {
         let directory = tempfile::tempdir().unwrap();
         let database = open_database(&directory.path().join("anchors.db")).await;
@@ -742,7 +766,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(
+        assert_eq!(
             database
                 .resolve_retrieval_anchor_derivatives(
                     &FactOwnerV1::Profile,
@@ -750,7 +774,8 @@ mod tests {
                 )
                 .await
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         database
             .append_retrieval_anchor_disposition(&disposition(
@@ -771,7 +796,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(
+        assert_eq!(
             database
                 .resolve_retrieval_anchor_derivatives(
                     &FactOwnerV1::Profile,
@@ -779,7 +804,8 @@ mod tests {
                 )
                 .await
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         assert!(
             database
@@ -812,7 +838,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn retained_direct_evidence_keeps_a_derivative_servable() {
         let directory = tempfile::tempdir().unwrap();
         let database = open_database(&directory.path().join("anchors.db")).await;
@@ -858,7 +884,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn only_active_direct_evidence_can_serve_a_derivative() {
         let directory = tempfile::tempdir().unwrap();
         let database = open_database(&directory.path().join("anchors.db")).await;
@@ -913,7 +939,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn production_authority_preserves_history_and_suppresses_superseded_sources() {
         let directory = tempfile::tempdir().unwrap();
         let database = open_database(&directory.path().join("anchors.db")).await;

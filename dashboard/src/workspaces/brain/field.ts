@@ -5,7 +5,7 @@
  * The problem this replaces. The registry is, in practice, several dozen
  * repositories with exactly one checkout each. Drawing a synthetic hub node per
  * repository turned each of those into an isolated two-node component, and the
- * renderer's constellation packer then arranged the components on a ring — so
+ * renderer's constellation packer then arranged the components on a ring, so
  * the whole surface read as one big circle of paired dots. Nothing about that
  * circle was true. The ring is a packing artifact; a reader looking at it sees
  * a cycle, an ordering, a centre and a periphery, and the registry has none of
@@ -15,20 +15,20 @@
  *
  * What replaces it. Every position on this field is a measurement:
  *
- *   x — time since TraceDecay last saw the project (`last_seen_at`), as ordered
+ *   x, time since TraceDecay last saw the project (`last_seen_at`), as ordered
  *       columns: today, this week, this month, this quarter, dormant. Columns
  *       rather than a continuous axis because the underlying quantity spans
  *       minutes to months, and because a column has a width to spread inside,
  *       which is what keeps bodies from fusing without ever moving one into a
- *       neighbouring column — an offset within a column costs nothing, an
+ *       neighbouring column, an offset within a column costs nothing, an
  *       offset across one would be a lie about when the project was last seen.
  *
- *   y — indexed mass: how much TraceDecay actually holds for the project
+ *   y, indexed mass: how much TraceDecay actually holds for the project
  *       (stores + graph scopes + artifacts), on a log scale because the
  *       registry spans one artifact to several hundred.
  *
- *   size — the same mass, so the heavy brains are also the big bodies.
- *   brightness — recency again (`vitality`), so the left-hand columns burn and
+ *   size, the same mass, so the heavy brains are also the big bodies.
+ *   brightness, recency again (`vitality`), so the left-hand columns burn and
  *       the dormant right-hand column sinks toward the substrate.
  *
  * A repository hub is materialised only when the repository genuinely has more
@@ -43,7 +43,7 @@ import {
 
 const DAY_SECONDS = 86_400;
 
-export interface FieldNode {
+interface FieldNode {
   id: string;
   label: string;
   kind: string;
@@ -53,15 +53,43 @@ export interface FieldNode {
   vitality: number;
   x: number;
   y: number;
+  /** The packed cell this body belongs to, or null when it stands alone. */
+  cell: string | null;
 }
 
-export interface FieldEdge {
+/**
+ * A crowded recency × mass cell. When four or more projects share one cell
+ * and cannot clear each other, they are packed into a rank-ordered grid
+ * inside it (heaviest first, then by id), so they separate as the reader
+ * zooms instead of piling onto one point. Position inside a packed cell is
+ * rank, not exact mass; the cell's bounds are still the measurement, and the
+ * members' exact values stay printed.
+ */
+interface FieldCell {
+  id: string;
+  column: number;
+  /** Member ids in rank order. */
+  members: string[];
+  /** Centre and size in field units. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Distance between neighbouring packed members, in field units. */
+  spacing: number;
+  /** Largest member radius, so a renderer knows when members stop overlapping. */
+  maxRadius: number;
+  /** Sum of member indexed mass. */
+  mass: number;
+}
+
+interface FieldEdge {
   source: string;
   target: string;
   kind: string;
 }
 
-export interface FieldColumn {
+interface FieldColumn {
   id: string;
   /** Axis tick label. */
   label: string;
@@ -73,11 +101,11 @@ export interface FieldColumn {
 /** What the mass axis actually holds, so the caption can state the shape the
  * axis has rather than leaving the reader to infer it from a crowd of bodies
  * along the bottom. */
-export interface MassSummary {
+interface MassSummary {
   floor: number;
   ceiling: number;
   median: number;
-  /** Projects sitting in the lower half of the LOG axis — the crowd. */
+  /** Projects sitting in the lower half of the LOG axis, the crowd. */
   lowerHalfCount: number;
   total: number;
 }
@@ -92,11 +120,13 @@ export interface RegistryField {
   /**
    * The age, in days, at which a body's brightness reaches zero on THIS field.
    * Relative to the registry rather than fixed, and stated in the caption
-   * because of it — see `recencyVitality`.
+   * because of it, see `recencyVitality`.
    */
   vitalityHorizonDays: number;
   /** Repositories that contributed a hub (more than one checkout). */
   sharedRepoCount: number;
+  /** Packed cells, in column then cell order. Empty when nothing crowds. */
+  cells: FieldCell[];
   /** The axis frame, so the camera shows the whole scale rather than only the
    * part of it that is currently occupied. An empty column is a reading. */
   extent: { x: [number, number]; y: [number, number] };
@@ -107,10 +137,10 @@ export interface RegistryField {
  *
  * Exported because the Delivery field asks a different question of the same
  * registry (branch composition rather than indexed mass) but has to place its
- * bodies on the SAME time ladder — two surfaces that both say "this week" have
+ * bodies on the SAME time ladder, two surfaces that both say "this week" have
  * to mean the same seven days. A second copy of these bounds would drift the
  * first time one of them was tuned. */
-export const RECENCY_COLUMNS: ReadonlyArray<{
+const RECENCY_COLUMNS: ReadonlyArray<{
   id: string;
   label: string;
   bound: string;
@@ -130,7 +160,7 @@ export function indexedMass(project: ProjectRegistryEntry): number {
 }
 
 /** Age in days, floored at zero so a clock skew never reads as the future. */
-export function ageDays(lastSeenAt: number, nowSeconds: number): number {
+function ageDays(lastSeenAt: number, nowSeconds: number): number {
   return Math.max(0, (nowSeconds - lastSeenAt) / DAY_SECONDS);
 }
 
@@ -148,7 +178,7 @@ const MIN_VITALITY_HORIZON_DAYS = 1;
  * The horizon is a parameter, and `composeRegistryField` sets it to the age of
  * the OLDEST project on the field rather than leaving it at a fixed quarter.
  * With the fixed 90-day horizon a registry whose projects span ten days
- * occupied only the top half of the scale — today read 1.00 and this-week read
+ * occupied only the top half of the scale, today read 1.00 and this-week read
  * 0.85, a luminance difference of fifteen percent that no eye separates on a
  * dark field. Anchored to the observed range the same registry uses the whole
  * scale: today burns, ten days ago is out.
@@ -179,7 +209,7 @@ const MAX_VITALITY_HORIZON_DAYS = 90;
  *
  * A HIGH QUANTILE of the observed ages rather than the maximum. One registry
  * entry last seen in 2019 would otherwise set the horizon at ninety-four years
- * and collapse every other project back to indistinguishable full brightness —
+ * and collapse every other project back to indistinguishable full brightness , 
  * which is the exact compression this parameter exists to remove, reintroduced
  * by a single outlier. At the ninetieth percentile the scale is set by the bulk
  * of the registry and the handful older than it simply rest at the floor,
@@ -215,15 +245,23 @@ export function columnIndexFor(lastSeenAt: number, nowSeconds: number): number {
  * line, which is comfortably less than half the gap, so a body can never be
  * mistaken for a member of the column next door. */
 const COLUMN_HALF_WIDTH = 0.42;
+/** Exported with `bodyRadius` because the scene model draws the mass axis and
+ * the body crowns in these same units; a second copy of either would drift. */
 const MASS_AXIS_HEIGHT = 2.9;
 /** Step size for the sideways nudges that keep bodies off each other. */
 const NUDGE = 0.06;
+/** Height of one mass cell, the unit crowded bodies are packed into. */
+const CELL_HEIGHT = 0.25;
+/** Fewer crowded bodies than this overlap in place rather than pack. */
+const PACK_MIN = 4;
+/** Width of a packed cell's grid, inside the column's own half-width. */
+const PACK_WIDTH = 2 * COLUMN_HALF_WIDTH * 0.95;
 /** A body's drawn radius in field units, so the clearance test knows how much
- * room each one actually takes. The canvas sizes bodies by the square root of
- * mass, and this mirrors that curve — otherwise the two heaviest projects in a
- * column, which are also the two largest discs, are the pair most likely to be
+ * room each one actually takes. The scene sizes bodies by the square root of
+ * mass, and this mirrors that curve, otherwise the two heaviest projects in a
+ * column, which are also the two largest crowns, are the pair most likely to be
  * left overlapping by a clearance tuned for the small ones. */
-function bodyRadius(mass: number, ceiling: number): number {
+export function bodyRadius(mass: number, ceiling: number): number {
   return 0.09 + 0.15 * Math.sqrt(mass / Math.max(ceiling, 1));
 }
 
@@ -243,8 +281,8 @@ export function composeRegistryField(
   );
   // The axis runs between the lightest and heaviest projects actually present.
   // Anchoring the floor at zero instead would spend a quarter of the field on a
-  // mass no registered project can have — every project holds at least one
-  // store — and squash the range that carries the reading.
+  // mass no registered project can have, every project holds at least one
+  // store, and squash the range that carries the reading.
   const massFloor = projects.reduce(
     (min, project) => Math.min(min, indexedMass(project)),
     Infinity,
@@ -274,6 +312,8 @@ export function composeRegistryField(
 
   const placedById = new Map<string, { x: number; y: number }>();
   const nodes: FieldNode[] = [];
+  const cells: FieldCell[] = [];
+  const lastCell = Math.floor(MASS_AXIS_HEIGHT / CELL_HEIGHT);
   for (const [index, bucket] of [...byColumn.entries()].sort((a, b) => a[0] - b[0])) {
     // Heaviest first, then by id: mass decides who gets the uncontested centre
     // line, and the id tiebreak keeps the result independent of payload order.
@@ -281,29 +321,77 @@ export function composeRegistryField(
       (a, b) =>
         indexedMass(b) - indexedMass(a) || a.project_id.localeCompare(b.project_id),
     );
-    const settledHere: Array<{ offset: number; y: number; radius: number }> = [];
+    const byCell = new Map<number, Array<{ project: ProjectRegistryEntry; y: number; radius: number }>>();
     for (const project of ordered) {
       const mass = indexedMass(project);
       // Sigma's y grows DOWNWARD on screen, so heavier has to be the larger
       // y for mass to read as height.
-      const y =
-        ((Math.log1p(mass) - axisLow) / axisSpan) * MASS_AXIS_HEIGHT;
-      const radius = bodyRadius(mass, massCeiling);
-      const offset = clearOffset(y, radius, settledHere);
-      const x = index + offset;
-      settledHere.push({ offset, y, radius });
+      const y = ((Math.log1p(mass) - axisLow) / axisSpan) * MASS_AXIS_HEIGHT;
+      const cell = Math.min(lastCell, Math.floor(y / CELL_HEIGHT));
+      const members = byCell.get(cell) ?? [];
+      members.push({ project, y, radius: bodyRadius(mass, massCeiling) });
+      byCell.set(cell, members);
+    }
+    const settledHere: Array<{ offset: number; y: number; radius: number }> = [];
+    const place = (project: ProjectRegistryEntry, x: number, y: number, cell: string | null): void => {
       placedById.set(project.project_id, { x, y });
       nodes.push({
         id: project.project_id,
         label: project.label,
         kind: project.kind,
-        degree: mass,
+        degree: indexedMass(project),
         vitality: recencyVitality(project.last_seen_at, nowSeconds, horizonDays),
         x,
         y,
+        cell,
+      });
+    };
+    // Heavy cells first, so the heaviest projects keep their measured place.
+    for (const [cellIndex, members] of [...byCell.entries()].sort((a, b) => b[0] - a[0])) {
+      const tentative: Array<{ offset: number; y: number; radius: number }> = [];
+      let crowded = false;
+      for (const member of members) {
+        const { offset, clear } = clearOffset(member.y, member.radius, [...settledHere, ...tentative]);
+        if (!clear && members.length >= PACK_MIN) {
+          crowded = true;
+          break;
+        }
+        tentative.push({ offset, y: member.y, radius: member.radius });
+      }
+      if (!crowded || members.length < PACK_MIN) {
+        members.forEach((member, rank) => place(member.project, index + tentative[rank]!.offset, member.y, null));
+        settledHere.push(...tentative);
+        continue;
+      }
+      const id = `cell:${index}:${cellIndex}`;
+      const height = CELL_HEIGHT * 0.92;
+      const cols = Math.max(1, Math.round(Math.sqrt((members.length * PACK_WIDTH) / height)));
+      const rows = Math.ceil(members.length / cols);
+      const dx = PACK_WIDTH / cols;
+      const dy = height / rows;
+      const centreY = (cellIndex + 0.5) * CELL_HEIGHT;
+      const spacing = rows > 1 ? Math.min(dx, dy) : dx;
+      members.forEach((member, rank) => {
+        const x = index - PACK_WIDTH / 2 + dx * ((rank % cols) + 0.5);
+        const y = centreY + height / 2 - dy * (Math.floor(rank / cols) + 0.5);
+        place(member.project, x, y, id);
+        settledHere.push({ offset: x - index, y, radius: spacing / 2 });
+      });
+      cells.push({
+        id,
+        column: index,
+        members: members.map((member) => member.project.project_id),
+        x: index,
+        y: centreY,
+        width: PACK_WIDTH,
+        height,
+        spacing,
+        maxRadius: Math.max(...members.map((member) => member.radius)),
+        mass: members.reduce((sum, member) => sum + indexedMass(member.project), 0),
       });
     }
   }
+  cells.sort((a, b) => a.column - b.column || b.y - a.y);
 
   // Shared-checkout repositories, and only those. The hub is the git directory
   // itself; its edges say "these working copies are the same repository", which
@@ -311,9 +399,9 @@ export function composeRegistryField(
   const edges: FieldEdge[] = [];
   let sharedRepoCount = 0;
   for (const group of groups) {
-    if (group.projects.length < 2) continue;
+    if (group.projects.length < 2 || group.git_common_dir == null) continue;
     sharedRepoCount += 1;
-    const hubId = `repo:${group.git_common_dir ?? group.label}`;
+    const hubId = `repo:${group.git_common_dir}`;
     const anchors = group.projects
       .map((project) => placedById.get(project.project_id))
       .filter((point): point is { x: number; y: number } => point != null);
@@ -329,7 +417,7 @@ export function composeRegistryField(
       // A hub carries no mass of its own; it is sized by how many working
       // copies it actually binds together.
       degree: group.projects.length,
-      // Lit by its most recently seen checkout — the repository is exactly as
+      // Lit by its most recently seen checkout, the repository is exactly as
       // live as the liveliest copy of it.
       vitality: group.projects.reduce(
         (max, project) =>
@@ -338,6 +426,7 @@ export function composeRegistryField(
       ),
       x: centroid.x,
       y: centroid.y,
+      cell: null,
     });
     for (const project of group.projects) {
       if (!placedById.has(project.project_id)) continue;
@@ -351,7 +440,7 @@ export function composeRegistryField(
   // The vertical margins are DERIVED from the bodies that actually sit at the
   // two ends rather than being a flat allowance. A flat 0.55 spent a fifth of
   // the frame's height on clearance the largest body (radius 0.24) does not
-  // need and the smallest (0.09) needs far less of — which read as an axis
+  // need and the smallest (0.09) needs far less of, which read as an axis
   // that tops out empty. Horizontal margin stays fixed: it has to clear a
   // body's own radius AND its offset from its column's centre line, and both
   // ends of the x axis are column edges rather than data.
@@ -368,6 +457,7 @@ export function composeRegistryField(
     mass: summarizeMass(projects, axisLow, axisSpan),
     vitalityHorizonDays: horizonDays,
     sharedRepoCount,
+    cells,
     extent: {
       x: [-xMargin, RECENCY_COLUMNS.length - 1 + xMargin],
       y: [-bottomPad, MASS_AXIS_HEIGHT + topPad],
@@ -382,7 +472,7 @@ export function composeRegistryField(
  * honest scale, but on a real registry it is also a lopsided one: forty of
  * forty-four projects hold between four and thirteen units while one holds two
  * hundred and forty-seven, so the bodies bunch along the bottom and the upper
- * axis looks like a drawing error. It is not — it is the distribution, and
+ * axis looks like a drawing error. It is not, it is the distribution, and
  * the view states that rather than leaving the reader to conclude the frame
  * is broken.
  */
@@ -400,9 +490,12 @@ function summarizeMass(
     masses.length % 2 === 0
       ? ((masses[middle - 1] ?? 0) + (masses[middle] ?? 0)) / 2
       : (masses[middle] ?? 0);
-  const lowerHalfCount = masses.filter(
-    (mass) => (Math.log1p(mass) - axisLow) / axisSpan < 0.5,
-  ).length;
+  // A registry where every project measures the same has no lower half: the
+  // clamped span would otherwise place every body below the midpoint.
+  const flat = masses[0] === masses[masses.length - 1];
+  const lowerHalfCount = flat
+    ? 0
+    : masses.filter((mass) => (Math.log1p(mass) - axisLow) / axisSpan < 0.5).length;
   return {
     floor: masses[0] ?? 0,
     ceiling: masses[masses.length - 1] ?? 0,
@@ -419,19 +512,16 @@ function summarizeMass(
  * offset within a column costs nothing, an offset across one would be a lie
  * about when the project was last seen.
  *
- * A real registry does exhaust that width — thirty-odd projects all seen in the
- * same week, holding much the same amount, want the same point. When no offset
- * clears, the body takes the one that leaves the most room rather than the
- * centre line, so a crowded column reads as a dense band with structure in it
- * instead of a pile on its axis. Bodies there genuinely do overlap, which is
- * the truth: those projects are in the same place because they measure the
- * same.
+ * When no offset clears, the body takes the one that leaves the most room
+ * rather than the centre line and reports that it did not clear. A few such
+ * bodies overlap in place, which is the truth: they measure the same. A
+ * crowd of them is packed into its mass cell instead (see `FieldCell`).
  */
 function clearOffset(
   y: number,
   radius: number,
   settled: ReadonlyArray<{ offset: number; y: number; radius: number }>,
-): number {
+): { offset: number; clear: boolean } {
   const steps = Math.floor(COLUMN_HALF_WIDTH / NUDGE);
   let roomiest = 0;
   let mostRoom = -Infinity;
@@ -445,19 +535,19 @@ function clearOffset(
           Math.hypot(point.offset - offset, point.y - y) - (point.radius + radius),
         );
       }
-      if (room >= 0) return offset;
+      if (room >= 0) return { offset, clear: true };
       if (room > mostRoom) {
         mostRoom = room;
         roomiest = offset;
       }
     }
   }
-  return roomiest;
+  return { offset: roomiest, clear: false };
 }
 
 /** One of the three counts a registry entry carries, summarised across the
  * whole registry. */
-export interface HoldingChannel {
+interface HoldingChannel {
   label: string;
   /** The value every project shares, when they all share one. */
   uniform: number | null;
@@ -472,7 +562,7 @@ export interface HoldingsSummary {
   stores: HoldingChannel;
   artifacts: HoldingChannel;
   /** The channels that carry no information because every project agrees, as a
-   * sentence — or null when they all vary. */
+   * sentence, or null when they all vary. */
   uniformLine: string | null;
 }
 
@@ -496,7 +586,7 @@ function channel(label: string, values: readonly number[]): HoldingChannel {
  * is 3, 4 or 5. Forty-four repetitions of a constant is not density.
  *
  * So the constant channels are stated once for the whole rail and the rows
- * carry the channel that differs — plus, per row, any other channel that
+ * carry the channel that differs, plus, per row, any other channel that
  * departs from its mode, because a project holding five artifacts where
  * everything else holds four IS a reading and must not be swallowed by the
  * summary.

@@ -1,8 +1,7 @@
 use super::*;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::super::command::{EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT, retry_busy_begin};
 
 fn busy_begin_connections() -> (TempDir, Connection, Connection) {
     let directory = TempDir::new().unwrap();
@@ -17,97 +16,135 @@ fn busy_begin_connections() -> (TempDir, Connection, Connection) {
     (directory, locker, contender)
 }
 
+fn sqlite_busy(message: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+        Some(message),
+    )
+}
+
+fn retry_without_connection(
+    mut begin: impl FnMut() -> rusqlite::Result<()>,
+    shutdown: &AtomicBool,
+    cancelled: impl FnMut() -> bool,
+) -> rusqlite::Result<()> {
+    let mut connection = Connection::open_in_memory().unwrap();
+    crate::storage_pool::wait_until(
+        retry_busy_begin(&mut connection, |_| begin(), shutdown, cancelled),
+        None,
+    )
+    .unwrap()
+}
+
+fn is_busy_with(error: &rusqlite::Error, expected: &str) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(error, Some(message))
+            if error.code == rusqlite::ErrorCode::DatabaseBusy && message == expected
+    )
+}
+
 #[test]
 fn immediate_begin_retries_sqlite_busy_until_lock_releases() {
-    let (_directory, mut locker, contender) = busy_begin_connections();
-    let lock = locker
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .unwrap();
-    let started = Arc::new(AtomicBool::new(false));
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let (_directory, mut locker, mut contender) = busy_begin_connections();
+    let mut lock = Some(
+        locker
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap(),
+    );
+    let shutdown = AtomicBool::new(false);
+    let mut attempts = 0;
 
-    std::thread::scope(|scope| {
-        let admission_started = Arc::clone(&started);
-        let shutdown = Arc::clone(&shutdown);
-        let admission = scope.spawn(move || {
-            admission_started.store(true, Ordering::Release);
-            let transaction = super::super::command::begin_transaction_with_busy_retry(
-                &contender,
-                TransactionBehavior::Immediate,
-                &shutdown,
-            )
-            .unwrap();
-            transaction.rollback().unwrap();
-        });
-        while !started.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
-        std::thread::yield_now();
-        lock.rollback().unwrap();
-        admission.join().unwrap();
-    });
+    // This thread's exact SQL clock is frozen, so it never reaches the acquire
+    // deadline and the holder's release alone decides when a retry succeeds.
+    let transaction = crate::storage_pool::wait_until(
+        retry_busy_begin(
+            &mut contender,
+            |contender| {
+                attempts += 1;
+                let attempt =
+                    rusqlite::Transaction::new_unchecked(contender, TransactionBehavior::Immediate);
+                if let Some(lock) = lock.take() {
+                    lock.rollback().unwrap();
+                }
+                attempt
+            },
+            &shutdown,
+            || false,
+        ),
+        None,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        attempts, 2,
+        "the busy attempt must be retried once released"
+    );
+    transaction.rollback().unwrap();
 }
 
 #[test]
 fn immediate_begin_busy_retry_is_bounded_and_honors_shutdown() {
-    let (_directory, mut locker, contender) = busy_begin_connections();
-    let _lock = locker
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .unwrap();
     let shutdown = AtomicBool::new(false);
+    let clock = FakeClock::frozen();
+    clock.install();
+    let mut attempts = 0;
 
-    let error = super::super::command::begin_transaction_with_busy_retry(
-        &contender,
-        TransactionBehavior::Immediate,
+    let error = retry_without_connection(
+        || {
+            attempts += 1;
+            clock.advance(Duration::from_millis(1));
+            Err::<(), _>(sqlite_busy(format!("attempt {attempts}")))
+        },
         &shutdown,
+        || false,
     )
     .unwrap_err();
 
-    assert!(matches!(
-        error,
-        rusqlite::Error::SqliteFailure(error, _)
-            if matches!(
-                error.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
-    ));
+    assert!(is_busy_with(&error, "attempt 1"), "{error:?}");
+    assert_eq!(
+        clock.elapsed(),
+        EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT,
+        "busy acquire must stop at the first busy attempt that reaches its bound"
+    );
 
     shutdown.store(true, Ordering::Release);
-    let error = super::super::command::begin_transaction_with_busy_retry(
-        &contender,
-        TransactionBehavior::Immediate,
+    let mut attempts = 0;
+    let error = retry_without_connection(
+        || {
+            attempts += 1;
+            clock.advance(Duration::from_millis(1));
+            Err::<(), _>(sqlite_busy(format!("attempt {attempts}")))
+        },
         &shutdown,
+        || false,
     )
     .unwrap_err();
-    assert!(matches!(
-        error,
-        rusqlite::Error::SqliteFailure(error, _)
-            if matches!(
-                error.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
-    ));
+
+    assert_eq!(attempts, 1, "shutdown must end the retry at the first busy");
+    assert!(is_busy_with(&error, "attempt 1"), "{error:?}");
 }
 
 #[test]
-fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
+fn immediate_begin_busy_retry_honors_cancellation() {
     let shutdown = AtomicBool::new(false);
+    let cancelled = AtomicBool::new(false);
     let mut attempts = 0;
 
-    let error = super::super::command::retry_busy_begin(
+    let error = retry_without_connection(
         || {
             attempts += 1;
             if attempts == 1 {
-                shutdown.store(true, Ordering::Release);
-                Err(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                    Some("original database lock".to_owned()),
-                ))
-            } else {
-                Ok(())
+                cancelled.store(true, Ordering::Release);
             }
+            Err::<(), _>(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("original database lock".to_owned()),
+            ))
         },
         &shutdown,
+        || cancelled.load(Ordering::Acquire),
     )
     .unwrap_err();
 
@@ -121,47 +158,35 @@ fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
 }
 
 #[test]
-fn deferred_begin_keeps_one_shot_sqlite_semantics() {
-    let (_directory, mut locker, contender) = busy_begin_connections();
-    let _lock = locker
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .unwrap();
-    let shutdown = AtomicBool::new(true);
+fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
+    let shutdown = AtomicBool::new(false);
+    let mut attempts = 0;
 
-    let transaction = super::super::command::begin_transaction_with_busy_retry(
-        &contender,
-        TransactionBehavior::Deferred,
+    let error = retry_without_connection(
+        || {
+            attempts += 1;
+            if attempts == 1 {
+                shutdown.store(true, Ordering::Release);
+                Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    Some("original database lock".to_owned()),
+                ))
+            } else {
+                Ok(())
+            }
+        },
         &shutdown,
+        || false,
     )
-    .unwrap();
+    .unwrap_err();
 
-    transaction.rollback().unwrap();
-}
-
-#[test]
-fn deferred_transaction_is_available_for_default_sqlite_semantics() {
-    let fixture = fixture('a', 'a');
-    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-    channel
-        .execute_batch("CREATE TABLE deferred (value INTEGER NOT NULL)".to_owned())
-        .unwrap();
-    let transaction = channel.begin_deferred().unwrap();
-    transaction
-        .execute(statement(
-            "INSERT INTO deferred VALUES (?)",
-            vec![ExactSqlValue::Integer(1)],
-        ))
-        .unwrap();
-
-    transaction.commit().unwrap();
-
-    let rows = channel
-        .query(
-            statement("SELECT count(*) FROM deferred", vec![]),
-            Duration::from_secs(1),
-        )
-        .unwrap();
-    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(1)]);
+    assert_eq!(attempts, 1);
+    assert!(matches!(
+        error,
+        rusqlite::Error::SqliteFailure(error, Some(message))
+            if error.code == rusqlite::ErrorCode::DatabaseBusy
+                && message == "original database lock"
+    ));
 }
 
 #[test]
@@ -299,20 +324,6 @@ fn pinned_batch_rejects_transaction_control() {
 
     let error = transaction
         .execute_batch("COMMIT; BEGIN IMMEDIATE".to_owned())
-        .unwrap_err();
-
-    assert!(matches!(error, ExactSqlError::TransactionControlDenied));
-    transaction.rollback().unwrap();
-}
-
-#[test]
-fn pinned_execute_rejects_transaction_control_before_commit_receipt() {
-    let fixture = fixture('a', 'a');
-    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-    let transaction = channel.begin_immediate().unwrap();
-
-    let error = transaction
-        .execute(statement("COMMIT", vec![]))
         .unwrap_err();
 
     assert!(matches!(error, ExactSqlError::TransactionControlDenied));

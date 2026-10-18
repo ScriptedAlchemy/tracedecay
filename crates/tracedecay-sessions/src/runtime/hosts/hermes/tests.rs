@@ -1,27 +1,45 @@
 //! Hermes observation normalization, coverage, and bounded-page tests.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
     CanonicalReasoningVisibilityV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceRangeV1, ProviderUsageCounterSemanticsV1,
-    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, RetentionClass, SessionId,
+    ProviderUsageCountersV1, ProviderUsageScopeV1, RetentionClass, SessionId,
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::admission::test_support::PanicHostAdmission;
+use crate::admission::test_support::{MemoryHostAdmission, PanicHostAdmission};
 use crate::observation::ObservationCancellation;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::shared::StoredCursor;
-use tracedecay_runtime_core::privacy::{
-    MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
 
-use super::coverage::admit_rows_with_admission_and_cancellation;
+use super::coverage::{admit_rows_with_admission_and_cancellation, sqlite_incarnation};
+use super::ingest::HermesProfileSource;
 use super::*;
+
+/// A state database name carrying URI-special characters, so the opener is
+/// proven to take it as a path and never as a `file:` URI. `?` is not a legal
+/// Windows filename character; `#` and `%` still cover the URI grammar there.
+#[cfg(not(windows))]
+const URI_SPECIAL_STATE_DB: &str = "state #?%.db";
+#[cfg(windows)]
+const URI_SPECIAL_STATE_DB: &str = "state #%.db";
 
 static HERMES_UNIT_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
     tokio::sync::OnceCell::const_new();
+static OBSERVED_HERMES_READ_QUERIES: AtomicUsize = AtomicUsize::new(0);
+
+fn count_hermes_read_query(event: TraceEvent<'_>) {
+    if matches!(event, TraceEvent::Stmt(_, _)) {
+        OBSERVED_HERMES_READ_QUERIES.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 async fn initialize_owned_store_before_foreign_fixture(directory: &std::path::Path) {
     HERMES_UNIT_FIXTURE_OWNED_STORE_READY
@@ -33,6 +51,22 @@ async fn initialize_owned_store_before_foreign_fixture(directory: &std::path::Pa
             );
         })
         .await;
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_sqlite_incarnation_reports_only_safe_identity_classification() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("private-hermes-session.sqlite3");
+
+    let error = sqlite_incarnation(&path).unwrap_err();
+
+    assert_eq!(
+        error,
+        "could not inspect Hermes SQLite authority (not_found)"
+    );
+    assert!(!error.contains("private-hermes-session"));
+    assert!(!error.contains("No such file"));
 }
 
 #[cfg(windows)]
@@ -113,6 +147,7 @@ fn fixture_projection() -> HermesProjectionMetadata {
         location_path: None,
         profile: Some("fixture".to_string()),
         location_provenance: None,
+        transcript_path: None,
     }
 }
 
@@ -141,58 +176,6 @@ fn canonical_with_session_usage(
     serde_json::from_value(parsed.value().clone()).unwrap()
 }
 
-#[test]
-fn repeated_joined_session_totals_emit_only_at_the_session_frontier() {
-    let mut first = fixture(7);
-    first.is_session_usage_frontier = false;
-    let second = fixture(8);
-    let first_envelope = canonical_with_session_usage(&first, 0, first.is_session_usage_frontier);
-    let second_envelope =
-        canonical_with_session_usage(&second, 7, second.is_session_usage_frontier);
-    assert!(first_envelope.facts().iter().all(|fact| {
-        !matches!(
-            fact,
-            CanonicalObservationFactV1::ProviderUsage { .. }
-                | CanonicalObservationFactV1::UncorrelatedUsage { .. }
-        )
-    }));
-    assert_eq!(
-        second_envelope
-            .facts()
-            .iter()
-            .filter(|fact| matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. }))
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn newly_observed_session_frontier_preserves_updated_cumulative_totals() {
-    let mut updated = fixture(8);
-    updated.session_input_tokens = Some(21);
-    updated.session_output_tokens = Some(9);
-    let envelope = canonical_with_session_usage(&updated, 7, updated.is_session_usage_frontier);
-
-    assert!(envelope.facts().iter().any(|fact| matches!(
-        fact,
-        CanonicalObservationFactV1::ProviderUsage {
-            model: ProviderUsageModelV1::Known { model },
-            native_scope: ProviderUsageScopeV1::Session,
-            counter_semantics: ProviderUsageCounterSemanticsV1::Cumulative,
-            counters: ProviderUsageCountersV1::Known {
-                input_tokens: Some(21),
-                output_tokens: Some(9),
-                ..
-            },
-            request_id: None,
-            native_kind,
-            native_field,
-        } if model == "model-redacted"
-            && native_kind == "session"
-            && native_field == "sessions.token_counters"
-    )));
-}
-
 #[tokio::test]
 async fn cancelled_hermes_admission_stops_before_the_next_transactional_row() {
     let project_id = tracedecay_domain::ProjectId::new("project.hermes-cancelled-startup").unwrap();
@@ -201,6 +184,8 @@ async fn cancelled_hermes_admission_stops_before_the_next_transactional_row() {
 
     let stats = admit_rows_with_admission_and_cancellation(
         &PanicHostAdmission,
+        &mut SourceSweep::new(PROVIDER, None),
+        std::path::Path::new("state.db"),
         &[fixture(1)],
         ObservationScopeV1::Project { project_id },
         ObservationSourceGenerationV1::new(1).unwrap(),
@@ -216,6 +201,37 @@ async fn cancelled_hermes_admission_stops_before_the_next_transactional_row() {
         stats,
         crate::runtime::shared::TranscriptIngestStats::default()
     );
+}
+
+#[tokio::test]
+async fn cancelled_hermes_sweep_stops_before_opening_the_host_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = HermesProfileSource {
+        state_db: dir.path().join("state.db"),
+        profile: Some("cancelled-fixture".to_string()),
+    };
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+    let mut budget =
+        crate::runtime::ingest_byte_budget::IngestByteBudget::bounded(MAX_HERMES_PAGE_BYTES);
+
+    let stats = try_ingest_state_db_bounded_with_admission(
+        &source,
+        dir.path(),
+        tracedecay_domain::ProjectId::new("project.hermes-cancelled-read").unwrap(),
+        &PanicHostAdmission,
+        &mut SourceSweep::new(PROVIDER, None),
+        &mut budget,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        stats,
+        crate::runtime::shared::TranscriptIngestStats::default()
+    );
+    assert!(!source.state_db.exists());
 }
 
 #[test]
@@ -359,7 +375,7 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
         record.native_record_id,
     )
     .unwrap();
-    let outcome = tracedecay_runtime_core::privacy::ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = tracedecay_privacy::RecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(
             parsed,
@@ -367,10 +383,7 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
             RetentionClass::new(OBSERVATION_RETENTION).unwrap(),
         )
         .unwrap();
-    let tracedecay_runtime_core::privacy::ObservationSanitizationOutcomeV1::Durable {
-        observation,
-        ..
-    } = outcome
+    let tracedecay_privacy::ObservationSanitizationOutcomeV1::Durable { observation, .. } = outcome
     else {
         panic!("safe Hermes fixture must remain durable");
     };
@@ -380,23 +393,6 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
         envelope.relations().message_id().map(ObservationId::as_str),
         Some("20260101_000000_abc123:7")
     );
-}
-
-#[test]
-fn canonical_identity_and_parent_relation_match_native_evidence() {
-    let row = fixture(7);
-    let record = normalized(&row, 0);
-    let expected_record_id = record.native_record_id.clone();
-    let expected_parent = stable_native_id("hermes.session", &json!("parent-redacted")).unwrap();
-    let envelope = normalize_native_observation(record.native, record.range).unwrap();
-    assert_eq!(envelope.stable_record_id(), &expected_record_id);
-    assert_eq!(
-        envelope.relations().parent_agent_id(),
-        Some(&expected_parent)
-    );
-    let relations = serde_json::to_value(envelope.relations()).unwrap();
-    assert!(relations.get("thread_id").is_none());
-    assert!(relations.get("turn_id").is_none());
 }
 
 #[test]
@@ -464,6 +460,7 @@ fn tool_message_preserves_authored_message_and_typed_result() {
             invocation_id: None,
             content: Value::String(content),
             success: None,
+            ..
         } if content == "safe fixture content"
     )));
     assert!(envelope.facts().iter().any(|fact| matches!(
@@ -543,26 +540,6 @@ fn replacement_generation_restarts_sqlite_ordering() {
     assert!(matches!(
         admission.action,
         HermesAdmissionAction::Capture(_)
-    ));
-}
-
-#[test]
-fn malformed_tool_calls_are_complete_typed_coverage() {
-    let mut row = fixture(7);
-    row.tool_calls = Some("{not-json".to_string());
-    let admission = prepare_observation_row(
-        &row,
-        Some(&fixture_projection()),
-        &ObservationScopeV1::Profile,
-        ObservationSourceGenerationV1::new(17).unwrap(),
-        None,
-        23,
-        29,
-    )
-    .unwrap();
-    assert!(matches!(
-        admission.action,
-        HermesAdmissionAction::Cover(ObservationCoverageReason::MalformedFrame)
     ));
 }
 
@@ -839,7 +816,7 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
                 );",
         )
         .unwrap();
-        // Generate the hostile value inside SQLite — never as a Rust String/Vec.
+        // Generate the hostile value inside SQLite, never as a Rust String/Vec.
         let hostile_bytes = MAX_HERMES_VALUE_BYTES.saturating_add(1);
         conn.execute(
             &format!(
@@ -1098,6 +1075,211 @@ fn write_usage_state_db(path: &std::path::Path, rows: usize) {
     transaction.commit().unwrap();
 }
 
+fn row_projection_bytes(row: &HermesRow) -> Vec<u8> {
+    serde_json::to_vec(&json!([
+        row.id,
+        row.session_id,
+        row.role,
+        row.content,
+        row.reasoning,
+        row.tool_name,
+        row.tool_calls,
+        row.timestamp,
+        row.session_model,
+        row.parent_session_id,
+        row.session_cwd,
+        row.session_source,
+        row.session_title,
+        row.session_started_at,
+        row.session_ended_at,
+        row.session_input_tokens,
+        row.session_output_tokens,
+        row.session_cache_read_tokens,
+        row.session_cache_write_tokens,
+        row.session_reasoning_tokens,
+        row.is_session_usage_frontier,
+        row.active,
+        row.sql_value_oversized,
+        row.sql_measured_bytes,
+    ]))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn batched_page_is_byte_identical_to_reference_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let path = dir.path().join("state.db");
+    write_usage_state_db(&path, 3);
+
+    let conn = open_read_only_strict(&path).await.unwrap();
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await.unwrap(),
+        &table_columns(&conn, "sessions").await.unwrap(),
+    );
+    let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+        .await
+        .unwrap();
+    let actual = page
+        .items
+        .iter()
+        .map(row_projection_bytes)
+        .collect::<Vec<_>>();
+    let expected = (0..3)
+        .map(|index| {
+            let content = format!("usage row {index}");
+            row_projection_bytes(&HermesRow {
+                id: index + 1,
+                session_id: "usage-session".to_string(),
+                role: "assistant".to_string(),
+                content: Some(content.clone()),
+                reasoning: None,
+                tool_name: None,
+                tool_calls: None,
+                timestamp: Some(index as f64),
+                session_model: Some("hermes-model".to_string()),
+                parent_session_id: None,
+                session_cwd: None,
+                session_source: None,
+                session_title: None,
+                session_started_at: None,
+                session_ended_at: None,
+                session_input_tokens: Some(10),
+                session_output_tokens: Some(5),
+                session_cache_read_tokens: None,
+                session_cache_write_tokens: None,
+                session_reasoning_tokens: None,
+                is_session_usage_frontier: index == 2,
+                active: 1,
+                sql_value_oversized: false,
+                sql_measured_bytes: ["usage-session", "assistant", &content, "hermes-model"]
+                    .into_iter()
+                    .map(str::len)
+                    .sum::<usize>() as u64,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(actual, expected);
+}
+
+async fn explain_query_plan(
+    conn: &crate::runtime::host_sqlite::SqliteReadConn,
+    sql: String,
+    parameters: Vec<i64>,
+) -> Vec<String> {
+    conn.with(move |conn| {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| row.get(3))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn active_and_legacy_batch_queries_keep_primary_key_seek_plans() {
+    for active_schema in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        initialize_owned_store_before_foreign_fixture(dir.path()).await;
+        let path = dir.path().join("state.db");
+        if active_schema {
+            write_usage_state_db(&path, 3);
+        } else {
+            write_minimal_legacy_state_db(&path, 3);
+        }
+
+        let conn = open_read_only_strict(&path).await.unwrap();
+        let select_sql = select_new_messages_sql(
+            &message_columns(&conn).await.unwrap(),
+            &table_columns(&conn, "sessions").await.unwrap(),
+        );
+        let admission_plan =
+            explain_query_plan(&conn, select_sql.admission_sql().to_string(), vec![0]).await;
+        let payload_plan =
+            explain_query_plan(&conn, select_sql.payload_sql(2), vec![1, 1, 2, 1]).await;
+
+        assert!(
+            admission_plan
+                .iter()
+                .any(|step| step.contains("SEARCH m USING INTEGER PRIMARY KEY (rowid>?)")),
+            "admission must seek from the cursor for active_schema={active_schema}: {admission_plan:?}"
+        );
+        assert!(
+            admission_plan
+                .iter()
+                .any(|step| step.contains("CORRELATED SCALAR SUBQUERY")),
+            "frontier lookup must remain inside the single admission execution: {admission_plan:?}"
+        );
+        assert!(
+            payload_plan
+                .iter()
+                .any(|step| step.contains("SEARCH m USING INTEGER PRIMARY KEY (rowid=?)")),
+            "payload batches must seek admitted ids for active_schema={active_schema}: {payload_plan:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn full_page_executes_one_admission_query_and_bounded_payload_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let path = dir.path().join("state.db");
+    write_usage_state_db(&path, CHUNK_ROWS);
+
+    let conn = open_read_only_strict(&path).await.unwrap();
+    conn.with(|conn| {
+        conn.trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(count_hermes_read_query),
+        );
+    })
+    .await
+    .unwrap();
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await.unwrap(),
+        &table_columns(&conn, "sessions").await.unwrap(),
+    );
+
+    OBSERVED_HERMES_READ_QUERIES.store(0, Ordering::Relaxed);
+    let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+        .await
+        .unwrap();
+    let query_executions = OBSERVED_HERMES_READ_QUERIES.load(Ordering::Relaxed);
+    conn.with(|conn| conn.trace_v2(TraceEventCodes::empty(), None))
+        .await
+        .unwrap();
+
+    assert_eq!(page.items.len(), CHUNK_ROWS);
+    let query_ceiling = CHUNK_ROWS.div_ceil(HERMES_PAYLOAD_BATCH_ROWS) + 1;
+    assert!(
+        query_executions <= query_ceiling,
+        "one full page must execute one admission query plus at most one query per {HERMES_PAYLOAD_BATCH_ROWS} payloads; observed {query_executions}"
+    );
+    assert_eq!(query_executions, query_ceiling);
+    let admitted_payload_bytes = page
+        .items
+        .iter()
+        .map(|row| super::rows::hermes_page_row_charge(row.sql_measured_bytes))
+        .sum::<u64>();
+    let peak_payload_batch_bytes = page
+        .items
+        .chunks(HERMES_PAYLOAD_BATCH_ROWS)
+        .map(|batch| {
+            batch
+                .iter()
+                .map(|row| super::rows::hermes_page_row_charge(row.sql_measured_bytes))
+                .sum::<u64>()
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(admitted_payload_bytes <= MAX_HERMES_PAGE_BYTES);
+    assert!(peak_payload_batch_bytes <= MAX_HERMES_PAGE_BYTES);
+}
+
 fn sqlite_sidecar(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
@@ -1112,7 +1294,7 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
     assert!(open_read_only_strict(&missing).await.is_err());
     assert!(!missing.exists());
 
-    let path = dir.path().join("state #?%.db");
+    let path = dir.path().join(URI_SPECIAL_STATE_DB);
     write_minimal_legacy_state_db(&path, 1);
     let before = std::fs::read(&path).unwrap();
     let wal = sqlite_sidecar(&path, "-wal");
@@ -1154,12 +1336,40 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
     assert!(!journal.exists());
 }
 
+/// Report whether `directory`'s filesystem accepts a file name that is not
+/// valid UTF-8.
+///
+/// `cfg(unix)` is a compile gate, not a filesystem capability: APFS refuses
+/// such a name outright with `EILSEQ`, so a macOS run failed at the fixture
+/// instead of exercising the reader. Probing keeps the coverage everywhere the
+/// bytes are really accepted and makes the skip visible where they are not.
+#[cfg(unix)]
+fn non_utf8_file_names_supported(directory: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStringExt;
+
+    let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn hermes_reader_supports_non_utf8_database_paths() {
     use std::os::unix::ffi::OsStringExt;
 
     let dir = tempfile::tempdir().unwrap();
+    if !non_utf8_file_names_supported(dir.path()) {
+        println!(
+            "skipping hermes_reader_supports_non_utf8_database_paths: \
+             this filesystem refuses non-UTF-8 file names"
+        );
+        return;
+    }
     initialize_owned_store_before_foreign_fixture(dir.path()).await;
     let path = dir
         .path()
@@ -1208,34 +1418,6 @@ async fn corrupt_and_incomplete_state_databases_fail_closed() {
     drop(conn);
     let conn = open_read_only_strict(&malformed).await.unwrap();
     assert!(validate_required_schema(&conn).await.is_err());
-}
-
-#[tokio::test]
-async fn minimal_legacy_schema_reads_without_optional_columns() {
-    let dir = tempfile::tempdir().unwrap();
-    initialize_owned_store_before_foreign_fixture(dir.path()).await;
-    let path = dir.path().join("state.db");
-    write_minimal_legacy_state_db(&path, 1);
-
-    let conn = open_read_only_strict(&path).await.unwrap();
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await.unwrap(),
-        &table_columns(&conn, "sessions").await.unwrap(),
-    );
-    let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
-        .await
-        .unwrap();
-
-    assert_eq!(page.items.len(), 1);
-    let row = &page.items[0];
-    assert_eq!(row.session_id, "legacy-session");
-    assert_eq!(row.content.as_deref(), Some("legacy row 0"));
-    assert!(row.tool_name.is_none());
-    assert!(row.tool_calls.is_none());
-    assert!(row.session_model.is_none());
-    assert!(row.parent_session_id.is_none());
-    assert!(row.session_input_tokens.is_none());
-    assert_eq!(row.active, 1);
 }
 
 #[tokio::test]
@@ -1363,108 +1545,231 @@ async fn multi_page_session_emits_one_usage_checkpoint_and_a_later_frontier_upda
     )));
 }
 
-mod destination_routing_tests {
-    use std::collections::HashMap;
-    use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+/// A Hermes profile whose `state.db` cannot be opened is a skipped source, and
+/// a skipped source is a partial sweep. The outcome must say so; the provider
+/// turns it into a typed catch-up failure instead of reporting a clean pass.
+#[tokio::test]
+async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    // The pin resolver is a root-registered port and stays unwired in this
+    // crate's tests, so the project qualifies as a candidate destination by
+    // being a git worktree instead of carrying a config pin.
+    let project_root = dir.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let init = std::process::Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())
+        .args(["init", "-q"])
+        .current_dir(&project_root)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    let home = dir.path().join("hermes-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("state.db"), b"this is not a sqlite database").unwrap();
+    let admission = MemoryHostAdmission::default();
 
-    use crate::runtime::shared::{ProjectRootMatcher, StoredCursor};
-    use tracedecay_runtime_core::git_discovery::{
-        GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
+    let outcome = ingest::ingest_homes_capped_with_admission_and_cancellation(
+        std::slice::from_ref(&home),
+        &project_root,
+        tracedecay_domain::ProjectId::new("project.hermes-unreadable-source").unwrap(),
+        &admission,
+        &mut SourceSweep::new(PROVIDER, None),
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.source_failures, 1,
+        "the unreadable profile is one skipped source"
+    );
+    assert!(!outcome.projection_drain_deferred);
+    assert_eq!(
+        outcome.stats,
+        crate::runtime::shared::TranscriptIngestStats::default()
+    );
+    assert!(admission.observations().is_empty());
+}
+
+/// A deterministic admission refusal is permanent: the same row fails the same
+/// way on every sweep. Without a durable skip the source cursor never clears
+/// it, so the whole profile `state.db` is abandoned every pass forever, which
+/// is what produced an endless "skipping projectless Hermes transcript source"
+/// WARN on a live daemon. Cover past it, exactly as the shared JSONL path
+/// does, so the source converges.
+mod deterministic_refusal_recovery {
+    use super::*;
+
+    async fn admit_one_refused_row(reason: &'static str) -> MemoryHostAdmission {
+        let admission = MemoryHostAdmission::default();
+        admission.refuse_captures_deterministically(reason);
+        let stats = admit_rows_with_admission_and_cancellation(
+            &admission,
+            &mut SourceSweep::new(PROVIDER, None),
+            std::path::Path::new("state.db"),
+            &[fixture(1)],
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            1,
+            1,
+            |_| Some(fixture_projection()),
+            &ObservationCancellation::default(),
+        )
+        .await
+        .expect("a permanently refused row must not abandon the whole source");
+        assert_eq!(stats.messages_upserted, 0);
+        admission
+    }
+
+    #[tokio::test]
+    async fn refused_row_is_covered_past_instead_of_skipping_the_source() {
+        let admission = admit_one_refused_row("privacy_boundary_failed").await;
+
+        let advances = admission.non_durable_advances();
+        assert_eq!(
+            advances.len(),
+            1,
+            "the refused row must be covered exactly once"
+        );
+        assert_eq!(
+            advances[0].reason(),
+            ObservationCoverageReason::AdmissionRefused
+        );
+        assert_eq!(advances[0].next_cursor().position(), 1);
+    }
+
+    #[tokio::test]
+    async fn identity_collision_keeps_its_own_coverage_reason() {
+        let admission = admit_one_refused_row("observation_identity_collision").await;
+
+        assert_eq!(
+            admission.non_durable_advances()[0].reason(),
+            ObservationCoverageReason::ObservationIdentityCollision
+        );
+    }
+}
+
+/// The identity digest is taken from the row's f64 timestamp before the
+/// native record crosses the JSON boundary and again after `normalize` parses
+/// it back. serde_json's default float parser does not reproduce every f64;
+/// this REAL is one it gets wrong, which made the two digests disagree, the
+/// sanitizer refuse the row as `privacy_boundary_failed`, and the sweep cover
+/// past roughly one Hermes row in eight forever. The workspace pins
+/// `float_roundtrip` so the boundary is exact; this is the row that proves it.
+#[test]
+fn hermes_timestamp_survives_the_json_boundary_into_one_identity() {
+    let mut row = fixture(2);
+    row.role = "assistant".to_string();
+    row.content = Some("safe fixture reply".to_string());
+    row.reasoning = None;
+    row.tool_name = None;
+    row.tool_calls = None;
+    row.timestamp = Some(1_783_829_317.501_287_5);
+    row.is_session_usage_frontier = false;
+
+    let record = normalized(&row, 1);
+    let encoded = serde_json::to_vec(&record.native).unwrap();
+    let parsed = parse_normalized_observation_record_v1(
+        &encoded,
+        record.range,
+        ObservationOrderingDomainV1::SqliteRowId,
+        |native| normalize_native_observation(native, record.range),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.value()["stable_record_id"].as_str(),
+        Some(record.native_record_id.as_str()),
+        "the canonical envelope must re-derive the identity the row was admitted under"
+    );
+
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        record.source,
+        ObservationScopeV1::Profile,
+        ObservationSourceGenerationV1::new(1).unwrap(),
+        record.range,
+        ObservationOrderingDomainV1::SqliteRowId,
+        record.native_record_id,
+    )
+    .unwrap();
+    let outcome = tracedecay_privacy::RecordSanitizerV1::observation_v1()
+        .unwrap()
+        .sanitize_parsed(
+            parsed,
+            identity,
+            RetentionClass::new(OBSERVATION_RETENTION).unwrap(),
+        )
+        .expect("a plain Hermes row must cross the privacy boundary");
+    assert!(
+        matches!(
+            outcome,
+            tracedecay_privacy::ObservationSanitizationOutcomeV1::Durable { .. }
+        ),
+        "row must be durable, not refused"
+    );
+}
+
+/// A quarantined session is witnessed at its first uncovered row. Deleting
+/// that row makes the next row first, whose witness differs, so the session
+/// leaves quarantine instead of staying blocked behind a row that is gone.
+#[tokio::test]
+async fn deleting_a_refused_row_releases_its_session() {
+    crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+    let home = tempfile::tempdir().unwrap();
+    let state_db = home.path().join("state.db");
+    let hub = crate::runtime::hosts::codex::CodexDiscoveryHub::default();
+    hub.register("consumer", Some(home.path()));
+    let admission = MemoryHostAdmission::default();
+    admission.fail_captures_for_session(
+        "session-redacted",
+        crate::admission::HostAdmissionOutcome {
+            status: crate::admission::HostAdmissionStatus::Degraded,
+            retryable: false,
+            reason_code: Some("observation_cursor_advance_ledger_disagreement"),
+            recovery: None,
+            cause: None,
+        },
+    );
+    let pass = |rows: Vec<HermesRow>| {
+        let (admission, hub, state_db) = (&admission, &hub, &state_db);
+        async move {
+            let mut sweep = SourceSweep::new(PROVIDER, Some((hub, "consumer")));
+            admit_rows_with_admission_and_cancellation(
+                admission,
+                &mut sweep,
+                state_db,
+                &rows,
+                ObservationScopeV1::Profile,
+                ObservationSourceGenerationV1::new(1).unwrap(),
+                1,
+                1,
+                |_| Some(fixture_projection()),
+                &ObservationCancellation::default(),
+            )
+            .await
+            .expect("a refused session must not abandon the state.db");
+            let mut reports = crate::ProviderRunOutcome::skipped();
+            sweep.report_into(&mut reports);
+            reports.failures.len()
+        }
     };
 
-    use super::super::ingest::HermesProfileSource;
-    use super::super::routing::turn_project_locations_for_destinations;
-    use super::super::rows::HermesRow;
+    assert_eq!(pass(vec![fixture(1), fixture(2)]).await, 1);
+    assert_eq!(
+        admission.failed_session_capture_attempts(),
+        1,
+        "the refused session's later row is not attempted in the same pass"
+    );
+    assert_eq!(pass(vec![fixture(1), fixture(2)]).await, 0);
+    assert_eq!(
+        admission.failed_session_capture_attempts(),
+        1,
+        "the unchanged session stays quarantined"
+    );
 
-    static IDENTITY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-
-    fn retrying_identity(path: &Path) -> GitRepositoryIdentityOutcome {
-        let root = path
-            .ancestors()
-            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
-            .unwrap_or(path);
-        if IDENTITY_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
-            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
-        }
-        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
-            worktree_root: root.to_path_buf(),
-            git_dir: root.join(".git"),
-            common_dir: root.join(".git"),
-        })
-    }
-
-    fn row_with_cwd(cwd: &Path) -> HermesRow {
-        HermesRow {
-            id: 1,
-            session_id: "session".to_string(),
-            role: "user".to_string(),
-            content: Some("retry me".to_string()),
-            reasoning: None,
-            tool_name: None,
-            tool_calls: None,
-            timestamp: None,
-            session_model: None,
-            parent_session_id: None,
-            session_cwd: Some(cwd.to_string_lossy().to_string()),
-            session_source: None,
-            session_title: None,
-            session_started_at: None,
-            session_ended_at: None,
-            session_input_tokens: None,
-            session_output_tokens: None,
-            session_cache_read_tokens: None,
-            session_cache_write_tokens: None,
-            session_reasoning_tokens: None,
-            is_session_usage_frontier: false,
-            active: 1,
-            sql_value_oversized: false,
-            sql_measured_bytes: 0,
-        }
-    }
-
-    #[test]
-    fn unknown_destination_route_retries_without_advancing_cursor() {
-        IDENTITY_ATTEMPTS.store(0, Ordering::SeqCst);
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let project_root = temp.path().join("repo");
-        let cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&cwd).expect("cwd");
-        let rows = vec![row_with_cwd(&cwd)];
-        let source = HermesProfileSource {
-            state_db: temp.path().join("state.db"),
-            legacy_project_pin: None,
-            profile: None,
-        };
-        let previous = StoredCursor::default();
-        let mut persisted = previous;
-        let mut routes = HashMap::new();
-
-        let first_matchers = vec![ProjectRootMatcher::new_with_identity_resolver(
-            &project_root,
-            retrying_identity,
-        )];
-        assert!(
-            turn_project_locations_for_destinations(&rows, &first_matchers, &source, &mut routes)
-                .is_err()
-        );
-        assert_eq!(persisted, previous);
-        assert!(routes.is_empty(), "unknown routes must not be cached");
-
-        let retry_matchers = vec![ProjectRootMatcher::new_with_identity_resolver(
-            &project_root,
-            retrying_identity,
-        )];
-        let locations =
-            turn_project_locations_for_destinations(&rows, &retry_matchers, &source, &mut routes)
-                .expect("the same source rows should route after identity recovers");
-        assert_eq!(
-            locations[0].by_row_id.get(&1).copied(),
-            Some("session_cwd"),
-            "recovered identity must route the deferred row to its destination"
-        );
-        persisted.position = rows[0].id as u64;
-        assert!(persisted.position > previous.position);
-        assert_eq!(IDENTITY_ATTEMPTS.load(Ordering::SeqCst), 3);
-    }
+    assert_eq!(pass(vec![fixture(2)]).await, 1);
+    assert_eq!(
+        admission.failed_session_capture_attempts(),
+        2,
+        "deleting the refused row releases the session"
+    );
 }

@@ -2,98 +2,25 @@
 ///
 /// Parses GLSL source files and emits nodes and edges for the code graph.
 /// Handles `.glsl`, `.vert`, `.frag`, `.geom`, `.comp`, `.tesc`, `.tese` files.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::{
-    clean_c_comment, docstring_from_preceding_comments, extract_call_expression_sites,
+    ExtractionState, clean_c_comment, docstring_from_preceding_comments,
+    extract_call_expression_sites, local_node_id,
 };
 use crate::complexity::{C_COMPLEXITY, count_complexity};
 use crate::traversal::{find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind};
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from GLSL source files using tree-sitter.
 pub struct GlslExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 impl GlslExtractor {
-    pub fn extract_source(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -111,7 +38,7 @@ impl GlslExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -125,6 +52,7 @@ impl GlslExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -139,14 +67,10 @@ impl GlslExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
-    }
-
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("glsl", "GLSL", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -183,8 +107,14 @@ impl GlslExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
-        let metrics = count_complexity(node, &C_COMPLEXITY, &state.source);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
+        let metrics = count_complexity(node, &C_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -208,6 +138,7 @@ impl GlslExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -231,7 +162,7 @@ impl GlslExtractor {
         if let Some(declarator) = find_descendant_by_kind(node, "function_declarator")
             && let Some(ident) = find_direct_child_by_kind(declarator, "identifier")
         {
-            return Some(state.node_text(ident));
+            return Some(state.node_text(ident).to_string());
         }
         None
     }
@@ -273,7 +204,13 @@ impl GlslExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -297,6 +234,7 @@ impl GlslExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -342,7 +280,7 @@ impl GlslExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -366,6 +304,7 @@ impl GlslExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -385,24 +324,24 @@ impl GlslExtractor {
         // init_declarator: `int x = 0;`
         if let Some(init_decl) = find_direct_child_by_kind(node, "init_declarator") {
             if let Some(ident) = find_direct_child_by_kind(init_decl, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
             // array declarator: `float arr[3] = ...`
             if let Some(arr) = find_direct_child_by_kind(init_decl, "array_declarator")
                 && let Some(ident) = find_direct_child_by_kind(arr, "identifier")
             {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
         }
         // Direct identifier: `uniform vec3 lightPos;`
         if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
-            return Some(state.node_text(ident));
+            return Some(state.node_text(ident).to_string());
         }
         // Array declarator without init: `in vec2 texCoords[];`
         if let Some(arr) = find_direct_child_by_kind(node, "array_declarator")
             && let Some(ident) = find_direct_child_by_kind(arr, "identifier")
         {
-            return Some(state.node_text(ident));
+            return Some(state.node_text(ident).to_string());
         }
         None
     }
@@ -412,8 +351,10 @@ impl GlslExtractor {
             return;
         }
 
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -422,7 +363,13 @@ impl GlslExtractor {
         let text = state.node_text(node);
         let docstring = Self::extract_docstring(state, node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Struct, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Struct,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -446,6 +393,7 @@ impl GlslExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -493,7 +441,13 @@ impl GlslExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -517,6 +471,7 @@ impl GlslExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -535,26 +490,28 @@ impl GlslExtractor {
     fn find_field_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // field_identifier is used in struct field declarations
         if let Some(fi) = find_direct_child_by_kind(node, "field_identifier") {
-            return Some(state.node_text(fi));
+            return Some(state.node_text(fi).to_string());
         }
         if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
-            return Some(state.node_text(ident));
+            return Some(state.node_text(ident).to_string());
         }
         // Array field: `float values[4];`
         if let Some(arr) = find_direct_child_by_kind(node, "array_declarator") {
             if let Some(fi) = find_direct_child_by_kind(arr, "field_identifier") {
-                return Some(state.node_text(fi));
+                return Some(state.node_text(fi).to_string());
             }
             if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
         }
         None
     }
 
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -562,7 +519,13 @@ impl GlslExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -586,6 +549,7 @@ impl GlslExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -604,7 +568,10 @@ impl GlslExtractor {
     fn visit_preproc_include(state: &mut ExtractionState, node: TsNode<'_>) {
         let include_path = find_direct_child_by_kind(node, "string_literal")
             .or_else(|| find_direct_child_by_kind(node, "system_lib_string"))
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<unknown>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let line = node.start_position().row as u32;
         let column = node.start_position().column as u32;
@@ -617,13 +584,15 @@ impl GlslExtractor {
                 line,
                 column,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
             });
         }
     }
 
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         extract_call_expression_sites(
-            &state.source,
+            state.source,
             &state.file_path,
             &mut state.unresolved_refs,
             node,
@@ -632,7 +601,7 @@ impl GlslExtractor {
     }
 
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, clean_c_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     /// Check if a declaration has a GLSL storage qualifier (uniform, in, out, etc.)
@@ -663,16 +632,6 @@ impl GlslExtractor {
         }
         false
     }
-
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
-    }
 }
 
 impl crate::LanguageExtractor for GlslExtractor {
@@ -684,17 +643,16 @@ impl crate::LanguageExtractor for GlslExtractor {
         "GLSL"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        GlslExtractor::extract_source(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        GlslExtractor::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(
+            GlslExtractor::extract_tree(file_path, source, tree, scope),
+        )
     }
 }

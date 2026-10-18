@@ -15,6 +15,8 @@ use tracedecay_domain::{
     SourceOccurrenceId,
 };
 
+use super::ports::RetrievalExecutionControl;
+
 /// Hydration denial removes the anchor and is indistinguishable from absence
 /// in public results (Plan 15).
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -23,15 +25,6 @@ pub enum HydrationStageError {
     BudgetExceeded,
     #[error("contract violation: {0}")]
     Contract(String),
-}
-
-/// Request-execution state sampled before each authorized hydration step.
-/// Implementations may read a cancellation token or a monotonic clock, but
-/// must not expose source payload.
-pub trait HydrationExecutionControlV1 {
-    fn elapsed_micros(&self) -> u64;
-
-    fn is_cancelled(&self) -> bool;
 }
 
 /// Bounded permission issued only after a selected anchor passes its repeated
@@ -153,7 +146,7 @@ struct SystemHydrationExecutionControl {
     started: Instant,
 }
 
-impl HydrationExecutionControlV1 for SystemHydrationExecutionControl {
+impl RetrievalExecutionControl for SystemHydrationExecutionControl {
     fn elapsed_micros(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
@@ -183,13 +176,13 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
         self.hydrate_with_control(request, selected, budget, &control)
     }
 
-    #[hotpath::measure(label = "query.hydrate")]
+    #[tracing::instrument(name = "query.hydrate", level = "trace", skip_all)]
     pub fn hydrate_with_control<P>(
         &mut self,
         request: &RetrievalRequest,
         selected: &[RankedCandidate],
         budget: &RetrievalBudget,
-        control: &dyn HydrationExecutionControlV1,
+        control: &dyn RetrievalExecutionControl,
     ) -> Result<HydrationPageV1<P>, HydrationStageError>
     where
         S: LateHydrationSource<P>,
@@ -226,7 +219,6 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                                 )
                             }
                             HydrationPreflightOutcomeV1::Cancelled => {
-                                hotpath::gauge!("query.cancel.count").inc(1u32);
                                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
                             }
                             HydrationPreflightOutcomeV1::Ready { estimated_bytes } => {
@@ -263,8 +255,6 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                 outcome,
             });
         }
-        hotpath::gauge!("query.hydrate.results").set(results.len());
-        hotpath::gauge!("query.hydrate.bytes").set(bytes_hydrated);
         Ok(HydrationPageV1 { results, receipts })
     }
 
@@ -275,7 +265,7 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
         ranked: &RankedCandidate,
         permit: &HydrationWorkPermitV1,
         budget: &RetrievalBudget,
-        control: &dyn HydrationExecutionControlV1,
+        control: &dyn RetrievalExecutionControl,
         bytes_hydrated: &mut u64,
         receipts: &mut Vec<HydrationReceipt>,
     ) -> Result<HydrationOutcomeV1<P>, HydrationStageError>
@@ -324,7 +314,6 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
             }
             HydrationReadOutcomeV1::Cancelled => {
-                hotpath::gauge!("query.cancel.count").inc(1u32);
                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
             }
         })
@@ -333,11 +322,10 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
 
 fn prework_unavailable(
     budget: &RetrievalBudget,
-    control: &dyn HydrationExecutionControlV1,
+    control: &dyn RetrievalExecutionControl,
     bytes_hydrated: u64,
 ) -> Option<HydrationUnavailableV1> {
     if control.is_cancelled() {
-        hotpath::gauge!("query.cancel.count").inc(1u32);
         return Some(HydrationUnavailableV1::Cancelled);
     }
     if bytes_hydrated >= budget.max_hydration_bytes {
@@ -353,7 +341,7 @@ fn prework_unavailable(
 fn work_permit(
     ranked: &RankedCandidate,
     budget: &RetrievalBudget,
-    control: &dyn HydrationExecutionControlV1,
+    control: &dyn RetrievalExecutionControl,
     bytes_hydrated: u64,
 ) -> HydrationWorkPermitV1 {
     let mut source_occurrence_ids = ranked

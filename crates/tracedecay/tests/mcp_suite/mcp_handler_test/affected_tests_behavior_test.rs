@@ -1,0 +1,740 @@
+//! What an agent observes when it calls `tracedecay_run_affected_tests`.
+//!
+//! The call goes through the production MCP `tools/call` path and the real
+//! `cargo test` runner. Assertions are the JSON the caller reads, not which
+//! helper the handler invoked.
+
+use std::fs;
+use std::path::Path;
+
+use serde_json::{Value, json};
+use tracedecay_application::operation_stream::operation_event_authority;
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{Deadline, OperationBudgetUsage, OperationReceipt};
+use tracedecay_domain::UtcMicros;
+use tracedecay_mcp::ToolResult;
+use url::Url;
+
+use crate::support::{
+    ProductionCompositionFixture, call_tool_when_ready, extract_text, peer_production_composition,
+    production_composition_fixture_with_sources, wait_for_current_graph,
+};
+
+const GREETING_TEST: &str = "tests::greeting_is_hello_world";
+const FAILING_TEST: &str = "greeting_is_goodbye";
+const KEPT_TEST: &str = "alpha_kept";
+
+fn write_affected_fixture(project: &Path) {
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("tests")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"affected_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "mod orphan;\n\
+         \n\
+         pub fn greeting() -> &'static str {\n\
+             \"hello-world\"\n\
+         }\n\
+         \n\
+         #[cfg(test)]\n\
+         mod tests {\n\
+             use super::greeting;\n\
+             \n\
+             #[test]\n\
+             fn greeting_is_hello_world() {\n\
+                 assert_eq!(greeting(), \"hello-world\");\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/orphan.rs"),
+        "pub fn unused_symbol() -> u8 {\n    0\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("tests/failing_greeting.rs"),
+        "#[test]\nfn greeting_is_goodbye() {\n    panic!(\"affected-test-failed: goodbye\");\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("tests/ordered.rs"),
+        "#[test]\nfn alpha_kept() {}\n\n#[test]\nfn zeta_omitted() {\n    panic!(\"zeta must not run\");\n}\n",
+    )
+    .unwrap();
+}
+
+async fn call_tool(
+    fixture: &ProductionCompositionFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> ToolResult {
+    ToolResult::new(
+        call_tool_when_ready(
+            &fixture.harness,
+            &fixture.project_root,
+            tool_name,
+            arguments,
+        )
+        .await,
+        Vec::new(),
+    )
+}
+
+fn parse_tool_json(tool_name: &str, result: &ToolResult) -> Value {
+    let text = extract_text(&result.value);
+    serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("{tool_name} did not return JSON ({error}): {text}"))
+}
+
+async fn run_affected(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
+    let mut arguments = arguments;
+    if let Some(object) = arguments.as_object_mut() {
+        object
+            .entry("format".to_owned())
+            .or_insert_with(|| json!("json"));
+    }
+    parse_tool_json(
+        "tracedecay_run_affected_tests",
+        &call_tool(fixture, "tracedecay_run_affected_tests", arguments).await,
+    )
+}
+
+/// The problem message a typed request refusal carries. The owner refuses
+/// with an error result whose body is the problem envelope.
+async fn refusal(fixture: &ProductionCompositionFixture, mut arguments: Value) -> String {
+    arguments["format"] = json!("json");
+    let response = fixture
+        .harness
+        .call_tool(
+            &fixture.project_root,
+            "tracedecay_run_affected_tests",
+            arguments,
+        )
+        .await
+        .expect("production run_affected_tests invocation");
+    let result = serde_json::to_value(response.result.expect("refusal result")).unwrap();
+    assert_eq!(result["isError"], json!(true), "{result}");
+    let envelope: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().expect("refusal text"))
+            .expect("problem envelope JSON");
+    assert_eq!(
+        envelope["problem"]["kind"],
+        json!("invalid_request"),
+        "{result}"
+    );
+    envelope["problem"]["message"]
+        .as_str()
+        .expect("problem message")
+        .to_owned()
+}
+
+fn refused(detail: &str) -> String {
+    format!("invalid arguments for tracedecay_run_affected_tests: {detail}")
+}
+
+async fn symbol_id(fixture: &ProductionCompositionFixture, name: &str, file: &str) -> String {
+    let result = call_tool(
+        fixture,
+        "tracedecay_find_exact_symbol",
+        json!({"name": name, "limit": 20, "format": "json"}),
+    )
+    .await;
+    let payload = parse_tool_json("tracedecay_find_exact_symbol", &result);
+    payload["matches"]
+        .as_array()
+        .and_then(|matches| {
+            matches.iter().find(|item| {
+                item["name"] == name
+                    && item["qualified_name"]
+                        .as_str()
+                        .is_some_and(|qualified| qualified.starts_with(file))
+            })
+        })
+        .and_then(|item| item["id"].as_str())
+        .unwrap_or_else(|| panic!("{file} symbol `{name}` missing from exact lookup: {payload}"))
+        .to_owned()
+}
+
+fn assert_rejection(output: &Value, operation: &str, message: &str) {
+    assert_eq!(
+        output,
+        &json!({
+            "passed": 0,
+            "failed": 0,
+            "results": [],
+            "error": {
+                "kind": "invalid_request",
+                "operation": operation,
+                "message": message,
+            }
+        }),
+        "rejection payload: {output}"
+    );
+}
+
+fn assert_stdout_line(output: &Value, line: &str) {
+    let stdout = output["stdout_tail"].as_str().unwrap_or("");
+    assert!(
+        stdout.lines().any(|candidate| candidate == line),
+        "missing `{line}` in stdout_tail:\n{stdout}"
+    );
+}
+
+fn assert_empty_note(output: &Value, note: &str) {
+    assert_eq!(
+        output,
+        &json!({
+            "passed": 0,
+            "failed": 0,
+            "results": [],
+            "note": note,
+        }),
+        "empty-run payload: {output}"
+    );
+}
+
+#[tokio::test]
+async fn run_affected_tests_reports_the_cargo_result_for_the_changed_manifest() {
+    let fixture = production_composition_fixture_with_sources(write_affected_fixture).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production affected-tests server");
+    wait_for_current_graph(&server).await;
+
+    assert_eq!(
+        refusal(&fixture, json!({"timeout_secs": 1})).await,
+        refused("missing field `changed_paths`")
+    );
+    assert_eq!(
+        refusal(
+            &fixture,
+            json!({"changed_paths": "src/lib.rs", "timeout_secs": 1})
+        )
+        .await,
+        refused("invalid type: string \"src/lib.rs\", expected a sequence")
+    );
+    assert_eq!(
+        refusal(
+            &fixture,
+            json!({"changed_paths": ["src/lib.rs", 7], "timeout_secs": 1})
+        )
+        .await,
+        refused("invalid type: integer `7`, expected a string")
+    );
+    assert_eq!(
+        refusal(
+            &fixture,
+            json!({"changed_paths": ["src/lib.rs"], "profile": "bench", "timeout_secs": 1})
+        )
+        .await,
+        refused("unknown variant `bench`, expected `debug` or `release`")
+    );
+    // An argument outside the typed request is refused, not silently ignored.
+    assert_eq!(
+        refusal(
+            &fixture,
+            json!({"changed_paths": ["src/lib.rs"], "filter": "greeting", "timeout_secs": 1})
+        )
+        .await,
+        refused(
+            "unknown field `filter`, expected one of `changed_paths`, `profile`, `timeout_secs`, `max_tests`"
+        )
+    );
+    assert_rejection(
+        &run_affected(
+            &fixture,
+            json!({"changed_paths": ["src/lib.rs"], "max_tests": 0, "timeout_secs": 1}),
+        )
+        .await,
+        "max_tests",
+        "`max_tests` must be an integer from 1 through 500",
+    );
+    assert_empty_note(
+        &run_affected(&fixture, json!({"changed_paths": [], "timeout_secs": 1})).await,
+        "no changed files detected",
+    );
+    assert_empty_note(
+        &run_affected(
+            &fixture,
+            json!({"changed_paths": ["src/orphan.rs"], "timeout_secs": 1}),
+        )
+        .await,
+        "no tests cover the changed paths (1 file(s))",
+    );
+
+    let greeting_id = symbol_id(&fixture, "greeting", "src/lib.rs").await;
+    let greeting_test_id = symbol_id(&fixture, "greeting_is_hello_world", "src/lib.rs").await;
+    let failing_id = symbol_id(&fixture, "greeting_is_goodbye", "tests/failing_greeting.rs").await;
+    let kept_id = symbol_id(&fixture, "alpha_kept", "tests/ordered.rs").await;
+
+    let covered = run_affected(
+        &fixture,
+        json!({
+            "changed_paths": ["src/lib.rs"],
+            "profile": "debug",
+            "timeout_secs": 120,
+            "max_tests": 5,
+        }),
+    )
+    .await;
+    assert_eq!(covered["exit_code"], json!(0), "covered payload: {covered}");
+    assert_eq!(covered["passed"], json!(1), "covered payload: {covered}");
+    assert_eq!(covered["failed"], json!(0), "covered payload: {covered}");
+    assert_eq!(
+        covered["total_observed"],
+        json!(1),
+        "covered payload: {covered}"
+    );
+    assert_eq!(
+        covered["truncated"],
+        json!(false),
+        "covered payload: {covered}"
+    );
+    assert_eq!(
+        covered["dispatched_tests"],
+        json!([GREETING_TEST]),
+        "covered payload: {covered}"
+    );
+    assert_eq!(
+        covered["results"],
+        json!([{
+            "test": GREETING_TEST,
+            "passed": true,
+            "covers_source_ids": [greeting_test_id, greeting_id],
+        }]),
+        "covered payload: {covered}"
+    );
+    assert_stdout_line(&covered, &format!("test {GREETING_TEST} ... ok"));
+    assert_eq!(
+        covered["terminal"]["result_tool"],
+        json!("tracedecay_test_results"),
+        "covered payload: {covered}"
+    );
+    assert_eq!(
+        covered["terminal"]["receipt"]["termination"],
+        json!("completed"),
+        "covered payload: {covered}"
+    );
+
+    let failed = run_affected(
+        &fixture,
+        json!({
+            "changed_paths": ["tests/failing_greeting.rs"],
+            "profile": "debug",
+            "timeout_secs": 120,
+            "max_tests": 5,
+        }),
+    )
+    .await;
+    assert_eq!(failed["exit_code"], json!(101), "failed payload: {failed}");
+    assert_eq!(failed["passed"], json!(0), "failed payload: {failed}");
+    assert_eq!(failed["failed"], json!(1), "failed payload: {failed}");
+    assert_eq!(
+        failed["total_observed"],
+        json!(1),
+        "failed payload: {failed}"
+    );
+    assert_eq!(
+        failed["truncated"],
+        json!(false),
+        "failed payload: {failed}"
+    );
+    assert_eq!(
+        failed["dispatched_tests"],
+        json!([FAILING_TEST]),
+        "failed payload: {failed}"
+    );
+    assert_eq!(
+        failed["results"],
+        json!([{
+            "test": FAILING_TEST,
+            "passed": false,
+            "covers_source_ids": [failing_id],
+        }]),
+        "failed payload: {failed}"
+    );
+    assert_stdout_line(&failed, "affected-test-failed: goodbye");
+    assert_stdout_line(&failed, &format!("test {FAILING_TEST} ... FAILED"));
+    assert_eq!(
+        failed["terminal"]["receipt"]["termination"],
+        json!("completed"),
+        "a reported test failure is still a completed run: {failed}"
+    );
+
+    let truncated = run_affected(
+        &fixture,
+        json!({
+            "changed_paths": ["tests/ordered.rs"],
+            "profile": "debug",
+            "timeout_secs": 120,
+            "max_tests": 1,
+        }),
+    )
+    .await;
+    assert_eq!(
+        truncated["exit_code"],
+        json!(0),
+        "truncated payload: {truncated}"
+    );
+    assert_eq!(
+        truncated["passed"],
+        json!(1),
+        "truncated payload: {truncated}"
+    );
+    assert_eq!(
+        truncated["failed"],
+        json!(0),
+        "truncated payload: {truncated}"
+    );
+    assert_eq!(
+        truncated["truncated"],
+        json!(true),
+        "truncated payload: {truncated}"
+    );
+    assert_eq!(
+        truncated["dispatched_tests"],
+        json!([KEPT_TEST]),
+        "truncated payload: {truncated}"
+    );
+    assert_eq!(
+        truncated["results"],
+        json!([{
+            "test": KEPT_TEST,
+            "passed": true,
+            "covers_source_ids": [kept_id],
+        }]),
+        "truncated payload: {truncated}"
+    );
+    assert_stdout_line(&truncated, &format!("test {KEPT_TEST} ... ok"));
+    let truncated_stdout = truncated["stdout_tail"].as_str().unwrap_or("");
+    assert!(
+        !truncated_stdout.contains("zeta must not run"),
+        "max_tests must not execute the omitted test:\n{truncated_stdout}"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+fn coalescing_counts(stats: &Value) -> (u64, u64) {
+    let counts = &stats["identical_read_coalescing"];
+    (
+        counts["leaders"].as_u64().expect("coalescing leaders"),
+        counts["followers"].as_u64().expect("coalescing followers"),
+    )
+}
+
+/// A side-effecting owner call is never answered from an identical call in
+/// flight beside it: two identical concurrent runs are two managed test runs.
+/// Two identical concurrent reads still enter the identical-read coalescer.
+#[tokio::test]
+async fn identical_concurrent_test_runs_each_run_while_identical_reads_still_ride() {
+    let fixture = production_composition_fixture_with_sources(write_affected_fixture).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production affected-tests server");
+    wait_for_current_graph(&server).await;
+    let run = json!({
+        "changed_paths": ["tests/ordered.rs"],
+        "timeout_secs": 120,
+        "max_tests": 1,
+        "format": "json",
+    });
+
+    let before = coalescing_counts(&server.server_stats_json().await);
+    let (first, second) = tokio::join!(
+        run_affected(&fixture, run.clone()),
+        run_affected(&fixture, run.clone())
+    );
+    let after_runs = coalescing_counts(&server.server_stats_json().await);
+    for output in [&first, &second] {
+        assert_eq!(output["dispatched_tests"], json!([KEPT_TEST]), "{output}");
+        assert_eq!(output["passed"], json!(1), "{output}");
+    }
+    assert_ne!(
+        first["terminal"]["operation_id"], second["terminal"]["operation_id"],
+        "each identical run records its own managed test run"
+    );
+    assert_eq!(
+        after_runs, before,
+        "test runs never enter the identical-read coalescer"
+    );
+
+    let read = json!({"path": "src", "format": "json"});
+    let (first_read, second_read) = tokio::join!(
+        call_tool(&fixture, "tracedecay_files", read.clone()),
+        call_tool(&fixture, "tracedecay_files", read.clone())
+    );
+    assert_eq!(
+        extract_text(&first_read.value),
+        extract_text(&second_read.value)
+    );
+    let after_reads = coalescing_counts(&server.server_stats_json().await);
+    assert_eq!(
+        (after_reads.0 - after_runs.0) + (after_reads.1 - after_runs.1),
+        2,
+        "both identical reads enter the identical-read coalescer"
+    );
+    fixture.harness.shutdown().await;
+}
+
+/// The operation-event authority is process-global, so every daemon
+/// composition in this test process shares it. A peer composition shutting
+/// down (the production `DaemonInvocationState::shutdown` path) between a
+/// managed run's admission and its first result must leave the accepted
+/// record in place: the first result lands at sequence 1 behind it instead
+/// of failing with an expired history frontier.
+#[tokio::test]
+async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_shutdown() {
+    let owner = production_composition_fixture_with_sources(write_affected_fixture).await;
+    let (peer, _peer_isolation) = peer_production_composition(&owner).await;
+
+    let root_uri = Url::from_directory_path(
+        fs::canonicalize(&owner.project_root).expect("canonical affected fixture root"),
+    )
+    .expect("affected fixture root URI")
+    .to_string();
+    let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("deadline");
+    let emitter = operation_event_authority()
+        .begin_managed_test_run(
+            root_uri,
+            mint_global_request_id(GlobalRequestSurface::ManagedTestRun).expect("request id"),
+            deadline.clone(),
+        )
+        .await
+        .expect("managed test run admitted before the peer shuts down");
+
+    peer.shutdown().await;
+
+    let first_result = emitter
+        .test_result(GREETING_TEST.to_owned(), true)
+        .await
+        .expect("first result must land after a peer composition shutdown");
+    assert_eq!(
+        first_result.sequence, 1,
+        "the accepted record at sequence 0 precedes the first result"
+    );
+    emitter
+        .terminal(
+            OperationReceipt::completed(
+                UtcMicros(1),
+                UtcMicros(2),
+                deadline,
+                OperationBudgetUsage::default(),
+            )
+            .expect("receipt"),
+        )
+        .await
+        .expect("terminal receipt after the first result");
+
+    owner.harness.shutdown().await;
+}
+
+const RECORDED_SESSION: &str = "production-codex-reopen-000";
+
+async fn start_dashboard(fixture: &ProductionCompositionFixture) -> String {
+    let started = parse_tool_json(
+        "tracedecay_dashboard",
+        &call_tool(
+            fixture,
+            "tracedecay_dashboard",
+            json!({"host": "127.0.0.1", "port": 0, "format": "json"}),
+        )
+        .await,
+    );
+    assert_eq!(started["status"], json!("started"), "{started}");
+    crate::common::dashboard_api_base_url(started["url"].as_str().expect("dashboard url"))
+}
+
+async fn stop_dashboard(fixture: &ProductionCompositionFixture) {
+    call_tool(fixture, "tracedecay_dashboard", json!({"action": "stop"})).await;
+}
+
+/// The Loom temporal read once the project session authority it composes has
+/// mounted; a freshly opened daemon answers `loading` until then. Each read
+/// waits for the route's answer, which the route's own request deadline
+/// bounds.
+async fn loom_temporal(dashboard: String) -> Value {
+    let url = format!("{dashboard}/api/loom/temporal?limit=200");
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    loop {
+        let (agent, url) = (agent.clone(), url.clone());
+        let envelope = tokio::task::spawn_blocking(move || {
+            let (status, envelope) = crate::common::get_json(&agent, &url);
+            assert_eq!(status, 200, "{envelope}");
+            envelope
+        })
+        .await
+        .expect("Loom temporal read");
+        if envelope["payload"]["available"] == json!(true) {
+            return envelope;
+        }
+        assert_eq!(envelope["domain_state"], json!("loading"), "{envelope}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Ingests the composed Codex rollout through the shared not-ready retry.
+async fn ingest_codex_transcripts(fixture: &ProductionCompositionFixture) {
+    let arguments = json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"});
+    let result = call_tool(fixture, "tracedecay_hook_runtime", arguments).await;
+    assert_ne!(result.value["isError"], json!(true), "{}", result.value);
+    let ingest = parse_tool_json("tracedecay_hook_runtime", &result);
+    assert_eq!(ingest["completed"], json!(true), "{ingest}");
+}
+
+/// The retained-run fields `tracedecay_test_results` answers with.
+async fn test_results(fixture: &ProductionCompositionFixture) -> Value {
+    let read = super::session_search_test::call_production_tool(
+        &fixture.harness,
+        &fixture.project_root,
+        "tracedecay_test_results",
+        json!({"format": "json"}),
+    )
+    .await;
+    json!({
+        "operation_id": read["operation_id"],
+        "session_id": read["session_id"],
+        "passed": read["passed"],
+        "failed": read["failed"],
+        "ignored": read["ignored"],
+        "exit_code": read["exit_code"],
+        "results": read["results"],
+        "termination": read["termination"],
+    })
+}
+
+fn loom_test_runs(envelope: &Value) -> (Vec<Value>, Value) {
+    let runs = envelope["payload"]["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("Loom events: {envelope}"))
+        .iter()
+        .filter(|event| event["kind"] == "test_run")
+        .cloned()
+        .collect();
+    let status = envelope["payload"]["source_statuses"]
+        .as_array()
+        .and_then(|statuses| {
+            statuses
+                .iter()
+                .find(|status| status["id"] == "session_test")
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("missing test-run source: {envelope}"));
+    (runs, status)
+}
+
+/// A test run started through MCP with a session id is recorded against that
+/// session at the moment it runs: the Loom route serves it on the session's
+/// lane with the recorded start and outcome, and `tracedecay_test_results`
+/// reads the newest record with its attribution. A run whose request named no
+/// session is counted unattributed, never placed on a lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_attributed_test_runs_are_loom_events() {
+    let _dashboard = crate::mcp_dashboard_tool_test::TEST_LOCK.lock().await;
+    let fixture = production_composition_fixture_with_sources(|project| {
+        write_affected_fixture(project);
+        let isolation = project.parent().expect("composition isolation root");
+        super::session_search_test::write_production_codex_rollout(
+            &super::session_search_test::composed_transcript_home(isolation),
+            project,
+        );
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production affected-tests server");
+    wait_for_current_graph(&server).await;
+    ingest_codex_transcripts(&fixture).await;
+
+    let attributed = run_affected(
+        &fixture,
+        json!({
+            "changed_paths": ["tests/failing_greeting.rs"],
+            "timeout_secs": 120,
+            "max_tests": 5,
+            "session_id": RECORDED_SESSION,
+        }),
+    )
+    .await;
+    assert_eq!(attributed["exit_code"], json!(101), "{attributed}");
+    assert_eq!(attributed["failed"], json!(1), "{attributed}");
+    assert_eq!(attributed["ignored"], json!(0), "{attributed}");
+    let terminal = &attributed["terminal"];
+    assert_eq!(
+        terminal["session_id"],
+        json!(RECORDED_SESSION),
+        "{attributed}"
+    );
+    let receipt = &terminal["receipt"];
+    let started_at = receipt["started_at"].as_i64().expect("recorded start");
+    let ended_at = receipt["ended_at"].as_i64().expect("recorded end");
+
+    let sessionless = run_affected(
+        &fixture,
+        json!({"changed_paths": ["tests/ordered.rs"], "timeout_secs": 120, "max_tests": 1}),
+    )
+    .await;
+    assert_eq!(sessionless["passed"], json!(1), "{sessionless}");
+    assert_eq!(
+        sessionless["terminal"]["session_id"],
+        Value::Null,
+        "{sessionless}"
+    );
+
+    let expected_run = json!({
+        "provider": "codex",
+        "session_id": RECORDED_SESSION,
+        "kind": "test_run",
+        "operation_id": terminal["operation_id"],
+        "recorded_at": started_at.div_euclid(1_000_000),
+        "started_at_micros": started_at,
+        "outcome": {
+            "finished_at_micros": ended_at,
+            "termination": "completed",
+            "exit_code": 101,
+            "passed": 0,
+            "failed": 1,
+            "ignored": 0,
+        },
+    });
+    let expected_results = json!({
+        "operation_id": sessionless["terminal"]["operation_id"],
+        "session_id": null,
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exit_code": 0,
+        "results": [{"test": KEPT_TEST, "passed": true}],
+        "termination": "completed",
+    });
+    assert_eq!(test_results(&fixture).await, expected_results);
+
+    let dashboard = start_dashboard(&fixture).await;
+    let (runs, status) = loom_test_runs(&loom_temporal(dashboard).await);
+    stop_dashboard(&fixture).await;
+    assert_eq!(runs, vec![expected_run]);
+    assert_eq!(status["state"], json!("partial"), "{status}");
+    assert_eq!(status["item_count"], json!(1), "{status}");
+    assert_eq!(
+        (
+            &status["coverage"]["eligible"],
+            &status["coverage"]["matched"],
+            &status["coverage"]["omitted"],
+        ),
+        (&json!(2), &json!(1), &json!(1)),
+        "the sessionless run is counted unattributed, not dropped: {status}"
+    );
+    fixture.shutdown().await;
+}

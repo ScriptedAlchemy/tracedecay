@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 
 /// Resolve the authoritative project/repository/worktree identity of one
 /// checkout for the evaluator's historical lane.

@@ -1,11 +1,17 @@
 /target
 /node_modules
+# Cargo sources that `pnpm install` links from its store; see the managed
+# block in each `.cargo/config.toml`.
+/.pnpm/
 .DS_Store
 .codegraph
 .tracedecay
 !plugin/.mcp.json
 .claude/settings.local.json
-.cursor/
+.cursor/*
+!.cursor/skills/
+!.cursor/skills/**
+.vscode/launch.json
 /local-only
 .worktrees
 .codex-worktrees
@@ -34,6 +40,16 @@ dashboard/.*-axe/
 # mockup screenshot output; regenerate with each mockup's shoot.mjs / qa-drive.mjs
 mockups/**/shots/
 
+# Operator TraceDecay profile snapshots must never be committed (real global.db /
+# hook analytics / session IDs). Concept HUD may recreate this path locally only.
+mockups/ui-concept-v2/app/profile-pack/
+
 # standalone lockfiles cargo writes when a vendored grafeo crate is tested
 # from inside its own directory; the workspace lock is the one that matters
 vendor/grafeo/*/Cargo.lock
+.target.durable-directory.lock
+
+# Bazel
+bazel-*
+MODULE.bazel.lock
+/.bazelrc.local

@@ -13,7 +13,7 @@ use crate::tests::harness::open_registered_test_database_fixture;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 
 async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String) {
-    crate::register_test_schema_installer();
+    crate::register_registered_schema_installer();
     let directory = TempDir::new().unwrap();
     let database_path = directory.path().join("project/sessions.db");
     fs::create_dir_all(database_path.parent().unwrap()).unwrap();
@@ -56,25 +56,27 @@ async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String)
     drop(connection);
     drop(database);
 
-    let error = match open_registered_test_database_fixture(
+    let (lease, owner) = open_registered_test_database_fixture(
         &database_path,
         TestDatabaseRuntimeScope::ProjectSessions {
             project_id: ProjectId::new("project.workflow-schema").unwrap(),
         },
     )
     .await
-    {
-        Ok(_) => panic!("malformed workflow schema must not be completed"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        TraceDecayError::ResetRequired {
-            ref authority,
-            ..
-        } if authority == "workflow"
-    ));
+    .expect("the store's other authorities stay admissible");
+    for refusal in [lease.reset_required(), owner.reset_required()] {
+        assert!(
+            matches!(
+                refusal,
+                Some(TraceDecayError::ResetRequired {
+                    ref authority,
+                    ..
+                }) if authority == "workflow"
+            ),
+            "a malformed workflow schema refuses session features: {refusal:?}"
+        );
+    }
+    drop((lease, owner));
     assert_eq!(
         fs::read(&database_path).unwrap(),
         before_bytes,
@@ -127,7 +129,7 @@ async fn schema_snapshot(
     snapshot
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn partial_workflow_store_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_schema (
@@ -141,7 +143,7 @@ async fn partial_workflow_store_requires_reset_without_mutation() {
     .await;
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn name_complete_workflow_store_with_missing_columns_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_definitions (definition_id TEXT);
@@ -154,7 +156,7 @@ async fn name_complete_workflow_store_with_missing_columns_requires_reset_withou
     .await;
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn constraintless_workflow_lookalike_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_definitions (
@@ -200,7 +202,7 @@ async fn constraintless_workflow_lookalike_requires_reset_without_mutation() {
     .await;
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn extra_workflow_schema_identity_requires_reset_without_mutation() {
     let mut schema = String::new();
     for table in WORKFLOW_TABLE_CONTRACTS_V1 {

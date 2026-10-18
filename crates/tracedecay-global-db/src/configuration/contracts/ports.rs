@@ -6,14 +6,14 @@ use std::pin::Pin;
 use tracedecay_domain::configuration::{
     ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationSnapshotV1,
-    CredentialReferenceMetadataV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
+    ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
 };
 use tracedecay_domain::{AccessPolicyDigest, ManifestDigest, UtcMicros};
 
 use super::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
-    ConfigurationRollbackRequest, DirectConfigurationMutation, WriteOnlyCredentialMutation,
+    ConfigurationRollbackRequest, DirectConfigurationMutation,
 };
 
 /// Async result used by configuration control-plane ports. Configuration
@@ -54,10 +54,6 @@ pub trait ScopeResolutionPort: Sync {
         actor: &'a AuthorizedActor,
         plan: &'a ProtectedChangePlan,
     ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>;
-}
-
-pub trait ConfigurationClock: Sync {
-    fn now(&self) -> UtcMicros;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,15 +146,4 @@ pub trait ConfigurationControlStore: Sync {
         &self,
         actor: &AuthorizedActor,
     ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>>;
-}
-
-/// Secure credential sink boundary. The material is resolved by the secure
-/// adapter using an opaque handle and never crosses into the application DTO.
-pub trait CredentialWritePort: Sync {
-    fn write_reference(
-        &self,
-        authority: &ConfigurationMutationAuthority,
-        write: &WriteOnlyCredentialMutation,
-        expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1>;
 }

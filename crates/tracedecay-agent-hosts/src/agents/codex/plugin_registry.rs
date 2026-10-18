@@ -16,7 +16,7 @@
 //! --json` exits 0 without a TTY, writes `[plugins."tracedecay@personal"]
 //! enabled = true` into `~/.codex/config.toml`, and copies the staged source
 //! into `~/.codex/plugins/cache/personal/tracedecay/<version>`. It does **not**
-//! write `[hooks.state]` — TraceDecay records trust for its own managed hooks
+//! write `[hooks.state]`. TraceDecay records trust for its own managed hooks
 //! separately (see [`super::sync_codex_hook_trust`] and its safety valve).
 //!
 //! That is the same host-capability shape already adopted for `codex mcp add`
@@ -35,27 +35,18 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::codex_config_path;
+use super::mcp_registry::{
+    CODEX_HOOKS_KEY, CODEX_MCP_SERVERS_KEY, CODEX_PLUGINS_KEY, read_config_table, table_peers,
+};
 
 /// Name of Codex's own CLI, which owns plugin cache and activation.
 const CODEX_CLI: &str = "codex";
 
 /// What the binary is required *for*, used in the typed absence error.
 pub(super) const CODEX_PLUGIN_CLI_LIFECYCLE: &str = "codex plugin lifecycle";
-
-/// TOML key holding Codex's plugin activation records (`tracedecay@…`).
-const CODEX_PLUGINS_KEY: &str = "plugins";
-
-/// TOML key holding Codex's MCP registry. Read only: this module must not
-/// accept a plugin command that also rewrites MCP servers.
-const CODEX_MCP_SERVERS_KEY: &str = "mcp_servers";
-
-/// TOML key holding Codex's hook-trust records. Read only *here*: the plugin
-/// CLI must never disturb trust records; TraceDecay writes its own managed
-/// entries through [`super::sync_codex_hook_trust`], outside any CLI run.
-const CODEX_HOOKS_KEY: &str = "hooks";
 
 /// Resolve Codex's own CLI, or fail with the typed requirement.
 pub(super) fn require_codex_plugin_cli() -> Result<PathBuf> {
@@ -108,7 +99,11 @@ fn plugin_selector(marketplace_name: &str) -> String {
 /// `config.toml` and of every managed versioned-cache registration path are
 /// recorded through the active host transaction so rollback can restore the
 /// pre-command surface when the command fails or a later step rejects it.
-#[hotpath::measure(label = "hosts.agent.codex.plugin_registry_step")]
+#[tracing::instrument(
+    name = "hosts.agent.codex.plugin_registry_step",
+    level = "trace",
+    skip_all
+)]
 fn run_codex_plugin_step(
     codex_cli: &Path,
     args: &[&str],
@@ -165,55 +160,11 @@ fn read_config_observation(
     path: &Path,
     owned_key: &str,
 ) -> Result<(Option<Vec<u8>>, CodexPluginPreservedRegionsV1)> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((None, CodexPluginPreservedRegionsV1::default()));
-        }
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "failed to read {} before Codex CLI: {error}",
-                    path.display()
-                ),
-            });
-        }
-    };
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("{} is not valid UTF-8: {error}", path.display()),
-        })?
-        .to_owned();
-    if text.trim().is_empty() {
-        return Ok((Some(bytes), CodexPluginPreservedRegionsV1::default()));
-    }
-    let config: toml::Table = toml::from_str(&text).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to parse {} as TOML: {error}", path.display()),
-    })?;
-    let plugin_peers = match config.get(CODEX_PLUGINS_KEY) {
-        None => toml::Table::new(),
-        Some(plugins) => {
-            let Some(plugins) = plugins.as_table() else {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "{}.{CODEX_PLUGINS_KEY} must be a TOML table",
-                        path.display()
-                    ),
-                });
-            };
-            let mut peers = toml::Table::new();
-            for (name, plugin) in plugins {
-                if name.as_str() != owned_key {
-                    peers.insert(name.clone(), plugin.clone());
-                }
-            }
-            peers
-        }
-    };
+    let (bytes, config) = read_config_table(path)?;
     Ok((
-        Some(bytes),
+        bytes,
         CodexPluginPreservedRegionsV1 {
-            plugin_peers,
+            plugin_peers: table_peers(&config, CODEX_PLUGINS_KEY, owned_key, path)?,
             mcp_servers: config.get(CODEX_MCP_SERVERS_KEY).cloned(),
             hooks: config.get(CODEX_HOOKS_KEY).cloned(),
         },
@@ -224,18 +175,16 @@ fn read_config_observation(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     #[cfg(unix)]
     fn fake_codex_cli(bin: &Path, log: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
             log = shell_single_quote(&log.to_string_lossy()),
         );
-        std::fs::write(bin, script).unwrap();
-        let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(bin, permissions).unwrap();
+        write_executable_script(bin, script).unwrap();
     }
 
     #[cfg(unix)]
@@ -244,17 +193,17 @@ peer=''
 mcp=''
 hooks=''
 if [ -f "$config" ]; then
-  if /bin/grep -q 'plugins.other' "$config"; then
+  if /usr/bin/grep -q 'plugins.other' "$config"; then
     peer='[plugins.other]
 enabled = true
 '
   fi
-  if /bin/grep -q 'mcp_servers.tracedecay' "$config"; then
+  if /usr/bin/grep -q 'mcp_servers.tracedecay' "$config"; then
     mcp='[mcp_servers.tracedecay]
 command = "/bin/tracedecay"
 '
   fi
-  if /bin/grep -q '^\[hooks' "$config"; then
+  if /usr/bin/grep -q '^\[hooks' "$config"; then
     hooks='[hooks.state."keep"]
 trusted_hash = "sha256:keep"
 '
@@ -432,33 +381,6 @@ exit 0"#;
         assert!(
             message.contains("hook trust") && message.contains("unaccepted"),
             "the refusal must name the Codex-owned state it protected: {message}"
-        );
-    }
-
-    #[test]
-    fn a_missing_codex_binary_refuses_instead_of_editing_host_owned_state() {
-        let home = tempfile::tempdir().unwrap();
-        let config_path = codex_config_path(home.path());
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        let operator_owned = concat!(
-            "[plugins.\"someone-else@personal\"]\nenabled = true\n\n",
-            "[hooks.state.\"keep\"]\ntrusted_hash = \"sha256:abc\"\n",
-        );
-        std::fs::write(&config_path, operator_owned).unwrap();
-
-        let error = crate::agents::host_cli::require_host_cli(
-            "codex-definitely-absent",
-            CODEX_PLUGIN_CLI_LIFECYCLE,
-        )
-        .expect_err("an absent host binary is a hard requirement failure");
-        let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
-            panic!("host CLI absence must surface as a typed requirement");
-        };
-        assert_eq!(program, "codex-definitely-absent");
-        assert_eq!(lifecycle, CODEX_PLUGIN_CLI_LIFECYCLE);
-        assert_eq!(
-            std::fs::read_to_string(&config_path).unwrap(),
-            operator_owned
         );
     }
 }

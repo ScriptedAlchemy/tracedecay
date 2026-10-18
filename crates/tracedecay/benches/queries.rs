@@ -1,36 +1,68 @@
-//! Static (per-repo) query catalog used by the criterion bench.
-//!
-//! Queries are constructed once after the production composition publishes a
-//! code-index generation. The `QueryContext` is sampled through mounted MCP
-//! reads, so top-ranked symbols, qualified names, and file prefixes all come
-//! from the same admitted, generation-pinned graph used by the timed calls.
-//!
-//! Write queries (`str_replace`, `multi_str_replace`, `insert_at`,
-//! `ast_grep_rewrite`) declare a `scratch_path` + `init_content`: the bench
-//! harness rewrites the scratch file before *every* timed iteration so the
-//! tool's "match must be unique" precondition keeps holding. A
-//! `git stash --include-untracked` at the end of the run reverts all
-//! scratch-file churn.
+//! Query catalog sampled from mounted reads; generation-bound claims are
+//! refreshed outside each timed invocation.
 
+#![allow(clippy::too_many_lines)]
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::JsonRpcResponse;
 
-/// Distinguishes read-only queries from queries that mutate a scratch file.
+/// One untimed setup call executed before an `Effect` iteration. `capture`
+/// maps `result`-relative JSON paths to `{{token}}` names; captured values are
+/// substituted into later step args and into the timed call's args, so
+/// lifecycle chains can mint fresh identities per iteration.
+pub struct PrimeStep {
+    /// `{{token}}` values computed by the prime builder itself (no tool call
+    /// needed) — substituted before `args`, so the step's own args may
+    /// reference them.
+    pub inject: Vec<(String, Value)>,
+    pub tool: &'static str,
+    pub args: Value,
+    pub capture: &'static [(&'static str, &'static str)],
+}
+
+/// Builds the untimed prime chain for one effect iteration: given the sampled
+/// context and the iteration counter, returns the ordered setup calls.
+pub type PrimeFn = fn(&QueryContext, u64) -> Vec<PrimeStep>;
+
+/// Distinguishes read-only queries from queries that mutate state.
 #[derive(Clone)]
 pub enum QueryKind {
     Read,
+    PreparedRead {
+        prime: PrimeFn,
+        selection: usize,
+    },
     Write {
         /// File path *relative to the project root* that must be (re)written
         /// before each timed iteration.
         scratch_path: String,
         /// Bytes the scratch file is reset to before each iter.
         init_content: String,
+        expected_content: String,
     },
+    /// One-shot or stateful operations measured with fresh preconditions per
+    /// iteration: the `prime` chain (untimed) recreates the entities the timed
+    /// call consumes, so every iteration measures a real effect, not a replay.
+    /// `cleanup` runs untimed AFTER the timed call — journaled restores that
+    /// return the shared bench corpus to its precondition state.
+    Effect {
+        prime: PrimeFn,
+        cleanup: Option<EffectCleanup>,
+        repeatable: bool,
+    },
+}
+
+/// Post-timed restore for an `Effect` query: `capture` reads identities out
+/// of the timed response (e.g. a minted `effect_id`) into the token table,
+/// then `steps` runs the restore chain untimed.
+#[derive(Clone)]
+pub struct EffectCleanup {
+    pub capture: &'static [(&'static str, &'static str)],
+    pub steps: PrimeFn,
 }
 
 /// One concrete tool invocation: the MCP tool name, its args, and the kind
@@ -44,7 +76,7 @@ pub struct Query {
 }
 
 impl Query {
-    fn read(label: &'static str, tool: &'static str, args: Value) -> Self {
+    pub(crate) fn read(label: &'static str, tool: &'static str, args: Value) -> Self {
         Self {
             label,
             tool,
@@ -53,12 +85,30 @@ impl Query {
         }
     }
 
-    fn write(
+    pub(crate) fn json_read(label: &'static str, tool: &'static str, mut args: Value) -> Self {
+        args["format"] = json!("json");
+        Self::read(label, tool, args)
+    }
+
+    pub(crate) fn prepared_read(
+        label: &'static str,
+        tool: &'static str,
+        args: Value,
+        selection: usize,
+        prime: PrimeFn,
+    ) -> Self {
+        let mut query = Self::json_read(label, tool, args);
+        query.kind = QueryKind::PreparedRead { prime, selection };
+        query
+    }
+
+    pub(crate) fn write(
         label: &'static str,
         tool: &'static str,
         args: Value,
         scratch_path: String,
         init_content: String,
+        expected_content: String,
     ) -> Self {
         Self {
             label,
@@ -67,31 +117,189 @@ impl Query {
             kind: QueryKind::Write {
                 scratch_path,
                 init_content,
+                expected_content,
             },
         }
     }
 }
 
-/// All queries we run for one tool. The harness invariant is `queries.len() == 5`.
+// Effect queries are constructed literally at the coverage call sites —
+// constructor sugar lives there (`eq`/`eqc`), since this file is also the
+// standalone `queries` bench root where effect groups never exist.
+
+/// Concrete workloads for one catalog tool.
 pub struct ToolGroup {
     pub tool: &'static str,
     pub queries: Vec<Query>,
 }
 
-/// Sampled data drawn from a freshly indexed graph. Built once per repo.
+/// Entity state minted during context build; `None`/empty means the producer
+/// failed and the dependent groups are skipped (the reason lands in `skipped`).
+///
+/// Lives here (not in `coverage/`) because `QueryContext` carries it and this
+/// file is compiled as two bench roots: the standalone `queries` bench has no
+/// `coverage` module, so every type it names must resolve in this crate root.
+#[derive(Default)]
+pub struct Seeds {
+    /// Temporary linked roots that must be included in the next composition
+    /// open before branch enrollment can reach the scheduler.
+    pub additional_project_roots: Vec<std::path::PathBuf>,
+    /// The current composition was opened before the linked route existed;
+    /// orchestration must reopen it with the additional roots.
+    pub needs_reopen_for_native_worktree: bool,
+    pub project_id: Option<String>,
+    pub repository_id: Option<String>,
+    pub branch: Option<String>,
+    pub head_commit: Option<String>,
+    /// First-parent ancestor of `head_commit` for range-diff coverage.
+    pub parent_commit: Option<String>,
+    /// (fact_id, related_fact_id, search_query, [entities])
+    pub fact_pair: Option<(String, String, String, Vec<String>)>,
+    /// Scalar boolean key toggled during seed (telemetry.timings.v1).
+    pub config_key: Option<String>,
+    /// Latest configuration revision after the seed set/unset pair.
+    pub config_revision: Option<String>,
+    /// The seeded revision (rollback target).
+    pub config_rollback_target: Option<String>,
+    /// Toggled scalar value to set next ({kind:boolean,value}).
+    pub config_scalar: Option<Value>,
+    /// Effective work.topology_policy.v1 value for protected previews.
+    pub topology_policy: Option<Value>,
+    /// Code-query node identities minted via `code_symbol_search` (distinct
+    /// from graph node ids; these tools consume the query-side identity).
+    pub code_node_ids: Vec<String>,
+    /// A graph node whose rename_preview is unblocked (source-edit lane needs
+    /// a symbol the policy can actually rename — most corpus symbols refuse
+    /// with ambiguous/hazard evidence, so seed time probes candidates).
+    pub rename_node: Option<Value>,
+    /// Symbol qualified names whose per-op dry_run completed small enough to
+    /// return `expected_state` inline (big symbols truncate the preview into
+    /// a result handle, which timing must not depend on).
+    pub replace_target: Option<String>,
+    pub insert_target: Option<String>,
+    pub move_target: Option<String>,
+    /// Ingested codex session id for this repo (td-bench-<name>).
+    pub lcm_session: Option<String>,
+    /// Canonical occurrence id minted by lcm_load_session.
+    pub lcm_message_id: Option<String>,
+    /// multi_root scope_set committed via compare_and_swap (id/revision/digest).
+    pub scope_set_id: Option<String>,
+    pub scope_set_revision: Option<i64>,
+    pub scope_set_digest: Option<String>,
+    /// session_refresh_begin handle + its selector arguments.
+    pub refresh_handle: Option<String>,
+    /// Operation id returned alongside the begin handle.
+    pub refresh_operation_id: Option<String>,
+    pub refresh_selectors: Option<Value>,
+    pub automation_run_id: Option<String>,
+    /// git_hunks producer output for `git_preview`/`git_apply`.
+    pub preview_input_id: Option<String>,
+    pub hunk_digests: Vec<String>,
+    /// Repo-relative file left modified for the git working-tree lane.
+    pub dirty_file: Option<String>,
+    /// Skill id minted via profile skill file drop (managed skills surface).
+    pub skill_id: Option<String>,
+    /// Canonical identity of the disposable linked worktree targeted by cleanup.
+    pub cleanup_worktree_id: Option<String>,
+    /// Changed path whose run_affected_tests plan maps to covering tests
+    /// (minted a request handle at seed time).
+    pub test_results_path: Option<String>,
+    pub compiler_diagnostic: Option<String>,
+    pub compiler_diagnostic_path: Option<String>,
+    pub context_scout_address: Option<Value>,
+    pub feedback: Option<tracedecay_contracts::feedback::FeedbackAdvisoryCycleSurfaceResultV1>,
+    /// Reversible-truncation handle (`rh_…`) minted by a deliberately fat
+    /// search response at seed time; feeds `tracedecay_retrieve`.
+    pub retrieve_handle: Option<String>,
+    /// Tools whose application authority never mounts under the bench
+    /// composition, discovered by seed-time probes — their groups are
+    /// omitted and named in `skipped`.
+    pub unavailable_tools: std::collections::BTreeSet<String>,
+    /// Tools/families whose seed producer failed — the bench prints these so
+    /// skipped coverage is visible instead of silent.
+    pub skipped: Vec<String>,
+    /// Real repo-relative file paths sampled from `tracedecay_files`.
+    pub sample_files: Vec<String>,
+    /// Work/workflow lifecycle artifacts minted by `seed_work`.
+    pub work: Option<WorkSeeds>,
+    /// A fresh work-executable binding committed this run; route resolution
+    /// reads bindings at composition open, so the caller must reopen the
+    /// harness once (then rebuild context) before the admit lane can pass.
+    pub needs_reopen_for_provider: bool,
+    /// Second bench branch pinned at HEAD~1 (branch_diff base ref; the tool
+    /// resolves branch names, not raw oids).
+    pub base_branch: Option<String>,
+    /// Native-integration journey artifacts minted at seed (inventory →
+    /// stack_snapshot → preflight → approve). Absent = family skipped.
+    pub native: Option<NativeSeeds>,
+}
+
+/// Minted once per run: the stack_snapshot body that seals, plus the live
+/// transaction the status lane reads.
+#[derive(Clone, Default)]
+pub struct NativeSeeds {
+    /// Validated route template; preparation refreshes its current claims.
+    pub snapshot_body: Value,
+    /// Daemon-minted transaction identity retained after a real apply.
+    pub transaction_id: Option<String>,
+}
+
+/// Artifacts of one real disposable Work lifecycle plus one workflow
+/// definition/run, minted once so the ~45 work_* and workflow_* tools measure
+/// against real graph state. Field absence means that leg failed and only its
+/// dependent groups skip.
+#[derive(Default)]
+pub struct WorkSeeds {
+    pub selection: Value,
+    pub task_id: String,
+    pub run_id: String,
+    pub attempt_id: String,
+    /// Started-then-cancelled terminal attempt identity {task,run,attempt}.
+    pub attempt_identity: Value,
+    /// Second terminal attempt for duplicate-adjudication reads/effects.
+    pub dup_attempt_identity: Option<Value>,
+    /// verified_graph_version from the first generate_proposal.
+    pub initial_version: Value,
+    /// accepted graph_version integer (base for admit_execution).
+    pub accepted_gv: i64,
+    /// Current verified_version from a post-lifecycle work_views.
+    pub current_version: Value,
+    /// WorkExecutionSnapshot from admit_execution (start_attempt input).
+    pub execution_snapshot: Value,
+    /// Head commit id used by the seed attempts.
+    pub commit: String,
+    /// workflow_definition validated with environment-repaired pins.
+    pub definition: Value,
+    pub definition_id: String,
+    pub actor_id: String,
+    /// worktree_id from the start_run authority (handoff scope component).
+    pub worktree_id: Option<String>,
+    /// A live workflow run (id + current sequence) for run-control effects.
+    pub wf_run_id: Option<String>,
+}
+
+/// Sampled data drawn from a freshly indexed graph plus seeded entity state.
+/// Built once per repo.
 pub struct QueryContext {
-    pub function_ids: Vec<String>,
-    pub struct_ids: Vec<String>,
-    pub any_ids: Vec<String>,
     pub function_qnames: Vec<String>,
+    pub struct_qnames: Vec<String>,
     pub dir_prefixes: Vec<String>,
+    /// Mounted repo root on disk (file URIs, worktree targets).
+    pub project_root: PathBuf,
+    /// The flat `tracedecay_files` listing (file objects with `path`), so
+    /// seed probes reuse the one successful fetch rather than re-reading it.
+    pub files: Vec<Value>,
+    /// Coverage-sweep seeds, populated by `coverage::seed_all` when the
+    /// `large_repos` root wires it in; the standalone `queries` bench leaves
+    /// it defaulted.
+    pub seeds: Seeds,
 }
 
 impl QueryContext {
     /// Pick the i-th id with wrap-around. Returns `"missing"` if no samples
-    /// exist — the tool handler will report a not-found error, which is still
+    /// exist, the tool handler will report a not-found error, which is still
     /// useful timing data (and the bench label keeps the case obvious).
-    fn pick(slice: &[String], i: usize) -> String {
+    pub(crate) fn pick(slice: &[String], i: usize) -> String {
         if slice.is_empty() {
             "missing".to_string()
         } else {
@@ -104,11 +312,31 @@ pub async fn build_context(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
 ) -> Result<QueryContext, String> {
+    // A first-index or post-upgrade rebuild publishes after minutes, while the
+    // composition mount gates at 20s — the reads below answer typed
+    // warming/unavailable states until the generation serves. Poll the same
+    // mounted scheduler until it does (bounded, then the error propagates).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    loop {
+        match try_build_context(harness, project_root).await {
+            Ok(ctx) => return Ok(ctx),
+            Err(e) if std::time::Instant::now() < deadline => {
+                eprintln!("[bench] context not ready ({e}); waiting for index...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+async fn try_build_context(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> Result<QueryContext, String> {
     let mut function_ids = Vec::new();
     let mut struct_ids = Vec::new();
-    let mut any_ids = Vec::new();
 
-    for kind in ["function", "method", "struct", "class", "module"] {
+    for kind in ["function", "method", "struct", "class"] {
         let payload = call_json_tool(
             harness,
             project_root,
@@ -124,7 +352,6 @@ pub async fn build_context(
             let Some(id) = symbol.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            push_unique(&mut any_ids, id);
             match kind {
                 "function" | "method" => push_unique(&mut function_ids, id),
                 "struct" | "class" => push_unique(&mut struct_ids, id),
@@ -135,10 +362,10 @@ pub async fn build_context(
 
     function_ids.truncate(64);
     struct_ids.truncate(64);
-    any_ids.truncate(64);
 
     let mut function_qnames = Vec::new();
-    for id in &function_ids {
+    let mut struct_qnames = Vec::new();
+    for id in function_ids.iter().chain(&struct_ids) {
         let payload = call_json_tool(
             harness,
             project_root,
@@ -149,21 +376,18 @@ pub async fn build_context(
         if let Some(qualified_name) = payload.get("qualified_name").and_then(Value::as_str)
             && !qualified_name.is_empty()
         {
-            push_unique(&mut function_qnames, qualified_name);
+            if function_ids.contains(id) {
+                push_unique(&mut function_qnames, qualified_name);
+            } else {
+                push_unique(&mut struct_qnames, qualified_name);
+            }
         }
     }
 
-    let file_payload = call_json_tool(
-        harness,
-        project_root,
-        "tracedecay_files",
-        json!({ "layout": "flat", "format": "json" }),
-    )
-    .await?;
-    let files = file_payload
-        .get("files")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "tracedecay_files returned no files array".to_owned())?;
+    let files: Vec<Value> = list_repo_files(harness, project_root).await?;
+    if files.is_empty() {
+        return Err("tracedecay_files returned no indexed files".to_owned());
+    }
 
     // Collect first-segment directory prefixes from the sample files (so
     // `path_prefix` queries are valid for *this* repo regardless of layout).
@@ -179,27 +403,68 @@ pub async fn build_context(
     dir_prefixes.dedup();
     dir_prefixes.truncate(5);
 
-    require_samples("functions or methods", &function_ids)?;
-    require_samples("structs or classes", &struct_ids)?;
-    require_samples("graph symbols", &any_ids)?;
     require_samples("qualified function names", &function_qnames)?;
+    require_samples("qualified struct or class names", &struct_qnames)?;
     require_samples("indexed directory prefixes", &dir_prefixes)?;
 
+    // Seed producers live in `coverage/` (not compiled into the standalone
+    // `queries` bench root): the caller wires `coverage::seed_all` when it
+    // wants the sweep ledger.
     Ok(QueryContext {
-        function_ids,
-        struct_ids,
-        any_ids,
         function_qnames,
+        struct_qnames,
         dir_prefixes,
+        project_root: project_root.to_path_buf(),
+        files,
+        seeds: Seeds::default(),
     })
 }
 
-async fn call_json_tool(
+/// Flat `tracedecay_files` listing as value objects. Large listings come back
+/// as a result-handle envelope whose usable entries live in `preview` (a
+/// truncated JSON string); the complete file objects are recovered from the
+/// prefix so every consumer sees the same shape.
+pub(crate) async fn list_repo_files(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> Result<Vec<Value>, String> {
+    let file_payload = call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_files",
+        json!({ "layout": "flat", "format": "json" }),
+    )
+    .await?;
+    match file_payload.get("files").and_then(Value::as_array) {
+        Some(files) => Ok(files.clone()),
+        None => {
+            let preview = file_payload
+                .get("preview")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let re = regex::Regex::new(r#"\{"bytes":\d+,"path":"[^"]+","symbols":\d+\}"#)
+                .map_err(|e| e.to_string())?;
+            let recovered: Vec<Value> = re
+                .find_iter(preview)
+                .filter_map(|m| serde_json::from_str::<Value>(m.as_str()).ok())
+                .collect();
+            if recovered.is_empty() {
+                return Err(format!(
+                    "tracedecay_files returned no files array: {file_payload}"
+                ));
+            }
+            Ok(recovered)
+        }
+    }
+}
+
+pub(crate) async fn call_json_tool(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
     tool_name: &str,
-    arguments: Value,
+    mut arguments: Value,
 ) -> Result<Value, String> {
+    arguments["format"] = json!("json");
     let response = harness
         .call_tool(project_root, tool_name, arguments)
         .await
@@ -207,7 +472,10 @@ async fn call_json_tool(
     json_tool_payload(tool_name, &response)
 }
 
-fn json_tool_payload(tool_name: &str, response: &JsonRpcResponse) -> Result<Value, String> {
+pub(crate) fn json_tool_payload(
+    tool_name: &str,
+    response: &JsonRpcResponse,
+) -> Result<Value, String> {
     if let Some(error) = &response.error {
         return Err(format!("{tool_name} JSON-RPC failed: {error:?}"));
     }
@@ -226,7 +494,7 @@ fn json_tool_payload(tool_name: &str, response: &JsonRpcResponse) -> Result<Valu
         .map_err(|error| format!("{tool_name} returned non-JSON output: {error}; text={text}"))
 }
 
-fn push_unique(values: &mut Vec<String>, value: &str) {
+pub(crate) fn push_unique(values: &mut Vec<String>, value: &str) {
     if !values.iter().any(|existing| existing == value) {
         values.push(value.to_owned());
     }
@@ -242,11 +510,11 @@ fn require_samples(label: &str, values: &[String]) -> Result<(), String> {
     }
 }
 
-fn five<F: FnMut(usize) -> Query>(mut f: F) -> Vec<Query> {
+pub(crate) fn five<F: FnMut(usize) -> Query>(mut f: F) -> Vec<Query> {
     (0..5).map(&mut f).collect()
 }
 
-fn dir(ctx: &QueryContext, i: usize) -> String {
+pub(crate) fn dir(ctx: &QueryContext, i: usize) -> String {
     if ctx.dir_prefixes.is_empty() {
         "src".to_string()
     } else {
@@ -254,27 +522,96 @@ fn dir(ctx: &QueryContext, i: usize) -> String {
     }
 }
 
-/// Root directory (relative to the project root) where all write-query
-/// scratch files live. Kept on a single path so `git stash --include-untracked`
-/// at end-of-bench reverts everything in one shot.
+/// Repository-relative scratch directory reset before each write iteration.
 pub const SCRATCH_DIR: &str = ".tracedecay-bench-scratch";
 
-fn scratch(name: &str) -> String {
+pub(crate) fn scratch(name: &str) -> String {
     format!("{SCRATCH_DIR}/{name}")
+}
+
+pub(crate) fn symbol_name(ctx: &QueryContext, i: usize) -> String {
+    QueryContext::pick(&ctx.function_qnames, i)
+        .rsplit("::")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+pub(crate) fn file_at(ctx: &QueryContext, i: usize) -> &Value {
+    &ctx.files[i % ctx.files.len()]
+}
+
+pub(crate) fn prime_symbol(
+    qname: String,
+    capture: &'static [(&'static str, &'static str)],
+) -> PrimeStep {
+    let (path, name) = qname.split_once("::").unwrap_or(("", &qname));
+    PrimeStep {
+        inject: vec![],
+        tool: "tracedecay_code_symbol_search",
+        args: json!({
+            "query": name.rsplit("::").next().unwrap_or(name),
+            "lazy_index_ignored_dependencies": false,
+            "scope": {"path_prefix": path},
+            "meta": {"projection": "summary", "order": "relevance", "cursor": null},
+            "format": "json",
+        }),
+        capture,
+    }
+}
+
+pub(crate) fn prime_function(ctx: &QueryContext, iteration: u64) -> Vec<PrimeStep> {
+    vec![prime_symbol(
+        QueryContext::pick(&ctx.function_qnames, iteration as usize),
+        &[
+            ("outcome.value.payload.items.0.node_id", "live_node"),
+            ("outcome.value.payload.generation", "live_generation"),
+        ],
+    )]
+}
+
+pub(crate) fn prime_class(ctx: &QueryContext, iteration: u64) -> Vec<PrimeStep> {
+    vec![prime_symbol(
+        QueryContext::pick(&ctx.struct_qnames, iteration as usize),
+        &[("outcome.value.payload.items.0.node_id", "live_node")],
+    )]
+}
+
+fn ast_search_args(ctx: &QueryContext, i: usize) -> Option<Value> {
+    let files: Vec<_> = ctx
+        .files
+        .iter()
+        .filter_map(|file| {
+            let path = file["path"].as_str()?;
+            let language = match Path::new(path).extension()?.to_str()? {
+                "py" => "python",
+                "ts" => "typescript",
+                "tsx" => "tsx",
+                "js" | "jsx" => "javascript",
+                "rs" => "rust",
+                "c" => "c",
+                "cpp" | "cc" | "cxx" => "cpp",
+                "java" => "java",
+                _ => return None,
+            };
+            Some((path, language))
+        })
+        .collect();
+    let (path, language) = files.get(i % files.len().max(1))?;
+    Some(
+        json!({"pattern": "$FUNC($$$ARGS)", "lang": language, "path_glob": path, "max_results": 20}),
+    )
 }
 
 pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     // ── read query inputs ────────────────────────────────────────────────
-    let search_terms = ["main", "init", "parse", "error", "config"];
-    let context_tasks = [
-        "How is configuration loaded at startup?",
-        "Where are command-line arguments parsed?",
-        "How are errors defined and propagated?",
-        "How is logging configured?",
-        "How are tests organized?",
-    ];
+    let search_terms: Vec<_> = (0..5).map(|i| symbol_name(ctx, i)).collect();
+    let context_tasks: Vec<_> = search_terms
+        .iter()
+        .map(|name| format!("How does {name} work?"))
+        .collect();
     let kinds_for_largest = ["function", "method", "struct", "class", "module"];
-    let file_globs = ["**/*.rs", "**/*.c", "**/*.py", "**/*.js", "**/*.ts"];
+    let file_globs: Vec<_> = (0..5).map(|i| file_at(ctx, i)["path"].clone()).collect();
     let rank_kinds = ["calls", "uses", "contains", "type_of", "implements"];
 
     let mut groups: Vec<ToolGroup> = Vec::new();
@@ -282,7 +619,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_search",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "term",
                 "tracedecay_search",
                 json!({ "query": search_terms[i], "limit": 20 }),
@@ -293,7 +630,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_context",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "task",
                 "tracedecay_context",
                 json!({ "task": context_tasks[i], "max_nodes": 20 }),
@@ -304,10 +641,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_callers",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_callers",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 3 }),
+                json!({ "node_id": "{{live_node}}", "maximum_depth": 3 }),
+                i,
+                prime_function,
             )
         }),
     });
@@ -315,21 +654,24 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_callees",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_callees",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 3 }),
+                json!({ "node_id": "{{live_node}}", "maximum_depth": 3 }),
+                i,
+                prime_function,
             )
         }),
     });
-
     groups.push(ToolGroup {
         tool: "tracedecay_node",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_node",
-                json!({ "node_id": QueryContext::pick(&ctx.any_ids, i) }),
+                json!({ "node_id": "{{live_node}}" }),
+                i,
+                prime_function,
             )
         }),
     });
@@ -337,7 +679,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_by_qualified_name",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "qname",
                 "tracedecay_by_qualified_name",
                 json!({ "qualified_name": QueryContext::pick(&ctx.function_qnames, i) }),
@@ -348,10 +690,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_signature",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_signature",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i) }),
+                json!({ "node_id": "{{live_node}}" }),
+                i,
+                prime_function,
             )
         }),
     });
@@ -359,21 +703,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_impact",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_impact",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 2 }),
-            )
-        }),
-    });
-
-    groups.push(ToolGroup {
-        tool: "tracedecay_body",
-        queries: five(|i| {
-            Query::read(
-                "by_id",
-                "tracedecay_body",
-                json!({ "symbol": QueryContext::pick(&ctx.function_qnames, i) }),
+                json!({ "node_id": "{{live_node}}", "max_depth": 2 }),
+                i,
+                prime_function,
             )
         }),
     });
@@ -381,7 +716,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_files",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "glob",
                 "tracedecay_files",
                 json!({ "pattern": file_globs[i] }),
@@ -393,13 +728,13 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
         tool: "tracedecay_complexity",
         queries: {
             let mut v = Vec::with_capacity(5);
-            v.push(Query::read(
+            v.push(Query::json_read(
                 "all",
                 "tracedecay_complexity",
                 json!({ "limit": 20 }),
             ));
             for i in 0..4 {
-                v.push(Query::read(
+                v.push(Query::json_read(
                     "scoped",
                     "tracedecay_complexity",
                     json!({ "path": dir(ctx, i), "limit": 20 }),
@@ -412,9 +747,13 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_doc_coverage",
         queries: {
-            let mut v = vec![Query::read("all", "tracedecay_doc_coverage", json!({}))];
+            let mut v = vec![Query::json_read(
+                "all",
+                "tracedecay_doc_coverage",
+                json!({}),
+            )];
             for i in 0..4 {
-                v.push(Query::read(
+                v.push(Query::json_read(
                     "scoped",
                     "tracedecay_doc_coverage",
                     json!({ "path": dir(ctx, i) }),
@@ -427,7 +766,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_largest",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "by_kind",
                 "tracedecay_largest",
                 json!({ "node_kind": kinds_for_largest[i], "limit": 20 }),
@@ -438,7 +777,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_hotspots",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "limit",
                 "tracedecay_hotspots",
                 json!({ "limit": 10 + (i as u32) * 10 }),
@@ -449,10 +788,10 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_god_class",
         queries: five(|i| {
-            Query::read(
-                "threshold",
+            Query::json_read(
+                "limit",
                 "tracedecay_god_class",
-                json!({ "min_methods": 5 + (i as u32) * 5 }),
+                json!({ "limit": 5 + (i as u32) * 5 }),
             )
         }),
     });
@@ -460,7 +799,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_module_api",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "scoped",
                 "tracedecay_module_api",
                 json!({ "path": dir(ctx, i) }),
@@ -471,10 +810,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_derives",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_derives",
-                json!({ "node_id": QueryContext::pick(&ctx.struct_ids, i) }),
+                json!({ "node_id": "{{live_node}}" }),
+                i,
+                prime_class,
             )
         }),
     });
@@ -482,7 +823,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_dead_code",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "scoped",
                 "tracedecay_dead_code",
                 json!({ "path": dir(ctx, i) }),
@@ -493,7 +834,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_rank",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "by_kind",
                 "tracedecay_rank",
                 json!({ "edge_kind": rank_kinds[i], "limit": 20 }),
@@ -504,7 +845,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_coupling",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "scoped",
                 "tracedecay_coupling",
                 json!({ "path": dir(ctx, i), "limit": 20 }),
@@ -515,10 +856,10 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_circular",
         queries: five(|i| {
-            Query::read(
-                "depth",
+            Query::json_read(
+                "limit",
                 "tracedecay_circular",
-                json!({ "max_depth": 4 + (i as u32) * 2 }),
+                json!({ "limit": 5 + (i as u32) * 5 }),
             )
         }),
     });
@@ -544,9 +885,11 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
                     "path": path,
                     "old_str": format!("TARGET_{i}"),
                     "new_str": format!("REPLACED_{i}"),
+                    "format": "json",
                 }),
                 path.clone(),
                 content,
+                format!("{body}REPLACED_{i}\nTAIL\n"),
             )
         }),
     });
@@ -565,9 +908,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::write(
                 "n_repls",
                 "tracedecay_multi_str_replace",
-                json!({ "path": path, "replacements": replacements }),
+                json!({ "path": path, "replacements": replacements, "format": "json" }),
                 path.clone(),
                 content,
+                (0..n)
+                    .map(|k| format!("DONE_{k}\nfiller line {k}\n"))
+                    .collect(),
             )
         }),
     });
@@ -587,49 +933,50 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
                     "anchor": format!("LINE_{i}"),
                     "content": "// inserted by bench\n",
                     "before": false,
+                    "format": "json",
                 }),
                 path.clone(),
                 content,
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(k, line)| {
+                        if k == i {
+                            format!("{line}\n// inserted by bench\n")
+                        } else {
+                            format!("{line}\n")
+                        }
+                    })
+                    .collect(),
             )
         }),
     });
 
-    if ast_grep_on_path() {
+    groups.push(ToolGroup {
+        tool: "tracedecay_ast_grep_rewrite",
+        queries: five(|i| {
+            let path = scratch(&format!("rewrite_{i}.rs"));
+            Query::write(
+                "replace_call",
+                "tracedecay_ast_grep_rewrite",
+                json!({"path": path, "pattern": "old()", "rewrite": "new()", "format": "json"}),
+                path.clone(),
+                "fn run() { old(); }\n".to_owned(),
+                "fn run() { new(); }\n".to_owned(),
+            )
+        }),
+    });
+    let queries = (0..5)
+        .filter_map(|i| {
+            ast_search_args(ctx, i)
+                .map(|args| Query::json_read("calls_in_file", "tracedecay_ast_grep_search", args))
+        })
+        .collect::<Vec<_>>();
+    if !queries.is_empty() {
         groups.push(ToolGroup {
-            tool: "tracedecay_ast_grep_rewrite",
-            queries: five(|i| {
-                let path = scratch(&format!("ast_grep_{i}.rs"));
-                // Provide a small rust source with a function whose name we'll
-                // rewrite. ast-grep's metavariable syntax is `$NAME`.
-                let content = format!("pub fn bench_target_{i}() {{\n    let _ = {i};\n}}\n");
-                Query::write(
-                    "rename_fn",
-                    "tracedecay_ast_grep_rewrite",
-                    json!({
-                        "path": path,
-                        "pattern": format!("fn bench_target_{i}() {{ $$$BODY }}"),
-                        "rewrite": format!("fn bench_renamed_{i}() {{ $$$BODY }}"),
-                    }),
-                    path.clone(),
-                    content,
-                )
-            }),
+            tool: "tracedecay_ast_grep_search",
+            queries,
         });
     }
-
     groups
-}
-
-/// Mirrors `tracedecay_mcp::ast_grep_available` without depending on
-/// internal-module visibility: shells out to `ast-grep --version`. Cached
-/// for the lifetime of the bench process.
-fn ast_grep_on_path() -> bool {
-    use std::sync::OnceLock;
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        std::process::Command::new("ast-grep")
-            .arg("--version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
 }

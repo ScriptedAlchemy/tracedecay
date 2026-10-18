@@ -1,14 +1,21 @@
 use std::path::Path;
+#[cfg(feature = "test-transport")]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::{CancellationSignal, RequestAdmission, ResolvedScope};
+#[cfg(feature = "test-transport")]
+use tracedecay_application::diagnostics_publication::{
+    CodeIndexPublicationIdentityFuture, CodeIndexPublicationIdentityPortV1,
+    CodeIndexPublicationIdentityV1,
+};
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
 use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
+use tracedecay_contracts::{CancellationSignal, RequestAdmission, ResolvedScope};
 use tracedecay_domain::feedback::FeedbackScopeV1;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, ContentDigest, FileOccurrenceId,
@@ -19,9 +26,9 @@ use tracedecay_domain::{
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-    CodeSearchChunkId, EdgeAuthorityV1, FileIdentityDigest, LanguageDescriptorRevision,
-    PolicyRevisionId, RelationEdgeKindV1, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
+    CodeSearchChunkId, ComplexityAnalysisV1, EdgeAuthorityV1, FileIdentityDigest,
+    LanguageDescriptorRevision, PolicyRevisionId, RelationEdgeKindV1, SanitizerRevision,
+    SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_graph_query::{
@@ -54,11 +61,13 @@ impl CodeGraphProjectionReadPort for HermeticAdvisoryCodeGraphV1 {
                 RequestAdmission::Admitted => {}
                 RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
+                RequestAdmission::GrantExpired => return Err(CodeGraphReadError::Denied),
             }
             VerifiedCodeGraphRead::new(
                 self.scope.clone(),
                 Arc::clone(&self.store),
                 tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+                None,
             )
         })
     }
@@ -104,7 +113,10 @@ pub(super) fn hermetic_advisory_code_graph(
 pub(super) fn hermetic_ci_code_graph(
     scope: &FeedbackScopeV1,
     project_root: &Path,
-) -> Arc<dyn CodeGraphProjectionReadPort> {
+) -> (
+    Arc<dyn CodeGraphProjectionReadPort>,
+    Arc<dyn CodeIndexPublicationIdentityPortV1>,
+) {
     let logical_path = "src/lib.rs";
     let source =
         std::fs::read_to_string(project_root.join(logical_path)).expect("fixture CI graph source");
@@ -156,17 +168,21 @@ pub(super) fn hermetic_ci_code_graph(
             simple_name: name.to_owned(),
             kind: kind.to_owned(),
             visibility: if declaration.starts_with("pub ") {
-                "pub".to_owned()
+                "public".to_owned()
             } else {
                 "private".to_owned()
             },
             branches: 0,
             loops: 0,
             max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             line_span: 1,
             start_line: u32::try_from(source[..start].lines().count() + 1)
                 .expect("fixture CI start line"),
             signature: Some(declaration.trim().to_owned()),
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             file_identity: file_identity.clone(),
             content_digest: ContentDigest::new(digest("symbol-content", declaration))
@@ -222,25 +238,46 @@ pub(super) fn hermetic_ci_code_graph(
         .collect::<Vec<_>>();
     let symbols =
         GenerationSymbolIndexV1::new(generation.clone(), records).expect("fixture CI symbol index");
+    let source_digest = ContentDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(source.as_bytes()))
+    ))
+    .expect("fixture CI source digest");
     let files = [SanitizedCodeFileV1 {
-        file_occurrence_id: file,
+        file_occurrence_id: file.clone(),
         logical_path: logical_path.to_owned(),
         language: Some(LanguageId::new("rust").expect("fixture CI language")),
-        content_digest: ContentDigest::new(format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(source.as_bytes()))
-        ))
-        .expect("fixture CI source digest"),
+        content_digest: source_digest.clone(),
         disposition: SnapshotFileDispositionV1::Present,
     }];
-    publish_graph(
+    let identity = CodeIndexPublicationIdentityV1::new(
+        generation.clone(),
+        scope.repository_id.clone(),
+        Some(scope.worktree_id.clone()),
+        Some(RefId::new(scope.branch_ref.clone()).expect("fixture CI reference")),
+        Some(scope.head_commit_id.clone()),
+        [(logical_path.to_owned(), file, source_digest)],
+    );
+    let graph = publish_graph(
         resolved_scope(scope),
         generation,
         &edges,
         &chunks,
         &files,
         Some(symbols),
-    )
+    );
+    (graph, Arc::new(StaticCodeIndexIdentity(identity)))
+}
+
+#[cfg(feature = "test-transport")]
+struct StaticCodeIndexIdentity(CodeIndexPublicationIdentityV1);
+
+#[cfg(feature = "test-transport")]
+impl CodeIndexPublicationIdentityPortV1 for StaticCodeIndexIdentity {
+    fn resolve(&self, _project_root: PathBuf) -> CodeIndexPublicationIdentityFuture<'_> {
+        let identity = self.0.clone();
+        Box::pin(async move { Some(identity) })
+    }
 }
 
 fn resolved_scope(scope: &FeedbackScopeV1) -> ResolvedScope {

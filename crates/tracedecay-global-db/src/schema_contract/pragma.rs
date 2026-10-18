@@ -29,7 +29,7 @@ pub(super) struct ActualForeignKey {
 #[derive(Debug)]
 pub(super) struct ActualIndexColumn {
     pub(super) cid: i64,
-    pub(super) name: String,
+    pub(super) name: Option<String>,
     pub(super) descending: bool,
     pub(super) collation: String,
 }
@@ -57,9 +57,10 @@ fn requested_values(count: usize) -> String {
         .join(", ")
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema_contract.query.table_metadata"
+#[tracing::instrument(
+    name = "global_db.schema_contract.query.table_metadata",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn read_table_metadata(
     conn: &impl QueryExecutor,

@@ -13,7 +13,7 @@ import { cn } from '../../../ui/cn.ts';
  * `hollow` is an absence or a zero-extent reading (unattributed, unwoven,
  * landing): outline only, never a fill that would invent a measured span.
  */
-export type TaskChipVariant = 'filled' | 'hollow';
+type TaskChipVariant = 'filled' | 'hollow';
 
 export function TaskChip({
   taskId,

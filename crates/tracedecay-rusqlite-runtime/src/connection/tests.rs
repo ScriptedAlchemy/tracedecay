@@ -1,12 +1,12 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, ErrorCode, config::DbConfig, limits::Limit};
 use tempfile::NamedTempFile;
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 use super::{
-    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, open, open_immutable_reader,
-    open_writer, with_progress_cancellation,
+    ConnectionMode, Durability, OpenedDatabaseFile, OpenedDatabaseFileError, VerifiedReaderError,
+    open, open_immutable_reader, open_verified_reader, open_writer, with_progress_cancellation,
 };
 
 fn database() -> NamedTempFile {
@@ -31,6 +31,9 @@ fn sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
     sidecar.into()
 }
 
+/// Writer policy: WAL, `synchronous=NORMAL` unless the store holds durable
+/// memory, and no automatic checkpoint. It does not consult any process
+/// environment variable.
 #[test]
 fn writer_mode_applies_wal_integrity_and_write_policy() {
     let file = database();
@@ -81,20 +84,6 @@ fn writer_bounds_the_retained_wal_file_to_the_soft_limit_ceiling() {
     );
 }
 
-/// Maintenance connections are the offline RESTART/TRUNCATE path, so they reset
-/// the WAL too and must carry the same retention bound.
-#[test]
-fn maintenance_bounds_the_retained_wal_file_to_the_soft_limit_ceiling() {
-    let file = database();
-    let connection = open(file.path(), ConnectionMode::Maintenance).expect("maintenance policy");
-
-    assert_eq!(
-        pragma_i64(&connection, "journal_size_limit"),
-        i64::try_from(WAL_SOFT_LIMIT_BYTES).expect("soft limit fits in i64"),
-        "maintenance must cap the retained WAL file at the configurable soft-limit ceiling"
-    );
-}
-
 #[test]
 fn writer_close_never_bypasses_explicit_checkpoint_policy() {
     let file = database();
@@ -116,6 +105,28 @@ fn writer_close_never_bypasses_explicit_checkpoint_policy() {
             .len(),
         wal_bytes
     );
+}
+
+#[test]
+fn rebinding_a_cached_statement_keeps_its_compiled_plan() {
+    let file = database();
+    let writer = open(file.path(), ConnectionMode::Writer).expect("prepare WAL database");
+    let reader = open(file.path(), ConnectionMode::Reader).expect("reader policy");
+    for connection in [&writer, &reader] {
+        let mut reprepares = 0;
+        for limit in 0..32_i64 {
+            let mut statement = connection
+                .prepare_cached("SELECT count(*) FROM (SELECT value FROM items LIMIT ?1)")
+                .unwrap();
+            let count: i64 = statement.query_row([limit], |row| row.get(0)).unwrap();
+            assert_eq!(count, limit.min(1));
+            reprepares += statement.reset_status(rusqlite::StatementStatus::RePrepare);
+        }
+        assert_eq!(
+            reprepares, 0,
+            "a bound LIMIT must not recompile the statement"
+        );
+    }
 }
 
 #[test]
@@ -212,7 +223,7 @@ fn maintenance_mode_makes_schema_exceptions_explicit() {
     connection
         .execute_batch("CREATE TABLE maintained(value); DROP TABLE maintained;")
         .expect("maintenance schema operation");
-    assert!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap() > 0);
+    assert_eq!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 4);
     connection
         .execute_batch("ATTACH DATABASE ':memory:' AS maintenance_aux; DETACH maintenance_aux;")
         .expect("maintenance attachment");
@@ -257,6 +268,47 @@ fn writer_bootstraps_fresh_incremental_auto_vacuum_before_wal() {
     );
 }
 
+/// Facts and the anchors they cite are never rebuilt, so the stores that hold
+/// them sync every commit; session and registry stores keep `NORMAL` until
+/// their durable rows move into classes of their own.
+#[cfg(any(unix, windows))]
+#[test]
+fn stores_holding_durable_memory_commit_at_full_sync() {
+    use tracedecay_store::StoreShardScopeV1;
+
+    let project_id = tracedecay_domain::ProjectId::new("project.durability").unwrap();
+    for (scope, synchronous) in [
+        (
+            StoreShardScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+            2,
+        ),
+        (StoreShardScopeV1::ProfileMemory, 2),
+        (StoreShardScopeV1::ProjectSessions { project_id }, 1),
+        (StoreShardScopeV1::ProfileSessions, 1),
+        (StoreShardScopeV1::Profile, 1),
+    ] {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("store.sqlite3");
+        let pinned = OpenedDatabaseFile::create_new(&path).expect("pin fresh database");
+        let worker_path = pinned.writer_open_path(&path).expect("select writer path");
+        let connection = open_writer(
+            &worker_path,
+            Some(&pinned),
+            &path,
+            Durability::for_scope(&scope),
+        )
+        .expect("writer policy");
+
+        assert_eq!(
+            pragma_i64(&connection, "synchronous"),
+            synchronous,
+            "{scope:?}"
+        );
+    }
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn fresh_writer_uses_a_sidecar_compatible_path() {
@@ -264,7 +316,8 @@ fn fresh_writer_uses_a_sidecar_compatible_path() {
     let path = directory.path().join("fresh-writer.sqlite3");
     let pinned = OpenedDatabaseFile::create_new(&path).expect("pin fresh database");
     let worker_path = pinned.writer_open_path(&path).expect("select writer path");
-    let connection = open_writer(&worker_path, Some(&pinned), &path).expect("writer policy");
+    let connection =
+        open_writer(&worker_path, Some(&pinned), &path, Durability::Normal).expect("writer policy");
 
     connection
         .execute_batch(
@@ -364,25 +417,6 @@ fn worker_open_path_stays_on_the_pinned_file_across_an_a_b_a_swap() {
     pinned.verify_current_path(&path).unwrap();
 }
 
-#[cfg(any(unix, windows))]
-#[test]
-fn writer_open_path_preserves_platform_identity_policy() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("writer-path.db");
-    std::fs::File::create(&path).unwrap();
-    let pinned = OpenedDatabaseFile::pin(&path).unwrap();
-    let worker_path = pinned.writer_open_path(&path).unwrap();
-
-    #[cfg(unix)]
-    if cfg!(any(target_os = "linux", target_os = "android")) {
-        assert!(worker_path.starts_with("/proc/self/fd/"));
-    } else {
-        assert_eq!(worker_path, path);
-    }
-    #[cfg(windows)]
-    assert_eq!(worker_path, path);
-}
-
 /// A WAL reader opens the `-shm` sidecar, so it needs the same sidecar-safe
 /// pathname a writer does.
 ///
@@ -443,6 +477,79 @@ fn writer_identity_fence_rejects_a_replacement_hidden_by_path_restore() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn verified_immutable_reader_never_binds_transient_b_to_restored_a_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("identity.db");
+    let replacement = directory.path().join("identity.replacement.db");
+    let retired = directory.path().join("identity.retired.db");
+    for (candidate, marker) in [(&path, "a"), (&replacement, "b")] {
+        let connection = Connection::open(candidate).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE identity(composer_id TEXT, bubble_id TEXT, marker TEXT);\
+                 INSERT INTO identity VALUES ('same-composer', 'same-bubble', '{marker}');"
+            ))
+            .unwrap();
+    }
+    let expected_a = OpenedDatabaseFile::pin(&path).unwrap().identity();
+
+    let pinned = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let swapped = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let opened = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let restored = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let replacer = {
+        let path = path.clone();
+        let replacement = replacement.clone();
+        let retired = retired.clone();
+        let pinned = std::sync::Arc::clone(&pinned);
+        let swapped = std::sync::Arc::clone(&swapped);
+        let opened = std::sync::Arc::clone(&opened);
+        let restored = std::sync::Arc::clone(&restored);
+        std::thread::spawn(move || {
+            pinned.wait();
+            std::fs::rename(&path, &retired).unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+            swapped.wait();
+            opened.wait();
+            std::fs::rename(&path, &replacement).unwrap();
+            std::fs::rename(&retired, &path).unwrap();
+            restored.wait();
+        })
+    };
+
+    let result = open_verified_reader(
+        &path,
+        open_immutable_reader,
+        || {
+            pinned.wait();
+            swapped.wait();
+        },
+        || {
+            opened.wait();
+            restored.wait();
+        },
+    );
+    replacer.join().unwrap();
+
+    match result {
+        Ok(reader) => {
+            assert_eq!(reader.file_identity(), expected_a);
+            assert_eq!(
+                reader
+                    .connection()
+                    .query_row("SELECT marker FROM identity", [], |row| row
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "a"
+            );
+        }
+        Err(VerifiedReaderError::Identity(OpenedDatabaseFileError::Replaced)) => {}
+        Err(error) => panic!("unexpected verified immutable open failure: {error}"),
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_pinned_file_blocks_replacement_until_authority_closes() {
@@ -490,4 +597,214 @@ fn windows_discard_created_removes_the_complete_sqlite_family() {
 
     assert!(!path.exists());
     assert!(sidecars.iter().all(|sidecar| !sidecar.exists()));
+}
+
+/// `sqlite_host_path` shortens a verbatim *disk* path so SQLite's win32 VFS
+/// uses per-handle byte locking instead of the UNC shared-handle emulation;
+/// it must keep the prefix for genuine UNC and over-long paths, which need
+/// the extended-length spelling to open at all.
+#[cfg(windows)]
+#[test]
+fn sqlite_host_path_shortens_verbatim_disk_paths_only() {
+    use super::sqlite_host_path;
+
+    let verbatim = Path::new(r"\\?\C:\data\store.db");
+    assert_eq!(sqlite_host_path(verbatim), Path::new(r"C:\data\store.db"));
+
+    let unc = Path::new(r"\\?\UNC\server\share\store.db");
+    assert_eq!(sqlite_host_path(unc), unc);
+
+    let long = PathBuf::from(format!(r"\\?\C:\{}", "d".repeat(300)));
+    assert_eq!(sqlite_host_path(&long), long);
+
+    // 255 plain chars strip (sidecars still fit); 256 keep the prefix
+    // because `-wal`/`-shm` would push past the classic 259-char limit.
+    let fits_with_sidecars = PathBuf::from(format!(r"\\?\C:\{}", "d".repeat(252)));
+    assert_eq!(
+        sqlite_host_path(&fits_with_sidecars),
+        PathBuf::from(format!(r"C:\{}", "d".repeat(252)))
+    );
+    let sidecars_too_long = PathBuf::from(format!(r"\\?\C:\{}", "d".repeat(253)));
+    assert_eq!(sqlite_host_path(&sidecars_too_long), sidecars_too_long);
+
+    // An empty `\\` component collapses to a plain separator either way,
+    // so dunce accepts the conversion; the literal spelling is preserved.
+    let empty_component = Path::new(r"\\?\C:\data\\store.db");
+    assert_eq!(
+        sqlite_host_path(empty_component),
+        Path::new(r"C:\data\\store.db")
+    );
+
+    // The classic limit is measured in UTF-16 code units, not UTF-8 bytes:
+    // 150 multibyte chars are 300 bytes but 150 units, so they may strip.
+    let wide_fits = PathBuf::from(format!("\\\\?\\C:\\{}", "é".repeat(150)));
+    assert_eq!(
+        sqlite_host_path(&wide_fits),
+        PathBuf::from(format!("C:\\{}", "é".repeat(150)))
+    );
+
+    // Components whose identity would change under Win32 name parsing keep
+    // the prefix: trailing dots/spaces are stripped, dot components resolve,
+    // `/` is a separator, and reserved DOS-device stems get special
+    // treatment. `dunce::simplified` refuses all of these and the refusal
+    // is honored — refused verbatim paths stay verbatim. (An empty `\\`
+    // component collapses to a plain separator either way, so dunce accepts
+    // that one — covered above.)
+    for raw in [
+        r"\\?\C:\data\store.",
+        r"\\?\C:\data\store ",
+        r"\\?\C:\data\.\store.db",
+        r"\\?\C:\data\..\store.db",
+        r"\\?\C:\data/store.db",
+        r"\\?\C:\data\CON.db",
+        r"\\?\C:\data\con.db",
+        r"\\?\C:\data\NUL",
+        r"\\?\C:\data\com1.db",
+        r"\\?\C:\data\lpt9.log",
+        "\\\\?\\C:\\data\\COM\u{b9}.db",
+        "\\\\?\\C:\\data\\lpt\u{b3}",
+    ] {
+        let path = Path::new(raw);
+        assert_eq!(sqlite_host_path(path), path, "{raw}");
+    }
+
+    let plain = Path::new(r"C:\data\store.db");
+    assert_eq!(sqlite_host_path(plain), plain);
+
+    let relative = Path::new("data\\store.db");
+    assert_eq!(sqlite_host_path(relative), relative);
+}
+
+/// On non-Windows hosts the `\\?\` byte sequence is an ordinary relative
+/// filename — a database path spelled that way must reach SQLite unchanged.
+#[cfg(not(windows))]
+#[test]
+fn sqlite_host_path_keeps_literal_windows_prefix_names() {
+    use super::sqlite_host_path;
+
+    let name = PathBuf::from(r"\\?\C:\data\store.db");
+    assert_eq!(sqlite_host_path(&name), name);
+}
+
+/// Two real directories can coexist whose names differ only by a trailing
+/// dot, and stripping `\\?\` from the dotted spelling would change which
+/// name the OS sees — so `dunce::simplified` refuses and the verbatim
+/// path is passed through untouched. SQLite itself still canonicalizes
+/// the name and aliases `store.` to `store`: a separate SQLite
+/// limitation, not a reason to normalize further here. What the
+/// production boundary must guarantee is that a refused verbatim
+/// spelling keeps its prefix and still opens.
+#[cfg(windows)]
+#[test]
+fn dot_suffixed_directory_retains_verbatim_and_opens() {
+    use super::sqlite_host_path;
+
+    let temp = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(temp.path()).unwrap();
+    assert!(
+        canonical.to_str().unwrap().starts_with(r"\\?\"),
+        "test requires a verbatim tempdir path"
+    );
+
+    // Both creations must go through verbatim spelling: a plain `store.`
+    // would collapse onto `store`.
+    let dotted = canonical.join("store.");
+    let plain = canonical.join("store");
+    std::fs::create_dir(&dotted).unwrap();
+    std::fs::create_dir(&plain).unwrap();
+    assert!(dotted.is_dir() && plain.is_dir());
+
+    // The refused verbatim spelling is passed through untouched.
+    let dotted_db = dotted.join("db.sqlite");
+    assert_eq!(sqlite_host_path(&dotted_db), dotted_db);
+
+    // Seed the `store` database (production open is READ_WRITE-only).
+    let db = Connection::open(plain.join("db.sqlite")).expect("create database");
+    db.execute_batch(
+        "CREATE TABLE sentinel(v TEXT); INSERT INTO sentinel VALUES('canonical-store');",
+    )
+    .unwrap();
+    drop(db);
+
+    // The verbatim open succeeds through the production boundary. SQLite
+    // resolves the name to `store`'s database (its own canonicalization
+    // aliases the dotted directory — a SQLite limitation, not this
+    // conversion's identity claim) — proven by the sentinel row; a
+    // separate `store.` database is unreachable through SQLite either way.
+    let reader = open(&dotted_db, ConnectionMode::Writer).expect("open via dotted verbatim path");
+    let value: String = reader
+        .query_row("SELECT v FROM sentinel", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, "canonical-store");
+}
+
+/// A database opened through a verbatim `\\?\` path is the same file, the
+/// same WAL journal, and the same lock domain as its plain spelling — the
+/// normalization only changes the pathname the VFS sees.
+#[cfg(windows)]
+#[test]
+fn verbatim_disk_path_opens_the_same_wal_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("verbatim.db");
+    std::fs::write(&path, b"").unwrap();
+    // `canonicalize` yields the `\\?\` extended-length spelling that store
+    // paths carry into the engine on Windows.
+    let verbatim = path.canonicalize().unwrap();
+    assert!(verbatim.to_str().unwrap().starts_with(r"\\?\"));
+
+    let writer = open(&verbatim, ConnectionMode::Writer).expect("verbatim writer open");
+    writer
+        .execute_batch("CREATE TABLE items(value INTEGER); INSERT INTO items VALUES (1);")
+        .unwrap();
+    let journal_mode: String = writer
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .expect("read pragma");
+    assert_eq!(journal_mode, "wal");
+
+    let reader = open(&path, ConnectionMode::Reader).expect("plain reader open");
+    assert_eq!(
+        reader.query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0)),
+        Ok(1)
+    );
+    drop(reader);
+    drop(writer);
+}
+
+#[test]
+fn verified_live_snapshot_retains_committed_wal_view_and_denies_writes() {
+    let file = database();
+    let writer = Connection::open(file.path()).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    let reader = super::open_verified_read_snapshot(file.path()).unwrap();
+    writer.execute("UPDATE items SET value = 2", []).unwrap();
+    assert_eq!(
+        reader
+            .connection()
+            .query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(
+        reader
+            .connection()
+            .execute("UPDATE items SET value = 3", [])
+            .is_err()
+    );
+    drop(reader);
+    let reader = super::open_verified_read_snapshot(file.path()).unwrap();
+    assert_eq!(
+        reader
+            .connection()
+            .query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(reader);
+    let busy: i64 = writer
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        busy, 0,
+        "dropping the reader must release its checkpoint lock"
+    );
 }

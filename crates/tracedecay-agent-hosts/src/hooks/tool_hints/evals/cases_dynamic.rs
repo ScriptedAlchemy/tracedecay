@@ -79,6 +79,46 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
             &["tracedecay_grep", "tracedecay_search", "tracedecay_context"],
         ),
         input_eval(
+            "grep-tool-impact-pattern-is-search",
+            ToolHintInput {
+                tool_name: Some("Grep".to_string()),
+                prompt: Some("impact".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::Search),
+            &["tracedecay_grep"],
+        ),
+        input_eval(
+            "grep-tool-depends-on-pattern-is-search",
+            ToolHintInput {
+                tool_name: Some("Grep".to_string()),
+                prompt: Some("depends on".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::Search),
+            &["tracedecay_grep"],
+        ),
+        input_eval(
+            "grep-tool-redundant-pattern-is-search",
+            ToolHintInput {
+                tool_name: Some("Grep".to_string()),
+                prompt: Some("redundant".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::Search),
+            &["tracedecay_grep"],
+        ),
+        input_eval(
+            "shell-search-impact-pattern-is-search",
+            ToolHintInput {
+                tool_name: Some("Shell".to_string()),
+                command: Some("rg -n impact src/hooks".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::Search),
+            &["tracedecay_grep"],
+        ),
+        input_eval(
             "shell-sed-source-read",
             ToolHintInput {
                 tool_name: Some("Bash".to_string()),
@@ -87,7 +127,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::FileRead),
-            &["tracedecay_outline", "tracedecay_body", "tracedecay_read"],
+            &["tracedecay_source_outline", "tracedecay_source_body"],
         ),
         input_eval(
             "shell-cat-config-read",
@@ -98,7 +138,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::FileRead),
-            &["tracedecay_outline"],
+            &["tracedecay_source_outline"],
         ),
         input_eval(
             "single-file-read-action",
@@ -108,7 +148,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::FileRead),
-            &["tracedecay_outline", "tracedecay_body", "tracedecay_read"],
+            &["tracedecay_source_outline", "tracedecay_source_body"],
         ),
         input_eval(
             "windows-tool-descriptor-read",
@@ -213,7 +253,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::EditRedundancy),
-            &["tracedecay_redundancy", "tracedecay_similar"],
+            &["tracedecay_search", "tracedecay_similar"],
         ),
         input_eval(
             "small-edit-does-not-nudge-redundancy",
@@ -233,7 +273,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
         input_eval(
             "codex-apply-patch-nudges-redundancy",
             ToolHintInput {
-                agent: HintAgent::Codex,
+                agent: HostIntegrationIdV1::Codex,
                 tool_name: Some("Edit".to_string()),
                 file_path: Some("src/util.rs".to_string()),
                 edit_text: Some(
@@ -250,7 +290,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::EditRedundancy),
-            &["tracedecay_redundancy", "tracedecay_similar"],
+            &["tracedecay_search", "tracedecay_similar"],
         ),
     ]
 }

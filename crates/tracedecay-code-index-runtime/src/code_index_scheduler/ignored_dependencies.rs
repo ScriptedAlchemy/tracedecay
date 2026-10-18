@@ -3,11 +3,9 @@
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 
 use gix::bstr::ByteSlice;
 use serde_json::Value;
-use tracedecay_application::ResolvedScope;
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::{
@@ -15,14 +13,19 @@ use tracedecay_code_index::production::{
     CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
     MAX_IGNORED_DEPENDENCY_ENTRYPOINT_BYTES_V1,
 };
-use tracedecay_domain::{CodeGenerationId, canonical_sha256};
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
+use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1};
+use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
+use super::git_tree_capture::CapturedFileOutcomeV1;
 use super::{
     CapturedSnapshotV1, CodeIndexPublishEvidenceV1, CodeIndexSchedulerErrorV1,
-    CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, StaticLanguageRegistry, now_micros,
-    projection_key,
+    CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SourceContentManifestV1,
+    StaticLanguageRegistry, now_micros, projection_key,
 };
-use crate::code_index::languages::LanguageRegistry;
+use tracedecay_code_index::languages::LanguageRegistry;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 pub const ADMITTED_SOURCE_READ_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -31,6 +34,36 @@ pub struct CodeIndexIgnoredDependencyRequestV1 {
     pub scope: ResolvedScope,
     pub expected_generation: CodeGenerationId,
     pub verified_imports: Vec<CodeIndexImportEvidenceV1>,
+}
+
+impl CodeIndexIgnoredDependencyRequestV1 {
+    /// The request a graph read of `latest` hands to admission when it found
+    /// the parser-verified import of `module`, or `None` without that import.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn for_verified_import_for_test(
+        latest: &LatestCompleteCodeIndexV1,
+        module: &str,
+    ) -> Option<Self> {
+        let generation = latest.generation();
+        let import = generation
+            .imports()
+            .iter()
+            .find(|import| import.module_specifier == module)?
+            .clone();
+        let snapshot = generation.snapshot();
+        let scope = ResolvedScope::new(
+            generation.manifest().project_id.clone(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone()?,
+            snapshot.reference.clone(),
+        )
+        .ok()?;
+        Some(Self {
+            scope,
+            expected_generation: generation.manifest().generation_id.clone(),
+            verified_imports: vec![import],
+        })
+    }
 }
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
@@ -61,6 +94,15 @@ pub enum CodeIndexIgnoredDependencyRefusalV1 {
     StaleGeneration,
     #[error("the request scope does not identify this exact mounted worktree")]
     ScopeMismatch,
+    /// The worktree has no decoded generation and its worker is parked on a
+    /// failure a wake does not clear, so no generation to admit against is
+    /// coming until the park's remediation is applied.
+    #[error(
+        "the code index for this worktree is parked; remedy: {}; cause: {}",
+        .0.remediation,
+        .0.reason
+    )]
+    ConvergenceParked(CodeIndexConvergenceParkedV1),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,7 +118,24 @@ pub struct CodeIndexIgnoredDependencyBuildV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
+    /// Admit one verified ignored dependency entrypoint.
+    ///
+    /// This is the admission boundary: every interruption observed inside it,
+    /// including the shared source-read and snapshot-capture helpers, which
+    /// report interruptions as reconcile interruptions because the ordinary
+    /// reconcile path owns them too, surfaces to the caller as the typed
+    /// ignored-dependency refusal.
     pub fn index_verified_ignored_dependency(
+        &mut self,
+        serving: &LatestCompleteCodeIndexV1,
+        request: CodeIndexIgnoredDependencyRequestV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CodeIndexIgnoredDependencyBuildV1, CodeIndexSchedulerErrorV1> {
+        self.index_verified_ignored_dependency_admission(serving, request, control)
+            .map_err(map_reconcile_interruption)
+    }
+
+    fn index_verified_ignored_dependency_admission(
         &mut self,
         serving: &LatestCompleteCodeIndexV1,
         request: CodeIndexIgnoredDependencyRequestV1,
@@ -95,6 +154,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map(|entry| entry.logical_path.clone())
             .collect::<BTreeSet<_>>();
         paths.insert(admission.logical_path.clone());
+        // The proof this admission just re-ran is the one a prior refusal
+        // retired the path for, so the retirement no longer applies.
+        self.refused_ignored_source_paths
+            .remove(&admission.logical_path);
         self.ignored_source_admissions = paths
             .into_iter()
             .map(|logical_path| CodeIndexIgnoredSourceAdmissionV1 { logical_path })
@@ -139,9 +202,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let active = self
             .publication
-            .load_active_shared()
+            .load_active_manifest()
             .map_err(CodeIndexProductionErrorV1::Publication)?;
         Ok(active.is_some_and(|active| {
+            let active = &active.metadata;
             active.manifest() == candidate.generation().manifest()
                 && active.snapshot() == candidate.generation().snapshot()
                 && active.ignored_source_admissions()
@@ -151,11 +215,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         }))
     }
 
-    /// One wall span covers the whole entrypoint resolution — package-root
+    /// One wall span covers the whole entrypoint resolution, package-root
     /// containment, `package.json` read, bounded entrypoint read, sanitize,
     /// and the gix ignore proof. The per-file reads inside are never
     /// individually spanned.
-    #[hotpath::measure(label = "daemon.code_index.ignored_dependency.resolve")]
+    #[tracing::instrument(
+        name = "daemon.code_index.ignored_dependency.resolve",
+        level = "trace",
+        skip_all
+    )]
     fn resolve_ignored_dependency_admission(
         &self,
         import: &CodeIndexImportEvidenceV1,
@@ -188,7 +256,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         previous_roster: Vec<CodeIndexIgnoredSourceAdmissionV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexIgnoredDependencyBuildV1, CodeIndexSchedulerErrorV1> {
-        self.ensure_worker_plan()?;
+        let began_under = self.epoch.load(std::sync::atomic::Ordering::Acquire);
+        let _workers = self.ensure_worker_plan()?;
         let _worker_memory = match self.reserve_worker_memory() {
             Ok(reservation) => reservation,
             Err(error) => {
@@ -225,7 +294,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured_files,
             changed_paths,
             retained_bytes,
-            mut retained_reservations,
+            retained_reservations,
         } = captured;
         let reextracted_files = changed_paths.len();
         let roster = self.ignored_source_admissions.clone();
@@ -252,17 +321,22 @@ impl CodeIndexWorktreeSchedulerV1 {
             Ok(generation) => generation,
             Err(error) => {
                 self.ignored_source_admissions = previous_roster;
-                return Err(map_production_interruption(error));
+                return Err(error.into());
             }
         };
         let generation_id = generation.manifest().generation_id.clone();
-        Self::finish_snapshot_build_memory(&mut retained_reservations)?;
-        self.retained_snapshot_bytes = retained_bytes;
-        self._retained_snapshot_memory = retained_reservations;
+        drop((retained_bytes, retained_reservations));
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
-        self.mark_reconciled();
-        let latest = self.bind_latest_complete(Arc::clone(&generation), None);
-        let publication = publication_evidence(reextracted_files, &generation)?;
+        self.mark_reconciled(
+            SourceContentManifestV1::for_snapshot(generation.snapshot()),
+            began_under,
+        );
+        let latest = self.bind_latest_complete(
+            self.decoded_publication(&generation)
+                .map_err(CodeIndexProductionErrorV1::Publication)?,
+            None,
+        );
+        let publication = self.publish_evidence(&generation, reextracted_files, false);
         Ok(CodeIndexIgnoredDependencyBuildV1 {
             outcome: CodeIndexIgnoredDependencyIndexOutcomeV1 {
                 generation_id,
@@ -275,28 +349,103 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub fn adopt_ignored_source_roster(
         &mut self,
-        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+        admissions: &[tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1],
     ) {
-        self.ignored_source_admissions = generation.ignored_source_admissions().to_vec();
+        // A path whose admission proof was already refused must not come back
+        // through the sealed roster: re-adopting it rebuilds the identical
+        // refused generation, so the refusal reproduces on every pass and the
+        // serving slot never fills.
+        self.ignored_source_admissions = admissions
+            .iter()
+            .filter(|admission| {
+                !self
+                    .refused_ignored_source_paths
+                    .contains(&admission.logical_path)
+            })
+            .cloned()
+            .collect();
     }
 
-    /// One wall span covers the whole roster verification sweep — it re-reads
-    /// and re-captures every admitted dependency entrypoint — with an entries
-    /// gauge for the roster size. Entries are never individually spanned.
-    #[hotpath::measure(label = "daemon.code_index.ignored_dependency.roster_verify")]
+    /// Retire the admitted paths a refused roster can no longer prove.
+    ///
+    /// A roster mismatch has two causes and one remedy each. An entrypoint
+    /// whose bytes moved is still a legitimate admission: its successor
+    /// re-captures it under the same roster. An entrypoint that git now
+    /// tracks, or that resolves outside the package it was admitted from, has
+    /// lost the proof that admitted it - only typed re-admission may bring it
+    /// back, so it is retired here and adoption skips it from now on.
+    pub(super) fn retire_unprovable_ignored_source_admissions(
+        &mut self,
+        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    ) {
+        for admission in generation.ignored_source_admissions() {
+            if !self.admitted_source_proof_holds(&admission.logical_path) {
+                tracing::warn!(
+                    event = "code_index_ignored_source_admission_retired",
+                    logical_path = admission.logical_path.as_str(),
+                    "an admitted ignored source no longer proves its admission; the successor \
+                     generation drops it and typed re-admission is required"
+                );
+                self.refused_ignored_source_paths
+                    .insert(admission.logical_path.clone());
+            }
+        }
+    }
+
+    /// Re-run the exact admission proof for one already-admitted logical path.
+    fn admitted_source_proof_holds(&self, logical_path: &str) -> bool {
+        let Some(package_relative) = logical_path.strip_prefix("node_modules/") else {
+            return false;
+        };
+        let mut segments = package_relative.split('/');
+        let Some(first) = segments.next() else {
+            return false;
+        };
+        let module = if first.starts_with('@') {
+            let Some(second) = segments.next() else {
+                return false;
+            };
+            format!("{first}/{second}")
+        } else {
+            first.to_owned()
+        };
+        let Ok(module_path) = validated_module_path(&module) else {
+            return false;
+        };
+        let package_root = self.project_root.join("node_modules").join(module_path);
+        let Ok(canonical_package) = canonical_package_root(&self.project_root, &package_root)
+        else {
+            return false;
+        };
+        validate_admitted_source(
+            &self.project_root,
+            &canonical_package,
+            &self.project_root.join(logical_path),
+            logical_path,
+            None,
+        )
+        .is_ok()
+    }
+
+    /// One wall span covers the whole roster verification sweep, it re-reads
+    /// and re-captures every admitted dependency entrypoint. Entries are never
+    /// individually spanned.
+    #[tracing::instrument(
+        name = "daemon.code_index.ignored_dependency.roster_verify",
+        level = "trace",
+        skip_all
+    )]
     pub fn ignored_source_roster_matches_generation(
         &self,
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) -> bool {
-        hotpath::gauge!("daemon.code_index.ignored_dependency.roster_verify.entries")
-            .set(generation.ignored_source_admissions().len() as u64);
         let registry = StaticLanguageRegistry::new();
         generation
             .ignored_source_admissions()
             .iter()
             .all(|admission| {
                 let absolute = self.project_root.join(&admission.logical_path);
-                let Ok(canonical) = absolute.canonicalize() else {
+                let Ok(canonical) = canonical_existing_identity(&absolute) else {
                     return false;
                 };
                 if !canonical.starts_with(&self.project_root) {
@@ -310,10 +459,11 @@ impl CodeIndexWorktreeSchedulerV1 {
                 else {
                     return false;
                 };
-                self.capture_candidate(&registry, &admission.logical_path, None)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|captured| captured.file == *expected)
+                matches!(
+                    self.capture_candidate(&registry, &admission.logical_path, None),
+                    Ok(CapturedFileOutcomeV1::Present(captured))
+                        if captured.file == *expected
+                )
             })
     }
 }
@@ -374,8 +524,7 @@ fn resolve_package_entrypoint(
     checkpoint_if_present(control)?;
     let package_json = package_root.join("package.json");
     if package_json.is_file() {
-        let canonical_package_json = package_json
-            .canonicalize()
+        let canonical_package_json = canonical_existing_identity(&package_json)
             .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::UnsupportedImport)?;
         if !canonical_package_json.starts_with(canonical_package) {
             return Err(CodeIndexIgnoredDependencyRefusalV1::SymlinkEscape.into());
@@ -458,9 +607,7 @@ fn read_contained_project_source(
     {
         return Err(CodeIndexIgnoredDependencyRefusalV1::PathEscape.into());
     }
-    let canonical = project_root
-        .join(relative)
-        .canonicalize()
+    let canonical = canonical_existing_identity(&project_root.join(relative))
         .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::PathEscape)?;
     if !canonical.starts_with(project_root) {
         return Err(CodeIndexIgnoredDependencyRefusalV1::PathEscape.into());
@@ -475,8 +622,7 @@ fn canonical_package_root(
     project_root: &Path,
     package_root: &Path,
 ) -> Result<PathBuf, CodeIndexSchedulerErrorV1> {
-    let canonical = package_root
-        .canonicalize()
+    let canonical = canonical_existing_identity(package_root)
         .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::UnsupportedImport)?;
     if !canonical.starts_with(project_root) || canonical != package_root {
         return Err(CodeIndexIgnoredDependencyRefusalV1::SymlinkEscape.into());
@@ -538,8 +684,7 @@ fn validate_admitted_source(
     control: Option<&dyn CodeIndexExecutionControlV1>,
 ) -> Result<Vec<u8>, CodeIndexSchedulerErrorV1> {
     checkpoint_if_present(control)?;
-    let canonical_entrypoint = entrypoint
-        .canonicalize()
+    let canonical_entrypoint = canonical_existing_identity(entrypoint)
         .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::UnsupportedImport)?;
     if !canonical_entrypoint.starts_with(project_root)
         || !canonical_entrypoint.starts_with(canonical_package)
@@ -558,16 +703,44 @@ fn validate_admitted_source(
         return Err(CodeIndexIgnoredDependencyRefusalV1::UnsupportedLanguage.into());
     };
     let registry = StaticLanguageRegistry::new();
-    let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase()) else {
+    if registry
+        .descriptor_for_extension(&extension.to_lowercase())
+        .is_none()
+    {
         return Err(CodeIndexIgnoredDependencyRefusalV1::UnsupportedLanguage.into());
-    };
-    let language = descriptor.language.clone();
+    }
     let bytes = read_bounded_source(&canonical_entrypoint, control)?;
     checkpoint_if_present(control)?;
-    super::privacy::sanitize_code_file(&language, &bytes)
-        .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::PrivacyRefused)?;
+    admit_privacy_cleared_source(&bytes)?;
     checkpoint_if_present(control)?;
     Ok(bytes)
+}
+
+/// The privacy fence for one third-party entrypoint admitted from outside git.
+///
+/// A captured project source declares its language through the repository's
+/// own file, so deriving the sanitizer shape from that language is evidence
+/// about the bytes. An ignored dependency declares it through the extension
+/// the dependency itself chose, which is not: taking that label lets a package
+/// present a structured document under the weaker code-or-prose credential
+/// scan, which cannot refuse anything it fails to understand. Every admitted
+/// entrypoint is therefore evaluated under the whole-document structured
+/// semantics, which fail closed when a document announces a format it does not
+/// satisfy.
+///
+/// Only bytes the sanitizer accepts verbatim are admitted. The caller returns
+/// the raw bytes it read, so a redaction decided here would be computed and
+/// then discarded, the redacted source would still reach the durable index.
+fn admit_privacy_cleared_source(bytes: &[u8]) -> Result<(), CodeIndexSchedulerErrorV1> {
+    let sanitized = sanitize_code_source_bytes(bytes, CodeSourceShapeV1::StructuredData)
+        .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::PrivacyRefused)?;
+    let (sanitized_bytes, receipt) = sanitized.into_parts();
+    if !matches!(receipt.disposition(), SanitizerDispositionV1::Accepted)
+        || sanitized_bytes != bytes
+    {
+        return Err(CodeIndexIgnoredDependencyRefusalV1::PrivacyRefused.into());
+    }
+    Ok(())
 }
 
 fn read_bounded_source(
@@ -655,8 +828,8 @@ fn logical_path_for(root: &Path, path: &Path) -> Result<String, CodeIndexSchedul
 }
 
 fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSchedulerErrorV1> {
-    let repository =
-        gix::open(root).map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let repository = tracedecay_runtime_core::git_open::open(root)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let index = repository
         .index_or_empty()
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
@@ -675,7 +848,7 @@ fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSch
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let ignored = excludes
         .at_path(Path::new(logical_path), None)
-        .map_err(CodeIndexSchedulerErrorV1::Io)?
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
         .is_excluded();
     if ignored {
         Ok(())
@@ -684,67 +857,57 @@ fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSch
     }
 }
 
+/// Admission-owned checkpoint: the caller is the ignored-dependency admission
+/// itself, so an interruption is that admission's typed refusal.
 fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeIndexSchedulerErrorV1> {
+    map_reconcile_interruption_result(checkpoint_if_present(Some(control)))
+}
+
+/// Shared checkpoint for the source-read and snapshot-capture helpers.
+///
+/// These helpers run under the ordinary background reconcile as well as under
+/// an ignored-dependency admission, so an observed interruption is reported as
+/// the reconcile interruption the production pipeline itself raises. Reporting
+/// it as an ignored-dependency refusal attributed every superseded or shutdown
+/// reconcile to a dependency admission that never ran, and bypassed the
+/// superseded-reconcile retry that only recognizes the production
+/// interruption. The admission boundary maps the interruption back to its own
+/// refusal (see `map_reconcile_interruption`).
+pub fn checkpoint_if_present(
+    control: Option<&dyn CodeIndexExecutionControlV1>,
+) -> Result<(), CodeIndexSchedulerErrorV1> {
+    let Some(control) = control else {
+        return Ok(());
+    };
     if control.is_cancelled() {
-        Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into())
+        Err(CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled).into())
     } else if control.is_deadline_exceeded() {
-        Err(CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into())
+        Err(
+            CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
+                .into(),
+        )
     } else {
         Ok(())
     }
 }
 
-pub fn checkpoint_if_present(
-    control: Option<&dyn CodeIndexExecutionControlV1>,
-) -> Result<(), CodeIndexSchedulerErrorV1> {
-    match control {
-        Some(control) => checkpoint(control),
-        None => Ok(()),
-    }
-}
-
-fn map_production_interruption(error: CodeIndexProductionErrorV1) -> CodeIndexSchedulerErrorV1 {
+/// Re-attribute a reconcile interruption observed under an ignored-dependency
+/// admission to that admission's typed refusal. Every other error passes
+/// through unchanged.
+fn map_reconcile_interruption(error: CodeIndexSchedulerErrorV1) -> CodeIndexSchedulerErrorV1 {
     match error {
-        CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled) => {
-            CodeIndexIgnoredDependencyRefusalV1::Cancelled.into()
-        }
-        CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded) => {
-            CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into()
-        }
-        other => other.into(),
+        CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Interrupted(
+            CodeIndexInterruptionV1::Cancelled,
+        )) => CodeIndexIgnoredDependencyRefusalV1::Cancelled.into(),
+        CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Interrupted(
+            CodeIndexInterruptionV1::DeadlineExceeded,
+        )) => CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into(),
+        other => other,
     }
 }
 
-fn publication_evidence(
-    reextracted_files: usize,
-    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-) -> Result<CodeIndexPublishEvidenceV1, CodeIndexSchedulerErrorV1> {
-    let changes = &generation.projection().request().changes;
-    let lane_digest = canonical_sha256(&(
-        generation.snapshot().content_identity.clone(),
-        generation
-            .chunks()
-            .chunks()
-            .iter()
-            .map(|chunk| (&chunk.id, &chunk.content_digest))
-            .collect::<Vec<_>>(),
-        generation.edges(),
-    ))
-    .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-    Ok(CodeIndexPublishEvidenceV1 {
-        generation_id: generation.manifest().generation_id.clone(),
-        repository_id: generation.snapshot().repository.clone(),
-        snapshot_content_identity: generation.snapshot().content_identity.clone(),
-        lane_digest,
-        file_occurrence_ids: generation
-            .snapshot()
-            .files
-            .iter()
-            .map(|file| file.file_occurrence_id.clone())
-            .collect(),
-        reextracted_files,
-        changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
-        reused_chunks: changes.reused.len(),
-        overflow_reconciled: false,
-    })
+fn map_reconcile_interruption_result<T>(
+    result: Result<T, CodeIndexSchedulerErrorV1>,
+) -> Result<T, CodeIndexSchedulerErrorV1> {
+    result.map_err(map_reconcile_interruption)
 }

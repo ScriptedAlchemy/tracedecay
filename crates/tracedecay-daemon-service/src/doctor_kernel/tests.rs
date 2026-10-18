@@ -1,0 +1,787 @@
+//! Daemon-owned Doctor signal-mapper and composition tests.
+//!
+//! Read mappers and [`DaemonRuntimeHealthSignalV1`] live in
+//! `tracedecay-contracts::doctor`. Composition from resolved kernel reads is
+//! owned here at the composition root.
+
+use tracedecay_agent_hosts::agents::host_bundle::{
+    HostBundleComponentDoctorResultV1, HostBundleComponentDoctorStateV1, HostBundleDoctorReportV1,
+    HostBundleRegistrationStateV1, HostComponentV1, HostKindV1,
+};
+use tracedecay_contracts::ConfigurationAuthorityReadV1;
+use tracedecay_contracts::doctor::{
+    DoctorCoverageCompletenessV1, HostComponentDriftV1, HostConformanceV1, HostIntegrationReadV1,
+    IngestRefusalV1, LanguageServerAnalyzerStateV1, LanguageServerReadV1, LanguageServerStateV1,
+    ObservabilityReadV1, ObservabilityStateV1, host_integration_finding,
+};
+
+use super::*;
+
+#[test]
+fn configuration_read_from_pin_absent_on_cold_cache() {
+    let missing: Result<tracedecay_configuration::config::PinnedRuntimeConfiguration, &str> =
+        Err("cold cache");
+    assert_eq!(
+        configuration_read_from_pin(&missing),
+        ConfigurationAuthorityReadV1::Absent
+    );
+}
+
+fn pinned_index_exclude(
+    patterns: &[&str],
+) -> tracedecay_configuration::config::PinnedRuntimeConfiguration {
+    use tracedecay_configuration::config::registry::ConfigurationRegistry;
+    use tracedecay_configuration::config::resolver::{ConfigurationLayerV1, resolve_configuration};
+    use tracedecay_domain::configuration::{
+        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
+        INDEX_EXCLUDE_SETTING_KEY, SettingKey,
+    };
+
+    let project_id = tracedecay_domain::ProjectId::new("project.doctor-unapplied-exclude").unwrap();
+    let revision = ConfigurationRevisionId::new("configuration.revision.doctor-exclude").unwrap();
+    let snapshot = resolve_configuration(
+        &ConfigurationRegistry::core().unwrap(),
+        &[ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            revision_id: revision.clone(),
+            entries: std::collections::BTreeMap::from([(
+                SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::StringList(
+                    patterns
+                        .iter()
+                        .map(|pattern| (*pattern).to_owned())
+                        .collect(),
+                ),
+            )]),
+        }],
+    )
+    .expect("read-time validation admits a stored pattern")
+    .snapshot;
+    tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: std::path::PathBuf::from("/profile"),
+            project_id,
+            project_root: std::path::PathBuf::from("/project"),
+        },
+        revision,
+        snapshot,
+    )
+    .expect("an unapplied pattern must not refuse the pin")
+}
+
+/// A stored exclude pattern the pin skips is configuration out of sync with
+/// what the operator stored, never "matches the resolved authority".
+#[test]
+fn configuration_finding_reports_a_stored_pattern_the_pin_leaves_unapplied() {
+    use tracedecay_contracts::doctor::{DoctorEvidenceStateV1, configuration_finding};
+
+    let finding = |patterns: &[&str]| {
+        let read = configuration_read_from_pin::<&str>(&Ok(pinned_index_exclude(patterns)));
+        let finding = configuration_finding(&read).expect("configuration finding");
+        (
+            finding.state(),
+            finding.evidence()[0].reference().as_str().to_owned(),
+            finding.coverage().statement().to_owned(),
+        )
+    };
+
+    assert_eq!(
+        finding(&["src/[abc", "docs/**"]),
+        (
+            DoctorEvidenceStateV1::Degraded,
+            "configuration.resolved.unapplied".to_owned(),
+            "index.exclude.v1 stores pattern \"src/[abc\" that does not compile (unclosed \
+             character class; missing ']'); indexing runs without it. Set index.exclude.v1 to \
+             patterns that compile or unset it (tracedecay_configuration_set / \
+             tracedecay_configuration_unset)"
+                .to_owned(),
+        )
+    );
+    assert_eq!(
+        finding(&["docs/**"]),
+        (
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            "configuration.resolved.in-sync".to_owned(),
+            "effective configuration matches the resolved authority".to_owned(),
+        )
+    );
+}
+
+async fn audit_verdict(database: &tracedecay_runtime_core::db::Database) -> Option<bool> {
+    tracedecay_global_db::schema_stages::audit_observation_authority(
+        database,
+        tracedecay_global_db::schema_stages::OBSERVATION_AUTHORITY_AUDIT_BUDGET,
+    )
+    .await
+    .verdict()
+}
+
+/// The daemon-side Doctor reader must observe the exhaustive
+/// observation-authority invariant pass itself. Without a producer the signal
+/// is permanently not-run, which downgrades every `StorageRuntime` finding to
+/// partial coverage and makes Doctor report unavailable audit data for a
+/// perfectly healthy store.
+#[tokio::test]
+async fn observation_authority_audit_observes_the_real_invariant_pass() {
+    let directory = tempfile::TempDir::new().expect("authority audit fixture root");
+    let uninitialized_path = directory.path().join("uninitialized.db");
+    let database_path = directory.path().join("registry.db");
+    tracedecay_global_db::register_registered_schema_installer();
+    let uninitialized_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+        &uninitialized_path,
+        "doctor uninitialized authority audit fixture",
+    )
+    .expect("doctor authority audit database authority");
+    let (uninitialized, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
+        &uninitialized_path,
+        &uninitialized_authority,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .expect("open uninitialized doctor audit fixture");
+
+    assert!(
+        audit_verdict(&uninitialized).await == Some(false),
+        "a store without the registered authority schema must fail the audit it ran"
+    );
+    drop(uninitialized);
+
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+        &database_path,
+        "doctor registered authority audit fixture",
+    )
+    .expect("doctor registered audit database authority");
+    let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime(
+        &database_path,
+        &authority,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+    )
+    .await
+    .expect("install the registered authority schema");
+
+    assert!(
+        audit_verdict(&database).await == Some(true),
+        "a converged registered authority must report a passing audit rather than \
+         unavailable audit data"
+    );
+}
+
+#[test]
+fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
+    let checked_in = HostBundleDoctorReportV1::default();
+    assert_eq!(
+        host_integration_read_from_report(&checked_in),
+        HostIntegrationReadV1::Absent
+    );
+
+    // A beta.66 profile: one Codex artifact's bytes moved while its
+    // registration and every other component stay current.
+    let component =
+        |host, component, state, repair_action: &str| HostBundleComponentDoctorResultV1 {
+            receipt_path: std::path::PathBuf::from("receipt.fixture.json"),
+            host: Some(host),
+            component: Some(component),
+            state,
+            registration: Some(HostBundleRegistrationStateV1::Current),
+            artifacts: Vec::new(),
+            repair_action: repair_action.to_owned(),
+        };
+    let mut drifted = checked_in;
+    drifted.components = vec![
+        component(
+            HostKindV1::ClaudeCode,
+            HostComponentV1::Core,
+            HostBundleComponentDoctorStateV1::Current,
+            "none",
+        ),
+        component(
+            HostKindV1::Codex,
+            HostComponentV1::ContextMcp,
+            HostBundleComponentDoctorStateV1::Drifted,
+            "run `tracedecay reinstall --component context-mcp` (refreshes tracedecay-owned files)",
+        ),
+    ];
+    let read = host_integration_read_from_report(&drifted);
+    assert_eq!(
+        read,
+        HostIntegrationReadV1::Observed {
+            conformance: HostConformanceV1::Drifted(vec![HostComponentDriftV1 {
+                component: "codex/context-mcp".to_owned(),
+                remedy: "run `tracedecay reinstall --component context-mcp` (refreshes \
+                         tracedecay-owned files)"
+                    .to_owned(),
+            }]),
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        }
+    );
+    let finding = host_integration_finding(&read).unwrap();
+    assert_eq!(
+        finding.coverage().statement(),
+        "codex/context-mcp has drifted from its installed shape; run `tracedecay reinstall \
+         --component context-mcp` (refreshes tracedecay-owned files)",
+        "a drift finding names the drifted component and its remedy"
+    );
+}
+
+fn engine_status(
+    language: &str,
+    command: &str,
+    state: tracedecay_lsp::analyzer::broker::EngineState,
+    install: &str,
+    active: bool,
+) -> tracedecay_lsp::analyzer::broker::ResolvedEngineStatus {
+    tracedecay_lsp::analyzer::broker::ResolvedEngineStatus {
+        status: tracedecay_lsp::analyzer::broker::EngineStatus {
+            language: language.to_owned(),
+            language_id: language.to_owned(),
+            command: command.to_owned(),
+            default_command: command.to_owned(),
+            args: Vec::new(),
+            enabled: true,
+            state,
+            install_options: vec![tracedecay_lsp::analyzer::adapters::LspInstallOption {
+                label: "npm".to_owned(),
+                command: install.to_owned(),
+                notes: None,
+            }],
+            last_error: None,
+            last_diagnostic_update: None,
+        },
+        active,
+        executable_found: state != tracedecay_lsp::analyzer::broker::EngineState::Unavailable,
+    }
+}
+
+/// The Doctor read is the broker's own view: the aggregate grades only
+/// project-active analyzers, and a degraded finding names the exact
+/// executable and its install step instead of "at least one analyzer".
+#[test]
+fn language_server_engine_statuses_name_the_missing_active_analyzer() {
+    use tracedecay_lsp::analyzer::broker::EngineState;
+
+    assert_eq!(
+        language_server_read_from_engine_statuses([]),
+        LanguageServerReadV1::Absent {
+            analyzers: Vec::new()
+        }
+    );
+    // Only inactive languages: nothing is graded, but the daemon's view of
+    // the inactive analyzer is still carried for `lsp servers`.
+    let inactive_only = language_server_read_from_engine_statuses([engine_status(
+        "go",
+        "gopls",
+        EngineState::Unavailable,
+        "go install gopls",
+        false,
+    )]);
+    assert!(matches!(
+        &inactive_only,
+        LanguageServerReadV1::Absent { analyzers }
+            if analyzers.len() == 1
+                && analyzers[0].state == LanguageServerAnalyzerStateV1::Inactive
+                && !analyzers[0].executable_found
+    ));
+
+    let read = language_server_read_from_engine_statuses([
+        engine_status(
+            "rust",
+            "rust-analyzer",
+            EngineState::Ready,
+            "rustup component add rust-analyzer",
+            true,
+        ),
+        engine_status(
+            "typescript",
+            "typescript-language-server",
+            EngineState::Unavailable,
+            "npm install -g typescript typescript-language-server",
+            true,
+        ),
+        // A disabled override outlives the language leaving the project; it
+        // must not grade the project as degraded.
+        engine_status(
+            "go",
+            "gopls",
+            EngineState::Disabled,
+            "go install gopls",
+            false,
+        ),
+    ]);
+    let LanguageServerReadV1::Observed {
+        state,
+        coverage,
+        analyzers,
+    } = &read
+    else {
+        panic!("active analyzers must be observed: {read:?}");
+    };
+    assert_eq!(*state, LanguageServerStateV1::Unavailable);
+    assert_eq!(*coverage, DoctorCoverageCompletenessV1::Complete);
+    assert_eq!(
+        analyzers
+            .iter()
+            .map(|analyzer| (analyzer.language.as_str(), analyzer.state))
+            .collect::<Vec<_>>(),
+        vec![
+            ("rust", LanguageServerAnalyzerStateV1::Ready),
+            ("typescript", LanguageServerAnalyzerStateV1::Unavailable),
+            ("go", LanguageServerAnalyzerStateV1::Inactive),
+        ]
+    );
+
+    let finding = tracedecay_contracts::doctor::language_server_finding(&read).expect("finding");
+    let statement = finding.coverage().statement();
+    assert!(
+        statement.contains("typescript (typescript-language-server; install: npm install -g typescript typescript-language-server)"),
+        "{statement}"
+    );
+    assert!(!statement.contains("gopls"), "{statement}");
+    assert!(!statement.contains("rust-analyzer"), "{statement}");
+}
+
+#[test]
+fn empty_observation_projection_is_absent() {
+    let model =
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+            .expect("empty projection");
+    assert_eq!(
+        observability_read_from_model(Ok(model)),
+        ObservabilityReadV1::Absent
+    );
+}
+
+#[test]
+fn retained_or_unreported_observation_history_is_not_absent() {
+    let model =
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+            &[],
+            1,
+            0,
+        )
+        .expect("retained projection");
+    assert_eq!(
+        observability_read_from_model(Ok(model)),
+        ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 0,
+            last_observed_at_micros: None,
+            coverage: DoctorCoverageCompletenessV1::Partial,
+        }
+    );
+
+    let unknown =
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+            &[],
+            0,
+            1,
+        )
+        .expect("unknown projection");
+    assert_eq!(
+        observability_read_from_model(Ok(unknown)),
+        ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 0,
+            last_observed_at_micros: None,
+            coverage: DoctorCoverageCompletenessV1::Unknown,
+        }
+    );
+
+    let mut active =
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+            .expect("active empty projection");
+    active.coverage = tracedecay_contracts::feedback::observations::FeedbackCoverageV1::Known;
+    active.watermark.producer_boot_id =
+        Some(tracedecay_domain::canonical_sha256(&"active-observation-boot").unwrap());
+    assert_eq!(
+        observability_read_from_model(Ok(active)),
+        ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 0,
+            last_observed_at_micros: None,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        }
+    );
+}
+#[tokio::test]
+async fn composed_report_carries_real_states_and_enumerates_coverage() {
+    use std::collections::BTreeSet;
+
+    use tracedecay_contracts::doctor::{
+        AdvisoryFeedbackReadV1, CodeIndexMountReadV1, CodeIndexMountStateV1,
+        ConfigurationAuthorityReadV1, ConfigurationDriftV1, DoctorCoverageCompletenessV1,
+        DoctorCoverageStatementV1, DoctorEvidenceRefV1, DoctorEvidenceReferenceV1,
+        DoctorEvidenceStateV1, DoctorFamilyConsultationV1, DoctorFamilyCoverageV1,
+        DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorFindingV1,
+        DoctorKernelInputsV1, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1,
+        DoctorStorageFindingV1, OperationalAuditReadV1, ProfileAuthorityReadV1,
+        RemoteOperationalReadV1,
+    };
+    use tracedecay_contracts::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestContext, RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::{
+        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    };
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    let actor = ActorId::new("actor.doctor-kernel-compose-test").unwrap();
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.doctor-kernel-compose-test").unwrap(),
+        RepositoryId::new("repository.doctor-kernel-compose-test").unwrap(),
+        WorktreeId::new("worktree.doctor-kernel-compose-test").unwrap(),
+        None,
+    )
+    .unwrap();
+    let capability = CapabilityId::new("capability.doctor-kernel-compose-test").unwrap();
+    let use_case = UseCaseId::new("use-case.doctor-kernel-compose-test").unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.doctor-kernel-compose-test").unwrap(),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "11".repeat(32))).unwrap(),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(10_000),
+        scope.clone(),
+        BTreeSet::from([capability]),
+        BTreeSet::from([use_case]),
+        DisclosureClass::Evidence,
+    )
+    .unwrap();
+    let ctx = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.doctor-kernel-compose-test").unwrap(),
+        Deadline::new(UtcMicros(9_000)).unwrap(),
+        CancellationContext::active("cancel.doctor-kernel-compose-test").unwrap(),
+    )
+    .unwrap();
+
+    let orphan_evidence = DoctorEvidenceRefV1::new(
+        DoctorFindingFamilyV1::Storage,
+        DoctorEvidenceReferenceV1::new("storage.orphan_store.fixture.age-42d").unwrap(),
+    );
+    let orphan_coverage = DoctorCoverageStatementV1::new(
+        DoctorCoverageCompletenessV1::Complete,
+        "orphan store identity no longer resolves",
+    )
+    .unwrap();
+    let orphan_finding = DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Storage,
+        DoctorEvidenceStateV1::Degraded,
+        vec![orphan_evidence],
+        orphan_coverage,
+    )
+    .unwrap();
+    let orphan_storage =
+        DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, orphan_finding)
+            .unwrap();
+
+    let inputs = DoctorKernelInputsV1 {
+        configuration: ConfigurationAuthorityReadV1::Resolved {
+            drift: ConfigurationDriftV1::InSync,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {
+            serving: true,
+            startup_converged: false,
+            ..DaemonRuntimeHealthSignalV1::default()
+        }),
+        operational_audit: OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::Unavailable,
+        },
+        host: HostIntegrationReadV1::Denied,
+        advisory_feedback: AdvisoryFeedbackReadV1::Absent,
+        github_source: GitHubSourceReadV1::Absent,
+        language_server: LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Ready,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+            analyzers: Vec::new(),
+        },
+        code_index: CodeIndexMountReadV1::Observed {
+            state: CodeIndexMountStateV1::Mounted,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        observability: ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 7,
+            last_observed_at_micros: Some(42),
+            coverage: DoctorCoverageCompletenessV1::Partial,
+        },
+        ingest_refusals: IngestRefusalCensusReadV1::Observed {
+            refusals: vec![IngestRefusalV1 {
+                provider: "cursor".to_owned(),
+                session_id: "cursor-session".to_owned(),
+                reason: "admission_refused".to_owned(),
+                start: 0,
+                end: 160,
+            }],
+        },
+        storage: merge_storage_reads(
+            storage_family_read(vec![orphan_storage]),
+            DoctorStorageFamilyReadV1::Unknown,
+        ),
+    };
+
+    let report = compose_doctor_report(&ctx, &inputs).await.expect("report");
+
+    assert_eq!(report.coverage().families().len(), 8);
+
+    let family_state = |family: DoctorFindingFamilyV1| {
+        report
+            .findings()
+            .find(|finding| finding.family() == family)
+            .map(DoctorFindingV1::state)
+    };
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Configuration),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::StorageRuntime),
+        Some(DoctorEvidenceStateV1::Degraded)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Advisory),
+        Some(DoctorEvidenceStateV1::Denied)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::CodeIndex),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Storage),
+        Some(DoctorEvidenceStateV1::Degraded)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::LanguageServer),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Observability),
+        Some(DoctorEvidenceStateV1::Partial)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Memory),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage),
+        "an unsampled daemon with no over-budget verdict reports memory healthy"
+    );
+
+    assert!(!report.is_healthy_complete());
+    assert_ne!(
+        report.coverage().completeness(),
+        DoctorCoverageCompletenessV1::Complete
+    );
+
+    let consultation = |family: DoctorFindingFamilyV1| {
+        report
+            .coverage()
+            .families()
+            .iter()
+            .find(|record| record.family() == family)
+            .map(DoctorFamilyCoverageV1::consultation)
+    };
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::LanguageServer),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Observability),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Memory),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Advisory),
+        Some(DoctorFamilyConsultationV1::Unavailable {
+            reason: DoctorFamilyUnavailableReasonV1::Denied,
+        })
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Configuration),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Storage),
+        Some(DoctorFamilyConsultationV1::Unavailable {
+            reason: DoctorFamilyUnavailableReasonV1::Unknown,
+        })
+    );
+}
+
+#[test]
+fn verifying_seated_generation_reads_stale_like_status() {
+    use tracedecay_contracts::doctor::CodeIndexMountStateV1;
+
+    assert_eq!(
+        code_index_mount_state(Some(CodeIndexStalenessStateV1::Verifying)),
+        CodeIndexMountStateV1::Stale
+    );
+    assert_eq!(
+        code_index_mount_state(Some(CodeIndexStalenessStateV1::Indexing)),
+        CodeIndexMountStateV1::Indexing
+    );
+}
+
+#[test]
+fn live_graph_container_bytes_sums_every_wal_segment() {
+    let temporary = tempfile::tempdir().unwrap();
+    let container = temporary.path().join("tracedecay.grafeo");
+    std::fs::write(&container, vec![0_u8; 1_000]).unwrap();
+    let wal = temporary.path().join("tracedecay.grafeo.wal");
+    std::fs::create_dir(&wal).unwrap();
+    std::fs::write(wal.join("wal_00000001.log"), vec![0_u8; 200]).unwrap();
+    std::fs::write(wal.join("wal_00000002.log"), vec![0_u8; 30]).unwrap();
+
+    assert_eq!(live_graph_container_bytes(&container), 1_230);
+}
+
+#[test]
+fn a_footprint_budget_is_not_reported_as_an_unmounted_store() {
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1;
+
+    let mut retention = tracedecay_configuration::RetentionConfig::default();
+    retention
+        .store_soft_budgets_bytes
+        .insert("projects/proj_a".to_owned(), 1);
+    assert_eq!(
+        soft_budget_findings(
+            std::collections::BTreeMap::new(),
+            &retention,
+            &BTreeSet::from(["projects/proj_a"]),
+        ),
+        DoctorStorageFamilyReadV1::Absent,
+        "the footprint owns this key"
+    );
+
+    retention
+        .store_soft_budgets_bytes
+        .insert("sessions.db".to_owned(), 1);
+    let DoctorStorageFamilyReadV1::Observed { findings } = soft_budget_findings(
+        std::collections::BTreeMap::new(),
+        &retention,
+        &BTreeSet::from(["projects/proj_a"]),
+    ) else {
+        panic!("an unmounted store budget is still reported");
+    };
+    assert_eq!(findings.len(), 1);
+    assert_eq!(
+        findings[0].finding().state(),
+        DoctorEvidenceStateV1::Unknown
+    );
+}
+
+/// #4097: a WAL whose checkpoint fence expired is a typed Doctor finding that
+/// names the process still holding its read slot.
+#[test]
+fn an_expired_wal_checkpoint_fence_is_a_finding_naming_its_holder() {
+    use tracedecay_runtime_core::shard_runtime::registry::{
+        CheckpointBlocker, CheckpointBlockers, CheckpointPressure, CheckpointWal,
+        PhysicalWriterRuntimeSnapshot,
+    };
+    use tracedecay_runtime_core::shard_runtime::telemetry::{
+        RuntimeTelemetryProjection, ShardRuntimeHealth, ShardRuntimeTelemetry,
+    };
+
+    let admission = tracedecay_store::AdmissionConfigV1::default();
+    let shard = |pressure| ShardRuntimeTelemetry {
+        binding: serde_json::from_value(serde_json::json!({
+            "shard_id": {
+                "brain_id": "brain.doctor-wal",
+                "profile_id": "profile.doctor-wal",
+                "scope": { "kind": "project", "project_id": "project.doctor-wal" }
+            },
+            "incarnation": 1,
+            "authority_epoch": 1
+        }))
+        .unwrap(),
+        state: tracedecay_store::RuntimeMaintenanceStateV1::Ready,
+        queue_budget: admission.per_shard_queue.clone(),
+        global_queue_budget_bytes: admission.global_queue_max_bytes,
+        queued_operations: 0,
+        queued_bytes: 0,
+        writer_present: true,
+        physical_reader_handles: 0,
+        general_reader_waiters: 0,
+        health_reader_waiters: 0,
+        client_leases: 0,
+        writer_busy_events: 0,
+        writer: Some(PhysicalWriterRuntimeSnapshot {
+            checkpoint_pressure: pressure,
+            ..PhysicalWriterRuntimeSnapshot::default()
+        }),
+        wal_bytes: None,
+        wal_budget: admission.wal.clone(),
+        memory_estimate_bytes: None,
+        health: ShardRuntimeHealth::Unknown,
+        pinned_profile: false,
+        idle_for_ms: 0,
+        eviction_eligible: false,
+        eviction_blocker_count: 0,
+    };
+    let wal = CheckpointWal {
+        frames: 1,
+        bytes: 300_000_000,
+    };
+    let projection = RuntimeTelemetryProjection {
+        per_shard_queue_budget: admission.per_shard_queue.clone(),
+        global_queue_budget_bytes: admission.global_queue_max_bytes,
+        wal_budget: admission.wal.clone(),
+        shards: vec![
+            shard(CheckpointPressure::FenceExpired {
+                wal,
+                holders: CheckpointBlockers {
+                    blockers: vec![CheckpointBlocker::ForeignConnection {
+                        pid: 4242,
+                        process: "sqlite3".to_owned(),
+                    }],
+                    omitted: 0,
+                },
+            }),
+            shard(CheckpointPressure::BlockGeneral {
+                wal,
+                blockers: CheckpointBlockers::default(),
+            }),
+            shard(CheckpointPressure::Open),
+        ],
+        aggregate:
+            tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryAggregate::default(),
+    };
+
+    let DoctorStorageFamilyReadV1::Observed { findings } = wal_checkpoint_pinned_read(&projection)
+    else {
+        panic!("an expired fence must be reported");
+    };
+    let [finding] = findings.as_slice() else {
+        panic!(
+            "only the expired fence is a finding, not the fence still inside its limit: {findings:?}"
+        );
+    };
+    assert_eq!(
+        finding.kind(),
+        tracedecay_contracts::doctor::DoctorStorageFindingKindV1::WalCheckpointPinned
+    );
+    assert_eq!(
+        finding.finding().state(),
+        tracedecay_contracts::doctor::DoctorEvidenceStateV1::Degraded
+    );
+    let evidence = format!("{:?}", finding.finding());
+    assert!(
+        evidence.contains("process:sqlite3[4242]") && evidence.contains("wal_bytes=300000000"),
+        "the finding names the holder and the WAL size: {evidence}"
+    );
+    assert_eq!(
+        wal_checkpoint_pinned_read(&RuntimeTelemetryProjection {
+            shards: Vec::new(),
+            ..projection
+        }),
+        DoctorStorageFamilyReadV1::Absent
+    );
+}

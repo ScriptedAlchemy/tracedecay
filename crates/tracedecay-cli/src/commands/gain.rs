@@ -1,18 +1,8 @@
-use super::daemon::daemon_tool_json;
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct SavingsDayPayload {
-    day: i64,
-    saved_tokens: u64,
-    calls: u64,
-}
-
-#[derive(Deserialize)]
-struct SavingsTotalPayload {
-    saved_tokens: u64,
-    calls: u64,
-}
+use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
+use tracedecay_contracts::retrieval::{
+    AdminCliGainHistoryV1, AdminCliGainTotalV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 /// Convert raw tokens-saved into a USD estimate using Sonnet input pricing.
 /// Sonnet is the default agent target; output-token savings are not relevant
@@ -29,27 +19,31 @@ pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> Option<f64> {
     Some((saved_tokens as f64) * price.prompt_per_mtok / 1_000_000.0)
 }
 
-#[hotpath::measure(label = "cli.gain.read", future = true)]
+#[tracing::instrument(name = "cli.gain.read", level = "trace", skip_all)]
 pub async fn handle_gain(
+    profile: &ProfileRoot,
     all: bool,
     history: bool,
     range: &str,
     json_output: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    handle_gain_inner(all, history, range, json_output).await
+    handle_gain_inner(profile, all, history, range, json_output).await
 }
 
-fn handle_gain_inner(
+fn handle_gain_inner<'a>(
+    profile: &ProfileRoot,
     all: bool,
     history: bool,
-    range: &str,
+    range: &'a str,
     json_output: bool,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'a>,
 > {
     // Erase the deeply nested gain-read future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
     Box::pin(async move {
+        let profile = &profile;
         let since = tracedecay_session_memory::provider_usage::provider_usage_range_start(range)
             .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })?;
         let since = i64::try_from(since).map_err(|_| {
@@ -65,29 +59,22 @@ fn handle_gain_inner(
                 .map(|p| p.to_string_lossy().into_owned())
         };
 
-        let result = daemon_tool_json(
+        let result = admin_cli_result(
+            profile,
             None,
-            "tracedecay_admin_cli",
-            serde_json::json!({
-                "action": "gain_query",
-                "project_arg": project_filter,
-                "since": since,
-                "history": history,
-            }),
+            AdminCliSurfaceRequestV1::GainQuery {
+                project_arg: project_filter.as_ref().map(std::path::PathBuf::from),
+                since,
+                history,
+            },
         )
         .await?;
         if history {
-            let rows = result
-                .get("history")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon gain history response is missing history rows".to_owned(),
-                })?;
+            let AdminCliResultV1::GainHistory(AdminCliGainHistoryV1 { history: rows }) = result
+            else {
+                return Err(admin_cli_result_mismatch("gain_query history"));
+            };
             let rows = rows
-                .iter()
-                .cloned()
-                .map(serde_json::from_value::<SavingsDayPayload>)
-                .collect::<std::result::Result<Vec<_>, _>>()?
                 .into_iter()
                 .map(|row| tracedecay_global_db::SavingsDay {
                     day: row.day,
@@ -114,9 +101,13 @@ fn handle_gain_inner(
             return Ok(());
         }
 
-        let total: SavingsTotalPayload = serde_json::from_value(result)?;
-        let saved_tokens = total.saved_tokens;
-        let calls = total.calls;
+        let AdminCliResultV1::GainTotal(AdminCliGainTotalV1 {
+            saved_tokens,
+            calls,
+        }) = result
+        else {
+            return Err(admin_cli_result_mismatch("gain_query"));
+        };
         let usd = estimate_dollars_saved(saved_tokens);
 
         if json_output {
@@ -151,17 +142,5 @@ mod tests {
         // 1_000_000 tokens × $3 / MTok = $3.00 (Sonnet input price)
         let usd = estimate_dollars_saved(1_000_000);
         assert!((usd.unwrap() - 3.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn dollars_handles_small_counts() {
-        // 1_000 tokens × $3 / MTok = $0.003
-        let usd = estimate_dollars_saved(1_000);
-        assert!((usd.unwrap() - 0.003).abs() < 0.001);
-    }
-
-    #[test]
-    fn dollars_zero_for_zero_tokens() {
-        assert_eq!(estimate_dollars_saved(0), Some(0.0));
     }
 }

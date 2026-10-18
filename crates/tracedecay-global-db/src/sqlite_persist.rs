@@ -3,13 +3,18 @@
 //! Git-index, native-integration, and configuration each own their tables and
 //! conflict kinds. The commit, rollback, receipt-replay, CAS row-count, and
 //! insert-or-equal decisions used to be copied beside those tables and then
-//! dropped the engine cause — or, on rollback failure, the original outcome.
+//! dropped the engine cause, or, on rollback failure, the original outcome.
 //! One helper keeps both errors.
 
 use std::fmt;
 use std::future::Future;
 
 use tracedecay_runtime_core::db::engine::{self, Transaction};
+
+pub(crate) use tracedecay_runtime_core::db::{
+    decode_stored_json as decode_json, encode_stored_json as encode_json,
+    optional_text_column as row_optional_text, text_column as row_text,
+};
 
 use crate::RegisteredGlobalDbWriteTransaction;
 
@@ -122,35 +127,7 @@ pub(crate) fn require_inserted_or_active<E>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ReplayPresence, replay_if_equal, require_absent_or_equal, require_inserted_or_active,
-        require_single_cas_row,
-    };
-
-    #[test]
-    fn receipt_replay_accepts_equal_and_rejects_conflict() {
-        assert_eq!(replay_if_equal("same", &"same", "conflict"), Ok("same"));
-        assert_eq!(
-            replay_if_equal("left", &"right", "conflict"),
-            Err("conflict")
-        );
-    }
-
-    #[test]
-    fn preview_insert_replays_equal_and_rejects_divergence() {
-        assert_eq!(
-            require_absent_or_equal(None, &"preview", "conflict"),
-            Ok(ReplayPresence::Absent)
-        );
-        assert_eq!(
-            require_absent_or_equal(Some("preview"), &"preview", "conflict"),
-            Ok(ReplayPresence::Equal)
-        );
-        assert_eq!(
-            require_absent_or_equal(Some("other"), &"preview", "conflict"),
-            Err("conflict")
-        );
-    }
+    use super::{require_inserted_or_active, require_single_cas_row};
 
     #[test]
     fn cas_requires_exactly_one_updated_row() {

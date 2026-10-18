@@ -1,0 +1,331 @@
+//! Retained application adapter for the canonical Memory Curator.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use crate::DaemonInvocationService;
+use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
+use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+use tracedecay_automation_runtime::automation::runner::{
+    MemoryCuratorAutomationOptions, run_memory_curator_with_backend_for_retained_settlement,
+};
+use tracedecay_contracts::ApplicationOutcome;
+use tracedecay_contracts::now_micros;
+use tracedecay_contracts::retained_surfaces::{
+    FactStoreCurateRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+    RetainedSurfaceResultV1,
+};
+use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
+
+const MEMORY_CURATOR_REQUEST_TIMEOUT_SECS: u64 = 80;
+
+#[tracing::instrument(name = "daemon.dashboard.automation.curate", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Curation pins the live configuration digest and admits one effect before the curator backend runs; a failed pin never starts a run."
+)]
+pub async fn execute_retained_memory_curator(
+    cg: &TraceDecay,
+    invocation_service: &DaemonInvocationService,
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    request: &FactStoreCurateRequestV1,
+) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    if native_runtime::handle().is_none() {
+        return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+            "the memory curator runtime is unavailable".to_owned(),
+        ));
+    }
+    let pinned = cg
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the automation configuration could not be loaded: {error}"
+            ))
+        })?;
+    let mut config = from_configuration_snapshot(pinned.snapshot()).map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the automation configuration snapshot is invalid: {error}"
+        ))
+    })?;
+    let min_confidence = f64::from(request.min_confidence_millionths) / 1_000_000.0;
+    config.timeout_secs = config.timeout_secs.min(MEMORY_CURATOR_REQUEST_TIMEOUT_SECS);
+    let backend = CodexAppServerBackend::from_automation_config(
+        &config,
+        &pinned.config().lcm_summarizers.codex,
+    );
+    let configuration_digest =
+        tracedecay_automation_runtime::automation::effect_runtime::pinned_automation_configuration_digest(
+            pinned.revision_id(),
+            &pinned.snapshot().effective_behavior_digest,
+            &pinned.snapshot().resolution_provenance_digest,
+        )
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the pinned automation configuration digest could not be assembled: {error}"
+            ))
+        })?;
+    let automation_request = request
+        .automation_request(context.request_context.request_id())
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+    let run_id = automation_request.run_id.as_str().to_owned();
+    let automation_context = cg
+        .automation_project_context(
+            invocation_service
+                .owner_home()
+                .map(std::path::Path::to_path_buf),
+        )
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the automation project context could not be composed: {error}"
+            ))
+        })?;
+    let prepared: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(crate::automation_effect::prepare(
+        invocation_service,
+        cg,
+        automation_context.project_root(),
+        &automation_context.dashboard_root,
+        context.request_context.request_id().clone(),
+        context.request_context.deadline().clone(),
+        context.cancellation_signal,
+        context.observed_at,
+        configuration_digest,
+        automation_request,
+    ));
+    let admission = prepared.await.map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the automation effect authority could not be prepared: {error}"
+        ))
+    })?;
+    let effect = match admission {
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Execute(effect) => effect,
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Replay(terminal) => {
+            return terminal.into_outcome().map_err(automation_problem);
+        }
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Conflict => {
+            return Err(RetainedSurfaceExecutionErrorV1::Conflict);
+        }
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::PreAdmissionProblem(
+            problem,
+        ) => {
+            return Err(RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+                problem.problem.source().clone(),
+            ));
+        }
+    };
+    // The run outlives this request, so it answers to the request's own
+    // cancellation and deadline, which bound the effect's settlement too.
+    let control = AutomationRunControl::from_interrupted(Arc::new({
+        let cancellation = context.cancellation_signal.clone();
+        let deadline = context.request_context.deadline().clone();
+        move || cancellation.is_cancelled() || deadline.is_elapsed_at(now_micros())
+    }));
+    let observation_producer = crate::automation_observation::project_run_observation_producer(
+        invocation_service,
+        automation_context.project_root(),
+    )
+    .await;
+    let project_root = automation_context.project_root().to_path_buf();
+    let observer = observation_producer.map(|producer| {
+        crate::automation_observation::automation_run_observer(
+            producer,
+            project_root,
+            "fact_store_curate",
+        )
+    });
+    let started = effect.started_outcome()?;
+    let configuration_revision_id = pinned.revision_id().clone();
+    let options = MemoryCuratorAutomationOptions {
+        trigger: AutomationTrigger::Application,
+        run_id: Some(run_id.clone()),
+        fact_review_limit: request.fact_review_limit as usize,
+        min_confidence,
+    };
+    let run = async move {
+        let retained_run = run_memory_curator_with_backend_for_retained_settlement(
+            &automation_context,
+            &config,
+            &configuration_revision_id,
+            &backend,
+            options,
+            &control,
+        )
+        .await;
+        let waiter = effect.start_retained_automation_settlement(retained_run, observer, |run| {
+            (run.ledger_record, run.committed_receipt)
+        });
+        log_curator_settlement(&run_id, waiter.wait().await);
+    };
+    // The Codex backend blocks its thread for the whole model run
+    // (`CodexAppServerBackend::run_task`), so the run polls on a blocking-pool
+    // thread. Dropping the task detaches it; the run outlives this request.
+    if let Err(error) =
+        NativeTask::spawn(async move { native_runtime::off_native_thread(run).await })
+    {
+        tracing::error!(%error, "memory curator run was not started");
+    }
+    Ok(started)
+}
+
+/// A settled run is durable in the effect journal and the run ledger; only a
+/// settlement that could not be observed, or that settled a problem, is
+/// reported here.
+fn log_curator_settlement(
+    run_id: &str,
+    settlement: tracedecay_domain::errors::Result<
+        tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome,
+    >,
+) {
+    match settlement {
+        Ok(tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Run { .. }) => {}
+        Ok(tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Problem {
+            problem,
+            ..
+        }) => tracing::warn!(
+            run_id,
+            problem_code = %problem.problem.problem.code,
+            "memory curator run settled with an application problem"
+        ),
+        Ok(tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Reused { .. }
+        | tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::AbandonedObserved { .. }) => {
+            tracing::warn!(run_id, "memory curator run settled without a retained terminal");
+        }
+        Err(error) => tracing::warn!(
+            run_id,
+            error = %error,
+            "memory curator run settlement could not be observed"
+        ),
+    }
+}
+
+fn automation_problem(
+    problem: Box<
+        tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
+    >,
+) -> RetainedSurfaceExecutionErrorV1 {
+    RetainedSurfaceExecutionErrorV1::ApplicationProblem(problem.problem.problem.source().clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use tracedecay_contracts::{
+        CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot,
+        Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
+        RetainedSurfaceExecutionContextV1, RetainedSurfaceOperation,
+        retained_surface_application_operation,
+    };
+    use tracedecay_domain::{
+        ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
+    };
+
+    use super::{
+        DaemonInvocationService, FactStoreCurateRequestV1, RetainedSurfaceExecutionErrorV1,
+    };
+
+    #[tokio::test]
+    async fn context_failure_precedes_retained_curator_admission() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let project_root = directory.path().join("project");
+        let profile_root = directory.path().join("profile");
+        std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+        std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
+            .expect("project source");
+        let options = tracedecay_project::project::TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        };
+        let writable = tracedecay_project::project::TraceDecay::init_with_options_for_test(
+            &project_root,
+            options.clone(),
+        )
+        .await
+        .expect("initialize retained curator project");
+        let dashboard_root = writable.store_layout().dashboard_root.clone();
+        writable.close();
+        let read_only =
+            tracedecay_project::project::TraceDecay::open_read_only_with_options_for_test(
+                &project_root,
+                options,
+            )
+            .await
+            .expect("open read-only retained curator project");
+        let operation =
+            retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+                .expect("retained operation");
+        let actor = ActorId::new("actor.retained-context-failure").expect("actor");
+        let scope = ResolvedScope::new(
+            ProjectId::new("project.retained-context-failure").expect("project id"),
+            RepositoryId::new("repository.retained-context-failure").expect("repository id"),
+            WorktreeId::new("worktree.retained-context-failure").expect("worktree id"),
+            None,
+        )
+        .expect("scope");
+        let request_id = RequestId::new("request.retained-context-failure").expect("request id");
+        let cancellation_id = "cancel.retained-context-failure".to_owned();
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.retained-context-failure").expect("grant id"),
+            1,
+            canonical_sha256(&"retained-context-failure").expect("grant digest"),
+            actor.clone(),
+            UtcMicros(1),
+            UtcMicros(i64::MAX - 1),
+            scope.clone(),
+            BTreeSet::from([operation.capability_id().clone()]),
+            BTreeSet::from([operation.use_case_id().clone()]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        let request_context = RequestContext::new(
+            actor,
+            scope,
+            grant,
+            request_id,
+            Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            CancellationContext::active(cancellation_id.clone()).expect("cancellation context"),
+        )
+        .expect("request context");
+        let cancellation =
+            CancellationSignal::active(cancellation_id).expect("cancellation signal");
+        let execution = RetainedSurfaceExecutionContextV1 {
+            request_context: &request_context,
+            cancellation_signal: &cancellation,
+            operation: &operation,
+            observed_at: UtcMicros(2),
+        };
+
+        let error = super::execute_retained_memory_curator(
+            &read_only,
+            &DaemonInvocationService::default(),
+            &execution,
+            &FactStoreCurateRequestV1::default(),
+        )
+        .await
+        .expect_err("read-only automation context must fail before admission");
+
+        let RetainedSurfaceExecutionErrorV1::Unavailable { detail } = error else {
+            panic!("context failure must win over admission: {error:?}");
+        };
+        assert!(detail.contains("open read-only"));
+        assert!(
+            !dashboard_root.join("automation_effects").exists(),
+            "context failure must not leave a durable automation reservation"
+        );
+    }
+}

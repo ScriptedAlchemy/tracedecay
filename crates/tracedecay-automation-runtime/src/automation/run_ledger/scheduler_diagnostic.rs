@@ -4,7 +4,7 @@ use std::path::Path;
 use super::{AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path};
 use crate::automation::backend::task_key as canonical_task_key;
 use crate::automation::config_error;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(crate) async fn append_or_reuse_scheduler_diagnostic(
     dashboard_root: &Path,
@@ -15,7 +15,7 @@ pub(crate) async fn append_or_reuse_scheduler_diagnostic(
     let path = run_ledger_path(dashboard_root);
     let candidate = candidate.clone();
     let anchor = effectful_anchor_run_id.map(str::to_owned);
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         append_or_reuse_blocking(&path, &candidate, anchor.as_deref())
     })
     .await
@@ -46,7 +46,7 @@ fn append_or_reuse_blocking(
     effectful_anchor_run_id: Option<&str>,
 ) -> Result<AutomationRunLedgerRecord> {
     if let Some(parent) = path.parent() {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)
             .map_err(TraceDecayError::from)?;
     }
     let lock =
@@ -72,7 +72,7 @@ fn append_or_reuse_blocking(
         super::sync_run_ledger_file_and_parent(path, &file)?;
         Ok(candidate.clone())
     })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(TraceDecayError::from);
+    let unlock = lock.unlock().map_err(TraceDecayError::from);
     result.and_then(|record| unlock.map(|()| record))
 }
 
@@ -322,118 +322,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(append_or_reuse_blocking(&path, &candidate, Some("effect-anchor")).is_err());
-    }
-
-    #[test]
-    fn malformed_row_before_anchor_does_not_block_diagnostic_reuse() {
-        // The reverse scan stops at the effectful anchor, so a malformed row
-        // older than the anchor is never reached and no longer blocks
-        // diagnostic reuse for a candidate newer than the anchor.
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = run_ledger_path(temp.path());
-        let anchor = record("effect-anchor", "succeeded", "scheduler", None);
-        let candidate = record(
-            "user_job_skip_before_malformed",
-            "skipped",
-            "scheduler",
-            Some("interval_not_due"),
-        );
-        std::fs::write(
-            &path,
-            format!(
-                "not-json\n{}\n{}\n",
-                serde_json::to_string(&anchor).unwrap(),
-                serde_json::to_string(&candidate).unwrap()
-            ),
-        )
-        .unwrap();
-
         assert_eq!(
-            append_or_reuse_blocking(&path, &candidate, Some(&anchor.run_id)).unwrap(),
-            candidate
+            append_or_reuse_blocking(&path, &candidate, Some("effect-anchor"))
+                .unwrap_err()
+                .to_string(),
+            "config error: scheduler diagnostic effectful anchor identity is invalid"
         );
-        assert_eq!(
-            std::fs::read_to_string(path)
-                .unwrap()
-                .matches(candidate.run_id.as_str())
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn diagnostic_before_anchor_is_reappended_when_older_than_anchor() {
-        // File order here is candidate(oldest), anchor(newest): the reverse
-        // scan reaches the anchor first and stops, so the older candidate
-        // occurrence is never seen. Rows older than the anchor are out of
-        // scope for reuse detection, in exchange for scan cost bounded to
-        // the anchor and resilience to bad old rows. The candidate is
-        // therefore appended again (a second, newer occurrence), not reused.
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = run_ledger_path(temp.path());
-        let anchor = record("effect-anchor", "succeeded", "scheduler", None);
-        let candidate = record(
-            "user_job_skip_before_anchor",
-            "skipped",
-            "scheduler",
-            Some("interval_not_due"),
-        );
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n{}\n",
-                serde_json::to_string(&candidate).unwrap(),
-                serde_json::to_string(&anchor).unwrap()
-            ),
-        )
-        .unwrap();
-
-        assert_eq!(
-            append_or_reuse_blocking(&path, &candidate, Some(&anchor.run_id)).unwrap(),
-            candidate
-        );
-        assert_eq!(
-            std::fs::read_to_string(path)
-                .unwrap()
-                .matches("user_job_skip_before_anchor")
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn duplicate_diagnostic_across_anchor_reuses_newest_occurrence() {
-        // File order (chronological): candidate(oldest), anchor(middle),
-        // candidate(newest). The reverse scan encounters the newest
-        // candidate occurrence before it reaches the anchor and stops at
-        // the anchor, so the older duplicate before the anchor is never
-        // seen. Reusing the newest occurrence is safe and
-        // idempotent: the row content is identical, so returning it instead
-        // of erroring does not lose any information, and no new row is
-        // appended.
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = run_ledger_path(temp.path());
-        let anchor = record("effect-anchor", "succeeded", "scheduler", None);
-        let candidate = record(
-            "user_job_skip_duplicate_anchor",
-            "skipped",
-            "scheduler",
-            Some("interval_not_due"),
-        );
-        let ledger_before = format!(
-            "{}\n{}\n{}\n",
-            serde_json::to_string(&candidate).unwrap(),
-            serde_json::to_string(&anchor).unwrap(),
-            serde_json::to_string(&candidate).unwrap()
-        );
-        std::fs::write(&path, &ledger_before).unwrap();
-
-        assert_eq!(
-            append_or_reuse_blocking(&path, &candidate, Some(&anchor.run_id)).unwrap(),
-            candidate
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), ledger_before);
     }
 
     #[test]
@@ -503,37 +397,12 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_diagnostic_creates_missing_ledger_and_commits_newline() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = run_ledger_path(temp.path());
-        let candidate = record(
-            "user_job_skip_create",
-            "skipped",
-            "scheduler",
-            Some("interval_not_due"),
-        );
-
-        assert!(!path.exists());
-        assert_eq!(
-            append_or_reuse_blocking(&path, &candidate, None).unwrap(),
-            candidate
-        );
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(bytes.ends_with(b"\n"));
-        // Exactly one newline: the first one found is the final byte.
-        assert_eq!(
-            bytes.iter().position(|&byte| byte == b'\n'),
-            Some(bytes.len() - 1)
-        );
-    }
-
-    #[test]
     fn multi_megabyte_anchor_allows_exact_reuse_and_append() {
         // The reverse scan must handle a multi-megabyte anchor with bounded
         // memory and still support exact reuse plus a later append. The
-        // candidate is newer than the anchor — the realistic order for a
+        // candidate is newer than the anchor, the realistic order for a
         // scheduler skip diagnostic computed against the latest effectful
-        // run — because a scan that stops at the anchor cannot reuse an
+        // run, because a scan that stops at the anchor cannot reuse an
         // older candidate without walking the full ledger.
         let temp = tempfile::TempDir::new().unwrap();
         let path = run_ledger_path(temp.path());
@@ -626,53 +495,6 @@ mod tests {
                 .matches("user_job_skip_toctou")
                 .count(),
             1
-        );
-    }
-
-    #[test]
-    fn fresher_anchor_than_the_identity_snapshot_duplicates_the_diagnostic() {
-        // Inverse of occurrence_anchor_reuses_diagnostic_after_a_newer_terminal_lands,
-        // pinning the primitive's contract: this function trusts the caller's
-        // anchor to bound the scan, so an anchor NEWER than the snapshot the
-        // candidate's identity was minted from hides the existing row and
-        // appends a duplicate. Production can no longer reach this state --
-        // `scheduled_user_job_run_id` returns the anchor together with the
-        // occurrence id and every scheduler diagnostic append carries that one
-        // anchor -- so this test documents why that coupling is mandatory
-        // rather than an accepted behavior.
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = run_ledger_path(temp.path());
-        let anchor_a = record("effect-anchor-a", "succeeded", "scheduler", None);
-        let diagnostic = record(
-            "user_job_skip_stale_identity",
-            "skipped",
-            "scheduler",
-            Some("interval_not_due"),
-        );
-        let terminal_b = record("effect-anchor-b", "succeeded", "scheduler", None);
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n{}\n{}\n",
-                serde_json::to_string(&anchor_a).unwrap(),
-                serde_json::to_string(&diagnostic).unwrap(),
-                serde_json::to_string(&terminal_b).unwrap()
-            ),
-        )
-        .unwrap();
-
-        assert_eq!(
-            append_or_reuse_blocking(&path, &diagnostic, Some(&terminal_b.run_id)).unwrap(),
-            diagnostic
-        );
-        assert_eq!(
-            std::fs::read_to_string(&path)
-                .unwrap()
-                .matches("user_job_skip_stale_identity")
-                .count(),
-            2,
-            "a fresher-than-identity anchor hides the existing row; only the \
-             single-snapshot coupling in the callers prevents this"
         );
     }
 

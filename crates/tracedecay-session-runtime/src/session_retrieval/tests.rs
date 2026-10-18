@@ -1,30 +1,43 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use super::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracedecay_contracts::retrieval::{
+    MAX_APPLICATION_PAGE_SIZE, PageRequest, RetrievalPortContext, RetrievalPortOutcome,
+    SessionLookupRequest, SessionLookupResult, SessionRetrievalBudgetStageV1,
+    SessionRetrievalStructuralRefusalV1, TemporalRetrievalFailure, TemporalRetrievalPort,
+};
+use tracedecay_contracts::{
+    ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
+    Deadline, DisclosureClass, OmissionReason, RequestId, ResultContractRef,
+};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
-    RetentionClass, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, TemporalModeV1,
-    UtcMicros, derive_exact_observation_anchor_id,
+    ManifestDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1,
+    ProjectionGenerationId, ProviderId, RetentionClass, RetrievalAnchorId, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId, TemporalModeV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
+use tracedecay_sessions::serving::{SessionProjectionServingState, SessionProjectionStaleReason};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     SessionRecord, SessionTemporalSnapshotRequestV1, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    build_observation_retrieval_anchor,
 };
-use tracedecay_temporal_query::context::CompactContext;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, TemporalAuthorizedRoot, TemporalSnapshotRequest,
-    TemporalWatermarks,
-};
-use tracedecay_temporal_query::ranking::{RankedCandidate, RetrieverContribution};
+use tracedecay_temporal_query::context::{CompactContext, ContextBudget};
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate, RetrieverContribution};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{KernelVersions, TemporalWatermarks};
+use tracedecay_temporal_query::snapshot::{TemporalAuthorizedRoot, TemporalSnapshotRequest};
 use tracedecay_temporal_query::{TemporalHydratedResult, TemporalKernelResult};
+use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
 #[derive(Clone)]
 struct RealPageFixture {
@@ -39,19 +52,6 @@ struct RealPageFixture {
 
 fn test_binding_digest(label: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(label.as_bytes())))
-}
-
-#[test]
-fn real_page_fixture_rejects_legacy_binding_digests_and_accepts_test_digests() {
-    for (field, invalid) in [
-        ("root_digest", "root.page"),
-        ("request_digest", "request.page.session.page.00"),
-        ("access_digest", "access.page.session.page.00"),
-        ("configuration", "page-test"),
-    ] {
-        assert!(BindingDigest::new(field, invalid).is_err());
-        assert!(BindingDigest::new(field, test_binding_digest(invalid)).is_ok());
-    }
 }
 
 fn real_page_root(root_id: &str) -> TemporalAuthorizedRoot {
@@ -159,8 +159,45 @@ async fn seed_real_page_fixture(
     }
     .to_owned();
     let session_id = format!("session.page.{rank:02}");
-    let message_id = format!("message.page.{rank:02}");
-    let text = format!("canonical content {rank}");
+    seed_real_page_fixture_in_session(database, root, rank, provider, session_id, true).await
+}
+
+async fn seed_real_page_fixture_in_session(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    root: &TemporalAuthorizedRoot,
+    rank: usize,
+    provider: String,
+    session_id: String,
+    finalize: bool,
+) -> RealPageFixture {
+    seed_real_page_fixtures_in_session(
+        database,
+        root,
+        rank..rank + 1,
+        provider,
+        session_id,
+        finalize,
+    )
+    .await
+    .pop()
+    .expect("one seeded page fixture")
+}
+
+async fn seed_real_page_fixtures_in_session(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    root: &TemporalAuthorizedRoot,
+    ranks: std::ops::Range<usize>,
+    provider: String,
+    session_id: String,
+    finalize: bool,
+) -> Vec<RealPageFixture> {
+    // Match the host admission projector's bounded transaction window.
+    const BATCH_ITEMS: usize = 32;
+    let rank = ranks
+        .clone()
+        .next_back()
+        .expect("at least one fixture rank");
+    let scalar = ranks.len() == 1;
     assert!(
         database
             .upsert_session(&SessionRecord {
@@ -186,128 +223,172 @@ async fn seed_real_page_fixture(
     let session = SessionId::new(session_id.clone()).expect("session");
     let source = ObservationSourceIdentityV1::for_provider(provider_id.clone(), session.clone())
         .expect("observation source");
-    let ordinal = u64::try_from(rank).expect("ordinal");
-    let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
-    let record_id = ObservationId::new(format!("record.page.{rank:02}")).expect("record id");
-    let projected_message_id = if provider == "claude" {
-        record_id.as_str().to_owned()
-    } else {
-        message_id.clone()
-    };
-    let relations = CanonicalObservationRelationsV1::new(session)
-        .with_message_id(ObservationId::new(message_id.clone()).expect("message id"));
-    let envelope = CanonicalObservationEnvelopeV1::new(
-        provider_id,
-        "message",
-        record_id.clone(),
-        relations,
-        vec![CanonicalObservationFactV1::Message {
-            role: CanonicalMessageRoleV1::Assistant,
-            content: json!(text),
-            model: Some("fixture-model".to_owned()),
-            timestamp: Some(i64::try_from(rank).expect("timestamp")),
-        }],
-        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
-    )
-    .expect("canonical message envelope");
-    let payload = serde_json::to_value(envelope).expect("canonical payload");
-    let observation = DurableObservationV1::new(
-        ObservationIdentityMaterialV1::for_native_record(
-            source,
-            ObservationScopeV1::Profile,
-            ObservationSourceGenerationV1::new(1).expect("generation"),
-            range,
-            ObservationOrderingDomainV1::SnapshotOrder,
-            record_id,
-        )
-        .expect("observation identity"),
-        SanitizationReceiptV1::new(
-            SanitizationReceiptRefV1::new(
-                SanitizationReceiptId::new(format!("receipt.page.{rank:02}")).expect("receipt id"),
-                tracedecay_domain::ComponentVersion::new("sanitizer.page-fixture.v1")
-                    .expect("sanitizer"),
-            )
-            .expect("receipt reference"),
-            SanitizerDispositionV1::Accepted,
-            SensitivityV1::NonSensitive,
-            Some(PayloadReferenceV1::for_payload(&payload).expect("payload reference")),
-        )
-        .expect("receipt"),
-        RetentionClass::new("retention.page-fixture").expect("retention"),
-        payload,
-    )
-    .expect("durable observation");
     let store = database.observation_store();
-    let previous_cursor = store
-        .get_source_cursor(observation.source(), observation.scope())
+    let mut previous_cursor = store
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
         .await
         .expect("source cursor");
-    let next_cursor = ObservationSourceCursorV1::for_ordering(
-        observation.source().clone(),
-        observation.scope().clone(),
-        observation.identity().generation(),
-        observation.identity().ordering_domain(),
-        observation.identity().position().end(),
-    )
-    .expect("next cursor");
-    let write = ObservationWrite::new(observation.clone(), previous_cursor, next_cursor)
+    let last_rank = rank;
+    let mut pending_writes = Vec::new();
+    let mut fixtures = Vec::with_capacity(ranks.len());
+    for rank in ranks {
+        let message_id = format!("message.page.{rank:02}");
+        let text = format!("canonical content {rank}");
+        let ordinal = u64::try_from(rank).expect("ordinal");
+        let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
+        let record_id = ObservationId::new(format!("record.page.{rank:02}")).expect("record id");
+        let projected_message_id = if provider == "claude" {
+            record_id.as_str().to_owned()
+        } else {
+            message_id.clone()
+        };
+        let relations = CanonicalObservationRelationsV1::new(session.clone())
+            .with_message_id(ObservationId::new(message_id.clone()).expect("message id"));
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider_id.clone(),
+            "message",
+            record_id.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!(text),
+                model: Some("fixture-model".to_owned()),
+                timestamp: Some(i64::try_from(rank).expect("timestamp")),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        )
+        .expect("canonical message envelope");
+        let payload = serde_json::to_value(envelope).expect("canonical payload");
+        let observation = DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                source.clone(),
+                ObservationScopeV1::Profile,
+                ObservationSourceGenerationV1::new(1).expect("generation"),
+                range,
+                ObservationOrderingDomainV1::SnapshotOrder,
+                record_id,
+            )
+            .expect("observation identity"),
+            SanitizationReceiptV1::new(
+                SanitizationReceiptRefV1::new(
+                    SanitizationReceiptId::new(format!("receipt.page.{rank:02}"))
+                        .expect("receipt id"),
+                    tracedecay_domain::ComponentVersion::new("sanitizer.page-fixture.v1")
+                        .expect("sanitizer"),
+                )
+                .expect("receipt reference"),
+                SanitizerDispositionV1::Accepted,
+                SensitivityV1::NonSensitive,
+                Some(PayloadReferenceV1::for_payload(&payload).expect("payload reference")),
+            )
+            .expect("receipt"),
+            RetentionClass::new("retention.page-fixture").expect("retention"),
+            payload,
+        )
+        .expect("durable observation");
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
+        )
+        .expect("next cursor");
+        let write = ObservationWrite::new(
+            observation.clone(),
+            previous_cursor.take(),
+            next_cursor.clone(),
+        )
         .expect("observation write");
-    let projection_generation =
-        ProjectionGenerationId::new("projection.page-fixture.v1").expect("projection generation");
-    let authorization =
-        build_observation_resolution_authorization_v1(write.observation(), "session-page-fixture")
-            .expect("resolution authorization");
-    let anchor = build_observation_retrieval_anchor_v2(
-        write.observation(),
-        projection_generation.clone(),
-        UtcMicros(1),
-        authorization,
-    )
-    .expect("retrieval anchor");
-    store
-        .persist_observation(
-            AnchoredObservationWrite::new(write, anchor, projection_generation)
-                .expect("anchored observation"),
+        let projection_generation = ProjectionGenerationId::new("projection.page-fixture.v1")
+            .expect("projection generation");
+        let authorization = build_observation_resolution_authorization_v1(
+            write.observation(),
+            tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
         )
-        .await
-        .expect("persist canonical observation");
-    store
-        .project_observation(observation.observation_id())
-        .await
-        .expect("project canonical observation");
-    database
-        .lcm_protect_session_raw_messages(&provider, &session_id)
-        .await
-        .expect("protect canonical raw message");
-    tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(database)
-        .materialize_pending_session_refresh_for_test(
-            &SessionId::new(session_id.clone()).expect("refresh session"),
+        .expect("resolution authorization");
+        let anchor = build_observation_retrieval_anchor(
+            write.observation(),
+            projection_generation.clone(),
+            UtcMicros(1),
+            authorization,
         )
-        .await
-        .expect("materialize canonical temporal occurrence");
-    let active_generation = database
-        .freeze_session_temporal_snapshot_result(SessionTemporalSnapshotRequestV1::new(
-            SessionId::new(session_id.clone()).expect("frozen session"),
-        ))
-        .await
-        .expect("freeze materialized temporal snapshot")
-        .watermarks()
-        .active_generation()
-        .value();
-
-    RealPageFixture {
-        provider,
-        session_id,
-        message_id,
-        projected_message_id,
-        text,
-        anchor_id: derive_exact_observation_anchor_id(
-            observation.scope(),
-            observation.observation_id(),
-        )
-        .expect("canonical anchor id"),
-        active_generation,
+        .expect("retrieval anchor");
+        previous_cursor = Some(next_cursor);
+        let write = AnchoredObservationWrite::new(write, anchor, projection_generation)
+            .expect("anchored observation");
+        if scalar {
+            store
+                .persist_observation(write)
+                .await
+                .expect("persist canonical observation");
+            store
+                .project_observation(observation.observation_id())
+                .await
+                .expect("project canonical observation");
+        } else {
+            pending_writes.push(write);
+            if pending_writes.len() == BATCH_ITEMS || rank == last_rank {
+                let count = pending_writes.len();
+                let outcomes = store
+                    .persist_observations(std::mem::take(&mut pending_writes))
+                    .await
+                    .expect("persist canonical observation page");
+                assert_eq!(outcomes.len(), count);
+                let projected = store
+                    .project_queued_observations(count)
+                    .await
+                    .expect("project canonical observation page")
+                    .expect("registered batched projector");
+                assert_eq!(projected.items.len(), count);
+                assert!(
+                    !projected.has_more,
+                    "fixture page must fully project before the next page"
+                );
+            }
+        }
+        fixtures.push(RealPageFixture {
+            provider: provider.clone(),
+            session_id: session_id.clone(),
+            message_id,
+            projected_message_id,
+            text,
+            anchor_id: derive_exact_observation_anchor_id(
+                observation.scope(),
+                observation.observation_id(),
+            )
+            .expect("canonical anchor id"),
+            active_generation: 0,
+        });
     }
+    let active_generation = if finalize {
+        database
+            .lcm_protect_session_raw_messages(&provider, &session_id)
+            .await
+            .expect("protect canonical raw message");
+        tracedecay_session_temporal_store::SessionTemporalStore::new(database)
+            .materialize_pending_session_refresh_for_test(
+                &SessionId::new(session_id.clone()).expect("refresh session"),
+            )
+            .await
+            .expect("materialize canonical temporal occurrence");
+        SessionTemporalAccess::new(database)
+            .freeze_session_temporal_snapshot_result(SessionTemporalSnapshotRequestV1::new(
+                SessionId::new(session_id.clone()).expect("frozen session"),
+            ))
+            .await
+            .expect("freeze materialized temporal snapshot")
+            .watermarks()
+            .active_generation()
+            .value()
+    } else {
+        0
+    };
+
+    for fixture in &mut fixtures {
+        fixture.active_generation = active_generation;
+    }
+    fixtures
 }
 
 #[tokio::test]
@@ -320,10 +401,9 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
     for rank in 0..RESULTS {
         fixtures.push(seed_real_page_fixture(harness.registered.as_ref(), &root, rank).await);
     }
-    let service = DaemonSessionRetrievalService::new(
+    let service = DaemonSessionRetrievalService::new_without_refresh_worker(
         harness.registered.clone(),
         registered_profile_retrieval_root(&harness.registered),
-        None,
     )
     .expect("registered retrieval service");
     let before = harness
@@ -476,10 +556,9 @@ async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
         tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("page-scope").await;
     let root = real_page_root("root.page");
     let fixture = seed_real_page_fixture(harness.registered.as_ref(), &root, 0).await;
-    let service = DaemonSessionRetrievalService::new(
+    let service = DaemonSessionRetrievalService::new_without_refresh_worker(
         harness.registered.clone(),
         registered_profile_retrieval_root(&harness.registered),
-        None,
     )
     .expect("registered retrieval service");
     let hydrated = || {
@@ -603,16 +682,6 @@ async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
     );
 }
 
-#[test]
-fn stored_retrieval_does_not_require_refresh_worker() {
-    assert!(!requires_refresh_worker(
-        SessionFreshnessPolicy::AllowStored
-    ));
-    assert!(requires_refresh_worker(
-        SessionFreshnessPolicy::RequireFresh
-    ));
-}
-
 fn typed<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -660,33 +729,6 @@ fn profile_serving_identity_rejects_mismatched_root() {
     );
 }
 
-#[test]
-fn profile_serving_identity_accepts_exact_profile_store_root_and_shard() {
-    let brain_id = typed::<tracedecay_domain::BrainId>("brain.session-retrieval");
-    let profile_id = typed::<tracedecay_domain::UserProfileId>("profile.durable-session-retrieval");
-    let root = profile_retrieval_root(
-        profile_id.as_str(),
-        profile_id.as_str(),
-        "store.profile.durable-session-retrieval",
-        "root.profile.durable-session-retrieval",
-    )
-    .expect("exact profile retrieval identity");
-
-    assert_eq!(root.identity.profile_id().as_str(), profile_id.as_str());
-    assert_eq!(
-        root.identity.store_id().as_str(),
-        "store.profile.durable-session-retrieval"
-    );
-    assert_eq!(
-        root.identity.root_id().as_str(),
-        "root.profile.durable-session-retrieval"
-    );
-    assert_eq!(
-        root.expected_runtime_shard,
-        Some(StoreShardIdV1::profile_sessions(brain_id, profile_id))
-    );
-}
-
 #[tokio::test]
 async fn service_rejects_foreign_shard_before_read_admission() {
     let harness =
@@ -706,7 +748,10 @@ async fn service_rejects_foreign_shard_before_read_admission() {
     )
     .expect("foreign profile retrieval root");
 
-    assert!(DaemonSessionRetrievalService::new(harness.registered.clone(), root, None).is_none());
+    assert!(
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .is_none()
+    );
     assert_eq!(
         harness
             .registered
@@ -717,15 +762,6 @@ async fn service_rejects_foreign_shard_before_read_admission() {
         before,
         "identity mismatch must fail before retrieval admits a read snapshot"
     );
-}
-
-#[tokio::test]
-async fn service_accepts_exact_registered_identity() {
-    let harness =
-        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("exact-shard").await;
-    let root = registered_profile_retrieval_root(&harness.registered);
-
-    assert!(DaemonSessionRetrievalService::new(harness.registered.clone(), root, None).is_some());
 }
 
 fn profile_retrieval_root(
@@ -843,6 +879,7 @@ fn complete_page_with_typed_omission_becomes_partial_and_keeps_coverage() {
         page,
         freshness,
         omitted,
+        ..
     } = complete_page_outcome(page, SessionDataFreshness::Fresh, 1)
     else {
         panic!("complete page with an omission must become partial");
@@ -918,10 +955,9 @@ fn cursor_stale_lcm_retrieval_requires_cursorless_restart() {
 async fn cursor_stale_session_retrieval_remains_typed_at_daemon_boundary() {
     let harness =
         tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("cursor-stale").await;
-    let service = DaemonSessionRetrievalService::new(
+    let service = DaemonSessionRetrievalService::new_without_refresh_worker(
         harness.registered.clone(),
         registered_profile_retrieval_root(&harness.registered),
-        None,
     )
     .expect("registered retrieval service");
 
@@ -971,6 +1007,7 @@ fn zero_item_partial_lcm_retrieval_remains_partial_instead_of_deleted() {
             items: Vec::new(),
             freshness,
             omitted: 5,
+            record_omitted: 5,
         },
         RetrievalGrainV1::Summary,
         SessionTemporalMetadataView::default(),
@@ -981,6 +1018,7 @@ fn zero_item_partial_lcm_retrieval_remains_partial_instead_of_deleted() {
             items: Vec::new(),
             freshness,
             omitted: 5,
+            record_omitted: 5,
         },
         RetrievalGrainV1::Summary,
         SessionTemporalMetadataView::default(),
@@ -1026,4 +1064,1084 @@ fn rendering_deadlines_remain_distinct_from_cancellation() {
         assert!(temporal_kernel_deadline(&error));
     }
     assert!(!temporal_kernel_deadline(&TemporalKernelError::Cancelled));
+}
+
+fn admitted_lookup_context(scope: tracedecay_contracts::ResolvedScope) -> RequestContext {
+    let actor = ActorId::new("actor.session-lookup").expect("actor");
+    let now = tracedecay_contracts::now_micros();
+    let expires_at = UtcMicros(now.0 + 60_000_000);
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.session-lookup").expect("grant id"),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "9".repeat(64))).expect("grant digest"),
+        actor.clone(),
+        now,
+        expires_at,
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.session.lookup").expect("capability")]),
+        BTreeSet::from([UseCaseId::new("use-case.session.lookup").expect("use case")]),
+        DisclosureClass::Evidence,
+    )
+    .expect("grant");
+    RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.session-lookup").expect("request id"),
+        Deadline::new(expires_at).expect("deadline"),
+        CancellationContext::active("cancellation.session-lookup").expect("cancellation"),
+    )
+    .expect("request context")
+}
+
+fn session_lookup_operation() -> ApplicationOperation {
+    ApplicationOperation::new(
+        CapabilityId::new("capability.session.lookup").expect("capability"),
+        UseCaseId::new("use-case.session.lookup").expect("use case"),
+        ResultContractRef::new(
+            SchemaId::new("schema.application.primitive.session-lookup.result").expect("schema"),
+            1,
+        )
+        .expect("result contract"),
+        true,
+    )
+}
+
+async fn admitted_session_lookup(
+    label: &str,
+    request: SessionLookupRequest,
+) -> Result<RetrievalPortOutcome<SessionLookupResult>, TemporalRetrievalFailure> {
+    let harness =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(label).await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service: Arc<dyn SessionApplicationRetrievalPortV1> = Arc::new(
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service"),
+    );
+    let context = admitted_lookup_context(scope);
+    let operation = session_lookup_operation();
+    DaemonSessionLookupPrimitiveV1::new(service)
+        .session_lookup(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await
+}
+
+fn session_lookup_page_request(
+    session_id: &str,
+    page_size: u32,
+    cursor: Option<&str>,
+) -> SessionLookupRequest {
+    let mut page = json!({"page_size": page_size});
+    if let Some(cursor) = cursor {
+        page["cursor"] = json!(cursor);
+    }
+    serde_json::from_value(json!({
+        "session_id": session_id,
+        "meta": {
+            "order": "relevance",
+            "page": page,
+            "projection": "summary",
+            "temporal": {"kind": "current"}
+        }
+    }))
+    .expect("session lookup page request")
+}
+
+/// A session lookup continuation pages only the lookup that minted it: a
+/// changed page size, a malformed cursor, or another operation's cursor is the
+/// one typed cursor refusal, and the unchanged replay serves the next page.
+#[tokio::test]
+async fn session_lookup_cursor_pages_only_the_request_that_minted_it() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-cursor-binding",
+    )
+    .await;
+    let seeded_root = real_page_root("root.binding");
+    let session_id = "session.page.binding";
+    let mut anchors = Vec::new();
+    for rank in 0..4 {
+        let fixture = seed_real_page_fixture_in_session(
+            harness.registered.as_ref(),
+            &seeded_root,
+            rank,
+            "codex".to_owned(),
+            session_id.to_owned(),
+            rank == 3,
+        )
+        .await;
+        anchors.push(fixture.anchor_id);
+    }
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service = Arc::new(
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service"),
+    );
+    let context = admitted_lookup_context(scope);
+    let operation = session_lookup_operation();
+    let primitive = DaemonSessionLookupPrimitiveV1::new(service.clone());
+    let lookup = |request: SessionLookupRequest| {
+        let primitive = &primitive;
+        let context = &context;
+        let operation = &operation;
+        async move {
+            primitive
+                .session_lookup(
+                    RetrievalPortContext {
+                        request: context,
+                        operation,
+                    },
+                    &request,
+                )
+                .await
+        }
+    };
+    let served =
+        |outcome: Result<RetrievalPortOutcome<SessionLookupResult>, TemporalRetrievalFailure>| {
+            match outcome {
+                Ok(
+                    RetrievalPortOutcome::Partial(evidence)
+                    | RetrievalPortOutcome::Completed(evidence),
+                ) => (
+                    evidence.payload.expect("page payload").anchors,
+                    evidence
+                        .page
+                        .cursor
+                        .as_ref()
+                        .and_then(tracedecay_contracts::PageCursor::as_opaque)
+                        .map(|cursor| cursor.as_str().to_owned()),
+                ),
+                other => panic!("the lookup page must be served: {other:?}"),
+            }
+        };
+    let refused =
+        |outcome: Result<RetrievalPortOutcome<SessionLookupResult>, TemporalRetrievalFailure>| {
+            let Ok(RetrievalPortOutcome::Refused(_, problem)) = outcome else {
+                panic!("the cursor must be refused: {outcome:?}");
+            };
+            assert_eq!(problem.retry(), tracedecay_contracts::RetryDirective::Never);
+            assert_eq!(
+                problem.legal_actions(),
+                &[
+                    tracedecay_contracts::LegalAction::CorrectRequest,
+                    tracedecay_contracts::LegalAction::RestartWithoutCursor
+                ]
+            );
+            let diagnostic = problem.diagnostic().expect("cursor diagnostic");
+            (diagnostic.code.clone(), diagnostic.message.clone())
+        };
+
+    let (first_anchors, cursor) =
+        served(lookup(session_lookup_page_request(session_id, 2, None)).await);
+    assert_eq!(first_anchors.len(), 2);
+    let cursor = cursor.expect("page one continues");
+
+    assert_eq!(
+        refused(lookup(session_lookup_page_request(session_id, 3, Some(&cursor))).await),
+        (
+            "cursor.parameter_changed".to_owned(),
+            "The cursor was issued for a request with a different `page_size`. Repeat the \
+             request with the parameters that returned the cursor, or restart without it."
+                .to_owned()
+        )
+    );
+    let invalid = (
+        "cursor.invalid".to_owned(),
+        "The cursor was not issued by this operation. Restart without it.".to_owned(),
+    );
+    assert_eq!(
+        refused(
+            lookup(session_lookup_page_request(
+                session_id,
+                2,
+                Some("4.00.1.00.00")
+            ))
+            .await
+        ),
+        invalid
+    );
+    let internal = SessionTemporalQuery::new(
+        SessionId::new(session_id).expect("session"),
+        None,
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        2,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("internal retrieval query")
+    .with_execution_limits(admitted_execution_limits(2));
+    let foreign = match service.retrieve_admitted(&context, internal).await {
+        SessionRetrievalServiceOutcome::Partial { page, .. } => {
+            page.temporal.cursor.expect("internal continuation")
+        }
+        other => panic!("the internal retrieval must page: {other:?}"),
+    };
+    assert_eq!(
+        refused(lookup(session_lookup_page_request(session_id, 2, Some(&foreign))).await),
+        invalid
+    );
+
+    let (second_anchors, _) =
+        served(lookup(session_lookup_page_request(session_id, 2, Some(&cursor))).await);
+    assert_eq!(second_anchors.len(), 2);
+    let paged = first_anchors
+        .iter()
+        .chain(&second_anchors)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        paged,
+        anchors.into_iter().collect::<BTreeSet<_>>(),
+        "pages one and two partition the seeded session without overlap"
+    );
+}
+
+/// The exact minimal request the CLI help and MCP schema advertise. `meta`
+/// exposes no budget parameter, so a refusal here has nothing a caller could
+/// correct.
+fn advertised_minimum_session_lookup_request() -> SessionLookupRequest {
+    serde_json::from_value(json!({
+        "session_id": "session.lookup.minimum-page",
+        "meta": {
+            "order": "relevance",
+            "page": {"page_size": 1},
+            "projection": "summary",
+            "temporal": {"kind": "current"}
+        }
+    }))
+    .expect("advertised minimal request is schema-valid")
+}
+
+/// The adapter builds the temporal query the admitted binding then budgets
+/// against `APPLICATION_RETRIEVAL_MAX_BYTES`. Leaving the multi-MiB
+/// `ExecutionLimits::default()` on that query made the schema minimum fail
+/// admission as `RequestCandidateBytes` before any store read, so this
+/// crosses the real adapter -> admitted binding -> budget admission path and
+/// requires an honest empty-store answer instead of a structural refusal.
+#[tokio::test]
+async fn advertised_minimum_session_lookup_request_passes_budget_admission() {
+    let outcome = admitted_session_lookup(
+        "session-lookup-minimum-page",
+        advertised_minimum_session_lookup_request(),
+    )
+    .await;
+
+    let evidence = match outcome {
+        Ok(RetrievalPortOutcome::Unavailable(evidence)) => evidence,
+        Err(TemporalRetrievalFailure::StructuralRefusal(refusal)) => {
+            panic!("schema-valid minimum page must not be a structural refusal: {refusal:?}")
+        }
+        other => panic!("empty store must answer an honest unavailable: {other:?}"),
+    };
+    assert!(evidence.payload.is_none());
+    assert_eq!(evidence.coverage.returned, 0);
+    assert_eq!(
+        evidence.omissions.first().map(|omission| omission.reason),
+        Some(OmissionReason::Unavailable)
+    );
+}
+
+/// A session browse reads a bounded cohort window of storage, so a session far
+/// larger than that window must still answer a small page and its cursor must
+/// advance the storage keyset rather than re-reading the same window: every
+/// page returns a full `LIMIT`, no message is served twice, and the walk keeps
+/// A service mounted without a refresh worker cannot know whether the
+/// projection is current. `RequireFresh` must therefore be refused with the
+/// worker-missing reason, never served as if the projection were fresh.
+#[tokio::test]
+async fn require_fresh_without_a_refresh_worker_is_refused_as_worker_missing() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-refresh-worker-missing",
+    )
+    .await;
+    let root = real_page_root("root.page");
+    let session_id = "session.page.worker-missing".to_owned();
+    seed_real_page_fixture_in_session(
+        harness.registered.as_ref(),
+        &root,
+        0,
+        "codex".to_owned(),
+        session_id.clone(),
+        true,
+    )
+    .await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let query = SessionTemporalQuery::new(
+        SessionId::new(&session_id).expect("session identity"),
+        None,
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        1,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("temporal query")
+    .with_execution_limits(admitted_execution_limits(1))
+    .with_freshness_policy(SessionFreshnessPolicy::RequireFresh);
+
+    let outcome = service.retrieve_admitted(&context, query).await;
+
+    match outcome {
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => assert_eq!(
+            unavailable.reason,
+            SessionRetrievalUnavailableReason::RefreshWorkerMissing
+        ),
+        other => panic!("RequireFresh without a worker must be refused, got {other:?}"),
+    }
+}
+
+/// A core mount has no refresh worker. Zero LCM rows are absence, not a
+/// historical catch-up, so describe must not answer `RefreshWorkerMissing`.
+#[tokio::test]
+async fn describe_without_a_refresh_worker_does_not_pretend_history_is_converging() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-describe-refresh-worker-missing",
+    )
+    .await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active("cancellation.session-lookup")
+            .expect("cancellation");
+    let command = LcmDescribeServiceCommand::new(
+        "codex",
+        SessionId::new("session.describe.worker-missing").expect("session identity"),
+        tracedecay_lcm::contracts::LcmDescribeTarget::Session,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        SessionRetrievalStoreScope::Profile,
+    );
+    let outcome = SessionApplicationRetrievalPortV1::describe_lcm_admitted(
+        &service,
+        &context,
+        &cancellation,
+        command,
+    )
+    .await;
+    match outcome {
+        LcmDescribeServiceOutcome::Unavailable(unavailable) => assert_ne!(
+            unavailable.reason,
+            SessionRetrievalUnavailableReason::RefreshWorkerMissing,
+            "a missing worker must not rewrite absence as catch-up: {unavailable:?}"
+        ),
+        LcmDescribeServiceOutcome::Complete { .. }
+        | LcmDescribeServiceOutcome::Partial { .. }
+        | LcmDescribeServiceOutcome::Deleted => {}
+        other => panic!("describe without a worker returned {other:?}"),
+    }
+}
+
+/// Profile catch-up mounts the real refresh worker's serving-status port. When
+/// that port reports current, `RequireFresh` must not be refused as
+/// `RefreshWorkerMissing`.
+#[tokio::test]
+async fn require_fresh_with_a_current_refresh_worker_is_not_refused_as_worker_missing() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-refresh-worker-current",
+    )
+    .await;
+    let root = real_page_root("root.page");
+    let session_id = "session.page.worker-current".to_owned();
+    seed_real_page_fixture_in_session(
+        harness.registered.as_ref(),
+        &root,
+        0,
+        "codex".to_owned(),
+        session_id.clone(),
+        true,
+    )
+    .await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service = DaemonSessionRetrievalService::new_admitted_profile(
+        harness.registered.clone(),
+        root.identity().clone(),
+        Some(std::sync::Arc::new(FixedRefreshServing(
+            SessionProjectionServingState::Current,
+        ))),
+    )
+    .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let query = SessionTemporalQuery::new(
+        SessionId::new(&session_id).expect("session identity"),
+        None,
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        1,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("temporal query")
+    .with_execution_limits(admitted_execution_limits(1))
+    .with_freshness_policy(SessionFreshnessPolicy::RequireFresh);
+
+    let outcome = service.retrieve_admitted(&context, query).await;
+
+    match outcome {
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => assert_ne!(
+            unavailable.reason,
+            SessionRetrievalUnavailableReason::RefreshWorkerMissing,
+            "a mounted current worker must not report RefreshWorkerMissing: {unavailable:?}"
+        ),
+        SessionRetrievalServiceOutcome::Complete { .. }
+        | SessionRetrievalServiceOutcome::CompleteZero { .. }
+        | SessionRetrievalServiceOutcome::Partial { .. } => {}
+        other => panic!("unexpected RequireFresh outcome with a current worker: {other:?}"),
+    }
+}
+
+struct FixedRefreshServing(SessionProjectionServingState);
+
+impl tracedecay_sessions::serving::SessionProjectionServingStatusPort for FixedRefreshServing {
+    fn serving_status(&self) -> tracedecay_sessions::serving::SessionProjectionServingStatus {
+        tracedecay_sessions::serving::SessionProjectionServingStatus {
+            state: self.0.clone(),
+            last_progress_at_unix_micros: None,
+            backlog: 0,
+            blocker: None,
+            retry_class: None,
+            convergence: tracedecay_sessions::serving::SessionConvergenceStatus::unavailable(),
+        }
+    }
+}
+
+/// An empty answer is complete only once historical catch-up is current.
+/// While catch-up is converging the same empty store must answer stale, or a
+/// search right after a scheduled import claims nothing matches (#2512).
+#[tokio::test]
+async fn empty_answer_is_stale_until_historical_catch_up_is_current() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-retrieval-empty-during-catch-up",
+    )
+    .await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let context = admitted_lookup_context(scope);
+    let answer = |state: SessionProjectionServingState| {
+        let service = DaemonSessionRetrievalService::new_admitted_profile(
+            harness.registered.clone(),
+            root.identity().clone(),
+            Some(std::sync::Arc::new(FixedRefreshServing(state))),
+        )
+        .expect("registered retrieval service");
+        let query = SessionTemporalQuery::new(
+            SessionId::new("session.empty.catch-up").expect("session identity"),
+            None,
+            "",
+            None,
+            TemporalModeV1::Current,
+            tracedecay_domain::RetrievalGrainV1::Occurrence,
+            1,
+            DiversityLimits::unbounded(),
+            ContextBudget {
+                max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+                max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+                estimator_version: "words-v1".to_owned(),
+            },
+        )
+        .expect("temporal query")
+        .with_execution_limits(admitted_execution_limits(1));
+        let context = &context;
+        async move { service.retrieve_admitted(context, query).await }
+    };
+
+    let current = answer(SessionProjectionServingState::Current).await;
+    assert!(
+        matches!(current, SessionRetrievalServiceOutcome::CompleteZero { .. }),
+        "a current empty store answers complete zero: {current:?}"
+    );
+    let converging = answer(SessionProjectionServingState::Stale {
+        reason: SessionProjectionStaleReason::HistoricalConvergence,
+    })
+    .await;
+    assert!(
+        matches!(converging, SessionRetrievalServiceOutcome::Stale { .. }),
+        "an empty store during catch-up must not claim completeness: {converging:?}"
+    );
+}
+
+fn admitted_session_query(session_id: &str, provider: Option<&str>) -> SessionTemporalQuery {
+    SessionTemporalQuery::new(
+        SessionId::new(session_id).expect("session identity"),
+        provider.map(str::to_owned),
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        1,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("temporal query")
+    .with_execution_limits(admitted_execution_limits(1))
+}
+
+/// #3393: one provider's retrying cursor must not hide Claude as a bare
+/// `TemporalStoreUnavailable`. Cursor is already projected; the live Claude
+/// session is catalogued but has no active generation; the worker is
+/// `HistoricalRetry { cursor_conflict }`. `lcm_load_session` uses
+/// `retrieve_admitted`; that path must surface the worker status
+/// (`historically_converging_unavailable`), not `without_worker`.
+#[tokio::test]
+async fn historical_retry_does_not_hide_claude_as_bare_temporal_unavailable() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-retrieval-historical-retry-claude",
+    )
+    .await;
+    let fixture_root = real_page_root("root.page");
+    seed_real_page_fixture_in_session(
+        harness.registered.as_ref(),
+        &fixture_root,
+        0,
+        "cursor".to_owned(),
+        "session.cursor.projected".to_owned(),
+        true,
+    )
+    .await;
+    assert!(
+        harness
+            .registered
+            .as_ref()
+            .upsert_session(&SessionRecord {
+                provider: "claude".to_owned(),
+                session_id: "session.claude.unprojected".to_owned(),
+                project_key: fixture_root.project_key().to_owned(),
+                project_path: "/fixture/claude".to_owned(),
+                title: Some("live Claude session".to_owned()),
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await,
+        "catalogue the live Claude session without a temporal generation"
+    );
+
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service = DaemonSessionRetrievalService::new_admitted_profile(
+        harness.registered.clone(),
+        root.identity().clone(),
+        Some(std::sync::Arc::new(FixedRefreshServing(
+            SessionProjectionServingState::Stale {
+                reason: SessionProjectionStaleReason::HistoricalRetry {
+                    reason_code: "cursor_conflict".to_owned(),
+                },
+            },
+        ))),
+    )
+    .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+
+    let cursor = service
+        .retrieve_admitted(
+            &context,
+            admitted_session_query("session.cursor.projected", Some("cursor")),
+        )
+        .await;
+    assert!(
+        matches!(
+            cursor,
+            SessionRetrievalServiceOutcome::Complete { .. }
+                | SessionRetrievalServiceOutcome::Partial { .. }
+        ),
+        "a retrying foreign cursor must not block a projected provider: {cursor:?}"
+    );
+
+    let claude = service
+        .retrieve_admitted(
+            &context,
+            admitted_session_query("session.claude.unprojected", Some("claude")),
+        )
+        .await;
+    match claude {
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+            assert_eq!(
+                unavailable.reason,
+                SessionRetrievalUnavailableReason::HistoricalRetry,
+                "lcm_load_session must report the worker's HistoricalRetry, not {unavailable:?}"
+            );
+            assert!(
+                unavailable.worker.is_some(),
+                "the worker status is the convergence answer: {unavailable:?}"
+            );
+        }
+        other => panic!(
+            "an unprojected Claude session during HistoricalRetry must report the worker, got {other:?}"
+        ),
+    }
+}
+
+/// yielding a continuation while records remain.
+#[tokio::test]
+async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
+    const RECORDS: usize = 1500;
+    const LIMIT: usize = 3;
+    const PAGES: usize = 3;
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-large-candidate-workspace",
+    )
+    .await;
+    let root = real_page_root("root.page");
+    let session_id = "session.page.large".to_owned();
+    let mut fixtures = seed_real_page_fixtures_in_session(
+        harness.registered.as_ref(),
+        &root,
+        0..RECORDS - 1,
+        "codex".to_owned(),
+        session_id.clone(),
+        false,
+    )
+    .await;
+    // The scalar fixture replaces the session row before its last projection;
+    // retain that final metadata instead of merging all message timestamps.
+    fixtures.push(
+        seed_real_page_fixture_in_session(
+            harness.registered.as_ref(),
+            &root,
+            RECORDS - 1,
+            "codex".to_owned(),
+            session_id.clone(),
+            true,
+        )
+        .await,
+    );
+    let stored_session = harness
+        .registered
+        .get_session("codex", &session_id)
+        .await
+        .expect("fixture session read")
+        .expect("fixture session");
+    assert_eq!(stored_session.started_at, Some(1499));
+    assert_eq!(stored_session.ended_at, Some(1499));
+    assert_eq!(
+        stored_session.title.as_deref(),
+        Some("fixture session 1499")
+    );
+    assert_eq!(
+        stored_session.project_path,
+        tracedecay_sessions::runtime::shared::durable_project_path_key("/fixture/1499"),
+    );
+    let expected_messages = fixtures
+        .into_iter()
+        .map(|fixture| (fixture.projected_message_id, fixture.text))
+        .collect::<BTreeMap<_, _>>();
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let session = SessionId::new(session_id).expect("large session identity");
+    let page_query = |limit: usize, cursor: Option<String>| {
+        SessionTemporalQuery::new(
+            session.clone(),
+            None,
+            "",
+            cursor,
+            TemporalModeV1::Current,
+            tracedecay_domain::RetrievalGrainV1::Occurrence,
+            limit,
+            DiversityLimits::unbounded(),
+            ContextBudget {
+                max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+                max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+                estimator_version: "words-v1".to_owned(),
+            },
+        )
+        .expect("large-session temporal query")
+        .with_execution_limits(admitted_execution_limits(limit))
+    };
+
+    let mut candidate_limits = admitted_execution_limits(1);
+    candidate_limits.candidate_total_bytes = ExecutionLimits::default().candidate_total_bytes + 1;
+    let mut record_limits = admitted_execution_limits(1);
+    record_limits.record_total_bytes = ExecutionLimits::default().record_total_bytes + 1;
+    for (limits, expected_stage) in [
+        (
+            candidate_limits,
+            SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+        ),
+        (
+            record_limits,
+            SessionRetrievalBudgetStageV1::RequestRecordBytes,
+        ),
+    ] {
+        assert_eq!(
+            service
+                .retrieve_admitted(&context, page_query(1, None).with_execution_limits(limits))
+                .await,
+            SessionRetrievalServiceOutcome::BudgetExhausted {
+                stage: expected_stage,
+                accounting: None,
+            },
+        );
+    }
+
+    // The cohort is a bounded window over storage order, so a page accounts for
+    // the window it examined, not the whole session: every candidate the page
+    // did not hydrate is reported unhydrated, and the rest of the session is
+    // owed by the continuation instead.
+    let cohort_window = u64::try_from(ExecutionLimits::default().candidate_limit).expect("window");
+    assert!(
+        RECORDS as u64 > cohort_window,
+        "the session must be larger than one cohort window",
+    );
+    let outcome = service
+        .retrieve_admitted(&context, page_query(1, None))
+        .await;
+    let page = match outcome {
+        SessionRetrievalServiceOutcome::Partial {
+            page,
+            freshness: SessionDataFreshness::Fresh,
+            omitted,
+            ..
+        } if omitted == cohort_window => page,
+        other => panic!("large session must return a bounded hydrated page: {other:?}"),
+    };
+    assert_eq!(page.temporal.coverage.unknown, cohort_window);
+    assert_eq!(page.temporal.anchors.len(), 1);
+    assert_eq!(page.results.len(), 1);
+    let message = &page.results[0].message;
+    assert_eq!(
+        expected_messages.get(&message.message_id),
+        Some(&message.text),
+        "hydration must return the exact retained message bytes",
+    );
+    assert!(message.text.len() <= 80);
+    assert!(
+        page.temporal.cursor.is_some(),
+        "the remaining rows must yield"
+    );
+    assert!(page.temporal.omissions.is_empty());
+    assert_eq!(page.temporal.watermarks.source, RECORDS as u64);
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut cursor = None;
+    for page_index in 0..PAGES {
+        let page = match service
+            .retrieve_admitted(&context, page_query(LIMIT, cursor.take()))
+            .await
+        {
+            SessionRetrievalServiceOutcome::Partial { page, .. }
+            | SessionRetrievalServiceOutcome::Complete { page, .. } => page,
+            other => panic!("page {page_index} of a large session must hydrate: {other:?}"),
+        };
+        assert_eq!(
+            page.results.len(),
+            LIMIT,
+            "page {page_index} must fill the requested limit",
+        );
+        for result in &page.results {
+            let message = &result.message;
+            assert_eq!(
+                expected_messages.get(&message.message_id),
+                Some(&message.text),
+                "page {page_index} must hydrate the exact retained bytes",
+            );
+            assert!(
+                seen.insert(message.message_id.clone()),
+                "page {page_index} re-served {}",
+                message.message_id,
+            );
+        }
+        cursor = page.temporal.cursor.clone();
+        assert!(
+            cursor.is_some(),
+            "page {page_index} left {} of {RECORDS} records unread and must continue",
+            RECORDS - seen.len(),
+        );
+    }
+    assert_eq!(seen.len(), PAGES * LIMIT);
+}
+
+/// A cursor walk must be exact at both ends: every record is served once, the
+/// page that finishes the session carries no continuation, and every page
+/// before it does. The limits bracket the record count so the final page is
+/// full, one short of full, and a single record.
+#[tokio::test]
+async fn session_lookup_cursor_walk_is_exact_at_the_page_boundaries() {
+    const RECORDS: usize = 40;
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-cursor-walk-workspace",
+    )
+    .await;
+    let root = real_page_root("root.walk");
+    let session_id = "session.page.walk".to_owned();
+    let mut expected_messages = BTreeMap::new();
+    for rank in 0..RECORDS {
+        let fixture = seed_real_page_fixture_in_session(
+            harness.registered.as_ref(),
+            &root,
+            rank,
+            "codex".to_owned(),
+            session_id.clone(),
+            rank + 1 == RECORDS,
+        )
+        .await;
+        expected_messages.insert(fixture.projected_message_id, fixture.text);
+    }
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service =
+        DaemonSessionRetrievalService::new_without_refresh_worker(harness.registered.clone(), root)
+            .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let session = SessionId::new(session_id).expect("walked session identity");
+
+    for limit in [RECORDS, RECORDS - 1, 1] {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut cursor = None;
+        let mut pages = 0usize;
+        loop {
+            let query = SessionTemporalQuery::new(
+                session.clone(),
+                None,
+                "",
+                cursor.take(),
+                TemporalModeV1::Current,
+                tracedecay_domain::RetrievalGrainV1::Occurrence,
+                limit,
+                DiversityLimits::unbounded(),
+                ContextBudget {
+                    max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+                    max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+                    estimator_version: "words-v1".to_owned(),
+                },
+            )
+            .expect("walked temporal query")
+            .with_execution_limits(admitted_execution_limits(limit));
+            let page = match service.retrieve_admitted(&context, query).await {
+                SessionRetrievalServiceOutcome::Partial { page, .. }
+                | SessionRetrievalServiceOutcome::Complete { page, .. } => page,
+                other => panic!("limit {limit} page {pages} must hydrate: {other:?}"),
+            };
+            pages += 1;
+            assert!(
+                !page.results.is_empty(),
+                "limit {limit} page {pages} produced a continuation with no records",
+            );
+            for result in &page.results {
+                let message = &result.message;
+                assert_eq!(
+                    expected_messages.get(&message.message_id),
+                    Some(&message.text),
+                    "limit {limit} page {pages} must hydrate the exact retained bytes",
+                );
+                assert!(
+                    seen.insert(message.message_id.clone()),
+                    "limit {limit} page {pages} re-served {}",
+                    message.message_id,
+                );
+            }
+            cursor = page.temporal.cursor.clone();
+            match cursor {
+                Some(_) => assert!(
+                    seen.len() < RECORDS,
+                    "limit {limit} continued past the last record",
+                ),
+                None => {
+                    assert_eq!(
+                        seen.len(),
+                        RECORDS,
+                        "limit {limit} stopped continuing with records unread",
+                    );
+                    break;
+                }
+            }
+            assert!(
+                pages <= RECORDS,
+                "limit {limit} failed to reach the end of the session",
+            );
+        }
+        assert_eq!(pages, RECORDS.div_ceil(limit));
+    }
+}
+
+/// Sizing the limits for the admitted budget must not admit a page the
+/// binding's result budget genuinely refuses: the schema maximum page is
+/// still refused as an oversized request, with the stage naming the limit.
+#[tokio::test]
+async fn oversized_session_lookup_page_remains_a_typed_budget_refusal() {
+    let mut request = advertised_minimum_session_lookup_request();
+    request.meta.page = PageRequest::first(MAX_APPLICATION_PAGE_SIZE).expect("schema maximum");
+
+    let outcome = admitted_session_lookup("session-lookup-oversized-page", request).await;
+
+    assert_eq!(
+        outcome,
+        Err(TemporalRetrievalFailure::StructuralRefusal(
+            SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
+                accounting: None,
+            }
+        ))
+    );
+}
+
+#[tokio::test]
+async fn project_retrieval_mounts_each_branch_of_a_shared_graph_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("profile");
+    let project = temp.path().join("project");
+    let project_id = typed::<tracedecay_domain::ProjectId>("project.shared-graph");
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        &profile,
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &project,
+        &profile,
+        project_id.as_str(),
+    )
+    .unwrap();
+    let mut branches = tracedecay_runtime_core::branch_meta::BranchMeta::new("master");
+    branches.add_branch("refs/heads/feature", "master");
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &branches).unwrap();
+    let registry = runtime.profile_database();
+    tracedecay_global_db::register_project_store(registry, &project, &layout)
+        .await
+        .unwrap();
+    let database = runtime.project_database_arc().unwrap();
+    let shard = &database.binding().shard_id;
+    let mut roots = Vec::new();
+    for branch in ["master", "refs/heads/feature"] {
+        let serving = SessionRetrievalServingIdentityV1::resolve_project(
+            project_id.as_str(),
+            &layout.graph_db_path,
+            Some(branch),
+            &project,
+            &shard.profile_id,
+            shard,
+            registry,
+        )
+        .await
+        .expect("tracked branch must retain a mounted retrieval authority");
+        let root = DaemonSessionRetrievalRoot::project(serving, registry)
+            .await
+            .unwrap();
+        assert_eq!(
+            root.identity().git_route().unwrap().branch_id().as_str(),
+            branch
+        );
+        roots.push(root.identity().root_id().clone());
+        assert!(
+            crate::lcm_authority::mount_registered_lcm_authority(
+                database.clone(),
+                root.identity().clone(),
+                shard,
+            )
+            .is_some()
+        );
+        assert!(
+            DaemonSessionRetrievalService::new_without_refresh_worker(database.clone(), root)
+                .is_some()
+        );
+    }
+    assert_ne!(
+        roots[0], roots[1],
+        "shared storage must not alias branch authority"
+    );
+    for branch in [None, Some("untracked")] {
+        assert!(
+            SessionRetrievalServingIdentityV1::resolve_project(
+                project_id.as_str(),
+                &layout.graph_db_path,
+                branch,
+                &project,
+                &shard.profile_id,
+                shard,
+                registry,
+            )
+            .await
+            .is_none(),
+            "missing or unknown branch must not pick another branch"
+        );
+    }
+    let foreign = &registry.binding().shard_id;
+    assert!(
+        SessionRetrievalServingIdentityV1::resolve_project(
+            project_id.as_str(),
+            &layout.graph_db_path,
+            Some("master"),
+            &project,
+            &shard.profile_id,
+            foreign,
+            registry,
+        )
+        .await
+        .is_none(),
+        "a profile shard cannot serve project retrieval"
+    );
 }

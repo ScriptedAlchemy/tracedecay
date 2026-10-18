@@ -1,14 +1,14 @@
-use rusqlite::Savepoint;
+use std::fs::OpenOptions;
+
 use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::{
-    ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
+    ExactSqlOnlyStorageOperationV1, ExistingWriterLocator, PersistentWriter,
     exact_sql::ExactSqlHandle,
-    reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
+    reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool},
 };
 use tracedecay_store::{
-    AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use super::{
@@ -49,7 +49,7 @@ fn params_preserve_order_nulls_and_owned_values() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn owned_rows_decode_the_engine_value_set() {
     let row = Row::from_values(vec![
         Value::Text("node".to_string()),
@@ -69,7 +69,16 @@ async fn owned_rows_decode_the_engine_value_set() {
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn dropping_unpolled_row_read_preserves_the_next_row() {
+    let mut rows = Rows::from_rows(vec![Row::from_values(vec![Value::Integer(7)])]);
+    drop(rows.next());
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 7);
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[asupersync::test]
 async fn runtime_rows_preserve_column_metadata_without_materialized_rows() {
     let fixture = runtime_fixture();
     let assert_columns = |rows: &Rows| {
@@ -99,41 +108,31 @@ async fn runtime_rows_preserve_column_metadata_without_materialized_rows() {
 fn row_decode_rejects_wrong_types_and_invalid_indexes() {
     let row = Row::from_values(vec![Value::Integer(-1)]);
 
-    assert!(row.get::<String>(0).is_err());
-    assert!(row.get::<u64>(0).is_err());
-    assert!(row.get::<i64>(-1).is_err());
-    assert!(row.get::<i64>(1).is_err());
-}
-
-struct NoWrites;
-
-impl StorageOperationExecutor for NoWrites {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct NoReads;
-
-impl ReaderQueryExecutor for NoReads {
-    fn execute_read(
-        &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
-        _request: &RuntimeReadRequestV1,
-    ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
-        unreachable!("engine exact SQL does not use the product read contract")
-    }
+    assert_eq!(row.get::<i64>(0), Ok(-1));
+    assert_eq!(
+        row.get::<String>(0),
+        Err(Error::TypeMismatch {
+            column: 0,
+            expected: "text",
+            actual: "integer",
+        })
+    );
+    assert_eq!(
+        row.get::<u64>(0),
+        Err(Error::IntegerOutOfRange {
+            column: 0,
+            target: "u64",
+            value: -1,
+        })
+    );
+    assert_eq!(row.get::<i64>(-1), Err(Error::InvalidColumn(-1)));
+    assert_eq!(row.get::<i64>(1), Err(Error::InvalidColumn(1)));
 }
 
 struct Fixture {
     connection: Connection,
     path: std::path::PathBuf,
-    _readers: ReaderPool<NoReads>,
+    _readers: ReaderPool<ExactSqlOnlyReaderV1>,
     _writer: PersistentWriter,
     _directory: TempDir,
 }
@@ -141,7 +140,12 @@ struct Fixture {
 fn runtime_fixture() -> Fixture {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("engine.sqlite3");
-    rusqlite::Connection::open(&path).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap();
     let path = path.canonicalize().unwrap();
     let binding: StoreRuntimeBindingV1 = serde_json::from_value(serde_json::json!({
         "shard_id": {
@@ -158,16 +162,18 @@ fn runtime_fixture() -> Fixture {
         StoreIncarnationV1::new(1).unwrap(),
         LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
     );
+    let runtime = asupersync::runtime::Runtime::current_handle().unwrap();
     let writer = PersistentWriter::start(
+        &runtime,
         ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
         AdmissionConfigV1::default(),
-        NoWrites,
+        ExactSqlOnlyStorageOperationV1,
     )
     .unwrap();
     let readers = ReaderPool::start(
         ExistingReaderLocator::new(binding, locator, path.clone()).unwrap(),
         AdmissionConfigV1::default().readers,
-        NoReads,
+        ExactSqlOnlyReaderV1,
     )
     .unwrap();
     let connection = Connection::attach(ExactSqlHandle::attach(&writer, &readers).unwrap());
@@ -180,7 +186,7 @@ fn runtime_fixture() -> Fixture {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
     let fixture = runtime_fixture();
     let connection = &fixture.connection;
@@ -194,21 +200,59 @@ async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
         .await
         .unwrap();
 
+    let first = connection
+        .transaction_with_behavior(super::TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let mut returned = first
+        .query(
+            "INSERT INTO items(label) VALUES (?1) RETURNING id",
+            params!["first"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        returned
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        1
+    );
+    assert!(returned.next().await.unwrap().is_none());
+    first.commit().await.unwrap();
     assert_eq!(
         connection
-            .execute("INSERT INTO items(label) VALUES (?1)", params!["first"])
+            .execute(
+                "UPDATE items SET label = ?1 WHERE id = ?2",
+                params!["first", 1_i64]
+            )
             .await
             .unwrap(),
         1
     );
-    assert_eq!(connection.last_insert_rowid(), 1);
     let statement = connection
         .prepare("INSERT INTO items(label) VALUES (?1)")
         .await
         .unwrap();
     statement.execute(params!["second"]).await.unwrap();
     statement.reset();
-    assert_eq!(connection.last_insert_rowid(), 2);
+    let mut inserted = connection
+        .query("SELECT id FROM items WHERE label = ?1", params!["second"])
+        .await
+        .unwrap();
+    assert_eq!(
+        inserted
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        2
+    );
     connection
         .execute_batch(
             "INSERT INTO items(label) VALUES ('batch-one');
@@ -216,33 +260,94 @@ async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
         )
         .await
         .unwrap();
-    assert_eq!(connection.last_insert_rowid(), 4);
+    let mut inserted = connection
+        .query(
+            "SELECT id FROM items WHERE label = ?1",
+            params!["batch-two"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inserted
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        4
+    );
 
     let committed = connection
         .transaction_with_behavior(super::TransactionBehavior::Immediate)
         .await
         .unwrap();
-    committed
-        .execute("INSERT INTO items(label) VALUES (?1)", params!["committed"])
+    let mut returned = committed
+        .query(
+            "INSERT INTO items(label) VALUES (?1) RETURNING id",
+            params!["committed"],
+        )
         .await
         .unwrap();
-    assert_eq!(committed.last_insert_rowid(), 5);
+    assert_eq!(
+        returned
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        5
+    );
     committed.commit().await.unwrap();
-    assert_eq!(connection.last_insert_rowid(), 5);
+    let mut inserted = connection
+        .query(
+            "SELECT id FROM items WHERE label = ?1",
+            params!["committed"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inserted
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        5
+    );
 
     let rolled_back = connection
         .transaction_with_behavior(super::TransactionBehavior::Immediate)
         .await
         .unwrap();
-    rolled_back
-        .execute(
-            "INSERT INTO items(label) VALUES (?1)",
+    let mut returned = rolled_back
+        .query(
+            "INSERT INTO items(label) VALUES (?1) RETURNING id",
             params!["rolled-back"],
         )
         .await
         .unwrap();
+    assert_eq!(
+        returned
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        6
+    );
     rolled_back.rollback().await.unwrap();
-    assert_eq!(connection.last_insert_rowid(), 6);
+    let mut absent = connection
+        .query(
+            "SELECT id FROM items WHERE label = ?1",
+            params!["rolled-back"],
+        )
+        .await
+        .unwrap();
+    assert!(absent.next().await.unwrap().is_none());
 
     let snapshot = connection.read_snapshot().await.unwrap();
     let mut rows = snapshot
@@ -311,7 +416,7 @@ async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
     assert!(connection.prepare("SELEC invalid syntax").await.is_err());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn default_transaction_is_deferred_and_does_not_take_the_write_lock() {
     let fixture = runtime_fixture();
     let deferred = fixture.connection.transaction().await.unwrap();
@@ -325,7 +430,25 @@ async fn default_transaction_is_deferred_and_does_not_take_the_write_lock() {
     deferred.rollback().await.unwrap();
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn health_snapshot_admits_once_a_concurrent_health_probe_releases_the_lane() {
+    let fixture = runtime_fixture();
+    let sibling = fixture.connection.health_read_snapshot().await.unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(sibling);
+    });
+
+    let admitted = fixture.connection.health_read_snapshot().await;
+
+    release.join().unwrap();
+    assert!(
+        admitted.is_ok(),
+        "a health probe must wait out a bounded sibling probe on the reserved lane"
+    );
+}
+
+#[asupersync::test]
 async fn transaction_statement_batch_reports_the_exact_failed_statement() {
     let fixture = runtime_fixture();
     fixture
@@ -383,4 +506,126 @@ async fn transaction_statement_batch_reports_the_exact_failed_statement() {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
     );
+}
+
+mod async_writer;
+
+#[test]
+fn deterministic_refusals_are_distinguished_from_transient_engine_faults() {
+    use tracedecay_rusqlite_runtime::exact_sql::ExactSqlError;
+
+    // A schema-contract trigger abort refuses this exact row for good.
+    let constraint = Error::Sqlite {
+        operation: "execute",
+        code: Some(19),
+        extended_code: Some(1811),
+        message: "invalid session refresh progress".to_owned(),
+    };
+    assert!(constraint.is_deterministic_refusal());
+    assert!(
+        Error::StatementBatch {
+            index: 0,
+            source: Box::new(constraint),
+        }
+        .is_deterministic_refusal()
+    );
+
+    // A materialization ceiling refuses this exact statement for good, and
+    // must not arrive as an untyped `Runtime` message.
+    let limit = Error::from(ExactSqlError::QueryLimitExceeded);
+    assert!(matches!(limit, Error::InvalidOperation(_)));
+    assert!(limit.is_deterministic_refusal());
+
+    // Contention and I/O faults stay retryable.
+    assert!(!Error::Busy.is_deterministic_refusal());
+    assert!(!Error::Runtime("writer restarted".to_owned()).is_deterministic_refusal());
+    assert!(
+        !Error::Sqlite {
+            operation: "execute",
+            code: Some(5),
+            extended_code: Some(5),
+            message: "database is locked".to_owned(),
+        }
+        .is_deterministic_refusal()
+    );
+}
+
+#[test]
+fn busy_or_locked_is_the_sqlite_lock_codes_not_their_text() {
+    let sqlite = |code: i32, extended_code: i32, message: &str| Error::Sqlite {
+        operation: "prepare query",
+        code: Some(code),
+        extended_code: Some(extended_code),
+        message: message.to_owned(),
+    };
+
+    assert!(sqlite(5, 5, "database is locked").is_busy_or_locked());
+    assert!(sqlite(5, 261, "database is locked").is_busy_or_locked());
+    assert!(sqlite(6, 6, "database table is locked").is_busy_or_locked());
+    assert!(Error::Busy.is_busy_or_locked());
+    assert!(
+        Error::StatementBatch {
+            index: 2,
+            source: Box::new(sqlite(5, 5, "database is locked")),
+        }
+        .is_busy_or_locked()
+    );
+
+    assert!(!sqlite(1, 1, "no such table: main.locked_rows").is_busy_or_locked());
+    assert!(!sqlite(19, 2067, "UNIQUE constraint failed: busy.id").is_busy_or_locked());
+    assert!(!Error::Runtime("exact SQL reader lane is busy".to_owned()).is_busy_or_locked());
+}
+
+#[asupersync::test]
+async fn returned_insert_ids_remain_bound_to_their_rows_after_reopen() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("returned-ids.sqlite3");
+    let connection = super::TestConnection::open(&path);
+    connection
+        .execute_batch("CREATE TABLE records(id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE)")
+        .await
+        .unwrap();
+    let mut inserted = Vec::new();
+    for label in ["first", "second"] {
+        let transaction = connection
+            .transaction_with_behavior(super::TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let mut returned = transaction
+            .query(
+                "INSERT INTO records(label) VALUES (?1) RETURNING id",
+                (label,),
+            )
+            .await
+            .unwrap();
+        let id = returned
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap();
+        assert!(returned.next().await.unwrap().is_none());
+        transaction.commit().await.unwrap();
+        inserted.push((label, id));
+    }
+    assert_ne!(inserted[0].1, inserted[1].1);
+    drop(connection);
+    let reopened = super::TestConnection::open(&path);
+    for (label, id) in inserted {
+        let mut rows = reopened
+            .query("SELECT label FROM records WHERE id = ?1", (id,))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            label
+        );
+        assert!(rows.next().await.unwrap().is_none());
+    }
 }

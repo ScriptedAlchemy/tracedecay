@@ -4,49 +4,41 @@ use std::collections::BTreeSet;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracedecay::agents::context_scout_v2::{
+use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt, ContextScoutLimitsV1,
     ContextScoutSelectionInputV1, select_deterministic_context_scout,
 };
-use tracedecay::agents::host_bundle_v2::{
+use tracedecay_agent_hosts::agents::host_bundle::{
     HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
 };
-use tracedecay::tracedecay::TraceDecay;
-use tracedecay_application::context_scout::{
+use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryWindowV1, ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
     ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
     EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
     TemporalState, feedback_surface_catalog_contribution,
 };
+use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId, TemporalModeV1,
-    UtcMicros,
+    CodeGenerationId, ComponentVersion, RefId, RetrievalAnchorId, TemporalModeV1, UtcMicros,
 };
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
-    HookEventFamily, HookHostV1, HookSpoolConfigV1, HookSpoolV1, NativeEnvelopeMaterialV1,
+    HookEventFamily, HookSpoolConfigV1, HookSpoolV1, NativeEnvelopeMaterialV1,
     decode_bound_native_hook_event, decode_native_hook_event, hook_configuration_path,
 };
+use tracedecay_project::project::TraceDecay;
 use tracedecay_tool_catalog::BindingSurface;
 
 use crate::common;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(character: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
     let scope = ResolvedScope::new(
@@ -99,6 +91,7 @@ fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
                 source_generation: Some(generation),
                 watermark_digest: Some(digest('e')),
                 freshness: FreshnessState::Current,
+                code_graph_freshness: None,
             },
             coverage: EvidenceCoverage {
                 requested_domains: vec![EvidenceDomain::Diagnostic],
@@ -120,29 +113,42 @@ fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
 
 #[tokio::test]
 async fn authentic_callback_to_all_delivery_surfaces() {
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
         "pub fn advisory_callback() {}\n",
     )
     .unwrap();
-    TraceDecay::init(&project)
+    TraceDecay::init_with_options(&project, environment.open_options())
         .await
         .expect("production project initialization");
-    let project_runtime = TraceDecay::open(&project)
+    let project_runtime = TraceDecay::open_with_options(&project, environment.open_options())
         .await
         .expect("production project-open startup");
 
     let callback = include_bytes!(
         "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
     );
-    let decoded =
-        decode_native_hook_event(HookHostV1::ClaudeCode, callback).expect("authentic callback");
+    let decoded = decode_native_hook_event(NativeHostIdentityV1::ClaudeCode, callback)
+        .expect("authentic callback");
 
     let layout = project_runtime.store_layout();
+    let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
+        &tracedecay::hook_runtime(tracedecay_runtime_core::config::ProfileRoot::new(
+            project_runtime
+                .profile_root()
+                .expect("production project profile root"),
+        )),
+        layout,
+    )
+    .expect("production worktree identity");
     let subscriber = HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
-        hook_configuration_path(&layout.data_root, HookHostV1::ClaudeCode),
+        hook_configuration_path(
+            &layout.data_root,
+            worktree_id,
+            NativeHostIdentityV1::ClaudeCode,
+        ),
     ));
     let now = UtcMicros(
         SystemTime::now()
@@ -153,12 +159,12 @@ async fn authentic_callback_to_all_delivery_surfaces() {
             .expect("microsecond clock"),
     );
     let HookConfigurationReadOutcomeV1::Bound(configuration) =
-        subscriber.load_current(HookHostV1::ClaudeCode, now)
+        subscriber.load_current(NativeHostIdentityV1::ClaudeCode, now)
     else {
         panic!("project-open must publish the Hook V2 binding");
     };
     let envelope = decode_bound_native_hook_event(
-        HookHostV1::ClaudeCode,
+        NativeHostIdentityV1::ClaudeCode,
         callback,
         &configuration.binding,
         NativeEnvelopeMaterialV1 {
@@ -177,7 +183,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     let spool_root = layout.data_root.join("advisory-hook-replay");
     let (mut spool, _) = HookSpoolV1::open(
         &spool_root,
-        HookSpoolConfigV1::stock(HookHostV1::ClaudeCode),
+        HookSpoolConfigV1::stock(NativeHostIdentityV1::ClaudeCode),
         now,
     )
     .expect("Hook V2 replay spool");
@@ -213,7 +219,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
                 category: ContextScoutCategoryV1::Coordination,
                 relevance_score: 10_000,
                 suggestion_text: "Another active agent edited this file.".to_owned(),
-                evidence: scout_evidence(now),
+                evidence: scout_evidence(now).into(),
                 expires_at: UtcMicros(now.0 + 1_000_000),
             }],
         },
@@ -228,10 +234,16 @@ async fn authentic_callback_to_all_delivery_surfaces() {
         .iter()
         .map(|binding| binding.surface())
         .collect::<BTreeSet<_>>();
-    assert!(surfaces.contains(&BindingSurface::Http));
-    assert!(surfaces.contains(&BindingSurface::Mcp));
-    assert!(surfaces.contains(&BindingSurface::Cli));
-    assert!(surfaces.contains(&BindingSurface::Lsp));
+    assert_eq!(
+        surfaces,
+        BTreeSet::from([
+            BindingSurface::Http,
+            BindingSurface::Mcp,
+            BindingSurface::Cli,
+            BindingSurface::Dashboard,
+        ]),
+        "LSP feedback is an internal delivery projection, not a callable catalog binding"
+    );
 
     let registrations = stock_host_registration_evidence(HostKindV1::ClaudeCode)
         .into_iter()
@@ -241,11 +253,18 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     assert!(registrations.contains(&HostRegistrationRouteV1::ClaudeConfiguredLanguageLsp));
     assert!(registrations.contains(&HostRegistrationRouteV1::Mcp));
     assert!(registrations.contains(&HostRegistrationRouteV1::Cli));
-    for operation in [
-        "feedback_diagnostics",
-        "feedback_get",
-        "feedback_expand",
-        "feedback_list",
+    let callable = BTreeSet::from([
+        BindingSurface::Cli,
+        BindingSurface::Mcp,
+        BindingSurface::Http,
+    ]);
+    let mut dashboard_routed = callable.clone();
+    dashboard_routed.insert(BindingSurface::Dashboard);
+    for (operation, expected) in [
+        ("feedback_diagnostics", &callable),
+        ("feedback_get", &dashboard_routed),
+        ("feedback_expand", &dashboard_routed),
+        ("feedback_list", &dashboard_routed),
     ] {
         let bindings = feedback
             .bindings()
@@ -254,27 +273,21 @@ async fn authentic_callback_to_all_delivery_surfaces() {
             .map(|binding| binding.surface())
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            bindings,
-            BTreeSet::from([
-                BindingSurface::Cli,
-                BindingSurface::Mcp,
-                BindingSurface::Http,
-                BindingSurface::Dashboard,
-            ]),
-            "{operation} must bind every canonical publication read surface"
+            &bindings, expected,
+            "{operation} must bind exactly the surfaces that mount it"
         );
     }
 }
 
 #[tokio::test]
-async fn exact_search_does_not_wait_for_semantic_projection() {
+async fn exact_search_is_ready_within_the_startup_deadline() {
     const STARTUP_DEADLINE: Duration = Duration::from_secs(5);
 
-    let (environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
-        "pub fn semantic_startup_probe() -> &'static str { \"exact\" }\n",
+        "pub fn exact_startup_probe() -> &'static str { \"exact\" }\n",
     )
     .unwrap();
     let git = std::process::Command::new(common::git_program())
@@ -289,7 +302,7 @@ async fn exact_search_does_not_wait_for_semantic_projection() {
     );
     let _daemon = common::spawn_tracedecay_daemon(environment.home());
     let initialized = common::tracedecay_command_with_home(environment.home())
-        .args(["init", "--quiet"])
+        .arg("init")
         .current_dir(&project)
         .stdin(Stdio::null())
         .output()
@@ -308,7 +321,7 @@ async fn exact_search_does_not_wait_for_semantic_projection() {
                 "tool",
                 "search",
                 "--args",
-                r#"{"query":"semantic_startup_probe","limit":8}"#,
+                r#"{"query":"exact_startup_probe","limit":8}"#,
             ])
             .current_dir(&project)
             .stdin(Stdio::null())
@@ -316,12 +329,12 @@ async fn exact_search_does_not_wait_for_semantic_projection() {
             .expect("run exact search through daemon");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if output.status.success() && stdout.contains("semantic_startup_probe") {
+        if output.status.success() && stdout.contains("exact_startup_probe") {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "exact search did not become ready before the semantic-independent startup deadline:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            "exact search did not become ready before the startup deadline:\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
         std::thread::sleep(Duration::from_millis(25));
     }

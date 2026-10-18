@@ -1,6 +1,6 @@
 //! Local response-handle cache for reversible MCP truncation.
 //!
-//! Handles are stored in the resolved project store's `response-handles` root.
+//! Handles are stored in the owning store's `response-handles` root.
 //! They are only references to local files, never external URLs or remote
 //! identifiers.
 
@@ -13,12 +13,14 @@ use serde_json::{Value, json};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-// The transport-neutral handle authority lives in `tracedecay-usecases`. This
-// module keeps the MCP telemetry and adapters.
+// The transport-neutral handle authority lives in
+// `tracedecay_session_memory::response_handles`. This module wraps it with the
+// MCP telemetry counters and re-exports the record types so MCP callers import
+// the authority and its telemetry-wrapped operations from one path.
+pub use tracedecay_mcp_catalog::RESPONSE_RETRIEVE_TOOL;
 pub use tracedecay_session_memory::response_handles::{
-    RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup, ResponseHandleRecord,
+    RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleLookup, ResponseHandleRecord,
 };
-pub const RESPONSE_RETRIEVE_TOOL: &str = "tracedecay_retrieve";
 
 #[derive(Default)]
 struct ResponseHandleTelemetry {
@@ -56,70 +58,45 @@ fn telemetry() -> &'static ResponseHandleTelemetry {
     TELEMETRY.get_or_init(ResponseHandleTelemetry::default)
 }
 
-fn public_inventory_problem(error: &TraceDecayError) -> (&'static str, &'static str) {
+fn public_inventory_problem(error: &ResponseHandleError) -> (&'static str, &'static str) {
     match error {
-        TraceDecayError::File { message, .. }
-            if message.starts_with("corrupt response-handle record:") =>
-        {
-            (
-                "corrupt_handle_record",
-                "The local response-handle inventory contains a corrupt record.",
-            )
-        }
-        TraceDecayError::File { .. }
-        | TraceDecayError::Database { .. }
-        | TraceDecayError::Search { .. }
-        | TraceDecayError::Config { .. }
-        | TraceDecayError::HostCliUnavailable { .. }
-        | TraceDecayError::ProfileResetRequired { .. }
-        | TraceDecayError::ResetRequired { .. }
-        | TraceDecayError::ProjectRoute { .. }
-        | TraceDecayError::SyncLock { .. }
-        | TraceDecayError::Io(_)
-        | TraceDecayError::Sqlite(_)
-        | TraceDecayError::Json(_)
-        | TraceDecayError::Automation(_) => (
+        ResponseHandleError::CorruptRecord { .. } => (
+            "corrupt_handle_record",
+            "The local response-handle inventory contains a corrupt record.",
+        ),
+        ResponseHandleError::InvalidHandle | ResponseHandleError::Store(_) => (
             "handle_inventory_unavailable",
             "The local response-handle inventory is unavailable.",
         ),
     }
 }
 
-pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
+/// Why a stored record could not be read back: the record exists but failed
+/// integrity validation.
+pub const RETRIEVE_CORRUPT_RECORD_REASON: &str = "corrupt_handle_record";
+/// Why a stored record could not be read back: the cache itself is unreadable.
+pub const RETRIEVE_READ_FAILED_REASON: &str = "handle_read_failed";
+
+/// The caller-facing form of a handle-read failure. An invalid handle stays a
+/// request error; a store failure becomes a typed, retryable route problem
+/// that names no local path, so it keeps its reason across the owner boundary.
+pub fn public_retrieve_error(error: ResponseHandleError) -> TraceDecayError {
     match error {
-        TraceDecayError::Config { message } if message.starts_with("invalid response handle:") => {
-            TraceDecayError::Config { message }
-        }
-        TraceDecayError::File { message, .. }
-            if message.starts_with("corrupt response-handle record:") =>
-        {
-            TraceDecayError::File {
-                message:
-                    "corrupt response-handle record: cached payload failed integrity validation"
-                        .to_string(),
-                path: "response-handles".to_string(),
-            }
-        }
-        TraceDecayError::File { .. }
-        | TraceDecayError::Database { .. }
-        | TraceDecayError::Search { .. }
-        | TraceDecayError::Config { .. }
-        | TraceDecayError::HostCliUnavailable { .. }
-        | TraceDecayError::ProfileResetRequired { .. }
-        | TraceDecayError::ResetRequired { .. }
-        | TraceDecayError::ProjectRoute { .. }
-        | TraceDecayError::SyncLock { .. }
-        | TraceDecayError::Io(_)
-        | TraceDecayError::Sqlite(_)
-        | TraceDecayError::Json(_)
-        | TraceDecayError::Automation(_) => TraceDecayError::File {
-            message: "response-handle cache is unavailable".to_string(),
-            path: "response-handles".to_string(),
-        },
+        ResponseHandleError::InvalidHandle => error.into(),
+        ResponseHandleError::CorruptRecord { .. } => TraceDecayError::project_route(
+            RETRIEVE_CORRUPT_RECORD_REASON,
+            true,
+            "corrupt response-handle record: cached payload failed integrity validation",
+        ),
+        ResponseHandleError::Store(_) => TraceDecayError::project_route(
+            RETRIEVE_READ_FAILED_REASON,
+            true,
+            "response-handle cache is unavailable",
+        ),
     }
 }
 
-pub fn response_handle_stats_json(project_root: Option<&Path>) -> Value {
+pub fn response_handle_stats_json(response_handle_root: Option<&Path>) -> Value {
     let telemetry = telemetry();
     let counter = |value: &AtomicU64| value.load(Ordering::Relaxed);
     let timestamp = |value: &AtomicI64| value.load(Ordering::Relaxed);
@@ -152,46 +129,38 @@ pub fn response_handle_stats_json(project_root: Option<&Path>) -> Value {
         "last_expired_at": timestamp_json(timestamp(&telemetry.last_expired_at)),
         "last_cleanup_at": timestamp_json(timestamp(&telemetry.last_cleanup_at)),
     });
-    if let (Some(project_root), Some(object)) = (project_root, stats.as_object_mut()) {
-        let on_disk = match tracedecay_session_memory::response_handles::inventory_response_handles(
-            project_root,
-        ) {
-            Ok(inventory) => json!({
-                "available": true,
-                "file_count": inventory.file_count,
-                "total_bytes": inventory.total_bytes,
-                "oldest_expires_at": inventory.oldest_expires_at,
-                "newest_expires_at": inventory.newest_expires_at,
-            }),
-            Err(error) => {
-                let (reason_code, detail) = public_inventory_problem(&error);
-                json!({
-                    "available": false,
-                    "reason_code": reason_code,
-                    "detail": detail,
-                })
-            }
-        };
+    if let (Some(root), Some(object)) = (response_handle_root, stats.as_object_mut()) {
+        let on_disk =
+            match tracedecay_session_memory::response_handles::inventory_response_handles(root) {
+                Ok(inventory) => json!({
+                    "available": true,
+                    "file_count": inventory.file_count,
+                    "total_bytes": inventory.total_bytes,
+                    "oldest_expires_at": inventory.oldest_expires_at,
+                    "newest_expires_at": inventory.newest_expires_at,
+                }),
+                Err(error) => {
+                    let (reason_code, detail) = public_inventory_problem(&error);
+                    json!({
+                        "available": false,
+                        "reason_code": reason_code,
+                        "detail": detail,
+                    })
+                }
+            };
         object.insert("on_disk".to_string(), on_disk);
     }
     stats
 }
 
 #[track_caller]
-pub fn store_response_handle(
-    project_root: &Path,
-    content: &str,
-    now: i64,
-) -> Result<ResponseHandleRecord> {
+pub fn store_response_handle(root: &Path, content: &str, now: i64) -> Result<ResponseHandleRecord> {
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     telemetry.store_attempts.fetch_add(1, Ordering::Relaxed);
-    let result = tracedecay_session_memory::response_handles::store_response_handle(
-        project_root,
-        content,
-        now,
-    );
+    let result =
+        tracedecay_session_memory::response_handles::store_response_handle(root, content, now);
     telemetry
         .store_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -214,24 +183,25 @@ pub fn store_response_handle(
             );
         }
     }
-    result
+    result.map_err(TraceDecayError::from)
 }
 
 #[track_caller]
-#[hotpath::measure(label = "mcp.server.response.handle_retrieve")]
+#[tracing::instrument(
+    name = "mcp.server.response.handle_retrieve",
+    level = "trace",
+    skip_all
+)]
 pub fn retrieve_response_handle(
-    project_root: &Path,
+    root: &Path,
     handle: &str,
     now: i64,
-) -> Result<ResponseHandleLookup> {
+) -> std::result::Result<ResponseHandleLookup, ResponseHandleError> {
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
-    let result = tracedecay_session_memory::response_handles::retrieve_response_handle(
-        project_root,
-        handle,
-        now,
-    );
+    let result =
+        tracedecay_session_memory::response_handles::retrieve_response_handle(root, handle, now);
     telemetry
         .retrieve_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -281,16 +251,14 @@ pub fn retrieve_response_handle(
 }
 
 #[track_caller]
-#[hotpath::measure(label = "mcp.server.response.handle_cleanup")]
-pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result<usize> {
+#[tracing::instrument(name = "mcp.server.response.handle_cleanup", level = "trace", skip_all)]
+pub fn cleanup_expired_response_handles(root: &Path, now: i64) -> Result<usize> {
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
     telemetry.cleanup_runs.fetch_add(1, Ordering::Relaxed);
-    let result = tracedecay_session_memory::response_handles::cleanup_expired_response_handles(
-        project_root,
-        now,
-    );
+    let result =
+        tracedecay_session_memory::response_handles::cleanup_expired_response_handles(root, now);
     telemetry
         .cleanup_time_us_total
         .fetch_add(duration_micros_u64(started.elapsed()), Ordering::Relaxed);
@@ -332,7 +300,9 @@ pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result
             );
         }
     }
-    result.map(|cleanup| cleanup.removed_expired)
+    result
+        .map(|cleanup| cleanup.removed_expired)
+        .map_err(TraceDecayError::from)
 }
 
 #[track_caller]
@@ -390,10 +360,15 @@ fn timestamp_json(value: i64) -> Value {
 }
 
 fn duration_micros_u64(duration: Duration) -> u64 {
-    duration.as_micros().min(u128::from(u64::MAX)) as u64
+    tracedecay_runtime_core::tracedecay::saturating_duration_micros(duration)
 }
 
-fn error_class(error: &TraceDecayError) -> &'static str {
+fn error_class(error: &ResponseHandleError) -> &'static str {
+    let error = match error {
+        ResponseHandleError::InvalidHandle => return "invalid_handle",
+        ResponseHandleError::CorruptRecord { .. } => return "corrupt_record",
+        ResponseHandleError::Store(error) => error,
+    };
     match error {
         TraceDecayError::ResetRequired { .. } => "reset_required",
         TraceDecayError::File { .. } => "file",
@@ -401,9 +376,14 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
         TraceDecayError::HostCliUnavailable { .. } => "host_cli_unavailable",
+        TraceDecayError::ServiceUnitNotOwned { .. } => "service_unit_not_owned",
         TraceDecayError::ProfileResetRequired { .. } => "profile_reset_required",
         TraceDecayError::ProjectRoute { .. } => "project_route",
+        TraceDecayError::ProjectOpen { .. } => "project_open",
+        TraceDecayError::InvalidRequest { .. } => "invalid_request",
+        TraceDecayError::ToolRefused { .. } => "tool_refused",
         TraceDecayError::SyncLock { .. } => "sync_lock",
+        TraceDecayError::LockDeadline { .. } => "lock_deadline",
         TraceDecayError::Io(_) => "io",
         TraceDecayError::Sqlite(_) => "sqlite",
         TraceDecayError::Json(_) => "json",
@@ -422,52 +402,17 @@ fn clipped_handle_for_log(handle: &str) -> String {
     }
 }
 
-/// Serializes lib unit tests that store response handles under the
-/// process-global profile root (`TRACEDECAY_DATA_DIR`). Uses the shared
-/// user-data-dir test lock so env mutation cannot race profile resolution.
-#[cfg(test)]
-pub(crate) fn lock_response_handle_store() -> std::sync::MutexGuard<'static, ()> {
-    tracedecay_runtime_core::config::lock_user_data_dir_test_env()
-}
-
 #[cfg(test)]
 mod tests {
+    use tracedecay_domain::errors::InvalidRequestReason;
+
     use super::*;
 
     #[test]
-    fn project_route_error_class_is_distinct() {
-        let error = TraceDecayError::project_route(
-            "project_route_unavailable",
-            true,
-            "project registry is warming",
-        );
-
-        assert_eq!(error_class(&error), "project_route");
-    }
-
-    #[test]
-    fn reset_required_error_class_is_distinct() {
-        let error =
-            TraceDecayError::reset_required("session store", "session store reset required");
-
-        assert_eq!(error_class(&error), "reset_required");
-    }
-
-    #[test]
-    fn host_cli_requirement_error_class_is_distinct() {
-        let error = TraceDecayError::HostCliUnavailable {
-            program: "kiro-cli".to_string(),
-            lifecycle: "kiro MCP registry lifecycle".to_string(),
-        };
-
-        assert_eq!(error_class(&error), "host_cli_unavailable");
-    }
-
-    #[test]
     fn public_inventory_problem_never_exposes_the_local_path() {
-        let error = TraceDecayError::File {
-            message: "corrupt response-handle record: invalid JSON".to_string(),
-            path: "/private/operator/cache/secret.json".to_string(),
+        let error = ResponseHandleError::CorruptRecord {
+            path: "/private/operator/cache/secret.json".into(),
+            reason: "invalid JSON".to_string(),
         };
 
         let (reason_code, detail) = public_inventory_problem(&error);
@@ -476,12 +421,45 @@ mod tests {
         assert!(!detail.contains("/private/operator"));
 
         let sanitized = public_retrieve_error(error);
+        assert_eq!(
+            sanitized.project_route_context(),
+            Some((
+                "corrupt_handle_record",
+                true,
+                "corrupt response-handle record: cached payload failed integrity validation"
+            ))
+        );
+    }
+
+    /// A store failure whose text reads like a corrupt record or an invalid
+    /// handle is still the cache being unavailable.
+    #[test]
+    fn store_failures_are_classified_by_type_not_text() {
+        let lookalike = || {
+            ResponseHandleError::Store(TraceDecayError::File {
+                message: "corrupt response-handle record: invalid response handle:".to_string(),
+                path: "/cache/rh_000000000000000000000000.json".to_string(),
+            })
+        };
+
+        assert_eq!(
+            public_inventory_problem(&lookalike()).0,
+            "handle_inventory_unavailable"
+        );
+        assert_eq!(
+            public_retrieve_error(lookalike()).project_route_context(),
+            Some((
+                "handle_read_failed",
+                true,
+                "response-handle cache is unavailable"
+            ))
+        );
         assert!(matches!(
-            sanitized,
-            TraceDecayError::File { message, path }
-                if message.starts_with("corrupt response-handle record:")
-                    && !message.contains("invalid JSON")
-                    && path == "response-handles"
+            public_retrieve_error(ResponseHandleError::InvalidHandle),
+            TraceDecayError::InvalidRequest {
+                reason: InvalidRequestReason::InvalidResponseHandle,
+                ..
+            }
         ));
     }
 }

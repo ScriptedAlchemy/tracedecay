@@ -6,10 +6,13 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +41,120 @@ def dashboard_command(mode: str, port: int, *extra: str) -> list[str]:
         str(port),
         *extra,
     ]
+
+
+class ProcessGroupCountTests(unittest.TestCase):
+    def test_late_census_failure_cleans_up_host_and_descendants(self) -> None:
+        real_popen = subprocess.Popen
+        for phase in ("timeout", "normal_exit"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                spawned = []
+
+                def capture(*args, **kwargs):
+                    process = real_popen(*args, **kwargs)
+                    spawned.append(process)
+                    return process
+
+                script = "import time; time.sleep(60)"
+                if phase == "normal_exit":
+                    script = (
+                        "import subprocess, sys; "
+                        "subprocess.Popen([sys.executable, '-c', "
+                        "'import time; time.sleep(60)'])"
+                    )
+                try:
+                    with (
+                        mock.patch.object(lifecycle.subprocess, "Popen", side_effect=capture),
+                        mock.patch.object(
+                            lifecycle,
+                            "process_group_process_count",
+                            side_effect=[1, lifecycle.LifecycleError("late census failed")],
+                        ),
+                        self.assertRaisesRegex(lifecycle.LifecycleError, "late census failed"),
+                    ):
+                        lifecycle.run_host(
+                            [sys.executable, "-c", script],
+                            env=os.environ,
+                            log_dir=Path(directory),
+                            timeout=0.2 if phase == "timeout" else 5,
+                            termination_grace=0.05,
+                        )
+                    self.assertEqual(len(spawned), 1)
+                    self.assertIsNotNone(spawned[0].poll())
+                    deadline = time.monotonic() + 1
+                    while lifecycle.process_group_process_count(spawned[0].pid):
+                        self.assertLess(time.monotonic(), deadline, "host descendants survived")
+                        time.sleep(0.01)
+                    for stream in (spawned[0].stdin, spawned[0].stdout, spawned[0].stderr):
+                        self.assertTrue(stream.closed)
+                finally:
+                    for process in spawned:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=5)
+
+    def test_ps_counts_only_live_members_of_the_requested_group(self) -> None:
+        listing = " 42 S\n42 R+\n42 Z\n42 Z+\n142 S\n"
+        with (
+            mock.patch.object(lifecycle.Path, "is_dir", return_value=False),
+            mock.patch.object(
+                lifecycle.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=listing),
+            ),
+        ):
+            self.assertEqual(lifecycle.process_group_process_count(42), 2)
+            self.assertEqual(lifecycle.process_group_process_count(43), 0)
+
+    def test_census_failure_cleans_up_spawned_host_and_daemon(self) -> None:
+        command = [sys.executable, "-c", "import time; time.sleep(60)"]
+        real_popen = subprocess.Popen
+        for owner in ("host", "daemon"):
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
+                spawned = []
+
+                def capture(*args, **kwargs):
+                    process = real_popen(*args, **kwargs)
+                    spawned.append(process)
+                    return process
+
+                with (
+                    mock.patch.object(lifecycle.subprocess, "Popen", side_effect=capture),
+                    mock.patch.object(
+                        lifecycle,
+                        "process_group_process_count",
+                        side_effect=lifecycle.LifecycleError("census failed"),
+                    ),
+                    self.assertRaisesRegex(lifecycle.LifecycleError, "census failed"),
+                ):
+                    if owner == "host":
+                        lifecycle.run_host(
+                            command,
+                            env=os.environ,
+                            log_dir=Path(directory),
+                            timeout=1,
+                            termination_grace=0.05,
+                        )
+                    else:
+                        lifecycle.OwnedDaemon(
+                            command,
+                            env=os.environ,
+                            log_dir=Path(directory),
+                            readiness=lambda: lifecycle.ProbeResult(
+                                True, "ready", "available", None
+                            ),
+                            readiness_timeout=1,
+                            poll_interval=0.01,
+                            termination_grace=0.05,
+                        ).start()
+
+                self.assertEqual(len(spawned), 1)
+                self.assertIsNotNone(spawned[0].poll())
+                for stream in (spawned[0].stdin, spawned[0].stdout, spawned[0].stderr):
+                    if stream is not None:
+                        self.assertTrue(stream.closed)
 
 
 class DashboardLifecycleTests(unittest.TestCase):
@@ -160,7 +277,9 @@ class DashboardLifecycleTests(unittest.TestCase):
                             url,
                             request_timeout=0.05,
                         ),
-                        readiness_timeout=0.2,
+                        # The stub takes a moment to bind on a loaded runner;
+                        # 0.2s left the probe stuck in dashboard_connect.
+                        readiness_timeout=2.0,
                         poll_interval=0.01,
                         termination_grace=0.05,
                     )
@@ -356,37 +475,28 @@ class HostLifecycleTests(unittest.TestCase):
 
 
 class RunWorkspaceTests(unittest.TestCase):
-    def test_workspace_cleanup_and_preserve_on_failure_are_explicit(self) -> None:
+    def test_workspace_is_removed_after_success_and_after_failure(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-lifecycle-test-") as directory:
             root = Path(directory)
-            normal = lifecycle.RunWorkspace(root, preserve_on_failure=False)
+            normal = lifecycle.RunWorkspace(root)
             with normal:
                 normal_path = normal.path
                 (normal.path / "evidence.json").write_text("{}\n", encoding="utf-8")
+                self.assertTrue(normal_path.is_dir())
             self.assertFalse(normal_path.exists())
 
-            failed = lifecycle.RunWorkspace(root, preserve_on_failure=False)
+            failed = lifecycle.RunWorkspace(root)
             with self.assertRaisesRegex(RuntimeError, "failed"):
                 with failed:
                     failed_path = failed.path
-                    raise RuntimeError("failed")
-            self.assertFalse(failed_path.exists())
-
-            preserved = lifecycle.RunWorkspace(root, preserve_on_failure=True)
-            with self.assertRaisesRegex(RuntimeError, "preserve"):
-                with preserved:
-                    preserved_path = preserved.path
-                    (preserved.path / "evidence.json").write_text(
+                    (failed.path / "evidence.json").write_text(
                         json.dumps({"sample_count": 1}) + "\n",
                         encoding="utf-8",
                     )
-                    raise RuntimeError("preserve")
-            self.assertTrue(preserved_path.is_dir())
-            self.assertEqual(
-                json.loads((preserved_path / "evidence.json").read_text(encoding="utf-8")),
-                {"sample_count": 1},
-            )
-
+                    self.assertTrue(failed_path.is_dir())
+                    raise RuntimeError("failed")
+            self.assertFalse(failed_path.exists())
+            self.assertEqual(list(root.iterdir()), [])
 
 if __name__ == "__main__":
     unittest.main()

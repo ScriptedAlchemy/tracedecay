@@ -8,12 +8,8 @@ use super::activation::advance_component_desired_state;
 use super::audit::{
     append_terminal_plan_event, has_matching_terminal_plan_event,
     insert_audit_event_with_receipt_digest, read_audit_event_from_transaction, seal_audit_target,
-    terminal_plan_event_kind,
 };
-use super::codec::{
-    CONFIGURATION_ACTIVATION_DESIRED_RECORDED, StoredMutationReceipt, decode_id,
-    redacted_direct_audit_target,
-};
+use super::codec::{StoredMutationReceipt, decode_id, redacted_direct_audit_target};
 use super::read::{
     current_revision_id_from_executor, read_change_plan_from_executor, read_revision_from_executor,
     validate_snapshot_registry_completeness_with_registry,
@@ -28,10 +24,14 @@ use super::{
     ConfigurationRegistry, ConfigurationRevisionId, ConfigurationRevisionRecordV1,
     ConfigurationSettlementAuthorityV1, ConfigurationSnapshotV1, ConfigurationStoreError,
     ConfigurationStoreResult, ConfigurationValueV1, DirectConfigurationMutation, Executor,
-    ManifestDigest, ProtectedChangePlan, ProtectedChangeSnapshotError, QueryExecutor,
-    RedactedConfigurationChangeV1, Row, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1,
-    ScopeRevalidationEvidenceV1, SettingKey, UtcMicros, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-    canonical_sha256, invalid_store_data, params, registry_default_candidate, unavailable_store,
+    ManifestDigest, ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
+    QueryExecutor, RedactedConfigurationChangeV1, Row, SOURCE_BINDINGS_SETTING_KEY,
+    ScopeControlOperationV1, ScopeRevalidationEvidenceV1, SettingKey, UtcMicros,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, canonical_sha256, invalid_store_data, params,
+    registry_default_candidate, unavailable_store,
+};
+use tracedecay_rusqlite_runtime::repository::{
+    CONFIGURATION_ACTIVATION_DESIRED_RECORDED, INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL,
 };
 
 pub(super) fn decode_stored_mutation_receipt(
@@ -188,13 +188,7 @@ pub(super) async fn insert_mutation_receipt(
         .map(|plan| plan.plan_id.as_str().to_owned());
     transaction
         .execute(
-            "INSERT INTO configuration_mutation_receipts (
-                receipt_id, plan_id, actor_id, idempotency_key,
-                base_revision_id, result_revision_id, operation_digest,
-                authorization_policy_epoch, authorization_policy_digest,
-                authority_revalidated_at, activation_status, receipt_digest, created_at,
-                effective_deadline_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL,
             params![
                 commit.receipt.receipt_id.as_str(),
                 plan_id,
@@ -215,45 +209,6 @@ pub(super) async fn insert_mutation_receipt(
         )
         .await
         .map_err(unavailable_store)?;
-    Ok(())
-}
-
-pub(super) fn validate_commit_bindings(
-    commit: &ConfigurationCommitV1,
-) -> ConfigurationStoreResult<()> {
-    commit.validate().map_err(ConfigurationStoreError::from)?;
-    if commit.next_revision.parent_revision_id.as_ref() != Some(&commit.expected_base_revision_id) {
-        return Err(invalid_store_data(
-            "configuration commit next revision does not name the expected base revision",
-        ));
-    }
-    if commit.audit_event.actor_id != commit.receipt.actor_id
-        || commit.audit_event.idempotency_key.as_ref() != Some(&commit.receipt.idempotency_key)
-        || commit.audit_event.base_revision_id != commit.receipt.base_revision_id
-        || commit.audit_event.result_revision_id.as_ref()
-            != Some(&commit.receipt.result_revision_id)
-        || commit.audit_event.operation_digest != commit.receipt.operation_digest
-        || commit.audit_event.receipt_id.as_ref() != Some(&commit.receipt.receipt_id)
-    {
-        return Err(invalid_store_data(
-            "configuration audit event does not bind the mutation receipt",
-        ));
-    }
-    if let Some(plan) = &commit.change_plan {
-        if plan.actor_id != commit.receipt.actor_id
-            || plan.base_revision_id != commit.expected_base_revision_id
-            || plan.operation_digest != commit.receipt.operation_digest
-        {
-            return Err(invalid_store_data(
-                "configuration change plan does not bind the mutation receipt",
-            ));
-        }
-        if terminal_plan_event_kind(commit.audit_event.event_kind).is_none() {
-            return Err(invalid_store_data(
-                "configuration change plan commit lacks a terminal applied audit event",
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -368,9 +323,20 @@ pub(super) async fn commit_configuration_transaction_with_registry(
     Ok(commit.receipt.clone())
 }
 
-pub(super) fn map_protected_change_snapshot_error(
-    error: ProtectedChangeSnapshotError,
-) -> ConfigurationError {
+/// The one validator for a protected change: preview and apply both derive
+/// the candidate snapshot here, so a preview accepts exactly what apply
+/// commits and refuses with apply's typed reason.
+pub fn protected_change_snapshot_v1(
+    snapshot: &ConfigurationSnapshotV1,
+    change: &ProtectedChange,
+    revision_id: &ConfigurationRevisionId,
+) -> Result<ConfigurationSnapshotV1, ConfigurationError> {
+    snapshot
+        .apply_protected_change(change, revision_id)
+        .map_err(map_protected_change_snapshot_error)
+}
+
+fn map_protected_change_snapshot_error(error: ProtectedChangeSnapshotError) -> ConfigurationError {
     match error {
         ProtectedChangeSnapshotError::Stale => ConfigurationError::PlanStale,
         ProtectedChangeSnapshotError::Domain(error) => ConfigurationError::validation(error),
@@ -402,7 +368,7 @@ where
     T: TryFrom<String>,
     <T as TryFrom<String>>::Error: std::fmt::Display,
 {
-    let digest = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+    let digest = digest.hex_suffix().ok_or_else(|| {
         ConfigurationError::validation_message("configuration digest is missing its sha256 prefix")
     })?;
     T::try_from(format!("{prefix}.{digest}")).map_err(|error| {
@@ -479,7 +445,7 @@ pub(super) fn apply_direct_mutation_to_snapshot(
                     .validate_layer(key, layer)
                     .map_err(ConfigurationError::validation)?;
                 registry
-                    .validate_value(key, value)
+                    .validate_written_value(key, value)
                     .map_err(ConfigurationError::validation)?;
                 replace_direct_effective_value(
                     effective_values,
@@ -548,11 +514,6 @@ pub(super) fn validate_direct_control_mutation(
             .contains(&key.as_str())
             {
                 return Err(ConfigurationError::PolicyWideningForbidden);
-            }
-            if matches!(value.as_ref(), ConfigurationValueV1::CredentialReference(_)) {
-                return Err(ConfigurationError::validation_message(
-                    "credential references require the write-only credential operation",
-                ));
             }
             value.validate().map_err(ConfigurationError::validation)
         }

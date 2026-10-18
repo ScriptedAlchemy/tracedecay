@@ -9,7 +9,7 @@
 //! 2. build and seal one clean generation through
 //!    [`CodeIndexProductionOwnerV1::build_and_publish`];
 //! 3. drain the sealed generation and ingest it into an isolated SQLite
-//!    lexical artifact, finalize, and reopen it content-addressed — the
+//!    lexical artifact, finalize, and reopen it content-addressed, the
 //!    exact reader shape `ProductionCodeIndexQueryOwnersV1` serves from;
 //! 4. compose the production `ExactLane`/`LexicalLane` over that reader and
 //!    run representative query classes (short token, high-cardinality term,
@@ -22,55 +22,54 @@
 //!
 //! Hermeticity matches `tracedecay-index-bench`: no socket, no daemon, no
 //! operator profile; the only path written is a self-created scratch
-//! directory under the system temp dir, removed before exit. With the
-//! `hotpath` feature off the workload is identical and no report is written.
+//! directory under the system temp dir, removed before exit.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+#[path = "../bench_support.rs"]
+mod artifact_bench;
+
+use artifact_bench::{
+    ActiveControl, AdmittedFile, SealedDrainBounds, decoded_generation, default_corpus_root,
+    drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile, replicate,
+    seal_partitioned,
+};
 use std::collections::BTreeSet;
-use std::fmt;
-use std::io::{Cursor, Read};
-use std::num::NonZeroUsize;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracedecay_code_index::chunks::content_digest;
-use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageBatchBoundsV1,
-    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
-    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
-};
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionConfigV1,
+    CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+    MemorySealedPublicationStoreV1, VerifiedSealedLexicalPageV1,
+    VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_domain::{
     AuthorizationRevision, ChunkerRevision, CodeGenerationId, ComponentRevision,
     ExactAdmissionRuleRevision, FileOccurrenceId, FreshnessCompatibilityV1, FreshnessVectorDigest,
-    FusionProfileId, LanguageId, ManifestDigest, PolicyRevisionId, PrincipalId, PrivacyDomainId,
-    ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, QueryNormalizationRevision, RepositoryDirtyStateV1, RepositoryId,
-    RetrievalBudget, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
-    RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1,
-    SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace, TemporalModeV1,
-    TreeId, UtcMicros, VectorWatermark,
+    FusionProfileId, ManifestDigest, PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId,
+    ProjectionKeyV1, ProjectionKindV1, QueryNormalizationRevision, RepositoryDirtyStateV1,
+    RepositoryId, RetrievalBudget, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrieverBatch, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SensitivityLevelV1,
+    SingleRootScopeV1, SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey,
+    SourceNamespace, TemporalModeV1, TreeId, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::lexical::{
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactWriterRevisionV1, CodeLexicalProjectionMetadataV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
+    CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1,
+    LexicalLane, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
+};
+use tracedecay_query::retrieval::ports::{
+    RetrievalExecutionControl, TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
 };
 use tracedecay_query::retrieval::{
     QUERY_EXACT_RULE_REVISION_V1, QUERY_LEXICAL_PROFILE_REVISION_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1,
@@ -79,16 +78,14 @@ use tracedecay_query::retrieval::{
 
 /// Bumped whenever the workload shape changes, so a profile comparison
 /// across a shape change is visibly not comparable.
-const WORKLOAD_REVISION: &str = "search-bench.v1";
-const DEFAULT_CORPUS_RELATIVE: &str = "benchmark_data/index-bench/corpus";
+const WORKLOAD_REVISION: &str = "search-bench.v2";
 const CORPUS_ENV: &str = "TRACEDECAY_SEARCH_BENCH_CORPUS";
 const REPLICAS_ENV: &str = "TRACEDECAY_SEARCH_BENCH_REPLICAS";
 const KEEP_SCRATCH_ENV: &str = "TRACEDECAY_SEARCH_BENCH_KEEP_SCRATCH";
 
-/// Sealed-source paging bounds, mirrored from `tracedecay-index-bench` so the
-/// artifact this workload queries is built the same way the daemon builds it.
-const MAX_PAGE_CHUNKS: usize = 64;
-const MAX_PAGE_BYTES: usize = 512 * 1024;
+/// The artifact this workload queries is paged with the daemon's own sealed
+/// page bounds (`TEXT_ARTIFACT_PAGE_*_V1`), so it is built the same way the
+/// daemon builds it.
 const BATCH_MAX_PAGES: usize = 16;
 const BATCH_MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
 const FINALIZATION_WORK_BUDGET: usize = 4_096;
@@ -104,14 +101,26 @@ const BUDGET: RetrievalBudget = RetrievalBudget {
     deadline_micros: None,
 };
 
-fn main() -> ExitCode {
-    #[cfg(feature = "hotpath")]
-    configure_hotpath();
+const USAGE: &str = "\
+usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
+                               [--warmups N] [--fuzzy-budget N]
+                               [--class NAME]... [--term CLASS=QUERY]...
 
+  --corpus DIR       fixture corpus to index and query
+                     (default: $TRACEDECAY_SEARCH_BENCH_CORPUS, else
+                     benchmark_data/index-bench/corpus beside this workspace)
+  --replicas N       index the corpus N times under distinct logical path
+                     prefixes (default: $TRACEDECAY_SEARCH_BENCH_REPLICAS, else 1)
+  --iterations N     timed query iterations per class (default: 40)
+  --warmups N        untimed warmup iterations per class (default: 3)
+  --fuzzy-budget N   lexical typo-recovery budget (default: production 64)
+  --class NAME       run only the named classes (repeatable; default: all)
+  --term CLASS=QUERY override one class's query text (repeatable)
+  -h, --help         print this message";
+
+fn main() -> ExitCode {
     // Declared first so it drops last: the exit report must observe every
     // measured span. Nothing here may call `std::process::exit`.
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("tracedecay-search-bench").build();
 
     let options = match Options::parse(std::env::args().skip(1)) {
         Ok(Some(options)) => options,
@@ -125,11 +134,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
-    match options.artifact.as_ref().map_or_else(
-        || run(&options),
-        |path| run_existing_artifact(&options, path),
+    if let Err(error) = tracedecay_runtime_core::native_runtime::install(
+        tracedecay_runtime_core::native_runtime::default_builder(),
     ) {
+        eprintln!("tracedecay-search-bench: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    match run(&options) {
         Ok(summary) => {
             println!("{summary}");
             ExitCode::SUCCESS
@@ -143,47 +155,6 @@ fn main() -> ExitCode {
 
 /// Same two guard defaults `tracedecay-index-bench` overrides, for the same
 /// reasons: no socket ever, and no stdout report corrupting the summary.
-#[cfg(feature = "hotpath")]
-fn configure_hotpath() {
-    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
-        unsafe {
-            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        }
-    }
-    let has_output_path = std::env::var_os("HOTPATH_OUTPUT_PATH")
-        .is_some_and(|path| path.to_str().is_some_and(|path| !path.is_empty()));
-    if !has_output_path {
-        unsafe {
-            std::env::set_var("HOTPATH_OUTPUT_FORMAT", "none");
-            std::env::remove_var("HOTPATH_OUTPUT_PATH");
-        }
-    }
-}
-
-const USAGE: &str = "\
-usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
-                               [--warmups N] [--fuzzy-budget N] [--artifact FILE]
-                               [--format-revision 11|12]
-                               [--class NAME]... [--term CLASS=QUERY]...
-
-  --corpus DIR       fixture corpus to index and query
-                     (default: $TRACEDECAY_SEARCH_BENCH_CORPUS, else
-                     benchmark_data/index-bench/corpus beside this workspace)
-  --replicas N       index the corpus N times under distinct logical path
-                     prefixes (default: $TRACEDECAY_SEARCH_BENCH_REPLICAS, else 1)
-  --iterations N     timed query iterations per class (default: 40)
-  --warmups N        untimed warmup iterations per class (default: 3)
-  --fuzzy-budget N   lexical typo-recovery budget (default: production 64)
-  --artifact FILE    reopen an existing sealed lexical artifact and skip ingest
-  --format-revision  select the writer revision for build A/B runs (default: 12)
-  --class NAME       run only the named classes (repeatable; default: all)
-  --term CLASS=QUERY override one class's query text (repeatable)
-  -h, --help         print this message
-
-Profiling: build with `--features production,hotpath` and set
-HOTPATH_OUTPUT_FORMAT and HOTPATH_OUTPUT_PATH. With the feature off the
-workload is identical and no report is written.";
-
 /// Default query classes, written against the committed index-bench corpus.
 /// Every default hits real corpus text so the measured work is candidate
 /// scoring, not empty-result short-circuits.
@@ -211,8 +182,6 @@ struct Options {
     iterations: usize,
     warmups: usize,
     fuzzy_budget: u32,
-    artifact: Option<PathBuf>,
-    writer_revision: CodeLexicalArtifactWriterRevisionV1,
     classes: Vec<(String, String)>,
 }
 
@@ -225,8 +194,6 @@ impl Options {
         let mut fuzzy_budget = MAX_FUZZY_TERM_EXPANSIONS_V1;
         let mut selected: Vec<String> = Vec::new();
         let mut overrides: Vec<(String, String)> = Vec::new();
-        let mut artifact = None;
-        let mut writer_revision = CodeLexicalArtifactWriterRevisionV1::default();
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -268,22 +235,6 @@ impl Options {
                         .ok_or_else(|| "--class needs a name".to_owned())?;
                     selected.push(value);
                 }
-                "--artifact" => {
-                    let value = arguments
-                        .next()
-                        .ok_or_else(|| "--artifact needs a file".to_owned())?;
-                    artifact = Some(PathBuf::from(value));
-                }
-                "--format-revision" => {
-                    let value = arguments
-                        .next()
-                        .ok_or_else(|| "--format-revision needs 11 or 12".to_owned())?;
-                    writer_revision = match value.as_str() {
-                        "11" => CodeLexicalArtifactWriterRevisionV1::V11,
-                        "12" => CodeLexicalArtifactWriterRevisionV1::V12,
-                        _ => return Err("--format-revision needs 11 or 12".to_owned()),
-                    };
-                }
                 "--term" => {
                     let value = arguments
                         .next()
@@ -296,9 +247,11 @@ impl Options {
                 other => return Err(format!("unrecognized argument {other:?}")),
             }
         }
-        let corpus_root = corpus_root
-            .or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from))
-            .unwrap_or_else(default_corpus_root);
+        let corpus_root =
+            match corpus_root.or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from)) {
+                Some(root) => root,
+                None => default_corpus_root()?,
+            };
         let replicas = match replicas {
             Some(replicas) => replicas,
             None => match std::env::var(REPLICAS_ENV) {
@@ -330,8 +283,6 @@ impl Options {
             iterations,
             warmups,
             fuzzy_budget,
-            artifact,
-            writer_revision,
             classes,
         }))
     }
@@ -347,241 +298,16 @@ fn parse_count(flag: &str, value: &str, minimum: usize) -> Result<usize, String>
     Ok(count)
 }
 
-fn default_corpus_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(DEFAULT_CORPUS_RELATIVE)
-}
-
-// ---------------------------------------------------------------------------
-// Corpus admission (identical walk to `tracedecay-index-bench`)
-// ---------------------------------------------------------------------------
-
-struct CorpusFile {
-    relative_path: String,
-    language: LanguageId,
-    bytes: Vec<u8>,
-}
-
-fn load_corpus(root: &Path) -> Result<Vec<CorpusFile>, String> {
-    let registry = StaticLanguageRegistry::new();
-    let mut files = Vec::new();
-    collect_corpus(root, root, &registry, &mut files)?;
-    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    if files.is_empty() {
-        return Err(format!(
-            "corpus {} admitted no files with a known language extension",
-            root.display()
-        ));
-    }
-    Ok(files)
-}
-
-fn collect_corpus(
-    root: &Path,
-    directory: &Path,
-    registry: &StaticLanguageRegistry,
-    files: &mut Vec<CorpusFile>,
-) -> Result<(), String> {
-    let mut entries = std::fs::read_dir(directory)
-        .map_err(|error| format!("read {}: {error}", directory.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("read {}: {error}", directory.display()))?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("stat {}: {error}", path.display()))?;
-        if file_type.is_dir() {
-            collect_corpus(root, &path, registry, files)?;
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        let Some(extension) = path.extension().and_then(std::ffi::OsStr::to_str) else {
-            continue;
-        };
-        let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase()) else {
-            continue;
-        };
-        if !descriptor.capabilities.extraction {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| format!("relativize {}: {error}", path.display()))?;
-        let Some(relative_path) = relative.to_str() else {
-            return Err(format!("corpus path {} is not Unicode", relative.display()));
-        };
-        let bytes =
-            std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
-        files.push(CorpusFile {
-            relative_path: relative_path.replace('\\', "/"),
-            language: descriptor.language.clone(),
-            bytes,
-        });
-    }
-    Ok(())
-}
-
-struct AdmittedFile {
-    logical_path: String,
-    language: LanguageId,
-    bytes: Arc<[u8]>,
-}
-
-fn replicate(corpus: &[CorpusFile], replicas: usize) -> Vec<AdmittedFile> {
-    let mut admitted = Vec::with_capacity(corpus.len().saturating_mul(replicas));
-    for replica in 0..replicas {
-        for file in corpus {
-            let logical_path = if replica == 0 {
-                file.relative_path.clone()
-            } else {
-                format!("replica{replica:02}/{}", file.relative_path)
-            };
-            admitted.push(AdmittedFile {
-                logical_path,
-                language: file.language.clone(),
-                bytes: Arc::from(file.bytes.clone()),
-            });
-        }
-    }
-    // The snapshot contract requires canonical file order over the whole
-    // admitted set, not per replica.
-    admitted.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-    admitted
-}
-
-// ---------------------------------------------------------------------------
-// In-memory production authorities (identical to `tracedecay-index-bench`)
-// ---------------------------------------------------------------------------
-
-struct ActiveControl;
-
-impl CodeIndexExecutionControlV1 for ActiveControl {
+impl RetrievalExecutionControl for ActiveControl {
     fn is_cancelled(&self) -> bool {
         false
     }
 
-    fn is_deadline_exceeded(&self) -> bool {
-        false
+    fn elapsed_micros(&self) -> u64 {
+        0
     }
 }
-
-#[derive(Default)]
-struct MemoryPublicationStore {
-    active: Arc<
-        Mutex<
-            std::collections::BTreeMap<
-                CodeIndexGenerationScopeV1,
-                Arc<CodeIndexPublishedGenerationV1>,
-            >,
-        >,
-    >,
-}
-
-impl CodeIndexAtomicPublicationPort for MemoryPublicationStore {
-    fn load_active(
-        &self,
-        scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .map_err(|_| CodeIndexPublicationStoreErrorV1::CompareAndSwap)?
-            .get(scope)
-            .map(|generation| generation.as_ref().clone()))
-    }
-
-    fn publish_atomically(
-        &mut self,
-        scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self
-            .active
-            .lock()
-            .map_err(|_| CodeIndexPublicationStoreErrorV1::CompareAndSwap)?;
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
-    }
-}
-
-struct ApplyingProjectionSink;
-
-impl CodeChunkProjectionSink for ApplyingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions = Vec::with_capacity(
-            request.changes.added_or_changed.len()
-                + request.changes.deleted.len()
-                + request.changes.reused.len(),
-        );
-        decisions.extend(request.changes.added_or_changed.iter().map(|change| {
-            ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            }
-        }));
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        decisions.extend(
-            request
-                .changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
-                    output_digest: None,
-                }),
-        );
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Workload
-// ---------------------------------------------------------------------------
 
 fn run(options: &Options) -> Result<String, String> {
     let started = Instant::now();
@@ -608,12 +334,9 @@ fn run(options: &Options) -> Result<String, String> {
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config,
-        MemoryPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .map_err(|error| format!("open production owner: {error}"))?;
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
+        .map_err(|error| format!("open production owner: {error}"))?;
 
     let request = build_request(&repository, &sanitizer_revision, &files);
     let generation_started = Instant::now();
@@ -621,18 +344,25 @@ fn run(options: &Options) -> Result<String, String> {
         .build_and_publish(request, &control)
         .map_err(|error| format!("build generation: {error}"))?;
     let generation_wall = generation_started.elapsed();
+    let generation = decoded_generation(&store, &generation)?;
     let chunk_count = generation.chunks().chunks().len() as u64;
 
     let seal_started = Instant::now();
-    let sealed = generation
-        .encode_sealed()
-        .map_err(|error| format!("encode sealed generation: {error}"))?;
+    let sealed = seal_partitioned(&generation)?;
     let seal_wall = seal_started.elapsed();
-    let sealed_len = sealed.len() as u64;
-    let state_digest = sealed_state_digest(&sealed)?;
+    let sealed_len = sealed.byte_len();
 
     let drain_started = Instant::now();
-    let (pages, source_receipt) = drain_pages(&sealed, sealed_len, &state_digest, &control)?;
+    let (pages, source_receipt) = drain_pages(
+        &sealed,
+        &control,
+        SealedDrainBounds {
+            batch_pages: BATCH_MAX_PAGES,
+            batch_retained_bytes: BATCH_MAX_RETAINED_BYTES,
+            page_chunks: TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+            page_bytes: TEXT_ARTIFACT_PAGE_BYTES_V1,
+        },
+    )?;
     let drain_wall = drain_started.elapsed();
 
     let scratch = Scratch::create()?;
@@ -641,10 +371,9 @@ fn run(options: &Options) -> Result<String, String> {
     let ingest_started = Instant::now();
     let receipt = ingest_artifact(
         &artifact_path,
-        metadata,
+        metadata.clone(),
         &pages,
         &source_receipt,
-        options.writer_revision,
         &control,
     )?;
     let ingest_wall = ingest_started.elapsed();
@@ -659,6 +388,7 @@ fn run(options: &Options) -> Result<String, String> {
         &artifact_path,
         &file_digest,
         file_size_bytes,
+        &metadata,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
@@ -727,111 +457,6 @@ fn run(options: &Options) -> Result<String, String> {
     serde_json::to_string_pretty(&report).map_err(|error| format!("serialize summary: {error}"))
 }
 
-/// Reopen a preserved sealed artifact and measure the same query classes
-/// without repeating ingest. Used to verify read-path fixes against a
-/// generation-scale file.
-fn run_existing_artifact(options: &Options, artifact_path: &Path) -> Result<String, String> {
-    let started = Instant::now();
-    let control = ActiveControl;
-
-    let open_started = Instant::now();
-    let (file_digest, file_size_bytes) = hash_file(artifact_path)?;
-    let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
-        artifact_path,
-        &file_digest,
-        file_size_bytes,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        &control,
-    )
-    .map_err(|error| format!("reopen lexical artifact: {error}"))?;
-    let open_wall = open_started.elapsed();
-
-    let authority = CentralExactAdmissionAuthorityV1::new(
-        ExactAdmissionRuleRevision::new(QUERY_EXACT_RULE_REVISION_V1)
-            .map_err(|error| format!("exact rule revision: {error}"))?,
-    );
-    let exact_lane = ExactLane::new(authority.clone(), reader.exact_adapter(authority.clone()));
-    let lexical_lane = LexicalLane::new(reader.clone());
-    let generation_id = reader.metadata().generation.clone();
-    let prototype = request_prototype_from_artifact(&reader)?;
-
-    let mut class_reports = Vec::with_capacity(options.classes.len());
-    for (class, query) in &options.classes {
-        let report = run_class(RunClassArguments {
-            class,
-            query,
-            options,
-            prototype: &prototype,
-            authority: &authority,
-            exact_lane: &exact_lane,
-            lexical_lane: &lexical_lane,
-            generation: &generation_id,
-        })?;
-        class_reports.push(report);
-    }
-
-    let verified = reader.verified_artifact();
-    let total_wall = started.elapsed();
-    let report = serde_json::json!({
-        "workload_revision": WORKLOAD_REVISION,
-        "reused_artifact": true,
-        "artifact_path": artifact_path.display().to_string(),
-        "chunks": verified.total_chunks(),
-        "artifact_bytes": file_size_bytes,
-        "artifact_digest": file_digest.as_str(),
-        "artifact_logical_digest": verified.artifact_digest().as_str(),
-        "iterations": options.iterations,
-        "warmups": options.warmups,
-        "fuzzy_budget": options.fuzzy_budget,
-        "peak_rss_bytes": peak_rss_bytes(),
-        "build_wall_ms": {
-            "artifact_reopen_verified": millis(open_wall),
-            "total": millis(total_wall),
-        },
-        "classes": class_reports,
-    });
-    serde_json::to_string_pretty(&report).map_err(|error| format!("serialize summary: {error}"))
-}
-
-fn request_prototype_from_artifact(
-    reader: &CodeLexicalArtifactReaderV1,
-) -> Result<RequestPrototypeV1, String> {
-    let metadata = reader.metadata();
-    let verified = reader.verified_artifact();
-    let repository = metadata
-        .repository_id
-        .clone()
-        .or_else(|| verified.repository_id().cloned())
-        .unwrap_or_else(|| identity("repository.search-bench"));
-    Ok(RequestPrototypeV1 {
-        principal: identity::<PrincipalId>("principal.search-bench"),
-        scope: RetrievalScope {
-            privacy_domain: identity::<PrivacyDomainId>("privacy.search-bench"),
-            root: SingleRootScopeV1 {
-                repository,
-                worktree: None,
-                reference: None,
-            },
-        },
-        snapshot: RetrievalSnapshot {
-            watermarks: VectorWatermark::default(),
-            freshness_digest: FreshnessVectorDigest::new(verified.source_state_digest().as_str())
-                .map_err(|error| format!("freshness digest: {error}"))?,
-            authorization_revision: identity::<AuthorizationRevision>(
-                "authorization.search-bench.v1",
-            ),
-            captured_at: metadata.freshness.observed_at,
-        },
-        profile_id: identity::<FusionProfileId>("query-fallback"),
-        sanitizer_revision: identity::<SanitizerRevision>(QUERY_SANITIZER_REVISION_V1),
-        normalization_revision: identity::<QueryNormalizationRevision>(
-            QUERY_NORMALIZATION_REVISION_V1,
-        ),
-        lexical_profile_revision: identity::<ComponentRevision>(QUERY_LEXICAL_PROFILE_REVISION_V1),
-        lexical_score_domain: identity::<ScoreDomainId>(QUERY_LEXICAL_SCORE_DOMAIN_V1),
-    })
-}
-
 /// Query-independent request fields, cloned per iteration exactly as the
 /// daemon clones its own per-request base.
 struct RequestPrototypeV1 {
@@ -892,14 +517,17 @@ fn request_prototype(
     })
 }
 
-struct RunClassArguments<'a, E, L> {
+struct RunClassArguments<'a> {
     class: &'a str,
     query: &'a str,
     options: &'a Options,
     prototype: &'a RequestPrototypeV1,
     authority: &'a CentralExactAdmissionAuthorityV1,
-    exact_lane: &'a E,
-    lexical_lane: &'a L,
+    exact_lane: &'a ExactLane<
+        CentralExactAdmissionAuthorityV1,
+        CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
+    >,
+    lexical_lane: &'a LexicalLane<CodeLexicalArtifactReaderV1>,
     generation: &'a CodeGenerationId,
 }
 
@@ -910,11 +538,7 @@ struct IterationMicros {
     total: u64,
 }
 
-fn run_class<E, L>(arguments: RunClassArguments<'_, E, L>) -> Result<serde_json::Value, String>
-where
-    E: ExactLaneRetriever,
-    L: LexicalLaneRetriever,
-{
+fn run_class(arguments: RunClassArguments<'_>) -> Result<serde_json::Value, String> {
     let RunClassArguments {
         class,
         query,
@@ -943,10 +567,12 @@ where
         let exact_started = Instant::now();
         let exact_outcome = exact_lane
             .retrieve_exact(&ExactLaneRequest {
+                control: &ActiveControl,
                 base: request.clone(),
                 query_view,
                 generation: generation.clone(),
                 literals,
+                path_prefix: None,
                 budget: request.budget,
             })
             .map_err(|error| format!("exact lane {class}: {error}"))?;
@@ -960,14 +586,17 @@ where
                 base: request.clone(),
                 query_view,
                 generation: generation.clone(),
-                whole_terms: parts.whole_terms,
-                subtokens: parts.subtokens,
-                phrases: parts.phrases,
-                field_filters: Vec::new(),
+                whole_terms: std::borrow::Cow::Owned(parts.whole_terms),
+                subtokens: std::borrow::Cow::Owned(parts.subtokens),
+                phrases: std::borrow::Cow::Owned(parts.phrases),
+                proximities: std::borrow::Cow::Owned(Vec::new()),
+                field_filters: std::borrow::Cow::Owned(Vec::new()),
+                path_prefix: None,
                 fuzzy_budget: options.fuzzy_budget,
                 lexical_profile_revision: prototype.lexical_profile_revision.clone(),
                 score_domain: prototype.lexical_score_domain.clone(),
                 budget: request.budget,
+                control: &ActiveControl,
             })
             .map_err(|error| format!("lexical lane {class}: {error}"))?;
         let lexical_wall = lexical_started.elapsed();
@@ -1042,15 +671,6 @@ fn phase_stats(
         "max": values.last().copied().unwrap_or_default(),
     })
 }
-
-fn percentile(sorted: &[u64], percent: usize) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let rank = (sorted.len() * percent).div_ceil(100);
-    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
-}
-
 fn build_request(
     repository: &RepositoryId,
     sanitizer_revision: &SanitizerRevision,
@@ -1087,6 +707,7 @@ fn build_request(
         content_identity: content_digest(&identity_hash),
         captured_at: UtcMicros(SEALED_AT - 1_000_000),
         files: snapshot_files,
+        omitted_sources: Vec::new(),
     };
     CodeIndexBuildRequestV1 {
         snapshot,
@@ -1109,60 +730,6 @@ fn build_request(
         },
     }
 }
-
-fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
-    let envelope: serde_json::Value = serde_json::from_slice(sealed)
-        .map_err(|error| format!("decode sealed generation envelope: {error}"))?;
-    let digest = envelope
-        .get("state_digest")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "sealed generation envelope has no state digest".to_owned())?;
-    ManifestDigest::try_from(digest.to_owned())
-        .map_err(|error| format!("sealed generation state digest: {error:?}"))
-}
-
-fn drain_pages(
-    sealed: &[u8],
-    sealed_len: u64,
-    state_digest: &ManifestDigest,
-    control: &ActiveControl,
-) -> Result<
-    (
-        Vec<VerifiedSealedLexicalPageV1>,
-        VerifiedSealedLexicalSourceReceiptV1,
-    ),
-    String,
-> {
-    let bounds =
-        VerifiedSealedLexicalPageBatchBoundsV1::new(BATCH_MAX_PAGES, BATCH_MAX_RETAINED_BYTES)
-            .map_err(|error| format!("sealed lexical batch bounds: {error}"))?;
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed.to_vec()),
-        sealed_len,
-        state_digest.clone(),
-        MAX_PAGE_CHUNKS,
-        MAX_PAGE_BYTES,
-        control,
-    )
-    .map_err(|error| format!("open sealed lexical page source: {error}"))?;
-    let mut pages = Vec::new();
-    loop {
-        let read = source
-            .next_page_batch_if(control, bounds, |staged| {
-                NonZeroUsize::new(staged.len())
-                    .ok_or_else(|| "sealed lexical batch staged no pages".to_owned())
-            })
-            .map_err(|error| format!("stage sealed lexical page batch: {error}"))?
-            .map_err(|error| format!("admit sealed lexical page batch: {error}"))?;
-        match read {
-            VerifiedSealedLexicalPageBatchReadV1::Pages(batch) => pages.extend(batch),
-            VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => {
-                return Ok((pages, receipt));
-            }
-        }
-    }
-}
-
 fn projection_metadata(
     generation: &CodeIndexPublishedGenerationV1,
     repository: &RepositoryId,
@@ -1192,6 +759,11 @@ fn projection_metadata(
             "retriever.lexical.search-bench.v1",
         ),
         exact_score_domain: identity::<ScoreDomainId>("score.exact.search-bench.v1"),
+        clone_route: Some(CodeLexicalCloneRouteV1 {
+            project_id: generation.manifest().project_id.clone(),
+            worktree_id: generation.snapshot().worktree.clone(),
+            snapshot_digest: generation.manifest().snapshot_digest.clone(),
+        }),
     }
 }
 
@@ -1200,15 +772,10 @@ fn ingest_artifact(
     metadata: CodeLexicalProjectionMetadataV1,
     pages: &[VerifiedSealedLexicalPageV1],
     source_receipt: &VerifiedSealedLexicalSourceReceiptV1,
-    writer_revision: CodeLexicalArtifactWriterRevisionV1,
     control: &ActiveControl,
 ) -> Result<tracedecay_query::retrieval::lexical::VerifiedCodeLexicalArtifactV1, String> {
-    let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
-        artifact_path,
-        metadata,
-        writer_revision,
-    )
-    .map_err(|error| format!("create lexical artifact: {error}"))?;
+    let mut builder = CodeLexicalArtifactBuilderV1::create(artifact_path, metadata)
+        .map_err(|error| format!("create lexical artifact: {error}"))?;
     for batch in pages.chunks(BATCH_MAX_PAGES) {
         builder
             .append_pages(batch, control)
@@ -1225,9 +792,7 @@ fn ingest_artifact(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Scratch directory
-// ---------------------------------------------------------------------------
 
 struct Scratch {
     path: PathBuf,
@@ -1237,8 +802,7 @@ impl Scratch {
     fn create() -> Result<Self, String> {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
+            .map_or_default(|elapsed| elapsed.as_nanos());
         let path = std::env::temp_dir().join(format!(
             "tracedecay-search-bench-{}-{unique:x}",
             std::process::id()
@@ -1285,33 +849,6 @@ fn hash_file(path: &Path) -> Result<(ManifestDigest, u64), String> {
         .map_err(|error| format!("artifact digest: {error}"))?;
     Ok((digest, file_size_bytes))
 }
-
-fn peak_rss_bytes() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        let Some(value) = line.strip_prefix("VmHWM:") else {
-            continue;
-        };
-        let kilobytes = value.split_whitespace().next()?.parse::<u64>().ok()?;
-        return kilobytes.checked_mul(1024);
-    }
-    None
-}
-
-fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
 fn micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-}
-
-fn identity<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap_or_else(|error| {
-        panic!("deterministic benchmark identity {value:?} must be valid: {error:?}")
-    })
 }

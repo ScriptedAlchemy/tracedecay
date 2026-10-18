@@ -1,8 +1,8 @@
 use crate::runtime::snapshot_observation::SnapshotAdmissionRecord;
-#[cfg(test)]
-use crate::runtime::snapshot_observation::snapshot_cursor_after;
-#[cfg(test)]
 use crate::runtime::source::TranscriptIngestResult;
+use tracedecay_domain::{
+    ClineTranscriptStream, ObservationSourceIdentityV1, ProviderId, SessionId,
+};
 #[cfg(test)]
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
@@ -12,6 +12,7 @@ use tracedecay_domain::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClineLikeSnapshotObservationRecord {
     pub(super) provider: &'static str,
+    pub(super) stream: ClineTranscriptStream,
     pub(super) session_id: String,
     pub(super) native_record_id: String,
     pub(super) order: u64,
@@ -19,6 +20,13 @@ pub struct ClineLikeSnapshotObservationRecord {
 }
 
 impl SnapshotAdmissionRecord for ClineLikeSnapshotObservationRecord {
+    fn source_identity(&self) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
+        Ok(self.stream.source_identity(
+            ProviderId::new(self.provider)?,
+            SessionId::new(&self.session_id)?,
+        )?)
+    }
+
     fn provider(&self) -> &'static str {
         self.provider
     }
@@ -47,12 +55,12 @@ impl ClineLikeSnapshotObservationRecord {
         scope: ObservationScopeV1,
         generation: ObservationSourceGenerationV1,
     ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-        snapshot_cursor_after(
-            self.provider,
-            &self.session_id,
-            self.order,
+        Ok(ObservationSourceCursorV1::for_ordering(
+            self.source_identity()?,
             scope,
             generation,
-        )
+            tracedecay_domain::ObservationOrderingDomainV1::SnapshotOrder,
+            self.order + 1,
+        )?)
     }
 }

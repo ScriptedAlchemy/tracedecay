@@ -1,374 +1,453 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-/// Canonical operation identity shared by every retained application surface.
-///
-/// Transport bindings select the exposed subset without defining another
-/// operation enum or name conversion.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum ApplicationSurfaceOperation {
-    GitStatus,
-    GitDiff,
-    GitHistory,
-    GitBlame,
-    GitHunks,
-    GitPreview,
-    GitApply,
-    GitHubStackSignalExpand,
-    NativeIntegrationStackSnapshot,
-    NativeIntegrationPreflight,
-    NativeIntegrationApprove,
-    NativeIntegrationApply,
-    NativeIntegrationStatus,
-    NativeIntegrationCancel,
-    NativeIntegrationWorktreeInventory,
-    NativeIntegrationWorktreeInspect,
-    NativeIntegrationWorktreeConfirm,
-    NativeIntegrationWorktreeRemove,
-    NativeIntegrationWorktreeReconcile,
-    FeedbackDiagnostics,
-    FeedbackGet,
-    FeedbackExpand,
-    FeedbackList,
-    FeedbackImpact,
-    FeedbackAdvisoryCycle,
-    AffectedTests,
-    TestResults,
-    CodeExactOccurrence,
-    CodePhraseSearch,
-    CodeSymbolSearch,
-    CodeSignatureSearch,
-    CodeImplementations,
-    CodeTypeHierarchy,
-    CodeCallers,
-    CodeCallees,
-    CodeFacets,
-    CodeTimeline,
-    CodeDeclaration,
-    CodeDefinition,
-    CodeTypeDefinition,
-    CodeReferences,
-    SessionLookup,
-    QualifiedName,
-    CallChain,
-    FileDependents,
-    SourceLines,
-    SourceBody,
-    SourceOutline,
-    ModuleApi,
-    FileMetadata,
-    HealthRead,
-    HealthDelta,
-    StorageStatus,
-    DiagnosticsRead,
-    ObservatoryRead,
-    ConfigurationList,
-    ConfigurationExplain,
-    ConfigurationGet,
-    ConfigurationSet,
-    ConfigurationUnset,
-    ConfigurationBatch,
-    ConfigurationWriteCredential,
-    ConfigurationObservedState,
-    ConfigurationProtectedPreview,
-    ConfigurationProtectedApply,
-    ConfigurationRollbackPreview,
-    ConfigurationRollbackApply,
-    ConfigurationAudit,
-    ContextScoutStatus,
-    ContextScoutRecent,
-    ContextScoutExplain,
-    ContextScoutCapability,
-    ContextScoutBudget,
-    ContextScoutPause,
-    ContextScoutResume,
-    ContextScoutCancel,
-    ContextScoutClaim,
-    ContextScoutDelivery,
-    ContextScoutFeedback,
+macro_rules! application_surface_operations {
+    (
+        $(
+            $variant:ident => $catalog_name:literal
+            $(, mcp: $mcp_name:literal)?;
+        )+
+    ) => {
+        /// Canonical operation identity shared by every retained application surface.
+        ///
+        /// Transport bindings select the exposed subset without defining another
+        /// operation enum or name conversion.
+        #[derive(
+            Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+        )]
+        #[serde(rename_all = "snake_case")]
+        pub enum ApplicationSurfaceOperation {
+            $($variant,)+
+        }
+
+        impl ApplicationSurfaceOperation {
+            pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [
+                $(Self::$variant,)+
+            ];
+
+            pub fn from_catalog_name(name: &str) -> Option<Self> {
+                Self::ALL
+                    .into_iter()
+                    .find(|operation| operation.as_str() == name)
+            }
+
+            pub fn from_tool_name(tool_name: &str) -> Option<Self> {
+                let operation = tool_name
+                    .strip_prefix("tracedecay_")
+                    .unwrap_or(tool_name);
+                Self::ALL
+                    .into_iter()
+                    .find(|candidate| candidate.mcp_operation_name() == operation)
+            }
+
+            pub fn from_surface_name(surface: crate::BindingSurface, name: &str) -> Option<Self> {
+                Self::ALL
+                    .into_iter()
+                    .find(|candidate| candidate.name_for_surface(surface) == name)
+            }
+
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $catalog_name,)+
+                }
+            }
+
+            /// MCP/CLI spelling for this canonical operation.
+            ///
+            /// Diagnostics and the code-graph navigation reads keep their
+            /// established short public tool spellings; their catalog and
+            /// HTTP/SDK identities keep the canonical name.
+            pub const fn mcp_operation_name(self) -> &'static str {
+                match self {
+                    $(
+                        Self::$variant => application_surface_operations!(
+                            @mcp_name $catalog_name $(, $mcp_name)?
+                        ),
+                    )+
+                }
+            }
+
+            pub const fn mcp_tool_name(self) -> &'static str {
+                match self {
+                    $(
+                        Self::$variant => application_surface_operations!(
+                            @mcp_tool_name $catalog_name $(, $mcp_name)?
+                        ),
+                    )+
+                }
+            }
+
+            pub const fn name_for_surface(self, surface: crate::BindingSurface) -> &'static str {
+                match surface {
+                    crate::BindingSurface::Cli | crate::BindingSurface::Mcp => {
+                        self.mcp_operation_name()
+                    }
+                    crate::BindingSurface::Http
+                    | crate::BindingSurface::Lsp
+                    | crate::BindingSurface::Dashboard => self.as_str(),
+                }
+            }
+        }
+    };
+    (@mcp_name $catalog_name:literal, $mcp_name:literal) => {
+        $mcp_name
+    };
+    (@mcp_name $catalog_name:literal) => {
+        $catalog_name
+    };
+    (@mcp_tool_name $catalog_name:literal, $mcp_name:literal) => {
+        concat!("tracedecay_", $mcp_name)
+    };
+    (@mcp_tool_name $catalog_name:literal) => {
+        concat!("tracedecay_", $catalog_name)
+    };
+}
+
+application_surface_operations! {
+    GitStatus => "git_status";
+    GitDiff => "git_diff";
+    GitHistory => "git_history";
+    GitBlame => "git_blame";
+    GitHunks => "git_hunks";
+    GitPreview => "git_preview";
+    GitApply => "git_apply";
+    GitHubStackSignalExpand => "github_stack_signal_expand";
+    NativeIntegrationStackSnapshot => "stack_snapshot";
+    NativeIntegrationPreflight => "preflight_native_integration";
+    NativeIntegrationApprove => "approve_native_integration";
+    NativeIntegrationApply => "apply_native_integration";
+    NativeIntegrationStatus => "native_integration_status";
+    NativeIntegrationCancel => "cancel_native_integration";
+    NativeIntegrationWorktreeInventory => "worktree_inventory";
+    NativeIntegrationWorktreeInspect => "worktree_cleanup_inspect";
+    NativeIntegrationWorktreeConfirm => "worktree_cleanup_confirm";
+    NativeIntegrationWorktreeRemove => "worktree_cleanup_remove";
+    NativeIntegrationWorktreeReconcile => "worktree_cleanup_reconcile";
+    FeedbackDiagnostics => "feedback_diagnostics";
+    FeedbackGet => "feedback_get";
+    FeedbackExpand => "feedback_expand";
+    FeedbackList => "feedback_list";
+    FeedbackImpact => "feedback_impact";
+    FeedbackAdvisoryCycle => "feedback_advisory_cycle";
+    FeedbackProximity => "feedback_proximity";
+    AffectedTests => "affected_tests";
+    TestResults => "test_results";
+    CodeExactOccurrence => "code_exact_occurrence";
+    CodePhraseSearch => "code_phrase_search";
+    CodeSymbolSearch => "code_symbol_search";
+    CodeSignatureSearch => "code_signature_search", mcp: "signature_search";
+    CodeImplementations => "code_implementations", mcp: "implementations";
+    CodeTypeHierarchy => "code_type_hierarchy", mcp: "type_hierarchy";
+    CodeCallers => "code_callers", mcp: "callers";
+    CodeCallees => "code_callees", mcp: "callees";
+    CodeFacets => "code_facets";
+    CodeTimeline => "code_timeline";
+    CodeDeclaration => "code_declaration";
+    CodeTypeDefinition => "code_type_definition";
+    CodeReferences => "code_references";
+    SessionLookup => "session_lookup";
+    QualifiedName => "qualified_name";
+    CallChain => "call_chain";
+    FileDependents => "file_dependents";
+    SourceLines => "source_lines";
+    SourceBody => "source_body";
+    SourceOutline => "source_outline";
+    ModuleApi => "module_api";
+    Context => "context";
+    Node => "node";
+    Impact => "impact";
+    Similar => "similar";
+    Redundancy => "redundancy";
+    RenamePreview => "rename_preview";
+    PortStatus => "port_status";
+    PortOrder => "port_order";
+    Todos => "todos";
+    TestMap => "test_map";
+    TestRisk => "test_risk";
+    Gini => "gini";
+    DependencyDepth => "dependency_depth";
+    Health => "health";
+    Dsm => "dsm";
+    Diagnose => "diagnose";
+    DeadCode => "dead_code";
+    Circular => "circular";
+    Hotspots => "hotspots";
+    UnmountedFiles => "unmounted_files";
+    Rank => "rank";
+    Largest => "largest";
+    Coupling => "coupling";
+    InheritanceDepth => "inheritance_depth";
+    Distribution => "distribution";
+    Recursion => "recursion";
+    Complexity => "complexity";
+    DocCoverage => "doc_coverage";
+    GodClass => "god_class";
+    UnsafePatterns => "unsafe_patterns";
+    Constructors => "constructors";
+    FieldSites => "field_sites";
+    FindExactSymbol => "find_exact_symbol";
+    ByQualifiedName => "by_qualified_name";
+    Signature => "signature";
+    Derives => "derives";
+    Grep => "grep";
+    AstGrepSearch => "ast_grep_search";
+    Affected => "affected";
+    DiffContext => "diff_context";
+    Changelog => "changelog";
+    CommitContext => "commit_context";
+    PrContext => "pr_context";
+    BranchSearch => "branch_search";
+    BranchDiff => "branch_diff";
+    BranchList => "branch_list";
+    Files => "files";
+    Config => "config";
+    Retrieve => "retrieve";
+    AutomationRunList => "automation_run_list";
+    AutomationRunView => "automation_run_view";
+    AutomationRunArtifactView => "automation_run_artifact_view";
+    SkillList => "skill_list";
+    SkillView => "skill_view";
+    HermesSkillBridge => "hermes_skill_bridge";
+    Analytics => "analytics";
+    Search => "search";
+    RunAffectedTests => "run_affected_tests";
+    Dashboard => "dashboard";
+    Status => "status";
+    ActiveProject => "active_project";
+    RemoteStatus => "remote_status";
+    Runtime => "runtime";
+    ProjectList => "project_list";
+    ProjectSearch => "project_search";
+    ProjectContext => "project_context";
+    AdminSync => "admin_sync";
+    AdminCli => "admin_cli";
+    AdminProject => "admin_project";
+    HookRuntime => "hook_runtime";
+    HealthRead => "health_read";
+    HealthDelta => "health_delta";
+    StorageStatus => "storage_status";
+    DiagnosticsRead => "diagnostics_read", mcp: "diagnostics";
+    ObservatoryRead => "observatory_read";
+    ConfigurationList => "configuration_list";
+    ConfigurationGet => "configuration_get";
+    ConfigurationSet => "configuration_set";
+    ConfigurationUnset => "configuration_unset";
+    ConfigurationBatch => "configuration_batch";
+    ConfigurationObservedState => "configuration_observed_state";
+    ConfigurationProtectedPreview => "configuration_protected_preview";
+    ConfigurationProtectedApply => "configuration_protected_apply";
+    ConfigurationRollbackPreview => "configuration_rollback_preview";
+    ConfigurationRollbackApply => "configuration_rollback_apply";
+    ConfigurationAudit => "configuration_audit";
+    ContextScoutStatus => "context_scout_status";
+    ContextScoutRecent => "context_scout_recent";
+    ContextScoutExplain => "context_scout_explain";
+    ContextScoutCapability => "context_scout_capability";
+    ContextScoutBudget => "context_scout_budget";
+    ContextScoutPause => "context_scout_pause";
+    ContextScoutResume => "context_scout_resume";
+    ContextScoutCancel => "context_scout_cancel";
+    ContextScoutClaim => "context_scout_claim";
+    ContextScoutDelivery => "context_scout_delivery";
+    ContextScoutFeedback => "context_scout_feedback";
+    StrReplace => "str_replace";
+    MultiStrReplace => "multi_str_replace";
+    InsertAt => "insert_at";
+    AstGrepRewrite => "ast_grep_rewrite";
+    ReplaceSymbol => "replace_symbol";
+    InsertAtSymbol => "insert_at_symbol";
+    MoveSymbol => "move_symbol";
+    RenameSymbol => "rename_symbol";
+    SourceEditReconcile => "source_edit_reconcile";
+    SourceEditRollback => "source_edit_rollback";
+    FactStoreCurate => "fact_store_curate";
+    FactStoreAdd => "fact_store_add";
+    FactStoreSearch => "fact_store_search";
+    FactStoreProbe => "fact_store_probe";
+    FactStoreRelated => "fact_store_related";
+    FactStoreReason => "fact_store_reason";
+    FactStoreContradict => "fact_store_contradict";
+    FactStoreGet => "fact_store_get";
+    FactStoreUpdate => "fact_store_update";
+    FactStoreRemove => "fact_store_remove";
+    FactStoreSupersede => "fact_store_supersede";
+    FactStoreList => "fact_store_list";
+    FactFeedback => "fact_feedback";
+    MemoryStatus => "memory_status";
+    SessionRefreshStatus => "session_refresh_status";
+    SessionRefreshCancel => "session_refresh_cancel";
+    SessionRefreshBegin => "session_refresh_begin";
+    MessageSearch => "message_search";
+    SessionsFor => "sessions_for";
+    Workflows => "workflows";
+    LcmStatus => "lcm_status";
+    LcmDoctor => "lcm_doctor";
+    LcmLoadSession => "lcm_load_session";
+    LcmGrep => "lcm_grep";
+    LcmDescribe => "lcm_describe";
+    LcmExpand => "lcm_expand";
+    LcmExpandQuery => "lcm_expand_query";
 }
 
 impl ApplicationSurfaceOperation {
-    pub const ALL: [Self; 79] = [
-        Self::GitStatus,
-        Self::GitDiff,
-        Self::GitHistory,
-        Self::GitBlame,
-        Self::GitHunks,
-        Self::GitPreview,
-        Self::GitApply,
-        Self::GitHubStackSignalExpand,
-        Self::NativeIntegrationStackSnapshot,
-        Self::NativeIntegrationPreflight,
-        Self::NativeIntegrationApprove,
-        Self::NativeIntegrationApply,
-        Self::NativeIntegrationStatus,
-        Self::NativeIntegrationCancel,
-        Self::NativeIntegrationWorktreeInventory,
-        Self::NativeIntegrationWorktreeInspect,
-        Self::NativeIntegrationWorktreeConfirm,
-        Self::NativeIntegrationWorktreeRemove,
-        Self::NativeIntegrationWorktreeReconcile,
-        Self::FeedbackDiagnostics,
-        Self::FeedbackGet,
-        Self::FeedbackExpand,
-        Self::FeedbackList,
-        Self::FeedbackImpact,
-        Self::FeedbackAdvisoryCycle,
-        Self::AffectedTests,
-        Self::TestResults,
-        Self::CodeExactOccurrence,
-        Self::CodePhraseSearch,
-        Self::CodeSymbolSearch,
-        Self::CodeSignatureSearch,
-        Self::CodeImplementations,
-        Self::CodeTypeHierarchy,
-        Self::CodeCallers,
-        Self::CodeCallees,
-        Self::CodeFacets,
-        Self::CodeTimeline,
-        Self::CodeDeclaration,
-        Self::CodeDefinition,
-        Self::CodeTypeDefinition,
-        Self::CodeReferences,
-        Self::SessionLookup,
-        Self::QualifiedName,
-        Self::CallChain,
-        Self::FileDependents,
-        Self::SourceLines,
-        Self::SourceBody,
-        Self::SourceOutline,
-        Self::ModuleApi,
-        Self::FileMetadata,
-        Self::HealthRead,
-        Self::HealthDelta,
-        Self::StorageStatus,
-        Self::DiagnosticsRead,
-        Self::ObservatoryRead,
-        Self::ConfigurationList,
-        Self::ConfigurationExplain,
-        Self::ConfigurationGet,
-        Self::ConfigurationSet,
-        Self::ConfigurationUnset,
-        Self::ConfigurationBatch,
-        Self::ConfigurationWriteCredential,
-        Self::ConfigurationObservedState,
-        Self::ConfigurationProtectedPreview,
-        Self::ConfigurationProtectedApply,
-        Self::ConfigurationRollbackPreview,
-        Self::ConfigurationRollbackApply,
-        Self::ConfigurationAudit,
-        Self::ContextScoutStatus,
-        Self::ContextScoutRecent,
-        Self::ContextScoutExplain,
-        Self::ContextScoutCapability,
-        Self::ContextScoutBudget,
-        Self::ContextScoutPause,
-        Self::ContextScoutResume,
-        Self::ContextScoutCancel,
-        Self::ContextScoutClaim,
-        Self::ContextScoutDelivery,
-        Self::ContextScoutFeedback,
+    /// Graph-backed reads and reports answered by the project's graph-tool
+    /// owner with their typed catalog result in `ApplicationOutcome::Result`.
+    pub const GRAPH_TOOL_OPERATIONS: &[Self] = &[
+        Self::Context,
+        Self::Node,
+        Self::Impact,
+        Self::Similar,
+        Self::Redundancy,
+        Self::RenamePreview,
+        Self::PortStatus,
+        Self::PortOrder,
+        Self::Todos,
+        Self::TestMap,
+        Self::TestRisk,
+        Self::Gini,
+        Self::DependencyDepth,
+        Self::Health,
+        Self::Dsm,
+        Self::Diagnose,
+        Self::DeadCode,
+        Self::Circular,
+        Self::Hotspots,
+        Self::UnmountedFiles,
+        Self::Rank,
+        Self::Largest,
+        Self::Coupling,
+        Self::InheritanceDepth,
+        Self::Distribution,
+        Self::Recursion,
+        Self::Complexity,
+        Self::DocCoverage,
+        Self::GodClass,
+        Self::UnsafePatterns,
+        Self::Constructors,
+        Self::FieldSites,
+        Self::FindExactSymbol,
+        Self::ByQualifiedName,
+        Self::Signature,
+        Self::Derives,
+        Self::Grep,
+        Self::AstGrepSearch,
+        Self::Affected,
+        Self::DiffContext,
+        Self::Changelog,
+        Self::CommitContext,
+        Self::PrContext,
+        Self::BranchSearch,
+        Self::BranchDiff,
+        Self::BranchList,
+        Self::Files,
+        Self::Config,
+        Self::Retrieve,
+        Self::AutomationRunList,
+        Self::AutomationRunView,
+        Self::AutomationRunArtifactView,
+        Self::SkillList,
+        Self::SkillView,
+        Self::HermesSkillBridge,
+        Self::Analytics,
+        Self::Search,
+        Self::RunAffectedTests,
+        Self::Dashboard,
+        Self::Status,
+        Self::ActiveProject,
+        Self::RemoteStatus,
+        Self::Runtime,
+        Self::AdminSync,
+        Self::AdminCli,
+        Self::AdminProject,
+        Self::HookRuntime,
     ];
 
-    pub fn from_catalog_name(name: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|operation| operation.as_str() == name)
+    /// Reads of the authenticated profile's project registry. They name no
+    /// project, so the daemon's profile owner answers them with their typed
+    /// catalog result for every connection, with or without a project.
+    pub const PROFILE_REGISTRY_OPERATIONS: &[Self] =
+        &[Self::ProjectList, Self::ProjectSearch, Self::ProjectContext];
+
+    /// Owner-served operations that first-party CLI commands and host hooks
+    /// call by name. They are never advertised in `tools/list` or mounted on
+    /// HTTP, so an agent cannot discover or select them.
+    pub const INTERNAL_OPERATIONS: &[Self] = &[
+        Self::AdminSync,
+        Self::AdminCli,
+        Self::AdminProject,
+        Self::HookRuntime,
+    ];
+
+    pub fn is_graph_tool(self) -> bool {
+        Self::GRAPH_TOOL_OPERATIONS.contains(&self)
     }
 
-    pub fn from_tool_name(tool_name: &str) -> Option<Self> {
-        let operation = match tool_name.strip_prefix("tracedecay_") {
-            Some(operation) => operation,
-            None => tool_name,
-        };
-        if operation == "diagnostics" {
-            return Some(Self::DiagnosticsRead);
-        }
-        Self::from_catalog_name(operation)
+    pub fn is_internal(self) -> bool {
+        Self::INTERNAL_OPERATIONS.contains(&self)
     }
 
-    pub const fn as_str(self) -> &'static str {
+    pub fn is_profile_registry_read(self) -> bool {
+        Self::PROFILE_REGISTRY_OPERATIONS.contains(&self)
+    }
+
+    /// Whether the daemon's profile owner, not a project's owner, answers
+    /// this call. A registry read always names no project; an operation
+    /// that is otherwise project-scoped reaches the profile owner only for
+    /// the requests that select the profile.
+    pub fn is_profile_owner_request(self, arguments: &serde_json::Map<String, Value>) -> bool {
+        let argument = |key: &str| arguments.get(key).and_then(Value::as_str);
         match self {
-            Self::GitStatus => "git_status",
-            Self::GitDiff => "git_diff",
-            Self::GitHistory => "git_history",
-            Self::GitBlame => "git_blame",
-            Self::GitHunks => "git_hunks",
-            Self::GitPreview => "git_preview",
-            Self::GitApply => "git_apply",
-            Self::GitHubStackSignalExpand => "github_stack_signal_expand",
-            Self::NativeIntegrationStackSnapshot => "stack_snapshot",
-            Self::NativeIntegrationPreflight => "preflight_native_integration",
-            Self::NativeIntegrationApprove => "approve_native_integration",
-            Self::NativeIntegrationApply => "apply_native_integration",
-            Self::NativeIntegrationStatus => "native_integration_status",
-            Self::NativeIntegrationCancel => "cancel_native_integration",
-            Self::NativeIntegrationWorktreeInventory => "worktree_inventory",
-            Self::NativeIntegrationWorktreeInspect => "worktree_cleanup_inspect",
-            Self::NativeIntegrationWorktreeConfirm => "worktree_cleanup_confirm",
-            Self::NativeIntegrationWorktreeRemove => "worktree_cleanup_remove",
-            Self::NativeIntegrationWorktreeReconcile => "worktree_cleanup_reconcile",
-            Self::FeedbackDiagnostics => "feedback_diagnostics",
-            Self::FeedbackGet => "feedback_get",
-            Self::FeedbackExpand => "feedback_expand",
-            Self::FeedbackList => "feedback_list",
-            Self::FeedbackImpact => "feedback_impact",
-            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
-            Self::AffectedTests => "affected_tests",
-            Self::TestResults => "test_results",
-            Self::CodeExactOccurrence => "code_exact_occurrence",
-            Self::CodePhraseSearch => "code_phrase_search",
-            Self::CodeSymbolSearch => "code_symbol_search",
-            Self::CodeSignatureSearch => "code_signature_search",
-            Self::CodeImplementations => "code_implementations",
-            Self::CodeTypeHierarchy => "code_type_hierarchy",
-            Self::CodeCallers => "code_callers",
-            Self::CodeCallees => "code_callees",
-            Self::CodeFacets => "code_facets",
-            Self::CodeTimeline => "code_timeline",
-            Self::CodeDeclaration => "code_declaration",
-            Self::CodeDefinition => "code_definition",
-            Self::CodeTypeDefinition => "code_type_definition",
-            Self::CodeReferences => "code_references",
-            Self::SessionLookup => "session_lookup",
-            Self::QualifiedName => "qualified_name",
-            Self::CallChain => "call_chain",
-            Self::FileDependents => "file_dependents",
-            Self::SourceLines => "source_lines",
-            Self::SourceBody => "source_body",
-            Self::SourceOutline => "source_outline",
-            Self::ModuleApi => "module_api",
-            Self::FileMetadata => "file_metadata",
-            Self::HealthRead => "health_read",
-            Self::HealthDelta => "health_delta",
-            Self::StorageStatus => "storage_status",
-            Self::DiagnosticsRead => "diagnostics_read",
-            Self::ObservatoryRead => "observatory_read",
-            Self::ConfigurationList => "configuration_list",
-            Self::ConfigurationExplain => "configuration_explain",
-            Self::ConfigurationGet => "configuration_get",
-            Self::ConfigurationSet => "configuration_set",
-            Self::ConfigurationUnset => "configuration_unset",
-            Self::ConfigurationBatch => "configuration_batch",
-            Self::ConfigurationWriteCredential => "configuration_write_credential",
-            Self::ConfigurationObservedState => "configuration_observed_state",
-            Self::ConfigurationProtectedPreview => "configuration_protected_preview",
-            Self::ConfigurationProtectedApply => "configuration_protected_apply",
-            Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
-            Self::ConfigurationRollbackApply => "configuration_rollback_apply",
-            Self::ConfigurationAudit => "configuration_audit",
-            Self::ContextScoutStatus => "context_scout_status",
-            Self::ContextScoutRecent => "context_scout_recent",
-            Self::ContextScoutExplain => "context_scout_explain",
-            Self::ContextScoutCapability => "context_scout_capability",
-            Self::ContextScoutBudget => "context_scout_budget",
-            Self::ContextScoutPause => "context_scout_pause",
-            Self::ContextScoutResume => "context_scout_resume",
-            Self::ContextScoutCancel => "context_scout_cancel",
-            Self::ContextScoutClaim => "context_scout_claim",
-            Self::ContextScoutDelivery => "context_scout_delivery",
-            Self::ContextScoutFeedback => "context_scout_feedback",
+            Self::ProjectList | Self::ProjectSearch | Self::ProjectContext => true,
+            Self::AdminProject => {
+                argument("action") == Some("automation_reconcile")
+                    && argument("scope") == Some("profile")
+            }
+            // Registry, storage, and savings actions read only the profile;
+            // cost and analytics name the profile when run outside a project.
+            Self::AdminCli => match argument("action") {
+                Some(
+                    "registry_list"
+                    | "registry_context"
+                    | "registry_empty"
+                    | "registry_project_tokens"
+                    | "registry_gc"
+                    | "storage_report"
+                    | "gain_query",
+                ) => true,
+                Some("cost_summary" | "analytics_sync" | "analytics_diagnostics") => {
+                    argument("scope") == Some("profile")
+                }
+                _ => false,
+            },
+            // A hook with no project route lands in the profile's stores.
+            Self::HookRuntime => match argument("action") {
+                Some("hermes_receipt" | "hook_v2_profile_admit") => true,
+                Some("ingest_transcript" | "claude_compact") => {
+                    arguments.get("user_scope").and_then(Value::as_bool) == Some(true)
+                }
+                _ => false,
+            },
+            _ => false,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::ApplicationSurfaceOperation;
 
-    const CANONICAL_NAMES: [&str; 79] = [
-        "git_status",
-        "git_diff",
-        "git_history",
-        "git_blame",
-        "git_hunks",
-        "git_preview",
-        "git_apply",
-        "github_stack_signal_expand",
-        "stack_snapshot",
-        "preflight_native_integration",
-        "approve_native_integration",
-        "apply_native_integration",
-        "native_integration_status",
-        "cancel_native_integration",
-        "worktree_inventory",
-        "worktree_cleanup_inspect",
-        "worktree_cleanup_confirm",
-        "worktree_cleanup_remove",
-        "worktree_cleanup_reconcile",
-        "feedback_diagnostics",
-        "feedback_get",
-        "feedback_expand",
-        "feedback_list",
-        "feedback_impact",
-        "feedback_advisory_cycle",
-        "affected_tests",
-        "test_results",
-        "code_exact_occurrence",
-        "code_phrase_search",
-        "code_symbol_search",
-        "code_signature_search",
-        "code_implementations",
-        "code_type_hierarchy",
-        "code_callers",
-        "code_callees",
-        "code_facets",
-        "code_timeline",
-        "code_declaration",
-        "code_definition",
-        "code_type_definition",
-        "code_references",
-        "session_lookup",
-        "qualified_name",
-        "call_chain",
-        "file_dependents",
-        "source_lines",
-        "source_body",
-        "source_outline",
-        "module_api",
-        "file_metadata",
-        "health_read",
-        "health_delta",
-        "storage_status",
-        "diagnostics_read",
-        "observatory_read",
-        "configuration_list",
-        "configuration_explain",
-        "configuration_get",
-        "configuration_set",
-        "configuration_unset",
-        "configuration_batch",
-        "configuration_write_credential",
-        "configuration_observed_state",
-        "configuration_protected_preview",
-        "configuration_protected_apply",
-        "configuration_rollback_preview",
-        "configuration_rollback_apply",
-        "configuration_audit",
-        "context_scout_status",
-        "context_scout_recent",
-        "context_scout_explain",
-        "context_scout_capability",
-        "context_scout_budget",
-        "context_scout_pause",
-        "context_scout_resume",
-        "context_scout_cancel",
-        "context_scout_claim",
-        "context_scout_delivery",
-        "context_scout_feedback",
-    ];
-
     #[test]
-    fn canonical_names_preserve_order_and_round_trip() {
-        assert_eq!(ApplicationSurfaceOperation::ALL.len(), 79);
-        for (operation, expected_name) in ApplicationSurfaceOperation::ALL
+    fn canonical_names_are_unique_and_round_trip() {
+        let names = ApplicationSurfaceOperation::ALL
             .into_iter()
-            .zip(CANONICAL_NAMES)
-        {
-            assert_eq!(operation.as_str(), expected_name);
+            .map(ApplicationSurfaceOperation::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), ApplicationSurfaceOperation::ALL.len());
+        for operation in ApplicationSurfaceOperation::ALL {
             assert_eq!(
-                ApplicationSurfaceOperation::from_catalog_name(expected_name),
+                ApplicationSurfaceOperation::from_catalog_name(operation.as_str()),
                 Some(operation)
             );
         }
@@ -376,6 +455,82 @@ mod tests {
             ApplicationSurfaceOperation::from_catalog_name("not_an_operation"),
             None
         );
+    }
+
+    #[test]
+    fn only_profile_selecting_requests_reach_the_profile_owner() {
+        let owner = |operation: ApplicationSurfaceOperation, arguments: serde_json::Value| {
+            operation.is_profile_owner_request(arguments.as_object().expect("object arguments"))
+        };
+        let profile_reconcile =
+            serde_json::json!({"action": "automation_reconcile", "scope": "profile"});
+        assert!(owner(
+            ApplicationSurfaceOperation::ProjectList,
+            serde_json::json!({})
+        ));
+        assert!(owner(
+            ApplicationSurfaceOperation::AdminProject,
+            profile_reconcile.clone()
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminProject,
+            serde_json::json!({"action": "automation_reconcile", "scope": "project"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminProject,
+            serde_json::json!({"action": "counter_get"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminSync,
+            profile_reconcile
+        ));
+        assert!(owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "registry_list", "limit": 10})
+        ));
+        assert!(owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "cost_summary", "range": "7d", "scope": "profile"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "cost_summary", "range": "7d", "scope": "project"})
+        ));
+        assert!(!owner(
+            ApplicationSurfaceOperation::AdminCli,
+            serde_json::json!({"action": "sessions_import"})
+        ));
+        for (arguments, profile) in [
+            (
+                serde_json::json!({"action": "hermes_receipt", "event": {}}),
+                true,
+            ),
+            (serde_json::json!({"action": "hook_v2_profile_admit"}), true),
+            (
+                serde_json::json!({"action": "ingest_transcript", "user_scope": true}),
+                true,
+            ),
+            (
+                serde_json::json!({"action": "ingest_transcript", "user_scope": false}),
+                false,
+            ),
+            (
+                serde_json::json!({"action": "claude_compact", "user_scope": true}),
+                true,
+            ),
+            (
+                serde_json::json!({"action": "claude_compact", "user_scope": "true"}),
+                false,
+            ),
+            (serde_json::json!({"action": "reset_counter"}), false),
+            (serde_json::json!({"action": "hook_v2_admit"}), false),
+        ] {
+            assert_eq!(
+                owner(ApplicationSurfaceOperation::HookRuntime, arguments.clone()),
+                profile,
+                "{arguments}"
+            );
+        }
     }
 
     #[test]
@@ -406,17 +561,14 @@ mod tests {
     }
 
     #[test]
-    fn tool_names_resolve_prefixes_and_diagnostics_alias() {
+    fn tool_names_resolve_the_transport_spelling_only() {
         for operation in ApplicationSurfaceOperation::ALL {
             assert_eq!(
-                ApplicationSurfaceOperation::from_tool_name(operation.as_str()),
+                ApplicationSurfaceOperation::from_tool_name(operation.mcp_operation_name()),
                 Some(operation)
             );
             assert_eq!(
-                ApplicationSurfaceOperation::from_tool_name(&format!(
-                    "tracedecay_{}",
-                    operation.as_str()
-                )),
+                ApplicationSurfaceOperation::from_tool_name(operation.mcp_tool_name()),
                 Some(operation)
             );
         }
@@ -429,15 +581,24 @@ mod tests {
             Some(ApplicationSurfaceOperation::DiagnosticsRead)
         );
         assert_eq!(
+            ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics_read"),
+            None
+        );
+        assert_eq!(
+            ApplicationSurfaceOperation::from_tool_name("tracedecay_callers"),
+            Some(ApplicationSurfaceOperation::CodeCallers)
+        );
+        assert_eq!(
+            ApplicationSurfaceOperation::from_tool_name("tracedecay_code_callers"),
+            None
+        );
+        assert_eq!(
+            ApplicationSurfaceOperation::CodeCallers.as_str(),
+            "code_callers"
+        );
+        assert_eq!(
             ApplicationSurfaceOperation::from_tool_name("tracedecay_not_an_operation"),
             None
         );
-    }
-
-    #[test]
-    fn operation_identity_is_copy_eq_and_hash() {
-        fn assert_traits<T: Copy + Eq + std::hash::Hash>() {}
-
-        assert_traits::<ApplicationSurfaceOperation>();
     }
 }

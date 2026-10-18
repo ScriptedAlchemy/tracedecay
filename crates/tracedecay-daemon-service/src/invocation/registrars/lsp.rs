@@ -1,5 +1,5 @@
 use super::*;
-use tracedecay_usecases::lsp_runtime::ProductionSemanticAuthorities;
+use tracedecay_application::lsp_runtime::ProductionSemanticAuthorities;
 
 #[derive(Clone)]
 pub struct DaemonLspOwnerRegistrar {
@@ -13,7 +13,6 @@ impl DaemonLspOwnerRegistrar {
         }
     }
 
-    #[hotpath::skip]
     pub async fn register_lsp_owner(
         &self,
         project_root: PathBuf,
@@ -23,23 +22,6 @@ impl DaemonLspOwnerRegistrar {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
-    pub async fn register_factory(
-        &self,
-        project_root: PathBuf,
-        factory: Arc<DaemonLspSessionFactory>,
-    ) -> Result<(), ProjectRuntimeRegistryError> {
-        self.register_factory_for_project(
-            project_root,
-            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
-            ProjectId::new("project.test.lsp").expect("test LSP project"),
-            factory,
-        )
-        .await
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn register_factory_for_project(
         &self,
         project_root: PathBuf,
@@ -60,7 +42,11 @@ impl DaemonLspOwnerRegistrar {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "daemon.service.lsp.build_and_register", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.lsp.build_and_register",
+        level = "trace",
+        skip_all
+    )]
     pub async fn build_and_register(
         &self,
         project_root: PathBuf,
@@ -70,7 +56,6 @@ impl DaemonLspOwnerRegistrar {
         code_index: Arc<
             tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         >,
-        runtime: tokio::runtime::Handle,
         diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
         languages: &[String],
         root_uri: String,
@@ -109,7 +94,6 @@ impl DaemonLspOwnerRegistrar {
         let mut gateway_capabilities = gateway_capabilities;
         gateway_capabilities.supports_workspace_folders = true;
         let semantics = production_semantic_authorities(
-            runtime.clone(),
             diagnostic_broker.clone(),
             languages,
             project_root.clone(),
@@ -127,9 +111,8 @@ impl DaemonLspOwnerRegistrar {
             scope_grant.scope.clone(),
             project_root.clone(),
         ));
-        let diagnostic_records = Arc::new(
-            tracedecay_usecases::feedback::diagnostics::DatabaseDiagnosticStore::new(database),
-        );
+        let diagnostic_records =
+            Arc::new(tracedecay_application::diagnostics_store::DiagnosticsStore::new(database));
         // The invocation handler publishes into the same per-project fan-out
         // that sessions from this factory forward as read-only notifications.
         let native_integration_status = self
@@ -138,8 +121,8 @@ impl DaemonLspOwnerRegistrar {
             .await;
         let factory = Arc::new(
             lsp_session_factory(
-                runtime,
                 feedback_runtime,
+                registered_database.clone(),
                 code_index.clone() as Arc<dyn LspCodeIndexProjectionIdentityPort>,
                 workspace_index,
                 diagnostic_records,

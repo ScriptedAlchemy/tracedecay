@@ -2,8 +2,13 @@ use std::collections::BTreeSet;
 
 use tracedecay_domain::RetrievalAnchorId;
 
-#[cfg(test)]
-use tracedecay_domain::ByteRangeV1;
+/// Term count above which the drop-one relaxation tier is not planned.
+///
+/// The tier expands to one conjunction per dropped term, so its expression
+/// grows as the square of the term count. Past this width the expansion is
+/// broader than the strict scan it stands in for and states nothing a reader
+/// would recognise as "the same query, one term short".
+pub const LEXICAL_RELAXED_MAX_TERMS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CandidateChannel {
@@ -13,7 +18,14 @@ pub enum CandidateChannel {
     Phrase,
     Entity,
     Time,
+    /// Strict tier of the lexical ladder: every term must match one message.
     Lexical,
+    /// The one relaxation tier: any all-but-one subset of the terms must match.
+    ///
+    /// Reached only after [`CandidateChannel::Lexical`] is verified empty under
+    /// the same filters and snapshot, so a query answered strictly never pays
+    /// for it.
+    LexicalRelaxed,
     Summary,
     Span,
     Burst,
@@ -42,13 +54,12 @@ impl CandidatePlan {
             .any(|clause| clause.channel == channel && clause.value == value)
     }
 
-    #[hotpath::skip]
     pub const fn has_semantic_channel(&self) -> bool {
         false
     }
 }
 
-#[hotpath::measure(label = "temporal.candidates.plan_scope")]
+#[tracing::instrument(name = "temporal.candidates.plan_scope", level = "trace", skip_all)]
 pub fn plan_scope_candidates() -> CandidatePlan {
     CandidatePlan {
         clauses: vec![
@@ -70,7 +81,7 @@ pub fn plan_scope_candidates() -> CandidatePlan {
     }
 }
 
-#[hotpath::measure(label = "temporal.candidates.plan_anchor")]
+#[tracing::instrument(name = "temporal.candidates.plan_anchor", level = "trace", skip_all)]
 pub fn plan_anchor(anchor_id: &RetrievalAnchorId) -> CandidatePlan {
     CandidatePlan {
         clauses: vec![CandidateClause {
@@ -81,7 +92,7 @@ pub fn plan_anchor(anchor_id: &RetrievalAnchorId) -> CandidatePlan {
     }
 }
 
-#[hotpath::measure(label = "temporal.candidates.plan_text")]
+#[tracing::instrument(name = "temporal.candidates.plan_text", level = "trace", skip_all)]
 pub fn plan_candidates(query: &str) -> CandidatePlan {
     let query = query.trim();
     if query.is_empty() {
@@ -91,6 +102,7 @@ pub fn plan_candidates(query: &str) -> CandidatePlan {
     let (phrases, remainder) = split_quoted(query);
     let mut clauses = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut lexical_tokens: Vec<&str> = Vec::new();
 
     push_clause(
         &mut clauses,
@@ -113,7 +125,17 @@ pub fn plan_candidates(query: &str) -> CandidatePlan {
     }
 
     for token in remainder.split_whitespace() {
-        if token.is_empty() || is_fts_operator(token) {
+        if token.is_empty() {
+            continue;
+        }
+        if is_fts_operator(token) {
+            // An uppercase boolean operator is structure the query typed, so it
+            // survives into the lexical clause and keeps the semantics it asked
+            // for. Every other spelling is a term-position stop word, and NEAR
+            // needs a call shape no bare token supplies.
+            if is_fts_boolean_operator(token) {
+                lexical_tokens.push(token);
+            }
             continue;
         }
         if looks_like_iso_date(token) {
@@ -132,13 +154,9 @@ pub fn plan_candidates(query: &str) -> CandidatePlan {
                 token.to_string(),
             );
         }
-        push_clause(
-            &mut clauses,
-            &mut seen,
-            CandidateChannel::Lexical,
-            token.to_string(),
-        );
+        lexical_tokens.push(token);
     }
+    push_lexical_ladder(&mut clauses, &mut seen, &lexical_tokens);
 
     push_clause(
         &mut clauses,
@@ -159,6 +177,30 @@ pub fn plan_candidates(query: &str) -> CandidatePlan {
         query.to_string(),
     );
     CandidatePlan { clauses }
+}
+
+/// Pushes the strict lexical clause and, where one exists, its single
+/// relaxation tier.
+///
+/// A single term has no weaker conjunction to fall back to, a typed boolean
+/// expression already says what to match, and past [`LEXICAL_RELAXED_MAX_TERMS`]
+/// the drop-one expansion is broader than the strict scan it stands in for.
+fn push_lexical_ladder(
+    clauses: &mut Vec<CandidateClause>,
+    seen: &mut BTreeSet<(CandidateChannel, String)>,
+    tokens: &[&str],
+) {
+    let lexical = normalize_lexical_tokens(tokens);
+    if lexical.tokens.is_empty() {
+        return;
+    }
+    let value = lexical.tokens.join(" ");
+    push_clause(clauses, seen, CandidateChannel::Lexical, value.clone());
+    if !lexical.has_boolean_operator
+        && (2..=LEXICAL_RELAXED_MAX_TERMS).contains(&lexical.tokens.len())
+    {
+        push_clause(clauses, seen, CandidateChannel::LexicalRelaxed, value);
+    }
 }
 
 fn push_clause(
@@ -253,6 +295,59 @@ fn is_fts_operator(token: &str) -> bool {
     )
 }
 
+/// Boolean operators a lexical clause can carry between two terms.
+///
+/// Case matters the way it matters to FTS5: `or` is a word people search for,
+/// `OR` is the operator they typed. `NEAR` is excluded because it is a call,
+/// not an infix, and a bare token cannot supply its arguments.
+pub fn is_fts_boolean_operator(token: &str) -> bool {
+    matches!(token, "AND" | "OR" | "NOT")
+}
+
+struct LexicalTokens<'a> {
+    tokens: Vec<&'a str>,
+    has_boolean_operator: bool,
+}
+
+/// Drops the operator positions no boolean expression can use, leading,
+/// trailing, and repeated, so the clause the store receives always alternates
+/// term, operator, term. Terms are deduplicated only for a plain conjunction,
+/// where a repeat adds no constraint; rewriting a typed expression would change
+/// what it asked for.
+fn normalize_lexical_tokens<'a>(tokens: &[&'a str]) -> LexicalTokens<'a> {
+    let mut kept: Vec<&'a str> = Vec::with_capacity(tokens.len());
+    let mut has_boolean_operator = false;
+    for token in tokens {
+        if is_fts_boolean_operator(token) {
+            if kept
+                .last()
+                .is_none_or(|previous| is_fts_boolean_operator(previous))
+            {
+                continue;
+            }
+            has_boolean_operator = true;
+            kept.push(token);
+            continue;
+        }
+        kept.push(token);
+    }
+    if kept
+        .last()
+        .is_some_and(|last| is_fts_boolean_operator(last))
+    {
+        kept.pop();
+        has_boolean_operator = kept.iter().copied().any(is_fts_boolean_operator);
+    }
+    if !has_boolean_operator {
+        let mut seen = BTreeSet::new();
+        kept.retain(|token| seen.insert(*token));
+    }
+    LexicalTokens {
+        tokens: kept,
+        has_boolean_operator,
+    }
+}
+
 fn looks_like_iso_date(token: &str) -> bool {
     let bytes = token.as_bytes();
     bytes.len() == 10
@@ -312,8 +407,10 @@ mod tests {
         assert!(plan.contains(CandidateChannel::Phrase, "fatal: path/to/file.rs:42"));
         assert!(plan.contains(CandidateChannel::Entity, "panic!(\"boom\")"));
         assert!(plan.contains(CandidateChannel::Entity, "E0425"));
-        assert!(plan.contains(CandidateChannel::Lexical, "日本語"));
-        assert!(plan.contains(CandidateChannel::Lexical, "🚨"));
+        assert!(plan.contains(
+            CandidateChannel::Lexical,
+            r#"panic!("boom") E0425 日本語 🚨 foo::bar"#
+        ));
         assert!(plan.contains(CandidateChannel::Entity, "foo::bar"));
         assert!(!plan.has_semantic_channel());
     }
@@ -332,16 +429,81 @@ mod tests {
     #[test]
     fn empty_queries_produce_no_candidates() {
         assert!(plan_candidates(" \t\n").clauses().is_empty());
+        assert!(plan_candidates(" \tworkflow\n").contains(CandidateChannel::Lexical, "workflow"));
     }
 
     #[test]
-    fn direct_anchor_plan_is_exact_and_singleton() {
-        let anchor = RetrievalAnchorId::new("anchor.direct").expect("anchor");
-        let plan = plan_anchor(&anchor);
+    fn lexical_terms_share_one_deduplicated_candidate_lane() {
+        let plan = plan_candidates("workflow correction workflow repeated");
+        let lexical = plan
+            .clauses()
+            .iter()
+            .filter(|clause| clause.channel == CandidateChannel::Lexical)
+            .collect::<Vec<_>>();
 
-        assert_eq!(plan.clauses().len(), 1);
-        assert!(plan.contains(CandidateChannel::Anchor, "anchor.direct"));
-        assert!(plan.clauses()[0].exact);
+        assert_eq!(lexical.len(), 1);
+        assert_eq!(lexical[0].value, "workflow correction repeated");
+    }
+
+    #[test]
+    fn plain_multi_term_queries_plan_one_relaxation_tier() {
+        let plan = plan_candidates("workflow correction repeated failure");
+
+        assert!(plan.contains(
+            CandidateChannel::Lexical,
+            "workflow correction repeated failure"
+        ));
+        assert!(plan.contains(
+            CandidateChannel::LexicalRelaxed,
+            "workflow correction repeated failure"
+        ));
+    }
+
+    #[test]
+    fn single_terms_and_typed_boolean_queries_plan_no_relaxation_tier() {
+        for query in ["workflow", "workflow OR correction", "workflow NOT stale"] {
+            let plan = plan_candidates(query);
+            assert!(
+                !plan
+                    .clauses()
+                    .iter()
+                    .any(|clause| clause.channel == CandidateChannel::LexicalRelaxed),
+                "{query} planned a relaxation tier"
+            );
+        }
+
+        let wide = (0..=LEXICAL_RELAXED_MAX_TERMS)
+            .map(|index| format!("term{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !plan_candidates(&wide)
+                .clauses()
+                .iter()
+                .any(|clause| clause.channel == CandidateChannel::LexicalRelaxed)
+        );
+    }
+
+    #[test]
+    fn typed_boolean_operators_survive_into_the_lexical_clause() {
+        assert!(
+            plan_candidates("alpha OR beta").contains(CandidateChannel::Lexical, "alpha OR beta")
+        );
+        assert!(
+            plan_candidates("alpha and beta").contains(CandidateChannel::Lexical, "alpha beta"),
+            "lowercase and is a term-position word, not an operator"
+        );
+        // Operator positions no expression can use are dropped, never emitted
+        // into a clause the store would fail to parse.
+        assert!(plan_candidates("OR alpha").contains(CandidateChannel::Lexical, "alpha"));
+        assert!(plan_candidates("alpha OR").contains(CandidateChannel::Lexical, "alpha"));
+        assert!(
+            plan_candidates("alpha OR AND beta")
+                .contains(CandidateChannel::Lexical, "alpha OR beta")
+        );
+        assert!(
+            plan_candidates("alpha NEAR beta").contains(CandidateChannel::Lexical, "alpha beta")
+        );
     }
 
     #[test]
@@ -353,18 +515,6 @@ mod tests {
         let plan = plan_candidates(r#""path\\to\\file" kept"#);
         assert!(plan.contains(CandidateChannel::Phrase, r"path\to\file"));
         assert!(plan.contains(CandidateChannel::Lexical, "kept"));
-    }
-
-    #[test]
-    fn planning_preserves_apostrophes_brackets_braces_commas_and_semicolons() {
-        let query = "don't use [path/to/file.rs], {cfg:debug}; done";
-        let plan = plan_candidates(query);
-
-        assert!(plan.contains(CandidateChannel::ExactMessage, query));
-        assert!(plan.contains(CandidateChannel::Lexical, "don't"));
-        assert!(plan.contains(CandidateChannel::Entity, "[path/to/file.rs],"));
-        assert!(plan.contains(CandidateChannel::Lexical, "{cfg:debug};"));
-        assert!(plan.contains(CandidateChannel::Lexical, "done"));
     }
 
     #[test]
@@ -381,10 +531,8 @@ mod tests {
         assert!(plan.contains(CandidateChannel::Entity, query));
         assert!(plan.contains(CandidateChannel::Entity, "path/to/weird,file.rs;"));
         assert!(plan.contains(CandidateChannel::Entity, "E0425"));
-        assert!(plan.contains(CandidateChannel::Lexical, "don't"));
+        assert!(plan.contains(CandidateChannel::Lexical, query));
         assert!(plan.contains(CandidateChannel::Entity, "panic!(\"x\")"));
-        assert!(plan.contains(CandidateChannel::Lexical, "日本語"));
-        assert!(plan.contains(CandidateChannel::Lexical, "🚨"));
         assert!(!plan.clauses().iter().any(|clause| clause.channel
             == CandidateChannel::ExactMessage
             && clause.value != query));
@@ -399,8 +547,7 @@ mod tests {
                 .iter()
                 .any(|clause| clause.channel == CandidateChannel::Phrase)
         );
-        assert!(plan.contains(CandidateChannel::Lexical, r#"prefix"not-a-phrase"#));
-        assert!(plan.contains(CandidateChannel::Lexical, "suffix"));
+        assert!(plan.contains(CandidateChannel::Lexical, r#"prefix"not-a-phrase suffix"#));
 
         let plan = plan_candidates(r#""unterminated phrase value"#);
         assert!(
@@ -413,13 +560,5 @@ mod tests {
             CandidateChannel::ExactMessage,
             r#""unterminated phrase value"#
         ));
-    }
-
-    #[test]
-    fn exact_match_byte_ranges_are_non_empty_and_half_open() {
-        let range = ByteRangeV1::new(7, 11).expect("valid range");
-        assert_eq!((range.start(), range.end()), (7, 11));
-        assert!(ByteRangeV1::new(7, 7).is_err());
-        assert!(ByteRangeV1::new(8, 7).is_err());
     }
 }

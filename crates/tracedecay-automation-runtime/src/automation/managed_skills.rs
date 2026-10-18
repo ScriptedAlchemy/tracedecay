@@ -4,20 +4,25 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::config_error;
-use crate::errors::Result;
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
-pub use super::managed_skill_model::{
+/// Typed reset authority for the profile's `agent_managed` skill and usage
+/// records.
+pub(crate) const MANAGED_SKILL_STORE_AUTHORITY: &str = "managed skill store";
+
+pub use tracedecay_automation::managed_skills::validate_managed_support_files;
+pub use tracedecay_automation::managed_skills::{
     MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
-    ManagedSkill, ManagedSkillDraft, ManagedSkillMaterializationScope, ManagedSkillMetadata,
-    ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-    ManagedSupportFile, SkillInstallTarget, default_managed_skill_targets,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillExt, ManagedSkillMaterializationScope,
+    ManagedSkillMetadata, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
+    ManagedSkillUpdate, ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget,
+    default_managed_skill_targets,
 };
-pub use super::managed_skill_validation::validate_managed_support_files;
-use super::managed_skill_validation::{
+use tracedecay_automation::managed_skills::{
     validate_managed_skill, validate_managed_skill_update, validate_skill_id,
 };
 
@@ -49,15 +54,7 @@ impl SkillConsolidationKind<'_> {
     }
 }
 
-struct SkillStoreLock(File);
-
-impl Drop for SkillStoreLock {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
-    }
-}
-
-fn lock_skill_store(profile_root: &Path) -> Result<SkillStoreLock> {
+fn lock_skill_store(profile_root: &Path) -> Result<FileLease> {
     let root = managed_skill_root(profile_root);
     std::fs::create_dir_all(&root).map_err(|e| {
         config_error(format!(
@@ -78,19 +75,20 @@ fn lock_skill_store(profile_root: &Path) -> Result<SkillStoreLock> {
                 path.display()
             ))
         })?;
-    file.lock_exclusive().map_err(|e| {
+    file.lock().map_err(|e| {
         config_error(format!(
             "failed to lock skill store '{}': {e}",
             path.display()
         ))
     })?;
+    let lock = FileLease::held(file, "automation.managed_skills.store");
     recover_skill_transaction(&root)?;
-    Ok(SkillStoreLock(file))
+    Ok(lock)
 }
 
-async fn lock_skill_store_async(profile_root: &Path) -> Result<SkillStoreLock> {
+async fn lock_skill_store_async(profile_root: &Path) -> Result<FileLease> {
     let profile_root = profile_root.to_path_buf();
-    tokio::task::spawn_blocking(move || lock_skill_store(&profile_root))
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || lock_skill_store(&profile_root))
         .await
         .map_err(|error| config_error(format!("managed skill lock task failed: {error}")))?
 }
@@ -260,7 +258,7 @@ fn stage_skill_directory(
     Ok(entry)
 }
 
-#[hotpath::measure(label = "automation.managed_skill.persist")]
+#[tracing::instrument(name = "automation.managed_skill.persist", level = "trace", skip_all)]
 fn persist_skill_transaction_unlocked(profile_root: &Path, skills: &[&ManagedSkill]) -> Result<()> {
     let root = managed_skill_root(profile_root);
     let mut ids = BTreeSet::new();
@@ -313,7 +311,11 @@ fn persist_skill_transaction_unlocked(profile_root: &Path, skills: &[&ManagedSki
 /// Re-loads and checksum-validates both revisions under one store lock, then
 /// publishes target and archived source through one crash-recoverable directory
 /// transaction. Source content is never deleted.
-#[hotpath::measure(label = "automation.managed_skill.consolidate", future = true)]
+#[tracing::instrument(
+    name = "automation.managed_skill.consolidate",
+    level = "trace",
+    skip_all
+)]
 pub async fn apply_managed_skill_consolidation(
     profile_root: &Path,
     target_id: Option<&str>,
@@ -405,6 +407,10 @@ async fn apply_managed_skill_consolidation_kind(
     source.metadata.absorbed_into = target_id.map(ToOwned::to_owned);
     source.metadata.archived_reason = Some(kind.archived_reason().to_string());
     source.set_state(ManagedSkillState::Archived);
+    source.refresh_checksum();
+    if let Some(target) = target.as_mut() {
+        target.refresh_checksum();
+    }
     let mut revisions: Vec<&ManagedSkill> = target.iter().collect();
     revisions.push(&source);
     persist_skill_transaction_unlocked(profile_root, &revisions)?;
@@ -489,7 +495,7 @@ pub fn managed_skill_dir(profile_root: &Path, id: &str) -> Result<PathBuf> {
     Ok(managed_skill_root(profile_root).join(id))
 }
 
-#[hotpath::measure(label = "automation.managed_skill.save", future = true)]
+#[tracing::instrument(name = "automation.managed_skill.save", level = "trace", skip_all)]
 pub async fn save_managed_skill(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
     let lock = lock_skill_store_async(profile_root).await?;
     let destination = managed_skill_dir(profile_root, &skill.metadata.id)?;
@@ -507,7 +513,7 @@ pub async fn save_managed_skill(profile_root: &Path, skill: &ManagedSkill) -> Re
     Ok(())
 }
 
-#[hotpath::measure(label = "automation.managed_skill.create", future = true)]
+#[tracing::instrument(name = "automation.managed_skill.create", level = "trace", skip_all)]
 pub async fn create_managed_skill(
     profile_root: &Path,
     draft: ManagedSkillDraft,
@@ -529,37 +535,98 @@ pub async fn create_managed_skill(
     Ok(skill)
 }
 
-#[hotpath::measure(label = "automation.managed_skill.load", future = true)]
-pub async fn load_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
+/// Why one managed skill record could not be read.
+#[derive(Debug, thiserror::Error)]
+pub enum ManagedSkillReadError {
+    /// The requested id is not a safe managed skill id.
+    #[error(transparent)]
+    InvalidId(TraceDecayError),
+    /// No record exists for the id.
+    #[error("managed skill '{id}' not found")]
+    NotFound { id: String },
+    /// The store or the stored record failed.
+    #[error(transparent)]
+    Failed(#[from] TraceDecayError),
+}
+
+impl From<ManagedSkillReadError> for TraceDecayError {
+    fn from(error: ManagedSkillReadError) -> Self {
+        match error {
+            ManagedSkillReadError::NotFound { id } => {
+                config_error(format!("managed skill '{id}' not found"))
+            }
+            ManagedSkillReadError::InvalidId(error) | ManagedSkillReadError::Failed(error) => error,
+        }
+    }
+}
+
+#[tracing::instrument(name = "automation.managed_skill.load", level = "trace", skip_all)]
+pub async fn load_managed_skill(
+    profile_root: &Path,
+    id: &str,
+) -> std::result::Result<ManagedSkill, ManagedSkillReadError> {
     let _lock = lock_skill_store_async(profile_root).await?;
     load_managed_skill_unlocked(profile_root, id)
 }
 
-fn load_managed_skill_unlocked(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
-    let dir = managed_skill_dir(profile_root, id)?;
+fn load_managed_skill_unlocked(
+    profile_root: &Path,
+    id: &str,
+) -> std::result::Result<ManagedSkill, ManagedSkillReadError> {
+    let dir = managed_skill_dir(profile_root, id).map_err(ManagedSkillReadError::InvalidId)?;
     let path = dir.join("skill.json");
     let bytes = std::fs::read(&path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            config_error(format!("managed skill '{id}' not found"))
+            ManagedSkillReadError::NotFound { id: id.to_owned() }
         } else {
-            config_error(format!(
+            ManagedSkillReadError::Failed(config_error(format!(
                 "failed to read managed skill record '{}': {e}",
                 path.display()
-            ))
+            )))
         }
     })?;
-    let mut skill: ManagedSkill = serde_json::from_slice(&bytes).map_err(|e| {
+    Ok(decode_managed_skill_record(&path, &bytes)?)
+}
+
+/// A stored record that fails to parse or validate is one typed `Config`
+/// failure naming the file, whichever check rejected it. The released
+/// summary-only shape (metadata without `routing_description`) is a typed
+/// reset instead: this binary never derives routing from a summary.
+fn decode_managed_skill_record(path: &Path, bytes: &[u8]) -> Result<ManagedSkill> {
+    let invalid = |e: &dyn std::fmt::Display| {
         config_error(format!(
-            "failed to parse managed skill record '{}': {e}",
+            "invalid managed skill record '{}': {e}",
             path.display()
         ))
+    };
+    let skill: ManagedSkill = serde_json::from_slice(bytes).map_err(|error| {
+        if is_summary_only_record(bytes) {
+            TraceDecayError::reset_required(
+                MANAGED_SKILL_STORE_AUTHORITY,
+                format!(
+                    "managed skill record '{}' is the released summary-only shape",
+                    path.display()
+                ),
+            )
+        } else {
+            invalid(&error)
+        }
     })?;
-    skill.normalize_timestamps();
-    validate_managed_skill(&skill)?;
+    validate_managed_skill(&skill).map_err(|e| invalid(&e))?;
     Ok(skill)
 }
 
-#[hotpath::measure(label = "automation.managed_skill.list", future = true)]
+fn is_summary_only_record(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|record| {
+            let metadata = record.get("metadata")?.as_object()?;
+            Some(metadata.contains_key("summary") && !metadata.contains_key("routing_description"))
+        })
+        .unwrap_or(false)
+}
+
+#[tracing::instrument(name = "automation.managed_skill.list", level = "trace", skip_all)]
 pub async fn list_managed_skills(profile_root: &Path) -> Result<Vec<ManagedSkill>> {
     if !managed_skill_root(profile_root).exists() {
         return Ok(Vec::new());
@@ -599,18 +666,34 @@ fn list_managed_skills_unlocked(profile_root: &Path) -> Result<Vec<ManagedSkill>
                 path.display()
             ))
         })?;
-        let mut skill = serde_json::from_slice::<ManagedSkill>(&bytes).map_err(|e| {
-            config_error(format!(
-                "failed to parse managed skill record '{}': {e}",
-                path.display()
-            ))
-        })?;
-        skill.normalize_timestamps();
-        validate_managed_skill(&skill)?;
-        skills.push(skill);
+        match decode_managed_skill_record(&path, &bytes) {
+            Ok(skill) => skills.push(skill),
+            Err(refusal) if refusal.reset_required_context().is_some() => {
+                reset_refused_skill_dir(&root, &entry.path(), &refusal)?;
+            }
+            Err(error) => return Err(error),
+        }
     }
     skills.sort_by(|a, b| a.metadata.id.cmp(&b.metadata.id));
     Ok(skills)
+}
+
+/// The complete-store scan owns a refused record: its skill directory is
+/// deleted (nothing kept) so one released record cannot fail every listing.
+fn reset_refused_skill_dir(root: &Path, dir: &Path, refusal: &TraceDecayError) -> Result<()> {
+    std::fs::remove_dir_all(dir).map_err(|error| {
+        config_error(format!(
+            "failed to reset refused managed skill '{}': {error}",
+            dir.display()
+        ))
+    })?;
+    sync_directory(root)?;
+    tracing::warn!(
+        managed_skill = %dir.display(),
+        refusal = %refusal,
+        "reset refused managed skill record"
+    );
+    Ok(())
 }
 
 pub async fn set_managed_skill_state(
@@ -632,19 +715,8 @@ fn set_managed_skill_state_unlocked(
 ) -> Result<ManagedSkill> {
     let mut skill = load_managed_skill_unlocked(profile_root, id)?;
     skill.set_state(state);
+    skill.refresh_checksum();
     persist_skill_transaction_unlocked(profile_root, &[&skill])?;
-    Ok(skill)
-}
-
-pub async fn update_managed_skill(
-    profile_root: &Path,
-    id: &str,
-    update: ManagedSkillUpdate,
-) -> Result<ManagedSkill> {
-    let lock = lock_skill_store_async(profile_root).await?;
-    let skill = apply_managed_skill_update_unlocked(profile_root, id, None, update)?;
-    drop(lock);
-    record_skill_patch_best_effort(profile_root, &skill, "update").await;
     Ok(skill)
 }
 
@@ -656,13 +728,14 @@ pub async fn set_managed_skill_pinned(
     let lock = lock_skill_store_async(profile_root).await?;
     let mut skill = load_managed_skill_unlocked(profile_root, id)?;
     skill.set_pinned(pinned);
+    skill.refresh_checksum();
     persist_skill_transaction_unlocked(profile_root, &[&skill])?;
     drop(lock);
     record_skill_patch_best_effort(profile_root, &skill, "pin").await;
     Ok(skill)
 }
 
-#[hotpath::measure(label = "automation.managed_skill.update", future = true)]
+#[tracing::instrument(name = "automation.managed_skill.update", level = "trace", skip_all)]
 pub async fn apply_managed_skill_update(
     profile_root: &Path,
     id: &str,
@@ -670,7 +743,7 @@ pub async fn apply_managed_skill_update(
     update: ManagedSkillUpdate,
 ) -> Result<ManagedSkill> {
     let lock = lock_skill_store_async(profile_root).await?;
-    let skill = apply_managed_skill_update_unlocked(profile_root, id, Some(base_checksum), update)?;
+    let skill = apply_managed_skill_update_unlocked(profile_root, id, base_checksum, update)?;
     drop(lock);
     record_skill_patch_best_effort(profile_root, &skill, "automatic_update").await;
     Ok(skill)
@@ -679,11 +752,11 @@ pub async fn apply_managed_skill_update(
 fn apply_managed_skill_update_unlocked(
     profile_root: &Path,
     id: &str,
-    base_checksum: Option<&str>,
+    base_checksum: &str,
     update: ManagedSkillUpdate,
 ) -> Result<ManagedSkill> {
     let skill = load_managed_skill_unlocked(profile_root, id)?;
-    if base_checksum.is_some_and(|checksum| checksum != skill.metadata.checksum) {
+    if base_checksum != skill.metadata.checksum {
         return Err(config_error(format!(
             "base_checksum for managed skill id '{id}' is stale"
         )));
@@ -710,9 +783,8 @@ pub fn preview_managed_skill_update(
             skill.metadata.id
         )));
     }
-    if content_changed {
-        skill.refresh_checksum();
-    }
+    // Metadata-only updates also complete a retained-format checksum cutover.
+    skill.refresh_checksum();
     skill.set_state(ManagedSkillState::Active);
     skill.touch();
     Ok(skill)
@@ -796,6 +868,7 @@ fn apply_managed_skill_archive_unlocked(
     }
     skill.metadata.archived_reason = reason;
     skill.set_state(ManagedSkillState::Archived);
+    skill.refresh_checksum();
     persist_skill_transaction_unlocked(profile_root, &[&skill])?;
     Ok(skill)
 }
@@ -821,6 +894,10 @@ fn apply_managed_skill_update_fields(
     }
     if let Some(summary) = update.summary {
         content_changed |= replace_if_changed(&mut skill.metadata.summary, summary);
+    }
+    if let Some(routing_description) = update.routing_description {
+        content_changed |=
+            replace_if_changed(&mut skill.metadata.routing_description, routing_description);
     }
     if let Some(category) = update.category {
         content_changed |= replace_if_changed(&mut skill.metadata.category, category);
@@ -871,6 +948,7 @@ pub async fn restore_managed_skill(profile_root: &Path, id: &str) -> Result<Mana
     skill.metadata.absorbed_into = None;
     skill.metadata.archived_reason = None;
     skill.set_state(ManagedSkillState::Active);
+    skill.refresh_checksum();
     persist_skill_transaction_unlocked(profile_root, &[&skill])?;
     drop(lock);
     record_skill_patch_best_effort(profile_root, &skill, "restore").await;
@@ -888,6 +966,8 @@ mod transaction_tests {
             id: id.to_string(),
             title: id.to_string(),
             summary: format!("Reusable workflow for {id}."),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "testing".to_string(),
             targets: vec![SkillInstallTarget::Codex],
             body_markdown: body.to_string(),
@@ -1122,6 +1202,8 @@ mod transaction_tests {
                 id: "waiting-skill".to_string(),
                 title: "Waiting skill".to_string(),
                 summary: "Exercises asynchronous lock acquisition.".to_string(),
+                routing_description:
+                    "Repeated repository workflows requiring this maintained procedure.".to_owned(),
                 category: "testing".to_string(),
                 targets: vec![SkillInstallTarget::Codex],
                 body_markdown: "# Waiting".to_string(),
@@ -1179,9 +1261,10 @@ mod transaction_tests {
         let profile = temp.path();
         let original = skill("ledger-skill", "# Ledger");
         save_managed_skill(profile, &original).await.unwrap();
-        let ledger_path = super::super::skill_usage::skill_usage_ledger_path(profile);
-        std::fs::remove_file(&ledger_path).unwrap();
-        std::fs::create_dir(&ledger_path).unwrap();
+        let record_path =
+            super::super::skill_usage::skill_usage_record_path(profile, "ledger-skill");
+        std::fs::remove_file(&record_path).unwrap();
+        std::fs::create_dir(&record_path).unwrap();
 
         let pinned = set_managed_skill_pinned(profile, "ledger-skill", true)
             .await
@@ -1247,3 +1330,7 @@ mod transaction_tests {
         assert_eq!(exported[0].body_markdown, "# A\nnew");
     }
 }
+
+#[cfg(test)]
+#[path = "managed_skills/routing_tests.rs"]
+mod routing_tests;

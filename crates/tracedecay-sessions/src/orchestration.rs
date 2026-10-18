@@ -12,6 +12,9 @@ pub struct ProviderRunOutcome<F> {
     pub bytes_consumed: u64,
     pub deferred_units: u64,
     pub byte_bounds_enforced: bool,
+    /// The run durably advanced source coverage (a cursor, a skipped range,
+    /// or a projection), whether or not it upserted any message.
+    pub coverage_advanced: bool,
     admitted: bool,
 }
 
@@ -27,6 +30,7 @@ impl<F> ProviderRunOutcome<F> {
             bytes_consumed,
             deferred_units: u64::from(deferred_by_byte_cap),
             byte_bounds_enforced: true,
+            coverage_advanced: bytes_consumed > 0,
             admitted: true,
         }
     }
@@ -38,6 +42,7 @@ impl<F> ProviderRunOutcome<F> {
             bytes_consumed: 0,
             deferred_units: 0,
             byte_bounds_enforced: true,
+            coverage_advanced: false,
             admitted: false,
         }
     }
@@ -45,15 +50,12 @@ impl<F> ProviderRunOutcome<F> {
     pub fn failed(failure: F, bytes_consumed: u64) -> Self {
         let mut outcome = Self::bounded(TranscriptIngestStats::default(), bytes_consumed, false);
         outcome.failures.push(failure);
+        outcome.coverage_advanced = false;
         outcome
     }
 
     pub fn add_failure(&mut self, failure: F) {
         self.failures.push(failure);
-    }
-
-    pub fn add_stats(&mut self, stats: TranscriptIngestStats) {
-        self.stats = self.stats.merge(stats);
     }
 
     pub fn add_deferred_units(&mut self, deferred_units: u64) {
@@ -82,6 +84,8 @@ pub struct ProviderRunFold<F> {
     pub units_failed: u64,
     pub deferred_units: u64,
     pub byte_bounds_enforced: bool,
+    /// Some run without a failure durably advanced source coverage.
+    pub coverage_advanced: bool,
 }
 
 impl<F> Default for ProviderRunFold<F> {
@@ -94,22 +98,35 @@ impl<F> Default for ProviderRunFold<F> {
             units_failed: 0,
             deferred_units: 0,
             byte_bounds_enforced: true,
+            coverage_advanced: false,
         }
     }
 }
 
-impl<F> ProviderRunFold<F> {
+impl<F: ProviderRunFailure + Clone> ProviderRunFold<F> {
+    /// Accounts an attempt the caller abandons to retry, keeping its
+    /// non-retryable failures.
     pub fn record_retry(&mut self, outcome: &ProviderRunOutcome<F>) {
         self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
         self.byte_bounds_enforced &= outcome.byte_bounds_enforced;
+        self.failures.extend(
+            outcome
+                .failures
+                .iter()
+                .filter(|failure| !failure.retryable())
+                .cloned(),
+        );
     }
+}
 
+impl<F> ProviderRunFold<F> {
     pub fn record(&mut self, outcome: ProviderRunOutcome<F>) {
         if !outcome.admitted {
             return;
         }
         self.units_admitted = self.units_admitted.saturating_add(1);
         if outcome.failures.is_empty() {
+            self.coverage_advanced |= outcome.coverage_advanced;
             if outcome.deferred_units == 0 {
                 self.units_completed = self.units_completed.saturating_add(1);
             }
@@ -197,5 +214,26 @@ mod tests {
         assert_eq!(fold.units_failed, 1);
         assert_eq!(fold.failures, vec![failure]);
         assert_eq!(fold.deferred_units, 4);
+    }
+
+    #[test]
+    fn a_retried_attempt_keeps_its_permanent_failures() {
+        let permanent = Failure { retryable: false };
+        let mut abandoned = ProviderRunOutcome::failed(permanent.clone(), 5);
+        abandoned.add_failure(Failure { retryable: true });
+
+        let mut fold = ProviderRunFold::default();
+        fold.record_retry(&abandoned);
+        fold.record(ProviderRunOutcome::bounded(
+            TranscriptIngestStats::default(),
+            3,
+            false,
+        ));
+
+        assert_eq!(
+            fold.failures,
+            vec![permanent],
+            "the retry skips a quarantined source, so only the abandoned attempt reports it"
+        );
     }
 }

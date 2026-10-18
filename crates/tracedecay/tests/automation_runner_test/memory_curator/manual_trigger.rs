@@ -21,8 +21,8 @@ async fn manual_memory_curator_runs_when_scheduling_and_task_are_disabled() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
+    let run = settle_memory_curator(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -58,8 +58,8 @@ async fn manual_memory_curator_skips_when_backend_is_disabled() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
+    let run = settle_memory_curator(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,

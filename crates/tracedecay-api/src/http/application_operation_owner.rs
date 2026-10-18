@@ -4,10 +4,11 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::HttpApplicationOwnerKind;
 
+/// `None` for operations that have no HTTP binding.
 pub const fn http_application_owner_kind(
     operation: ApplicationSurfaceOperation,
-) -> HttpApplicationOwnerKind {
-    match operation {
+) -> Option<HttpApplicationOwnerKind> {
+    Some(match operation {
         ApplicationSurfaceOperation::GitStatus
         | ApplicationSurfaceOperation::GitDiff
         | ApplicationSurfaceOperation::GitHistory
@@ -35,6 +36,7 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::FeedbackList
         | ApplicationSurfaceOperation::FeedbackImpact
         | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+        | ApplicationSurfaceOperation::FeedbackProximity
         | ApplicationSurfaceOperation::AffectedTests => HttpApplicationOwnerKind::Feedback,
         ApplicationSurfaceOperation::CodeExactOccurrence
         | ApplicationSurfaceOperation::CodePhraseSearch
@@ -42,7 +44,6 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::CodeFacets
         | ApplicationSurfaceOperation::CodeTimeline
         | ApplicationSurfaceOperation::CodeDeclaration
-        | ApplicationSurfaceOperation::CodeDefinition
         | ApplicationSurfaceOperation::CodeTypeDefinition
         | ApplicationSurfaceOperation::CodeReferences => HttpApplicationOwnerKind::CallableCode,
         ApplicationSurfaceOperation::TestResults
@@ -59,19 +60,16 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::SourceBody
         | ApplicationSurfaceOperation::SourceOutline
         | ApplicationSurfaceOperation::ModuleApi
-        | ApplicationSurfaceOperation::FileMetadata
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
         | ApplicationSurfaceOperation::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
         ApplicationSurfaceOperation::ObservatoryRead => HttpApplicationOwnerKind::Observatory,
         ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
         | ApplicationSurfaceOperation::ConfigurationGet
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
         | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
         | ApplicationSurfaceOperation::ConfigurationObservedState
         | ApplicationSurfaceOperation::ConfigurationProtectedPreview
         | ApplicationSurfaceOperation::ConfigurationProtectedApply
@@ -93,5 +91,112 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::ContextScoutFeedback => {
             HttpApplicationOwnerKind::ContextScout
         }
-    }
+        ApplicationSurfaceOperation::StrReplace
+        | ApplicationSurfaceOperation::MultiStrReplace
+        | ApplicationSurfaceOperation::InsertAt
+        | ApplicationSurfaceOperation::AstGrepRewrite
+        | ApplicationSurfaceOperation::ReplaceSymbol
+        | ApplicationSurfaceOperation::InsertAtSymbol
+        | ApplicationSurfaceOperation::MoveSymbol
+        | ApplicationSurfaceOperation::RenameSymbol
+        | ApplicationSurfaceOperation::SourceEditReconcile
+        | ApplicationSurfaceOperation::SourceEditRollback
+        | ApplicationSurfaceOperation::Context
+        | ApplicationSurfaceOperation::Node
+        | ApplicationSurfaceOperation::Impact
+        | ApplicationSurfaceOperation::Similar
+        | ApplicationSurfaceOperation::Redundancy
+        | ApplicationSurfaceOperation::RenamePreview
+        | ApplicationSurfaceOperation::PortStatus
+        | ApplicationSurfaceOperation::PortOrder
+        | ApplicationSurfaceOperation::Todos
+        | ApplicationSurfaceOperation::TestMap
+        | ApplicationSurfaceOperation::TestRisk
+        | ApplicationSurfaceOperation::Gini
+        | ApplicationSurfaceOperation::DependencyDepth
+        | ApplicationSurfaceOperation::Health
+        | ApplicationSurfaceOperation::Dsm
+        | ApplicationSurfaceOperation::Diagnose
+        | ApplicationSurfaceOperation::DeadCode
+        | ApplicationSurfaceOperation::Circular
+        | ApplicationSurfaceOperation::Hotspots
+        | ApplicationSurfaceOperation::UnmountedFiles
+        | ApplicationSurfaceOperation::Rank
+        | ApplicationSurfaceOperation::Largest
+        | ApplicationSurfaceOperation::Coupling
+        | ApplicationSurfaceOperation::InheritanceDepth
+        | ApplicationSurfaceOperation::Distribution
+        | ApplicationSurfaceOperation::Recursion
+        | ApplicationSurfaceOperation::Complexity
+        | ApplicationSurfaceOperation::DocCoverage
+        | ApplicationSurfaceOperation::GodClass
+        | ApplicationSurfaceOperation::UnsafePatterns
+        | ApplicationSurfaceOperation::Constructors
+        | ApplicationSurfaceOperation::FieldSites
+        | ApplicationSurfaceOperation::FindExactSymbol
+        | ApplicationSurfaceOperation::ByQualifiedName
+        | ApplicationSurfaceOperation::Signature
+        | ApplicationSurfaceOperation::Derives
+        | ApplicationSurfaceOperation::Grep
+        | ApplicationSurfaceOperation::AstGrepSearch
+        | ApplicationSurfaceOperation::Affected
+        | ApplicationSurfaceOperation::DiffContext
+        | ApplicationSurfaceOperation::Changelog
+        | ApplicationSurfaceOperation::CommitContext
+        | ApplicationSurfaceOperation::PrContext
+        | ApplicationSurfaceOperation::BranchSearch
+        | ApplicationSurfaceOperation::BranchDiff
+        | ApplicationSurfaceOperation::BranchList
+        | ApplicationSurfaceOperation::Files
+        | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::Retrieve
+        | ApplicationSurfaceOperation::AutomationRunList
+        | ApplicationSurfaceOperation::AutomationRunView
+        | ApplicationSurfaceOperation::AutomationRunArtifactView
+        | ApplicationSurfaceOperation::SkillList
+        | ApplicationSurfaceOperation::SkillView
+        | ApplicationSurfaceOperation::HermesSkillBridge
+        | ApplicationSurfaceOperation::Analytics
+        | ApplicationSurfaceOperation::Search
+        | ApplicationSurfaceOperation::RunAffectedTests
+        | ApplicationSurfaceOperation::Dashboard
+        | ApplicationSurfaceOperation::Status
+        | ApplicationSurfaceOperation::ActiveProject
+        | ApplicationSurfaceOperation::RemoteStatus
+        | ApplicationSurfaceOperation::Runtime
+        | ApplicationSurfaceOperation::ProjectList
+        | ApplicationSurfaceOperation::ProjectSearch
+        | ApplicationSurfaceOperation::ProjectContext
+        | ApplicationSurfaceOperation::AdminSync
+        | ApplicationSurfaceOperation::AdminCli
+        | ApplicationSurfaceOperation::AdminProject
+        | ApplicationSurfaceOperation::HookRuntime => return None,
+        ApplicationSurfaceOperation::FactStoreCurate
+        | ApplicationSurfaceOperation::FactStoreAdd
+        | ApplicationSurfaceOperation::FactStoreSearch
+        | ApplicationSurfaceOperation::FactStoreProbe
+        | ApplicationSurfaceOperation::FactStoreRelated
+        | ApplicationSurfaceOperation::FactStoreReason
+        | ApplicationSurfaceOperation::FactStoreContradict
+        | ApplicationSurfaceOperation::FactStoreGet
+        | ApplicationSurfaceOperation::FactStoreUpdate
+        | ApplicationSurfaceOperation::FactStoreRemove
+        | ApplicationSurfaceOperation::FactStoreSupersede
+        | ApplicationSurfaceOperation::FactStoreList
+        | ApplicationSurfaceOperation::FactFeedback
+        | ApplicationSurfaceOperation::MemoryStatus
+        | ApplicationSurfaceOperation::SessionRefreshStatus
+        | ApplicationSurfaceOperation::SessionRefreshCancel
+        | ApplicationSurfaceOperation::SessionRefreshBegin
+        | ApplicationSurfaceOperation::MessageSearch
+        | ApplicationSurfaceOperation::SessionsFor
+        | ApplicationSurfaceOperation::Workflows
+        | ApplicationSurfaceOperation::LcmStatus
+        | ApplicationSurfaceOperation::LcmDoctor
+        | ApplicationSurfaceOperation::LcmLoadSession
+        | ApplicationSurfaceOperation::LcmGrep
+        | ApplicationSurfaceOperation::LcmDescribe
+        | ApplicationSurfaceOperation::LcmExpand
+        | ApplicationSurfaceOperation::LcmExpandQuery => HttpApplicationOwnerKind::Retained,
+    })
 }

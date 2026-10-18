@@ -3,22 +3,35 @@
 //!
 //! Both defects these tests pin were only observable *at the loop*: a policy
 //! object can behave perfectly while nothing consults it. Every assertion here
-//! counts reconcile passes the worker actually dispatched — never elapsed time,
+//! counts reconcile passes the worker actually dispatched, never elapsed time,
 //! which swings run to run on a shared machine.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-
-use super::super::reconcile_panic_guard::{
-    MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
-    ReconcileFaultInjectionV1, ReconcileFaultKindV1,
+use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexReadinessTargetV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
 };
-use super::CodeIndexSchedulerRegistryV1;
+
+use super::super::tests::{OwnerSignals, commit_fixture_checkout, run_git_in};
+use super::super::{
+    CodeIndexBuildProgressSlotStateV1, CodeIndexCadenceTriggerV1, CodeIndexDemandAdmissionV1,
+    CodeIndexReconcileAdmissionV1,
+    reconcile_panic_guard::{
+        MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
+        ReconcileFaultInjectionV1, ReconcileFaultKindV1,
+    },
+};
+use super::{CodeIndexOwnerActivityV1, CodeIndexSchedulerRegistryV1};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::resident_memory::{RESIDENT_OWNER_IDLE_WINDOW_V1, ResidentOwnersV1};
 
 /// Wake rounds driven from outside the worker. Each stands for the ordinary
 /// wake traffic a live daemon produces (cadence ticks, queries, sibling
@@ -47,25 +60,32 @@ struct Fixture {
     _root: TempDir,
     project: std::path::PathBuf,
     registry: CodeIndexSchedulerRegistryV1,
+    owners: Arc<ResidentOwnersV1>,
 }
 
 impl Fixture {
     async fn mount(project_id: &str) -> Self {
+        Self::mount_prepared(project_id, |_| {}).await
+    }
+
+    /// Mount after `prepare` has shaped the committed checkout, so the
+    /// mount's own first pass already runs over that shape.
+    async fn mount_prepared(project_id: &str, prepare: impl FnOnce(&Path)) -> Self {
         let root = TempDir::new().expect("fixture root");
         let project = root.path().join("project");
         fs::create_dir_all(project.join("src")).expect("create source root");
         fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write source");
-        run_git_in(&project, &["init", "-q", "-b", "main"]);
-        run_git_in(&project, &["add", "."]);
-        run_git_in(&project, &["commit", "-qm", "fixture"]);
+        commit_fixture_checkout(&project);
+        prepare(&project);
 
-        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+        let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
+            .with_resident_owners(Arc::clone(&owners));
         registry
             .mount_worktree(
                 tracedecay_domain::ProjectId::new(project_id).expect("project identity"),
                 &project,
                 root.path().join("store"),
-                None,
             )
             .await
             .expect("mount scheduler");
@@ -74,6 +94,7 @@ impl Fixture {
             _root: root,
             project,
             registry,
+            owners,
         };
         // Mount itself can drive a pass. Let the worker go quiet before a fault
         // is installed, so every pass a test counts is one the test caused.
@@ -83,26 +104,89 @@ impl Fixture {
         fixture
     }
 
+    /// Mount the same checkout and store again under a fresh registry, the
+    /// way a restarted (or upgraded) daemon does. The caller has already shut
+    /// the previous registry down.
+    async fn remount(previous: Self, project_id: &str) -> Self {
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
+            .with_resident_owners(Arc::clone(&previous.owners));
+        registry
+            .mount_worktree(
+                tracedecay_domain::ProjectId::new(project_id).expect("project identity"),
+                &previous.project,
+                previous._root.path().join("store"),
+            )
+            .await
+            .expect("remount scheduler");
+        Self {
+            _root: previous._root,
+            project: previous.project,
+            registry,
+            owners: previous.owners,
+        }
+    }
+
+    /// This checkout's scope store root.
+    fn scope_store_root(&self) -> std::path::PathBuf {
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
+        super::super::scoped_code_index_store_root(&self._root.path().join("store"), &canonical)
+    }
+
+    /// The durable active pointer of this checkout's scope store.
+    fn active_pointer_path(&self) -> std::path::PathBuf {
+        self.scope_store_root()
+            .join("active-code-generation-v1.json")
+    }
+
     /// Block until the worker has had no pass in flight for `window`.
+    ///
+    /// A pass gives up its owner-pass guard before its graph tail (prepare,
+    /// activation, seat), so only a finished pass, tail included, is quiet.
     async fn settle_for(&self, window: Duration) {
+        self.quiet_for(window, CodeIndexOwnerActivityV1::pass_finished)
+            .await;
+    }
+
+    /// Block until no owner pass has started or run for `window`. A worker
+    /// waiting out a held store lock owes a pass, so it never settles, but it
+    /// starts none until the holder lets go.
+    async fn pass_free_for(&self, window: Duration) {
+        self.quiet_for(window, |activity| !activity.passes().running())
+            .await;
+    }
+
+    /// Block until `quiet` has held, with no pass started, for `window`. A
+    /// worker that never goes quiet panics: every caller asserts on what the
+    /// worker did after it stopped, which a still-running pass falsifies.
+    async fn quiet_for(&self, window: Duration, quiet: impl Fn(&CodeIndexOwnerActivityV1) -> bool) {
         let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
-        let mut quiet_since: Option<tokio::time::Instant> = None;
+        let mut quiet_since: Option<(tokio::time::Instant, Option<u64>)> = None;
         while tokio::time::Instant::now() < deadline {
-            if self
-                .registry
-                .reconcile_in_progress_for_test(&self.project)
-                .await
-            {
+            let activity = self.registry.subscribe_owner_activity(&self.project).await;
+            let started = activity.as_ref().map(|activity| activity.passes().started);
+            if activity.as_ref().is_some_and(|activity| !quiet(activity)) {
                 quiet_since = None;
             } else {
                 match quiet_since {
-                    None => quiet_since = Some(tokio::time::Instant::now()),
-                    Some(since) if since.elapsed() >= window => return,
-                    Some(_) => {}
+                    Some((since, at)) if at == started => {
+                        if since.elapsed() >= window {
+                            return;
+                        }
+                    }
+                    _ => quiet_since = Some((tokio::time::Instant::now(), started)),
                 }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        let activity = self
+            .registry
+            .subscribe_owner_activity(&self.project)
+            .await
+            .map(|activity| (activity.passes(), activity.worker_phase()));
+        panic!(
+            "the worker never stayed quiet for {window:?} within {SETTLE_DEADLINE:?}; \
+             last (passes, phase): {activity:?}"
+        );
     }
 
     /// Install the fault and hand back the shared counter of dispatched passes.
@@ -112,7 +196,7 @@ impl Fixture {
         faulting_passes: usize,
     ) -> Arc<ReconcileFaultInjectionV1> {
         let fault = Arc::new(ReconcileFaultInjectionV1::new(kind, faulting_passes));
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         worktree
@@ -127,10 +211,85 @@ impl Fixture {
     /// exactly as it does not when a cadence tick or query wakes the worker
     /// over bytes nobody touched.
     async fn wake_without_new_input(&self) {
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         worktree.wake.notify_one();
+    }
+
+    /// One attributable wake with no epoch advance.
+    async fn wake_with_pending_arrival(&self) {
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &worktree.pending_wake,
+            &worktree.wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
+    }
+
+    /// The follow-up a busy worker stamps for itself: no new source, the same
+    /// trigger the production storm logged while the store lock was held.
+    async fn wake_busy_follow_up(&self) {
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &worktree.pending_wake,
+            &worktree.wake,
+            CodeIndexCadenceTriggerV1::BusyFollowUp,
+        );
+    }
+
+    async fn pending_wake_micros(&self) -> u64 {
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        let pending = worktree.pending_wake.lock();
+        pending.micros
+    }
+
+    async fn clear_build_progress(&self) {
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        *worktree
+            .build_progress
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            CodeIndexBuildProgressSlotStateV1::default();
+    }
+
+    async fn clear_convergence_park_for_test(&self) {
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        *worktree
+            .convergence_park
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    async fn plant_terminal_publication_park(&self, reason: &str) {
+        use tracedecay_contracts::code_index_freshness::{
+            CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
+        };
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        *worktree
+            .convergence_park
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(CodeIndexConvergenceParkedV1 {
+                reason: reason.to_owned(),
+                blocked_reason: Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt),
+                remediation: "run `tracedecay daemon restart`".to_owned(),
+                parked_at_micros: 1,
+                observed_passes: 1,
+                retries_on_wake: false,
+            });
     }
 
     /// Drive `EXTERNAL_WAKE_ROUNDS` spaced wakes over unchanged input.
@@ -139,6 +298,41 @@ impl Fixture {
             self.wake_without_new_input().await;
             tokio::time::sleep(WAKE_ROUND_SPACING).await;
         }
+    }
+}
+
+/// Poll until the worker has taken the pending arrival, or the deadline expires.
+///
+/// Zero means the wake was observed (suppressed or consumed by a pass). A
+/// non-zero result means the worker never ran, so an attempts-equals-zero
+/// assertion would be vacuous.
+async fn wait_until_pending_wake_drained(fixture: &Fixture) -> u64 {
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    loop {
+        let micros = fixture.pending_wake_micros().await;
+        if micros == 0 || tokio::time::Instant::now() >= deadline {
+            return micros;
+        }
+        signals.changed_before(deadline.into_std()).await;
+    }
+}
+
+/// Wait until the mount reports a sealed complete generation, waking the
+/// worker as a query would and re-reading on every owner transition.
+async fn wait_for_latest_generation(fixture: &Fixture) -> String {
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    loop {
+        let freshness = fixture
+            .registry
+            .dashboard_freshness(&fixture.project)
+            .await
+            .expect("mounted freshness");
+        if let Some(generation) = freshness.latest_generation_id {
+            return generation;
+        }
+        fixture.wake_with_pending_arrival().await;
+        signals.changed().await;
     }
 }
 
@@ -223,10 +417,13 @@ async fn changed_input_lifts_a_quarantined_reconcile() {
     // A real hook hint advances the control epoch: these are not the bytes
     // that panicked.
     assert!(
-        fixture
-            .registry
-            .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
-            .await,
+        matches!(
+            fixture
+                .registry
+                .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        ),
         "the hint must reach the mounted scheduler"
     );
     let after_hint = wait_for_attempts(&fault, quarantined_at + 1).await;
@@ -234,6 +431,62 @@ async fn changed_input_lifts_a_quarantined_reconcile() {
     assert!(
         after_hint > quarantined_at,
         "changed input must earn another attempt; stayed at {quarantined_at}"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn superseded_reconcile_retains_its_arrival_until_a_later_wake() {
+    let fixture = Fixture::mount("project.reconcile-superseded-arrival").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::Cancelled, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 1).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        1,
+        "an interrupted pass relies on the source observation's wake instead of self-retrying"
+    );
+    assert_ne!(
+        fixture.pending_wake_micros().await,
+        0,
+        "the interrupted pass must restore the arrival a later source wake will consume"
+    );
+
+    let attempts_before_shutdown = fault.attempts();
+    fixture.registry.shutdown().await;
+    assert_eq!(
+        fault.attempts(),
+        attempts_before_shutdown,
+        "terminal shutdown must not retry the interrupted pass"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deadline_interruption_retains_arrival_without_retrying_expired_work() {
+    let fixture = Fixture::mount("project.reconcile-deadline-arrival").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::DeadlineExceeded, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 1).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        1,
+        "an expired reconcile must not retry the same deadline"
+    );
+    assert_ne!(
+        fixture.pending_wake_micros().await,
+        0,
+        "deadline attribution must not erase the accepted arrival"
     );
 
     fixture.registry.shutdown().await;
@@ -269,6 +522,230 @@ async fn a_transient_capacity_refusal_is_retried_without_an_external_wake() {
     fixture.registry.shutdown().await;
 }
 
+/// A first mount refused because another owner holds the scope's
+/// code-generation store lock opens once that holder lets go, with the release
+/// as its only trigger, and its worktree then reaches fresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_mount_refused_by_a_held_store_lock_mounts_on_its_release() {
+    let root = TempDir::new().expect("fixture root");
+    let project = root.path().join("project");
+    fs::create_dir_all(project.join("src")).expect("create source root");
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write source");
+    commit_fixture_checkout(&project);
+    let store = root.path().join("store");
+    let canonical = canonical_existing_identity(&project).expect("canonical project");
+    let scope_store = super::super::scoped_code_index_store_root(&store, &canonical);
+    fs::create_dir_all(&scope_store).expect("create the scope store");
+    let holder =
+        acquire_code_generation_store_lock(&scope_store).expect("hold the scope store lock");
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry.install_cold_mount_open_observer(&project);
+    let mount = tokio::spawn({
+        let registry = registry.clone();
+        let project = project.clone();
+        async move {
+            registry
+                .mount_worktree(
+                    tracedecay_domain::ProjectId::new("project.first-mount-store-lock")
+                        .expect("project identity"),
+                    &project,
+                    store,
+                )
+                .await
+        }
+    });
+    // The first open started and finished while the lock was held.
+    registry.wait_for_cold_mount_open_events(&project, 2).await;
+    drop(holder);
+
+    let mounted = tokio::time::timeout(SETTLE_DEADLINE, mount)
+        .await
+        .expect("the mount ends once the lock is released")
+        .expect("mount task");
+    assert_eq!(mounted.map_err(|error| error.to_string()), Ok(true));
+    let ready = registry
+        .wait_for_readiness(&project, CodeIndexReadinessTargetV1::Fresh, SETTLE_DEADLINE)
+        .await
+        .expect("readiness read");
+    let CodeIndexReadinessWaitReadV1::Reached { reading } = ready else {
+        panic!("the released first mount must reach fresh: {ready:?}");
+    };
+    assert_eq!(
+        reading.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh)
+    );
+    assert_eq!(reading.parked, None);
+    registry.shutdown().await;
+}
+
+/// A pass refused because another owner holds this scope's code-generation
+/// store lock runs again exactly when the holder lets go: no pass repeats the
+/// refusal while the lock stays held, and the worktree converges after the
+/// release with no further hint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_generation_store_lock_retries_on_its_release() {
+    let fixture = Fixture::mount("project.reconcile-store-lock-retry").await;
+    let sealed_before = wait_for_latest_generation(&fixture).await;
+    fixture.settle_for(MOUNT_QUIET_WINDOW).await;
+    let passes = fixture
+        .install_fault(ReconcileFaultKindV1::Permanent, 0)
+        .await;
+    let holder = acquire_code_generation_store_lock(&fixture.scope_store_root())
+        .expect("hold the scope store lock");
+
+    fs::write(
+        fixture.project.join("src/main.rs"),
+        "fn main() { edited(); }\nfn edited() {}\n",
+    )
+    .expect("edit source");
+    run_git_in(&fixture.project, &["commit", "-qam", "edit"]);
+    // The only external wake: nothing notifies the worker when the lock drops.
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        ),
+        "the hint must reach the mounted scheduler"
+    );
+    assert_eq!(wait_for_attempts(&passes, 1).await, 1);
+    fixture.pass_free_for(TERMINATION_QUIET_WINDOW).await;
+    assert_eq!(
+        passes.attempts(),
+        1,
+        "a held lock must not be polled by repeated passes"
+    );
+    let parked = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness")
+        .parked;
+    assert_eq!(parked, None, "a held lock is a wait, not a park");
+    drop(holder);
+
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    let freshness = loop {
+        let freshness = fixture
+            .registry
+            .dashboard_freshness(&fixture.project)
+            .await
+            .expect("mounted freshness");
+        if freshness.latest_generation_id.as_ref() != Some(&sealed_before)
+            && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+        {
+            break freshness;
+        }
+        signals.changed().await;
+    };
+    assert_eq!(freshness.parked, None, "{freshness:?}");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh),
+        "{freshness:?}"
+    );
+    assert!(
+        freshness
+            .latest_generation_id
+            .as_ref()
+            .is_some_and(|generation| *generation != sealed_before),
+        "the edit must seal a new generation once the lock is released: {freshness:?}"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
+/// Follow-up wakes that arrive while another owner holds the store lock must
+/// not each run a failing reconcile. The refused pass waits for the holder to
+/// release the lock; those wakes stay pending until then, and the edit seals
+/// once the holder is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn follow_up_wakes_wait_out_a_held_store_lock() {
+    let fixture = Fixture::mount("project.reconcile-store-lock-follow-up").await;
+    let sealed_before = wait_for_latest_generation(&fixture).await;
+    fixture.settle_for(MOUNT_QUIET_WINDOW).await;
+    let passes = fixture
+        .install_fault(ReconcileFaultKindV1::Permanent, 0)
+        .await;
+    let holder = acquire_code_generation_store_lock(&fixture.scope_store_root())
+        .expect("hold the scope store lock");
+
+    fs::write(
+        fixture.project.join("src/main.rs"),
+        "fn main() { edited(); }\nfn edited() {}\n",
+    )
+    .expect("edit source");
+    run_git_in(&fixture.project, &["commit", "-qam", "edit"]);
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        ),
+        "the hint must reach the mounted scheduler"
+    );
+    assert_eq!(wait_for_attempts(&passes, 1).await, 1);
+    fixture.pass_free_for(MOUNT_QUIET_WINDOW).await;
+    assert_eq!(
+        passes.attempts(),
+        1,
+        "the refused pass must settle before follow-up wakes are driven"
+    );
+
+    for _ in 0..EXTERNAL_WAKE_ROUNDS {
+        fixture.wake_busy_follow_up().await;
+        tokio::time::sleep(WAKE_ROUND_SPACING).await;
+    }
+    assert_eq!(
+        passes.attempts(),
+        1,
+        "follow-up wakes must wait for the store-lock holder instead of retrying the refusal"
+    );
+    let parked = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness")
+        .parked;
+    assert_eq!(parked, None, "a held lock is a wait, not a park");
+    drop(holder);
+
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    let freshness = loop {
+        let freshness = fixture
+            .registry
+            .dashboard_freshness(&fixture.project)
+            .await
+            .expect("mounted freshness");
+        if freshness.latest_generation_id.as_ref() != Some(&sealed_before)
+            && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+        {
+            break freshness;
+        }
+        signals.changed().await;
+    };
+    assert_eq!(freshness.parked, None, "{freshness:?}");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh),
+        "{freshness:?}"
+    );
+    assert!(
+        freshness
+            .latest_generation_id
+            .as_ref()
+            .is_some_and(|generation| *generation != sealed_before),
+        "the edit must seal a new generation once the lock is released: {freshness:?}"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
 /// FINDING 2, guard rail. The retry must not become the bug it fixes: a
 /// capacity refusal that never clears is bounded, not retried forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -280,6 +757,10 @@ async fn a_capacity_refusal_that_never_clears_is_bounded() {
     let bound = 1 + MAX_CONSECUTIVE_CAPACITY_RETRIES_V1 as usize;
 
     fixture.wake_without_new_input().await;
+    // Reach the policy bound before the quiet window: on a loaded machine a
+    // retry still queued would otherwise be sampled as the terminal count and
+    // the comparison below would read its arrival as a re-arm.
+    wait_for_attempts(&fault, bound).await;
     fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
     let settled = fault.attempts();
     // The decisive property: self-scheduling has *stopped*. An unbounded retry
@@ -304,9 +785,37 @@ async fn a_capacity_refusal_that_never_clears_is_bounded() {
     fixture.registry.shutdown().await;
 }
 
+/// A reconcile refused for resident memory repeats no pass while that memory
+/// stays held, and runs again the moment memory is given back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_memory_refusal_waits_for_headroom_instead_of_self_retrying() {
+    let fixture = Fixture::mount("project.reconcile-memory-refusal").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::ResidentMemory, 1)
+        .await;
+
+    fixture.wake_without_new_input().await;
+    wait_for_attempts(&fault, 1).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    assert_eq!(
+        fault.attempts(),
+        1,
+        "no pass repeats a memory refusal before memory is given back"
+    );
+
+    fixture.owners.note_headroom();
+    let attempts = wait_for_attempts(&fault, 2).await;
+    assert!(
+        attempts >= 2,
+        "memory given back is the refused reconcile's retry; saw {attempts} pass(es)"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
 /// FINDING 2, the distinction that matters most. A refusal that *is* a
-/// resident-memory admission failure but can never be admitted — the request
-/// alone exceeds the whole process limit — must not be self-retried. No other
+/// resident-memory admission failure but can never be admitted, the request
+/// alone exceeds the whole process limit, must not be self-retried. No other
 /// holder releasing anything makes it fit, so retrying it is the unbounded
 /// retry this PR exists to remove, wearing a capacity label.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -353,19 +862,640 @@ async fn a_permanent_refusal_is_never_self_retried() {
     fixture.registry.shutdown().await;
 }
 
-fn run_git_in(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+/// The stuck-after-init journey behind issue #2057: a cold build that fails
+/// the same way over unchanged source. Before the park, the restored arrival
+/// read as `indexing` indefinitely while every query wake rebuilt the whole
+/// worktree into the same refusal. An unreadable committed source file is a
+/// real input that reproduces it. The refusal must park typed with its exact
+/// cause, stop rebuilding on wakes that carry no new input, stay parked (not
+/// `indexing`) across a daemon restart, and converge once the operator fixes
+/// the file and runs the `tracedecay sync` the park names.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix() {
+    const PROJECT: &str = "project.reconcile-reproducing-failure";
+    const REASON: &str = "code-index repository status failed: code-index classification: \
+        Permission denied (os error 13)";
+    let set_model_mode = |project: &Path, mode: u32| {
+        fs::set_permissions(
+            project.join("src/model.rs"),
+            fs::Permissions::from_mode(mode),
+        )
+        .expect("set source mode");
+    };
+    let fixture = Fixture::mount_prepared(PROJECT, |project| {
+        fs::write(
+            project.join("src/model.rs"),
+            "pub struct Gamma;\npub fn delta() {}\n",
+        )
+        .expect("write source");
+        run_git_in(project, &["add", "."]);
+        run_git_in(project, &["commit", "-qm", "model"]);
+        set_model_mode(project, 0o000);
+    })
+    .await;
+    let counted = fixture
+        .install_fault(ReconcileFaultKindV1::Permanent, 0)
+        .await;
+
+    // Query admission posts an arrival without new input, as the stuck
+    // project's retrying callers did every few seconds.
+    for _ in 0..EXTERNAL_WAKE_ROUNDS {
+        fixture.wake_with_pending_arrival().await;
+        tokio::time::sleep(WAKE_ROUND_SPACING).await;
+    }
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    assert_eq!(
+        counted.attempts(),
+        0,
+        "wakes over unchanged input must not rebuild into the same refusal"
     );
+    let freshness = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Parked),
+        "a reproducing refusal is parked, not indexing: {freshness:?}"
+    );
+    assert!(!freshness.rebuild_in_flight, "{freshness:?}");
+    assert_eq!(freshness.latest_generation_id, None);
+    let parked = freshness.parked.expect("typed convergence park");
+    assert_eq!(parked.reason, REASON);
+    assert!(
+        parked.remediation.contains("`tracedecay sync`"),
+        "the park must name the retry command: {parked:?}"
+    );
+    assert!(!parked.retries_on_wake);
+
+    fixture.registry.shutdown().await;
+    let restarted = Fixture::remount(fixture, PROJECT).await;
+    restarted.settle_for(MOUNT_QUIET_WINDOW).await;
+    let freshness = restarted
+        .registry
+        .dashboard_freshness(&restarted.project)
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Parked),
+        "a restart over the same refusal is parked again, not indexing: {freshness:?}"
+    );
+    assert_eq!(
+        freshness.parked.map(|parked| parked.reason).as_deref(),
+        Some(REASON)
+    );
+
+    set_model_mode(&restarted.project, 0o644);
+    assert_eq!(
+        restarted
+            .registry
+            .notify_hook_overflow(&restarted.project)
+            .await,
+        CodeIndexDemandAdmissionV1::Queued,
+        "the operator reconcile is admitted on a parked worktree"
+    );
+    // The admitted reconcile alone must converge. Injecting arrivals here
+    // would keep a wake pending behind every pass that outlasts the spacing,
+    // and a pending wake never reads as fresh. Fresh text seats before the
+    // complete generation does, so the wait covers both.
+    let mut signals = OwnerSignals::subscribe(&restarted.registry, &restarted.project).await;
+    restarted
+        .registry
+        .request_complete_generation(&restarted.project)
+        .await;
+    let (freshness, serving) = loop {
+        let freshness = restarted
+            .registry
+            .dashboard_freshness(&restarted.project)
+            .await
+            .expect("mounted freshness");
+        let serving = restarted
+            .registry
+            .latest_complete_serving_for_test(&restarted.project)
+            .await;
+        if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+            && let Some(serving) = serving
+        {
+            break (freshness, serving);
+        }
+        signals.changed().await;
+    };
+    assert!(freshness.parked.is_none(), "{freshness:?}");
+    assert_eq!(
+        serving
+            .generation()
+            .generation_statistics()
+            .expect("generation statistics")
+            .symbol_count,
+        3,
+        "`main`, `Gamma`, and `delta` are the fixture's symbols"
+    );
+    restarted.registry.shutdown().await;
+}
+
+/// The upgrade journey behind issue #1979, driven through the real worker.
+/// The daemon mounts cold over a store whose pointer a pre-beta.38 release
+/// sealed; its digest no longer matches the re-serialized entries. The worker
+/// must delete the derived store and rebuild it from source with no operator
+/// action, and status must never show a terminal park.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pre_segment_bytes_pointer_is_reset_and_rebuilt_by_the_worker() {
+    let fixture = Fixture::mount("project.reconcile-upgrade-pointer-reset").await;
+    let sealed = wait_for_latest_generation(&fixture).await;
+    let pointer_path = fixture.active_pointer_path();
+    assert!(
+        pointer_path.exists(),
+        "the initial build must publish a durable pointer for {sealed}"
+    );
+    fixture.registry.shutdown().await;
+    super::super::tests::downgrade_pointer_to_pre_segment_bytes_shape(&pointer_path);
+
+    let upgraded = Fixture::remount(fixture, "project.reconcile-upgrade-pointer-reset").await;
+    let rebuilt = wait_for_latest_generation(&upgraded).await;
+    let freshness = upgraded
+        .registry
+        .dashboard_freshness(&upgraded.project)
+        .await
+        .expect("mounted freshness");
+    assert!(
+        freshness.parked.is_none(),
+        "a corrupt derived publication is rebuilt, never parked: {freshness:?}"
+    );
+    let wire = serde_json::to_value(&freshness).expect("freshness wire");
+    assert!(
+        wire["progress"]["blocked_reason"].is_null(),
+        "status must not carry a terminal reason after the rebuild: {wire}"
+    );
+    assert!(
+        matches!(
+            upgraded
+                .registry
+                .notify_hook_overflow(&upgraded.project)
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        ),
+        "hooks are admitted again on the rebuilt store"
+    );
+    let pointer: tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1 =
+        serde_json::from_slice(&fs::read(&pointer_path).expect("rebuilt pointer"))
+            .expect("rebuilt pointer decodes");
+    assert_eq!(pointer.generation_id, rebuilt);
+    assert!(
+        pointer.generation_index[0].segment_bytes > 0,
+        "the rebuilt pointer is in the current shape"
+    );
+    upgraded.registry.shutdown().await;
+}
+
+/// A corrupt publication authority gets exactly one automatic reset and
+/// rebuild per mount. A store that is corrupt again after that rebuild is
+/// parked; the fault here reproduces on every pass, so the second attempt is
+/// the rebuild the reset scheduled and the park follows it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corrupt_publication_authority_resets_once_then_parks_and_reports_terminal_state() {
+    let fixture = Fixture::mount("project.reconcile-publication-corruption").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 2).await;
+    fixture.drive_external_wakes().await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        2,
+        "one reset buys one rebuild; a store corrupt again after it must ignore later wakes"
+    );
+    assert_eq!(
+        fixture.pending_wake_micros().await,
+        0,
+        "terminal failure must consume the arrival so status is not rebuilding"
+    );
+    let freshness = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness");
+    assert!(
+        !freshness.rebuild_in_flight,
+        "terminal publication corruption is blocked, not in flight: {freshness:?}"
+    );
+    let wire = serde_json::to_value(&freshness).expect("freshness wire");
+    assert_eq!(
+        wire["parked"]["blocked_reason"], "publication_authority_corrupt",
+        "status must carry the typed terminal reason: {wire}"
+    );
+    let parked = freshness.parked.expect("terminal convergence state");
+    assert!(
+        parked
+            .reason
+            .contains("injected corrupt publication authority"),
+        "terminal state must retain the exact cause: {parked:?}"
+    );
+    assert!(
+        parked.remediation.contains("`tracedecay daemon restart`"),
+        "the park must name the exact operator command: {parked:?}"
+    );
+    assert_eq!(
+        parked.blocked_reason,
+        Some(
+            tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt
+        )
+    );
+    assert!(
+        !parked.retries_on_wake,
+        "a store corrupt again after its rebuild cannot clear on another wake"
+    );
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_overflow(&fixture.project)
+                .await,
+            CodeIndexDemandAdmissionV1::Terminal(_)
+        ),
+        "the mounted scheduler must return the terminal state until reset"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
+/// A terminal park planted without a worker-observed failure must still stop
+/// the loop. Admission already refuses that slot; a stack flag the observing
+/// pass alone sets would keep dispatching reconcile against it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn planted_terminal_publication_park_suppresses_worker_reconcile() {
+    let fixture = Fixture::mount("project.reconcile-planted-terminal-park").await;
+    fixture
+        .plant_terminal_publication_park("planted before any reconcile")
+        .await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    fixture.wake_with_pending_arrival().await;
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    while fixture.pending_wake_micros().await != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "planted terminal park did not drain the pending arrival"
+        );
+        signals.changed_before(deadline.into_std()).await;
+    }
+    fixture.drive_external_wakes().await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        0,
+        "the worker must read the shared PublicationAuthorityCorrupt park, not a local flag"
+    );
+    assert_eq!(
+        fixture.pending_wake_micros().await,
+        0,
+        "terminal suppression must leave no rebuild arrival"
+    );
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_overflow(&fixture.project)
+                .await,
+            CodeIndexDemandAdmissionV1::Terminal(_)
+        ),
+        "admission and the worker must refuse the same planted park"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corrupt_publication_without_build_progress_returns_terminal_admission() {
+    let fixture = Fixture::mount("project.reconcile-cold-publication-corruption").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 2).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    // Observational progress can lag or be cleared while the park remains the
+    // sole terminal authority.
+    fixture.clear_build_progress().await;
+
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_overflow(&fixture.project)
+            .await,
+        CodeIndexDemandAdmissionV1::Terminal(_)
+    ));
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+            .await,
+        CodeIndexDemandAdmissionV1::Terminal(_)
+    ));
+    fixture.registry.shutdown().await;
+}
+
+/// The typed park is the mount's publication-authority, not a bool this worker
+/// latches after it personally observes the error. A park already present,
+/// planted by admission, a previous owner, or a test of that contract, must
+/// stop the loop before it dispatches another reconcile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_publication_park_stops_the_worker_without_a_local_latch() {
+    let fixture = Fixture::mount("project.reconcile-park-is-worker-authority").await;
+    fixture
+        .plant_terminal_publication_park("store already corrupt before this worker observed it")
+        .await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    assert_eq!(
+        wait_until_pending_wake_drained(&fixture).await,
+        0,
+        "the worker must observe the terminal wake before the assertion"
+    );
+    fixture.drive_external_wakes().await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        0,
+        "a terminal publication park must stop the worker; a private bool misses a park this loop has not yet observed"
+    );
+    assert_eq!(
+        fixture.pending_wake_micros().await,
+        0,
+        "terminal suppression must consume the arrival so status is not rebuilding"
+    );
+    let freshness = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness");
+    assert!(
+        !freshness.rebuild_in_flight,
+        "a pre-existing terminal park is blocked, not in flight: {freshness:?}"
+    );
+    let parked = freshness.parked.expect("terminal convergence state");
+    assert_eq!(
+        parked.blocked_reason,
+        Some(
+            tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt
+        )
+    );
+    assert_eq!(
+        parked.observed_passes, 1,
+        "the worker must not re-observe a park it did not cause"
+    );
+    assert!(
+        !parked.retries_on_wake,
+        "stopping the worker must not rewrite the park into a retryable failure"
+    );
+
+    // The loop must re-read the slot. A worker-local bool would stay set
+    // after this clear and keep the next wake suppressed.
+    fixture.clear_convergence_park_for_test().await;
+    fixture.wake_with_pending_arrival().await;
+    let seen = wait_for_attempts(&fault, 1).await;
+    assert!(
+        seen >= 1,
+        "clearing the typed park must admit the worker again; a sticky latch would not"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn park_visible_before_progress_reason_returns_terminal_admission() {
+    let fixture = Fixture::mount("project.reconcile-park-before-progress").await;
+    let scope = {
+        let canonical = canonical_existing_identity(&fixture.project).expect("canonical project");
+        let mounted = fixture.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        ResolvedScope::new(
+            worktree.project_id.clone(),
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            None,
+        )
+        .expect("resolved scope")
+    };
+    fixture
+        .plant_terminal_publication_park("parked before progress snapshot")
+        .await;
+    fixture.clear_build_progress().await;
+
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_overflow(&fixture.project)
+            .await,
+        CodeIndexDemandAdmissionV1::Terminal(_)
+    ));
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+            .await,
+        CodeIndexDemandAdmissionV1::Terminal(_)
+    ));
+    assert!(matches!(
+        fixture
+            .registry
+            .request_query_background_reconcile(&scope)
+            .await,
+        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+    ));
+    fixture.registry.shutdown().await;
+}
+
+/// An ordinary read's freshness probe is the quietest path to the scheduler,
+/// and the one most likely to be treated as retryable. A cold terminal park
+/// must reach it as `Terminal` so a read never reports a resettable index as
+/// merely stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cold_terminal_park_makes_the_freshness_probe_terminal() {
+    let fixture = Fixture::mount("project.reconcile-park-freshness-probe").await;
+    fixture
+        .plant_terminal_publication_park("parked before any freshness probe")
+        .await;
+    fixture.clear_build_progress().await;
+
+    assert!(matches!(
+        fixture
+            .registry
+            .probe_freshness_admission(&fixture.project)
+            .await,
+        CodeIndexDemandAdmissionV1::Terminal(_)
+    ));
+    let scope = {
+        let mounted = fixture.registry.mounted.lock().await;
+        let worktree = mounted
+            .get(&canonical_existing_identity(&fixture.project).unwrap())
+            .unwrap();
+        ResolvedScope::new(
+            worktree.project_id.clone(),
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            None,
+        )
+        .unwrap()
+    };
+    assert!(matches!(
+        fixture
+            .registry
+            .request_query_background_reconcile(&scope)
+            .await,
+        CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_)
+    ));
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retire_and_remount_clears_terminal_publication_park_for_new_admission() {
+    let fixture = Fixture::mount("project.reconcile-publication-remount").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
+        .await;
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 2).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    assert!(matches!(
+        fixture
+            .registry
+            .notify_hook_overflow(&fixture.project)
+            .await,
+        CodeIndexDemandAdmissionV1::Terminal(_)
+    ));
+
+    let mut roots = std::collections::BTreeSet::new();
+    roots.insert(canonical_existing_identity(&fixture.project).expect("canonical project"));
+    assert!(
+        fixture.registry.retire_project_roots(&roots).await,
+        "retire must drain the terminal owner"
+    );
+    fixture
+        .registry
+        .mount_worktree(
+            tracedecay_domain::ProjectId::new("project.reconcile-publication-remount")
+                .expect("project identity"),
+            &fixture.project,
+            fixture._root.path().join("store"),
+        )
+        .await
+        .expect("remount over a fresh owner without the injected fault");
+
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_overflow(&fixture.project)
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        ),
+        "retire/remount must admit work again on a repaired mount"
+    );
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        ),
+        "exact-path hooks must recover with the remounted owner"
+    );
+    fixture.registry.shutdown().await;
+}
+
+/// A park written by an actor other than this worker must still suppress
+/// the loop. The old worker-local bool stayed false here, so later wakes
+/// reconciled against a terminal publication authority.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn planted_terminal_publication_park_suppresses_later_wakes() {
+    let fixture = Fixture::mount("project.reconcile-planted-publication-park").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::Permanent, usize::MAX)
+        .await;
+    fixture
+        .plant_terminal_publication_park("planted by an actor other than the worker")
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    fixture.drive_external_wakes().await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        0,
+        "a shared terminal park must stop the worker without a task-local latch"
+    );
+    assert_eq!(
+        fixture.pending_wake_micros().await,
+        0,
+        "the suppressed wake must drain the pending arrival"
+    );
+    let freshness = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness");
+    assert!(
+        !freshness.rebuild_in_flight,
+        "a terminal park is not a rebuild: {freshness:?}"
+    );
+    fixture.registry.shutdown().await;
+}
+
+/// Issue #3401: one Python function whose suite is only a comment used to
+/// fail chunk identity (`clone_body_empty_span`) and park the worktree with
+/// `retries_on_wake: false`, so `init --wait` never saw a first generation.
+/// The stub is not a clone candidate; neighboring files must still converge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_python_clone_body_does_not_park_the_worktree() {
+    let fixture = Fixture::mount_prepared("project.empty-clone-body", |project| {
+        fs::write(
+            project.join("src/hooks.py"),
+            "def pending():\n    # leftover from a generator\n\ndef publish(value):\n    return value\n",
+        )
+        .expect("write python stub");
+        run_git_in(project, &["add", "."]);
+        run_git_in(project, &["commit", "-qm", "python stub"]);
+    })
+    .await;
+    let ready = fixture
+        .registry
+        .wait_for_readiness(
+            &fixture.project,
+            CodeIndexReadinessTargetV1::Fresh,
+            SETTLE_DEADLINE,
+        )
+        .await
+        .expect("readiness read");
+    let CodeIndexReadinessWaitReadV1::Reached { reading } = ready else {
+        panic!("an empty Python suite must not block the first generation: {ready:?}");
+    };
+    assert_eq!(
+        reading.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh),
+        "empty clone-body input must converge, not park: {reading:?}"
+    );
+    assert!(
+        reading.latest_generation_id.is_some(),
+        "the first generation must become available: {reading:?}"
+    );
+    assert_eq!(reading.parked, None, "{reading:?}");
+    fixture.registry.shutdown().await;
 }

@@ -1,13 +1,13 @@
-//! User-profile projection over the canonical configuration control plane.
+//! User-profile projection over the profile's configuration store.
 //!
-//! Editable values come only from the daemon-owned resolved snapshot. The
-//! legacy `config.toml` remains a read-only metadata source for fields that are
-//! not settings (installed agents, cached version state, and automation
-//! discovery); transports cannot obtain a write capability for it.
+//! Editable values come only from the profile's resolved snapshot. The
+//! profile `config.toml` is read only for fields that are not settings
+//! (installed agents, cached version state, and automation discovery);
+//! transports cannot obtain a write capability for it.
 
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 
 use tracedecay_automation::config::AutomationConfig;
 use tracedecay_domain::configuration::{
@@ -16,7 +16,10 @@ use tracedecay_domain::configuration::{
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
 };
 
-use super::{DirectConfigurationMutation, ProductionConfigurationDaemonClient};
+use tracedecay_contracts::now_micros;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
+use tracedecay_global_db::configuration::{ProfileConfigurationStore, ProfileConfigurationV1};
 use tracedecay_session_memory::user_config::UserConfig;
 
 pub type UserSettingsFuture<'a, T> =
@@ -24,7 +27,6 @@ pub type UserSettingsFuture<'a, T> =
 
 #[derive(Clone, Debug)]
 pub struct UserSettingsSnapshotV1 {
-    pub legacy_config_path: String,
     pub configuration_snapshot_id: String,
     pub configuration_revision_id: String,
     pub upload_enabled: bool,
@@ -39,7 +41,8 @@ pub struct UserSettingsSnapshotV1 {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserSettingsMutationV1 {
     pub upload_enabled: Option<bool>,
-    pub watcher_debounce: Option<String>,
+    /// Positive milliseconds already parsed at the settings boundary.
+    pub watcher_debounce_ms: Option<u64>,
     pub extraction_timeout_secs: Option<u64>,
 }
 
@@ -68,61 +71,67 @@ pub trait UserSettingsDaemonClient: Send + Sync {
     fn read(&self) -> UserSettingsFuture<'_, UserSettingsSnapshotV1>;
 }
 
-/// Daemon-owned read projection. A default-constructed value is deliberately
+/// Daemon-owned read projection over the profile's `ProfileSessions`
+/// configuration store. A default-constructed value is deliberately
 /// unavailable and is used only by isolated dashboard fixtures that did not
-/// mount the configuration runtime.
+/// mount the profile store.
 #[derive(Default)]
 pub struct ProductionUserSettingsDaemonClient {
-    configuration: Option<Arc<ProductionConfigurationDaemonClient>>,
+    profile_sessions: Option<RegisteredGlobalDbLeaseV1>,
     profile_id: Option<UserProfileId>,
+    profile_root: Option<PathBuf>,
 }
 
 impl ProductionUserSettingsDaemonClient {
     pub fn new(
-        configuration: Arc<ProductionConfigurationDaemonClient>,
+        profile_sessions: RegisteredGlobalDbLeaseV1,
         profile_id: UserProfileId,
+        profile_root: PathBuf,
     ) -> Self {
         Self {
-            configuration: Some(configuration),
+            profile_sessions: Some(profile_sessions),
             profile_id: Some(profile_id),
+            profile_root: Some(profile_root),
         }
     }
 }
 
 impl UserSettingsDaemonClient for ProductionUserSettingsDaemonClient {
     fn read(&self) -> UserSettingsFuture<'_, UserSettingsSnapshotV1> {
-        let configuration = self.configuration.clone();
+        let profile_sessions = self.profile_sessions.clone();
         let profile_id = self.profile_id.clone();
+        let profile_root = self.profile_root.clone();
         Box::pin(async move {
-            let configuration =
-                configuration.ok_or_else(|| unavailable("configuration runtime"))?;
+            let profile_sessions =
+                profile_sessions.ok_or_else(|| unavailable("profile configuration store"))?;
             let profile_id = profile_id.ok_or_else(|| unavailable("user profile identity"))?;
-            let current = configuration
-                .current()
-                .await
-                .map_err(|error| unavailable(format!("resolved configuration: {error}")))?;
-            let metadata = tokio::task::spawn_blocking(read_legacy_user_metadata)
-                .await
-                .map_err(|error| unavailable(format!("user settings metadata task: {error}")))??;
-            user_settings_snapshot(&current, &profile_id, metadata)
+            let current =
+                ProfileConfigurationStore::new_registered(profile_sessions.as_ref(), &profile_id)
+                    .map_err(|error| unavailable(format!("profile configuration: {error}")))?
+                    .read_or_initialize(now_micros())
+                    .await
+                    .map_err(|error| unavailable(format!("profile configuration: {error}")))?;
+            let profile_root = profile_root.ok_or_else(|| unavailable("user profile root"))?;
+            let metadata = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                read_user_metadata(&profile_root)
+            })
+            .await
+            .map_err(|error| unavailable(format!("user settings metadata task: {error}")))??;
+            user_settings_snapshot(&current, metadata)
         })
     }
 }
 
-struct LegacyUserMetadata {
-    path: String,
+struct UserMetadata {
     installed_agents: Vec<String>,
     cached_latest_version: String,
     automation: AutomationConfig,
 }
 
-fn read_legacy_user_metadata() -> Result<LegacyUserMetadata, UserSettingsAuthorityError> {
-    let path = tracedecay_session_memory::user_config::config_path()
-        .ok_or_else(|| unavailable("legacy user configuration path"))?;
-    let config = UserConfig::load_strict()
-        .map_err(|error| unavailable(format!("legacy user configuration metadata: {error}")))?;
-    Ok(LegacyUserMetadata {
-        path: path.display().to_string(),
+fn read_user_metadata(profile_root: &Path) -> Result<UserMetadata, UserSettingsAuthorityError> {
+    let config = UserConfig::load(profile_root)
+        .map_err(|error| unavailable(format!("user configuration metadata: {error}")))?;
+    Ok(UserMetadata {
         installed_agents: config.installed_agents,
         cached_latest_version: config.cached_latest_version,
         automation: config.automation,
@@ -130,17 +139,14 @@ fn read_legacy_user_metadata() -> Result<LegacyUserMetadata, UserSettingsAuthori
 }
 
 fn user_settings_snapshot(
-    current: &crate::config::PinnedRuntimeConfiguration,
-    profile_id: &UserProfileId,
-    metadata: LegacyUserMetadata,
+    current: &ProfileConfigurationV1,
+    metadata: UserMetadata,
 ) -> Result<UserSettingsSnapshotV1, UserSettingsAuthorityError> {
-    validate_profile_provenance(current, profile_id)?;
     let upload_enabled = required_bool(current, USER_UPLOAD_ENABLED_SETTING_KEY)?;
     let watcher_debounce_ms = required_unsigned(current, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY)?;
     let extraction_timeout_secs =
         required_unsigned(current, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY)?;
     Ok(UserSettingsSnapshotV1 {
-        legacy_config_path: metadata.path,
         configuration_snapshot_id: current.snapshot.snapshot_id.as_str().to_owned(),
         configuration_revision_id: current.revision_id.as_str().to_owned(),
         upload_enabled,
@@ -153,39 +159,11 @@ fn user_settings_snapshot(
     })
 }
 
-fn validate_profile_provenance(
-    current: &crate::config::PinnedRuntimeConfiguration,
-    profile_id: &UserProfileId,
-) -> Result<(), UserSettingsAuthorityError> {
-    for raw_key in [
-        USER_UPLOAD_ENABLED_SETTING_KEY,
-        USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
-        USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    ] {
-        let key = setting_key(raw_key)?;
-        let candidates = current
-            .snapshot
-            .provenance
-            .get(&key)
-            .ok_or_else(|| unavailable(format!("provenance for {raw_key}")))?;
-        if candidates.iter().any(|candidate| match &candidate.layer {
-            ConfigurationLayerIdV1::Default => false,
-            ConfigurationLayerIdV1::UserProfile {
-                profile_id: candidate_profile,
-            } => candidate_profile != profile_id,
-            ConfigurationLayerIdV1::Project { .. } | ConfigurationLayerIdV1::Collection { .. } => {
-                true
-            }
-        }) {
-            return Err(unavailable(format!(
-                "exact user profile provenance for {raw_key}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-#[hotpath::measure(label = "usecases.configuration.plan_user_settings")]
+#[tracing::instrument(
+    name = "usecases.configuration.plan_user_settings",
+    level = "trace",
+    skip_all
+)]
 pub fn plan_user_settings_mutation(
     _current: &UserSettingsSnapshotV1,
     profile_id: UserProfileId,
@@ -202,9 +180,7 @@ pub fn plan_user_settings_mutation(
             ConfigurationValueV1::Boolean(upload_enabled),
         )?);
     }
-    if let Some(watcher_debounce) = mutation.watcher_debounce {
-        let watcher_debounce_ms = parse_duration_millis(&watcher_debounce)
-            .ok_or_else(|| unavailable("canonical watcher debounce duration"))?;
+    if let Some(watcher_debounce_ms) = mutation.watcher_debounce_ms {
         mutations.push(set(
             layer.clone(),
             USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
@@ -259,34 +235,22 @@ fn setting_key(raw_key: &str) -> Result<SettingKey, UserSettingsAuthorityError> 
         .map_err(|error| unavailable(format!("registered user setting key: {error}")))
 }
 
-fn required_setting<'a>(
-    current: &'a crate::config::PinnedRuntimeConfiguration,
-    raw_key: &str,
-) -> Result<&'a ConfigurationValueV1, UserSettingsAuthorityError> {
-    let key = setting_key(raw_key)?;
-    current
-        .snapshot
-        .effective_values
-        .get(&key)
-        .ok_or_else(|| unavailable(format!("resolved user setting {raw_key}")))
-}
-
 fn required_bool(
-    current: &crate::config::PinnedRuntimeConfiguration,
+    current: &ProfileConfigurationV1,
     raw_key: &str,
 ) -> Result<bool, UserSettingsAuthorityError> {
-    match required_setting(current, raw_key)? {
-        ConfigurationValueV1::Boolean(value) => Ok(*value),
+    match current.value(raw_key) {
+        Ok(ConfigurationValueV1::Boolean(value)) => Ok(*value),
         _ => Err(unavailable(format!("boolean user setting {raw_key}"))),
     }
 }
 
 fn required_unsigned(
-    current: &crate::config::PinnedRuntimeConfiguration,
+    current: &ProfileConfigurationV1,
     raw_key: &str,
 ) -> Result<u64, UserSettingsAuthorityError> {
-    match required_setting(current, raw_key)? {
-        ConfigurationValueV1::Unsigned(value) if *value > 0 => Ok(*value),
+    match current.value(raw_key) {
+        Ok(ConfigurationValueV1::Unsigned(value)) if *value > 0 => Ok(*value),
         _ => Err(unavailable(format!(
             "positive unsigned user setting {raw_key}"
         ))),
@@ -305,7 +269,6 @@ mod tests {
 
     fn snapshot() -> UserSettingsSnapshotV1 {
         UserSettingsSnapshotV1 {
-            legacy_config_path: "/profile/config.toml".to_owned(),
             configuration_snapshot_id: "configuration.snapshot.fixture".to_owned(),
             configuration_revision_id: "configuration.revision.fixture".to_owned(),
             upload_enabled: false,
@@ -326,7 +289,7 @@ mod tests {
             profile_id.clone(),
             UserSettingsMutationV1 {
                 upload_enabled: Some(true),
-                watcher_debounce: Some("15s".to_owned()),
+                watcher_debounce_ms: Some(15_000),
                 extraction_timeout_secs: Some(60),
             },
         )
@@ -334,6 +297,13 @@ mod tests {
 
         assert_eq!(plan.mutations.len(), 3);
         assert!(plan.restart_recommended);
+        assert!(plan.mutations.iter().any(|mutation| matches!(
+            mutation,
+            DirectConfigurationMutation::Set {
+                value,
+                ..
+            } if matches!(value.as_ref(), ConfigurationValueV1::Unsigned(15_000))
+        )));
         assert!(plan.mutations.iter().all(|mutation| {
             matches!(
                 mutation.target_layer(),

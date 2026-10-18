@@ -7,15 +7,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::McpServer;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
-use tracedecay_runtime_core::storage::resolve_response_handle_root;
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
 /// Creates a temporary Rust project and returns a direct protocol server.
 ///
@@ -25,14 +21,16 @@ use tracedecay_runtime_core::storage::resolve_response_handle_root;
 /// non-graph tool behavior.
 pub(crate) async fn setup_server() -> (Arc<McpServer>, TempDir) {
     let dir = TempDir::new().unwrap();
-    let project = dir.path();
+    // The daemon routes a project by its canonical root identity, so a macOS
+    // `/var` temp dir is served as `/private/var`.
+    let project = &canonical_root_identity(dir.path());
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("src/main.rs"),
         "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
     )
     .unwrap();
-    let cg = crate::fixture::init_project_from_template(project)
+    let cg = Box::pin(tracedecay_project::project::TraceDecay::init(project))
         .await
         .unwrap();
     // Boxed server-construction future: the production composition layout
@@ -51,7 +49,7 @@ pub(crate) async fn run_server_with_messages(
 }
 
 /// As [`run_server_with_messages`], but leaves the server running when the
-/// client disconnects — [`McpServer::run_connection`] is the entry point the
+/// client disconnects, [`McpServer::run_connection`] is the entry point the
 /// daemon uses per client socket. Scenarios where a hook arrives on the host's
 /// hook socket and the follow-up tool call arrives on the agent's own socket
 /// need this: two independent connections against one live server.
@@ -105,24 +103,32 @@ pub(crate) fn jsonrpc_request(id: Value, method: &str, params: Value) -> String 
     .unwrap()
 }
 
+/// The protocol version [`spec_initialize_request`] requests; `rmcp` keeps a
+/// supported initialize-era version, so it is also the negotiated version.
+pub(crate) const INITIALIZE_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// A spec-valid MCP `initialize`: `protocolVersion`, `capabilities`, and
+/// `clientInfo` are all required.
+pub(crate) fn spec_initialize_request(id: Value) -> String {
+    jsonrpc_request(
+        id,
+        "initialize",
+        json!({
+            "protocolVersion": INITIALIZE_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "tracedecay-protocol-test", "version": "0"}
+        }),
+    )
+}
+
 pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
-    resolve_response_handle_root(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
+    cg.store_layout().response_handle_root.clone()
 }
 
 pub(crate) fn jsonrpc_notification(method: &str) -> String {
     serde_json::to_string(&json!({
         "jsonrpc": "2.0",
         "method": method
-    }))
-    .unwrap()
-}
-
-pub(crate) fn jsonrpc_notification_with_params(method: &str, params: Value) -> String {
-    serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params
     }))
     .unwrap()
 }
@@ -182,9 +188,6 @@ impl McpTransport for ReadErrorTransport {
     }
 }
 
-/// Serializes tests that mutate process-wide global-accounting environment.
-pub(crate) static SAVINGS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 /// A server whose accounting and analytics writes are actually observable.
 ///
 /// [`McpServer::new`] leaves both accounting databases unmounted, so ledger
@@ -194,6 +197,7 @@ pub(crate) static SAVINGS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex:
 pub(crate) struct AccountedServer {
     pub(crate) server: Arc<McpServer>,
     pub(crate) global_db_path: PathBuf,
+    pub(crate) project_root: PathBuf,
     _project: TempDir,
     _profile: TempDir,
 }
@@ -255,6 +259,7 @@ async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
     AccountedServer {
         server,
         global_db_path,
+        project_root: dir.path().to_path_buf(),
         _project: dir,
         _profile: profile_dir,
     }
@@ -264,13 +269,14 @@ pub(crate) async fn mcp_runtime_events(
     global_db_path: &std::path::Path,
     session_id: &str,
 ) -> Vec<tracedecay_global_db::AnalyticsEventRecord> {
-    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(
-        global_db_path
-            .parent()
-            .expect("global db has a profile root"),
-    )
-    .await
-    .expect("registered profile runtime opens at isolated path");
+    let runtime =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
+            global_db_path
+                .parent()
+                .expect("global db has a profile root"),
+        )
+        .await
+        .expect("registered profile runtime opens at isolated path");
     runtime
         .query_profile_analytics_events_for_test(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("mcp".to_string()),
@@ -309,7 +315,7 @@ pub(crate) async fn expect_mcp_runtime_event(
 }
 
 /// As [`mcp_runtime_events`], but through the production composition's
-/// retained profile authority — a second profile-scoped test runtime cannot
+/// retained profile authority, a second profile-scoped test runtime cannot
 /// open the daemon-owned profile stores.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn harness_mcp_runtime_events(
@@ -403,11 +409,4 @@ pub(crate) fn analytics_metadata(event: &tracedecay_global_db::AnalyticsEventRec
             .expect("analytics event metadata"),
     )
     .expect("analytics event metadata is JSON")
-}
-
-// ---------------------------------------------------------------------------
-// Repository setup used by routed hook journeys.
-// ---------------------------------------------------------------------------
-pub(crate) fn git(project: &std::path::Path, args: &[&str]) {
-    crate::common::fixture::git_run(project, args);
 }

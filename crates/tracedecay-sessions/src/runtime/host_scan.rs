@@ -1,6 +1,8 @@
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::observation::ObservationCancellation;
+use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 
 pub(super) const HOST_SCAN_WINDOW: Duration = Duration::from_secs(2);
 
@@ -15,7 +17,6 @@ pub(super) struct HostScanEvidence {
 }
 
 impl HostScanEvidence {
-    #[hotpath::skip]
     pub(super) const fn is_deferred(self) -> bool {
         self.cancelled
             || self.deadline_elapsed
@@ -37,7 +38,6 @@ pub(super) struct HostScanBudget {
 }
 
 impl HostScanBudget {
-    #[hotpath::skip]
     pub(super) const fn new(
         max_input_bytes: u64,
         max_units: usize,
@@ -98,7 +98,19 @@ impl HostScanBudget {
         true
     }
 
-    #[hotpath::skip]
+    /// Charges a discovered path's encoded length, at least one byte, against
+    /// the input bound.
+    pub(super) fn try_charge_path(
+        &mut self,
+        path: &Path,
+        provider: &'static str,
+    ) -> TranscriptIngestResult<bool> {
+        let bytes = u64::try_from(path.as_os_str().as_encoded_bytes().len())
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })?
+            .max(1);
+        Ok(self.try_charge_input(bytes))
+    }
+
     pub(super) const fn deadline(&self) -> Instant {
         self.deadline
     }
@@ -107,7 +119,6 @@ impl HostScanBudget {
         self.cancellation.clone()
     }
 
-    #[hotpath::skip]
     pub(super) const fn consumed_input_bytes(&self) -> u64 {
         self.consumed_input_bytes
     }
@@ -120,8 +131,17 @@ impl HostScanBudget {
         self.evidence.unavailable_units = self.evidence.unavailable_units.saturating_add(1);
     }
 
-    #[hotpath::skip]
     pub(super) const fn evidence(&self) -> HostScanEvidence {
         self.evidence
     }
+}
+
+/// Per-source read failures a host isolates to that source instead of
+/// failing the whole sweep. A refusal of the source's own records is the
+/// source sweep's to quarantine instead.
+pub(super) fn isolatable_source_error(error: &TranscriptIngestError) -> bool {
+    matches!(
+        error,
+        TranscriptIngestError::ScanIo { .. } | TranscriptIngestError::ScanGenerationChanged { .. }
+    )
 }

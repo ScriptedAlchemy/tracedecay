@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "provider": "pi",
+  "sources": [
+    {
+      "kind": "first_party_extension_payload",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/pi/README.md",
+      "extension_path": "plugin/pi/index.ts",
+      "pi_coding_agent_version": "0.87.1",
+      "captured_on": "2026-09-25"
+    },
+    {
+      "kind": "official_documentation",
+      "url": "https://github.com/earendil-works/pi/blob/v0.87.1/packages/coding-agent/docs/extensions.md",
+      "sections": ["Events"],
+      "retrieved_at": "2026-09-25"
+    }
+  ],
+  "events": [
+    {
+      "identity": "session_start",
+      "family": "session_boundary",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/pi/session-start.json",
+      "request": {
+        "hook_event_name": "session_start",
+        "id": "<EVENT_ID>",
+        "session_id": "<SESSION_ID>",
+        "cwd": "<PROJECT_ROOT>",
+        "reason": "startup"
+      }
+    },
+    {
+      "identity": "stop",
+      "family": "session_boundary",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/pi/agent-end.json",
+      "request": {
+        "hook_event_name": "agent_end",
+        "id": "<EVENT_ID>",
+        "session_id": "<SESSION_ID>",
+        "cwd": "<PROJECT_ROOT>"
+      }
+    }
+  ]
+}

@@ -11,14 +11,40 @@ use tracedecay_automation_runtime::automation::scheduler::{
 
 use super::super::{
     DaemonHandshake, apply_project_automation_patch_via_surface, enter_test_daemon_database_scope,
-    initialize_test_project, isolate_codex_app_server_binary, test_client_identity_for,
-    test_daemon_engine_for_profile, test_handshake_defaults,
+    initialize_test_project, test_client_identity_for, test_daemon_engine_for_profile,
+    test_handshake_defaults,
 };
 
 #[tokio::test]
 async fn automation_scheduler_tick_respects_pause_control_without_backend_call() {
+    paused_tick_scenario().await;
+}
+
+/// The daemon polls its automation scheduler on Tokio workers with a 16 MiB
+/// stack (`ASYNC_STACK_BYTES` in the CLI). With instrumentation every
+/// instrumented future is wrapped by value, which is what overflowed that
+/// stack in production (#835). Run the same tick on a thread of exactly that
+/// size so a regression aborts here instead of in the live daemon.
+#[test]
+fn automation_scheduler_tick_fits_the_daemon_worker_stack() {
+    const DAEMON_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("daemon-worker-stack".to_owned())
+        .stack_size(DAEMON_WORKER_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(paused_tick_scenario());
+        })
+        .expect("spawn daemon-sized thread")
+        .join()
+        .expect("scheduler tick must complete on a daemon-sized stack");
+}
+
+async fn paused_tick_scenario() {
     let dir = TempDir::new().expect("temp dir");
-    let _codex_bin = isolate_codex_app_server_binary(dir.path());
     let project = dir.path().canonicalize().expect("canonical temp dir");
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
@@ -35,6 +61,17 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
         &handshake.client_identity.profile_root,
         "paused-scheduler-tick-test",
     );
+    // Save the pause before automation is enabled. Opening the project server
+    // registers this project's own automation scheduler owner, and a
+    // `every:1m` task is immediately due, so enabling first leaves a window in
+    // which the daemon's own tick reads an unpaused control and appends the
+    // run record this case then blames on the tick it invokes below.
+    save_scheduler_control(
+        &dashboard_root,
+        &AutomationSchedulerControl { paused: true },
+    )
+    .await
+    .expect("save paused scheduler control");
     let server = apply_project_automation_patch_via_surface(
         &engine,
         &handshake,
@@ -51,12 +88,6 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
     )
     .await;
     let cg = server.cg().await;
-    save_scheduler_control(
-        &dashboard_root,
-        &AutomationSchedulerControl { paused: true },
-    )
-    .await
-    .expect("save paused scheduler control");
 
     let run_control =
         tracedecay_automation_runtime::automation::AutomationRunControl::from_interrupted(

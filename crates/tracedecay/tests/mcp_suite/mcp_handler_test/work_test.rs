@@ -1,0 +1,1066 @@
+#![cfg(all(feature = "test-transport", unix))]
+
+use crate::support::*;
+use serde_json::{Value, json};
+use std::collections::BTreeSet;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracedecay_domain::configuration::{
+    ConfigurationValueV1, WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1,
+    WorkExecutableCapabilityV1,
+};
+use tracedecay_domain::{
+    ManifestDigestHasher, WorkApprovalPolicy, WorkContentLocationClassV1, WorkEffortClassV1,
+    WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits, WorkFallbackTopology,
+    WorkFilesystemPolicy, WorkOrdinalBandV1, WorkProviderBackendV1, WorkRouteCandidateV1,
+    WorkRouteExecutionProfileV1, WorkSandboxPolicy,
+};
+use tracedecay_runtime_core::test_executable::write_executable_script;
+
+async fn call_envelope(server: &tracedecay::mcp::McpServer, tool: &str, arguments: Value) -> Value {
+    let result = handle_real_server_tool_call(server, tool, arguments).await;
+    serde_json::from_str(extract_real_server_text(&result))
+        .unwrap_or_else(|error| panic!("{tool} returned invalid JSON ({error}): {result}"))
+}
+
+async fn call(server: &tracedecay::mcp::McpServer, tool: &str, arguments: Value) -> Value {
+    let decoded = call_envelope(server, tool, arguments).await;
+    decoded
+        .pointer("/value/outcome/value/payload")
+        .cloned()
+        .unwrap_or(decoded)
+}
+
+fn now_micros() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_micros(),
+    )
+    .expect("current time fits UtcMicros")
+}
+
+async fn configure_attempt_provider(production: &ProductionCompositionFixture) {
+    let executable_bytes = b"#!/bin/sh\nexit 0\n";
+    let isolation_root = production
+        .project_root
+        .parent()
+        .expect("production fixture isolation root");
+    let executable_path = isolation_root.join("work-attempt-provider");
+    write_executable_script(&executable_path, executable_bytes)
+        .expect("write Work provider executable");
+    let executable_path = executable_path
+        .canonicalize()
+        .expect("canonical Work provider executable");
+    let mut hasher = ManifestDigestHasher::new();
+    hasher.update(executable_bytes);
+    let executable = WorkExecutableReference::new(
+        "executable.work.mcp-attempt-provider".to_owned(),
+        hasher.finalize().expect("Work provider executable digest"),
+    )
+    .expect("Work provider executable reference");
+    let route = WorkRouteCandidateV1 {
+        route_id: "route.work.mcp-attempt-codex.v1".to_owned(),
+        provider_capability_id: WorkProviderBackendV1::CodexCli
+            .provider_id()
+            .as_str()
+            .to_owned(),
+        model_id: "gpt-5.6-sol".to_owned(),
+        effort: WorkEffortClassV1::Standard,
+        declared_budget_ceiling: 1,
+        content_location: WorkContentLocationClassV1::Local,
+        correctness: WorkOrdinalBandV1::High,
+        sensitive_data_fitness: WorkOrdinalBandV1::High,
+        latency: WorkOrdinalBandV1::Moderate,
+        cost: WorkOrdinalBandV1::Moderate,
+        autonomy: WorkOrdinalBandV1::High,
+        evidence_quality: WorkOrdinalBandV1::High,
+        execution: WorkRouteExecutionProfileV1 {
+            sandbox: WorkSandboxPolicy::Required,
+            approval: WorkApprovalPolicy::Never,
+            filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+            egress: WorkEgressPolicy::Deny,
+            environment_allowlist: BTreeSet::new(),
+            credential_references: BTreeSet::new(),
+            limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1)
+                .expect("Work provider execution limits"),
+            maximum_duration_micros: 60_000_000,
+            fallback: WorkFallbackTopology::Disabled,
+        },
+    };
+    let binding = WorkExecutableBindingV1::new(
+        executable,
+        executable_path,
+        vec![WorkExecutableCapabilityV1::CodexCliExecJson],
+        vec![route],
+    )
+    .expect("configured Work provider binding");
+    let server = production
+        .harness
+        .server(&production.project_root)
+        .expect("production MCP server");
+    let expected_revision = production
+        .harness
+        .configuration_revision(&production.project_root)
+        .await
+        .expect("fixture configuration revision");
+    let configured = call_envelope(
+        &server,
+        "tracedecay_configuration_set",
+        json!({
+            "layer": {
+                "kind": "project",
+                "project_id": production
+                    .harness
+                    .project_id(&production.project_root)
+                    .await
+                    .expect("registered fixture project")
+            },
+            "key": WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+            "value": serde_json::to_value(ConfigurationValueV1::WorkExecutableBindings(vec![
+                binding,
+            ]))
+            .expect("serialize Work provider binding"),
+            "expected_revision": expected_revision,
+            "idempotency_key": "configuration.idempotency.mcp-attempt-provider",
+            "format": "json"
+        }),
+    )
+    .await;
+    assert_eq!(
+        configured.pointer("/outcome/outcome"),
+        Some(&json!("effect")),
+        "Work provider configuration must commit: {configured}"
+    );
+    drop(server);
+}
+
+/// A fresh provider attempt has no session association yet. The public Work
+/// reads must still project it from the authority that committed the attempt.
+///
+/// The journey deliberately leaves the second attempt in flight and then reads
+/// it, so the runtime has to carry the reader and the attempt worker at once.
+/// The Work read handlers are synchronous: `load_effect_dispatch` occupies its
+/// worker thread while it waits for the exact-SQL transaction slot the in-flight
+/// attempt holds. With two worker threads the reader and the attempt worker
+/// deadlock until the 30s transaction-idle reclaim frees the slot, which is
+/// within milliseconds of this operation's own 30s deadline, so the journey
+/// passed or failed by a race rather than by its contract. Provision the
+/// threads the journey's own concurrency needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
+    let production = production_composition_fixture().await;
+    configure_attempt_provider(&production).await;
+    let production = production.reopen().await;
+    let project_root = production.project_root.clone();
+    let server = production
+        .harness
+        .server(&production.project_root)
+        .expect("production MCP server");
+    let occurred_at = now_micros();
+    let selection = json!({ "selection": "profile_owned_no_git" });
+
+    let prepared_create = call(
+        &server,
+        "tracedecay_work_prepare_graph_mutation",
+        json!({
+            "selection": selection,
+            "change": {
+                "change": "create_task",
+                "initiative": {
+                    "id": "initiative.mcp-attempt-read",
+                    "title": "MCP attempt read initiative",
+                    "created_at": occurred_at
+                },
+                "plan": {
+                    "id": "plan.mcp-attempt-read",
+                    "initiative_id": "initiative.mcp-attempt-read",
+                    "title": "MCP attempt read plan",
+                    "created_at": occurred_at
+                },
+                "milestone": {
+                    "id": "milestone.mcp-attempt-read",
+                    "plan_id": "plan.mcp-attempt-read",
+                    "title": "MCP attempt read milestone",
+                    "created_at": occurred_at
+                },
+                "item": {
+                    "input": {
+                        "task_id": "task.mcp-attempt-read",
+                        "hierarchy": {
+                            "initiative_id": "initiative.mcp-attempt-read",
+                            "plan_id": "plan.mcp-attempt-read",
+                            "milestone_id": "milestone.mcp-attempt-read"
+                        },
+                        "title": "Read a freshly started attempt",
+                        "dependencies": [],
+                        "informational_relations": [],
+                        "causal_candidates": [],
+                        "acceptance_criteria": [],
+                        "effort": 1,
+                        "scheduled_at": null,
+                        "deadline": null,
+                        "created_at": occurred_at,
+                        "updated_at": occurred_at
+                    },
+                    "accepted_proposal": null,
+                    "accepted_route": null,
+                    "execution_admitted_at": null,
+                    "accepted_attempts": [],
+                    "accepted_criteria": {},
+                    "accepted_at": null,
+                    "archived_at": null,
+                    "evidence_links": [],
+                    "handoffs": []
+                }
+            },
+            "evidence": []
+        }),
+    )
+    .await;
+    let created = call(
+        &server,
+        "tracedecay_work_create",
+        prepared_create["request"].clone(),
+    )
+    .await;
+    assert_eq!(created["replayed"], false, "{created}");
+
+    let generated = call(
+        &server,
+        "tracedecay_work_generate_proposal",
+        json!({
+            "selection": selection,
+            "task_id": "task.mcp-attempt-read",
+            "proposal_id": "proposal.mcp-attempt-read",
+            "occurred_at": now_micros()
+        }),
+    )
+    .await;
+    assert!(generated["proposal"].is_object(), "{generated}");
+    let initial_version = generated["verified_graph_version"].clone();
+    let prepared_accept = call(
+        &server,
+        "tracedecay_work_prepare_graph_mutation",
+        json!({
+            "selection": selection,
+            "change": {
+                "change": "decide_proposal",
+                "proposal": generated["proposal"].clone(),
+                "disposition": "accepted"
+            },
+            "evidence": []
+        }),
+    )
+    .await;
+    assert_eq!(
+        prepared_accept["mutation"], "decide_proposal",
+        "{prepared_accept}"
+    );
+    let accepted = call(
+        &server,
+        "tracedecay_work_accept_proposal",
+        prepared_accept["request"].clone(),
+    )
+    .await;
+    assert_eq!(accepted["replayed"], false, "{accepted}");
+    let prepared_admit = call(
+        &server,
+        "tracedecay_work_prepare_graph_mutation",
+        json!({
+            "selection": selection,
+            "change": {
+                "change": "admit_execution",
+                "task_id": "task.mcp-attempt-read"
+            },
+            "evidence": []
+        }),
+    )
+    .await;
+    let admitted = call(
+        &server,
+        "tracedecay_work_admit_execution",
+        prepared_admit["request"].clone(),
+    )
+    .await;
+    let admitted_version = admitted["mutation"]["verified_graph_version"].clone();
+    assert_eq!(admitted["mutation"]["replayed"], false, "{admitted}");
+
+    let placement_request = json!({
+        "task_id": "task.mcp-attempt-read",
+        "run_id": "run.mcp-attempt-read",
+        "target": {
+            "kind": "clean_in_place",
+            "root": null,
+            "network_free": true,
+            "in_place_acknowledged": true
+        },
+        "occurred_at": now_micros()
+    });
+    let preflight = call(
+        &server,
+        "tracedecay_work_placement_preflight",
+        placement_request.clone(),
+    )
+    .await;
+    assert_eq!(preflight["blockers"], json!([]), "{preflight}");
+    let placed = call(
+        &server,
+        "tracedecay_work_admit_placement",
+        placement_request,
+    )
+    .await;
+    assert_eq!(
+        placed["identity"]["run_id"], "run.mcp-attempt-read",
+        "{placed}"
+    );
+
+    let commit = Command::new(crate::common::git_program())
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&project_root)
+        .output()
+        .expect("read fixture commit");
+    assert!(commit.status.success(), "git rev-parse must succeed");
+    let commit = String::from_utf8(commit.stdout)
+        .expect("commit is UTF-8")
+        .trim()
+        .to_owned();
+    let attempt_at = now_micros();
+    let start_request = json!({
+        "task_id": "task.mcp-attempt-read",
+        "run_id": "run.mcp-attempt-read",
+        "attempt_id": "attempt.mcp-attempt-read",
+        "operation": "operation.work.start_attempt",
+        "worktree_root": project_root,
+        "commit": commit,
+        "instructions": "Observe the fixture only.",
+        "effect_state": "observational",
+        "occurred_at": attempt_at,
+        "execution_snapshot": admitted["execution_snapshot"].clone()
+    });
+    let _: tracedecay_contracts::StartWorkAttemptCommand =
+        serde_json::from_value(start_request.clone()).expect("valid start-attempt request");
+    let mut second_start_request = start_request.clone();
+    second_start_request["attempt_id"] = json!("attempt.mcp-attempt-read.second");
+    let started = call(&server, "tracedecay_work_start_attempt", start_request).await;
+    assert_eq!(
+        started["identity"]["attempt_id"], "attempt.mcp-attempt-read",
+        "{started}"
+    );
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let status = call(
+                &server,
+                "tracedecay_work_attempt_status",
+                json!({
+                    "task_id": "task.mcp-attempt-read",
+                    "run_id": "run.mcp-attempt-read",
+                    "attempt_id": "attempt.mcp-attempt-read"
+                }),
+            )
+            .await;
+            match status["state"].as_str() {
+                Some("succeeded") => break status,
+                Some("leased" | "running") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                _ => panic!("Work provider must settle successfully: {status}"),
+            }
+        }
+    })
+    .await
+    .expect("Work provider did not settle within the fixture budget");
+    assert_eq!(settled["terminal"]["outcome"], "succeeded", "{settled}");
+    let second_started = call(
+        &server,
+        "tracedecay_work_start_attempt",
+        second_start_request,
+    )
+    .await;
+    assert_eq!(
+        second_started["identity"]["attempt_id"], "attempt.mcp-attempt-read.second",
+        "{second_started}"
+    );
+    let attempts = call(
+        &server,
+        "tracedecay_work_list_attempts",
+        json!({ "page_size": 50 }),
+    )
+    .await;
+    assert_eq!(attempts["state"], "listed", "{attempts}");
+    let listed_attempt = attempts["attempts"]
+        .as_array()
+        .and_then(|attempts| {
+            attempts
+                .iter()
+                .find(|attempt| attempt["identity"] == started["identity"])
+        })
+        .expect("started attempt must be listed");
+    assert_eq!(listed_attempt["state"], "succeeded", "{attempts}");
+    assert_eq!(
+        listed_attempt["terminal"]["outcome"], "succeeded",
+        "{attempts}"
+    );
+
+    let history = call(
+        &server,
+        "tracedecay_work_execution_history",
+        json!({ "page_size": 50 }),
+    )
+    .await;
+    assert_eq!(history["state"], "listed", "{history}");
+    assert!(
+        history["observed_order"]
+            .as_array()
+            .is_some_and(|events| events
+                .iter()
+                .any(|event| event["identity"] == started["identity"])),
+        "{history}"
+    );
+
+    let topology = call(
+        &server,
+        "tracedecay_work_topology",
+        json!({ "page_size": 50 }),
+    )
+    .await;
+    assert_eq!(topology["state"], "view", "{topology}");
+    assert!(
+        topology["execution_placement"]["lanes"]
+            .as_array()
+            .is_some_and(|lanes| lanes.iter().any(|lane| {
+                lane["task_id"] == "task.mcp-attempt-read"
+                    && lane["run_id"] == "run.mcp-attempt-read"
+            })),
+        "{topology}"
+    );
+
+    let compared = call(
+        &server,
+        "tracedecay_work_compare_proposal",
+        json!({
+            "selection": selection,
+            "task_id": "task.mcp-attempt-read",
+            "old_version": initial_version,
+            "new_version": admitted_version,
+            "observed_at": now_micros()
+        }),
+    )
+    .await;
+    assert_eq!(compared["task_id"], "task.mcp-attempt-read", "{compared}");
+
+    let duplicate = call(
+        &server,
+        "tracedecay_work_prepare_duplicate_adjudication",
+        json!({
+            "first_attempt": started["identity"],
+            "second_attempt": second_started["identity"],
+            "verdict": "not_duplicate",
+            "reason": "distinct fixture attempts",
+            "quantities": {
+                "wall_micros": null,
+                "token_count": null,
+                "cost_micros": null,
+                "test_count": null,
+                "effect_count": null,
+                "evidence": "owner_receipt",
+                "effect_outcome": "not_applicable",
+                "coverage": "known"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        duplicate["first_attempt"], started["identity"],
+        "{duplicate}"
+    );
+    assert_eq!(
+        duplicate["second_attempt"], second_started["identity"],
+        "{duplicate}"
+    );
+    assert!(
+        duplicate["evidence"]["work_generation"].is_string(),
+        "{duplicate}"
+    );
+    assert!(
+        duplicate["evidence"]["topology_generation"].is_string(),
+        "{duplicate}"
+    );
+    let mut fabricated = duplicate.clone();
+    fabricated["command_id"] = json!("request.mcp-attempt-read.fabricated-evidence");
+    fabricated["evidence"]["work_generation"] =
+        json!(format!("work-product-projection.sha256:{}", "0".repeat(64)));
+    let refused = call(&server, "tracedecay_work_adjudicate_duplicate", fabricated).await;
+    assert_eq!(
+        refused.pointer("/value/problem/code"),
+        Some(&json!(
+            "application.work.duplicate-adjudication.evidence-stale"
+        )),
+        "{refused}"
+    );
+    assert_eq!(
+        refused.pointer("/value/problem/legal_actions"),
+        Some(&json!(["refresh"])),
+        "{refused}"
+    );
+    let adjudicated = call(
+        &server,
+        "tracedecay_work_adjudicate_duplicate",
+        duplicate.clone(),
+    )
+    .await;
+    assert_eq!(
+        adjudicated["receipt"]["command"], duplicate,
+        "{adjudicated}"
+    );
+
+    let experience = call(
+        &server,
+        "tracedecay_work_experience",
+        json!({
+            "selection": selection,
+            "task_id": "task.mcp-attempt-read",
+            "verified_version": admitted_version,
+            "expertise_categories": ["testing"],
+            "evidence_not_before": occurred_at,
+            "observed_at": now_micros(),
+            "limit": 10
+        }),
+    )
+    .await;
+    assert_ne!(
+        experience.pointer("/value/problem/code"),
+        Some(&json!("not_found_or_not_authorized")),
+        "experience must not require a task-session association: {experience}"
+    );
+
+    let placement = call(
+        &server,
+        "tracedecay_work_placement_status",
+        json!({
+            "task_id": "task.mcp-attempt-read",
+            "run_id": "run.mcp-attempt-read"
+        }),
+    )
+    .await;
+    assert_ne!(placement["state"], "absent", "{placement}");
+
+    let cancelled = call(
+        &server,
+        "tracedecay_work_cancel_attempt",
+        json!({
+            "task_id": "task.mcp-attempt-read",
+            "run_id": "run.mcp-attempt-read",
+            "attempt_id": "attempt.mcp-attempt-read",
+            "request_id": "cancel.mcp-attempt-read",
+            "occurred_at": now_micros()
+        }),
+    )
+    .await;
+    assert_ne!(
+        cancelled.pointer("/value/problem/code"),
+        Some(&json!("not_found_or_not_authorized")),
+        "the attempt consumer must find the fresh attempt even if its provider already settled: {cancelled}"
+    );
+
+    let paused = call(
+        &server,
+        "tracedecay_work_pause_run",
+        json!({
+            "task_id": "task.mcp-attempt-read",
+            "run_id": "run.mcp-attempt-read",
+            "reason": "operator_request",
+            "occurred_at": now_micros()
+        }),
+    )
+    .await;
+    assert_eq!(paused["state"], "paused", "{paused}");
+    let resumed = call(
+        &server,
+        "tracedecay_work_resume_run",
+        json!({
+            "task_id": "task.mcp-attempt-read",
+            "run_id": "run.mcp-attempt-read",
+            "reason": "operator_request",
+            "expected_authority_version": paused["authority"],
+            "occurred_at": now_micros()
+        }),
+    )
+    .await;
+    assert_eq!(resumed["state"], "running", "{resumed}");
+}
+
+const GENERATE_ROUTE_ID: &str = "route.work.mcp-attempt-codex.v1";
+const GENERATE_PROVIDER_ID: &str = "provider.work.codex-cli";
+
+async fn create_ready_task(
+    server: &tracedecay::mcp::McpServer,
+    selection: &Value,
+    occurred_at: i64,
+    task_id: &str,
+) -> Value {
+    let prepared = call(
+        server,
+        "tracedecay_work_prepare_graph_mutation",
+        json!({
+            "selection": selection,
+            "change": {
+                "change": "create_task",
+                "initiative": {
+                    "id": format!("initiative.{task_id}"),
+                    "title": "Generate proposal initiative",
+                    "created_at": occurred_at
+                },
+                "plan": {
+                    "id": format!("plan.{task_id}"),
+                    "initiative_id": format!("initiative.{task_id}"),
+                    "title": "Generate proposal plan",
+                    "created_at": occurred_at
+                },
+                "milestone": {
+                    "id": format!("milestone.{task_id}"),
+                    "plan_id": format!("plan.{task_id}"),
+                    "title": "Generate proposal milestone",
+                    "created_at": occurred_at
+                },
+                "item": {
+                    "input": {
+                        "task_id": task_id,
+                        "hierarchy": {
+                            "initiative_id": format!("initiative.{task_id}"),
+                            "plan_id": format!("plan.{task_id}"),
+                            "milestone_id": format!("milestone.{task_id}")
+                        },
+                        "title": "Generate one proposal",
+                        "dependencies": [],
+                        "informational_relations": [],
+                        "causal_candidates": [],
+                        "acceptance_criteria": [],
+                        "effort": 1,
+                        "scheduled_at": null,
+                        "deadline": null,
+                        "created_at": occurred_at,
+                        "updated_at": occurred_at
+                    },
+                    "accepted_proposal": null,
+                    "accepted_route": null,
+                    "execution_admitted_at": null,
+                    "accepted_attempts": [],
+                    "accepted_criteria": {},
+                    "accepted_at": null,
+                    "archived_at": null,
+                    "evidence_links": [],
+                    "handoffs": []
+                }
+            },
+            "evidence": []
+        }),
+    )
+    .await;
+    let created = call(
+        server,
+        "tracedecay_work_create",
+        prepared["request"].clone(),
+    )
+    .await;
+    assert_eq!(created["replayed"], false, "{created}");
+    assert_eq!(
+        created["verified_graph_version"]["graph_version"], 1,
+        "{created}"
+    );
+    assert_eq!(
+        created["verified_graph_version"]["event_sequence"], 1,
+        "{created}"
+    );
+    created
+}
+
+fn proposal_arguments(
+    selection: &Value,
+    task_id: &str,
+    proposal_id: &str,
+    occurred_at: i64,
+) -> Value {
+    json!({
+        "selection": selection,
+        "task_id": task_id,
+        "proposal_id": proposal_id,
+        "occurred_at": occurred_at
+    })
+}
+
+fn work_tool_text(result: &Value) -> Value {
+    serde_json::from_str(extract_real_server_text(result))
+        .unwrap_or_else(|error| panic!("Work tool text is not JSON ({error}): {result}"))
+}
+
+/// Drop the digest that covers per-call admission (deadline and cancellation).
+///
+/// Two calls with the same arguments are not byte-identical, because that
+/// digest is minted again on every `tools/call`. The route, reasons, sizing,
+/// and graph version are.
+fn without_admission_digest(mut value: Value) -> Value {
+    if let Some(object) = value.pointer_mut("/decision") {
+        object
+            .as_object_mut()
+            .expect("decision object")
+            .remove("input_digest");
+    }
+    if let Some(object) = value.pointer_mut("/proposal") {
+        object
+            .as_object_mut()
+            .expect("proposal object")
+            .remove("evidence_digest");
+    }
+    if let Some(object) = value.pointer_mut("/calibration/provenance") {
+        object
+            .as_object_mut()
+            .expect("provenance object")
+            .remove("input_digest");
+    }
+    value
+}
+
+/// The payload a host reads after a successful `tools/call`.
+///
+/// `isError` is absent on success; a problem rides in the text as
+/// `kind: problem`, not as a sibling of the MCP result.
+async fn generate_proposal_success(server: &tracedecay::mcp::McpServer, arguments: Value) -> Value {
+    let result =
+        handle_real_server_tool_call(server, "tracedecay_work_generate_proposal", arguments).await;
+    assert_ne!(result["isError"], json!(true), "{result}");
+    let envelope = work_tool_text(&result);
+    assert_eq!(envelope["kind"], "success", "{envelope}");
+    envelope
+        .pointer("/value/outcome/value/payload")
+        .cloned()
+        .unwrap_or_else(|| panic!("success envelope has no payload: {envelope}"))
+}
+
+/// `tracedecay_work_generate_proposal` is a read. A ready task with one
+/// configured route is allowed onto that route, without inventing a size or
+/// moving the graph. A task the graph does not contain is a typed refusal,
+/// not an empty proposal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refuses_a_missing_task()
+{
+    let production = production_composition_fixture().await;
+    configure_attempt_provider(&production).await;
+    let production = production.reopen().await;
+    let server = production
+        .harness
+        .server(&production.project_root)
+        .expect("production MCP server");
+    let selection = json!({ "selection": "profile_owned_no_git" });
+    let occurred_at = now_micros();
+    let created = create_ready_task(&server, &selection, occurred_at, "task.mcp-generate").await;
+    // The committed version is stamped when the mutation lands. A read whose
+    // observation instant is earlier than that stamp sees no graph, so every
+    // task — including the one just created — is not_found.
+    let observed_at = now_micros();
+
+    let refused = handle_real_server_tool_call(
+        &server,
+        "tracedecay_work_generate_proposal",
+        proposal_arguments(
+            &selection,
+            "task.mcp-generate.absent",
+            "proposal.mcp-generate.absent",
+            observed_at,
+        ),
+    )
+    .await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    let refused_text = work_tool_text(&refused);
+    assert_eq!(refused_text["kind"], "problem", "{refused_text}");
+    assert!(
+        refused_text["value"].get("binding_id").is_none(),
+        "a concealed refusal must not reveal the binding: {refused_text}"
+    );
+    assert!(
+        refused_text.pointer("/value/outcome").is_none(),
+        "a missing task must not return a proposal: {refused_text}"
+    );
+    let mut problem = refused_text["value"]["problem"].clone();
+    let problem_fields = problem.as_object_mut().expect("refusal problem object");
+    let request_id = problem_fields
+        .remove("request_id")
+        .expect("refusal request id");
+    let trace_id = problem_fields.remove("trace_id").expect("refusal trace id");
+    assert_eq!(
+        problem,
+        json!({
+            "revision": 1,
+            "kind": "not_found_or_not_authorized",
+            "code": "not_found_or_not_authorized",
+            "message": "The requested resource was not found or is not authorized",
+            "diagnostic": null,
+            "detail": null,
+            "committed_receipt": null,
+            "owning_layer": "application",
+            "terminality": "pre_admission",
+            "retryable": false,
+            "retry": "never",
+            "retry_scope": null,
+            "retry_after_millis": null,
+            "cancellation_stage": null,
+            "unavailable_classification": null,
+            "execution_failure_classification": null,
+            "details": [],
+            "legal_actions": [],
+            "coverage": null
+        }),
+        "{refused_text}"
+    );
+    let request_id = request_id.as_str().expect("refusal request id");
+    assert!(!request_id.is_empty(), "{refused_text}");
+    assert_eq!(trace_id, json!(request_id), "{refused_text}");
+    assert_eq!(
+        refused_text["value"]["request_id"],
+        json!(request_id),
+        "{refused_text}"
+    );
+
+    let generated = generate_proposal_success(
+        &server,
+        proposal_arguments(
+            &selection,
+            "task.mcp-generate",
+            "proposal.mcp-generate.ready",
+            observed_at,
+        ),
+    )
+    .await;
+    assert_eq!(
+        generated["verified_graph_version"], created["verified_graph_version"],
+        "generating a proposal must not advance the graph: {generated}"
+    );
+    let mut proposal = generated["proposal"].clone();
+    let proposal_evidence_digest = proposal
+        .as_object_mut()
+        .expect("proposal object")
+        .remove("evidence_digest");
+    let proposal_configuration_digest = proposal
+        .as_object_mut()
+        .expect("proposal object")
+        .remove("configuration_digest");
+    assert_eq!(
+        proposal,
+        json!({
+            "proposal_id": "proposal.mcp-generate.ready",
+            "task_id": "task.mcp-generate",
+            "based_on_version": 1,
+            "shape": {
+                "score_kind": "ordinal",
+                "complexity": 0,
+                "ambiguity": 0,
+                "blast_radius": 0,
+                "integration_overhead": 0
+            },
+            "sizing": {
+                "score_kind": "ordinal",
+                "low": 1,
+                "likely": 1,
+                "high": 1,
+                "coverage": "declared_work_item_effort"
+            },
+            "children": [],
+            "route": {
+                "decision": "selected",
+                "recommended": {
+                    "provider_id": GENERATE_PROVIDER_ID,
+                    "route_id": GENERATE_ROUTE_ID
+                },
+                "alternatives": [],
+                "exclusions": [],
+                "fallback": GENERATE_ROUTE_ID
+            },
+            "explanation": "policy disposition Allow; reasons [FrontierIncomparable, Ready, RouteEvidenceSparse, InsufficientCalibrationSupport, DeterministicBaselineSelected]"
+        }),
+        "{generated}"
+    );
+    assert_eq!(
+        proposal_evidence_digest.as_ref(),
+        Some(&generated["decision"]["input_digest"]),
+        "{generated}"
+    );
+    assert_eq!(
+        proposal_configuration_digest.as_ref(),
+        Some(&generated["decision"]["configuration_digest"]),
+        "{generated}"
+    );
+    let evidence_digest = generated["decision"]["input_digest"]
+        .as_str()
+        .expect("decision input digest");
+    assert_eq!(evidence_digest.len(), "sha256:".len() + 64, "{generated}");
+    assert!(evidence_digest.starts_with("sha256:"), "{generated}");
+    assert_eq!(
+        generated["decision"]["evaluator_id"], "work_proposal.v1",
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["evaluator_revision"], 3,
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["task_id"], "task.mcp-generate",
+        "{generated}"
+    );
+    assert_eq!(generated["decision"]["based_on_version"], 1, "{generated}");
+    assert_eq!(generated["decision"]["disposition"], "allow", "{generated}");
+    assert_eq!(
+        generated["decision"]["recommended_action"], "proceed_to_acceptance",
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["deterministic_fallback"], true,
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["ordered_reason_codes"],
+        json!([
+            "frontier_incomparable",
+            "ready",
+            "route_evidence_sparse",
+            "insufficient_calibration_support",
+            "deterministic_baseline_selected"
+        ]),
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["frontier_comparison"], "incomparable",
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["live_git_evidence"],
+        Value::Null,
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["local_evidence"]["watermark"], observed_at,
+        "{generated}"
+    );
+    assert_eq!(generated["decision"].get("sizing"), None, "{generated}");
+    assert_eq!(
+        generated["decision"].get("decomposition"),
+        None,
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["shape"],
+        json!({
+            "kind": "unclassified",
+            "band": "lowest"
+        }),
+        "{generated}"
+    );
+    assert_eq!(
+        generated["decision"]["route_plan"],
+        json!({
+            "ranked": [{
+                "rank": 1,
+                "route_id": GENERATE_ROUTE_ID,
+                "correctness": "high",
+                "sensitive_data_fitness": "high",
+                "latency": "moderate",
+                "cost": "moderate",
+                "autonomy": "high",
+                "evidence_quality": "high"
+            }],
+            "exclusions": [],
+            "deterministic_baseline": GENERATE_ROUTE_ID,
+            "coverage": "lowest",
+            "uncertainty": "highest",
+            "human_override_applied": false
+        }),
+        "{generated}"
+    );
+    let mut calibration = generated["calibration"].clone();
+    let provenance = calibration
+        .as_object_mut()
+        .expect("calibration object")
+        .remove("provenance");
+    assert_eq!(
+        calibration,
+        json!({
+            "cohort_route": GENERATE_ROUTE_ID,
+            "raw_outcomes": [],
+            "eligible_route_count": 1,
+            "routes_with_outcomes": 0,
+            "comparable_outcomes": 0,
+            "incomparable_outcomes": 0,
+            "uncertainty": "sparse"
+        }),
+        "{generated}"
+    );
+    let provenance = provenance.expect("calibration provenance");
+    assert_eq!(
+        provenance["evaluator_id"], "work_proposal.v1",
+        "{generated}"
+    );
+    assert_eq!(provenance["evaluator_revision"], 3, "{generated}");
+    assert_eq!(provenance["evaluated_at"], observed_at, "{generated}");
+    assert_eq!(
+        provenance["input_digest"], generated["decision"]["input_digest"],
+        "{generated}"
+    );
+    assert_eq!(
+        provenance["configuration_digest"], generated["decision"]["configuration_digest"],
+        "{generated}"
+    );
+    assert_eq!(
+        provenance["configuration_revision"], generated["decision"]["configuration_revision"],
+        "{generated}"
+    );
+    assert_eq!(
+        provenance["local_evidence"], generated["decision"]["local_evidence"],
+        "{generated}"
+    );
+
+    let replayed = generate_proposal_success(
+        &server,
+        proposal_arguments(
+            &selection,
+            "task.mcp-generate",
+            "proposal.mcp-generate.ready",
+            observed_at,
+        ),
+    )
+    .await;
+    assert_eq!(
+        replayed["proposal"]["evidence_digest"], replayed["decision"]["input_digest"],
+        "{replayed}"
+    );
+    assert_eq!(
+        without_admission_digest(replayed),
+        without_admission_digest(generated.clone()),
+        "the same arguments must select the same route"
+    );
+
+    let other = generate_proposal_success(
+        &server,
+        proposal_arguments(
+            &selection,
+            "task.mcp-generate",
+            "proposal.mcp-generate.other",
+            observed_at,
+        ),
+    )
+    .await;
+    assert_eq!(
+        other["proposal"]["evidence_digest"], other["decision"]["input_digest"],
+        "{other}"
+    );
+    assert_eq!(
+        other["proposal"]["proposal_id"], "proposal.mcp-generate.other",
+        "{other}"
+    );
+    let mut other_stable = without_admission_digest(other);
+    let generated_stable = without_admission_digest(generated);
+    other_stable["proposal"]["proposal_id"] = generated_stable["proposal"]["proposal_id"].clone();
+    assert_eq!(
+        other_stable, generated_stable,
+        "the caller-chosen proposal id does not change the route"
+    );
+}

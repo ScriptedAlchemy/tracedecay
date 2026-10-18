@@ -6,13 +6,15 @@
 //! flows have explicit inputs and preserve the historical error messages.
 
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::path::Path;
 
 use yaml_edit::{Document, Mapping, Sequence, YamlNode};
 
-use crate::agents::{backup_config_file, safe_write_bytes_file};
-use crate::errors::{Result, TraceDecayError};
+use crate::agents::{
+    lifecycle_created_container, lifecycle_created_file, note_created_container,
+    safe_remove_host_file, safe_write_bytes_file,
+};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineEnding {
@@ -51,13 +53,7 @@ struct ProfileConfigDocument {
 impl ProfileConfigDocument {
     fn parse(contents: &str) -> std::result::Result<Self, String> {
         let normalized = LineEnding::detect(contents).normalize(contents);
-        let document = if normalized.trim().is_empty() {
-            Document::new_mapping()
-        } else {
-            Document::from_str(&normalized)
-                .map_err(|error| format!("invalid Hermes YAML config: {error}"))?
-        };
-        let root = document
+        let root = parse_profile(&normalized)?
             .as_mapping()
             .ok_or_else(|| "unsupported Hermes config; expected a top-level mapping".to_string())?;
         Ok(Self { root })
@@ -68,20 +64,10 @@ impl ProfileConfigDocument {
     }
 }
 
-/// Reads the removed `plugins.tracedecay.project_root` setting solely as
-/// provenance for one-time data migration and transcript import.
-pub fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
-    let contents = std::fs::read_to_string(config_path).ok()?;
-    let config = ProfileConfigDocument::parse(&contents).ok()?;
-    let plugins = config.root().get_mapping("plugins")?;
-    let tracedecay = plugins.get_mapping("tracedecay")?;
-    string_value(&tracedecay, "project_root")
-}
-
 pub(super) fn registration_state(
     config_path: &Path,
-) -> crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 {
-    use crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+) -> crate::agents::host_bundle::HostBundleRegistrationStateV1 {
+    use crate::agents::host_bundle::HostBundleRegistrationStateV1 as State;
 
     let Ok(contents) = std::fs::read_to_string(config_path) else {
         return State::Missing;
@@ -112,19 +98,27 @@ pub(super) fn registration_state(
 }
 
 pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
-    let existing = std::fs::read_to_string(config_path).unwrap_or_default();
-    let original_path = original_config_path(config_path);
-    if config_path.is_file() && !original_path.exists() {
-        crate::agents::safe_write_bytes_file(&original_path, existing.as_bytes(), None)?;
-    }
-    let updated = enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
-        message: format!(
-            "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
-            config_path.display()
-        ),
-    })?;
+    let existing = match std::fs::read_to_string(config_path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to read {}: {error}", config_path.display()),
+            });
+        }
+    };
+    let (updated, created) =
+        enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
+            message: format!(
+                "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
+                config_path.display()
+            ),
+        })?;
     if updated != existing {
         write_config_file(config_path, &updated)?;
+    }
+    for pointer in created {
+        note_created_container(config_path, pointer);
     }
     Ok(true)
 }
@@ -133,33 +127,18 @@ pub(super) fn disable_plugin(config_path: &Path) -> Result<()> {
     let Ok(existing) = std::fs::read_to_string(config_path) else {
         return Ok(());
     };
-    let updated = disable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
-        message: format!(
-            "{message} in {}; leaving Hermes plugin files in place",
-            config_path.display()
-        ),
-    })?;
-    let original_path = original_config_path(config_path);
-    if let Ok(original) = std::fs::read(&original_path)
-        && std::str::from_utf8(&original)
-            .is_ok_and(|original| updated.trim_end() == original.trim_end())
-    {
-        crate::agents::safe_write_bytes_file(config_path, &original, None)?;
-        crate::agents::safe_remove_host_file(&original_path).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("failed to remove {}: {error}", original_path.display()),
-            }
+    let created = |pointer: &str| lifecycle_created_container(config_path, pointer);
+    let updated =
+        disable_plugin_config(&existing, &created).map_err(|message| TraceDecayError::Config {
+            message: format!(
+                "{message} in {}; leaving Hermes plugin files in place",
+                config_path.display()
+            ),
         })?;
-        return Ok(());
-    }
     if updated != existing {
         write_config_file(config_path, &updated)?;
     }
     Ok(())
-}
-
-pub(super) fn original_config_path(config_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
 // Error messages preserved from the historical line-oriented implementation so
@@ -169,7 +148,7 @@ const MEMORY_ERR: &str = "unsupported Hermes memory config";
 const CONTEXT_ERR: &str = "unsupported Hermes context config";
 
 // The mutation path is deliberately text/span oriented rather than CST oriented.
-// The pinned `yaml-edit` (0.2.3) cannot reliably synthesize nested block or flow
+// `yaml-edit` (as of 0.2.3) cannot reliably synthesize nested block or flow
 // collections: `Mapping::set`/`Sequence::push` render new members at column 0
 // (their indent is derived from context that is lost through the cloned
 // `get_mapping`/`get_sequence` handles), and node-copying `set` ignores the
@@ -178,26 +157,59 @@ const CONTEXT_ERR: &str = "unsupported Hermes context config";
 // anchors, aliases, flow collections and line endings byte-for-byte intact for
 // structure the installer does not own.
 
-fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
+/// The containers enabling TraceDecay may add to a profile, as JSON pointers
+/// into the YAML document.
+const OWNED_CONTAINERS: [&str; 4] = ["/plugins", "/plugins/enabled", "/memory", "/context"];
+
+/// The enabled config and the [`OWNED_CONTAINERS`] enabling added to it.
+fn enable_plugin_config(
+    existing: &str,
+) -> std::result::Result<(String, Vec<&'static str>), String> {
     let line_ending = LineEnding::detect(existing);
     let normalized = line_ending.normalize(existing);
+    let before = owned_containers_present(&normalized)?;
     let updated = enable_normalized(&normalized)?;
-    Ok(line_ending.restore(updated))
+    let created = owned_containers_present(&updated)?
+        .into_iter()
+        .filter(|pointer| !before.contains(pointer))
+        .collect();
+    Ok((line_ending.restore(updated), created))
 }
 
-fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> {
+/// Disable TraceDecay, collapsing an owned container once empty only when
+/// `created` says enabling added it.
+fn disable_plugin_config(
+    existing: &str,
+    created: &dyn Fn(&str) -> bool,
+) -> std::result::Result<String, String> {
     if existing.trim().is_empty() {
         return Ok(existing.to_string());
     }
     let line_ending = LineEnding::detect(existing);
     let normalized = line_ending.normalize(existing);
-    let updated = disable_normalized(&normalized)?;
+    let updated = disable_normalized(&normalized, created)?;
     Ok(line_ending.restore(updated))
 }
 
+fn owned_containers_present(text: &str) -> std::result::Result<Vec<&'static str>, String> {
+    let document = parse_profile(text)?;
+    let root = document
+        .as_mapping()
+        .ok_or_else(|| "unsupported Hermes config; expected a top-level mapping".to_string())?;
+    Ok(OWNED_CONTAINERS
+        .into_iter()
+        .filter(|pointer| match *pointer {
+            "/plugins/enabled" => root
+                .get("plugins")
+                .and_then(|plugins| plugins.as_mapping().cloned())
+                .is_some_and(|plugins| plugins.get("enabled").is_some()),
+            pointer => root.get(&pointer[1..]).is_some(),
+        })
+        .collect())
+}
+
 fn enable_normalized(existing: &str) -> std::result::Result<String, String> {
-    let text = remove_legacy_project_pin(existing)?;
-    let text = remove_seq_item(&text, &["plugins", "disabled"], "tracedecay")?;
+    let text = remove_seq_item(existing, &["plugins", "disabled"], "tracedecay")?;
     let text = ensure_enabled(&text)?;
     let text = ensure_scalar(
         &text,
@@ -220,11 +232,29 @@ fn enable_normalized(existing: &str) -> std::result::Result<String, String> {
     Ok(text)
 }
 
-fn disable_normalized(existing: &str) -> std::result::Result<String, String> {
-    let text = remove_seq_item(existing, &["plugins", "enabled"], "tracedecay")?;
-    let text = remove_legacy_project_pin(&text)?;
-    let text = disable_scalar(&text, "context", "engine")?;
-    let text = disable_scalar(&text, "memory", "provider")?;
+fn disable_normalized(
+    existing: &str,
+    created: &dyn Fn(&str) -> bool,
+) -> std::result::Result<String, String> {
+    let mut text = remove_seq_item(existing, &["plugins", "enabled"], "tracedecay")?;
+    if created("/plugins/enabled") {
+        let document = parse_profile(&text)?;
+        if let Some(plugins) = document
+            .as_mapping()
+            .and_then(|root| root.get("plugins"))
+            .and_then(|plugins| plugins.as_mapping().cloned())
+        {
+            text = collapse_if_empty(&text, &plugins, "enabled")?;
+        }
+    }
+    if created("/plugins") {
+        let document = parse_profile(&text)?;
+        if let Some(root) = document.as_mapping() {
+            text = collapse_if_empty(&text, &root, "plugins")?;
+        }
+    }
+    let text = disable_scalar(&text, "context", "engine", created("/context"))?;
+    let text = disable_scalar(&text, "memory", "provider", created("/memory"))?;
     Ok(text)
 }
 
@@ -234,8 +264,10 @@ fn parse_profile(text: &str) -> std::result::Result<Document, String> {
     if text.trim().is_empty() {
         return Ok(Document::new_mapping());
     }
-    let document =
-        Document::from_str(text).map_err(|error| format!("invalid Hermes YAML config: {error}"))?;
+    // Spans index into `text`, so comments outside the document body survive
+    // every splice even though the parsed `Document` drops them.
+    let document = Document::from_str_ignoring_comments(text)
+        .map_err(|error| format!("invalid Hermes YAML config: {error}"))?;
     if document.as_mapping().is_none() {
         return Err("unsupported Hermes config; expected a top-level mapping".to_string());
     }
@@ -283,14 +315,14 @@ fn append_root_block(text: &str, block: &str) -> String {
 }
 
 fn value_end(node: &YamlNode) -> Option<usize> {
-    if let Some(scalar) = node.as_scalar() {
-        Some(scalar.byte_range().end as usize)
-    } else if let Some(mapping) = node.as_mapping() {
-        Some(mapping.byte_range().end as usize)
-    } else {
-        node.as_sequence()
-            .map(|sequence| sequence.byte_range().end as usize)
-    }
+    let range = node
+        .as_scalar()
+        .map(yaml_edit::Scalar::byte_range)
+        .or_else(|| node.as_mapping().map(Mapping::byte_range))
+        .or_else(|| node.as_sequence().map(Sequence::byte_range))?;
+    // An omitted value parses as a zero-width scalar placed after any blank
+    // lines that follow its key; it owns no bytes, so it has no end.
+    (range.end > range.start).then_some(range.end as usize)
 }
 
 // ---- enable mutations ----
@@ -470,43 +502,6 @@ fn insert_block_child(
 
 // ---- removals ----
 
-/// Remove the legacy `plugins.tracedecay.project_root` pin, collapsing an
-/// otherwise-empty `tracedecay` mapping when it carries no comments/anchors.
-fn remove_legacy_project_pin(text: &str) -> std::result::Result<String, String> {
-    let document = parse_profile(text)?;
-    let root = document
-        .as_mapping()
-        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
-    let Some(plugins) = root
-        .get("plugins")
-        .and_then(|node| node.as_mapping().cloned())
-    else {
-        return Ok(text.to_string());
-    };
-    let Some(tracedecay) = plugins
-        .get("tracedecay")
-        .and_then(|node| node.as_mapping().cloned())
-    else {
-        return Ok(text.to_string());
-    };
-    if !tracedecay.contains_key("project_root") {
-        return Ok(text.to_string());
-    }
-    let after = remove_map_entry(text, &tracedecay, "project_root")?;
-
-    let document = parse_profile(&after)?;
-    let root = document
-        .as_mapping()
-        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
-    if let Some(plugins) = root
-        .get("plugins")
-        .and_then(|node| node.as_mapping().cloned())
-    {
-        return collapse_if_empty(&after, &plugins, "tracedecay");
-    }
-    Ok(after)
-}
-
 fn remove_seq_item(text: &str, path: &[&str], value: &str) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
     let root = document
@@ -575,8 +570,8 @@ fn remove_map_entry(
                 .map(|scalar| scalar.byte_range().start as usize)
         })
         .ok_or_else(|| PLUGINS_ERR.to_string())?;
-    // A `key:` whose only child was just removed has a null value and no value
-    // node; fall back to the key position so we still drop the dangling line.
+    // A `key:` whose only child was just removed has a null value that owns no
+    // bytes; fall back to the key position so we still drop the dangling line.
     let value_end = entry.value_node().and_then(|node| value_end(&node));
     if parent.is_flow_style() {
         let value_end = value_end.ok_or_else(|| PLUGINS_ERR.to_string())?;
@@ -612,7 +607,12 @@ fn expand_over_flow_separator(text: &str, start: usize, mut end: usize) -> (usiz
     (start, end)
 }
 
-fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result<String, String> {
+fn disable_scalar(
+    text: &str,
+    container: &str,
+    key: &str,
+    collapse: bool,
+) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
     let root = document
         .as_mapping()
@@ -627,6 +627,9 @@ fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result
         return Ok(text.to_string());
     }
     let after = remove_map_entry(text, &mapping, key)?;
+    if !collapse {
+        return Ok(after);
+    }
 
     let document = parse_profile(&after)?;
     let root = document
@@ -720,24 +723,17 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
     if current.as_deref() == Some(contents) {
         return Ok(());
     }
+    if contents.trim().is_empty() && lifecycle_created_file(path) {
+        return safe_remove_host_file(path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", path.display()),
+        });
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
             message: format!("failed to create {}: {error}", parent.display()),
         })?;
     }
-    let backup = backup_config_file(path)?;
-    safe_write_bytes_file(path, contents.as_bytes(), backup.as_deref()).map_err(|error| {
-        let backup_hint = backup
-            .as_ref()
-            .map(|path| format!(" Backup is at {}.", path.display()))
-            .unwrap_or_default();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to atomically replace {}: {error}.{backup_hint}",
-                path.display()
-            ),
-        }
-    })
+    safe_write_bytes_file(path, contents.as_bytes())
 }
 
 #[cfg(test)]
@@ -791,29 +787,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn collapse_after_removal_keeps_following_authored_lines() {
-        let text = concat!(
-            "plugins:\n",
-            "  enabled:\n",
-            "    - tracedecay\n",
-            "  tracedecay:\n",
-            "    project_root: /legacy\n",
-            "\n",
-            "memory: keep\n",
-        );
-        assert_eq!(
-            remove_legacy_project_pin(text).unwrap(),
-            concat!(
-                "plugins:\n",
-                "  enabled:\n",
-                "    - tracedecay\n",
-                "\n",
-                "memory: keep\n",
-            ),
-        );
-    }
-
     #[derive(Debug, Clone, Copy)]
     enum Mutation {
         Enable,
@@ -836,8 +809,8 @@ mod tests {
 
     fn mutate(case: &CorpusCase) -> String {
         match case.mutation {
-            Mutation::Enable => enable_plugin_config(case.input).unwrap(),
-            Mutation::Disable => disable_plugin_config(case.input).unwrap(),
+            Mutation::Enable => enable_plugin_config(case.input).unwrap().0,
+            Mutation::Disable => disable_plugin_config(case.input, &|_| false).unwrap(),
         }
     }
 
@@ -877,11 +850,6 @@ mod tests {
                     .get_sequence("enabled")
                     .is_none_or(|enabled| !sequence_contains(&enabled, "tracedecay"))
             );
-            assert!(
-                plugins
-                    .get_mapping("tracedecay")
-                    .is_none_or(|plugin| !plugin.contains_key("project_root"))
-            );
         }
         assert_ne!(
             root.get_mapping("memory")
@@ -906,7 +874,7 @@ mod tests {
                 input: concat!(
                     "# leading comment\n",
                     "\"plugins\": {enabled: [other], disabled: [tracedecay, blocked], ",
-                    "tracedecay: {project_root: \"/legacy\", keep: yes}}\n",
+                    "tracedecay: {keep: yes}}\n",
                     "memory: {note: \"keep me\"}\n",
                     "context: {note: 'keep me too'}\n",
                     "unknown: {quoted: \"value\"}\n",
@@ -920,7 +888,7 @@ mod tests {
                     "note: 'keep me too'",
                     "unknown: {quoted: \"value\"}",
                 ],
-                removed: &["project_root:"],
+                removed: &[],
                 crlf: false,
             },
             CorpusCase {
@@ -931,7 +899,6 @@ mod tests {
                     "plugins:\n",
                     "  enabled: [other]\n",
                     "  tracedecay:\n",
-                    "    project_root: /legacy\n",
                     "    options: *defaults\n",
                     "consumer:\n",
                     "  <<: *defaults\n",
@@ -943,7 +910,7 @@ mod tests {
                     "color: blue",
                     "retries: 3",
                 ],
-                removed: &["project_root:"],
+                removed: &[],
                 crlf: false,
             },
             CorpusCase {
@@ -969,7 +936,6 @@ mod tests {
                     "plugins:\n",
                     "  enabled: [tracedecay, other]\n",
                     "  tracedecay:\n",
-                    "    project_root: /legacy\n",
                     "    summary_model: glm-5\n",
                     "memory: {provider: tracedecay, keep: true}\n",
                     "context: {engine: tracedecay, budget: 42}\n",
@@ -985,7 +951,7 @@ mod tests {
                     "hooks: &hooks",
                     "mcp: {servers: *hooks}",
                 ],
-                removed: &["project_root:"],
+                removed: &[],
                 crlf: false,
             },
         ];
@@ -1030,37 +996,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn enable_plugin_creates_missing_profile_config() {
-        let dir = TempDir::new().unwrap();
-        let config = dir.path().join(".hermes/profiles/work/config.yaml");
-
-        enable_plugin(&config).unwrap();
-
-        let updated = read(&config);
-        assert_enabled(&updated);
-        assert!(
-            !config.with_extension("yaml.bak").exists(),
-            "first write should not create a backup for a missing config"
-        );
-    }
-
-    #[test]
-    fn disable_plugin_ignores_missing_config() {
-        let dir = TempDir::new().unwrap();
-        let config = dir.path().join(".hermes/profiles/missing/config.yaml");
-
-        disable_plugin(&config).unwrap();
-
-        assert!(!config.exists());
-    }
-
+    /// Disabling removes exactly the blocks enabling appended: a `plugins:`
+    /// block it added goes, one the operator had stays, and so does an empty
+    /// `memory:` mapping the operator already had.
     #[test]
     fn enable_then_disable_restores_existing_config_bytes() {
-        let original = "theme: dark\nplugins:\n  enabled:\n    - foreign\n";
-        let enabled = enable_plugin_config(original).unwrap();
+        for (original, appended) in [
+            (
+                "theme: dark\nplugins:\n  enabled:\n    - foreign\n",
+                &["/memory", "/context"][..],
+            ),
+            (
+                "model: x\nmemory: {}\n",
+                &["/plugins", "/plugins/enabled", "/context"][..],
+            ),
+        ] {
+            let (enabled, created) = enable_plugin_config(original).unwrap();
+            assert_eq!(created, appended);
+            assert!(enabled.contains("- tracedecay"), "{enabled}");
 
-        assert_eq!(disable_plugin_config(&enabled).unwrap(), original);
+            let created = |pointer: &str| created.contains(&pointer);
+            assert_eq!(disable_plugin_config(&enabled, &created).unwrap(), original);
+        }
     }
 
     #[test]
@@ -1072,7 +1029,7 @@ mod tests {
         );
 
         assert_eq!(
-            disable_plugin_config(input).unwrap(),
+            disable_plugin_config(input, &|_| true).unwrap(),
             "user_setting: keep\n"
         );
     }
@@ -1088,22 +1045,39 @@ mod tests {
         );
 
         assert_eq!(
-            disable_plugin_config(input).unwrap(),
+            disable_plugin_config(input, &|_| true).unwrap(),
             "\n\nuser_setting: keep\n"
         );
     }
 
     #[test]
-    fn enable_plugin_backs_up_existing_config_before_atomic_write() {
+    fn enable_plugin_keeps_no_copy_of_the_prior_config() {
         let dir = TempDir::new().unwrap();
         let config = dir.path().join("config.yaml");
         let original = "theme: dark\nplugins:\n  enabled:\n    - other\n";
         std::fs::write(&config, original).unwrap();
 
-        enable_plugin(&config).unwrap();
+        let mut facts = Vec::new();
+        crate::agents::recorded_lifecycle(dir.path(), &mut facts, false, || enable_plugin(&config))
+            .unwrap();
+        crate::agents::recorded_lifecycle(dir.path(), &mut facts, true, || disable_plugin(&config))
+            .unwrap();
 
-        let backup = dir.path().join("config.yaml.bak");
-        assert!(backup.exists());
-        assert_eq!(read(&backup), original);
+        assert_eq!(read(&config), original);
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("config.yaml")]);
+    }
+
+    #[test]
+    fn enable_plugin_does_not_replace_a_config_it_could_not_read() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::create_dir(&config).unwrap();
+
+        let error = enable_plugin(&config).unwrap_err();
+        assert!(error.to_string().contains("failed to read"));
     }
 }

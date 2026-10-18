@@ -1,20 +1,18 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-
-use tokio::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::ownership::retire_missing_repository_owners;
-use super::{GitWatcher, WatchState, log_daemon_event, request_freshness_for_repository};
+use super::{GitWatcher, WatchState, log_daemon_event, park, request_freshness_for_repository};
 
 /// The backstop's per-repository coverage decision.
 ///
 /// Returns the log label for the freshness request this tick must make, or
 /// `None` when nothing has drifted a full interval. Interval drift alone drives
 /// coverage: the heartbeat proves only that the watcher task is alive, and a
-/// live watcher reacts to git metadata alone — never to working-tree edits or
-/// missed hook deliveries — so a healthy heartbeat must never veto the request.
+/// live watcher reacts to git metadata alone, never to working-tree edits or
+/// missed hook deliveries, so a healthy heartbeat must never veto the request.
 /// Gating coverage on a stale heartbeat left healthy-watcher projects with no
 /// freshness floor at all; live profiles were observed hours stale while every
 /// mechanism reported healthy.
@@ -27,21 +25,19 @@ pub const fn coverage_action(watcher_stale: bool, interval_elapsed: bool) -> Opt
 }
 
 pub async fn run(watcher: GitWatcher) {
-    let mut ticker = tokio::time::interval(Duration::from_mins(1));
     let mut due_by_root = HashMap::new();
-    ticker.tick().await;
-
-    loop {
-        tokio::select! {
-            biased;
-            () = watcher.inner.cancellation.cancelled() => return,
-            _ = ticker.tick() => {}
-        }
+    while park(
+        watcher.inner.cancellation.cancelled(),
+        Duration::from_mins(1),
+        "backstop",
+    )
+    .await
+    {
         tick(&watcher, &mut due_by_root).await;
     }
 }
 
-#[hotpath::measure(label = "daemon.git.watch.backstop_tick", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.backstop_tick", level = "trace", skip_all)]
 async fn tick(watcher: &GitWatcher, due_by_root: &mut HashMap<PathBuf, (Duration, Instant)>) {
     retire_missing_repository_owners(&watcher.inner).await;
     super::overflow::cover_overflowed_repositories(watcher).await;

@@ -14,6 +14,7 @@ use super::{
 };
 use crate::error::rollback_failure;
 use crate::location::PersistentGraphStoreState;
+use crate::projection::check_cancelled;
 use crate::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
     GraphDbRuntimeState, GraphDurability, GraphFormatVersion,
@@ -100,8 +101,32 @@ pub(super) fn open_registered_graph(
     Ok(owner)
 }
 
+pub(super) fn open_registered_graph_lazy(
+    path: &Path,
+    expected_format: GraphFormatVersion,
+    registration: &GraphDbRegistration,
+    authority_attachment: Box<dyn RetainedGraphStoreOwnerAttachmentV1>,
+) -> Result<GraphDbOwner, GraphDbError> {
+    check_request(
+        registration.lifecycle_cancellation.as_ref(),
+        registration.deadline,
+        "registry.open_lazy.lifecycle",
+    )?;
+    check_request(
+        registration.cancellation.as_ref(),
+        registration.deadline,
+        "registry.open_lazy",
+    )?;
+    let persistent_store_state = inspect_graph_database_file(path)?;
+    let database = GraphDb::open_lazy_with_store_state(
+        registered_open_options(path, expected_format, registration, persistent_store_state),
+        persistent_store_state,
+    )?;
+    GraphDbOwner::register_database(database, authority_attachment)
+}
+
 /// Opens the registry-owned database, running the deterministic-corruption
-/// quarantine protocol when a preexisting container reports the typed
+/// deletion protocol when a preexisting container reports the typed
 /// corruption verdict, then reopening the vacated path as a fresh store that
 /// the canonical replay authorities re-project into.
 fn open_registered_database(
@@ -121,28 +146,40 @@ fn open_registered_database(
         Err(GraphDbError::Corrupt { message })
             if persistent_store_state == PersistentGraphStoreState::Existing =>
         {
-            let recovery = crate::store_quarantine::recover_deterministically_corrupt_container(
+            let recovery = crate::corrupt_store::recover_deterministically_corrupt_container(
                 path,
                 &message,
                 &|| open(PersistentGraphStoreState::Existing),
             )?;
             match recovery {
-                crate::store_quarantine::CorruptStoreRecovery::Reopened(database) => {
+                crate::corrupt_store::CorruptStoreRecovery::Reopened(database) => {
                     Ok((database, PersistentGraphStoreState::Existing))
                 }
-                crate::store_quarantine::CorruptStoreRecovery::Quarantined {
-                    quarantine_directory,
-                } => {
+                crate::corrupt_store::CorruptStoreRecovery::Deleted => {
                     let fresh_state = inspect_graph_database_file(path)?;
                     let database = open(fresh_state)?;
                     tracing::info!(
-                        event = "store_rebuilt_after_quarantine",
+                        event = "store_rebuilt_after_corruption",
                         container = %path.display(),
-                        quarantine = %quarantine_directory.display(),
-                        "fresh graph store opened after corruption quarantine; canonical \
-                         replay authorities re-project its generations"
+                        "fresh graph store opened after deleting a corrupt container; \
+                         canonical replay authorities re-project its generations"
                     );
                     Ok((database, fresh_state))
+                }
+            }
+        }
+        Err(GraphDbError::FormatSuperseded { .. })
+            if persistent_store_state == PersistentGraphStoreState::Existing =>
+        {
+            match crate::corrupt_store::replace_superseded_container(path, &|| {
+                open(PersistentGraphStoreState::Existing)
+            })? {
+                crate::corrupt_store::CorruptStoreRecovery::Reopened(database) => {
+                    Ok((database, PersistentGraphStoreState::Existing))
+                }
+                crate::corrupt_store::CorruptStoreRecovery::Deleted => {
+                    let fresh_state = inspect_graph_database_file(path)?;
+                    Ok((open(fresh_state)?, fresh_state))
                 }
             }
         }
@@ -168,14 +205,6 @@ fn registered_open_options(
         expected_format,
         durability: GraphDurability::WalSync,
         cancellation,
-    }
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
-    if cancellation.is_cancelled() {
-        Err(GraphDbError::Cancelled)
-    } else {
-        Ok(())
     }
 }
 
@@ -221,6 +250,7 @@ pub(super) fn retains_fault(error: &GraphDbError) -> bool {
     matches!(
         error,
         GraphDbError::ResetRequired { .. }
+            | GraphDbError::FormatSuperseded { .. }
             | GraphDbError::Corrupt { .. }
             | GraphDbError::DurabilityUncertain { .. }
     )
@@ -238,7 +268,9 @@ pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             GraphDbRuntimeState::DurabilityUncertain => GraphDbRegistryStatus::DurabilityUncertain,
         },
         RegistryEntry::Faulted { error, .. } => match error {
-            GraphDbError::ResetRequired { .. } => GraphDbRegistryStatus::ResetRequired,
+            GraphDbError::ResetRequired { .. } | GraphDbError::FormatSuperseded { .. } => {
+                GraphDbRegistryStatus::ResetRequired
+            }
             GraphDbError::Corrupt { .. } => GraphDbRegistryStatus::Corrupt,
             GraphDbError::DurabilityUncertain { .. } => GraphDbRegistryStatus::DurabilityUncertain,
             GraphDbError::Cancelled
@@ -249,6 +281,9 @@ pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             | GraphDbError::ProjectionMismatch { .. }
             | GraphDbError::GenerationMismatch { .. }
             | GraphDbError::Unavailable { .. }
+            | GraphDbError::SourceCommitmentsUnavailable { .. }
+            | GraphDbError::SealedRevisionIncompatible { .. }
+            | GraphDbError::SealSuperseded
             | GraphDbError::SealedStoreImmutable { .. }
             | GraphDbError::Closed => GraphDbRegistryStatus::Closed,
         },

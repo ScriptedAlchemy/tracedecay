@@ -9,7 +9,9 @@ use tracedecay_domain::{
     ProviderUsageScopeV1, SessionId,
 };
 
-use crate::{ObservationRecordParseErrorV1, parse_rfc3339_timestamp};
+use crate::{
+    ObservationRecordParseErrorV1, parse_rfc3339_timestamp, parse_rfc3339_timestamp_micros,
+};
 
 const PROVIDER: &str = "claude";
 
@@ -27,27 +29,59 @@ pub fn stable_record_id(
     provider_observation_id(&candidate).ok_or(ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
+/// The spawn a Claude subagent transcript records about itself: the session
+/// that owns its `subagents/` directory (or the subagent named by the
+/// sidecar's `parentAgentId`) and the sidecar's `toolUseId`, the parent's
+/// `tool_use` block id. Absent fields stay absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClaudeSpawnParent<'a> {
+    pub session_id: &'a str,
+    pub tool_use_id: Option<&'a str>,
+}
+
 pub fn normalize(
     native: &Value,
     session_id: &str,
+    transcript_path: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // Claude records order by file bytes, so the range length is the source
-    // record's byte length. Failed normalizations are counted, never hidden.
-    hotpath::gauge!("capture.claude.record_bytes").inc(range.end() - range.start());
-    let envelope = normalize_record(native, session_id, stable_record_id, range);
-    if envelope.is_err() {
-        hotpath::gauge!("capture.claude.normalize_failures").inc(1u64);
-    }
-    envelope
+    normalize_spawned(
+        native,
+        session_id,
+        None,
+        transcript_path,
+        stable_record_id,
+        range,
+    )
+}
+
+/// [`normalize`] for a record of a subagent transcript spawned by `parent`.
+pub fn normalize_spawned(
+    native: &Value,
+    session_id: &str,
+    parent: Option<ClaudeSpawnParent<'_>>,
+    transcript_path: Option<&str>,
+    stable_record_id: ObservationId,
+    range: ObservationSourceRangeV1,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    normalize_record(
+        native,
+        session_id,
+        parent,
+        transcript_path,
+        stable_record_id,
+        range,
+    )
 }
 
 /// One source-record canonicalization, not a per-block walk.
-#[hotpath::measure(label = "capture.claude.normalize")]
+#[tracing::instrument(name = "capture.claude.normalize", level = "trace", skip_all)]
 fn normalize_record(
     native: &Value,
     session_id: &str,
+    parent: Option<ClaudeSpawnParent<'_>>,
+    transcript_path: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
@@ -63,7 +97,7 @@ fn normalize_record(
         .and_then(parse_rfc3339_timestamp);
     let mut facts = Vec::new();
 
-    append_session_location_fact(&mut facts, native);
+    append_session_location_fact(&mut facts, native, transcript_path);
     if matches!(record_kind, "user" | "assistant") {
         let message = native.get("message").unwrap_or(native);
         // Message facts carry only provider-authored visible text. Thinking,
@@ -83,12 +117,19 @@ fn normalize_record(
         append_message_facts(
             &mut facts,
             message,
-            stable_record_id.as_str(),
             record_kind == "assistant" && !is_api_error_placeholder(native, message),
             authored_message,
         );
         append_assistant_attribution_fact(&mut facts, native, record_kind);
         append_tool_use_result_facts(&mut facts, native, record_kind);
+        // The branch rides only on message records so it never renders as a
+        // row of its own.
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
+        {
+            append_git_branch_fact(&mut facts, native);
+        }
         // Preserve Claude's native compact-summary flags as typed compaction
         // metadata without introducing a cross-provider trust contract.
         if record_kind == "user"
@@ -107,6 +148,17 @@ fn normalize_record(
                 })),
                 input_tokens: None,
                 output_tokens: None,
+            });
+        }
+        if let Some(branch) = native
+            .get("gitBranch")
+            .and_then(Value::as_str)
+            .filter(|branch| !branch.is_empty())
+        {
+            facts.push(CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+                reference: Some(branch.to_owned()),
+                content: None,
             });
         }
     } else {
@@ -136,6 +188,13 @@ fn normalize_record(
     if let Some(agent) = optional_id(native, &["agentId", "agent_id"]) {
         relations = relations.with_agent_id(agent);
     }
+    if let Some(parent) = parent {
+        relations = relations
+            .with_parent_session_id(SessionId::new(parent.session_id).map_err(|_| invalid())?);
+        if let Some(tool_use_id) = parent.tool_use_id.and_then(provider_observation_id) {
+            relations = relations.with_parent_tool_use_id(tool_use_id);
+        }
+    }
 
     let mut evidence =
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range);
@@ -156,7 +215,7 @@ fn normalize_record(
 /// Claude writes API-error placeholders as assistant records carrying
 /// `isApiErrorMessage: true`, model `"<synthetic>"`, and all-zero
 /// `message.usage`. No provider request was billed for them, so their zero
-/// counters must never become provider-usage rows — recording them attributes
+/// counters must never become provider-usage rows, recording them attributes
 /// zero-token usage to the non-model `"<synthetic>"` and pollutes billing.
 /// Either native signal alone marks the placeholder (older records may carry
 /// one without the other).
@@ -219,19 +278,23 @@ fn tool_result_only_message_content(message: &Value) -> Option<Value> {
     (!parts.is_empty()).then(|| Value::String(parts.join("\n\n")))
 }
 
-fn append_session_location_fact(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
-    let Some(cwd) = native
+fn append_session_location_fact(
+    facts: &mut Vec<CanonicalObservationFactV1>,
+    native: &Value,
+    transcript_path: Option<&str>,
+) {
+    let cwd = native
         .get("cwd")
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())
-        .map(str::to_owned)
-    else {
+        .map(str::to_owned);
+    if cwd.is_none() && transcript_path.is_none() {
         return;
-    };
+    }
     facts.push(CanonicalObservationFactV1::Session {
-        project_path: Some(cwd.clone()),
-        location_path: Some(cwd),
-        transcript_path: None,
+        project_path: cwd.clone(),
+        location_path: cwd,
+        transcript_path: transcript_path.map(str::to_owned),
         title: None,
         started_at: None,
         ended_at: None,
@@ -240,6 +303,20 @@ fn append_session_location_fact(facts: &mut Vec<CanonicalObservationFactV1>, nat
         profile: None,
         location_provenance: Some("transcript_record".to_owned()),
     });
+}
+
+fn append_git_branch_fact(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
+    if let Some(branch) = native
+        .get("gitBranch")
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+            reference: Some(branch.to_owned()),
+            content: None,
+        });
+    }
 }
 
 fn append_assistant_attribution_fact(
@@ -300,18 +377,38 @@ fn append_tool_use_result_facts(
     if let Some(branch) = native.get("gitBranch").cloned() {
         content.insert("gitBranch".to_owned(), branch);
     }
-    if tool_use_result
+    if let Some(path) = tool_use_result
         .get("filePath")
         .and_then(Value::as_str)
-        .is_some_and(|path| !path.is_empty())
+        .filter(|path| !path.is_empty())
     {
+        // The edit rollup reads these keys from the fact content; each is
+        // present only when Claude recorded it (`Write` reports `type`,
+        // `Edit`/`Write`/`MultiEdit` report `structuredPatch` hunks).
+        let mut edit = content.clone();
+        if let Some(edited_at_micros) = native
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_timestamp_micros)
+        {
+            edit.insert("edited_at_micros".to_owned(), Value::from(edited_at_micros));
+        }
+        if let Some(change_type) = tool_use_result.get("type").and_then(Value::as_str) {
+            edit.insert(
+                "change_type".to_owned(),
+                Value::String(change_type.to_owned()),
+            );
+        }
+        if let Some(hunks) = tool_use_result
+            .get("structuredPatch")
+            .and_then(Value::as_array)
+        {
+            edit.insert("hunks".to_owned(), Value::from(hunks.len()));
+        }
         facts.push(CanonicalObservationFactV1::Git {
             evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
-            reference: tool_use_result
-                .get("filePath")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            content: Some(Value::Object(content.clone())),
+            reference: Some(path.to_owned()),
+            content: Some(Value::Object(edit)),
         });
     }
     if tool_use_result
@@ -333,7 +430,6 @@ fn append_tool_use_result_facts(
 fn append_message_facts(
     facts: &mut Vec<CanonicalObservationFactV1>,
     message: &Value,
-    message_id: &str,
     provider_usage_allowed: bool,
     mut authored_message: Option<CanonicalObservationFactV1>,
 ) {
@@ -399,7 +495,7 @@ fn append_message_facts(
         }
         return;
     };
-    for (index, block) in blocks.iter().enumerate() {
+    for block in blocks {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 // Visible text is aggregated into one Message for compatibility,
@@ -419,28 +515,25 @@ fn append_message_facts(
                 let invocation_id = block
                     .get("id")
                     .and_then(Value::as_str)
-                    .and_then(provider_observation_id)
-                    .or_else(|| ObservationId::new(format!("{message_id}:tool:{index}")).ok());
-                if let Some(invocation_id) = invocation_id {
-                    facts.push(CanonicalObservationFactV1::ToolInvocation {
-                        invocation_id,
-                        name: name.to_owned(),
-                        arguments: block.get("input").cloned().unwrap_or(Value::Null),
-                    });
-                }
+                    .and_then(provider_observation_id);
+                facts.push(CanonicalObservationFactV1::ToolInvocation {
+                    invocation_id,
+                    name: name.to_owned(),
+                    arguments: block.get("input").cloned().unwrap_or(Value::Null),
+                });
                 append_task_lifecycle_fact(name, block.get("input"), facts);
             }
-            Some("tool_result") => facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: block
+            Some("tool_result") => facts.push(crate::accounted_tool_result(
+                block
                     .get("tool_use_id")
                     .and_then(Value::as_str)
                     .and_then(provider_observation_id),
-                content: block.get("content").cloned().unwrap_or(Value::Null),
-                success: block
+                block.get("content").cloned().unwrap_or(Value::Null),
+                block
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .map(|is_error| !is_error),
-            }),
+            )),
             Some("thinking") => {
                 let content = block.get("thinking").cloned();
                 if content.is_some() {
@@ -466,7 +559,7 @@ fn append_message_facts(
 /// `TaskUpdate` tool calls; per-session state mirrored under
 /// `~/.claude/tasks/<session>/`). Each call is one lifecycle event on one task
 /// item. The native input rides in `content` verbatim; ids and statuses are
-/// never synthesized (`TaskCreate` carries no task id or status in its input —
+/// never synthesized (`TaskCreate` carries no task id or status in its input;
 /// the id only arrives later via `toolUseResult`).
 fn append_task_lifecycle_fact(
     name: &str,
@@ -571,17 +664,12 @@ fn system_hook_has_signal(native: &Value) -> bool {
 }
 
 fn canonical_role(message: &Value, record_kind: &str) -> CanonicalMessageRoleV1 {
-    match message
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or(record_kind)
-    {
-        "user" => CanonicalMessageRoleV1::User,
-        "assistant" => CanonicalMessageRoleV1::Assistant,
-        "system" => CanonicalMessageRoleV1::System,
-        "tool" => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
+    CanonicalMessageRoleV1::from_wire_label(
+        message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or(record_kind),
+    )
 }
 
 fn optional_id(native: &Value, keys: &[&str]) -> Option<ObservationId> {
@@ -654,7 +742,7 @@ mod provider_usage_tests {
                 ObservationSourceRangeV1::new(20, 30).unwrap(),
             ),
         ] {
-            let envelope = normalize(native, "session.fixture", stable_id, range).unwrap();
+            let envelope = normalize(native, "session.fixture", None, stable_id, range).unwrap();
             assert_eq!(
                 envelope.relations().message_id().map(ObservationId::as_str),
                 Some("message.shared")
@@ -680,6 +768,7 @@ mod provider_usage_tests {
         let envelope = normalize(
             &native,
             "session.fixture",
+            None,
             ObservationId::new("message.fixture").unwrap(),
             ObservationSourceRangeV1::new(10, 20).unwrap(),
         )
@@ -714,6 +803,7 @@ mod provider_usage_tests {
         let envelope = normalize(
             &native,
             "session.fixture",
+            None,
             ObservationId::new("message.user-fixture").unwrap(),
             ObservationSourceRangeV1::new(20, 30).unwrap(),
         )

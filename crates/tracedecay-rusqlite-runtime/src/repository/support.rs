@@ -1,21 +1,56 @@
 use std::fmt::Display;
 
+use crate::exact_sql::{decode_json, encode_json};
 use rusqlite::types::{ToSqlOutput, Type, Value, ValueRef};
 use rusqlite::{OptionalExtension, ToSql};
 use serde::{Serialize, de::DeserializeOwned};
+
+pub(super) trait CachedStatements {
+    fn execute_cached<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
+
+    fn query_row_cached<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+}
+
+impl CachedStatements for rusqlite::Connection {
+    fn execute_cached<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+        self.prepare_cached(sql)?.execute(params)
+    }
+
+    fn query_row_cached<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.prepare_cached(sql)?.query_row(params, f)
+    }
+}
+
 pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
-    serde_json::to_string(value).map_err(|error| conversion(error.to_string()))
+    encode_json(value, |error| conversion(error.to_string()))
 }
 
 pub(super) fn decode<T: DeserializeOwned>(value: String) -> rusqlite::Result<T> {
-    serde_json::from_str(&value).map_err(|error| conversion(error.to_string()))
+    decode_json(&value, |error| conversion(error.to_string()))
 }
 
-pub(super) fn canonical_digest<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
-    let value = serde_json::to_value(value).map_err(|error| conversion(error.to_string()))?;
-    tracedecay_domain::canonical_sha256(&value)
-        .map(|digest| digest.as_str().to_owned())
-        .map_err(|error| conversion(error.to_string()))
+/// Two persisted encodings agree when they denote the same JSON document. A
+/// row migrated or hydrated in SQL is minified differently from one serde
+/// wrote, so a byte comparison would report a collision on an idempotent
+/// replay of a pre-migration write.
+pub(super) fn same_json(stored: &str, expected: &str) -> bool {
+    if stored == expected {
+        return true;
+    }
+    match (
+        serde_json::from_str::<serde_json::Value>(stored),
+        serde_json::from_str::<serde_json::Value>(expected),
+    ) {
+        (Ok(stored), Ok(expected)) => stored == expected,
+        _ => false,
+    }
 }
 
 pub(super) fn conversion(error: impl Display) -> rusqlite::Error {
@@ -111,7 +146,7 @@ fn insert(
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
         .join(", ");
-    connection.execute(
+    connection.execute_cached(
         &format!(
             "INSERT{conflict_clause} INTO {table} ({}) VALUES ({placeholders})",
             column_names(columns).join(", ")
@@ -137,8 +172,8 @@ pub(super) fn insert_row(
 /// every one of them matches what the caller expects.
 ///
 /// `Ok(None)` means no such row exists. Each column is projected through
-/// `CAST(... AS TEXT)` so a value that SQLite converted on the way in — a text
-/// binding landing in an `INTEGER` column, say — still compares equal to what
+/// `CAST(... AS TEXT)` so a value that SQLite converted on the way in, a text
+/// binding landing in an `INTEGER` column, say, still compares equal to what
 /// the caller wrote, and so one comparison covers every storage class.
 pub(super) fn stored_row_matches(
     connection: &rusqlite::Connection,
@@ -158,7 +193,7 @@ pub(super) fn stored_row_matches(
         .collect::<Vec<_>>()
         .join(" AND ");
     let stored = connection
-        .query_row(
+        .query_row_cached(
             &format!("SELECT {projection} FROM {table} WHERE {predicate}"),
             rusqlite::params_from_iter(bindings(keys)),
             |row| {
@@ -187,9 +222,9 @@ pub(super) fn stored_row_matches(
 /// violation from the driver.
 ///
 /// `keys` must cover the constraint that `OR IGNORE` can swallow. When it does,
-/// the read-back always finds the conflicting row; when it would not — every
+/// the read-back always finds the conflicting row; when it would not, every
 /// caller here keys on the primary key, satisfies its `CHECK`s by construction,
-/// and foreign-key violations are not swallowed by `OR IGNORE` at all — the
+/// and foreign-key violations are not swallowed by `OR IGNORE` at all, the
 /// missing row surfaces as [`rusqlite::Error::QueryReturnedNoRows`].
 pub(super) fn idempotent_insert(
     connection: &rusqlite::Connection,

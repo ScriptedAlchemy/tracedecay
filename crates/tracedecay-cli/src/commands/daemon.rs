@@ -1,16 +1,24 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::time::Instant;
-use tracedecay_application::{ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope};
+use std::time::Instant;
+use tracedecay_contracts::graph_tool::GraphToolResultV1;
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryContextV1, AdminCliResultV1, AdminCliScopeV1, AdminCliSurfaceRequestV1,
+};
+use tracedecay_contracts::{ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope};
+use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Resolves the daemon handshake for the current client. One labeled
 /// boundary so a slow CLI invocation can attribute time to client identity
 /// resolution separately from the daemon round-trip itself.
-#[hotpath::measure(label = "cli.daemon.handshake")]
-fn client_handshake(
+#[tracing::instrument(name = "cli.daemon.handshake", level = "trace", skip_all)]
+pub(crate) fn client_handshake(
+    profile: &ProfileRoot,
     project_path: Option<&std::path::Path>,
 ) -> tracedecay_domain::errors::Result<tracedecay_daemon_protocol::DaemonHandshake> {
     tracedecay::daemon::handshake_for_current_client(
+        profile,
         project_path.map(std::path::Path::to_path_buf),
         None,
         false,
@@ -29,61 +37,165 @@ fn client_handshake(
 /// consumer of a retained result payload unwraps through here so a problem
 /// envelope surfaces as its typed code and message and envelope drift
 /// surfaces as a decode error naming the tool.
-#[hotpath::measure(label = "cli.daemon.retained_payload")]
+#[tracing::instrument(name = "cli.daemon.retained_payload", level = "trace", skip_all)]
 pub(crate) fn retained_tool_payload<T: DeserializeOwned>(
     tool_name: &str,
     reply: Value,
 ) -> tracedecay_domain::errors::Result<T> {
-    let decode_error = |context: &str, error: serde_json::Error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned {context}: {error}"),
-        }
-    };
-    if reply.get("problem").is_some() {
-        let envelope: ApplicationProblemEnvelope = serde_json::from_value(reply)
-            .map_err(|error| decode_error("an undecodable problem envelope", error))?;
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "daemon tool {tool_name} refused: {}: {}",
-                envelope.problem.code, envelope.problem.message
-            ),
-        });
-    }
-    let envelope: ApplicationEnvelope<Value> = serde_json::from_value(reply)
-        .map_err(|error| decode_error("an undecodable application envelope", error))?;
-    let packet = match envelope.outcome {
-        ApplicationOutcome::Evidence(packet) => packet,
-        ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
+    let payload = match retained_tool_outcome(tool_name, reply)? {
+        ApplicationOutcome::Evidence(packet) => packet.payload,
+        ApplicationOutcome::Preview(_)
+        | ApplicationOutcome::Effect(_)
+        | ApplicationOutcome::Result(_) => {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("daemon tool {tool_name} returned a non-evidence outcome"),
             });
         }
     };
-    let payload =
-        packet
-            .payload
-            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("daemon tool {tool_name} omitted its evidence payload"),
-            })?;
-    serde_json::from_value(payload).map_err(|error| decode_error("an undecodable payload", error))
+    decode_retained_payload(tool_name, "evidence", payload)
+}
+
+/// Typed payload of a retained effect terminal (`begin`/`cancel`-class
+/// operations), or the typed refusal. Evidence and preview outcomes are not
+/// effects and surface as envelope drift naming the tool.
+#[tracing::instrument(name = "cli.daemon.retained_effect_payload", level = "trace", skip_all)]
+pub(crate) fn retained_effect_payload<T: DeserializeOwned>(
+    tool_name: &str,
+    reply: Value,
+) -> tracedecay_domain::errors::Result<T> {
+    let payload = match retained_tool_outcome(tool_name, reply)? {
+        ApplicationOutcome::Effect(effect) => effect.payload,
+        ApplicationOutcome::Evidence(_)
+        | ApplicationOutcome::Preview(_)
+        | ApplicationOutcome::Result(_) => {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("daemon tool {tool_name} returned a non-effect outcome"),
+            });
+        }
+    };
+    decode_retained_payload(tool_name, "effect", payload)
+}
+
+fn retained_tool_outcome(
+    tool_name: &str,
+    reply: Value,
+) -> tracedecay_domain::errors::Result<ApplicationOutcome<Value>> {
+    reject_problem_envelope(&reply, tool_name)?;
+    let envelope: ApplicationEnvelope<Value> = serde_json::from_value(reply).map_err(|error| {
+        retained_decode_error(tool_name, "an undecodable application envelope", error)
+    })?;
+    Ok(envelope.outcome)
+}
+
+fn decode_retained_payload<T: DeserializeOwned>(
+    tool_name: &str,
+    outcome_class: &str,
+    payload: Option<Value>,
+) -> tracedecay_domain::errors::Result<T> {
+    let payload = payload.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("daemon tool {tool_name} omitted its {outcome_class} payload"),
+    })?;
+    serde_json::from_value(payload)
+        .map_err(|error| retained_decode_error(tool_name, "an undecodable payload", error))
+}
+
+fn retained_decode_error(
+    tool_name: &str,
+    context: &str,
+    error: serde_json::Error,
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("daemon tool {tool_name} returned {context}: {error}"),
+    }
+}
+
+/// One `tracedecay_admin_cli` action under the shared CLI tool deadline. The
+/// request selects its owner: the profile owner answers the profile's
+/// registry, storage, and savings actions and profile-scoped cost and
+/// analytics; the owner of `project_path` answers the rest. A refusal is the
+/// command's error.
+pub(crate) async fn admin_cli_result(
+    profile: &ProfileRoot,
+    project_path: Option<&std::path::Path>,
+    request: AdminCliSurfaceRequestV1,
+) -> tracedecay_domain::errors::Result<AdminCliResultV1> {
+    let deadline = crate::tool_command::tool_command_deadline()?;
+    let result = crate::tool_command::owner_operation_result(
+        profile,
+        client_handshake(profile, project_path)?,
+        ApplicationSurfaceOperation::AdminCli,
+        serde_json::to_value(request)?,
+        deadline,
+    )
+    .await?;
+    match result {
+        GraphToolResultV1::AdminCli(result) => Ok(*result),
+        _ => Err(admin_cli_result_mismatch("tracedecay_admin_cli")),
+    }
+}
+
+/// The profile registry's context for one project selector: a project id, a
+/// root path, or a registered alias.
+pub(crate) async fn registry_context(
+    profile: &ProfileRoot,
+    selector: std::path::PathBuf,
+) -> tracedecay_domain::errors::Result<AdminCliRegistryContextV1> {
+    let request = AdminCliSurfaceRequestV1::RegistryContext {
+        project_arg: Some(selector),
+    };
+    match admin_cli_result(profile, None, request).await? {
+        AdminCliResultV1::RegistryContext(context) => Ok(context),
+        _ => Err(admin_cli_result_mismatch("registry_context")),
+    }
+}
+
+/// A cost or analytics action reads the project the command runs in, or the
+/// whole profile outside one.
+pub(crate) fn admin_cli_scope(project_path: Option<&std::path::Path>) -> AdminCliScopeV1 {
+    match project_path {
+        Some(_) => AdminCliScopeV1::Project,
+        None => AdminCliScopeV1::Profile,
+    }
+}
+
+/// The owner answered `action` with another action's result.
+pub(crate) fn admin_cli_result_mismatch(
+    action: &str,
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::project_route(
+        "owner_result_mismatch",
+        false,
+        format!("the owner answered {action} with another action's result"),
+    )
 }
 
 /// One-shot daemon tool call using the shared `TRACEDECAY_TOOL_DEADLINE_MS`
 /// envelope (default 120s) via `tracedecay::daemon::call_default_tool`.
 pub(crate) async fn daemon_tool_json(
+    profile: &ProfileRoot,
     project_path: Option<&std::path::Path>,
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("cli.daemon.tool").set(&tool_name);
-    let handshake = client_handshake(project_path)?;
-    let result = hotpath::future!(
-        tracedecay::daemon::call_default_tool(&handshake, tool_name, arguments),
-        label = "cli.daemon.request"
+    tracing::trace!(name: "cli.daemon.tool", value = ?tool_name);
+    let handshake = client_handshake(profile, project_path)?;
+    // Both calls are erased so every command's `Send` proof stops here
+    // (rust-lang/rust#159228).
+    let result = tracing::Instrument::instrument(
+        tracedecay_runtime_core::erase_send!(
+            tracedecay::daemon::call_default_tool(profile, &handshake, tool_name, arguments),
+            tracedecay_domain::errors::Result<serde_json::Value>
+        ),
+        tracing::trace_span!("cli.daemon.request"),
     )
     .await?;
-    recover_truncated_payload(&handshake, tool_name, result, None).await
+    tracedecay_runtime_core::erase_send!(
+        tracedecay::daemon::recover_truncated_tool_payload(
+            profile, &handshake, tool_name, result, None
+        ),
+        tracedecay_domain::errors::Result<serde_json::Value>
+    )
+    .await
 }
 
 /// Deadline-carrying variant for CLI journeys that deliberately trigger a cold
@@ -92,139 +204,56 @@ pub(crate) async fn daemon_tool_json(
 /// recovery fetch, so the command cannot outlive its own budget on private
 /// retry clocks.
 pub(crate) async fn daemon_tool_json_until(
+    profile: &ProfileRoot,
     deadline: Instant,
     project_path: Option<&std::path::Path>,
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("cli.daemon.tool").set(&tool_name);
-    let handshake = client_handshake(project_path)?;
+    tracing::trace!(name: "cli.daemon.tool", value = ?tool_name);
+    let handshake = client_handshake(profile, project_path)?;
     // Distinct from `cli.daemon.request`: this lifetime includes waiting out a
     // cold project open, so aggregating the two would conflate daemon latency
     // with deliberate open waits.
-    let result = hotpath::future!(
+    let result = tracing::Instrument::instrument(
         tracedecay::daemon::call_default_tool_awaiting_project_open(
-            &handshake, tool_name, arguments, deadline,
+            profile, &handshake, tool_name, arguments, deadline,
         ),
-        label = "cli.daemon.request_open_wait"
+        tracing::trace_span!("cli.daemon.request_open_wait"),
     )
     .await?;
-    recover_truncated_payload(&handshake, tool_name, result, Some(deadline)).await
+    tracedecay::daemon::recover_truncated_tool_payload(
+        profile,
+        &handshake,
+        tool_name,
+        result,
+        Some(deadline),
+    )
+    .await
 }
 
-async fn recover_truncated_payload(
-    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
+/// A reply that is an [`ApplicationProblemEnvelope`] is the owner's typed
+/// refusal: it returns as that problem's error, typed detail included, so a
+/// caller never reads the refusal as its success shape.
+pub(crate) fn reject_problem_envelope(
+    reply: &Value,
     tool_name: &str,
-    result: serde_json::Value,
-    deadline: Option<Instant>,
-) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    let payload = tracedecay::daemon::tool_json_payload(&result, tool_name)?;
-    if !is_truncation_envelope(&payload) {
-        return Ok(payload);
+) -> tracedecay_domain::errors::Result<()> {
+    if reply.get("problem").is_none() {
+        return Ok(());
     }
-    let handle = payload
-        .get("handle")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "daemon tool {tool_name} returned truncated JSON without a retrieval handle"
-            ),
+    let envelope: ApplicationProblemEnvelope =
+        serde_json::from_value(reply.clone()).map_err(|error| {
+            retained_decode_error(tool_name, "an undecodable problem envelope", error)
         })?;
-    let arguments = serde_json::json!({ "handle": handle, "format": "json" });
-    let retrieved = match deadline {
-        Some(deadline) => {
-            hotpath::future!(
-                tracedecay::daemon::call_default_tool_awaiting_project_open(
-                    handshake,
-                    "tracedecay_retrieve",
-                    arguments,
-                    deadline,
-                ),
-                label = "cli.daemon.recovery_fetch"
-            )
-            .await?
-        }
-        None => {
-            hotpath::future!(
-                tracedecay::daemon::call_default_tool(handshake, "tracedecay_retrieve", arguments),
-                label = "cli.daemon.recovery_fetch"
-            )
-            .await?
-        }
-    };
-    let retrieved = tracedecay::daemon::tool_json_payload(&retrieved, "tracedecay_retrieve")?;
-    let content = retrieved
-        .get("content")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("daemon retrieval for {tool_name} omitted response content"),
-        })?;
-    serde_json::from_str(content).map_err(Into::into)
-}
-
-/// Recover a truncated MCP tool result while keeping the MCP envelope shape
-/// `tracedecay tool` prints. Status unwraps to the inner JSON; this path must
-/// leave `content[*].text` as the recovered payload so `--format json` and
-/// `--json` callers still parse the tool schema rather than a handle envelope.
-pub(crate) async fn recover_truncated_mcp_result(
-    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
-    tool_name: &str,
-    result: serde_json::Value,
-    deadline: Option<Instant>,
-) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    let Ok(payload) = tracedecay::daemon::tool_json_payload(&result, tool_name) else {
-        return Ok(result);
-    };
-    if !is_truncation_envelope(&payload) {
-        return Ok(result);
-    }
-    let recovered =
-        recover_truncated_payload(handshake, tool_name, result.clone(), deadline).await?;
-    let text = serde_json::to_string(&recovered)?;
-    let mut recovered_result = result;
-    let blocks = recovered_result
-        .get_mut("content")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned no content blocks"),
-        })?;
-    let mut replaced = false;
-    for block in blocks {
-        let Some(block_text) = block.get("text").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let Ok(block_payload) = serde_json::from_str::<serde_json::Value>(block_text) else {
-            continue;
-        };
-        if is_truncation_envelope(&block_payload) {
-            block["text"] = serde_json::Value::String(text.clone());
-            replaced = true;
-            break;
-        }
-    }
-    if !replaced {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} omitted its truncation payload"),
-        });
-    }
-    Ok(recovered_result)
-}
-
-pub(crate) fn is_truncation_envelope(value: &Value) -> bool {
-    value.get("truncated").and_then(Value::as_bool) == Some(true)
-        && value
-            .get("original_chars")
-            .and_then(Value::as_u64)
-            .is_some()
-        && value.get("preview").and_then(Value::as_str).is_some()
+    Err(tracedecay_mcp::application_output::tool_result::problem_error(envelope))
 }
 
 pub(crate) fn reject_truncation_envelope(
     value: &Value,
     tool_name: &str,
 ) -> tracedecay_domain::errors::Result<()> {
-    if !is_truncation_envelope(value) {
+    if !tracedecay::daemon::is_truncation_envelope(value) {
         return Ok(());
     }
     let original_chars = value.get("original_chars").and_then(Value::as_u64);
@@ -244,28 +273,29 @@ pub(crate) fn reject_truncation_envelope(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
 
     use serde_json::json;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, AuthorityReceipt, CancellationContext,
         CapabilityGrantSnapshot, Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain,
         EvidencePacket, OperationReceipt, PageState, PolicyDecisionRef, RequestContext, RequestId,
         ResolvedScope, ResultContractRef, RetrievalEvidence, RetryDirective, TemporalState,
     };
     use tracedecay_domain::{
-        ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+        ActorId, ComponentVersion, ProjectId, RepositoryId, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, SortContractId, UseCaseId};
 
-    use super::{is_truncation_envelope, retained_tool_payload};
+    use super::retained_tool_payload;
+    use tracedecay::daemon::is_truncation_envelope;
 
     fn contract() -> ResultContractRef {
         ResultContractRef::new(SchemaId::new("schema.cli.fixture.result").unwrap(), 1).unwrap()
     }
 
-    fn scope() -> ResolvedScope {
+    pub(crate) fn scope() -> ResolvedScope {
         ResolvedScope::new(
             ProjectId::new("project.cli.fixture").unwrap(),
             RepositoryId::new("repository.cli.fixture").unwrap(),
@@ -275,20 +305,23 @@ mod tests {
         .unwrap()
     }
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
-    fn context() -> RequestContext {
-        let capability = CapabilityId::new("capability.cli.fixture").unwrap();
-        let use_case = UseCaseId::new("use-case.cli.fixture").unwrap();
+    /// A request whose grant covers `capability` and `use_case` until
+    /// `grant_expires_at`, due by `deadline`.
+    pub(crate) fn request_context(
+        capability: CapabilityId,
+        use_case: UseCaseId,
+        grant_expires_at: UtcMicros,
+        deadline: UtcMicros,
+    ) -> RequestContext {
         let grant = CapabilityGrantSnapshot::new(
             "grant.cli.fixture".to_owned().try_into().unwrap(),
             1,
             digest('a'),
             ActorId::new("actor.issuer").unwrap(),
             UtcMicros(1),
-            UtcMicros(1_000),
+            grant_expires_at,
             scope(),
             BTreeSet::from([capability]),
             BTreeSet::from([use_case]),
@@ -300,7 +333,7 @@ mod tests {
             scope(),
             grant,
             RequestId::new("request.cli.fixture").unwrap(),
-            Deadline::new(UtcMicros(500)).unwrap(),
+            Deadline::new(deadline).unwrap(),
             CancellationContext::active("cancel.cli.fixture").unwrap(),
         )
         .unwrap()
@@ -308,10 +341,13 @@ mod tests {
 
     /// A daemon reply as retained tools actually send it: the typed payload
     /// nested inside a full evidence envelope.
-    fn evidence_reply(payload: serde_json::Value) -> serde_json::Value {
-        let context = context();
+    pub(crate) fn evidence_reply(
+        context: &RequestContext,
+        contract: ResultContractRef,
+        payload: serde_json::Value,
+    ) -> serde_json::Value {
         let authority = AuthorityReceipt::from_context(
-            &context,
+            context,
             PolicyDecisionRef::new(
                 "policy.cli.fixture",
                 1,
@@ -347,10 +383,11 @@ mod tests {
             finished_at: UtcMicros(3),
             budget: Default::default(),
             cancellation: None,
+            cost: None,
         };
         let packet = EvidencePacket::from_retrieval(evidence, authority, receipt).unwrap();
-        serde_json::to_value(tracedecay_application::ApplicationEnvelope::evidence(
-            contract(),
+        serde_json::to_value(tracedecay_contracts::ApplicationEnvelope::evidence(
+            contract,
             context.request_id().clone(),
             scope(),
             packet,
@@ -369,7 +406,13 @@ mod tests {
             answer: i64,
         }
 
-        let reply = evidence_reply(json!({ "answer": 42 }));
+        let context = request_context(
+            CapabilityId::new("capability.cli.fixture").unwrap(),
+            UseCaseId::new("use-case.cli.fixture").unwrap(),
+            UtcMicros(1_000),
+            UtcMicros(500),
+        );
+        let reply = evidence_reply(&context, contract(), json!({ "answer": 42 }));
         assert!(
             serde_json::from_value::<StrictResult>(reply.clone()).is_err(),
             "the fixture must reproduce the raw-envelope decode crash"
@@ -396,32 +439,89 @@ mod tests {
 
         let error = retained_tool_payload::<serde_json::Value>("tracedecay_message_search", reply)
             .expect_err("a problem envelope is a refusal");
-        let message = error.to_string();
-        assert!(
-            message.contains("tracedecay_message_search refused"),
-            "refusal must name the tool: {message}"
+        assert_eq!(
+            error.project_route_context(),
+            Some((
+                "not_found_or_not_authorized",
+                false,
+                "The requested resource was not found or is not authorized"
+            )),
+            "{error}"
         );
-        assert!(
-            message.contains("not_found"),
-            "refusal must carry the typed problem code: {message}"
-        );
+    }
+
+    #[test]
+    fn owner_refusal_renders_as_the_owner_problem_not_a_reconstruction() {
+        for owner_problem in [
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            ApplicationProblem::Unsupported {
+                diagnostic: tracedecay_contracts::SafeDiagnostic::new(
+                    "memory.cross_project_write_unsupported",
+                    "Memory writes cannot target another project",
+                )
+                .unwrap(),
+                retry: RetryDirective::Never,
+                legal_actions: vec![tracedecay_contracts::LegalAction::ContactAdministrator],
+                detail: None,
+            },
+            ApplicationProblem::conflict("memory.revision_conflict", "The fact changed"),
+        ] {
+            let envelope = tracedecay_api::adapter_problem(
+                RequestId::new("request.cli.fixture").unwrap(),
+                owner_problem,
+            )
+            .unwrap();
+            let mut tool_result =
+                tracedecay_mcp::application_output::tool_result::problem_tool_result(
+                    &serde_json::to_string(&envelope).unwrap(),
+                    &envelope.problem,
+                )
+                .unwrap();
+            tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut tool_result);
+            let from_tool_result =
+                tracedecay_mcp::application_output::tool_result::tool_result_refusal(
+                    &tool_result.value,
+                )
+                .expect("an isError tool result carries the owner refusal");
+            let from_envelope = retained_tool_payload::<serde_json::Value>(
+                "tracedecay_message_search",
+                serde_json::to_value(&envelope).unwrap(),
+            )
+            .expect_err("a problem envelope is a refusal");
+
+            let owner = serde_json::to_value(&envelope.problem).unwrap();
+            for error in [from_tool_result, from_envelope] {
+                let document: serde_json::Value = serde_json::from_str(
+                    &tracedecay::mcp::tools::command_refusal_document(&error).unwrap(),
+                )
+                .unwrap();
+                for field in ["kind", "code", "retryable", "retry", "legal_actions"] {
+                    assert_eq!(document["problem"][field], owner[field], "{document}");
+                }
+            }
+        }
     }
 
     /// Envelope drift fails with an error naming the tool instead of a bare
     /// serde message.
     #[test]
     fn non_envelope_reply_is_a_named_decode_error() {
-        let error = retained_tool_payload::<serde_json::Value>(
-            "tracedecay_memory_status",
-            json!({ "memory": {} }),
-        )
-        .expect_err("a bare payload is envelope drift");
-        assert!(
-            error
-                .to_string()
-                .contains("tracedecay_memory_status returned an undecodable application envelope"),
-            "decode error must name the tool: {error}"
-        );
+        let reply = json!({ "memory": {} });
+        let decode = serde_json::from_value::<
+            tracedecay_contracts::ApplicationEnvelope<serde_json::Value>,
+        >(reply.clone())
+        .expect_err("the fixture is not an application envelope");
+        let error = retained_tool_payload::<serde_json::Value>("tracedecay_memory_status", reply)
+            .expect_err("a bare payload is envelope drift");
+        match error {
+            tracedecay_domain::errors::TraceDecayError::Config { message } => assert_eq!(
+                message,
+                format!(
+                    "daemon tool tracedecay_memory_status returned an undecodable application envelope: {decode}"
+                )
+            ),
+            other => panic!("expected a config refusal, got {other}"),
+        }
     }
 
     #[test]

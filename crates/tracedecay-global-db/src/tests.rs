@@ -6,14 +6,24 @@ use super::{
     TranscriptPersistenceError,
 };
 
+#[cfg(test)]
+mod codex_response_echo;
 pub mod harness;
 #[cfg(test)]
-mod lcm_privacy_rescan;
+pub(crate) mod lcm_privacy_rescan;
 #[cfg(test)]
 mod lcm_schema;
 #[cfg(test)]
+mod payload_gc_cost;
+#[cfg(test)]
+mod schema_install_cancellation;
+#[cfg(test)]
 mod session_sync;
+#[cfg(test)]
+mod source_rewrite;
 
+#[cfg(test)]
+use super::registered_analytics::ANALYTICS_INSERT_ROWS_PER_STATEMENT;
 #[cfg(test)]
 use harness::RegisteredGlobalDbHarness;
 
@@ -40,7 +50,7 @@ async fn row_count(db: &RegisteredGlobalDb, table: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn remote_deletion_tombstone_preserves_exact_identity_and_cleanup_state() {
     let harness = RegisteredGlobalDbHarness::open("remote-deletion-state").await;
     let pending = RemoteDeletionTombstone {
@@ -139,7 +149,7 @@ async fn remote_deletion_tombstone_preserves_exact_identity_and_cleanup_state() 
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn deleted_remote_tombstone_can_reopen_for_post_tombstone_reconciliation() {
     let harness = RegisteredGlobalDbHarness::open("remote-deletion-reconciliation").await;
     let pending = RemoteDeletionTombstone {
@@ -191,7 +201,7 @@ async fn deleted_remote_tombstone_can_reopen_for_post_tombstone_reconciliation()
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn git_common_dir_aliases_share_one_project_and_store_authority() {
     let harness = RegisteredGlobalDbHarness::open("common-dir-single-authority").await;
     let root = harness.storage_root().join("repository");
@@ -257,44 +267,6 @@ async fn git_common_dir_aliases_share_one_project_and_store_authority() {
         .unwrap();
     assert_eq!(context.project.project_id, "proj_primary");
     assert_eq!(context.stores.len(), 1);
-    let inventory = harness
-        .registered
-        .registered_project_root_inventory("proj_primary")
-        .await
-        .unwrap()
-        .expect("registered root inventory");
-    assert!(
-        inventory
-            .roots
-            .contains(&primary.to_string_lossy().into_owned())
-    );
-    assert!(
-        inventory
-            .roots
-            .contains(&linked.to_string_lossy().into_owned())
-    );
-    assert_eq!(inventory.terminal_root_count, inventory.roots.len() as u64);
-    harness
-        .registered
-        .upsert_code_project(
-            "proj_primary",
-            &primary,
-            Some(&common_dir),
-            None,
-            Some("main"),
-        )
-        .await
-        .unwrap();
-    let refreshed = harness
-        .registered
-        .registered_project_root_inventory("proj_primary")
-        .await
-        .unwrap()
-        .expect("refreshed registered root inventory");
-    assert_eq!(
-        refreshed.inventory_digest, inventory.inventory_digest,
-        "last-seen bookkeeping must not change the root-liveness revision"
-    );
 
     #[cfg(unix)]
     {
@@ -317,9 +289,9 @@ async fn git_common_dir_aliases_share_one_project_and_store_authority() {
     }
 }
 
-#[tokio::test]
-async fn registered_mount_publishes_complete_migrated_schema() {
-    let harness = RegisteredGlobalDbHarness::open("complete-migrated-schema").await;
+#[asupersync::test]
+async fn registered_mount_publishes_complete_schema() {
+    let harness = RegisteredGlobalDbHarness::open("complete-schema").await;
     let snapshot = harness.registered.read_snapshot().await.unwrap();
 
     super::schema_contract::validate_authority_schema_contract(&snapshot)
@@ -349,12 +321,29 @@ async fn registered_mount_publishes_complete_migrated_schema() {
             .unwrap();
         assert!(
             rows.next().await.unwrap().is_some(),
-            "registered migration omitted {table}.{column}"
+            "registered schema omitted {table}.{column}"
         );
     }
+    let mut rows = snapshot
+        .query(
+            "SELECT group_concat(name, ',') FROM pragma_index_info('idx_sessions_parent')",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "provider,parent_session_id",
+        "registered schema omitted the subagent parent lookup index"
+    );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn host_discovery_queue_is_durable_ordered_and_idempotent() {
     let harness = RegisteredGlobalDbHarness::open("host-discovery-queue").await;
     let first = std::path::PathBuf::from("/tmp/kimi/session-a/context.jsonl");
@@ -398,7 +387,7 @@ async fn host_discovery_queue_is_durable_ordered_and_idempotent() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn registered_schema_validation_rejects_incomplete_authority_schema() {
     let harness = RegisteredGlobalDbHarness::open("reject-incomplete-authority-schema").await;
     harness
@@ -421,10 +410,10 @@ async fn registered_schema_validation_rejects_incomplete_authority_schema() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn concurrent_registered_mounts_singleflight_to_one_runtime() {
     let harness = RegisteredGlobalDbHarness::open("concurrent-registered-mounts").await;
-    let (first, second, third, fourth) = tokio::join!(
+    let (first, second, third, fourth) = asupersync::join!(
         harness.mount(),
         harness.mount(),
         harness.mount(),
@@ -442,27 +431,29 @@ async fn concurrent_registered_mounts_singleflight_to_one_runtime() {
     }
 }
 
-#[tokio::test]
-async fn queued_registered_write_rechecks_authority_when_dequeued() {
+#[asupersync::test]
+async fn queued_registered_write_rechecks_authority_when_dequeued(cx: &asupersync::Cx) {
     let mut harness = RegisteredGlobalDbHarness::open("queued-authority-loss").await;
     let db = harness.registered.clone();
     let transaction = db.begin_write_transaction().await.unwrap();
 
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (started_tx, mut started_rx) = asupersync::channel::oneshot::channel();
     let queued_db = db.clone();
-    let queued = tokio::spawn(async move {
-        started_tx.send(()).unwrap();
-        queued_db
-            .writer_connection()
-            .unwrap()
-            .execute(
-                "CREATE TABLE stale_queued_writer_must_not_persist (value INTEGER)",
-                (),
-            )
-            .await
-    });
-    started_rx.await.unwrap();
-    tokio::task::yield_now().await;
+    let mut queued = cx
+        .spawn(move |cx| async move {
+            started_tx.send(&cx, ()).unwrap();
+            queued_db
+                .writer_connection()
+                .unwrap()
+                .execute(
+                    "CREATE TABLE stale_queued_writer_must_not_persist (value INTEGER)",
+                    (),
+                )
+                .await
+        })
+        .expect("spawn queued write");
+    started_rx.recv(cx).await.unwrap();
+    asupersync::runtime::yield_now().await;
     assert!(
         !queued.is_finished(),
         "write was not queued behind transaction"
@@ -471,6 +462,7 @@ async fn queued_registered_write_rechecks_authority_when_dequeued() {
     harness.revoke();
     transaction.rollback().await.unwrap();
     let error = queued
+        .join(cx)
         .await
         .unwrap()
         .expect_err("queued write did not recheck authority");
@@ -478,15 +470,36 @@ async fn queued_registered_write_rechecks_authority_when_dequeued() {
     assert!(!table_exists(&db, "stale_queued_writer_must_not_persist").await);
 }
 
-#[tokio::test]
-async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payload() {
+/// Drives `task` until `signal` resolves; the task must still be pending.
+#[cfg(test)]
+async fn drive_until<T>(
+    mut task: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+    signal: impl std::future::Future<Output = T>,
+) -> T {
+    let mut signal = std::pin::pin!(signal);
+    std::future::poll_fn(|context| {
+        assert!(
+            task.as_mut().poll(context).is_pending(),
+            "task finished before its cancellation point"
+        );
+        signal.as_mut().poll(context)
+    })
+    .await
+}
+
+#[asupersync::test]
+async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payload(
+    cx: &asupersync::Cx,
+) {
     let harness = RegisteredGlobalDbHarness::open("cancelled-authoritative-transaction").await;
     let db = harness.registered.clone();
     let storage_root = harness.storage_root().to_path_buf();
-    let (created_tx, created_rx) = tokio::sync::oneshot::channel();
+    let (created_tx, mut created_rx) = asupersync::channel::oneshot::channel();
     let task_db = db.clone();
     let task_storage_root = storage_root.clone();
-    let task = tokio::spawn(async move {
+    // Asupersync aborts cooperatively, so cancellation here is dropping the
+    // in-flight future, as Tokio's abort did.
+    let mut task = Box::pin(async move {
         let transaction = task_db.begin_write_transaction().await.unwrap();
         transaction
             .execute(
@@ -513,11 +526,13 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
             &mut payload_rollback,
         )
         .unwrap();
-        created_tx.send(payload.payload_ref).unwrap();
+        created_tx.send(cx, payload.payload_ref).unwrap();
         std::future::pending::<()>().await;
     });
 
-    let payload_ref = created_rx.await.expect("payload creation signal");
+    let payload_ref = drive_until(task.as_mut(), created_rx.recv(cx))
+        .await
+        .expect("payload creation signal");
     let payload_path = tracedecay_lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     assert!(payload_path.is_file());
 
@@ -534,33 +549,42 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
     drop(snapshot);
 
     let queued_db = db.clone();
-    let queued_write = tokio::spawn(async move {
-        queued_db
-            .writer_connection()
-            .unwrap()
-            .execute(
-                "INSERT INTO sessions (provider, session_id, project_key, project_path)
+    let mut queued_write = cx
+        .spawn(move |_| async move {
+            queued_db
+                .writer_connection()
+                .unwrap()
+                .execute(
+                    "INSERT INTO sessions (provider, session_id, project_key, project_path)
                  VALUES ('codex', 'queued-after-cancellation', 'project', '/project')",
-                (),
-            )
-            .await
-    });
-    tokio::pin!(queued_write);
+                    (),
+                )
+                .await
+        })
+        .expect("spawn queued write");
+    let mut queued_write = std::pin::pin!(queued_write.join(cx));
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut queued_write)
-            .await
-            .is_err(),
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(25),
+            &mut queued_write
+        )
+        .await
+        .is_err(),
         "queued writer bypassed the active transaction"
     );
 
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    drop(task);
     assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut queued_write)
-            .await
-            .expect("queued writer remained blocked after cancellation")
-            .expect("queued writer task failed")
-            .is_ok()
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_secs(1),
+            &mut queued_write
+        )
+        .await
+        .expect("queued writer remained blocked after cancellation")
+        .expect("queued writer task failed")
+        .is_ok()
     );
     assert!(!payload_path.exists());
 
@@ -584,8 +608,8 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[tokio::test]
-async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
+#[asupersync::test]
+async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer(cx: &asupersync::Cx) {
     let harness = RegisteredGlobalDbHarness::open("cancelled-lcm-lifecycle").await;
     let db = harness.registered.clone();
     let update = tracedecay_lcm::LcmLifecycleUpdate {
@@ -600,19 +624,21 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
             to_store_id: 2,
         }],
     };
-    let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+    let (written_tx, mut written_rx) = asupersync::channel::oneshot::channel();
     let task_db = db.clone();
     let task_update = update.clone();
-    let task = tokio::spawn(async move {
+    let mut task = Box::pin(async move {
         let transaction = task_db.begin_write_transaction().await.unwrap();
         tracedecay_lcm::compression::update_lifecycle(&transaction, task_update)
             .await
             .unwrap();
-        written_tx.send(()).unwrap();
+        written_tx.send(cx, ()).unwrap();
         std::future::pending::<()>().await;
     });
 
-    written_rx.await.expect("lifecycle write signal");
+    drive_until(task.as_mut(), written_rx.recv(cx))
+        .await
+        .expect("lifecycle write signal");
     let snapshot = db.read_snapshot().await.unwrap();
     assert!(
         tracedecay_lcm::compression::lifecycle_state(&snapshot, "cursor", "cancelled-lifecycle",)
@@ -622,8 +648,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     );
     drop(snapshot);
 
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    drop(task);
     let snapshot = db.read_snapshot().await.unwrap();
     assert!(
         tracedecay_lcm::compression::lifecycle_state(&snapshot, "cursor", "cancelled-lifecycle",)
@@ -643,7 +668,143 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     assert_eq!(state.maintenance_debt, update.maintenance_debt);
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn analytics_batch_ids_preserve_input_order_across_insert_chunks() {
+    let harness = RegisteredGlobalDbHarness::open("analytics-batch-id-order").await;
+    let db = &harness.registered;
+    let event = |session_id: String| AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: "project".to_string(),
+        session_id: Some(session_id),
+        timestamp: 1,
+        event_kind: "hook_route".to_string(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: None,
+        metadata_json: None,
+    };
+
+    assert!(
+        db.append_analytics_events(&[])
+            .await
+            .expect("append empty analytics batch")
+            .is_empty()
+    );
+
+    let single_ids = db
+        .append_analytics_events(&[event("single".to_string())])
+        .await
+        .expect("append single analytics event");
+    assert_eq!(single_ids.len(), 1);
+
+    let events = (0..ANALYTICS_INSERT_ROWS_PER_STATEMENT + 3)
+        .map(|index| event(format!("batch-{index:03}")))
+        .collect::<Vec<_>>();
+    let ids = db
+        .append_analytics_events(&events)
+        .await
+        .expect("append analytics batch spanning insert chunks");
+    assert_eq!(ids.len(), events.len());
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT id, session_id
+             FROM analytics_events
+             WHERE id > ?1
+             ORDER BY id ASC",
+            tracedecay_runtime_core::db::engine::params![single_ids[0]],
+        )
+        .await
+        .unwrap();
+    let mut stored = Vec::with_capacity(events.len());
+    while let Some(row) = rows.next().await.unwrap() {
+        stored.push((row.get::<i64>(0).unwrap(), row.get::<String>(1).unwrap()));
+    }
+
+    assert_eq!(stored.len(), events.len());
+    for ((stored_id, stored_session_id), (returned_id, event)) in
+        stored.iter().zip(ids.iter().zip(&events))
+    {
+        assert_eq!(stored_id, returned_id);
+        assert_eq!(Some(stored_session_id), event.session_id.as_ref());
+    }
+    assert_eq!(
+        row_count(db, "analytics_events").await,
+        i64::try_from(events.len() + 1).unwrap()
+    );
+}
+
+#[asupersync::test]
+async fn single_analytics_append_commits_in_one_writer_dispatch() {
+    let harness = RegisteredGlobalDbHarness::open("analytics-single-dispatch").await;
+    let inspection = rusqlite::Connection::open(harness.registered.db_path()).unwrap();
+    inspection
+        .busy_timeout(std::time::Duration::from_millis(100))
+        .unwrap();
+    let event = AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: "project".to_string(),
+        session_id: Some("session".to_string()),
+        timestamp: 1,
+        event_kind: "mcp_tool_call".to_string(),
+        hook_name: None,
+        tool_name: Some("tracedecay_work".to_string()),
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: Some("success".to_string()),
+        metadata_json: None,
+    };
+
+    // One poll hands the INSERT to the writer thread, which autocommits it and
+    // only afterwards answers the reply channel. Whether that answer has already
+    // arrived when the poll returns is a race with that thread, so the poll's own
+    // result is not the contract; abandoning the future before anyone reads the
+    // reply is. A single-dispatch autocommit survives that; a transaction-framed
+    // append would roll back and never reach the inspection connection below.
+    {
+        let append = harness.registered.append_analytics_event(&event);
+        let mut append = std::pin::pin!(append);
+        if let std::task::Poll::Ready(result) = futures_util::poll!(&mut append) {
+            result.expect("single analytics append");
+        }
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let count = inspection
+            .query_row("SELECT COUNT(*) FROM analytics_events", (), |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        if count == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "single append did not autocommit after its future was abandoned"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert_eq!(
+        inspection
+            .execute(
+                "UPDATE analytics_events SET outcome = 'verified' WHERE id = 1",
+                (),
+            )
+            .expect("completed single append must retain no SQLite transaction"),
+        1
+    );
+}
+
+#[asupersync::test]
 async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
     let harness = RegisteredGlobalDbHarness::open("analytics-batch-rollback").await;
     let db = &harness.registered;
@@ -696,7 +857,7 @@ async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn analytics_import_cursor_failure_rolls_back_events() {
     let harness = RegisteredGlobalDbHarness::open("analytics-cursor-rollback").await;
     let db = &harness.registered;
@@ -743,10 +904,13 @@ async fn analytics_import_cursor_failure_rolls_back_events() {
         .is_err()
     );
     assert_eq!(row_count(db, "analytics_events").await, 0);
-    assert_eq!(db.get_parse_offset("hook_analytics:fixture").await, None);
+    assert!(matches!(
+        db.get_parse_offset("hook_analytics:fixture").await,
+        Ok(None)
+    ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn analytics_import_cursor_conflict_rolls_back_events() {
     let harness = RegisteredGlobalDbHarness::open("analytics-cursor-conflict").await;
     let db = &harness.registered;
@@ -790,13 +954,13 @@ async fn analytics_import_cursor_conflict_rolls_back_events() {
 
     assert!(error.contains("parse offset conflict"), "{error}");
     assert_eq!(row_count(db, "analytics_events").await, 0);
-    assert_eq!(
+    assert!(matches!(
         db.get_parse_offset("hook_analytics:fixture").await,
-        Some(claimed)
-    );
+        Ok(Some(offset)) if offset == claimed
+    ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn parse_offset_pair_conflict_rolls_back_both_authorities() {
     let harness = RegisteredGlobalDbHarness::open("parse-offset-pair-conflict").await;
     let db = &harness.registered;
@@ -841,11 +1005,17 @@ async fn parse_offset_pair_conflict_rolls_back_both_authorities() {
         Err(TranscriptPersistenceError::PairConflict { path, .. })
             if path == "pair:second"
     ));
-    assert_eq!(db.get_parse_offset("pair:first").await, Some(first));
-    assert_eq!(db.get_parse_offset("pair:second").await, Some(second));
+    assert!(matches!(
+        db.get_parse_offset("pair:first").await,
+        Ok(Some(offset)) if offset == first
+    ));
+    assert!(matches!(
+        db.get_parse_offset("pair:second").await,
+        Ok(Some(offset)) if offset == second
+    ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn parse_offset_pair_rejects_one_key_without_writing() {
     let harness = RegisteredGlobalDbHarness::open("parse-offset-pair-same-key").await;
     let db = &harness.registered;
@@ -858,10 +1028,60 @@ async fn parse_offset_pair_rejects_one_key_without_writing() {
         .await;
 
     assert!(result.is_err());
-    assert_eq!(db.get_parse_offset("pair:same").await, None);
+    assert!(matches!(db.get_parse_offset("pair:same").await, Ok(None)));
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn session_lookup_reports_a_broken_store_instead_of_absence() {
+    let harness = RegisteredGlobalDbHarness::open("session-lookup-broken-store").await;
+    let db = &harness.registered;
+    let session = tracedecay_sessions::runtime::SessionRecord {
+        provider: "codex".to_owned(),
+        session_id: "healthy-session".to_owned(),
+        project_key: "/project".to_owned(),
+        project_path: "/project".to_owned(),
+        title: None,
+        started_at: None,
+        ended_at: None,
+        transcript_path: Some("/project/session.jsonl".to_owned()),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    assert!(db.upsert_session(&session).await);
+    let loaded = db
+        .get_session("codex", "healthy-session")
+        .await
+        .expect("healthy store returns the session")
+        .expect("healthy session row");
+    assert_eq!(loaded.provider, "codex");
+    assert_eq!(loaded.session_id, "healthy-session");
+
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch("DROP TABLE sessions")
+        .await
+        .expect("drop the live sessions table");
+    transaction.commit().await.unwrap();
+
+    let error = db
+        .get_session("codex", "healthy-session")
+        .await
+        .expect_err("a broken store must not look like a missing session");
+    let TranscriptPersistenceError::Storage { operation, source } = &error else {
+        panic!("expected a storage error, got {error}");
+    };
+    assert_eq!(*operation, "load transcript session");
+    let message = source.to_string();
+    assert!(
+        message.contains("no such table"),
+        "sqlite failure must stay visible: {message}"
+    );
+}
+
+#[asupersync::test]
 async fn registered_handles_share_one_serialized_writer() {
     let harness = RegisteredGlobalDbHarness::open("shared-registered-writer").await;
     let first = harness.registered.clone();
@@ -885,38 +1105,54 @@ async fn registered_handles_share_one_serialized_writer() {
         metadata_json: None,
     };
     let analytics = second.append_analytics_event(&event);
-    tokio::pin!(analytics);
+    let mut analytics = std::pin::pin!(analytics);
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut analytics)
-            .await
-            .is_err(),
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(25),
+            &mut analytics
+        )
+        .await
+        .is_err(),
         "analytics bypassed the active transaction"
     );
 
     let savings_write = savings.try_record_savings("/project", "tracedecay_runtime", 100, 50, 1);
-    tokio::pin!(savings_write);
+    let mut savings_write = std::pin::pin!(savings_write);
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut savings_write)
-            .await
-            .is_err(),
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(25),
+            &mut savings_write
+        )
+        .await
+        .is_err(),
         "accounting bypassed the active transaction"
     );
 
     transaction.commit().await.unwrap();
     assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut analytics)
-            .await
-            .expect("analytics append timed out")
-            .is_ok()
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(1), &mut savings_write)
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_secs(1),
+            &mut analytics
+        )
         .await
-        .expect("savings insert timed out")
-        .expect("savings insert failed");
+        .expect("analytics append timed out")
+        .is_ok()
+    );
+    asupersync::time::timeout(
+        asupersync::time::wall_now(),
+        std::time::Duration::from_secs(1),
+        &mut savings_write,
+    )
+    .await
+    .expect("savings insert timed out")
+    .expect("savings insert failed");
     assert_eq!(first.sum_savings(None, 0).await.unwrap().calls, 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn optional_accounting_exposes_database_failures_to_callers() {
     let mut harness = RegisteredGlobalDbHarness::open("accounting-write-errors").await;
     let database = harness.registered.clone();
@@ -935,16 +1171,16 @@ async fn optional_accounting_exposes_database_failures_to_callers() {
     assert!(savings_error.to_string().contains("active daemon"));
 }
 
-#[tokio::test]
-async fn concurrent_registered_writes_remain_isolated() {
+#[asupersync::test]
+async fn concurrent_registered_writes_remain_isolated(cx: &asupersync::Cx) {
     let harness = RegisteredGlobalDbHarness::open("concurrent-registered-writes").await;
     let handles = (0..12)
         .map(|_| harness.registered.clone())
         .collect::<Vec<_>>();
 
-    let mut writes = tokio::task::JoinSet::new();
+    let mut writes = Vec::new();
     for (index, db) in handles.iter().cloned().enumerate() {
-        writes.spawn(async move {
+        let write = cx.spawn(move |_| async move {
             db.try_record_savings(
                 "/shared/project",
                 &format!("writer-{index}"),
@@ -955,15 +1191,16 @@ async fn concurrent_registered_writes_remain_isolated() {
             .await
             .expect("concurrent savings insert");
         });
+        writes.push(write.expect("spawn concurrent write"));
     }
-    while let Some(result) = writes.join_next().await {
-        result.unwrap();
+    for mut write in writes {
+        write.join(cx).await.unwrap();
     }
 
     assert_eq!(handles[0].sum_savings(None, 0).await.unwrap().calls, 12);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn analytics_query_honors_upper_horizon_and_row_cursor() {
     let harness = RegisteredGlobalDbHarness::open("analytics-query-bounds").await;
     let event = |timestamp: i64| AnalyticsEventInsert {
@@ -1025,8 +1262,8 @@ async fn analytics_query_honors_upper_horizon_and_row_cursor() {
     );
 }
 
-#[tokio::test]
-async fn queued_registered_writes_preserve_fifo_fairness() {
+#[asupersync::test]
+async fn queued_registered_writes_preserve_fifo_fairness(cx: &asupersync::Cx) {
     let harness = RegisteredGlobalDbHarness::open("registered-writer-fairness").await;
     let db = harness.registered.clone();
     db.writer_connection()
@@ -1044,7 +1281,7 @@ async fn queued_registered_writes_preserve_fifo_fairness() {
     let mut queued = Vec::new();
     for label in ["first", "second", "third"] {
         let queued_db = db.clone();
-        queued.push(tokio::spawn(async move {
+        let write = cx.spawn(move |_| async move {
             queued_db
                 .writer_connection()
                 .unwrap()
@@ -1053,14 +1290,15 @@ async fn queued_registered_writes_preserve_fifo_fairness() {
                     tracedecay_runtime_core::db::engine::params![label],
                 )
                 .await
-        }));
-        tokio::task::yield_now().await;
+        });
+        queued.push(write.expect("spawn queued write"));
+        asupersync::runtime::yield_now().await;
     }
     assert!(queued.iter().all(|write| !write.is_finished()));
 
     transaction.commit().await.unwrap();
-    for write in queued {
-        write.await.unwrap().unwrap();
+    for mut write in queued {
+        write.join(cx).await.unwrap().unwrap();
     }
 
     let snapshot = db.read_snapshot().await.unwrap();
@@ -1075,7 +1313,7 @@ async fn queued_registered_writes_preserve_fifo_fairness() {
     assert_eq!(labels, ["first", "second", "third"]);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
     async fn read_tokens(
         connection: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
@@ -1121,7 +1359,7 @@ async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
     assert_eq!(read_tokens(&fresh, &project_key).await, 2);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn retained_registered_database_rejects_new_writer_after_scope_drop() {
     let mut harness = RegisteredGlobalDbHarness::open("retained-registered-writer").await;
     let db = harness.registered.clone();
@@ -1135,7 +1373,7 @@ async fn retained_registered_database_rejects_new_writer_after_scope_drop() {
     assert!(!table_exists(&db, "stale_retained_writer").await);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn issued_registered_writer_rejects_autocommit_after_scope_drop() {
     let mut harness = RegisteredGlobalDbHarness::open("issued-registered-writer").await;
     let db = harness.registered.clone();
@@ -1156,7 +1394,7 @@ async fn issued_registered_writer_rejects_autocommit_after_scope_drop() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn begun_registered_transaction_rolls_back_when_scope_drops_before_commit() {
     let mut harness = RegisteredGlobalDbHarness::open("begun-registered-transaction").await;
     let db = harness.registered.clone();
@@ -1181,7 +1419,71 @@ async fn begun_registered_transaction_rolls_back_when_scope_drops_before_commit(
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn copied_transact_handle_cannot_write_after_scope_drop_inside_the_body() {
+    use tracedecay_runtime_core::db::engine::Executor as _;
+    let mut harness = RegisteredGlobalDbHarness::open("transact-copied-handle").await;
+    let db = harness.registered.clone();
+    let scope = std::sync::Arc::new(std::sync::Mutex::new(harness.take_scope()));
+
+    let outcome = db
+        .transact(async move |transaction| {
+            transaction
+                .execute(
+                    "CREATE TABLE transact_written_before_revoke (value INTEGER)",
+                    (),
+                )
+                .await?;
+            let copy = transaction;
+            drop(scope.lock().unwrap().take());
+            copy.execute(
+                "CREATE TABLE transact_written_after_revoke (value INTEGER)",
+                (),
+            )
+            .await?;
+            Ok::<_, tracedecay_runtime_core::db::engine::Error>(())
+        })
+        .await
+        .expect("job transport");
+
+    let error = outcome.expect_err("copied handle wrote after the scope ended");
+    assert!(error.to_string().contains("active daemon"), "{error}");
+    assert!(!table_exists(&db, "transact_written_after_revoke").await);
+    assert!(
+        !table_exists(&db, "transact_written_before_revoke").await,
+        "refused body did not roll back"
+    );
+}
+
+#[asupersync::test]
+async fn transact_rolls_back_when_scope_ends_before_commit() {
+    use tracedecay_runtime_core::db::engine::Executor as _;
+    let mut harness = RegisteredGlobalDbHarness::open("transact-commit-check").await;
+    let db = harness.registered.clone();
+    let scope = std::sync::Arc::new(std::sync::Mutex::new(harness.take_scope()));
+
+    let error = db
+        .transact(async move |transaction| {
+            transaction
+                .execute(
+                    "CREATE TABLE transact_staged_before_commit (value INTEGER)",
+                    (),
+                )
+                .await?;
+            drop(scope.lock().unwrap().take());
+            Ok::<_, tracedecay_runtime_core::db::engine::Error>(())
+        })
+        .await
+        .expect_err("transact committed after the scope ended");
+
+    assert!(error.to_string().contains("active daemon"), "{error}");
+    assert!(
+        !table_exists(&db, "transact_staged_before_commit").await,
+        "failed commit did not roll back staged writes"
+    );
+}
+
+#[asupersync::test]
 async fn begun_registered_transaction_can_roll_back_after_scope_drop() {
     let mut harness = RegisteredGlobalDbHarness::open("registered-rollback").await;
     let db = harness.registered.clone();
@@ -1203,7 +1505,7 @@ async fn begun_registered_transaction_can_roll_back_after_scope_drop() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn registered_runtime_rejects_database_file_replacement() {
     let harness = RegisteredGlobalDbHarness::open("database-file-replacement").await;
     let db_path = harness.registered.db_path().to_path_buf();
@@ -1227,7 +1529,7 @@ async fn registered_runtime_rejects_database_file_replacement() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn registered_runtime_does_not_recreate_a_missing_database() {
     let harness = RegisteredGlobalDbHarness::open("missing-database-no-create").await;
     let db_path = harness.registered.db_path().to_path_buf();
@@ -1254,7 +1556,7 @@ async fn registered_runtime_does_not_recreate_a_missing_database() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn project_tokens_separate_a_genuine_zero_from_a_failed_read() {
     let harness = RegisteredGlobalDbHarness::open("project-tokens-failed-read").await;
     let project = std::path::Path::new("/tmp/tracedecay-project-tokens");
@@ -1311,7 +1613,7 @@ async fn project_tokens_separate_a_genuine_zero_from_a_failed_read() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn project_store_resolution_rejects_conflicting_common_dir_and_marker_identities() {
     let harness = RegisteredGlobalDbHarness::open("project-identity-conflict").await;
     let project = harness.storage_root().join("repo");
@@ -1347,6 +1649,29 @@ async fn project_store_resolution_rejects_conflicting_common_dir_and_marker_iden
         .await
         .unwrap();
     tracedecay_runtime_core::storage::write_repository_identity_marker(&project, "proj_marker")
+        .unwrap();
+    assert_eq!(
+        harness
+            .registered
+            .project_ids_by_identity(&project, None)
+            .await
+            .unwrap(),
+        Vec::<String>::new(),
+        "a marker naming a project this profile holds no store for is not an identity"
+    );
+    harness
+        .registered
+        .upsert_store_instance(super::StoreInstanceUpsert {
+            store_id: "store:proj_marker:profile_sharded".to_string(),
+            project_id: "proj_marker".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_marker".to_string(),
+            manifest_relpath: None,
+            last_verified_at: None,
+            last_write_at: None,
+        })
+        .await
         .unwrap();
 
     assert_eq!(

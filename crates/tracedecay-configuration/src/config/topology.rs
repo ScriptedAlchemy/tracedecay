@@ -3,14 +3,14 @@
 //! The sole resolver combines the typed registry default with explicit layers;
 //! these helpers consume its pinned snapshot and return the complete validated
 //! policy. They never inspect paths, invoke Git, manufacture capability or
-//! repository evidence, or substitute a locally invented default — missing,
+//! repository evidence, or substitute a locally invented default, missing,
 //! mistyped, invalid, or unsupported inputs fail closed.
 
 use thiserror::Error;
 use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-    WorkTopologyPolicyV1, safe_work_topology_policy_v1,
+    WorkTopologyPolicyV1,
 };
 
 #[derive(Debug, Error)]
@@ -40,21 +40,14 @@ pub fn resolved_work_topology_policy(
     }
 }
 
-/// Exposes the exact safe policy used by the typed registry before any
-/// operator publishes a protected replacement.
-pub fn safe_default_work_topology_policy() -> WorkTopologyPolicyV1 {
-    safe_work_topology_policy_v1()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use tracedecay_domain::configuration::{
         BranchTopologyKindV1, ConfigurationLayerIdV1, ConfigurationSnapshotV1,
-        ConfigurationValueKindV1, ConfigurationValueV1, RestartRequirementV1, SettingKey,
-        SettingScopeV1, SettingSensitivityV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-        WorkTopologyPolicyV1, safe_work_topology_policy_v1,
+        ConfigurationValueV1, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkTopologyPolicyV1,
+        safe_work_topology_policy_v1,
     };
     use tracedecay_domain::{ManifestDigest, ProjectId, UserProfileId};
     use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
@@ -64,13 +57,7 @@ mod tests {
 
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("fixture id is canonical")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn topology_key() -> SettingKey {
         SettingKey::new(WORK_TOPOLOGY_POLICY_SETTING_KEY).unwrap()
@@ -87,51 +74,6 @@ mod tests {
                 ConfigurationValueV1::WorkTopologyPolicy(Box::new(policy)),
             )]),
         }
-    }
-
-    #[test]
-    fn safe_default_never_enables_cross_merge() {
-        let policy = safe_default_work_topology_policy();
-        policy.validate().unwrap();
-        assert!(!policy.cross_merge.allow_cross_repository);
-    }
-
-    #[test]
-    fn registry_default_is_the_domain_safe_default() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let definition = registry.definition(&topology_key()).unwrap();
-        assert_eq!(
-            definition.value_kind,
-            ConfigurationValueKindV1::WorkTopologyPolicy
-        );
-        assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert_eq!(
-            definition.restart_requirement,
-            RestartRequirementV1::DaemonRestart
-        );
-        let ConfigurationValueV1::WorkTopologyPolicy(default) = &definition.default_value else {
-            panic!("registry default must be a typed topology policy");
-        };
-        let safe = safe_work_topology_policy_v1();
-        assert_eq!(**default, safe);
-        assert_eq!(
-            default.compute_digest().unwrap(),
-            safe.compute_digest().unwrap()
-        );
-    }
-
-    #[test]
-    fn resolves_safe_default_when_no_layer_overrides() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let snapshot = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let resolved = resolved_work_topology_policy(&snapshot).unwrap();
-        let safe = safe_default_work_topology_policy();
-        assert_eq!(*resolved, safe);
-        assert_eq!(
-            resolved.compute_digest().unwrap(),
-            safe.compute_digest().unwrap()
-        );
     }
 
     #[test]
@@ -177,7 +119,12 @@ mod tests {
                 ConfigurationValueV1::WorkTopologyPolicy(Box::new(safe_work_topology_policy_v1())),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "setting work.topology_policy.v1 cannot be placed in UserProfile { profile_id: UserProfileId(\"profile.fixture\") }"
+        );
     }
 
     #[test]
@@ -191,7 +138,12 @@ mod tests {
                 ConfigurationValueV1::WorkTopologyPolicy(Box::new(safe_work_topology_policy_v1())),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "the registry default layer is internal and cannot be supplied"
+        );
     }
 
     #[test]
@@ -207,7 +159,12 @@ mod tests {
                 ConfigurationValueV1::Text("permissive".to_owned()),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: setting value kind does not match work.topology_policy.v1: expected WorkTopologyPolicy, got Text"
+        );
     }
 
     #[test]
@@ -217,12 +174,22 @@ mod tests {
         // No protected-ref rules at all.
         let mut unprotected = safe_work_topology_policy_v1();
         unprotected.protected_refs.clear();
-        assert!(resolve_configuration(&registry, &[project_layer(unprotected)]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[project_layer(unprotected)])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: protected ref rules must not be empty"
+        );
 
         // Unsupported schema version.
         let mut future = safe_work_topology_policy_v1();
         future.schema_version = 2;
-        assert!(resolve_configuration(&registry, &[project_layer(future)]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[project_layer(future)])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: work topology policy schema version is not canonical"
+        );
     }
 
     #[test]

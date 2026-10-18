@@ -1,89 +1,83 @@
-use std::hint::black_box;
-use std::time::Instant;
+use tracedecay_domain::{RetrievalFailure, RetrieverOutcome};
+use tracedecay_query::retrieval::lexical::MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
 
-use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkGrainV1, FileOccurrenceId, FreshnessCompatibilityV1,
-    technical_tokens,
-};
-use tracedecay_query::retrieval::lexical::{
-    CodeLexicalProjectionAdapterV1, LexicalLane, LexicalLaneRetriever,
+use crate::candidate_producers::{
+    complete, real_lexical_source_fixture_from_sources, sealed_artifact,
 };
 
-use crate::candidate_producers::{chunk, complete, id, lexical_request, projection_metadata};
-
+/// A term shared by more documents than the lane may hydrate per request
+/// generates no candidates of its own once a rarer term is present: only the
+/// rare term's documents are scored, so the batch cannot fill its cap from
+/// common-word-only rows. The lane reports that pruning as a typed `Partial`
+/// outcome naming the pruned term rather than silently truncating. Alone, the
+/// common term is still admitted and the retrieval is complete.
 #[test]
-#[ignore = "manual cold/warm lexical scaling benchmark"]
-fn immutable_postings_cold_warm_scaling() {
-    eprintln!("documents,cold_build_and_first_query_us,warm_query_avg_ns,full_scan_avg_ns");
-    for (documents, repetitions) in [(1_000_u32, 100_u32), (10_000, 25), (50_000, 5)] {
-        let generation = id::<CodeGenerationId>("generation.1");
-        let target = documents / 2;
-        let corpus = (0..documents)
-            .map(|ordinal| {
-                if ordinal == target {
-                    format!("fn function_{ordinal}() {{ let needle = true; }}")
-                } else {
-                    format!("fn function_{ordinal}() {{ let unrelated_{ordinal} = true; }}")
-                }
-            })
-            .collect::<Vec<_>>();
-        let chunks = corpus
-            .iter()
-            .enumerate()
-            .map(|(ordinal, text)| {
-                chunk(
-                    &generation,
-                    ordinal as u32,
-                    CodeSearchChunkGrainV1::SymbolBody,
-                    text,
-                    &[],
-                    &[],
+fn common_term_candidates_are_bounded_by_the_rarest_source() {
+    let files = 128;
+    let functions_per_file = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 / files + 1;
+    let fixture = real_lexical_source_fixture_from_sources(
+        (0..files)
+            .map(|file| {
+                let source = (0..functions_per_file)
+                    .map(|function| {
+                        if file == files / 2 && function == 0 {
+                            format!(
+                                "pub fn function_{function}() {{ let needle = shared_flag; }}\n"
+                            )
+                        } else {
+                            format!("pub fn function_{function}() {{ let shared_flag = true; }}\n")
+                        }
+                    })
+                    .collect::<String>();
+                (
+                    format!("file.scaling.{file:03}"),
+                    format!("src/scaling_{file:03}.rs"),
+                    source.into_bytes(),
                 )
             })
-            .collect();
-        let mut metadata = projection_metadata(&generation, FreshnessCompatibilityV1::Current);
-        metadata.logical_paths.extend((0..documents).map(|ordinal| {
-            (
-                id::<FileOccurrenceId>(&format!("file.{ordinal}")),
-                format!("src/file-{ordinal}.rs"),
-            )
-        }));
-        let request = lexical_request("needle", &["needle"], &[], &[], 0, 8);
+            .collect(),
+    );
+    let artifact = sealed_artifact(&fixture, fixture.metadata.clone());
+    let lane = artifact.lane();
 
-        let cold_started = Instant::now();
-        let projection = CodeLexicalProjectionAdapterV1::new(metadata, chunks)
-            .expect("generation-bound postings build");
-        let lane = LexicalLane::new(projection);
-        let first = complete(
-            lane.retrieve_lexical(&request)
-                .expect("first postings query"),
-        );
-        let cold_elapsed = cold_started.elapsed();
-        assert_eq!(first.candidates.len(), 1);
+    let common_only = complete(
+        lane.retrieve_lexical(&artifact.request("shared_flag", &["shared_flag"], &[], &[], 0, 8))
+            .expect("common-only query"),
+    );
+    assert_eq!(common_only.candidates.len(), 8);
+    let documents = common_only.coverage.eligible;
+    assert!(
+        documents > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
+        "the common term must exceed the document-frequency budget: {documents}"
+    );
 
-        let warm_started = Instant::now();
-        for _ in 0..repetitions {
-            let batch = complete(
-                lane.retrieve_lexical(&request)
-                    .expect("warm postings query"),
-            );
-            assert_eq!(black_box(batch.candidates.len()), 1);
+    let RetrieverOutcome::Partial {
+        value: mixed,
+        reason,
+    } = lane
+        .retrieve_lexical(&artifact.request(
+            "needle shared_flag",
+            &["needle", "shared_flag"],
+            &[],
+            &[],
+            0,
+            8,
+        ))
+        .expect("mixed-selectivity query")
+    else {
+        panic!("pruning the common term must be reported as a partial retrieval");
+    };
+    assert_eq!(
+        reason,
+        RetrievalFailure::CandidateSourcesPruned {
+            term_sources: vec![("shared_flag".to_owned(), documents)],
+            document_frequency_budget: MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
         }
-        let warm_average = warm_started.elapsed().as_nanos() / u128::from(repetitions);
-
-        let scan_started = Instant::now();
-        for _ in 0..repetitions {
-            let matches = corpus
-                .iter()
-                .filter(|text| technical_tokens(text).any(|(_, term)| term == "needle"))
-                .count();
-            assert_eq!(black_box(matches), 1);
-        }
-        let scan_average = scan_started.elapsed().as_nanos() / u128::from(repetitions);
-
-        eprintln!(
-            "{documents},{},{warm_average},{scan_average}",
-            cold_elapsed.as_micros()
-        );
-    }
+    );
+    assert_eq!(
+        (mixed.candidates.len(), mixed.coverage.eligible),
+        (2, 2),
+        "only the two documents holding the rare term may be hydrated: {:?}",
+        mixed.coverage
+    );
 }

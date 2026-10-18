@@ -5,7 +5,12 @@ import {
   scopeWritable,
   useScope,
 } from "../../data/scope/store.ts";
-import { callWork, type WorkResult, type WorkRoute } from "./workApi.ts";
+import {
+  callWork,
+  workResultInvalidatesReads,
+  type WorkResult,
+  type WorkRoute,
+} from "./workApi.ts";
 
 /**
  * Work reads and commands as queries.
@@ -54,10 +59,7 @@ export function useWorkCommand<Request, Response>(
         ? callWork(route, request, scopedUrl(scope, route.path))
         : Promise.resolve(notWritable<Response>(writability.reason)),
     onSuccess: (result) => {
-      // Only a committed command changes what a read would return. Invalidating
-      // on a refusal would refetch on every rejected keystroke and, worse, make
-      // a denied command look like it had moved something.
-      if (result.outcome === "value") {
+      if (workResultInvalidatesReads(result)) {
         void client.invalidateQueries({ queryKey: ["work"] });
       }
     },

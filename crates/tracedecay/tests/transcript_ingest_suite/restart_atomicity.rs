@@ -3,29 +3,36 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
-    ProviderId, SessionId,
+    SessionId,
 };
+use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::claude::ClaudeSource;
-use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
-use tracedecay_sessions::runtime::codex::CodexSource;
-use tracedecay_sessions::runtime::cursor::{
-    ingest_cursor_transcript_event as ingest_cursor_transcript_event_registered,
-    try_ingest_cursor_transcript_event as try_ingest_cursor_transcript_event_registered,
+use tracedecay_sessions::observation::ObservationCancellation;
+use tracedecay_sessions::runtime::hosts::claude::{ClaudeSource, identify_claude_source};
+use tracedecay_sessions::runtime::hosts::claude_observation::{
+    ClaudeObservationIngestError, ingest_source_with_observations_with_admission,
 };
-use tracedecay_sessions::runtime::source::{TranscriptIngestError, TranscriptSource};
-use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionProvider};
+use tracedecay_sessions::runtime::hosts::cursor::try_ingest_cursor_transcript_event_capped_with_admission;
+use tracedecay_sessions::runtime::ingest::test_support::{
+    IngestPassOutcome, default_ingest_pass_bounds,
+    ingest_user_global_sources_for_provider_with_roots_bounded,
+};
+use tracedecay_sessions::runtime::shared::TranscriptIngestStats;
+use tracedecay_sessions::runtime::source::TranscriptIngestError;
+use tracedecay_sessions::runtime::{
+    SessionMessageSearchResult, SessionProvider, with_transcript_source_profile,
+};
 use tracedecay_store::ObservationReplayRequest;
 
 use crate::claude::write_claude_transcript;
 use crate::cline_like::{vscode_storage_root, write_task};
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::support::{init_git_repo, init_project, setup};
 
 const TEST_PROJECT_ID: &str = "tracedecay-transcript-ingest-fixture";
@@ -60,8 +67,23 @@ pub(super) struct ProjectSessionTestRuntime {
 }
 
 impl ProjectSessionTestRuntime {
+    pub(super) async fn shutdown(self) -> tracedecay_domain::errors::Result<()> {
+        self.runtime.shutdown().await
+    }
+
     pub(super) fn runtime(&self) -> &HostAdmissionTestRuntimeV1 {
         &self.runtime
+    }
+
+    /// The transcript source profile of this fixture: its registered profile
+    /// with the `setup` home (`<fixture root>/home`) beside it.
+    pub(super) fn transcript_source_profile(&self) -> ProfileRoot {
+        let profile_root = self.runtime.profile_root_for_test();
+        let home = profile_root
+            .parent()
+            .expect("fixture profile has a fixture root")
+            .join("home");
+        ProfileRoot::new(profile_root).with_home(home)
     }
 
     pub(super) fn project_id(&self) -> &ProjectId {
@@ -187,27 +209,94 @@ pub(super) async fn open_sibling_project_session_db(
     }
 }
 
-pub(super) async fn try_ingest_source(
+/// Runs the production user-scope pass for one provider against `runtime`'s
+/// profile store, with `home` as the transcript source profile's user home and
+/// `registered_roots` as the registered projects the user scope excludes.
+pub(super) async fn ingest_user_provider(
+    runtime: &HostAdmissionTestRuntimeV1,
+    home: &Path,
+    provider: SessionProvider,
+    registered_roots: Vec<PathBuf>,
+) -> IngestPassOutcome {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("fixture mounts its profile session store");
+    let authority =
+        GlobalDbSessionIngestAuthority::new(database).with_background_cpu(runtime.background_cpu());
+    let shard = &database.binding().shard_id;
+    let outcome = with_transcript_source_profile(
+        ProfileRoot::new(runtime.profile_root_for_test()).with_home(home),
+        ingest_user_global_sources_for_provider_with_roots_bounded(
+            (&shard.brain_id, &shard.profile_id, &authority),
+            runtime.profile_root_for_test(),
+            Some(provider),
+            registered_roots,
+            default_ingest_pass_bounds(),
+            &ObservationCancellation::default(),
+        ),
+    )
+    .await;
+    assert!(
+        outcome.failures.is_empty(),
+        "user {provider:?} pass failed: {:?}",
+        outcome.failures
+    );
+    outcome
+}
+
+/// Runs one Claude source through the production observation pipeline against
+/// the registered project authority.
+pub(super) async fn try_ingest_claude_source(
     runtime: &ProjectSessionTestRuntime,
-    source: &dyn TranscriptSource,
+    source: &ClaudeSource,
     project_root: &Path,
-    max_new_bytes: Option<u64>,
-) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
-    tracedecay_sessions::runtime::shared::TranscriptIngestStats,
-> {
+) -> Result<TranscriptIngestStats, ClaudeObservationIngestError> {
+    ingest_source_with_observations_with_admission(
+        source,
+        project_root,
+        ObservationScopeV1::Project {
+            project_id: runtime.project_id.clone(),
+        },
+        &runtime.runtime.facade(),
+        None,
+        ObservationCancellation::default(),
+    )
+    .await
+    .map(|stats| stats.transcript)
+}
+
+/// Committed observation cursor offset for one Claude transcript.
+pub(super) async fn claude_observation_cursor(
+    runtime: &ProjectSessionTestRuntime,
+    transcript: &Path,
+) -> Option<u64> {
+    let projects_dir = transcript
+        .ancestors()
+        .find(|ancestor| ancestor.ends_with(".claude/projects"))
+        .expect("transcript under .claude/projects");
+    let identity = identify_claude_source(projects_dir, transcript).unwrap();
+    let source = ObservationSourceIdentityV1::for_source(
+        SessionId::new(identity.session_id).unwrap(),
+        SessionId::new(identity.source_id).unwrap(),
+    )
+    .unwrap();
     runtime
         .runtime
-        .ingest_project_transcript_source_for_test(source, project_root, max_new_bytes)
+        .project_observation_source_cursor_for_test(&source)
         .await
+        .ok()
+        .flatten()
+        .map(|cursor| cursor.byte_offset())
 }
 
 async fn ingest_cursor_transcript_event(
     event_json: &str,
     runtime: &ProjectSessionTestRuntime,
     project_id: ProjectId,
-) -> tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats {
-    ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
+) -> tracedecay_sessions::runtime::hosts::cursor::CursorTranscriptIngestStats {
+    try_ingest_cursor_transcript_event(event_json, runtime, project_id)
         .await
+        .expect("cursor transcript ingest")
 }
 
 async fn try_ingest_cursor_transcript_event(
@@ -215,60 +304,34 @@ async fn try_ingest_cursor_transcript_event(
     runtime: &ProjectSessionTestRuntime,
     project_id: ProjectId,
 ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
-    tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats,
+    tracedecay_sessions::runtime::hosts::cursor::CursorTranscriptIngestStats,
 > {
-    try_ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
-        .await
+    try_ingest_cursor_transcript_event_capped_with_admission(
+        event_json,
+        project_id,
+        &runtime.runtime.facade(),
+        None,
+    )
+    .await
 }
 
+/// Runs the production provider sweep with `home` as the transcript source
+/// profile's user home, the way the daemon scopes its ingest passes.
 pub(super) async fn ingest_global_sources_for_provider(
+    home: &Path,
     runtime: &ProjectSessionTestRuntime,
     project_root: &Path,
     provider: Option<SessionProvider>,
 ) -> tracedecay_sessions::runtime::shared::TranscriptIngestStats {
-    runtime
-        .runtime
-        .ingest_project_provider_for_test(project_root, provider)
-        .await
-        .unwrap()
-}
-
-async fn parse_offset_for_task_history(
-    runtime: &ProjectSessionTestRuntime,
-    _project: &Path,
-    path: &Path,
-) -> Option<tracedecay_global_db::ParseOffset> {
-    let path_text = path.to_string_lossy();
-    if let Some(offset) = runtime.get_parse_offset(path_text.as_ref()).await {
-        return Some(offset);
-    }
-    #[cfg(windows)]
-    {
-        let alternate = if path_text.contains('/') {
-            path_text.replace('/', "\\")
-        } else {
-            path_text.replace('\\', "/")
-        };
-        if alternate != path_text
-            && let Some(offset) = runtime.get_parse_offset(&alternate).await
-        {
-            return Some(offset);
-        }
-    }
-    let task_dir = path.parent()?.file_name()?.to_string_lossy();
-    let file_name = path.file_name()?.to_string_lossy();
-    runtime
-        .runtime
-        .project_parse_offset_by_suffix_for_test(&format!("{task_dir}/{file_name}"))
-        .await
-        .ok()
-        .flatten()
-}
-
-fn claude_cursor_key(source: &ClaudeSource, project: &Path) -> String {
-    let paths = source.transcript_paths(project);
-    assert_eq!(paths.len(), 1);
-    paths[0].to_string_lossy().into_owned()
+    let profile = ProfileRoot::new(runtime.runtime.profile_root_for_test()).with_home(home);
+    with_transcript_source_profile(
+        profile,
+        runtime
+            .runtime
+            .ingest_project_provider_for_test(project_root, provider),
+    )
+    .await
+    .unwrap()
 }
 
 pub(super) async fn set_projection_failure(runtime: &ProjectSessionTestRuntime, enabled: bool) {
@@ -285,11 +348,11 @@ pub(super) async fn observation_source_cursor(
     session_id: &str,
     project: &Path,
 ) -> Option<ObservationSourceCursorV1> {
-    let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new(provider).unwrap(),
-        SessionId::new(session_id).unwrap(),
-    )
-    .unwrap();
+    // Look up with the same source identity admission wrote. Codex v2 and
+    // Cline UI streams must not be reconstructed as a session-only source.
+    let source =
+        tracedecay_sessions::runtime::native_ingest_source_identity(provider, session_id, None)
+            .unwrap();
     let project_id = test_project_id(project);
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
@@ -300,6 +363,28 @@ pub(super) async fn observation_source_cursor(
             project_id: test_project_id(project)
         }
     );
+    runtime
+        .runtime
+        .project_observation_source_cursor_for_test(&source)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Committed cursor of one named native stream inside a session, for providers
+/// whose task owns several independently appended sources.
+pub(super) async fn observation_source_cursor_for_key(
+    runtime: &ProjectSessionTestRuntime,
+    provider: &str,
+    session_id: &str,
+    source_key: &str,
+) -> Option<ObservationSourceCursorV1> {
+    let source = tracedecay_sessions::runtime::native_ingest_source_identity(
+        provider,
+        session_id,
+        Some(source_key),
+    )
+    .unwrap();
     runtime
         .runtime
         .project_observation_source_cursor_for_test(&source)
@@ -358,7 +443,15 @@ pub(super) async fn assert_secret_absent_from_observation_sinks(
 }
 
 fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) -> PathBuf {
-    let dir = home.join(".codex/sessions/2026/01/01");
+    // Joined per component so the fixture path is spelled exactly as the
+    // rollout walker reports it (a `/`-joined tail is not the native spelling
+    // on Windows), which is what `transcript_path` is asserted against.
+    let dir = home
+        .join(".codex")
+        .join("sessions")
+        .join("2026")
+        .join("01")
+        .join("01");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("rollout-2026-01-01T00-00-00-{session}.jsonl"));
     let contents = format!(
@@ -401,10 +494,9 @@ fn assert_no_transcript_adjacent_fallback_writer(
     assert!(
         !transcript
             .parent()
-            .map(|parent| parent.join("sessions.db").exists()
+            .is_some_and(|parent| parent.join("sessions.db").exists()
                 || parent.join("tracedecay.db").exists()
-                || parent.join(".tracedecay").exists())
-            .unwrap_or(false),
+                || parent.join(".tracedecay").exists()),
         "provider ingest must not create a transcript-adjacent fallback writer"
     );
     assert_ne!(
@@ -420,14 +512,13 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-restart");
     let source = ClaudeSource::with_home(&home);
-    let path_key = claude_cursor_key(&source, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = try_ingest_source(&db, &source, &project, None)
+    let first = try_ingest_claude_source(&db, &source, &project)
         .await
         .unwrap();
     assert_eq!(first.messages_upserted, 2);
-    let first_offset = db.get_parse_offset(&path_key).await.unwrap();
+    let first_offset = claude_observation_cursor(&db, &path).await.unwrap();
     let first_session = db.get_session("claude", "claude-restart").await.unwrap();
 
     let mut transcript = std::fs::OpenOptions::new()
@@ -452,14 +543,10 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
 
     let rejected = open_project_session_db(&project).await.unwrap();
     set_projection_failure(&rejected, true).await;
-    let failed = try_ingest_source(&rejected, &source, &project, None).await;
+    let failed = try_ingest_claude_source(&rejected, &source, &project).await;
     assert!(
         failed.is_err(),
         "projection failure must surface as an ingest error"
-    );
-    assert_eq!(
-        rejected.get_parse_offset(&path_key).await,
-        Some(first_offset)
     );
     assert_eq!(rejected.session_message_count().await.unwrap(), 2);
     assert_eq!(
@@ -477,44 +564,43 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     drop(rejected);
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let suffix = try_ingest_source(&reopened, &source, &project, None)
+    let suffix = try_ingest_claude_source(&reopened, &source, &project)
         .await
         .unwrap();
     assert_eq!(suffix.messages_upserted, 1);
-    let final_offset = reopened.get_parse_offset(&path_key).await.unwrap();
-    assert!(final_offset.byte_offset > first_offset.byte_offset);
-    assert_eq!(
-        final_offset.byte_offset,
-        std::fs::metadata(&path).unwrap().len()
-    );
+    let final_offset = claude_observation_cursor(&reopened, &path).await.unwrap();
+    assert!(final_offset > first_offset);
+    assert_eq!(final_offset, std::fs::metadata(&path).unwrap().len());
     drop(reopened);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = try_ingest_source(&replay, &source, &project, None)
+    let unchanged = try_ingest_claude_source(&replay, &source, &project)
         .await
         .unwrap();
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
-    assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
+    assert_eq!(
+        claude_observation_cursor(&replay, &path).await,
+        Some(final_offset)
+    );
     assert_eq!(replay.session_message_count().await.unwrap(), 3);
 }
 
 #[tokio::test]
-async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate() {
+async fn claude_malformed_complete_frame_is_covered_and_repair_recovers_without_gap_or_duplicate() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-malformed-frame");
     let source = ClaudeSource::with_home(&home);
-    let path_key = claude_cursor_key(&source, &project);
     let valid_prefix = std::fs::read_to_string(&path).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let initial = try_ingest_source(&db, &source, &project, None)
+    let initial = try_ingest_claude_source(&db, &source, &project)
         .await
         .unwrap();
     assert_eq!(initial.messages_upserted, 2);
-    let prefix_offset = db.get_parse_offset(&path_key).await.unwrap();
-    assert_eq!(prefix_offset.byte_offset, valid_prefix.len() as u64);
+    let prefix_offset = claude_observation_cursor(&db, &path).await.unwrap();
+    assert_eq!(prefix_offset, valid_prefix.len() as u64);
     drop(db);
 
     let suffix = serde_json::json!({
@@ -531,29 +617,18 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     )
     .unwrap();
 
-    let rejected = open_project_session_db(&project).await.unwrap();
-    let malformed = try_ingest_source(&rejected, &source, &project, None).await;
-    assert!(
-        matches!(
-            malformed,
-            Err(TranscriptIngestError::NonDurableRecord {
-                provider: "claude",
-                ..
-            })
-        ),
-        "malformed complete frame must surface as a non-durable scanner error, got {malformed:?}"
-    );
+    let covered = open_project_session_db(&project).await.unwrap();
+    let malformed = try_ingest_claude_source(&covered, &source, &project)
+        .await
+        .expect("malformed complete frame must be covered, not fail the pass");
+    assert_eq!(malformed.messages_upserted, 1);
     assert_eq!(
-        rejected
-            .get_parse_offset(&path_key)
-            .await
-            .unwrap()
-            .byte_offset,
-        prefix_offset.byte_offset
+        claude_observation_cursor(&covered, &path).await,
+        Some(std::fs::metadata(&path).unwrap().len())
     );
-    assert_eq!(rejected.session_message_count().await.unwrap(), 2);
-    assert!(rejected.get_session_message("claude", "u4").await.is_none());
-    drop(rejected);
+    assert_eq!(covered.session_message_count().await.unwrap(), 3);
+    assert!(covered.get_session_message("claude", "u4").await.is_some());
+    drop(covered);
 
     let repaired = serde_json::json!({
         "type": "user",
@@ -566,27 +641,27 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     std::fs::write(&path, format!("{valid_prefix}{repaired}\n{suffix}\n")).unwrap();
 
     let retry = open_project_session_db(&project).await.unwrap();
-    let recovered = try_ingest_source(&retry, &source, &project, None)
+    let recovered = try_ingest_claude_source(&retry, &source, &project)
         .await
         .unwrap();
-    assert_eq!(recovered.messages_upserted, 2);
+    assert_eq!(recovered.messages_upserted, 1);
     assert_eq!(retry.session_message_count().await.unwrap(), 4);
     assert!(retry.get_session_message("claude", "u3").await.is_some());
     assert!(retry.get_session_message("claude", "u4").await.is_some());
-    let final_offset = retry.get_parse_offset(&path_key).await.unwrap();
-    assert_eq!(
-        final_offset.byte_offset,
-        std::fs::metadata(&path).unwrap().len()
-    );
+    let final_offset = claude_observation_cursor(&retry, &path).await.unwrap();
+    assert_eq!(final_offset, std::fs::metadata(&path).unwrap().len());
     drop(retry);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = try_ingest_source(&replay, &source, &project, None)
+    let unchanged = try_ingest_claude_source(&replay, &source, &project)
         .await
         .unwrap();
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
-    assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
+    assert_eq!(
+        claude_observation_cursor(&replay, &path).await,
+        Some(final_offset)
+    );
     assert_eq!(replay.session_message_count().await.unwrap(), 4);
     assert!(replay.get_session_message("claude", "u4").await.is_some());
 }
@@ -597,7 +672,6 @@ async fn claude_restart_defers_a_partial_final_line() {
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-partial");
     let source = ClaudeSource::with_home(&home);
-    let path_key = claude_cursor_key(&source, &project);
     let complete_len = std::fs::metadata(&path).unwrap().len();
     let partial = serde_json::json!({
         "type": "user",
@@ -616,21 +690,21 @@ async fn claude_restart_defers_a_partial_final_line() {
         .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = try_ingest_source(&db, &source, &project, None)
+    let first = try_ingest_claude_source(&db, &source, &project)
         .await
         .unwrap();
     assert_eq!(first.messages_upserted, 2);
-    let committed_offset = db.get_parse_offset(&path_key).await.unwrap();
-    assert_eq!(committed_offset.byte_offset, complete_len);
+    let committed_offset = claude_observation_cursor(&db, &path).await.unwrap();
+    assert_eq!(committed_offset, complete_len);
     drop(db);
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let still_partial = try_ingest_source(&reopened, &source, &project, None)
+    let still_partial = try_ingest_claude_source(&reopened, &source, &project)
         .await
         .unwrap();
     assert_eq!(still_partial.messages_upserted, 0);
     assert_eq!(
-        reopened.get_parse_offset(&path_key).await,
+        claude_observation_cursor(&reopened, &path).await,
         Some(committed_offset)
     );
 
@@ -640,31 +714,31 @@ async fn claude_restart_defers_a_partial_final_line() {
         .unwrap()
         .write_all(b"\n")
         .unwrap();
-    let completed = try_ingest_source(&reopened, &source, &project, None)
+    let completed = try_ingest_claude_source(&reopened, &source, &project)
         .await
         .unwrap();
     assert_eq!(completed.messages_upserted, 1);
     assert_eq!(reopened.session_message_count().await.unwrap(), 3);
-    let final_offset = reopened.get_parse_offset(&path_key).await.unwrap();
-    assert_eq!(
-        final_offset.byte_offset,
-        std::fs::metadata(&path).unwrap().len()
-    );
+    let final_offset = claude_observation_cursor(&reopened, &path).await.unwrap();
+    assert_eq!(final_offset, std::fs::metadata(&path).unwrap().len());
     drop(reopened);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = try_ingest_source(&replay, &source, &project, None)
+    let unchanged = try_ingest_claude_source(&replay, &source, &project)
         .await
         .unwrap();
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
-    assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
+    assert_eq!(
+        claude_observation_cursor(&replay, &path).await,
+        Some(final_offset)
+    );
     assert_eq!(replay.session_message_count().await.unwrap(), 3);
     assert!(replay.get_session_message("claude", "u3").await.is_some());
 }
 
 #[tokio::test]
-async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
+async fn cline_snapshot_restart_and_incomplete_rewrite_admit_only_complete_documents() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let history_path = write_task(
@@ -672,30 +746,20 @@ async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
         &project,
         "cline-restart",
     );
-    let source = ClineLikeSource::cline_with_home(&home);
+    let original: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&history_path).unwrap()).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    // user + assistant + usage companion rows
-    assert_eq!(first.messages_upserted, 3);
-    let offset = parse_offset_for_task_history(&db, &project, &history_path)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    // user + assistant + the UI sidecar's usage record
+    assert_eq!(durable_table_count(&db, "observations").await, 3);
     let durable_count = db.session_message_count().await.unwrap();
     drop(db);
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let replay = try_ingest_source(&reopened, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(replay.sessions_upserted, 0);
-    assert_eq!(replay.messages_upserted, 0);
-    assert_eq!(
-        parse_offset_for_task_history(&reopened, &project, &history_path).await,
-        Some(offset)
-    );
+    ingest_global_sources_for_provider(&home, &reopened, &project, Some(SessionProvider::Cline))
+        .await;
+    assert_eq!(durable_table_count(&reopened, "observations").await, 3);
     assert_eq!(
         reopened
             .search_session_messages("cline", None, "billing pipeline", 10)
@@ -711,18 +775,12 @@ async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
     )
     .unwrap();
     let incomplete = open_project_session_db(&project).await.unwrap();
-    let deferred = try_ingest_source(&incomplete, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(deferred.messages_upserted, 0);
+    ingest_global_sources_for_provider(&home, &incomplete, &project, Some(SessionProvider::Cline))
+        .await;
+    assert_eq!(durable_table_count(&incomplete, "observations").await, 3);
     assert_eq!(
         incomplete.session_message_count().await.unwrap(),
         durable_count
-    );
-    // Incomplete JSON must not advance past the last successfully committed hash.
-    assert_eq!(
-        parse_offset_for_task_history(&incomplete, &project, &history_path).await,
-        Some(offset)
     );
     assert!(
         incomplete
@@ -732,33 +790,16 @@ async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
     );
     drop(incomplete);
 
-    std::fs::write(
-        &history_path,
-        serde_json::to_string_pretty(&serde_json::json!([
-            {
-                "role": "user",
-                "content": "Investigate the billing pipeline regression",
-                "ts": 1_800_000_000_i64
-            },
-            {
-                "role": "assistant",
-                "content": "The billing pipeline regression is fixed.",
-                "ts": 1_800_000_010_i64
-            },
-            {
-                "role": "user",
-                "content": "Verify the completed Cline rewrite.",
-                "ts": 1_800_000_020_i64
-            }
-        ]))
-        .unwrap(),
-    )
-    .unwrap();
+    let mut entries = original.clone();
+    entries.push(serde_json::json!({
+        "role": "user",
+        "content": "Verify the completed Cline rewrite.",
+        "ts": 1_800_000_020_i64
+    }));
+    std::fs::write(&history_path, serde_json::to_vec_pretty(&entries).unwrap()).unwrap();
     let completed = open_project_session_db(&project).await.unwrap();
-    let completed_stats = try_ingest_source(&completed, &source, &project, None)
-        .await
-        .unwrap();
-    assert!(completed_stats.messages_upserted > 0);
+    ingest_global_sources_for_provider(&home, &completed, &project, Some(SessionProvider::Cline))
+        .await;
     assert_eq!(
         completed
             .search_session_messages("cline", None, "completed Cline rewrite", 10)
@@ -766,11 +807,12 @@ async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
             .len(),
         1
     );
-    assert_ne!(
-        parse_offset_for_task_history(&completed, &project, &history_path)
+    assert_eq!(
+        completed
+            .search_session_messages("cline", None, "billing pipeline", 10)
             .await
-            .unwrap(),
-        offset
+            .len(),
+        2
     );
 }
 
@@ -910,15 +952,10 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
     let incremental_source = ClaudeSource::with_home(&incremental_home);
     let incremental_db = open_project_session_db(&incremental_project).await.unwrap();
     assert_eq!(
-        try_ingest_source(
-            &incremental_db,
-            &incremental_source,
-            &incremental_project,
-            None,
-        )
-        .await
-        .unwrap()
-        .messages_upserted,
+        try_ingest_claude_source(&incremental_db, &incremental_source, &incremental_project)
+            .await
+            .unwrap()
+            .messages_upserted,
         2
     );
     let suffix = serde_json::json!({
@@ -938,15 +975,10 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
     )
     .unwrap();
     assert_eq!(
-        try_ingest_source(
-            &incremental_db,
-            &incremental_source,
-            &incremental_project,
-            None,
-        )
-        .await
-        .unwrap()
-        .messages_upserted,
+        try_ingest_claude_source(&incremental_db, &incremental_source, &incremental_project)
+            .await
+            .unwrap()
+            .messages_upserted,
         1
     );
     let mut incremental_messages = incremental_db
@@ -981,7 +1013,7 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
     let rebuild_source = ClaudeSource::with_home(&rebuild_home);
     let rebuild_db = open_project_session_db(&rebuild_project).await.unwrap();
     assert_eq!(
-        try_ingest_source(&rebuild_db, &rebuild_source, &rebuild_project, None)
+        try_ingest_claude_source(&rebuild_db, &rebuild_source, &rebuild_project)
             .await
             .unwrap()
             .messages_upserted,
@@ -1118,15 +1150,26 @@ async fn cursor_blank_unsupported_and_oversized_frames_are_covered() {
     assert!(covered.source_deferred);
     let mut messages_upserted = covered.messages_upserted;
     let mut deferred = covered.source_deferred;
-    for _ in 0..3 {
+    let file_len = std::fs::metadata(&transcript_path).unwrap().len();
+    for pass in 0..3 {
         if !deferred {
             break;
         }
+        let before =
+            observation_source_cursor_position(&db, "cursor", "cursor-covered-frames", &project)
+                .await;
         let catchup =
             try_ingest_cursor_transcript_event(&event.to_string(), &db, test_project_id(&project))
                 .await
                 .expect("bounded follow-up pass must make durable progress");
-        assert!(catchup.bytes_consumed > 0);
+        let after =
+            observation_source_cursor_position(&db, "cursor", "cursor-covered-frames", &project)
+                .await;
+        assert!(
+            catchup.bytes_consumed > 0,
+            "catch-up pass {pass} made no durable progress: {catchup:?}; \
+             cursor {before:?} -> {after:?} of {file_len} bytes"
+        );
         messages_upserted += catchup.messages_upserted;
         deferred = catchup.source_deferred;
     }
@@ -1152,7 +1195,7 @@ async fn cursor_blank_unsupported_and_oversized_frames_are_covered() {
 }
 
 #[tokio::test]
-async fn cursor_truncation_replacement_preserves_distinct_generations() {
+async fn cursor_truncation_replacement_retires_the_prior_generation() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let transcript_path = tmp.path().join("cursor-replaced.jsonl");
@@ -1190,12 +1233,12 @@ async fn cursor_truncation_replacement_preserves_distinct_generations() {
     let replaced =
         ingest_cursor_transcript_event(&event.to_string(), &db, test_project_id(&project)).await;
     assert_eq!(replaced.messages_upserted, 2);
-    assert_eq!(db.session_message_count().await.unwrap(), 3);
-    assert_eq!(
+    assert_eq!(db.session_message_count().await.unwrap(), 2);
+    assert!(
         db.search_session_messages("cursor", None, "orig-cursor-repl-9f3a", 10)
             .await
-            .len(),
-        1
+            .is_empty(),
+        "the replacement no longer offers the first generation"
     );
     assert_eq!(
         db.search_session_messages("cursor", None, "repl-cursor-gen-9f3a", 10)
@@ -1314,29 +1357,18 @@ async fn cursor_commit_before_projection_ack_retries_without_duplicate() {
 }
 
 #[tokio::test]
-async fn codex_restart_partial_malformed_and_crash_before_commit() {
+async fn codex_restart_partial_malformed_and_projection_failure() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let path = write_codex_rollout_fixture(&home, &project, "codex-restart");
-    let source = CodexSource::with_home(&home);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(first.messages_upserted, 2);
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
     assert_eq!(db.session_message_count().await.unwrap(), 2);
-    let path_key = db
-        .get_session("codex", "codex-restart")
-        .await
-        .expect("Codex session ingested")
-        .transcript_path
-        .expect("Codex durable transcript path");
-    let first_offset = db.get_parse_offset(&path_key).await.unwrap();
     assert_no_transcript_adjacent_fallback_writer(&db, &path);
     drop(db);
 
-    // Partial final line: frontier stays at the last complete frame.
+    // Partial final line: nothing past the last complete frame is admitted.
     let prefix = std::fs::read_to_string(&path).unwrap();
     std::fs::write(
         &path,
@@ -1346,24 +1378,18 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     )
     .unwrap();
     let partial = open_project_session_db(&project).await.unwrap();
-    assert_eq!(
-        try_ingest_source(&partial, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
-    assert_eq!(
+    ingest_global_sources_for_provider(&home, &partial, &project, Some(SessionProvider::Codex))
+        .await;
+    assert_eq!(partial.session_message_count().await.unwrap(), 2);
+    assert!(
         partial
-            .get_parse_offset(&path_key)
+            .search_session_messages("codex", None, "Partial Codex", 10)
             .await
-            .unwrap()
-            .byte_offset,
-        first_offset.byte_offset
+            .is_empty()
     );
     drop(partial);
 
-    // Complete the line, then inject a projection failure before the suffix commits.
+    // Complete the line, then fail projection while the suffix is admitted.
     let suffix = serde_json::json!({
         "timestamp": "2026-01-01T00:00:03.000Z",
         "type": "event_msg",
@@ -1372,19 +1398,8 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     std::fs::write(&path, format!("{prefix}{suffix}\n")).unwrap();
     let rejected = open_project_session_db(&project).await.unwrap();
     set_projection_failure(&rejected, true).await;
-    let failed = try_ingest_source(&rejected, &source, &project, None).await;
-    assert!(
-        failed.is_err(),
-        "projection failure must surface as an ingest error"
-    );
-    assert_eq!(
-        rejected
-            .get_parse_offset(&path_key)
-            .await
-            .unwrap()
-            .byte_offset,
-        first_offset.byte_offset
-    );
+    ingest_global_sources_for_provider(&home, &rejected, &project, Some(SessionProvider::Codex))
+        .await;
     assert!(
         rejected
             .search_session_messages("codex", None, "Codex suffix after restart", 10)
@@ -1395,13 +1410,8 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     drop(rejected);
 
     let recovered = open_project_session_db(&project).await.unwrap();
-    assert_eq!(
-        try_ingest_source(&recovered, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        1
-    );
+    ingest_global_sources_for_provider(&home, &recovered, &project, Some(SessionProvider::Codex))
+        .await;
     assert_eq!(
         recovered
             .search_session_messages("codex", None, "Codex suffix after restart", 10)
@@ -1409,10 +1419,10 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
             .len(),
         1
     );
+    assert_eq!(recovered.session_message_count().await.unwrap(), 3);
 
-    // Malformed complete frame between known-good prefix and a later valid line:
-    // classic Codex JSONL skip policy advances past the bad line without durable
-    // rows for it, then ingests the valid suffix.
+    // A malformed complete frame between valid lines is covered without a
+    // durable row and the valid suffix after it is admitted.
     let malformed_suffix = serde_json::json!({
         "timestamp": "2026-01-01T00:00:04.000Z",
         "type": "event_msg",
@@ -1424,13 +1434,8 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
         format!("{current}{{\"type\":\"event_msg\",malformed}}\n{malformed_suffix}\n"),
     )
     .unwrap();
-    assert_eq!(
-        try_ingest_source(&recovered, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        1
-    );
+    ingest_global_sources_for_provider(&home, &recovered, &project, Some(SessionProvider::Codex))
+        .await;
     assert_eq!(
         recovered
             .search_session_messages("codex", None, "malformed", 10)
@@ -1438,17 +1443,13 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
             .len(),
         1
     );
-    assert_eq!(
-        try_ingest_source(&recovered, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
+    ingest_global_sources_for_provider(&home, &recovered, &project, Some(SessionProvider::Codex))
+        .await;
+    assert_eq!(recovered.session_message_count().await.unwrap(), 4);
 }
 
 #[tokio::test]
-async fn legacy_cline_crash_before_commit_keeps_content_hash_frontier() {
+async fn cline_projection_failure_retries_changed_snapshot_without_duplicate() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let history_path = write_task(
@@ -1456,74 +1457,38 @@ async fn legacy_cline_crash_before_commit_keeps_content_hash_frontier() {
         &project,
         "cline-crash",
     );
-    let source = ClineLikeSource::cline_with_home(&home);
+    let original: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&history_path).unwrap()).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        3
-    );
-    let offset = parse_offset_for_task_history(&db, &project, &history_path)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    let first_count = db.session_message_count().await.unwrap();
     drop(db);
 
-    std::fs::write(
-        &history_path,
-        serde_json::to_string_pretty(&serde_json::json!([
-            {
-                "role": "user",
-                "content": "Investigate the billing pipeline regression",
-                "ts": 1_800_000_000_i64
-            },
-            {
-                "role": "assistant",
-                "content": "The billing pipeline regression is fixed.",
-                "ts": 1_800_000_010_i64
-            },
-            {
-                "role": "user",
-                "content": "Crash before commit suffix for Cline.",
-                "ts": 1_800_000_020_i64
-            }
-        ]))
-        .unwrap(),
-    )
-    .unwrap();
+    let mut entries = original;
+    entries.push(serde_json::json!({
+        "role": "user",
+        "content": "Crash before commit suffix for Cline.",
+        "ts": 1_800_000_020_i64
+    }));
+    std::fs::write(&history_path, serde_json::to_vec_pretty(&entries).unwrap()).unwrap();
 
     let rejected = open_project_session_db(&project).await.unwrap();
     set_projection_failure(&rejected, true).await;
-    assert!(
-        try_ingest_source(&rejected, &source, &project, None)
-            .await
-            .is_err(),
-        "projection failure must surface as an ingest error"
-    );
+    ingest_global_sources_for_provider(&home, &rejected, &project, Some(SessionProvider::Cline))
+        .await;
     assert!(
         rejected
             .search_session_messages("cline", None, "Crash before commit suffix", 10)
             .await
             .is_empty()
     );
-    // Content-hash frontier must remain at the last successful commit.
-    assert_eq!(
-        parse_offset_for_task_history(&rejected, &project, &history_path).await,
-        Some(offset)
-    );
     set_projection_failure(&rejected, false).await;
     drop(rejected);
 
     let recovered = open_project_session_db(&project).await.unwrap();
-    assert_eq!(
-        try_ingest_source(&recovered, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        4
-    );
+    ingest_global_sources_for_provider(&home, &recovered, &project, Some(SessionProvider::Cline))
+        .await;
     assert_eq!(
         recovered
             .search_session_messages("cline", None, "Crash before commit suffix", 10)
@@ -1532,40 +1497,34 @@ async fn legacy_cline_crash_before_commit_keeps_content_hash_frontier() {
         1
     );
     assert_eq!(
-        try_ingest_source(&recovered, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
+        recovered.session_message_count().await.unwrap(),
+        first_count + 1
+    );
+    ingest_global_sources_for_provider(&home, &recovered, &project, Some(SessionProvider::Cline))
+        .await;
+    assert_eq!(
+        recovered.session_message_count().await.unwrap(),
+        first_count + 1
     );
 }
 
 #[tokio::test]
-async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_frames() {
+async fn claude_and_codex_jsonl_truncation_replacement_retires_prior_frames() {
     for provider in ["claude", "codex"] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
-        let (path, source): (PathBuf, Box<dyn TranscriptSource>) = match provider {
-            "claude" => {
-                let path = write_claude_transcript(&home, &project, "claude-trunc-repl");
-                (path, Box::new(ClaudeSource::with_home(&home)))
-            }
-            "codex" => {
-                let path = write_codex_rollout_fixture(&home, &project, "codex-trunc-repl");
-                (path, Box::new(CodexSource::with_home(&home)))
-            }
+        let path = match provider {
+            "claude" => write_claude_transcript(&home, &project, "claude-trunc-repl"),
+            "codex" => write_codex_rollout_fixture(&home, &project, "codex-trunc-repl"),
             _ => unreachable!(),
         };
 
         let db = open_project_session_db(&project).await.unwrap();
-        let first = try_ingest_source(&db, source.as_ref(), &project, None)
-            .await
-            .unwrap();
+        let first = ingest_jsonl_fixture(provider, &db, &home, &project).await;
         assert!(
             first.messages_upserted >= 2,
             "{provider}: initial ingest must commit provider frames"
         );
-        let first_count = db.session_message_count().await.unwrap();
         assert_eq!(
             db.search_session_messages(provider, None, "Investigate", 10)
                 .await
@@ -1652,21 +1611,18 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
         }
 
         let replaced = open_project_session_db(&project).await.unwrap();
-        let stats = try_ingest_source(&replaced, source.as_ref(), &project, None)
-            .await
-            .unwrap();
+        let stats = ingest_jsonl_fixture(provider, &replaced, &home, &project).await;
         assert_eq!(stats.messages_upserted, 2, "{provider}");
         assert_eq!(
             replaced.session_message_count().await.unwrap(),
-            first_count + 2,
-            "{provider}: prior generation rows must remain searchable"
+            2,
+            "{provider}: the replacement retires every frame it no longer offers"
         );
-        assert_eq!(
+        assert!(
             replaced
                 .search_session_messages(provider, None, "Investigate", 10)
                 .await
-                .len(),
-            1,
+                .is_empty(),
             "{provider}"
         );
         assert_eq!(
@@ -1691,9 +1647,8 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
             "{provider}"
         );
         assert_eq!(
-            try_ingest_source(&replaced, source.as_ref(), &project, None)
+            ingest_jsonl_fixture(provider, &replaced, &home, &project)
                 .await
-                .unwrap()
                 .messages_upserted,
             0,
             "{provider}: exact replay must be a durable no-op"
@@ -1701,95 +1656,22 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
     }
 }
 
-#[tokio::test]
-async fn codex_incomplete_tail_retained_across_append_then_completes() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let path = write_codex_rollout_fixture(&home, &project, "codex-partial-append");
-    let source = CodexSource::with_home(&home);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
+async fn ingest_jsonl_fixture(
+    provider: &str,
+    runtime: &ProjectSessionTestRuntime,
+    home: &Path,
+    project: &Path,
+) -> TranscriptIngestStats {
+    match provider {
+        "claude" => try_ingest_claude_source(runtime, &ClaudeSource::with_home(home), project)
             .await
-            .unwrap()
-            .messages_upserted,
-        2
-    );
-    let path_key = db
-        .get_session("codex", "codex-partial-append")
-        .await
-        .expect("Codex session ingested")
-        .transcript_path
-        .expect("Codex durable transcript path");
-    let committed = db.get_parse_offset(&path_key).await.unwrap();
-    drop(db);
-
-    let partial = serde_json::json!({
-        "timestamp": "2026-01-01T00:00:03.000Z",
-        "type": "event_msg",
-        "payload": {"type": "user_message", "message": "Codex deferred partial append line"}
-    })
-    .to_string();
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(partial.as_bytes())
-        .unwrap();
-
-    let still_open = open_project_session_db(&project).await.unwrap();
-    assert_eq!(
-        try_ingest_source(&still_open, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
-    assert_eq!(
-        still_open
-            .get_parse_offset(&path_key)
-            .await
-            .unwrap()
-            .byte_offset,
-        committed.byte_offset
-    );
-    drop(still_open);
-
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(b"\n")
-        .unwrap();
-
-    let completed = open_project_session_db(&project).await.unwrap();
-    assert_eq!(
-        try_ingest_source(&completed, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        1
-    );
-    assert_eq!(
-        completed
-            .search_session_messages("codex", None, "deferred partial append", 10)
-            .await
-            .len(),
-        1
-    );
-    let final_offset = completed.get_parse_offset(&path_key).await.unwrap();
-    assert_eq!(
-        final_offset.byte_offset,
-        std::fs::metadata(&path).unwrap().len()
-    );
-    assert_eq!(
-        try_ingest_source(&completed, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
+            .unwrap(),
+        "codex" => {
+            ingest_global_sources_for_provider(home, runtime, project, Some(SessionProvider::Codex))
+                .await
+        }
+        _ => unreachable!(),
+    }
 }
 
 #[tokio::test]
@@ -1829,12 +1711,12 @@ async fn cursor_jsonl_rotation_rename_rescans_replacement_without_gap() {
     let rotated =
         ingest_cursor_transcript_event(&event.to_string(), &db, test_project_id(&project)).await;
     assert_eq!(rotated.messages_upserted, 2);
-    assert_eq!(db.session_message_count().await.unwrap(), 3);
-    assert_eq!(
+    assert_eq!(db.session_message_count().await.unwrap(), 2);
+    assert!(
         db.search_session_messages("cursor", None, "orig-cursor-rot-9f3a", 10)
             .await
-            .len(),
-        1
+            .is_empty(),
+        "the transcript path, not the archived file, is the source of truth"
     );
     assert_eq!(
         db.search_session_messages("cursor", None, "rot-cursor-gen-9f3a", 10)
@@ -1857,83 +1739,9 @@ async fn cursor_jsonl_rotation_rename_rescans_replacement_without_gap() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn codex_observation_commit_before_ack_replays_after_reopen() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
-    init_git_repo(&project);
-    mark_test_project(&project);
-    let path = write_codex_rollout_fixture(&home, &project, "codex-commit-before-ack");
-
-    let rejected = open_project_session_db(&project).await.unwrap();
-    assert_no_transcript_adjacent_fallback_writer(&rejected, &path);
-    set_projection_failure(&rejected, true).await;
-    let _ =
-        ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Codex)).await;
-    assert_eq!(rejected.session_message_count().await.unwrap(), 0);
-    assert!(
-        rejected
-            .search_session_messages("codex", None, "billing pipeline regression", 10)
-            .await
-            .is_empty()
-    );
-    let committed_cursor =
-        observation_source_cursor_position(&rejected, "codex", "codex-commit-before-ack", &project)
-            .await
-            .expect("Codex observation frontier commits before projection ack");
-    assert!(committed_cursor > 0);
-    assert!(durable_table_count(&rejected, "observations").await >= 1);
-    assert!(durable_table_count(&rejected, "sanitization_receipts").await >= 1);
-    assert!(durable_table_count(&rejected, "projection_queue").await >= 1);
-    set_projection_failure(&rejected, false).await;
-    drop(rejected);
-
-    let recovered = open_project_session_db(&project).await.unwrap();
-    assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Codex))
-            .await
-            .messages_upserted,
-        2
-    );
-    assert_eq!(
-        recovered
-            .search_session_messages("codex", None, "fixed", 10)
-            .await
-            .len(),
-        1
-    );
-    assert_eq!(
-        observation_source_cursor_position(
-            &recovered,
-            "codex",
-            "codex-commit-before-ack",
-            &project,
-        )
-        .await,
-        Some(committed_cursor)
-    );
-    assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
-    assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Codex))
-            .await
-            .messages_upserted,
-        0
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn claude_observation_commit_before_ack_replays_after_reopen() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let path = write_claude_transcript(&home, &project, "claude-commit-before-ack");
@@ -1941,8 +1749,13 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
     let rejected = open_project_session_db(&project).await.unwrap();
     assert_no_transcript_adjacent_fallback_writer(&rejected, &path);
     set_projection_failure(&rejected, true).await;
-    let _ = ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Claude))
-        .await;
+    let _ = ingest_global_sources_for_provider(
+        &home,
+        &rejected,
+        &project,
+        Some(SessionProvider::Claude),
+    )
+    .await;
     assert_eq!(rejected.session_message_count().await.unwrap(), 0);
     assert!(
         rejected
@@ -1970,9 +1783,14 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
 
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Claude))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(SessionProvider::Claude)
+        )
+        .await
+        .messages_upserted,
         2
     );
     assert_eq!(
@@ -1992,9 +1810,14 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
     );
     assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Claude))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(SessionProvider::Claude)
+        )
+        .await
+        .messages_upserted,
         0
     );
 }

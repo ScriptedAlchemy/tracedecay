@@ -1,4 +1,4 @@
-use super::super::ports::ExecutionControl;
+use super::super::execution::ExecutionControl;
 use super::{ContextError, TokenPolicy};
 
 pub const TOKEN_SCAN_CHUNK_BYTES: usize = 4 * 1024;
@@ -56,7 +56,7 @@ impl TokenSummary {
         }
     }
 
-    #[hotpath::measure(label = "temporal.context.estimate")]
+    #[tracing::instrument(name = "temporal.context.estimate", level = "trace", skip_all)]
     pub fn scan(
         policy: TokenPolicy,
         fragment: &str,

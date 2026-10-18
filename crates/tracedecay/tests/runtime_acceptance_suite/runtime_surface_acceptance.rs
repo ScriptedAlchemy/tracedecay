@@ -1,7 +1,8 @@
-use crate::common;
+use crate::common::{self, fixture::copy_fixture_tree};
+
+use super::application_production_reachability::admitted_mcp_invocation;
 
 use std::collections::BTreeSet;
-use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -12,62 +13,67 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use tracedecay::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, FeedbackSurfaceRequest,
-    execute_application_surface, http_application_router, parse_application_surface_request,
-    resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
-};
-#[cfg(all(unix, feature = "test-transport"))]
-use tracedecay::application_surface::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay::daemon::{DaemonHandshake, call_default_tool};
-use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
+use tracedecay::daemon::call_default_tool;
 use tracedecay_api::sse_response;
-use tracedecay_application::feedback::{
+use tracedecay_application::ProjectSourceAccessSnapshot;
+use tracedecay_application::feedback::concrete::open_feedback_runtime;
+use tracedecay_application::feedback::owner::{
+    FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
+};
+use tracedecay_application::operation_stream::{
+    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
+    OperationKind, OperationStreamConfig,
+};
+use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
+use tracedecay_contracts::feedback::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
     FeedbackDiagnosticsReadRequestV1,
 };
-use tracedecay_application::retrieval::PrimitiveRequest;
+use tracedecay_contracts::retrieval::PrimitiveRequest;
 #[cfg(all(unix, feature = "test-transport"))]
-use tracedecay_application::{ApplicationEnvelope, IdempotencyKey};
-use tracedecay_application::{
+use tracedecay_contracts::{ApplicationEnvelope, IdempotencyKey};
+use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemKind, CancellationContext, CancellationObservation,
     CancellationSignal, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
     CoverageCompleteness, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
     OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_daemon_protocol::{
-    DaemonInvocationClient, DaemonLspSessionClient, FramePoll, FrameSend, RequestedOutputFormat,
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, FeedbackSurfaceRequest,
+    parse_application_surface_request,
+};
+use tracedecay_daemon_protocol::{
+    DaemonHandshake, DaemonInvocationClient, DaemonLspSessionClient, FramePoll, FrameSend,
+    RequestedOutputFormat,
+};
+#[cfg(all(unix, feature = "test-transport"))]
+use tracedecay_daemon_service::application_surface::{
+    GitApplySurfaceRequest, GitPreviewSurfaceRequest,
+};
+use tracedecay_daemon_service::application_surface::{
+    execute_application_surface, http_application_router,
+    resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
-    WorktreeId,
+    ActorId, CommitId, LocatorDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
 };
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_domain::{
-    GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1,
-    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionOperationV1,
-    GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
+    GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
 };
 use tracedecay_lsp::TRACEDECAY_CONTEXT_REVISION;
 use tracedecay_mcp::application_output::json::json_line as canonical_json_line;
 use tracedecay_mcp::application_output::markdown::render as render_markdown;
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use tracedecay_mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
+use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
-use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
-use tracedecay_usecases::feedback::owner::{
-    FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
-};
-use tracedecay_usecases::operation_stream::{
-    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
-    OperationKind, OperationStreamConfig,
-};
-use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 static DASHBOARD_CONFIGURATION_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
@@ -77,24 +83,100 @@ struct RuntimeFixture {
     client: DaemonInvocationClient,
     handshake: DaemonHandshake,
     project: PathBuf,
-    _environment: common::IsolatedEnv,
+    _environment: common::IsolatedHome,
 }
 
 impl RuntimeFixture {
     fn home(&self) -> &Path {
         self._environment.home()
     }
+
+    fn profile(&self) -> &ProfileRoot {
+        self._environment.profile()
+    }
+
+    fn response_handle_root(&self) -> PathBuf {
+        tracedecay_runtime_core::storage::resolve_persisted_layout(
+            &self.project,
+            self._environment.profile_root(),
+        )
+        .expect("resolve admitted project store")
+        .expect("admitted project is enrolled")
+        .response_handle_root
+    }
+
+    /// The path an LSP client addresses the admitted project through.
+    ///
+    /// Daemon admission canonicalizes the root, while a client spells it the
+    /// way its host does: macOS hands out `/var/folders/...` for a directory
+    /// that canonicalizes to `/private/var/...`, and a linked worktree is
+    /// reached through its symlink. On Unix the fixture therefore addresses
+    /// the project through a real filesystem alias, so every request in the
+    /// journey, initialize, document routing, feedback reads, has to
+    /// preserve the admitted identity across the spelling difference rather
+    /// than only on hosts whose temp directory happens to be an alias.
+    fn client_project_path(&self) -> PathBuf {
+        #[cfg(unix)]
+        {
+            let alias = self._environment.scratch().join("project-alias");
+            std::os::unix::fs::symlink(&self.project, &alias)
+                .expect("alias the admitted project root");
+            alias
+        }
+        #[cfg(not(unix))]
+        {
+            self.project.clone()
+        }
+    }
+
+    fn daemon_log_tail(&self) -> String {
+        std::fs::read_to_string(self._environment.scratch().join("runtime-daemon.log"))
+            .expect("read isolated runtime daemon log")
+            .lines()
+            .rev()
+            .take(160)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 async fn runtime_fixture() -> RuntimeFixture {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
-    let daemon = common::spawn_tracedecay_daemon(environment.home());
+    let (environment, project) = common::IsolatedHome::new();
+    let daemon_log = std::fs::File::create(environment.scratch().join("runtime-daemon.log"))
+        .expect("create isolated runtime daemon log");
+    let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
+        command.env("RUST_LOG", "info").stderr(daemon_log);
+    });
     initialize_project(environment.home(), &project);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
-        .expect("daemon client");
+    await_published_code_index(environment.home(), &project);
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("daemon handshake");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake.clone())
+            .expect("daemon client");
+    let mounted = admitted_mcp_invocation(
+        &client,
+        ApplicationSurfaceOperation::ConfigurationObservedState,
+        "request.runtime-fixture.configuration-mounted",
+        || {
+            parse_application_surface_request(
+                ApplicationSurfaceOperation::ConfigurationObservedState,
+                serde_json::json!({}),
+            )
+            .expect("configuration readiness request")
+        },
+    )
+    .await;
+    successful_application(&mounted);
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -105,21 +187,17 @@ async fn runtime_fixture() -> RuntimeFixture {
 }
 
 async fn lsp_runtime_fixture() -> RuntimeFixture {
-    let host_rustup_home = std::env::var_os("RUSTUP_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))
-        .filter(|path| path.is_dir());
-    let host_rustup_toolchain = std::env::var_os("RUSTUP_TOOLCHAIN")
-        .or_else(|| option_env!("RUSTUP_TOOLCHAIN").map(OsString::from));
-    let (environment, project) = common::IsolatedEnv::acquire().await;
-    copy_dir(
+    let (environment, project) = common::IsolatedHome::new();
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         &project,
-    );
-    copy_dir(
+    )
+    .expect("copy writable fixture");
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/managed_run_overlay"),
         &project,
-    );
+    )
+    .expect("copy writable fixture");
     git(&project, &["init", "--quiet"]);
     git(&project, &["config", "user.name", "TraceDecay Test"]);
     git(
@@ -128,16 +206,11 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     );
     git(&project, &["add", "."]);
     git(&project, &["commit", "--quiet", "-m", "base"]);
+    let daemon_events = environment.scratch().join("runtime-daemon.log");
+    let daemon_log = std::fs::File::create(&daemon_events).expect("create isolated LSP daemon log");
     let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
-        // Keep TraceDecay state under the isolated home while allowing a rustup
-        // proxy on PATH to resolve the host's already-installed analyzer.
-        command.stderr(Stdio::inherit());
-        if let Some(rustup_home) = host_rustup_home {
-            command.env("RUSTUP_HOME", rustup_home);
-            if let Some(rustup_toolchain) = host_rustup_toolchain {
-                command.env("RUSTUP_TOOLCHAIN", rustup_toolchain);
-            }
-        }
+        environment.apply_toolchain_env(command);
+        command.env("RUST_LOG", "info").stderr(daemon_log);
     });
     let output = common::tracedecay_command_with_home(environment.home())
         .arg("init")
@@ -148,11 +221,19 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     assert_command_success("tracedecay init", &output);
     let storage = run_storage_status(environment.home(), &project, true);
     assert_command_success("open indexed LSP project", &storage);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
-        .expect("daemon client");
+    await_published_code_index(environment.home(), &project);
+    await_analyzer_backed_lsp_owner(&daemon_events);
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("daemon handshake");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake.clone())
+            .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -162,13 +243,53 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     }
 }
 
+/// Blocks until the daemon has replaced the warming LSP owner with the
+/// analyzer-backed one.
+///
+/// A serving code index is a strictly earlier boundary: project open registers
+/// an LSP owner with no providers at all while the census is unavailable
+/// (`crates/tracedecay/src/daemon/project_open_owners.rs`, reason
+/// `warming_without_sealed_generation`), and the deferred owner
+/// (`.../advisory_runtime/deferred.rs`) upgrades it after the first generation
+/// seals, measured here at one to two seconds *after* `status` already reports
+/// `code_graph_serving: ready`. Waiting on the index alone therefore still
+/// negotiates against the warming owner.
+///
+/// The mount is observable only on the daemon event stream, which
+/// `log_deferred_attempt` exists to carry ("Record every attempt outcome on the
+/// daemon event stream so that state is diagnosable"). Waiting on it keeps the
+/// negotiation assertions themselves untouched: a daemon that never upgrades
+/// fails here with the whole stream, and one that upgrades to a provider set
+/// the gateway then refuses still fails on the assertions.
+fn await_analyzer_backed_lsp_owner(daemon_events: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let events = std::fs::read_to_string(daemon_events).unwrap_or_default();
+        let mounted = events.lines().any(|line| {
+            (line.contains("event=advisory_deferred_attempt") && line.contains("phase=mounted"))
+                || (line.contains("phase=lsp_owner_registered")
+                    && !line.contains("warming_without_sealed_generation"))
+        });
+        if mounted {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "daemon never upgraded the warming LSP owner to an analyzer-backed one; \
+             daemon events:\n{events}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 #[cfg(all(unix, feature = "test-transport"))]
 async fn git_runtime_fixture() -> RuntimeFixture {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
-    copy_dir(
+    let (environment, project) = common::IsolatedHome::new();
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         &project,
-    );
+    )
+    .expect("copy writable fixture");
     git(&project, &["init", "--quiet"]);
     git(&project, &["config", "user.name", "TraceDecay Test"]);
     git(
@@ -208,12 +329,21 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     )
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
+    // Git reads answer a typed retryable `mounting` problem until project open
+    // installs the owner's authority; the journeys start from a served project.
+    await_published_code_index(environment.home(), &project);
 
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
-        .expect("daemon client");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("daemon handshake");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake.clone())
+            .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -273,7 +403,7 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
     // flight the gateway writes no frame at all, so silence means "not yet"
     // rather than "never" and a client has to keep reading. The old bound of
     // 200 polls gave up after roughly two seconds, which a real analyzer's
-    // cold start — sysroot load and crate graph build — cannot beat.
+    // cold start, sysroot load and crate graph build, cannot beat.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     while std::time::Instant::now() < deadline {
         let (operation_deadline, cancellation) = lsp_control();
@@ -400,28 +530,32 @@ async fn poll_lsp_context(
 }
 
 fn initialize_project(home: &Path, project: &Path) {
-    copy_dir(
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         project,
-    );
-    copy_dir(
+    )
+    .expect("copy writable fixture");
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/managed_run_overlay"),
         project,
-    );
+    )
+    .expect("copy writable fixture");
+    // The V2 code index is Git-authority-based end to end: candidate paths come
+    // from the gix worktree classification, generations are minted from Git tree
+    // captures, and `worktree_stat_signature_for` opens the repository to prove
+    // freshness. A plain directory therefore never seats a serving generation,
+    // `mount_worktree_inner` documents that missing Git authority leaves it
+    // empty, so every code-graph-backed route reads `failed` here. Enrol the
+    // fixture as a repository before `tracedecay init`, exactly as this file's
+    // `lsp_runtime_fixture` and `git_runtime_fixture` already do; initializing
+    // Git afterwards would re-key the project onto a different worktree
+    // identity than the one the daemon already registered.
+    git(project, &["init", "--quiet"]);
+    git(project, &["config", "user.name", "TraceDecay Test"]);
+    git(project, &["config", "user.email", "tracedecay@example.com"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "--quiet", "-m", "base"]);
     common::initialize_tracedecay_cli_project(home, project);
-}
-
-fn copy_dir(source: &Path, destination: &Path) {
-    std::fs::create_dir_all(destination).expect("fixture destination");
-    for entry in std::fs::read_dir(source).expect("fixture directory") {
-        let entry = entry.expect("fixture entry");
-        let target = destination.join(entry.file_name());
-        if entry.file_type().expect("fixture entry type").is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).expect("copy checked-in fixture");
-        }
-    }
 }
 
 fn storage_status_request() -> ApplicationSurfaceRequest {
@@ -450,6 +584,54 @@ fn run_storage_status(home: &Path, project: &Path, json_output: bool) -> Output 
         command.arg("--json");
     }
     command.output().expect("run storage_status")
+}
+
+/// Blocks until the daemon has published the sealed code-index generation that
+/// every steady-state assertion in this suite reads.
+///
+/// `tracedecay init` deliberately returns once reconciliation is *requested*:
+/// `handle_admin_sync` answers `"status": "queued"`
+/// (`crates/tracedecay/src/mcp/tools/handlers/info/status.rs`) and the CLI
+/// prints a typed not-ready receipt
+/// (`first generation not ready` / `code_index_reconciliation_requested`)
+/// (`crates/tracedecay-cli/src/commands/index.rs`). Project open publishes the
+/// route immediately and, with no sealed generation yet, registers a warming
+/// LSP owner carrying no analyzer providers at all
+/// (`crates/tracedecay/src/daemon/project_open_owners.rs`, "warming_without_\
+/// sealed_generation"); the deferred advisory owner replaces it once the first
+/// generation seals. A fixture that hands back the client before that boundary
+/// therefore races the daemon: graph primitives answer `termination: failed`
+/// and `initialize` negotiates none of the routed analyzer's methods.
+///
+/// One status read held by `wait_for` until the index serves its native
+/// graph: the `ready` boundary `mcp_suite::support::wait_for_current_graph`
+/// also waits on.
+fn await_published_code_index(home: &Path, project: &Path) {
+    let project_arg = project.to_string_lossy().into_owned();
+    let output = common::tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "status",
+            "--args",
+            r#"{"format":"json","wait_for":{"state":"ready","timeout_ms":110000}}"#,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run status");
+    assert!(
+        output.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+    assert_eq!(
+        status["wait"],
+        serde_json::json!({ "outcome": "reached" }),
+        "daemon never published a serving code-index generation: {status}"
+    );
 }
 
 fn run_feedback_diagnostics(home: &Path, project: &Path, request_handle: &str) -> Output {
@@ -495,31 +677,77 @@ fn run_application_tool(
         .expect("run application tool")
 }
 
+fn run_application_tool_markdown(
+    home: &Path,
+    project: &Path,
+    operation: ApplicationSurfaceOperation,
+    arguments: &Value,
+) -> Output {
+    let project_arg = project.to_string_lossy().into_owned();
+    let arguments = arguments.to_string();
+    common::tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            operation.as_str(),
+            "--args",
+            arguments.as_str(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run application tool with Markdown output")
+}
+
 #[cfg(all(unix, feature = "test-transport"))]
-async fn preview_commit_via_mcp(
+async fn staged_hunks_input_via_mcp(
     fixture: &RuntimeFixture,
     request_id: &str,
-    message: &str,
-) -> GitIndexPreviewV1 {
-    let captured_at = wall_clock_micros();
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: captured_at,
+) -> tracedecay_contracts::git::GitHunkPreviewInputV1 {
+    let result = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::GitHunks,
+        RequestId::new(request_id).expect("MCP hunks request id"),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::GitHunks,
+            serde_json::json!({"scope": "staged"}),
+        )
+        .expect("MCP hunks request"),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP Git hunks dispatch");
+    let ApplicationOutcome::Evidence(evidence) =
+        &result.result.as_ref().expect("MCP hunks result").outcome
+    else {
+        panic!("MCP git_hunks must return an evidence outcome");
     };
+    let input: tracedecay_contracts::git::GitHunkPreviewInputV1 = serde_json::from_value(
+        evidence.payload.clone().expect("MCP hunks payload")["result"]["value"].clone(),
+    )
+    .expect("typed MCP hunk preview input");
+    assert!(
+        !input.hunks.is_empty(),
+        "git_hunks found no staged hunks to preview"
+    );
+    input
+}
+
+#[cfg(all(unix, feature = "test-transport"))]
+async fn preview_unstage_hunks_via_mcp(
+    fixture: &RuntimeFixture,
+    request_id: &str,
+) -> GitIndexPreviewV1 {
+    let input = staged_hunks_input_via_mcp(fixture, &format!("{request_id}.hunks")).await;
     let request = GitPreviewSurfaceRequest {
-        operation: GitIndexTransactionOperationV1::CommitIndex,
-        preview_input_id: None,
-        selected_hunk_digests: Vec::new(),
-        commit_intent: Some(
-            GitIndexCommitIntentV1::new(
-                message.to_owned(),
-                identity.clone(),
-                identity,
-                GitIndexSigningPolicyV1::UnsignedPermitted,
-            )
-            .expect("commit intent"),
-        ),
+        operation: GitIndexTransactionOperationV1::UnstageHunks,
+        preview_input_id: Some(input.preview_input_id),
+        selected_hunk_digests: input
+            .hunks
+            .iter()
+            .map(|entry| entry.digest.clone())
+            .collect(),
     };
     let result = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitPreview,
@@ -556,10 +784,11 @@ async fn assert_application_transport_parity(
     case: &str,
     operation: ApplicationSurfaceOperation,
     arguments: Value,
+    termination: OperationTermination,
 ) -> Value {
     let cli = run_application_tool(fixture.home(), &fixture.project, operation, &arguments);
     assert_command_success(operation.as_str(), &cli);
-    let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI application JSON");
+    let cli: Value = common::tool_json_structured_content(&cli.stdout);
     let mcp = resolve_mcp_application_surface(
         operation,
         RequestId::new(format!("request.primitive-parity.mcp.{case}")).expect("MCP request id"),
@@ -593,6 +822,8 @@ async fn assert_application_transport_parity(
     );
     let expected_contract = if operation == ApplicationSurfaceOperation::TestResults {
         "schema.application.feedback.test-results.result".to_owned()
+    } else if operation == ApplicationSurfaceOperation::CodeExactOccurrence {
+        "schema.application.code-query.exact-occurrence.result".to_owned()
     } else {
         format!(
             "schema.application.primitive.{}.result",
@@ -611,7 +842,9 @@ async fn assert_application_transport_parity(
         };
         assert_eq!(
             evidence.execution.termination,
-            OperationTermination::Completed
+            termination,
+            "{case} ({operation:?}) terminated unexpectedly: {envelope:?}\nIsolated daemon log:\n{}",
+            fixture.daemon_log_tail()
         );
         assert_eq!(evidence.coverage.returned, evidence.page.returned);
     }
@@ -623,7 +856,7 @@ async fn assert_application_transport_parity(
     assert_eq!(cli["outcome"]["outcome"], "evidence");
     assert_eq!(
         cli["outcome"]["value"]["execution"]["termination"],
-        "completed"
+        serde_json::to_value(termination).expect("termination JSON")
     );
 
     let mut cli_envelope = cli.clone();
@@ -631,16 +864,20 @@ async fn assert_application_transport_parity(
         serde_json::to_value(mcp.result.as_ref().expect("MCP result")).expect("MCP envelope");
     let mut http_envelope =
         serde_json::to_value(http.result.as_ref().expect("HTTP result")).expect("HTTP envelope");
+    let mcp_payload = mcp_envelope["outcome"]["value"]["payload"].clone();
+    let http_payload = http_envelope["outcome"]["value"]["payload"].clone();
     normalize_application_envelope(&mut cli_envelope);
     normalize_application_envelope(&mut mcp_envelope);
     normalize_application_envelope(&mut http_envelope);
     assert_eq!(mcp_envelope, http_envelope);
     assert_eq!(cli_envelope, mcp_envelope);
 
-    let mcp_payload = successful_application(&mcp);
-    let http_payload = successful_application(&http);
+    assert!(
+        !mcp_payload.is_null(),
+        "{case} returned no evidence payload"
+    );
     assert_eq!(mcp_payload, http_payload);
-    assert_eq!(cli["outcome"]["value"]["payload"], *mcp_payload);
+    assert_eq!(cli["outcome"]["value"]["payload"], mcp_payload);
     assert_eq!(
         cli["scope"]["project_id"],
         serde_json::to_value(&mcp.result.as_ref().expect("MCP result").scope.project_id)
@@ -650,7 +887,7 @@ async fn assert_application_transport_parity(
         mcp.result.as_ref().expect("MCP result").scope,
         http.result.as_ref().expect("HTTP result").scope
     );
-    mcp_payload.clone()
+    mcp_payload
 }
 
 fn normalize_application_envelope(value: &mut Value) {
@@ -668,6 +905,7 @@ fn normalize_application_envelope(value: &mut Value) {
                 "expires_at",
                 "observed_at",
                 "elapsed_micros",
+                "wall_micros",
             ] {
                 fields.remove(volatile);
             }
@@ -779,12 +1017,6 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
         .as_str()
         .unwrap_or_else(|| panic!("settings must expose a revision: {settings}"))
         .to_owned();
-    let legacy_config_path = PathBuf::from(
-        settings["project"]["legacy_config_path"]
-            .as_str()
-            .unwrap_or_else(|| panic!("settings must expose the legacy path: {settings}")),
-    );
-    let legacy_config_before = std::fs::read(&legacy_config_path).ok();
     let original_max_file_size = settings["project"]["config"]["max_file_size"].clone();
 
     // The mirror of the in-process assertion: with the control plane mounted,
@@ -837,11 +1069,6 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
         applied_payload["project"]["config"]["max_file_size"], original_max_file_size,
         "the committed value must differ from the pre-change reading"
     );
-    assert_eq!(
-        std::fs::read(&legacy_config_path).ok(),
-        legacy_config_before,
-        "a typed mutation must not fall back to config.json"
-    );
 
     // Re-read: the commit is durable and the pinned runtime configuration the
     // dashboard serves advanced with it, rather than the response alone.
@@ -876,6 +1103,7 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
     assert_eq!(stale["actual_revision_id"], applied_revision.as_str());
 
     let _ = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_dashboard",
         serde_json::json!({ "action": "stop", "format": "json" }),
@@ -901,16 +1129,14 @@ async fn dashboard_user_settings_replay_through_application_restart() {
         .as_str()
         .unwrap_or_else(|| panic!("profile settings must expose a revision: {initial}"))
         .to_owned();
-    assert_eq!(
-        initial["project"]["configuration_revision_id"],
+    let project_revision = initial["project"]["configuration_revision_id"].clone();
+    assert_ne!(
+        project_revision,
         initial_revision.as_str(),
-        "project and profile settings must share the control-plane revision"
+        "profile settings live in the profile store, not the project's"
     );
-    let legacy_user_config = PathBuf::from(
-        initial["user"]["legacy_config_path"]
-            .as_str()
-            .unwrap_or_else(|| panic!("profile settings must expose the legacy path: {initial}")),
-    );
+    let legacy_user_config =
+        tracedecay_session_memory::user_config::config_path(fixture._environment.profile_root());
     let legacy_user_config_before = std::fs::read(&legacy_user_config).ok();
     let legal_actions = envelope["legal_actions"]
         .as_array()
@@ -943,8 +1169,8 @@ async fn dashboard_user_settings_replay_through_application_restart() {
         .to_owned();
     assert_ne!(applied_revision, initial_revision);
     assert_eq!(
-        applied["payload"]["project"]["configuration_revision_id"],
-        applied_revision.as_str()
+        applied["payload"]["project"]["configuration_revision_id"], project_revision,
+        "a profile settings write must not advance the project's configuration"
     );
     assert_eq!(
         std::fs::read(&legacy_user_config).ok(),
@@ -953,6 +1179,7 @@ async fn dashboard_user_settings_replay_through_application_restart() {
     );
 
     call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_dashboard",
         serde_json::json!({ "action": "stop", "format": "json" }),
@@ -1007,6 +1234,7 @@ async fn dashboard_user_settings_replay_through_application_restart() {
     );
 
     let _ = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_dashboard",
         serde_json::json!({ "action": "stop", "format": "json" }),
@@ -1017,6 +1245,21 @@ async fn dashboard_user_settings_replay_through_application_restart() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
     let fixture = runtime_fixture().await;
+    let active_project = call_default_tool(
+        fixture.profile(),
+        &fixture.handshake,
+        "tracedecay_active_project",
+        serde_json::json!({ "format": "json" }),
+    )
+    .await
+    .expect("public active-project read");
+    let active_project =
+        tracedecay::daemon::tool_json_payload(&active_project, "tracedecay_active_project")
+            .expect("active-project payload");
+    let project_id = active_project["project_id"]
+        .as_str()
+        .expect("active-project read must expose its project identity")
+        .to_owned();
     let observed = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::ConfigurationObservedState,
         RequestId::new("request.configuration.mcp-observed").unwrap(),
@@ -1034,14 +1277,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
         .as_str()
         .expect("initial configuration revision")
         .to_owned();
-    let project_id = observed
-        .result
-        .as_ref()
-        .expect("observed-state application result")
-        .scope
-        .project_id
-        .clone();
-    let get_arguments = serde_json::json!({ "key": "diagnostics.prewarm.v1" });
+    let get_arguments = serde_json::json!({ "key": "telemetry.timings.v1" });
     let current = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::ConfigurationGet,
         RequestId::new("request.configuration.mcp-get-before").unwrap(),
@@ -1057,14 +1293,14 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
     .expect("MCP configuration get");
     let initial_value = successful_application(&current)["effective_value"]["value"]
         .as_bool()
-        .expect("initial diagnostics prewarm value");
+        .expect("initial telemetry timings value");
     let next_value = !initial_value;
     let set_arguments = serde_json::json!({
         "layer": {
             "kind": "project",
             "project_id": project_id,
         },
-        "key": "diagnostics.prewarm.v1",
+        "key": "telemetry.timings.v1",
         "value": {
             "kind": "boolean",
             "value": next_value,
@@ -1115,7 +1351,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
             "kind": "project",
             "project_id": project_id,
         },
-        "key": "diagnostics.prewarm.v1",
+        "key": "telemetry.timings.v1",
         "value": {
             "kind": "boolean",
             "value": initial_value,
@@ -1141,6 +1377,58 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
         .expect_err("a stale MCP configuration write must conflict");
     assert_eq!(problem.problem.kind(), ApplicationProblemKind::Conflict);
     assert_eq!(problem.problem.code, "configuration.conflict");
+
+    let current_revision = successful_application(&reloaded)["revision_id"]
+        .as_str()
+        .expect("configuration re-read revision")
+        .to_owned();
+    let unset = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::ConfigurationUnset,
+        RequestId::new("request.configuration.mcp-unset").unwrap(),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationUnset,
+            serde_json::json!({
+                "layer": {
+                    "kind": "project",
+                    "project_id": project_id,
+                },
+                "key": "telemetry.timings.v1",
+                "expected_revision": current_revision,
+                "idempotency_key": "configuration.idempotency.mcp-unset",
+            }),
+        )
+        .unwrap(),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP configuration unset");
+    assert!(
+        matches!(
+            &unset.result.as_ref().expect("successful MCP unset").outcome,
+            ApplicationOutcome::Effect(_)
+        ),
+        "configuration unset must return an effect receipt"
+    );
+
+    let restored = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::ConfigurationGet,
+        RequestId::new("request.configuration.mcp-get-restored").unwrap(),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationGet,
+            serde_json::json!({ "key": "telemetry.timings.v1" }),
+        )
+        .unwrap(),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP configuration read after unset");
+    assert_eq!(
+        successful_application(&restored)["effective_value"]["value"],
+        initial_value,
+        "unsetting the project override must restore the prior effective value"
+    );
 }
 
 /// Starts the dashboard inside the running daemon and returns its base URL.
@@ -1150,6 +1438,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
 /// authorities instead of dialing back over a socket.
 async fn start_daemon_hosted_dashboard(fixture: &RuntimeFixture) -> String {
     let started = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_dashboard",
         serde_json::json!({
@@ -1170,11 +1459,11 @@ async fn start_daemon_hosted_dashboard(fixture: &RuntimeFixture) -> String {
         ),
         "dashboard did not start: {payload}"
     );
-    payload["url"]
-        .as_str()
-        .unwrap_or_else(|| panic!("dashboard tool returned no url: {payload}"))
-        .trim_end_matches('/')
-        .to_owned()
+    common::dashboard_api_base_url(
+        payload["url"]
+            .as_str()
+            .unwrap_or_else(|| panic!("dashboard tool returned no url: {payload}")),
+    )
 }
 
 fn get_dashboard_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
@@ -1188,13 +1477,61 @@ fn patch_dashboard_json(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, V
     common::response_to_json(response)
 }
 
+/// The Agents page Tokens card asks the daemon-hosted dashboard for one
+/// session's handoff-token frontier; the daemon answers it from the grant
+/// store of the project's registered session database.
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_handoff_token_frontier_reads_the_registered_grant_store() {
+    let _dashboard_lock = DASHBOARD_CONFIGURATION_TEST_LOCK.lock().await;
+    let fixture = runtime_fixture().await;
+    let base_url = start_daemon_hosted_dashboard(&fixture).await;
+    let agent = common::http_agent();
+    let url = format!("{base_url}/api/application/handoff/list-task");
+
+    let response = common::http_call_with_retry(&format!("POST {url}"), || {
+        agent
+            .post(&url)
+            .send_json(serde_json::json!({ "session_id": "session.agents-tokens-card" }))
+    });
+    let (status, body) = common::response_to_json(response);
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["kind"], "success", "{body}");
+    assert_eq!(body["value"]["outcome"]["outcome"], "evidence", "{body}");
+    let mut frontier = body["value"]["outcome"]["value"]["payload"].clone();
+    assert!(
+        frontier["observed_at"].as_i64().is_some_and(|at| at > 0),
+        "the frontier names the instant its states were decided at: {frontier}"
+    );
+    frontier["observed_at"] = Value::Null;
+    assert_eq!(
+        frontier,
+        serde_json::json!({
+            "observed_at": null,
+            "handoffs": [],
+            "open_count": 0,
+            "consumed_count": 0,
+            "expired_count": 0,
+            "truncated": false,
+        })
+    );
+
+    let _ = call_default_tool(
+        fixture.profile(),
+        &fixture.handshake,
+        "tracedecay_dashboard",
+        serde_json::json!({ "action": "stop", "format": "json" }),
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn project_open_application_boundary() {
     let fixture = runtime_fixture().await;
 
     let cli = run_storage_status(fixture.home(), &fixture.project, true);
     assert_command_success("CLI storage_status", &cli);
-    let cli_value: Value = serde_json::from_slice(&cli.stdout).expect("CLI application JSON");
+    let cli_value: Value = common::tool_json_structured_content(&cli.stdout);
     assert_eq!(cli_value["outcome"]["outcome"], "evidence");
     assert!(cli_value["scope"]["project_id"].as_str().is_some());
     assert_eq!(
@@ -1238,7 +1575,32 @@ async fn project_open_application_boundary() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
-    let fixture = runtime_fixture().await;
+    let fixture = lsp_runtime_fixture().await;
+    let result = call_default_tool(
+        fixture.profile(),
+        &fixture.handshake,
+        "tracedecay_status",
+        serde_json::json!({
+            "format": "json", "include_branch_diagnostics": false,
+            "include_storage_health": false, "include_session_ingest": false,
+            "include_staleness": false,
+            "wait_for": { "state": "ready", "timeout_ms": 20_000 },
+        }),
+    )
+    .await
+    .expect("read exact project graph readiness");
+    let status = tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
+        .expect("canonical project status");
+    assert_eq!(
+        status["wait"],
+        serde_json::json!({ "outcome": "reached" }),
+        "graph did not become current within publication budget: {status}\n{}",
+        fixture.daemon_log_tail()
+    );
+    let generation = status["code_index_freshness"]["worktree"]["latest_generation_id"]
+        .as_str()
+        .expect("current code-index generation")
+        .to_owned();
     let page = serde_json::json!({ "page_size": 10, "cursor": null });
     let authenticate = assert_application_transport_parity(
         &fixture,
@@ -1248,6 +1610,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             "qualified_name": "src/auth/login.rs::authenticate",
             "page": page,
         }),
+        OperationTermination::Completed,
     )
     .await;
     let authenticate_id = authenticate["symbols"][0]["node_id"]
@@ -1263,6 +1626,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             "qualified_name": "src/auth/login.rs::credentials_are_valid",
             "page": { "page_size": 10, "cursor": null },
         }),
+        OperationTermination::Completed,
     )
     .await;
     let credentials_are_valid_id = credentials_are_valid["symbols"][0]["node_id"]
@@ -1278,6 +1642,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             "to_node_id": credentials_are_valid_id,
             "maximum_depth": 8,
         }),
+        OperationTermination::Completed,
     )
     .await;
     assert_eq!(call_chain["node_ids"][0], authenticate_id);
@@ -1303,22 +1668,75 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         "file-dependents",
         ApplicationSurfaceOperation::FileDependents,
         serde_json::json!({ "file": "src/auth/session.rs" }),
+        OperationTermination::Completed,
     )
     .await;
     assert_eq!(dependents["file"], "src/auth/session.rs");
     assert!(dependents["dependent_files"].as_array().is_some());
 
-    let source_path = fixture.project.join("src/auth/login.rs");
-    let source_len = std::fs::metadata(source_path)
-        .expect("fixture source metadata")
-        .len();
+    let exact = assert_application_transport_parity(
+        &fixture,
+        "exact-occurrence-authenticate",
+        ApplicationSurfaceOperation::CodeExactOccurrence,
+        serde_json::json!({
+            "literal": "authenticate",
+            "kind": "whole_symbol",
+            "scope": {
+                "generation": generation,
+                "path_prefix": "src/auth/login.rs",
+            },
+            "meta": {
+                "projection": "evidence",
+                "order": "source_position",
+                "cursor": null,
+            },
+        }),
+        OperationTermination::Partial,
+    )
+    .await;
+    let occurrence = &exact["items"][0]["occurrence"];
+    assert_eq!(occurrence["path"], "src/auth/login.rs");
+    let source_lines_arguments = serde_json::json!({
+        "file": occurrence["file"],
+        "span": occurrence["span"],
+        "meta": {
+            "temporal": { "kind": "current" },
+            "page": { "page_size": 10, "cursor": null },
+            "projection": "evidence",
+            "order": "source_position",
+        },
+    });
     let source_lines = assert_application_transport_parity(
         &fixture,
         "source-lines",
         ApplicationSurfaceOperation::SourceLines,
+        source_lines_arguments,
+        OperationTermination::Completed,
+    )
+    .await;
+    assert_eq!(source_lines["file"], "src/auth/login.rs");
+    let source = std::fs::read(fixture.project.join("src/auth/login.rs"))
+        .expect("read source-lines fixture");
+    let start = occurrence["span"]["start_byte"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .expect("source-lines start byte");
+    let end = occurrence["span"]["end_byte"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .expect("source-lines end byte");
+    assert_eq!(
+        source_lines["body"],
+        std::str::from_utf8(&source[start..end]).expect("UTF-8 fixture span")
+    );
+    assert_eq!(source_lines["references"][0]["span"], occurrence["span"]);
+    let references_only = assert_application_transport_parity(
+        &fixture,
+        "source-lines-references-only",
+        ApplicationSurfaceOperation::SourceLines,
         serde_json::json!({
-            "file": "src/auth/login.rs",
-            "span": { "start_byte": 0, "end_byte": source_len },
+            "file": occurrence["file"],
+            "span": occurrence["span"],
             "meta": {
                 "temporal": { "kind": "current" },
                 "page": { "page_size": 10, "cursor": null },
@@ -1326,18 +1744,20 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
                 "order": "source_position",
             },
         }),
+        OperationTermination::Completed,
     )
     .await;
-    assert_eq!(
-        source_lines["references"][0]["span"],
-        serde_json::json!({ "start_byte": 0, "end_byte": source_len })
-    );
+    assert!(references_only.get("file").is_none());
+    assert!(references_only.get("body").is_none());
+    assert_eq!(references_only["references"][0]["span"], occurrence["span"]);
 
+    let source_body_arguments = serde_json::json!({ "node_id": authenticate_id });
     let source_body = assert_application_transport_parity(
         &fixture,
         "source-body",
         ApplicationSurfaceOperation::SourceBody,
-        serde_json::json!({ "node_id": authenticate_id }),
+        source_body_arguments.clone(),
+        OperationTermination::Completed,
     )
     .await;
     assert_eq!(source_body["file"], "src/auth/login.rs");
@@ -1346,6 +1766,24 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             .as_str()
             .expect("authenticate source body")
             .contains("create_session(username)")
+    );
+    let source_body_markdown = run_application_tool_markdown(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::SourceBody,
+        &source_body_arguments,
+    );
+    assert_command_success("CLI source_body Markdown", &source_body_markdown);
+    let source_body_markdown =
+        String::from_utf8(source_body_markdown.stdout).expect("CLI source_body Markdown is UTF-8");
+    assert!(
+        source_body_markdown
+            .starts_with("## source\\_body\n\n### Payload\n\n```text\nsrc/auth/login.rs:"),
+        "source payload must be the first rendered field: {source_body_markdown}"
+    );
+    assert!(
+        source_body_markdown.contains("\n    Ok(create_session(username))\n"),
+        "source payload must contain the retrieved body: {source_body_markdown}"
     );
 }
 
@@ -1385,7 +1823,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
     assert_command_success("CLI git_status", &cli_status);
     let cli_status: ApplicationEnvelope<Value> =
-        serde_json::from_slice(&cli_status.stdout).expect("CLI status envelope");
+        serde_json::from_value(common::tool_json_structured_content(&cli_status.stdout))
+            .expect("CLI status envelope");
     assert_eq!(
         cli_status.scope.project_id, scope.project_id,
         "CLI and MCP must resolve the same project for one repository"
@@ -1400,25 +1839,18 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
 
     let original_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
-    let captured_at = wall_clock_micros();
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: captured_at,
-    };
+    // write-tree refreshes Git's index cache-tree extension, so capture it
+    // before preview binds the exact index bytes.
+    let staged_tree_before_apply = git_stdout(&fixture.project, &["write-tree"]);
+    let hunks_input = staged_hunks_input_via_mcp(&fixture, "request.git-parity.hunks").await;
     let preview_request = GitPreviewSurfaceRequest {
-        operation: GitIndexTransactionOperationV1::CommitIndex,
-        preview_input_id: None,
-        selected_hunk_digests: Vec::new(),
-        commit_intent: Some(
-            GitIndexCommitIntentV1::new(
-                "test: prove Git transport parity\n".to_owned(),
-                identity.clone(),
-                identity,
-                GitIndexSigningPolicyV1::UnsignedPermitted,
-            )
-            .expect("commit intent"),
-        ),
+        operation: GitIndexTransactionOperationV1::UnstageHunks,
+        preview_input_id: Some(hunks_input.preview_input_id),
+        selected_hunk_digests: hunks_input
+            .hunks
+            .iter()
+            .map(|entry| entry.digest.clone())
+            .collect(),
     };
     let preview_arguments = serde_json::to_value(&preview_request).expect("preview arguments");
 
@@ -1430,7 +1862,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
     assert_command_success("CLI git_preview", &cli_preview);
     let cli_preview: ApplicationEnvelope<Value> =
-        serde_json::from_slice(&cli_preview.stdout).expect("CLI preview envelope");
+        serde_json::from_value(common::tool_json_structured_content(&cli_preview.stdout))
+            .expect("CLI preview envelope");
     let ApplicationOutcome::Preview(cli_preview) = cli_preview.outcome else {
         panic!("CLI git_preview must return a preview outcome");
     };
@@ -1438,27 +1871,29 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         serde_json::from_value(cli_preview.payload.expect("CLI immutable preview"))
             .expect("CLI immutable preview");
 
-    // `commit_index` publication is deliberately unavailable (deferred,
-    // 2026-08-05). The files ref backend locks only names already
-    // present in an update-ref transaction, so nothing prevents a new loose
-    // ref appearing between namespace validation and destination publication.
-    // Until that is soundly closed, preflight reports this exact typed
-    // unsupported state and apply proves no mutation. Asserting the
-    // disposition here keeps the deferral visible: without it, the terminal
-    // abort below reads as an unexplained parity failure rather than as the
-    // blocker the daemon actually found.
     assert_eq!(
         cli_preview_payload.disposition,
-        GitIndexPreviewDispositionV1::Unsupported(
-            GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
-        )
+        GitIndexPreviewDispositionV1::Applicable
     );
+    // Each preview commits an immutable identity and observation time. A new
+    // transport observation needs its own hunk input, even for unchanged Git state.
+    let mcp_hunks = staged_hunks_input_via_mcp(&fixture, "request.git-parity.hunks.mcp").await;
+    let mcp_preview_arguments = serde_json::to_value(GitPreviewSurfaceRequest {
+        operation: GitIndexTransactionOperationV1::UnstageHunks,
+        preview_input_id: Some(mcp_hunks.preview_input_id),
+        selected_hunk_digests: mcp_hunks
+            .hunks
+            .iter()
+            .map(|entry| entry.digest.clone())
+            .collect(),
+    })
+    .expect("MCP preview arguments");
     let mcp_preview = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitPreview,
         RequestId::new("request.git-parity.preview.mcp").expect("MCP preview request id"),
         parse_application_surface_request(
             ApplicationSurfaceOperation::GitPreview,
-            preview_arguments,
+            mcp_preview_arguments,
         )
         .expect("MCP preview request"),
         RequestedOutputFormat::Json,
@@ -1495,10 +1930,6 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         mcp_preview_payload.candidate_index_tree
     );
     assert_eq!(
-        cli_preview_payload.commit_intent_digest,
-        mcp_preview_payload.commit_intent_digest
-    );
-    assert_eq!(
         cli_preview_payload.disposition,
         mcp_preview_payload.disposition
     );
@@ -1510,7 +1941,6 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
             .expect("idempotency key"),
     })
     .expect("apply arguments");
-    let staged_tree_before_apply = git_stdout(&fixture.project, &["write-tree"]);
     let cli_apply = run_application_tool(
         fixture.home(),
         &fixture.project,
@@ -1518,7 +1948,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         &apply_arguments,
     );
     assert_command_success("CLI git_apply", &cli_apply);
-    let cli_apply_wire: Value = serde_json::from_slice(&cli_apply.stdout).expect("CLI apply JSON");
+    let cli_apply_wire: Value = common::tool_json_structured_content(&cli_apply.stdout);
     assert!(
         cli_apply_wire.get("problem").is_none(),
         "CLI git_apply problem: {cli_apply_wire:#}"
@@ -1528,29 +1958,24 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     let ApplicationOutcome::Effect(cli_apply) = cli_apply.outcome else {
         panic!("CLI git_apply must return an effect outcome");
     };
-    // The deferred publication is still a real admitted transaction: it must
-    // terminate in a durable receipt on the transport rather than a transport
-    // exception, and that receipt must report the attempt as failed with no
-    // change rather than as a successful empty commit.
     assert_eq!(
         cli_apply.execution.termination,
-        OperationTermination::Failed
+        OperationTermination::Completed,
+        "CLI apply must commit the unchanged preview: {cli_apply:?}"
     );
     let cli_receipt: GitIndexTransactionReceiptV1 =
         serde_json::from_value(cli_apply.payload.clone().expect("CLI durable Git receipt"))
             .expect("typed CLI Git receipt");
-    assert_eq!(
-        cli_receipt.outcome,
-        GitIndexReceiptOutcomeV1::AbortedNoChange
-    );
-    assert!(
-        cli_receipt.created_commit.is_none(),
-        "deferred ref publication must never report a created commit"
-    );
+    assert_eq!(cli_receipt.outcome, GitIndexReceiptOutcomeV1::Committed);
     assert_eq!(
         git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
         original_head,
-        "deferred ref publication must leave HEAD exactly where the preview found it"
+        "an index-only apply must leave HEAD exactly where the preview found it"
+    );
+    let index_tree_after_apply = git_stdout(&fixture.project, &["write-tree"]);
+    assert_ne!(
+        index_tree_after_apply, staged_tree_before_apply,
+        "a committed unstage must move the index back toward HEAD"
     );
 
     let mcp_apply = resolve_mcp_application_surface(
@@ -1571,9 +1996,10 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     };
     assert_eq!(
         mcp_apply.execution.termination,
-        OperationTermination::Failed
+        OperationTermination::Completed,
+        "replaying a committed apply must preserve its successful terminal outcome"
     );
-    let normalize_replay = |effect: &tracedecay_application::EffectResult<Value>| {
+    let normalize_replay = |effect: &tracedecay_contracts::EffectResult<Value>| {
         let mut value = serde_json::to_value(effect).expect("effect wire value");
         value["authority"]
             .as_object_mut()
@@ -1597,8 +2023,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
     assert_eq!(
         git_stdout(&fixture.project, &["write-tree"]),
-        staged_tree_before_apply,
-        "a proven no-mutation apply must leave the caller's staged index intact"
+        index_tree_after_apply,
+        "a replayed apply must not mutate the index a second time"
     );
 
     std::fs::write(
@@ -1607,13 +2033,9 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     )
     .expect("write conflicting replay change");
     git(&fixture.project, &["add", "src/main.rs"]);
-    let conflicting_preview = preview_commit_via_mcp(
-        &fixture,
-        "request.git-parity.conflicting-preview",
-        "test: conflicting replay\n",
-    )
-    .await;
     let before_conflicting_replay_tree = git_stdout(&fixture.project, &["write-tree"]);
+    let conflicting_preview =
+        preview_unstage_hunks_via_mcp(&fixture, "request.git-parity.conflicting-preview").await;
     let conflicting_replay = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitApply,
         RequestId::new("request.git-parity.conflicting-replay")
@@ -1646,12 +2068,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         "conflicting replay rejection must not alter the native index"
     );
 
-    let stale_preview = preview_commit_via_mcp(
-        &fixture,
-        "request.git-parity.stale-preview",
-        "test: stale CAS must not commit\n",
-    )
-    .await;
+    let stale_preview =
+        preview_unstage_hunks_via_mcp(&fixture, "request.git-parity.stale-preview").await;
     std::fs::write(
         fixture.project.join("src/main.rs"),
         "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// drift after preview\n",
@@ -1673,8 +2091,10 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         &stale_apply_arguments,
     );
     assert_command_success("CLI stale git_apply", &stale_cli_apply);
-    let stale_cli_apply: ApplicationEnvelope<Value> =
-        serde_json::from_slice(&stale_cli_apply.stdout).expect("CLI stale apply envelope");
+    let stale_cli_apply: ApplicationEnvelope<Value> = serde_json::from_value(
+        common::tool_json_structured_content(&stale_cli_apply.stdout),
+    )
+    .expect("CLI stale apply envelope");
     let ApplicationOutcome::Effect(stale_cli_apply) = stale_cli_apply.outcome else {
         panic!("stale CLI git_apply must return an authoritative no-change effect");
     };
@@ -1703,14 +2123,10 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         "CAS drift rejection must preserve the caller's newer index"
     );
 
-    let cancellation_preview = preview_commit_via_mcp(
-        &fixture,
-        "request.git-parity.cancellation-preview",
-        "test: cancelled apply must not commit\n",
-    )
-    .await;
     let cancellation_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
     let cancellation_tree = git_stdout(&fixture.project, &["write-tree"]);
+    let cancellation_preview =
+        preview_unstage_hunks_via_mcp(&fixture, "request.git-parity.cancellation-preview").await;
     let cancellation_deadline =
         Deadline::new(UtcMicros(wall_clock_micros().0.saturating_add(60_000_000)))
             .expect("cancellation deadline");
@@ -1794,9 +2210,10 @@ async fn workflow_json_preserves_a_typed_application_problem_envelope() {
         .output()
         .expect("invoke Workflow CLI");
 
-    assert!(
-        output.status.success(),
-        "typed application problems are successful CLI transport responses: {}",
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a typed problem exits non-zero with its envelope on stdout: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("Workflow JSON stdout");
@@ -1879,18 +2296,20 @@ async fn stdio_bridge_exits_successfully_after_client_shutdown_and_exit() {
 
     assert!(
         output.status.success(),
-        "graceful LSP exit must not fail explicit bridge detach: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "graceful LSP exit must not fail explicit bridge detach: {}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        fixture.daemon_log_tail()
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn production_lsp_negotiates_and_projects_canonical_context() {
     let fixture = lsp_runtime_fixture().await;
-    let root_uri = url::Url::from_directory_path(&fixture.project)
+    let client_project = fixture.client_project_path();
+    let root_uri = url::Url::from_directory_path(&client_project)
         .expect("project root URI")
         .to_string();
-    let document_uri = url::Url::from_file_path(fixture.project.join("src/auth/login.rs"))
+    let document_uri = url::Url::from_file_path(client_project.join("src/auth/login.rs"))
         .expect("document URI")
         .to_string();
     let source = std::fs::read_to_string(fixture.project.join("src/auth/login.rs"))
@@ -1905,7 +2324,12 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         cancellation,
     )
     .await
-    .expect("open production daemon LSP session");
+    .unwrap_or_else(|error| {
+        panic!(
+            "open production daemon LSP session: {error:?}\n{}",
+            fixture.daemon_log_tail()
+        )
+    });
 
     let projections = [
         "diagnostics",
@@ -1957,8 +2381,10 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         "unexpected initialize response: {initialized}"
     );
     assert_eq!(
-        initialized["result"]["capabilities"]["documentSymbolProvider"], true,
-        "a routed analyzer must negotiate the declared document-symbol capability: {initialized}"
+        initialized["result"]["capabilities"]["documentSymbolProvider"],
+        true,
+        "a routed analyzer must negotiate the declared document-symbol capability: {initialized}\nIsolated daemon log:\n{}",
+        fixture.daemon_log_tail()
     );
     assert_eq!(
         initialized["result"]["capabilities"]["hoverProvider"], true,
@@ -2017,15 +2443,26 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     let projection = poll_lsp_context(&mut session, &document_uri, "diagnostics", 2).await;
     // The gateway compares roots by parsed path rather than by raw string,
     // because a directory URI legitimately arrives with or without a trailing
-    // slash, so the projection is checked the same way it is admitted.
+    // slash, so the projection is checked the same way it is admitted. The
+    // projection names the root the daemon admitted, the canonical directory,
+    // not the alias the client spelled it through.
     let projected_root = projection["result"]["rootUri"]
         .as_str()
         .expect("projected root URI");
+    // The expectation is the root's identity, not `canonicalize`: a file URL
+    // never carries the `\\?\` verbatim prefix Windows canonicalization
+    // returns, so comparing against that spelling would refuse the very root
+    // the daemon published. The alias the client spelled is still refused,
+    // it is a different name for this directory, not this name.
+    let projected_path = url::Url::parse(projected_root)
+        .ok()
+        .and_then(|url| url.to_file_path().ok());
     assert_eq!(
-        url::Url::parse(projected_root)
-            .ok()
-            .and_then(|url| url.to_file_path().ok()),
-        Some(fixture.project.clone()),
+        projected_path.as_deref(),
+        Some(
+            tracedecay_runtime_core::path_safety::canonical_root_identity(&fixture.project)
+                .as_path()
+        ),
         "the projection must name the admitted root, got {projected_root}"
     );
     assert_eq!(projection["result"]["documentUri"], document_uri);
@@ -2196,7 +2633,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             // producer or publication exists for the scope yet) and `failed`
             // (a read that ran and failed) are separately carried terminal
             // states and are never collapsed into one another, so both are
-            // legal here — see the diagnostics projection above, which makes
+            // legal here, see the diagnostics projection above, which makes
             // the same distinction for the same first-run condition. What is
             // never legal is claiming completeness, or carrying items that no
             // handle can expand.
@@ -2228,6 +2665,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     }
 
     let managed_run = call_default_tool(
+        fixture.profile(),
         &fixture.handshake,
         "tracedecay_run_affected_tests",
         serde_json::json!({
@@ -2284,6 +2722,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         "test-results",
         ApplicationSurfaceOperation::TestResults,
         serde_json::json!({}),
+        OperationTermination::Completed,
     )
     .await;
     let http_test_results =
@@ -2330,7 +2769,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             "cycle-backed related projections must expose retrieval handles"
         );
         let handle_record = match retrieve_response_handle(
-            &fixture.project,
+            &fixture.response_handle_root(),
             lsp_handle,
             wall_clock_micros().0.div_euclid(1_000_000),
         )
@@ -2347,7 +2786,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
 
         let cli = run_feedback_diagnostics(fixture.home(), &fixture.project, canonical_handle);
         assert_command_success("CLI feedback_diagnostics", &cli);
-        let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI feedback JSON");
+        let cli: Value = common::tool_json_structured_content(&cli.stdout);
         let mcp = resolve_mcp_application_surface(
             ApplicationSurfaceOperation::FeedbackDiagnostics,
             RequestId::new("request.feedback-parity.mcp").expect("request id"),
@@ -2372,7 +2811,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
 
         for lsp_handle in related_lsp_handles {
             let record = match retrieve_response_handle(
-                &fixture.project,
+                &fixture.response_handle_root(),
                 &lsp_handle,
                 wall_clock_micros().0.div_euclid(1_000_000),
             )
@@ -2407,8 +2846,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
                 &feedback_arguments,
             );
             assert_command_success(operation.as_str(), &cli);
-            let cli: Value =
-                serde_json::from_slice(&cli.stdout).expect("CLI feedback projection JSON");
+            let cli: Value = common::tool_json_structured_content(&cli.stdout);
             let mcp = resolve_mcp_application_surface(
                 operation,
                 RequestId::new(format!(
@@ -2579,14 +3017,16 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         .expect("cross-scope project root URI")
         .to_string();
     let other_handshake = tracedecay::daemon::handshake_for_current_client(
+        fixture._environment.profile(),
         Some(other_project.path().to_path_buf()),
         None,
         false,
         false,
     )
     .expect("cross-scope daemon handshake");
-    let other_client = tracedecay_daemon_identity::invocation_client_for_current(other_handshake)
-        .expect("cross-scope daemon client");
+    let other_client =
+        tracedecay::daemon::invocation_client_for_current(fixture.profile(), other_handshake)
+            .expect("cross-scope daemon client");
     let (deadline, cancellation) = lsp_control();
     let mut cross_scope = DaemonLspSessionClient::open(
         other_client,
@@ -2672,7 +3112,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     )
     .await;
     assert!(
-        matches!(denied, Err(tracedecay_application::InvocationError::Denied)),
+        matches!(denied, Err(tracedecay_contracts::InvocationError::Denied)),
         "an unregistered workspace root must fail closed"
     );
 
@@ -2708,9 +3148,15 @@ async fn feedback_handle_bootstrap_reads() {
     let scope = resolved_scope("feedback");
     let observed_at = wall_clock_micros();
     let access = feedback_access(&scope, observed_at);
-    let runtime = open_feedback_runtime(database, project.path(), scope, access)
-        .await
-        .expect("feedback runtime");
+    let runtime = open_feedback_runtime(
+        database,
+        project.path(),
+        project.path().join("response-handles"),
+        scope,
+        access,
+    )
+    .await
+    .expect("feedback runtime");
     let owner = runtime.owner();
 
     let list_handle = runtime
@@ -2785,17 +3231,17 @@ async fn feedback_handle_bootstrap_reads() {
     ));
 }
 
-fn assert_exact_markdown_field(markdown: &str, label: &str, expected: &str) {
-    let expected = format!("- {label}: `{expected}`");
-    assert!(
-        markdown.lines().any(|line| line == expected),
-        "missing exact Markdown field {expected:?}\n{markdown}"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn primitive_config_markdown_json_parity() {
+async fn application_markdown_is_payload_first_and_json_stays_exact() {
     let fixture = runtime_fixture().await;
+    let mounted = admitted_mcp_invocation(
+        &fixture.client,
+        ApplicationSurfaceOperation::StorageStatus,
+        "request.primitive-config-parity.storage-mounted",
+        storage_status_request,
+    )
+    .await;
+    successful_application(&mounted);
     let request_id = RequestId::new("request.primitive-config-parity").expect("shared request id");
 
     let markdown_result = resolve_mcp_application_surface(
@@ -2885,116 +3331,50 @@ async fn primitive_config_markdown_json_parity() {
         Some("## storage\\_status"),
         "the operation heading uses the canonical Markdown escaping contract"
     );
-    assert_exact_markdown_field(&markdown, "Operation", "storage_status");
-    assert_exact_markdown_field(&markdown, "Binding", "binding.cli.storage_status.v1");
-    assert_exact_markdown_field(
-        &markdown,
-        "Contract",
-        "schema.application.primitive.storage-status.result@1",
-    );
-    assert_exact_markdown_field(&markdown, "Status", "success");
-    assert_exact_markdown_field(&markdown, "Outcome", "evidence");
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope project",
-        json["scope"]["project_id"]
-            .as_str()
-            .expect("JSON project scope"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope repository",
-        json["scope"]["repository_id"]
-            .as_str()
-            .expect("JSON repository scope"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope worktree",
-        json["scope"]["worktree_id"]
-            .as_str()
-            .expect("JSON worktree scope"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope reference",
-        json["scope"]["reference"].as_str().unwrap_or("none"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope digest",
-        json["scope"]["scope_digest"]
-            .as_str()
-            .expect("JSON scope digest"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Freshness",
-        json["outcome"]["value"]["temporal"]["freshness"]
-            .as_str()
-            .expect("JSON freshness"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Coverage",
-        json["outcome"]["value"]["coverage"]["completeness"]
-            .as_str()
-            .expect("JSON coverage"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Page returned",
-        &json["outcome"]["value"]["page"]["returned"].to_string(),
-    );
-    let page_total = json["outcome"]["value"]["page"]["total"]
-        .as_u64()
-        .map_or_else(|| "unknown".to_owned(), |total| total.to_string());
-    assert_exact_markdown_field(&markdown, "Page total", &page_total);
-    let cursor = json["outcome"]["value"]["page"]["cursor"]
-        .as_str()
-        .unwrap_or("none");
-    assert_exact_markdown_field(&markdown, "Cursor", cursor);
-    assert_exact_markdown_field(&markdown, "Termination", "completed");
-    assert_exact_markdown_field(&markdown, "Cancellation stage", "none");
-
-    // The key list is derived from the payload rather than pinned to a literal,
-    // so it tracks the contract instead of going stale the next time the
-    // payload gains a field. The human view lists the first eight sorted keys
-    // and elides the rest behind its `--json` pointer, so the expectation
-    // reproduces that rule instead of assuming the payload stays small.
-    const HUMAN_VIEW_VISIBLE_KEYS: usize = 8;
     let payload = &json["outcome"]["value"]["payload"];
-    let payload_fields = payload
-        .as_object()
-        .expect("storage_status payload is an object");
-    assert!(
-        !payload_fields.is_empty(),
-        "an empty payload would make the key parity assertion vacuous"
-    );
-    let payload_bytes = serde_json::to_vec(payload)
-        .expect("serialize JSON payload")
-        .len();
-    let mut payload_keys = payload_fields.keys().cloned().collect::<Vec<_>>();
-    payload_keys.sort_unstable();
-    let visible_keys = &payload_keys[..payload_keys.len().min(HUMAN_VIEW_VISIBLE_KEYS)];
-    let elision = if payload_keys.len() > visible_keys.len() {
-        ", …"
-    } else {
-        ""
-    };
-    let rendered_keys = visible_keys.join(",").replace('_', "\\_");
-    let payload_summary = format!(
-        "- Payload: object(keys={rendered_keys}{elision}; json\\_bytes={payload_bytes}); complete: --json"
+    let payload_markdown = format!(
+        "    {}",
+        serde_json::to_string_pretty(payload)
+            .expect("serialize storage status payload")
+            .replace('\n', "\n    ")
     );
     assert!(
-        markdown.lines().any(|line| line == payload_summary),
-        "missing exact Markdown payload summary {payload_summary:?}\n{markdown}"
+        markdown.starts_with("## storage\\_status\n\n### Payload\n\n"),
+        "the payload must be the first Markdown field: {markdown}"
     );
+    assert!(markdown.contains(&payload_markdown));
+    assert!(markdown.contains("\n- Status: `success`"));
+    assert!(markdown.contains("\n- Evidence: `freshness="));
+    assert!(markdown.contains("\n- Provenance: `binding=binding.cli.storage_status.v1;"));
+    assert!(!markdown.contains("Scope digest"));
+    assert!(!markdown.contains("\n- Receipt:"));
     assert_eq!(json["outcome"]["outcome"], "evidence");
     assert_eq!(
         &json["outcome"]["value"]["payload"],
         successful_application(&cli_result),
         "the JSON renderer must emit its own invocation's payload verbatim"
+    );
+
+    let health = run_application_tool_markdown(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::HealthRead,
+        &serde_json::json!({}),
+    );
+    assert_command_success("CLI health_read Markdown", &health);
+    let health = String::from_utf8(health.stdout).expect("CLI health_read Markdown is UTF-8");
+    // Same pretty-printed payload block the storage_status half of this test
+    // already grades: the Markdown renderer is `to_string_pretty`, not compact.
+    assert!(
+        health.starts_with("## health\\_read\n\n### Payload\n\n    {\n      \"status\": \""),
+        "health status must be the first rendered field: {health}"
+    );
+    assert!(health.contains("\n- Evidence: `freshness="));
+    assert!(health.contains("\n- Provenance: `binding=binding.cli.health_read.v1;"));
+    assert_eq!(
+        health.lines().count(),
+        11,
+        "health output is not the compact pretty-printed payload: {health}"
     );
 }
 
@@ -3276,8 +3656,7 @@ fn wall_clock_micros() -> UtcMicros {
         i64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_micros())
-                .unwrap_or(0),
+                .map_or(0, |duration| duration.as_micros()),
         )
         .unwrap_or(i64::MAX),
     )
@@ -3329,6 +3708,4 @@ fn cancelled_receipt(context: &RequestContext) -> OperationReceipt {
     receipt
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("manifest digest")
-}
+use tracedecay_domain::test_fixtures::digest;

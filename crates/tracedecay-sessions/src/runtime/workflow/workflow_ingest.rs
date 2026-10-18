@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
 use tracedecay_domain::ProjectId;
@@ -19,7 +20,8 @@ use crate::runtime::snapshot_observation::{
 };
 use crate::runtime::source::{
     MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader, TranscriptDiscoveryBounds,
-    collect_files_with_ext_bounded, path_byte_len,
+    TranscriptIngestError, TranscriptIngestResult, collect_files_with_ext_bounded, path_byte_len,
+    run_blocking_transcript_section,
 };
 use crate::runtime::workflow_index::WorkflowIngestSink;
 use crate::runtime::workflow_index::{WorkflowAgent, WorkflowRun, WorkflowStatus};
@@ -52,64 +54,108 @@ struct DiscoveredRun {
     agents_dir: PathBuf,
 }
 
-/// Fail-open at every level: a store that cannot be read, a project whose home
-/// cannot be resolved, or an individual malformed run all degrade to "ingest
-/// less", never an error. Returns the number of runs and agents upserted.
+struct PreparedRun {
+    source_run_id: String,
+    run_mtime: i64,
+    workflow_run: WorkflowRun,
+    agents: Vec<WorkflowAgent>,
+}
+
+/// Malformed individual runs are isolated. Authority, store availability, and
+/// worker failures are returned so callers cannot claim a complete sweep.
 ///
 /// The registered-database entry points live on the root store adapter, which
 /// implements [`WorkflowIngestSink`]; this sweep sees only that port.
-#[hotpath::measure(label = "sessions.workflow_ingest.sweep", future = true)]
+#[tracing::instrument(name = "sessions.workflow_ingest.sweep", level = "trace", skip_all)]
 pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
     sink: &S,
     project_id: &ProjectId,
     project_root: &Path,
     projects_dir: &Path,
-) -> WorkflowIngestStats {
+) -> TranscriptIngestResult<WorkflowIngestStats> {
+    ingest_workflow_runs_with_sink_and_discover(
+        sink,
+        project_id,
+        project_root,
+        projects_dir,
+        discover_runs,
+    )
+    .await
+}
+
+async fn ingest_workflow_runs_with_sink_and_discover<S, D>(
+    sink: &S,
+    project_id: &ProjectId,
+    project_root: &Path,
+    projects_dir: &Path,
+    discover: D,
+) -> TranscriptIngestResult<WorkflowIngestStats>
+where
+    S: WorkflowIngestSink,
+    D: FnOnce(&Path) -> Vec<DiscoveredRun> + Send + 'static,
+{
     if !sink.matches_project_sessions_authority(project_id) {
         tracing::warn!(
             %project_id,
             reason_code = "project_sessions_authority_mismatch",
             "workflow ingest rejected non-matching session authority"
         );
-        return WorkflowIngestStats::default();
+        return Err(TranscriptIngestError::HostAdmission {
+            provider: "claude",
+            reason: "project_sessions_authority_mismatch",
+            retryable: false,
+            status: crate::admission::HostAdmissionStatus::Unavailable,
+            detail: None,
+        });
     }
     let Some(watermark) = sink.read_ingest_watermark().await else {
-        return WorkflowIngestStats::default();
+        return Err(TranscriptIngestError::BackgroundResourceUnavailable {
+            provider: "claude",
+            resource: "workflow_sessions_reader",
+        });
     };
 
     let mut stats = WorkflowIngestStats::default();
     let mut max_mtime = watermark;
 
-    // Resolve the fixed project-side git identity once; every in-window run's
-    // membership test reuses it instead of re-resolving the same project root.
-    let project_matcher = ProjectRootMatcher::new(project_root);
-
-    for run in discover_runs(projects_dir) {
-        let run_mtime = newest_mtime(&run);
-        if run_mtime > 0 && run_mtime <= watermark {
+    let (project_matcher, discovered) = {
+        let project_root = project_root.to_path_buf();
+        let projects_dir = projects_dir.to_path_buf();
+        run_blocking_transcript_section("claude", move || {
+            // Resolve the fixed project-side git identity once; every
+            // in-window run's membership test reuses it instead of
+            // re-resolving the same project root.
+            (
+                ProjectRootMatcher::new(&project_root),
+                discover(&projects_dir),
+            )
+        })
+        .await?
+    };
+    let project_matcher = Arc::new(project_matcher);
+    for run in discovered {
+        let prepared = {
+            let project_matcher = Arc::clone(&project_matcher);
+            run_blocking_transcript_section("claude", move || {
+                prepare_discovered_run(run, &project_matcher, watermark)
+            })
+            .await?
+        };
+        let Some(prepared) = prepared else {
             continue;
+        };
+        if prepared.run_mtime > max_mtime {
+            max_mtime = prepared.run_mtime;
         }
 
-        // Scope to this project by the owning session's recorded cwd. A run
-        // whose parent thread began in another project is skipped without
-        // touching the DB — the same per-session cwd filter ClaudeSource uses.
-        // This filter also gates the watermark: `discover_runs` walks every
-        // project on the machine, but the watermark is persisted per-store, so
-        // only in-scope runs may advance it. Letting an out-of-project run raise
-        // this store's watermark could push it past a still-changing target run
-        // and strand that run (e.g. a Running run never re-ingested once it
-        // completes).
-        if !run_belongs_to_project(&run, &project_matcher) {
-            continue;
-        }
-        if run_mtime > max_mtime {
-            max_mtime = run_mtime;
-        }
-
-        match ingest_one_run(sink, &run).await {
+        match persist_prepared_run(sink, &prepared).await {
             Ok(run_stats) => stats = stats.merge(run_stats),
             Err(err) => {
-                tracing::debug!(run_id = %run.run_id, error = %err, "skipping workflow run");
+                tracing::debug!(
+                    run_id = %prepared.source_run_id,
+                    error = %err,
+                    "skipping workflow run"
+                );
             }
         }
     }
@@ -121,12 +167,57 @@ pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
         sink.bump_ingest_watermark(max_mtime).await;
     }
 
-    stats
+    Ok(stats)
+}
+
+fn prepare_discovered_run(
+    run: DiscoveredRun,
+    project_matcher: &ProjectRootMatcher,
+    watermark: i64,
+) -> Option<PreparedRun> {
+    let run_mtime = newest_mtime(&run);
+    if run_mtime > 0 && run_mtime <= watermark {
+        return None;
+    }
+
+    // Scope to this project by the owning session's recorded cwd. A run whose
+    // parent thread began in another project is skipped without touching the
+    // DB, the same per-session cwd filter ClaudeSource uses. This filter also
+    // gates the watermark: discovery walks every project on the machine, but
+    // the watermark is persisted per-store, so only in-scope runs may advance
+    // it. Letting an out-of-project run raise this store's watermark could push
+    // it past a still-changing target run and strand that run.
+    if !run_belongs_to_project(&run, project_matcher) {
+        return None;
+    }
+
+    let (mut workflow_run, mut agents) = match run.meta_path.as_deref().and_then(read_run_meta) {
+        // Finished (or at least meta-written) run: authoritative roster from
+        // `workflowProgress[]`.
+        Some(meta) => parse_run_from_meta(&run.run_id, &run.parent_session_id, &meta),
+        // In-progress / orphan dir with no meta json yet: synthesize a Running
+        // run and derive the roster from journal.jsonl + present agent files.
+        None => parse_run_from_dir(&run.run_id, &run.parent_session_id, &run.agents_dir),
+    };
+
+    for agent in &mut agents {
+        enrich_agent_from_transcript(agent, &run.agents_dir);
+    }
+    if workflow_run.agent_count == 0 {
+        workflow_run.agent_count = i64::try_from(agents.len()).unwrap_or(i64::MAX);
+    }
+
+    Some(PreparedRun {
+        source_run_id: run.run_id,
+        run_mtime,
+        workflow_run,
+        agents,
+    })
 }
 
 /// Discover every workflow run under `projects_dir` by walking
 /// `<slug>/<session_id>/subagents/workflows/<run_id>/`.
-#[hotpath::measure(label = "sessions.workflow_ingest.discover")]
+#[tracing::instrument(name = "sessions.workflow_ingest.discover", level = "trace", skip_all)]
 fn discover_runs(projects_dir: &Path) -> Vec<DiscoveredRun> {
     let bounds = TranscriptDiscoveryBounds::from_discovered_units(MAX_WORKFLOW_RUNS);
     let mut runs = Vec::new();
@@ -238,7 +329,11 @@ fn run_belongs_to_project(run: &DiscoveredRun, project_matcher: &ProjectRootMatc
 /// The owning session's working directory, probed from the parent transcript
 /// (`<session_id>.jsonl`, two levels above `subagents/workflows/`) or, failing
 /// that, an agent transcript in the run dir.
-#[hotpath::measure(label = "sessions.workflow_ingest.resolve_cwd")]
+#[tracing::instrument(
+    name = "sessions.workflow_ingest.resolve_cwd",
+    level = "trace",
+    skip_all
+)]
 fn run_cwd(run: &DiscoveredRun) -> Option<PathBuf> {
     // Parent transcript sits at <slug>/<session_id>.jsonl. agents_dir is
     // <slug>/<session_id>/subagents/workflows/<run_id>; `ancestors()` yields
@@ -252,13 +347,13 @@ fn run_cwd(run: &DiscoveredRun) -> Option<PathBuf> {
     });
     if let Some(cwd) = parent_transcript
         .as_deref()
-        .and_then(crate::runtime::claude::transcript_cwd)
+        .and_then(crate::runtime::hosts::claude::transcript_cwd)
     {
         return Some(cwd);
     }
     // Fall back to the first agent transcript that records a cwd.
     for path in agent_transcripts(&run.agents_dir) {
-        if let Some(cwd) = crate::runtime::claude::transcript_cwd(&path) {
+        if let Some(cwd) = crate::runtime::hosts::claude::transcript_cwd(&path) {
             return Some(cwd);
         }
     }
@@ -267,7 +362,11 @@ fn run_cwd(run: &DiscoveredRun) -> Option<PathBuf> {
 
 /// Absolute paths to the `agent-<id>.jsonl` transcripts in a run directory,
 /// excluding the sibling `.meta.json` files and `journal.jsonl`.
-#[hotpath::measure(label = "sessions.workflow_ingest.agent_transcripts")]
+#[tracing::instrument(
+    name = "sessions.workflow_ingest.agent_transcripts",
+    level = "trace",
+    skip_all
+)]
 fn agent_transcripts(agents_dir: &Path) -> Vec<PathBuf> {
     let bounds = TranscriptDiscoveryBounds::from_discovered_units(MAX_WORKFLOW_AGENTS);
     let mut paths: Vec<PathBuf> = collect_files_with_ext_bounded(agents_dir, "jsonl", 0, bounds)
@@ -289,40 +388,27 @@ fn agent_transcripts(agents_dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Parse one discovered run and upsert its run row plus every agent row.
-#[hotpath::measure(label = "sessions.workflow_ingest.ingest_run", future = true)]
-async fn ingest_one_run<S: WorkflowIngestSink>(
+/// Upsert one prepared run plus every agent row.
+#[tracing::instrument(
+    name = "sessions.workflow_ingest.persist_run",
+    level = "trace",
+    skip_all
+)]
+async fn persist_prepared_run<S: WorkflowIngestSink>(
     sink: &S,
-    run: &DiscoveredRun,
+    prepared: &PreparedRun,
 ) -> Result<WorkflowIngestStats, crate::runtime::workflow_index::WorkflowIndexError> {
-    let (mut workflow_run, mut agents) = match run.meta_path.as_deref().and_then(read_run_meta) {
-        // Finished (or at least meta-written) run: authoritative roster from
-        // `workflowProgress[]`.
-        Some(meta) => parse_run_from_meta(&run.run_id, &run.parent_session_id, &meta),
-        // In-progress / orphan dir with no meta json yet: synthesize a Running
-        // run and derive the roster from journal.jsonl + present agent files.
-        None => parse_run_from_dir(&run.run_id, &run.parent_session_id, &run.agents_dir),
-    };
-
-    // Enrich each agent from its transcript (path, tokens, session id, times)
-    // and reconcile the run-level agent count with what we actually recorded.
-    for agent in &mut agents {
-        enrich_agent_from_transcript(agent, &run.agents_dir);
-    }
-    if workflow_run.agent_count == 0 {
-        workflow_run.agent_count = i64::try_from(agents.len()).unwrap_or(i64::MAX);
-    }
-
-    sink.upsert_workflow_run(&workflow_run, &agents).await?;
+    sink.upsert_workflow_run(&prepared.workflow_run, &prepared.agents)
+        .await?;
     Ok(WorkflowIngestStats {
         runs_ingested: 1,
-        agents_ingested: agents.len() as u64,
+        agents_ingested: prepared.agents.len() as u64,
     })
 }
 
 /// Read and JSON-parse a `workflows/<run_id>.json` file, or `None` when it is
-/// missing or malformed (fail-open — the run is then treated as dir-only).
-#[hotpath::measure(label = "sessions.workflow_ingest.read_meta")]
+/// missing or malformed (fail-open, the run is then treated as dir-only).
+#[tracing::instrument(name = "sessions.workflow_ingest.read_meta", level = "trace", skip_all)]
 fn read_run_meta(path: &Path) -> Option<Value> {
     let text = read_snapshot_text_bounded("claude-workflow", path, MAX_SNAPSHOT_METADATA_BYTES)
         .ok()
@@ -330,13 +416,15 @@ fn read_run_meta(path: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-// ---------------------------------------------------------------------------
 // Pure parsing (unit-tested; no disk access below this line).
-// ---------------------------------------------------------------------------
 
 /// Build a [`WorkflowRun`] and its agent roster from a parsed run-meta JSON
 /// (`workflows/<run_id>.json`).
-#[hotpath::measure(label = "sessions.workflow_ingest.parse_meta")]
+#[tracing::instrument(
+    name = "sessions.workflow_ingest.parse_meta",
+    level = "trace",
+    skip_all
+)]
 fn parse_run_from_meta(
     run_id: &str,
     parent_session_id: &str,
@@ -389,7 +477,7 @@ fn parse_run_from_meta(
 
 /// Synthesize a Running [`WorkflowRun`] for a dir-only (in-progress / orphan)
 /// run and build its roster from `journal.jsonl` plus the agent files present.
-#[hotpath::measure(label = "sessions.workflow_ingest.parse_dir")]
+#[tracing::instrument(name = "sessions.workflow_ingest.parse_dir", level = "trace", skip_all)]
 fn parse_run_from_dir(
     run_id: &str,
     parent_session_id: &str,
@@ -532,9 +620,7 @@ fn ms_field_to_secs(value: &Value, key: &str) -> Option<i64> {
     value.get(key).and_then(Value::as_i64).map(|ms| ms / 1000)
 }
 
-// ---------------------------------------------------------------------------
 // Agent transcript + journal parsing.
-// ---------------------------------------------------------------------------
 
 /// Fill in an agent's transcript-derived fields from
 /// `agent-<agentId>.jsonl` when that file exists: absolute `transcript_path`,
@@ -574,12 +660,15 @@ struct TranscriptSummary {
     last_ts: Option<i64>,
 }
 
-#[hotpath::measure(label = "sessions.workflow_ingest.summarize_transcript")]
+#[tracing::instrument(
+    name = "sessions.workflow_ingest.summarize_transcript",
+    level = "trace",
+    skip_all
+)]
 fn summarize_transcript_file(path: &Path) -> TranscriptSummary {
     let Ok(file) = File::open(path) else {
         return TranscriptSummary::default();
     };
-    let file = hotpath::io!(file, label = "sessions.workflow_ingest.transcript_io");
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     let mut summary = TranscriptSummary::default();
     loop {
@@ -644,13 +733,16 @@ struct JournalEvent {
 
 /// Parse `journal.jsonl` into its events, skipping malformed lines. Absent
 /// journal yields an empty list.
-#[hotpath::measure(label = "sessions.workflow_ingest.read_journal")]
+#[tracing::instrument(
+    name = "sessions.workflow_ingest.read_journal",
+    level = "trace",
+    skip_all
+)]
 fn read_journal(agents_dir: &Path) -> Vec<JournalEvent> {
     let path = agents_dir.join("journal.jsonl");
     let Ok(file) = File::open(&path) else {
         return Vec::new();
     };
-    let file = hotpath::io!(file, label = "sessions.workflow_ingest.journal_io");
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     let mut events = Vec::new();
     while events.len() < MAX_WORKFLOW_JOURNAL_EVENTS {

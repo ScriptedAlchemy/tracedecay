@@ -1,98 +1,22 @@
 /// Tree-sitter based Lua source code extractor.
 ///
 /// Parses Lua source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{ExtractionState, local_node_id};
 use crate::complexity::{LUA_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Lua source files using tree-sitter.
 pub struct LuaExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 impl LuaExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_lua(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -110,7 +34,7 @@ impl LuaExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -124,6 +48,7 @@ impl LuaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -138,15 +63,10 @@ impl LuaExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("lua", "Lua", source)
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -172,7 +92,7 @@ impl LuaExtractor {
 
         let (name, kind, visibility, class_context) = match name_node.kind() {
             "identifier" => {
-                let name = state.node_text(name_node);
+                let name = state.node_text(name_node).to_string();
                 (
                     name,
                     NodeKind::Function,
@@ -189,9 +109,10 @@ impl LuaExtractor {
                 let table_name = name_node
                     .child_by_field_name("table")
                     .map(|n| state.node_text(n));
-                let field_name = name_node
-                    .child_by_field_name("field")
-                    .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+                let field_name = name_node.child_by_field_name("field").map_or_else(
+                    || "<anonymous>".to_string(),
+                    |n| state.node_text(n).to_string(),
+                );
                 (field_name, NodeKind::Function, Visibility::Pub, table_name)
             }
             "method_index_expression" => {
@@ -199,9 +120,10 @@ impl LuaExtractor {
                 let table_name = name_node
                     .child_by_field_name("table")
                     .map(|n| state.node_text(n));
-                let method_name = name_node
-                    .child_by_field_name("method")
-                    .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+                let method_name = name_node.child_by_field_name("method").map_or_else(
+                    || "<anonymous>".to_string(),
+                    |n| state.node_text(n).to_string(),
+                );
                 (method_name, NodeKind::Method, Visibility::Pub, table_name)
             }
             _ => return,
@@ -218,8 +140,8 @@ impl LuaExtractor {
         } else {
             format!("{}::{}", state.qualified_prefix(), name)
         };
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &LUA_COMPLEXITY, &state.source);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
+        let metrics = count_complexity(node, &LUA_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -243,6 +165,7 @@ impl LuaExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -300,10 +223,10 @@ impl LuaExtractor {
             let call_name = value_node
                 .child_by_field_name("name")
                 .map(|n| state.node_text(n));
-            if call_name.as_deref() == Some("require") {
+            if call_name == Some("require") {
                 // Extract the module name from the arguments.
-                let mod_name =
-                    Self::extract_require_module(state, value_node).unwrap_or(name.clone());
+                let mod_name = Self::extract_require_module(state, value_node)
+                    .unwrap_or_else(|| name.to_string());
                 Self::emit_use_node(state, node, &mod_name);
                 return;
             }
@@ -331,12 +254,12 @@ impl LuaExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -355,6 +278,7 @@ impl LuaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -379,7 +303,13 @@ impl LuaExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), mod_name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, mod_name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Use,
+            mod_name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -403,6 +333,7 @@ impl LuaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -434,7 +365,7 @@ impl LuaExtractor {
                 if child.kind() == "string" {
                     // The string node contains a string_content child.
                     if let Some(content) = find_direct_child_by_kind(child, "string_content") {
-                        return Some(state.node_text(content));
+                        return Some(state.node_text(content).to_string());
                     }
                     // Fall back to stripping quotes from the full text.
                     let text = state.node_text(child);
@@ -499,11 +430,13 @@ impl LuaExtractor {
                             let callee_name = state.node_text(name_node);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
                         // Recurse into the call for nested calls.
@@ -521,17 +454,6 @@ impl LuaExtractor {
             }
         }
     }
-
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
-    }
 }
 
 impl crate::LanguageExtractor for LuaExtractor {
@@ -543,17 +465,16 @@ impl crate::LanguageExtractor for LuaExtractor {
         "Lua"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_lua(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

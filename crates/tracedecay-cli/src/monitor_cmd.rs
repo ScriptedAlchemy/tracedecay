@@ -1,29 +1,54 @@
 //! `tracedecay monitor`: the live token-savings TUI over the global mmap ring.
 
+use std::collections::BTreeMap;
 use std::io::Write;
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use tracedecay_runtime_core::monitor_ring::{
-    FILE_SIZE, LOCK_FILENAME, MMAP_FILENAME, MmapReader, MonitorEntry, RING_CAPACITY,
-};
 use tracedecay_runtime_core::text::format_number;
+use tracedecay_session_memory::monitor_ring::{
+    FILE_SIZE, LOCK_FILENAME, MMAP_FILENAME, MmapReader, RingCursor, RingDrain,
+};
 
 mod cost;
 
 use cost::{CostCache, CostCacheState};
 
+/// Tool calls the monitor has read from the ring since it started or was
+/// reset. Totals cover observed calls only; the ring cannot replay calls
+/// overwritten before a read, so those are counted in `missed`.
+#[derive(Default)]
+struct Tally {
+    /// Saved tokens per project, then per tool.
+    by_project: BTreeMap<String, BTreeMap<String, u64>>,
+    saved: u64,
+    missed: u64,
+    recent: Vec<(String, String)>,
+}
+
+impl Tally {
+    fn record(&mut self, drain: RingDrain) {
+        self.missed += drain.dropped;
+        for entry in drain.entries {
+            push_recent_update(&mut self.recent, &entry.project, &entry.tool_name);
+            self.saved += entry.delta;
+            *self
+                .by_project
+                .entry(entry.project)
+                .or_default()
+                .entry(entry.tool_name)
+                .or_default() += entry.delta;
+        }
+    }
+}
+
 /// Run the monitor TUI. Blocks until Ctrl+C.
-pub fn run() -> std::io::Result<()> {
+pub fn run(profile: &ProfileRoot) -> std::io::Result<()> {
     use crossterm::{
         cursor, execute, terminal,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen},
     };
-    let dir = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "cannot resolve home directory",
-        )
-    })?;
-    std::fs::create_dir_all(&dir)?;
+    let dir = profile.data_dir();
+    std::fs::create_dir_all(dir)?;
 
     // Single-instance lock, held for the lifetime of `run` (shared sidecar
     // helper; see the sidecar-lock module note in runtime-core `storage`).
@@ -40,60 +65,44 @@ pub fn run() -> std::io::Result<()> {
         f.set_len(FILE_SIZE as u64)?;
     }
 
-    let mut reader = MmapReader::open()?;
-    let mut last_idx = reader.write_idx();
-    let mut entries: Vec<MonitorEntry> = Vec::new();
-    let mut recent_updates: Vec<(String, String)> = Vec::new();
-
-    // Populate with existing entries in the ring buffer (up to write_idx).
-    let populated = last_idx.min(RING_CAPACITY as u64) as usize;
-    if populated > 0 {
-        let start_slot = if last_idx > RING_CAPACITY as u64 {
-            (last_idx as usize) % RING_CAPACITY
-        } else {
-            0
-        };
-        for i in 0..populated {
-            let slot = (start_slot + i) % RING_CAPACITY;
-            if let Some(e) = reader.entry(slot)
-                && e.delta > 0
-            {
-                push_recent_update(&mut recent_updates, &e.project, &e.tool_name);
-                entries.push(e);
-            }
-        }
-    }
+    let mut reader = MmapReader::open_at(profile.data_dir())?;
+    let mut ring_cursor = RingCursor::default();
+    let mut tally = Tally::default();
+    // Entries overwritten before the monitor started are history, not loss.
+    tally.record(RingDrain {
+        dropped: 0,
+        ..reader.drain(&mut ring_cursor)
+    });
 
     let mut stdout = std::io::stdout();
     terminal::enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
 
     let result = monitor_loop(
+        profile,
         &mut reader,
-        &mut entries,
-        &mut recent_updates,
-        &mut last_idx,
+        &mut ring_cursor,
+        &mut tally,
         &mut stdout,
     );
 
     execute!(stdout, cursor::Show, LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
 
-    let _ = lock_file.unlock();
+    drop(lock_file);
     let _ = std::fs::remove_file(&lock_path);
 
     result
 }
 
 fn monitor_loop(
+    profile: &ProfileRoot,
     reader: &mut MmapReader,
-    entries: &mut Vec<MonitorEntry>,
-    recent_updates: &mut Vec<(String, String)>,
-    last_idx: &mut u64,
+    ring_cursor: &mut RingCursor,
+    tally: &mut Tally,
     stdout: &mut std::io::Stdout,
 ) -> std::io::Result<()> {
     use crossterm::{cursor, event, execute, terminal};
-    use std::collections::HashMap;
 
     let mut cost_cache = CostCache::new();
     let mut scroll_offset: usize = 0;
@@ -113,8 +122,7 @@ fn monitor_loop(
                 event::KeyCode::Char('r')
                     if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
                 {
-                    entries.clear();
-                    recent_updates.clear();
+                    *tally = Tally::default();
                     scroll_offset = 0;
                 }
                 event::KeyCode::Up => {
@@ -133,22 +141,12 @@ fn monitor_loop(
             }
         }
 
-        let _ = reader.refresh();
-        let current_idx = reader.write_idx();
-        if current_idx > *last_idx {
-            for i in *last_idx..current_idx {
-                let slot = (i as usize) % RING_CAPACITY;
-                if let Some(e) = reader.entry(slot) {
-                    push_recent_update(recent_updates, &e.project, &e.tool_name);
-                    entries.push(e);
-                }
-            }
-            *last_idx = current_idx;
-        }
+        reader.refresh()?;
+        tally.record(reader.drain(ring_cursor));
 
         cost_cache.poll_refresh();
         if cost_cache.is_stale() {
-            cost_cache.begin_refresh();
+            cost_cache.begin_refresh(profile);
         }
 
         let (width, height) = terminal::size().unwrap_or((80, 24));
@@ -214,36 +212,16 @@ fn monitor_loop(
         }
 
         // ── Grouped log entries ──
-        let mut grouped: HashMap<String, HashMap<String, u64>> = HashMap::new();
-        for entry in entries.iter() {
-            let project = &entry.project;
-            let method = &entry.tool_name;
-            *grouped
-                .entry(project.clone())
-                .or_default()
-                .entry(method.clone())
-                .or_default() += entry.delta;
-        }
-
-        let mut projects: Vec<String> = grouped
-            .keys()
-            .filter(|p| !is_temp_dir_name(p) && !p.is_empty())
-            .cloned()
-            .collect();
-        projects.sort();
-
         // Each line carries an optional ANSI color prefix; padding is computed
         // from the plain text length so escape bytes don't affect alignment.
         let mut all_lines: Vec<(&'static str, String)> = Vec::new();
         let mut grand_total: u64 = 0;
 
-        for project in &projects {
-            let Some(methods) = grouped.get(project) else {
-                continue;
-            };
-            let mut method_lines: Vec<String> = methods.keys().cloned().collect();
-            method_lines.sort();
-
+        for (project, methods) in tally
+            .by_project
+            .iter()
+            .filter(|(p, _)| !is_temp_dir_name(p) && !p.is_empty())
+        {
             let project_total: u64 = methods.values().sum::<u64>();
             grand_total += project_total;
 
@@ -251,10 +229,9 @@ fn monitor_loop(
                 "",
                 format!("{} ({})", project, format_number(project_total)),
             ));
-            for method in &method_lines {
-                let delta = *methods.get(method).unwrap_or(&0);
-                let color = update_color_for(recent_updates, project, method);
-                all_lines.push((color, format!("  {}  {}", method, format_number(delta))));
+            for (method, delta) in methods {
+                let color = update_color_for(&tally.recent, project, method);
+                all_lines.push((color, format!("  {}  {}", method, format_number(*delta))));
             }
         }
         all_lines.push(("", format!("TOTAL  {}", format_number(grand_total))));
@@ -291,11 +268,13 @@ fn monitor_loop(
 
         // ── Footer ──
         let sep = "\u{2500}".repeat(w);
-        let total_saved: u64 = entries.iter().map(|e| e.delta).sum();
-        let total_str = format_number(total_saved);
-        let label = "TraceDecay Monitor";
-        let suffix = "saved tokens";
-        let footer_content = format!("{label}  {total_str} {suffix}");
+        let mut footer_content = format!(
+            "TraceDecay Monitor  {} saved tokens observed",
+            format_number(tally.saved)
+        );
+        if tally.missed > 0 {
+            footer_content.push_str(&format!(", missed calls: {}", format_number(tally.missed)));
+        }
         let footer_padding = w.saturating_sub(footer_content.len());
         let hint = "\u{2191}\u{2193}/PgUp/PgDn scroll | Ctrl+R reset | Ctrl+C quit";
         let hint_padding = w.saturating_sub(hint.len());
@@ -345,20 +324,38 @@ fn update_color_for(recent: &[(String, String)], project: &str, tool_name: &str)
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{push_recent_update, update_color_for};
+    use super::{Tally, push_recent_update, update_color_for};
+    use tracedecay_session_memory::monitor_ring::{MonitorEntry, RingDrain};
+
+    fn call(project: &str, tool_name: &str, delta: u64) -> MonitorEntry {
+        MonitorEntry {
+            prefix: "tracedecay".to_string(),
+            project: project.to_string(),
+            tool_name: tool_name.to_string(),
+            delta,
+            before: 0,
+            timestamp: 0,
+        }
+    }
 
     #[test]
-    fn push_recent_update_keeps_three_most_recent() {
-        let mut recent: Vec<(String, String)> = Vec::new();
-        push_recent_update(&mut recent, "proj", "tool_a");
-        push_recent_update(&mut recent, "proj", "tool_b");
-        push_recent_update(&mut recent, "proj", "tool_c");
-        push_recent_update(&mut recent, "proj", "tool_d");
-        assert_eq!(recent.len(), 3);
-        // Most recent first.
-        assert_eq!(recent[0].1, "tool_d");
-        assert_eq!(recent[1].1, "tool_c");
-        assert_eq!(recent[2].1, "tool_b");
+    fn tally_accumulates_observed_calls_and_missed_counts_across_drains() {
+        let mut tally = Tally::default();
+        tally.record(RingDrain {
+            entries: vec![call("alpha", "search", 10), call("alpha", "context", 5)],
+            dropped: 0,
+        });
+        tally.record(RingDrain {
+            entries: vec![call("alpha", "search", 7), call("bravo", "search", 1)],
+            dropped: 44,
+        });
+        tally.record(RingDrain::default());
+
+        assert_eq!((tally.saved, tally.missed), (23, 44));
+        assert_eq!(tally.by_project["alpha"]["search"], 17);
+        assert_eq!(tally.by_project["alpha"]["context"], 5);
+        assert_eq!(tally.by_project["bravo"]["search"], 1);
+        assert_eq!(tally.recent[0], ("bravo".to_string(), "search".to_string()));
     }
 
     #[test]

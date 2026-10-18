@@ -90,7 +90,7 @@ pub(super) fn document_ngrams(
             if observed.is_multiple_of(4_096) {
                 checkpoint(control)?;
             }
-            ngrams.push(pack_byte_ngram(window));
+            ngrams.push(super::super::pack_byte_ngram(window));
             observed = observed.checked_add(1).ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Contract(
                     "lexical artifact n-gram work count overflowed".to_owned(),
@@ -104,43 +104,40 @@ pub(super) fn document_ngrams(
 }
 
 pub(super) fn query_ngrams(bytes: &[u8]) -> BTreeSet<u32> {
-    let width = bytes.len().min(3);
-    if width == 0 {
-        return BTreeSet::new();
-    }
-    bytes.windows(width).map(pack_byte_ngram).collect()
+    super::super::packed_query_ngrams(bytes)
 }
 
-fn pack_byte_ngram(bytes: &[u8]) -> u32 {
-    debug_assert!((1..=3).contains(&bytes.len()));
-    bytes
-        .iter()
-        .enumerate()
-        .fold((bytes.len() as u32) << 24, |packed, (index, byte)| {
-            packed | (u32::from(*byte) << (index * 8))
+/// Whether a packed n-gram needs the case-preserving kind. Normalized text is
+/// the ASCII-lowercased raw text at the same byte offsets, so a raw window
+/// without an ASCII uppercase byte is already the normalized window there.
+pub(super) fn ngram_is_case_sensitive(ngram: u32) -> bool {
+    let width = ngram >> 24;
+    (0..width).any(|index| ((ngram >> (index * 8)) as u8).is_ascii_uppercase())
+}
+
+/// The kind that holds each query n-gram for a case-sensitive raw match, or
+/// `None` when every window is case-insensitive and the normalized query
+/// already admits every raw match.
+pub(super) fn raw_override_query_ngrams(bytes: &[u8]) -> Option<Vec<(i64, u32)>> {
+    let keys = query_ngrams(bytes)
+        .into_iter()
+        .map(|ngram| {
+            let kind = if ngram_is_case_sensitive(ngram) {
+                NGRAM_RAW_OVERRIDE
+            } else {
+                NGRAM_NORMALIZED
+            };
+            (kind, ngram)
         })
+        .collect::<Vec<_>>();
+    keys.iter()
+        .any(|(kind, _)| *kind == NGRAM_RAW_OVERRIDE)
+        .then_some(keys)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{document_ngram_scratch, reserve_ngram_scratch};
-
-    #[test]
-    fn ngram_scratch_charge_covers_the_real_boundary_reservation() {
-        let (window_count, scratch_bytes) = document_ngram_scratch(2).expect("scratch charge");
-        assert_eq!(window_count, 3, "two bytes produce three n-gram windows");
-
-        let scratch = reserve_ngram_scratch(4).expect("boundary reservation");
-        let allocated_bytes = scratch
-            .capacity()
-            .checked_mul(std::mem::size_of::<u32>())
-            .expect("allocated scratch bytes");
-        assert!(
-            scratch_bytes >= allocated_bytes,
-            "the preflight charged {scratch_bytes} bytes for {window_count} windows, but the boundary reservation retained {allocated_bytes} bytes at capacity {}",
-            scratch.capacity()
-        );
-    }
 
     #[test]
     fn ngram_scratch_charge_covers_real_reservations() {

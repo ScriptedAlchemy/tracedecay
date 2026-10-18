@@ -2,22 +2,23 @@
 ///
 /// Parses Objective-C source files and emits nodes and edges for the code graph.
 /// Handles `.m` and `.mm` files.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::{clean_c_doc_comment, docstring_from_preceding_comments};
+use crate::common::{clean_c_comment, docstring_from_preceding_comments, local_node_id};
 use crate::complexity::{OBJC_COMPLEXITY, count_complexity};
 use crate::traversal::{find_descendant_by_kind, find_direct_child_by_kind};
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Objective-C source files using tree-sitter.
 pub struct ObjcExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -25,18 +26,15 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Depth of @interface/@implementation nesting. > 0 means inside a type body.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -44,7 +42,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -54,8 +52,7 @@ impl ExtractionState {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -70,12 +67,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        self.node_str(node).to_string()
-    }
-
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &str {
@@ -86,27 +79,6 @@ impl ExtractionState {
 }
 
 impl ObjcExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_objc(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -124,7 +96,7 @@ impl ObjcExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -138,6 +110,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -156,11 +129,6 @@ impl ObjcExtractor {
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("objc", "Objective-C", source)
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -197,7 +165,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &NodeKind::Include, &path, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Include,
+            &path,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -221,6 +195,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -238,8 +213,10 @@ impl ObjcExtractor {
 
     /// Extract a preprocessor #define.
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
@@ -247,11 +224,12 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::PreprocessorDef,
             &name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -276,6 +254,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -300,8 +279,7 @@ impl ObjcExtractor {
         // Check if this is an NS_ENUM pattern
         if let Some(macro_spec) = find_direct_child_by_kind(node, "macro_type_specifier") {
             let macro_name = find_direct_child_by_kind(macro_spec, "identifier")
-                .map(|n| state.node_text(n))
-                .unwrap_or_default();
+                .map_or_default(|n| state.node_text(n).to_string());
             if macro_name == "NS_ENUM" || macro_name == "NS_OPTIONS" {
                 Self::visit_ns_enum(state, node, &macro_spec);
                 return;
@@ -345,11 +323,17 @@ impl ObjcExtractor {
                     .to_string()
             })
             .or_else(|| {
-                let text = state.node_str(node);
+                let text = state.node_text(node);
                 text.find('{').map(|pos| text[..pos].trim().to_string())
             });
         let qualified_name = format!("{}::{}", state.qualified_prefix(), enum_name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &enum_name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Enum,
+            &enum_name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -373,6 +357,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -395,7 +380,7 @@ impl ObjcExtractor {
                 let child = cursor.node();
                 if child.kind() == "type_identifier" && cursor.field_name() == Some("declarator") {
                     let variant_name = state.node_text(child);
-                    Self::create_enum_variant(state, &variant_name, child);
+                    Self::create_enum_variant(state, variant_name, child);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -416,7 +401,7 @@ impl ObjcExtractor {
                 if child.kind() == "ERROR" {
                     // Inside ERROR, find the identifier
                     if let Some(ident) = find_direct_child_by_kind(child, "identifier") {
-                        return Some(state.node_text(ident));
+                        return Some(state.node_text(ident).to_string());
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -435,7 +420,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -459,6 +450,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -486,7 +478,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Typedef, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Typedef,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -510,6 +508,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -533,7 +532,7 @@ impl ObjcExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "type_identifier" {
-                    last_type_id = Some(state.node_text(child));
+                    last_type_id = Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -547,23 +546,31 @@ impl ObjcExtractor {
     ///
     /// Maps to Interface node kind with method declarations inside.
     fn visit_protocol(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let docstring = Self::extract_docstring(state, node);
         let text = state.node_text(node);
-        let signature = Self::extract_first_line(&text);
+        let signature = Self::extract_first_line(text);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Interface, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Interface,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Interface,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -582,6 +589,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -639,11 +647,13 @@ impl ObjcExtractor {
                     let name = state.node_text(child);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: from_node_id.to_string(),
-                        reference_name: name,
+                        reference_name: name.to_string(),
                         reference_kind: EdgeKind::Implements,
                         line,
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
                 if !cursor.goto_next_sibling() {
@@ -657,23 +667,31 @@ impl ObjcExtractor {
     ///
     /// This includes properties, method declarations, superclass, and protocol conformance.
     fn visit_class_interface(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let docstring = Self::extract_docstring(state, node);
         let text = state.node_text(node);
-        let signature = Self::extract_first_line(&text);
+        let signature = Self::extract_first_line(text);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Class,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -692,6 +710,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -710,11 +729,13 @@ impl ObjcExtractor {
             let super_name = state.node_text(superclass);
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: id.clone(),
-                reference_name: super_name,
+                reference_name: super_name.to_string(),
                 reference_kind: EdgeKind::Extends,
                 line: start_line,
                 column: superclass.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
             });
         }
 
@@ -746,11 +767,13 @@ impl ObjcExtractor {
                     let name = state.node_text(type_id);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: from_node_id.to_string(),
-                        reference_name: name,
+                        reference_name: name.to_string(),
                         reference_kind: EdgeKind::Implements,
                         line,
                         column: type_id.start_position().column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
                 if !cursor.goto_next_sibling() {
@@ -791,7 +814,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Property, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Property,
+            &name,
+            node,
+        );
 
         let visibility = Visibility::Pub;
 
@@ -817,6 +846,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -840,14 +870,14 @@ impl ObjcExtractor {
         {
             // Direct identifier
             if let Some(ident) = find_direct_child_by_kind(struct_declarator, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
             // Pointer declarator (NSString *name)
             if let Some(ptr_decl) =
                 find_direct_child_by_kind(struct_declarator, "pointer_declarator")
                 && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
             {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
         }
         None
@@ -871,7 +901,7 @@ impl ObjcExtractor {
 
         let kind = NodeKind::Method;
 
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -895,6 +925,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -914,23 +945,25 @@ impl ObjcExtractor {
     ///
     /// Maps to Impl node kind with method definitions inside.
     fn visit_class_implementation(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let docstring = Self::extract_docstring(state, node);
         let text = state.node_text(node);
-        let signature = Self::extract_first_line(&text);
+        let signature = Self::extract_first_line(text);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Impl, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Impl, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Impl,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -949,6 +982,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1001,7 +1035,7 @@ impl ObjcExtractor {
     /// Extract docstring for an `implementation_definition` by looking at preceding
     /// sibling comments within the `class_implementation`.
     fn extract_impl_method_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, clean_c_doc_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     /// Extract a method definition (has a body).
@@ -1019,13 +1053,19 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
-        let metrics = count_complexity(node, &OBJC_COMPLEXITY, &state.source);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Method,
+            &name,
+            node,
+        );
+        let metrics = count_complexity(node, &OBJC_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Method,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -1044,6 +1084,7 @@ impl ObjcExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1074,13 +1115,19 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
-        let metrics = count_complexity(node, &OBJC_COMPLEXITY, &state.source);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
+        let metrics = count_complexity(node, &OBJC_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Function,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -1099,6 +1146,7 @@ impl ObjcExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1138,7 +1186,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1162,6 +1216,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1191,11 +1246,13 @@ impl ObjcExtractor {
                             let callee_name = state.node_text(callee);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1223,10 +1280,10 @@ impl ObjcExtractor {
     fn extract_message_call(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         let method_name = node
             .child_by_field_name("method")
-            .map(|n| state.node_text(n));
+            .map(|n| state.node_text(n).to_string());
         let receiver_name = node
             .child_by_field_name("receiver")
-            .map(|n| state.node_text(n));
+            .map(|n| state.node_text(n).to_string());
 
         if let Some(method) = method_name {
             let reference_name = if let Some(receiver) = receiver_name {
@@ -1241,6 +1298,8 @@ impl ObjcExtractor {
                 line: node.start_position().row as u32,
                 column: node.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
             });
         }
     }
@@ -1254,7 +1313,7 @@ impl ObjcExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "identifier" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1269,7 +1328,7 @@ impl ObjcExtractor {
         if let Some(declarator) = find_descendant_by_kind(node, "function_declarator")
             && let Some(ident) = find_direct_child_by_kind(declarator, "identifier")
         {
-            return Some(state.node_text(ident));
+            return Some(state.node_text(ident).to_string());
         }
         None
     }
@@ -1285,7 +1344,7 @@ impl ObjcExtractor {
                 .trim()
                 .to_string();
         }
-        let text = state.node_str(node);
+        let text = state.node_text(node);
         if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
         } else {
@@ -1295,7 +1354,7 @@ impl ObjcExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, clean_c_doc_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     /// Extract first line of text as a signature.
@@ -1324,17 +1383,16 @@ impl crate::LanguageExtractor for ObjcExtractor {
         "Objective-C"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        ObjcExtractor::extract_objc(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        ObjcExtractor::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(
+            ObjcExtractor::extract_tree(file_path, source, tree, scope),
+        )
     }
 }

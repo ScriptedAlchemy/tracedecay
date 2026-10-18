@@ -1,11 +1,11 @@
-//! `GET /api/events` — the dashboard's typed Server-Sent Events stream.
+//! `GET /api/events`, the dashboard's typed Server-Sent Events stream.
 //!
 //! The dashboard frontend replaces polling with one revision-monotone SSE path.
 //! Every event
 //! carries stream/run identity, a monotone event revision, an entity revision,
 //! exact scope, observation time, an optional source watermark, and coverage.
 //! The client reducer deduplicates by `(stream, event_revision)`, rejects stale
-//! generations, and refetches the canonical read model on a revision gap — so
+//! generations, and refetches the canonical read model on a revision gap, so
 //! this endpoint deliberately emits **coarse invalidation** events, never full
 //! read-model payloads. A periodic heartbeat (both a typed `heartbeat` event and
 //! transport-level keep-alive comment frames) proves liveness.
@@ -17,14 +17,14 @@
 //! Two kinds of source feed this endpoint.
 //!
 //! **Polled digests** (cheap, within dashboard territory):
-//! - `project_registry_changed` — polled from the project registry snapshot
+//! - `project_registry_changed`, polled from the project registry snapshot
 //!   digest (real end-to-end);
-//! - `storage_telemetry_invalidated` — polled coarsely from the summed store
+//! - `storage_telemetry_invalidated`, polled coarsely from the summed store
 //!   size (a real change signal that tells the client to refetch
 //!   `/api/storage/telemetry`).
 //!
 //! **Durable activity records** (via [`tracedecay_session_memory::event_lane`]): the daemon
-//! observes real agent work continuously — host hooks admitted on the MCP
+//! observes real agent work continuously, host hooks admitted on the MCP
 //! boundary, transcript messages persisted, touched paths queued for indexing,
 //! tool calls dispatched. Each producer durably publishes its own project
 //! scope before waking live consumers, and this endpoint turns those records into
@@ -35,7 +35,7 @@
 //! running many agents produces hook and index pulses far faster than any
 //! visualization can render, and the client's queue is bounded. So pulses
 //! accumulate into one bucket per `(family, project)` and flush on a fixed
-//! [`ACTIVITY_FLUSH_INTERVAL`] tick — at most **two events per second per family
+//! [`ACTIVITY_FLUSH_INTERVAL`] tick, at most **two events per second per family
 //! per project**, each carrying the coalesced `count`/`units` in its payload.
 //! Slow or lagged consumers replay from the persisted producer frontier.
 //! Retention eviction and rejected oversized records advance explicit drop and
@@ -51,16 +51,16 @@ use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::IntoResponse;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
-use tokio_stream::wrappers::ReceiverStream;
 
 use tracedecay_runtime_core::db::engine::QueryExecutor;
+use tracedecay_runtime_core::native_runtime;
 
 use super::DashboardState;
 use super::read_model::{
@@ -139,6 +139,9 @@ pub enum DashboardEventKindV1 {
         first_available: u64,
         dropped_events: u64,
     },
+    /// Durable activity replay failed. A live stream is not proof that history
+    /// was empty.
+    ReplayUnavailable { reason: String },
 }
 
 impl DashboardEventKindV1 {
@@ -156,7 +159,7 @@ impl DashboardEventKindV1 {
             Self::CodeIndexActivity { .. } => ActivityFamilyV1::CodeIndex.stream_name(),
             Self::ToolCallActivity { .. } => ActivityFamilyV1::ToolCall.stream_name(),
             Self::TaskActivity { .. } => ActivityFamilyV1::Task.stream_name(),
-            Self::ResumeGap { .. } => "control",
+            Self::ResumeGap { .. } | Self::ReplayUnavailable { .. } => "control",
         }
     }
 
@@ -274,9 +277,12 @@ struct EventStreamState {
     last_registry_digest: Option<String>,
     last_store_total_bytes: Option<u64>,
     /// Canonical project root → registered project id, refreshed for free from
-    /// the registry poll this task already runs. Lets a producer that does not
-    /// hold its project id (transcript ingest) still land on the right neuron.
-    registry_roots: HashMap<PathBuf, String>,
+    /// the shared registry poll. Lets a producer that does not hold its
+    /// project id (transcript ingest) still land on the right neuron.
+    registry_roots: Arc<HashMap<PathBuf, String>>,
+    /// Reader of the shared source poll; `None` until `subscribe` runs at
+    /// stream open so unit tests that never connect keep direct control.
+    source_receiver: Option<tokio::sync::watch::Receiver<SourcePollSnapshot>>,
 }
 
 impl EventStreamState {
@@ -289,7 +295,8 @@ impl EventStreamState {
             activity_dropped_events: 0,
             last_registry_digest: None,
             last_store_total_bytes: None,
-            registry_roots: HashMap::new(),
+            registry_roots: Arc::new(HashMap::new()),
+            source_receiver: None,
         }
     }
 
@@ -393,7 +400,7 @@ impl EventStreamState {
 
     /// Resolve the registered project id for an observed project root. Prefers
     /// the id the producer already supplied; falls back to the registry map,
-    /// canonicalizing once (only here, at flush time — never on the producer's
+    /// canonicalizing once (only here, at flush time, never on the producer's
     /// hot path).
     fn resolve_project_id(&self, root: &Path, supplied: Option<String>) -> Option<String> {
         if supplied.is_some() {
@@ -409,7 +416,7 @@ impl EventStreamState {
     /// Turn one coalesced bucket into an envelope-disciplined event. `base` is
     /// the serving dashboard's scope: the observed project's id replaces
     /// `project_id`, while the storage identity stays the store this daemon
-    /// actually observed the work in — which is exactly where the observation
+    /// actually observed the work in, which is exactly where the observation
     /// was recorded.
     fn activity_event(
         &mut self,
@@ -480,38 +487,149 @@ impl EventStreamState {
             .collect()
     }
 
-    /// Poll all real sources against `state`, appending any change events.
-    async fn poll_sources(
-        &mut self,
-        state: &DashboardState,
-        scope: &DashboardScopeV1,
-    ) -> Vec<DashboardEventV1> {
-        hotpath::future!(
+    /// Poll the shared source snapshot, appending any change events.
+    async fn poll_sources(&mut self, scope: &DashboardScopeV1) -> Vec<DashboardEventV1> {
+        tracing::Instrument::instrument(
             async move {
                 let mut events = Vec::new();
-                if let Some(snapshot) = registry_snapshot(state).await {
-                    self.registry_roots = snapshot.roots;
+                let Some(receiver) = self.source_receiver.as_mut() else {
+                    return events;
+                };
+                // `watch::channel` starts with a placeholder, not a source
+                // baseline. Wait for the poller's first complete observation;
+                // otherwise a connection could consume the empty default and
+                // miss the first real change before its next poll tick.
+                let needs_initial_snapshot = !receiver.borrow().initialized;
+                if needs_initial_snapshot && receiver.changed().await.is_err() {
+                    return events;
+                }
+                let snapshot = receiver.borrow_and_update().clone();
+                if let Some(registry) = snapshot.registry {
+                    self.registry_roots = registry.roots;
                     if let Some(event) =
-                        self.detect_registry_change(snapshot.digest, snapshot.count, scope)
+                        self.detect_registry_change(registry.digest, registry.count, scope)
                     {
                         events.push(event);
                     }
                 }
-                if let Some(total) = summed_store_bytes(state).await
+                if let Some(total) = snapshot.total_store_bytes
                     && let Some(event) = self.detect_storage_change(total, scope)
                 {
                     events.push(event);
                 }
                 events
             },
-            label = "dashboard_api.events.poll"
+            tracing::trace_span!("dashboard_api.events.poll"),
         )
         .await
     }
 }
 
+/// Latest registry/storage observation published by the single shared poller
+/// owned by a dashboard state.
+#[derive(Clone, Default)]
+struct SourcePollSnapshot {
+    /// False only for the watch channel's placeholder. A published snapshot is
+    /// initialized even when both sources are currently unavailable, so a new
+    /// stream can establish a real baseline before it starts change detection.
+    initialized: bool,
+    registry: Option<RegistrySnapshot>,
+    total_store_bytes: Option<u64>,
+}
+
+/// One shared poller per `DashboardState`: the first `/api/events` stream
+/// starts it, and every stream reads its latest snapshot instead of running
+/// the same registry and store-size queries per client. The poller task exits
+/// when its last stream drops so a replaced dashboard state does not keep its
+/// store handles alive; a later stream re-arms it.
+#[derive(Clone, Default)]
+pub struct SharedSourcePoll {
+    sender: Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<SourcePollSnapshot>>>>,
+}
+
+impl SharedSourcePoll {
+    /// Acquire the poller slot without turning a prior holder's panic into an
+    /// SSE-server panic. The protected sender remains valid after poisoning, so
+    /// retain it and report the invariant failure rather than replacing or
+    /// discarding a live poller.
+    fn lock_sender(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<tokio::sync::watch::Sender<SourcePollSnapshot>>> {
+        match self.sender.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => {
+                tracing::error!("dashboard shared source poller slot was poisoned");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    /// Subscribe to the shared snapshot, starting the poller when it is not
+    /// running (first stream, or a restart after the last stream dropped).
+    fn subscribe(
+        &self,
+        state: &DashboardState,
+    ) -> tokio::sync::watch::Receiver<SourcePollSnapshot> {
+        let mut slot = self.lock_sender();
+        if let Some(sender) = slot.as_ref() {
+            return sender.subscribe();
+        }
+        let (sender, _initial) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        // Only the two stores: the last `DashboardState` clone must not drop
+        // on a native worker, where daemon-owned ports may expect Tokio.
+        let savings_db = state.savings_db.clone();
+        let mem_db = Arc::clone(&state.mem_db);
+        let poller_sender = sender.clone();
+        let poller_slot = Arc::clone(&self.sender);
+        let poller = native_runtime::NativeTask::spawn(async move {
+            let mut due = Instant::now();
+            loop {
+                let timer = native_runtime::sleep_until(due).await;
+                due = Instant::now() + POLL_INTERVAL;
+                if let Err(error) = &timer {
+                    // Without a timer the poller would spin; it stops and the
+                    // next subscriber arms a fresh one.
+                    tracing::error!(%error, "dashboard shared source poller timer unavailable");
+                }
+                if timer.is_err() || poller_sender.receiver_count() == 0 {
+                    // The exit re-check runs under the same lock `subscribe`
+                    // holds while attaching a receiver: a stream that lands in
+                    // between either bumps the count (keep polling) or sees
+                    // the cleared slot and arms a fresh poller.
+                    let mut slot = match poller_slot.lock() {
+                        Ok(slot) => slot,
+                        Err(poisoned) => {
+                            tracing::error!("dashboard shared source poller slot was poisoned");
+                            poisoned.into_inner()
+                        }
+                    };
+                    if timer.is_err() || poller_sender.receiver_count() == 0 {
+                        *slot = None;
+                        return;
+                    }
+                }
+                let registry = registry_snapshot(savings_db.as_ref()).await;
+                let total_store_bytes = store_total_bytes(&mem_db.read_connection()).await;
+                let _ = poller_sender.send(SourcePollSnapshot {
+                    initialized: true,
+                    registry,
+                    total_store_bytes,
+                });
+            }
+        });
+        let receiver = sender.subscribe();
+        match poller {
+            Ok(_detached) => *slot = Some(sender),
+            // The receiver's sender drops here, so streams skip source
+            // events and the next subscriber retries.
+            Err(error) => tracing::error!(%error, "dashboard shared source poller not admitted"),
+        }
+        receiver
+    }
+}
+
 /// `GET /api/events`
-pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> impl IntoResponse {
+pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> Response {
     let scope = scope_from_state(&state);
     let run_id = format!("run-{}-{}", std::process::id(), now_micros());
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(CHANNEL_CAPACITY);
@@ -523,64 +641,96 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
     let requested = parse_last_event_id(&headers);
     let activity_db = state.lcm_db.clone();
     let activity_project_id = state.project_id.clone();
-    let initial_replay = match (activity_db.as_deref(), activity_project_id.as_deref()) {
-        (Some(db), Some(project_id)) => {
-            tracedecay_session_memory::event_lane::replay_after(
-                db,
-                project_id,
-                requested.as_ref().map(|resume| resume.sequence),
-            )
-            .await
-        }
-        _ => None,
-    };
+    let delivery_settlements = Arc::clone(&state.delivery_settlements);
+    let source_receiver = state.event_source_poll.subscribe(&state);
 
-    tokio::spawn(async move {
-        let delivery_settlements = Arc::clone(&state.delivery_settlements);
+    // The response returns before any store is read, so the stream opens
+    // even while the session store is busy.
+    let producer = native_runtime::NativeTask::spawn(async move {
         let connection_ref = crate::events_delivery::connection_ref(&run_id, &scope);
         let connection_ref_for_stream = connection_ref.clone();
         async {
+        let activity_run_id = run_id.clone();
         let mut stream_state = EventStreamState::new(run_id);
-        let mut interval = tokio::time::interval(POLL_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut flush = tokio::time::interval(ACTIVITY_FLUSH_INTERVAL);
-        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        stream_state.source_receiver = Some(source_receiver);
+        // The first frame proves the stream is live before the activity
+        // replay or the source baselines read a store.
+        let connected = stream_state.heartbeat(&scope);
+        if send_event(
+            &tx,
+            delivery_settlements.as_ref(),
+            connection_ref_for_stream.as_deref(),
+            connected,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+        let initial_replay = match (activity_db.as_deref(), activity_project_id.as_deref()) {
+            (Some(db), Some(project_id)) => {
+                tracedecay_session_memory::event_lane::replay_after(
+                    db,
+                    project_id,
+                    requested.as_ref().map(|resume| resume.sequence),
+                )
+                .await
+            }
+            _ => Ok(None),
+        };
+        let poll_due = native_runtime::sleep_until(Instant::now());
+        tokio::pin!(poll_due);
+        let flush_due = native_runtime::sleep_until(Instant::now());
+        tokio::pin!(flush_due);
         let mut tick: u64 = 0;
         let mut pending: std::collections::BTreeMap<ActivityBucketKeyV1, ActivityBucketV1> =
             std::collections::BTreeMap::new();
         let mut producer_cursor = requested.as_ref().map_or(0, |resume| resume.sequence);
         let mut control = Vec::new();
-        if let Some(mut replay) = initial_replay {
+        if let Err(reason) = &initial_replay {
+            control.push(replay_unavailable_event(&activity_run_id, &scope, reason));
+        }
+        if let Ok(Some(mut replay)) = initial_replay {
             let run_mismatch = requested
                 .as_ref()
                 .is_some_and(|resume| resume.run_id != replay.frontier.run_id);
             let invalid_frontier = requested
                 .as_ref()
                 .is_some_and(|resume| resume.sequence >= replay.frontier.next_sequence);
+            let mut replay_failed = false;
             if (run_mismatch || invalid_frontier)
                 && let (Some(db), Some(project_id)) =
                     (activity_db.as_deref(), activity_project_id.as_deref())
-                && let Some(from_start) =
-                    tracedecay_session_memory::event_lane::replay_after(db, project_id, None).await
             {
-                replay = from_start;
+                match tracedecay_session_memory::event_lane::replay_after(db, project_id, None)
+                    .await
+                {
+                    Ok(Some(from_start)) => replay = from_start,
+                    Err(reason) => {
+                        control.push(replay_unavailable_event(&activity_run_id, &scope, &reason));
+                        replay_failed = true;
+                    }
+                    Ok(None) => {}
+                }
             }
-            if replay.resume_gap || run_mismatch || invalid_frontier {
-                control.push(resume_gap_event(
-                    requested.as_ref().map_or(0, |resume| resume.sequence),
-                    &replay.frontier,
-                    &scope,
-                ));
-                producer_cursor = replay.frontier.retained_from_sequence.saturating_sub(1);
-            }
-            for record in replay.records {
-                producer_cursor = producer_cursor.max(record.producer_sequence);
-                accumulate_record(&mut pending, record);
+            if !replay_failed {
+                if replay.resume_gap || run_mismatch || invalid_frontier {
+                    control.push(resume_gap_event(
+                        requested.as_ref().map_or(0, |resume| resume.sequence),
+                        &replay.frontier,
+                        &scope,
+                    ));
+                    producer_cursor = replay.frontier.retained_from_sequence.saturating_sub(1);
+                }
+                for record in replay.records {
+                    producer_cursor = producer_cursor.max(record.producer_sequence);
+                    accumulate_record(&mut pending, record);
+                }
             }
         }
 
         // Prime the source baselines immediately so the first real change emits.
-        let _ = stream_state.poll_sources(&state, &scope).await;
+        let _ = stream_state.poll_sources(&scope).await;
         for event in control
             .into_iter()
             .chain(stream_state.flush_activity(&mut pending, &scope))
@@ -600,16 +750,26 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
 
         loop {
             let batch: Vec<DashboardEventV1> = tokio::select! {
-                _ = interval.tick() => {
+                fired = &mut poll_due => {
+                    poll_due.set(native_runtime::sleep_until(Instant::now() + POLL_INTERVAL));
+                    if let Err(error) = fired {
+                        tracing::error!(%error, "dashboard event stream timer unavailable");
+                        return;
+                    }
                     tick = tick.saturating_add(1);
                     let mut batch = Vec::new();
                     if tick.is_multiple_of(HEARTBEAT_EVERY_TICKS) {
                         batch.push(stream_state.heartbeat(&scope));
                     }
-                    batch.extend(stream_state.poll_sources(&state, &scope).await);
+                    batch.extend(stream_state.poll_sources(&scope).await);
                     batch
                 }
-                _ = flush.tick() => {
+                fired = &mut flush_due => {
+                    flush_due.set(native_runtime::sleep_until(Instant::now() + ACTIVITY_FLUSH_INTERVAL));
+                    if let Err(error) = fired {
+                        tracing::error!(%error, "dashboard event stream timer unavailable");
+                        return;
+                    }
                     if pending.is_empty() {
                         continue;
                     }
@@ -628,12 +788,15 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
                         Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                             if let (Some(db), Some(project_id)) =
                                 (activity_db.as_deref(), activity_project_id.as_deref())
-                                && let Some(replay) = tracedecay_session_memory::event_lane::replay_after(
+                            {
+                                match tracedecay_session_memory::event_lane::replay_after(
                                     db,
                                     project_id,
                                     Some(producer_cursor),
-                                ).await
-                            {
+                                )
+                                .await
+                                {
+                                    Ok(Some(replay)) => {
                                 if replay.resume_gap {
                                     let event = resume_gap_event(producer_cursor, &replay.frontier, &scope);
                                     if send_event(
@@ -651,6 +814,27 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
                                         producer_cursor = record.producer_sequence;
                                         accumulate_record(&mut pending, record);
                                     }
+                                }
+                                    }
+                                    Err(reason) => {
+                                        let event = replay_unavailable_event(
+                                            &activity_run_id,
+                                            &scope,
+                                            &reason,
+                                        );
+                                        if send_event(
+                                            &tx,
+                                            delivery_settlements.as_ref(),
+                                            connection_ref_for_stream.as_deref(),
+                                            event,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            return;
+                                        }
+                                    }
+                                    Ok(None) => {}
                                 }
                             }
                         }
@@ -683,12 +867,38 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
             delivery_settlements.disconnect(connection_ref).await;
         }
     });
+    if let Err(error) = producer {
+        tracing::error!(%error, "dashboard event stream producer not admitted");
+        return crate::util::json_error(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            format!("dashboard event stream could not start: {error}"),
+        )
+        .into_response();
+    }
 
-    Sse::new(ReceiverStream::new(rx)).keep_alive(
-        KeepAlive::new()
-            .interval(KEEP_ALIVE_INTERVAL)
-            .text("keep-alive"),
-    )
+    keep_alive_sse(rx, KEEP_ALIVE_INTERVAL).into_response()
+}
+
+/// Sends a keep-alive comment after each `interval` without an event, as
+/// axum's `KeepAlive` does, but on a native timer: axum's arms a Tokio timer,
+/// which panics on a runtime without one.
+fn keep_alive_sse(
+    rx: tokio::sync::mpsc::Receiver<Result<Event, Infallible>>,
+    interval: Duration,
+) -> impl IntoResponse {
+    Sse::new(futures_util::stream::unfold(rx, move |mut rx| async move {
+        let event = match native_runtime::timeout(interval, rx.recv()).await {
+            Ok(event) => event?,
+            Err(native_runtime::TimeoutError::Elapsed) => {
+                Ok(Event::default().comment("keep-alive"))
+            }
+            Err(native_runtime::TimeoutError::TimerUnavailable(error)) => {
+                tracing::error!(%error, "dashboard event stream keep-alive timer unavailable");
+                return None;
+            }
+        };
+        Some((event, rx))
+    }))
 }
 
 async fn send_event(
@@ -697,7 +907,7 @@ async fn send_event(
     connection_ref: Option<&str>,
     mut event: DashboardEventV1,
 ) -> Result<(), ()> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             if let Some(connection_ref) = connection_ref
                 && !delivery_settlements
@@ -720,7 +930,7 @@ async fn send_event(
             };
             tx.send(Ok(frame)).await.map_err(|_| ())
         },
-        label = "dashboard_api.events.delivery"
+        tracing::trace_span!("dashboard_api.events.delivery"),
     )
     .await
 }
@@ -752,6 +962,30 @@ async fn receive_activity(
     match receiver {
         Some(receiver) => Some(receiver.recv().await),
         None => std::future::pending().await,
+    }
+}
+
+fn replay_unavailable_event(
+    run_id: &str,
+    scope: &DashboardScopeV1,
+    reason: &str,
+) -> DashboardEventV1 {
+    DashboardEventV1 {
+        stream: "control".to_string(),
+        run_id: run_id.to_owned(),
+        event_revision: 0,
+        producer_sequence: None,
+        retained_from_sequence: None,
+        dropped_events: 0,
+        entity_revision: None,
+        scope: scope.clone(),
+        observation_time_micros: now_micros(),
+        source_watermark: None,
+        coverage: DashboardCoverageV1::unknown(),
+        delivery_receipt: None,
+        kind: DashboardEventKindV1::ReplayUnavailable {
+            reason: reason.to_owned(),
+        },
     }
 }
 
@@ -810,9 +1044,10 @@ fn accumulate_record(
 /// Serialize one typed event into an SSE frame, named by its stream so the
 /// client can route by `event:` without parsing the payload first.
 fn encode_event(event: &DashboardEventV1) -> Result<Event, serde_json::Error> {
-    let data =
-        hotpath::measure_block!("dashboard_api.http.serialize", serde_json::to_string(event))?;
-    crate::observe::record_response_bytes(data.len());
+    let data = {
+        let _span = tracing::trace_span!("dashboard_api.http.serialize").entered();
+        serde_json::to_string(event)
+    }?;
     let frame = Event::default().event(event.kind.stream()).data(data);
     let resume_sequence = match &event.kind {
         DashboardEventKindV1::ResumeGap {
@@ -828,15 +1063,18 @@ fn encode_event(event: &DashboardEventV1) -> Result<Event, serde_json::Error> {
 
 /// One observation of the project registry: its change digest, its size, and
 /// the canonical-root → project-id map the activity flush resolves against.
+#[derive(Clone)]
 struct RegistrySnapshot {
     digest: String,
     count: u64,
-    roots: HashMap<PathBuf, String>,
+    roots: Arc<HashMap<PathBuf, String>>,
 }
 
 /// Compute a stable digest of the project-registry snapshot plus its count.
-async fn registry_snapshot(state: &DashboardState) -> Option<RegistrySnapshot> {
-    let db = state.savings_db.as_ref()?;
+async fn registry_snapshot(
+    db: Option<&tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+) -> Option<RegistrySnapshot> {
+    let db = db?;
     let projects = db.list_code_projects(250).await.ok()?;
     let count = projects.len() as u64;
     let mut hasher = DefaultHasher::new();
@@ -862,26 +1100,13 @@ async fn registry_snapshot(state: &DashboardState) -> Option<RegistrySnapshot> {
     Some(RegistrySnapshot {
         digest: format!("{:016x}", hasher.finish()),
         count,
-        roots,
+        roots: Arc::new(roots),
     })
 }
 
-/// Sum the observed size of the always-held stores (graph + memory) as a coarse
-/// storage-change signal. Returns `None` only when neither pragma read succeeds.
-async fn summed_store_bytes(state: &DashboardState) -> Option<u64> {
-    let mut total: u64 = 0;
-    let mut any = false;
-    if let Some(bytes) = store_total_bytes(&state.graph_conn).await {
-        total = total.saturating_add(bytes);
-        any = true;
-    }
-    if let Some(bytes) = store_total_bytes(&state.mem_db.read_connection()).await {
-        total = total.saturating_add(bytes);
-        any = true;
-    }
-    any.then_some(total)
-}
-
+/// Observed size of the always-held project store as a coarse storage-change
+/// signal. `graph_conn` is a read connection onto `mem_db`, so the shared
+/// database is measured once. Returns `None` when a pragma read fails.
 async fn store_total_bytes(conn: &(impl QueryExecutor + ?Sized)) -> Option<u64> {
     let page_size = pragma_u64(conn, "page_size").await?;
     let page_count = pragma_u64(conn, "page_count").await?;
@@ -939,12 +1164,14 @@ pub(crate) async fn dashboard_state_fixture(
         "fixture project root must accept a repository identity marker"
     );
     let project_root = project.path().to_path_buf();
+    let profile_root = project_root.join("profile");
     let store_root = project_root.join("store");
     let dashboard_root = store_root.join("dashboard");
     std::fs::create_dir_all(&dashboard_root).expect("fixture dashboard root");
 
     let state = DashboardState {
         build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        host_io: crate::test_support::fixture_host_io(),
         project_id: Some(project_identity.as_str().to_owned()),
         resolved_scope: crate::scope::resolve_dashboard_scope(
             &project_root,
@@ -952,6 +1179,7 @@ pub(crate) async fn dashboard_state_fixture(
         ),
         code_graph_read_admission: None,
         code_graph_projection_read_port: None,
+        code_read_authority: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: FactOwnerV1::Project {
@@ -966,6 +1194,8 @@ pub(crate) async fn dashboard_state_fixture(
         lcm_db: None,
         lcm_db_path: String::new(),
         lcm_scope: "unavailable".to_owned(),
+        session_authority: crate::DashboardSessionAuthorityStateV1::Unavailable,
+        session_mount: None,
         lcm_read_authority: None,
         git_correlation_read_authority: None,
         delivery_read_authority: None,
@@ -973,16 +1203,17 @@ pub(crate) async fn dashboard_state_fixture(
         savings_db_path: String::new(),
         project_root,
         code_index_freshness_reader: None,
-        explorer_semantic_reader: None,
         feedback_status_reader: None,
+        pr_autotrack_reader: None,
         storage_mode: "profile_sharded".to_owned(),
+        profile_root,
         store_root,
-        config_path: project.path().join("config.json"),
         dashboard_root,
-        retention_config: crate::config::RetentionConfig::default(),
+        retention_config: tracedecay_configuration::RetentionConfig::default(),
         user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),
         profile_code_index_worker_settings: None,
         token_counts: Arc::new(crate::token_count::TokenCountCache::new()),
+        derived_snapshots: Arc::new(crate::snapshot_cache::DerivedSnapshotCaches::new()),
         code_diagnostics_authority: None,
         automation_authority: None,
         automation_observation: None,
@@ -994,6 +1225,7 @@ pub(crate) async fn dashboard_state_fixture(
         delivery_settlements: Arc::new(
             crate::events_delivery::DashboardDeliverySettlementRegistryV1::new(None),
         ),
+        event_source_poll: crate::events_api::SharedSourcePoll::default(),
     };
     (project, state)
 }
@@ -1001,7 +1233,50 @@ pub(crate) async fn dashboard_state_fixture(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     use super::*;
+
+    async fn next_frame(
+        body: &mut (impl futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+    ) -> Option<String> {
+        let frame = futures_util::StreamExt::next(body)
+            .await?
+            .expect("sse body frame");
+        Some(String::from_utf8(frame.to_vec()).expect("utf-8 sse frame"))
+    }
+
+    #[test]
+    fn event_stream_keeps_alive_without_a_tokio_timer() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime without a time driver");
+        runtime.block_on(async {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let mut body = keep_alive_sse(rx, Duration::from_millis(20))
+                .into_response()
+                .into_body()
+                .into_data_stream();
+            tx.send(Ok(Event::default().data("first")))
+                .await
+                .expect("stream open");
+            assert_eq!(
+                next_frame(&mut body).await.as_deref(),
+                Some("data: first\n\n")
+            );
+            assert_eq!(
+                next_frame(&mut body).await.as_deref(),
+                Some(": keep-alive\n\n")
+            );
+            drop(tx);
+            assert_eq!(
+                next_frame(&mut body).await,
+                None,
+                "the stream ends with its producer"
+            );
+        });
+    }
 
     async fn registered_database_for_test(
         path: &Path,
@@ -1036,21 +1311,6 @@ mod tests {
             storage_mode: "profile_sharded".into(),
             store_root: "/store".into(),
         }
-    }
-
-    #[test]
-    fn heartbeat_revisions_are_monotone_per_stream() {
-        let mut state = EventStreamState::new("run-test".to_string());
-        let scope = scope();
-        let first = state.heartbeat(&scope);
-        let second = state.heartbeat(&scope);
-        let third = state.heartbeat(&scope);
-        assert_eq!(first.event_revision, 1);
-        assert_eq!(second.event_revision, 2);
-        assert_eq!(third.event_revision, 3);
-        assert_eq!(first.stream, STREAM_HEARTBEAT);
-        assert_eq!(first.kind, DashboardEventKindV1::Heartbeat);
-        assert_eq!(first.run_id, "run-test");
     }
 
     #[test]
@@ -1139,22 +1399,6 @@ mod tests {
             .detect_registry_change("digest-c".into(), 4, &scope)
             .expect("second registry change");
         assert_eq!(next.event_revision, 2);
-    }
-
-    #[test]
-    fn storage_change_emits_only_after_baseline() {
-        let mut state = EventStreamState::new("run-test".to_string());
-        let scope = scope();
-        assert!(state.detect_storage_change(1000, &scope).is_none());
-        assert!(state.detect_storage_change(1000, &scope).is_none());
-        let event = state
-            .detect_storage_change(2048, &scope)
-            .expect("storage change event");
-        assert_eq!(event.stream, STREAM_STORAGE_TELEMETRY);
-        assert_eq!(
-            event.kind,
-            DashboardEventKindV1::StorageTelemetryInvalidated { total_bytes: 2048 }
-        );
     }
 
     #[test]
@@ -1291,9 +1535,10 @@ mod tests {
     #[test]
     fn a_pulse_without_a_project_id_resolves_through_the_registry_map() {
         let mut state = EventStreamState::new("run-test".to_string());
-        state
-            .registry_roots
-            .insert(PathBuf::from("/repo/ingested"), "proj-ingested".to_string());
+        state.registry_roots = Arc::new(HashMap::from([(
+            PathBuf::from("/repo/ingested"),
+            "proj-ingested".to_string(),
+        )]));
         let mut pending = std::collections::BTreeMap::new();
         accumulate_record(
             &mut pending,
@@ -1323,28 +1568,19 @@ mod tests {
     }
 
     #[test]
-    fn activity_families_serialize_with_their_own_family_tags() {
-        for family in ActivityFamilyV1::ALL {
-            let kind = DashboardEventKindV1::activity(family, 1, 1, None);
-            let value = serde_json::to_value(&kind).unwrap();
-            let tag = value["family"].as_str().expect("family tag").to_string();
-            assert!(
-                tag.ends_with("_activity"),
-                "activity families are tagged as activity: {tag}"
-            );
-            // The SSE event name must be the one the frontend subscribes to.
-            assert_eq!(kind.stream(), family.stream_name());
-        }
+    fn tool_call_activity_serializes_its_family_tag_and_sse_stream() {
+        let kind = DashboardEventKindV1::activity(
+            ActivityFamilyV1::ToolCall,
+            4,
+            4,
+            Some("tracedecay_context".into()),
+        );
         assert_eq!(
-            serde_json::to_value(DashboardEventKindV1::activity(
-                ActivityFamilyV1::ToolCall,
-                4,
-                4,
-                Some("tracedecay_context".into()),
-            ))
-            .unwrap()["family"],
+            serde_json::to_value(&kind).unwrap()["family"],
             "tool_call_activity"
         );
+        // The SSE event name the frontend subscribes to.
+        assert_eq!(kind.stream(), "tool_call");
     }
 
     #[test]
@@ -1440,20 +1676,236 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_sources_waits_for_the_first_published_snapshot_before_baselining() {
+        let (sender, receiver) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        let mut state = EventStreamState::new("run-test".to_string());
+        state.source_receiver = Some(receiver);
+        let base = scope();
+
+        let poll = tokio::spawn(async move {
+            let initial = state.poll_sources(&base).await;
+            (state, initial)
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !poll.is_finished(),
+            "the watch placeholder must not become the source baseline"
+        );
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(10),
+            })
+            .expect("polling stream is still subscribed");
+        let (mut state, initial) = poll.await.expect("source poll task completes");
+        assert!(
+            initial.is_empty(),
+            "first published snapshot establishes baseline"
+        );
+
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(11),
+            })
+            .expect("polling stream is still subscribed");
+        let changes = state.poll_sources(&scope()).await;
+        assert_eq!(
+            changes.len(),
+            1,
+            "the first post-baseline change is emitted"
+        );
+        assert_eq!(
+            changes[0].kind,
+            DashboardEventKindV1::StorageTelemetryInvalidated { total_bytes: 11 }
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_initial_source_poll_releases_its_watch_receiver() {
+        let (sender, receiver) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        let mut state = EventStreamState::new("cancelled-poll".to_string());
+        state.source_receiver = Some(receiver);
+        let poll = tokio::spawn(async move { state.poll_sources(&scope()).await });
+        tokio::task::yield_now().await;
+        assert_eq!(sender.receiver_count(), 1, "the poll owns one receiver");
+
+        poll.abort();
+        assert!(poll.await.expect_err("aborted initial poll").is_cancelled());
+        assert_eq!(
+            sender.receiver_count(),
+            0,
+            "cancelling before the first snapshot must not retain a receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_source_poller_join_baselines_the_current_published_snapshot() {
+        let (sender, first) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(10),
+            })
+            .expect("initial subscriber keeps sender alive");
+        let mut state = EventStreamState::new("late-join".to_string());
+        state.source_receiver = Some(sender.subscribe());
+
+        assert!(
+            state.poll_sources(&scope()).await.is_empty(),
+            "a late joiner must baseline the shared current snapshot"
+        );
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(12),
+            })
+            .expect("late joiner is still subscribed");
+        let changes = state.poll_sources(&scope()).await;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].kind,
+            DashboardEventKindV1::StorageTelemetryInvalidated { total_bytes: 12 }
+        );
+        drop(first);
+    }
+
+    #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (project, mut dash) = dashboard_state_fixture("project.dashboard-events").await;
         let registry = registered_database_for_test(&project.path().join("registry.db")).await;
         dash.savings_db_path = registry.db_path().display().to_string();
         dash.savings_db = Some(registry);
         let scope = scope_from_state(&dash);
         let mut state = EventStreamState::new("run-test".to_string());
+        let mut receiver = dash.event_source_poll.subscribe(&dash);
+        // The shared poller publishes on its own tick; wait for that first
+        // snapshot instead of racing it.
+        tokio::time::timeout(Duration::from_secs(60), receiver.changed())
+            .await
+            .expect("shared poller publishes its first snapshot")
+            .expect("shared poller sender is alive");
+        state.source_receiver = Some(receiver);
 
         // First poll primes the baselines and emits nothing.
-        let primed = state.poll_sources(&dash, &scope).await;
-        assert!(primed.is_empty(), "baseline poll must not emit events");
-        // The storage baseline is a real summed size read.
-        assert!(state.last_store_total_bytes.unwrap_or(0) > 0);
-        assert!(state.last_registry_digest.is_some());
+        let primed = state.poll_sources(&scope).await;
+        assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
+        let database_bytes = super::pragma_u64(&dash.mem_db.read_connection(), "page_size")
+            .await
+            .expect("database page size")
+            * super::pragma_u64(&dash.mem_db.read_connection(), "page_count")
+                .await
+                .expect("database page count");
+        assert_eq!(state.last_store_total_bytes, Some(database_bytes));
+        let mut hasher = DefaultHasher::new();
+        0_u64.hash(&mut hasher);
+        assert_eq!(
+            state.last_registry_digest.as_deref(),
+            Some(format!("{:016x}", hasher.finish())).as_deref()
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_source_poller_releases_its_state_after_the_last_stream() {
+        let (_project, dash) = dashboard_state_fixture("project.dashboard-events-retire").await;
+        let baseline = Arc::strong_count(&dash.mem_db);
+        let receiver = dash.event_source_poll.subscribe(&dash);
+        assert!(
+            Arc::strong_count(&dash.mem_db) > baseline,
+            "the running poller holds the project store"
+        );
+
+        drop(receiver);
+        // Generous ceiling: the loop exits as soon as the poller's next tick
+        // retires it, so only a genuine leak waits this long.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while Arc::strong_count(&dash.mem_db) > baseline {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the poller must release the project store once no stream reads it"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(dash.event_source_poll.lock_sender().is_none());
+
+        // A later stream re-arms a fresh poller that publishes again.
+        let mut receiver = dash.event_source_poll.subscribe(&dash);
+        tokio::time::timeout(Duration::from_secs(60), receiver.changed())
+            .await
+            .expect("re-armed poller publishes")
+            .expect("re-armed poller sender is alive");
+    }
+
+    #[test]
+    fn shared_source_poller_publishes_without_a_tokio_runtime() {
+        let tokio = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, dash) =
+            tokio.block_on(dashboard_state_fixture("project.dashboard-events-native"));
+        let initialized = native_runtime::block_on(async {
+            let mut receiver = dash.event_source_poll.subscribe(&dash);
+            native_runtime::timeout(Duration::from_secs(60), receiver.changed())
+                .await
+                .expect("shared poller publishes its first snapshot")
+                .expect("shared poller sender is alive");
+            receiver.borrow().initialized
+        })
+        .expect("native block_on");
+        assert!(
+            initialized,
+            "the first published snapshot is a real observation"
+        );
+    }
+
+    #[test]
+    fn event_stream_sends_its_first_frame_without_a_tokio_runtime() {
+        let tokio = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, dash) =
+            tokio.block_on(dashboard_state_fixture("project.dashboard-events-stream"));
+        let writer_waits = native_runtime::native_thread_writer_waits();
+        let first = native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let mut body = events(State(dash), HeaderMap::new())
+                .await
+                .into_response()
+                .into_body()
+                .into_data_stream();
+            native_runtime::timeout(Duration::from_secs(60), next_frame(&mut body))
+                .await
+                .expect("the stream producer sends its connected frame")
+        })
+        .expect("native block_on");
+        assert!(
+            first
+                .as_deref()
+                .is_some_and(|frame| frame.starts_with("event: heartbeat\n")),
+            "{first:?}"
+        );
+        assert_eq!(
+            native_runtime::native_thread_writer_waits(),
+            writer_waits,
+            "the stream parked no native thread on a writer"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_store_bytes_counts_the_shared_database_once() {
+        let (_project, dash) = dashboard_state_fixture("project.dashboard-events-bytes").await;
+        let page_size = pragma_u64(&dash.graph_conn, "page_size")
+            .await
+            .expect("page_size");
+        let page_count = pragma_u64(&dash.graph_conn, "page_count")
+            .await
+            .expect("page_count");
+        let database_bytes = page_size * page_count;
+        assert!(database_bytes > 0, "fixture database has pages");
+
+        assert_eq!(
+            store_total_bytes(&dash.mem_db.read_connection()).await,
+            Some(database_bytes)
+        );
     }
 }

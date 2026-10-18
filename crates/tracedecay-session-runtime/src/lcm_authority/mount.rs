@@ -5,15 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{
     CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, RequestId,
 };
 use tracedecay_domain::{ActorId, UtcMicros};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
-    CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
-    ResolvedSessionIdentity, application_observed_at, session_application_grant_digest,
+    CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets, ResolvedSessionIdentity,
+    application_observed_at, session_application_grant_digest,
 };
 use tracedecay_session_memory::session::SessionRequestBinding;
 use tracedecay_session_memory::session::lcm::{
@@ -33,7 +34,7 @@ const LCM_GRANT_ID: &str = "grant.daemon.lcm";
 const LCM_GRANT_SETTLEMENT_MARGIN: Duration = Duration::from_secs(1);
 // The canonical LCM operation budgets. LCM reads verify content hashes over
 // whole payloads before slicing, so their byte budget covers verified read
-// I/O — not the response, which stays bounded by the context budget and the
+// I/O, not the response, which stays bounded by the context budget and the
 // MCP response cap. The admitted describe/expand bindings share these.
 pub const LCM_MAX_RESULTS: u64 = 4_096;
 pub const LCM_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -72,7 +73,6 @@ fn lcm_operation_and_grant_expiries(observed_at: UtcMicros) -> Option<(UtcMicros
     Some((operation_expires_at, grant_expires_at))
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl MountedLcmAuthority {
     fn invocation(&self, request: LcmAuthorityRequest) -> Option<LcmAuthorityInvocation> {
         let operation = request.operation();
@@ -213,15 +213,14 @@ fn lcm_binding_digest(
     digest.finalize().into()
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl MountedLcmAuthorityPort for MountedLcmAuthority {
     fn execute(&self, request: LcmAuthorityRequest) -> MountedLcmFuture<'_> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let invocation = self.invocation(request)?;
                 Some(self.authority.execute(invocation).await)
             },
-            label = "daemon.lcm.mount.execute"
+            tracing::trace_span!("daemon.lcm.mount.execute"),
         ))
     }
 
@@ -269,26 +268,22 @@ pub fn mount_registered_lcm_authority(
 
 #[cfg(test)]
 mod deadline_tests {
-    use super::lcm_operation_and_grant_expiries;
+    use super::{LCM_GRANT_SETTLEMENT_MARGIN, lcm_operation_and_grant_expiries};
+    use crate::lcm_effects::LCM_EFFECT_CEILING;
     use tracedecay_domain::UtcMicros;
-
-    #[test]
-    fn grant_expiry_is_derived_from_operation_deadline_with_settlement_margin() {
-        let observed_at = UtcMicros(1_000_000);
-        let (operation_expires_at, grant_expires_at) =
-            lcm_operation_and_grant_expiries(observed_at).expect("bounded LCM deadlines");
-
-        assert_eq!(operation_expires_at, UtcMicros(31_000_000));
-        assert_eq!(grant_expires_at, UtcMicros(32_000_000));
-        assert_eq!(
-            grant_expires_at.0 - operation_expires_at.0,
-            1_000_000,
-            "the capability may outlive execution only by the settlement margin"
-        );
-    }
 
     #[test]
     fn lcm_deadline_derivation_fails_closed_on_clock_overflow() {
         assert!(lcm_operation_and_grant_expiries(UtcMicros(i64::MAX)).is_none());
+
+        let ceiling = i64::try_from(LCM_EFFECT_CEILING.as_micros()).unwrap();
+        let margin = i64::try_from(LCM_GRANT_SETTLEMENT_MARGIN.as_micros()).unwrap();
+        assert_eq!(
+            lcm_operation_and_grant_expiries(UtcMicros(1_000)),
+            Some((
+                UtcMicros(1_000 + ceiling),
+                UtcMicros(1_000 + ceiling + margin)
+            ))
+        );
     }
 }

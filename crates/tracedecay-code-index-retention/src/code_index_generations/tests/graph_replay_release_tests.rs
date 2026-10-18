@@ -6,14 +6,14 @@ use super::*;
 #[test]
 fn durable_deletion_receipt_enqueues_restart_safe_graph_release() {
     let (store, generations) = fixture_store(3);
-    let plan = plan_next_code_generation_retention_cancellable(
+    let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        None,
     )
     .expect("plan retention");
-    let deleted = plan.collectable_generations[0].clone();
+    let deleted = plan.collectable_generations.clone();
     execute_code_generation_retention(
         store.path(),
         plan,
@@ -25,12 +25,24 @@ fn durable_deletion_receipt_enqueues_restart_safe_graph_release() {
 
     let page = code_generation_graph_replay_release_page(store.path(), None)
         .expect("read durable graph replay release");
-    assert_eq!(page.releases.len(), 1);
-    assert_eq!(page.releases[0].generation, deleted);
-    assert_ne!(page.releases[0].generation.generation_id, generations[2].id);
+    assert_eq!(page.releases.len(), 2);
+    let mut released = page
+        .releases
+        .iter()
+        .map(|release| release.generation.clone())
+        .collect::<Vec<_>>();
+    released.sort_by(|left, right| left.generation_id.cmp(&right.generation_id));
+    assert_eq!(released, deleted);
+    assert!(
+        page.releases
+            .iter()
+            .all(|release| release.generation.generation_id != generations[2].id)
+    );
 
-    complete_code_generation_graph_replay_release(store.path(), &page.releases[0])
-        .expect("checkpoint graph replay release");
+    for release in &page.releases {
+        complete_code_generation_graph_replay_release(store.path(), release)
+            .expect("checkpoint graph replay release");
+    }
     assert!(
         code_generation_graph_replay_release_page(store.path(), None)
             .expect("read empty graph replay release queue")
@@ -43,11 +55,11 @@ fn durable_deletion_receipt_enqueues_restart_safe_graph_release() {
 fn graph_release_queue_pages_more_than_one_retention_batch() {
     let (store, _) = fixture_store(70);
     loop {
-        let plan = plan_next_code_generation_retention_cancellable(
+        let plan = prepare_next_code_generation_retention_cancellable(
             store.path(),
             &BTreeSet::new(),
-            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
             &|| false,
+            None,
         )
         .expect("plan retention");
         if plan.collectable_generations.is_empty() {
@@ -84,11 +96,11 @@ fn graph_release_queue_pages_more_than_one_retention_batch() {
 #[test]
 fn graph_release_queue_rejects_corrupt_and_oversize_evidence() {
     let (store, _) = fixture_store(4);
-    let plan = plan_next_code_generation_retention_cancellable(
+    let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        None,
     )
     .expect("plan retention");
     execute_code_generation_retention(
@@ -123,9 +135,9 @@ fn graph_release_queue_rejects_corrupt_and_oversize_evidence() {
 
 #[test]
 fn identical_pool_and_staged_bytes_must_still_match_the_generation_digest() {
-    let (store, _generations) = fixture_store(5);
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), 3).expect("plan retention");
+    let (store, generations) = fixture_store(5);
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let canonical = store
         .path()
@@ -155,9 +167,9 @@ fn identical_pool_and_staged_bytes_must_still_match_the_generation_digest() {
 #[cfg(unix)]
 #[test]
 fn replaced_pool_path_is_not_the_opened_stable_destination() {
-    let (store, _generations) = fixture_store(5);
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), 3).expect("plan retention");
+    let (store, generations) = fixture_store(5);
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let canonical = store
         .path()
@@ -182,10 +194,10 @@ fn replaced_pool_path_is_not_the_opened_stable_destination() {
 
 #[test]
 fn missing_staged_generation_blocks_pool_exposure_before_receipt() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), 3).expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention");
     let receipt = build_receipt(&plan, plan.collectable_generations.clone(), UtcMicros(109))
         .expect("build retention receipt");
     let transaction = CodeGenerationRetentionTransactionV1 {
@@ -193,7 +205,8 @@ fn missing_staged_generation_blocks_pool_exposure_before_receipt() {
         active_pointer: plan.active_pointer.clone(),
         receipt: receipt.clone(),
     };
-    persist_transaction(store.path(), &transaction).expect("persist transaction journal");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist transaction journal");
     stage_collectable_generations(store.path(), &transaction).expect("stage generation");
     let missing = transaction_stage_root(store.path(), &receipt)
         .join(&receipt.deleted_generations[0].generation_file);
@@ -227,8 +240,8 @@ fn missing_staged_generation_blocks_pool_exposure_before_receipt() {
 fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_missing_replay() {
     let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), 3).expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention");
     assert_eq!(plan.collectable_generations.len(), 1);
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
@@ -241,7 +254,8 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
     };
 
     // Retention: journal, quarantine, and expose before the receipt.
-    persist_transaction(store.path(), &transaction).expect("persist transaction journal");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist transaction journal");
     stage_collectable_generations(store.path(), &transaction).expect("stage generation");
     {
         let pool_lock =
@@ -261,7 +275,13 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
     // Retention: the receipt and its release event become durable, in the
     // same order the production executor uses (events before receipt).
     graph_replay_release::write_events(store.path(), &receipt).expect("write release events");
-    write_receipt(store.path(), &receipt).expect("write durable receipt");
+    receipt_store::write_receipt(
+        store.path(),
+        &GENERATION_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        &receipt,
+    )
+    .expect("write durable receipt");
     let page = code_generation_graph_replay_release_page(store.path(), None)
         .expect("read durable release event");
     assert_eq!(page.releases.len(), 1);
@@ -333,7 +353,8 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
         &|| false,
     )
     .expect("cleanup retries after release completion");
-    clear_transaction(store.path()).expect("clear transaction journal");
+    journal::clear_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL)
+        .expect("clear transaction journal");
 
     // No orphan: the consumed release's pool copy must not be resurrected,
     // and no release event survives without its pool copy.
@@ -376,12 +397,14 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
 #[cfg(unix)]
 #[test]
 fn graph_release_queue_rejects_symlink_evidence() {
-    let (store, _) = fixture_store(4);
-    let plan = plan_next_code_generation_retention_cancellable(
+    // One superseded generation, so the queue holds exactly the release this
+    // test replaces with a symlink.
+    let (store, _) = fixture_store(2);
+    let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
+        None,
     )
     .expect("plan retention");
     let report = execute_code_generation_retention(

@@ -8,22 +8,24 @@
 
 mod binding;
 mod executable;
-mod hotpath_observe;
 mod id;
 mod manifest;
 mod mcp;
 mod operation;
+mod owner_side_effect;
+mod owner_stores;
 mod profile;
 mod retrieval;
 mod snapshot;
 mod validation;
 
 pub use binding::{
-    BindingDeprecation, BindingStatus, BindingSurface, ProtocolRevisionRange,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
+    BindingSurface, ProtocolRevisionRange, SurfaceBindingInputV1, SurfaceBindingV1,
+    SurfaceOperationName,
 };
 pub use executable::{
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    BindingAvailabilityV1, BindingRegistryV1, ExecutableBindingAvailabilityV1,
+    ExecutableBindingMetadataV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
     ExecutableCodecV1, ExecutableSchemaAuthority, ExecutableUnavailableDispositionV1,
     ExecutionOwnerV1, RouteExposureV1, SchemaBodyAuthorityV1, SdkExecutableBindingAvailabilityV1,
     SdkExecutableBindingRegistryV1, SdkExecutableBindingV1, SdkTransportBindingV1,
@@ -49,10 +51,11 @@ pub use mcp::{
     McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
 pub use operation::ApplicationSurfaceOperation;
-pub use profile::{
-    ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind,
-    RoutingFixtureExpectation, RoutingFixtureV1,
+pub use owner_side_effect::{
+    INTERACTIVE_CEILING_MILLIS, LONG_RUNNING_CEILING_MILLIS, OwnerSideEffectEntryV1,
 };
+pub use owner_stores::{OwnerStoreDeclarationV1, OwnerStoresV1};
+pub use profile::{ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind};
 pub use retrieval::{
     ContributionContractRef, CoverageContractRef, OmissionContractRef, RetrievalFamily,
     RetrievalPrimitiveManifestInputV1, RetrievalPrimitiveManifestV1, ScoringContractRef,

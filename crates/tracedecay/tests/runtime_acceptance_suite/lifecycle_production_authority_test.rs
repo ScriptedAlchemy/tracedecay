@@ -1,9 +1,9 @@
 use crate::common::fixture::{GitFixture, TestProfile};
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay_project::project::TraceDecay;
 
 #[tokio::test]
 async fn direct_lifecycle_entry_points_retain_production_authority() {
-    let profile = TestProfile::acquire().await;
+    let profile = TestProfile::isolated();
     let repository = GitFixture::primary(profile.path("project"));
     let project = repository.root();
     std::fs::create_dir_all(project.join("src")).expect("project source directory");

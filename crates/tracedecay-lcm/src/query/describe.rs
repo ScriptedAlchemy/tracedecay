@@ -46,14 +46,17 @@ pub(super) async fn summary_overviews(
 ) -> Result<Vec<LcmSummaryNodeOverview>, LcmError> {
     let mut rows = conn
         .query(
-            "SELECT n.node_id, n.conversation_id, n.depth, n.summary_text, n.created_at,
-                    COUNT(s.source_id)
-             FROM lcm_summary_nodes n
-             LEFT JOIN lcm_summary_sources s ON s.node_id = n.node_id
-             WHERE n.provider = ?1 AND n.session_id = ?2
-             GROUP BY n.node_id, n.conversation_id, n.depth, n.summary_text, n.created_at
-             ORDER BY n.depth, n.created_at, n.node_id
-             LIMIT 20",
+            &format!(
+                "SELECT n.summary_id, n.conversation_id, n.depth, n.summary_text, n.created_at,
+                        COUNT(s.source_id)
+                 FROM session_summary_nodes n
+                 LEFT JOIN session_summary_sources s ON s.summary_id = n.summary_id
+                 WHERE n.provider = ?1 AND n.session_id = ?2 AND {}
+                 GROUP BY n.summary_id, n.conversation_id, n.depth, n.summary_text, n.created_at
+                 ORDER BY n.depth, n.created_at, n.summary_id
+                 LIMIT 20",
+                schema::SUMMARY_VISIBLE_SQL
+            ),
             params![provider, session_id],
         )
         .await?;
@@ -82,11 +85,14 @@ pub(super) async fn describe_summary_node(
 ) -> Result<LcmDescribeSummaryNode, LcmError> {
     let mut rows = conn
         .query(
-            "SELECT node_id, conversation_id, depth, summary_token_count,
-                    source_token_count, source_time_start, source_time_end,
-                    expand_hint, metadata_json, created_at
-             FROM lcm_summary_nodes
-             WHERE provider = ?1 AND session_id = ?2 AND node_id = ?3",
+            &format!(
+                "SELECT n.summary_id, n.conversation_id, n.depth, n.summary_token_count,
+                        n.source_token_count, n.source_time_start, n.source_time_end,
+                        n.expand_hint, n.metadata_json, n.created_at
+                 FROM session_summary_nodes n
+                 WHERE n.provider = ?1 AND n.session_id = ?2 AND n.summary_id = ?3 AND {}",
+                schema::SUMMARY_VISIBLE_SQL
+            ),
             params![provider, session_id, node_id],
         )
         .await?;
@@ -122,8 +128,8 @@ async fn describe_summary_sources(
     let mut rows = conn
         .query(
             "SELECT source_kind, source_id
-             FROM lcm_summary_sources
-             WHERE node_id = ?1
+             FROM session_summary_sources
+             WHERE summary_id = ?1
              ORDER BY ordinal",
             params![node_id],
         )
@@ -246,10 +252,12 @@ async fn load_describe_summary_nodes(
         if chunk.is_empty() {
             continue;
         }
+        // Children are the lineage of the described (visible) summary and are
+        // read as published.
         let sql = format!(
-            "SELECT node_id, summary_token_count, source_token_count, expand_hint
-             FROM lcm_summary_nodes
-             WHERE provider = ? AND session_id = ? AND node_id IN ({})",
+            "SELECT summary_id, summary_token_count, source_token_count, expand_hint
+             FROM session_summary_nodes
+             WHERE provider = ? AND session_id = ? AND summary_id IN ({})",
             sql_in_placeholders(chunk.len())
         );
         let mut values = vec![

@@ -10,7 +10,7 @@ use crate::error::rollback_failure;
 use crate::location::ValidatedOpen;
 use crate::schema::{
     FINAL_SCHEMA, FORMAT_LABEL, FORMAT_VERSION_PROPERTY, INDEXED_PROPERTIES, NAMESPACE_PROPERTY,
-    PROJECTION_PROPERTY, QUARANTINE_KEY_PROPERTY, SCHEMA_PROPERTY, SEQUENCE_PROPERTY,
+    PROJECTION_PROPERTY, QUARANTINE_KEY_PROPERTY, SCHEMA_PROPERTY, SEQUENCE_PROPERTY, key_value,
     nodes_with_label, required_string,
 };
 use crate::state::FormatState;
@@ -46,12 +46,12 @@ pub(crate) fn projection_mismatch(
     }
 }
 
-#[hotpath::measure(label = "graph_db.generation.recover.open")]
+#[tracing::instrument(name = "graph_db.generation.recover.open", level = "trace", skip_all)]
 pub(crate) fn open_recovered_database(
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
-    let recovered = hotpath::measure_block!(
-        "graph_db.generation.recover.open.engine",
+    let recovered = {
+        let _span = tracing::trace_span!("graph_db.generation.recover.open.engine").entered();
         GrafeoDB::with_config(reopen.config.clone()).map_err(|error| {
             GraphDbError::DurabilityUncertain {
                 message: format!(
@@ -59,15 +59,15 @@ pub(crate) fn open_recovered_database(
                 ),
             }
         })
-    )?;
-    record_open_corpus_gauges(&recovered);
+    }?;
     if let Err(error) = validate_or_initialize_format(&recovered, reopen) {
         return close_recovered_after_error("validate recovered graph format", recovered, error);
     }
-    let state = match hotpath::measure_block!(
-        "graph_db.generation.open.state",
+    let match_result = {
+        let _span = tracing::trace_span!("graph_db.generation.open.state").entered();
         FormatState::load(&recovered)
-    ) {
+    };
+    let state = match match_result {
         Ok(state) => state,
         Err(error) => {
             return close_recovered_after_error("load recovered graph state", recovered, error);
@@ -91,26 +91,31 @@ pub(crate) fn validate_or_initialize_format(
     database: &GrafeoDB,
     validated: &ValidatedOpen,
 ) -> Result<(), GraphDbError> {
-    hotpath::measure_block!(
-        "graph_db.generation.open.format",
+    {
+        let _span = tracing::trace_span!("graph_db.generation.open.format").entered();
         validate_or_initialize_format_marker(database, validated)
-    )?;
+    }?;
     // The pinned grafeo fork persists the store's property-index keys in the
-    // catalog section and `load_from_sections` rebuilds each one with a full
-    // node scan inside `GrafeoDB::with_config`, so on a store checkpointed by
-    // this engine these calls find the index present and return without
-    // scanning. This loop stays as the authority that *defines* the index
-    // set: a fresh store and a store whose last checkpoint predates catalog
-    // index persistence register here, and without the indexes the unique-key
-    // lookups in `state.rs` degrade from a hash hit to a full node scan —
+    // catalog section, and a sealed compact container stores each indexed
+    // column's rows in value order at seal time, so a reopened store already
+    // has every index without scanning a node. Re-declaring one is not a
+    // no-op: it marks the container stale, which forces a full checkpoint
+    // on close. This loop stays as the authority that *defines*
+    // the index set for a fresh store and a store whose last checkpoint
+    // predates catalog index persistence; without the indexes the unique-key
+    // lookups in `state.rs` degrade from a hash hit to a full node scan,
     // measured at 500k entities, 64 point reads took 23.7s instead of 1.4ms,
-    // and the bounded traversal 773ms instead of 2.7ms. The span shows which
-    // side of the engine boundary the rebuild cost actually lands on.
-    hotpath::measure_block!("graph_db.generation.open.property_indexes", {
-        for property in INDEXED_PROPERTIES {
-            database.create_property_index(property);
+    // and the bounded traversal 773ms instead of 2.7ms.
+    {
+        let _span = tracing::trace_span!("graph_db.generation.open.property_indexes").entered();
+        {
+            for property in INDEXED_PROPERTIES {
+                if !database.has_property_index(property) {
+                    database.create_property_index(property);
+                }
+            }
         }
-    });
+    };
     Ok(())
 }
 
@@ -168,37 +173,26 @@ fn validate_or_initialize_format_marker(
         .ok_or_else(|| GraphDbError::Corrupt {
             message: "TraceDecay format marker is unreadable".to_owned(),
         })?;
+    let expected = validated.expected_format.get();
     let actual = marker
         .get_property(FORMAT_VERSION_PROPERTY)
         .and_then(Value::as_int64);
-    if actual != Some(i64::from(validated.expected_format.get())) {
-        return Err(GraphDbError::ResetRequired {
-            message: format!(
-                "TraceDecay graph format mismatch: expected {}, found {actual:?}",
-                validated.expected_format.get()
-            ),
-        });
-    }
     if marker.get_property(SCHEMA_PROPERTY).and_then(Value::as_str) != Some(FINAL_SCHEMA) {
         return Err(GraphDbError::ResetRequired {
             message: "TraceDecay graph schema is not the final native scalar schema".to_owned(),
         });
     }
-    Ok(())
-}
-
-/// Records how much corpus the engine open just hydrated, so the phase spans
-/// around it can be correlated with store size in a Hotpath report.
-#[inline(always)]
-pub(crate) fn record_open_corpus_gauges(database: &GrafeoDB) {
-    #[cfg(feature = "hotpath")]
-    {
-        let store = database.graph_store();
-        hotpath::gauge!("graph_db.generation.open.nodes").set(store.node_count());
-        hotpath::gauge!("graph_db.generation.open.edges").set(store.edge_count());
+    match actual.and_then(|found| u32::try_from(found).ok()) {
+        Some(found) if found == expected => Ok(()),
+        Some(found) if found > 0 && found < expected => {
+            Err(GraphDbError::FormatSuperseded { found, expected })
+        }
+        _ => Err(GraphDbError::ResetRequired {
+            message: format!(
+                "TraceDecay graph format mismatch: expected {expected}, found {actual:?}"
+            ),
+        }),
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = database;
 }
 
 /// Checkpoints sidecar-WAL history that a successful open replayed into the
@@ -217,10 +211,7 @@ pub(crate) fn collapse_replayed_wal(database: &GrafeoDB) {
     let Some(newest_segment) = newest_wal_segment_sequence(&sidecar) else {
         return;
     };
-    let checkpointed_sequence = grafeo_storage::wal::WalRecovery::new(&sidecar)
-        .checkpoint()
-        .map(|metadata| metadata.log_sequence);
-    if let Some(sequence) = checkpointed_sequence
+    if let Some(sequence) = checkpointed_wal_sequence(&sidecar)
         && sequence >= newest_segment
     {
         let removed_segments = remove_checkpoint_covered_segments(&sidecar, sequence);
@@ -235,16 +226,15 @@ pub(crate) fn collapse_replayed_wal(database: &GrafeoDB) {
         return;
     }
 
-    match hotpath::measure_block!(
-        "graph_db.generation.open.wal_checkpoint",
+    let match_result = {
+        let _span = tracing::trace_span!("graph_db.generation.open.wal_checkpoint").entered();
         database.wal_checkpoint()
-    ) {
+    };
+    match match_result {
         Ok(()) => {
-            let removed_segments = grafeo_storage::wal::WalRecovery::new(&sidecar)
-                .checkpoint()
-                .map_or(0, |metadata| {
-                    remove_checkpoint_covered_segments(&sidecar, metadata.log_sequence)
-                });
+            let removed_segments = checkpointed_wal_sequence(&sidecar).map_or(0, |sequence| {
+                remove_checkpoint_covered_segments(&sidecar, sequence)
+            });
             tracing::info!(
                 event = "graph_wal_checkpoint",
                 phase = "open",
@@ -263,24 +253,31 @@ pub(crate) fn collapse_replayed_wal(database: &GrafeoDB) {
     }
 }
 
+/// Bytes of WAL history the durable checkpoint does not cover: every segment
+/// numbered after the checkpointed one, or the whole sidecar when no
+/// checkpoint exists. Covered segments the retention rule keeps are excluded,
+/// so a checkpoint brings this to zero instead of re-triggering itself.
+pub(crate) fn uncheckpointed_wal_bytes(sidecar: &Path) -> u64 {
+    let covered = checkpointed_wal_sequence(sidecar);
+    wal_segments(sidecar)
+        .filter(|(sequence, _)| covered.is_none_or(|covered| *sequence > covered))
+        .filter_map(|(_, entry)| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+fn checkpointed_wal_sequence(sidecar: &Path) -> Option<u64> {
+    grafeo_storage::wal::WalRecovery::new(sidecar)
+        .checkpoint()
+        .map(|metadata| metadata.log_sequence)
+}
+
 /// Delete segments that recovery skips because their sequence precedes the
 /// durable checkpoint. Keep the checkpoint segment and two preceding files,
 /// matching Grafeo's own rotation safety margin.
 fn remove_checkpoint_covered_segments(sidecar: &Path, covered_below: u64) -> u64 {
-    let Ok(entries) = std::fs::read_dir(sidecar) else {
-        return 0;
-    };
     let mut removed = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(sequence) = name
-            .to_str()
-            .and_then(|name| name.strip_prefix("wal_"))
-            .and_then(|name| name.strip_suffix(".log"))
-            .and_then(|name| name.parse::<u64>().ok())
-        else {
-            continue;
-        };
+    for (sequence, entry) in wal_segments(sidecar) {
         if sequence + 2 < covered_below && std::fs::remove_file(entry.path()).is_ok() {
             removed += 1;
         }
@@ -289,19 +286,27 @@ fn remove_checkpoint_covered_segments(sidecar: &Path, covered_below: u64) -> u64
 }
 
 fn newest_wal_segment_sequence(sidecar: &Path) -> Option<u64> {
-    let entries = std::fs::read_dir(sidecar).ok()?;
-    entries
+    wal_segments(sidecar)
+        .filter(|(_, entry)| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
+        .map(|(sequence, _)| sequence)
+        .max()
+}
+
+fn wal_segments(sidecar: &Path) -> impl Iterator<Item = (u64, std::fs::DirEntry)> {
+    std::fs::read_dir(sidecar)
+        .into_iter()
         .flatten()
-        .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
+        .flatten()
         .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            name.strip_prefix("wal_")?
+            let sequence = entry
+                .file_name()
+                .to_str()?
+                .strip_prefix("wal_")?
                 .strip_suffix(".log")?
                 .parse::<u64>()
-                .ok()
+                .ok()?;
+            Some((sequence, entry))
         })
-        .max()
 }
 
 fn close_recovered_after_error<T>(
@@ -315,15 +320,19 @@ fn close_recovered_after_error<T>(
     }
 }
 
-#[hotpath::measure(label = "graph_db.generation.recover.checkpoint")]
+#[tracing::instrument(
+    name = "graph_db.generation.recover.checkpoint",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn checkpoint_recovered_database(
     recovered: GrafeoDB,
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
-    hotpath::measure_block!(
-        "graph_db.generation.recover.checkpoint.close",
+    {
+        let _span = tracing::trace_span!("graph_db.generation.recover.checkpoint.close").entered();
         recovered.close()
-    )
+    }
     .map_err(|error| GraphDbError::DurabilityUncertain {
         message: format!("Grafeo close failed while checkpointing projection quarantine: {error}"),
     })?;
@@ -369,7 +378,11 @@ pub(crate) fn requarantine_after_failed_checkpoint_verification(
     Ok((recovered, state, quarantined))
 }
 
-#[hotpath::measure(label = "graph_db.generation.open.quarantine")]
+#[tracing::instrument(
+    name = "graph_db.generation.open.quarantine",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn load_quarantined_projections(
     database: &GrafeoDB,
 ) -> Result<BTreeSet<(GraphNamespace, GraphProjectionId)>, GraphDbError> {
@@ -423,9 +436,17 @@ pub(crate) fn set_projection_quarantine(
         .find_nodes_by_property(QUARANTINE_KEY_PROPERTY, &key_value)
         .into_iter()
         .filter(|node| {
-            store
-                .get_node(*node)
-                .is_some_and(|record| record.has_label(QUARANTINE_LABEL))
+            store.get_node(*node).is_some_and(|record| {
+                record.has_label(QUARANTINE_LABEL)
+                    && record
+                        .get_property(NAMESPACE_PROPERTY)
+                        .and_then(Value::as_str)
+                        == Some(namespace.as_str())
+                    && record
+                        .get_property(PROJECTION_PROPERTY)
+                        .and_then(Value::as_str)
+                        == Some(projection.as_str())
+            })
         });
     let existing = markers.next();
     if markers.next().is_some() {
@@ -490,11 +511,7 @@ pub(crate) fn set_projection_quarantine(
 /// A property rather than a label for the same reason entity identity is: one
 /// native label per record becomes one columnar node table per record.
 fn quarantine_key_value(namespace: &GraphNamespace, projection: &GraphProjectionId) -> Value {
-    Value::from(format!(
-        "{}_{}",
-        hex::encode(namespace.as_str().as_bytes()),
-        hex::encode(projection.as_str().as_bytes())
-    ))
+    key_value(namespace, projection.as_str())
 }
 
 pub(crate) fn quarantine_transition_failure(context: &str, error: GraphDbError) -> GraphDbError {
@@ -507,6 +524,7 @@ pub(crate) fn is_database_fault(error: &GraphDbError) -> bool {
     matches!(
         error,
         GraphDbError::ResetRequired { .. }
+            | GraphDbError::FormatSuperseded { .. }
             | GraphDbError::Corrupt { .. }
             | GraphDbError::DurabilityUncertain { .. }
     )

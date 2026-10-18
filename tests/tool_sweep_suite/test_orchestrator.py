@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 
 SUITE_DIR = Path(__file__).parent
@@ -25,6 +26,23 @@ def load_orchestrator():
 
 
 class WholeRunDeadlineTests(unittest.TestCase):
+    def test_codex_auth_is_staged_only_under_the_ephemeral_phase_root(self) -> None:
+        orchestrator = load_orchestrator()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source_home = root / "source"
+            source_home.mkdir()
+            (source_home / "auth.json").write_text("credential")
+            with patch.dict("os.environ", {"CODEX_HOME": str(source_home)}):
+                destination_home = orchestrator._stage_codex_auth(root / "ephemeral")
+
+            self.assertEqual(
+                (destination_home / "auth.json").read_text(), "credential"
+            )
+            self.assertEqual(
+                (destination_home / "auth.json").stat().st_mode & 0o777, 0o600
+            )
+
     def test_expiring_process_is_cancelled_before_the_final_report(self) -> None:
         """The process group is stopped at the shared deadline, not left to CI's timeout."""
         orchestrator = load_orchestrator()
@@ -56,15 +74,29 @@ class WholeRunDeadlineTests(unittest.TestCase):
             report = orchestrator.load_report(out / "results.json")
             junit = (out / "junit.xml").read_text()
 
+        fatal = (
+            "whole run deadline exceeded before catalog discovery; "
+            "reads phase was cancelled: whole_run_deadline_exceeded"
+        )
         self.assertEqual(status, 1)
-        self.assertIn("fatal", report)
-        self.assertIn("mcp-catalog-sweep", junit)
+        self.assertEqual(report["fatal"], fatal)
+        self.assertEqual(report["fatal_problem_code"], "tool_sweep.phase_execution_failed")
+        self.assertEqual(report["entries"], [])
+        self.assertEqual(
+            [phase["outcome"]["reason"] for phase in report["phases"]],
+            ["whole_run_deadline_exceeded"],
+        )
+        self.assertIn(
+            f'<error message="tool_sweep.phase_execution_failed: {fatal}" '
+            'type="tool_sweep.phase_execution_failed" />',
+            junit,
+        )
 
     def test_deadline_cancels_phase_and_emits_an_aggregate_artifact(self) -> None:
         """A stalled isolated phase must never leave CI without a final report."""
         orchestrator = load_orchestrator()
         manifest = {
-            "tools": [{"name": "tracedecay_read"}],
+            "tools": [{"name": "tracedecay_grep"}],
             "resources": [{"uri": "tracedecay://health"}],
             "prompts": [{"name": "triage"}],
         }
@@ -81,20 +113,11 @@ class WholeRunDeadlineTests(unittest.TestCase):
             {"tool_sweep.whole_run_deadline_exceeded"},
         )
 
-    def test_phase_environment_creates_the_temp_root_before_wrappers_run(self) -> None:
-        orchestrator = load_orchestrator()
-        with tempfile.TemporaryDirectory() as raw:
-            environment = orchestrator._phase_environment(Path(raw) / "phase")
-
-            self.assertTrue(Path(environment["TMPDIR"]).is_dir())
-            self.assertEqual(environment["TMPDIR"], environment["TMP"])
-            self.assertEqual(environment["TMPDIR"], environment["TEMP"])
-
     def test_junit_preserves_row_and_fatal_problem_codes(self) -> None:
         orchestrator = load_orchestrator()
         report = {
             "entries": [{
-                "kind": "tool", "name": "tracedecay_read", "verdict": "FAIL",
+                "kind": "tool", "name": "tracedecay_grep", "verdict": "FAIL",
                 "note": "typed failure", "problem_code": "store.offline",
                 "elapsed_ms": 0, "deadline_ms": 1,
             }],

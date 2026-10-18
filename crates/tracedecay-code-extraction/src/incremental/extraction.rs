@@ -1,4 +1,4 @@
-use tracedecay_domain::{ExtractionResult, NodeKind};
+use tracedecay_domain::{NodeKind, SourceSpan};
 
 use super::{
     ParseCompleteness, ParseError, ParseInputEdit, ParseReport, ParseResetReason, ParseReuse,
@@ -7,31 +7,12 @@ use super::{
 use crate::LanguageExtractor;
 use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use crate::parsed_extraction::{
-    ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionDisposition,
-    ParsedExtractionResetReason, ParsedExtractionScope, ParsedTraversalMetrics,
-    merge_changed_extraction, node_intersects_edit,
+    ParsedExtractionArtifactV1, ParsedExtractionDisposition, ParsedExtractionResetReason,
+    ParsedExtractionScope, ParsedTraversalMetrics, merge_changed_extraction,
+    superseded_previous_nodes,
 };
 
 impl RetainedParseDocument {
-    /// Produce a complete canonical legacy graph from the retained tree.
-    pub fn extract_canonical(
-        &self,
-        extractor: &dyn LanguageExtractor,
-        report: &ParseReport,
-        previous: Option<&ExtractionResult>,
-    ) -> Result<ParsedExtraction, ParseError> {
-        // Only the Noop and Incremental paths read the prior extraction; the
-        // Initial and Reset paths must not pay its deep clone.
-        let previous_artifact = match report.reuse {
-            ParseReuse::Noop | ParseReuse::Incremental => {
-                previous.cloned().map(ExtractionArtifactV1::from_result)
-            }
-            ParseReuse::Initial | ParseReuse::Reset { .. } => None,
-        };
-        self.extract_canonical_artifact(extractor, report, previous_artifact.as_ref())
-            .map(ParsedExtractionArtifactV1::into_parsed)
-    }
-
     /// Produce a complete graph and structured evidence artifact from the
     /// current retained tree. Incremental deltas replace every affected import
     /// statement's rows, including when deletion produces no replacement row.
@@ -41,12 +22,9 @@ impl RetainedParseDocument {
         report: &ParseReport,
         previous: Option<&ExtractionArtifactV1>,
     ) -> Result<ParsedExtractionArtifactV1, ParseError> {
-        crate::hotpath_observe::measure_extract_file(
-            extractor.language_name(),
-            self.source.len(),
-            || self.extract_canonical_artifact_unmeasured(extractor, report, previous),
-            crate::hotpath_observe::ExtractOutputCounts::from_extract_result,
-        )
+        crate::observe::measure_extract_file(|| {
+            self.extract_canonical_artifact_unmeasured(extractor, report, previous)
+        })
     }
 
     fn extract_canonical_artifact_unmeasured(
@@ -56,9 +34,6 @@ impl RetainedParseDocument {
         previous: Option<&ExtractionArtifactV1>,
     ) -> Result<ParsedExtractionArtifactV1, ParseError> {
         if report.state_epoch != self.state_epoch {
-            crate::hotpath_observe::record_retained_parse_abstention(
-                crate::hotpath_observe::RetainedParseAbstention::StaleReport,
-            );
             return Err(ParseError::StaleReport);
         }
 
@@ -120,7 +95,7 @@ impl RetainedParseDocument {
             );
         }
 
-        let delta = extractor.extract_parsed_artifact_prepared(
+        let delta = extractor.extract_parsed_artifact(
             self.identity.logical_path(),
             &self.source,
             self.parsed_source_text(),
@@ -153,7 +128,7 @@ impl RetainedParseDocument {
         extractor: &dyn LanguageExtractor,
         reason: Option<ParsedExtractionResetReason>,
     ) -> ParsedExtractionArtifactV1 {
-        let extracted = extractor.extract_parsed_artifact_prepared(
+        let extracted = extractor.extract_parsed_artifact(
             self.identity.logical_path(),
             &self.source,
             self.parsed_source_text(),
@@ -163,7 +138,6 @@ impl RetainedParseDocument {
         let extracted = self.complete_composite_reset(extractor, extracted);
         match reason {
             Some(reason) => {
-                crate::hotpath_observe::record_extraction_reset(reason);
                 ParsedExtractionArtifactV1::reset(extracted.artifact, reason, self.source.len())
             }
             None => extracted,
@@ -182,9 +156,11 @@ impl RetainedParseDocument {
                 // Markdown is the sole composite-grammar producer and uses
                 // the default artifact shape. Build it directly so this
                 // fallback does not re-enter the full traversal span.
-                crate::hotpath_observe::measure_markdown_composite_fallback(|| {
+                crate::observe::measure_markdown_composite_fallback(|| {
                     ExtractionArtifactV1::from_result(
-                        extractor.extract(self.identity.logical_path(), &self.source),
+                        extractor
+                            .extract_artifact(self.identity.logical_path(), &self.source)
+                            .result,
                     )
                 }),
                 ParsedExtractionResetReason::CompositeGrammar,
@@ -208,7 +184,7 @@ fn merge_changed_artifact(
     edit: ParseInputEdit,
     old_end_row: u32,
 ) -> Option<ExtractionArtifactV1> {
-    crate::hotpath_observe::measure_emit(|| {
+    crate::observe::measure_emit(|| {
         merge_changed_artifact_unmeasured(previous, delta, edit, old_end_row)
     })
 }
@@ -219,22 +195,12 @@ fn merge_changed_artifact_unmeasured(
     edit: ParseInputEdit,
     old_end_row: u32,
 ) -> Option<ExtractionArtifactV1> {
-    let delta_ids = delta
-        .result
-        .nodes
-        .iter()
-        .filter(|node| node.kind != NodeKind::File)
-        .map(|node| node.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
+    let superseded = superseded_previous_nodes(&previous.result, &delta.result, edit)?;
     let affected_import_statements = previous
         .result
         .nodes
         .iter()
-        .filter(|node| node.kind == NodeKind::Use)
-        .filter(|node| {
-            node_intersects_edit(node, edit.start_position, edit.old_end_position)
-                || delta_ids.contains(&node.id)
-        })
+        .filter(|node| node.kind == NodeKind::Use && superseded.contains(node.id.as_str()))
         .map(|node| {
             (
                 node.start_line,
@@ -244,12 +210,7 @@ fn merge_changed_artifact_unmeasured(
             )
         })
         .collect::<Vec<_>>();
-    let result = merge_changed_extraction(
-        &previous.result,
-        delta.result,
-        edit.start_position,
-        edit.old_end_position,
-    )?;
+    let result = merge_changed_extraction(&previous.result, delta.result, edit)?;
     let mut imports = previous
         .imports
         .iter()
@@ -262,9 +223,46 @@ fn merge_changed_artifact_unmeasured(
         .map(|row| shift_unaffected_import(row, edit, old_end_row))
         .collect::<Option<Vec<_>>>()?;
     imports.extend(delta.imports);
-    let mut artifact = ExtractionArtifactV1 { result, imports };
+    let mut clone_bodies = previous
+        .clone_bodies
+        .iter()
+        .filter(|row| !superseded.contains(row.symbol_occurrence_id.as_str()))
+        .cloned()
+        .map(|row| shift_unaffected_clone_body(row, edit))
+        .collect::<Option<Vec<_>>>()?;
+    clone_bodies.extend(delta.clone_bodies);
+    let mut callable_arities = previous
+        .callable_arities
+        .iter()
+        .filter(|row| !superseded.contains(row.node_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    callable_arities.extend(delta.callable_arities);
+    let mut go_method_sets = previous
+        .go_method_sets
+        .iter()
+        .filter(|row| !superseded.contains(row.node_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    go_method_sets.extend(delta.go_method_sets);
+    let mut artifact = ExtractionArtifactV1 {
+        result,
+        imports,
+        clone_bodies,
+        schema_evidence: None,
+        callable_arities,
+        go_method_sets,
+    };
     artifact.canonicalize_order();
     Some(artifact)
+}
+
+fn shift_unaffected_clone_body(
+    mut row: crate::ExtractedCloneBodyV1,
+    edit: ParseInputEdit,
+) -> Option<crate::ExtractedCloneBodyV1> {
+    row.body_span = shift_unaffected_span(row.body_span, edit)?.0;
+    Some(row)
 }
 
 fn import_position_is_within(
@@ -282,17 +280,11 @@ fn shift_unaffected_import(
     edit: ParseInputEdit,
     old_end_row: u32,
 ) -> Option<ExtractedImportEvidenceV1> {
-    let edit_start = u64::try_from(edit.start_byte).ok()?;
-    let old_end = u64::try_from(edit.old_end_byte).ok()?;
-    if row.span.end_byte <= edit_start {
+    let (span, shifted) = shift_unaffected_span(row.span, edit)?;
+    row.span = span;
+    if !shifted {
         return Some(row);
     }
-    if row.span.start_byte < old_end {
-        return None;
-    }
-
-    row.span.start_byte = shift_value(row.span.start_byte, edit.old_end_byte, edit.new_end_byte)?;
-    row.span.end_byte = shift_value(row.span.end_byte, edit.old_end_byte, edit.new_end_byte)?;
     if row.start_line == old_end_row {
         row.start_column = shift_value(
             u64::from(row.start_column),
@@ -303,6 +295,20 @@ fn shift_unaffected_import(
         .ok()?;
     }
     Some(row)
+}
+
+fn shift_unaffected_span(mut span: SourceSpan, edit: ParseInputEdit) -> Option<(SourceSpan, bool)> {
+    let edit_start = u64::try_from(edit.start_byte).ok()?;
+    let old_end = u64::try_from(edit.old_end_byte).ok()?;
+    if span.end_byte <= edit_start {
+        return Some((span, false));
+    }
+    if span.start_byte < old_end {
+        return None;
+    }
+    span.start_byte = shift_value(span.start_byte, edit.old_end_byte, edit.new_end_byte)?;
+    span.end_byte = shift_value(span.end_byte, edit.old_end_byte, edit.new_end_byte)?;
+    Some((span, true))
 }
 
 fn shift_value(value: u64, old_end: usize, new_end: usize) -> Option<u64> {

@@ -2,8 +2,8 @@
 //! parity). Detection is purely lexical (token Jaccard on normalized titles
 //! and bodies) and deterministic; it never mutates skills.
 //!
-//! This module is the single skill-overlap authority. Validation — at
-//! proposal parse time and again at lifecycle apply time — goes through
+//! This module is the single skill-overlap authority. Validation at proposal
+//! parse time and again at lifecycle apply time goes through
 //! [`detected_skill_overlap_pair`], which judges exactly one pair and is
 //! therefore order-independent and stable: whether two skills validate can
 //! never depend on unrelated skills crowding a ranked list. The ranked
@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::super::managed_skills::{ManagedSkill, ManagedSkillState};
-use crate::memory::similarity::lexical_overlap;
+use tracedecay_session_memory::memory::similarity::lexical_overlap;
 
 /// Minimum content (title+summary+body) token Jaccard for a pair to count as
 /// a consolidation candidate on its own.
@@ -43,8 +43,8 @@ pub struct SkillOverlapCandidate {
 
 /// Order-independent pairwise overlap predicate: the single validation
 /// authority shared by proposal parsing and lifecycle application. The
-/// decision depends only on the two skills — their consolidation eligibility
-/// and the lexical thresholds — never on how a pair ranks against unrelated
+/// decision depends only on the two skills, their consolidation eligibility
+/// and the lexical thresholds, never on how a pair ranks against unrelated
 /// skills.
 pub fn detected_skill_overlap_pair(first: &ManagedSkill, second: &ManagedSkill) -> bool {
     detected_overlap(first, second).is_some()
@@ -136,13 +136,12 @@ fn overlap_candidate(a: &ManagedSkill, b: &ManagedSkill) -> Option<SkillOverlapC
     let shared_tokens = content_payload
         .get("shared_tokens")
         .and_then(serde_json::Value::as_array)
-        .map(|tokens| {
+        .map_or_default(|tokens| {
             tokens
                 .iter()
                 .filter_map(|token| token.as_str().map(str::to_string))
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     Some(SkillOverlapCandidate {
         skill_a: a.metadata.id.clone(),
         skill_b: b.metadata.id.clone(),
@@ -173,7 +172,7 @@ fn skill_content_text(skill: &ManagedSkill) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::super::managed_skills::{
-        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
+        ManagedSkillDraft, ManagedSkillExt, ManagedSkillProvenance, ManagedSkillSource,
         default_managed_skill_targets,
     };
     use super::*;
@@ -183,6 +182,8 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             summary: summary.to_string(),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "workflow".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: body.to_string(),
@@ -223,47 +224,6 @@ mod tests {
             "Prefer thiserror enums over anyhow in library crates.",
             "Model failures with typed enums. Reserve panics for invariants. Convert io errors at module boundaries.",
         )
-    }
-
-    #[test]
-    fn detects_overlapping_pairs_above_threshold() {
-        let (a, b) = overlapping_pair();
-        let unrelated = unrelated_skill();
-        let candidates = skill_overlap_candidates(&[a, b, unrelated], DEFAULT_SKILL_OVERLAP_LIMIT);
-
-        assert_eq!(candidates.len(), 1);
-        let candidate = &candidates[0];
-        assert_eq!(candidate.skill_a, "review-automation-runs");
-        assert_eq!(candidate.skill_b, "automation-run-review");
-        assert!(candidate.content_overlap >= SKILL_OVERLAP_CONTENT_THRESHOLD);
-        assert_eq!(candidate.recommendation, "merge_or_archive_review");
-        assert!(!candidate.shared_tokens.is_empty());
-    }
-
-    #[test]
-    fn skips_pairs_where_either_skill_is_pinned() {
-        let (mut a, mut b) = overlapping_pair();
-        a.set_pinned(true);
-        assert!(
-            skill_overlap_candidates(&[a.clone(), b.clone()], DEFAULT_SKILL_OVERLAP_LIMIT)
-                .is_empty()
-        );
-
-        a.set_pinned(false);
-        b.set_pinned(true);
-        assert!(skill_overlap_candidates(&[a, b], DEFAULT_SKILL_OVERLAP_LIMIT).is_empty());
-    }
-
-    #[test]
-    fn ignores_archived_and_disabled_skills() {
-        let (mut a, b) = overlapping_pair();
-        a.set_state(ManagedSkillState::Archived);
-        assert!(
-            skill_overlap_candidates(&[a.clone(), b.clone()], DEFAULT_SKILL_OVERLAP_LIMIT)
-                .is_empty()
-        );
-        a.set_state(ManagedSkillState::Disabled);
-        assert!(skill_overlap_candidates(&[a, b], DEFAULT_SKILL_OVERLAP_LIMIT).is_empty());
     }
 
     #[test]

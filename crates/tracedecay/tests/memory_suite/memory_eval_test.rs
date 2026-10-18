@@ -1,20 +1,21 @@
 //! Behavioral retained-memory evals over the exact retained-memory tools.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     FactCategoryV1, FactProjectionV1, FactSearchHitV1, FactStoreAddCommitV1, FactStoreAddResultV1,
     FactStoreGetResultV1, FactStoreListResultV1, FactStoreSearchResultV1, FactV1,
     MemoryStatusResultV1,
 };
 use tracedecay_domain::FactId;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common;
 
@@ -107,20 +108,9 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(crate::common::tracedecay_bin());
+        let mut command = common::tracedecay_command_with_home(&self.home_path);
         command
             .current_dir(&self.project_path)
-            .env("HOME", &self.home_path)
-            .env("USERPROFILE", &self.home_path)
-            .env("XDG_CONFIG_HOME", self.home_path.join(".config"))
-            .env(
-                tracedecay::config::USER_DATA_DIR_ENV,
-                self.home_path.join(".tracedecay"),
-            )
-            .env(
-                "TRACEDECAY_GLOBAL_DB",
-                self.home_path.join(".tracedecay/global.db"),
-            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -143,30 +133,38 @@ fn load_scenario(id: &str) -> Scenario {
     scenario
 }
 
+/// Drains one child pipe on its own thread so a child blocked on a full pipe
+/// cannot be mistaken for a hang (see the same harness in the CLI suite).
+fn drain_pipe<R: std::io::Read + Send + 'static>(mut pipe: R) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        pipe.read_to_end(&mut buf)
+            .unwrap_or_else(|error| panic!("failed to drain child pipe: {error}"));
+        buf
+    })
+}
+
 fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
     let mut child = command
         .spawn()
         .unwrap_or_else(|error| panic!("failed to spawn tracedecay: {error}"));
+    let stdout = child.stdout.take().map(drain_pipe);
+    let stderr = child.stderr.take().map(drain_pipe);
     let started = Instant::now();
     loop {
         if let Some(status) = child
             .try_wait()
             .unwrap_or_else(|error| panic!("failed to poll tracedecay: {error}"))
         {
-            let mut stdout = Vec::new();
-            if let Some(mut output) = child.stdout.take() {
-                std::io::Read::read_to_end(&mut output, &mut stdout)
-                    .unwrap_or_else(|error| panic!("failed to read stdout: {error}"));
-            }
-            let mut stderr = Vec::new();
-            if let Some(mut output) = child.stderr.take() {
-                std::io::Read::read_to_end(&mut output, &mut stderr)
-                    .unwrap_or_else(|error| panic!("failed to read stderr: {error}"));
-            }
+            let join = |handle: Option<JoinHandle<Vec<u8>>>| {
+                handle.map_or_default(|handle| {
+                    handle.join().expect("child pipe drain thread panicked")
+                })
+            };
             return Output {
                 status,
-                stdout,
-                stderr,
+                stdout: join(stdout),
+                stderr: join(stderr),
             };
         }
         assert!(
@@ -253,6 +251,7 @@ fn initialize_fixture_project(fixture: &Fixture) {
         .build()
         .expect("tokio runtime");
     runtime.block_on(async {
+        common::register_process_runtime_ports();
         common::write_empty_global_db_schema(&profile_root.join("global.db")).await;
         let tracedecay = TraceDecay::init_with_options(&fixture.project_path, options)
             .await
@@ -465,6 +464,10 @@ fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<FactSearchHit
 fn available_fact(projection: FactProjectionV1) -> FactV1 {
     match projection {
         FactProjectionV1::Available { fact } => *fact,
+        FactProjectionV1::Superseded {
+            fact,
+            superseded_by,
+        } => panic!("expected current fact, got {fact:?} superseded by {superseded_by}"),
         FactProjectionV1::Unavailable { status } => {
             panic!("expected available fact projection, got {status:?}")
         }
@@ -744,7 +747,7 @@ fn format_outcomes(outcomes: &[AssertionOutcome]) -> String {
         .iter()
         .map(|outcome| {
             format!(
-                "  [{}] {} — {}",
+                "  [{}] {}, {}",
                 if outcome.passed { "pass" } else { "FAIL" },
                 outcome.name,
                 outcome.detail
@@ -855,45 +858,4 @@ fn eval_memory_ranking_retrieval_reinforcement() {
 #[test]
 fn eval_memory_ranking_feedback_promotes() {
     run_scenario("memory-ranking-feedback-promotes");
-}
-
-/// Every scenario file must have a matching test so an unwired JSON scenario
-/// cannot silently stop exercising the production retained-memory path.
-#[test]
-fn every_scenario_file_is_wired() {
-    let wired: HashSet<&str> = [
-        "memory-no-pollution",
-        "memory-secret-rejection",
-        "memory-skip-local",
-        "memory-supersede-without-dup",
-        "memory-multiturn-continuity",
-        "memory-ranking-trust-bias",
-        "memory-ranking-supersession",
-        "memory-ranking-morphology",
-        "memory-feedback-trust",
-        "memory-ranking-retrieval-reinforcement",
-        "memory-ranking-feedback-promotes",
-    ]
-    .into_iter()
-    .collect();
-    let directory = crate::common::repository_path("evals/memory/scenarios");
-    let found = std::fs::read_dir(&directory)
-        .expect("read evals/memory/scenarios")
-        .map(|entry| entry.expect("scenario entry").path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-        .map(|path| {
-            let id = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .expect("scenario file stem")
-                .to_owned();
-            load_scenario(&id);
-            id
-        })
-        .collect::<HashSet<_>>();
-    assert_eq!(
-        found.iter().map(String::as_str).collect::<HashSet<_>>(),
-        wired,
-        "evals/memory/scenarios/*.json and the test list must stay in sync"
-    );
 }

@@ -1,4 +1,4 @@
-use tracedecay_application::{ApplicationProblem, ResolvedScope};
+use tracedecay_contracts::{ApplicationProblem, ResolvedScope};
 
 use super::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonInvocationOutcome,

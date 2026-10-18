@@ -1,4 +1,4 @@
-import type { WorkAttemptStateV1, WorkGraphReadV1 } from '../../contracts/index.ts';
+import type { WorkAttemptStateV1, WorkGraphReadV1 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkResult } from '../work/workApi.ts';
 import { latestGraphEntry } from './handoff.ts';
@@ -10,7 +10,7 @@ import { type CountRow, rankedCounts } from './activity.ts';
  * The analytics diagnostics fold records how the window's events came out
  * (`by_outcome`) and carries a short tape of the latest events with their own
  * outcomes (`recent_events`). The work-product graph read carries the runtime
- * projection — every attempt the daemon could observe, with the state it is in
+ * projection, every attempt the daemon could observe, with the state it is in
  * (`WorkAttemptStateV1`, whose members include `failed`, `timed_out`,
  * `cancelled` and `recovery_required`).
  *
@@ -26,7 +26,7 @@ import { type CountRow, rankedCounts } from './activity.ts';
  */
 
 /** Outcome words this build reads as a failed call. */
-export const FAILED_OUTCOMES: readonly string[] = [
+const FAILED_OUTCOMES: readonly string[] = [
   'error',
   'failed',
   'failure',
@@ -42,8 +42,8 @@ export const FAILED_OUTCOMES: readonly string[] = [
 
 /** Outcome words this build reads as a call that did not fail. `observed` is
  * here because hook-routing events carry it and they are not tool calls at
- * all — they are events the fold saw go past. */
-export const SETTLED_OUTCOMES: readonly string[] = [
+ * all, they are events the fold saw go past. */
+const SETTLED_OUTCOMES: readonly string[] = [
   'success',
   'succeeded',
   'ok',
@@ -54,16 +54,16 @@ export const SETTLED_OUTCOMES: readonly string[] = [
   'observed',
 ];
 
-export type OutcomeClass = 'failed' | 'settled' | 'unclassified';
+type OutcomeClass = 'failed' | 'settled' | 'unclassified';
 
-export function classifyOutcome(outcome: string): OutcomeClass {
+function classifyOutcome(outcome: string): OutcomeClass {
   const normalized = outcome.trim().toLowerCase();
   if (FAILED_OUTCOMES.includes(normalized)) return 'failed';
   if (SETTLED_OUTCOMES.includes(normalized)) return 'settled';
   return 'unclassified';
 }
 
-export interface OutcomeReading {
+interface OutcomeReading {
   readonly failed: readonly { label: string; count: number }[];
   readonly settled: readonly { label: string; count: number }[];
   readonly unclassified: readonly { label: string; count: number }[];
@@ -73,7 +73,7 @@ export interface OutcomeReading {
 }
 
 /** `by_outcome`, split three ways. `counted` is the sum of everything the row
- * set carried — the only denominator these shares may be taken against, because
+ * set carried, the only denominator these shares may be taken against, because
  * the window's own event count includes events this array never described. */
 export function readOutcomes(rows: readonly CountRow[]): OutcomeReading {
   const ranked = rankedCounts(rows, 'outcome');
@@ -92,7 +92,7 @@ export function readOutcomes(rows: readonly CountRow[]): OutcomeReading {
   };
 }
 
-export interface FailedEvent {
+interface FailedEvent {
   readonly timestamp: number;
   readonly tool: string;
   readonly kind: string;
@@ -140,7 +140,7 @@ const UNCLEAN_ATTEMPT_STATES: ReadonlySet<WorkAttemptStateV1> = new Set<WorkAtte
   'cancellation_escalated',
 ]);
 
-export interface AttemptFailure {
+interface AttemptFailure {
   readonly attemptId: string;
   readonly taskId: string;
   readonly runId: string;
@@ -150,6 +150,8 @@ export interface AttemptFailure {
 export type AttemptFailureReading =
   | { readonly state: 'pending' }
   | { readonly state: 'refused'; readonly chip: DomainStateKind; readonly detail: string }
+  /** No Work graph exists yet, so no attempt could have run against one. */
+  | { readonly state: 'absent' }
   | {
       readonly state: 'read';
       readonly failures: readonly AttemptFailure[];
@@ -157,7 +159,7 @@ export type AttemptFailureReading =
       readonly attempts: number;
       /** The runtime projection's own coverage. `unavailable` means the daemon
        * could observe NO attempt, which is not the same as observing none to
-       * have failed — the surface must not print a zero for it. */
+       * have failed, the surface must not print a zero for it. */
       readonly coverage: 'complete' | 'partial' | 'unavailable';
       /** Attempts the daemon named as unobservable under `partial` coverage. */
       readonly unobserved: number;
@@ -178,6 +180,7 @@ export function readAttemptFailures(
   if (result.outcome === 'refused') {
     return { state: 'refused', chip: result.state, detail: result.detail };
   }
+  if (result.value.mode === 'absent') return { state: 'absent' };
   const latest = latestGraphEntry(result.value);
   if (latest === null) {
     return {

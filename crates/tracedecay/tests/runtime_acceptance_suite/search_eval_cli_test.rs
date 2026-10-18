@@ -31,22 +31,30 @@ fn validate_reports_the_direct_checked_in_workload() {
         String::from_utf8_lossy(&output.stderr)
     );
     let payload = stdout_json(&output);
-    assert_eq!(payload["command"], "validate");
+    // `validate` without `--workload` validates the packaged workload, so the
+    // shipped binary must report exactly the receipt the evaluator library
+    // derives for it: digests, cardinalities, and source binding come from
+    // that authority, never from literals in this test.
+    let receipt = tracedecay_search_eval::validate_default_workload()
+        .expect("validate the packaged workload through the library");
     assert_eq!(payload["status"], "pass");
-    assert_eq!(payload["query_count"], 28);
-    assert_eq!(payload["partition_counts"]["train"], 14);
-    assert_eq!(payload["partition_counts"]["validation"], 14);
-    assert_eq!(payload["profile_count"], 3);
-    assert!(
-        payload["workload_digest"]
-            .as_str()
-            .is_some_and(|digest| digest.starts_with("sha256:"))
+    assert_eq!(
+        payload,
+        serde_json::to_value(&receipt).expect("serialize workload receipt"),
+        "the CLI validate envelope drifted from the library receipt"
     );
+    let partition_total: u64 = payload["partition_counts"]
+        .as_object()
+        .expect("partition counts")
+        .values()
+        .map(|count| count.as_u64().expect("partition count"))
+        .sum();
+    assert_eq!(payload["query_count"], partition_total);
 }
 
 #[test]
-fn compare_reports_unmeasured_semantic_and_rerank_stages_as_pending() {
-    let output = run(&["compare", "--profiles", "hybrid-reranked"]);
+fn compare_reports_the_lexical_baselines_conceptual_misses() {
+    let output = run(&["compare", "--profiles", "query-fallback"]);
     assert_eq!(
         output.status.code(),
         Some(1),
@@ -55,15 +63,50 @@ fn compare_reports_unmeasured_semantic_and_rerank_stages_as_pending() {
     );
     let payload = stdout_json(&output);
     assert_eq!(payload["command"], "compare");
-    assert_eq!(payload["status"], "pending");
-    for profile in payload["profiles"].as_array().expect("profiles array") {
-        assert_eq!(profile["status"], "pending");
+    assert_eq!(
+        payload["status"], "fail",
+        "comparison did not retain the measured conceptual misses: {payload}"
+    );
+    let profiles = payload["profiles"].as_array().expect("profiles array");
+    assert!(!profiles.is_empty(), "no partition was compared: {payload}");
+    for profile in profiles {
+        // The workload pins the baseline's per-partition fallback output by
+        // digest; that receipt, not a miss count, is what identifies which
+        // needs the lexical baseline answers.
+        assert_eq!(
+            profile["fallback_matches_expected"], true,
+            "the lexical baseline drifted from the workload's pinned fallback receipt: {profile}"
+        );
+        let queries = profile["queries"].as_array().expect("per-query results");
+        let missed = queries
+            .iter()
+            .filter(|query| query["status"] == "fail")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            profile["failed_queries"],
+            missed.len(),
+            "failed_queries disagrees with the per-query statuses: {profile}"
+        );
+        assert!(
+            !missed.is_empty(),
+            "the lexical baseline no longer misses any conceptual need; re-pin the workload receipt deliberately: {profile}"
+        );
+        for query in &missed {
+            let strata = query["strata"].as_array().expect("query strata");
+            assert!(
+                strata.contains(&Value::from("natural_language")),
+                "the lexical baseline missed a non-conceptual need: {query}"
+            );
+        }
+        assert_eq!(profile["status"], "fail");
         assert!(matches!(
             profile["resource_status"].as_str(),
             Some("pass" | "pending")
         ));
-        assert_eq!(profile["optional_stages"]["semantic"], "pending");
-        assert_eq!(profile["optional_stages"]["rerank"], "pending");
+        assert_eq!(
+            profile["quality"]["protected_recall_at_10"]["numerator"],
+            profile["quality"]["protected_recall_at_10"]["denominator"]
+        );
     }
 }
 

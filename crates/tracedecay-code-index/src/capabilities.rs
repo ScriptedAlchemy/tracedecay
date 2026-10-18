@@ -3,22 +3,15 @@
 //! revisions, available grains and exact-term fields, supported languages,
 //! graph edge-authority classes, privacy domain/key epoch, source coverage,
 //! exclusions, partial states, and manifest digest.
-//!
-//! Consumers must reject a missing, incompatible, mixed-generation, or
-//! unauthorized base manifest before candidate production. The optional
-//! semantic manifest augments this base; its absence cannot block authorized
-//! lexical/graph retrieval.
-
-use std::collections::BTreeMap;
 
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeIndexCapabilityManifestV1,
-    CodeSearchChunkGrainV1, CoverageSummaryV1, DomainError, EdgeAuthorityV1,
-    ExactTechnicalTermKindV1, ExtractorRevision, GrammarRevision, LanguageId,
-    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, ProjectionKeyV1, ProjectionKindV1,
-    SanitizationReceiptId, SanitizerRevision, canonical_sha256,
+    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeGenerationSourceCommitmentsV1,
+    CodeIndexCapabilityManifestV1, CodeSearchChunkGrainV1, CoverageSummaryV1, DomainError,
+    EdgeAuthorityV1, ExactTechnicalTermKindV1, ExtractorRevision, GrammarRevision, LanguageId,
+    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, SanitizationReceiptId,
+    SanitizerRevision, canonical_sha256,
 };
 
 use super::languages::LanguageRegistry;
@@ -30,33 +23,8 @@ pub enum CapabilityEmissionErrorV1 {
     GenerationNotSealed,
     #[error("the generation manifest mixes snapshots or generations")]
     MixedGeneration,
-    #[error("the privacy domain or key epoch is not authorized for this consumer")]
-    UnauthorizedPrivacyDomain,
     #[error("contract violation: {0}")]
     Contract(String),
-}
-
-/// The capability-manifest emitter contract.
-pub trait CodeIndexCapabilityEmitter {
-    /// Emit the base capability manifest for one sealed generation.
-    fn emit(
-        &self,
-        generation: &CodeGenerationManifestV1,
-    ) -> Result<CodeIndexCapabilityManifestV1, CapabilityEmissionErrorV1>;
-}
-
-/// The consumer-side validation contract for a base manifest: reject missing,
-/// incompatible, mixed-generation, or unauthorized manifests before candidate
-/// production.
-pub trait CodeIndexCapabilityValidator {
-    /// Validate that `manifest` authorizes candidate production under
-    /// `projection` for `generation`.
-    fn validate_for_candidates(
-        &self,
-        generation: &CodeGenerationId,
-        projection: &ProjectionKeyV1,
-        manifest: &CodeIndexCapabilityManifestV1,
-    ) -> Result<(), CapabilityEmissionErrorV1>;
 }
 
 /// Domain separator for the generation seal's expected digest. The seal is
@@ -66,20 +34,9 @@ pub const GENERATION_SEAL_SEPARATOR: &str = "tracedecay.code-generation-seal.v1"
 /// The chunk schema revision pinned by this implementation.
 pub const CHUNK_SCHEMA_REVISION_V1: &str = "code-search-chunk.v1";
 
-/// The exact-term kinds the query chunker emits.
-pub const BASE_EXACT_TERM_KINDS: &[ExactTechnicalTermKindV1] = &[
-    ExactTechnicalTermKindV1::WholeSymbol,
-    ExactTechnicalTermKindV1::QualifiedName,
-    ExactTechnicalTermKindV1::Path,
-    ExactTechnicalTermKindV1::CompilerErrorCode,
-    ExactTechnicalTermKindV1::CompilerErrorText,
-    ExactTechnicalTermKindV1::RuntimeErrorCode,
-    ExactTechnicalTermKindV1::RuntimeErrorText,
-    ExactTechnicalTermKindV1::CliFlag,
-    ExactTechnicalTermKindV1::ToolName,
-    ExactTechnicalTermKindV1::ConfigurationKey,
-    ExactTechnicalTermKindV1::CommitIdentifier,
-];
+/// The exact-term kinds the query chunker emits, in codec ordinal order.
+pub const BASE_EXACT_TERM_KINDS: &[ExactTechnicalTermKindV1] =
+    ExactTechnicalTermKindV1::ORDER.as_slice();
 
 /// The edge-authority classes query tree-sitter extraction declares: edges
 /// derived purely from syntax are `SyntaxExact`; unresolved constructs are
@@ -103,21 +60,7 @@ struct SealPayload<'a> {
     privacy_domain: &'a PrivacyDomainId,
     privacy_key_epoch: u64,
     parent_generation: &'a Option<CodeGenerationId>,
-}
-
-#[derive(Serialize)]
-struct LegacySealPayload<'a> {
-    separator: &'static str,
-    generation_id: &'a CodeGenerationId,
-    snapshot_digest: &'a ManifestDigest,
-    registry_revision: &'a LanguageRegistryRevision,
-    grammar_revisions: &'a [(LanguageId, GrammarRevision)],
-    extractor_revisions: &'a [(LanguageId, ExtractorRevision)],
-    sanitizer_revision: &'a SanitizerRevision,
-    chunker_revision: &'a ChunkerRevision,
-    privacy_domain: &'a PrivacyDomainId,
-    privacy_key_epoch: u64,
-    parent_generation: &'a Option<CodeGenerationId>,
+    source_commitments: &'a Option<CodeGenerationSourceCommitmentsV1>,
 }
 
 /// The canonical expected digest a generation planner must seal before handing
@@ -126,21 +69,6 @@ struct LegacySealPayload<'a> {
 pub fn expected_seal_digest(
     generation: &CodeGenerationManifestV1,
 ) -> Result<ManifestDigest, DomainError> {
-    if generation.uses_legacy_v1_identity()? {
-        return canonical_sha256(&LegacySealPayload {
-            separator: GENERATION_SEAL_SEPARATOR,
-            generation_id: &generation.generation_id,
-            snapshot_digest: &generation.snapshot_digest,
-            registry_revision: &generation.registry_revision,
-            grammar_revisions: &generation.grammar_revisions,
-            extractor_revisions: &generation.extractor_revisions,
-            sanitizer_revision: &generation.sanitizer_revision,
-            chunker_revision: &generation.chunker_revision,
-            privacy_domain: &generation.privacy_domain,
-            privacy_key_epoch: generation.privacy_key_epoch,
-            parent_generation: &generation.parent_generation,
-        });
-    }
     canonical_sha256(&SealPayload {
         separator: GENERATION_SEAL_SEPARATOR,
         generation_id: &generation.generation_id,
@@ -154,6 +82,7 @@ pub fn expected_seal_digest(
         privacy_domain: &generation.privacy_domain,
         privacy_key_epoch: generation.privacy_key_epoch,
         parent_generation: &generation.parent_generation,
+        source_commitments: &generation.source_commitments,
     })
 }
 
@@ -167,9 +96,9 @@ pub fn capability_manifest_digest(
 }
 
 /// The base capability-manifest emitter. Everything the manifest pins that
-/// the generation manifest does not already carry — descriptor revisions,
+/// the generation manifest does not already carry, descriptor revisions,
 /// supported languages, available grains, exact-term kinds, edge-authority
-/// classes, source coverage, and sanitization receipts — is supplied at
+/// classes, source coverage, and sanitization receipts, is supplied at
 /// construction, so one emitter describes one generation's indexing
 /// authority.
 pub struct BaseCapabilityEmitter<R: LanguageRegistry> {
@@ -199,24 +128,37 @@ impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
             sanitization_receipts,
         }
     }
-
-    /// Override the declared exact-term kinds (must match chunker output).
-    #[must_use]
-    pub fn with_exact_term_kinds(mut self, kinds: Vec<ExactTechnicalTermKindV1>) -> Self {
-        self.exact_term_kinds = kinds;
-        self
-    }
-
-    /// Override the declared edge-authority classes.
-    #[must_use]
-    pub fn with_edge_authority_classes(mut self, classes: Vec<EdgeAuthorityV1>) -> Self {
-        self.edge_authority_classes = classes;
-        self
-    }
 }
 
-impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R> {
-    fn emit(
+/// Whether a sealed generation carries exactly the registry, grammar, and
+/// extractor revisions supplied by its snapshot-scoped language registry.
+///
+/// Callers must supply the registry narrowed to the languages present in the
+/// generation's snapshot. An unavailable current descriptor must therefore be
+/// rejected while constructing that registry rather than omitted here.
+pub fn generation_language_revisions_match<R: LanguageRegistry>(
+    generation: &CodeGenerationManifestV1,
+    registry: &R,
+) -> bool {
+    let descriptors = registry.descriptors();
+    generation.registry_revision == registry.registry_revision()
+        && generation.grammar_revisions.len() == descriptors.len()
+        && generation.extractor_revisions.len() == descriptors.len()
+        && !generation.grammar_revisions.iter().zip(&descriptors).any(
+            |((language, revision), descriptor)| {
+                language != &descriptor.language || revision != &descriptor.grammar_revision
+            },
+        )
+        && !generation.extractor_revisions.iter().zip(&descriptors).any(
+            |((language, revision), descriptor)| {
+                language != &descriptor.language || revision != &descriptor.extractor_revision
+            },
+        )
+}
+
+impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
+    /// Emit the base capability manifest for one sealed generation.
+    pub fn emit(
         &self,
         generation: &CodeGenerationManifestV1,
     ) -> Result<CodeIndexCapabilityManifestV1, CapabilityEmissionErrorV1> {
@@ -235,23 +177,10 @@ impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R
             return Err(CapabilityEmissionErrorV1::GenerationNotSealed);
         }
 
-        let descriptors = self.registry.descriptors();
-        if generation.registry_revision != self.registry.registry_revision()
-            || generation.grammar_revisions.len() != descriptors.len()
-            || generation.extractor_revisions.len() != descriptors.len()
-            || generation.grammar_revisions.iter().zip(&descriptors).any(
-                |((language, revision), descriptor)| {
-                    language != &descriptor.language || revision != &descriptor.grammar_revision
-                },
-            )
-            || generation.extractor_revisions.iter().zip(&descriptors).any(
-                |((language, revision), descriptor)| {
-                    language != &descriptor.language || revision != &descriptor.extractor_revision
-                },
-            )
-        {
+        if !generation_language_revisions_match(generation, &self.registry) {
             return Err(CapabilityEmissionErrorV1::MixedGeneration);
         }
+        let descriptors = self.registry.descriptors();
         let supported_languages: Vec<LanguageId> = descriptors
             .iter()
             .map(|descriptor| descriptor.language.clone())
@@ -260,18 +189,13 @@ impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R
             .iter()
             .map(|descriptor| descriptor.descriptor_revision.clone())
             .collect();
-        let mut available_grains = vec![
-            CodeSearchChunkGrainV1::SymbolSignature,
-            CodeSearchChunkGrainV1::SymbolBody,
-            CodeSearchChunkGrainV1::FilePreamble,
-            CodeSearchChunkGrainV1::FileWindow,
-        ];
-        if descriptors
+        let admit_members = descriptors
             .iter()
-            .any(|descriptor| descriptor.stable_member_spans)
-        {
-            available_grains.push(CodeSearchChunkGrainV1::SymbolMember);
-        }
+            .any(|descriptor| descriptor.stable_member_spans);
+        let mut available_grains: Vec<CodeSearchChunkGrainV1> = CodeSearchChunkGrainV1::ORDER
+            .into_iter()
+            .filter(|grain| *grain != CodeSearchChunkGrainV1::SymbolMember || admit_members)
+            .collect();
         available_grains.sort();
         available_grains.dedup();
 
@@ -314,80 +238,6 @@ impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R
     }
 }
 
-/// The consumer-side base-manifest validator. Authorization is pinned at
-/// construction: the expected chunk schema revision and the authorized
-/// privacy domains with their maximum key epochs.
-pub struct BaseCapabilityValidator {
-    chunk_schema_revision: String,
-    /// Privacy domain identity -> maximum authorized key epoch.
-    authorized_privacy_domains: BTreeMap<String, u64>,
-}
-
-impl BaseCapabilityValidator {
-    /// Create a validator for the query base chunk schema.
-    pub fn new() -> Self {
-        Self {
-            chunk_schema_revision: CHUNK_SCHEMA_REVISION_V1.to_owned(),
-            authorized_privacy_domains: BTreeMap::new(),
-        }
-    }
-
-    /// Authorize one privacy domain up to `max_key_epoch` (inclusive).
-    #[must_use]
-    pub fn authorize_privacy_domain(
-        mut self,
-        domain: &PrivacyDomainId,
-        max_key_epoch: u64,
-    ) -> Self {
-        self.authorized_privacy_domains
-            .insert(domain.as_str().to_owned(), max_key_epoch);
-        self
-    }
-}
-
-impl Default for BaseCapabilityValidator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CodeIndexCapabilityValidator for BaseCapabilityValidator {
-    fn validate_for_candidates(
-        &self,
-        generation: &CodeGenerationId,
-        projection: &ProjectionKeyV1,
-        manifest: &CodeIndexCapabilityManifestV1,
-    ) -> Result<(), CapabilityEmissionErrorV1> {
-        if &manifest.generation_id != generation {
-            return Err(CapabilityEmissionErrorV1::MixedGeneration);
-        }
-        if projection.kind == ProjectionKindV1::Embedding {
-            // The base manifest alone never authorizes embedding projections.
-            return Err(CapabilityEmissionErrorV1::Contract(
-                "embedding projections require the semantic capability manifest".to_owned(),
-            ));
-        }
-        // Structural and digest validation (including the recomputed
-        // manifest digest) is owned by the domain contract.
-        manifest
-            .validate()
-            .map_err(|error| CapabilityEmissionErrorV1::Contract(error.to_string()))?;
-        if manifest.chunk_schema_revision != self.chunk_schema_revision {
-            return Err(CapabilityEmissionErrorV1::Contract(format!(
-                "chunk schema revision {} is not compatible with {}",
-                manifest.chunk_schema_revision, self.chunk_schema_revision
-            )));
-        }
-        match self
-            .authorized_privacy_domains
-            .get(manifest.privacy_domain.as_str())
-        {
-            Some(max_epoch) if manifest.privacy_key_epoch <= *max_epoch => Ok(()),
-            _ => Err(CapabilityEmissionErrorV1::UnauthorizedPrivacyDomain),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,10 +245,7 @@ mod tests {
 
     use crate::languages::StaticLanguageRegistry;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-            .expect("valid digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn generation_manifest() -> CodeGenerationManifestV1 {
         let registry = StaticLanguageRegistry::new();
@@ -424,8 +271,11 @@ mod tests {
             .collect();
         let mut manifest = CodeGenerationManifestV1 {
             project_id: tracedecay_domain::ProjectId::new("project.fixture").expect("valid id"),
-            generation_id: CodeGenerationId::new("generation.v1.aaaaaaaa.00000001")
-                .expect("valid id"),
+            generation_id: CodeGenerationId::new(format!(
+                "generation.v1.aaaaaaaa.00000001.{}",
+                "c".repeat(64)
+            ))
+            .expect("valid id"),
             snapshot_digest: digest('a'),
             invalidation_digest: digest('c'),
             registry_revision: registry.registry_revision(),
@@ -436,15 +286,13 @@ mod tests {
             privacy_domain: PrivacyDomainId::new("privacy.fixture").expect("valid id"),
             privacy_key_epoch: 7,
             parent_generation: None,
+            source_commitments: None,
             seal: GenerationSealV1 {
                 expected_digest: digest('b'),
                 sealed_at: UtcMicros(1_000_000),
                 planner: tracedecay_domain::ComponentVersion::new("planner.v1").expect("valid id"),
             },
         };
-        manifest.invalidation_digest = manifest
-            .expected_legacy_invalidation_digest()
-            .expect("legacy invalidation digest computes");
         manifest.seal.expected_digest =
             expected_seal_digest(&manifest).expect("seal digest computes");
         manifest
@@ -469,63 +317,6 @@ mod tests {
         BaseCapabilityEmitter::new(StaticLanguageRegistry::new(), coverage(), receipts())
     }
 
-    fn projection(kind: ProjectionKindV1) -> ProjectionKeyV1 {
-        ProjectionKeyV1 {
-            kind,
-            schema_revision: "projection.v1".to_owned(),
-            profile_digest: digest('e'),
-        }
-    }
-
-    #[test]
-    fn emit_pins_the_frozen_base_manifest_fields() {
-        let generation = generation_manifest();
-        let manifest = emitter().emit(&generation).expect("emission succeeds");
-
-        assert_eq!(manifest.generation_id, generation.generation_id);
-        assert_eq!(manifest.chunk_schema_revision, CHUNK_SCHEMA_REVISION_V1);
-        assert_eq!(manifest.chunker_revision, generation.chunker_revision);
-        assert_eq!(manifest.privacy_domain, generation.privacy_domain);
-        assert_eq!(manifest.privacy_key_epoch, 7);
-        assert_eq!(manifest.source_coverage, coverage());
-        assert_eq!(manifest.sanitization_receipts, receipts());
-        assert_eq!(manifest.exact_term_kinds, BASE_EXACT_TERM_KINDS);
-        assert_eq!(manifest.edge_authority_classes, BASE_EDGE_AUTHORITY_CLASSES);
-        assert!(
-            manifest
-                .supported_languages
-                .contains(&LanguageId::new("rust").expect("valid id"))
-        );
-        // Member grain is available because compiled descriptors identify
-        // stable member spans.
-        assert!(
-            manifest
-                .available_grains
-                .contains(&CodeSearchChunkGrainV1::SymbolMember)
-        );
-        let mut sorted = manifest.available_grains.clone();
-        sorted.sort();
-        assert_eq!(manifest.available_grains, sorted);
-        assert_eq!(
-            capability_manifest_digest(&manifest).expect("digest recomputes"),
-            manifest.manifest_digest
-        );
-    }
-
-    #[test]
-    fn emission_is_deterministic_and_serde_round_trips() {
-        let generation = generation_manifest();
-        let first = emitter().emit(&generation).expect("first emission");
-        let second = emitter().emit(&generation).expect("second emission");
-        assert_eq!(first, second);
-
-        let bytes = serde_json::to_vec(&first).expect("serialize");
-        let decoded: CodeIndexCapabilityManifestV1 =
-            serde_json::from_slice(&bytes).expect("deserialize");
-        assert_eq!(first, decoded);
-        assert_eq!(decoded.manifest_digest, first.manifest_digest);
-    }
-
     #[test]
     fn emit_rejects_unsealed_and_mixed_generations() {
         let mut unsealed = generation_manifest();
@@ -537,96 +328,11 @@ mod tests {
 
         let mut mixed = generation_manifest();
         mixed.parent_generation = Some(mixed.generation_id.clone());
-        // Recompute the integrity inputs so only self-supersession is wrong.
-        mixed.invalidation_digest = mixed
-            .expected_legacy_invalidation_digest()
-            .expect("mixed invalidation digest");
+        // Recompute the seal so only self-supersession is wrong.
         mixed.seal.expected_digest = expected_seal_digest(&mixed).expect("seal");
         assert_eq!(
             emitter().emit(&mixed),
             Err(CapabilityEmissionErrorV1::MixedGeneration)
-        );
-    }
-
-    #[test]
-    fn validator_accepts_an_authorized_base_manifest_round_trip() {
-        let generation = generation_manifest();
-        let manifest = emitter().emit(&generation).expect("emission succeeds");
-        let validator =
-            BaseCapabilityValidator::new().authorize_privacy_domain(&generation.privacy_domain, 7);
-
-        validator
-            .validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Lexical),
-                &manifest,
-            )
-            .expect("lexical projection authorized");
-        validator
-            .validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Graph),
-                &manifest,
-            )
-            .expect("graph projection authorized");
-    }
-
-    #[test]
-    fn validator_rejects_wrong_generation_tampering_and_unauthorized_domains() {
-        let generation = generation_manifest();
-        let manifest = emitter().emit(&generation).expect("emission succeeds");
-        let validator =
-            BaseCapabilityValidator::new().authorize_privacy_domain(&generation.privacy_domain, 7);
-
-        let other = CodeGenerationId::new("generation.other").expect("valid id");
-        assert_eq!(
-            validator.validate_for_candidates(
-                &other,
-                &projection(ProjectionKindV1::Lexical),
-                &manifest
-            ),
-            Err(CapabilityEmissionErrorV1::MixedGeneration)
-        );
-
-        let mut tampered = manifest.clone();
-        tampered.source_coverage.files_eligible = 11;
-        assert!(matches!(
-            validator.validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Lexical),
-                &tampered,
-            ),
-            Err(CapabilityEmissionErrorV1::Contract(_))
-        ));
-
-        assert!(matches!(
-            validator.validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Embedding),
-                &manifest,
-            ),
-            Err(CapabilityEmissionErrorV1::Contract(_))
-        ));
-
-        let no_domains = BaseCapabilityValidator::new();
-        assert_eq!(
-            no_domains.validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Lexical),
-                &manifest,
-            ),
-            Err(CapabilityEmissionErrorV1::UnauthorizedPrivacyDomain)
-        );
-
-        let stale_epoch =
-            BaseCapabilityValidator::new().authorize_privacy_domain(&generation.privacy_domain, 6);
-        assert_eq!(
-            stale_epoch.validate_for_candidates(
-                &generation.generation_id,
-                &projection(ProjectionKindV1::Lexical),
-                &manifest,
-            ),
-            Err(CapabilityEmissionErrorV1::UnauthorizedPrivacyDomain)
         );
     }
 }

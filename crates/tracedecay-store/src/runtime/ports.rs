@@ -1,21 +1,16 @@
-use std::future::Future;
-use std::pin::Pin;
-
 use super::{
     CommitSequenceV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
     GraphNodeV1, GraphSearchResultV1, GraphStatsV1, MaintenanceTelemetryV1, OperationPriorityV1,
     ReaderHealthLeaseIdV1, ReaderHealthLeaseV1, RuntimeCancellationIdentityV1,
     RuntimeCancellationStageV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
-    RuntimeTransactionScopeV1, SaturationScopeV1, ShardWatermarkV1, SnapshotLeaseIdV1,
-    SnapshotLeaseV1, StorageRuntimeContractErrorV1, StorageRuntimeErrorV1, StoreCommitReceiptV1,
-    StoreRuntimeBindingV1, UnavailableReasonV1, WatermarkCoverageStatusV1,
+    RuntimeTransactionScopeV1, SaturationScopeV1, ShardWatermarkV1, StorageRuntimeContractErrorV1,
+    StoreCommitReceiptV1, StoreRuntimeBindingV1, UnavailableReasonV1, WatermarkCoverageStatusV1,
 };
 use super::{
     RepositoryOperationEnvelopeV1, RepositoryReadOperationV1, RepositoryReadResultV1,
     StoreAuthorityEpochV1, StoreShardIdV1,
 };
 use serde::{Deserialize, Deserializer, Serialize};
-use thiserror::Error;
 
 /// One caller-owned monotonic interruption decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,7 +98,7 @@ impl RuntimeSubmitRequestV1 {
 }
 
 /// Idempotent write outcomes, including expected admission and cancellation
-/// states. Driver failures remain `StorageRuntimePortErrorV1`; these variants
+/// states. Driver failures remain `StorageRuntimeErrorV1`; these variants
 /// are stable runtime decisions callers must handle explicitly.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -273,8 +268,6 @@ impl RuntimeSubmitOutcomeV1 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeReadOperationV1 {
     CurrentWatermark,
-    SnapshotLease { lease_id: SnapshotLeaseIdV1 },
-    FrozenCoverage,
     MaintenanceTelemetry,
     ReaderHealthLease { lease_id: ReaderHealthLeaseIdV1 },
     TemporalHealth,
@@ -331,8 +324,7 @@ impl RuntimeReadOperationV1 {
     }
 }
 
-/// A validated one-runtime read request. `consistency` directly represents
-/// Latest, AtLeast, ExactSnapshot, or a frozen cross-shard vector.
+/// A validated one-runtime read request. `consistency` is Latest or AtLeast.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct RuntimeReadRequestV1 {
     binding: StoreRuntimeBindingV1,
@@ -410,43 +402,6 @@ impl RuntimeReadRequestV1 {
                 field: "read admission bytes",
             });
         }
-        match &self.consistency {
-            ConsistencyModeV1::ExactSnapshot { lease } => {
-                lease.validate()?;
-                if !binding_matches_watermark(&self.binding, &lease.watermark) {
-                    return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                        field: "snapshot lease runtime binding",
-                    });
-                }
-                if let RuntimeReadOperationV1::SnapshotLease { lease_id } = &self.operation
-                    && *lease_id != lease.lease_id
-                {
-                    return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                        field: "snapshot lease request id",
-                    });
-                }
-            }
-            ConsistencyModeV1::FrozenWatermarkVector { vector }
-                if vector.get(&self.binding.shard_id).is_none_or(|watermark| {
-                    !binding_matches_watermark(&self.binding, watermark)
-                }) =>
-            {
-                return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                    field: "frozen watermark runtime binding",
-                });
-            }
-            _ => {}
-        }
-        if self.operation == RuntimeReadOperationV1::FrozenCoverage
-            && !matches!(
-                self.consistency,
-                ConsistencyModeV1::FrozenWatermarkVector { .. }
-            )
-        {
-            return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "frozen coverage consistency",
-            });
-        }
         if self.operation == RuntimeReadOperationV1::TemporalHealth
             && self.priority != OperationPriorityV1::Health
         {
@@ -478,8 +433,6 @@ impl<'de> Deserialize<'de> for RuntimeReadRequestV1 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeReadResultV1 {
     CurrentWatermark { watermark: ShardWatermarkV1 },
-    SnapshotLease { lease: Option<SnapshotLeaseV1> },
-    FrozenCoverage { coverage: FrozenWatermarkCoverageV1 },
     MaintenanceTelemetry { telemetry: MaintenanceTelemetryV1 },
     ReaderHealthLease { lease: Option<ReaderHealthLeaseV1> },
     TemporalHealth { healthy: bool },
@@ -490,8 +443,8 @@ pub enum RuntimeReadResultV1 {
     Repository { result: RepositoryReadResultV1 },
 }
 
-/// Explicit history coverage for every read. `Partial`, `Stale`, and
-/// `Unavailable` are successful typed read decisions, not malformed responses.
+/// Explicit history coverage for every read. `Stale` and `Unavailable` are
+/// successful typed read decisions, not malformed responses.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeReadCoverageV1 {
@@ -501,9 +454,6 @@ pub enum RuntimeReadCoverageV1 {
         observed: Option<ShardWatermarkV1>,
     },
     Complete {
-        coverage: FrozenWatermarkCoverageV1,
-    },
-    Partial {
         coverage: FrozenWatermarkCoverageV1,
     },
     Stale {
@@ -606,12 +556,11 @@ fn validate_read_coverage(
     let required = required_vector(request)?;
     let (coverage, expected_class) = match response {
         RuntimeReadCoverageV1::Complete { coverage } => (coverage, 0_u8),
-        RuntimeReadCoverageV1::Partial { coverage } => (coverage, 1),
-        RuntimeReadCoverageV1::Stale { coverage } => (coverage, 2),
+        RuntimeReadCoverageV1::Stale { coverage } => (coverage, 1),
         RuntimeReadCoverageV1::Unavailable {
             coverage: Some(coverage),
             ..
-        } => (coverage, 3),
+        } => (coverage, 2),
         RuntimeReadCoverageV1::Unavailable { coverage: None, .. } => return Ok(()),
         RuntimeReadCoverageV1::Latest { .. } => {
             return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
@@ -634,12 +583,10 @@ fn validate_read_coverage(
     });
     let actual_class = if coverage.is_complete() {
         0
-    } else if coverage.is_partial() {
-        1
     } else if has_stale {
-        2
+        1
     } else if has_unavailable {
-        3
+        2
     } else {
         unreachable!("a non-empty coverage vector always has a derived class")
     };
@@ -662,47 +609,6 @@ fn validate_read_value(
             RuntimeReadResultV1::CurrentWatermark { watermark },
         ) if binding_matches_watermark(request.binding(), watermark)
             && coverage_observes(coverage, watermark) =>
-        {
-            Ok(())
-        }
-        (
-            RuntimeReadOperationV1::SnapshotLease { lease_id },
-            RuntimeReadResultV1::SnapshotLease { lease },
-        ) => {
-            if lease.is_none()
-                && matches!(
-                    request.consistency(),
-                    ConsistencyModeV1::ExactSnapshot { .. }
-                )
-            {
-                return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                    field: "exact snapshot lease read result",
-                });
-            }
-            if let Some(lease) = lease {
-                lease.validate()?;
-                if lease.lease_id != *lease_id
-                    || !binding_matches_watermark(request.binding(), &lease.watermark)
-                    || !coverage_observes(coverage, &lease.watermark)
-                {
-                    return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                        field: "snapshot lease read result",
-                    });
-                }
-            }
-            Ok(())
-        }
-        (
-            RuntimeReadOperationV1::FrozenCoverage,
-            RuntimeReadResultV1::FrozenCoverage {
-                coverage: value_coverage,
-            },
-        ) if matches!(
-            coverage,
-            RuntimeReadCoverageV1::Complete { coverage }
-                | RuntimeReadCoverageV1::Partial { coverage }
-                if coverage == value_coverage
-        ) =>
         {
             Ok(())
         }
@@ -777,10 +683,6 @@ fn required_vector(
     request: &RuntimeReadRequestV1,
 ) -> Result<FrozenWatermarkVectorV1, StorageRuntimeContractErrorV1> {
     match request.consistency() {
-        ConsistencyModeV1::FrozenWatermarkVector { vector } => Ok(vector.clone()),
-        ConsistencyModeV1::ExactSnapshot { lease } => {
-            FrozenWatermarkVectorV1::new([lease.watermark.clone()])
-        }
         ConsistencyModeV1::AtLeast { commit_sequence } => {
             FrozenWatermarkVectorV1::new([ShardWatermarkV1 {
                 shard_id: request.binding().shard_id.clone(),
@@ -803,8 +705,7 @@ fn coverage_observes(coverage: &RuntimeReadCoverageV1, watermark: &ShardWatermar
             observed: Some(observed),
         } => observed == watermark,
         RuntimeReadCoverageV1::Latest { observed: None } => false,
-        RuntimeReadCoverageV1::Complete { coverage }
-        | RuntimeReadCoverageV1::Partial { coverage } => {
+        RuntimeReadCoverageV1::Complete { coverage } => {
             coverage.observed(&watermark.shard_id) == Some(watermark)
         }
         RuntimeReadCoverageV1::Stale { .. } | RuntimeReadCoverageV1::Unavailable { .. } => false,
@@ -818,98 +719,6 @@ fn binding_matches_watermark(
     binding.shard_id == watermark.shard_id
         && binding.incarnation == watermark.incarnation
         && binding.authority_epoch == watermark.authority_epoch
-}
-
-fn validate_probe(
-    control: &RuntimeRequestControlV1,
-    probe: &dyn RuntimeRequestProbeV1,
-) -> Result<(), StorageRuntimeContractErrorV1> {
-    if probe.cancellation_identity() != &control.cancellation {
-        return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-            field: "runtime cancellation probe identity",
-        });
-    }
-    if probe.deadline_identity() != &control.deadline {
-        return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-            field: "runtime deadline probe identity",
-        });
-    }
-    Ok(())
-}
-
-fn read_interruption(
-    probe: &dyn RuntimeRequestProbeV1,
-) -> Result<Option<RuntimeReadOutcomeV1>, StorageRuntimeContractErrorV1> {
-    let reason = match probe.interruption() {
-        Some(RuntimeInterruptionV1::Cancelled) => UnavailableReasonV1::Cancelled,
-        Some(RuntimeInterruptionV1::DeadlineExceeded) => UnavailableReasonV1::DeadlineExceeded,
-        None => return Ok(None),
-    };
-    RuntimeReadOutcomeV1::new(
-        None,
-        RuntimeReadCoverageV1::Unavailable {
-            coverage: None,
-            reason,
-        },
-    )
-    .map(Some)
-}
-
-#[derive(Debug, Error)]
-pub enum StorageRuntimePortErrorV1 {
-    #[error("invalid storage runtime request: {0}")]
-    InvalidRequest(StorageRuntimeContractErrorV1),
-    #[error("invalid storage runtime response: {0}")]
-    InvalidResponse(StorageRuntimeContractErrorV1),
-    #[error(transparent)]
-    Runtime(Box<StorageRuntimeErrorV1>),
-}
-
-impl From<StorageRuntimeErrorV1> for StorageRuntimePortErrorV1 {
-    fn from(error: StorageRuntimeErrorV1) -> Self {
-        Self::Runtime(Box::new(error))
-    }
-}
-
-pub type StorageRuntimePortResultV1<T> = Result<T, StorageRuntimePortErrorV1>;
-pub type StorageRuntimePortFutureV1<'a, T> =
-    Pin<Box<dyn Future<Output = StorageRuntimePortResultV1<T>> + Send + 'a>>;
-
-/// Object-safe std-only asynchronous read boundary.
-pub trait StorageRuntimeReadPort: Send + Sync {
-    fn dispatch_read<'a>(
-        &'a self,
-        request: RuntimeReadRequestV1,
-        probe: &'a dyn RuntimeRequestProbeV1,
-    ) -> StorageRuntimePortFutureV1<'a, RuntimeReadOutcomeV1>;
-
-    fn read<'a>(
-        &'a self,
-        request: RuntimeReadRequestV1,
-        probe: &'a dyn RuntimeRequestProbeV1,
-    ) -> StorageRuntimePortFutureV1<'a, RuntimeReadOutcomeV1> {
-        Box::pin(async move {
-            request
-                .validate()
-                .and_then(|()| validate_probe(request.control(), probe))
-                .map_err(StorageRuntimePortErrorV1::InvalidRequest)?;
-            if let Some(outcome) =
-                read_interruption(probe).map_err(StorageRuntimePortErrorV1::InvalidResponse)?
-            {
-                return Ok(outcome);
-            }
-            let outcome = self.dispatch_read(request.clone(), probe).await?;
-            outcome
-                .validate_for(&request)
-                .map_err(StorageRuntimePortErrorV1::InvalidResponse)?;
-            if let Some(interrupted) =
-                read_interruption(probe).map_err(StorageRuntimePortErrorV1::InvalidResponse)?
-            {
-                return Ok(interrupted);
-            }
-            Ok(outcome)
-        })
-    }
 }
 
 // Keep the single-shard requirement helper explicit so adapter migrations do

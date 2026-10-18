@@ -3,7 +3,7 @@ members = [
     "crates/tracedecay",
     "crates/tracedecay-agent-hosts",
     "crates/tracedecay-api",
-    "crates/tracedecay-application",
+    "crates/tracedecay-contracts",
     "crates/tracedecay-automation",
     "crates/tracedecay-automation-runtime",
     "crates/tracedecay-capture",
@@ -30,14 +30,15 @@ members = [
     "crates/tracedecay-lsp",
     "crates/tracedecay-maintenance",
     "crates/tracedecay-mcp",
+    "crates/tracedecay-mcp-catalog",
     "crates/tracedecay-policy",
+    "crates/tracedecay-privacy",
     "crates/tracedecay-private-fs",
+    "crates/tracedecay-project",
     "crates/tracedecay-query",
     "crates/tracedecay-runtime-core",
     "crates/tracedecay-sdk",
     "crates/tracedecay-search-eval",
-    "crates/tracedecay-semantic",
-    "crates/tracedecay-semantic-contracts",
     "crates/tracedecay-session-memory",
     "crates/tracedecay-session-runtime",
     "crates/tracedecay-sessions",
@@ -48,34 +49,52 @@ members = [
     "crates/tracedecay-store",
     "crates/tracedecay-store-runtime",
     "crates/tracedecay-tool-catalog",
-    "crates/tracedecay-usecases",
+    "crates/tracedecay-tokenizer",
+    "crates/tracedecay-application",
 ]
 exclude = [
     ".worktrees",
     ".codex-worktrees",
+    "patches/tokensave-medium-treesitters",
 ]
 resolver = "3"
 
 # Declared once here; every package inherits via
-# `edition.workspace = true`. Cargo has no config-level edition default — this
+# `edition.workspace = true`. Cargo has no config-level edition default, so this
 # inheritance table is the sanctioned single source of truth.
 [workspace.package]
 edition = "2024"
-version = "0.1.0-beta.37"
+version = "1.0.0-beta.88"
 
 [workspace.dependencies]
-# Opt-in profiler, pinned once for the whole workspace. Non-optional on purpose:
-# the macros must always resolve, and with no profiling feature selected the
-# crate pulls only `hotpath-macros` and expands every macro to a no-op, so the
-# explicit feature-off comparison build carries no measurable profiler weight.
-hotpath = { version = "0.24", default-features = false, features = ["threads"] }
-grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
-grafeo-common = { version = "=0.5.42", default-features = false }
-grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
-grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
-grafeo-storage = { version = "=0.5.42", default-features = false, features = ["wal"] }
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
-tracedecay-semantic-contracts = { path = "crates/tracedecay-semantic-contracts", version = "0.1.0" }
+# nightly-outcome-try is an asupersync default (Outcome's Try impls). It
+# compiles only on the pinned nightly. native-runtime stays explicit because
+# it is not part of that default set.
+# Switch back to `version = "=0.6.0"` once 0.6.0 is published to crates.io (#3874).
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "432e2c3b2cf2bad02fc88e380d29a6b0b5c01422", default-features = false, features = ["proc-macros", "native-runtime", "nightly-outcome-try"] }
+# grafeo 0.5.43 from our fork (ScriptedAlchemy/grafeo, main). The
+# published crates carry a tiered-storage
+# arena whose `HotVersionRef` addresses a single 1 MiB chunk, which caps an
+# epoch near 32 Ki node records and then panics. The fork spans epochs across
+# chunks, types the exhaustion and oversize errors, fixes compact, overlay,
+# close, and WAL recovery correctness, and adds the direct compact build
+# (`IncrementalCompactStoreBuilder` + `GrafeoDB::write_compact_container`)
+# and in-place, page-verified sealed sections that sealed generation stores
+# are built and reopened with. Its `memory_usage()` also counts the catalog,
+# empty property-index shards and plan-cache tables, which the serving graph
+# heap charge reads. The fork's workspace resolves sibling crates
+# by path, so all five crates must name the same `rev`; mixed revisions build
+# type-incompatible instances.
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["algos"] }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["lpg"] }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file"] }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["wal"] }
+# Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
+# resolve the same object database and status implementation, so a feature
+# added for one is never missing for the other.
+gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+schemars = "1.2.1"
 
 [profile.bench]
 opt-level = 3
@@ -84,20 +103,26 @@ debug-assertions = false
 overflow-checks = false
 incremental = false
 
+# panic stays unwind. Production catch_unwind recovers poisoned work.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
 # Workspace crates retain line tables and incremental state; dependencies omit
 # debuginfo to reduce compile, cache, and link costs. CI explicitly disables
 # incremental compilation through CARGO_INCREMENTAL.
 # `line-tables-only` (not `1`/limited) is deliberate: backtraces and panic
 # locations keep file:line, while the spine rlibs and per-suite test binaries
-# shrink several-fold — measured 764–966 MiB per root-lib cache entry at
+# shrink several-fold, measured 764–966 MiB per root-lib cache entry at
 # debug=1 against 45.7 MiB without debuginfo, which was blowing the shared
 # build-cache budget and turning evictions into repeat 5-minute misses.
+#
+# `test` (built-in, inherits `dev`) and `perf` (below) inherit every setting
+# and package override declared here, so per-package overrides live only on
+# `dev`.
 [profile.dev]
-debug = "line-tables-only"
-incremental = true
-opt-level = 1
-
-[profile.test]
 debug = "line-tables-only"
 incremental = true
 opt-level = 1
@@ -120,29 +145,34 @@ debug = 0
 [profile.dev.package.tracedecay-daemon-protocol]
 opt-level = 0
 
-[profile.test.package."*"]
-debug = 0
-
-[profile.test.package.tracedecay-daemon-protocol]
+# Same shape as the protocol crate: transport-neutral DTOs whose serde and
+# schemars glue is almost all LLVM time. Measured on a workspace-cold
+# `tracedecay-cli` build: ~205s at opt-level 1 against ~79s at opt-level 0,
+# ~40s off wall time since the crate is on the critical path.
+[profile.dev.package.tracedecay-contracts]
 opt-level = 0
 
-# Opt-in profile for hot-kernel runs: `cargo test --profile perf ...` or
-# `cargo build --profile perf ...`. It mirrors dev/test (line tables for
-# workspace crates, no dependency debuginfo) but keeps the critical-path
-# kernels below optimized. Default `cargo build` / `cargo test` no longer
-# optimize any specific package, so ordinary edit-compile loops stay cheap;
-# reach for this profile when running the generation-scale code-index or
-# graph-publication suites at production-like speed. The full-suite gates
-# (`cargo test-all` / `cargo test-ci` in .cargo/config.toml) pin it via
-# `--cargo-profile perf` so those suites keep their kernel opt-levels.
+# The first token count pays a one-time BPE model load (embedded-vocabulary
+# base64 decode + BPE regex compile) that costs seconds in unoptimized
+# builds; the dashboard token-count warm task and its tests hit it on every
+# test-process start, and `context_scout_model` gives its proposal one second
+# in total. Optimize the loader wherever tests run, not only under `perf`.
+[profile.dev.package.tiktoken-rs]
+opt-level = 2
+
+[profile.dev.package.regex]
+opt-level = 2
+
+# The full-suite profile. Ordinary `cargo build` / `cargo test` (dev/test)
+# optimize no specific workspace package so edit-compile loops stay cheap;
+# this profile inherits dev and additionally keeps the critical-path kernels
+# below optimized so the generation-scale code-index and graph-publication
+# suites run at production-like speed. Hosted CI (`.github/workflows/ci.yml`)
+# and the local full-suite aliases (`cargo test-ci` / `cargo test-all` in
+# .cargo/config.toml) all build support binaries, archives and tests with
+# this one profile, so they share artifacts and assertions stay on.
 [profile.perf]
 inherits = "dev"
-
-[profile.perf.package."*"]
-debug = 0
-
-[profile.perf.package.tracedecay-daemon-protocol]
-opt-level = 0
 
 # Code-index lifecycle tests exercise six-figure production generations under
 # the same bounded readiness contracts as the daemon. Keep the owning kernels
@@ -189,16 +219,6 @@ opt-level = 2
 [profile.perf.package.serde_json]
 opt-level = 2
 
-# The first token count pays a one-time BPE model load (embedded-vocabulary
-# base64 decode + BPE regex compile) that costs seconds in unoptimized
-# builds; the dashboard token-count warm task and its tests hit it on every
-# test-process start.
-[profile.perf.package.tiktoken-rs]
-opt-level = 2
-
-[profile.perf.package.regex]
-opt-level = 2
-
 # Graph publication digest checks hash multi-megabyte canonical replay
 # sources on every durable read/write; unoptimized sha2 alone exceeds the
 # exact-SQL test transaction budget.
@@ -206,42 +226,274 @@ opt-level = 2
 opt-level = 3
 
 # The upstream Rust grammar rejects `#[cfg(...)]` attributes on
-# struct-destructuring fields (tree-sitter/tree-sitter-rust#301). Every
-# `tree-sitter-rust` consumer in the graph resolves to the PR author's fork,
-# pinned to the PR head commit, until the fix lands upstream.
+# struct-destructuring fields. Our fork carries tree-sitter/tree-sitter-rust#301
+# on top of upstream master (branch `tracedecay/struct-pattern-attrs-v2`), and
+# every `tree-sitter-rust` consumer in the graph resolves to it until upstream
+# merges #301 and releases it.
 [patch.crates-io]
-tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }
-# FastEmbed's user-defined constructor owns the ORT SessionBuilder but did not
-# expose rc.12's load canceler. This reviewed fork publishes that existing
-# handle immediately before CreateSessionFromArray so TraceDecay can enforce
-# its typed cold-load deadline during graph construction.
-fastembed = { git = "https://github.com/ScriptedAlchemy/fastembed-rs.git", rev = "ad2af71090615b4e36bb106ce19207f84cbe38e0" }
+tree-sitter-rust = { git = "https://github.com/ScriptedAlchemy/tree-sitter-rust", rev = "d737577441bf238d18be428ee6207779a55140aa" }
+# Kotlin uses arborium-kotlin across all tiers; the medium bundle must not
+# link tree-sitter-kotlin-sg's duplicate parse table.
+tokensave-medium-treesitters = { path = "patches/tokensave-medium-treesitters" }
+# tree-sitter-perl 1.1.2 lists `tree-sitter` ^0.26 as a normal dependency;
+# upstream master moves it to dev-dependencies with grammar sources identical
+# to 1.1.2. Unpublished, so pin that commit until a release ships it.
+tree-sitter-perl = { git = "https://github.com/ganezdragon/tree-sitter-perl", rev = "5b97493ce70686e22ec8b9ea261437147e342b49" }
+# tree-sitter-sequel 0.3.11 builds with `cc = "~1.2.1"`, which holds every
+# cc 1.x in the graph at 1.2. The fork is the 0.3.11 tag plus upstream
+# DerekStride/tree-sitter-sql#368 (cc = "1.2.1") and the generated parser
+# copied byte for byte from the published crate. Drop it once a release
+# ships #368 (DerekStride/tree-sitter-sql#384).
+tree-sitter-sequel = { git = "https://github.com/ScriptedAlchemy/tree-sitter-sql", rev = "52fb886f900022d459df9f87cecb3d5033ce7268" }
 
-# Patched grafeo 0.5.42, consumed from our fork at the reviewed head of
-# ScriptedAlchemy/grafeo#1 (codex/checked-lpg-block-ranges): the accumulated
-# patch stack (arena multi-chunk fix, streaming serialization + mmap compact
-# open, compact/overlay/close correctness, transaction-bounded WAL recovery,
-# durable vector-index topology, version-gc below the horizon) plus the
-# review fixes — close() checkpoints once a raw store handle escapes, the
-# Dict marker mapping is versioned as CompactStore section v4 (v3 stores
-# stay readable; binaries at older pins fail closed on v4 stores with a
-# typed unsupported-version error), dropping a property index reaches the
-# compact base, neighbors() filters base edge tombstones, and the tiered
-# arena accepts exact-fit values while typing over-aligned allocations.
-# On top of that head, the LPG block-directory format v2 widens entry
-# offsets and lengths to u64: a v1 section larger than 4 GiB silently
-# truncated offsets on write and panicked the reader on any block straddling
-# the 4 GiB line. v1 sections stay readable and corrupt directory entries
-# fail typed so quarantine can fire.
-# The published crates carry a tiered-storage arena whose `HotVersionRef` can
-# only address a single 1 MiB chunk, which caps an epoch near 32 Ki node
-# records and then panics; the fork spans epochs across chunks and types the
-# exhaustion errors. The fork also carries graph correctness and bounded WAL
-# group-write fixes. Its workspace resolves sibling crates by path, so every
-# grafeo crate must come from the same revision — a mixed registry/git graph
-# would build type-incompatible instances of the patched crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
+# Dev opt-level 0 for workspace glue crates (every tracedecay-* crate that is
+# not a profile.perf kernel below). A `cargo build -p tracedecay-cli --timings`
+# audit on 8 cores found the wall-time critical path is a serial chain of
+# workspace crates whose cost is ~85% LLVM codegen at dev opt-level 1:
+# rusqlite-runtime (96s codegen), tracedecay (69s), daemon-service (49s),
+# mcp (35s), application (142s, off-path but fan-out). Compiling dispatch,
+# DTO, and plumbing crates unoptimized cut a cold build from 461s to 345s
+# wall (-25%) and workspace CPU by ~45% (measured). The perf-pinned kernels
+# (code-index, rusqlite-runtime, store, grafeo-*, ...) keep dev opt-level 1 so
+# local tests keep optimized engine code; the perf mirror pins preserve every
+# crate's previous perf level since `perf` inherits dev overrides.
+
+[profile.dev.package.tracedecay]
+opt-level = 0
+
+[profile.perf.package.tracedecay]
+opt-level = 1
+
+[profile.dev.package.tracedecay-agent-hosts]
+opt-level = 0
+
+[profile.perf.package.tracedecay-agent-hosts]
+opt-level = 1
+
+[profile.dev.package.tracedecay-api]
+opt-level = 0
+
+[profile.perf.package.tracedecay-api]
+opt-level = 1
+
+[profile.dev.package.tracedecay-application]
+opt-level = 0
+
+[profile.perf.package.tracedecay-application]
+opt-level = 1
+
+[profile.dev.package.tracedecay-automation]
+opt-level = 0
+
+[profile.perf.package.tracedecay-automation]
+opt-level = 1
+
+[profile.dev.package.tracedecay-automation-runtime]
+opt-level = 0
+
+[profile.perf.package.tracedecay-automation-runtime]
+opt-level = 1
+
+[profile.dev.package.tracedecay-capture]
+opt-level = 0
+
+[profile.perf.package.tracedecay-capture]
+opt-level = 1
+
+[profile.dev.package.tracedecay-cli]
+opt-level = 0
+
+[profile.perf.package.tracedecay-cli]
+opt-level = 1
+
+[profile.dev.package.tracedecay-code-index-retention]
+opt-level = 0
+
+[profile.perf.package.tracedecay-code-index-retention]
+opt-level = 1
+
+[profile.dev.package.tracedecay-configuration]
+opt-level = 0
+
+[profile.perf.package.tracedecay-configuration]
+opt-level = 1
+
+[profile.dev.package.tracedecay-daemon-control]
+opt-level = 0
+
+[profile.perf.package.tracedecay-daemon-control]
+opt-level = 1
+
+[profile.dev.package.tracedecay-daemon-identity]
+opt-level = 0
+
+[profile.perf.package.tracedecay-daemon-identity]
+opt-level = 1
+
+[profile.dev.package.tracedecay-daemon-service]
+opt-level = 0
+
+[profile.perf.package.tracedecay-daemon-service]
+opt-level = 1
+
+[profile.dev.package.tracedecay-dashboard-api]
+opt-level = 0
+
+[profile.perf.package.tracedecay-dashboard-api]
+opt-level = 1
+
+[profile.dev.package.tracedecay-framing]
+opt-level = 0
+
+[profile.perf.package.tracedecay-framing]
+opt-level = 1
+
+[profile.dev.package.tracedecay-global-db]
+opt-level = 0
+
+[profile.perf.package.tracedecay-global-db]
+opt-level = 1
+
+[profile.dev.package.tracedecay-graph-query]
+opt-level = 0
+
+[profile.perf.package.tracedecay-graph-query]
+opt-level = 1
+
+[profile.dev.package.tracedecay-hooks]
+opt-level = 0
+
+[profile.perf.package.tracedecay-hooks]
+opt-level = 1
+
+[profile.dev.package.tracedecay-host-admission]
+opt-level = 0
+
+[profile.perf.package.tracedecay-host-admission]
+opt-level = 1
+
+[profile.dev.package.tracedecay-host-integration]
+opt-level = 0
+
+[profile.perf.package.tracedecay-host-integration]
+opt-level = 1
+
+[profile.dev.package.tracedecay-lcm]
+opt-level = 0
+
+[profile.perf.package.tracedecay-lcm]
+opt-level = 1
+
+[profile.dev.package.tracedecay-lsp]
+opt-level = 0
+
+[profile.perf.package.tracedecay-lsp]
+opt-level = 1
+
+[profile.dev.package.tracedecay-maintenance]
+opt-level = 0
+
+[profile.perf.package.tracedecay-maintenance]
+opt-level = 1
+
+[profile.dev.package.tracedecay-mcp]
+opt-level = 0
+
+[profile.perf.package.tracedecay-mcp]
+opt-level = 1
+
+[profile.dev.package.tracedecay-mcp-catalog]
+opt-level = 0
+
+[profile.perf.package.tracedecay-mcp-catalog]
+opt-level = 1
+
+[profile.dev.package.tracedecay-policy]
+opt-level = 0
+
+[profile.perf.package.tracedecay-policy]
+opt-level = 1
+
+[profile.dev.package.tracedecay-privacy]
+opt-level = 0
+
+[profile.perf.package.tracedecay-privacy]
+opt-level = 1
+
+[profile.dev.package.tracedecay-private-fs]
+opt-level = 0
+
+[profile.perf.package.tracedecay-private-fs]
+opt-level = 1
+
+[profile.dev.package.tracedecay-project]
+opt-level = 0
+
+[profile.perf.package.tracedecay-project]
+opt-level = 1
+
+[profile.dev.package.tracedecay-query]
+opt-level = 0
+
+[profile.perf.package.tracedecay-query]
+opt-level = 1
+
+[profile.dev.package.tracedecay-sdk]
+opt-level = 0
+
+[profile.perf.package.tracedecay-sdk]
+opt-level = 1
+
+[profile.dev.package.tracedecay-search-eval]
+opt-level = 0
+
+[profile.perf.package.tracedecay-search-eval]
+opt-level = 1
+
+[profile.dev.package.tracedecay-session-memory]
+opt-level = 0
+
+[profile.perf.package.tracedecay-session-memory]
+opt-level = 1
+
+[profile.dev.package.tracedecay-session-runtime]
+opt-level = 0
+
+[profile.perf.package.tracedecay-session-runtime]
+opt-level = 1
+
+[profile.dev.package.tracedecay-session-temporal-store]
+opt-level = 0
+
+[profile.perf.package.tracedecay-session-temporal-store]
+opt-level = 1
+
+[profile.dev.package.tracedecay-sessions]
+opt-level = 0
+
+[profile.perf.package.tracedecay-sessions]
+opt-level = 1
+
+[profile.dev.package.tracedecay-source-edit]
+opt-level = 0
+
+[profile.perf.package.tracedecay-source-edit]
+opt-level = 1
+
+[profile.dev.package.tracedecay-store-runtime]
+opt-level = 0
+
+[profile.perf.package.tracedecay-store-runtime]
+opt-level = 1
+
+[profile.dev.package.tracedecay-temporal-query]
+opt-level = 0
+
+[profile.perf.package.tracedecay-temporal-query]
+opt-level = 1
+
+[profile.dev.package.tracedecay-tool-catalog]
+opt-level = 0
+
+[profile.perf.package.tracedecay-tool-catalog]
+opt-level = 1

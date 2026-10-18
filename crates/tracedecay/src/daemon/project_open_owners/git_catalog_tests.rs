@@ -1,0 +1,387 @@
+use crate::test_support::git::GIT_FIXTURE_CONFIG;
+use tracedecay_application::git_intelligence::NativeGitIntelligence;
+use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_contracts::catalog_composition::{
+    CatalogCompositionError, build_application_catalog_snapshot,
+};
+use tracedecay_contracts::git::GitIndexTransactionPortError;
+use tracedecay_contracts::{
+    ApplicationContractError, AuthorityReceipt, CancellationContext, CapabilityGrantId,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, GitIndexOperationBindingV1,
+    GitIndexPreviewRequestV1, GitIndexTransactionPort, IdempotencyKey, OperationTermination,
+    PolicyDecisionRef, RequestContext, RequestId,
+};
+use tracedecay_daemon_service::{GRANT_HORIZON, daemon_owned_project_source_access_at};
+use tracedecay_domain::git::{
+    GitDiffScopeV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionOperationV1, MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS,
+};
+use tracedecay_domain::{
+    ComponentVersion, GitIndexPreviewId, GitIndexPreviewInputV1, canonical_sha256,
+};
+use tracedecay_domain::{ProjectId, UtcMicros};
+
+fn unavailable_catalog()
+-> Result<tracedecay_tool_catalog::CatalogSnapshotV1, CatalogCompositionError> {
+    Err(CatalogCompositionError::Application(
+        ApplicationContractError::Catalog(
+            "catalog unavailable for this independently constructed owner".to_owned(),
+        ),
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() {
+    let directory = tempfile::tempdir().unwrap();
+    let project_root = directory.path().join("project");
+    let profile_root = directory.path().join("profile");
+    std::fs::create_dir_all(&project_root).unwrap();
+    git(&project_root, &["init", "-b", "main"]);
+    std::fs::write(project_root.join("file.txt"), "initial\n").unwrap();
+    git(&project_root, &["add", "."]);
+    git(&project_root, &["commit", "-m", "fixture"]);
+    let project_id = ProjectId::new("project.git-catalog").unwrap();
+    let fixture =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            &profile_root,
+            &project_root,
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+    let graph = fixture
+        .initialize_project_graph_for_test(
+            &project_root,
+            tracedecay_project::project::TraceDecayOpenOptions {
+                profile_root: Some(profile_root),
+                global_db_path: None,
+            },
+        )
+        .await
+        .unwrap();
+    let configuration = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .unwrap();
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
+            .unwrap();
+    let access = daemon_owned_project_source_access_at(
+        &scope,
+        &project_root,
+        &configuration,
+        tracedecay_contracts::now_micros(),
+    )
+    .unwrap();
+    let database = graph
+        .store_runtime_registry()
+        .mount_registered_project_sessions(project_id.clone())
+        .await
+        .unwrap();
+    let registry =
+        DaemonGitIndexTransactionServiceRegistry::new(build_application_catalog_snapshot);
+    registry
+        .mount(
+            database.clone(),
+            project_root.clone(),
+            access.clone(),
+            tracedecay_contracts::now_micros(),
+        )
+        .await
+        .unwrap();
+    let owner = registry
+        .for_repository_root(&project_root)
+        .await
+        .unwrap()
+        .unwrap();
+    let operation = GitIndexTransactionOperationV1::StageHunks;
+    let initial = owner.current_authority(operation).unwrap();
+    assert_eq!(
+        initial.catalog_digest.as_str(),
+        build_application_catalog_snapshot()
+            .unwrap()
+            .digest()
+            .to_string()
+    );
+    assert_eq!(initial.scope, scope);
+    // The authority blocks on the configuration store from whichever thread
+    // rechecks policy, so it must not need that thread's Tokio runtime.
+    let off_runtime = std::thread::scope(|threads| {
+        let plain = threads.spawn(|| owner.current_authority(operation));
+        let current_thread = threads.spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async { owner.current_authority(operation) })
+        });
+        [plain.join().unwrap(), current_thread.join().unwrap()]
+    });
+    for authority in off_runtime {
+        let authority = authority.unwrap();
+        assert_eq!(authority.policy_digest, initial.policy_digest);
+        assert_eq!(authority.configuration_digest, initial.configuration_digest);
+    }
+
+    // A separate owner can refuse its own provider without replacing the
+    // canonical dependency already retained by the first owner.
+    let independent = DaemonGitIndexTransactionServiceRegistry::new(unavailable_catalog);
+    independent
+        .mount(
+            database.clone(),
+            project_root.clone(),
+            access.clone(),
+            tracedecay_contracts::now_micros(),
+        )
+        .await
+        .unwrap();
+    let unavailable = independent
+        .for_repository_root(&project_root)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        unavailable.current_authority(operation),
+        Err(GitIndexTransactionPortError::DaemonUnavailable)
+    ));
+    assert_eq!(
+        owner.current_authority(operation).unwrap().catalog_digest,
+        initial.catalog_digest
+    );
+
+    let before = git(&project_root, &["rev-parse", "HEAD"]);
+    std::fs::write(project_root.join("file.txt"), "accepted\n").unwrap();
+    let index_tree_before = git(&project_root, &["write-tree"]);
+    let accepted = transaction_preview(&owner, "accepted", operation).await;
+    let accepted_result = owner.service.apply(&accepted).await.unwrap();
+    assert_eq!(
+        accepted_result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::Committed
+    );
+    assert_ne!(git(&project_root, &["write-tree"]), index_tree_before);
+    assert_eq!(git(&project_root, &["show", ":file.txt"]), b"accepted\n");
+    assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), before);
+
+    std::fs::write(project_root.join("file.txt"), "previewed\n").unwrap();
+    let stale = transaction_preview(&owner, "stale", operation).await;
+    std::fs::write(project_root.join("file.txt"), "changed\n").unwrap();
+    let head_before_stale = git(&project_root, &["rev-parse", "HEAD"]);
+    let index_before_stale = std::fs::read(project_root.join(".git/index")).unwrap();
+    // Repository revalidation happens after durable admission, so refusal
+    // must return a terminal no-change receipt.
+    let stale_result = owner.service.apply(&stale).await.unwrap();
+    stale_result.validate_for(&stale).unwrap();
+    assert_eq!(
+        stale_result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
+    );
+    assert_eq!(
+        stale_result.execution.termination,
+        OperationTermination::Failed
+    );
+    assert_eq!(
+        git(&project_root, &["rev-parse", "HEAD"]),
+        head_before_stale
+    );
+    assert_eq!(
+        std::fs::read(project_root.join(".git/index")).unwrap(),
+        index_before_stale
+    );
+    assert_eq!(
+        std::fs::read(project_root.join("file.txt")).unwrap(),
+        b"changed\n"
+    );
+    let denied = transaction_preview(&owner, "revoked", operation).await;
+    let before_denial = git(&project_root, &["rev-parse", "HEAD"]);
+    let index_before_denial = std::fs::read(project_root.join(".git/index")).unwrap();
+    let mut revoked = access.clone();
+    revoked.effective_capabilities.clear();
+    registry
+        .mount(
+            database.clone(),
+            project_root.clone(),
+            revoked,
+            tracedecay_contracts::now_micros(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        owner.current_authority(operation),
+        Err(GitIndexTransactionPortError::PolicyDenied)
+    ));
+    let denied_result = owner.service.apply(&denied).await.unwrap();
+    denied_result.validate_for(&denied).unwrap();
+    assert_eq!(
+        denied_result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
+    );
+    assert_eq!(
+        denied_result.execution.termination,
+        OperationTermination::Failed
+    );
+    assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), before_denial);
+    assert_eq!(
+        std::fs::read(project_root.join(".git/index")).unwrap(),
+        index_before_denial
+    );
+    // Project open snapshots this access once and nothing renews it, so an
+    // owner mounted one horizon and one hour ago must still serve.
+    let observed_at = tracedecay_contracts::now_micros();
+    let horizon = i64::try_from(GRANT_HORIZON.as_micros()).unwrap();
+    let opened_at = UtcMicros(observed_at.0 - horizon - 3_600_000_000);
+    let day_old =
+        daemon_owned_project_source_access_at(&scope, &project_root, &configuration, opened_at)
+            .unwrap();
+    assert!(day_old.grant_expires_at < observed_at);
+    registry
+        .mount(database, project_root.clone(), day_old, opened_at)
+        .await
+        .unwrap();
+    let current = owner
+        .current_authority(operation)
+        .expect("the Git owner must still authorize a route opened a day ago");
+    assert!(
+        current.grant_expires_at > current.evaluated_at
+            && current.grant_expires_at.0 <= current.evaluated_at.0 + horizon,
+        "an authorized request keeps a finite grant expiry: {current:?}"
+    );
+    let day_old_preview = transaction_preview(&owner, "day-old", operation).await;
+    let day_old_result = owner.service.apply(&day_old_preview).await.unwrap();
+    assert_eq!(
+        day_old_result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::Committed
+    );
+    assert_eq!(git(&project_root, &["show", ":file.txt"]), b"changed\n");
+}
+
+fn git(root: &std::path::Path, arguments: &[&str]) -> Vec<u8> {
+    let output = std::process::Command::new("git")
+        .args(GIT_FIXTURE_CONFIG)
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git failed: {output:?}");
+    output.stdout
+}
+
+async fn transaction_preview(
+    owner: &tracedecay_code_index_runtime::git_transactions::DaemonGitInvocationOwner,
+    suffix: &str,
+    operation: GitIndexTransactionOperationV1,
+) -> tracedecay_contracts::GitIndexApplyRequestV1 {
+    let captured = owner.current_authority(operation).unwrap();
+    let binding = GitIndexOperationBindingV1::for_operation(operation).unwrap();
+    let snapshot = tracedecay_code_index_runtime::git_transactions::capture_exact_snapshot(
+        &owner.repository_root,
+        captured.scope.project_id.clone(),
+        captured.scope.repository_id.clone(),
+        captured.scope.worktree_id.clone(),
+        captured.evaluated_at,
+        None,
+    )
+    .unwrap();
+    let preview_id = GitIndexPreviewId::new(format!("preview.catalog.{suffix}")).unwrap();
+    let hunks = if operation == GitIndexTransactionOperationV1::StageHunks {
+        let hunks = NativeGitIntelligence::new(
+            owner.repository_root.clone(),
+            captured.scope.repository_id.clone(),
+            captured.scope.worktree_id.clone(),
+        )
+        .hunk_refs(
+            &GitDiffScopeV1::WorkingTree,
+            preview_id.as_str(),
+            &GitIndexPreviewV1::repository_snapshot_digest(&snapshot).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(hunks.len(), 0);
+        hunks
+    } else {
+        Vec::new()
+    };
+    // The preview input lives 30 s from the authority evaluation that admits
+    // it. Evaluate that authority after the Git capture, which takes seconds
+    // on a loaded host, so the lifetime covers only the transaction itself.
+    let current = owner.current_authority(operation).unwrap();
+    let expires_at =
+        UtcMicros(current.evaluated_at.0 + MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS);
+    let input = GitIndexPreviewInputV1::new_hunk_selection(
+        preview_id.clone(),
+        operation,
+        snapshot.clone(),
+        hunks.clone(),
+        current.evaluated_at,
+        expires_at,
+    )
+    .unwrap();
+    owner.service.save_preview_input(input).await.unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!("grant.catalog.{suffix}")).unwrap(),
+        current.policy_revision,
+        canonical_sha256(&current.policy_digest).unwrap(),
+        current.requester.clone(),
+        current.evaluated_at,
+        current.grant_expires_at,
+        current.scope.clone(),
+        [binding.capability_id.clone()].into_iter().collect(),
+        [binding.use_case_id.clone()].into_iter().collect(),
+        DisclosureClass::Sensitive,
+    )
+    .unwrap();
+    let context = RequestContext::new(
+        current.requester.clone(),
+        current.scope.clone(),
+        grant,
+        RequestId::new(format!("request.catalog.{suffix}")).unwrap(),
+        Deadline::new(current.grant_expires_at).unwrap(),
+        CancellationContext::active(format!("cancel.catalog.{suffix}")).unwrap(),
+    )
+    .unwrap();
+    let authority = AuthorityReceipt::from_context(
+        &context,
+        PolicyDecisionRef::new(
+            "policy.catalog.fixture",
+            current.policy_revision,
+            current.policy_digest.clone(),
+            ComponentVersion::new("policy.catalog.fixture").unwrap(),
+        )
+        .unwrap(),
+        current.evaluated_at,
+    )
+    .unwrap();
+    let preview = owner
+        .service
+        .preview(&GitIndexPreviewRequestV1 {
+            context: context.clone(),
+            authority: authority.clone(),
+            binding: binding.clone(),
+            preview_id,
+            repository_snapshot: snapshot,
+            selected_hunks: hunks,
+            observed_at: current.evaluated_at,
+        })
+        .await
+        .unwrap()
+        .preview;
+    assert_eq!(
+        preview.disposition,
+        GitIndexPreviewDispositionV1::Applicable,
+    );
+    tracedecay_contracts::GitIndexApplyRequestV1 {
+        context,
+        authority,
+        binding,
+        preview_id: preview.preview_id,
+        preview_digest: preview.preview_digest,
+        idempotency_key: IdempotencyKey::new(format!("apply.catalog.{suffix}")).unwrap(),
+        proof: tracedecay_contracts::GitIndexEffectProofV1 {
+            policy_digest: current.policy_digest,
+            configuration_digest: current.configuration_digest,
+            catalog_digest: current.catalog_digest,
+            privacy_digest: current.privacy_digest,
+            external_proof: None,
+        },
+        observed_at: tracedecay_contracts::now_micros(),
+    }
+}

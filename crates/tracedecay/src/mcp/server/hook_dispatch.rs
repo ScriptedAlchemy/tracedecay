@@ -10,7 +10,6 @@ impl McpServer {
     /// project root; both are revalidated here so admit-time membership is never
     /// reused. Everything that differs between the branch plans is carried by
     /// `policy` rather than by branching on the plan again.
-    #[hotpath::skip]
     async fn apply_branch_effect(
         &self,
         effect_root: &Path,
@@ -29,15 +28,15 @@ impl McpServer {
                     };
                 }
             };
+        // A host hook is the daemon's own plumbing reacting to a host event,
+        // not an operator naming the route: it stays behind the automatic
+        // admission gate exactly like an after-edit path hint.
         match &self.code_index_reconcile_sink {
-            Some(sink) if sink(root).await => HostAdmissionOutcome::replay_completed(true, false),
-            Some(_) | None => {
-                HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable")
-            }
+            Some(sink) => code_index_host_outcome(&sink(root, CodeIndexDemandV1::Reconcile).await),
+            None => HostAdmissionOutcome::retained_unavailable(CODE_INDEX_SCHEDULER_UNAVAILABLE),
         }
     }
 
-    #[hotpath::skip]
     pub(crate) async fn update_hook_workspace_route(
         &self,
         event: &hook_events::HookEvent,
@@ -80,7 +79,6 @@ impl McpServer {
         })
     }
 
-    #[hotpath::skip]
     pub(crate) async fn run_hook_event_plan(
         &self,
         cg: Arc<TraceDecay>,
@@ -93,17 +91,17 @@ impl McpServer {
                     return HostAdmissionOutcome::replay_completed(false, true);
                 }
                 match self.code_index_hook_sink.as_ref() {
-                    Some(sink) if sink(root.to_path_buf(), rel_paths).await => {
-                        HostAdmissionOutcome::replay_completed(true, false)
+                    Some(sink) => {
+                        code_index_host_outcome(&sink(root.to_path_buf(), rel_paths).await)
                     }
-                    Some(_) | None => HostAdmissionOutcome::retained_unavailable(
-                        "code_index_scheduler_unavailable",
-                    ),
+                    None => {
+                        HostAdmissionOutcome::retained_unavailable(CODE_INDEX_SCHEDULER_UNAVAILABLE)
+                    }
                 }
             }
             HookEventPlan::AddBranch(branch) => {
                 // Project-root plans must revalidate live root + current branch
-                // immediately before effect — same strictness as AddBranchAt.
+                // immediately before effect, same strictness as AddBranchAt.
                 self.apply_branch_effect(root, root, branch).await
             }
             HookEventPlan::AddBranchAt {
@@ -113,7 +111,7 @@ impl McpServer {
             } => {
                 // Durable effect roots stay concrete (not hashed) and must be
                 // freshly normalized, canonicalized, and reauthorized before
-                // any write — admit-time membership/branch are never reused.
+                // any write, admit-time membership/branch are never reused.
                 self.apply_branch_effect(&effect_root, root, branch).await
             }
             HookEventPlan::SyncCurrentBranch { branch, agent: _ } => {
@@ -133,12 +131,7 @@ impl McpServer {
                 .await
                 {
                     Ok(true) => {
-                        if let Some(reconcile) = &self.automation_scheduler_reconciler {
-                            let reconcile = Arc::clone(reconcile);
-                            tokio::spawn(async move {
-                                let _ = reconcile().await;
-                            });
-                        }
+                        self.spawn_automation_scheduler_reconcile();
                         HostAdmissionOutcome::replay_completed(true, false)
                     }
                     Ok(false) => HostAdmissionOutcome::replay_completed(false, true),
@@ -159,12 +152,7 @@ impl McpServer {
                 .await
                 {
                     Ok(()) => {
-                        if let Some(reconcile) = &self.automation_scheduler_reconciler {
-                            let reconcile = Arc::clone(reconcile);
-                            tokio::spawn(async move {
-                                let _ = reconcile().await;
-                            });
-                        }
+                        self.spawn_automation_scheduler_reconcile();
                         HostAdmissionOutcome::replay_completed(true, false)
                     }
                     Err(_) => {
@@ -176,11 +164,24 @@ impl McpServer {
         }
     }
 
-    #[hotpath::skip]
+    /// Best-effort: a reconcile the runtime does not admit is logged and skipped.
+    fn spawn_automation_scheduler_reconcile(&self) {
+        if let Some(reconcile) = &self.automation_scheduler_reconciler {
+            let reconcile = Arc::clone(reconcile);
+            if let Err(error) =
+                tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+                    let _ = reconcile().await;
+                })
+            {
+                tracing::warn!(%error, "hook automation scheduler reconcile not admitted");
+            }
+        }
+    }
+
     pub(crate) async fn run_hook_incremental_sync(
         &self,
         cg: Arc<TraceDecay>,
-        agent: HookAgent,
+        agent: HostIntegrationIdV1,
     ) -> HostAdmissionOutcome {
         match self.accept_debounced_code_index_reconcile(&cg, agent).await {
             Ok(changed) => HostAdmissionOutcome::replay_completed(changed, !changed),
@@ -188,26 +189,28 @@ impl McpServer {
         }
     }
 
-    #[hotpath::skip]
     async fn accept_debounced_code_index_reconcile(
         &self,
         cg: &TraceDecay,
-        agent: HookAgent,
+        agent: HostIntegrationIdV1,
     ) -> std::result::Result<bool, HostAdmissionOutcome> {
         let marker = hook_events::sync_marker_path(&cg.store_layout().data_root, agent);
-        let now = crate::tracedecay::current_timestamp();
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         if !hook_events::should_run_sync(&marker, now, 3) {
             return Ok(false);
         }
         let Some(sink) = &self.code_index_reconcile_sink else {
             return Err(HostAdmissionOutcome::retained_unavailable(
-                "code_index_scheduler_unavailable",
+                CODE_INDEX_SCHEDULER_UNAVAILABLE,
             ));
         };
-        if !sink(cg.project_root().to_path_buf()).await {
-            return Err(HostAdmissionOutcome::retained_unavailable(
-                "code_index_scheduler_unavailable",
-            ));
+        let admission = sink(
+            cg.project_root().to_path_buf(),
+            CodeIndexDemandV1::Reconcile,
+        )
+        .await;
+        if !admission.is_queued() {
+            return Err(code_index_host_outcome(&admission));
         }
         hook_events::write_sync_marker(&marker, now);
         Ok(true)

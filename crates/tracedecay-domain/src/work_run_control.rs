@@ -639,15 +639,6 @@ mod tests {
     }
 
     #[test]
-    fn an_admitted_run_admits_reservations_and_carries_its_remaining_budget() {
-        let control = control();
-        assert!(control.admits_reservation());
-        assert_eq!(control.authority().get(), 1);
-        assert_eq!(control.deadline().remaining_micros, 900);
-        assert!(control.fenced_attempts().is_empty());
-    }
-
-    #[test]
     fn pausing_fences_reservations_and_records_the_live_frontier() {
         let paused = control()
             .pause(

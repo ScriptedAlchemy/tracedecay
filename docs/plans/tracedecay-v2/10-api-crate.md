@@ -4,7 +4,7 @@
 
 Normative public-service delivery contract; completion status is owned solely by
 `00-plan-set-index.md`. `tracedecay-api` is the canonical thin Axum
-HTTP, SSE, and static-dashboard adapter over `tracedecay-application`. The
+HTTP, SSE, and static-dashboard adapter over `tracedecay-contracts`. The
 executable-work journey adds typed Plan 24 task/work and Plan 32 runtime routes
 through this same adapter only when their application operations ship.
 

@@ -1,12 +1,12 @@
 import type Graph from 'graphology';
-import { nodeHullFrame, type FieldFrame, type PreparedField } from './layout.ts';
+import type { PreparedField } from './layout.ts';
 
 /**
  * The emergent path: a field whose SHAPE is the finding, settled by
  * ForceAtlas2 and then composed so its components read as one constellation.
  *
  * The layout engine is reached through {@link loadForceAtlas2} and nowhere
- * else, so a measured field — which never calls into this module — cannot pull
+ * else, so a measured field, which never calls into this module, cannot pull
  * it in. Everything below the loader is pure: the engine arrives as an
  * argument, so the settle and the composition can be exercised without a
  * renderer, a document, or the real library.
@@ -22,7 +22,7 @@ export type ForceAtlas2Module = typeof import('graphology-layout-forceatlas2').d
  * The repository rule is that imports belong at the top of a module; this is
  * the documented exception, taken deliberately for code-splitting. ForceAtlas2
  * is a large dependency that only an emergent field ever runs, and a static
- * import would place it in the chunk of every field — including the measured
+ * import would place it in the chunk of every field, including the measured
  * ones, whose coordinates the engine must never be allowed to touch. Guarding
  * the *call* was not enough: the cost of a static import is paid at load, not
  * at call.
@@ -38,7 +38,7 @@ export async function loadForceAtlas2(): Promise<ForceAtlas2Module> {
  * afterwards so it always frames the composed result.
  */
 export function settleEmergentField(
-  prepared: PreparedField,
+  prepared: Pick<PreparedField, 'graph' | 'nodeCount' | 'edgeDensity'>,
   forceAtlas2: ForceAtlas2Module,
 ): void {
   const { graph, nodeCount, edgeDensity } = prepared;
@@ -196,10 +196,4 @@ export function composeConstellation(graph: Graph): void {
       graph.updateNodeAttribute(node, 'y', (y) => (y as number) + dy);
     }
   });
-}
-
-/** The frozen bbox is computed after the settle, so the camera always frames
- * the composed result, not the raw FA2 scatter. */
-export function frameEmergentField(prepared: PreparedField): FieldFrame {
-  return nodeHullFrame(prepared.graph, prepared.realNodes);
 }

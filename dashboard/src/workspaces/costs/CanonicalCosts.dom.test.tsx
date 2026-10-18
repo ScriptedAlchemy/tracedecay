@@ -10,7 +10,7 @@ import { CanonicalCosts } from './CanonicalCosts.tsx';
 /**
  * The canonical cost read exists to make an unpriced ledger visible. Prices are
  * resolved from provider usage, so a read with unpriced usage arrives with
- * `provider_cost: null` and `pricing_revision_unavailable` — and $0.00 is the
+ * `provider_cost: null` and `pricing_revision_unavailable`, and $0.00 is the
  * single most damaging thing this surface could print in its place.
  *
  * Latency is the other assertion class here. The projection carries retained

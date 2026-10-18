@@ -1,13 +1,18 @@
 //! Root integration tests for the daemon invocation service.
 //!
-//! These suites use composition-root fixtures (TraceDecay, host-admission,
+//! These suites use composition-root fixtures (`TraceDecay`, host-admission,
 //! session retrieval). Pure unit tests live in `tracedecay-daemon-service`.
 
 use std::sync::Arc;
 
-use tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1;
-use tracedecay_application::ResolvedScope;
-use tracedecay_application::feedback::observations::FeedbackSourceEventV1;
+use tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1;
+use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
+use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
+use tracedecay_application::work::{
+    WorkTaskSessionAdmittedRetrievalPortV1, WorkTaskSessionEvidenceRetrievalV1,
+};
+use tracedecay_contracts::feedback::observations::FeedbackSourceEventV1;
+use tracedecay_contracts::{CapabilityGrantSnapshot, ResolvedScope};
 use tracedecay_daemon_service::{
     DaemonInvocationService, DaemonWorkProposalRoutingAuthorityV1,
     UnavailableFeedbackCycleRuntimeV1,
@@ -21,35 +26,18 @@ use tracedecay_lsp::{
     LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
     UnavailableSemanticProvider, UpstreamCapabilities,
 };
-use tracedecay_usecases::feedback::observations::FeedbackObservationEmitterV1;
-use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 
 struct DeniedWorkEvidenceRetrieval;
 
-impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1
-    for DeniedWorkEvidenceRetrieval
-{
-    fn retrieve_admitted<'a>(
-        &'a self,
-        _context: &'a tracedecay_application::RequestContext,
-        _query: tracedecay_session_memory::session::SessionTemporalQuery,
-    ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
-    {
-        Box::pin(async {
-            tracedecay_session_runtime::session_retrieval::SessionRetrievalServiceOutcome::Denied
-        })
-    }
-}
+impl WorkTaskSessionAdmittedRetrievalPortV1 for DeniedWorkEvidenceRetrieval {}
 
-pub(super) fn denied_work_evidence_retrieval()
--> crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1 {
-    crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::new(
-        DeniedWorkEvidenceRetrieval,
-    ))
+pub(super) fn denied_work_evidence_retrieval() -> WorkTaskSessionEvidenceRetrievalV1 {
+    WorkTaskSessionEvidenceRetrievalV1::new(Arc::new(DeniedWorkEvidenceRetrieval))
 }
 
 pub(super) fn empty_work_proposal_routing(
     scope: ResolvedScope,
+    grant: &CapabilityGrantSnapshot,
 ) -> (DaemonWorkProposalRoutingAuthorityV1, ManifestDigest) {
     let revision = tracedecay_domain::configuration::ConfigurationRevisionId::new(
         "configuration.revision.work-empty-routing",
@@ -59,29 +47,41 @@ pub(super) fn empty_work_proposal_routing(
         tracedecay_domain::configuration::WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
     )
     .expect("work executable bindings key");
-    let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
-        std::collections::BTreeMap::from([(
-            key.clone(),
-            tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
-                Vec::new(),
-            ),
-        )]),
-        std::collections::BTreeMap::from([(
-            key,
-            vec![tracedecay_domain::configuration::ConfigurationCandidateV1 {
-                layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
-                    project_id: scope.project_id.clone(),
-                },
-                revision_id: revision.clone(),
-                disposition: tracedecay_domain::configuration::CandidateDispositionV1::Winning,
-                safe_reason: None,
-            }],
-        )]),
+    // The runtime pin rejects a snapshot that omitted registry defaults
+    // such as `index.include.v1`. Resolve through the same core registry
+    // the daemon uses at project open, then overlay empty Work bindings.
+    let snapshot = tracedecay_project::config::resolver::resolve_configuration(
+        &tracedecay_project::config::registry::ConfigurationRegistry::core()
+            .expect("configuration registry defaults"),
+        &[tracedecay_project::config::resolver::ConfigurationLayerV1 {
+            layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                project_id: scope.project_id.clone(),
+            },
+            revision_id: revision.clone(),
+            entries: std::collections::BTreeMap::from([(
+                key,
+                tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
+                    Vec::new(),
+                ),
+            )]),
+        }],
     )
-    .expect("empty Work routing snapshot");
+    .expect("empty Work routing resolved through production defaults")
+    .snapshot;
     let digest = snapshot.effective_behavior_digest.clone();
-    let routing = DaemonWorkProposalRoutingAuthorityV1::mount(scope, revision, &snapshot, &digest)
-        .expect("empty Work proposal routing");
+    let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: std::path::PathBuf::from("/profile"),
+            project_id: scope.project_id.clone(),
+            project_root: std::env::current_dir().expect("test project root"),
+        },
+        revision,
+        snapshot,
+    )
+    .expect("empty pinned Work routing configuration");
+    let routing =
+        DaemonWorkProposalRoutingAuthorityV1::mount(scope, &configuration, &digest, grant)
+            .expect("empty Work proposal routing");
     (routing, digest)
 }
 
@@ -110,7 +110,6 @@ pub(super) async fn mount_test_work_observability(
             database,
             scope.project_id.clone(),
             configuration_digest.clone(),
-            configuration_provenance_digest,
             policy_digest.clone(),
         )
         .await
@@ -178,7 +177,6 @@ impl CanonicalContextProjectionAuthority for UnavailableContextAuthority {
 
 fn unavailable_lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
     Arc::new(DaemonLspSessionFactory::new(
-        tokio::runtime::Handle::current(),
         Arc::new(unavailable_feedback_cycle(Arc::new(
             RecordingFeedbackCycleObservations::default(),
         ))),
@@ -204,7 +202,7 @@ fn hook_envelope(event: HookEventV2) -> HookEventEnvelopeV2 {
     HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
         event_id: [1; 16],
-        producer: tracedecay_hooks::HookHostV1::Codex,
+        producer: tracedecay_domain::NativeHostIdentityV1::Codex,
         protected_session_id: [2; 32],
         project_id: [3; 16],
         repository_id: [4; 16],
@@ -219,7 +217,7 @@ fn hook_envelope(event: HookEventV2) -> HookEventEnvelopeV2 {
 
 fn hook_binding() -> HookScopeBindingV1 {
     HookScopeBindingV1 {
-        host: tracedecay_hooks::HookHostV1::Codex,
+        host: tracedecay_domain::NativeHostIdentityV1::Codex,
         project_id: [3; 16],
         repository_id: [4; 16],
         worktree_id: [5; 16],
@@ -236,7 +234,7 @@ fn hook_binding() -> HookScopeBindingV1 {
         .map(|family| tracedecay_hooks::HookCapabilityV1 {
             family,
             support: tracedecay_hooks::stock_event_support(
-                tracedecay_hooks::HookHostV1::Codex,
+                tracedecay_domain::NativeHostIdentityV1::Codex,
                 family,
             ),
         })
@@ -258,11 +256,31 @@ fn hook_lifecycle() -> ContextScoutLifecycleAddressV1 {
     }
 }
 
+/// An absolute project root and the `file:` URI that resolves back to it on
+/// the running host.
+///
+/// The daemon maps an admitted root URI to the owning project by converting it
+/// with `Url::to_file_path`, and that conversion rejects a drive-less path on
+/// Windows. A hardcoded `file:///name` fixture is therefore a Unix-only shape:
+/// it resolves to no owner on Windows and every LSP open is refused.
+/// `name` is a `/`-separated relative path such as `projects/recovery-a`.
+pub(super) fn admitted_root_fixture(name: &str) -> (std::path::PathBuf, String) {
+    if cfg!(windows) {
+        (
+            std::path::PathBuf::from(format!("C:\\{}", name.replace('/', "\\"))),
+            format!("file:///C:/{name}"),
+        )
+    } else {
+        (
+            std::path::PathBuf::from(format!("/{name}")),
+            format!("file:///{name}"),
+        )
+    }
+}
+
 mod configuration_registrars_tests;
 mod lsp_lease_tests;
 mod lsp_tests;
-mod observability_tests;
-mod primitive_tests;
 mod project_lifecycle_tests;
 mod types_tests;
 mod work_evidence_journey_tests;

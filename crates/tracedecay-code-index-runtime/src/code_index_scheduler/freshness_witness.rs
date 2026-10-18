@@ -1,54 +1,86 @@
 //! Durable source-freshness evidence for one activated code generation.
+//!
+//! Two layers with different authority. The stat signature over every
+//! candidate's `(logical path, len, mtime)` is a negative cache: unequal
+//! metadata proves the worktree moved without reading a byte, but equal
+//! metadata proves nothing, a same-length rewrite whose mtime was preserved
+//! (`rsync -a`, `cp --preserve`, `touch -d`, restore tools, a timestamp
+//! collision) leaves it unchanged. Source currency is therefore only ever
+//! settled against the sealed generation's own per-file content digests
+//! (`SanitizedCodeSnapshotV1::files`), re-derived from the bytes on disk
+//! through the same bounded read + sanitize + digest path reconciliation uses.
+//!
+//! [`SourceSweepCacheV1`] makes re-settling cheap without weakening that
+//! authority: a digest re-derived once is reused only while the file's full
+//! stat identity, change time included, still holds.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs::Metadata;
+use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
+use gix::bstr::BStr;
+use gix::dir::walk::{Action, Delegate, ForDeletionMode};
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1;
-
-use super::{
-    CodeIndexSchedulerErrorV1, StaticLanguageRegistry, classification, encode_tagged_lowercase_hex,
+use tracedecay_code_index::production::{
+    CodeIndexIgnoredSourceAdmissionV1, CodeIndexProductionErrorV1,
 };
-use crate::code_index::languages::LanguageRegistry;
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
+use tracedecay_domain::{
+    CodeSourceOmissionReasonV1, ContentDigest, IndexPathPolicyV1, LanguageId,
+    SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, validate_code_logical_path,
+};
+use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
+use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
+
+use super::reconcile::cancelled_code_index_reconcile;
+use super::{CodeIndexSchedulerErrorV1, classification, ignored_dependencies, privacy};
+use tracedecay_code_index::chunks::content_digest;
+use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
+use tracedecay_code_index::parallelism;
 
 const FRESHNESS_WITNESS_FILE_NAME: &str = "freshness_witness.v1";
 
-/// A cheap stat-level signature over every ordinary or explicitly admitted
-/// source candidate. Ignored admissions are part of the signature even though
-/// gix deliberately omits them from its ordinary candidate set.
-#[hotpath::measure(label = "daemon.code_index.freshness.stat_signature")]
-pub fn worktree_stat_signature_for(
+/// One stat-swept source candidate, carrying what the content proof needs to
+/// re-derive its canonical digest exactly as capture does.
+struct StatCandidateV1 {
+    logical_path: String,
+    language: LanguageId,
+    explicitly_admitted: bool,
+}
+
+/// One stat sweep over every ordinary or explicitly admitted source
+/// candidate: a negative cache only, settled by [`SourceSweepCacheV1`].
+pub struct WorktreeStatSweepV1 {
+    pub signature: String,
+}
+
+/// A cheap stat-level sweep over every ordinary or explicitly admitted source
+/// candidate. Ignored admissions are part of the sweep even though gix
+/// deliberately omits them from its ordinary candidate set.
+#[tracing::instrument(
+    name = "daemon.code_index.freshness.stat_signature",
+    level = "trace",
+    skip_all
+)]
+pub fn worktree_stat_sweep(
     project_root: &Path,
     ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
-) -> Result<String, CodeIndexSchedulerErrorV1> {
-    let repository = gix::open(project_root)
+) -> Result<WorktreeStatSweepV1, CodeIndexSchedulerErrorV1> {
+    let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-    let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
-        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-    let registry = StaticLanguageRegistry::new();
-    let mut candidate_paths = classification.candidate_paths();
-    candidate_paths.extend(
-        ignored_source_admissions
-            .iter()
-            .map(|admission| admission.logical_path.clone()),
-    );
-    // One sweep span plus an entries gauge: the stat walk is O(candidates) and
-    // must never publish one profiler event per file.
-    hotpath::gauge!("daemon.code_index.freshness.stat_signature.candidates")
-        .set(candidate_paths.len() as u64);
+    let candidate_roster = source_candidates(&repository, ignored_source_admissions)?.candidates;
+    // One sweep span covers the O(candidates) stat walk. Never emit one
+    // trace event per file.
     let mut buf = Vec::new();
-    for logical_path in candidate_paths {
-        let absolute = project_root.join(&logical_path);
-        let Some(extension) = absolute.extension().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if registry
-            .descriptor_for_extension(&extension.to_lowercase())
-            .is_none()
-        {
-            continue;
-        }
-        let Ok(metadata) = std::fs::metadata(&absolute) else {
+    for candidate in candidate_roster {
+        let Ok(metadata) = std::fs::metadata(project_root.join(&candidate.logical_path)) else {
             continue;
         };
         if !metadata.is_file() {
@@ -59,20 +91,820 @@ pub fn worktree_stat_signature_for(
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map_or(0u128, |elapsed| elapsed.as_nanos());
-        buf.extend_from_slice(logical_path.as_bytes());
+        buf.extend_from_slice(candidate.logical_path.as_bytes());
         buf.push(0);
         buf.extend_from_slice(&metadata.len().to_le_bytes());
         buf.extend_from_slice(&mtime_nanos.to_le_bytes());
         buf.push(0xff);
     }
-    Ok(encode_tagged_lowercase_hex(
-        "sha256:",
-        &Sha256::digest(&buf),
-    ))
+    Ok(WorktreeStatSweepV1 {
+        signature: encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&buf)),
+    })
+}
+
+struct SourceCandidatesV1 {
+    /// Every ordinary or explicitly admitted path with a registered language,
+    /// present or not: the roster a stat sweep checks.
+    candidates: Vec<StatCandidateV1>,
+    /// Every Git path no logical path can carry, whatever its extension,
+    /// present or not: capture records each present one as an omitted source.
+    unrepresentable: Vec<Vec<u8>>,
+}
+
+fn source_candidates(
+    repository: &gix::Repository,
+    ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
+) -> Result<SourceCandidatesV1, CodeIndexSchedulerErrorV1> {
+    let classification = classification::WorktreeChangeClassificationV1::classify(repository)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let registry = StaticLanguageRegistry::new();
+    let admitted_paths = ignored_source_admissions
+        .iter()
+        .map(|admission| admission.logical_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut candidate_paths = classification.candidate_paths();
+    candidate_paths.extend(admitted_paths.iter().map(|path| (*path).to_owned()));
+    let mut unrepresentable = classification
+        .non_utf8_paths()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    unrepresentable.extend(
+        candidate_paths
+            .iter()
+            .filter(|path| validate_code_logical_path(path).is_err())
+            .map(|path| path.as_bytes().to_vec()),
+    );
+    let candidates = candidate_paths
+        .into_iter()
+        .filter_map(|logical_path| {
+            let explicitly_admitted = admitted_paths.contains(logical_path.as_str());
+            source_candidate(&registry, logical_path, explicitly_admitted)
+        })
+        .collect();
+    Ok(SourceCandidatesV1 {
+        candidates,
+        unrepresentable,
+    })
+}
+
+/// `logical_path` as a source candidate, `None` when no registered language
+/// claims its extension.
+fn source_candidate(
+    registry: &StaticLanguageRegistry,
+    logical_path: String,
+    explicitly_admitted: bool,
+) -> Option<StatCandidateV1> {
+    let extension = Path::new(&logical_path).extension()?.to_str()?;
+    let descriptor = registry.descriptor_for_extension(&extension.to_lowercase())?;
+    Some(StatCandidateV1 {
+        explicitly_admitted,
+        language: descriptor.language.clone(),
+        logical_path,
+    })
+}
+
+/// The per-file content identities one sealed generation was reconciled
+/// against: `logical path → content digest` of the sanitized bytes for every
+/// present file in the generation's snapshot manifest, plus the snapshot's
+/// own content identity naming which sealed source these digests belong to.
+/// A view of the sealed generation, not a second authority.
+#[derive(Clone, Debug)]
+pub struct SourceContentManifestV1 {
+    snapshot_content_identity: ContentDigest,
+    files: Arc<BTreeMap<String, ContentDigest>>,
+    withheld: Arc<BTreeSet<String>>,
+    unrepresentable: Arc<BTreeSet<Vec<u8>>>,
+}
+
+impl SourceContentManifestV1 {
+    pub fn for_snapshot(snapshot: &SanitizedCodeSnapshotV1) -> Self {
+        let mut withheld = BTreeSet::new();
+        let mut unrepresentable = BTreeSet::new();
+        for source in &snapshot.omitted_sources {
+            match &source.reason {
+                CodeSourceOmissionReasonV1::PrivacyWithheld { .. } => {
+                    if let Ok(path) = std::str::from_utf8(&source.git_path) {
+                        withheld.insert(path.to_owned());
+                    }
+                }
+                CodeSourceOmissionReasonV1::UnrepresentablePath => {
+                    unrepresentable.insert(source.git_path.clone());
+                }
+            }
+        }
+        Self {
+            snapshot_content_identity: snapshot.content_identity.clone(),
+            files: Arc::new(
+                snapshot
+                    .files
+                    .iter()
+                    .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
+                    .map(|file| (file.logical_path.clone(), file.content_digest.clone()))
+                    .collect(),
+            ),
+            withheld: Arc::new(withheld),
+            unrepresentable: Arc::new(unrepresentable),
+        }
+    }
+
+    /// Whether this manifest describes the sealed source `snapshot_content_identity`
+    /// names: the reconcile that established it verified exactly that snapshot.
+    pub fn describes_snapshot(&self, snapshot_content_identity: &ContentDigest) -> bool {
+        self.snapshot_content_identity == *snapshot_content_identity
+    }
+}
+
+fn read_candidate(
+    project_root: &Path,
+    candidate: &StatCandidateV1,
+) -> Result<Vec<u8>, CodeIndexSchedulerErrorV1> {
+    if candidate.explicitly_admitted {
+        ignored_dependencies::read_explicitly_admitted_source(
+            project_root,
+            &candidate.logical_path,
+            None,
+        )
+    } else {
+        ignored_dependencies::read_bounded_snapshot_source(
+            &project_root.join(&candidate.logical_path),
+            None,
+        )
+    }
+}
+
+/// The canonical content digest capture would seal for `raw`: the digest of
+/// the sanitized bytes.
+fn sanitized_digest(
+    candidate: &StatCandidateV1,
+    raw: &[u8],
+) -> Result<ContentDigest, CodeIndexSchedulerErrorV1> {
+    privacy::sanitize_code_file(&candidate.language, raw)
+        .map(|(bytes, _, _)| content_digest(&bytes))
+}
+
+/// What capture would seal for one candidate's bytes on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CandidateContentV1 {
+    Digest(ContentDigest),
+    /// The privacy boundary withholds this file from every generation.
+    Withheld,
+    Unreadable,
+}
+
+impl CandidateContentV1 {
+    fn derive(project_root: &Path, candidate: &StatCandidateV1) -> Self {
+        match read_candidate(project_root, candidate)
+            .and_then(|raw| sanitized_digest(candidate, &raw))
+        {
+            Ok(digest) => Self::Digest(digest),
+            Err(CodeIndexSchedulerErrorV1::Privacy(_)) => Self::Withheld,
+            Err(_) => Self::Unreadable,
+        }
+    }
+
+    fn matches(&self, logical_path: &str, manifest: &SourceContentManifestV1) -> bool {
+        match self {
+            Self::Digest(digest) => manifest.files.get(logical_path) == Some(digest),
+            Self::Withheld => {
+                !manifest.files.contains_key(logical_path)
+                    && manifest.withheld.contains(logical_path)
+            }
+            Self::Unreadable => false,
+        }
+    }
+}
+
+/// At most this many digests are re-derived on the sweeping thread.
+const INLINE_DIGEST_LIMIT: usize = 16;
+
+/// One inode's stat identity. On Unix the change time is the kernel's own
+/// record of every content or metadata write and cannot be set back
+/// (`touch -d`, `cp --preserve`, `rsync -a` all advance it), so an equal
+/// settled key proves the bytes behind it unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StatKeyV1 {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    size: u64,
+    modified_nanos: i128,
+    changed: ChangeStamp,
+}
+
+impl StatKeyV1 {
+    #[cfg(unix)]
+    fn of(metadata: &Metadata, sampled_at: ChangeClockReading) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.mode(),
+            size: metadata.size(),
+            modified_nanos: i128::from(metadata.mtime()) * 1_000_000_000
+                + i128::from(metadata.mtime_nsec()),
+            changed: RewriteWitness::NATIVE.stamp(metadata, sampled_at),
+        }
+    }
+
+    // ponytail: without a rewrite witness a stat cannot prove unchanged bytes,
+    // so non-Unix keys never settle and every sweep re-derives every digest,
+    // as before this cache. NTFS ChangeTime is not that witness: it stays put
+    // when a writer restores LastWriteTime through its handle.
+    #[cfg(not(unix))]
+    fn of(metadata: &Metadata, sampled_at: ChangeClockReading) -> Self {
+        Self {
+            device: 0,
+            inode: 0,
+            mode: 0,
+            size: metadata.len(),
+            modified_nanos: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .and_then(|elapsed| i128::try_from(elapsed.as_nanos()).ok())
+                .unwrap_or(0),
+            changed: RewriteWitness::NATIVE.stamp(metadata, sampled_at),
+        }
+    }
+
+    /// Whether any later write must produce a different key.
+    fn settled(&self) -> bool {
+        self.changed.is_settled()
+    }
+}
+
+/// Apply a stat-sized `probe` to every item on a few scoped threads, in order.
+/// Stats never queue on the indexing pool, so a sweep is not delayed by the
+/// builds that pool is running.
+fn stat_concurrently<T: Sync, R: Send>(items: &[T], probe: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let chunk = items
+        .len()
+        .div_ceil(GIT_STATUS_MODIFICATION_CHECK_THREADS)
+        .max(1);
+    std::thread::scope(|scope| {
+        let probe = &probe;
+        let workers = items
+            .chunks(chunk)
+            .map(|slice| scope.spawn(move || slice.iter().map(probe).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
+/// The key of whatever is at `path` now, `None` when nothing is.
+fn sample(path: &Path, sampled_at: ChangeClockReading) -> std::io::Result<Option<StatKeyV1>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(StatKeyV1::of(&metadata, sampled_at))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// A candidate roster and the directory and ignore-rule evidence it was
+/// enumerated from. Adding, removing or renaming an entry advances its
+/// directory's change time, and ignore rules live in the recorded files, so
+/// while every recorded key holds the roster is the one a fresh Git walk
+/// would produce, and the probe skips that walk.
+struct CachedCandidateRosterV1 {
+    git_metadata_signature: String,
+    admitted_paths: Vec<String>,
+    evidence: Vec<(PathBuf, Option<StatKeyV1>)>,
+    candidates: Arc<Vec<StatCandidateV1>>,
+    unrepresentable: Arc<Vec<Vec<u8>>>,
+}
+
+impl CachedCandidateRosterV1 {
+    fn holds(&self, git_metadata_signature: &str, admitted_paths: &[String]) -> bool {
+        self.git_metadata_signature == git_metadata_signature
+            && self.admitted_paths == admitted_paths
+            && {
+                let sampled_at = ChangeClockReading::now();
+                stat_concurrently(&self.evidence, |(path, key)| {
+                    sample(path, sampled_at).is_ok_and(|now| now == *key)
+                })
+            }
+            .into_iter()
+            .all(|holds| holds)
+    }
+}
+
+/// Records every directory the Git walk descends into, keyed before the walk
+/// reads it, plus the `.gitignore` each one holds.
+struct DirectoryEvidenceV1 {
+    root: PathBuf,
+    sampled_at: ChangeClockReading,
+    evidence: Vec<(PathBuf, Option<StatKeyV1>)>,
+    settled: bool,
+}
+
+impl DirectoryEvidenceV1 {
+    fn record(&mut self, path: PathBuf, directory: bool) {
+        let key = sample(&path, self.sampled_at);
+        let settled = match &key {
+            Ok(Some(key)) => key.settled(),
+            Ok(None) => !directory,
+            Err(_) => false,
+        };
+        match key {
+            Ok(key) if settled => self.evidence.push((path, key)),
+            _ => self.settled = false,
+        }
+    }
+
+    fn record_directory(&mut self, directory: PathBuf) {
+        let ignore_file = directory.join(".gitignore");
+        self.record(directory, true);
+        // An absent `.gitignore` needs no key: creating one advances the
+        // directory's change time.
+        if sample(&ignore_file, self.sampled_at).is_ok_and(|key| key.is_some()) {
+            self.record(ignore_file, false);
+        }
+    }
+}
+
+impl Delegate for DirectoryEvidenceV1 {
+    fn emit(
+        &mut self,
+        _entry: gix::dir::EntryRef<'_>,
+        _collapsed_directory_status: Option<gix::dir::entry::Status>,
+    ) -> Action {
+        if self.settled {
+            Action::Continue(())
+        } else {
+            Action::Break(())
+        }
+    }
+
+    fn can_recurse(
+        &mut self,
+        entry: gix::dir::EntryRef<'_>,
+        for_deletion: Option<ForDeletionMode>,
+        worktree_root_is_repository: bool,
+    ) -> bool {
+        let recurse = entry.status.can_recurse(
+            entry.disk_kind,
+            entry.pathspec_match,
+            for_deletion,
+            worktree_root_is_repository,
+        );
+        if recurse && self.settled {
+            match gix::path::from_bstr(entry.rela_path.as_ref()) {
+                Ok(relative) => self.record_directory(self.root.join(relative)),
+                Err(_) => self.settled = false,
+            }
+        }
+        recurse
+    }
+}
+
+/// Keys every directory and ignore-rule file the candidate roster depends on,
+/// before the roster's own walk reads them. `None` when any of them changed
+/// too recently to be keyed.
+fn roster_evidence(
+    repository: &gix::Repository,
+    project_root: &Path,
+    sampled_at: ChangeClockReading,
+) -> Option<Vec<(PathBuf, Option<StatKeyV1>)>> {
+    let mut recorder = DirectoryEvidenceV1 {
+        root: project_root.to_path_buf(),
+        sampled_at,
+        evidence: Vec::new(),
+        settled: true,
+    };
+    let common_dir = repository.common_dir();
+    recorder.record(common_dir.join("config"), false);
+    recorder.record(common_dir.join("info").join("exclude"), false);
+    let global_excludes = match repository
+        .config_snapshot()
+        .trusted_path("core.excludesFile")
+    {
+        Ok(Some(path)) => Some(path),
+        Ok(None) => gix::path::env::xdg_config("ignore", &mut |name| std::env::var_os(name)),
+        Err(_) => return None,
+    };
+    if let Some(path) = global_excludes {
+        recorder.record(path, false);
+    }
+    recorder.record_directory(project_root.to_path_buf());
+    let index = repository.index_or_empty().ok()?;
+    let options = repository
+        .dirwalk_options()
+        .ok()?
+        .emit_untracked(gix::dir::walk::EmissionMode::Matching);
+    let interrupt = AtomicBool::new(false);
+    repository
+        .dirwalk(
+            &index,
+            Vec::<gix::bstr::BString>::new(),
+            &interrupt,
+            options,
+            &mut recorder,
+        )
+        .ok()?;
+    recorder.settled.then_some(recorder.evidence)
+}
+
+/// What one sweep of the witness checked, for the profiler and the proof.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SourceSweepStatsV1 {
+    /// Whether the candidate roster came from a fresh Git walk.
+    pub walked: bool,
+    pub candidates: usize,
+    /// Files whose bytes were read because no settled key vouched for them.
+    pub hashed: usize,
+}
+
+/// What earlier sweeps proved about the worktree: per-file content digests
+/// that hold while each file's settled stat key does, and the last candidate
+/// roster with the evidence that keeps it valid. A clean sweep then stats
+/// files and directories and reads no bytes. It is a cache of the content
+/// proof, not a second authority: every entry was derived from the bytes on
+/// disk, and a disagreeing key falls back to re-deriving them.
+pub struct SourceSweepCacheV1 {
+    /// The path policy capture seals under; an excluded candidate is not a
+    /// source the manifest has to carry.
+    path_policy: IndexPathPolicyV1,
+    contents: HashMap<String, (StatKeyV1, CandidateContentV1)>,
+    roster: Option<CachedCandidateRosterV1>,
+}
+
+impl SourceSweepCacheV1 {
+    pub fn new(path_policy: IndexPathPolicyV1) -> Self {
+        Self {
+            path_policy,
+            contents: HashMap::new(),
+            roster: None,
+        }
+    }
+
+    /// Whether the bytes on disk still carry exactly the manifest's content
+    /// identities: every present manifest file is still a candidate, and
+    /// every candidate's canonical digest equals its manifest entry (or the
+    /// privacy boundary withholds it and the manifest agrees). Digests no
+    /// settled key vouches for are re-derived across the indexing pool.
+    #[tracing::instrument(
+        name = "daemon.code_index.freshness.source_sweep",
+        level = "trace",
+        skip_all
+    )]
+    pub fn witness_matches(
+        &mut self,
+        project_root: &Path,
+        ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
+        git_metadata_signature: &str,
+        manifest: &SourceContentManifestV1,
+        shutting_down: &AtomicBool,
+    ) -> (bool, SourceSweepStatsV1) {
+        let mut stats = SourceSweepStatsV1::default();
+        let sampled_at = ChangeClockReading::now();
+        let admitted_paths = ignored_source_admissions
+            .iter()
+            .map(|admission| admission.logical_path.clone())
+            .collect::<Vec<_>>();
+        let (candidates, unrepresentable) = match self.roster.as_ref() {
+            Some(roster) if roster.holds(git_metadata_signature, &admitted_paths) => (
+                Arc::clone(&roster.candidates),
+                Arc::clone(&roster.unrepresentable),
+            ),
+            _ => {
+                stats.walked = true;
+                let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
+                    return (false, stats);
+                };
+                let evidence = roster_evidence(&repository, project_root, sampled_at);
+                let Ok(SourceCandidatesV1 {
+                    candidates,
+                    unrepresentable,
+                }) = source_candidates(&repository, ignored_source_admissions)
+                else {
+                    return (false, stats);
+                };
+                let candidates = Arc::new(candidates);
+                let unrepresentable = Arc::new(unrepresentable);
+                let live = candidates
+                    .iter()
+                    .map(|candidate| candidate.logical_path.as_str())
+                    .collect::<BTreeSet<_>>();
+                self.contents.retain(|path, _| live.contains(path.as_str()));
+                self.roster = evidence.map(|evidence| CachedCandidateRosterV1 {
+                    git_metadata_signature: git_metadata_signature.to_owned(),
+                    admitted_paths,
+                    evidence,
+                    candidates: Arc::clone(&candidates),
+                    unrepresentable: Arc::clone(&unrepresentable),
+                });
+                (candidates, unrepresentable)
+            }
+        };
+        let present_unrepresentable = stat_concurrently(&unrepresentable, |git_path| {
+            gix::path::from_byte_slice(git_path)
+                .is_ok_and(|relative| project_root.join(relative).is_file())
+        })
+        .into_iter()
+        .zip(unrepresentable.iter())
+        .filter_map(|(present, git_path)| present.then_some(git_path.as_slice()))
+        .collect::<BTreeSet<_>>();
+        if present_unrepresentable
+            != manifest
+                .unrepresentable
+                .iter()
+                .map(Vec::as_slice)
+                .collect::<BTreeSet<_>>()
+        {
+            return (false, stats);
+        }
+        let eligible = candidates
+            .iter()
+            .filter(|candidate| {
+                validate_code_logical_path(&candidate.logical_path).is_ok()
+                    && (candidate.explicitly_admitted
+                        || !self.path_policy.excludes(&candidate.logical_path))
+            })
+            .collect::<Vec<_>>();
+        let present = present_candidates(project_root, &eligible, sampled_at);
+        stats.candidates = present.len();
+        let present_paths = present
+            .iter()
+            .map(|(candidate, _)| candidate.logical_path.as_str())
+            .collect::<BTreeSet<_>>();
+        if !manifest
+            .files
+            .keys()
+            .chain(manifest.withheld.iter())
+            .all(|logical_path| present_paths.contains(logical_path.as_str()))
+        {
+            return (false, stats);
+        }
+        let Ok(disputed) =
+            self.disputed(project_root, present, manifest, shutting_down, &mut stats)
+        else {
+            return (false, stats);
+        };
+        (disputed.is_empty(), stats)
+    }
+
+    /// The sealed files of `manifest` whose bytes on disk no longer carry
+    /// their sealed digests. An unchanged stat identity proves nothing where a
+    /// write leaves no rewrite witness (NTFS, an assume-unchanged index
+    /// entry), so a capture that reuses sealed rows on stat evidence asks this
+    /// sweep which of them the bytes disprove. An absent file is not disputed:
+    /// its deletion is visible to stat.
+    pub fn disputed_sources(
+        &mut self,
+        project_root: &Path,
+        manifest: &SourceContentManifestV1,
+        shutting_down: &AtomicBool,
+    ) -> Result<BTreeSet<String>, CodeIndexSchedulerErrorV1> {
+        let registry = StaticLanguageRegistry::new();
+        let candidates = manifest
+            .files
+            .keys()
+            .filter_map(|logical_path| source_candidate(&registry, logical_path.clone(), false))
+            .collect::<Vec<_>>();
+        let present = present_candidates(
+            project_root,
+            &candidates.iter().collect::<Vec<_>>(),
+            ChangeClockReading::now(),
+        );
+        let disputed = self.disputed(
+            project_root,
+            present,
+            manifest,
+            shutting_down,
+            &mut SourceSweepStatsV1::default(),
+        )?;
+        Ok(disputed
+            .into_iter()
+            .map(|candidate| candidate.logical_path.clone())
+            .collect())
+    }
+
+    /// The `present` candidates whose bytes disagree with `manifest` even
+    /// after git's clean filters. Digests no settled key vouches for are
+    /// re-derived across the indexing pool.
+    fn disputed<'a>(
+        &mut self,
+        project_root: &Path,
+        present: Vec<(&'a StatCandidateV1, Option<StatKeyV1>)>,
+        manifest: &SourceContentManifestV1,
+        shutting_down: &AtomicBool,
+        stats: &mut SourceSweepStatsV1,
+    ) -> Result<Vec<&'a StatCandidateV1>, CodeIndexSchedulerErrorV1> {
+        let mut disputed = Vec::new();
+        let mut unvouched = Vec::new();
+        for (candidate, key) in present {
+            match self.contents.get(&candidate.logical_path) {
+                Some((cached, content)) if Some(*cached) == key => {
+                    if !content.matches(&candidate.logical_path, manifest) {
+                        disputed.push(candidate);
+                    }
+                }
+                _ => unvouched.push((candidate, key)),
+            }
+        }
+        stats.hashed = unvouched.len();
+        let derive = |candidate: &StatCandidateV1| {
+            if shutting_down.load(Ordering::Acquire) {
+                CandidateContentV1::Unreadable
+            } else {
+                CandidateContentV1::derive(project_root, candidate)
+            }
+        };
+        // The few files an edit touches are read on this thread; only a bulk
+        // re-derivation (a cold cache) takes the indexing pool and its CPU
+        // permits.
+        let _scan_batch = tracedecay_privacy::code_source_scan_batch();
+        let derived = if unvouched.len() <= INLINE_DIGEST_LIMIT {
+            unvouched
+                .iter()
+                .map(|(candidate, _)| derive(candidate))
+                .collect::<Vec<_>>()
+        } else {
+            parallelism::install(|| {
+                unvouched
+                    .par_iter()
+                    .map(|(candidate, _)| {
+                        parallelism::with_background_cpu_permit(|| derive(candidate))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|error| {
+                CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Parallelism(
+                    error,
+                ))
+            })?
+        };
+        if shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        for ((candidate, key), content) in unvouched.into_iter().zip(derived) {
+            if !content.matches(&candidate.logical_path, manifest) {
+                disputed.push(candidate);
+            }
+            // The key was sampled before the read, so a settled key vouches
+            // for these bytes: a write after the stat would change it.
+            match key {
+                Some(key) if key.settled() && content != CandidateContentV1::Unreadable => {
+                    self.contents
+                        .insert(candidate.logical_path.clone(), (key, content));
+                }
+                _ => {
+                    self.contents.remove(&candidate.logical_path);
+                }
+            }
+        }
+        if disputed.is_empty() {
+            return Ok(disputed);
+        }
+        Ok(clean_filter_mismatches(project_root, disputed, manifest))
+    }
+}
+
+/// Every candidate that is a regular file or a link to one, with its stat key.
+/// A link's key is `None`: its own key says nothing about its target's bytes.
+fn present_candidates<'a>(
+    project_root: &Path,
+    candidates: &[&'a StatCandidateV1],
+    sampled_at: ChangeClockReading,
+) -> Vec<(&'a StatCandidateV1, Option<StatKeyV1>)> {
+    stat_concurrently(candidates, |candidate| {
+        let absolute = project_root.join(&candidate.logical_path);
+        let metadata = std::fs::symlink_metadata(&absolute).ok()?;
+        let key = if metadata.file_type().is_symlink() {
+            if !std::fs::metadata(&absolute).is_ok_and(|target| target.is_file()) {
+                return None;
+            }
+            None
+        } else if metadata.is_file() {
+            Some(StatKeyV1::of(&metadata, sampled_at))
+        } else {
+            return None;
+        };
+        Some((*candidate, key))
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The disputed files the clean filters do not reconcile. A tracked file
+/// whose bytes on disk differ from its sealed digest may still be exactly what
+/// the generation sealed: a clean-tree generation captures HEAD's blobs, and
+/// git's clean filters (`core.autocrlf`, `eol`, `ident`, filter drivers) are
+/// what separate those blobs from the checkout. Running the disk bytes through
+/// the repository's own filter pipeline, the same conversion gix status
+/// applies before it compares content, settles whether the file is current.
+/// Untracked and explicitly admitted sources have no blob to be sealed from,
+/// so their raw mismatch is final.
+fn clean_filter_mismatches<'a>(
+    project_root: &Path,
+    disputed: Vec<&'a StatCandidateV1>,
+    manifest: &SourceContentManifestV1,
+) -> Vec<&'a StatCandidateV1> {
+    let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
+        return disputed;
+    };
+    let Ok((mut pipeline, index)) = repository.filter_pipeline(None) else {
+        return disputed;
+    };
+    disputed
+        .into_iter()
+        .filter(|candidate| {
+            let Some(expected) = manifest.files.get(&candidate.logical_path) else {
+                return true;
+            };
+            if candidate.explicitly_admitted
+                || index
+                    .entry_by_path(BStr::new(candidate.logical_path.as_str()))
+                    .is_none()
+            {
+                return true;
+            }
+            let rela_path = Path::new(&candidate.logical_path);
+            let Ok(file) = std::fs::File::open(project_root.join(rela_path)) else {
+                return true;
+            };
+            let Ok(mut converted) = pipeline.convert_to_git(file, rela_path, &index) else {
+                return true;
+            };
+            let mut bytes = Vec::new();
+            !(converted.read_to_end(&mut bytes).is_ok()
+                && sanitized_digest(candidate, &bytes).is_ok_and(|digest| digest == *expected))
+        })
+        .collect()
+}
+
+/// The exact sanitized bytes a generation sealed for `logical_path`, recovered
+/// from the checkout, or `None` once the checkout no longer holds them.
+///
+/// Byte offsets the graph records index these bytes, which are not always the
+/// file on disk: a clean-tree generation seals HEAD's blobs, so a checkout
+/// whose clean filters rewrite the file (`core.autocrlf=true` over CRLF
+/// sources) is current while every offset past the first converted line
+/// ending points elsewhere in the disk bytes. The file is tried as it is on
+/// disk first, then through the repository's own filter pipeline, the same
+/// two readings [`clean_filter_mismatches`] accepts as current.
+pub fn sealed_source_bytes(
+    project_root: &Path,
+    logical_path: &str,
+    language: &LanguageId,
+    sealed: &ContentDigest,
+) -> Result<Option<Vec<u8>>, CodeIndexSchedulerErrorV1> {
+    let raw =
+        ignored_dependencies::read_bounded_snapshot_source(&project_root.join(logical_path), None)?;
+    let (sanitized, _, _) = privacy::sanitize_code_file(language, &raw)?;
+    if content_digest(&sanitized) == *sealed {
+        return Ok(Some(sanitized));
+    }
+    // ponytail: one repository open and filter pipeline per filtered file;
+    // hoist them into a caller-held reader if a caller ever needs hundreds.
+    let repository = tracedecay_runtime_core::git_open::open(project_root)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let (mut pipeline, index) = repository
+        .filter_pipeline(None)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    if index.entry_by_path(BStr::new(logical_path)).is_none() {
+        return Ok(None);
+    }
+    let mut filtered = Vec::new();
+    pipeline
+        .convert_to_git(raw.as_slice(), Path::new(logical_path), &index)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
+        .read_to_end(&mut filtered)?;
+    let (sanitized, _, _) = privacy::sanitize_code_file(language, &filtered)?;
+    Ok((content_digest(&sanitized) == *sealed).then_some(sanitized))
+}
+
+/// What the last completed reconcile proved the worktree's source to be, in
+/// the two forms a later probe consults: the stat signature as the negative
+/// cache and the generation's sealed file digests as the proof.
+#[derive(Clone)]
+pub struct ReconciledSourceWitnessV1 {
+    pub stat_signature: String,
+    pub content_manifest: SourceContentManifestV1,
+}
+
+impl ReconciledSourceWitnessV1 {
+    pub fn new(stat_signature: String, snapshot: &SanitizedCodeSnapshotV1) -> Self {
+        Self {
+            stat_signature,
+            content_manifest: SourceContentManifestV1::for_snapshot(snapshot),
+        }
+    }
 }
 
 /// Durable binding between one sealed generation and the exact ordinary plus
-/// ignored-source state against which it was reconciled.
+/// ignored-source state against which it was reconciled. An expendable
+/// restart optimization: it names the generation whose sealed file digests
+/// are the content authority, and carries the stat signature that lets a
+/// moved tree skip straight to reconcile.
 pub struct RestoreFreshnessWitnessV1 {
     pub generation_id: String,
     pub git_metadata_signature: String,
@@ -136,5 +968,44 @@ impl RestoreFreshnessWitnessV1 {
         if std::fs::write(&temp, self.encode()).is_ok() {
             let _ = std::fs::rename(&temp, &path);
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use tracedecay_private_fs::{ChangeClockReading, RewriteWitness, change_time_settled};
+
+    use super::sample;
+
+    /// The sweep cache keeps a digest only under a settled key and reuses it
+    /// only for an equal one. A clock read before the write cannot settle the
+    /// write's change time, so a same-size rewrite in that quantum, which
+    /// leaves every stat field equal, cannot match the key either.
+    #[test]
+    fn a_key_sampled_inside_its_write_quantum_vouches_for_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("lib.rs");
+        let sampled_at = ChangeClockReading::now();
+        std::fs::write(&path, "pub fn alpha() -> u32 { 1 }\n").unwrap();
+
+        let first = sample(&path, sampled_at).unwrap().unwrap();
+        let second = sample(&path, sampled_at).unwrap().unwrap();
+        assert!(!first.settled());
+        assert_ne!(first, second);
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let changed_at = RewriteWitness::NATIVE.change_time_nanos(&metadata).unwrap();
+        let left_quantum = (0..10_000_000_u32).any(|_| {
+            std::thread::yield_now();
+            change_time_settled(changed_at)
+        });
+        assert!(
+            left_quantum,
+            "the change clock must leave the write's quantum"
+        );
+        let sampled_at = ChangeClockReading::now();
+        let first = sample(&path, sampled_at).unwrap().unwrap();
+        assert!(first.settled());
+        assert_eq!(first, sample(&path, sampled_at).unwrap().unwrap());
     }
 }

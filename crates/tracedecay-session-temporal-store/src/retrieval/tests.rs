@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use tempfile::tempdir;
 use tracedecay_domain::{
     MAX_OBSERVATION_RECORD_BYTES, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
@@ -9,22 +11,38 @@ use super::cursors::*;
 use super::queries::*;
 use super::records::*;
 use super::*;
-use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay_global_db::tests::harness::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1, open_registered_test_database_fixture,
+};
 use tracedecay_runtime_core::db::{
-    DatabaseEngineReadSnapshot,
+    DatabaseEngineReadSnapshot, TestDatabaseRuntimeScope,
     engine::{Connection, Executor, TestConnection, Value as SqlValue},
 };
 use tracedecay_temporal_query::candidates::CandidateChannel;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, KernelVersions, PageRequest, TemporalAuthorizedRoot,
-    TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
-    TemporalParticipantManifest, TemporalPortError, TemporalPreparedCandidateCohort,
-    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
-    TemporalWatermarks,
+use tracedecay_temporal_query::execution::{
+    BindingDigest, ExecutionControl, ExecutionLimits, await_controlled,
 };
+use tracedecay_temporal_query::execution::{ReadBudgetAccounting, TemporalPortError};
+use tracedecay_temporal_query::paging::{
+    CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidateReadState, PageLimits, PageRequest,
+    PageStatus,
+};
+use tracedecay_temporal_query::paging::{
+    TemporalRecord, begin_prepared_candidate_pull, commit_prepared_candidate_pull,
+};
+use tracedecay_temporal_query::plan_temporal_candidates;
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
+    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalPreparedCandidateCohort,
+    TemporalSourceAccess, TemporalWatermarks,
+};
+use tracedecay_temporal_query::snapshot::{
+    TemporalAuthorizedRoot, TemporalRetrievalScope, TemporalSnapshotRequest,
+};
 
+mod relation_batch_tests;
 mod relation_graph_tests;
 
 #[test]
@@ -49,9 +67,7 @@ fn normalize_plan_detail(detail: &str) -> String {
         .to_ascii_uppercase()
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn snapshot(generation: u64) -> TemporalExecutionSnapshot {
     TemporalExecutionSnapshot::new_authorized(
@@ -234,6 +250,137 @@ fn prepared_root_candidates_bind_each_frozen_participant_generation() {
     );
 }
 
+fn root_preparation_request(mode: TemporalModeV1) -> TemporalSnapshotRequest {
+    root_snapshot_with_mode(1, None, mode).request().clone()
+}
+
+#[asupersync::test]
+async fn root_candidate_preparation_matches_direct_request_producer() {
+    let dir = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let adapter = read.adapter();
+    let request = root_preparation_request(TemporalModeV1::Current);
+    let plan = plan_temporal_candidates("needle candidate", None, false);
+    let direct = adapter
+        .prepare_root_candidate_cohort(&request, &plan)
+        .await
+        .expect("direct root candidate cohort");
+    let candidate_limits = PageLimits::new(
+        request.limits().candidate_limit,
+        request.limits().candidate_total_bytes,
+        request.limits().candidate_item_bytes,
+        request.limits().candidate_limit.min(64),
+    )
+    .expect("valid limits");
+    let mut state = CandidateReadState::new(candidate_limits);
+    let mut via_pages = Vec::new();
+    let scope = TemporalRetrievalScope::AllSessionsInAuthorizedRoot;
+    loop {
+        let limits = begin_prepared_candidate_pull(&request, &mut state).expect("pull limits");
+        let control = request.execution_control();
+        let field_caps = CandidateFieldCaps::new(
+            limits.candidate_stable_id_bytes,
+            limits.candidate_anchor_id_bytes,
+            limits.candidate_metadata_field_bytes,
+        );
+        let page_request = state.request(limits.candidate_key_bytes, Some(field_caps));
+        let mut sink = state.begin_page(
+            control,
+            limits.candidate_key_bytes,
+            Some(field_caps),
+            CANDIDATE_READ_BUDGET,
+        );
+        let status = await_controlled(
+            control,
+            Box::pin(adapter.produce_candidates_from_request(
+                &scope,
+                &request,
+                1,
+                &plan,
+                &page_request,
+                &mut sink,
+            )),
+        )
+        .await
+        .expect("page-driven root candidate cohort");
+        let page = sink.finish(status).expect("bounded page");
+        let page = commit_prepared_candidate_pull(&mut state, page).expect("committed page");
+        let status = page.status();
+        via_pages.extend(page.into_items());
+        if status == PageStatus::Complete {
+            break;
+        }
+    }
+    assert_eq!(
+        direct.candidates(),
+        via_pages.as_slice(),
+        "direct preparation must match the request producer path"
+    );
+    assert!(
+        !direct.candidates().is_empty(),
+        "root candidate preparation must return live fixture candidates"
+    );
+}
+
+#[asupersync::test]
+async fn root_candidate_preparation_sizes_the_clause_byte_refusal() {
+    let dir = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let adapter = read.adapter();
+    let request = root_preparation_request(TemporalModeV1::Current).with_limits(ExecutionLimits {
+        candidate_limit: 8,
+        candidate_total_bytes: 64 * 1024,
+        candidate_item_bytes: 8,
+        ..ExecutionLimits::default()
+    });
+    let plan = plan_temporal_candidates("needle candidate", None, false);
+    let Err(TemporalPortError::BudgetExceeded {
+        resource,
+        accounting,
+    }) = adapter.prepare_root_candidate_cohort(&request, &plan).await
+    else {
+        panic!("an 8-byte candidate ceiling must refuse the fixture's candidates");
+    };
+    assert_eq!(resource, "candidate clause bytes");
+    // A refusal an operator cannot size is a refusal they cannot act on: the
+    // boundary has to say what it admitted and what the clause text asked for.
+    assert_eq!(
+        accounting,
+        Some(ReadBudgetAccounting::requested(
+            8,
+            "needle candidate".len() as u64
+        )),
+        "an oversized clause is a request against a ceiling, not a consumed budget"
+    );
+}
+
+#[asupersync::test]
+async fn root_candidate_preparation_preserves_live_cancellation() {
+    let dir = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let adapter = read.adapter();
+    let control = ExecutionControl::default();
+    control.cancel();
+    let request = root_preparation_request(TemporalModeV1::Current).with_execution_control(control);
+    let plan = plan_temporal_candidates("needle candidate", None, false);
+    assert_eq!(
+        adapter.prepare_root_candidate_cohort(&request, &plan).await,
+        Err(TemporalPortError::Cancelled)
+    );
+}
+
 fn record_request() -> PageRequest {
     PageRequest::for_test(32, 64 * 1024, 8 * 1024, 32, 512)
 }
@@ -261,8 +408,8 @@ struct RegisteredTemporalRead {
 }
 
 impl RegisteredTemporalRead {
-    fn adapter(&self) -> GlobalDbTemporalReadPort<'_> {
-        GlobalDbTemporalReadPort::new_registered(&self.read)
+    fn adapter(&self) -> SessionTemporalReadPort<'_> {
+        SessionTemporalReadPort::new_registered(&self.read)
     }
 
     async fn record_kinds(
@@ -307,10 +454,20 @@ impl RegisteredTemporalRead {
         candidate: RankingCandidate,
         request: &PageRequest,
     ) -> Vec<TemporalRecord> {
+        self.records_for_candidates(snapshot, vec![candidate], request)
+            .await
+    }
+
+    async fn records_for_candidates(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        candidates: Vec<RankingCandidate>,
+        request: &PageRequest,
+    ) -> Vec<TemporalRecord> {
         let query = build_record_query_with_relations(
             snapshot.retrieval_scope(),
             snapshot,
-            &[candidate],
+            &candidates,
             0,
             &RecordCursor {
                 candidate: 0,
@@ -407,6 +564,7 @@ trait HostAdmissionRetrievalFixture {
     );
     async fn seed_candidate_query_fixture_for_test(&self);
     async fn seed_cross_session_record_fixture_for_test(&self);
+    async fn seed_wide_span_record_fixture_for_test(&self, members: usize);
     async fn seed_derived_record_fixture_for_test(&self);
     async fn seed_oversized_record_fixture_for_test(&self);
     async fn seed_provider_summary_fixture_for_test(&self);
@@ -516,64 +674,62 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 );
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id,
-                message_id, turn_id, role, knowledge_at, valid_time_json,
-                evidence_json, sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, message_id, turn_id, copied_from_anchor_ids_json,
+                role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes, index_text
              ) VALUES
                 (
                     'session-plan-inside', 1, 'occurrence-plan-inside',
-                    'observation-plan-inside', 'claude', 0, 'anchor-plan-inside',
-                    'message-plan-inside', 'turn-plan-inside', 'user', 20,
+                    'observation-plan-inside', 1, 'claude', 0, 'anchor-plan-inside',
+                    'message-plan-inside', 'turn-plan-inside', '[]', 'user', 20,
                     '{\"kind\":\"unknown\"}', '{}',
                     '0000000000000000000000000000000000000000000000000000000000000000', 38,
-                    'needle candidate derived needle inside',
                     'needle candidate derived needle inside'
                 ),
                 (
                     'session-plan-inside', 1, 'occurrence-plan-inside-old',
-                    'observation-plan-inside', 'claude', 1, 'anchor-plan-inside-old',
-                    'message-plan-inside-old', 'turn-plan-inside-old', 'assistant', 10,
+                    'observation-plan-inside', 1, 'claude', 1, 'anchor-plan-inside-old',
+                    'message-plan-inside-old', 'turn-plan-inside-old', '[]', 'assistant', 10,
                     '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 27,
-                    'derived needle older member', 'derived needle older member'
+                    '0000000000000000000000000000000000000000000000000000000000000000', 27, 'derived needle older member'
                 ),
                 (
                     'session-plan-inside', 1, 'occurrence-plan-inside-last',
-                    'observation-plan-inside', 'claude', 2, 'anchor-plan-inside-last',
-                    'message-plan-inside-last', 'turn-plan-inside-last', 'assistant', 5,
+                    'observation-plan-inside', 1, 'claude', 2, 'anchor-plan-inside-last',
+                    'message-plan-inside-last', 'turn-plan-inside-last', '[]', 'assistant', 5,
                     '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 26,
-                    'derived needle last member', 'derived needle last member'
+                    '0000000000000000000000000000000000000000000000000000000000000000', 26, 'derived needle last member'
                 ),
                 (
                     'session-plan-outside', 1, 'occurrence-plan-outside',
-                    'observation-plan-outside', 'claude', 0, 'anchor-plan-outside',
-                    'message-plan-outside', 'turn-plan-outside', 'user', 30,
+                    'observation-plan-outside', 2, 'claude', 0, 'anchor-plan-outside',
+                    'message-plan-outside', 'turn-plan-outside', '[]', 'user', 30,
                     '{\"kind\":\"unknown\"}', '{}',
                     '0000000000000000000000000000000000000000000000000000000000000000', 39,
-                    'needle candidate derived needle outside',
                     'needle candidate derived needle outside'
                 );
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES
                 (
-                    'summary-plan-inside', 'session-plan-inside', 'anchor-plan-summary',
-                    'needle summary inside newest', 'needle summary inside newest', '{}',
+                    'summary-plan-inside', 'session-plan-inside', 'claude',
+                    'session-plan-inside', 0, 'anchor-plan-summary',
+                    'needle summary inside newest', 'hash', 1, 1, '{}',
                     '{\"provider\":\"claude\"}', 25
                 ),
                 (
-                    'summary-plan-inside-old', 'session-plan-inside',
-                    'anchor-plan-summary-old',
-                    'needle summary inside older', 'needle summary inside older', '{}',
+                    'summary-plan-inside-old', 'session-plan-inside', 'claude',
+                    'session-plan-inside', 0, 'anchor-plan-summary-old',
+                    'needle summary inside older', 'hash', 1, 1, '{}',
                     '{\"provider\":\"claude\"}', 15
                 ),
                 (
-                    'summary-plan-outside', 'session-plan-outside',
-                    'anchor-plan-summary-outside',
-                    'needle summary outside', 'needle summary outside', '{}',
+                    'summary-plan-outside', 'session-plan-outside', 'claude',
+                    'session-plan-outside', 0, 'anchor-plan-summary-outside',
+                    'needle summary outside', 'hash', 1, 1, '{}',
                     '{\"provider\":\"claude\"}', 35
                 );
              INSERT INTO session_summary_availability (
@@ -620,23 +776,23 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                     'sha256:derived-outside-members', '{}'
                 );
              INSERT INTO session_derived_evidence_members (
-                session_id, generation, evidence_kind, evidence_id,
+                session_id, generation, evidence_kind, first_occurrence_id,
                 ordinal, occurrence_id, member_role
              ) VALUES
                 (
-                    'session-plan-inside', 1, 'span', 'derived-plan-inside',
+                    'session-plan-inside', 1, 'span', 'occurrence-plan-inside',
                     0, 'occurrence-plan-inside', 'first'
                 ),
                 (
-                    'session-plan-inside', 1, 'span', 'derived-plan-inside-old',
+                    'session-plan-inside', 1, 'span', 'occurrence-plan-inside-old',
                     0, 'occurrence-plan-inside-old', 'first'
                 ),
                 (
-                    'session-plan-inside', 1, 'span', 'derived-plan-inside-old',
+                    'session-plan-inside', 1, 'span', 'occurrence-plan-inside-old',
                     1, 'occurrence-plan-inside-last', 'last'
                 ),
                 (
-                    'session-plan-outside', 1, 'span', 'derived-plan-outside',
+                    'session-plan-outside', 1, 'span', 'occurrence-plan-outside',
                     0, 'occurrence-plan-outside', 'first'
                 );",
         )
@@ -762,28 +918,25 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 ('other-anchor', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id,
-                role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, index_text
              ) VALUES
                 (
-                    'session-a', 1, 'same-id', 'observation-shared', 'claude', 0,
-                    'same-anchor', 'user', 5, '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 12,
-                    'same content', 'same content'
+                    'session-a', 1, 'same-id', 'observation-shared', 1, 'claude', 0,
+                    'same-anchor', '[]', 'user', 5, '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 12, 'same content'
                 ),
                 (
-                    'session-b', 1, 'same-id', 'observation-shared', 'claude', 0,
-                    'same-anchor', 'user', 5, '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 12,
-                    'same content', 'same content'
+                    'session-b', 1, 'same-id', 'observation-shared', 1, 'claude', 0,
+                    'same-anchor', '[]', 'user', 5, '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 12, 'same content'
                 ),
                 (
-                    'session-b', 1, 'source-b', 'observation-shared', 'claude', 1,
-                    'source-anchor-b', 'user', 4, '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 6,
-                    'source', 'source'
+                    'session-b', 1, 'source-b', 'observation-shared', 1, 'claude', 1,
+                    'source-anchor-b', '[]', 'user', 4, '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 6, 'source'
                 );
              INSERT INTO session_assertions (
                 session_id, generation, assertion_id, assertion_kind,
@@ -803,6 +956,109 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
         )
         .await
         .expect("cross-session retrieval fixture");
+    }
+
+    /// Seeds one span whose members are individually anchored, so a test can tell
+    /// the boundary occurrences the group's bounds need apart from the interior
+    /// ones that only their own channels should retrieve.
+    async fn seed_wide_span_record_fixture_for_test(&self, members: usize) {
+        assert!(members >= 2, "a span needs distinct first and last members");
+        self.activate_temporal_generation_for_retrieval_test("session-snapshot", 1)
+            .await;
+        let occurrence_id = |index: usize| format!("sha256:{index:064x}");
+        let anchors = (0..members)
+            .map(|index| format!("('member-anchor-{index}', '{{}}', '{{}}', 'fixture')"))
+            .chain(std::iter::once(
+                "('derived-span-anchor', '{}', '{}', 'fixture')".to_string(),
+            ))
+            .collect::<Vec<_>>()
+            .join(",");
+        let occurrences = (0..members)
+            .map(|index| {
+                format!(
+                    "('session-snapshot', 1, '{}', 'derived-observation', 1, 'claude', {index},
+                      'member-anchor-{index}', '[]', 'user', {}, '{{\"kind\":\"unknown\"}}',
+                      '{{\"authority\":\"provider_native\",
+                         \"evidence_class\":\"provider_declared\",
+                         \"source_anchor_id\":\"source-evidence-anchor\",
+                         \"sanitization_receipt\":{{
+                            \"receipt_id\":\"derived-receipt\",
+                            \"sanitizer_version\":\"derived-sanitizer\"
+                         }}}}',
+                      '0000000000000000000000000000000000000000000000000000000000000000', 15,
+                      'member {index}')",
+                    occurrence_id(index),
+                    index + 5,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let member_rows = (0..members)
+            .map(|index| {
+                let role = match index {
+                    0 => "first",
+                    last if last == members - 1 => "last",
+                    _ => "member",
+                };
+                format!(
+                    "('session-snapshot', 1, 'span', '{}', {index}, '{}', '{role}')",
+                    occurrence_id(0),
+                    occurrence_id(index)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let database = self
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        Executor::execute_batch(
+            &database
+                .writer_connection()
+                .expect("registered profile writer"),
+            &format!(
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path
+                 ) VALUES ('claude', 'session-snapshot', 'user', '/wide-span-test');
+                 INSERT INTO sanitization_receipts (
+                    receipt_id, sanitizer_version, payload_digest, receipt_json
+                 ) VALUES ('derived-receipt', 'fixture', 'sha256:derived', '{{}}');
+                 INSERT INTO observations (
+                    observation_id, payload_digest, receipt_id, observation_json,
+                    committed_cursor_json
+                 ) VALUES (
+                    'derived-observation', 'sha256:derived', 'derived-receipt',
+                    '{{\"identity\":{{\"source\":{{\"provider\":\"claude\"}}}}}}', '{{}}'
+                 );
+                 INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES {anchors};
+                 INSERT INTO session_occurrences (
+                    session_id, generation, occurrence_id, source_observation_id,
+                    source_sequence, source_provider, projection_output_ordinal,
+                    retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                    valid_time_json, evidence_json, sanitized_content_digest,
+                    sanitized_content_bytes, index_text
+                 ) VALUES {occurrences};
+                 INSERT INTO session_derived_evidence (
+                    session_id, generation, evidence_kind, evidence_id,
+                    retrieval_anchor_id, thread_id, first_occurrence_id, last_occurrence_id,
+                    algorithm_version, configuration_digest, member_count, member_digest,
+                    evidence_json
+                 ) VALUES (
+                    'session-snapshot', 1, 'span', 'span-evidence-id',
+                    'derived-span-anchor', NULL, '{first}', '{last}',
+                    'span-v1', 'sha256:configuration', {members}, 'sha256:members', '{{}}'
+                 );
+                 INSERT INTO session_derived_evidence_members (
+                    session_id, generation, evidence_kind, first_occurrence_id,
+                    ordinal, occurrence_id, member_role
+                 ) VALUES {member_rows};",
+                first = occurrence_id(0),
+                last = occurrence_id(members - 1),
+            ),
+        )
+        .await
+        .expect("wide span retrieval fixture");
     }
 
     async fn seed_derived_record_fixture_for_test(&self) {
@@ -835,15 +1091,15 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 ('derived-span-anchor', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id,
-                role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, index_text
              ) VALUES (
                 'session-snapshot', 1,
                 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
-                'derived-observation', 'claude', 0,
-                'source-occurrence-anchor', 'user', 5, '{\"kind\":\"unknown\"}',
+                'derived-observation', 1, 'claude', 0,
+                'source-occurrence-anchor', '[]', 'user', 5, '{\"kind\":\"unknown\"}',
                 '{
                     \"authority\":\"provider_native\",
                     \"evidence_class\":\"provider_declared\",
@@ -853,8 +1109,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                         \"sanitizer_version\":\"derived-sanitizer\"
                     }
                 }',
-                '0000000000000000000000000000000000000000000000000000000000000000', 15,
-                'derived content', 'derived content'
+                '0000000000000000000000000000000000000000000000000000000000000000', 15, 'derived content'
              );
              INSERT INTO session_derived_evidence (
                 session_id, generation, evidence_kind, evidence_id,
@@ -869,10 +1124,11 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 'span-v1', 'sha256:configuration', 1, 'sha256:members', '{}'
              );
              INSERT INTO session_derived_evidence_members (
-                session_id, generation, evidence_kind, evidence_id,
+                session_id, generation, evidence_kind, first_occurrence_id,
                 ordinal, occurrence_id, member_role
              ) VALUES (
-                'session-snapshot', 1, 'span', 'span-evidence-id',
+                'session-snapshot', 1, 'span',
+                'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
                 0,
                 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
                 'first'
@@ -914,16 +1170,16 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
             &writer,
             "INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id,
-                role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, index_text
              ) VALUES (
-                'session-snapshot', 1, 'occurrence-oversized', 'observation-1',
-                'claude', 0, 'anchor-evidence', 'user', 1,
+                'session-snapshot', 1, 'occurrence-oversized', 'observation-1', 1,
+                'claude', 0, 'anchor-evidence', '[]', 'user', 1,
                 '{\"kind\":\"unknown\"}', ?1,
                 '0000000000000000000000000000000000000000000000000000000000000000',
-                5, 'snippet', 'index'
+                5, 'index'
              )",
             [oversized_json.clone()],
         )
@@ -959,26 +1215,26 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 ('anchor-summary-provider', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id,
-                role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, index_text
              ) VALUES (
-                'session-snapshot', 1, 'occurrence-claude', 'observation-claude',
-                'claude', 0, 'source-claude', 'user', 1, '{\"kind\":\"unknown\"}',
+                'session-snapshot', 1, 'occurrence-claude', 'observation-claude', 1,
+                'claude', 0, 'source-claude', '[]', 'user', 1, '{\"kind\":\"unknown\"}',
                 '{\"authority\":\"canonical\",\"evidence_class\":\"observed\",
                   \"source_anchor_id\":\"source-claude\",
                   \"sanitization_receipt\":{\"receipt_id\":\"receipt-1\"}}',
                 '0000000000000000000000000000000000000000000000000000000000000000',
-                7,
-                'snippet', 'index'
+                7, 'index'
              );
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES (
-                'summary-provider', 'session-snapshot', 'anchor-summary-provider',
-                'summary', 'summary',
+                'summary-provider', 'session-snapshot', 'test', 'session-snapshot', 0,
+                'anchor-summary-provider', 'summary', 'hash', 1, 1,
                 '{\"knowledge_through\":1,\"valid_through\":null}', NULL, 1
              );
              INSERT INTO session_summary_availability (
@@ -1021,26 +1277,24 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 ('successor-summary-anchor', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id,
-                role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, index_text
              ) VALUES
                 (
                     'session-snapshot', 1, 'summary-source-at-5',
-                    'summary-history-observation', 'claude', 0, 'shared-summary-source',
-                    'user', 5, '{\"kind\":\"known\",\"valid_at\":5}', '{}',
+                    'summary-history-observation', 1, 'claude', 0, 'shared-summary-source',
+                    '[]', 'user', 5, '{\"kind\":\"known\",\"valid_at\":5}', '{}',
                     '0000000000000000000000000000000000000000000000000000000000000000',
-                    11,
-                    'source at 5', 'source at 5'
+                    11, 'source at 5'
                 ),
                 (
                     'session-snapshot', 1, 'summary-source-at-10',
-                    'summary-history-observation', 'claude', 1, 'shared-summary-source',
-                    'user', 10, '{\"kind\":\"known\",\"valid_at\":10}', '{}',
+                    'summary-history-observation', 1, 'claude', 1, 'shared-summary-source',
+                    '[]', 'user', 10, '{\"kind\":\"known\",\"valid_at\":10}', '{}',
                     '0000000000000000000000000000000000000000000000000000000000000000',
-                    12,
-                    'source at 10', 'source at 10'
+                    12, 'source at 10'
                 );
              INSERT INTO session_current_entities (
                 session_id, generation, entity_kind, entity_id,
@@ -1050,17 +1304,18 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 NULL, 'summary-source-at-10', '{}'
              );
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES
                 (
-                    'historical-summary', 'session-snapshot', 'historical-summary-anchor',
-                    'historical', 'historical',
+                    'historical-summary', 'session-snapshot', 'test', 'session-snapshot', 0,
+                    'historical-summary-anchor', 'historical', 'hash', 1, 1,
                     '{\"knowledge_through\":5,\"valid_through\":5}', NULL, 5
                 ),
                 (
-                    'successor-summary', 'session-snapshot', 'successor-summary-anchor',
-                    'successor', 'successor',
+                    'successor-summary', 'session-snapshot', 'test', 'session-snapshot', 0,
+                    'successor-summary-anchor', 'successor', 'hash', 1, 1,
                     '{\"knowledge_through\":10,\"valid_through\":10}', NULL, 10
                 );
              INSERT INTO session_summary_availability (
@@ -1082,7 +1337,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn frozen_generation_survives_rotation_while_a_new_snapshot_observes_drift() {
     let dir = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -1109,11 +1364,12 @@ async fn frozen_generation_survives_rotation_while_a_new_snapshot_observes_drift
         .expect("same read snapshot retains generation one");
     let fresh_read = runtime.retrieval_read_for_test().await;
     let fresh_adapter = fresh_read.adapter();
-    assert!(
-        fresh_adapter
-            .validate_snapshot(&frozen_snapshot)
-            .await
-            .is_err()
+    assert_eq!(
+        fresh_adapter.validate_snapshot(&frozen_snapshot).await,
+        Err(TemporalPortError::Read {
+            operation: "validate temporal read snapshot",
+            message: "snapshot does not match the active frozen generation".to_owned(),
+        })
     );
     fresh_adapter
         .validate_snapshot(&snapshot(2))
@@ -1129,9 +1385,18 @@ fn candidate_and_record_cursors_are_stable_and_bounded() {
         session_id: "session-b".to_string(),
         stable_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .to_string(),
+        strict_lexical_matched: false,
     };
     let encoded = candidate.encode(256).unwrap();
     assert_eq!(CandidateCursor::decode(Some(&encoded)).unwrap(), candidate);
+    // The ladder state a continuation carries survives the round trip, so a page
+    // that resumes on the relaxation tier still knows the strict tier answered.
+    let answered = CandidateCursor {
+        strict_lexical_matched: true,
+        ..candidate
+    };
+    let encoded = answered.encode(256).unwrap();
+    assert_eq!(CandidateCursor::decode(Some(&encoded)).unwrap(), answered);
 
     let record = RecordCursor {
         candidate: 99_999,
@@ -1141,10 +1406,16 @@ fn candidate_and_record_cursors_are_stable_and_bounded() {
     };
     let encoded = record.encode(256).unwrap();
     assert_eq!(RecordCursor::decode(Some(&encoded)).unwrap(), record);
-    assert!(record.encode(8).is_err());
+    assert_eq!(
+        record.encode(8),
+        Err(TemporalPortError::BudgetExceeded {
+            resource: "continuation key bytes",
+            accounting: None,
+        })
+    );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn duplicate_frozen_generation_rows_fail_closed_as_not_unique() {
     let dir = tempdir().expect("temporary directory");
     let conn = TestConnection::open(&dir.path().join("ambiguous-generation.db"));
@@ -1172,7 +1443,7 @@ async fn duplicate_frozen_generation_rows_fail_closed_as_not_unique() {
     .await
     .expect("ambiguous generation fixture");
 
-    let adapter = GlobalDbTemporalReadPort::new(&conn);
+    let adapter = SessionTemporalReadPort::new(&conn);
     let error = adapter
         .validate_snapshot(&snapshot(1))
         .await
@@ -1232,7 +1503,7 @@ fn mode_sql_is_shaped_without_optional_or_fallback_predicates() {
     assert_eq!(forensic.summary_predicate, "1 = 1");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -1334,6 +1605,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(128),
         SqlValue::Integer(1_024),
         SqlValue::Integer(10),
+        SqlValue::Text("current".to_string()),
     ];
     assert_eq!(
         read.text_column(SUMMARY_CANDIDATE_QUERY, summary_params.clone(), 0)
@@ -1380,6 +1652,65 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         "root retrieval must execute one live FTS store query: {root_fts_plan:?}"
     );
 
+    let root_exact_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text("needle candidate".to_string()),
+        SqlValue::Text(fts_phrase("needle candidate")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap")),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(ROOT_EXACT_CANDIDATE_QUERY, root_exact_params.clone(), 0)
+            .await,
+        ["occurrence-plan-inside"],
+        "root exact retrieval must exclude the populated out-of-root session"
+    );
+    let root_exact_plan = read
+        .explain_query_plan(ROOT_EXACT_CANDIDATE_QUERY, root_exact_params.clone())
+        .await;
+    assert!(
+        root_exact_plan.iter().any(|detail| {
+            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "root exact retrieval must prefilter through the live FTS operator: {root_exact_plan:?}"
+    );
+
+    // Every retained snippet contains a space, so `instr` alone would admit all
+    // three in-root rows. The literal has no FTS token, so the maintained index
+    // admits nothing: the exact channel is a measured empty set that never
+    // scans retained text and never refuses.
+    let mut root_exact_tokenless_params = root_exact_params;
+    root_exact_tokenless_params[2] = SqlValue::Text(" ".to_string());
+    root_exact_tokenless_params[3] = SqlValue::Text(fts_phrase(" "));
+    assert_eq!(
+        read.text_column(
+            ROOT_EXACT_CANDIDATE_QUERY,
+            root_exact_tokenless_params.clone(),
+            0
+        )
+        .await,
+        Vec::<String>::new(),
+        "a literal without an indexable token must be an empty exact channel"
+    );
+    let root_exact_tokenless_plan = read
+        .explain_query_plan(ROOT_EXACT_CANDIDATE_QUERY, root_exact_tokenless_params)
+        .await;
+    assert!(
+        root_exact_tokenless_plan.iter().any(|detail| {
+            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "a token-free exact literal must still be admitted through the FTS operator: {root_exact_tokenless_plan:?}"
+    );
+
     let root_time_params = vec![
         SqlValue::Text("user".to_string()),
         SqlValue::Null,
@@ -1415,6 +1746,46 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
             .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
         "root time retrieval must use the live root generation-order index: {root_time_plan:?}"
     );
+
+    let root_scope_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Null,
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(ROOT_SCOPE_CANDIDATE_QUERY, root_scope_params.clone(), 0)
+            .await,
+        [
+            "occurrence-plan-inside",
+            "occurrence-plan-inside-old",
+            "occurrence-plan-inside-last"
+        ],
+        "root scope browse must return every in-root occurrence in keyset order \
+         and exclude the populated out-of-root session"
+    );
+    let root_scope_plan = read
+        .explain_query_plan(ROOT_SCOPE_CANDIDATE_QUERY, root_scope_params)
+        .await;
+    assert!(
+        root_scope_plan
+            .iter()
+            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
+        "root scope browse must use the live root generation-order index: {root_scope_plan:?}"
+    );
+    assert!(
+        root_scope_plan
+            .iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+        "root scope browse must take its leading keyset order from the index: {root_scope_plan:?}"
+    );
     // `ORDER BY knowledge_at DESC, session_id, occurrence_id` mixes directions
     // against an all-ascending index, so SQLite can only walk the leading
     // keyset column from the index and must sort the trailing terms inside each
@@ -1429,7 +1800,253 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     );
 }
 
-#[tokio::test]
+const LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY: &str = "
+    SELECT occurrence.occurrence_id, occurrence.retrieval_anchor_id,
+           occurrence.knowledge_at, occurrence.message_id, occurrence.turn_id,
+           occurrence.session_id, occurrence.role, authority_session.provider,
+           frozen.generation
+    FROM session_temporal_generations frozen
+    JOIN session_occurrences occurrence
+      ON occurrence.session_id = frozen.session_id
+     AND +occurrence.generation <= frozen.generation
+    JOIN retrieval_anchors authority_anchor
+      ON authority_anchor.anchor_id = occurrence.retrieval_anchor_id
+    JOIN sessions authority_session
+      ON authority_session.session_id = occurrence.session_id
+     AND authority_session.provider = occurrence.source_provider
+     AND authority_session.project_key = ?1
+    WHERE frozen.state = 'active'
+      AND (?2 IS NULL OR authority_session.provider = ?2)
+      AND (
+          (authority_session.project_key = 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+          OR
+          (authority_session.project_key <> 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+           AND json_extract(authority_anchor.owner_json, '$.project_id')
+               = authority_session.project_key)
+      )
+      AND (
+          occurrence.knowledge_at < ?3
+          OR (
+              occurrence.knowledge_at = ?3
+              AND (
+                  occurrence.session_id > ?4
+                  OR (
+                      occurrence.session_id = ?4
+                      AND occurrence.occurrence_id > ?5
+                  )
+              )
+          )
+      )
+      AND length(CAST(occurrence.occurrence_id AS BLOB)) <= ?6
+      AND length(CAST(occurrence.retrieval_anchor_id AS BLOB)) <= ?7
+      AND length(CAST(COALESCE(occurrence.message_id, '') AS BLOB)) <= ?8
+      AND length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB)) <= ?8
+      AND length(CAST(occurrence.session_id AS BLOB)) <= ?8
+      AND length(CAST(occurrence.role AS BLOB)) <= ?8
+      AND length(CAST(authority_session.provider AS BLOB)) <= ?8
+      AND length(CAST(occurrence.occurrence_id AS BLOB))
+          + length(CAST(occurrence.retrieval_anchor_id AS BLOB))
+          + length(CAST(COALESCE(occurrence.message_id, '') AS BLOB))
+          + length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB))
+          + length(CAST(occurrence.session_id AS BLOB))
+          + length(CAST(occurrence.role AS BLOB))
+          + length(CAST(authority_session.provider AS BLOB)) <= ?9
+      AND length(CAST(occurrence.occurrence_id AS BLOB))
+          + length(CAST(occurrence.session_id AS BLOB)) + 9 <= ?10
+    ORDER BY occurrence.knowledge_at DESC, occurrence.session_id,
+             occurrence.occurrence_id
+    LIMIT ?11";
+
+#[asupersync::test]
+async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() {
+    const OCCURRENCE_COUNT: usize = 50_000;
+    const SESSION_COUNT: usize = 2_703;
+    const PAGE: i64 = 64;
+    const CHUNK: usize = 10_000;
+
+    let directory = tempdir().expect("temporary directory");
+    let database_path = directory.path().join("sessions.db");
+    let (_database, _owner) = open_registered_test_database_fixture(
+        &database_path,
+        TestDatabaseRuntimeScope::ProfileSessions,
+    )
+    .await
+    .expect("registered schema");
+    let connection = TestConnection::open(&database_path);
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = ON;
+             INSERT INTO sanitization_receipts (
+                receipt_id, sanitizer_version, payload_digest, receipt_json
+             ) VALUES ('root-scope-receipt', 'test', 'root-scope-digest', '{}');
+             INSERT INTO observations (
+                observation_id, payload_digest, receipt_id, observation_json,
+                committed_cursor_json
+             ) VALUES (
+                'root-scope-observation',
+                'root-scope-digest',
+                'root-scope-receipt',
+                '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}',
+                '{}'
+             );
+             INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES (
+                'root-scope-anchor', '{}', '{\"kind\":\"profile\"}', 'test'
+             );
+             WITH RECURSIVE sequence(value) AS (
+                VALUES(0)
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < 2702
+             )
+             INSERT INTO sessions (provider, session_id, project_key, project_path)
+             SELECT 'claude', printf('root-scope-%04d', value), 'user', '/root-scope'
+             FROM sequence;
+             INSERT INTO session_temporal_generations (
+                session_id, generation, state, frozen_watermarks_json, created_at
+             )
+             SELECT session_id, 1, 'building', '{}', 0 FROM sessions;
+             UPDATE session_temporal_generations SET state = 'ready', ready_at = 1;
+             UPDATE session_temporal_generations SET state = 'active', activated_at = 2;",
+        )
+        .await
+        .expect("root-scope identity fixture");
+
+    let seed = connection
+        .authorized_long_lease_transaction()
+        .await
+        .expect("long-lease seed");
+    for start in (0..OCCURRENCE_COUNT).step_by(CHUNK) {
+        let end = start + CHUNK - 1;
+        seed.execute_authority_revalidated_batch(&format!(
+            "WITH RECURSIVE sequence(value) AS (
+                VALUES({start})
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < {end}
+             )
+             INSERT INTO session_occurrences (
+                session_id, generation, occurrence_id, source_observation_id,
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, index_text
+             )
+             SELECT
+                printf('root-scope-%04d', value % {SESSION_COUNT}),
+                1,
+                printf('root-scope-%06d', value),
+                'root-scope-observation',
+                1,
+                'claude',
+                value,
+                'root-scope-anchor',
+                '[]',
+                'assistant',
+                value,
+                json_object('kind', 'unknown'),
+                '{{}}',
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                15,
+                'root scope occurrence'
+             FROM sequence;"
+        ))
+        .await
+        .expect("root-scope occurrence chunk");
+    }
+    seed.execute_authority_revalidated_batch("ANALYZE;")
+        .await
+        .expect("analyze root-scope fixture");
+    seed.commit().await.expect("commit root-scope fixture");
+
+    let params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Null,
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(PAGE),
+    ];
+    let mut explain_rows = connection
+        .query(
+            &format!("EXPLAIN QUERY PLAN {ROOT_SCOPE_CANDIDATE_QUERY}"),
+            params.clone(),
+        )
+        .await
+        .expect("root scope plan");
+    let mut repaired_plan = Vec::new();
+    while let Some(row) = explain_rows.next().await.expect("plan row") {
+        let detail: String = row.get(3).expect("plan detail");
+        repaired_plan.push(normalize_plan_detail(&detail));
+    }
+    assert!(
+        repaired_plan
+            .iter()
+            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
+        "large-history root scope must use the occurrence keyset index: {repaired_plan:?}"
+    );
+    assert!(
+        repaired_plan
+            .iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+        "large-history root scope must not materialize the project before LIMIT: {repaired_plan:?}"
+    );
+
+    let mut legacy_explain = connection
+        .query(
+            &format!("EXPLAIN QUERY PLAN {LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY}"),
+            params.clone(),
+        )
+        .await
+        .expect("legacy root scope plan");
+    let mut legacy_plan = Vec::new();
+    while let Some(row) = legacy_explain.next().await.expect("legacy plan row") {
+        let detail: String = row.get(3).expect("legacy plan detail");
+        legacy_plan.push(normalize_plan_detail(&detail));
+    }
+    assert!(
+        legacy_plan
+            .iter()
+            .any(|detail| detail.contains("USE TEMP B-TREE FOR ORDER BY"))
+            || !legacy_plan
+                .iter()
+                .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
+        "the generation-first browse is the measured full-window sort: {legacy_plan:?}"
+    );
+
+    let mut rows = connection
+        .query(LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY, params.clone())
+        .await
+        .expect("legacy root scope page");
+    let mut legacy = Vec::new();
+    while let Some(row) = rows.next().await.expect("legacy row") {
+        legacy.push(row.get::<String>(0).expect("occurrence id"));
+    }
+
+    let mut rows = connection
+        .query(ROOT_SCOPE_CANDIDATE_QUERY, params)
+        .await
+        .expect("repaired root scope page");
+    let mut repaired = Vec::new();
+    while let Some(row) = rows.next().await.expect("repaired row") {
+        repaired.push(row.get::<String>(0).expect("occurrence id"));
+    }
+    assert_eq!(repaired.len(), PAGE as usize, "{repaired:?}");
+    assert_eq!(
+        repaired.first().map(String::as_str),
+        Some("root-scope-049999"),
+        "newest occurrence must be first: {repaired:?}"
+    );
+    assert_eq!(legacy, repaired, "both shapes must return the same page");
+}
+
+#[asupersync::test]
 async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -1450,6 +2067,7 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Integer(1_024),
         SqlValue::Integer(128),
         SqlValue::Integer(10),
+        SqlValue::Text("current".to_string()),
     ];
     assert_eq!(
         read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_params.clone(), 0)
@@ -1495,6 +2113,7 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Integer(1_024),
         SqlValue::Integer(128),
         SqlValue::Integer(10),
+        SqlValue::Text("current".to_string()),
     ];
     assert!(
         read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_missing_phrase, 0)
@@ -1534,10 +2153,12 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         "derived retrieval must search members through the live occurrence FTS operator: {derived_plan:?}"
     );
     assert!(
-        derived_plan
-            .iter()
-            .any(|detail| detail.contains("IDX_SESSION_DERIVED_EVIDENCE_SCOPE_ORDER")),
-        "derived retrieval must use the live evidence scope index: {derived_plan:?}"
+        derived_plan.iter().any(|detail| {
+            detail
+                .contains("SEARCH EVIDENCE USING INDEX SQLITE_AUTOINDEX_SESSION_DERIVED_EVIDENCE_1")
+                && detail.contains("SESSION_ID=? AND EVIDENCE_KIND=?")
+        }),
+        "derived retrieval must search evidence by its session and kind key: {derived_plan:?}"
     );
     let derived_wrong_provider = vec![
         SqlValue::Text("session-plan-inside".to_string()),
@@ -1685,7 +2306,7 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn exact_candidate_matches_embedded_literal_and_returns_utf8_byte_range() {
     let dir = tempdir().expect("temporary directory");
     let conn = TestConnection::open(&dir.path().join("exact-range.db"));
@@ -1779,7 +2400,7 @@ async fn exact_candidate_matches_embedded_literal_and_returns_utf8_byte_range() 
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_item_cap() {
     let dir = tempdir().expect("temporary directory");
     let conn = TestConnection::open(&dir.path().join("exact-large-source.db"));
@@ -1814,6 +2435,11 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
              snippet_text TEXT NOT NULL,
              PRIMARY KEY(session_id, generation, occurrence_id)
          );
+         CREATE VIRTUAL TABLE session_occurrences_fts USING fts5(
+             snippet_text,
+             content = 'session_occurrences',
+             content_rowid = 'rowid'
+         );
          INSERT INTO sessions VALUES ('claude', 'session-large', 'user');
          INSERT INTO retrieval_anchors VALUES (
              'anchor-large',
@@ -1827,7 +2453,7 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     .expect("large exact fixture schema");
     let literal = "exact-tail-🚨";
     let prefix_bytes = 768 * 1024;
-    let snippet = format!("{}{literal}", "x".repeat(prefix_bytes));
+    let snippet = format!("{} {literal}", "x".repeat(prefix_bytes));
     assert!(snippet.len() < MAX_OBSERVATION_RECORD_BYTES);
     conn.execute(
         "INSERT INTO session_occurrences VALUES (
@@ -1851,6 +2477,11 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     )
     .await
     .expect("oversized hostile occurrence");
+    conn.execute_batch(
+        "INSERT INTO session_occurrences_fts(session_occurrences_fts) VALUES('rebuild');",
+    )
+    .await
+    .expect("rebuild exact candidate FTS fixture");
 
     let candidate_item_bytes = 256 * 1024;
     let source_bytes = i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap");
@@ -1892,6 +2523,7 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
                 SqlValue::Text("user".to_string()),
                 SqlValue::Null,
                 SqlValue::Text(literal.to_string()),
+                SqlValue::Text(fts_phrase(literal)),
                 SqlValue::Integer(i64::MAX),
                 SqlValue::Text(String::new()),
                 SqlValue::Text(String::new()),
@@ -1918,7 +2550,7 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn root_record_authority_binds_the_candidate_source_provider() {
     let dir = tempdir().unwrap();
     let conn = TestConnection::open(&dir.path().join("root-record-authority.db"));
@@ -1976,7 +2608,7 @@ async fn root_record_authority_binds_the_candidate_source_provider() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn profile_root_authorizes_legacy_claude_anchor_without_project_scope() {
     let dir = tempdir().unwrap();
     let conn = TestConnection::open(&dir.path().join("profile-root-authority.db"));
@@ -2035,7 +2667,7 @@ async fn profile_root_authorizes_legacy_claude_anchor_without_project_scope() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn provider_filter_separates_same_session_and_none_reads_all_providers() {
     let dir = tempdir().unwrap();
     let conn = TestConnection::open(&dir.path().join("provider-scope.db"));
@@ -2108,7 +2740,7 @@ async fn provider_filter_separates_same_session_and_none_reads_all_providers() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn root_pagination_restart_provider_filter_and_session_parity_are_stable() {
     let dir = tempdir().unwrap();
     let conn = TestConnection::open(&dir.path().join("root-pagination.db"));
@@ -2265,7 +2897,7 @@ async fn root_pagination_restart_provider_filter_and_session_parity_are_stable()
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn root_record_hydration_rejects_cross_session_copy_and_assertion_traps() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2290,7 +2922,7 @@ async fn root_record_hydration_rejects_cross_session_copy_and_assertion_traps() 
     assert!(kinds_b.contains(&"assertion".to_string()));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn current_record_hydration_retains_non_superseding_assertions_for_resolution() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2313,8 +2945,8 @@ async fn current_record_hydration_retains_non_superseding_assertions_for_resolut
     );
 }
 
-#[tokio::test]
-async fn derived_candidate_materializes_members_with_canonical_evidence_linkage() {
+#[asupersync::test]
+async fn derived_candidate_materializes_boundaries_with_canonical_evidence_linkage() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
@@ -2329,7 +2961,7 @@ async fn derived_candidate_materializes_members_with_canonical_evidence_linkage(
     let records = read.records(&snapshot, candidate, &record_request()).await;
     assert_eq!(records.len(), 1);
     let TemporalRecord::Occurrence(member) = &records[0] else {
-        panic!("derived candidate must materialize its member occurrence");
+        panic!("derived candidate must materialize its boundary occurrence");
     };
     assert_eq!(
         member.anchor_id,
@@ -2349,7 +2981,131 @@ async fn derived_candidate_materializes_members_with_canonical_evidence_linkage(
     );
 }
 
-#[tokio::test]
+/// A group's cost must follow what the ranking needs from it, its bounds, not
+/// how many messages happen to sit inside it. Charging every member against the
+/// record budget is what let one wide span refuse a whole query.
+#[asupersync::test]
+async fn derived_candidate_reads_only_its_boundary_occurrences() {
+    async fn boundary_records(members: usize) -> Vec<TemporalRecord> {
+        let dir = tempdir().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        runtime
+            .seed_wide_span_record_fixture_for_test(members)
+            .await;
+        let read = runtime.retrieval_read_for_test().await;
+        let snapshot = scoped_snapshot_with_mode(1, None, TemporalModeV1::Forensic);
+        let mut candidate = candidate_for_anchor("derived-span-anchor");
+        candidate.channel = CandidateChannel::Span;
+        candidate.retriever_record_id = "span-evidence-id".to_string();
+        read.records(&snapshot, candidate, &record_request()).await
+    }
+
+    let narrow = boundary_records(4).await;
+    let wide = boundary_records(40).await;
+
+    assert_eq!(
+        narrow.len(),
+        2,
+        "a span contributes its first and last occurrence, not its membership"
+    );
+    assert_eq!(
+        wide.len(),
+        narrow.len(),
+        "a ten-times wider span must not read ten times the records"
+    );
+    let anchors = narrow
+        .iter()
+        .map(|record| {
+            let TemporalRecord::Occurrence(occurrence) = record else {
+                panic!("a span's boundary records are occurrences");
+            };
+            assert!(
+                occurrence
+                    .evidence
+                    .supporting_anchor_ids
+                    .contains(&RetrievalAnchorId::new("derived-span-anchor").unwrap()),
+                "a boundary record keeps the group it bounds as provenance"
+            );
+            occurrence.anchor_id.clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        anchors,
+        vec![
+            RetrievalAnchorId::new("member-anchor-0").unwrap(),
+            RetrievalAnchorId::new("member-anchor-3").unwrap(),
+        ]
+    );
+}
+
+/// The interior of a group is reachable, just not through the group: a member
+/// that matches on its own arrives on its own channel.
+#[asupersync::test]
+async fn interior_span_member_is_read_through_its_own_candidate() {
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_wide_span_record_fixture_for_test(4).await;
+    let read = runtime.retrieval_read_for_test().await;
+    let snapshot = scoped_snapshot_with_mode(1, None, TemporalModeV1::Forensic);
+    let mut candidate = candidate_for_anchor("member-anchor-2");
+    candidate.channel = CandidateChannel::Lexical;
+
+    let records = read.records(&snapshot, candidate, &record_request()).await;
+
+    assert_eq!(records.len(), 1);
+    let TemporalRecord::Occurrence(interior) = &records[0] else {
+        panic!("a lexical candidate resolves to its occurrence");
+    };
+    assert_eq!(
+        interior.anchor_id,
+        RetrievalAnchorId::new("member-anchor-2").unwrap()
+    );
+}
+
+/// One occurrence is one record. When a group boundary also matched on its own,
+/// the two channels must not each charge the budget for the same row.
+#[asupersync::test]
+async fn a_boundary_that_also_matches_directly_is_charged_once() {
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_wide_span_record_fixture_for_test(4).await;
+    let read = runtime.retrieval_read_for_test().await;
+    let snapshot = scoped_snapshot_with_mode(1, None, TemporalModeV1::Forensic);
+    let mut group = candidate_for_anchor("derived-span-anchor");
+    group.channel = CandidateChannel::Span;
+    group.retriever_record_id = "span-evidence-id".to_string();
+    let mut direct = candidate_for_anchor("member-anchor-0");
+    direct.channel = CandidateChannel::Lexical;
+
+    let records = read
+        .records_for_candidates(&snapshot, vec![direct, group], &record_request())
+        .await;
+
+    let occurrences = records
+        .iter()
+        .filter_map(|record| match record {
+            TemporalRecord::Occurrence(occurrence) => Some(occurrence.occurrence_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut deduplicated = occurrences.clone();
+    deduplicated.sort();
+    deduplicated.dedup();
+    assert_eq!(
+        occurrences.len(),
+        deduplicated.len(),
+        "the same occurrence must not be charged twice: {occurrences:?}"
+    );
+    assert_eq!(occurrences.len(), 2, "boundary-zero, boundary-three");
+}
+
+#[asupersync::test]
 async fn oversized_evidence_json_never_reaches_occurrence_rows() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2368,7 +3124,7 @@ async fn oversized_evidence_json_never_reaches_occurrence_rows() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
     let total = 100_000usize;
     let start = 71_111usize;
@@ -2455,9 +3211,14 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
     // is that no branch falls back to scanning `session_occurrences`: every
     // candidate row is reached by an index seek.
     assert!(
-        plan.iter().all(
-            |detail| !detail.contains("SCAN O") && !detail.contains("SCAN SESSION_OCCURRENCES")
-        ),
+        plan.iter().all(|detail| {
+            let words = detail.split_whitespace().collect::<Vec<_>>();
+            // Whole-word, because the plan also names derived aliases that merely
+            // start with `O`; a substring test would read `SCAN OC` as `SCAN O`.
+            !words
+                .windows(2)
+                .any(|pair| pair[0] == "SCAN" && matches!(pair[1], "O" | "SESSION_OCCURRENCES"))
+        }),
         "record hydration must index-seek every candidate occurrence: {plan:?}"
     );
 
@@ -2494,6 +3255,13 @@ fn fts_values_are_bound_as_literal_phrases() {
 #[test]
 fn iso_day_bounds_are_micros_and_half_open() {
     let (start, end) = iso_day_bounds("2026-07-18").unwrap();
+    assert_eq!(start, 1_784_332_800_000_000);
     assert_eq!(end - start, 86_400_000_000);
-    assert!(iso_day_bounds("not-a-date").is_err());
+    assert_eq!(
+        iso_day_bounds("not-a-date"),
+        Err(TemporalPortError::Read {
+            operation: CANDIDATE_OPERATION,
+            message: "invalid ISO date candidate".to_owned(),
+        })
+    );
 }

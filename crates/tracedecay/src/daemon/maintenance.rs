@@ -1,1252 +1,402 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::future::Future;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(any(feature = "hotpath", test))]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, Notify};
-use tokio::task::JoinHandle;
-use tracedecay_application::storage::{
-    StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1, StoreKeyV1,
-    StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthBaselinePendingV1, TableGrowthSampleV1,
-    TableGrowthTelemetryReadV1, TableNameV1,
+use tokio::sync::Mutex;
+use tracedecay_code_index::parallelism::{
+    collect_idle_installed_worker_heaps, collect_installed_worker_heaps_when_idle,
 };
-use tracedecay_application::{
-    ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-    Deadline, DisclosureClass, RequestAdmission, RequestContext, ResolvedScope, now_micros,
+use tracedecay_code_index_retention::code_index_generations::code_index_store_root;
+use tracedecay_maintenance::clock::now_secs_i64;
+use tracedecay_maintenance::compaction_receipt::record_live_compaction_outcome;
+use tracedecay_maintenance::generation::{
+    run_project_generation_maintenance, run_registered_project_generation_maintenance,
 };
-use tracedecay_domain::{ManifestDigest, UtcMicros};
+use tracedecay_maintenance::lease::ProjectStoreMaintenanceLeaseV1;
+use tracedecay_maintenance::loop_run::{MaintenanceWake, run_maintenance_loop};
+use tracedecay_maintenance::store_maintenance::RegisteredProjectStoreV1;
+use tracedecay_maintenance::telemetry::{
+    StoreFileIdentityStateV1, StoreTelemetrySamplingOutcome, StoreTelemetrySamplingRegistry,
+};
+use tracedecay_maintenance::tick::{
+    MaintenanceContinuation, MaintenanceTickOutcome, cursor_after_attempted_units,
+    select_store_window,
+};
+use tracedecay_runtime_core::storage::{RESPONSE_HANDLES_DIRECTORY, profile_sharded_data_root};
 
 use super::branch_admin::StoreAdministration;
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
-
-pub(super) mod generation;
-
-const COLD_STORE_PAGE_LIMIT: usize = 8;
-/// Upper bound on mounted session databases + project graphs a single
-/// maintenance tick may process. Each store gets one writer admission, so an
-/// unbounded loop over every mounted project×branch cannot monopolize the lane;
-/// this budget caps total work and a round-robin cursor (`store_cursor`)
-/// guarantees every store is still reached across ticks.
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
+use tracedecay_domain::process_heap::request_idle_thread_collection_v1;
+use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, TimeoutError};
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
-const CHECKPOINT_DIRECTORY: &str = "maintenance";
-const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
-const STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
-const STORAGE_TELEMETRY_CAPABILITY: &str = "capability.application.storage.telemetry";
-const STORAGE_TELEMETRY_USE_CASE: &str = "use-case.application.storage.telemetry.read";
-#[cfg(any(feature = "hotpath", test))]
-static MAINTENANCE_FUTURES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+const REGISTERED_PROJECT_PAGE_LIMIT: usize = 64;
 
-#[derive(Clone, Copy)]
-struct TableWatermark {
-    bytes: StorageByteSizeV1,
-    observed_at: UtcMicros,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum TableGrowthObservation {
-    Preview,
-    Advance,
-}
-
-/// Store telemetry bound to the database's guarded read capability.
+/// Every registered project whose profile shard exists on disk, keyed for the
+/// tick's work list.
 ///
-/// The runtime-core handle retains the exact database client that issued it;
-/// this daemon adapter must not unwrap that guard into a raw SQL handle just to
-/// retain the maintenance-owned table-growth baseline.
-#[derive(Clone)]
-pub(super) struct GuardedStoreTelemetryPort {
-    handle: DatabaseStorageTelemetryHandle,
-    store: StoreKeyV1,
-    scope: ResolvedScope,
-    reader_wait: Duration,
-    table_watermarks: Arc<std::sync::Mutex<Option<BTreeMap<TableNameV1, TableWatermark>>>>,
-}
-
-impl GuardedStoreTelemetryPort {
-    fn new(
-        handle: DatabaseStorageTelemetryHandle,
-        store: StoreKeyV1,
-        scope: ResolvedScope,
-        reader_wait: Duration,
-    ) -> Self {
-        Self {
-            handle,
-            store,
-            scope,
-            reader_wait,
-            table_watermarks: Arc::new(std::sync::Mutex::new(None)),
-        }
-    }
-
-    fn admits(&self, context: &RequestContext, store: &StoreKeyV1) -> bool {
-        context.validate().is_ok()
-            && context.scope() == &self.scope
-            && store == &self.store
-            && context.admission_at(now_micros()) == RequestAdmission::Admitted
-    }
-
-    fn for_scope(&self, scope: ResolvedScope) -> Self {
-        Self {
-            handle: self.handle.clone(),
-            store: self.store.clone(),
-            scope,
-            reader_wait: self.reader_wait,
-            table_watermarks: Arc::clone(&self.table_watermarks),
-        }
-    }
-
-    fn rebind(&self, handle: DatabaseStorageTelemetryHandle, scope: ResolvedScope) -> Self {
-        Self {
-            handle,
-            store: self.store.clone(),
-            scope,
-            reader_wait: self.reader_wait,
-            table_watermarks: Arc::clone(&self.table_watermarks),
-        }
-    }
-
-    pub(super) fn preview_table_growth<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        store: &'a StoreKeyV1,
-    ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
-        self.read_table_growth(context, store, TableGrowthObservation::Preview)
-    }
-
-    fn read_table_growth<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        store: &'a StoreKeyV1,
-        observation: TableGrowthObservation,
-    ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
-        Box::pin(async move {
-            if !self.admits(context, store) {
-                return TableGrowthTelemetryReadV1::Denied {
-                    store: store.clone(),
-                };
-            }
-            let Ok(current) = self
-                .handle
-                .table_size_telemetry(self.reader_wait, || telemetry_interruption(context))
-            else {
-                return TableGrowthTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                };
-            };
-            let observed_at = now_micros();
-            let mut current_tables = BTreeMap::new();
-            for sample in current {
-                let Ok(table) = TableNameV1::new(sample.table_name) else {
-                    return TableGrowthTelemetryReadV1::Unknown {
-                        store: store.clone(),
-                    };
-                };
-                current_tables.insert(table, StorageByteSizeV1(sample.bytes));
-            }
-            let mut watermarks = match self.table_watermarks.lock() {
-                Ok(watermarks) => watermarks,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            compare_table_growth(
-                store,
-                current_tables,
-                observed_at,
-                &mut watermarks,
-                observation,
-            )
-        })
-    }
-}
-
-impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
-    fn store_size<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        store: &'a StoreKeyV1,
-    ) -> StorageTelemetryFuture<'a, StorageTelemetryReadV1> {
-        Box::pin(async move {
-            if !self.admits(context, store) {
-                return StorageTelemetryReadV1::Denied {
-                    store: store.clone(),
-                };
-            }
-            let Ok(sample) = self
-                .handle
-                .store_size_telemetry(self.reader_wait, || telemetry_interruption(context))
-            else {
-                return StorageTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                };
-            };
-            let sample = StoreSizeSampleV1 {
-                store: store.clone(),
-                page_size_bytes: sample.page_size_bytes,
-                page_count: sample.page_count,
-                freelist_pages: sample.freelist_pages,
-                observed_at: now_micros(),
-            };
-            if sample.validate().is_err() {
-                return StorageTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                };
-            }
-            StorageTelemetryReadV1::Observed { sample }
-        })
-    }
-
-    fn table_growth<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        store: &'a StoreKeyV1,
-    ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
-        self.read_table_growth(context, store, TableGrowthObservation::Advance)
-    }
-}
-
-fn compare_table_growth(
-    store: &StoreKeyV1,
-    current_tables: BTreeMap<TableNameV1, StorageByteSizeV1>,
-    observed_at: UtcMicros,
-    watermarks: &mut Option<BTreeMap<TableNameV1, TableWatermark>>,
-    observation: TableGrowthObservation,
-) -> TableGrowthTelemetryReadV1 {
-    let Some(previous_watermarks) = watermarks.as_ref() else {
-        if observation == TableGrowthObservation::Preview {
-            return TableGrowthTelemetryReadV1::Unknown {
-                store: store.clone(),
-            };
-        }
-        let tables_observed = u64::try_from(current_tables.len()).unwrap_or(u64::MAX);
-        *watermarks = Some(
-            current_tables
-                .into_iter()
-                .map(|(table, bytes)| (table, TableWatermark { bytes, observed_at }))
-                .collect(),
-        );
-        return TableGrowthTelemetryReadV1::BaselineEstablished {
-            store: store.clone(),
-            observed_at,
-            tables_observed,
-        };
-    };
-
-    let mut growth = Vec::new();
-    let mut baseline_pending = Vec::new();
-    for (table, current_bytes) in &current_tables {
-        if let Some(previous) = previous_watermarks.get(table) {
-            let sample = TableGrowthSampleV1 {
-                store: store.clone(),
-                table: table.clone(),
-                previous_bytes: previous.bytes,
-                current_bytes: *current_bytes,
-                previous_observed_at: previous.observed_at,
-                current_observed_at: observed_at,
-            };
-            if sample.validate().is_err() {
-                return TableGrowthTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                };
-            }
-            growth.push(sample);
-        } else {
-            baseline_pending.push(TableGrowthBaselinePendingV1 {
-                store: store.clone(),
-                table: table.clone(),
-                current_bytes: *current_bytes,
-                observed_at,
-            });
-        }
-    }
-    if observation == TableGrowthObservation::Advance {
-        *watermarks = Some(
-            current_tables
-                .into_iter()
-                .map(|(table, bytes)| (table, TableWatermark { bytes, observed_at }))
-                .collect(),
-        );
-    }
-    TableGrowthTelemetryReadV1::Observed {
-        store: store.clone(),
-        samples: growth,
-        baseline_pending,
-    }
-}
-
-fn telemetry_interruption(
-    context: &RequestContext,
-) -> Option<tracedecay_store::UnavailableReasonV1> {
-    match context.admission_at(now_micros()) {
-        RequestAdmission::Admitted => None,
-        RequestAdmission::Cancelled => Some(tracedecay_store::UnavailableReasonV1::Cancelled),
-        RequestAdmission::TimedOut => Some(tracedecay_store::UnavailableReasonV1::DeadlineExceeded),
-    }
-}
-
-#[derive(Clone)]
-struct CachedStoreTelemetryPort {
-    scope: ResolvedScope,
-    store: StoreKeyV1,
-    port: GuardedStoreTelemetryPort,
-}
-
-/// Daemon-owned table-growth baseline authority shared by maintenance and
-/// read-only diagnostic projections.
-#[derive(Clone, Default)]
-pub(super) struct StoreTelemetrySamplingRegistry {
-    ports: Arc<std::sync::Mutex<HashMap<PathBuf, CachedStoreTelemetryPort>>>,
-    semantic_vector_retention:
-        Arc<std::sync::Mutex<HashMap<PathBuf, SemanticVectorRetentionProgressV1>>>,
-    graph_replay_release: Arc<std::sync::Mutex<HashMap<PathBuf, GraphReplayReleaseProgressV1>>>,
-    /// Last by-design retention operator line per lane and project. A
-    /// persistent unavailable-by-design condition logs once, then counts on
-    /// [`daemon.git.maintenance.retention_quiet_total`]; a state change or a
-    /// genuine anomaly emits again.
-    retention_operator_log: Arc<std::sync::Mutex<HashMap<RetentionOperatorLogKeyV1, String>>>,
-    loud_retention_this_tick: Arc<AtomicBool>,
-}
-
-/// Operator-log lane for the once-then-quiet retention pin.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) enum RetentionOperatorLogLaneV1 {
-    Semantic,
-    CodeGeneration,
-    Tick,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct RetentionOperatorLogKeyV1 {
-    lane: RetentionOperatorLogLaneV1,
-    scope: PathBuf,
-}
-
-/// Longest run of short-cadence ticks a project's graph-replay release
-/// reconcile may be skipped after consecutive unhealthy attempts. At the
-/// one-minute retry cadence this bounds post-recovery release latency to
-/// roughly eight minutes while a wedged runtime is probed a handful of times
-/// per hour instead of once per tick.
-const GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS: u32 = 8;
-
-/// Per-project reconcile state for the graph-replay release queue.
-///
-/// Release evidence is durable on disk, so none of this state guards
-/// correctness: the cursor makes the queue walk incremental across ticks
-/// (retained entries stop blocking later pages), and the backoff window
-/// converts "retry a known-wedged graph runtime every tick" into a bounded
-/// re-probe. Losing the state (restart, project retirement) only means the
-/// next attempt starts from the front of the queue immediately.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct GraphReplayReleaseProgressV1 {
-    consecutive_unhealthy: u32,
-    skip_remaining: u32,
-    cursor: Option<String>,
-}
-
-#[derive(Clone, Copy, Default)]
-struct StoreTelemetrySamplingOutcome {
-    observed: u64,
-    unavailable: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct SemanticVectorRetentionBacklogV1 {
-    pub(super) pending: u64,
-    pub(super) ready: u64,
-    pub(super) published: u64,
-    pub(super) cancelled: u64,
-}
-
-impl SemanticVectorRetentionBacklogV1 {
-    pub(super) fn from_receipt(
-        receipt: &tracedecay_store::SemanticVectorProjectCensusReceipt,
-    ) -> Self {
-        Self {
-            pending: receipt.counts.pending,
-            ready: receipt.counts.ready,
-            published: receipt.counts.published,
-            cancelled: receipt.counts.cancelled,
-        }
-    }
-}
-
-/// Result of recording one semantic-vector retention census page.
-///
-/// Rejected variants stay fail-closed: progress resets and no receipt is
-/// accepted. `CensusCountOverflow` is the only true u64-sum overflow
-/// (`receipt.validate()`); other rejects name the actual page defect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SemanticVectorRetentionCensusOutcome {
-    Accepted,
-    InconsistentPage,
-    IncompleteTerminalPage,
-    CensusCountOverflow,
-    ReceiptIdentityMismatch,
-}
-
-impl SemanticVectorRetentionCensusOutcome {
-    #[hotpath::skip]
-    pub(super) const fn as_failure_label(self) -> Option<&'static str> {
-        match self {
-            Self::Accepted => None,
-            Self::InconsistentPage => Some("inconsistent_page"),
-            Self::IncompleteTerminalPage => Some("incomplete_terminal_page"),
-            Self::CensusCountOverflow => Some("census_count_overflow"),
-            Self::ReceiptIdentityMismatch => Some("receipt_identity_mismatch"),
-        }
-    }
-}
-
-// `Observed` is matched by field-destructuring across several call sites
-// (doctor_kernel, git_watch/store_maintenance); boxing the receipt would
-// ripple through all of them for a cold, infrequently-read maintenance
-// status.
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum SemanticVectorRetentionReadV1 {
-    Unknown,
-    /// The semantic runtime is not seated for this daemon, so no vector
-    /// census will ever start, let alone complete. This is the ordinary
-    /// default-off state, distinct from [`Self::Unknown`] (a census that has
-    /// not run yet or was reset by a failure or mutation).
-    SemanticUnseated,
-    Scanning,
-    Observed {
-        receipt: tracedecay_store::SemanticVectorProjectCensusReceipt,
-    },
-}
-
-#[derive(Clone, Debug, Default)]
-struct SemanticVectorRetentionProgressV1 {
-    cursor: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
-    observed: Option<tracedecay_store::SemanticVectorProjectCensusReceipt>,
-    scanning: bool,
-    semantic_unseated: bool,
-}
-
-impl StoreTelemetrySamplingRegistry {
-    pub(super) fn register_port<E>(
-        &self,
-        path: &Path,
-        scope: &ResolvedScope,
-        open: impl FnOnce() -> Result<DatabaseStorageTelemetryHandle, E>,
-    ) -> bool {
-        let Some(store_name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
-            return false;
-        };
-        let Ok(store) = StoreKeyV1::new(store_name.to_owned()) else {
-            return false;
-        };
-        let Ok(handle) = open() else {
-            return false;
-        };
-        let mut ports = self
-            .ports
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(cached) = ports.get_mut(path) {
-            cached.scope = scope.clone();
-            cached.store = store;
-            cached.port = cached.port.rebind(handle, scope.clone());
-            return true;
-        }
-        let port = GuardedStoreTelemetryPort::new(
-            handle,
-            store.clone(),
-            scope.clone(),
-            Duration::from_secs(5),
-        );
-        ports.insert(
-            path.to_path_buf(),
-            CachedStoreTelemetryPort {
-                scope: scope.clone(),
-                store,
-                port,
-            },
-        );
-        true
-    }
-
-    pub(super) fn registered_port(
-        &self,
-        path: &Path,
-        scope: &ResolvedScope,
-    ) -> Option<(StoreKeyV1, GuardedStoreTelemetryPort)> {
-        let ports = self
-            .ports
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cached = ports.get(path)?;
-        Some((cached.store.clone(), cached.port.for_scope(scope.clone())))
-    }
-
-    /// Release the telemetry client's exact database lease before the owning
-    /// project store is retired. Other project and profile sampling ports stay
-    /// mounted.
-    pub(super) fn release_retained_handle(&self, path: &Path) {
-        self.ports
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(path);
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(path);
-        self.graph_replay_release
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(path);
-        self.retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|key, _| key.scope != path);
-    }
-
-    pub(super) fn release_retained_handles_for_shutdown(&self) {
-        self.ports
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.graph_replay_release
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.loud_retention_this_tick
-            .store(false, Ordering::Release);
-    }
-
-    pub(super) fn semantic_vector_retention_cursor(
-        &self,
-        project_root: &Path,
-    ) -> Option<tracedecay_store::SemanticVectorStageCensusCursor> {
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(project_root)
-            .and_then(|progress| progress.cursor.clone())
-    }
-
-    fn retain_project_maintenance_state(&self, active_projects: &BTreeSet<PathBuf>) {
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|project, _| active_projects.contains(project));
-        self.graph_replay_release
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|project, _| active_projects.contains(project));
-        self.retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|key, _| {
-                key.scope.as_os_str().is_empty() || active_projects.contains(&key.scope)
-            });
-    }
-
-    /// Whether this tick may attempt the graph-replay release reconcile.
-    ///
-    /// Consecutive unhealthy attempts open a bounded skip window; each denied
-    /// tick burns one unit of it, so a wedged runtime is re-probed after at
-    /// most [`GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS`] short-cadence ticks
-    /// rather than being polled (and timing out) on every one.
-    pub(super) fn graph_replay_release_attempt_admitted(&self, project_root: &Path) -> bool {
-        let mut progress = self
-            .graph_replay_release
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(state) = progress.get_mut(project_root) else {
-            return true;
-        };
-        if state.skip_remaining == 0 {
-            return true;
-        }
-        state.skip_remaining -= 1;
-        false
-    }
-
-    /// Record a release attempt the graph runtime could not serve (deadline,
-    /// unavailability, or a held replay pool) and widen the skip window:
-    /// 1, 2, 4, then capped at [`GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS`].
-    pub(super) fn record_graph_replay_release_unhealthy(&self, project_root: &Path) {
-        let mut progress = self
-            .graph_replay_release
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let state = progress.entry(project_root.to_path_buf()).or_default();
-        state.consecutive_unhealthy = state.consecutive_unhealthy.saturating_add(1);
-        state.skip_remaining = GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS
-            .min(1_u32 << state.consecutive_unhealthy.saturating_sub(1).min(3));
-    }
-
-    /// Record a served release attempt: close the skip window and advance the
-    /// durable-queue cursor to `continuation` (`None` restarts from the front
-    /// of the queue on the next attempt).
-    pub(super) fn record_graph_replay_release_served(
-        &self,
-        project_root: &Path,
-        continuation: Option<String>,
-    ) {
-        let mut progress = self
-            .graph_replay_release
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match progress.entry(project_root.to_path_buf()) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                if continuation.is_none() {
-                    entry.remove();
-                } else {
-                    *entry.get_mut() = GraphReplayReleaseProgressV1 {
-                        consecutive_unhealthy: 0,
-                        skip_remaining: 0,
-                        cursor: continuation,
-                    };
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                if continuation.is_some() {
-                    entry.insert(GraphReplayReleaseProgressV1 {
-                        consecutive_unhealthy: 0,
-                        skip_remaining: 0,
-                        cursor: continuation,
-                    });
-                }
-            }
-        }
-    }
-
-    /// The release-queue cursor recorded by the last served attempt.
-    pub(super) fn graph_replay_release_cursor(&self, project_root: &Path) -> Option<String> {
-        self.graph_replay_release
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(project_root)
-            .and_then(|state| state.cursor.clone())
-    }
-
-    /// Open a fresh per-tick loud-vs-quiet window before any retention pass
-    /// emits. A genuine anomaly during the tick keeps the tick line loud.
-    pub(super) fn begin_retention_tick_log_window(&self) {
-        self.loud_retention_this_tick
-            .store(false, Ordering::Release);
-    }
-
-    /// Mark that this tick emitted a genuine retention anomaly. By-design
-    /// unavailable pins stay quiet; this forces the tick summary to stay loud.
-    pub(super) fn mark_loud_retention_log(&self) {
-        self.loud_retention_this_tick.store(true, Ordering::Release);
-    }
-
-    /// Whether this (lane, scope, detail) pair should emit an operator line.
-    ///
-    /// Identical repeats of a persistent by-design condition increment
-    /// `daemon.git.maintenance.retention_quiet_total` and stay silent. A
-    /// changed detail logs again.
-    pub(super) fn admit_by_design_retention_log(
-        &self,
-        lane: RetentionOperatorLogLaneV1,
-        scope: &Path,
-        detail: &str,
-    ) -> bool {
-        let key = RetentionOperatorLogKeyV1 {
-            lane,
-            scope: scope.to_path_buf(),
-        };
-        let mut states = self
-            .retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if states.get(&key).map(String::as_str) == Some(detail) {
-            hotpath::gauge!("daemon.git.maintenance.retention_quiet_total").inc(1_u64);
-            return false;
-        }
-        states.insert(key, detail.to_owned());
-        true
-    }
-
-    pub(super) fn clear_by_design_retention_log(
-        &self,
-        lane: RetentionOperatorLogLaneV1,
-        scope: &Path,
-    ) {
-        let key = RetentionOperatorLogKeyV1 {
-            lane,
-            scope: scope.to_path_buf(),
-        };
-        self.retention_operator_log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&key);
-    }
-
-    /// Emit `retention_degraded` once per by-design state, or every time for
-    /// a genuine anomaly. Repeat by-design ticks count on the quiet gauge.
-    pub(super) fn emit_retention_degraded(
-        &self,
-        project_root: &Path,
-        pass: &'static str,
-        failure: &str,
-    ) {
-        let lane = match pass {
-            "semantic_vector_generations" => RetentionOperatorLogLaneV1::Semantic,
-            "code_generations" => RetentionOperatorLogLaneV1::CodeGeneration,
-            _ => {
-                self.mark_loud_retention_log();
-                super::log_daemon_event(
-                    "retention_degraded",
-                    &[("pass", pass.to_owned()), ("failure", failure.to_owned())],
-                );
-                return;
-            }
-        };
-        if retention_failure_is_by_design(lane, failure) {
-            if !self.admit_by_design_retention_log(lane, project_root, failure) {
-                return;
-            }
-        } else {
-            self.mark_loud_retention_log();
-            self.clear_by_design_retention_log(lane, project_root);
-        }
-        super::log_daemon_event(
-            "retention_degraded",
-            &[("pass", pass.to_owned()), ("failure", failure.to_owned())],
-        );
-    }
-
-    /// Whether the tick summary line should be written. Repeated by-design
-    /// `retry` ticks stay quiet; a loud anomaly or an outcome change logs.
-    pub(super) fn admit_retention_tick_log(&self, outcome: MaintenanceTickOutcome) -> bool {
-        let detail = format!("{}:{}", outcome.succeeded(), outcome.label());
-        let loud = self.loud_retention_this_tick.load(Ordering::Acquire);
-        if matches!(outcome, MaintenanceTickOutcome::Retry) && !loud {
-            return self.admit_by_design_retention_log(
-                RetentionOperatorLogLaneV1::Tick,
-                Path::new(""),
-                &detail,
-            );
-        }
-        self.clear_by_design_retention_log(RetentionOperatorLogLaneV1::Tick, Path::new(""));
-        true
-    }
-
-    pub(super) fn record_semantic_vector_retention_failure(&self, project_root: &Path) {
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                project_root.to_path_buf(),
-                SemanticVectorRetentionProgressV1::default(),
-            );
-    }
-
-    /// Pin the project's census read to [`SemanticVectorRetentionReadV1::SemanticUnseated`].
-    ///
-    /// The vector retention pass records this when the daemon has no seated
-    /// semantic runtime, so downstream passes can distinguish "no census will
-    /// ever exist" from a census that merely has not completed yet.
-    pub(super) fn record_semantic_vector_retention_unseated(&self, project_root: &Path) {
-        self.semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                project_root.to_path_buf(),
-                SemanticVectorRetentionProgressV1 {
-                    semantic_unseated: true,
-                    ..SemanticVectorRetentionProgressV1::default()
-                },
-            );
-    }
-
-    pub(super) fn record_semantic_vector_retention_census(
-        &self,
-        project_root: &Path,
-        census: &tracedecay_graph_db::SemanticVectorRetentionCensus,
-    ) -> SemanticVectorRetentionCensusOutcome {
-        use tracedecay_graph_db::SemanticVectorRetentionAction;
-
-        let mut retention = self
-            .semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let progress = retention.entry(project_root.to_path_buf()).or_default();
-        // A census page can only come from a seated semantic runtime.
-        progress.semantic_unseated = false;
-        if matches!(
-            census.action,
-            SemanticVectorRetentionAction::Retired(_)
-                | SemanticVectorRetentionAction::Finalized(_)
-                | SemanticVectorRetentionAction::CancelledRemoved(_)
-        ) {
-            // The returned page describes the pre-action state. Restart from
-            // the beginning on the next tick instead of publishing stale sums.
-            *progress = SemanticVectorRetentionProgressV1::default();
-            return SemanticVectorRetentionCensusOutcome::Accepted;
-        }
-        progress.cursor.clone_from(&census.continuation);
-        if census.continuation.is_some() {
-            if census.complete_receipt.is_some() {
-                *progress = SemanticVectorRetentionProgressV1::default();
-                return SemanticVectorRetentionCensusOutcome::InconsistentPage;
-            }
-            progress.scanning = true;
-            progress.observed = None;
-        } else {
-            let Some(receipt) = census.complete_receipt.clone() else {
-                *progress = SemanticVectorRetentionProgressV1::default();
-                return SemanticVectorRetentionCensusOutcome::IncompleteTerminalPage;
-            };
-            if receipt.validate().is_err() {
-                *progress = SemanticVectorRetentionProgressV1::default();
-                return SemanticVectorRetentionCensusOutcome::CensusCountOverflow;
-            }
-            if receipt.shard_id != census.shard_id || receipt.revision != census.revision {
-                *progress = SemanticVectorRetentionProgressV1::default();
-                return SemanticVectorRetentionCensusOutcome::ReceiptIdentityMismatch;
-            }
-            progress.observed = Some(receipt);
-            progress.cursor = None;
-            progress.scanning = false;
-        }
-        SemanticVectorRetentionCensusOutcome::Accepted
-    }
-
-    pub(super) fn semantic_vector_retention_read(
-        &self,
-        project_root: &Path,
-    ) -> SemanticVectorRetentionReadV1 {
-        let retention = self
-            .semantic_vector_retention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(progress) = retention.get(project_root) else {
-            return SemanticVectorRetentionReadV1::Unknown;
-        };
-        if progress.semantic_unseated {
-            return SemanticVectorRetentionReadV1::SemanticUnseated;
-        }
-        if progress.scanning {
-            return SemanticVectorRetentionReadV1::Scanning;
-        }
-        progress
-            .observed
-            .clone()
-            .map_or(SemanticVectorRetentionReadV1::Unknown, |receipt| {
-                SemanticVectorRetentionReadV1::Observed { receipt }
-            })
-    }
-
-    pub(super) fn semantic_vector_scope_collection_ready(&self, project_root: &Path) -> bool {
-        matches!(
-            self.semantic_vector_retention_read(project_root),
-            SemanticVectorRetentionReadV1::Observed {
-                receipt: tracedecay_store::SemanticVectorProjectCensusReceipt {
-                    counts: tracedecay_store::SemanticVectorStageCensusCounts {
-                        pending: 0,
-                        ready: 0,
-                        published: _,
-                        cancelled: 0,
-                    },
-                    ..
-                },
-            }
-        )
-    }
-
-    #[hotpath::skip]
-    async fn advance_registered(
-        &self,
-        active_paths: &BTreeSet<PathBuf>,
-        sampled_paths: &BTreeSet<PathBuf>,
-    ) -> StoreTelemetrySamplingOutcome {
-        let ports = {
-            let mut ports = self
-                .ports
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            ports.retain(|path, _| active_paths.contains(path));
-            ports
-                .iter()
-                .filter(|(path, _)| sampled_paths.contains(*path))
-                .map(|(_, cached)| cached.clone())
-                .collect::<Vec<_>>()
-        };
-        let mut outcome = StoreTelemetrySamplingOutcome::default();
-        for cached in ports {
-            let Ok(context) = storage_telemetry_request_context(cached.scope.clone()) else {
-                outcome.unavailable = outcome.unavailable.saturating_add(1);
-                continue;
-            };
-            match cached.port.table_growth(&context, &cached.store).await {
-                TableGrowthTelemetryReadV1::BaselineEstablished { .. }
-                | TableGrowthTelemetryReadV1::Observed { .. } => {
-                    outcome.observed = outcome.observed.saturating_add(1);
-                }
-                TableGrowthTelemetryReadV1::Unsupported { .. }
-                | TableGrowthTelemetryReadV1::Denied { .. }
-                | TableGrowthTelemetryReadV1::Unknown { .. } => {
-                    outcome.unavailable = outcome.unavailable.saturating_add(1);
-                }
-            }
-        }
-        outcome
-    }
-}
-
-/// Persistent by-design retention conditions log once, then count on gauges.
-/// Corrupt, reset, denied, and cancelled failures stay loud every attempt.
-pub(super) fn retention_failure_is_by_design(
-    lane: RetentionOperatorLogLaneV1,
-    failure: &str,
-) -> bool {
-    match lane {
-        RetentionOperatorLogLaneV1::Semantic => {
-            failure == "configuration_inventory_unavailable" || failure.starts_with("unavailable:")
-        }
-        RetentionOperatorLogLaneV1::CodeGeneration => {
-            failure.starts_with("vector_inventory_offline:")
-        }
-        RetentionOperatorLogLaneV1::Tick => false,
-    }
-}
-
-fn storage_telemetry_request_context(
-    scope: ResolvedScope,
-) -> Result<RequestContext, ApplicationContractError> {
-    let observed_at = now_micros();
-    let expires_at = tracedecay_domain::UtcMicros(
-        observed_at
-            .0
-            .saturating_add(STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS),
-    );
-    let request_id =
-        mint_global_request_id(GlobalRequestSurface::DaemonStorageTelemetry).map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "storage telemetry request identity",
-            }
-        })?;
-    let suffix = request_id.as_str().to_owned();
-    let actor = tracedecay_domain::ActorId::new("actor.tracedecay-daemon-storage-telemetry")?;
-    let capability =
-        tracedecay_tool_catalog::CapabilityId::new(STORAGE_TELEMETRY_CAPABILITY.to_owned())?;
-    let use_case = tracedecay_tool_catalog::UseCaseId::new(STORAGE_TELEMETRY_USE_CASE.to_owned())?;
-    let manifest: ManifestDigest = tracedecay_domain::canonical_sha256(&(
-        "tracedecay.daemon.storage-telemetry-grant.v1",
-        &scope,
-        &capability,
-        &use_case,
-        expires_at,
-    ))?;
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new(format!("grant.daemon.storage-telemetry.{suffix}"))?,
-        1,
-        manifest,
-        actor.clone(),
-        observed_at,
-        expires_at,
-        scope.clone(),
-        BTreeSet::from([capability]),
-        BTreeSet::from([use_case]),
-        DisclosureClass::Metadata,
-    )?;
-    RequestContext::new(
-        actor,
-        scope,
-        grant,
-        request_id,
-        Deadline::new(expires_at)?,
-        CancellationContext::active(format!("cancel.daemon.storage-telemetry.{suffix}"))?,
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::daemon) enum MaintenanceContinuation {
-    /// Resume the bounded semantic-vector phase over the normal graph window.
-    ///
-    /// This is deliberately phase-scoped rather than project-scoped: no
-    /// project identifier is retained in maintenance state, so mounted graphs
-    /// continue to receive the same bounded, round-robin service.
-    SemanticVectorRetention,
-    /// Resume bounded code-generation retention over the normal graph window:
-    /// a superseded-generation backlog or a partially drained graph-replay
-    /// release queue keeps the short cadence until it converges, instead of
-    /// parking multi-GiB debris behind the full maintenance interval.
-    ///
-    /// A continuation tick for this phase still runs the bounded
-    /// semantic-vector page first, so semantic convergence never starves
-    /// behind a code-generation drain.
-    CodeGenerationRetention,
-}
-
-impl MaintenanceContinuation {
-    /// Two phases asking to continue collapse to the one whose continuation
-    /// tick still advances both: a code-generation continuation re-runs the
-    /// bounded semantic-vector page on every tick, while a semantic-only
-    /// continuation would starve a pending code-generation backlog.
-    fn combine(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::CodeGenerationRetention, _) | (_, Self::CodeGenerationRetention) => {
-                Self::CodeGenerationRetention
-            }
-            (Self::SemanticVectorRetention, Self::SemanticVectorRetention) => {
-                Self::SemanticVectorRetention
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::daemon) enum MaintenanceTickOutcome {
-    Complete,
-    Continue(MaintenanceContinuation),
-    Retry,
-}
-
-impl MaintenanceTickOutcome {
-    pub(in crate::daemon) fn is_complete(self) -> bool {
-        self == Self::Complete
-    }
-
-    fn continuation(self) -> Option<MaintenanceContinuation> {
-        match self {
-            Self::Continue(continuation) => Some(continuation),
-            Self::Complete | Self::Retry => None,
-        }
-    }
-
-    fn succeeded(self) -> bool {
-        !matches!(self, Self::Retry)
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Complete => "complete",
-            Self::Continue(MaintenanceContinuation::SemanticVectorRetention) => {
-                "semantic_vector_progress"
-            }
-            Self::Continue(MaintenanceContinuation::CodeGenerationRetention) => {
-                "code_generation_progress"
-            }
-            Self::Retry => "retry",
-        }
-    }
-
-    /// A failure wins over ordinary bounded progress so the next short tick
-    /// retries the complete maintenance journey. The semantic census cursor is
-    /// durable in the graph registry, so that retry still resumes its progress
-    /// rather than losing the bounded semantic-vector work.
-    fn combine(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Retry, _) | (_, Self::Retry) => Self::Retry,
-            (Self::Continue(left), Self::Continue(right)) => Self::Continue(left.combine(right)),
-            (Self::Continue(continuation), Self::Complete)
-            | (Self::Complete, Self::Continue(continuation)) => Self::Continue(continuation),
-            (Self::Complete, Self::Complete) => Self::Complete,
-        }
-    }
-}
-
-/// The maintenance loop parks on `tokio::time::sleep_until`, so every deadline
-/// it derives must be measured on the same clock the timer wheel uses.
-/// `tokio::time::Instant` is the process monotonic clock in production and the
-/// runtime's virtual clock under a paused test runtime; mixing it with
-/// `std::time::Instant` would leave the due check permanently in the past
-/// relative to a fired timer.
-type CadenceInstant = tokio::time::Instant;
-
-#[derive(Debug)]
-pub(super) struct MaintenanceCadence {
-    interval: Duration,
-    retry_delay: Duration,
-    not_before: Option<CadenceInstant>,
-    in_flight: bool,
-}
-
-impl MaintenanceCadence {
-    pub(super) fn new(interval: Duration) -> Self {
-        Self {
-            interval,
-            retry_delay: interval.min(Duration::from_mins(1)),
-            not_before: None,
-            in_flight: false,
-        }
-    }
-
-    pub(super) fn reserve(&mut self, now: CadenceInstant) -> bool {
-        if self.in_flight || self.not_before.is_some_and(|not_before| now < not_before) {
-            return false;
-        }
-        self.in_flight = true;
-        true
-    }
-
-    fn finish(&mut self, now: CadenceInstant, outcome: MaintenanceTickOutcome) -> CadenceInstant {
-        self.in_flight = false;
-        let delay = match outcome {
-            MaintenanceTickOutcome::Complete => self.interval,
-            MaintenanceTickOutcome::Continue(_) | MaintenanceTickOutcome::Retry => self.retry_delay,
-        };
-        let deadline = now + delay;
-        self.not_before = Some(deadline);
-        deadline
-    }
-}
-
-struct MaintenanceLifecycleInstrumentation;
-
-impl MaintenanceLifecycleInstrumentation {
-    fn new() -> Self {
-        #[cfg(any(feature = "hotpath", test))]
-        {
-            let active = MAINTENANCE_FUTURES_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
-            hotpath::gauge!("daemon_maintenance_futures_active").set(active);
-        }
-        Self
-    }
-
-    fn record_outcome(&self, outcome: MaintenanceTickOutcome) {
-        match outcome {
-            MaintenanceTickOutcome::Complete => {
-                hotpath::gauge!("daemon_maintenance_outcome_complete").inc(1.0);
-            }
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::SemanticVectorRetention) => {
-                hotpath::gauge!("daemon_maintenance_outcome_semantic_vector_progress").inc(1.0);
-            }
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention) => {
-                hotpath::gauge!("daemon_maintenance_outcome_code_generation_progress").inc(1.0);
-            }
-            MaintenanceTickOutcome::Retry => {
-                hotpath::gauge!("daemon_maintenance_outcome_retry").inc(1.0);
-            }
-        }
-    }
-
-    fn record_cancellation(&self) {
-        hotpath::gauge!("daemon_maintenance_outcome_cancelled").inc(1.0);
-    }
-}
-
-impl Drop for MaintenanceLifecycleInstrumentation {
-    fn drop(&mut self) {
-        #[cfg(any(feature = "hotpath", test))]
-        {
-            let active = MAINTENANCE_FUTURES_ACTIVE
-                .fetch_sub(1, Ordering::SeqCst)
-                .saturating_sub(1);
-            hotpath::gauge!("daemon_maintenance_futures_active").set(active);
-        }
-    }
-}
-
-struct MaintenancePhaseInstrumentation {
-    continuation: Option<MaintenanceContinuation>,
-}
-
-impl MaintenancePhaseInstrumentation {
-    fn new(continuation: Option<MaintenanceContinuation>) -> Self {
-        match continuation {
-            Some(MaintenanceContinuation::SemanticVectorRetention) => {
-                hotpath::gauge!("daemon_maintenance_phase_semantic_vector_active").inc(1.0);
-            }
-            Some(MaintenanceContinuation::CodeGenerationRetention) => {
-                hotpath::gauge!("daemon_maintenance_phase_code_generation_active").inc(1.0);
-            }
-            None => {
-                hotpath::gauge!("daemon_maintenance_phase_full_tick_active").inc(1.0);
-            }
-        }
-        Self { continuation }
-    }
-}
-
-impl Drop for MaintenancePhaseInstrumentation {
-    fn drop(&mut self) {
-        match self.continuation {
-            Some(MaintenanceContinuation::SemanticVectorRetention) => {
-                hotpath::gauge!("daemon_maintenance_phase_semantic_vector_active").inc(-1.0);
-            }
-            Some(MaintenanceContinuation::CodeGenerationRetention) => {
-                hotpath::gauge!("daemon_maintenance_phase_code_generation_active").inc(-1.0);
-            }
-            None => {
-                hotpath::gauge!("daemon_maintenance_phase_full_tick_active").inc(-1.0);
-            }
-        }
-    }
-}
-
-async fn run_maintenance_loop<F, Fut>(
-    cancellation: &tracedecay_session_memory::context::CancellationToken,
-    wake: &Notify,
-    interval: Duration,
-    mut run_tick: F,
-) where
-    F: FnMut(Option<MaintenanceContinuation>) -> Fut,
-    Fut: Future<Output = MaintenanceTickOutcome>,
-{
-    let _lifecycle = MaintenanceLifecycleInstrumentation::new();
-    let mut cadence = MaintenanceCadence::new(interval);
-    let mut deadline = CadenceInstant::now() + cadence.retry_delay;
-    let mut continuation = None;
+/// ponytail: reads the whole project registry each full or continuation tick.
+/// The round-robin store window bounds the retention work, not this read; page
+/// the listing behind the store cursor if registries reach thousands of rows.
+async fn registered_project_stores(
+    profile_root: &Path,
+    profile_database: &tracedecay_global_db::RegisteredGlobalDb,
+) -> tracedecay_domain::errors::Result<Vec<(String, RegisteredProjectStoreV1)>> {
+    let mut stores = Vec::new();
+    let mut after: Option<String> = None;
     loop {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {
-                _lifecycle.record_cancellation();
+        let page = profile_database
+            .list_code_projects_after(after.as_deref(), REGISTERED_PROJECT_PAGE_LIMIT)
+            .await?;
+        let exhausted = page.len() < REGISTERED_PROJECT_PAGE_LIMIT;
+        after = page.last().map(|project| project.project_id.clone());
+        for project in page {
+            let data_root = profile_sharded_data_root(profile_root, &project.project_id);
+            if !data_root.is_dir() {
+                continue;
+            }
+            stores.push((
+                project.project_id,
+                RegisteredProjectStoreV1 {
+                    data_root,
+                    canonical_root: PathBuf::from(project.canonical_root),
+                },
+            ));
+        }
+        if exhausted {
+            return Ok(stores);
+        }
+    }
+}
+
+/// Holds every mounted store whose path no longer names the file this daemon
+/// opened in the reset-required state. The writer's file probe closes such a
+/// store's connections, but its mounted owners keep the closed runtime, so
+/// status and doctor name the restart that remounts them.
+fn record_lost_store_files(
+    sampling: &StoreTelemetrySamplingRegistry,
+    registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
+) {
+    for (path, state) in sampling.check_store_identities() {
+        if matches!(
+            state,
+            StoreFileIdentityStateV1::Missing | StoreFileIdentityStateV1::Replaced
+        ) && registry.record_store_identity_lost(&path)
+        {
+            log_daemon_event(
+                "store_file_identity_lost",
+                &[
+                    ("path", path.display().to_string()),
+                    ("state", format!("{state:?}")),
+                ],
+            );
+        }
+    }
+}
+
+/// Expired response handles are removed from the profile root and every
+/// registered project store, so a daemon that outlives the handle TTL still
+/// reclaims them. The sweep stops between roots once cancellation is
+/// requested.
+async fn sweep_response_handles(
+    handle_roots: Vec<PathBuf>,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+) {
+    let swept = native_runtime::spawn_blocking(move || {
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+        let (mut removed, mut failed) = (0usize, 0usize);
+        for root in &handle_roots {
+            if cancellation.is_cancelled() {
                 break;
             }
-            () = wake.notified() => {}
-            () = tokio::time::sleep_until(deadline) => {}
+            match tracedecay_mcp::response_handles::cleanup_expired_response_handles(root, now) {
+                Ok(count) => removed = removed.saturating_add(count),
+                Err(_) => failed = failed.saturating_add(1),
+            }
         }
-        if cancellation.is_cancelled() {
-            _lifecycle.record_cancellation();
-            break;
-        }
-        let now = CadenceInstant::now();
-        if now < deadline || !cadence.reserve(now) {
-            continue;
-        }
-        let _phase = MaintenancePhaseInstrumentation::new(continuation);
-        let outcome = run_tick(continuation).await;
-        if cancellation.is_cancelled() {
-            _lifecycle.record_cancellation();
-            break;
-        }
-        _lifecycle.record_outcome(outcome);
-        continuation = outcome.continuation();
-        deadline = cadence.finish(CadenceInstant::now(), outcome);
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub(super) struct ColdStoreCursorV1 {
-    pub(super) after_project_id: Option<String>,
-}
-
-fn next_cold_store_cursor(
-    previous: Option<&str>,
-    project_ids: &[String],
-    has_more: bool,
-) -> Option<ColdStoreCursorV1> {
-    if !has_more {
-        return None;
-    }
-    Some(ColdStoreCursorV1 {
-        after_project_id: project_ids
-            .last()
-            .cloned()
-            .or_else(|| previous.map(str::to_owned)),
+        (handle_roots.len(), removed, failed)
     })
+    .await;
+    match swept {
+        Ok((roots, removed, failed)) if removed > 0 || failed > 0 => log_daemon_event(
+            "response_handle_cleanup",
+            &[
+                ("roots", roots.to_string()),
+                ("removed_expired", removed.to_string()),
+                ("failed_roots", failed.to_string()),
+            ],
+        ),
+        Ok(_) => {}
+        Err(error) => log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "response_handles".to_owned()),
+                ("failure", "blocking_pool_unavailable".to_owned()),
+                ("error", error),
+            ],
+        ),
+    }
+}
+
+/// Starts one maintenance owner on the native runtime. A refusal is logged
+/// with the owner it leaves unstarted.
+#[track_caller]
+fn spawn_maintenance_task(
+    owner: &'static str,
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Option<NativeTask<()>> {
+    NativeTask::spawn(work)
+        .inspect_err(|error| {
+            log_daemon_event(
+                "maintenance_task_unavailable",
+                &[("owner", owner.to_string()), ("reason", error.clone())],
+            );
+        })
+        .ok()
+}
+
+/// Joins a cancelled maintenance task. A tick notices cancellation only
+/// between store units, and the unit it is in may be awaiting blocking store
+/// work that holds a database client. Aborting drops only the awaiting future:
+/// the blocking closure keeps that client past the terminal store close, which
+/// then leaves the store's WAL untruncated. The task therefore gets the abort
+/// deadline to finish cooperatively and is aborted only past it.
+async fn join_cancelled_maintenance_task(
+    task: Option<NativeTask<()>>,
+    owner: &'static str,
+    abort_deadline: Duration,
+) {
+    let Some(task) = task else {
+        return;
+    };
+    let reason = match native_runtime::timeout(abort_deadline, task.wait()).await {
+        Ok(_) => return,
+        Err(TimeoutError::Elapsed) => "cooperative_join_exceeded_abort_deadline".to_string(),
+        Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
+    };
+    log_daemon_event(
+        "daemon_shutdown",
+        &[
+            ("outcome", "maintenance_task_aborted".to_string()),
+            ("owner", owner.to_string()),
+            ("reason", reason),
+        ],
+    );
+    task.abort();
+    let reason = match native_runtime::timeout(abort_deadline, task.wait()).await {
+        Ok(_) => return,
+        Err(TimeoutError::Elapsed) => "join_exceeded_abort_deadline".to_string(),
+        Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
+    };
+    log_daemon_event(
+        "daemon_shutdown",
+        &[
+            ("outcome", "maintenance_task_abandoned".to_string()),
+            ("owner", owner.to_string()),
+            ("reason", reason),
+        ],
+    );
+}
+
+#[tracing::instrument(
+    name = "daemon.maintenance.registered_store_retention",
+    level = "trace",
+    skip_all
+)]
+async fn run_registered_store_retention(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    config: &tracedecay_configuration::RetentionConfig,
+) -> bool {
+    let now = match now_secs_i64() {
+        Ok(now) => now,
+        Err(failure) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "session_retention".to_owned()),
+                    ("failure", failure.to_owned()),
+                ],
+            );
+            return false;
+        }
+    };
+    let report =
+        tracedecay_maintenance::retention::registered_store::run_registered_store_retention(
+            database,
+            &config.session_lcm,
+            &config.observation,
+            now,
+        )
+        .await;
+    match &report.session_lcm {
+        Some(Ok(session_lcm)) => {
+            let reclaimed = session_lcm.bytes_reclaimed();
+            if reclaimed > 0 || !session_lcm.errors.is_empty() {
+                log_daemon_event(
+                    "retention_session_lcm",
+                    &[
+                        ("store", "mounted_sessions".to_owned()),
+                        ("bytes_reclaimed", reclaimed.to_string()),
+                        ("errors", session_lcm.errors.len().to_string()),
+                    ],
+                );
+            }
+        }
+        Some(Err(_)) => log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "session_lcm".to_owned()),
+                ("failure", "retention_pass_failed".to_owned()),
+            ],
+        ),
+        None => {}
+    }
+    match &report.observations {
+        Some(Ok(observations)) => {
+            let reclaimed = observations.bytes_reclaimed();
+            if reclaimed > 0 || !observations.errors.is_empty() {
+                log_daemon_event(
+                    "retention_observation",
+                    &[
+                        ("store", "mounted_sessions".to_owned()),
+                        ("bytes_reclaimed", reclaimed.to_string()),
+                        ("errors", observations.errors.len().to_string()),
+                    ],
+                );
+            }
+        }
+        Some(Err(_)) => log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "observation".to_owned()),
+                ("failure", "retention_pass_failed".to_owned()),
+            ],
+        ),
+        None => {}
+    }
+    match &report.observability {
+        Ok(receipt) if observability_retention_expired_rows(receipt) => {
+            log_observability_retention("mounted_sessions", receipt);
+        }
+        Err(error) => log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "observability_analytics".to_owned()),
+                ("failure", error.diagnostic().to_owned()),
+            ],
+        ),
+        Ok(_) => {}
+    }
+    log_payload_gc_outcome(&report.payload_gc);
+    let mut succeeded = report.succeeded();
+    if let Some(compaction) = &config.compaction {
+        let outcome = tracedecay_maintenance::retention::live_compaction::compact_registered_store(
+            database, compaction,
+        )
+        .await;
+        succeeded &= record_live_compaction_outcome("mounted_sessions", outcome);
+    }
+    succeeded
+}
+
+fn log_payload_gc_outcome(
+    outcome: &Result<
+        tracedecay_lcm::LcmGcReport,
+        tracedecay_maintenance::retention::registered_store::RegisteredStoreRetentionErrorV1,
+    >,
+) {
+    match outcome {
+        Ok(gc) if gc.totals.files > 0 || !gc.errors.is_empty() => log_daemon_event(
+            "retention_lcm_payload_gc",
+            &[
+                ("store", "mounted_sessions".to_owned()),
+                ("reaped_files", gc.totals.files.to_string()),
+                ("bytes_reclaimed", gc.totals.bytes.to_string()),
+                ("errors", gc.errors.len().to_string()),
+            ],
+        ),
+        Err(error) => log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "lcm_payload_gc".to_owned()),
+                ("failure", error.diagnostic().to_owned()),
+            ],
+        ),
+        Ok(_) => {}
+    }
+}
+
+#[tracing::instrument(
+    name = "daemon.maintenance.profile_observability_retention",
+    level = "trace",
+    skip_all
+)]
+async fn run_profile_observability_retention(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+) -> bool {
+    let now = match now_secs_i64() {
+        Ok(now) => now,
+        Err(failure) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "observability_analytics".to_owned()),
+                    ("failure", failure.to_owned()),
+                ],
+            );
+            return false;
+        }
+    };
+    match database.prune_observability_events(now).await {
+        Ok(receipt) => {
+            if observability_retention_expired_rows(&receipt) {
+                log_observability_retention("global.db", &receipt);
+            }
+            true
+        }
+        Err(_) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "observability_analytics".to_owned()),
+                    ("failure", "retention_pass_failed".to_owned()),
+                ],
+            );
+            false
+        }
+    }
+}
+
+fn observability_retention_expired_rows(
+    receipt: &tracedecay_global_db::ObservabilityRetentionReceiptV1,
+) -> bool {
+    receipt.expired_detail > 0
+        || receipt.expired_rollup > 0
+        || receipt.expired_rollups.expired_generations > 0
+        || receipt.expired_rollups.advanced_frontiers > 0
+}
+
+fn log_observability_retention(
+    store: &str,
+    receipt: &tracedecay_global_db::ObservabilityRetentionReceiptV1,
+) {
+    log_daemon_event(
+        "retention_observability_analytics",
+        &[
+            ("store", store.to_owned()),
+            ("expired_detail", receipt.expired_detail.to_string()),
+            ("expired_rollup", receipt.expired_rollup.to_string()),
+            (
+                "expired_rollup_generations",
+                receipt.expired_rollups.expired_generations.to_string(),
+            ),
+            (
+                "advanced_rollup_frontiers",
+                receipt.expired_rollups.advanced_frontiers.to_string(),
+            ),
+        ],
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1258,9 +408,20 @@ pub(super) enum MaintenanceStoreOutcomeV1 {
     Cancelled,
 }
 
-impl MaintenanceStoreOutcomeV1 {
-    fn was_processed(self) -> bool {
-        self == Self::Processed
+impl From<tracedecay_maintenance::retention::cold_store::ColdStorePageOutcomeV1>
+    for MaintenanceStoreOutcomeV1
+{
+    fn from(
+        outcome: tracedecay_maintenance::retention::cold_store::ColdStorePageOutcomeV1,
+    ) -> Self {
+        use tracedecay_maintenance::retention::cold_store::ColdStorePageOutcomeV1;
+
+        match outcome {
+            ColdStorePageOutcomeV1::Processed => Self::Processed,
+            ColdStorePageOutcomeV1::Missing => Self::Missing,
+            ColdStorePageOutcomeV1::Unreadable => Self::Unreadable,
+            ColdStorePageOutcomeV1::Cancelled => Self::Cancelled,
+        }
     }
 }
 
@@ -1274,12 +435,11 @@ pub(super) struct MaintenanceMetricsV1 {
     pub(super) last_outcome: Option<MaintenanceStoreOutcomeV1>,
 }
 
-/// Grace windows for the daily branch-store GC pass, taken from the pinned
+/// Grace window for the daily branch-store GC pass, taken from the pinned
 /// sync configuration at daemon startup.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct BranchStoreGcCadenceV1 {
     pub(super) branch_gc_days: u64,
-    pub(super) orphan_db_gc_days: u64,
 }
 
 /// Interval between branch-store GC passes across mounted projects.
@@ -1287,9 +447,10 @@ const BRANCH_STORE_GC_PERIOD: Duration = Duration::from_hours(24);
 
 #[derive(Clone)]
 pub(super) struct MaintenanceCoordinator {
-    cancellation: tracedecay_session_memory::context::CancellationToken,
-    wake: Arc<Notify>,
-    task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+    background_cpu: Option<Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>>,
+    wake: Arc<MaintenanceWake>,
+    task: Arc<Mutex<Option<NativeTask<()>>>>,
     metrics: Arc<Mutex<MaintenanceMetricsV1>>,
     /// Round-robin fairness cursor over mounted stores: the sort key of the
     /// last store processed. The next tick resumes immediately after it so no
@@ -1298,120 +459,195 @@ pub(super) struct MaintenanceCoordinator {
     /// Instant of the last branch-store GC pass that succeeded for every
     /// mounted project. `None` keeps the daily cadence retry-eligible.
     last_branch_gc: Arc<Mutex<Option<Instant>>>,
+    /// The resident-memory sampler task; see [`Self::spawn`].
+    resident_memory_sampler: Arc<Mutex<Option<NativeTask<()>>>>,
+    /// Last resident-memory verdict logged, shared by the sampler and the
+    /// retention tick so a sustained over-budget state logs once per
+    /// transition rather than once per sample.
+    resident_memory_log: Arc<std::sync::Mutex<ResidentMemoryLogStateV1>>,
 }
 
 impl Default for MaintenanceCoordinator {
     fn default() -> Self {
         Self {
-            cancellation: tracedecay_session_memory::context::CancellationToken::new(),
-            wake: Arc::new(Notify::new()),
+            cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
+            background_cpu: None,
+            wake: Arc::new(MaintenanceWake::default()),
             task: Arc::new(Mutex::new(None)),
             metrics: Arc::new(Mutex::new(MaintenanceMetricsV1::default())),
             store_cursor: Arc::new(Mutex::new(None)),
             last_branch_gc: Arc::new(Mutex::new(None)),
+            resident_memory_sampler: Arc::new(Mutex::new(None)),
+            resident_memory_log: Arc::new(std::sync::Mutex::new(
+                ResidentMemoryLogStateV1::default(),
+            )),
         }
     }
 }
 
-/// One unit of bounded per-tick maintenance work: either a mounted session
-/// database or a mounted project graph. Arcs are cloned into the item so the
-/// store stays alive for the duration of the writer-held critical section.
+/// One unit of bounded per-tick maintenance work: a mounted session database
+/// or a mounted project graph, named by its database path. A tick holds no
+/// mounted store between units. Each unit resolves its store when its
+/// writer-held section starts and drops it when that section ends. Capacity
+/// retirement of an idle project refuses while anything leases its stores, so
+/// a tick that kept every listed store for its whole run refused those
+/// retirements. A store unmounted since the listing is skipped.
 enum MaintenanceStoreWork {
-    Session(tracedecay_global_db::RegisteredGlobalDbLeaseV1),
-    Graph(Arc<crate::tracedecay::TraceDecay>),
+    Session(PathBuf),
+    Graph(PathBuf),
+    /// The code-index scopes of a registered project that no mounted graph
+    /// owns; its database is never opened by this unit.
+    Registered(RegisteredProjectStoreV1),
 }
 
 impl MaintenanceStoreWork {
-    fn database_path(&self) -> &Path {
+    fn database_path(&self) -> Option<&Path> {
         match self {
-            Self::Session(database) => database.db_path(),
-            Self::Graph(graph) => graph.db().database_path(),
+            Self::Session(database_path) | Self::Graph(database_path) => Some(database_path),
+            Self::Registered(_) => None,
         }
     }
 }
 
-/// Pure round-robin window selection over stably-sorted store keys.
-///
-/// Returns the indices to process this tick (at most `budget`, always
-/// `min(budget, keys.len())`) and the cursor to resume after next tick. Sorting
-/// the keys and resuming after the previous cursor guarantees that, across
-/// `ceil(len / budget)` consecutive ticks, every store is processed at least
-/// once — nothing that should be reclaimed is starved forever — while any
-/// single tick touches no more than `budget` stores.
-fn select_store_window(
-    keys: &[String],
-    after: Option<&str>,
-    budget: usize,
-) -> (Vec<usize>, Option<String>) {
-    let count = keys.len();
-    if count == 0 || budget == 0 {
-        return (Vec::new(), after.map(str::to_owned));
-    }
-    let start = match after {
-        Some(cursor) => keys.partition_point(|key| key.as_str() <= cursor) % count,
-        None => 0,
-    };
-    let take = budget.min(count);
-    let indices = (0..take)
-        .map(|offset| (start + offset) % count)
-        .collect::<Vec<_>>();
-    let next = indices.last().map(|&index| keys[index].clone());
-    (indices, next)
+/// What a tick reads from one mounted project graph, copied out at listing.
+struct MountedGraphListing {
+    key: String,
+    database_path: PathBuf,
+    project_root: PathBuf,
+    data_root: PathBuf,
+    code_index_store_root: PathBuf,
 }
 
-fn cursor_after_attempted_units(
-    keys: &[String],
-    window: &[usize],
-    attempted: usize,
-    prior: Option<&str>,
-) -> Option<String> {
-    attempted
-        .checked_sub(1)
-        .and_then(|last| window.get(last))
-        .and_then(|&index| keys.get(index))
-        .cloned()
-        .or_else(|| prior.map(str::to_owned))
+/// The work-list key of a mounted project graph: its root and serving branch.
+fn graph_work_key(graph: &tracedecay_project::project::TraceDecay) -> String {
+    format!(
+        "g:{}\u{1f}{}",
+        graph.project_root().display(),
+        graph.serving_branch().unwrap_or_default()
+    )
+}
+
+pub(crate) fn project_store_maintenance_lease(
+    graph: &tracedecay_project::project::TraceDecay,
+) -> ProjectStoreMaintenanceLeaseV1 {
+    ProjectStoreMaintenanceLeaseV1::new(
+        graph.project_root().to_path_buf(),
+        graph.store_layout().clone(),
+        graph.db().clone(),
+        graph.retained_store_runtime_registry(),
+        graph.profile_database().clone(),
+    )
 }
 
 impl MaintenanceCoordinator {
-    #[hotpath::skip]
     pub(super) async fn spawn(
         profile_root: PathBuf,
-        profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-        retention: crate::config::RetentionConfig,
+        retention: tracedecay_configuration::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
     ) -> Self {
-        let coordinator = Self::default();
+        let coordinator = Self {
+            background_cpu: administration
+                .session_temporal_refresh_schedulers()
+                .background_cpu(),
+            ..Self::default()
+        };
+        // Measured RSS is a process fact that admission trusts, so it is
+        // sampled on its own short cadence regardless of whether retention
+        // maintenance runs: the retention tick is hours apart, and a cold
+        // index climbs from nothing to the admission watermark in minutes.
+        if let Err(error) =
+            tracedecay_runtime_core::resident_memory::install_process_resident_owners_pressure_reclaimer_v1()
+        {
+            tracing::error!(
+                event = "resident_owners_pressure_reclaimer_unavailable",
+                error = %error,
+                "could not bind retained owners to the resident-memory pressure cell"
+            );
+        }
+        if let Err(error) =
+            tracedecay_runtime_core::resident_memory::install_process_allocator_pressure_reclaimer_v1()
+        {
+            tracing::error!(
+                event = "process_allocator_pressure_reclaimer_unavailable",
+                error = %error,
+                "could not install the allocator pressure reclaimer"
+            );
+        }
+        let sampler_owner = coordinator.clone();
+        *coordinator.resident_memory_sampler.lock().await = spawn_maintenance_task(
+            "resident_memory_sampler",
+            tracing::Instrument::instrument(
+                async move {
+                    sampler_owner.run_resident_memory_sampler().await;
+                },
+                tracing::trace_span!("daemon.maintenance.resident_memory_sampler"),
+            ),
+        );
         if !retention_maintenance_enabled(&retention) {
             return coordinator;
         }
+        // A sealed code generation supersedes its predecessor, whose sealed
+        // artifact, read bundle, and segments only the retention tick
+        // reclaims. Pull that tick forward on each publication instead of
+        // letting a day of publications pile up behind the daily cadence.
+        let publication_owner = coordinator.clone();
+        let mut publications = code_index_schedulers.subscribe_generation_publications();
+        // Detached: it ends with the coordinator's cancellation or the
+        // publication channel.
+        drop(spawn_maintenance_task(
+            "publication_due_requests",
+            tracing::Instrument::instrument(
+                async move {
+                    loop {
+                        tokio::select! {
+                            biased;
+                            () = publication_owner.cancellation.cancelled() => break,
+                            received = publications.recv() => match received {
+                                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    publication_owner.request_due();
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            },
+                        }
+                    }
+                },
+                tracing::trace_span!("daemon.maintenance.publication_due_requests"),
+            ),
+        ));
         let task_owner = coordinator.clone();
         let interval = Duration::from_secs(retention.interval_hours.max(1).saturating_mul(3_600));
-        let handle = tokio::spawn(hotpath::future!(
-            async move {
-                task_owner
-                    .run(
-                        profile_root,
-                        profile_database,
-                        administration,
-                        code_index_schedulers,
-                        retention,
-                        branch_gc,
-                        interval,
-                    )
-                    .await;
-            },
-            label = "daemon.maintenance.retention_loop"
-        ));
-        *coordinator.task.lock().await = Some(handle);
+        *coordinator.task.lock().await = spawn_maintenance_task(
+            "retention_tick",
+            tracing::Instrument::instrument(
+                async move {
+                    task_owner
+                        .run(
+                            profile_root,
+                            administration,
+                            code_index_schedulers,
+                            retention,
+                            branch_gc,
+                            interval,
+                        )
+                        .await;
+                },
+                tracing::trace_span!("daemon.maintenance.retention_loop"),
+            ),
+        );
         coordinator
     }
 
     #[cfg(unix)]
     pub(super) fn wake(&self) {
-        self.wake.notify_one();
+        self.wake.wake();
+    }
+
+    /// A code generation was sealed: its predecessor's sealed artifact, read
+    /// bundle, and segments are collectable now, not at the next daily tick.
+    pub(super) fn request_due(&self) {
+        self.wake.request_due();
     }
 
     /// Stop the maintenance loop from starting another pass, synchronously.
@@ -1425,99 +661,241 @@ impl MaintenanceCoordinator {
     /// join below stays correct whether or not it already ran.
     pub(super) fn cancel(&self) {
         self.cancellation.cancel();
-        self.wake.notify_waiters();
     }
 
-    #[hotpath::skip]
     pub(super) async fn shutdown(&self) {
         self.cancel();
-        if let Some(task) = self.task.lock().await.take() {
-            let _ = task.await;
-        }
+        // Cancel stops the next pass and the sampler at once; an in-flight
+        // tick notices between stores. Retention and RSS sampling are
+        // abandonable, so the abort deadline bounds each join.
+        join_cancelled_maintenance_task(
+            self.task.lock().await.take(),
+            "retention_tick",
+            DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await;
+        join_cancelled_maintenance_task(
+            self.resident_memory_sampler.lock().await.take(),
+            "resident_memory_sampler",
+            DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await;
     }
 
-    #[hotpath::skip]
+    /// Sample measured RSS every [`RESIDENT_MEMORY_SAMPLE_INTERVAL_V1`] until
+    /// cancelled. Publishing a sample runs the pressure reclaimers when it
+    /// reaches the high watermark, so this loop is what turns a climb during
+    /// a cold index into released memory instead of refused admissions. Each
+    /// sample first releases idle owners, then has an index pool that went
+    /// idle collect its workers' heaps (again after a release, which frees
+    /// what they built), and asks the async runtime and store workers to
+    /// collect theirs as they idle.
+    async fn run_resident_memory_sampler(&self) {
+        let log = Arc::clone(&self.resident_memory_log);
+        run_resident_memory_sampler_loop(
+            &self.cancellation,
+            RESIDENT_MEMORY_SAMPLE_INTERVAL_V1,
+            Arc::new(move || {
+                if sweep_resident_owners() {
+                    collect_installed_worker_heaps_when_idle();
+                }
+                collect_idle_installed_worker_heaps();
+                request_idle_thread_collection_v1();
+                let pages = tracedecay_sessions::runtime::release_unpinned_shared_jsonl_pages();
+                if pages.pages > 0 {
+                    tracing::info!(
+                        event = "shared_jsonl_pages_released",
+                        pages = pages.pages,
+                        bytes = pages.bytes,
+                        "released unpinned prepared transcript pages"
+                    );
+                }
+                sample_process_resident_memory(&log);
+            }),
+        )
+        .await;
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The task retains independently owned profile, stores, schedulers and cadence for its full cancellation lifetime."
+    )]
     async fn run(
         &self,
         profile_root: PathBuf,
-        profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-        retention: crate::config::RetentionConfig,
+        retention: tracedecay_configuration::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
         interval: Duration,
     ) {
         run_maintenance_loop(&self.cancellation, &self.wake, interval, |continuation| {
-            self.run_tick(
+            let (profile_root, administration, code_index_schedulers, retention) = (
                 &profile_root,
-                profile_database.as_ref(),
                 &administration,
                 &code_index_schedulers,
                 &retention,
-                branch_gc,
-                continuation,
-            )
+            );
+            async move {
+                // Resolved per tick: a reset-required profile authority keeps
+                // the daemon serving, and the tick after the operator's reset
+                // mounts the fresh store.
+                let profile_database = match administration.registered_profile_database().await {
+                    Ok(database) => database,
+                    Err(error) => {
+                        log_daemon_event(
+                            "retention_degraded",
+                            &[
+                                ("pass", "maintenance_tick".to_owned()),
+                                ("failure", "profile_authority_unavailable".to_owned()),
+                                ("error", error.to_string()),
+                            ],
+                        );
+                        return MaintenanceTickOutcome::Retry;
+                    }
+                };
+                self.run_tick(
+                    profile_root,
+                    profile_database.as_ref(),
+                    administration,
+                    code_index_schedulers,
+                    retention,
+                    branch_gc,
+                    continuation,
+                )
+                .await
+            }
         })
         .await;
     }
 
-    #[hotpath::measure(label = "daemon.maintenance.tick", future = true)]
+    #[tracing::instrument(name = "daemon.maintenance.tick", level = "trace", skip_all)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "A tick borrows independently owned stores and policy while retaining the continuation cursor."
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "A maintenance tick is one ordered pass over session, graph, and retention owners."
+    )]
     async fn run_tick(
         &self,
         profile_root: &Path,
         profile_database: &tracedecay_global_db::RegisteredGlobalDb,
         administration: &StoreAdministration,
         code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-        retention: &crate::config::RetentionConfig,
+        retention: &tracedecay_configuration::RetentionConfig,
         branch_gc: BranchStoreGcCadenceV1,
         continuation: Option<MaintenanceContinuation>,
     ) -> MaintenanceTickOutcome {
-        // Piggybacks on the retention tick's existing cadence instead of a
-        // dedicated timer thread: this is the daemon's only always-running
-        // periodic loop, so it is where a slow RSS climb toward the
-        // admission limit becomes visible between full telemetry snapshots.
-        record_process_resident_memory_gauge();
+        let Some(background_cpu) = self.background_cpu.as_ref() else {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "maintenance_tick".to_owned()),
+                    ("failure", "background_cpu_authority_unavailable".to_owned()),
+                ],
+            );
+            return MaintenanceTickOutcome::Retry;
+        };
         administration
             .store_telemetry_sampling()
             .begin_retention_tick_log_window();
         let session_databases = if continuation.is_none() {
-            administration.mounted_registered_session_databases().await
+            administration
+                .mounted_registered_session_databases()
+                .await
+                .iter()
+                .map(|database| database.db_path().to_path_buf())
+                .collect()
         } else {
             Vec::new()
         };
-        let project_graphs = administration.mounted_project_graphs().await;
+        let project_graphs = administration
+            .mounted_project_graphs()
+            .await
+            .iter()
+            .map(|graph| MountedGraphListing {
+                key: graph_work_key(graph),
+                database_path: graph.db().database_path().to_path_buf(),
+                project_root: graph.project_root().to_path_buf(),
+                data_root: graph.store_layout().data_root.clone(),
+                code_index_store_root: code_index_store_root(
+                    &graph.store_layout().data_root,
+                    &graph.store_layout().project_root,
+                ),
+            })
+            .collect::<Vec<_>>();
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            let _ = crate::test_support::hold_after_maintenance_listing_for_test().await;
+        }
+        // The listing copies in-memory mounts and is not CPU work, so a tick
+        // parked at the listing holds no background CPU unit.
+        let Some(_background_cpu) = background_cpu.try_acquire() else {
+            return MaintenanceTickOutcome::Retry;
+        };
+        let (registered_projects, registry_listed) =
+            match registered_project_stores(profile_root, profile_database).await {
+                Ok(stores) => (stores, true),
+                Err(error) => {
+                    log_daemon_event(
+                        "retention_degraded",
+                        &[
+                            ("pass", "code_generations".to_owned()),
+                            ("failure", "project_registry_unavailable".to_owned()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    (Vec::new(), false)
+                }
+            };
+        if continuation.is_none() && !self.cancellation.is_cancelled() {
+            let handle_roots = std::iter::once(profile_root)
+                .chain(
+                    registered_projects
+                        .iter()
+                        .map(|(_, store)| store.data_root.as_path()),
+                )
+                .map(|root| root.join(RESPONSE_HANDLES_DIRECTORY))
+                .collect();
+            sweep_response_handles(handle_roots, self.cancellation.clone()).await;
+        }
+        let mounted_store_roots = project_graphs
+            .iter()
+            .map(|graph| graph.code_index_store_root.clone())
+            .collect::<BTreeSet<_>>();
         let mut active_telemetry_paths = BTreeSet::from([profile_database.db_path().to_path_buf()]);
-        active_telemetry_paths.extend(
-            session_databases
-                .iter()
-                .map(|database| database.db_path().to_path_buf()),
-        );
+        active_telemetry_paths.extend(session_databases.iter().cloned());
         active_telemetry_paths.extend(
             project_graphs
                 .iter()
-                .map(|graph| graph.db().database_path().to_path_buf()),
+                .map(|graph| graph.database_path.clone()),
         );
         // Build one stably-sorted work list across both store kinds so the
         // per-tick budget and round-robin cursor bound the total work, not each
         // loop independently. Keys are unique on-disk identities (session db
         // path; project root + serving branch), prefixed by kind so the order
         // is deterministic regardless of the mounted maps' iteration order.
-        let mut work: Vec<(String, MaintenanceStoreWork)> =
-            Vec::with_capacity(session_databases.len() + project_graphs.len());
-        for database in &session_databases {
+        let mut work: Vec<(String, MaintenanceStoreWork)> = Vec::with_capacity(
+            session_databases.len() + project_graphs.len() + registered_projects.len(),
+        );
+        for database_path in &session_databases {
             work.push((
-                format!("s:{}", database.db_path().display()),
-                MaintenanceStoreWork::Session(database.clone()),
+                format!("s:{}", database_path.display()),
+                MaintenanceStoreWork::Session(database_path.clone()),
             ));
         }
         for graph in &project_graphs {
             work.push((
-                format!(
-                    "g:{}\u{1f}{}",
-                    graph.project_root().display(),
-                    graph.serving_branch().unwrap_or_default()
-                ),
-                MaintenanceStoreWork::Graph(Arc::clone(graph)),
+                graph.key.clone(),
+                MaintenanceStoreWork::Graph(graph.database_path.clone()),
+            ));
+        }
+        for (project_id, store) in registered_projects {
+            work.push((
+                format!("r:{project_id}"),
+                MaintenanceStoreWork::Registered(store),
             ));
         }
         work.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1530,27 +908,40 @@ impl MaintenanceCoordinator {
         sampled_telemetry_paths.extend(
             window
                 .iter()
-                .map(|index| work[*index].1.database_path().to_path_buf()),
+                .filter_map(|index| work[*index].1.database_path().map(Path::to_path_buf)),
         );
         let maintenance_observations = administration.store_telemetry_sampling();
         let active_maintenance_projects = project_graphs
             .iter()
-            .map(|graph| graph.project_root().to_path_buf())
+            .map(|graph| graph.project_root.clone())
             .collect::<BTreeSet<_>>();
         maintenance_observations.retain_project_maintenance_state(&active_maintenance_projects);
-        let telemetry_sampling = if continuation.is_none() {
+        // A capacity retirement releasing stores skips this pass: sampling
+        // leases every sampled store until it ends.
+        let telemetry_sampling = if continuation.is_none()
+            && let Ok(_clients) = administration.maintenance_store_clients().try_lock()
+        {
             maintenance_observations
-                .advance_registered(&active_telemetry_paths, &sampled_telemetry_paths)
+                .advance_registered(
+                    &active_telemetry_paths,
+                    &sampled_telemetry_paths,
+                    &self.cancellation,
+                )
                 .await
         } else {
             StoreTelemetrySamplingOutcome::default()
         };
+        if continuation.is_none()
+            && let Some(registry) = administration.mounted_session_runtime_registry().await
+        {
+            record_lost_store_files(&maintenance_observations, &registry);
+        }
 
         // Bounded, round-robin slice of mounted stores. Writer admission is
         // per unit so one busy store defers only itself, and the cursor
-        // advances past attempted units even on cancellation. A semantic
-        // continuation omits session stores, but remains phase-scoped over the
-        // same bounded graph window rather than pinning one project.
+        // advances past attempted units even on cancellation. A continuation
+        // omits session stores, but remains phase-scoped over the same bounded
+        // graph window rather than pinning one project.
         let mut attempted = 0usize;
         let mut deferred = 0u64;
         let mut outcome = MaintenanceTickOutcome::Complete;
@@ -1561,24 +952,53 @@ impl MaintenanceCoordinator {
             }
             let admitted = administration
                 .try_with_writer(|| async {
-                    match &work[index].1 {
-                        MaintenanceStoreWork::Session(database) => {
-                            if super::store_maintenance::run_session_retention(database, retention)
+                    let Ok(_clients) = administration.maintenance_store_clients().try_lock() else {
+                        return MaintenanceTickOutcome::Retry;
+                    };
+                    let (key, unit) = &work[index];
+                    match unit {
+                        MaintenanceStoreWork::Session(database_path) => {
+                            let Some(database) = administration
+                                .mounted_registered_session_databases()
                                 .await
-                            {
+                                .into_iter()
+                                .find(|database| database.db_path() == database_path)
+                            else {
+                                return MaintenanceTickOutcome::Complete;
+                            };
+                            if run_registered_store_retention(&database, retention).await {
                                 MaintenanceTickOutcome::Complete
                             } else {
                                 MaintenanceTickOutcome::Retry
                             }
                         }
-                        MaintenanceStoreWork::Graph(graph) => {
-                            generation::run_project_generation_maintenance(
-                                graph,
+                        MaintenanceStoreWork::Graph(_) => {
+                            let Some(graph) = administration
+                                .mounted_project_graphs()
+                                .await
+                                .into_iter()
+                                .find(|graph| graph_work_key(graph) == *key)
+                            else {
+                                return MaintenanceTickOutcome::Complete;
+                            };
+                            run_project_generation_maintenance(
+                                &project_store_maintenance_lease(&graph),
                                 code_index_schedulers,
                                 &maintenance_observations,
                                 &self.cancellation,
-                                retention,
+                                retention.compaction.as_ref(),
                                 continuation,
+                            )
+                            .await
+                        }
+                        MaintenanceStoreWork::Registered(store) => {
+                            run_registered_project_generation_maintenance(
+                                store,
+                                &mounted_store_roots,
+                                code_index_schedulers,
+                                profile_database,
+                                &maintenance_observations,
+                                &self.cancellation,
                             )
                             .await
                         }
@@ -1600,18 +1020,17 @@ impl MaintenanceCoordinator {
         }
         *self.store_cursor.lock().await =
             cursor_after_attempted_units(&keys, &window, attempted, after.as_deref());
+        if !registry_listed {
+            outcome = MaintenanceTickOutcome::Retry;
+        }
 
         // Profile-wide maintenance is intentionally excluded from a bounded
-        // semantic-vector continuation: only the owning phase is eligible
-        // for the short cadence.
+        // continuation: only the owning phase is eligible for the short
+        // cadence.
         if continuation.is_none() && !self.cancellation.is_cancelled() {
             match administration
                 .try_with_writer(|| async {
-                    super::store_maintenance::run_observability_analytics_retention(
-                        profile_database,
-                        "global.db",
-                    )
-                    .await
+                    run_profile_observability_retention(profile_database).await
                 })
                 .await
             {
@@ -1630,8 +1049,13 @@ impl MaintenanceCoordinator {
         {
             match administration
                 .try_with_writer(|| async {
-                    super::store_maintenance::run_global_compaction(profile_database, compaction)
-                        .await
+                    let compacted =
+                        tracedecay_maintenance::retention::live_compaction::compact_registered_store(
+                            profile_database,
+                            compaction,
+                        )
+                        .await;
+                    record_live_compaction_outcome("global.db", compacted)
                 })
                 .await
             {
@@ -1644,12 +1068,22 @@ impl MaintenanceCoordinator {
             }
         }
         if continuation.is_none() && !self.cancellation.is_cancelled() {
+            let mut owner_roots = tracedecay_maintenance::store_maintenance::scheduler_owner_roots(
+                code_index_schedulers,
+            )
+            .await;
+            owner_roots.extend(
+                project_graphs
+                    .iter()
+                    .map(|graph| graph.project_root.clone()),
+            );
             match administration
                 .try_with_writer(|| {
-                    run_cold_store_page(
+                    tracedecay_maintenance::retention::cold_store::run_cold_store_page(
                         profile_root,
                         profile_database,
-                        retention,
+                        retention.orphan_store_gc_days,
+                        &owner_roots,
                         &self.cancellation,
                     )
                 })
@@ -1663,7 +1097,7 @@ impl MaintenanceCoordinator {
                     metrics.unavailable_stores = page.unavailable_stores;
                     metrics.reclaimed_bytes =
                         metrics.reclaimed_bytes.saturating_add(page.reclaimed_bytes);
-                    metrics.last_outcome = Some(page.outcome);
+                    metrics.last_outcome = Some(page.outcome.into());
                     if !page.outcome.was_processed() {
                         outcome = MaintenanceTickOutcome::Retry;
                     }
@@ -1678,7 +1112,7 @@ impl MaintenanceCoordinator {
 
         // Branch-store GC: the watcher owns no store authorities, while this
         // owner already holds the administration coordinator. Daily cadence,
-        // retry-eligible — the stamp advances only when every mounted project's
+        // retry-eligible, the stamp advances only when every mounted project's
         // pass succeeded.
         if continuation.is_none() && !self.cancellation.is_cancelled() {
             let gc_due = self
@@ -1697,8 +1131,8 @@ impl MaintenanceCoordinator {
                         administration,
                         code_index_schedulers,
                         branch_gc.branch_gc_days,
-                        branch_gc.orphan_db_gc_days,
-                        graph,
+                        &graph.project_root,
+                        &graph.data_root,
                     )
                     .await;
                 }
@@ -1739,333 +1173,199 @@ impl MaintenanceCoordinator {
             .store_telemetry_sampling()
             .admit_retention_tick_log(outcome)
         {
-            super::log_daemon_event("retention_maintenance_tick", &tick_fields);
+            log_daemon_event("retention_maintenance_tick", &tick_fields);
         }
         outcome
     }
 }
 
-/// Samples this process's current resident set size, republishes it as a
-/// Hotpath gauge, and feeds it to the resident-memory admission authority.
+/// Samples this process's resident set and feeds its admission bytes to the
+/// resident-memory admission authority.
 ///
 /// A 20G RSS overrun past the admission limit was visible only to `ps` during
-/// a 2026-08 incident; this closes that gap using the retention tick's
-/// existing cadence rather than a new background timer. Publishing the same
-/// sample to
+/// a 2026-08 incident; the dedicated sampler closes that gap on a short
+/// cadence. Publishing the sample to
 /// [`process_resident_memory_pressure_v1`](tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1)
 /// closes the loop: admission stops trusting its reservation model once the
-/// measurement says the process is over budget. There is exactly one reader
-/// here — the gauge and the admission cell consume the same sample.
-#[cfg(target_os = "linux")]
-fn record_process_resident_memory_gauge() {
-    if let Some(bytes) =
-        tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
-    {
-        hotpath::gauge!("daemon.process.resident_bytes").set(bytes);
-        let state = tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1()
-            .publish_observed_resident_bytes(bytes);
-        if let tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1::OverBudget {
-            observed_bytes,
-            limit_bytes,
-            high_watermark_bytes,
-            ..
-        } = state
-        {
+/// measurement says the process is over budget. Admission and the over-budget
+/// log use the pressure state, which also counts cgroup committed bytes.
+///
+/// The kernel sample is Linux `/proc`, Windows `GetProcessMemoryInfo`, or
+/// macOS `TASK_VM_INFO`. A host that cannot observe RSS returns `None` and
+/// this function stays quiet rather than publishing zero.
+fn sample_process_resident_memory(log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {
+    use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1;
+
+    let pressure = tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1();
+    let Some((_, state)) = pressure.sample_and_publish() else {
+        return;
+    };
+    let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
+    let transition = {
+        let mut log = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        log.observe(over_budget)
+    };
+    match (transition, state) {
+        (
+            Some(ResidentMemoryLogTransitionV1::EnteredOverBudget),
+            ResidentMemoryPressureStateV1::OverBudget {
+                observed_bytes,
+                limit_bytes,
+                high_watermark_bytes,
+                ..
+            },
+        ) => {
             tracing::warn!(
                 event = "daemon_resident_memory_over_budget",
                 observed_bytes,
                 limit_bytes,
                 high_watermark_bytes,
-                "measured process RSS is over the admission high watermark; refusing new growth and releasing reclaimable retained state"
+                "measured process RSS reached the admission high watermark; refusing new growth and releasing reclaimable retained state"
             );
         }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn record_process_resident_memory_gauge() {}
-
-#[derive(Debug)]
-struct ColdStorePageMetrics {
-    processed_stores: u64,
-    unavailable_stores: u64,
-    reclaimed_bytes: u64,
-    outcome: MaintenanceStoreOutcomeV1,
-}
-
-impl Default for ColdStorePageMetrics {
-    fn default() -> Self {
-        Self {
-            processed_stores: 0,
-            unavailable_stores: 0,
-            reclaimed_bytes: 0,
-            outcome: MaintenanceStoreOutcomeV1::Processed,
+        (
+            Some(ResidentMemoryLogTransitionV1::ReturnedToNominal),
+            ResidentMemoryPressureStateV1::Nominal { observed_bytes, .. },
+        ) => {
+            tracing::info!(
+                event = "daemon_resident_memory_nominal",
+                observed_bytes,
+                low_watermark_bytes = pressure.low_watermark_bytes(),
+                "measured process RSS fell back under the admission low watermark"
+            );
         }
+        _ => {}
     }
 }
 
-#[hotpath::measure(label = "daemon.maintenance.cold_store_page", future = true)]
-async fn run_cold_store_page(
-    profile_root: &Path,
-    profile_database: &tracedecay_global_db::RegisteredGlobalDb,
-    retention: &crate::config::RetentionConfig,
-    cancellation: &tracedecay_session_memory::context::CancellationToken,
-) -> tracedecay_domain::errors::Result<ColdStorePageMetrics> {
-    let checkpoint_path = checkpoint_path(profile_root);
-    let cursor = load_cursor(&checkpoint_path).unwrap_or(ColdStoreCursorV1 {
-        after_project_id: None,
-    });
-    let page = tracedecay_maintenance::retention::orphan_stores::build_store_census_page(
-        profile_database,
-        profile_root,
-        cursor.after_project_id.as_deref(),
-        COLD_STORE_PAGE_LIMIT,
-    )
-    .await?;
-    let retention_now = if retention.orphan_store_gc_days.is_some()
-        || retention.incident_debris_retention_days.is_some()
-    {
-        Some(now_secs_i64().map_err(|message| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: message.to_owned(),
-            }
-        })?)
-    } else {
-        None
+/// Scope end and memory stalls both free retained owners: a worktree idle
+/// past its window gives its state back, and kernel-reported stalls above
+/// [`RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1`] shed one tier even
+/// while RSS sits under the watermark.
+///
+/// [`RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1`]: tracedecay_runtime_core::resident_memory::RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1
+/// Release idle owners, and shed a tier under memory stall; whether any owner
+/// was released.
+fn sweep_resident_owners() -> bool {
+    use tracedecay_runtime_core::resident_memory::{
+        RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1, log_resident_owner_release_v1,
+        process_resident_owners_v1, sampled_memory_pressure_some_avg10_v1,
     };
-    let mut metrics = ColdStorePageMetrics::default();
-    for entry in &page.entries {
-        let outcome = classify_cold_store_state(
-            cancellation.is_cancelled(),
-            entry.manifest_readable,
-            entry.data_root.is_dir(),
-        );
-        match outcome {
-            MaintenanceStoreOutcomeV1::Processed => {
-                metrics.processed_stores = metrics.processed_stores.saturating_add(1);
-            }
-            MaintenanceStoreOutcomeV1::Cancelled => {
-                metrics.outcome = outcome;
-                return Ok(metrics);
-            }
-            MaintenanceStoreOutcomeV1::Busy
-            | MaintenanceStoreOutcomeV1::Missing
-            | MaintenanceStoreOutcomeV1::Unreadable => {
-                if metrics.outcome == MaintenanceStoreOutcomeV1::Processed {
-                    metrics.outcome = outcome;
+    let owners = process_resident_owners_v1();
+    let now = std::time::Instant::now();
+    let mut released = owners.release_idle(now);
+    if sampled_memory_pressure_some_avg10_v1()
+        .is_some_and(|stalled| stalled >= RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1)
+    {
+        released.extend(owners.shed_one_tier(now));
+    }
+    for release in &released {
+        log_resident_owner_release_v1(release);
+    }
+    !released.is_empty()
+}
+
+type ResidentMemorySampleV1 = Arc<dyn Fn() + Send + Sync + 'static>;
+
+async fn run_resident_memory_sampler_loop(
+    cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+    interval: Duration,
+    sample: ResidentMemorySampleV1,
+) {
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            slept = native_runtime::sleep_until(Instant::now() + interval) => {
+                if let Err(error) = slept {
+                    // Without a timer every park would return at once and spin.
+                    tracing::error!(event = "resident_memory_sampler_timer_unavailable", %error);
+                    return;
                 }
-                metrics.unavailable_stores = metrics.unavailable_stores.saturating_add(1);
+            }
+        }
+        if cancellation.is_cancelled() {
+            return;
+        }
+        let sample = Arc::clone(&sample);
+        // Reclaimers run inside the publish and an allocator trim over a
+        // multi-gigabyte heap takes real time; keep it off the runtime. A
+        // shutdown stops awaiting that blocking pass but cannot unsafely
+        // interrupt allocator maintenance already running on its worker.
+        let sampled = native_runtime::spawn_blocking(move || sample());
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            result = sampled => {
+                if result.is_err() {
+                    return;
+                }
             }
         }
     }
-    if let Some(days) = retention.orphan_store_gc_days {
-        let findings = tracedecay_maintenance::retention::orphan_stores::classify_stores(
-            &page.entries,
-            retention_now.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "maintenance retention clock unavailable".to_owned(),
-            })?,
-        );
-        let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
-            findings,
-            retention_window_secs(days),
-        );
-        let (outcome, _) =
-            tracedecay_maintenance::retention::orphan_stores::execute_registered_collection(
-                profile_database,
-                &plan,
-                profile_root,
-            )
-            .await?;
-        metrics.reclaimed_bytes = metrics
-            .reclaimed_bytes
-            .saturating_add(outcome.reclaimed_bytes);
-        metrics.unavailable_stores = metrics
-            .unavailable_stores
-            .saturating_add(outcome.errors.len() as u64);
-        if !outcome.errors.is_empty() {
-            metrics.outcome = MaintenanceStoreOutcomeV1::Unreadable;
-        }
-    }
-    if let Some(days) = retention.incident_debris_retention_days {
-        let report = tracedecay_maintenance::retention::incident_debris::sweep_incident_debris(
-            &page.entries,
-            profile_root,
-            retention_window_secs(days),
-            retention_now.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "maintenance retention clock unavailable".to_owned(),
-            })?,
-        );
-        metrics.reclaimed_bytes = metrics
-            .reclaimed_bytes
-            .saturating_add(report.reclaimed_bytes);
-        metrics.unavailable_stores = metrics
-            .unavailable_stores
-            .saturating_add(report.errors.len() as u64);
-        if !report.errors.is_empty() {
-            metrics.outcome = MaintenanceStoreOutcomeV1::Unreadable;
-        }
-    }
-    let project_ids = page
-        .entries
-        .iter()
-        .map(|entry| entry.project_id.clone())
-        .collect::<Vec<_>>();
-    let next_cursor = next_cold_store_cursor(
-        cursor.after_project_id.as_deref(),
-        &project_ids,
-        page.next_cursor.is_some(),
-    )
-    .unwrap_or(ColdStoreCursorV1 {
-        after_project_id: None,
-    });
-    persist_cursor(&checkpoint_path, &next_cursor).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("persist maintenance cold-store cursor: {error}"),
-        }
-    })?;
-    Ok(metrics)
 }
 
-fn classify_cold_store_state(
-    cancelled: bool,
-    manifest_readable: bool,
-    data_root_exists: bool,
-) -> MaintenanceStoreOutcomeV1 {
-    if cancelled {
-        MaintenanceStoreOutcomeV1::Cancelled
-    } else if !data_root_exists {
-        MaintenanceStoreOutcomeV1::Missing
-    } else if !manifest_readable {
-        MaintenanceStoreOutcomeV1::Unreadable
-    } else {
-        MaintenanceStoreOutcomeV1::Processed
+/// Cadence of the measured-RSS sampler. Reading `/proc/self/status` is
+/// microseconds; a cold index of a few thousand files climbs from nothing to
+/// the admission watermark in about two minutes, so thirty seconds bounds
+/// how long freed-but-retained pages can count against admission.
+const RESIDENT_MEMORY_SAMPLE_INTERVAL_V1: Duration = Duration::from_secs(30);
+
+/// Whether the last resident-memory sample was logged as over budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ResidentMemoryLogStateV1 {
+    over_budget: bool,
+}
+
+/// A change in the logged resident-memory verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResidentMemoryLogTransitionV1 {
+    EnteredOverBudget,
+    ReturnedToNominal,
+}
+
+impl ResidentMemoryLogStateV1 {
+    /// Record one verdict and return the transition it made, if any: a
+    /// sustained state is logged once, when it starts and when it ends.
+    fn observe(&mut self, over_budget: bool) -> Option<ResidentMemoryLogTransitionV1> {
+        let transition = match (self.over_budget, over_budget) {
+            (false, true) => Some(ResidentMemoryLogTransitionV1::EnteredOverBudget),
+            (true, false) => Some(ResidentMemoryLogTransitionV1::ReturnedToNominal),
+            _ => None,
+        };
+        self.over_budget = over_budget;
+        transition
     }
 }
 
-fn checkpoint_path(profile_root: &Path) -> PathBuf {
-    profile_root
-        .join(CHECKPOINT_DIRECTORY)
-        .join(CHECKPOINT_FILE)
-}
-
-fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("maintenance cursor has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec(cursor).map_err(std::io::Error::other)?;
-    let mut file = std::fs::File::create(&temporary)?;
-    std::io::Write::write_all(&mut file, &bytes)?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)
-}
-
-pub(super) fn retention_maintenance_enabled(retention: &crate::config::RetentionConfig) -> bool {
+pub(super) fn retention_maintenance_enabled(
+    retention: &tracedecay_configuration::RetentionConfig,
+) -> bool {
     retention.session_lcm.enabled
         || retention.observation.enabled
         || retention.orphan_store_gc_days.is_some()
-        || retention.incident_debris_retention_days.is_some()
         || retention.compaction.is_some()
-}
-
-pub(super) fn retention_window_secs(days: u64) -> i64 {
-    i64::try_from(days)
-        .ok()
-        .and_then(|days| days.checked_mul(24 * 60 * 60))
-        .unwrap_or(i64::MAX)
-}
-
-pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system_clock_before_unix_epoch")?
-        .as_secs();
-    i64::try_from(seconds).map_err(|_| "system_clock_out_of_range")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
     use tokio::sync::Notify;
-    use tracedecay_application::storage::{
-        StorageByteSizeV1, StoreKeyV1, TableGrowthTelemetryReadV1, TableNameV1,
+
+    use super::{MaintenanceCoordinator, NativeTask, run_resident_memory_sampler_loop};
+    use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
+    use tracedecay_maintenance::tick::{
+        MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome,
+        cursor_after_attempted_units, select_store_window,
     };
-    use tracedecay_domain::UtcMicros;
-
-    use super::{
-        CadenceInstant, ColdStoreCursorV1, MAINTENANCE_FUTURES_ACTIVE,
-        MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence, MaintenanceContinuation,
-        MaintenanceStoreOutcomeV1, MaintenanceTickOutcome, RetentionOperatorLogLaneV1,
-        SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
-        StoreTelemetrySamplingRegistry, TableGrowthObservation, checkpoint_path,
-        classify_cold_store_state, compare_table_growth, cursor_after_attempted_units, load_cursor,
-        next_cold_store_cursor, persist_cursor, retention_failure_is_by_design,
-        run_maintenance_loop, select_store_window,
-    };
-
-    #[test]
-    fn table_growth_preview_never_mutates_the_maintenance_baseline() {
-        let store = StoreKeyV1::new("project.db").expect("store key");
-        let table = TableNameV1::new("messages").expect("table name");
-        let mut watermarks = None;
-
-        let preview = compare_table_growth(
-            &store,
-            std::collections::BTreeMap::from([(table.clone(), StorageByteSizeV1(10))]),
-            UtcMicros(1),
-            &mut watermarks,
-            TableGrowthObservation::Preview,
-        );
-        assert!(matches!(
-            preview,
-            TableGrowthTelemetryReadV1::Unknown { .. }
-        ));
-        assert!(
-            watermarks.is_none(),
-            "preview must not establish a baseline"
-        );
-
-        let baseline = compare_table_growth(
-            &store,
-            std::collections::BTreeMap::from([(table.clone(), StorageByteSizeV1(10))]),
-            UtcMicros(2),
-            &mut watermarks,
-            TableGrowthObservation::Advance,
-        );
-        assert!(matches!(
-            baseline,
-            TableGrowthTelemetryReadV1::BaselineEstablished {
-                tables_observed: 1,
-                ..
-            }
-        ));
-
-        let observed = compare_table_growth(
-            &store,
-            std::collections::BTreeMap::from([(table, StorageByteSizeV1(20))]),
-            UtcMicros(3),
-            &mut watermarks,
-            TableGrowthObservation::Preview,
-        );
-        let TableGrowthTelemetryReadV1::Observed { samples, .. } = observed else {
-            panic!("preview should compare with the maintenance baseline");
-        };
-        assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].growth_bytes().get(), 10);
-    }
 
     #[test]
     fn cadence_rate_limits_failures_and_successes() {
-        let started = CadenceInstant::now();
+        let started = std::time::Instant::now();
         let mut cadence = MaintenanceCadence::new(Duration::from_mins(1));
 
         assert!(cadence.reserve(started));
@@ -2088,7 +1388,7 @@ mod tests {
     #[test]
     fn retry_outcome_takes_precedence_over_bounded_progress() {
         let progress =
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::SemanticVectorRetention);
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention);
 
         assert_eq!(
             progress.combine(MaintenanceTickOutcome::Retry),
@@ -2101,17 +1401,10 @@ mod tests {
     }
 
     #[test]
-    fn code_generation_continuation_dominates_the_semantic_phase() {
-        // A code-generation continuation tick re-runs the bounded semantic
-        // page, so it must win when both phases report bounded progress; the
-        // reverse would starve the code-generation backlog.
-        let semantic =
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::SemanticVectorRetention);
+    fn code_generation_continuation_dominates_a_complete_tick() {
         let code_generation =
             MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention);
 
-        assert_eq!(semantic.combine(code_generation), code_generation);
-        assert_eq!(code_generation.combine(semantic), code_generation);
         assert_eq!(
             code_generation.combine(MaintenanceTickOutcome::Complete),
             code_generation
@@ -2159,78 +1452,6 @@ mod tests {
         registry.record_graph_replay_release_unhealthy(project);
         assert!(!registry.graph_replay_release_attempt_admitted(project));
         assert!(registry.graph_replay_release_attempt_admitted(project));
-    }
-
-    #[test]
-    fn by_design_retention_failures_are_the_unavailable_and_offline_lanes() {
-        assert!(retention_failure_is_by_design(
-            RetentionOperatorLogLaneV1::Semantic,
-            "unavailable:semantic retrieval is not calibrated",
-        ));
-        assert!(retention_failure_is_by_design(
-            RetentionOperatorLogLaneV1::Semantic,
-            "configuration_inventory_unavailable",
-        ));
-        assert!(!retention_failure_is_by_design(
-            RetentionOperatorLogLaneV1::Semantic,
-            "corrupt:index page",
-        ));
-        assert!(retention_failure_is_by_design(
-            RetentionOperatorLogLaneV1::CodeGeneration,
-            "vector_inventory_offline:vector_census_incomplete",
-        ));
-        assert!(!retention_failure_is_by_design(
-            RetentionOperatorLogLaneV1::CodeGeneration,
-            "graph_replay_pool_busy",
-        ));
-    }
-
-    #[test]
-    fn by_design_retention_logs_once_then_counts_on_the_quiet_gauge() {
-        let registry = StoreTelemetrySamplingRegistry::default();
-        let project = std::path::Path::new("/project");
-        let failure = "unavailable:semantic retrieval is not calibrated";
-
-        assert!(
-            registry.admit_by_design_retention_log(
-                RetentionOperatorLogLaneV1::Semantic,
-                project,
-                failure,
-            ),
-            "the first by-design state must log"
-        );
-        assert!(
-            !registry.admit_by_design_retention_log(
-                RetentionOperatorLogLaneV1::Semantic,
-                project,
-                failure,
-            ),
-            "an unchanged by-design state must stay quiet"
-        );
-        assert!(
-            registry.admit_by_design_retention_log(
-                RetentionOperatorLogLaneV1::Semantic,
-                project,
-                "unavailable:model missing",
-            ),
-            "a changed by-design reason must log again"
-        );
-
-        registry.mark_loud_retention_log();
-        registry.begin_retention_tick_log_window();
-        assert!(
-            registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry),
-            "the first by-design retry tick must log"
-        );
-        assert!(
-            !registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry),
-            "a repeated by-design retry tick must stay quiet"
-        );
-        registry.mark_loud_retention_log();
-        assert!(
-            registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry),
-            "a genuine anomaly on the same tick must keep the tick line loud"
-        );
     }
 
     #[test]
@@ -2282,145 +1503,15 @@ mod tests {
         );
     }
 
-    /// `MAINTENANCE_FUTURES_ACTIVE` is a process-wide gauge, so a test that
-    /// observes absolute readings must not overlap another test that runs a
-    /// maintenance loop. Every test that starts `run_maintenance_loop` holds
-    /// this lock for the whole lifetime of its loop.
-    static MAINTENANCE_LOOP_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    #[tokio::test(start_paused = true)]
-    async fn repeated_wakes_do_not_move_the_maintenance_due_deadline() {
-        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_session_memory::context::CancellationToken::new();
-        let wake = Arc::new(Notify::new());
-        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let baseline = MAINTENANCE_FUTURES_ACTIVE.load(Ordering::SeqCst);
-        let task_cancellation = cancellation.clone();
-        let task_wake = Arc::clone(&wake);
-        let task_ticks = Arc::clone(&ticks);
-        let task = tokio::spawn(async move {
-            run_maintenance_loop(
-                &task_cancellation,
-                &task_wake,
-                Duration::from_mins(10),
-                move |_| {
-                    let ticks = Arc::clone(&task_ticks);
-                    async move {
-                        ticks.fetch_add(1, Ordering::SeqCst);
-                        MaintenanceTickOutcome::Complete
-                    }
-                },
-            )
-            .await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(
-            MAINTENANCE_FUTURES_ACTIVE.load(Ordering::SeqCst),
-            baseline + 1,
-            "the loop lifecycle must become observable while the task is live"
-        );
-
-        for _ in 0..3 {
-            wake.notify_one();
-            tokio::task::yield_now().await;
-            assert_eq!(ticks.load(Ordering::SeqCst), 0);
-        }
-        tokio::time::advance(Duration::from_secs(59)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 0);
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            ticks.load(Ordering::SeqCst),
-            1,
-            "the original absolute deadline must run exactly once despite early wakes"
-        );
-
-        cancellation.cancel();
-        task.await
-            .expect("maintenance loop joins after cancellation");
-        assert_eq!(
-            MAINTENANCE_FUTURES_ACTIVE.load(Ordering::SeqCst),
-            baseline,
-            "cancellation must drop the lifecycle guard and clear the active gauge"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn progress_continuation_reenters_only_the_owning_phase() {
-        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_session_memory::context::CancellationToken::new();
-        let wake = Arc::new(Notify::new());
-        let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let task_cancellation = cancellation.clone();
-        let task_wake = Arc::clone(&wake);
-        let task_phases = Arc::clone(&phases);
-        let task = tokio::spawn(async move {
-            run_maintenance_loop(
-                &task_cancellation,
-                &task_wake,
-                Duration::from_mins(10),
-                move |continuation| {
-                    let phases = Arc::clone(&task_phases);
-                    async move {
-                        let mut phases = phases
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        phases.push(continuation);
-                        if phases.len() == 1 {
-                            MaintenanceTickOutcome::Continue(
-                                MaintenanceContinuation::SemanticVectorRetention,
-                            )
-                        } else {
-                            MaintenanceTickOutcome::Complete
-                        }
-                    }
-                },
-            )
-            .await;
-        });
-        tokio::task::yield_now().await;
-
-        tokio::time::advance(Duration::from_mins(1)).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_mins(1)).await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(
-            *phases
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![None, Some(MaintenanceContinuation::SemanticVectorRetention)],
-            "bounded progress must resume its semantic-vector phase instead of a full tick"
-        );
-
-        cancellation.cancel();
-        task.await
-            .expect("maintenance loop joins after cancellation");
-    }
-
     fn store_keys(count: usize) -> Vec<String> {
         (0..count).map(|index| format!("s:{index:03}")).collect()
-    }
-
-    #[test]
-    fn store_window_is_bounded_by_the_per_tick_budget() {
-        let keys = store_keys(50);
-        let (window, _) = select_store_window(&keys, None, MAINTENANCE_STORE_PAGE_LIMIT);
-        assert_eq!(window.len(), MAINTENANCE_STORE_PAGE_LIMIT);
-
-        // A mounted set smaller than the budget is processed whole.
-        let small = store_keys(3);
-        let (window, _) = select_store_window(&small, None, MAINTENANCE_STORE_PAGE_LIMIT);
-        assert_eq!(window, vec![0, 1, 2]);
     }
 
     #[test]
     fn store_window_round_robin_reaches_every_store_and_never_starves() {
         // With more stores than the budget, feeding each tick's cursor into the
         // next must cover every store within ceil(count / budget) ticks while
-        // no tick exceeds the budget — nothing reclaimable is skipped forever.
+        // no tick exceeds the budget, nothing reclaimable is skipped forever.
         for &(count, budget) in &[(7usize, 3usize), (50, 8), (17, 5), (8, 8), (1, 8)] {
             let keys = store_keys(count);
             let ticks = count.div_ceil(budget);
@@ -2445,26 +1536,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn store_window_resumes_after_the_cursor() {
-        let keys = store_keys(10);
-        let (first, next) = select_store_window(&keys, None, 4);
-        assert_eq!(first, vec![0, 1, 2, 3]);
-        assert_eq!(next.as_deref(), Some("s:003"));
-        let (second, next) = select_store_window(&keys, next.as_deref(), 4);
-        assert_eq!(second, vec![4, 5, 6, 7]);
-        assert_eq!(next.as_deref(), Some("s:007"));
-        // The window wraps past the end back to the front.
-        let (third, _) = select_store_window(&keys, next.as_deref(), 4);
-        assert_eq!(third, vec![8, 9, 0, 1]);
+    #[tokio::test]
+    async fn a_mounted_store_deleted_under_the_daemon_requires_a_restart() {
+        let temporary = tempfile::tempdir().expect("store identity fixture root");
+        let profile_root = temporary.path().join("profile");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            44,
+            "maintenance store identity",
+        )
+        .expect("daemon database scope");
+        let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("daemon session runtime registry");
+        let database_path = temporary.path().join("project.db");
+        tracedecay_global_db::register_registered_schema_installer();
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &database_path,
+            "maintenance store identity fixture",
+        )
+        .expect("store identity fixture authority");
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("store identity fixture database");
+        let scope = tracedecay_contracts::ResolvedScope::new(
+            tracedecay_domain::ProjectId::new("project.store-identity").expect("project identity"),
+            tracedecay_domain::RepositoryId::new("repository.store-identity")
+                .expect("repository identity"),
+            tracedecay_domain::WorktreeId::new("worktree.store-identity")
+                .expect("worktree identity"),
+            None,
+        )
+        .expect("resolved scope");
+        let sampling = StoreTelemetrySamplingRegistry::default();
+        assert!(sampling.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        let lost = |registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1| {
+            registry
+                .reset_required_stores()
+                .into_iter()
+                .filter(|store| store.store == database_path.display().to_string())
+                .map(|store| store.remedy)
+                .collect::<Vec<_>>()
+        };
+
+        super::record_lost_store_files(&sampling, &registry);
+        assert_eq!(
+            lost(&registry),
+            Vec::<String>::new(),
+            "a live store is not lost"
+        );
+
+        std::fs::remove_file(&database_path).expect("delete the mounted store");
+        super::record_lost_store_files(&sampling, &registry);
+        assert_eq!(
+            lost(&registry),
+            [tracedecay_domain::errors::DAEMON_RESTART_COMMAND.to_owned()],
+            "a store deleted under the daemon must be reset-required, naming the restart"
+        );
     }
 
     #[tokio::test]
-    async fn shutdown_release_clears_retained_telemetry_handles_and_progress() {
+    async fn shutdown_release_clears_retained_telemetry_handles() {
         let temporary = tempfile::tempdir().expect("telemetry registry fixture root");
         let database_path = temporary.path().join("project.db");
         let other_database_path = temporary.path().join("other.db");
-        tracedecay_store_runtime::register_registered_schema_installer();
+        tracedecay_global_db::register_registered_schema_installer();
         let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
             &database_path,
             "maintenance telemetry shutdown fixture",
@@ -2479,7 +1623,7 @@ mod tests {
         .expect("telemetry fixture database");
         let project_id = tracedecay_domain::ProjectId::new("project.maintenance-shutdown")
             .expect("project identity");
-        let scope = tracedecay_application::ResolvedScope::new(
+        let scope = tracedecay_contracts::ResolvedScope::new(
             project_id,
             tracedecay_domain::RepositoryId::new("repository.maintenance-shutdown")
                 .expect("repository identity"),
@@ -2495,22 +1639,12 @@ mod tests {
         assert!(registry.register_port(&other_database_path, &scope, || {
             database.storage_telemetry_handle()
         }));
-        registry.record_semantic_vector_retention_unseated(&database_path);
-        registry.record_semantic_vector_retention_unseated(&other_database_path);
         assert!(registry.registered_port(&database_path, &scope).is_some());
-        assert_eq!(
-            registry.semantic_vector_retention_read(&database_path),
-            SemanticVectorRetentionReadV1::SemanticUnseated
-        );
 
         registry.release_retained_handle(&database_path);
         assert!(
             registry.registered_port(&database_path, &scope).is_none(),
             "project retirement must drop the exact maintenance-owned database client"
-        );
-        assert_eq!(
-            registry.semantic_vector_retention_read(&database_path),
-            SemanticVectorRetentionReadV1::Unknown
         );
         assert!(
             registry
@@ -2518,14 +1652,9 @@ mod tests {
                 .is_some(),
             "exact project retirement must preserve unrelated telemetry clients"
         );
-        assert_eq!(
-            registry.semantic_vector_retention_read(&other_database_path),
-            SemanticVectorRetentionReadV1::SemanticUnseated
-        );
         assert!(registry.register_port(&database_path, &scope, || {
             database.storage_telemetry_handle()
         }));
-        registry.record_semantic_vector_retention_unseated(&database_path);
 
         registry.release_retained_handles_for_shutdown();
 
@@ -2533,16 +1662,18 @@ mod tests {
             registry.registered_port(&database_path, &scope).is_none(),
             "shutdown must drop maintenance-owned database clients"
         );
-        assert_eq!(
-            registry.semantic_vector_retention_read(&database_path),
-            SemanticVectorRetentionReadV1::Unknown
+        assert!(
+            registry
+                .registered_port(&other_database_path, &scope)
+                .is_none(),
+            "shutdown must drop every maintenance-owned database client"
         );
     }
 
     #[test]
     fn store_window_empty_set_preserves_cursor() {
         let (window, next) = select_store_window(&[], Some("s:005"), 8);
-        assert!(window.is_empty());
+        assert_eq!(window.len(), 0);
         assert_eq!(next.as_deref(), Some("s:005"));
     }
 
@@ -2562,478 +1693,11 @@ mod tests {
     }
 
     #[test]
-    fn semantic_vector_census_cursor_advances_and_resets_at_end() {
-        let registry = StoreTelemetrySamplingRegistry::default();
-        let project = std::path::Path::new("/project");
-        let shard_id = tracedecay_store::StoreShardIdV1::project(
-            tracedecay_domain::BrainId::new("brain.maintenance").unwrap(),
-            tracedecay_domain::UserProfileId::new("profile.maintenance").unwrap(),
-            tracedecay_domain::ProjectId::new("project.maintenance").unwrap(),
-        );
-        let revision = tracedecay_store::SemanticVectorStageCensusRevision::new(7).unwrap();
-        let first_counts = tracedecay_store::SemanticVectorStageCensusCounts {
-            pending: 2,
-            ready: 3,
-            published: 4,
-            cancelled: 5,
-        };
-        let first_digest = tracedecay_domain::canonical_sha256(&"first-page").unwrap();
-        let cursor = tracedecay_store::SemanticVectorStageCensusCursor::new(
-            shard_id.clone(),
-            None,
-            revision,
-            256,
-            first_counts,
-            first_digest,
-        )
-        .expect("valid semantic vector cursor");
-        let first = tracedecay_graph_db::SemanticVectorRetentionCensus {
-            shard_id: shard_id.clone(),
-            revision,
-            pending: 2,
-            ready: 3,
-            published: 4,
-            cancelled: 5,
-            complete_receipt: None,
-            continuation: Some(cursor.clone()),
-            action: tracedecay_graph_db::SemanticVectorRetentionAction::None,
-        };
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &first),
-            SemanticVectorRetentionCensusOutcome::Accepted
-        );
-        assert_eq!(
-            registry.semantic_vector_retention_cursor(project),
-            Some(cursor)
-        );
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::Scanning
-        );
-
-        let second = tracedecay_graph_db::SemanticVectorRetentionCensus {
-            shard_id: shard_id.clone(),
-            revision,
-            pending: 7,
-            ready: 11,
-            published: 13,
-            cancelled: 17,
-            complete_receipt: Some(tracedecay_store::SemanticVectorProjectCensusReceipt {
-                shard_id,
-                revision,
-                counts: tracedecay_store::SemanticVectorStageCensusCounts {
-                    pending: 9,
-                    ready: 14,
-                    published: 17,
-                    cancelled: 22,
-                },
-                record_digest: tracedecay_domain::canonical_sha256(&"complete").unwrap(),
-            }),
-            continuation: None,
-            action: tracedecay_graph_db::SemanticVectorRetentionAction::None,
-        };
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &second),
-            SemanticVectorRetentionCensusOutcome::Accepted
-        );
-        assert_eq!(registry.semantic_vector_retention_cursor(project), None);
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::Observed {
-                receipt: second.complete_receipt.unwrap(),
-            }
-        );
-    }
-
-    #[test]
-    fn semantic_vector_mutation_and_failure_restart_census() {
-        let registry = StoreTelemetrySamplingRegistry::default();
-        let project = std::path::Path::new("/project");
-        let shard_id = tracedecay_store::StoreShardIdV1::project(
-            tracedecay_domain::BrainId::new("brain.maintenance").unwrap(),
-            tracedecay_domain::UserProfileId::new("profile.maintenance").unwrap(),
-            tracedecay_domain::ProjectId::new("project.maintenance").unwrap(),
-        );
-        let revision = tracedecay_store::SemanticVectorStageCensusRevision::new(7).unwrap();
-        let cursor = tracedecay_store::SemanticVectorStageCensusCursor::new(
-            shard_id.clone(),
-            None,
-            revision,
-            256,
-            tracedecay_store::SemanticVectorStageCensusCounts {
-                pending: 1,
-                ready: 0,
-                published: 1,
-                cancelled: 0,
-            },
-            tracedecay_domain::canonical_sha256(&"page").unwrap(),
-        )
-        .expect("valid semantic vector cursor");
-        let page = tracedecay_graph_db::SemanticVectorRetentionCensus {
-            shard_id,
-            revision,
-            pending: 1,
-            ready: 0,
-            published: 1,
-            cancelled: 0,
-            complete_receipt: None,
-            continuation: Some(cursor),
-            action: tracedecay_graph_db::SemanticVectorRetentionAction::None,
-        };
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &page),
-            SemanticVectorRetentionCensusOutcome::Accepted
-        );
-
-        let generation = tracedecay_domain::VectorGenerationIdV1::new(
-            tracedecay_domain::canonical_sha256(&"retired-generation")
-                .expect("canonical generation digest"),
-        );
-        let mutated = tracedecay_graph_db::SemanticVectorRetentionCensus {
-            action: tracedecay_graph_db::SemanticVectorRetentionAction::Retired(generation),
-            ..page.clone()
-        };
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &mutated),
-            SemanticVectorRetentionCensusOutcome::Accepted
-        );
-        assert_eq!(registry.semantic_vector_retention_cursor(project), None);
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::Unknown
-        );
-
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &page),
-            SemanticVectorRetentionCensusOutcome::Accepted
-        );
-        registry.record_semantic_vector_retention_failure(project);
-        assert_eq!(registry.semantic_vector_retention_cursor(project), None);
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::Unknown
-        );
-    }
-
-    #[test]
-    fn semantic_unseated_read_is_distinct_and_cleared_by_census_and_failure() {
-        let registry = StoreTelemetrySamplingRegistry::default();
-        let project = std::path::Path::new("/project");
-
-        registry.record_semantic_vector_retention_unseated(project);
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::SemanticUnseated
-        );
-        assert_eq!(registry.semantic_vector_retention_cursor(project), None);
-
-        // A failure reset is Unknown, not unseated: the census could not be
-        // read even though a semantic runtime is seated.
-        registry.record_semantic_vector_retention_failure(project);
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::Unknown
-        );
-
-        // A census page proves a seated runtime and clears the unseated pin.
-        registry.record_semantic_vector_retention_unseated(project);
-        let shard_id = tracedecay_store::StoreShardIdV1::project(
-            tracedecay_domain::BrainId::new("brain.maintenance").unwrap(),
-            tracedecay_domain::UserProfileId::new("profile.maintenance").unwrap(),
-            tracedecay_domain::ProjectId::new("project.maintenance").unwrap(),
-        );
-        let revision = tracedecay_store::SemanticVectorStageCensusRevision::new(3).unwrap();
-        let complete = tracedecay_graph_db::SemanticVectorRetentionCensus {
-            shard_id: shard_id.clone(),
-            revision,
-            pending: 0,
-            ready: 0,
-            published: 1,
-            cancelled: 0,
-            complete_receipt: Some(tracedecay_store::SemanticVectorProjectCensusReceipt {
-                shard_id,
-                revision,
-                counts: tracedecay_store::SemanticVectorStageCensusCounts {
-                    pending: 0,
-                    ready: 0,
-                    published: 1,
-                    cancelled: 0,
-                },
-                record_digest: tracedecay_domain::canonical_sha256(&"unseated-clear").unwrap(),
-            }),
-            continuation: None,
-            action: tracedecay_graph_db::SemanticVectorRetentionAction::None,
-        };
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &complete),
-            SemanticVectorRetentionCensusOutcome::Accepted
-        );
-        assert!(matches!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::Observed { .. }
-        ));
-
-        // Re-pinning unseated discards a stale observed receipt: an unseated
-        // runtime cannot vouch for a census taken while it was seated.
-        registry.record_semantic_vector_retention_unseated(project);
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::SemanticUnseated
-        );
-        assert!(!registry.semantic_vector_scope_collection_ready(project));
-    }
-
-    #[test]
-    fn retained_terminal_census_with_receipt_is_observed() {
-        let registry = StoreTelemetrySamplingRegistry::default();
-        let project = std::path::Path::new("/project");
-        let shard_id = tracedecay_store::StoreShardIdV1::project(
-            tracedecay_domain::BrainId::new("brain.maintenance").unwrap(),
-            tracedecay_domain::UserProfileId::new("profile.maintenance").unwrap(),
-            tracedecay_domain::ProjectId::new("project.maintenance").unwrap(),
-        );
-        let revision = tracedecay_store::SemanticVectorStageCensusRevision::new(7).unwrap();
-        let receipt = tracedecay_store::SemanticVectorProjectCensusReceipt {
-            shard_id: shard_id.clone(),
-            revision,
-            counts: tracedecay_store::SemanticVectorStageCensusCounts {
-                pending: 0,
-                ready: 0,
-                published: 1,
-                cancelled: 0,
-            },
-            record_digest: tracedecay_domain::canonical_sha256(&"retained-head").unwrap(),
-        };
-        let generation = tracedecay_domain::VectorGenerationIdV1::new(
-            tracedecay_domain::canonical_sha256(&"retained-generation")
-                .expect("canonical generation digest"),
-        );
-        let census = tracedecay_graph_db::SemanticVectorRetentionCensus {
-            shard_id,
-            revision,
-            pending: 0,
-            ready: 0,
-            published: 1,
-            cancelled: 0,
-            complete_receipt: Some(receipt.clone()),
-            continuation: None,
-            action: tracedecay_graph_db::SemanticVectorRetentionAction::Retained(generation),
-        };
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &census),
-            SemanticVectorRetentionCensusOutcome::Accepted
-        );
-        assert_eq!(registry.semantic_vector_retention_cursor(project), None);
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::Observed { receipt }
-        );
-    }
-
-    #[test]
-    fn incomplete_terminal_census_resets_progress() {
-        let registry = StoreTelemetrySamplingRegistry::default();
-        let project = std::path::Path::new("/project");
-        let shard_id = tracedecay_store::StoreShardIdV1::project(
-            tracedecay_domain::BrainId::new("brain.maintenance").unwrap(),
-            tracedecay_domain::UserProfileId::new("profile.maintenance").unwrap(),
-            tracedecay_domain::ProjectId::new("project.maintenance").unwrap(),
-        );
-        let revision = tracedecay_store::SemanticVectorStageCensusRevision::new(7).unwrap();
-        let cursor = tracedecay_store::SemanticVectorStageCensusCursor::new(
-            shard_id.clone(),
-            None,
-            revision,
-            256,
-            tracedecay_store::SemanticVectorStageCensusCounts {
-                pending: 0,
-                ready: 0,
-                published: 1,
-                cancelled: 0,
-            },
-            tracedecay_domain::canonical_sha256(&"paging").unwrap(),
-        )
-        .expect("valid semantic vector cursor");
-        let paging = tracedecay_graph_db::SemanticVectorRetentionCensus {
-            shard_id: shard_id.clone(),
-            revision,
-            pending: 0,
-            ready: 0,
-            published: 1,
-            cancelled: 0,
-            complete_receipt: None,
-            continuation: Some(cursor.clone()),
-            action: tracedecay_graph_db::SemanticVectorRetentionAction::None,
-        };
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &paging),
-            SemanticVectorRetentionCensusOutcome::Accepted
-        );
-        assert_eq!(
-            registry.semantic_vector_retention_cursor(project),
-            Some(cursor)
-        );
-
-        let incomplete = tracedecay_graph_db::SemanticVectorRetentionCensus {
-            shard_id,
-            revision,
-            pending: 0,
-            ready: 0,
-            published: 1,
-            cancelled: 0,
-            complete_receipt: None,
-            continuation: None,
-            action: tracedecay_graph_db::SemanticVectorRetentionAction::Retained(
-                tracedecay_domain::VectorGenerationIdV1::new(
-                    tracedecay_domain::canonical_sha256(&"retained-incomplete")
-                        .expect("canonical generation digest"),
-                ),
-            ),
-        };
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &incomplete),
-            SemanticVectorRetentionCensusOutcome::IncompleteTerminalPage
-        );
-        assert_eq!(registry.semantic_vector_retention_cursor(project), None);
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::Unknown
-        );
-    }
-
-    #[test]
-    fn invalid_sum_receipt_is_census_count_overflow() {
-        let registry = StoreTelemetrySamplingRegistry::default();
-        let project = std::path::Path::new("/project");
-        let shard_id = tracedecay_store::StoreShardIdV1::project(
-            tracedecay_domain::BrainId::new("brain.maintenance").unwrap(),
-            tracedecay_domain::UserProfileId::new("profile.maintenance").unwrap(),
-            tracedecay_domain::ProjectId::new("project.maintenance").unwrap(),
-        );
-        let revision = tracedecay_store::SemanticVectorStageCensusRevision::new(7).unwrap();
-        let census = tracedecay_graph_db::SemanticVectorRetentionCensus {
-            shard_id: shard_id.clone(),
-            revision,
-            pending: 0,
-            ready: 0,
-            published: 1,
-            cancelled: 0,
-            complete_receipt: Some(tracedecay_store::SemanticVectorProjectCensusReceipt {
-                shard_id,
-                revision,
-                counts: tracedecay_store::SemanticVectorStageCensusCounts {
-                    pending: u64::MAX,
-                    ready: 1,
-                    published: 0,
-                    cancelled: 0,
-                },
-                record_digest: tracedecay_domain::canonical_sha256(&"overflow").unwrap(),
-            }),
-            continuation: None,
-            action: tracedecay_graph_db::SemanticVectorRetentionAction::None,
-        };
-        assert_eq!(
-            registry.record_semantic_vector_retention_census(project, &census),
-            SemanticVectorRetentionCensusOutcome::CensusCountOverflow
-        );
-        assert_eq!(registry.semantic_vector_retention_cursor(project), None);
-        assert_eq!(
-            registry.semantic_vector_retention_read(project),
-            SemanticVectorRetentionReadV1::Unknown
-        );
-    }
-
-    #[test]
-    fn cold_store_cursor_resumes_after_the_last_complete_project() {
-        let first = next_cold_store_cursor(
-            None,
-            &["project-a".to_owned(), "project-b".to_owned()],
-            true,
-        )
-        .expect("first page cursor");
-        assert_eq!(
-            first,
-            ColdStoreCursorV1 {
-                after_project_id: Some("project-b".to_owned()),
-            }
-        );
-
-        assert_eq!(
-            next_cold_store_cursor(
-                first.after_project_id.as_deref(),
-                &["project-c".to_owned()],
-                false,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn cold_store_outcomes_do_not_report_deferred_work_as_processed() {
-        for outcome in [
-            MaintenanceStoreOutcomeV1::Busy,
-            MaintenanceStoreOutcomeV1::Missing,
-            MaintenanceStoreOutcomeV1::Unreadable,
-            MaintenanceStoreOutcomeV1::Cancelled,
-        ] {
-            assert!(!outcome.was_processed());
-        }
-        assert!(MaintenanceStoreOutcomeV1::Processed.was_processed());
-    }
-
-    #[test]
-    fn cold_store_checkpoint_survives_restart() {
-        let root = tempfile::tempdir().expect("checkpoint root");
-        let path = checkpoint_path(root.path());
-        let expected = ColdStoreCursorV1 {
-            after_project_id: Some("project-b".to_owned()),
-        };
-
-        persist_cursor(&path, &expected).expect("persist cursor");
-
-        assert_eq!(load_cursor(&path), Some(expected));
-        assert!(!path.with_extension("json.tmp").exists());
-    }
-
-    #[test]
-    fn cold_store_state_distinguishes_missing_unreadable_and_cancelled() {
-        assert_eq!(
-            classify_cold_store_state(false, true, true),
-            MaintenanceStoreOutcomeV1::Processed
-        );
-        assert_eq!(
-            classify_cold_store_state(false, true, false),
-            MaintenanceStoreOutcomeV1::Missing
-        );
-        assert_eq!(
-            classify_cold_store_state(false, false, true),
-            MaintenanceStoreOutcomeV1::Unreadable
-        );
-        assert_eq!(
-            classify_cold_store_state(true, true, true),
-            MaintenanceStoreOutcomeV1::Cancelled
-        );
-    }
-
-    #[test]
-    fn debris_retention_enables_maintenance_without_orphan_gc() {
-        let mut retention = crate::config::RetentionConfig::default();
-        retention.session_lcm.enabled = false;
-        retention.observation.enabled = false;
-        retention.orphan_store_gc_days = None;
-        retention.incident_debris_retention_days = Some(30);
-        retention.compaction = None;
-
-        assert!(super::retention_maintenance_enabled(&retention));
-    }
-
-    #[test]
     fn soft_budget_alone_never_enables_destructive_maintenance() {
-        let mut retention = crate::config::RetentionConfig::default();
+        let mut retention = tracedecay_configuration::RetentionConfig::default();
         retention.session_lcm.enabled = false;
         retention.observation.enabled = false;
         retention.orphan_store_gc_days = None;
-        retention.incident_debris_retention_days = None;
         retention.compaction = None;
         retention
             .store_soft_budgets_bytes
@@ -3046,7 +1710,385 @@ mod tests {
     }
 
     #[test]
-    fn retention_window_conversion_never_wraps_negative() {
-        assert_eq!(super::retention_window_secs(u64::MAX), i64::MAX);
+    fn resident_memory_log_reports_each_transition_once() {
+        use super::{ResidentMemoryLogStateV1, ResidentMemoryLogTransitionV1};
+
+        let mut log = ResidentMemoryLogStateV1::default();
+        assert_eq!(log.observe(false), None, "nominal from the start is silent");
+        assert_eq!(
+            log.observe(true),
+            Some(ResidentMemoryLogTransitionV1::EnteredOverBudget)
+        );
+        assert_eq!(log.observe(true), None, "a sustained overrun logs once");
+        assert_eq!(
+            log.observe(false),
+            Some(ResidentMemoryLogTransitionV1::ReturnedToNominal)
+        );
+        assert_eq!(log.observe(false), None);
+        assert_eq!(
+            log.observe(true),
+            Some(ResidentMemoryLogTransitionV1::EnteredOverBudget),
+            "a fresh overrun after recovery logs again"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_resident_memory_reclaimer_never_stalls_runtime_or_sampler_cancellation() {
+        const INTERVAL: Duration = Duration::from_millis(200);
+        let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+        let started = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new((StdMutex::new(false), Condvar::new()));
+        let callback_started = Arc::clone(&started);
+        let callback_calls = Arc::clone(&calls);
+        let callback_release = Arc::clone(&release);
+        let fake_reclaimer = Arc::new(move || {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+            callback_started.notify_one();
+            let (released, ready) = &*callback_release;
+            let mut released = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = ready
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        });
+        let task_cancellation = cancellation.clone();
+        let spawned = std::time::Instant::now();
+        let mut sampler = tokio::spawn(async move {
+            run_resident_memory_sampler_loop(&task_cancellation, INTERVAL, fake_reclaimer).await;
+        });
+
+        let started_after_interval =
+            tokio::time::timeout(Duration::from_secs(10), started.notified()).await;
+        let first_sample_after = spawned.elapsed();
+        let heartbeat = tokio::spawn(async { 7_u8 });
+        let heartbeat_result = heartbeat.await;
+
+        cancellation.cancel();
+        let cancelled_while_blocked =
+            tokio::time::timeout(Duration::from_secs(10), &mut sampler).await;
+
+        let (released, ready) = &*release;
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        ready.notify_all();
+
+        assert!(started_after_interval.is_ok(), "the sampler must run");
+        assert!(
+            first_sample_after >= INTERVAL,
+            "the sampler must wait its interval first, sampled after {first_sample_after:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(heartbeat_result.expect("runtime heartbeat"), 7);
+        cancelled_while_blocked
+            .expect("cancellation must not wait for a blocked pressure reclaimer")
+            .expect("sampler joins after cancellation");
+    }
+
+    /// A registered project nothing has mounted since the daemon started is
+    /// collected by the first full tick and converges on its continuation,
+    /// instead of waiting for a client to mount it. A tick that runs while a
+    /// capacity release holds the maintenance store clients defers it.
+    #[test]
+    fn a_full_tick_collects_an_unmounted_registered_project_without_a_tokio_runtime() {
+        let hazards = crate::test_support::native_runtime_hazards();
+        tracedecay_runtime_core::native_runtime::block_on(
+            a_full_tick_collects_an_unmounted_registered_project(),
+        )
+        .expect("native runtime");
+        assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+    }
+
+    async fn a_full_tick_collects_an_unmounted_registered_project() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let temp = tempfile::TempDir::new().expect("temp root");
+        let profile_root = temp.path().join("profile");
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(&checkout).expect("checkout");
+        let checkout = checkout.canonicalize().expect("canonical checkout");
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+            &profile_root,
+        )
+        .await
+        .expect("profile database");
+        let profile_database = runtime.profile_database_arc();
+        let project = profile_database
+            .upsert_code_project("proj_unmounted", &checkout, None, None, None)
+            .await
+            .expect("register project");
+        // The scope hash is derived from the registry's stored canonical
+        // root, spelled plainly. Hashing the verbatim `\\?\` spelling
+        // `canonicalize` returns on Windows names a directory the tick's
+        // unmounted-scope lookup cannot prove, so it would skip the fixture.
+        let store_root =
+            tracedecay_code_index_retention::code_index_generations::code_index_store_root(
+                &tracedecay_runtime_core::storage::profile_sharded_data_root(
+                    &profile_root,
+                    &project.project_id,
+                ),
+                Path::new(&project.canonical_root),
+            );
+        tracedecay_code_index_retention::code_index_generations::fixture::write_generation_store_fixture(
+            &store_root,
+            6,
+        );
+        let generation_files = || {
+            std::fs::read_dir(store_root.join("code-generations-v1"))
+                .expect("list generations")
+                .count()
+        };
+        let coordinator = MaintenanceCoordinator {
+            background_cpu: Some(Arc::new(
+                tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1::new(
+                    std::num::NonZeroUsize::MIN,
+                ),
+            )),
+            ..MaintenanceCoordinator::default()
+        };
+        let administration = super::StoreAdministration::default();
+        let schedulers =
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
+                1,
+            );
+        let retention = tracedecay_configuration::RetentionConfig::default();
+        let branch_gc = super::BranchStoreGcCadenceV1 { branch_gc_days: 30 };
+        assert_eq!(generation_files(), 6);
+
+        let release = administration.maintenance_store_clients().lock().await;
+        let deferred = coordinator
+            .run_tick(
+                &profile_root,
+                &profile_database,
+                &administration,
+                &schedulers,
+                &retention,
+                branch_gc,
+                None,
+            )
+            .await;
+        assert_eq!(deferred, MaintenanceTickOutcome::Retry);
+        assert_eq!(
+            generation_files(),
+            6,
+            "a tick leases no store while a capacity release runs"
+        );
+        drop(release);
+
+        coordinator
+            .run_tick(
+                &profile_root,
+                &profile_database,
+                &administration,
+                &schedulers,
+                &retention,
+                branch_gc,
+                None,
+            )
+            .await;
+        assert_eq!(generation_files(), 1, "the full tick collects the backlog");
+
+        let continuation = coordinator
+            .run_tick(
+                &profile_root,
+                &profile_database,
+                &administration,
+                &schedulers,
+                &retention,
+                branch_gc,
+                Some(MaintenanceContinuation::CodeGenerationRetention),
+            )
+            .await;
+        assert_eq!(continuation, MaintenanceTickOutcome::Complete);
+        assert_eq!(generation_files(), 1);
+    }
+
+    #[test]
+    fn a_full_tick_sweeps_expired_response_handles_from_the_profile_and_each_store() {
+        tracedecay_runtime_core::native_runtime::block_on(async {
+            use tracedecay_session_memory::response_handles::{
+                inventory_response_handles, store_response_handle,
+            };
+
+            let temp = tempfile::TempDir::new().expect("temp root");
+            let profile_root = temp.path().join("profile");
+            let checkout = temp.path().join("checkout");
+            std::fs::create_dir_all(&checkout).expect("checkout");
+            let runtime =
+                tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+                    &profile_root,
+                )
+                .await
+                .expect("profile database");
+            let profile_database = runtime.profile_database_arc();
+            let project = profile_database
+                .upsert_code_project("proj_handles", &checkout, None, None, None)
+                .await
+                .expect("register project");
+            let store_root = tracedecay_runtime_core::storage::profile_sharded_data_root(
+                &profile_root,
+                &project.project_id,
+            );
+            std::fs::create_dir_all(&store_root).expect("project store");
+            let roots = [
+                profile_root.join(super::RESPONSE_HANDLES_DIRECTORY),
+                store_root.join(super::RESPONSE_HANDLES_DIRECTORY),
+            ];
+            let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+            for root in &roots {
+                store_response_handle(root, "expired", 1).expect("expired handle");
+                store_response_handle(root, "fresh", now).expect("fresh handle");
+                assert_eq!(inventory_response_handles(root).expect("inventory").file_count, 2);
+            }
+            let coordinator = MaintenanceCoordinator {
+                background_cpu: Some(Arc::new(
+                    tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1::new(
+                        std::num::NonZeroUsize::MIN,
+                    ),
+                )),
+                ..MaintenanceCoordinator::default()
+            };
+
+            coordinator
+                .run_tick(
+                    &profile_root,
+                    &profile_database,
+                    &super::StoreAdministration::default(),
+                    &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+                    &tracedecay_configuration::RetentionConfig::default(),
+                    super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },
+                    None,
+                )
+                .await;
+
+            for root in &roots {
+                assert_eq!(
+                    inventory_response_handles(root).expect("inventory").file_count,
+                    1,
+                    "the tick removes the expired handle and keeps the fresh one under {}",
+                    root.display()
+                );
+            }
+        })
+        .expect("native runtime");
+    }
+
+    /// Tick state released 200 ms after its tick drops, past the abort
+    /// deadline, as when a loaded host runs an aborted tick's unwind late. The
+    /// release runs on its own thread so no shared runtime worker blocks.
+    struct LateUnwind<T: Send + 'static>(Option<T>);
+
+    impl<T: Send + 'static> Drop for LateUnwind<T> {
+        fn drop(&mut self) {
+            let state = self.0.take();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                drop(state);
+            });
+        }
+    }
+
+    /// The join may abandon an aborted tick whose unwind outlasts the abort
+    /// deadline, so the test waits for the tick's state to drop rather than
+    /// expecting the join to have seen it.
+    #[tokio::test]
+    async fn shutdown_aborts_a_stuck_tick_at_the_abort_deadline() {
+        let (held_state, released) = tokio::sync::oneshot::channel::<()>();
+        let started = Arc::new(Notify::new());
+        let task_started = Arc::clone(&started);
+        let handle = NativeTask::spawn(async move {
+            let _held_state = LateUnwind(Some(held_state));
+            task_started.notify_one();
+            std::future::pending::<()>().await;
+        })
+        .expect("native task");
+        started.notified().await;
+
+        super::join_cancelled_maintenance_task(
+            Some(handle),
+            "stuck_tick",
+            Duration::from_millis(50),
+        )
+        .await;
+
+        let released = tokio::time::timeout(Duration::from_secs(30), released)
+            .await
+            .expect("a tick stuck past the abort deadline must be aborted");
+        assert!(released.is_err(), "the aborted tick dropped its state");
+    }
+
+    /// A tick cancelled while it awaits blocking store work must not leave
+    /// that work holding its database client past the maintenance join: the
+    /// terminal store close then finds the client lease and skips the WAL
+    /// truncate.
+    #[tokio::test]
+    async fn shutdown_waits_for_the_blocking_store_work_of_a_cancelled_tick() {
+        let coordinator = MaintenanceCoordinator::default();
+        let store_client = Arc::new(());
+        let blocking_client = Arc::clone(&store_client);
+        let started = Arc::new(Notify::new());
+        let task_started = Arc::clone(&started);
+        let handle = NativeTask::spawn(async move {
+            let _ = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                task_started.notify_one();
+                std::thread::sleep(Duration::from_millis(300));
+                drop(blocking_client);
+            })
+            .await;
+        })
+        .expect("native task");
+        *coordinator.task.lock().await = Some(handle);
+        started.notified().await;
+
+        coordinator.shutdown().await;
+
+        assert_eq!(
+            Arc::strong_count(&store_client),
+            1,
+            "the maintenance join returned while the tick's blocking store work held its client"
+        );
+    }
+
+    /// The coordinator starts its sampler, publication and retention owners
+    /// on the native runtime and joins them at shutdown, with no Tokio
+    /// runtime entered.
+    #[test]
+    fn the_coordinator_runs_and_shuts_down_without_a_tokio_runtime() {
+        let hazards = crate::test_support::native_runtime_hazards();
+        tracedecay_runtime_core::native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let temp = tempfile::TempDir::new().expect("temp root");
+            let retention = tracedecay_configuration::RetentionConfig {
+                orphan_store_gc_days: Some(30),
+                ..tracedecay_configuration::RetentionConfig::default()
+            };
+            assert!(super::retention_maintenance_enabled(&retention));
+            let coordinator = MaintenanceCoordinator::spawn(
+                temp.path().join("profile"),
+                super::StoreAdministration::default(),
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+                retention,
+                super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },
+            )
+            .await;
+            assert!(coordinator.task.lock().await.is_some(), "the retention owner started");
+            assert!(
+                coordinator.resident_memory_sampler.lock().await.is_some(),
+                "the sampler started"
+            );
+            tracedecay_runtime_core::native_runtime::timeout(
+                Duration::from_secs(10),
+                coordinator.shutdown(),
+            )
+            .await
+            .expect("shutdown joins every maintenance owner");
+            assert!(coordinator.task.lock().await.is_none());
+            assert!(coordinator.resident_memory_sampler.lock().await.is_none());
+        })
+        .expect("native runtime");
+        assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
     }
 }

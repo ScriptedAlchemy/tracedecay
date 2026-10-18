@@ -2,6 +2,7 @@ import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'rea
 import { ChevronDown } from 'lucide-react';
 import { cn } from '../cn';
 import { WorkspaceHeader } from '../instrument.tsx';
+import { rovingRowsKeyDown } from '../rovingRows.ts';
 
 /** Left filter column, center result list, right inspector. Regions are
  * slots; workspaces own only read-model wiring.
@@ -21,7 +22,7 @@ export function ExplorerSplit({
   inspectorWidth = 'standard',
   className,
 }: {
-  /** Workspace path — supplies the channel number in the header. Omit to
+  /** Workspace path, supplies the channel number in the header. Omit to
    * render the split without a header (embedded use). */
   path?: string;
   title?: string;
@@ -37,53 +38,14 @@ export function ExplorerSplit({
 }) {
   const resultsRef = useRef<HTMLElement | null>(null);
   // Below `lg` the filter rail is display:none, which used to take the query
-  // input — the only way to search — with it. The archetype owns the fix: the
+  // input, the only way to search, with it. The archetype owns the fix: the
   // same `filters` node renders a second time as a collapsible strip above the
   // results, shown only below `lg` (the rail and the strip are never both
   // visible). Filter state lives in the workspace, so both renders stay in
   // sync; collapsed by default so narrow viewports keep their vertical budget.
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const mobileFiltersId = useId();
-  // Roving arrows over the result rows: rows are native buttons, so
-  // Enter/Space activate for free; arrows, Home, End and Page keys move
-  // focus without forcing a Tab-through of every row.
-  const onResultsKeyDown = (event: KeyboardEvent) => {
-    const container = resultsRef.current;
-    if (!container) return;
-    const rows = [...container.querySelectorAll<HTMLButtonElement>('button')];
-    if (rows.length === 0) return;
-    const active = document.activeElement;
-    const current = active instanceof HTMLButtonElement ? rows.indexOf(active) : -1;
-    const page = 10;
-    const last = rows.length - 1;
-    const from = current < 0 ? 0 : current;
-    let next: number;
-    switch (event.key) {
-      case 'Home':
-        next = 0;
-        break;
-      case 'End':
-        next = last;
-        break;
-      case 'PageDown':
-        next = Math.min(from + page, last);
-        break;
-      case 'PageUp':
-        next = Math.max(from - page, 0);
-        break;
-      case 'ArrowDown':
-        next = Math.min(current + 1, last);
-        break;
-      case 'ArrowUp':
-        next = Math.max(current - 1, 0);
-        break;
-      default:
-        return;
-    }
-    event.preventDefault();
-    rows[next]?.focus();
-    rows[next]?.scrollIntoView({ block: 'nearest' });
-  };
+  const onResultsKeyDown = (event: KeyboardEvent) => rovingRowsKeyDown(resultsRef.current, event);
   return (
     <div className={cn('flex h-full min-h-0 flex-col', className)}>
       {path && title ? <WorkspaceHeader path={path} title={title} note={note} /> : null}
@@ -121,8 +83,8 @@ export function ExplorerSplit({
               role="region"
               aria-label="Filter controls"
               // Scrollable regions need keyboard operation (WCAG 2.1.1). A
-              // filter column whose current content is all read-out — no facet
-              // buttons because nothing loaded — is scrollable with nothing
+              // filter column whose current content is all read-out, no facet
+              // buttons because nothing loaded, is scrollable with nothing
               // inside to tab to, so the panel itself takes the tab stop.
               tabIndex={0}
               className="max-h-[45vh] overflow-auto border-t border-edge-subtle p-2.5"
@@ -162,8 +124,8 @@ export function ExplorerSplit({
           ref={resultsRef}
           aria-label="Results"
           // The results pane is the one member of this split that is allowed to
-          // shrink — its only child is a scroll container, whose automatic
-          // minimum size is zero — so it absorbed every deficit the layout had.
+          // shrink, its only child is a scroll container, whose automatic
+          // minimum size is zero, so it absorbed every deficit the layout had.
           // Stacked below `lg` the filter rail took its 224px first and left
           // the results at `height: 0`; the rows and the scrollbar that would
           // have reached them both disappeared while the caption above went on
@@ -175,7 +137,7 @@ export function ExplorerSplit({
           onKeyDown={onResultsKeyDown}
         >
           {/* Named, because internal scrolling is licensed for LABELLED
-            * regions only, and this is the element that actually scrolls — the
+            * regions only, and this is the element that actually scrolls, the
             * section around it is `overflow-hidden`, so its own name never
             * reaches the scroll container a reader operates. */}
           <div
@@ -212,7 +174,7 @@ export function ExplorerSplit({
 
 /** The engraved legend that names an instrument bay, sitting on its own
  * hairline at the top of the column. */
-export function BayLegend({ children }: { children: ReactNode }) {
+function BayLegend({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
       <span className="td-title">{children}</span>
@@ -234,6 +196,8 @@ export function BayLegend({ children }: { children: ReactNode }) {
 export function DataRow({
   selected,
   onSelect,
+  onInspect,
+  rowId,
   children,
   className,
   height,
@@ -242,6 +206,22 @@ export function DataRow({
 }: {
   selected?: boolean;
   onSelect?: () => void;
+  /**
+   * Hover inspects; click selects. A workspace whose inspector previews the
+   * row under the pointer (or under keyboard focus) wires it here, and the row
+   * fires it for both pointer movement over it and focus arriving so the
+   * keyboard path reaches exactly what the pointer does.
+   *
+   * Movement, not entry: a list that scrolls under a parked pointer, which is
+   * what the roving arrow keys do, synthesises enter events for whichever row
+   * slides beneath it, and those would steal inspection from the row the
+   * keyboard just focused. The browser fires no move for a scroll.
+   */
+  onInspect?: () => void;
+  /** The row's stable identity, stamped as `data-row-id` so a list can find
+   * the row a selection made elsewhere (a scene, the address) refers to and
+   * bring it into view. */
+  rowId?: string;
   children: ReactNode;
   className?: string;
   /**
@@ -260,14 +240,17 @@ export function DataRow({
     <button
       type="button"
       onClick={onSelect}
+      onPointerMove={onInspect}
+      onFocus={onInspect}
+      data-row-id={rowId}
       aria-pressed={selected ?? false}
       style={{ height: height != null ? `${height}px` : 'var(--row-height-data)' }}
       className={cn(
-        'relative flex w-full gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-xs',
+        'relative flex w-full gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-sm',
         align === 'start' ? 'items-start pt-2' : 'items-center',
         'hover:bg-surface-1 focus-visible:bg-surface-1',
-        // Lists in this archetype pin a `ListCaption` at `top-0`, so a row
-        // brought into view by the roving arrow keys landed underneath it —
+        // Lists in this archetype pin a sticky caption at `top-0`, so a row
+        // brought into view by the roving arrow keys landed underneath it,
         // focused but hidden, and unclickable at the same coordinates. The
         // scroll margin parks the row below the caption instead.
         'scroll-mt-9',
@@ -286,28 +269,6 @@ export function DataRow({
       />
       {children}
     </button>
-  );
-}
-
-/** Fixed height shared by two-line result rows and their virtualizer. */
-export const RESULT_ROW_HEIGHT = 56;
-
-export function ListCaption({
-  children,
-  className,
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <p
-      className={cn(
-        'sticky top-0 z-10 flex items-center gap-2 border-b border-edge-subtle bg-surface-0/95 px-4 py-2 text-2xs text-text-muted backdrop-blur',
-        className,
-      )}
-    >
-      {children}
-    </p>
   );
 }
 
@@ -340,7 +301,7 @@ export function InspectorPanel({
             onClick={onClose}
             aria-label="Close inspector"
             // 15x21 was the glyph's own box, which is the smallest control in
-            // the product. The × stays exactly the size it was — the hit area
+            // the product. The × stays exactly the size it was, the hit area
             // grows around it instead, and the negative margin lets it use the
             // header's padding so the bar does not gain 16px to hold it.
             className="-my-2 flex size-[var(--touch-target-min)] shrink-0 items-center justify-center text-text-muted hover:text-text-primary"
@@ -389,12 +350,12 @@ export function RawFields({
 }
 
 /** Filesystem paths and URLs carry no spaces, so the browser's only line-break
- * fallback (`overflow-wrap: break-word`) had nowhere to break but mid-word —
+ * fallback (`overflow-wrap: break-word`) had nowhere to break but mid-word,
  * every character landed on its own line in a narrow column (worst at
  * 320px). A `<wbr>` after each path separator gives it a real break point
  * instead, so long paths wrap at segment boundaries like `.tracedecay/` \
  * `config.toml` rather than one letter per line. Plain values are unaffected
- * — this only ever inserts, never rewrites, the text. */
+ *, this only ever inserts, never rewrites, the text. */
 function withPathBreaks(text: string): ReactNode {
   if (!text.includes('/')) return text;
   const segments = text.split('/');
@@ -418,13 +379,13 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
   if (typeof value !== 'object') {
     const text = String(value);
     return (
-      <span className="td-value break-words text-2xs text-text-secondary">
+      <span className="td-value break-words text-sm text-text-secondary">
         {withPathBreaks(text)}
       </span>
     );
   }
   const isArray = Array.isArray(value);
-  // A flat array of primitives (glob lists, tags, provider names — the common
+  // A flat array of primitives (glob lists, tags, provider names, the common
   // case for config-shaped payloads) reads far better as a wrapped chip row
   // than as N index-labelled dt/dd pairs: no meaningless "0", "1", "2" legends
   // eating the label column, and no extra nesting depth for the width
@@ -436,13 +397,13 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
         {value.slice(0, 60).map((v, i) => (
           <span
             key={i}
-            className="td-value break-words rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-2xs text-text-secondary"
+            className="td-value break-words rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-sm text-text-secondary"
           >
             {v === null || v === undefined ? '—' : withPathBreaks(String(v))}
           </span>
         ))}
         {value.length > 60 ? (
-          <span className="text-2xs text-text-muted">… {value.length - 60} more</span>
+          <span className="text-sm text-text-muted">… {value.length - 60} more</span>
         ) : null}
       </div>
     );
@@ -457,14 +418,14 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
         <div
           key={k}
           // Only the OUTERMOST level reserves a label column; every level
-          // below stacks label above value. Side-by-side columns compound —
-          // up to 9rem reserved per nesting level — and CSS Grid sizes the
+          // below stacks label above value. Side-by-side columns compound,
+          // up to 9rem reserved per nesting level, and CSS Grid sizes the
           // label's minmax before the value's `1fr`, so a few levels deep the
           // value track measures 0px and every value wraps one character per
           // line. Capping the reservation at one track holds however deep the
           // payload nests and however narrow the container is.
           className={cn(
-            'grid gap-x-2 gap-y-0.5 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0',
+            'grid gap-x-2 gap-y-0.5 border-b border-edge-subtle/60 py-1 text-sm last:border-b-0',
             depth === 0
               ? 'grid-cols-1 sm:grid-cols-[minmax(5rem,9rem)_1fr] sm:gap-y-0'
               : 'grid-cols-1',
@@ -479,7 +440,7 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
         </div>
       ))}
       {entries.length > 60 ? (
-        <span className="text-2xs text-text-muted">… {entries.length - 60} more</span>
+        <span className="text-sm text-text-muted">… {entries.length - 60} more</span>
       ) : null}
     </dl>
   );

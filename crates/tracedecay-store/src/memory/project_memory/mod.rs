@@ -3,13 +3,13 @@ use tracedecay_domain::canonical_text::is_canonical_text_within;
 use tracedecay_domain::{
     Confidence, DomainError, FactAssertionId, FactCategoryV1, FactEventId, FactId,
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, SanitizerDispositionV1, UtcMicros,
+    RetrievalAnchorId, RetrievalAnchorRecord, SanitizerDispositionV1, UtcMicros,
 };
 
 use super::queries::{MAX_CURRENT_LIMIT, MAX_LINEAGE_LIMIT};
 use super::{
     FactLineageCursor, FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_SEARCH_BYTES,
-    ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1, validate_owned_fact_id,
+    ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1, StoredFactV1, validate_owned_fact_id,
 };
 
 mod automatic_facts;
@@ -38,7 +38,8 @@ pub use curation::{
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1,
     ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactMergeTargetV1,
     ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRemoveCommandV1,
-    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactSupersedeCommandV1,
+    ProjectMemoryFactSupersedeOutcomeV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1,
     derive_project_memory_fact_curation_child_operation_id,
 };
@@ -49,7 +50,8 @@ pub use dashboard::{
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardNamedCountV1, ProjectMemoryDashboardOplogEntryV1,
     ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryDashboardVectorSnapshotV1,
+    ProjectMemoryStoreRevisionV1,
 };
 pub use search::{
     MAX_PROJECT_MEMORY_SEARCH_SCORE_MILLIONTHS, ProjectMemoryFactContradictionPageV1,
@@ -110,6 +112,7 @@ pub struct ProjectMemoryFactV1 {
     projected_as_of: UtcMicros,
     source: FactIdentitySourceV1,
     telemetry: ProjectMemoryFactTelemetryV1,
+    superseded_by: Option<FactId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,7 +177,17 @@ impl ProjectMemoryFactV1 {
             projected_as_of,
             source,
             telemetry,
+            superseded_by: None,
         })
+    }
+
+    pub fn with_superseded_by(mut self, superseded_by: FactId) -> FactStoreResult<Self> {
+        validate_owned_fact_id(&superseded_by, &self.owner)?;
+        if superseded_by == self.fact_id {
+            return Err(FactStoreError::FactMismatch);
+        }
+        self.superseded_by = Some(superseded_by);
+        Ok(self)
     }
 
     pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
@@ -210,6 +223,9 @@ impl ProjectMemoryFactV1 {
     }
     pub fn telemetry(&self) -> &ProjectMemoryFactTelemetryV1 {
         &self.telemetry
+    }
+    pub fn superseded_by(&self) -> Option<&FactId> {
+        self.superseded_by.as_ref()
     }
     pub fn payload(&self) -> &FactPayloadV1 {
         &self.payload
@@ -269,7 +285,7 @@ impl ProjectMemoryFactPageV1 {
             validate_owned_fact_id(cursor, &owner)?;
             // Resume semantics are exclusive-start (`fact_id > cursor`), so
             // the canonical cursor for a full page is exactly its last fact
-            // id — the same convention the search-page cursor uses. Anything
+            // id, the same convention the search-page cursor uses. Anything
             // else either re-serves returned rows or silently skips rows.
             if previous != Some(cursor) {
                 return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -308,6 +324,7 @@ pub struct ProjectMemoryFactHistoryV1 {
     fact_id: FactId,
     events: Vec<FactLineageEventV1>,
     next_after: Option<FactLineageCursor>,
+    retired_fact: Option<StoredFactV1>,
 }
 
 /// Durable result of one owner-scoped sweep over superseded assertion
@@ -445,7 +462,16 @@ impl ProjectMemoryFactHistoryV1 {
             fact_id,
             events,
             next_after,
+            retired_fact: None,
         })
+    }
+
+    pub fn with_retired_fact(mut self, retired_fact: StoredFactV1) -> FactStoreResult<Self> {
+        if retired_fact.owner() != &self.owner || retired_fact.fact_id() != &self.fact_id {
+            return Err(FactStoreError::FactMismatch);
+        }
+        self.retired_fact = Some(retired_fact);
+        Ok(self)
     }
 
     pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
@@ -466,6 +492,9 @@ impl ProjectMemoryFactHistoryV1 {
     pub fn next_after(&self) -> Option<&FactLineageCursor> {
         self.next_after.as_ref()
     }
+    pub fn retired_fact(&self) -> Option<&StoredFactV1> {
+        self.retired_fact.as_ref()
+    }
 }
 
 /// Bounded detail projection used for canonical `get`, history, status, and dashboard
@@ -474,7 +503,7 @@ impl ProjectMemoryFactHistoryV1 {
 pub struct ProjectMemoryFactInspectionV1 {
     fact: ProjectMemoryFactV1,
     history: ProjectMemoryFactHistoryV1,
-    anchors: Vec<RetrievalAnchorRecordV2>,
+    anchors: Vec<RetrievalAnchorRecord>,
     status: ProjectMemoryFactStatusV1,
 }
 
@@ -482,7 +511,7 @@ impl ProjectMemoryFactInspectionV1 {
     pub fn new(
         fact: ProjectMemoryFactV1,
         history: ProjectMemoryFactHistoryV1,
-        anchors: Vec<RetrievalAnchorRecordV2>,
+        anchors: Vec<RetrievalAnchorRecord>,
         status: ProjectMemoryFactStatusV1,
     ) -> FactStoreResult<Self> {
         history.validate_for_owner(fact.owner())?;
@@ -537,7 +566,7 @@ impl ProjectMemoryFactInspectionV1 {
     pub fn history(&self) -> &ProjectMemoryFactHistoryV1 {
         &self.history
     }
-    pub fn anchors(&self) -> &[RetrievalAnchorRecordV2] {
+    pub fn anchors(&self) -> &[RetrievalAnchorRecord] {
         &self.anchors
     }
     pub fn status(&self) -> &ProjectMemoryFactStatusV1 {

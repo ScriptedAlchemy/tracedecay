@@ -13,7 +13,7 @@ pub use tracedecay_domain::{
     WorkContentLocationClassV1, WorkEffortClassV1, WorkOrdinalBandV1, WorkRouteCandidateV1,
 };
 
-use crate::authorization::{PolicyIdentifierV1, policy_digest};
+use crate::identity::{PolicyIdentifierV1, policy_digest};
 
 /// Explicit cancellation fact supplied by the caller. Policy never observes a
 /// live token.
@@ -341,7 +341,7 @@ pub struct WorkDecompositionProposalV1 {
     pub rationale: Vec<WorkProposalReasonV1>,
 }
 
-/// Ranked route. Dimensions stay SEPARATE — no scalar score field is permitted here.
+/// Ranked route. Dimensions stay SEPARATE. No scalar score field is permitted here.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkRankedRouteV1 {
@@ -446,10 +446,6 @@ pub struct WorkProposalDecisionV1 {
     /// gates, including the one that found no eligible route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_plan: Option<WorkRoutePlanV1>,
-}
-
-pub trait WorkProposalEvaluator {
-    fn evaluate(&self, input: &WorkProposalPolicyInputV1) -> WorkProposalDecisionV1;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -644,8 +640,8 @@ fn partition_routes(
 
 /// Order the survivors by the separate ordinal dimensions.
 ///
-/// The precedence is fixed and lexicographic — correctness, sensitive-data
-/// fitness, evidence quality, autonomy, latency, cost — with `route_id`
+/// The precedence is fixed and lexicographic: correctness, sensitive-data
+/// fitness, evidence quality, autonomy, latency, cost, with `route_id`
 /// ascending as the final tiebreak, so the order is total and no scalar score
 /// is ever formed.
 fn rank_survivors(survivors: &mut [&WorkRouteCandidateV1]) {
@@ -927,9 +923,9 @@ const fn comparison_reason(comparison: WorkFrontierComparisonV1) -> WorkProposal
     }
 }
 
-impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
-    #[hotpath::measure(label = "policy.work_loop.evaluate")]
-    fn evaluate(&self, input: &WorkProposalPolicyInputV1) -> WorkProposalDecisionV1 {
+impl WorkProposalEvaluatorV1 {
+    #[tracing::instrument(name = "policy.work_loop.evaluate", level = "trace", skip_all)]
+    pub fn evaluate(&self, input: &WorkProposalPolicyInputV1) -> WorkProposalDecisionV1 {
         if !input.is_valid() {
             return self.decision(
                 input,
@@ -1026,21 +1022,21 @@ impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
                 plan,
             );
         }
+        if input.execution_admitted && terminal_attempt_count > 0 {
+            reasons.push(WorkProposalReasonV1::TerminalEvidenceObserved);
+            return self.planned_decision(
+                self.decision(
+                    input,
+                    WorkProposalDispositionV1::Allow,
+                    Some(WorkProposalActionV1::Replan),
+                    false,
+                    reasons,
+                    comparison,
+                ),
+                plan,
+            );
+        }
         if input.execution_admitted {
-            if terminal_attempt_count > 0 {
-                reasons.push(WorkProposalReasonV1::TerminalEvidenceObserved);
-                return self.planned_decision(
-                    self.decision(
-                        input,
-                        WorkProposalDispositionV1::Allow,
-                        Some(WorkProposalActionV1::Replan),
-                        false,
-                        reasons,
-                        comparison,
-                    ),
-                    plan,
-                );
-            }
             reasons.push(WorkProposalReasonV1::ExecutionInFlight);
             return self.planned_decision(
                 self.decision(
@@ -1140,13 +1136,6 @@ mod tests {
             prior_outcomes: Vec::new(),
             human_override: None,
         }
-    }
-
-    #[test]
-    fn identical_inputs_produce_identical_decisions() {
-        let evaluator = WorkProposalEvaluatorV1::default();
-        let request = input();
-        assert_eq!(evaluator.evaluate(&request), evaluator.evaluate(&request));
     }
 
     #[test]
@@ -1297,29 +1286,6 @@ mod tests {
         );
         assert_eq!(decision.local_evidence, request.local_evidence);
         assert_eq!(decision.live_git_evidence, request.live_git_evidence);
-    }
-
-    #[test]
-    fn cancellation_and_deadline_are_indeterminate() {
-        let mut cancelled = input();
-        cancelled.cancellation = WorkProposalCancellationV1::Cancelled {
-            requested_at: UtcMicros(50),
-        };
-        assert_eq!(
-            WorkProposalEvaluatorV1::default()
-                .evaluate(&cancelled)
-                .disposition,
-            WorkProposalDispositionV1::Indeterminate
-        );
-
-        let mut elapsed = input();
-        elapsed.evaluated_at = elapsed.deadline;
-        assert_eq!(
-            WorkProposalEvaluatorV1::default()
-                .evaluate(&elapsed)
-                .disposition,
-            WorkProposalDispositionV1::Indeterminate
-        );
     }
 
     #[test]

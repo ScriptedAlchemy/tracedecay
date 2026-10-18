@@ -24,6 +24,7 @@ pub(super) fn is_observable_operation(operation: DaemonInvocationOperation) -> b
             | DaemonInvocationOperation::FeedbackExpand
             | DaemonInvocationOperation::FeedbackList
             | DaemonInvocationOperation::FeedbackAdvisoryCycle
+            | DaemonInvocationOperation::FeedbackProximity
             | DaemonInvocationOperation::FeedbackImpact
             | DaemonInvocationOperation::AffectedTests
             | DaemonInvocationOperation::PrimitiveImpact
@@ -42,6 +43,7 @@ pub(super) fn feedback_observation_operation(
         DaemonInvocationOperation::FeedbackExpand => FeedbackOperationV1::FeedbackExpand,
         DaemonInvocationOperation::FeedbackList => FeedbackOperationV1::FeedbackList,
         DaemonInvocationOperation::FeedbackAdvisoryCycle => FeedbackOperationV1::FeedbackCycle,
+        DaemonInvocationOperation::FeedbackProximity => FeedbackOperationV1::Proximity,
         DaemonInvocationOperation::FeedbackImpact => FeedbackOperationV1::PrimitiveImpact,
         DaemonInvocationOperation::AffectedTests => FeedbackOperationV1::PrimitiveAffectedTests,
         DaemonInvocationOperation::PrimitiveImpact => FeedbackOperationV1::PrimitiveImpact,
@@ -66,22 +68,21 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::CodeFacets
         | DaemonInvocationOperation::CodeTimeline
         | DaemonInvocationOperation::CodeDeclaration
-        | DaemonInvocationOperation::CodeDefinition
         | DaemonInvocationOperation::CodeTypeDefinition
         | DaemonInvocationOperation::CodeReferences
         | DaemonInvocationOperation::Configuration
         | DaemonInvocationOperation::ContextScout
         | DaemonInvocationOperation::ObservatoryRead
         | DaemonInvocationOperation::RetainedApplication
+        | DaemonInvocationOperation::ProfileRetainedApplication
+        | DaemonInvocationOperation::ProfileGraphTool
+        | DaemonInvocationOperation::ProfileConfiguration
         | DaemonInvocationOperation::MultiRootScopeSetRead
         | DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
         | DaemonInvocationOperation::MultiRootExecute
         | DaemonInvocationOperation::WorkApplication
         | DaemonInvocationOperation::WorkflowApplication
         | DaemonInvocationOperation::HandoffApplication
-        | DaemonInvocationOperation::SemanticQualify
-        | DaemonInvocationOperation::SemanticEvaluateAndPublish
-        | DaemonInvocationOperation::SemanticActivate
         | DaemonInvocationOperation::GitStatus
         | DaemonInvocationOperation::GitDiff
         | DaemonInvocationOperation::GitHistory
@@ -99,9 +100,11 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::NativeIntegrationWorktreeInspect
         | DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
         | DaemonInvocationOperation::NativeIntegrationWorktreeRemove
-        | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile => {
-            FeedbackOperationV1::FeedbackCycle
-        }
+        | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
+        | DaemonInvocationOperation::SourceEdit
+        | DaemonInvocationOperation::SourceEditReconcile
+        | DaemonInvocationOperation::SourceEditRollback
+        | DaemonInvocationOperation::GraphTool => FeedbackOperationV1::FeedbackCycle,
     }
 }
 
@@ -127,6 +130,7 @@ pub(super) fn invocation_response_outcome(
         | DaemonInvocationOutcome::Configuration { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
         | DaemonInvocationOutcome::RetainedApplication { .. }
+        | DaemonInvocationOutcome::GraphTool { .. }
         | DaemonInvocationOutcome::GitHubStackSignalExpand { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetRead { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { .. }
@@ -134,14 +138,12 @@ pub(super) fn invocation_response_outcome(
         | DaemonInvocationOutcome::WorkApplication { .. }
         | DaemonInvocationOutcome::WorkflowApplication { .. }
         | DaemonInvocationOutcome::HandoffApplication { .. }
-        | DaemonInvocationOutcome::SemanticEvaluatedProfileQualified { .. }
-        | DaemonInvocationOutcome::SemanticEvaluatedProfilePublished { .. }
-        | DaemonInvocationOutcome::SemanticProfileActivated { .. }
         | DaemonInvocationOutcome::ObservationAccepted
         | DaemonInvocationOutcome::LspOpened { .. }
         | DaemonInvocationOutcome::LspAcknowledged { .. }
         | DaemonInvocationOutcome::LspReconnected { .. }
-        | DaemonInvocationOutcome::LspDetached => FeedbackOutcomeV1::Completed,
+        | DaemonInvocationOutcome::LspDetached
+        | DaemonInvocationOutcome::SourceEdit { .. } => FeedbackOutcomeV1::Completed,
         DaemonInvocationOutcome::Feedback { result, .. }
         | DaemonInvocationOutcome::Primitive { result, .. }
         | DaemonInvocationOutcome::CallableCode { result, .. }
@@ -248,7 +250,7 @@ pub(super) fn observe_invocation_response(
     started_at: UtcMicros,
     response: &DaemonInvocationResponse,
 ) {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     let outcome = invocation_response_outcome(response);
     let duration_micros = u64::try_from(observed_at.0.saturating_sub(started_at.0)).ok();
     if let Some(route) = route {

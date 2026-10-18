@@ -2,27 +2,17 @@ use std::fs;
 use std::path::Path;
 
 use tempfile::TempDir;
-use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::serve;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_runtime_core::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 
-use crate::common::{EnvVarGuard, canonical_existing_path};
-use crate::home_env_lock::HOME_ENV_LOCK;
+use crate::common::canonical_existing_path;
 
-struct HomeEnvGuard {
-    _home: EnvVarGuard,
-    _userprofile: EnvVarGuard,
-    _data_dir: EnvVarGuard,
-}
-
-impl HomeEnvGuard {
-    fn set(home: &Path) -> Self {
-        Self {
-            _home: EnvVarGuard::set("HOME", home),
-            _userprofile: EnvVarGuard::set("USERPROFILE", home),
-            _data_dir: EnvVarGuard::set(USER_DATA_DIR_ENV, home.join(".tracedecay")),
-        }
+/// Open options naming `profile_root` explicitly, as every production caller
+/// does.
+fn profile_options(profile_root: &Path) -> TraceDecayOpenOptions {
+    TraceDecayOpenOptions {
+        profile_root: Some(profile_root.to_path_buf()),
+        global_db_path: Some(profile_root.join("global.db")),
     }
 }
 
@@ -134,15 +124,17 @@ fn schema_version(db_path: &Path) -> u32 {
     let connection =
         rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    let version = connection
-        .query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0))
-        .unwrap();
+    let version = tracedecay_runtime_core::db::schema_version::read_version_sync(
+        &connection,
+        tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT,
+    )
+    .unwrap()
+    .unwrap_or(0);
     u32::try_from(version).unwrap()
 }
 
 #[tokio::test]
 async fn fresh_profile_initialization_creates_the_final_v2_store() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let home = root.join("home");
@@ -150,10 +142,10 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
     let project = root.join("repo");
     let shard_root = profile_root.join("projects/proj_init");
     fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeEnvGuard::set(&home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_init").unwrap();
 
-    let cg = init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+    let cg = init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
         .await
         .unwrap();
 
@@ -177,17 +169,16 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
 
 #[tokio::test]
 async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let home = root.join("home");
     let profile_root = home.join(".tracedecay");
     let project = root.join("repo");
     fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeEnvGuard::set(&home);
+    crate::common::register_process_runtime_ports();
 
     let initialized =
-        init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+        init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
             .await
             .unwrap();
     let db_path = initialized.db_path().to_path_buf();
@@ -195,17 +186,20 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
 
     let incompatible_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1;
     let connection = rusqlite::Connection::open(&db_path).unwrap();
-    connection
-        .pragma_update(None, "user_version", incompatible_version)
+    let downgraded = connection
+        .execute(
+            "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = ?2",
+            rusqlite::params![
+                incompatible_version,
+                tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT
+            ],
+        )
         .unwrap();
+    assert_eq!(downgraded, 1, "the graph stamp row must exist to downgrade");
     drop(connection);
 
-    let error = match open_with_maintenance(
-        &project,
-        &profile_root,
-        TraceDecayOpenOptions::default(),
-    )
-    .await
+    let error = match open_with_maintenance(&project, &profile_root, profile_options(&profile_root))
+        .await
     {
         Ok(_) => panic!("an incompatible profile store must require a reset"),
         Err(error) => error,
@@ -229,14 +223,13 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
 
 #[tokio::test]
 async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo");
     fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_explicit").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
@@ -252,12 +245,12 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
         .await
         .unwrap();
 
-    assert_eq!(
-        cg.store_layout().data_root,
-        client_profile.join("projects/proj_explicit")
+    assert_path_eq(
+        &cg.store_layout().data_root,
+        client_profile.join("projects/proj_explicit"),
     );
     assert!(
-        !cg.store_layout().config_path.exists(),
+        !cg.store_layout().data_root.join("config.json").exists(),
         "init persists configuration in the store, not a legacy config.json"
     );
     assert!(cg.db_path().is_file());
@@ -273,14 +266,13 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
 
 #[tokio::test]
 async fn trace_decay_options_global_db_path_implies_profile_root() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo");
     fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_db_only").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: None,
@@ -291,12 +283,12 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
         .await
         .unwrap();
 
-    assert_eq!(
-        cg.store_layout().data_root,
-        client_profile.join("projects/proj_db_only")
+    assert_path_eq(
+        &cg.store_layout().data_root,
+        client_profile.join("projects/proj_db_only"),
     );
     assert!(
-        !cg.store_layout().config_path.exists(),
+        !cg.store_layout().data_root.join("config.json").exists(),
         "init persists configuration in the store, not a legacy config.json"
     );
     assert!(cg.db_path().is_file());
@@ -312,7 +304,6 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
 
 #[tokio::test]
 async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let home = root.join("home");
@@ -329,11 +320,11 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
             "git@github.com:ScriptedAlchemy/tracedecay.git",
         ],
     );
-    let _home_guard = HomeEnvGuard::set(&home);
+    crate::common::register_process_runtime_ports();
 
     let profile_root = home.join(".tracedecay");
     let initialized =
-        init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+        init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
             .await
             .unwrap();
     let original_project_id = initialized
@@ -346,7 +337,7 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
     drop(initialized);
     fs::rename(&project, &renamed).unwrap();
 
-    let reopened = open_with_maintenance(&renamed, &profile_root, TraceDecayOpenOptions::default())
+    let reopened = open_with_maintenance(&renamed, &profile_root, profile_options(&profile_root))
         .await
         .unwrap();
 
@@ -367,10 +358,8 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
 
 #[tokio::test]
 async fn persisted_repository_identity_survives_rename_while_serve_open_fails_closed() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
-    let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo-before-rename");
     let renamed = root.join("repo-after-rename");
@@ -385,7 +374,7 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
             "git@github.com:ScriptedAlchemy/tracedecay.git",
         ],
     );
-    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    crate::common::register_process_runtime_ports();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
         global_db_path: Some(client_profile.join("global.db")),
@@ -401,17 +390,6 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
     assert!(
         TraceDecay::is_initialized_with_options(&renamed, &open_options),
         "the durable git marker should resolve the moved profile store synchronously"
-    );
-    let serve_error =
-        match serve::ensure_initialized_with_options(&renamed, open_options.clone()).await {
-            Ok(_) => panic!("serve compatibility API must not open the project database locally"),
-            Err(error) => error,
-        };
-    assert!(
-        serve_error
-            .to_string()
-            .contains("managed TraceDecay daemon"),
-        "serve should direct callers to the sole database owner: {serve_error}"
     );
 
     let reopened = open_with_maintenance(&renamed, &client_profile, open_options)
@@ -467,7 +445,6 @@ async fn branch_open_rejects_a_mismatched_maintenance_profile() {
 
 #[tokio::test]
 async fn trace_decay_open_branch_uses_shared_profile_store() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let home = root.join("home");
@@ -481,10 +458,10 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
     run_git(&project, &["add", "seed.txt"]);
     run_git(&project, &["commit", "-m", "seed"]);
     run_git(&project, &["branch", "feature/profile"]);
-    let _home_guard = HomeEnvGuard::set(&home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_branch").unwrap();
     let initialized =
-        init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+        init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
             .await
             .unwrap();
     let shard_root = initialized.store_layout().data_root.clone();
@@ -495,19 +472,39 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
         .expect("init must persist branch tracking");
     if !branch_meta.is_tracked("feature/profile") {
         let default_branch = branch_meta.default_branch.clone();
-        branch_meta.add_branch(
-            "feature/profile",
-            tracedecay_runtime_core::config::db_filename(&shard_root),
-            &default_branch,
-        );
+        branch_meta.add_branch("feature/profile", &default_branch);
         tracedecay_runtime_core::branch_meta::save_branch_meta(&shard_root, &branch_meta).unwrap();
     }
+    // `open_branch` refuses a tracked branch whose exact provenance is not
+    // published (it is "still indexing" and serves its published ancestor), so
+    // publish the feature branch's graph source before opening it directly.
+    let published = tracedecay_runtime_core::branch_meta::publish_graph_source(
+        &shard_root,
+        "feature/profile",
+        None,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
+            project_id: "proj_branch".to_owned(),
+            repository_id: "repository.proj_branch".to_owned(),
+            worktree_id: "worktree.proj_branch".to_owned(),
+            worktree_root: project.to_string_lossy().into_owned(),
+            reference: "refs/heads/feature/profile".to_owned(),
+            source_oid: "b".repeat(40),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            published,
+            tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+        ),
+        "the feature branch must be query-eligible before it is opened"
+    );
 
     let cg = open_branch_with_maintenance(
         &project,
         "feature/profile",
         &profile_root,
-        TraceDecayOpenOptions::default(),
+        profile_options(&profile_root),
     )
     .await
     .unwrap();
@@ -519,7 +516,6 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
 
 #[tokio::test]
 async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
@@ -543,7 +539,7 @@ async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
     run_git(&project, &["commit", "-m", "feature"]);
     run_git(&project, &["checkout", "-"]);
 
-    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_auto_branch").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
@@ -553,7 +549,10 @@ async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
         .await
         .unwrap();
     let shard_root = main.store_layout().data_root.clone();
-    assert_eq!(shard_root, client_profile.join("projects/proj_auto_branch"));
+    assert_path_eq(
+        &shard_root,
+        client_profile.join("projects/proj_auto_branch"),
+    );
     drop(main);
 
     run_git(&project, &["checkout", "feature/client-profile"]);

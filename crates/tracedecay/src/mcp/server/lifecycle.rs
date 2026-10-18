@@ -2,66 +2,27 @@
 //! sync-on-read, branch-drift reopen, and version-update checks.
 
 use super::*;
+use tracedecay_domain::ApplicationProblemDetailV1;
 
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 
-#[derive(Default)]
-pub(crate) struct McpBackgroundTaskOwner {
-    admission: std::sync::Mutex<McpBackgroundTaskAdmission>,
-    shutdown_tasks: tokio::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
-}
-
-#[derive(Default)]
-struct McpBackgroundTaskAdmission {
-    closed: bool,
-    tasks: tokio::task::JoinSet<()>,
-}
-
-impl McpBackgroundTaskOwner {
-    fn spawn<Task>(&self, task: Task) -> bool
-    where
-        Task: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let mut admission = self
-            .admission
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if admission.closed {
-            return false;
-        }
-        admission.tasks.spawn(task);
-        true
-    }
-
-    #[hotpath::measure(label = "mcp.server.background_shutdown", future = true)]
-    pub(crate) async fn shutdown(&self) -> Vec<String> {
-        let mut retained = self.shutdown_tasks.lock().await;
-        if retained.is_none() {
-            let tasks = {
-                let mut admission = self
-                    .admission
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                admission.closed = true;
-                std::mem::take(&mut admission.tasks)
-            };
-            *retained = Some(tasks);
-        }
-        let Some(tasks) = retained.as_mut() else {
-            return Vec::new();
-        };
-        tasks.abort_all();
-        let mut failures = Vec::new();
-        while let Some(result) = tasks.join_next().await {
-            if let Err(error) = result
-                && !error.is_cancelled()
-            {
-                failures.push(error.to_string());
-            }
-        }
-        retained.take();
-        failures
+/// A parked index logs its cause and remedy as fields; the bounded route
+/// message would cut the cause.
+fn warn_reconcile_not_admitted(error: &TraceDecayError, message: &str) {
+    match (
+        error.project_route_context(),
+        error.project_route_typed_detail(),
+    ) {
+        (
+            Some((reason_code, _, _)),
+            Some(ApplicationProblemDetailV1::Parked {
+                cause,
+                remedy,
+                retries_on_wake,
+            }),
+        ) => tracing::warn!(reason_code, cause, remedy, retries_on_wake, "{message}"),
+        _ => tracing::warn!(error = %error, "{message}"),
     }
 }
 
@@ -73,182 +34,11 @@ impl Drop for ReadRefreshRunningGuard {
     }
 }
 
-struct BranchReopenCompletion(Arc<AtomicU64>);
+struct BranchReopenCompletion(Arc<tokio::sync::watch::Sender<u64>>);
 
 impl Drop for BranchReopenCompletion {
     fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::Release);
-    }
-}
-
-/// Retained startup reconciliation-admission task, joined or aborted before the code graph
-/// authority is released.
-#[derive(Default)]
-pub(crate) struct StartupCatchUpTasksV1 {
-    sync: Option<tokio::task::JoinHandle<()>>,
-}
-
-/// The startup catch-up lifecycle as one linear machine.
-///
-/// Dispatch and readiness live in the same state machine. The hazard that
-/// motivated it: the old completion flag defaulted to
-/// `true` so a server with no catch-up reported "settled", which forced the
-/// dispatch site to pre-clear them in a separate store *before* spawning —
-/// an ordering that was documented rather than enforced. Here, dispatch
-/// *is* the transition into [`Self::Syncing`], so no window exists in which
-/// a dispatched catch-up still reads as settled.
-pub(crate) enum StartupCatchUpStateV1 {
-    /// No catch-up was ever dispatched (session-start sync disabled, or a
-    /// construction path that opts out). Terminal, and *ready*: waiters must
-    /// not block on work that will never run.
-    NotStarted,
-    /// Reconciliation admission is running.
-    Syncing { tasks: StartupCatchUpTasksV1 },
-    /// Reconciliation admission settled, including failure paths.
-    Settled { tasks: StartupCatchUpTasksV1 },
-    /// Shutdown tore the machine down.
-    Cancelled,
-}
-
-impl StartupCatchUpStateV1 {
-    #[hotpath::skip]
-    const fn settled(&self) -> bool {
-        !matches!(self, Self::Syncing { .. })
-    }
-
-    fn tasks_mut(&mut self) -> Option<&mut StartupCatchUpTasksV1> {
-        match self {
-            Self::Syncing { tasks } | Self::Settled { tasks } => Some(tasks),
-            Self::NotStarted | Self::Cancelled => None,
-        }
-    }
-
-    fn take_tasks(&mut self) -> StartupCatchUpTasksV1 {
-        self.tasks_mut().map(std::mem::take).unwrap_or_default()
-    }
-}
-
-/// Owns the startup reconciliation-admission state.
-///
-/// Held behind an `Arc` on the server so the spawned sync task can signal
-/// completion through the same lock the waiters read.
-/// The lock is a `std::sync::Mutex` on purpose: every critical section is a
-/// phase swap or a handle take, and joins always happen *outside* it, so the
-/// sync readiness accessors stay callable from non-async code.
-pub(crate) struct StartupCatchUpMachineV1 {
-    state: std::sync::Mutex<StartupCatchUpStateV1>,
-    /// Set once the first dispatch claims the machine. Kept distinct from
-    /// the phase so a completed catch-up still refuses a second dispatch.
-    dispatched: std::sync::atomic::AtomicBool,
-}
-
-impl Default for StartupCatchUpMachineV1 {
-    fn default() -> Self {
-        Self {
-            state: std::sync::Mutex::new(StartupCatchUpStateV1::NotStarted),
-            dispatched: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-}
-
-impl StartupCatchUpMachineV1 {
-    fn state(&self) -> std::sync::MutexGuard<'_, StartupCatchUpStateV1> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// One-shot dispatch claim. The first caller wins and the machine enters
-    /// [`StartupCatchUpStateV1::Syncing`] in the same critical section, so
-    /// there is no interval in which a dispatched catch-up reads as settled.
-    pub(crate) fn try_claim_dispatch(&self) -> bool {
-        if self
-            .dispatched
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return false;
-        }
-        let mut state = self.state();
-        if matches!(*state, StartupCatchUpStateV1::Cancelled) {
-            return false;
-        }
-        let tasks = state.take_tasks();
-        *state = StartupCatchUpStateV1::Syncing { tasks };
-        true
-    }
-
-    /// Enters the synchronous phase for a direct
-    /// [`McpServer::run_startup_catch_up_sync`] call. Idempotent for the
-    /// dispatched path, which is already `Syncing`. A cancelled machine
-    /// stays cancelled: shutdown has already released what this phase needs.
-    fn begin_sync(&self) {
-        let mut state = self.state();
-        if matches!(*state, StartupCatchUpStateV1::Cancelled) {
-            return;
-        }
-        let tasks = state.take_tasks();
-        *state = StartupCatchUpStateV1::Syncing { tasks };
-    }
-
-    /// The reconciliation-admission phase is done.
-    fn settle(&self) {
-        let mut state = self.state();
-        if matches!(*state, StartupCatchUpStateV1::Cancelled) {
-            return;
-        }
-        let tasks = state.take_tasks();
-        *state = StartupCatchUpStateV1::Settled { tasks };
-    }
-
-    pub(super) fn install_sync_task(&self, task: tokio::task::JoinHandle<()>) {
-        let mut state = self.state();
-        match state.tasks_mut() {
-            Some(tasks) => tasks.sync = Some(task),
-            // Shutdown won the race; nothing will ever join this handle.
-            None => task.abort(),
-        }
-    }
-
-    fn take_sync_task(&self) -> Option<tokio::task::JoinHandle<()>> {
-        self.state().tasks_mut().and_then(|tasks| tasks.sync.take())
-    }
-
-    /// Terminal shutdown state.
-    fn mark_cancelled(&self) {
-        *self.state() = StartupCatchUpStateV1::Cancelled;
-    }
-
-    fn settled(&self) -> bool {
-        self.state().settled()
-    }
-}
-
-/// Phase transitions exposed to the sibling test module, which asserts the
-/// machine's invariants directly rather than by racing a live server.
-#[cfg(test)]
-impl StartupCatchUpMachineV1 {
-    /// True once dispatch has been claimed — the old
-    /// `startup_catch_up_started` flag.
-    pub(super) fn dispatch_claimed(&self) -> bool {
-        self.dispatched.load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    pub(super) fn settled_for_test(&self) -> bool {
-        self.settled()
-    }
-
-    pub(super) fn settle_for_test(&self) {
-        self.settle();
-    }
-
-    pub(super) fn mark_cancelled_for_test(&self) {
-        self.mark_cancelled();
+        self.0.send_modify(|completed| *completed += 1);
     }
 }
 
@@ -261,84 +51,18 @@ pub(crate) struct VersionCheckState {
     pub(crate) refreshing: bool,
 }
 
-/// Owns response admission, revocation, and forced cancellation for one
-/// daemon-retained project server.
-#[derive(Clone)]
-pub(crate) struct ProjectServerResponseLifecycle {
-    response_gate: Arc<tokio::sync::RwLock<()>>,
-    response_revoked: tracedecay_session_memory::context::CancellationToken,
-    request_abort: tracedecay_session_memory::context::CancellationToken,
-}
-
-impl Default for ProjectServerResponseLifecycle {
-    fn default() -> Self {
-        Self {
-            response_gate: Arc::new(tokio::sync::RwLock::new(())),
-            response_revoked: tracedecay_session_memory::context::CancellationToken::new(),
-            request_abort: tracedecay_session_memory::context::CancellationToken::new(),
-        }
+/// Compare-and-swap cooldown gate for the lazy staleness check and background
+/// read refresh. Returns `true` iff at least `window_secs` have elapsed since
+/// `atomic`'s last stamp and this call won the race to advance it to `now`, so
+/// at most one caller per window proceeds.
+fn try_claim_cooldown(atomic: &AtomicI64, now: i64, window_secs: i64) -> bool {
+    let previous = atomic.load(Ordering::Acquire);
+    if now.saturating_sub(previous) < window_secs {
+        return false;
     }
-}
-
-impl ProjectServerResponseLifecycle {
-    pub(crate) fn revoke(&self) {
-        self.response_revoked.cancel();
-    }
-
-    /// Close response admission without invalidating an already-admitted reply.
-    /// Tokio's write-preferring lock prevents later readers from overtaking the
-    /// queued retirement writer, so cancellation is published at the cutover.
-    #[hotpath::measure(label = "mcp.server.revoke_drain", future = true)]
-    pub(crate) async fn revoke_after_request_drain(&self) {
-        let _guard = self.response_gate.write().await;
-        self.response_revoked.cancel();
-    }
-
-    pub(crate) async fn wait_for_request_drain(&self) {
-        let _guard = self.response_gate.write().await;
-    }
-
-    pub(crate) fn abort_requests(&self) {
-        self.request_abort.cancel();
-    }
-
-    pub(crate) fn response_gate(&self) -> &Arc<tokio::sync::RwLock<()>> {
-        &self.response_gate
-    }
-
-    pub(crate) fn response_revoked(
-        &self,
-    ) -> &tracedecay_session_memory::context::CancellationToken {
-        &self.response_revoked
-    }
-}
-
-/// Shared compare-and-swap cooldown gate for the lazy staleness check and
-/// background read refresh. Each
-/// wraps one `AtomicI64` timestamp field on [`McpServer`]; `try_claim`
-/// single-flights concurrent callers off that stamp so at most one
-/// caller per window proceeds.
-///
-/// Note: call sites are inconsistent about additionally special-casing
-/// a `0` (never-checked) stamp before calling `try_claim` — some do,
-/// some don't. That inconsistency predates this extraction and is
-/// preserved as-is here rather than harmonized.
-struct CooldownGate;
-
-impl CooldownGate {
-    /// Returns `true` iff at least `window_secs` have elapsed since
-    /// `atomic`'s last stamp and this call won the race to advance it
-    /// to `now`. The loser of a race bails so at most one caller
-    /// within each window proceeds.
-    fn try_claim(&self, atomic: &AtomicI64, now: i64, window_secs: i64) -> bool {
-        let previous = atomic.load(Ordering::Acquire);
-        if now.saturating_sub(previous) < window_secs {
-            return false;
-        }
-        atomic
-            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    }
+    atomic
+        .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
 }
 
 impl McpServer {
@@ -349,6 +73,10 @@ impl McpServer {
         self.background_tasks.spawn(task)
     }
 
+    pub(crate) fn refuse_background_work(&self) {
+        self.background_tasks.close_admission();
+    }
+
     pub(crate) fn project_server_response_lifecycle(&self) -> ProjectServerResponseLifecycle {
         self.project_server_lifecycle.clone()
     }
@@ -357,20 +85,17 @@ impl McpServer {
         self.project_server_lifecycle.revoke();
     }
 
-    #[hotpath::skip]
     pub(crate) async fn revoke_project_server_responses_after_drain(&self) {
         self.project_server_lifecycle
             .revoke_after_request_drain()
             .await;
     }
 
-    #[hotpath::skip]
     pub(crate) async fn wait_for_project_server_request_drain(&self) {
         self.project_server_lifecycle.wait_for_request_drain().await;
     }
 
     pub(crate) fn abort_project_server_requests(&self) {
-        self.project_server_lifecycle.abort_requests();
         // Poison recovery matters most here: skipping this on a poisoned
         // mutex leaves every in-flight request uncancelled and the shutdown
         // drain waits forever.
@@ -383,11 +108,15 @@ impl McpServer {
     }
 
     /// Shutdown-side teardown of the startup index-sync phase.
-    #[hotpath::measure(label = "mcp.server.startup_catch_up.shutdown", future = true)]
+    #[tracing::instrument(
+        name = "mcp.server.startup_catch_up.shutdown",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn shutdown_startup_catch_up_sync(&self) {
         if let Some(task) = self.startup_catch_up.take_sync_task() {
             task.abort();
-            let _ = task.await;
+            let _ = task.wait().await;
         }
         self.startup_catch_up.mark_cancelled();
     }
@@ -401,17 +130,16 @@ impl McpServer {
     ///
     /// **Serve old, await new.** On drift the caller does *not* wait for the
     /// reopen. `reopen_for_current_branch` is a full DB open plus a sealed
-    /// restore — O(store), seconds to minutes on a large index — and it used to
+    /// restore, O(store), seconds to minutes on a large index, and it used to
     /// run inline on the request that happened to notice the checkout, with
     /// every other caller blocked behind the reopen lock. Now the reopen is
     /// retained and single-flighted, and every caller
-    /// — the one that noticed the drift included — serves the last complete
+    ///, the one that noticed the drift included, serves the last complete
     /// snapshot until the swap lands.
     ///
-    /// If reopening fails the previous instance is kept — the effect-time
+    /// If reopening fails the previous instance is kept, the effect-time
     /// branch identity check in the hook writer and
     /// [`Self::maybe_sync_if_stale`] still protect writes.
-    #[hotpath::skip]
     pub(crate) async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
         self.reopen_if_branch_drifted_memoized().await.0
     }
@@ -420,7 +148,11 @@ impl McpServer {
     /// hands back this request's single branch resolution, so the rest of the
     /// request reads the live branch from the memo instead of re-opening the
     /// repository. The memo is request-scoped and never retained.
-    #[hotpath::skip]
+    #[tracing::instrument(
+        name = "mcp.server.branch_drift_reopen_memoized",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) async fn reopen_if_branch_drifted_memoized(
         &self,
     ) -> (Arc<TraceDecay>, tracedecay_runtime_core::branch::BranchMemo) {
@@ -494,41 +226,43 @@ impl McpServer {
         });
     }
 
-    /// Polls until at least one branch reopen has completed past `after`, or
-    /// until `timeout` elapses. Returns `true` if one landed.
-    ///
-    /// Reopens do not block requests, so tests (and any caller that genuinely
-    /// needs the post-swap state rather than an answer) observe completion here.
-    #[doc(hidden)]
-    #[hotpath::skip]
-    pub async fn wait_for_branch_reopen(&self, after: u64, timeout: std::time::Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while self.branch_reopen_completions.load(Ordering::Acquire) <= after {
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        true
+    /// Waits until at least one branch reopen has completed past `after`, or
+    /// until `timeout` elapses. Returns `true` if one landed. Reopens do not
+    /// block requests, so tests observe completion here.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_branch_reopen(
+        &self,
+        after: u64,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let mut completions = self.branch_reopen_completions.subscribe();
+        matches!(
+            tracedecay_runtime_core::native_runtime::timeout(
+                timeout,
+                completions.wait_for(|completed| *completed > after),
+            )
+            .await,
+            Ok(Ok(_))
+        )
     }
 
     /// Number of branch reopens that have completed so far.
-    #[doc(hidden)]
-    pub fn branch_reopens_completed(&self) -> u64 {
-        self.branch_reopen_completions.load(Ordering::Acquire)
+    #[cfg(test)]
+    pub(crate) fn branch_reopens_completed(&self) -> u64 {
+        *self.branch_reopen_completions.borrow()
     }
 
     /// Catch-up helper for tests and explicit callers. Bypasses the 30 s
     /// cooldown in [`Self::maybe_sync_if_stale`] so changes made while the
-    /// server was down — a terminal `git pull`, IDE edits before the agent
-    /// launched, files touched by another tool — are admitted for authoritative
+    /// server was down, a terminal `git pull`, IDE edits before the agent
+    /// launched, files touched by another tool, are admitted for authoritative
     /// reconciliation. This method waits only for scheduler admission, never
     /// for indexing. The staleness-check stamp is updated on the way out so the
     /// next lazy request does not immediately enqueue duplicate work.
     ///
     /// The machine is advanced on every exit path (including errors) so
     /// [`Self::wait_for_startup_catch_up`] never hangs.
-    #[hotpath::measure(label = "mcp.server.startup_catch_up", future = true)]
+    #[tracing::instrument(name = "mcp.server.startup_catch_up", level = "trace", skip_all)]
     pub async fn run_startup_catch_up_sync(&self) {
         self.startup_catch_up.begin_sync();
 
@@ -542,20 +276,26 @@ impl McpServer {
             freshness_probe_sink: self.code_index_freshness_probe_sink.clone(),
         };
         match refresh(request).await {
-            Ok(Some(fresh)) => {
+            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(Some(fresh))) => {
                 *crate::mcp::server::requests::recover_lock(&self.file_token_map) = fresh;
             }
-            Ok(None) => {}
+            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {}
+            Ok(super::hook_writes::BackgroundRefreshOutcome::NotApplicable) => {
+                tracing::debug!("startup code-index catch-up does not apply without Git identity");
+            }
+            Ok(super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled) => {
+                tracing::info!(
+                    reason = "linked_worktree_disabled",
+                    "automatic code-index refresh disabled by watch policy"
+                );
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "startup catch-up admission failed");
+                warn_reconcile_not_admitted(&e, "startup catch-up admission failed");
                 self.startup_catch_up.settle();
                 return;
             }
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         self.last_staleness_check_at.store(now, Ordering::Release);
 
         self.startup_catch_up.settle();
@@ -567,20 +307,25 @@ impl McpServer {
     }
 
     /// Polls until startup reconciliation admission settles or `timeout` elapses.
-    #[hotpath::skip]
     pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now() + timeout;
         while !self.startup_catch_up_done() {
-            if tokio::time::Instant::now() >= deadline {
+            let now = std::time::Instant::now();
+            if now >= deadline
+                || tracedecay_runtime_core::native_runtime::sleep_until(
+                    now + std::time::Duration::from_millis(25),
+                )
+                .await
+                .is_err()
+            {
                 return false;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         true
     }
 
     /// Claim the lazy-reconciliation window for edit-shaped tools and enqueue it
-    /// in the background — but only if at least 30 s have passed since the last
+    /// in the background, but only if at least 30 s have passed since the last
     /// successful admission. The cooldown is the gate: while it holds, this returns
     /// immediately, so dropping it into every `tools/call` handler is cheap.
     ///
@@ -588,30 +333,25 @@ impl McpServer {
     /// reindex the entire stale set inline, on the request
     /// path, with no bound: one `git pull` ahead of an edit tool turned that
     /// call into an O(store) reindex the client waited on. The claim is still
-    /// made here — so the cooldown and single-flight semantics are unchanged —
+    /// made here, so the cooldown and single-flight semantics are unchanged,
     /// but the bounded request is retained through the same mechanism read tools
-    /// already use ([`Self::spawn_read_refresh_task`]), and the caller serves
+    /// already use (`Self::spawn_read_refresh_task`), and the caller serves
     /// immediately on the current snapshot. Freshness is reported separately by
     /// the code-index authority after reconciliation completes.
     ///
     /// Concurrent callers are serialized via
-    /// [`Self::last_staleness_check_at`]: the first caller stamps `now`
+    /// `Self::last_staleness_check_at`: the first caller stamps `now`
     /// into the field with `compare_exchange`; later callers within the
     /// same window see the stamp and bail. If admission fails, the stamp still
     /// advances so every subsequent tool call does not retry immediately.
-    #[hotpath::measure(label = "mcp.server.sync_if_stale", future = true)]
+    #[tracing::instrument(name = "mcp.server.sync_if_stale", level = "trace", skip_all)]
     pub async fn maybe_sync_if_stale(&self) {
-        let cg = self.cg_snapshot().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let previous = self.last_staleness_check_at.load(Ordering::Acquire);
-        if previous != 0 && now.saturating_sub(previous) < 30 {
+        if !self.background_tasks.admits() {
             return;
         }
-
-        if !CooldownGate.try_claim(&self.last_staleness_check_at, now, 30) {
+        let cg = self.cg_snapshot().await;
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+        if !try_claim_cooldown(&self.last_staleness_check_at, now, 30) {
             return;
         }
 
@@ -624,7 +364,7 @@ impl McpServer {
         // the guard only fires on a checkout racing the current call.
         //
         // R4: deliberately resolves its own branch rather than taking the
-        // request memo. The `CooldownGate` claim above rate-limits this path
+        // request memo. The cooldown claim above rate-limits this path
         // to once per 30s, so it is not a per-request cost, and re-reading
         // HEAD here keeps the racing-checkout guard genuine.
         if cg.branch_drifted() {
@@ -660,32 +400,28 @@ impl McpServer {
     ///
     /// R4: this runs before any cooldown claim, so it is on the hot path of
     /// every read tool call. It takes the caller's request-scoped branch memo
-    /// — the same resolution `reopen_if_branch_drifted` already made for this
-    /// request — instead of re-opening the repository.
+    ///, the same resolution `reopen_if_branch_drifted` already made for this
+    /// request, instead of re-opening the repository.
     pub(crate) fn maybe_spawn_read_refresh(
         &self,
         cg: &Arc<TraceDecay>,
         live_branch: &tracedecay_runtime_core::branch::BranchMemo,
     ) {
-        if !self.sync_config.read_refresh {
+        if !self.sync_config.read_refresh || !self.background_tasks.admits() {
             return;
         }
         // A checkout racing this call would diff the new branch against the
         // old branch's DB; `tools/call` reopens onto the live branch before
-        // dispatch, so this only fires on an in-flight race. Skip it — the
+        // dispatch, so this only fires on an in-flight race. Skip it, the
         // next call runs on the reopened snapshot.
         if cg.branch_drifted_with(live_branch) {
             return;
         }
 
-        let now = crate::tracedecay::current_timestamp();
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let cooldown = self.sync_config.read_cooldown_secs as i64;
-        let previous = self.last_background_refresh_at.load(Ordering::Acquire);
-        if previous != 0 && now.saturating_sub(previous) < cooldown {
-            return;
-        }
         // Reserve the cooldown slot. If another read call won the race, bail.
-        if !CooldownGate.try_claim(&self.last_background_refresh_at, now, cooldown) {
+        if !try_claim_cooldown(&self.last_background_refresh_at, now, cooldown) {
             return;
         }
         // Reserve the single-flight slot. If a refresh is already running
@@ -724,20 +460,34 @@ impl McpServer {
         let _admitted = self.background_tasks.spawn(async move {
             let _running = running_guard;
             match refresh(request).await {
-                Ok(Some(fresh)) => {
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(Some(fresh))) => {
                     if let Ok(mut guard) = token_map.lock() {
                         *guard = fresh;
                     }
                 }
-                Ok(None) => {}
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {}
+                Ok(super::hook_writes::BackgroundRefreshOutcome::NotApplicable) => {
+                    tracing::debug!(
+                        "background code-index reconciliation does not apply without Git identity"
+                    );
+                }
+                Ok(super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled) => {
+                    tracing::info!(
+                        reason = "linked_worktree_disabled",
+                        "automatic code-index refresh disabled by watch policy"
+                    );
+                }
                 Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "background read reconciliation was not admitted"
+                    warn_reconcile_not_admitted(
+                        &e,
+                        "background read reconciliation was not admitted",
                     );
                 }
             }
-            done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
+            done_at.store(
+                tracedecay_runtime_core::tracedecay::current_timestamp(),
+                Ordering::Release,
+            );
         });
     }
 
@@ -764,12 +514,20 @@ impl McpServer {
     /// contract) and on a refused spawn during shutdown.
     fn spawn_version_refresh(&self) {
         let server = self.dispatch_authority.server();
-        let spawned = self.spawn_background_task(hotpath::future!(
+        let spawned = self.spawn_background_task(tracing::Instrument::instrument(
             async move {
-                let latest = tokio::task::spawn_blocking(crate::cloud::fetch_latest_version)
-                    .await
-                    .ok()
-                    .flatten();
+                let latest = match tracedecay_runtime_core::native_runtime::spawn_blocking(
+                    tracedecay_dashboard_api::cloud::fetch_latest_version,
+                )
+                .await
+                {
+                    Ok(Some(Ok(latest))) => Some(latest),
+                    Ok(Some(Err(error))) => {
+                        tracing::debug!(%error, "version-update check could not read releases");
+                        None
+                    }
+                    Ok(None) | Err(_) => None,
+                };
                 let Some(server) = server.upgrade() else {
                     return;
                 };
@@ -779,7 +537,7 @@ impl McpServer {
                     cache.refreshing = false;
                 }
             },
-            label = "mcp.server.version_refresh"
+            tracing::trace_span!("mcp.server.version_refresh"),
         ));
         if !spawned && let Ok(mut cache) = self.version_cache.lock() {
             cache.refreshing = false;
@@ -802,7 +560,7 @@ fn cached_version_warning(cache: &mut VersionCheckState, current: &str) -> (Opti
     let warning = cache
         .latest
         .as_deref()
-        .filter(|latest| crate::cloud::is_newer_minor_version(current, latest))
+        .filter(|latest| tracedecay_dashboard_api::cloud::is_newer_minor_version(current, latest))
         .map(|latest| {
             format!(
                 "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
@@ -810,62 +568,6 @@ fn cached_version_warning(cache: &mut VersionCheckState, current: &str) -> (Opti
             )
         });
     (warning, claim_refresh)
-}
-
-#[cfg(test)]
-mod response_lifecycle_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn response_revocation_waits_for_admitted_response_lease_to_drain() {
-        let lifecycle = ProjectServerResponseLifecycle::default();
-        let admitted_response = Arc::clone(lifecycle.response_gate()).read_owned().await;
-        let mut retirement = Box::pin(lifecycle.revoke_after_request_drain());
-        std::future::poll_fn(|context| {
-            let retirement_poll = std::future::Future::poll(retirement.as_mut(), context);
-            assert!(
-                retirement_poll.is_pending(),
-                "retirement bypassed an admitted response"
-            );
-            std::task::Poll::Ready(())
-        })
-        .await;
-
-        assert!(
-            !lifecycle.response_revoked().is_cancelled(),
-            "retirement must not revoke an already-admitted response"
-        );
-        drop(admitted_response);
-        retirement.await;
-        assert!(lifecycle.response_revoked().is_cancelled());
-    }
-}
-
-#[cfg(test)]
-mod background_task_owner_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn shutdown_aborts_joins_and_closes_background_task_admission() {
-        let owner = McpBackgroundTaskOwner::default();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let task_dropped = Arc::clone(&dropped);
-        assert!(owner.spawn(async move {
-            struct DropSignal(Arc<AtomicBool>);
-            impl Drop for DropSignal {
-                fn drop(&mut self) {
-                    self.0.store(true, Ordering::Release);
-                }
-            }
-            let _signal = DropSignal(task_dropped);
-            std::future::pending::<()>().await;
-        }));
-        tokio::task::yield_now().await;
-
-        assert!(owner.shutdown().await.is_empty());
-        assert!(dropped.load(Ordering::Acquire));
-        assert!(!owner.spawn(async {}));
-    }
 }
 
 #[cfg(test)]

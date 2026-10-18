@@ -2,7 +2,7 @@
 
 Thanks for downloading TraceDecay!
 
-TraceDecay is a code intelligence tool that builds a semantic knowledge graph of your codebase. It gives AI coding agents (like Claude Code) instant, structured access to your code's symbols, relationships, and dependencies — so they spend fewer tokens scanning files and more time writing code.
+TraceDecay is a code intelligence tool that builds a semantic knowledge graph of your codebase. It gives AI coding agents (like Claude Code) instant, structured access to your code's symbols, relationships, and dependencies, so they spend fewer tokens scanning files and more time writing code.
 
 Core indexing and retrieval run through the local daemon by default. Configured
 remote sources and authorities are separate, policy-bound effects; see
@@ -23,14 +23,15 @@ deployment.
 3. [Connecting to Your Agent](#connecting-to-your-agent)
 4. [Exploring Your Codebase from the CLI](#exploring-your-codebase-from-the-cli)
 5. [Keeping the Index Fresh](#keeping-the-index-fresh)
-6. [Checking Your Setup with Doctor](#checking-your-setup-with-doctor)
-7. [Finding Affected Tests](#finding-affected-tests)
-8. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
-9. [Supported Languages](#supported-languages)
-10. [Privacy and Network](#privacy-and-network)
-11. [Updating TraceDecay](#updating-tracedecay)
-12. [Configuration Files](#configuration-files)
-13. [Troubleshooting](#troubleshooting)
+6. [Running Parallel Work with Synthesis](#running-parallel-work-with-synthesis)
+7. [Checking Your Setup with Doctor](#checking-your-setup-with-doctor)
+8. [Finding Affected Tests](#finding-affected-tests)
+9. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
+10. [Supported Languages](#supported-languages)
+11. [Privacy and Network](#privacy-and-network)
+12. [Updating TraceDecay](#updating-tracedecay)
+13. [Configuration Files](#configuration-files)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -41,8 +42,27 @@ Pick whichever method suits your platform.
 **Linux and Apple silicon macOS:**
 
 ```bash
-curl -fsSL https://github.com/ScriptedAlchemy/tracedecay/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ScriptedAlchemy/tracedecay/master/install.sh | bash
 ```
+
+The installer verifies the archive's build-provenance attestation with the
+[GitHub CLI](https://cli.github.com/) (`gh attestation verify`), so `gh` must
+be installed and signed in (`gh auth login`). Without `gh` it refuses, because
+the release's `SHA256SUMS` sits beside the archive in the same release and
+proves only that the download is intact, not who built it. To install on
+that checksum alone, set `TRACEDECAY_INSTALL_UNATTESTED=1`; the installer then
+warns that provenance was not verified. Later `tracedecay upgrade` runs verify
+the attestation themselves and need no `gh`.
+
+To verify a downloaded archive by hand:
+
+```bash
+gh attestation verify tracedecay-beta-<tag>-<platform>.tar.gz --repo ScriptedAlchemy/tracedecay \
+  --signer-workflow ScriptedAlchemy/tracedecay/.github/workflows/release-beta.yml
+```
+
+Stable archives (`tracedecay-<tag>-<platform>`) are signed by
+`.github/workflows/release.yml`.
 
 **Windows:**
 
@@ -58,21 +78,41 @@ Download from the [latest release](https://github.com/ScriptedAlchemy/tracedecay
 
 ## Your First Index
 
-Navigate to any project directory and run:
+Start the daemon first, then enroll the project:
 
 ```bash
+tracedecay daemon install-service
 cd /path/to/your/project
 tracedecay init
 ```
 
-TraceDecay enrolls the repository with the daemon, captures an exact checkout
-snapshot, and publishes a validated code generation. Project facts, sessions,
-and lossless LCM remain project-wide; code generations retain exact repository,
-checkout, worktree, ref, commit/tree, snapshot, and generation provenance.
-Storage is daemon-owned (an explicit local `.tracedecay/` install is only a
-location choice), and clients never open a project database directly.
+`tracedecay init` is brokered through the daemon-owned code-index scheduler.
+With no daemon accepting connections for this profile it refuses before it
+writes anything:
 
-Once it finishes, run `tracedecay status` to see what was indexed:
+```
+Error: project route error (code_index_scheduler_unavailable): project initialization requires the daemon-owned code-index scheduler; start the daemon and retry
+```
+
+Confirm the daemon with `tracedecay daemon status` and re-run `init`.
+
+`tracedecay init` enrolls the repository with the daemon and requests the
+first code generation. The default command returns a typed not-ready receipt
+(`first generation not ready` / `code_index_reconciliation_requested`) once
+that request is queued; the generation publishes in the background. Pass
+`--wait` to hold until it is ready. Project facts, sessions, and lossless LCM
+remain project-wide; code generations retain exact repository, checkout,
+worktree, ref, commit/tree, snapshot, and generation provenance. Storage is
+daemon-owned (an explicit local `.tracedecay/` install is only a location
+choice), and clients never open a project database directly.
+
+`init` returns a typed not-ready receipt when enrollment and the code-index
+request are accepted. The first generation is built in the background. Run
+`tracedecay status --json` to inspect progress, the selected generation, and
+its coverage. A `converging` project or `unavailable` graph is not ready; a
+successful status command only means the diagnostic request completed. Pass
+`tracedecay init --wait` to hold until the first generation is ready. Once
+that generation is current, inspect what was indexed:
 
 ```bash
 tracedecay status
@@ -88,7 +128,7 @@ For machine-readable output, use `--json`.
 
 ### Why `init` is explicit and refresh is daemon-owned
 
-`tracedecay init` is the one-time enrollment and first-generation operation.
+`tracedecay init` enrolls the repository once and requests its first generation.
 After enrollment, hooks, MCP, LSP, and the daemon's bounded freshness ladder
 submit content-free hints. The daemon reconciles native Git state, captures the
 selected worktree snapshot, and publishes a complete generation in the
@@ -120,25 +160,37 @@ untouched. Run `tracedecay sync`, then re-check `tracedecay status`; do not use
 `storage reset-project-store`, which is reserved for a reported schema reset
 requirement.
 
-### Explicit refresh compatibility
+### What gets indexed
 
-`--force` remains accepted for compatibility and queues the same authoritative
-reconciliation as `tracedecay sync`. It does not delete or fully rebuild the
-project store:
+The code index is Git's view of the worktree: tracked files and untracked
+files that `.gitignore` does not ignore. Ignored files are never indexed.
+From that set, the project's `index.exclude.v1` patterns remove paths, and
+`index.include.v1` patterns re-admit paths the exclude list would remove.
+The shipped exclude list skips generated, vendored, and cache directories
+such as `node_modules`, `vendor`, `dist`, `build`, `target`, `coverage`,
+`.next`, `.turbo`, `.cache`, virtualenvs, and `__pycache__`, plus minified
+`*.min.*` assets.
+
+A pattern is a glob over the project-relative path: `*` and `?` stay inside
+one path segment, `**` spans segments, and a pattern that names a directory
+covers everything under it (`docs` and `docs/**` are equivalent). A pattern
+without a slash matches only at the project root; write `**/docs` to match
+the directory at any depth. `grep`,
+`ast_grep_search`, and `unmounted_files` walk the same filtered file set.
+
+Both settings are project-scoped and apply when the daemon restarts; the next
+generation then adds or drops exactly the matching files. Change them from the
+dashboard Settings page or with `tracedecay_configuration_set` (value kind
+`string_list`), for example to also skip a fixtures tree:
 
 ```bash
-tracedecay sync --force
+tracedecay tool configuration_set --args '{"layer":{"kind":"project","project_id":"<id>"},"key":"index.exclude.v1","value":{"kind":"string_list","value":["vendor/**","**/node_modules/**","generated-fixtures/**"]},"expected_revision":"<revision>","idempotency_key":"<key>"}'
 ```
 
-### Default Skips
-
-TraceDecay respects `.gitignore` by default and skips common generated, vendored, and cache directories such as `node_modules`, `vendor`, `dist`, `build`, `coverage`, `.next`, `.turbo`, `.cache`, virtualenvs, and `__pycache__`.
-
-If there are additional directories you never want indexed for a run, pass `--skip-folder`:
-
-```bash
-tracedecay sync --skip-folder generated-fixtures  # explicit administrative refresh
-```
+The value replaces the whole list, so start from the current effective value
+(`tracedecay tool configuration_get --args '{"key":"index.exclude.v1"}'`). A
+malformed pattern is refused before anything is written. There is no per-run
+folder exclusion; `init` and `sync` take no folder flags.
 
 ### Seeing what changed
 
@@ -150,45 +202,37 @@ operation with its own preview and receipt.
 ### Diagnosing slow daemon convergence
 
 If status reports warming or a backlog, inspect the daemon's typed coverage
-first. An operator may request explicit per-operation diagnostics with `--verbose`
-(`-v`) when the daemon reports that an administrative refresh is appropriate:
+first. When the daemon reports that an administrative refresh is appropriate,
+request one; `--verbose` (`-v`) also prints the daemon's admission receipt:
 
 ```bash
-tracedecay sync --verbose  # explicit administrative diagnostics
+tracedecay sync --verbose
 ```
 
 Example output:
 
 ```
-  [verbose] scanned 10432 files in 2.3s
-  [verbose] stat-checked 10432 files in 0.1s
-  [verbose] changes: 3 new, 847 stat-changed, 0 removed, 9582 unchanged
-  [verbose] hashed 850 files in 1.2s (0 read errors)
-  [verbose] content check: 12 modified, 838 mtime-only
-  [verbose] indexed 15 files (204 nodes, 189 edges) in 0.3s
-  [verbose] resolved 39841 references in 0.5s
-✔ sync done — 3 added, 12 modified, 0 removed in 4412ms
+{
+  "reconcile_scope": "authoritative_project",
+  "status": "queued",
+  "project_root": "/path/to/repo"
+}
+code-index reconciliation queued via daemon for /path/to/repo
 ```
 
-This also accepts the `--force` compatibility flag, with the same diagnostics.
+The request only queues the reconcile; follow its progress with
+`tracedecay status`.
 
-### Respecting .gitignore
+### Nothing to add to .gitignore
 
-By default, tracedecay respects your `.gitignore` rules and skips ignored files during indexing. You can check the current setting or toggle it:
-
-```bash
-tracedecay gitignore              # show current setting
-tracedecay gitignore on           # enable (default)
-tracedecay gitignore off          # disable — index everything
-```
-
-TraceDecay never creates files inside your repository's working tree: all
-project data lives under `~/.tracedecay`, and a git repository additionally
+TraceDecay never creates files inside your repository's working tree, so
+`init` leaves `git status` untouched and nothing needs a `.gitignore` entry:
+all project data lives under `~/.tracedecay`, and a git repository also
 carries an identity marker inside `.git/` (never committed). If a project was
 enrolled by an older TraceDecay, it may still have a leftover
-`.tracedecay/enrollment.json` in the repository — its identity is adopted into
-the profile registry the first time the project is opened, after which the
-file is ignored and you can safely delete the `.tracedecay/` directory.
+`.tracedecay/enrollment.json` in the repository. Nothing reads that file any
+more; identity comes from `.git/` and the profile registry, so you can safely
+delete the `.tracedecay/` directory.
 
 ---
 
@@ -231,6 +275,7 @@ tracedecay install --agent cursor      # Cursor
 tracedecay install --agent devin       # Devin
 tracedecay install --agent kiro        # AWS Kiro
 tracedecay install --agent kimi        # Kimi Code CLI
+tracedecay install --agent chatgpt     # ChatGPT
 ```
 
 Other host integrations can be detected by `doctor`, but do not appear in the
@@ -244,8 +289,9 @@ MCP registration or native plugin tools, with permissions where available.
 - Devin registers the `tracedecay serve` stdio MCP server in
   `~/.config/devin/mcp_config.json`, preserving other Devin MCP entries and
   leaving Devin's permission policy unchanged.
-- Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then drives `codex plugin add tracedecay@personal` to install Codex's cache from that source. The plugin owns MCP, hooks, and skills. TraceDecay does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, or `[hooks.state]` trust hashes — Codex still asks you to trust new command hooks via `/hooks`.
-- Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; run the printed `/plugins install <staged-path>` command in Kimi Code, then rerun TraceDecay so it can record the staged source. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths.
+- Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then drives `codex plugin add tracedecay@personal` to install Codex's cache from that source. The plugin owns MCP, hooks, and skills. TraceDecay does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, or `[hooks.state]` trust hashes. Codex still asks you to trust new command hooks via `/hooks`.
+- Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; for the first install, run the printed `/plugins install <staged-path>` command in Kimi Code (it asks you to trust the plugin), then rerun TraceDecay so it can record the staged source. Later installs and updates refresh that plugin without a Kimi step: TraceDecay briefly starts `kimi web` on a loopback port and asks Kimi's own installer to reinstall it. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths.
+- ChatGPT stages its portable plugin bundle at `~/.tracedecay/host-bundle-stage/chatgpt/tracedecay`. Successful staging exits 0; registration inside ChatGPT is reported as unverifiable with installation guidance. `uninstall --agent chatgpt` removes the receipt-owned staged bytes. The same explorer is also included in the local Codex plugin, which launches it over stdio.
 
 Hermes setup writes the single user integration to
 `~/.hermes/plugins/tracedecay/` and enables it in `~/.hermes/config.yaml` under
@@ -281,11 +327,16 @@ identities. Removed Hermes install flags (`--profile`, `--all-profiles`, and
 When changing generated Hermes plugin or context-engine behavior, start with
 TraceDecay's read-only analysis tools before rebuilding or reinstalling
 anything: use `tracedecay_diff_context` to inspect modified symbols,
-dependencies, and affected tests; `tracedecay_simplify_scan` for complexity,
-duplication, dead-code, and coupling regressions; `tracedecay_test_risk` for
+dependencies, and affected tests; use `tracedecay_complexity`,
+`tracedecay_dead_code`, and `tracedecay_coupling` for
+focused quality checks; `tracedecay_test_risk` for
 untested hot spots; `tracedecay_diagnostics` for structured compiler/type
 feedback; and `tracedecay_run_affected_tests` for the focused test set when test
-execution is appropriate.
+execution is appropriate. Each managed run is recorded in the project session
+store against the session its request names (`session_id`), with its start and
+finish times, exit status, and passed/failed/ignored counts; `tracedecay_test_results`
+reads that record back, and the dashboard's Loom view draws it on the session's
+lane. A run whose request names no session is recorded unattributed.
 
 For LCM/session issues, pair `tracedecay_lcm_status` with the read-only LCM
 diagnostics (`tracedecay_lcm_doctor`, or the native Hermes `lcm_doctor` wrapper).
@@ -301,12 +352,14 @@ gated unless the host explicitly forwards messages. The
 not stock Hermes API. Treat `compression.*` as built-in compressor config; only
 `compression.enabled` gates auto-compaction globally.
 
-Kiro setup registers the profile-wide `tracedecay` MCP server through
-`kiro-cli`. It does not create steering files, custom agents, default-agent
-settings, hooks, or workspace MCP registrations. See
-[Kiro integration](KIRO-INTEGRATION.md) for the exact lifecycle.
+Kiro setup registers the profile-wide `tracedecay` MCP server by editing
+Kiro's documented `~/.kiro/settings/mcp.json`; it never runs `kiro-cli`, so
+it works whether or not `kiro-cli` is installed or signed in. It does not
+create steering files, custom agents, default-agent settings, hooks, or
+workspace MCP registrations. See [Kiro integration](KIRO-INTEGRATION.md) for
+the exact lifecycle.
 
-The install is idempotent — safe to run again after upgrading tracedecay. You'll also be offered the option to set up an optional global git post-commit hint hook (more on that below).
+The install is idempotent, safe to run again after upgrading tracedecay. You'll also be offered the option to set up an optional global git post-commit hint hook (more on that below).
 
 ### Profile-wide installs
 
@@ -333,7 +386,7 @@ the config locations and lifecycle details.
 Cursor install is plugin-based:
 
 - `tracedecay install --agent cursor` installs `cursor-plugin/` into `~/.cursor/plugins/local/tracedecay`.
-- The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace's project store instead of the plugin directory. If a host spawns the server without expanding `${workspaceFolder}`, `serve` warns and falls back to project discovery where possible (details in the plugin's `README.md`).
+- The plugin MCP config runs `tracedecay serve` with no `--path`: Cursor spawns plugin MCP servers with the workspace folder as the working directory and never expands `${workspaceFolder}` for them, so `serve` resolves the active workspace's project store from its cwd and MCP initialize roots. An unenrolled workspace still completes the MCP handshake; tool calls answer with a typed `project_not_enrolled` error until `tracedecay init` runs there (details in the plugin's `README.md`).
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
 - The Cursor plugin's daemon-owned native lifecycle journey uses
   `sessionStart`, `preCompact`, `afterFileEdit`, and `stop`. Each hook is
@@ -374,26 +427,44 @@ Current Codex limitations: TraceDecay drives `codex plugin add` / `remove` but
 cannot reload an active Codex session or trust plugin command hooks for you
 (use `/hooks` after install or recopy). Uninstall drives `codex plugin remove
 tracedecay@personal` and then removes the staged source. The legacy Codex
-config surfaces are intentionally left alone.
+configuration files are left unchanged.
 
-Kimi's global lifecycle is also two-step: TraceDecay stages source, then Kimi
-Code's `/plugins install <staged-path>` registers it. To remove it, use Kimi
-Code's `/plugins remove tracedecay` first, then rerun `tracedecay uninstall
---agent kimi` to remove the staged source. TraceDecay never writes Kimi's
-managed plugin directory or `installed.json`.
+Kimi's first global install is also two-step: TraceDecay stages source, then
+Kimi Code's `/plugins install <staged-path>` registers it after Kimi's trust
+prompt. Once Kimi lists the TraceDecay plugin as installed and enabled from
+exactly that staged path, `tracedecay update`, `update-plugin`, and a repeated
+`install --agent kimi` refresh it themselves. TraceDecay starts
+`kimi web --no-open --port <ephemeral>` (loopback only, with Kimi's auto-update
+disabled), authenticates with Kimi's server token from
+`~/.kimi-code/server.token`, calls `POST /api/v1/plugins` with the staged path,
+accepts the refresh only when Kimi reports the staged version in state `ok`,
+and stops the server it started. A missing `kimi`, an older Kimi without
+`kimi web`, a refused token, a timeout, or any other answer leaves the
+`/plugins install <staged-path>` step pending and prints why. To remove it, use
+Kimi Code's `/plugins remove tracedecay` first, then rerun `tracedecay
+uninstall --agent kimi` to remove the staged source. TraceDecay never writes
+Kimi's managed plugin directory or `installed.json`; only Kimi's installer
+does.
+
+ChatGPT registers plugins through its own UI. TraceDecay
+stages the portable bundle and reports the host registration as
+`unverifiable`, with informational guidance rather than a standing pending
+action. Successful `install`, `update-plugin`, and `update` exit 0; `doctor`
+checks the staged bytes and fails incomplete or damaged staging.
+`uninstall --agent chatgpt` removes the receipt-owned staged tree; host-side
+removal is performed inside ChatGPT. The local Codex plugin includes the
+same code explorer and launches it over stdio.
 
 The generated MCP entries use the resolved absolute path to the current `tracedecay` executable.
 
-#### Config backups
+#### Config edits
 
-Whenever tracedecay rewrites an agent config file — on `install`, on `uninstall`,
-or an explicitly authorized host-maintenance operation — it first copies the
-original to a sibling `.bak` file in the same directory. Doctor only reports
-configuration findings; it never rewrites hooks. For example:
-
-- `~/.claude.json` → `~/.claude.json.bak`
-
-If anything goes wrong (a typo, an unexpected rewrite, an unknown bug), restore with `cp <path>.bak <path>`. The `.bak` is always the **exact bytes** of whatever was on disk just before the write; tracedecay never deletes or rotates it, so the most recent backup is the file you want.
+Whenever tracedecay rewrites an agent config file, on `install`, on `uninstall`,
+or an explicitly authorized host-maintenance operation, it edits only its own
+entries and publishes the result atomically. It never leaves backup or
+"original" copies beside host configs. Uninstall removes TraceDecay's entries
+and leaves every other setting in place. Doctor only reports configuration
+findings and never rewrites hooks.
 
 ### Removing an integration
 
@@ -409,7 +480,7 @@ tracedecay uninstall --agent hermes
 
 You don't need an AI agent to use tracedecay. Every MCP tool is reachable from
 the shell through `tracedecay tool <name>`, which dispatches the same tool the
-agent would call. There are no separate per-tool subcommands — `tracedecay
+agent would call. There are no separate per-tool subcommands, `tracedecay
 query`, `tracedecay context`, `tracedecay files`, and `tracedecay affected` do
 not exist and will fail with an unrecognized-subcommand error.
 
@@ -440,7 +511,7 @@ tracedecay tool search "authenticate" --limit 5
 tracedecay tool context "implement user authentication"
 ```
 
-This is the same context builder that AI agents use. Given a natural language task description, it finds the most relevant entry points, related symbols, and code structure. Output defaults to the human text rendering; use `--json` for the raw payload.
+This is the same context builder that AI agents use. Given a natural language task description, it finds the most relevant entry points, related symbols, and code structure. Output defaults to the human text rendering. `--json` prints the MCP tool result every tool prints: the rendered `content`, `isError`, and `structuredContent` holding the whole typed result (or a refusal's typed `problem` record). `--format json` prints only the typed result.
 
 ```bash
 tracedecay tool context "implement user authentication" --json --max-nodes 30
@@ -454,7 +525,7 @@ The `--max-nodes` flag controls how many symbols are included (default: 20).
 tracedecay tool files                           # all files
 tracedecay tool files --path src/mcp            # only files under src/mcp/
 tracedecay tool files --pattern "**/*.rs"       # only Rust files
-tracedecay tool files --json                    # machine-readable output
+tracedecay tool files --json                    # tool result; typed payload in structuredContent
 ```
 
 ### Running the MCP server directly
@@ -463,7 +534,23 @@ tracedecay tool files --json                    # machine-readable output
 tracedecay serve
 ```
 
-This starts the MCP server over stdio. You normally don't need to run this yourself — the agent integration handles it. But it's useful for debugging or connecting custom tools.
+This starts the MCP server over stdio. You normally don't need to run this yourself, the agent integration handles it. But it's useful for debugging or connecting custom tools.
+
+### Repeated-query hints (experimental)
+
+When the profile setting `user.repeated_query_hints.v1` is `true`, a tool call
+whose query words overlap more than 60% with a call to the same tool among the
+previous six calls of the same MCP session gets one extra text block naming
+that earlier call, as a sign of a possible loop. The hint never blocks a call
+or changes the rest of the result. The setting is off by default, belongs to
+your profile, and applies to MCP sessions started after it changes:
+
+```bash
+tracedecay tool configuration_set --args '{"layer":{"kind":"user_profile","profile_id":"<id>"},"key":"user.repeated_query_hints.v1","value":{"kind":"boolean","value":true},"expected_revision":"<revision>","idempotency_key":"<key>"}'
+```
+
+Read the current value and revision with `tracedecay tool configuration_get
+--args '{"key":"user.repeated_query_hints.v1"}'`.
 
 ### Working from a subdirectory
 
@@ -527,9 +614,12 @@ or a typed warming/refresh-required state. They do not run an implicit refresh
 or open storage. Hooks and the daemon scheduler own background convergence;
 multiple clients are serialized by the daemon authority.
 
-### Optional daemon service
+### Daemon service
 
-If you want the daemon available across terminal sessions and after login, install the per-user service:
+The daemon is required, not optional: `tracedecay init` brokers through the
+daemon-owned code-index scheduler, and the read commands connect to the daemon
+rather than starting one. Install the per-user service to manage the daemon
+through the host service manager:
 
 ```bash
 tracedecay daemon install-service
@@ -538,11 +628,54 @@ tracedecay daemon status
 
 On Linux this installs a systemd user service. On macOS this installs a LaunchAgent at `~/Library/LaunchAgents/com.tracedecay.daemon.plist`. On Windows this registers a least-privilege, per-user Task Scheduler task that starts at logon. The task name and ACL are scoped to the current Windows SID, and the daemon endpoint is an authenticated loopback connection discovered from the selected profile.
 
+Headless Linux containers and remote shells may have no systemd user bus
+(`systemctl --user` reports `Failed to connect to bus`). In that environment,
+run the daemon in the foreground:
+
+```bash
+tracedecay daemon run
+```
+
+Keep that terminal running, then run `tracedecay init` and other commands in a
+second terminal under the same user and profile. The foreground daemon owns the
+same authenticated endpoint; it does not require a service manager.
+`tracedecay daemon status` exits 0 only when that endpoint is serving; a
+stopped or unreachable daemon exits non-zero.
+
+The service is memory-bounded, sized from physical RAM when it is installed:
+`MemoryMax` is half of RAM up to 24 GiB, `MemoryHigh` is three quarters of
+that, and `MemorySwapMax` is an eighth of it (on a 128 GiB host: 18 GiB, 24
+GiB, and 3 GiB). `MemoryHigh` is the line where the daemon refuses new growth
+and sheds reclaimable caches; `MemoryMax` is the kernel kill line, after which
+the unit restarts. Override them with a drop-in, which reinstalls leave alone:
+
+```bash
+systemctl --user edit tracedecay
+# [Service]
+# MemoryHigh=12G
+# MemoryMax=16G
+# MemorySwapMax=2G
+```
+
+launchd has no enforced memory ceiling, so the LaunchAgent passes the same
+`MemoryMax` budget to the daemon as `TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES`,
+where it bounds admission and triggers the same cache shedding.
+
 Use `tracedecay daemon start`, `stop`, or `restart` for explicit lifecycle control. Remove the service with:
 
 ```bash
 tracedecay daemon uninstall-service
 ```
+
+Install without activation with `tracedecay daemon install-service --no-start`.
+Updates and post-update maintenance preserve the exact captured service state:
+running services return to running, stopped-enabled services stay stopped and
+enabled, stopped-disabled services stay stopped and disabled, and masked or
+missing services remain untouched. Passive commands and integrations (`status`,
+`doctor`, `tool`, `serve`, MCP proxying, and hooks) never start or enable the
+service. If the daemon is unavailable, it may be intentionally held; report the
+typed state instead of retrying or changing lifecycle. Use `start` or `restart`
+only when you intentionally want the daemon running.
 
 ### CLI-Only Workflows
 
@@ -558,6 +691,125 @@ Use `tracedecay sync` only as an explicit administrative refresh request when a
 diagnostic says the selected generation is stale; routine freshness remains a
 daemon-owned background journey.
 
+## Running Parallel Work with Synthesis
+
+Work runs provider attempts for you: several tasks implemented in parallel,
+then one synthesis attempt that reviews their outputs. The guided path,
+`tracedecay work advance-job`, runs that whole job from one request. Agents
+call the same operation as the `tracedecay_work_advance_job` MCP tool.
+
+### Before you start
+
+Work starts attempts only through a provider route you configured, so set
+`work.executable_bindings.v1` for the project first. The default topology
+admits one active attempt per repository. A job still finishes under that
+default, but its sources run one at a time. To run them at the same time, raise
+`concurrency.maximum_active_per_repository` and
+`concurrency.maximum_global_active` in `work.topology_policy.v1`. That key is
+protected, so change it with a protected preview and apply, then restart the
+daemon.
+
+### Describe the job
+
+Write the job to a file. Each task names its instructions and its placement.
+The synthesis names the task whose run it uses, its output name, and its
+instructions.
+
+```json
+{
+  "job": "parser-rewrite",
+  "title": "Rewrite the parser",
+  "base": { "reference": "refs/heads/main", "commit": "<full commit id>" },
+  "effect_state": "observational",
+  "tasks": [
+    {
+      "key": "alpha",
+      "title": "Recursive-descent parser",
+      "instructions": "Rewrite src/parse.rs as a recursive-descent parser.",
+      "placement": {
+        "kind": "linked_worktree",
+        "root": "/abs/path/to/worktree-alpha",
+        "network_free": true,
+        "in_place_acknowledged": false
+      }
+    },
+    {
+      "key": "beta",
+      "title": "Pratt parser",
+      "instructions": "Rewrite src/parse.rs as a Pratt parser.",
+      "placement": {
+        "kind": "linked_worktree",
+        "root": "/abs/path/to/worktree-beta",
+        "network_free": true,
+        "in_place_acknowledged": false
+      }
+    }
+  ],
+  "synthesis": {
+    "task": "alpha",
+    "output_name": "output.parser-rewrite.review",
+    "instructions": "Compare both rewrites and synthesize the better parser."
+  }
+}
+```
+
+The `job` name and each task `key` use 1 to 48 lowercase letters, digits, or
+hyphens. A job names 1 to 16 tasks. Every Work identity comes from these two
+names, so the job above owns `task.parser-rewrite.alpha`,
+`run.parser-rewrite.alpha`, the source attempt
+`attempt.parser-rewrite.alpha.source`, and the synthesis attempt
+`attempt.parser-rewrite.alpha.synthesis`. The response repeats these
+identities under `job`.
+
+### Run it
+
+```bash
+tracedecay work advance-job --request-file job.json --until-settled
+```
+
+Each call creates every task, accepts its allowed proposal, admits execution,
+admits the placement, and starts the source attempt. It then waits for the
+sources, synthesizes them, waits for the synthesis, and releases each
+placement. Every step is the same Work operation you could call yourself,
+with that operation's own receipt. The output prints one line per step.
+`--until-settled` calls again until the job completes or is refused. Without
+it, one call runs every step it can and returns. Add `--json` to print each
+call's result envelope on its own line.
+
+A call ends in one of four states:
+
+- `advancing`: the call reached its deadline with steps left. Call again.
+- `waiting`: attempts are still running, the proposal route is warming, or the
+  topology has no free attempt slot. Call again later.
+- `refused`: the chain stopped at the named step with a typed problem. The
+  problem is the step operation's own refusal or one of the guided refusals
+  below.
+- `completed`: the response carries the source attempts and the synthesis
+  attempt.
+
+The job keeps no state of its own. Each call reads what the Work authorities
+hold and runs only the steps that are still missing. Sending the same request
+again is always safe, including after a daemon restart.
+
+### When the job is refused
+
+- `application.work-guided.job-conflict`: an object the job owns already
+  exists with different content, such as a changed title, placement, or
+  instructions. Name a new job to run the changed request.
+- `application.work-guided.proposal-withheld`: a task's proposal was not
+  decided `allow`. Review it with `generate-proposal` and `review-proposal`.
+- `application.work-guided.needs-operator`: an attempt failed, timed out, was
+  cancelled, or needs recovery, or a placement is quarantined. Recover it with
+  `resume-attempts`, `retry-attempt`, or `release-placement`.
+- `application.work-guided.invalid-job`: the request itself is malformed.
+
+Pause, resume, cancel, retry, and adjudication stay separate operations. For
+example, while you pause a job's run with `tracedecay work pause-run`, the
+next call refuses synthesis with `application.work-run-control.paused`. After
+`resume-run`, the same request continues. Each source attempt runs in the root
+its own placement admitted, and the synthesis runs in its task's placement
+root. A placement without a root runs in the project checkout.
+
 ## Checking Your Setup with Doctor
 
 The `doctor` command runs a read-only health check:
@@ -568,28 +820,82 @@ tracedecay doctor
 
 It verifies:
 
-- **Binary** — location and version
-- **Current project** — registered project identity, final-store admission,
+- **Binary**, location and version
+- **Current project**, registered project identity, final-store admission,
   exact worktree/ref/commit/generation, freshness, coverage, and typed authority
   state
-- **Global registry** — daemon-owned project/profile enrollment and availability
-- **User config** — `~/.tracedecay/config.toml` and upload settings
-- **Agent integrations** — MCP server registration, hook installation, tool permissions, prompt rules
-- **Network** — the configured worldwide counter and GitHub releases API; each
-  reports its own available or unavailable state
+- **Global registry**, daemon-owned project/profile enrollment and availability
+- **User config**, `~/.tracedecay/config.toml` and upload settings
+- **Agent integrations**. MCP server registration, hook installation, tool permissions, prompt rules
+- **Network**, the configured worldwide counter and GitHub releases API; each
+  reports its own available or unavailable state, and a failed release lookup
+  names its outcome (see [Updating TraceDecay](#updating-tracedecay))
 
 If any tool permissions are missing after an upgrade, Doctor reports the missing
 capability and the supported install/update operation. Doctor only reports
 state; refresh, retention, recreation, and host-config changes are separate
 authorized daemon operations.
 
-To check only a specific agent:
+### Hosts that are not installed
 
-```bash
-tracedecay doctor
+A host TraceDecay tracks or finds leftover config for, but whose CLI is not on
+`PATH`, is reported as skipped with its reason and nothing else:
+
+```text
+Factory Droid integration
+  - droid: skipped, not installed (host CLI `droid` is unavailable for Factory Droid MCP registry lifecycle; install it or add it to PATH and retry)
 ```
 
-The accepted agent values are the same values supported by `tracedecay install --agent`.
+Hosts TraceDecay configures through their documented config files (Kiro,
+Cline, Devin, Zed, and others) need no host CLI and no host sign-in.
+
+A skipped host never counts as an issue, warning, or pending operator step, in
+`doctor`, `install`, `update-plugin`, `reinstall`, or `update`. Only defects in
+TraceDecay's own state, or in a host TraceDecay can reach, change the exit
+status.
+
+### One set of findings
+
+Doctor asks the running daemon for its canonical findings (storage, runtime,
+code index, ingest coverage, memory owners, GitHub source, and the rest) and
+prints each one under **Canonical Doctor findings** with the statement and
+evidence the dashboard's Doctor view shows, for example:
+
+```text
+✔ observability: durable ingest coverage records no refused source records (observability.ingest-coverage.converged)
+```
+
+When no daemon is listening for the profile, Doctor runs only its binary-local
+checks (binary, service unit, host integrations, external tools, release
+lookup) and reports the typed state in place of the findings:
+
+```text
+… daemon_unavailable: no TraceDecay daemon is listening for this profile, ...
+```
+
+Start the daemon and re-run Doctor to read the findings.
+
+### Exit status and JSON
+
+| Exit | `doctor` | `install`, `update-plugin`, `reinstall`, `update` |
+|------|----------|---------------------------------------------------|
+| `0`  | no issue found; warnings and skipped hosts may be printed | every host completed, or was skipped as not applicable or `not installed` |
+| `1`  | an issue was found | a host's lifecycle ran and failed (or, for `update`, the upgrade failed) |
+| `75` | no issue, but an operator step is pending: `daemon_unavailable`, a store the daemon serves reset-required, or a host's interactive activation (Kimi Code's `/plugins install`) | nothing failed, but a host waits on an interactive step (Kimi Code's `/plugins install`) |
+
+A project runtime that is still mounting (`application.runtime.mounting`) is
+reported as pending with a wait remedy; it does not change the exit status.
+
+`tracedecay doctor --json` writes no human report and prints one JSON
+document on stdout with `version`, `outcome` (`healthy`, `issue`, or
+`pending_operator_action`), the `issues` / `warnings` / `pending_actions`
+counts, every check line in `checks` (`level` and `message`), and
+`daemon_findings`. `daemon_findings.state` is `observed` (carrying the
+`/api/doctor/findings` `payload`, projected by the same code the dashboard route
+uses, plus its `domain_state`, `coverage`, and `freshness`),
+`daemon_unavailable` when no daemon listens, `mounting` while the project
+runtime that owns the report is still mounting, or `unread` with a `reason` when
+a daemon answered without an observed report.
 
 ---
 
@@ -625,7 +931,7 @@ tracedecay tool affected --args '{"files":["src/lib.rs"],"depth":3}'
 # custom test file pattern
 tracedecay tool affected --args '{"files":["src/lib.rs"],"filter":"*_test.rs"}'
 
-# raw JSON payload instead of the human rendering
+# the tool result, with the typed payload under structuredContent
 tracedecay tool affected --args '{"files":["src/lib.rs"]}' --json
 ```
 
@@ -652,7 +958,7 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 |------|-------------|
 | `tracedecay_callers` | Find what calls a given function or method. Configurable traversal depth. |
 | `tracedecay_callees` | Find what a function or method calls. |
-| `tracedecay_impact` | Trace the full blast radius of changing a symbol — everything that could be affected. |
+| `tracedecay_impact` | Trace the full blast radius of changing a symbol, everything that could be affected. |
 | `tracedecay_affected` | Find test files affected by source file changes. |
 | `tracedecay_similar` | Find symbols with similar names (useful for naming patterns or related code). |
 | `tracedecay_rename_preview` | Preview all references to a symbol before renaming it. |
@@ -661,24 +967,22 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_dead_code` | Find unreachable symbols — functions with no callers. |
-| `tracedecay_unused_imports` | Find import statements that are never referenced. |
-| `tracedecay_unmounted_files` | Find source files no build root reaches — indexed as healthy symbols, yet no compiler, bundler, or test runner ever loads them. Reports one section per ecosystem with its own verdict and blind spots. |
+| `tracedecay_dead_code` | Find unreachable symbols, functions with no callers. |
+| `tracedecay_unmounted_files` | Find source files no build root reaches, indexed as healthy symbols, yet no compiler, bundler, or test runner ever loads them. Reports one section per ecosystem with its own verdict and blind spots. |
 | `tracedecay_circular` | Detect circular file dependencies. |
 | `tracedecay_recursion` | Detect recursive and mutually-recursive call cycles. |
 | `tracedecay_complexity` | Rank functions by composite complexity score, including cyclomatic complexity from the AST. |
-| `tracedecay_god_class` | Find classes with the most members — candidates for decomposition. |
-| `tracedecay_hotspots` | Find the most connected symbols (highest call count). These are high-risk areas. |
+| `tracedecay_god_class` | Find classes with the most members, candidates for decomposition. |
+| `tracedecay_hotspots` | Rank symbols by `(incoming + outgoing + 1) * (file churn + 1)` over the last 90 days. When Git history is unavailable, rank by connectivity and report churn as unavailable. |
 | `tracedecay_doc_coverage` | Find public symbols missing documentation. |
-| `tracedecay_simplify_scan` | Quality analysis of changed files: duplications, dead code, complexity, coupling. |
 
 ### Health & quality signals
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_health` | Composite quality signal (0–10000) from five structural dimensions (acyclicity, depth, equality, redundancy, modularity) with a low-weight penalty for `/// skip-test-coverage` overuse. The single number to track over time. |
+| `tracedecay_health` | Health panel: the measured dimensions (acyclicity, depth, equality, redundancy, modularity, coverage_discipline), worst first, then the dimensions the scope gave nothing to measure under `no evidence:` with the reason. `quality_signal` (0–10000) is the geometric mean of the five structural dimensions with a low-weight penalty for `/// skip-test-coverage` overuse. Dimensions without evidence enter it at their formula value, so an empty scope reads 10000 and one file reads 0; read `panel` before the number. |
 | `tracedecay_gini` | Gini inequality coefficient for any metric (complexity, lines, fan-in, fan-out, members). Finds god files and uneven distributions. |
-| `tracedecay_dependency_depth` | Longest file-level dependency chains — the critical paths where upstream changes ripple through the most layers. |
+| `tracedecay_dependency_depth` | Longest file-level dependency chains, the critical paths where upstream changes ripple through the most layers. |
 | `tracedecay_dsm` | Design Structure Matrix showing file dependencies as clusters, density stats, or an NxN grid. Reveals hidden coupling patterns. |
 | `tracedecay_test_risk` | Risk-weighted test gaps combining complexity, coupling, git churn, and test coverage. Answers "where should the next test go?" Reports a **static attribution lower bound** (not line/branch coverage): each function is attributed via a direct test edge (`direct_unit`) or a depth-3 transitive path (`closure`), with the weaker `closure` method keeping a higher residual risk. See [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md) for how to interpret the signal honestly on integration-heavy repos. |
 
@@ -693,38 +997,38 @@ Mark functions that are genuinely untestable in unit tests (e.g. infrastructure-
 pub async fn produce(&mut self, topic: &str, batch: Bytes) -> io::Result<i64> { ... }
 ```
 
-Marked functions are excluded from `tracedecay_test_risk` attribution calculations, giving you an accurate picture of testable-code attribution (the `skipped` count appears in the summary). Note this is a **static attribution** signal, not executed coverage — see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md).
+Marked functions are excluded from `tracedecay_test_risk` attribution calculations, giving you an accurate picture of testable-code attribution (the `skipped` count appears in the summary). Note this is a **static attribution** signal, not executed coverage, see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md).
 
-**Health penalty:** The `coverage_discipline` dimension (visible in `tracedecay_health` and `tracedecay_health_delta`) penalises overuse. Each skipped function lowers the score proportionally — a few genuine exclusions have negligible impact, but marking 50%+ of your codebase as untestable will visibly reduce your quality signal. This encourages using the annotation for its intended purpose rather than as a way to game coverage numbers.
+**Health penalty:** The `coverage_discipline` dimension (visible in `tracedecay_health` and `tracedecay_health_delta`) penalises overuse. Each skipped function lowers the score proportionally, a few genuine exclusions have negligible impact, but marking 50%+ of your codebase as untestable will visibly reduce your quality signal. This encourages using the annotation for its intended purpose rather than as a way to game coverage numbers.
 
 ### Structural analysis
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_module_api` | Public API surface of a file or directory. |
+| `tracedecay_module_api` | Public API of a file or directory. |
 | `tracedecay_coupling` | Rank files by coupling (fan-in or fan-out). |
 | `tracedecay_inheritance_depth` | Find the deepest class inheritance hierarchies. |
 | `tracedecay_type_hierarchy` | Recursive type hierarchy tree for traits, interfaces, and classes. |
 | `tracedecay_distribution` | Node kind breakdown (classes, methods, fields) per file or directory. |
 | `tracedecay_rank` | Rank nodes by relationship count (most-implemented interface, most-extended class, etc.). |
-| `tracedecay_largest` | Rank nodes by size — largest classes, longest methods. |
+| `tracedecay_largest` | Rank nodes by size, largest classes, longest methods. |
 
 ### Git-aware tools
 
 | Tool | What it does |
 |------|-------------|
 | `tracedecay_diff_context` | Semantic context for changed files: modified symbols, dependencies, and affected tests. |
-| `tracedecay_changelog` | Semantic diff between two git refs — which symbols were added, removed, or modified. |
+| `tracedecay_changelog` | Semantic diff between two git refs, which symbols were added, removed, or modified. |
 | `tracedecay_commit_context` | Semantic summary of uncommitted changes, useful for drafting commit messages. |
 | `tracedecay_pr_context` | Semantic diff between git refs for pull request descriptions. |
-| `tracedecay_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection. Finds test callers up to depth 3, so a listed test may be a direct caller or a transitive one — see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md) for the direct-vs-closure distinction. |
+| `tracedecay_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection. Finds test callers up to depth 3, so a listed test may be a direct caller or a transitive one, see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md) for the direct-vs-closure distinction. |
 
 ### Porting tools
 
 | Tool | What it does |
 |------|-------------|
 | `tracedecay_port_status` | Compare symbols between source/target directories to track cross-language porting progress. |
-| `tracedecay_port_order` | Topological sort of symbols for porting — tells you what to port first based on dependencies. |
+| `tracedecay_port_order` | Topological sort of symbols for porting, tells you what to port first based on dependencies. |
 
 ### Memory and fact recall
 
@@ -736,7 +1040,7 @@ The holographic memory tools store durable facts linked to entities:
 | `tracedecay_fact_feedback` | Record `helpful` or `unhelpful` feedback for a numeric `fact_id` so the fact's computed trust score changes over time. |
 | `tracedecay_memory_status` | Read-only report of project/profile fact and entity counts, trust-score buckets, feedback counts, coverage, and missing-vector state. It never repairs or mutates storage. |
 
-Entity recall surfaces facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. Update old prompts and permissions to use the exact `tracedecay_fact_store_*` tools, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
+Entity recall finds facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. Update old prompts and permissions to use the exact `tracedecay_fact_store_*` tools, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
 
 Common exact fact-tool payloads (in add/search/probe order):
 
@@ -828,7 +1132,8 @@ counter payload. The counter service still receives ordinary transport metadata
 such as the source IP and may derive aggregate geography from it; submitting an
 aggregate count is not an anonymity guarantee.
 
-This powers the "Worldwide" counter shown in `tracedecay status` only when the counter is enabled.
+`tracedecay status` does not display the counter. When you opt in, `tracedecay doctor`
+reads the public total only to report whether the counter service is reachable.
 
 **To opt in:**
 
@@ -842,12 +1147,38 @@ Disable it again at any time:
 tracedecay disable-upload-counter
 ```
 
+The setting belongs to your profile, not to a project: it applies everywhere
+and can be changed or read (`tracedecay tool configuration_get --args
+'{"key":"user.upload_enabled.v1"}'`) from any directory.
+
 ### Version check
 
 TraceDecay checks GitHub release endpoints to show an upgrade notice. GitHub
 receives ordinary request metadata, including the connection source address and
 the TraceDecay user agent. A timeout or unavailable service means release
 metadata is unavailable, not that no update exists.
+
+### GitHub source and pull-request discovery
+
+`tracedecay init`, and every later project open, binds the GitHub repository
+of the checkout's `origin` remote as the project's GitHub source
+(`binding.tracedecay-daemon.github-origin` in `scope.source_bindings.v1`). The
+binding follows `origin` when the remote changes. A GitHub binding you added
+yourself for another repository is left in place: a project has exactly one
+GitHub source.
+
+Reads use the first credential available, in this order: `GH_TOKEN`, the
+`gh auth token` login, then the git credential helper's stored login for
+`https://github.com`. TraceDecay never stores the token. `tracedecay status`
+reports how the source is read, the pull-request discovery outcome for the
+checkout's exact head, and a remedy when there is one:
+
+| `github_source` state | Meaning |
+|---|---|
+| `bound` | A credential authorizes the reads. |
+| `unauthenticated_public` | No credential was found, so the repository is read anonymously as a public repository. That allows 60 requests per hour. Discovery uses the REST issue search's `head:` qualifier, which also finds fork-headed pull requests. |
+| `denied_no_credential` | No credential was found and GitHub refused the anonymous read: the repository is private or absent. Run `gh auth login`, or set `GH_TOKEN` to a token with read access, then reopen the project. |
+| `absent` | No GitHub source was observed: the checkout has no GitHub `origin`, or its advisory owner has not mounted in this daemon yet. |
 
 ### Private GitHub review sources
 
@@ -873,14 +1204,6 @@ pricing cache, or consult a pricing environment override. Missing native usage,
 unknown models, unavailable observations, or unavailable pricing remain typed
 unknown/unavailable results; TraceDecay never fills them with zero or a stale
 fallback estimate.
-
-### Semantic-model acquisition
-
-When semantic auto-download is enabled, TraceDecay can download missing,
-revision-pinned semantic-model artifacts from Hugging Face hosts. Artifacts are
-verified against catalog-pinned lengths and SHA-256 digests before publication.
-If acquisition is unavailable or disabled, semantic retrieval reports its model
-state or failure while exact, lexical, and graph retrieval remain available.
 
 ### Configured remote authority
 
@@ -912,7 +1235,34 @@ The `upgrade` command downloads the latest release from GitHub and replaces the 
 tracedecay upgrade
 ```
 
-Beta and stable are separate update channels — a beta build only sees beta releases and vice versa. Any attached MCP servers will continue running with the previous binary until you restart your agent.
+Beta and stable are separate update channels, a beta build only sees beta releases and vice versa. Any attached MCP servers will continue running with the previous binary until you restart your agent.
+
+Before anything is unpacked, `upgrade` checks the archive against the
+release's `SHA256SUMS` and then against its build-provenance attestation:
+it fetches the attestations GitHub holds for the archive's SHA-256 digest
+and verifies one of them against the Sigstore public-good trust root built
+into the binary (Fulcio certificate chain, Rekor transparency-log entry, DSSE
+signature, and an in-toto subject equal to the archive digest). The signing
+certificate must name this repository's release workflow for the channel
+(`release-beta.yml` or `release.yml`) run from `master` or from the release
+tag. On success it prints `Build provenance verified: <workflow identity>`.
+A missing attestation, one that fails verification, or one signed by any
+other identity refuses the upgrade; the checksum alone never suffices.
+
+Release lookups send the same GitHub credential as project reads (`GH_TOKEN`,
+then `gh auth token`, then the git credential helper), which raises GitHub's
+quota from 60 to 5000 requests per hour. When a lookup fails, `upgrade` and
+`doctor` name the outcome and its remedy:
+
+| Outcome | Meaning |
+|---|---|
+| `rate_limited` | GitHub's API quota is exhausted; authenticate, or retry after the reported reset time. |
+| `unauthorized` | GitHub refused the credential; refresh it with `gh auth login` or fix `GH_TOKEN`. |
+| `network_unreachable` | No connection to GitHub (DNS, connect, TLS, or proxy). |
+| `timed_out` | GitHub did not answer in time. |
+| `malformed_response` | GitHub answered with a body that is not release metadata. |
+| `unexpected_status` | GitHub answered with an HTTP status the lookup cannot interpret. |
+| `no_asset_for_platform` | No release on your channel publishes your platform's asset yet; release CI may still be uploading. |
 
 After upgrading, re-run install if the host integration reports a missing
 capability, then inspect the daemon-owned status/coverage:
@@ -927,6 +1277,43 @@ If the status is `reset_required`, stop reads and writes for the affected
 authority and follow the daemon's typed remediation or reset instructions. Do
 not copy or edit database files, bypass the daemon, or reopen the authority
 until remediation completes or the daemon explicitly recreates the final store.
+
+#### Scoped resets: `tracedecay wipe --stale --yes`
+
+`tracedecay doctor` lists each store the daemon holds in its reset-required
+state as a pending operator action with the command that resets it. When that
+command is `tracedecay wipe --stale --yes`, the reset deletes exactly the
+stores the daemon reports and nothing else; the daemon recreates each one
+empty. Nothing is migrated or backed up. The stores it resets on their own:
+
+| Store | Files deleted | What is lost |
+|---|---|---|
+| profile authority | `~/.tracedecay/global.db` (`-wal`, `-shm`) | the project registry, usage accounting, and remote-deletion records |
+| profile sessions | `~/.tracedecay/user-sessions.db` family | projectless session history and stored profile configuration |
+| project sessions `<id>` | `~/.tracedecay/projects/<id>/sessions.db` family | that project's session history and stored configuration |
+| profile / project hook admissions | the Hook V2 admission ledgers | pending hook admissions |
+
+The profile authority holds no session data, so a session-feature schema
+change (LCM, git correlation, workflows) resets only the session stores and
+never the registry.
+
+A profile authority reset keeps every project store (code index, graph,
+sessions, memory) byte-identical. The registry it recreates is empty, so the
+reset prints one `tracedecay init <path>` command per project store whose root
+still exists; each project's store records its own root and identity, so
+`init` registers it again and keeps serving its existing code generation. A
+git checkout also registers itself again the first time a command runs in it.
+At startup the daemon inspects every project sessions store whose project
+root still exists, without opening the project, so a profile written by an
+earlier release lists each refused store at once and one `wipe --stale --yes`
+resets them all. A store this release's schema already admitted records that
+in its `store_manifest.json` and is not opened again until the schema changes. While the profile authority is reset-required, project commands
+refuse with this reset instead of serving: project routing resolves
+enrollment, linked worktrees, and remote-deletion records through the
+registry.
+
+A store `wipe --stale` cannot reset on its own names `tracedecay wipe --all
+--yes`, which deletes every profile store, including project code indexes.
 
 ---
 
@@ -948,7 +1335,7 @@ user-preference writes here; projectless Codex and Cursor hooks recall from it.
 
 Projects enroll one daemon-owned project authority. Profile-backed storage
 keeps the final Grafeo/SQLite stores under the private profile root
-(`~/.tracedecay/projects/<project-id>`); a git repository additionally carries
+(`~/.tracedecay/projects/<project-id>`); a git repository also carries
 its identity in `.git/tracedecay-project.json`. Nothing is written into the
 visible working tree. Project facts, sessions, and lossless LCM are
 project-wide across branches and linked worktrees. Code graphs are indexed as
@@ -961,8 +1348,7 @@ are separate daemon operations with receipts. Hosts and clients never become a
 storage authority or open a database directly.
 
 A leftover repo-local `.tracedecay/enrollment.json` from an older TraceDecay is
-adopted into the registry on first open and then ignored; you can delete it.
-Do not copy or edit store files.
+not read; you can delete it. Do not copy or edit store files.
 
 An incompatible persisted shape or incomplete privacy remediation returns
 `ResetRequired`/`reset_required`. Follow the daemon's remediation or explicitly
@@ -984,20 +1370,20 @@ tracedecay memory status --path /path/to/project --json
 
 Created in your home directory. Contains:
 
-- `config.toml` — user preferences (upload opt-in/out, cached version info, pending upload count)
-- `global.db` — daemon-owned registry/usage metadata for enrolled projects; it is
+- `config.toml`, user preferences (cached version info, pending upload count)
+- `global.db`, daemon-owned registry/usage metadata for enrolled projects; it is
   not a fact authority and clients never open it directly
-- `projects/<project_id>/` — daemon-owned project authority data when profile storage is enabled
+- `projects/<project_id>/`, daemon-owned project authority data when profile storage is enabled
 
 The `config.toml` is plain TOML and fully transparent:
 
 ```toml
-upload_enabled = false      # set to true to opt in to counter upload/read
 pending_upload = 4823       # tokens waiting to be uploaded
 last_upload_at = 1711375200 # last successful upload timestamp
-last_worldwide_total = 1000000
-last_worldwide_fetch_at = 1711375200
 ```
+
+The upload opt-in is the `user.upload_enabled.v1` setting, not a key in this
+file.
 
 #### Mandatory structured sanitization of ingested transcripts
 
@@ -1036,6 +1422,21 @@ TraceDecay could not find an initialized project store for your current director
 tracedecay init
 ```
 
+### "code_index_scheduler_unavailable" from `init`
+
+```
+Error: project route error (code_index_scheduler_unavailable): project initialization requires the daemon-owned code-index scheduler; start the daemon and retry
+```
+
+No daemon is accepting connections for this profile, so `init` refused before
+writing anything. Start one and retry:
+
+```bash
+tracedecay daemon install-service   # or: tracedecay daemon start
+tracedecay daemon status
+tracedecay init
+```
+
 ### MCP server not connecting
 
 Your AI agent doesn't see tracedecay tools.
@@ -1043,6 +1444,12 @@ Your AI agent doesn't see tracedecay tools.
 1. Run `tracedecay doctor` to check the integration
 2. Verify `tracedecay` is on your PATH: `which tracedecay`
 3. Re-run `tracedecay install` and restart your agent completely
+
+The CLI fallback is another client of the same daemon, not a guarantee that
+the daemon is available. If Doctor reports a stopped, missing, or unavailable
+daemon, preserve that state unless you explicitly intend to start it. Do not
+loop on MCP/CLI retries or treat a held daemon as permission to run a lifecycle
+command.
 
 ### Missing symbols in search
 
@@ -1052,7 +1459,8 @@ Some symbols aren't showing up.
   warming/refresh-required state. Request an explicit administrative refresh
   only when the daemon reports it is needed.
 - Check that the language is supported (see the tiers above)
-- Verify the file isn't being skipped by `.gitignore` (`tracedecay gitignore` to check)
+- Verify the file is in Git's view of the worktree (not ignored by `.gitignore`)
+  and not matched by `index.exclude.v1` (see [What gets indexed](#what-gets-indexed))
 
 ### Indexing is slow on first run
 

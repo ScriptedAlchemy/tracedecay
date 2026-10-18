@@ -1,30 +1,30 @@
 use std::sync::Arc;
 
-use tracedecay_application::remote::auth::{
+use tracedecay_contracts::remote::auth::{
     OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1,
 };
-use tracedecay_application::remote::composition::{
-    AuthenticityClaimV1, AuthorizationClaimV1, IntegrityClaimV1, PendingLocalEvidenceV1,
-    PendingLocalObservationsV1, QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1,
-    RemoteQueryCompositionV1, ShardCoverageStateV1, ShardQueryContributionV1,
-};
-use tracedecay_application::remote::credential_admission::{
+use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAdmissionErrorV1, RemoteCredentialAdmissionPortV1,
     RemoteCredentialAdmissionServiceV1, RemoteCredentialUseV1,
 };
-use tracedecay_application::remote::query::{RemoteExactObservationResultV1, RemoteQueryResultV1};
-use tracedecay_application::remote::status::{
+use tracedecay_contracts::remote::query::{
+    RemoteQueryAuthorizationDecisionV1, RemoteQueryPolicyRecordV1,
+};
+use tracedecay_contracts::remote::replay::{
+    RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidenceV1,
+};
+use tracedecay_contracts::remote::status::{
     RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, DoctorCoverageCompletenessV1,
     PolicyDecisionRef, RemoteListenerReadV1, RemoteOperationalReadV1, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, BrainNodeId, ComponentVersion, CoverageStateV1, CurrentRemoteAuthorityStateV1,
-    EnrollmentGrantV1, EntityId, ManifestDigest, ObservedTernaryV1, ProjectId, RefId,
-    RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1, RepositoryId,
-    RepositoryStateSnapshotId, UtcMicros, WorktreeId, canonical_sha256,
+    ActorId, BrainNodeId, ComponentVersion, CurrentRemoteAuthorityStateV1, EnrollmentGrantV1,
+    EntityId, ManifestDigest, ProjectId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1,
+    RemoteRepositoryScopeV1, RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
@@ -45,102 +45,6 @@ impl RemoteSpoolKeyringV1 for TestRemoteKeyring {
     ) -> Result<Option<Arc<RemoteSpoolKeyV1>>, RemoteSqliteStorageErrorV1> {
         Ok((revision == self.0.revision()).then(|| Arc::clone(&self.0)))
     }
-}
-
-fn remote_query_result(
-    coverage: ShardCoverageStateV1,
-    pending_local: PendingLocalEvidenceV1,
-) -> RemoteQueryResultV1 {
-    RemoteQueryResultV1 {
-        composition: RemoteQueryCompositionV1 {
-            contributions: vec![ShardQueryContributionV1 {
-                manifest: QueryManifestBindingV1 {
-                    brain_id: "brain.remote-coverage".to_owned(),
-                    shard_id: "shard.remote-coverage".to_owned(),
-                    generation_id: "generation.remote-coverage".to_owned(),
-                    schema_digest: [1; 32],
-                    watermark_sequence: 1,
-                    placement_revision: 1,
-                    authority_epoch: 1,
-                    cache_age_millis: 0,
-                    cache_lag_commits: 0,
-                },
-                integrity: IntegrityClaimV1::Verified,
-                authenticity: AuthenticityClaimV1::Authenticated,
-                freshness: RemoteFreshnessV1::Current,
-                completeness: RemoteCompletenessV1::Complete,
-                authorization: AuthorizationClaimV1::Authorized,
-                coverage,
-                authority_receipt: None,
-                value: None,
-                reason_code: (coverage != ShardCoverageStateV1::Complete)
-                    .then(|| "remote_shard_degraded".to_owned()),
-            }],
-            pending_local,
-            coverage,
-        },
-        observation: RemoteExactObservationResultV1::NotFound,
-    }
-}
-
-#[test]
-fn remote_query_coverage_preserves_real_shard_and_pending_counts() {
-    let result = remote_query_result(
-        ShardCoverageStateV1::Stale,
-        PendingLocalObservationsV1 {
-            count: 3,
-            oldest_age_millis: Some(9),
-            has_sequence_gap: false,
-            has_quarantined: false,
-        }
-        .into(),
-    );
-    result.validate().expect("valid stale remote query result");
-
-    let observation = super::remote_protocol::remote_query_result_observation(
-        "request.remote-coverage",
-        1,
-        &result,
-        ObservedTernaryV1::Yes,
-    );
-
-    assert_eq!(observation.expected_shards, Some(1));
-    assert_eq!(observation.observed_shards, Some(1));
-    assert_eq!(observation.pending_local_evidence, Some(3));
-    assert_eq!(observation.terminal_succeeded, ObservedTernaryV1::Yes);
-    assert_eq!(observation.coverage, CoverageStateV1::Stale);
-    assert_eq!(
-        observation.unavailable_reason.as_deref(),
-        Some("pending_local_evidence")
-    );
-}
-
-#[test]
-fn remote_query_coverage_does_not_fabricate_unavailable_pending_count() {
-    let result = remote_query_result(
-        ShardCoverageStateV1::Unknown,
-        PendingLocalEvidenceV1::Unavailable {
-            reason: tracedecay_application::remote::composition::PendingLocalUnavailableReasonV1::AuthorityUnavailable,
-        },
-    );
-    result
-        .validate()
-        .expect("valid unavailable remote query result");
-
-    let observation = super::remote_protocol::remote_query_result_observation(
-        "request.remote-coverage-unavailable",
-        1,
-        &result,
-        ObservedTernaryV1::Unknown,
-    );
-
-    assert_eq!(observation.pending_local_evidence, None);
-    assert_eq!(observation.terminal_succeeded, ObservedTernaryV1::Unknown);
-    assert_eq!(observation.coverage, CoverageStateV1::Unknown);
-    assert_eq!(
-        observation.unavailable_reason.as_deref(),
-        Some("pending_local_authority_unavailable")
-    );
 }
 
 pub(crate) fn grant(
@@ -206,6 +110,67 @@ pub(crate) fn admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionE
         Deadline::new(UtcMicros(100)).expect("deadline"),
     )
     .expect("enrollment admission")
+}
+
+pub(crate) fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV1 {
+    let digest = ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("policy digest");
+    RemoteReplayPolicyEvidenceV1 {
+        scope: ResolvedScope::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            scope.reference.clone(),
+        )
+        .expect("resolved scope"),
+        repository_scope: scope.clone(),
+        policy_revision: 1,
+        decision: RemoteReplayPolicyDecisionV1::Admit,
+        policy: PolicyDecisionRef::new(
+            "policy.remote-registry.replay",
+            1,
+            digest.clone(),
+            ComponentVersion::new("policy.remote-registry.replay.v1").expect("policy component"),
+        )
+        .expect("policy decision"),
+        configuration_digest: digest.clone(),
+        catalog_digest: digest.clone(),
+        privacy_digest: digest,
+        revalidated_at: UtcMicros(1),
+    }
+}
+
+pub(crate) fn query_policy(scope: &RemoteRepositoryScopeV1) -> RemoteQueryPolicyRecordV1 {
+    let resolved = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        scope.reference.clone(),
+    )
+    .expect("resolved scope");
+    let digest = ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest");
+    RemoteQueryPolicyRecordV1 {
+        repository_scope: scope.clone(),
+        authority: AuthorityReceipt {
+            grant_id: CapabilityGrantId::new("grant.remote-registry.query")
+                .expect("capability grant identity"),
+            grant_revision: 1,
+            grant_digest: digest.clone(),
+            authorized_scope_digest: resolved.scope_digest.clone(),
+            disclosure: DisclosureClass::Evidence,
+            policy: PolicyDecisionRef::new(
+                "policy.remote-registry.query",
+                1,
+                digest,
+                ComponentVersion::new("policy.remote-registry.query.v1").expect("policy component"),
+            )
+            .expect("policy decision"),
+            revalidated_at: UtcMicros(1),
+        },
+        scope: resolved,
+        policy_revision: 1,
+        decision: RemoteQueryAuthorizationDecisionV1::Allow,
+        revalidated_at: UtcMicros(1),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -275,7 +240,6 @@ async fn remote_operational_read_observes_mounted_authorities_and_fails_typed_wh
     assert_eq!(status.spool.pending_count, 0);
     assert_eq!(status.spool.quarantined_count, 0);
     assert!(!status.spool.has_sequence_gap);
-    assert!(!status.current_backup_verified);
     assert!(!status.failover_in_progress);
     assert!(!status.recovery_required);
     assert!(
@@ -386,5 +350,170 @@ async fn mounted_node_populates_exact_prebody_credential_route_and_shutdown_canc
             UtcMicros(11),
         ),
         Err(RemoteCredentialAdmissionErrorV1::Unavailable)
+    );
+}
+
+fn joined_discovery(
+    brain_id: tracedecay_domain::BrainId,
+    node_id: BrainNodeId,
+    secret: &[u8],
+) -> tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1 {
+    let mut grant = grant(brain_id, node_id, &[3_u8; 32]);
+    grant.capabilities = [
+        RemoteCapabilityV1::CaptureOffline,
+        RemoteCapabilityV1::DiscoverAuthority,
+    ]
+    .into_iter()
+    .collect();
+    let enrollment = tracedecay_domain::EnrollmentCredentialRecordV1 {
+        enrollment_id: EntityId::new("enrollment.remote-joined").expect("enrollment identity"),
+        brain_id: grant.brain_id.clone(),
+        node_id: grant.node_id.clone(),
+        fingerprint: RemoteCredentialFingerprintV1::from_secret(secret)
+            .expect("credential fingerprint"),
+        revision: 1,
+        issued_at: UtcMicros(10),
+        expires_at: UtcMicros(100),
+        revoked_at: None,
+        capabilities: grant.capabilities.clone(),
+        scope: grant.scope.clone(),
+    };
+    let receipt = tracedecay_contracts::remote::auth::RemoteEnrollmentCommitReceiptV1 {
+        admission: admission(&grant),
+        prior_grant_digest: canonical_sha256(&grant).expect("grant digest"),
+        input_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+            .expect("input digest"),
+        committed_state_digest: canonical_sha256(&enrollment).expect("enrollment digest"),
+        consumed_at: enrollment.issued_at,
+        budget: tracedecay_contracts::OperationBudgetUsage {
+            units_consumed: 1,
+            bytes_consumed: 1,
+            elapsed_micros: 0,
+        },
+        enrollment,
+    };
+    let writer: tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1 =
+        serde_json::from_value(serde_json::json!({
+            "project_id": grant.scope.project_id,
+            "scope": grant.scope,
+            "authority": {
+                "fence": {
+                    "brain_id": grant.brain_id,
+                    "shard_id": "shard.remote-joined",
+                    "generation_id": "generation.remote-joined",
+                    "placement_revision": 1,
+                    "authority_epoch": 1,
+                    "authority_node_id": grant.node_id,
+                },
+                "credential_revision": 1,
+                "observed_at": 10,
+            },
+        }))
+        .expect("writer authority");
+    tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1 {
+        policy: replay_policy(&grant.scope),
+        writer,
+        enrollment: receipt,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joined_node_store_serves_only_offline_capture_for_its_member_brain() {
+    let temporary = tempfile::tempdir().expect("temporary profile parent");
+    let profile_root = temporary.path().join("profile");
+    #[cfg(unix)]
+    let endpoint =
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-joined.sock"));
+    #[cfg(not(unix))]
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        daemon_authority.record().epoch,
+        "remote node join",
+    )
+    .expect("daemon database scope");
+    let identity = daemon_authority.profile_identity().clone();
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("session runtime registry");
+    let credentials = registry.remote_credential_authority();
+    let authority_brain =
+        tracedecay_domain::BrainId::new("brain.remote-joined-authority").expect("brain identity");
+    let node_id = BrainNodeId::new("node.remote-joined").expect("node identity");
+    let secret = [13_u8; 32];
+    let presented = || OpaqueRemoteCredential::new(secret).expect("opaque credential");
+
+    assert_eq!(
+        registry
+            .join_remote_node(&joined_discovery(
+                identity.brain_id().clone(),
+                node_id.clone(),
+                &secret,
+            ))
+            .await,
+        Err(tracedecay_store_runtime::RemoteNodeOperatorErrorV1::BrainIdentityConflict),
+        "joining the profile's own Brain is provisioning's job, never a join"
+    );
+
+    let discovery = joined_discovery(authority_brain.clone(), node_id.clone(), &secret);
+    for attempt in ["join", "rerun"] {
+        registry
+            .join_remote_node(&discovery)
+            .await
+            .unwrap_or_else(|error| panic!("{attempt}: {error}"));
+    }
+    let joined = credentials
+        .storage_for_presented(RemoteCredentialUseV1::CaptureOffline, &presented())
+        .expect("the joined store serves node-local offline capture");
+    assert_eq!(joined.storage.member_brain(), &authority_brain);
+    assert_eq!(&joined.binding.shard_id.brain_id, identity.brain_id());
+    for use_case in [
+        RemoteCredentialUseV1::TransferFrame,
+        RemoteCredentialUseV1::Replay,
+        RemoteCredentialUseV1::Query,
+        RemoteCredentialUseV1::Promote,
+        RemoteCredentialUseV1::DiscoverAuthority,
+    ] {
+        assert!(
+            credentials
+                .storage_for_presented(use_case, &presented())
+                .is_err(),
+            "a joined store must never answer {use_case:?} as its Brain's authority"
+        );
+    }
+    let session = RemoteCredentialAdmissionServiceV1::new(
+        tracedecay_store_runtime::DaemonRemoteCredentialLookupV1::new(Arc::clone(&credentials)),
+    )
+    .admit_before_body(
+        &presented(),
+        RemoteCredentialUseV1::CaptureOffline,
+        UtcMicros(20),
+    )
+    .expect("the adopted enrollment admits the node's own credential");
+    assert_eq!(
+        (session.brain_id(), session.node_id()),
+        (&authority_brain, &node_id)
+    );
+
+    let mut rival = discovery.clone();
+    rival.enrollment.enrollment.expires_at = UtcMicros(90);
+    assert_eq!(
+        registry.join_remote_node(&rival).await,
+        Err(tracedecay_store_runtime::RemoteNodeOperatorErrorV1::Conflict),
+        "a different record for the adopted enrollment never replaces it"
+    );
+    let own = grant(identity.brain_id().clone(), node_id, &[14_u8; 32]);
+    assert_eq!(
+        registry
+            .provision_remote_node(own.clone(), admission(&own))
+            .await,
+        Err(tracedecay_store_runtime::RemoteNodeOperatorErrorV1::BrainIdentityConflict),
+        "a joined node store never becomes a hosted one"
     );
 }

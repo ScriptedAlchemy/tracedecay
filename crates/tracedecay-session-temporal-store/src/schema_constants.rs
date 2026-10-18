@@ -1,24 +1,45 @@
 //! Session-temporal schema identity shared with registered-store admission.
 
-pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 4;
+/// Version 5 stores occurrence text once: `snippet_text` is a virtual alias
+/// of `index_text`, and full-text search indexes only `index_text`. Version 6
+/// makes `session_summary_nodes` the one summary authority: the LCM summary
+/// columns are real columns here, `session_summary_sources` carries the
+/// lineage, and the summary FTS indexes `summary_text` alone. Version 7
+/// shares projection rows across generations: a refresh adds rows under its
+/// own generation instead of copying the session, occurrences carry the
+/// relation facts they derive from, and derived evidence is keyed by its
+/// first member so a live run extends in place. Version 8 resets a session
+/// whose materialized occurrences lost their canonical observation:
+/// `session_temporal_resets` carries the request and the generation a
+/// rebuilt session starts from.
+pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 8;
 
 pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
-    (
-        "session_temporal_schema_migrations",
-        &["name", "version", "applied_at"],
-    ),
     (
         "session_summary_nodes",
         &[
             "summary_id",
             "session_id",
+            "provider",
+            "conversation_id",
+            "depth",
             "summary_anchor_id",
             "summary_text",
-            "index_text",
+            "summary_hash",
+            "summary_token_count",
+            "source_token_count",
+            "source_time_start",
+            "source_time_end",
+            "expand_hint",
+            "metadata_json",
             "source_horizon_json",
             "publication_json",
             "created_at",
         ],
+    ),
+    (
+        "session_summary_sources",
+        &["summary_id", "ordinal", "source_kind", "source_id"],
     ),
     (
         "session_relation_receipts",
@@ -32,6 +53,10 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "graph_watermark",
             "created_at",
             "applied_at",
+            "recovery_state",
+            "recovery_failure_code",
+            "recovery_failure_count",
+            "recovery_next_attempt_at",
         ],
     ),
     (
@@ -180,6 +205,10 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "session_temporal_resets",
+        &["session_id", "requested_at", "reset_generation"],
+    ),
+    (
         "session_turns",
         &[
             "session_id",
@@ -217,6 +246,7 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "generation",
             "occurrence_id",
             "source_observation_id",
+            "source_sequence",
             "source_provider",
             "projection_output_ordinal",
             "retrieval_anchor_id",
@@ -226,13 +256,16 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "turn_grouping_json",
             "message_id",
             "agent_id",
+            "parent_message_id",
+            "parent_agent_id",
+            "parent_session_id",
+            "copied_from_anchor_ids_json",
             "role",
             "knowledge_at",
             "valid_time_json",
             "evidence_json",
             "sanitized_content_digest",
             "sanitized_content_bytes",
-            "snippet_text",
             "index_text",
         ],
     ),
@@ -288,10 +321,10 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "session_id",
             "generation",
             "evidence_kind",
+            "first_occurrence_id",
             "evidence_id",
             "retrieval_anchor_id",
             "thread_id",
-            "first_occurrence_id",
             "last_occurrence_id",
             "algorithm_version",
             "configuration_digest",
@@ -306,7 +339,7 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "session_id",
             "generation",
             "evidence_kind",
-            "evidence_id",
+            "first_occurrence_id",
             "ordinal",
             "occurrence_id",
             "member_role",
@@ -324,6 +357,6 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "checked_at",
         ],
     ),
-    ("session_occurrences_fts", &["index_text", "snippet_text"]),
-    ("session_summary_nodes_fts", &["summary_text", "index_text"]),
+    ("session_occurrences_fts", &["index_text"]),
+    ("session_summary_nodes_fts", &["summary_text"]),
 ];

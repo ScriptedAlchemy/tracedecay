@@ -1,0 +1,297 @@
+//! Closed result authority for retained memory and temporal operations.
+
+use serde_json::from_value;
+
+use crate::retained_surfaces::RetainedSurfaceOperation;
+
+mod automation;
+mod lcm;
+mod memory;
+mod session;
+
+pub use automation::{
+    AutomationCommittedReceiptV1, AutomationExternalEffectReceiptV1, AutomationRunProblemV1,
+    AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
+    FactStoreCurateResultV1, FactStoreCurateStateV1, MemoryAutomationCurationAddDispositionV1,
+    MemoryAutomationCurationLinkDispositionV1, MemoryAutomationCurationMergeV1,
+    MemoryAutomationCurationOperationEffectV1, MemoryAutomationCurationReceiptV1,
+    MemoryAutomationCurationRelationKindV1, MemoryAutomationCurationRelationProvenanceV1,
+    MemoryAutomationCurationRelationV1, MemoryAutomationCurationRemoveDispositionV1,
+    MemoryAutomationCurationResultV1, MemoryAutomationFactConflictSourceV1,
+    MemoryAutomationFactConflictValidationV1, MemoryAutomationFactDedupeValidationV1,
+    MemoryAutomationFactDispositionV1, MemoryAutomationFactEffectV1,
+    MemoryAutomationFactEvidenceItemV1, MemoryAutomationFactEvidenceSourceSpanV1,
+    MemoryAutomationFactEvidenceTrustBucketV1, MemoryAutomationFactEvidenceTrustV1,
+    MemoryAutomationFactEvidenceV1, MemoryAutomationFactInputDigestError,
+    MemoryAutomationFactInputDigestV1, MemoryAutomationFactNearestMatchV1,
+    MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
+    MemoryAutomationFactTargetV1, MemoryAutomationFactValidationStatusV1,
+    MemoryAutomationFactValidationV1,
+};
+pub use lcm::{
+    CompactLineageEdgeV1, LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmContentRangeV1,
+    LcmConvergenceStateV1, LcmConvergenceV1, LcmDagDepthStatusV1, LcmDagStatusV1,
+    LcmDescribeExternalPayloadV1, LcmDescribeResultV1, LcmDescribeSourceOverviewV1,
+    LcmDescribeSummaryNodeV1, LcmDescriptionV1, LcmDoctorFindingKindV1, LcmDoctorFindingV1,
+    LcmDoctorHealthStatusV1, LcmDoctorHealthV1, LcmDoctorProjectionStateV1, LcmDoctorProjectionV1,
+    LcmDoctorResultV1, LcmExpandQueryBudgetV1, LcmExpandQueryContextBlockV1, LcmExpandQueryMatchV1,
+    LcmExpandQueryPaginationV1, LcmExpandQueryResultV1, LcmExpandQuerySynthesisPromptV1,
+    LcmExpandResultV1, LcmExpandedSourceV1, LcmExpansionV1, LcmGrepHitV1, LcmGrepResultV1,
+    LcmLifecycleStatusV1, LcmLoadSessionResultV1, LcmMessageV1, LcmPayloadCoverageStateV1,
+    LcmPayloadCoverageV1, LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRawMessageMetadataV1,
+    LcmRawMessageOverviewV1, LcmRawMessageV1, LcmRedactionStatusV1, LcmRetrievalOutcomeV1,
+    LcmSourcePaginationV1, LcmSourceRefV1, LcmStatusResultV1, LcmStatusV1, LcmStorageKindV1,
+    LcmStoreStatusV1, LcmStoreTokenCoverageV1, LcmSummaryConvergenceReasonV1,
+    LcmSummaryConvergenceStateV1, LcmSummaryConvergenceStatusV1, LcmSummaryNodeOverviewV1,
+    LcmSummaryNodeV1, LcmTemporalFieldsV1,
+};
+pub use memory::{
+    FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1, FactContradictionV1,
+    FactFeedbackDetailsAvailabilityV1, FactFeedbackResultV1, FactFeedbackV1,
+    FactIdentitySourceResultV1, FactPayloadAccessV1, FactProjectionV1,
+    FactRetrievalTelemetryDegradationV1, FactRetrievalTelemetryV1, FactSearchGraphCoverageV1,
+    FactSearchGraphDegradationV1, FactSearchHitV1, FactSearchScoresV1, FactStatusV1,
+    FactStoreAddCommitV1, FactStoreAddResultV1, FactStoreContradictResultV1, FactStoreGetResultV1,
+    FactStoreListResultV1, FactStoreProbeResultV1, FactStoreReasonResultV1,
+    FactStoreRelatedResultV1, FactStoreRemoveResultV1, FactStoreSearchResultV1,
+    FactStoreSupersedeResultV1, FactStoreUpdateResultV1, FactTelemetryV1, FactV1, MemoryAlgebraV1,
+    MemoryFeedbackFunnelV1, MemoryStatusResultV1, MemoryStatusV1, TrustHistoryEntryV1,
+};
+pub use session::{
+    ClosedUtcIntervalV1, CorrelationIndexCountModeV1, CorrelationIndexV1, GitScopeV1,
+    HydrationStateResultV1, MessageSearchHitV1, MessageSearchResultV1, RetainedNextActionV1,
+    RetrievalWorkerStatusV1, SessionCorrelationHitV1, SessionCoverageIntervalV1,
+    SessionCoverageReasonV1, SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1,
+    SessionRecordV1, SessionRefreshBeginResultV1, SessionRefreshCancelResultV1,
+    SessionRefreshFrontierResultV1, SessionRefreshProgressV1, SessionRefreshReceiptV1,
+    SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1, SessionSourceCoverageV1,
+    SessionsForResultV1, TemporalCoverageOmissionV1, TemporalCoverageV1, TemporalExplanationV1,
+    TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1,
+    TemporalWatermarksV1, ValidCoverageIntervalV1, WorkflowAgentV1, WorkflowCoverageV1,
+    WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1, WorkflowsResultV1,
+};
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RetainedOutcomeStatusV1 {
+    Aborted,
+    BudgetExhausted,
+    Busy,
+    Cancelled,
+    Complete,
+    CompleteZero,
+    CursorManifestLimitExceeded,
+    DeadlineExceeded,
+    Deleted,
+    Denied,
+    Error,
+    Failed,
+    Joined,
+    Locked,
+    NotFound,
+    Ok,
+    Partial,
+    Recorded,
+    Redacted,
+    Running,
+    Stale,
+    Started,
+    Unavailable,
+    UnsupportedFilter,
+    WrongScope,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedErrorV1 {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(untagged)]
+pub enum RetainedSurfaceResultV1 {
+    FactStoreCurate(FactStoreCurateResultV1),
+    FactStoreAdd(FactStoreAddResultV1),
+    FactStoreSearch(FactStoreSearchResultV1),
+    FactStoreProbe(FactStoreProbeResultV1),
+    FactStoreRelated(FactStoreRelatedResultV1),
+    FactStoreReason(FactStoreReasonResultV1),
+    FactStoreContradict(FactStoreContradictResultV1),
+    FactStoreGet(FactStoreGetResultV1),
+    FactStoreUpdate(FactStoreUpdateResultV1),
+    FactStoreRemove(FactStoreRemoveResultV1),
+    FactStoreSupersede(FactStoreSupersedeResultV1),
+    FactStoreList(FactStoreListResultV1),
+    FactFeedback(FactFeedbackResultV1),
+    MemoryStatus(MemoryStatusResultV1),
+    SessionRefreshStatus(SessionRefreshStatusResultV1),
+    SessionRefreshCancel(SessionRefreshCancelResultV1),
+    SessionRefreshBegin(SessionRefreshBeginResultV1),
+    MessageSearch(MessageSearchResultV1),
+    SessionsFor(SessionsForResultV1),
+    Workflows(WorkflowsResultV1),
+    LcmStatus(LcmStatusResultV1),
+    LcmDoctor(LcmDoctorResultV1),
+    LcmLoadSession(LcmLoadSessionResultV1),
+    LcmGrep(LcmGrepResultV1),
+    LcmDescribe(Box<LcmDescribeResultV1>),
+    LcmExpand(Box<LcmExpandResultV1>),
+    LcmExpandQuery(LcmExpandQueryResultV1),
+}
+
+impl RetainedSurfaceResultV1 {
+    /// Decodes `operation`'s result body. The enum is untagged on the wire, so
+    /// a decode that does not know the operation selects the first variant
+    /// with a matching shape, which may be a sibling operation's.
+    pub fn from_operation_value(
+        operation: RetainedSurfaceOperation,
+        value: serde_json::Value,
+    ) -> serde_json::Result<Self> {
+        type Operation = RetainedSurfaceOperation;
+        Ok(match operation {
+            Operation::FactStoreCurate => Self::FactStoreCurate(from_value(value)?),
+            Operation::FactStoreAdd => Self::FactStoreAdd(from_value(value)?),
+            Operation::FactStoreSearch => Self::FactStoreSearch(from_value(value)?),
+            Operation::FactStoreProbe => Self::FactStoreProbe(from_value(value)?),
+            Operation::FactStoreRelated => Self::FactStoreRelated(from_value(value)?),
+            Operation::FactStoreReason => Self::FactStoreReason(from_value(value)?),
+            Operation::FactStoreContradict => Self::FactStoreContradict(from_value(value)?),
+            Operation::FactStoreGet => Self::FactStoreGet(from_value(value)?),
+            Operation::FactStoreUpdate => Self::FactStoreUpdate(from_value(value)?),
+            Operation::FactStoreRemove => Self::FactStoreRemove(from_value(value)?),
+            Operation::FactStoreSupersede => Self::FactStoreSupersede(from_value(value)?),
+            Operation::FactStoreList => Self::FactStoreList(from_value(value)?),
+            Operation::FactFeedback => Self::FactFeedback(from_value(value)?),
+            Operation::MemoryStatus => Self::MemoryStatus(from_value(value)?),
+            Operation::SessionRefreshStatus => Self::SessionRefreshStatus(from_value(value)?),
+            Operation::SessionRefreshCancel => Self::SessionRefreshCancel(from_value(value)?),
+            Operation::SessionRefreshBegin => Self::SessionRefreshBegin(from_value(value)?),
+            Operation::MessageSearch => Self::MessageSearch(from_value(value)?),
+            Operation::SessionsFor => Self::SessionsFor(from_value(value)?),
+            Operation::Workflows => Self::Workflows(from_value(value)?),
+            Operation::LcmStatus => Self::LcmStatus(from_value(value)?),
+            Operation::LcmDoctor => Self::LcmDoctor(from_value(value)?),
+            Operation::LcmLoadSession => Self::LcmLoadSession(from_value(value)?),
+            Operation::LcmGrep => Self::LcmGrep(from_value(value)?),
+            Operation::LcmDescribe => Self::LcmDescribe(Box::new(from_value(value)?)),
+            Operation::LcmExpand => Self::LcmExpand(Box::new(from_value(value)?)),
+            Operation::LcmExpandQuery => Self::LcmExpandQuery(from_value(value)?),
+        })
+    }
+
+    /// The same result under the variant `operation` names.
+    pub fn for_operation(self, operation: RetainedSurfaceOperation) -> serde_json::Result<Self> {
+        Self::from_operation_value(operation, serde_json::to_value(self)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::automation::tests::{automation_request, with_request_digest};
+    use super::{RetainedSurfaceOperation, RetainedSurfaceResultV1};
+    use crate::retained_surfaces::AutomationTaskV1;
+
+    #[test]
+    fn operation_decode_selects_the_named_variant_of_a_shared_shape() {
+        let page = json!({
+            "owner": {"kind": "profile"},
+            "hits": [],
+            "next_after": null,
+            "graph_coverage": {"kind": "not_mounted"}
+        });
+        let untagged = serde_json::from_value::<RetainedSurfaceResultV1>(page.clone())
+            .expect("untagged fact-page result");
+        assert!(
+            matches!(untagged, RetainedSurfaceResultV1::FactStoreProbe(_)),
+            "an untagged decode picks the first sibling with the shape: {untagged:?}"
+        );
+
+        let related = untagged
+            .clone()
+            .for_operation(RetainedSurfaceOperation::FactStoreRelated)
+            .expect("related page");
+        assert!(
+            matches!(related, RetainedSurfaceResultV1::FactStoreRelated(_)),
+            "{related:?}"
+        );
+        let reason = untagged
+            .for_operation(RetainedSurfaceOperation::FactStoreReason)
+            .expect("reason page");
+        assert!(
+            matches!(reason, RetainedSurfaceResultV1::FactStoreReason(_)),
+            "{reason:?}"
+        );
+        assert_eq!(
+            RetainedSurfaceResultV1::from_operation_value(
+                RetainedSurfaceOperation::FactStoreSearch,
+                page
+            )
+            .unwrap_err()
+            .to_string(),
+            "missing field `retrieval_telemetry`",
+            "a body decodes only as the named operation's result"
+        );
+    }
+
+    #[test]
+    fn curate_receipt_selects_only_its_exact_result_variant() {
+        let request = automation_request("run.memory.zero", AutomationTaskV1::MemoryCurator);
+        let result = serde_json::from_value::<RetainedSurfaceResultV1>(with_request_digest(
+            json!({
+                "run_id": "run.memory.zero",
+                "task": "memory_curator",
+                "state": "started"
+            }),
+            &request,
+        ))
+        .expect("canonical curate receipt");
+        let RetainedSurfaceResultV1::FactStoreCurate(receipt) = result else {
+            panic!("the receipt decoded as a sibling operation: {result:?}");
+        };
+        assert!(receipt.matches_admission(&request));
+
+        let terminal = with_request_digest(
+            json!({
+                "run_id": "run.memory.zero",
+                "task": "memory_curator",
+                "terminal": {
+                    "status": "completed",
+                    "summary": {
+                        "reviewed_count": 0,
+                        "accepted_count": 0,
+                        "rejected_count": 0,
+                        "skipped_count": 0
+                    }
+                },
+                "committed_receipts": []
+            }),
+            &request,
+        );
+        let error = RetainedSurfaceResultV1::from_operation_value(
+            RetainedSurfaceOperation::FactStoreCurate,
+            terminal,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.starts_with("unknown field `committed_receipts`, expected one of"),
+            "the run terminal is read from the run ledger, not returned by fact_store_curate: {error}"
+        );
+    }
+}

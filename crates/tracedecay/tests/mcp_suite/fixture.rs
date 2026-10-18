@@ -10,13 +10,14 @@
 //! to the production daemon composition and is never pre-seeded here.
 //!
 //! The graph DB only stores project-root-relative paths, so a copied store is
-//! location-independent; the two files that embed absolute paths
-//! (`config.json` `root_dir` and `store_manifest.json`) are rewritten after
-//! copying.
+//! location-independent. The profile shard's `store_manifest.json` is the file
+//! that still embeds absolute paths (`project_id`, `project_root`,
+//! `data_root`); it is rewritten after copying. Configuration lives in the
+//! store, not a `config.json` (#2134).
 //!
-//! Every entry point falls back to the real `TraceDecay::init` path when the
-//! template cannot be built or the seeded store cannot be opened, so tests
-//! never depend on the template for correctness.
+//! Seeding is the only bootstrap. A template that cannot be built or a copy
+//! that cannot be opened is a typed error; tests do not silently pay a second
+//! full init.
 
 use std::fs;
 use std::io;
@@ -25,21 +26,69 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::OnceCell;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::errors::Result as TdResult;
-use tracedecay_runtime_core::storage::{
-    PrivateStoreIo, default_profile_project_id, default_profile_root,
-};
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::branch::detect_default_branch;
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::branch_meta::{BranchMeta, save_branch_meta};
+use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
+use tracedecay_runtime_core::storage::{PrivateStoreIo, default_profile_project_id};
 
-use crate::common::GLOBAL_DB_ENV;
+/// Store schema versions admitted by recorded version rather than by the
+/// graph-DB final shape. Init refuses a store recorded at any other version,
+/// so each one must invalidate the template when it changes.
+#[derive(Clone, Copy)]
+struct StoreSchemaVersions {
+    lcm: i64,
+    session_temporal: i64,
+    git_correlation: i64,
+}
 
-/// Bump when the template layout or fixture sources change, so stale
-/// templates from previous revisions in a cached target dir are ignored.
-const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v6";
+impl StoreSchemaVersions {
+    const CURRENT: Self = Self {
+        lcm: tracedecay_lcm::schema::LCM_SCHEMA_VERSION,
+        session_temporal: tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION,
+        git_correlation:
+            tracedecay_sessions::runtime::git_correlation::GIT_CORRELATION_SCHEMA_VERSION,
+    };
+}
+
+/// Shared on-disk template identity. The graph-database final shape and the
+/// other admitted schema constants (authority tables, temporal columns, format
+/// revisions) are fingerprinted from those constants, so a column or revision
+/// change selects a different directory without a hand-maintained revision.
+/// Tables admitted by a recorded version alone are keyed on [`StoreSchemaVersions`].
+fn template_dir_name(versions: StoreSchemaVersions) -> Option<String> {
+    schema_template_dir_name(
+        versions,
+        &tracedecay_global_db::schema_contract::expected_admitted_schema_fingerprint(),
+    )
+}
+
+fn schema_template_dir_name(
+    versions: StoreSchemaVersions,
+    admitted_schema: &str,
+) -> Option<String> {
+    let StoreSchemaVersions {
+        lcm,
+        session_temporal,
+        git_correlation,
+    } = versions;
+    match tracedecay_runtime_core::db::migrations::expected_final_schema_fingerprint() {
+        Ok(fingerprint) => Some(format!(
+            "mcp-suite-store-template-{fingerprint}-{admitted_schema}-lcm{lcm}-temporal{session_temporal}-git{git_correlation}"
+        )),
+        Err(error) => {
+            eprintln!("[mcp_suite::fixture] schema fingerprint unavailable: {error}");
+            None
+        }
+    }
+}
 
 const EMPTY_FLAVOR: &str = "empty";
 
-static TEMPLATE_ROOT: OnceCell<Option<PathBuf>> = OnceCell::const_new();
+static TEMPLATE_ROOT: OnceCell<std::result::Result<PathBuf, String>> = OnceCell::const_new();
 
 /// Writes the shared production-composition fixture sources: cross-file calls,
 /// structs, impls, a test file, and doc comments.
@@ -48,7 +97,7 @@ pub fn write_indexed_fixture_sources(project: &Path) {
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
-        project.join("src/main.rs"),
+        project.join("src").join("main.rs"),
         r#"
 use crate::utils::helper;
 mod utils;
@@ -62,7 +111,7 @@ fn main() {
     .unwrap();
 
     fs::write(
-        project.join("src/utils.rs"),
+        project.join("src").join("utils.rs"),
         r#"
 /// Returns a greeting string.
 pub fn helper() -> String {
@@ -79,7 +128,7 @@ fn format_greeting(name: &str) -> String {
     // Test file so affected-tests can find something
     fs::create_dir_all(project.join("tests")).unwrap();
     fs::write(
-        project.join("tests/test_utils.rs"),
+        project.join("tests").join("test_utils.rs"),
         r#"
 use crate::utils::helper;
 
@@ -90,36 +139,100 @@ fn test_helper() { assert!(!helper().is_empty()); }
     .unwrap();
 }
 
-/// Drop-in replacement for `TraceDecay::init(project)` in tests: seeds an
-/// initialized (schema-complete, empty) store from the on-disk template and
-/// opens it. Falls back to the real init when seeding is not possible.
-pub async fn init_project_from_template(project_root: &Path) -> TdResult<TraceDecay> {
-    // Boxed open/init futures: the production graph composition is the
-    // mega-future whose inline layout overflows perf-profile test stacks.
-    if let Some(template) = template_root().await
-        && let Some(targets) = SeedTargets::from_env()
-        && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
-        && let Ok(cg) = Box::pin(TraceDecay::open(project_root)).await
-    {
-        return Ok(cg);
-    }
-    Box::pin(TraceDecay::init(project_root)).await
-}
-
-/// Like [`init_project_from_template`] but for callers that pass an explicit
-/// profile root via `TraceDecayOpenOptions` instead of env vars.
+/// Drop-in replacement for `TraceDecay::init_with_options(project, options)`
+/// in tests: seeds an initialized (schema-complete, empty) store from the
+/// on-disk template into the options' profile and opens it.
 pub async fn init_project_from_template_with_options(
     project_root: &Path,
     options: TraceDecayOpenOptions,
 ) -> TdResult<TraceDecay> {
-    if let (Some(template), Some(targets)) =
-        (template_root().await, SeedTargets::from_options(&options))
-        && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
-        && let Ok(cg) = Box::pin(TraceDecay::open_with_options(project_root, options.clone())).await
-    {
-        return Ok(cg);
+    match template_root().await {
+        Ok(template) => {
+            init_project_from_template_root(Some(template), project_root, options).await
+        }
+        Err(error) => Err(config_error(format!(
+            "mcp suite store template is unavailable: {error}"
+        ))),
     }
-    Box::pin(TraceDecay::init_with_options(project_root, options)).await
+}
+
+async fn init_project_from_template_root(
+    template: Option<&Path>,
+    project_root: &Path,
+    options: TraceDecayOpenOptions,
+) -> TdResult<TraceDecay> {
+    let template =
+        template.ok_or_else(|| config_error("mcp suite store template is unavailable"))?;
+    let targets = SeedTargets::from_options(&options)
+        .ok_or_else(|| config_error("mcp suite store template seed requires a profile root"))?;
+    seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets)
+        .map_err(|error| config_error(format!("mcp suite store template seed failed: {error}")))?;
+    Box::pin(TraceDecay::open_with_options(project_root, options)).await
+}
+
+/// Seeds the profile a production composition over `isolation_root` will
+/// open with the template's initialized (schema-complete, empty) databases:
+/// `global.db`, `user-sessions.db`, and each project's graph and sessions
+/// databases. The composition then admits existing stores instead of
+/// installing every schema again. Only databases and the rebound store
+/// manifest are copied: the template's branch metadata and hook state
+/// describe the template project, so branch metadata is bootstrapped from
+/// each project's own repository and hook state is left to the composition.
+/// Each call copies private files; nothing is shared between tests. A profile
+/// that already exists is a reopen and is left exactly as it is.
+#[cfg(feature = "test-transport")]
+pub async fn seed_production_composition_profile(isolation_root: &Path, project_roots: &[PathBuf]) {
+    let profile_root = isolation_root.join("profile");
+    if profile_root.exists() {
+        return;
+    }
+    let template = template_root()
+        .await
+        .unwrap_or_else(|error| panic!("mcp suite store template is unavailable: {error}"))
+        .join(EMPTY_FLAVOR);
+    seed_profile_databases(&template, &profile_root, project_roots)
+        .unwrap_or_else(|error| panic!("mcp suite store template seed failed: {error}"));
+}
+
+#[cfg(feature = "test-transport")]
+fn seed_profile_databases(
+    template: &Path,
+    profile_root: &Path,
+    project_roots: &[PathBuf],
+) -> io::Result<()> {
+    let src_home = template.join("home").join(".tracedecay");
+    let src_data = sole_subdir(&src_home.join("projects"))?;
+    for project_root in project_roots {
+        let project_id = default_profile_project_id(project_root);
+        let data_dest = profile_root.join("projects").join(&project_id);
+        PrivateStoreIo::create_dir_all(&data_dest)?;
+        for database in ["tracedecay.db", "sessions.db"] {
+            copy_db_files(&src_data.join(database), &data_dest.join(database))?;
+        }
+        fs::copy(
+            src_data.join("store_manifest.json"),
+            data_dest.join("store_manifest.json"),
+        )?;
+        rebind_store_manifest(&data_dest, &project_id, project_root)?;
+        // As project init does: an existing store never bootstraps it.
+        if let Some(default_branch) = detect_default_branch(project_root) {
+            save_branch_meta(&data_dest, &BranchMeta::new(&default_branch))?;
+        }
+    }
+    for database in [
+        src_home.join("global.db"),
+        tracedecay_sessions::runtime::user_sessions_db_path(&src_home),
+    ] {
+        let name = database.file_name().expect("template database file name");
+        copy_db_files(&database, &profile_root.join(name))?;
+    }
+    Ok(())
+}
+
+fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
+        message: message.into(),
+    }
 }
 
 struct SeedTargets {
@@ -128,16 +241,6 @@ struct SeedTargets {
 }
 
 impl SeedTargets {
-    fn from_env() -> Option<Self> {
-        let profile_root = default_profile_root().ok()?;
-        let global_db_path = std::env::var_os(GLOBAL_DB_ENV)
-            .map_or_else(|| profile_root.join("global.db"), PathBuf::from);
-        Some(Self {
-            profile_root,
-            global_db_path,
-        })
-    }
-
     fn from_options(options: &TraceDecayOpenOptions) -> Option<Self> {
         let profile_root = options.profile_root.clone()?;
         let global_db_path = options
@@ -153,10 +256,10 @@ impl SeedTargets {
 
 /// Copies one template flavor's store into place for `project_root`:
 /// data dir under the target profile root, global DB (only if absent), and
-/// rewrites the absolute paths embedded in config + manifest.
+/// rewrites the absolute paths embedded in `store_manifest.json`.
 fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::Result<()> {
     fs::create_dir_all(project_root)?;
-    let src_home = flavor.join("home/.tracedecay");
+    let src_home = flavor.join("home").join(".tracedecay");
     let src_data = sole_subdir(&src_home.join("projects"))?;
 
     let project_id = default_profile_project_id(project_root);
@@ -174,15 +277,7 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
     // permission validation accepts the template copy under any umask.
     PrivateStoreIo::create_dir_all(&data_dest)?;
     copy_tree(&src_data, &data_dest)?;
-
-    rewrite_json(&data_dest.join("config.json"), |config| {
-        config["root_dir"] = Value::String(project_root.to_string_lossy().into_owned());
-    })?;
-    rewrite_json(&data_dest.join("store_manifest.json"), |manifest| {
-        manifest["project_id"] = Value::String(project_id.clone());
-        manifest["project_root"] = Value::String(project_root.to_string_lossy().into_owned());
-        manifest["data_root"] = Value::String(data_dest.to_string_lossy().into_owned());
-    })?;
+    rebind_store_manifest(&data_dest, &project_id, project_root)?;
 
     if !targets.global_db_path.exists() {
         if let Some(parent) = targets.global_db_path.parent() {
@@ -193,68 +288,93 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
     Ok(())
 }
 
-async fn template_root() -> Option<&'static Path> {
-    TEMPLATE_ROOT
-        .get_or_init(|| async { ensure_template().await })
+async fn template_root() -> std::result::Result<&'static Path, &'static str> {
+    match TEMPLATE_ROOT
+        .get_or_init(|| async {
+            ensure_template(
+                &crate::common::fixture::cargo_target_tmpdir(),
+                StoreSchemaVersions::CURRENT,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        })
         .await
-        .as_deref()
+    {
+        Ok(path) => Ok(path.as_path()),
+        Err(error) => Err(error.as_str()),
+    }
+}
+
+/// Plain, resolved directory used for the shared template tree.
+///
+/// Bazel Windows `TEST_TMPDIR` / `CARGO_TARGET_TMPDIR` keep `/` separators.
+/// `std::fs::canonicalize` then spells `\\?\C:\...`. Joining a `/` component
+/// onto that verbatim root, or asking private-fs to extend a ≥260-char path
+/// that still contains `/`, is rejected as
+/// `long Windows security path must have an exact absolute spelling`.
+fn host_exact_template_root(path: &Path) -> PathBuf {
+    canonical_root_identity(path)
+}
+
+fn fixture_tmp_root(scratch: &tempfile::TempDir) -> PathBuf {
+    canonical_existing_identity(scratch.path()).expect("scratch temp dir exists")
 }
 
 /// Returns the shared template dir, building it if this is the first test
 /// process to need it. nextest runs one process per test, so an exclusive
 /// file lock serializes the build machine-wide: exactly one process builds,
 /// every concurrent process blocks briefly and then finds READY.
-async fn ensure_template() -> Option<PathBuf> {
-    let tmp_root = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let shared = tmp_root.join(TEMPLATE_DIR_NAME);
+async fn ensure_template(tmp_root: &Path, versions: StoreSchemaVersions) -> io::Result<PathBuf> {
+    let tmp_root = host_exact_template_root(tmp_root);
+    let template_dir_name = template_dir_name(versions).ok_or_else(|| {
+        io::Error::other("mcp suite store template schema fingerprint is unavailable")
+    })?;
+    let shared = tmp_root.join(&template_dir_name);
     if shared.join("READY").is_file() {
-        return Some(shared);
+        return Ok(shared);
     }
 
-    fs::create_dir_all(tmp_root).ok()?;
-    let lock_path = tmp_root.join(format!("{TEMPLATE_DIR_NAME}.lock"));
+    fs::create_dir_all(&tmp_root)?;
+    let lock_path = tmp_root.join(format!("{template_dir_name}.lock"));
     let lock_file = tokio::task::spawn_blocking(move || -> io::Result<fs::File> {
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&lock_path)?;
-        fs2::FileExt::lock_exclusive(&file)?;
+        file.lock()?;
         Ok(file)
     })
     .await
-    .ok()?
-    .ok()?;
+    .map_err(io::Error::other)??;
 
     // Another process may have finished the build while we waited.
     if shared.join("READY").is_file() {
-        let _ = fs2::FileExt::unlock(&lock_file);
-        return Some(shared);
+        let _ = lock_file.unlock();
+        return Ok(shared);
     }
 
-    let build = shared.with_file_name(format!("{TEMPLATE_DIR_NAME}-build-{}", std::process::id()));
+    let build = shared.with_file_name(format!("{template_dir_name}-build-{}", std::process::id()));
     let _ = fs::remove_dir_all(&build);
     let built = build_template(&build).await;
     let result = match built {
         Ok(()) => match fs::rename(&build, &shared) {
-            Ok(()) => Some(shared),
+            Ok(()) => Ok(shared),
             // Rename failed (e.g. leftover partial dir); the private build
             // tree is still a valid template for this process.
             Err(_) if shared.join("READY").is_file() => {
                 let _ = fs::remove_dir_all(&build);
-                Some(shared)
+                Ok(shared)
             }
-            Err(_) => Some(build),
+            Err(_) => Ok(build),
         },
         Err(err) => {
-            eprintln!(
-                "[mcp_suite::fixture] template build failed, falling back to real init: {err}"
-            );
+            eprintln!("[mcp_suite::fixture] template build failed: {err}");
             let _ = fs::remove_dir_all(&build);
-            None
+            Err(err)
         }
     };
-    let _ = fs2::FileExt::unlock(&lock_file);
+    let _ = lock_file.unlock();
     result
 }
 
@@ -263,14 +383,18 @@ async fn build_template(dest: &Path) -> io::Result<()> {
     // branch detection walking up from the fixture project cannot find this
     // repo's .git and bootstrap branch metadata that a TempDir-based test
     // project would never have.
+    let dest = host_exact_template_root(dest);
     let scratch = tempfile::TempDir::new()?;
-    let scratch_root = scratch.path().canonicalize()?;
+    // Plain host identity, not `canonicalize`'s Windows `\\?\` spelling:
+    // init and private-fs joins onto a verbatim root preserve `/` and then
+    // fail the exact-absolute long-path check.
+    let scratch_root = canonical_existing_identity(scratch.path())?;
 
     let root = scratch_root.join(EMPTY_FLAVOR);
     let project = root.join("project");
     fs::create_dir_all(&project)?;
 
-    let profile_root = root.join("home/.tracedecay");
+    let profile_root = root.join("home").join(".tracedecay");
     let global_db_path = profile_root.join("global.db");
     let options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
@@ -280,11 +404,23 @@ async fn build_template(dest: &Path) -> io::Result<()> {
         .await
         .map_err(io_other)?;
     let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    let graph_db_path = cg.store_layout().graph_db_path.clone();
     cg.checkpoint().await.map_err(io_other)?;
     cg.close();
 
     purge_configuration(&sessions_db_path)?;
     purge_global_registry(&global_db_path).await?;
+    let built_fingerprint =
+        tracedecay_runtime_core::db::migrations::schema_fingerprint(&graph_db_path)
+            .map_err(io_other)?;
+    let expected_fingerprint =
+        tracedecay_runtime_core::db::migrations::expected_final_schema_fingerprint()
+            .map_err(io_other)?;
+    if built_fingerprint != expected_fingerprint {
+        return Err(io::Error::other(format!(
+            "built template schema fingerprint {built_fingerprint} does not match expected {expected_fingerprint}"
+        )));
+    }
     copy_tree(&root, &dest.join(EMPTY_FLAVOR))?;
 
     fs::write(dest.join("READY"), b"ok")?;
@@ -390,8 +526,12 @@ fn sole_subdir(dir: &Path) -> io::Result<PathBuf> {
 }
 
 /// Recursively copies `src` into `dest`, preserving file mtimes.
+///
+/// Destination directories go through [`PrivateStoreIo`] so seeded hook spool
+/// roots stay owner-private under a group umask; plain `create_dir_all` would
+/// leave them `0775` and fail closed at Hook capture admission.
 fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
-    fs::create_dir_all(dest)?;
+    PrivateStoreIo::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let from = entry.path();
@@ -431,6 +571,27 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Points a copied `store_manifest.json` at its new project and data dir.
+fn rebind_store_manifest(
+    data_dest: &Path,
+    project_id: &str,
+    project_root: &Path,
+) -> io::Result<()> {
+    rewrite_json(&data_dest.join("store_manifest.json"), |manifest| {
+        manifest["project_id"] = Value::String(project_id.to_owned());
+        manifest["project_root"] = Value::String(
+            canonical_root_identity(project_root)
+                .to_string_lossy()
+                .into_owned(),
+        );
+        manifest["data_root"] = Value::String(
+            canonical_root_identity(data_dest)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    })
+}
+
 fn rewrite_json(path: &Path, edit: impl FnOnce(&mut Value)) -> io::Result<()> {
     let mut value: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
     edit(&mut value);
@@ -439,4 +600,259 @@ fn rewrite_json(path: &Path, edit: impl FnOnce(&mut Value)) -> io::Result<()> {
 
 fn io_other(err: impl std::fmt::Display) -> io::Error {
     io::Error::other(err.to_string())
+}
+
+#[test]
+fn host_exact_template_root_uses_plain_canonical_identity() {
+    let scratch = tempfile::TempDir::new().unwrap();
+    let created = scratch.path().join("template-root");
+    fs::create_dir_all(&created).unwrap();
+    // Bazel Windows tmp dirs keep `/`; the helper must still name the
+    // same directory without a verbatim prefix.
+    let mixed = PathBuf::from(created.to_string_lossy().replace('\\', "/"));
+    let exact = host_exact_template_root(&mixed);
+    assert_eq!(exact, canonical_root_identity(&created));
+    assert!(
+        !exact.to_string_lossy().starts_with(r"\\?\"),
+        "template roots must be plain host paths, got {}",
+        exact.display()
+    );
+}
+
+/// A column constant that admission checks is part of the template key. A warm
+/// target recorded under the contract with that column removed is not selected,
+/// and the selected template's `graph_scopes` has the current columns.
+#[tokio::test]
+async fn changing_a_schema_column_constant_does_not_reuse_the_template() {
+    assert!(
+        tracedecay_global_db::schema_contract::authority_schema_fingerprint_omitting_column(
+            "graph_scopes",
+            "db_relpath",
+        )
+        .is_none(),
+        "db_relpath is not an admitted graph_scopes column"
+    );
+    let omitted =
+        tracedecay_global_db::schema_contract::authority_schema_fingerprint_omitting_column(
+            "graph_scopes",
+            "writable",
+        )
+        .expect("writable is an admitted graph_scopes column");
+    assert_ne!(
+        omitted,
+        tracedecay_global_db::schema_contract::expected_admitted_schema_fingerprint(),
+        "dropping a column constant must change the admitted schema fingerprint"
+    );
+
+    let scratch = tempfile::TempDir::new().unwrap();
+    let tmp_root = fixture_tmp_root(&scratch);
+    let stale_name = schema_template_dir_name(StoreSchemaVersions::CURRENT, &omitted).unwrap();
+    let stale = tmp_root.join(&stale_name);
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("READY"), b"previous-schema").unwrap();
+
+    let selected = ensure_template(&tmp_root, StoreSchemaVersions::CURRENT)
+        .await
+        .expect("current schema builds its own template");
+    assert_ne!(selected, stale);
+    assert_eq!(fs::read(selected.join("READY")).unwrap(), b"ok");
+
+    let global_db = selected
+        .join(EMPTY_FLAVOR)
+        .join("home")
+        .join(".tracedecay")
+        .join("global.db");
+    // The template name carries two digests, so on Windows this path passes
+    // MAX_PATH; SQLite opens it only in the extended-length spelling that
+    // `canonicalize` returns, as the store runtime keeps for such paths.
+    let connection = Connection::open(global_db.canonicalize().unwrap()).unwrap();
+    let mut statement = connection
+        .prepare("SELECT name FROM pragma_table_info('graph_scopes') ORDER BY cid")
+        .unwrap();
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "graph_scope_id",
+            "project_id",
+            "store_id",
+            "branch_name",
+            "parent_scope_id",
+            "last_synced_at",
+            "writable",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
+    let scratch = tempfile::TempDir::new().unwrap();
+    let tmp_root = fixture_tmp_root(&scratch);
+    let current = StoreSchemaVersions::CURRENT;
+    let older = StoreSchemaVersions {
+        git_correlation: current.git_correlation - 1,
+        ..current
+    };
+
+    // What a build before the Git correlation bump left in a warm target.
+    let stale = ensure_template(&tmp_root, older).await.unwrap();
+    let stale_sessions = sole_subdir(
+        &stale
+            .join(EMPTY_FLAVOR)
+            .join("home")
+            .join(".tracedecay")
+            .join("projects"),
+    )
+    .unwrap()
+    .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+    // The template name carries two digests, so on Windows this path passes
+    // MAX_PATH; SQLite opens it only in the extended-length spelling that
+    // `canonicalize` returns, as the store runtime keeps for such paths.
+    let downgraded = Connection::open(stale_sessions.canonicalize().unwrap())
+        .unwrap()
+        .execute(
+            "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = 'git_correlation'",
+            [older.git_correlation],
+        )
+        .unwrap();
+    assert_eq!(
+        downgraded, 1,
+        "stale template must record the older version"
+    );
+
+    let template = ensure_template(&tmp_root, current).await.unwrap();
+    let profile_root = tmp_root.join("home").join(".tracedecay");
+    let cg = match init_project_from_template_root(
+        Some(&template),
+        &tmp_root.join("project"),
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    {
+        Ok(cg) => cg,
+        Err(error) => panic!("project must initialize from the template: {error:?}"),
+    };
+    let recorded: i64 = Connection::open(&cg.store_layout().sessions_db_path)
+        .unwrap()
+        .query_row(
+            "SELECT version FROM tracedecay_schema_version WHERE component = 'git_correlation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, current.git_correlation);
+    cg.close();
+}
+
+/// The copied store is the template, bound to the requested project. A fresh
+/// init would not carry the template marker, and it would not be how this
+/// bootstrap reports success.
+#[tokio::test]
+async fn template_seed_opens_the_copied_store_for_the_requested_project() {
+    let scratch = tempfile::TempDir::new().unwrap();
+    let tmp_root = fixture_tmp_root(&scratch);
+    let template = ensure_template(&tmp_root, StoreSchemaVersions::CURRENT)
+        .await
+        .expect("template builds from a real init");
+    let template_store = sole_subdir(
+        &template
+            .join(EMPTY_FLAVOR)
+            .join("home")
+            .join(".tracedecay")
+            .join("projects"),
+    )
+    .unwrap();
+    let template_manifest: Value = serde_json::from_str(
+        &fs::read_to_string(template_store.join("store_manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let template_project_root = template_manifest["project_root"]
+        .as_str()
+        .expect("template manifest records a project root")
+        .to_owned();
+    fs::write(
+        template_store.join("template-seed-marker"),
+        b"seeded-not-initialized",
+    )
+    .unwrap();
+
+    let project = tmp_root.join("requested-project");
+    fs::create_dir_all(&project).unwrap();
+    let profile_root = tmp_root.join("profile").join(".tracedecay");
+    let cg = init_project_from_template_root(
+        Some(&template),
+        &project,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    .expect("seeded store opens");
+
+    let data_root = cg.store_layout().data_root.clone();
+    assert_eq!(
+        fs::read(data_root.join("template-seed-marker")).unwrap(),
+        b"seeded-not-initialized"
+    );
+    assert!(data_root.join("store_manifest.json").is_file());
+    assert!(!data_root.join("config.json").exists());
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(data_root.join("store_manifest.json")).unwrap())
+            .unwrap();
+    assert_ne!(
+        manifest["project_root"].as_str(),
+        Some(template_project_root.as_str())
+    );
+    assert_eq!(
+        manifest["project_root"].as_str(),
+        Some(canonical_root_identity(&project).to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        cg.project_root(),
+        canonical_root_identity(&project).as_path()
+    );
+    cg.close();
+}
+
+/// An occupied destination used to fall through to a full init and hide a
+/// broken seed. Seeding now fails closed with the seed error.
+#[tokio::test]
+async fn template_seed_does_not_fall_back_when_the_destination_exists() {
+    let scratch = tempfile::TempDir::new().unwrap();
+    let tmp_root = fixture_tmp_root(&scratch);
+    let template = ensure_template(&tmp_root, StoreSchemaVersions::CURRENT)
+        .await
+        .expect("template builds from a real init");
+    let project = tmp_root.join("requested-project");
+    fs::create_dir_all(&project).unwrap();
+    let profile_root = tmp_root.join("profile").join(".tracedecay");
+    let project_id = default_profile_project_id(&project);
+    fs::create_dir_all(profile_root.join("projects").join(&project_id)).unwrap();
+
+    let error = match init_project_from_template_root(
+        Some(&template),
+        &project,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("an existing store must not be papered over with a full init"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "config error: mcp suite store template seed failed: store data dir already exists"
+    );
 }

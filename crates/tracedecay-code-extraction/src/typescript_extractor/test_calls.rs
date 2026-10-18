@@ -1,9 +1,10 @@
 use tree_sitter::Node as TsNode;
 
 use super::{ExtractionState, TypeScriptExtractor};
+use crate::common::local_node_id;
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use crate::types::{Edge, EdgeKind, Node, NodeKind, Visibility, generate_node_id};
+use crate::types::{Edge, EdgeKind, Node, NodeKind, Visibility};
 
 /// Root callee names that mark a call as a test-framework construct whose
 /// callback argument should be attributed as an executable test node.
@@ -32,7 +33,7 @@ fn test_call_root_callee<'s>(state: &ExtractionState<'s>, call: TsNode<'_>) -> O
     loop {
         match callee.kind() {
             "identifier" => return Some(state.node_text(callee)),
-            // `describe.only`, `it.each`, `test.skip` — recurse into the
+            // `describe.only`, `it.each`, `test.skip`. Recurse into the
             // object side of the member access. Curried calls like
             // `test.each([...])(...)` are their own `call_expression`, so we
             // descend into that callee the same way.
@@ -48,6 +49,19 @@ fn test_call_root_callee<'s>(state: &ExtractionState<'s>, call: TsNode<'_>) -> O
 /// call (`describe`, `it`, `test`, …) based on its root callee.
 pub(super) fn is_test_framework_call(state: &ExtractionState<'_>, call: TsNode<'_>) -> bool {
     test_call_root_callee(state, call).is_some_and(|root| TEST_CALLEES.contains(&root))
+}
+
+/// Whether a `Function` node's signature is the one [`visit_test_call`] writes:
+/// the first source line of a call rooted at a test-framework callee
+/// (`describe("fn", …`, `it.each(…`). Such a node is named by its title
+/// string, not by a declaration, so it must never be a name-resolution target:
+/// `fn()` inside `describe("fn", …)` calls the real `fn`.
+pub fn is_test_framework_call_signature(signature: &str) -> bool {
+    let root_end = signature
+        .find(|character: char| !(character.is_alphanumeric() || matches!(character, '_' | '$')))
+        .unwrap_or(signature.len());
+    let (root, rest) = signature.split_at(root_end);
+    TEST_CALLEES.contains(&root) && (rest.starts_with('(') || rest.starts_with('.'))
 }
 
 /// Find the title argument (first string / template) of a test call's
@@ -143,13 +157,18 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
     let start_column = call.start_position().column as u32;
     let end_column = call.end_position().column as u32;
     let qualified_name = format!("{}::{}", state.qualified_prefix(), title);
-    let id = generate_node_id(&state.file_path, &NodeKind::Function, &title, start_line);
+    let id = local_node_id(
+        &state.file_path,
+        state.source,
+        &NodeKind::Function,
+        &title,
+        call,
+    );
 
     let callback = test_call_callback(args);
     let is_async = callback.is_some_and(|cb| TypeScriptExtractor::has_child_kind(cb, "async"));
-    let metrics = callback
-        .map(|cb| count_complexity(cb, &TYPESCRIPT_COMPLEXITY, state.source))
-        .unwrap_or_default();
+    let metrics =
+        callback.map_or_default(|cb| count_complexity(cb, &TYPESCRIPT_COMPLEXITY, state.source));
 
     let call_text = state.node_text(call);
     let signature = truncate_title(call_text.lines().next().unwrap_or_default());
@@ -176,6 +195,7 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
         unsafe_blocks: metrics.unsafe_blocks,
         unchecked_calls: metrics.unchecked_calls,
         assertions: metrics.assertions,
+        complexity_analysis: metrics.analysis,
         updated_at: state.timestamp,
         parent_id: None,
     };
@@ -206,16 +226,16 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
     state.node_stack.pop();
 }
 
-/// Whether a statement is a named function declaration whose body owns its
-/// own call sites. `extract_call_sites` only skips nested arrow/function
-/// *children*, so a top-level `function_declaration` statement would have
-/// its body walked and double-attributed to the enclosing test — guard it.
-/// Arrow/function-expression assignments (`const f = () => {}`) are already
-/// skipped by `extract_call_sites` and need no guard here.
+/// Whether a statement becomes graph symbols that own every call site inside
+/// it: a helper function or a class, whose methods and field initializers
+/// own their calls. Attributing them again to the test would double-count.
 fn defines_own_callable(stmt: TsNode<'_>) -> bool {
     matches!(
         stmt.kind(),
-        "function_declaration" | "generator_function_declaration"
+        "function_declaration"
+            | "generator_function_declaration"
+            | "class_declaration"
+            | "abstract_class_declaration"
     )
 }
 
@@ -229,23 +249,20 @@ fn visit_test_body(state: &mut ExtractionState<'_>, body: TsNode<'_>, test_id: &
     }
     loop {
         let stmt = cursor.node();
-        let mut handled = false;
         if stmt.kind() == "expression_statement"
             && let Some(call) = find_direct_child_by_kind(stmt, "call_expression")
             && is_test_framework_call(state, call)
         {
-            // Nested describe/it — recurse as its own test node.
+            // Nested describe/it. Recurse as its own test node.
             visit_test_call(state, call);
-            handled = true;
-        }
-        if !handled {
-            // Declarations inside describe (helpers, consts, nested classes)
-            // become their own nodes.
+        } else if matches!(stmt.kind(), "lexical_declaration" | "variable_declaration") {
+            // An arrow helper owns its body's calls; setup initializers
+            // (`const rows = build()`) map the test to what it exercises.
+            TypeScriptExtractor::visit_lexical_declaration(state, stmt, Some(test_id));
+        } else {
+            // Declarations inside describe (helpers, nested classes) become
+            // their own nodes; setup calls and assertions belong to the test.
             TypeScriptExtractor::visit_node(state, stmt);
-            // Statements that define their own callable (a helper function
-            // or arrow) own their call sites; attributing them again to the
-            // test node would double-count. Only attribute non-declaration
-            // statements (setup calls, assertions) to the test node.
             if !defines_own_callable(stmt) {
                 TypeScriptExtractor::extract_call_sites(state, stmt, test_id);
             }

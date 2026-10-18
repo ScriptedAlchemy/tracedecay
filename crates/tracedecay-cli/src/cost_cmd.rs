@@ -1,38 +1,54 @@
-use serde::Deserialize;
-use serde_json::{Value, json};
+use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_session_memory::provider_usage::{
     ProviderUsageCostSummaryV1, ProviderUsageCoverageV1,
 };
 
-#[hotpath::measure(label = "cli.cost.read", future = true)]
+use crate::{
+    commands::{admin_cli_result, admin_cli_result_mismatch, admin_cli_scope},
+    cost_summary::{CostAdminPayload, CostSummaryPayload},
+};
+
+#[tracing::instrument(name = "cli.cost.read", level = "trace", skip_all)]
 pub(crate) async fn handle_cost(
+    profile: &ProfileRoot,
     range: String,
     by_model: bool,
-    by_task: bool,
     export: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
-    let payload = call_cost_admin(&range).await?;
-    if payload.get("summary").is_none_or(Value::is_null) {
-        println!("Provider usage accounting is unavailable.");
-        return Ok(());
-    }
-    let summary: CostSummaryPayload = serde_json::from_value(payload["summary"].clone())?;
-    let today: TodayCostPayload = serde_json::from_value(payload["today"].clone())?;
+    let cwd = std::env::current_dir()?;
+    let project_root = profile.discover_project_root(&cwd);
+    let cost = match admin_cli_result(
+        profile,
+        project_root.as_deref(),
+        AdminCliSurfaceRequestV1::CostSummary {
+            range: range.clone(),
+            scope: admin_cli_scope(project_root.as_deref()),
+        },
+    )
+    .await?
+    {
+        AdminCliResultV1::CostSummary(cost) => cost,
+        _ => return Err(admin_cli_result_mismatch("cost_summary")),
+    };
+    let CostAdminPayload { summary, today } = CostAdminPayload::try_from(cost)?;
     if summary.provider_usage.coverage == ProviderUsageCoverageV1::Unavailable {
         println!("No canonical provider usage is available for this profile.");
         return Ok(());
     }
 
-    hotpath::measure_block!("cli.cost.render", {
-        print_cost_summary(
-            &today.provider_usage,
-            &range,
-            by_model,
-            by_task,
-            export.as_deref(),
-            &summary,
-        )
-    })?;
+    {
+        let _span = tracing::trace_span!("cli.cost.render").entered();
+        {
+            print_cost_summary(
+                &today.provider_usage,
+                &range,
+                by_model,
+                export.as_deref(),
+                &summary,
+            )
+        }
+    }?;
     Ok(())
 }
 
@@ -40,16 +56,13 @@ fn print_cost_summary(
     today: &ProviderUsageCostSummaryV1,
     range: &str,
     by_model: bool,
-    by_task: bool,
     export: Option<&str>,
     summary: &CostSummaryPayload,
 ) -> tracedecay_domain::errors::Result<()> {
     if let Some(fmt) = export {
-        print_cost_export(fmt, range, by_model, by_task, summary)?;
+        print_cost_export(fmt, range, by_model, summary)?;
     } else if by_model {
         print_model_table(summary);
-    } else if by_task {
-        print_task_table(summary);
     } else {
         print_default_summary(today, range, summary);
     }
@@ -60,7 +73,6 @@ fn print_cost_export(
     fmt: &str,
     range: &str,
     by_model: bool,
-    by_task: bool,
     summary: &CostSummaryPayload,
 ) -> tracedecay_domain::errors::Result<()> {
     let usage = &summary.provider_usage;
@@ -79,48 +91,39 @@ fn print_cost_export(
             });
             println!("{}", serde_json::to_string_pretty(&obj)?);
         }
-        "csv" => print_cost_csv(summary, by_model, by_task),
+        "csv" => print_cost_csv(summary, by_model),
         _ => eprintln!("Unknown export format '{fmt}'. Use 'json' or 'csv'."),
     }
     Ok(())
 }
 
-fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool, by_task: bool) {
+fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool) {
     let usage = &summary.provider_usage;
     if by_model {
         println!("provider,model,cost_usd,tokens");
         for model in &usage.by_model {
             let cost = model
                 .cost_usd
-                .map(|cost| format!("{cost:.4}"))
-                .unwrap_or_else(|| "unavailable".to_owned());
+                .map_or_else(|| "unavailable".to_owned(), |cost| format!("{cost:.4}"));
             let tokens = model
                 .total_tokens
-                .map(|tokens| tokens.to_string())
-                .unwrap_or_else(|| "unavailable".to_owned());
+                .map_or_else(|| "unavailable".to_owned(), |tokens| tokens.to_string());
             println!("{},{},{cost},{tokens}", model.provider, model.model);
         }
-    } else if by_task {
-        println!("status");
-        println!("task_attribution_unavailable");
     } else {
         println!("total_cost_usd,input_tokens,output_tokens,tokens_saved,efficiency");
         let total_cost = usage
             .total_cost_usd
-            .map(|cost| format!("{cost:.4}"))
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |cost| format!("{cost:.4}"));
         let input = usage
             .total_input_tokens
-            .map(|tokens| tokens.to_string())
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |tokens| tokens.to_string());
         let output = usage
             .total_output_tokens
-            .map(|tokens| tokens.to_string())
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |tokens| tokens.to_string());
         let efficiency = summary
             .efficiency_ratio
-            .map(|ratio| format!("{ratio:.4}"))
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |ratio| format!("{ratio:.4}"));
         println!(
             "{total_cost},{input},{output},{},{efficiency}",
             summary.tokens_saved
@@ -139,25 +142,22 @@ fn print_model_table(summary: &CostSummaryPayload) {
             .total_cost_usd
             .zip(model.cost_usd)
             .filter(|(total, _)| *total > 0.0)
-            .map(|(total, cost)| format!("{:.0}%", cost / total * 100.0))
-            .unwrap_or_else(|| "n/a".to_owned());
-        let token_count = model
-            .total_tokens
-            .map(tracedecay_runtime_core::text::format_token_count)
-            .unwrap_or_else(|| "unknown".to_owned());
+            .map_or_else(
+                || "n/a".to_owned(),
+                |(total, cost)| format!("{:.0}%", cost / total * 100.0),
+            );
+        let token_count = model.total_tokens.map_or_else(
+            || "unknown".to_owned(),
+            tracedecay_runtime_core::text::format_token_count,
+        );
         let cost = model
             .cost_usd
-            .map(|cost| format!("${cost:.2}"))
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |cost| format!("${cost:.2}"));
         println!(
             "  {:<12} {:<24} {:>10} {:>10} {:>6}",
             model.provider, model.model, cost, token_count, share
         );
     }
-}
-
-fn print_task_table(_summary: &CostSummaryPayload) {
-    println!("Task cost attribution is unavailable from canonical provider usage.");
 }
 
 fn print_default_summary(
@@ -200,33 +200,6 @@ fn print_default_summary(
     }
 }
 
-#[derive(Deserialize)]
-struct CostSummaryPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
-    tokens_saved: u64,
-    efficiency_ratio: Option<f64>,
-}
-
-#[derive(Deserialize)]
-struct TodayCostPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
-}
-
-#[hotpath::measure(label = "cli.cost.request", future = true)]
-async fn call_cost_admin(range: &str) -> tracedecay_domain::errors::Result<Value> {
-    let cwd = std::env::current_dir()?;
-    let project_root = tracedecay::config::discover_project_root(&cwd);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)?;
-    let result = tracedecay::daemon::call_default_tool(
-        &handshake,
-        "tracedecay_admin_cli",
-        json!({ "action": "cost_summary", "range": range }),
-    )
-    .await?;
-    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
-}
-
 fn print_cost_row(
     label: &str,
     cost: Option<f64>,
@@ -238,18 +211,16 @@ fn print_cost_row(
         let denominator = input.checked_add(cache_read)?;
         (denominator > 0).then_some((cache_read as f64 / denominator as f64) * 100.0)
     });
-    let input = input
-        .map(tracedecay_runtime_core::text::format_token_count)
-        .unwrap_or_else(|| "unknown".to_owned());
-    let output = output
-        .map(tracedecay_runtime_core::text::format_token_count)
-        .unwrap_or_else(|| "unknown".to_owned());
-    let cost = cost
-        .map(|cost| format!("${cost:.2}"))
-        .unwrap_or_else(|| "unavailable".to_owned());
-    let cache = cache_pct
-        .map(|percent| format!("{percent:.0}%"))
-        .unwrap_or_else(|| "unknown".to_owned());
+    let input = input.map_or_else(
+        || "unknown".to_owned(),
+        tracedecay_runtime_core::text::format_token_count,
+    );
+    let output = output.map_or_else(
+        || "unknown".to_owned(),
+        tracedecay_runtime_core::text::format_token_count,
+    );
+    let cost = cost.map_or_else(|| "unavailable".to_owned(), |cost| format!("${cost:.2}"));
+    let cache = cache_pct.map_or_else(|| "unknown".to_owned(), |percent| format!("{percent:.0}%"));
     println!(
         "  {:<10} {:>10} {:>10} {:>10} {:>10}",
         label, cost, input, output, cache

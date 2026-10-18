@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WorkGraphReadV1Schema, type WorkGraphReadV1 } from '../../contracts/index.ts';
+import { WorkGraphReadV1Schema, type WorkGraphReadV1 } from '../../contracts/generated.ts';
 import {
   workGraphRead,
   workGraphTimeline,
@@ -18,8 +18,8 @@ import {
 /**
  * The work-product graph read, falsified against wire-shaped fixtures.
  *
- * Every read here goes through `WorkGraphReadV1Schema` first — the same schema
- * `callWork` parses the wire with — so the object these derivations are proved
+ * Every read here goes through `WorkGraphReadV1Schema` first, the same schema
+ * `callWork` parses the wire with, so the object these derivations are proved
  * against is the contract and not a hand-shaped approximation of it. The
  * assertions that matter most are the separations: an empty window from a
  * refusal, a withheld figure from a zero, unmeasured attempts from no attempts,

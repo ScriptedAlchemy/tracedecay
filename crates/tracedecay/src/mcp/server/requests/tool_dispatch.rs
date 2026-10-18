@@ -3,10 +3,9 @@
 use super::*;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 
-use super::super::read_coalescing::{ReadFlightClaim, tool_allows_identical_read_coalescing};
+use tracedecay_mcp::server::{ReadFlightClaim, tool_allows_identical_read_coalescing};
 
 impl McpServer {
-    #[hotpath::skip]
     pub(super) async fn route_tool_arguments(
         &self,
         id: &Value,
@@ -17,7 +16,7 @@ impl McpServer {
         memory_request_scope: &str,
     ) -> Result<RoutedToolCall> {
         let private_reader =
-            crate::mcp::tools::tool_dispatches_registered_project_reader(tool_name);
+            tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader(tool_name);
         let cached_private_route = private_reader
             .then(|| route_cache.workspace_route_for_arguments(&arguments))
             .flatten();
@@ -36,7 +35,6 @@ impl McpServer {
         let routed_project = match private_route {
             Some(_)
                 if crate::mcp::project_route::arguments_have_project_selector(
-                    tool_name,
                     &handler_arguments,
                 ) =>
             {
@@ -54,13 +52,16 @@ impl McpServer {
             }
             None => None,
         };
-        if tracedecay_automation::analytics::is_skill_view_tool(tool_name)
-            && let Some(request_id) = json_rpc_request_id_string(id)
-            && let Some(map) = handler_arguments.as_object_mut()
-        {
-            map.insert("__mcp_request_id".to_string(), json!(request_id));
-        }
-        if tool_supports_live_cancellation(tool_name)
+        // A skill view keys its usage record by the JSON-RPC id its analytics
+        // event records, so importing that event later cannot count it twice.
+        // Its cancellation identity travels in the dispatch control, not here.
+        if tracedecay_automation::analytics::is_skill_view_tool(tool_name) {
+            if let Some(request_id) = json_rpc_request_id_string(id)
+                && let Some(map) = handler_arguments.as_object_mut()
+            {
+                map.insert("__mcp_request_id".to_string(), json!(request_id));
+            }
+        } else if tool_supports_live_cancellation(tool_name)
             && let Some(map) = handler_arguments.as_object_mut()
         {
             map.remove("__mcp_request_id");
@@ -97,7 +98,10 @@ impl McpServer {
 
     #[cfg(feature = "test-transport")]
     #[doc(hidden)]
-    #[hotpath::skip]
+    // The request identity, deadline, and cancellation below are static
+    // literals that cannot fail to parse; this entry point exists only for
+    // the test transport.
+    #[cfg_attr(not(test), allow(clippy::expect_used))]
     pub async fn call_tool_for_test(
         &self,
         tool_name: &str,
@@ -130,19 +134,18 @@ impl McpServer {
                 tool_name,
                 routed.arguments,
                 routed.selected_project.as_ref(),
-                None,
                 application_invocation_executor,
                 application_invocation_target,
                 Some(
-                    tracedecay_application::RequestId::new("request.mcp.test-transport")
+                    tracedecay_contracts::RequestId::new("request.mcp.test-transport")
                         .expect("static test-transport request identity"),
                 ),
                 Some(
-                    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
+                    tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
                         .expect("static test-transport deadline"),
                 ),
                 Some(
-                    tracedecay_application::CancellationSignal::active(
+                    tracedecay_contracts::CancellationSignal::active(
                         "cancellation.mcp.test-transport",
                     )
                     .expect("static test-transport cancellation"),
@@ -152,14 +155,14 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "mcp.server.tools_call.dispatch", future = true)]
+    #[tracing::instrument(name = "mcp.server.tools_call.dispatch", level = "trace", skip_all)]
     pub(super) async fn dispatch_routed_tool_call(
         &self,
         tool_name: &str,
         routed: RoutedToolCall,
         timings_enabled: bool,
         publish_activity: bool,
-        application_request_id: Option<tracedecay_application::RequestId>,
+        application_request_id: Option<tracedecay_contracts::RequestId>,
         dispatch_control: DispatchControl,
     ) -> DispatchedToolCall {
         let handler_start = timings_enabled.then(std::time::Instant::now);
@@ -175,25 +178,20 @@ impl McpServer {
         // `routed.selected_server`; an unselected call is admitted on `self`.
         // Never resolve or fall back to another project inside the worker.
         let dispatch_server = self;
-        let (cg, live_branch) = dispatch_server.reopen_if_branch_drifted_memoized().await;
-        let project_reader_preselected = routed.selected_project.is_some();
+        let cg = match tracedecay_mcp::tools::binding::tool_branch_sensitivity(tool_name) {
+            tracedecay_mcp::tools::binding::BranchSensitivity::Independent => {
+                dispatch_server.cg_snapshot().await
+            }
+            tracedecay_mcp::tools::binding::BranchSensitivity::Sensitive => {
+                dispatch_server.reopen_if_branch_drifted_memoized().await.0
+            }
+        };
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
 
         dispatch_server
-            .begin_tool_dispatch(
-                tool_name,
-                &cg,
-                &live_branch,
-                project_reader_preselected,
-                publish_activity,
-            )
+            .begin_tool_dispatch(tool_name, &cg, publish_activity)
             .await;
-        let server_stats = if tool_name == "tracedecay_status" {
-            Some(dispatch_server.server_stats_json().await)
-        } else {
-            None
-        };
         let ApplicationSurfaceDispatch {
             invocation_executor: application_invocation_executor,
             ..
@@ -206,7 +204,6 @@ impl McpServer {
                 tool_name,
                 routed.arguments,
                 routed.selected_project.as_ref(),
-                server_stats,
                 application_invocation_executor,
                 application_invocation_target,
                 application_request_id,
@@ -224,24 +221,26 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::skip]
     pub(super) async fn execute_tool_dispatch(
         &self,
         cg: &TraceDecay,
         tool_name: &str,
         handler_arguments: Value,
         resolved_project_route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
-        server_stats: Option<Value>,
         application_invocation_executor: Option<
             &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
         >,
-        application_invocation_target: tracedecay_application::InvocationTarget,
-        application_request_id: Option<tracedecay_application::RequestId>,
-        application_deadline: Option<tracedecay_application::Deadline>,
-        application_cancellation: Option<tracedecay_application::CancellationSignal>,
+        application_invocation_target: tracedecay_contracts::InvocationTarget,
+        application_request_id: Option<tracedecay_contracts::RequestId>,
+        application_deadline: Option<tracedecay_contracts::Deadline>,
+        application_cancellation: Option<tracedecay_contracts::CancellationSignal>,
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
-        let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
+        let read_flight = tool_allows_identical_read_coalescing(tool_name, |tool_name| {
+            tracedecay_mcp::tools::binding::mcp_dispatch_contract(tool_name)
+                .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
+        })
+        .then(|| {
             self.identical_read_coalescer.claim(
                 engine_identity.to_string_lossy().as_ref(),
                 tool_name,
@@ -259,85 +258,27 @@ impl McpServer {
             cg,
             tool_name,
             handler_arguments,
-            server_stats,
-            self.scope_prefix(),
             ToolCallRegistryOptions {
-                global_db: self.registry_db.as_ref(),
-                project_registry_reads: self.project_registry_reads.as_deref(),
-                accounting_db: self.accounting_db.as_deref(),
-                registered_project_session_db: self.registered_session_db.clone(),
-                registered_profile_session_db: self.registered_user_session_db.clone(),
-                registered_savings_db: self.accounting_db.clone(),
-                dashboard_session_retrieval_service: self
-                    .project_application_retrieval
-                    .as_ref()
-                    .map(|mounted| Arc::clone(&mounted.service)),
-                dashboard_session_retrieval_identity: self
-                    .project_application_retrieval
-                    .as_ref()
-                    .map(|mounted| mounted.identity.clone()),
-                daemon_user_profile_id: self
-                    .profile_identity
-                    .as_ref()
-                    .map(|identity| identity.profile_id().clone()),
-                profile_root: self.profile_root.as_deref(),
                 resolved_project_route,
-                automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
-                automation_writer: self.dashboard_automation_writer.clone(),
-                doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
-                remote_operational_status: self.remote_operational_status.clone(),
-                code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
-                explorer_semantic_reader: self.dashboard_explorer_semantic_reader.clone(),
-                feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
-                diagnostics_cache: Some(&self.diagnostics_cache),
-                diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_executor,
-                application_invocation_target,
-                dashboard_application_invocation_executor: self
-                    .application_invocation_executor
-                    .clone(),
-                daemon_invocation_service: self.daemon_invocation_service.as_ref(),
-                dashboard_delivery_settlement_authority: self.delivery_settlement_authority.clone(),
                 application_request_id,
                 application_deadline,
                 application_cancellation,
-                code_index_publication_identity: self.code_index_publication_identity.clone(),
-                code_index_reconcile_sink: self.code_index_reconcile_sink.clone(),
-                code_index_search_executor: self.code_index_search_executor.clone(),
-                code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
-                source_edit_executor: self.source_edit_executor.get().cloned(),
-                source_edit_reconciliation_executor: self
-                    .source_edit_reconciliation_executor
-                    .get()
-                    .cloned(),
-                source_edit_rollback_executor: self.source_edit_rollback_executor.get().cloned(),
-                code_index_search_authority: self.code_index_search_authority.clone(),
-                code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
-                code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
-                verified_graph_query_port: self.verified_graph_query_port.clone(),
-                code_index_ignored_dependency_admission: self
-                    .code_index_ignored_dependency_admission
-                    .clone(),
-                generation_census_reader: self.generation_census_reader(),
-                retained_project_server_resolver: self.retained_project_server_resolver.clone(),
-                session_sync_service: session_sync_service.as_deref(),
-                served_stale_graph_generation: std::sync::Arc::new(std::sync::OnceLock::new()),
-                session_authorities: crate::mcp::tools::SessionAuthorities::new(
-                    self.session_db.as_ref(),
-                    self.user_session_db.as_ref(),
-                )
-                .with_profile_identity(self.profile_identity.clone())
-                .with_profile_retained_authority(self.profile_retained_authority.as_ref())
-                .with_registered_databases(
-                    self.registered_session_db.as_ref(),
-                    self.registered_user_session_db.as_ref(),
-                )
-                .with_lcm_authorities(
-                    self.project_lcm_authority.as_deref(),
-                    self.user_lcm_authority.as_deref(),
-                ),
+                application_invocation_target,
+                ..self.tool_call_registry_options(session_sync_service.as_deref())
             },
         );
+        // A composed daemon serves one transcript owner. The refresh
+        // schedulers already run their sweep under this profile; scoping the
+        // dispatch puts every hook-triggered ingest on the same reader.
+        let dispatch: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
+        > = match self.profile.clone() {
+            Some(profile) => Box::pin(
+                tracedecay_sessions::runtime::with_transcript_source_profile(profile, dispatch),
+            ),
+            None => dispatch,
+        };
         if let Some(read_flight) = read_flight {
             match read_flight {
                 ReadFlightClaim::Leader(leader) => match dispatch.await {
@@ -345,10 +286,11 @@ impl McpServer {
                     Err(error) => Err(error),
                 },
                 ReadFlightClaim::Follower(follower) => match follower.wait().await {
-                    Some(result) => Ok(hotpath::measure_block!(
-                        "mcp.server.read_coalescing.result_clone",
+                    Some(result) => Ok({
+                        let _span = tracing::trace_span!("mcp.server.read_coalescing.result_clone")
+                            .entered();
                         (*result).clone()
-                    )),
+                    }),
                     None => dispatch.await,
                 },
             }

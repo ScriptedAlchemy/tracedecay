@@ -11,8 +11,8 @@ import { StateChip, type DomainStateKind } from './StateChip';
 
 /**
  * The truth header every `DashboardEnvelopeV1` read carries: its domain state,
- * its coverage with denominator, its freshness, and — only when the server
- * returned one — a refresh control bound to the server's own legal-action
+ * its coverage with denominator, its freshness, and, only when the server
+ * returned one, a refresh control bound to the server's own legal-action
  * reference.
  *
  * The refresh button is deliberately conditional on that reference rather than
@@ -58,7 +58,7 @@ export function EnvelopeTruth({
           title={refresh}
           data-operation={refresh}
         >
-          <span className="inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary group-hover:text-text-primary">
+          <span className="inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-sm font-medium text-text-secondary group-hover:text-text-primary">
             <RefreshCw aria-hidden size={12} className={refreshing ? 'animate-spin' : undefined} />
             {refreshing ? 'Refreshing' : 'Refresh'}
           </span>
@@ -69,7 +69,7 @@ export function EnvelopeTruth({
 }
 
 /** The envelope's authorization outcome as its own domain state. `authorized`
- * has no chip — it is the ordinary case, and a badge on every read would make
+ * has no chip, it is the ordinary case, and a badge on every read would make
  * the three that matter invisible. */
 export function authorizationState(authorization: DashboardAuthorizationV1): DomainStateKind | null {
   switch (authorization.outcome) {
@@ -95,7 +95,7 @@ export function OmissionReasons({ coverage }: { coverage: DashboardCoverageV1 })
       <p className="text-3xs font-medium uppercase tracking-wide text-text-muted">
         Why this read is incomplete
       </p>
-      <ul className="mt-1 space-y-1 text-2xs text-text-secondary">
+      <ul className="mt-1 space-y-1 text-body text-text-secondary">
         {coverage.omission_reasons.map((reason) => (
           <li key={reason}>{reason}</li>
         ))}

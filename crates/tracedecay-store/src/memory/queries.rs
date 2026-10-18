@@ -27,7 +27,6 @@ pub struct FactQueryCoverageV1 {
 }
 
 impl FactQueryCoverageV1 {
-    #[hotpath::skip]
     pub const fn new(visible: u64, hidden: u64, unknown: u64, redacted: u64) -> Self {
         Self {
             visible,
@@ -37,22 +36,18 @@ impl FactQueryCoverageV1 {
         }
     }
 
-    #[hotpath::skip]
     pub const fn visible(&self) -> u64 {
         self.visible
     }
 
-    #[hotpath::skip]
     pub const fn hidden(&self) -> u64 {
         self.hidden
     }
 
-    #[hotpath::skip]
     pub const fn unknown(&self) -> u64 {
         self.unknown
     }
 
-    #[hotpath::skip]
     pub const fn redacted(&self) -> u64 {
         self.redacted
     }
@@ -88,7 +83,6 @@ impl FactContradictionStateV1 {
         }
     }
 
-    #[hotpath::skip]
     pub const fn is_positive(&self) -> bool {
         matches!(self, Self::Present { .. })
     }
@@ -119,12 +113,10 @@ impl FactCurrentResponseV1 {
         self.fact.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn coverage(&self) -> &FactQueryCoverageV1 {
         &self.coverage
     }
 
-    #[hotpath::skip]
     pub const fn contradiction(&self) -> &FactContradictionStateV1 {
         &self.contradiction
     }
@@ -155,12 +147,10 @@ impl FactAsOfResponseV1 {
         self.fact.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn coverage(&self) -> &FactQueryCoverageV1 {
         &self.coverage
     }
 
-    #[hotpath::skip]
     pub const fn contradiction(&self) -> &FactContradictionStateV1 {
         &self.contradiction
     }
@@ -191,12 +181,10 @@ impl FactLineageResponseV1 {
         &self.events
     }
 
-    #[hotpath::skip]
     pub const fn coverage(&self) -> &FactQueryCoverageV1 {
         &self.coverage
     }
 
-    #[hotpath::skip]
     pub const fn contradiction(&self) -> &FactContradictionStateV1 {
         &self.contradiction
     }

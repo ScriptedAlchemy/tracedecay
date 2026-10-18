@@ -8,9 +8,9 @@ use std::future::Future;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
-    ConfigurationAuditEvent, ConfigurationIdempotencyKey, ConfigurationReceiptId,
-    ConfigurationRevisionId, ConfigurationSnapshotV1, ProtectedChange, ProtectedChangePlan,
-    RollbackModeV1,
+    ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationIdempotencyKey,
+    ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ProtectedChange,
+    ProtectedChangePlan, RollbackModeV1,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, DomainError, ManifestDigest, UtcMicros, canonical_sha256,
@@ -134,10 +134,43 @@ impl ConfigurationCommitV1 {
         self.audit_event.validate()?;
         if self.expected_base_revision_id != self.receipt.base_revision_id
             || self.next_revision.revision_id != self.receipt.result_revision_id
+            || self.next_revision.parent_revision_id.as_ref()
+                != Some(&self.expected_base_revision_id)
         {
             return Err(DomainError::SnapshotMismatch {
                 field: "configuration commit revision binding",
             });
+        }
+        if self.audit_event.actor_id != self.receipt.actor_id
+            || self.audit_event.idempotency_key.as_ref() != Some(&self.receipt.idempotency_key)
+            || self.audit_event.base_revision_id != self.receipt.base_revision_id
+            || self.audit_event.result_revision_id.as_ref()
+                != Some(&self.receipt.result_revision_id)
+            || self.audit_event.operation_digest != self.receipt.operation_digest
+            || self.audit_event.receipt_id.as_ref() != Some(&self.receipt.receipt_id)
+        {
+            return Err(DomainError::SnapshotMismatch {
+                field: "configuration commit audit binding",
+            });
+        }
+        if let Some(plan) = &self.change_plan {
+            if plan.actor_id != self.receipt.actor_id
+                || plan.base_revision_id != self.expected_base_revision_id
+                || plan.operation_digest != self.receipt.operation_digest
+            {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "configuration commit plan binding",
+                });
+            }
+            if !matches!(
+                self.audit_event.event_kind,
+                ConfigurationAuditEventKindV1::Applied
+                    | ConfigurationAuditEventKindV1::RollbackApplied
+            ) {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "configuration commit terminal audit event",
+                });
+            }
         }
         Ok(())
     }

@@ -1,9 +1,9 @@
 /**
  * The settings editor as one state machine.
  *
- * The editor used to be six independent `useState` slices — the project draft,
+ * The editor used to be six independent `useState` slices, the project draft,
  * the user draft, the pending review, a `confirmed` boolean, the validation
- * errors, and the saved notice — that only added up to a correct screen when
+ * errors, and the saved notice, that only added up to a correct screen when
  * they happened to agree. Nothing stopped them disagreeing. A confirmation was
  * a bare boolean beside the review it was supposedly given for, so a refetch
  * could replace the draft underneath a confirmed review and the next apply
@@ -26,6 +26,8 @@ import {
   planCodeIndexWorkerChangeAgainst,
   planProjectChangeAgainst,
   planUserChangeAgainst,
+  sameCodeIndexWorkerSelection,
+  sameStrings,
   type CodeIndexWorkerSettingsChangeSet,
   type CodeIndexWorkerSettingsValues,
   settingsRevisionId,
@@ -52,11 +54,11 @@ export interface SettingsDraft {
  * A validated change frozen against the revision it was planned from.
  *
  * `reviewId` is the identity of that pairing. Two reviews with the same id are
- * the same change against the same revision; anything else — an edited draft,
- * a moved authority — produces a different id, which is how a confirmation
+ * the same change against the same revision; anything else, an edited draft,
+ * a moved authority, produces a different id, which is how a confirmation
  * given for one review is refused for another.
  */
-export interface SettingsReview {
+interface SettingsReview {
   readonly scope: SettingsScope;
   readonly expectedRevisionId: string;
   readonly patch:
@@ -68,15 +70,18 @@ export interface SettingsReview {
 }
 
 /** A write the authority confirmed, as the authority reported it. */
-export interface SettingsAppliedRecord {
+interface SettingsAppliedRecord {
   readonly scope: SettingsScope;
   readonly message: string;
+  /** The revision the PATCH response named, the authority's own statement of
+   * where the resource now stands, ahead of the read that follows. */
+  readonly revisionId: string;
   readonly resyncRecommended: boolean;
   readonly restartRecommended: boolean;
 }
 
 /** Field-level refusals, kept with the authority that issued them. */
-export type SettingsRejection =
+type SettingsRejection =
   | {
       readonly origin: 'client';
       readonly scope: SettingsScope;
@@ -91,17 +96,17 @@ export type SettingsRejection =
 
 /**
  * What the editor is resting on between writes: nothing, one completed write,
- * or one refused write. Never a completed write and a refusal at once — the
+ * or one refused write. Never a completed write and a refusal at once, the
  * old pair of slices could hold "Project settings saved" above a field still
  * marked invalid by an earlier attempt.
  */
-export type SettingsResting =
+type SettingsResting =
   | { readonly rest: 'clean' }
   | { readonly rest: 'applied'; readonly applied: SettingsAppliedRecord }
   | { readonly rest: 'rejected'; readonly rejection: SettingsRejection };
 
 /** A write that did not reach a verdict. Distinct from a refusal, which did. */
-export type SettingsSubmitFailure =
+type SettingsSubmitFailure =
   | { readonly kind: 'offline'; readonly detail: string }
   | { readonly kind: 'error'; readonly detail: string }
   | { readonly kind: 'protocol_error'; readonly authority: string; readonly detail: string };
@@ -183,7 +188,7 @@ export function reduceSettingsEditor(
       return requestReview(state, action.scope, action.idempotencyKey);
     case 'review_dismissed':
       // A dismissal cannot cancel a write already in flight, and it cannot
-      // clear a verdict the editor is resting on — closing the dialog after a
+      // clear a verdict the editor is resting on, closing the dialog after a
       // save must not take the save with it.
       return state.status === 'editor_unavailable' ||
         state.status === 'editing' ||
@@ -210,7 +215,7 @@ export function reduceSettingsEditor(
 /**
  * A fresh read of the resource.
  *
- * The draft always follows the authority — the editor shows what is there, not
+ * The draft always follows the authority, the editor shows what is there, not
  * what was there. A review does not: it is a statement about a specific
  * revision, so when the authority moves past that revision the review is
  * superseded rather than quietly re-aimed at the new one. The one exception is
@@ -259,15 +264,25 @@ function observeAuthority(
 
 /**
  * An edit. A review describes a draft; once the draft moves, the review
- * describes nothing, so it goes — along with any confirmation given for it.
+ * describes nothing, so it goes, along with any confirmation given for it.
+ *
+ * A write in flight is the exception: leaving `submitting` would make
+ * `settleSubmit` discard the verdict when it lands, so the edit waits. A
+ * refusal the editor is resting on judged the draft as it was; once the draft
+ * moves it is no longer about anything and goes too, while a completed write
+ * stays true and stays.
  */
 function redraft(
   state: SettingsEditorState,
   next: (draft: SettingsDraft) => SettingsDraft,
 ): SettingsEditorState {
-  if (state.status === 'editor_unavailable') return state;
+  if (state.status === 'editor_unavailable' || state.status === 'submitting') return state;
   if (state.status === 'editing') {
-    return editing(state.authority, next(state.draft), state.resting);
+    return editing(
+      state.authority,
+      next(state.draft),
+      state.resting.rest === 'rejected' ? CLEAN : state.resting,
+    );
   }
   return editing(state.authority, next(state.draft), CLEAN);
 }
@@ -277,7 +292,9 @@ function requestReview(
   scope: SettingsScope,
   idempotencyKey: string,
 ): SettingsEditorState {
-  if (state.status === 'editor_unavailable') return state;
+  // A review opened over a write in flight would replace the state that
+  // write's verdict is delivered to. It waits for the verdict.
+  if (state.status === 'editor_unavailable' || state.status === 'submitting') return state;
   const plan = planFor(state.authority, state.draft, scope);
   switch (plan.outcome) {
     case 'invalid':
@@ -360,7 +377,7 @@ function setConfirmation(
  * against the authority the editor now holds, and only an identical review id
  * lets the write proceed. The id carries the revision as well as the change,
  * so one comparison catches both a resource that moved and a draft that no
- * longer produces what was confirmed — either way the review is superseded
+ * longer produces what was confirmed, either way the review is superseded
  * instead of applied.
  */
 function startSubmit(state: SettingsEditorState): SettingsEditorState {
@@ -398,6 +415,7 @@ function settleSubmit(
         applied: {
           scope: result.scope,
           message: savedMessage(result.scope),
+          revisionId: result.revisionId,
           resyncRecommended: result.resyncRecommended,
           restartRecommended: result.restartRecommended,
         },
@@ -469,7 +487,7 @@ export type SubmittingSettingsState = Extract<SettingsEditorState, { status: 'su
  * there is no path that sends a patch from a stale review.
  *
  * Scope writability is deliberately absent. It is not a property of the review
- * this machine holds — it is a property of the dashboard the routes point at,
+ * this machine holds, it is a property of the dashboard the routes point at,
  * and it can change while a review sits open. The controller supplies it at
  * dispatch so the write refuses on the current reading rather than one captured
  * when the draft was confirmed.
@@ -516,14 +534,6 @@ export function settingsConfirmationHeld(state: SettingsEditorState): boolean {
   }
 }
 
-/** Field refusals to mark the inputs with. Only a resting editor has any. */
-export function settingsFieldErrors(
-  state: SettingsEditorState,
-): readonly SettingsValidationError[] {
-  const rejection = settingsRejection(state);
-  return rejection ? rejection.errors : [];
-}
-
 export function settingsRejection(state: SettingsEditorState): SettingsRejection | null {
   return state.status === 'editing' && state.resting.rest === 'rejected'
     ? state.resting.rejection
@@ -541,8 +551,24 @@ export function settingsScopeDirty(
   state: SettingsEditorState,
   scope: SettingsScope,
 ): boolean {
-  if (state.status === 'editor_unavailable') return false;
-  return planFor(state.authority, state.draft, scope).outcome !== 'unchanged';
+  const plan = settingsScopePlan(state, scope);
+  return plan !== null && plan.outcome !== 'unchanged';
+}
+
+/**
+ * The change this scope's draft currently amounts to, replanned live.
+ *
+ * This is the same plan `review_requested` freezes, computed without freezing
+ * it, so a surface can state validity, `ready`, `unchanged`, or `invalid`
+ * with the daemon-shaped field errors, while the value is still being typed.
+ * `null` while the read names no revision to plan against.
+ */
+export function settingsScopePlan(
+  state: SettingsEditorState,
+  scope: SettingsScope,
+): SettingsPlan | null {
+  if (state.status === 'editor_unavailable') return null;
+  return planFor(state.authority, state.draft, scope);
 }
 
 /* --------------------------------------------------------------- helpers --*/
@@ -688,12 +714,11 @@ function sameProjectValues(
   right: ProjectSettingsValues,
 ): boolean {
   return (
-    sameStringList(left.include, right.include) &&
-    sameStringList(left.exclude, right.exclude) &&
+    sameStrings(left.include, right.include) &&
+    sameStrings(left.exclude, right.exclude) &&
     left.max_file_size === right.max_file_size &&
     left.extract_docstrings === right.extract_docstrings &&
     left.track_call_sites === right.track_call_sites &&
-    left.git_ignore === right.git_ignore &&
     left.context_scout === right.context_scout &&
     left.telemetry_timings === right.telemetry_timings &&
     left.auto_track_pr_branches === right.auto_track_pr_branches &&
@@ -719,16 +744,6 @@ function sameCodeIndexWorkerValues(
   );
 }
 
-function sameCodeIndexWorkerSelection(
-  left: CodeIndexWorkerSettingsValues['code_index_workers'],
-  right: CodeIndexWorkerSettingsValues['code_index_workers'],
-): boolean {
-  return (
-    left.mode === right.mode &&
-    (left.mode !== 'exact' || (right.mode === 'exact' && left.workers === right.workers))
-  );
-}
-
 function sameCodeIndexWorkerStatus(
   left: CodeIndexWorkerSettingsValues['code_index_worker_status'],
   right: CodeIndexWorkerSettingsValues['code_index_worker_status'],
@@ -742,8 +757,4 @@ function sameCodeIndexWorkerStatus(
     left.memory_safe_workers === right.memory_safe_workers &&
     left.limiting_reason === right.limiting_reason
   );
-}
-
-function sameStringList(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

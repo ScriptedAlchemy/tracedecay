@@ -9,73 +9,51 @@
 /// Each named declaration exposes its name via the `name` field. We walk
 /// the tree, push namespace/section frames onto a scope stack, and emit
 /// graph nodes for declarations, parented to the closest enclosing scope.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 
 pub struct LeanExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
-    /// `(qualified_prefix, parent_id)` — top is the active scope. The file
+    /// `(qualified_prefix, parent_id)`. Top is the active scope. The file
     /// frame is the last resort and is never popped.
     scope_stack: Vec<(String, String)>,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         let file_node_id = generate_node_id(file_path, &NodeKind::File, file_path, 0);
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
             scope_stack: Vec::new(),
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl LeanExtractor {
-    pub fn extract_lean(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse(source) {
-            Ok(tree) => tree,
-            Err(_msg) => {
-                return Self::build_result(
-                    Self::initialize_state(file_path, source),
-                    Instant::now(),
-                );
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -83,7 +61,11 @@ impl LeanExtractor {
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
-        let mut state = Self::initialize_state(file_path, source);
+        let mut state = Self::initialize_state(
+            file_path,
+            source,
+            crate::common::file_end_line(source, tree),
+        );
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit(&mut state, child);
@@ -96,7 +78,11 @@ impl LeanExtractor {
         )
     }
 
-    fn initialize_state(file_path: &str, source: &str) -> ExtractionState {
+    fn initialize_state<'s>(
+        file_path: &str,
+        source: &'s str,
+        end_line: u32,
+    ) -> ExtractionState<'s> {
         let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -106,7 +92,7 @@ impl LeanExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -120,6 +106,7 @@ impl LeanExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -140,15 +127,11 @@ impl LeanExtractor {
         }
     }
 
-    fn parse(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("lean", "Lean", source)
-    }
-
     fn visit(state: &mut ExtractionState, node: TsNode<'_>) {
         // Skip anonymous keyword tokens (e.g. the literal `namespace`,
         // `def`, `theorem` words inside their parent named nodes).
         // Their `kind()` matches the named outer kind but they are not
-        // structural — emitting nodes for them would produce phantom
+        // structural. Emitting nodes for them would produce phantom
         // `<anonymous>` modules and double-counted definitions.
         if !node.is_named() {
             return;
@@ -177,7 +160,7 @@ impl LeanExtractor {
             // `open`, `attribute`, `notation`, `mixfix`, `macro_rules`,
             // `variable`, `universe`, `prelude`, `elab`, `syntax`,
             // `hash_command`, `export`, `builtin_initialize` are out of
-            // scope — they don't define named graph entities we track.
+            // scope. They don't define named graph entities we track.
             _ => {}
         }
     }
@@ -196,13 +179,13 @@ impl LeanExtractor {
 
     /// Handles `namespace` / `section`. Named blocks emit a `Module`
     /// node and push a new scope so the body is parented to it. Anonymous
-    /// `section` blocks (no `name` field) emit nothing — they're scope
-    /// markers in the source, but as graph nodes they'd just be noise —
-    /// the body is recursed into so contained defs still get parented to
+    /// `section` blocks (no `name` field) emit nothing. They're scope
+    /// markers in the source, but as graph nodes they'd just be noise.
+    /// The body is recursed into so contained defs still get parented to
     /// the *surrounding* scope.
     fn visit_namespace(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node.child_by_field_name("name").map(|n| state.node_text(n));
-        let pushed = if let Some(name) = name.as_deref() {
+        let pushed = if let Some(name) = name {
             let id = Self::emit_node(state, node, NodeKind::Module, name);
             let parent_qn = match state.scope_stack.last() {
                 Some((qn, _)) => qn.clone(),
@@ -214,7 +197,7 @@ impl LeanExtractor {
             false
         };
 
-        // Recurse into every child *except* the `name` field — the rest is
+        // Recurse into every child *except* the `name` field. The rest is
         // the body. Iterating all children with their field names works
         // for both `namespace` and `section`.
         let mut cursor = node.walk();
@@ -240,7 +223,7 @@ impl LeanExtractor {
         // The `module` field on `import` holds the dotted module path.
         if let Some(n) = node.child_by_field_name("module") {
             let target = state.node_text(n);
-            Self::push_use_edge(state, node, &target);
+            Self::push_use_edge(state, node, target);
             return;
         }
         // Fallback: scan for an identifier child (older grammars / shapes).
@@ -249,7 +232,7 @@ impl LeanExtractor {
             loop {
                 if cursor.node().kind() == "identifier" {
                     let target = state.node_text(cursor.node());
-                    Self::push_use_edge(state, node, &target);
+                    Self::push_use_edge(state, node, target);
                     break;
                 }
                 if !cursor.goto_next_sibling() {
@@ -278,7 +261,7 @@ impl LeanExtractor {
     /// for nested content.
     fn emit_named(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) -> String {
         let name = match node.child_by_field_name("name") {
-            Some(n) => state.node_text(n),
+            Some(n) => state.node_text(n).to_string(),
             None => format!("<anonymous_{}>", node.kind()),
         };
         Self::emit_node(state, node, kind, &name)
@@ -289,7 +272,7 @@ impl LeanExtractor {
     fn emit_if_named(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
         if let Some(name_node) = node.child_by_field_name("name") {
             let name = state.node_text(name_node);
-            Self::emit_node(state, node, kind, &name);
+            Self::emit_node(state, node, kind, name);
         }
     }
 
@@ -306,7 +289,7 @@ impl LeanExtractor {
             None => state.file_path.clone(),
         };
         let qualified_name = format!("{parent_qn}::{name}");
-        let id = generate_node_id(&state.file_path, &kind, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, name, node);
 
         let signature = state
             .node_text(node)
@@ -336,6 +319,7 @@ impl LeanExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -363,17 +347,16 @@ impl crate::LanguageExtractor for LeanExtractor {
         "Lean"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_lean(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

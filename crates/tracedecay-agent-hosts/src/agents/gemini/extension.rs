@@ -5,7 +5,7 @@
 //! install|uninstall|list|update`. TraceDecay therefore does exactly two
 //! things here:
 //!
-//! 1. **Stage** a complete extension source directory it owns outright — the
+//! 1. **Stage** a complete extension source directory it owns outright, the
 //!    `gemini-extension.json` manifest (naming the tracedecay MCP server with
 //!    `args: ["serve"]` and `trust: true`) plus the extension's own context
 //!    file. The manifest carries the resolved tracedecay binary through the
@@ -29,11 +29,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use crate::agents::{
-    host_cli, load_json_file, record_host_config_observation_bytes, safe_write_text_file,
-};
+use crate::agents::serve_args::ServeArgs;
+use crate::agents::{host_cli, load_json_file, record_host_config_observation_bytes};
 
 /// Name of Gemini CLI's lifecycle binary.
 pub(super) const GEMINI_CLI: &str = "gemini";
@@ -49,9 +48,6 @@ pub(super) const EXTENSION_NAME: &str = "tracedecay";
 
 /// Key the MCP server lands under inside the extension manifest.
 pub(super) const MCP_SERVER_NAME: &str = "tracedecay";
-
-/// Arguments the tracedecay MCP server is launched with.
-pub(super) const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 /// Manifest file name Gemini CLI requires at the root of an extension.
 pub(super) const EXTENSION_MANIFEST_FILE: &str = "gemini-extension.json";
@@ -70,7 +66,7 @@ pub(super) use crate::agents::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER;
 ///
 /// `trust: true` is what makes Gemini auto-approve tracedecay tool calls
 /// instead of prompting per call; `args: ["serve"]` is the MCP transport the
-/// binary speaks. Both live in the extension now — not in
+/// binary speaks. Both live in the extension now, not in
 /// `~/.gemini/settings.json`.
 const EXTENSION_MANIFEST_TEMPLATE: &str = r#"{
   "name": "tracedecay",
@@ -87,9 +83,7 @@ const EXTENSION_MANIFEST_TEMPLATE: &str = r#"{
 }
 "#;
 
-// ---------------------------------------------------------------------------
 // Paths
-// ---------------------------------------------------------------------------
 
 /// TraceDecay's own Gemini profile root. Every path below is derived from the
 /// admitted `home` rather than an ambient environment variable, because the
@@ -112,7 +106,7 @@ pub(super) fn extension_stage_dir(home: &Path) -> PathBuf {
     home.join(GEMINI_STAGED_EXTENSION_RELATIVE)
 }
 
-/// The staged manifest — presence is the signal that TraceDecay has rendered
+/// The staged manifest, presence is the signal that TraceDecay has rendered
 /// an extension source for this profile.
 pub(super) fn staged_manifest_path(home: &Path) -> PathBuf {
     extension_stage_dir(home).join(EXTENSION_MANIFEST_FILE)
@@ -134,21 +128,13 @@ pub(super) fn installed_manifest_path(home: &Path) -> PathBuf {
 }
 
 /// Gemini CLI's shared settings file. Host-owned, and under the extension
-/// model no longer a TraceDecay write target — only an observation target, so
+/// model no longer a TraceDecay write target, only an observation target, so
 /// a lifecycle transaction can roll back whatever the host CLI changed there.
 pub(super) fn settings_path(home: &Path) -> PathBuf {
     gemini_home(home).join("settings.json")
 }
 
-/// The operator's own global context file. Read-only for this integration; a
-/// tracedecay block here is legacy residue from the pre-extension model.
-pub(super) fn user_context_path(home: &Path) -> PathBuf {
-    gemini_home(home).join(EXTENSION_CONTEXT_FILE)
-}
-
-// ---------------------------------------------------------------------------
 // Staging
-// ---------------------------------------------------------------------------
 
 /// Every file the staged extension consists of, already rendered.
 ///
@@ -156,6 +142,7 @@ pub(super) fn user_context_path(home: &Path) -> PathBuf {
 /// are the same bytes every other reader reasons about.
 pub(crate) fn rendered_extension_files(
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
 ) -> Result<Vec<(&'static str, String)>> {
     Ok(vec![
         (
@@ -164,6 +151,7 @@ pub(crate) fn rendered_extension_files(
                 EXTENSION_MANIFEST_FILE,
                 EXTENSION_MANIFEST_TEMPLATE,
                 tracedecay_bin,
+                serve_args,
             )?,
         ),
         (EXTENSION_CONTEXT_FILE, context_file_text()),
@@ -174,9 +162,14 @@ pub(crate) fn rendered_extension_files(
 /// - `gemini-extension.json`: stamp `version` from the crate version and
 ///   replace the `__TRACEDECAY_BIN__` placeholder with the resolved binary.
 /// - everything else is shipped verbatim.
-fn render_extension_file(relative: &str, contents: &str, tracedecay_bin: &str) -> Result<String> {
+fn render_extension_file(
+    relative: &str,
+    contents: &str,
+    tracedecay_bin: &str,
+    serve_args: &ServeArgs,
+) -> Result<String> {
     match relative {
-        EXTENSION_MANIFEST_FILE => render_manifest(contents, tracedecay_bin),
+        EXTENSION_MANIFEST_FILE => render_manifest(contents, tracedecay_bin, serve_args),
         _ => Ok(contents.to_string()),
     }
 }
@@ -184,8 +177,9 @@ fn render_extension_file(relative: &str, contents: &str, tracedecay_bin: &str) -
 /// Stamp the version and substitute the binary path in a single parse /
 /// serialize round-trip. Assigning a `serde_json::Value` escapes any
 /// JSON-special character in the path, which a raw string replace would not.
-fn render_manifest(raw: &str, tracedecay_bin: &str) -> Result<String> {
-    let rendered = crate::agents::plugin_bundle::stamp_manifest_version_with(raw, |manifest| {
+fn render_manifest(raw: &str, tracedecay_bin: &str, serve_args: &ServeArgs) -> Result<String> {
+    let raw = serve_args.render_quoted(raw);
+    let rendered = crate::agents::plugin_bundle::stamp_manifest_version_with(&raw, |manifest| {
         if let Some(server) = manifest
             .pointer_mut("/mcpServers/tracedecay")
             .and_then(serde_json::Value::as_object_mut)
@@ -218,24 +212,6 @@ fn context_file_text() -> String {
     )
 }
 
-/// Render the extension source into its stable staging directory and report
-/// that directory. A clean replace, so a file a previous version staged but
-/// this one no longer ships cannot linger into the next `gemini extensions
-/// install`.
-#[hotpath::measure(label = "hosts.agent.gemini.extension_deploy")]
-pub(super) fn deploy_extension_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
-    let stage_dir = extension_stage_dir(home);
-    clean_replace_owned_stage_dir(&stage_dir)?;
-    for (relative, rendered) in rendered_extension_files(tracedecay_bin)? {
-        safe_write_text_file(&stage_dir.join(relative), &rendered, None)?;
-    }
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Staged tracedecay Gemini extension in {}",
-        stage_dir.display()
-    );
-    Ok(stage_dir)
-}
-
 /// True when a staging directory is tracedecay-owned: its manifest names the
 /// tracedecay extension. A missing directory is trivially safe to write into.
 pub(super) fn stage_dir_is_tracedecay(stage_dir: &Path) -> bool {
@@ -245,30 +221,7 @@ pub(super) fn stage_dir_is_tracedecay(stage_dir: &Path) -> bool {
         == Some(EXTENSION_NAME)
 }
 
-/// Remove the tracedecay-owned staging directory so the next write is a clean
-/// replace. No-op when it is missing; refuses when it exists but is not
-/// tracedecay-owned, so a directory squatting on the path — an operator's own
-/// hand-written extension source, say — is never deleted.
-fn clean_replace_owned_stage_dir(stage_dir: &Path) -> Result<()> {
-    if !stage_dir.exists() {
-        return Ok(());
-    }
-    if !stage_dir_is_tracedecay(stage_dir) {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "refusing to replace non-tracedecay Gemini extension directory {}",
-                stage_dir.display()
-            ),
-        });
-    }
-    std::fs::remove_dir_all(stage_dir).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to remove {}: {error}", stage_dir.display()),
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Installed-extension observation
-// ---------------------------------------------------------------------------
 
 /// What TraceDecay can actually see of the host's installed extension.
 ///
@@ -308,11 +261,12 @@ pub(super) fn read_installed_extension(home: &Path) -> InstalledExtensionV1 {
 pub(super) fn manifest_declares_current_server(
     manifest: &serde_json::Value,
     tracedecay_bin: Option<&str>,
+    serve_args: &ServeArgs,
 ) -> bool {
     manifest.get("name").and_then(serde_json::Value::as_str) == Some(EXTENSION_NAME)
         && manifest.get("version").and_then(serde_json::Value::as_str)
             == Some(crate::PRODUCT_VERSION)
-        && manifest_server_is_current(manifest, tracedecay_bin)
+        && manifest_server_is_current(manifest, tracedecay_bin, serve_args)
 }
 
 /// The MCP-server half of [`manifest_declares_current_server`], without the
@@ -320,6 +274,7 @@ pub(super) fn manifest_declares_current_server(
 pub(super) fn manifest_server_is_current(
     manifest: &serde_json::Value,
     tracedecay_bin: Option<&str>,
+    serve_args: &ServeArgs,
 ) -> bool {
     let Some(server) = manifest
         .pointer(&format!("/mcpServers/{MCP_SERVER_NAME}"))
@@ -333,23 +288,20 @@ pub(super) fn manifest_server_is_current(
         .is_some_and(|command| {
             !command.is_empty() && tracedecay_bin.is_none_or(|expected| command == expected)
         });
-    let args_ok = server
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|args| {
-            MCP_SERVER_ARGS
-                .iter()
-                .all(|expected| args.iter().any(|arg| arg.as_str() == Some(*expected)))
-        });
+    let args_ok = serve_args.matches_json(server.get("args"), &[]);
     let trust_ok = server.get("trust").and_then(serde_json::Value::as_bool) == Some(true);
     command_ok && args_ok && trust_ok
 }
 
 /// True when the host's installed extension is present and current.
-pub(super) fn installed_extension_is_current(home: &Path, tracedecay_bin: Option<&str>) -> bool {
+pub(super) fn installed_extension_is_current(
+    home: &Path,
+    tracedecay_bin: Option<&str>,
+    serve_args: &ServeArgs,
+) -> bool {
     match read_installed_extension(home) {
         InstalledExtensionV1::Present(manifest) => {
-            manifest_declares_current_server(&manifest, tracedecay_bin)
+            manifest_declares_current_server(&manifest, tracedecay_bin, serve_args)
         }
         InstalledExtensionV1::Missing | InstalledExtensionV1::Unreadable => false,
     }
@@ -361,9 +313,7 @@ pub(super) fn installed_extension_is_present(home: &Path) -> bool {
     installed_extension_dir(home).exists()
 }
 
-// ---------------------------------------------------------------------------
 // Host CLI lifecycle
-// ---------------------------------------------------------------------------
 
 /// Resolve Gemini CLI's own binary, or fail with the typed requirement.
 ///
@@ -385,10 +335,14 @@ pub(super) fn require_gemini_cli() -> Result<PathBuf> {
 ///
 /// When the host already carries an installed tracedecay extension the host's
 /// own `uninstall` runs first: `gemini extensions install` refuses to install
-/// over an existing extension, and removing it through the host — rather than
-/// deleting the host-owned directory ourselves — keeps every write to that
+/// over an existing extension, and removing it through the host, rather than
+/// deleting the host-owned directory ourselves, keeps every write to that
 /// state on Gemini's side of the boundary.
-#[hotpath::measure(label = "hosts.agent.gemini.extension_activate")]
+#[tracing::instrument(
+    name = "hosts.agent.gemini.extension_activate",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn gemini_extension_activate_with(gemini: &Path, home: &Path) -> Result<()> {
     let stage_dir = extension_stage_dir(home);
     if !staged_manifest_path(home).exists() {
@@ -410,39 +364,37 @@ pub(super) fn gemini_extension_activate_with(gemini: &Path, home: &Path) -> Resu
 ///
 /// The staged source is left in place: it is TraceDecay-owned input to the
 /// host lifecycle, not host registration state, and the deployed-asset
-/// lifecycle — not this registration boundary — owns removing it.
-#[hotpath::measure(label = "hosts.agent.gemini.extension_deactivate")]
+/// lifecycle, not this registration boundary, owns removing it.
+#[tracing::instrument(
+    name = "hosts.agent.gemini.extension_deactivate",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn gemini_extension_deactivate_with(gemini: &Path, home: &Path) -> Result<()> {
     run_gemini_extension_step(gemini, &["extensions", "uninstall", EXTENSION_NAME], home)
 }
 
-/// Ask Gemini CLI itself what extensions it has, or `None` only when its
-/// binary is genuinely unavailable on `PATH`.
+/// Ask Gemini CLI itself what extensions it has.
 ///
-/// Used only by the doctor, which must never *claim* an activation state it
-/// could not observe: when this returns `None` the doctor says so instead of
-/// inferring adoption from files TraceDecay staged itself. A present but
-/// unusable binary, metadata failure, or launch failure remains a typed error
-/// so it cannot be relabelled as ordinary host absence.
-pub(super) fn host_reported_extensions(home: &Path) -> Result<Option<host_cli::HostCliOutcomeV1>> {
-    let gemini = match host_cli::require_host_cli(GEMINI_CLI, GEMINI_CLI_LIFECYCLE) {
-        Ok(gemini) => gemini,
-        Err(TraceDecayError::HostCliUnavailable { .. }) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    host_cli::run_host_cli(&gemini, &["extensions", "list"], home).map(Some)
+/// Used only by the doctor, which runs it after `require_host` proved the
+/// binary present, and must never *claim* an activation state it could not
+/// observe. A present but unusable binary, metadata failure, or launch
+/// failure is a typed error.
+pub(super) fn host_reported_extensions(home: &Path) -> Result<host_cli::HostCliOutcomeV1> {
+    let gemini = host_cli::require_host_cli(GEMINI_CLI, GEMINI_CLI_LIFECYCLE)?;
+    host_cli::run_host_cli(&gemini, &["extensions", "list"], home)
 }
 
 /// Run one `gemini extensions ...` step, converting a failed invocation into
 /// the host's own diagnosis.
 ///
 /// The post-command bytes of `~/.gemini/settings.json` are recorded through
-/// the active host transaction — read exactly once, after the child exits — so
+/// the active host transaction, read exactly once, after the child exits, so
 /// the transaction's existing rollback authority can restore the pre-command
 /// document if the command fails or a later verification rejects its effect.
 /// Reading again after recording would let a foreign writer be absorbed into
 /// the transaction's intended state.
-#[hotpath::measure(label = "hosts.agent.gemini.extension_step")]
+#[tracing::instrument(name = "hosts.agent.gemini.extension_step", level = "trace", skip_all)]
 fn run_gemini_extension_step(gemini: &Path, args: &[&str], home: &Path) -> Result<()> {
     let settings = settings_path(home);
     let outcome = host_cli::run_host_cli(gemini, args, home)?;

@@ -23,7 +23,11 @@ fn store_operation_message(operation: &'static str, message: impl Into<String>) 
 }
 
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
-    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.frontiers")]
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.frontiers",
+        level = "trace",
+        skip_all
+    )]
     /// Reads every committed source cursor through bounded `rowid` keyset
     /// pages.
     ///
@@ -60,7 +64,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         Ok(frontiers)
     }
 
-    #[hotpath::skip]
     pub async fn read_session_sync_journal(
         &self,
         key: &str,
@@ -88,7 +91,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| store_operation_error("decode session sync journal", error))
     }
 
-    #[hotpath::skip]
     pub async fn list_session_sync_journals(
         &self,
         key_prefix: &str,
@@ -117,20 +119,34 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         read_journal_values_for_keys(&snapshot, keys).await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.registered.session_sync.recovery_page"
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.recovery_page",
+        level = "trace",
+        skip_all
     )]
     /// Reads one keyset page of journals that can still require recovery.
     /// Journals may each retain multi-megabyte source frontiers, so the page
-    /// query returns keys only — a page of values could exceed the exact-SQL
-    /// byte budget together even though each value fits alone — and every
+    /// query returns keys only, a page of values could exceed the exact-SQL
+    /// byte budget together even though each value fits alone, and every
     /// value then arrives through its own single-row read.
-    #[hotpath::skip]
     pub async fn list_incomplete_session_sync_journal_page(
         &self,
         key_prefix: &str,
         after_key: Option<&str>,
+    ) -> Result<Vec<(String, String)>, TraceDecayError> {
+        self.list_incomplete_session_sync_journal_page_through(
+            key_prefix,
+            after_key,
+            &format!("{key_prefix}\u{10ffff}"),
+        )
+        .await
+    }
+
+    pub async fn list_incomplete_session_sync_journal_page_through(
+        &self,
+        key_prefix: &str,
+        after_key: Option<&str>,
+        through_key: &str,
     ) -> Result<Vec<(String, String)>, TraceDecayError> {
         let snapshot = self.read_snapshot().await.map_err(|error| {
             store_operation_error("open incomplete session sync journals", error)
@@ -140,17 +156,19 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 "SELECT key
                  FROM session_backfill_meta
                  WHERE key >= ?1 AND key < ?2 AND key > ?3
+                   AND key <= ?4
                    AND CASE
                        WHEN json_valid(value)
                        THEN COALESCE(json_extract(value, '$.status') != 'complete', 1)
                        ELSE 1
                    END
                  ORDER BY key
-                 LIMIT ?4",
+                 LIMIT ?5",
                 params![
                     key_prefix,
                     format!("{key_prefix}\u{10ffff}"),
                     after_key.unwrap_or(""),
+                    through_key,
                     SESSION_SYNC_RECOVERY_PAGE_ROWS,
                 ],
             )
@@ -169,7 +187,42 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         read_journal_values_for_keys(&snapshot, keys).await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.insert")]
+    pub async fn session_sync_journal_high_water(
+        &self,
+        key_prefix: &str,
+    ) -> Result<Option<String>, TraceDecayError> {
+        let snapshot = self.read_snapshot().await.map_err(|error| {
+            store_operation_error("open session sync journal high water", error)
+        })?;
+        let mut rows = snapshot
+            .query(
+                "SELECT MAX(key)
+                 FROM session_backfill_meta
+                 WHERE key >= ?1 AND key < ?2",
+                params![key_prefix, format!("{key_prefix}\u{10ffff}")],
+            )
+            .await
+            .map_err(|error| {
+                store_operation_error("read session sync journal high water", error)
+            })?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            store_operation_error("step session sync journal high water", error)
+        })?
+        else {
+            return Err(store_operation_message(
+                "read session sync journal high water",
+                "aggregate query returned no row",
+            ));
+        };
+        row.get(0)
+            .map_err(|error| store_operation_error("decode session sync journal high water", error))
+    }
+
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.insert",
+        level = "trace",
+        skip_all
+    )]
     pub async fn insert_session_sync_journal(
         &self,
         key: &str,
@@ -189,7 +242,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .map_err(|error| store_operation_error("insert session sync journal", error))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.cas")]
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.cas",
+        level = "trace",
+        skip_all
+    )]
     pub async fn compare_and_swap_session_sync_journal(
         &self,
         key: &str,
@@ -209,6 +266,29 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .await
         .map(|changed| changed == 1)
         .map_err(|error| store_operation_error("update session sync journal", error))
+    }
+
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.cas_delete",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn compare_and_delete_session_sync_journal(
+        &self,
+        key: &str,
+        expected: &str,
+    ) -> Result<bool, TraceDecayError> {
+        let writer = self
+            .writer_connection()
+            .map_err(|error| store_operation_error("open session sync journal writer", error))?;
+        SessionExec::execute(
+            &writer,
+            "DELETE FROM session_backfill_meta WHERE key = ?1 AND value = ?2",
+            params![key, expected],
+        )
+        .await
+        .map(|changed| changed == 1)
+        .map_err(|error| store_operation_error("delete session sync journal", error))
     }
 }
 

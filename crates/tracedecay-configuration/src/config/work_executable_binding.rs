@@ -5,15 +5,16 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, SettingKey,
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
 };
 use tracedecay_domain::{
-    ManifestDigest, WorkExecutableReference, WorkProviderBackendV1, WorkProviderProtocol,
+    ManifestDigest, ManifestDigestHasher, WorkExecutableReference, WorkProviderBackendV1,
+    WorkProviderProtocol,
 };
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 
 use super::PinnedRuntimeConfiguration;
 
@@ -70,15 +71,6 @@ pub enum WorkExecutableBindingError {
     Unavailable { executable_id: String },
 }
 
-pub trait WorkExecutableBindingResolver {
-    fn resolve(
-        &self,
-        reference: &WorkExecutableReference,
-        backend: WorkProviderBackendV1,
-        protocol: WorkProviderProtocol,
-    ) -> Result<ResolvedWorkExecutableBinding, WorkExecutableBindingError>;
-}
-
 #[derive(Clone, Debug)]
 pub struct PinnedWorkExecutableBindingResolver {
     bindings: BTreeMap<String, WorkExecutableBindingV1>,
@@ -96,7 +88,7 @@ impl PinnedWorkExecutableBindingResolver {
             }
         })?;
         let Some(ConfigurationValueV1::WorkExecutableBindings(configured)) =
-            configuration.snapshot.effective_values.get(&key)
+            configuration.snapshot().effective_values.get(&key)
         else {
             return Err(WorkExecutableBindingError::Unavailable {
                 executable_id: "configuration.work-executable-bindings".to_owned(),
@@ -109,14 +101,12 @@ impl PinnedWorkExecutableBindingResolver {
             .collect();
         Ok(Self {
             bindings,
-            configuration_revision_id: configuration.revision_id.clone(),
-            configuration_snapshot_id: configuration.snapshot.snapshot_id.clone(),
+            configuration_revision_id: configuration.revision_id().clone(),
+            configuration_snapshot_id: configuration.snapshot().snapshot_id.clone(),
         })
     }
-}
 
-impl WorkExecutableBindingResolver for PinnedWorkExecutableBindingResolver {
-    fn resolve(
+    pub fn resolve(
         &self,
         reference: &WorkExecutableReference,
         backend: WorkProviderBackendV1,
@@ -145,7 +135,9 @@ impl WorkExecutableBindingResolver for PinnedWorkExecutableBindingResolver {
                 executable_id: executable_id.clone(),
             }
         })?;
-        if canonical_path != binding.canonical_path() {
+        // `canonicalize` spells verbatim `\\?\C:\` on Windows while bindings
+        // record the plain canonical form; compare identities, not spelling.
+        if !same_canonical_path(&canonical_path, binding.canonical_path()) {
             return Err(WorkExecutableBindingError::Stale { executable_id });
         }
         let (actual_digest, verified_byte_length) =
@@ -177,7 +169,7 @@ fn digest_file(path: &Path) -> std::io::Result<(ManifestDigest, u64)> {
             "configured provider executable is not an executable file",
         ));
     }
-    let mut hasher = Sha256::new();
+    let mut hasher = ManifestDigestHasher::new();
     let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
@@ -190,8 +182,7 @@ fn digest_file(path: &Path) -> std::io::Result<(ManifestDigest, u64)> {
             .checked_add(read as u64)
             .ok_or_else(|| std::io::Error::other("provider executable byte length overflow"))?;
     }
-    let digest =
-        ManifestDigest::from_sha256_bytes(&hasher.finalize()).map_err(std::io::Error::other)?;
+    let digest = hasher.finalize().map_err(std::io::Error::other)?;
     Ok((digest, bytes))
 }
 
@@ -212,29 +203,42 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
 
-    use sha2::{Digest, Sha256};
     use tempfile::TempDir;
     use tracedecay_domain::configuration::{
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
         WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
     };
     use tracedecay_domain::{
-        ManifestDigest, ProjectId, WorkExecutableReference, WorkProviderBackendV1,
-        WorkProviderProtocol,
+        ManifestDigest, ManifestDigestHasher, ProjectId, WorkExecutableReference,
+        WorkProviderBackendV1, WorkProviderProtocol,
     };
     use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
     use tracedecay_global_db::configuration::resolver::{
         ConfigurationLayerV1, resolve_configuration,
     };
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
-    use super::{
-        PinnedWorkExecutableBindingResolver, WorkExecutableBindingError,
-        WorkExecutableBindingResolver,
-    };
+    use super::{PinnedWorkExecutableBindingResolver, WorkExecutableBindingError, digest_file};
     use crate::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
     fn digest(bytes: &[u8]) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))).unwrap()
+        let mut hasher = ManifestDigestHasher::new();
+        hasher.update(bytes);
+        hasher.finalize().unwrap()
+    }
+
+    #[test]
+    fn executable_digest_remains_raw_sha256() {
+        let directory = TempDir::new().unwrap();
+        let executable_path = directory.path().join("fixture");
+        write_executable_script(&executable_path, b"#!/bin/sh\nexit 0\n").unwrap();
+
+        let (digest, byte_length) = digest_file(&executable_path).unwrap();
+        assert_eq!(
+            digest.as_str(),
+            "sha256:306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb"
+        );
+        assert_eq!(byte_length, 17);
     }
 
     fn pinned(root: &Path, bindings: Vec<WorkExecutableBindingV1>) -> PinnedRuntimeConfiguration {
@@ -258,6 +262,7 @@ mod tests {
         .unwrap();
         PinnedRuntimeConfiguration::new(
             RuntimeConfigurationTarget {
+                profile_root: root.join("profile"),
                 project_id,
                 project_root: root.to_path_buf(),
             },
@@ -272,15 +277,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let executable_path = directory.path().join("codex");
         let original = b"#!/bin/sh\nexit 0\n";
-        std::fs::write(&executable_path, original).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(&executable_path).unwrap().permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(&executable_path, permissions).unwrap();
-        }
+        write_executable_script(&executable_path, original).unwrap();
         let executable_path = executable_path.canonicalize().unwrap();
         let reference =
             WorkExecutableReference::new("codex.pinned".to_owned(), digest(original)).unwrap();
@@ -288,6 +285,7 @@ mod tests {
             reference.clone(),
             executable_path.clone(),
             vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
+            Vec::new(),
         )
         .unwrap();
         let configuration = pinned(directory.path(), vec![binding]);
@@ -306,11 +304,11 @@ mod tests {
         assert_eq!(resolved.verified_byte_length(), original.len() as u64);
         assert_eq!(
             resolved.configuration_revision_id(),
-            &configuration.revision_id
+            configuration.revision_id()
         );
         assert_eq!(
             resolved.configuration_snapshot_id(),
-            &configuration.snapshot.snapshot_id
+            &configuration.snapshot().snapshot_id
         );
 
         assert!(matches!(

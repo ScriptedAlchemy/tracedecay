@@ -6,21 +6,24 @@ use serde_json::{Value, json};
 use tracedecay_policy::CurationApplyDecisionV1;
 
 use super::artifacts::sha256_bytes;
+use super::host_io::{HostIo, ManagedSkillExportReport};
 use super::managed_skills::{
-    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, apply_managed_skill_update,
-    create_managed_skill, default_managed_skill_targets, list_managed_skills,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillExt, ManagedSkillProvenance, ManagedSkillSource,
+    ManagedSkillUpdate, ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget,
+    apply_managed_skill_update, create_managed_skill, default_managed_skill_targets,
+    list_managed_skills,
 };
 use super::skill_usage::{
     SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageSummary,
     skill_improvement_recommendations as usage_skill_improvement_recommendations,
 };
-use super::text::truncate_chars_for_prompt;
-use crate::errors::Result;
-use crate::ports::session_evidence::LcmGrepHit;
 use tracedecay_automation::analytics::ToolFamilySignal;
+use tracedecay_automation::managed_skills::validate_managed_skill_update;
+use tracedecay_automation::text::truncate_chars_for_prompt;
+use tracedecay_domain::errors::Result;
+use tracedecay_lcm::LcmGrepHit;
 
-use super::config_error;
+use super::{config_error, normalized_non_empty};
 
 mod consolidation;
 
@@ -60,7 +63,7 @@ pub struct ManagedSkillMaterializationReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManagedSkillDeploymentReceipt {
     pub status: ManagedSkillDeploymentStatus,
-    pub exports: Vec<crate::agents::ManagedSkillExportReport>,
+    pub exports: Vec<ManagedSkillExportReport>,
     pub materialization_scopes: Vec<ManagedSkillMaterializationReceipt>,
     pub errors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,7 +115,9 @@ pub(crate) async fn validate_skill_proposals(
 }
 
 pub(crate) async fn validate_and_apply_skill_proposals(
+    host_io: &HostIo,
     profile_root: &Path,
+    host_home: Option<&Path>,
     project_root: Option<&Path>,
     run_id: &str,
     proposals: &[Value],
@@ -251,7 +256,8 @@ pub(crate) async fn validate_and_apply_skill_proposals(
         }
     }
     let mutated = !created.is_empty() || !updated.is_empty() || !consolidations.is_empty();
-    let deployment = mutated.then(|| deploy_managed_skills(profile_root, project_root));
+    let deployment =
+        mutated.then(|| deploy_managed_skills(host_io, host_home, profile_root, project_root));
     Ok(SkillProposalOutcome {
         created,
         updated,
@@ -322,18 +328,48 @@ fn ensure_skill_not_referenced_by_scheduled_job(
 }
 
 pub fn deploy_managed_skills_to_project(
+    host_io: &HostIo,
+    host_home: Option<&Path>,
     profile_root: &Path,
     project_root: &Path,
 ) -> ManagedSkillDeploymentReceipt {
-    deploy_managed_skills(profile_root, Some(project_root))
+    deploy_managed_skills(host_io, host_home, profile_root, Some(project_root))
 }
 
-#[hotpath::measure(label = "hosts.automation.managed_skill.deploy")]
-fn deploy_managed_skills(
+/// Deploys managed skills for an explicitly resolved `home`.
+///
+/// Lifecycle passes (`install`, `update`, `reinstall`) call this so both halves
+/// of a managed skill converge on the store: the host-loadable `SKILL.md` files
+/// and the per-host prompt index blocks. Those passes previously reconciled the
+/// materialized files alone, leaving a prompt index that only ever converged as
+/// a side effect of a successful store mutation, so a store that emptied
+/// without one left every host advertising skills that no longer exist.
+#[tracing::instrument(
+    name = "hosts.automation.managed_skill.deploy_at",
+    level = "trace",
+    skip_all
+)]
+pub fn deploy_managed_skills_at(
+    host_io: &HostIo,
+    home: &Path,
+    profile_root: &Path,
+    project_root: &Path,
+) -> ManagedSkillDeploymentReceipt {
+    deploy_managed_skills_with_home(host_io, home, profile_root, Some(project_root))
+}
+
+#[tracing::instrument(
+    name = "hosts.automation.managed_skill.deploy",
+    level = "trace",
+    skip_all
+)]
+pub(crate) fn deploy_managed_skills(
+    host_io: &HostIo,
+    host_home: Option<&Path>,
     profile_root: &Path,
     project_root: Option<&Path>,
 ) -> ManagedSkillDeploymentReceipt {
-    let Some(home) = crate::agents::home_dir() else {
+    let Some(home) = host_home else {
         return ManagedSkillDeploymentReceipt {
             status: ManagedSkillDeploymentStatus::Unavailable,
             exports: Vec::new(),
@@ -343,27 +379,29 @@ fn deploy_managed_skills(
             retry_required: true,
         };
     };
-    let exports = match project_root.map_or_else(
-        || crate::agents::export_managed_skills_to_agents(&home, profile_root),
+    deploy_managed_skills_with_home(host_io, home, profile_root, project_root)
+}
+
+fn deploy_managed_skills_with_home(
+    host_io: &HostIo,
+    home: &Path,
+    profile_root: &Path,
+    project_root: Option<&Path>,
+) -> ManagedSkillDeploymentReceipt {
+    let home = home.to_path_buf();
+    let exports = project_root.map_or_else(
+        || host_io.export_managed_skills_to_agents(&home, profile_root),
         |project_root| {
-            crate::agents::export_managed_skills_to_agent_hosts(&home, project_root, profile_root)
+            host_io.export_managed_skills_to_agent_hosts(&home, project_root, profile_root)
         },
-    ) {
-        Ok(exports) => exports,
-        Err(error) => {
-            return ManagedSkillDeploymentReceipt {
-                status: ManagedSkillDeploymentStatus::Unavailable,
-                exports: Vec::new(),
-                materialization_scopes: Vec::new(),
-                errors: vec![error.to_string()],
-                reason: Some("host_io_unregistered".to_string()),
-                retry_required: true,
-            };
-        }
-    };
+    );
     let project_root = project_root.unwrap_or(home.as_path());
-    let (scopes, errors) =
-        super::skill_materialization::reconcile_detected_scopes(profile_root, &home, project_root);
+    let (scopes, errors) = super::skill_materialization::reconcile_detected_scopes(
+        host_io,
+        profile_root,
+        &home,
+        project_root,
+    );
     let materialization_scopes = scopes
         .into_iter()
         .map(|result| ManagedSkillMaterializationReceipt {
@@ -474,7 +512,8 @@ pub(crate) fn skill_improvement_recommendations(
             "kind": "activation_or_tooling_guidance",
             "priority": if family.missed_events >= 3 { "high" } else { "medium" },
             "tool_family": family.family,
-            "recommendation": "add_or_patch_skill_guidance",
+            "recommendation": "diagnose_routing_or_tooling_gap",
+            "possible_remedies": ["improve_tool_description", "improve_hint_routing", "patch_existing_skill", "create_skill", "no_action"],
             "reason": format!(
                 "{} relevant {} event(s) had {} direct use event(s)",
                 family.family, family.relevant_events, family.usage_events
@@ -567,9 +606,7 @@ fn accepted_skill_proposal_record(
     if let Some(object) = record.as_object_mut() {
         let reason = proposal.get("reason").cloned().unwrap_or(Value::Null);
         object.insert("action".to_string(), json!(action.as_str()));
-        object.insert("proposal_action".to_string(), json!(action.as_str()));
-        object.insert("reason".to_string(), reason.clone());
-        object.insert("proposal_reason".to_string(), reason);
+        object.insert("reason".to_string(), reason);
         object.insert("target_skill_id".to_string(), json!(skill.metadata.id));
         object.insert(
             "target_checksum".to_string(),
@@ -581,6 +618,75 @@ fn accepted_skill_proposal_record(
         }
     }
     record
+}
+
+/// Routing examples use the existing agent-adoption scenario contract.
+/// They are retained with the proposal for that evaluator, never scored here.
+fn validate_routing_examples(proposal: &Value, skill_id: &str) -> std::result::Result<(), String> {
+    let examples = proposal
+        .get("routing_validation")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "routing_validation must contain agent-adoption scenarios".to_owned())?;
+    let mut positive = false;
+    let mut neighbor = false;
+    let mut negative = false;
+    for example in examples {
+        for field in ["id", "category", "fixture", "status", "prompt"] {
+            required_proposal_string(example.get(field), field)?;
+        }
+        if example
+            .get("max_tool_calls")
+            .and_then(Value::as_u64)
+            .is_none()
+            || !example
+                .get("hosts")
+                .and_then(Value::as_array)
+                .is_some_and(|hosts| {
+                    !hosts.is_empty()
+                        && hosts
+                            .iter()
+                            .all(|host| matches!(host.as_str(), Some("claude" | "codex")))
+                })
+            || !example
+                .get("ground_truth")
+                .and_then(Value::as_array)
+                .is_some_and(|checks| {
+                    !checks.is_empty()
+                        && checks
+                            .iter()
+                            .all(|check| check.as_str().is_some_and(|text| !text.trim().is_empty()))
+                })
+        {
+            return Err(
+                "routing scenarios require hosts, task-outcome checks, and a tool budget"
+                    .to_owned(),
+            );
+        }
+        let expected = example.get("expected_skill").and_then(Value::as_str);
+        let allowed = example.get("allowed_skills").and_then(Value::as_array);
+        if let Some(allowed) = allowed {
+            if !allowed
+                .iter()
+                .all(|skill| skill.as_str().is_some_and(|id| !id.is_empty()))
+            {
+                return Err("allowed_skills must contain skill identifiers".to_owned());
+            }
+            if let Some(expected) = expected
+                && !allowed.iter().any(|skill| skill.as_str() == Some(expected))
+            {
+                return Err("expected_skill must be allowed".to_owned());
+            }
+        }
+        positive |= expected == Some(skill_id);
+        neighbor |= expected.is_some_and(|expected| expected != skill_id);
+        negative |= expected.is_none() && allowed.is_some_and(Vec::is_empty);
+    }
+    if !(positive && neighbor && negative) {
+        return Err(
+            "routing_validation requires positive, near-neighbor, and no-skill examples".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn skill_draft_from_proposal(
@@ -597,18 +703,16 @@ fn skill_draft_from_proposal(
     }
     let title = required_proposal_string(object.get("title"), "title")?;
     let summary = required_proposal_string(object.get("summary"), "summary")?;
+    let routing_description = required_routing_description(object.get("routing_description"))?;
     let category = required_proposal_string(object.get("category"), "category")?;
     let targets = proposal_targets_or_default(object.get("targets"))?;
-    let body_markdown = object
-        .get("body_markdown")
-        .or_else(|| object.get("body"))
-        .ok_or_else(|| "body_markdown is required".to_string())
-        .and_then(|value| required_proposal_string(Some(value), "body_markdown"))?;
+    let body_markdown = required_proposal_string(object.get("body_markdown"), "body_markdown")?;
     let support_files = support_files_from_proposal(object.get("support_files"))?;
     let draft = ManagedSkillDraft {
         id,
         title,
         summary,
+        routing_description,
         category,
         targets,
         body_markdown,
@@ -619,11 +723,9 @@ fn skill_draft_from_proposal(
             run_id: Some(run_id.to_string()),
         },
     };
-    draft
-        .clone()
-        .materialize()
-        .map(|_| draft)
-        .map_err(|err| err.to_string())
+    let materialized = draft.clone().materialize().map_err(|err| err.to_string())?;
+    validate_routing_examples(proposal, &materialized.host_skill_slug())?;
+    Ok(draft)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -649,13 +751,13 @@ fn skill_proposal_action(proposal: &Value) -> std::result::Result<SkillProposalA
     let object = proposal
         .as_object()
         .ok_or_else(|| "proposal must be a JSON object".to_string())?;
-    let Some(action) = object.get("action").or_else(|| object.get("operation")) else {
+    let Some(action) = object.get("action") else {
         return Ok(SkillProposalAction::Create);
     };
     match required_proposal_string(Some(action), "action")?.as_str() {
         "create" => Ok(SkillProposalAction::Create),
-        "update" | "patch" => Ok(SkillProposalAction::Update),
-        "merge" | "consolidate" => Ok(SkillProposalAction::Merge),
+        "update" => Ok(SkillProposalAction::Update),
+        "merge" => Ok(SkillProposalAction::Merge),
         "archive" => Ok(SkillProposalAction::Archive),
         other => Err(format!("unsupported skill proposal action '{other}'")),
     }
@@ -682,20 +784,33 @@ fn skill_update_from_proposal(
         ));
     }
 
+    if object
+        .get("routing_description")
+        .is_some_and(|value| !value.is_null())
+    {
+        validate_routing_examples(proposal, &existing.host_skill_slug())?;
+    }
     let update = ManagedSkillUpdate {
         title: optional_proposal_string(object.get("title"))?,
         summary: optional_proposal_string(object.get("summary"))?,
+        routing_description: object
+            .get("routing_description")
+            .filter(|value| !value.is_null())
+            .map(|value| required_routing_description(Some(value)))
+            .transpose()?,
         category: optional_proposal_string(object.get("category"))?,
         targets: optional_proposal_targets(object.get("targets"))?,
-        body_markdown: optional_proposal_string(
-            object.get("body_markdown").or_else(|| object.get("body")),
-        )?,
-        support_files: if object.contains_key("support_files") {
+        body_markdown: optional_proposal_string(object.get("body_markdown"))?,
+        support_files: if object
+            .get("support_files")
+            .is_some_and(|value| !value.is_null())
+        {
             Some(support_files_from_proposal(object.get("support_files"))?)
         } else {
             None
         },
         pinned: match object.get("pinned") {
+            Some(value) if value.is_null() => None,
             Some(value) => Some(
                 value
                     .as_bool()
@@ -706,6 +821,7 @@ fn skill_update_from_proposal(
     };
     if update.title.is_none()
         && update.summary.is_none()
+        && update.routing_description.is_none()
         && update.category.is_none()
         && update.targets.is_none()
         && update.body_markdown.is_none()
@@ -715,9 +831,13 @@ fn skill_update_from_proposal(
         return Err("update proposal must include at least one changed field".to_string());
     }
     let changes_existing = update
-        .title
+        .routing_description
         .as_ref()
-        .is_some_and(|title| existing.metadata.title != *title)
+        .is_some_and(|description| existing.metadata.routing_description != *description)
+        || update
+            .title
+            .as_ref()
+            .is_some_and(|title| existing.metadata.title != *title)
         || update
             .summary
             .as_ref()
@@ -746,6 +866,7 @@ fn skill_update_from_proposal(
             "update proposal does not change managed skill id '{id}'"
         ));
     }
+    validate_managed_skill_update(&update).map_err(|error| error.to_string())?;
     Ok((id, base_checksum, update))
 }
 
@@ -759,7 +880,7 @@ fn proposal_targets_or_default(
 fn optional_proposal_targets(
     value: Option<&Value>,
 ) -> std::result::Result<Option<Vec<SkillInstallTarget>>, String> {
-    let Some(value) = value else {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
         return Ok(None);
     };
     let array = value
@@ -817,6 +938,13 @@ fn support_files_from_proposal(
     Ok(files)
 }
 
+fn required_routing_description(value: Option<&Value>) -> std::result::Result<String, String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "routing_description is required".to_owned())
+}
+
 fn required_proposal_string(
     value: Option<&Value>,
     field: &str,
@@ -829,6 +957,7 @@ fn required_proposal_string(
 
 fn optional_proposal_string(value: Option<&Value>) -> std::result::Result<Option<String>, String> {
     value
+        .filter(|value| !value.is_null())
         .map(|value| required_proposal_string(Some(value), "optional string field"))
         .transpose()
 }
@@ -840,32 +969,10 @@ fn rejected_skill(proposal: &Value, reason: &str) -> Value {
     })
 }
 
-fn normalized_non_empty(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[test]
-    fn managed_skill_exports_only_refresh_for_the_user_profile() {
-        let home = Path::new("/home/test-user");
-        assert!(crate::agents::uses_default_user_profile(
-            home,
-            Path::new("/home/test-user/.tracedecay"),
-        ));
-        assert!(!crate::agents::uses_default_user_profile(
-            home,
-            Path::new("/tmp/tracedecay-test-profile"),
-        ));
-    }
 
     fn assert_err_eq<T>(result: std::result::Result<T, String>, expected: &str) {
         match result {
@@ -875,25 +982,36 @@ mod tests {
     }
 
     #[test]
-    fn proposal_targets_accept_known_aliases() -> std::result::Result<(), String> {
-        let targets = optional_proposal_targets(Some(&json!([
-            "cursor",
-            "prompt-only",
-            "open_code",
-            "kiro"
-        ])))?
-        .ok_or_else(|| "targets should be present".to_string())?;
-
+    fn proposal_action_accepts_only_the_prompt_schema_verbs() {
         assert_eq!(
-            targets,
-            vec![
-                SkillInstallTarget::Cursor,
-                SkillInstallTarget::Agents,
-                SkillInstallTarget::OpenCode,
-                SkillInstallTarget::Kiro,
-            ]
+            skill_proposal_action(&json!({"action": "update"})),
+            Ok(SkillProposalAction::Update)
         );
-        Ok(())
+        assert_eq!(
+            skill_proposal_action(&json!({"action": "merge"})),
+            Ok(SkillProposalAction::Merge)
+        );
+        for verb in ["patch", "consolidate"] {
+            assert_err_eq(
+                skill_proposal_action(&json!({"action": verb})),
+                &format!("unsupported skill proposal action '{verb}'"),
+            );
+        }
+        assert_eq!(
+            skill_proposal_action(&json!({"operation": "archive"})),
+            Ok(SkillProposalAction::Create)
+        );
+        assert_err_eq(
+            skill_draft_from_proposal(
+                &json!({
+                    "id": "x", "title": "t", "summary": "s", "routing_description": "r",
+                    "category": "c", "body": "b"
+                }),
+                "run-1",
+                &BTreeSet::new(),
+            ),
+            "body_markdown is required",
+        );
     }
 
     #[test]
@@ -910,27 +1028,6 @@ mod tests {
             optional_proposal_targets(Some(&json!(["  "]))),
             "targets[] is required",
         );
-    }
-
-    #[test]
-    fn support_files_from_proposal_builds_managed_support_files() -> std::result::Result<(), String>
-    {
-        let files = support_files_from_proposal(Some(&json!([
-            {
-                "path": "references/example.md",
-                "text": "hello"
-            },
-            {
-                "path": "scripts/check.sh",
-                "text": "#!/usr/bin/env bash\n"
-            }
-        ])))?;
-
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].path, Path::new("references/example.md"));
-        assert_eq!(files[0].bytes, b"hello");
-        assert_eq!(files[1].path, Path::new("scripts/check.sh"));
-        Ok(())
     }
 
     #[test]
@@ -966,5 +1063,38 @@ mod tests {
                 .contains("referenced")
         );
         ensure_skill_not_referenced_by_scheduled_job(temp.path(), "other").unwrap();
+    }
+    #[test]
+    fn routing_examples_require_selection_boundaries_and_task_outcomes() {
+        let scenario = |id: &str, expected: Option<&str>| {
+            let mut value = json!({
+                "id": id, "category": "routing", "hosts": ["codex"],
+                "fixture": "main", "status": "active", "prompt": "Inspect the requested source.",
+                "ground_truth": ["source"], "max_tool_calls": 4
+            });
+            if let Some(expected) = expected {
+                value["expected_skill"] = json!(expected);
+            } else {
+                value["allowed_skills"] = json!([]);
+            }
+            value
+        };
+        let mut proposal = json!({"routing_validation": [
+            scenario("positive", Some("review-changes")),
+            scenario("neighbor", Some("trace-callers")),
+            scenario("negative", None)
+        ]});
+        super::validate_routing_examples(&proposal, "review-changes").unwrap();
+        proposal["routing_validation"][0]["ground_truth"] = json!([]);
+        assert_eq!(
+            super::validate_routing_examples(&proposal, "review-changes").unwrap_err(),
+            "routing scenarios require hosts, task-outcome checks, and a tool budget"
+        );
+        proposal["routing_validation"][0]["ground_truth"] = json!(["source"]);
+        proposal["routing_validation"].as_array_mut().unwrap().pop();
+        assert_eq!(
+            super::validate_routing_examples(&proposal, "review-changes").unwrap_err(),
+            "routing_validation requires positive, near-neighbor, and no-skill examples"
+        );
     }
 }

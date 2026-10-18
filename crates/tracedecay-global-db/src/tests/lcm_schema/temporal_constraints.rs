@@ -1,6 +1,6 @@
 use super::*;
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rejects_cross_session_and_generation_rows() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -19,83 +19,15 @@ async fn temporal_schema_rejects_cross_session_and_generation_rows() {
         .await
         .unwrap();
     conn.execute_batch(
-        "INSERT INTO sanitization_receipts (
-            receipt_id, sanitizer_version, payload_digest, receipt_json
-         )
-         VALUES ('receipt-one', 'test', 'digest-one', '{}');
-         INSERT INTO observations (
-            observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json
-         )
-         VALUES ('observation-one', 'digest-one', 'receipt-one', '{}', '{}');
-         INSERT INTO retrieval_anchors (
-            anchor_id, anchor_json, owner_json, projection_generation
-         )
-         VALUES ('anchor-one', '{}', '{}', 'test');
-         INSERT INTO session_temporal_generations (
+        "INSERT INTO session_temporal_generations (
             session_id, generation, state, frozen_watermarks_json, created_at
          )
          VALUES
             ('session-one', 1, 'building', '{}', 100),
-            ('session-one', 2, 'building', '{}', 100),
-            ('session-two', 1, 'building', '{}', 100);
-         INSERT INTO session_turns (
-            session_id, generation, turn_id, ordinal, grouping_provenance, created_at
-         )
-         VALUES ('session-one', 1, 'turn-one', 0, 'provider', 100);
-         INSERT INTO session_occurrences (
-            session_id, generation, occurrence_id, source_observation_id,
-            source_provider, projection_output_ordinal, retrieval_anchor_id,
-            role, knowledge_at, valid_time_json, evidence_json,
-            sanitized_content_digest, sanitized_content_bytes,
-            snippet_text, index_text
-         )
-         VALUES
-            ('session-one', 1, 'occurrence-one', 'observation-one',
-             'test', 0, 'anchor-one', 'assistant', 100,
-             json_object('kind', 'unknown'), '{}',
-             '0000000000000000000000000000000000000000000000000000000000000000',
-             3, 'one', 'one'),
-            ('session-one', 2, 'occurrence-two', 'observation-one',
-             'test', 0, 'anchor-one', 'assistant', 100,
-             json_object('kind', 'unknown'), '{}',
-             '0000000000000000000000000000000000000000000000000000000000000000',
-             3, 'two', 'two'),
-            ('session-two', 1, 'occurrence-three', 'observation-one',
-             'test', 0, 'anchor-one', 'assistant', 100,
-             json_object('kind', 'unknown'), '{}',
-             '0000000000000000000000000000000000000000000000000000000000000000',
-             5, 'three', 'three');",
+            ('session-one', 2, 'building', '{}', 100);",
     )
     .await
     .unwrap();
-
-    let cross_session = conn
-        .execute(
-            "INSERT INTO session_turn_members (
-                session_id, generation, turn_id, occurrence_id, ordinal
-             )
-             VALUES ('session-one', 1, 'turn-one', 'occurrence-three', 0)",
-            (),
-        )
-        .await;
-    assert!(
-        cross_session.is_err(),
-        "a Turn cannot own an occurrence from another session"
-    );
-
-    let cross_generation = conn
-        .execute(
-            "INSERT INTO session_turn_members (
-                session_id, generation, turn_id, occurrence_id, ordinal
-             )
-             VALUES ('session-one', 1, 'turn-one', 'occurrence-two', 0)",
-            (),
-        )
-        .await;
-    assert!(
-        cross_generation.is_err(),
-        "a Turn cannot own an occurrence from another generation"
-    );
 
     conn.execute(
         "UPDATE session_temporal_generations
@@ -135,7 +67,7 @@ async fn temporal_schema_rejects_cross_session_and_generation_rows() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -168,17 +100,17 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
          VALUES ('session-one', 1, 'building', '{}', 100);
          INSERT INTO session_occurrences (
             session_id, generation, occurrence_id, source_observation_id,
-            source_provider, projection_output_ordinal, retrieval_anchor_id,
-            role, knowledge_at, valid_time_json, evidence_json,
-            sanitized_content_digest, sanitized_content_bytes,
-            snippet_text, index_text
+            source_sequence, source_provider, projection_output_ordinal,
+            retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+            valid_time_json, evidence_json, sanitized_content_digest,
+            sanitized_content_bytes, index_text
          )
          VALUES (
-            'session-one', 1, 'occurrence-one', 'observation-one',
-            'test', 0, 'anchor-subject', 'assistant', 100,
+            'session-one', 1, 'occurrence-one', 'observation-one', 1,
+            'test', 0, 'anchor-subject', '[]', 'assistant', 100,
             json_object('kind', 'known', 'valid_at', 100), '{}',
             '0000000000000000000000000000000000000000000000000000000000000000',
-            3, 'one', 'one'
+            3, 'one'
          );
          INSERT INTO session_assertions (
             session_id, generation, assertion_id, assertion_kind,
@@ -202,7 +134,7 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
     .await
     .unwrap();
 
-    for (sql, description) in [
+    for (sql, description, violated_check) in [
         (
             "INSERT INTO session_current_entities (
                  session_id, generation, entity_kind, entity_id,
@@ -213,6 +145,7 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
                  'assertion-one', '{}'
              )",
             "current entities must use a typed entity kind",
+            "entity_kind IN (",
         ),
         (
             "INSERT INTO session_current_entities (
@@ -224,6 +157,7 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
                  'assertion-one', 'occurrence-one', '{}'
              )",
             "current entities must point to exactly one typed target",
+            "(current_assertion_id IS NULL) <> (current_occurrence_id IS NULL)",
         ),
         (
             "INSERT INTO session_assertions (
@@ -237,6 +171,7 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
                  json_object('kind', 'known', 'valid_at', 100), '{}'
              )",
             "assertions must use a typed assertion kind",
+            "assertion_kind IN (",
         ),
         (
             "INSERT INTO session_assertions (
@@ -250,43 +185,54 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
                  json_object('kind', 'known'), '{}'
              )",
             "known assertion valid time must include an integer valid_at",
+            "json_valid(valid_time_json)",
         ),
         (
             "INSERT INTO session_occurrences (
                  session_id, generation, occurrence_id, source_observation_id,
-                 source_provider, projection_output_ordinal, retrieval_anchor_id,
-                 role, knowledge_at, valid_time_json, evidence_json,
-                 sanitized_content_digest, sanitized_content_bytes,
-                 snippet_text, index_text
+                 source_sequence, source_provider, projection_output_ordinal,
+                 retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                 valid_time_json, evidence_json, sanitized_content_digest,
+                 sanitized_content_bytes, index_text
              )
              VALUES (
-                 'session-one', 1, 'occurrence-invalid-time', 'observation-one',
-                 'test', 1, 'anchor-subject', 'assistant', 101,
+                 'session-one', 1, 'occurrence-invalid-time', 'observation-one', 1,
+                 'test', 1, 'anchor-subject', '[]', 'assistant', 101,
                  json_object('kind', 'unknown', 'valid_at', 101), '{}',
                  '0000000000000000000000000000000000000000000000000000000000000000',
-                 3, 'bad', 'bad'
+                 3, 'bad'
              )",
             "unknown occurrence valid time must not include valid_at",
+            "json_valid(valid_time_json)",
         ),
     ] {
+        let refusal = conn.execute(sql, ()).await.unwrap_err().to_string();
         assert!(
-            conn.execute(sql, ()).await.is_err(),
-            "schema accepted an invalid row: {description}"
+            refusal.starts_with(&format!(
+                "SQLite execute failed: CHECK constraint failed: {violated_check}"
+            )),
+            "{description}: {refusal}"
         );
     }
-    for (assignment, description) in [
-        ("source_provider = ''", "blank source provider"),
+    for (assignment, description, violated_check) in [
+        (
+            "source_provider = ''",
+            "blank source provider",
+            "source_provider <> ''",
+        ),
         (
             "sanitized_content_digest = 'ABC'",
             "non-canonical sanitized content digest",
+            "length(sanitized_content_digest) = 64",
         ),
         (
             "sanitized_content_bytes = -1",
             "negative sanitized content byte count",
+            "sanitized_content_bytes >= 0",
         ),
     ] {
-        assert!(
-            conn.execute(
+        let refusal = conn
+            .execute(
                 &format!(
                     "UPDATE session_occurrences
                      SET {assignment}
@@ -297,13 +243,18 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
                 (),
             )
             .await
-            .is_err(),
-            "schema accepted {description}"
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.starts_with(&format!(
+                "SQLite execute failed: CHECK constraint failed: {violated_check}"
+            )),
+            "{description}: {refusal}"
         );
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_uses_explicit_projection_receipt_progress_counts() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -400,15 +351,17 @@ async fn temporal_schema_uses_explicit_projection_receipt_progress_counts() {
     conn.execute(&progress_insert("truthful-progress"), ())
         .await
         .expect("intermediate progress must use cumulative item counts when coverage is deferred");
-    assert!(
+    assert_eq!(
         conn.execute(&progress_insert("corrupt-progress"), ())
             .await
-            .is_err(),
+            .unwrap_err()
+            .to_string(),
+        "SQLite execute failed: invalid session refresh progress",
         "progress must reject a mismatched explicit cumulative item count"
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -447,7 +400,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "INSERT INTO session_refresh_operations (
                 session_id, operation_id, request_digest, target_frontier_json,
@@ -460,10 +413,12 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: session refresh operations must start running",
         "refresh operations must start in running"
     );
-    assert!(
+    assert_eq!(
         conn.execute(
             "INSERT INTO session_refresh_progress (
                 session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
@@ -477,10 +432,12 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh progress",
         "first progress cannot predate its owning operation"
     );
-    assert!(
+    assert_eq!(
         conn.execute(
             "INSERT INTO session_refresh_progress (
                 session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
@@ -494,7 +451,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh progress",
         "progress without the operation generation's projection receipt must be rejected"
     );
     conn.execute(
@@ -548,8 +507,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
                 'refresh-session', 'refresh-one', 0, '{frontier}', '{coverage}', 1, 0, 101
              )"
         );
-        assert!(
-            conn.execute(&sql, ()).await.is_err(),
+        assert_eq!(
+            conn.execute(&sql, ()).await.unwrap_err().to_string(),
+            "SQLite execute failed: invalid session refresh progress",
             "{label} must be rejected"
         );
     }
@@ -655,8 +615,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
                 committed_batches, committed_records, recorded_at
              ) VALUES ('refresh-session', 'refresh-one', {values})"
         );
-        assert!(
-            conn.execute(&sql, ()).await.is_err(),
+        assert_eq!(
+            conn.execute(&sql, ()).await.unwrap_err().to_string(),
+            "SQLite execute failed: invalid session refresh progress",
             "{label} must be rejected"
         );
     }
@@ -692,7 +653,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "INSERT INTO session_refresh_progress (
                 session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
@@ -706,7 +667,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh progress",
         "terminal operations cannot append progress"
     );
 
@@ -755,8 +718,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
                 '{frontier}', '{coverage}', {failure_code}, {terminal_at}
              )"
         );
-        assert!(
-            conn.execute(&sql, ()).await.is_err(),
+        assert_eq!(
+            conn.execute(&sql, ()).await.unwrap_err().to_string(),
+            "SQLite execute failed: invalid session refresh terminal receipt",
             "{label} must be rejected"
         );
     }
@@ -774,23 +738,27 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "UPDATE session_refresh_receipts SET terminal_at = 104
              WHERE session_id = 'refresh-session' AND operation_id = 'refresh-one'",
             (),
         )
         .await
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: session refresh receipts are immutable"
     );
-    assert!(
+    assert_eq!(
         conn.execute(
             "DELETE FROM session_refresh_receipts
              WHERE session_id = 'refresh-session' AND operation_id = 'refresh-one'",
             (),
         )
         .await
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: session refresh receipts are immutable"
     );
 
     conn.execute_batch(
@@ -821,7 +789,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "INSERT INTO session_refresh_progress (
                 session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
@@ -835,7 +803,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh progress",
         "a progress row cannot borrow another operation's generation receipt"
     );
     conn.execute(
@@ -886,7 +856,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "UPDATE session_refresh_operations
              SET state = 'cancelled', updated_at = 201, terminal_at = 201,
@@ -895,7 +865,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh state transition",
         "cancelled operations cannot carry a failure code"
     );
     conn.execute_batch(
@@ -908,7 +880,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "INSERT INTO session_refresh_receipts (
                 session_id, operation_id, terminal_state, frontier_json,
@@ -922,10 +894,12 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh terminal receipt",
         "terminal receipt frontiers cannot exceed the owning target frontier"
     );
-    assert!(
+    assert_eq!(
         conn.execute(
             "INSERT INTO session_refresh_receipts (
                 session_id, operation_id, terminal_state, frontier_json,
@@ -939,7 +913,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh terminal receipt",
         "terminal receipt failure codes must match the owning operation"
     );
     conn.execute(
@@ -1070,7 +1046,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "INSERT INTO session_refresh_progress (
                 session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
@@ -1084,7 +1060,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh progress",
         "first progress must reject receipt.source_through past the committed endpoint"
     );
 
@@ -1101,7 +1079,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "UPDATE session_refresh_operations
              SET state = 'failed', updated_at = 251, terminal_at = 251,
@@ -1110,7 +1088,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh state transition",
         "terminal operations must own a generation binding"
     );
 
@@ -1161,7 +1141,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "UPDATE session_refresh_operations
              SET state = 'complete', updated_at = 302, terminal_at = 302
@@ -1169,12 +1149,14 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             (),
         )
         .await
-        .is_err(),
-        "completion cannot be forged from the failure/cancellation zero-progress seed",
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session refresh state transition",
+        "completion cannot be forged from the failure/cancellation zero-progress seed"
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_enforces_generation_state_machine_and_durability() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -1185,7 +1167,7 @@ async fn temporal_schema_enforces_generation_state_machine_and_durability() {
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
-    assert!(
+    assert_eq!(
         conn.execute(
             "INSERT INTO session_temporal_generations (
                 session_id, generation, state, frozen_watermarks_json, created_at, ready_at
@@ -1193,7 +1175,9 @@ async fn temporal_schema_enforces_generation_state_machine_and_durability() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: session temporal generations must start building",
         "generation rows must start in building"
     );
     conn.execute(
@@ -1214,7 +1198,7 @@ async fn temporal_schema_enforces_generation_state_machine_and_durability() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "UPDATE session_temporal_generations
              SET ready_at = 102
@@ -1222,10 +1206,12 @@ async fn temporal_schema_enforces_generation_state_machine_and_durability() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session temporal generation transition",
         "same-state timestamp rewrites must be rejected"
     );
-    assert!(
+    assert_eq!(
         conn.execute(
             "UPDATE session_temporal_generations
              SET state = 'superseded', activated_at = 102, completed_at = 103
@@ -1233,7 +1219,9 @@ async fn temporal_schema_enforces_generation_state_machine_and_durability() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: invalid session temporal generation transition",
         "ready cannot skip active"
     );
     conn.execute(
@@ -1252,7 +1240,7 @@ async fn temporal_schema_enforces_generation_state_machine_and_durability() {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         conn.execute(
             "UPDATE session_temporal_generations
              SET state = 'active', activated_at = 102
@@ -1260,22 +1248,26 @@ async fn temporal_schema_enforces_generation_state_machine_and_durability() {
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: session already has an active temporal generation",
         "only one active generation is allowed"
     );
-    assert!(
+    assert_eq!(
         conn.execute(
             "DELETE FROM session_temporal_generations
              WHERE session_id = 'generation-session' AND generation = 2",
             (),
         )
         .await
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "SQLite execute failed: session temporal generations are durable",
         "all generation rows are durable, including building generations"
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_keeps_append_only_authority_immutable() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -1291,11 +1283,12 @@ async fn temporal_schema_keeps_append_only_authority_immutable() {
             anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES ('append-anchor', '{}', '{}', 'test');
          INSERT INTO session_summary_nodes (
-            summary_id, session_id, summary_anchor_id, summary_text, index_text,
+            summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+            summary_text, summary_hash, summary_token_count, source_token_count,
             source_horizon_json, created_at
          ) VALUES (
-            'append-summary', 'append-session', 'append-anchor',
-            'summary', 'summary', '{}', 100
+            'append-summary', 'append-session', 'test', 'append-session', 0, 'append-anchor',
+            'summary', 'hash', 1, 1, '{}', 100
          );
          INSERT INTO session_temporal_generations (
             session_id, generation, state, frozen_watermarks_json, created_at
@@ -1316,17 +1309,30 @@ async fn temporal_schema_keeps_append_only_authority_immutable() {
     )
     .await
     .unwrap();
-    for sql in [
-        "UPDATE session_summary_nodes SET summary_text = 'rewrite'
-         WHERE summary_id = 'append-summary'",
-        "DELETE FROM session_summary_nodes WHERE summary_id = 'append-summary'",
-        "UPDATE session_temporal_projection_receipts SET fts_digest = 'rewrite'
-         WHERE session_id = 'append-session' AND generation = 1 AND batch_ordinal = 0",
-        "DELETE FROM session_temporal_projection_receipts
-         WHERE session_id = 'append-session' AND generation = 1 AND batch_ordinal = 0",
+    for (sql, refusal) in [
+        (
+            "UPDATE session_summary_nodes SET summary_text = 'rewrite'
+             WHERE summary_id = 'append-summary'",
+            "SQLite execute failed: session summary nodes are immutable",
+        ),
+        (
+            "DELETE FROM session_summary_nodes WHERE summary_id = 'append-summary'",
+            "SQLite execute failed: session summary nodes are immutable",
+        ),
+        (
+            "UPDATE session_temporal_projection_receipts SET fts_digest = 'rewrite'
+             WHERE session_id = 'append-session' AND generation = 1 AND batch_ordinal = 0",
+            "SQLite execute failed: session temporal projection receipts are immutable",
+        ),
+        (
+            "DELETE FROM session_temporal_projection_receipts
+             WHERE session_id = 'append-session' AND generation = 1 AND batch_ordinal = 0",
+            "SQLite execute failed: session temporal projection receipts are immutable",
+        ),
     ] {
-        assert!(
-            conn.execute(sql, ()).await.is_err(),
+        assert_eq!(
+            conn.execute(sql, ()).await.unwrap_err().to_string(),
+            refusal,
             "append-only authority mutation must be rejected: {sql}"
         );
     }

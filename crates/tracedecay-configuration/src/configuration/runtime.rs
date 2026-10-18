@@ -4,15 +4,13 @@
 //! authorization, mutation, audit, and credential semantics remain in the
 //! existing application operations and transactional store.
 
-use std::any::Any;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
-    CredentialReferenceMetadataV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
-    SettingKey,
+    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, ProtectedApplyRequest,
+    ProtectedChange, ProtectedChangePlan, SettingKey,
 };
 
 use crate::config::{
@@ -21,19 +19,18 @@ use crate::config::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-
-use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
-use super::ports::{
-    ConfigurationClock, ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
-    ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+use tracedecay_global_db::configuration::contracts::ports::{
+    ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationMutationAuthorizationPort,
+    ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort,
+    ScopeRevalidationEvidenceV1,
 };
-use super::types::{
+use tracedecay_global_db::configuration::contracts::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
     ConfigurationRollbackRequest, DirectConfigurationMutation, ResolvedSetting, SettingSummary,
-    WriteOnlyCredentialMutation,
 };
-use super::user_settings::{ProductionUserSettingsDaemonClient, UserSettingsDaemonClient};
+
+use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 
 type SharedConfigurationControlPlane = Arc<dyn ConfigurationControlPlane + Send + Sync>;
 
@@ -47,9 +44,6 @@ pub struct ProjectConfigurationRuntime {
     configuration_database: RegisteredGlobalDbLeaseV1,
     authorities: Arc<ConfigurationAuthoritySlots>,
     client: Arc<ProductionConfigurationDaemonClient>,
-    semantic_activation: OnceLock<Arc<dyn Any + Send + Sync>>,
-    semantic_inventory: OnceLock<Arc<dyn Any + Send + Sync>>,
-    user_settings: Arc<ProductionUserSettingsDaemonClient>,
 }
 
 impl ProjectConfigurationRuntime {
@@ -58,8 +52,7 @@ impl ProjectConfigurationRuntime {
             configuration,
             registered_database,
         } = opened;
-        let target = configuration.target.clone();
-        let profile_id = registered_database.binding().shard_id.profile_id.clone();
+        let target = configuration.target().clone();
         let registry = crate::config::registry::ConfigurationRegistry::core().map_err(|error| {
             TraceDecayError::Config {
                 message: format!("configuration registry unavailable: {error}"),
@@ -76,26 +69,18 @@ impl ProjectConfigurationRuntime {
                 store: store.clone(),
                 scopes: SharedScopeResolution(Arc::clone(&authorities)),
                 authorization: SharedMutationAuthorization(Arc::clone(&authorities)),
-                clock: SystemConfigurationClock,
             });
         let client = Arc::new(ProductionConfigurationDaemonClient {
-            target: configuration.target.clone(),
+            target: configuration.target().clone(),
             store,
             control_plane: Arc::clone(&control_plane),
         });
-        let user_settings = Arc::new(ProductionUserSettingsDaemonClient::new(
-            Arc::clone(&client),
-            profile_id,
-        ));
         Ok((
             Self {
                 target,
                 configuration_database: registered_database,
                 authorities,
                 client,
-                semantic_activation: OnceLock::new(),
-                semantic_inventory: OnceLock::new(),
-                user_settings,
             },
             configuration,
         ))
@@ -124,12 +109,6 @@ impl ProjectConfigurationRuntime {
         Arc::clone(&self.client)
     }
 
-    /// Daemon-owned user-profile settings authority. Dashboard and other
-    /// adapters receive this narrow client rather than loading `config.toml`.
-    pub fn user_settings_client(&self) -> Arc<dyn UserSettingsDaemonClient> {
-        Arc::clone(&self.user_settings) as Arc<dyn UserSettingsDaemonClient>
-    }
-
     pub fn configuration_store(&self) -> OwnedGlobalDbConfigurationControlStore {
         self.client.store.clone()
     }
@@ -148,32 +127,15 @@ impl ProjectConfigurationRuntime {
         )
     }
 
-    /// First-wins type-erased semantic activation payload. Callers in
-    /// `tracedecay-usecases` downcast to the production coordinator.
-    pub fn install_semantic_activation<T: Send + Sync + 'static>(&self, value: Arc<T>) {
-        let _ = self
-            .semantic_activation
-            .set(value as Arc<dyn Any + Send + Sync>);
-    }
-
-    pub fn semantic_activation<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        self.semantic_activation
-            .get()
-            .and_then(|value| Arc::clone(value).downcast::<T>().ok())
-    }
-
-    /// First-wins type-erased inventory payload. Callers downcast to the
-    /// production retrieval configuration store.
-    pub fn install_semantic_inventory<T: Send + Sync + 'static>(&self, value: T) {
-        let _ = self
-            .semantic_inventory
-            .set(Arc::new(value) as Arc<dyn Any + Send + Sync>);
-    }
-
-    pub fn semantic_inventory<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
-        self.semantic_inventory
-            .get()
-            .and_then(|value| value.downcast_ref::<T>().cloned())
+    /// Resolves the runtime component's durable observed revision through the
+    /// canonical configuration history. A missing value means this component
+    /// has never recorded activation.
+    pub fn observed_runtime_configuration(
+        &self,
+    ) -> ConfigurationOperationFuture<'_, Option<ConfigurationCurrentStateV1>> {
+        self.client
+            .store
+            .observed_component_configuration(RUNTIME_CONFIGURATION_COMPONENT.to_owned())
     }
 
     pub fn installed_mutation_authorization(
@@ -196,40 +158,17 @@ pub struct ProductionConfigurationDaemonClient {
     control_plane: SharedConfigurationControlPlane,
 }
 
+/// Read and mutation operations come straight from the control plane; the
+/// client only adds the typed `set`/`unset`/`batch` conveniences and `current`.
+impl std::ops::Deref for ProductionConfigurationDaemonClient {
+    type Target = dyn ConfigurationControlPlane + Send + Sync;
+
+    fn deref(&self) -> &Self::Target {
+        self.control_plane.as_ref()
+    }
+}
+
 impl ProductionConfigurationDaemonClient {
-    pub fn list(
-        &self,
-        actor: AuthorizedActor,
-    ) -> ConfigurationOperationFuture<'_, Vec<SettingSummary>> {
-        self.control_plane.list(actor)
-    }
-
-    pub fn explain(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
-        self.control_plane.explain(actor, key)
-    }
-
-    pub fn get(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
-        self.control_plane.get(actor, key)
-    }
-
-    pub fn mutate_direct(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        mutation: DirectConfigurationMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        self.control_plane
-            .mutate_direct(authority, mutation, expected_revision)
-    }
-
     pub fn set(
         &self,
         authority: ConfigurationMutationAuthority,
@@ -276,76 +215,16 @@ impl ProductionConfigurationDaemonClient {
         )
     }
 
-    pub fn write_credential(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        write: WriteOnlyCredentialMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        self.control_plane
-            .write_credential(authority, write, expected_revision)
-    }
-
-    pub fn observed_state(
-        &self,
-        actor: AuthorizedActor,
-    ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
-        self.control_plane.observed_state(actor)
-    }
-
-    pub fn dry_run_protected_change(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        change: ProtectedChange,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        self.control_plane
-            .dry_run_protected_change(authority, change, expected_revision)
-    }
-
-    pub fn apply_protected_change(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        request: ProtectedApplyRequest,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        self.control_plane
-            .apply_protected_change(authority, request)
-    }
-
-    pub fn dry_run_rollback(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        rollback: ConfigurationRollbackRequest,
-    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        self.control_plane.dry_run_rollback(authority, rollback)
-    }
-
-    pub fn apply_rollback(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        request: ProtectedApplyRequest,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        self.control_plane.apply_rollback(authority, request)
-    }
-
-    pub fn audit(
-        &self,
-        actor: AuthorizedActor,
-        query: ConfigurationAuditQuery,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
-        self.control_plane.audit(actor, query)
-    }
-
     pub fn current(&self) -> ConfigurationOperationFuture<'_, PinnedRuntimeConfiguration> {
         let store = self.store.clone();
         let target = self.target.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
-                let current = super::ports::ConfigurationControlStore::current(&store).await?;
+                let current = ConfigurationControlStore::current(&store).await?;
                 PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)
                     .map_err(|_| ConfigurationError::Unavailable)
             },
-            label = "usecases.configuration.current"
+            tracing::trace_span!("usecases.configuration.current"),
         ))
     }
 }
@@ -355,7 +234,6 @@ struct RetainedConfigurationControlPlane {
     store: OwnedGlobalDbConfigurationControlStore,
     scopes: SharedScopeResolution,
     authorization: SharedMutationAuthorization,
-    clock: SystemConfigurationClock,
 }
 
 impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
@@ -368,30 +246,10 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .list(actor)
-            .await
-        })
-    }
-
-    fn explain(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
-        Box::pin(async move {
-            ConfigurationControlPlaneOperations::new(
-                self.registry.as_ref(),
-                &self.store,
-                &self.scopes,
-                &self.store,
-                &self.authorization,
-                &self.clock,
-            )
-            .explain(actor, key)
             .await
         })
     }
@@ -406,9 +264,8 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .get(actor, key)
             .await
@@ -426,31 +283,10 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .mutate_direct(authority, mutation, expected_revision)
-            .await
-        })
-    }
-
-    fn write_credential(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        write: WriteOnlyCredentialMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        Box::pin(async move {
-            ConfigurationControlPlaneOperations::new(
-                self.registry.as_ref(),
-                &self.store,
-                &self.scopes,
-                &self.store,
-                &self.authorization,
-                &self.clock,
-            )
-            .write_credential(authority, write, expected_revision)
             .await
         })
     }
@@ -464,9 +300,8 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .observed_state(actor)
             .await
@@ -484,9 +319,8 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .dry_run_protected_change(authority, change, expected_revision)
             .await
@@ -503,9 +337,8 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .apply_protected_change(authority, request)
             .await
@@ -522,9 +355,8 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .dry_run_rollback(authority, rollback)
             .await
@@ -541,9 +373,8 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .apply_rollback(authority, request)
             .await
@@ -560,9 +391,8 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .audit(actor, query)
             .await
@@ -660,8 +490,7 @@ impl ConfigurationMutationAuthorizationPort for SharedMutationAuthorization {
         sink: tracedecay_domain::configuration::ConfigurationMutationSinkV1,
         effect: tracedecay_domain::configuration::ConfigurationMutationEffectV1,
         now: UtcMicros,
-    ) -> ConfigurationOperationFuture<'a, super::ports::CurrentConfigurationMutationAuthorizationV1>
-    {
+    ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1> {
         let Ok(authorization) = self.0.installed_mutation_authorization() else {
             return Box::pin(async { Err(ConfigurationError::Unavailable) });
         };
@@ -669,21 +498,11 @@ impl ConfigurationMutationAuthorizationPort for SharedMutationAuthorization {
     }
 }
 
-struct SystemConfigurationClock;
-
-impl ConfigurationClock for SystemConfigurationClock {
-    fn now(&self) -> UtcMicros {
-        now_micros()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tracedecay_domain::configuration::ConfigurationValueKindV1;
-    use tracedecay_semantic_contracts::SemanticConfig;
+    use tracedecay_global_db::configuration::contracts::ports::CurrentConfigurationMutationAuthorizationV1;
 
-    use crate::config::SEMANTIC_RUNTIME_SETTING_KEY;
+    use super::*;
 
     struct TestScopeResolution;
 
@@ -716,10 +535,7 @@ mod tests {
             _sink: tracedecay_domain::configuration::ConfigurationMutationSinkV1,
             _effect: tracedecay_domain::configuration::ConfigurationMutationEffectV1,
             _now: UtcMicros,
-        ) -> ConfigurationOperationFuture<
-            'a,
-            super::super::ports::CurrentConfigurationMutationAuthorizationV1,
-        > {
+        ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1> {
             unreachable!("authority installation test does not invoke the authorization port")
         }
     }
@@ -763,22 +579,5 @@ mod tests {
             .install(scopes, authorization)
             .expect_err("second authority installation must fail");
         assert!(matches!(error, TraceDecayError::Config { .. }));
-    }
-
-    #[test]
-    fn core_registry_owns_atomic_semantic_configuration() {
-        let registry =
-            crate::config::registry::ConfigurationRegistry::core().expect("core registry");
-        let key = SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
-        let definition = registry.definition(&key).unwrap();
-        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Text);
-        registry
-            .validate_value(
-                &key,
-                &ConfigurationValueV1::Text(
-                    serde_json::to_string(&SemanticConfig::default()).unwrap(),
-                ),
-            )
-            .unwrap();
     }
 }

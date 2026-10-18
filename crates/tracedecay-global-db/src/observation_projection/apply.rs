@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 
 use serde::Deserialize;
 use tracedecay_domain::{
@@ -9,23 +11,28 @@ use tracedecay_domain::{
 use tracedecay_store::{
     ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectionSkipReason,
     ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
-    SessionMessageProjection, SessionMessageRecord, SessionRecord, WorkflowFactProjection,
-    WorkflowFactRecord, derive_canonical_projection, workflow_semantic_kind,
+    SPAWNED_SESSIONS_KEY, SessionMessageProjection, SessionMessageRecord, SessionRecord,
+    WorkflowFactProjection, WorkflowFactRecord, workflow_semantic_kind,
 };
 
 use tracedecay_lcm::contracts::LcmError;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-use tracedecay_sessions::runtime::claude::{
-    ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
+use tracedecay_runtime_core::db::{
+    DatabaseEngineReadConnection, DatabaseEngineReadSnapshot, DatabaseWriteTransaction,
 };
+use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_response;
 
 use super::state::{
-    canonicalize_session_project_paths, read_message, read_output_state, read_session,
-    reconcile_session_rows, storage, storage_message, verify_output_state,
+    canonicalize_session_project_paths, message_projection, output_ownership_sql, read_message,
+    read_observation, read_output_state, read_session, reconcile_session_rows_detailed, storage,
+    storage_message, stored_output_digest, verify_output_state, verify_projection_rows,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
     message_transition, write_workflow_fact_transition,
+};
+use tracedecay_session_temporal_store::{
+    request_session_temporal_reset, request_session_temporal_reset_if_materialized,
 };
 
 fn decode_canonical_envelope(
@@ -34,97 +41,113 @@ fn decode_canonical_envelope(
     CanonicalObservationEnvelopeV1::deserialize(payload)
 }
 
-#[hotpath::measure(label = "global_db.observation_apply.derive")]
+#[tracing::instrument(name = "global_db.observation_apply.derive", level = "trace", skip_all)]
 pub(in super::super) fn derive_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
-    match observation.source().provider().as_str() {
-        "claude" if decode_canonical_envelope(observation.payload()).is_ok() => {
-            derive_canonical_projection(observation)
-        }
-        "claude" => derive_claude_projection(observation),
-        _ => derive_canonical_projection(observation),
-    }
-}
-
-fn derive_claude_projection(
-    observation: &DurableObservationV1,
-) -> ProjectionStoreResult<ObservationProjection> {
-    let session_id = observation.source().session_id().as_str();
-    let payload = observation.payload();
-    let durable_message_id = payload
-        .pointer("/message/id")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| payload.get("uuid").and_then(serde_json::Value::as_str))
-        .filter(|id| !id.is_empty());
-    let durable_tool_event_ids = payload
-        .pointer("/message/content")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| {
-            item.get("id")
-                .or_else(|| item.get("tool_use_id"))
-                .and_then(serde_json::Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned)
-        })
-        .collect::<Vec<_>>();
-    let (project_key, project_path) = match observation.scope() {
-        ObservationScopeV1::Profile => ("user", "user"),
-        ObservationScopeV1::Project { project_id } => (project_id.as_str(), project_id.as_str()),
-    };
-    let source_path = (observation.source().source_key() != observation.source().session_id())
-        .then(|| observation.source().source_key().as_str());
-    let context = ClaudeRecordContext {
-        session_id,
-        project_key,
-        project_path,
-        file_generation: observation.identity().generation().file_id(),
-        offset: observation.identity().position().start(),
-        session_cwd: None,
-        source_path,
-        raw_message_id: durable_message_id,
-        raw_tool_event_ids: &durable_tool_event_ids,
-        raw_hook_tool_use_id: None,
-    };
-
-    match map_sanitized_claude_record(payload, &context) {
-        ClaudeRecordDisposition::Message { draft, message } => {
-            let draft = *draft;
-            let message = *message;
-            let timestamp = message.timestamp;
-            let session = SessionRecord {
-                provider: "claude".to_string(),
-                session_id: draft.session_id,
-                project_key: draft.project_key,
-                project_path: draft.project_path,
-                title: draft.title,
-                started_at: timestamp,
-                ended_at: timestamp,
-                transcript_path: None,
-                metadata_json: draft.metadata_json,
-                parent_session_id: draft.parent_session_id,
-                is_subagent: draft.is_subagent,
-                agent_id: draft.agent_id,
-                parent_tool_use_id: draft.parent_tool_use_id,
-            };
-            ObservationProjection::for_message(observation, session, message)
-        }
-        ClaudeRecordDisposition::NonConversational => ObservationProjection::for_skip(
-            observation,
-            ProjectionSkipReason::NonConversationalRecord,
-        ),
-    }
+    tracedecay_store::derive_canonical_projection(observation)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectionOutputAlias {
-    provider: String,
-    message_id: String,
+pub(crate) struct ProjectionOutputAlias {
+    pub(crate) provider: String,
+    pub(crate) message_id: String,
 }
 
-async fn read_projection_alias(
+const LIVE_PROJECTION_AUTHORITY_SQL: &str = "SELECT disposition.reason,
+            alias.output_provider, alias.output_message_id
+         FROM (SELECT ?1 AS projector_version, ?2 AS observation_id) AS target
+         LEFT JOIN observation_projection_dispositions AS disposition
+           ON disposition.projector_version = target.projector_version
+          AND disposition.observation_id = target.observation_id
+         LEFT JOIN observation_projection_aliases AS alias
+           ON alias.projector_version = target.projector_version
+          AND alias.observation_id = target.observation_id";
+
+const REBUILD_PROJECTION_AUTHORITY_SQL: &str = "SELECT disposition.reason,
+            alias.output_provider, alias.output_message_id
+         FROM (
+            SELECT ?1 AS projector_version, ?2 AS generation, ?3 AS observation_id
+         ) AS target
+         LEFT JOIN observation_projection_dispositions AS disposition
+           ON disposition.projector_version = target.projector_version
+          AND disposition.observation_id = target.observation_id
+         LEFT JOIN observation_projection_rebuild_aliases AS alias
+           ON alias.projector_version = target.projector_version
+          AND alias.generation = target.generation
+          AND alias.observation_id = target.observation_id";
+
+pub(crate) struct ProjectionAuthority {
+    pub(crate) disposition: Option<ProjectionSkipReason>,
+    pub(crate) alias: Option<ProjectionOutputAlias>,
+}
+
+pub(crate) async fn read_projection_authority(
+    conn: &impl QueryExecutor,
+    observation_id: &CanonicalObservationIdV1,
+    rebuild_generation: Option<&str>,
+) -> ProjectionStoreResult<ProjectionAuthority> {
+    let mut rows = if let Some(generation) = rebuild_generation {
+        conn.query(
+            REBUILD_PROJECTION_AUTHORITY_SQL,
+            (
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                generation,
+                observation_id.as_str(),
+            ),
+        )
+        .await
+    } else {
+        conn.query(
+            LIVE_PROJECTION_AUTHORITY_SQL,
+            (SESSION_MESSAGE_PROJECTOR_VERSION, observation_id.as_str()),
+        )
+        .await
+    }
+    .map_err(|error| storage("read projection authority", error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection authority", error))?
+        .ok_or_else(|| storage_message("read projection authority", "authority row is missing"))?;
+    let reason = row
+        .get::<Option<String>>(0)
+        .map_err(|error| storage("read projection authority", error))?
+        .map(|reason| {
+            ProjectionSkipReason::from_durable_str(&reason).ok_or_else(|| {
+                storage_message(
+                    "read projection authority",
+                    "projection disposition has an unknown reason",
+                )
+            })
+        })
+        .transpose()?;
+    let provider = row
+        .get::<Option<String>>(1)
+        .map_err(|error| storage("read projection authority", error))?;
+    let message_id = row
+        .get::<Option<String>>(2)
+        .map_err(|error| storage("read projection authority", error))?;
+    let alias = match (provider, message_id) {
+        (Some(provider), Some(message_id)) => Some(ProjectionOutputAlias {
+            provider,
+            message_id,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(storage_message(
+                "read projection authority",
+                "projection alias identity is incomplete",
+            ));
+        }
+    };
+    Ok(ProjectionAuthority {
+        disposition: reason,
+        alias,
+    })
+}
+
+pub(crate) async fn read_projection_alias(
     conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
     rebuild_generation: Option<&str>,
@@ -168,81 +191,494 @@ async fn read_projection_alias(
     }))
 }
 
-pub(in super::super) async fn derive_projection_with_alias(
-    conn: &impl QueryExecutor,
-    observation: &DurableObservationV1,
-) -> ProjectionStoreResult<ObservationProjection> {
-    derive_projection_with_alias_from_generation(conn, observation, None).await
+/// Connection that can derive a projection as one erased `Send` future.
+///
+/// Native-source verification calls derivation, and derivation calls
+/// verification. A generic `async fn` makes that a structural `Send` cycle the
+/// next trait solver walks until the recursion limit. Each connection type
+/// builds the future here, so the cycle is a `dyn Future + Send` instead.
+pub(crate) trait SendProjectionDerive: QueryExecutor + Sync {
+    fn derive_projection_alias<'a>(
+        &'a self,
+        observation: &'a DurableObservationV1,
+        rebuild_generation: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = ProjectionStoreResult<ObservationProjection>> + Send + 'a>>;
+
+    fn verify_native_source_supersession<'a>(
+        &'a self,
+        predecessor: &'a DurableObservationV1,
+    ) -> Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + 'a>>;
 }
 
-pub(super) async fn derive_projection_for_rebuild(
-    conn: &impl QueryExecutor,
-    observation: &DurableObservationV1,
-    generation: &str,
-) -> ProjectionStoreResult<ObservationProjection> {
-    derive_projection_with_alias_from_generation(conn, observation, Some(generation)).await
+pub(in super::super) fn derive_projection_with_alias<'a>(
+    conn: &'a impl SendProjectionDerive,
+    observation: &'a DurableObservationV1,
+) -> Pin<Box<dyn Future<Output = ProjectionStoreResult<ObservationProjection>> + Send + 'a>> {
+    conn.derive_projection_alias(observation, None)
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.derive.alias")]
-async fn derive_projection_with_alias_from_generation(
-    conn: &impl QueryExecutor,
-    observation: &DurableObservationV1,
-    rebuild_generation: Option<&str>,
-) -> ProjectionStoreResult<ObservationProjection> {
-    if let Some(reason) =
-        durable_projection_disposition(conn, observation.observation_id().as_str()).await?
-        && matches!(
-            reason,
-            ProjectionSkipReason::OutputCollision
-                | ProjectionSkipReason::InvalidContract
-                | ProjectionSkipReason::SanitizationRefused
-        )
-    {
-        return Ok(ObservationProjection::Skipped(reason));
-    }
-    let projection = derive_projection(observation)?;
-    // Collapse Codex-style token/time goal ticks at projection time so every
-    // raw observation stays durable while current goal state follows the
-    // established (thread, objective, status) transition semantics.
-    let projection =
-        collapse_consecutive_goal_ticks(conn, observation, projection, rebuild_generation).await?;
-    let Some(alias) =
-        read_projection_alias(conn, observation.observation_id(), rebuild_generation).await?
-    else {
-        return Ok(projection);
-    };
-    let (projection, derived_messages, workflow_facts) = match projection {
-        ObservationProjection::Message(projection) => (projection, Vec::new(), Vec::new()),
-        ObservationProjection::Composite {
-            message: Some(projection),
-            derived_messages,
-            workflow_facts,
-        } => (projection, derived_messages, workflow_facts),
-        ObservationProjection::Composite { message: None, .. }
-        | ObservationProjection::Skipped(_) => {
-            return Err(ProjectionStoreError::ProvenanceCollision);
+pub(super) fn derive_projection_for_rebuild<'a>(
+    conn: &'a impl SendProjectionDerive,
+    observation: &'a DurableObservationV1,
+    generation: &'a str,
+) -> Pin<Box<dyn Future<Output = ProjectionStoreResult<ObservationProjection>> + Send + 'a>> {
+    conn.derive_projection_alias(observation, Some(generation))
+}
+
+macro_rules! impl_send_projection_derive {
+    ($ty:ty) => {
+        impl $crate::observation_projection::SendProjectionDerive for $ty {
+            fn derive_projection_alias<'a>(
+                &'a self,
+                observation: &'a tracedecay_domain::DurableObservationV1,
+                rebuild_generation: Option<&'a str>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = tracedecay_store::ProjectionStoreResult<
+                                tracedecay_store::ObservationProjection,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(tracing::Instrument::instrument(
+                    async move {
+                        let authority: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<
+                                            $crate::observation_projection::apply::ProjectionAuthority,
+                                        >,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::apply::read_projection_authority(
+                                self,
+                                observation.observation_id(),
+                                rebuild_generation,
+                            ),
+                        );
+                        let authority = authority.await?;
+                        if authority.disposition
+                            == Some(tracedecay_store::ProjectionSkipReason::NativeSourceSuperseded)
+                        {
+                            self.verify_native_source_supersession(observation).await?;
+                            return Ok(tracedecay_store::ObservationProjection::Skipped(
+                                tracedecay_store::ProjectionSkipReason::NativeSourceSuperseded,
+                            ));
+                        }
+                        if let Some(reason) = authority.disposition
+                            && matches!(
+                                reason,
+                                tracedecay_store::ProjectionSkipReason::OutputCollision
+                                    | tracedecay_store::ProjectionSkipReason::InvalidContract
+                                    | tracedecay_store::ProjectionSkipReason::SanitizationRefused
+                                    | tracedecay_store::ProjectionSkipReason::SourceRecordRetired
+                            )
+                        {
+                            return Ok(tracedecay_store::ObservationProjection::Skipped(reason));
+                        }
+                        let projection =
+                            $crate::observation_projection::derive_projection(observation)?;
+                        // Collapse Codex-style token/time goal ticks at projection time so every
+                        // raw observation stays durable while current goal state follows the
+                        // established (thread, objective, status) transition semantics.
+                        let collapsed: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<
+                                            tracedecay_store::ObservationProjection,
+                                        >,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::apply::collapse_consecutive_goal_ticks(
+                                self,
+                                observation,
+                                projection,
+                                rebuild_generation,
+                            ),
+                        );
+                        let projection = collapsed.await?;
+                        let mut alias = authority.alias;
+                        if alias.is_none() {
+                            let predecessor: std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                            Output = tracedecay_store::ProjectionStoreResult<
+                                                Option<tracedecay_domain::DurableObservationV1>,
+                                            >,
+                                        > + Send
+                                        + '_,
+                                >,
+                            > = Box::pin(
+                                $crate::observation_projection::source_transition::read_native_source_predecessor(
+                                    self,
+                                    observation,
+                                ),
+                            );
+                            if let Some(predecessor) = predecessor.await? {
+                                let aliased: std::pin::Pin<
+                                    Box<
+                                        dyn std::future::Future<
+                                                Output = tracedecay_store::ProjectionStoreResult<
+                                                    Option<
+                                                        $crate::observation_projection::apply::ProjectionOutputAlias,
+                                                    >,
+                                                >,
+                                            > + Send
+                                            + '_,
+                                    >,
+                                > = Box::pin(
+                                    $crate::observation_projection::apply::read_projection_alias(
+                                        self,
+                                        predecessor.observation_id(),
+                                        rebuild_generation,
+                                    ),
+                                );
+                                alias = aliased.await?;
+                            }
+                        }
+                        let Some(alias) = alias else {
+                            return Ok(projection);
+                        };
+                        let (projection, workflow_facts) = match projection {
+                            tracedecay_store::ObservationProjection::Message(projection) => {
+                                (projection, Vec::new())
+                            }
+                            tracedecay_store::ObservationProjection::Composite {
+                                message: Some(projection),
+                                workflow_facts,
+                            } => (projection, workflow_facts),
+                            tracedecay_store::ObservationProjection::Composite { message: None, .. }
+                            | tracedecay_store::ObservationProjection::Skipped(_) => {
+                                return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                            }
+                        };
+                        let mut session = projection.session().clone();
+                        let mut message = projection.message().clone();
+                        session.provider.clone_from(&alias.provider);
+                        message.provider = alias.provider;
+                        message.message_id = alias.message_id;
+                        tracedecay_store::ObservationProjection::for_outputs(
+                            observation,
+                            Some((session, message)),
+                            workflow_facts
+                                .into_iter()
+                                .map(|projection| {
+                                    (projection.session().clone(), projection.fact().clone())
+                                })
+                                .collect(),
+                        )
+                    },
+                    tracing::trace_span!("global_db.observation_apply.derive.alias"),
+                ))
+            }
+
+            fn verify_native_source_supersession<'a>(
+                &'a self,
+                predecessor: &'a tracedecay_domain::DurableObservationV1,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = tracedecay_store::ProjectionStoreResult<()>,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    let successor: std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = tracedecay_store::ProjectionStoreResult<
+                                        Option<tracedecay_domain::DurableObservationV1>,
+                                    >,
+                                > + Send
+                                + '_,
+                        >,
+                    > = Box::pin(
+                        $crate::observation_projection::source_transition::read_native_source_successor(
+                            self,
+                            predecessor,
+                        ),
+                    );
+                    let successor = successor
+                        .await?
+                        .ok_or(tracedecay_store::ProjectionStoreError::ProvenanceCollision)?;
+                    let effect = self.derive_projection_alias(&successor, None).await?;
+                    if matches!(effect.skip_reason(), Some(reason) if reason != tracedecay_store::ProjectionSkipReason::NonConversationalRecord)
+                    {
+                        return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                    }
+                    if effect.skip_reason().is_some() {
+                        let verified: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<()>,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin($crate::observation_projection::apply::verify_effect(
+                            self,
+                            &successor,
+                            &effect,
+                        ));
+                        verified.await?;
+                    } else {
+                        let usage: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<()>,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::apply::verify_observation_provider_usage(
+                                self,
+                                &successor,
+                            ),
+                        );
+                        usage.await?;
+                        // Reopen audits use read-only connections without the live writer's
+                        // temporary cache. Resolve retained ownership through the same bounded
+                        // authority used by the canonical projection audit.
+                        let outputs = effect
+                            .message()
+                            .into_iter()
+                            .map(|projection| {
+                                (
+                                    projection.message().provider.clone(),
+                                    projection.message().message_id.clone(),
+                                )
+                            })
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let authorities: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<
+                                            std::collections::HashMap<
+                                                (String, String),
+                                                $crate::observation_projection::ProjectionOutputAuthority,
+                                            >,
+                                        >,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::read_output_authorities(
+                                self,
+                                &outputs,
+                            ),
+                        );
+                        let authorities = authorities.await?;
+                        for projection in effect.message().into_iter() {
+                            $crate::observation_projection::apply::verify_provenance(
+                                self,
+                                projection,
+                            )
+                            .await?;
+                            let message = projection.message();
+                            let authority = authorities
+                                .get(&(message.provider.clone(), message.message_id.clone()))
+                                .ok_or(tracedecay_store::ProjectionStoreError::ProvenanceCollision)?;
+                            let owner: std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                            Output = tracedecay_store::ProjectionStoreResult<
+                                                tracedecay_store::SessionMessageProjection,
+                                            >,
+                                        > + Send
+                                        + '_,
+                                >,
+                            > = Box::pin(
+                                $crate::observation_projection::resolve_output_projection(
+                                    self,
+                                    authority,
+                                    Some((successor.observation_id().as_str(), &effect)),
+                                    projection,
+                                ),
+                            );
+                            let owner = owner.await?;
+                            $crate::observation_projection::apply::verify_provenance(self, &owner)
+                                .await?;
+                            $crate::observation_projection::state::verify_projection_rows(
+                                self,
+                                &owner,
+                            )
+                            .await?;
+                        }
+                        let workflow: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<()>,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::apply::verify_workflow_effects(
+                                self,
+                                effect.workflow_facts(),
+                            ),
+                        );
+                        workflow.await?;
+                    }
+                    let anchors: std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = tracedecay_store::ProjectionStoreResult<(
+                                        tracedecay_domain::RetrievalAnchorRecord,
+                                        tracedecay_domain::RetrievalAnchorRecord,
+                                    )>,
+                                > + Send
+                                + '_,
+                        >,
+                    > = Box::pin(
+                        $crate::observation_projection::source_transition::read_transition_anchors(
+                            self,
+                            predecessor,
+                            &successor,
+                        ),
+                    );
+                    let (old_anchor, new_anchor) = anchors.await?;
+                    let owner = old_anchor.owner_column_json().map_err(|error| {
+                        $crate::observation_projection::state::storage(
+                            "encode native source owner",
+                            error,
+                        )
+                    })?;
+                    let mut disposition = self
+                        .query(
+                            "SELECT state, superseded_by, reason_class FROM retrieval_anchor_dispositions
+         WHERE anchor_id = ?1 AND owner_json = ?2 ORDER BY sequence DESC LIMIT 1",
+                            tracedecay_runtime_core::db::engine::params![
+                                old_anchor.anchor_id().as_str(),
+                                owner.as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source anchor supersession",
+                                error,
+                            )
+                        })?;
+                    let current = disposition
+                        .next()
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source anchor supersession",
+                                error,
+                            )
+                        })?
+                        .ok_or(tracedecay_store::ProjectionStoreError::ProvenanceCollision)?;
+                    if current.get::<String>(0).map_err(|error| {
+                        $crate::observation_projection::state::storage(
+                            "verify native source anchor supersession",
+                            error,
+                        )
+                    })? != "superseded"
+                        || current.get::<Option<String>>(1).map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source anchor supersession",
+                                error,
+                            )
+                        })?.as_deref()
+                            != Some(new_anchor.anchor_id().as_str())
+                        || current.get::<String>(2).map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source anchor supersession",
+                                error,
+                            )
+                        })? != "correction"
+                    {
+                        return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                    }
+                    drop(disposition);
+                    let mut aliases = self
+                        .query(
+                            "SELECT COUNT(*) FROM retrieval_anchor_aliases WHERE owner_json = ?1 AND anchor_id = ?2",
+                            tracedecay_runtime_core::db::engine::params![
+                                owner,
+                                new_anchor.anchor_id().as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source current alias",
+                                error,
+                            )
+                        })?;
+                    let count: i64 = aliases
+                        .next()
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source current alias",
+                                error,
+                            )
+                        })?
+                        .ok_or(tracedecay_store::ProjectionStoreError::ProvenanceCollision)?
+                        .get(0)
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source current alias",
+                                error,
+                            )
+                        })?;
+                    if usize::try_from(count).ok() != Some(new_anchor.aliases().len()) {
+                        return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                    }
+                    drop(aliases);
+                    let mut rows = self
+                        .query(
+                            "SELECT 1 FROM observation_projection_provenance WHERE projector_version = ?1 AND observation_id = ?2
+             UNION ALL SELECT 1 FROM observation_workflow_facts WHERE projector_version = ?1 AND observation_id = ?2
+             UNION ALL SELECT 1 FROM observation_projection_aliases WHERE projector_version = ?1 AND observation_id = ?2
+             LIMIT 1",
+                            tracedecay_runtime_core::db::engine::params![
+                                tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION,
+                                predecessor.observation_id().as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify superseded native source effects",
+                                error,
+                            )
+                        })?;
+                    if rows
+                        .next()
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify superseded native source effects",
+                                error,
+                            )
+                        })?
+                        .is_some()
+                    {
+                        return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                    }
+                    drop(rows);
+                    Ok(())
+                })
+            }
         }
     };
-    let mut session = projection.session().clone();
-    let mut message = projection.message().clone();
-    session.provider.clone_from(&alias.provider);
-    message.provider = alias.provider;
-    message.message_id = alias.message_id;
-    let mut messages = vec![(session, message)];
-    messages.extend(
-        derived_messages
-            .into_iter()
-            .map(|projection| (projection.session().clone(), projection.message().clone())),
-    );
-    ObservationProjection::for_outputs(
-        observation,
-        messages,
-        workflow_facts
-            .into_iter()
-            .map(|projection| (projection.session().clone(), projection.fact().clone()))
-            .collect(),
-    )
 }
+#[cfg(test)]
+pub(crate) use impl_send_projection_derive;
+
+impl_send_projection_derive!(DatabaseWriteTransaction<'_>);
+impl_send_projection_derive!(DatabaseEngineReadConnection);
+impl_send_projection_derive!(DatabaseEngineReadSnapshot);
+impl_send_projection_derive!(crate::registered::RegisteredGlobalDbWriteTransaction<'_>);
 
 /// Objective used for goal-state dedupe: prefer native `/objective` (Codex),
 /// else the already-extracted `content_text`.
@@ -353,8 +789,12 @@ async fn read_latest_goal_dedupe_key(
 
 /// Drop Codex Goal rows that only advance tokens/time while retaining the raw
 /// observation. Meaningful objective or status transitions still project.
-#[hotpath::measure(future = true, label = "global_db.observation_apply.derive.collapse")]
-async fn collapse_consecutive_goal_ticks(
+#[tracing::instrument(
+    name = "global_db.observation_apply.derive.collapse",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn collapse_consecutive_goal_ticks(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     projection: ObservationProjection,
@@ -365,7 +805,6 @@ async fn collapse_consecutive_goal_ticks(
 
     let ObservationProjection::Composite {
         message,
-        derived_messages,
         workflow_facts,
     } = projection
     else {
@@ -374,7 +813,6 @@ async fn collapse_consecutive_goal_ticks(
     if workflow_facts.is_empty() {
         return Ok(ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         });
     }
@@ -417,16 +855,6 @@ async fn collapse_consecutive_goal_ticks(
         retained.push(fact_projection);
     }
 
-    let message = if message.as_ref().is_some_and(|projection| {
-        projection.message().kind.as_deref() == Some("goal")
-            && !retained
-                .iter()
-                .any(|fact| fact.fact().semantic_kind == CanonicalWorkflowSemanticKindV1::Goal)
-    }) {
-        None
-    } else {
-        message
-    };
     if retained.is_empty() {
         return match message {
             Some(message) => Ok(ObservationProjection::Message(message)),
@@ -438,12 +866,15 @@ async fn collapse_consecutive_goal_ticks(
     }
     Ok(ObservationProjection::Composite {
         message,
-        derived_messages,
         workflow_facts: retained,
     })
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.session")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.session",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn apply_session(
     conn: &impl Executor,
     session: &SessionRecord,
@@ -453,14 +884,16 @@ pub(super) async fn apply_session(
     // Downstream reconciliation, verify/audit, and rebuild then operate on
     // stored strings alone without touching the filesystem.
     let session = &canonicalize_session_project_paths(session);
-    match read_session(conn, &session.provider, &session.session_id).await? {
+    let stored = match read_session(conn, &session.provider, &session.session_id).await? {
         Some(actual) => {
-            let Some(merged) = reconcile_session_rows(&actual, session) else {
-                return Err(ProjectionStoreError::OutputCollision {
+            let normalized_actual = canonicalize_session_project_paths(&actual);
+            let merged = reconcile_session_rows_detailed(&normalized_actual, session).map_err(
+                |conflict| ProjectionStoreError::SessionOutputCollision {
                     provider: session.provider.clone(),
-                    message_id: format!("session:{}", session.session_id),
-                });
-            };
+                    session_id: session.session_id.clone(),
+                    field: conflict.field(),
+                },
+            )?;
             if merged == actual {
                 return Ok(());
             }
@@ -488,11 +921,11 @@ pub(super) async fn apply_session(
                 ],
             )
             .await
-            .map(|_| ())
-            .map_err(|error| storage("enrich projected session", error))
+            .map_err(|error| storage("enrich projected session", error))?;
+            merged
         }
-        None => conn
-            .execute(
+        None => {
+            conn.execute(
                 "INSERT INTO sessions
             (provider, session_id, project_key, project_path, title, started_at, ended_at,
              transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
@@ -515,9 +948,110 @@ pub(super) async fn apply_session(
                 ],
             )
             .await
-            .map(|_| ())
-            .map_err(|error| storage("insert projected session", error)),
+            .map_err(|error| storage("insert projected session", error))?;
+            session.clone()
+        }
+    };
+    bind_spawn_calls(conn, &stored, session).await
+}
+
+/// The parent's recorded spawn rollup entry naming `child`, as its call id.
+/// Shared by the live bind below and the rebuild activation sweep.
+pub(super) const SPAWN_CALL_FOR_CHILD_SQL: &str = "(
+    SELECT json_extract(spawn.value, '$.tool_use_id')
+    FROM sessions AS parent,
+         json_each(
+             CASE WHEN json_valid(parent.metadata_json) THEN parent.metadata_json ELSE '{}' END,
+             '$.spawned_sessions'
+         ) AS spawn
+    WHERE parent.provider = child.provider
+      AND parent.session_id = child.parent_session_id
+      AND json_extract(spawn.value, '$.session_id') = child.session_id
+      AND json_type(spawn.value, '$.tool_use_id') = 'text'
+    ORDER BY CAST(spawn.key AS INTEGER)
+    LIMIT 1
+)";
+
+/// Binds a child session's `parent_tool_use_id` to the call its parent's
+/// transcript recorded spawning it (`sessions.metadata_json
+/// $.spawned_sessions[]`), for hosts whose child transcript does not carry
+/// the call. Either side may be ingested first: a child row lacking the call
+/// reads its parent's rollup, and a record adding spawn entries binds the
+/// already-ingested children it names. A call the child recorded itself is
+/// never overwritten, and a child naming another parent is never bound.
+async fn bind_spawn_calls(
+    conn: &impl Executor,
+    stored: &SessionRecord,
+    incoming: &SessionRecord,
+) -> ProjectionStoreResult<()> {
+    if stored.parent_session_id.is_some() && stored.parent_tool_use_id.is_none() {
+        conn.execute(
+            &format!(
+                "UPDATE sessions AS child SET parent_tool_use_id = {SPAWN_CALL_FOR_CHILD_SQL}
+                 WHERE child.provider = ?1 AND child.session_id = ?2
+                   AND child.parent_tool_use_id IS NULL
+                   AND {SPAWN_CALL_FOR_CHILD_SQL} IS NOT NULL"
+            ),
+            params![stored.provider.as_str(), stored.session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("bind child session spawn call", error))?;
     }
+    if records_spawns(incoming) {
+        conn.execute(
+            &format!(
+                "UPDATE sessions AS child SET parent_tool_use_id = {SPAWN_CALL_FOR_CHILD_SQL}
+                 WHERE child.provider = ?1 AND child.parent_session_id = ?2
+                   AND child.parent_tool_use_id IS NULL
+                   AND {SPAWN_CALL_FOR_CHILD_SQL} IS NOT NULL"
+            ),
+            params![stored.provider.as_str(), stored.session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("bind spawned child session calls", error))?;
+    }
+    Ok(())
+}
+
+fn records_spawns(session: &SessionRecord) -> bool {
+    session
+        .metadata_json
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .is_some_and(|metadata| {
+            metadata
+                .get(SPAWNED_SESSIONS_KEY)
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|spawns| !spawns.is_empty())
+        })
+}
+
+/// Aligns a provenance-owned message row onto the projection's session before
+/// the content upsert.
+///
+/// The ingest upsert refuses a row whose `session_id` differs, so a drifted
+/// row blocks the rewrite that uniquely owned current provenance authorizes.
+/// `(provider, message_id)` is that ownership key; `session_id` is a field of
+/// the row, not a second owner. Callers reach this only after that ownership
+/// is already proven (an existing projected message, or released-rendering
+/// convergence). A first insert of an unowned identity must not adopt a
+/// foreign row and does not call this.
+async fn adopt_owned_projection_raw_session(
+    conn: &impl Executor,
+    message: &SessionMessageRecord,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "UPDATE lcm_raw_messages SET session_id = ?3
+         WHERE provider = ?1 AND message_id = ?2 AND session_id <> ?3",
+        params![
+            message.provider.as_str(),
+            message.message_id.as_str(),
+            message.session_id.as_str(),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("adopt projection raw session", error))
 }
 
 /// Writes the projection-derived raw row through the canonical LCM raw
@@ -534,16 +1068,292 @@ async fn upsert_projected_raw_message(
     tracedecay_lcm::raw::upsert_projection_raw_message(conn, message)
         .await
         .map_err(|error| match error {
-            LcmError::SanitizationRefused { reason } => {
-                ProjectionStoreError::SanitizationRefused { reason }
-            }
+            LcmError::SanitizationRefused {
+                reason,
+                quarantined,
+            } => ProjectionStoreError::SanitizationRefused {
+                reason,
+                quarantined,
+            },
             environmental => storage("upsert projected LCM raw message", environmental),
         })
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.rows")]
-async fn apply_rows(
+async fn reconcile_projected_codex_goal_response(
     conn: &impl Executor,
+    current: &SessionMessageRecord,
+) -> ProjectionStoreResult<()> {
+    let Some(response_message_id) = find_preceding_codex_goal_response(conn, current)
+        .await
+        .map_err(|error| storage("find preceding Codex goal response", error))?
+    else {
+        return Ok(());
+    };
+    retire_replaced_codex_output(conn, current.provider.as_str(), &response_message_id).await
+}
+
+/// Retires the output `message_id` that another Codex record of the same
+/// message replaces. Its row and provenance go, each owning
+/// observation settles as an `output_collision` skip, and a session temporal
+/// generation that already holds it is rebuilt.
+pub(super) async fn retire_replaced_codex_output(
+    conn: &impl Executor,
+    provider: &str,
+    message_id: &str,
+) -> ProjectionStoreResult<()> {
+    let mut provenance_rows = conn
+        .query(
+            "SELECT observation_id, receipt_id
+             FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
+        )
+        .await
+        .map_err(|error| storage("read replaced Codex provenance", error))?;
+    let mut replaced_observations = Vec::new();
+    while let Some(row) = provenance_rows
+        .next()
+        .await
+        .map_err(|error| storage("read replaced Codex provenance", error))?
+    {
+        replaced_observations.push((
+            row.get::<String>(0)
+                .map_err(|error| storage("read replaced Codex provenance", error))?,
+            row.get::<String>(1)
+                .map_err(|error| storage("read replaced Codex provenance", error))?,
+        ));
+    }
+    drop(provenance_rows);
+    delete_projected_output(conn, provider, message_id).await?;
+    conn.execute(
+        "DELETE FROM observation_projection_provenance
+         WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+        params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
+    )
+    .await
+    .map_err(|error| storage("remove replaced Codex provenance", error))?;
+    for (observation_id, receipt_id) in replaced_observations {
+        request_session_temporal_reset_if_materialized(conn, &observation_id).await?;
+        conn.execute(
+            "INSERT INTO observation_projection_dispositions
+                (projector_version, observation_id, receipt_id, reason)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT DO NOTHING",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+                receipt_id.as_str(),
+                ProjectionSkipReason::OutputCollision.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("retire replaced Codex observation", error))?;
+    }
+    Ok(())
+}
+
+/// Replaces the stored output row with the one this binary derives.
+///
+/// The projected message row is derived state, so every field but its identity
+/// is rewritten from the record. A projector that owns the output also owns the
+/// row's session, so the row is first moved onto the projection's session.
+/// A Hermes body belongs to the Hermes LCM turn authority: an existing Hermes
+/// row keeps its body and takes only the projection's session columns. Shared
+/// with released-rendering convergence, which reaches the same row through a
+/// different admission path and must not write it a second way.
+pub(super) async fn supersede_projected_message(
+    conn: &impl Executor,
+    message: &SessionMessageRecord,
+) -> ProjectionStoreResult<()> {
+    adopt_owned_projection_raw_session(conn, message).await?;
+    if message.provider == "hermes" {
+        let updated = conn
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET role = ?3, timestamp = ?4, ordinal = ?5, kind = ?6, model = ?7,
+                     tool_names = ?8, source_path = ?9, source_offset = ?10
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![
+                    message.provider.as_str(),
+                    message.message_id.as_str(),
+                    message.role.as_str(),
+                    message.timestamp,
+                    message.ordinal,
+                    message.kind.as_deref(),
+                    message.model.as_deref(),
+                    message.tool_names.as_deref(),
+                    message.source_path.as_deref(),
+                    message.source_offset,
+                ],
+            )
+            .await
+            .map_err(|error| storage("supersede projected Hermes message", error))?;
+        if updated == 1 {
+            return Ok(());
+        }
+    }
+    upsert_projected_raw_message(conn, message).await
+}
+
+/// Removes one projected output row; every retirement path drops it here.
+async fn delete_projected_output(
+    conn: &impl Executor,
+    provider: &str,
+    message_id: &str,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+        params![provider, message_id],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("remove retired projection message", error))
+}
+
+/// Whether the released rendering converged to a servable output or to the
+/// sanitizer's current quarantine verdict.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in super::super) enum ConvergedRendering {
+    /// The output rows and provenance digest now hold this binary's rendering.
+    Output,
+    /// This binary's rendering is withheld by the LCM privacy sanitizer, so the
+    /// observation now holds the durable sanitization-refusal disposition a
+    /// fresh capture writes instead of an output.
+    Quarantined,
+}
+
+/// Rewrites one output's rows and provenance digest to this binary's
+/// deterministic rendering, keeping the historical `message_created` flag the
+/// releases wrote.
+///
+/// Reached only from the authority audit, which has already admitted the row
+/// as a shipped rendering: provenance still carries the digest of the output
+/// this store holds, or it carries this binary's digest while the mutable row
+/// is still that shipped rendering. A row that matches neither is refused
+/// before this write. The message row is a pure derivation of the durable
+/// observation, so rewriting it loses nothing;
+/// the digest is re-stamped last so an interrupted transaction leaves the
+/// released pairing intact.
+///
+/// When the LCM privacy sanitizer withholds this binary's rendering, that
+/// verdict *is* the current rendering: the output is retired to the disposition
+/// a fresh capture writes ([`retire_quarantined_projection`]). A sanitizer
+/// fault still fails the transaction so the store stays refused, named.
+pub(in super::super) async fn converge_released_output_rendering(
+    conn: &impl Executor,
+    projection: &SessionMessageProjection,
+) -> ProjectionStoreResult<ConvergedRendering> {
+    // A beta-era partial projection may retain current provenance and message
+    // rows after losing their shared session row. The immutable projection is
+    // the canonical insert authority; `apply_session` also preserves richer
+    // compatible session metadata when the row already exists.
+    apply_session(conn, projection.session()).await?;
+    match supersede_projected_message(conn, projection.message()).await {
+        Ok(()) => {}
+        Err(ProjectionStoreError::SanitizationRefused {
+            quarantined: true, ..
+        }) => {
+            retire_quarantined_projection(conn, projection).await?;
+            return Ok(ConvergedRendering::Quarantined);
+        }
+        Err(error) => return Err(error),
+    }
+    let provenance = projection.provenance();
+    conn.execute(
+        "UPDATE observation_projection_provenance
+         SET output_digest = ?4
+         WHERE projector_version = ?1 AND observation_id = ?2 AND output_ordinal = ?3",
+        params![
+            provenance.projector_version(),
+            provenance.observation_id().as_str(),
+            projection.output_ordinal(),
+            stored_output_digest(projection)?.as_str(),
+        ],
+    )
+    .await
+    .map_err(|error| storage("re-stamp released projection provenance", error))?;
+    Ok(ConvergedRendering::Output)
+}
+
+/// Converges one observation whose current rendering the LCM privacy sanitizer
+/// withholds to the durable disposition a fresh capture of the same envelope
+/// writes today.
+///
+/// A capture running now derives the same rendering, fails the same
+/// deterministic sanitization, rolls its rows back, and records
+/// `sanitization_refused` against the observation
+/// (`persist_projection_rejection_on_database`). So the released store reaches
+/// byte-identical state by removing the outputs this observation created with
+/// their message rows, dropping its provenance and workflow rows, and writing
+/// that disposition in their place. An output row a *different* observation
+/// created keeps its own provenance and is not this retirement's to remove,
+/// a fresh capture would not have created it either.
+///
+/// Only the projection is retired. The durable observation, its payload, and
+/// its receipt stay untouched, so a binary whose sanitizer admits the content
+/// re-projects it from the same authority.
+async fn retire_quarantined_projection(
+    conn: &impl Executor,
+    projection: &SessionMessageProjection,
+) -> ProjectionStoreResult<()> {
+    let provenance = projection.provenance();
+    let observation_id = provenance.observation_id().as_str();
+    let mut rows = conn
+        .query(
+            "SELECT output_provider, output_message_id
+             FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2 AND message_created = 1",
+            params![provenance.projector_version(), observation_id],
+        )
+        .await
+        .map_err(|error| storage("read quarantined projection outputs", error))?;
+    let mut outputs = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read quarantined projection outputs", error))?
+    {
+        outputs.push((
+            row.get::<String>(0)
+                .map_err(|error| storage("read quarantined projection outputs", error))?,
+            row.get::<String>(1)
+                .map_err(|error| storage("read quarantined projection outputs", error))?,
+        ));
+    }
+    drop(rows);
+    for (output_provider, output_message_id) in &outputs {
+        delete_projected_output(conn, output_provider, output_message_id).await?;
+    }
+    conn.execute(
+        "DELETE FROM observation_projection_provenance
+         WHERE projector_version = ?1 AND observation_id = ?2",
+        params![provenance.projector_version(), observation_id],
+    )
+    .await
+    .map_err(|error| storage("remove quarantined projection provenance", error))?;
+    conn.execute(
+        "DELETE FROM observation_workflow_facts
+         WHERE projector_version = ?1 AND observation_id = ?2",
+        params![provenance.projector_version(), observation_id],
+    )
+    .await
+    .map_err(|error| storage("remove quarantined projection workflow facts", error))?;
+    apply_skip_disposition_for_receipt(
+        conn,
+        observation_id,
+        provenance.receipt_id(),
+        ProjectionSkipReason::SanitizationRefused,
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.rows",
+    level = "trace",
+    skip_all
+)]
+async fn apply_rows(
+    conn: &DatabaseWriteTransaction<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
     projection: &SessionMessageProjection,
@@ -552,12 +1362,43 @@ async fn apply_rows(
     apply_session(conn, session).await?;
 
     let message = projection.message();
+    reconcile_projected_codex_goal_response(conn, message).await?;
     let existing = read_message(conn, &message.provider, &message.message_id).await?;
     let state = read_output_state(conn, projection).await?;
     if existing.is_some()
         && let Some(state) = state.as_ref()
     {
-        verify_output_state(conn, state, projection).await?;
+        // Erase the projection child here. `verify_output_state` stays generic
+        // over `QueryExecutor`, whose futures are not `Send`, so the write
+        // transaction is the boundary that can prove the child on its own.
+        let verified: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+            Box::pin(async {
+                if state.owner_count == 0 {
+                    return Err(ProjectionStoreError::ProvenanceCollision);
+                }
+                let message = projection.message();
+                let owner: Pin<
+                    Box<
+                        dyn Future<Output = ProjectionStoreResult<SessionMessageProjection>>
+                            + Send
+                            + '_,
+                    >,
+                > = Box::pin(message_projection(
+                    conn,
+                    &state.canonical,
+                    &message.provider,
+                    &message.message_id,
+                ));
+                let owner_projection = owner.await?;
+                let provenance: Pin<
+                    Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>,
+                > = Box::pin(verify_provenance(conn, &owner_projection));
+                provenance.await?;
+                let rows: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                    Box::pin(verify_projection_rows(conn, &owner_projection));
+                rows.await
+            });
+        verified.await?;
     }
     let transition_state = state.as_ref().map(|state| {
         MessageTransitionState::new(
@@ -567,82 +1408,22 @@ async fn apply_rows(
             state.projector_owned,
         )
     });
-    let (transition, preserve_protected_payload) = message_transition(
+    let decided: Pin<
+        Box<dyn Future<Output = ProjectionStoreResult<MessageTransition>> + Send + '_>,
+    > = Box::pin(message_transition(
         conn,
         sequence,
         projection,
         existing.as_ref(),
         transition_state,
-    )
-    .await?;
+    ));
+    let transition = decided.await?;
     match transition {
-        MessageTransition::Insert => {
-            conn.execute(
-                "INSERT INTO session_messages
-            (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
-             tool_names, source_path, source_offset, metadata_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
-                    message.provider.as_str(),
-                    message.message_id.as_str(),
-                    message.session_id.as_str(),
-                    message.role.as_str(),
-                    message.timestamp,
-                    message.ordinal,
-                    message.text.as_str(),
-                    message.kind.as_deref(),
-                    message.model.as_deref(),
-                    message.tool_names.as_deref(),
-                    message.source_path.as_deref(),
-                    message.source_offset,
-                    message.metadata_json.as_deref(),
-                ],
-            )
-            .await
-            .map_err(|error| storage("insert projected message", error))?;
-        }
-        MessageTransition::Supersede => {
-            conn.execute(
-                "UPDATE session_messages
-                 SET session_id = ?3, role = ?4, timestamp = ?5, ordinal = ?6,
-                     text = ?7, kind = ?8, model = ?9, tool_names = ?10,
-                     source_path = ?11, source_offset = ?12, metadata_json = ?13
-                 WHERE provider = ?1 AND message_id = ?2",
-                params![
-                    message.provider.as_str(),
-                    message.message_id.as_str(),
-                    message.session_id.as_str(),
-                    message.role.as_str(),
-                    message.timestamp,
-                    message.ordinal,
-                    message.text.as_str(),
-                    message.kind.as_deref(),
-                    message.model.as_deref(),
-                    message.tool_names.as_deref(),
-                    message.source_path.as_deref(),
-                    message.source_offset,
-                    message.metadata_json.as_deref(),
-                ],
-            )
-            .await
-            .map_err(|error| storage("supersede projected message", error))?;
-        }
+        MessageTransition::Insert => upsert_projected_raw_message(conn, message).await?,
+        MessageTransition::Supersede => supersede_projected_message(conn, message).await?,
         MessageTransition::Retain => {}
     }
-    let projected_message = match transition {
-        MessageTransition::Insert | MessageTransition::Supersede => message,
-        MessageTransition::Retain => {
-            existing
-                .as_ref()
-                .ok_or_else(|| ProjectionStoreError::OutputCollision {
-                    provider: message.provider.clone(),
-                    message_id: message.message_id.clone(),
-                })?
-        }
-    };
-    if projected_message.provider != "hermes" && !preserve_protected_payload {
-        upsert_projected_raw_message(conn, projected_message).await?;
-    }
+    super::codex_echo::retire_codex_response_echo(conn, observation, message).await?;
     Ok(transition == MessageTransition::Insert)
 }
 
@@ -683,7 +1464,11 @@ struct StoredWorkflowFact {
     output_digest: String,
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.query.workflow")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.query.workflow",
+    level = "trace",
+    skip_all
+)]
 async fn verify_workflow_fact(
     conn: &impl QueryExecutor,
     projection: &WorkflowFactProjection,
@@ -801,7 +1586,11 @@ async fn verify_workflow_fact(
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.workflow")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.workflow",
+    level = "trace",
+    skip_all
+)]
 async fn apply_workflow_fact(
     conn: &impl Executor,
     sequence: u64,
@@ -827,8 +1616,12 @@ async fn apply_workflow_fact(
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.query.provenance")]
-pub(super) async fn verify_provenance(
+#[tracing::instrument(
+    name = "global_db.observation_apply.query.provenance",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn verify_provenance(
     conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
@@ -873,7 +1666,7 @@ pub(super) async fn verify_provenance(
         provenance.receipt_id().to_string(),
         message.provider.clone(),
         message.message_id.clone(),
-        projection.output_digest()?.as_str().to_string(),
+        stored_output_digest(projection)?.as_str().to_string(),
     );
     if actual == expected {
         Ok(())
@@ -893,7 +1686,7 @@ async fn read_provenance_output_binding(
         .query(
             "SELECT provenance.output_provider, provenance.output_message_id,
                     EXISTS(
-                        SELECT 1 FROM session_messages AS message
+                        SELECT 1 FROM lcm_raw_messages AS message
                         WHERE message.provider = provenance.output_provider
                           AND message.message_id = provenance.output_message_id
                     )
@@ -927,13 +1720,13 @@ async fn read_provenance_output_binding(
     )))
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_apply.persist.provenance"
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.provenance",
+    level = "trace",
+    skip_all
 )]
 async fn apply_provenance(
     conn: &impl Executor,
-    sequence: u64,
     projection: &SessionMessageProjection,
     message_created: bool,
 ) -> ProjectionStoreResult<()> {
@@ -954,7 +1747,7 @@ async fn apply_provenance(
                 provenance.receipt_id(),
                 message.provider.as_str(),
                 message.message_id.as_str(),
-                projection.output_digest()?.as_str(),
+                stored_output_digest(projection)?.as_str(),
                 i64::from(message_created),
             ],
         )
@@ -968,8 +1761,8 @@ async fn apply_provenance(
         // deterministic existing-output collision the drain converges into a
         // durable skip. A ghost binding or a retained row that names
         // the SAME output but disagrees on anchor, receipt, or digest is
-        // corrupt provenance authority — as is a row that disagrees right
-        // after this insert claimed to write it — and stays a hard error.
+        // corrupt provenance authority, as is a row that disagrees right
+        // after this insert claimed to write it, and stays a hard error.
         Err(ProjectionStoreError::ProvenanceCollision) if inserted == 0 => {
             let (stored_provider, stored_message_id, output_exists) =
                 read_provenance_output_binding(conn, provenance, projection.output_ordinal())
@@ -988,86 +1781,7 @@ async fn apply_provenance(
         }
         Err(error) => return Err(error),
     }
-    if inserted == 0 {
-        return Ok(());
-    }
-
-    let sequence_i64 =
-        i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
-    conn.execute(
-        "INSERT INTO temp.observation_projection_output_state (
-            projector_version, output_provider, output_message_id,
-            canonical_observation_id, latest_observation_id, latest_sequence,
-            projector_owned, owner_count
-         ) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, 1)
-         ON CONFLICT(projector_version, output_provider, output_message_id) DO UPDATE SET
-            canonical_observation_id = CASE
-                WHEN observation_projection_output_state.projector_owned = 1
-                 AND excluded.latest_sequence >= observation_projection_output_state.latest_sequence
-                THEN excluded.latest_observation_id
-                ELSE observation_projection_output_state.canonical_observation_id
-            END,
-            latest_observation_id = CASE
-                WHEN excluded.latest_sequence >= observation_projection_output_state.latest_sequence
-                THEN excluded.latest_observation_id
-                ELSE observation_projection_output_state.latest_observation_id
-            END,
-            latest_sequence = MAX(
-                observation_projection_output_state.latest_sequence,
-                excluded.latest_sequence
-            ),
-            projector_owned = MAX(
-                observation_projection_output_state.projector_owned,
-                excluded.projector_owned
-            ),
-            owner_count = observation_projection_output_state.owner_count + 1",
-        params![
-            provenance.projector_version(),
-            message.provider.as_str(),
-            message.message_id.as_str(),
-            provenance.observation_id().as_str(),
-            sequence_i64,
-            i64::from(message_created),
-        ],
-    )
-    .await
-    .map_err(|error| storage("update projection output state", error))?;
     Ok(())
-}
-
-/// Durable deterministic dispositions are projection input on every replay and
-/// rebuild. Consulting them before derivation prevents an unchanged invalid
-/// observation from repeating expensive hashing or parsing work.
-#[hotpath::measure(future = true, label = "global_db.observation_apply.query.disposition")]
-pub async fn durable_projection_disposition(
-    conn: &impl QueryExecutor,
-    observation_id: &str,
-) -> ProjectionStoreResult<Option<ProjectionSkipReason>> {
-    let mut rows = conn
-        .query(
-            "SELECT reason FROM observation_projection_dispositions
-             WHERE projector_version = ?1 AND observation_id = ?2",
-            (SESSION_MESSAGE_PROJECTOR_VERSION, observation_id),
-        )
-        .await
-        .map_err(|error| storage("read projection disposition", error))?;
-    let reason = rows
-        .next()
-        .await
-        .map_err(|error| storage("read projection disposition", error))?
-        .map(|row| row.get::<String>(0))
-        .transpose()
-        .map_err(|error| storage("read projection disposition", error))?;
-    reason
-        .map(|reason| {
-            ProjectionSkipReason::from_durable_str(&reason).ok_or_else(|| {
-                storage_message(
-                    "read projection disposition",
-                    "projection disposition has an unknown reason",
-                )
-            })
-        })
-        .transpose()
 }
 
 async fn verify_skip_disposition(
@@ -1075,14 +1789,26 @@ async fn verify_skip_disposition(
     observation: &DurableObservationV1,
     reason: ProjectionSkipReason,
 ) -> ProjectionStoreResult<()> {
+    verify_skip_disposition_for_receipt(
+        conn,
+        observation.observation_id().as_str(),
+        observation.receipt().receipt().receipt_id().as_str(),
+        reason,
+    )
+    .await
+}
+
+async fn verify_skip_disposition_for_receipt(
+    conn: &impl QueryExecutor,
+    observation_id: &str,
+    expected_receipt_id: &str,
+    reason: ProjectionSkipReason,
+) -> ProjectionStoreResult<()> {
     let mut rows = conn
         .query(
             "SELECT receipt_id, reason FROM observation_projection_dispositions
              WHERE projector_version = ?1 AND observation_id = ?2",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                observation.observation_id().as_str()
-            ],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
         )
         .await
         .map_err(|error| storage("verify projection disposition", error))?;
@@ -1099,7 +1825,6 @@ async fn verify_skip_disposition(
     let actual_reason = row
         .get::<String>(1)
         .map_err(|error| storage("verify projection disposition", error))?;
-    let expected_receipt_id = observation.receipt().receipt().receipt_id().as_str();
     if receipt_id == expected_receipt_id && actual_reason == reason.as_str() {
         Ok(())
     } else {
@@ -1107,10 +1832,29 @@ async fn verify_skip_disposition(
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.skip")]
 pub(super) async fn apply_skip_disposition(
     conn: &impl Executor,
     observation: &DurableObservationV1,
+    reason: ProjectionSkipReason,
+) -> ProjectionStoreResult<()> {
+    apply_skip_disposition_for_receipt(
+        conn,
+        observation.observation_id().as_str(),
+        observation.receipt().receipt().receipt_id().as_str(),
+        reason,
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.skip",
+    level = "trace",
+    skip_all
+)]
+async fn apply_skip_disposition_for_receipt(
+    conn: &impl Executor,
+    observation_id: &str,
+    receipt_id: &str,
     reason: ProjectionSkipReason,
 ) -> ProjectionStoreResult<()> {
     conn.execute(
@@ -1120,18 +1864,18 @@ pub(super) async fn apply_skip_disposition(
          ON CONFLICT DO NOTHING",
         params![
             SESSION_MESSAGE_PROJECTOR_VERSION,
-            observation.observation_id().as_str(),
-            observation.receipt().receipt().receipt_id().as_str(),
+            observation_id,
+            receipt_id,
             reason.as_str(),
         ],
     )
     .await
     .map_err(|error| storage("insert projection disposition", error))?;
-    verify_skip_disposition(conn, observation, reason).await
+    verify_skip_disposition_for_receipt(conn, observation_id, receipt_id, reason).await
 }
 
 async fn verify_message_effect(
-    conn: &impl QueryExecutor,
+    conn: &impl SendProjectionDerive,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     verify_provenance(conn, projection).await?;
@@ -1142,13 +1886,168 @@ async fn verify_message_effect(
 }
 
 async fn apply_message_effect(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
-    let message_created = apply_rows(conn, sequence, observation, projection).await?;
-    apply_provenance(conn, sequence, projection, message_created).await
+    let message = projection.message();
+    let previous_owner = read_canonical_owner(conn, &message.provider, &message.message_id).await?;
+    let rows: Pin<Box<dyn Future<Output = ProjectionStoreResult<bool>> + Send + '_>> =
+        Box::pin(apply_rows(conn, sequence, observation, projection));
+    let message_created = rows.await?;
+    apply_provenance(conn, projection, message_created).await?;
+    // The session-temporal store materialized the previous owner's
+    // occurrence; once another observation owns the message, that occurrence
+    // is stale and the session must rebuild.
+    if let Some(previous_owner) = previous_owner
+        && read_canonical_owner(conn, &message.provider, &message.message_id)
+            .await?
+            .as_deref()
+            != Some(previous_owner.as_str())
+    {
+        request_session_temporal_reset(conn, &previous_owner).await?;
+    }
+    Ok(())
+}
+
+/// The observation whose rendering an output's row holds, per its provenance.
+async fn read_canonical_owner(
+    conn: &impl QueryExecutor,
+    provider: &str,
+    message_id: &str,
+) -> ProjectionStoreResult<Option<String>> {
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT canonical_observation_id FROM ({})",
+                output_ownership_sql()
+            ),
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
+        )
+        .await
+        .map_err(|error| storage("read projection output owner", error))?;
+    rows.next()
+        .await
+        .map_err(|error| storage("read projection output owner", error))?
+        .map(|row| {
+            row.get::<String>(0)
+                .map_err(|error| storage("read projection output owner", error))
+        })
+        .transpose()
+}
+
+/// Retires one observation its rewritten source no longer offers: its
+/// provenance and workflow facts are removed and a `source_record_retired`
+/// disposition takes their place, so replays and rebuilds skip it. Each
+/// output it shared falls back to its remaining canonical owner's rendering,
+/// and an output only it owned is removed. Returns whether the observation
+/// was retired; an observation the store never held, or one already settled
+/// by another disposition, has no projection to retire.
+pub(in super::super) async fn retire_source_record(
+    conn: &(impl Executor + SendProjectionDerive),
+    observation_id: &str,
+) -> ProjectionStoreResult<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT observation.receipt_id,
+                    EXISTS (
+                        SELECT 1 FROM observation_projection_dispositions AS disposition
+                        WHERE disposition.projector_version = ?1
+                          AND disposition.observation_id = observation.observation_id
+                    )
+             FROM observations AS observation WHERE observation.observation_id = ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+        )
+        .await
+        .map_err(|error| storage("read retired source record", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read retired source record", error))?
+    else {
+        return Ok(false);
+    };
+    let receipt_id = row
+        .get::<String>(0)
+        .map_err(|error| storage("read retired source record", error))?;
+    let settled = row
+        .get::<i64>(1)
+        .map_err(|error| storage("read retired source record", error))?
+        != 0;
+    drop(rows);
+    if settled {
+        return Ok(false);
+    }
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT output_provider, output_message_id
+             FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+        )
+        .await
+        .map_err(|error| storage("read retired source record outputs", error))?;
+    let mut outputs = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read retired source record outputs", error))?
+    {
+        outputs.push((
+            row.get::<String>(0)
+                .map_err(|error| storage("read retired source record outputs", error))?,
+            row.get::<String>(1)
+                .map_err(|error| storage("read retired source record outputs", error))?,
+        ));
+    }
+    drop(rows);
+    for sql in [
+        "DELETE FROM observation_projection_provenance
+         WHERE projector_version = ?1 AND observation_id = ?2",
+        "DELETE FROM observation_workflow_facts
+         WHERE projector_version = ?1 AND observation_id = ?2",
+    ] {
+        conn.execute(
+            sql,
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+        )
+        .await
+        .map_err(|error| storage("remove retired source record projection", error))?;
+    }
+    apply_skip_disposition_for_receipt(
+        conn,
+        observation_id,
+        &receipt_id,
+        ProjectionSkipReason::SourceRecordRetired,
+    )
+    .await?;
+    for (provider, message_id) in outputs {
+        let Some(owner_id) = read_canonical_owner(conn, &provider, &message_id).await? else {
+            delete_projected_output(conn, &provider, &message_id).await?;
+            continue;
+        };
+        let owner_id = CanonicalObservationIdV1::new(owner_id)
+            .map_err(|_| storage_message("read retired output owner", "invalid owner id"))?;
+        let (_, owner) = read_observation(conn, &owner_id)
+            .await?
+            .ok_or(ProjectionStoreError::ObservationNotFound)?;
+        let message = match derive_projection_with_alias(conn, &owner).await? {
+            ObservationProjection::Message(projection)
+            | ObservationProjection::Composite {
+                message: Some(projection),
+                ..
+            } if projection.message().provider == provider
+                && projection.message().message_id == message_id =>
+            {
+                projection.message().clone()
+            }
+            _ => return Err(ProjectionStoreError::ProvenanceCollision),
+        };
+        supersede_projected_message(conn, &message).await?;
+    }
+    request_session_temporal_reset(conn, observation_id).await?;
+    Ok(true)
 }
 
 struct ProviderUsageRow {
@@ -1233,14 +2132,18 @@ fn provider_usage_rows_from_envelope(
         .collect()
 }
 
-fn provider_usage_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
+pub(crate) fn provider_usage_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
     match scope {
         ObservationScopeV1::Profile => ("profile", None),
         ObservationScopeV1::Project { project_id } => ("project", Some(project_id.as_str())),
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.usage")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.usage",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn apply_provider_usage_effects(
     conn: &impl Executor,
     sequence: u64,
@@ -1314,9 +2217,10 @@ pub(crate) async fn apply_provider_usage_effects(
     Ok(())
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_apply.persist.stage_usage"
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.stage_usage",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn stage_provider_usage_effects(
     conn: &impl Executor,
@@ -1520,25 +2424,41 @@ async fn provider_usage_observation_sequence(
         .map_err(|error| storage("read provider usage observation sequence", error))
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.query")]
-pub async fn verify_effect(
+pub(crate) async fn verify_observation_provider_usage(
     conn: &impl QueryExecutor,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let sequence = provider_usage_observation_sequence(conn, observation.observation_id()).await?;
+    verify_provider_usage_effects(conn, sequence, observation).await
+}
+
+#[tracing::instrument(name = "global_db.observation_apply.query", level = "trace", skip_all)]
+pub async fn verify_effect(
+    conn: &impl SendProjectionDerive,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
-    let sequence = provider_usage_observation_sequence(conn, observation.observation_id()).await?;
-    verify_provider_usage_effects(conn, sequence, observation).await?;
+    if effect.skip_reason() == Some(ProjectionSkipReason::NativeSourceSuperseded) {
+        Box::pin(super::source_transition::verify_native_source_supersession(
+            conn,
+            observation,
+        ))
+        .await?;
+        return verify_skip_disposition(
+            conn,
+            observation,
+            ProjectionSkipReason::NativeSourceSuperseded,
+        )
+        .await;
+    }
+    verify_observation_provider_usage(conn, observation).await?;
     match effect {
         ObservationProjection::Message(projection) => verify_message_effect(conn, projection).await,
         ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         } => {
             if let Some(message) = message {
-                verify_message_effect(conn, message).await?;
-            }
-            for message in derived_messages {
                 verify_message_effect(conn, message).await?;
             }
             verify_workflow_effects(conn, workflow_facts).await?;
@@ -1560,37 +2480,53 @@ pub async fn verify_workflow_effects(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn apply_effect(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
+    if effect.skip_reason() == Some(ProjectionSkipReason::NativeSourceSuperseded) {
+        Box::pin(super::source_transition::verify_native_source_supersession(
+            conn,
+            observation,
+        ))
+        .await?;
+        return apply_skip_disposition(
+            conn,
+            observation,
+            ProjectionSkipReason::NativeSourceSuperseded,
+        )
+        .await;
+    }
     apply_provider_usage_effects(conn, sequence, observation).await?;
     // Boxed message-effect futures: this apply sits at the bottom of the
     // session-sync ingest chain, and its many-statement state machine inlined
     // into that already-deep composition overflows the base-opt worker stack.
     match effect {
         ObservationProjection::Message(projection) => {
-            Box::pin(apply_message_effect(
-                conn,
-                sequence,
-                observation,
-                projection,
-            ))
-            .await
+            let applied: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                Box::pin(apply_message_effect(
+                    conn,
+                    sequence,
+                    observation,
+                    projection,
+                ));
+            applied.await
         }
         ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         } => {
             if let Some(message) = message {
-                Box::pin(apply_message_effect(conn, sequence, observation, message)).await?;
-            }
-            for message in derived_messages {
-                Box::pin(apply_message_effect(conn, sequence, observation, message)).await?;
+                let applied: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                    Box::pin(apply_message_effect(conn, sequence, observation, message));
+                applied.await?;
             }
             for projection in workflow_facts {
                 apply_workflow_fact(conn, sequence, projection).await?;
@@ -1600,8 +2536,23 @@ pub(super) async fn apply_effect(
         ObservationProjection::Skipped(reason) => {
             apply_skip_disposition(conn, observation, *reason).await
         }
+    }?;
+    if effect
+        .skip_reason()
+        .is_none_or(|reason| reason == ProjectionSkipReason::NonConversationalRecord)
+    {
+        super::source_transition::settle_native_source_transition(
+            conn,
+            observation,
+            super::source_transition::SourceTransitionTarget::Live,
+        )
+        .await?;
     }
+    Ok(())
 }
+
+#[cfg(test)]
+mod authority_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1633,8 +2584,8 @@ mod tests {
             ..sparse.clone()
         };
 
-        let forward = reconcile_session_rows(&sparse, &rich).unwrap();
-        let reverse = reconcile_session_rows(&rich, &sparse).unwrap();
+        let forward = reconcile_session_rows_detailed(&sparse, &rich).unwrap();
+        let reverse = reconcile_session_rows_detailed(&rich, &sparse).unwrap();
         assert_eq!(forward, reverse);
         assert_eq!(forward.project_path, "/workspace/project");
         assert_eq!(forward.title.as_deref(), Some("Composer session"));
@@ -1648,11 +2599,11 @@ mod tests {
             project_key: "project.typed".to_owned(),
             ..legacy_path_key.clone()
         };
-        let enriched = reconcile_session_rows(&legacy_path_key, &typed_project).unwrap();
+        let enriched = reconcile_session_rows_detailed(&legacy_path_key, &typed_project).unwrap();
         assert_eq!(enriched.project_key, "project.typed");
         assert_eq!(
             enriched,
-            reconcile_session_rows(&typed_project, &legacy_path_key).unwrap()
+            reconcile_session_rows_detailed(&typed_project, &legacy_path_key).unwrap()
         );
 
         let runtime_owned = SessionRecord {
@@ -1665,7 +2616,7 @@ mod tests {
             metadata_json: Some(r#"{"source":"provider_projection"}"#.to_owned()),
             ..forward.clone()
         };
-        let preserved = reconcile_session_rows(&runtime_owned, &projected).unwrap();
+        let preserved = reconcile_session_rows_detailed(&runtime_owned, &projected).unwrap();
         assert_eq!(preserved.title.as_deref(), Some("Runtime-owned session"));
         assert_eq!(
             preserved.metadata_json.as_deref(),
@@ -1676,6 +2627,6 @@ mod tests {
             project_path: "/workspace/other".to_owned(),
             ..rich
         };
-        assert!(reconcile_session_rows(&forward, &conflicting).is_none());
+        assert!(reconcile_session_rows_detailed(&forward, &conflicting).is_err());
     }
 }

@@ -1,10 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracedecay_runtime_core::storage::{ProjectStorageLocation, classify_registry_storage_fields};
 
 pub use tracedecay_sessions::runtime::{
     SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
-    TranscriptBatch,
 };
 
 /// Total savings + call count for a project (or all projects when `project` is None).
@@ -97,6 +96,35 @@ impl ObservabilityEmissionClaimV1 {
             } => delivery_envelope_json,
         }
     }
+}
+
+/// One worker-owned owner fact looked up inside a claim-and-settle write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservabilityOwnerEmissionWriteV1 {
+    pub project_id: String,
+    pub owner_event_id: String,
+    pub owner_fact_json: String,
+}
+
+/// Delivery built only after the outbox lookup shows the fact is new.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedObservabilityEmissionV1 {
+    pub delivery_envelope_json: String,
+    pub event: AnalyticsEventInsert,
+}
+
+/// Result of claiming and settling one owner fact in a shared write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservabilityOwnerEmissionWriteOutcomeV1 {
+    /// This fact was rejected before mutation; other facts may still settle.
+    Rejected {
+        error: String,
+    },
+    /// An outbox row already owns this fact, so no new delivery was prepared.
+    Replayed,
+    Settled {
+        analytics_event_id: i64,
+    },
 }
 
 impl tracedecay_sessions::runtime::git_correlation::AnalyticsSessionTimestampSource
@@ -213,7 +241,6 @@ pub struct GraphScopeUpsert {
     pub project_id: String,
     pub store_id: String,
     pub branch_name: String,
-    pub db_relpath: String,
     pub parent_scope_id: Option<String>,
     pub last_synced_at: Option<i64>,
     pub writable: bool,
@@ -225,7 +252,6 @@ pub struct GraphScopeRecord {
     pub project_id: String,
     pub store_id: String,
     pub branch_name: String,
-    pub db_relpath: String,
     pub parent_scope_id: Option<String>,
     pub last_synced_at: Option<i64>,
     pub writable: bool,
@@ -273,12 +299,18 @@ pub struct ProjectRegistryContext {
     pub stores: Vec<ProjectStoreContext>,
 }
 
-/// One complete, bounded snapshot of the registered checkout roots that may
-/// still own derived storage for a project.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct RegisteredProjectRootInventoryV1 {
-    pub project_id: String,
-    pub roots: std::collections::BTreeSet<String>,
-    pub terminal_root_count: u64,
-    pub inventory_digest: tracedecay_domain::ManifestDigest,
+/// Candidate enrollment roots a registered project claims: its canonical
+/// and display roots plus every registered alias.
+pub fn registry_context_candidate_roots(context: &ProjectRegistryContext) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from(&context.project.canonical_root),
+        PathBuf::from(&context.project.display_root),
+    ];
+    candidates.extend(
+        context
+            .aliases
+            .iter()
+            .map(|alias| PathBuf::from(&alias.alias_path)),
+    );
+    candidates
 }

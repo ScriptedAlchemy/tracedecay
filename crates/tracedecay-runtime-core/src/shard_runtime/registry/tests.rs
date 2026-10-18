@@ -1,0 +1,671 @@
+mod attachment;
+mod graph;
+mod production_routes;
+mod support;
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use tracedecay_store::{RuntimeMaintenanceStateV1, StoreAuthorityEpochV1};
+
+use super::*;
+use support::*;
+
+#[test]
+fn budget_accepts_the_cap_and_rejects_zero_or_above_cap() {
+    assert_eq!(
+        StoreRuntimeRegistryConfig::new(MAX_PROJECT_CODE_OPEN_RUNTIMES)
+            .unwrap()
+            .project_code_open_runtime_budget(),
+        MAX_PROJECT_CODE_OPEN_RUNTIMES
+    );
+    for invalid in [0, MAX_PROJECT_CODE_OPEN_RUNTIMES + 1] {
+        assert!(matches!(
+            StoreRuntimeRegistryConfig::new(invalid),
+            Err(StoreRuntimeRegistryFailure::InvalidProjectCodeBudget { requested, .. })
+                if requested == invalid
+        ));
+    }
+}
+
+#[asupersync::test]
+async fn exclusive_maintenance_budget_accepts_any_nonzero_exact_count() {
+    for budget in [1, MAX_PROJECT_CODE_OPEN_RUNTIMES + 1, usize::MAX] {
+        let config = StoreRuntimeRegistryConfig::for_exclusive_maintenance(budget).unwrap();
+        assert_eq!(config.project_code_open_runtime_budget(), budget);
+        let _ = registry(config);
+    }
+    assert!(matches!(
+        StoreRuntimeRegistryConfig::for_exclusive_maintenance(0),
+        Err(StoreRuntimeRegistryFailure::InvalidProjectCodeBudget {
+            requested: 0,
+            maximum: usize::MAX,
+        })
+    ));
+}
+
+#[asupersync::test]
+async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
+    for clients in [1, 8, 32, 64] {
+        let (registry, resolver, publisher) = registry(StoreRuntimeRegistryConfig::default());
+        let pin = profile_pin(&registry).await;
+        publisher.block.store(true, Ordering::SeqCst);
+        let request = project_request(&format!("project.singleflight-{clients}"), &pin);
+
+        let mut joins = Vec::new();
+        for index in 0..clients {
+            match registry.begin_or_join_open(&request) {
+                StoreRuntimeOpenBegin::Started(join) if index == 0 => joins.push(join),
+                StoreRuntimeOpenBegin::Joined(join) => joins.push(join),
+                other => panic!("unexpected open result: {other:?}"),
+            }
+        }
+        wait_for_calls(&publisher.calls, 2).await;
+        publisher.release.notify_one();
+        let mut handles = Vec::new();
+        for join in joins {
+            match join.wait().await {
+                StoreRuntimeOpenResult::Published(handle) => handles.push(handle),
+                other @ StoreRuntimeOpenResult::Failed(_) => {
+                    panic!("publication failed: {other:?}")
+                }
+            }
+        }
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            handles[1..]
+                .iter()
+                .all(|handle| handles[0].shares_runtime_with(handle))
+        );
+        assert_eq!(
+            handles[0].health_snapshot().state,
+            RuntimeMaintenanceStateV1::Ready
+        );
+        eprintln!("shard_runtime_open clients={clients} runtimes=1 locators=1 busy=0 locked=0");
+    }
+}
+
+#[asupersync::test]
+async fn each_open_waiter_receives_an_independent_client_token_while_clones_share_one() {
+    let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    publisher.block.store(true, Ordering::SeqCst);
+    let request = project_request("project.client-tokens", &pin);
+    let first = registry.begin_or_join_open(&request);
+    wait_for_calls(&publisher.calls, 2).await;
+    let second = registry.begin_or_join_open(&request);
+    publisher.release.notify_one();
+
+    let first = match first.wait().await {
+        StoreRuntimeOpenResult::Published(lease) => lease,
+        StoreRuntimeOpenResult::Failed(failure) => panic!("first open failed: {failure:?}"),
+    };
+    let second = match second.wait().await {
+        StoreRuntimeOpenResult::Published(lease) => lease,
+        StoreRuntimeOpenResult::Failed(failure) => panic!("second open failed: {failure:?}"),
+    };
+    let first_clone = first.clone();
+
+    assert!(first.shares_runtime_with(&first_clone));
+    assert!(first.shares_runtime_with(&second));
+    assert_eq!(first.runtime_identity(), second.runtime_identity());
+    assert_eq!(first.health_snapshot().client_leases, 2);
+    drop(first);
+    assert_eq!(second.health_snapshot().client_leases, 2);
+    drop(first_clone);
+    assert_eq!(second.health_snapshot().client_leases, 1);
+    drop(second);
+}
+
+#[asupersync::test]
+async fn identity_bound_open_rejects_foreign_attachment_before_registry_publication() {
+    let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    let request = project_request("project.identity-bound", &pin).require_opened_file_identity(2);
+
+    assert!(matches!(
+        registry.open(request).await,
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "publish identity-bound registered runtime open",
+            message,
+        }) if message.contains("unpublished close=Ok(())")
+    ));
+
+    let inventory = registry.inventory(tracedecay_store::AdmissionConfigV1::default(), None);
+    assert_eq!(inventory.opening_shards, 0);
+    assert_eq!(
+        inventory.entries.len(),
+        1,
+        "only the profile runtime remains"
+    );
+}
+
+#[asupersync::test]
+async fn identity_bound_open_refusal_preserves_an_existing_matching_runtime() {
+    let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    let project = project_request("project.identity-retained", &pin);
+    let request = StoreRuntimeOpenRequest::new_read_only(
+        project.key().shard_id().clone(),
+        incarnation(),
+        Some(pin),
+    );
+    let retained = open_published(&registry, request.clone().require_opened_file_identity(1)).await;
+
+    assert!(matches!(
+        registry.open(request.require_opened_file_identity(2)).await,
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "join identity-bound registered runtime open",
+            ..
+        })
+    ));
+    assert!(matches!(
+        registry.lookup(retained.binding()),
+        StoreRuntimeLookup::Ready(handle)
+            if handle.shares_runtime_with(&retained)
+    ));
+}
+
+#[asupersync::test]
+async fn failed_open_wakes_joiners_and_retry_uses_a_higher_fence() {
+    let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    publisher.block.store(true, Ordering::SeqCst);
+    publisher.mode.store(1, Ordering::SeqCst);
+    let request = project_request("project.failure", &pin);
+    let first = registry.begin_or_join_open(&request);
+    wait_for_calls(&publisher.calls, 2).await;
+    let second = registry.begin_or_join_open(&request);
+    publisher.release.notify_one();
+    let (first, second) = asupersync::time::timeout(
+        asupersync::Cx::current().unwrap().now(),
+        Duration::from_secs(2),
+        async { asupersync::join!(first.wait(), second.wait()) },
+    )
+    .await
+    .expect("joiners cannot be stranded");
+    for result in [first, second] {
+        assert!(matches!(
+            result,
+            StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "publish",
+                ..
+            })
+        ));
+    }
+
+    let failed_epoch = publisher.bindings.lock().unwrap()[1].authority_epoch;
+    publisher.block.store(false, Ordering::SeqCst);
+    publisher.mode.store(0, Ordering::SeqCst);
+    let retry = open_published(&registry, request).await;
+    assert!(retry.binding().authority_epoch > failed_epoch);
+}
+
+#[test]
+fn runtime_shutdown_wakes_every_joiner_and_rejects_reuse() {
+    for round in 0..8 {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(0, 4)
+            .build()
+            .unwrap();
+        let (registry, _, publisher) =
+            runtime.block_on(async { registry(StoreRuntimeRegistryConfig::default()) });
+        let (first, second, request) = runtime.block_on(async {
+            let pin = profile_pin(&registry).await;
+            publisher.block.store(true, Ordering::SeqCst);
+            let request = project_request(&format!("project.cancelled-{round}"), &pin);
+            let first = registry.begin_or_join_open(&request);
+            wait_for_calls(&publisher.calls, 2).await;
+            let second = registry.begin_or_join_open(&request);
+            (first, second, request)
+        });
+
+        drop(runtime);
+        let waiter = asupersync::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(0, 4)
+            .build()
+            .unwrap();
+        waiter.block_on(async {
+            let (first, second) = asupersync::time::timeout(
+                asupersync::Cx::current().unwrap().now(),
+                Duration::from_secs(2),
+                async { asupersync::join!(first.wait(), second.wait()) },
+            )
+            .await
+            .expect("cancelled opener cannot strand joiners");
+            for result in [first, second] {
+                assert!(matches!(
+                    result,
+                    StoreRuntimeOpenResult::Failed(
+                        StoreRuntimeRegistryFailure::OpenTaskAbandoned { .. }
+                    )
+                ));
+            }
+
+            publisher.block.store(false, Ordering::SeqCst);
+            assert!(
+                matches!(
+                    registry.open(request).await,
+                    StoreRuntimeOpenResult::Failed(
+                        StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { .. }
+                    )
+                ),
+                "a registry cannot acquire authority from a replacement runtime"
+            );
+        });
+    }
+}
+
+/// Shutdown during an in-flight open: the shutdown close cancels and joins the
+/// open instead of skipping it, the open ends typed-cancelled with nothing
+/// published, and every idle published runtime still closes.
+#[asupersync::test]
+async fn shutdown_close_cancels_and_joins_an_in_flight_open() {
+    let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    publisher.block.store(true, Ordering::SeqCst);
+    let request = project_sessions_request("project.shutdown", &pin);
+    let opening = registry.begin_or_join_open(&request);
+    wait_for_calls(&publisher.calls, 2).await;
+    let opening_key = request.key.clone();
+    drop((request, pin));
+
+    let mut close = asupersync::Cx::current()
+        .unwrap()
+        .spawn({
+            let registry = registry.clone();
+            move |_| async move {
+                registry
+                    .close_idle_for_shutdown(std::time::Instant::now())
+                    .await
+            }
+        })
+        .unwrap();
+    asupersync::time::timeout(
+        asupersync::Cx::current().unwrap().now(),
+        Duration::from_secs(2),
+        async {
+            while !registry.open_cancellation().is_cancelled() {
+                asupersync::runtime::yield_now().await;
+            }
+        },
+    )
+    .await
+    .expect("shutdown close cancels in-flight opens");
+    asupersync::runtime::yield_now().await;
+    assert!(
+        !close.is_finished(),
+        "shutdown close must join the open it cancelled, not skip it"
+    );
+    publisher.release.notify_one();
+
+    let opened = opening.wait().await;
+    assert!(
+        matches!(
+            &opened,
+            StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::OpenCancelled { key })
+                if **key == opening_key
+        ),
+        "a cancelled open publishes nothing: {opened:?}"
+    );
+    assert_eq!(
+        close
+            .join(&asupersync::Cx::current().unwrap())
+            .await
+            .unwrap()
+            .unwrap(),
+        1,
+        "only the profile runtime"
+    );
+    let inventory = registry.inventory(AdmissionConfigV1::default(), None);
+    assert_eq!(inventory.opening_shards, 0);
+    assert_eq!(inventory.entries.len(), 0);
+
+    let reopened = registry
+        .open(StoreRuntimeOpenRequest::new(
+            profile_shard(),
+            incarnation(),
+            None,
+        ))
+        .await;
+    assert!(
+        matches!(
+            &reopened,
+            StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::OpenCancelled { .. })
+        ),
+        "a shut-down registry admits no new open: {reopened:?}"
+    );
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
+}
+
+#[asupersync::test]
+async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
+    let config = StoreRuntimeRegistryConfig::new(2).unwrap();
+    let (registry, _, _publisher) = registry(config);
+    let pin = profile_pin(&registry).await;
+    let held = open_published(&registry, code_request("worktree.held", &pin)).await;
+    let leased = open_published(&registry, code_request("worktree.leased", &pin)).await;
+    let leased_binding = leased.binding().clone();
+    let StoreRuntimeLookup::Ready(retained) = registry.lookup(&leased_binding) else {
+        panic!("a published runtime issues an independent client lease");
+    };
+    drop(leased);
+
+    assert!(matches!(
+        registry.begin_or_join_open(&code_request("worktree.overflow", &pin)),
+        StoreRuntimeOpenBegin::Rejected(StoreRuntimeRegistryFailure::ProjectCodeBudgetExhausted {
+            limit: 2
+        })
+    ));
+    assert!(matches!(
+        registry.lookup(pin.binding()),
+        StoreRuntimeLookup::Ready(_)
+    ));
+    assert!(matches!(
+        registry.lookup(&leased_binding),
+        // The lookup itself is one client token and the retained client is
+        // the second retirement-visible lifetime.
+        StoreRuntimeLookup::Ready(handle) if handle.health_snapshot().client_leases == 2
+    ));
+
+    let held_binding = held.binding().clone();
+    drop(held);
+    open_published(&registry, code_request("worktree.overflow", &pin)).await;
+    assert!(matches!(
+        registry.lookup(&held_binding),
+        StoreRuntimeLookup::Missing { .. }
+    ));
+    drop(retained);
+
+    force_ready_runtime_state(&registry, pin.binding(), RuntimeMaintenanceStateV1::Faulted);
+    assert!(matches!(
+        registry.profile_authority_pin(&profile_shard()),
+        ProfileAuthorityPinResult::Rejected(
+            StoreRuntimeRegistryFailure::ProfileAuthorityUnavailable {
+                state: RuntimeMaintenanceStateV1::Faulted,
+                ..
+            }
+        )
+    ));
+    assert!(matches!(
+        registry.begin_or_join_open(&code_request("worktree.after-profile-fault", &pin)),
+        StoreRuntimeOpenBegin::Rejected(StoreRuntimeRegistryFailure::ProfileAuthorityUnavailable {
+            state: RuntimeMaintenanceStateV1::Faulted,
+            ..
+        })
+    ));
+}
+
+#[asupersync::test]
+async fn profile_sessions_require_the_profile_pin_without_consuming_project_capacity() {
+    let config = StoreRuntimeRegistryConfig::new(1).unwrap();
+    let (registry, _, _) = registry(config);
+    let pin = profile_pin(&registry).await;
+    assert!(matches!(
+        registry.begin_or_join_open(&StoreRuntimeOpenRequest::new(
+            profile_sessions_shard(),
+            incarnation(),
+            None,
+        )),
+        StoreRuntimeOpenBegin::Rejected(
+            StoreRuntimeRegistryFailure::ProfileAuthorityRequired { .. }
+        )
+    ));
+
+    let profile_sessions = open_published(&registry, profile_sessions_request(&pin)).await;
+    let project = open_published(&registry, project_request("project.full-budget", &pin)).await;
+
+    assert!(matches!(
+        registry.lookup(profile_sessions.binding()),
+        StoreRuntimeLookup::Ready(_)
+    ));
+    assert!(matches!(
+        registry.lookup(project.binding()),
+        StoreRuntimeLookup::Ready(_)
+    ));
+}
+
+#[asupersync::test]
+async fn project_memory_and_sessions_do_not_consume_code_capacity() {
+    let config = StoreRuntimeRegistryConfig::new(1).unwrap();
+    let (registry, _, _) = registry(config);
+    let pin = profile_pin(&registry).await;
+    let code = open_published(&registry, code_request("worktree.full-budget", &pin)).await;
+    let project = open_published(
+        &registry,
+        project_request("project.memory-outside-code-budget", &pin),
+    )
+    .await;
+    let sessions = open_published(
+        &registry,
+        project_sessions_request("project.sessions-outside-code-budget", &pin),
+    )
+    .await;
+
+    assert!(matches!(
+        registry.begin_or_join_open(&code_request("worktree.overflow", &pin)),
+        StoreRuntimeOpenBegin::Rejected(StoreRuntimeRegistryFailure::ProjectCodeBudgetExhausted {
+            limit: 1
+        })
+    ));
+    for binding in [code.binding(), project.binding(), sessions.binding()] {
+        assert!(matches!(
+            registry.lookup(binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+    }
+}
+
+#[asupersync::test]
+async fn epochs_are_monotonic_across_registries_and_respect_a_retained_floor() {
+    let resolver: Arc<dyn StoreRuntimeResolver> = Arc::new(TestResolver::default());
+    let publisher: Arc<dyn ShardRuntimePublisher> = Arc::new(TestPublisher::default());
+    let floor = StoreAuthorityEpochV1::new(1_000_000).unwrap();
+    let first = StoreRuntimeRegistry::with_config_and_authority_epoch_floor(
+        asupersync::runtime::Runtime::current_handle().unwrap(),
+        resolver.clone(),
+        publisher.clone(),
+        StoreRuntimeRegistryConfig::default(),
+        Some(floor),
+    )
+    .unwrap();
+    let first = open_published(
+        &first,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    let second = StoreRuntimeRegistry::new(
+        asupersync::runtime::Runtime::current_handle().unwrap(),
+        resolver,
+        publisher,
+    )
+    .unwrap();
+    let second = open_published(
+        &second,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    assert!(first.binding().authority_epoch > floor);
+    assert!(second.binding().authority_epoch > first.binding().authority_epoch);
+    assert!(!first.shares_runtime_with(&second));
+}
+
+#[test]
+fn exact_sql_authority_rechecks_opened_file_identity() {
+    use tracedecay_rusqlite_runtime::exact_sql::{
+        ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("identity.db");
+    std::fs::write(&database_path, []).unwrap();
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&database_path, "exact SQL identity test")
+            .unwrap();
+    let current_identity = crate::db::sqlite_generation_identity(&database_path).unwrap();
+    let authority = RuntimeDatabaseWriteAuthority {
+        authority,
+        canonical_path: database_path.canonicalize().unwrap(),
+        opened_file_identity: current_identity,
+    };
+
+    let retained_path = directory.path().join("retained-original.db");
+    std::fs::rename(&database_path, retained_path).unwrap();
+    std::fs::write(&database_path, []).unwrap();
+
+    assert!(matches!(
+        ExactSqlWriteAuthority::verify(&authority, ExactSqlWriteIntent::Execute),
+        Err(ExactSqlError::AuthorityDenied(message))
+            if message == "database file identity changed after registry attachment"
+    ));
+}
+
+#[cfg(unix)]
+#[asupersync::test]
+async fn registered_identity_inspection_failures_preserve_operation_and_safe_category() {
+    use crate::db::{
+        Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    };
+    use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlError, ExactSqlStatement};
+
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("private-provider-session.sqlite3");
+    let authority =
+        DatabaseAuthority::acquire_test(&database_path, "identity classification").unwrap();
+    let fixture = Database::publish_registered_test_runtime_with_retirement_control(
+        &database_path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+        TestDatabaseRuntimeScope::ProfileMemory,
+    )
+    .await
+    .unwrap();
+    let (owner, runtime, _retirement) = fixture.into_parts();
+    let exact_sql = runtime
+        .authorized_exact_sql_handle(authority.clone())
+        .unwrap();
+    let database = owner.issue_lease().unwrap();
+
+    std::fs::remove_file(&database_path).unwrap();
+
+    let registry_failure = runtime
+        .validate_registered_read("read registered metadata")
+        .unwrap_err();
+    assert!(matches!(
+        &registry_failure,
+        StoreRuntimeRegistryFailure::SqliteFileIdentityInspectionFailed {
+            operation: "read registered metadata",
+            source,
+        } if source.operation() == crate::db::SqliteFileIdentityOperation::Inspect
+            && source.category() == crate::db::SqliteFileIdentityErrorCategory::NotFound
+    ));
+    let diagnostic = format!("{registry_failure:?}");
+    assert!(diagnostic.contains("read registered metadata"));
+    assert!(diagnostic.contains("NotFound"));
+    assert!(!diagnostic.contains("private-provider-session"));
+    assert!(!diagnostic.contains(&database_path.display().to_string()));
+    assert!(!diagnostic.contains("No such file"));
+
+    let exact_sql_attachment_failure = runtime
+        .validate_registered_read("authorize exact SQL channel")
+        .unwrap_err();
+    assert!(
+        matches!(
+            &exact_sql_attachment_failure,
+            StoreRuntimeRegistryFailure::SqliteFileIdentityInspectionFailed {
+                operation: "authorize exact SQL channel",
+                source,
+            } if source.category() == crate::db::SqliteFileIdentityErrorCategory::NotFound
+        ),
+        "unexpected exact-SQL attachment failure: {exact_sql_attachment_failure:?}"
+    );
+
+    let checkpoint = database.checkpoint().await.unwrap_err();
+    let checkpoint_diagnostic = format!("{checkpoint:?}");
+    assert!(checkpoint_diagnostic.contains("authorize registered checkpoint"));
+    assert!(checkpoint_diagnostic.contains("NotFound"));
+    assert!(!checkpoint_diagnostic.contains("private-provider-session"));
+    assert!(!checkpoint_diagnostic.contains("No such file"));
+
+    let metadata = database
+        .set_metadata("private-provider-key", "private-session-content")
+        .await
+        .unwrap_err();
+    let metadata_diagnostic = format!("{metadata:?}");
+    assert!(metadata_diagnostic.contains("begin registered exact SQL transaction"));
+    assert!(metadata_diagnostic.contains("not_found"));
+    assert!(!metadata_diagnostic.contains("private-provider-session"));
+    assert!(!metadata_diagnostic.contains("private-provider-key"));
+    assert!(!metadata_diagnostic.contains("private-session-content"));
+    assert!(!metadata_diagnostic.contains("No such file"));
+
+    let exact_sql_error = exact_sql
+        .execute(
+            ExactSqlStatement::new(
+                "CREATE TABLE should_not_execute (id INTEGER)".to_owned(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        exact_sql_error,
+        ExactSqlError::AuthorityDenied(message)
+            if message == "execute registered exact SQL statement: registered SQLite file identity inspection failed: inspect failed (not_found)"
+    ));
+}
+
+#[asupersync::test]
+async fn cancelling_an_open_waiter_preserves_owned_publication_and_shutdown_drain() {
+    let cx = asupersync::Cx::current().unwrap();
+    let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    publisher.block.store(true, Ordering::SeqCst);
+    let request = project_request("project.cancelled-waiter", &pin);
+    let opening = registry.begin_or_join_open(&request);
+    wait_for_calls(&publisher.calls, 2).await;
+    let joined = registry.begin_or_join_open(&request);
+    let (started, mut waiting) = asupersync::channel::oneshot::channel();
+    let mut waiter = cx
+        .spawn(move |cx| async move {
+            started.send(&cx, ()).unwrap();
+            opening.wait().await
+        })
+        .unwrap();
+    waiting.recv(&cx).await.unwrap();
+    waiter.abort();
+    assert!(matches!(
+        waiter.join(&cx).await.unwrap(),
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::WaitCancelled {
+            operation: "wait for registered runtime open",
+        })
+    ));
+    assert_eq!(
+        registry
+            .inventory(AdmissionConfigV1::default(), None)
+            .opening_shards,
+        1
+    );
+    publisher.release.notify_one();
+    let published = match joined.wait().await {
+        StoreRuntimeOpenResult::Published(published) => published,
+        other @ StoreRuntimeOpenResult::Failed(_) => {
+            panic!("accepted open lost its owner: {other:?}")
+        }
+    };
+    let binding = published.binding().clone();
+    drop((published, request, pin));
+    assert_eq!(
+        registry
+            .close_idle_for_shutdown(std::time::Instant::now())
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(matches!(
+        registry.lookup(&binding),
+        StoreRuntimeLookup::Missing { .. }
+    ));
+}

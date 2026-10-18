@@ -1,40 +1,39 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
 use tracedecay_automation_runtime::automation::AutomationRunControl;
-use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
+use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
+use tracedecay_automation_runtime::automation::scheduler_stop::AutomationSchedulerStop;
+use tracedecay_runtime_core::native_runtime::NativeTask;
 
-use crate::daemon::automation_effect::{
+use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
+    RetainedAutomationSettlementProjection, pinned_automation_configuration_digest,
 };
-use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
 
 use super::branch_admin::MaintenanceReaperKind;
-use super::{
-    DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
-};
+use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, StoreAdministration};
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
+use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime::{self, timeout};
 
 mod combined_effect;
 pub(crate) mod effect_admission;
 mod host_receipt_review;
-mod run_control;
-mod termination;
 pub(super) use effect_admission::run_automation_scheduler_tick;
 use effect_admission::{
     log_scheduler_admission_conflict, log_scheduler_pre_admission_problem,
     scheduler_automation_effect, synchronize_scheduler_effect_control,
 };
 use host_receipt_review::run_host_receipt_review;
-use run_control::AutomationSchedulerStop;
-pub(super) use termination::MaintenanceTaskTermination;
 
-pub(super) fn scheduler_task_log_fields(
+fn scheduler_project_task_fields(
     project_path: &Path,
-    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
-    outcome: &str,
+    task: AgentTaskKind,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
@@ -42,8 +41,17 @@ pub(super) fn scheduler_task_log_fields(
             "task",
             tracedecay_automation_runtime::automation::backend::task_key(task).to_string(),
         ),
-        ("outcome", outcome.to_string()),
     ]
+}
+
+pub(super) fn scheduler_task_log_fields(
+    project_path: &Path,
+    task: AgentTaskKind,
+    outcome: &str,
+) -> Vec<(&'static str, String)> {
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.push(("outcome", outcome.to_string()));
+    fields
 }
 
 fn log_scheduler_task_start(
@@ -58,17 +66,12 @@ fn log_scheduler_task_start(
 
 fn scheduler_task_error_log_fields(
     project_path: &Path,
-    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
+    task: AgentTaskKind,
     error: &impl std::fmt::Display,
 ) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        (
-            "task",
-            tracedecay_automation_runtime::automation::backend::task_key(task).to_string(),
-        ),
-        ("error", error.to_string()),
-    ]
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.push(("error", error.to_string()));
+    fields
 }
 
 fn log_scheduler_task_error(
@@ -87,40 +90,28 @@ fn log_scheduler_automation_replay(
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     terminal: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal,
 ) {
-    log_daemon_event(
-        "scheduler_task_application_replay",
-        &[
-            ("project", project_path.display().to_string()),
-            (
-                "task",
-                tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
-            ),
-            (
-                "terminal",
-                if terminal.is_completed() {
-                    "completed"
-                } else if terminal.problem().is_some() {
-                    "problem"
-                } else {
-                    "skipped"
-                }
-                .to_owned(),
-            ),
-        ],
-    );
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.push((
+        "terminal",
+        if terminal.is_completed() {
+            "completed"
+        } else if terminal.problem().is_some() {
+            "problem"
+        } else {
+            "skipped"
+        }
+        .to_owned(),
+    ));
+    log_daemon_event("scheduler_task_application_replay", &fields);
 }
 
 pub(super) fn scheduler_application_problem_log_fields(
     project_path: &Path,
-    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
+    task: AgentTaskKind,
     problem: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
 ) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        (
-            "task",
-            tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
-        ),
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.extend([
         ("request_id", problem.problem.request_id.as_str().to_owned()),
         ("run_id", problem.run_id.as_str().to_owned()),
         (
@@ -132,7 +123,8 @@ pub(super) fn scheduler_application_problem_log_fields(
             "committed_receipt_count",
             problem.committed_receipts.len().to_string(),
         ),
-    ]
+    ]);
+    fields
 }
 
 fn scheduler_run_observer(
@@ -152,6 +144,15 @@ fn scheduler_run_observer(
     })
 }
 
+#[tracing::instrument(
+    name = "daemon.scheduler.settle_retained_automation",
+    level = "trace",
+    skip_all
+)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Settlement composes the retained run, effect guard, cancellation and project observer without transferring their authorities."
+)]
 async fn settle_scheduler_retained_automation<T, P>(
     engine: &DaemonEngine,
     project_id: &tracedecay_domain::ProjectId,
@@ -173,6 +174,9 @@ where
         + 'static,
 {
     synchronize_scheduler_effect_control(run_control);
+    // The task was admitted, so a pre-admission problem that recurs later is
+    // a new transition and must be logged again.
+    effect_admission::note_scheduler_task_admitted(project_path, task);
     let settlement = effect.start_retained_automation_settlement(
         retained,
         Some(scheduler_run_observer(engine, project_id, project_path)),
@@ -234,17 +238,6 @@ fn scheduler_record_log_fields(
     fields
 }
 
-#[cfg(test)]
-pub(super) fn daemon_scheduler_record_log_line(
-    project_path: &Path,
-    record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
-) -> String {
-    super::format_daemon_log_line(
-        "scheduler_task",
-        &scheduler_record_log_fields(project_path, record),
-    )
-}
-
 fn log_daemon_scheduler_record(
     project_path: &Path,
     record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
@@ -268,7 +261,7 @@ pub(super) enum AutomationSchedulerLifecycle {
 }
 
 pub(super) struct AutomationSchedulerHandle {
-    pub(super) task: Option<JoinHandle<()>>,
+    pub(super) task: Option<NativeTask<()>>,
     pub(super) wake: Arc<tokio::sync::Notify>,
     pub(super) completion: Arc<()>,
     pub(super) generation: Arc<std::sync::atomic::AtomicU64>,
@@ -279,7 +272,7 @@ pub(super) struct AutomationSchedulerHandle {
 
 #[cfg(test)]
 impl AutomationSchedulerHandle {
-    pub(super) fn for_test(task: JoinHandle<()>) -> Self {
+    pub(super) fn for_test(task: NativeTask<()>) -> Self {
         Self {
             task: Some(task),
             wake: Arc::new(tokio::sync::Notify::new()),
@@ -292,12 +285,17 @@ impl AutomationSchedulerHandle {
     }
 }
 
+/// One automation loop's early-stop handles, registered when it starts.
+pub(super) struct AutomationSchedulerSignal {
+    stop: AutomationSchedulerStop,
+    wake: std::sync::Weak<tokio::sync::Notify>,
+}
+
 pub(super) struct AutomationSchedulerRetirement {
     termination: Arc<MaintenanceTaskTermination>,
 }
 
 impl AutomationSchedulerRetirement {
-    #[hotpath::skip]
     pub(super) async fn wait(self) {
         self.termination.wait().await;
     }
@@ -322,7 +320,6 @@ impl AutomationSchedulerExitBarrier {
         Self { state }
     }
 
-    #[hotpath::skip]
     async fn pause_after_disabled_read(&self) {
         self.state.send_modify(|state| *state |= Self::REACHED);
         self.wait_for(|state| state & Self::RELEASED != 0).await;
@@ -334,7 +331,6 @@ impl AutomationSchedulerExitBarrier {
             .send_modify(|state| *state = (*state & !Self::DECISION_MASK) | decision);
     }
 
-    #[hotpath::skip]
     pub(super) async fn wait_until_reached(&self) {
         self.wait_for(|state| state & Self::REACHED != 0).await;
     }
@@ -343,14 +339,12 @@ impl AutomationSchedulerExitBarrier {
         self.state.send_modify(|state| *state |= Self::RELEASED);
     }
 
-    #[hotpath::skip]
     pub(super) async fn wait_for_decision(&self) -> u8 {
         self.wait_for(|state| state & Self::DECISION_MASK != Self::UNDECIDED)
             .await
             & Self::DECISION_MASK
     }
 
-    #[hotpath::skip]
     async fn wait_for(&self, ready: impl Fn(u8) -> bool) -> u8 {
         let mut state = self.state.subscribe();
         loop {
@@ -399,13 +393,12 @@ mod automation_scheduler_exit_barrier_tests {
 }
 
 impl DaemonEngine {
-    #[hotpath::skip]
     pub(super) async fn activate_automation_scheduler_for_open_project(
         &self,
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-        cg: Arc<crate::tracedecay::TraceDecay>,
+        cg: Arc<tracedecay_project::project::TraceDecay>,
     ) {
         if !self.lifecycle.accepting() {
             return;
@@ -483,13 +476,12 @@ impl DaemonEngine {
             .await;
     }
 
-    #[hotpath::skip]
     pub(super) async fn ensure_automation_scheduler(
         &self,
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
+    ) -> tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome {
         let transition = self.maintenance_transition_gate(&key).await;
         let _transition = transition.lock().await;
         let scope = super::branch_admin::owner_writer_scope(&key);
@@ -501,14 +493,17 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Locked scheduler reconcile is one compare-and-swap of the live automation handle."
+    )]
     pub(super) async fn reconcile_automation_scheduler_locked(
         &self,
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
-        use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+    ) -> tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome {
+        use tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome;
 
         if !self.lifecycle.accepting() {
             return AutomationSchedulerReconcileOutcome::LifecycleInactive;
@@ -546,7 +541,7 @@ impl DaemonEngine {
         if let Some(mut handle) = finished
             && let Some(task) = handle.task.take()
         {
-            let _ = task.await;
+            let _ = task.wait().await;
         }
 
         #[cfg(test)]
@@ -640,7 +635,7 @@ impl DaemonEngine {
             if let Some(mut handle) = finished
                 && let Some(task) = handle.task.take()
             {
-                let _ = task.await;
+                let _ = task.wait().await;
             }
             debug_assert!(matches!(
                 lifecycle,
@@ -677,15 +672,19 @@ impl DaemonEngine {
         })
     }
 
-    #[hotpath::measure(label = "daemon.scheduler.start_automation", future = true)]
+    #[tracing::instrument(name = "daemon.scheduler.start_automation", level = "trace", skip_all)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Scheduler start is one handle-spawn and first-tick arming sequence."
+    )]
     pub(super) async fn start_automation_scheduler(
         &self,
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
         cg: Arc<TraceDecay>,
-    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
-        use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+    ) -> tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome {
+        use tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome;
 
         if !self.lifecycle.accepting() {
             return AutomationSchedulerReconcileOutcome::LifecycleInactive;
@@ -737,7 +736,9 @@ impl DaemonEngine {
         let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let loop_generation = Arc::clone(&generation);
         let stop_requested = AutomationSchedulerStop::default();
-        let run_control = stop_requested.run_control(self.lifecycle.clone());
+        let lifecycle = self.lifecycle.clone();
+        let run_control =
+            stop_requested.run_control(std::sync::Arc::new(move || lifecycle.accepting()));
         let termination = Arc::new(MaintenanceTaskTermination::pending());
         let administration = self.store_administration.clone();
         let scheduler_engine = self.clone();
@@ -770,10 +771,35 @@ impl DaemonEngine {
                         || handle.lifecycle == AutomationSchedulerLifecycle::Retiring
                 });
         };
-        let task = tokio::spawn(hotpath::future!(
+        let task = match NativeTask::spawn(tracing::Instrument::instrument(
             scheduler_loop,
-            label = "daemon.scheduler.loop"
-        ));
+            tracing::trace_span!("daemon.scheduler.loop"),
+        )) {
+            Ok(task) => task,
+            Err(error) => {
+                log_daemon_event(
+                    "scheduler_start",
+                    &[
+                        ("project", key.project_root.display().to_string()),
+                        ("outcome", "runtime_unavailable".to_string()),
+                        ("error", error),
+                    ],
+                );
+                return AutomationSchedulerReconcileOutcome::OwnerUnavailable;
+            }
+        };
+        {
+            let mut signals = self
+                .store_administration
+                .automation_scheduler_signals()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            signals.retain(|signal| signal.wake.strong_count() > 0);
+            signals.push(AutomationSchedulerSignal {
+                stop: stop_requested.clone(),
+                wake: Arc::downgrade(&wake),
+            });
+        }
         schedulers.insert(
             key,
             AutomationSchedulerHandle {
@@ -792,7 +818,7 @@ impl DaemonEngine {
         AutomationSchedulerReconcileOutcome::Started
     }
 
-    #[hotpath::skip]
+    #[tracing::instrument(name = "daemon.scheduler.commit_exit", level = "trace", skip_all)]
     async fn commit_automation_scheduler_exit(
         &self,
         key: &ProjectServerKey,
@@ -863,7 +889,6 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::skip]
     pub(super) async fn retire_automation_scheduler_locked(
         &self,
         key: &ProjectServerKey,
@@ -872,7 +897,6 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::skip]
     async fn retire_exact_automation_scheduler_locked(
         &self,
         key: &ProjectServerKey,
@@ -881,79 +905,42 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::skip]
     async fn retire_matching_automation_scheduler_locked(
         &self,
         key: &ProjectServerKey,
         allow_logical_owner: bool,
     ) -> Option<AutomationSchedulerRetirement> {
-        let (task, completion, termination, reservation) = {
-            let mut schedulers = self
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await;
-            let owner = if schedulers.contains_key(key) {
-                key.clone()
-            } else if allow_logical_owner {
-                schedulers
-                    .keys()
-                    .find(|candidate| same_scheduler_owner(candidate, key))
-                    .cloned()?
-            } else {
-                return None;
-            };
-            let handle = schedulers.get_mut(&owner)?;
-            let reservation = self
-                .store_administration
-                .reserve_retirement_reaper(&owner)?;
-            handle.stop_requested.request();
-            handle.lifecycle = AutomationSchedulerLifecycle::Retiring;
-            handle
-                .generation
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let task = handle.task.take().map(|task| (owner, task));
-            (
-                task,
-                Arc::clone(&handle.completion),
-                Arc::clone(&handle.termination),
-                reservation,
-            )
-        };
         #[cfg(test)]
-        self.automation_scheduler_state_changed.notify_waiters();
-        if let Some((owner, task)) = task {
-            let completed = Arc::clone(&completion);
-            let reaper_administration = self.store_administration.clone();
-            let reaper_owner = owner.clone();
-            #[cfg(test)]
-            let state_changed = Arc::clone(&self.automation_scheduler_state_changed);
-            self.store_administration.spawn_retirement_reaper(
-                reservation,
-                MaintenanceReaperKind::Automation,
-                owner,
-                task,
-                Arc::clone(&termination),
-                async move {
-                    {
-                        let mut schedulers =
-                            reaper_administration.automation_schedulers().lock().await;
-                        if schedulers.get(&reaper_owner).is_some_and(|handle| {
-                            Arc::ptr_eq(&handle.completion, &completed)
-                                && handle.lifecycle == AutomationSchedulerLifecycle::Retiring
-                        }) {
-                            schedulers.remove(&reaper_owner);
-                        }
-                    }
-                    #[cfg(test)]
-                    state_changed.notify_waiters();
-                },
-            );
-        }
-        Some(AutomationSchedulerRetirement { termination })
+        let state_changed = Some(Arc::clone(&self.automation_scheduler_state_changed));
+        #[cfg(not(test))]
+        let state_changed = None;
+        retire_matching_automation_scheduler(
+            &self.store_administration,
+            key,
+            allow_logical_owner,
+            state_changed,
+        )
+        .await
     }
 
-    #[hotpath::skip]
+    /// Request every automation loop to stop. Prepare-time cancel must be
+    /// synchronous, so it signals through the registered early-stop handles
+    /// and never waits for the async scheduler map.
+    pub(super) fn cancel_automation_schedulers(&self) {
+        let signals = self
+            .store_administration
+            .automation_scheduler_signals()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for signal in signals.iter() {
+            let Some(wake) = signal.wake.upgrade() else {
+                continue;
+            };
+            signal.stop.request();
+            wake.notify_one();
+        }
+    }
+
     pub(super) async fn shutdown_automation_schedulers(&self) {
         // Draining is latched before this runs, and every registration path
         // rechecks that latch. Do not queue shutdown behind unrelated
@@ -978,13 +965,104 @@ impl DaemonEngine {
             .await
             .clear();
         let _child_shutdown =
-            tracedecay_sessions::runtime::codex_app_server::begin_codex_app_server_shutdown();
+            tracedecay_sessions::runtime::hosts::codex_app_server::begin_codex_app_server_shutdown(
+            );
         let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
             for retirement in retirements {
                 retirement.wait().await;
             }
         })
         .await;
+    }
+}
+
+#[tracing::instrument(name = "daemon.scheduler.retire_scheduler", level = "trace", skip_all)]
+async fn retire_matching_automation_scheduler(
+    store_administration: &StoreAdministration,
+    key: &ProjectServerKey,
+    allow_logical_owner: bool,
+    state_changed: Option<Arc<tokio::sync::Notify>>,
+) -> Option<AutomationSchedulerRetirement> {
+    let (task, completion, termination, reservation) = {
+        let mut schedulers = store_administration.automation_schedulers().lock().await;
+        let owner = if schedulers.contains_key(key) {
+            key.clone()
+        } else if allow_logical_owner {
+            schedulers
+                .keys()
+                .find(|candidate| same_scheduler_owner(candidate, key))
+                .cloned()?
+        } else {
+            return None;
+        };
+        let handle = schedulers.get_mut(&owner)?;
+        let reservation = store_administration.reserve_retirement_reaper(&owner)?;
+        handle.stop_requested.request();
+        handle.lifecycle = AutomationSchedulerLifecycle::Retiring;
+        handle
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let task = handle.task.take().map(|task| (owner, task));
+        (
+            task,
+            Arc::clone(&handle.completion),
+            Arc::clone(&handle.termination),
+            reservation,
+        )
+    };
+    if let Some(state_changed) = &state_changed {
+        state_changed.notify_waiters();
+    }
+    if let Some((owner, task)) = task {
+        let completed = Arc::clone(&completion);
+        let reaper_administration = store_administration.clone();
+        let reaper_owner = owner.clone();
+        store_administration.spawn_retirement_reaper(
+            reservation,
+            MaintenanceReaperKind::Automation,
+            owner,
+            task,
+            Arc::clone(&termination),
+            async move {
+                {
+                    let mut schedulers = reaper_administration.automation_schedulers().lock().await;
+                    if schedulers.get(&reaper_owner).is_some_and(|handle| {
+                        Arc::ptr_eq(&handle.completion, &completed)
+                            && handle.lifecycle == AutomationSchedulerLifecycle::Retiring
+                    }) {
+                        schedulers.remove(&reaper_owner);
+                    }
+                }
+                if let Some(state_changed) = state_changed {
+                    state_changed.notify_waiters();
+                }
+            },
+        );
+    }
+    Some(AutomationSchedulerRetirement { termination })
+}
+
+/// Stops every automation loop bound to one physical store owner and waits
+/// until each has dropped its project handle, so capacity retirement never
+/// races a loop that still holds the owner's session Store client.
+pub(super) async fn retire_owner_automation_schedulers(
+    store_administration: &StoreAdministration,
+    owner: &super::StoreOwnerKey,
+) {
+    let keys: Vec<ProjectServerKey> = store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .keys()
+        .filter(|key| &key.owner == owner)
+        .cloned()
+        .collect();
+    for key in keys {
+        if let Some(retirement) =
+            retire_matching_automation_scheduler(store_administration, &key, false, None).await
+        {
+            retirement.wait().await;
+        }
     }
 }
 
@@ -997,13 +1075,18 @@ pub(super) fn same_scheduler_owner(left: &ProjectServerKey, right: &ProjectServe
 fn observed_scheduler_lifecycle(
     handle: &AutomationSchedulerHandle,
 ) -> AutomationSchedulerLifecycle {
-    if handle.task.as_ref().is_some_and(JoinHandle::is_finished) {
+    if handle.task.as_ref().is_some_and(NativeTask::is_finished) {
         AutomationSchedulerLifecycle::Finished
     } else {
         handle.lifecycle
     }
 }
 
+#[tracing::instrument(
+    name = "daemon.scheduler.retained_project_graph",
+    level = "trace",
+    skip_all
+)]
 async fn retained_project_graph(
     engine: &DaemonEngine,
     key: &ProjectServerKey,
@@ -1015,59 +1098,51 @@ async fn retained_project_graph(
     Some(server.cg().await)
 }
 
-/// Consecutive project-open failures after which the scheduler loop exits.
-///
-/// The loop is respawned by the next scheduler reconcile, so this bounds one
-/// futile retry streak rather than retiring the automation lane.
-const SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION: u32 = 6;
-
-/// Longest gap between project-open retries.
-const SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING: Duration = Duration::from_mins(5);
-
-struct BackgroundJobGaugeGuard {
-    #[cfg(test)]
-    test_counter: Option<Arc<std::sync::atomic::AtomicI64>>,
-}
-
-impl BackgroundJobGaugeGuard {
-    fn enter() -> Self {
-        hotpath::gauge!("background_jobs").inc(1.0);
-        Self {
-            #[cfg(test)]
-            test_counter: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn enter_for_test(counter: Arc<std::sync::atomic::AtomicI64>) -> Self {
-        let mut guard = Self::enter();
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        guard.test_counter = Some(counter);
-        guard
-    }
-}
-
-impl Drop for BackgroundJobGaugeGuard {
-    fn drop(&mut self) {
-        hotpath::gauge!("background_jobs").inc(-1.0);
-        #[cfg(test)]
-        if let Some(counter) = self.test_counter.as_ref() {
-            counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-}
-
-/// Exponential backoff for repeated project-open failures, from one tick.
-fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
-    let base = Duration::from_secs(
-        tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-    );
-    let steps = consecutive_failures.saturating_sub(1).min(16);
-    base.saturating_mul(1_u32.checked_shl(steps).unwrap_or(u32::MAX))
-        .min(SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING)
-}
-
 #[allow(clippy::too_many_arguments)]
+/// The scheduler tick as a type-erased boxed future: the loop's state machine
+/// (and every layout query that reaches it from a runtime open) then names
+/// only a pointer, not the instrumented tick future.
+fn boxed_automation_scheduler_tick<'a>(
+    project_path: &'a Path,
+    cg: &'a TraceDecay,
+    handshake: &'a DaemonHandshake,
+    engine: &'a DaemonEngine,
+    run_control: &'a AutomationRunControl,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(run_automation_scheduler_tick(
+        project_path,
+        cg,
+        handshake,
+        engine,
+        run_control,
+    ))
+}
+
+/// See [`boxed_automation_scheduler_tick`].
+fn boxed_host_receipt_review<'a>(
+    project_path: &'a Path,
+    cg: &'a TraceDecay,
+    handshake: &'a DaemonHandshake,
+    engine: &'a DaemonEngine,
+    run_control: &'a AutomationRunControl,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(run_host_receipt_review(
+        project_path,
+        cg,
+        handshake,
+        engine,
+        run_control,
+    ))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The task owns its wake, generation and completion tokens until scheduler exit is committed."
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The automation scheduler loop is one wake-admit-tick cadence for a project."
+)]
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
     handshake: DaemonHandshake,
@@ -1081,7 +1156,12 @@ async fn run_automation_scheduler_loop(
     #[cfg(test)] exit_barrier: Option<Arc<AutomationSchedulerExitBarrier>>,
 ) {
     let mut consecutive_open_failures: u32 = 0;
-    loop {
+    'scheduler: loop {
+        // A stop request (retirement, daemon cancel, draining) ends the loop
+        // at its next wake instead of leaving it for the shutdown join.
+        if run_control.read_control().interrupted() {
+            break;
+        }
         let observed_generation = generation.load(std::sync::atomic::Ordering::Acquire);
         match automation_scheduler_has_work_for_project(&cg).await {
             Ok(true) => {
@@ -1121,12 +1201,12 @@ async fn run_automation_scheduler_loop(
                     break;
                 }
                 // Still configured or the generation advanced, so stay in the
-                // loop — but yield until the next tick or an explicit wake
+                // loop, but yield until the next tick or an explicit wake
                 // instead of spinning through the gate locks.
                 tokio::select! {
-                    () = tokio::time::sleep(Duration::from_secs(
+                    slept = scheduler_sleep(&project_path, Duration::from_secs(
                         tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-                    )) => {}
+                    )) => if !slept { break 'scheduler; },
                     () = wake.notified() => {}
                 }
                 continue;
@@ -1142,7 +1222,7 @@ async fn run_automation_scheduler_loop(
                 // the daemon's life and logs identically every time. Back the
                 // retries off, and escalate to a terminal exit once the failure
                 // is clearly not transient. A finished scheduler is dropped
-                // from the registry, so the next reconcile respawns this loop —
+                // from the registry, so the next reconcile respawns this loop,
                 // the exit costs a retry, not the lane.
                 consecutive_open_failures = consecutive_open_failures.saturating_add(1);
                 log_daemon_event(
@@ -1157,7 +1237,9 @@ async fn run_automation_scheduler_loop(
                         ),
                     ],
                 );
-                if consecutive_open_failures >= SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION {
+                if consecutive_open_failures
+                    >= tracedecay_automation_runtime::automation::scheduler::PROJECT_OPEN_FAILURE_ESCALATION
+                {
                     tracing::warn!(
                         event = "scheduler_project_open",
                         outcome = "escalated",
@@ -1176,9 +1258,12 @@ async fn run_automation_scheduler_loop(
                     );
                     break;
                 }
-                let backoff = scheduler_project_open_backoff(consecutive_open_failures);
+                let backoff =
+                    tracedecay_automation_runtime::automation::scheduler::project_open_backoff(
+                        consecutive_open_failures,
+                    );
                 tokio::select! {
-                    () = tokio::time::sleep(backoff) => {}
+                    slept = scheduler_sleep(&project_path, backoff) => if !slept { break 'scheduler; },
                     () = wake.notified() => {}
                 }
                 continue;
@@ -1191,17 +1276,9 @@ async fn run_automation_scheduler_loop(
                 ("outcome", "start".to_string()),
             ],
         );
-        let tick_result = {
-            let _background_job = BackgroundJobGaugeGuard::enter();
-            Box::pin(run_automation_scheduler_tick(
-                &project_path,
-                &cg,
-                &handshake,
-                &engine,
-                &run_control,
-            ))
-            .await
-        };
+        let tick_result =
+            boxed_automation_scheduler_tick(&project_path, &cg, &handshake, &engine, &run_control)
+                .await;
         if let Err(e) = tick_result {
             log_daemon_event(
                 "scheduler_tick",
@@ -1212,14 +1289,8 @@ async fn run_automation_scheduler_loop(
                 ],
             );
         }
-        if let Err(error) = Box::pin(run_host_receipt_review(
-            &project_path,
-            &cg,
-            &handshake,
-            &engine,
-            &run_control,
-        ))
-        .await
+        if let Err(error) =
+            boxed_host_receipt_review(&project_path, &cg, &handshake, &engine, &run_control).await
         {
             log_daemon_event(
                 "host_receipt_review",
@@ -1239,24 +1310,36 @@ async fn run_automation_scheduler_loop(
             ],
         );
         tokio::select! {
-            () = tokio::time::sleep(Duration::from_secs(tick_secs)) => {}
+            slept = scheduler_sleep(&project_path, Duration::from_secs(tick_secs)) => {
+                if !slept {
+                    break 'scheduler;
+                }
+            }
             () = wake.notified() => {
+                if run_control.read_control().interrupted() {
+                    break 'scheduler;
+                }
                 // Receipts arrive at tool cadence. Wait for a short quiet
                 // period and reset it for every later receipt, producing one
                 // review for the burst rather than one review per command.
                 loop {
                     tokio::select! {
-                        () = tokio::time::sleep(Duration::from_secs(5)) => break,
+                        slept = scheduler_sleep(&project_path, Duration::from_secs(5)) => {
+                            if !slept {
+                                break 'scheduler;
+                            }
+                            break;
+                        }
                         () = wake.notified() => {}
                     }
                 }
-                if let Err(error) = Box::pin(run_host_receipt_review(
+                if let Err(error) = boxed_host_receipt_review(
                     &project_path,
                     &cg,
                     &handshake,
                     &engine,
                     &run_control,
-                ))
+                )
                 .await
                 {
                     log_daemon_event(
@@ -1271,6 +1354,27 @@ async fn run_automation_scheduler_loop(
             }
         }
     }
+}
+
+/// Sleeps `duration` on the native timer. `false` when that timer is
+/// unavailable: every park would then return at once, so the loop exits and
+/// the next reconcile respawns it.
+async fn scheduler_sleep(project_path: &Path, duration: Duration) -> bool {
+    let Some(deadline) = std::time::Instant::now().checked_add(duration) else {
+        return std::future::pending().await;
+    };
+    let Err(error) = native_runtime::sleep_until(deadline).await else {
+        return true;
+    };
+    log_daemon_event(
+        "scheduler_exit",
+        &[
+            ("project", project_path.display().to_string()),
+            ("reason", "timer_unavailable".to_string()),
+            ("error", error),
+        ],
+    );
+    false
 }
 
 async fn automation_scheduler_has_work_for_project(cg: &TraceDecay) -> Result<bool> {
@@ -1300,8 +1404,16 @@ pub(super) async fn automation_scheduler_tick_secs_for_project(cg: &TraceDecay) 
 /// this often no matter how many projects are active.
 const RETENTION_MIN_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
+/// Owned by [`StoreAdministration`], the daemon-wide handle every project's
+/// scheduler loop already clones, so one daemon runs at most one global
+/// retention pass per [`RETENTION_MIN_INTERVAL_SECS`].
+///
+/// Not a process-wide static: a test binary hosts many daemons, and a sibling
+/// daemon's scheduler tick took the `in_flight` reservation out from under a
+/// retention test, which then observed a pass that returned before it ever
+/// acquired the writer.
 #[derive(Debug, Default)]
-struct GlobalRetentionCadence {
+pub(super) struct GlobalRetentionCadence {
     last_success: Option<std::time::Instant>,
     in_flight: bool,
 }
@@ -1328,14 +1440,9 @@ impl GlobalRetentionCadence {
     }
 }
 
-static GLOBAL_RETENTION_CADENCE: std::sync::Mutex<GlobalRetentionCadence> =
-    std::sync::Mutex::new(GlobalRetentionCadence {
-        last_success: None,
-        in_flight: false,
-    });
-
-#[cfg(test)]
-static GLOBAL_RETENTION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The daemon-wide cadence handle, shared by every clone of one
+/// [`StoreAdministration`].
+pub(super) type SharedGlobalRetentionCadence = Arc<std::sync::Mutex<GlobalRetentionCadence>>;
 
 #[cfg(test)]
 mod global_retention_cadence_tests {
@@ -1350,12 +1457,12 @@ mod global_retention_cadence_tests {
     /// hanging the suite.
     #[tokio::test]
     async fn denied_reservation_returns_without_relocking_the_cadence() {
-        let _test_lock = super::GLOBAL_RETENTION_TEST_LOCK.lock().await;
+        let cadence = super::SharedGlobalRetentionCadence::default();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let now = Instant::now();
-            let first = super::reserve_global_retention(now);
-            let second = super::reserve_global_retention(now);
+            let first = super::reserve_global_retention(&cadence, now);
+            let second = super::reserve_global_retention(&cadence, now);
             let outcome = (first.is_some(), second.is_some());
             drop(first);
             sender.send(outcome).expect("report reservation outcome");
@@ -1395,12 +1502,13 @@ mod global_retention_cadence_tests {
 }
 
 struct GlobalRetentionReservation {
+    cadence: SharedGlobalRetentionCadence,
     active: bool,
 }
 
 impl GlobalRetentionReservation {
     fn finish(mut self, now: std::time::Instant, succeeded: bool) {
-        finish_global_retention(now, succeeded);
+        finish_global_retention(&self.cadence, now, succeeded);
         self.active = false;
     }
 }
@@ -1408,28 +1516,36 @@ impl GlobalRetentionReservation {
 impl Drop for GlobalRetentionReservation {
     fn drop(&mut self) {
         if self.active {
-            finish_global_retention(std::time::Instant::now(), false);
+            finish_global_retention(&self.cadence, std::time::Instant::now(), false);
         }
     }
 }
 
-fn reserve_global_retention(now: std::time::Instant) -> Option<GlobalRetentionReservation> {
-    let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
+fn reserve_global_retention(
+    cadence: &SharedGlobalRetentionCadence,
+    now: std::time::Instant,
+) -> Option<GlobalRetentionReservation> {
+    let mut guard = match cadence.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     // `then` (not `then_some`) so the reservation only exists when the
     // cadence granted it: `then_some` constructs the value eagerly, and a
-    // denied reservation would be dropped right here — its Drop re-locks
-    // GLOBAL_RETENTION_CADENCE while this guard is still held, deadlocking
-    // the scheduler tick (and falsely finishing a pass it never owned).
-    guard
-        .reserve(now)
-        .then(|| GlobalRetentionReservation { active: true })
+    // denied reservation would be dropped right here, its Drop re-locks the
+    // cadence while this guard is still held, deadlocking the scheduler tick
+    // (and falsely finishing a pass it never owned).
+    guard.reserve(now).then(|| GlobalRetentionReservation {
+        cadence: Arc::clone(cadence),
+        active: true,
+    })
 }
 
-fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
-    let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
+fn finish_global_retention(
+    cadence: &SharedGlobalRetentionCadence,
+    now: std::time::Instant,
+    succeeded: bool,
+) {
+    let mut guard = match cadence.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
@@ -1437,21 +1553,17 @@ fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
 }
 
 fn global_table_retention_config(
-    config: &crate::config::RetentionConfig,
+    config: &tracedecay_configuration::RetentionConfig,
 ) -> tracedecay_maintenance::retention::RetentionConfig {
-    let (session_messages_days, lcm_raw_messages_days) = if config.session_lcm.enabled {
-        (
-            config.session_lcm.dedupe_projected_after_days,
-            config.session_lcm.drop_after_days,
-        )
+    let lcm_raw_messages_days = if config.session_lcm.enabled {
+        config.session_lcm.drop_after_days
     } else {
-        (None, None)
+        None
     };
     tracedecay_maintenance::retention::RetentionConfig {
         // The root retention tree has no analytics-event window. Disabling
         // this legacy table is the only mapping that does not invent policy.
         analytics_events_days: None,
-        session_messages_days,
         lcm_raw_messages_days,
     }
 }
@@ -1459,15 +1571,19 @@ fn global_table_retention_config(
 /// Applies the configured retention windows to the global telemetry tables,
 /// at most once per [`RETENTION_MIN_INTERVAL_SECS`]. Best-effort: retention is
 /// housekeeping, so failures are logged and never abort a scheduler tick.
+#[tracing::instrument(name = "daemon.scheduler.global_retention", level = "trace", skip_all)]
 async fn maybe_run_global_retention(
     administration: &super::branch_admin::StoreAdministration,
     database: &tracedecay_global_db::RegisteredGlobalDb,
-    config: &crate::config::RetentionConfig,
+    config: &tracedecay_configuration::RetentionConfig,
 ) {
-    let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
+    let Some(reservation) = reserve_global_retention(
+        administration.global_retention_cadence(),
+        std::time::Instant::now(),
+    ) else {
         return;
     };
-    let now_secs = crate::tracedecay::current_timestamp();
+    let now_secs = tracedecay_runtime_core::tracedecay::current_timestamp();
     let global_config = global_table_retention_config(config);
     let Some(retention) = administration
         .try_with_writer(|| async {
@@ -1490,29 +1606,11 @@ async fn maybe_run_global_retention(
         );
         return;
     };
-    let succeeded = match retention {
-        Ok(reports) => {
-            for report in reports {
-                if report.applied && report.rows > 0 {
-                    log_daemon_event(
-                        "retention_prune",
-                        &[
-                            ("scope", "global".to_string()),
-                            ("table", report.table.to_string()),
-                            ("rows", report.rows.to_string()),
-                            (
-                                "window_days",
-                                report
-                                    .window_days
-                                    .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
-                            ),
-                        ],
-                    );
-                }
-            }
-            true
-        }
-        Err(_) => {
+    // An interrupted pass still reports the slices it committed; only the
+    // cadence outcome distinguishes it from a complete drain.
+    let (committed, succeeded) = match retention {
+        Ok(reports) => (reports, true),
+        Err(interruption) => {
             log_daemon_event(
                 "retention_prune",
                 &[
@@ -1521,9 +1619,27 @@ async fn maybe_run_global_retention(
                     ("failure", "retention_pass_failed".to_string()),
                 ],
             );
-            false
+            (interruption.committed, false)
         }
     };
+    for report in committed {
+        if report.applied && report.rows > 0 {
+            log_daemon_event(
+                "retention_prune",
+                &[
+                    ("scope", "global".to_string()),
+                    ("table", report.table.to_string()),
+                    ("rows", report.rows.to_string()),
+                    (
+                        "window_days",
+                        report
+                            .window_days
+                            .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
+                    ),
+                ],
+            );
+        }
+    }
     reservation.finish(std::time::Instant::now(), succeeded);
 }
 
@@ -1538,29 +1654,6 @@ mod global_retention_tests {
     use crate::daemon::branch_admin::StoreAdministration;
     use tracedecay_global_db::RegisteredGlobalDb;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
-
-    struct ResetGlobalRetentionCadence;
-
-    impl ResetGlobalRetentionCadence {
-        fn new() -> Self {
-            reset_global_retention_cadence();
-            Self
-        }
-    }
-
-    impl Drop for ResetGlobalRetentionCadence {
-        fn drop(&mut self) {
-            reset_global_retention_cadence();
-        }
-    }
-
-    fn reset_global_retention_cadence() {
-        let mut cadence = match GLOBAL_RETENTION_CADENCE.lock() {
-            Ok(cadence) => cadence,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *cadence = GlobalRetentionCadence::default();
-    }
 
     async fn seed_eligible_projected_message(database: &RegisteredGlobalDb) {
         let session = tracedecay_sessions::runtime::SessionRecord {
@@ -1597,17 +1690,10 @@ mod global_retention_tests {
             source_offset: None,
             metadata_json: None,
         };
-        assert!(
-            database
-                .upsert_transcript_batch(
-                    &session,
-                    std::slice::from_ref(&message),
-                    "global-retention-fixture",
-                    tracedecay_global_db::ParseOffset::default(),
-                )
-                .await,
-            "project the registered retention fixture message"
-        );
+        database
+            .lcm_ingest_raw_message(database.db_path().parent().unwrap(), &message)
+            .await
+            .expect("seed the registered retention fixture message");
 
         let transaction = database
             .begin_write_transaction()
@@ -1617,18 +1703,23 @@ mod global_retention_tests {
             .execute_batch(
                 "CREATE TABLE retention_delete_receipts (deleted_message_id TEXT NOT NULL);
                  CREATE TRIGGER retention_delete_receipt
-                 AFTER DELETE ON session_messages BEGIN
+                 AFTER DELETE ON lcm_raw_messages BEGIN
                     INSERT INTO retention_delete_receipts(deleted_message_id)
                     VALUES (OLD.message_id);
                  END;
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count
+                 INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('retention-summary-anchor', '{}', '{}', 'test');
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_horizon_json, created_at
                  ) VALUES (
-                    'retention-summary', 'claude', 'retention-session', 'retention-session', 0,
-                    'retention summary', 'retention-summary-hash', 1, 1
+                    'retention-summary', 'retention-session', 'claude', 'retention-session', 0,
+                    'retention-summary-anchor', 'retention summary', 'retention-summary-hash',
+                    1, 1, '{}', 1
                  );
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  SELECT 'retention-summary', 'raw_message', CAST(store_id AS TEXT), 0
                  FROM lcm_raw_messages
                  WHERE provider = 'claude' AND message_id = 'retention-message';",
@@ -1663,20 +1754,16 @@ mod global_retention_tests {
             .expect("decode retention deletion receipt count")
     }
 
-    fn global_retention_config() -> crate::config::RetentionConfig {
-        let mut config = crate::config::RetentionConfig::default();
+    fn global_retention_config() -> tracedecay_configuration::RetentionConfig {
+        let mut config = tracedecay_configuration::RetentionConfig::default();
         config.session_lcm.enabled = true;
-        config.session_lcm.dedupe_projected_after_days = Some(1);
-        config.session_lcm.drop_after_days = None;
+        config.session_lcm.drop_after_days = Some(1);
         config.session_lcm.offload_after_days = None;
         config
     }
 
     #[tokio::test]
     async fn retention_defers_while_daemon_writer_is_held_and_prunes_once_after_release() {
-        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
-        let _cadence_reset = ResetGlobalRetentionCadence::new();
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-writer-admission").await;
         let database = harness.registered.clone();
         seed_eligible_projected_message(database.as_ref()).await;
@@ -1744,9 +1831,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn cancelled_admitted_retention_releases_writer_and_cadence_for_retry() {
-        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
-        let _cadence_reset = ResetGlobalRetentionCadence::new();
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-cancelled-admission").await;
         let database = harness.registered.clone();
         seed_eligible_projected_message(database.as_ref()).await;
@@ -1808,9 +1892,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn failed_retention_releases_writer_and_cadence_for_retry() {
-        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
-        let _cadence_reset = ResetGlobalRetentionCadence::new();
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-prune-failure").await;
         let database = harness.registered.clone();
         seed_eligible_projected_message(database.as_ref()).await;
@@ -1819,7 +1900,7 @@ mod global_retention_tests {
             .expect("open registered writer for retention fault")
             .execute_batch(
                 "CREATE TRIGGER fail_global_retention_prune
-                 BEFORE DELETE ON session_messages
+                 BEFORE DELETE ON lcm_raw_messages
                  WHEN OLD.message_id = 'retention-message'
                  BEGIN
                     SELECT RAISE(ABORT, 'forced global retention prune failure');
@@ -1871,10 +1952,19 @@ struct PinnedAutomationConfiguration {
     configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
     configuration_digest: tracedecay_domain::ManifestDigest,
     settings: tracedecay_automation_runtime::automation::config::AutomationConfig,
+    /// The `codex` executable the same snapshot binds
+    /// (`lcm.summarizer_executables.v1`); the automation backend spawns only
+    /// this path.
+    codex_executable: tracedecay_domain::configuration::LcmSummarizerExecutableV1,
 }
 
+#[tracing::instrument(
+    name = "daemon.scheduler.read_automation_config",
+    level = "trace",
+    skip_all
+)]
 async fn effective_automation_config_for_project(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
 ) -> Result<PinnedAutomationConfiguration> {
     let configuration = cg
         .configuration_runtime()
@@ -1885,18 +1975,18 @@ async fn effective_automation_config_for_project(
             message: format!("automation configuration authority is unavailable: {error}"),
         })?;
     let settings = tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-        &configuration.snapshot,
+        configuration.snapshot(),
     )?;
-    let configuration_digest =
-        crate::daemon::automation_effect::pinned_automation_configuration_digest(
-            &configuration.revision_id,
-            &configuration.snapshot.effective_behavior_digest,
-            &configuration.snapshot.resolution_provenance_digest,
-        )?;
+    let configuration_digest = pinned_automation_configuration_digest(
+        configuration.revision_id(),
+        &configuration.snapshot().effective_behavior_digest,
+        &configuration.snapshot().resolution_provenance_digest,
+    )?;
     Ok(PinnedAutomationConfiguration {
-        configuration_revision_id: configuration.revision_id,
+        configuration_revision_id: configuration.revision_id().clone(),
         configuration_digest,
         settings,
+        codex_executable: configuration.config().lcm_summarizers.codex.clone(),
     })
 }
 
@@ -1936,8 +2026,13 @@ pub(super) fn automation_scheduler_configured(
 
 /// True when the scheduler loop has anything to do for this project: a
 /// scheduled fixed task or a schedulable user-defined job.
+#[tracing::instrument(
+    name = "daemon.scheduler.probe_scheduler_work",
+    level = "trace",
+    skip_all
+)]
 async fn automation_scheduler_has_work(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<bool> {
     use tracedecay_automation_runtime::automation::config::{
@@ -1961,13 +2056,22 @@ async fn automation_scheduler_has_work(
 
 /// Ticks every schedulable user-defined job with the same lock/cooldown
 /// discipline as the fixed tasks (enforced inside the job runner).
+#[tracing::instrument(name = "daemon.scheduler.user_jobs_pass", level = "trace", skip_all)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Job dispatch binds retained project memory and pinned configuration to the admitted backend and shared error result."
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "A user-jobs pass is one scan-and-dispatch of due profile jobs."
+)]
 async fn run_user_jobs_scheduler_pass(
     engine: &DaemonEngine,
     run_control: &AutomationRunControl,
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
     profile_root: &Path,
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     configuration_digest: tracedecay_domain::ManifestDigest,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     backend: &tracedecay_automation_runtime::automation::backend::CodexAppServerBackend,
@@ -2012,6 +2116,7 @@ async fn run_user_jobs_scheduler_pass(
         match tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
             &dashboard_root,
             config,
+            backend.executable(),
             job,
             &requested_run_id,
             occurrence_anchor_run_id.as_deref(),
@@ -2092,11 +2197,11 @@ async fn run_user_jobs_scheduler_pass(
                     == tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus::Skipped
                     && run.ledger_record.error.as_deref() == Some("scheduler_lock_active")
                 {
-                    crate::daemon::automation_effect::RetainedAutomationSettlementProjection::AbandonObserved {
+                    RetainedAutomationSettlementProjection::AbandonObserved {
                         record: run.ledger_record,
                     }
                 } else {
-                    crate::daemon::automation_effect::RetainedAutomationSettlementProjection::Run {
+                    RetainedAutomationSettlementProjection::Run {
                         record: run.ledger_record,
                         committed: run.committed_receipt.map(Box::new),
                     }
@@ -2141,6 +2246,11 @@ async fn run_user_jobs_scheduler_pass(
 /// Deriving a fresher anchor at append time can bound the scan below an
 /// already-appended row and silently write a byte-different duplicate.
 /// `None` means this snapshot held no scheduler-effectful terminal at all.
+#[tracing::instrument(
+    name = "daemon.scheduler.mint_user_job_run_id",
+    level = "trace",
+    skip_all
+)]
 async fn scheduled_user_job_run_id(
     dashboard_root: &Path,
     job: &tracedecay_automation_runtime::automation::jobs::AutomationJob,
@@ -2176,84 +2286,4 @@ async fn scheduled_user_job_run_id(
         ),
         latest_scheduler_terminal.map(|record| record.run_id),
     ))
-}
-
-#[cfg(test)]
-mod scheduler_project_open_backoff_tests {
-    use super::{
-        BackgroundJobGaugeGuard, SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING,
-        SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION, scheduler_project_open_backoff,
-    };
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicI64, Ordering};
-    use std::time::Duration;
-
-    #[test]
-    fn backoff_starts_at_one_tick_and_grows() {
-        let tick = Duration::from_secs(
-            tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-        );
-        assert_eq!(scheduler_project_open_backoff(1), tick);
-        assert_eq!(scheduler_project_open_backoff(2), tick * 2);
-        assert_eq!(scheduler_project_open_backoff(3), tick * 4);
-    }
-
-    #[test]
-    fn backoff_is_capped_and_never_regresses() {
-        let mut previous = Duration::ZERO;
-        for attempt in 1..=64 {
-            let backoff = scheduler_project_open_backoff(attempt);
-            assert!(backoff >= previous, "backoff must be monotonic");
-            assert!(
-                backoff <= SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING,
-                "backoff must stay under its ceiling"
-            );
-            previous = backoff;
-        }
-        assert_eq!(
-            scheduler_project_open_backoff(64),
-            SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING
-        );
-    }
-
-    #[test]
-    fn escalation_bounds_the_total_futile_retry_window() {
-        let total: Duration = (1..=SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION)
-            .map(scheduler_project_open_backoff)
-            .sum();
-        let tick = Duration::from_secs(
-            tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-        );
-        assert!(
-            total > tick,
-            "escalation must allow more than one retry before exiting"
-        );
-        assert!(
-            total <= Duration::from_hours(1),
-            "a futile streak must not run for hours before escalating"
-        );
-    }
-
-    #[tokio::test]
-    async fn background_job_gauge_is_released_when_the_tick_is_aborted() {
-        let active = Arc::new(AtomicI64::new(0));
-        let observed = Arc::clone(&active);
-        let (entered, entered_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let _gauge = BackgroundJobGaugeGuard::enter_for_test(observed);
-            entered.send(()).expect("report gauge entry");
-            std::future::pending::<()>().await;
-        });
-
-        entered_rx.await.expect("tick reached gauge scope");
-        assert_eq!(active.load(Ordering::SeqCst), 1);
-        task.abort();
-        assert!(task.await.expect_err("tick was aborted").is_cancelled());
-
-        assert_eq!(
-            active.load(Ordering::SeqCst),
-            0,
-            "aborting a scheduler tick must not strand the background-job gauge"
-        );
-    }
 }

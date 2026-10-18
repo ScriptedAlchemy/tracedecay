@@ -4,9 +4,9 @@
 //! execute through the daemon invocation transport in production. A direct
 //! test server has no daemon socket, so those tools would truthfully report
 //! `application.transport.unavailable`. This composition mounts the same
-//! retained owner the daemon registers at project open — the invocation
+//! retained owner the daemon registers at project open, the invocation
 //! service, the server's retained surface ports, and the project retained
-//! grant — behind an in-process executor, so retained recall behavior stays
+//! grant, behind an in-process executor, so retained recall behavior stays
 //! testable against the real owner rather than a stub.
 
 use std::path::PathBuf;
@@ -15,44 +15,91 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracedecay_lsp::LspSessionRegistry;
 
-use super::project_open_owners::{
-    daemon_owned_project_source_access_at, project_open_retained_grant,
-};
+use super::project_open_owners::project_open_retained_grant;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
-use tracedecay_daemon_protocol::invocation_now_micros;
-use tracedecay_daemon_service::{DaemonInvocationService, DaemonRetainedRuntimeRegistrar};
+use tracedecay_contracts::{ResolvedScope, now_micros};
+use tracedecay_daemon_service::{
+    DaemonInvocationService, DaemonRetainedRuntimeRegistrar, daemon_owned_project_source_access_at,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 #[derive(Clone)]
 struct RetainedOwnerTestExecutor {
     service: DaemonInvocationService,
     lsp_registry: Arc<Mutex<LspSessionRegistry>>,
     project_root: PathBuf,
+    /// The profile registry the daemon composition root answers registry
+    /// reads from, with the profile session scope they report under.
+    profile_registry: Option<(ResolvedScope, RegisteredGlobalDbLeaseV1)>,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for RetainedOwnerTestExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for RetainedOwnerTestExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        forward_application_surface(self, invocation)
     }
 }
+
+/// Routes an application surface invocation through `executor`'s daemon
+/// invocation port, as the daemon client does; any other request is
+/// unavailable.
+pub(crate) fn forward_application_surface(
+    executor: &impl tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    invocation: tracedecay_contracts::ApplicationInvocation,
+) -> tracedecay_contracts::ApplicationInvocationFuture<
+    '_,
+    std::result::Result<
+        tracedecay_contracts::ApplicationResponse,
+        tracedecay_contracts::InvocationError,
+    >,
+> {
+    Box::pin(async move {
+        let (context, request) = invocation.into_parts();
+        let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request else {
+            return Err(tracedecay_contracts::InvocationError::Unavailable);
+        };
+        tracedecay_daemon_protocol::invoke_application_surface(executor, context, binding, payload)
+            .await
+    })
+}
+
+/// A `DaemonInvocationExecutor::observe_feedback` that accepts and drops
+/// every observation, for test executors with no feedback ledger.
+macro_rules! ignore_feedback_observations {
+    () => {
+        fn observe_feedback(
+            &self,
+            _subject_digest: tracedecay_domain::ManifestDigest,
+            _observed_at: tracedecay_domain::UtcMicros,
+            _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+            '_,
+            tracedecay_domain::errors::Result<()>,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+    };
+}
+#[cfg(test)]
+pub(crate) use ignore_feedback_observations;
 
 impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestExecutor {
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-        deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationSignal,
-        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationSignal,
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
@@ -64,40 +111,89 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
             if cancellation.is_cancelled() {
                 return Err(
                     tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
-                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                        stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
                     },
                 );
             }
-            if tracedecay_daemon_protocol::deadline_remaining(&deadline).is_none() {
-                return Err(
-                    tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
-                        stage: tracedecay_application::CancellationStage::BeforeAdmission,
-                    },
-                );
-            }
-            Ok(self
-                .service
-                .invoke_with_cancellation(
-                    &self.lsp_registry,
-                    Some(&self.project_root),
+            let remaining = tracedecay_daemon_protocol::deadline_remaining(&deadline).ok_or(
+                tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
+                    stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
+                },
+            )?;
+            if let tracedecay_daemon_protocol::DaemonInvocationPayload::ProfileGraphTool {
+                surface_operation,
+                arguments,
+                deadline,
+                cancellation: context,
+                ..
+            } = request.payload
+            {
+                let compute = |arguments| async move {
+                    let (scope, registry) =
+                        self.profile_registry
+                            .clone()
+                            .ok_or_else(|| TraceDecayError::Config {
+                                message: "the test server mounts no profile registry".to_owned(),
+                            })?;
+                    if !surface_operation.is_profile_registry_read() {
+                        return Err(TraceDecayError::Config {
+                            message: "the test server's profile owner answers only registry reads"
+                                .to_owned(),
+                        });
+                    }
+                    let completion = super::profile_owner::registry_read(
+                        registry,
+                        Some(&self.project_root),
+                        surface_operation,
+                        arguments,
+                    )
+                    .await?;
+                    Ok((scope, completion))
+                };
+                return Ok(super::profile_owner::answer_profile_owner_operation(
+                    request.request_id,
+                    surface_operation,
+                    arguments,
+                    deadline,
+                    context,
                     None,
-                    None,
-                    None,
-                    request,
-                    None,
+                    compute,
                 )
-                .await)
+                .await);
+            }
+            let request_id = request.request_id.clone();
+            let executor = self.clone();
+            let invocation =
+                tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+                    executor
+                        .service
+                        .invoke_with_cancellation(
+                            &executor.lsp_registry,
+                            Some(&executor.project_root),
+                            None,
+                            None,
+                            None,
+                            request,
+                            None,
+                        )
+                        .await
+                })
+                .map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)?;
+            super::invocation_executor::settle_in_process_invocation(
+                self.service.request_cancellations(),
+                &request_id,
+                invocation,
+                remaining,
+                cancellation,
+                None,
+                policy,
+                tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE,
+            )
+            .await
         })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: tracedecay_domain::ManifestDigest,
-        _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 /// In-process transport for the project retained owner: the invocation
@@ -108,11 +204,19 @@ pub(crate) struct ProjectRetainedOwnerTransport {
     pub(crate) executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 }
 
-/// Builds the in-process retained transport for `project_root`.
+/// Builds the in-process retained transport for `context`'s project, with the
+/// profile registry its registry reads answer from.
 pub(crate) fn project_retained_owner_transport(
-    project_root: &std::path::Path,
+    context: &crate::mcp::server::McpServerConstructionContext,
 ) -> Result<ProjectRetainedOwnerTransport> {
-    let project_root = project_root.canonicalize()?;
+    let project_root = context.cg.project_root().canonicalize()?;
+    let profile_registry = match (context.profile_identity.as_deref(), &context.registry_db) {
+        (Some(identity), Some(registry)) => Some((
+            super::profile_retained::profile_session_scope(identity)?,
+            registry.clone(),
+        )),
+        _ => None,
+    };
     let resident_memory = Arc::new(
         tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
@@ -125,6 +229,7 @@ pub(crate) fn project_retained_owner_transport(
         service: service.clone(),
         lsp_registry: Arc::new(Mutex::new(LspSessionRegistry::default())),
         project_root,
+        profile_registry,
     };
     Ok(ProjectRetainedOwnerTransport {
         service,
@@ -157,7 +262,7 @@ pub(crate) async fn register_project_retained_owner_for_test(
             message: format!("retained test owner scope is invalid: {error}"),
         }
     })?;
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let configuration = graph
         .configuration_runtime()
         .client()
@@ -182,7 +287,19 @@ pub(crate) async fn register_project_retained_owner_for_test(
         access.configuration_digest.clone(),
     );
     DaemonRetainedRuntimeRegistrar::new(service)
-        .register(project_root, scope, access.requester, grant, ports)
+        .register(
+            project_root.clone(),
+            scope.clone(),
+            access.requester,
+            grant,
+            ports,
+        )
+        .await?;
+    // Project open registers the graph-tool owner beside the retained owner,
+    // under the checkout the route admitted.
+    let admitted = server.admitted_project_scope().unwrap_or(scope);
+    server
+        .register_graph_tool_owner_on(service, &project_root, admitted)
         .await
 }
 
@@ -192,7 +309,7 @@ pub(crate) async fn register_project_retained_owner_for_test(
 pub(crate) async fn mcp_server_with_project_retained_owner_for_test(
     context: crate::mcp::server::McpServerConstructionContext,
 ) -> Result<Arc<crate::mcp::McpServer>> {
-    let transport = project_retained_owner_transport(context.cg.project_root())?;
+    let transport = project_retained_owner_transport(&context)?;
     let context = context.with_application_invocation_executor(Arc::clone(&transport.executor));
     let server = crate::mcp::McpServer::new_with_context(context).await;
     register_project_retained_owner_for_test(&transport.service, server.as_ref()).await?;

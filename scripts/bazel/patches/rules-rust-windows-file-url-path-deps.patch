@@ -1,0 +1,117 @@
+diff --git a/crate_universe/src/metadata/metadata_annotation.rs b/crate_universe/src/metadata/metadata_annotation.rs
+--- a/crate_universe/src/metadata/metadata_annotation.rs
++++ b/crate_universe/src/metadata/metadata_annotation.rs
+@@ -280,6 +280,26 @@
+                     if let Some(path_with_suffix) = node.id.repr.strip_prefix("path+file://") {
+                         if let Some((path_in_lockfile, _suffix)) = path_with_suffix.rsplit_once('#')
+                         {
++                            // Cargo renders path dependencies as `file:///`
++                            // URLs; on Windows these look like
++                            // `file:///C:/workspace/crate`, which strips to
++                            // `/C:/workspace/crate` - a root-relative path
++                            // whose first component is the drive letter. It
++                            // then fails `strip_prefix` against absolute
++                            // workspace paths and breaks later path joins.
++                            // Re-anchor it as `C:/workspace/crate`.
++                            let (path_in_lockfile, windows_drive_anchor) = {
++                                let bytes = path_in_lockfile.as_bytes();
++                                if bytes.len() >= 3
++                                    && bytes[0] == b'/'
++                                    && bytes[1].is_ascii_alphabetic()
++                                    && bytes[2] == b':'
++                                {
++                                    (&path_in_lockfile[1..], true)
++                                } else {
++                                    (path_in_lockfile, false)
++                                }
++                            };
+                             let path = match Utf8Path::new(path_in_lockfile)
+                                 .strip_prefix(&metadata.workspace_root)
+                             {
+@@ -321,5 +341,15 @@
+                                 Err(_) => Utf8PathBuf::from(path_in_lockfile),
+                             };
++                            // On Windows, paths display with `\` joins, which
++                            // are invalid escape sequences inside the Starlark
++                            // and JSON strings this annotation is rendered
++                            // into. `/` is accepted by every Windows
++                            // filesystem API, so emit the canonical form.
++                            let path = if windows_drive_anchor {
++                                Utf8PathBuf::from(path.as_str().replace('\\', "/"))
++                            } else {
++                                path
++                            };
+                             return Ok(SourceAnnotation::Path { path });
+                         }
+                     }
+diff --git a/crate_universe/src/rendering.rs b/crate_universe/src/rendering.rs
+--- a/crate_universe/src/rendering.rs
++++ b/crate_universe/src/rendering.rs
+@@ -1073,7 +1073,11 @@
+             // Ensure the output directory exists
+             fs::create_dir_all(
+                 path.parent()
+                     .expect("All file paths should have valid directories"),
+-            )?;
++            )
++            .context(format!(
++                "Failed to create output directory: {}",
++                path.display()
++            ))?;
+             fs::write(&path, content.as_bytes())
+                 .context(format!("Failed to write file to disk: {}", path.display()))?;
+         }
+diff --git a/crate_universe/extensions.bzl b/crate_universe/extensions.bzl
+--- a/crate_universe/extensions.bzl
++++ b/crate_universe/extensions.bzl
+@@ -832,8 +832,9 @@
+     if use_environ:
+         generator_sha256 = module_ctx.os.environ.get(CARGO_BAZEL_GENERATOR_SHA256)
+         generator_url = module_ctx.os.environ.get(CARGO_BAZEL_GENERATOR_URL)
+-    elif len(CARGO_BAZEL_URLS) == 0:
++    elif len(CARGO_BAZEL_URLS) == 0 or "win" in module_ctx.os.name:
+         # For Bazel 7 and below, `module_ctx.path` will also watch files so to avoid
+         # volatility in lock files caused by referencing host specific files, direct
+-        # references are avoided.
++        # references are avoided. Windows also bootstraps from source: the
++        # vendored sources carry host fixes the released binaries predate.
+         return module_ctx.path(Label("@cargo_bazel_bootstrap//:BUILD.bazel")).dirname.get_child("cargo-bazel")
+ diff --git a/crate_universe/private/local_crate_mirror.bzl b/crate_universe/private/local_crate_mirror.bzl
+--- a/crate_universe/private/local_crate_mirror.bzl
++++ b/crate_universe/private/local_crate_mirror.bzl
+@@ -14,13 +14,29 @@
+ 
+     # TODO: Work out why we can't just symlink here and actually copy.
+     # illicitonion thinks it may be that symlinks didn't get invalidated properly?
+-    for child in repository_ctx.path(path).readdir():
+-        repository_ctx.execute(["cp", "-r", child, repository_ctx.path(child.basename)])
+-
+-    paths_to_track = execute(repository_ctx, ["find", path, "-type", "f"]).stdout.strip().split("\n")
++    # On Windows there is no `cp`/`find` on PATH (System32\find.exe is the DOS
++    # filter and `bash` may resolve to WSL), so use cmd builtins there.
++    if "win" in repository_ctx.os.name:
++        # A single wildcard xcopy reproduces the whole tree (files and dirs)
++        # under the mirror root; per-child destinations mis-handle files whose
++        # name collides with a directory entry (e.g. BUILD.bazel).
++        execute(repository_ctx, [
++            "cmd", "/c", "xcopy", "/e", "/i", "/y",
++            str(path).replace("/", "\\") + "\\*",
++            str(repository_ctx.path(".")).replace("/", "\\") + "\\",
++        ])
++        find_cmd = ["cmd", "/c", "dir", "/s", "/b", "/a-d", str(path).replace("/", "\\")]
++    else:
++        for child in repository_ctx.path(path).readdir():
++            repository_ctx.execute(["cp", "-r", child, repository_ctx.path(child.basename)])
++        find_cmd = ["find", path, "-type", "f"]
++    paths_to_track = [
++        line.strip()
++        for line in execute(repository_ctx, find_cmd).stdout.strip().split("\n")
++        if line.strip()
++    ]
+     for path_to_track in paths_to_track:
+-        if path_to_track:
+-            repository_ctx.read(path_to_track)
++        repository_ctx.read(path_to_track)
+ 
+     execute(repository_ctx, [generator, "render", "--options-json", repository_ctx.attr.options_json, "--output-path", repository_ctx.path("BUILD.bazel")])
+ 

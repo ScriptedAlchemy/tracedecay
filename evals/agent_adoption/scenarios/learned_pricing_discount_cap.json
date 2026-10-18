@@ -1,0 +1,35 @@
+{
+  "id": "learned_pricing_discount_cap",
+  "category": "learned_skill",
+  "hosts": [
+    "claude"
+  ],
+  "fixture": "main",
+  "status": "learned",
+  "prompt": "We want to raise the maximum discount to 30 percent. What does that touch and what should I verify?",
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states apply_discount",
+          "pattern": "\\bapply_discount\\b"
+        },
+        {
+          "id": "states 25",
+          "pattern": "\\b25\\b"
+        },
+        {
+          "id": "states 2026-06",
+          "pattern": "\\b2026\\-06\\b"
+        }
+      ]
+    }
+  },
+  "max_tool_calls": 10,
+  "learned_skill": {
+    "workflow": "pricing_change_review",
+    "expected": true
+  },
+  "notes": "Held-out positive for the pricing-change-review workflow; the answer must surface the recorded 2026-06 decision capping discounts at 25 percent."
+}

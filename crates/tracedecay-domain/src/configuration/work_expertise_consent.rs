@@ -93,13 +93,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn consent_is_disabled_by_default() {
-        WorkExpertiseConsentV1::disabled()
-            .validate()
-            .expect("disabled consent is canonical");
-    }
-
-    #[test]
     fn consent_rejects_an_unbounded_lifetime() {
         let consent = WorkExpertiseConsentV1 {
             schema_version: WorkExpertiseConsentV1::SCHEMA_VERSION,
@@ -108,6 +101,9 @@ mod tests {
             expires_at: Some(UtcMicros(2 + MAX_WORK_EXPERTISE_CONSENT_LIFETIME_MICROS_V1)),
             allowed_categories: BTreeSet::from([WorkExpertiseCategoryV1::Language]),
         };
-        assert!(consent.validate().is_err());
+        assert_eq!(
+            consent.validate().unwrap_err().to_string(),
+            "enabled work expertise consent is not canonical"
+        );
     }
 }

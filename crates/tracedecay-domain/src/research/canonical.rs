@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -19,8 +20,17 @@ thread_local! {
         const { RefCell::new(String::new()) };
 }
 
+/// Drop the calling thread's pooled canonical serialization buffers; its next
+/// serialization allocates them again. A thread keeps up to eight 1 MiB object
+/// buffers and a 64 KiB digest buffer between calls.
+pub fn release_thread_canonical_scratch() {
+    canonical_serializer::release_thread_object_buffers();
+    // An exiting thread has already dropped its buffer.
+    let _ = CANONICAL_SHA256_SINK_BUFFER.try_with(RefCell::take);
+}
+
 impl ManifestDigest {
-    /// Canonical `sha256:`-tagged encoding of raw SHA-256 digest bytes — the
+    /// Canonical `sha256:`-tagged encoding of raw SHA-256 digest bytes, the
     /// one constructor for digest material, so call sites never re-roll their
     /// own `format!`/hex loop over an already-computed hash.
     pub fn from_sha256_bytes(digest: &[u8]) -> Result<Self, DomainError> {
@@ -35,12 +45,34 @@ impl ManifestDigest {
     }
 }
 
+pub struct ManifestDigestHasher(Sha256);
+
+impl ManifestDigestHasher {
+    pub fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    pub fn update(&mut self, bytes: impl AsRef<[u8]>) {
+        self.0.update(bytes.as_ref());
+    }
+
+    pub fn finalize(self) -> Result<ManifestDigest, DomainError> {
+        ManifestDigest::from_sha256_bytes(&self.0.finalize())
+    }
+}
+
+impl Default for ManifestDigestHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(super) type CanonicalError = serde_json::Error;
 pub(super) type CanonicalResult<T = ()> = Result<T, CanonicalError>;
 pub(super) const SERDE_JSON_PRIVATE_TOKEN_PREFIX: &str = "$serde_json::private::";
 
 /// Serialize any domain value to the crate's canonical JSON byte form.
-#[hotpath::measure(label = "domain.canonical.json_bytes")]
+#[tracing::instrument(name = "domain.canonical.json_bytes", level = "trace", skip_all)]
 pub fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, DomainError> {
     let mut output = Vec::new();
     canonical_serializer::serialize_canonical(value, &mut output)?;
@@ -49,7 +81,7 @@ pub fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, DomainEr
 
 /// Serialize a JSON value with recursively lexicographic object keys and no
 /// insignificant whitespace.
-#[hotpath::measure(label = "domain.canonical.json_value")]
+#[tracing::instrument(name = "domain.canonical.json_value", level = "trace", skip_all)]
 pub fn canonical_json_value(value: &Value) -> Result<String, DomainError> {
     let mut output = String::new();
     write_canonical(value, &mut output);
@@ -61,7 +93,7 @@ pub fn canonical_json_value(value: &Value) -> Result<String, DomainError> {
 /// The value is streamed straight into the hasher through a buffered sink; no
 /// intermediate `serde_json::Value` tree is materialized, which matters for
 /// the six-figure element sets the code index digests on every publish.
-#[hotpath::measure(label = "domain.canonical.sha256")]
+#[tracing::instrument(name = "domain.canonical.sha256", level = "trace", skip_all)]
 pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<ManifestDigest, DomainError> {
     CANONICAL_SHA256_SINK_BUFFER.with(|cell| {
         // `replace` keeps the buffer owned across a panic in serialize so the
@@ -86,7 +118,7 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<ManifestDigest, Domai
 ///
 /// Callers that must persist the canonical bytes avoid traversing large values
 /// a second time solely to compute the same digest.
-#[hotpath::measure(label = "domain.canonical.bytes_and_sha256")]
+#[tracing::instrument(name = "domain.canonical.bytes_and_sha256", level = "trace", skip_all)]
 pub fn canonical_json_bytes_and_sha256<T: Serialize>(
     value: &T,
 ) -> Result<(Vec<u8>, ManifestDigest), DomainError> {
@@ -94,6 +126,20 @@ pub fn canonical_json_bytes_and_sha256<T: Serialize>(
     let digest_bytes = Sha256::digest(&bytes);
     let digest = ManifestDigest::from_sha256_bytes(&digest_bytes)?;
     Ok((bytes, digest))
+}
+
+/// Decode a stored JSON payload and require its canonical digest to match the
+/// column that was persisted with it. Journal rows use this so a rewritten
+/// payload cannot reuse another row's digest.
+pub fn decode_with_canonical_digest<T>(payload: &str, stored_digest: &str) -> Option<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let value: T = serde_json::from_str(payload).ok()?;
+    match canonical_sha256(&value) {
+        Ok(digest) if digest.as_str() == stored_digest => Some(value),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

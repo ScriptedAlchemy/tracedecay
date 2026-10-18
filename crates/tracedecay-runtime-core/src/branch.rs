@@ -4,7 +4,77 @@
 
 use std::path::Path;
 
+use tracedecay_domain::GitHeadStateV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_private_fs::FileLease;
+
+#[cfg(any(test, feature = "test-helpers"))]
+use std::collections::HashMap;
+#[cfg(any(test, feature = "test-helpers"))]
+use std::path::PathBuf;
+#[cfg(any(test, feature = "test-helpers"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(test, feature = "test-helpers"))]
+use std::sync::{LazyLock, Mutex};
+
+/// Counts live [`current_branch`] probes in test builds.
+///
+/// [`BranchMemo::resolved`] never increments this: it answers from a
+/// pre-seeded value and must not open git. A request that skips live
+/// resolution therefore reports zero here.
+#[cfg(any(test, feature = "test-helpers"))]
+static LIVE_BRANCH_RESOLUTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Per-root live probes so parallel suites do not share one process counter.
+#[cfg(any(test, feature = "test-helpers"))]
+static LIVE_BRANCH_RESOLUTIONS_BY_ROOT: LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn live_branch_resolution_counts() -> std::sync::MutexGuard<'static, HashMap<PathBuf, u64>> {
+    LIVE_BRANCH_RESOLUTIONS_BY_ROOT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn record_live_branch_resolution(project_root: &Path) {
+    LIVE_BRANCH_RESOLUTIONS.fetch_add(1, Ordering::Relaxed);
+    let mut counts = live_branch_resolution_counts();
+    *counts.entry(project_root.to_path_buf()).or_insert(0) += 1;
+    if let Ok(canonical) = project_root.canonicalize()
+        && canonical != project_root
+    {
+        *counts.entry(canonical).or_insert(0) += 1;
+    }
+}
+
+/// Live [`current_branch`] probes for one project root (and its canonical path).
+///
+/// Parallel tests share the process, so the global counter is not an isolation
+/// boundary. A fixture asserts against its own root.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn live_branch_resolution_count_for_root_for_test(root: &Path) -> u64 {
+    let counts = live_branch_resolution_counts();
+    if let Some(count) = counts.get(root) {
+        return *count;
+    }
+    root.canonicalize()
+        .ok()
+        .and_then(|canonical| counts.get(&canonical).copied())
+        .unwrap_or(0)
+}
+
+/// Clears live-resolution probes recorded for one project root.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reset_live_branch_resolution_count_for_root_for_test(root: &Path) {
+    let mut counts = live_branch_resolution_counts();
+    counts.remove(root);
+    if let Ok(canonical) = root.canonicalize() {
+        counts.remove(&canonical);
+    }
+}
 
 mod admin;
 mod tracking;
@@ -12,13 +82,11 @@ mod tracking;
 pub use admin::{
     BranchAdminAction, BranchAdminOutcome, BranchAdminReport, PreparedBranchAdminMutation,
     SingleStoreBranchRetirementV1, prepare_branch_admin_mutation,
-    remove_tracked_branch_store_checked,
 };
 pub use tracking::{
     BranchAddOutcome, BranchTrackingPreparation, PreparedBranchRollbackOutcome,
-    PreparedBranchTracking, finalize_prepared_branch_tracking, find_nearest_tracked_ancestor,
-    is_branch_ref_present, local_branch_exists, prepare_branch_tracking_in_layout,
-    rollback_prepared_branch_tracking,
+    PreparedBranchTracking, find_nearest_tracked_ancestor, local_branch_exists,
+    prepare_branch_tracking_in_layout, rollback_prepared_branch_tracking,
 };
 pub(crate) use tracking::{now_unix_secs, parse_unix_secs};
 
@@ -29,24 +97,64 @@ pub const BRANCH_LOCK_RETRY_ATTEMPTS: usize = 20;
 /// Interval between branch-lock acquisition retries.
 pub const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Resolves the current branch name using `gix`. Linked worktrees use
-/// `git symbolic-ref HEAD` because gix can resolve their shared repository's
-/// primary HEAD instead of the worktree-specific HEAD.
+/// Resolves the current branch name using `gix`.
+///
+/// A linked worktree resolves its own HEAD because the authority is opened at
+/// that worktree's Git directory, not at the shared common directory.
 ///
 /// Returns `None` for detached HEAD or if the repository cannot be opened.
+#[tracing::instrument(name = "runtime_core.git.branch.current", level = "trace", skip_all)]
 pub fn current_branch(project_root: &Path) -> Option<String> {
-    crate::git_repository::GitRepositoryAuthority::discover(project_root)
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        record_live_branch_resolution(project_root);
+    }
+    crate::git_repository::GitRepositoryAuthority::current_branch(project_root)
+}
+
+/// Live HEAD of one checkout.
+///
+/// [`current_branch`] collapses a detached HEAD and an unreadable repository
+/// into the same `None`. Readers that display the checkout's branch need those
+/// apart: detached HEAD is an observation, and keeping the branch recorded at
+/// enrollment would stay stale after `git switch` or `git checkout --detach`.
+/// A linked worktree resolves its own Git directory, so its HEAD is not the
+/// primary checkout's branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckoutHead {
+    /// HEAD names a branch, including an unborn branch with no commits yet.
+    Branch(String),
+    /// HEAD is detached from every branch.
+    Detached,
+}
+
+/// Resolves [`CheckoutHead`] for `project_root`.
+///
+/// Returns `None` when the path is not a repository or HEAD cannot be read.
+/// That is uncertainty, not detachment.
+#[tracing::instrument(
+    name = "runtime_core.git.branch.checkout_head",
+    level = "trace",
+    skip_all
+)]
+#[must_use]
+pub fn checkout_head(project_root: &Path) -> Option<CheckoutHead> {
+    let head = crate::git_repository::GitRepositoryAuthority::discover(project_root)
         .ok()?
         .head()
-        .ok()?
-        .branch()
-        .map(str::to_owned)
+        .ok()?;
+    match head {
+        GitHeadStateV1::Attached { branch, .. } | GitHeadStateV1::Unborn { branch } => {
+            Some(CheckoutHead::Branch(branch))
+        }
+        GitHeadStateV1::Detached { .. } => Some(CheckoutHead::Detached),
+    }
 }
 
 /// One live-branch resolution, scoped to a single request or write gate.
 ///
-/// [`current_branch`] opens a `gix` repository and, for linked worktrees,
-/// spawns `git symbolic-ref`. A single request can cross several drift checks
+/// [`current_branch`] stats HEAD and reopens the repository whenever HEAD was
+/// replaced. A single request can cross several drift checks
 /// and write gates, each of which used to pay that cost again. A `BranchMemo`
 /// is created at the request or gate entry, threaded down, and dropped with
 /// the request.
@@ -108,9 +216,7 @@ impl BranchMemo {
 }
 
 /// Acquires the shared branch-add lock.
-pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::File> {
-    use fs2::FileExt;
-
+pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<FileLease> {
     std::fs::create_dir_all(tracedecay_dir)?;
     let lock_path = tracedecay_dir.join(".branch-add.lock");
     let file = std::fs::OpenOptions::new()
@@ -118,24 +224,25 @@ pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::Fil
         .write(true)
         .truncate(false)
         .open(&lock_path)?;
-    file.try_lock_exclusive()
+    file.try_lock()
+        .map_err(std::io::Error::from)
         .map_err(|e| TraceDecayError::SyncLock {
             message: format!("branch add already running at {}: {e}", lock_path.display()),
         })?;
-    Ok(file)
+    Ok(FileLease::held(file, "branch.add"))
 }
 
 /// Blocking-with-timeout variant of [`try_acquire_branch_add_lock`] for
 /// synchronous callers. Retries a briefly-contended lock (a concurrent branch
 /// add is only holding it for the duration of a DB clone) before giving up.
-pub fn acquire_branch_lock_blocking(tracedecay_dir: &Path) -> Result<std::fs::File> {
+pub fn acquire_branch_lock_blocking(tracedecay_dir: &Path) -> Result<FileLease> {
     acquire_branch_add_lock_blocking_with(tracedecay_dir, try_acquire_branch_add_lock)
 }
 
 fn acquire_branch_add_lock_blocking_with(
     tracedecay_dir: &Path,
-    acquire: fn(&Path) -> Result<std::fs::File>,
-) -> Result<std::fs::File> {
+    acquire: fn(&Path) -> Result<FileLease>,
+) -> Result<FileLease> {
     let mut last_contention = None;
     for _ in 0..BRANCH_LOCK_RETRY_ATTEMPTS {
         match acquire(tracedecay_dir) {
@@ -219,34 +326,96 @@ pub fn sanitize_branch_name(name: &str) -> String {
     result.trim_matches('_').to_string()
 }
 
-/// Resolves the DB path for a given branch.
-///
-/// If the branch is tracked in metadata, returns its `db_file` path.
-/// Returns `None` if untracked or if the path would escape `tracedecay_dir`.
-#[must_use]
-pub fn resolve_branch_db_path(
-    tracedecay_dir: &Path,
-    branch: &str,
-    meta: &crate::branch_meta::BranchMeta,
-) -> Option<std::path::PathBuf> {
-    let entry = meta.branches.get(branch)?;
-    let resolved = tracedecay_dir.join(&entry.db_file);
-    // Prevent path traversal: resolved path must stay within tracedecay_dir
-    if let (Ok(canonical_dir), Ok(canonical_path)) =
-        (tracedecay_dir.canonicalize(), resolved.canonicalize())
-        && !canonical_path.starts_with(&canonical_dir)
-    {
-        return None;
-    }
-    Some(resolved)
-}
-
 #[cfg(test)]
 mod branch_memo_tests {
+    use std::io::Write as _;
+    use std::path::Path;
+
     use super::BranchMemo;
 
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// Repeated reads reuse the last HEAD answer, so a checkout between two
+    /// reads must still be observed on the very next one, in the main
+    /// checkout and in a linked worktree's own HEAD.
+    #[test]
+    fn current_branch_observes_every_checkout_immediately() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repository directory");
+        let root = root.canonicalize().expect("canonical repository");
+        run_git(&root, &["init", "--quiet", "--initial-branch=main"]);
+        run_git(&root, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
+        assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
+        assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
+
+        run_git(&root, &["checkout", "--quiet", "-b", "feature"]);
+        assert_eq!(super::current_branch(&root).as_deref(), Some("feature"));
+        run_git(&root, &["checkout", "--quiet", "--detach"]);
+        assert_eq!(super::current_branch(&root), None);
+        run_git(&root, &["checkout", "--quiet", "main"]);
+        assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
+
+        let linked = temp.path().join("linked");
+        run_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "side",
+                linked.to_str().expect("utf-8"),
+            ],
+        );
+        let linked = linked.canonicalize().expect("linked worktree");
+        assert_eq!(super::current_branch(&linked).as_deref(), Some("side"));
+        run_git(&linked, &["checkout", "--quiet", "-b", "side-two"]);
+        assert_eq!(super::current_branch(&linked).as_deref(), Some("side-two"));
+        assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
+    }
+
+    /// Rewrites `path` in place with same-length `contents` and hands back its
+    /// mtime, so only the change time can tell the two states apart.
+    fn rewrite_in_place(path: &Path, contents: &[u8]) {
+        let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.write_all(contents).unwrap();
+        file.set_modified(modified).unwrap();
+    }
+
+    /// A same-size HEAD rewrite inside the change-time quantum of the stamp
+    /// the memo was keyed by leaves every stat field equal, so a stamp taken
+    /// in that quantum must not answer the next read.
+    #[test]
+    fn current_branch_observes_a_same_size_in_place_head_rewrite() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repository directory");
+        let root = root.canonicalize().expect("canonical repository");
+        run_git(&root, &["init", "--quiet", "--initial-branch=main"]);
+        run_git(&root, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
+        run_git(&root, &["branch", "side"]);
+        let head = root.join(".git").join("HEAD");
+
+        for _ in 0..32 {
+            rewrite_in_place(&head, b"ref: refs/heads/main\n");
+            assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
+            rewrite_in_place(&head, b"ref: refs/heads/side\n");
+            assert_eq!(super::current_branch(&root).as_deref(), Some("side"));
+        }
+    }
+
     /// A memo answers repeated reads of its own root from one resolution, and
-    /// refuses to answer for a different root — a different repository is a
+    /// refuses to answer for a different root, a different repository is a
     /// different HEAD, so it must be resolved directly.
     #[test]
     fn memo_serves_its_own_root_and_bypasses_for_another() {
@@ -275,13 +444,80 @@ mod branch_memo_tests {
         );
     }
 
-    /// An unseeded memo resolves lazily and caches even a `None` answer, so a
-    /// detached HEAD or non-repository root is not re-probed within a request.
+    /// A pre-seeded memo must not open git; only [`super::current_branch`]
+    /// (via an unresolved [`BranchMemo::get`]) is a live probe.
     #[test]
-    fn unresolved_memo_caches_a_negative_answer() {
+    fn resolved_memo_does_not_increment_the_live_probe_counter() {
         let temp = tempfile::tempdir().expect("temporary directory");
-        let memo = BranchMemo::new(temp.path());
-        assert_eq!(memo.get(), None);
-        assert_eq!(memo.get(), None);
+        super::reset_live_branch_resolution_count_for_root_for_test(temp.path());
+        let seeded = BranchMemo::resolved(temp.path(), Some("feature/pinned".to_owned()));
+        assert_eq!(seeded.get(), Some("feature/pinned"));
+        assert_eq!(
+            super::live_branch_resolution_count_for_root_for_test(temp.path()),
+            0
+        );
+
+        let unresolved = BranchMemo::new(temp.path());
+        assert_eq!(unresolved.get(), None);
+        assert_eq!(
+            super::live_branch_resolution_count_for_root_for_test(temp.path()),
+            1
+        );
+        assert_eq!(unresolved.get(), None);
+        assert_eq!(
+            super::live_branch_resolution_count_for_root_for_test(temp.path()),
+            1,
+            "a memo must resolve the live branch at most once"
+        );
+    }
+
+    /// Branch reads that arrive while another thread walks the checkout share
+    /// that walk. Reading it as "no repository" made branch tracking refuse a
+    /// checkout on `main` as detached; walking again repaid the discovery the
+    /// topology memo exists to avoid.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branch_reads_share_the_discovery_walk_another_thread_owns() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repository directory");
+        let root = root.canonicalize().expect("canonical repository");
+        run_git(&root, &["init", "--quiet", "--initial-branch=main"]);
+        run_git(&root, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
+
+        let mut block = crate::git_repository::block_repository_discovery_for_test(&root);
+        let owner = std::thread::spawn({
+            let root = root.clone();
+            move || super::detect_default_branch(&root)
+        });
+        block.wait_entered().await;
+        let head = std::thread::spawn({
+            let root = root.clone();
+            move || super::checkout_head(&root)
+        });
+        let default_branch = std::thread::spawn({
+            let root = root.clone();
+            move || super::detect_default_branch(&root)
+        });
+        crate::git_repository::wait_for_topology_callers_for_test(&root, 2, || {
+            u64::from(head.is_finished()) + u64::from(default_branch.is_finished())
+        })
+        .await;
+        block.release();
+
+        assert_eq!(owner.join().expect("owner").as_deref(), Some("main"));
+        assert_eq!(
+            head.join().expect("checkout head"),
+            Some(super::CheckoutHead::Branch("main".to_owned()))
+        );
+        assert_eq!(
+            default_branch.join().expect("default branch").as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            crate::git_repository::repository_discovery_count_for_test(&root),
+            1,
+            "every caller must be answered by the one parked walk"
+        );
+        crate::git_repository::reset_repository_discovery_for_test(&root);
     }
 }

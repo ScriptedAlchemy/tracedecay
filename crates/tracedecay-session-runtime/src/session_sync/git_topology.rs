@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_application::{AuthorizedRoot, AuthorizedScopeSet};
 use tracedecay_code_index::git_projection::{
     GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitTopologyProjectionError, GitTopologyProjectionStore,
     build_git_topology_manifest_checked, git_topology_idempotency_key, git_topology_namespace,
     git_topology_projection_identity,
 };
+use tracedecay_contracts::{AuthorizedRoot, AuthorizedScopeSet};
 use tracedecay_domain::{GitHeadStateV1, RefId, RepositoryId, WorktreeId};
 use tracedecay_global_db::VerifiedGraphRuntimePortV1;
 use tracedecay_graph_db::{GraphCancellation, GraphDbError, GraphProjectorRevision};
@@ -16,8 +16,10 @@ use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 use tracedecay_store::FactReadControl;
 
+use tracedecay_application::git_intelligence::{
+    GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence,
+};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_usecases::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
 
 use super::{DaemonSessionSyncService, SessionSyncProjectContext, work::SessionSyncInterruption};
 
@@ -29,7 +31,6 @@ pub enum GitTopologySyncFailure {
 }
 
 impl GitTopologySyncFailure {
-    #[hotpath::skip]
     pub(super) const fn failure_code(self) -> &'static str {
         match self {
             Self::Stale => "git_topology_declared_state_stale",
@@ -45,11 +46,10 @@ pub(super) enum GitTopologySyncOutcome {
 }
 
 impl SessionSyncProjectContext {
-    #[hotpath::skip]
     pub(super) async fn publish_git_topology(
         &self,
         service: &DaemonSessionSyncService,
-        request: &tracedecay_application::session_sync::SessionSyncRequestV1,
+        request: &tracedecay_contracts::session_sync::SessionSyncRequestV1,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> GitTopologySyncOutcome {
         let scope = match tracedecay_code_index_runtime::resolved_scope_for_project(
@@ -76,7 +76,7 @@ impl SessionSyncProjectContext {
         let worktree = scope.worktree_id;
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
-        let worker = tokio::task::spawn_blocking(move || {
+        let worker = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             publish_native_topology(
                 runtime,
                 project_root,
@@ -317,8 +317,7 @@ pub(super) fn validate_retained_declared_topology(
 
 fn topology_read_failure(error: GitTopologyProjectionError) -> GitTopologySyncFailure {
     match error {
-        GitTopologyProjectionError::Stale { .. }
-        | GitTopologyProjectionError::StaleBinding { .. } => GitTopologySyncFailure::Stale,
+        GitTopologyProjectionError::StaleBinding { .. } => GitTopologySyncFailure::Stale,
         GitTopologyProjectionError::RepositoryMismatch => GitTopologySyncFailure::Denied,
         _ => GitTopologySyncFailure::Unavailable,
     }

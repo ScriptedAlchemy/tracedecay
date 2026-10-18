@@ -3,14 +3,10 @@ use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 
 use tracedecay_store::{
-    ParseOffset, TranscriptStore, TranscriptStoreError, TranscriptStoreResult,
-    TranscriptWriteBatch, TranscriptWriteKind,
+    ParseOffset, TranscriptStore, TranscriptStoreError, TranscriptStoreResult, TranscriptWriteBatch,
 };
 
-use tracedecay_global_db::{
-    GlobalDbGitCorrelationStore, RegisteredGlobalDb, TranscriptPersistenceError,
-};
-use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
+use tracedecay_global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
 use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 
 /// Transcript-store adapter over an already-open authoritative
@@ -33,20 +29,12 @@ impl<D> GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    #[hotpath::skip]
     pub const fn new(db: D) -> Self {
         Self { db }
     }
 
     fn db(&self) -> &RegisteredGlobalDb {
         self.db.borrow()
-    }
-
-    fn storage_error(operation: &'static str, message: impl Into<String>) -> TranscriptStoreError {
-        TranscriptStoreError::Storage {
-            operation,
-            source: Box::new(std::io::Error::other(message.into())),
-        }
     }
 
     fn path_text(path: &Path) -> String {
@@ -83,90 +71,39 @@ where
         }
     }
 
-    #[hotpath::skip]
-    async fn persist_batch(
-        &self,
-        batch: TranscriptWriteBatch,
-        commit_records: &[CommitSessionRecord],
-        span_observations: &[SpanObservation],
-    ) -> TranscriptStoreResult<()> {
-        let (cursor_path, kind) = batch.into_parts();
+    async fn persist_batch(&self, batch: TranscriptWriteBatch) -> TranscriptStoreResult<()> {
+        let (cursor_path, mut expected_offset, next_offset) = batch.into_parts();
         let cursor_key = Self::path_text(&cursor_path);
-        match kind {
-            TranscriptWriteKind::AdvanceOffset {
-                expected_offset,
-                next_offset,
-            } => {
-                if !commit_records.is_empty() || !span_observations.is_empty() {
-                    return Err(Self::storage_error(
-                        "persist transcript offset",
-                        "offset-only transcript writes cannot contain git evidence",
-                    ));
-                }
-
-                // Offset-only batches contain no parse products, so advancing
-                // across a compatible append winner cannot persist stale rows.
-                // Full batches below must never rewrite their observed cursor:
-                // their caller has to re-read and reparse after a conflict.
-                let mut expected_offset = expected_offset;
-                loop {
-                    match self
-                        .db()
-                        .persist_transcript_offset_result(&cursor_key, expected_offset, next_offset)
-                        .await
-                    {
-                        Ok(()) => return Ok(()),
-                        Err(TranscriptPersistenceError::Conflict { expected, actual }) => {
-                            if actual == next_offset {
-                                return Ok(());
-                            }
-                            let compatible_successor = actual.file_id != 0
-                                && actual.file_id == next_offset.file_id
-                                && actual.byte_offset > expected.byte_offset
-                                && actual.mtime >= expected.mtime
-                                && next_offset.byte_offset > actual.byte_offset
-                                && next_offset.mtime >= actual.mtime;
-                            if !compatible_successor {
-                                return Err(Self::persistence_error(
-                                    &cursor_path,
-                                    TranscriptPersistenceError::Conflict { expected, actual },
-                                ));
-                            }
-                            expected_offset = actual;
-                        }
-                        Err(error) => {
-                            return Err(Self::persistence_error(&cursor_path, error));
-                        }
+        // Offset-only batches contain no parse products, so advancing across a
+        // compatible append winner cannot persist stale rows.
+        loop {
+            match self
+                .db()
+                .persist_transcript_offset_result(&cursor_key, expected_offset, next_offset)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(TranscriptPersistenceError::Conflict { expected, actual }) => {
+                    if actual == next_offset {
+                        return Ok(());
                     }
+                    let compatible_successor = actual.file_id != 0
+                        && actual.file_id == next_offset.file_id
+                        && actual.byte_offset > expected.byte_offset
+                        && actual.mtime >= expected.mtime
+                        && next_offset.byte_offset > actual.byte_offset
+                        && next_offset.mtime >= actual.mtime;
+                    if !compatible_successor {
+                        return Err(Self::persistence_error(
+                            &cursor_path,
+                            TranscriptPersistenceError::Conflict { expected, actual },
+                        ));
+                    }
+                    expected_offset = actual;
                 }
-            }
-            TranscriptWriteKind::Upsert {
-                session,
-                messages,
-                expected_offset,
-                next_offset,
-            } => {
-                self.db()
-                    .persist_transcript_batch_result(
-                        &session,
-                        &messages,
-                        &cursor_key,
-                        expected_offset,
-                        next_offset,
-                    )
-                    .await
-                    .map_err(|error| Self::persistence_error(&cursor_path, error))?;
-
-                GlobalDbGitCorrelationStore::new(self.db())
-                    .publish_transcript_evidence(
-                        "transcript-git-evidence",
-                        commit_records,
-                        span_observations,
-                    )
-                    .map_err(|error| TranscriptStoreError::Storage {
-                        operation: "publish transcript git evidence",
-                        source: Box::new(error),
-                    })
+                Err(error) => {
+                    return Err(Self::persistence_error(&cursor_path, error));
+                }
             }
         }
     }
@@ -176,25 +113,30 @@ impl<D> TranscriptStore for GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    #[hotpath::measure(label = "usecases.transcript_store.get_parse_offset", future = true)]
+    #[tracing::instrument(
+        name = "usecases.transcript_store.get_parse_offset",
+        level = "trace",
+        skip_all
+    )]
     async fn get_parse_offset(&self, cursor_path: &Path) -> TranscriptStoreResult<ParseOffset> {
         let cursor_key = Self::path_text(cursor_path);
         self.db()
-            .get_parse_offset_result(&cursor_key)
+            .get_parse_offset(&cursor_key)
             .await
             .map(Option::unwrap_or_default)
             .map_err(|error| Self::persistence_error(cursor_path, error))
     }
 
-    #[hotpath::measure(
-        label = "usecases.transcript_store.persist_transcript_batch",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.transcript_store.persist_transcript_batch",
+        level = "trace",
+        skip_all
     )]
     async fn persist_transcript_batch(
         &self,
         batch: TranscriptWriteBatch,
     ) -> TranscriptStoreResult<()> {
-        self.persist_batch(batch, &[], &[]).await
+        self.persist_batch(batch).await
     }
 }
 
@@ -202,9 +144,10 @@ impl<D> TranscriptIngestStore for GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    #[hotpath::measure(
-        label = "usecases.transcript_store.replace_parse_offset_pair",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.transcript_store.replace_parse_offset_pair",
+        level = "trace",
+        skip_all
     )]
     async fn replace_parse_offset_pair(
         &self,
@@ -222,9 +165,10 @@ where
             .map_err(|error| Self::persistence_error(first.0, error))
     }
 
-    #[hotpath::measure(
-        label = "usecases.transcript_store.advance_parse_offset",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.transcript_store.advance_parse_offset",
+        level = "trace",
+        skip_all
     )]
     async fn advance_parse_offset_monotonic(
         &self,
@@ -236,86 +180,12 @@ where
             .await
             .map_err(|error| Self::persistence_error(cursor_path, error))
     }
-
-    #[hotpath::measure(
-        label = "usecases.transcript_store.record_session_ingest_activity",
-        future = true
-    )]
-    async fn record_session_ingest_activity(
-        &self,
-        project_root: &Path,
-        units: u64,
-        provider: &'static str,
-    ) {
-        crate::event_lane::publish(
-            self.db(),
-            crate::event_lane::ActivityFamilyV1::SessionIngest,
-            project_root,
-            None,
-            units,
-            Some(provider),
-        )
-        .await;
-    }
-
-    #[hotpath::measure(label = "usecases.transcript_store.get_session", future = true)]
-    async fn get_session(
-        &self,
-        provider: &str,
-        session_id: &str,
-    ) -> TranscriptStoreResult<Option<tracedecay_sessions::runtime::SessionRecord>> {
-        self.db()
-            .get_session_result(provider, session_id)
-            .await
-            .map_err(|error| match error {
-                TranscriptPersistenceError::Storage { operation, source } => {
-                    TranscriptStoreError::Storage { operation, source }
-                }
-                TranscriptPersistenceError::Conflict { .. }
-                | TranscriptPersistenceError::PairConflict { .. } => Self::storage_error(
-                    "load transcript session",
-                    "unexpected cursor conflict while loading a session",
-                ),
-            })
-    }
-
-    #[hotpath::measure(
-        label = "usecases.transcript_store.persist_transcript_batch_git",
-        future = true
-    )]
-    async fn persist_transcript_batch_with_git_evidence(
-        &self,
-        batch: TranscriptWriteBatch,
-        commit_records: &[CommitSessionRecord],
-        span_observations: &[SpanObservation],
-    ) -> TranscriptStoreResult<()> {
-        self.persist_batch(batch, commit_records, span_observations)
-            .await
-    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[test]
-    fn adapter_contains_only_the_borrowed_global_db_handle() {
-        fn assert_exact_fields(store: &GlobalDbTranscriptStore<&'_ RegisteredGlobalDb>) {
-            let GlobalDbTranscriptStore { db: _ } = store;
-        }
-
-        let _ = assert_exact_fields;
-        assert_eq!(
-            std::mem::size_of::<GlobalDbTranscriptStore<&'static RegisteredGlobalDb>>(),
-            std::mem::size_of::<&'static RegisteredGlobalDb>()
-        );
-        assert_eq!(
-            std::mem::align_of::<GlobalDbTranscriptStore<&'static RegisteredGlobalDb>>(),
-            std::mem::align_of::<&'static RegisteredGlobalDb>()
-        );
-    }
-
-    #[cfg(unix)]
     #[test]
     fn non_utf8_paths_keep_the_legacy_lossy_database_key() {
         use std::ffi::OsString;

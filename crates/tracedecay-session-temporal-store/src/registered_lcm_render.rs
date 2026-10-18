@@ -14,6 +14,7 @@ use tracedecay_lcm::contracts::{
     LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
 use tracedecay_lcm::raw::{RAW_MESSAGE_METADATA_SELECT_COLUMNS, raw_message_metadata_from_row};
+use tracedecay_lcm::schema::{RAW_MESSAGE_UNPUBLISHED_SQL, SUMMARY_VISIBLE_SQL};
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, Value, params, params_from_iter};
 
@@ -44,7 +45,9 @@ pub(super) async fn describe_relation_summary_ids(
 pub(super) fn expand_relation_summary_ids(request: &LcmExpandRequest) -> Vec<String> {
     match &request.target {
         LcmExpandTarget::SummaryNode { node_id } => vec![node_id.clone()],
-        LcmExpandTarget::RawMessage { .. } | LcmExpandTarget::ExternalPayload { .. } => Vec::new(),
+        LcmExpandTarget::CanonicalOccurrence { .. }
+        | LcmExpandTarget::RawMessage { .. }
+        | LcmExpandTarget::ExternalPayload { .. } => Vec::new(),
     }
 }
 
@@ -55,11 +58,13 @@ async fn session_summary_ids(
 ) -> Result<Vec<String>, LcmError> {
     let mut rows = query(
         snapshot,
-        "SELECT node_id
-         FROM lcm_summary_nodes
-         WHERE provider = ?1 AND session_id = ?2
-         ORDER BY depth, created_at, node_id
-         LIMIT 20",
+        &format!(
+            "SELECT n.summary_id
+             FROM session_summary_nodes n
+             WHERE n.provider = ?1 AND n.session_id = ?2 AND {SUMMARY_VISIBLE_SQL}
+             ORDER BY n.depth, n.created_at, n.summary_id
+             LIMIT 20"
+        ),
         params![provider, session_id],
     )
     .await?;
@@ -70,7 +75,7 @@ async fn session_summary_ids(
     Ok(ids)
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.describe")]
+#[tracing::instrument(name = "session_temporal.describe", level = "trace", skip_all)]
 pub(super) async fn describe(
     snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmDescribeRequest,
@@ -119,6 +124,7 @@ pub(super) async fn describe(
         provider: request.provider,
         session_id: request.session_id,
         raw_message_count: counts.raw_messages,
+        unpublished_message_count: counts.unpublished_messages,
         summary_node_count: counts.summary_nodes,
         external_payload_count: counts.external_payloads,
         first_store_id: counts.first_store_id,
@@ -131,7 +137,7 @@ pub(super) async fn describe(
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.expand")]
+#[tracing::instrument(name = "session_temporal.expand", level = "trace", skip_all)]
 pub(super) async fn expand(
     snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmExpandRequest,
@@ -143,6 +149,27 @@ pub(super) async fn expand(
         limit: usize::MAX,
     });
     let expansion = match request.target {
+        LcmExpandTarget::CanonicalOccurrence { message_id } => {
+            let raw = load_raw_message_by_identity(
+                snapshot,
+                &request.provider,
+                &request.session_id,
+                &message_id,
+            )
+            .await?;
+            LcmExpandResponse {
+                kind: "raw_message".to_string(),
+                content: String::new(),
+                content_range: empty_content_range(slice),
+                raw_message: None,
+                raw_message_metadata: Some(raw),
+                summary_node: None,
+                summary_sources: Vec::new(),
+                payload_ref: None,
+                from_current_session: Some(true),
+                source_pagination: None,
+            }
+        }
         LcmExpandTarget::RawMessage { store_id } => {
             let raw = load_raw_message(snapshot, store_id).await?;
             if raw.provider != request.provider {
@@ -162,7 +189,6 @@ pub(super) async fn expand(
                 summary_sources: Vec::new(),
                 payload_ref,
                 from_current_session: Some(from_current_session),
-                externalized_note: None,
                 source_pagination: None,
             }
         }
@@ -203,7 +229,6 @@ pub(super) async fn expand(
                 summary_sources,
                 payload_ref: None,
                 from_current_session: None,
-                externalized_note: None,
                 source_pagination: Some(source_pagination),
             }
         }
@@ -225,7 +250,6 @@ pub(super) async fn expand(
                 summary_sources: Vec::new(),
                 payload_ref: Some(payload_ref),
                 from_current_session: None,
-                externalized_note: None,
                 source_pagination: None,
             }
         }
@@ -240,6 +264,7 @@ struct DescribeCounts {
     external_payloads: i64,
     first_store_id: Option<i64>,
     last_store_id: Option<i64>,
+    unpublished_messages: i64,
 }
 
 async fn describe_counts(
@@ -249,17 +274,22 @@ async fn describe_counts(
 ) -> Result<DescribeCounts, LcmError> {
     let mut rows = query(
         snapshot,
-        "SELECT
-             (SELECT COUNT(*) FROM lcm_raw_messages
-              WHERE provider = ?1 AND session_id = ?2),
-             (SELECT COUNT(*) FROM lcm_summary_nodes
-              WHERE provider = ?1 AND session_id = ?2),
-             (SELECT COUNT(*) FROM lcm_external_payloads
-              WHERE provider = ?1 AND session_id = ?2),
-             (SELECT MIN(store_id) FROM lcm_raw_messages
-              WHERE provider = ?1 AND session_id = ?2),
-             (SELECT MAX(store_id) FROM lcm_raw_messages
-              WHERE provider = ?1 AND session_id = ?2)",
+        &format!(
+            "SELECT
+                 (SELECT COUNT(*) FROM lcm_raw_messages
+                  WHERE provider = ?1 AND session_id = ?2),
+                 (SELECT COUNT(*) FROM session_summary_nodes n
+                  WHERE n.provider = ?1 AND n.session_id = ?2 AND {SUMMARY_VISIBLE_SQL}),
+                 (SELECT COUNT(*) FROM lcm_external_payloads
+                  WHERE provider = ?1 AND session_id = ?2),
+                 (SELECT MIN(store_id) FROM lcm_raw_messages
+                  WHERE provider = ?1 AND session_id = ?2),
+                 (SELECT MAX(store_id) FROM lcm_raw_messages
+                  WHERE provider = ?1 AND session_id = ?2),
+                 (SELECT COUNT(*) FROM lcm_raw_messages AS raw
+                  WHERE raw.provider = ?1 AND raw.session_id = ?2
+                    AND {RAW_MESSAGE_UNPUBLISHED_SQL})"
+        ),
         params![provider, session_id],
     )
     .await?;
@@ -272,6 +302,7 @@ async fn describe_counts(
         external_payloads: field!(&row, 2)?,
         first_store_id: field!(&row, 3)?,
         last_store_id: field!(&row, 4)?,
+        unpublished_messages: field!(&row, 5)?,
     })
 }
 
@@ -280,38 +311,62 @@ async fn raw_message_overviews(
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmRawMessageOverview>, LcmError> {
+    // The snippet is the bounded preview. `total_chars` is the message's own
+    // length: an external payload's recorded char count, otherwise the stored
+    // content. Using the snippet length here described a stub, which is how a
+    // session that expand can read came back empty.
+    let preview_cap = i64::try_from(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS)
+        .map_err(|_| LcmError::Db("snippet preview cap does not fit i64".to_string()))?;
     let mut rows = query(
         snapshot,
-        "SELECT message_id, store_id, role, storage_kind, payload_ref,
-                LENGTH(snippet_text)
-         FROM lcm_raw_messages
-         WHERE provider = ?1 AND session_id = ?2
-         ORDER BY store_id
+        "SELECT raw.message_id, raw.store_id, raw.role, raw.storage_kind, raw.payload_ref,
+                CASE
+                    WHEN raw.snippet_text <> '' THEN raw.snippet_text
+                    ELSE substr(COALESCE(raw.content, ''), 1, ?3)
+                END,
+                COALESCE(
+                    (SELECT payload.char_count
+                       FROM lcm_external_payloads AS payload
+                      WHERE payload.payload_ref = raw.payload_ref),
+                    length(raw.content),
+                    length(raw.snippet_text),
+                    0
+                )
+         FROM lcm_raw_messages AS raw
+         WHERE raw.provider = ?1 AND raw.session_id = ?2
+         ORDER BY raw.store_id
          LIMIT 20",
-        params![provider, session_id],
+        params![provider, session_id, preview_cap],
     )
     .await?;
     let mut out = Vec::new();
     while let Some(row) = next_row(&mut rows).await? {
         let storage_kind_text: String = field!(&row, 3)?;
-        let total_chars = field!(&row, 5, i64)?.max(0) as u64;
+        let content_preview: String = field!(&row, 5)?;
+        let total_chars = field!(&row, 6, i64)?.max(0) as u64;
         out.push(LcmRawMessageOverview {
             message_id: field!(&row, 0)?,
             store_id: field!(&row, 1)?,
             role: field!(&row, 2)?,
             storage_kind: storage_kind(&storage_kind_text)?,
             payload_ref: field!(&row, 4)?,
-            content_preview: String::new(),
-            content_range: LcmContentRange {
-                offset: 0,
-                limit: 0,
-                returned_chars: 0,
-                total_chars,
-                truncated: total_chars > 0,
-            },
+            content_range: preview_range(&content_preview, total_chars),
+            content_preview,
         });
     }
     Ok(out)
+}
+
+fn preview_range(preview: &str, total_chars: u64) -> LcmContentRange {
+    let returned_chars = preview.chars().count() as u64;
+    let total_chars = total_chars.max(returned_chars);
+    LcmContentRange {
+        offset: 0,
+        limit: returned_chars,
+        returned_chars,
+        total_chars,
+        truncated: returned_chars < total_chars,
+    }
 }
 
 async fn summary_overviews(
@@ -322,25 +377,30 @@ async fn summary_overviews(
 ) -> Result<Vec<LcmSummaryNodeOverview>, LcmError> {
     let mut rows = query(
         snapshot,
-        "SELECT node_id, conversation_id, depth, created_at
-         FROM lcm_summary_nodes
-         WHERE provider = ?1 AND session_id = ?2
-         ORDER BY depth, created_at, node_id
-         LIMIT 20",
+        &format!(
+            "SELECT n.summary_id, n.conversation_id, n.depth, n.summary_text, n.created_at
+             FROM session_summary_nodes n
+             WHERE n.provider = ?1 AND n.session_id = ?2 AND {SUMMARY_VISIBLE_SQL}
+             ORDER BY n.depth, n.created_at, n.summary_id
+             LIMIT 20"
+        ),
         params![provider, session_id],
     )
     .await?;
     let mut out = Vec::new();
     while let Some(row) = next_row(&mut rows).await? {
         let node_id: String = field!(&row, 0)?;
+        let summary_text: String = field!(&row, 3)?;
         let source_count = relation(relations, &node_id)?.sources.len();
         out.push(LcmSummaryNodeOverview {
             node_id,
             conversation_id: field!(&row, 1)?,
             depth: field!(&row, 2)?,
-            summary_preview: String::new(),
+            summary_preview: tracedecay_lcm::retrieval_content::derived_text_for_snippet(
+                &summary_text,
+            ),
             source_count,
-            created_at: field!(&row, 3)?,
+            created_at: field!(&row, 4)?,
         });
     }
     Ok(out)
@@ -355,11 +415,14 @@ async fn describe_summary_node(
 ) -> Result<LcmDescribeSummaryNode, LcmError> {
     let mut rows = query(
         snapshot,
-        "SELECT node_id, conversation_id, depth, summary_token_count,
-                source_token_count, source_time_start, source_time_end,
-                expand_hint, metadata_json, created_at
-         FROM lcm_summary_nodes
-         WHERE provider = ?1 AND session_id = ?2 AND node_id = ?3",
+        &format!(
+            "SELECT n.summary_id, n.conversation_id, n.depth, n.summary_token_count,
+                    n.source_token_count, n.source_time_start, n.source_time_end,
+                    n.expand_hint, n.metadata_json, n.created_at
+             FROM session_summary_nodes n
+             WHERE n.provider = ?1 AND n.session_id = ?2 AND n.summary_id = ?3
+               AND {SUMMARY_VISIBLE_SQL}"
+        ),
         params![provider, session_id, node_id],
     )
     .await?;
@@ -406,8 +469,8 @@ async fn describe_summary_sources(
                 // projection-durability retention drop pass deletes raw rows
                 // precisely because the summary is the durable survivor, so
                 // the lineage outlives the row it names. Describe still
-                // reports the source — eliding it would understate the
-                // summary's lineage — but carries no raw metadata for it, which
+                // reports the source, eliding it would understate the
+                // summary's lineage, but carries no raw metadata for it, which
                 // is how this overview already spells "no raw row backs this
                 // ref" (`role`/`storage_kind` are read straight off that row).
                 // `tracedecay_lcm_expand` on the same node reports the typed
@@ -465,6 +528,14 @@ async fn describe_external_payload(
     if payload.provider != provider || payload.session_id != session_id {
         return Err(LcmError::PayloadNotFound);
     }
+    let content_preview = external_payload_preview(
+        snapshot,
+        provider,
+        session_id,
+        &payload.message_id,
+        payload_ref,
+    )
+    .await?;
     Ok(LcmDescribeExternalPayload {
         payload_ref: payload.payload_ref,
         provider: payload.provider,
@@ -476,8 +547,33 @@ async fn describe_external_payload(
         char_count: payload.char_count,
         created_at: payload.created_at,
         metadata_json: payload.metadata_json,
-        content_preview: String::new(),
+        content_preview,
     })
+}
+
+async fn external_payload_preview(
+    snapshot: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    payload_ref: &str,
+) -> Result<String, LcmError> {
+    let mut rows = query(
+        snapshot,
+        "SELECT snippet_text
+         FROM lcm_raw_messages
+         WHERE provider = ?1
+           AND session_id = ?2
+           AND message_id = ?3
+           AND payload_ref = ?4
+         LIMIT 1",
+        params![provider, session_id, message_id, payload_ref],
+    )
+    .await?;
+    if let Some(row) = next_row(&mut rows).await? {
+        return field!(&row, 0);
+    }
+    Ok(format!("[externalized payload ref={payload_ref}]"))
 }
 
 /// Loads the raw row a directly requested `store_id` names, refusing when it is
@@ -490,6 +586,31 @@ async fn load_raw_message(
     find_raw_message(snapshot, store_id)
         .await?
         .ok_or(LcmError::SummarySourceNotOwnedBySession)
+}
+
+async fn load_raw_message_by_identity(
+    snapshot: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+) -> Result<LcmRawMessageMetadata, LcmError> {
+    let sql = format!(
+        "SELECT {RAW_MESSAGE_METADATA_SELECT_COLUMNS}
+         FROM lcm_raw_messages
+         WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
+         ORDER BY store_id
+         LIMIT 2"
+    );
+    let mut rows = query(snapshot, &sql, params![provider, session_id, message_id]).await?;
+    let row = next_row(&mut rows)
+        .await?
+        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+    if next_row(&mut rows).await?.is_some() {
+        return Err(LcmError::Db(
+            "duplicate raw messages for exact provider/session/message identity".to_string(),
+        ));
+    }
+    raw_message_metadata_from_row(&row)
 }
 
 /// Reads one raw row by `store_id` alone, so a row belonging to another session
@@ -520,12 +641,14 @@ async fn load_summary_node(
 ) -> Result<LcmSummaryNode, LcmError> {
     let mut rows = query(
         snapshot,
-        "SELECT node_id, provider, conversation_id, session_id, depth,
-                '' AS summary_text, summary_hash, summary_token_count,
-                source_token_count, source_time_start, source_time_end,
-                expand_hint, metadata_json, created_at
-         FROM lcm_summary_nodes
-         WHERE node_id = ?1",
+        &format!(
+            "SELECT n.summary_id, n.provider, n.conversation_id, n.session_id, n.depth,
+                    '' AS summary_text, n.summary_hash, n.summary_token_count,
+                    n.source_token_count, n.source_time_start, n.source_time_end,
+                    n.expand_hint, n.metadata_json, n.created_at
+             FROM session_summary_nodes n
+             WHERE n.summary_id = ?1 AND {SUMMARY_VISIBLE_SQL}"
+        ),
         params![node_id],
     )
     .await?;
@@ -617,7 +740,7 @@ async fn anchor_store_id(
          FROM session_occurrences AS occurrence
          JOIN session_temporal_generations AS generation
            ON generation.session_id = occurrence.session_id
-          AND generation.generation = occurrence.generation
+          AND +occurrence.generation <= generation.generation
           AND generation.state = 'active'
          JOIN lcm_raw_messages AS raw
            ON raw.message_id = occurrence.message_id
@@ -645,14 +768,14 @@ async fn anchor_store_id(
 /// Recovers the locator of a raw source whose row retention already dropped.
 ///
 /// Publication writes both lineage records from the same manifest source list:
-/// the projected `lcm_summary_sources` row carries the `store_id` as text at the
-/// source's ordinal (`operations::summary_projection`), and the relation graph
+/// the `session_summary_sources` row carries the `store_id` as text at the
+/// source's ordinal (`operations::publication`), and the relation graph
 /// carries the anchor at that same ordinal (`relations::build_graph` enumerates
 /// the same sequence). Retention drops the raw row but never the lineage, so the
 /// projected record still names the locator the anchor can no longer reach.
 ///
 /// The recovered locator only ever *names* a source that the caller then reports
-/// as retention-expired — no content or metadata is disclosed. It is refused
+/// as retention-expired, no content or metadata is disclosed. It is refused
 /// unless the raw row is genuinely absent: a present row that the anchor failed
 /// to reach is an identity or ownership problem, not retention, and must keep
 /// failing closed.
@@ -665,8 +788,8 @@ async fn retention_dropped_store_id(
     let mut rows = query(
         snapshot,
         "SELECT source_id
-         FROM lcm_summary_sources
-         WHERE node_id = ?1 AND ordinal = ?2 AND source_kind = 'raw_message'",
+         FROM session_summary_sources
+         WHERE summary_id = ?1 AND ordinal = ?2 AND source_kind = 'raw_message'",
         params![summary_id, ordinal],
     )
     .await?;
@@ -723,7 +846,7 @@ async fn load_summary_sources(
                 // An *absent* raw row is not an ownership violation: publication
                 // proves every raw source exists and is session-owned before the
                 // lineage row is written (`operations::sources::prepare_raw_source`),
-                // so a row missing at read time was removed afterwards — by the
+                // so a row missing at read time was removed afterwards, by the
                 // projection-durability retention drop pass, whose whole premise
                 // is that the summary is the durable survivor. Report the source
                 // as `HydrationStateV1::RetentionExpired` and keep rendering;
@@ -825,13 +948,15 @@ async fn load_summary_nodes(
         .cloned()
         .map(Value::Text)
         .collect::<Vec<_>>();
+    // Children are the lineage of an already-visible parent, so they are read
+    // without the visibility rule; the parent's availability governs the page.
     let sql = format!(
-        "SELECT node_id, provider, conversation_id, session_id, depth,
+        "SELECT summary_id, provider, conversation_id, session_id, depth,
                 '' AS summary_text, summary_hash, summary_token_count,
                 source_token_count, source_time_start, source_time_end,
                 expand_hint, metadata_json, created_at
-         FROM lcm_summary_nodes
-         WHERE node_id IN ({placeholders})"
+         FROM session_summary_nodes
+         WHERE summary_id IN ({placeholders})"
     );
     let mut rows = query(snapshot, &sql, params_from_iter(values)).await?;
     let mut out = BTreeMap::new();

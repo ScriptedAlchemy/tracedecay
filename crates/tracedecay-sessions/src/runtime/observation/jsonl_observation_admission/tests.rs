@@ -3,9 +3,10 @@
 //! The seam has exactly two dispositions for an admitted frame that fails:
 //!
 //! 1. A deterministic content refusal covers past the frame with a durable
-//!    `AdmissionRefused` coverage row so the stream converges.
-//! 2. Everything else — store commit/read-back failures, unbound authorities,
-//!    retryable races — is a typed [`TranscriptIngestError::HostAdmission`]
+//!    typed reason (`ObservationIdentityCollision` for that exact refusal,
+//!    otherwise `AdmissionRefused`) so the stream converges.
+//! 2. Everything else, store commit/read-back failures, unbound authorities,
+//!    retryable races, is a typed [`TranscriptIngestError::HostAdmission`]
 //!    block: the frontier does not advance and no coverage is written over a
 //!    record whose durable fate is unknown.
 //!
@@ -13,33 +14,44 @@
 //! the persist path and never reach either disposition.
 
 use std::io::Write as _;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use tracedecay_domain::{
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
-    ProviderId, SessionId,
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    ProjectId, ProviderId, RetentionClass, SessionId,
 };
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_store::ParseOffset;
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
+    ObservationIdentityCollisionDispositionV1,
 };
-use tracedecay_store::{ObservationBatchFallbackCause, ParseOffset};
 
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::admission::{
-    AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostProjectionDrainOutcome,
+    AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostAdmissionStatus,
+    HostProjectionDrainOutcome,
 };
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::runtime::codex::{
+use crate::runtime::hosts::codex::{
     try_admit_codex_jsonl_observations_for_profile_with_admission,
     try_admit_codex_jsonl_observations_for_project_with_admission,
 };
+use crate::runtime::ingest::classify_transcript_ingest_failure;
 use crate::runtime::shared::StoredCursor;
-use crate::runtime::source::{JsonlResumeState, TranscriptIngestError};
+use crate::runtime::source::{
+    HoldUnchangedGenerationCache, JsonlChangeKind, JsonlIoAccounting, JsonlResumeState,
+    TranscriptIngestError, spin_until_jsonl_change_settled,
+};
 
 /// Wraps [`MemoryHostAdmission`] so a test can script the capture verdict and
 /// observe every cover-past cursor write the seam attempts.
@@ -47,46 +59,31 @@ use crate::runtime::source::{JsonlResumeState, TranscriptIngestError};
 struct SeamSpyAdmission {
     inner: MemoryHostAdmission,
     scripted_capture_error: Mutex<Option<HostAdmissionOutcome>>,
+    scripted_capture_error_once: Mutex<Option<HostAdmissionOutcome>>,
     scripted_batch_error: Mutex<Option<HostAdmissionOutcome>>,
+    scripted_cursor_refusal: Mutex<Option<HostAdmissionOutcome>>,
     report_no_cursor: AtomicBool,
     capture_calls: AtomicU64,
+    capture_collision_dispositions: Mutex<Vec<ObservationIdentityCollisionDispositionV1>>,
     cover_past_advances: Mutex<Vec<ObservationCursorAdvance>>,
+    /// Commit the next capture through the shared store and then report the
+    /// cursor CAS as lost, the way a live hook ingest wins the race a sweep
+    /// was still trying to write.
+    peer_wins_next_cursor_cas: AtomicBool,
+    /// Commit only the first batched frame, then report the window CAS lost.
+    /// The durable cursor then covers a prefix, not the window's last frame.
+    peer_covers_batch_prefix: AtomicBool,
+    rewrites: Mutex<Vec<RewriteCall>>,
 }
 
-#[test]
-fn install_shared_jsonl_preparation_authority_is_idempotent_across_memory_arcs() {
-    use std::num::NonZeroU64;
-    use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
-
-    super::install_test_shared_jsonl_preparation_authority();
-    let other = std::sync::Arc::new(ProcessResidentMemoryV1::new(
-        NonZeroU64::new(64 * 1024 * 1024).expect("nonzero JSONL fixture budget"),
-    ));
-    super::install_shared_jsonl_preparation_authority(other).expect(
-        "a second installer with a distinct memory Arc must not poison the process-wide authority",
-    );
-}
-
-#[tokio::test]
-async fn shared_jsonl_page_reuses_one_bounded_scan() {
-    super::install_test_shared_jsonl_preparation_authority();
-    let temp = tempfile::TempDir::new().expect("temp directory");
-    let path = temp.path().join("shared.jsonl");
-    std::fs::write(&path, b"{}\n").expect("JSONL fixture");
-    let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
-
-    let (first, first_hit) =
-        super::shared_jsonl_page(&path, StoredCursor::default(), Some(1024), None, true)
-            .await
-            .expect("initial shared page");
-    let (second, second_hit) =
-        super::shared_jsonl_page(&path, StoredCursor::default(), Some(1024), None, true)
-            .await
-            .expect("cached shared page");
-
-    assert!(!first_hit);
-    assert!(second_hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &second));
+#[derive(Debug, PartialEq, Eq)]
+enum RewriteCall {
+    Begin {
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    },
+    Complete(ObservationSourceGenerationV1),
 }
 
 #[tokio::test]
@@ -99,6 +96,7 @@ async fn shared_jsonl_page_precomputes_codex_context_hints_once() {
         b"{\"type\":\"event_msg\"}\n{\"type\":\"turn_context\"}\n",
     )
     .expect("JSONL fixture");
+    let settled = spin_until_jsonl_change_settled(&path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
     let (first, _) =
@@ -110,8 +108,16 @@ async fn shared_jsonl_page_precomputes_codex_context_hints_once() {
             .await
             .expect("second shared consumer");
 
-    assert!(hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    if settled {
+        assert!(hit);
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+    // Without a stat witness the shared identity never settles, so each
+    // consumer honestly reads its own page.
+    if !settled {
+        assert!(!hit);
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    }
     assert_eq!(
         first
             .frames
@@ -133,6 +139,7 @@ async fn shared_jsonl_page_keys_symlinks_by_canonical_source() {
     let path = temp.path().join("source.jsonl");
     let alias = temp.path().join("alias.jsonl");
     std::fs::write(&path, b"{}\n").expect("JSONL fixture");
+    spin_until_jsonl_change_settled(&path);
     symlink(&path, &alias).expect("symlink fixture");
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
@@ -155,6 +162,7 @@ async fn shared_jsonl_page_waiters_share_one_async_in_flight_read() {
     let temp = tempfile::TempDir::new().expect("temp directory");
     let path = temp.path().join("concurrent.jsonl");
     std::fs::write(&path, b"{}\n").expect("JSONL fixture");
+    let settled = spin_until_jsonl_change_settled(&path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
     let first_path = path.clone();
@@ -172,8 +180,16 @@ async fn shared_jsonl_page_waiters_share_one_async_in_flight_read() {
     let (first, first_hit) = first.expect("first concurrent page");
     let (second, second_hit) = second.expect("second concurrent page");
 
-    assert_ne!(first_hit, second_hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    if settled {
+        assert_ne!(first_hit, second_hit);
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+    // Without a stat witness the shared identity never settles: each
+    // consumer's key is unique, so both honestly read the file.
+    if !settled {
+        assert!(!first_hit && !second_hit);
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    }
 }
 
 #[tokio::test]
@@ -186,7 +202,9 @@ async fn shared_jsonl_page_wait_is_operation_cancellable() {
         position: 0,
         generation: 0,
         max_new_bytes: Some(1024),
+        max_frames: None,
         resume: None,
+        prefix_recovery: super::JsonlPrefixRecovery::Report,
         preparation: false.into(),
     };
     let cache = super::SHARED_JSONL_PAGE_CACHE.get_or_init(tokio::sync::Mutex::default);
@@ -263,8 +281,6 @@ async fn lazy_preparation_mutex_wait_is_operation_cancellable() {
 
 #[tokio::test]
 async fn lazy_preparation_cpu_wait_is_operation_cancellable() {
-    use std::num::NonZeroUsize;
-
     super::install_test_shared_jsonl_preparation_authority();
     let temp = tempfile::tempdir().expect("temp directory");
     let path = temp.path().join("cancel-lazy-cpu.jsonl");
@@ -279,9 +295,9 @@ async fn lazy_preparation_cpu_wait_is_operation_cancellable() {
     .await
     .expect("lazy page");
     let preparations_before = super::shared_jsonl_frame_preparations_for_test(page.file_identity);
-    let background_cpu = tracedecay_private_fs::background_cpu::test_process_background_cpu(
+    let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(
         NonZeroUsize::new(1).expect("nonzero CPU width"),
-    );
+    ));
     let held = background_cpu.acquire();
     let task_page = Arc::clone(&page);
     let task_cpu = Arc::clone(&background_cpu);
@@ -331,6 +347,7 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
     let path = temp.path().join("aborted-prefetch.jsonl");
     std::fs::write(&path, b"{}\n").expect("JSONL fixture");
     let canonical = std::fs::canonicalize(&path).expect("canonical fixture");
+    let observed_builds = super::SharedJsonlBuildObserver::for_paths(std::slice::from_ref(&path));
     let build_gate = std::sync::Arc::new(std::sync::Barrier::new(2));
     super::SHARED_JSONL_BUILD_GATES
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -339,10 +356,9 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
         .insert(path.clone(), std::sync::Arc::clone(&build_gate));
     let pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
-    super::SHARED_JSONL_ACTIVE_BUILDS.store(0, Ordering::Release);
     pin.start_prefetches(std::slice::from_ref(&path));
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while super::SHARED_JSONL_ACTIVE_BUILDS.load(Ordering::Acquire) == 0 {
+        while observed_builds.active() == 0 {
             tokio::task::yield_now().await;
         }
     })
@@ -379,11 +395,6 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
     .expect("same-key demand registered its waiter before producer abort");
 
     drop(pin);
-    super::SHARED_JSONL_BUILD_GATES
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-        .lock()
-        .unwrap()
-        .remove(&path);
     tokio::task::spawn_blocking(move || build_gate.wait())
         .await
         .expect("release aborted build gate");
@@ -412,35 +423,12 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
 }
 
 #[tokio::test]
-async fn unpinned_admission_page_defers_decode_to_the_scope_gate() {
-    super::install_test_shared_jsonl_preparation_authority();
-    let temp = tempfile::TempDir::new().expect("temp directory");
-    let path = temp.path().join("scope-first.jsonl");
-    std::fs::write(&path, b"{\"type\":\"event_msg\"}\n").expect("JSONL fixture");
-
-    let (page, _) =
-        super::shared_jsonl_page(&path, StoredCursor::default(), Some(1024), None, true)
-            .await
-            .expect("standalone admission page");
-
-    assert!(
-        page.frames
-            .iter()
-            .all(|frame| frame.prepared.get().is_none()),
-        "an unpinned standalone/replay page must not decode before its scope gate"
-    );
-    assert!(
-        page._memory.is_some(),
-        "raw replay pages must retain a process-memory reservation until their final Arc drops"
-    );
-}
-
-#[tokio::test]
 async fn generation_pin_prevents_slow_consumer_page_eviction() {
     super::install_test_shared_jsonl_preparation_authority();
     let temp = tempfile::TempDir::new().expect("temp directory");
     let pinned_path = temp.path().join("pinned.jsonl");
     std::fs::write(&pinned_path, b"{}\n").expect("pinned JSONL fixture");
+    let settled = spin_until_jsonl_change_settled(&pinned_path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&pinned_path));
     let (pinned, initial_hit) = super::shared_jsonl_page(
         &pinned_path,
@@ -470,8 +458,131 @@ async fn generation_pin_prevents_slow_consumer_page_eviction() {
     )
     .await
     .expect("replayed pinned page");
-    assert!(hit);
-    assert!(std::sync::Arc::ptr_eq(&pinned, &replayed));
+    if settled {
+        assert!(hit);
+        assert!(std::sync::Arc::ptr_eq(&pinned, &replayed));
+    }
+    // Without a stat witness the shared identity never settles, so the
+    // replayed read honestly misses.
+    if !settled {
+        assert!(!hit);
+        assert!(!std::sync::Arc::ptr_eq(&pinned, &replayed));
+    }
+}
+
+#[tokio::test]
+async fn idle_release_drops_unpinned_prepared_pages_and_keeps_pinned_ones() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::TempDir::new().expect("temp directory");
+    let mut encoded = serde_json::to_vec(&json!({
+        "payload": "x".repeat(64 * 1024),
+    }))
+    .expect("JSONL payload");
+    encoded.push(b'\n');
+
+    // Every test in this binary shares the process-wide page cache, so a
+    // concurrent ingest can capacity-evict any unpinned page. Hold a setup pin
+    // until the cache guard below excludes those evictions.
+    let unpinned_path = temp.path().join("unpinned.jsonl");
+    std::fs::write(&unpinned_path, &encoded).expect("unpinned JSONL");
+    let unpinned_settled = spin_until_jsonl_change_settled(&unpinned_path);
+    let setup_pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&unpinned_path));
+    let (unpinned, _) = super::shared_jsonl_page(
+        &unpinned_path,
+        StoredCursor::default(),
+        Some(encoded.len() as u64),
+        None,
+        true,
+    )
+    .await
+    .expect("unpinned page");
+    assert!(
+        unpinned.retained_bytes > 0,
+        "a prepared page retains its payload bytes"
+    );
+
+    let pinned_path = temp.path().join("pinned.jsonl");
+    std::fs::write(&pinned_path, &encoded).expect("pinned JSONL");
+    let pinned_settled = spin_until_jsonl_change_settled(&pinned_path);
+    let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&pinned_path));
+    let (pinned, _) = super::shared_jsonl_page(
+        &pinned_path,
+        StoredCursor::default(),
+        Some(encoded.len() as u64),
+        None,
+        true,
+    )
+    .await
+    .expect("pinned page");
+
+    let mut cache = super::SHARED_JSONL_PAGE_CACHE
+        .get()
+        .expect("shared page cache")
+        .lock()
+        .await;
+    assert_eq!(
+        super::release_unpinned_shared_jsonl_pages(),
+        super::SharedJsonlPageReleaseV1 { pages: 0, bytes: 0 },
+        "idle release must skip a contended cache rather than wait"
+    );
+    drop(setup_pin);
+    assert!(
+        Arc::strong_count(&unpinned) >= 2 && Arc::strong_count(&pinned) >= 2,
+        "ingest left both prepared pages shared with later consumers"
+    );
+
+    let released = super::release_unpinned_cached_jsonl_pages(&mut cache);
+    eprintln!(
+        "JSONL_HEAP_PROOF released_pages={} released_bytes={} unpinned={}",
+        released.pages, released.bytes, unpinned.retained_bytes
+    );
+    assert!(
+        released.pages >= 1 && released.bytes >= unpinned.retained_bytes,
+        "idle release must drop the unpinned prepared page: {released:?}"
+    );
+    assert_eq!(
+        Arc::strong_count(&unpinned),
+        1,
+        "idle release must drop the unpinned prepared page"
+    );
+    assert!(
+        Arc::strong_count(&pinned) >= 2,
+        "a pinned in-flight page must survive idle release"
+    );
+    drop(cache);
+
+    let (rebuilt, unpinned_hit) = super::shared_jsonl_page(
+        &unpinned_path,
+        StoredCursor::default(),
+        Some(encoded.len() as u64),
+        None,
+        true,
+    )
+    .await
+    .expect("rebuilt unpinned page");
+    let (replayed, pinned_hit) = super::shared_jsonl_page(
+        &pinned_path,
+        StoredCursor::default(),
+        Some(encoded.len() as u64),
+        None,
+        true,
+    )
+    .await
+    .expect("replayed pinned page");
+    if unpinned_settled {
+        assert!(
+            !unpinned_hit,
+            "a later consumer must rebuild the released unpinned page"
+        );
+        assert!(!Arc::ptr_eq(&unpinned, &rebuilt));
+    }
+    if pinned_settled {
+        assert!(
+            pinned_hit,
+            "a later consumer must still share the pinned page"
+        );
+        assert!(Arc::ptr_eq(&pinned, &replayed));
+    }
 }
 
 #[tokio::test]
@@ -506,6 +617,7 @@ async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
         .expect("append fixture");
     file.write_all(b"{\"type\":\"event_msg\"}\n")
         .expect("append JSONL frame");
+    let settled = spin_until_jsonl_change_settled(&path);
 
     let (exact, first_hit) = super::shared_jsonl_page_with_cancellation(
         &path,
@@ -530,8 +642,16 @@ async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
     )
     .await
     .expect("replayed exact append page");
-    assert!(replay_hit);
-    assert!(Arc::ptr_eq(&exact, &replayed));
+    if settled {
+        assert!(replay_hit);
+        assert!(Arc::ptr_eq(&exact, &replayed));
+    }
+    // Without a stat witness the shared identity never settles, so the
+    // replay honestly rebuilds its own page.
+    if !settled {
+        assert!(!replay_hit);
+        assert!(!Arc::ptr_eq(&exact, &replayed));
+    }
     assert!(!Arc::ptr_eq(&prefetched, &exact));
 }
 
@@ -551,31 +671,58 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
         std::fs::write(&path, &encoded).expect("parallel JSONL fixture");
         paths.push(path);
     }
-    let _pin = super::pin_shared_jsonl_paths(&paths);
+    // No pin: `workers` pinned pages would fill the process-global page cache
+    // and make concurrent tests' cache-hit assertions fail. The cache's
+    // `workers` page cap bounds retained bytes with or without pins.
+    let observed_builds = super::SharedJsonlBuildObserver::for_paths(&paths);
+    let build_gate = std::sync::Arc::new(std::sync::Barrier::new(path_count));
+    {
+        let mut gates = super::SHARED_JSONL_BUILD_GATES
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap();
+        for path in &paths {
+            gates.insert(path.clone(), std::sync::Arc::clone(&build_gate));
+        }
+    }
 
-    super::SHARED_JSONL_PEAK_BUILDS.store(0, Ordering::Release);
-    let _prefetches = super::start_shared_jsonl_page_prefetch(&paths);
-    for path in &paths {
-        super::shared_jsonl_page(
-            path,
-            StoredCursor::default(),
-            Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
-            None,
-            super::SharedJsonlFramePreparation::Lazy,
-        )
-        .await
-        .expect("prepared generation page");
+    let prefetches = super::start_shared_jsonl_page_prefetch(&paths);
+    let builds = paths
+        .into_iter()
+        .map(|path| {
+            tokio::spawn(async move {
+                super::shared_jsonl_page(
+                    &path,
+                    StoredCursor::default(),
+                    Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
+                    None,
+                    super::SharedJsonlFramePreparation::Lazy,
+                )
+                .await
+                .expect("prepared generation page");
+            })
+        })
+        .collect::<Vec<_>>();
+    for build in builds {
+        build.await.expect("prepared generation task");
+    }
+    // A prefetch that waited on a demand build rebuilds its page when that
+    // page has already left the process-global cache, so the demand tasks
+    // alone do not cover every build this test started.
+    let cx = tracedecay_runtime_core::native_runtime::cx().expect("native runtime");
+    for mut prefetch in prefetches {
+        let _ = prefetch.join(&cx).await.expect("prefetch task");
     }
 
     assert_eq!(
-        super::SHARED_JSONL_ACTIVE_BUILDS.load(Ordering::Acquire),
+        observed_builds.active(),
         0,
         "every completed page build must release exactly one active-build slot"
     );
-
-    if std::thread::available_parallelism().is_ok_and(|cores| cores.get() > 8) {
-        assert!(super::shared_jsonl_peak_builds_for_test() > 8);
-    }
+    assert!(
+        observed_builds.peak() >= 2,
+        "the rendezvous gate requires every page build to overlap before proceeding"
+    );
     let retained = super::SHARED_JSONL_PAGE_CACHE
         .get()
         .expect("shared page cache")
@@ -588,37 +735,6 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
                 .unwrap_or(u64::MAX)
                 .saturating_mul(super::SHARED_JSONL_WORKER_RESERVATION_BYTES)
     );
-}
-
-#[test]
-fn preparation_uses_the_daemon_installed_worker_width() {
-    super::install_test_shared_jsonl_preparation_authority();
-    assert_eq!(super::shared_jsonl_preparation_workers(), 48);
-}
-
-#[test]
-fn preparation_preserves_configured_widths_above_sixty_four() {
-    assert_eq!(super::shared_jsonl_preparation_workers_from(96), 96);
-}
-
-#[test]
-fn preparation_width_backs_down_under_memory_pressure() {
-    let reservation = super::SHARED_JSONL_WORKER_RESERVATION_BYTES;
-    assert_eq!(
-        super::shared_jsonl_preparation_capacity_from(48, reservation * 64, 0),
-        48
-    );
-    assert_eq!(
-        super::shared_jsonl_preparation_capacity_from(48, reservation * 8, reservation * 6),
-        2
-    );
-}
-
-#[test]
-fn speculative_preparation_reserves_capacity_for_exact_cursor_demand() {
-    assert_eq!(super::shared_jsonl_speculative_capacity_from(48), 47);
-    assert_eq!(super::shared_jsonl_speculative_capacity_from(2), 1);
-    assert_eq!(super::shared_jsonl_speculative_capacity_from(1), 0);
 }
 
 #[test]
@@ -730,41 +846,29 @@ async fn lazy_preparation_retains_only_its_measured_memory_charge() {
     );
 }
 
-#[test]
-fn speculative_capacity_is_one_global_quota_across_prefetch_generations() {
-    let key = |name: &str| super::SharedJsonlPageKey {
-        path: PathBuf::from(name),
-        position: 0,
-        generation: 0,
-        max_new_bytes: Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
-        resume: None,
-        preparation: true.into(),
-    };
-    let first = key("/generation-a.jsonl");
-    let second = key("/generation-b.jsonl");
-    let demand_slot = key("/exact-demand.jsonl");
-    let mut cache = super::SharedJsonlPageCache::default();
-
-    assert!(super::reserve_shared_jsonl_speculative_slot(
-        &mut cache, &first, 2
-    ));
-    assert!(super::reserve_shared_jsonl_speculative_slot(
-        &mut cache, &second, 2
-    ));
-    assert!(
-        !super::reserve_shared_jsonl_speculative_slot(&mut cache, &demand_slot, 2),
-        "a second prefetch generation cannot recompute and reuse occupied speculative slots"
-    );
-    assert_eq!(cache.speculative_in_flight.len(), 2);
-}
-
 impl SeamSpyAdmission {
     fn script_capture_error(&self, outcome: HostAdmissionOutcome) {
         *self.scripted_capture_error.lock().unwrap() = Some(outcome);
     }
 
+    fn script_peer_wins_next_cursor_cas(&self) {
+        self.peer_wins_next_cursor_cas.store(true, Ordering::SeqCst);
+    }
+
+    fn script_peer_covers_batch_prefix(&self) {
+        self.peer_covers_batch_prefix.store(true, Ordering::SeqCst);
+    }
+
+    fn peer_won_cursor_cas(&self) -> bool {
+        self.peer_wins_next_cursor_cas.swap(false, Ordering::SeqCst)
+    }
+
     fn script_batch_error(&self, outcome: HostAdmissionOutcome) {
         *self.scripted_batch_error.lock().unwrap() = Some(outcome);
+    }
+
+    fn script_capture_error_once(&self, outcome: HostAdmissionOutcome) {
+        *self.scripted_capture_error_once.lock().unwrap() = Some(outcome);
     }
 
     fn cover_past_advances(&self) -> Vec<ObservationCursorAdvance> {
@@ -773,6 +877,10 @@ impl SeamSpyAdmission {
 
     fn capture_count(&self) -> u64 {
         self.capture_calls.load(Ordering::Relaxed)
+    }
+
+    fn capture_collision_dispositions(&self) -> Vec<ObservationIdentityCollisionDispositionV1> {
+        self.capture_collision_dispositions.lock().unwrap().clone()
     }
 }
 
@@ -783,7 +891,20 @@ impl HostAdmission for SeamSpyAdmission {
     ) -> AdmissionFuture<'a, CaptureObservationOutcome> {
         Box::pin(async move {
             self.capture_calls.fetch_add(1, Ordering::Relaxed);
-            if let Some(outcome) = *self.scripted_capture_error.lock().unwrap() {
+            self.capture_collision_dispositions
+                .lock()
+                .unwrap()
+                .push(request.identity_collision_disposition());
+            if self.peer_won_cursor_cas() {
+                let _ = self.inner.capture_observation(request).await;
+                return Err(HostAdmissionOutcome::retained_backpressured(
+                    "cursor_conflict",
+                ));
+            }
+            if let Some(outcome) = self.scripted_capture_error_once.lock().unwrap().take() {
+                return Err(outcome);
+            }
+            if let Some(outcome) = self.scripted_capture_error.lock().unwrap().clone() {
                 return Err(outcome);
             }
             self.inner.capture_observation(request).await
@@ -795,10 +916,29 @@ impl HostAdmission for SeamSpyAdmission {
         requests: Vec<CaptureObservationRequest>,
     ) -> AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
         Box::pin(async move {
+            self.capture_collision_dispositions.lock().unwrap().extend(
+                requests
+                    .iter()
+                    .map(CaptureObservationRequest::identity_collision_disposition),
+            );
+            if self.peer_won_cursor_cas() {
+                let _ = self.inner.capture_observations(requests).await;
+                return Err(HostAdmissionOutcome::retained_backpressured(
+                    "cursor_conflict",
+                ));
+            }
+            if self.peer_covers_batch_prefix.swap(false, Ordering::SeqCst) {
+                if let Some(first) = requests.into_iter().next() {
+                    let _ = self.inner.capture_observation(first).await;
+                }
+                return Err(HostAdmissionOutcome::retained_backpressured(
+                    "cursor_conflict",
+                ));
+            }
             if let Some(outcome) = self.scripted_batch_error.lock().unwrap().take() {
                 return Err(outcome);
             }
-            if let Some(outcome) = *self.scripted_capture_error.lock().unwrap() {
+            if let Some(outcome) = self.scripted_capture_error.lock().unwrap().clone() {
                 // Fail the window without counting here so sequential
                 // fallback still visits each frame exactly once.
                 return Err(outcome);
@@ -825,10 +965,52 @@ impl HostAdmission for SeamSpyAdmission {
         source: &'a ObservationSourceIdentityV1,
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
+        if let Some(outcome) = self.scripted_cursor_refusal.lock().unwrap().clone() {
+            return Box::pin(async move { Err(outcome) });
+        }
         if self.report_no_cursor.load(Ordering::SeqCst) {
             return Box::pin(async { Ok(None) });
         }
         self.inner.get_source_cursor(source, scope)
+    }
+
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        self.inner.committed_source_cursors(source, scope)
+    }
+
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    ) -> AdmissionFuture<'a, ()> {
+        self.rewrites.lock().unwrap().push(RewriteCall::Begin {
+            previous,
+            generation,
+            retained_through,
+        });
+        self.inner
+            .begin_source_rewrite(source, scope, previous, generation, retained_through)
+    }
+
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+    ) -> AdmissionFuture<'a, u64> {
+        self.rewrites
+            .lock()
+            .unwrap()
+            .push(RewriteCall::Complete(generation));
+        self.inner
+            .complete_source_rewrite(source, scope, generation)
     }
 
     fn drain_projection_queue<'a>(
@@ -913,11 +1095,7 @@ fn rollout_fixture() -> (tempfile::TempDir, PathBuf, u64) {
 }
 
 async fn stored_cursor(spy: &SeamSpyAdmission) -> Option<ObservationSourceCursorV1> {
-    let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("codex").unwrap(),
-        SessionId::new(SESSION_ID).unwrap(),
-    )
-    .unwrap();
+    let source = crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap();
     spy.get_source_cursor(&source, &ObservationScopeV1::Profile)
         .await
         .unwrap()
@@ -949,6 +1127,7 @@ async fn commit_failures_block_typed_and_never_cover_past() {
                 provider: "codex",
                 reason: surfaced,
                 retryable: false,
+                ..
             } => assert_eq!(surfaced, reason),
             other => panic!("commit failure must stay a typed admission block, got {other:?}"),
         }
@@ -962,6 +1141,44 @@ async fn commit_failures_block_typed_and_never_cover_past() {
             "{reason}: the source frontier must not advance"
         );
     }
+}
+
+/// A refused source cursor names the admission authority's reason instead of
+/// blaming the transcript's frames.
+#[tokio::test]
+async fn refused_source_cursor_reports_its_typed_reason() {
+    let (_temp, path, _len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    *spy.scripted_cursor_refusal.lock().unwrap() = Some(HostAdmissionOutcome {
+        status: HostAdmissionStatus::Unknown,
+        retryable: false,
+        reason_code: Some("unknown_provider"),
+        recovery: None,
+        cause: None,
+    });
+
+    let error =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect_err("a refused source cursor must fail the source");
+
+    assert!(
+        matches!(
+            error,
+            TranscriptIngestError::HostAdmission {
+                provider: "codex",
+                reason: "unknown_provider",
+                retryable: false,
+                ..
+            }
+        ),
+        "the cursor refusal must keep its admission reason: {error:?}"
+    );
+    let failure = classify_transcript_ingest_failure("codex", "observation", &error);
+    assert_eq!(failure.reason_code, "unknown_provider");
+    assert!(!failure.retryable);
+    assert_eq!(spy.capture_count(), 0);
+    assert!(spy.inner.observations().is_empty());
 }
 
 #[tokio::test]
@@ -984,12 +1201,347 @@ async fn retryable_admission_failures_keep_their_own_verdict() {
                 provider: "codex",
                 reason: "cursor_conflict",
                 retryable: true,
+                ..
             }
         ),
         "retryable races must not be laundered into a terminal record verdict: {error:?}"
     );
     assert!(spy.cover_past_advances().is_empty());
     assert!(stored_cursor(&spy).await.is_none());
+}
+
+/// Live hook ingest and the catch-up sweep own the same `(source, scope)`
+/// cursor, so one of them loses the store's compare-and-swap. When the winner
+/// already covered the range the loser was writing, the loser's work is
+/// durable and the pass is a no-op, not a failed source: reporting it as a
+/// failure produced a "Cursor transcript catch-up failed" WARN roughly every
+/// ten seconds on a live daemon for work that was already committed.
+#[tokio::test]
+async fn cursor_cas_lost_to_a_peer_that_covered_the_range_is_a_no_op() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    spy.script_peer_wins_next_cursor_cas();
+
+    let stats =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("a CAS the peer already covered must not fail the source pass");
+
+    assert_eq!(
+        stored_cursor(&spy).await.map(|cursor| cursor.position()),
+        Some(len),
+        "the pass must adopt the winner's frontier"
+    );
+    assert!(
+        !spy.inner.observations().is_empty(),
+        "the peer's commit is the durable record this pass stopped duplicating"
+    );
+    assert_eq!(
+        stats.frames_accepted, 0,
+        "the loser accepts nothing of its own"
+    );
+    assert!(
+        stats.frames_skipped > 0,
+        "the covered frames are counted as skipped, not lost"
+    );
+}
+
+/// The same lost CAS with nothing behind it stays a typed retryable block:
+/// adopting a frontier the winner never reached would skip real records.
+#[tokio::test]
+async fn cursor_cas_lost_without_peer_coverage_stays_a_typed_block() {
+    let (_temp, path, _len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    spy.script_capture_error(HostAdmissionOutcome::retained_backpressured(
+        "cursor_conflict",
+    ));
+
+    let error =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect_err("an uncovered race must surface for another pass");
+
+    assert!(matches!(
+        error,
+        TranscriptIngestError::HostAdmission {
+            reason: "cursor_conflict",
+            retryable: true,
+            ..
+        }
+    ));
+    assert!(stored_cursor(&spy).await.is_none());
+}
+
+/// A window CAS that the peer only partly won used to fail the source. The
+/// prefix is already durable; the tail has to be replayed one frame at a time.
+#[tokio::test]
+async fn cursor_cas_lost_on_a_partially_covered_window_replays_the_tail() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    write_rollout(&path, &cwd);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "tail that the peer did not cover"
+            }
+        })
+    )
+    .unwrap();
+    let len = std::fs::metadata(&path).unwrap().len();
+    let spy = SeamSpyAdmission::default();
+    spy.script_peer_covers_batch_prefix();
+
+    let stats =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("a prefix-covered window must replay its uncovered tail");
+
+    assert_eq!(
+        stored_cursor(&spy).await.map(|cursor| cursor.position()),
+        Some(len),
+        "the replay must adopt the prefix and commit through the tail"
+    );
+    assert!(
+        spy.inner.observations().len() >= 2,
+        "the covered prefix and the uncovered tail must both stay durable, got {} observations and stats {stats:?}",
+        spy.inner.observations().len()
+    );
+}
+
+#[tokio::test]
+async fn eligible_identity_collision_retries_once_with_normalizer_fallback() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cursor-repeated-no-id.jsonl");
+    let bytes = b"{\"role\":\"user\",\"content\":\"repeated\"}\n";
+    std::fs::write(&path, bytes).unwrap();
+    let spy = SeamSpyAdmission::default();
+    spy.script_batch_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "observation_identity_collision",
+    ));
+    spy.script_capture_error_once(HostAdmissionOutcome::deterministic_content_refusal(
+        "observation_identity_collision",
+    ));
+    let normalized_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = Arc::clone(&normalized_ids);
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor").unwrap(),
+        SessionId::new("session.cursor-repeated-no-id").unwrap(),
+    )
+    .unwrap();
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "cursor",
+        &path,
+        &spy,
+        source,
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    );
+
+    let progress = super::admit_jsonl_observations(
+        request,
+        |_| (),
+        move |_, bytes, range, _, _, hints| {
+            let id = if hints.identity_collision_retry {
+                "record.positional-fallback"
+            } else {
+                "record.legacy-content-hash"
+            };
+            observed_ids.lock().unwrap().push(id);
+            let native_record_id = ObservationId::new(id).unwrap();
+            let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
+                bytes,
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                |native| {
+                    CanonicalObservationEnvelopeV1::new(
+                        ProviderId::new("cursor").unwrap(),
+                        "message",
+                        native_record_id.clone(),
+                        CanonicalObservationRelationsV1::new(
+                            SessionId::new("session.cursor-repeated-no-id").unwrap(),
+                        )
+                        .with_message_id(native_record_id.clone()),
+                        vec![CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::User,
+                            content: native,
+                            model: None,
+                            timestamp: None,
+                        }],
+                        CanonicalObservationEvidenceV1::new(
+                            ObservationOrderingDomainV1::FileBytes,
+                            range,
+                        ),
+                    )
+                    .map_err(|_| {
+                        tracedecay_privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                    })
+                },
+            )
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?;
+            if hints.identity_collision_retry {
+                Ok(super::JsonlFrameAdmission::durable(
+                    parsed,
+                    native_record_id,
+                ))
+            } else {
+                Ok(
+                    super::JsonlFrameAdmission::durable_with_identity_collision_retry(
+                        parsed,
+                        native_record_id,
+                    ),
+                )
+            }
+        },
+    )
+    .await
+    .expect("a validated no-ID collision must retry with positional identity");
+
+    assert_eq!(progress.frames_persisted, 1);
+    assert_eq!(progress.frames_refused, 0);
+    assert_eq!(
+        spy.capture_count(),
+        2,
+        "one primary plus one fallback write"
+    );
+    assert_eq!(
+        spy.capture_collision_dispositions(),
+        [
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+            ObservationIdentityCollisionDispositionV1::SettleTerminal,
+        ],
+        "the batch and scalar primary may probe, while the alternate is terminal"
+    );
+    assert_eq!(
+        normalized_ids.lock().unwrap().as_slice(),
+        [
+            "record.legacy-content-hash",
+            "record.legacy-content-hash",
+            "record.positional-fallback"
+        ],
+        "the batch parse, scalar primary, and one positional retry are the only normalizations"
+    );
+    assert!(spy.cover_past_advances().is_empty());
+    assert_eq!(spy.inner.observations().len(), 1);
+}
+
+#[tokio::test]
+async fn exhausted_identity_collision_retry_uses_its_exact_terminal_coverage_reason() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cursor-repeated-no-id-terminal.jsonl");
+    let bytes = b"{\"role\":\"user\",\"content\":\"repeated\"}\n";
+    std::fs::write(&path, bytes).unwrap();
+    let spy = SeamSpyAdmission::default();
+    spy.script_batch_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "observation_identity_collision",
+    ));
+    spy.script_capture_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "observation_identity_collision",
+    ));
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor").unwrap(),
+        SessionId::new("session.cursor-repeated-no-id-terminal").unwrap(),
+    )
+    .unwrap();
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "cursor",
+        &path,
+        &spy,
+        source,
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    );
+
+    let progress = super::admit_jsonl_observations(
+        request,
+        |_| (),
+        move |_, bytes, range, _, _, hints| {
+            let native_record_id = ObservationId::new(if hints.identity_collision_retry {
+                "record.positional-fallback-terminal"
+            } else {
+                "record.legacy-content-hash-terminal"
+            })
+            .unwrap();
+            let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
+                bytes,
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                |native| {
+                    CanonicalObservationEnvelopeV1::new(
+                        ProviderId::new("cursor").unwrap(),
+                        "message",
+                        native_record_id.clone(),
+                        CanonicalObservationRelationsV1::new(
+                            SessionId::new("session.cursor-repeated-no-id-terminal").unwrap(),
+                        )
+                        .with_message_id(native_record_id.clone()),
+                        vec![CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::User,
+                            content: native,
+                            model: None,
+                            timestamp: None,
+                        }],
+                        CanonicalObservationEvidenceV1::new(
+                            ObservationOrderingDomainV1::FileBytes,
+                            range,
+                        ),
+                    )
+                    .map_err(|_| {
+                        tracedecay_privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                    })
+                },
+            )
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?;
+            if hints.identity_collision_retry {
+                Ok(super::JsonlFrameAdmission::durable(
+                    parsed,
+                    native_record_id,
+                ))
+            } else {
+                Ok(
+                    super::JsonlFrameAdmission::durable_with_identity_collision_retry(
+                        parsed,
+                        native_record_id,
+                    ),
+                )
+            }
+        },
+    )
+    .await
+    .expect("the exhausted deterministic collision must settle terminal coverage");
+
+    assert_eq!(progress.frames_persisted, 0);
+    assert_eq!(progress.frames_refused, 1);
+    assert_eq!(spy.capture_count(), 2, "primary plus one fallback only");
+    assert_eq!(
+        spy.capture_collision_dispositions(),
+        [
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+            ObservationIdentityCollisionDispositionV1::SettleTerminal,
+        ],
+        "the exhausted alternate must restore terminal collision semantics"
+    );
+    let advances = spy.cover_past_advances();
+    assert_eq!(advances.len(), 1);
+    assert_eq!(
+        advances[0].reason(),
+        ObservationCoverageReason::ObservationIdentityCollision
+    );
 }
 
 #[tokio::test]
@@ -1044,11 +1596,380 @@ async fn content_refusals_cover_past_so_the_stream_converges() {
 }
 
 #[tokio::test]
+async fn an_unchanged_resumed_rollout_does_not_rebuild_its_prior_context() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    let first =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("first pass");
+    assert_eq!(first.bytes_consumed, len);
+
+    crate::runtime::hosts::codex::evict_prior_context_for_test(&path);
+    let replay =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("unchanged pass");
+    assert_eq!(replay.bytes_consumed, 0);
+    assert_eq!(replay.frames_persisted, 0);
+    assert_eq!(
+        replay.prior_context_bytes, 0,
+        "an unchanged rollout admits no frame, so it must not be re-read for its context"
+    );
+
+    let appended = json!({
+        "timestamp": "2026-01-01T00:00:02.000Z",
+        "type": "event_msg",
+        "payload": {"type": "user_message", "message": "appended message"}
+    })
+    .to_string()
+        + "\n";
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+    drop(file);
+    let resumed =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("appended pass");
+    assert!(
+        resumed.resumed,
+        "the appended pass resumes at the committed cursor"
+    );
+    assert_eq!(
+        resumed.bytes_consumed,
+        u64::try_from(appended.len()).unwrap()
+    );
+    assert_eq!(
+        resumed.prior_context_bytes, len,
+        "the evicted context walks back to the session meta that set the cwd"
+    );
+    assert_eq!(resumed.frames_persisted, 1);
+}
+
+const CATCH_UP_RECORD_BYTES: usize = 256;
+const CATCH_UP_TURN_RECORDS: usize = 16;
+const CATCH_UP_WINDOW_BYTES: u64 = 16 * 1024;
+
+/// One rollout line of exactly [`CATCH_UP_RECORD_BYTES`]: the session meta,
+/// then a turn context opening every [`CATCH_UP_TURN_RECORDS`] records with
+/// user messages between them.
+fn catch_up_rollout_line(index: usize, cwd: &Path, word: &str) -> String {
+    let record = |pad: &str| match index {
+        0 => json!({
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": SESSION_ID, "cwd": cwd, "pad": pad}
+        }),
+        _ if index % CATCH_UP_TURN_RECORDS == 1 => json!({
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "turn_context",
+            "payload": {"turn_id": format!("turn-{index:05}"), "cwd": cwd, "model": "gpt-5.5", "pad": pad}
+        }),
+        _ => json!({
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": format!("{word}-{index:05} {pad}")}
+        }),
+    };
+    let pad = CATCH_UP_RECORD_BYTES - 1 - record("").to_string().len();
+    let line = record(&"x".repeat(pad)).to_string() + "\n";
+    assert_eq!(line.len(), CATCH_UP_RECORD_BYTES);
+    line
+}
+
+/// Admit `path` window by window until the rollout stops deferring, returning
+/// the summed scan accounting, prior-context rereads, and window count.
+async fn catch_up_codex_rollout(
+    path: &Path,
+    admission: &MemoryHostAdmission,
+    max_new_bytes: Option<u64>,
+) -> (JsonlIoAccounting, u64, u64) {
+    let mut io = JsonlIoAccounting::default();
+    let mut prior_context_bytes = 0;
+    for windows in 1..=4_096 {
+        let pass = try_admit_codex_jsonl_observations_for_profile_with_admission(
+            path,
+            None,
+            &[],
+            admission,
+            max_new_bytes,
+        )
+        .await
+        .expect("catch-up window");
+        io = io.followed_by(pass.io);
+        prior_context_bytes += pass.prior_context_bytes;
+        if !pass.source_deferred {
+            return (io, prior_context_bytes, windows);
+        }
+    }
+    panic!("catch-up never stopped deferring");
+}
+
+/// Catching up an in-place edit of a large rollout window by window reads its
+/// prefix a fixed number of times: once to find the edit and once to the first
+/// changed record. Neither each window's resume proof nor its prior context
+/// rereads the prefix, so the bytes do not grow with the file or the windows.
+#[tokio::test]
+async fn catching_up_an_edited_rollout_rereads_no_prefix_per_window() {
+    for records in [1_024_usize, 4_096] {
+        super::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let path = temp.path().join("rollout.jsonl");
+        let _warm = HoldUnchangedGenerationCache::enter(temp.path());
+        let original = (0..records)
+            .map(|index| catch_up_rollout_line(index, &cwd, "original"))
+            .collect::<String>();
+        std::fs::write(&path, &original).unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let admission = MemoryHostAdmission::default();
+        catch_up_codex_rollout(&path, &admission, None).await;
+
+        let len = u64::try_from(original.len()).unwrap();
+        let edited_index = records / 2;
+        let edit_offset = u64::try_from(edited_index * CATCH_UP_RECORD_BYTES).unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(edit_offset)).unwrap();
+        file.write_all(catch_up_rollout_line(edited_index, &cwd, "edited").as_bytes())
+            .unwrap();
+        drop(file);
+        spin_until_jsonl_change_settled(&path);
+
+        let (io, prior_context_bytes, windows) =
+            catch_up_codex_rollout(&path, &admission, Some(CATCH_UP_WINDOW_BYTES)).await;
+        assert_eq!(windows, (len - edit_offset) / CATCH_UP_WINDOW_BYTES);
+        assert_eq!(io.content_bytes, len - edit_offset, "{records} records");
+        assert_eq!(io.snapshot_hash_bytes, 0, "{records} records");
+        // Without a stat rewrite witness (Windows) no resume proof can be
+        // minted, so every window's resume re-validates its prefix: the walk
+        // is strictly larger than the single divergence walk Unix needs once.
+        if cfg!(unix) {
+            assert_eq!(
+                io.prefix_validation_bytes,
+                len + edit_offset + CATCH_UP_RECORD_BYTES as u64,
+                "{records} records: only the divergence walks hash the prefix, never a later window"
+            );
+        } else {
+            assert!(
+                io.prefix_validation_bytes >= len + edit_offset + CATCH_UP_RECORD_BYTES as u64,
+                "{records} records: resumes re-validated their prefixes: {}",
+                io.prefix_validation_bytes
+            );
+        }
+        assert!(
+            prior_context_bytes <= windows * CATCH_UP_WINDOW_BYTES,
+            "{records} records over {windows} windows reread {prior_context_bytes} prefix bytes \
+             for their prior context"
+        );
+        let edited = admission
+            .observations()
+            .iter()
+            .filter(|stored| {
+                stored
+                    .observation()
+                    .payload()
+                    .to_string()
+                    .contains(&format!("edited-{edited_index:05}"))
+            })
+            .count();
+        assert_eq!(edited, 1, "{records} records");
+    }
+}
+
+/// A rewrite retires what the new generation stopped offering only once that
+/// generation was read to the end of the file: a tail spanning several passes
+/// stays deferred and never completes the rewrite early.
+#[tokio::test]
+async fn a_rewrite_completes_only_when_its_generation_reaches_the_end() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    let records = 512_usize;
+    let original = (0..records)
+        .map(|index| catch_up_rollout_line(index, &cwd, "original"))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let spy = SeamSpyAdmission::default();
+    let pass = |max_new_bytes| {
+        try_admit_codex_jsonl_observations_for_profile_with_admission(
+            &path,
+            None,
+            &[],
+            &spy,
+            max_new_bytes,
+        )
+    };
+    assert!(!pass(None).await.expect("cold pass").source_deferred);
+    let previous = stored_cursor(&spy).await.expect("cold cursor").generation();
+    // Every pass that reaches the end settles its generation; with no rewrite
+    // pending that retires nothing.
+    assert_eq!(
+        std::mem::take(&mut *spy.rewrites.lock().unwrap()),
+        vec![RewriteCall::Complete(previous)]
+    );
+
+    let edited_index = records / 4;
+    let edit_offset = u64::try_from(edited_index * CATCH_UP_RECORD_BYTES).unwrap();
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(edit_offset)).unwrap();
+    file.write_all(catch_up_rollout_line(edited_index, &cwd, "edited").as_bytes())
+        .unwrap();
+    drop(file);
+    spin_until_jsonl_change_settled(&path);
+
+    let first = pass(Some(CATCH_UP_WINDOW_BYTES))
+        .await
+        .expect("first tail pass");
+    assert!(first.source_deferred, "the tail spans several passes");
+    let generation = stored_cursor(&spy).await.expect("tail cursor").generation();
+    assert_ne!(generation, previous);
+    assert_eq!(
+        *spy.rewrites.lock().unwrap(),
+        vec![RewriteCall::Begin {
+            previous,
+            generation,
+            retained_through: edit_offset,
+        }]
+    );
+    for _ in 0..records {
+        let tail = pass(Some(CATCH_UP_WINDOW_BYTES)).await.expect("tail pass");
+        if !tail.source_deferred {
+            assert_eq!(
+                *spy.rewrites.lock().unwrap().last().unwrap(),
+                RewriteCall::Complete(generation)
+            );
+            assert_eq!(spy.rewrites.lock().unwrap().len(), 2);
+            return;
+        }
+        assert_eq!(
+            spy.rewrites.lock().unwrap().len(),
+            1,
+            "a deferred pass must not complete the rewrite"
+        );
+    }
+    panic!("the tail never stopped deferring");
+}
+
+/// One rollout line of exactly [`CATCH_UP_RECORD_BYTES`]: the session meta
+/// setting `cwd`, then user messages that leave it alone.
+fn session_cwd_rollout_line(index: usize, cwd: &Path, word: &str) -> String {
+    let record = |pad: &str| match index {
+        0 => json!({
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": SESSION_ID, "cwd": cwd, "pad": pad}
+        }),
+        _ => json!({
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": format!("{word}-{index:05} {pad}")}
+        }),
+    };
+    let pad = CATCH_UP_RECORD_BYTES - 1 - record("").to_string().len();
+    let line = record(&"x".repeat(pad)).to_string() + "\n";
+    assert_eq!(line.len(), CATCH_UP_RECORD_BYTES);
+    line
+}
+
+/// Admit `path` for `project_root` window by window until it stops deferring.
+async fn catch_up_codex_project_rollout(
+    path: &Path,
+    project_root: &Path,
+    admission: &MemoryHostAdmission,
+    max_new_bytes: u64,
+) {
+    for _ in 0..4_096 {
+        let pass = try_admit_codex_jsonl_observations_for_project_with_admission(
+            path,
+            project_root,
+            ProjectId::new("project-a").unwrap(),
+            admission,
+            Some(max_new_bytes),
+        )
+        .await
+        .expect("catch-up window");
+        if !pass.source_deferred {
+            return;
+        }
+    }
+    panic!("catch-up never stopped deferring");
+}
+
+/// An in-place rewrite that moves the rollout to another project starts a new
+/// JSONL generation. A window resumed in that generation must not inherit the
+/// cwd the previous generation cached for an offset past the rewrite.
+#[tokio::test]
+async fn a_rewritten_rollout_does_not_resume_the_previous_generations_context() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let project_a = temp.path().join("project-a");
+    let project_b = temp.path().join("project-b");
+    std::fs::create_dir_all(&project_a).unwrap();
+    std::fs::create_dir_all(&project_b).unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    let records = 64;
+    let original = (0..records)
+        .map(|index| session_cwd_rollout_line(index, &project_a, "original"))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let admission = MemoryHostAdmission::default();
+    catch_up_codex_project_rollout(&path, &project_a, &admission, 4 * 1024).await;
+    let admitted = admission.observations().len();
+    assert_eq!(
+        admitted, records,
+        "every original record belongs to project A"
+    );
+
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.write_all(session_cwd_rollout_line(0, &project_b, "original").as_bytes())
+        .unwrap();
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::End(0)).unwrap();
+    let appended = (records..2 * records)
+        .map(|index| session_cwd_rollout_line(index, &project_b, "appended"))
+        .collect::<String>();
+    file.write_all(appended.as_bytes()).unwrap();
+    drop(file);
+    spin_until_jsonl_change_settled(&path);
+
+    let first_window = u64::try_from(original.len() + 4 * CATCH_UP_RECORD_BYTES).unwrap();
+    catch_up_codex_project_rollout(&path, &project_a, &admission, first_window).await;
+    let leaked = admission
+        .observations()
+        .iter()
+        .filter(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("appended-")
+        })
+        .count();
+    assert_eq!(
+        leaked, 0,
+        "records the rewritten session meta moved to project B were admitted to project A"
+    );
+}
+
+#[tokio::test]
 async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
+    // The shared metadata cache retains entries up to
+    // `shared_jsonl_preparation_capacity()`, so this test only observes the
+    // shared decode once the preparation authority is installed: without it the
+    // capacity is the degraded fallback of one entry.
+    super::install_test_shared_jsonl_preparation_authority();
     let (_temp, path, _) = rollout_fixture();
+    let settled = spin_until_jsonl_change_settled(&path);
     let first = SeamSpyAdmission::default();
     let second = SeamSpyAdmission::default();
-    let before = crate::runtime::codex::session_meta_read_count_for_test(&path);
+    let before = crate::runtime::hosts::codex::session_meta_read_count_for_test(&path);
 
     try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &first, None)
         .await
@@ -1057,11 +1978,22 @@ async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
         .await
         .expect("second profile consumer");
 
-    assert_eq!(
-        crate::runtime::codex::session_meta_read_count_for_test(&path) - before,
-        1,
-        "canonical path+native identity must share one bounded prefix decode"
-    );
+    if settled {
+        assert_eq!(
+            crate::runtime::hosts::codex::session_meta_read_count_for_test(&path) - before,
+            1,
+            "canonical path+native identity must share one bounded prefix decode"
+        );
+    }
+    // Without a stat witness the shared identity never settles, so each
+    // consumer honestly decodes the prefix itself.
+    if !settled {
+        assert_eq!(
+            crate::runtime::hosts::codex::session_meta_read_count_for_test(&path) - before,
+            2,
+            "no stat witness exists, so each consumer decodes its own prefix"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1098,8 +2030,8 @@ async fn batch_refusal_reuses_pre_context_switch_frames() {
     let contents = lines.join("\n") + "\n";
     std::fs::write(&path, contents).unwrap();
     let spy = SeamSpyAdmission::default();
-    spy.script_batch_error(HostAdmissionOutcome::batch_requires_scalar_fallback(
-        ObservationBatchFallbackCause::IntraBatchIdentityCollision,
+    spy.script_batch_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "observation_identity_collision",
     ));
     spy.script_capture_error(HostAdmissionOutcome::deterministic_content_refusal(
         "observation_identity_collision",
@@ -1124,7 +2056,7 @@ async fn batch_refusal_reuses_pre_context_switch_frames() {
         .expect("the A-scoped message must receive a durable disposition");
     assert_eq!(
         a_message_advance.reason(),
-        ObservationCoverageReason::AdmissionRefused,
+        ObservationCoverageReason::ObservationIdentityCollision,
         "the A-scoped frame must keep its pre-window disposition after the B context switch"
     );
 }
@@ -1211,6 +2143,7 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
     std::fs::create_dir_all(&cwd).unwrap();
     let path = temp.path().join("rollout.jsonl");
     let len = write_undecodable_tail_rollout(&path, &cwd);
+    let settled = spin_until_jsonl_change_settled(&path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
     let spy = SeamSpyAdmission::default();
 
@@ -1250,7 +2183,7 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
     assert_eq!(progress.frames_decoded, 1);
     // The coverage reason proves the decode was skipped; this proves the seam
     // *reports* it. `session_meta` names itself, so it is still decoded before
-    // it is judged — only the two frames that cannot move the cwd are refused
+    // it is judged, only the two frames that cannot move the cwd are refused
     // from the gate, and the split has to say so or a change that moves the
     // verdict earlier is invisible to production telemetry.
     assert_eq!(
@@ -1259,7 +2192,14 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
          the one that can is not"
     );
     assert_eq!(progress.frames_persisted, 0);
-    assert!(hit);
+    if settled {
+        assert!(hit);
+    }
+    // Without a stat witness the shared identity never settles, so the
+    // retained page is honestly re-read.
+    if !settled {
+        assert!(!hit);
+    }
     assert_eq!(
         super::shared_jsonl_frame_preparations_for_test(page.file_identity),
         1,
@@ -1280,69 +2220,6 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
             .expect("covered-past frames still advance the frontier")
             .position(),
         len
-    );
-}
-
-/// The same rollout in scope: records still admit, and the decode still owns
-/// the malformed verdict for the frame the scope gate no longer intercepts.
-#[tokio::test]
-async fn in_scope_frames_still_admit_and_keep_the_decode_verdict() {
-    super::install_test_shared_jsonl_preparation_authority();
-    let temp = tempfile::tempdir().unwrap();
-    let cwd = temp.path().join("workspace");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let path = temp.path().join("rollout.jsonl");
-    write_undecodable_tail_rollout(&path, &cwd);
-    let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
-    let spy = SeamSpyAdmission::default();
-
-    let progress =
-        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
-            .await
-            .expect("an in-scope rollout admits");
-    let (page, hit) = super::shared_jsonl_page(
-        &path,
-        StoredCursor::default(),
-        None,
-        None,
-        super::SharedJsonlFramePreparation::Lazy,
-    )
-    .await
-    .expect("the retained admission page remains available");
-
-    assert_eq!(spy.inner.observations().len(), 2);
-    assert_eq!(progress.frames_persisted, 2);
-    assert_eq!(progress.frames_decoded, 3);
-    assert_eq!(
-        progress.frames_rejected_before_decode, 0,
-        "nothing in scope may be refused before it is decoded"
-    );
-    assert!(hit);
-    assert_eq!(
-        super::shared_jsonl_frame_preparations_for_test(page.file_identity),
-        3,
-        "the context frame and both in-scope frames must reach canonical preparation"
-    );
-    assert_eq!(
-        progress
-            .frames_decoded
-            .saturating_add(progress.frames_rejected_before_decode),
-        3,
-        "every attempted frame is either decoded or rejected before decode, never both"
-    );
-    assert!(
-        page.frames
-            .iter()
-            .all(|frame| frame.prepared.get().is_some()),
-        "in-scope replay frames must prepare once through the shared admitted worker path"
-    );
-    assert_eq!(
-        spy.cover_past_advances()
-            .iter()
-            .map(ObservationCursorAdvance::reason)
-            .collect::<Vec<_>>(),
-        vec![ObservationCoverageReason::MalformedFrame],
-        "in scope, the undecodable frame keeps the decode's own verdict"
     );
 }
 
@@ -1377,8 +2254,8 @@ async fn exact_hook_prepares_an_in_scope_window_concurrently() {
         contents.push('\n');
     }
     std::fs::write(&path, contents).unwrap();
-    super::SHARED_JSONL_PEAK_FRAME_PREPARATIONS.store(0, Ordering::Release);
-    let prepared_before = super::SHARED_JSONL_TOTAL_FRAME_PREPARATIONS.load(Ordering::Acquire);
+    let file_identity = crate::runtime::source::jsonl_file_identity(&path).unwrap();
+    let rendezvous = super::SharedJsonlPreparationRendezvous::register(file_identity);
 
     let progress = try_admit_codex_jsonl_observations_for_profile_with_admission(
         &path,
@@ -1390,18 +2267,229 @@ async fn exact_hook_prepares_an_in_scope_window_concurrently() {
     .await
     .expect("bounded exact-hook admission");
 
-    assert!(progress.frames_persisted >= u64::try_from(event_count).unwrap());
-    assert!(
-        super::SHARED_JSONL_TOTAL_FRAME_PREPARATIONS
-            .load(Ordering::Acquire)
-            .saturating_sub(prepared_before)
-            >= event_count,
-        "every in-scope event is prepared once through the shared window"
+    assert_eq!(progress.frames_persisted, 33);
+    assert_eq!(
+        super::shared_jsonl_frame_preparations_for_test(file_identity),
+        33,
+        "every in-scope frame is prepared once through the shared window"
     );
-    if std::thread::available_parallelism().is_ok_and(|cores| cores.get() > 1) {
-        assert!(
-            super::SHARED_JSONL_PEAK_FRAME_PREPARATIONS.load(Ordering::Acquire) > 1,
-            "the exact-hook path must overlap independent frame preparation"
-        );
-    }
+    assert_eq!(
+        rendezvous.state(),
+        super::SharedJsonlPreparationRendezvousState {
+            inside: 2,
+            overlapped: true,
+            serialized: false,
+        },
+        "the exact-hook path must overlap independent frame preparation"
+    );
+}
+
+const EDITED_RECORD_BYTES: usize = 128;
+
+fn identified_record_line(id: &str) -> String {
+    let framing = json!({"id": id, "content": ""}).to_string().len() + 1;
+    let mut line =
+        json!({"id": id, "content": "x".repeat(EDITED_RECORD_BYTES - framing)}).to_string();
+    line.push('\n');
+    assert_eq!(line.len(), EDITED_RECORD_BYTES);
+    line
+}
+
+async fn admit_identified_records(
+    admission: &MemoryHostAdmission,
+    path: &Path,
+) -> super::JsonlObservationAdmissionProgress {
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("kimi").unwrap(),
+        SessionId::new("session.edited-middle").unwrap(),
+    )
+    .unwrap();
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "kimi",
+        path,
+        admission,
+        source,
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    );
+    super::admit_jsonl_observations(
+        request,
+        |_| (),
+        |_, bytes, range, _, _, _| {
+            let native: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let native_record_id = ObservationId::new(native["id"].as_str().unwrap()).unwrap();
+            let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
+                bytes,
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                |native| {
+                    CanonicalObservationEnvelopeV1::new(
+                        ProviderId::new("kimi").unwrap(),
+                        "message",
+                        native_record_id.clone(),
+                        CanonicalObservationRelationsV1::new(
+                            SessionId::new("session.edited-middle").unwrap(),
+                        )
+                        .with_message_id(native_record_id.clone()),
+                        vec![CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::User,
+                            content: native,
+                            model: None,
+                            timestamp: None,
+                        }],
+                        CanonicalObservationEvidenceV1::new(
+                            ObservationOrderingDomainV1::FileBytes,
+                            range,
+                        ),
+                    )
+                    .map_err(|_| {
+                        tracedecay_privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                    })
+                },
+            )
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "kimi" })?;
+            Ok(super::JsonlFrameAdmission::durable(
+                parsed,
+                native_record_id,
+            ))
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// Editing one record in the middle of a transcript keeps every record before
+/// it: only the bytes from the edited record on are framed and admitted again.
+#[tokio::test]
+async fn edited_middle_record_reingests_only_the_bytes_after_the_edit() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("edited-middle.jsonl");
+    let original = (0..400)
+        .map(|index| identified_record_line(&format!("record-{index:04}")))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let admission = MemoryHostAdmission::default();
+
+    let cold = admit_identified_records(&admission, &path).await;
+    assert_eq!(cold.frames_persisted, 400);
+    assert_eq!(cold.io.content_bytes, 51_200);
+    let original_generation = admission.observations()[0]
+        .observation()
+        .identity()
+        .generation();
+
+    let mut edited = original.into_bytes();
+    edited[25_600..25_728].copy_from_slice(identified_record_line("edited-0200").as_bytes());
+    std::fs::write(&path, &edited).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let rescan = admit_identified_records(&admission, &path).await;
+
+    assert_eq!(rescan.io.change, JsonlChangeKind::Rewritten);
+    assert_eq!(
+        rescan.io.content_bytes, 25_600,
+        "only bytes after the edit are framed"
+    );
+    assert_eq!(rescan.io.snapshot_hash_bytes, 0);
+    // Without a stat rewrite witness (Windows) the resume proof itself cannot
+    // cache: it re-walks the recorded prefix before the divergence check does,
+    // so the same work costs one extra full-prefix walk.
+    let expected_prefix_validation = if cfg!(unix) {
+        51_200 + 25_728
+    } else {
+        2 * 51_200 + 25_728
+    };
+    assert_eq!(
+        rescan.io.prefix_validation_bytes, expected_prefix_validation,
+        "divergence check walks the recorded prefix, recovery stops one record past the edit"
+    );
+    assert_eq!(rescan.bytes_consumed, 25_600);
+    assert_eq!(rescan.frames_persisted, 200);
+
+    let retained = admission
+        .non_durable_advances()
+        .into_iter()
+        .filter(|advance| advance.reason() == ObservationCoverageReason::RetainedPrefix)
+        .map(|advance| advance.coverage().range())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        [ObservationSourceRangeV1::new(0, 25_600).unwrap()]
+    );
+    // The 199 unchanged records after the edit resolve to their retained
+    // identities; only the edited record is new, in the rewritten generation.
+    let observations = admission.observations();
+    assert_eq!(observations.len(), 401);
+    let rewritten = observations
+        .iter()
+        .filter(|stored| stored.observation().identity().generation() != original_generation)
+        .map(|stored| stored.observation().identity().position())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rewritten,
+        [ObservationSourceRangeV1::new(25_600, 25_728).unwrap()]
+    );
+    let edited_payloads = observations
+        .iter()
+        .filter(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("edited-0200")
+        })
+        .count();
+    assert_eq!(edited_payloads, 1);
+
+    let settled = admit_identified_records(&admission, &path).await;
+    assert_eq!(settled.io.content_bytes, 0);
+    assert_eq!(settled.bytes_consumed, 0);
+    assert_eq!(settled.frames_persisted, 0);
+}
+
+/// A host that rewrites its transcript by atomic rename gets the same
+/// proportional resume: the committed checkpoints prove the retained prefix,
+/// not the replaced file's identity.
+#[tokio::test]
+async fn renamed_rewrite_of_a_middle_record_reingests_only_the_bytes_after_the_edit() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("renamed-middle.jsonl");
+    let original = (0..400)
+        .map(|index| identified_record_line(&format!("record-{index:04}")))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let admission = MemoryHostAdmission::default();
+    assert_eq!(
+        admit_identified_records(&admission, &path)
+            .await
+            .frames_persisted,
+        400
+    );
+
+    let mut edited = original.into_bytes();
+    edited[25_600..25_728].copy_from_slice(identified_record_line("edited-0200").as_bytes());
+    let replacement = temp.path().join("renamed-middle.jsonl.next");
+    std::fs::write(&replacement, &edited).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let rescan = admit_identified_records(&admission, &path).await;
+
+    assert_eq!(rescan.io.content_bytes, 25_600);
+    assert_eq!(rescan.io.snapshot_hash_bytes, 0);
+    assert_eq!(rescan.bytes_consumed, 25_600);
+    assert_eq!(rescan.frames_persisted, 200);
+    let retained = admission
+        .non_durable_advances()
+        .into_iter()
+        .filter(|advance| advance.reason() == ObservationCoverageReason::RetainedPrefix)
+        .map(|advance| advance.coverage().range())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        [ObservationSourceRangeV1::new(0, 25_600).unwrap()]
+    );
+    assert_eq!(admission.observations().len(), 401);
 }

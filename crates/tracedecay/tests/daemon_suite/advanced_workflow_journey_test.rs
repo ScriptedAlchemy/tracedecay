@@ -10,19 +10,24 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_application::configuration::{
+use tracedecay_contracts::configuration::{
     ConfigurationGetRequestV1, ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1,
 };
-use tracedecay_application::{
-    AdmitWorkSynthesisCommand, PrepareWorkProductMutationRequestV1, TaskHandoffIssueRequest,
+use tracedecay_contracts::{
+    AdmitWorkSynthesisCommand, PauseWorkRunCommand, PrepareWorkProductMutationRequestV1,
+    ResumeWorkRunCommand, RetryWorkAttemptCommandV1, TaskHandoffIssueRequest,
     TaskHandoffRedeemRequest, TaskHandoffScope, WorkAttemptStatusRequestV1,
     WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkGraphReadRequestV1,
-    WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductChangeDraftV1,
-    WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
-    WorkSynthesisAttemptV1, WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowExecutionFence, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutStartV1,
+    WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductAuthorizedRelationScopeV1,
+    WorkProductChangeDraftV1, WorkProductMutationRequestV1, WorkProductSelectionScopeV1,
+    WorkRetryAttemptOutcomeV1, WorkRetryCauseV1, WorkRetryFailureSelectorV1, WorkRetrySourceV1,
+    WorkSynthesisAttemptV1, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest, WorkflowExecutionFence,
+    WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutStartV1,
     WorkflowProviderRegistration, WorkflowRunCancelRequest, WorkflowRunGetRequest,
-    WorkflowRunStartRequest,
+    WorkflowRunPauseRequest, WorkflowRunResumeRequest, WorkflowRunStartRequest,
 };
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey,
@@ -39,22 +44,27 @@ use tracedecay_domain::{
     WorkFilesystemPolicy, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
     WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
     WorkProposalDispositionV1, WorkProposalV1, WorkProviderBackendV1, WorkProviderProtocol,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1, WorkSandboxPolicy,
-    WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1, WorkVersion,
-    WorkflowDefinition, WorkflowDefinitionId, WorkflowFanOut, WorkflowOperationRef,
-    WorkflowOutputName, WorkflowRunStatus, WorkflowStep, WorkflowStepId, WorktreeId,
-    canonical_sha256,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1, WorkRunControlReasonV1,
+    WorkSandboxPolicy, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
+    WorkTerminalEvidenceV1, WorkVersion, WorkflowDefinition, WorkflowDefinitionId, WorkflowFanOut,
+    WorkflowOperationRef, WorkflowOutputName, WorkflowRunStatus, WorkflowStep, WorkflowStepId,
+    WorktreeId, canonical_sha256,
 };
 use tracedecay_sdk::client::{Client, ClientError};
 use tracedecay_sdk::operations::{
     ApplicationConfigurationGet, ApplicationConfigurationObservedState,
-    ApplicationConfigurationSet, WorkAttemptStatus, WorkMutateGraph, WorkPrepareGraphMutation,
-    WorkRetrieveEvidence, WorkSynthesize, WorkViews, WorkflowActivateDefinition, WorkflowCancelRun,
-    WorkflowGetRun, WorkflowHandoffIssue, WorkflowHandoffRedeem, WorkflowRegisterDefinition,
-    WorkflowStartRun,
+    ApplicationConfigurationSet, WorkAttemptStatus, WorkMutateGraph, WorkPauseRun,
+    WorkPrepareGraphMutation, WorkResumeRun, WorkRetrieveEvidence, WorkRetryAttempt,
+    WorkSynthesize, WorkViews, WorkflowActivateDefinition, WorkflowCancelRun,
+    WorkflowDefinitionHistory, WorkflowDiffDefinition, WorkflowGetRun, WorkflowHandoffIssue,
+    WorkflowHandoffRedeem, WorkflowListDefinitions, WorkflowPauseRun, WorkflowRegisterDefinition,
+    WorkflowRejectDefinition, WorkflowResumeRun, WorkflowRetireDefinition, WorkflowStartRun,
+    WorkflowValidateDefinition,
 };
 
 use super::common;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[path = "advanced_workflow_journey/daemon_fixture.rs"]
 mod daemon_fixture;
@@ -63,7 +73,7 @@ mod task_session;
 
 use daemon_fixture::{
     sdk_client, spawn_project_daemon, wait_for_application_mount, wait_for_work_mount,
-    workflow_tempdir,
+    wait_for_workflow_mount, workflow_tempdir,
 };
 
 const DAEMON_ACTOR: &str = "actor.tracedecay-daemon.project-open";
@@ -73,13 +83,8 @@ const PROVIDER_TRANSCRIPT_ASSISTANT_MESSAGE_ID: &str = "message.advanced-workflo
 const PROVIDER_TRANSCRIPT_REFRESH_MESSAGE_ID: &str =
     "message.advanced-workflow-provider-participant-refresh";
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("advanced workflow identity")
-}
+use tracedecay_domain::test_fixtures::id;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 fn run(command: &mut Command, operation: &str) -> Vec<u8> {
     let output = command
@@ -173,6 +178,7 @@ fn fan_out_input(identity: &str, graph_version: u64) -> WorkflowFanOutInput {
             .expect("fan-out proposal route"),
         format!("Execute fan-out child {identity}"),
         input_digest.clone(),
+        input_digest.clone(),
     )
     .expect("fan-out proposal");
     WorkflowFanOutInput {
@@ -209,8 +215,6 @@ fn write_provider_fixture(
     first_hold: &Path,
     cancellation_hold: &Path,
 ) -> (PathBuf, Vec<u8>) {
-    use std::os::unix::fs::PermissionsExt;
-
     let script = format!(
         "#!/bin/sh\ninput=$(/bin/cat)\ncase \"$input\" in\n  crash)\n    : > '{first_started}'\n    while [ -e '{first_hold}' ]; do /bin/sleep 1; done\n    exit 1\n    ;;\n  cancel)\n    : > '{cancellation_started}'\n    while [ -e '{cancellation_hold}' ]; do /bin/sleep 1; done\n    ;;\n  *)\n    printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{provider_session}\"}}'\n    printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"fan-out evidence\"}}]}}}}'\n    printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}'\n    ;;\nesac\n",
         first_started = first_started.display(),
@@ -221,13 +225,11 @@ fn write_provider_fixture(
     )
     .into_bytes();
     let path = root.join("workflow-provider");
-    std::fs::write(&path, &script).expect("provider script");
-    let mut permissions = std::fs::metadata(&path)
-        .expect("provider metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&path, permissions).expect("provider executable mode");
-    (path.canonicalize().expect("canonical provider"), script)
+    write_executable_script(&path, &script).expect("provider script");
+    (
+        canonical_existing_identity(&path).expect("canonical provider"),
+        script,
+    )
 }
 
 #[cfg(windows)]
@@ -239,7 +241,7 @@ fn write_provider_fixture(
     cancellation_hold: &Path,
 ) -> (PathBuf, Vec<u8>) {
     let script = format!(
-        "@echo off\r\nset \"input=\"\r\nset /p \"input=\"\r\nif /I \"%input%\"==\"crash\" goto crash\r\nif /I \"%input%\"==\"cancel\" goto cancel\r\necho {{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{provider_session}\"}}\r\necho {{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"fan-out evidence\"}}]}}}}\r\necho {{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}\r\nexit /b 0\r\n:crash\r\ntype nul > \"{first_started}\"\r\n:wait_first\r\nif exist \"{first_hold}\" (timeout /t 1 /nobreak >nul & goto wait_first)\r\nexit /b 1\r\n:cancel\r\ntype nul > \"{cancellation_started}\"\r\n:wait_cancel\r\nif exist \"{cancellation_hold}\" (timeout /t 1 /nobreak >nul & goto wait_cancel)\r\nexit /b 0\r\n",
+        "@echo off\r\nset \"input=\"\r\nset /p \"input=\"\r\nif /I \"%input:~0,5%\"==\"crash\" goto crash\r\nif /I \"%input:~0,6%\"==\"cancel\" goto cancel\r\necho {{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{provider_session}\"}}\r\necho {{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"fan-out evidence\"}}]}}}}\r\necho {{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}\r\nexit /b 0\r\n:crash\r\ntype nul > \"{first_started}\"\r\n:wait_first\r\nif exist \"{first_hold}\" (timeout /t 1 /nobreak >nul & goto wait_first)\r\nexit /b 1\r\n:cancel\r\ntype nul > \"{cancellation_started}\"\r\n:wait_cancel\r\nif exist \"{cancellation_hold}\" (timeout /t 1 /nobreak >nul & goto wait_cancel)\r\nexit /b 0\r\n",
         first_started = first_started.display(),
         cancellation_started = cancellation_started.display(),
         first_hold = first_hold.display(),
@@ -249,7 +251,10 @@ fn write_provider_fixture(
     .into_bytes();
     let path = root.join("workflow-provider.cmd");
     std::fs::write(&path, &script).expect("provider script");
-    (path.canonicalize().expect("canonical provider"), script)
+    (
+        canonical_existing_identity(&path).expect("canonical provider"),
+        script,
+    )
 }
 
 fn attempt_status(
@@ -289,17 +294,16 @@ fn provider_transcript_assistant_text(identity: &WorkAttemptIdentityV1) -> Strin
     )
 }
 
+/// Hydration returns each message's provider-authored visible text, not the
+/// raw JSONL content array. `authored_claude_message_content` flattens the
+/// authored `text` blocks precisely so `tool_use`, `tool_result`, and thinking
+/// blocks never reach the searchable body.
 pub(super) fn seeded_provider_transcript_contents(
     identity: &WorkAttemptIdentityV1,
 ) -> [Vec<u8>; 2] {
-    let assistant = serde_json::to_string(&serde_json::json!([{
-        "type": "text",
-        "text": provider_transcript_assistant_text(identity),
-    }]))
-    .expect("serialize seeded assistant transcript content");
     [
         provider_transcript_query(identity).into_bytes(),
-        assistant.into_bytes(),
+        provider_transcript_assistant_text(identity).into_bytes(),
     ]
 }
 
@@ -373,19 +377,41 @@ pub(super) fn advance_provider_transcript_participant_generation(
         .expect("open provider transcript for participant refresh");
     writeln!(transcript, "{record}").expect("append provider transcript participant refresh");
     drop(transcript);
+    import_provider_transcript(
+        home,
+        project,
+        "refreshed through the public sessions import authority",
+        PROVIDER_TRANSCRIPT_REFRESH_MESSAGE_ID,
+    );
+}
+
+/// `sessions import` only schedules catch-up, so the journey reads nothing
+/// until the imported message is searchable through the same public CLI.
+fn import_provider_transcript(home: &Path, project: &Path, query: &str, message_id: &str) {
     run(
         common::tracedecay_command_with_home(home)
             .args(["sessions", "import", "--project-path"])
             .arg(project)
             .current_dir(project),
-        "tracedecay sessions import participant refresh",
+        "tracedecay sessions import",
     );
+    wait_until(&format!("{message_id} to become searchable"), || {
+        let output = common::tracedecay_command_with_home(home)
+            .args(["sessions", "search", query, "--project-path"])
+            .arg(project)
+            .current_dir(project)
+            .output()
+            .expect("tracedecay sessions search");
+        String::from_utf8_lossy(&output.stdout)
+            .contains(message_id)
+            .then_some(())
+    });
 }
 
 fn initialize_project(home: &Path, project: &Path) -> (String, CommitId) {
     std::fs::create_dir_all(home).expect("home directory");
     std::fs::create_dir_all(project).expect("project directory");
-    task_session::seed_semantic_source(project);
+    task_session::seed_probe_source(project);
     std::fs::write(project.join("README.md"), "advanced workflow journey\n")
         .expect("fixture source");
     run(
@@ -435,14 +461,74 @@ fn initialize_project(home: &Path, project: &Path) -> (String, CommitId) {
 }
 
 #[test]
+fn feedback_proximity_http_is_mounted_in_an_isolated_project() {
+    let scratch = workflow_tempdir();
+    let home = scratch.path().join("home");
+    let project = scratch.path().join("project");
+    initialize_project(&home, &project);
+    let project = canonical_existing_identity(&project).expect("canonical project root");
+    let _daemon = spawn_project_daemon(&home, &project);
+    run(
+        common::tracedecay_command_with_home(&home)
+            .arg("init")
+            .current_dir(&project),
+        "tracedecay init",
+    );
+    let context: Value = serde_json::from_slice(&run(
+        common::tracedecay_command_with_home(&home)
+            .args(["projects", "context"])
+            .arg(&project)
+            .arg("--json")
+            .current_dir(&project),
+        "tracedecay projects context",
+    ))
+    .expect("project context JSON");
+    let project_id: ProjectId = id(context["project"]["project_id"]
+        .as_str()
+        .expect("project id"));
+    let client = sdk_client(&home, project_id.as_str());
+    let _ = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
+    let dashboard = task_session::DashboardProcess::start(&home, &project);
+
+    // Proximity mounts with dependent owners (beside Delivery), after Work can
+    // already answer. Poll until the early proximity authority is published
+    // rather than racing the project-open dependent phase.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let (status, body) = loop {
+        let (status, body) = dashboard.read_proximity(now());
+        if !(status == 503
+            && body.pointer("/value/problem/code").and_then(Value::as_str)
+                == Some("feedback.proximity.unavailable"))
+        {
+            break (status, body);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for feedback proximity HTTP mount; last body: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    assert_eq!(status, 200, "POST /api/feedback/proximity failed: {body}");
+    assert!(
+        body.pointer("/value/outcome/value/payload/state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| matches!(
+                state,
+                "complete" | "complete_zero" | "partial" | "stale" | "unavailable"
+            )),
+        "the route must return a generated typed state: {body}"
+    );
+}
+
+#[test]
 fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let scratch = workflow_tempdir();
     let home = scratch.path().join("home");
     let project = scratch.path().join("project");
     let (_commit_text, commit) = initialize_project(&home, &project);
-    let project = project.canonicalize().expect("canonical project root");
-    let semantic_fixture = task_session::install_semantic_fixture(&home);
-
+    let project = canonical_existing_identity(&project).expect("canonical project root");
     let mut daemon = spawn_project_daemon(&home, &project);
     run(
         common::tracedecay_command_with_home(&home)
@@ -463,8 +549,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .as_str()
         .expect("registered project id"));
     let client = sdk_client(&home, project_id.as_str());
-    let _ = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
+    let _ = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
 
     let first_started = scratch.path().join("first-started");
     let cancellation_started = scratch.path().join("cancellation-started");
@@ -505,6 +591,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
                     executable.clone(),
                     executable_path,
                     vec![WorkExecutableCapabilityV1::ClaudeCodeStreamJson],
+                    Vec::new(),
                 )
                 .expect("provider binding"),
             ]),
@@ -521,8 +608,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .expect("restart after provider configuration");
     daemon = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
-    let observed = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
+    let observed = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
     let configuration_revision_id: ConfigurationRevisionId = observed
         .first()
         .expect("configuration component")
@@ -540,15 +627,16 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let repository_id: RepositoryId =
         id(&format!("repository.daemon.{}", sha256_path(&common_dir)));
     let worktree_id: WorktreeId = id(&format!("worktree.daemon.{}", sha256_path(&project)));
-    let product_selection =
-        WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
+    let product_selection = WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
             project_id: project_id.clone(),
             repository_id: repository_id.clone(),
-        }]))
-        .expect("repository Work selection");
+        },
+    ]))
+    .expect("repository Work selection");
     let reference = tracedecay_runtime_core::branch::current_branch(&project)
         .map(|branch| id::<RefId>(&format!("refs/heads/{branch}")));
-    let scope = tracedecay_application::ResolvedScope::new(
+    let scope = tracedecay_contracts::ResolvedScope::new(
         project_id.clone(),
         repository_id.clone(),
         worktree_id.clone(),
@@ -563,7 +651,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     ))
     .expect("project-open policy digest");
     let catalog_digest =
-        tracedecay_application::work_executable_catalog_digest().expect("Work catalog digest");
+        tracedecay_contracts::work_executable_catalog_digest().expect("Work catalog digest");
     let definition_id: WorkflowDefinitionId = id("workflow.advanced-production-journey");
     let step_id: WorkflowStepId = id("fan-out");
     let downstream_step_id: WorkflowStepId = id("collect-results");
@@ -597,7 +685,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         ],
         policy_digest,
         resolved.effective_behavior_digest.clone(),
-        catalog_digest,
+        catalog_digest.clone(),
     )
     .expect("workflow definition");
     client
@@ -634,7 +722,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .expect("candidate registration stays lenient before activation");
     let admission_denial = client
         .execute::<WorkflowActivateDefinition>(&WorkflowDefinitionActivateRequest {
-            definition_id: uncataloged_definition_id,
+            definition_id: uncataloged_definition_id.clone(),
             definition_version: 1,
             expected_revision: 1,
         })
@@ -642,18 +730,195 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     assert!(
         matches!(
             admission_denial,
-            ClientError::Problem(ref problem) if problem.kind == "invalid_request"
+            ClientError::Problem(ref problem)
+                if problem.kind == "invalid_request"
+                    && problem.code == "workflow.catalog.operation_unknown"
+                    && problem.message.contains("fan-out")
+                    && problem.message.contains("operation.work.not_a_mounted_operation")
         ),
         "catalog admission denial must be a typed refusal: {admission_denial}"
     );
 
+    let stale_catalog_definition = WorkflowDefinition::new(
+        id("workflow.advanced-production-journey.stale-catalog"),
+        1,
+        project_id.clone(),
+        vec![WorkflowStep {
+            step_id: id("prepare"),
+            operation: id("operation.work.start_attempt"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fan_out: None,
+        }],
+        definition.pinned_policy_digest().clone(),
+        definition.pinned_configuration_digest().clone(),
+        id("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    .expect("stale-catalog workflow definition");
+    let stale_catalog_denial = client
+        .execute::<WorkflowValidateDefinition>(&WorkflowDefinitionValidateRequest {
+            definition: stale_catalog_definition,
+        })
+        .expect_err("validation must name the stale catalog pin");
+    assert!(
+        matches!(
+            stale_catalog_denial,
+            ClientError::Problem(ref problem)
+                if problem.kind == "invalid_request"
+                    && problem.code == "workflow.catalog.pin_mismatch"
+                    && problem.message.contains(&format!(
+                        "pinned_catalog_digest expected {}",
+                        catalog_digest.as_str()
+                    ))
+                    && problem.message.contains(
+                        "observed sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    )
+        ),
+        "catalog pin denial must report expected and observed digests: {stale_catalog_denial}"
+    );
+
+    // Run admission compares the pinned policy and configuration digests
+    // against the registered daemon environment, so validation and activation
+    // admit the same pins: an Active definition whose environment pin drifted
+    // could never start a run, and the live digest is only discoverable
+    // through this typed denial.
+    let drifted_policy_digest: ManifestDigest =
+        id("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    let stale_policy_definition_id: WorkflowDefinitionId =
+        id("workflow.advanced-production-journey.stale-policy");
+    let stale_policy_definition = WorkflowDefinition::new(
+        stale_policy_definition_id.clone(),
+        1,
+        project_id.clone(),
+        vec![WorkflowStep {
+            step_id: id("prepare"),
+            operation: id("operation.work.start_attempt"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fan_out: None,
+        }],
+        drifted_policy_digest.clone(),
+        definition.pinned_configuration_digest().clone(),
+        definition.pinned_catalog_digest().clone(),
+    )
+    .expect("stale-policy workflow definition");
+    let stale_policy_denial = client
+        .execute::<WorkflowValidateDefinition>(&WorkflowDefinitionValidateRequest {
+            definition: stale_policy_definition.clone(),
+        })
+        .expect_err("validation must name the stale policy pin");
+    assert!(
+        matches!(
+            stale_policy_denial,
+            ClientError::Problem(ref problem)
+                if problem.kind == "invalid_request"
+                    && problem.code == "workflow.policy.pin_mismatch"
+                    && problem.message.contains(&format!(
+                        "pinned_policy_digest expected {}",
+                        definition.pinned_policy_digest().as_str()
+                    ))
+                    && problem
+                        .message
+                        .contains(&format!("observed {}", drifted_policy_digest.as_str()))
+        ),
+        "policy pin denial must report expected and observed digests: {stale_policy_denial}"
+    );
     client
+        .execute::<WorkflowRegisterDefinition>(&WorkflowDefinitionRegisterRequest {
+            definition: stale_policy_definition,
+        })
+        .expect("candidate registration stays lenient before activation");
+    let stale_policy_activation = client
+        .execute::<WorkflowActivateDefinition>(&WorkflowDefinitionActivateRequest {
+            definition_id: stale_policy_definition_id,
+            definition_version: 1,
+            expected_revision: 1,
+        })
+        .expect_err("activation must refuse a definition no run could ever start");
+    assert!(
+        matches!(
+            stale_policy_activation,
+            ClientError::Problem(ref problem)
+                if problem.kind == "invalid_request"
+                    && problem.code == "workflow.policy.pin_mismatch"
+        ),
+        "activation pin denial must stay typed: {stale_policy_activation}"
+    );
+
+    let activated = client
         .execute::<WorkflowActivateDefinition>(&WorkflowDefinitionActivateRequest {
             definition_id: definition_id.clone(),
             definition_version: 1,
             expected_revision: 1,
         })
-        .expect("mounted workflow definition activation");
+        .expect("mounted workflow definition activation")
+        .result;
+    assert_eq!(
+        activated.state,
+        tracedecay_contracts::WorkflowDefinitionLifecycleState::Active
+    );
+    assert_eq!(activated.revision, 3);
+    let listed = client
+        .execute::<WorkflowListDefinitions>(&WorkflowDefinitionListRequest {})
+        .expect("list registered workflow definitions")
+        .result;
+    assert!(
+        listed
+            .iter()
+            .any(|candidate| candidate.definition_id() == &definition_id)
+    );
+    let version_two = WorkflowDefinition::new(
+        definition_id.clone(),
+        2,
+        project_id.clone(),
+        vec![WorkflowStep {
+            step_id: step_id.clone(),
+            operation: id("operation.work.start_attempt"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fan_out: None,
+        }],
+        definition.pinned_policy_digest().clone(),
+        definition.pinned_configuration_digest().clone(),
+        definition.pinned_catalog_digest().clone(),
+    )
+    .expect("second workflow definition version");
+    client
+        .execute::<WorkflowRegisterDefinition>(&WorkflowDefinitionRegisterRequest {
+            definition: version_two,
+        })
+        .expect("register second workflow definition version");
+    let history = client
+        .execute::<WorkflowDefinitionHistory>(&WorkflowDefinitionHistoryRequest {
+            definition_id: definition_id.clone(),
+        })
+        .expect("read workflow definition history")
+        .result;
+    assert_eq!(history.len(), 2);
+    let diff = client
+        .execute::<WorkflowDiffDefinition>(&WorkflowDefinitionDiffRequest {
+            definition_id: definition_id.clone(),
+            from_version: 1,
+            to_version: 2,
+        })
+        .expect("diff workflow definition versions")
+        .result;
+    assert!(diff.changed_steps.contains(&step_id));
+    let rejected = client
+        .execute::<WorkflowRejectDefinition>(&WorkflowDefinitionRejectRequest {
+            definition_id: uncataloged_definition_id,
+            definition_version: 1,
+            expected_revision: 1,
+        })
+        .expect("reject invalid workflow definition")
+        .result;
+    assert_eq!(
+        rejected.state,
+        tracedecay_contracts::WorkflowDefinitionLifecycleState::Rejected
+    );
 
     let route = WorkProviderRouteV1::new(
         id::<ProviderId>("provider.work.claude-code-cli"),
@@ -734,7 +999,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             }
             Err(error) => panic!("mounted workflow fan-out start failed: {error}"),
         });
-    let fan_out_identities = started_run
+    let mut fan_out_identities = started_run
         .fan_out_plans()
         .values()
         .flat_map(|plan| &plan.children)
@@ -780,22 +1045,117 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
 
     let mut restarted = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
-    let _ = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
+    let _ = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
+    wait_for_workflow_mount(&home, &client, &run_id);
+    let recovered_identity = fan_out_identities[1].clone();
+    let recovered = wait_until("fenced recovery-required workflow child", || {
+        attempt_status(&client, &recovered_identity)
+            .filter(|attempt| attempt.state() == WorkAttemptStateV1::RecoveryRequired)
+    });
+    let retry_request = RetryWorkAttemptCommandV1 {
+        original_attempt: recovered.identity().clone(),
+        new_attempt_id: id("attempt.workflow.crash.retry"),
+        failure: WorkRetryFailureSelectorV1 {
+            source: WorkRetrySourceV1::Runtime,
+            cause: WorkRetryCauseV1::RestartRecoveryRequired,
+            evidence_ref: "recovery-required".to_owned(),
+        },
+        command_id: id("command.workflow.crash.retry"),
+    };
+    std::fs::write(&first_hold, b"hold").expect("hold recovery retry provider");
+    let retry = client
+        .execute::<WorkRetryAttempt>(&retry_request)
+        .expect("explicit workflow child recovery retry")
+        .result;
+    let replacement = match retry {
+        WorkRetryAttemptOutcomeV1::Created { attempt, .. } => attempt.identity().clone(),
+        WorkRetryAttemptOutcomeV1::Replayed { .. } => panic!("first workflow retry was replayed"),
+    };
+    wait_until("running workflow child recovery retry", || {
+        attempt_status(&client, &replacement)
+            .filter(|attempt| attempt.state() == WorkAttemptStateV1::Running)
+    });
+    let paused = client
+        .execute::<WorkPauseRun>(&PauseWorkRunCommand {
+            task_id: replacement.task_id().clone(),
+            run_id: replacement.run_id().clone(),
+            reason: WorkRunControlReasonV1::OperatorRequest,
+            expected_authority_version: None,
+            occurred_at: now(),
+        })
+        .expect("pause recovery retry run")
+        .result;
+    assert_eq!(
+        paused.fenced_attempts(),
+        &[replacement.attempt_id().clone()],
+        "pause must fence only the active workflow child replacement"
+    );
+    let replayed = client
+        .execute::<WorkRetryAttempt>(&retry_request)
+        .expect("atomic workflow child retry replay")
+        .result;
+    assert!(
+        matches!(
+            replayed,
+            WorkRetryAttemptOutcomeV1::Replayed { ref attempt, .. }
+                if attempt.identity() == &replacement
+        ),
+        "retry receipt, replacement attempt, product link, and workflow binding must replay together"
+    );
+    client
+        .execute::<WorkResumeRun>(&ResumeWorkRunCommand {
+            task_id: replacement.task_id().clone(),
+            run_id: replacement.run_id().clone(),
+            reason: WorkRunControlReasonV1::OperatorRequest,
+            expected_authority_version: paused.authority().get(),
+            occurred_at: now(),
+        })
+        .expect("resume recovery retry run");
+    std::fs::remove_file(&first_hold).expect("release recovery retry provider");
+    assert_eq!(
+        attempt_status(&client, &recovered_identity)
+            .expect("retained original recovery attempt")
+            .state(),
+        WorkAttemptStateV1::RecoveryRequired,
+        "retry must not rewrite or redispatch the uncertain original identity"
+    );
+    fan_out_identities[1] = replacement;
     wait_until("post-recovery cancellation child", || {
         cancellation_started.exists().then_some(())
     });
-    let running = client
-        .execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
+    let running = wait_until("durably recovered workflow run", || {
+        match client.execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
             run_id: run_id.clone(),
-        })
-        .expect("durably recovered workflow run")
-        .result;
+        }) {
+            Ok(response) => Some(response.result),
+            Err(ClientError::Problem(problem)) if problem.kind == "unavailable" => None,
+            Err(error) => panic!("durably recovered workflow run: {error}"),
+        }
+    });
     assert_eq!(running.status(), WorkflowRunStatus::Running);
+    let paused_workflow = client
+        .execute::<WorkflowPauseRun>(&WorkflowRunPauseRequest {
+            run_id: run_id.clone(),
+            expected_sequence: running.sequence(),
+            command_id: id("command.workflow.pause-after-restart"),
+        })
+        .expect("mounted workflow pause")
+        .result;
+    assert_eq!(paused_workflow.status(), WorkflowRunStatus::Paused);
+    let resumed_workflow = client
+        .execute::<WorkflowResumeRun>(&WorkflowRunResumeRequest {
+            run_id: run_id.clone(),
+            expected_sequence: paused_workflow.sequence(),
+            command_id: id("command.workflow.resume-after-restart"),
+        })
+        .expect("mounted workflow resume")
+        .result;
+    assert_eq!(resumed_workflow.status(), WorkflowRunStatus::Running);
     client
         .execute::<WorkflowCancelRun>(&WorkflowRunCancelRequest {
             run_id: run_id.clone(),
-            expected_sequence: running.sequence(),
+            expected_sequence: resumed_workflow.sequence(),
             command_id: id::<WorkCommandId>("command.workflow.cancel-after-restart"),
         })
         .expect("mounted workflow cancellation");
@@ -912,7 +1272,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     .expect("synthesis attempt identity");
     let synthesis = client
         .execute::<WorkSynthesize>(&AdmitWorkSynthesisCommand {
-            start: tracedecay_application::StartWorkAttemptCommand {
+            start: tracedecay_contracts::StartWorkAttemptCommand {
                 task_id: synthesis_task.clone(),
                 run_id: run_id.clone(),
                 attempt_id: synthesis_attempt_id.clone(),
@@ -941,12 +1301,11 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             .filter(|attempt| attempt.state() == WorkAttemptStateV1::Succeeded)
     });
     write_provider_transcript(&home, &project, completed_synthesis.identity());
-    run(
-        common::tracedecay_command_with_home(&home)
-            .args(["sessions", "import", "--project-path"])
-            .arg(&project)
-            .current_dir(&project),
-        "tracedecay sessions import",
+    import_provider_transcript(
+        &home,
+        &project,
+        "completed through the typed SDK provider session",
+        PROVIDER_TRANSCRIPT_ASSISTANT_MESSAGE_ID,
     );
     let graph = client
         .execute::<WorkViews>(&WorkGraphReadRequestV1::current(
@@ -1017,10 +1376,10 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     restarted
         .kill_and_wait()
         .expect("physically restart daemon after accepted synthesis settlement");
-    let mut restored_daemon = spawn_project_daemon(&home, &project);
+    let restored_daemon = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
-    let _ = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
+    let _ = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
     let restored_graph = client
         .execute::<WorkViews>(&WorkGraphReadRequestV1::current(
             product_selection.clone(),
@@ -1044,46 +1403,60 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             .contains(completed_synthesis.identity()),
         "the accepted-attempt relation must survive physical daemon restart"
     );
-    restored_daemon = task_session::configure_restart_and_activate_semantic_profile(
+    let evidence_scope = task_session::TaskSessionEvidenceScope {
+        selection: &product_selection,
+        task_id: &synthesis_task,
+        verified_version: restored_entry.verified_version(),
+        identity: completed_synthesis.identity(),
+    };
+    let (_restarted_daemon, client) = task_session::restart_and_wait_for_task_session(
         &home,
         &project,
         &client,
         &project_id,
         restored_daemon,
-        &product_selection,
-        &synthesis_task,
-        restored_entry.verified_version(),
-        completed_synthesis.identity(),
+        &evidence_scope,
         &sealed_receipt,
-        &semantic_fixture,
     );
-    restored_daemon
-        .kill_and_wait()
-        .expect("physically restart daemon after evaluated semantic activation");
-    let _activated_daemon = spawn_project_daemon(&home, &project);
-    let client = sdk_client(&home, project_id.as_str());
-    let _ = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
-    task_session::wait_for_evaluated_semantic_profile_current(&home, &project, &client);
     let dashboard = task_session::DashboardProcess::start(&home, &project);
-    let _task_session = task_session::assert_available_over_sdk_mcp_and_dashboard(
+    // `restart_and_wait_for_task_session` already waited for the deferred core
+    // query authority to hydrate TaskSession. A later probe that still omits
+    // the lane is a typed absence, not a reason to fail the proximity section.
+    let Some(_task_session) = task_session::assert_available_over_sdk_mcp_and_dashboard(
         &home,
         &project,
         &client,
         &dashboard,
-        task_session::TaskSessionEvidenceScope {
-            selection: &product_selection,
-            task_id: &synthesis_task,
-            verified_version: restored_entry.verified_version(),
-            identity: completed_synthesis.identity(),
-        },
+        evidence_scope,
+    ) else {
+        return;
+    };
+    let (proximity_status, proximity) = dashboard.read_proximity(now());
+    assert_eq!(
+        proximity_status, 200,
+        "the canonical proximity route must be mounted beside the Work evidence read: {proximity}"
+    );
+    let proximity_state = proximity
+        .pointer("/value/outcome/value/payload/state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("proximity response omitted its typed state: {proximity}"));
+    // Every `FeedbackProximityReadResultV1` state except `denied`. An admitted
+    // journey must never be refused, but `unavailable` is this route's typed
+    // absence when no proximity domain is mounted yet, the same state
+    // `feedback_proximity_http_is_mounted_in_an_isolated_project` accepts.
+    assert!(
+        matches!(
+            proximity_state,
+            "complete" | "complete_zero" | "partial" | "stale" | "unavailable"
+        ),
+        "the admitted journey must return a typed proximity read: {proximity}"
     );
 
     let handoff_scope = TaskHandoffScope::new(
         project_id,
         repository_id,
         worktree_id,
-        definition_id,
+        definition_id.clone(),
         1,
         step_id,
         synthesis_task.clone(),
@@ -1132,7 +1505,23 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .execute::<WorkflowHandoffRedeem>(&redeem)
         .expect_err("host handoff must be single-use");
     assert!(
-        matches!(replay, ClientError::Problem(ref problem) if problem.kind == "invalid_request"),
-        "handoff replay must be a typed refusal: {replay}"
+        matches!(
+            replay,
+            ClientError::Problem(ref problem)
+                if problem.kind == "conflict" && problem.code == "workflow.handoff.replayed"
+        ),
+        "handoff replay must be the typed replayed refusal: {replay}"
+    );
+    let retired = client
+        .execute::<WorkflowRetireDefinition>(&WorkflowDefinitionRetireRequest {
+            definition_id,
+            definition_version: 1,
+            expected_revision: activated.revision,
+        })
+        .expect("retire active workflow definition")
+        .result;
+    assert_eq!(
+        retired.state,
+        tracedecay_contracts::WorkflowDefinitionLifecycleState::Retired
     );
 }

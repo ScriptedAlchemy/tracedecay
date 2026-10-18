@@ -2,14 +2,14 @@
  * Settings read model: turns the untyped `/api/settings` payload
  * (settings_api.rs::get_settings) into a navigable, origin-aware shape.
  *
- * WHAT THE WIRE ACTUALLY CARRIES — this file exists to keep the surface honest
+ * WHAT THE WIRE ACTUALLY CARRIES, this file exists to keep the surface honest
  * about it:
  *
  *   - `project.config` is `project_configuration.config`, a resolved config
  *     struct serialized wholesale. Every key in it is already effective. The
  *     payload never says which file or default supplied a given key.
  *   - `automation` is `automation_config::effective_config(global, project)`.
- *     The daemon really does merge two layers there — and then ships only the
+ *     The daemon really does merge two layers there, and then ships only the
  *     result. The winning layer is not on the wire.
  *   - `user` and `project.config` do not even address the same keys
  *     (`upload_enabled`/`watcher_debounce` vs `include`/`exclude`/…), so they
@@ -17,8 +17,8 @@
  *
  * Therefore this model does NOT rank groups into a resolution stack and does
  * not claim that one group overrides another: nothing in the payload supports
- * it. What it does model is ORIGIN — the source each group is read from, which
- * the payload states directly via `config_path` / `config_endpoint` — and the
+ * it. What it does model is ORIGIN, the source each group is read from, which
+ * the payload states directly via `config_endpoint`, and the
  * one place the payload carries genuine per-value provenance:
  * `environment.variables[]`, where `active` distinguishes an override that is
  * actually in force from one that is unset so a default applies.
@@ -29,26 +29,43 @@
 
 import { z } from 'zod';
 import {
+  CodeIndexWorkerSelectionV1Schema,
   SettingsPayloadV1Schema,
   type CodeIndexWorkerSelectionV1,
   type CodeIndexWorkerStatusV1,
   type CodeIndexWorkerSettingsPatch,
+  type ContextScoutIntentSettingsV1,
   type ProjectSettingsPatch,
   type SettingsPayloadV1,
   type UserSettingsPatch,
 } from '../../contracts/generated.ts';
+import { isRecord } from '../../data/query/responseBody.ts';
 
-export type ConfigRowKind =
+type ConfigRowKind =
   | 'group'
   | 'boolean'
   | 'number'
   | 'path'
   | 'string'
   | 'null'
-  | 'list';
+  | 'list'
+  /** The code-index worker selection: one `{mode, workers?}` value, one row. */
+  | 'selection';
+
+/**
+ * The provenance `/api/settings` serves for one key, and nothing more.
+ *
+ * `unserved` is the honest default: the payload states an effective value
+ * without saying which layer supplied it. Only `environment.variables[]`
+ * carries per-value provenance, `explicit` when the variable is set in the
+ * daemon's process environment (an override in force), `default` when it is
+ * unset so whatever default applies, applies. Nothing here is inferred from a
+ * value; a key whose provenance is not on the wire stays `unserved`.
+ */
+export type ServedProvenance = 'unserved' | 'explicit' | 'default';
 
 export interface ConfigRow {
-  /** Dotted path within the section — unique, and the row's React key. */
+  /** Dotted path within the section, unique, and the row's React key. */
   readonly id: string;
   /** Leaf label as it appears in the payload. */
   readonly label: string;
@@ -59,6 +76,10 @@ export interface ConfigRow {
   readonly value: unknown;
   /** Scalar rendering + search text. Empty for groups. */
   readonly text: string;
+  /** Per-key provenance exactly as far as the wire states it. */
+  readonly provenance: ServedProvenance;
+  /** The daemon's own description, when the payload carries one for this key. */
+  readonly description: string | null;
   /** For groups: how many scalar settings live underneath. */
   count: number;
 }
@@ -66,23 +87,22 @@ export interface ConfigRow {
 /**
  * Where a group's values come from, as the payload states it.
  *
- * `file`        — read from a configuration file whose path the payload gives.
- * `environment` — the process environment overlay.
- * `resolved`    — state the daemon computed and reported; no source stated.
+ * `file`, read from a configuration file whose path the payload gives.
+ * `environment`, the process environment overlay.
+ * `resolved`, state the daemon computed and reported; no source stated.
  */
 export type OriginKind = 'file' | 'environment' | 'resolved';
 
 export interface ConfigSection {
-  /** Top-level payload key — also the DOM id used for in-page navigation. */
+  /** Top-level payload key, also the DOM id used for in-page navigation. */
   readonly id: string;
   readonly title: string;
   /** What this group is, in one clause. */
   readonly blurb: string;
   readonly origin: OriginKind;
   /** Path or endpoint the payload names for this group, when it names one. */
+  /** The API endpoint a section's values are read from, when stated. */
   readonly location: string | null;
-  /** How to read `location`: a filesystem path or an API endpoint. */
-  readonly locationKind: 'path' | 'endpoint' | null;
   /** Facts restated from keys the payload carries. Never inferred. */
   readonly notes: readonly string[];
   readonly rows: readonly ConfigRow[];
@@ -96,7 +116,7 @@ export interface ConfigSection {
  * variable is set in the daemon's environment (an override in force) or unset
  * (so whatever default applies, applies).
  */
-export interface EnvOverride {
+interface EnvOverride {
   readonly name: string;
   /** Payload `active`: true when the variable is set in the process env. */
   readonly active: boolean;
@@ -105,16 +125,9 @@ export interface EnvOverride {
   readonly description: string;
 }
 
-export interface ConfigStamp {
-  readonly label: string;
-  readonly value: string;
-}
-
 export interface SettingsModel {
   readonly sections: readonly ConfigSection[];
   readonly settingCount: number;
-  /** Identity of the configuration snapshot being displayed, when present. */
-  readonly stamps: readonly ConfigStamp[];
   /** Environment overrides, reported verbatim. Empty when absent. */
   readonly overrides: readonly EnvOverride[];
   /** How many of `overrides` are actually in force. */
@@ -130,7 +143,6 @@ export interface ProjectSettingsValues {
   readonly max_file_size: string;
   readonly extract_docstrings: boolean;
   readonly track_call_sites: boolean;
-  readonly git_ignore: boolean;
   readonly context_scout: boolean;
   readonly telemetry_timings: boolean;
   readonly auto_track_pr_branches: boolean;
@@ -167,7 +179,7 @@ export interface SettingsValidationError {
 }
 
 /**
- * The fields the editor found changed — not the request body.
+ * The fields the editor found changed, not the request body.
  *
  * The contracted body is `ProjectSettingsPatch`, which also carries
  * `expected_revision_id`; the plan holds that separately so a change set can be
@@ -182,8 +194,8 @@ export interface ProjectSettingsChangeSet {
   max_file_size?: number;
   extract_docstrings?: boolean;
   track_call_sites?: boolean;
-  git_ignore?: boolean;
   context_scout?: boolean;
+  context_scout_intent?: ContextScoutIntentSettingsV1;
   telemetry?: { timings?: boolean };
   sync?: {
     auto_track_pr_branches?: boolean;
@@ -205,7 +217,7 @@ export interface CodeIndexWorkerSettingsChangeSet {
 
 /**
  * The change sets carry omission semantics the generated patch types cannot
- * express — schemars renders every `Option<T>` field as required-and-nullable,
+ * express, schemars renders every `Option<T>` field as required-and-nullable,
  * so `ProjectSettingsPatch` has no way to say "this field was not edited",
  * which is precisely what the daemon's `#[serde(default)]` reads. The field
  * NAMES are still the contract's, and these assertions fail the build if the
@@ -256,11 +268,11 @@ export interface SettingsRevisionConflict {
   readonly actualRevisionId: string | null;
 }
 
-export const MIN_AUTO_TRACK_PR_POLL_SECS = 60;
+const MIN_AUTO_TRACK_PR_POLL_SECS = 60;
 
 /**
  * Recognized top-level groups and how to describe them. `origin` records where
- * the group is read from — a fact the payload supports — and deliberately
+ * the group is read from, a fact the payload supports, and deliberately
  * carries no precedence, because the payload states none.
  */
 const GROUP_META: Readonly<
@@ -303,11 +315,23 @@ const ORIGIN_ORDER: Readonly<Record<OriginKind, number>> = {
 };
 
 /**
- * Keys consumed by a dedicated renderer, so the generic row flattener does not
- * also emit them and show the same facts twice.
+ * Top-level payload members that are write receipts, not configuration groups.
+ * `settings_api.rs` sets them on the envelope a PATCH answers with, and the
+ * mutation reads them into the applied record; rendered as sections they
+ * appeared as a one-row group named "Restart recommended" after every worker
+ * write, counted among the settings.
+ */
+const RECEIPT_FLAGS: ReadonlySet<string> = new Set(['resync_recommended', 'restart_recommended']);
+
+/**
+ * Keys the generic flattener must skip because a dedicated builder emits their
+ * rows: `environment.variables[]` becomes one row per variable carrying the
+ * only served provenance, and `user.code_index_workers` becomes one selection
+ * row rather than a `mode`/`workers` pair that could be edited apart.
  */
 const SPECIALIZED: Readonly<Record<string, ReadonlySet<string>>> = {
   environment: new Set(['variables']),
+  user: new Set(['code_index_workers']),
 };
 
 /**
@@ -316,7 +340,7 @@ const SPECIALIZED: Readonly<Record<string, ReadonlySet<string>>> = {
  * is not an envelope at all, and an envelope whose payload the generated
  * contract refuses.
  */
-export type SettingsPayloadRead =
+type SettingsPayloadRead =
   | { readonly outcome: 'settings'; readonly payload: SettingsPayloadV1 }
   | { readonly outcome: 'not_an_envelope' }
   | { readonly outcome: 'unsupported_payload' };
@@ -332,7 +356,7 @@ const SettingsEnvelopeMemberSchema = z.object({ payload: z.record(z.string(), z.
  * groups this file models live under `payload` and never at the top level.
  * Reading the envelope itself as settings would render `schema_revision`,
  * `coverage`, and `freshness` as configuration and, worse, find no revision
- * identity — which the editor would report as an omitted required field.
+ * identity, which the editor would report as an omitted required field.
  */
 export function readSettingsEnvelope(body: unknown): SettingsPayloadRead {
   const envelope = SettingsEnvelopeMemberSchema.safeParse(body);
@@ -347,16 +371,17 @@ export function readSettingsEnvelope(body: unknown): SettingsPayloadRead {
  * The read model walks whatever groups the payload carries, so its parameter
  * stays `unknown` on purpose: a group the daemon starts reporting before the
  * contract is regenerated must still appear here rather than vanish, and every
- * row it emits is a literal it found — it never claims a named field. The
+ * row it emits is a literal it found, it never claims a named field. The
  * editable slice, which does name fields, goes through `buildSettingsEditor`
  * against a contract-parsed payload instead.
  */
 export function buildSettingsModel(payload: unknown): SettingsModel {
   if (!isRecord(payload)) {
-    return { sections: [], settingCount: 0, stamps: [], overrides: [], activeOverrides: 0 };
+    return { sections: [], settingCount: 0, overrides: [], activeOverrides: 0 };
   }
   const sections: ConfigSection[] = [];
   for (const [key, value] of Object.entries(payload)) {
+    if (RECEIPT_FLAGS.has(key)) continue;
     sections.push(buildSection(key, value));
   }
   const ordered = sections
@@ -371,7 +396,6 @@ export function buildSettingsModel(payload: unknown): SettingsModel {
   return {
     sections: ordered,
     settingCount: ordered.reduce((total, s) => total + s.settingCount, 0),
-    stamps: readStamps(payload),
     overrides,
     activeOverrides: overrides.filter((item) => item.active).length,
   };
@@ -413,7 +437,6 @@ export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor 
       max_file_size: maxFileSize,
       extract_docstrings: config.extract_docstrings,
       track_call_sites: config.track_call_sites,
-      git_ignore: config.git_ignore,
       context_scout: config.context_scout,
       telemetry_timings: config.telemetry.timings,
       auto_track_pr_branches: config.sync.auto_track_pr_branches,
@@ -486,7 +509,6 @@ export function planProjectChangeAgainst(
   for (const field of [
     'extract_docstrings',
     'track_call_sites',
-    'git_ignore',
     'context_scout',
   ] as const) {
     if (values[field] !== current.project[field]) patch[field] = values[field];
@@ -652,7 +674,7 @@ function validateCodeIndexWorkerValues(
   return errors;
 }
 
-function sameCodeIndexWorkerSelection(
+export function sameCodeIndexWorkerSelection(
   left: CodeIndexWorkerSelectionV1,
   right: CodeIndexWorkerSelectionV1,
 ): boolean {
@@ -735,7 +757,7 @@ function unsignedIntegerString(value: number): string | null {
   return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
 }
 
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+export function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
@@ -746,7 +768,10 @@ function buildSection(key: string, value: unknown): ConfigSection {
   let settingCount = 0;
   if (isRecord(value)) {
     for (const [childKey, childValue] of Object.entries(value)) {
-      if (skip?.has(childKey)) continue;
+      if (skip?.has(childKey)) {
+        settingCount += specializedRows(key, childKey, childValue, rows);
+        continue;
+      }
       settingCount += flatten(childKey, childValue, childKey, 0, rows);
     }
   } else {
@@ -758,8 +783,7 @@ function buildSection(key: string, value: unknown): ConfigSection {
     title: meta?.title ?? humanize(key),
     blurb: sectionBlurb(key, value, meta?.blurb ?? 'Reported by the daemon'),
     origin: meta?.origin ?? 'resolved',
-    location: location?.value ?? null,
-    locationKind: location?.kind ?? null,
+    location,
     notes: readNotes(value),
     rows,
     settingCount,
@@ -775,19 +799,12 @@ function sectionBlurb(key: string, value: unknown, fallback: string): string {
 }
 
 /** Where a section's values live, when the payload says so. */
-function readLocation(
-  key: string,
-  value: unknown,
-): { value: string; kind: 'path' | 'endpoint' } | null {
+function readLocation(key: string, value: unknown): string | null {
   if (isRecord(value)) {
-    const path = value['config_path'] ?? value['legacy_config_path'];
-    if (typeof path === 'string' && path.length > 0) return { value: path, kind: 'path' };
     const endpoint = value['config_endpoint'];
-    if (typeof endpoint === 'string' && endpoint.length > 0) {
-      return { value: endpoint, kind: 'endpoint' };
-    }
+    if (typeof endpoint === 'string' && endpoint.length > 0) return endpoint;
   }
-  if (key === 'environment') return { value: 'process environment', kind: 'endpoint' };
+  if (key === 'environment') return 'process environment';
   return null;
 }
 
@@ -798,48 +815,8 @@ function readLocation(
 function readNotes(value: unknown): string[] {
   if (!isRecord(value)) return [];
   const notes: string[] = [];
-  if (value['legacy_config_read_only'] === true) {
-    notes.push('legacy config path is read-only');
-  }
-  const configPath = value['config_path'];
-  const legacyPath = value['legacy_config_path'];
-  if (
-    typeof configPath === 'string' &&
-    typeof legacyPath === 'string' &&
-    configPath === legacyPath
-  ) {
-    notes.push('config path and legacy path are the same file');
-  }
   if (value['enabled'] === false) notes.push('disabled');
   return notes;
-}
-
-/** Identity of the displayed snapshot, if the payload carries one.
- *
- * One stamp per distinct (label, value): the project and user groups of a live
- * payload routinely carry the SAME snapshot and revision ids, and repeating an
- * identity does not say more about it — it rendered the header strip twice and
- * collided the strip's `label:value` React keys. Distinct values under one
- * label (two groups pinned to different snapshots) still both appear, because
- * that disagreement is a reading. */
-function readStamps(payload: Record<string, unknown>): ConfigStamp[] {
-  const stamps: ConfigStamp[] = [];
-  const push = (label: string, value: unknown) => {
-    if (typeof value !== 'string' || value.length === 0) return;
-    if (stamps.some((stamp) => stamp.label === label && stamp.value === value)) return;
-    stamps.push({ label, value });
-  };
-  for (const group of Object.values(payload)) {
-    if (!isRecord(group)) continue;
-    push('snapshot', group['configuration_snapshot_id']);
-    push('revision', group['configuration_revision_id']);
-  }
-  const version = payload['version'];
-  if (isRecord(version)) {
-    push('version', version['version']);
-    push('channel', version['channel']);
-  }
-  return stamps;
 }
 
 /**
@@ -923,8 +900,72 @@ function itemLabel(item: Record<string, unknown>, index: number): string {
   return `#${index}`;
 }
 
+/**
+ * Rows for the keys `SPECIALIZED` reserves. Returns the scalar count they
+ * contribute, like `flatten`.
+ *
+ * Environment variables are the one place the payload carries per-value
+ * provenance, so each becomes a row whose `provenance` is `explicit` (set in
+ * the process environment, value shown) or `default` (unset), taken from a
+ * literal `active: true` exactly as `readOverrides` takes it. The worker
+ * selection is one value on the wire and one CAS-guarded write, so it is one
+ * row; splitting it into `mode` and `workers` would offer two edits for a
+ * resource that accepts one.
+ */
+function specializedRows(
+  section: string,
+  key: string,
+  value: unknown,
+  out: ConfigRow[],
+): number {
+  if (section === 'environment' && key === 'variables') {
+    const overrides = readOverrides({ variables: value });
+    for (const item of overrides) {
+      out.push({
+        id: `${key}.${item.name}`,
+        label: item.name,
+        depth: 0,
+        kind: 'string',
+        value: item.value,
+        text: item.value ?? 'unset',
+        provenance: item.active ? 'explicit' : 'default',
+        description: item.description.length > 0 ? item.description : null,
+        count: 1,
+      });
+    }
+    return overrides.length;
+  }
+  if (section === 'user' && key === 'code_index_workers') {
+    const selection = CodeIndexWorkerSelectionV1Schema.safeParse(value);
+    if (!selection.success) {
+      out.push(scalarRow(key, key, 0, 'string', value, scalarText(value)));
+      return 1;
+    }
+    out.push(
+      scalarRow(key, key, 0, 'selection', selection.data, selectionText(selection.data)),
+    );
+    return 1;
+  }
+  return flatten(key, value, key, 0, out);
+}
+
+/** The worker selection as one readable value. */
+export function selectionText(selection: CodeIndexWorkerSelectionV1): string {
+  return selection.mode === 'automatic' ? 'automatic' : `exact · ${selection.workers} workers`;
+}
+
 function groupRow(label: string, id: string, depth: number): ConfigRow {
-  return { id, label, depth, kind: 'group', value: null, text: '', count: 0 };
+  return {
+    id,
+    label,
+    depth,
+    kind: 'group',
+    value: null,
+    text: '',
+    provenance: 'unserved',
+    description: null,
+    count: 0,
+  };
 }
 
 function scalarRow(
@@ -935,7 +976,17 @@ function scalarRow(
   value: unknown,
   text: string,
 ): ConfigRow {
-  return { id, label, depth, kind, value, text, count: 1 };
+  return {
+    id,
+    label,
+    depth,
+    kind,
+    value,
+    text,
+    provenance: 'unserved',
+    description: null,
+    count: 1,
+  };
 }
 
 function classify(value: unknown): ConfigRowKind {
@@ -956,65 +1007,6 @@ function scalarText(value: unknown): string {
   return String(value);
 }
 
-/**
- * Filter rows to those matching `query`, keeping the ancestors that give a
- * match its context and the full subtree of any group that matches by name.
- */
-export function filterRows(rows: readonly ConfigRow[], query: string): ConfigRow[] {
-  const needle = query.trim().toLowerCase();
-  if (needle === '') return [...rows];
-  const keep = new Array<boolean>(rows.length).fill(false);
-  rows.forEach((row, index) => {
-    if (!matches(row, needle)) return;
-    keep[index] = true;
-    if (row.kind === 'group') {
-      for (let i = index + 1; i < rows.length && rows[i]!.depth > row.depth; i += 1) {
-        keep[i] = true;
-      }
-    }
-  });
-  // Ancestors of every kept row, so nesting still reads.
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (!keep[index]) continue;
-    let depth = rows[index]!.depth;
-    for (let i = index - 1; i >= 0 && depth > 0; i -= 1) {
-      if (rows[i]!.depth < depth) {
-        keep[i] = true;
-        depth = rows[i]!.depth;
-      }
-    }
-  }
-  return rows.filter((_, index) => keep[index]!);
-}
-
-/** Environment overrides matching `query`, over name, value and description. */
-export function filterOverrides(
-  overrides: readonly EnvOverride[],
-  query: string,
-): EnvOverride[] {
-  const needle = query.trim().toLowerCase();
-  if (needle === '') return [...overrides];
-  return overrides.filter(
-    (item) =>
-      item.name.toLowerCase().includes(needle) ||
-      item.description.toLowerCase().includes(needle) ||
-      (item.value ?? '').toLowerCase().includes(needle),
-  );
-}
-
-function matches(row: ConfigRow, needle: string): boolean {
-  return (
-    row.label.toLowerCase().includes(needle) ||
-    row.id.toLowerCase().includes(needle) ||
-    row.text.toLowerCase().includes(needle)
-  );
-}
-
-/** Scalar settings among a filtered row slice. */
-export function countSettings(rows: readonly ConfigRow[]): number {
-  return rows.reduce((total, row) => total + (row.kind === 'group' ? 0 : 1), 0);
-}
-
 /** Split a path into its directory prefix and the segment worth reading. */
 export function splitPath(value: string): { head: string; tail: string } {
   const cut = value.lastIndexOf('/');
@@ -1027,6 +1019,3 @@ function humanize(key: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}

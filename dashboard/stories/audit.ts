@@ -1,22 +1,22 @@
 /**
  * Visual-audit + accessibility harness.
  *
- * `npm run visual:audit`
+ * `pnpm run visual:audit`
  *   Starts the dashboard (rsbuild dev) with every `/api` call served from the
- *   MSW-backed fixtures (`fixtures/route.ts`) — no daemon required — then walks
+ *   MSW-backed fixtures (`fixtures/route.ts`), no daemon required, then walks
  *   the code-driven story registry and captures each surface across
  *   light+dark themes and 320/768/1440 widths, writing PNGs and a machine
  *   `manifest.json` to `audit-gallery/`. A render check runs per
  *   surface and its violations are recorded in the manifest.
  *
- * `npm run visual:audit -- --diff`
+ * `pnpm run visual:audit -- --diff`
  *   Same capture, then pixelmatch every screenshot against the committed
  *   baseline of the same name in `audit-baselines/`, recording mismatched
  *   pixel counts (and writing diff PNGs) in the manifest.
  *
  * WIDTHS ARE PINNED TO THE BASELINES, NOT TO PLAN 11. The plan's viewport,
- * zoom and media matrix has been retired along with the accessibility harness
- * — the two gates CI runs. This harness keeps 320/768/1440 at a height of 900
+ * zoom and media matrix has been retired along with the accessibility harness,
+ * the two gates CI runs. This harness keeps 320/768/1440 at a height of 900
  * because `audit-baselines/` holds seventy-five committed PNGs named and sized
  * for exactly that geometry: moving to 320x568 and 768x1024 would make every
  * one of them a `size-mismatch`, and a size-mismatch is not compared. The
@@ -26,8 +26,8 @@
  *
  * What this harness does carry from the plan, because it costs no pixels: the
  * two Plan 11 measurements. Its route coverage is the widest in the
- * repository — every registered story surface, not the handful of routes the
- * scenario gates visit — so it is where an undersized control on a workspace
+ * repository, every registered story surface, not the handful of routes the
+ * scenario gates visit, so it is where an undersized control on a workspace
  * nobody audits turns up.
  *
  * Env:
@@ -42,7 +42,6 @@ import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
 import type { Server } from 'node:http';
 import { STORY_SURFACES } from './registry.ts';
-import { installApiFixtures } from './fixtures/route.ts';
 import { STILLNESS_INIT, startStaticServer } from '../e2e/static-server.ts';
 import {
   MIN_TOUCH_TARGET_PX,
@@ -50,6 +49,7 @@ import {
   TOUCH_TARGET_PROBE,
   clippedContentFailures,
   reflowFailures,
+  sidewaysRailFailures,
   touchTargetFailures,
   type ReflowReport,
   type TouchTargetReport,
@@ -65,6 +65,12 @@ const WIDTHS = [320, 768, 1440] as const;
 const VIEWPORT_HEIGHT = 900;
 const PORT = Number(process.env['AUDIT_PORT'] ?? 5173);
 const DIFF_MODE = process.argv.slice(2).includes('--diff');
+/** One instant for the fixture payloads and the page clock, so a capture's
+ * timestamps and relative ages are the same on every run. */
+const AUDIT_NOW_MS = Date.parse('2026-09-24T09:30:00Z');
+process.env['TD_FIXTURE_NOW_MS'] = String(AUDIT_NOW_MS);
+// Imported after the pin: the fixtures read their clock once, at load.
+const { installApiFixtures } = await import('./fixtures/route.ts');
 
 type Theme = (typeof THEMES)[number];
 type Width = (typeof WIDTHS)[number];
@@ -89,6 +95,8 @@ interface ShotEntry {
   targets?: TouchTargetReport;
   /** Plan 11 assertions this shot failed. */
   planFailures?: string[];
+  /** `/api` requests made while on this surface that no fixture models. */
+  unmatchedRequests?: string[];
   diff?: DiffResult;
   error?: string;
 }
@@ -164,7 +172,7 @@ async function setTheme(page: Page, theme: Theme): Promise<void> {
     try {
       localStorage.setItem('td-theme', t);
     } catch {
-      /* private mode / storage disabled — dataset alone still themes */
+      /* private mode / storage disabled. Dataset alone still themes */
     }
     document.documentElement.dataset['theme'] = t;
   }, theme);
@@ -193,7 +201,7 @@ async function main(): Promise<void> {
   // The BUILT bundle, not `rsbuild dev`. Lazy route compilation under the dev
   // server emits runtime errors the release build does not have (esbuild's
   // `__name` helper reaching the page among them), and a route that throws
-  // still renders the router's accessible error boundary — which screenshots
+  // still renders the router's accessible error boundary, which screenshots
   // happily. `AUDIT_BASE_URL` still wins, for
   // auditing an already-running server on purpose.
   const preset = process.env['AUDIT_BASE_URL'];
@@ -214,6 +222,7 @@ async function main(): Promise<void> {
   let browser: Browser | null = null;
   const surfaces: SurfaceEntry[] = [];
   const pageErrors: string[] = [];
+  let unmatched: readonly string[] = [];
   let screenshotCount = 0;
 
   try {
@@ -222,7 +231,9 @@ async function main(): Promise<void> {
     // for real here. Do not pin --use-angle: that would force software even on
     // a host that later has a GPU.
     browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ deviceScaleFactor: 1 });
+    // The stillness script below only stops CSS; charts and canvas fields
+    // animate on the app's reduced-motion preference, which reads this.
+    const context = await browser.newContext({ deviceScaleFactor: 1, reducedMotion: 'reduce' });
     const page = await context.newPage();
     // A crashed route renders the router's own accessible error boundary, which
     // screenshots happily. A page error therefore
@@ -231,11 +242,12 @@ async function main(): Promise<void> {
       pageErrors.push(error.message);
       console.error(`[audit] PAGEERROR ${error.message}`);
     });
-    await installApiFixtures(page);
+    await page.clock.setFixedTime(AUDIT_NOW_MS);
+    unmatched = await installApiFixtures(page);
     // Passed as source text, not a function: tsx compiles callbacks with
     // esbuild's `keepNames`, whose `__name` helper does not exist in the page.
     // As a function this threw `__name is not defined` on every run, so the
-    // motion reset never applied and every capture was taken mid-animation —
+    // motion reset never applied and every capture was taken mid-animation.
     // silently, because nothing failed the run on a page error.
     await page.addInitScript({ content: STILLNESS_INIT });
 
@@ -254,6 +266,7 @@ async function main(): Promise<void> {
         for (const surface of STORY_SURFACES) {
           const file = `${surface.id}__${theme}__${width}.png`;
           const entry = surfaceMap.get(surface.id)!;
+          const unmatchedBefore = unmatched.length;
           try {
             await gotoSurface(page, surface.path);
             await setTheme(page, theme); // reassert after navigation
@@ -271,6 +284,7 @@ async function main(): Promise<void> {
             const planFailures = [
               ...(width === 320 ? reflowFailures(reflow, tag) : []),
               ...(width === 320 ? clippedContentFailures(reflow, tag) : []),
+              ...sidewaysRailFailures(reflow, tag),
               ...touchTargetFailures(targets, tag),
             ];
             const shot: ShotEntry = {
@@ -281,6 +295,7 @@ async function main(): Promise<void> {
               reflow,
               targets,
               planFailures,
+              unmatchedRequests: unmatched.slice(unmatchedBefore),
             };
             if (DIFF_MODE) shot.diff = diffAgainstBaseline(file, buf as Buffer);
             entry.shots.push(shot);
@@ -291,6 +306,7 @@ async function main(): Promise<void> {
                 (shot.diff ? `  diff=${shot.diff.status}` : ''),
             );
             for (const f of planFailures) console.log(`           ! ${f}`);
+            for (const r of shot.unmatchedRequests ?? []) console.log(`           ! no fixture: ${r}`);
           } catch (err) {
             entry.shots.push({ theme, width, file, bytes: 0, error: String(err) });
             console.warn(`[audit] FAILED ${file}: ${String(err)}`);
@@ -340,6 +356,7 @@ async function main(): Promise<void> {
     screenshotCount,
     expectedScreenshotCount: STORY_SURFACES.length * THEMES.length * WIDTHS.length,
     planFailureCount: planFailures.length,
+    unmatchedRequests: [...new Set(unmatched)],
     undersizedTargets: [...undersized.entries()].map(([selector, v]) => ({ selector, ...v })),
     surfaces,
   };
@@ -387,12 +404,12 @@ async function main(): Promise<void> {
 
   // THE GATE. This used to fail only on shots that could not be rendered, so a
   // run could report accessibility violations in its own summary and still exit
-  // 0 — which is what every CI runner and every reviewer reads. Recording a
+  // 0, which is what every CI runner and every reviewer reads. Recording a
   // violation is not the same as failing on one.
   //
   // Pixel drift was left behind by that same fix: every baseline really is
   // compared with pixelmatch, the changed count really is printed, and then the
-  // exit code ignored it — so a visual regression was measured, reported, and
+  // exit code ignored it, so a visual regression was measured, reported, and
   // waved through. It counts now, which is what `11a-dashboard-design.md` has
   // been claiming all along.
   const failed = surfaces.flatMap((s) => s.shots).filter((sh) => sh.error);
@@ -402,17 +419,25 @@ async function main(): Promise<void> {
   if (pageErrors.length > 0) {
     console.error(`[audit] ${pageErrors.length} page error(s)`);
   }
+  if (manifest.unmatchedRequests.length > 0) {
+    console.error(
+      `[audit] ${manifest.unmatchedRequests.length} request path(s) have no fixture, so the ` +
+        `surfaces that read them were captured against a 404 the daemon may never send:`,
+    );
+    for (const r of manifest.unmatchedRequests) console.error(`         ${r}`);
+  }
   if (diffs.length > 0) {
     console.error(`[audit] ${diffs.length} shot(s) drifted from their baseline`);
   }
   if (planFailures.length > 0) {
     console.error(
-      `[audit] ${planFailures.length} shot(s) failed a Plan 11 assertion (reflow at 320, or a touch target under ${MIN_TOUCH_TARGET_PX}x${MIN_TOUCH_TARGET_PX})`,
+      `[audit] ${planFailures.length} shot(s) failed a layout assertion (reflow at 320, a side rail scrolling sideways, or a touch target under ${MIN_TOUCH_TARGET_PX}x${MIN_TOUCH_TARGET_PX})`,
     );
   }
   if (
     failed.length > 0 ||
     pageErrors.length > 0 ||
+    manifest.unmatchedRequests.length > 0 ||
     diffs.length > 0 ||
     planFailures.length > 0
   ) {

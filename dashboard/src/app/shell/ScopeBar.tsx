@@ -1,12 +1,15 @@
 import { useEffect } from 'react';
 import { Command, Moon, Sun, X } from 'lucide-react';
 import {
+  projectRegistryPayload,
   registryAnnotation,
   registryReading,
   useProjectEntry,
+  useProjectRegistry,
 } from '../../data/query/projectRegistry.ts';
 import { cn } from '../../ui/cn';
-import { useScope } from '../../data/scope/store.ts';
+import { launchBindingCaption, useScope } from '../../data/scope/store.ts';
+import { channelNumber, type Channel } from '../channels.ts';
 
 function toggleTheme() {
   const root = document.documentElement;
@@ -15,25 +18,42 @@ function toggleTheme() {
   localStorage.setItem('td-theme', next);
 }
 
-/** Always-visible active scope (plan 11: every view preserves and displays
- * scope; transitions are explicit) rendered as the console's setting register:
- * each field is an engraved legend over a monospaced value, divided by
- * hairlines like the switch bank on an instrument front panel. */
-export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
+/**
+ * The scope/workspace register (NAVIGATION.md "Persistent regions" 3): a
+ * 52px register carrying `Project: all` or the reconciled project label with
+ * its canonical ID, the active channel and title, and the shell's own
+ * controls. Every view preserves and displays scope; transitions are
+ * explicit, the only scope control here is the one that clears it.
+ *
+ * `channel` is the route's channel, resolved by the shell (which sits inside
+ * the router) rather than read here, so the register can be rendered and
+ * tested on its own. Absent, the channel cell is simply not drawn; nothing is
+ * invented for it.
+ */
+export function ScopeBar({
+  channel,
+  onOpenPalette,
+}: {
+  channel?: Channel | null;
+  onOpenPalette?: () => void;
+}) {
   const scope = useScope((s) => s.scope);
   const selectAllProjects = useScope((s) => s.selectAllProjects);
   const reconcileScope = useScope((s) => s.reconcileScope);
+  const registry = useProjectRegistry({ enabled: scope.kind === 'all' });
+  const listing = projectRegistryPayload(registry.data);
+  const bindingCaption = scope.kind === 'all' ? launchBindingCaption(listing) : null;
   // The bounded registry read: one project by id, rather than a search through
   // a truncated listing that cannot distinguish "not registered" from "past the
   // end of the page". Its key is rooted at the registry prefix the daemon's
   // `project_registry_changed` invalidation names, so a rename or an
   // active-project switch re-runs the reconciliation below instead of leaving
-  // this — the read every write control depends on — stale until a reload.
+  // this, the read every write control depends on, stale until a reload.
   const entry = useProjectEntry(scope.kind === 'project' ? scope.projectId : null);
 
   // The one place a selected project is reconciled against the registry, for
-  // both its activation and its label. Every entry into a project scope — deep
-  // link, command palette, Remote Brain, this bar — arrives `unresolved` with
+  // both its activation and its label. Every entry into a project scope, deep
+  // link, command palette, Remote Brain, this bar, arrives `unresolved` with
   // an unverified label, and this read is what settles both. Controls consult
   // `scopeWritable`, so until this lands they report writability as unknown
   // rather than offering a write the gateway would refuse.
@@ -46,60 +66,93 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
   // lookups over the same payload are two things to keep in agreement. What
   // the bar adds is why the name may not be canonical yet.
   const annotation = scope.kind === 'project' ? registryAnnotation(entry.data) : null;
-  const projectLabel = scope.kind === 'project' ? scope.label : undefined;
   return (
-    // Every control on this bar is stretched to the bar's own height, so the
-    // bar's height IS their touch target. `h-12` is 3rem, and the root font
-    // size is 14px, so it measured 42px — 41px of content once the hairline is
-    // taken out — and put the palette, scope and theme controls under the
-    // minimum together. Sized from the token plus that hairline, so the
-    // content box lands exactly on 44. `NavRail`'s brand block matches it.
-    //
-    // A minimum rather than a height: every cell here stacks a legend over a
-    // value, so at 200% text zoom the pair is taller than 44px. Pinned to
-    // exactly 44 the bar could not take them, and the clip below finished the
-    // job — the project name and its `unverified`/`not in registry` caveat
-    // were cut off at precisely the zoom level someone would be using in order
-    // to read them.
-    <header className="flex min-h-[calc(var(--touch-target-min)+1px)] shrink-0 items-stretch border-b border-edge-subtle bg-surface-1">
+    // A minimum rather than a height: the scope cell stacks a name over its
+    // canonical ID, so at 200% text zoom the pair is taller than the register.
+    // Pinned to exactly 52 the bar could not take them, and a clip would cut
+    // off the project name and its `unverified`/`not in registry` caveat at
+    // precisely the zoom level someone would be using to read them.
+    // Below sm the scope and channel cannot share one row with the controls,
+    // so the register stacks on every page: scope first, controls beneath.
+    <header className="flex min-h-[var(--shell-register)] shrink-0 items-stretch border-b border-edge-frame bg-surface-1 max-sm:flex-wrap">
       {/* `min-w-0` without `overflow-hidden`: the horizontal containment comes
         * from `truncate` on the label itself, which shortens the name and
-        * leaves the caveat beside it readable. The clip did the same job
-        * vertically, where nothing wants it. */}
-      <div className="flex min-w-0 flex-1 items-stretch" aria-label="Active scope">
+        * leaves the caveat beside it readable. */}
+      <div className="flex min-w-0 flex-1 items-stretch max-sm:basis-full" aria-label="Active scope">
         {scope.kind === 'project' ? (
           <button
             type="button"
             onClick={selectAllProjects}
             aria-label={
               annotation
-                ? `Clear project scope ${projectLabel} · ${annotation}`
-                : `Clear project scope ${projectLabel}`
+                ? `Clear project scope ${scope.label} · ${annotation}`
+                : `Clear project scope ${scope.label}`
             }
             className={cn(
               'group flex min-w-0 flex-col justify-center gap-1 border-r border-edge-subtle px-3 text-left',
-              'bg-accent/10 hover:bg-accent/20',
+              'bg-alert/10 hover:bg-alert/20',
             )}
           >
-            <span className="td-legend text-text-secondary">Project</span>
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="td-value truncate text-xs">{projectLabel}</span>
+            <span className="flex min-w-0 items-baseline gap-1.5">
+              <span className="text-base text-text-secondary">Project:</span>
+              <span className="truncate text-base text-alert" data-scope-label>
+                {scope.label}
+              </span>
               {/* Kept out of the truncating value so a long label cannot clip
                 * the caveat away and leave the name looking confirmed. */}
               {annotation ? (
                 <span
                   data-scope-label-annotation={annotation}
-                  className="shrink-0 text-3xs text-text-secondary"
+                  className="shrink-0 text-xs text-text-secondary"
                 >
                   · {annotation}
                 </span>
               ) : null}
-              <X aria-hidden size={10} className="shrink-0 text-text-muted" />
+              <X aria-hidden size={10} className="shrink-0 self-center text-text-muted" />
+            </span>
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="td-legend">ID</span>
+              <span className="td-value truncate text-xs text-text-secondary" data-scope-id>
+                {scope.projectId}
+              </span>
             </span>
           </button>
         ) : (
-          <ScopeField label="Project" value="all" muted />
+          <span className="flex min-w-0 shrink-0 flex-col justify-center gap-1 border-r border-edge-subtle px-3 py-2">
+            <span className="flex min-w-0 items-baseline gap-1.5">
+              <span className="text-base text-text-secondary">Project:</span>
+              <span className="text-base text-alert">all</span>
+            </span>
+            {bindingCaption ? (
+              <span className="td-legend truncate" data-launch-binding>
+                {bindingCaption}
+              </span>
+            ) : null}
+            {listing?.active_project_id ? (
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="td-legend">Bound ID</span>
+                <span
+                  className="td-value truncate text-xs text-text-secondary"
+                  data-launch-binding-id
+                >
+                  {listing.active_project_id}
+                </span>
+              </span>
+            ) : null}
+          </span>
         )}
+        {channel ? (
+          <span
+            className="flex min-w-0 shrink-0 items-center gap-2 border-r border-edge-subtle px-3"
+            aria-label="Active channel"
+            data-active-channel={channel.path}
+          >
+            <span className="td-value text-2xs text-accent" data-cell="numeric">
+              {channelNumber(channel.path)}
+            </span>
+            <span className="td-title text-text-primary">{channel.label}</span>
+          </span>
+        ) : null}
         <span aria-hidden className="flex-1 border-r border-edge-subtle" />
       </div>
       <button
@@ -107,6 +160,7 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
         onClick={onOpenPalette}
         className={cn(
           'flex shrink-0 flex-col items-start justify-center gap-1 border-r border-edge-subtle px-3',
+          'max-sm:ml-auto max-sm:min-h-[var(--touch-target-min)] max-sm:border-l max-sm:border-t',
           'hover:bg-surface-2',
         )}
         aria-label="Open command palette"
@@ -121,31 +175,11 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
         type="button"
         onClick={toggleTheme}
         aria-label="Toggle theme"
-        // `w-11` was written for 44 and rendered 38.5; the glyph is unchanged.
-        className="flex w-[var(--touch-target-min)] shrink-0 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text-primary"
+        className="flex w-[var(--touch-target-min)] shrink-0 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text-primary max-sm:min-h-[var(--touch-target-min)] max-sm:border-t max-sm:border-edge-subtle"
       >
         <Sun aria-hidden size={14} className="hidden [[data-theme=light]_&]:block" />
         <Moon aria-hidden size={14} className="[[data-theme=light]_&]:hidden" />
       </button>
     </header>
-  );
-}
-
-function ScopeField({
-  label,
-  value,
-  muted,
-}: {
-  label: string;
-  value: string;
-  muted?: boolean;
-}) {
-  return (
-    <span className="flex min-w-0 shrink-0 flex-col justify-center gap-1 border-r border-edge-subtle px-3">
-      <span className="td-legend">{label}</span>
-      <span className={cn('td-value truncate text-xs', muted && 'text-text-muted')}>
-        {value}
-      </span>
-    </span>
   );
 }

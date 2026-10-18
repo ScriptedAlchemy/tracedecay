@@ -2,13 +2,37 @@ use std::path::Path;
 
 use super::*;
 
-#[hotpath::measure(label = "sessions.lcm.expand", future = true)]
+#[tracing::instrument(name = "sessions.lcm.expand", level = "trace", skip_all)]
 pub async fn expand(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     request: LcmExpandRequest,
 ) -> Result<LcmExpandResponse, LcmError> {
     match request.target {
+        LcmExpandTarget::CanonicalOccurrence { message_id } => {
+            let raw = raw::load_raw_message_by_identity(
+                conn,
+                &request.provider,
+                &request.session_id,
+                &message_id,
+            )
+            .await?
+            .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+            let (raw, range) = raw_message_with_sliced_content(raw, request.content_slice);
+            let content = raw.content.clone();
+            Ok(LcmExpandResponse {
+                kind: "raw_message".to_string(),
+                content,
+                content_range: range,
+                raw_message: Some(raw),
+                raw_message_metadata: None,
+                summary_node: None,
+                summary_sources: Vec::new(),
+                payload_ref: None,
+                from_current_session: Some(true),
+                source_pagination: None,
+            })
+        }
         LcmExpandTarget::RawMessage { store_id } => {
             let raw = raw::load_raw_message_by_store_id(conn, store_id).await?;
             // Raw store_id expansion works across sessions like hermes-lcm
@@ -27,7 +51,6 @@ pub async fn expand(
             } else {
                 externalized_ref.clone()
             };
-            crate::metrics::record_lcm_retrieval(1);
             Ok(LcmExpandResponse {
                 kind: "raw_message".to_string(),
                 content,
@@ -38,7 +61,6 @@ pub async fn expand(
                 summary_sources: Vec::new(),
                 payload_ref,
                 from_current_session: Some(from_current_session),
-                externalized_note: None,
                 source_pagination: None,
             })
         }
@@ -55,7 +77,6 @@ pub async fn expand(
                 request.source_limit,
             );
             let summary_sources = slice_summary_sources(sources, request.content_slice);
-            crate::metrics::record_lcm_retrieval(1);
             Ok(LcmExpandResponse {
                 kind: "summary_node".to_string(),
                 content,
@@ -66,7 +87,6 @@ pub async fn expand(
                 summary_sources,
                 payload_ref: None,
                 from_current_session: None,
-                externalized_note: None,
                 source_pagination: Some(source_pagination),
             })
         }
@@ -94,7 +114,6 @@ pub async fn expand(
                     || expansion.offset.saturating_add(expansion.char_count)
                         < expansion.total_char_count,
             };
-            crate::metrics::record_lcm_retrieval(1);
             Ok(LcmExpandResponse {
                 kind: "external_payload".to_string(),
                 content: expansion.content,
@@ -105,77 +124,8 @@ pub async fn expand(
                 summary_sources: Vec::new(),
                 payload_ref: Some(expansion.payload_ref),
                 from_current_session: None,
-                externalized_note: None,
                 source_pagination: None,
             })
         }
     }
-}
-
-/// True when a context block is machine noise rather than readable text: a
-/// base64/hex thinking-signature blob or comparable binary-ish payload. Such
-/// blocks never help answer a query and only waste the synthesis budget, so
-/// expand-query assembly skips them.
-///
-/// Deterministic and cheap: prose never contains an unbroken ~160-char run of
-/// pure base64/hex-alphabet characters, whereas signature blobs are exactly
-/// that. Whitespace-delimited tokens are checked so ordinary URLs or paths
-/// (which contain separators well under the threshold) are never misclassified.
-pub(super) fn is_noise_block_content(content: &str) -> bool {
-    const NOISE_TOKEN_MIN_CHARS: usize = 160;
-    let trimmed = content.trim();
-    if trimmed.len() < NOISE_TOKEN_MIN_CHARS {
-        return false;
-    }
-    trimmed
-        .split_whitespace()
-        .any(|token| token_is_signature_blob(token, NOISE_TOKEN_MIN_CHARS))
-}
-
-fn token_is_signature_blob(token: &str, min_chars: usize) -> bool {
-    if token.chars().count() < min_chars {
-        return false;
-    }
-    // Base64 / base64url / hex alphabet only. A real word or path this long
-    // would contain characters outside this set (spaces are already split off).
-    let mut has_lower = false;
-    let mut has_upper = false;
-    let mut has_digit = false;
-    for c in token.chars() {
-        if !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')) {
-            return false;
-        }
-        has_lower |= c.is_ascii_lowercase();
-        has_upper |= c.is_ascii_uppercase();
-        has_digit |= c.is_ascii_digit();
-    }
-    // Require real base64 entropy (mixed case and digits). A monotonous run of
-    // one repeated character — long padding, ASCII art, a giant single-case
-    // word — is not a signature blob and must not be dropped as noise.
-    has_lower && has_upper && has_digit
-}
-
-pub(super) fn expand_query_match_from_hit(hit: &LcmGrepHit) -> LcmExpandQueryMatch {
-    LcmExpandQueryMatch {
-        kind: hit.kind.clone(),
-        node_id: hit.node_id.clone(),
-        store_id: hit.store_id,
-        snippet: hit.snippet.clone(),
-    }
-}
-
-pub(super) fn expand_query_synthesis_prompt(
-    prompt: &str,
-    context_blocks: &[LcmExpandQueryContextBlock],
-    context_truncated: bool,
-) -> LcmExpandQuerySynthesisPrompt {
-    let system = LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT.to_string();
-    let context_json = serde_json::to_string_pretty(context_blocks).unwrap_or_else(|_| "[]".into());
-    let truncation_note = if context_truncated {
-        "\n\nNOTE: Some LCM context was truncated; pagination metadata is included in the tool response."
-    } else {
-        ""
-    };
-    let user = format!("QUESTION:\n{prompt}\n\nEXPANDED CONTEXT:\n{context_json}{truncation_note}");
-    LcmExpandQuerySynthesisPrompt { system, user }
 }

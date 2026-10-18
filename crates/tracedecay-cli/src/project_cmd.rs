@@ -1,70 +1,71 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use serde_json::{Value, json};
-use tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
-use tracedecay_application::{ProjectRegistryView, render_project_registry_view};
+use serde_json::Value;
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryContextV1, AdminCliRegistryListV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
+use tracedecay_contracts::{ProjectRegistryView, PublicCodeProject, render_project_registry_view};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-#[cfg(test)]
-use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::cli::ProjectsAction;
-use crate::commands::{ProfileOfflineAuthority, join_outcome_and_restore, take_profile_offline};
+use crate::commands::{
+    ProfileOfflineAuthority, RestoreWording, admin_cli_result, admin_cli_result_mismatch,
+    join_outcome_and_restore, registry_context, take_profile_offline, try_admit_profile_registry,
+};
 
 const MAX_LIMIT: usize = 1_000;
 
-#[hotpath::measure(label = "cli.projects.dispatch", future = true)]
+#[tracing::instrument(name = "cli.projects.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_projects_action(
+    profile: &ProfileRoot,
     action: ProjectsAction,
     assume_yes: bool,
     dry_run: bool,
 ) -> Result<()> {
     match action {
         ProjectsAction::List { limit, json } => {
-            let limit = bounded_limit(limit);
-            let payload = call_registry_admin(json!({
-                "action": "registry_list",
-                "limit": limit,
-                "query": null,
-            }))
-            .await?;
-            print_registry_list(&payload, "registered projects", json)?;
+            let listing = registry_list(profile, bounded_limit(limit), None).await?;
+            print_registry_list(listing, "registered projects", json)?;
         }
         ProjectsAction::Search { query, limit, json } => {
-            let limit = bounded_limit(limit);
-            let payload = call_registry_admin(json!({
-                "action": "registry_list",
-                "limit": limit,
-                "query": query,
-            }))
-            .await?;
-            print_registry_list(&payload, &format!("projects matching \"{query}\""), json)?;
+            let label = format!("projects matching \"{query}\"");
+            let listing = registry_list(profile, bounded_limit(limit), Some(query)).await?;
+            print_registry_list(listing, &label, json)?;
         }
         ProjectsAction::Context { selector, json } => {
-            let payload = call_registry_admin(json!({
-                "action": "registry_context",
-                "project_arg": selector,
-            }))
-            .await?;
-            if payload["status"] != "ok" {
-                return Err(TraceDecayError::Config {
-                    message: format!(
+            let context = registry_context(profile, PathBuf::from(&selector)).await?;
+            let AdminCliRegistryContextV1::Ok {
+                project,
+                aliases,
+                stores,
+                ..
+            } = &context
+            else {
+                return Err(TraceDecayError::project_route(
+                    "project_route_not_found",
+                    false,
+                    format!(
                         "registered project not found for '{selector}'; try `tracedecay projects search {selector}`"
                     ),
-                });
-            }
+                ));
+            };
             if json {
-                println!("{}", serde_json::to_string_pretty(&payload)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::to_value(&context)?)?
+                );
             } else {
-                print!("{}", render_project_context_payload(&payload));
+                print!("{}", render_project_context(project, aliases, stores));
             }
         }
         ProjectsAction::Forget {
             selector,
             keep_store,
         } => {
-            handle_projects_forget(&selector, keep_store, assume_yes, dry_run).await?;
+            handle_projects_forget(profile, &selector, keep_store, assume_yes, dry_run).await?;
         }
     }
     Ok(())
@@ -76,12 +77,13 @@ pub(crate) async fn handle_projects_action(
 ///
 /// The destructive path runs offline inside the bounded profile-offline
 /// window, so it completes even when the project's runtime is wedged in a
-/// terminal activation loop — the managed daemon service is stopped (the
+/// terminal activation loop, the managed daemon service is stopped (the
 /// supervisor bounds the stop) and restored afterward. The preview runs
 /// through the daemon like every other read-only `projects` subcommand and
 /// never stops the service.
-#[hotpath::measure(label = "cli.projects.forget", future = true)]
+#[tracing::instrument(name = "cli.projects.forget", level = "trace", skip_all)]
 async fn handle_projects_forget(
+    profile: &ProfileRoot,
     selector: &str,
     keep_store: bool,
     assume_yes: bool,
@@ -89,7 +91,7 @@ async fn handle_projects_forget(
 ) -> Result<()> {
     let selector_arg = forget_selector_argument(selector)?;
     if dry_run {
-        return preview_projects_forget(selector, &selector_arg, keep_store).await;
+        return preview_projects_forget(profile, selector, &selector_arg, keep_store).await;
     }
     if !assume_yes {
         return Err(TraceDecayError::Config {
@@ -100,8 +102,8 @@ async fn handle_projects_forget(
             ),
         });
     }
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-    let profile_offline = take_profile_offline(&profile_root, "projects forget")?;
+    let profile_root = profile.data_dir().to_path_buf();
+    let profile_offline = take_profile_offline(profile, &profile_root, "projects forget")?;
     let outcome = forget_under_profile_offline(
         selector,
         &selector_arg,
@@ -111,7 +113,12 @@ async fn handle_projects_forget(
     )
     .await;
     let restore = profile_offline.finish();
-    join_outcome_and_restore("projects forget", outcome, restore)
+    join_outcome_and_restore(
+        RestoreWording::ManagedService,
+        "projects forget",
+        outcome,
+        restore,
+    )
 }
 
 /// The destructive forget body, run inside the profile-offline window. The
@@ -129,8 +136,7 @@ async fn forget_under_profile_offline(
         profile_root,
         "projects forget",
     )?;
-    let Some(registry) = ProfileRegistryMaintenanceRuntime::try_open_existing(profile_root).await?
-    else {
+    let Some(registry) = try_admit_profile_registry(profile_root).await? else {
         return Err(TraceDecayError::Config {
             message: "no profile registry exists; there is nothing to forget".to_string(),
         });
@@ -165,27 +171,26 @@ async fn forget_under_profile_offline(
 /// Read-only forget preview, brokered through the daemon registry like the
 /// other `projects` reads. Prints exactly what a confirmed run would remove.
 async fn preview_projects_forget(
+    profile: &ProfileRoot,
     selector: &str,
     selector_arg: &Path,
     keep_store: bool,
 ) -> Result<()> {
-    let payload = call_registry_admin(json!({
-        "action": "registry_context",
-        "project_arg": selector_arg,
-    }))
-    .await?;
-    if payload["status"] != "ok" {
+    let AdminCliRegistryContextV1::Ok {
+        project,
+        aliases,
+        stores,
+        ..
+    } = registry_context(profile, selector_arg.to_path_buf()).await?
+    else {
         return Err(forget_selector_not_found(selector));
-    }
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-    let project = &payload["project"];
+    };
+    let profile_root = profile.data_dir().to_path_buf();
     println!(
         "Would forget project {} ({}).",
-        project["project_id"].as_str().unwrap_or("-"),
-        project["display_root"].as_str().unwrap_or("-")
+        project.project_id, project.display_root
     );
-    let alias_count = payload["aliases"].as_array().map_or(0, Vec::len);
-    let stores = payload["stores"].as_array().cloned().unwrap_or_default();
+    let alias_count = aliases.len();
     println!(
         "  would retire the registry identity row, {alias_count} alias(es), and {} store \
          instance(s)",
@@ -238,55 +243,62 @@ fn bounded_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_LIMIT)
 }
 
-#[hotpath::measure(label = "cli.projects.render")]
-fn print_registry_list(payload: &Value, label: &str, json_output: bool) -> Result<()> {
+#[tracing::instrument(name = "cli.projects.render", level = "trace", skip_all)]
+fn print_registry_list(
+    listing: AdminCliRegistryListV1,
+    label: &str,
+    json_output: bool,
+) -> Result<()> {
     if json_output {
-        println!("{}", serde_json::to_string_pretty(payload)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::to_value(&listing)?)?
+        );
         return Ok(());
     }
-    let view: ProjectRegistryView = serde_json::from_value(json!({
-        "summary": payload["summary"],
-        "project_tree": payload["project_tree"],
-    }))?;
+    let AdminCliRegistryListV1::Ok {
+        summary,
+        project_tree,
+        ..
+    } = listing;
+    let view = ProjectRegistryView {
+        summary,
+        project_tree,
+    };
     print!("{}", render_project_registry_view(label, &view));
     Ok(())
 }
 
-fn render_project_context_payload(payload: &Value) -> String {
+/// Renders the plain-text `projects context` view. It never prints a git
+/// remote URL, which can embed credentials (`https://user:token@host/...`);
+/// `PublicCodeProject` carries none.
+fn render_project_context(
+    project: &PublicCodeProject,
+    aliases: &[Value],
+    stores: &[Value],
+) -> String {
     let mut out = String::new();
-    let project = &payload["project"];
-    let _ = writeln!(
-        out,
-        "Project: {}",
-        project["project_id"].as_str().unwrap_or("-")
-    );
-    let _ = writeln!(
-        out,
-        "root: {}",
-        project["display_root"].as_str().unwrap_or("-")
-    );
-    if let Some(branch) = project["default_branch"].as_str() {
+    let _ = writeln!(out, "Project: {}", project.project_id);
+    let _ = writeln!(out, "root: {}", project.display_root);
+    if let Some(branch) = &project.default_branch {
         let _ = writeln!(out, "default branch: {branch}");
     }
-    if let Some(git_common_dir) = project["git_common_dir"].as_str() {
+    if let Some(branch) = &project.head_branch {
+        let _ = writeln!(out, "head branch: {branch}");
+    }
+    if let Some(git_common_dir) = &project.git_common_dir {
         let _ = writeln!(out, "git common dir: {git_common_dir}");
     }
-    let _ = writeln!(out, "last seen: {}", project["last_seen_at"]);
+    let _ = writeln!(out, "last seen: {}", project.last_seen_at);
 
-    if let Some(aliases) = payload["aliases"]
-        .as_array()
-        .filter(|aliases| !aliases.is_empty())
-    {
+    if !aliases.is_empty() {
         out.push_str("\nAliases:\n");
         for alias in aliases {
             let _ = writeln!(out, "  {}", alias["alias_path"].as_str().unwrap_or("-"));
         }
     }
 
-    if let Some(stores) = payload["stores"]
-        .as_array()
-        .filter(|stores| !stores.is_empty())
-    {
+    if !stores.is_empty() {
         out.push_str("\nStores:\n");
         for store_context in stores {
             let store = &store_context["store"];
@@ -305,10 +317,9 @@ fn render_project_context_payload(payload: &Value) -> String {
             {
                 let _ = writeln!(
                     out,
-                    "    scope {} branch={} db={} writable={}",
+                    "    scope {} branch={} writable={}",
                     scope["graph_scope_id"].as_str().unwrap_or("-"),
                     scope["branch_name"].as_str().unwrap_or("-"),
-                    scope["db_relpath"].as_str().unwrap_or("-"),
                     scope["writable"].as_bool().unwrap_or(false)
                 );
             }
@@ -329,74 +340,24 @@ fn render_project_context_payload(payload: &Value) -> String {
     out
 }
 
-#[hotpath::measure(label = "cli.projects.request", future = true)]
-async fn call_registry_admin(arguments: Value) -> Result<Value> {
+/// One page of the profile registry; the cwd's project, when there is one,
+/// is marked active.
+#[tracing::instrument(name = "cli.projects.request", level = "trace", skip_all)]
+async fn registry_list(
+    profile: &ProfileRoot,
+    limit: usize,
+    query: Option<String>,
+) -> Result<AdminCliRegistryListV1> {
     let cwd = std::env::current_dir()?;
-    let project_root = tracedecay::config::discover_project_root(&cwd);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)?;
-    let result =
-        tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
-            .await?;
-    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
-}
-
-/// Renders the plain-text `projects context` view. Deliberately omits
-/// `project.git_remote_url` — a git remote URL can embed credentials
-/// (`https://user:token@host/...`), so it must never be printed here or
-/// serialized into the JSON view (see `PublicCodeProject`).
-#[cfg(test)]
-fn render_project_context_text(context: &ProjectRegistryContext) -> String {
-    let mut out = String::new();
-    let project = &context.project;
-    let _ = writeln!(out, "Project: {}", project.project_id);
-    let _ = writeln!(out, "root: {}", project.display_root);
-    if let Some(branch) = &project.default_branch {
-        let _ = writeln!(out, "default branch: {branch}");
+    let request = AdminCliSurfaceRequestV1::RegistryList {
+        limit,
+        query,
+        project_arg: profile.discover_project_root(&cwd),
+    };
+    match admin_cli_result(profile, None, request).await? {
+        AdminCliResultV1::RegistryList(listing) => Ok(listing),
+        _ => Err(admin_cli_result_mismatch("registry_list")),
     }
-    if let Some(git_common_dir) = &project.git_common_dir {
-        let _ = writeln!(out, "git common dir: {git_common_dir}");
-    }
-    let _ = writeln!(out, "last seen: {}", project.last_seen_at);
-
-    if !context.aliases.is_empty() {
-        out.push('\n');
-        out.push_str("Aliases:\n");
-        for alias in &context.aliases {
-            let _ = writeln!(out, "  {}", alias.alias_path);
-        }
-    }
-
-    if !context.stores.is_empty() {
-        out.push('\n');
-        out.push_str("Stores:\n");
-        for store_context in &context.stores {
-            let store = &store_context.store;
-            let _ = writeln!(
-                out,
-                "  {} [{} / {}] {}",
-                store.store_id, store.store_kind, store.storage_mode, store.store_relpath
-            );
-            for scope in &store_context.graph_scopes {
-                let _ = writeln!(
-                    out,
-                    "    scope {} branch={} db={} writable={}",
-                    scope.graph_scope_id, scope.branch_name, scope.db_relpath, scope.writable
-                );
-            }
-            for artifact in &store_context.artifacts {
-                let size = artifact
-                    .size_bytes
-                    .map_or_else(|| "-".to_string(), |bytes| bytes.to_string());
-                let _ = writeln!(
-                    out,
-                    "    artifact {} path={} size={}",
-                    artifact.artifact_kind, artifact.relpath, size
-                );
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -404,8 +365,8 @@ mod tests {
     use super::*;
     use tracedecay_dashboard_api::project_registry::PublicProjectRegistryContext;
     use tracedecay_global_db::{
-        CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectStoreContext,
-        StoreArtifactRecord, StoreInstanceRecord,
+        CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectRegistryContext,
+        ProjectStoreContext, StoreArtifactRecord, StoreInstanceRecord,
     };
 
     const CREDENTIAL_REMOTE_URL: &str =
@@ -445,7 +406,6 @@ mod tests {
                     project_id: "proj_test".to_string(),
                     store_id: "store:test".to_string(),
                     branch_name: "main".to_string(),
-                    db_relpath: "projects/proj_test/branches/main.db".to_string(),
                     parent_scope_id: None,
                     last_synced_at: Some(230),
                     writable: true,
@@ -465,7 +425,10 @@ mod tests {
     #[test]
     fn plain_text_context_omits_credential_bearing_remote_url() {
         let context = context_with_credential_remote();
-        let text = render_project_context_text(&context);
+        let public = PublicProjectRegistryContext::new(&context, None);
+        let aliases = vec![serde_json::to_value(&context.aliases[0]).unwrap()];
+        let stores = vec![serde_json::to_value(&context.stores[0]).unwrap()];
+        let text = render_project_context(&public.project, &aliases, &stores);
 
         assert!(
             !text.contains("sekret-token"),
@@ -512,18 +475,39 @@ mod tests {
     fn daemon_context_payload_preserves_registry_details() {
         let context = context_with_credential_remote();
         let public = PublicProjectRegistryContext::new(&context, None);
-        let payload = serde_json::json!({
-            "project": public.project,
-            "aliases": context.aliases,
-            "stores": context.stores,
-        });
+        let aliases = vec![serde_json::to_value(&context.aliases[0]).unwrap()];
+        let stores = vec![serde_json::to_value(&context.stores[0]).unwrap()];
 
-        let text = render_project_context_payload(&payload);
+        let text = render_project_context(&public.project, &aliases, &stores);
 
         assert!(text.contains("Aliases:\n  /repo"));
         assert!(text.contains("Stores:\n  store:test [code_project / profile_sharded]"));
         assert!(text.contains("scope store:test:branch:main branch=main"));
         assert!(text.contains("artifact graph_db path=projects/proj_test/branches/main.db"));
         assert!(!text.contains("sekret-token"));
+    }
+
+    #[test]
+    fn daemon_context_payload_names_default_and_head_branches_apart() {
+        let project = PublicCodeProject {
+            project_id: "proj_test".to_owned(),
+            label: "repo".to_owned(),
+            project_root: "/repo".to_owned(),
+            display_root: "/repo".to_owned(),
+            canonical_root: "/repo".to_owned(),
+            git_common_dir: None,
+            default_branch: Some("main".to_owned()),
+            head_branch: Some("served-head".to_owned()),
+            created_at: 100,
+            last_seen_at: 200,
+            is_active: None,
+        };
+
+        let text = render_project_context(&project, &[], &[]);
+
+        assert!(
+            text.contains("default branch: main\nhead branch: served-head\n"),
+            "{text}"
+        );
     }
 }

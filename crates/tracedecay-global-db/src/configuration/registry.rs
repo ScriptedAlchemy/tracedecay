@@ -3,37 +3,33 @@
 use std::collections::BTreeMap;
 
 use thiserror::Error;
-use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
     AnalyzerSettingsV1, CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     CodeIndexWorkerSelectionV1, ConfigurationValueKindV1, ConfigurationValueV1,
-    ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY,
-    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+    ContextScoutSettingsV1, DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY,
+    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
+    PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY,
+    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
     SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
     USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
-    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1,
+    safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
-use tracedecay_semantic_contracts::SemanticConfig;
-#[cfg(test)]
-use tracedecay_semantic_contracts::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticProfileSelection, SemanticResourceCeilings,
-};
+use tracedecay_domain::{DomainError, validate_index_path_patterns};
 
 /// Canonical default for configured-tier proximity warnings.
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
@@ -41,7 +37,7 @@ pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 6;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 7;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -64,31 +60,17 @@ pub enum ConfigurationRegistryError {
         maximum: u64,
         actual: u64,
     },
-    #[error("setting {key} payload is invalid: {reason}")]
-    InvalidSettingPayload {
+    #[error("setting {key} pattern '{pattern}' is invalid: {message}")]
+    InvalidPathPattern {
         key: SettingKey,
-        reason: InvalidSettingPayloadReason,
+        pattern: String,
+        message: String,
     },
     #[error("setting {key} cannot be written in layer {layer:?}")]
     InvalidLayer {
         key: SettingKey,
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1,
     },
-}
-
-/// Static, field-level reason a typed setting payload was refused.
-///
-/// Variants never carry caller-supplied text, paths, or model ids.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum InvalidSettingPayloadReason {
-    #[error("malformed json")]
-    MalformedJson,
-    #[error("unknown field")]
-    UnknownField,
-    #[error("invalid artifact_digest")]
-    InvalidArtifactDigest,
-    #[error("invalid payload")]
-    InvalidPayload,
 }
 
 /// Immutable mapping of every supported setting to its typed definition.
@@ -192,6 +174,21 @@ impl ConfigurationRegistry {
             restart_requirement: RestartRequirementV1::None,
             deprecation: DeprecationStateV1::Active,
         })?;
+        // On-demand LCM summarization launches a host CLI only through this
+        // explicit binding; the unconfigured default keeps compaction pending
+        // rather than resolving a binary from the daemon's environment.
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::LcmSummarizerExecutables,
+            default_value: ConfigurationValueV1::LcmSummarizerExecutables(
+                LcmSummarizerExecutablesV1::unconfigured(),
+            ),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1)?,
             schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
@@ -204,31 +201,10 @@ impl ConfigurationRegistry {
             restart_requirement: RestartRequirementV1::None,
             deprecation: DeprecationStateV1::Active,
         })?;
-        let semantic_default = SemanticConfig::default();
-        semantic_default.validate().map_err(|_| {
-            ConfigurationRegistryError::InvalidDefinition(DomainError::NonCanonical {
-                field: "semantic runtime default",
-            })
-        })?;
-        let semantic_default = serde_json::to_string(&semantic_default).map_err(|_| {
-            ConfigurationRegistryError::InvalidDefinition(DomainError::NonCanonical {
-                field: "semantic runtime default encoding",
-            })
-        })?;
-        registry.register(SettingDefinitionV1 {
-            key: setting_key(SEMANTIC_RUNTIME_SETTING_KEY)?,
-            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
-            value_kind: ConfigurationValueKindV1::Text,
-            default_value: ConfigurationValueV1::Text(semantic_default),
-            sensitivity: SettingSensitivityV1::Sensitive,
-            scope: SettingScopeV1::Project,
-            restart_requirement: RestartRequirementV1::AnalyzerRestart,
-            deprecation: DeprecationStateV1::Active,
-        })?;
         register_project_settings(&mut registry)?;
         let expected = CONFIGURATION_SETTING_KEYS_V1
             .iter()
-            .filter(|key| **key != USER_CODE_INDEX_WORKERS_SETTING_KEY)
+            .filter(|key| !PROFILE_SETTING_KEYS_V1.contains(key))
             .map(|key| setting_key(key))
             .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
         let actual = registry
@@ -246,14 +222,30 @@ impl ConfigurationRegistry {
         Ok(registry)
     }
 
-    /// Build the exact profile-session registry for the daemon-wide code-index
-    /// worker selection. This setting must be available before any project is
-    /// opened, so it cannot share the project-session snapshot authority.
-    pub fn profile_code_index_workers() -> Result<Self, ConfigurationRegistryError> {
+    /// Build the exact profile-session registry of every setting in
+    /// [`PROFILE_SETTING_KEYS_V1`]. These settings resolve before and without
+    /// any project, so they cannot share a project snapshot authority.
+    pub fn profile() -> Result<Self, ConfigurationRegistryError> {
         let mut registry = Self {
             definitions: BTreeMap::new(),
         };
         registry.register(code_index_worker_definition()?)?;
+        register_profile_scalar_settings(&mut registry)?;
+        Ok(registry)
+    }
+
+    /// A registry of exactly `definitions`, for fixtures that reproduce a
+    /// store an earlier registry wrote.
+    #[cfg(test)]
+    pub(crate) fn from_definitions(
+        definitions: impl IntoIterator<Item = SettingDefinitionV1>,
+    ) -> Result<Self, ConfigurationRegistryError> {
+        let mut registry = Self {
+            definitions: BTreeMap::new(),
+        };
+        for definition in definitions {
+            registry.register(definition)?;
+        }
         Ok(registry)
     }
 
@@ -334,8 +326,35 @@ impl ConfigurationRegistry {
                 });
             }
         }
-        if key.as_str() == SEMANTIC_RUNTIME_SETTING_KEY {
-            validate_semantic_runtime_payload(key, value)?;
+        Ok(())
+    }
+
+    /// [`Self::validate_value`] plus the checks that gate only a new write.
+    ///
+    /// Stored snapshots are revalidated with `validate_value` on every read,
+    /// so a rule that may tighten across releases must not live there: an
+    /// `index.exclude.v1` pattern an earlier release accepted has to keep
+    /// loading (the runtime pin leaves it unapplied and reports it as a
+    /// setting finding) while a new write of it is refused.
+    pub fn validate_written_value(
+        &self,
+        key: &SettingKey,
+        value: &ConfigurationValueV1,
+    ) -> Result<(), ConfigurationRegistryError> {
+        self.validate_value(key, value)?;
+        if let ConfigurationValueV1::StringList(patterns) = value
+            && matches!(
+                key.as_str(),
+                INDEX_EXCLUDE_SETTING_KEY | INDEX_INCLUDE_SETTING_KEY
+            )
+        {
+            validate_index_path_patterns(patterns).map_err(|error| {
+                ConfigurationRegistryError::InvalidPathPattern {
+                    key: key.clone(),
+                    pattern: error.pattern,
+                    message: error.message,
+                }
+            })?;
         }
         Ok(())
     }
@@ -389,10 +408,20 @@ fn register_project_stored_user_profile_settings(
         scope: SettingScopeV1::UserProfile,
         restart_requirement: RestartRequirementV1::None,
         deprecation: DeprecationStateV1::Active,
-    })?;
+    })
+}
+
+fn register_profile_scalar_settings(
+    registry: &mut ConfigurationRegistry,
+) -> Result<(), ConfigurationRegistryError> {
     for (key, default_value, restart_requirement) in [
         (
             USER_UPLOAD_ENABLED_SETTING_KEY,
+            ConfigurationValueV1::Boolean(false),
+            RestartRequirementV1::None,
+        ),
+        (
+            USER_REPEATED_QUERY_HINTS_SETTING_KEY,
             ConfigurationValueV1::Boolean(false),
             RestartRequirementV1::None,
         ),
@@ -443,8 +472,6 @@ struct ProjectDefaults {
     max_file_size: u64,
     extract_docstrings: bool,
     track_call_sites: bool,
-    git_ignore: bool,
-    diagnostics_prewarm: bool,
     native_graph_activation: bool,
     telemetry_timings: bool,
     sync: SyncDefaults,
@@ -465,7 +492,6 @@ struct SyncDefaults {
     full_sync_escalation_files: usize,
     max_concurrent_syncs: usize,
     branch_gc_days: u64,
-    orphan_db_gc_days: u64,
     auto_init: bool,
     auto_track_pr_branches: bool,
     auto_track_pr_poll_secs: u64,
@@ -487,7 +513,6 @@ impl Default for SyncDefaults {
             full_sync_escalation_files: 500,
             max_concurrent_syncs: 2,
             branch_gc_days: 14,
-            orphan_db_gc_days: 7,
             auto_init: true,
             auto_track_pr_branches: false,
             auto_track_pr_poll_secs: 300,
@@ -500,7 +525,6 @@ impl Default for ProjectDefaults {
         let mut exclude: Vec<String> = vec![
             ".git/**".to_string(),
             ".tracedecay/**".to_string(),
-            "bin/**".to_string(),
             "**/*.min.*".to_string(),
         ];
         for segment in tracedecay_runtime_core::config::GENERATED_DIR_SEGMENTS {
@@ -513,8 +537,6 @@ impl Default for ProjectDefaults {
             max_file_size: 1_048_576,
             extract_docstrings: true,
             track_call_sites: true,
-            git_ignore: true,
-            diagnostics_prewarm: false,
             native_graph_activation: true,
             telemetry_timings: true,
             sync: SyncDefaults::default(),
@@ -558,18 +580,6 @@ fn register_project_settings(
             ConfigurationValueV1::Boolean(defaults.track_call_sites),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            INDEX_GIT_IGNORE_SETTING_KEY,
-            ConfigurationValueV1::Boolean(defaults.git_ignore),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            DIAGNOSTICS_PREWARM_SETTING_KEY,
-            ConfigurationValueV1::Boolean(defaults.diagnostics_prewarm),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::None,
         ),
         (
             INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
@@ -656,12 +666,6 @@ fn register_project_settings(
             RestartRequirementV1::DaemonRestart,
         ),
         (
-            SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(sync.orphan_db_gc_days),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
             SYNC_AUTO_INIT_SETTING_KEY,
             ConfigurationValueV1::Boolean(sync.auto_init),
             SettingSensitivityV1::Public,
@@ -709,62 +713,6 @@ fn setting_key(value: &str) -> Result<SettingKey, ConfigurationRegistryError> {
     Ok(SettingKey::new(value)?)
 }
 
-fn validate_semantic_runtime_payload(
-    key: &SettingKey,
-    value: &ConfigurationValueV1,
-) -> Result<(), ConfigurationRegistryError> {
-    let ConfigurationValueV1::Text(payload) = value else {
-        return Err(ConfigurationRegistryError::ValueKindMismatch {
-            key: key.clone(),
-            expected: ConfigurationValueKindV1::Text,
-            actual: value.kind(),
-        });
-    };
-    let parsed = serde_json::from_str::<SemanticConfig>(payload).map_err(|error| {
-        ConfigurationRegistryError::InvalidSettingPayload {
-            key: key.clone(),
-            reason: classify_semantic_json_error(&error),
-        }
-    })?;
-    if semantic_config_has_invalid_artifact_digest(&parsed) {
-        return Err(ConfigurationRegistryError::InvalidSettingPayload {
-            key: key.clone(),
-            reason: InvalidSettingPayloadReason::InvalidArtifactDigest,
-        });
-    }
-    parsed
-        .validate()
-        .map_err(|_| ConfigurationRegistryError::InvalidSettingPayload {
-            key: key.clone(),
-            reason: InvalidSettingPayloadReason::InvalidPayload,
-        })
-}
-
-fn classify_semantic_json_error(error: &serde_json::Error) -> InvalidSettingPayloadReason {
-    if error.is_syntax() || error.is_eof() {
-        return InvalidSettingPayloadReason::MalformedJson;
-    }
-    if error.is_data() && error.to_string().starts_with("unknown field") {
-        return InvalidSettingPayloadReason::UnknownField;
-    }
-    if error.is_data() {
-        InvalidSettingPayloadReason::InvalidPayload
-    } else {
-        InvalidSettingPayloadReason::MalformedJson
-    }
-}
-
-fn semantic_config_has_invalid_artifact_digest(config: &SemanticConfig) -> bool {
-    config
-        .active_profile
-        .as_ref()
-        .into_iter()
-        .chain(config.rollback_profile.as_ref())
-        .any(|profile| {
-            !tracedecay_domain::canonical_text::is_lowercase_hex(&profile.artifact_digest, 64)
-        })
-}
-
 #[cfg(test)]
 mod proximity_threshold_tests {
     use super::*;
@@ -807,15 +755,120 @@ mod proximity_threshold_tests {
 }
 
 #[cfg(test)]
+mod index_path_pattern_tests {
+    use super::*;
+
+    /// A stored pattern an earlier release never compiled must keep loading
+    /// while a new write of it is refused.
+    #[test]
+    fn a_malformed_index_pattern_loads_but_cannot_be_written() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).expect("key");
+        let value = ConfigurationValueV1::StringList(vec!["src/[abc".to_owned()]);
+
+        assert!(registry.validate_value(&key, &value).is_ok());
+        assert!(matches!(
+            registry.validate_written_value(&key, &value),
+            Err(ConfigurationRegistryError::InvalidPathPattern { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod released_setting_keys_tests {
+    use super::*;
+    use tracedecay_domain::configuration::RETIRED_CORE_SETTING_KEYS_V1;
+
+    /// Every setting key a published release persisted, as literals so that
+    /// removing a key constant cannot silently shrink this history. Append a
+    /// key here when it first ships; never delete one.
+    const RELEASED_SETTING_KEYS: &[&str] = &[
+        "analyzer.settings.v1",
+        "automation.settings.v1",
+        "context_scout.settings.v1",
+        "diagnostics.prewarm.v1",
+        "feedback.proximity.risk_threshold",
+        "index.exclude.v1",
+        "index.extract_docstrings.v1",
+        "index.git_ignore.v1",
+        "index.include.v1",
+        "index.max_file_size.v1",
+        "index.native_graph_activation.v1",
+        "index.track_call_sites.v1",
+        "lcm.summarizer_executables.v1",
+        "scope.access_rules.v1",
+        "scope.source_bindings.v1",
+        "semantic.runtime.v1",
+        "sync.auto_init.v1",
+        "sync.auto_track_pr_branches.v1",
+        "sync.auto_track_pr_poll_secs.v1",
+        "sync.auto_watch.v1",
+        "sync.backstop_interval_mins.v1",
+        "sync.branch_gc_days.v1",
+        "sync.full_sync_escalation_files.v1",
+        "sync.max_concurrent_syncs.v1",
+        "sync.orphan_db_gc_days.v1",
+        "sync.read_cooldown_secs.v1",
+        "sync.read_refresh.v1",
+        "sync.session_start_stale_threshold_secs.v1",
+        "sync.session_start_sync.v1",
+        "sync.watch_debounce_ms.v1",
+        "sync.watch_linked_worktrees.v1",
+        "sync.watch_max_delay_ms.v1",
+        "sync.watch_max_projects.v1",
+        "telemetry.timings.v1",
+        "user.code_index_workers.v1",
+        "user.extraction_timeout_secs.v1",
+        "user.upload_enabled.v1",
+        "user.watcher_debounce_ms.v1",
+        "user.work_expertise_consent.v1",
+        "work.executable_bindings.v1",
+        "work.expertise_consent.v1",
+        "work.topology_policy.v1",
+    ];
+
+    /// A released key that is neither registered nor retired would turn every
+    /// persisted snapshot carrying it into a configuration reset on open. A
+    /// key the profile store took over is retired from project snapshots.
+    #[test]
+    fn every_released_setting_key_is_registered_or_retired() {
+        let core = ConfigurationRegistry::core().expect("core registry");
+        let profile = ConfigurationRegistry::profile().expect("profile registry");
+        for raw_key in RELEASED_SETTING_KEYS {
+            let key = SettingKey::new(*raw_key).expect("key");
+            let in_core = core.definition(&key).is_ok();
+            let in_profile = profile.definition(&key).is_ok();
+            let retired = RETIRED_CORE_SETTING_KEYS_V1.contains(raw_key);
+            assert!(
+                !(in_core && (in_profile || retired)) && (in_core || in_profile || retired),
+                "released setting {raw_key} must be exactly one of core-registered or retired \
+                 from core (core: {in_core}, profile: {in_profile}, retired: {retired})"
+            );
+        }
+        for raw_key in RETIRED_CORE_SETTING_KEYS_V1 {
+            assert!(
+                RELEASED_SETTING_KEYS.contains(raw_key),
+                "retired setting {raw_key} must record a released key"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod user_profile_settings_tests {
     use super::*;
 
     #[test]
     fn editable_profile_settings_are_registered_with_exact_scope_and_restart_semantics() {
-        let registry = ConfigurationRegistry::core().expect("registry");
+        let registry = ConfigurationRegistry::profile().expect("registry");
         for (raw_key, kind, restart) in [
             (
                 USER_UPLOAD_ENABLED_SETTING_KEY,
+                ConfigurationValueKindV1::Boolean,
+                RestartRequirementV1::None,
+            ),
+            (
+                USER_REPEATED_QUERY_HINTS_SETTING_KEY,
                 ConfigurationValueKindV1::Boolean,
                 RestartRequirementV1::None,
             ),
@@ -849,7 +902,6 @@ mod user_profile_settings_tests {
 
     #[test]
     fn code_index_workers_default_is_automatic_and_zero_exact_is_denied() {
-        assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 6);
         let key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).expect("key");
         let project_registry = ConfigurationRegistry::core().expect("project registry");
         assert!(matches!(
@@ -857,11 +909,18 @@ mod user_profile_settings_tests {
             Err(ConfigurationRegistryError::UnknownSetting(_))
         ));
 
-        let registry =
-            ConfigurationRegistry::profile_code_index_workers().expect("profile registry");
-        assert_eq!(registry.definitions().count(), 1);
+        let registry = ConfigurationRegistry::profile().expect("profile registry");
+        assert_eq!(
+            registry
+                .definitions()
+                .map(|definition| definition.key.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            PROFILE_SETTING_KEYS_V1.iter().copied().collect(),
+            "the profile route must send exactly the keys the profile store registers"
+        );
         let definition = registry.definition(&key).expect("definition");
 
+        assert_eq!(definition.schema_revision, 7);
         assert_eq!(definition.scope, SettingScopeV1::UserProfile);
         assert_eq!(
             definition.value_kind,
@@ -877,282 +936,27 @@ mod user_profile_settings_tests {
             definition.restart_requirement,
             RestartRequirementV1::DaemonRestart
         );
-        assert!(
-            registry
-                .validate_value(
-                    &key,
-                    &ConfigurationValueV1::CodeIndexWorkerSelection(
-                        CodeIndexWorkerSelectionV1::Exact { workers: 0 },
-                    ),
-                )
-                .is_err()
-        );
-    }
-}
-
-#[cfg(test)]
-mod automation_defaults_tests {
-    use super::*;
-    use tracedecay_domain::configuration::AutomationBackendV1;
-
-    #[test]
-    fn fresh_snapshot_resolves_the_active_automation_default() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).expect("automation key");
-        let definition = registry.definition(&key).expect("automation definition");
-        let ConfigurationValueV1::AutomationSettings(settings) = &definition.default_value else {
-            panic!("automation registry entry must retain its typed value");
-        };
-
-        assert!(settings.enabled);
-        assert_eq!(settings.backend, AutomationBackendV1::CodexAppServer);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert!(settings.tasks.memory_curator.enabled);
-        assert!(settings.tasks.session_reflector.enabled);
-        assert!(settings.tasks.skill_writer.enabled);
-    }
-}
-
-#[cfg(test)]
-mod sync_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn linked_worktree_watching_requires_explicit_project_opt_in() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let key = SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).expect("setting key");
-        let definition = registry.definition(&key).expect("setting definition");
-
-        assert_eq!(
-            definition.default_value,
-            ConfigurationValueV1::Boolean(false)
-        );
-        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Boolean);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
-        assert_eq!(
-            definition.restart_requirement,
-            RestartRequirementV1::DaemonRestart
-        );
-    }
-
-    #[test]
-    fn orphan_database_retention_has_one_exact_project_default() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let key = SettingKey::new(SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY).expect("setting key");
-        let definition = registry.definition(&key).expect("setting definition");
-
-        assert_eq!(definition.default_value, ConfigurationValueV1::Unsigned(7));
-        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Unsigned);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
-        assert_eq!(
-            definition.restart_requirement,
-            RestartRequirementV1::DaemonRestart
-        );
-        assert_eq!(
-            CONFIGURATION_SETTING_KEYS_V1
-                .iter()
-                .filter(|candidate| **candidate == SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY)
-                .count(),
-            1
-        );
-    }
-}
-
-#[cfg(test)]
-mod work_expertise_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn expertise_consent_defaults_are_disabled_at_both_required_scopes() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-
-        for (raw_key, expected_scope) in [
-            (
-                USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-                SettingScopeV1::UserProfile,
-            ),
-            (
-                PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-                SettingScopeV1::Project,
-            ),
-        ] {
-            let definition = registry
-                .definition(&SettingKey::new(raw_key).expect("setting key"))
-                .expect("setting definition");
-            assert_eq!(definition.scope, expected_scope);
-            assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
-            assert_eq!(definition.restart_requirement, RestartRequirementV1::None);
-            assert_eq!(
-                definition.default_value,
-                ConfigurationValueV1::WorkExpertiseConsent(WorkExpertiseConsentV1::disabled())
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod context_scout_tests {
-    use super::*;
-    use tracedecay_domain::configuration::{
-        ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
-    };
-
-    #[test]
-    fn stock_context_scout_configuration_is_explicitly_disabled() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let definition = registry
-            .definition(&SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY).unwrap())
-            .unwrap();
-        let ConfigurationValueV1::ContextScoutSettings(settings) = &definition.default_value else {
-            panic!("Context Scout registry entry must retain its typed value");
-        };
-        assert_eq!(settings.state, ContextScoutConfigurationStateV1::Disabled);
-        assert_eq!(
-            settings.mode,
-            ContextScoutConfigurationModeV1::Deterministic
-        );
-        assert_eq!(settings.model_path, None);
-        settings.validate().unwrap();
-    }
-}
-
-#[cfg(test)]
-mod semantic_runtime_payload_tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use tracedecay_domain::ManifestDigest;
-    use tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES;
-
-    fn semantic_runtime_key() -> SettingKey {
-        SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).expect("semantic runtime key")
-    }
-
-    fn realistic_activation_config() -> SemanticConfig {
-        let artifact_digest = "ab".repeat(32);
-        SemanticConfig {
-            selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
-            auto_download: true,
-            active_profile: Some(SemanticProfileSelection {
-                profile_id: "jina-embeddings-v2-base-code".to_owned(),
-                accepted_profile_digest: ManifestDigest::new(format!("sha256:{artifact_digest}"))
-                    .expect("accepted profile digest"),
-                artifact_digest,
-                artifact_path: PathBuf::from(concat!(
-                    "/var/lib/tracedecay/semantic-models/",
-                    "jina-embeddings-v2-base-code/",
-                    "revision-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
-                    "onnx/model.onnx"
-                )),
-            }),
-            rollback_profile: None,
-            resources: SemanticResourceCeilings {
-                max_model_bytes: 700 * 1024 * 1024,
-                max_tokenizer_bytes: 64 * 1024 * 1024,
-                max_resident_bytes: 2 * 1024 * 1024 * 1024,
-                max_threads: 8,
-                max_concurrent_sessions: 4,
-                max_batch_size: 32,
-                max_sequence_length: 512,
-                load_deadline_ms: 30_000,
-            },
-        }
-    }
-
-    fn encoded_activation_payload() -> String {
-        let encoded =
-            serde_json::to_string(&realistic_activation_config()).expect("semantic runtime JSON");
-        assert!(
-            encoded.len() > CANONICAL_TEXT_MAX_BYTES,
-            "activation payload must exceed the 512-byte label bound, got {}",
-            encoded.len()
-        );
-        encoded
-    }
-
-    #[test]
-    fn semantic_runtime_accepts_a_realistic_activation_payload() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let payload = encoded_activation_payload();
-        registry
-            .validate_value(
-                &semantic_runtime_key(),
-                &ConfigurationValueV1::Text(payload),
-            )
-            .expect("realistic semantic.runtime.v1 payload");
-    }
-
-    #[test]
-    fn semantic_runtime_rejects_malformed_json() {
-        let registry = ConfigurationRegistry::core().expect("registry");
         assert!(matches!(
             registry.validate_value(
-                &semantic_runtime_key(),
-                &ConfigurationValueV1::Text("{".to_owned()),
+                &key,
+                &ConfigurationValueV1::CodeIndexWorkerSelection(
+                    CodeIndexWorkerSelectionV1::Exact { workers: 2 },
+                ),
             ),
-            Err(ConfigurationRegistryError::InvalidSettingPayload {
-                reason: InvalidSettingPayloadReason::MalformedJson,
-                ..
-            })
+            Ok(())
         ));
-    }
-
-    #[test]
-    fn semantic_runtime_rejects_an_unknown_field() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let mut document = serde_json::to_value(realistic_activation_config()).expect("json value");
-        document
-            .as_object_mut()
-            .expect("object")
-            .insert("unexpected_field".to_owned(), serde_json::json!(true));
-        let payload = serde_json::to_string(&document).expect("unknown-field JSON");
         assert!(matches!(
             registry.validate_value(
-                &semantic_runtime_key(),
-                &ConfigurationValueV1::Text(payload),
+                &key,
+                &ConfigurationValueV1::CodeIndexWorkerSelection(
+                    CodeIndexWorkerSelectionV1::Exact { workers: 0 },
+                ),
             ),
-            Err(ConfigurationRegistryError::InvalidSettingPayload {
-                reason: InvalidSettingPayloadReason::UnknownField,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn semantic_runtime_accepts_an_explicitly_disabled_selected_model() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let config = SemanticConfig {
-            selected_model: None,
-            ..SemanticConfig::default()
-        };
-        let payload = serde_json::to_string(&config).expect("disabled semantic runtime JSON");
-        registry
-            .validate_value(
-                &semantic_runtime_key(),
-                &ConfigurationValueV1::Text(payload),
-            )
-            .expect("selected_model null disables the semantic lane");
-    }
-
-    #[test]
-    fn semantic_runtime_rejects_an_invalid_artifact_digest() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let mut config = realistic_activation_config();
-        if let Some(profile) = config.active_profile.as_mut() {
-            profile.artifact_digest = "0".repeat(63);
-        }
-        let payload = serde_json::to_string(&config).expect("invalid digest JSON");
-        assert!(matches!(
-            registry.validate_value(
-                &semantic_runtime_key(),
-                &ConfigurationValueV1::Text(payload),
-            ),
-            Err(ConfigurationRegistryError::InvalidSettingPayload {
-                reason: InvalidSettingPayloadReason::InvalidArtifactDigest,
-                ..
-            })
+            Err(ConfigurationRegistryError::InvalidDefinition(
+                tracedecay_domain::DomainError::NonCanonical {
+                    field: "code index worker count",
+                }
+            ))
         ));
     }
 }

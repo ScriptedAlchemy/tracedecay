@@ -44,8 +44,8 @@ pub const DASHBOARD_SCHEMA_REVISION_V1: u32 = 1;
 /// The first sixteen variants are the plan's exact `DashboardDomainState`
 /// discriminated union. [`Self::Unsupported`] is the backend-gap binding
 /// state: the read model's HTTP surface exists, but its live producer/source is
-/// not yet wired server-side. It is never healthy or empty — the frontend
-/// renders a distinct "not yet available" state — and it is deliberately
+/// not yet wired server-side. It is never healthy or empty, the frontend
+/// renders a distinct "not yet available" state, and it is deliberately
 /// separate from [`Self::UnsupportedSchema`] (an undecodable schema/variant).
 // The full sixteen-state union plus `Unsupported` is normative contract (the
 // generation source for the frontend's exhaustive switches). Most variants are
@@ -157,7 +157,7 @@ pub enum DashboardCoverageCompletenessV1 {
 }
 
 /// Coverage statement. Counts are optional; an unknown denominator is `None`,
-/// never a fabricated `0`/`100%`. The completeness axis is authoritative — the
+/// never a fabricated `0`/`100%`. The completeness axis is authoritative, the
 /// frontend never derives `complete` from a `matched == eligible` coincidence.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardCoverageV1 {
@@ -551,7 +551,7 @@ impl<T> DashboardEnvelopeV1<T> {
     }
 
     /// A `complete_zero_findings` envelope. Only constructible from complete
-    /// coverage — the plan's rule that the empty result is legal only under
+    /// coverage. The plan's rule that the empty result is legal only under
     /// genuinely complete coverage is enforced here: a non-complete coverage
     /// argument downgrades the state to `partial` rather than lying.
     #[must_use]
@@ -591,59 +591,21 @@ impl<T> DashboardEnvelopeV1<T> {
         self.legal_actions = actions;
         self
     }
-
-    #[must_use]
-    pub fn map_payload<U>(self, map: impl FnOnce(T) -> U) -> DashboardEnvelopeV1<U> {
-        DashboardEnvelopeV1 {
-            schema_revision: self.schema_revision,
-            scope: self.scope,
-            version: self.version,
-            time: self.time,
-            source_watermark: self.source_watermark,
-            authorization: self.authorization,
-            coverage: self.coverage,
-            freshness: self.freshness,
-            domain_state: self.domain_state,
-            legal_actions: self.legal_actions,
-            payload: map(self.payload),
-        }
-    }
-
-    #[must_use]
-    pub fn with_valid_time(mut self, valid_time_micros: i64) -> Self {
-        self.time.valid_time_micros = Some(valid_time_micros);
-        self
-    }
 }
 
 /// Current wall-clock time in microseconds since the Unix epoch.
 ///
 /// Dashboard read models carry raw `i64` micros, so this unwraps the canonical
-/// [`tracedecay_application::now_micros`] rather than restating its saturating
+/// [`tracedecay_contracts::now_micros`] rather than restating its saturating
 /// clamp.
 #[must_use]
 pub fn now_micros() -> i64 {
-    tracedecay_application::now_micros().0
+    tracedecay_contracts::now_micros().0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn schema_revision_is_stamped() {
-        let envelope = DashboardEnvelopeV1::unsupported(scope(), 7_u32);
-        assert_eq!(envelope.schema_revision, DASHBOARD_SCHEMA_REVISION_V1);
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unsupported);
-        assert_eq!(
-            envelope.coverage.completeness,
-            DashboardCoverageCompletenessV1::Unsupported
-        );
-        assert_eq!(
-            envelope.freshness.state,
-            DashboardFreshnessStateV1::Unsupported
-        );
-    }
 
     #[test]
     fn unavailable_partial_and_denied_never_claim_complete_coverage() {

@@ -218,9 +218,7 @@ async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_
         0
     );
     let payload_dir = tmp.path().join(".tracedecay").join("lcm-payloads");
-    let payload_count = std::fs::read_dir(payload_dir)
-        .map(|entries| entries.count())
-        .unwrap_or_default();
+    let payload_count = std::fs::read_dir(payload_dir).map_or_default(|entries| entries.count());
     assert_eq!(
         payload_count, 0,
         "payload rollback must remove created files"

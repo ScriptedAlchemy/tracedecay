@@ -453,14 +453,20 @@ mod tests {
 
     #[test]
     fn complete_ci_localization_requires_exact_generation_evidence() {
-        assert!(result().validate().is_err());
+        assert_eq!(
+            result().validate().unwrap_err().to_string(),
+            "complete ci failure generation evidence is not canonical"
+        );
     }
 
     #[test]
     fn ci_provider_state_and_coverage_cannot_be_collapsed() {
         let mut mismatched = result();
         mismatched.state = CiFailureLocalizationStateV1::Partial;
-        assert!(mismatched.validate().is_err());
+        assert_eq!(
+            mismatched.validate().unwrap_err().to_string(),
+            "ci failure localization coverage is not canonical"
+        );
     }
 
     #[test]
@@ -472,7 +478,10 @@ mod tests {
             generation_id: CodeGenerationId::new("generation.denied").unwrap(),
             retrieval_anchor_id: RetrievalAnchorId::new("anchor.denied").unwrap(),
         });
-        assert!(denied.validate().is_err());
+        assert_eq!(
+            denied.validate().unwrap_err().to_string(),
+            "unavailable ci localization evidence is not canonical"
+        );
 
         denied.generation = None;
         assert!(denied.validate().is_ok());
@@ -484,7 +493,10 @@ mod tests {
             target: CiInertRerunTargetV1::Workflow,
             retrieval_anchor_id: None,
         });
-        assert!(unavailable.validate().is_err());
+        assert_eq!(
+            unavailable.validate().unwrap_err().to_string(),
+            "unavailable ci localization evidence is not canonical"
+        );
         unavailable.rerun_hints.clear();
         assert!(unavailable.validate().is_ok());
     }

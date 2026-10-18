@@ -1,0 +1,5 @@
+--- a/aws-lc/crypto/fipsmodule/rand/entropy/tree_drbg_jitter_entropy.c
++++ b/aws-lc/crypto/fipsmodule/rand/entropy/tree_drbg_jitter_entropy.c
+@@ -17 +17 @@
+-#include "../../../../third_party/jitterentropy/jitterentropy-library/jitterentropy.h"
++#include "jitterentropy.h"

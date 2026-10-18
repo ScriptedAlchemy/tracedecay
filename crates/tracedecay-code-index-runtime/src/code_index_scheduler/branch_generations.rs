@@ -13,8 +13,8 @@ use super::{
 
 #[derive(Clone)]
 pub struct BranchGenerationReadControlV1 {
-    pub deadline: Option<tracedecay_application::Deadline>,
-    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+    pub deadline: Option<tracedecay_contracts::Deadline>,
+    pub cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
 impl BranchGenerationReadControlV1 {
@@ -22,22 +22,108 @@ impl BranchGenerationReadControlV1 {
         if self
             .cancellation
             .as_ref()
-            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
         {
             return Some(CodeIndexSearchUnavailableReasonV1::Cancelled);
         }
         self.deadline
             .as_ref()
             .is_some_and(|deadline| {
-                deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+                deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
             })
             .then_some(CodeIndexSearchUnavailableReasonV1::TimedOut)
+    }
+
+    /// Whether this request has said how long it may wait on a contended
+    /// resource. A deadline or a cancellation is a bound its owner will
+    /// eventually fire; a control carrying neither would loop until the holder
+    /// happened to leave, so such a request is refused at once instead.
+    #[must_use]
+    pub fn has_wait_budget(&self) -> bool {
+        self.deadline.is_some() || self.cancellation.is_some()
     }
 }
 
 pub struct BranchGenerationPairV1 {
     pub base: LatestCompleteCodeIndexV1,
     pub head: LatestCompleteCodeIndexV1,
+}
+
+/// How long a contended scheduler read sleeps between lock attempts.
+const SCHEDULER_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
+type SchedulerGuard<'a> = std::sync::MutexGuard<'a, super::CodeIndexWorktreeSchedulerV1>;
+
+/// One attempt at the per-worktree scheduler: `None` when another owner holds
+/// it, `Internal` when that owner panicked while holding it.
+fn try_lock_scheduler(
+    scheduler: &std::sync::Mutex<super::CodeIndexWorktreeSchedulerV1>,
+) -> Result<Option<SchedulerGuard<'_>>, CodeIndexSearchUnavailableReasonV1> {
+    match scheduler.try_lock() {
+        Ok(scheduler) => Ok(Some(scheduler)),
+        Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            Err(CodeIndexSearchUnavailableReasonV1::Internal)
+        }
+    }
+}
+
+/// Take the scheduler for one exact read from a blocking thread, waiting out a
+/// transient holder for as long as the request's deadline and cancellation
+/// allow.
+///
+/// Callers already hold the build-publication fence, and every long-lived
+/// scheduler owner, the reconcile worker above all, takes that fence before
+/// the scheduler, so a contended scheduler here is a short-lived status probe,
+/// not a rebuild in flight. Losing that race used to be refused outright with
+/// `CapacityUnavailable`, the same reason a genuinely oversized generation is
+/// refused with, so a compare read that merely collided with a probe told the
+/// user its generation exceeded the bounded-read limits. The wait ends with the
+/// request's own terminal state, exactly as the fence wait above it does.
+///
+/// A control with no wait budget, neither deadline nor cancellation, keeps
+/// the immediate `CapacityUnavailable` refusal: nothing would ever end its
+/// wait, and this runs on a blocking thread while the async parent holds the
+/// build-publication fence, so a stuck holder would pin both indefinitely.
+fn lock_scheduler_for_exact_read<'a>(
+    scheduler: &'a std::sync::Mutex<super::CodeIndexWorktreeSchedulerV1>,
+    control: &BranchGenerationReadControlV1,
+) -> Result<SchedulerGuard<'a>, CodeIndexSearchUnavailableReasonV1> {
+    loop {
+        if let Some(scheduler) = try_lock_scheduler(scheduler)? {
+            return Ok(scheduler);
+        }
+        if !control.has_wait_budget() {
+            return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+        }
+        if let Some(reason) = control.termination() {
+            return Err(reason);
+        }
+        std::thread::sleep(SCHEDULER_LOCK_RETRY_INTERVAL);
+    }
+}
+
+/// The async twin of [`lock_scheduler_for_exact_read`] for the native
+/// candidate producer, which runs on its caller's runtime rather than a
+/// blocking thread; the sleep between attempts parks the future, never a
+/// worker. The guard is only ever produced on the attempt that returns, and
+/// the no-wait-budget rule is the same.
+async fn lock_scheduler_for_exact_read_async<'a>(
+    scheduler: &'a std::sync::Mutex<super::CodeIndexWorktreeSchedulerV1>,
+    control: &BranchGenerationReadControlV1,
+) -> Result<SchedulerGuard<'a>, CodeIndexSearchUnavailableReasonV1> {
+    loop {
+        if let Some(scheduler) = try_lock_scheduler(scheduler)? {
+            return Ok(scheduler);
+        }
+        if !control.has_wait_budget() {
+            return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+        }
+        if let Some(reason) = control.termination() {
+            return Err(reason);
+        }
+        super::control_poll().await;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -68,8 +154,8 @@ impl BranchGenerationCardinalityBoundsV1 {
 /// Which half of a requested exact revision pair the durable index could not
 /// serve. Carrying both sides separately is the whole point: the mint path used
 /// to rebuild *base* whenever anything was missing, so a request whose base was
-/// already sealed and whose head was not paid for a redundant full-tree capture
-/// — and failed outright whenever that redundant base capture could not be
+/// already sealed and whose head was not paid for a redundant full-tree capture,
+/// and failed outright whenever that redundant base capture could not be
 /// performed.
 #[derive(Clone, Copy, Debug)]
 struct ExactGenerationMissV1 {
@@ -79,9 +165,9 @@ struct ExactGenerationMissV1 {
 
 /// Outcome of resolving one exact revision pair against the durable generation
 /// index. A miss is deliberately *not* an error: sealing a generation from an
-/// immutable commit tree is idempotent, so every shape of absence — never
+/// immutable commit tree is idempotent, so every shape of absence, never
 /// indexed, pruned out of the bounded index, or named by an entry whose sealed
-/// bytes are gone — is answered the same way, by minting it.
+/// bytes are gone, is answered the same way, by minting it.
 enum ExactGenerationPairV1 {
     Sealed(
         Arc<CodeIndexPublishedGenerationV1>,
@@ -92,17 +178,21 @@ enum ExactGenerationPairV1 {
 
 impl DaemonCodeIndexPublicationStoreV1 {
     pub fn exact_read_error(
-        error: crate::code_index::production::CodeIndexPublicationStoreErrorV1,
+        error: tracedecay_code_index::production::CodeIndexPublicationStoreErrorV1,
     ) -> CodeIndexSearchUnavailableReasonV1 {
         match error {
-            crate::code_index::production::CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(
+            tracedecay_code_index::production::CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(
                 _,
             ) => CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
             _ => CodeIndexSearchUnavailableReasonV1::Internal,
         }
     }
 
-    #[hotpath::measure(label = "daemon.code_index.branch_generations.revisions")]
+    #[tracing::instrument(
+        name = "daemon.code_index.branch_generations.revisions",
+        level = "trace",
+        skip_all
+    )]
     fn revisions(
         &self,
         base_reference: &RefId,
@@ -131,7 +221,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // `generation_index_truncated` says only that the absence of an entry no
         // longer proves the revision was never indexed. It used to be reported
         // here as `CapacityUnavailable`, which callers read as a transient
-        // "retry later" — but the flag latches on the first eviction and never
+        // "retry later", but the flag latches on the first eviction and never
         // clears, so once the bounded index had evicted anything, every
         // unindexed revision became permanently, and falsely, transient. The
         // truthful answer is the same one an untruncated miss gets: we do not
@@ -229,9 +319,52 @@ impl DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    /// Run one native candidate producer against the exact mounted scope.
+    ///
+    /// Native preflight drives this future from its existing blocking owner,
+    /// because the borrowed gix object-memory tree cannot outlive that call.
+    /// The callback runs only while the canonical publication fence is held
+    /// and never receives a scheduler handle it could retain.
+    pub async fn with_native_candidate_generation_producer<T>(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+        control: BranchGenerationReadControlV1,
+        produce: impl FnOnce(
+            &mut super::CodeIndexWorktreeSchedulerV1,
+            &BranchGenerationReadControlV1,
+        ) -> Result<T, CodeIndexSearchUnavailableReasonV1>,
+    ) -> Result<T, CodeIndexSearchUnavailableReasonV1> {
+        let (scheduler, build_publication_lock) = {
+            let mounted = self.mounted.lock().await;
+            let worktree = unique_mounted_for_scope(&mounted, scope)
+                .unique()
+                .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
+                .1;
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.build_publication_lock),
+            )
+        };
+        let mut build_publication = std::pin::pin!(build_publication_lock.lock_owned());
+        let _build_publication = loop {
+            tokio::select! {
+                guard = &mut build_publication => break guard,
+                () = super::control_poll() => {
+                    if let Some(reason) = control.termination() {
+                        return Err(reason);
+                    }
+                }
+            }
+        };
+        control.termination().map_or(Ok(()), Err)?;
+        let mut scheduler = lock_scheduler_for_exact_read_async(&scheduler, &control).await?;
+        control.termination().map_or(Ok(()), Err)?;
+        produce(&mut scheduler, &control)
+    }
+
     pub async fn generations_for_revisions(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
@@ -256,7 +389,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn bounded_generations_for_revisions(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
@@ -280,13 +413,14 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
     }
 
-    #[hotpath::measure(
-        label = "daemon.code_index.branch_generations.generations",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.code_index.branch_generations.generations",
+        level = "trace",
+        skip_all
     )]
     async fn generations_for_revisions_with_bounds(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
@@ -309,10 +443,10 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         let mut build_publication = std::pin::pin!(build_publication_lock.lock_owned());
-        let _build_publication = loop {
+        let build_publication = loop {
             tokio::select! {
                 guard = &mut build_publication => break guard,
-                () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
+                () = super::control_poll() => {
                     if let Some(reason) = control.termination() {
                         return Err(reason);
                     }
@@ -327,7 +461,14 @@ impl CodeIndexSchedulerRegistryV1 {
         let head_tree = head_tree.clone();
         let scope = scope.clone();
         let terminal_control = control.clone();
-        let task = tokio::task::spawn_blocking(move || {
+        let task = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            // The fence travels with the work it fences. The settle loop below
+            // never answers before this closure returns, but the caller may drop
+            // that future, a request timeout, a closed connection, which
+            // detaches the blocking task and would otherwise release the fence
+            // while a mint could still be waiting on the scheduler. Owned by
+            // the closure, the fence outlives every scheduler acquisition here.
+            let _build_publication = build_publication;
             let exact_source = |reference: &RefId, revision: &GitOidV1, tree: &GitOidV1| {
                 Ok::<_, CodeIndexSearchUnavailableReasonV1>(
                     super::git_tree_capture::ExactGitTreeSourceV1 {
@@ -356,35 +497,32 @@ impl CodeIndexSchedulerRegistryV1 {
                 ExactGenerationPairV1::Sealed(base, head) => (base, head),
                 // Mint only the side the index could not serve. Capturing a
                 // whole commit tree is the expensive part of this path, and a
-                // base that is already sealed is evidence we already hold — the
+                // base that is already sealed is evidence we already hold, the
                 // unconditional base capture that used to run here charged every
                 // head-only miss for a second full tree, and turned any base the
                 // working repository could no longer capture into a hard failure
                 // of a read the index could have answered.
                 ExactGenerationPairV1::Missing(missing) => {
-                    let mut scheduler = match scheduler.try_lock() {
-                        Ok(scheduler) => scheduler,
-                        Err(std::sync::TryLockError::WouldBlock) => {
-                            return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
-                        }
-                        Err(std::sync::TryLockError::Poisoned(_)) => {
-                            return Err(CodeIndexSearchUnavailableReasonV1::Internal);
+                    let mut scheduler = lock_scheduler_for_exact_read(&scheduler, &control)?;
+                    {
+                        let _span =
+                            tracing::trace_span!("daemon.code_index.branch_generations.mint")
+                                .entered();
+                        {
+                            if missing.base {
+                                scheduler.publish_exact_git_tree_generation(
+                                    &exact_source(&base_reference, &base_revision, &base_tree)?,
+                                    &control,
+                                )?;
+                            }
+                            if missing.head && !same_revision {
+                                scheduler.publish_exact_git_tree_generation(
+                                    &exact_source(&head_reference, &head_revision, &head_tree)?,
+                                    &control,
+                                )?;
+                            }
                         }
                     };
-                    hotpath::measure_block!("daemon.code_index.branch_generations.mint", {
-                        if missing.base {
-                            scheduler.publish_exact_git_tree_generation(
-                                &exact_source(&base_reference, &base_revision, &base_tree)?,
-                                &control,
-                            )?;
-                        }
-                        if missing.head && !same_revision {
-                            scheduler.publish_exact_git_tree_generation(
-                                &exact_source(&head_reference, &head_revision, &head_tree)?,
-                                &control,
-                            )?;
-                        }
-                    });
                     drop(scheduler);
                     match historical_generation_owner.publication.revisions(
                         &base_reference,
@@ -436,15 +574,22 @@ mod tests {
     use std::process::Command;
 
     use tempfile::TempDir;
-    use tracedecay_application::ResolvedScope;
+    use tracedecay_code_index_retention::code_index_generations::{
+        DurablePublicationPointerV1, durable_generation_index_digest,
+    };
+    use tracedecay_contracts::ResolvedScope;
     use tracedecay_domain::{GitOidV1, ProjectId};
     use tracedecay_query::code_search;
 
     use super::*;
-    use crate::code_index_branch_diff::{bounded_diff, diff_symbols, generation_symbols};
+    use crate::code_index_branch_diff::{
+        CodeIndexRevisionPairRequestV1, bounded_diff, diff_symbols, generation_symbols,
+        revision_pair_layout_inputs,
+    };
     use crate::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     };
+    use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
     fn git(root: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -486,7 +631,8 @@ mod tests {
         let base_tree =
             GitOidV1::new(git(project.path(), &["rev-parse", "HEAD^{tree}"])).expect("base tree");
         let project_id = ProjectId::new("project.branch-generation-diff").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),
@@ -538,13 +684,12 @@ mod tests {
             .expect("write decoy generation");
         }
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");
@@ -613,8 +758,6 @@ mod tests {
         let base_generation_id = pair.base.generation().manifest().generation_id.clone();
         // A revision paired with a tree that is not its own names no commit in
         // this repository, so neither the index nor a capture can serve it.
-        // The mount worker may claim the scheduler between exact reads, so
-        // settle only its documented transient lock-contention response.
         let mismatched_tree = settled_pair(
             &registry,
             &scope,
@@ -707,6 +850,26 @@ mod tests {
             "authenticated cardinality admission must not read sealed bytes"
         );
         drop(active_decode);
+        clear_generation_cardinality(&scoped_store, &large_revision);
+        assert!(matches!(
+            revision_pair_layout_inputs(
+                &registry,
+                &scope,
+                CodeIndexRevisionPairRequestV1 {
+                    base_reference: reference.clone(),
+                    base_revision: large_revision.clone(),
+                    base_tree: large_tree.clone(),
+                    head_reference: reference.clone(),
+                    head_revision: large_revision.clone(),
+                    head_tree: large_tree.clone(),
+                    file_filter: None,
+                    kind_filter: None,
+                    control: control.clone(),
+                },
+            )
+            .await,
+            Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable)
+        ));
         let started = std::time::Instant::now();
         let outcome = bounded_diff(
             large_generation.generation(),
@@ -726,9 +889,9 @@ mod tests {
         );
 
         let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.large-generation")
+            tracedecay_contracts::CancellationSignal::active("cancel.large-generation")
                 .expect("cancellation");
-        cancellation.cancel(tracedecay_application::clock::now_micros());
+        cancellation.cancel(tracedecay_contracts::clock::now_micros());
         assert_eq!(
             bounded_diff(
                 large_generation.generation(),
@@ -743,7 +906,7 @@ mod tests {
             Err(CodeIndexSearchUnavailableReasonV1::Cancelled)
         );
         let expired =
-            tracedecay_application::Deadline::new(tracedecay_application::clock::now_micros())
+            tracedecay_contracts::Deadline::new(tracedecay_contracts::clock::now_micros())
                 .expect("expired deadline");
         assert_eq!(
             bounded_diff(
@@ -827,7 +990,8 @@ mod tests {
         git(project.path(), &["checkout", "-q", "main"]);
 
         let project_id = ProjectId::new("project.non-checked-out-refs").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         let scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),
@@ -844,13 +1008,12 @@ mod tests {
         )
         .expect("dirty worktree source");
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");
@@ -944,7 +1107,8 @@ mod tests {
         .expect("dirty source");
 
         let project_id = ProjectId::new("project.dirty-generation").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),
@@ -968,13 +1132,12 @@ mod tests {
         drop(dirty);
         drop(scheduler);
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");
@@ -991,34 +1154,25 @@ mod tests {
 
         // The exact pair is no longer unavailable: the registry mints sealed
         // exact generations straight from the commit's ODB tree on demand.
-        // The invariant this test guards is unchanged — the dirty sealed
+        // The invariant this test guards is unchanged, the dirty sealed
         // generation itself must never serve as exact-commit evidence.
         let control = BranchGenerationReadControlV1 {
             deadline: None,
             cancellation: None,
         };
-        let pair = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                match registry
-                    .generations_for_revisions(
-                        &scope,
-                        &reference,
-                        &revision,
-                        &tree,
-                        &reference,
-                        &revision,
-                        &tree,
-                        control.clone(),
-                    )
-                    .await
-                {
-                    Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable) => {
-                        tokio::task::yield_now().await;
-                    }
-                    result => break result,
-                }
-            }
-        })
+        let pair = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            registry.generations_for_revisions(
+                &scope,
+                &reference,
+                &revision,
+                &tree,
+                &reference,
+                &revision,
+                &tree,
+                control.clone(),
+            ),
+        )
         .await
         .expect("bounded exact-generation read")
         .expect("exact generation minted from the commit tree");
@@ -1075,10 +1229,6 @@ mod tests {
     /// while keeping every entry, so the test isolates the flag itself from the
     /// question of which entries survived.
     fn latch_generation_index_truncation(scoped_store: &Path) {
-        use tracedecay_code_index_retention::code_index_generations::{
-            DurablePublicationPointerV1, durable_generation_index_digest,
-        };
-
         let pointer_path = scoped_store.join("active-code-generation-v1.json");
         let mut pointer: DurablePublicationPointerV1 =
             serde_json::from_slice(&std::fs::read(&pointer_path).expect("read pointer"))
@@ -1095,6 +1245,31 @@ mod tests {
         .expect("write truncated publication pointer");
     }
 
+    fn clear_generation_cardinality(scoped_store: &Path, revision: &GitOidV1) {
+        let pointer_path = scoped_store.join("active-code-generation-v1.json");
+        let mut pointer: DurablePublicationPointerV1 =
+            serde_json::from_slice(&std::fs::read(&pointer_path).expect("read pointer"))
+                .expect("decode publication pointer");
+        pointer
+            .generation_index
+            .iter_mut()
+            .find(|entry| entry.source_revision.as_deref() == Some(revision.as_str()))
+            .expect("revision entry")
+            .cardinality = None;
+        pointer.generation_index_digest = Some(
+            durable_generation_index_digest(
+                &pointer.generation_index,
+                pointer.generation_index_truncated,
+            )
+            .expect("digest generation index"),
+        );
+        std::fs::write(
+            &pointer_path,
+            serde_json::to_vec(&pointer).expect("encode pointer"),
+        )
+        .expect("write pointer");
+    }
+
     async fn settled_pair(
         registry: &CodeIndexSchedulerRegistryV1,
         scope: &ResolvedScope,
@@ -1103,36 +1278,24 @@ mod tests {
         control: &BranchGenerationReadControlV1,
         timeout: std::time::Duration,
     ) -> Result<BranchGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
-        tokio::time::timeout(timeout, async {
-            loop {
-                match registry
-                    .generations_for_revisions(
-                        scope,
-                        base.0,
-                        base.1,
-                        base.2,
-                        head.0,
-                        head.1,
-                        head.2,
-                        control.clone(),
-                    )
-                    .await
-                {
-                    // Only scheduler-lock contention may be retried here: a
-                    // capacity answer that outlives the deadline is exactly the
-                    // spin these tests exist to rule out.
-                    Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable) => {
-                        tokio::task::yield_now().await;
-                    }
-                    result => break result,
-                }
-            }
-        })
+        tokio::time::timeout(
+            timeout,
+            registry.generations_for_revisions(
+                scope,
+                base.0,
+                base.1,
+                base.2,
+                head.0,
+                head.1,
+                head.2,
+                control.clone(),
+            ),
+        )
         .await
         .expect("bounded exact-generation read")
     }
 
-    /// A revision the branch has already moved past is an ordinary request — a
+    /// A revision the branch has already moved past is an ordinary request, a
     /// base whose ref advanced between the caller's rev-parse and this read, a
     /// merge-base, a deliberately pinned commit. The capture used to peel the
     /// reference and refuse anything that was not its current tip, which made
@@ -1154,10 +1317,11 @@ mod tests {
         );
 
         let project_id = ProjectId::new("project.superseded-tip-mint").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         // Only the current tip is indexed, so the pair's head is served from the
-        // index and its base — a commit the branch has already left behind — is
+        // index and its base, a commit the branch has already left behind, is
         // the single half that has to be captured from the object database.
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),
@@ -1176,13 +1340,12 @@ mod tests {
             .clone();
         drop(scheduler);
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");
@@ -1243,9 +1406,334 @@ mod tests {
         );
     }
 
+    /// A read that has to mint finds the scheduler held by a short-lived
+    /// probe. It waits for the scheduler, bounded by its own deadline: a read
+    /// with deadline left completes once the holder lets go, and one whose
+    /// deadline passes first reports the typed `TimedOut` state. Losing that
+    /// race used to be refused with `CapacityUnavailable`, the reason a
+    /// genuinely oversized generation is refused with, so a compare read that
+    /// merely collided with a probe told the user its generation exceeded the
+    /// bounded-read limits.
+    /// A mounted worktree whose tip is sealed and whose base commit is not, so
+    /// an exact compare read has to mint the base, the step that needs the
+    /// scheduler.
+    struct HeldSchedulerFixtureV1 {
+        _project: TempDir,
+        _store: TempDir,
+        registry: CodeIndexSchedulerRegistryV1,
+        canonical_project: std::path::PathBuf,
+        scope: ResolvedScope,
+        reference: RefId,
+        base_revision: GitOidV1,
+        base_tree: GitOidV1,
+        head_revision: GitOidV1,
+        head_tree: GitOidV1,
+    }
+
+    impl HeldSchedulerFixtureV1 {
+        async fn open(project_id: &str) -> Self {
+            let project = TempDir::new().expect("project");
+            let store = TempDir::new().expect("store");
+            init_fixture_repository(project.path());
+            let (base_revision, base_tree) = commit_source(
+                project.path(),
+                "pub fn held_scheduler_base_value() -> usize { 1 }\n",
+                "base",
+            );
+            let (head_revision, head_tree) = commit_source(
+                project.path(),
+                "pub fn held_scheduler_head_value() -> usize { 2 }\n",
+                "head",
+            );
+
+            let project_id = ProjectId::new(project_id).expect("project id");
+            let canonical_project =
+                canonical_existing_identity(project.path()).expect("canonical project");
+            let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
+            let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+                project_id.clone(),
+                &canonical_project,
+                scoped_store,
+                Arc::new(SharedCodeIndexBytePoolV1::default()),
+            )
+            .expect("open scheduler");
+            scheduler.reconcile_now().expect("publish tip generation");
+            drop(scheduler);
+
+            let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+            registry
+                .mount_worktree(
+                    project_id.clone(),
+                    &canonical_project,
+                    store.path().to_path_buf(),
+                )
+                .await
+                .expect("mount sealed store");
+            let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
+                .expect("indexing identity");
+            let reference = identity.head_ref().cloned().expect("head reference");
+            let scope = ResolvedScope::new(
+                project_id,
+                identity.repository_id().clone(),
+                identity.worktree_id().clone(),
+                Some(reference.clone()),
+            )
+            .expect("resolved scope");
+            Self {
+                _project: project,
+                _store: store,
+                registry,
+                canonical_project,
+                scope,
+                reference,
+                base_revision,
+                base_tree,
+                head_revision,
+                head_tree,
+            }
+        }
+
+        fn base(&self) -> (&RefId, &GitOidV1, &GitOidV1) {
+            (&self.reference, &self.base_revision, &self.base_tree)
+        }
+
+        fn head(&self) -> (&RefId, &GitOidV1, &GitOidV1) {
+            (&self.reference, &self.head_revision, &self.head_tree)
+        }
+
+        /// Hold the mounted scheduler from a thread of its own, the way a status
+        /// probe on the blocking pool does, until the returned sender fires.
+        async fn hold_scheduler(
+            &self,
+        ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+            let handle = self
+                .registry
+                .scheduler_handle(&self.canonical_project)
+                .await
+                .expect("mounted scheduler handle");
+            let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let probe = std::thread::spawn(move || {
+                let _held = handle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                held_tx.send(()).expect("the test observes the hold");
+                release_rx.recv().expect("the test releases the hold");
+            });
+            held_rx.recv().expect("the probe holds the scheduler");
+            (release_tx, probe)
+        }
+    }
+
+    fn deadline_in(duration: std::time::Duration) -> tracedecay_contracts::Deadline {
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
+            tracedecay_contracts::clock::now_micros().0
+                + i64::try_from(duration.as_micros()).expect("deadline fits"),
+        ))
+        .expect("deadline")
+    }
+
+    #[tokio::test]
+    async fn an_exact_read_that_finds_the_scheduler_held_waits_for_it() {
+        let fixture = HeldSchedulerFixtureV1::open("project.held-scheduler-read").await;
+        let (release_tx, probe) = fixture.hold_scheduler().await;
+
+        let expired = settled_pair(
+            &fixture.registry,
+            &fixture.scope,
+            fixture.base(),
+            fixture.head(),
+            &BranchGenerationReadControlV1 {
+                deadline: Some(deadline_in(std::time::Duration::from_millis(300))),
+                cancellation: None,
+            },
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .map(|_| "sealed pair");
+        assert!(
+            matches!(expired, Err(CodeIndexSearchUnavailableReasonV1::TimedOut)),
+            "a read that runs out of deadline waiting for the scheduler reports the deadline, got {expired:?}"
+        );
+
+        let control = BranchGenerationReadControlV1 {
+            deadline: Some(deadline_in(std::time::Duration::from_secs(30))),
+            cancellation: None,
+        };
+        let mut waiting = std::pin::pin!(fixture.registry.generations_for_revisions(
+            &fixture.scope,
+            &fixture.reference,
+            &fixture.base_revision,
+            &fixture.base_tree,
+            &fixture.reference,
+            &fixture.head_revision,
+            &fixture.head_tree,
+            control.clone(),
+        ));
+        tokio::select! {
+            outcome = &mut waiting => {
+                let outcome = outcome.map(|_| "sealed pair");
+                panic!("a read with deadline left must wait for the scheduler, got {outcome:?}");
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(300)) => {}
+        }
+
+        release_tx
+            .send(())
+            .expect("the probe is waiting to release");
+        probe.join().expect("the probe thread joins");
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(30), waiting)
+            .await
+            .expect("bounded exact-generation read")
+            .expect("the read completes once the scheduler is released");
+        assert_eq!(
+            pair.base
+                .generation()
+                .snapshot()
+                .source_revision
+                .as_ref()
+                .map(tracedecay_domain::CommitId::as_str),
+            Some(fixture.base_revision.as_str()),
+            "the waiting read mints the base it was asked for"
+        );
+        let base_symbols =
+            generation_symbols(pair.base.generation(), None, None, &control).expect("base symbols");
+        assert!(
+            base_symbols
+                .iter()
+                .any(|symbol| symbol.name == "held_scheduler_base_value")
+        );
+    }
+
+    /// The search executor polls exact reads on a native blocking thread with
+    /// no Tokio runtime. A read that finds the scheduler held still waits on
+    /// its control there and ends at its deadline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_exact_read_off_tokio_waits_out_its_deadline_on_a_held_scheduler() {
+        let fixture = HeldSchedulerFixtureV1::open("project.native-held-scheduler-read").await;
+        let (release_tx, probe) = fixture.hold_scheduler().await;
+        let registry = fixture.registry.clone();
+        let scope = fixture.scope.clone();
+        let control = BranchGenerationReadControlV1 {
+            deadline: Some(deadline_in(std::time::Duration::from_millis(300))),
+            cancellation: None,
+        };
+        let read = std::thread::spawn(move || {
+            tracedecay_runtime_core::native_runtime::block_on(
+                registry.with_native_candidate_generation_producer(&scope, control, |_, _| {
+                    Ok("produced")
+                }),
+            )
+        });
+        let produced = tokio::task::spawn_blocking(move || read.join())
+            .await
+            .expect("the joining thread finishes")
+            .map_err(|panic| {
+                panic.downcast_ref::<String>().cloned().or_else(|| {
+                    panic
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_owned())
+                })
+            });
+        release_tx
+            .send(())
+            .expect("the probe is waiting to release");
+        probe.join().expect("the probe thread joins");
+        assert!(
+            matches!(
+                produced,
+                Ok(Ok(Err(CodeIndexSearchUnavailableReasonV1::TimedOut)))
+            ),
+            "a read off Tokio that runs out of deadline on a held scheduler reports the \
+             deadline, got {produced:?}"
+        );
+    }
+
+    /// A read carrying neither a deadline nor a cancellation has declared no
+    /// wait budget: nothing it owns would ever end a wait on a held scheduler,
+    /// and the exact-read path would sit on a blocking thread with the
+    /// build-publication fence held for as long as the holder stayed. Such a
+    /// read keeps the immediate typed `CapacityUnavailable` refusal on both the
+    /// blocking compare path and the native candidate producer, and the same
+    /// read succeeds once the scheduler is free, the refusal named the race,
+    /// not the generation.
+    #[tokio::test]
+    async fn an_exact_read_without_a_wait_budget_is_refused_at_once() {
+        let fixture = HeldSchedulerFixtureV1::open("project.no-budget-scheduler-read").await;
+        let (release_tx, probe) = fixture.hold_scheduler().await;
+        let no_budget = BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        };
+
+        // While the probe holds the scheduler, `CapacityUnavailable` is the only
+        // exit a no-budget read has before the probe lets go: a read that waited
+        // would sit until the bounded-read timeout below fires instead.
+        let refused = settled_pair(
+            &fixture.registry,
+            &fixture.scope,
+            fixture.base(),
+            fixture.head(),
+            &no_budget,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .map(|_| "sealed pair");
+        assert!(
+            matches!(
+                refused,
+                Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable)
+            ),
+            "a compare read with no wait budget is refused with the typed reason, got {refused:?}"
+        );
+
+        let produced = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.registry.with_native_candidate_generation_producer(
+                &fixture.scope,
+                no_budget.clone(),
+                |_, _| Ok("produced"),
+            ),
+        )
+        .await
+        .expect("bounded native candidate read");
+        assert!(
+            matches!(
+                produced,
+                Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable)
+            ),
+            "a native candidate read with no wait budget is refused with the typed reason, got {produced:?}"
+        );
+
+        release_tx
+            .send(())
+            .expect("the probe is waiting to release");
+        probe.join().expect("the probe thread joins");
+        let pair = settled_pair(
+            &fixture.registry,
+            &fixture.scope,
+            fixture.base(),
+            fixture.head(),
+            &no_budget,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("the same read completes once the scheduler is free");
+        assert_eq!(
+            pair.base
+                .generation()
+                .snapshot()
+                .source_revision
+                .as_ref()
+                .map(tracedecay_domain::CommitId::as_str),
+            Some(fixture.base_revision.as_str()),
+            "the refusal was the race, not the generation"
+        );
+    }
+
     /// Once the bounded index evicts anything its truncation flag latches on
-    /// forever, and a missing entry used to be reported as `CapacityUnavailable`
-    /// — a transient answer callers retry until their deadline, for a generation
+    /// forever, and a missing entry used to be reported as `CapacityUnavailable`,
+    /// a transient answer callers retry until their deadline, for a generation
     /// that was never going to appear. A truncated miss is mint-eligible like
     /// any other, and only the missing half is minted: the base here is served
     /// from the index alone, since its reference no longer exists to capture.
@@ -1261,7 +1749,8 @@ mod tests {
         );
 
         let project_id = ProjectId::new("project.truncated-index-mint").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),
@@ -1296,13 +1785,12 @@ mod tests {
         git(project.path(), &["branch", "-q", "-D", "main"]);
         latch_generation_index_truncation(&scoped_store);
 
-        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
         registry
             .mount_worktree(
                 project_id.clone(),
                 &canonical_project,
                 store.path().to_path_buf(),
-                None,
             )
             .await
             .expect("mount sealed store");

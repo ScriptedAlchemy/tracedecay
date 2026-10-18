@@ -23,7 +23,7 @@ export function Highlight({
         segment.hit ? (
           <mark
             key={i}
-            className="rounded-[2px] bg-accent/25 px-[0.15em] font-semibold text-text-primary underline decoration-accent decoration-2 underline-offset-2"
+            className="rounded-panel bg-accent/25 px-[0.15em] font-semibold text-text-primary underline decoration-accent decoration-2 underline-offset-2"
           >
             {segment.text}
           </mark>

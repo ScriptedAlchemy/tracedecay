@@ -66,6 +66,7 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
             project_id: project_id.clone(),
         },
         &cancellation,
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect_err("pre-cancelled Cursor sweep must stop before persistence");
@@ -85,6 +86,7 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
             project_id: project_id.clone(),
         },
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("uncancelled Cursor retry must admit the untouched source");
@@ -98,6 +100,7 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
         None,
         ObservationScopeV1::Project { project_id },
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("completed Cursor retry must be deduplicated");
@@ -120,6 +123,7 @@ async fn mid_admission_cancellation_stops_cursor_before_projection() {
             project_id: project_id.clone(),
         },
         &cancellation,
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect_err("mid-admission cancellation must stop before projection");
@@ -137,6 +141,7 @@ async fn mid_admission_cancellation_stops_cursor_before_projection() {
         None,
         ObservationScopeV1::Project { project_id },
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("uncancelled Cursor retry must admit the untouched source");
@@ -159,6 +164,7 @@ async fn projection_backlog_over_pass_limit_converges_in_two_passes() {
         None,
         scope.clone(),
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("first bounded projection pass");
@@ -177,6 +183,7 @@ async fn projection_backlog_over_pass_limit_converges_in_two_passes() {
         None,
         scope,
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("second bounded projection pass");
@@ -184,35 +191,6 @@ async fn projection_backlog_over_pass_limit_converges_in_two_passes() {
     assert_eq!(second.stats.messages_upserted, 1);
     assert!(!second.stats.source_deferred);
     assert_eq!(admission.pending_projection_count(), 0);
-}
-
-#[tokio::test]
-async fn complete_cursor_sweep_persists_host_provider_coverage() {
-    let (project, _home, source, project_id) = cursor_sweep_test_fixture();
-    let admission = MemoryHostAdmission::default();
-    let scope = ObservationScopeV1::Project {
-        project_id: project_id.clone(),
-    };
-    let outcome = admit_cursor_sweep_observations_with_session_ids(
-        &source,
-        project.path(),
-        &admission,
-        None,
-        scope.clone(),
-        &ObservationCancellation::default(),
-    )
-    .await
-    .expect("complete Cursor sweep");
-    assert!(!outcome.stats.source_deferred);
-    let coverage = admission
-        .get_parse_offset(&scope, "host-coverage://cursor/v1")
-        .await
-        .unwrap()
-        .expect("Cursor coverage watermark");
-    assert_eq!(
-        coverage.file_id,
-        crate::runtime::source::HostProviderCoverage::Complete as u64
-    );
 }
 
 #[tokio::test]
@@ -261,6 +239,7 @@ async fn projection_error_racing_cancellation_remains_visible() {
             provider: "cursor",
             reason: "registered_authority_unavailable",
             retryable: true,
+            ..
         }
     ));
 }

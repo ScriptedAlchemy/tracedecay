@@ -1,30 +1,29 @@
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 pub struct ErlangExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         let file_node_id = generate_node_id(file_path, &NodeKind::File, file_path, 0);
         Self {
             nodes: Vec::new(),
@@ -32,39 +31,18 @@ impl ExtractionState {
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl ErlangExtractor {
-    pub fn extract_erlang(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(t) => t,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -82,7 +60,7 @@ impl ErlangExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -96,6 +74,7 @@ impl ErlangExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -110,10 +89,6 @@ impl ErlangExtractor {
             scope,
             metrics,
         )
-    }
-
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("erlang", "Erlang", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -155,11 +130,12 @@ impl ErlangExtractor {
         let arity = Self::count_arity(first_clause);
         let full_name = format!("{name}/{arity}");
         let qualified_name = format!("{}::{}", state.file_path, full_name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::Function,
             &full_name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -184,6 +160,7 @@ impl ErlangExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -219,7 +196,13 @@ impl ErlangExtractor {
         }
         let name = Self::extract_attr_value(state, node).unwrap_or_else(|| "?".to_string());
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -243,6 +226,7 @@ impl ErlangExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -259,7 +243,13 @@ impl ErlangExtractor {
         let name = Self::extract_attr_value(state, node).unwrap_or_else(|| "?".to_string());
         let start_line = node.start_position().row as u32;
         let sig = Self::first_line(state, node);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -283,6 +273,7 @@ impl ErlangExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -307,6 +298,8 @@ impl ErlangExtractor {
                 line: start_line,
                 column: 0,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
             });
         }
         let _ = text;
@@ -315,7 +308,7 @@ impl ErlangExtractor {
     /// Extracts the atom (function name) from the first child of a `function_clause`.
     fn extract_atom_name(state: &ExtractionState, clause: TsNode<'_>) -> Option<String> {
         if let Some(n) = clause.child_by_field_name("name") {
-            return Some(state.node_text(n));
+            return Some(state.node_text(n).to_string());
         }
         // Fall back to first atom child.
         let mut cursor = clause.walk();
@@ -323,7 +316,7 @@ impl ErlangExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "atom" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -366,11 +359,8 @@ impl ErlangExtractor {
                 if child.kind() == "atom" {
                     let text = state.node_text(child);
                     // Skip keywords like "module", "type", "spec".
-                    if !matches!(
-                        text.as_str(),
-                        "module" | "type" | "opaque" | "spec" | "callback"
-                    ) {
-                        return Some(text);
+                    if !matches!(text, "module" | "type" | "opaque" | "spec" | "callback") {
+                        return Some(text.to_string());
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -391,11 +381,13 @@ impl ErlangExtractor {
                         let name = state.node_text(callee);
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: fn_id.to_string(),
-                            reference_name: name,
+                            reference_name: name.to_string(),
                             reference_kind: EdgeKind::Calls,
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     Self::extract_calls(state, child, fn_id);
@@ -434,17 +426,16 @@ impl crate::LanguageExtractor for ErlangExtractor {
         "Erlang"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_erlang(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

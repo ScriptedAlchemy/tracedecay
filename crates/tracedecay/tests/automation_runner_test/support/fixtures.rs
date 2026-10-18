@@ -4,15 +4,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 use tracedecay_automation_runtime::automation::automatic_facts::record_session_automatic_facts;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, read_run_artifact_payload,
 };
-use tracedecay_automation_runtime::ports::project_runtime::ProjectRuntime;
 use tracedecay_domain::FactOwnerV1;
-use tracedecay_global_db::ParseOffset;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -28,11 +27,11 @@ use super::{project_memory_owner, test_automation_run_control};
 /// `project_registry::ephemeral_root_rejection` refuses ("project root
 /// '/tmp/.tmpXXXX' is under the OS temporary directory and cannot be
 /// registered as a durable authority in profile '...'"), and every fixture in
-/// this binary would additionally serialize on that one profile's exclusive
+/// this binary would also serialize on that one profile's exclusive
 /// lifecycle lease. The hermetic escape hatch
 /// (`TraceDecay::standalone_test_open_options`) is `cfg(test)`/`test-transport`
 /// gated, so it is inactive for this integration binary and cannot be relied
-/// on — the fixture must pin the profile itself, the same shape
+/// on, the fixture must pin the profile itself, the same shape
 /// `memory_eval_test::initialize_fixture_project` already uses.
 ///
 /// The shard lives under the project's own `.tracedecay/` marker directory so
@@ -49,7 +48,14 @@ pub(crate) fn fixture_open_options(project_root: &Path) -> TraceDecayOpenOptions
     }
 }
 
+/// The user home a fixture's automation runs deploy managed skills under,
+/// hidden beside the fixture profile.
+pub(crate) fn fixture_host_home(project_root: &Path) -> std::path::PathBuf {
+    project_root.join(".tracedecay").join("fixture-home")
+}
+
 pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
+    crate::common::register_process_runtime_ports();
     fs::create_dir_all(project_root.join("src")).unwrap();
     fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let project_root = fs::canonicalize(project_root).unwrap();
@@ -72,10 +78,11 @@ pub(crate) async fn seed_project_session_activity_at(cg: &TraceDecay, timestamp:
     let FactOwnerV1::Project { project_id } = project_memory_owner(cg) else {
         panic!("combined-review fixtures require an authoritative project owner");
     };
-    let sessions = cg
-        .project_sessions(project_id, vec![cg.project_root().to_path_buf()])
-        .await
-        .expect("project sessions mount");
+    let context = cg
+        .automation_project_context(Some(fixture_host_home(cg.project_root())))
+        .expect("automation project context");
+    assert_eq!(context.project_id, project_id);
+    let sessions = &context.project_sessions;
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: format!("combined-activity-{timestamp}"),
@@ -111,17 +118,10 @@ pub(crate) async fn seed_project_session_activity_at(cg: &TraceDecay, timestamp:
         source_offset: None,
         metadata_json: None,
     };
-    assert!(
-        sessions
-            .upsert_transcript_batch(
-                &session,
-                std::slice::from_ref(&message),
-                &format!("combined-review-activity:{timestamp}"),
-                ParseOffset::default(),
-            )
-            .await,
-        "activity fixture must persist a timestamped message"
-    );
+    sessions
+        .lcm_ingest_raw_message(sessions.db_path().parent().unwrap(), &message)
+        .await
+        .expect("activity fixture must persist a timestamped message");
 }
 
 #[cfg(feature = "test-transport")]
@@ -189,11 +189,9 @@ pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
         source_offset: None,
         metadata_json: Some(json!({ "cmd": "rg automation src" }).to_string()),
     };
-    assert!(
-        db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
-            .await
-            .unwrap()
-    );
+    db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
+        .await
+        .unwrap();
 }
 
 /// Seeds one session message at `timestamp` so the scheduler observes LCM
@@ -271,11 +269,9 @@ pub(crate) async fn seed_session_message_in_db(
             .source
             .map(|source| json!({ "source": source }).to_string()),
     };
-    assert!(
-        db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
-            .await
-            .unwrap()
-    );
+    db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
+        .await
+        .unwrap();
 }
 
 #[derive(Debug, Clone)]
@@ -287,7 +283,7 @@ pub(crate) struct SeededDuplicateFacts {
 }
 
 pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) -> SeededDuplicateFacts {
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
 
     let owner = project_memory_owner(cg);
@@ -363,7 +359,7 @@ pub(crate) async fn fact_exists(
     read_control: &tracedecay_store::FactReadControl,
 ) -> bool {
     use tracedecay_domain::FactId;
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
     use tracedecay_store::{ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1};
 

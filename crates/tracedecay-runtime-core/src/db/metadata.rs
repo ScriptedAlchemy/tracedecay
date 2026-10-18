@@ -1,4 +1,4 @@
-use crate::db::engine::params;
+use crate::db::engine::{Executor, params};
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -14,7 +14,6 @@ pub enum BoundedMetadataValue {
 
 impl Database {
     /// Reads a metadata value by key, returning `None` if not set.
-    #[hotpath::skip]
     pub async fn get_metadata(&self, key: &str) -> Result<Option<String>> {
         let mut rows = self
             .read_connection()
@@ -45,7 +44,6 @@ impl Database {
     /// `SQLite` measures the stored value as bytes and conditionally projects
     /// the value in the same query. The runtime therefore receives only the
     /// measured length and `NULL` when the value exceeds the caller's limit.
-    #[hotpath::skip]
     pub async fn get_metadata_bounded(
         &self,
         key: &str,
@@ -116,7 +114,6 @@ impl Database {
     /// Reads a metadata value through an already-open canonical write
     /// transaction. Compound durable operations use this to keep their
     /// compare-and-set and metadata update on one writer lane.
-    #[hotpath::skip]
     pub async fn get_metadata_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
@@ -146,33 +143,36 @@ impl Database {
     }
 
     /// Sets a metadata value, creating or replacing the entry.
-    #[hotpath::skip]
     pub async fn set_metadata(&self, key: &str, value: &str) -> Result<()> {
-        let transaction = self.begin_write_transaction("set_metadata").await?;
-        self.set_metadata_unguarded(&transaction, key, value)
-            .await?;
-        transaction.commit().await
+        let (key, value) = (key.to_owned(), value.to_owned());
+        self.transact("set_metadata", async move |tx| {
+            set_metadata_on(tx, &key, &value).await
+        })
+        .await?
     }
 
-    #[hotpath::skip]
     pub async fn set_metadata_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         key: &str,
         value: &str,
     ) -> Result<()> {
-        transaction
-            .execute_engine(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
-                params![key, value],
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to set metadata: {e}"),
-                operation: "set_metadata".to_string(),
-            })?;
-        Ok(())
+        set_metadata_on(transaction, key, value).await
     }
+}
+
+async fn set_metadata_on(transaction: &impl Executor, key: &str, value: &str) -> Result<()> {
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to set metadata: {e}"),
+            operation: "set_metadata".to_string(),
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -192,7 +192,7 @@ mod tests {
         (directory, database)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn bounded_metadata_distinguishes_missing_exact_and_oversized_values() {
         let (_directory, database) = database("bounded-metadata-exact").await;
         database
@@ -226,7 +226,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn bounded_metadata_measures_utf8_bytes_and_never_projects_large_values() {
         let (_directory, database) = database("bounded-metadata-bytes").await;
         database
@@ -257,7 +257,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn bounded_metadata_rejects_in_limit_non_text_but_skips_oversized_non_text() {
         let (_directory, database) = database("bounded-metadata-non-text").await;
         database

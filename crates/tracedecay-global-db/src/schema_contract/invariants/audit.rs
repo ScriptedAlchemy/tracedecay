@@ -2,26 +2,28 @@ use std::collections::{BTreeSet, HashMap};
 
 use futures_util::future::try_join_all;
 use tracedecay_domain::DurableObservationV1;
+use tracedecay_privacy::sanitize_lcm_payload_text;
 use tracedecay_store::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, WorkflowFactProjection,
+    stored_message_is_shipped_release_rendering,
 };
 
-use crate::observation_projection::ProjectionOutputAuthority;
+use crate::observation_projection::{ProjectionOutputAuthority, ProjectionRowsBatch};
 
-use crate::global_db_operation_error;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
-use super::rows::{authority_violation, decode_authority_json};
-use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, OPERATION, projection_checkpoint};
+use super::released_rendering::{
+    ReleasedRenderingLedger, StoredProvenanceRendering, admit_provenance_row,
+};
+use super::rows::{audit_read_error, authority_violation, decode_authority_observation};
+use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, projection_checkpoint};
 const AUDIT_NAME: &str = "observation-authority";
 
 const AUDIT_VERSION: i64 = 2;
 pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
 const DETAILED_AUDIT_CONCURRENCY: usize = 32;
-const DETAILED_TAIL_CONCURRENCY: usize = 1;
-// Amortize the page query across several bounded validation chunks while
-// checkpointing often enough to stay below one ordinary statement deadline.
+// Amortize the page query across several bounded validation chunks.
 const DETAILED_AUDIT_CHUNKS_PER_PAGE: usize = 3;
 const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize =
     DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE;
@@ -78,7 +80,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
         );",
     )
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    .map_err(audit_read_error)?;
     let mut rows = conn
         .query(
             "SELECT 1 FROM pragma_table_xinfo('authority_audit_checkpoints')
@@ -86,12 +88,8 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let has_bounded_passes = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .is_some();
+        .map_err(audit_read_error)?;
+    let has_bounded_passes = rows.next().await.map_err(audit_read_error)?.is_some();
     drop(rows);
     if !has_bounded_passes {
         conn.execute(
@@ -100,7 +98,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     }
     let mut rows = conn
         .query(
@@ -109,19 +107,11 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let mut has_source_cursor_rowid = false;
     let mut has_source_advance_rowid = false;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        match row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-            .as_str()
-        {
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+        match row.get::<String>(0).map_err(audit_read_error)?.as_str() {
             "source_cursor_rowid" => has_source_cursor_rowid = true,
             "source_advance_rowid" => has_source_advance_rowid = true,
             _ => {}
@@ -135,7 +125,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     }
     if !has_source_advance_rowid {
         conn.execute(
@@ -144,7 +134,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     }
     Ok(())
 }
@@ -159,14 +149,14 @@ async fn validate_existing_audit_checkpoint_baseline(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let exists = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("audit checkpoint catalog query returned no row"))?
         .get::<i64>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         != 0;
     drop(rows);
     if !exists {
@@ -187,14 +177,14 @@ async fn validate_existing_audit_checkpoint_baseline(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let found = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("audit checkpoint shape query returned no row"))?
         .get::<i64>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     if found != REQUIRED_BASELINE_COLUMNS {
         return Err(authority_violation(
             "authority audit checkpoint table is missing required baseline columns",
@@ -217,42 +207,20 @@ pub(super) async fn read_audit_checkpoint(
             params![AUDIT_NAME, AUDIT_VERSION],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    else {
+        .map_err(audit_read_error)?;
+    let Some(row) = rows.next().await.map_err(audit_read_error)? else {
         return Ok(None);
     };
     Ok(Some(AuditCheckpoint {
-        receipt_rowid: row
-            .get(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        observation_sequence: row
-            .get(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_cursor_rowid: row
-            .get(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_advance_rowid: row
-            .get(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        provenance_rowid: row
-            .get(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        disposition_rowid: row
-            .get(5)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        alias_rowid: row
-            .get(6)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        projection_checkpoint: row
-            .get(7)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        bounded_passes_since_exhaustive: row
-            .get(8)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        receipt_rowid: row.get(0).map_err(audit_read_error)?,
+        observation_sequence: row.get(1).map_err(audit_read_error)?,
+        source_cursor_rowid: row.get(2).map_err(audit_read_error)?,
+        source_advance_rowid: row.get(3).map_err(audit_read_error)?,
+        provenance_rowid: row.get(4).map_err(audit_read_error)?,
+        disposition_rowid: row.get(5).map_err(audit_read_error)?,
+        alias_rowid: row.get(6).map_err(audit_read_error)?,
+        projection_checkpoint: row.get(7).map_err(audit_read_error)?,
+        bounded_passes_since_exhaustive: row.get(8).map_err(audit_read_error)?,
     }))
 }
 
@@ -289,37 +257,21 @@ pub(super) async fn audit_checkpoint_is_plausible(
             params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let row = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("audit checkpoint frontier query returned no row"))?;
     let frontiers = AuditCheckpoint {
-        receipt_rowid: row
-            .get(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        observation_sequence: row
-            .get(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_cursor_rowid: row
-            .get(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_advance_rowid: row
-            .get(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        provenance_rowid: row
-            .get(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        disposition_rowid: row
-            .get(5)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        alias_rowid: row
-            .get(6)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        projection_checkpoint: row
-            .get(7)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        receipt_rowid: row.get(0).map_err(audit_read_error)?,
+        observation_sequence: row.get(1).map_err(audit_read_error)?,
+        source_cursor_rowid: row.get(2).map_err(audit_read_error)?,
+        source_advance_rowid: row.get(3).map_err(audit_read_error)?,
+        provenance_rowid: row.get(4).map_err(audit_read_error)?,
+        disposition_rowid: row.get(5).map_err(audit_read_error)?,
+        alias_rowid: row.get(6).map_err(audit_read_error)?,
+        projection_checkpoint: row.get(7).map_err(audit_read_error)?,
         ..AuditCheckpoint::default()
     };
     Ok(checkpoint.receipt_rowid <= frontiers.receipt_rowid
@@ -342,7 +294,6 @@ struct ProjectionAuthorityState {
 }
 
 impl ProjectionAuthorityState {
-    #[hotpath::skip]
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
@@ -365,31 +316,20 @@ impl ProjectionAuthorityState {
                 params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let row = rows
             .next()
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .map_err(audit_read_error)?
             .ok_or_else(|| {
                 authority_violation("projection authority count query returned no row")
             })?;
         Ok(Self {
-            provenance_rows: row
-                .get(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            disposition_rows: row
-                .get(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            alias_rows: row
-                .get(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            workflow_rows: row
-                .get(3)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            queued: row
-                .get::<i64>(4)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-                != 0,
+            provenance_rows: row.get(0).map_err(audit_read_error)?,
+            disposition_rows: row.get(1).map_err(audit_read_error)?,
+            alias_rows: row.get(2).map_err(audit_read_error)?,
+            workflow_rows: row.get(3).map_err(audit_read_error)?,
+            queued: row.get::<i64>(4).map_err(audit_read_error)? != 0,
         })
     }
 
@@ -426,7 +366,6 @@ struct ProjectionAliasRow {
 }
 
 impl ProjectionAliasRow {
-    #[hotpath::skip]
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
@@ -439,30 +378,26 @@ impl ProjectionAliasRow {
                 params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let row = rows
             .next()
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .map_err(audit_read_error)?
             .ok_or_else(|| authority_violation("projection alias disappeared"))?;
         Ok(Self {
-            provider: row
-                .get(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            message_id: row
-                .get(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            provider: row.get(0).map_err(audit_read_error)?,
+            message_id: row.get(1).map_err(audit_read_error)?,
         })
     }
 }
 
-struct ProjectionProvenanceRow {
-    retrieval_anchor_id: String,
-    receipt_id: String,
-    output_provider: String,
-    output_message_id: String,
-    output_digest: String,
-    message_created: i64,
+pub(super) struct ProjectionProvenanceRow {
+    pub(super) retrieval_anchor_id: String,
+    pub(super) receipt_id: String,
+    pub(super) output_provider: String,
+    pub(super) output_message_id: String,
+    pub(super) output_digest: String,
+    pub(super) message_created: i64,
 }
 
 /// Observation ids carried by one batched provenance statement.
@@ -475,9 +410,10 @@ impl ProjectionProvenanceRow {
     /// An observation/ordinal with no row is simply absent, which each caller
     /// reads as the same "projection provenance disappeared" outcome the
     /// per-row `Ok(None)` produced.
-    #[cfg_attr(
-        feature = "hotpath",
-        hotpath::measure(label = "global_db.observation_audit.batch.provenance")
+    #[tracing::instrument(
+        name = "global_db.observation_audit.batch.provenance",
+        level = "trace",
+        skip_all
     )]
     async fn load_batch(
         conn: &impl QueryExecutor,
@@ -490,7 +426,7 @@ impl ProjectionProvenanceRow {
         let requested_keys = observation_ids.iter().collect::<Vec<_>>();
         for chunk in requested_keys.chunks(PROVENANCE_ROW_BATCH_KEYS) {
             let requested = serde_json::to_string(&chunk)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                .map_err(|error| authority_violation(error.to_string()))?;
             let mut rows = conn
                 .query(
                     "SELECT provenance.observation_id, provenance.output_ordinal,
@@ -504,39 +440,19 @@ impl ProjectionProvenanceRow {
                     params![SESSION_MESSAGE_PROJECTOR_VERSION, requested.as_str()],
                 )
                 .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-            {
-                let observation_id = row
-                    .get::<String>(0)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-                let output_ordinal = row
-                    .get::<i64>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                .map_err(audit_read_error)?;
+            while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+                let observation_id = row.get::<String>(0).map_err(audit_read_error)?;
+                let output_ordinal = row.get::<i64>(1).map_err(audit_read_error)?;
                 rows_by_key.insert(
                     (observation_id, output_ordinal),
                     Self {
-                        retrieval_anchor_id: row
-                            .get(2)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        receipt_id: row
-                            .get(3)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        output_provider: row
-                            .get(4)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        output_message_id: row
-                            .get(5)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        output_digest: row
-                            .get(6)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        message_created: row
-                            .get(7)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                        retrieval_anchor_id: row.get(2).map_err(audit_read_error)?,
+                        receipt_id: row.get(3).map_err(audit_read_error)?,
+                        output_provider: row.get(4).map_err(audit_read_error)?,
+                        output_message_id: row.get(5).map_err(audit_read_error)?,
+                        output_digest: row.get(6).map_err(audit_read_error)?,
+                        message_created: row.get(7).map_err(audit_read_error)?,
                     },
                 );
             }
@@ -551,7 +467,6 @@ struct ProjectionDispositionRow {
 }
 
 impl ProjectionDispositionRow {
-    #[hotpath::skip]
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
@@ -563,19 +478,15 @@ impl ProjectionDispositionRow {
                 params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let row = rows
             .next()
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .map_err(audit_read_error)?
             .ok_or_else(|| authority_violation("projection disposition disappeared"))?;
         Ok(Self {
-            receipt_id: row
-                .get(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            reason: row
-                .get(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            receipt_id: row.get(0).map_err(audit_read_error)?,
+            reason: row.get(1).map_err(audit_read_error)?,
         })
     }
 }
@@ -596,9 +507,10 @@ impl ProjectionOutputOwnership {
     /// `COALESCE(SUM(message_created), 0)` returned for the same key. The
     /// aggregate deliberately keeps spanning every projector version, so a
     /// second projector that also claims creation is still caught.
-    #[cfg_attr(
-        feature = "hotpath",
-        hotpath::measure(label = "global_db.observation_audit.batch.ownership")
+    #[tracing::instrument(
+        name = "global_db.observation_audit.batch.ownership",
+        level = "trace",
+        skip_all
     )]
     async fn load_batch(
         conn: &impl QueryExecutor,
@@ -618,7 +530,7 @@ impl ProjectionOutputOwnership {
                     })
                     .collect::<Vec<_>>(),
             )
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(|error| authority_violation(error.to_string()))?;
             let mut rows = conn
                 .query(
                     "SELECT provenance.output_provider, provenance.output_message_id,
@@ -633,21 +545,11 @@ impl ProjectionOutputOwnership {
                     params![requested.as_str()],
                 )
                 .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-            {
-                let provider = row
-                    .get::<String>(0)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-                let message_id = row
-                    .get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-                let creator_count = row
-                    .get::<i64>(2)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                .map_err(audit_read_error)?;
+            while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+                let provider = row.get::<String>(0).map_err(audit_read_error)?;
+                let message_id = row.get::<String>(1).map_err(audit_read_error)?;
+                let creator_count = row.get::<i64>(2).map_err(audit_read_error)?;
                 counts.insert((provider, message_id), creator_count);
             }
         }
@@ -678,7 +580,7 @@ impl ProjectionOutputOwnership {
 /// The audit is a read-only convergence check over a page it has already
 /// scanned: the authority every row would have read for itself, row by row, is
 /// the same authority read here in one batched statement per table. What stays
-/// strictly per observation is the *derivation* each row is audited against —
+/// strictly per observation is the *derivation* each row is audited against,
 /// only the stored side it is compared to is shared.
 ///
 /// `ProjectionAuthorityState` deliberately stays a per-observation read. It
@@ -687,14 +589,17 @@ impl ProjectionOutputOwnership {
 /// window in which a concurrent drain turns a completed projection back into a
 /// skipped "still pending" one. The reads batched here only supply evidence a
 /// row is *compared against*, never whether the comparison happens.
-struct ResolvedOutputAuthority {
+struct ResolvedOutputAuthority<'a> {
     authorities: HashMap<(String, String), ProjectionOutputAuthority>,
     creators: HashMap<(String, String), i64>,
     provenance: HashMap<(String, i64), ProjectionProvenanceRow>,
-    projection_rows: crate::observation_projection::ProjectionRowsBatch,
+    projection_rows: ProjectionRowsBatch,
+    /// Released renderings this page found. Held here because every row that
+    /// can produce one already reads its stored authority through this struct.
+    released: &'a ReleasedRenderingLedger,
 }
 
-impl ResolvedOutputAuthority {
+impl ResolvedOutputAuthority<'_> {
     fn provenance_row(
         &self,
         observation_id: &str,
@@ -752,34 +657,11 @@ fn validate_alias_binding(
     Ok(())
 }
 
-fn validate_provenance_row(
-    actual: &ProjectionProvenanceRow,
-    projection: &SessionMessageProjection,
-) -> tracedecay_domain::errors::Result<()> {
-    let provenance = projection.provenance();
-    let message = projection.message();
-    let output_digest = projection.output_digest().map_err(|_| {
-        authority_violation("projection output digest is not canonically derivable")
-    })?;
-    if actual.retrieval_anchor_id != provenance.retrieval_anchor_id().as_str()
-        || actual.receipt_id != provenance.receipt_id()
-        || actual.output_provider != message.provider
-        || actual.output_message_id != message.message_id
-        || actual.output_digest != output_digest.as_str()
-        || !matches!(actual.message_created, 0 | 1)
-    {
-        return Err(authority_violation(
-            "projection provenance disagrees with deterministic output",
-        ));
-    }
-    Ok(())
-}
-
 async fn validate_message_projection_row(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation_id: &str,
     effect: &ObservationProjection,
-    resolved: &ResolvedOutputAuthority,
+    resolved: &ResolvedOutputAuthority<'_>,
     projection: &SessionMessageProjection,
 ) -> tracedecay_domain::errors::Result<bool> {
     let message = projection.message();
@@ -788,7 +670,12 @@ async fn validate_message_projection_row(
     else {
         return Ok(false);
     };
-    validate_provenance_row(provenance, projection)?;
+    admit_provenance_row(
+        provenance,
+        projection,
+        &resolved.projection_rows,
+        resolved.released,
+    )?;
     resolved
         .ownership(&message.provider, &message.message_id)
         .validate()?;
@@ -816,36 +703,230 @@ async fn validate_message_projection_row(
     ) else {
         return Ok(false);
     };
-    validate_provenance_row(owner_provenance, &owner_projection)?;
-    let owner_session = owner_projection.session();
-    let owner_message = owner_projection.message();
+    // A released rendering's stored rows *are* the rendering the provenance
+    // pairs them with, and the write step that owns the transaction rewrites
+    // them; comparing them against this binary's fields would refuse exactly
+    // that.
+    if admit_provenance_row(
+        owner_provenance,
+        &owner_projection,
+        &resolved.projection_rows,
+        resolved.released,
+    )? == StoredProvenanceRendering::Current
+    {
+        // Convergence supersedes an existing output row, and reinserts a
+        // vanished one only where provenance still names this observation as
+        // its creator. A surviving body that disagrees with the deterministic
+        // output stays a hard failure. Session repair is only the uniquely
+        // owned current output whose session row is absent.
+        let owner_message = owner_projection.message();
+        let output_row_present = resolved
+            .projection_rows
+            .message(&owner_message.provider, &owner_message.message_id)
+            .is_some();
+        match verify_owner_output_rows(conn, resolved, &owner_projection).await {
+            Ok(()) => {
+                // Message equality is not the whole output. The row's hash and
+                // storage kind are not compared by the message record, so a
+                // matching message can still sit on stale storage columns.
+                // Protected rows are not this arm: they differ from the
+                // projected row, and that compatibility already checked them.
+                let stored_matches = match resolved
+                    .projection_rows
+                    .message(&owner_message.provider, &owner_message.message_id)
+                {
+                    Some(stored) => {
+                        crate::observation_projection::stored_row_matches(stored, owner_message)
+                            .map_err(|error| {
+                                authority_violation(format!(
+                                    "projection output rows disagree with deterministic output: \
+                                     {error}"
+                                ))
+                            })?
+                    }
+                    None => false,
+                };
+                if stored_matches
+                    && owned_storage_columns_need_rewrite(
+                        &owner_projection,
+                        &resolved.projection_rows,
+                    )?
+                {
+                    resolved.released.record(&owner_projection);
+                }
+            }
+            Err(ProjectionStoreError::OutputCollision {
+                provider,
+                message_id,
+            }) if !output_row_present
+                && owner_provenance.message_created == 1
+                && provider == owner_message.provider
+                && message_id == owner_message.message_id
+                && owner_provenance.output_provider == provider
+                && owner_provenance.output_message_id == message_id =>
+            {
+                // Provenance still says this observation created the row, and
+                // the row is gone. That is an interrupted write, not a retired
+                // output. Restore it from the immutable projection.
+                resolved.released.record(&owner_projection);
+            }
+            Err(ProjectionStoreError::OutputCollision {
+                provider,
+                message_id,
+            }) if output_row_present
+                && provider == owner_projection.message().provider
+                && message_id == owner_projection.message().message_id
+                && resolved
+                    .projection_rows
+                    .message(&provider, &message_id)
+                    .is_some_and(|stored| {
+                        // A sanitizer fault is not a match; the row then
+                        // falls through to the named hard failure below.
+                        stored_message_is_shipped_release_rendering(
+                            &authority.canonical,
+                            |released| {
+                                crate::observation_projection::stored_row_matches(stored, released)
+                                    .is_ok_and(|matches| matches)
+                            },
+                        )
+                    }) =>
+            {
+                // Provenance already carries this binary's digest, and the
+                // mutable row is still the rendering a shipped release wrote
+                // for this observation: the write that stamped the digest did
+                // not finish. Finish it on the released-rendering ledger. A
+                // body that matches neither rendering is tamper and falls
+                // through to the hard failure below.
+                resolved.released.record(&owner_projection);
+            }
+            Err(ProjectionStoreError::SessionOutputCollision {
+                provider,
+                session_id,
+                field: "row_missing",
+            }) if !output_row_present
+                && owner_provenance.message_created == 1
+                && provider == owner_projection.session().provider
+                && session_id == owner_projection.session().session_id
+                && owner_provenance.output_provider == owner_message.provider
+                && owner_provenance.output_message_id == owner_message.message_id =>
+            {
+                // The message batch is how sessions are loaded. A creator whose
+                // message row is gone therefore looks like a missing session
+                // even when the session row is still there. Restore both from
+                // the immutable projection.
+                resolved.released.record(&owner_projection);
+            }
+            Err(ProjectionStoreError::SessionOutputCollision {
+                provider,
+                session_id,
+                field: "row_missing",
+            }) if output_row_present
+                && provider == owner_projection.session().provider
+                && session_id == owner_projection.session().session_id =>
+            {
+                // The uniquely owned current output has no session row. The
+                // immutable owner projection is the exact insert authority;
+                // defer it to the write transaction's convergence ledger.
+                // Conflicting session fields remain hard errors.
+                resolved.released.record(&owner_projection);
+            }
+            Err(error) => {
+                return Err(authority_violation(format!(
+                    "projection output rows disagree with deterministic output: {error}"
+                )));
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Compares one output's stored session and message rows against the owner
+/// projection this binary derives, using the page's batched rows.
+async fn verify_owner_output_rows(
+    conn: &impl QueryExecutor,
+    resolved: &ResolvedOutputAuthority<'_>,
+    owner: &SessionMessageProjection,
+) -> std::result::Result<(), ProjectionStoreError> {
+    let session = owner.session();
+    let message = owner.message();
+    let session_row = crate::observation_projection::load_verified_session(
+        conn,
+        &resolved.projection_rows,
+        &session.provider,
+        &session.session_id,
+    )
+    .await?;
     crate::observation_projection::verify_projection_rows_from_records(
         conn,
-        &owner_projection,
+        owner,
+        session_row.as_deref(),
         resolved
             .projection_rows
-            .session(&owner_session.provider, &owner_session.session_id),
-        resolved
-            .projection_rows
-            .message(&owner_message.provider, &owner_message.message_id),
+            .message(&message.provider, &message.message_id),
     )
     .await
-    .map_err(|error| {
-        authority_violation(format!(
-            "projection output rows disagree with deterministic output: {error}"
-        ))
-    })?;
-    Ok(true)
+}
+
+/// Whether the storage columns of a message row that already matches this
+/// projection are not the ones a fresh projection write would store.
+///
+/// A Hermes body belongs to the Hermes LCM turn authority, not the projector.
+/// A sanitizer quarantine is itself the
+/// current rendering, so the caller records the projection for the same
+/// converge path a fresh capture uses. A sanitizer fault stays a typed refusal.
+fn owned_storage_columns_need_rewrite(
+    projection: &SessionMessageProjection,
+    rows: &ProjectionRowsBatch,
+) -> tracedecay_domain::errors::Result<bool> {
+    let message = projection.message();
+    if message.provider == "hermes" {
+        return Ok(false);
+    }
+    let expected = match sanitize_lcm_payload_text(&message.text) {
+        Ok(sanitized) => sanitized.sanitized_text().to_owned(),
+        Err(error) if error.is_quarantine_verdict() => return Ok(true),
+        Err(error) => {
+            return Err(authority_violation(format!(
+                "projection message sanitizer failed: {error}"
+            )));
+        }
+    };
+    let Some(raw) = rows.storage_columns(&message.provider, &message.message_id) else {
+        return Ok(true);
+    };
+    // The derived columns are pure functions of the same sanitized body, so a
+    // twin whose content matches can still carry a hash that fails hydration
+    // with `PayloadIntegrityMismatch` or retrieval text the projector never
+    // wrote. Compare what a fresh write stores, not content alone. A body
+    // large enough for `session_canonical_bodies` stores NULL content plus the
+    // bounded snippet placeholder that drives both derived columns.
+    let (expected_snippet, expected_index) = if expected.len()
+        >= tracedecay_store::INLINE_BODY_BYTES
+    {
+        let placeholder = tracedecay_lcm::retrieval_content::derived_text_for_snippet(&expected);
+        (placeholder.clone(), placeholder)
+    } else {
+        (
+            tracedecay_lcm::retrieval_content::derived_text_for_snippet(&expected),
+            tracedecay_lcm::retrieval_content::derived_text_for_index(&expected),
+        )
+    };
+    Ok(raw.storage_kind != "inline"
+        || raw.session_id != message.session_id
+        || raw.content != expected
+        || raw.content_hash != tracedecay_lcm::retrieval_content::projected_content_hash(&expected)
+        || raw.snippet_text != expected_snippet
+        || raw.index_text != expected_index)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn validate_message_projection(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation_id: &str,
     state: ProjectionAuthorityState,
     unaliased: &ObservationProjection,
     effect: &ObservationProjection,
-    resolved: &ResolvedOutputAuthority,
+    resolved: &ResolvedOutputAuthority<'_>,
     projection: &SessionMessageProjection,
 ) -> tracedecay_domain::errors::Result<()> {
     if state.alias_rows > 1 {
@@ -907,17 +988,16 @@ fn validate_skipped_projection_row(
 
 #[allow(clippy::too_many_arguments)]
 async fn validate_composite_projection(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation_id: &str,
     state: ProjectionAuthorityState,
     unaliased: &ObservationProjection,
     effect: &ObservationProjection,
-    resolved: &ResolvedOutputAuthority,
+    resolved: &ResolvedOutputAuthority<'_>,
     message: Option<&SessionMessageProjection>,
-    derived_messages: &[SessionMessageProjection],
     workflow_facts: &[WorkflowFactProjection],
 ) -> tracedecay_domain::errors::Result<()> {
-    if workflow_facts.is_empty() && derived_messages.is_empty() {
+    if workflow_facts.is_empty() {
         return Err(authority_violation(
             "composite projection has no additional output",
         ));
@@ -934,9 +1014,7 @@ async fn validate_composite_projection(
         let alias = ProjectionAliasRow::load(conn, observation_id).await?;
         validate_alias_binding(&alias, unaliased, projection)?;
     }
-    let expected_message_rows =
-        i64::try_from(usize::from(message.is_some()) + derived_messages.len())
-            .map_err(|_| authority_violation("message projection count overflow"))?;
+    let expected_message_rows = i64::from(message.is_some());
     if state.queued {
         if state.disposition_rows != 0
             || state.workflow_rows != 0
@@ -948,12 +1026,6 @@ async fn validate_composite_projection(
         }
         let mut validated_rows = 0_i64;
         if let Some(projection) = message {
-            validated_rows += i64::from(
-                validate_message_projection_row(conn, observation_id, effect, resolved, projection)
-                    .await?,
-            );
-        }
-        for projection in derived_messages {
             validated_rows += i64::from(
                 validate_message_projection_row(conn, observation_id, effect, resolved, projection)
                     .await?,
@@ -977,13 +1049,6 @@ async fn validate_composite_projection(
     {
         return Err(authority_violation("projection provenance disappeared"));
     }
-    for projection in derived_messages {
-        if !validate_message_projection_row(conn, observation_id, effect, resolved, projection)
-            .await?
-        {
-            return Err(authority_violation("projection provenance disappeared"));
-        }
-    }
     let expected_workflow_rows = i64::try_from(workflow_facts.len())
         .map_err(|_| authority_violation("workflow projection count overflow"))?;
     if state.workflow_rows != expected_workflow_rows {
@@ -1006,7 +1071,7 @@ async fn validate_composite_projection(
 /// durable output-collision skip re-derives as `Skipped(OutputCollision)` and
 /// audits through the `Skipped` arm natively.
 async fn derive_projection_effect(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation: &DurableObservationV1,
 ) -> tracedecay_domain::errors::Result<ObservationProjection> {
     crate::observation_projection::derive_projection_with_alias(conn, observation)
@@ -1021,11 +1086,9 @@ async fn derive_projection_effect(
 /// cheaper than deciding per row whether its authority will be consulted.
 fn requested_outputs(effects: &[ObservationProjection]) -> BTreeSet<(String, String)> {
     let mut outputs = BTreeSet::new();
-    for effect in effects {
-        for projection in effect.messages() {
-            let message = projection.message();
-            outputs.insert((message.provider.clone(), message.message_id.clone()));
-        }
+    for projection in effects.iter().filter_map(ObservationProjection::message) {
+        let message = projection.message();
+        outputs.insert((message.provider.clone(), message.message_id.clone()));
     }
     outputs
 }
@@ -1034,12 +1097,13 @@ fn requested_outputs(effects: &[ObservationProjection]) -> BTreeSet<(String, Str
 ///
 /// Derivation concurrency stays exactly what it was; only its result is now
 /// retained so the page's stored authority can be read once for all of it.
-#[cfg_attr(
-    feature = "hotpath",
-    hotpath::measure(label = "global_db.observation_audit.batch.derive")
+#[tracing::instrument(
+    name = "global_db.observation_audit.batch.derive",
+    level = "trace",
+    skip_all
 )]
 async fn derive_page_effects(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observations: &[&DurableObservationV1],
 ) -> tracedecay_domain::errors::Result<Vec<ObservationProjection>> {
     let mut effects = Vec::with_capacity(observations.len());
@@ -1058,15 +1122,17 @@ async fn derive_page_effects(
 
 /// Reads the stored authority for every output a page's derivations name, in
 /// one batched statement per authority table.
-#[cfg_attr(
-    feature = "hotpath",
-    hotpath::measure(label = "global_db.observation_audit.batch.authority")
+#[tracing::instrument(
+    name = "global_db.observation_audit.batch.authority",
+    level = "trace",
+    skip_all
 )]
-async fn resolve_output_authority(
+async fn resolve_output_authority<'a>(
     conn: &impl QueryExecutor,
     observations: &[&DurableObservationV1],
     effects: &[ObservationProjection],
-) -> tracedecay_domain::errors::Result<ResolvedOutputAuthority> {
+    released: &'a ReleasedRenderingLedger,
+) -> tracedecay_domain::errors::Result<ResolvedOutputAuthority<'a>> {
     let outputs = requested_outputs(effects);
     let authorities = crate::observation_projection::read_output_authorities(conn, &outputs)
         .await
@@ -1095,6 +1161,7 @@ async fn resolve_output_authority(
                     "projection output rows disagree with deterministic output: {error}"
                 ))
             })?,
+        released,
     })
 }
 
@@ -1103,11 +1170,12 @@ async fn resolve_output_authority(
 /// per-row invariant is unchanged; only the number of round trips spent
 /// re-reading the same stored authority is.
 async fn validate_projection_effects(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observations: &[&DurableObservationV1],
+    released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<()> {
     let effects = derive_page_effects(conn, observations).await?;
-    let resolved = resolve_output_authority(conn, observations, &effects).await?;
+    let resolved = resolve_output_authority(conn, observations, &effects, released).await?;
     for group in observations
         .chunks(DETAILED_AUDIT_CONCURRENCY)
         .zip(effects.chunks(DETAILED_AUDIT_CONCURRENCY))
@@ -1122,10 +1190,10 @@ async fn validate_projection_effects(
 }
 
 async fn validate_projection_effect(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
-    resolved: &ResolvedOutputAuthority,
+    resolved: &ResolvedOutputAuthority<'_>,
 ) -> tracedecay_domain::errors::Result<()> {
     // The unaliased projection is only needed to validate alias bindings, so it
     // is derived lazily inside the arms that consume it.
@@ -1152,7 +1220,6 @@ async fn validate_projection_effect(
         }
         ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         } => {
             let unaliased = derive_unaliased_projection(observation)?;
@@ -1164,7 +1231,6 @@ async fn validate_projection_effect(
                 effect,
                 resolved,
                 message.as_deref(),
-                derived_messages,
                 workflow_facts,
             )
             .await
@@ -1192,17 +1258,17 @@ async fn observation_by_id(
             params![observation_id],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let json = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| {
             authority_violation("projection authority references a missing observation")
         })?
         .get::<String>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    decode_authority_json(&json, "projected observation authority JSON")
+        .map_err(audit_read_error)?;
+    decode_authority_observation(conn, &json).await
 }
 
 async fn count_suffix_rows(
@@ -1210,9 +1276,11 @@ async fn count_suffix_rows(
     table: &str,
     after_rowid: i64,
 ) -> tracedecay_domain::errors::Result<(i64, i64)> {
+    // `+projector_version` keeps the planner on the rowid range: an index led
+    // by projector_version would scan every row of the version, the store.
     let query = format!(
         "SELECT COALESCE(MAX(rowid), ?1), COUNT(*) FROM {table}
-         WHERE rowid > ?1 AND projector_version = ?2"
+         WHERE rowid > ?1 AND +projector_version = ?2"
     );
     let mut rows = conn
         .query(
@@ -1220,17 +1288,15 @@ async fn count_suffix_rows(
             params![after_rowid, SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let row = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("projection suffix count returned no row"))?;
     Ok((
-        row.get(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        row.get(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        row.get(0).map_err(audit_read_error)?,
+        row.get(1).map_err(audit_read_error)?,
     ))
 }
 
@@ -1249,7 +1315,7 @@ async fn collect_projection_suffix_ids(
          JOIN observations AS observation
            ON observation.observation_id = projection.observation_id
          WHERE projection.rowid > ?1
-           AND projection.projector_version = ?2
+           AND +projection.projector_version = ?2
            AND observation.sequence <= ?3
          ORDER BY projection.rowid LIMIT ?4"
     );
@@ -1266,21 +1332,12 @@ async fn collect_projection_suffix_ids(
                 ],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let mut page_rows = 0_i64;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
+        while let Some(row) = rows.next().await.map_err(audit_read_error)? {
             page_rows += 1;
-            scan_cursor = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            observation_ids.insert(
-                row.get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            );
+            scan_cursor = row.get::<i64>(0).map_err(audit_read_error)?;
+            observation_ids.insert(row.get::<String>(1).map_err(audit_read_error)?);
         }
         drop(rows);
         if page_rows < AUDIT_PAGE_ROWS {
@@ -1289,80 +1346,15 @@ async fn collect_projection_suffix_ids(
     }
 }
 
-async fn projection_rowid_through_sequence(
-    conn: &impl QueryExecutor,
-    table: &str,
-    through_observation_sequence: i64,
-) -> tracedecay_domain::errors::Result<i64> {
-    let query = format!(
-        "SELECT COALESCE(MAX(projection.rowid), 0)
-         FROM {table} AS projection
-         JOIN observations AS observation
-           ON observation.observation_id = projection.observation_id
-         WHERE projection.projector_version = ?1
-           AND observation.sequence <= ?2"
-    );
-    let mut rows = conn
-        .query(
-            &query,
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                through_observation_sequence
-            ],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    rows.next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .ok_or_else(|| authority_violation("projection progress query returned no row"))?
-        .get(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))
-}
-
-async fn projection_audit_checkpoint_through_sequence(
-    conn: &impl QueryExecutor,
-    checkpoint: AuditCheckpoint,
-    observation_sequence: i64,
-) -> tracedecay_domain::errors::Result<AuditCheckpoint> {
-    if checkpoint.bounded_passes_since_exhaustive == INCOMPLETE_EXHAUSTIVE_PASS {
-        return Ok(AuditCheckpoint {
-            projection_checkpoint: observation_sequence,
-            ..checkpoint
-        });
-    }
-    Ok(AuditCheckpoint {
-        provenance_rowid: projection_rowid_through_sequence(
-            conn,
-            "observation_projection_provenance",
-            observation_sequence,
-        )
-        .await?,
-        disposition_rowid: projection_rowid_through_sequence(
-            conn,
-            "observation_projection_dispositions",
-            observation_sequence,
-        )
-        .await?,
-        alias_rowid: projection_rowid_through_sequence(
-            conn,
-            "observation_projection_aliases",
-            observation_sequence,
-        )
-        .await?,
-        projection_checkpoint: observation_sequence,
-        ..checkpoint
-    })
-}
-
 fn historical_projection_delta_required(checkpoint: AuditCheckpoint) -> bool {
     checkpoint.bounded_passes_since_exhaustive != INCOMPLETE_EXHAUSTIVE_PASS
 }
 
 async fn validate_projection_authority_suffix_pages(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     mut checkpoint: AuditCheckpoint,
     page_limit: Option<i64>,
+    released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
     let (provenance_rowid, provenance_audited) = count_suffix_rows(
         conn,
@@ -1431,45 +1423,24 @@ async fn validate_projection_authority_suffix_pages(
                 ],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let mut page_rows = 0_i64;
         let mut detailed_observations = Vec::<(i64, DurableObservationV1)>::new();
         let mut detailed_limit_reached = false;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
+        while let Some(row) = rows.next().await.map_err(audit_read_error)? {
             page_rows += 1;
-            scan_cursor = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let observation_receipt_id = row
-                .get::<String>(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            scan_cursor = row.get::<i64>(0).map_err(audit_read_error)?;
+            let observation_receipt_id = row.get::<String>(2).map_err(audit_read_error)?;
             let state = ProjectionAuthorityState {
-                provenance_rows: row
-                    .get(3)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                disposition_rows: row
-                    .get(4)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                alias_rows: row
-                    .get(5)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                workflow_rows: row
-                    .get(6)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                queued: row
-                    .get::<i64>(7)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?
-                    != 0,
+                provenance_rows: row.get(3).map_err(audit_read_error)?,
+                disposition_rows: row.get(4).map_err(audit_read_error)?,
+                alias_rows: row.get(5).map_err(audit_read_error)?,
+                workflow_rows: row.get(6).map_err(audit_read_error)?,
+                queued: row.get::<i64>(7).map_err(audit_read_error)? != 0,
             };
             let disposition = match (
-                row.get::<Option<String>>(8)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                row.get::<Option<String>>(9)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                row.get::<Option<String>>(8).map_err(audit_read_error)?,
+                row.get::<Option<String>>(9).map_err(audit_read_error)?,
             ) {
                 (Some(receipt_id), Some(reason)) => {
                     Some(ProjectionDispositionRow { receipt_id, reason })
@@ -1489,6 +1460,7 @@ async fn validate_projection_authority_suffix_pages(
                         reason,
                         ProjectionSkipReason::OutputCollision
                             | ProjectionSkipReason::InvalidContract
+                            | ProjectionSkipReason::SourceRecordRetired
                     )
                 });
             if stored_rejection {
@@ -1507,11 +1479,36 @@ async fn validate_projection_authority_suffix_pages(
                 }
                 continue;
             }
-            let observation = decode_authority_json::<DurableObservationV1>(
-                &row.get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                "projected observation authority JSON",
-            )?;
+            let observation = decode_authority_observation(
+                conn,
+                &row.get::<String>(1).map_err(audit_read_error)?,
+            )
+            .await?;
+            if disposition.as_ref().is_some_and(|value| {
+                value.reason == ProjectionSkipReason::NativeSourceSuperseded.as_str()
+            }) {
+                if !state.is_skip() {
+                    return Err(authority_violation(
+                        "superseded source retains projection outputs",
+                    ));
+                }
+                crate::observation_projection::verify_native_source_supersession(
+                    conn,
+                    &observation,
+                )
+                .await
+                .map_err(|error| {
+                    authority_violation(format!("invalid native source supersession: {error}"))
+                })?;
+                validate_skipped_projection_row(
+                    &observation,
+                    disposition
+                        .as_ref()
+                        .ok_or_else(|| authority_violation("source disposition disappeared"))?,
+                    ProjectionSkipReason::NativeSourceSuperseded,
+                )?;
+                continue;
+            }
             let skip_reason = match crate::observation_projection::derive_projection(&observation)
                 .map_err(|error| {
                 authority_violation(format!("invalid projection authority: {error}"))
@@ -1538,27 +1535,18 @@ async fn validate_projection_authority_suffix_pages(
             }
         }
         drop(rows);
-        let validation_concurrency = if detailed_limit_reached {
-            DETAILED_AUDIT_CONCURRENCY
-        } else {
-            // The final partial page can contain unusually expensive composite
-            // outputs. Checkpoint smaller chunks so interruption never restarts
-            // the whole tail.
-            DETAILED_TAIL_CONCURRENCY
-        };
         // Derivation and the page's stored authority are read once for the
-        // whole page; validation still advances the checkpoint in
-        // `validation_concurrency` chunks, so batching the reads never widens
-        // the stride an interruption has to replay.
+        // whole page.
         let page_observations = detailed_observations
             .iter()
             .map(|(_, observation)| observation)
             .collect::<Vec<_>>();
         let page_effects = derive_page_effects(conn, &page_observations).await?;
-        let resolved = resolve_output_authority(conn, &page_observations, &page_effects).await?;
+        let resolved =
+            resolve_output_authority(conn, &page_observations, &page_effects, released).await?;
         for (chunk, chunk_effects) in detailed_observations
-            .chunks(validation_concurrency)
-            .zip(page_effects.chunks(validation_concurrency))
+            .chunks(DETAILED_AUDIT_CONCURRENCY)
+            .zip(page_effects.chunks(DETAILED_AUDIT_CONCURRENCY))
         {
             try_join_all(
                 chunk
@@ -1569,18 +1557,17 @@ async fn validate_projection_authority_suffix_pages(
                     }),
             )
             .await?;
-            let validated_through = chunk.last().map_or(scan_cursor, |(sequence, _)| *sequence);
-            checkpoint =
-                projection_audit_checkpoint_through_sequence(conn, checkpoint, validated_through)
-                    .await?;
         }
         pages_audited += 1;
         if page_rows < AUDIT_PAGE_ROWS && !detailed_limit_reached {
             break;
         }
         if page_limit.is_some_and(|limit| pages_audited >= limit) {
-            checkpoint =
-                projection_audit_checkpoint_through_sequence(conn, checkpoint, scan_cursor).await?;
+            // The projection rowid checkpoints stay where this pass started:
+            // rows appended since then for observations at or below
+            // `projection_checkpoint` are the historical delta the next pass
+            // still has to validate.
+            checkpoint.projection_checkpoint = scan_cursor;
             return Ok((
                 checkpoint,
                 provenance_audited,
@@ -1627,7 +1614,7 @@ async fn validate_projection_authority_suffix_pages(
         }
         for chunk in historical_observations.chunks(DETAILED_AUDIT_CONCURRENCY) {
             let chunk_observations = chunk.iter().collect::<Vec<_>>();
-            validate_projection_effects(conn, &chunk_observations).await?;
+            validate_projection_effects(conn, &chunk_observations, released).await?;
         }
     }
     Ok((
@@ -1646,22 +1633,25 @@ async fn validate_projection_authority_suffix_pages(
 }
 
 pub(super) async fn validate_projection_authority_suffix(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     checkpoint: AuditCheckpoint,
+    released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64)> {
     let (checkpoint, provenance, dispositions, aliases, _) =
-        validate_projection_authority_suffix_pages(conn, checkpoint, None).await?;
+        validate_projection_authority_suffix_pages(conn, checkpoint, None, released).await?;
     Ok((checkpoint, provenance, dispositions, aliases))
 }
 
 pub(super) async fn validate_projection_authority_chunk(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     checkpoint: AuditCheckpoint,
+    released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
     validate_projection_authority_suffix_pages(
         conn,
         checkpoint,
         Some(PROJECTION_PROGRESS_PAGE_INTERVAL),
+        released,
     )
     .await
 }
@@ -1720,7 +1710,7 @@ pub(super) async fn write_audit_checkpoint(
     )
     .await
     .map(|_| ())
-    .map_err(|error| global_db_operation_error(OPERATION, error))
+    .map_err(audit_read_error)
 }
 
 #[cfg(test)]
@@ -1730,22 +1720,31 @@ mod tests {
     use serde_json::Value;
     use tempfile::TempDir;
     use tracedecay_domain::{
-        CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1, ObservationId,
-        ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+        CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+        CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
+        DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
         ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-        PayloadReferenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+        PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
     };
-    use tracedecay_store::{ObservationProjection, SESSION_MESSAGE_PROJECTOR_VERSION};
+    use tracedecay_store::{
+        AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjection,
+        ObservationProjectionStore, ObservationStore, ObservationWrite, ProjectionSkipReason,
+        SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
+        build_observation_retrieval_anchor,
+    };
 
     use super::{
-        AuditCheckpoint, BTreeSet, DETAILED_AUDIT_CHUNKS_PER_PAGE, DETAILED_AUDIT_CONCURRENCY,
-        DETAILED_TAIL_CONCURRENCY, HashMap, MAX_DETAILED_OBSERVATIONS_PER_PAGE,
-        PROJECTION_PROGRESS_PAGE_INTERVAL, ProjectionOutputOwnership, ResolvedOutputAuthority,
-        ensure_audit_checkpoint_schema, historical_projection_delta_required,
-        projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
+        AuditCheckpoint, BTreeSet, HashMap, ProjectionOutputOwnership, ReleasedRenderingLedger,
+        ResolvedOutputAuthority, ensure_audit_checkpoint_schema,
+        validate_projection_authority_suffix,
     };
-    use crate::tests::harness::{RegisteredGlobalDbTestFixture, open_registered_test_fixture};
+    use crate::tests::harness::{
+        RegisteredGlobalDbTestFixture, open_registered_test_fixture, seed_projected_messages,
+        writer_telemetry,
+    };
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{
         Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
@@ -1779,17 +1778,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn exhaustive_projection_audit_bounds_detailed_work() {
-        assert_eq!(
-            MAX_DETAILED_OBSERVATIONS_PER_PAGE,
-            DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE
-        );
-        assert!(std::hint::black_box(DETAILED_TAIL_CONCURRENCY) < DETAILED_AUDIT_CONCURRENCY);
-        assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
-    }
+    crate::observation_projection::impl_send_projection_derive!(CountingQuery<'_>);
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn audit_checkpoint_schema_tracks_source_cursor_progress() {
         let directory = TempDir::new().unwrap();
         let connection = TestConnection::open(&directory.path().join("sessions.db"));
@@ -1837,8 +1828,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn invariant_receipt_probes_have_covering_indexes() {
+    #[asupersync::test]
+    async fn observation_point_reads_have_covering_indexes() {
         let directory = TempDir::new().unwrap();
         let connection = open_registered_test_fixture(
             &directory.path().join("sessions.db"),
@@ -1852,6 +1843,7 @@ mod tests {
                 "SELECT name FROM sqlite_master
                  WHERE type = 'index'
                    AND name IN (
+                       'idx_observations_valid_session_sequence',
                        'idx_observations_identity_receipt',
                        'idx_projection_dispositions_observation_receipt'
                    )
@@ -1869,52 +1861,36 @@ mod tests {
             indexes,
             [
                 "idx_observations_identity_receipt",
+                "idx_observations_valid_session_sequence",
                 "idx_projection_dispositions_observation_receipt"
             ]
         );
-    }
-
-    #[test]
-    fn incomplete_exhaustive_pass_does_not_repeat_historical_projection_audit() {
-        assert!(!historical_projection_delta_required(AuditCheckpoint {
-            bounded_passes_since_exhaustive: -1,
-            ..AuditCheckpoint::default()
-        }));
-        assert!(historical_projection_delta_required(
-            AuditCheckpoint::default()
-        ));
-    }
-
-    #[tokio::test]
-    async fn incomplete_exhaustive_checkpoint_does_not_rescan_projection_tables() {
-        let directory = TempDir::new().unwrap();
-        let connection = open_registered_test_fixture(
-            &directory.path().join("sessions.db"),
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .unwrap();
-        let counting = CountingQuery {
-            inner: &connection,
-            queries: AtomicUsize::new(0),
-        };
-        let checkpoint = AuditCheckpoint {
-            provenance_rowid: 11,
-            disposition_rowid: 22,
-            alias_rowid: 33,
-            bounded_passes_since_exhaustive: -1,
-            ..AuditCheckpoint::default()
-        };
-
-        let checkpoint = projection_audit_checkpoint_through_sequence(&counting, checkpoint, 44)
+        let mut rows = connection
+            .query(
+                "EXPLAIN QUERY PLAN
+                 SELECT observation_json
+                 FROM observations
+                 WHERE json_valid(observation_json)
+                   AND json_extract(observation_json, '$.__retention_released') IS NULL
+                   AND json_extract(
+                        observation_json,
+                        '$.identity.source.session_id'
+                   ) = ?1
+                 ORDER BY sequence DESC
+                 LIMIT ?2",
+                tracedecay_runtime_core::db::engine::params!["session.missing", 65_i64],
+            )
             .await
             .unwrap();
-
-        assert_eq!(checkpoint.provenance_rowid, 11);
-        assert_eq!(checkpoint.disposition_rowid, 22);
-        assert_eq!(checkpoint.alias_rowid, 33);
-        assert_eq!(checkpoint.projection_checkpoint, 44);
-        assert_eq!(counting.queries.load(Ordering::Relaxed), 0);
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            plan.push(row.get::<String>(3).unwrap());
+        }
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_observations_valid_session_sequence")),
+            "lifecycle admission must seek by session instead of scanning observations: {plan:?}"
+        );
     }
 
     fn skipped_observation(index: usize) -> DurableObservationV1 {
@@ -1962,7 +1938,7 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn projection_audit_batches_common_skip_rows() {
         const OBSERVATIONS: usize = 128;
 
@@ -2041,10 +2017,13 @@ mod tests {
             inner: &connection,
             queries: AtomicUsize::new(0),
         };
-        let (_, _, dispositions, _) =
-            validate_projection_authority_suffix(&counting, AuditCheckpoint::default())
-                .await
-                .unwrap();
+        let (_, _, dispositions, _) = validate_projection_authority_suffix(
+            &counting,
+            AuditCheckpoint::default(),
+            &ReleasedRenderingLedger::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(dispositions, i64::try_from(OBSERVATIONS).unwrap());
         assert!(
             counting.queries.load(Ordering::Relaxed) < OBSERVATIONS / 2,
@@ -2058,39 +2037,139 @@ mod tests {
     /// decode. The observation's own projection outcome is irrelevant here: the
     /// resolver only selects and decodes the owner row.
     async fn seed_authority_observation(
-        conn: &impl Executor,
+        conn: &RegisteredGlobalDbTestFixture,
         index: usize,
     ) -> DurableObservationV1 {
         let observation = skipped_observation(index);
-        let receipt = observation.receipt();
-        conn.execute(
-            "INSERT INTO sanitization_receipts (
-                receipt_id, sanitizer_version, payload_digest, receipt_json
-             ) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                receipt.receipt().receipt_id().as_str(),
-                receipt.receipt().sanitizer_version().as_str(),
-                observation.payload_reference().digest().as_str(),
-                serde_json::to_string(receipt).unwrap()
-            ],
+        let cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
         )
-        .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO observations (
-                observation_id, payload_digest, receipt_id,
-                observation_json, committed_cursor_json
-             ) VALUES (?1, ?2, ?3, ?4, '{}')",
-            params![
-                observation.observation_id().as_str(),
-                observation.payload_reference().digest().as_str(),
-                receipt.receipt().receipt_id().as_str(),
-                serde_json::to_string(&observation).unwrap()
-            ],
+        let generation = ProjectionGenerationId::new("projection.audit-test").unwrap();
+        let authorization =
+            build_observation_resolution_authorization_v1(&observation, "audit-test").unwrap();
+        let anchor = build_observation_retrieval_anchor(
+            &observation,
+            generation.clone(),
+            UtcMicros(1),
+            authorization,
         )
-        .await
         .unwrap();
+        let write = ObservationWrite::new(observation.clone(), None, cursor).unwrap();
+        conn.database()
+            .observation_store()
+            .persist_observation(AnchoredObservationWrite::new(write, anchor, generation).unwrap())
+            .await
+            .unwrap();
         observation
+    }
+
+    #[asupersync::test]
+    async fn projection_audit_accepts_metadata_retired_before_projection() {
+        let directory = TempDir::new().unwrap();
+        let connection = open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
+        let observation = seed_authority_observation(&connection, 0).await;
+        let registered = connection.database();
+        let previous = observation.identity().generation();
+        let generation = ObservationSourceGenerationV1::new(2).unwrap();
+        registered
+            .record_observation_source_presence(
+                observation.source(),
+                observation.scope(),
+                &[crate::ObservationSourcePresenceV1 {
+                    observation_id: observation.observation_id().clone(),
+                    generation: previous,
+                    start_offset: observation.identity().position().start(),
+                }],
+            )
+            .await
+            .unwrap();
+        registered
+            .begin_observation_source_rewrite(
+                observation.source(),
+                observation.scope(),
+                previous,
+                generation,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registered
+                .complete_observation_source_rewrite(
+                    observation.source(),
+                    observation.scope(),
+                    generation,
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        registered
+            .observation_store()
+            .project_observation(observation.observation_id())
+            .await
+            .unwrap();
+        let (_, _, dispositions, _) = validate_projection_authority_suffix(
+            &connection,
+            AuditCheckpoint::default(),
+            &ReleasedRenderingLedger::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(dispositions, 1);
+
+        let foreign_observation = seed_authority_observation(&connection, 1).await;
+        let error = connection
+            .execute(
+                "UPDATE observation_projection_dispositions
+                 SET receipt_id = ?1 WHERE observation_id = ?2",
+                params![
+                    foreign_observation
+                        .receipt()
+                        .receipt()
+                        .receipt_id()
+                        .as_str(),
+                    observation.observation_id().as_str()
+                ],
+            )
+            .await
+            .expect_err("a foreign receipt must not replace retirement authority");
+        assert!(
+            error
+                .to_string()
+                .contains("projection disposition receipt mismatch")
+        );
+
+        connection
+            .execute(
+                "UPDATE observation_projection_dispositions
+                 SET receipt_id = ?1, reason = 'unknown_reason' WHERE observation_id = ?2",
+                params![
+                    observation.receipt().receipt().receipt_id().as_str(),
+                    observation.observation_id().as_str()
+                ],
+            )
+            .await
+            .unwrap();
+        let error = validate_projection_authority_suffix(
+            &connection,
+            AuditCheckpoint::default(),
+            &ReleasedRenderingLedger::default(),
+        )
+        .await
+        .err()
+        .expect("an unknown disposition must fail the audit");
+        assert!(error.to_string().contains("deterministic skip reason"));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2108,7 +2187,7 @@ mod tests {
                 projector_version, observation_id, output_ordinal, receipt_id,
                 output_provider, output_message_id, output_digest, message_created,
                 retrieval_anchor_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 projector_version,
                 observation.observation_id().as_str(),
@@ -2117,7 +2196,13 @@ mod tests {
                 output_provider,
                 output_message_id,
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                message_created
+                message_created,
+                tracedecay_domain::derive_exact_observation_anchor_id(
+                    observation.scope(),
+                    observation.observation_id(),
+                )
+                .unwrap()
+                .as_str(),
             ],
         )
         .await
@@ -2131,7 +2216,7 @@ mod tests {
     /// an output it only adopted resolves to its *oldest*, and a requested key
     /// with no provenance resolves to nothing at all (the absence every caller
     /// turns into a typed provenance collision).
-    #[tokio::test]
+    #[asupersync::test]
     async fn batched_output_authority_reproduces_projector_ownership_ordering() {
         let directory = TempDir::new().unwrap();
         let connection = open_registered_test_fixture(
@@ -2246,7 +2331,7 @@ mod tests {
 
     /// Every requested key must be answered, including across the chunk
     /// boundary the batched statement pages at.
-    #[tokio::test]
+    #[asupersync::test]
     async fn batched_output_authority_answers_every_key_across_chunks() {
         const OUTPUTS: usize = 300;
 
@@ -2343,120 +2428,251 @@ mod tests {
         }
     }
 
-    /// One session's projected messages, committed and drained through the real
-    /// observation store so the audit sees production-shaped authority.
-    async fn seed_projected_messages(
-        runtime: &crate::tests::harness::HostAdmissionTestRuntimeV1,
-        count: usize,
-    ) -> Vec<DurableObservationV1> {
-        use tracedecay_domain::{
-            CanonicalMessageRoleV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
-            CanonicalObservationRelationsV1, ObservationSourceCursorV1, ProjectionGenerationId,
-            ProviderId, SessionId, UtcMicros,
-        };
-        use tracedecay_store::{
-            AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
-            ObservationStore, ObservationWrite,
-        };
+    crate::observation_projection::impl_send_projection_derive!(
+        CountingSnapshot<'_, tracedecay_runtime_core::db::DatabaseEngineReadSnapshot>
+    );
 
+    const CURSOR_COLLISION_MESSAGE_ID: &str = "fixture-session:0:generation:5552477573209801791";
+
+    async fn seed_projected_cursor_message(
+        runtime: &crate::tests::harness::HostAdmissionTestRuntimeV1,
+        text: &str,
+    ) -> DurableObservationV1 {
+        let provider = ProviderId::new("cursor").unwrap();
+        let session_id = SessionId::new("fixture-session").unwrap();
+        let record = ObservationId::new("cursor.native.fixture-collision").unwrap();
+        let range = ObservationSourceRangeV1::new(0, 100).unwrap();
+        let relations = CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_message_id(ObservationId::new(CURSOR_COLLISION_MESSAGE_ID).unwrap());
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider.clone(),
+            "message",
+            record.clone(),
+            relations,
+            vec![
+                CanonicalObservationFactV1::Session {
+                    project_path: None,
+                    location_path: None,
+                    transcript_path: Some("/fixture/cursor/session.jsonl".to_owned()),
+                    title: None,
+                    started_at: None,
+                    ended_at: None,
+                    source: Some("cursor_transcript".to_owned()),
+                    native_source: Some("cursor".to_owned()),
+                    profile: None,
+                    location_provenance: None,
+                },
+                CanonicalObservationFactV1::Message {
+                    role: CanonicalMessageRoleV1::User,
+                    content: serde_json::json!({ "text": text }),
+                    model: None,
+                    timestamp: Some(1_750_000_000),
+                },
+            ],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+        )
+        .unwrap();
+        let payload = serde_json::to_value(envelope).unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.cursor-fixture-collision").unwrap(),
+                ComponentVersion::new("sanitizer.cursor-fixture.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        let source =
+            ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap();
+        let generation = ObservationSourceGenerationV1::new(5_552_477_573_209_801_791).unwrap();
+        let observation = DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                source,
+                ObservationScopeV1::Profile,
+                generation,
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                record,
+            )
+            .unwrap(),
+            receipt,
+            RetentionClass::new("retention.cursor-fixture").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            generation,
+            observation.identity().ordering_domain(),
+            range.end(),
+        )
+        .unwrap();
+        let write = ObservationWrite::new(observation.clone(), None, next_cursor).unwrap();
+        let projection_generation =
+            ProjectionGenerationId::new("projection.cursor-fixture.v1").unwrap();
+        let authorization =
+            build_observation_resolution_authorization_v1(write.observation(), "cursor-fixture")
+                .unwrap();
+        let anchor = build_observation_retrieval_anchor(
+            write.observation(),
+            projection_generation.clone(),
+            UtcMicros(1),
+            authorization,
+        )
+        .unwrap();
+        let anchored = AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap();
         let store = runtime
             .observation_store(crate::tests::harness::HostAdmissionScope::Profile)
             .unwrap();
-        let provider = ProviderId::new("codex").unwrap();
-        let session_id = SessionId::new("session.audit-batch").unwrap();
-        let source =
-            ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
-                .unwrap();
-        let mut expected_cursor: Option<ObservationSourceCursorV1> = None;
-        let mut observations = Vec::with_capacity(count);
-        for index in 0..count {
-            let record_id = format!("record.audit-batch-{index}");
-            let record = ObservationId::new(record_id.clone()).unwrap();
-            let start = u64::try_from(index).unwrap() * 100;
-            let range = ObservationSourceRangeV1::new(start, start + 100).unwrap();
-            let relations = CanonicalObservationRelationsV1::new(session_id.clone())
-                .with_message_id(ObservationId::new(format!("message.{record_id}")).unwrap());
-            let envelope = CanonicalObservationEnvelopeV1::new(
-                provider.clone(),
-                "message",
-                record.clone(),
-                relations,
-                vec![CanonicalObservationFactV1::Message {
-                    role: CanonicalMessageRoleV1::Assistant,
-                    content: serde_json::json!({ "text": format!("audit batch {index}") }),
-                    model: None,
-                    timestamp: Some(1_750_000_000),
-                }],
-                CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
-            )
+        assert!(matches!(
+            store.persist_observation(anchored).await.unwrap(),
+            ObservationPersistOutcome::Committed(_)
+        ));
+        store
+            .project_observation(observation.observation_id())
+            .await
             .unwrap();
-            let payload = serde_json::to_value(envelope).unwrap();
-            let receipt = SanitizationReceiptV1::new(
-                SanitizationReceiptRefV1::new(
-                    SanitizationReceiptId::new(format!("receipt.audit-batch-{index}")).unwrap(),
-                    ComponentVersion::new("sanitizer.audit-batch.v1").unwrap(),
-                )
-                .unwrap(),
-                SanitizerDispositionV1::Accepted,
-                SensitivityV1::NonSensitive,
-                Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
-            )
+        observation
+    }
+
+    #[asupersync::test]
+    async fn projection_audit_preserves_receipt_bound_cursor_collision() {
+        let directory = TempDir::new().unwrap();
+        let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
             .unwrap();
-            let observation = DurableObservationV1::new(
-                ObservationIdentityMaterialV1::for_native_record(
-                    source.clone(),
-                    ObservationScopeV1::Profile,
-                    ObservationSourceGenerationV1::new(1).unwrap(),
-                    range,
-                    ObservationOrderingDomainV1::FileBytes,
-                    record,
-                )
-                .unwrap(),
-                receipt,
-                RetentionClass::new("retention.audit-batch").unwrap(),
-                payload,
+        let original = [
+            "fixture credential api_key=sk-cursor-collision-",
+            "1234567890abcdef",
+        ]
+        .concat();
+        let protected =
+            tracedecay_privacy::sanitize_lcm_payload_text(&original).expect("sanitize fixture");
+        assert_ne!(protected.sanitized_text(), original);
+        let observation = seed_projected_cursor_message(&runtime, &original).await;
+        let projection = crate::observation_projection::derive_projection(&observation)
+            .unwrap()
+            .message()
+            .unwrap()
+            .clone();
+        assert_eq!(projection.message().message_id, CURSOR_COLLISION_MESSAGE_ID);
+
+        let database = runtime
+            .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let legacy_metadata = serde_json::json!({
+            "ingest_protection": {
+                "sanitization_receipt":
+                    crate::tests::lcm_privacy_rescan::legacy_receipt(&original)
+            }
+        })
+        .to_string();
+        let transaction = database.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET content = ?3, content_hash = ?4, storage_kind = 'inline',
+                     payload_ref = NULL, placeholder_text = NULL, metadata_json = ?5
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![
+                    "cursor",
+                    CURSOR_COLLISION_MESSAGE_ID,
+                    original.as_str(),
+                    tracedecay_lcm::retrieval_content::projected_content_hash(&original),
+                    legacy_metadata
+                ],
             )
+            .await
             .unwrap();
-            let next_cursor = ObservationSourceCursorV1::for_ordering(
-                observation.source().clone(),
-                observation.scope().clone(),
-                observation.identity().generation(),
-                observation.identity().ordering_domain(),
-                observation.identity().position().end(),
+        transaction.commit().await.unwrap();
+        database
+            .lcm_privacy_rescan_raw_messages()
+            .await
+            .expect("privacy rescan");
+
+        let stored_before = database
+            .get_session_message("cursor", CURSOR_COLLISION_MESSAGE_ID)
+            .await
+            .expect("read receipt-bound stored message")
+            .expect("receipt-bound stored message");
+        assert_eq!(stored_before.text, protected.sanitized_text());
+        assert_ne!(stored_before, *projection.message());
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("receipt-bound protected row must not degrade convergence");
+
+        let stored_after = database
+            .get_session_message("cursor", CURSOR_COLLISION_MESSAGE_ID)
+            .await
+            .expect("read preserved stored message")
+            .expect("preserved stored message");
+        assert_eq!(
+            stored_after, stored_before,
+            "convergence must not overwrite the colliding stored evidence"
+        );
+        let snapshot = database.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT output_digest, message_created
+                 FROM observation_projection_provenance
+                 WHERE projector_version = ?1 AND observation_id = ?2",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    observation.observation_id().as_str()
+                ],
             )
+            .await
             .unwrap();
-            let write = ObservationWrite::new(
-                observation.clone(),
-                expected_cursor.clone(),
-                next_cursor.clone(),
+        let row = rows
+            .next()
+            .await
+            .unwrap()
+            .expect("preserved deterministic provenance");
+        assert_eq!(
+            row.get::<String>(0).unwrap(),
+            crate::observation_projection::stored_output_digest(&projection)
+                .unwrap()
+                .as_str()
+        );
+        assert_eq!(row.get::<i64>(1).unwrap(), 1);
+        assert!(rows.next().await.unwrap().is_none());
+    }
+
+    #[asupersync::test]
+    async fn projection_audit_restores_a_created_cursor_message_whose_row_is_gone() {
+        let directory = TempDir::new().unwrap();
+        let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed_projected_cursor_message(&runtime, "restored cursor message").await;
+        let database = runtime
+            .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let transaction = database.begin_write_transaction().await.unwrap();
+        let deleted = transaction
+            .execute(
+                "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+                params!["cursor", CURSOR_COLLISION_MESSAGE_ID],
             )
+            .await
             .unwrap();
-            let generation = ProjectionGenerationId::new("projection.audit-batch.v1").unwrap();
-            let authorization = tracedecay_store::build_observation_resolution_authorization_v1(
-                write.observation(),
-                "audit-batch",
-            )
-            .unwrap();
-            let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
-                write.observation(),
-                generation.clone(),
-                UtcMicros(1),
-                authorization,
-            )
-            .unwrap();
-            let anchored = AnchoredObservationWrite::new(write, anchor, generation).unwrap();
-            assert!(matches!(
-                store.persist_observation(anchored).await.unwrap(),
-                ObservationPersistOutcome::Committed(_)
-            ));
-            store
-                .project_observation(observation.observation_id())
-                .await
-                .unwrap();
-            expected_cursor = Some(next_cursor);
-            observations.push(observation);
-        }
-        observations
+        assert_eq!(deleted, 1);
+        transaction.commit().await.unwrap();
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("a created message with surviving provenance must be restored");
+
+        let restored = database
+            .get_session_message("cursor", CURSOR_COLLISION_MESSAGE_ID)
+            .await
+            .expect("read restored message")
+            .expect("restored message row");
+        assert_eq!(restored.text, "restored cursor message");
     }
 
     /// The audit's message path must stay correct while resolving each chunk's
@@ -2464,7 +2680,7 @@ mod tests {
     /// baseline this replaced issued two authority reads, one ownership read
     /// and a full owner re-derivation (two more reads) for every message on top
     /// of the rest; the batched path must land well under that.
-    #[tokio::test]
+    #[asupersync::test]
     async fn projection_audit_batches_message_output_authority() {
         const OBSERVATIONS: usize = 24;
 
@@ -2472,16 +2688,20 @@ mod tests {
         let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
             .unwrap();
-        let observations = seed_projected_messages(&runtime, OBSERVATIONS).await;
+        let observations = seed_projected_messages(&runtime, 0..OBSERVATIONS).await;
 
         let database = runtime
             .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
             .expect("registered profile database");
         let snapshot = database.read_snapshot().await.unwrap();
         let counting = CountingSnapshot::new(&snapshot);
-        validate_projection_authority_suffix(&counting, AuditCheckpoint::default())
-            .await
-            .expect("a batched audit of well-formed projections must converge");
+        validate_projection_authority_suffix(
+            &counting,
+            AuditCheckpoint::default(),
+            &ReleasedRenderingLedger::default(),
+        )
+        .await
+        .expect("a batched audit of well-formed projections must converge");
 
         // Each batched authority read is issued once for the whole page, not
         // once per projected message.
@@ -2513,7 +2733,7 @@ mod tests {
             "projected sessions must reuse the page authority instead of reading per output"
         );
         assert_eq!(
-            counting.issued("FROM session_messages WHERE provider = ?1 AND message_id = ?2"),
+            counting.issued("FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2"),
             0,
             "projected messages must reuse the page authority instead of reading per output"
         );
@@ -2589,7 +2809,7 @@ mod tests {
             "projection audit issued {queries} queries for {OBSERVATIONS} projected messages"
         );
 
-        let effect = crate::observation_projection::derive_projection(&observations[0]).unwrap();
+        let effect = crate::observation_projection::derive_projection(&observations[0].0).unwrap();
         let projection = effect.message().expect("seeded message projection");
         let message = projection.message();
         let requested = BTreeSet::from([(message.provider.clone(), message.message_id.clone())]);
@@ -2624,10 +2844,110 @@ mod tests {
         );
     }
 
+    /// Runs the resumed (non-exhaustive) authority audit and returns the
+    /// SQLite VM steps it executed; the audit runs inside the writer's stepped
+    /// transactions.
+    async fn resumed_audit_vm_steps(database: &crate::RegisteredGlobalDb) -> u64 {
+        let vm_steps = || writer_telemetry(database).sqlite_vm.vm_steps;
+        let before = vm_steps();
+        super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+            .await
+            .expect("well-formed projections must pass the resumed audit");
+        vm_steps() - before
+    }
+
+    /// A resumed audit validates the observations committed since its
+    /// checkpoint. Its work must follow those observations: re-reading the
+    /// store for each one makes a streamed window cost O(new × store).
+    #[asupersync::test]
+    async fn resumed_authority_audit_work_follows_new_observations_not_the_store() {
+        const BASE: usize = 48;
+        const GROWN: usize = 8 * BASE;
+        const STREAMED: usize = 16;
+
+        let directory = TempDir::new().unwrap();
+        let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        let database = runtime
+            .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+            .expect("registered profile database");
+
+        seed_projected_messages(&runtime, 0..BASE).await;
+        resumed_audit_vm_steps(database).await;
+        seed_projected_messages(&runtime, BASE..BASE + STREAMED).await;
+        let base_steps = resumed_audit_vm_steps(database).await;
+
+        seed_projected_messages(&runtime, BASE + STREAMED..GROWN + STREAMED).await;
+        resumed_audit_vm_steps(database).await;
+        seed_projected_messages(&runtime, GROWN + STREAMED..GROWN + 2 * STREAMED).await;
+        let grown_steps = resumed_audit_vm_steps(database).await;
+
+        eprintln!("resumed authority audit VM steps: base={base_steps} grown={grown_steps}");
+        assert!(
+            grown_steps * 10 <= base_steps * 12,
+            "auditing {STREAMED} new observations on an 8x larger store must stay within \
+             1.2x of the base store's audit work: base={base_steps} grown={grown_steps}"
+        );
+    }
+
+    /// A projection row appended for an observation the previous pass already
+    /// audited sits behind the observation checkpoint but past the projection
+    /// rowid checkpoints. The resumed audit must still reach it when the same
+    /// pass also validates newly committed observations.
+    #[asupersync::test]
+    async fn resumed_authority_audit_detects_a_projection_row_planted_behind_its_checkpoint() {
+        let directory = TempDir::new().unwrap();
+        let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        let database = runtime
+            .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let audited = seed_projected_messages(&runtime, 0..8).await;
+        resumed_audit_vm_steps(database).await;
+
+        let transaction = database.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "INSERT INTO observation_projection_dispositions (
+                    projector_version, observation_id, receipt_id, reason
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    audited[0].0.observation_id().as_str(),
+                    audited[0].0.receipt().receipt().receipt_id().as_str(),
+                    ProjectionSkipReason::OutputCollision.as_str()
+                ],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        seed_projected_messages(&runtime, 8..12).await;
+
+        let error =
+            super::super::ensure_authority_invariants(database.runtime_database(), false, false)
+                .await
+                .expect_err("a planted disposition on a projected message must fail the audit");
+        assert_eq!(
+            error.project_open_failure_kind(),
+            Some(
+                tracedecay_domain::errors::ProjectOpenFailureKind::AuthorityVerdict {
+                    migration_pending: false,
+                }
+            ),
+            "a planted row is a verdict about the stored data: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "projection authority must contain exactly one skip outcome without an alias"
+        );
+    }
+
     /// Batched creation-owner counting keeps the "one creator per output"
     /// invariant, including the cross-projector case a single projector-scoped
     /// query would miss, and reads an unknown output as zero creators.
-    #[tokio::test]
+    #[asupersync::test]
     async fn batched_output_ownership_still_rejects_multiple_creators() {
         let directory = TempDir::new().unwrap();
         let connection = open_registered_test_fixture(
@@ -2692,6 +3012,7 @@ mod tests {
             )
             .await
             .unwrap(),
+            released: &ReleasedRenderingLedger::default(),
         };
 
         let contested = resolved

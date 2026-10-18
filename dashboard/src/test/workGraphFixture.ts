@@ -5,7 +5,7 @@ import type {
   WorkRuntimeProjectionCoverageV1,
   WorkRelationReplanDecisionV1,
   WorkTimelineLaneV1,
-} from '../contracts/index.ts';
+} from '../contracts/generated.ts';
 
 /**
  * Work-product graph reads for the Work tests, shaped the way the daemon shapes
@@ -27,7 +27,7 @@ import type {
  * for a derivation bug to hide behind a number nobody could trace back.
  */
 
-export interface WorkGraphTaskSpec {
+interface WorkGraphTaskSpec {
   readonly taskId: string;
   readonly title?: string;
   readonly acceptedProposal?: string | null;
@@ -41,20 +41,20 @@ export interface WorkGraphTaskSpec {
   readonly scheduledAt?: number | null;
   readonly deadline?: number | null;
   readonly dependencies?: readonly string[];
-  /** Nominated causes. DECLARED data — an empty list is the plan declaring
+  /** Nominated causes. DECLARED data. An empty list is the plan declaring
    * none, which is the case these tests exist to keep separate from a read that
    * could not answer. */
   readonly causalCandidates?: readonly string[];
   readonly lane?: WorkTimelineLaneV1;
   /** Handoffs recorded on this task. Omitted means the task carries none,
-   * which is a graph saying nothing was handed on — distinct from a read that
+   * which is a graph saying nothing was handed on, distinct from a read that
    * never landed, and the Agents handoff surface is built to keep the two
    * apart. `task_id` is filled from the spec so a fixture cannot record a
    * handoff against a task it does not belong to. */
   readonly handoffs?: readonly WorkHandoffSpec[];
 }
 
-export interface WorkHandoffSpec {
+interface WorkHandoffSpec {
   readonly handoffId: string;
   readonly fromActor: string;
   readonly toActor: string;
@@ -64,7 +64,7 @@ export interface WorkHandoffSpec {
   readonly unknowns?: readonly string[];
 }
 
-export interface WorkRuntimeAttemptSpec {
+interface WorkRuntimeAttemptSpec {
   readonly attemptId: string;
   readonly taskId: string;
   readonly runId: string;
@@ -74,7 +74,7 @@ export interface WorkRuntimeAttemptSpec {
 export interface WorkGraphVersionSpec {
   readonly tasks: readonly WorkGraphTaskSpec[];
   readonly version?: number;
-  /** The instant the caller observed this version at — the clock every churn
+  /** The instant the caller observed this version at, the clock every churn
    * reading is measured against. */
   readonly observedAt?: number;
   readonly validAt?: number;
@@ -145,7 +145,7 @@ function workItem(task: WorkGraphTaskSpec, observedAt: number) {
 }
 
 /** The runtime projection, restated identically on the entry and inside the
- * bundle — which is how the daemon serializes it, and the reason the dashboard
+ * bundle, which is how the daemon serializes it, and the reason the dashboard
  * can read either one and get the same version. */
 function runtimeProjection(spec: WorkGraphVersionSpec, version: number, observedAt: number) {
   return {
@@ -167,7 +167,7 @@ function runtimeProjection(spec: WorkGraphVersionSpec, version: number, observed
 
 /** One `WorkGraphVersionEntryV1`: an immutable graph version and the whole
  * projection bundle derived from it at one observation instant. */
-export function workGraphVersion(spec: WorkGraphVersionSpec) {
+function workGraphVersion(spec: WorkGraphVersionSpec) {
   const version = spec.version ?? 4;
   const observedAt = spec.observedAt ?? DEFAULT_OBSERVED_AT;
   const totalEffort = spec.tasks.reduce((sum, task) => sum + taskEffort(task), 0);
@@ -274,7 +274,7 @@ const COMPLETE_SELECTION: WorkGraphSelectionCoverageV1 = {
   covered_events: 1,
 };
 
-/** A `current` graph read: one version, no timeline — the mode the dashboard
+/** A `current` graph read: one version, no timeline, the mode the dashboard
  * actually asks in. `selection_coverage` says how much of the owner's journal
  * the selection covered; a `partial` one is a truthful reading of a slice, not
  * a broken graph. */
@@ -291,8 +291,8 @@ export function workGraphRead(
 }
 
 /** An `evolution` graph read: a timeline of versions and the coverage it was
- * read under. Present so the empty-timeline success — complete coverage over
- * zero returned entries — can be put on the wire as the daemon would send it. */
+ * read under. Present so the empty-timeline success, complete coverage over
+ * zero returned entries, can be put on the wire as the daemon would send it. */
 export function workGraphTimeline(
   versions: readonly WorkGraphVersionSpec[],
   coverage: WorkGraphTimelineCoverageV1 = {

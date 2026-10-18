@@ -6,7 +6,8 @@ use tracedecay_domain::{
     TemporalValidityV1, UtcMicros,
 };
 
-use super::super::ports::{ExecutionControl, TemporalPortError};
+use super::super::execution::ExecutionControl;
+use crate::execution::TemporalPortError;
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub enum SummarySourceState {
@@ -199,7 +200,7 @@ fn summary_source_rejection(
                         // ingested messages today): that uncertainty is already
                         // surfaced per-occurrence through the coverage
                         // `unknown` axis, so it must not reject the summary's
-                        // whole lineage — only a provably out-of-horizon
+                        // whole lineage, only a provably out-of-horizon
                         // source does.
                         (TemporalValidityV1::Unknown, Some(_)) => None,
                         (_, None) => None,

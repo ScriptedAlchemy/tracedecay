@@ -1,26 +1,30 @@
 use std::collections::BTreeMap;
-use std::fmt;
 
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, EphemeralSanitizedQueryViewV1, ExactAdmissionProof,
     ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1, FreshnessVectorDigest,
     PrincipalId, PrivacyDomainId, QueryNormalizationRevision, RepositoryId, RetrievalAnchorId,
     RetrievalBudget, RetrievalContractError, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    SanitizerRevision, SingleRootScopeV1, SourceOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorWatermark,
+    RetrievalSourceRoleV1, SanitizerRevision, SingleRootScopeV1, SourceOccurrenceId,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{ExactLaneEvidence, ExactLaneRequest, ExactLiteralV1};
 use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl, RetrievalPortError,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
+struct ActiveControl;
+
+impl RetrievalExecutionControl for ActiveControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
 }
+
+use tracedecay_domain::test_fixtures::id;
 
 fn request_and_proof() -> (ExactLaneRequest<'static>, ExactAdmissionProof) {
     let scope = RetrievalScope {
@@ -85,10 +89,12 @@ fn request_and_proof() -> (ExactLaneRequest<'static>, ExactAdmissionProof) {
     ));
     (
         ExactLaneRequest {
+            control: &ActiveControl,
             base,
             query_view,
             generation: CodeGenerationId::new("generation.contract").unwrap(),
             literals: vec![literal],
+            path_prefix: None,
             budget,
         },
         proof,
@@ -131,6 +137,8 @@ fn exact_evidence_matches_the_frozen_generation_and_literal() {
         },
         matched_literals: vec![literal],
         admission_proof: proof,
+        source_role: RetrievalSourceRoleV1::default(),
+        specificity_micros: 1_000_000,
     };
     evidence
         .validate(&request)

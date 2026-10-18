@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::Database;
-use crate::store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
+use crate::shard_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_db::GraphWatermark;
 
@@ -11,7 +11,7 @@ use tracedecay_graph_db::GraphWatermark;
 /// reject updates and deletes) and its `AUTOINCREMENT` key is never reused,
 /// and every committed mutation that can change the projected source records
 /// at least one lineage event in the same transaction (the invariant
-/// `store::memory::graph::source_unchanged_since` already relies on). Two
+/// `tracedecay_session_memory::fact_store::graph::source_unchanged_since` already relies on). Two
 /// snapshots observing the same maximum sequence therefore saw an identical
 /// projected source, so a watermark computed under one snapshot remains valid
 /// for any later snapshot that still observes the same stamp.
@@ -130,10 +130,7 @@ impl Database {
     /// Returns the memoized projected-source watermark when it was computed
     /// under the exact `lineage_stamp` the caller currently observes.
     #[must_use]
-    pub(crate) fn memory_graph_source_watermark_at(
-        &self,
-        lineage_stamp: i64,
-    ) -> Option<GraphWatermark> {
+    pub fn memory_graph_source_watermark_at(&self, lineage_stamp: i64) -> Option<GraphWatermark> {
         self.inner
             .memory_graph_source_watermark
             .lock()
@@ -145,7 +142,7 @@ impl Database {
 
     /// Records the projected-source watermark computed under `lineage_stamp`.
     /// The stamp and the hashed source must come from the same read snapshot.
-    pub(crate) fn record_memory_graph_source_watermark(
+    pub fn record_memory_graph_source_watermark(
         &self,
         lineage_stamp: i64,
         watermark: GraphWatermark,
@@ -212,7 +209,7 @@ mod tests {
     use crate::db::{
         DatabaseAuthority, MemoryGraphRuntimeOperationErrorV1, TestDatabaseRuntimeMode,
     };
-    use crate::store_runtime::VerifiedGraphRuntimePortV1;
+    use crate::shard_runtime::VerifiedGraphRuntimePortV1;
 
     struct TestGraphRuntime {
         binding: StoreRuntimeBindingV1,
@@ -264,7 +261,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn concurrent_identical_graph_runtime_binds_are_idempotent() {
         let directory = tempfile::tempdir().expect("graph binding directory");
         let database_path = directory.path().join("memory.db");
@@ -310,7 +307,7 @@ mod tests {
         assert!(Arc::ptr_eq(&operation.runtime, &runtime));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn stamped_source_watermark_memo_serves_only_the_exact_lineage_stamp() {
         let directory = tempfile::tempdir().expect("watermark memo directory");
         let database_path = directory.path().join("memory.db");
@@ -324,7 +321,7 @@ mod tests {
         .await
         .expect("database runtime");
 
-        // Before any record, every stamp is a miss — never a fabricated hit.
+        // Before any record, every stamp is a miss, never a fabricated hit.
         assert!(database.memory_graph_source_watermark_at(7).is_none());
 
         let first = GraphWatermark::new("sha256:memo-stamp-seven").expect("first watermark");
@@ -345,7 +342,7 @@ mod tests {
         assert!(database.memory_graph_source_watermark_at(7).is_none());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn graph_runtime_binding_rejects_the_right_shard_with_the_wrong_locator() {
         let directory = tempfile::tempdir().expect("graph locator binding directory");
         let database_path = directory.path().join("memory.db");
@@ -375,7 +372,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn bound_graph_runtime_does_not_retain_a_derived_store_or_graph_owner() {
         let directory = tempfile::tempdir().expect("weak graph binding directory");
         let database_path = directory.path().join("memory.db");
@@ -405,7 +402,7 @@ mod tests {
         assert!(weak_runtime.upgrade().is_none());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn deferred_graph_proxy_resolves_once_activation_completes() {
         let directory = tempfile::tempdir().expect("deferred graph proxy directory");
         let database_path = directory.path().join("memory.db");
@@ -463,7 +460,7 @@ mod tests {
         assert!(resolved.shares_runtime_with(&deferred));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn deferred_graph_proxy_stays_typed_without_activation_and_across_owner_drop() {
         let directory = tempfile::tempdir().expect("never-activated graph proxy directory");
         let database_path = directory.path().join("memory.db");
@@ -496,7 +493,7 @@ mod tests {
                 .expect("valid never-activated projection"),
         );
         // A runtime that never becomes available stays a typed refusal at
-        // every read — never a panic, silent success, or empty result.
+        // every read, never a panic, silent success, or empty result.
         assert!(matches!(
             deferred.verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false))),
             Err(GraphDbError::Unavailable { .. })
@@ -525,7 +522,7 @@ mod tests {
         assert_eq!(snapshot_calls.load(Ordering::Acquire), 0);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn weak_graph_proxy_delegates_live_and_reports_absent_owner() {
         let directory = tempfile::tempdir().expect("weak graph proxy directory");
         let database_path = directory.path().join("memory.db");

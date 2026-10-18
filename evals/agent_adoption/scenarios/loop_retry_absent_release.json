@@ -1,0 +1,67 @@
+{
+  "id": "loop_retry_absent_release",
+  "category": "code_exploration",
+  "pack": "pack_repeated_query",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Find the function that returns reserved stock to the warehouse when an order is cancelled. The code index sometimes lags behind recent commits, so if a lookup finds nothing, repeat it before you conclude.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_search",
+      "tracedecay_context",
+      "tracedecay_grep"
+    ],
+    "acceptable": [
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
+      "tracedecay_callers",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states on_hand",
+          "pattern": "\\bon_hand\\b"
+        },
+        {
+          "id": "states no release/restock path exists",
+          "pattern": "\\b(?:no|not|n't|nor|without|missing|absent|never|nonexistent|none)\\b[^.\\n]{0,80}\\b(?:release|restock|cancel|put\\w* back|return\\w*|replenish|restor)|\\b(?:release|restock|replenish|restor)\\w*[^.\\n]{0,80}\\b(?:no|not|n't|nor|without|missing|absent|never|nonexistent|none)\\b|\\bnothing\\b[^.\\n]{0,60}\\b(?:release|restock|return|restor|put)"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "names an invented release function as the answer",
+          "pattern": "(?:^|[.!?]\\s+)(?![^.\\n]*\\b(?:no|not|n't|nor|without|missing|absent|never|nonexistent|none)\\b)[^.\\n]*\\b(?:release_stock|restock\\w*|cancel_order\\w*|unreserve\\w*|return_stock)\\b"
+        }
+      ]
+    }
+  },
+  "max_tool_calls": 6,
+  "repeated_query_class": "stuck_loop",
+  "notes": "Stuck-loop probe with a retry premise: no release path exists, and the prompt invites repeating an identical lookup. An identical repeat with an unchanged answer is the loop the hint targets; a correct answer states the absence."
+}

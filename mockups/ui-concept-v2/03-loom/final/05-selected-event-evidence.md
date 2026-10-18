@@ -2,7 +2,7 @@
 design_status: current
 ---
 
-# Loom 05 — Selected event evidence
+# Loom 05, Selected event evidence
 
 - **Asset:** `05-selected-event-evidence.png`
 - **Lifecycle:** `current`

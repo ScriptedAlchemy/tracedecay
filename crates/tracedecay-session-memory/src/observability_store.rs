@@ -1,6 +1,9 @@
 //! Registered-store adapter for canonical observability envelopes.
 
-use tracedecay_application::{
+use std::future::Future;
+use std::pin::Pin;
+
+use tracedecay_contracts::{
     ApplicationContractError, ExecutionTopologyRollupFragmentPageV1,
     ExecutionTopologyRollupFragmentQueryV1, ExecutionTopologyRollupQueryPort, ObservabilityFuture,
     ObservabilityPageV1, ObservabilityQueryPort, ObservabilityQueryV1, ObservabilityRecordPort,
@@ -8,7 +11,7 @@ use tracedecay_application::{
 use tracedecay_domain::{CoverageStateV1, ObservabilityEnvelopeV1};
 use tracedecay_global_db::{
     AnalyticsEventInsert, AnalyticsEventQuery, ObservabilityRollupFragmentQueryV1,
-    RegisteredGlobalDb,
+    RegisteredGlobalDb, merge_coverage,
 };
 
 /// Hard cap on eligible envelopes served per observability query.
@@ -28,37 +31,50 @@ pub struct RegisteredObservabilityPortV1<'a> {
 }
 
 impl<'a> RegisteredObservabilityPortV1<'a> {
-    #[hotpath::skip]
     pub const fn new(db: &'a RegisteredGlobalDb) -> Self {
         Self { db }
+    }
+
+    pub async fn read_exact(
+        &self,
+        authorized_scope_ref: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<ObservabilityEnvelopeV1>, ApplicationContractError> {
+        let row: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<Option<tracedecay_global_db::AnalyticsEventRecord>, String>,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(
+            self.db
+                .read_observability_event(authorized_scope_ref, idempotency_key),
+        );
+        let Some(row) = row.await.map_err(ApplicationContractError::Domain)? else {
+            return Ok(None);
+        };
+        let envelope = row
+            .metadata_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<ObservabilityEnvelopeV1>(value).ok())
+            .filter(|envelope| envelope.validate().is_ok())
+            .filter(|envelope| {
+                envelope.scope_ref == authorized_scope_ref
+                    && envelope.idempotency_key == idempotency_key
+                    && envelope.event_kind == row.event_kind
+            })
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "observability_exact_read",
+            })?;
+        Ok(Some(envelope))
     }
 }
 
 impl ObservabilityRecordPort for RegisteredObservabilityPortV1<'_> {
     fn record(&self, envelope: ObservabilityEnvelopeV1) -> ObservabilityFuture<'_, String> {
         Box::pin(async move {
-            envelope
-                .validate()
-                .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
-            let metadata_json = serde_json::to_string(&envelope)
-                .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
-            let insert = AnalyticsEventInsert {
-                provider: OBSERVABILITY_PROVIDER.to_string(),
-                project_id: envelope.scope_ref.clone(),
-                session_id: None,
-                timestamp: envelope.event_time_micros.div_euclid(1_000_000),
-                event_kind: envelope.event_kind.clone(),
-                hook_name: None,
-                tool_name: None,
-                tool_category: None,
-                skill_name: None,
-                hint_category: None,
-                hint_id: Some(envelope.idempotency_key.clone()),
-                outcome: envelope
-                    .terminal_result
-                    .map(|result| format!("{result:?}").to_ascii_lowercase()),
-                metadata_json: Some(metadata_json),
-            };
+            let insert = observability_insert(envelope)?;
             self.db
                 .append_observability_event(&insert)
                 .await
@@ -66,6 +82,51 @@ impl ObservabilityRecordPort for RegisteredObservabilityPortV1<'_> {
                 .map_err(ApplicationContractError::Domain)
         })
     }
+}
+
+pub async fn record_observability_batch(
+    db: &RegisteredGlobalDb,
+    envelopes: Vec<ObservabilityEnvelopeV1>,
+) -> Result<Vec<String>, ApplicationContractError> {
+    let inserts = envelopes
+        .into_iter()
+        .map(observability_insert)
+        .collect::<Result<Vec<_>, _>>()?;
+    db.append_observability_events(&inserts)
+        .await
+        .map(|ids| {
+            ids.into_iter()
+                .map(|id| format!("analytics:{id}"))
+                .collect()
+        })
+        .map_err(ApplicationContractError::Domain)
+}
+
+fn observability_insert(
+    envelope: ObservabilityEnvelopeV1,
+) -> Result<AnalyticsEventInsert, ApplicationContractError> {
+    envelope
+        .validate()
+        .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
+    let metadata_json = serde_json::to_string(&envelope)
+        .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
+    Ok(AnalyticsEventInsert {
+        provider: OBSERVABILITY_PROVIDER.to_owned(),
+        project_id: envelope.scope_ref,
+        session_id: None,
+        timestamp: envelope.event_time_micros.div_euclid(1_000_000),
+        event_kind: envelope.event_kind,
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: Some(envelope.idempotency_key),
+        outcome: envelope
+            .terminal_result
+            .map(|result| format!("{result:?}").to_ascii_lowercase()),
+        metadata_json: Some(metadata_json),
+    })
 }
 
 impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
@@ -214,10 +275,10 @@ impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
                 CoverageStateV1::Known
             };
             for (_, event) in &eligible {
-                coverage = merge_coverage_state(coverage, event.coverage);
+                coverage = merge_coverage(coverage, event.coverage);
             }
             if invalid_in_page {
-                coverage = merge_coverage_state(coverage, CoverageStateV1::Partial);
+                coverage = merge_coverage(coverage, CoverageStateV1::Partial);
             }
             eligible.sort_by(|(_, left), (_, right)| {
                 (
@@ -288,24 +349,5 @@ impl ExecutionTopologyRollupQueryPort for RegisteredObservabilityPortV1<'_> {
                     .collect(),
             })
         })
-    }
-}
-
-fn merge_coverage_state(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
-    #[hotpath::skip]
-    const fn rank(state: CoverageStateV1) -> u8 {
-        match state {
-            CoverageStateV1::Known => 0,
-            CoverageStateV1::Capped => 1,
-            CoverageStateV1::Sampled => 2,
-            CoverageStateV1::Partial => 3,
-            CoverageStateV1::Stale => 4,
-            CoverageStateV1::Unknown => 5,
-        }
-    }
-    if rank(left) >= rank(right) {
-        left
-    } else {
-        right
     }
 }

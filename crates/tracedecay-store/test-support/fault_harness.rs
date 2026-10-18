@@ -2,9 +2,9 @@
 //!
 //! The daemon-crash harness needs the daemon to stop *inside* a chosen
 //! observation-persistence boundary so the test can kill it there and observe
-//! what the boundary guaranteed. Both boundaries live in different crates —
+//! what the boundary guaranteed. Both boundaries live in different crates,
 //! the pre-commit one inside the rusqlite write executor, the pre-ack one in
-//! the store adapter that owns the client response — so the claim protocol
+//! the store adapter that owns the client response, so the claim protocol
 //! lives here, where both can reach it.
 //!
 //! The whole module is compiled only under

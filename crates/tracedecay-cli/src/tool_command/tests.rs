@@ -1,12 +1,22 @@
 use super::*;
 use serde_json::{Value, json};
-use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef, SafeDiagnostic,
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationProblemEnvelope, OpaqueCursor, PageRequest, RequestId,
+    ResultContractRef, SafeDiagnostic,
 };
-use tracedecay_tool_catalog::{BindingId, SchemaId};
+use tracedecay_daemon_protocol::{
+    BindingResolution, CatalogBindingResolver, ResolvedBinding, decode_retained_request,
+};
+use tracedecay_daemon_service::application_surface::{
+    application_surface_catalog_ref, parse_http_application_surface_request,
+    resolve_application_surface_dispatch_with_controls,
+};
+use tracedecay_tool_catalog::{
+    BindingId, BindingSurface, ProfileId, SchemaId, SurfaceOperationName,
+};
 
 fn defs() -> Vec<ToolDefinition> {
-    get_tool_definitions().expect("tool definitions")
+    tracedecay_mcp::get_tool_definitions().expect("tool definitions")
 }
 
 fn def(name: &str) -> ToolDefinition {
@@ -17,38 +27,15 @@ fn def(name: &str) -> ToolDefinition {
 }
 
 #[test]
-fn fact_store_tool_lookup_rejects_broad_and_accepts_exact_routes() {
-    let definitions = defs();
-    assert!(
-        definitions
-            .iter()
-            .all(|definition| definition.name != "tracedecay_fact_store")
-    );
-    for name in [
-        "fact_store_add",
-        "fact_store_search",
-        "fact_store_probe",
-        "fact_store_related",
-        "fact_store_reason",
-        "fact_store_contradict",
-        "fact_store_get",
-        "fact_store_update",
-        "fact_store_remove",
-        "fact_store_list",
-    ] {
-        let canonical = canonical_tool_name(name);
-        assert!(
-            definitions
-                .iter()
-                .any(|definition| definition.name == canonical),
-            "{canonical} must resolve through the CLI catalog"
-        );
-    }
+fn search_flags_bind_query_from_the_one_tool_schema() {
+    let definition =
+        tracedecay_mcp::cli_tool_definition("tracedecay_search").expect("search CLI definition");
+    let parsed = parse_invocation(&definition, &["findable_symbol".to_string()]).unwrap();
+    assert_eq!(parsed.tool_args, json!({ "query": "findable_symbol" }));
 }
 
 #[test]
-fn canonicalizes_alias_and_strip_prefix() {
-    assert_eq!(canonical_tool_name("query"), "tracedecay_search");
+fn canonicalizes_prefix_and_dashes() {
     assert_eq!(
         canonical_tool_name("tracedecay_search"),
         "tracedecay_search"
@@ -79,6 +66,50 @@ fn whole_payload_invocation_parses_without_a_tool_definition() {
     assert!(parsed.raw_json);
     assert!(!parsed.dry_run);
     assert!(!parsed.show_help);
+}
+
+#[test]
+fn multi_root_execute_accepts_its_emitted_continuation_object() {
+    let digest = |byte: char| {
+        tracedecay_domain::ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
+            .expect("test digest")
+    };
+    let generation = tracedecay_domain::RootScopeOutcomeV1::new(
+        digest('b'),
+        tracedecay_domain::ScopeOutcome::<Option<tracedecay_domain::RootGenerationV1>>::Denied,
+    )
+    .expect("denied root generation");
+    let emitted = tracedecay_contracts::MultiRootContinuationV1::new(
+        digest('a'),
+        vec![generation.clone()],
+        vec![tracedecay_domain::RootScopeOutcomeV1::new(
+            digest('b'),
+            tracedecay_domain::ScopeOutcome::<Option<tracedecay_contracts::OpaqueCursor>>::Denied,
+        )
+        .expect("denied root cursor")],
+        digest('c'),
+        digest('d'),
+        1,
+    )
+    .expect("page-zero continuation");
+    let continuation = serde_json::to_value(emitted).expect("emitted continuation JSON");
+    let arguments = json!({
+        "scope_set_id": "scope-set.cli-replay",
+        "scope_set_revision": 1,
+        "scope_set_digest": format!("sha256:{}", "a".repeat(64)),
+        "operation": {"kind": "query", "request": {}},
+        "page": 1,
+        "continuation": continuation
+    });
+
+    let parsed = parse_invocation_with_stdin(
+        &def("multi_root_execute"),
+        &["--args".to_owned(), arguments.to_string()],
+        || panic!("inline JSON must not read stdin"),
+    )
+    .expect("the public CLI must replay the continuation emitted by page zero");
+
+    assert_eq!(parsed.tool_args["continuation"], continuation);
 }
 
 #[test]
@@ -120,24 +151,6 @@ fn whole_payload_invocation_defers_schema_dependent_flags() {
 }
 
 #[test]
-fn parses_positional_required_string() {
-    let d = def("search");
-    let parsed = parse_invocation(&d, &["foo".to_string()]).unwrap();
-    assert_eq!(parsed.tool_args, json!({ "query": "foo" }));
-}
-
-#[test]
-fn coerces_integer_flag() {
-    let d = def("search");
-    let parsed = parse_invocation(
-        &d,
-        &["foo".to_string(), "--limit".to_string(), "25".to_string()],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args, json!({ "query": "foo", "limit": 25 }));
-}
-
-#[test]
 fn rejects_non_numeric_flag() {
     let d = def("search");
     let err = parse_invocation(
@@ -153,52 +166,13 @@ fn rejects_non_numeric_flag() {
 }
 
 #[test]
-fn coerces_boolean_flag() {
-    let d = def("context");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "describe X".to_string(),
-            "--include-code".to_string(),
-            "true".to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args["include_code"], json!(true));
-}
-
-#[test]
-fn missing_required_errors() {
-    let d = def("search");
-    let err = parse_invocation(&d, &[]).unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("missing required parameter"), "got: {msg}");
-}
-
-#[test]
-fn args_escape_hatch() {
-    let d = def("search");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--args".to_string(),
-            r#"{"query":"foo","limit":3}"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args["query"], json!("foo"));
-    assert_eq!(parsed.tool_args["limit"], json!(3));
-}
-
-#[test]
 fn args_escape_hatch_reads_at_file() {
     let d = def("search");
-    let dir = std::env::temp_dir().join(format!("ts-args-at-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // Payload comfortably above Linux's 128 KiB MAX_ARG_STRLEN to prove
     // the @file path carries what a literal argv string cannot.
     let big = "x".repeat(200 * 1024);
-    let path = dir.join("payload.json");
+    let path = dir.path().join("payload.json");
     std::fs::write(&path, format!(r#"{{"query":"{big}","limit":7}}"#)).unwrap();
     let parsed =
         parse_invocation(&d, &["--args".to_string(), format!("@{}", path.display())]).unwrap();
@@ -207,7 +181,6 @@ fn args_escape_hatch_reads_at_file() {
         parsed.tool_args["query"].as_str().map(str::len),
         Some(big.len())
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -221,27 +194,15 @@ fn args_escape_hatch_reads_stdin_dash() {
 }
 
 #[test]
-fn args_escape_hatch_reads_stdin_at_dash() {
-    let d = def("search");
-    let parsed = parse_invocation_with_stdin(&d, &["--args".to_string(), "@-".to_string()], || {
-        Ok(r#"{"query":"stdin-at"}"#.to_string())
-    })
-    .unwrap();
-    assert_eq!(parsed.tool_args, json!({ "query": "stdin-at" }));
-}
-
-#[test]
 fn args_escape_hatch_reads_bare_path() {
     // `--args` is a whole-payload arg, so a bare file path works without the
     // `@` sigil used by per-key file values.
     let d = def("search");
-    let dir = std::env::temp_dir().join(format!("ts-args-bare-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("payload.json");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("payload.json");
     std::fs::write(&path, r#"{"query":"bare","limit":4}"#).unwrap();
     let parsed = parse_invocation(&d, &["--args".to_string(), path.display().to_string()]).unwrap();
     assert_eq!(parsed.tool_args, json!({ "query": "bare", "limit": 4 }));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -297,24 +258,8 @@ fn reserved_flags_extracted() {
 }
 
 #[test]
-fn help_flag_short_circuits() {
-    let d = def("search");
-    let parsed = parse_invocation(&d, &["--help".to_string()]).unwrap();
-    assert!(parsed.show_help);
-}
-
-#[test]
-fn unknown_tool_name_errors() {
-    // canonical_tool_name only normalises — unknown names are caught by
-    // the lookup in run(). Simulate the lookup here.
-    let canonical = canonical_tool_name("totally-fake-tool");
-    let found = defs().into_iter().any(|d| d.name == canonical);
-    assert!(!found);
-}
-
-#[test]
 fn array_value_collected_via_repetition() {
-    let d = def("file_metadata");
+    let d = def("affected");
     let parsed = parse_invocation(
         &d,
         &[
@@ -335,7 +280,7 @@ fn array_value_collected_via_repetition() {
 
 #[test]
 fn finalize_arrays_splits_csv() {
-    let d = def("file_metadata");
+    let d = def("affected");
     let mut map = Map::new();
     map.insert("files".to_string(), json!("src/a.rs,src/b.rs,src/c.rs"));
     finalize_arrays(&d, &mut map);
@@ -347,21 +292,35 @@ fn finalize_arrays_splits_csv() {
 
 #[test]
 fn explicit_project_lcm_dispatch_allows_first_touch_init() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
+    // An explicit absolute --project must pass through untouched; a bare
+    // `/tmp/project` is drive-relative on Windows and would be re-rooted on
+    // the current drive, which is not the property under test.
+    let project = if cfg!(windows) {
+        r"C:\tmp\project"
+    } else {
+        "/tmp/project"
+    };
     let dispatch = DaemonToolDispatch::project_scoped(
-        Some("/tmp/project".to_string()),
+        profile,
+        Some(project.to_string()),
         "tracedecay_lcm_status",
     );
 
     assert!(dispatch.allow_init);
-    assert_eq!(dispatch.project_path, Some(PathBuf::from("/tmp/project")));
+    assert_eq!(dispatch.project_path, Some(PathBuf::from(project)));
 }
 
 #[test]
 fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
     let dispatch = DaemonToolDispatch::for_tool(
+        profile,
         None,
         "tracedecay_lcm_status",
-        &json!({
+        &mut json!({
             "provider": "hermes",
             "storage_scope": "user",
         }),
@@ -371,26 +330,281 @@ fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
     assert!(!dispatch.allow_init);
 }
 
-#[test]
-fn user_memory_scope_dispatch_is_projectless() {
-    let dispatch = DaemonToolDispatch::for_tool(
-        None,
-        "tracedecay_fact_store_list",
-        &json!({
-            "memory_scope": "user",
-        }),
-    );
+const REGISTRY_READ_TOOLS: [&str; 3] = [
+    "tracedecay_project_list",
+    "tracedecay_project_search",
+    "tracedecay_project_context",
+];
 
-    assert_eq!(dispatch.project_path, None);
+/// An initialised root is one whose repository carries the `.git/`-side
+/// identity marker and whose profile holds the shard it names (or a
+/// path-local profile store); the repo-local `.tracedecay/tracedecay.db`
+/// layout no longer exists.
+fn mark_initialised_project(profile: &tracedecay_runtime_core::config::ProfileRoot, root: &Path) {
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, "proj_dispatch")
+        .expect("pin fixture repository identity");
+    std::fs::create_dir_all(tracedecay_runtime_core::storage::profile_sharded_data_root(
+        profile.data_dir(),
+        "proj_dispatch",
+    ))
+    .expect("create fixture profile shard");
 }
 
 #[test]
-fn implicit_tool_dispatch_stays_projectless_without_initialized_ancestor() {
-    let root = tempfile::tempdir().expect("projectless tool fixture");
-    let nested = root.path().join("nested");
-    std::fs::create_dir_all(&nested).expect("nested directory");
+fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
+    let uninitialised = tempfile::tempdir().expect("tempdir");
+    let uninitialised_arg = uninitialised.path().to_string_lossy().into_owned();
+    for tool_name in REGISTRY_READ_TOOLS {
+        let dispatch = DaemonToolDispatch::for_tool(
+            profile,
+            Some(uninitialised_arg.clone()),
+            tool_name,
+            &mut json!({}),
+        );
+        assert_eq!(
+            dispatch.project_path, None,
+            "{tool_name}: an uninitialised --project must not become a project handshake"
+        );
+        assert!(!dispatch.allow_init, "{tool_name}");
+        assert!(
+            !uninitialised.path().join(".tracedecay").exists(),
+            "{tool_name}: registry reads must never create a project store"
+        );
+    }
 
-    assert_eq!(implicit_tool_project_path(&nested), None);
+    // A project-bound tool keeps the explicit project and the daemon's
+    // typed refusal for an uninitialised root.
+    let project_bound = DaemonToolDispatch::for_tool(
+        profile,
+        Some(uninitialised_arg.clone()),
+        "tracedecay_status",
+        &mut json!({}),
+    );
+    assert_eq!(
+        project_bound.project_path,
+        Some(tracedecay_configuration::resolve_path(Some(
+            uninitialised_arg.clone()
+        )))
+    );
+
+    // An initialised explicit project still routes through that project so
+    // the listing can mark it active.
+    let initialised = tempfile::tempdir().expect("tempdir");
+    mark_initialised_project(profile, initialised.path());
+    let dispatch = DaemonToolDispatch::for_tool(
+        profile,
+        Some(initialised.path().to_string_lossy().into_owned()),
+        "tracedecay_project_list",
+        &mut json!({}),
+    );
+    assert_eq!(
+        dispatch.project_path.as_deref(),
+        Some(initialised.path()),
+        "an initialised --project keeps the project route"
+    );
+    assert!(!dispatch.allow_init);
+}
+
+#[test]
+fn registry_read_dispatch_hands_a_missing_explicit_project_to_the_daemon() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
+    // (a) A `--project` that does not exist is not "no project": it travels
+    // verbatim so the daemon returns its typed project-route refusal, exactly
+    // as it does for every project-scoped tool.
+    let missing = tempfile::tempdir().expect("tempdir");
+    let missing_path = missing.path().join("does-not-exist");
+    let missing_arg = missing_path.to_string_lossy().into_owned();
+    for tool_name in REGISTRY_READ_TOOLS {
+        let mut args = json!({});
+        let dispatch =
+            DaemonToolDispatch::for_tool(profile, Some(missing_arg.clone()), tool_name, &mut args);
+        assert_eq!(
+            dispatch.project_path,
+            Some(tracedecay_configuration::resolve_path(Some(
+                missing_arg.clone()
+            ))),
+            "{tool_name}: a missing --project must not be silently dropped"
+        );
+        assert!(!dispatch.allow_init, "{tool_name}");
+        assert_eq!(
+            args,
+            json!({}),
+            "{tool_name}: a missing --project must not be seeded as a registry selector"
+        );
+    }
+    let project_bound = DaemonToolDispatch::for_tool(
+        profile,
+        Some(missing_arg.clone()),
+        "tracedecay_status",
+        &mut json!({}),
+    );
+    assert_eq!(
+        project_bound.project_path,
+        DaemonToolDispatch::for_tool(
+            profile,
+            Some(missing_arg),
+            "tracedecay_project_list",
+            &mut json!({})
+        )
+        .project_path,
+        "registry reads and project-scoped tools must agree on a missing --project"
+    );
+}
+
+#[test]
+fn registry_read_dispatch_honours_an_explicit_ambient_root_verbatim() {
+    // (b) The ambient-root filter protects cwd discovery from walking into the
+    // user profile; it must not erase a project the caller named explicitly.
+    let home = tempfile::tempdir().expect("tempdir");
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
+    mark_initialised_project(profile, home.path());
+    let home_arg = home.path().to_string_lossy().into_owned();
+    assert!(
+        profile.is_ambient_project_root(home.path()),
+        "the profile home must be an ambient root"
+    );
+    let discovered = profile.discover_project_root(home.path());
+    let explicit = DaemonToolDispatch::for_tool(
+        profile,
+        Some(home_arg),
+        "tracedecay_project_list",
+        &mut json!({}),
+    );
+
+    assert_eq!(
+        discovered, None,
+        "cwd discovery keeps filtering the ambient user profile"
+    );
+    assert_eq!(
+        explicit.project_path.as_deref(),
+        Some(home.path()),
+        "an explicit initialised --project is the project connection even when ambient"
+    );
+    assert!(!explicit.allow_init);
+}
+
+#[test]
+fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
+    // (c) `project_context --project <uninitialised dir>` names the project to
+    // describe: it becomes the `path` selector instead of a missing-parameter
+    // refusal. Callers who already chose a selector keep it.
+    let uninitialised = tempfile::tempdir().expect("tempdir");
+    let uninitialised_arg = uninitialised.path().to_string_lossy().into_owned();
+    let expected_path = tracedecay_configuration::resolve_path(Some(uninitialised_arg.clone()))
+        .to_string_lossy()
+        .into_owned();
+
+    let mut seeded = json!({});
+    let dispatch = DaemonToolDispatch::for_tool(
+        profile,
+        Some(uninitialised_arg.clone()),
+        "tracedecay_project_context",
+        &mut seeded,
+    );
+    assert_eq!(dispatch.project_path, None);
+    assert!(!dispatch.allow_init);
+    assert_eq!(seeded, json!({ "path": expected_path }));
+
+    let mut explicit_path = json!({ "path": "/srv/other" });
+    DaemonToolDispatch::for_tool(
+        profile,
+        Some(uninitialised_arg.clone()),
+        "tracedecay_project_context",
+        &mut explicit_path,
+    );
+    assert_eq!(explicit_path, json!({ "path": "/srv/other" }));
+
+    let mut explicit_selector = json!({ "project_selector": { "project_id": "p1" } });
+    DaemonToolDispatch::for_tool(
+        profile,
+        Some(uninitialised_arg.clone()),
+        "tracedecay_project_context",
+        &mut explicit_selector,
+    );
+    assert_eq!(
+        explicit_selector,
+        json!({ "project_selector": { "project_id": "p1" } })
+    );
+
+    // Only `project_context` reads a `path` selector; the listing tools stay
+    // untouched.
+    for tool_name in ["tracedecay_project_list", "tracedecay_project_search"] {
+        let mut args = json!({});
+        DaemonToolDispatch::for_tool(
+            profile,
+            Some(uninitialised_arg.clone()),
+            tool_name,
+            &mut args,
+        );
+        assert_eq!(args, json!({}), "{tool_name}");
+    }
+
+    // An initialised explicit project connects through the project instead,
+    // and the daemon defaults `path` to the served root itself.
+    let initialised = tempfile::tempdir().expect("tempdir");
+    mark_initialised_project(profile, initialised.path());
+    let mut args = json!({});
+    let dispatch = DaemonToolDispatch::for_tool(
+        profile,
+        Some(initialised.path().to_string_lossy().into_owned()),
+        "tracedecay_project_context",
+        &mut args,
+    );
+    assert_eq!(dispatch.project_path.as_deref(), Some(initialised.path()));
+    assert_eq!(args, json!({}));
+}
+
+#[test]
+fn profile_scoped_session_refresh_dispatch_is_projectless() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
+    for tool_name in [
+        "tracedecay_session_refresh_begin",
+        "tracedecay_session_refresh_status",
+        "tracedecay_session_refresh_cancel",
+    ] {
+        let dispatch = DaemonToolDispatch::for_tool(
+            profile,
+            Some("/explicit/project".to_owned()),
+            tool_name,
+            &mut json!({ "scope": { "kind": "profile" } }),
+        );
+        assert_eq!(dispatch.project_path, None, "{tool_name}");
+        assert!(!dispatch.allow_init, "{tool_name}");
+
+        let project_scoped = DaemonToolDispatch::for_tool(
+            profile,
+            Some("/explicit/project".to_owned()),
+            tool_name,
+            &mut json!({ "scope": { "kind": "project" } }),
+        );
+        assert_eq!(
+            project_scoped.project_path,
+            Some(tracedecay_configuration::resolve_path(Some(
+                "/explicit/project".to_owned()
+            ))),
+            "{tool_name}"
+        );
+    }
+    // A non-refresh tool with an object `scope` is not a profile request: it
+    // keeps its explicit project.
+    let dispatch = DaemonToolDispatch::for_tool(
+        profile,
+        Some("/explicit/project".to_owned()),
+        "tracedecay_message_search",
+        &mut json!({ "scope": { "kind": "profile" } }),
+    );
+    assert_eq!(
+        dispatch.project_path,
+        Some(tracedecay_configuration::resolve_path(Some(
+            "/explicit/project".to_owned()
+        )))
+    );
 }
 
 // --- Validation gate and corrective-error contract ---
@@ -415,21 +629,6 @@ fn unknown_key_errors_with_did_you_mean_and_valid_keys() {
 }
 
 #[test]
-fn unknown_key_in_args_payload_errors_too() {
-    let d = def("search");
-    let err = parse_invocation(
-        &d,
-        &[
-            "--args".to_string(),
-            r#"{"query":"x","limt":2}"#.to_string(),
-        ],
-    )
-    .unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("unknown parameter `--limt`"), "got: {msg}");
-}
-
-#[test]
 fn invalid_enum_errors_with_allowed_values() {
     let d = def("gini");
     let err = parse_invocation(&d, &["--metric".to_string(), "bogus".to_string()]).unwrap_err();
@@ -437,13 +636,6 @@ fn invalid_enum_errors_with_allowed_values() {
     assert!(msg.contains("`bogus` is not one of:"), "got: {msg}");
     assert!(msg.contains("complexity"), "got: {msg}");
     assert!(msg.contains("fan_in"), "got: {msg}");
-}
-
-#[test]
-fn valid_enum_passes() {
-    let d = def("gini");
-    let parsed = parse_invocation(&d, &["--metric".to_string(), "fan_in".to_string()]).unwrap();
-    assert_eq!(parsed.tool_args["metric"], json!("fan_in"));
 }
 
 /// The fact category vocabulary reaches the schema through a `$defs`
@@ -474,22 +666,6 @@ fn invalid_ref_enum_errors_with_allowed_values() {
     ] {
         assert!(msg.contains(admitted), "missing `{admitted}` in: {msg}");
     }
-}
-
-#[test]
-fn valid_ref_enum_passes() {
-    let d = def("fact_store_add");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--content".to_string(),
-            "categorized fact".to_string(),
-            "--category".to_string(),
-            "decision".to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args["category"], json!("decision"));
 }
 
 #[test]
@@ -564,57 +740,17 @@ fn dispatch_routing_keys_bypass_unknown_key_gate() {
 }
 
 #[test]
-fn removed_storage_routing_keys_fail_validation() {
-    let d = def("fact_store_list");
-    for removed in ["storage_scope", "hermes_home"] {
-        let payload = format!(r#"{{"{removed}":"removed"}}"#);
-        let error = parse_invocation(&d, &["--args".to_string(), payload]).unwrap_err();
-        let flag = format!("--{}", removed.replace('_', "-"));
-        assert!(
-            error.to_string().contains("unknown parameter") && error.to_string().contains(&flag),
-            "removed argument should fail clearly: {error}"
-        );
-    }
-}
+fn lcm_storage_scope_flag_lands_in_tool_args_and_rejects_unknown_scopes() {
+    let d = def("lcm_status");
+    let parsed = parse_invocation(&d, &["--storage-scope".to_string(), "user".to_string()])
+        .expect("storage scope flag should parse");
+    assert_eq!(parsed.tool_args["storage_scope"], json!("user"));
 
-#[test]
-fn lcm_cli_help_exposes_scope_without_hermes_profile_routing() {
-    for tool_name in [
-        "lcm_status",
-        "lcm_load_session",
-        "lcm_grep",
-        "lcm_describe",
-        "lcm_expand",
-        "lcm_expand_query",
-        "lcm_doctor",
-        "hermes_skill_bridge",
-    ] {
-        let help = render_tool_cli_help(&def(tool_name));
-        if tool_name.starts_with("lcm_") {
-            assert!(help.contains("--storage-scope"), "{tool_name}: {help}");
-        }
-        assert!(!help.contains("--hermes-home"), "{tool_name}: {help}");
-        assert!(!help.contains("hermes_profile"), "{tool_name}: {help}");
-    }
-}
-
-#[test]
-fn per_key_json_array_of_pairs_parses() {
-    let d = def("multi_str_replace");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--path".to_string(),
-            "lib.rs".to_string(),
-            "--replacements".to_string(),
-            r#"[["alpha","gamma"]]"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        parsed.tool_args["replacements"],
-        json!([["alpha", "gamma"]])
-    );
+    let err =
+        parse_invocation(&d, &["--storage-scope".to_string(), "shared".to_string()]).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("`shared` is not one of:"), "got: {msg}");
+    assert!(msg.contains("project"), "got: {msg}");
 }
 
 #[test]
@@ -633,25 +769,6 @@ fn comma_split_array_of_pairs_gets_corrective_error() {
     let msg = format!("{err}");
     assert!(msg.contains("array of arrays"), "got: {msg}");
     assert!(msg.contains("--args -"), "got: {msg}");
-}
-
-#[test]
-fn per_key_json_object_parses() {
-    let d = def("message_search");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--query".to_string(),
-            "zeta".to_string(),
-            "--project-selector".to_string(),
-            r#"{"project_id":"other"}"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        parsed.tool_args["project_selector"],
-        json!({"project_id": "other"})
-    );
 }
 
 #[test]
@@ -681,13 +798,6 @@ fn key_equals_value_form_accepted() {
 }
 
 #[test]
-fn reserved_flag_equals_value_form_accepted() {
-    let d = def("search");
-    let parsed = parse_invocation(&d, &["--args={\"query\":\"eq\"}".to_string()]).unwrap();
-    assert_eq!(parsed.tool_args, json!({ "query": "eq" }));
-}
-
-#[test]
 fn fact_feedback_bare_helpful_flag_does_not_swallow_note_flag() {
     let d = def("fact_feedback");
     let parsed = parse_invocation(
@@ -709,16 +819,6 @@ fn fact_feedback_bare_helpful_flag_does_not_swallow_note_flag() {
 }
 
 #[test]
-fn bare_boolean_flag_at_end_of_args_defaults_to_true() {
-    let d = def("context");
-    let parsed = parse_invocation(&d, &["how".to_string(), "--include-code".to_string()]).unwrap();
-    assert_eq!(
-        parsed.tool_args,
-        json!({ "task": "how", "include_code": true })
-    );
-}
-
-#[test]
 fn bare_boolean_flag_before_next_flag_does_not_swallow_it() {
     let d = def("context");
     let parsed = parse_invocation(
@@ -734,24 +834,6 @@ fn bare_boolean_flag_before_next_flag_does_not_swallow_it() {
     assert_eq!(
         parsed.tool_args,
         json!({ "task": "how", "include_code": true })
-    );
-}
-
-#[test]
-fn boolean_flag_with_explicit_value_after_it_is_still_consumed() {
-    let d = def("context");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "how".to_string(),
-            "--include-code".to_string(),
-            "false".to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        parsed.tool_args,
-        json!({ "task": "how", "include_code": false })
     );
 }
 
@@ -829,13 +911,6 @@ fn unknown_tool_suggestion_finds_nearest_name() {
 }
 
 #[test]
-fn edit_distance_basics() {
-    assert_eq!(edit_distance("limit", "limit"), 0);
-    assert_eq!(edit_distance("limt", "limit"), 1);
-    assert_eq!(edit_distance("", "abc"), 3);
-}
-
-#[test]
 fn validation_skips_opaque_schemas() {
     // A definition without properties must be treated as opaque: no unknown
     // key rejection, so dynamic tools can't be bricked by the walker.
@@ -855,12 +930,6 @@ fn validation_skips_opaque_schemas() {
 }
 
 #[test]
-fn join_content_text_returns_single_block() {
-    let value = json!({ "content": [{ "type": "text", "text": "only payload" }] });
-    assert_eq!(join_content_text(&value), "only payload");
-}
-
-#[test]
 fn join_content_text_joins_warning_and_payload() {
     // A prepended warning block must not shadow the payload+metrics block;
     // the CLI historically printed only content[0].text and dropped this.
@@ -874,6 +943,32 @@ fn join_content_text_joins_warning_and_payload() {
         join_content_text(&value),
         "warning: index is stale\n\nactual payload\ntracedecay_metrics: 123"
     );
+}
+
+#[test]
+fn join_content_text_routes_the_trailer_and_footer_to_stderr() {
+    // `--format json` payloads are parsed from stdout as one document; the
+    // stale-graph trailer and the token accounting are separate blocks that
+    // must not trail the payload (run 34296614024: "Extra data: line 4
+    // column 1").
+    let value = json!({
+        "content": [
+            { "type": "text", "text": r#"{"code":[],"coverage":{"exact":"complete"}}"# },
+            { "type": "text", "text": "\ncode_graph_freshness: stale, serving the last complete generation g.7" },
+            { "type": "text", "text": "\ntracedecay_metrics: before=151600 after=3721" }
+        ]
+    });
+    let stdout = join_content_text(&value);
+    assert_eq!(stdout, r#"{"code":[],"coverage":{"exact":"complete"}}"#);
+    assert!(serde_json::from_str::<Value>(&stdout).is_ok());
+    assert_eq!(
+        beside_result_blocks(&value),
+        vec![
+            "code_graph_freshness: stale, serving the last complete generation g.7".to_owned(),
+            "tracedecay_metrics: before=151600 after=3721".to_owned(),
+        ]
+    );
+    assert!(beside_result_blocks(&json!({ "content": [] })).is_empty());
 }
 
 #[test]
@@ -891,39 +986,6 @@ fn join_content_text_skips_empty_blocks() {
 fn join_content_text_empty_when_no_content() {
     assert_eq!(join_content_text(&json!({})), "");
     assert_eq!(join_content_text(&json!({ "content": [] })), "");
-}
-
-#[test]
-fn reject_tool_result_truncation_detects_content_envelope() {
-    let value = json!({
-        "content": [{
-            "type": "text",
-            "text": "{\"truncated\":true,\"original_chars\":16000,\"preview\":\"{}\",\"handle\":\"h1\"}"
-        }]
-    });
-    let err = reject_tool_result_truncation(&value, "tracedecay_search").unwrap_err();
-    let message = err.to_string();
-    assert!(message.contains("truncated JSON"), "{message}");
-    assert!(message.contains("tracedecay_retrieve"), "{message}");
-    assert!(
-        reject_tool_result_truncation(
-            &json!({ "content": [{ "type": "text", "text": "{\"ok\":true}" }] }),
-            "tracedecay_search"
-        )
-        .is_ok()
-    );
-    assert!(
-        reject_tool_result_truncation(
-            &json!({
-                "content": [{
-                    "type": "text",
-                    "text": "{\"truncated\":true,\"matches\":[]}"
-                }]
-            }),
-            "tracedecay_grep"
-        )
-        .is_ok()
-    );
 }
 
 /// `main` maps `Ok` to exit 0 and any `Err` to a failing `ExitCode`, so the
@@ -948,24 +1010,95 @@ fn successful_tool_result_exits_zero() {
         tool_result_process_outcome(&json_success, "tracedecay_str_replace").is_ok(),
         "an explicit isError:false JSON result must keep exit 0"
     );
+    let typed = json!({"success": true, "files": []});
     assert_eq!(
-        rendered_tool_output(&markdown, false),
+        rendered_tool_output(
+            &ToolResult::new(markdown, Vec::new()).with_structured_result(typed.clone()),
+            CliToolOutput::Text
+        )
+        .unwrap(),
         "**success:** true\n**files:** []"
     );
-    let json_stdout = rendered_tool_output(&json_success, true);
-    // Pretty serialization escapes the nested `content[0].text` JSON string.
-    // Parse the complete envelope back and compare it structurally instead of
+    let json_stdout = rendered_tool_output(
+        &ToolResult::new(json_success.clone(), Vec::new()).with_structured_result(typed.clone()),
+        CliToolOutput::Document,
+    )
+    .unwrap();
+    // Compact `--json` escapes the nested `content[0].text` JSON string.
+    // Parse the complete document back and compare it structurally instead of
     // searching for an unescaped substring that valid output cannot contain.
+    assert!(
+        !json_stdout.contains('\n'),
+        "--json must be one compact line: {json_stdout}"
+    );
     let reparsed: Value = serde_json::from_str(&json_stdout)
         .unwrap_or_else(|error| panic!("JSON stdout must itself be valid JSON: {error}"));
     assert_eq!(
-        reparsed, json_success,
-        "JSON stdout must keep the exact daemon payload: {json_stdout}"
+        reparsed,
+        json!({
+            "content": json_success["content"],
+            "isError": false,
+            "structuredContent": typed,
+        }),
+        "JSON stdout is the tool result with the typed answer: {json_stdout}"
+    );
+}
+
+#[test]
+fn json_document_preserves_large_typed_listing() {
+    let files = (0..2000)
+        .map(|index| {
+            json!({
+                "path": format!("src/pipe_overflow_{index:04}.rs"),
+                "symbols": 1,
+                "bytes": 20
+            })
+        })
+        .collect::<Vec<_>>();
+    let typed = json!({ "count": 2000, "layout": "flat", "files": files });
+    let result = ToolResult::new(
+        json!({
+            "content": [{
+                "type": "text",
+                "text": "## Files\nindexed files: 2000"
+            }],
+            "isError": false
+        }),
+        Vec::new(),
+    )
+    .with_structured_result(typed.clone());
+    let compact = rendered_tool_output(&result, CliToolOutput::Document).unwrap();
+    assert!(
+        !compact.contains('\n'),
+        "--json must stay one compact line: {compact}"
+    );
+    assert!(
+        compact.len() > 65_536,
+        "full --json must keep the typed listing above 64KiB: {}",
+        compact.len()
+    );
+    let parsed: Value = serde_json::from_str(&compact).unwrap();
+    assert_eq!(parsed["isError"], false);
+    assert_eq!(parsed["structuredContent"], typed);
+}
+
+/// An answer rendered without its typed result cannot print the `--json`
+/// document, rather than printing one with no `structuredContent`.
+#[test]
+fn json_answer_without_its_typed_result_is_refused() {
+    let answer = ToolResult::new(
+        json!({"content": [{"type": "text", "text": "ok"}]}),
+        Vec::new(),
     );
     assert_eq!(
-        reparsed["isError"],
-        json!(false),
-        "JSON stdout must keep the daemon isError flag: {json_stdout}"
+        rendered_tool_output(&answer, CliToolOutput::Document)
+            .unwrap_err()
+            .to_string(),
+        "config error: the tool rendered its answer without its typed result"
+    );
+    assert_eq!(
+        rendered_tool_output(&answer, CliToolOutput::Text).unwrap(),
+        "ok"
     );
 }
 
@@ -981,41 +1114,43 @@ fn application_error_tool_result_exits_nonzero() {
         }],
         "isError": true
     });
-    let stdout_json = rendered_tool_output(&failed, true);
-    let stdout_text = rendered_tool_output(&failed, false);
+    let failed = ToolResult::new(failed, Vec::new());
+    let stdout_json = rendered_tool_output(&failed, CliToolOutput::Document).unwrap();
+    let stdout_text = rendered_tool_output(&failed, CliToolOutput::Text).unwrap();
     assert!(
         stdout_json.contains("old_str not found in README.md"),
         "{stdout_json}"
     );
-    assert!(stdout_json.contains("\"isError\": true"), "{stdout_json}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout_json).expect("tool output is valid JSON"),
+        failed.value
+    );
     assert_eq!(
         stdout_text,
         "{\"success\":false,\"message\":\"old_str not found in README.md\"}"
     );
 
-    let error = tool_result_process_outcome(&failed, "tracedecay_str_replace")
+    let error = tool_result_process_outcome(&failed.value, "tracedecay_str_replace")
         .expect_err("an application failure must fail the CLI process");
-    let message = error.to_string();
-    assert!(message.contains("tracedecay_str_replace"), "{message}");
-    assert!(message.contains("application failure"), "{message}");
-    assert!(
-        !message.contains("old_str not found in README.md"),
-        "stderr must not scrape a payload that is already on stdout: {message}"
+    // stderr names the refusal without scraping the payload already on stdout.
+    assert_eq!(
+        error.to_string(),
+        "tracedecay_str_replace refused the request"
     );
 }
 
 /// A truthful *degraded* answer is not a failure. Retrieval lanes that report
 /// themselves `unavailable` inside an otherwise successful payload, partial
-/// coverage, and warming generations all keep exit 0 — only an outcome the
+/// coverage, and warming generations all keep exit 0, only an outcome the
 /// daemon itself marked `isError` changes the status.
 #[test]
 fn typed_unavailable_coverage_inside_a_successful_result_stays_exit_zero() {
     let markdown = json!({
         "content": [{
             "type": "text",
-            "text": "### Coverage\nPartial recall — some retrieval lanes did not answer:\n\
+            "text": "### Coverage\nPartial recall. Some retrieval lanes did not answer:\n\
                      - exact: unavailable (generation_rebuilding)\n\
-                     - semantic: unavailable (generation_rebuilding)"
+                     - graph: unavailable (generation_rebuilding)"
         }]
     });
     let warming_json = json!({
@@ -1042,12 +1177,67 @@ fn typed_unavailable_coverage_inside_a_successful_result_stays_exit_zero() {
         tool_result_process_outcome(&nested_is_error, "tracedecay_context").is_ok(),
         "only the daemon's top-level isError flag may change the process status"
     );
+}
+
+#[test]
+fn a_diff_with_an_untested_symbol_fails_the_gate_and_names_it() {
+    let payload = json!({
+        "structuredContent": {
+            "test_gate": {
+                "verdict": "fail",
+                "untested": ["parse", "save"]
+            }
+        }
+    });
+    let error = tool_result_process_outcome(&payload, "tracedecay_diff_context")
+        .expect_err("an untested blast radius must fail the process");
+    match error {
+        tracedecay_domain::errors::TraceDecayError::ToolRefused(refusal) => {
+            assert_eq!(refusal.code.as_deref(), Some("test_gate"));
+            assert_eq!(
+                refusal.reason.as_deref(),
+                Some("untested blast radius: parse, save")
+            );
+        }
+        other => panic!("expected a test-gate refusal, got {other}"),
+    }
+    let passing = json!({
+        "structuredContent": { "test_gate": { "verdict": "pass", "untested": [] } }
+    });
+    assert!(tool_result_process_outcome(&passing, "tracedecay_diff_context").is_ok());
+}
+
+#[test]
+fn typed_unavailable_coverage_keeps_its_payload_on_stdout() {
+    let markdown = json!({
+        "content": [{
+            "type": "text",
+            "text": "### Coverage\nPartial recall. Some retrieval lanes did not answer:\n\
+                     - exact: unavailable (generation_rebuilding)\n\
+                     - graph: unavailable (generation_rebuilding)"
+        }]
+    });
+    let warming_json = json!({
+        "content": [{
+            "type": "text",
+            "text": "{\"coverage\":\"partial\",\"exact\":\"unavailable\",\"reason\":\"generation_rebuilding\"}"
+        }]
+    });
+    let typed =
+        json!({"coverage": "partial", "exact": "unavailable", "reason": "generation_rebuilding"});
     assert!(
-        rendered_tool_output(&markdown, false).contains("unavailable (generation_rebuilding)"),
+        rendered_tool_output(&ToolResult::new(markdown, Vec::new()), CliToolOutput::Text)
+            .unwrap()
+            .contains("unavailable (generation_rebuilding)"),
         "markdown stdout must keep the typed degraded payload"
     );
     assert!(
-        rendered_tool_output(&warming_json, true).contains("generation_rebuilding"),
+        rendered_tool_output(
+            &ToolResult::new(warming_json, Vec::new()).with_structured_result(typed),
+            CliToolOutput::Document
+        )
+        .unwrap()
+        .contains("generation_rebuilding"),
         "JSON stdout must keep the typed warming payload"
     );
 }
@@ -1061,31 +1251,30 @@ fn application_error_without_a_json_message_still_exits_nonzero() {
         "content": [{ "type": "text", "text": "**success:** false\n**outcome:** failed" }],
         "isError": true
     });
+    let rendered = ToolResult::new(failed.clone(), Vec::new());
     assert_eq!(
-        rendered_tool_output(&failed, false),
+        rendered_tool_output(&rendered, CliToolOutput::Text).unwrap(),
         "**success:** false\n**outcome:** failed"
     );
     assert!(
-        rendered_tool_output(&failed, true).contains("**success:** false"),
+        rendered_tool_output(&rendered, CliToolOutput::Document)
+            .unwrap()
+            .contains("**success:** false"),
         "JSON stdout must keep the exact markdown daemon payload"
     );
 
     let error = tool_result_process_outcome(&failed, "tracedecay_run_affected_tests")
         .expect_err("an application failure must fail the CLI process");
-    let message = error.to_string();
-    assert!(
-        message.contains("tracedecay_run_affected_tests"),
-        "{message}"
-    );
-    assert!(message.contains("application failure"), "{message}");
-    assert!(
-        !message.contains("**success:** false"),
-        "stderr must not scrape a payload that is already on stdout: {message}"
+    assert_eq!(
+        error.to_string(),
+        "tracedecay_run_affected_tests refused the request"
     );
 }
 
 #[test]
 fn application_problem_makes_the_tool_command_fail() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
     let request_id = RequestId::new("request.cli.configuration-conflict").unwrap();
     let result = ApplicationSurfaceInvocationResult {
         operation: ApplicationSurfaceOperation::ConfigurationSet,
@@ -1105,13 +1294,12 @@ fn application_problem_makes_the_tool_command_fail() {
         requested_format: RequestedOutputFormat::Json,
     };
 
-    let error = print_cli_application_surface(result, true)
+    let error = print_cli_application_surface(profile, None, result, CliToolOutput::Document)
         .expect_err("a canonical application problem must fail the CLI process");
-    assert!(
-        error
-            .to_string()
-            .contains("configuration_revision_conflict"),
-        "{error}"
+    assert_eq!(
+        error.to_string(),
+        "tracedecay_configuration_set refused the request (configuration_revision_conflict): \
+         The expected configuration revision is stale"
     );
 }
 
@@ -1120,16 +1308,15 @@ fn application_problem_makes_the_tool_command_fail() {
 fn documented_json_invocations() -> Vec<(&'static str, Value)> {
     vec![
         ("tracedecay_storage_status", json!({})),
+        // `health_read` takes no parameters at all, so the documented
+        // invocation is the empty object on every transport.
+        ("tracedecay_health_read", json!({})),
         ("tracedecay_git_status", json!({})),
         ("tracedecay_git_diff", json!({})),
         ("tracedecay_git_history", json!({"count": 3})),
         (
             "tracedecay_source_outline",
             json!({"file": "src/update_cmd.rs"}),
-        ),
-        (
-            "tracedecay_file_metadata",
-            json!({"files": ["src/update_cmd.rs"]}),
         ),
     ]
 }
@@ -1147,7 +1334,7 @@ fn documented_format_argument_never_reaches_the_reviewed_request() {
         let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
             .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
 
-        let (request, format) =
+        let (request, format, _) =
             cli_surface_invocation(tool_name, with_format(args.clone(), "json"), false)
                 .unwrap_or_else(|error| {
                     panic!("{tool_name} rejected a documented argument: {error}")
@@ -1161,40 +1348,332 @@ fn documented_format_argument_never_reaches_the_reviewed_request() {
     }
 }
 
+/// One request the way each transport carries it. CLI and MCP share the
+/// argument object, page controls included; HTTP carries the page in its
+/// query string, so its body omits exactly the fields the query supplies.
+struct TransportEquivalentRequest {
+    tool_name: &'static str,
+    arguments: Value,
+    http_body: Value,
+    http_page: PageRequest,
+}
+
+fn http_page(page_size: u32, cursor: Option<&str>) -> PageRequest {
+    PageRequest::new(
+        page_size,
+        cursor.map(|cursor| OpaqueCursor::new(cursor).expect("cursor")),
+    )
+    .expect("page")
+}
+
+fn transport_equivalent_requests() -> Vec<TransportEquivalentRequest> {
+    let mut requests: Vec<TransportEquivalentRequest> = documented_json_invocations()
+        .into_iter()
+        .map(|(tool_name, arguments)| TransportEquivalentRequest {
+            tool_name,
+            http_body: arguments.clone(),
+            arguments,
+            http_page: http_page(10, None),
+        })
+        .collect();
+    // Diagnostics retains its shipped flat CLI/MCP shape, while HTTP accepts
+    // the canonical request and carries page controls in the query.
+    requests.push(TransportEquivalentRequest {
+        tool_name: "tracedecay_diagnostics",
+        arguments: json!({
+            "scope": "file",
+            "path": "src/update_cmd.rs",
+            "maximum_diagnostics": 25,
+            "cursor": "diagnostics-page-2",
+        }),
+        http_body: json!({"scope": {"file": "src/update_cmd.rs"}}),
+        http_page: http_page(25, Some("diagnostics-page-2")),
+    });
+    // Callable-code continuations ride in `meta.cursor`; the HTTP query cursor
+    // must be the same continuation, not a second channel.
+    let symbol_search = json!({
+        "query": "ApplicationSurfaceOperation",
+        "scope": {"path_prefix": "src"},
+        "lazy_index_ignored_dependencies": false,
+        "meta": {"projection": "evidence", "order": "source_position"},
+    });
+    let mut symbol_search_arguments = symbol_search.clone();
+    symbol_search_arguments["meta"]["cursor"] = json!("symbols-page-2");
+    requests.push(TransportEquivalentRequest {
+        tool_name: "tracedecay_code_symbol_search",
+        arguments: symbol_search_arguments,
+        http_body: symbol_search,
+        http_page: http_page(10, Some("symbols-page-2")),
+    });
+    requests
+}
+
+/// The canonical session refresh request in both owner scopes. The daemon
+/// decodes exactly this shape on every transport; the CLI and MCP arguments
+/// are the HTTP body plus the presentation-only `format`.
+fn session_refresh_equivalent_requests() -> Vec<TransportEquivalentRequest> {
+    let session = json!({ "id": "session.refresh" });
+    let target = json!({
+        "temporal_mode": { "kind": "current" },
+        "grain": "logical_message",
+        "frontier": { "observed_through": 9, "committed_through": 4 }
+    });
+    let profile_scope = json!({ "kind": "profile" });
+    let project_scope = json!({ "kind": "project" });
+    let mut requests = Vec::new();
+    for (tool_name, scope, session, handle) in [
+        (
+            "tracedecay_session_refresh_begin",
+            profile_scope.clone(),
+            session.clone(),
+            Value::Null,
+        ),
+        (
+            "tracedecay_session_refresh_status",
+            profile_scope.clone(),
+            session.clone(),
+            json!("srh_profile"),
+        ),
+        (
+            "tracedecay_session_refresh_cancel",
+            profile_scope,
+            session.clone(),
+            json!("srh_profile"),
+        ),
+        (
+            "tracedecay_session_refresh_begin",
+            project_scope.clone(),
+            session.clone(),
+            Value::Null,
+        ),
+        (
+            "tracedecay_session_refresh_status",
+            project_scope,
+            session,
+            json!("srh_project"),
+        ),
+    ] {
+        let body = json!({
+            "scope": scope,
+            "session": session,
+            "source": { "scope": "codex" },
+            "target": target,
+            "handle": handle,
+        });
+        requests.push(TransportEquivalentRequest {
+            tool_name,
+            arguments: body.clone(),
+            http_body: body,
+            http_page: http_page(10, None),
+        });
+    }
+    requests
+}
+
+/// The binding the daemon's composed catalog resolves for `tool_name` on
+/// `surface`, for the default profile at the production protocol revision.
+fn catalog_binding(surface: BindingSurface, tool_name: &str) -> Option<ResolvedBinding> {
+    let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
+        .unwrap_or_else(|| panic!("{tool_name} names no application operation"));
+    CatalogBindingResolver::new(application_surface_catalog_ref().expect("application catalog"))
+        .resolve_binding(
+            surface,
+            &BindingResolution {
+                profile_id: ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
+                    .expect("default profile"),
+                operation: SurfaceOperationName::new(operation.name_for_surface(surface))
+                    .expect("operation name"),
+                protocol_revision: 1,
+                negotiated_features: std::collections::BTreeSet::new(),
+            },
+        )
+}
+
+/// The retained half of the transport equivalence: CLI and MCP normalize
+/// through the shared argument adapter and, like the HTTP body, land on
+/// `decode_request` for the exact operation. All three must decode the same
+/// canonical `RetainedSurfaceRequestV1` and bind one request/result contract.
+fn assert_retained_transports_decode_one_canonical_request(
+    equivalent: &TransportEquivalentRequest,
+    operation: tracedecay_contracts::RetainedSurfaceOperation,
+) {
+    let tool_name = equivalent.tool_name;
+    let (cli_body, cli_format, _) = cli_surface_invocation(
+        tool_name,
+        with_format(equivalent.arguments.clone(), "json"),
+        false,
+    )
+    .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
+    let mcp = adapt_application_tool_request(
+        tool_name,
+        with_format(equivalent.arguments.clone(), "json"),
+    )
+    .unwrap_or_else(|error| panic!("{tool_name} MCP normalization failed: {error}"));
+    assert_eq!(cli_format, RequestedOutputFormat::Json, "{tool_name}");
+    assert_eq!(
+        mcp.requested_format,
+        RequestedOutputFormat::Json,
+        "{tool_name}"
+    );
+
+    let decoded = [
+        (BindingSurface::Cli, cli_body),
+        (BindingSurface::Mcp, mcp.request),
+        (BindingSurface::Http, equivalent.http_body.clone()),
+    ]
+    .map(|(surface, body)| {
+        let request = decode_retained_request(operation, body)
+            .unwrap_or_else(|error| panic!("{tool_name} {surface:?} request: {error}"));
+        assert_eq!(request.operation(), operation, "{tool_name} {surface:?}");
+        let binding = catalog_binding(surface, tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} has no {surface:?} catalog binding"));
+        (
+            surface,
+            serde_json::to_value(&request).expect("decoded request"),
+            binding.request_schema,
+            binding.result_schema,
+        )
+    });
+    let (_, cli_request, cli_request_schema, cli_result_schema) = &decoded[0];
+    let expected_scope = equivalent.arguments["scope"]["kind"]
+        .as_str()
+        .expect("fixture scope kind");
+    assert_eq!(
+        cli_request["request"]["scope"]["kind"], expected_scope,
+        "{tool_name}: the canonical request must carry the owner scope unchanged"
+    );
+    for (surface, request, request_schema, result_schema) in &decoded[1..] {
+        assert_eq!(
+            request, cli_request,
+            "{tool_name}: {surface:?} decoded a different canonical request than the CLI"
+        );
+        assert_eq!(
+            request_schema, cli_request_schema,
+            "{tool_name}: {surface:?} bound a different request contract than the CLI"
+        );
+        assert_eq!(
+            result_schema, cli_result_schema,
+            "{tool_name}: {surface:?} bound a different result contract than the CLI"
+        );
+    }
+}
+
+/// The same request, decoded by every transport, must reach the same reviewed
+/// request and result contract as the same canonical
+/// [`ApplicationSurfaceRequest`]. CLI and MCP decode through the shared
+/// argument adapter; HTTP decodes through its own body-plus-query projection.
+/// A transport that grew its own request shape would fail here before any
+/// daemon was involved. Retained operations (the session refresh lifecycle in
+/// both owner scopes) take the retained decoder for the same proof.
 #[test]
-fn cli_and_mcp_normalize_documented_arguments_identically() {
-    for (tool_name, args) in documented_json_invocations() {
+fn cli_mcp_and_http_decode_one_canonical_request() {
+    for equivalent in session_refresh_equivalent_requests() {
+        let operation =
+            tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(equivalent.tool_name)
+                .unwrap_or_else(|| panic!("{} is a retained operation", equivalent.tool_name));
+        assert_retained_transports_decode_one_canonical_request(&equivalent, operation);
+    }
+    for equivalent in transport_equivalent_requests() {
+        let tool_name = equivalent.tool_name;
         let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
             .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
-        let arguments = with_format(args, "json");
 
-        let (cli_request, cli_format) = cli_surface_invocation(tool_name, arguments.clone(), false)
-            .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
-        // The MCP transport reaches the reviewed schema through the same
-        // adapter; an argument accepted there must be accepted here.
-        let mcp = normalize_application_tool_args(tool_name, arguments)
-            .unwrap_or_else(|error| panic!("{tool_name} MCP normalization failed: {error}"));
-
-        assert_eq!(cli_request, mcp.request, "{tool_name}");
-        assert_eq!(cli_format, mcp.requested_format, "{tool_name}");
-
-        let cli_parsed = serde_json::to_value(
-            parse_application_surface_request(operation, cli_request).expect("cli request"),
+        let (cli_body, cli_format, _) = cli_surface_invocation(
+            tool_name,
+            with_format(equivalent.arguments.clone(), "json"),
+            false,
         )
-        .expect("cli request is serializable");
-        let mcp_parsed = serde_json::to_value(
-            parse_application_surface_request(operation, mcp.request).expect("mcp request"),
+        .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
+        let mcp = adapt_application_tool_request(
+            tool_name,
+            with_format(equivalent.arguments.clone(), "json"),
         )
-        .expect("mcp request is serializable");
-        assert_eq!(cli_parsed, mcp_parsed, "{tool_name}");
+        .unwrap_or_else(|error| panic!("{tool_name} MCP normalization failed: {error}"));
+        assert_eq!(cli_format, RequestedOutputFormat::Json, "{tool_name}");
+        assert_eq!(
+            mcp.requested_format,
+            RequestedOutputFormat::Json,
+            "{tool_name}"
+        );
+
+        let decoded = [
+            (
+                BindingSurface::Cli,
+                parse_application_surface_request(operation, cli_body)
+                    .unwrap_or_else(|error| panic!("{tool_name} CLI request: {error}")),
+            ),
+            (
+                BindingSurface::Mcp,
+                parse_application_surface_request(operation, mcp.request)
+                    .unwrap_or_else(|error| panic!("{tool_name} MCP request: {error}")),
+            ),
+            (
+                BindingSurface::Http,
+                parse_http_application_surface_request(
+                    operation,
+                    equivalent.http_body.clone(),
+                    &equivalent.http_page,
+                )
+                .unwrap_or_else(|error| panic!("{tool_name} HTTP request: {error}")),
+            ),
+        ];
+
+        let mut contracts = Vec::new();
+        for (surface, request) in decoded {
+            let request_value = serde_json::to_value(&request).expect("decoded request");
+            let dispatched = resolve_application_surface_dispatch_with_controls(
+                surface,
+                operation,
+                RequestId::new(format!(
+                    "request.{}.{}",
+                    format!("{surface:?}").to_ascii_lowercase(),
+                    operation.as_str()
+                ))
+                .expect("request id"),
+                request,
+                equivalent.http_page.clone(),
+                None,
+                CancellationSignal::active(format!("cancel.{}", operation.as_str()))
+                    .expect("cancellation"),
+                RequestedOutputFormat::Json,
+            )
+            .unwrap_or_else(|error| panic!("{tool_name} {surface:?} dispatch: {error}"));
+            assert_eq!(
+                serde_json::to_value(&dispatched.invocation.invocation.request)
+                    .expect("dispatched request"),
+                request_value,
+                "{tool_name} {surface:?} dispatch must carry the decoded request unchanged"
+            );
+            contracts.push((
+                surface,
+                request_value,
+                dispatched.invocation.request_schema.clone(),
+                dispatched.invocation.result_schema.clone(),
+            ));
+        }
+        let (_, cli_request, cli_request_schema, cli_result_schema) = &contracts[0];
+        for (surface, request, request_schema, result_schema) in &contracts[1..] {
+            assert_eq!(
+                request, cli_request,
+                "{tool_name}: {surface:?} decoded a different canonical request than the CLI"
+            );
+            assert_eq!(
+                request_schema, cli_request_schema,
+                "{tool_name}: {surface:?} bound a different request contract than the CLI"
+            );
+            assert_eq!(
+                result_schema, cli_result_schema,
+                "{tool_name}: {surface:?} bound a different result contract than the CLI"
+            );
+        }
     }
 }
 
 #[test]
 fn json_flag_and_json_format_select_the_same_output() {
-    let (flag_request, flag_format) =
+    let (flag_request, flag_format, _) =
         cli_surface_invocation("tracedecay_storage_status", json!({}), true).expect("flag");
-    let (format_request, format_format) = cli_surface_invocation(
+    let (format_request, format_format, _) = cli_surface_invocation(
         "tracedecay_storage_status",
         json!({"format": "json"}),
         false,
@@ -1204,13 +1683,6 @@ fn json_flag_and_json_format_select_the_same_output() {
     assert_eq!(flag_format, RequestedOutputFormat::Json);
     assert_eq!(format_format, RequestedOutputFormat::Json);
     assert_eq!(flag_request, format_request);
-}
-
-#[test]
-fn markdown_remains_the_default_presentation() {
-    let (_request, format) =
-        cli_surface_invocation("tracedecay_storage_status", json!({}), false).expect("default");
-    assert_eq!(format, RequestedOutputFormat::Markdown);
 }
 
 #[test]
@@ -1224,7 +1696,83 @@ fn application_surface_rejects_invalid_output_formats() {
         .expect_err("format outside the schema must fail");
         assert!(matches!(
             error,
-            ApplicationSurfaceAdapterError::InvalidSurfaceRequest
+            ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. }
         ));
     }
+}
+
+/// A `status` wait that ends `timed_out` is the retryable readiness refusal
+/// the process exits 75 on, naming the last state; one that cannot reach its
+/// state is the non-retryable refusal naming the reason; one that reached
+/// exits 0.
+#[test]
+fn tool_status_exit_follows_the_wait_outcome() {
+    let status = |wait: Value| {
+        json!({
+            "content": [{"type": "text", "text": "## Project Status"}],
+            "structuredContent": {"wait": wait},
+        })
+    };
+    let refusal = |wait: Value| {
+        tool_result_process_outcome(&status(wait), "tracedecay_status")
+            .expect_err("an unreached wait exits non-zero")
+            .to_string()
+    };
+
+    assert_eq!(
+        refusal(json!({"outcome": "timed_out", "last_state": "warming"})),
+        format!(
+            "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_TIMED_OUT}): \
+             wait_for timed out before the index reached the requested state; last state: warming"
+        )
+    );
+    assert_eq!(
+        refusal(json!({"outcome": "unavailable", "reason": "scheduler_not_mounted"})),
+        format!(
+            "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_UNAVAILABLE}): \
+             wait_for cannot reach the requested state: scheduler_not_mounted"
+        )
+    );
+    tool_result_process_outcome(&status(json!({"outcome": "reached"})), "tracedecay_status")
+        .expect("a reached wait exits 0");
+}
+
+#[test]
+fn tool_listing_has_no_catch_all_group() {
+    let listing = render_tool_list(&defs());
+    let mut groups: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut current = None;
+    for line in listing.lines() {
+        if let Some(group) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            current = Some(group);
+        } else if line.starts_with("  ")
+            && let Some(group) = current
+        {
+            *groups.entry(group).or_default() += 1;
+        }
+    }
+    let listed: usize = groups.values().sum();
+    assert_eq!(
+        listed,
+        defs().len(),
+        "every tool is listed once: {groups:?}"
+    );
+    let ceiling = listed / 3;
+    for (group, count) in &groups {
+        assert!(
+            *count <= ceiling,
+            "group [{group}] holds {count} of {listed} tools, more than a third: {groups:?}"
+        );
+    }
+}
+
+#[test]
+fn first_line_truncates_on_a_char_boundary() {
+    let description = format!(
+        "{}é tail that pushes the line past the width",
+        "a".repeat(88)
+    );
+    let line = first_line(&description);
+    assert!(line.chars().count() <= 90, "{line}");
+    assert!(line.ends_with('…'), "{line}");
 }

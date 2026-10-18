@@ -1,0 +1,527 @@
+//! Wire projection for the daemon-owned store-runtime telemetry inventory.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistrySnapshot {
+    pub inventory_shards: u32,
+    pub returned_shards: u32,
+    pub omitted_shards: u32,
+    pub per_shard_queue_max_operations: u32,
+    pub per_shard_queue_max_bytes: u64,
+    pub global_queue_max_bytes: u64,
+    pub wal_soft_limit_bytes: u64,
+    pub wal_hard_limit_bytes: u64,
+    pub aggregate: RuntimeRegistryAggregateSnapshot,
+    pub shards: Vec<RuntimeRegistryShardSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistryAggregateSnapshot {
+    pub ready: u32,
+    pub opening: u32,
+    pub draining: u32,
+    pub exclusive_maintenance: u32,
+    pub reopening: u32,
+    pub faulted: u32,
+    pub closed: u32,
+    /// Retained in the shipped wire contract; no runtime proves positive health.
+    pub healthy: u32,
+    pub degraded: u32,
+    pub unknown_health: u32,
+    pub pinned_profiles: u32,
+    pub eviction_eligible: u32,
+    pub writer_present: u32,
+    pub physical_reader_handles: u64,
+    pub general_reader_waiters: u64,
+    pub health_reader_waiters: u64,
+    pub writer_busy_events: u64,
+    pub writer_telemetry_shards: u32,
+    pub writer_telemetry_complete: bool,
+    pub offered_operations: u64,
+    pub admitted_operations: u64,
+    pub completed_operations: u64,
+    pub shed_operations: u64,
+    pub retried_operations: u64,
+    pub cancelled_operations: u64,
+    pub deadline_exceeded_operations: u64,
+    pub conflicted_operations: u64,
+    pub committed_batches: u64,
+    pub writer_queue_wait_micros: u64,
+    pub writer_transaction_micros: u64,
+    pub writer_error_events: u64,
+    pub health_lane_services: u64,
+    pub queued_operations: u64,
+    pub queued_bytes: u64,
+    pub total_leases: u64,
+    pub wal_bytes: Option<u64>,
+    pub memory_estimate_bytes: Option<u64>,
+    pub global_queued_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistryShardSnapshot {
+    pub binding: tracedecay_store::StoreRuntimeBindingV1,
+    pub state: String,
+    pub health: String,
+    pub writer_present: bool,
+    pub physical_reader_handles: u32,
+    pub general_reader_waiters: u16,
+    pub health_reader_waiters: u16,
+    pub writer_busy_events: u64,
+    pub writer: Option<RuntimeRegistryWriterSnapshot>,
+    pub queued_operations: u32,
+    pub queued_bytes: u64,
+    pub total_leases: u64,
+    pub wal_bytes: Option<u64>,
+    pub memory_estimate_bytes: Option<u64>,
+    pub pinned_profile: bool,
+    pub idle_for_ms: u64,
+    pub eviction_eligible: bool,
+    pub eviction_blocker_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistryWriterSnapshot {
+    pub offered_operations: u64,
+    pub admitted_operations: u64,
+    pub completed_operations: u64,
+    pub shed_operations: u64,
+    pub retried_operations: u64,
+    pub cancelled_operations: u64,
+    pub deadline_exceeded_operations: u64,
+    pub conflicted_operations: u64,
+    pub committed_batches: u64,
+    pub queue_wait_micros: u64,
+    pub transaction_micros: u64,
+    pub error_events: u64,
+    pub health_lane_services: u64,
+    pub commit_sequence: u64,
+    pub checkpoint: RuntimeRegistryCheckpointSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistryCheckpointSnapshot {
+    pub pressure: String,
+    pub outcome: Option<String>,
+    pub wal_bytes: Option<u64>,
+    pub blockers: Vec<RuntimeRegistryCheckpointBlockerSnapshot>,
+    pub blockers_omitted: usize,
+    pub hard_retry_wakes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistryCheckpointBlockerSnapshot {
+    pub kind: String,
+    pub id: String,
+    pub age_ms: u64,
+}
+
+impl RuntimeRegistrySnapshot {
+    pub fn from_projection(
+        projection: crate::shard_runtime::telemetry::RuntimeTelemetryProjection,
+    ) -> Self {
+        let aggregate = &projection.aggregate;
+        let shards = projection
+            .shards
+            .iter()
+            .map(RuntimeRegistryShardSnapshot::from_telemetry)
+            .collect();
+        Self {
+            inventory_shards: aggregate.inventory_shards,
+            returned_shards: aggregate.returned_shards,
+            omitted_shards: aggregate.omitted_shards,
+            per_shard_queue_max_operations: projection.per_shard_queue_budget.max_operations,
+            per_shard_queue_max_bytes: projection.per_shard_queue_budget.max_bytes,
+            global_queue_max_bytes: projection.global_queue_budget_bytes,
+            wal_soft_limit_bytes: projection.wal_budget.soft_limit_bytes,
+            wal_hard_limit_bytes: projection.wal_budget.hard_limit_bytes,
+            aggregate: RuntimeRegistryAggregateSnapshot {
+                ready: aggregate.states.ready,
+                opening: aggregate.states.opening,
+                draining: aggregate.states.draining,
+                exclusive_maintenance: aggregate.states.exclusive_maintenance,
+                reopening: aggregate.states.reopening,
+                faulted: aggregate.states.faulted,
+                closed: aggregate.states.closed,
+                healthy: 0,
+                degraded: aggregate.health.degraded,
+                unknown_health: aggregate.health.unknown,
+                pinned_profiles: aggregate.pinned_profiles,
+                eviction_eligible: aggregate.eviction_eligible,
+                writer_present: aggregate.writer_present,
+                physical_reader_handles: aggregate.physical_reader_handles,
+                general_reader_waiters: aggregate.general_reader_waiters,
+                health_reader_waiters: aggregate.health_reader_waiters,
+                writer_busy_events: aggregate.writer_busy_events,
+                writer_telemetry_shards: aggregate.writer_telemetry_shards,
+                writer_telemetry_complete: aggregate.writer_telemetry_complete,
+                offered_operations: aggregate.offered_operations,
+                admitted_operations: aggregate.admitted_operations,
+                completed_operations: aggregate.completed_operations,
+                shed_operations: aggregate.shed_operations,
+                retried_operations: aggregate.retried_operations,
+                cancelled_operations: aggregate.cancelled_operations,
+                deadline_exceeded_operations: aggregate.deadline_exceeded_operations,
+                conflicted_operations: aggregate.conflicted_operations,
+                committed_batches: aggregate.committed_batches,
+                writer_queue_wait_micros: aggregate.writer_queue_wait_micros,
+                writer_transaction_micros: aggregate.writer_transaction_micros,
+                writer_error_events: aggregate.writer_error_events,
+                health_lane_services: aggregate.health_lane_services,
+                queued_operations: aggregate.queued_operations,
+                queued_bytes: aggregate.queued_bytes,
+                total_leases: aggregate.client_leases,
+                wal_bytes: aggregate.wal_bytes,
+                memory_estimate_bytes: aggregate.memory_estimate_bytes,
+                global_queued_bytes: aggregate.global_queued_bytes,
+            },
+            shards,
+        }
+    }
+}
+
+impl RuntimeRegistryShardSnapshot {
+    fn from_telemetry(telemetry: &crate::shard_runtime::telemetry::ShardRuntimeTelemetry) -> Self {
+        Self {
+            binding: telemetry.binding.clone(),
+            state: runtime_state_label(telemetry.state).to_owned(),
+            health: runtime_health_label(telemetry.health).to_owned(),
+            writer_present: telemetry.writer_present,
+            physical_reader_handles: telemetry.physical_reader_handles,
+            general_reader_waiters: telemetry.general_reader_waiters,
+            health_reader_waiters: telemetry.health_reader_waiters,
+            writer_busy_events: telemetry.writer_busy_events,
+            writer: telemetry
+                .writer
+                .as_ref()
+                .map(|writer| RuntimeRegistryWriterSnapshot {
+                    offered_operations: writer.offered_operations,
+                    admitted_operations: writer.admitted_operations,
+                    completed_operations: writer.completed_operations,
+                    shed_operations: writer.shed_operations,
+                    retried_operations: writer.retried_operations,
+                    cancelled_operations: writer.cancelled_operations,
+                    deadline_exceeded_operations: writer.deadline_exceeded_operations,
+                    conflicted_operations: writer.conflicted_operations,
+                    committed_batches: writer.committed_batches,
+                    queue_wait_micros: writer.queue_wait_micros,
+                    transaction_micros: writer.transaction_micros,
+                    error_events: writer.error_events,
+                    health_lane_services: writer.health_lane_services,
+                    commit_sequence: writer.commit_sequence.0,
+                    checkpoint: checkpoint_snapshot(writer),
+                }),
+            queued_operations: telemetry.queued_operations,
+            queued_bytes: telemetry.queued_bytes,
+            total_leases: u64::from(telemetry.client_leases),
+            wal_bytes: telemetry.wal_bytes,
+            memory_estimate_bytes: telemetry.memory_estimate_bytes,
+            pinned_profile: telemetry.pinned_profile,
+            idle_for_ms: telemetry.idle_for_ms,
+            eviction_eligible: telemetry.eviction_eligible,
+            eviction_blocker_count: telemetry.eviction_blocker_count,
+        }
+    }
+}
+
+fn checkpoint_snapshot(
+    writer: &crate::shard_runtime::registry::PhysicalWriterRuntimeSnapshot,
+) -> RuntimeRegistryCheckpointSnapshot {
+    use crate::shard_runtime::registry::{CheckpointOutcome, CheckpointPressure};
+
+    let outcome = writer
+        .checkpoint_status
+        .latest
+        .as_ref()
+        .map(|outcome| match outcome {
+            CheckpointOutcome::BelowSoft { .. } => "below_soft",
+            CheckpointOutcome::Complete { .. } => "complete",
+            CheckpointOutcome::Pending { .. } => "pending",
+            CheckpointOutcome::Interrupted { .. } => "interrupted",
+        })
+        .map(str::to_owned);
+    // Below the hard limit the drain is open, but a pending checkpoint still
+    // names the readers that kept it from completing.
+    let (pressure, wal_bytes, blockers) = match &writer.checkpoint_pressure {
+        CheckpointPressure::Open => (
+            "open",
+            checkpoint_outcome_wal_bytes(writer.checkpoint_status.latest.as_ref()),
+            match writer.checkpoint_status.latest.as_ref() {
+                Some(
+                    CheckpointOutcome::Pending { blockers, .. }
+                    | CheckpointOutcome::Interrupted { blockers, .. },
+                ) => Some(blockers),
+                _ => None,
+            },
+        ),
+        CheckpointPressure::BlockGeneral { wal, blockers } => {
+            ("hard_drain", Some(wal.bytes), Some(blockers))
+        }
+        CheckpointPressure::FenceExpired { wal, holders } => {
+            ("fence_expired", Some(wal.bytes), Some(holders))
+        }
+    };
+    RuntimeRegistryCheckpointSnapshot {
+        pressure: pressure.to_owned(),
+        outcome,
+        wal_bytes,
+        blockers: blockers.map_or_else(Vec::new, |blockers| {
+            blockers
+                .blockers
+                .iter()
+                .map(checkpoint_blocker_snapshot)
+                .collect()
+        }),
+        blockers_omitted: blockers.map_or(0, |blockers| blockers.omitted),
+        hard_retry_wakes: writer.checkpoint_hard_retry_wakes,
+    }
+}
+
+fn checkpoint_outcome_wal_bytes(
+    outcome: Option<&crate::shard_runtime::registry::CheckpointOutcome>,
+) -> Option<u64> {
+    use crate::shard_runtime::registry::CheckpointOutcome;
+
+    outcome.and_then(|outcome| match outcome {
+        CheckpointOutcome::BelowSoft { wal }
+        | CheckpointOutcome::Complete { wal, .. }
+        | CheckpointOutcome::Pending { wal, .. } => Some(wal.bytes),
+        CheckpointOutcome::Interrupted { wal, .. } => wal.map(|wal| wal.bytes),
+    })
+}
+
+fn checkpoint_blocker_snapshot(
+    blocker: &crate::shard_runtime::registry::CheckpointBlocker,
+) -> RuntimeRegistryCheckpointBlockerSnapshot {
+    use crate::shard_runtime::registry::CheckpointBlocker;
+
+    match blocker {
+        CheckpointBlocker::SnapshotLease { lease_id, age } => {
+            RuntimeRegistryCheckpointBlockerSnapshot {
+                kind: "snapshot_lease".to_owned(),
+                id: lease_id.as_str().to_owned(),
+                age_ms: u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
+            }
+        }
+        CheckpointBlocker::PhysicalReader { reader_id, age } => {
+            RuntimeRegistryCheckpointBlockerSnapshot {
+                kind: "physical_reader".to_owned(),
+                id: reader_id.to_string(),
+                age_ms: u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
+            }
+        }
+        CheckpointBlocker::ForeignConnection { pid, process } => {
+            RuntimeRegistryCheckpointBlockerSnapshot {
+                kind: "foreign_connection".to_owned(),
+                id: format!("{process}[{pid}]"),
+                age_ms: 0,
+            }
+        }
+    }
+}
+
+fn runtime_state_label(state: tracedecay_store::RuntimeMaintenanceStateV1) -> &'static str {
+    match state {
+        tracedecay_store::RuntimeMaintenanceStateV1::Closed => "closed",
+        tracedecay_store::RuntimeMaintenanceStateV1::Opening => "opening",
+        tracedecay_store::RuntimeMaintenanceStateV1::Ready => "ready",
+        tracedecay_store::RuntimeMaintenanceStateV1::Draining => "draining",
+        tracedecay_store::RuntimeMaintenanceStateV1::ExclusiveMaintenance => {
+            "exclusive_maintenance"
+        }
+        tracedecay_store::RuntimeMaintenanceStateV1::Reopening => "reopening",
+        tracedecay_store::RuntimeMaintenanceStateV1::Faulted => "faulted",
+    }
+}
+
+fn runtime_health_label(
+    health: crate::shard_runtime::telemetry::ShardRuntimeHealth,
+) -> &'static str {
+    match health {
+        crate::shard_runtime::telemetry::ShardRuntimeHealth::Unknown => "unknown",
+        crate::shard_runtime::telemetry::ShardRuntimeHealth::Degraded => "degraded",
+        crate::shard_runtime::telemetry::ShardRuntimeHealth::Faulted => "faulted",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shard_runtime::registry::PhysicalWriterRuntimeSnapshot;
+    use crate::shard_runtime::registry::{
+        CheckpointBlocker, CheckpointBlockers, CheckpointOutcome, CheckpointPressure,
+        CheckpointStatus, CheckpointWal,
+    };
+    use std::time::Duration;
+    use tracedecay_store::{
+        AdmissionConfigV1, BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
+        StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId,
+    };
+
+    #[test]
+    fn aggregate_wire_retains_the_released_healthy_count() {
+        let projection = crate::shard_runtime::telemetry::project_runtime_telemetry(
+            &crate::shard_runtime::telemetry::RuntimeRegistryInventory {
+                admission: AdmissionConfigV1::default(),
+                global_queued_bytes: None,
+                opening_shards: 1,
+                entries: Vec::new(),
+            },
+        );
+        let value =
+            serde_json::to_value(RuntimeRegistrySnapshot::from_projection(projection)).unwrap();
+        assert_eq!(
+            value["aggregate"].get("healthy"),
+            Some(&serde_json::json!(0))
+        );
+        assert_eq!(value["aggregate"]["unknown_health"], 1);
+    }
+
+    #[test]
+    fn shard_wire_uses_canonical_binding_and_preserves_unknown_usage() {
+        let binding = StoreRuntimeBindingV1::new(
+            StoreShardIdV1::project(
+                BrainId::try_from("brain.runtime-wire".to_owned()).unwrap(),
+                UserProfileId::try_from("profile.runtime-wire".to_owned()).unwrap(),
+                ProjectId::try_from("project.runtime-wire".to_owned()).unwrap(),
+            ),
+            StoreIncarnationV1::new(3).unwrap(),
+            StoreAuthorityEpochV1::new(5).unwrap(),
+        );
+        let shard = RuntimeRegistryShardSnapshot {
+            binding,
+            state: "ready".to_owned(),
+            health: "unknown".to_owned(),
+            writer_present: false,
+            physical_reader_handles: 0,
+            general_reader_waiters: 0,
+            health_reader_waiters: 0,
+            writer_busy_events: 0,
+            writer: None,
+            queued_operations: 0,
+            queued_bytes: 0,
+            total_leases: 0,
+            wal_bytes: None,
+            memory_estimate_bytes: None,
+            pinned_profile: false,
+            idle_for_ms: 0,
+            eviction_eligible: true,
+            eviction_blocker_count: 0,
+        };
+
+        let value = serde_json::to_value(shard).unwrap();
+
+        assert_eq!(value["binding"]["shard_id"]["scope"]["kind"], "project");
+        assert_eq!(
+            value["binding"]["shard_id"]["scope"]["project_id"],
+            "project.runtime-wire"
+        );
+        assert_eq!(value["binding"]["incarnation"], 3);
+        assert_eq!(value["binding"]["authority_epoch"], 5);
+        assert!(value.get("shard").is_none());
+        assert!(value["wal_bytes"].is_null());
+        assert!(value["memory_estimate_bytes"].is_null());
+    }
+
+    #[test]
+    fn checkpoint_wire_names_live_hard_pressure_blockers_and_retries() {
+        let writer = PhysicalWriterRuntimeSnapshot {
+            checkpoint_pressure: CheckpointPressure::BlockGeneral {
+                wal: CheckpointWal {
+                    frames: 70_000,
+                    bytes: 286_720_000,
+                },
+                blockers: CheckpointBlockers {
+                    blockers: vec![CheckpointBlocker::PhysicalReader {
+                        reader_id: 7,
+                        age: Duration::from_millis(250),
+                    }],
+                    omitted: 2,
+                },
+            },
+            checkpoint_hard_retry_wakes: 3,
+            ..PhysicalWriterRuntimeSnapshot::default()
+        };
+
+        let snapshot = checkpoint_snapshot(&writer);
+
+        assert_eq!(snapshot.pressure, "hard_drain");
+        assert_eq!(snapshot.wal_bytes, Some(286_720_000));
+        assert_eq!(snapshot.blockers.len(), 1);
+        assert_eq!(snapshot.blockers[0].kind, "physical_reader");
+        assert_eq!(snapshot.blockers[0].id, "7");
+        assert_eq!(snapshot.blockers[0].age_ms, 250);
+        assert_eq!(snapshot.blockers_omitted, 2);
+        assert_eq!(snapshot.hard_retry_wakes, 3);
+    }
+
+    #[test]
+    fn checkpoint_wire_names_the_process_holding_an_expired_fence() {
+        let writer = PhysicalWriterRuntimeSnapshot {
+            checkpoint_pressure: CheckpointPressure::FenceExpired {
+                wal: CheckpointWal {
+                    frames: 70_000,
+                    bytes: 286_720_000,
+                },
+                holders: CheckpointBlockers {
+                    blockers: vec![CheckpointBlocker::ForeignConnection {
+                        pid: 4242,
+                        process: "sqlite3".to_owned(),
+                    }],
+                    omitted: 0,
+                },
+            },
+            ..PhysicalWriterRuntimeSnapshot::default()
+        };
+
+        let snapshot = checkpoint_snapshot(&writer);
+
+        assert_eq!(snapshot.pressure, "fence_expired");
+        assert_eq!(snapshot.wal_bytes, Some(286_720_000));
+        assert_eq!(snapshot.blockers.len(), 1);
+        assert_eq!(snapshot.blockers[0].kind, "foreign_connection");
+        assert_eq!(snapshot.blockers[0].id, "sqlite3[4242]");
+    }
+
+    #[test]
+    fn checkpoint_wire_names_the_blockers_of_a_pending_checkpoint_below_the_hard_limit() {
+        let wal = CheckpointWal {
+            frames: 56_000,
+            bytes: 230_000_000,
+        };
+        let writer = PhysicalWriterRuntimeSnapshot {
+            checkpoint_status: CheckpointStatus {
+                latest: Some(CheckpointOutcome::Pending {
+                    kind: tracedecay_rusqlite_runtime::CheckpointKind::Restart,
+                    wal,
+                    report: tracedecay_rusqlite_runtime::CheckpointFrameReport {
+                        busy: true,
+                        log_frames: 56_000,
+                        checkpointed_frames: 55_990,
+                    },
+                    blockers: CheckpointBlockers {
+                        blockers: vec![CheckpointBlocker::PhysicalReader {
+                            reader_id: 4,
+                            age: Duration::from_millis(1_200),
+                        }],
+                        omitted: 0,
+                    },
+                    hard_pressure: false,
+                    elapsed: Duration::ZERO,
+                }),
+            },
+            ..PhysicalWriterRuntimeSnapshot::default()
+        };
+
+        let snapshot = checkpoint_snapshot(&writer);
+
+        assert_eq!(snapshot.pressure, "open");
+        assert_eq!(snapshot.outcome.as_deref(), Some("pending"));
+        assert_eq!(snapshot.wal_bytes, Some(230_000_000));
+        assert_eq!(snapshot.blockers.len(), 1);
+        assert_eq!(snapshot.blockers[0].kind, "physical_reader");
+        assert_eq!(snapshot.blockers[0].id, "4");
+        assert_eq!(snapshot.blockers[0].age_ms, 1_200);
+    }
+}

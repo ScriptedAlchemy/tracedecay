@@ -2,8 +2,8 @@
 //!
 //! Ingest sanitizes every raw message before persistence, but rows written
 //! under older detector rules can hold values the current detector would
-//! redact or refuse. This owner re-evaluates every at-rest raw-message body —
-//! inline `content` and whole-message external payload bytes — and re-ingests
+//! redact or refuse. This owner re-evaluates every at-rest raw-message body,
+//! inline `content` and whole-message external payload bytes, and re-ingests
 //! each hit through the same staging and commit path new ingest uses, so
 //! redaction, externalization, quarantine, receipts, and FTS maintenance all
 //! follow the one canonical sanitizer. A replaced external payload file is
@@ -14,8 +14,8 @@
 //! [`lcm_payload_detector_revision`], so the sweep runs once per rule refresh
 //! instead of on every project open. An interrupted pass leaves the watermark
 //! unset and reruns from the start; sanitization is idempotent. A row the
-//! sanitizer cannot re-evaluate fails the run with a typed error — never a
-//! silent skip — and the watermark stays unset until a pass covers every row.
+//! sanitizer cannot re-evaluate fails the run with a typed error, never a
+//! silent skip, and the watermark stays unset until a pass covers every row.
 //!
 //! Media-span payload files are byte ranges the ingest scan already evaluated
 //! inside their owning message text before externalizing them; the rescan
@@ -30,8 +30,8 @@ use tracedecay_lcm::{
     payload::{self, DeleteOpts},
     raw, schema,
 };
+use tracedecay_privacy::{lcm_payload_detector_revision, sanitize_lcm_payload_text};
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_runtime_core::privacy::{lcm_payload_detector_revision, sanitize_lcm_payload_text};
 use tracedecay_sessions::runtime::SessionMessageRecord;
 
 use super::RegisteredGlobalDb;
@@ -53,15 +53,31 @@ pub enum LcmPrivacyRescanOutcomeV1 {
     Completed(LcmPrivacyRescanReceiptV1),
 }
 
+impl From<LcmPrivacyRescanOutcomeV1> for tracedecay_privacy::PrivacyLcmRemediationOutcomeV1 {
+    fn from(outcome: LcmPrivacyRescanOutcomeV1) -> Self {
+        match outcome {
+            LcmPrivacyRescanOutcomeV1::AlreadyCurrent => Self::AlreadyCurrent,
+            LcmPrivacyRescanOutcomeV1::Completed(receipt) => Self::Completed {
+                detector_revision: receipt.detector_revision,
+                scanned_rows: receipt.scanned_rows,
+                clean_rows: receipt.clean_rows,
+                remediated_rows: receipt.remediated_rows,
+                protected_rows: receipt.protected_rows,
+                unavailable_payload_rows: receipt.unavailable_payload_rows,
+            },
+        }
+    }
+}
+
 /// Counts of one completed at-rest rescan pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LcmPrivacyRescanReceiptV1 {
     pub detector_revision: String,
-    /// Rows whose at-rest body was re-evaluated under the current detector.
+    /// Rows whose available body and provider metadata were re-evaluated.
     pub scanned_rows: u64,
     /// Rows the current detector left byte-identical.
     pub clean_rows: u64,
-    /// Rows re-ingested because the current detector changed their body or
+    /// Rows remediated because the current detector changed their body or
     /// provider metadata.
     pub remediated_rows: u64,
     /// Unreceipted rows re-protected through the canonical protect pass
@@ -73,7 +89,7 @@ pub struct LcmPrivacyRescanReceiptV1 {
     pub unavailable_payload_rows: u64,
 }
 
-/// One at-rest raw row joined with its optional `session_messages` twin.
+/// One at-rest message row.
 struct RescanRow {
     store_id: i64,
     provider: String,
@@ -86,11 +102,11 @@ struct RescanRow {
     storage_kind: LcmStorageKind,
     payload_ref: Option<String>,
     metadata_json: Option<String>,
-    projection_kind: Option<String>,
-    projection_model: Option<String>,
-    projection_tool_names: Option<String>,
-    projection_source_path: Option<String>,
-    projection_source_offset: Option<i64>,
+    kind: Option<String>,
+    model: Option<String>,
+    tool_names: Option<String>,
+    source_path: Option<String>,
+    source_offset: Option<i64>,
 }
 
 /// The rescan input recovered from one row's at-rest bytes.
@@ -108,7 +124,11 @@ impl RegisteredGlobalDb {
     /// Rescans every persisted LCM raw-message body under the current
     /// detector revision, remediating hits through the canonical ingest path.
     /// Runs at most once per store per detector revision.
-    #[hotpath::measure(future = true, label = "global_db.registered.lcm.privacy_rescan")]
+    #[tracing::instrument(
+        name = "global_db.registered.lcm.privacy_rescan",
+        level = "trace",
+        skip_all
+    )]
     pub async fn lcm_privacy_rescan_raw_messages(
         &self,
     ) -> Result<LcmPrivacyRescanOutcomeV1, LcmError> {
@@ -139,32 +159,44 @@ impl RegisteredGlobalDb {
             };
             after_store_id = last.store_id;
             for row in page {
-                let (text, replaced_payload_ref) =
-                    match self.rescan_input(&storage_root, &row).await? {
-                        RescanInput::Body {
-                            text,
-                            replaced_payload_ref,
-                        } => (text, replaced_payload_ref),
-                        RescanInput::PayloadUnavailable => {
-                            unavailable_payload_rows += 1;
-                            continue;
-                        }
-                    };
-                scanned_rows += 1;
                 let provider_metadata = stored_provider_metadata(&row)?;
-                if !requires_remediation(&text, provider_metadata.as_deref())? {
-                    clean_rows += 1;
-                    continue;
+                let metadata_dirty = match provider_metadata.as_deref() {
+                    Some(metadata) => raw::provider_metadata_requires_resanitization(metadata)?,
+                    None => false,
+                };
+                scanned_rows += 1;
+                match self.rescan_input(&storage_root, &row).await? {
+                    RescanInput::Body {
+                        text,
+                        replaced_payload_ref,
+                    } => {
+                        if requires_remediation(&text, None)? {
+                            self.remediate_row(
+                                &storage_root,
+                                &row,
+                                text,
+                                provider_metadata,
+                                replaced_payload_ref,
+                            )
+                            .await?;
+                            remediated_rows += 1;
+                        } else if metadata_dirty {
+                            self.remediate_row_metadata(&row).await?;
+                            remediated_rows += 1;
+                        } else {
+                            clean_rows += 1;
+                        }
+                    }
+                    RescanInput::PayloadUnavailable => {
+                        unavailable_payload_rows += 1;
+                        if metadata_dirty {
+                            self.remediate_row_metadata(&row).await?;
+                            remediated_rows += 1;
+                        } else {
+                            clean_rows += 1;
+                        }
+                    }
                 }
-                self.remediate_row(
-                    &storage_root,
-                    &row,
-                    text,
-                    provider_metadata,
-                    replaced_payload_ref,
-                )
-                .await?;
-                remediated_rows += 1;
             }
         }
 
@@ -189,7 +221,6 @@ impl RegisteredGlobalDb {
 
     /// Binds receipts to every unreceipted row through the one existing
     /// protect pass, per owning session.
-    #[hotpath::skip]
     async fn protect_unreceipted_sessions(&self) -> Result<u64, LcmError> {
         let sessions = {
             let snapshot = self.lcm_read_snapshot().await?;
@@ -220,29 +251,20 @@ impl RegisteredGlobalDb {
         Ok(protected_rows)
     }
 
-    #[hotpath::skip]
     async fn load_rescan_page(&self, after_store_id: i64) -> Result<Vec<RescanRow>, LcmError> {
         let snapshot = self.lcm_read_snapshot().await?;
+        let columns = raw::stored_message_record_select_columns("r");
+        let sql = format!(
+            "SELECT r.store_id, {columns}, r.payload_ref
+             FROM lcm_raw_messages AS r
+             WHERE r.store_id > ?1 ORDER BY r.store_id LIMIT ?2"
+        );
         let mut rows = snapshot
-            .query(
-                "SELECT raw.store_id, raw.provider, raw.message_id, raw.session_id,
-                        raw.role, raw.ordinal, raw.timestamp, raw.content,
-                        raw.storage_kind, raw.payload_ref, raw.metadata_json,
-                        message.kind, message.model, message.tool_names,
-                        message.source_path, message.source_offset
-                 FROM lcm_raw_messages AS raw
-                 LEFT JOIN session_messages AS message
-                   ON message.provider = raw.provider
-                  AND message.message_id = raw.message_id
-                 WHERE raw.store_id > ?1
-                 ORDER BY raw.store_id
-                 LIMIT ?2",
-                params![after_store_id, RESCAN_PAGE_LIMIT],
-            )
+            .query(&sql, params![after_store_id, RESCAN_PAGE_LIMIT])
             .await?;
         let mut page = Vec::new();
         while let Some(row) = rows.next().await? {
-            let storage_kind_text: String = row.get(8)?;
+            let storage_kind_text: String = row.get(15)?;
             let storage_kind = LcmStorageKind::from_db(&storage_kind_text).ok_or_else(|| {
                 LcmError::Db(format!("invalid storage_kind: {storage_kind_text}"))
             })?;
@@ -252,17 +274,17 @@ impl RegisteredGlobalDb {
                 message_id: row.get(2)?,
                 session_id: row.get(3)?,
                 role: row.get(4)?,
-                ordinal: row.get(5)?,
-                timestamp: row.get(6)?,
-                content: row.get(7)?,
+                timestamp: row.get(5)?,
+                ordinal: row.get(6)?,
+                content: Some(raw::message_body_from_record_row(&row, 1)?),
+                kind: row.get(8)?,
+                model: row.get(9)?,
+                tool_names: row.get(10)?,
+                source_path: row.get(11)?,
+                source_offset: row.get(12)?,
+                metadata_json: row.get(13)?,
                 storage_kind,
-                payload_ref: row.get(9)?,
-                metadata_json: row.get(10)?,
-                projection_kind: row.get(11)?,
-                projection_model: row.get(12)?,
-                projection_tool_names: row.get(13)?,
-                projection_source_path: row.get(14)?,
-                projection_source_offset: row.get(15)?,
+                payload_ref: row.get(20)?,
             });
         }
         Ok(page)
@@ -270,7 +292,6 @@ impl RegisteredGlobalDb {
 
     /// Recovers the at-rest body this row actually serves: inline content, or
     /// the verified external payload bytes.
-    #[hotpath::skip]
     async fn rescan_input(
         &self,
         storage_root: &Path,
@@ -325,10 +346,32 @@ impl RegisteredGlobalDb {
         }
     }
 
+    /// Changes metadata without rewriting or deleting the independently receipted body.
+    async fn remediate_row_metadata(&self, row: &RescanRow) -> Result<(), LcmError> {
+        let stored = row.metadata_json.as_deref().ok_or_else(|| {
+            LcmError::Db("metadata remediation requires stored metadata".to_owned())
+        })?;
+        let sanitized = raw::resanitize_stored_provider_metadata_json(stored)?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let changed = transaction.execute(
+            "UPDATE lcm_raw_messages SET metadata_json = ?1 WHERE store_id = ?2 AND provider = ?3 AND message_id = ?4 AND metadata_json IS ?5",
+            params![sanitized, row.store_id, row.provider.as_str(), row.message_id.as_str(), stored],
+        ).await?;
+        if changed != 1 {
+            return Err(LcmError::Db(
+                "stored metadata changed during privacy remediation".to_owned(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Re-ingests one dirty row through the canonical staging and commit
-    /// path, resynchronizes its projection twin, and tombstones a replaced
+    /// path and tombstones a replaced
     /// external payload so the superseded bytes leave the disk.
-    #[hotpath::skip]
     async fn remediate_row(
         &self,
         storage_root: &Path,
@@ -337,6 +380,44 @@ impl RegisteredGlobalDb {
         provider_metadata_json: Option<String>,
         replaced_payload_ref: Option<String>,
     ) -> Result<(), LcmError> {
+        let provider_metadata_json = if row.storage_kind == LcmStorageKind::External {
+            match provider_metadata_json {
+                Some(metadata) => {
+                    let mut value: serde_json::Value = serde_json::from_str(&metadata)
+                        .map_err(|error| LcmError::Db(error.to_string()))?;
+                    if let Some(object) = value.as_object_mut()
+                        && object
+                            .get("external_payload")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        && row.payload_ref.as_deref().is_some_and(|expected| {
+                            object
+                                .get("payload_ref")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(expected)
+                        })
+                    {
+                        for key in [
+                            "external_payload",
+                            "payload_ref",
+                            "kind",
+                            "byte_count",
+                            "char_count",
+                            "sha256",
+                        ] {
+                            object.remove(key);
+                        }
+                    }
+                    Some(
+                        serde_json::to_string(&value)
+                            .map_err(|error| LcmError::Db(error.to_string()))?,
+                    )
+                }
+                None => None,
+            }
+        } else {
+            provider_metadata_json
+        };
         let record = SessionMessageRecord {
             provider: row.provider.clone(),
             message_id: row.message_id.clone(),
@@ -345,40 +426,30 @@ impl RegisteredGlobalDb {
             timestamp: row.timestamp,
             ordinal: row.ordinal,
             text,
-            kind: row.projection_kind.clone(),
-            model: row.projection_model.clone(),
-            tool_names: row.projection_tool_names.clone(),
-            source_path: row.projection_source_path.clone(),
-            source_offset: row.projection_source_offset,
+            kind: row.kind.clone(),
+            model: row.model.clone(),
+            tool_names: row.tool_names.clone(),
+            source_path: row.source_path.clone(),
+            source_offset: row.source_offset,
             metadata_json: provider_metadata_json,
         };
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
-        let staged = raw::stage_raw_message_with_payload_tracked(
+        let mut staged = raw::stage_raw_message_with_payload_tracked(
             storage_root,
             &record,
             &mut payload_rollback,
         )?;
+        staged.retain_provider_metadata()?;
+        let replaced_payload_ref = replaced_payload_ref
+            .filter(|old_ref| Some(old_ref.as_str()) != staged.external_payload_ref());
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
-        let upsert = raw::commit_staged_raw_message(&transaction, &record, staged).await?;
-        transaction
-            .execute(
-                "UPDATE session_messages SET text = ?3, metadata_json = ?4
-                 WHERE provider = ?1 AND message_id = ?2",
-                params![
-                    record.provider.as_str(),
-                    record.message_id.as_str(),
-                    upsert.projection_text.as_str(),
-                    upsert.projection_metadata_json.as_deref(),
-                ],
-            )
-            .await?;
-        // An external row remediates only when its body changed, and payload
-        // refs are content-addressed, so the re-ingest can never reuse the
-        // replaced ref: the superseded payload is always safe to delete.
+        raw::commit_staged_raw_message(&transaction, &record, staged).await?;
+        // Metadata-only remediation can reuse the content-addressed body.
+        // Tombstone only a payload no longer referenced by the replacement.
         if let Some(old_ref) = replaced_payload_ref.as_deref() {
             payload::delete_external_payload_in_transaction(
                 &transaction,
@@ -392,8 +463,9 @@ impl RegisteredGlobalDb {
             )
             .await?;
         }
-        transaction.commit().await?;
-        payload_rollback.disarm();
+        transaction
+            .commit_with_on_commit(move || payload_rollback.disarm())
+            .await?;
         if let Some(old_ref) = replaced_payload_ref.as_deref() {
             let transaction = self
                 .begin_write_transaction()
@@ -414,6 +486,7 @@ fn requires_remediation(text: &str, provider_metadata: Option<&str>) -> Result<b
     let sanitization =
         sanitize_lcm_payload_text(text).map_err(|error| LcmError::SanitizationRefused {
             reason: format!("at-rest LCM privacy rescan refused a stored payload: {error}"),
+            quarantined: error.is_quarantine_verdict(),
         })?;
     if sanitization.sanitized_text() != text {
         return Ok(true);
@@ -427,13 +500,9 @@ fn requires_remediation(text: &str, provider_metadata: Option<&str>) -> Result<b
 /// Recovers the provider metadata a re-ingest must carry: the stored metadata
 /// without the `ingest_protection` envelope the ingest path re-derives.
 ///
-/// Whole-message external rows never persisted provider metadata (their
-/// stored metadata is the payload envelope ingest builds fresh), so they
-/// re-ingest with none — exactly what ingest produced the first time.
+/// Retention offloads preserve provider metadata even when the body becomes
+/// external. Its privacy policy must therefore be independent of body storage.
 fn stored_provider_metadata(row: &RescanRow) -> Result<Option<String>, LcmError> {
-    if row.storage_kind == LcmStorageKind::External {
-        return Ok(None);
-    }
     let Some(metadata_json) = row.metadata_json.as_deref() else {
         return Ok(None);
     };
@@ -441,12 +510,14 @@ fn stored_provider_metadata(row: &RescanRow) -> Result<Option<String>, LcmError>
         serde_json::from_str::<serde_json::Value>(metadata_json).map_err(|error| {
             LcmError::SanitizationRefused {
                 reason: format!("stored LCM metadata is not valid JSON: {error}"),
+                quarantined: false,
             }
         })?;
     let object = metadata
         .as_object_mut()
         .ok_or_else(|| LcmError::SanitizationRefused {
             reason: "stored LCM metadata must be a JSON object".to_owned(),
+            quarantined: false,
         })?;
     object.remove("ingest_protection");
     if object.is_empty() {

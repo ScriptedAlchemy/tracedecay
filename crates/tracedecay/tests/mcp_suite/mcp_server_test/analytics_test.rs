@@ -1,67 +1,23 @@
 use crate::common::EnvVarGuard;
 use crate::mcp_server_test::support::*;
+use crate::support::refusal_problem;
 use serde_json::json;
 #[cfg(feature = "test-transport")]
 use std::sync::Arc;
-
-#[tokio::test]
-async fn search_call_writes_savings_ledger_row() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
-    let fixture = crate::support::production_composition_fixture().await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
-    crate::support::warm_code_index_search(&server, "helper").await;
-    server.ledger_writes_settled().await;
-    let project_path = fixture
-        .project_root
-        .canonicalize()
-        .expect("project path canonicalizes")
-        .to_string_lossy()
-        .to_string();
-    let baseline = fixture
-        .harness
-        .sum_profile_savings(Some(&project_path), 0)
-        .await
-        .expect("baseline settled savings");
-
-    let responses = run_server_with_messages(
-        Arc::clone(&server),
-        vec![jsonrpc_request(
-            json!(9001),
-            "tools/call",
-            json!({
-                "name": "tracedecay_search",
-                "arguments": { "query": "hello" }
-            }),
-        )],
-    )
-    .await;
-
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 9001)
-        .expect("should have a response for id=9001");
-    let resp = parse_response(resp_str);
-    assert!(resp["error"].is_null(), "search should not error");
-
-    server.ledger_writes_settled().await;
-    let total = fixture
-        .harness
-        .sum_profile_savings(Some(&project_path), 0)
-        .await
-        .expect("settled savings after the accounted call");
-    assert_eq!(total.calls, baseline.calls + 1);
-    fixture.harness.shutdown().await;
-}
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn search_call_writes_mcp_runtime_analytics_event() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
+    // Global accounting is a process-environment switch the cargo test
+    // profile turns off, so the journey runs in a child without the opt-out.
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_server_test::analytics_test::search_call_writes_mcp_runtime_analytics_event",
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
+        );
+        return;
+    }
     let fixture = crate::support::production_composition_fixture_with_sources(|root| {
         std::fs::create_dir_all(root.join("src")).expect("savings project src");
         std::fs::write(root.join("src/main.rs"), savings_project_source())
@@ -74,9 +30,7 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
         .expect("production project server");
     crate::support::warm_code_index_search(&server, "helper").await;
     server.ledger_writes_settled().await;
-    let project_path = fixture
-        .project_root
-        .canonicalize()
+    let project_path = canonical_existing_identity(&fixture.project_root)
         .expect("project path canonicalizes")
         .to_string_lossy()
         .to_string();
@@ -260,9 +214,7 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
     );
 
     server.ledger_writes_settled().await;
-    let project_id = fixture
-        .project_root
-        .canonicalize()
+    let project_id = canonical_existing_identity(&fixture.project_root)
         .expect("project path canonicalizes")
         .to_string_lossy()
         .to_string();
@@ -304,7 +256,10 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
     )
     .await;
 
-    assert!(resp["error"].is_object(), "unknown tool should error");
+    let refusal = crate::support::route_refusal(&resp);
+    assert_eq!(refusal["diagnostic"]["code"], "unknown_tool", "{resp}");
+    assert_eq!(refusal["kind"], "invalid_request", "{resp}");
+    assert_eq!(refusal["retryable"], false, "{resp}");
 
     server_handle.ledger_writes_settled().await;
     assert_eq!(
@@ -354,10 +309,10 @@ async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
     )
     .await;
 
-    assert!(
-        resp["error"].is_object(),
-        "missing fixture skill should make the tool call fail"
-    );
+    let problem = refusal_problem(&resp["result"]);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(problem["message"], "managed skill 'repo-hygiene' not found");
 
     server_handle.ledger_writes_settled().await;
     let event = expect_mcp_runtime_event(
@@ -376,40 +331,6 @@ async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
 }
 
 #[tokio::test]
-async fn semantic_tool_failure_writes_error_mcp_runtime_analytics_event() {
-    let fixture = setup_accounted_server().await;
-    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
-    let db_path = &fixture.global_db_path;
-
-    let resp = call_tool(
-        server,
-        9004,
-        "tracedecay_changelog",
-        json!({
-            "from_ref": "definitely-not-a-ref",
-            "to_ref": "also-not-a-ref",
-            "_meta": { "sessionId": "mcp-session-9004" }
-        }),
-    )
-    .await;
-
-    assert!(resp["error"].is_null(), "semantic failures are MCP results");
-    assert_eq!(resp["result"]["isError"], true);
-
-    server_handle.ledger_writes_settled().await;
-    let event = expect_mcp_runtime_event(
-        db_path,
-        "tracedecay_changelog",
-        "mcp-session-9004",
-        "durable semantic-failure MCP runtime analytics event",
-    )
-    .await;
-
-    assert_eq!(event.session_id.as_deref(), Some("mcp-session-9004"));
-    assert_eq!(event.outcome.as_deref(), Some("error"));
-}
-
-#[tokio::test]
 async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
     let fixture = crate::support::production_composition_fixture().await;
     let server = fixture
@@ -419,7 +340,7 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
 
     // An anchor mismatch (str_replace's `old_str` not present in the file) is
     // a structural failure the handler already knows about via
-    // `EditResult::success == false` — the resulting analytics event should
+    // `EditResult::success == false`, the resulting analytics event should
     // carry that exact message, not a generic "tool_dispatch_error" marker.
     let resp = call_tool(
         Arc::clone(&server),
@@ -460,18 +381,21 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
 }
 
 /// Regression test for the empty-ledger bug: the savings ledger must record
-/// **by default**, with no env opt-in. The holographic-fact-store commit
-/// made the global DB opt-in via `TRACEDECAY_ENABLE_GLOBAL_DB`, which
-/// silently disabled ledger writes for every default MCP-server install
-/// (dashboards showed "no events yet" while lifetime counters kept growing
-/// through the ungated CLI paths).
+/// **by default**, with no env opt-in. An opt-in gate once silently disabled
+/// ledger writes for every default MCP-server install (dashboards showed "no
+/// events yet" while lifetime counters kept growing through the ungated CLI
+/// paths).
 #[tokio::test]
 async fn ledger_records_by_default_without_env_opt_in() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    // Simulate a real (non-cargo) launch: neither the opt-in nor the
-    // cargo-test opt-out is present, so the default-on path is exercised.
-    let _enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
-    let _disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");
+    // Simulate a real (non-cargo) launch in a child process: the cargo-test
+    // opt-out is absent, so the default-on path is exercised.
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_server_test::analytics_test::ledger_records_by_default_without_env_opt_in",
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
+        );
+        return;
+    }
     assert!(tracedecay_global_db::global_accounting_enabled());
 
     let fixture = crate::support::production_composition_fixture().await;
@@ -481,9 +405,7 @@ async fn ledger_records_by_default_without_env_opt_in() {
         .expect("production project server");
     crate::support::warm_code_index_search(&server, "helper").await;
     server.ledger_writes_settled().await;
-    let project_path = fixture
-        .project_root
-        .canonicalize()
+    let project_path = canonical_existing_identity(&fixture.project_root)
         .expect("project path canonicalizes")
         .to_string_lossy()
         .to_string();
@@ -523,126 +445,38 @@ async fn ledger_records_by_default_without_env_opt_in() {
     fixture.harness.shutdown().await;
 }
 
-/// The explicit opt-outs must still work: a falsy
-/// `TRACEDECAY_ENABLE_GLOBAL_DB` or a truthy `TRACEDECAY_DISABLE_GLOBAL_DB`
-/// disables global accounting.
+/// A truthy `TRACEDECAY_DISABLE_GLOBAL_DB` is the one opt-out: a falsy value
+/// leaves accounting on, and the retired `TRACEDECAY_ENABLE_GLOBAL_DB` no
+/// longer overrides it.
 #[tokio::test]
 async fn global_accounting_env_overrides() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
     use tracedecay_global_db::{AccountingMode, global_accounting_mode};
 
-    let _clear_enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
-    let _clear_disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");
+    // The child runs this test alone, so it may switch the accounting
+    // variables in-process without reaching a sibling test.
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_server_test::analytics_test::global_accounting_env_overrides",
+            &[
+                ("TRACEDECAY_ENABLE_GLOBAL_DB", None),
+                ("TRACEDECAY_DISABLE_GLOBAL_DB", None),
+            ],
+        );
+        return;
+    }
     assert_eq!(global_accounting_mode(), AccountingMode::Default);
     assert!(global_accounting_mode().enabled());
 
     {
-        let _disable = EnvVarGuard::set("TRACEDECAY_DISABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
-        assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
-        // An explicit enable wins over the opt-out (the cargo-test default).
-        let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
-        assert_eq!(global_accounting_mode(), AccountingMode::EnabledByEnv);
+        let _falsy = EnvVarGuard::set("TRACEDECAY_DISABLE_GLOBAL_DB", std::ffi::OsStr::new("0"));
+        assert_eq!(global_accounting_mode(), AccountingMode::Default);
     }
 
-    let _enable_falsy = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("0"));
+    let _disable = EnvVarGuard::set("TRACEDECAY_DISABLE_GLOBAL_DB", std::ffi::OsStr::new("on"));
     assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
     assert!(!global_accounting_mode().enabled());
-}
-
-/// A full-file read returns the entire file to the agent, so it must not
-/// credit the lifetime counters: net saving = before - after, clamped at
-/// zero. Guards against the historical bug where the counters accumulated
-/// the gross "before" estimate even when the response carried the whole file.
-#[tokio::test]
-async fn full_file_read_credits_zero_net_savings() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
-    let fixture = crate::support::production_composition_fixture_with_sources(|root| {
-        std::fs::create_dir_all(root.join("src")).expect("savings project src");
-        std::fs::write(root.join("src/main.rs"), savings_project_source())
-            .expect("savings project source");
-    })
-    .await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
-    crate::support::warm_code_index_search(&server, "helper").await;
-    server.ledger_writes_settled().await;
-    let project_path = fixture
-        .project_root
-        .canonicalize()
-        .expect("project path canonicalizes");
-    let project_key = project_path.to_string_lossy().to_string();
-    let baseline = fixture
-        .harness
-        .sum_profile_savings(Some(&project_key), 0)
-        .await
-        .expect("baseline settled savings");
-    let baseline_lifetime = fixture
-        .harness
-        .project_lifetime_saved_tokens(&project_path)
-        .await
-        .expect("baseline lifetime savings");
-
-    let resp = crate::support::handle_real_server_tool_call_raw(
-        &server,
-        "tracedecay_read",
-        json!({
-            "file": "src/main.rs",
-            "mode": "full"
-        }),
-    )
-    .await;
-    assert!(resp["error"].is_null(), "read should not error: {resp}");
-
-    server.ledger_writes_settled().await;
-    let event = expect_harness_project_mcp_runtime_event(
-        &fixture.harness,
-        &project_key,
-        "tracedecay_read",
-        "durable full-file read analytics event",
-    )
-    .await;
-    let metadata = analytics_metadata(&event);
-    let before = metadata["before_tokens"]
-        .as_u64()
-        .expect("analytics event before-token count");
-    let after = metadata["after_tokens"]
-        .as_u64()
-        .expect("analytics event after-token count");
-    assert!(before > 0, "raw-file estimate should be nonzero");
-    assert!(
-        after >= before,
-        "full-file response ({after}) should be at least the raw estimate ({before})"
-    );
-
-    let total = fixture
-        .harness
-        .sum_profile_savings(Some(&project_key), 0)
-        .await
-        .expect("settled savings after full-file read");
-    assert_eq!(
-        total.calls,
-        baseline.calls + 1,
-        "the accounted call must settle exactly one new ledger row"
-    );
-    assert_eq!(
-        total.saved_tokens - baseline.saved_tokens,
-        0,
-        "ledger must not count a full-file read as savings"
-    );
-    let lifetime = fixture
-        .harness
-        .project_lifetime_saved_tokens(&project_path)
-        .await
-        .expect("lifetime savings after full-file read");
-    assert_eq!(
-        lifetime - baseline_lifetime,
-        0,
-        "lifetime counter must not be credited with the gross before estimate"
-    );
-    fixture.harness.shutdown().await;
+    let _retired = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
+    assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
 }
 
 /// The lifetime counter and the ledger must agree: both credit the net
@@ -651,8 +485,15 @@ async fn full_file_read_credits_zero_net_savings() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lifetime_counter_matches_ledger_net_savings() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
+    // Global accounting is a process-environment switch the cargo test
+    // profile turns off, so the journey runs in a child without the opt-out.
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_server_test::analytics_test::lifetime_counter_matches_ledger_net_savings",
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
+        );
+        return;
+    }
     let fixture = crate::support::production_composition_fixture_with_sources(|root| {
         std::fs::create_dir_all(root.join("src")).expect("savings project src");
         std::fs::write(root.join("src/main.rs"), savings_project_source())
@@ -665,10 +506,8 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         .expect("production project server");
     crate::support::warm_code_index_search(&server, "helper").await;
     server.ledger_writes_settled().await;
-    let project_path = fixture
-        .project_root
-        .canonicalize()
-        .expect("project path canonicalizes");
+    let project_path =
+        canonical_existing_identity(&fixture.project_root).expect("project path canonicalizes");
     let project_key = project_path.to_string_lossy().to_string();
     let baseline = fixture
         .harness

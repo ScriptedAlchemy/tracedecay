@@ -250,7 +250,7 @@ async fn load_session_exact_final_page_omits_next_cursor() {
 // engine behavior on a fresh store: reads return empty results and zeroed
 // overviews instead of errors.
 #[tokio::test]
-async fn empty_session_load_grep_and_describe_return_empty_results() {
+async fn empty_session_load_and_describe_return_empty_results() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "session-empty").await;
@@ -270,26 +270,6 @@ async fn empty_session_load_grep_and_describe_return_empty_results() {
         .expect("empty session should load");
     assert!(page.messages.is_empty());
     assert_eq!(page.next_cursor, None);
-
-    let hits = db
-        .lcm_grep_for_test(LcmGrepRequest {
-            provider: "cursor".into(),
-            query: "anything".into(),
-            scope: LcmScope::Session,
-            session_id: Some("session-empty".into()),
-            include_summaries: true,
-            limit: 10,
-            sort: LcmGrepSort::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-            git_filter: Default::default(),
-        })
-        .await
-        .expect("grep on empty session should succeed")
-        .hits;
-    assert!(hits.is_empty());
 
     let described = db
         .lcm_describe_for_test(LcmDescribeRequest {

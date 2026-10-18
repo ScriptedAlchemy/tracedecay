@@ -4,18 +4,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::automation::artifacts::sha256_json;
-use crate::automation::backend::{AgentTaskKind, AgentTaskResponse};
+use crate::automation::backend::{
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskResponse,
+    runtime_failure_class,
+};
 use crate::automation::config::AutomationConfig;
+use crate::automation::host_io::HostIo;
 use crate::automation::lifecycle::{
     AgentTaskRunContext, AutomationRunLedgerPublication, AutomationRunPublication,
     AutomationRunSettlementGuard, RetainedAutomationRun,
 };
-use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use crate::errors::{Result, TraceDecayError};
+use crate::automation::run_ledger::{
+    AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationTrigger,
+};
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::curation::unpersisted_rejected_parts;
 use super::session_reflector::{default_include_recent_sessions, default_recent_sessions_limit};
-use super::user_evidence_preflight::preflight_user_skill_writer_evidence;
 use super::*;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,51 +47,87 @@ pub struct SkillWriterAutomationOptions {
     pub profile_root: Option<PathBuf>,
 }
 
-pub async fn run_skill_writer_with_backend(
-    cg: &TraceDecay,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: SkillWriterAutomationOptions,
-) -> AutomationRunResult<SkillWriterAutomationRun> {
-    let retrieval = production_project_automation_retrieval(cg).await;
-    run_skill_writer_with_backend_and_retrieval(
-        cg,
-        config,
-        configuration_revision_id,
-        backend,
-        retrieval.as_ref(),
-        options,
-    )
-    .await
+/// An authoring decision, not a deployment or a successful skill mutation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoSkillNeededDecision {
+    reason: String,
+    remedy: SkillRoutingRemedy,
 }
 
-/// Runs one already-admitted retained application effect without publishing
-/// its ledger terminal ahead of outer settlement. The retained settlement
-/// authority must bind and publish the returned exact record.
-pub async fn run_skill_writer_with_backend_for_retained_settlement(
-    cg: &TraceDecay,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: SkillWriterAutomationOptions,
-) -> RetainedAutomationRun<SkillWriterAutomationRun> {
-    let retrieval = production_project_automation_retrieval(cg).await;
-    run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-        cg,
-        config,
-        configuration_revision_id,
-        backend,
-        retrieval.as_ref(),
-        options,
-    )
-    .await
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SkillRoutingRemedy {
+    ImproveToolDescription,
+    ImproveHintRouting,
+    InsufficientRepeatedEvidence,
+    GenericReasoning,
+    OneOffTask,
+    NoAction,
+}
+
+fn no_skill_needed_decision(
+    output: &Value,
+    proposals: &[Value],
+) -> Result<Option<NoSkillNeededDecision>> {
+    match output.get("outcome") {
+        Some(Value::String(outcome)) if outcome == "skills_proposed" => {
+            if proposals.is_empty() {
+                return Err(TraceDecayError::Config {
+                    message: "skills_proposed requires at least one skill mutation".to_owned(),
+                });
+            }
+            match output.get("decision") {
+                Some(decision) if decision.is_null() => {}
+                Some(_) => {
+                    return Err(TraceDecayError::Config {
+                        message: "skills_proposed cannot include a no-skill decision".to_owned(),
+                    });
+                }
+                None => {
+                    return Err(TraceDecayError::Config {
+                        message: "skills_proposed requires decision: null".to_owned(),
+                    });
+                }
+            }
+            Ok(None)
+        }
+        Some(Value::String(outcome)) if outcome == "no_skill_needed" => {
+            if !proposals.is_empty() {
+                return Err(TraceDecayError::Config {
+                    message: "no_skill_needed cannot include skill mutations".to_owned(),
+                });
+            }
+            let decision: NoSkillNeededDecision =
+                serde_json::from_value(output.get("decision").cloned().ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "no_skill_needed requires a decision".to_owned(),
+                    }
+                })?)?;
+            if decision.reason.trim().is_empty() {
+                return Err(TraceDecayError::Config {
+                    message: "no_skill_needed requires an evidenced reason".to_owned(),
+                });
+            }
+            Ok(Some(decision))
+        }
+        None => Err(TraceDecayError::Config {
+            message: "skill writer output requires an explicit outcome".to_owned(),
+        }),
+        Some(_) => Err(TraceDecayError::Config {
+            message: "unsupported skill writer outcome".to_owned(),
+        }),
+    }
+}
+
+pub(super) fn validate_skill_writer_decision(output: &Value, proposals: &[Value]) -> Result<()> {
+    no_skill_needed_decision(output, proposals).map(|_| ())
 }
 
 /// Retained-settlement variant that preserves the caller's canonical session
 /// retrieval authority instead of silently reopening the production route.
 pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -109,31 +151,8 @@ pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement
     RetainedAutomationRun::new(result, settlement_guard)
 }
 
-pub async fn run_skill_writer_with_backend_and_retrieval(
-    cg: &TraceDecay,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
-    options: SkillWriterAutomationOptions,
-) -> AutomationRunResult<SkillWriterAutomationRun> {
-    run_skill_writer_with_backend_and_retrieval_publication(
-        cg,
-        config,
-        configuration_revision_id,
-        backend,
-        retrieval,
-        options,
-        AutomationRunPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            settlement_guard: None,
-        },
-    )
-    .await
-}
-
 async fn run_skill_writer_with_backend_and_retrieval_publication(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -143,13 +162,15 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
     let authority =
         project_curation_authority(cg, "automation:skill-writer", configuration_revision_id)?;
-    let sessions_db = project_automation_sessions(cg).await?;
+    let sessions_db = project_automation_sessions(cg);
     run_skill_writer_for_store_with_publication(
         SkillWriterStoreRuntime {
-            dashboard_root: cg.store_layout().dashboard_root.clone(),
+            host_io: cg.host_io,
+            host_home: cg.host_home.clone(),
+            dashboard_root: cg.dashboard_root.clone(),
             sessions_db,
-            analytics_project_root: Some(cg.project_root()),
-            analytics_db: Some(cg.profile_database().as_ref()),
+            analytics_project_root: Some(&cg.project_root),
+            analytics_db: Some(cg.profile_database.as_ref()),
             authority,
         },
         retrieval,
@@ -162,65 +183,9 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
     .await
 }
 
-pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
-    profile_root: &std::path::Path,
-    session_registry: Arc<dyn ProfileRuntime>,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
-    mut options: SkillWriterAutomationOptions,
-) -> AutomationRunResult<SkillWriterAutomationRun> {
-    options.profile_root = Some(profile_root.to_path_buf());
-    let sessions_db = session_registry.profile_sessions().await?;
-    let authority = profile_curation_authority(
-        session_registry.as_ref(),
-        "automation:skill-writer",
-        configuration_revision_id,
-    )?;
-    let prebuilt_evidence =
-        match preflight_user_skill_writer_evidence(retrieval, config, options.clone()).await? {
-            Some(SkillWriterEvidenceOutcome::Ready(bundle)) => Some(bundle),
-            Some(SkillWriterEvidenceOutcome::Skipped {
-                reason,
-                evidence_hash,
-            }) => {
-                let run = AgentTaskRunContext::new(
-                    user_automation_root(profile_root),
-                    sessions_db.clone(),
-                    options.run_id.clone(),
-                    "skill_writer",
-                    options.trigger,
-                    config,
-                    AgentTaskKind::SkillWriter,
-                );
-                return Ok(rejected_skill_writer_run(
-                    &run,
-                    config,
-                    reason,
-                    evidence_hash,
-                ));
-            }
-            None => None,
-        };
-    run_skill_writer_for_store(
-        SkillWriterStoreRuntime {
-            dashboard_root: user_automation_root(profile_root),
-            sessions_db,
-            analytics_project_root: None,
-            analytics_db: None,
-            authority,
-        },
-        retrieval,
-        config,
-        backend,
-        options,
-        prebuilt_evidence,
-    )
-    .await
-}
-
 pub(super) struct SkillWriterStoreRuntime<'a> {
+    pub(super) host_io: HostIo,
+    pub(super) host_home: Option<PathBuf>,
     pub(super) dashboard_root: PathBuf,
     pub(super) sessions_db: RegisteredGlobalDbLeaseV1,
     pub(super) analytics_project_root: Option<&'a Path>,
@@ -228,33 +193,9 @@ pub(super) struct SkillWriterStoreRuntime<'a> {
     pub(super) authority: CurationApplyAuthorityV1,
 }
 
-pub(super) async fn run_skill_writer_for_store(
-    runtime: SkillWriterStoreRuntime<'_>,
-    retrieval: &dyn AutomationSessionRetrieval,
-    config: &AutomationConfig,
-    backend: &dyn AgentTaskBackend,
-    options: SkillWriterAutomationOptions,
-    prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
-) -> AutomationRunResult<SkillWriterAutomationRun> {
-    run_skill_writer_for_store_with_publication(
-        runtime,
-        retrieval,
-        config,
-        backend,
-        options,
-        prebuilt_evidence,
-        AutomationRunPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            settlement_guard: None,
-        },
-    )
-    .await
-}
-
-// The single funnel every skill-writer entry point (project, user, retained
-// settlement) flows through: one static run-lifetime span in the futures lane
-// so suspension and cancellation of long runs stay visible.
-#[hotpath::measure(future = true, label = "automation.run.skill_writer")]
+// One static run-lifetime span in the futures lane so suspension and
+// cancellation of long skill-writer runs stay visible.
+#[tracing::instrument(name = "automation.run.skill_writer", level = "trace", skip_all)]
 async fn run_skill_writer_for_store_with_publication(
     runtime: SkillWriterStoreRuntime<'_>,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -264,184 +205,197 @@ async fn run_skill_writer_for_store_with_publication(
     prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
     publication: AutomationRunPublication<'_>,
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
-    let AutomationRunPublication {
-        ledger: ledger_publication,
-        settlement_guard,
-    } = publication;
-    let SkillWriterStoreRuntime {
-        dashboard_root,
-        sessions_db,
-        analytics_project_root,
-        analytics_db,
-        authority,
-    } = runtime;
-    let mut run = AgentTaskRunContext::new(
-        dashboard_root,
-        sessions_db,
-        options.run_id.clone(),
-        "skill_writer",
-        options.trigger,
+    run_skill_writer_for_store_with_publication_inner(
+        runtime,
+        retrieval,
         config,
-        AgentTaskKind::SkillWriter,
-    )
-    .with_ledger_publication(ledger_publication)
-    .with_settlement_guard(settlement_guard);
-    let _run_lock = match run.gate().await? {
-        SchedulerGate::Proceed(lock) => lock,
-        SchedulerGate::Skip(reason) => {
-            return skipped_skill_writer_run(&run, reason, None)
-                .await
-                .map_err(Into::into);
-        }
-    };
-    let evidence_bundle = match prebuilt_evidence {
-        Some(bundle) => bundle,
-        None => match build_skill_writer_evidence(
-            retrieval,
-            analytics_project_root,
-            analytics_db.map(|database| database as &dyn AutomationSessionStore),
-            options,
-        )
-        .await?
-        {
-            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-            SkillWriterEvidenceOutcome::Skipped {
-                reason,
-                evidence_hash,
-            } => {
-                return Ok(rejected_skill_writer_run(
-                    &run,
-                    config,
-                    reason,
-                    evidence_hash,
-                ));
-            }
-        },
-    };
-    let SkillWriterEvidenceBundle {
-        profile_root,
-        evidence,
-        evidence_hash,
-    } = evidence_bundle;
-    // Refresh adoption outcomes of previously activated skills so this run's
-    // feedback artifact reports real post-activation quality. Best effort: a
-    // stale snapshot must not block skill writing.
-    if let Err(err) = crate::automation::outcomes::refresh_skill_outcomes(
-        &profile_root,
-        &run.dashboard_root,
-        current_timestamp(),
+        backend,
+        options,
+        prebuilt_evidence,
+        publication,
     )
     .await
-    {
-        tracing::warn!(error = %err, "failed to refresh skill outcomes");
-    }
+}
 
-    let activation_policy = skill_writer_activation_policy();
-    let request = AgentTaskRequest::new(
-        run.run_id.clone(),
-        AgentTaskKind::SkillWriter,
-        build_skill_writer_prompt(&evidence),
-        evidence_hash.clone(),
-        json!({
-            "skill_writer_evidence": evidence,
-            "apply": true,
-            "activation_policy": activation_policy,
-        }),
-    );
-    let input_hash = Some(request.input_hash.clone());
-    let finalizer = run.finalizer(input_hash.clone())?;
-    let (mut response, mut retry_report) = match finalizer
-        .run_backend_or_fallback(backend, &request, evidence_hash.clone())
-        .await?
-    {
-        BackendTaskRun::Response {
-            response,
-            retry_report,
-        } => (response, retry_report),
-        BackendTaskRun::Fallback(record) => {
-            let record = *record;
-            return Ok(SkillWriterAutomationRun {
-                run_id: record.run_id.clone(),
-                report: failed_backend_fallback_report(&record),
-                ledger_record: record,
-                backend_response: None,
-                committed_receipt: None,
-            });
-        }
-    };
-    let (mut proposed_ops, mut proposals) = finalizer
-        .response_output_array(
-            &response,
-            evidence_hash.clone(),
-            &retry_report,
-            "skills",
-            "skill writer output must include a skills array",
-        )
-        .await?;
-    let mut validation_repairs = Vec::new();
-    for attempt in 1..=2 {
-        let validation_errors =
-            validate_skill_proposals(&profile_root, &run.run_id, &proposals).await?;
-        if validation_errors.is_empty() {
-            break;
-        }
-        validation_repairs.push(json!({
-            "attempt": attempt,
-            "errors": validation_errors,
-        }));
-        if attempt == 2 {
-            let error = TraceDecayError::Config {
-                message: "skill proposal validation repair budget exhausted; output quarantined"
-                    .to_string(),
-            };
-            let ledger_record = finalizer
-                .append_failed_record(
-                    response.model.clone(),
-                    evidence_hash,
-                    Some(proposed_ops),
-                    error.to_string(),
-                    &retry_report,
-                )
-                .await?;
-            return Err(AutomationRunError::RecordedFailure {
-                error,
-                ledger_record: Box::new(ledger_record),
-            });
-        }
-        let repair_request = AgentTaskRequest::new(
-            run.run_id.clone(),
+/// Body of [`run_skill_writer_for_store_with_publication`], boxed at
+/// definition; see the scheduler's boxing note.
+#[allow(clippy::too_many_arguments)]
+fn run_skill_writer_for_store_with_publication_inner<'a>(
+    runtime: SkillWriterStoreRuntime<'a>,
+    retrieval: &'a dyn AutomationSessionRetrieval,
+    config: &'a AutomationConfig,
+    backend: &'a dyn AgentTaskBackend,
+    options: SkillWriterAutomationOptions,
+    prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
+    publication: AutomationRunPublication<'a>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = AutomationRunResult<SkillWriterAutomationRun>> + Send + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let AutomationRunPublication {
+            ledger: ledger_publication,
+            settlement_guard,
+        } = publication;
+        let SkillWriterStoreRuntime {
+            host_io,
+            host_home,
+            dashboard_root,
+            sessions_db,
+            analytics_project_root,
+            analytics_db,
+            authority,
+        } = runtime;
+        let mut run = AgentTaskRunContext::new(
+            dashboard_root,
+            sessions_db,
+            options.run_id.clone(),
+            "skill_writer",
+            options.trigger,
+            config,
+            backend.executable(),
             AgentTaskKind::SkillWriter,
-            format!(
-                "Repair the previous skill proposal JSON. Return only {{\"skills\": [...]}}. Preserve valid intent, fix every validation error, and do not add unrelated changes.\n{}",
-                serde_json::to_string_pretty(validation_repairs.last().unwrap_or(&Value::Null))
-                    .map_err(TraceDecayError::from)?
-            ),
-            evidence_hash.clone(),
-            json!({
-                "previous_output": proposed_ops.clone(),
-                "validation_errors": validation_repairs.last(),
-                "activation_policy": activation_policy,
-            }),
-        );
-        let repair_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
-        let mut repair_retry_report = AgentTaskRetryReport::default();
-        response = match run_agent_task_with_retry_report(
-            backend,
-            &repair_request,
-            &repair_policy,
-            &mut repair_retry_report,
+        )
+        .with_ledger_publication(ledger_publication)
+        .with_settlement_guard(settlement_guard);
+        let _run_lock = match run.gate().await? {
+            SchedulerGate::Proceed(lock) => lock,
+            SchedulerGate::Skip(reason) => {
+                return skipped_skill_writer_run(&run, reason.as_str(), None)
+                    .await
+                    .map_err(Into::into);
+            }
+        };
+        let owning_profile_root = prebuilt_evidence
+            .as_ref()
+            .map(|bundle| bundle.profile_root.clone())
+            .or_else(|| options.profile_root.clone());
+        if let Some(profile_root) = owning_profile_root.as_deref()
+            && let Some(reconciled) = reconcile_pending_skill_deployment(
+                &run,
+                &host_io,
+                host_home.as_deref(),
+                profile_root,
+                analytics_project_root,
+            )
+            .await?
+        {
+            return Ok(reconciled);
+        }
+        let evidence_bundle = match prebuilt_evidence {
+            Some(bundle) => bundle,
+            None => match build_skill_writer_evidence(
+                retrieval,
+                analytics_project_root,
+                analytics_db,
+                options,
+            )
+            .await?
+            {
+                SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+                SkillWriterEvidenceOutcome::Skipped {
+                    reason,
+                    budget_stage,
+                    evidence_hash,
+                } => {
+                    return Ok(rejected_skill_writer_run(
+                        &run,
+                        config,
+                        reason,
+                        budget_stage,
+                        evidence_hash,
+                    ));
+                }
+            },
+        };
+        let SkillWriterEvidenceBundle {
+            profile_root,
+            evidence,
+            evidence_hash,
+        } = evidence_bundle;
+        // Refresh adoption outcomes of previously activated skills so this run's
+        // feedback artifact reports real post-activation quality. Best effort: a
+        // stale snapshot must not block skill writing.
+        if let Err(err) = crate::automation::outcomes::refresh_skill_outcomes(
+            &profile_root,
+            &run.dashboard_root,
+            current_timestamp(),
         )
         .await
         {
-            Ok(response) => response,
-            Err(error) => {
-                retry_report.append(repair_retry_report);
+            tracing::warn!(error = %err, "failed to refresh skill outcomes");
+        }
+
+        let activation_policy = skill_writer_activation_policy();
+        let request = AgentTaskRequest::new(
+            run.run_id.clone(),
+            AgentTaskKind::SkillWriter,
+            build_skill_writer_prompt(&evidence),
+            evidence_hash.clone(),
+            json!({
+                "skill_writer_evidence": evidence,
+                "apply": true,
+                "activation_policy": activation_policy,
+            }),
+        );
+        let input_hash = Some(request.input_hash.clone());
+        let finalizer = run.finalizer(input_hash.clone())?;
+        let (mut response, mut retry_report) = match finalizer
+            .run_backend_or_fallback(backend, &request, evidence_hash.clone())
+            .await?
+        {
+            BackendTaskRun::Response {
+                response,
+                retry_report,
+            } => (response, retry_report),
+            BackendTaskRun::Fallback(record) => {
+                let record = *record;
+                return Ok(SkillWriterAutomationRun {
+                    run_id: record.run_id.clone(),
+                    report: failed_backend_fallback_report(&record),
+                    ledger_record: record,
+                    backend_response: None,
+                    committed_receipt: None,
+                });
+            }
+        };
+        let (mut proposed_ops, mut proposals) = finalizer
+            .response_output_array(
+                &response,
+                evidence_hash.clone(),
+                &retry_report,
+                "skills",
+                "skill writer output must include a skills array",
+            )
+            .await?;
+        let mut validation_repairs = Vec::new();
+        for attempt in 1..=2 {
+            let mut validation_errors =
+                validate_skill_proposals(&profile_root, &run.run_id, &proposals).await?;
+            if let Err(error) = validate_skill_writer_decision(&proposed_ops, &proposals) {
+                validation_errors.push(json!({"reason": error.to_string()}));
+            }
+            if validation_errors.is_empty() {
+                break;
+            }
+            validation_repairs.push(json!({
+                "attempt": attempt,
+                "errors": validation_errors,
+            }));
+            if attempt == 2 {
+                let error = TraceDecayError::Config {
+                    message:
+                        "skill proposal validation repair budget exhausted; output quarantined"
+                            .to_string(),
+                };
                 let ledger_record = finalizer
                     .append_failed_record(
-                        None,
+                        response.model.clone(),
                         evidence_hash,
                         Some(proposed_ops),
                         error.to_string(),
+                        AgentTaskFailureClass::Permanent,
                         &retry_report,
                     )
                     .await?;
@@ -450,86 +404,250 @@ async fn run_skill_writer_for_store_with_publication(
                     ledger_record: Box::new(ledger_record),
                 });
             }
-        };
-        retry_report.append(repair_retry_report);
-        (proposed_ops, proposals) = finalizer
-            .response_output_array(
-                &response,
+            let repair_request = AgentTaskRequest::new(
+                run.run_id.clone(),
+                AgentTaskKind::SkillWriter,
+                format!(
+                    "Repair the previous skill proposal JSON. Return the complete skill writer JSON, including any no_skill_needed decision. Preserve valid intent, fix every validation error, and do not add unrelated changes.\n{}",
+                    serde_json::to_string_pretty(validation_repairs.last().unwrap_or(&Value::Null))
+                        .map_err(TraceDecayError::from)?
+                ),
                 evidence_hash.clone(),
-                &retry_report,
-                "skills",
-                "skill writer repair output must include a skills array",
+                json!({
+                    "previous_output": proposed_ops.clone(),
+                    "validation_errors": validation_repairs.last(),
+                    "activation_policy": activation_policy,
+                }),
+            );
+            let repair_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
+            let mut repair_retry_report = AgentTaskRetryReport::default();
+            response = match run_agent_task_with_retry_report(
+                backend,
+                &repair_request,
+                &repair_policy,
+                &mut repair_retry_report,
             )
-            .await?;
-    }
-    let (report, record, committed_receipt) = match finalize_skill_writer_success(
-        &finalizer,
-        &profile_root,
-        analytics_project_root,
-        config,
-        &authority,
-        activation_policy,
-        ProposedSkillOutput {
-            response: &response,
-            retry_report: &retry_report,
-            evidence: &evidence,
-            evidence_hash: evidence_hash.clone(),
-            proposed_ops: &proposed_ops,
-            proposals: &proposals,
-            validation_repairs: &validation_repairs,
-        },
-    )
-    .await
-    {
-        Ok(SkillWriterFinalization::Completed {
-            report,
-            record,
-            committed_receipt,
-        }) => (report, record, committed_receipt.map(|receipt| *receipt)),
-        Ok(SkillWriterFinalization::FailedRecorded { error, record }) => {
-            return Err(AutomationRunError::RecordedFailure {
-                error,
-                ledger_record: Box::new(record),
-            });
-        }
-        Err(AutomationRunError::Runtime(err)) => {
-            let ledger_record = finalizer
-                .append_failed_record(
-                    response.model.clone(),
-                    evidence_hash,
-                    Some(proposed_ops),
-                    err.to_string(),
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    retry_report.append(repair_retry_report);
+                    let ledger_record = finalizer
+                        .append_failed_record(
+                            None,
+                            evidence_hash,
+                            Some(proposed_ops),
+                            error.to_string(),
+                            error.failure_class(),
+                            &retry_report,
+                        )
+                        .await?;
+                    return Err(AutomationRunError::RecordedFailure {
+                        error: error.into(),
+                        ledger_record: Box::new(ledger_record),
+                    });
+                }
+            };
+            retry_report.append(repair_retry_report);
+            (proposed_ops, proposals) = finalizer
+                .response_output_array(
+                    &response,
+                    evidence_hash.clone(),
                     &retry_report,
+                    "skills",
+                    "skill writer repair output must include a skills array",
                 )
                 .await?;
-            return Err(AutomationRunError::RecordedFailure {
-                error: err,
-                ledger_record: Box::new(ledger_record),
-            });
         }
-        Err(error @ AutomationRunError::RecordedFailure { .. }) => return Err(error),
-        Err(error @ AutomationRunError::PartialEffect { .. }) => return Err(error),
-    };
-    let record = finalizer
-        .append_success_record(&request, &response, &retry_report, record)
-        .await
-        .map_err(|error| match committed_receipt.clone() {
-            Some(committed_receipt) => AutomationRunError::PartialEffect {
-                run_id: run.run_id.clone(),
-                committed_receipt: Box::new(committed_receipt),
-                ledger_record: None,
-                detail: "Skill lifecycle changes committed, but their automation terminal could not be published; reconcile the skill receipt before another run.",
+        let (report, record, committed_receipt) = match finalize_skill_writer_success(
+            &host_io,
+            host_home.as_deref(),
+            &finalizer,
+            &profile_root,
+            analytics_project_root,
+            config,
+            &authority,
+            activation_policy,
+            ProposedSkillOutput {
+                response: &response,
+                retry_report: &retry_report,
+                evidence: &evidence,
+                evidence_hash: evidence_hash.clone(),
+                proposed_ops: &proposed_ops,
+                proposals: &proposals,
+                validation_repairs: &validation_repairs,
             },
-            None => AutomationRunError::Runtime(error),
-        })?;
+        )
+        .await
+        {
+            Ok(SkillWriterFinalization::Completed {
+                report,
+                record,
+                committed_receipt,
+            }) => (report, record, committed_receipt.map(|receipt| *receipt)),
+            Ok(SkillWriterFinalization::FailedRecorded { error, record }) => {
+                return Err(AutomationRunError::RecordedFailure {
+                    error,
+                    ledger_record: Box::new(record),
+                });
+            }
+            Err(AutomationRunError::Runtime(err)) => {
+                let ledger_record = finalizer
+                    .append_failed_record(
+                        response.model.clone(),
+                        evidence_hash,
+                        Some(proposed_ops),
+                        err.to_string(),
+                        runtime_failure_class(&err),
+                        &retry_report,
+                    )
+                    .await?;
+                return Err(AutomationRunError::RecordedFailure {
+                    error: err,
+                    ledger_record: Box::new(ledger_record),
+                });
+            }
+            Err(error @ AutomationRunError::RecordedFailure { .. }) => return Err(error),
+            Err(error @ AutomationRunError::PartialEffect { .. }) => return Err(error),
+        };
+        let record = finalizer
+            .append_success_record(&request, &response, &retry_report, record)
+            .await
+            .map_err(|error| match committed_receipt.clone() {
+                Some(committed_receipt) => AutomationRunError::PartialEffect {
+                    run_id: run.run_id.clone(),
+                    committed_receipt: Box::new(committed_receipt),
+                    ledger_record: None,
+                    detail: "Skill lifecycle changes committed, but their automation terminal could not be published; reconcile the skill receipt before another run.",
+                },
+                None => AutomationRunError::Runtime(error),
+            })?;
 
-    Ok(SkillWriterAutomationRun {
-        run_id: run.run_id,
-        report,
-        ledger_record: record,
-        backend_response: Some(response),
-        committed_receipt,
+        Ok(SkillWriterAutomationRun {
+            run_id: run.run_id,
+            report,
+            ledger_record: record,
+            backend_response: Some(response),
+            committed_receipt,
+        })
     })
+}
+
+/// The latest skill-writer terminal when it committed skill mutations that
+/// never reached the hosts. Every skill-writer run settles this before it asks
+/// the backend for new work, so no later terminal can hide it.
+pub(super) fn pending_skill_deployment(
+    summary: &AutomationRunLedgerTaskSummary,
+) -> Option<&AutomationRunLedgerRecord> {
+    summary.latest_effectful_any_trigger().filter(|record| {
+        record.status == crate::automation::run_ledger::AutomationRunStatus::Failed
+            && record.error_retryable == Some(true)
+            && record
+                .applied_ops
+                .as_ref()
+                .and_then(|ops| ops.get("deployment"))
+                .and_then(|deployment| deployment.get("retry_required"))
+                .and_then(Value::as_bool)
+                == Some(true)
+    })
+}
+
+/// Redeploys the committed managed-skill store when the latest terminal left
+/// host deployment owed. The run settles that debt instead of asking the
+/// backend for new mutations, whose replay would collide with the skills the
+/// earlier run already committed.
+async fn reconcile_pending_skill_deployment(
+    run: &AgentTaskRunContext<'_>,
+    host_io: &HostIo,
+    host_home: Option<&std::path::Path>,
+    profile_root: &std::path::Path,
+    project_root: Option<&std::path::Path>,
+) -> AutomationRunResult<Option<SkillWriterAutomationRun>> {
+    let summary = run.ledger_summary().await?;
+    let Some(pending) = pending_skill_deployment(&summary) else {
+        return Ok(None);
+    };
+    let reconciled_run_id = pending.run_id.clone();
+    let rejected_ops = pending.rejected_ops.clone();
+    let rejected_count = pending.rejected_count;
+    let deployment = crate::automation::skill_writer::deploy_managed_skills(
+        host_io,
+        host_home,
+        profile_root,
+        project_root,
+    );
+    let deployment_json = serde_json::to_value(&deployment).map_err(TraceDecayError::from)?;
+    let report = json!({
+        "status": if deployment.retry_required {
+            "deployment_retry_required"
+        } else {
+            "deployment_reconciled"
+        },
+        "dry_run": false,
+        "task": "skill_writer",
+        "reconciled_run_id": reconciled_run_id,
+        "deployment": deployment_json,
+    });
+    let applied_ops = json!({ "deployment": deployment_json });
+    let finalizer = run.finalizer(None)?;
+    if deployment.retry_required {
+        let error = TraceDecayError::Config {
+            message: "managed skill host deployment still requires retry".to_string(),
+        };
+        let ledger_record = finalizer
+            .append_failed_record_with_effects(
+                None,
+                None,
+                None,
+                error.to_string(),
+                AgentTaskFailureClass::Retryable,
+                &AgentTaskRetryReport::default(),
+                Some(applied_ops),
+                None,
+                Some(report),
+                0,
+                0,
+            )
+            .await?;
+        return Err(AutomationRunError::RecordedFailure {
+            error,
+            ledger_record: Box::new(ledger_record),
+        });
+    }
+    if rejected_count > 0 {
+        let error = TraceDecayError::Config {
+            message: "skill curation could not apply every validated proposal".to_string(),
+        };
+        let ledger_record = finalizer
+            .append_failed_record_with_effects(
+                None,
+                None,
+                None,
+                error.to_string(),
+                AgentTaskFailureClass::Permanent,
+                &AgentTaskRetryReport::default(),
+                Some(applied_ops),
+                rejected_ops,
+                Some(report),
+                0,
+                rejected_count,
+            )
+            .await?;
+        return Err(AutomationRunError::RecordedFailure {
+            error,
+            ledger_record: Box::new(ledger_record),
+        });
+    }
+    let ledger_record = finalizer
+        .append_reconciliation_record(applied_ops, report.clone())
+        .await?;
+    Ok(Some(SkillWriterAutomationRun {
+        run_id: run.run_id.clone(),
+        report,
+        ledger_record,
+        backend_response: None,
+        committed_receipt: None,
+    }))
 }
 
 /// Validates and automatically applies the `skills` half of a skill-writer (or
@@ -552,6 +670,8 @@ fn skill_validation_repairs_summary(validation_repairs: &[Value]) -> Result<Valu
 }
 
 pub(super) async fn finalize_skill_writer_success(
+    host_io: &HostIo,
+    host_home: Option<&std::path::Path>,
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
     project_root: Option<&std::path::Path>,
@@ -569,6 +689,7 @@ pub(super) async fn finalize_skill_writer_success(
         proposals,
         validation_repairs,
     } = output;
+    let no_skill_needed = no_skill_needed_decision(proposed_ops, proposals)?;
     let run_id = finalizer.run_id();
     // Hash the repair transcript before any lifecycle effects are applied so a
     // serialization failure cannot surface after skill mutations committed.
@@ -576,7 +697,9 @@ pub(super) async fn finalize_skill_writer_success(
     let curation_decision =
         evaluate_skill_curation(config, authority, evidence_hash.as_deref(), proposals)?;
     let proposal_outcome = validate_and_apply_skill_proposals(
+        host_io,
         profile_root,
+        host_home,
         project_root,
         run_id,
         proposals,
@@ -643,7 +766,9 @@ pub(super) async fn finalize_skill_writer_success(
         && rejected_count == 0
         && !deployment_failed;
     let report = json!({
-        "status": if no_candidate {
+        "status": if no_skill_needed.is_some() {
+            "no_skill_needed"
+        } else if no_candidate {
             "no_candidate"
         } else if fully_applied {
             "applied"
@@ -651,6 +776,7 @@ pub(super) async fn finalize_skill_writer_success(
             "failed_after_partial_effects"
         },
         "dry_run": false,
+        "decision": no_skill_needed,
         "task": "skill_writer",
         "evidence_hash": evidence_hash,
         "activation_policy": activation_policy,
@@ -695,9 +821,13 @@ pub(super) async fn finalize_skill_writer_success(
         );
         record.status = crate::automation::run_ledger::AutomationRunStatus::Failed;
         record.error = Some(error.to_string());
-        record.error_classification =
-            Some(crate::automation::backend::AgentTaskFailureClass::Permanent);
-        record.error_retryable = Some(false);
+        let error_classification = if deployment_failed {
+            AgentTaskFailureClass::Retryable
+        } else {
+            AgentTaskFailureClass::Permanent
+        };
+        record.error_classification = Some(error_classification);
+        record.error_retryable = Some(error_classification.is_retryable());
         record.applied_ops = Some(json!({
             "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
             "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
@@ -741,6 +871,8 @@ pub(super) async fn finalize_skill_writer_success(
             .map(str::to_string),
         Some(json!({
             "skills": proposed_ops.get("skills").cloned().unwrap_or_else(|| json!([])),
+            "outcome": report.get("status"),
+            "decision": report.get("decision"),
             "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
             "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
             "applied_consolidations": report.get("applied_consolidations").cloned().unwrap_or_else(|| json!([])),
@@ -764,6 +896,7 @@ pub(super) async fn finalize_skill_writer_success(
         "status": report.get("status").cloned().unwrap_or_else(|| json!("applied")),
         "dry_run": false,
         "activation_policy": activation_policy,
+        "decision": report.get("decision"),
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
         "validation_repairs": validation_repairs_summary,
@@ -828,32 +961,23 @@ fn default_skill_writer_evidence_limit() -> usize {
 
 pub(super) fn build_skill_writer_prompt(evidence: &Value) -> String {
     const POLICY: &str = concat!(
-        "Review these bounded TraceDecay session snippets and propose only reusable managed skills for repeated workflows, corrections, or tool-use patterns.\n",
-        "Evidence has two channels: recent_session_slices holds turn-ordered head/tail turns and summary nodes replayed from recently active sessions, and hits holds keyword search matches.\n",
+        "Review this bounded TraceDecay evidence for durable improvements to profile-owned managed skills. recent_session_slices contains turn-ordered excerpts and summaries from recent sessions; hits contains keyword matches.\n",
         "\n",
-        "Target shape of the skill library: CLASS-LEVEL umbrella skills, each with a rich body and support files for session-specific detail — not a long flat list of narrow one-session-one-skill entries. This shapes HOW you update, not WHETHER you update.\n",
+        "Propose a mutation only when repeated evidence shows a recurring workflow, correction, or tool-use need that ordinary reasoning, tool metadata, memory, or current skills do not already cover. A single correction, request to remember something, skill load, workaround, or successful retry is insufficient. Keep general preferences in memory or host instructions unless they change a skill's workflow.\n",
         "\n",
-        "Signals that warrant a skill proposal (any one is enough):\n",
-        "- The user corrected the agent's style, tone, format, verbosity, workflow, or approach. Frustration signals like 'stop doing X', 'this is too verbose', 'don't format like this', 'you always do Y and I hate it', or an explicit 'remember this' are FIRST-CLASS skill signals, not just memory signals. Embed the correction in the body of the skill that governs that class of task so the next session starts already knowing; a memory fact alone is not enough.\n",
-        "- A non-trivial technique, fix, workaround, debugging path, or tool-usage pattern emerged that a future session would benefit from.\n",
-        "- A skill that evidence shows was used or loaded this session turned out to be wrong, missing a step, or outdated. Patch it now.\n",
+        "Choose the smallest evidenced change. Update an automation-owned skill when its existing selection boundary covers the workflow; correct obsolete guidance instead of adding exceptions. Create a skill only for a distinct recurring workflow. Merge, archive, or redesign routing only when the supplied overlap, ownership, and usage evidence supports that exact action. Never merge or archive pinned or user-authored skills.\n",
         "\n",
-        "Preference order — pick the EARLIEST action that fits:\n",
-        "1. UPDATE a skill that the evidence (skill_usage_summaries, skill_improvement_recommendations, existing_managed_skills) shows was used or loaded recently. It was in play, so it is the right one to extend.\n",
-        "2. PATCH an existing umbrella skill from existing_managed_skills whose class covers the new learning. Add a subsection, a pitfall, or broaden a trigger.\n",
-        "3. ADD to an existing skill's scope via its support_files (reference notes, templates, or re-runnable snippets), with a one-line pointer in the skill body so future sessions find it.\n",
-        "4. CREATE a new skill only when nothing existing fits. The name MUST be at the class level and MUST survive the test: 'does this name only make sense for today's task?' If yes, it is wrong — no PR numbers, error strings, feature codenames, or fix-X/debug-Y session artifacts. Fall back to option 1, 2, or 3 instead.\n",
+        "Write discovery metadata for selection, not a miniature manual. routing_description should be one concise, discriminating description of what the skill does and the tasks that should select it; add a nearby exclusion only when it prevents likely misrouting. Do not use catchalls, magic phrases, tool inventories, or generic domain words that attract neighboring work. Use a durable task name without PR numbers, transient errors, or session narrative.\n",
         "\n",
-        "Do NOT capture (these become persistent self-imposed constraints that bite later when the environment changes):\n",
-        "- Environment-dependent failures: missing binaries, 'command not found', unconfigured credentials, uninstalled packages, post-migration path mismatches. The user can fix these; they are not durable rules.\n",
-        "- Negative claims about tools or features ('X is broken', 'browser tools do not work'). These harden into refusals the agent cites against itself long after the actual problem was fixed. If a tool failed because of setup state, capture the FIX (install command, config step, env var) under an existing setup or troubleshooting skill — never 'this tool does not work' as a standalone constraint.\n",
-        "- Session-specific transient errors that resolved before the session ended. If retrying worked, the lesson is the retry pattern, not the original failure.\n",
-        "- One-off task narratives. A single 'summarize this' or 'analyze this PR' request is not a class of work that warrants a skill.\n",
-        "- Secrets, credentials, or tokens in any skill body or support file.\n",
+        "Keep body_markdown to domain facts, decision criteria, useful workflow guidance, and concrete correctness, security, or authorization constraints that change a capable agent's behavior. Do not add generic planning, testing, review, approval, reporting, or tool-use itineraries. Preserve the user's scope and existing authorization. Let the agent finish authorized preparation, implementation, inspection, and fixes; require a pause only for a material missing decision, new authority, or an external or irreversible action whose risk warrants it.\n",
         "\n",
-        "An empty skills array is a real option when the session ran smoothly with no corrections and produced no new technique, but do not reach for it as a default.\n",
+        "Keep a simple skill self-contained. For multiple substantial modes or conditional details, put only that material in support_files and link each file from body_markdown with a clear read condition. Do not create a router or support file merely to satisfy a pattern. Never include secrets, credentials, or tokens. Do not persist environment failures, negative claims that a tool is broken, resolved transient errors, or one-off task narratives. A repeated setup problem may belong in an existing setup or troubleshooting skill when the evidence supports it.\n",
         "\n",
-        "Response contract: Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, kiro, or hermes; Hermes exports are generated read-only under the TraceDecay plugin package and never overwrite host-owned user skills. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Consolidations: when skill_overlap_candidates shows overlapping managed skills, you may propose action=merge (include id for the surviving skill, base_checksum, source_skill_id, source_base_checksum, reason, and optional merged title/summary/category/targets/body_markdown/support_files) or action=archive (include id, base_checksum, reason). Consolidations preserve archived source content. Valid proposals are activated and exported automatically. Never propose merge or archive for pinned or user-authored skills.\n",
+        "If no mutation is warranted, return skills: [], outcome: no_skill_needed, and decision with a specific reason and remedy (improve_tool_description, improve_hint_routing, insufficient_repeated_evidence, generic_reasoning, one_off_task, or no_action). This performs no deployment. Missed or repeated skill use alone is not evidence of a defect; distinguish selection, task outcome, observability, and tool or hint routing.\n",
+        "\n",
+        "The existing adoption contract requires routing_validation for every create or routing_description change: include a positive expected_skill scenario, a near-neighbor scenario selecting its expected skill, and a negative scenario with allowed_skills: []. Each has id, category, hosts (claude/codex), fixture, status, prompt, nonempty ground_truth outcome checks, and max_tool_calls. These scenarios test selection boundaries and task outcomes; they do not prove measured improvement.\n",
+        "\n",
+        "Response contract: Return only JSON with a skills array, an explicit outcome, and decision. Use outcome=skills_proposed with at least one managed skill create, patch/update, merge, or archive and decision=null; use outcome=no_skill_needed with skills=[] and the decision described above. New skills use action=create and must include id, title, summary, routing_description, category, body_markdown, targets, support_files with text content, routing_validation, and reason. Targets must be an array using cursor, codex, claude, agents, opencode, kimi, kiro, or hermes; Hermes exports are generated read-only under the TraceDecay plugin package and never overwrite host-owned user skills. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, routing_description, category, targets, body_markdown, support_files, or pinned; set unchanged nullable fields to null. For updates, support_files is a complete replacement list, not a partial file patch. Consolidations: when skill_overlap_candidates shows overlapping managed skills, you may propose action=merge (include id for the surviving skill, base_checksum, source_skill_id, source_base_checksum, reason, and nullable merged title/summary/routing_description/category/targets/body_markdown/support_files/routing_validation fields) or action=archive (include id, base_checksum, reason). Consolidations preserve archived source content. Valid proposals are activated and exported automatically. Never propose merge or archive for pinned or user-authored skills.\n",
     );
     format!(
         "{POLICY}{}",
@@ -882,6 +1006,7 @@ pub(super) fn rejected_skill_writer_run(
     run: &AgentTaskRunContext<'_>,
     config: &AutomationConfig,
     reason: &str,
+    budget_stage: Option<SessionRetrievalBudgetStageV1>,
     evidence_hash: Option<String>,
 ) -> SkillWriterAutomationRun {
     let (report, record) = unpersisted_rejected_parts(
@@ -889,6 +1014,7 @@ pub(super) fn rejected_skill_writer_run(
         config,
         AgentTaskKind::SkillWriter,
         reason,
+        budget_stage,
         evidence_hash,
         "skill_writer",
     );
@@ -898,5 +1024,114 @@ pub(super) fn rejected_skill_writer_run(
         ledger_record: record,
         backend_response: None,
         committed_receipt: None,
+    }
+}
+
+#[cfg(test)]
+mod routing_decision_tests {
+    use super::{NoSkillNeededDecision, SkillRoutingRemedy, no_skill_needed_decision};
+    use serde_json::json;
+
+    #[test]
+    fn no_skill_needed_requires_a_reason_and_refuses_mutations() {
+        let output = json!({
+            "skills": [], "outcome": "no_skill_needed",
+            "decision": {"reason": "The only request was a one-off arithmetic calculation.", "remedy": "one_off_task"}
+        });
+        assert_eq!(
+            no_skill_needed_decision(&output, &[]).unwrap(),
+            Some(NoSkillNeededDecision {
+                reason: "The only request was a one-off arithmetic calculation.".to_owned(),
+                remedy: SkillRoutingRemedy::OneOffTask,
+            })
+        );
+        assert_eq!(
+            no_skill_needed_decision(&output, &[json!({"action": "archive"})])
+                .unwrap_err()
+                .to_string(),
+            "config error: no_skill_needed cannot include skill mutations"
+        );
+        let mut invalid = output.clone();
+        invalid["decision"]["reason"] = json!("  ");
+        assert_eq!(
+            no_skill_needed_decision(&invalid, &[])
+                .unwrap_err()
+                .to_string(),
+            "config error: no_skill_needed requires an evidenced reason"
+        );
+        invalid["decision"]["reason"] = json!("observed");
+        invalid["decision"]["remedy"] = json!("create_skill");
+        assert_eq!(
+            no_skill_needed_decision(&invalid, &[])
+                .unwrap_err()
+                .to_string(),
+            "json error: unknown variant `create_skill`, expected one of `improve_tool_description`, `improve_hint_routing`, `insufficient_repeated_evidence`, `generic_reasoning`, `one_off_task`, `no_action`"
+        );
+        assert_eq!(
+            no_skill_needed_decision(&json!({"skills": []}), &[])
+                .unwrap_err()
+                .to_string(),
+            "config error: skill writer output requires an explicit outcome"
+        );
+    }
+
+    #[test]
+    fn skill_writer_outcomes_are_explicit_and_exhaustive() {
+        let proposal = json!({"action": "create"});
+        assert!(
+            no_skill_needed_decision(
+                &json!({
+                    "skills": [proposal.clone()],
+                    "outcome": "skills_proposed",
+                    "decision": null
+                }),
+                &[proposal],
+            )
+            .unwrap()
+            .is_none()
+        );
+        for (remedy, expected) in [
+            (
+                "improve_tool_description",
+                SkillRoutingRemedy::ImproveToolDescription,
+            ),
+            (
+                "improve_hint_routing",
+                SkillRoutingRemedy::ImproveHintRouting,
+            ),
+            (
+                "insufficient_repeated_evidence",
+                SkillRoutingRemedy::InsufficientRepeatedEvidence,
+            ),
+            ("generic_reasoning", SkillRoutingRemedy::GenericReasoning),
+            ("one_off_task", SkillRoutingRemedy::OneOffTask),
+            ("no_action", SkillRoutingRemedy::NoAction),
+        ] {
+            assert_eq!(
+                no_skill_needed_decision(
+                    &json!({
+                        "skills": [],
+                        "outcome": "no_skill_needed",
+                        "decision": {"reason": "No reusable skill mutation is warranted.", "remedy": remedy}
+                    }),
+                    &[],
+                )
+                .unwrap(),
+                Some(NoSkillNeededDecision {
+                    reason: "No reusable skill mutation is warranted.".to_owned(),
+                    remedy: expected,
+                }),
+                "remedy {remedy}"
+            );
+        }
+        assert_eq!(
+            no_skill_needed_decision(
+                &json!({"skills": [], "outcome": "unsupported", "decision": {}}),
+                &[],
+            )
+            .unwrap_err()
+            .to_string(),
+            "config error: unsupported skill writer outcome"
+        );
     }
 }

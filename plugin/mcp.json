@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "graph": {
+      "type": "stdio",
+      "command": "tracedecay",
+      "args": ["serve"]
+    },
+    "tracedecay-explorer": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/chatgpt-extension/embedded/server.mjs"],
+      "cwd": "./"
+    }
+  }
+}

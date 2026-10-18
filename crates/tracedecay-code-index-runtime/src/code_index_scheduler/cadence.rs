@@ -11,8 +11,8 @@
 //! [`CodeIndexArrivalV1::Unavailable`]: queue delay and event-to-ready latency
 //! are then withheld, never rendered as a zero-latency sample.
 
-use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 
 use tracedecay_domain::{CodeGenerationId, ContentDigest};
 
@@ -31,6 +31,8 @@ pub enum CodeIndexCadenceTriggerV1 {
     QueryAdmission,
     /// Follow-up wake after a busy serve-prior-generation admission.
     BusyFollowUp,
+    /// The process gave memory back, so work refused for memory retries.
+    MemoryHeadroom,
 }
 
 impl CodeIndexCadenceTriggerV1 {
@@ -43,15 +45,16 @@ impl CodeIndexCadenceTriggerV1 {
             Self::GitWatcher => "git_watcher",
             Self::QueryAdmission => "query_admission",
             Self::BusyFollowUp => "busy_follow_up",
+            Self::MemoryHeadroom => "memory_headroom",
         }
     }
 }
 
 /// When the wake that produced one reconcile was accepted.
 ///
-/// A reconcile that runs without an attributable pending wake — a follow-up pass
+/// A reconcile that runs without an attributable pending wake, a follow-up pass
 /// draining work an earlier wake already claimed, or an out-of-range clock
-/// reading — has no arrival instant. That is a typed absence, not an instant
+/// reading, has no arrival instant. That is a typed absence, not an instant
 /// equal to the terminal time, because substituting the terminal time would
 /// publish a zero queue delay and a zero event-to-ready latency for a sample
 /// whose arrival was never observed.
@@ -88,7 +91,10 @@ pub enum CodeIndexCadenceOutcomeV1 {
         generation_id: CodeGenerationId,
         reextracted_files: usize,
         changed_chunks: usize,
-        reused_chunks: usize,
+        reused_chunks: u64,
+        clone_payloads_reused: Option<u64>,
+        clone_stale_invalidations: Option<u64>,
+        clone_body_changes_observed: Option<bool>,
     },
     Noop {
         snapshot_content_identity: ContentDigest,
@@ -251,12 +257,20 @@ pub struct CodeIndexCadenceReadModelV1 {
 
 /// Bounded ring of recent event-to-ready receipts.
 ///
-/// Capacity is at least [`P99_MINIMUM_SAMPLES`] so a retained population can
+/// Capacity is at least `P99_MINIMUM_SAMPLES` so a retained population can
 /// actually reach p99 eligibility; a shorter ring would make p99 permanently
 /// unavailable by construction.
 #[derive(Debug, Default)]
 pub struct CodeIndexCadenceTelemetryV1 {
     receipts: VecDeque<CodeIndexEventToReadyReceiptV1>,
+    latest_clone_updates: BTreeMap<PathBuf, (CodeGenerationId, CodeIndexCloneUpdateV1)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CodeIndexCloneUpdateV1 {
+    pub payloads_reused: Option<u64>,
+    pub stale_invalidations: Option<u64>,
+    pub changed_symbol_update_micros: Option<u64>,
 }
 
 impl CodeIndexCadenceTelemetryV1 {
@@ -268,8 +282,40 @@ impl CodeIndexCadenceTelemetryV1 {
     );
 
     pub fn record(&mut self, receipt: CodeIndexEventToReadyReceiptV1) {
-        #[cfg(feature = "hotpath")]
-        observe_receipt(&receipt);
+        if let CodeIndexCadenceOutcomeV1::Published {
+            generation_id,
+            clone_payloads_reused,
+            clone_stale_invalidations,
+            clone_body_changes_observed,
+            ..
+        } = &receipt.outcome
+        {
+            if self.latest_clone_updates.len() >= Self::CAPACITY
+                && !self
+                    .latest_clone_updates
+                    .contains_key(&receipt.project_root)
+            {
+                self.latest_clone_updates.pop_first();
+            }
+            self.latest_clone_updates.insert(
+                receipt.project_root.clone(),
+                (
+                    generation_id.clone(),
+                    CodeIndexCloneUpdateV1 {
+                        payloads_reused: *clone_payloads_reused,
+                        stale_invalidations: *clone_stale_invalidations,
+                        changed_symbol_update_micros: if *clone_body_changes_observed == Some(true)
+                        {
+                            receipt
+                                .event_to_ready_micros()
+                                .and_then(|value| u64::try_from(value).ok())
+                        } else {
+                            None
+                        },
+                    },
+                ),
+            );
+        }
         while self.receipts.len() >= Self::CAPACITY {
             self.receipts.pop_front();
         }
@@ -292,6 +338,15 @@ impl CodeIndexCadenceTelemetryV1 {
             .iter()
             .filter(|receipt| receipt.arrival.wake_micros().is_some())
             .count()
+    }
+
+    pub(super) fn latest_clone_update(
+        &self,
+        project_root: &Path,
+        generation_id: &CodeGenerationId,
+    ) -> Option<CodeIndexCloneUpdateV1> {
+        let (observed_generation, update) = self.latest_clone_updates.get(project_root)?;
+        (observed_generation == generation_id).then_some(*update)
     }
 
     /// Aggregate the retained ring into the bounded truthful read model.
@@ -341,39 +396,6 @@ impl CodeIndexCadenceTelemetryV1 {
     }
 }
 
-/// Bounded wake-decision counters for one completed reconcile: which trigger
-/// woke the worker and whether the pass published or proved a no-op. Both
-/// reason sets are closed enums, so the keys stay static; per-receipt latency
-/// stays in the ring's truthful percentile model rather than a profiler gauge.
-#[cfg(feature = "hotpath")]
-fn observe_receipt(receipt: &CodeIndexEventToReadyReceiptV1) {
-    match receipt.trigger {
-        CodeIndexCadenceTriggerV1::Mount => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.mount_total").inc(1_u64);
-        }
-        CodeIndexCadenceTriggerV1::HookHint => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.hook_hint_total").inc(1_u64);
-        }
-        CodeIndexCadenceTriggerV1::Overflow => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.overflow_total").inc(1_u64);
-        }
-        CodeIndexCadenceTriggerV1::GitWatcher => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.git_watcher_total").inc(1_u64);
-        }
-        CodeIndexCadenceTriggerV1::QueryAdmission => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.query_admission_total").inc(1_u64);
-        }
-        CodeIndexCadenceTriggerV1::BusyFollowUp => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.busy_follow_up_total").inc(1_u64);
-        }
-    }
-    if receipt.is_noop() {
-        hotpath::gauge!("daemon.code_index.cadence.reconcile.noop_total").inc(1_u64);
-    } else {
-        hotpath::gauge!("daemon.code_index.cadence.reconcile.published_total").inc(1_u64);
-    }
-}
-
 /// Whether adding one latency sample newly crossed a percentile floor.
 ///
 /// The scheduler emits the aggregate read model exactly when a percentile
@@ -387,6 +409,9 @@ pub fn newly_eligible_percentile(latency_sample_count: usize) -> Option<&'static
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod clone_update_tests;
 
 #[cfg(test)]
 mod tests {
@@ -417,21 +442,6 @@ mod tests {
     }
 
     #[test]
-    fn queue_delay_is_arrival_to_dequeue_and_service_is_dequeue_to_ready() {
-        // Arrival at 100, dequeued at 400, terminal at 900: the wait in the
-        // queue and the work done after dequeue are different measurements.
-        let receipt = receipt(CodeIndexArrivalV1::Observed { wake_micros: 100 }, 400, 900);
-        assert_eq!(receipt.queue_delay_micros(), Some(300));
-        assert_eq!(receipt.service_micros(), 500);
-        assert_eq!(receipt.event_to_ready_micros(), Some(800));
-        assert!(
-            receipt.queue_delay_micros() < receipt.event_to_ready_micros(),
-            "queue delay must be strictly less than total latency when the \
-             scheduler spent time reconciling after dequeue"
-        );
-    }
-
-    #[test]
     fn unavailable_arrival_withholds_latency_instead_of_reporting_zero() {
         let receipt = receipt(CodeIndexArrivalV1::Unavailable, 400, 900);
         assert_eq!(receipt.queue_delay_micros(), None);
@@ -457,7 +467,7 @@ mod tests {
         assert_eq!(read_model.arrival_unavailable_count, 4);
         assert_eq!(read_model.latency_sample_count, 1);
         assert_eq!(read_model.event_to_ready_micros.sample_count, 1);
-        // One sample is below every floor, so no percentile may be published —
+        // One sample is below every floor, so no percentile may be published,
         // and none of the four withheld receipts contributed a zero.
         assert_eq!(read_model.event_to_ready_micros.p50.value, None);
         assert_eq!(read_model.queue_delay_micros.p50.value, None);

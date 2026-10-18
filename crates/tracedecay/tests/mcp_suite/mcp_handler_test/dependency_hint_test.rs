@@ -4,12 +4,9 @@ use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
-
-mod lazy_cutover;
 
 struct ScopedDependencyHintFixture {
     harness: ProductionProjectCompositionHarnessV1,
@@ -17,39 +14,14 @@ struct ScopedDependencyHintFixture {
     _isolation: TestTempDir,
 }
 
-fn write_dependency_declaration(project: &Path, declarations: &str) {
-    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+fn write_dependency_declaration(project: &Path, module: &str, declarations: &str) {
+    fs::create_dir_all(project.join("node_modules").join(module)).unwrap();
     fs::write(project.join(".gitignore"), "node_modules/\n").unwrap();
-    fs::write(project.join("node_modules/pkg/index.d.ts"), declarations).unwrap();
-}
-
-fn initialize_git_repository(project: &Path) {
-    let init = Command::new(crate::common::git_program())
-        .args(["init", "-q"])
-        .current_dir(project)
-        .status()
-        .expect("git init dependency-hint fixture");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(crate::common::git_program())
-        .args(["add", "."])
-        .current_dir(project)
-        .status()
-        .expect("git add dependency-hint fixture");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(crate::common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "dependency hint fixture",
-        ])
-        .current_dir(project)
-        .status()
-        .expect("git commit dependency-hint fixture");
-    assert!(commit.success(), "git commit must succeed");
+    fs::write(
+        project.join("node_modules").join(module).join("index.d.ts"),
+        declarations,
+    )
+    .unwrap();
 }
 
 async fn scoped_dependency_hint_fixture(
@@ -60,8 +32,8 @@ async fn scoped_dependency_hint_fixture(
     let project_root = isolation.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     write_sources(&project_root);
-    initialize_git_repository(&project_root);
-    let harness = ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
+    commit_worktree(&project_root, "dependency hint fixture");
+    let harness = crate::support::seeded_composition::open_with_scope_prefix(
         isolation.path(),
         [project_root.clone()],
         scope_prefix,
@@ -106,6 +78,27 @@ async fn wait_for_search_payload(server: &McpServer, arguments: Value) -> Value 
     panic!("code-index search authority did not activate within the polling budget: {last}");
 }
 
+async fn wait_for_named_search_payload(
+    server: &McpServer,
+    arguments: Value,
+    expected_name: &str,
+) -> Value {
+    let mut last = Value::Null;
+    for _ in 0..60 {
+        let payload = search_payload(server, arguments.clone()).await;
+        if payload["results"].as_array().is_some_and(|results| {
+            results
+                .iter()
+                .any(|result| result["display"]["name"] == expected_name)
+        }) {
+            return payload;
+        }
+        last = payload;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("named code-index result did not activate within the polling budget: {last}");
+}
+
 fn hint_candidates(payload: &Value) -> &[Value] {
     payload["external_import_hint"]["candidates"]
         .as_array()
@@ -116,10 +109,14 @@ fn hint_candidates(payload: &Value) -> &[Value] {
 async fn test_search_reports_unresolved_external_import_hint_without_mutating_generation() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
-        write_dependency_declaration(project, "export interface SparseWidget { value: string }\n");
+        write_dependency_declaration(
+            project,
+            "SparseWidgetHelperDependency",
+            "export interface SparseWidget { value: string }\n",
+        );
         fs::write(
             project.join("src/app.ts"),
-            r#"import type { SparseWidget as ExternalSparseWidget } from "pkg";
+            r#"import type { SparseWidget as ExternalSparseWidget } from "SparseWidgetHelperDependency";
 export function SparseWidgetHelper() { return 1; }
 export function GenerationAnchor() { return 2; }
 "#,
@@ -134,19 +131,25 @@ export function GenerationAnchor() { return 2; }
     let before =
         wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
 
-    let sparse = search_payload(&server, json!({"query": "SparseWidget", "limit": 5})).await;
+    let sparse = wait_for_named_search_payload(
+        &server,
+        json!({"query": "SparseWidgetHelper", "limit": 5}),
+        "SparseWidgetHelper",
+    )
+    .await;
     assert!(
         sparse["results"].as_array().is_some_and(|results| {
-            results
-                .iter()
-                .any(|result| result["display"]["path"] == "src/app.ts")
+            results.iter().any(|result| {
+                result["display"]["name"] == "SparseWidgetHelper"
+                    && result["display"]["path"] == "src/app.ts"
+            })
         }),
-        "the successful sparse lexical result must be preserved: {sparse}"
+        "the successful sparse lexical symbol result must be preserved: {sparse}"
     );
     assert_eq!(
         hint_candidates(&sparse),
         &[json!({
-            "module": "pkg",
+            "module": "SparseWidgetHelperDependency",
             "symbol": "SparseWidget",
             "import_file": "src/app.ts",
             "line": 1,
@@ -190,6 +193,7 @@ async fn test_search_external_import_hint_respects_scope_before_limit() {
         fs::create_dir_all(project.join("outside")).unwrap();
         write_dependency_declaration(
             project,
+            "pkg",
             "export interface ScopedDependency { value: string }\n",
         );
         for index in 0..8 {
@@ -236,6 +240,7 @@ async fn test_search_skips_external_import_hint_when_results_fill_limit() {
         fs::create_dir_all(project.join("src")).unwrap();
         write_dependency_declaration(
             project,
+            "pkg",
             "export interface IndexedAnchor { value: string }\n",
         );
         fs::write(
@@ -259,6 +264,224 @@ export function IndexedAnchor() { return 1; }
     assert!(
         payload["external_import_hint"].is_null(),
         "a full result page must skip the verified advisory read: {payload}"
+    );
+    fixture.harness.shutdown().await;
+}
+
+const GENERATION_ADVANCED_REASON: &str =
+    "application.symbol-graph.ignored-dependency-generation-advanced";
+
+enum DependencyImportStyle {
+    Named,
+    Default,
+}
+
+async fn lazy_dependency_fixture(
+    symbol: &str,
+    import_style: DependencyImportStyle,
+) -> ProductionCompositionFixture {
+    let (declaration, import) = match import_style {
+        DependencyImportStyle::Named => (
+            format!("export interface {symbol} {{ value: string }}\n"),
+            format!("import type {{ {symbol} }} from \"pkg\";\n"),
+        ),
+        DependencyImportStyle::Default => (
+            format!("export default interface {symbol} {{ value: string }}\n"),
+            format!("import type {symbol} from \"pkg\";\n"),
+        ),
+    };
+    production_composition_fixture_with_sources(move |project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        write_dependency_declaration(project, "pkg", &declaration);
+        fs::write(
+            project.join("src/app.ts"),
+            "export function GenerationAnchor() { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(project.join("src/dependency-types.ts"), import).unwrap();
+    })
+    .await
+}
+
+fn assert_generation_advanced_retry(response: &Value) {
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(
+        problem["kind"], "unavailable",
+        "the generation-advancing call must not return a same-call symbol payload: {response}"
+    );
+    assert_eq!(
+        problem["code"].as_str(),
+        Some(GENERATION_ADVANCED_REASON),
+        "lazy admission must expose the canonical usecase retry reason: {response}"
+    );
+    assert_eq!(
+        problem["message"],
+        "ignored dependency indexing advanced the graph generation; retry the request",
+        "{response}"
+    );
+    assert_eq!(problem["retryable"], true, "{response}");
+}
+
+fn code_generation(payload: &Value) -> &str {
+    payload["code_generation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("search response code generation: {payload}"))
+}
+
+async fn exact_symbol_payload(server: &McpServer, arguments: Value) -> Value {
+    let response =
+        handle_real_server_tool_call_raw(server, "tracedecay_find_exact_symbol", arguments).await;
+    assert!(
+        response["error"].is_null(),
+        "exact-symbol read must succeed: {response}"
+    );
+    serde_json::from_str(extract_real_server_text(&response["result"]))
+        .expect("exact-symbol response JSON")
+}
+
+#[tokio::test]
+async fn exact_symbol_explicit_lazy_admission_advances_generation_then_retry_finds_symbol_once() {
+    let fixture =
+        lazy_dependency_fixture("ExactOnlyDependency", DependencyImportStyle::Named).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    let before =
+        wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
+
+    let zero =
+        exact_symbol_payload(&server, json!({"name": "ExactOnlyDependency", "limit": 5})).await;
+    assert_eq!(
+        zero["count"], 0,
+        "the ignored dependency must be absent before explicit admission: {zero}"
+    );
+    let after_zero =
+        wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
+    assert_eq!(code_generation(&after_zero), code_generation(&before));
+
+    let arguments = json!({
+        "name": "ExactOnlyDependency",
+        "limit": 5,
+        "lazy_index_ignored_dependencies": true
+    });
+    let first = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_find_exact_symbol",
+        arguments.clone(),
+    )
+    .await;
+    assert_generation_advanced_retry(&first);
+
+    let after =
+        wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
+    assert_ne!(
+        code_generation(&after),
+        code_generation(&before),
+        "the scheduler must publish a new serving generation before requesting a retry"
+    );
+
+    let payload = exact_symbol_payload(&server, arguments).await;
+    assert_eq!(payload["count"], 1, "retry must find one symbol: {payload}");
+    let matches = payload["matches"]
+        .as_array()
+        .expect("exact-symbol retry matches");
+    assert_eq!(matches.len(), 1, "retry must find one symbol: {payload}");
+    assert_eq!(
+        matches[0]["name"], "ExactOnlyDependency",
+        "retry must return the requested dependency symbol: {payload}"
+    );
+    assert_eq!(
+        matches[0]["file"], "node_modules/pkg/index.d.ts",
+        "retry must return the ignored dependency declaration: {payload}"
+    );
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn search_explicit_lazy_admission_advances_generation_then_retry_finds_dependency_chunk_once()
+{
+    let fixture =
+        lazy_dependency_fixture("SearchOnlyDependency", DependencyImportStyle::Default).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    let before =
+        wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
+
+    let zero = search_payload(&server, json!({"query": "default", "limit": 5})).await;
+    assert_eq!(
+        zero["results"],
+        json!([]),
+        "the ignored dependency must be absent before explicit admission: {zero}"
+    );
+    let after_zero =
+        wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
+    assert_eq!(code_generation(&after_zero), code_generation(&before));
+
+    let arguments = json!({
+        "query": "default",
+        "limit": 5,
+        "lazy_index_ignored_dependencies": true
+    });
+    let first = search_payload(&server, arguments.clone()).await;
+    assert_eq!(
+        first["results"],
+        json!([]),
+        "generation-advancing admission must preserve the successful lexical result: {first}"
+    );
+    assert_eq!(
+        code_generation(&first),
+        code_generation(&before),
+        "the current response remains bound to the generation that produced its lexical result"
+    );
+
+    let retry = wait_for_search_payload(&server, arguments.clone()).await;
+    assert_ne!(
+        code_generation(&retry),
+        code_generation(&before),
+        "the retry must bind the scheduler-published generation"
+    );
+    let results = retry["results"].as_array().expect("search retry results");
+    assert_eq!(
+        results.len(),
+        1,
+        "retry must find one dependency chunk: {retry}"
+    );
+    let result = &results[0];
+    let anchor = result["candidate"]["anchor_id"]
+        .as_str()
+        .expect("search retry candidate anchor");
+    assert!(
+        anchor.starts_with("code-chunk:"),
+        "the default keyword must bind the admitted dependency chunk: {retry}"
+    );
+    let chunk_id = anchor
+        .strip_prefix("code-chunk:")
+        .expect("search retry chunk anchor");
+    let expected_source = format!("code-chunk:{}:{chunk_id}", code_generation(&retry));
+    assert!(
+        result["candidate"]["occurrences"]
+            .as_array()
+            .is_some_and(|occurrences| occurrences.iter().any(|occurrence| {
+                occurrence["source_occurrence_id"].as_str() == Some(expected_source.as_str())
+                    && occurrence["file_occurrence_id"]
+                        .as_str()
+                        .is_some_and(|file| !file.is_empty())
+            })),
+        "the returned chunk must retain its exact generation, chunk, and file occurrence: {retry}"
+    );
+    let stable = wait_for_search_payload(&server, arguments).await;
+    assert_eq!(
+        code_generation(&stable),
+        code_generation(&retry),
+        "a positive retry must not schedule another generation: {stable}"
+    );
+    assert_eq!(
+        stable["results"].as_array().map(Vec::len),
+        Some(1),
+        "a positive retry must continue returning exactly one result: {stable}"
     );
     fixture.harness.shutdown().await;
 }

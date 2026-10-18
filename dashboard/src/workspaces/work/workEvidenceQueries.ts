@@ -4,13 +4,13 @@ import type {
   WorkEvidenceContinuationV1,
   WorkEvidenceRetrieveRequestV1,
   WorkGraphReadV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { workQueryKey } from '../../data/query/work.ts';
 import { callWork, type WorkResult } from './workApi.ts';
 import { WORK_RETRIEVE_EVIDENCE_ROUTE } from './workRoutes.ts';
 
-export const WORK_EVIDENCE_PAGE_SIZE = 25;
+const WORK_EVIDENCE_PAGE_SIZE = 25;
 export type WorkEvidenceTemporalKind = TemporalModeV1['kind'];
 
 /** Translate the browser's explicitly UTC-labelled cutoff into the temporal
@@ -150,11 +150,12 @@ export function useWorkEvidence(
     queryFn:
       request === undefined
         ? skipToken
-        : () =>
+        : ({ signal }) =>
             callWork(
               WORK_RETRIEVE_EVIDENCE_ROUTE,
               request,
               scopedUrl(scope, WORK_RETRIEVE_EVIDENCE_ROUTE.path),
+              signal,
             ),
   });
 }

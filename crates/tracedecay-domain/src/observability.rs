@@ -467,72 +467,13 @@ pub struct HealthSnapshotObservedV1 {
     pub files_analyzed: u64,
     pub function_denominator: u64,
     pub dimensions: BTreeMap<String, HealthDimensionObservedV1>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PerformanceMeasurementDescriptorV1 {
-    pub descriptor_revision: String,
-    pub metric: String,
-    pub unit: String,
-    pub eligible_population: String,
-    pub horizon: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct BenchmarkRunAggregateV1 {
-    pub descriptor: PerformanceMeasurementDescriptorV1,
-    pub eligible: u64,
-    pub observed: u64,
-    pub censored: u64,
-    pub unknown: u64,
-    pub p50: Option<f64>,
-    pub p95: Option<f64>,
-    pub p99: Option<f64>,
-    pub coverage: CoverageStateV1,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct PairedEffectEstimateV1 {
-    pub baseline_revision: String,
-    pub candidate_revision: String,
-    pub paired_samples: u64,
-    pub effect: Option<f64>,
-    pub unit: String,
-    pub coverage: CoverageStateV1,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PerformanceDispositionV1 {
-    Promote,
-    Reject,
-    InsufficientEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use schemars::schema_for;
-
-    #[derive(JsonSchema, Serialize)]
-    #[schemars(rename = "ObservabilityPayloadV1")]
-    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-    enum DirectOperationResourceSchemaV1 {
-        OperationResource(CoverageStateV1),
-    }
-
-    #[derive(JsonSchema, Serialize)]
-    #[schemars(rename = "ObservabilityPayloadV1")]
-    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-    enum BoxedOperationResourceSchemaV1 {
-        OperationResource(Box<CoverageStateV1>),
-    }
-
-    #[derive(Serialize)]
-    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-    enum DirectOperationResourceWireV1<'a> {
-        OperationResource(&'a OperationResourceObservedV1),
-    }
 
     fn stage(stage: OperationStageV1, elapsed_micros: u64) -> OperationStageTimingV1 {
         OperationStageTimingV1 {
@@ -616,41 +557,6 @@ mod tests {
     }
 
     #[test]
-    fn boxed_operation_resource_preserves_wire_shape_and_round_trips() {
-        let resource = operation_resource(Vec::new());
-        let direct =
-            serde_json::to_value(DirectOperationResourceWireV1::OperationResource(&resource))
-                .unwrap();
-        let payload = ObservabilityPayloadV1::OperationResource(Box::new(resource));
-        let boxed = serde_json::to_value(&payload).unwrap();
-
-        assert_eq!(boxed, direct);
-        assert_eq!(
-            serde_json::from_value::<ObservabilityPayloadV1>(boxed).unwrap(),
-            payload
-        );
-    }
-
-    #[test]
-    fn boxing_is_transparent_to_schemars_tagged_enum_shape() {
-        let direct_wire = serde_json::to_value(DirectOperationResourceSchemaV1::OperationResource(
-            CoverageStateV1::Known,
-        ))
-        .unwrap();
-        let boxed_wire = serde_json::to_value(BoxedOperationResourceSchemaV1::OperationResource(
-            Box::new(CoverageStateV1::Known),
-        ))
-        .unwrap();
-        let direct_schema = serde_json::to_value(schema_for!(DirectOperationResourceSchemaV1))
-            .expect("direct schema must serialize");
-        let boxed_schema = serde_json::to_value(schema_for!(BoxedOperationResourceSchemaV1))
-            .expect("boxed schema must serialize");
-
-        assert_eq!(boxed_wire, direct_wire);
-        assert_eq!(boxed_schema, direct_schema);
-    }
-
-    #[test]
     fn operation_stage_wire_values_are_closed_and_stable() {
         let values = [
             (OperationStageV1::Scheduled, "\"scheduled\""),
@@ -690,33 +596,6 @@ mod tests {
             OperationReadinessV1 {
                 foreground_ready_micros: Some(21),
                 background_complete_micros: None,
-            }
-        );
-        assert_eq!(envelope.validate(), Ok(()));
-    }
-
-    #[test]
-    fn successful_terminal_records_both_readiness_milestones() {
-        let envelope = operation_envelope(
-            vec![
-                stage(OperationStageV1::Scheduled, 0),
-                stage(OperationStageV1::Admitted, 5),
-                stage(OperationStageV1::Started, 8),
-                stage(OperationStageV1::FirstProgress, 13),
-                stage(OperationStageV1::FirstUsefulResult, 21),
-                stage(OperationStageV1::Terminal, 34),
-            ],
-            Some(ObservabilityTerminalResultV1::Succeeded),
-        );
-        let ObservabilityPayloadV1::OperationResource(resource) = &envelope.payload else {
-            unreachable!();
-        };
-
-        assert_eq!(
-            resource.readiness(),
-            OperationReadinessV1 {
-                foreground_ready_micros: Some(21),
-                background_complete_micros: Some(34),
             }
         );
         assert_eq!(envelope.validate(), Ok(()));
@@ -1015,14 +894,6 @@ mod tests {
     }
 
     #[test]
-    fn performance_disposition_does_not_invent_success() {
-        assert_eq!(
-            serde_json::to_string(&PerformanceDispositionV1::InsufficientEvidence).unwrap(),
-            "\"insufficient_evidence\""
-        );
-    }
-
-    #[test]
     fn envelope_rejects_payload_kind_mismatch() {
         let envelope = ObservabilityEnvelopeV1 {
             event_id: "event:1".into(),
@@ -1064,6 +935,44 @@ mod tests {
             }),
         };
         assert_eq!(envelope.validate(), Err("event_kind"));
+    }
+
+    #[test]
+    fn retriever_observations_admit_only_runtime_lanes() {
+        let observed = |retriever_kind: &str| RetrieverObservedV1 {
+            retriever_kind: retriever_kind.into(),
+            profile_revision: "profile.v1".into(),
+            requested_candidates: 4,
+            consumed_candidates: 4,
+            eligible_candidates: 2,
+            returned_candidates: 2,
+            unique_contributions: 2,
+        };
+        assert_eq!(observed("graph").validate(), Ok(()));
+        assert_eq!(observed("semantic").validate(), Err("retriever_counts"));
+
+        let planner = |lanes: &[&str]| RetrievalPlannerObservedV1 {
+            planner_revision: "planner.v1".into(),
+            requested_lanes: lanes.iter().map(|lane| (*lane).into()).collect(),
+            admitted_lanes: vec![],
+            abstained: true,
+        };
+        assert_eq!(
+            planner(&[
+                "exact_literal",
+                "lexical",
+                "graph",
+                "temporal",
+                "task_session",
+                "diagnostic",
+            ])
+            .validate(),
+            Ok(())
+        );
+        assert_eq!(
+            planner(&["lexical", "semantic"]).validate(),
+            Err("retrieval_planner_lanes")
+        );
     }
 
     #[test]

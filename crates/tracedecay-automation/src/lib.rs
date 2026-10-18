@@ -1,7 +1,7 @@
 //! Automation contracts, deterministic policies, and state models.
 //!
 //! Runtime adapters and persistence remain outside this crate.
-//! Opt-in `hotpath` spans cover backend invocation and managed-skill
+//! Tracing spans cover backend invocation and managed-skill
 //! parse/validation only. Scheduler ticks, run-ledger writes, and host
 //! orchestration stay with their owning crates.
 
@@ -17,7 +17,6 @@ pub mod evidence_budget;
 pub mod managed_skill_format;
 mod managed_skill_model;
 mod managed_skill_validation;
-mod ports;
 pub mod run_labels;
 pub mod skill_frontmatter;
 pub mod text;
@@ -26,9 +25,10 @@ pub mod managed_skills {
     pub use crate::managed_skill_model::{
         MATERIALIZED_SKILL_MANAGED_BY, MAX_MANAGED_SKILL_BODY_BYTES,
         MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES, ManagedSkill, ManagedSkillDraft,
-        ManagedSkillMaterializationScope, ManagedSkillMetadata, ManagedSkillProvenance,
-        ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile,
-        SkillInstallTarget, current_metadata_timestamp, default_managed_skill_targets,
+        ManagedSkillExt, ManagedSkillMaterializationScope, ManagedSkillMetadata,
+        ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
+        ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget, current_metadata_timestamp,
+        default_managed_skill_targets,
     };
     pub use crate::managed_skill_validation::{
         validate_managed_skill, validate_managed_skill_update, validate_managed_support_files,
@@ -36,8 +36,7 @@ pub mod managed_skills {
     };
 }
 
-pub use error::{AutomationError, BoxError, Result};
-pub use ports::AutomationRunRecord;
+pub use error::{AutomationError, Result};
 
 pub(crate) fn config_error(message: impl Into<String>) -> AutomationError {
     AutomationError::config(message)

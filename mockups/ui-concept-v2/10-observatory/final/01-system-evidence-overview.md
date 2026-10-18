@@ -3,7 +3,7 @@ design_status: current
 evidence_class: concept_synthetic
 ---
 
-# Observatory — system evidence overview
+# Observatory, system evidence overview
 
 - **Asset:** `01-system-evidence-overview.png`
 - **Route:** `/observatory`

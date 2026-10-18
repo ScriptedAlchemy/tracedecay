@@ -5,13 +5,11 @@ use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-#[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
 #[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    create_managed_skill,
+    ManagedSupportFileExt, create_managed_skill,
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
@@ -21,7 +19,9 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 use tracedecay_automation_runtime::automation::skill_usage::{
     SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
-
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_project::project::TraceDecayOpenOptions;
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     let dir = TempDir::new().unwrap();
@@ -77,6 +77,7 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
             backend_attempt_count: 0,
             backend_attempts: Vec::new(),
             fallback_status: None,
+            session_evidence_budget_stage: None,
             report_ref: None,
             artifacts: vec![artifact],
             started_at: "1782283199".to_string(),
@@ -87,15 +88,14 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     .await
     .unwrap();
 
-    let markdown_result = handle_tool_call(
-        &cg,
-        "tracedecay_automation_run_artifact_view",
-        json!({"run_id": run_id, "kind": "codex_handoff"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let server = real_mcp_server(cg).await;
+    let markdown_result = server
+        .call_tool_for_test(
+            "tracedecay_automation_run_artifact_view",
+            json!({"run_id": run_id, "kind": "codex_handoff"}),
+        )
+        .await
+        .unwrap();
     let markdown_text = extract_text(&markdown_result.value);
     assert!(markdown_text.starts_with("## Automation Run Artifact"));
     assert!(markdown_text.contains("**run_id:** run-mcp-artifact"));
@@ -103,15 +103,13 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     assert!(markdown_text.contains("ready_for_review"));
     assert!(!markdown_text.contains("|"));
 
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_automation_run_artifact_view",
-        json!({"run_id": run_id, "kind": "codex_handoff", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = server
+        .call_tool_for_test(
+            "tracedecay_automation_run_artifact_view",
+            json!({"run_id": run_id, "kind": "codex_handoff", "format": "json"}),
+        )
+        .await
+        .unwrap();
     let payload = extract_json(&result.value);
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["run_id"], run_id);
@@ -122,39 +120,43 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
         "inspect artifact through MCP"
     );
 
-    let missing = handle_tool_call(
-        &cg,
-        "tracedecay_automation_run_artifact_view",
-        json!({"run_id": run_id, "kind": "generated_evals"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        missing
-            .to_string()
-            .contains("automation run artifact not found")
+    let problem = expect_tool_refusal(
+        server
+            .call_tool_for_test(
+                "tracedecay_automation_run_artifact_view",
+                json!({"run_id": run_id, "kind": "generated_evals"}),
+            )
+            .await,
+    );
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(
+        problem["message"],
+        format!("automation run artifact not found: {run_id}/generated_evals")
     );
 
-    close_test_graph(cg).await;
+    drop(server);
 }
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn managed_skill_mcp_tools_list_and_view_profile_store() {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    let home = dir.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
-    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile = crate::common::isolated_profile_under_home(&dir.path().join("home"));
+    let cg = TestTraceDecay::new(
+        fixture::init_project_from_template_with_options(
+            &project,
+            TraceDecayOpenOptions::for_profile(&profile),
+        )
+        .await
+        .unwrap(),
+    );
+    let profile_root = profile.data_dir().to_path_buf();
     let runtime = open_active_project_scoped_runtime(&cg).await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
+    let project_id = RegisteredGlobalDb::canonical_project_key(cg.project_root());
 
     let active_skill = create_managed_skill(
         &profile_root,
@@ -178,7 +180,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
             provider: "mcp".to_string(),
             project_id: project_id.clone(),
             session_id: Some("mcp-skill-session".to_string()),
-            timestamp: tracedecay::tracedecay::current_timestamp(),
+            timestamp: tracedecay_runtime_core::tracedecay::current_timestamp(),
             event_kind: "mcp_tool_call".to_string(),
             hook_name: None,
             tool_name: Some("tracedecay_skill_view".to_string()),
@@ -272,7 +274,6 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
             "tracedecay_skill_view",
             json!({
                 "id": "active-skill",
-                "include_support_files": false,
                 "__mcp_request_id": "req-active-view",
                 "format": "json",
             }),
@@ -309,6 +310,14 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
         0
     );
     assert_eq!(payload["support_files_included"], false);
+    let summary = &payload["support_file_summaries"][0];
+    assert_eq!(summary["path"], "references/checklist.md");
+    assert!(summary["byte_len"].as_u64().unwrap() > 0);
+    let encoded = payload.to_string();
+    assert!(
+        !encoded.contains("inspect context"),
+        "default skill view must not inline support-file bytes: {encoded}"
+    );
     let usage_record = load_skill_usage_record(&profile_root, "active-skill")
         .await
         .unwrap()
@@ -324,7 +333,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
             provider: "mcp".to_string(),
             project_id,
             session_id: Some("mcp-skill-session".to_string()),
-            timestamp: tracedecay::tracedecay::current_timestamp(),
+            timestamp: tracedecay_runtime_core::tracedecay::current_timestamp(),
             event_kind: "mcp_tool_call".to_string(),
             hook_name: None,
             tool_name: Some("tracedecay_skill_view".to_string()),
@@ -357,7 +366,6 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     assert_eq!(payload["skills"][0]["usage_summary"]["view_count"], 3);
 
     drop(server);
-    drop(env_lock);
 }
 
 #[cfg(feature = "test-transport")]
@@ -366,6 +374,7 @@ pub(crate) fn managed_skill_test_draft(id: &str, title: &str) -> ManagedSkillDra
         id: id.to_string(),
         title: title.to_string(),
         summary: format!("{title} summary."),
+        routing_description: format!("{title} summary."),
         category: "maintenance".to_string(),
         targets:
             tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(

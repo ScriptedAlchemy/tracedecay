@@ -13,21 +13,22 @@ use tracedecay_domain::{
 
 use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::runtime::SessionMessageRecord;
+use crate::runtime::shared::TranscriptLocationMetadataKeys;
 use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
 };
 use tracedecay_framing::{WireReadOutcome, read_bounded_to_string};
-use tracedecay_runtime_core::privacy::ObservationRecordParseErrorV1;
+use tracedecay_privacy::ObservationRecordParseErrorV1;
 
 mod admission;
 
-#[cfg(test)]
-pub use admission::snapshot_cursor_after;
+pub(crate) use admission::capture_snapshot_observations;
+
 pub use admission::{
-    SnapshotAdmissionRecord, SnapshotAdmissionRunner, SnapshotCaptureOutcome,
-    advance_snapshot_coverage, advance_snapshot_coverage_maybe, capture_snapshot_observations,
-    snapshot_capture_request, snapshot_cursor_covers_range, snapshot_range_was_committed,
-    snapshot_source_identity,
+    SnapshotAdmissionBatch, SnapshotAdmissionRecord, SnapshotAdmissionRunner,
+    SnapshotCaptureOutcome, SnapshotSourceRefusal, advance_snapshot_coverage,
+    advance_snapshot_coverage_maybe, snapshot_capture_request, snapshot_cursor_covers_range,
+    snapshot_range_was_committed, snapshot_source_identity,
 };
 
 pub const MAX_SNAPSHOT_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -148,12 +149,15 @@ pub fn host_admission_error(
         HostAdmissionStatus::Supported
         | HostAdmissionStatus::AcceptedForReplay
         | HostAdmissionStatus::Committed
-        | HostAdmissionStatus::ExactDuplicate => "observation_admission_incomplete",
+        | HostAdmissionStatus::ExactDuplicate
+        | HostAdmissionStatus::NotApplicable => "observation_admission_incomplete",
     });
     TranscriptIngestError::HostAdmission {
         provider,
         reason,
         retryable: outcome.retryable,
+        status: outcome.status,
+        detail: outcome.cause,
     }
 }
 
@@ -174,7 +178,8 @@ pub fn host_admission_status_message(provider_label: &str, status: HostAdmission
         HostAdmissionStatus::Supported
         | HostAdmissionStatus::AcceptedForReplay
         | HostAdmissionStatus::Committed
-        | HostAdmissionStatus::ExactDuplicate => {
+        | HostAdmissionStatus::ExactDuplicate
+        | HostAdmissionStatus::NotApplicable => {
             format!("{provider_label} observation admission was incomplete")
         }
     }
@@ -209,6 +214,35 @@ pub fn snapshot_message_fields(
     fields
 }
 
+/// Copies the host-recorded task/workspace location into the native snapshot
+/// payload so the canonical envelope can project it as a `Session` fact.
+pub fn insert_snapshot_location(
+    payload: &mut Map<String, Value>,
+    metadata: Option<&Value>,
+    keys: TranscriptLocationMetadataKeys,
+) {
+    let Some(cwd) = metadata
+        .and_then(|metadata| metadata.get(keys.cwd))
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+    else {
+        return;
+    };
+    let mut location = Map::new();
+    location.insert("path".to_string(), Value::String(cwd.to_string()));
+    if let Some(provenance) = metadata
+        .and_then(|metadata| metadata.get(keys.provenance))
+        .and_then(Value::as_str)
+        .filter(|provenance| !provenance.is_empty())
+    {
+        location.insert(
+            "provenance".to_string(),
+            Value::String(provenance.to_string()),
+        );
+    }
+    payload.insert("location".to_string(), Value::Object(location));
+}
+
 pub fn canonical_snapshot_envelope(
     native: &Value,
     provider: &str,
@@ -217,15 +251,48 @@ pub fn canonical_snapshot_envelope(
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     let invalid = || ObservationRecordParseErrorV1::NormalizationFailed;
-    let role = match native.get("role").and_then(Value::as_str) {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    };
+    let role = native.get("role").and_then(Value::as_str).map_or(
+        CanonicalMessageRoleV1::Unknown,
+        CanonicalMessageRoleV1::from_wire_label,
+    );
     let timestamp = native.get("timestamp").and_then(Value::as_i64);
     let mut facts = Vec::new();
+    let location = native.get("location").filter(|location| {
+        location
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| !path.is_empty())
+    });
+    let transcript_path = native
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty());
+    if location.is_some() || transcript_path.is_some() {
+        // `project_path` stays unset on purpose: session routing keeps its
+        // scope-derived fallback, only the location metadata is projected.
+        facts.push(CanonicalObservationFactV1::Session {
+            project_path: None,
+            location_path: location.and_then(|location| {
+                location
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+            transcript_path: transcript_path.map(str::to_string),
+            title: None,
+            started_at: None,
+            ended_at: None,
+            source: None,
+            native_source: None,
+            profile: None,
+            location_provenance: location.and_then(|location| {
+                location
+                    .get("provenance")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+        });
+    }
     if let Some(text) = native.get("text").cloned() {
         facts.push(CanonicalObservationFactV1::Message {
             role,
@@ -237,13 +304,13 @@ pub fn canonical_snapshot_envelope(
             timestamp,
         });
     }
-    append_tool_invocation_facts(&mut facts, native, message_id)?;
+    append_tool_invocation_facts(&mut facts, native)?;
     if let Some(result) = native.get("tool_result").filter(|value| value.is_object()) {
-        facts.push(CanonicalObservationFactV1::ToolResult {
-            invocation_id: optional_observation_id(result, "invocation_id")?,
-            content: result.get("content").cloned().unwrap_or(Value::Null),
-            success: result.get("success").and_then(Value::as_bool),
-        });
+        facts.push(tracedecay_capture::accounted_tool_result(
+            optional_observation_id(result, "invocation_id")?,
+            result.get("content").cloned().unwrap_or(Value::Null),
+            result.get("success").and_then(Value::as_bool),
+        ));
     }
     if let Some(usage) = native.get("usage").filter(|value| value.is_object()) {
         facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
@@ -358,14 +425,13 @@ fn apply_optional_relation(
 fn append_tool_invocation_facts(
     facts: &mut Vec<CanonicalObservationFactV1>,
     native: &Value,
-    message_id: &str,
 ) -> Result<(), ObservationRecordParseErrorV1> {
     if let Some(calls) = native
         .get("tool_calls")
         .or_else(|| native.get("tool_invocations"))
         .and_then(Value::as_array)
     {
-        for (index, call) in calls.iter().enumerate() {
+        for call in calls {
             let Some(name) = call
                 .pointer("/function/name")
                 .or_else(|| call.get("name"))
@@ -388,10 +454,11 @@ fn append_tool_invocation_facts(
                 .or_else(|| call.get("invocation_id"))
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty())
-                .map_or_else(|| format!("{message_id}:tool:{index}"), str::to_owned);
+                .map(ObservationId::new)
+                .transpose()
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
             facts.push(CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: ObservationId::new(invocation_id)
-                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+                invocation_id,
                 name: name.to_string(),
                 arguments,
             });
@@ -402,16 +469,14 @@ fn append_tool_invocation_facts(
     // Snapshot providers derive `tool_names` from native exposed tool-call records.
     // This fallback preserves that evidence without inventing arguments; payload
     // shapers must supply `tool_calls` when typed arguments are available.
-    for (index, name) in native
+    for name in native
         .get("tool_names")
         .and_then(Value::as_str)
         .into_iter()
         .flat_map(|names| names.split(',').filter(|name| !name.is_empty()))
-        .enumerate()
     {
         facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: ObservationId::new(format!("{message_id}:tool:{index}"))
-                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+            invocation_id: None,
             name: name.to_string(),
             arguments: Value::Null,
         });
@@ -664,8 +729,12 @@ mod tests {
                 .any(|fact| matches!(fact, CanonicalObservationFactV1::Reasoning { .. }))
         );
         let encoded = serde_json::to_string(&canonical).expect("serialize");
+        assert_eq!(
+            encoded,
+            r#"{"version":1,"provider":"kiro","native_record_kind":"message","stable_record_id":"message-1","relations":{"session_id":"session-1","message_id":"message-1"},"facts":[{"kind":"message","role":"assistant","content":"hello"}],"evidence":{"ordering_domain":"snapshot_order","range":{"start":0,"end":1}}}"#
+        );
         assert!(!encoded.contains("must-never-leak"));
-        assert!(!encoded.contains("\"kind\":\"reasoning\""));
+        assert!(encoded.contains("hello"));
     }
 
     #[test]
@@ -707,7 +776,7 @@ mod tests {
                 invocation_id,
                 name,
                 arguments,
-            } if invocation_id.as_str() == "call-1"
+            } if invocation_id.as_ref().map(ObservationId::as_str) == Some("call-1")
                 && name == "read_file"
                 && arguments.get("path") == Some(&json!("src/main.rs"))
         )));
@@ -736,19 +805,25 @@ mod tests {
             "text": "hello",
             "tool_names": "read_file,write_file",
         }));
-        let tools: Vec<_> = canonical
+        let tools = canonical
             .facts()
             .iter()
-            .filter(|fact| matches!(fact, CanonicalObservationFactV1::ToolInvocation { .. }))
-            .collect();
-        assert_eq!(tools.len(), 2);
-        assert!(tools.iter().all(|fact| matches!(
-            fact,
-            CanonicalObservationFactV1::ToolInvocation {
-                arguments: Value::Null,
-                ..
-            }
-        )));
+            .filter_map(|fact| match fact {
+                CanonicalObservationFactV1::ToolInvocation {
+                    invocation_id,
+                    name,
+                    arguments,
+                } => Some((invocation_id.as_ref(), name.as_str(), arguments)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tools,
+            vec![
+                (None, "read_file", &Value::Null),
+                (None, "write_file", &Value::Null),
+            ]
+        );
     }
 
     #[test]
@@ -798,6 +873,10 @@ mod tests {
         );
         let left_json = serde_json::to_string(&left).expect("serialize left");
         let right_json = serde_json::to_string(&right).expect("serialize right");
+        assert_eq!(
+            left_json,
+            r#"{"version":1,"provider":"kiro","native_record_kind":"message","stable_record_id":"message-1","relations":{"session_id":"session-1","message_id":"message-1"},"facts":[{"kind":"message","role":"assistant","content":"hello"}],"evidence":{"ordering_domain":"snapshot_order","range":{"start":0,"end":1}}}"#
+        );
         assert!(!left_json.contains("/tmp/"));
         assert!(!right_json.contains("/other/"));
         assert_eq!(left_json, right_json);

@@ -4,7 +4,7 @@
  * This module draws and does nothing else. It is handed positions, per-channel
  * stretch, per-node bloom and a resolved palette, and it paints one frame. It
  * never integrates, never decides how a body responds to a gesture, and never
- * reads the clock — if a mark moves, it is because the simulation moved it.
+ * reads the clock. If a mark moves, it is because the simulation moved it.
  *
  * Canvas cannot read CSS custom properties, so the composing page resolves the
  * token block once per theme flip and hands the resolved strings in. That keeps
@@ -47,7 +47,7 @@ function mulberry32(seed) {
 
 /**
  * A closed relief outline. `rough` is the region's own irregularity, handed in
- * by the caller — a lumpy coastline means a lumpy module.
+ * by the caller. A lumpy coastline means a lumpy module.
  */
 function blob(ctx, cx, cy, radiusX, radiusY, seed, rough = 0.14, samples = 72) {
   const random = mulberry32(seed);
@@ -319,7 +319,7 @@ export function createRenderer(canvas, dataset) {
       let points;
       if (edge.dir === 'in') {
         // A call that entered a type and moves between its methods before
-        // leaving. Drawn, not implied — it is the sheet's whole argument.
+        // leaving. Drawn, not implied. It is the sheet's whole argument.
         points = [
           [ax, ay],
           [(ax + bx) / 2, Math.min(ay, by) - 46],
@@ -505,7 +505,7 @@ export function createRenderer(canvas, dataset) {
     }
     ctx.restore();
     label('hop ring ↓', 88, 40, { align: 'right', tracking: 1.1, upper: true });
-    label('depth limit 3 — 41 further symbols exist beyond this frame and are not drawn', 1416, 40, {
+    label('depth limit 3, 41 further symbols exist beyond this frame and are not drawn', 1416, 40, {
       align: 'right',
       tracking: 1.1,
       upper: true,
@@ -521,7 +521,7 @@ export function createRenderer(canvas, dataset) {
       if (node.unresolved) {
         label(node.name, p.x, p.y + dy, { size: 11, color: palette.textMuted, align: 'center' });
         label(node.unresolved, p.x, p.y + dy + 12, { color: palette.stateUnknown, align: 'center' });
-        label('channel ends — target not in graph', p.x, p.y + dy - 12, {
+        label('channel ends, target not in graph', p.x, p.y + dy - 12, {
           color: palette.stateUnknown,
           align: 'center',
           tracking: 1.1,

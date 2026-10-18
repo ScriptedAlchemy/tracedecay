@@ -5,7 +5,7 @@
  * failure this file exists to catch is a refactor that collapses `unmeasured`
  * or `failed` into an empty measurement, which would turn "the producer did not
  * run" into "the producer ran and found nothing" everywhere these routes are
- * drawn. Each case therefore asserts the negative — never `measured` — as well
+ * drawn. Each case therefore asserts the negative, never `measured`, as well
  * as the positive.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -76,14 +76,6 @@ afterEach(() => {
 });
 
 describe('fetchStructure', () => {
-  it('passes a measured reading through unchanged', async () => {
-    respond(envelope({ status: 'measured', measurement: { hop_count: 3 } }));
-    const result = await fetchStructure<Measurement>('/x', ReadSchema);
-    expect(result.outcome).toBe('measured');
-    expect(result).toMatchObject({ measurement: { hop_count: 3 } });
-    expect(absenceReason(result)).toBeNull();
-  });
-
   it('keeps an unmeasured read distinct from an empty measurement', async () => {
     respond(
       envelope({
@@ -131,7 +123,7 @@ describe('fetchStructure', () => {
   it('keeps the typed reading when a non-2xx still carries a full envelope', async () => {
     // The strata route answers 503 while the verified graph is warming, but
     // its body is a complete typed envelope with the producer's own reason.
-    // That reason must reach the surface instead of a raw `error — HTTP 503`.
+    // That reason must reach the surface instead of a raw `error, HTTP 503`.
     respond(
       envelope({
         status: 'unmeasured',

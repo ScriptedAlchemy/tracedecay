@@ -10,7 +10,7 @@
  * as JSON. `GET /api/plugins/analytics/diagnostics` groups that table by
  * `event_kind` and publishes the per-kind row counts as `by_event_kind`. So the
  * *count of records in a family* is landed and readable. Nothing inside the
- * envelope is — the diagnostics projector never opens `metadata_json`, so the
+ * envelope is, the diagnostics projector never opens `metadata_json`, so the
  * eligible/enabled/available denominators on `AdoptionEligibilityObservedV1`,
  * the invoked/terminal/useful counts on `AdoptionOutcomeLinkedV1`, and every
  * retrieval budget, rank, and contribution figure stay unread.
@@ -32,7 +32,7 @@
  * Suppression is applied against the *observed* count, which is the
  * conservative direction: a family with three observed rows cannot be shown to
  * have five eligible units, so it is withheld. A family absent from the window
- * is worse than three — under a capped or partial read it cannot even be told
+ * is worse than three, under a capped or partial read it cannot even be told
  * apart from a family whose rows fell outside the window, so it is reported as
  * censored by the window rather than as zero.
  *
@@ -69,7 +69,7 @@ export const DIAGNOSTICS_WINDOW_ROWS = 10_000;
  * exists to stop small cells identifying anyone. Censored means the window the
  * daemon read could not have contained the answer either way.
  */
-export type FamilyReading =
+type FamilyReading =
   | { kind: 'observed'; count: number }
   | { kind: 'suppressed'; floor: number; reason: string }
   | { kind: 'censored'; reason: string }
@@ -77,7 +77,7 @@ export type FamilyReading =
 
 /** What a diagnostics read said about its own completeness, carried forward so
  * an absent family can be read against it. */
-export interface WindowTruth {
+interface WindowTruth {
   /** The daemon's own completeness word, printed verbatim and never softened. */
   completeness: string;
   /** True only for `complete`. Any other word leaves absence unprovable. */
@@ -145,7 +145,7 @@ export function readFamily(
 
 /** The state chip a family reading carries. A withheld cell is not an error and
  * not an outage: the daemon answered and the answer may not be shown. */
-export function familyState(reading: FamilyReading): DomainStateKind {
+function familyState(reading: FamilyReading): DomainStateKind {
   switch (reading.kind) {
     case 'observed':
       return 'ready';
@@ -218,8 +218,6 @@ export const ADOPTION_FUNNEL_STAGES = [
   'RepeatUseful',
 ] as const;
 
-export type AdoptionFunnelStage = (typeof ADOPTION_FUNNEL_STAGES)[number];
-
 export interface FunnelStageCount {
   stage: string;
   count: number | null;
@@ -228,9 +226,9 @@ export interface FunnelStageCount {
 /**
  * Whether a set of funnel stage counts can be believed as a funnel.
  *
- * A funnel is monotone by construction — `AdoptionOutcomeLinkedV1::validate`
+ * A funnel is monotone by construction, `AdoptionOutcomeLinkedV1::validate`
  * refuses a record where `terminal > invoked` or `repeat_useful >
- * independently_useful` — so a projection that produced a rising stage is
+ * independently_useful`, so a projection that produced a rising stage is
  * reporting something other than the funnel it is labelled as. That is a
  * contradiction to state, not a bar to draw shorter.
  *
@@ -239,7 +237,7 @@ export interface FunnelStageCount {
  * so two measured stages with an unmeasured one between them are still
  * comparable.
  */
-export type FunnelConsistency =
+type FunnelConsistency =
   | { kind: 'not_evaluable'; measured: number; reason: string }
   | { kind: 'consistent'; measured: number }
   | { kind: 'contradiction'; earlier: string; later: string; reason: string };

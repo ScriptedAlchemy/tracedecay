@@ -1,0 +1,1651 @@
+use std::collections::{BTreeSet, HashSet};
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolBindingV1,
+    CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
+};
+use tracedecay_code_index::lineage::LineageSymbolRecordV1;
+use tracedecay_contracts::retrieval::{
+    ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationRecord,
+    ImplementationSelector, ImplementationsRequest, PrimitiveFailure, PrimitiveFailureKind,
+    PrimitiveSupportGap, SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext,
+    SymbolGraphPortFuture, SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolGraphScope,
+    SymbolPrimitiveRecord, SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord,
+    TypeHierarchyRequest,
+};
+use tracedecay_contracts::{
+    OpaqueCursor, OperationBudgetUsage, PageRequest, RequestContext, RetrievalRequestMeta,
+};
+use tracedecay_domain::code_intelligence::NodeKind;
+use tracedecay_domain::{
+    CursorBindingBuilderV1, CursorBindingV1, RelationEdgeKindV1, SymbolOccurrenceId, UtcMicros,
+};
+use tracedecay_graph_db::GraphCancellation;
+use tracedecay_runtime_core::native_runtime;
+
+mod ignored_dependency;
+
+#[cfg(test)]
+pub(super) use self::ignored_dependency::ignored_dependency_candidate_failure;
+use self::ignored_dependency::{
+    IgnoredDependencyRequest, admit_ignored_dependency, validate_claim_generation,
+};
+use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
+use crate::primitives::concrete::SymbolGraphCursorSnapshot;
+use crate::primitives::production::code_graph_read_failure;
+
+const MAX_COMPATIBILITY_RESULTS: usize = 500;
+const MAX_IMPLEMENTATION_RESULTS: usize = 200;
+const MAX_IMPLEMENTATION_RELATIONS: usize = 500_000;
+/// Inbound kinds `callers` shares with `references`: call sites, usages,
+/// type references, and annotations. Walking `Calls` alone dropped
+/// type-import/`new` rows and then claimed a complete empty page.
+const CALLER_AND_REFERENCE_KINDS: [RelationEdgeKindV1; 4] = [
+    RelationEdgeKindV1::Calls,
+    RelationEdgeKindV1::Uses,
+    RelationEdgeKindV1::TypeOf,
+    RelationEdgeKindV1::Annotates,
+];
+
+pub type SymbolGraphCursorFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, PrimitiveFailure>> + Send + 'a>>;
+
+/// A read's exclusive hold on one graph generation.
+///
+/// The claim carries the snapshot identity that was live when the read began,
+/// so every page the read serves, and every continuation it mints, is
+/// answered under that one generation or refused as stale. A page may never be
+/// served under a generation other than the one its claim was minted against.
+#[derive(Debug)]
+pub struct SymbolGraphPageClaim {
+    pub(super) snapshot: SymbolGraphCursorSnapshot,
+    pub(super) offset: usize,
+}
+
+/// Adapter into the existing authenticated opaque-cursor authority. This
+/// module owns no cursor encoding, keyring, expiry, or resume logic.
+///
+/// Paging is two-phase on purpose. [`Self::claim_page`] binds the read to the
+/// generation that is live before any row is read and resolves the resume
+/// offset against it; [`Self::finish_page`] re-reads the live generation and
+/// refuses to emit the page's continuation if it moved. Without the second
+/// phase a cursor could be handed out for a page-set that no longer exists.
+pub trait SymbolGraphCursorPort: Send + Sync {
+    fn claim_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        binding: &'a CursorBindingV1,
+        cursor: Option<&'a OpaqueCursor>,
+        observed_at: UtcMicros,
+    ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        binding: &'a CursorBindingV1,
+        claim: &'a SymbolGraphPageClaim,
+        next_offset: usize,
+        total: usize,
+        has_more: bool,
+        observed_at: UtcMicros,
+    ) -> SymbolGraphCursorFuture<'a, Option<OpaqueCursor>>;
+}
+
+impl<T> SymbolGraphCursorPort for Arc<T>
+where
+    T: SymbolGraphCursorPort + ?Sized,
+{
+    fn claim_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        binding: &'a CursorBindingV1,
+        cursor: Option<&'a OpaqueCursor>,
+        observed_at: UtcMicros,
+    ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim> {
+        (**self).claim_page(context, binding, cursor, observed_at)
+    }
+
+    fn finish_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        binding: &'a CursorBindingV1,
+        claim: &'a SymbolGraphPageClaim,
+        next_offset: usize,
+        total: usize,
+        has_more: bool,
+        observed_at: UtcMicros,
+    ) -> SymbolGraphCursorFuture<'a, Option<OpaqueCursor>> {
+        (**self).finish_page(
+            context,
+            binding,
+            claim,
+            next_offset,
+            total,
+            has_more,
+            observed_at,
+        )
+    }
+}
+
+/// Production adapter from the transport-neutral application primitive family
+/// to the admitted, generation-pinned graph projection.
+pub struct CanonicalSymbolGraphAdapter<C> {
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
+    /// Admitted project root implementation bodies are read from.
+    source_root: PathBuf,
+    cursors: C,
+    ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
+}
+
+impl<C> SymbolGraphPrimitivePort for CanonicalSymbolGraphAdapter<C>
+where
+    C: SymbolGraphCursorPort,
+{
+    fn symbol_search<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a SymbolSearchPrimitiveRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let binding = match cursor_binding("search", &request.meta, |binding| {
+                    binding
+                        .parameter("query", request.query.as_str())
+                        .parameter("scope", &request.scope)
+                        .parameter(
+                            "lazy_index_ignored_dependencies",
+                            &request.lazy_index_ignored_dependencies,
+                        )
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let claim =
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(failure) => return failed_with(context, failure),
+                    };
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
+                };
+                if let Err(failure) = validate_claim_generation(&claim, &graph.reader) {
+                    return failed_with(context, failure);
+                }
+                let Ok(page) = graph.reader.search_symbols(
+                    request.query.as_str(),
+                    Some(&|_, binding, _| in_scope_parts(binding, &request.scope)),
+                    0,
+                    MAX_COMPATIBILITY_RESULTS,
+                    Arc::clone(&graph.cancellation),
+                ) else {
+                    return failed(context, "canonical symbol search failed");
+                };
+                let records = page
+                    .symbols
+                    .into_iter()
+                    .map(|symbol| symbol_record(symbol, None))
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(records) = records else {
+                    return failed(context, "canonical symbol search evidence was incomplete");
+                };
+                if let Err(failure) = admit_ignored_dependency(
+                    self.ignored_dependency_admission.as_ref(),
+                    context,
+                    &graph,
+                    &self.cursors,
+                    IgnoredDependencyRequest {
+                        binding: &binding,
+                        claim: &claim,
+                        normal_results_empty: records.is_empty(),
+                        requested: request.lazy_index_ignored_dependencies,
+                        query: request.query.as_str(),
+                        scope: &request.scope,
+                    },
+                )
+                .await
+                {
+                    return failed_with(context, failure);
+                }
+                complete_or_failed(
+                    &self.cursors,
+                    context,
+                    &request.meta.page,
+                    &binding,
+                    &claim,
+                    &graph,
+                    records,
+                    Vec::new(),
+                    None,
+                )
+                .await
+            },
+            tracing::trace_span!("usecases.primitives.symbol_search"),
+        ))
+    }
+
+    fn exact_symbol<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a ExactSymbolRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let binding = match cursor_binding("exact", &request.meta, |binding| {
+                    binding
+                        .parameter("name", &request.name)
+                        .parameter("scope", &request.scope)
+                        .parameter(
+                            "lazy_index_ignored_dependencies",
+                            &request.lazy_index_ignored_dependencies,
+                        )
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let claim =
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(failure) => return failed_with(context, failure),
+                    };
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
+                };
+                if let Err(failure) = validate_claim_generation(&claim, &graph.reader) {
+                    return failed_with(context, failure);
+                }
+                let Ok(nodes) = graph.reader.resolve_simple_name(
+                    &request.name,
+                    None,
+                    MAX_COMPATIBILITY_RESULTS,
+                    Arc::clone(&graph.cancellation),
+                ) else {
+                    return failed(context, "exact symbol lookup failed");
+                };
+                let records = nodes
+                    .into_iter()
+                    .filter(|node| in_scope(node, &request.scope))
+                    .map(|node| symbol_record(node, None))
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(records) = records else {
+                    return failed(context, "exact symbol evidence was incomplete");
+                };
+                if let Err(failure) = admit_ignored_dependency(
+                    self.ignored_dependency_admission.as_ref(),
+                    context,
+                    &graph,
+                    &self.cursors,
+                    IgnoredDependencyRequest {
+                        binding: &binding,
+                        claim: &claim,
+                        normal_results_empty: records.is_empty(),
+                        requested: request.lazy_index_ignored_dependencies,
+                        query: &request.name,
+                        scope: &request.scope,
+                    },
+                )
+                .await
+                {
+                    return failed_with(context, failure);
+                }
+                complete_or_failed(
+                    &self.cursors,
+                    context,
+                    &request.meta.page,
+                    &binding,
+                    &claim,
+                    &graph,
+                    records,
+                    Vec::new(),
+                    None,
+                )
+                .await
+            },
+            tracing::trace_span!("usecases.primitives.exact_symbol"),
+        ))
+    }
+
+    fn signature_search<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a SignatureSearchRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let binding = match cursor_binding("signature", &request.meta, |binding| {
+                    binding
+                        .parameter("returns", &request.returns)
+                        .parameter("params", &request.params)
+                        .parameter("is_async", &request.is_async)
+                        .parameter("scope", &request.scope)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let claim =
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(failure) => return failed_with(context, failure),
+                    };
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
+                };
+                let Ok(nodes) = graph.reader.find_symbols(
+                    &|_, binding, metadata| {
+                        in_scope_parts(binding, &request.scope)
+                            && metadata.is_some_and(|metadata| {
+                                matches!(
+                                    NodeKind::from_str(&metadata.kind),
+                                    Some(NodeKind::Function | NodeKind::Method)
+                                ) && signature_metadata_matches(metadata, request)
+                            })
+                    },
+                    MAX_COMPATIBILITY_RESULTS,
+                    Arc::clone(&graph.cancellation),
+                ) else {
+                    return failed(context, "signature symbol lookup failed");
+                };
+
+                let mut records = Vec::new();
+                for node in nodes {
+                    if node.metadata.is_none() {
+                        return failed(context, "signature symbol evidence was incomplete");
+                    }
+                    let Ok(record) = symbol_record(node, None) else {
+                        return failed(context, "signature symbol evidence was incomplete");
+                    };
+                    records.push(record);
+                    if records.len() >= MAX_COMPATIBILITY_RESULTS {
+                        break;
+                    }
+                }
+                complete_or_failed(
+                    &self.cursors,
+                    context,
+                    &request.meta.page,
+                    &binding,
+                    &claim,
+                    &graph,
+                    records,
+                    Vec::new(),
+                    None,
+                )
+                .await
+            },
+            tracing::trace_span!("usecases.primitives.signature_search"),
+        ))
+    }
+
+    fn implementations<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a ImplementationsRequest,
+    ) -> SymbolGraphPortFuture<'a, ImplementationRecord> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let binding = match cursor_binding("implementations", &request.meta, |binding| {
+                    binding
+                        .parameter("selector", &request.selector)
+                        .parameter("scope", &request.scope)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let claim =
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(failure) => return failed_with(context, failure),
+                    };
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
+                };
+                let (records, gaps) = match &request.selector {
+                    ImplementationSelector::Trait { name } => {
+                        match trait_implementations(
+                            &graph.reader,
+                            Arc::clone(&graph.cancellation),
+                            name,
+                            &request.scope,
+                        ) {
+                            Ok((records, undecided)) => (
+                                records,
+                                undecided
+                                    .then(|| PrimitiveSupportGap {
+                                        provider: Some("code_index".to_owned()),
+                                        language: None,
+                                        reason: "Implementors of an interface whose method set \
+                                                 is not fully indexed are undecided"
+                                            .to_owned(),
+                                    })
+                                    .into_iter()
+                                    .collect(),
+                            ),
+                            Err(()) => {
+                                return failed(context, "trait implementation lookup failed");
+                            }
+                        }
+                    }
+                    ImplementationSelector::Method { name } => {
+                        let Ok(nodes) = graph.reader.resolve_simple_name(
+                            name,
+                            None,
+                            MAX_IMPLEMENTATION_RESULTS,
+                            Arc::clone(&graph.cancellation),
+                        ) else {
+                            return failed(context, "method implementation lookup failed");
+                        };
+                        let mut records = Vec::new();
+                        for node in nodes {
+                            if !node.metadata.as_ref().is_some_and(|metadata| {
+                                matches!(
+                                    NodeKind::from_str(&metadata.kind),
+                                    Some(NodeKind::Function | NodeKind::Method)
+                                )
+                            }) || !in_scope(&node, &request.scope)
+                            {
+                                continue;
+                            }
+                            let Ok(symbol) = symbol_record(node, None) else {
+                                return failed(
+                                    context,
+                                    "method implementation evidence was incomplete",
+                                );
+                            };
+                            records.push(SymbolRelationRecord {
+                                symbol,
+                                edge_kind: "implementation".to_owned(),
+                                dispatch_via_trait: false,
+                                dispatch_from: None,
+                                depth: None,
+                            });
+                        }
+                        (records, Vec::new())
+                    }
+                };
+                let outcome = complete_or_failed(
+                    &self.cursors,
+                    context,
+                    &request.meta.page,
+                    &binding,
+                    &claim,
+                    &graph,
+                    records,
+                    gaps,
+                    None,
+                )
+                .await;
+                with_implementation_bodies(&self.source_root, context, outcome).await
+            },
+            tracing::trace_span!("usecases.primitives.implementations"),
+        ))
+    }
+
+    fn type_hierarchy<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a TypeHierarchyRequest,
+    ) -> SymbolGraphPortFuture<'a, TypeHierarchyRecord> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let binding = match cursor_binding("hierarchy", &request.meta, |binding| {
+                    binding
+                        .parameter("node_id", &request.node_id)
+                        .parameter("maximum_depth", &request.maximum_depth)
+                        .parameter("scope", &request.scope)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let claim =
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(failure) => return failed_with(context, failure),
+                    };
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
+                };
+                let root_id = match relation_seed(&request.node_id) {
+                    Ok(root_id) => root_id,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let root = match graph
+                    .reader
+                    .symbol_summary(&root_id, Arc::clone(&graph.cancellation))
+                {
+                    Ok(Some(node)) if in_scope(&node, &request.scope) => node,
+                    Ok(None) => {
+                        return failed_with(
+                            context,
+                            primitive_failure(
+                                PrimitiveFailureKind::NotFoundOrNotAuthorized,
+                                "application.symbol-graph.node-not-found",
+                                "type hierarchy root is not in the admitted graph",
+                            ),
+                        );
+                    }
+                    Ok(Some(_)) => {
+                        return complete_or_failed(
+                            &self.cursors,
+                            context,
+                            &request.meta.page,
+                            &binding,
+                            &claim,
+                            &graph,
+                            Vec::new(),
+                            Vec::new(),
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(_) => return failed(context, "type hierarchy root lookup failed"),
+                };
+                let Ok(root_record) = symbol_record(root, None) else {
+                    return failed(context, "type hierarchy root evidence was incomplete");
+                };
+                let mut records = vec![TypeHierarchyRecord {
+                    parent_node_id: root_id.as_str().to_owned(),
+                    symbol: root_record,
+                    edge_kind: "root".to_owned(),
+                    depth: 0,
+                }];
+                let mut seen = HashSet::from([request.node_id.clone()]);
+                let mut frontier = vec![(root_id, 0_u32)];
+
+                while let Some((parent_id, depth)) = frontier.pop() {
+                    if depth >= request.maximum_depth || records.len() >= MAX_COMPATIBILITY_RESULTS
+                    {
+                        continue;
+                    }
+                    let Ok(edges) = graph.reader.callers(
+                        std::slice::from_ref(&parent_id),
+                        &[RelationEdgeKindV1::Implements, RelationEdgeKindV1::Extends],
+                        MAX_COMPATIBILITY_RESULTS,
+                        Arc::clone(&graph.cancellation),
+                    ) else {
+                        return failed(context, "type hierarchy traversal failed");
+                    };
+                    for edge in edges.into_iter().flatten() {
+                        let child = edge.neighbor;
+                        if !seen.insert(child.occurrence.as_str().to_owned()) {
+                            continue;
+                        }
+                        if !in_scope(&child, &request.scope) {
+                            continue;
+                        }
+                        let child_id = child.occurrence.clone();
+                        let Ok(symbol) = symbol_record(child, None) else {
+                            return failed(context, "type hierarchy node evidence was incomplete");
+                        };
+                        records.push(TypeHierarchyRecord {
+                            symbol,
+                            parent_node_id: parent_id.as_str().to_owned(),
+                            edge_kind: edge.edge.kind.as_str().to_owned(),
+                            depth: depth + 1,
+                        });
+                        frontier.push((child_id, depth + 1));
+                        if records.len() >= MAX_COMPATIBILITY_RESULTS {
+                            break;
+                        }
+                    }
+                }
+
+                complete_or_failed(
+                    &self.cursors,
+                    context,
+                    &request.meta.page,
+                    &binding,
+                    &claim,
+                    &graph,
+                    records,
+                    Vec::new(),
+                    None,
+                )
+                .await
+            },
+            tracing::trace_span!("usecases.primitives.type_hierarchy"),
+        ))
+    }
+
+    fn callers<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a GraphRelationRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let binding = match cursor_binding("callers", &request.meta, |binding| {
+                    relation_parameters(binding, request)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let claim =
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(failure) => return failed_with(context, failure),
+                    };
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
+                };
+                let seed = match relation_seed(&request.node_id) {
+                    Ok(seed) => seed,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let (records, unresolved) = match relation_traversal(
+                    &graph.reader,
+                    Arc::clone(&graph.cancellation),
+                    seed.clone(),
+                    request.maximum_depth,
+                    true,
+                    &request.scope,
+                ) {
+                    Ok(records) => records,
+                    Err(()) => {
+                        return match absent_seed(&graph, &seed) {
+                            Some(failure) => failed_with(context, failure),
+                            None => failed(context, "caller traversal failed"),
+                        };
+                    }
+                };
+                if records.is_empty()
+                    && let Some(failure) = absent_seed(&graph, &seed)
+                {
+                    return failed_with(context, failure);
+                }
+                let mut gaps = if unresolved.exact_target_unavailable {
+                    // Unresolved Rust receiver calls and TypeScript imports the
+                    // seal could not bind share one disclosure; the gap is the
+                    // call site, not a language.
+                    vec![PrimitiveSupportGap {
+                        provider: Some("code_index".to_owned()),
+                        language: None,
+                        reason: "Exact target evidence is unavailable for matching call sites"
+                            .to_owned(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                gaps.extend(
+                    unresolved
+                        .unmodeled_imports
+                        .iter()
+                        .map(|shape| PrimitiveSupportGap::import_unmodeled(shape.as_str())),
+                );
+                // A caller inside an unexpanded macro body is syntactic
+                // evidence only; what the expansion calls is not covered.
+                gaps.extend(
+                    records
+                        .iter()
+                        .filter(|record| record.symbol.kind == NodeKind::MacroInvocation.as_str())
+                        .map(|record| record.symbol.name.as_str())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .map(PrimitiveSupportGap::macro_body_unparsed),
+                );
+                complete_or_failed(
+                    &self.cursors,
+                    context,
+                    &request.meta.page,
+                    &binding,
+                    &claim,
+                    &graph,
+                    records,
+                    gaps,
+                    None,
+                )
+                .await
+            },
+            tracing::trace_span!("usecases.primitives.callers"),
+        ))
+    }
+
+    fn callees<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a GraphRelationRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let binding = match cursor_binding("callees", &request.meta, |binding| {
+                    relation_parameters(binding, request)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let claim =
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(failure) => return failed_with(context, failure),
+                    };
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
+                };
+                let seed = match relation_seed(&request.node_id) {
+                    Ok(seed) => seed,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let (mut records, _) = match relation_traversal(
+                    &graph.reader,
+                    Arc::clone(&graph.cancellation),
+                    seed.clone(),
+                    request.maximum_depth,
+                    false,
+                    &request.scope,
+                ) {
+                    Ok(records) => records,
+                    Err(()) => {
+                        return match absent_seed(&graph, &seed) {
+                            Some(failure) => failed_with(context, failure),
+                            None => failed(context, "callee traversal failed"),
+                        };
+                    }
+                };
+                if records.is_empty()
+                    && let Some(failure) = absent_seed(&graph, &seed)
+                {
+                    return failed_with(context, failure);
+                }
+
+                if request.resolve_trait_dispatch {
+                    let mut seen = records
+                        .iter()
+                        .map(|record| record.symbol.node_id.clone())
+                        .collect::<HashSet<_>>();
+                    let callee_ids = records
+                        .iter()
+                        .map(|record| record.symbol.node_id.clone())
+                        .collect::<Vec<_>>();
+                    for callee_id in callee_ids {
+                        let Ok(occurrence) = SymbolOccurrenceId::new(callee_id.clone()) else {
+                            return failed(context, "trait dispatch identity was invalid");
+                        };
+                        let Ok(Some(callee)) = graph
+                            .reader
+                            .symbol_summary(&occurrence, Arc::clone(&graph.cancellation))
+                        else {
+                            return failed(context, "trait dispatch symbol lookup failed");
+                        };
+                        let Ok(targets) = trait_dispatch_targets(
+                            &graph.reader,
+                            Arc::clone(&graph.cancellation),
+                            &callee,
+                        ) else {
+                            return failed(context, "trait dispatch resolution failed");
+                        };
+                        for target in targets {
+                            if !in_scope(&target, &request.scope)
+                                || !seen.insert(target.occurrence.as_str().to_owned())
+                            {
+                                continue;
+                            }
+                            let Ok(symbol) = symbol_record(target, None) else {
+                                return failed(context, "trait dispatch evidence was incomplete");
+                            };
+                            records.push(SymbolRelationRecord {
+                                symbol,
+                                edge_kind: RelationEdgeKindV1::Calls.as_str().to_owned(),
+                                dispatch_via_trait: true,
+                                dispatch_from: Some(callee_id.clone()),
+                                depth: None,
+                            });
+                            if records.len() >= MAX_COMPATIBILITY_RESULTS {
+                                break;
+                            }
+                        }
+                        if records.len() >= MAX_COMPATIBILITY_RESULTS {
+                            break;
+                        }
+                    }
+                }
+
+                complete_or_failed(
+                    &self.cursors,
+                    context,
+                    &request.meta.page,
+                    &binding,
+                    &claim,
+                    &graph,
+                    records,
+                    Vec::new(),
+                    None,
+                )
+                .await
+            },
+            tracing::trace_span!("usecases.primitives.callees"),
+        ))
+    }
+
+    fn impact<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a GraphImpactPrimitiveRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let binding = match cursor_binding("impact", &request.meta, |binding| {
+                    binding
+                        .parameter("node_id", &request.node_id)
+                        .parameter("maximum_depth", &request.maximum_depth)
+                        .parameter("scope", &request.scope)
+                }) {
+                    Ok(binding) => binding,
+                    Err(failure) => return failed_with(context, failure),
+                };
+                let claim =
+                    match claim_generation(&self.cursors, context, &request.meta.page, &binding)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(failure) => return failed_with(context, failure),
+                    };
+                let graph = match open_graph(&self.code_graph, context).await {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
+                };
+                let Ok(seed) = SymbolOccurrenceId::new(request.node_id.clone()) else {
+                    return failed(context, "impact seed identity was invalid");
+                };
+                let Ok(impact) = graph.reader.impact(
+                    &[seed],
+                    &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+                    request.maximum_depth,
+                    MAX_COMPATIBILITY_RESULTS,
+                    MAX_COMPATIBILITY_RESULTS.saturating_mul(16),
+                    Arc::clone(&graph.cancellation),
+                ) else {
+                    return failed(context, "impact traversal failed");
+                };
+                let edge_count = impact.impacted.len() as u64;
+                let records = impact
+                    .impacted
+                    .into_iter()
+                    .map(|node| node.summary)
+                    .filter(|node| in_scope(node, &request.scope))
+                    .take(MAX_COMPATIBILITY_RESULTS)
+                    .map(|node| symbol_record(node, None))
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(records) = records else {
+                    return failed(context, "impact evidence was incomplete");
+                };
+                complete_or_failed(
+                    &self.cursors,
+                    context,
+                    &request.meta.page,
+                    &binding,
+                    &claim,
+                    &graph,
+                    records,
+                    Vec::new(),
+                    Some(edge_count),
+                )
+                .await
+            },
+            tracing::trace_span!("usecases.primitives.impact"),
+        ))
+    }
+}
+
+struct OpenSymbolGraph {
+    /// Counts every store read on [`Self::cost`].
+    reader: CodeGraphInteractiveReader,
+    cost: CodeGraphReadCostMeter,
+    cancellation: Arc<dyn GraphCancellation>,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+}
+
+#[tracing::instrument(name = "usecases.primitives.open_graph", level = "trace", skip_all)]
+async fn open_graph(
+    port: &Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
+    context: SymbolGraphPortContext<'_>,
+) -> Result<OpenSymbolGraph, tracedecay_graph_query::CodeGraphReadError> {
+    let cancellation = tracedecay_graph_query::request_graph_cancellation(context.request);
+    let verified = port
+        .open(tracedecay_graph_query::CodeGraphReadRequest::new(
+            context.request,
+            context.observed_at,
+            Arc::clone(&cancellation),
+        ))
+        .await?;
+    let freshness = verified.freshness();
+    let cost = CodeGraphReadCostMeter::start();
+    let reader = verified
+        .reader_with_cancellation(
+            context.request,
+            context.observed_at,
+            Arc::clone(&cancellation),
+        )?
+        .metered(&cost);
+    Ok(OpenSymbolGraph {
+        reader,
+        cost,
+        cancellation,
+        freshness,
+    })
+}
+
+pub(super) fn trait_implementations(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+    name: &str,
+    scope: &SymbolGraphScope,
+) -> Result<(Vec<SymbolRelationRecord>, bool), ()> {
+    let indexed = graph
+        .resolve_simple_name(
+            name.rsplit("::").next().unwrap_or(name),
+            None,
+            MAX_IMPLEMENTATION_RESULTS,
+            Arc::clone(&cancellation),
+        )
+        .map_err(|_| ())?;
+    let qualified = name.contains("::") || name.contains('.');
+    let exact_candidates = indexed
+        .into_iter()
+        .filter(|node| is_trait_named(node, name, qualified))
+        .collect::<Vec<_>>();
+    let candidates = if exact_candidates.is_empty() {
+        graph
+            .find_symbols(
+                &|_, _, metadata| {
+                    metadata.is_some_and(|metadata| {
+                        is_trait_metadata(metadata)
+                            && (contains_ignore_ascii_case(&metadata.simple_name, name)
+                                || contains_ignore_ascii_case(&metadata.qualified_name, name))
+                    })
+                },
+                MAX_IMPLEMENTATION_RESULTS,
+                Arc::clone(&cancellation),
+            )
+            .map_err(|_| ())?
+    } else {
+        exact_candidates
+    };
+    let mut records = Vec::new();
+    let mut interfaces = Vec::new();
+    for trait_node in candidates.into_iter().filter(|node| {
+        node.metadata.as_ref().is_some_and(|metadata| {
+            matches!(
+                NodeKind::from_str(&metadata.kind),
+                Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+            )
+        })
+    }) {
+        interfaces.push(trait_node.occurrence.clone());
+        let edges = graph
+            .callers(
+                std::slice::from_ref(&trait_node.occurrence),
+                &[RelationEdgeKindV1::Implements],
+                MAX_IMPLEMENTATION_RELATIONS,
+                Arc::clone(&cancellation),
+            )
+            .map_err(|_| ())?;
+        for edge in edges.into_iter().flatten() {
+            let implementation = edge.neighbor;
+            if !in_scope(&implementation, scope) {
+                continue;
+            }
+            records.push(SymbolRelationRecord {
+                symbol: symbol_record(implementation, None)?,
+                edge_kind: edge.edge.kind.as_str().to_owned(),
+                dispatch_via_trait: false,
+                dispatch_from: Some(trait_node.occurrence.as_str().to_owned()),
+                depth: None,
+            });
+        }
+    }
+    records.sort_by(|left, right| {
+        left.symbol
+            .node_id
+            .cmp(&right.symbol.node_id)
+            .then_with(|| left.dispatch_from.cmp(&right.dispatch_from))
+    });
+    records.dedup_by(|left, right| left.symbol.node_id == right.symbol.node_id);
+    records.truncate(MAX_IMPLEMENTATION_RESULTS);
+    let undecided = graph
+        .has_undecided_implementors(&interfaces, cancellation)
+        .map_err(|_| ())?;
+    Ok((records, undecided))
+}
+
+fn is_trait_named(node: &CodeGraphSymbolSummaryV1, name: &str, qualified: bool) -> bool {
+    node.metadata.as_ref().is_some_and(|metadata| {
+        is_trait_metadata(metadata)
+            && if qualified {
+                metadata.qualified_name == name
+            } else {
+                metadata.simple_name.eq_ignore_ascii_case(name)
+            }
+    })
+}
+
+fn is_trait_metadata(metadata: &LineageSymbolRecordV1) -> bool {
+    matches!(
+        NodeKind::from_str(&metadata.kind),
+        Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+    )
+}
+
+fn signature_metadata_matches(
+    metadata: &LineageSymbolRecordV1,
+    request: &SignatureSearchRequest,
+) -> bool {
+    if request
+        .is_async
+        .is_some_and(|want_async| metadata.is_async != want_async)
+    {
+        return false;
+    }
+    let Some(signature) = metadata.signature.as_deref() else {
+        return false;
+    };
+    if request
+        .returns
+        .as_deref()
+        .is_some_and(|returns| !return_region(signature).contains(returns))
+    {
+        return false;
+    }
+    let parameters = parameter_region(signature);
+    request
+        .params
+        .iter()
+        .all(|param| parameters.contains(param))
+}
+
+/// Byte offsets of the parameter list's balanced parentheses, so tuple
+/// parameters and parenthesized return types stay in their own regions.
+fn parameter_parens(signature: &str) -> Option<(usize, usize)> {
+    let open = signature.find('(')?;
+    let mut depth = 0_usize;
+    for (index, byte) in signature.bytes().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((open, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parameter_region(signature: &str) -> &str {
+    parameter_parens(signature).map_or("", |(open, close)| &signature[open + 1..close])
+}
+
+fn return_region(signature: &str) -> &str {
+    let tail = parameter_parens(signature).map_or(signature, |(_, close)| &signature[close + 1..]);
+    tail.split_once("->")
+        .map_or("", |(_, returns)| returns.trim())
+}
+
+/// The relation seed a caller named. A malformed id is the caller's error, not
+/// a retryable outage.
+fn relation_seed(node_id: &str) -> Result<SymbolOccurrenceId, PrimitiveFailure> {
+    SymbolOccurrenceId::new(node_id.to_owned()).map_err(|_| {
+        primitive_failure(
+            PrimitiveFailureKind::InvalidRequest,
+            "application.symbol-graph.node-id-invalid",
+            "node_id is not a symbol occurrence id",
+        )
+    })
+}
+
+/// Why an empty or failed relation walk cannot be answered as "no relations"
+/// or an outage: the seed is absent from the admitted graph, or its lookup
+/// failed. Only those pages pay this read; a related row already proves the
+/// seed exists.
+fn absent_seed(graph: &OpenSymbolGraph, seed: &SymbolOccurrenceId) -> Option<PrimitiveFailure> {
+    match graph
+        .reader
+        .symbol_summary(seed, Arc::clone(&graph.cancellation))
+    {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(primitive_failure(
+            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+            "application.symbol-graph.node-not-found",
+            "node_id is not in the admitted graph",
+        )),
+        Err(_) => Some(primitive_failure(
+            PrimitiveFailureKind::Unavailable,
+            "application.symbol-graph.query-unavailable",
+            "relation seed lookup failed",
+        )),
+    }
+}
+
+fn relation_traversal(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+    seed: SymbolOccurrenceId,
+    maximum_depth: u32,
+    incoming: bool,
+    scope: &SymbolGraphScope,
+) -> Result<(Vec<SymbolRelationRecord>, UnresolvedCallerGapsV1), ()> {
+    let seed_occurrence = seed.clone();
+    let mut seen = HashSet::from([seed.clone()]);
+    let mut frontier = vec![seed];
+    let mut records = Vec::new();
+    let mut records_seed_recursion = false;
+    let mut unresolved_callers = UnresolvedCallerGapsV1::default();
+    for depth in 1..=maximum_depth {
+        if frontier.is_empty() || records.len() >= MAX_COMPATIBILITY_RESULTS {
+            break;
+        }
+        if incoming {
+            let gaps = graph
+                .unresolved_caller_gaps(
+                    &frontier,
+                    scope.path_prefix.as_deref(),
+                    Arc::clone(&cancellation),
+                )
+                .map_err(|_| ())?;
+            unresolved_callers.exact_target_unavailable |= gaps.exact_target_unavailable;
+            unresolved_callers
+                .unmodeled_imports
+                .extend(gaps.unmodeled_imports);
+        }
+        let batches = if incoming {
+            graph.callers(
+                &frontier,
+                &CALLER_AND_REFERENCE_KINDS,
+                MAX_COMPATIBILITY_RESULTS.saturating_mul(16),
+                Arc::clone(&cancellation),
+            )
+        } else {
+            graph.callees(
+                &frontier,
+                &[RelationEdgeKindV1::Calls],
+                MAX_COMPATIBILITY_RESULTS.saturating_mul(16),
+                Arc::clone(&cancellation),
+            )
+        }
+        .map_err(|_| ())?;
+        let mut next = Vec::new();
+        for edge in batches.into_iter().flatten() {
+            // A directly recursive seed is its own caller and callee; it is
+            // listed once and not walked again.
+            let direct_recursion = depth == 1
+                && edge.neighbor.occurrence == seed_occurrence
+                && !records_seed_recursion;
+            if direct_recursion {
+                records_seed_recursion = true;
+            } else if !seen.insert(edge.neighbor.occurrence.clone()) {
+                continue;
+            }
+            let occurrence = edge.neighbor.occurrence.clone();
+            if in_scope(&edge.neighbor, scope) {
+                records.push(SymbolRelationRecord {
+                    symbol: symbol_record(edge.neighbor, None)?,
+                    edge_kind: edge.edge.kind.as_str().to_owned(),
+                    dispatch_via_trait: false,
+                    dispatch_from: None,
+                    depth: Some(depth),
+                });
+            }
+            if !direct_recursion {
+                next.push(occurrence);
+            }
+            if records.len() >= MAX_COMPATIBILITY_RESULTS {
+                break;
+            }
+        }
+        frontier = next;
+    }
+    Ok((records, unresolved_callers))
+}
+
+fn trait_dispatch_targets(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+    method: &CodeGraphSymbolSummaryV1,
+) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
+    let metadata = method.metadata.as_ref().ok_or(())?;
+    let parents = graph
+        .callers(
+            std::slice::from_ref(&method.occurrence),
+            &[RelationEdgeKindV1::Contains],
+            MAX_COMPATIBILITY_RESULTS,
+            Arc::clone(&cancellation),
+        )
+        .map_err(|_| ())?;
+    let traits = parents
+        .into_iter()
+        .flatten()
+        .map(|edge| edge.neighbor)
+        .filter(|parent| {
+            parent.metadata.as_ref().is_some_and(|metadata| {
+                matches!(
+                    NodeKind::from_str(&metadata.kind),
+                    Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let trait_occurrences = traits
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    if trait_occurrences.is_empty() {
+        return Ok(Vec::new());
+    }
+    let implementors = graph
+        .callers(
+            &trait_occurrences,
+            &[RelationEdgeKindV1::Implements],
+            MAX_COMPATIBILITY_RESULTS,
+            Arc::clone(&cancellation),
+        )
+        .map_err(|_| ())?
+        .into_iter()
+        .flatten()
+        .map(|edge| edge.neighbor.occurrence)
+        .collect::<Vec<_>>();
+    let children = graph
+        .callees(
+            &implementors,
+            &[RelationEdgeKindV1::Contains],
+            MAX_COMPATIBILITY_RESULTS,
+            cancellation,
+        )
+        .map_err(|_| ())?;
+    Ok(children
+        .into_iter()
+        .flatten()
+        .map(|edge| edge.neighbor)
+        .filter(|child| {
+            child.metadata.as_ref().is_some_and(|child_metadata| {
+                matches!(
+                    NodeKind::from_str(&child_metadata.kind),
+                    Some(NodeKind::Method | NodeKind::Function)
+                ) && child_metadata.simple_name == metadata.simple_name
+            })
+        })
+        .collect())
+}
+
+pub(crate) fn symbol_record(
+    node: CodeGraphSymbolSummaryV1,
+    score: Option<f64>,
+) -> Result<SymbolPrimitiveRecord, ()> {
+    let metadata = node.metadata.ok_or(())?;
+    let file = node
+        .binding
+        .and_then(|binding| binding.logical_path)
+        .ok_or(())?;
+    let end_line = metadata
+        .start_line
+        .checked_add(metadata.line_span.checked_sub(1).ok_or(())?)
+        .ok_or(())?;
+    Ok(SymbolPrimitiveRecord {
+        node_id: node.occurrence.as_str().to_owned(),
+        name: metadata.simple_name,
+        qualified_name: metadata.qualified_name,
+        kind: metadata.kind,
+        file,
+        line: metadata.start_line.saturating_add(1),
+        end_line: end_line.saturating_add(1),
+        is_async: metadata.is_async,
+        signature: metadata.signature,
+        score,
+    })
+}
+
+/// Exact zero-based, inclusive `start_line..=end_line` source of one indexed
+/// symbol, the slice every symbol-body read serves.
+pub(crate) async fn read_symbol_source_body(
+    project_root: &Path,
+    file: &str,
+    start_line: u32,
+    end_line: u32,
+) -> std::io::Result<String> {
+    let path = project_root.join(file);
+    let content = native_runtime::spawn_blocking(move || std::fs::read_to_string(path))
+        .await
+        .map_err(std::io::Error::other)??;
+    let start = start_line as usize;
+    let end = end_line as usize;
+    Ok(content
+        .lines()
+        .skip(start)
+        .take(end.saturating_sub(start).saturating_add(1))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Hydrates only the served page, so a large implementation set reads the
+/// source of at most one page of matches.
+async fn with_implementation_bodies(
+    source_root: &Path,
+    context: SymbolGraphPortContext<'_>,
+    outcome: SymbolGraphPortOutcome<SymbolRelationRecord>,
+) -> SymbolGraphPortOutcome<ImplementationRecord> {
+    let (page, partial, finished_at, budget, cost) = match outcome {
+        SymbolGraphPortOutcome::Completed {
+            page,
+            finished_at,
+            budget,
+            cost,
+        } => (page, false, finished_at, budget, cost),
+        SymbolGraphPortOutcome::Partial {
+            page,
+            finished_at,
+            budget,
+            cost,
+        } => (page, true, finished_at, budget, cost),
+        SymbolGraphPortOutcome::Failed {
+            failure,
+            finished_at,
+            budget,
+        } => {
+            return SymbolGraphPortOutcome::Failed {
+                failure,
+                finished_at,
+                budget,
+            };
+        }
+    };
+    let SymbolGraphPage {
+        generation,
+        freshness,
+        items,
+        total,
+        next_cursor,
+        truncated,
+        related_edge_count,
+        support_gaps,
+    } = page;
+    let mut hydrated = Vec::with_capacity(items.len());
+    for record in items {
+        let Ok(body) = read_symbol_source_body(
+            source_root,
+            &record.symbol.file,
+            record.symbol.line.saturating_sub(1),
+            record.symbol.end_line.saturating_sub(1),
+        )
+        .await
+        else {
+            return failed(context, "implementation source body was unavailable");
+        };
+        hydrated.push(ImplementationRecord {
+            symbol: record.symbol,
+            edge_kind: record.edge_kind,
+            dispatch_from: record.dispatch_from,
+            body,
+        });
+    }
+    let page = SymbolGraphPage {
+        generation,
+        freshness,
+        items: hydrated,
+        total,
+        next_cursor,
+        truncated,
+        related_edge_count,
+        support_gaps,
+    };
+    if partial {
+        SymbolGraphPortOutcome::Partial {
+            page,
+            finished_at,
+            budget,
+            cost,
+        }
+    } else {
+        SymbolGraphPortOutcome::Completed {
+            page,
+            finished_at,
+            budget,
+            cost,
+        }
+    }
+}
+
+fn in_scope(node: &CodeGraphSymbolSummaryV1, scope: &SymbolGraphScope) -> bool {
+    in_scope_parts(node.binding.as_ref(), scope)
+}
+
+fn in_scope_parts(binding: Option<&CodeGraphSymbolBindingV1>, scope: &SymbolGraphScope) -> bool {
+    let Some(file) = binding.and_then(|binding| binding.logical_path.as_deref()) else {
+        return false;
+    };
+    scope
+        .path_prefix
+        .as_deref()
+        .is_none_or(|path_prefix| tracedecay_domain::path_matches_scope(file, Some(path_prefix)))
+}
+
+fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
+    query.is_empty()
+        || (query.len() <= value.len()
+            && value
+                .as_bytes()
+                .windows(query.len())
+                .any(|window| window.eq_ignore_ascii_case(query.as_bytes())))
+}
+
+/// The binding a symbol-graph cursor is minted for: the lane and every request
+/// field that shapes the lane's result set.
+fn cursor_binding(
+    lane: &'static str,
+    meta: &RetrievalRequestMeta,
+    parameters: impl FnOnce(CursorBindingBuilderV1) -> CursorBindingBuilderV1,
+) -> Result<CursorBindingV1, PrimitiveFailure> {
+    meta.bind_cursor(parameters(CursorBindingV1::builder(lane)))
+        .build()
+        .map_err(|_| {
+            primitive_failure(
+                PrimitiveFailureKind::Unavailable,
+                "application.symbol-graph.cursor-binding",
+                "could not bind the cursor to the request",
+            )
+        })
+}
+
+fn relation_parameters(
+    binding: CursorBindingBuilderV1,
+    request: &GraphRelationRequest,
+) -> CursorBindingBuilderV1 {
+    binding
+        .parameter("node_id", &request.node_id)
+        .parameter("maximum_depth", &request.maximum_depth)
+        .parameter("resolve_trait_dispatch", &request.resolve_trait_dispatch)
+        .parameter("scope", &request.scope)
+}
+
+/// Binds a read to the live graph generation before any row is read, and
+/// resolves the resume offset of an incoming cursor against that same
+/// generation. Claiming first is what makes a mid-read generation change
+/// observable at all: the identity the page-set came from is recorded before
+/// the rows are gathered rather than re-derived after they are.
+async fn claim_generation(
+    cursors: &dyn SymbolGraphCursorPort,
+    context: SymbolGraphPortContext<'_>,
+    request: &PageRequest,
+    binding: &CursorBindingV1,
+) -> Result<SymbolGraphPageClaim, PrimitiveFailure> {
+    cursors
+        .claim_page(
+            context.request,
+            binding,
+            request.cursor.as_ref(),
+            context.observed_at,
+        )
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_or_failed<T: Send>(
+    cursors: &dyn SymbolGraphCursorPort,
+    context: SymbolGraphPortContext<'_>,
+    request: &PageRequest,
+    binding: &CursorBindingV1,
+    claim: &SymbolGraphPageClaim,
+    graph: &OpenSymbolGraph,
+    items: Vec<T>,
+    gaps: Vec<PrimitiveSupportGap>,
+    related_edge_count: Option<u64>,
+) -> SymbolGraphPortOutcome<T> {
+    let mut page = match paginate(
+        cursors,
+        context,
+        request,
+        binding,
+        claim,
+        graph.freshness,
+        items,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(failure) => {
+            return SymbolGraphPortOutcome::Failed {
+                failure,
+                finished_at: context.observed_at,
+                budget: OperationBudgetUsage::default(),
+            };
+        }
+    };
+    page.related_edge_count = related_edge_count;
+    page.support_gaps = gaps;
+    let receipt = graph.cost.receipt();
+    let Some(finished_at) = i64::try_from(receipt.wall_micros)
+        .ok()
+        .and_then(|wall| context.observed_at.0.checked_add(wall))
+        .map(UtcMicros)
+    else {
+        return failed(
+            context,
+            "graph read end time is outside the timestamp domain",
+        );
+    };
+    let budget = OperationBudgetUsage {
+        elapsed_micros: receipt.wall_micros,
+        ..OperationBudgetUsage::default()
+    };
+    let cost = Some(receipt);
+    if page.support_gaps.is_empty() {
+        SymbolGraphPortOutcome::Completed {
+            page,
+            finished_at,
+            budget,
+            cost,
+        }
+    } else {
+        SymbolGraphPortOutcome::Partial {
+            page,
+            finished_at,
+            budget,
+            cost,
+        }
+    }
+}
+
+async fn paginate<T: Send>(
+    cursors: &dyn SymbolGraphCursorPort,
+    context: SymbolGraphPortContext<'_>,
+    request: &PageRequest,
+    binding: &CursorBindingV1,
+    claim: &SymbolGraphPageClaim,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+    items: Vec<T>,
+) -> Result<SymbolGraphPage<T>, PrimitiveFailure> {
+    let offset = claim.offset();
+    let total = items.len();
+    if offset > total {
+        return Err(primitive_failure(
+            PrimitiveFailureKind::InvalidRequest,
+            "application.symbol-graph.cursor-set-mismatch",
+            "cursor continuation is outside the frozen result set",
+        ));
+    }
+    let page_size = request.page_size as usize;
+    let end = offset.saturating_add(page_size).min(total);
+    let has_more = end < total;
+    let page_items = items.into_iter().skip(offset).take(page_size).collect();
+    // Re-reads the live generation and refuses the page if it moved while the
+    // rows above were being gathered, so a continuation is never minted for a
+    // page-set the caller can no longer be served.
+    let next_cursor = cursors
+        .finish_page(
+            context.request,
+            binding,
+            claim,
+            end,
+            total,
+            has_more,
+            context.observed_at,
+        )
+        .await?;
+    Ok(SymbolGraphPage::complete(
+        claim.snapshot.code_generation_id().clone(),
+        freshness,
+        page_items,
+        Some(total as u64),
+        next_cursor,
+    ))
+}
+
+fn failed<T>(
+    context: SymbolGraphPortContext<'_>,
+    reason: &'static str,
+) -> SymbolGraphPortOutcome<T> {
+    failed_with(
+        context,
+        primitive_failure(
+            PrimitiveFailureKind::Unavailable,
+            "application.symbol-graph.query-unavailable",
+            reason,
+        ),
+    )
+}
+
+/// Surfaces a typed cursor failure, notably the stale answer a superseded
+/// generation produces, without flattening it into the generic unavailable
+/// reason [`failed`] carries.
+fn failed_with<T>(
+    context: SymbolGraphPortContext<'_>,
+    failure: PrimitiveFailure,
+) -> SymbolGraphPortOutcome<T> {
+    SymbolGraphPortOutcome::Failed {
+        failure,
+        finished_at: context.observed_at,
+        budget: OperationBudgetUsage::default(),
+    }
+}
+
+fn primitive_failure(
+    kind: PrimitiveFailureKind,
+    code: &'static str,
+    message: &'static str,
+) -> PrimitiveFailure {
+    PrimitiveFailure::new(kind, code, message)
+        .unwrap_or_else(|_| panic!("static primitive failure is valid"))
+}

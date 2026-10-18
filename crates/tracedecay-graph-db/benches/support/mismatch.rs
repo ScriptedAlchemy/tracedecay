@@ -210,6 +210,16 @@ impl GraphPublicationStoreV1 for ExactRecoveredDigestMismatch<'_> {
         self.inner.retire_replay(request, context)
     }
 
+    fn retire_verified_head_replay(
+        &mut self,
+        request: &GraphPublicationReplayRetirementV1,
+        expected_head: &GraphVerifiedHeadV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+        self.inner
+            .retire_verified_head_replay(request, expected_head, context)
+    }
+
     fn discard_pending_replay(
         &mut self,
         request: &tracedecay_store::GraphPendingReplayDiscardV1,

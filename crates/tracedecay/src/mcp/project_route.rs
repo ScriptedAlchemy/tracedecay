@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_mcp::hook_events;
+pub(crate) use tracedecay_mcp::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
 
 const MAX_HOOK_ROUTE_CACHE_ENTRIES: usize = 256;
 
@@ -19,7 +20,7 @@ pub(crate) struct ResolvedProjectRoute {
     /// route (plan: `docs/superpowers/plans/v2/01-domain-request-context.md`).
     /// Query-facing handlers consume the routed server; the scope names the
     /// exact project/repository/worktree that server answers for.
-    pub(crate) scope: tracedecay_application::ResolvedScope,
+    pub(crate) scope: tracedecay_contracts::ResolvedScope,
 }
 
 impl ResolvedProjectRoute {
@@ -53,6 +54,11 @@ impl std::fmt::Debug for ResolvedProjectRoute {
     }
 }
 
+#[tracing::instrument(
+    name = "mcp.project_route.resolve_registered",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn resolve_registered_project_route(
     context: ProjectRegistryContext,
     requested_path: &Path,
@@ -66,13 +72,14 @@ pub(crate) async fn resolve_registered_project_route(
             "registered project server resolver is unavailable",
         ));
     };
-    let (requested_path, scope) = crate::mcp::scope::resolve_query_scope(&context, requested_path)
-        .map_err(|error| error.into_route_failure().into_error())?;
-    let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
+    let (requested_path, scope) =
+        tracedecay_mcp::scope::resolve_query_scope(&context, requested_path)
+            .map_err(|error| error.into_route_failure().into_error())?;
+    let request = tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_registered_project(
         context.clone(),
         requested_path.clone(),
     );
-    let server = resolver.resolve(request).await?.ok_or_else(|| {
+    let server = resolver(request).await?.ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::project_route(
             "project_route_unavailable",
             true,
@@ -90,79 +97,6 @@ pub(crate) async fn resolve_registered_project_route(
         requested_root: requested_path,
         scope,
     })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProjectRouteFailureKind {
-    NotFound,
-    NotAuthorized,
-    Ambiguous,
-    Unavailable,
-}
-
-impl ProjectRouteFailureKind {
-    #[hotpath::skip]
-    pub(crate) const fn reason_code(self) -> &'static str {
-        match self {
-            Self::NotFound => "project_route_not_found",
-            Self::NotAuthorized => "project_route_not_authorized",
-            Self::Ambiguous => "project_route_ambiguous",
-            Self::Unavailable => "project_route_unavailable",
-        }
-    }
-
-    #[hotpath::skip]
-    pub(crate) const fn retryable(self) -> bool {
-        matches!(self, Self::Unavailable)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProjectRouteFailure {
-    pub(crate) kind: ProjectRouteFailureKind,
-    pub(crate) detail: String,
-}
-
-impl ProjectRouteFailure {
-    pub(crate) fn into_error(self) -> tracedecay_domain::errors::TraceDecayError {
-        tracedecay_domain::errors::TraceDecayError::project_route(
-            self.kind.reason_code(),
-            self.kind.retryable(),
-            self.detail,
-        )
-    }
-
-    pub(crate) fn from_selection_error(error: &tracedecay_domain::errors::TraceDecayError) -> Self {
-        let detail = error.to_string();
-        let kind = match error {
-            tracedecay_domain::errors::TraceDecayError::ProjectRoute { reason_code, .. } => {
-                match reason_code.as_str() {
-                    "project_route_not_found" => ProjectRouteFailureKind::NotFound,
-                    "project_route_not_authorized" => ProjectRouteFailureKind::NotAuthorized,
-                    "project_route_ambiguous" => ProjectRouteFailureKind::Ambiguous,
-                    _ => ProjectRouteFailureKind::Unavailable,
-                }
-            }
-            tracedecay_domain::errors::TraceDecayError::Config { message }
-                if message.contains("not found for selector") =>
-            {
-                ProjectRouteFailureKind::NotFound
-            }
-            tracedecay_domain::errors::TraceDecayError::Config { message }
-                if message.contains("ambiguous") || message.contains("multiple stores") =>
-            {
-                ProjectRouteFailureKind::Ambiguous
-            }
-            tracedecay_domain::errors::TraceDecayError::Config { message }
-                if message.contains("registry is unavailable")
-                    || message.contains("profile identity") =>
-            {
-                ProjectRouteFailureKind::NotAuthorized
-            }
-            _ => ProjectRouteFailureKind::Unavailable,
-        };
-        Self { kind, detail }
-    }
 }
 
 #[derive(Clone)]
@@ -194,6 +128,7 @@ impl HookProjectRouteCache {
     /// Evicts cached routes for a tombstoned project. The cached server lease
     /// is weak, but retaining the identity would make every later request fail
     /// against a retired project instead of allowing a newly resolved route.
+    #[tracing::instrument(name = "mcp.project_route.forget_project", level = "trace", skip_all)]
     pub(crate) fn forget_project(
         &mut self,
         profile_id: &tracedecay_domain::UserProfileId,
@@ -208,7 +143,7 @@ impl HookProjectRouteCache {
                 project_id,
             ))
         };
-        if self.connection_route.as_ref().is_some_and(&belongs_to) {
+        if self.connection_route.as_ref().is_some_and(belongs_to) {
             self.connection_route = None;
         }
         let sessions = self
@@ -240,6 +175,7 @@ impl HookProjectRouteCache {
             .or(event.cwd.as_deref())
     }
 
+    #[tracing::instrument(name = "mcp.project_route.observe_route", level = "trace", skip_all)]
     pub(crate) fn observe_workspace_route(
         &mut self,
         event: &hook_events::HookEvent,
@@ -254,14 +190,14 @@ impl HookProjectRouteCache {
             .as_deref()
             .filter(|identity| !identity.is_empty())
             .and_then(|identity| {
-                tracedecay_runtime_core::privacy::protect_sensitive_structural_id(identity).ok()
+                tracedecay_privacy::protect_sensitive_structural_id(identity).ok()
             });
         let thread_id = metadata
             .thread_id
             .as_deref()
             .filter(|identity| !identity.is_empty())
             .and_then(|identity| {
-                tracedecay_runtime_core::privacy::protect_sensitive_structural_id(identity).ok()
+                tracedecay_privacy::protect_sensitive_structural_id(identity).ok()
             });
         if let Some(session_id) = session_id.as_deref() {
             self.insert_session_workspace_route(session_id.to_owned(), route.clone());
@@ -279,6 +215,7 @@ impl HookProjectRouteCache {
         }
     }
 
+    #[tracing::instrument(name = "mcp.project_route.select_route", level = "trace", skip_all)]
     pub(crate) fn workspace_route_for_arguments(
         &self,
         arguments: &Value,
@@ -395,6 +332,7 @@ impl SharedHookProjectRouteCache {
         )
     }
 
+    #[tracing::instrument(name = "mcp.project_route.snapshot_cache", level = "trace", skip_all)]
     pub(crate) fn snapshot(&self) -> tracedecay_domain::errors::Result<HookProjectRouteCache> {
         let state = self
             .inner
@@ -405,6 +343,7 @@ impl SharedHookProjectRouteCache {
         Ok(cache)
     }
 
+    #[tracing::instrument(name = "mcp.project_route.store_cache", level = "trace", skip_all)]
     pub(crate) fn store(
         &self,
         cache: &HookProjectRouteCache,
@@ -419,6 +358,7 @@ impl SharedHookProjectRouteCache {
     /// Refresh `target` from the shared cache with one clone under the lock,
     /// skipped entirely while `target` already carries the current shared
     /// generation (route updates are rare relative to tool calls).
+    #[tracing::instrument(name = "mcp.project_route.refresh_cache", level = "trace", skip_all)]
     pub(crate) fn refresh_into(
         &self,
         target: &mut HookProjectRouteCache,
@@ -437,6 +377,11 @@ impl SharedHookProjectRouteCache {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "mcp.project_route.forget_project_shared",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn forget_project(
         &self,
         profile_id: &tracedecay_domain::UserProfileId,
@@ -460,6 +405,11 @@ pub(crate) fn arguments_have_structural_route_identity(arguments: &Value) -> boo
     mcp_route_thread_id(arguments).is_some() || mcp_analytics_session_id(arguments).is_some()
 }
 
+#[tracing::instrument(
+    name = "mcp.project_route.protect_structural_ids",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn protect_tool_structural_ids(arguments: &mut Value) -> Result<(), ()> {
     const STRUCTURAL_ID_KEYS: &[&str] = &[
         "session_id",
@@ -496,8 +446,8 @@ pub(crate) fn protect_tool_structural_ids(arguments: &mut Value) -> Result<(), (
             let Some(raw) = map.get(*key).and_then(Value::as_str) else {
                 continue;
             };
-            let protected = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(raw)
-                .map_err(|_| ())?;
+            let protected =
+                tracedecay_privacy::protect_sensitive_structural_id(raw).map_err(|_| ())?;
             map.insert((*key).to_string(), Value::String(protected));
         }
         Ok(())
@@ -520,7 +470,7 @@ fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<Str
         if value.is_empty() {
             return None;
         }
-        tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value).ok()
+        tracedecay_privacy::protect_sensitive_structural_id(value).ok()
     }
 
     [Some(arguments), arguments.get("_meta")]
@@ -529,19 +479,7 @@ fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<Str
         .find_map(|value| keys.iter().find_map(|key| string_field(value, key)))
 }
 
-/// Top-level argument keys that are semantic tool arguments — owned and
-/// validated by the tool's own request schema — rather than registered-project
-/// route selectors, per tool. Route selection and its guards must skip these
-/// so a semantic field never masquerades as an unresolved route.
-pub(crate) fn semantic_route_argument_fields(tool_name: &str) -> &'static [&'static str] {
-    match tool_name {
-        "tracedecay_message_search" => &["project_path"],
-        _ => &[],
-    }
-}
-
-pub(crate) fn arguments_have_project_selector(tool_name: &str, arguments: &Value) -> bool {
-    let semantic = semantic_route_argument_fields(tool_name);
+pub(crate) fn arguments_have_project_selector(arguments: &Value) -> bool {
     [
         "project_selector",
         "project_id",
@@ -550,7 +488,7 @@ pub(crate) fn arguments_have_project_selector(tool_name: &str, arguments: &Value
         "root",
     ]
     .into_iter()
-    .any(|key| !semantic.contains(&key) && arguments.get(key).is_some())
+    .any(|key| arguments.get(key).is_some())
 }
 
 fn project_route_identity_matches(
@@ -566,7 +504,6 @@ fn project_route_identity_matches(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::process::Command;
     use std::sync::Arc;
 
     use serde_json::json;
@@ -578,7 +515,9 @@ mod tests {
     };
     use crate::daemon::ProductionProjectCompositionHarnessV1;
     use crate::mcp::server::McpServer;
-    use tracedecay_hooks::core_events::{HookAgent, HookRouteMetadata};
+    use crate::test_support::git::git;
+    use tracedecay_domain::HostIntegrationIdV1;
+    use tracedecay_hooks::core_events::HookRouteMetadata;
     use tracedecay_mcp::hook_events::{HookEvent, HookEventKind};
 
     struct ResolvedRouteFixture {
@@ -598,32 +537,9 @@ mod tests {
         )
         .expect("route manifest");
         fs::write(project.join("src/lib.rs"), "pub fn route_marker() {}\n").expect("route source");
-        for args in [
-            &["init", "--quiet"][..],
-            &["add", "."][..],
-            &[
-                "-c",
-                "user.name=TraceDecay Tests",
-                "-c",
-                "user.email=tests@tracedecay.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "fixture",
-            ][..],
-        ] {
-            assert!(
-                Command::new(
-                    tracedecay_runtime_core::git::try_git_program()
-                        .expect("absolute git executable should resolve"),
-                )
-                .args(args)
-                .current_dir(&project)
-                .status()
-                .expect("git route fixture")
-                .success()
-            );
-        }
+        git(&project, &["init", "--quiet"]);
+        git(&project, &["add", "."]);
+        git(&project, &["commit", "--quiet", "-m", "fixture"]);
         let harness =
             ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
                 .await
@@ -948,7 +864,7 @@ mod tests {
 
     fn hook_event(session_id: &str, thread_id: &str, cwd: &str) -> HookEvent {
         HookEvent {
-            agent: HookAgent::Claude,
+            agent: HostIntegrationIdV1::Claude,
             kind: HookEventKind::FileEdit,
             rel_paths: Vec::new(),
             had_command: false,

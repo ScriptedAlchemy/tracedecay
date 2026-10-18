@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
-use tracedecay_application::git::{
+use tracedecay_contracts::git::{
     AuthorizedScopeSetPort, NativeWorktreePort, NativeWorktreeTargetV1,
     WorktreeCleanupConfirmRequestV1, WorktreeCleanupConfirmationV1,
     WorktreeCleanupInspectRequestV1, WorktreeCleanupReconcileRequestV1,
@@ -21,18 +21,16 @@ use tracedecay_application::git::{
     WorktreeKindV1, WorktreeObservationV1, WorktreePresenceV1, worktree_confirmation_digest,
     worktree_inspection_digest,
 };
-use tracedecay_application::{AuthorizedRoot, AuthorizedScopeSet, CancellationSignal};
+use tracedecay_contracts::{AuthorizedRoot, AuthorizedScopeSet, CancellationSignal};
 use tracedecay_domain::git::{GitHeadStateV1, GitOperationStateV1};
 use tracedecay_domain::{
     ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
     WorktreeInventorySnapshotId, canonical_sha256,
 };
-use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
+use tracedecay_runtime_core::git_repository::{GitRepositoryAuthority, GitRepositoryStatus};
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
-use super::store::SharedDaemonNativeIntegrationStore;
-
-type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+use super::store::DaemonNativeIntegrationStore;
 
 #[derive(Clone)]
 pub struct DaemonAuthorizedScopeSetReader {
@@ -82,22 +80,19 @@ impl Default for HolderFenceRootV1 {
 /// requests and daemon-owned runtime mounts until reconciliation is terminal.
 #[derive(Clone)]
 pub struct WorktreeHolderAdmissionFenceV1 {
-    state: Arc<ProfiledStdMutex<HolderFenceStateV1>>,
+    state: Arc<std::sync::Mutex<HolderFenceStateV1>>,
 }
 
 impl Default for WorktreeHolderAdmissionFenceV1 {
     fn default() -> Self {
         Self {
-            state: Arc::new(hotpath::mutex!(
-                std::sync::Mutex::new(HolderFenceStateV1::default()),
-                label = "daemon.git.worktree.holder_fence"
-            )),
+            state: Arc::new(std::sync::Mutex::new(HolderFenceStateV1::default())),
         }
     }
 }
 
 impl WorktreeHolderAdmissionFenceV1 {
-    #[hotpath::measure(label = "daemon.git.worktree.admit", future = true)]
+    #[tracing::instrument(name = "daemon.git.worktree.admit", level = "trace", skip_all)]
     pub async fn admit_holders(
         &self,
         roots: impl IntoIterator<Item = PathBuf>,
@@ -129,7 +124,7 @@ impl WorktreeHolderAdmissionFenceV1 {
         Some(admissions)
     }
 
-    #[hotpath::measure(label = "daemon.git.worktree.mark_recovery", future = true)]
+    #[tracing::instrument(name = "daemon.git.worktree.mark_recovery", level = "trace", skip_all)]
     pub async fn mark_recovery_required(&self, roots: impl IntoIterator<Item = PathBuf>) {
         let mut roots = roots.into_iter().collect::<Vec<_>>();
         roots.sort();
@@ -266,18 +261,18 @@ pub struct DaemonNativeWorktreeAuthority {
     pub(super) repository_id: RepositoryId,
     pub(super) repository_root: PathBuf,
     pub(super) repository_common_dir: PathBuf,
-    pub(super) store: SharedDaemonNativeIntegrationStore,
+    pub(super) store: DaemonNativeIntegrationStore,
     pub(super) holder_fence: WorktreeHolderAdmissionFenceV1,
     inventory_epoch: AtomicU64,
 }
 
 impl DaemonNativeWorktreeAuthority {
-    #[hotpath::measure(label = "daemon.git.worktree.open")]
+    #[tracing::instrument(name = "daemon.git.worktree.open", level = "trace", skip_all)]
     pub fn open(
         project_id: ProjectId,
         repository_id: RepositoryId,
         repository_root: &Path,
-        store: SharedDaemonNativeIntegrationStore,
+        store: DaemonNativeIntegrationStore,
     ) -> Result<Self, WorktreeContractError> {
         project_id.validate()?;
         repository_id.validate()?;
@@ -376,7 +371,7 @@ impl DaemonNativeWorktreeAuthority {
                 locked: WorktreeObservationV1::Unknown,
                 holder: WorktreeObservationV1::Unknown,
                 unique_data: WorktreeObservationV1::Unknown,
-                operation: None,
+                operation_state: None,
                 observed_at,
                 inspection_digest: zero_digest()?,
             });
@@ -414,19 +409,7 @@ impl DaemonNativeWorktreeAuthority {
         } else {
             WorktreePresenceV1::Present
         };
-        let clean = if status.entries.is_empty() {
-            // The application cleanup predicate treats `No` as absence of a
-            // dirty-worktree blocker, alongside the other risk observations.
-            WorktreeObservationV1::No
-        } else {
-            WorktreeObservationV1::Yes
-        };
-        let unique_data = match (&status.head, clean) {
-            (_, WorktreeObservationV1::Yes) | (GitHeadStateV1::Detached { .. }, _) => {
-                WorktreeObservationV1::Yes
-            }
-            _ => WorktreeObservationV1::No,
-        };
+        let (clean, unique_data) = cleanup_observations(&status);
         let operation = (status.operation != GitOperationStateV1::None).then_some(status.operation);
         let holder = if ignore_cleanup_fence {
             WorktreeObservationV1::No
@@ -448,7 +431,7 @@ impl DaemonNativeWorktreeAuthority {
             },
             holder,
             unique_data,
-            operation,
+            operation_state: operation,
             observed_at,
             inspection_digest: zero_digest()?,
         })
@@ -472,7 +455,7 @@ impl DaemonNativeWorktreeAuthority {
             locked: WorktreeObservationV1::Unknown,
             holder: WorktreeObservationV1::Unknown,
             unique_data: WorktreeObservationV1::Unknown,
-            operation: None,
+            operation_state: None,
             observed_at,
             inspection_digest: zero_digest()?,
         })
@@ -530,15 +513,32 @@ impl DaemonNativeWorktreeAuthority {
             locked: inspection.locked,
             holder: inspection.holder,
             unique_data: inspection.unique_data,
-            operation: inspection.operation,
+            operation: inspection.operation_state,
             observed_at,
             evidence_digest: zero_digest()?,
         })
     }
 }
 
+fn cleanup_observations(
+    status: &GitRepositoryStatus,
+) -> (WorktreeObservationV1, WorktreeObservationV1) {
+    let clean = if status.entries.is_empty() {
+        WorktreeObservationV1::Yes
+    } else {
+        WorktreeObservationV1::No
+    };
+    let unique_data = match (&status.head, clean) {
+        (_, WorktreeObservationV1::No) | (GitHeadStateV1::Detached { .. }, _) => {
+            WorktreeObservationV1::Yes
+        }
+        _ => WorktreeObservationV1::No,
+    };
+    (clean, unique_data)
+}
+
 impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
-    #[hotpath::measure(label = "daemon.git.worktree.inventory")]
+    #[tracing::instrument(name = "daemon.git.worktree.inventory", level = "trace", skip_all)]
     fn inventory(
         &self,
         request: &WorktreeInventoryRequestV1,
@@ -549,7 +549,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
             return Ok(WorktreeInventoryOutcomeV1::Unavailable);
         }
         let roots = self.scope_roots(&request.target, scope_set)?;
-        let observed_at = tracedecay_application::now_micros();
+        let observed_at = tracedecay_contracts::now_micros();
         let mut entries = Vec::with_capacity(roots.len());
         for root in roots {
             if cancellation.is_cancelled() {
@@ -573,7 +573,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         };
         let epoch = self
             .inventory_epoch
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| WorktreeContractError::AuthorityUnavailable)?;
@@ -616,7 +616,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         )))
     }
 
-    #[hotpath::measure(label = "daemon.git.worktree.inspect")]
+    #[tracing::instrument(name = "daemon.git.worktree.inspect", level = "trace", skip_all)]
     fn inspect(
         &self,
         request: &WorktreeCleanupInspectRequestV1,
@@ -629,7 +629,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         let inspection = self.observe_target(
             &request.target,
             scope_set,
-            tracedecay_application::now_micros(),
+            tracedecay_contracts::now_micros(),
             false,
         )?;
         Ok(match inspection.presence {
@@ -639,7 +639,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         })
     }
 
-    #[hotpath::measure(label = "daemon.git.worktree.confirm")]
+    #[tracing::instrument(name = "daemon.git.worktree.confirm", level = "trace", skip_all)]
     fn confirm(
         &self,
         request: &WorktreeCleanupConfirmRequestV1,
@@ -649,7 +649,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         if cancellation.is_cancelled() {
             return Ok(WorktreeConfirmationOutcomeV1::Unavailable);
         }
-        let confirmed_at = tracedecay_application::now_micros();
+        let confirmed_at = tracedecay_contracts::now_micros();
         let inspection = self.observe_target(&request.target, scope_set, confirmed_at, false)?;
         if inspection.presence == WorktreePresenceV1::Foreign {
             return Ok(WorktreeConfirmationOutcomeV1::Denied);
@@ -677,22 +677,23 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         )))
     }
 
-    fn remove(
+    async fn remove(
         &self,
         request: &WorktreeCleanupRemoveRequestV1,
         scope_set: &AuthorizedScopeSet,
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError> {
-        self.remove_cleanup(request, scope_set, cancellation)
+        self.remove_cleanup(request, scope_set, cancellation).await
     }
 
-    fn reconcile(
+    async fn reconcile(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,
         scope_set: &AuthorizedScopeSet,
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError> {
         self.reconcile_cleanup(request, scope_set, cancellation)
+            .await
     }
 }
 
@@ -732,4 +733,139 @@ fn seal_entry(
 
 pub(super) fn zero_digest() -> Result<ManifestDigest, WorktreeContractError> {
     ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).map_err(WorktreeContractError::Domain)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use tracedecay_contracts::git::{
+        NativeWorktreeSurfaceResultV1, NativeWorktreeTargetV1, WorktreeInspectionOutcomeV1,
+        WorktreeInspectionV1, WorktreeKindV1, WorktreeObservationV1, WorktreePresenceV1,
+    };
+    use tracedecay_domain::git::GitOperationStateV1;
+    use tracedecay_domain::{ProjectId, RepositoryId, UtcMicros, WorktreeId};
+    use tracedecay_runtime_core::git::try_git_program;
+    use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
+
+    use super::{cleanup_observations, zero_digest};
+
+    fn git(root: &Path, arguments: &[&str]) -> String {
+        let output = Command::new(try_git_program().expect("resolve git"))
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output is UTF-8")
+            .trim()
+            .to_owned()
+    }
+
+    fn inspection(
+        clean: WorktreeObservationV1,
+        unique_data: WorktreeObservationV1,
+    ) -> WorktreeInspectionV1 {
+        WorktreeInspectionV1 {
+            target: NativeWorktreeTargetV1::Worktree {
+                project_id: ProjectId::new("project.worktree.clean").expect("project id"),
+                repository_id: RepositoryId::new("repository.worktree.clean")
+                    .expect("repository id"),
+                worktree_id: WorktreeId::new("worktree.clean").expect("worktree id"),
+            },
+            presence: WorktreePresenceV1::Present,
+            kind: Some(WorktreeKindV1::Linked),
+            worktree_id: WorktreeId::new("worktree.clean").expect("worktree id"),
+            reference: None,
+            head: None,
+            clean,
+            locked: WorktreeObservationV1::No,
+            holder: WorktreeObservationV1::No,
+            unique_data,
+            operation_state: None,
+            observed_at: UtcMicros(1),
+            inspection_digest: zero_digest().expect("inspection digest"),
+        }
+    }
+
+    #[test]
+    fn worktree_inspection_roundtrips_its_surface_tag_and_git_operation() {
+        for operation in [None, Some(GitOperationStateV1::Merge)] {
+            let mut observation = inspection(WorktreeObservationV1::Yes, WorktreeObservationV1::No);
+            observation.operation_state = operation;
+            let result = NativeWorktreeSurfaceResultV1::Inspection(
+                WorktreeInspectionOutcomeV1::Inspection(Box::new(observation)),
+            );
+            let encoded = serde_json::to_vec(&result).unwrap();
+            let decoded: NativeWorktreeSurfaceResultV1 = serde_json::from_slice(&encoded)
+                .expect("the operation tag and Git state must both survive the wire");
+            assert_eq!(decoded, result);
+            assert_eq!(
+                serde_json::to_value(result).unwrap()["operation"],
+                "inspection"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_observations_match_real_git_status_and_preserve_blockers() {
+        let directory = tempfile::tempdir().expect("temporary fixture");
+        let repository_root = directory.path().join("repository");
+        let worktree_root = directory.path().join("linked");
+        std::fs::create_dir(&repository_root).expect("repository root");
+        git(&repository_root, &["init", "--initial-branch=main"]);
+        git(
+            &repository_root,
+            &["config", "user.email", "fixture@example.com"],
+        );
+        git(&repository_root, &["config", "user.name", "Fixture"]);
+        std::fs::write(repository_root.join("tracked.txt"), "tracked\n").expect("tracked file");
+        git(&repository_root, &["add", "tracked.txt"]);
+        git(&repository_root, &["commit", "-m", "seed"]);
+        git(&repository_root, &["branch", "cleanup"]);
+        git(
+            &repository_root,
+            &[
+                "worktree",
+                "add",
+                worktree_root.to_str().expect("worktree path"),
+                "cleanup",
+            ],
+        );
+
+        let authority = GitRepositoryAuthority::discover(&worktree_root).expect("Git authority");
+        assert_eq!(git(&worktree_root, &["status", "--porcelain"]), "");
+        let clean_status = authority.status().expect("clean Git status");
+        let (clean, unique_data) = cleanup_observations(&clean_status);
+        assert_eq!(clean, WorktreeObservationV1::Yes);
+        assert_eq!(unique_data, WorktreeObservationV1::No);
+        assert!(inspection(clean, unique_data).removal_eligible());
+
+        std::fs::write(worktree_root.join("private.txt"), "private\n").expect("untracked file");
+        assert_eq!(
+            git(&worktree_root, &["status", "--porcelain"]),
+            "?? private.txt"
+        );
+        let dirty_status = authority.status().expect("dirty Git status");
+        let (clean, unique_data) = cleanup_observations(&dirty_status);
+        assert_eq!(clean, WorktreeObservationV1::No);
+        assert_eq!(unique_data, WorktreeObservationV1::Yes);
+        assert!(!inspection(clean, unique_data).removal_eligible());
+
+        let mut blocked = inspection(WorktreeObservationV1::Yes, WorktreeObservationV1::No);
+        blocked.locked = WorktreeObservationV1::Yes;
+        assert!(!blocked.removal_eligible());
+        blocked.locked = WorktreeObservationV1::No;
+        blocked.holder = WorktreeObservationV1::Yes;
+        assert!(!blocked.removal_eligible());
+        blocked.holder = WorktreeObservationV1::No;
+        blocked.unique_data = WorktreeObservationV1::Yes;
+        assert!(!blocked.removal_eligible());
+    }
 }

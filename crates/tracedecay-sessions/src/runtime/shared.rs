@@ -5,155 +5,22 @@
 //! both depend on them so they do not need to import from each other.
 
 use std::collections::HashMap;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tracedecay_domain::collapse_whitespace;
 use tracedecay_lcm::message_storage_text;
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
 };
 
-use crate::runtime::SessionMessageRecord;
-pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
-
-type ProfiledMutex<T> = hotpath::mutexes::Mutex<T>;
-
-/// Shareable handle to a read-only rusqlite connection over a foreign
-/// (non-TraceDecay-owned) `SQLite` store.
-///
-/// The mutex makes the handle `Sync`, so async ingest futures may hold it
-/// across await points and stay `Send`; every SQL call runs on a blocking
-/// thread via [`SqliteReadConn::with`], keeping the async executor unblocked.
-#[derive(Clone)]
-pub struct SqliteReadConn {
-    inner: Arc<ProfiledMutex<rusqlite::Connection>>,
-}
-
-impl SqliteReadConn {
-    pub fn new(conn: rusqlite::Connection) -> Self {
-        Self {
-            inner: Arc::new(hotpath::mutex!(
-                Mutex::new(conn),
-                label = "sessions.shared.sqlite_conn"
-            )),
-        }
-    }
-
-    /// Runs `body` against the connection on a blocking thread. Returns `None`
-    /// only if the blocking task itself fails (cancellation/panic), which
-    /// callers degrade to the same outcome as any SQL error.
-    #[hotpath::measure(label = "sessions.shared.sqlite_with", future = true)]
-    pub async fn with<T, F>(&self, body: F) -> Option<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(&rusqlite::Connection) -> T + Send + 'static,
-    {
-        let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            let guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
-            body(&guard)
-        })
-        .await
-        .ok()
-    }
-}
+pub use crate::{StoredCursor, TranscriptIngestStats};
 
 /// Generic per-transcript backlog threshold for warning that automatic
 /// session transcript catch-up may not drain recall transcripts quickly enough.
 pub const SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES: u64 = 2 * 1024 * 1024;
-
-/// **`RowCursor`** reader for SQLite-backed transcript stores (Zed, Copilot CLI
-/// `session-store.db`).
-///
-/// Selects rows whose rowid is greater than `prev.position` (the last-seen
-/// rowid), ordered ascending, mapping each through `map_row` *during* iteration
-/// (rows must not outlive the statement cursor) and advancing the stored cursor
-/// to the maximum rowid seen. `select_sql` must select the rowid as its first
-/// column and accept a single `?` bound to the previous rowid, e.g.
-/// `"SELECT rowid, role, text FROM turns WHERE rowid > ? ORDER BY rowid"`.
-/// Fail-open: any query error yields `None`; `map_row` returning `None` skips
-/// that row while still advancing the cursor. The whole read runs as one
-/// blocking call on the connection's thread.
-pub async fn read_new_rows<T, F>(
-    conn: &SqliteReadConn,
-    select_sql: &str,
-    prev: StoredCursor,
-    map_row: F,
-) -> Option<NewRows<T>>
-where
-    T: Send + 'static,
-    F: FnMut(i64, &rusqlite::Row<'_>) -> Option<T> + Send + 'static,
-{
-    let select_sql = select_sql.to_string();
-    conn.with(move |conn| read_new_rows_sync(conn, &select_sql, prev, map_row))
-        .await
-        .flatten()
-}
-
-#[hotpath::measure(label = "sessions.shared.read_new_rows_sync")]
-fn read_new_rows_sync<T>(
-    conn: &rusqlite::Connection,
-    select_sql: &str,
-    prev: StoredCursor,
-    mut map_row: impl FnMut(i64, &rusqlite::Row<'_>) -> Option<T>,
-) -> Option<NewRows<T>> {
-    let mut statement = match conn.prepare_cached(select_sql) {
-        Ok(statement) => statement,
-        Err(error) => {
-            tracing::debug!(
-                select_sql,
-                previous_rowid = prev.position,
-                error = %error,
-                "skipping transcript row source query"
-            );
-            return None;
-        }
-    };
-    let mut result_rows = match statement.query(rusqlite::params![prev.position as i64]) {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::debug!(
-                select_sql,
-                previous_rowid = prev.position,
-                error = %error,
-                "skipping transcript row source query"
-            );
-            return None;
-        }
-    };
-
-    let mut items = Vec::new();
-    let mut max_rowid = prev.position;
-    while let Ok(Some(row)) = result_rows.next() {
-        let Ok(rowid) = row.get::<_, i64>(0) else {
-            tracing::debug!(
-                select_sql,
-                "skipping transcript row without rowid in column 0"
-            );
-            continue;
-        };
-        if rowid as u64 > max_rowid {
-            max_rowid = rowid as u64;
-        }
-        if let Some(item) = map_row(rowid, row) {
-            items.push(item);
-        }
-    }
-
-    Some(NewRows {
-        items,
-        new_cursor: StoredCursor {
-            position: max_rowid,
-            // Row stores have no single file mtime; the rowid alone is the
-            // monotonic cursor, so mtime is left as a sentinel.
-            mtime: 0,
-            file_id: 0,
-        },
-    })
-}
 
 /// Compare two paths for equality, canonicalizing when possible so that
 /// symlinks/`..`/trailing differences do not cause false mismatches. Falls back
@@ -164,6 +31,82 @@ pub fn paths_equal(a: &Path, b: &Path) -> bool {
         (Ok(a), Ok(b)) => normalized_paths_equal(&a, &b),
         _ => normalized_paths_equal(a, b),
     }
+}
+
+/// The one canonical stored form of a path-shaped durable key.
+///
+/// Applied on write and read for `parse_offsets.file_path`, and on write for
+/// `sessions.project_path`, so each path-shaped authority has one stored form
+/// and the ingest cursor hot path needs one indexed equality lookup.
+///
+/// Only syntactically absolute Windows drive and UNC display forms are folded:
+/// the extended-length prefix, slash direction, and drive-letter case. Unix
+/// paths containing literal backslashes and opaque keys stay byte-exact. The
+/// result never depends on the compiling platform: the same input produces the
+/// same stored bytes on Windows and Unix.
+#[must_use]
+pub fn path_identity_key(path: &str) -> String {
+    if let Some(body) = path
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| path.strip_prefix("//?/UNC/"))
+    {
+        return canonical_unc_path(body).unwrap_or_else(|| path.to_owned());
+    }
+
+    if let Some(stripped) = path
+        .strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix("//?/"))
+    {
+        return canonical_drive_path(stripped).unwrap_or_else(|| path.to_owned());
+    }
+
+    if let Some(normalized) = canonical_drive_path(path) {
+        return normalized;
+    }
+    path.strip_prefix(r"\\")
+        .or_else(|| path.strip_prefix("//"))
+        .and_then(canonical_unc_path)
+        .unwrap_or_else(|| path.to_owned())
+}
+
+/// Stored form of a live filesystem project path.
+///
+/// [`path_identity_key`] folds Windows display syntax only; it leaves Unix
+/// symlink aliases byte-exact. Session rows and dashboard reads must agree on
+/// one OS identity (`/var` vs `/private/var`, `/tmp/link` vs `/tmp/real`) or a
+/// scoped session query silently returns zero rows.
+#[must_use]
+pub fn durable_project_path_key(path: &str) -> String {
+    // Relative values include profile-scoped sentinels and opaque project IDs;
+    // their identity must not depend on directories in the daemon working directory.
+    if !Path::new(path).is_absolute() {
+        return path_identity_key(path);
+    }
+    let canonical =
+        tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(Path::new(path));
+    path_identity_key(&canonical.to_string_lossy())
+}
+
+fn canonical_drive_path(path: &str) -> Option<String> {
+    let head = path.as_bytes();
+    if head.len() >= 3
+        && head[0].is_ascii_alphabetic()
+        && head[1] == b':'
+        && matches!(head[2], b'/' | b'\\')
+    {
+        let mut normalized = path.replace('\\', "/");
+        normalized[..1].make_ascii_lowercase();
+        return Some(normalized);
+    }
+    None
+}
+
+fn canonical_unc_path(body: &str) -> Option<String> {
+    let normalized = body.replace('\\', "/");
+    let mut components = normalized.split('/');
+    let server = components.next()?;
+    let share = components.next()?;
+    (!server.is_empty() && !share.is_empty()).then(|| format!("//{normalized}"))
 }
 
 pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
@@ -204,12 +147,6 @@ pub type GitIdentityResolver = fn(&Path) -> GitRepositoryIdentityOutcome;
 /// before the next lookup retries the underlying git discovery.
 const LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Default)]
-struct LocationWorktreeCacheEntry {
-    outcome: OnceLock<GitRepositoryIdentityOutcome>,
-    unknown_retry_after: Mutex<Option<Instant>>,
-}
-
 #[derive(Debug)]
 struct ProjectRootMatcherCacheEntry {
     matcher: Arc<ProjectRootMatcher>,
@@ -235,7 +172,7 @@ impl ProjectRootMatcher {
         Self::new_with_identity_resolver(project_root, discover_repository_identity_cli_first)
     }
 
-    #[hotpath::measure(label = "sessions.shared.matcher_new")]
+    #[tracing::instrument(name = "sessions.shared.matcher_new", level = "trace", skip_all)]
     pub fn new_with_identity_resolver(
         project_root: &Path,
         identity_resolver: GitIdentityResolver,
@@ -278,14 +215,12 @@ impl ProjectRootMatcher {
     }
 
     fn contains_uncached(&self, path: &Path) -> ProjectMembership {
-        self.contains_uncached_with(
-            path,
-            self.identity_resolver,
-            tracedecay_runtime_core::config::discover_project_root,
-        )
+        self.contains_uncached_with(path, self.identity_resolver, |path: &Path| {
+            crate::runtime::transcript_source_profile()?.discover_project_root(path)
+        })
     }
 
-    #[hotpath::measure(label = "sessions.shared.membership_resolve")]
+    #[tracing::instrument(name = "sessions.shared.membership_resolve", level = "trace", skip_all)]
     fn contains_uncached_with(
         &self,
         path: &Path,
@@ -299,7 +234,7 @@ impl ProjectRootMatcher {
             return ProjectMembership::Unknown;
         }
 
-        let path_identity = identity_resolver(path);
+        let path_identity = identity_resolver(nearest_existing_ancestor(path));
         match (&self.identity, path_identity) {
             (
                 GitRepositoryIdentityOutcome::Resolved(project_identity),
@@ -330,6 +265,20 @@ impl ProjectRootMatcher {
     }
 }
 
+/// A transcript's working directory may since have been deleted. Git cannot
+/// probe a missing directory, so it would stay undecidable forever, while the
+/// directory still lies inside whatever worktree its nearest surviving
+/// ancestor belongs to. A relative path, or one whose existence cannot be
+/// read, is probed as given.
+pub(crate) fn nearest_existing_ancestor(path: &Path) -> &Path {
+    if !path.is_absolute() {
+        return path;
+    }
+    path.ancestors()
+        .find(|ancestor| !matches!(ancestor.try_exists(), Ok(false)))
+        .unwrap_or(path)
+}
+
 /// Source-lifetime cache of project matchers keyed by canonical project root.
 ///
 /// A source parses many transcript files for the same project. Keeping the
@@ -340,7 +289,6 @@ impl ProjectRootMatcher {
 #[derive(Clone, Debug)]
 pub struct ProjectRootMatcherCache {
     matchers: Arc<Mutex<HashMap<PathBuf, Arc<ProjectRootMatcherCacheEntry>>>>,
-    location_worktrees: Arc<Mutex<HashMap<PathBuf, Arc<LocationWorktreeCacheEntry>>>>,
     identity_resolver: GitIdentityResolver,
 }
 
@@ -348,7 +296,6 @@ impl Default for ProjectRootMatcherCache {
     fn default() -> Self {
         Self {
             matchers: Arc::default(),
-            location_worktrees: Arc::default(),
             identity_resolver: discover_repository_identity_cli_first,
         }
     }
@@ -437,73 +384,6 @@ impl ProjectRootMatcherCache {
             ProjectMembership::NoMatch
         }
     }
-
-    /// Resolve a transcript cwd's worktree once for this ingest source.
-    ///
-    /// Location metadata is added per message, so one transcript can otherwise
-    /// repeat git discovery thousands of times for the same cwd. Keep this
-    /// source-lifetime like the project matchers and use
-    /// [`discover_repository_identity_cli_first`] instead of opening the
-    /// repository object database.
-    pub fn git_worktree_root(&self, cwd: &Path) -> Option<PathBuf> {
-        self.git_worktree_root_at(cwd, Instant::now(), &discover_repository_identity_cli_first)
-    }
-
-    #[hotpath::measure(label = "sessions.shared.git_worktree")]
-    fn git_worktree_root_at(
-        &self,
-        cwd: &Path,
-        now: Instant,
-        identity_resolver: &impl Fn(&Path) -> GitRepositoryIdentityOutcome,
-    ) -> Option<PathBuf> {
-        loop {
-            let resolution = self
-                .location_worktrees
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(cwd.to_path_buf())
-                .or_insert_with(|| Arc::new(LocationWorktreeCacheEntry::default()))
-                .clone();
-            match resolution
-                .outcome
-                .get_or_init(|| identity_resolver(cwd))
-                .clone()
-            {
-                GitRepositoryIdentityOutcome::Resolved(identity) => {
-                    return Some(identity.worktree_root);
-                }
-                GitRepositoryIdentityOutcome::NotRepository => return None,
-                GitRepositoryIdentityOutcome::Unknown(_) => {
-                    // Location metadata is best-effort: this Option surface
-                    // cannot spell uncertainty, so a still-cooling Unknown
-                    // omits the worktree path rather than inventing one.
-                    let should_retry = {
-                        let mut retry_after = resolution
-                            .unknown_retry_after
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner);
-                        let retry_after = retry_after
-                            .get_or_insert(now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN);
-                        now >= *retry_after
-                    };
-                    if !should_retry {
-                        return None;
-                    }
-
-                    let mut worktrees = self
-                        .location_worktrees
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    if worktrees
-                        .get(cwd)
-                        .is_some_and(|cached| Arc::ptr_eq(cached, &resolution))
-                    {
-                        worktrees.remove(cwd);
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Decides whether one transcript record belongs to the scope currently being
@@ -515,13 +395,14 @@ impl ProjectRootMatcherCache {
 /// * **Project** scope keeps a record when its working directory belongs to
 ///   the project being ingested.
 /// * **Profile** (user-global) scope keeps a record when its working directory
-///   belongs to *no* registered project — records with no working directory at
+///   belongs to *no* registered project, records with no working directory at
 ///   all are user-global by definition. That is exactly the complement of the
 ///   project scopes, so each record lands in one store and not both.
 ///
 /// Resolving the fixed root side once is the point: the equivalent per-record
 /// [`path_belongs_to_project`] call re-resolves the same unchanging root for
 /// every record.
+#[derive(Clone)]
 pub enum TranscriptScopeMatcher {
     Project(Arc<ProjectRootMatcher>),
     Profile(Vec<Arc<ProjectRootMatcher>>),
@@ -542,7 +423,7 @@ impl TranscriptScopeMatcher {
     }
 
     /// Profile scope when `registered_roots` is present, project scope
-    /// otherwise — the shape every provider source carries as an
+    /// otherwise, the shape every provider source carries as an
     /// `Option<Vec<PathBuf>>` user scope beside its project root.
     pub fn for_scope(project_root: &Path, registered_roots: Option<&[PathBuf]>) -> Self {
         registered_roots.map_or_else(|| Self::project(project_root), Self::profile)
@@ -589,7 +470,7 @@ impl TranscriptScopeMatcher {
 
     /// Tri-state scope acceptance: `Match`/`NoMatch` mirror [`Self::accepts`],
     /// while `Unknown` reports that a bounded git timeout left the record's
-    /// scope undecided — deferring callers must not persist their cursor.
+    /// scope undecided, deferring callers must not persist their cursor.
     pub fn membership(&self, cwd: Option<&Path>) -> ProjectMembership {
         match self {
             Self::Project(project) => cwd.map_or(ProjectMembership::NoMatch, |cwd| {
@@ -640,7 +521,7 @@ fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
 /// unfinished-run evidence) so a multi-line blob never smears a table, bullet,
 /// or stored column.
 pub fn one_line_truncated(text: &str, max: usize) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(text);
     if collapsed.chars().count() <= max {
         return collapsed;
     }
@@ -648,32 +529,9 @@ pub fn one_line_truncated(text: &str, max: usize) -> String {
     format!("{truncated}…")
 }
 
-/// Clip `text` to at most `max_bytes` on a UTF-8 boundary, appending a single
-/// `…` only when truncation occurred. Unlike [`one_line_truncated`] this keeps
-/// internal newlines, so multi-line derived-row previews retain their structure.
-pub fn preview_truncated(text: &str, max_bytes: usize) -> String {
-    let prefix = tracedecay_runtime_core::text::utf8_prefix_at_or_before(text, max_bytes);
-    if prefix.len() == text.len() {
-        prefix.to_string()
-    } else {
-        format!("{prefix}…")
-    }
-}
-
-/// Collapse whitespace and clip to a short preview suitable for a session title.
-pub fn preview_title(text: &str) -> String {
-    const MAX_TITLE_CHARS: usize = 80;
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= MAX_TITLE_CHARS {
-        collapsed
-    } else {
-        collapsed.chars().take(MAX_TITLE_CHARS).collect()
-    }
-}
-
 /// Return lossless storage text plus tool names discovered in either structured
 /// content blocks or a sibling `tool_calls` field.
-#[hotpath::measure(label = "sessions.shared.content_storage")]
+#[tracing::instrument(name = "sessions.shared.content_storage", level = "trace", skip_all)]
 pub fn content_storage_text_and_tools(
     content: &Value,
     tool_calls: Option<&Value>,
@@ -691,86 +549,6 @@ pub fn content_storage_text_and_tools(
 pub fn append_tool_calls_metadata(map: &mut serde_json::Map<String, Value>, message: &Value) {
     if let Some(tool_calls) = message.get("tool_calls") {
         map.insert("tool_calls".to_string(), tool_calls.clone());
-    }
-}
-
-/// Byte length of `serde_json::to_string(value)`, or 0 when `value` is absent.
-fn json_byte_len(value: Option<&Value>) -> u64 {
-    let Some(value) = value else {
-        return 0;
-    };
-    let mut sink = ByteCountSink::default();
-    if serde_json::to_writer(&mut sink, value).is_ok() {
-        sink.count
-    } else {
-        0
-    }
-}
-
-/// `io::Write` sink that counts bytes without retaining them, so JSON byte
-/// lengths can be measured without allocating an intermediate `String`.
-#[derive(Default)]
-struct ByteCountSink {
-    count: u64,
-}
-
-impl io::Write for ByteCountSink {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.count += buf.len() as u64;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Records bounded per-call tool metadata (byte counts and identifiers only,
-/// never content) for `tool_use`/`tool_result` blocks found in `content`.
-/// Inserts the `tool_events` key only when at least one entry was collected.
-#[hotpath::measure(label = "sessions.shared.append_tool_events")]
-pub fn append_tool_event_metadata(map: &mut serde_json::Map<String, Value>, content: &Value) {
-    let Some(items) = content.as_array() else {
-        return;
-    };
-    let mut events = Vec::new();
-    for item in items {
-        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
-            continue;
-        };
-        match item_type {
-            "tool_use" => {
-                let mut event = serde_json::Map::new();
-                event.insert("type".to_string(), Value::String("tool_use".to_string()));
-                if let Some(name) = item.get("name").and_then(Value::as_str) {
-                    event.insert("tool_name".to_string(), Value::String(name.to_string()));
-                }
-                if let Some(id) = item.get("id").and_then(Value::as_str) {
-                    event.insert("call_id".to_string(), Value::String(id.to_string()));
-                }
-                event.insert(
-                    "input_bytes".to_string(),
-                    Value::from(json_byte_len(item.get("input"))),
-                );
-                events.push(Value::Object(event));
-            }
-            "tool_result" => {
-                let mut event = serde_json::Map::new();
-                event.insert("type".to_string(), Value::String("tool_result".to_string()));
-                if let Some(id) = item.get("tool_use_id").and_then(Value::as_str) {
-                    event.insert("call_id".to_string(), Value::String(id.to_string()));
-                }
-                event.insert(
-                    "output_bytes".to_string(),
-                    Value::from(json_byte_len(item.get("content"))),
-                );
-                events.push(Value::Object(event));
-            }
-            _ => {}
-        }
-    }
-    if !events.is_empty() {
-        map.insert("tool_events".to_string(), Value::Array(events));
     }
 }
 
@@ -794,7 +572,6 @@ pub struct TranscriptLocationMetadataKeys {
 }
 
 impl TranscriptLocationMetadataKeys {
-    #[hotpath::skip]
     pub const fn new(cwd: &'static str, worktree: &'static str, provenance: &'static str) -> Self {
         Self {
             cwd,
@@ -816,23 +593,6 @@ pub fn append_location_metadata(
         location
             .cwd
             .and_then(tracedecay_runtime_core::worktree::git_worktree_root),
-    );
-}
-
-/// [`append_location_metadata`] with the cwd's worktree resolved through a
-/// source-lifetime cache, so one transcript's repeated cwd does not re-run git
-/// discovery for every message row.
-pub fn append_location_metadata_cached(
-    map: &mut serde_json::Map<String, Value>,
-    keys: TranscriptLocationMetadataKeys,
-    location: TranscriptLocation<'_>,
-    cache: &ProjectRootMatcherCache,
-) {
-    append_location_metadata_with_worktree(
-        map,
-        keys,
-        location,
-        location.cwd.and_then(|cwd| cache.git_worktree_root(cwd)),
     );
 }
 
@@ -955,44 +715,6 @@ fn collect_tool_names(value: &Value, tools: &mut Vec<String>) {
     }
 }
 
-fn title_text_from_stored_content(text: &str) -> String {
-    serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|value| visible_text_from_content(&value))
-        .unwrap_or_else(|| text.to_string())
-}
-
-fn visible_text_from_content(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(items) => {
-            let parts = items
-                .iter()
-                .filter_map(visible_text_from_content)
-                .filter(|text| !text.trim().is_empty())
-                .collect::<Vec<_>>();
-            (!parts.is_empty()).then(|| parts.join("\n\n"))
-        }
-        Value::Object(map) => {
-            for key in ["text", "content", "message"] {
-                if let Some(text) = map.get(key).and_then(Value::as_str) {
-                    return Some(text.to_string());
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Build a session title from the first user message, if any.
-pub fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<String> {
-    messages
-        .iter()
-        .find(|message| message.role == "user")
-        .map(|message| preview_title(&title_text_from_stored_content(&message.text)))
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1000,7 +722,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
-    use serde_json::{Value, json};
+    use serde_json::json;
     use tempfile::TempDir;
     use tracedecay_runtime_core::git_discovery::{
         GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
@@ -1010,13 +732,90 @@ mod tests {
     use super::ProjectMembership;
     use super::ProjectRootMatcher;
     use super::ProjectRootMatcherCache;
-    use super::TranscriptLocation;
-    use super::TranscriptLocationMetadataKeys;
-    use super::append_location_metadata_cached;
-    use super::one_line_truncated;
+    use super::path_identity_key;
     use super::usage_counters_from;
 
     static MATCHER_CACHE_RESOLVER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn durable_path_identity_folds_only_absolute_windows_display_forms() {
+        assert_eq!(
+            path_identity_key(r"\\?\C:\Repo\Case\transcript.jsonl"),
+            "c:/Repo/Case/transcript.jsonl"
+        );
+        assert_eq!(
+            path_identity_key(r"\\?\UNC\server\Share\transcript.jsonl"),
+            "//server/Share/transcript.jsonl"
+        );
+        assert_eq!(
+            path_identity_key(r"\\server\Share\transcript.jsonl"),
+            "//server/Share/transcript.jsonl"
+        );
+
+        assert_eq!(path_identity_key(r"/repo/a\b"), r"/repo/a\b");
+        assert_ne!(
+            path_identity_key(r"/repo/a\b"),
+            path_identity_key("/repo/a/b")
+        );
+        assert_ne!(
+            path_identity_key("/repo/Case/transcript.jsonl"),
+            path_identity_key("/repo/case/transcript.jsonl")
+        );
+        assert_eq!(
+            path_identity_key(r"opaque\project-key"),
+            r"opaque\project-key"
+        );
+        assert_eq!(path_identity_key(r"\\server"), r"\\server");
+    }
+
+    #[test]
+    fn durable_project_path_preserves_non_path_identity() {
+        const CHILD: &str = "TD_SESSION_PATH_SENTINEL_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            for sentinel in ["user", "unknown", "opaque-project-id"] {
+                assert!(Path::new(sentinel).is_dir());
+                assert_eq!(super::durable_project_path_key(sentinel), sentinel);
+            }
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        for sentinel in ["user", "unknown", "opaque-project-id"] {
+            std::fs::create_dir(temp.path().join(sentinel)).unwrap();
+        }
+        // Isolate cwd in a child process so parallel tests retain their own paths.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "durable_project_path_preserves_non_path_identity",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .current_dir(temp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_project_path_collapses_a_symlink_alias() {
+        let temp = tempfile::TempDir::new().expect("temporary root");
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).expect("real project root");
+        std::os::unix::fs::symlink(&real, &link).expect("directory alias");
+
+        let via_link = super::durable_project_path_key(link.to_str().expect("utf-8 link"));
+        let via_real = super::durable_project_path_key(real.to_str().expect("utf-8 real"));
+        assert_eq!(
+            via_link, via_real,
+            "one directory reached through a symlink alias is one stored project path"
+        );
+        assert_ne!(
+            link.to_string_lossy().as_ref(),
+            via_link.as_str(),
+            "fixture must keep the caller spelling distinct from the stored identity"
+        );
+    }
 
     fn unknown_then_resolved_identity(path: &Path) -> GitRepositoryIdentityOutcome {
         if MATCHER_CACHE_RESOLVER_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -1061,6 +860,42 @@ mod tests {
     }
 
     #[test]
+    fn deleted_working_directory_membership_is_decided_by_its_surviving_repository() {
+        let temp = TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("project");
+        let other_root = temp.path().join("other");
+        for root in [&project_root, &other_root] {
+            std::fs::create_dir_all(root).expect("repository root");
+            let status = std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(root)
+                .status()
+                .expect("git init");
+            assert!(status.success());
+        }
+        let deleted_in_project = project_root.join("deleted/worktree");
+        let deleted_in_other = other_root.join("deleted");
+        let surviving_in_project = project_root.join("packages");
+        std::fs::create_dir_all(&surviving_in_project).expect("surviving cwd");
+        assert!(!deleted_in_project.exists());
+        assert!(!deleted_in_other.exists());
+        let matcher = ProjectRootMatcher::new(&project_root);
+
+        assert_eq!(
+            matcher.contains_status(&deleted_in_project),
+            ProjectMembership::Match
+        );
+        assert_eq!(
+            matcher.contains_status(&deleted_in_other),
+            ProjectMembership::NoMatch
+        );
+        assert_eq!(
+            matcher.contains_status(&surviving_in_project),
+            ProjectMembership::Match
+        );
+    }
+
+    #[test]
     fn matcher_cache_suppresses_repeated_unknown_identity_lookups() {
         let temp = TempDir::new().expect("temp dir");
         let root = temp.path().join("repo");
@@ -1099,136 +934,6 @@ mod tests {
             GitRepositoryIdentityOutcome::Resolved(_)
         ));
         assert_eq!(MATCHER_CACHE_RESOLVER_CALLS.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn location_metadata_unknown_uses_cooldown_then_retries() {
-        let temp = TempDir::new().expect("temp dir");
-        let cwd = temp.path().join("repo");
-        std::fs::create_dir_all(&cwd).expect("cwd");
-        let cache = ProjectRootMatcherCache::default();
-        let calls = AtomicUsize::new(0);
-        let now = Instant::now();
-        let resolver = |path: &Path| {
-            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
-            } else {
-                GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
-                    worktree_root: path.to_path_buf(),
-                    git_dir: path.join(".git"),
-                    common_dir: path.join(".git"),
-                })
-            }
-        };
-
-        assert!(cache.git_worktree_root_at(&cwd, now, &resolver).is_none());
-        assert!(
-            cache
-                .git_worktree_root_at(
-                    &cwd,
-                    now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN / 2,
-                    &resolver,
-                )
-                .is_none()
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        assert_eq!(
-            cache.git_worktree_root_at(
-                &cwd,
-                now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN,
-                &resolver,
-            ),
-            Some(cwd)
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn location_metadata_cache_reuses_worktree_root_for_repeated_cwd() {
-        let temp = TempDir::new().expect("temp dir");
-        let project_root = temp.path().join("repo");
-        let nested_cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&project_root)
-            .status()
-            .expect("git init");
-        assert!(status.success());
-
-        let cache = ProjectRootMatcherCache::default();
-        let keys = TranscriptLocationMetadataKeys::new("cwd", "worktree", "provenance");
-        let location = TranscriptLocation::new(Some(&nested_cwd), "test");
-        let mut first = serde_json::Map::new();
-        append_location_metadata_cached(&mut first, keys, location, &cache);
-        assert_eq!(
-            first.get("worktree").and_then(Value::as_str),
-            Some(
-                project_root
-                    .canonicalize()
-                    .expect("canonical project root")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        );
-
-        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
-            .expect("hide git metadata after first lookup");
-
-        let mut second = serde_json::Map::new();
-        append_location_metadata_cached(&mut second, keys, location, &cache);
-        assert_eq!(
-            second.get("worktree").and_then(Value::as_str),
-            first.get("worktree").and_then(Value::as_str),
-            "repeated cwd should reuse the source-lifetime worktree resolution"
-        );
-    }
-
-    #[test]
-    fn project_root_matcher_caches_repeated_path_membership() {
-        let temp = TempDir::new().expect("temp dir");
-        let project_root = temp.path().join("repo");
-        let nested_cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&project_root)
-            .status()
-            .expect("git init");
-        assert!(status.success());
-
-        let matcher = ProjectRootMatcher::new(&project_root);
-        assert!(matcher.contains(&nested_cwd));
-
-        // A repeated lookup should use the result already resolved for this
-        // cwd, rather than discovering/opening the same repository again.
-        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
-            .expect("hide git metadata after first lookup");
-        assert!(matcher.contains(&nested_cwd));
-    }
-
-    #[test]
-    fn one_line_truncated_collapses_and_clips() {
-        assert_eq!(one_line_truncated("a\n b\t c", 100), "a b c");
-        assert_eq!(one_line_truncated("abcdef", 3), "abc…");
-    }
-
-    #[test]
-    fn usage_counters_keep_cache_only_rows_actual() {
-        let Some(usage) = usage_counters_from(&json!({
-            "usage": {
-                "cache_read_input_tokens": 123,
-                "total_tokens": 123
-            }
-        })) else {
-            panic!("cache-only usage should be retained");
-        };
-
-        assert_eq!(usage["input_tokens"], 0);
-        assert_eq!(usage["output_tokens"], 0);
-        assert_eq!(usage["cache_read_input_tokens"], 123);
-        assert_eq!(usage["total_tokens"], 123);
     }
 
     #[test]

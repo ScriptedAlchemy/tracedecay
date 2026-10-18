@@ -5,12 +5,13 @@
 
 use crate::support::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval;
 #[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval_for_retained_settlement;
 use tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock;
 #[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::scheduler::{SessionActivity, schedule_decision};
+#[cfg(feature = "test-transport")]
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::SessionId;
 
 struct CountingAutomationSessionRetrieval {
@@ -45,6 +46,56 @@ impl AutomationSessionRetrieval for CountingAutomationSessionRetrieval {
     }
 }
 
+struct CombinedBudgetRefusalRetrieval {
+    inner: FixtureAutomationSessionRetrieval,
+    refusal_call: usize,
+    stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
+    calls: AtomicUsize,
+}
+
+impl CombinedBudgetRefusalRetrieval {
+    fn new(
+        cg: &TraceDecay,
+        refusal_call: usize,
+        stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
+    ) -> Self {
+        Self {
+            inner: FixtureAutomationSessionRetrieval::new(cg),
+            refusal_call,
+            stage,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AutomationSessionRetrieval for CombinedBudgetRefusalRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        self.inner.anchor_session_id()
+    }
+
+    fn retrieve(
+        &self,
+        query: tracedecay_session_memory::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'_> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == self.refusal_call {
+            let stage = self.stage;
+            return Box::pin(async move {
+                AutomationTemporalRetrieval::StructuralRefusal(
+                    tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                        stage,
+                        accounting: None,
+                    },
+                )
+            });
+        }
+        self.inner.retrieve(query)
+    }
+}
+
 fn combined_options(profile_root: &Path) -> CombinedReviewAutomationOptions {
     CombinedReviewAutomationOptions {
         run_id: Some("combined-run-1".to_string()),
@@ -61,6 +112,8 @@ fn combined_options(profile_root: &Path) -> CombinedReviewAutomationOptions {
 
 fn combined_output_fixture() -> Value {
     json!({
+        "outcome": "skills_proposed",
+        "decision": null,
         "facts": [
             {
                 "content": "TraceDecay automation should manage durable session reflection facts directly",
@@ -77,6 +130,8 @@ fn combined_output_fixture() -> Value {
                 "id": "automation-run-review",
                 "title": "Automation run review",
                 "summary": "Review self-improvement automation run ledgers and apply policies.",
+                "routing_description": "Review self-improvement automation run ledgers and apply policies.",
+                "routing_validation": skill_routing_validation("automation-run-review"),
                 "category": "workflow",
                 "body_markdown": "Use when reviewing TraceDecay self-improvement runs.",
                 "reason": "Session evidence repeats automation workflow outcome review."
@@ -88,19 +143,17 @@ fn combined_output_fixture() -> Value {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -130,7 +183,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(reflector.status, AutomationRunStatus::Succeeded);
     assert_eq!(
         reflector.prompt_version.as_deref(),
-        Some("combined_review:v1")
+        Some("combined_review:v3")
     );
     assert_eq!(reflector.accepted_count, 0);
 
@@ -140,7 +193,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(skill.task_key.as_deref(), Some("skill_writer"));
     assert_eq!(skill.trigger, AutomationTrigger::Scheduler);
     assert_eq!(skill.status, AutomationRunStatus::Succeeded);
-    assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v1"));
+    assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v3"));
     assert_eq!(skill.accepted_count, 0);
 
     // Both halves share the combined request's input hash and correlate
@@ -156,7 +209,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     // Empty combined effects leave no automatic fact receipts behind.
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -182,9 +235,10 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(records.len(), 2);
     for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
         let now = current_timestamp();
-        let decision = schedule_decision(&config, task, &records, SessionActivity::none(), now);
+        let decision =
+            schedule_decision(&config, None, task, &records, SessionActivity::none(), now);
         assert_eq!(
-            decision.skip_reason(),
+            decision.skip_reason().map(AutomationSkipReasonV1::as_str),
             Some("scheduler_interval_not_elapsed"),
             "{task:?} must count the combined run as its last scheduler run"
         );
@@ -193,20 +247,62 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks() {
-    let _env_lock = ENV_LOCK.lock().await;
+async fn combined_review_refreshes_skill_and_fact_outcomes() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let before = tracedecay_automation_runtime::automation::outcomes::load_outcomes_snapshot(
+        &dashboard_root,
+    )
+    .await
+    .unwrap();
+    assert_eq!(before.skills_refreshed_at, None);
+    assert_eq!(before.facts_refreshed_at, None);
+
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
+        &scheduler_config(Some(3600), None),
+        &test_configuration_revision(),
+        &CombinedJsonBackend::new(combined_no_skill_needed_output()),
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(dispatch, CombinedReviewDispatch::Ran(_)));
+
+    let after = tracedecay_automation_runtime::automation::outcomes::load_outcomes_snapshot(
+        &dashboard_root,
+    )
+    .await
+    .unwrap();
+    assert!(
+        after.facts_refreshed_at.is_some(),
+        "combined review must refresh the fact outcomes it publishes"
+    );
+    assert!(
+        after.skills_refreshed_at.is_some(),
+        "combined review must refresh the skill outcomes it publishes"
+    );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
     let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
 
     let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -255,19 +351,17 @@ async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks(
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn retained_combined_review_defers_recorded_failures_until_settlement() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(json!({"facts": []}));
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
 
     let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -295,17 +389,15 @@ async fn retained_combined_review_defers_recorded_failures_until_settlement() {
 
 #[tokio::test]
 async fn combined_review_commits_atomic_terminal_effects() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let _global_db = isolate_global_db(&cg);
     seed_project_session_activity(&cg).await;
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review(
         &cg,
         &config,
         &run_control,
@@ -329,7 +421,7 @@ async fn combined_review_commits_atomic_terminal_effects() {
     );
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -361,7 +453,6 @@ async fn combined_review_commits_atomic_terminal_effects() {
 
 #[tokio::test]
 async fn combined_review_not_dispatched_when_only_one_task_is_due() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -380,8 +471,8 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -405,53 +496,7 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
 }
 
 #[tokio::test]
-async fn combined_review_not_dispatched_when_skill_writer_is_not_due() {
-    let _env_lock = ENV_LOCK.lock().await;
-    let temp = tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let cg = init_project(temp.path()).await;
-    let now = current_timestamp();
-    // Activity must predate the skill-writer terminal so the interval gate
-    // still applies; newer activity would re-admit the writer as fresh.
-    seed_project_session_activity_at(&cg, now - 120).await;
-    let config = scheduler_config(Some(3600), None);
-    append_run_record(
-        &cg.store_layout().dashboard_root,
-        &scheduler_record_for(
-            "previous_skill_writer_run",
-            AgentTaskKind::SkillWriter,
-            AutomationRunStatus::Succeeded,
-            now - 60,
-        ),
-    )
-    .await
-    .unwrap();
-    let backend = CombinedJsonBackend::new(combined_output_fixture());
-    let retrieval = CountingAutomationSessionRetrieval::new(&cg);
-
-    let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
-        &config,
-        &test_configuration_revision(),
-        &backend,
-        &retrieval,
-        combined_options(&profile_root),
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(retrieval.calls(), 0, "not-due work must not read evidence");
-    assert_eq!(backend.calls(), 0);
-    let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
-        panic!("expected combined dispatch to fall back, got {dispatch:?}");
-    };
-    assert_eq!(reason, "skill_writer_not_due");
-}
-
-#[tokio::test]
 async fn combined_review_task_configuration_skips_before_retrieval_or_backend() {
-    let _env_lock = ENV_LOCK.lock().await;
     for (disabled_task, expected_reason) in [
         (AgentTaskKind::SessionReflector, "session_reflector_not_due"),
         (AgentTaskKind::SkillWriter, "skill_writer_not_due"),
@@ -469,8 +514,8 @@ async fn combined_review_task_configuration_skips_before_retrieval_or_backend() 
         let backend = CombinedJsonBackend::new(combined_output_fixture());
         let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-        let dispatch = run_combined_review_with_backend_and_retrieval(
-            &cg,
+        let dispatch = settle_combined_review(
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -500,7 +545,6 @@ async fn combined_review_task_configuration_skips_before_retrieval_or_backend() 
 
 #[tokio::test]
 async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
-    let _env_lock = ENV_LOCK.lock().await;
     for (locked_task, expected_reason) in [
         (AgentTaskKind::SessionReflector, "session_reflector_not_due"),
         (AgentTaskKind::SkillWriter, "skill_writer_not_due"),
@@ -522,8 +566,8 @@ async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
         let backend = CombinedJsonBackend::new(combined_output_fixture());
         let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-        let dispatch = run_combined_review_with_backend_and_retrieval(
-            &cg,
+        let dispatch = settle_combined_review(
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -554,7 +598,6 @@ async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
 
 #[tokio::test]
 async fn combined_review_respects_escape_hatch_flag() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -563,8 +606,8 @@ async fn combined_review_respects_escape_hatch_flag() {
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -588,42 +631,6 @@ async fn combined_review_respects_escape_hatch_flag() {
 }
 
 #[tokio::test]
-async fn combined_review_falls_back_when_evidence_is_unavailable() {
-    let _env_lock = ENV_LOCK.lock().await;
-    let temp = tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let cg = init_project(temp.path()).await;
-    let _global_db = isolate_global_db(&cg);
-    seed_project_session_activity(&cg).await;
-    // Activity authority is present so the due-gate can pass; the injected
-    // empty retrieval still makes the reflector evidence bundle empty, so
-    // the combined path defers to the per-task runs (which record their own
-    // skips).
-    let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(combined_output_fixture());
-    let retrieval = EmptyAutomationSessionRetrieval::new();
-
-    let dispatch =
-        tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-            &cg,
-            &config,
-            &test_configuration_revision(),
-            &backend,
-            &retrieval,
-            combined_options(&profile_root),
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
-        panic!("expected combined dispatch to fall back, got {dispatch:?}");
-    };
-    assert_eq!(reason, "session_reflector_evidence_unavailable");
-}
-
-#[tokio::test]
 async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     for reason in [
         "session_evidence_denied",
@@ -638,28 +645,28 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
         let cg = init_project(temp.path()).await;
         seed_project_session_activity(&cg).await;
         let config = scheduler_config(Some(3600), None);
-        let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+        let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
         let retrieval = RejectedAutomationSessionRetrieval::new(reason);
 
-        let dispatch =
-            tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-                &cg,
-                &config,
-                &test_configuration_revision(),
-                &backend,
-                &retrieval,
-                combined_options(&profile_root),
-                &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-            )
-            .await
-            .unwrap();
+        let dispatch = settle_combined_review(
+            &automation_project_context(&cg),
+            &config,
+            &test_configuration_revision(),
+            &backend,
+            &retrieval,
+            combined_options(&profile_root),
+            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        )
+        .await
+        .unwrap();
 
-        assert!(matches!(
-            dispatch,
-            CombinedReviewDispatch::NotCombined {
-                reason: "session_reflector_evidence_unavailable"
-            }
-        ));
+        let CombinedReviewDispatch::NotCombined {
+            reason: actual_reason,
+        } = dispatch
+        else {
+            panic!("terminal evidence must fall back, got {dispatch:?}");
+        };
+        assert_eq!(actual_reason, reason);
         assert_eq!(backend.calls(), 0);
         assert!(
             load_run_records(&cg.store_layout().dashboard_root, 10)
@@ -675,26 +682,109 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     let cg = init_project(temp.path()).await;
     seed_project_session_activity(&cg).await;
     let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let retrieval = EmptyAutomationSessionRetrieval::new();
-    let dispatch =
-        tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-            &cg,
-            &config,
-            &test_configuration_revision(),
-            &backend,
-            &retrieval,
-            combined_options(&profile_root),
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-        )
-        .await
-        .unwrap();
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
+    let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
+        panic!("empty evidence must fall back, got {dispatch:?}");
+    };
+    assert_eq!(reason, "no_session_evidence");
+    assert_eq!(backend.calls(), 0);
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!profile_root.exists());
+}
+
+#[tokio::test]
+async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_project_session_activity(&cg).await;
+    let config = scheduler_config(Some(3600), None);
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
+    let retrieval = CombinedBudgetRefusalRetrieval::new(
+        &cg,
+        0,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+    );
+
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
+
     assert!(matches!(
         dispatch,
         CombinedReviewDispatch::NotCombined {
-            reason: "session_reflector_evidence_unavailable"
+            reason: "session_evidence_budget_exhausted",
         }
     ));
+    assert_eq!(retrieval.calls(), 1);
+    assert_eq!(backend.calls(), 0);
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!profile_root.exists());
+}
+
+#[tokio::test]
+async fn combined_review_preserves_skill_budget_stage_for_fallback() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_project_session_activity(&cg).await;
+    let config = scheduler_config(Some(3600), None);
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
+    let retrieval = CombinedBudgetRefusalRetrieval::new(
+        &cg,
+        1,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+    );
+
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        dispatch,
+        CombinedReviewDispatch::NotCombined {
+            reason: "session_evidence_budget_exhausted",
+        }
+    ));
+    assert_eq!(retrieval.calls(), 2);
     assert_eq!(backend.calls(), 0);
     assert!(
         load_run_records(&cg.store_layout().dashboard_root, 10)
@@ -708,16 +798,14 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missing() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(json!({ "facts": [] }));
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -735,7 +823,7 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
     let error = failure.error;
     let err = error.to_string();
     assert!(
-        err.contains("must include facts and skills arrays"),
+        err.contains("combined review output must include a skills array"),
         "unexpected error: {err}"
     );
     let records = load_run_records(&cg.store_layout().dashboard_root, 50)
@@ -745,13 +833,10 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
     for record in &records {
         assert_eq!(record.status, AutomationRunStatus::Failed);
         assert_eq!(record.trigger, AutomationTrigger::Scheduler);
-        assert_eq!(record.prompt_version.as_deref(), Some("combined_review:v1"));
-        assert!(
-            record
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("facts and skills arrays"))
-        );
+        assert_eq!(record.prompt_version.as_deref(), Some("combined_review:v3"));
+        assert!(record.error.as_deref().is_some_and(|error| {
+            error.contains("combined review output must include a skills array")
+        }));
     }
     let mut tasks: Vec<AgentTaskKind> = records.iter().map(|record| record.task).collect();
     tasks.sort_by_key(|task| format!("{task:?}"));
@@ -771,20 +856,20 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn combined_skill_failure_preserves_the_completed_memory_authority() {
-    let _env_lock = ENV_LOCK.lock().await;
+async fn combined_skill_validation_exhaustion_preserves_atomic_no_write() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let backend = CombinedJsonBackend::new(json!({
+        "outcome": "skills_proposed",
+        "decision": null,
         "facts": combined_output_fixture()["facts"].clone(),
         "skills": [{"id": "missing-required-skill-fields"}]
     }));
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review(
         &cg,
         &scheduler_config(Some(3600), None),
         &run_control,
@@ -794,28 +879,19 @@ async fn combined_skill_failure_preserves_the_completed_memory_authority() {
     .await
     .unwrap();
 
-    let CombinedReviewDispatch::MemoryCompletedSkillFailure(failure) = dispatch else {
-        panic!("skill failure must not become a memory partial effect: {dispatch:?}");
+    let CombinedReviewDispatch::RecordedFailure(failure) = dispatch else {
+        panic!("invalid skill output must fail both combined effects: {dispatch:?}");
     };
+    assert_eq!(backend.calls(), 2);
     assert!(
-        failure.skill_writer_record_error.is_none(),
-        "a published failed skill terminal must not report a second publication failure"
-    );
-    let session_reflector = failure.session_reflector;
-    let skill_writer_record = failure.skill_writer_record;
-    assert_eq!(
-        session_reflector.ledger_record.status,
-        AutomationRunStatus::Succeeded
-    );
-    assert_eq!(session_reflector.run_id, "combined-run-1");
-    assert!(session_reflector.committed_receipt.is_some());
-    assert_eq!(
-        skill_writer_record.expect("skill failure ledger").status,
-        AutomationRunStatus::Failed
+        failure
+            .error
+            .to_string()
+            .contains("repair budget exhausted")
     );
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -826,26 +902,26 @@ async fn combined_skill_failure_preserves_the_completed_memory_authority() {
     )
     .await
     .unwrap();
-    assert_eq!(receipts.len(), 1);
-    assert_eq!(receipts[0].run_id, "combined-run-1");
+    assert!(
+        receipts.is_empty(),
+        "combined validation failure must commit neither half"
+    );
 }
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fails() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let config = AutomationConfig {
         timeout_secs: 1,
         ..scheduler_config(Some(3600), None)
     };
     let backend = FailingBackend::new(AgentTaskKind::CombinedReview);
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -856,7 +932,7 @@ async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fail
     .unwrap();
 
     // The backend failure is transient, but this test pins the noop-fallback
-    // record, not retry semantics (covered by backend.rs retry tests) —
+    // record, not retry semantics (covered by backend.rs retry tests),
     // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     let CombinedReviewDispatch::RecordedFailure(failure) = dispatch else {
@@ -896,17 +972,15 @@ async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fail
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_interruption_reaches_validation_before_any_automatic_write() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let interrupted = Arc::new(AtomicBool::new(true));
     let run_control = test_automation_run_control(Arc::clone(&interrupted));
 
-    let error = run_combined_review_with_backend(
+    let error = run_combined_review(
         &cg,
         &scheduler_config(Some(3600), None),
         &run_control,
@@ -920,7 +994,7 @@ async fn combined_review_interruption_reaches_validation_before_any_automatic_wr
     interrupted.store(false, Ordering::Release);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     assert!(
@@ -934,5 +1008,108 @@ async fn combined_review_interruption_reaches_validation_before_any_automatic_wr
         .unwrap()
         .is_empty(),
         "pre-interrupted validation must not admit an automatic fact write"
+    );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn combined_review_falls_back_when_skill_deployment_is_pending() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    let host_home = fixture_host_home(cg.project_root());
+    let profile_root = host_home.join(".tracedecay");
+    seed_session_evidence(&cg).await;
+    let skill_backend = SkillJsonBackend::new(json!({
+        "outcome": "skills_proposed",
+        "decision": null,
+        "skills": [{
+            "id": "combined-review",
+            "title": "Combined review",
+            "summary": "Review combined automation runs before enabling automation.",
+            "routing_description": "Review combined automation runs before enabling automation.",
+            "routing_validation": skill_routing_validation("combined-review"),
+            "category": "workflow",
+            "body_markdown": "Check run ledgers and deployment receipts before rerunning automation.",
+            "reason": "Session evidence repeats combined review."
+        }]
+    }));
+    let config = scheduler_config(Some(3600), Some(0));
+    let scheduled_skill_options = || SkillWriterAutomationOptions {
+        trigger: AutomationTrigger::Scheduler,
+        provider: "cursor".to_string(),
+        query: "automation".to_string(),
+        evidence_limit: 5,
+        profile_root: Some(profile_root.clone()),
+        ..SkillWriterAutomationOptions::default()
+    };
+
+    let homeless_context = cg.automation_project_context(None).unwrap();
+    let failed = match settle_skill_writer(
+        &homeless_context,
+        &config,
+        &test_configuration_revision(),
+        &skill_backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        scheduled_skill_options(),
+    )
+    .await
+    {
+        Err(AutomationRunError::PartialEffect {
+            ledger_record: Some(record),
+            ..
+        }) => *record,
+        other => panic!("expected a recorded partial effect, got {other:?}"),
+    };
+    assert_eq!(failed.error_retryable, Some(true));
+    assert_eq!(
+        failed.applied_ops.as_ref().unwrap()["deployment"]["retry_required"],
+        json!(true)
+    );
+
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
+
+    // The owed skill deployment wins over combining: the dispatcher falls back
+    // to per-task runs so the standalone writer reconciles instead of the
+    // combined run replaying the already-committed mutation.
+    assert_eq!(
+        backend.calls(),
+        0,
+        "a pending skill deployment must defer the combined backend call"
+    );
+    let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
+        panic!("expected a deferred combined dispatch, got {dispatch:?}");
+    };
+    assert_eq!(reason, "skill_deployment_pending");
+
+    std::fs::create_dir_all(host_home.join(".claude")).unwrap();
+    let deployed_skill = host_home.join(".claude/skills/combined-review/SKILL.md");
+    let retry = settle_skill_writer(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &skill_backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        scheduled_skill_options(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(skill_backend.calls(), 1);
+    assert_eq!(retry.report["status"], json!("deployment_reconciled"));
+    assert!(
+        deployed_skill.is_file(),
+        "the standalone fallback must deploy the committed skill to {}",
+        deployed_skill.display()
     );
 }

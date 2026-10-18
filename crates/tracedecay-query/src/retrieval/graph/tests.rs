@@ -6,44 +6,42 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use tracedecay_application::CancellationSignal;
-use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_code_index::graph_projection::{
     CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionStore,
     HermeticCodeGraphProjectionStore,
 };
+use tracedecay_contracts::CancellationSignal;
+use tracedecay_contracts::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate, ContentDigest, EdgeAuthorityV1,
     EvidenceRole, FixedPointScore, FreshnessCompatibilityV1, LanguageDescriptorRevision,
     PolicyRevisionId, PrincipalId, RelationEdgeKindV1, RetrievalBudget, RetrievalFailure,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-    SingleRootScopeV1, SourceFreshness, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorWatermark,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrievalSourceRoleV1, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SingleRootScopeV1, SourceFreshness, SourceSpan, SymbolOccurrenceId,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 
 use super::{
-    GraphExecutionControl, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
-    GraphPathSegmentV1,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1, RetrievalExecutionControl,
 };
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
 };
 
 mod control;
-mod measurement;
 mod projection;
 mod scale;
 mod storage;
 
 #[derive(Debug)]
-struct TestGraphExecutionControl {
+struct TestRetrievalExecutionControl {
     cancelled: bool,
     elapsed_micros: u64,
 }
 
-impl GraphExecutionControl for TestGraphExecutionControl {
+impl RetrievalExecutionControl for TestRetrievalExecutionControl {
     fn is_cancelled(&self) -> bool {
         self.cancelled
     }
@@ -53,20 +51,14 @@ impl GraphExecutionControl for TestGraphExecutionControl {
     }
 }
 
-fn graph_control() -> Arc<dyn GraphExecutionControl> {
-    Arc::new(TestGraphExecutionControl {
+fn graph_control() -> Arc<dyn RetrievalExecutionControl> {
+    Arc::new(TestRetrievalExecutionControl {
         cancelled: false,
         elapsed_micros: 0,
     })
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn digest_id<T>(byte: char) -> T
 where
@@ -170,6 +162,7 @@ fn graph_pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: RetrievalSourceRoleV1::default(),
         retriever: RetrieverKind::Graph,
         retriever_revision: id("retriever.graph.v1"),
         score_domain: id(crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1),
@@ -359,7 +352,7 @@ impl GraphEvidenceReadPort for FakeGraphPort {
     fn read_graph_evidence(
         &self,
         _request: &GraphLaneRequest,
-        _control: Arc<dyn super::GraphExecutionControl>,
+        _control: Arc<dyn super::RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         match &self.reply {
             PortReply::Outcome(outcome) => Ok(outcome.clone()),
@@ -952,4 +945,80 @@ fn graph_lane_reports_missing_authority_without_substitution() {
         outcome,
         RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable { .. })
     ));
+}
+
+#[test]
+fn graph_evidence_ties_use_source_chunks_across_generations() {
+    let mut generations = Vec::new();
+    for (generation, alpha, zeta) in [
+        ("generation.a", "symbol.zzz", "symbol.aaa"),
+        ("generation.b", "symbol.aaa", "symbol.zzz"),
+    ] {
+        let mut request = graph_request(8, 2);
+        request.generation = id(generation);
+        request.seed_anchors[0].occurrence.generation = request.generation.clone();
+        let edges: Vec<_> = [alpha, zeta]
+            .into_iter()
+            .map(|target| CanonicalRelationEdgeV1 {
+                from_occurrence: id("symbol.seed"),
+                to_occurrence: id(target),
+                kind: RelationEdgeKindV1::Calls,
+                authority: EdgeAuthorityV1::SyntaxExact,
+                evidence_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                },
+            })
+            .collect();
+        let chunks = vec![
+            projection_chunk(&request, "chunk.seed", "symbol.seed"),
+            projection_chunk(&request, "chunk.alpha", alpha),
+            projection_chunk(&request, "chunk.zeta", zeta),
+        ];
+        let cancellation = CancellationSignal::active("cancellation.graph-stable-ties").unwrap();
+        let publisher = HermeticCodeGraphProjectionStore::memory(&cancellation).unwrap();
+        publisher
+            .publish_code_graph(&request.generation, &edges, &chunks, &cancellation)
+            .unwrap();
+        let store = publisher.verified_store(&request.generation).unwrap();
+        let batch = read_projection(&store, &request, &cancellation);
+        let mut capped_request = request.clone();
+        capped_request.budget.max_candidates_per_lane = 1;
+        let capped = read_projection(&store, &capped_request, &cancellation);
+        assert_eq!(capped.candidates.len(), 1);
+        assert_eq!(capped.coverage.capped, 1);
+        assert_eq!(
+            capped.candidates[0].retriever_evidence_anchor,
+            id("code-graph:chunk:chunk.alpha")
+        );
+        assert_eq!(batch.candidates.len(), 2);
+        let mut pairs: Vec<_> = batch
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.clone(),
+                    batch.evidence_by_occurrence[&candidate.source_occurrence_id].clone(),
+                )
+            })
+            .collect();
+        pairs.sort_by(super::compare_graph_candidates);
+        assert_eq!(
+            pairs[0].0.source_occurrence_id.as_str(),
+            format!("code-graph:{alpha}")
+        );
+        let names: Vec<_> = pairs
+            .iter()
+            .map(|pair| pair.0.retriever_evidence_anchor.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                id("code-graph:chunk:chunk.alpha"),
+                id("code-graph:chunk:chunk.zeta")
+            ]
+        );
+        generations.push(names);
+    }
+    assert_eq!(generations[0], generations[1]);
 }

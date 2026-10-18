@@ -1,50 +1,38 @@
 //! Bounded, resumable census and collection of unregistered project leaves.
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-use std::collections::HashMap;
-use std::collections::HashSet;
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-use std::ffi::{CStr, OsString};
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::Path;
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
-
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-use std::os::fd::AsRawFd;
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-use std::os::unix::ffi::OsStringExt;
 
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
-use super::fence::capture_store_content_fence_controlled;
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-use super::fence::open_store_directory_nofollow;
-use super::quarantine::{
-    QuarantineRecoveryOutcome, quarantined_project_id, recover_named_store_quarantine,
+use super::fence::{
+    capture_store_content_fence_controlled, capture_store_directory_fence,
+    open_store_directory_nofollow,
 };
 use super::{
-    CollectionCompletionV1, CollectionControl, CollectionFailure, CollectionFailureKind,
-    CollectionOutcome, CollectionRecoveryAction, CollectionRecoveryReceipt, StoreContentFence,
-    StoreDirectoryFence, UnregisteredCollectionPlan, UnregisteredStoreFinding,
-    capture_store_directory_fence, dir_size_bytes_controlled,
-    execute_unregistered_collection_controlled, newest_mtime_secs_controlled,
-    plan_unregistered_collection,
+    CollectionCompletionV1, CollectionControl, CollectionFailureKind, CollectionOutcome,
+    StoreContentFence, StoreDirectoryFence, UnregisteredCollectionPlan, UnregisteredStoreFinding,
+    dir_size_bytes_controlled, execute_unregistered_collection_controlled,
+    manifest_names_abandoned_root, newest_mtime_secs_controlled, plan_unregistered_collection,
 };
 
 pub const DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT: usize = 8;
 const MAX_UNREGISTERED_STORE_PAGE_LIMIT: usize = 64;
 const UNREGISTERED_STORE_DIRECTORY_ENTRY_MULTIPLIER: usize = 8;
 
-pub(super) enum ProjectDirectoryWorkV1 {
-    Project(String),
-    Quarantine {
-        project_id: String,
-        quarantine_name: String,
-    },
+pub(in crate::retention) struct ProjectDirectoryPageV1 {
+    /// Valid `project_id` leaf names under `projects/`.
+    pub entries: Vec<String>,
+    pub next_cursor: Option<String>,
+    /// Raw directory or portable-inventory entries consumed to produce this
+    /// slice. Summing pages exposes nonlinear rescans without timing heuristics.
+    pub entries_scanned: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -94,9 +82,10 @@ pub struct UnregisteredStoreSweepReport {
 /// honoring cancellation/deadline before each bounded filesystem/registry
 /// action. A cancellation never reports an empty successful page or mutates a
 /// partially inspected plan.
-#[hotpath::measure(
-    label = "maintenance.orphan_stores.sweep_unregistered_page",
-    future = true
+#[tracing::instrument(
+    name = "maintenance.orphan_stores.sweep_unregistered_page",
+    level = "trace",
+    skip_all
 )]
 pub async fn sweep_unregistered_store_page(
     db: &RegisteredGlobalDb,
@@ -107,73 +96,64 @@ pub async fn sweep_unregistered_store_page(
     if let Some(completion) =
         UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
     {
-        return Ok(observed_page_report(interrupted_report(
-            completion,
-            CollectionOutcome::default(),
-        )));
+        return Ok(interrupted_report(completion, CollectionOutcome::default()));
     }
-    let mut recovery_outcome = CollectionOutcome::default();
-    let census = census_unregistered_project_dirs_page(
-        db,
-        profile_root,
-        request.cursor.as_deref(),
-        limit,
-        request.now,
-        request.apply,
-        request.cancellation,
-        request.deadline,
-        &mut recovery_outcome,
-    )
-    .await?;
+    let census_page = tracedecay_runtime_core::erase_send!(
+        census_unregistered_project_dirs_page(
+            db,
+            profile_root,
+            request.cursor.as_deref(),
+            limit,
+            request.now,
+            request.cancellation,
+            request.deadline,
+        ),
+        tracedecay_domain::errors::Result<Option<(Vec<UnregisteredStoreFinding>, Option<String>)>>
+    );
+    let census = census_page.await?;
     let Some((findings, next_cursor)) = census else {
-        return Ok(observed_page_report(interrupted_report(
+        return Ok(interrupted_report(
             UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
                 .unwrap_or(UnregisteredSweepCompletionV1::DeadlineExceeded),
-            recovery_outcome,
-        )));
+            CollectionOutcome::default(),
+        ));
     };
     let plan = plan_unregistered_collection(findings, request.retention_secs);
     if !request.apply {
-        return Ok(observed_page_report(UnregisteredStoreSweepReport {
+        return Ok(UnregisteredStoreSweepReport {
             plan,
             applied: false,
-            outcome: recovery_outcome,
+            outcome: CollectionOutcome::default(),
             next_cursor,
             completion: UnregisteredSweepCompletionV1::Complete,
-        }));
+        });
     }
     if let Some(completion) =
         UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
     {
-        return Ok(observed_page_report(UnregisteredStoreSweepReport {
+        return Ok(UnregisteredStoreSweepReport {
             plan: UnregisteredCollectionPlan::default(),
             applied: false,
-            outcome: recovery_outcome,
+            outcome: CollectionOutcome::default(),
             next_cursor: request.cursor,
             completion,
-        }));
+        });
     }
-    let mut outcome = execute_unregistered_collection_controlled(
+    let collected: Pin<
+        Box<dyn Future<Output = tracedecay_domain::errors::Result<CollectionOutcome>> + Send + '_>,
+    > = Box::pin(execute_unregistered_collection_controlled(
         db,
         &plan,
         profile_root,
         CollectionControl::new(request.cancellation, request.deadline),
-    )
-    .await?;
-    outcome.reclaimed_bytes = outcome
-        .reclaimed_bytes
-        .saturating_add(recovery_outcome.reclaimed_bytes);
-    outcome.collected.extend(recovery_outcome.collected);
-    outcome.errors.extend(recovery_outcome.errors);
-    outcome
-        .recovery_receipts
-        .extend(recovery_outcome.recovery_receipts);
+    ));
+    let outcome = collected.await?;
     let completion = match outcome.completion {
         CollectionCompletionV1::Complete => UnregisteredSweepCompletionV1::Complete,
         CollectionCompletionV1::Cancelled => UnregisteredSweepCompletionV1::Cancelled,
         CollectionCompletionV1::DeadlineExceeded => UnregisteredSweepCompletionV1::DeadlineExceeded,
     };
-    Ok(observed_page_report(UnregisteredStoreSweepReport {
+    Ok(UnregisteredStoreSweepReport {
         plan,
         applied: completion == UnregisteredSweepCompletionV1::Complete,
         outcome,
@@ -181,7 +161,7 @@ pub async fn sweep_unregistered_store_page(
             .then_some(next_cursor)
             .flatten(),
         completion,
-    }))
+    })
 }
 
 fn interrupted_report(
@@ -195,33 +175,6 @@ fn interrupted_report(
     }
 }
 
-/// Page-terminal census: cancelled and deadline-bounded pages count next to
-/// complete ones so a starved sweep is visible, and collected/failed items
-/// are attributed even when the page ends early.
-fn observed_page_report(report: UnregisteredStoreSweepReport) -> UnregisteredStoreSweepReport {
-    match report.completion {
-        UnregisteredSweepCompletionV1::Complete => {
-            hotpath::gauge!("maintenance.orphan_stores.unregistered.page_complete_total")
-                .inc(1_u64);
-        }
-        UnregisteredSweepCompletionV1::Cancelled => {
-            hotpath::gauge!("maintenance.orphan_stores.unregistered.page_cancelled_total")
-                .inc(1_u64);
-        }
-        UnregisteredSweepCompletionV1::DeadlineExceeded => {
-            hotpath::gauge!("maintenance.orphan_stores.unregistered.page_deadline_total")
-                .inc(1_u64);
-        }
-    }
-    hotpath::gauge!("maintenance.orphan_stores.unregistered.collected_total")
-        .inc(report.outcome.collected.len());
-    hotpath::gauge!("maintenance.orphan_stores.unregistered.failed_total")
-        .inc(report.outcome.errors.len());
-    hotpath::gauge!("maintenance.orphan_stores.unregistered.reclaimed_bytes_total")
-        .inc(report.outcome.reclaimed_bytes);
-    report
-}
-
 /// Builds only one page of costly child inventories. Its directory cursor is
 /// advanced by a bounded number of raw entries, so a profile with many
 /// unregistered leaves cannot turn one writer admission into a full scan.
@@ -231,390 +184,80 @@ async fn census_unregistered_project_dirs_page(
     cursor: Option<&str>,
     limit: usize,
     now: i64,
-    recover_interrupted_quarantines: bool,
     cancellation: &CancellationToken,
     deadline: MonotonicDeadline,
-    recovery_outcome: &mut CollectionOutcome,
 ) -> tracedecay_domain::errors::Result<Option<(Vec<UnregisteredStoreFinding>, Option<String>)>> {
     let projects_dir = profile_root.join("projects");
-    let page = read_project_directory_page(profile_root, cursor, limit, cancellation, deadline)?;
-    let Some((work, next_cursor)) = page else {
+    let interrupted =
+        || UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some();
+    let page = read_project_directory_page(profile_root, cursor, limit, &interrupted)?;
+    let Some(page) = page else {
         return Ok(None);
     };
-    let mut recovered_project_ids = HashSet::new();
-    let mut findings = Vec::with_capacity(work.len());
-    for work in work {
+    let next_cursor = page.next_cursor;
+    let mut findings = Vec::with_capacity(page.entries.len());
+    for name in page.entries {
         if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
             return Ok(None);
         }
-        let ProjectDirectoryWorkV1::Quarantine {
-            project_id,
-            quarantine_name,
-        } = work
-        else {
-            let ProjectDirectoryWorkV1::Project(name) = work else {
-                continue;
-            };
-            let control = CollectionControl::new(cancellation, deadline);
-            let is_registered = match control.race(db.code_project_exists(&name)).await {
-                Ok(Ok(exists)) => exists,
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Ok(None),
-            };
-            if is_registered {
-                continue;
-            }
-            if recovered_project_ids.contains(&name) {
-                continue;
-            }
-            let data_root = projects_dir.join(&name);
-            let metadata = match std::fs::symlink_metadata(&data_root) {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                continue;
-            }
-            let expected_data_root_fence = capture_store_directory_fence(profile_root, &data_root)
-                .unwrap_or(StoreDirectoryFence::Unverifiable);
-            let expected_content_fence = match capture_store_content_fence_controlled(
-                profile_root,
-                &data_root,
-                CollectionControl::new(cancellation, deadline),
-            ) {
+        let control = CollectionControl::new(cancellation, deadline);
+        let is_registered = match control.race(db.code_project_exists(&name)).await {
+            Ok(Ok(exists)) => exists,
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Ok(None),
+        };
+        if is_registered {
+            continue;
+        }
+        let data_root = projects_dir.join(&name);
+        let metadata = match std::fs::symlink_metadata(&data_root) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let expected_data_root_fence = capture_store_directory_fence(profile_root, &data_root)
+            .unwrap_or(StoreDirectoryFence::Unverifiable);
+        let expected_content_fence =
+            match capture_store_content_fence_controlled(profile_root, &data_root, control) {
                 Ok(fence) => fence,
                 Err(CollectionFailureKind::Cancelled) => return Ok(None),
                 Err(_) => StoreContentFence::Unverifiable,
             };
-            if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
-                return Ok(None);
-            }
-            let last_write_secs = match newest_mtime_secs_controlled(&data_root, control) {
-                Ok(mtime) => mtime,
-                Err(CollectionFailureKind::Cancelled) => return Ok(None),
-                Err(_) => return Ok(None),
-            };
-            let size_bytes = match dir_size_bytes_controlled(&data_root, control) {
-                Ok(size) => size,
-                Err(CollectionFailureKind::Cancelled) => return Ok(None),
-                Err(_) => return Ok(None),
-            };
-            findings.push(UnregisteredStoreFinding {
-                project_dir_name: name,
-                data_root,
-                age_secs: now.saturating_sub(last_write_secs).max(0),
-                size_bytes,
-                expected_payload_mtime_secs: last_write_secs,
-                expected_data_root_fence,
-                expected_content_fence,
-            });
-            continue;
-        };
-        if recover_interrupted_quarantines {
-            let data_root = projects_dir.join(&project_id);
-            let record_recovery = match recover_named_store_quarantine(
-                profile_root,
-                &data_root,
-                std::ffi::OsStr::new(&quarantine_name),
-                &projects_dir,
-            ) {
-                Ok(Some(QuarantineRecoveryOutcome::Restored {
-                    restored_path,
-                    journal_pending,
-                })) => {
-                    recovered_project_ids.insert(project_id.clone());
-                    Some((
-                        projects_dir.join(&quarantine_name),
-                        restored_path,
-                        if journal_pending {
-                            CollectionRecoveryAction::RetainedForRecovery
-                        } else {
-                            CollectionRecoveryAction::Restored
-                        },
-                    ))
-                }
-                Ok(Some(QuarantineRecoveryOutcome::Retained { quarantine_path })) => {
-                    recovered_project_ids.insert(project_id.clone());
-                    Some((
-                        quarantine_path.clone(),
-                        quarantine_path,
-                        CollectionRecoveryAction::RetainedForRecovery,
-                    ))
-                }
-                Ok(None) => None,
-                Err(kind) => {
-                    recovery_outcome.errors.push(CollectionFailure {
-                        store_id: project_id.clone(),
-                        kind,
-                    });
-                    None
-                }
-            };
-            if let Some((quarantine_path, actual_path, action)) = record_recovery {
-                recovery_outcome
-                    .recovery_receipts
-                    .push(CollectionRecoveryReceipt {
-                        store_id: project_id.clone(),
-                        original_path: data_root.clone(),
-                        actual_path,
-                        quarantine_path,
-                        action,
-                    });
-                recovery_outcome.errors.push(CollectionFailure {
-                    store_id: project_id,
-                    kind: CollectionFailureKind::PayloadChanged,
-                });
-            }
+        if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
+            return Ok(None);
         }
+        let Ok(last_write_secs) = newest_mtime_secs_controlled(&data_root, control) else {
+            return Ok(None);
+        };
+        let Ok(size_bytes) = dir_size_bytes_controlled(&data_root, control) else {
+            return Ok(None);
+        };
+        let abandoned_root = manifest_names_abandoned_root(&data_root, profile_root);
+        findings.push(UnregisteredStoreFinding {
+            project_dir_name: name,
+            data_root,
+            age_secs: now.saturating_sub(last_write_secs).max(0),
+            size_bytes,
+            expected_payload_mtime_secs: last_write_secs,
+            expected_data_root_fence,
+            expected_content_fence,
+            abandoned_root,
+        });
     }
     Ok(Some((findings, next_cursor)))
 }
 
-/// Read exactly one bounded page of project-directory names through a
-/// capability opened beneath the profile root. The POSIX directory offset is
-/// opaque; it is accepted only when the directory identity still matches, so
-/// a replacement restarts safely instead of seeking a stale location.
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-pub(super) fn read_project_directory_page(
+/// Resume a durable inventory byte position, never an operating-system directory
+/// cookie. The maintained directory iterator stays open while building; after
+/// restart its bounded replay deduplicates against committed inventory records.
+pub(in crate::retention) fn read_project_directory_page(
     profile_root: &Path,
     cursor: Option<&str>,
     limit: usize,
-    cancellation: &CancellationToken,
-    deadline: MonotonicDeadline,
-) -> tracedecay_domain::errors::Result<Option<(Vec<ProjectDirectoryWorkV1>, Option<String>)>> {
-    let projects_dir = profile_root.join("projects");
-    let root = match open_store_directory_nofollow(profile_root, &projects_dir) {
-        Ok(capability) => capability.root,
-        Err(super::CollectionFailureKind::PayloadChanged) => {
-            return Ok(Some((Vec::new(), None)));
-        }
-        Err(kind) => {
-            return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("open unregistered project-directory page: {kind:?}"),
-            });
-        }
-    };
-    let identity = directory_cursor_identity(&root).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("inspect unregistered project-directory cursor: {error}"),
-        }
-    })?;
-    let offset = cursor
-        .and_then(parse_project_directory_cursor)
-        .filter(|saved| saved.identity == identity && saved.offset >= 0)
-        .map_or(0, |saved| saved.offset);
-    let stream = DirectoryStream::open(root.as_raw_fd()).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("open unregistered project-directory stream: {error}"),
-        }
-    })?;
-    if offset > 0 {
-        // SAFETY: the opaque offset originated from `telldir` for this exact
-        // directory identity. A filesystem that rejects/invalidates the
-        // offset produces an empty or repeated page, which simply restarts on
-        // the next full pass; it cannot authorize deletion by itself.
-        unsafe { libc::seekdir(stream.raw, offset as libc::c_long) };
-    }
-
-    let scan_limit = limit.saturating_mul(UNREGISTERED_STORE_DIRECTORY_ENTRY_MULTIPLIER);
-    let mut scanned = 0usize;
-    let mut work = Vec::with_capacity(limit);
-    let mut resume_offset = offset;
-    loop {
-        if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
-            return Ok(None);
-        }
-        let Some(name) = stream.next_name().map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("read unregistered project-directory stream: {error}"),
-            }
-        })?
-        else {
-            return Ok(Some((work, None)));
-        };
-        if name == "." || name == ".." {
-            continue;
-        }
-        let position = stream.position().map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("checkpoint unregistered project-directory stream: {error}"),
-            }
-        })?;
-        let entry = if let Some(project_id) = quarantined_project_id(&name) {
-            Some(ProjectDirectoryWorkV1::Quarantine {
-                project_id,
-                quarantine_name: name,
-            })
-        } else if tracedecay_runtime_core::storage::validate_project_id(&name).is_ok() {
-            Some(ProjectDirectoryWorkV1::Project(name))
-        } else {
-            None
-        };
-        if let Some(entry) = entry {
-            if work.len() == limit {
-                return Ok(Some((
-                    work,
-                    Some(format_project_directory_cursor(identity, resume_offset)),
-                )));
-            }
-            work.push(entry);
-        }
-        scanned = scanned.saturating_add(1);
-        resume_offset = position;
-        if scanned >= scan_limit {
-            return Ok(Some((
-                work,
-                Some(format_project_directory_cursor(identity, resume_offset)),
-            )));
-        }
-    }
-}
-
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProjectDirectoryCursorIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-struct ProjectDirectoryCursor {
-    identity: ProjectDirectoryCursorIdentity,
-    offset: i64,
-}
-
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-fn directory_cursor_identity(
-    root: &cap_std::fs::Dir,
-) -> std::io::Result<ProjectDirectoryCursorIdentity> {
-    use cap_std::fs::MetadataExt;
-
-    let metadata = root.metadata(".")?;
-    Ok(ProjectDirectoryCursorIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-fn parse_project_directory_cursor(value: &str) -> Option<ProjectDirectoryCursor> {
-    let mut fields = value.split(':');
-    (fields.next()? == "v1").then_some(())?;
-    let device = fields.next()?.parse().ok()?;
-    let inode = fields.next()?.parse().ok()?;
-    let offset = fields.next()?.parse().ok()?;
-    fields.next().is_none().then_some(ProjectDirectoryCursor {
-        identity: ProjectDirectoryCursorIdentity { device, inode },
-        offset,
-    })
-}
-
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-fn format_project_directory_cursor(
-    identity: ProjectDirectoryCursorIdentity,
-    offset: i64,
-) -> String {
-    format!("v1:{}:{}:{offset}", identity.device, identity.inode)
-}
-
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-struct DirectoryStream {
-    raw: *mut libc::DIR,
-}
-
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-impl DirectoryStream {
-    fn open(directory_fd: std::os::fd::RawFd) -> std::io::Result<Self> {
-        // `open_dir_nofollow` intentionally returns an O_PATH capability on
-        // Linux. `dup` would preserve O_PATH, which `fdopendir` rejects with
-        // EBADF. Open its exact dot entry instead: this remains rooted at the
-        // already verified no-follow capability while yielding a readable
-        // directory fd owned by the stream.
-        let readable = unsafe {
-            libc::openat(
-                directory_fd,
-                c".".as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            )
-        };
-        if readable < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: `readable` is an owned directory fd. On failure it remains
-        // owned here and is closed before returning.
-        let raw = unsafe { libc::fdopendir(readable) };
-        if raw.is_null() {
-            // SAFETY: `fdopendir` did not consume this fd on failure.
-            unsafe { libc::close(readable) };
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self { raw })
-    }
-
-    fn next_name(&self) -> std::io::Result<Option<String>> {
-        // SAFETY: `raw` remains valid for the lifetime of this stream. Reset
-        // errno first so a null return is distinguishable from end-of-stream.
-        reset_errno();
-        let entry = unsafe { libc::readdir(self.raw) };
-        if entry.is_null() {
-            let error = std::io::Error::last_os_error();
-            return if error.raw_os_error() == Some(0) {
-                Ok(None)
-            } else {
-                Err(error)
-            };
-        }
-        // SAFETY: POSIX `dirent::d_name` is NUL-terminated for a successful
-        // `readdir`; it stays live until the following `readdir` call.
-        let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
-        let name = OsString::from_vec(bytes.to_vec())
-            .into_string()
-            .map_err(|_| std::io::Error::other("non-UTF-8 project-directory entry"))?;
-        Ok(Some(name))
-    }
-
-    fn position(&self) -> std::io::Result<i64> {
-        // SAFETY: `raw` is a live `DIR*` owned by this stream.
-        let position = unsafe { libc::telldir(self.raw) };
-        if position < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(position)
-        }
-    }
-}
-
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-impl Drop for DirectoryStream {
-    fn drop(&mut self) {
-        // SAFETY: this struct owns the stream and calls `closedir` exactly
-        // once when it leaves scope.
-        let _ = unsafe { libc::closedir(self.raw) };
-    }
-}
-
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn reset_errno() {
-    // SAFETY: libc exposes this thread-local errno cell for the current
-    // thread; clearing it distinguishes end-of-directory from read failure.
-    unsafe { *libc::__errno_location() = 0 };
-}
-
-#[cfg(target_os = "macos")]
-fn reset_errno() {
-    // SAFETY: macOS exposes the current thread's errno storage through
-    // `__error`, with the same end-of-directory contract as Linux.
-    unsafe { *libc::__error() = 0 };
-}
-
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-pub(super) fn read_project_directory_page(
-    profile_root: &Path,
-    cursor: Option<&str>,
-    limit: usize,
-    cancellation: &CancellationToken,
-    deadline: MonotonicDeadline,
-) -> tracedecay_domain::errors::Result<Option<(Vec<ProjectDirectoryWorkV1>, Option<String>)>> {
+    interrupted: &dyn Fn() -> bool,
+) -> tracedecay_domain::errors::Result<Option<ProjectDirectoryPageV1>> {
     let projects_dir = profile_root.join("projects");
     let saved = cursor.and_then(parse_portable_directory_cursor);
     // Page application mutates `projects/` by removing its own prior entries.
@@ -629,7 +272,11 @@ pub(super) fn read_project_directory_page(
             let signature = match portable_directory_signature(&projects_dir) {
                 Ok(signature) => signature,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(Some((Vec::new(), None)));
+                    return Ok(Some(ProjectDirectoryPageV1 {
+                        entries: Vec::new(),
+                        next_cursor: None,
+                        entries_scanned: 0,
+                    }));
                 }
                 Err(error) => {
                     return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -644,7 +291,11 @@ pub(super) fn read_project_directory_page(
         let signature = match portable_directory_signature(&projects_dir) {
             Ok(signature) => signature,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Some((Vec::new(), None)));
+                return Ok(Some(ProjectDirectoryPageV1 {
+                    entries: Vec::new(),
+                    next_cursor: None,
+                    entries_scanned: 0,
+                }));
             }
             Err(error) => {
                 return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -655,13 +306,14 @@ pub(super) fn read_project_directory_page(
         let inventory = portable_inventory_path(profile_root, &signature);
         (signature, inventory, 0)
     };
+    let mut entries_scanned = 0usize;
     let build_complete = match advance_portable_inventory(
         &projects_dir,
         &inventory,
         &directory_signature,
         limit.saturating_mul(UNREGISTERED_STORE_DIRECTORY_ENTRY_MULTIPLIER),
-        cancellation,
-        deadline,
+        &mut entries_scanned,
+        interrupted,
     )? {
         Some(complete) => complete,
         None => return Ok(None),
@@ -671,16 +323,14 @@ pub(super) fn read_project_directory_page(
     // opaque cursor instead of opening a missing log and falsely reporting a
     // complete empty page; maintenance and Doctor will retry this exact slice.
     if !build_complete && !inventory.exists() {
-        return Ok(Some((
-            Vec::new(),
-            Some(format_portable_directory_cursor(directory_signature, start)),
-        )));
+        return Ok(Some(ProjectDirectoryPageV1 {
+            entries: Vec::new(),
+            next_cursor: Some(format_portable_directory_cursor(directory_signature, start)),
+            entries_scanned,
+        }));
     }
     let file = match std::fs::File::open(&inventory) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Some((Vec::new(), None)));
-        }
         Err(error) => {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("open unregistered project-directory page: {error}"),
@@ -688,7 +338,7 @@ pub(super) fn read_project_directory_page(
         }
     };
     let mut reader = std::io::BufReader::new(file);
-    use std::io::{BufRead, Seek, SeekFrom};
+    use std::io::{BufRead, Read, Seek, SeekFrom};
     if start == 0 {
         let mut header = String::new();
         reader.read_line(&mut header).map_err(|error| {
@@ -697,6 +347,35 @@ pub(super) fn read_project_directory_page(
             }
         })?;
     } else {
+        let length = reader
+            .get_ref()
+            .metadata()
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("inspect unregistered inventory cursor boundary: {error}"),
+            })?
+            .len();
+        let header_length = portable_inventory_header(&directory_signature).len() as u64;
+        if start < header_length || start > length {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "unregistered inventory cursor is outside committed records".to_owned(),
+            });
+        }
+        reader.seek(SeekFrom::Start(start - 1)).map_err(|error| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("seek unregistered inventory record boundary: {error}"),
+            }
+        })?;
+        let mut boundary = [0];
+        reader.read_exact(&mut boundary).map_err(|error| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("read unregistered inventory record boundary: {error}"),
+            }
+        })?;
+        if boundary != *b"\n" {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "unregistered inventory cursor splits a committed record".to_owned(),
+            });
+        }
         reader.seek(SeekFrom::Start(start)).map_err(|error| {
             tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("seek unregistered inventory cursor: {error}"),
@@ -707,7 +386,7 @@ pub(super) fn read_project_directory_page(
     let scan_limit = limit.saturating_mul(UNREGISTERED_STORE_DIRECTORY_ENTRY_MULTIPLIER);
     let mut scanned = 0usize;
     loop {
-        if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
+        if interrupted() {
             return Ok(None);
         }
         let mut name = String::new();
@@ -717,13 +396,24 @@ pub(super) fn read_project_directory_page(
             }
         })?;
         if bytes == 0 {
-            let next_cursor = (!build_complete).then(|| {
-                reader
-                    .stream_position()
-                    .ok()
-                    .map(|offset| format_portable_directory_cursor(directory_signature, offset))
-            });
-            return Ok(Some((work, next_cursor.flatten())));
+            let next_cursor = if build_complete {
+                None
+            } else {
+                let offset = reader.stream_position().map_err(|error| {
+                    tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!("checkpoint incomplete unregistered inventory: {error}"),
+                    }
+                })?;
+                Some(format_portable_directory_cursor(
+                    directory_signature,
+                    offset,
+                ))
+            };
+            return Ok(Some(ProjectDirectoryPageV1 {
+                entries: work,
+                next_cursor,
+                entries_scanned,
+            }));
         }
         let name = name.trim_end_matches(['\r', '\n']).to_owned();
         let next_offset = reader.stream_position().map_err(|error| {
@@ -732,34 +422,29 @@ pub(super) fn read_project_directory_page(
             }
         })?;
         scanned = scanned.saturating_add(1);
-        if let Some(project_id) = quarantined_project_id(&name) {
-            work.push(ProjectDirectoryWorkV1::Quarantine {
-                project_id,
-                quarantine_name: name,
-            });
-        } else if tracedecay_runtime_core::storage::validate_project_id(&name).is_ok() {
-            work.push(ProjectDirectoryWorkV1::Project(name));
+        entries_scanned = entries_scanned.saturating_add(1);
+        if portable_inventory_entry_is_valid(&name) {
+            work.push(name);
         }
         if work.len() == limit || scanned >= scan_limit {
-            return Ok(Some((
-                work,
-                Some(format_portable_directory_cursor(
+            return Ok(Some(ProjectDirectoryPageV1 {
+                entries: work,
+                next_cursor: Some(format_portable_directory_cursor(
                     directory_signature,
                     next_offset,
                 )),
-            )));
+                entries_scanned,
+            }));
         }
     }
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 #[derive(Clone, PartialEq, Eq)]
 struct PortableDirectoryCursor {
     signature: String,
     offset: u64,
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn portable_inventory_path(profile_root: &Path, signature: &str) -> std::path::PathBuf {
     profile_root
         .join("maintenance")
@@ -767,7 +452,6 @@ pub(super) fn portable_inventory_path(profile_root: &Path, signature: &str) -> s
         .join(format!("{signature}.log"))
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn portable_directory_signature(directory: &Path) -> std::io::Result<String> {
     let metadata = directory.metadata()?;
     let modified = metadata
@@ -782,7 +466,6 @@ pub(super) fn portable_directory_signature(directory: &Path) -> std::io::Result<
     ))
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn parse_portable_directory_cursor(value: &str) -> Option<PortableDirectoryCursor> {
     let mut fields = value.split(':');
     let version = fields.next()?;
@@ -790,26 +473,25 @@ fn parse_portable_directory_cursor(value: &str) -> Option<PortableDirectoryCurso
     let offset = fields.next()?;
     (version == "portable-v2").then_some(())?;
     fields.next().is_none().then_some(())?;
+    // Signatures become file names; accept only the numeric metadata encoding.
+    let parts = signature.split('-').collect::<Vec<_>>();
+    (parts.len() == 3 && parts.iter().all(|part| part.parse::<u64>().is_ok())).then_some(())?;
     Some(PortableDirectoryCursor {
         signature: signature.to_owned(),
         offset: offset.parse().ok()?,
     })
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn format_portable_directory_cursor(signature: String, offset: u64) -> String {
     format!("portable-v2:{signature}:{offset}")
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 const PORTABLE_INVENTORY_TAIL_RECOVERY_BYTES: u64 = 64 * 1024;
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_header(signature: &str) -> String {
     format!("v2:{signature}\n")
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
     use std::io::Read;
 
@@ -822,13 +504,10 @@ fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
     reader.read_exact(&mut header).is_ok() && header == expected
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn portable_inventory_entry_is_valid(name: &str) -> bool {
-    quarantined_project_id(name).is_some()
-        || tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
+    tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn clear_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(portable_inventory_complete_path(inventory)) {
         Ok(()) => Ok(()),
@@ -837,7 +516,6 @@ fn clear_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_temporary_path(
     inventory: &Path,
 ) -> tracedecay_domain::errors::Result<std::path::PathBuf> {
@@ -857,7 +535,6 @@ fn portable_inventory_temporary_path(
     Ok(parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), sequence)))
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn ensure_portable_inventory_header(
     inventory: &Path,
     signature: &str,
@@ -886,7 +563,6 @@ fn ensure_portable_inventory_header(
 /// A newline commits one appended record. Only the bounded final suffix is
 /// inspected: an interrupted append is truncated back to the last committed
 /// record before either hydration or another append can observe it.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn recover_portable_inventory_tail(inventory: &Path, signature: &str) -> std::io::Result<()> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -914,25 +590,21 @@ fn recover_portable_inventory_tail(inventory: &Path, signature: &str) -> std::io
     let truncate_at = tail
         .iter()
         .rposition(|byte| *byte == b'\n')
-        .map(|position| tail_start + position as u64 + 1)
-        .unwrap_or(header_len)
+        .map_or(header_len, |position| tail_start + position as u64 + 1)
         .max(header_len);
     file.set_len(truncate_at)?;
     file.sync_all()
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_complete_path(inventory: &Path) -> std::path::PathBuf {
     inventory.with_extension("complete")
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_is_complete(inventory: &Path) -> bool {
     std::fs::symlink_metadata(portable_inventory_complete_path(inventory))
         .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn mark_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {
     let marker = portable_inventory_complete_path(inventory);
     let mut options = std::fs::OpenOptions::new();
@@ -944,29 +616,24 @@ fn mark_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 struct PortableInventoryBuilder {
-    source: std::fs::ReadDir,
+    source: cap_std::fs::ReadDir,
     /// A restart hydrates this set from the durable log in bounded slices
     /// before replaying source entries, so retained partial work is not
     /// replaced or appended twice.
     known: HashSet<String>,
+    known_offset: u64,
     hydration: Option<std::io::BufReader<std::fs::File>>,
     complete: bool,
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 static PORTABLE_INVENTORY_BUILDERS: OnceLock<
     Mutex<HashMap<std::path::PathBuf, PortableInventoryBuilder>>,
 > = OnceLock::new();
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 static PORTABLE_INVENTORY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-#[cfg(all(
-    test,
-    not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))
-))]
+#[cfg(test)]
 pub(super) fn forget_portable_inventory_builder_for_test(inventory: &Path) {
     if let Some(builders) = PORTABLE_INVENTORY_BUILDERS.get()
         && let Ok(mut builders) = builders.lock()
@@ -975,16 +642,15 @@ pub(super) fn forget_portable_inventory_builder_for_test(inventory: &Path) {
     }
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn advance_portable_inventory(
     projects_dir: &Path,
     inventory: &Path,
     signature: &str,
     raw_entry_limit: usize,
-    cancellation: &CancellationToken,
-    deadline: MonotonicDeadline,
+    entries_scanned: &mut usize,
+    interrupted: &dyn Fn() -> bool,
 ) -> tracedecay_domain::errors::Result<Option<bool>> {
-    use std::io::{BufRead, Write};
+    use std::io::{BufRead, Seek, SeekFrom, Write};
 
     let parent =
         inventory
@@ -1018,17 +684,49 @@ pub(super) fn advance_portable_inventory(
         }
     })?;
     if portable_inventory_is_complete(inventory) {
+        // Completion may have been published by another process while this
+        // process retained a partial iterator and its deduplication set.
+        if let Some(builders) = PORTABLE_INVENTORY_BUILDERS.get() {
+            builders
+                .lock()
+                .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "unregistered inventory builder lock is poisoned".to_owned(),
+                })?
+                .remove(inventory);
+        }
         return Ok(Some(true));
     }
     let builders = PORTABLE_INVENTORY_BUILDERS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut builders =
-        builders
-            .lock()
-            .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "unregistered inventory builder lock is poisoned".to_owned(),
+    // The canonical sidecar lock already owns this inventory exclusively.
+    // Move its iterator out of the shared map so unrelated profile admissions
+    // never wait for this inventory's filesystem reads or durable appends.
+    let retained = {
+        let _span =
+            tracing::trace_span!("maintenance.orphan_inventory.builder_admission").entered();
+        {
+            builders
+                .lock()
+                .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "unregistered inventory builder lock is poisoned".to_owned(),
+                })?
+                .remove(inventory)
+        }
+    };
+    let mut builder = if let Some(builder) = retained {
+        builder
+    } else {
+        let profile_root = projects_dir.parent().ok_or_else(|| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: "unregistered projects directory has no profile parent".to_owned(),
+            }
+        })?;
+        let capability =
+            open_store_directory_nofollow(profile_root, projects_dir).map_err(|kind| {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("open unregistered project-directory capability: {kind:?}"),
+                }
             })?;
-    if !builders.contains_key(inventory) {
-        let source = std::fs::read_dir(projects_dir).map_err(|error| {
+        let source = capability.root.entries().map_err(|error| {
             tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("open unregistered project-directory inventory stream: {error}"),
             }
@@ -1045,94 +743,137 @@ pub(super) fn advance_portable_inventory(
                 message: format!("read unregistered inventory recovery header: {error}"),
             }
         })?;
-        builders.insert(
-            inventory.to_path_buf(),
-            PortableInventoryBuilder {
-                source,
-                known: HashSet::new(),
-                hydration: Some(hydration),
-                complete: false,
-            },
-        );
-    }
-    let Some(builder) = builders.get_mut(inventory) else {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "unregistered inventory builder was not retained".to_owned(),
-        });
-    };
-    let raw_entry_limit = raw_entry_limit.max(1);
-    let mut budget = raw_entry_limit;
-    let mut completed = false;
-    let mut append_error = None;
-    while budget > 0 {
-        if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
-            return Ok(None);
+        PortableInventoryBuilder {
+            source,
+            known: HashSet::new(),
+            known_offset: header.len() as u64,
+            hydration: Some(hydration),
+            complete: false,
         }
-        if let Some(hydration) = builder.hydration.as_mut() {
-            let mut name = String::new();
-            let bytes = hydration.read_line(&mut name).map_err(|error| {
+    };
+    let result = (|| {
+        // The sidecar lock serializes writes, but other processes can append
+        // between admissions. Hydrate only their new suffix before resuming this
+        // iterator, so each committed name still appears exactly once.
+        if builder.hydration.is_none() {
+            let mut file = std::fs::File::open(inventory).map_err(|error| {
                 tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("read unregistered inventory recovery entry: {error}"),
+                    message: format!("open unregistered inventory suffix: {error}"),
                 }
             })?;
-            if bytes == 0 {
-                builder.hydration = None;
+            let length = file
+                .metadata()
+                .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("inspect unregistered inventory suffix: {error}"),
+                })?
+                .len();
+            if length < builder.known_offset {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "committed unregistered inventory shrank between admissions"
+                        .to_owned(),
+                });
+            }
+            if length > builder.known_offset {
+                file.seek(SeekFrom::Start(builder.known_offset))
+                    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!("seek unregistered inventory suffix: {error}"),
+                    })?;
+                builder.hydration = Some(std::io::BufReader::new(file));
+            }
+        }
+        let raw_entry_limit = raw_entry_limit.max(1);
+        let mut budget = raw_entry_limit;
+        let mut completed = false;
+        let mut append_error = None;
+        while budget > 0 {
+            if interrupted() {
+                return Ok(None);
+            }
+            if let Some(hydration) = builder.hydration.as_mut() {
+                let mut name = String::new();
+                let bytes = hydration.read_line(&mut name).map_err(|error| {
+                    tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!("read unregistered inventory recovery entry: {error}"),
+                    }
+                })?;
+                if bytes == 0 {
+                    builder.hydration = None;
+                    continue;
+                }
+                builder.known_offset += bytes as u64;
+                *entries_scanned = entries_scanned.saturating_add(1);
+                budget = budget.saturating_sub(1);
+                let name = name.trim_end_matches(['\r', '\n']);
+                if portable_inventory_entry_is_valid(name) {
+                    builder.known.insert(name.to_owned());
+                }
                 continue;
             }
-            budget = budget.saturating_sub(1);
-            let name = name.trim_end_matches(['\r', '\n']);
-            if portable_inventory_entry_is_valid(name) {
-                builder.known.insert(name.to_owned());
-            }
-            continue;
-        }
-        if builder.complete {
-            completed = true;
-            break;
-        }
-        let Some(entry) = builder.source.next() else {
-            builder.complete = true;
-            completed = true;
-            break;
-        };
-        budget = budget.saturating_sub(1);
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        if portable_inventory_entry_is_valid(&name) && !builder.known.contains(&name) {
-            let append = (|| {
-                // Build one complete record before its single locked write.
-                // A crash can leave only this final record torn; the bounded
-                // tail repair above removes it before the next hydration.
-                let record = format!("{name}\n");
-                let mut output = std::fs::OpenOptions::new().append(true).open(inventory)?;
-                output
-                    .write_all(record.as_bytes())
-                    .and_then(|()| output.sync_data())
-            })();
-            if let Err(error) = append {
-                append_error = Some(error);
+            if builder.complete {
+                completed = true;
                 break;
             }
-            builder.known.insert(name);
-        }
-    }
-    if let Some(error) = append_error {
-        builders.remove(inventory);
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("durably append unregistered inventory entry: {error}"),
-        });
-    }
-    if completed {
-        mark_portable_inventory_complete(inventory).map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("mark unregistered inventory complete: {error}"),
+            let Some(entry) = builder.source.next() else {
+                builder.complete = true;
+                completed = true;
+                break;
+            };
+            *entries_scanned = entries_scanned.saturating_add(1);
+            budget = budget.saturating_sub(1);
+            let entry =
+                entry.map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!(
+                        "read unregistered project-directory inventory entry: {error}"
+                    ),
+                })?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if portable_inventory_entry_is_valid(&name) && !builder.known.contains(&name) {
+                let append = {
+                    let _span = tracing::trace_span!("maintenance.orphan_inventory.durable_append")
+                        .entered();
+                    (|| {
+                        // Build one complete record before its single locked write.
+                        // A crash can leave only this final record torn; the bounded
+                        // tail repair above removes it before the next hydration.
+                        let record = format!("{name}\n");
+                        let mut output =
+                            std::fs::OpenOptions::new().append(true).open(inventory)?;
+                        output
+                            .write_all(record.as_bytes())
+                            .and_then(|()| output.sync_data())
+                    })()
+                };
+                if let Err(error) = append {
+                    append_error = Some(error);
+                    break;
+                }
+                builder.known_offset += name.len() as u64 + 1;
+                builder.known.insert(name);
             }
-        })?;
-        builders.remove(inventory);
+        }
+        if let Some(error) = append_error {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("durably append unregistered inventory entry: {error}"),
+            });
+        }
+        if completed {
+            mark_portable_inventory_complete(inventory).map_err(|error| {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("mark unregistered inventory complete: {error}"),
+                }
+            })?;
+        }
+        Ok(Some(completed))
+    })();
+    if matches!(&result, Ok(None | Some(false))) {
+        builders
+            .lock()
+            .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "unregistered inventory builder lock is poisoned".to_owned(),
+            })?
+            .insert(inventory.to_path_buf(), builder);
     }
-    Ok(Some(completed))
+    result
 }

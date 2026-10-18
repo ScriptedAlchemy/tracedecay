@@ -1,3 +1,5 @@
+// Its own test binary, not a runtime_core_suite module: the ambient-git test
+// re-executes this binary with a bare `--exact` test name.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::io::Write as _;
@@ -9,10 +11,12 @@ use tracedecay_domain::git::{
     GitChangeKindV1, GitDegradationV1, GitHeadStateV1, GitObjectFormatV1, GitStatusEntryV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git::GitCommandBounds;
 use tracedecay_runtime_core::git_repository::{
     GitHistoryBudget, GitHistoryOptions, GitHistoryTermination, GitRepositoryAuthority,
     GitRepositoryError,
 };
+use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 struct Fixture {
     directory: TempDir,
@@ -50,9 +54,23 @@ impl Fixture {
                 "user.name=Fixture",
                 "-c",
                 "user.email=fixture@example.com",
+                // The nested-tree fixture exceeds MAX_PATH under a Windows
+                // temp root; Git for Windows refuses those paths unless told
+                // to use the extended-length form. A no-op elsewhere.
+                "-c",
+                "core.longpaths=true",
+                // Git 2.47+ detaches `maintenance run --auto` after a commit
+                // and holds `.git/objects/maintenance.lock` while it runs,
+                // which lands in a git-dir snapshot and vanishes before the
+                // next one. The tests snapshot the git dir to prove the
+                // authority writes nothing, so the fixture must not either.
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
             ])
-            .args(args)
-            .current_dir(self.path())
+            .args(plain_git_args(args))
+            .current_dir(plain_host_path(self.path()))
             .output()
             .expect("git executable");
         assert!(
@@ -71,9 +89,10 @@ impl Fixture {
 
     fn import_linear_history(&self, commits: usize) {
         let mut child = Command::new("git")
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
             .arg("fast-import")
             .arg("--quiet")
-            .current_dir(self.path())
+            .current_dir(plain_host_path(self.path()))
             .stdin(Stdio::piped())
             .spawn()
             .expect("git fast-import");
@@ -229,6 +248,45 @@ fn authority_observes_dirty_files_without_sync() {
 }
 
 #[test]
+fn bounded_status_answers_its_request_deadline_and_cancellation() {
+    let fixture = Fixture::init("sha1");
+    fixture.write("tracked.txt", "before\n");
+    fixture.commit("initial");
+    fixture.write("tracked.txt", "after\n");
+    let authority = GitRepositoryAuthority::discover(fixture.path()).unwrap();
+
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let error = authority
+        .status_bounded(&GitCommandBounds {
+            cancel: Some(cancelled),
+            ..GitCommandBounds::default()
+        })
+        .expect_err("a cancelled request must not report a status");
+    assert!(
+        matches!(&error, GitRepositoryError::Operation { operation: "status", detail } if detail == "git read cancelled"),
+        "{error:?}"
+    );
+    let error = authority
+        .status_bounded(&GitCommandBounds {
+            deadline: std::time::Instant::now(),
+            ..GitCommandBounds::default()
+        })
+        .expect_err("an expired request must not report a status");
+    assert!(
+        matches!(&error, GitRepositoryError::Operation { operation: "status", detail } if detail == "git read deadline exceeded"),
+        "{error:?}"
+    );
+
+    assert_eq!(
+        authority
+            .status_bounded(&GitCommandBounds::default())
+            .unwrap(),
+        authority.status().unwrap()
+    );
+}
+
+#[test]
 fn authority_honors_repository_included_ignore_configuration() {
     let fixture = Fixture::init("sha1");
     fixture.write("README.md", "initial\n");
@@ -238,9 +296,13 @@ fn authority_honors_repository_included_ignore_configuration() {
     let excludes = config_dir.path().join("ignored");
     std::fs::write(&excludes, "from-included-config.txt\n").unwrap();
     let config = config_dir.path().join("gitconfig");
+    // A backslash starts an escape sequence in a git config value, so a
+    // native Windows path must be spelled with forward slashes (which git
+    // accepts on every host) or the included file fails to parse.
+    let excludes_value = excludes.to_str().unwrap().replace('\\', "/");
     std::fs::write(
         &config,
-        format!("[core]\n\texcludesFile = {}\n", excludes.display()),
+        format!("[core]\n\texcludesFile = {excludes_value}\n"),
     )
     .unwrap();
     fixture.git(&["config", "include.path", config.to_str().unwrap()]);
@@ -254,6 +316,52 @@ fn authority_honors_repository_included_ignore_configuration() {
         entry,
         GitStatusEntryV1::Ignored { path } if path == "from-included-config.txt"
     )));
+}
+
+#[test]
+fn authority_reads_a_separate_git_dir_checkout_as_its_worktree() {
+    let store = tempfile::tempdir().expect("separate Git directory");
+    let git_dir = store.path().join("checkout.git");
+    let fixture = Fixture {
+        directory: tempfile::tempdir().expect("checkout"),
+    };
+    fixture.git(&[
+        "init",
+        "--quiet",
+        "-b",
+        "main",
+        "--separate-git-dir",
+        git_dir.to_str().expect("UTF-8 Git directory"),
+    ]);
+    fixture.write("tracked.txt", "before\n");
+    fixture.commit("initial");
+    fixture.write("tracked.txt", "after\n");
+    fixture.write("untracked.txt", "untracked\n");
+
+    for attempt in ["cold", "retained"] {
+        let authority = GitRepositoryAuthority::discover(fixture.path()).unwrap();
+        assert_eq!(
+            authority.worktree_root(),
+            Some(fixture.path().canonicalize().unwrap().as_path()),
+            "{attempt} discovery"
+        );
+        assert_eq!(authority.git_dir(), git_dir.canonicalize().unwrap());
+        let status = authority.status().unwrap();
+        assert!(
+            status.entries.iter().any(|entry| matches!(
+                entry,
+                GitStatusEntryV1::Tracked(tracked)
+                    if tracked.path == "tracked.txt"
+                        && tracked.worktree == GitChangeKindV1::Modified
+            )),
+            "{attempt} status: {:?}",
+            status.entries
+        );
+        assert!(status.entries.iter().any(|entry| matches!(
+            entry,
+            GitStatusEntryV1::Untracked { path } if path == "untracked.txt"
+        )));
+    }
 }
 
 #[test]
@@ -326,13 +434,6 @@ fn authority_does_not_report_truncation_at_exact_scan_boundary() {
         .unwrap();
     assert!(history.commits.is_empty());
     assert!(!history.truncated);
-}
-
-fn _assert_send_sync<T: Send + Sync>() {}
-
-#[test]
-fn authority_is_send_sync() {
-    _assert_send_sync::<GitRepositoryAuthority>();
 }
 
 #[test]
@@ -619,15 +720,28 @@ fn authority_reports_shallow_history_as_truncated_evidence() {
         source.commit(&format!("commit {index}"));
     }
     let shallow = tempfile::tempdir().unwrap();
+    // `file://` + a native path is not a URL git can parse: on Windows the
+    // backslashes make the drive letter read as a host. Spell the path
+    // plainly and with URL separators, the same way this fixture writes an
+    // `excludesFile` value.
+    let clone_source_url = format!(
+        "file:///{}",
+        plain_host_path(source.path())
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    );
+    let clone_dest = plain_host_path(shallow.path());
+    let clone_dest_arg = clone_dest.to_str().unwrap();
     let output = Command::new("git")
-        .args([
+        .args(plain_git_args(&[
             "clone",
             "--quiet",
             "--depth",
             "1",
-            &format!("file://{}", source.path().display()),
-            shallow.path().to_str().unwrap(),
-        ])
+            &clone_source_url,
+            clone_dest_arg,
+        ]))
         .output()
         .unwrap();
     assert!(
@@ -648,4 +762,66 @@ fn authority_reports_shallow_history_as_truncated_evidence() {
     assert_eq!(history.commits.len(), 1);
     assert!(history.truncated);
     assert_eq!(history.termination, GitHistoryTermination::ShallowBoundary);
+}
+
+/// Git exports `GIT_DIR`, `GIT_INDEX_FILE`, and sometimes `GIT_WORK_TREE` to
+/// every hook process, and TraceDecay ships an optional global post-commit
+/// hook that runs `tracedecay sync`. Under gix 0.87 a default-permission open
+/// honours all three, so a sync launched from a hook in one repository would
+/// read another repository's index while claiming to read the root it was
+/// asked for. The raw-`gix` half of this test pins that hazard; the authority
+/// half pins the guarantee that closes it.
+#[test]
+fn git_open_resolves_the_requested_root_under_a_hook_git_environment() {
+    const CHILD_ROOT: &str = "TRACEDECAY_GIT_OPEN_CHILD_ROOT";
+    const CHILD_DECOY: &str = "TRACEDECAY_GIT_OPEN_CHILD_DECOY";
+    if let (Some(root), Some(decoy)) = (std::env::var_os(CHILD_ROOT), std::env::var_os(CHILD_DECOY))
+    {
+        let root = Path::new(&root);
+        let decoy = Path::new(&decoy);
+
+        let hazard = gix::open(root).expect("raw open");
+        assert_eq!(
+            hazard.index_path(),
+            decoy.join(".git/index"),
+            "raw gix::open no longer honours GIT_INDEX_FILE; re-read git_open's invariant"
+        );
+
+        let repository = tracedecay_runtime_core::git_open::open(root).expect("authority open");
+        assert_eq!(repository.index_path(), root.join(".git/index"));
+        assert_eq!(repository.git_dir(), root.join(".git"));
+        assert_eq!(repository.workdir(), Some(root));
+
+        let discovered = tracedecay_runtime_core::git_open::discover(&root.join("nested"))
+            .expect("authority discover");
+        assert_eq!(discovered.index_path(), root.join(".git/index"));
+        assert_eq!(discovered.git_dir(), root.join(".git"));
+        return;
+    }
+
+    let fixture = Fixture::init("sha1");
+    fixture.write("nested/README.md", "requested\n");
+    fixture.commit("initial");
+    let decoy = Fixture::init("sha1");
+    decoy.write("README.md", "decoy\n");
+    decoy.commit("decoy");
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "git_open_resolves_the_requested_root_under_a_hook_git_environment",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, fixture.path())
+        .env(CHILD_DECOY, decoy.path())
+        .env("GIT_DIR", decoy.path().join(".git"))
+        .env("GIT_WORK_TREE", decoy.path())
+        .env("GIT_INDEX_FILE", decoy.path().join(".git/index"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

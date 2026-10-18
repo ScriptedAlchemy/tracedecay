@@ -1,6 +1,12 @@
+#![cfg(unix)]
+
 use std::path::Path;
 
-use super::bootstrap::run_git;
+use tracedecay_code_index_retention::code_index_generations::{
+    DurablePublicationPointerV1, code_text_artifacts_root, scoped_code_index_store_root,
+};
+use tracedecay_code_index_runtime::code_index_scheduler;
+
 use super::*;
 
 async fn notify_workspace_open(
@@ -48,19 +54,46 @@ async fn files_for_session(
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bindings() {
-    let home = TempDir::new().expect("isolated home");
-    let root = home.path().canonicalize().expect("canonical home");
+async fn wait_for_exact_interactive_graph_ready(
+    engine: &DaemonEngine,
+    scope: &tracedecay_contracts::ResolvedScope,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = engine
+                .invocation
+                .code_index_schedulers
+                .latest_complete_ready_for_scope(scope)
+                .await
+                && latest.interactive_graph_store().is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("exact interactive graph readiness timed out");
+}
+
+/// One committed repository at `<root>/primary` plus a linked worktree at
+/// `<root>/linked` whose checkout differs from the primary's: the primary
+/// owns `README.md` and `primary.rs`, the linked worktree owns `linked.rs`,
+/// so a listing that leaks across routes is observable.
+fn create_linked_worktree_fixture(root: &Path) -> (PathBuf, PathBuf) {
     let primary = root.join("primary");
     let linked = root.join("linked");
-    let profile_root = root.join("profile");
     std::fs::create_dir_all(&primary).expect("create primary repository");
-    run_git(&primary, &["init", "-b", "main", "--quiet"]);
+    git(&primary, &["init", "-b", "main", "--quiet"]);
     std::fs::write(primary.join("README.md"), "shared authority\n").expect("fixture");
-    run_git(&primary, &["add", "."]);
-    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
-    run_git(
+    std::fs::write(
+        primary.join("primary.rs"),
+        "pub fn primary_snapshot_only() -> u8 { 1 }\n",
+    )
+    .expect("primary-only source");
+    git(&primary, &["add", "."]);
+    git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    git(
         &primary,
         &[
             "worktree",
@@ -71,25 +104,57 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         ],
     );
     std::fs::remove_file(linked.join("README.md")).expect("remove primary-only source");
+    std::fs::remove_file(linked.join("primary.rs")).expect("remove primary-only source");
     std::fs::write(
         linked.join("linked.rs"),
         "pub fn linked_snapshot_only() -> u8 { 2 }\n",
     )
     .expect("linked-only source");
+    (primary, linked)
+}
+
+fn files_listing_text(response: &tracedecay_mcp::JsonRpcResponse) -> &str {
+    assert!(
+        response.error.is_none(),
+        "files follow-up must serve a listing: {response:?}"
+    );
+    response
+        .result
+        .as_ref()
+        .and_then(|result| result["content"].as_array())
+        .and_then(|content| content.first())
+        .and_then(|item| item["text"].as_str())
+        .unwrap_or_else(|| panic!("files response must contain text: {response:?}"))
+}
+
+/// A linked route that reopens degraded to core still answers `Ok` and keeps
+/// its key, its alias and the shared store publication, so every other
+/// assertion in these journeys holds while the defect is present. Only the
+/// published level names it.
+fn assert_reopened_linked_route_is_not_degraded(
+    servers: &crate::daemon::database_owner_registry::DatabaseOwnerRegistry,
+    linked_key: &crate::daemon::project_open_admission::ProjectServerKey,
+) {
+    assert_eq!(
+        servers
+            .servers
+            .get(linked_key)
+            .expect("the reopened linked route is published")
+            .publication,
+        crate::daemon::project_open_admission::ProjectServerPublication::RegisteredHostIngest,
+        "the reopened linked route must publish full capabilities, not a degraded core"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bindings() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let (primary, linked) = create_linked_worktree_fixture(&root);
+    let profile_root = root.join("profile");
 
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&primary, &client_identity).await;
-    // A user leftover from before the working-tree cutover: a stale legacy
-    // enrollment file inside the linked worktree. Nothing writes these
-    // anymore; routing must ignore it because the repository identity
-    // resolves first.
-    let stale_project_id = "proj_stale_linked_worktree";
-    std::fs::create_dir_all(linked.join(".tracedecay")).expect("legacy marker dir");
-    std::fs::write(
-        linked.join(".tracedecay/enrollment.json"),
-        format!("{{\"project_id\":\"{stale_project_id}\",\"storage_mode\":\"profile_sharded\"}}"),
-    )
-    .expect("write stale legacy linked-worktree marker");
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "shared worktree authority");
     let engine = test_daemon_engine_for_profile(&profile_root);
@@ -157,46 +222,103 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         linked_graph.store_layout().graph_db_path,
         "both exact worktree views must derive their database authority from the canonical layout locator"
     );
-    assert!(
-        !profile_root
-            .join("projects")
-            .join(stale_project_id)
-            .exists(),
-        "a stale worktree-local marker must never create or open a second project store"
-    );
-    let branch_store_exists =
-        std::fs::read_dir(primary_graph.store_layout().data_root.join("branches"))
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(std::result::Result::ok)
-            .any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "db")
-            });
-    assert!(
-        !branch_store_exists,
-        "opening a linked worktree must not create a branch database"
-    );
 
-    let session_id = "session.linked-worktree-follow-up";
-    notify_workspace_open(linked_server.as_ref(), session_id, &linked).await;
-    let routed = files_for_session(primary_server.as_ref(), session_id).await;
+    // `f347a0a46` ("fix(index): require opt-in for linked worktree scopes")
+    // gates project-open code-index activation for a linked worktree behind
+    // `sync.watch_linked_worktrees`, which defaults off. The linked route still
+    // reaches its full upgrade, the daemon publishes
+    // `phase=full_published code_index=linked_worktree_disabled` for it, and
+    // keeps the exact server and scheduler bindings this test is about, but it
+    // owns no verified code graph. A graph query routed to it must therefore
+    // answer the typed `code-graph-unavailable` refusal rather than silently
+    // serving another worktree's listing.
+    // That refusal is the *typed terminal* both project-open deferred owners
+    // key off. A route the daemon may never index automatically publishes no
+    // generation and seats no text serving level, so the deferred advisory
+    // owner and the deferred query-authority mount have nothing to wait for:
+    // each answers this admission instead of parking a background task that
+    // would wake on every other route's serving seat, take the shared project
+    // writer lane it can never use, and still be resolving at reopen and
+    // shutdown. Assert the admission is exact to the route, the primary
+    // shares this store and stays admitted.
+    let project_id = tracedecay_domain::ProjectId::new(
+        linked_graph
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("admitted routes carry a project identity"),
+    )
+    .expect("project id");
+    for (route, expected) in [
+        (
+            &linked,
+            code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+        ),
+        (
+            &primary,
+            code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted,
+        ),
+    ] {
+        let scope = tracedecay_code_index_runtime::resolved_scope_for_project(route, &project_id)
+            .expect("route scope");
+        assert_eq!(
+            engine
+                .invocation
+                .code_index_schedulers
+                .automatic_admission_for_scope(&scope),
+            Some(expected),
+            "code-index admission must be exact to {}",
+            route.display()
+        );
+    }
+    let primary_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&primary, &project_id)
+            .expect("primary route scope");
+
+    let linked_session_id = "session.linked-worktree-follow-up";
+    notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
+    let routed = files_for_session(primary_server.as_ref(), linked_session_id).await;
     assert!(
         routed.error.is_none(),
-        "a follow-up on another daemon server must retain the linked route: {routed:?}"
+        "the graph-tool owner refuses as an isError tool result: {routed:?}"
     );
-    let routed_text = routed
+    let routed_result = routed
         .result
         .as_ref()
-        .and_then(|result| result["content"].as_array())
-        .and_then(|content| content.first())
-        .and_then(|item| item["text"].as_str())
-        .unwrap_or_else(|| panic!("files response must contain text: {routed:?}"));
-    assert!(routed_text.contains("linked.rs"), "{routed_text}");
-    assert!(!routed_text.contains("README.md"), "{routed_text}");
+        .unwrap_or_else(|| panic!("linked route must answer a refusal result: {routed:?}"));
+    assert_eq!(
+        routed_result["isError"],
+        serde_json::json!(true),
+        "a linked worktree without the watch opt-in must not serve a file listing: {routed_result}"
+    );
+    let problem = &routed_result["structuredContent"]["problem"];
+    assert_eq!(
+        (&problem["kind"], &problem["code"], &problem["message"]),
+        (
+            &serde_json::json!("unavailable"),
+            &serde_json::json!("code-graph-unavailable"),
+            &serde_json::json!(
+                "the exact project code graph is unavailable: the verified code graph is not \
+                 ready for the exact project root"
+            ),
+        ),
+        "{routed_result}"
+    );
+
+    // The refusal is exact to the route, not a project-wide outage: the primary
+    // route shares the same store authority, is admitted, and still answers the
+    // listing, with its own census, never the linked worktree's sources.
+    let primary_session_id = "session.primary-route-follow-up";
+    notify_workspace_open(primary_server.as_ref(), primary_session_id, &primary).await;
+    // `project_server` may publish `code_index=warming`; require the exact
+    // route's interactive graph to be ready so this assertion tests routing
+    // rather than catalog activation timing.
+    wait_for_exact_interactive_graph_ready(&engine, &primary_scope).await;
+    let primary_listing = files_for_session(linked_server.as_ref(), primary_session_id).await;
+    let primary_text = files_listing_text(&primary_listing);
+    assert!(primary_text.contains("indexed files"), "{primary_text}");
+    assert!(!primary_text.contains("linked.rs"), "{primary_text}");
 
     primary_graph
         .db()
@@ -274,8 +396,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         .await;
     assert!(matches!(
         primary_automation,
-        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Started
-            | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
+        tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
+            | tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified
     ));
     let linked_automation = engine
         .reconcile_automation_scheduler_locked(
@@ -286,8 +408,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         .await;
     assert!(matches!(
         linked_automation,
-        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
-            | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Exiting
+        tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified
+            | tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Exiting
     ));
     assert_eq!(
         engine
@@ -327,6 +449,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         let mut servers = engine.store_administration.project_servers().lock().await;
         assert_eq!(servers.servers.len(), 2);
         assert_eq!(servers.aliases.len(), 2);
+        assert_reopened_linked_route_is_not_degraded(&servers, &linked_key);
         assert!(servers.remove(&primary_key).is_some());
     }
 
@@ -338,16 +461,573 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
                 primary_handshake.clone(),
             )
             .await,
-        tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
-            | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Exiting
+        tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified
+            | tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Exiting
     ));
+    // Every whole-worktree demand the daemon raised for the linked route on
+    // its own, both full servers' startup catch-up and the `workspaceOpen`
+    // hook above, is automatic and stays behind the watch opt-in, so the
+    // route never mounts a scheduler, let alone publishes a generation. The
+    // refusal asserted earlier is therefore a property of the route, not of
+    // whether the follow-up read raced an index the daemon should never have
+    // started.
     assert!(
-        tracedecay_runtime_core::storage::read_legacy_enrollment_marker(&linked)
-            .expect("read linked legacy marker")
-            .is_some_and(|marker| marker.project_id == stale_project_id),
-        "routing must ignore, not rewrite or delete, a stale legacy worktree-local marker"
+        engine
+            .invocation
+            .code_index_schedulers
+            .scheduler_handle(&linked)
+            .await
+            .is_none(),
+        "a linked worktree without the watch opt-in must never mount a code-index scheduler"
     );
+    drop((
+        primary_server,
+        primary_graph,
+        linked_graph,
+        reopened_linked_server,
+        reopened_linked_graph,
+    ));
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
         .expect("linked-worktree shutdown must remain bounded");
+}
+
+/// The opt-in twin of the default-off case above: with
+/// `sync.watch_linked_worktrees = true` written through the production
+/// configuration surface, a linked worktree of the same project is admitted to
+/// automatic indexing, seats its own generation, serves its own census (never
+/// the primary's), reopens through the retained canonical runtime, and shuts
+/// down within the same bound, all concurrently with the primary route.
+#[tokio::test]
+async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let (primary, linked) = create_linked_worktree_fixture(&root);
+    let profile_root = root.join("profile");
+
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&primary, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "opted-in linked worktree authority");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let primary_handshake = DaemonHandshake {
+        project_path: Some(primary.clone()),
+        client_identity: client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    let linked_handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+
+    // Opt in on the project layer before the linked route ever opens: its
+    // admission is decided from the durable current revision at project open.
+    apply_project_setting_via_surface(&engine, &primary_handshake, |_snapshot| {
+        (
+            tracedecay_domain::configuration::SettingKey::new(
+                tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            )
+            .expect("linked worktree watch setting key"),
+            tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
+        )
+    })
+    .await;
+
+    let (primary_server, linked_server) = tokio::join!(
+        engine.project_server(&primary_handshake),
+        engine.project_server(&linked_handshake),
+    );
+    let primary_server = primary_server.expect("primary project must open");
+    let linked_server = linked_server
+        .expect("opted-in linked worktree must concurrently open through the primary authority");
+    let primary_graph = primary_server.cg().await;
+    let linked_graph = linked_server.cg().await;
+    assert_eq!(
+        primary_graph.db_path(),
+        linked_graph.db_path(),
+        "linked worktrees must share one project store authority"
+    );
+
+    let project_id = tracedecay_domain::ProjectId::new(
+        linked_graph
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("admitted routes carry a project identity"),
+    )
+    .expect("project id");
+    let route_scopes = [&linked, &primary].map(|route| {
+        let scope = tracedecay_code_index_runtime::resolved_scope_for_project(route, &project_id)
+            .expect("route scope");
+        assert_eq!(
+            engine
+                .invocation
+                .code_index_schedulers
+                .automatic_admission_for_scope(&scope),
+            Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted),
+            "the opt-in must admit {} to automatic indexing",
+            route.display()
+        );
+        (route.clone(), scope)
+    });
+
+    // Both routes index behind their opens. Complete-generation decoding is an
+    // explicit consumer demand, so route readiness is the current retained
+    // text owner plus its verified persistent graph. Poll the canonical
+    // freshness authority: the decoded-seat signal intentionally does not move
+    // when this lightweight owner becomes current.
+    let readiness = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        loop {
+            let mut ready = true;
+            for (_, scope) in &route_scopes {
+                ready &= engine
+                    .invocation
+                    .code_index_schedulers
+                    .retained_text_owner_freshness_for_scope(scope)
+                    .await
+                    .is_some_and(|(owner, current)| {
+                        current && owner.interactive_graph_store().is_ok()
+                    });
+            }
+            if ready {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if readiness.is_err() {
+        let primary_status = engine
+            .invocation
+            .code_index_schedulers
+            .dashboard_freshness(&primary)
+            .await;
+        let linked_status = engine
+            .invocation
+            .code_index_schedulers
+            .dashboard_freshness(&linked)
+            .await;
+        panic!(
+            "both worktree routes must become current within the project-open bound; \
+             primary={primary_status:?}; linked={linked_status:?}"
+        );
+    }
+
+    let linked_session_id = "session.opted-in-linked-follow-up";
+    notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
+    let linked_listing = files_for_session(primary_server.as_ref(), linked_session_id).await;
+    let linked_text = files_listing_text(&linked_listing);
+    assert!(linked_text.contains("linked.rs"), "{linked_text}");
+    assert!(!linked_text.contains("primary.rs"), "{linked_text}");
+
+    let primary_session_id = "session.opted-in-primary-follow-up";
+    notify_workspace_open(primary_server.as_ref(), primary_session_id, &primary).await;
+    let primary_listing = files_for_session(linked_server.as_ref(), primary_session_id).await;
+    let primary_text = files_listing_text(&primary_listing);
+    assert!(primary_text.contains("primary.rs"), "{primary_text}");
+    assert!(!primary_text.contains("linked.rs"), "{primary_text}");
+
+    let primary_key =
+        ProjectServerKey::from_open_project(&primary_graph, &primary_handshake).unwrap();
+    let linked_key = ProjectServerKey::from_open_project(&linked_graph, &linked_handshake).unwrap();
+    assert_eq!(
+        primary_key.owner, linked_key.owner,
+        "runtime and automation owners must derive from the canonical StoreLayout locator"
+    );
+
+    {
+        let mut servers = engine.store_administration.project_servers().lock().await;
+        assert!(servers.remove(&linked_key).is_some());
+    }
+    drop(linked_graph);
+    drop(linked_server);
+    let reopened_linked_server = engine
+        .project_server(&linked_handshake)
+        .await
+        .expect("indexed linked worktree must reopen through the retained canonical runtime");
+    let reopened_linked_graph = reopened_linked_server.cg().await;
+    assert_eq!(
+        reopened_linked_graph
+            .db()
+            .runtime_client()
+            .publication()
+            .publication_id,
+        primary_graph
+            .db()
+            .runtime_client()
+            .publication()
+            .publication_id,
+        "reopening an exact linked route must not publish a second database owner"
+    );
+    {
+        let servers = engine.store_administration.project_servers().lock().await;
+        assert_eq!(servers.servers.len(), 2);
+        assert_eq!(servers.aliases.len(), 2);
+        // A reopen builds fresh ports and a fresh evidence adapter. Keying
+        // any of those registrations
+        // by object identity refuses the reopen, `settle_failed_full_upgrade`
+        // reclaims the core, and `project_server` still answers `Ok` with a
+        // route that shares the store publication, so every assertion above
+        // holds while the route serves core-only capabilities for the life of
+        // the daemon. Name the published level so that degradation fails here.
+        assert_reopened_linked_route_is_not_degraded(&servers, &linked_key);
+    }
+    drop((
+        primary_server,
+        primary_graph,
+        reopened_linked_server,
+        reopened_linked_graph,
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
+        .await
+        .expect("opted-in linked-worktree shutdown must remain bounded");
+}
+
+/// The text artifact a scope's active generation names, once one is attached.
+fn active_text_artifact_file(scope: &Path) -> Option<String> {
+    let bytes = std::fs::read(scope.join("active-code-generation-v1.json")).ok()?;
+    let pointer: DurablePublicationPointerV1 =
+        serde_json::from_slice(&bytes).expect("decode publication pointer");
+    pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == pointer.generation_id)
+        .and_then(|entry| entry.text_artifact())
+        .map(|descriptor| descriptor.artifact_file.clone())
+}
+
+/// Removing an indexed linked worktree through Git reclaims its whole
+/// code-index scope and the text artifact only it named on the ordinary
+/// maintenance journey, while the primary's scope and artifact stay served.
+/// The linked route stays mounted throughout, as it does in a running daemon;
+/// its code-index scheduler, which could still write into the scope, is
+/// retired before the scope is collected.
+#[tokio::test]
+async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_only_it_named() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let (primary, linked) = create_linked_worktree_fixture(&root);
+    let profile_root = root.join("profile");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&primary, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "removed linked worktree retention");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let primary_handshake = DaemonHandshake {
+        project_path: Some(primary.clone()),
+        client_identity: client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    let linked_handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    apply_project_setting_via_surface(&engine, &primary_handshake, |_snapshot| {
+        (
+            tracedecay_domain::configuration::SettingKey::new(
+                tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            )
+            .expect("linked worktree watch setting key"),
+            tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
+        )
+    })
+    .await;
+    let primary_server = engine
+        .project_server(&primary_handshake)
+        .await
+        .expect("primary project must open");
+    let linked_server = engine
+        .project_server(&linked_handshake)
+        .await
+        .expect("opted-in linked worktree must open");
+    let primary_graph = primary_server.cg().await;
+    let linked_graph = linked_server.cg().await;
+
+    let code_index_root = primary_graph.store_layout().data_root.join("code-index-v1");
+    let primary_scope = scoped_code_index_store_root(&code_index_root, &primary);
+    let linked_scope = scoped_code_index_store_root(&code_index_root, &linked);
+    let (primary_artifact, linked_artifact) =
+        tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            loop {
+                if let (Some(primary_artifact), Some(linked_artifact)) = (
+                    active_text_artifact_file(&primary_scope),
+                    active_text_artifact_file(&linked_scope),
+                ) {
+                    return (primary_artifact, linked_artifact);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both worktrees publish a text artifact");
+    assert_ne!(
+        primary_artifact, linked_artifact,
+        "the worktrees index different trees"
+    );
+    let shared = code_text_artifacts_root(&primary_scope);
+    assert!(shared.join(&primary_artifact).is_file());
+    assert!(shared.join(&linked_artifact).is_file());
+
+    // Put a refresh in flight so the linked scheduler is writing when its
+    // root disappears.
+    std::fs::write(linked.join("late.rs"), "pub fn late() {}\n").expect("edit linked worktree");
+    git(
+        &primary,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            linked.to_str().expect("utf-8 linked path"),
+        ],
+    );
+    let observations = engine.store_administration.store_telemetry_sampling();
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    let lease = crate::daemon::maintenance::project_store_maintenance_lease(primary_graph.as_ref());
+    let mut ticks = Vec::new();
+    let converged = tokio::time::timeout(std::time::Duration::from_mins(1), async {
+        let mut continuation = None;
+        loop {
+            let outcome = tracedecay_maintenance::generation::run_project_generation_maintenance(
+                &lease,
+                &engine.invocation.code_index_schedulers,
+                &observations,
+                &cancellation,
+                None,
+                continuation,
+            )
+            .await;
+            ticks.push((outcome.label(), linked_scope.exists()));
+            if outcome.is_complete() && !linked_scope.exists() {
+                return;
+            }
+            continuation = match outcome {
+                tracedecay_maintenance::tick::MaintenanceTickOutcome::Continue(next) => Some(next),
+                _ => None,
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        converged.is_ok(),
+        "generation maintenance did not converge after the worktree was removed; \
+         (outcome, linked scope present) per tick, last 20: {:?} of {} ticks",
+        &ticks[ticks.len().saturating_sub(20)..],
+        ticks.len()
+    );
+
+    assert!(
+        !linked_scope.exists(),
+        "the removed worktree's scope is collected"
+    );
+    let schedulers = &engine.invocation.code_index_schedulers;
+    let mounted = schedulers.mounted_roots().await;
+    assert!(
+        !mounted.contains(&linked) && !schedulers.retiring.lock().await.contains_key(&linked),
+        "collection retires and joins the removed worktree's scheduler first: {mounted:?}"
+    );
+    assert!(mounted.contains(&primary), "the primary's scheduler stays");
+    assert!(
+        !code_index_root
+            .join(".code-index-scope-retention-transaction-v1.json")
+            .exists(),
+        "no scope collection is left pending rollback"
+    );
+    assert!(
+        !shared.join(&linked_artifact).exists(),
+        "the text artifact only the removed worktree named is collected"
+    );
+    assert!(primary_scope.is_dir(), "the primary's scope survives");
+    assert!(
+        shared.join(&primary_artifact).is_file(),
+        "the primary's text artifact survives"
+    );
+    assert_eq!(
+        active_text_artifact_file(&primary_scope).as_deref(),
+        Some(primary_artifact.as_str())
+    );
+
+    // The removed worktree's route stays mounted, so its lease keeps ticking;
+    // with nothing left to prove it settles instead of retrying forever.
+    let linked_lease =
+        crate::daemon::maintenance::project_store_maintenance_lease(linked_graph.as_ref());
+    assert_eq!(
+        tracedecay_maintenance::generation::run_project_generation_maintenance(
+            &linked_lease,
+            &engine.invocation.code_index_schedulers,
+            &observations,
+            &cancellation,
+            None,
+            None,
+        )
+        .await,
+        tracedecay_maintenance::tick::MaintenanceTickOutcome::Complete
+    );
+    assert!(primary_scope.is_dir());
+    assert!(shared.join(&primary_artifact).is_file());
+
+    drop((lease, linked_lease, linked_graph, primary_graph));
+    drop((linked_server, primary_server));
+    tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
+        .await
+        .expect("shutdown after scope retention must remain bounded");
+}
+
+#[tokio::test]
+async fn retiring_observability_owner_reopens_same_route_without_cached_degradation() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().unwrap();
+    let project = root.join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let profile = root.join("profile");
+    let identity = test_client_identity_for(profile.clone());
+    initialize_test_project(&project, &identity).await;
+    let _scope = enter_test_daemon_database_scope(&profile, "retiring observability route");
+    let engine = test_daemon_engine_for_profile(&profile);
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity: identity,
+        ..test_handshake_defaults()
+    };
+    let server = engine.project_server(&handshake).await.unwrap();
+    let graph = server.cg().await;
+    let key = ProjectServerKey::from_open_project(&graph, &handshake).unwrap();
+    let db = engine
+        .store_administration
+        .registered_project_session_database(&project, graph.store_layout())
+        .await
+        .unwrap();
+    let producer = engine
+        .invocation
+        .service
+        .observability_producer(Some(&project))
+        .await
+        .unwrap();
+    let blocker = db.begin_write_transaction().await.unwrap();
+    assert!(
+        producer.cancel().await.is_err(),
+        "held writer prevents settlement"
+    );
+    assert!(
+        producer.shutdown_joined(),
+        "the real producer worker must have joined"
+    );
+    assert!(!producer.shutdown_settled());
+    let roots = std::collections::BTreeSet::from([project.clone()]);
+    assert!(
+        engine
+            .invocation
+            .service
+            .project_runtimes
+            .quiesce_roots(&roots)
+            .await
+            .is_some(),
+        "the root's runtime retires while its store owner still awaits the writer"
+    );
+    // Remove the initial published route to model a capacity reopen. From the
+    // first refusal onward, only production open/retry logic may change it.
+    assert!(
+        engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .remove(&key)
+            .is_some()
+    );
+    drop(graph);
+    drop(server);
+    // Releasing the unrelated writer does not autonomously retry settlement;
+    // the first real mount must trigger it and still report Retiring.
+    blocker.rollback().await.unwrap();
+    let error = match engine.project_server(&handshake).await {
+        Ok(_) => panic!("retiring owner must refuse the full project open"),
+        Err(error) => error,
+    };
+    assert!(
+        super::super::project_open_admission::is_observability_retiring(&error),
+        "{error}"
+    );
+    assert_eq!(
+        super::super::project_open_retry_backoff(&error),
+        Some(super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
+    );
+    assert!(
+        engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .get_ready(&key)
+            .is_none(),
+        "a transient owner refusal must not cache a permanently degraded core"
+    );
+    let reopened = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match engine.project_server(&handshake).await {
+                Ok(server) => break server,
+                Err(error)
+                    if super::super::project_open_admission::is_observability_retiring(&error) =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("reopen lost its typed recovery state: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("same route must recover after the writer releases");
+    let graph = reopened.cg().await;
+    let reopened_key = ProjectServerKey::from_open_project(&graph, &handshake).unwrap();
+    assert_eq!(
+        key, reopened_key,
+        "recovery preserves the canonical store identity"
+    );
+    assert_reopened_linked_route_is_not_degraded(
+        &*engine.store_administration.project_servers().lock().await,
+        &key,
+    );
+    drop(graph);
+    drop(reopened);
+    drop(producer);
+    drop(db);
+    engine.shutdown_all().await;
+}
+
+/// A handshake's profile-identity binding runs on the native runtime: with no
+/// Tokio runtime it opens the cold profile runtime and binds the client to it.
+#[test]
+fn profile_identity_binding_opens_a_cold_profile_runtime_without_a_tokio_runtime() {
+    let temp = TempDir::new().expect("temp dir");
+    let profile_root = temp.path().join("profile");
+    let store_administration = test_store_administration_for_profile(&profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "profile-binding-off-tokio");
+    let mut handshake = DaemonHandshake {
+        client_identity: test_client_identity_for(profile_root.clone()),
+        ..test_handshake_defaults()
+    };
+
+    let hazards = crate::test_support::native_runtime_hazards();
+    tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        super::super::connection_serving::bind_authenticated_profile_identity_within_deadline(
+            &mut handshake,
+            &store_administration,
+        )
+        .await
+    })
+    .expect("native runtime runs the binding")
+    .expect("bind the client's profile identity");
+
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+    assert_eq!(
+        handshake.client_identity.profile_root,
+        profile_root.canonicalize().expect("canonical profile root"),
+        "the binding returns the canonical bound identity"
+    );
 }

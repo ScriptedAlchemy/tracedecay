@@ -3,6 +3,24 @@
 Blocking local and remote clients for typed Work and Workflow operations,
 cancellation, paging, and resumable SSE streams.
 
+## Prerequisites
+
+The client connects to a running daemon and addresses a project that daemon
+already serves. Set both up before the first call, in this order:
+
+```bash
+tracedecay daemon install-service   # or: tracedecay daemon start
+tracedecay init /path/to/project
+```
+
+The daemon comes first. `tracedecay init` is brokered through the
+daemon-owned code-index scheduler, so with no daemon reachable it refuses
+before writing anything:
+
+```
+Error: project route error (code_index_scheduler_unavailable): project initialization requires the daemon-owned code-index scheduler; start the daemon and retry
+```
+
 ```rust
 use serde_json::json;
 use tracedecay_sdk::client::{Client, ConnectionMode, OperationRequestOptions};

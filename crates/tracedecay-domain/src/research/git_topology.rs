@@ -6,8 +6,7 @@ use crate::code_intelligence::identity::CodeGenerationId;
 use crate::feedback::{
     CiFailureGenerationEvidenceV1, CiFailureLocalizationResultV1, CiFailureRunIdentityV1,
     GitHubPullRequestIdV1, GitHubReviewCommentIdV1, GitHubReviewIdV1,
-    GitHubReviewImmutableAnchorV1, GitHubReviewIngressResultV1, GitHubReviewItemV1,
-    GitHubReviewThreadIdV1,
+    GitHubReviewImmutableAnchorV1, GitHubReviewIngressResultV1, GitHubReviewThreadIdV1,
 };
 use crate::git::{
     GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
@@ -57,7 +56,6 @@ pub enum GitTopologyGenerationRefV1 {
     GitReceipt {
         receipt_id: GitIndexReceiptId,
         preview_id: GitIndexPreviewId,
-        commit_id: Option<GitOidV1>,
     },
     #[serde(rename = "github_stack_capability")]
     GitHubStackCapability {
@@ -116,11 +114,9 @@ impl GitTopologyGenerationRefV1 {
             Self::GitReceipt {
                 receipt_id,
                 preview_id,
-                commit_id,
             } => {
                 receipt_id.validate()?;
-                preview_id.validate()?;
-                commit_id.as_ref().map_or(Ok(()), GitOidV1::validate)
+                preview_id.validate()
             }
             Self::GitHubStackCapability {
                 generation_id,
@@ -515,60 +511,6 @@ pub struct ReviewSnapshotAnchorRefV1 {
 }
 
 impl ReviewSnapshotAnchorRefV1 {
-    pub fn from_item(
-        pull_request: PullRequestSnapshotAnchorRefV1,
-        item: &GitHubReviewItemV1,
-    ) -> Result<Self, DomainError> {
-        item.validate()?;
-        let mut sources = Vec::new();
-        push_source(
-            &mut sources,
-            GitTopologySourceRoleV1::PullRequestObservation,
-            pull_request.source_anchor_id.clone(),
-        )?;
-        push_source(
-            &mut sources,
-            GitTopologySourceRoleV1::ReviewOriginal,
-            item.remap.original.retrieval_anchor_id.clone(),
-        )?;
-        push_source(
-            &mut sources,
-            GitTopologySourceRoleV1::ReviewAuthor,
-            item.author_anchor.clone(),
-        )?;
-        push_source(
-            &mut sources,
-            GitTopologySourceRoleV1::ReviewBody,
-            item.body_anchor.clone(),
-        )?;
-        if let Some(anchor_id) = &item.safe_url_anchor {
-            push_source(
-                &mut sources,
-                GitTopologySourceRoleV1::ReviewSafeUrl,
-                anchor_id.clone(),
-            )?;
-        }
-        let value = Self {
-            pull_request,
-            review_id: item.review_id.clone(),
-            thread_id: item.thread_id.clone(),
-            comment_id: item.comment_id.clone(),
-            reply_to_comment_id: item.reply_to_comment_id.clone(),
-            original: item.remap.original.clone(),
-            item_digest: canonical_sha256(item)?,
-            sources,
-        };
-        if item.repository_id != value.pull_request.repository_id
-            || item.pull_request_id != value.pull_request.pull_request_id
-        {
-            return Err(DomainError::SnapshotMismatch {
-                field: "review pull request snapshot",
-            });
-        }
-        value.validate()?;
-        Ok(value)
-    }
-
     pub fn validate(&self) -> Result<(), DomainError> {
         self.pull_request.validate()?;
         self.review_id
@@ -1059,7 +1001,6 @@ pub struct PreflightPreviewAnchorRefV1 {
     pub preview_digest: ManifestDigest,
     pub operation: GitIndexTransactionOperationV1,
     pub candidate_index_tree: Option<GitOidV1>,
-    pub commit_intent_digest: Option<ManifestDigest>,
     pub expires_at: UtcMicros,
 }
 
@@ -1075,7 +1016,6 @@ impl PreflightPreviewAnchorRefV1 {
             preview_digest: preview.preview_digest.clone(),
             operation: preview.operation,
             candidate_index_tree: preview.candidate_index_tree.clone(),
-            commit_intent_digest: preview.commit_intent_digest.clone(),
             expires_at: preview.expires_at,
         };
         if value.repository.snapshot_id != preview.repository_snapshot.snapshot_id
@@ -1109,9 +1049,6 @@ impl PreflightPreviewAnchorRefV1 {
                 });
             }
         }
-        self.commit_intent_digest
-            .as_ref()
-            .map_or(Ok(()), ManifestDigest::validate)?;
         self.generation().validate()
     }
 }
@@ -1126,7 +1063,6 @@ pub struct ApplyReceiptAnchorRefV1 {
     pub outcome: GitIndexReceiptOutcomeV1,
     pub final_snapshot_digest: ManifestDigest,
     pub final_snapshot_captured: bool,
-    pub created_commit: Option<GitOidV1>,
     pub sources: Vec<OrderedGitTopologySourceV1>,
 }
 
@@ -1151,7 +1087,6 @@ impl ApplyReceiptAnchorRefV1 {
             outcome: receipt.outcome,
             final_snapshot_digest: receipt.final_snapshot_digest.clone(),
             final_snapshot_captured: receipt.final_snapshot_captured,
-            created_commit: receipt.created_commit.clone(),
             sources,
         };
         if value.preflight.preview_id != receipt.preview_id
@@ -1170,7 +1105,6 @@ impl ApplyReceiptAnchorRefV1 {
         GitTopologyGenerationRefV1::GitReceipt {
             receipt_id: self.receipt_id.clone(),
             preview_id: self.preflight.preview_id.clone(),
-            commit_id: self.created_commit.clone(),
         }
     }
 
@@ -1180,21 +1114,10 @@ impl ApplyReceiptAnchorRefV1 {
         self.transaction_id.validate()?;
         self.receipt_digest.validate()?;
         self.final_snapshot_digest.validate()?;
-        self.created_commit
-            .as_ref()
-            .map_or(Ok(()), GitOidV1::validate)?;
         validate_ordered_sources(&self.sources)?;
         if self.sources.len() != 1 || self.sources[0].role != GitTopologySourceRoleV1::Preflight {
             return Err(DomainError::NonCanonical {
                 field: "apply receipt preflight source",
-            });
-        }
-        if self.outcome == GitIndexReceiptOutcomeV1::Committed
-            && (!self.final_snapshot_captured || self.created_commit.is_none())
-            && self.preflight.operation == GitIndexTransactionOperationV1::CommitIndex
-        {
-            return Err(DomainError::NonCanonical {
-                field: "commit apply receipt",
             });
         }
         self.generation().validate()

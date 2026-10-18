@@ -1,15 +1,16 @@
 //! Typed retained session-query mappers over mounted daemon authorities.
 
-use tracedecay_application::RetainedSurfaceExecutionErrorV1;
-use tracedecay_application::retained_surfaces::{
-    CorrelationIndexV1, GitScopeV1, RetainedErrorV1, RetainedOutcomeStatusV1,
-    SessionCorrelationHitV1, SessionGitRefV1, SessionGitRelationV1, SessionsForRequestV1,
-    SessionsForResultV1, WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1, WorkflowRunV1,
-    WorkflowStatusV1, WorkflowsRequestV1, WorkflowsResultV1,
+use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
+use tracedecay_contracts::retained_surfaces::{
+    CorrelationIndexCountModeV1, CorrelationIndexV1, GitScopeV1, RetainedErrorV1,
+    RetainedOutcomeStatusV1, SessionCorrelationHitV1, SessionGitRefV1, SessionGitRelationV1,
+    SessionsForRequestV1, SessionsForResultV1, WorkflowAgentV1, WorkflowCoverageV1,
+    WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1, WorkflowsRequestV1, WorkflowsResultV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
-    CommitEvidence, CommitRelation, CommitRelationFilter, GitCorrelationError, GitRefFilter,
-    SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind, git_scope_filter_from_args,
+    CommitEvidence, CommitRelation, CommitRelationFilter, CorrelationIndexPresence,
+    GitCorrelationError, GitRefFilter, SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind,
+    git_scope_filter_from_args,
 };
 use tracedecay_sessions::{
     WorkflowAgent, WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowRun,
@@ -25,7 +26,11 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
 
-#[hotpath::measure(label = "daemon.retained.session.sessions_for", future = true)]
+#[tracing::instrument(
+    name = "daemon.retained.session.sessions_for",
+    level = "trace",
+    skip_all
+)]
 pub async fn sessions_for(
     database: Option<&RegisteredGlobalDb>,
     request: &SessionsForRequestV1,
@@ -60,10 +65,13 @@ pub async fn sessions_for(
         limit,
     };
     let correlation = GlobalDbGitCorrelationStore::new(database);
-    let index_health = correlation.correlation_index_health().await.ok();
-    let results = match hotpath::future!(
-        correlation.sessions_for_with_relation(&query, relation),
-        label = "daemon.retained.session.sessions_for.query"
+    let queried = tracedecay_runtime_core::erase_send!(
+        correlation.sessions_for_with_relation_and_presence(&query, relation),
+        Result<(Vec<SessionGitCorrelationHit>, CorrelationIndexPresence), GitCorrelationError>
+    );
+    let (results, index_presence) = match tracing::Instrument::instrument(
+        queried,
+        tracing::trace_span!("daemon.retained.session.sessions_for.query"),
     )
     .await
     {
@@ -80,22 +88,25 @@ pub async fn sessions_for(
         && matches!(query.git_ref, GitRefFilter::Commit(_))
         && relation == CommitRelationFilter::Produced
     {
-        match hotpath::future!(
-            correlation.sessions_for_with_relation(&query, CommitRelationFilter::Observed),
-            label = "daemon.retained.session.sessions_for.observed_fallback"
+        let observed = tracedecay_runtime_core::erase_send!(
+            correlation
+                .sessions_for_with_relation_and_presence(&query, CommitRelationFilter::Observed),
+            Result<(Vec<SessionGitCorrelationHit>, CorrelationIndexPresence), GitCorrelationError>
+        );
+        match tracing::Instrument::instrument(
+            observed,
+            tracing::trace_span!("daemon.retained.session.sessions_for.observed_fallback"),
         )
         .await
         {
-            Ok(observed) if !observed.is_empty() => Some(observed),
+            Ok((observed, _)) if !observed.is_empty() => Some(observed),
             Ok(_) | Err(GitCorrelationError::Unavailable(_)) => None,
             Err(error) => return Err(map_git_error(error)),
         }
     } else {
         None
     };
-    let index_empty = index_health
-        .as_ref()
-        .is_none_or(|health| health.is_empty_for(&query.git_ref));
+    let index_empty = index_presence.is_empty_for(&query.git_ref);
     let mut result = SessionsForResultV1 {
         status: RetainedOutcomeStatusV1::Ok,
         git_ref: Some(query.git_ref.kind().to_owned()),
@@ -106,13 +117,16 @@ pub async fn sessions_for(
         count: results.len(),
         results: results.into_iter().map(correlation_hit).collect(),
         index_empty: Some(index_empty),
-        index: index_health.map(|health| CorrelationIndexV1 {
-            projection_available: health.projection_available,
-            generation: health.generation,
-            source_watermark: health.source_watermark,
-            span_count: health.span_count,
-            commit_count: health.commit_count,
-            backfill_watermark: health.backfill_watermark,
+        index: Some(CorrelationIndexV1 {
+            projection_available: index_presence.projection_available,
+            generation: index_presence.generation,
+            source_watermark: index_presence.source_watermark,
+            spans_present: index_presence.spans_present,
+            commits_present: index_presence.commits_present,
+            span_count: (!index_presence.spans_present).then_some(0),
+            commit_count: (!index_presence.commits_present).then_some(0),
+            backfill_watermark: index_presence.backfill_watermark,
+            count_mode: CorrelationIndexCountModeV1::PresenceOnly,
         }),
         message: None,
         observed_count: None,
@@ -125,14 +139,14 @@ pub async fn sessions_for(
             result.observed_count = Some(observed_count);
             result.observed_sessions = Some(observed.into_iter().map(correlation_hit).collect());
             result.message = Some(format!(
-                "no producing sessions; {observed_count} session(s) observed this commit — pass relation=observed to list them",
+                "no producing sessions; {observed_count} session(s) observed this commit. Pass relation=observed to list them",
             ));
         } else {
             result.message = Some(if index_empty {
                 if matches!(&query.git_ref, GitRefFilter::Commit(_)) {
-                    "no commit evidence indexed yet — run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-sync` adds weaker historical overlap evidence".to_owned()
+                    "no commit evidence indexed yet. Run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-sync` adds weaker historical overlap evidence".to_owned()
                 } else {
-                    "correlation index empty (no git spans recorded yet) — it will converge on the next daemon startup, or run `tracedecay sessions git-sync` to schedule it now".to_owned()
+                    "correlation index empty (no git spans recorded yet). It will converge on the next daemon startup, or run `tracedecay sessions git-sync` to schedule it now".to_owned()
                 }
             } else {
                 "no sessions matched this git ref".to_owned()
@@ -142,7 +156,7 @@ pub async fn sessions_for(
     Ok(result)
 }
 
-#[hotpath::measure(label = "daemon.retained.session.workflows", future = true)]
+#[tracing::instrument(name = "daemon.retained.session.workflows", level = "trace", skip_all)]
 pub async fn workflows(
     workflow_index: Option<&dyn WorkflowIndexReadPort>,
     request: &WorkflowsRequestV1,
@@ -189,14 +203,14 @@ pub async fn workflows(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             port.runs(WorkflowRunListRequest {
                 scope: WorkflowRunScope::Session {
                     session_id: session_id.to_owned(),
                 },
                 limit,
             }),
-            label = "daemon.retained.session.workflows.list"
+            tracing::trace_span!("daemon.retained.session.workflows.list"),
         )
         .await
         .map_err(|error| {
@@ -219,7 +233,7 @@ pub async fn workflows(
             request.commit.as_deref(),
         )
         .map_err(map_git_error)?;
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             port.runs(WorkflowRunListRequest {
                 scope: WorkflowRunScope::GitScope(WorkflowGitScope {
                     branch: filter.branch.clone(),
@@ -228,7 +242,7 @@ pub async fn workflows(
                 }),
                 limit,
             }),
-            label = "daemon.retained.session.workflows.list"
+            tracing::trace_span!("daemon.retained.session.workflows.list"),
         )
         .await
         .map_err(|error| {
@@ -277,12 +291,6 @@ fn map_git_error(error: GitCorrelationError) -> RetainedSurfaceExecutionErrorV1 
             RetainedSurfaceExecutionErrorV1::InvalidRequest
         }
         GitCorrelationError::Corrupt(_) => RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
-        GitCorrelationError::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::DuringRead,
-        ),
-        GitCorrelationError::BudgetExhausted => RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
-        ),
         error @ (GitCorrelationError::Db(_) | GitCorrelationError::Unavailable(_)) => {
             RetainedSurfaceExecutionErrorV1::unavailable(error.to_string())
         }
@@ -299,25 +307,25 @@ fn limit(value: Option<u64>) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
 }
 
 fn time_filter(
-    value: Option<&tracedecay_application::retained_surfaces::RetainedTimeFilterV1>,
+    value: Option<&tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1>,
     bound: SearchTimeBound,
 ) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
     match value {
         None => Ok(None),
-        Some(tracedecay_application::retained_surfaces::RetainedTimeFilterV1::Micros(value)) => {
+        Some(tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1::Micros(value)) => {
             i64::try_from(*value)
                 .map(Some)
                 .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
         }
-        Some(tracedecay_application::retained_surfaces::RetainedTimeFilterV1::Expression(
-            value,
-        )) => value
-            .parse::<i64>()
-            .ok()
-            .filter(|value| *value >= 0)
-            .or_else(|| parse_search_time_filter_bound(value, current_timestamp(), bound))
-            .map(Some)
-            .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest),
+        Some(tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1::Expression(value)) => {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value >= 0)
+                .or_else(|| parse_search_time_filter_bound(value, current_timestamp(), bound))
+                .map(Some)
+                .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        }
     }
 }
 
@@ -373,20 +381,20 @@ async fn workflow_run_query(
 ) -> Result<WorkflowsResultV1, RetainedSurfaceExecutionErrorV1> {
     let outcome = match agent_label {
         Some(label) if !label.trim().is_empty() => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 port.agent(run_id.to_owned(), label.to_owned()),
-                label = "daemon.retained.session.workflows.detail"
+                tracing::trace_span!("daemon.retained.session.workflows.detail"),
             )
             .await
         }
         Some(_) => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
         None => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 port.run(WorkflowRunDetailRequest {
                     run_id: run_id.to_owned(),
                     limit,
                 }),
-                label = "daemon.retained.session.workflows.detail"
+                tracing::trace_span!("daemon.retained.session.workflows.detail"),
             )
             .await
         }

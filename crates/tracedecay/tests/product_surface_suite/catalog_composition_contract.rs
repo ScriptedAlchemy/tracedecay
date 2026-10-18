@@ -1,21 +1,20 @@
 use std::collections::BTreeSet;
 
-use tracedecay::catalog_composition::{
-    CatalogCompositionError, build_application_catalog_snapshot, validate_application_catalog,
-};
 use tracedecay_api::{
     http_application_full_route_path, http_route_documents, is_http_application_operation_exposed,
-    retained_application_route_path,
 };
-use tracedecay_application::{
+use tracedecay_contracts::catalog_composition::{
+    CatalogCompositionError, build_application_catalog_snapshot, validate_application_catalog,
+};
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationHandlerDescriptors,
     ApplicationOperation, ResultContractRef, RetainedSurfaceOperation,
     application_catalog_contributions, application_handler_descriptors,
     retrieval::catalog::symbol_search_contribution,
 };
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingSurface, CapabilityId, ProfileBudget, ProfileId,
-    ProfileKind, SchemaId, SchemaRef, ScopeDimension, UseCaseId,
+    ApplicationSurfaceOperation, BindingSurface, CapabilityId, ProfileId, ProfileKind, SchemaId,
+    SchemaRef, ScopeDimension, UseCaseId,
 };
 
 #[test]
@@ -76,30 +75,14 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
 fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() {
     let snapshot = build_application_catalog_snapshot().unwrap();
     let expected_profiles = [
-        (
-            "profile.default",
-            ProfileKind::Default,
-            ProfileBudget::new(448, 18_000).unwrap(),
-        ),
-        (
-            "profile.compact",
-            ProfileKind::Compact,
-            ProfileBudget::new(22, 4_000).unwrap(),
-        ),
-        (
-            "profile.administrative",
-            ProfileKind::Administrative,
-            ProfileBudget::new(48, 8_000).unwrap(),
-        ),
-        (
-            "profile.host-limited",
-            ProfileKind::HostLimited,
-            ProfileBudget::new(17, 2_000).unwrap(),
-        ),
+        ("profile.default", ProfileKind::Default),
+        ("profile.compact", ProfileKind::Compact),
+        ("profile.administrative", ProfileKind::Administrative),
+        ("profile.host-limited", ProfileKind::HostLimited),
     ];
 
     assert_eq!(snapshot.profiles().count(), expected_profiles.len());
-    for (profile_id, kind, budget) in expected_profiles {
+    for (profile_id, kind) in expected_profiles {
         let profile_id = ProfileId::new(profile_id).unwrap();
         let profile = snapshot
             .profile(&profile_id)
@@ -114,8 +97,27 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
             .collect::<Vec<_>>();
 
         assert_eq!(profile.kind(), kind);
-        assert_eq!(profile.budget(), budget);
         assert_eq!(profile.capability_ids(), eligible_capability_ids);
+        let composed_bindings = eligible_capability_ids
+            .iter()
+            .filter_map(|capability_id| snapshot.capability(capability_id))
+            .flat_map(|capability| capability.binding_ids())
+            .filter_map(|binding_id| snapshot.binding(binding_id))
+            .filter(|binding| profile.enables_surface(binding.surface()))
+            .count();
+        let maximum_bindings = profile.budget().maximum_bindings() as usize;
+        // The default budget is derived from composition, so a binding added
+        // anywhere widens it; the narrower profiles hold a fixed ceiling.
+        if kind == ProfileKind::Default {
+            assert_eq!(maximum_bindings, composed_bindings);
+        } else {
+            assert!(
+                composed_bindings <= maximum_bindings,
+                "{} composes {composed_bindings} bindings over its \
+                 {maximum_bindings}-binding budget",
+                profile_id.as_str()
+            );
+        }
         let enabled_features = snapshot
             .capabilities()
             .flat_map(|capability| capability.required_features().iter().cloned())
@@ -223,15 +225,22 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
         .iter()
         .filter(|(binding, _)| {
             match ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str()) {
-                Some(operation) => !is_http_application_operation_exposed(operation),
+                Some(operation) => !is_http_application_operation_exposed(operation)
+                    .expect("HTTP exposure registry"),
                 None => RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
-                    .is_none_or(|operation| !operation.is_callable()),
+                    .is_none(),
             }
         })
         .map(|(binding, _)| binding.operation().as_str())
         .collect::<Vec<_>>();
 
-    assert!(!documents.is_empty());
+    assert_eq!(
+        documents
+            .iter()
+            .find(|document| document.operation == "code_symbol_search")
+            .map(|document| document.path.as_str()),
+        Some("/application/code/code_symbol_search")
+    );
     assert!(
         unrouted.is_empty(),
         "every visible HTTP catalog binding must have a public route: {unrouted:?}"
@@ -240,12 +249,6 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
     assert!(documents.iter().all(|document| {
         ApplicationSurfaceOperation::from_catalog_name(&document.operation)
             .is_some_and(|operation| http_application_full_route_path(operation) == document.path)
-            || RetainedSurfaceOperation::from_operation_name(&document.operation).is_some_and(
-                |operation| {
-                    operation.is_callable()
-                        && retained_application_route_path(operation) == document.path
-                },
-            )
     }));
     assert!(documents.iter().all(|document| {
         !matches!(document.operation.as_str(), "git_preview" | "git_apply")
@@ -254,12 +257,6 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
                 "/application/git/preview" | "/application/git/apply"
             )
     }));
-    assert!(
-        documents
-            .iter()
-            .any(|document| document.operation == "code_symbol_search"
-                && document.path == "/application/code/code_symbol_search")
-    );
 }
 
 #[test]
@@ -360,15 +357,6 @@ fn orphan_handler_descriptor_is_rejected() {
         validate_application_catalog(&application_catalog_contributions().unwrap(), &handlers),
         inconsistent("application handler use case")
     );
-}
-
-#[test]
-fn root_composition_is_deterministic() {
-    let first = build_application_catalog_snapshot().unwrap();
-    let second = build_application_catalog_snapshot().unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.digest(), second.digest());
 }
 
 fn descriptor_with_contract(

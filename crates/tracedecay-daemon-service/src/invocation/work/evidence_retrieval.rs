@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, RequestContext, WorkEvidenceRetrievalServiceV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1,
 };
@@ -15,35 +15,45 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{RegisteredWorkRuntime, work_product_problem};
 
-#[hotpath::measure(label = "daemon.service.work.retrieve_evidence", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.work.retrieve_evidence",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn retrieve(
-    registered: &RegisteredWorkRuntime,
-    context: &RequestContext,
+    registered: RegisteredWorkRuntime,
+    context: RequestContext,
     capability: &str,
     use_case: UseCaseId,
     request: WorkEvidenceRetrieveRequestV1,
 ) -> Result<WorkEvidenceRetrievalV1, ApplicationProblem> {
     let capability = CapabilityId::new(capability).map_err(|_| {
         work_product_problem(
-            tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
         )
     })?;
-    let binding = tracedecay_application::WorkProductBindingV1::new(capability, use_case);
+    let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case);
     let storage = registered.database.work_storage().map_err(|_| {
         work_product_problem(
-            tracedecay_application::WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable,
+            tracedecay_contracts::WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable,
         )
     })?;
     let evidence_retrieval = Arc::clone(&registered.evidence_retrieval);
-    WorkEvidenceRetrievalServiceV1::new(
-        storage.clone(),
-        storage.clone(),
-        storage,
-        Arc::clone(&evidence_retrieval),
-        evidence_retrieval,
-        binding,
-    )
-    .retrieve(context, request)
+    tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
+        WorkEvidenceRetrievalServiceV1::new(
+            storage.clone(),
+            storage.clone(),
+            storage,
+            Arc::clone(&evidence_retrieval),
+            evidence_retrieval,
+            binding,
+        )
+        .retrieve(&context, request)
+        .await
+    })
     .await
+    .unwrap_or(Err(
+        tracedecay_contracts::WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable,
+    ))
     .map_err(work_product_problem)
 }

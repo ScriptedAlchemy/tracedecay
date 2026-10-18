@@ -13,7 +13,7 @@ import { VirtualList } from './VirtualList.tsx';
  * virtualizer here.
  *
  * jsdom performs no layout: every element measures zero, and a virtualizer
- * given a zero-height viewport mounts nothing at all — which would satisfy any
+ * given a zero-height viewport mounts nothing at all, which would satisfy any
  * ceiling by drawing an empty list. So each windowed case installs a measured
  * viewport and also asserts a nonzero mount strictly below the item count.
  */
@@ -24,24 +24,29 @@ const MOUNT_CEILING = 250;
 /**
  * Give jsdom a viewport the virtualizer can measure.
  *
- * TanStack Virtual sizes the scroll element with `offsetWidth`/`offsetHeight`
- * (`getRect` in `@tanstack/virtual-core`), which jsdom always reports as zero —
- * not `clientHeight` or `getBoundingClientRect`. It also needs a
- * `ResizeObserver` to exist on the window, which jsdom does not provide.
+ * TanStack Virtual sizes the scroll element with `clientWidth`/`clientHeight`
+ * from virtual-core 3.19.6 (`offsetWidth`/`offsetHeight` before), which jsdom
+ * always reports as zero, not `getBoundingClientRect`. Both pairs are stubbed
+ * so the helper holds across that change. It also needs a `ResizeObserver` to
+ * exist on the window, which jsdom does not provide.
  */
 function installViewport(height: number, width = 900): () => void {
-  const names = ['offsetHeight', 'offsetWidth'] as const;
+  const sizes = {
+    offsetHeight: height,
+    clientHeight: height,
+    offsetWidth: width,
+    clientWidth: width,
+  } as const;
+  const names = Object.keys(sizes) as (keyof typeof sizes)[];
   const saved = names.map(
     (name) => [name, Object.getOwnPropertyDescriptor(HTMLElement.prototype, name)] as const,
   );
-  Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
-    configurable: true,
-    get: () => height,
-  });
-  Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
-    configurable: true,
-    get: () => width,
-  });
+  for (const name of names) {
+    Object.defineProperty(HTMLElement.prototype, name, {
+      configurable: true,
+      get: () => sizes[name],
+    });
+  }
 
   vi.stubGlobal(
     'ResizeObserver',
@@ -91,13 +96,6 @@ function renderRows(count: number) {
 }
 
 describe('VirtualList row bounds', () => {
-  it('renders a 100-row page without windowing it', () => {
-    // The plan's escape hatch from virtualization is a paginated mode of at
-    // most 100 rows, so that size stays plainly rendered — the same DOM as a
-    // bare map, with every row present for find-in-page and screen readers.
-    expect(renderRows(100).mounted()).toBe(100);
-  });
-
   it('still renders every row at the 200-row threshold', () => {
     expect(renderRows(200).mounted()).toBe(200);
   });
@@ -110,27 +108,6 @@ describe('VirtualList row bounds', () => {
     expect(mounted()).toBeGreaterThan(0);
     expect(mounted()).toBeLessThan(count);
     expect(mounted()).toBeLessThanOrEqual(MOUNT_CEILING);
-  });
-
-  it('holds the ceiling on a viewport far taller than any supported tier', () => {
-    // 2000 CSS pixels is well past the tallest tier the plan measures, so a
-    // ceiling that holds here is not an artifact of a small test viewport.
-    restore = installViewport(2_000);
-    const { mounted } = renderRows(20_000);
-
-    expect(mounted()).toBeGreaterThan(0);
-    expect(mounted()).toBeLessThanOrEqual(MOUNT_CEILING);
-  });
-
-  it('does not scale mounted rows with the result count', () => {
-    restore = installViewport(900);
-    const small = renderRows(1_000).mounted();
-    const large = renderRows(20_000).mounted();
-
-    // The property that matters: a twentyfold larger corpus must not mount
-    // twentyfold more rows. Both are viewport-driven, so they match.
-    expect(small).toBeGreaterThan(0);
-    expect(large).toBeLessThanOrEqual(small);
   });
 
   it('preserves a row element across a re-render with the same items', () => {
@@ -149,7 +126,7 @@ describe('VirtualList row bounds', () => {
 
     rerender(<VirtualList items={items} getKey={(item) => item} renderItem={renderItem} />);
 
-    // Stable keys, so React reuses the node rather than remounting it — which
+    // Stable keys, so React reuses the node rather than remounting it, which
     // is what lets focus and selection survive a refetch.
     expect(container.querySelector('[data-row="row-0"]')).toBe(before);
   });

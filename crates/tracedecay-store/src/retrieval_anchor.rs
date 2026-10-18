@@ -10,10 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::canonical_text::{CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within};
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_domain::{
-    AnchorOwnerBindingV1, FactOwnerV1, ProjectionGenerationId, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV3, UtcMicros,
-};
+use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, UtcMicros};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RetrievalAnchorStoreError {
@@ -36,91 +33,6 @@ impl From<RetrievalAnchorStoreError> for TraceDecayError {
     }
 }
 
-/// Exact physical owner encoding for both byte-compatible V2 anchors and V3
-/// profile/privacy-bound anchors. Untagged serialization preserves the
-/// canonical owner JSON embedded in existing anchor rows.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum RetrievalAnchorOwnerV1 {
-    V3(AnchorOwnerBindingV1),
-    V2(FactOwnerV1),
-}
-
-impl RetrievalAnchorOwnerV1 {
-    pub fn validate(&self) -> RetrievalAnchorStoreResult<()> {
-        match self {
-            Self::V3(owner) => owner.validate().map_err(domain),
-            Self::V2(owner) => owner.validate().map_err(domain),
-        }
-    }
-
-    pub fn v3(&self) -> Option<&AnchorOwnerBindingV1> {
-        match self {
-            Self::V3(owner) => Some(owner),
-            Self::V2(_) => None,
-        }
-    }
-
-    pub fn v2(&self) -> Option<&FactOwnerV1> {
-        match self {
-            Self::V3(_) => None,
-            Self::V2(owner) => Some(owner),
-        }
-    }
-}
-
-impl From<AnchorOwnerBindingV1> for RetrievalAnchorOwnerV1 {
-    fn from(owner: AnchorOwnerBindingV1) -> Self {
-        Self::V3(owner)
-    }
-}
-
-impl From<FactOwnerV1> for RetrievalAnchorOwnerV1 {
-    fn from(owner: FactOwnerV1) -> Self {
-        Self::V2(owner)
-    }
-}
-
-/// Byte-compatible persisted anchor record across the V2/V3 cutover.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum StoredRetrievalAnchorRecordV1 {
-    V3(RetrievalAnchorRecordV3),
-    V2(RetrievalAnchorRecordV2),
-}
-
-impl StoredRetrievalAnchorRecordV1 {
-    pub fn validate(&self) -> RetrievalAnchorStoreResult<()> {
-        match self {
-            Self::V3(record) => record.validate().map_err(domain),
-            Self::V2(record) => record.validate().map_err(domain),
-        }
-    }
-
-    pub fn anchor_id(&self) -> &RetrievalAnchorId {
-        match self {
-            Self::V3(record) => record.anchor_id(),
-            Self::V2(record) => record.anchor_id(),
-        }
-    }
-
-    pub fn owner(&self) -> RetrievalAnchorOwnerV1 {
-        match self {
-            Self::V3(record) => RetrievalAnchorOwnerV1::V3(record.owner().clone()),
-            Self::V2(record) => {
-                RetrievalAnchorOwnerV1::V2(FactOwnerV1::from(record.owner().clone()))
-            }
-        }
-    }
-
-    pub fn projection_generation(&self) -> &ProjectionGenerationId {
-        match self {
-            Self::V3(record) => record.projection_generation(),
-            Self::V2(record) => record.projection_generation(),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AnchorDispositionStateV1 {
@@ -134,7 +46,6 @@ pub enum AnchorDispositionStateV1 {
 }
 
 impl AnchorDispositionStateV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -164,16 +75,16 @@ impl AnchorDispositionStateV1 {
     /// means the anchor has no disposition history yet.
     ///
     /// This is the one canonical disposition state machine. Two SQLite engines
-    /// append to `retrieval_anchor_dispositions` — the root authority in
+    /// append to `retrieval_anchor_dispositions`, the root authority in
     /// `src/db/retrieval_anchor_authority.rs` and the `RetrievalAnchorExecutor`
-    /// in the rusqlite-runtime crate — and an anchor may be written by either
+    /// in the rusqlite-runtime crate, and an anchor may be written by either
     /// during the migration. If the two disagree about a transition, the same
     /// anchor becomes reachable or unreachable depending on which writer it
     /// happened to pass through. Each engine still renders its own refusal
     /// message; only the decision is shared.
     ///
     /// The rules: `Redacted`, `Expired`, and `Deleted` are terminal, so no
-    /// transition leaves them. `Superseded` may only advance to `Deleted` — a
+    /// transition leaves them. `Superseded` may only advance to `Deleted`, a
     /// superseded anchor can be erased but never resurrected. `Active`,
     /// `Quarantined`, `Unavailable`, and a fresh anchor accept any next state,
     /// which is what lets a quarantine or an outage be reversed.
@@ -191,7 +102,6 @@ impl AnchorDispositionStateV1 {
     /// recoverable, and tombstoning their derivatives would make the recovery
     /// lossy. The complementary read-side rule is
     /// [`serves_derivatives`](Self::serves_derivatives).
-    #[hotpath::skip]
     pub const fn suppresses_derivatives(self) -> bool {
         matches!(
             self,
@@ -221,7 +131,6 @@ pub enum AnchorDispositionReasonClassV1 {
 }
 
 impl AnchorDispositionReasonClassV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::UserRequest => "user_request",
@@ -244,7 +153,6 @@ pub enum AnchorDerivativeKindV1 {
 }
 
 impl AnchorDerivativeKindV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Span => "span",
@@ -268,7 +176,7 @@ impl AnchorDerivativeKindV1 {
 pub struct RetrievalAnchorDispositionRecordV1 {
     disposition_id: String,
     anchor_id: RetrievalAnchorId,
-    owner: RetrievalAnchorOwnerV1,
+    owner: FactOwnerV1,
     state: AnchorDispositionStateV1,
     superseded_by: Option<RetrievalAnchorId>,
     reason_class: AnchorDispositionReasonClassV1,
@@ -280,7 +188,7 @@ impl RetrievalAnchorDispositionRecordV1 {
     pub fn new(
         disposition_id: impl Into<String>,
         anchor_id: RetrievalAnchorId,
-        owner: impl Into<RetrievalAnchorOwnerV1>,
+        owner: FactOwnerV1,
         state: AnchorDispositionStateV1,
         superseded_by: Option<RetrievalAnchorId>,
         reason_class: AnchorDispositionReasonClassV1,
@@ -289,7 +197,7 @@ impl RetrievalAnchorDispositionRecordV1 {
         let record = Self {
             disposition_id: disposition_id.into(),
             anchor_id,
-            owner: owner.into(),
+            owner,
             state,
             superseded_by,
             reason_class,
@@ -307,11 +215,10 @@ impl RetrievalAnchorDispositionRecordV1 {
         &self.anchor_id
     }
 
-    pub fn owner(&self) -> &RetrievalAnchorOwnerV1 {
+    pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> AnchorDispositionStateV1 {
         self.state
     }
@@ -320,12 +227,10 @@ impl RetrievalAnchorDispositionRecordV1 {
         self.superseded_by.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn reason_class(&self) -> AnchorDispositionReasonClassV1 {
         self.reason_class
     }
 
-    #[hotpath::skip]
     pub const fn effective_at(&self) -> UtcMicros {
         self.effective_at
     }
@@ -333,7 +238,7 @@ impl RetrievalAnchorDispositionRecordV1 {
     pub fn validate(&self) -> RetrievalAnchorStoreResult<()> {
         validate_label(&self.disposition_id, "disposition id")?;
         self.anchor_id.validate().map_err(domain)?;
-        self.owner.validate()?;
+        self.owner.validate().map_err(domain)?;
         if let Some(successor) = &self.superseded_by {
             successor.validate().map_err(domain)?;
             if successor == &self.anchor_id {
@@ -353,7 +258,7 @@ impl RetrievalAnchorDispositionRecordV1 {
 #[serde(deny_unknown_fields)]
 pub struct RetrievalAnchorDerivativeV1 {
     source_anchor_id: RetrievalAnchorId,
-    owner: RetrievalAnchorOwnerV1,
+    owner: FactOwnerV1,
     kind: AnchorDerivativeKindV1,
     derivative_id: String,
     direct_evidence: bool,
@@ -362,14 +267,14 @@ pub struct RetrievalAnchorDerivativeV1 {
 impl RetrievalAnchorDerivativeV1 {
     pub fn new(
         source_anchor_id: RetrievalAnchorId,
-        owner: impl Into<RetrievalAnchorOwnerV1>,
+        owner: FactOwnerV1,
         kind: AnchorDerivativeKindV1,
         derivative_id: impl Into<String>,
         direct_evidence: bool,
     ) -> RetrievalAnchorStoreResult<Self> {
         let derivative = Self {
             source_anchor_id,
-            owner: owner.into(),
+            owner,
             kind,
             derivative_id: derivative_id.into(),
             direct_evidence,
@@ -382,11 +287,10 @@ impl RetrievalAnchorDerivativeV1 {
         &self.source_anchor_id
     }
 
-    pub fn owner(&self) -> &RetrievalAnchorOwnerV1 {
+    pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
 
-    #[hotpath::skip]
     pub const fn kind(&self) -> AnchorDerivativeKindV1 {
         self.kind
     }
@@ -395,14 +299,13 @@ impl RetrievalAnchorDerivativeV1 {
         &self.derivative_id
     }
 
-    #[hotpath::skip]
     pub const fn is_direct_evidence(&self) -> bool {
         self.direct_evidence
     }
 
     pub fn validate(&self) -> RetrievalAnchorStoreResult<()> {
         self.source_anchor_id.validate().map_err(domain)?;
-        self.owner.validate()?;
+        self.owner.validate().map_err(domain)?;
         validate_label(&self.derivative_id, "anchor derivative id")
     }
 }
@@ -413,7 +316,7 @@ impl RetrievalAnchorDerivativeV1 {
 #[serde(deny_unknown_fields)]
 pub struct RetrievalAnchorTombstoneV1 {
     anchor_id: RetrievalAnchorId,
-    owner: RetrievalAnchorOwnerV1,
+    owner: FactOwnerV1,
     terminal_state: AnchorDispositionStateV1,
     reason_class: AnchorDispositionReasonClassV1,
     effective_at: UtcMicros,
@@ -422,14 +325,14 @@ pub struct RetrievalAnchorTombstoneV1 {
 impl RetrievalAnchorTombstoneV1 {
     pub fn new(
         anchor_id: RetrievalAnchorId,
-        owner: impl Into<RetrievalAnchorOwnerV1>,
+        owner: FactOwnerV1,
         terminal_state: AnchorDispositionStateV1,
         reason_class: AnchorDispositionReasonClassV1,
         effective_at: UtcMicros,
     ) -> RetrievalAnchorStoreResult<Self> {
         let record = Self {
             anchor_id,
-            owner: owner.into(),
+            owner,
             terminal_state,
             reason_class,
             effective_at,
@@ -450,28 +353,25 @@ impl RetrievalAnchorTombstoneV1 {
             return Err(invalid("retrieval anchor tombstone terminal state"));
         }
         self.anchor_id.validate().map_err(domain)?;
-        self.owner.validate()
+        self.owner.validate().map_err(domain)
     }
 
     pub fn anchor_id(&self) -> &RetrievalAnchorId {
         &self.anchor_id
     }
 
-    pub fn owner(&self) -> &RetrievalAnchorOwnerV1 {
+    pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
 
-    #[hotpath::skip]
     pub const fn terminal_state(&self) -> AnchorDispositionStateV1 {
         self.terminal_state
     }
 
-    #[hotpath::skip]
     pub const fn reason_class(&self) -> AnchorDispositionReasonClassV1 {
         self.reason_class
     }
 
-    #[hotpath::skip]
     pub const fn effective_at(&self) -> UtcMicros {
         self.effective_at
     }
@@ -500,20 +400,20 @@ pub trait RetrievalAnchorDispositionStore: Send + Sync {
     fn current_disposition(
         &self,
         anchor_id: &RetrievalAnchorId,
-        owner: &RetrievalAnchorOwnerV1,
+        owner: &FactOwnerV1,
     ) -> impl Future<Output = RetrievalAnchorStoreResult<Option<RetrievalAnchorDispositionRecordV1>>>
     + Send;
 
     fn tombstone(
         &self,
         anchor_id: &RetrievalAnchorId,
-        owner: &RetrievalAnchorOwnerV1,
+        owner: &FactOwnerV1,
     ) -> impl Future<Output = RetrievalAnchorStoreResult<Option<RetrievalAnchorTombstoneV1>>> + Send;
 
     fn derivatives(
         &self,
         anchor_id: &RetrievalAnchorId,
-        owner: &RetrievalAnchorOwnerV1,
+        owner: &FactOwnerV1,
     ) -> impl Future<Output = RetrievalAnchorStoreResult<Vec<RetrievalAnchorDerivativeV1>>> + Send;
 }
 
@@ -535,7 +435,7 @@ fn invalid(message: impl Into<String>) -> RetrievalAnchorStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::{PrivacyDomainId, ProjectId, UserProfileId};
+    use tracedecay_domain::ProjectId;
 
     fn owner() -> FactOwnerV1 {
         FactOwnerV1::Project {
@@ -653,35 +553,5 @@ mod tests {
             ),
             Err(RetrievalAnchorStoreError::InvalidData(_))
         ));
-    }
-
-    #[test]
-    fn authority_owner_preserves_v2_wire_and_admits_exact_v3_owner() {
-        let legacy = owner();
-        let authority = RetrievalAnchorOwnerV1::from(legacy.clone());
-        assert_eq!(
-            serde_json::to_value(&authority).unwrap(),
-            serde_json::to_value(&legacy).unwrap()
-        );
-        assert_eq!(
-            serde_json::from_value::<RetrievalAnchorOwnerV1>(
-                serde_json::to_value(&legacy).unwrap()
-            )
-            .unwrap(),
-            authority
-        );
-
-        let v3 = AnchorOwnerBindingV1::for_project(
-            UserProfileId::new("profile.fixture").unwrap(),
-            ProjectId::new("project.fixture").unwrap(),
-            PrivacyDomainId::new("privacy.fixture").unwrap(),
-        )
-        .unwrap();
-        let authority = RetrievalAnchorOwnerV1::from(v3.clone());
-        assert_eq!(
-            serde_json::to_value(&authority).unwrap(),
-            serde_json::to_value(&v3).unwrap()
-        );
-        assert_eq!(authority.v3(), Some(&v3));
     }
 }

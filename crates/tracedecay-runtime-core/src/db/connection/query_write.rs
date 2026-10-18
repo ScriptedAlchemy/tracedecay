@@ -1,13 +1,20 @@
+use super::facade::advance_graph_transaction_generation;
 use super::{
     Connection, Database, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
     DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, Result,
     TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
+use crate::db::engine::{Executor, Result as EngineResult, WriteTx};
+use tracedecay_rusqlite_runtime::exact_sql::JobPolicy;
+
+enum JobAbort<E> {
+    Body(E),
+    Commit(TraceDecayError),
+}
 
 impl Database {
     /// Runs a bounded scalar inspection on the retained runtime, projecting the
     /// first column of the first row.
-    #[hotpath::skip]
     async fn query_scalar<T, P>(&self, operation: &str, sql: &str, params: P) -> Result<T>
     where
         T: crate::db::engine::FromValue,
@@ -33,28 +40,12 @@ impl Database {
 
     /// Runs a bounded scalar integer inspection on the retained runtime.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn query_scalar_i64(&self, operation: &str, sql: &str) -> Result<i64> {
-        self.query_scalar(operation, sql, ()).await
-    }
-
-    /// Runs a bounded scalar blob inspection on the retained runtime.
-    #[doc(hidden)]
-    #[hotpath::skip]
-    pub async fn query_scalar_blob(&self, operation: &str, sql: &str) -> Result<Vec<u8>> {
-        self.query_scalar(operation, sql, ()).await
-    }
-
-    /// Runs a bounded scalar text inspection on the retained runtime.
-    #[doc(hidden)]
-    #[hotpath::skip]
-    pub async fn query_scalar_text(&self, operation: &str, sql: &str) -> Result<String> {
         self.query_scalar(operation, sql, ()).await
     }
 
     /// Runs a bounded scalar integer inspection with one text identity bound.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn query_scalar_i64_with_text(
         &self,
         operation: &str,
@@ -77,7 +68,6 @@ impl Database {
     // Visible outside the crate: integration suites in `tests/` are external
     // crates and exercise this fixture path directly.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn execute_write<P>(&self, operation: &str, sql: &str, params: P) -> Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -85,7 +75,6 @@ impl Database {
         self.execute_write_engine(operation, sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn execute_write_engine<P>(
         &self,
         operation: &str,
@@ -95,31 +84,34 @@ impl Database {
     where
         P: crate::db::engine::IntoParams,
     {
-        let transaction = self.begin_write_transaction(operation).await?;
-        let changed = transaction
-            .execute_engine(sql, params)
-            .await
-            .map_err(|error| TraceDecayError::Database {
+        let params = params.into_params();
+        let (operation_name, sql) = (operation.to_owned(), sql.to_owned());
+        self.transact(operation, async move |tx| {
+            let changed = match params.clone() {
+                Ok(params) => tx.execute(&sql, params).await,
+                Err(error) => Err(error),
+            };
+            changed.map_err(|error| TraceDecayError::Database {
                 message: format!("failed to execute brokered write: {error}"),
-                operation: operation.to_owned(),
-            })?;
-        transaction.commit().await?;
-        Ok(changed)
+                operation: operation_name.clone(),
+            })
+        })
+        .await?
     }
 
     /// Executes a SQL batch atomically through the canonical writer broker.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn execute_write_batch(&self, operation: &str, sql: &str) -> Result<()> {
-        let transaction = self.begin_write_transaction(operation).await?;
-        transaction
-            .execute_batch(sql)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to execute brokered write batch: {error}"),
-                operation: operation.to_string(),
-            })?;
-        transaction.commit().await
+        let (operation_name, sql) = (operation.to_owned(), sql.to_owned());
+        self.transact(operation, async move |tx| {
+            tx.execute_batch(&sql)
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to execute brokered write batch: {error}"),
+                    operation: operation_name.clone(),
+                })
+        })
+        .await?
     }
 
     /// Executes one authority-revalidated schema or bulk-maintenance batch
@@ -128,7 +120,6 @@ impl Database {
     /// The retained client guard stays alive for the entire transaction, and
     /// the exact write authority is checked before writer admission and again
     /// continuously by the runtime's authority-revalidated batch execution.
-    #[hotpath::skip]
     pub async fn execute_authority_revalidated_batch(
         &self,
         operation: &str,
@@ -174,9 +165,29 @@ impl Database {
     ///
     /// Writable handles opened for the same database share one `DatabaseInner`,
     /// so this guard coordinates MCP, dashboard, and automation mutations.
-    #[hotpath::skip]
-    pub async fn writer(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.inner.writer.lock().await
+    /// Boxed: the context and lock wait sit dozens of levels deep, and every
+    /// write future would otherwise repeat that `Send` proof
+    /// (rust-lang/rust#159228).
+    pub fn writer(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<asupersync::sync::OwnedMutexGuard<()>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
+                message: "database writer admission requires an Asupersync context".to_owned(),
+            })?;
+            asupersync::sync::OwnedMutexGuard::lock(std::sync::Arc::clone(&self.inner.writer), &cx)
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("database writer admission failed: {error}"),
+                    operation: "acquire database writer lane".to_owned(),
+                })
+        })
     }
 
     pub(super) fn require_active_write_scope(&self, operation: &str) -> Result<()> {
@@ -195,11 +206,7 @@ impl Database {
             .require_active_write_scope(operation)
     }
 
-    #[hotpath::skip]
-    pub(super) async fn open_writer_connection_unguarded(
-        &self,
-        operation: &str,
-    ) -> Result<Connection> {
+    pub(super) fn open_writer_connection_unguarded(&self, operation: &str) -> Result<Connection> {
         self.require_active_write_scope(operation)?;
         self.inner.write_conn.clone().ok_or_else(|| {
             integrity::read_only_upgrade_error(self.canonical_database_path(), operation)
@@ -209,20 +216,19 @@ impl Database {
     /// Opens an isolated writer while holding the process-local writer lane.
     /// The handle cannot escape the guard, preventing raw DML from bypassing
     /// serialization or joining a transaction on the retained reader.
-    #[hotpath::skip]
     pub async fn writer_connection(&self, operation: &str) -> Result<DatabaseWriterConnection<'_>> {
-        let guard = self.writer().await;
-        let conn = self.open_writer_connection_unguarded(operation).await?;
+        let guard = self.writer().await?;
+        let conn = self.open_writer_connection_unguarded(operation)?;
         Ok(DatabaseWriterConnection {
             _guard: guard,
             conn,
             _client_guard: self.client_guard(),
+            _database: std::marker::PhantomData,
         })
     }
 
     /// Starts a query-only snapshot on a separate connection that cannot join
     /// a transaction running on the retained writable connection.
-    #[hotpath::skip]
     pub(crate) async fn begin_isolated_read_snapshot(
         &self,
         operation: &str,
@@ -242,7 +248,6 @@ impl Database {
         })
     }
 
-    #[hotpath::skip]
     pub async fn begin_engine_read_snapshot(
         &self,
         operation: &str,
@@ -250,7 +255,18 @@ impl Database {
         self.begin_isolated_read_snapshot(operation).await
     }
 
-    #[hotpath::skip]
+    /// Starts a health-check snapshot on the reader capacity reserved for
+    /// diagnosis, so an active writer cannot block operator visibility.
+    pub async fn begin_engine_health_read_snapshot(
+        &self,
+    ) -> EngineResult<DatabaseEngineReadSnapshot> {
+        let snapshot = self.inner.conn.health_read_snapshot().await?;
+        Ok(DatabaseEngineReadSnapshot {
+            snapshot,
+            _client_guard: self.client_guard(),
+        })
+    }
+
     pub async fn begin_memory_read_transaction(
         &self,
         operation: &str,
@@ -262,13 +278,12 @@ impl Database {
 
     /// Starts an immediate transaction that owns the canonical writer lane.
     /// Dropping the returned capability rolls back before releasing the lane.
-    #[hotpath::skip]
     pub async fn begin_write_transaction(
         &self,
         operation: &str,
     ) -> Result<DatabaseWriteTransaction<'_>> {
-        let guard = self.writer().await;
-        let conn = self.open_writer_connection_unguarded(operation).await?;
+        let guard = self.writer().await?;
+        let conn = self.open_writer_connection_unguarded(operation)?;
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
@@ -280,6 +295,7 @@ impl Database {
             transaction,
             guard,
             _client_guard: self.client_guard(),
+            _database: std::marker::PhantomData,
         })
     }
 
@@ -290,13 +306,12 @@ impl Database {
     /// transaction lease while continuously making progress. The runtime's
     /// long-lease policy renews that lease only after successful commands;
     /// idle transactions, revoked authority, and shutdown still cancel it.
-    #[hotpath::skip]
     pub async fn begin_bulk_write_transaction(
         &self,
         operation: &str,
     ) -> Result<DatabaseWriteTransaction<'_>> {
-        let guard = self.writer().await;
-        let conn = self.open_writer_connection_unguarded(operation).await?;
+        let guard = self.writer().await?;
+        let conn = self.open_writer_connection_unguarded(operation)?;
         let transaction = conn
             .authorized_long_lease_transaction()
             .await
@@ -308,10 +323,80 @@ impl Database {
             transaction,
             guard,
             _client_guard: self.client_guard(),
+            _database: std::marker::PhantomData,
         })
     }
 
-    #[hotpath::skip]
+    /// Runs `body` as one write job on the canonical writer: commit, with the
+    /// graph transaction generation advanced, when it returns `Ok`; rollback
+    /// when it returns `Err`. The outer error is the job's own failure,
+    /// including a body that awaits anything but its statements. The job
+    /// holds the writer lane like [`Self::begin_write_transaction`], so it
+    /// queues behind interactive writers instead of retrying `Busy`.
+    pub async fn transact<R, E, F>(
+        &self,
+        operation: &str,
+        body: F,
+    ) -> Result<std::result::Result<R, E>>
+    where
+        F: AsyncFn(&WriteTx<'_, '_>) -> std::result::Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.transact_with_policy(operation, JobPolicy::Bounded, body)
+            .await
+    }
+
+    /// [`Self::transact`] for bulk replacement, under the lease that renews on
+    /// progress (see [`Self::begin_bulk_write_transaction`]).
+    pub async fn transact_bulk<R, E, F>(
+        &self,
+        operation: &str,
+        body: F,
+    ) -> Result<std::result::Result<R, E>>
+    where
+        F: AsyncFn(&WriteTx<'_, '_>) -> std::result::Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.transact_with_policy(operation, JobPolicy::AuthorizedLongLease, body)
+            .await
+    }
+
+    async fn transact_with_policy<R, E, F>(
+        &self,
+        operation: &str,
+        policy: JobPolicy,
+        body: F,
+    ) -> Result<std::result::Result<R, E>>
+    where
+        F: AsyncFn(&WriteTx<'_, '_>) -> std::result::Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        let _lane = self.writer().await?;
+        let conn = self.open_writer_connection_unguarded(operation)?;
+        let _client_guard = self.client_guard();
+        let verdict = conn
+            .transact(policy, async move |tx: &WriteTx<'_, '_>| {
+                let value = body(tx).await.map_err(JobAbort::Body)?;
+                advance_graph_transaction_generation(tx)
+                    .await
+                    .map_err(JobAbort::Commit)?;
+                Ok(value)
+            })
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("isolated writer job failed: {error}"),
+                operation: operation.to_owned(),
+            })?;
+        match verdict {
+            Ok(value) => Ok(Ok(value)),
+            Err(JobAbort::Body(error)) => Ok(Err(error)),
+            Err(JobAbort::Commit(error)) => Err(error),
+        }
+    }
+
     pub async fn begin_memory_write_transaction(
         &self,
         operation: &str,

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from lib.process_control import terminate
+from lib.portable_process import dies_with_this_process
 
 
 TIMEOUT_SECONDS = 30
@@ -125,6 +126,7 @@ def main() -> None:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=daemon_stderr,
+                preexec_fn=dies_with_this_process(),
             )
             wait_for_daemon(daemon, socket_path)
             initialized = subprocess.run(

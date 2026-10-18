@@ -10,9 +10,7 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{CapabilityId, ManifestDigest, UtcMicros};
 
-use crate::authorization::{
-    PolicyIdentifierV1, PrivacyConstraintSetV1, PrivacyConstraintV1, policy_digest,
-};
+use crate::identity::{PolicyIdentifierV1, policy_digest};
 
 const ANALYZER_ADMISSION_SNAPSHOT_DOMAIN: &str = "tracedecay.policy.analyzer-admission-snapshot.v1";
 
@@ -70,7 +68,6 @@ pub struct AnalyzerAdmissionInputV1 {
     pub language_id: AnalyzerLanguageId,
     pub requested_capability: CapabilityId,
     pub candidates: Vec<AnalyzerCandidateV1>,
-    pub privacy_constraints: PrivacyConstraintSetV1,
     pub configuration_digest: ManifestDigest,
     pub policy_revision: u64,
     pub policy_digest: ManifestDigest,
@@ -97,7 +94,6 @@ pub enum AnalyzerAdmissionReasonV1 {
     CandidateUnknown,
     CandidateAmbiguous,
     ScopeUnauthorized,
-    LocalOnlyPrivacy,
     RestrictedPrivacy,
     InsufficientMemory,
     Selected,
@@ -156,10 +152,10 @@ pub struct AnalyzerAdmissionSnapshotV1 {
 }
 
 impl AnalyzerAdmissionSnapshotV1 {
-    pub fn compose<E>(evaluator: &E, input: &AnalyzerAdmissionInputV1) -> Self
-    where
-        E: AnalyzerAdmissionEvaluator,
-    {
+    pub fn compose(
+        evaluator: &AnalyzerAdmissionEvaluatorV1,
+        input: &AnalyzerAdmissionInputV1,
+    ) -> Self {
         let decision = evaluator.evaluate(input);
         let snapshot_digest = policy_digest(ANALYZER_ADMISSION_SNAPSHOT_DOMAIN, &decision);
         Self {
@@ -173,10 +169,6 @@ impl AnalyzerAdmissionSnapshotV1 {
             && self.snapshot_digest.validate().is_ok()
             && self.decision.is_bound_to(input)
     }
-}
-
-pub trait AnalyzerAdmissionEvaluator {
-    fn evaluate(&self, input: &AnalyzerAdmissionInputV1) -> AnalyzerAdmissionDecisionV1;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -222,11 +214,9 @@ impl AnalyzerAdmissionEvaluatorV1 {
             ordered_reason_codes,
         }
     }
-}
 
-impl AnalyzerAdmissionEvaluator for AnalyzerAdmissionEvaluatorV1 {
-    #[hotpath::measure(label = "policy.analyzer.evaluate")]
-    fn evaluate(&self, input: &AnalyzerAdmissionInputV1) -> AnalyzerAdmissionDecisionV1 {
+    #[tracing::instrument(name = "policy.analyzer.evaluate", level = "trace", skip_all)]
+    pub fn evaluate(&self, input: &AnalyzerAdmissionInputV1) -> AnalyzerAdmissionDecisionV1 {
         if input.settings.validate().is_err()
             || input.language_id.validate().is_err()
             || input.requested_capability.validate().is_err()
@@ -301,18 +291,6 @@ impl AnalyzerAdmissionEvaluator for AnalyzerAdmissionEvaluatorV1 {
                 AnalyzerAdmissionDispositionV1::Deny,
                 None,
                 vec![AnalyzerAdmissionReasonV1::ScopeUnauthorized],
-            );
-        }
-        if input
-            .privacy_constraints
-            .contains(&PrivacyConstraintV1::LocalOnly)
-            && candidate.execution_location == AnalyzerExecutionLocationV1::External
-        {
-            return self.decision(
-                input,
-                AnalyzerAdmissionDispositionV1::Deny,
-                None,
-                vec![AnalyzerAdmissionReasonV1::LocalOnlyPrivacy],
             );
         }
         if selection.privacy_class == AnalyzerPrivacyClassV1::Restricted

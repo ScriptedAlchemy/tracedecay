@@ -1,4 +1,4 @@
-//! OS service lifecycle and readiness control for the TraceDecay daemon.
+//! OS service lifecycle and readiness control for the `TraceDecay` daemon.
 //!
 //! This crate owns the generated systemd, launchd, and Windows service
 //! definitions together with install, stop, restore, and authenticated
@@ -19,10 +19,9 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake, MovedStoreAdoption};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-
-/// Canonical systemd user-unit name for the managed daemon.
-pub const SERVICE_NAME: &str = "tracedecay.service";
+use tracedecay_runtime_core::config::ProfileRoot;
 
 pub use tracedecay_daemon_protocol::SOCKET_ENV;
 
@@ -78,18 +77,47 @@ impl RemoteBrainTlsConfig {
     }
 }
 
-mod core_handshake;
 mod service;
 
-pub use core_handshake::handshake_for_current_client;
 pub use service::{
-    DaemonServiceSpec, DaemonServiceState, MaintenanceWindowOutcome, QuiescedDaemonLifecycle,
-    daemon_reachable, default_socket_path, install_service, install_service_under_lease,
-    installed_service_socket_path, installed_service_state, prepare_scoop_package_service,
-    quiesce_installed_service_before_lease, refresh_installed_service_under_lease_with_state,
-    restore_installed_service_after_update, restore_scoop_package_service, service_spec,
-    service_spec_with_remote_tls, service_status, socket_path_or_default, start_service,
-    stop_service, unavailable_daemon_socket_advice, uninstall_service,
-    verify_installed_service_quiesced_under_lease, wait_for_installed_service_state,
-    with_exclusive_maintenance_window, with_quiesced_installed_service,
+    DaemonProcessProofV1, DaemonServiceMemoryLimitsV1, DaemonServiceSpec, DaemonServiceState,
+    DaemonServiceStatus, MaintenanceWindowOutcome, QuiescedDaemonLifecycle, daemon_reachable,
+    daemon_reset_required_stores, daemon_socket_connectable, default_socket_path, install_service,
+    install_service_under_lease, installed_service_process_proof, installed_service_socket_path,
+    installed_service_state, prepare_scoop_package_service, quiesce_installed_service_before_lease,
+    refresh_installed_service_under_lease_with_state, restore_installed_service_after_update,
+    restore_scoop_package_service, service_spec, service_spec_with_remote_tls, service_status,
+    socket_path_or_default, start_service, stop_service, systemd_unit_name, uninstall_service,
+    unreachable_daemon_detail, verify_installed_service_quiesced_under_lease,
+    with_exclusive_maintenance_window, with_unavailable_daemon_advice,
 };
+
+/// The daemon client identity of `profile`.
+pub fn client_identity(profile: &ProfileRoot) -> DaemonClientIdentity {
+    DaemonClientIdentity::new(profile.data_dir().to_path_buf(), profile.global_db_path())
+}
+
+/// Handshake for `profile`'s client identity and caller-supplied binary
+/// version.
+pub fn handshake_for_current_client(
+    profile: &ProfileRoot,
+    client_version: &str,
+    project_path: Option<PathBuf>,
+    scope_prefix: Option<String>,
+    timings: bool,
+    allow_init: bool,
+) -> Result<DaemonHandshake> {
+    Ok(DaemonHandshake {
+        project_path,
+        scope_prefix,
+        timings,
+        allow_init,
+        allow_initialize_root_routing: false,
+        client_identity: client_identity(profile),
+        client_version: client_version.to_owned(),
+        client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
+        tool_list_changed_capable: false,
+        catalog_version: String::new(),
+        moved_store_adoption: MovedStoreAdoption::Never,
+    })
+}

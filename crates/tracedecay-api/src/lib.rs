@@ -1,4 +1,4 @@
-//! Thin HTTP/SSE adapter contracts over `tracedecay-application`.
+//! Thin HTTP/SSE adapter contracts over `tracedecay-contracts`.
 //!
 //! The executable owns `CanonicalInvocation`; this crate receives the resolved
 //! binding and its application result after dispatch, then encodes that result
@@ -10,6 +10,9 @@
 //! translate admitted application contracts and evaluate nothing themselves.
 //!
 #![forbid(unsafe_code)]
+
+#[macro_use]
+mod mounted_operation;
 
 pub mod assets;
 pub mod configuration;
@@ -28,7 +31,7 @@ pub mod workflow;
 
 use serde::Serialize;
 use thiserror::Error;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
     OperationTermination, RequestId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
     StreamTermination,
@@ -36,7 +39,7 @@ use tracedecay_application::{
 use tracedecay_tool_catalog::BindingId;
 
 pub use assets::{
-    DashboardAssetSource, StaticDashboardAsset, StaticDashboardAssets, static_dashboard_router,
+    StaticAssetEncoding, StaticDashboardAsset, StaticDashboardAssets, static_dashboard_router,
 };
 pub use handoff::{
     HandoffApplicationOwner, HandoffHttpRequest, HandoffInvocationFuture, HandoffOperation,
@@ -44,28 +47,25 @@ pub use handoff::{
 };
 pub use http::{
     HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOwnerKind,
-    HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1, adapter_problem_response,
-    application_problem_response, application_router, configuration_application_router,
-    feedback_application_router, http_application_full_route_path, http_application_owner_kind,
-    http_application_route_path, http_route_documents, is_http_application_operation_exposed,
+    HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1, adapter_problem,
+    adapter_problem_response, application_problem_response, application_problem_status,
+    application_router, configuration_application_router, feedback_application_router,
+    http_application_full_route_path, http_application_owner_kind, http_application_route_path,
+    http_route_documents, is_http_application_operation_exposed,
 };
 pub use multi_root::{
     MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
     MultiRootInvocationFuture, multi_root_application_router,
 };
-pub use retained::{
-    RetainedApplicationOwner, RetainedHttpRequest, RetainedInvocationFuture,
-    retained_application_route_path, retained_application_router,
-    retained_invalid_request_response, retained_operation_id, retained_route_path,
-};
+pub use retained::{retained_invalid_request_response, retained_route_path};
 pub use sse::sse_response;
 pub use work::{
     WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
-    work_application_router, work_dashboard_router, work_invalid_request_response,
+    work_application_router, work_dashboard_router, work_invalid_request,
 };
 pub use workflow::{
     WorkflowApplicationOwner, WorkflowHttpRequest, WorkflowInvocationFuture, WorkflowOperation,
-    workflow_application_router, workflow_invalid_request_response,
+    workflow_application_router, workflow_invalid_request,
 };
 
 /// A resolved canonical invocation result ready for HTTP presentation.
@@ -105,6 +105,15 @@ impl<T> CanonicalInvocationResult<T> {
 pub enum HttpJsonEnvelope<T> {
     Success(Box<HttpSuccessEnvelope<T>>),
     Problem(Box<HttpProblemEnvelope>),
+}
+
+impl<T> From<ApplicationProblemEnvelope> for HttpJsonEnvelope<T> {
+    fn from(application: ApplicationProblemEnvelope) -> Self {
+        Self::Problem(Box::new(HttpProblemEnvelope {
+            binding_id: None,
+            application,
+        }))
+    }
 }
 
 /// HTTP success preserves the application contract, request identity, scope,
@@ -249,9 +258,14 @@ impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
     }
 }
 
-/// SSE framing failures. Application failures remain canonical terminal events.
+/// Failures constructing or encoding an adapter envelope. Application
+/// failures remain canonical problems or terminal events.
 #[derive(Debug, Error)]
 pub enum HttpAdapterError {
+    #[error("application response violated its canonical contract: {0}")]
+    Contract(#[from] tracedecay_contracts::ApplicationContractError),
+    #[error("application response payload could not be encoded: {0}")]
+    ResultEncoding(#[from] serde_json::Error),
     #[error("canonical SSE event could not be encoded")]
     EventEncoding,
     #[error("canonical SSE stream ended before its terminal event")]
@@ -272,7 +286,7 @@ mod tests {
         application_router, http_application_full_route_path, http_application_owner_kind,
         http_application_route_path,
     };
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
         CancellationSignal, Deadline, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
         StreamEvent, StreamEventKind,
@@ -315,7 +329,7 @@ mod tests {
     fn http_operations_dispatch_to_concrete_owner_families() {
         assert_eq!(
             http_application_owner_kind(ApplicationSurfaceOperation::DiagnosticsRead),
-            HttpApplicationOwnerKind::Primitive
+            Some(HttpApplicationOwnerKind::Primitive)
         );
         for operation in [
             "multi_root_scope_set_read",
@@ -450,12 +464,21 @@ mod tests {
                 "/feedback/advisory_cycle",
                 ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
             ),
+            (
+                "/feedback/proximity",
+                ApplicationSurfaceOperation::FeedbackProximity,
+            ),
         ];
 
         for (index, (path, _)) in routes.iter().enumerate() {
+            let body = if *path == "/feedback/proximity" {
+                r#"{"observed_at":1}"#
+            } else {
+                "{}"
+            };
             let mut request = Request::post(*path)
                 .header("content-type", "application/json")
-                .body(Body::from("{}"))
+                .body(Body::from(body))
                 .expect("HTTP request");
             request.extensions_mut().insert(
                 RequestId::new(format!("request.http.feedback.{index}")).expect("request id"),
@@ -516,7 +539,8 @@ mod tests {
         for (index, operation) in ApplicationSurfaceOperation::ALL
             .into_iter()
             .filter(|operation| {
-                http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Configuration
+                http_application_owner_kind(*operation)
+                    == Some(HttpApplicationOwnerKind::Configuration)
             })
             .enumerate()
         {
@@ -537,7 +561,7 @@ mod tests {
         let observed = observed.lock().expect("configuration observations");
         assert_eq!(
             observed.len(),
-            tracedecay_application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES.len()
+            tracedecay_contracts::configuration::configuration_surface_operation_names().count()
         );
         for (index, (operation, body, actual_deadline, actual_cancellation)) in
             observed.iter().enumerate()

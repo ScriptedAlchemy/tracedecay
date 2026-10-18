@@ -75,10 +75,9 @@ fn writer_actor_allows_only_product_schema_pragmas() {
     }
 }
 
-/// The projection output-state cache is derived, per-connection scratch
-/// rebuilt from `observation_projection_provenance` whenever
-/// `PRAGMA data_version` moves. It must be able to exist on this channel;
-/// denying it made every projection rebuild fail.
+/// The projection rebuild keeps its output sets in per-connection TEMP
+/// scratch. It must be able to exist on this channel; denying it made every
+/// projection rebuild fail.
 #[test]
 fn writer_actor_allows_temp_tables_and_indexes_but_not_temp_triggers_or_views() {
     let fixture = fixture('a', 'a');
@@ -87,23 +86,6 @@ fn writer_actor_allows_temp_tables_and_indexes_but_not_temp_triggers_or_views() 
         .execute_batch("CREATE TABLE durable (value INTEGER NOT NULL)".to_owned())
         .expect("durable table remains available");
 
-    // The exact shape the projection output-state cache creates.
-    channel
-        .execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS observation_projection_output_state (
-                    projector_version TEXT NOT NULL,
-                    output_provider TEXT NOT NULL,
-                    output_message_id TEXT NOT NULL,
-                    canonical_observation_id TEXT NOT NULL,
-                    latest_observation_id TEXT NOT NULL,
-                    latest_sequence INTEGER NOT NULL CHECK(latest_sequence >= 0),
-                    projector_owned INTEGER NOT NULL CHECK(projector_owned IN (0, 1)),
-                    owner_count INTEGER NOT NULL CHECK(owner_count > 0),
-                    PRIMARY KEY(projector_version, output_provider, output_message_id)
-                 ) WITHOUT ROWID;"
-                .to_owned(),
-        )
-        .expect("projection output-state cache must be creatable");
     channel
         .execute_batch(
             "CREATE TEMP TABLE scratch (value INTEGER NOT NULL);
@@ -172,28 +154,27 @@ fn long_lease_transaction_renews_its_lease_after_successful_bounded_steps() {
     let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     base.execute_batch("CREATE TABLE lease_probe (value INTEGER)".to_owned())
         .unwrap();
-    let authority = Arc::new(LeaseClockAdvancingAuthority {
-        step: EXACT_SQL_TRANSACTION_LIMIT / 4,
-        execute_checks: AtomicUsize::new(0),
-    });
+    let clock = FakeClock::frozen();
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
         .unwrap()
-        .with_write_authority(authority.clone())
+        .with_write_authority(FakeClockAuthority::installing(&clock))
         .unwrap();
     let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
 
-    // Five bounded steps, each preceded by a quarter-limit advance of the
-    // writer's fake lease clock, must together outlive the absolute
-    // transaction limit so success proves renewal.
-    for value in 0..5 {
+    // Half-idle steps on the writer's clock that together outlive the
+    // absolute transaction limit, so success proves renewal.
+    let step = EXACT_SQL_TRANSACTION_IDLE_LIMIT / 2;
+    let steps = EXACT_SQL_TRANSACTION_LIMIT.as_millis() / step.as_millis() + 1;
+    for value in 0..steps {
+        clock.advance(step);
         transaction
             .execute(statement(
                 "INSERT INTO lease_probe VALUES (?)",
-                vec![ExactSqlValue::Integer(value)],
+                vec![ExactSqlValue::Integer(i64::try_from(value).unwrap())],
             ))
             .unwrap();
     }
-    assert!(authority.fake_elapsed() > EXACT_SQL_TRANSACTION_LIMIT);
+    assert!(clock.elapsed() > EXACT_SQL_TRANSACTION_LIMIT);
     transaction.commit().unwrap();
 
     let rows = base
@@ -202,13 +183,18 @@ fn long_lease_transaction_renews_its_lease_after_successful_bounded_steps() {
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(5)]);
+    assert_eq!(
+        rows.rows[0].values,
+        vec![ExactSqlValue::Integer(i64::try_from(steps).unwrap())]
+    );
 }
 
 #[test]
 fn authority_revalidated_batch_has_no_guessed_deadline_and_rechecks_authority() {
     let fixture = fixture('a', 'a');
+    let clock = FakeClock::frozen();
     let authority = Arc::new(SlowSchemaAuthority {
+        clock: Arc::clone(&clock),
         execute_batch_checks: AtomicUsize::new(0),
     });
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
@@ -216,7 +202,6 @@ fn authority_revalidated_batch_has_no_guessed_deadline_and_rechecks_authority() 
         .with_write_authority(authority.clone())
         .unwrap();
     let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
-    let started = Instant::now();
 
     transaction
         .execute_authority_revalidated_batch(
@@ -231,8 +216,41 @@ fn authority_revalidated_batch_has_no_guessed_deadline_and_rechecks_authority() 
         )
         .unwrap();
 
-    assert!(started.elapsed() > EXACT_SQL_EXECUTION_LIMIT);
+    assert!(clock.elapsed() > EXACT_SQL_EXECUTION_LIMIT);
     assert!(authority.execute_batch_checks.load(Ordering::Acquire) > 3);
+    transaction.rollback().unwrap();
+}
+
+#[test]
+fn authority_revalidated_query_runs_past_the_statement_deadline() {
+    let fixture = fixture('a', 'a');
+    let clock = FakeClock::frozen();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
+        .unwrap()
+        .with_write_authority(Arc::new(FakeClockAuthority {
+            clock: Arc::clone(&clock),
+            advance: Some((ExactSqlWriteIntent::Query, EXACT_SQL_EXECUTION_LIMIT / 2)),
+        }))
+        .unwrap();
+    let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
+    let scan = statement(
+        "WITH RECURSIVE n(value) AS (
+             VALUES(1)
+             UNION ALL
+             SELECT value + 1 FROM n WHERE value < 10000
+         )
+         SELECT count(*) FROM n",
+        vec![],
+    );
+
+    let rows = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(transaction.query_authority_revalidated_async(scan))
+        .expect("an authority-revalidated query has no statement deadline");
+
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(10_000)]);
+    assert!(clock.elapsed() > EXACT_SQL_EXECUTION_LIMIT * 2);
     transaction.rollback().unwrap();
 }
 

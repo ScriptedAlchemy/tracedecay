@@ -1,9 +1,11 @@
-use tracedecay_application::remote::{
+use tracedecay_contracts::remote::{
     capture::RemoteCapturePersistenceErrorV1,
     query::RemoteExactObservationQueryErrorV1,
-    replay::{RemoteReplayCurrentWriterPortV1, RemoteReplayCurrentWriterV1, RemoteReplayFrameV1},
+    replay::{RemoteReplayCurrentWriterPortV1, RemoteReplayCurrentWriterV1},
 };
-use tracedecay_domain::{CurrentRemoteAuthorityStateV1, RemoteRepositoryScopeV1, UtcMicros};
+use tracedecay_domain::{
+    CurrentRemoteAuthorityStateV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1, UtcMicros,
+};
 
 use super::*;
 
@@ -24,15 +26,17 @@ impl RemoteSqliteStorageV1 {
         scope
             .validate()
             .map_err(|_| RemoteExactObservationQueryErrorV1::ScopeMismatch)?;
-        let rows = query(
+        let row = authority_row(
             self.handle(),
-            "SELECT authority_state_json, writer_json, runtime_binding_json, updated_at
-             FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(self.binding.shard_id.brain_id.as_str())],
+            "authority_state_json, writer_json, runtime_binding_json, updated_at",
+            &self.binding.shard_id.brain_id,
         )
-        .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
-        let row =
-            one_row(rows).map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+        .map_err(|error| match error {
+            RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished => {
+                RemoteExactObservationQueryErrorV1::WriterAuthorityUnpublished
+            }
+            _ => RemoteExactObservationQueryErrorV1::AuthorityUnavailable,
+        })?;
         let authority: CurrentRemoteAuthorityStateV1 = serde_json::from_str(
             row_text(&row, 0).map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?,
         )
@@ -79,21 +83,17 @@ impl RemoteSqliteStorageV1 {
 impl RemoteReplayCurrentWriterPortV1 for RemoteSqliteStorageV1 {
     fn current_writer(
         &self,
-        frame: &RemoteReplayFrameV1,
+        fence: &RemoteWriterFenceV1,
     ) -> Result<RemoteReplayCurrentWriterV1, RemoteCapturePersistenceErrorV1> {
-        if promotion_pending(self.handle(), &frame.capture.writer.authority.fence)
-            .map_err(map_persistence_error)?
-        {
+        if promotion_pending(self.handle(), fence).map_err(map_persistence_error)? {
             return Err(RemoteCapturePersistenceErrorV1::Unavailable);
         }
-        let rows = query(
+        let row = authority_row(
             self.handle(),
-            "SELECT authority_state_json, writer_json, runtime_binding_json
-             FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(frame.capture.writer.authority.fence.brain_id.as_str())],
+            "authority_state_json, writer_json, runtime_binding_json",
+            &fence.brain_id,
         )
-        .map_err(map_persistence_error)?;
-        let row = persistence_one_row(rows)?;
+        .map_err(map_authority_persistence_error)?;
         let state: CurrentRemoteAuthorityStateV1 = serde_json::from_str(row_text(&row, 0)?)
             .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
         let writer: RemoteWriterAuthorityV1 = serde_json::from_str(row_text(&row, 1)?)

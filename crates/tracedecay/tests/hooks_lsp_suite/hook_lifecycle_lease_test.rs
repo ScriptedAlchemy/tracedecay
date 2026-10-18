@@ -3,6 +3,10 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_runtime_core::lifecycle_lease::{
+    ExclusiveLeaseAttempt, try_acquire_exclusive_for_profile,
+};
+
 use super::common::{
     apply_tracedecay_home_env, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
@@ -38,6 +42,10 @@ fn native_hook_commands() -> Vec<(&'static str, Vec<u8>)> {
     );
     let opencode_stop = fixture_request(opencode, "stop");
     let opencode_tool_after = fixture_request(opencode, "post_tool_use");
+    let pi_agent_end = include_bytes!(
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/pi/agent-end.json"
+    )
+    .to_vec();
 
     vec![
         ("hook-prompt-submit", claude_stop.clone()),
@@ -70,6 +78,7 @@ fn native_hook_commands() -> Vec<(&'static str, Vec<u8>)> {
         ("hook-kimi-event", kimi_edit),
         ("hook-opencode-event", opencode_stop),
         ("hook-opencode-tool-after", opencode_tool_after),
+        ("hook-pi-event", pi_agent_end),
     ]
 }
 
@@ -84,9 +93,15 @@ fn fixture_request(document: &str, identity: &str) -> Vec<u8> {
     serde_json::to_vec(&event["request"]).unwrap()
 }
 
+/// Rebinds a recorded fixture's portable `cwd` placeholder to this test's
+/// enrollment. A payload that names no `cwd` is returned unchanged: its host
+/// resolves the project from the hook process's working directory, and adding
+/// a field the host never sends would stop being the production shape.
 fn payload_with_enrolled_cwd(payload: &[u8], project: &Path) -> Vec<u8> {
     let mut payload: serde_json::Value = serde_json::from_slice(payload).unwrap();
-    payload["cwd"] = serde_json::Value::String(project.to_string_lossy().into_owned());
+    if payload.get("cwd").is_some() {
+        payload["cwd"] = serde_json::Value::String(project.to_string_lossy().into_owned());
+    }
     serde_json::to_vec(&payload).unwrap()
 }
 
@@ -143,7 +158,8 @@ fn native_host_hooks_do_not_create_a_missing_profile() {
             | "hook-cursor-post-tool-use"
             | "hook-kimi-event"
             | "hook-opencode-event"
-            | "hook-opencode-tool-after" => b"",
+            | "hook-opencode-tool-after"
+            | "hook-pi-event" => b"",
             // Cursor sessionStart has a host-specific response even when no
             // project is bound: empty context and no session environment.
             "hook-cursor-session-start" => b"{\"additional_context\":\"\",\"env\":{}}\n",
@@ -163,30 +179,28 @@ fn native_host_hooks_do_not_create_a_missing_profile() {
 }
 
 #[test]
-fn cursor_before_submit_prompt_remains_capture_only() {
-    let temp = tempfile::tempdir().unwrap();
-    let payload = serde_json::json!({
-        "hook_event_name": "beforeSubmitPrompt",
-        "conversation_id": "cursor-prompt-session",
-        "generation_id": "cursor-prompt-generation",
-        "prompt": "inspect the current change",
-        "workspace_roots": [temp.path()],
-    })
-    .to_string();
+fn native_prompts_reject_invalid_profile_identity_without_ingesting() {
+    for hook in ["hook-codex-user-prompt-submit", "hook-kiro-prompt-submit"] {
+        let home = tempfile::tempdir().unwrap();
+        let profile = home.path().join(".tracedecay");
+        std::fs::create_dir(&profile).unwrap();
+        let identity = profile.join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME);
+        std::fs::write(&identity, b"{}").unwrap();
+        let event = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "unbound-prompt-session",
+            "cwd": home.path(),
+            "prompt": "inspect the current change",
+        });
 
-    let output = run_hook(
-        temp.path(),
-        "hook-cursor-before-submit-prompt",
-        Some(payload.as_bytes()),
-    );
+        let output = run_hook(home.path(), hook, Some(event.to_string().as_bytes()));
 
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"{}\n", "{output:?}");
-    assert!(output.stderr.is_empty(), "{output:?}");
-    assert!(
-        !temp.path().join(".tracedecay").exists(),
-        "capture-only denial surface must not create profile state"
-    );
+        assert!(!output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert_eq!(std::fs::read(identity).unwrap(), b"{}");
+        assert!(!profile.join("global.db").exists());
+        assert!(!profile.join("sessions.db").exists());
+    }
 }
 
 #[test]
@@ -282,21 +296,32 @@ fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
             "hook-opencode-event",
             serde_json::json!({
                 "id": "opencode-event",
-                "type": "session.idle",
-                "properties": { "sessionID": "opencode-session" },
+                "created": 0,
+                "type": "session.execution.succeeded",
+                "data": { "sessionID": "opencode-session" },
             }),
             b"".as_slice(),
         ),
         (
             "hook-opencode-tool-after",
             serde_json::json!({
-                "input": {
-                    "tool": "apply_patch",
-                    "sessionID": "opencode-session",
-                    "callID": "call-1",
-                    "args": { "patchText": "*** Begin Patch\n*** End Patch" },
-                },
-                "output": { "title": "Done", "output": "Done" },
+                "tool": "patch",
+                "sessionID": "opencode-session",
+                "id": "call-1",
+                "input": { "patchText": "*** Begin Patch\n*** End Patch" },
+                "status": "completed",
+                "result": { "content": [] },
+            }),
+            b"".as_slice(),
+        ),
+        (
+            "hook-pi-event",
+            serde_json::json!({
+                "hook_event_name": "session_start",
+                "id": "pi-event",
+                "session_id": "pi-session",
+                "cwd": temp.path(),
+                "reason": "startup",
             }),
             b"".as_slice(),
         ),
@@ -312,11 +337,8 @@ fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
 
 #[test]
 fn native_hook_captures_only_bound_transport_spool_records() {
-    use tracedecay_hooks::{
-        HookCapabilityV1, HookConfigurationFileWriterV1, HookConfigurationPublisherV1,
-        HookConfigurationSnapshotV1, HookEventFamily, HookHostV1, HookScopeBindingV1,
-        HookSpoolConfigV1, HookSpoolV1,
-    };
+    use tracedecay_domain::NativeHostIdentityV1;
+    use tracedecay_hooks::{HookSpoolConfigV1, HookSpoolV1};
 
     let temp = tempfile::tempdir().unwrap();
     let opencode = include_str!(
@@ -325,8 +347,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
     let cases = [
         (
             "hook-claude-post-tool-use",
-            HookHostV1::ClaudeCode,
-            HookEventFamily::ToolLifecycle,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
             )
@@ -334,31 +355,40 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-stop",
-            HookHostV1::ClaudeCode,
-            HookEventFamily::SessionBoundary,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json")
                 .to_vec(),
         ),
         (
             "hook-codex-stop",
-            HookHostV1::Codex,
-            HookEventFamily::SessionBoundary,
+            NativeHostIdentityV1::Codex,
             include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json")
                 .to_vec(),
         ),
         (
             "hook-cursor-after-file-edit",
-            HookHostV1::CursorDesktop,
-            HookEventFamily::SavedEdit,
+            NativeHostIdentityV1::CursorDesktop,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
             )
             .to_vec(),
         ),
         (
+            "hook-cursor-stop",
+            NativeHostIdentityV1::CursorDesktop,
+            serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "stop",
+                "conversation_id": "cursor-stop-session",
+                "generation_id": "cursor-stop-generation",
+                "model": "fixture-model",
+                "status": "completed",
+                "loop_count": 0,
+            }))
+            .unwrap(),
+        ),
+        (
             "hook-hermes-terminal-receipt",
-            HookHostV1::Hermes,
-            HookEventFamily::ToolLifecycle,
+            NativeHostIdentityV1::Hermes,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json"
             )
@@ -366,8 +396,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-kimi-event",
-            HookHostV1::KimiCode,
-            HookEventFamily::SavedEdit,
+            NativeHostIdentityV1::KimiCode,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
             )
@@ -375,19 +404,41 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-opencode-event",
-            HookHostV1::OpenCode,
-            HookEventFamily::SessionBoundary,
+            NativeHostIdentityV1::OpenCode,
             fixture_request(opencode, "stop"),
         ),
         (
             "hook-opencode-tool-after",
-            HookHostV1::OpenCode,
-            HookEventFamily::SavedEdit,
+            NativeHostIdentityV1::OpenCode,
             fixture_request(opencode, "post_tool_use"),
+        ),
+        (
+            "hook-pi-event",
+            NativeHostIdentityV1::Pi,
+            include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/pi/session-start.json")
+                .to_vec(),
+        ),
+        (
+            "hook-pi-event",
+            NativeHostIdentityV1::Pi,
+            include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/pi/agent-end.json")
+                .to_vec(),
+        ),
+        (
+            "hook-droid-event",
+            NativeHostIdentityV1::FactoryDroid,
+            include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/droid/session-start.json")
+                .to_vec(),
+        ),
+        (
+            "hook-droid-event",
+            NativeHostIdentityV1::FactoryDroid,
+            include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/droid/stop.json")
+                .to_vec(),
         ),
     ];
 
-    for (index, (hook, host, family, payload)) in cases.into_iter().enumerate() {
+    for (index, (hook, host, payload)) in cases.into_iter().enumerate() {
         let home = temp.path().join(format!("home-{index}"));
         let project = temp.path().join(format!("project-{index}"));
         std::fs::create_dir_all(&home).unwrap();
@@ -398,62 +449,87 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             &(project_id.clone()),
         )
         .unwrap();
-        let data_root = home.join(".tracedecay/projects").join(&project_id);
-        std::fs::create_dir_all(&data_root).unwrap();
-        let now = test_now();
-        let binding = HookScopeBindingV1 {
-            host,
-            project_id: [1; 16],
-            repository_id: [2; 16],
-            worktree_id: [3; 16],
-            worktree_epoch: 4,
-            binding_token: [5; 32],
-            capabilities: vec![HookCapabilityV1 {
-                family,
-                support: tracedecay_hooks::HookEventSupportV1::Native,
-            }],
-        };
-        HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(
-            tracedecay_hooks::hook_configuration_path(&data_root, host),
-        ))
-        .publish(HookConfigurationSnapshotV1 {
-            schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
-            revision: 1,
-            published_at: tracedecay_domain::UtcMicros(now.0 - 1_000_000),
-            expires_at: tracedecay_domain::UtcMicros(now.0 + 60_000_000),
-            binding,
-        })
+        let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+            &project,
+            &home.join(".tracedecay"),
+            &project_id,
+        )
         .unwrap();
+        tracedecay_agent_hosts::hooks::publish_hook_bindings(
+            &tracedecay::hook_runtime(tracedecay_runtime_core::config::ProfileRoot::under_home(
+                &home,
+            )),
+            &layout,
+        )
+        .unwrap();
+        let data_root = layout.data_root;
 
-        // Claude's response-capable PostToolUse handler resolves its project
-        // identity from the payload CWD rather than the process CWD. The
-        // recorded host fixture intentionally uses a portable workspace path,
-        // so bind this production-shaped payload to this test's enrollment.
-        let payload = if hook == "hook-claude-post-tool-use" {
-            payload_with_enrolled_cwd(&payload, &project)
-        } else {
-            payload
-        };
+        // Every response-capable handler resolves project identity from the
+        // payload CWD rather than the process CWD, and deliberately refuses to
+        // re-attribute a named-but-unknown directory to wherever the hook
+        // happens to run. The recorded host fixtures intentionally use a
+        // portable workspace path, so bind these production-shaped payloads to
+        // this test's enrollment.
+        let payload = payload_with_enrolled_cwd(&payload, &project);
         let output = run_hook_at(&home, &project, hook, Some(&payload));
 
         assert!(output.status.success(), "{hook}: {output:?}");
-        let expected_stdout: &[u8] = if hook == "hook-claude-post-tool-use" {
-            b""
-        } else {
-            b"{}\n"
+        let expected_stdout: &[u8] = match hook {
+            // These providers support immediate context for PostToolUse. With
+            // no bound daemon guidance the canonical response journey emits no
+            // JSON, exactly as `native_host_hooks_do_not_create_a_missing_profile`
+            // pins for the unbound case: a published binding changes where the
+            // event is spooled, not whether context is fabricated.
+            "hook-claude-post-tool-use"
+            | "hook-kimi-event"
+            | "hook-opencode-event"
+            | "hook-opencode-tool-after"
+            | "hook-pi-event"
+            | "hook-droid-event" => b"",
+            _ => b"{}\n",
         };
         assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");
         assert!(output.stderr.is_empty(), "{hook}: {output:?}");
-        if hook == "hook-claude-post-tool-use" {
+        // A host redelivers a callback whose exit it could not observe, and
+        // sibling hooks fire concurrently for one edit. The redelivery names
+        // the same event and must settle as the capture already recorded, on
+        // the response lane and the native capture lane alike.
+        if matches!(
+            hook,
+            "hook-claude-post-tool-use" | "hook-cursor-after-file-edit"
+        ) {
             let replay = run_hook_at(&home, &project, hook, Some(&payload));
             assert!(replay.status.success(), "{hook} replay: {replay:?}");
             assert_eq!(replay.stdout, expected_stdout, "{hook} replay: {replay:?}");
             assert!(replay.stderr.is_empty(), "{hook} replay: {replay:?}");
         }
-        assert!(!home.join(".tracedecay/lifecycle.lock").exists());
+        assert!(home.join(".tracedecay/lifecycle.lock").is_file(), "{hook}");
+        let maintenance = try_acquire_exclusive_for_profile(
+            &home.join(".tracedecay"),
+            "verify completed hook released its lease",
+        )
+        .unwrap();
+        assert!(
+            matches!(maintenance, ExclusiveLeaseAttempt::Acquired(_)),
+            "{hook} retained its lifecycle lease after exit"
+        );
+        drop(maintenance);
         assert!(!home.join(".tracedecay/global.db").exists());
         assert!(!data_root.join("tracedecay.db").exists());
         assert!(!data_root.join("sessions.db").exists());
+        if hook == "hook-stop" {
+            let deliveries = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+                tracedecay_hooks::hook_delivery_receipt_spool_root(&data_root, host),
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
+            let pending = deliveries.pending(2).unwrap();
+            assert_eq!(pending.len(), 1, "offline output must retain its receipt");
+            assert_eq!(
+                pending[0].settlement.outcome,
+                tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+            );
+        }
         let spool_root = data_root.join("hook-v2-spool").join(host.hook_key());
         let (mut spool, report) =
             HookSpoolV1::open(&spool_root, HookSpoolConfigV1::stock(host), test_now()).unwrap();
@@ -467,7 +543,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
 
 // The lifecycle-guarded stdin hook surface is retired: `hook-user-session-review`
 // was the only stdin hook that acquired the lifecycle lease, and the native
-// daemon cutover (58717f2ac2) deleted the subcommand — session review now runs
+// daemon cutover (58717f2ac2) deleted the subcommand, session review now runs
 // as a bounded in-process daemon action. No stdin hook engages the lifecycle
 // lock anymore, so the external-exclusive-lease quiesce and lifecycle-path
 // drain journeys have no remaining production surface.
@@ -521,5 +597,22 @@ fn bound_claude_hook_returns_only_the_transport_response() {
 
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
-    assert_eq!(output.stdout, b"{}\n");
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_else(|| panic!("registered SessionStart carries the skill mandate: {response}"));
+    assert!(
+        context.starts_with("TraceDecay keeps a code graph")
+            && context.contains("`routing-tracedecay`"),
+        "{context}"
+    );
+    assert_eq!(
+        response,
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        })
+    );
 }

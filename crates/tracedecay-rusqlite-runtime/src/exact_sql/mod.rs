@@ -4,16 +4,13 @@
 //! module exposes owned values, never a SQLite connection or filesystem path.
 
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicI64, Ordering},
-        mpsc,
-    },
+    collections::BTreeMap,
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
+use asupersync::{Cx, channel::mpsc as actor_mpsc};
 use rusqlite::{Connection, TransactionBehavior, params_from_iter};
-use tokio::sync::mpsc as tokio_mpsc;
 use tracedecay_store::{
     OperationPriorityV1, StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
 };
@@ -28,41 +25,44 @@ use crate::{
 
 const MAX_QUERY_ROWS: usize = 10_000;
 const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
-const MAX_SQL_BYTES: usize = 1024 * 1024;
+/// SQLite's statement-length limit, less the authority suffix
+/// [`guard::prepare_cached`] appends to a cached statement's text.
+const MAX_SQL_BYTES: usize = 1024 * 1024 - guard::MAX_CACHE_KEY_SUFFIX_BYTES;
 const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXACT_SQL_ATTACHMENTS: i32 = 4;
 const EXACT_SQL_PROGRESS_INTERVAL_OPS: i32 = 1_000;
-#[cfg(not(test))]
-const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
-// Test-mode limits keep the expiry paths exercisable in seconds. They must
-// still leave headroom for this crate's own near-cap payload tests (multiple
-// ~4 MiB replay-page statements per cleanup transaction) on hosted-runner
-// disks, where one such insert plus fsync can take most of a second.
-#[cfg(test)]
-const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(2);
-#[cfg(not(test))]
+pub(crate) const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
 const EXACT_SQL_TRANSACTION_IDLE_LIMIT: Duration = Duration::from_secs(30);
-#[cfg(test)]
-const EXACT_SQL_TRANSACTION_IDLE_LIMIT: Duration = Duration::from_secs(2);
-#[cfg(not(test))]
 const EXACT_SQL_TRANSACTION_LIMIT: Duration = Duration::from_secs(120);
-#[cfg(test)]
-const EXACT_SQL_TRANSACTION_LIMIT: Duration = Duration::from_secs(4);
 const ROW_ALLOCATION_OVERHEAD: usize =
     std::mem::size_of::<ExactSqlRow>() + std::mem::size_of::<Vec<ExactSqlValue>>();
 const CELL_ALLOCATION_OVERHEAD: usize = std::mem::size_of::<ExactSqlValue>();
 
+mod clock;
+#[cfg(test)]
+pub(crate) use clock::fake::TaskClock;
+mod column;
 mod command;
 mod guard;
+mod json;
 mod types;
 
+pub(crate) use column::{
+    ExactSqlColumnError, integer_at, integer_column, optional_text, optional_text_at,
+    take_optional_text, take_text, text, text_at, text_column,
+};
+pub(crate) use json::{decode as decode_json, encode as encode_json};
 pub use types::*;
 
+pub use command::{ExactSqlJobTransaction, JobPolicy};
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
-use command::TransactionCommand;
-use guard::{AuthorizedDatabaseOperation, InsertTracker, with_exact_sql_guard};
+use command::{TransactionCommand, TransactionLeaseState};
+pub(crate) use guard::{authorize_connection, connection_identity};
+
+use crate::connection::ConnectionMode;
+use guard::{AuthorizedDatabaseOperation, ExactSqlAuthority, with_exact_sql_guard};
 
 type ExactSqlQuery = dyn Fn(ExactSqlStatement, OperationPriorityV1, Duration) -> Result<ExactSqlRows, ExactSqlError>
     + Send
@@ -74,8 +74,8 @@ type ExactSqlHealthSnapshotFactory =
     dyn Fn(Duration) -> Result<ExactSqlReadSnapshot, ExactSqlError> + Send + Sync;
 type ReaderPoolOccupancyRead = dyn Fn() -> Option<ReaderPoolSnapshot> + Send + Sync;
 type ReaderMemoryRelease = dyn Fn() -> Result<MemoryReleaseOutcome, ExactSqlError> + Send + Sync;
-type ExactSqlSnapshotQuery =
-    dyn FnMut(ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> + Send;
+type ExactSqlSnapshotQuery = dyn FnMut(ExactSqlStatement, ExactSqlStatementBudget) -> Result<ExactSqlRows, ExactSqlError>
+    + Send;
 type StoreSizeTelemetryRead = dyn Fn(
         Duration,
         &mut dyn FnMut() -> Option<UnavailableReasonV1>,
@@ -93,7 +93,7 @@ type TableSizeTelemetryRead = dyn Fn(
 pub struct ExactSqlHandle {
     binding: StoreRuntimeBindingV1,
     locator: VerifiedStoreLocatorV1,
-    writer: Option<tokio_mpsc::Sender<WriterCommand>>,
+    writer: Option<actor_mpsc::Sender<WriterCommand>>,
     query: Arc<ExactSqlQuery>,
     snapshot: Arc<ExactSqlSnapshotFactory>,
     health_snapshot: Arc<ExactSqlHealthSnapshotFactory>,
@@ -101,8 +101,126 @@ pub struct ExactSqlHandle {
     table_size_telemetry: Arc<TableSizeTelemetryRead>,
     reader_pool_occupancy: Arc<ReaderPoolOccupancyRead>,
     release_reader_memory: Arc<ReaderMemoryRelease>,
-    last_insert_rowid: Arc<AtomicI64>,
     write_authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
+}
+
+/// Waits for the serialized writer actor's reply by parking the calling
+/// thread.
+///
+/// Every synchronous handle storage port in this workspace
+/// (`WorkAttemptStoragePort`, `WorkflowRunReadPort`, and their siblings)
+/// reaches the writer through these one-shot replies, so its caller must run
+/// where a thread may park: a
+/// blocking-pool thread (`native_runtime::spawn_blocking`,
+/// `native_runtime::off_native_thread`, `NativeTask::spawn_off_native_thread`)
+/// or a dedicated thread. A wait on a native runtime thread (a worker or a
+/// `block_on` caller; its blocking pool carries no runtime handle) parks that
+/// thread and every task queued on it, so each one is counted in
+/// [`native_thread_writer_waits`] and the first at each call site is logged.
+#[track_caller]
+fn recv_writer_reply<T>(
+    response: async_channel::Receiver<T>,
+) -> Result<T, async_channel::RecvError> {
+    if crate::native_runtime::on_native_thread() {
+        NATIVE_THREAD_WRITER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if record_native_thread_wait("writer", std::panic::Location::caller()) {
+            tracing::warn!(
+                call_site = %std::panic::Location::caller(),
+                backtrace = %std::backtrace::Backtrace::force_capture(),
+                "synchronous storage port parked a native runtime thread waiting on the writer; later hits at this call site are counted only (native_thread_writer_waits)"
+            );
+        }
+    }
+    response.recv_blocking()
+}
+
+fn refuse_on_pool() -> Result<(), ExactSqlError> {
+    if crate::storage_pool::on_pool() {
+        return Err(ExactSqlError::WriterUnavailable);
+    }
+    Ok(())
+}
+
+static NATIVE_THREAD_WRITER_WAITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+type WaitSiteKey = (&'static str, &'static std::panic::Location<'static>);
+
+static NATIVE_THREAD_WAIT_SITES: Mutex<BTreeMap<WaitSiteKey, u64>> = Mutex::new(BTreeMap::new());
+
+/// Counts one native-thread storage wait at its call site and reports whether
+/// it is the first there. Only that first hit is logged, so a hot site cannot
+/// flood the journal.
+fn record_native_thread_wait(
+    kind: &'static str,
+    site: &'static std::panic::Location<'static>,
+) -> bool {
+    let mut sites = NATIVE_THREAD_WAIT_SITES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hits = sites.entry((kind, site)).or_insert(0);
+    *hits += 1;
+    *hits == 1
+}
+
+/// One call site that parked a native runtime thread on storage, with its hit
+/// count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageWaitSite {
+    /// `"reader"` or `"writer"`.
+    pub kind: &'static str,
+    pub call_site: String,
+    pub hits: u64,
+}
+
+/// Per-call-site breakdown of [`native_thread_reader_waits`] and
+/// [`native_thread_writer_waits`].
+#[must_use]
+pub fn native_thread_storage_wait_sites() -> Vec<StorageWaitSite> {
+    NATIVE_THREAD_WAIT_SITES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|((kind, site), hits)| StorageWaitSite {
+            kind,
+            call_site: site.to_string(),
+            hits: *hits,
+        })
+        .collect()
+}
+
+/// Synchronous writer waits this process ran on a native runtime thread. Each
+/// one parked that thread; zero is the only healthy value.
+#[must_use]
+pub fn native_thread_writer_waits() -> u64 {
+    NATIVE_THREAD_WRITER_WAITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Counts a synchronous read that is about to park a native runtime
+/// thread on reader admission or a reader worker's reply, as
+/// `recv_writer_reply` does for writer waits.
+#[track_caller]
+pub(crate) fn note_native_thread_reader_wait() {
+    if crate::native_runtime::on_native_thread() {
+        NATIVE_THREAD_READER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if record_native_thread_wait("reader", std::panic::Location::caller()) {
+            tracing::warn!(
+                call_site = %std::panic::Location::caller(),
+                backtrace = %std::backtrace::Backtrace::force_capture(),
+                "synchronous storage read parked a native runtime thread waiting on a reader; later hits at this call site are counted only (native_thread_reader_waits)"
+            );
+        }
+    }
+}
+
+static NATIVE_THREAD_READER_WAITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Synchronous reads this process ran on a native runtime thread. Each one
+/// parked that thread; zero is the only healthy value.
+#[must_use]
+pub fn native_thread_reader_waits() -> u64 {
+    NATIVE_THREAD_READER_WAITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ExactSqlHandle {
@@ -146,7 +264,7 @@ impl ExactSqlHandle {
     fn from_readers<E: ReaderQueryExecutor>(
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
-        writer: Option<tokio_mpsc::Sender<WriterCommand>>,
+        writer: Option<actor_mpsc::Sender<WriterCommand>>,
         readers: &ReaderPool<E>,
     ) -> Self {
         let query_readers = readers.downgrade();
@@ -178,7 +296,11 @@ impl ExactSqlHandle {
                             "exact SQL reader pool is closed".to_owned(),
                         )
                     })?
-                    .begin_exact_sql_snapshot(priority, max_wait)
+                    .begin_exact_sql_snapshot(
+                        priority,
+                        max_wait,
+                        crate::reader::READ_SNAPSHOT_LIFETIME,
+                    )
             }),
             health_snapshot: Arc::new(move |max_wait| {
                 health_snapshot_readers
@@ -218,7 +340,6 @@ impl ExactSqlHandle {
                     reason: MemoryReleaseNoOpReason::ReaderPoolClosed,
                 }),
             }),
-            last_insert_rowid: Arc::new(AtomicI64::new(0)),
             write_authority: None,
         }
     }
@@ -243,7 +364,6 @@ impl ExactSqlHandle {
             table_size_telemetry: Arc::clone(&self.table_size_telemetry),
             reader_pool_occupancy: Arc::clone(&self.reader_pool_occupancy),
             release_reader_memory: Arc::clone(&self.release_reader_memory),
-            last_insert_rowid: Arc::clone(&self.last_insert_rowid),
             write_authority: None,
         }
     }
@@ -257,10 +377,6 @@ impl ExactSqlHandle {
         }
         self.write_authority = Some(authority);
         Ok(self)
-    }
-
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.last_insert_rowid.load(Ordering::Acquire)
     }
 
     /// Live reader-pool occupancy, or `None` once the pool has been closed.
@@ -293,6 +409,7 @@ impl ExactSqlHandle {
         (self.table_size_telemetry)(reader_wait, &mut interrupted)
     }
 
+    #[track_caller]
     pub fn execute(
         &self,
         statement: ExactSqlStatement,
@@ -303,6 +420,48 @@ impl ExactSqlHandle {
         }
     }
 
+    pub async fn execute_async(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlExecuteResult, ExactSqlError> {
+        match self
+            .dispatch_writer_async(SqlRequest::Execute(statement))
+            .await?
+        {
+            SqlResult::Executed(result) => Ok(result),
+            _ => Err(ExactSqlError::WriterUnavailable),
+        }
+    }
+
+    /// Runs one statement that returns rows on the writer actor. Once admitted,
+    /// the write completes even when its caller abandons the reply waiter.
+    #[track_caller]
+    pub fn execute_returning(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        statement.validate()?;
+        match self.dispatch_writer(SqlRequest::ExecuteReturning(statement))? {
+            SqlResult::Queried(rows) => Ok(rows),
+            _ => Err(ExactSqlError::WriterUnavailable),
+        }
+    }
+
+    pub async fn execute_returning_async(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        statement.validate()?;
+        match self
+            .dispatch_writer_async(SqlRequest::ExecuteReturning(statement))
+            .await?
+        {
+            SqlResult::Queried(rows) => Ok(rows),
+            _ => Err(ExactSqlError::WriterUnavailable),
+        }
+    }
+
+    #[track_caller]
     pub fn validate(&self, statement: ExactSqlStatement) -> Result<(), ExactSqlError> {
         match self.dispatch_writer(SqlRequest::Validate(statement))? {
             SqlResult::Validated => Ok(()),
@@ -310,7 +469,18 @@ impl ExactSqlHandle {
         }
     }
 
+    pub async fn validate_async(&self, statement: ExactSqlStatement) -> Result<(), ExactSqlError> {
+        match self
+            .dispatch_writer_async(SqlRequest::Validate(statement))
+            .await?
+        {
+            SqlResult::Validated => Ok(()),
+            _ => Err(ExactSqlError::WriterUnavailable),
+        }
+    }
+
     /// Interactive read. Admits against the whole general reader lane.
+    #[track_caller]
     pub fn query(
         &self,
         statement: ExactSqlStatement,
@@ -324,6 +494,7 @@ impl ExactSqlHandle {
     /// Callers that know they are bulk or maintenance work pass `Background`
     /// so the reader pool keeps a slice of the general lane free for
     /// interactive reads.
+    #[track_caller]
     pub fn query_with_priority(
         &self,
         statement: ExactSqlStatement,
@@ -331,12 +502,124 @@ impl ExactSqlHandle {
         max_wait: Duration,
     ) -> Result<ExactSqlRows, ExactSqlError> {
         statement.validate()?;
+        note_native_thread_reader_wait();
         (self.query)(statement, priority, max_wait)
     }
 
+    /// Awaited interactive read. Reader admission and the query run as one
+    /// job on the blocking pool, so the awaiting task parks no runtime thread.
+    /// The storage executor replaces the hop (docs/plans/storage, step 7).
+    pub async fn query_async(
+        &self,
+        statement: ExactSqlStatement,
+        max_wait: Duration,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        statement.validate()?;
+        let query = Arc::clone(&self.query);
+        crate::native_runtime::spawn_blocking(move || {
+            query(statement, OperationPriorityV1::Foreground, max_wait)
+        })
+        .await
+        .map_err(ExactSqlError::ReaderUnavailable)?
+    }
+
+    /// Runs `job` as one write transaction on the writer thread: begin
+    /// IMMEDIATE, the job's statements with no round trip between them, then
+    /// commit when the job returns `Ok` and rollback when it returns `Err`.
+    /// The outer error is the transaction's own failure; the inner result is
+    /// the job's verdict. A job is `Fn` over owned inputs so the storage
+    /// executor can run it again after an interrupted read fence.
+    pub async fn transact<R, E, F>(&self, job: F) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.transact_with_policy(JobPolicy::Bounded, job).await
+    }
+
+    /// [`Self::transact`] under `policy`.
+    pub async fn transact_with_policy<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(policy, move |transaction| Ok(job(transaction)))
+            .await
+    }
+
+    /// [`Self::transact_with_policy`] for an async body, so an async helper
+    /// over the job's statements runs unchanged. The body is polled once
+    /// inside the job: its statements are synchronous, so it completes on that
+    /// poll unless it awaited something else, which would hold the writer
+    /// across the wait. Such a job rolls back with
+    /// [`ExactSqlError::JobAwaitedForeignFuture`].
+    pub async fn transact_async<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        body: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: AsyncFn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(policy, move |transaction| {
+            complete_now(body(transaction)).ok_or(ExactSqlError::JobAwaitedForeignFuture)
+        })
+        .await
+    }
+
+    async fn run_job<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<Result<R, E>, ExactSqlError>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        let (outcome, verdict) = async_channel::bounded(1);
+        let (reply, response) = async_channel::bounded(1);
+        let job: command::WriterJob = Box::new(move |transaction| {
+            let result = job(transaction)?;
+            let commit = result.is_ok();
+            let _ = outcome.try_send(result);
+            Ok(commit)
+        });
+        self.writer
+            .as_ref()
+            .ok_or(ExactSqlError::WriterUnavailable)?
+            .try_send(WriterCommand::Job {
+                job,
+                policy,
+                reply,
+                authority: self.write_authority.clone(),
+            })
+            .map_err(map_writer_send_error)?;
+        response
+            .recv()
+            .await
+            .map_err(|_| ExactSqlError::WriterUnavailable)??;
+        verdict
+            .try_recv()
+            .map_err(|_| ExactSqlError::WriterUnavailable)
+    }
+
     /// Checkpoints and truncates the WAL on the serialized writer connection.
-    pub fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows, ExactSqlError> {
-        let (reply, response) = mpsc::sync_channel(1);
+    fn enqueue_checkpoint_wal_truncate(
+        &self,
+    ) -> Result<async_channel::Receiver<Result<ExactSqlRows, ExactSqlError>>, ExactSqlError> {
+        let (reply, response) = async_channel::bounded(1);
         self.writer
             .as_ref()
             .ok_or(ExactSqlError::WriterUnavailable)?
@@ -345,14 +628,41 @@ impl ExactSqlHandle {
                 authority: self.write_authority.clone(),
             })
             .map_err(map_writer_send_error)?;
-        response
-            .recv()
+        Ok(response)
+    }
+
+    #[track_caller]
+    pub fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows, ExactSqlError> {
+        refuse_on_pool()?;
+        recv_writer_reply(self.enqueue_checkpoint_wal_truncate()?)
             .map_err(|_| ExactSqlError::WriterUnavailable)?
     }
 
+    pub async fn checkpoint_wal_truncate_async(&self) -> Result<ExactSqlRows, ExactSqlError> {
+        self.enqueue_checkpoint_wal_truncate()?
+            .recv()
+            .await
+            .map_err(|_| ExactSqlError::WriterUnavailable)?
+    }
+
+    #[track_caller]
     pub fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult, ExactSqlError> {
         validate_batch(&sql)?;
         match self.dispatch_writer(SqlRequest::ExecuteBatch(sql))? {
+            SqlResult::BatchExecuted(result) => Ok(result),
+            _ => Err(ExactSqlError::WriterUnavailable),
+        }
+    }
+
+    pub async fn execute_batch_async(
+        &self,
+        sql: String,
+    ) -> Result<ExactSqlBatchResult, ExactSqlError> {
+        validate_batch(&sql)?;
+        match self
+            .dispatch_writer_async(SqlRequest::ExecuteBatch(sql))
+            .await?
+        {
             SqlResult::BatchExecuted(result) => Ok(result),
             _ => Err(ExactSqlError::WriterUnavailable),
         }
@@ -363,8 +673,9 @@ impl ExactSqlHandle {
     /// Reader caches are released through the reader pool. A writer, when
     /// present, is released on the writer actor. A handle that cannot release
     /// anything reports a typed no-op instead of [`ExactSqlError::WriterUnavailable`];
-    /// a reader release that *errored* is never a no-op — it propagates so
+    /// a reader release that *errored* is never a no-op, it propagates so
     /// the maintenance caller's degraded log fires.
+    #[track_caller]
     pub fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let readers = (self.release_reader_memory)()?;
         let writer = if self.writer.is_some() {
@@ -380,47 +691,66 @@ impl ExactSqlHandle {
         Ok(merge_memory_release(readers, writer))
     }
 
-    /// Enables incremental auto-vacuum through its fixed maintenance rebuild.
-    pub fn repair_incremental_auto_vacuum(&self) -> Result<(), ExactSqlError> {
-        let (reply, response) = mpsc::sync_channel(1);
-        self.writer
-            .as_ref()
-            .ok_or(ExactSqlError::WriterUnavailable)?
-            .try_send(WriterCommand::Vacuum {
-                reply,
-                authority: self.write_authority.clone(),
-            })
-            .map_err(map_writer_send_error)?;
-        response
-            .recv()
-            .map_err(|_| ExactSqlError::WriterUnavailable)?
+    /// Reader cache work still executes off the async runtime; writer work
+    /// awaits the same serialized command protocol as ordinary writes.
+    pub async fn release_connection_memory_async(
+        &self,
+        cx: &Cx,
+    ) -> Result<MemoryReleaseOutcome, ExactSqlError> {
+        let release_readers = Arc::clone(&self.release_reader_memory);
+        let mut task = cx
+            .spawn_blocking(move |_| release_readers())
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+        let readers = task
+            .join(cx)
+            .await
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))??;
+        let writer = if self.writer.is_some() {
+            match self
+                .dispatch_writer_async(SqlRequest::ExecuteBatch("PRAGMA shrink_memory".to_owned()))
+                .await
+            {
+                Ok(_) => true,
+                Err(ExactSqlError::WriterUnavailable) => false,
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
+        Ok(merge_memory_release(readers, writer))
     }
 
     /// Interactive read snapshot. Admits against the whole general lane.
+    #[track_caller]
     pub fn begin_read_snapshot(
         &self,
         max_wait: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
-        hotpath::measure_block!("rusqlite.begin_read_snapshot", {
+        {
+            let _span = tracing::trace_span!("rusqlite.begin_read_snapshot").entered();
             self.begin_read_snapshot_with_priority(OperationPriorityV1::Foreground, max_wait)
-        })
+        }
     }
 
     /// Read snapshot under an explicit priority. A pinned snapshot holds its
     /// worker for its whole lifetime, so declaring bulk work `Background` here
     /// matters more than for a one-shot query.
+    #[track_caller]
     pub fn begin_read_snapshot_with_priority(
         &self,
         priority: OperationPriorityV1,
         max_wait: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
+        note_native_thread_reader_wait();
         (self.snapshot)(priority, max_wait)
     }
 
+    #[track_caller]
     pub fn begin_health_read_snapshot(
         &self,
         max_wait: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
+        note_native_thread_reader_wait();
         (self.health_snapshot)(max_wait)
     }
 
@@ -429,30 +759,45 @@ impl ExactSqlHandle {
     ///
     /// The span covers dispatching to the exact-SQL worker, waiting for that
     /// single thread to reach this command, and the lock acquisition it then
-    /// performs — not the lock alone. Long-running commands on the same worker
+    /// performs, not the lock alone. Long-running commands on the same worker
     /// (vacuum, WAL truncation, a long-lease transaction) are therefore visible
     /// here as begin latency even when SQLite was never contended, which is the
     /// distinction `rusqlite.exact_sql.write_lock` exists to make.
+    #[track_caller]
     pub fn begin_immediate(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
-        hotpath::measure_block!("rusqlite.exact_sql.begin_immediate", {
+        {
+            let _span = tracing::trace_span!("rusqlite.exact_sql.begin_immediate").entered();
             self.begin_transaction(TransactionBehavior::Immediate, TransactionPolicy::Ordinary)
-        })
+        }
     }
 
+    pub async fn begin_immediate_async(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
+        self.begin_transaction_async(TransactionBehavior::Immediate, TransactionPolicy::Ordinary)
+            .await
+    }
+
+    #[track_caller]
     pub fn begin_deferred(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
-        hotpath::measure_block!("rusqlite.begin_deferred", {
+        {
+            let _span = tracing::trace_span!("rusqlite.begin_deferred").entered();
             self.begin_transaction(TransactionBehavior::Deferred, TransactionPolicy::Ordinary)
-        })
+        }
+    }
+
+    pub async fn begin_deferred_async(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
+        self.begin_transaction_async(TransactionBehavior::Deferred, TransactionPolicy::Ordinary)
+            .await
     }
 
     /// Begins the only transaction mode whose lease renews on progress.
     ///
-    /// Reserved for schema installation and full-index bulk replacement — work
+    /// Reserved for schema installation and full-index bulk replacement, work
     /// that legitimately outlives one lease while continuously committing
     /// progress. The mode is intentionally not configurable: callers must
     /// attach a live write authority and opt into the long-lease transaction
     /// and revalidated-batch APIs. Shutdown, idleness, and authority revocation remain
     /// progress-handler cancellation conditions.
+    #[track_caller]
     pub fn begin_authorized_long_lease_immediate(
         &self,
     ) -> Result<ExactSqlTransaction, ExactSqlError> {
@@ -464,22 +809,50 @@ impl ExactSqlHandle {
                 "long-lease transaction requires attached write authority".to_owned(),
             ));
         }
-        hotpath::measure_block!("rusqlite.begin_authorized_long_lease_immediate", {
-            self.begin_transaction(
-                TransactionBehavior::Immediate,
-                TransactionPolicy::AuthorizedLongLease,
-            )
-        })
+        {
+            let _span =
+                tracing::trace_span!("rusqlite.begin_authorized_long_lease_immediate").entered();
+            {
+                self.begin_transaction(
+                    TransactionBehavior::Immediate,
+                    TransactionPolicy::AuthorizedLongLease,
+                )
+            }
+        }
     }
 
-    fn begin_transaction(
+    pub async fn begin_authorized_long_lease_immediate_async(
+        &self,
+    ) -> Result<ExactSqlTransaction, ExactSqlError> {
+        if self.writer.is_none() {
+            return Err(ExactSqlError::WriterUnavailable);
+        }
+        if self.write_authority.is_none() {
+            return Err(ExactSqlError::AuthorityDenied(
+                "long-lease transaction requires attached write authority".to_owned(),
+            ));
+        }
+        self.begin_transaction_async(
+            TransactionBehavior::Immediate,
+            TransactionPolicy::AuthorizedLongLease,
+        )
+        .await
+    }
+
+    fn enqueue_transaction(
         &self,
         behavior: TransactionBehavior,
         policy: TransactionPolicy,
-    ) -> Result<ExactSqlTransaction, ExactSqlError> {
-        let (commands, receiver) = mpsc::sync_channel(1);
-        let (reply, response) = mpsc::sync_channel(1);
-        let expired = Arc::new(AtomicBool::new(false));
+    ) -> Result<
+        (
+            ExactSqlTransaction,
+            async_channel::Receiver<Result<(), ExactSqlError>>,
+        ),
+        ExactSqlError,
+    > {
+        let (commands, receiver) = async_channel::bounded(1);
+        let (reply, response) = async_channel::bounded(1);
+        let lease = Arc::new(TransactionLeaseState::default());
         self.writer
             .as_ref()
             .ok_or(ExactSqlError::WriterUnavailable)?
@@ -488,19 +861,42 @@ impl ExactSqlHandle {
                 policy,
                 receiver,
                 reply,
-                last_insert_rowid: Arc::clone(&self.last_insert_rowid),
-                expired: Arc::clone(&expired),
+                lease: Arc::clone(&lease),
                 authority: self.write_authority.clone(),
             })
             .map_err(map_writer_send_error)?;
+        Ok((
+            ExactSqlTransaction {
+                commands: Some(commands),
+                lease,
+                policy,
+            },
+            response,
+        ))
+    }
+    #[track_caller]
+    fn begin_transaction(
+        &self,
+        behavior: TransactionBehavior,
+        policy: TransactionPolicy,
+    ) -> Result<ExactSqlTransaction, ExactSqlError> {
+        refuse_on_pool()?;
+        let (transaction, response) = self.enqueue_transaction(behavior, policy)?;
+        recv_writer_reply(response).map_err(|_| ExactSqlError::WriterUnavailable)??;
+        Ok(transaction)
+    }
+
+    async fn begin_transaction_async(
+        &self,
+        behavior: TransactionBehavior,
+        policy: TransactionPolicy,
+    ) -> Result<ExactSqlTransaction, ExactSqlError> {
+        let (transaction, response) = self.enqueue_transaction(behavior, policy)?;
         response
             .recv()
+            .await
             .map_err(|_| ExactSqlError::WriterUnavailable)??;
-        Ok(ExactSqlTransaction {
-            commands: Some(commands),
-            expired,
-            policy,
-        })
+        Ok(transaction)
     }
 
     /// Measured as the whole caller round trip, like `begin_immediate`: the
@@ -509,24 +905,42 @@ impl ExactSqlHandle {
     /// `rusqlite.exact_sql.execute` span covers only the execution, so the
     /// difference between the two populations is the queue wait a busy writer
     /// imposes on one-shot commands.
+    fn enqueue_writer_request(
+        &self,
+        request: SqlRequest,
+    ) -> Result<async_channel::Receiver<Result<SqlResult, ExactSqlError>>, ExactSqlError> {
+        validate_request(&request)?;
+        let (reply, response) = async_channel::bounded(1);
+        self.writer
+            .as_ref()
+            .ok_or(ExactSqlError::WriterUnavailable)?
+            .try_send(WriterCommand::Dispatch {
+                request,
+                reply,
+                authority: self.write_authority.clone(),
+            })
+            .map_err(map_writer_send_error)?;
+        Ok(response)
+    }
+
+    #[track_caller]
     fn dispatch_writer(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
-        hotpath::measure_block!("rusqlite.exact_sql.dispatch", {
-            validate_request(&request)?;
-            let (reply, response) = mpsc::sync_channel(1);
-            self.writer
-                .as_ref()
-                .ok_or(ExactSqlError::WriterUnavailable)?
-                .try_send(WriterCommand::Dispatch {
-                    request,
-                    reply,
-                    last_insert_rowid: Arc::clone(&self.last_insert_rowid),
-                    authority: self.write_authority.clone(),
-                })
-                .map_err(map_writer_send_error)?;
-            response
-                .recv()
-                .map_err(|_| ExactSqlError::WriterUnavailable)?
-        })
+        refuse_on_pool()?;
+        {
+            let _span = tracing::trace_span!("rusqlite.exact_sql.dispatch").entered();
+            {
+                recv_writer_reply(self.enqueue_writer_request(request)?)
+                    .map_err(|_| ExactSqlError::WriterUnavailable)?
+            }
+        }
+    }
+
+    #[tracing::instrument(name = "rusqlite.exact_sql.dispatch", level = "trace", skip_all)]
+    async fn dispatch_writer_async(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
+        self.enqueue_writer_request(request)?
+            .recv()
+            .await
+            .map_err(|_| ExactSqlError::WriterUnavailable)?
     }
 }
 
@@ -537,42 +951,64 @@ pub struct ExactSqlReadSnapshot {
 impl ExactSqlReadSnapshot {
     pub(crate) fn new<F>(query: F) -> Self
     where
-        F: FnMut(ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> + Send + 'static,
+        F: FnMut(ExactSqlStatement, ExactSqlStatementBudget) -> Result<ExactSqlRows, ExactSqlError>
+            + Send
+            + 'static,
     {
         Self {
             query: std::sync::Mutex::new(Box::new(query)),
         }
     }
 
+    #[track_caller]
     pub fn query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
+        self.query_with_budget(statement, ExactSqlStatementBudget::Request)
+    }
+
+    #[track_caller]
+    pub fn query_with_budget(
+        &self,
+        statement: ExactSqlStatement,
+        budget: ExactSqlStatementBudget,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
         statement.validate()?;
+        note_native_thread_reader_wait();
         self.query
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)(statement)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)(statement, budget)
     }
 }
 
 pub struct ExactSqlTransaction {
-    commands: Option<mpsc::SyncSender<TransactionCommand>>,
-    expired: Arc<AtomicBool>,
+    commands: Option<async_channel::Sender<TransactionCommand>>,
+    lease: Arc<TransactionLeaseState>,
     policy: TransactionPolicy,
 }
 
+enum RollbackDispatch {
+    Awaiting {
+        lease: Arc<TransactionLeaseState>,
+        response: async_channel::Receiver<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
+    },
+    Settled(Result<ExactSqlRollbackReceipt, ExactSqlError>),
+}
+
 impl ExactSqlTransaction {
+    #[track_caller]
     pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
+        refuse_on_pool()?;
         let sender = self
             .commands
             .as_ref()
             .ok_or(ExactSqlError::TransactionClosed)?;
-        let (reply, response) = mpsc::sync_channel(1);
+        let (reply, response) = async_channel::bounded(1);
         sender
             .try_send(TransactionCommand::Attach { attachment, reply })
-            .map_err(|error| map_transaction_send_error(error, &self.expired))?;
-        response
-            .recv()
-            .map_err(|_| transaction_terminal_error(&self.expired))?
+            .map_err(|error| map_transaction_send_error(error, &self.lease))?;
+        recv_writer_reply(response).map_err(|_| transaction_terminal_error(&self.lease))?
     }
 
+    #[track_caller]
     pub fn validate(&self, statement: ExactSqlStatement) -> Result<(), ExactSqlError> {
         match self.dispatch(SqlRequest::Validate(statement))? {
             SqlResult::Validated => Ok(()),
@@ -580,6 +1016,14 @@ impl ExactSqlTransaction {
         }
     }
 
+    pub async fn validate_async(&self, statement: ExactSqlStatement) -> Result<(), ExactSqlError> {
+        match self.dispatch_async(SqlRequest::Validate(statement)).await? {
+            SqlResult::Validated => Ok(()),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    #[track_caller]
     pub fn execute(
         &self,
         statement: ExactSqlStatement,
@@ -590,6 +1034,17 @@ impl ExactSqlTransaction {
         }
     }
 
+    pub async fn execute_async(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlExecuteResult, ExactSqlError> {
+        match self.dispatch_async(SqlRequest::Execute(statement)).await? {
+            SqlResult::Executed(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    #[track_caller]
     pub fn query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
         match self.dispatch(SqlRequest::Query(statement))? {
             SqlResult::Queried(result) => Ok(result),
@@ -597,6 +1052,17 @@ impl ExactSqlTransaction {
         }
     }
 
+    pub async fn query_async(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        match self.dispatch_async(SqlRequest::Query(statement)).await? {
+            SqlResult::Queried(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    #[track_caller]
     pub fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult, ExactSqlError> {
         if sql.trim().is_empty() {
             return Err(ExactSqlError::InvalidStatement);
@@ -607,11 +1073,25 @@ impl ExactSqlTransaction {
         }
     }
 
+    pub async fn execute_batch_async(
+        &self,
+        sql: String,
+    ) -> Result<ExactSqlBatchResult, ExactSqlError> {
+        if sql.trim().is_empty() {
+            return Err(ExactSqlError::InvalidStatement);
+        }
+        match self.dispatch_async(SqlRequest::ExecuteBatch(sql)).await? {
+            SqlResult::BatchExecuted(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
     /// Executes one batch with continuous authority revalidation.
     ///
     /// This is not a generic unbounded mode; it is accepted only by an
     /// authority-bound long-lease transaction. The writer actor re-verifies
     /// authority before, repeatedly during, and after execution.
+    #[track_caller]
     pub fn execute_authority_revalidated_batch(
         &self,
         sql: String,
@@ -628,43 +1108,150 @@ impl ExactSqlTransaction {
         }
     }
 
-    pub fn commit(mut self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
-        let sender = self
-            .commands
-            .take()
-            .ok_or(ExactSqlError::TransactionClosed)?;
-        let (reply, response) = mpsc::sync_channel(1);
-        sender
-            .try_send(TransactionCommand::Commit { reply })
-            .map_err(|error| map_transaction_send_error(error, &self.expired))?;
-        response
-            .recv()
-            .map_err(|_| transaction_terminal_error(&self.expired))?
+    pub async fn execute_authority_revalidated_batch_async(
+        &self,
+        sql: String,
+    ) -> Result<ExactSqlBatchResult, ExactSqlError> {
+        if sql.trim().is_empty() {
+            return Err(ExactSqlError::InvalidStatement);
+        }
+        match self
+            .dispatch_with_policy_async(
+                SqlRequest::ExecuteBatch(sql),
+                ExecutionPolicy::AuthorityRevalidated,
+            )
+            .await?
+        {
+            SqlResult::BatchExecuted(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
     }
 
-    pub fn rollback(mut self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
+    /// Runs one query under the same authority-revalidated policy as
+    /// [`Self::execute_authority_revalidated_batch_async`]: no ordinary
+    /// statement deadline, accepted only by an authority-bound long-lease
+    /// transaction.
+    pub async fn query_authority_revalidated_async(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        match self
+            .dispatch_with_policy_async(
+                SqlRequest::Query(statement),
+                ExecutionPolicy::AuthorityRevalidated,
+            )
+            .await?
+        {
+            SqlResult::Queried(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    fn enqueue_commit(
+        mut self,
+        on_commit: Option<Box<dyn FnOnce() + Send + 'static>>,
+    ) -> Result<async_channel::Receiver<Result<ExactSqlCommitReceipt, ExactSqlError>>, ExactSqlError>
+    {
         let sender = self
             .commands
             .take()
             .ok_or(ExactSqlError::TransactionClosed)?;
-        let (reply, response) = mpsc::sync_channel(1);
+        let (reply, response) = async_channel::bounded(1);
+        sender
+            .try_send(TransactionCommand::Commit { reply, on_commit })
+            .map_err(|error| map_transaction_send_error(error, &self.lease))?;
+        Ok(response)
+    }
+    #[track_caller]
+    pub fn commit(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
+        refuse_on_pool()?;
+        let lease = Arc::clone(&self.lease);
+        recv_writer_reply(self.enqueue_commit(None)?)
+            .map_err(|_| transaction_terminal_error(&lease))?
+    }
+
+    pub async fn commit_async(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
+        let lease = Arc::clone(&self.lease);
+        self.enqueue_commit(None)?
+            .recv()
+            .await
+            .map_err(|_| transaction_terminal_error(&lease))?
+    }
+
+    /// Transfers resources to the writer until SQLite commits or rolls back.
+    pub async fn commit_async_with_on_commit<F>(
+        self,
+        on_commit: F,
+    ) -> Result<ExactSqlCommitReceipt, ExactSqlError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let lease = Arc::clone(&self.lease);
+        self.enqueue_commit(Some(Box::new(on_commit)))?
+            .recv()
+            .await
+            .map_err(|_| transaction_terminal_error(&lease))?
+    }
+
+    fn enqueue_rollback(
+        mut self,
+    ) -> Result<
+        async_channel::Receiver<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
+        ExactSqlError,
+    > {
+        let sender = self
+            .commands
+            .take()
+            .ok_or(ExactSqlError::TransactionClosed)?;
+        let (reply, response) = async_channel::bounded(1);
         sender
             .try_send(TransactionCommand::Rollback { reply })
-            .map_err(|error| map_transaction_send_error(error, &self.expired))?;
-        response
-            .recv()
-            .map_err(|_| transaction_terminal_error(&self.expired))?
+            .map_err(|error| map_transaction_send_error(error, &self.lease))?;
+        Ok(response)
+    }
+    /// Decides, once for both callers, whether a rollback still has a writer
+    /// to ask or has already been answered by a writer-side release.
+    fn begin_rollback(self) -> RollbackDispatch {
+        let lease = Arc::clone(&self.lease);
+        match self.enqueue_rollback() {
+            Ok(response) => RollbackDispatch::Awaiting { lease, response },
+            Err(ExactSqlError::TransactionClosed | ExactSqlError::TransactionExpired) => {
+                RollbackDispatch::Settled(settled_rollback_or_terminal_error(&lease))
+            }
+            Err(error) => RollbackDispatch::Settled(Err(error)),
+        }
     }
 
+    #[track_caller]
+    pub fn rollback(self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
+        refuse_on_pool()?;
+        match self.begin_rollback() {
+            RollbackDispatch::Awaiting { lease, response } => recv_writer_reply(response)
+                .unwrap_or_else(|_| settled_rollback_or_terminal_error(&lease)),
+            RollbackDispatch::Settled(result) => result,
+        }
+    }
+
+    pub async fn rollback_async(self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
+        match self.begin_rollback() {
+            RollbackDispatch::Awaiting { lease, response } => response
+                .recv()
+                .await
+                .unwrap_or_else(|_| settled_rollback_or_terminal_error(&lease)),
+            RollbackDispatch::Settled(result) => result,
+        }
+    }
+
+    #[track_caller]
     fn dispatch(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
         self.dispatch_with_policy(request, ExecutionPolicy::Bounded)
     }
 
-    fn dispatch_with_policy(
+    fn enqueue_transaction_request(
         &self,
         request: SqlRequest,
         execution_policy: ExecutionPolicy,
-    ) -> Result<SqlResult, ExactSqlError> {
+    ) -> Result<async_channel::Receiver<Result<SqlResult, ExactSqlError>>, ExactSqlError> {
         validate_request(&request)?;
         if execution_policy == ExecutionPolicy::AuthorityRevalidated
             && self.policy != TransactionPolicy::AuthorizedLongLease
@@ -678,17 +1265,41 @@ impl ExactSqlTransaction {
             .commands
             .as_ref()
             .ok_or(ExactSqlError::TransactionClosed)?;
-        let (reply, response) = mpsc::sync_channel(1);
+        let (reply, response) = async_channel::bounded(1);
         sender
             .try_send(TransactionCommand::Dispatch {
                 request,
                 execution_policy,
                 reply,
             })
-            .map_err(|error| map_transaction_send_error(error, &self.expired))?;
-        response
+            .map_err(|error| map_transaction_send_error(error, &self.lease))?;
+        Ok(response)
+    }
+    #[track_caller]
+    fn dispatch_with_policy(
+        &self,
+        request: SqlRequest,
+        execution_policy: ExecutionPolicy,
+    ) -> Result<SqlResult, ExactSqlError> {
+        refuse_on_pool()?;
+        recv_writer_reply(self.enqueue_transaction_request(request, execution_policy)?)
+            .map_err(|_| transaction_terminal_error(&self.lease))?
+    }
+
+    async fn dispatch_with_policy_async(
+        &self,
+        request: SqlRequest,
+        execution_policy: ExecutionPolicy,
+    ) -> Result<SqlResult, ExactSqlError> {
+        self.enqueue_transaction_request(request, execution_policy)?
             .recv()
-            .map_err(|_| transaction_terminal_error(&self.expired))?
+            .await
+            .map_err(|_| transaction_terminal_error(&self.lease))?
+    }
+
+    async fn dispatch_async(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
+        self.dispatch_with_policy_async(request, ExecutionPolicy::Bounded)
+            .await
     }
 }
 
@@ -700,40 +1311,33 @@ fn execute_request(
     execution_deadline: Option<Instant>,
     enforce_statement_limit: bool,
     repeated_authority: Option<(Arc<dyn ExactSqlWriteAuthority>, ExactSqlWriteIntent)>,
-) -> (Result<SqlResult, ExactSqlError>, bool) {
-    if let Err(error) = validate_request(&request) {
-        return (Err(error), false);
-    }
-    let insert_tracker = Arc::new(InsertTracker::default());
-    let result = with_exact_sql_guard(
+) -> Result<SqlResult, ExactSqlError> {
+    validate_request(&request)?;
+    with_exact_sql_guard(
         connection,
-        pinned_transaction,
-        false,
+        ExactSqlAuthority::Writer {
+            allow_savepoints: pinned_transaction,
+            database_operation: None,
+        },
         shutdown_requested,
         execution_deadline,
         enforce_statement_limit,
         repeated_authority,
-        crate::connection::authorize_writer,
-        true,
-        None,
-        Some(Arc::clone(&insert_tracker)),
         || match request {
-            SqlRequest::Validate(statement) => connection
-                .prepare_cached(&statement.sql)
+            SqlRequest::Validate(statement) => guard::prepare_cached(connection, &statement.sql)
                 .map(|_| SqlResult::Validated)
                 .map_err(|error| sqlite_error("validate statement", error)),
             SqlRequest::Execute(statement) => {
                 execute_statement(connection, statement).map(SqlResult::Executed)
             }
-            SqlRequest::Query(statement) => {
+            SqlRequest::Query(statement) | SqlRequest::ExecuteReturning(statement) => {
                 execute_query_unchecked(connection, statement).map(SqlResult::Queried)
             }
             SqlRequest::ExecuteBatch(sql) => {
                 execute_batch(connection, &sql).map(SqlResult::BatchExecuted)
             }
         },
-    );
-    (result, insert_tracker.applied.load(Ordering::Acquire))
+    )
 }
 
 fn verify_write_authority(
@@ -746,20 +1350,12 @@ fn verify_write_authority(
     }
 }
 
-fn publish_last_insert_rowid(
-    result: &mut Result<SqlResult, ExactSqlError>,
-    inserted: bool,
-    connection_rowid: i64,
-    logical_rowid: &AtomicI64,
-) {
-    if inserted {
-        logical_rowid.store(connection_rowid, Ordering::Release);
-    }
-    let rowid = logical_rowid.load(Ordering::Acquire);
-    match result.as_mut() {
-        Ok(SqlResult::Executed(result)) => result.last_insert_rowid = rowid,
-        Ok(SqlResult::BatchExecuted(result)) => result.last_insert_rowid = rowid,
-        Ok(SqlResult::Validated | SqlResult::Queried(_)) | Err(_) => {}
+/// One poll; `None` means the future is pending.
+fn complete_now<F: Future>(future: F) -> Option<F::Output> {
+    match std::pin::pin!(future).poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    {
+        std::task::Poll::Ready(output) => Some(output),
+        std::task::Poll::Pending => None,
     }
 }
 
@@ -767,7 +1363,8 @@ fn validate_request(request: &SqlRequest) -> Result<(), ExactSqlError> {
     match request {
         SqlRequest::Validate(statement)
         | SqlRequest::Execute(statement)
-        | SqlRequest::Query(statement) => statement.validate(),
+        | SqlRequest::Query(statement)
+        | SqlRequest::ExecuteReturning(statement) => statement.validate(),
         SqlRequest::ExecuteBatch(sql) => validate_batch(sql),
     }
 }
@@ -801,7 +1398,11 @@ fn validate_batch(sql: &String) -> Result<(), ExactSqlError> {
     }
 }
 
-#[hotpath::measure(label = "rusqlite_runtime.exact_sql.execute_statement")]
+#[tracing::instrument(
+    name = "rusqlite_runtime.exact_sql.execute_statement",
+    level = "trace",
+    skip_all
+)]
 fn execute_statement(
     connection: &Connection,
     statement: ExactSqlStatement,
@@ -810,17 +1411,13 @@ fn execute_statement(
         .params
         .into_iter()
         .map(ExactSqlValue::into_rusqlite);
-    let mut prepared = connection
-        .prepare_cached(&statement.sql)
+    let mut prepared = guard::prepare_cached(connection, &statement.sql)
         .map_err(|error| sqlite_error("prepare execute", error))?;
     let changed_rows = prepared
         .execute(params_from_iter(values))
         .map_err(|error| sqlite_error("execute", error))?;
     crate::telemetry::observe_statement(&prepared);
-    Ok(ExactSqlExecuteResult {
-        changed_rows,
-        last_insert_rowid: connection.last_insert_rowid(),
-    })
+    Ok(ExactSqlExecuteResult { changed_rows })
 }
 
 fn attach_database(
@@ -837,15 +1434,13 @@ fn attach_database(
     )?;
     with_exact_sql_guard(
         connection,
-        pinned_transaction,
-        false,
+        ExactSqlAuthority::Writer {
+            allow_savepoints: pinned_transaction,
+            database_operation: Some(AuthorizedDatabaseOperation::Attach),
+        },
         shutdown_requested,
         execution_deadline,
         true,
-        None,
-        crate::connection::authorize_writer,
-        true,
-        Some(AuthorizedDatabaseOperation::Attach),
         None,
         || execute_statement(connection, statement).map(|_| ()),
     )
@@ -862,17 +1457,15 @@ fn detach_database(
     let sql = format!("DETACH DATABASE \"{database_name}\"");
     with_exact_sql_guard(
         connection,
-        false,
-        false,
+        ExactSqlAuthority::Writer {
+            allow_savepoints: false,
+            database_operation: Some(AuthorizedDatabaseOperation::Detach(
+                database_name.to_owned(),
+            )),
+        },
         shutdown_requested,
         None,
         true,
-        None,
-        crate::connection::authorize_writer,
-        true,
-        Some(AuthorizedDatabaseOperation::Detach(
-            database_name.to_owned(),
-        )),
         None,
         || execute_batch(connection, &sql).map(|_| ()),
     )
@@ -885,49 +1478,132 @@ fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResu
         .map_err(|error| sqlite_error("execute batch", error))?;
     Ok(ExactSqlBatchResult {
         changed_rows: connection.total_changes().saturating_sub(before),
-        last_insert_rowid: connection.last_insert_rowid(),
     })
 }
 
-#[hotpath::measure(label = "rusqlite_runtime.exact_sql.execute_query")]
+#[tracing::instrument(
+    name = "rusqlite_runtime.exact_sql.execute_query",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn execute_query(
     connection: &Connection,
     request: ExactSqlStatement,
+    budget: ExactSqlStatementBudget,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     request.validate()?;
+    let (execution_deadline, enforce_statement_limit) = match budget {
+        ExactSqlStatementBudget::Request => (None, true),
+        ExactSqlStatementBudget::Convergence => (None, false),
+        // The progress handler never runs for a statement shorter than its
+        // interval, so it alone cannot stop a run of short statements.
+        ExactSqlStatementBudget::Until(deadline) if clock::now() >= deadline => {
+            return Err(sqlite_error(
+                "advance query",
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+                    None,
+                ),
+            ));
+        }
+        ExactSqlStatementBudget::Until(deadline) => (Some(deadline), false),
+    };
     with_exact_sql_guard(
         connection,
-        false,
-        false,
+        ExactSqlAuthority::Canonical(ConnectionMode::Reader),
         None,
-        None,
-        true,
-        None,
-        crate::connection::authorize_reader,
-        false,
-        None,
+        execution_deadline,
+        enforce_statement_limit,
         None,
         || execute_query_unchecked(connection, request),
     )
+}
+
+const PREPARE_QUERY: &str = "prepare query";
+
+fn prepare_read_statement<'c>(
+    connection: &'c Connection,
+    sql: &str,
+) -> Result<rusqlite::CachedStatement<'c>, ExactSqlError> {
+    guard::prepare_cached(connection, sql).map_err(|error| sqlite_error(PREPARE_QUERY, error))
+}
+
+/// SQLite answers a connection that starts a read while another connection
+/// recovers the WAL with `SQLITE_BUSY_RECOVERY`, which bypasses the busy
+/// handler, so a reader started right after its writer, or a writer whose
+/// file another process just opened, could fail a statement with "database
+/// is locked" under load. The window is bounded by recovery itself; retry a
+/// few times before surfacing the error.
+pub(crate) async fn read_across_wal_recovery<T>(
+    mut read: impl FnMut() -> Result<T, ExactSqlError>,
+) -> Result<T, ExactSqlError> {
+    const RETRIES: u32 = 8;
+    const BACKOFF: Duration = Duration::from_millis(25);
+    for _ in 0..RETRIES {
+        match read() {
+            Err(ExactSqlError::Sqlite {
+                operation: PREPARE_QUERY,
+                code: Some(rusqlite::ffi::SQLITE_BUSY | rusqlite::ffi::SQLITE_LOCKED),
+                ..
+            }) => crate::storage_pool::sleep(BACKOFF).await,
+            done => return done,
+        }
+    }
+    read()
+}
+
+async fn request_across_wal_recovery<T>(
+    request: SqlRequest,
+    mut run: impl FnMut(SqlRequest) -> Result<T, ExactSqlError>,
+) -> Result<T, ExactSqlError> {
+    if !matches!(
+        request,
+        SqlRequest::Query(_) | SqlRequest::ExecuteReturning(_)
+    ) {
+        return run(request);
+    }
+    read_across_wal_recovery(|| run(request.clone())).await
 }
 
 fn execute_query_unchecked(
     connection: &Connection,
     request: ExactSqlStatement,
 ) -> Result<ExactSqlRows, ExactSqlError> {
-    let mut statement = connection
-        .prepare_cached(&request.sql)
-        .map_err(|error| sqlite_error("prepare query", error))?;
+    // A read's cost decomposes into three phases that fail and stall for
+    // different reasons, so they are measured apart: acquiring a preparable
+    // statement (which rides out WAL recovery), SQLite's first step under the
+    // snapshot, and materializing the result set. `reader.exact_sql` alone
+    // cannot distinguish a scan from a wait.
+    let mut statement = {
+        let _span = tracing::trace_span!("rusqlite.exact_sql.query.prepare").entered();
+        prepare_read_statement(connection, &request.sql)
+    }?;
     let columns = statement
         .column_names()
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let column_count = columns.len();
     let values = request.params.into_iter().map(ExactSqlValue::into_rusqlite);
-    let mut query = statement
-        .query(params_from_iter(values))
-        .map_err(|error| sqlite_error("start query", error))?;
+    let mut query = {
+        let _span = tracing::trace_span!("rusqlite.exact_sql.query.start").entered();
+        statement.query(params_from_iter(values))
+    }
+    .map_err(|error| sqlite_error("start query", error))?;
+    let rows = {
+        let _span = tracing::trace_span!("rusqlite.exact_sql.query.fetch").entered();
+        materialize_rows(&mut query, &columns)
+    }?;
+    drop(query);
+    crate::telemetry::observe_statement(&statement);
+    Ok(ExactSqlRows { columns, rows })
+}
+
+/// Materializes a result set under the row-count and byte ceilings.
+fn materialize_rows(
+    query: &mut rusqlite::Rows<'_>,
+    columns: &[String],
+) -> Result<Vec<ExactSqlRow>, ExactSqlError> {
+    let column_count = columns.len();
     let mut rows = Vec::new();
     let mut materialized_bytes = columns
         .iter()
@@ -971,9 +1647,7 @@ fn execute_query_unchecked(
         }
         rows.push(ExactSqlRow { values });
     }
-    drop(query);
-    crate::telemetry::observe_statement(&statement);
-    Ok(ExactSqlRows { columns, rows })
+    Ok(rows)
 }
 
 fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> ExactSqlError {
@@ -991,28 +1665,44 @@ fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> ExactSqlErro
     }
 }
 
-fn map_writer_send_error(error: tokio_mpsc::error::TrySendError<WriterCommand>) -> ExactSqlError {
+fn map_writer_send_error(error: actor_mpsc::SendError<WriterCommand>) -> ExactSqlError {
     match error {
-        tokio_mpsc::error::TrySendError::Full(_) => ExactSqlError::Busy,
-        tokio_mpsc::error::TrySendError::Closed(_) => ExactSqlError::WriterUnavailable,
+        actor_mpsc::SendError::Full(_) => ExactSqlError::Busy,
+        actor_mpsc::SendError::Disconnected(_) | actor_mpsc::SendError::Cancelled(_) => {
+            ExactSqlError::WriterUnavailable
+        }
     }
 }
 
-fn transaction_terminal_error(expired: &AtomicBool) -> ExactSqlError {
-    if expired.load(Ordering::Acquire) {
+fn transaction_terminal_error(lease: &TransactionLeaseState) -> ExactSqlError {
+    if lease.is_expired() {
         ExactSqlError::TransactionExpired
     } else {
         ExactSqlError::TransactionClosed
     }
 }
 
+/// Answers a caller's rollback for a transaction the writer already released.
+///
+/// Every writer-side release rolls back and publishes its receipt before
+/// dropping the command channel, so the honest answer here is that rollback,
+/// not a rollback failure. Only a genuinely failed `SQLite` rollback, or a
+/// release that published nothing, surfaces as an error.
+fn settled_rollback_or_terminal_error(
+    lease: &TransactionLeaseState,
+) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
+    lease
+        .settled_rollback()
+        .unwrap_or_else(|| Err(transaction_terminal_error(lease)))
+}
+
 fn map_transaction_send_error(
-    error: mpsc::TrySendError<TransactionCommand>,
-    expired: &AtomicBool,
+    error: async_channel::TrySendError<TransactionCommand>,
+    lease: &TransactionLeaseState,
 ) -> ExactSqlError {
     match error {
-        mpsc::TrySendError::Full(_) => ExactSqlError::Busy,
-        mpsc::TrySendError::Disconnected(_) => transaction_terminal_error(expired),
+        async_channel::TrySendError::Full(_) => ExactSqlError::Busy,
+        async_channel::TrySendError::Closed(_) => transaction_terminal_error(lease),
     }
 }
 

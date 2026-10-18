@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
     GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexTransactionPort,
@@ -10,15 +10,14 @@ use tracedecay_application::{
     OperationTermination, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, GitBlobExpectationV1, GitCommitIdentityV1, GitCoverageV1,
-    GitHeadStateV1, GitIndexCommitIntentV1, GitIndexEntryExpectationV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
-    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
-    GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest, ProjectId, RefId,
-    RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
-    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
-    canonical_sha256,
+    ActorId, ComponentVersion, GitBlobExpectationV1, GitCoverageV1, GitHeadStateV1,
+    GitIndexEntryExpectationV1, GitIndexPreviewDispositionV1, GitIndexPreviewId,
+    GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    GitObjectFormatV1, GitOidV1, GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest,
+    ProjectId, RefId, RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1,
+    RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
+    UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
 use tracedecay_store::GitIndexTransactionStore;
@@ -88,20 +87,18 @@ impl FakeNative {
         apply_modes: impl IntoIterator<Item = NativeMode>,
         recovery_modes: impl IntoIterator<Item = RecoveryMode>,
     ) -> Self {
-        let preview_results = preview
-            .map(|preview| {
-                VecDeque::from([GitIndexPreviewPortResultV1 {
-                    execution: OperationReceipt::completed(
-                        preview.created_at,
-                        preview.created_at,
-                        Deadline::new(preview.expires_at).expect("preview deadline"),
-                        OperationBudgetUsage::default(),
-                    )
-                    .expect("preview execution"),
-                    preview,
-                }])
-            })
-            .unwrap_or_default();
+        let preview_results = preview.map_or_default(|preview| {
+            VecDeque::from([GitIndexPreviewPortResultV1 {
+                execution: OperationReceipt::completed(
+                    preview.created_at,
+                    preview.created_at,
+                    Deadline::new(preview.expires_at).expect("preview deadline"),
+                    OperationBudgetUsage::default(),
+                )
+                .expect("preview execution"),
+                preview,
+            }])
+        });
         Self {
             preview_results: Mutex::new(preview_results),
             apply_modes: Mutex::new(apply_modes.into_iter().collect()),
@@ -224,17 +221,9 @@ impl GitIndexPolicyRecheckPort for TestPolicy {
     }
 }
 
-pub fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("fixture identity")
-}
+pub use tracedecay_domain::test_fixtures::id;
 
-pub fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
-}
+pub use tracedecay_domain::test_fixtures::digest;
 
 pub fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture object id")
@@ -281,21 +270,6 @@ pub fn snapshot() -> RepositoryStateSnapshotV1 {
     .expect("native identity")
 }
 
-pub fn commit_intent() -> GitIndexCommitIntentV1 {
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: fixture_time(1_000_000),
-    };
-    GitIndexCommitIntentV1::new(
-        "transaction fixture\n".to_owned(),
-        identity.clone(),
-        identity,
-        GitIndexSigningPolicyV1::UnsignedPermitted,
-    )
-    .expect("intent")
-}
-
 fn fixture_hunk(
     operation: GitIndexTransactionOperationV1,
     preview_id: &GitIndexPreviewId,
@@ -304,7 +278,7 @@ fn fixture_hunk(
     HunkRefV1 {
         repository: id::<RepositoryId>("repository.fixture"),
         worktree: id::<WorktreeId>("worktree.fixture"),
-        direction: operation.hunk_direction().expect("hunk operation"),
+        direction: operation.hunk_direction(),
         path: "packet.txt".to_owned(),
         original_path: None,
         expected_base_blob: GitBlobExpectationV1::AbsentFile,
@@ -314,9 +288,8 @@ fn fixture_hunk(
             unmerged_stage: None,
         },
         expected_worktree_blob: match operation.hunk_direction() {
-            Some(HunkDirectionV1::WorkingTreeToIndex) => Some(GitBlobExpectationV1::AbsentFile),
-            Some(HunkDirectionV1::IndexToHead) => None,
-            None => None,
+            HunkDirectionV1::WorkingTreeToIndex => Some(GitBlobExpectationV1::AbsentFile),
+            HunkDirectionV1::IndexToHead => None,
         },
         expected_worktree_mode: None,
         hunk_header: "@@ -1 +1 @@".to_owned(),
@@ -340,30 +313,15 @@ fn preview_for_operation(
     let preview_id = GitIndexPreviewId::new(match operation {
         GitIndexTransactionOperationV1::StageHunks => "preview.transport.stage",
         GitIndexTransactionOperationV1::UnstageHunks => "preview.transport.unstage",
-        GitIndexTransactionOperationV1::CommitIndex => "preview.transport.commit",
     })
     .expect("preview id");
-    let (selected_hunks, candidate_index_tree, intent) = match operation {
-        GitIndexTransactionOperationV1::CommitIndex => (
-            Vec::new(),
-            snapshot.index.tree_id.clone(),
-            Some(commit_intent()),
-        ),
-        GitIndexTransactionOperationV1::StageHunks
-        | GitIndexTransactionOperationV1::UnstageHunks => (
-            vec![fixture_hunk(operation, &preview_id, &snapshot_digest)],
-            Some(oid('e')),
-            None,
-        ),
-    };
-    GitIndexPreviewV1::new_with_commit_intent(
-        preview_id,
+    GitIndexPreviewV1::new(
+        preview_id.clone(),
         operation,
         snapshot,
-        snapshot_digest,
-        selected_hunks,
-        candidate_index_tree,
-        intent.as_ref(),
+        snapshot_digest.clone(),
+        vec![fixture_hunk(operation, &preview_id, &snapshot_digest)],
+        Some(oid('e')),
         GitIndexPreviewDispositionV1::Applicable,
         fixture_time(10),
         expires_at,
@@ -372,7 +330,7 @@ fn preview_for_operation(
 }
 
 /// Fixture timeline anchored at a fixed far-future epoch (2100-01-01 UTC) so
-/// the store actor's autonomous wall-clock preview-input GC never observes
+/// the store's autonomous wall-clock preview-input GC never observes
 /// fixture expiries as already elapsed. Ordinals are spaced 200ms apart: wide
 /// enough to preserve every strict ordering the tests assert, narrow enough
 /// that fixture preview lifetimes stay inside the domain's 30s maximum.
@@ -386,30 +344,18 @@ pub fn preview() -> GitIndexPreviewV1 {
 }
 
 pub fn preview_with_expiry(expires_at: UtcMicros) -> GitIndexPreviewV1 {
-    preview_for_operation(GitIndexTransactionOperationV1::CommitIndex, expires_at)
+    preview_for_operation(GitIndexTransactionOperationV1::StageHunks, expires_at)
 }
 
 pub fn preview_input(preview: &GitIndexPreviewV1) -> GitIndexPreviewInputV1 {
-    match preview.operation {
-        GitIndexTransactionOperationV1::CommitIndex => GitIndexPreviewInputV1::new_commit(
-            preview.preview_id.clone(),
-            preview.repository_snapshot.clone(),
-            commit_intent(),
-            preview.created_at,
-            preview.expires_at,
-        ),
-        GitIndexTransactionOperationV1::StageHunks
-        | GitIndexTransactionOperationV1::UnstageHunks => {
-            GitIndexPreviewInputV1::new_hunk_selection(
-                preview.preview_id.clone(),
-                preview.operation,
-                preview.repository_snapshot.clone(),
-                preview.selected_hunks.clone(),
-                preview.created_at,
-                preview.expires_at,
-            )
-        }
-    }
+    GitIndexPreviewInputV1::new_hunk_selection(
+        preview.preview_id.clone(),
+        preview.operation,
+        preview.repository_snapshot.clone(),
+        preview.selected_hunks.clone(),
+        preview.created_at,
+        preview.expires_at,
+    )
     .expect("preview input")
 }
 
@@ -486,8 +432,6 @@ fn preview_request(
         preview_id: preview.preview_id.clone(),
         repository_snapshot: preview.repository_snapshot.clone(),
         selected_hunks: preview.selected_hunks.clone(),
-        commit_intent: (preview.operation == GitIndexTransactionOperationV1::CommitIndex)
-            .then(commit_intent),
         observed_at: request.observed_at,
     }
 }
@@ -516,23 +460,16 @@ pub fn receipt_for(
     preview: &GitIndexPreviewV1,
     outcome: GitIndexReceiptOutcomeV1,
 ) -> GitIndexTransactionReceiptV1 {
-    let (final_snapshot, new_index_tree, new_head, created_commit) = match outcome {
-        GitIndexReceiptOutcomeV1::Committed => {
-            let is_commit = preview.operation == GitIndexTransactionOperationV1::CommitIndex;
-            (
-                digest('f'),
-                Some(oid('c')),
-                is_commit
-                    .then(|| oid('d'))
-                    .or_else(|| preview.repository_snapshot.head.commit().cloned()),
-                is_commit.then(|| oid('d')),
-            )
-        }
+    let (final_snapshot, new_index_tree, new_head) = match outcome {
+        GitIndexReceiptOutcomeV1::Committed => (
+            digest('f'),
+            Some(oid('c')),
+            preview.repository_snapshot.head.commit().cloned(),
+        ),
         GitIndexReceiptOutcomeV1::AbortedNoChange | GitIndexReceiptOutcomeV1::NeedsInspection => (
             preview.repository_snapshot_digest.clone(),
             preview.repository_snapshot.index.tree_id.clone(),
             preview.repository_snapshot.head.commit().cloned(),
-            None,
         ),
     };
     GitIndexTransactionReceiptV1::new(
@@ -543,7 +480,6 @@ pub fn receipt_for(
         final_snapshot,
         new_index_tree,
         new_head,
-        created_commit,
         outcome,
         fixture_time(15),
     )
@@ -569,28 +505,26 @@ pub fn execution_for(
     }
 }
 
-pub fn test_store() -> (RegisteredGlobalDbHarness, DaemonGitIndexTransactionStore) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("registered fixture runtime");
-    let database = runtime.block_on(RegisteredGlobalDbHarness::open("git-index-transaction"));
+pub async fn test_store() -> (RegisteredGlobalDbHarness, DaemonGitIndexTransactionStore) {
+    let database = RegisteredGlobalDbHarness::open("git-index-transaction").await;
     let store = DaemonGitIndexTransactionStore::open(database.registered.clone())
-        .expect("canonical registered store actor");
+        .await
+        .expect("canonical registered store");
     (database, store)
 }
 
-pub fn test_port_from_preview(
+pub async fn test_port_from_preview(
     operation: GitIndexTransactionOperationV1,
     native_modes: impl IntoIterator<Item = NativeMode>,
     recovery_modes: impl IntoIterator<Item = RecoveryMode>,
 ) -> TestHarness {
-    let (database, store) = test_store();
+    let (database, store) = test_store().await;
     let preview_template = preview_for_operation(operation, fixture_time(100));
     let authority_request = apply_request(&preview_template, "idempotency.transport");
     let preview_request = preview_request(&preview_template, &authority_request);
     store
         .save_preview_input(preview_input(&preview_template))
+        .await
         .expect("save daemon preview input");
     let native =
         FakeNative::with_preview(Some(preview_template.clone()), native_modes, recovery_modes);
@@ -610,6 +544,7 @@ pub fn test_port_from_preview(
     );
     let preview = port
         .preview(&preview_request)
+        .await
         .expect("preview reaches the native owner")
         .preview;
     let request = apply_request(&preview, "idempotency.transport");

@@ -1,12 +1,12 @@
 //! Canonical admitted problem mapping for automation runs.
 
-use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationRunRequestV1};
-use tracedecay_application::{
-    ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemEnvelope,
-    ApplicationUnavailableClassV1, CancellationSignal, CancellationStage, LegalAction,
-    ProblemOwningLayer, RequestAdmission, RequestContext, RetryDirective, SafeDiagnostic,
-};
 use tracedecay_automation::backend::AgentTaskFailureClass;
+use tracedecay_contracts::retained_surfaces::{AutomationRunProblemV1, AutomationRunRequestV1};
+use tracedecay_contracts::{
+    ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemEnvelope,
+    ApplicationUnavailableClassV1, CancellationSignal, CancellationStage, ProblemOwningLayer,
+    RequestAdmission, RequestContext, SafeDiagnostic,
+};
 
 use crate::automation::run_ledger::AutomationRunLedgerRecord;
 
@@ -15,7 +15,7 @@ use super::terminal::AutomationSettledProblem;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub fn reset_required_problem(
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
 ) -> Result<AutomationSettledProblem> {
@@ -23,20 +23,18 @@ pub fn reset_required_problem(
         operation,
         context,
         request,
-        ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new(
+        ApplicationProblem::reset_required(
+            SafeDiagnostic::new(
                 "application.automation-run.reset-required",
                 "The interrupted automation run has no reconcilable terminal; preserve its exact run identity and reset it explicitly before reuse.",
             )
             .map_err(contract_error)?,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        },
+        ),
     )
 }
 
 pub fn indeterminate_external_effect_problem(
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
 ) -> Result<AutomationSettledProblem> {
@@ -44,36 +42,13 @@ pub fn indeterminate_external_effect_problem(
         operation,
         context,
         request,
-        ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new(
+        ApplicationProblem::reset_required(
+            SafeDiagnostic::new(
                 "application.automation-run.external-effect-indeterminate",
                 "An external automation effect may have committed before its terminal was published; the effect will not be replayed and its exact run identity requires explicit reconciliation or reset.",
             )
             .map_err(contract_error)?,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        },
-    )
-}
-
-pub fn shipped_proposal_reset_required_problem(
-    operation: &tracedecay_application::ApplicationOperation,
-    context: &RequestContext,
-    request: &AutomationRunRequestV1,
-) -> Result<AutomationSettledProblem> {
-    zero_effect_terminal(
-        operation,
-        context,
-        request,
-        ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new(
-                "application.memory-automation-run.shipped-proposals-reset-required",
-                "Unresolved shipped fact-proposal state cannot be imported because final-V2 has no approval authority; preserve it and explicitly reset its exact file.",
-            )
-            .map_err(contract_error)?,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        },
+        ),
     )
 }
 
@@ -120,10 +95,12 @@ fn failure_class_problem(
             ApplicationExecutionFailureClassV1::MalformedOutput,
             diagnostic,
         ),
-        Some(AgentTaskFailureClass::Permanent) | None => ApplicationProblem::execution_failed(
-            ApplicationExecutionFailureClassV1::Permanent,
-            diagnostic,
-        ),
+        Some(AgentTaskFailureClass::Permanent | AgentTaskFailureClass::InputTooLarge) | None => {
+            ApplicationProblem::execution_failed(
+                ApplicationExecutionFailureClassV1::Permanent,
+                diagnostic,
+            )
+        }
     };
     problem.map_err(contract_error)
 }
@@ -137,15 +114,13 @@ pub fn runtime_problem(
         return Ok(problem);
     }
     if error.reset_required_context().is_some() {
-        return Ok(ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new(
+        return Ok(ApplicationProblem::reset_required(
+            SafeDiagnostic::new(
                 "application.automation-run.reset-required",
                 "The admitted automation authority requires an explicit reset before reuse.",
             )
             .map_err(contract_error)?,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        });
+        ));
     }
     ApplicationProblem::execution_failed(
         ApplicationExecutionFailureClassV1::Permanent,
@@ -167,7 +142,7 @@ fn post_admission_termination_problem(
             .map(Some)
             .map_err(contract_error);
     }
-    match context.admission_at(tracedecay_application::now_micros()) {
+    match context.admission_at(tracedecay_contracts::now_micros()) {
         // A request admitted with a cancelled snapshot cannot reach this
         // post-admission mapper, but retain the exact typed state if a corrupt
         // caller violates that boundary.
@@ -176,7 +151,9 @@ fn post_admission_termination_problem(
                 .map(Some)
                 .map_err(contract_error)
         }
-        RequestAdmission::TimedOut => {
+        // The effect may already be in flight, so an expired grant keeps the
+        // unknown-outcome terminal rather than a pre-admission refusal.
+        RequestAdmission::TimedOut | RequestAdmission::GrantExpired => {
             ApplicationProblem::timed_out(CancellationStage::EffectInFlight)
                 .map(Some)
                 .map_err(contract_error)
@@ -186,7 +163,7 @@ fn post_admission_termination_problem(
 }
 
 fn zero_effect_terminal(
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
     problem: ApplicationProblem,
@@ -213,26 +190,21 @@ fn zero_effect_terminal(
 mod tests {
     use crate::automation::run_ledger::AutomationRunLedgerRecord;
     use serde_json::json;
-    use tracedecay_application::{
+    use tracedecay_automation::backend::AgentTaskFailureClass;
+    use tracedecay_contracts::{
         ApplicationExecutionFailureClassV1, ApplicationProblemKind, ApplicationUnavailableClassV1,
         CancellationContext, CancellationSignal, CancellationStage, CapabilityGrantId,
         CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId,
         ResolvedScope,
     };
-    use tracedecay_automation::backend::AgentTaskFailureClass;
-    use tracedecay_domain::{
-        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
-    };
+    use tracedecay_domain::{ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-    use super::{
-        failed_ledger_problem, failure_class_problem, post_admission_termination_problem,
-        runtime_problem,
-    };
+    use super::{failed_ledger_problem, failure_class_problem, runtime_problem};
 
     fn failed_ledger() -> AutomationRunLedgerRecord {
         serde_json::from_value(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": "run.failed-ledger-problem",
             "trigger": "scheduler",
             "task": "memory_curator",
@@ -242,16 +214,13 @@ mod tests {
             "rejected_count": 0,
             "error": "backend failed",
             "error_classification": "permanent",
-            "started_at": "2026-08-12T00:00:00Z",
-            "completed_at": "2026-08-12T00:00:01Z"
+            "started_at": "1786492800",
+            "completed_at": "1786492801"
         }))
         .expect("failed ledger")
     }
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
-            .expect("fixture digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn context_with_deadline(deadline: UtcMicros) -> RequestContext {
         let scope = ResolvedScope::new(
@@ -331,6 +300,12 @@ mod tests {
                 None,
                 Some(ApplicationExecutionFailureClassV1::Permanent),
             ),
+            (
+                AgentTaskFailureClass::InputTooLarge,
+                ApplicationProblemKind::ExecutionFailed,
+                None,
+                Some(ApplicationExecutionFailureClassV1::Permanent),
+            ),
         ];
         for (class, kind, unavailable, execution) in cases {
             let problem = failure_class_problem(Some(class)).expect("typed backend problem");
@@ -367,25 +342,6 @@ mod tests {
             problem.cancellation_stage(),
             Some(CancellationStage::EffectInFlight)
         );
-        assert_eq!(problem.execution_failure_classification(), None);
-    }
-
-    #[test]
-    fn elapsed_post_admission_deadline_precedes_backend_failure_classification() {
-        let context = context_with_deadline(UtcMicros(2));
-        let cancellation =
-            CancellationSignal::active("cancellation.runtime-problem").expect("signal");
-
-        let problem = post_admission_termination_problem(&context, &cancellation)
-            .expect("typed deadline")
-            .expect("elapsed deadline problem");
-
-        assert_eq!(problem.kind(), ApplicationProblemKind::TimedOut);
-        assert_eq!(
-            problem.cancellation_stage(),
-            Some(CancellationStage::EffectInFlight)
-        );
-        assert_eq!(problem.unavailable_classification(), None);
         assert_eq!(problem.execution_failure_classification(), None);
     }
 

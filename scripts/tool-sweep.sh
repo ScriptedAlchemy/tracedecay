@@ -20,7 +20,7 @@ reported as failed rather than skipped.
 EOF
 }
 
-BIN="${TRACEDECAY_BIN:-$REPO_ROOT/target/release/tracedecay}"
+BIN="${TRACEDECAY_BIN:-$REPO_ROOT/bazel-bin/crates/tracedecay-cli/tracedecay}"
 OUT=""
 WHOLE_RUN_DEADLINE_MS="${TRACEDECAY_SWEEP_WHOLE_RUN_DEADLINE_MS:-1800000}"
 

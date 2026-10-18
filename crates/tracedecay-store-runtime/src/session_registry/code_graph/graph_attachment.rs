@@ -5,7 +5,7 @@ use std::time::Instant;
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1, GraphDbRegistration,
 };
-use tracedecay_runtime_core::store_runtime::registry::{
+use tracedecay_runtime_core::shard_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey, StoreRuntimeRegistry,
 };
 use tracedecay_sessions::observation::ObservationCancellation;
@@ -104,20 +104,20 @@ async fn open_session_relation_owner_with_cancellation(
         })?;
     let registration = registration(cancellation, lifecycle_cancellation, operation);
     let graph_registry = graph_registry.clone();
-    // Grafeo SingleFile restore is blocking CPU and allocation work. Retain
-    // the join in the daemon-owned task while moving the resolver off Tokio's
-    // cooperative workers; cancellation remains visible inside the native
-    // load through the exact registration authority.
-    let graph = tokio::task::spawn_blocking(move || {
-        hotpath::measure_block!("daemon.store.session_relation_graph.open", {
-            graph_registry.resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+    // Grafeo SingleFile restore is blocking CPU and allocation work, so it runs
+    // on the native blocking pool; cancellation remains visible inside the load
+    // through the exact registration authority.
+    let graph = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        let _span = tracing::trace_span!("daemon.store.session_relation_graph.open").entered();
+        {
+            graph_registry.resolve_lazy_owner_attachment(GraphDbOwnerRegistrationV1 {
                 operation: registration,
                 authority_attachment: Box::new(store_attachment),
             })
-        })
+        }
     })
     .await
-    .map_err(|error| session_registry_error("join session relation graph open", error.to_string()))?
+    .map_err(|error| session_registry_error("join session relation graph open", error))?
     .map_err(|error| {
         session_registry_error("open session relation graph owner", error.to_string())
     })?;
@@ -130,18 +130,24 @@ pub async fn close_retained_for_shutdown(
     verified_locator: VerifiedStoreLocatorV1,
 ) -> Result<()> {
     let graph_registry = graph_registry.clone();
+    let shard_id = binding.shard_id.clone();
     // This close requires an unleased owner: the registry drain must already
     // have dropped the retained map-owner attachments and every owner-issued
     // graph client lease, and the reconciliation workers must already be
     // joined. A lease that survives the drain is a live consumer, so the
-    // typed Conflict below is the correct terminal answer — never retry here.
-    tokio::task::spawn_blocking(move || {
-        graph_registry.close_retained_for_shutdown(&binding, &verified_locator)
+    // typed Conflict below is the correct terminal answer, never retry here.
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        graph_registry.close_retained(&binding, &verified_locator)
     })
     .await
-    .map_err(|error| session_registry_error("join graph shutdown close", error.to_string()))?
+    .map_err(|error| session_registry_error("join graph shutdown close", error))?
     .map(|_| ())
-    .map_err(|error| session_registry_error("close graph runtime for shutdown", error.to_string()))
+    .map_err(|error| {
+        session_registry_error(
+            "close graph runtime for shutdown",
+            format!("{error} (shard {shard_id:?})"),
+        )
+    })
 }
 
 impl super::RetainedVerifiedGraphRuntimeV1 {

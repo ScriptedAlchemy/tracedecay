@@ -10,8 +10,8 @@ use axum::http::StatusCode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_application::{ApplicationProblemEnvelope, ApplicationProblemKind};
-use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+use tracedecay_contracts::{ApplicationProblemEnvelope, ApplicationProblemKind};
+use tracedecay_domain::configuration::{CodeIndexWorkerSelectionV1, ContextScoutIntentSettingsV1};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Application operation behind the project settings write.
@@ -38,13 +38,13 @@ pub struct ProjectSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_call_sites: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_ignore: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetrySettingsPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncSettingsPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_scout: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_scout_intent: Option<ContextScoutIntentSettingsV1>,
 }
 
 /// Nested synchronization settings patch.
@@ -115,21 +115,37 @@ pub fn parse_code_index_worker_settings_patch(
         .map_err(|error| patch_shape_error("code index worker settings", &error))
 }
 
-/// Validate the transport-owned user patch invariants. The executable supplies
-/// the duration parser because profile configuration remains its authority.
-pub fn validate_user_settings_patch(
+/// User-settings fields after the HTTP boundary has parsed display strings.
+///
+/// `watcher_debounce_ms` is already a positive millisecond count. Planners
+/// write that unsigned value and do not parse the wire string again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedUserSettingsPatch {
+    pub upload_enabled: Option<bool>,
+    pub watcher_debounce_ms: Option<u64>,
+    pub extraction_timeout_secs: Option<u64>,
+}
+
+/// Parse a user settings patch once. The executable supplies the duration
+/// parser because profile configuration remains its authority.
+pub fn admit_user_settings_patch(
     patch: &UserSettingsPatch,
-    duration_is_valid: impl Fn(&str) -> bool,
-) -> Result<(), DashboardConfigurationRouteErrorV1> {
+    parse_debounce_millis: impl Fn(&str) -> Option<u64>,
+) -> Result<AdmittedUserSettingsPatch, DashboardConfigurationRouteErrorV1> {
     let mut errors = Vec::new();
-    if let Some(debounce) = &patch.watcher_debounce
-        && !duration_is_valid(debounce)
-    {
-        errors.push(validation_error(
-            "watcher_debounce",
-            "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
-        ));
-    }
+    let watcher_debounce_ms = match patch.watcher_debounce.as_deref() {
+        Some(debounce) => match parse_debounce_millis(debounce) {
+            Some(millis) => Some(millis),
+            None => {
+                errors.push(validation_error(
+                    "watcher_debounce",
+                    "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
+                ));
+                None
+            }
+        },
+        None => None,
+    };
     if patch.extraction_timeout_secs == Some(0) {
         errors.push(validation_error(
             "extraction_timeout_secs",
@@ -137,7 +153,11 @@ pub fn validate_user_settings_patch(
         ));
     }
     if errors.is_empty() {
-        Ok(())
+        Ok(AdmittedUserSettingsPatch {
+            upload_enabled: patch.upload_enabled,
+            watcher_debounce_ms,
+            extraction_timeout_secs: patch.extraction_timeout_secs,
+        })
     } else {
         Err(settings_validation_error(errors))
     }
@@ -198,20 +218,12 @@ pub fn configuration_authority_unavailable_error() -> DashboardConfigurationRout
 pub fn configuration_application_problem_error(
     problem: ApplicationProblemEnvelope,
 ) -> DashboardConfigurationRouteErrorV1 {
-    let status = match problem.problem.kind {
-        ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-        ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-        ApplicationProblemKind::Conflict
-        | ApplicationProblemKind::PartialEffect
-        | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-        ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-        ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
-        ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-        ApplicationProblemKind::Cancelled => StatusCode::CONFLICT,
-        ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+    // Cancellation stays a conflict on this historic configuration route.
+    // Every other kind uses the canonical application status.
+    let status = if problem.problem.kind == ApplicationProblemKind::Cancelled {
+        StatusCode::CONFLICT
+    } else {
+        crate::application_problem_status(problem.problem.kind)
     };
     let payload = serde_json::to_value(problem)
         .unwrap_or_else(|_| json!({ "detail": "configuration mutation was rejected" }));
@@ -287,6 +299,32 @@ mod tests {
             validate_code_index_worker_settings_patch(&patch).expect_err("zero must be denied");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["validation_errors"][0]["field"], "code_index_workers");
+    }
+
+    #[test]
+    fn user_settings_patch_parses_debounce_once() {
+        let patch = parse_user_settings_patch(json!({
+            "expected_revision_id": "configuration.revision.fixture",
+            "idempotency_key": "configuration.idempotency.fixture",
+            "watcher_debounce": "15s",
+            "extraction_timeout_secs": 60
+        }))
+        .unwrap();
+        let admitted =
+            admit_user_settings_patch(&patch, |value| (value == "15s").then_some(15_000)).unwrap();
+        assert_eq!(admitted.watcher_debounce_ms, Some(15_000));
+        assert_eq!(admitted.extraction_timeout_secs, Some(60));
+
+        let invalid = parse_user_settings_patch(json!({
+            "expected_revision_id": "configuration.revision.fixture",
+            "idempotency_key": "configuration.idempotency.fixture",
+            "watcher_debounce": "0s"
+        }))
+        .unwrap();
+        let (status, Json(body)) = admit_user_settings_patch(&invalid, |_| None)
+            .expect_err("zero duration must be denied");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["validation_errors"][0]["field"], "watcher_debounce");
     }
 
     #[test]

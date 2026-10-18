@@ -2,29 +2,30 @@
 //!
 //! This module owns capacity: how many workers exist per lane, who is holding
 //! one, and when an idle one retires. The siblings own the two things that hang
-//! off it — [`lease`] the RAII checkout that always returns a worker, and
+//! off it, [`lease`] the RAII checkout that always returns a worker, and
 //! [`outcome`] the result vocabulary an acquisition reports in.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Condvar, Mutex, Weak},
-    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
-use tokio::sync::watch;
+use asupersync::channel::watch;
 use tracedecay_store::{
     OperationPriorityV1, ReaderBudgetV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
     SaturationScopeV1, StoreRuntimeBindingV1, UnavailableReasonV1,
 };
 
 use super::{ExistingReaderLocator, ReaderQueryExecutor, ReaderStartError, worker};
-use crate::CheckpointPressure;
+use crate::checkpoint::CheckpointBlockerSource;
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement, MemoryReleaseNoOpReason,
-    MemoryReleaseOutcome,
+    ExactSqlError, ExactSqlReadSnapshot, ExactSqlReaderRefusalV1, ExactSqlRows, ExactSqlStatement,
+    MemoryReleaseNoOpReason, MemoryReleaseOutcome,
 };
 use crate::telemetry::{ReaderAdmissionRecorder, ReaderAdmissionSnapshot};
+use crate::{CheckpointBlocker, CheckpointBlockers, CheckpointPressure};
+use worker::SnapshotRevoker;
 
 mod lease;
 mod outcome;
@@ -32,6 +33,27 @@ mod outcome;
 pub use lease::{ReaderLease, SnapshotLease};
 pub use outcome::{ReaderAcquireError, ReaderPoolSnapshot, ReaderPoolState};
 use outcome::{interruption, validate_probe};
+
+/// Classifies a lane acquisition failure for the exact-SQL entry points.
+///
+/// `acquire_lane` answers two different kinds of question. The lane can
+/// decline to admit this request, which says nothing about the store, or a
+/// reader can fail, which says the store cannot be read here. Reporting both
+/// as [`ExactSqlError::ReaderUnavailable`] left the difference legible only in
+/// the `Display` text, so a caller that wanted to route a declined request
+/// onto another lane had to either match that text or route around every
+/// failure, including a reader that had actually broken.
+fn map_reader_acquire_error(error: ReaderAcquireError) -> ExactSqlError {
+    match error {
+        ReaderAcquireError::Saturated { .. } => {
+            ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Saturated)
+        }
+        ReaderAcquireError::Interrupted {
+            reason: UnavailableReasonV1::Draining,
+        } => ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Draining),
+        error => ExactSqlError::ReaderUnavailable(error.to_string()),
+    }
+}
 
 pub(super) const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
 pub(super) const SNAPSHOT_END_GRACE: Duration = Duration::from_millis(5);
@@ -52,6 +74,148 @@ pub(super) const DEFERRED_SNAPSHOT_END_LIMIT: Duration = Duration::from_secs(2);
 /// deadline and reports `Saturated`. Background acquisitions therefore admit
 /// against `max_per_hot_shard` minus this reservation.
 pub(super) const FOREGROUND_RESERVED_GENERAL_WORKERS: u16 = 2;
+const MAX_CHECKPOINT_BLOCKERS: usize = 16;
+
+/// One open snapshot: when it began, and how the checkpoint fence ends it.
+struct ActiveSnapshot {
+    started: Instant,
+    revoker: SnapshotRevoker,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ReaderCheckpointBlockers {
+    active: Arc<Mutex<BTreeMap<u64, ActiveSnapshot>>>,
+    /// Active snapshots whose lease already ended: the worker's rollback
+    /// outran [`SNAPSHOT_END_GRACE`] and is finishing on a return task.
+    released: Arc<(Mutex<BTreeSet<u64>>, Condvar)>,
+    finished: Arc<asupersync::sync::Notify>,
+}
+
+impl ReaderCheckpointBlockers {
+    pub(super) fn begin(&self, reader_id: u64, revoker: SnapshotRevoker) -> bool {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.contains_key(&reader_id) {
+            return false;
+        }
+        active.insert(
+            reader_id,
+            ActiveSnapshot {
+                started: Instant::now(),
+                revoker,
+            },
+        );
+        true
+    }
+
+    pub(super) fn release(&self, reader_id: u64) {
+        self.released
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(reader_id);
+    }
+
+    pub(super) fn finish(&self, reader_id: u64) {
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&reader_id);
+        let (released, settled) = &*self.released;
+        if released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&reader_id)
+        {
+            settled.notify_all();
+            self.finished.notify_waiters();
+        }
+    }
+
+    /// Test-only: block until every released snapshot has finished, with no
+    /// bound, unlike the checkpoint's own [`Self::await_released_snapshots`].
+    #[cfg(test)]
+    pub(crate) fn wait_until_released_snapshots_finish(&self) {
+        let (released, settled) = &*self.released;
+        let released = released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(
+            settled
+                .wait_while(released, |released| !released.is_empty())
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+    }
+}
+
+impl CheckpointBlockerSource for ReaderCheckpointBlockers {
+    fn checkpoint_blockers(&self) -> CheckpointBlockers {
+        let now = Instant::now();
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A revoked snapshot its worker already rolled back holds no WAL read
+        // slot, though its lease is still out.
+        let holding = active
+            .iter()
+            .filter(|(_, snapshot)| !snapshot.revoker.rolled_back())
+            .collect::<Vec<_>>();
+        let blockers = holding
+            .iter()
+            .take(MAX_CHECKPOINT_BLOCKERS)
+            .map(|(reader_id, snapshot)| CheckpointBlocker::PhysicalReader {
+                reader_id: **reader_id,
+                age: now.saturating_duration_since(snapshot.started),
+            })
+            .collect();
+        CheckpointBlockers {
+            blockers,
+            omitted: holding.len().saturating_sub(MAX_CHECKPOINT_BLOCKERS),
+        }
+    }
+
+    fn revoke_snapshots_older_than(&self, age: Duration) -> usize {
+        let now = Instant::now();
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut revoked = 0;
+        for snapshot in active.values() {
+            if now.saturating_duration_since(snapshot.started) >= age {
+                snapshot.revoker.revoke();
+                revoked += 1;
+            }
+        }
+        revoked
+    }
+
+    /// A return task writes off a worker that misses
+    /// [`DEFERRED_SNAPSHOT_END_LIMIT`], so the wait shares that bound; a
+    /// reader still pinned past it is reported by the checkpoint itself.
+    fn await_released_snapshots(&self) -> futures_util::future::BoxFuture<'static, ()> {
+        let released = Arc::clone(&self.released);
+        let finished = Arc::clone(&self.finished);
+        let awaited = released
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move {
+            let settled = finished.wait_until(|| {
+                released
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_disjoint(&awaited)
+            });
+            let _ = crate::storage_pool::timeout(DEFERRED_SNAPSHOT_END_LIMIT, settled).await;
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReaderLane {
@@ -85,7 +249,6 @@ impl LaneAdmission {
         }
     }
 
-    #[hotpath::skip]
     const fn interactive(lane: ReaderLane) -> Self {
         Self {
             lane,
@@ -96,8 +259,14 @@ impl LaneAdmission {
 
 pub(super) struct WorkerRecord {
     pub(super) client: worker::WorkerClient,
-    pub(super) join: Option<JoinHandle<()>>,
+    pub(super) join: Option<crate::storage_pool::PoolTask>,
     lane: ReaderLane,
+}
+
+pub(super) fn join_worker(record: &mut WorkerRecord) {
+    if let Some(join) = record.join.take() {
+        let _ = join.join();
+    }
 }
 
 #[derive(Clone)]
@@ -114,6 +283,13 @@ pub(super) struct PoolState {
     opening_general: u16,
     opening_health: u16,
     pub(super) records: BTreeMap<u64, WorkerRecord>,
+    /// Idle workers ordered oldest-released first. Checkout takes the back:
+    /// `SQLite` keeps a connection's page cache across read transactions until
+    /// a commit lands after that connection's last read. The most recently
+    /// released worker is the likeliest to have read since the last commit;
+    /// handing out a longer-idle one re-reads every B-tree path it touches.
+    /// The front therefore holds the longest-idle burst workers, which is
+    /// where [`ReaderPool::retire_idle_at`] looks for retirees.
     general: VecDeque<AvailableWorker>,
     health: VecDeque<AvailableWorker>,
     pub(super) leased_general: u16,
@@ -121,7 +297,7 @@ pub(super) struct PoolState {
     /// Workers whose snapshot end outran [`SNAPSHOT_END_GRACE`].
     ///
     /// Their lease has ended but the worker has not confirmed its rollback, so
-    /// it is neither available nor leased. It is still counted here — a limbo
+    /// it is neither available nor leased. It is still counted here, a limbo
     /// worker that vanished from the accounting would silently shrink the lane
     /// and let a shutdown declare quiescence with work still in flight.
     pub(super) limbo_general: u16,
@@ -135,9 +311,21 @@ pub(super) struct PoolState {
     pub(super) waiting_health: u16,
     /// Successful exact-SQL snapshot admissions across both lanes.
     snapshot_admissions: u64,
+    /// Set by [`ReaderPool::close_for_lost_file`]: every worker, including one
+    /// still being spawned, must exit and none may stay idle.
+    lost: bool,
 }
 
 impl PoolState {
+    /// Why an acquisition refused by a draining pool is turned away.
+    const fn draining_reason(&self) -> UnavailableReasonV1 {
+        if self.lost {
+            UnavailableReasonV1::FileLost
+        } else {
+            UnavailableReasonV1::Draining
+        }
+    }
+
     fn workers(&self, lane: ReaderLane) -> u16 {
         self.records
             .values()
@@ -152,7 +340,6 @@ impl PoolState {
         self.workers(lane).saturating_sub(self.limbo(lane))
     }
 
-    #[hotpath::skip]
     pub(super) const fn limbo(&self, lane: ReaderLane) -> u16 {
         match lane {
             ReaderLane::General => self.limbo_general,
@@ -160,7 +347,6 @@ impl PoolState {
         }
     }
 
-    #[hotpath::skip]
     pub(super) const fn limbo_mut(&mut self, lane: ReaderLane) -> &mut u16 {
         match lane {
             ReaderLane::General => &mut self.limbo_general,
@@ -168,7 +354,6 @@ impl PoolState {
         }
     }
 
-    #[hotpath::skip]
     const fn waiting(&self, lane: ReaderLane) -> u16 {
         match lane {
             ReaderLane::General => self.waiting_general,
@@ -176,7 +361,6 @@ impl PoolState {
         }
     }
 
-    #[hotpath::skip]
     const fn waiting_mut(&mut self, lane: ReaderLane) -> &mut u16 {
         match lane {
             ReaderLane::General => &mut self.waiting_general,
@@ -226,7 +410,6 @@ struct WaitingGuard<'pool, E: ReaderQueryExecutor> {
 }
 
 impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
-    #[hotpath::skip]
     const fn new(inner: &'pool PoolInner<E>, lane: ReaderLane) -> Self {
         Self {
             inner,
@@ -235,7 +418,6 @@ impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
         }
     }
 
-    #[hotpath::skip]
     const fn was_counted(&self) -> bool {
         self.counted
     }
@@ -273,9 +455,14 @@ pub(super) struct PoolInner<E: ReaderQueryExecutor> {
     idle_burst_retire: Duration,
     executor: E,
     checkpoint_pressure: Option<watch::Receiver<CheckpointPressure>>,
+    pub(super) checkpoint_blockers: ReaderCheckpointBlockers,
     pub(super) state: Mutex<PoolState>,
     pub(super) capacity_changed: Condvar,
     pub(super) admission: Arc<ReaderAdmissionRecorder>,
+    /// Test-only: runs once between a growing acquire's worker spawn and its
+    /// registration.
+    #[cfg(test)]
+    after_spawn: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl<E: ReaderQueryExecutor> Drop for PoolInner<E> {
@@ -291,9 +478,7 @@ impl<E: ReaderQueryExecutor> Drop for PoolInner<E> {
             record.client.shutdown();
         }
         for mut record in records.into_values() {
-            if let Some(join) = record.join.take() {
-                let _ = join.join();
-            }
+            join_worker(&mut record);
         }
     }
 }
@@ -337,7 +522,13 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         budget: ReaderBudgetV1,
         executor: E,
     ) -> Result<Self, ReaderStartError> {
-        Self::start_with_checkpoint_pressure(locator, budget, executor, None)
+        Self::start_with_checkpoint_control(
+            locator,
+            budget,
+            executor,
+            None,
+            ReaderCheckpointBlockers::default(),
+        )
     }
 
     pub(crate) fn start_with_checkpoint_pressure(
@@ -345,6 +536,22 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         budget: ReaderBudgetV1,
         executor: E,
         checkpoint_pressure: Option<watch::Receiver<CheckpointPressure>>,
+    ) -> Result<Self, ReaderStartError> {
+        Self::start_with_checkpoint_control(
+            locator,
+            budget,
+            executor,
+            checkpoint_pressure,
+            ReaderCheckpointBlockers::default(),
+        )
+    }
+
+    pub(crate) fn start_with_checkpoint_control(
+        locator: ExistingReaderLocator,
+        budget: ReaderBudgetV1,
+        executor: E,
+        checkpoint_pressure: Option<watch::Receiver<CheckpointPressure>>,
+        checkpoint_blockers: ReaderCheckpointBlockers,
     ) -> Result<Self, ReaderStartError> {
         budget
             .validate()
@@ -356,6 +563,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             budget,
             executor,
             checkpoint_pressure,
+            checkpoint_blockers,
             state: Mutex::new(PoolState {
                 lifecycle: ReaderPoolState::Ready,
                 health_admission_open: true,
@@ -372,9 +580,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 waiting_general: 0,
                 waiting_health: 0,
                 snapshot_admissions: 0,
+                lost: false,
             }),
             capacity_changed: Condvar::new(),
             admission: Arc::new(ReaderAdmissionRecorder::default()),
+            #[cfg(test)]
+            after_spawn: Mutex::new(None),
         });
         let pool = Self { inner };
         for _ in 0..pool.inner.budget.min_per_hot_shard {
@@ -419,7 +630,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     ) -> Result<ExactSqlRows, ExactSqlError> {
         let mut lease = self
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(map_reader_acquire_error)?;
         lease.execute_exact_sql_query(statement)
     }
 
@@ -427,14 +638,15 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         &self,
         priority: OperationPriorityV1,
         max_wait: Duration,
+        lifetime: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
         let mut lease = self
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
-        lease.begin_exact_sql_snapshot()?;
+            .map_err(map_reader_acquire_error)?;
+        lease.begin_exact_sql_snapshot(lifetime)?;
         self.record_snapshot_admission();
-        Ok(ExactSqlReadSnapshot::new(move |statement| {
-            lease.execute_active_exact_sql_query(statement)
+        Ok(ExactSqlReadSnapshot::new(move |statement, budget| {
+            lease.execute_active_exact_sql_query(statement, budget)
         }))
     }
 
@@ -448,12 +660,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 max_wait,
                 || None,
             )
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(map_reader_acquire_error)?;
         lease.retire_after_snapshot();
-        lease.begin_exact_sql_snapshot()?;
+        lease.begin_exact_sql_snapshot(super::READ_SNAPSHOT_LIFETIME)?;
         self.record_snapshot_admission();
-        Ok(ExactSqlReadSnapshot::new(move |statement| {
-            lease.execute_active_exact_sql_query(statement)
+        Ok(ExactSqlReadSnapshot::new(move |statement, budget| {
+            lease.execute_active_exact_sql_query(statement, budget)
         }))
     }
 
@@ -600,6 +812,64 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         self.inner.capacity_changed.notify_all();
     }
 
+    /// Fences admission, closes the pinned descriptor, and tells every worker
+    /// to interrupt its statement and exit, which closes its connection. The
+    /// pool object may outlive this call inside a lease, but no longer holds
+    /// the unlinked file open. Never waits, so a pool task may call it.
+    pub(crate) fn close_for_lost_file(&self) {
+        // Draining and `lost` flip under one lock, so a waiter the wake below
+        // releases never sees the pool draining without the file being lost.
+        let clients: Vec<_> = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.lifecycle = ReaderPoolState::Draining;
+            state.health_admission_open = false;
+            state.lost = true;
+            state
+                .records
+                .values()
+                .map(|record| record.client.clone())
+                .collect()
+        };
+        self.inner.capacity_changed.notify_all();
+        self.inner.locator.release_opened_database();
+        for client in clients {
+            client.shutdown();
+        }
+    }
+
+    /// Test-only: run `hook` once, between the next growing acquire's worker
+    /// spawn and its registration.
+    #[cfg(test)]
+    pub(crate) fn run_once_after_spawn(&self, hook: impl FnOnce() + Send + 'static) {
+        *self
+            .inner
+            .after_spawn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
+    }
+
+    /// Whether every worker has exited, so no connection to the file is open.
+    /// Meaningful after [`Self::close_for_lost_file`], which stops new workers.
+    pub(crate) fn workers_exited(&self) -> bool {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.opening_general == 0
+            && state.opening_health == 0
+            && state.records.values().all(|record| {
+                record
+                    .join
+                    .as_ref()
+                    .is_none_or(crate::storage_pool::PoolTask::is_finished)
+            })
+    }
+
     pub(crate) fn is_quiescent(&self) -> bool {
         let state = self
             .inner
@@ -619,35 +889,38 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     }
 
     /// Test-only: block until a general-lane acquisition is counted as a
-    /// waiter, or the bound lapses.
+    /// waiter.
     ///
     /// Arming a waiter notifies `capacity_changed`, so this observes the
     /// event directly instead of polling `snapshot`.
     #[cfg(test)]
-    pub(crate) fn wait_until_waiting_general(&self, max_wait: Duration) -> bool {
+    pub(crate) fn wait_until_waiting_general(&self) {
         let state = self
             .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (state, _) = self
-            .inner
-            .capacity_changed
-            .wait_timeout_while(state, max_wait, |state| state.waiting_general == 0)
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.waiting_general > 0
+        drop(
+            self.inner
+                .capacity_changed
+                .wait_while(state, |state| state.waiting_general == 0)
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
     }
 
-    /// Test-only: block until the pool is quiescent, or the bound lapses.
+    /// Test-only: block until the pool is quiescent.
     ///
     /// Every lane-state transition that feeds quiescence (lease returns,
     /// opens, limbo resolution) notifies `capacity_changed`, so the wait is
     /// event-driven. The one exception is the final strong-count handoff:
-    /// the deferred-return thread drops its pool reference immediately after
+    /// the deferred-return task drops its pool reference immediately after
     /// its notification, and that drop has no event, so the tail of this wait
     /// yields across a window of a few instructions.
+    ///
+    /// There is no bound: a deferred return always resolves its limbo, and a
+    /// host under load can stall that task for tens of seconds.
     #[cfg(test)]
-    pub(crate) fn wait_until_quiescent(&self, max_wait: Duration) -> bool {
+    pub(crate) fn wait_until_quiescent(&self) {
         fn lanes_busy(state: &PoolState) -> bool {
             state.opening_general != 0
                 || state.opening_health != 0
@@ -656,34 +929,29 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 || state.limbo_general != 0
                 || state.limbo_health != 0
         }
-        let deadline = Instant::now() + max_wait;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
             let state = self
                 .inner
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (state, _) = self
+            let state = self
                 .inner
                 .capacity_changed
-                .wait_timeout_while(state, remaining, |state| lanes_busy(state))
+                .wait_while(state, |state| lanes_busy(state))
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let lanes_settled = !lanes_busy(&state);
             drop(state);
-            if lanes_settled && Arc::strong_count(&self.inner) == 1 {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
+            if Arc::strong_count(&self.inner) == 1 {
+                return;
             }
             std::thread::yield_now();
         }
     }
 
-    /// Acquire within a caller-selected bound. The caller-owned probe remains
-    /// the sole cancellation/deadline authority and is checked before every
-    /// capacity decision and bounded condvar wait.
+    /// Acquire within a caller-selected bound on the time spent waiting for
+    /// capacity, counted from when the lane is first found blocked. The
+    /// caller-owned probe remains the sole cancellation/deadline authority and
+    /// is checked before every capacity decision and bounded condvar wait.
     pub fn acquire(
         &self,
         request: &RuntimeReadRequestV1,
@@ -730,7 +998,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         self.acquire(request, probe, ACQUISITION_POLL_QUANTUM)
     }
 
-    #[hotpath::measure(label = "rusqlite_runtime.reader.acquire_lane")]
+    #[tracing::instrument(
+        name = "rusqlite_runtime.reader.acquire_lane",
+        level = "trace",
+        skip_all
+    )]
     fn acquire_lane<F>(
         &self,
         admission: LaneAdmission,
@@ -740,14 +1012,24 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     where
         F: FnMut() -> Option<UnavailableReasonV1>,
     {
+        if crate::storage_pool::on_pool() {
+            return Err(ReaderAcquireError::Worker(
+                worker::ReaderWorkerError::WorkerClosed,
+            ));
+        }
         let lane = admission.lane;
         let lease_ceiling = self.lease_ceiling(admission);
         let mut waiting = WaitingGuard::new(&self.inner, lane);
         let started = Instant::now();
+        // `max_wait` bounds the time spent waiting for capacity, so it starts
+        // when the lane is first found blocked. Measured from entry, a
+        // scheduler stall before the first capacity check would spend the
+        // whole bound and report saturation without ever waiting for a release.
+        let mut blocked_since: Option<Instant> = None;
         // Retiring burst workers walks and rebuilds the idle deque under the
         // state lock; it only has anything to do when the idle set has actually
         // changed. Run it on entry and after a notified wake, never on every
-        // bounded poll tick — a timed-out wait leaves the idle set untouched, so
+        // bounded poll tick, a timed-out wait leaves the idle set untouched, so
         // repeating the scan each 5ms merely adds lock traffic to the hot path.
         let mut retire_pending = true;
 
@@ -767,10 +1049,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             if state.lifecycle == ReaderPoolState::Draining
                 && (lane == ReaderLane::General || !state.health_admission_open)
             {
+                let reason = state.draining_reason();
+                drop(state);
                 self.inner.admission.interrupted();
-                return Err(ReaderAcquireError::Interrupted {
-                    reason: UnavailableReasonV1::Draining,
-                });
+                return Err(ReaderAcquireError::Interrupted { reason });
             }
             if lane == ReaderLane::General
                 && self
@@ -781,16 +1063,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         matches!(&*pressure.borrow(), CheckpointPressure::BlockGeneral { .. })
                     })
             {
-                let elapsed = started.elapsed();
-                if elapsed >= max_wait {
+                let blocked = blocked_since.get_or_insert_with(Instant::now).elapsed();
+                if blocked >= max_wait {
                     self.inner
                         .admission
-                        .saturated(elapsed, waiting.was_counted());
+                        .saturated(started.elapsed(), waiting.was_counted());
                     return Err(ReaderAcquireError::Saturated {
                         scope: SaturationScopeV1::ReaderPool,
                     });
                 }
-                let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
+                let wait = (max_wait - blocked).min(ACQUISITION_POLL_QUANTUM);
                 waiting.arm(&mut state);
                 let (_state, wait_result) = self
                     .inner
@@ -802,15 +1084,18 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             }
             // Foreground reservation. A background acquisition holding fewer
             // than `lease_ceiling` leases may take or grow a worker; at the
-            // ceiling it waits here instead, leaving the rest of the lane —
-            // both idle workers and unspawned headroom — for interactive
+            // ceiling it waits here instead, leaving the rest of the lane,
+            // both idle workers and unspawned headroom, for interactive
             // reads. Foreground acquisitions see the whole lane.
             let leased = match lane {
                 ReaderLane::General => state.leased_general,
                 ReaderLane::ReservedHealth => state.leased_health,
             };
-            if leased < lease_ceiling {
-                if let Some(worker) = state.available(lane).pop_front() {
+            // A worker being opened already owns its future lease. Counting
+            // only checked-out workers lets simultaneous background opens
+            // consume the foreground reservation before any open completes.
+            if leased.saturating_add(state.opening(lane)) < lease_ceiling {
+                if let Some(worker) = state.available(lane).pop_back() {
                     match lane {
                         ReaderLane::General => state.leased_general += 1,
                         ReaderLane::ReservedHealth => state.leased_health += 1,
@@ -844,6 +1129,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         Arc::clone(&self.inner.admission),
                     )
                     .and_then(|spawned| self.validate_worker_identity(spawned));
+                    #[cfg(test)]
+                    if let Some(pause) = self
+                        .inner
+                        .after_spawn
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        pause();
+                    }
                     let mut state = self
                         .inner
                         .state
@@ -863,6 +1158,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         },
                     );
                     if state.lifecycle == ReaderPoolState::Draining {
+                        // The lost-file sweep ran before this worker existed.
+                        if state.lost {
+                            client.shutdown();
+                        }
+                        let reason = state.draining_reason();
                         state.available(lane).push_back(AvailableWorker {
                             id,
                             client,
@@ -871,9 +1171,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         drop(state);
                         self.inner.capacity_changed.notify_all();
                         self.inner.admission.interrupted();
-                        return Err(ReaderAcquireError::Interrupted {
-                            reason: UnavailableReasonV1::Draining,
-                        });
+                        return Err(ReaderAcquireError::Interrupted { reason });
                     }
                     *state.leased_mut(lane) += 1;
                     drop(state);
@@ -891,16 +1189,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     ));
                 }
             }
-            let elapsed = started.elapsed();
-            if elapsed >= max_wait {
+            let blocked = blocked_since.get_or_insert_with(Instant::now).elapsed();
+            if blocked >= max_wait {
                 self.inner
                     .admission
-                    .saturated(elapsed, waiting.was_counted());
+                    .saturated(started.elapsed(), waiting.was_counted());
                 return Err(ReaderAcquireError::Saturated {
                     scope: SaturationScopeV1::ReaderPool,
                 });
             }
-            let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
+            let wait = (max_wait - blocked).min(ACQUISITION_POLL_QUANTUM);
             waiting.arm(&mut state);
             let (_state, wait_result) = self
                 .inner
@@ -944,9 +1242,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             record.client.shutdown();
         }
         for record in &mut retired {
-            if let Some(join) = record.join.take() {
-                let _ = join.join();
-            }
+            join_worker(record);
         }
         retired.len()
     }
@@ -1002,7 +1298,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
 
 /// Folds per-worker release results into one truthful pool outcome.
 ///
-/// A worker fault — the pragma itself reporting a SQLite error — propagates
+/// A worker fault, the pragma itself reporting a SQLite error, propagates
 /// as `Err` carrying the partial-release count, so the caller's degraded log
 /// fires instead of the failure vanishing into a "pool closed" no-op. Workers
 /// that were skipped (terminated, or busy inside a retained snapshot) are not

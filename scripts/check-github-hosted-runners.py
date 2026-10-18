@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ import yaml
 STANDARD_GITHUB_HOSTED_RUNNERS = frozenset(
     {
         "ubuntu-latest",
+        "ubuntu-26.04",
+        "ubuntu-26.04-arm",
         "ubuntu-24.04",
         "ubuntu-22.04",
         "ubuntu-24.04-arm",
@@ -23,6 +26,7 @@ STANDARD_GITHUB_HOSTED_RUNNERS = frozenset(
         "windows-2025",
         "windows-2022",
         "macos-latest",
+        "macos-26",
         "macos-15",
         "macos-15-intel",
         "macos-14",
@@ -30,6 +34,10 @@ STANDARD_GITHUB_HOSTED_RUNNERS = frozenset(
 )
 RELEASE_MATRIX_EXPRESSION = "${{ matrix.runner }}"
 INLINE_MATRIX_EXPRESSION = "${{ fromJSON(matrix.runner) }}"
+LITERAL_RUNNER_EXPRESSION = re.compile(
+    r"\$\{\{\s*matrix\.[A-Za-z_][A-Za-z_0-9]*\s*==\s*'[^']*'\s*"
+    r"&&\s*'([^']+)'\s*\|\|\s*'([^']+)'\s*\}\}"
+)
 RELEASE_WORKFLOWS = frozenset({"release.yml", "release-beta.yml"})
 
 
@@ -100,6 +108,9 @@ def validate_workflow(path: Path) -> None:
             continue
         elif runner == INLINE_MATRIX_EXPRESSION:
             inline_matrix_runners(job, authority)
+        elif match := LITERAL_RUNNER_EXPRESSION.fullmatch(runner):
+            for label in match.groups():
+                require_hosted_label(label, authority)
         else:
             raise PolicyViolation(
                 f"{authority} uses unaudited dynamic runner expression {runner!r}"

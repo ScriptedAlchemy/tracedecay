@@ -8,7 +8,7 @@ use crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_tr
 fn progress(key: GitHistoryProgressKey) -> GitHistoryProgressRow {
     GitHistoryProgressRow {
         key,
-        activity_timestamp: 201,
+        change_sequence: 201,
         provider: "codex".to_string(),
         session_id: "session-1".to_string(),
         project_path: "/repo/linked".to_string(),
@@ -242,7 +242,7 @@ async fn stable_source_key_preserves_the_older_active_candidate() {
     assert!(insert_progress(&conn, &older).await.unwrap());
 
     let mut newer = older.clone();
-    newer.activity_timestamp = 301;
+    newer.change_sequence = 301;
     newer.window_end = 300;
     newer.segment_end = 300;
     assert!(!insert_progress(&conn, &newer).await.unwrap());

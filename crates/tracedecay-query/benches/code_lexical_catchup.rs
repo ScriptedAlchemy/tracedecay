@@ -4,35 +4,29 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageReadV1,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
+    CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
+    CodeIndexRepositoryParseIdentityV1, MemorySealedPublicationStoreV1,
+    SealedGenerationSegmentPublicationV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
 };
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-};
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ComponentRevision, FileOccurrenceId,
-    FreshnessCompatibilityV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId,
-    SensitivityLevelV1, SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey,
-    SourceNamespace, UtcMicros,
+    ChunkerRevision, ComponentRevision, FileOccurrenceId, FreshnessCompatibilityV1, ManifestDigest,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1,
+    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SensitivityLevelV1,
+    SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
 };
 use tracedecay_query::retrieval::lexical::{
-    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalCloneRouteV1,
     CodeLexicalProjectionMetadataV1, VerifiedCodeLexicalArtifactV1,
 };
 
@@ -48,103 +42,6 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
-    }
-}
-
-#[derive(Default)]
-struct PublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
-}
-
-impl CodeIndexAtomicPublicationPort for PublicationStore {
-    fn load_active(
-        &self,
-        scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .expect("benchmark publication lock")
-            .get(scope)
-            .map(|generation| generation.as_ref().clone()))
-    }
-
-    fn publish_atomically(
-        &mut self,
-        scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().expect("benchmark publication lock");
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
-    }
-}
-
-struct ProjectionSink;
-
-impl CodeChunkProjectionSink for ProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            })
-            .collect::<Vec<_>>();
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        decisions.extend(
-            request
-                .changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
-                    output_digest: None,
-                }),
-        );
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
 }
 
@@ -180,7 +77,7 @@ struct RunReport {
     sqlite_ingestion_commits: u64,
     artifact_bytes: u64,
     artifact_digest: String,
-    source_cumulative_digest: String,
+    artifact_file_digest: String,
 }
 
 struct RunResult {
@@ -196,14 +93,13 @@ struct ComparisonReport {
     bounded_batch: RunReport,
     final_receipt_equal: bool,
     artifact_digest_equal: bool,
-    source_cumulative_digest_equal: bool,
+    artifact_file_digest_equal: bool,
 }
 
 fn main() {
-    configure_hotpath();
     // Dropped when `main` returns, so a requested profile observes both
     // compared ingestion paths.
-    let _hotpath = hotpath::HotpathGuardBuilder::new("code-lexical-catchup-bench").build();
+
     let fixture = build_fixture();
     let one_page = run(&fixture, IngestionMode::OnePage);
     let bounded_batch = run(&fixture, IngestionMode::BoundedBatch);
@@ -211,8 +107,8 @@ fn main() {
     let final_receipt_equal = one_page.receipt == bounded_batch.receipt;
     let artifact_digest_equal =
         one_page.receipt.artifact_digest() == bounded_batch.receipt.artifact_digest();
-    let source_cumulative_digest_equal = one_page.receipt.source_cumulative_digest()
-        == bounded_batch.receipt.source_cumulative_digest();
+    let artifact_file_digest_equal =
+        one_page.report.artifact_file_digest == bounded_batch.report.artifact_file_digest;
     let report = ComparisonReport {
         fixture_pages: fixture.pages.len(),
         batch_page_limit: BATCH_PAGE_LIMIT,
@@ -220,7 +116,7 @@ fn main() {
         bounded_batch: bounded_batch.report,
         final_receipt_equal,
         artifact_digest_equal,
-        source_cumulative_digest_equal,
+        artifact_file_digest_equal,
     };
 
     println!(
@@ -228,30 +124,9 @@ fn main() {
         serde_json::to_string_pretty(&report).expect("serialize benchmark report")
     );
     assert!(
-        final_receipt_equal && artifact_digest_equal && source_cumulative_digest_equal,
-        "the compared ingestion paths must produce the exact same final receipt and digests"
+        final_receipt_equal && artifact_digest_equal && artifact_file_digest_equal,
+        "the compared ingestion paths must produce the exact same final receipt and bytes"
     );
-}
-
-/// Mirrors `tracedecay-index-bench`'s guard defaults: stdout here carries the
-/// machine-read comparison JSON, so the hotpath report goes to
-/// `HOTPATH_OUTPUT_PATH` when one is named and nowhere otherwise, and the
-/// localhost metrics server stays off. This runs as the first statement of
-/// `main`, before any other thread exists, which makes `set_var` sound.
-fn configure_hotpath() {
-    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
-        unsafe {
-            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        }
-    }
-    let has_output_path = std::env::var_os("HOTPATH_OUTPUT_PATH")
-        .is_some_and(|path| path.to_str().is_some_and(|path| !path.is_empty()));
-    if !has_output_path {
-        unsafe {
-            std::env::set_var("HOTPATH_OUTPUT_FORMAT", "none");
-            std::env::remove_var("HOTPATH_OUTPUT_PATH");
-        }
-    }
 }
 
 fn build_fixture() -> Fixture {
@@ -285,6 +160,7 @@ fn build_fixture() -> Fixture {
         content_identity: content_digest(&sources[0].1),
         captured_at: UtcMicros(1_000_000),
         files: sources.iter().map(|(file, _)| file.clone()).collect(),
+        omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
         snapshot,
@@ -325,22 +201,45 @@ fn build_fixture() -> Fixture {
     };
     let control = ActiveControl;
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config, PublicationStore::default(), ProjectionSink)
+        CodeIndexProductionOwnerV1::new(config, MemorySealedPublicationStoreV1::default())
             .expect("build deterministic production fixture owner");
     let generation = owner
         .build_and_publish(request, &control)
         .expect("build deterministic sealed generation");
-    let sealed = generation
-        .encode_sealed()
+    let mut segments = BTreeMap::new();
+    let mut evidence_pack = Vec::new();
+    let manifest = generation
+        .publication()
+        .encode(None, |publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    page_digest, bytes, ..
+                } => {
+                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                    evidence_pack.extend_from_slice(bytes);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    segment_digest,
+                    ..
+                } => {
+                    segments.insert(
+                        segment_digest.as_str().to_owned(),
+                        std::mem::take(&mut evidence_pack),
+                    );
+                }
+            }
+            Ok(())
+        })
         .expect("encode deterministic sealed generation");
-    let sealed_len = u64::try_from(sealed.len()).expect("sealed generation length");
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("decode sealed generation envelope");
-    let state_digest = id::<ManifestDigest>(
-        envelope["state_digest"]
-            .as_str()
-            .expect("sealed generation state digest"),
-    );
+    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
+        .expect("sealed manifest digest");
     let metadata = CodeLexicalProjectionMetadataV1 {
         generation: generation.manifest().generation_id.clone(),
         repository_id: Some(repository),
@@ -356,14 +255,25 @@ fn build_fixture() -> Fixture {
             "retriever.lexical.catchup-benchmark.v1",
         ),
         exact_score_domain: id::<ScoreDomainId>("score.exact.catchup-benchmark.v1"),
+        clone_route: Some(CodeLexicalCloneRouteV1 {
+            project_id: generation.manifest().project_id.clone(),
+            worktree_id: generation.snapshot().worktree.clone(),
+            snapshot_digest: generation.manifest().snapshot_digest.clone(),
+        }),
     };
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed),
-        sealed_len,
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        &manifest,
         state_digest,
+        move |digest, _, buffer, _control| {
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
+        },
         1,
         1024 * 1024,
-        &control,
     )
     .expect("open verified lexical page source");
     let mut pages = Vec::new();
@@ -397,7 +307,9 @@ fn run(fixture: &Fixture, mode: IngestionMode) -> RunResult {
     let started = Instant::now();
     let (progress, sqlite_ingestion_commits) = match mode {
         IngestionMode::OnePage => {
-            let mut progress = builder.progress().expect("read initial artifact progress");
+            let mut progress = builder
+                .progress(&control)
+                .expect("read initial artifact progress");
             for page in &fixture.pages {
                 progress = builder
                     .append_page(page, &control)
@@ -409,7 +321,9 @@ fn run(fixture: &Fixture, mode: IngestionMode) -> RunResult {
             )
         }
         IngestionMode::BoundedBatch => {
-            let mut progress = builder.progress().expect("read initial artifact progress");
+            let mut progress = builder
+                .progress(&control)
+                .expect("read initial artifact progress");
             let mut commits = 0_u64;
             for pages in fixture.pages.chunks(BATCH_PAGE_LIMIT) {
                 progress = builder
@@ -439,7 +353,9 @@ fn run(fixture: &Fixture, mode: IngestionMode) -> RunResult {
             sqlite_ingestion_commits,
             artifact_bytes: receipt.file_size_bytes(),
             artifact_digest: receipt.artifact_digest().as_str().to_owned(),
-            source_cumulative_digest: receipt.source_cumulative_digest().as_str().to_owned(),
+            artifact_file_digest: hex::encode(Sha256::digest(
+                std::fs::read(&artifact_path).expect("read finalized benchmark artifact"),
+            )),
         },
         receipt,
     }

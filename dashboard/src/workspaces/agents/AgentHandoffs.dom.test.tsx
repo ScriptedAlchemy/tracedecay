@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { WorkGraphReadV1Schema } from '../../contracts/generated.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
 import type { WorkResult } from '../work/workApi.ts';
-import type { WorkGraphReadV1 } from '../../contracts/index.ts';
+import type { WorkGraphReadV1 } from '../../contracts/generated.ts';
 import { AgentHandoffs } from './AgentHandoffs.tsx';
 import { readHandoffFrontier } from './handoff.ts';
 
@@ -12,7 +12,7 @@ import { readHandoffFrontier } from './handoff.ts';
  *
  * Everything below drives the component through `readHandoffFrontier` over a
  * fixture the generated contract has already accepted, rather than through a
- * hand-shaped reading — so a test cannot pass against a frontier the daemon
+ * hand-shaped reading, so a test cannot pass against a frontier the daemon
  * could never send.
  */
 
@@ -56,6 +56,40 @@ function frontierFixture() {
 }
 
 describe('AgentHandoffs', () => {
+  it('reads an absent Work graph as no graph yet, never as a refusal', () => {
+    const absent = render(
+      <AgentHandoffs
+        reading={readHandoffFrontier(
+          landed({
+            mode: 'absent',
+            authorized_scope: {
+              owner_brain_id: 'brain.agents',
+              owner_profile_id: 'profile.agents',
+              selection: { selection: 'profile_owned_no_git' },
+            },
+            selection_coverage: { coverage: 'complete', covered_events: 0 },
+          }),
+        )}
+      />,
+    );
+    expect(absent.container.querySelector('[data-agent-handoffs="absent"]')).not.toBeNull();
+    expect(screen.getByText(/no Work graph yet/)).toBeTruthy();
+    expect(absent.container.querySelector('[data-agent-handoffs="refused"]')).toBeNull();
+    absent.unmount();
+
+    const denied = render(
+      <AgentHandoffs
+        reading={readHandoffFrontier({
+          outcome: 'refused',
+          state: 'denied',
+          detail: 'not found, or not authorized for this actor',
+        })}
+      />,
+    );
+    expect(denied.container.querySelector('[data-agent-handoffs="refused"]')).not.toBeNull();
+    expect(screen.queryByText(/no Work graph yet/)).toBeNull();
+  });
+
   it('renders every handoff with the actors, the evidence and the unknowns it carried', () => {
     render(<AgentHandoffs reading={readHandoffFrontier(landed(frontierFixture()))} />);
 
@@ -73,15 +107,6 @@ describe('AgentHandoffs', () => {
     expect(within(table).getByText('evidence.tests-green')).toBeTruthy();
     // The handoff that declared none says so rather than leaving a blank cell.
     expect(within(table).getByText('none declared')).toBeTruthy();
-  });
-
-  it('states the population the frontier is a subset of', () => {
-    render(<AgentHandoffs reading={readHandoffFrontier(landed(frontierFixture()))} />);
-    // Two handoffs over ONE of the two tasks: a frontier reported without its
-    // denominator reads as the whole graph.
-    expect(screen.getByText(/2 handoffs · 1 of 2 tasks · graph version 4/)).toBeTruthy();
-    expect(screen.getByText(/3 evidence references were carried/)).toBeTruthy();
-    expect(screen.getByText(/1 declared unknown/)).toBeTruthy();
   });
 
   it('carries the actor rollup as text and not only as a rail', () => {
@@ -136,11 +161,5 @@ describe('AgentHandoffs', () => {
     // A measured emptiness renders no failure chip: this read landed.
     expect(screen.queryByText('Offline')).toBeNull();
     expect(document.querySelector('[data-agent-handoffs-empty="true"]')).toBeTruthy();
-  });
-
-  it('says where the frontier came from, and that the token operations are not it', () => {
-    render(<AgentHandoffs reading={readHandoffFrontier(landed(frontierFixture()))} />);
-    expect(screen.getByText(/work\.views/)).toBeTruthy();
-    expect(screen.getByText(/cannot enumerate a frontier/)).toBeTruthy();
   });
 });

@@ -1,19 +1,33 @@
 use tracedecay_domain::{
-    AnchorSourceGenerationV2, DurableObservationV1, EvidenceAvailabilityV1,
+    AnchorSourceGeneration, DurableObservationV1, EvidenceAvailabilityV1,
     GenerationBoundRepositoryProvenanceV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ProjectionGenerationId, RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorTargetV2,
+    ProjectionGenerationId, RetrievalAnchorId, RetrievalAnchorRecord, RetrievalAnchorTarget,
 };
 
 use super::{ObservationStoreError, ObservationStoreResult, ObservationWrite};
 
+/// Whether an identity collision may be retried with another provider-proven
+/// stable identity for the same source evidence.
+///
+/// Terminal settlement remains the default. The retry disposition is narrow:
+/// it asks the store to return the typed collision without writing refusal or
+/// coverage state so the caller can submit one alternate identity through the
+/// ordinary exact-CAS path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ObservationIdentityCollisionDispositionV1 {
+    #[default]
+    SettleTerminal,
+    RetryWithAlternateIdentity,
+}
+
 pub(super) fn validate_retrieval_anchor_binding(
     observation: &DurableObservationV1,
-    retrieval_anchor: &RetrievalAnchorRecordV2,
+    retrieval_anchor: &RetrievalAnchorRecord,
     projection_generation: &ProjectionGenerationId,
 ) -> ObservationStoreResult<()> {
     if !matches!(
         retrieval_anchor.target(),
-        RetrievalAnchorTargetV2::ExactObservation(observation_id)
+        RetrievalAnchorTarget::ExactObservation(observation_id)
             if observation_id == observation.observation_id()
     ) {
         return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
@@ -22,7 +36,7 @@ pub(super) fn validate_retrieval_anchor_binding(
         return Err(ObservationStoreError::RetrievalAnchorOwnerMismatch);
     }
     if retrieval_anchor.source_generation()
-        != &AnchorSourceGenerationV2::Observation(observation.identity().generation())
+        != &AnchorSourceGeneration::Observation(observation.identity().generation())
     {
         return Err(ObservationStoreError::RetrievalAnchorSourceGenerationMismatch);
     }
@@ -42,13 +56,13 @@ pub(super) fn validate_retrieval_anchor_binding(
 pub struct RepositoryProvenanceAttachmentV1 {
     availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    anchor: Option<RetrievalAnchorRecordV2>,
+    anchor: Option<RetrievalAnchorRecord>,
 }
 
 impl RepositoryProvenanceAttachmentV1 {
     pub fn new(
         availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
-        anchor: Option<RetrievalAnchorRecordV2>,
+        anchor: Option<RetrievalAnchorRecord>,
     ) -> ObservationStoreResult<Self> {
         if availability.value().is_some() != anchor.is_some() {
             return Err(ObservationStoreError::RepositoryProvenanceAvailabilityMismatch);
@@ -84,7 +98,7 @@ impl RepositoryProvenanceAttachmentV1 {
         self.availability.value()
     }
 
-    pub fn anchor(&self) -> Option<&RetrievalAnchorRecordV2> {
+    pub fn anchor(&self) -> Option<&RetrievalAnchorRecord> {
         self.anchor.as_ref()
     }
 
@@ -121,12 +135,12 @@ impl RepositoryProvenanceAttachmentV1 {
             || anchor.source_observations() != [observation.observation_id().clone()]
             || !matches!(
                 anchor.source_generation(),
-                AnchorSourceGenerationV2::RepositoryCapture(capture_id)
+                AnchorSourceGeneration::RepositoryCapture(capture_id)
                     if capture_id == provenance.capture_id()
             )
             || !matches!(
                 anchor.target(),
-                RetrievalAnchorTargetV2::RepositoryCapture {
+                RetrievalAnchorTarget::RepositoryCapture {
                     repository_id,
                     capture_id,
                     receipt,
@@ -147,21 +161,25 @@ impl Default for RepositoryProvenanceAttachmentV1 {
     }
 }
 
-/// One observation write and its stable V2 retrieval anchor.
+/// One observation write, its stable V2 retrieval anchor, and the caller's
+/// typed identity-collision disposition.
 ///
-/// Stores commit every part of this value in one authoritative transaction.
+/// Stores commit every durable observation and anchor part in one
+/// authoritative transaction. The disposition controls whether a collision
+/// is settled in that transaction; it is not retained as observation data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchoredObservationWrite {
     write: ObservationWrite,
-    retrieval_anchor: RetrievalAnchorRecordV2,
+    retrieval_anchor: RetrievalAnchorRecord,
     projection_generation: ProjectionGenerationId,
     repository_provenance: RepositoryProvenanceAttachmentV1,
+    identity_collision_disposition: ObservationIdentityCollisionDispositionV1,
 }
 
 impl AnchoredObservationWrite {
     pub fn new(
         write: ObservationWrite,
-        retrieval_anchor: RetrievalAnchorRecordV2,
+        retrieval_anchor: RetrievalAnchorRecord,
         projection_generation: ProjectionGenerationId,
     ) -> ObservationStoreResult<Self> {
         validate_retrieval_anchor_binding(
@@ -174,13 +192,28 @@ impl AnchoredObservationWrite {
             retrieval_anchor,
             projection_generation,
             repository_provenance: RepositoryProvenanceAttachmentV1::unavailable(),
+            identity_collision_disposition:
+                ObservationIdentityCollisionDispositionV1::SettleTerminal,
         })
+    }
+
+    #[must_use]
+    pub fn with_identity_collision_disposition(
+        mut self,
+        disposition: ObservationIdentityCollisionDispositionV1,
+    ) -> Self {
+        self.identity_collision_disposition = disposition;
+        self
+    }
+
+    pub fn identity_collision_disposition(&self) -> ObservationIdentityCollisionDispositionV1 {
+        self.identity_collision_disposition
     }
 
     pub fn with_repository_provenance_attachment(
         mut self,
         availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
-        anchor: Option<RetrievalAnchorRecordV2>,
+        anchor: Option<RetrievalAnchorRecord>,
     ) -> ObservationStoreResult<Self> {
         let repository_provenance = RepositoryProvenanceAttachmentV1::new(availability, anchor)?;
         repository_provenance
@@ -205,7 +238,7 @@ impl AnchoredObservationWrite {
         self.write.next_cursor()
     }
 
-    pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecordV2 {
+    pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecord {
         &self.retrieval_anchor
     }
 
@@ -225,7 +258,7 @@ impl AnchoredObservationWrite {
         self,
     ) -> (
         ObservationWrite,
-        RetrievalAnchorRecordV2,
+        RetrievalAnchorRecord,
         ProjectionGenerationId,
         RepositoryProvenanceAttachmentV1,
     ) {

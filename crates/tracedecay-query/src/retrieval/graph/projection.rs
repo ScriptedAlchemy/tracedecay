@@ -1,5 +1,6 @@
 //! Query-owned translation over one frozen code-index graph reader.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -8,32 +9,32 @@ use tracedecay_code_index::graph_projection::{
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore,
-    FreshnessCompatibilityV1, LogicalEvidenceId, RetrievalAnchorId, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId, UtcMicros,
+    FreshnessCompatibilityV1, LogicalEvidenceId, RetrievalAnchorId, RetrievalSourceRoleV1,
+    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId,
+    SourceFreshness, SourceOccurrenceId, UtcMicros, canonical_sha256,
 };
 
-use super::{GraphExecutionControl, GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
+use super::{GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
 use crate::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
-    contract_error,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalExecutionControl,
+    RetrievalPortError, contract_error,
 };
 
 impl GraphEvidenceReadPort for CodeGraphEvidenceReader {
     fn read_graph_evidence(
         &self,
         request: &GraphLaneRequest,
-        control: Arc<dyn GraphExecutionControl>,
+        control: Arc<dyn RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         read_graph_evidence(self, request, control)
     }
 }
 
-#[hotpath::measure(label = "query.lane.graph.read")]
+#[tracing::instrument(name = "query.lane.graph.read", level = "trace", skip_all)]
 fn read_graph_evidence(
     reader: &CodeGraphEvidenceReader,
     request: &GraphLaneRequest,
-    control: Arc<dyn GraphExecutionControl>,
+    control: Arc<dyn RetrievalExecutionControl>,
 ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
     request.validate()?;
     check_request_control(request, control.as_ref())?;
@@ -54,43 +55,41 @@ fn read_graph_evidence(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation> =
-        Arc::new(GraphTraversalCancellationV1 {
-            control: Arc::clone(&control),
-            deadline_micros: request.budget.deadline_micros,
-        });
-    let raw = hotpath::measure_block!("query.graph.traverse", {
-        reader
-            .traverse(
-                &request.generation,
-                &seed_symbols,
-                &request.edge_kinds,
-                request.max_depth,
-                cancellation,
-            )
-            .map_err(|error| {
-                if matches!(error, CodeGraphProjectionError::Cancelled) {
-                    check_request_control(request, control.as_ref())
-                        .err()
-                        .unwrap_or(RetrievalPortError::Cancelled)
-                } else {
-                    map_projection_error(error)
-                }
-            })
-    })?;
+    let cancellation =
+        graph_read_cancellation(Arc::clone(&control), request.budget.deadline_micros);
+    let raw = {
+        let _span = tracing::trace_span!("query.graph.traverse").entered();
+        {
+            reader
+                .traverse(
+                    &request.generation,
+                    &seed_symbols,
+                    &request.edge_kinds,
+                    request.max_depth,
+                    cancellation,
+                )
+                .map_err(|error| {
+                    if matches!(error, CodeGraphProjectionError::Cancelled) {
+                        check_request_control(request, control.as_ref())
+                            .err()
+                            .unwrap_or(RetrievalPortError::Cancelled)
+                    } else {
+                        map_projection_error(error)
+                    }
+                })
+        }
+    }?;
     check_request_control(request, control.as_ref())?;
     let batch = project_graph_batch(reader, request, control.as_ref(), raw)?;
     check_request_control(request, control.as_ref())?;
-    hotpath::gauge!("query.graph.project.candidates").set(batch.candidates.len());
-    hotpath::gauge!("query.graph.project.examined").set(batch.coverage.examined);
     Ok(RetrieverOutcome::Complete(batch))
 }
 
-#[hotpath::measure(label = "query.graph.project")]
+#[tracing::instrument(name = "query.graph.project", level = "trace", skip_all)]
 fn project_graph_batch(
     reader: &CodeGraphEvidenceReader,
     request: &GraphLaneRequest,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
     raw: CodeGraphTraversalBatchV1,
 ) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
     let retriever_revision =
@@ -102,7 +101,37 @@ fn project_graph_batch(
     let raw_candidate_count = raw.candidates.len();
     let mut candidates = Vec::with_capacity(raw_candidate_count.min(cap));
     let mut evidence_by_occurrence = BTreeMap::new();
-    for (ordinal, raw_candidate) in raw.candidates.into_iter().take(cap).enumerate() {
+    // Select before truncating: traversal order can use generation-scoped IDs.
+    // Retain only cap + 1 source keys while scanning the bounded traversal batch.
+    let mut selected = BTreeMap::new();
+    for raw_candidate in raw.candidates {
+        check_request_control(request, control)?;
+        let retriever_evidence_anchor = retrieval_anchor(match &raw_candidate.binding.chunk {
+            Some(chunk) => format!("code-graph:chunk:{chunk}"),
+            None => format!(
+                "code-graph:source:{}",
+                canonical_sha256(&(
+                    &raw_candidate.binding.logical_path,
+                    &raw_candidate.binding.source_span,
+                ))
+                .map_err(contract_error)?
+            ),
+        })?;
+        selected.insert(
+            (
+                Reverse(raw_candidate.score_micros),
+                retriever_evidence_anchor,
+                raw_candidate.target.clone(),
+            ),
+            raw_candidate,
+        );
+        if selected.len() > cap {
+            selected.pop_last();
+        }
+    }
+    for (ordinal, ((_, retriever_evidence_anchor, _), raw_candidate)) in
+        selected.into_iter().enumerate()
+    {
         check_request_control(request, control)?;
         let target = raw_candidate.target;
         let occurrence = format!("code-graph:{}", target.as_str());
@@ -120,13 +149,14 @@ fn project_graph_batch(
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
+            source_role: RetrievalSourceRoleV1::default(),
             retriever: RetrieverKind::Graph,
             retriever_revision: retriever_revision.clone(),
             score_domain: score_domain.clone(),
             raw_score: FixedPointScore(raw_candidate.score_micros),
             ordinal_rank: ordinal as u32,
             exact_admission_proof: None,
-            retriever_evidence_anchor: retrieval_anchor(format!("evidence.{occurrence}"))?,
+            retriever_evidence_anchor,
             freshness: reader.freshness().clone(),
         };
         let evidence = GraphLaneEvidence {
@@ -167,7 +197,7 @@ fn project_graph_batch(
 }
 
 struct GraphTraversalCancellationV1 {
-    control: Arc<dyn GraphExecutionControl>,
+    control: Arc<dyn RetrievalExecutionControl>,
     deadline_micros: Option<u64>,
 }
 
@@ -180,9 +210,20 @@ impl tracedecay_graph_db::GraphCancellation for GraphTraversalCancellationV1 {
     }
 }
 
+/// Adapts query cancellation and its monotonic deadline to graph reads.
+pub fn graph_read_cancellation(
+    control: Arc<dyn RetrievalExecutionControl>,
+    deadline_micros: Option<u64>,
+) -> Arc<dyn tracedecay_graph_db::GraphCancellation> {
+    Arc::new(GraphTraversalCancellationV1 {
+        control,
+        deadline_micros,
+    })
+}
+
 fn check_request_control(
     request: &GraphLaneRequest,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> Result<(), RetrievalPortError> {
     if control.is_cancelled() {
         Err(RetrievalPortError::Cancelled)

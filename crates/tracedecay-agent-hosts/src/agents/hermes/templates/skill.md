@@ -12,7 +12,7 @@ call graph traversal, impact analysis, affected files, and architectural navigat
 
 If a tracedecay tool invocation fails, times out, or the plugin is unavailable,
 every tool is also available directly as a shell command:
-`tracedecay tool <name> --args '<json>'` — the same JSON arguments object as the
+`tracedecay tool <name> --args '<json>'`, the same JSON arguments object as the
 MCP tool; pipe it via `--args -` (a quoted heredoc) when it contains quotes or
 newlines (`tracedecay tool` lists all tools, `tracedecay tool <name> --help`
 shows parameters). Hermes tool calls already run through this CLI under the hood
@@ -40,9 +40,9 @@ compresses a session.
 
 1. Start with `tracedecay_message_search`. Its defaults are `provider=all`,
    `include_subagents=true`, `scope=all`, `message_type=all`, `limit=10`, and
-   `catch_up=false`. It finds stored message evidence and session ids; an
-   explicit freshness request can return `refresh_required`, but never catches
-   data up itself.
+   `require_fresh=false`. It finds stored message evidence and session ids;
+   `require_fresh=true` can return `refresh_required`, but never refreshes
+   data itself.
 2. Hermes exposes native aliases `lcm_grep`, `lcm_load_session`,
    `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, and
    `lcm_doctor`. They dispatch to their matching `tracedecay_lcm_*` commands;
@@ -50,10 +50,10 @@ compresses a session.
    canonical command and its schema elsewhere. Do not invent fields by mixing
    the two surfaces.
 3. Narrow temporal evidence with `lcm_grep` / `tracedecay_lcm_grep` (default
-   `temporal_mode=current`; Hermes starts its native alias at the current
-   session), replay one session with `lcm_load_session` /
-   `tracedecay_lcm_load_session` (default `temporal_mode=forensic`), then use
-   `lcm_describe` / `tracedecay_lcm_describe` and `lcm_expand` /
+   `temporal_mode={"kind":"current"}`; Hermes starts its native alias at the
+   current session), replay one session with `lcm_load_session` /
+   `tracedecay_lcm_load_session` (default `temporal_mode={"kind":"forensic"}`),
+   then use `lcm_describe` / `tracedecay_lcm_describe` and `lcm_expand` /
    `tracedecay_lcm_expand` to open only the needed DAG node or payload.
    Summary node IDs are opaque strings, not integers. `source_limit` and the
    opaque continuation cursor apply only to summary source pages; raw and
@@ -78,7 +78,15 @@ is required, invoke `tracedecay_session_refresh_begin` only with clear host or
 user intent. It returns the opaque handle used by
 `tracedecay_session_refresh_status` and `tracedecay_session_refresh_cancel`.
 The CLI equivalents are `tracedecay sessions refresh begin`, `status`, and
-`cancel`, using the same selectors and returned handle.
+`cancel`, using the same selectors and returned handle. Preserve the scope the
+read returned in the request's `scope` selector: a project-root read refreshes
+with `scope.kind=project`, while an authorized profile-root read
+(`storage_scope=user`) refreshes with `scope.kind=profile`, served by the
+authenticated profile session authority. Profile, project, Git-route, store,
+and root identity stay inside the mounted daemon authority. Never redirect a
+profile refresh through whichever project happens to be active, and pass the
+same `scope`, `session`, `source`, and `target` selectors to `status` and
+`cancel` as to `begin`.
 Leave host context-window
 preflight, compression, and boundaries to the Hermes context engine rather
 than triggering them during recall.
@@ -118,21 +126,21 @@ memory and does not write project LCM data into an arbitrary working directory.
 ## Memory
 
 - **Recall before external search.** Run `fact_search` (and `lcm_grep` for past
-  conversations) before reaching for web or external search — prior sessions
+  conversations) before reaching for web or external search. Prior sessions
   often already answered the question.
 - **Calibrate trust; don't default everything high.** Aim for a spread across
   stored facts rather than uniform high trust:
-  - `>= 0.85` — verified, durable facts (confirmed decisions, observed behavior,
+  - `>= 0.85`, verified, durable facts (confirmed decisions, observed behavior,
     user-stated preferences).
-  - `~ 0.7` — ordinary well-sourced observations.
-  - `~ 0.5` — plausible but unverified; prefer not storing over storing noise.
+  - `~ 0.7`, ordinary well-sourced observations.
+  - `~ 0.5`, plausible but unverified; prefer not storing over storing noise.
 - **Read the add result's diff report.** `fact_add` returns
   `diff` / `closest_fact_id` / `similarity` / `reason`:
-  - `near_duplicate` — a very similar fact exists; prefer `fact_update` on the
+  - `near_duplicate`, a very similar fact exists; prefer `fact_update` on the
     existing fact over piling on duplicates.
-  - `possible_conflict` — a negation/state-change cue suggests supersession;
+  - `possible_conflict`, a negation/state-change cue suggests supersession;
     confirm which fact is current and update or remove the stale one.
-  - `rejected_secret_like` — the content looked like a credential and was NOT
+  - `rejected_secret_like`, the content looked like a credential and was NOT
     stored; never try to re-store secrets.
 - **Never store secrets, transient run output (ports, PIDs, temp paths, run
   logs), or facts you have not verified.**

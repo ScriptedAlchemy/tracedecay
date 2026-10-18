@@ -4,7 +4,7 @@ use super::*;
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::git::{
+use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalExpandPort,
     GitHubStackSignalExpandSurfaceRequest, git_surface_operation,
 };
@@ -15,8 +15,8 @@ use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 /// The transport never carries an actor, recipient, queue state, or stack
 /// payload: the daemon mints a context from the admitted project route and
 /// the runtime settles only that context actor's durable host-pending row.
-#[hotpath::measure(label = "daemon.service.github_stack.expand")]
-pub(super) fn execute_github_stack_signal_expand(
+#[tracing::instrument(name = "daemon.service.github_stack.expand", level = "trace", skip_all)]
+pub(super) async fn execute_github_stack_signal_expand(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
     owner: Option<DaemonNativeIntegrationOwner>,
@@ -63,7 +63,10 @@ pub(super) fn execute_github_stack_signal_expand(
             Ok(signal) => signal,
             Err(problem) => return application_problem(wire_request_id, problem),
         };
-    let result = match runtime.expand(request.into_application_request(context), &signal) {
+    let result = match runtime
+        .expand(request.into_application_request(context), &signal)
+        .await
+    {
         Ok(result) => result,
         Err(error) => error.into_surface_result(),
     };
@@ -92,15 +95,15 @@ fn github_stack_signal_authority(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> Result<RequestContext, ApplicationProblem> {
-    if observed_at >= registered.grants.expires_at {
-        return Err(ApplicationProblem::not_found_or_not_authorized(
-            RetryDirective::Never,
-        ));
-    }
     let operation = git_surface_operation(GITHUB_STACK_SIGNAL_EXPAND_OPERATION)
         .map_err(|_| invalid_github_stack_signal_request())?
         .ok_or_else(invalid_github_stack_signal_request)?;
-    let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
+    let expires_at = UtcMicros(
+        deadline
+            .expires_at
+            .0
+            .min(mounted_grant_expires_at(observed_at).0),
+    );
     let grant_digest = canonical_sha256(&(
         "tracedecay.daemon.github-stack-signal-expand-route-grant.v1",
         &registered.scope,
@@ -166,7 +169,7 @@ fn github_stack_signal_evidence(
 ) -> Result<ApplicationOutcome<serde_json::Value>, ApplicationProblem> {
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )
@@ -194,13 +197,8 @@ fn github_stack_signal_evidence(
 }
 
 fn invalid_github_stack_signal_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "invalid_github_stack_signal_expand_request".to_owned(),
-            message: "The GitHub stack signal request does not match its operation contract"
-                .to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "invalid_github_stack_signal_expand_request",
+        "The GitHub stack signal request does not match its operation contract",
+    )
 }

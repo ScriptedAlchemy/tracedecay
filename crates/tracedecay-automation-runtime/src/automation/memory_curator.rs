@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
     ActorId, Confidence, FactEventId, FactId, FactOwnerV1, ManifestDigest, canonical_sha256,
@@ -9,8 +8,9 @@ use tracedecay_domain::{
 
 use super::artifacts::sha256_json;
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
-    BackendRetryPolicy, run_agent_task_with_retry_report,
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
+    runtime_failure_class,
 };
 use super::config::AutomationConfig;
 use super::lifecycle::{
@@ -20,15 +20,14 @@ use super::lifecycle::{
     failed_backend_fallback_report,
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use crate::errors::{Result, TraceDecayError};
-use crate::ports::project_runtime::ProfileRuntime;
-use crate::ports::project_runtime::TraceDecay;
-use crate::store::memory::DatabaseFactStore;
+use crate::ports::project_runtime::AutomationProjectContext;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_policy::{
     CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
     CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryApplicationError, MemoryMutationError, MemoryOperationContext,
 };
@@ -40,8 +39,6 @@ const CURATION_MAX_OPERATIONS: usize = 256;
 
 mod review;
 mod wire;
-#[cfg(test)]
-use review::memory_curator_review_value;
 use review::{attach_pagination_summary, memory_curator_resume_cursor, memory_curator_review};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,34 +77,10 @@ pub struct MemoryCuratorAutomationRun {
     pub committed_receipt: Option<AutomationCommittedReceipt>,
 }
 
-pub async fn run_memory_curator_with_backend(
-    cg: &TraceDecay,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: MemoryCuratorAutomationOptions,
-    run_control: &AutomationRunControl,
-) -> AutomationRunResult<MemoryCuratorAutomationRun> {
-    let sessions_db = super::runner::project_automation_sessions(cg).await?;
-    run_memory_curator_for_store_with_publication(
-        MemoryCuratorStore::Project { cg, sessions_db },
-        config,
-        configuration_revision_id,
-        backend,
-        options,
-        run_control,
-        AutomationRunPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            settlement_guard: None,
-        },
-    )
-    .await
-}
-
 /// Runs one admitted retained Memory Curator effect without publishing its
 /// ledger terminal before the daemon accepts the outer application terminal.
 pub async fn run_memory_curator_with_backend_for_retained_settlement(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -115,90 +88,41 @@ pub async fn run_memory_curator_with_backend_for_retained_settlement(
     run_control: &AutomationRunControl,
 ) -> RetainedAutomationRun<MemoryCuratorAutomationRun> {
     let settlement_guard = AutomationRunSettlementGuard::new();
-    let result = match super::runner::project_automation_sessions(cg).await {
-        Ok(sessions_db) => {
-            run_memory_curator_for_store_with_publication(
-                MemoryCuratorStore::Project { cg, sessions_db },
-                config,
-                configuration_revision_id,
-                backend,
-                options,
-                run_control,
-                AutomationRunPublication {
-                    ledger: AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
-                    settlement_guard: Some(&settlement_guard),
-                },
-            )
-            .await
-        }
-        Err(error) => Err(error.into()),
-    };
-    RetainedAutomationRun::new(result, settlement_guard)
-}
-
-/// Runs autonomous curation against profile-level user memory.
-pub(crate) async fn run_user_memory_curator_with_backend(
-    profile_root: &std::path::Path,
-    session_registry: Arc<dyn ProfileRuntime>,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: MemoryCuratorAutomationOptions,
-    run_control: &AutomationRunControl,
-) -> AutomationRunResult<MemoryCuratorAutomationRun> {
-    let sessions_db = session_registry.profile_sessions().await?;
-    run_memory_curator_for_store_with_publication(
-        MemoryCuratorStore::User {
-            profile_root,
-            runtime: session_registry.as_ref(),
-            sessions_db,
-        },
+    let sessions_db = super::runner::project_automation_sessions(cg);
+    let result = run_memory_curator_for_store_with_publication(
+        MemoryCuratorStore { cg, sessions_db },
         config,
         configuration_revision_id,
         backend,
         options,
         run_control,
         AutomationRunPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            settlement_guard: None,
+            ledger: AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
+            settlement_guard: Some(&settlement_guard),
         },
     )
-    .await
+    .await;
+    RetainedAutomationRun::new(result, settlement_guard)
 }
 
-enum MemoryCuratorStore<'a> {
-    Project {
-        cg: &'a TraceDecay,
-        sessions_db: RegisteredGlobalDbLeaseV1,
-    },
-    User {
-        profile_root: &'a std::path::Path,
-        runtime: &'a dyn ProfileRuntime,
-        sessions_db: RegisteredGlobalDbLeaseV1,
-    },
+struct MemoryCuratorStore<'a> {
+    cg: &'a AutomationProjectContext,
+    sessions_db: RegisteredGlobalDbLeaseV1,
 }
 
 impl MemoryCuratorStore<'_> {
     fn dashboard_root(&self) -> std::path::PathBuf {
-        match self {
-            Self::Project { cg, .. } => cg.store_layout().dashboard_root.clone(),
-            Self::User { profile_root, .. } => super::runner::user_automation_root(profile_root),
-        }
+        self.cg.dashboard_root.clone()
     }
 
     fn sessions_db(&self) -> RegisteredGlobalDbLeaseV1 {
-        match self {
-            Self::Project { sessions_db, .. } | Self::User { sessions_db, .. } => {
-                sessions_db.clone()
-            }
-        }
+        self.sessions_db.clone()
     }
 
     fn owner(&self) -> Result<FactOwnerV1> {
-        match self {
-            Self::Project { cg, .. } => cg.project_memory_owner(),
-            Self::User { .. } => Ok(FactOwnerV1::Profile),
-        }
+        Ok(FactOwnerV1::Project {
+            project_id: self.cg.project_id.clone(),
+        })
     }
 
     fn curation_authority(
@@ -206,40 +130,22 @@ impl MemoryCuratorStore<'_> {
         configuration_revision_id: &ConfigurationRevisionId,
     ) -> Result<CurationApplyAuthorityV1> {
         let actor_id = ActorId::new("automation:memory-curator").map_err(memory_contract_error)?;
-        let (project_id, profile_id) = match self {
-            Self::Project { cg, .. } => {
-                let project_id = match cg.project_memory_owner()? {
-                    FactOwnerV1::Project { project_id } => project_id,
-                    FactOwnerV1::Profile => {
-                        return Err(memory_validation_error(
-                            "project memory curator is missing project authority",
-                        ));
-                    }
-                };
-                (Some(project_id), cg.profile_id().clone())
-            }
-            Self::User { runtime, .. } => (None, runtime.profile_id().clone()),
-        };
         Ok(CurationApplyAuthorityV1 {
             actor_id,
-            project_id,
-            profile_id,
+            project_id: Some(self.cg.project_id.clone()),
+            profile_id: self.cg.profile_id.clone(),
             configuration_revision_id: configuration_revision_id.clone(),
         })
     }
 
-    async fn open_memory_database(&self) -> Result<crate::db::Database> {
-        match self {
-            Self::Project { cg, .. } => cg.open_project_store_db().await,
-            Self::User { runtime, .. } => runtime.open_user_memory_db().await,
-        }
+    fn open_memory_database(&self) -> tracedecay_runtime_core::db::Database {
+        self.cg.project_memory_database.clone()
     }
 }
 
-// The single funnel every curator entry point (project, user, retained
-// settlement) flows through: one static run-lifetime span in the futures lane
-// so suspension and cancellation of long runs stay visible.
-#[hotpath::measure(future = true, label = "automation.run.memory_curator")]
+// One static run-lifetime span in the futures lane so suspension and
+// cancellation of long curator runs stay visible.
+#[tracing::instrument(name = "automation.run.memory_curator", level = "trace", skip_all)]
 async fn run_memory_curator_for_store_with_publication(
     store: MemoryCuratorStore<'_>,
     config: &AutomationConfig,
@@ -262,6 +168,7 @@ async fn run_memory_curator_for_store_with_publication(
         "memory_curator",
         options.trigger,
         config,
+        backend.executable(),
         AgentTaskKind::MemoryCurator,
     )
     .with_ledger_publication(ledger_publication)
@@ -277,7 +184,7 @@ async fn run_memory_curator_for_store_with_publication(
     let _run_lock = match run.gate().await? {
         SchedulerGate::Proceed(lock) => lock,
         SchedulerGate::Skip(reason) => {
-            return skipped_run(&run, reason, None, None)
+            return skipped_run(&run, reason.as_str(), None, None)
                 .await
                 .map_err(Into::into);
         }
@@ -292,7 +199,7 @@ async fn run_memory_curator_for_store_with_publication(
     }
 
     let owner = store.owner()?;
-    let database = store.open_memory_database().await?;
+    let database = store.open_memory_database();
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).map_err(
         |error| TraceDecayError::Config {
             message: format!("initialize memory curator authority: {error}"),
@@ -340,7 +247,7 @@ async fn run_memory_curator_for_store_with_publication(
             Ok(response) => response,
             Err(err) => {
                 let record = finalizer
-                    .append_backend_fallback_record(evidence_hash, err.to_string(), &retry_report)
+                    .append_backend_fallback_record(evidence_hash, &err, &retry_report)
                     .await?;
                 return Ok(MemoryCuratorAutomationRun {
                     run_id: record.run_id.clone(),
@@ -378,6 +285,7 @@ async fn run_memory_curator_for_store_with_publication(
                     evidence_hash,
                     None,
                     error.to_string(),
+                    AgentTaskFailureClass::Permanent,
                     &retry_report,
                 )
                 .await?;
@@ -418,11 +326,12 @@ async fn run_memory_curator_for_store_with_publication(
                         evidence_hash,
                         None,
                         error.to_string(),
+                        error.failure_class(),
                         &retry_report,
                     )
                     .await?;
                 return Err(AutomationRunError::RecordedFailure {
-                    error,
+                    error: error.into(),
                     ledger_record: Box::new(ledger_record),
                 });
             }
@@ -464,6 +373,7 @@ async fn run_memory_curator_for_store_with_publication(
                         evidence_hash,
                         None,
                         error.to_string(),
+                        runtime_failure_class(&error),
                         &retry_report,
                     )
                     .await?;
@@ -522,6 +432,7 @@ async fn run_memory_curator_for_store_with_publication(
                         evidence_hash,
                         None,
                         error.to_string(),
+                        runtime_failure_class(&error),
                         &retry_report,
                         applied_ops,
                         None,
@@ -695,7 +606,7 @@ async fn skipped_run(
 
 fn build_memory_curator_prompt() -> String {
     format!(
-        "Review only the canonical current facts in context.llm_review. Return {{\"ops\":[]}} with at most {CURATION_MAX_OPERATIONS} operations. Never invent or rewrite a fact id.\n{}",
+        "Complete the review of only the canonical current facts in context.llm_review. Propose only operations supported by those exact snapshots and current relations; absence or unavailable facts are not evidence. Return {{\"ops\":[]}} when no change is warranted, with at most {CURATION_MAX_OPERATIONS} operations. Never invent or rewrite a fact id.\n{}",
         wire::MODEL_CONTRACT
     )
 }
@@ -843,7 +754,7 @@ fn settle_memory_curation_result(
         }) => Err(MemoryCurationApplyFailure::Settled {
             error: memory_application_error(error),
             operation_count,
-            receipt: Box::new(authority_result),
+            receipt: authority_result,
         }),
     }
 }

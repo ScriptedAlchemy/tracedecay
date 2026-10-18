@@ -2,8 +2,7 @@
 //!
 //! Each submodule owns one agent-host's on-disk transcript shape and the
 //! projection into provider-neutral session rows. Ingest dispatches through
-//! these adapters; they are re-exported at `crate::runtime::{claude, …}` so
-//! existing public paths stay stable.
+//! these adapters.
 
 pub mod claude;
 pub mod claude_observation;
@@ -19,4 +18,5 @@ pub mod opencode;
 pub(in crate::runtime) mod opencode_frontier;
 pub(in crate::runtime) mod opencode_part_scan;
 pub(in crate::runtime) mod opencode_snapshot;
+pub mod pi;
 pub mod vibe;

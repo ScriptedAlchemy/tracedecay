@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use tracedecay_store::{
     FactReadControl, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore,
 };
@@ -8,7 +11,7 @@ impl<A: ProjectMemoryGraphStore> MemoryApplication<A> {
     /// Reads the rebuildable Grafeo topology, then returns facts hydrated by
     /// the canonical owner-bound fact authority. Graph nodes never carry fact
     /// content and cannot act as a raw-row fallback.
-    #[hotpath::measure(label = "usecases.memory.graph", future = true)]
+    #[tracing::instrument(name = "usecases.memory.graph", level = "trace", skip_all)]
     pub async fn project_memory_graph(
         &self,
         query: ProjectMemoryGraphQueryV1,
@@ -16,10 +19,14 @@ impl<A: ProjectMemoryGraphStore> MemoryApplication<A> {
     ) -> Result<ProjectMemoryGraphPageV1, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let max_relations = query.max_relations();
-        let page = self
-            .authority
-            .project_memory_graph(query, read_control)
-            .await?;
+        let page_read: Pin<
+            Box<
+                dyn Future<Output = tracedecay_store::FactStoreResult<ProjectMemoryGraphPageV1>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(self.authority.project_memory_graph(query, read_control));
+        let page = page_read.await?;
         if page.owner() != &self.owner
             || page.relations().len() > max_relations
             || page.facts().iter().any(|fact| fact.owner() != &self.owner)

@@ -7,34 +7,17 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import type {
-  OplogPayload,
-  ProjectionPayload,
-  SimilarityPayload,
-  TrustHistoryPayload,
-} from '../../data/query/memory.ts';
 import {
-  OplogPayloadSchema,
-  TrustHistoryPayloadSchema,
-} from '../../data/query/memory.ts';
-import {
-  formatUtcMicros,
-  oplogReading,
-  projectionReading,
-  similarityReading,
-  trustDetailState,
-  trustHistoryReading,
-} from './memoryModel.ts';
+  MemoryOplogPayloadV1Schema,
+  type MemoryOplogPayloadV1,
+  type MemoryProjectionPayloadV1,
+  type MemorySimilarityPayloadV1,
+  type MemoryTrustHistoryPayloadV1,
+} from '../../contracts/generated.ts';
+import { TrustHistoryPayloadSchema } from '../../data/query/memory.ts';
+import { oplogReading, projectionReading, similarityReading, trustDetailState, trustHistoryReading } from './memoryModel.ts';
 
-/* ---- trust history ------------------------------------------------------- */
-
-describe('formatUtcMicros', () => {
-  it('formats canonical microseconds for presentation without changing the wire value', () => {
-    expect(formatUtcMicros(1_754_006_400_000_000)).toBe('2025-08-01T00:00:00.000Z');
-  });
-});
-
-function trustEvent(overrides: Partial<TrustHistoryPayload['trust_history'][number]> = {}) {
+function trustEvent(overrides: Partial<MemoryTrustHistoryPayloadV1['trust_history'][number]> = {}) {
   return {
     event_id: 'event-project-1',
     timestamp: 1_754_006_400_000_000,
@@ -47,7 +30,7 @@ function trustEvent(overrides: Partial<TrustHistoryPayload['trust_history'][numb
   };
 }
 
-function trustPayload(events: TrustHistoryPayload['trust_history']): TrustHistoryPayload {
+function trustPayload(events: MemoryTrustHistoryPayloadV1['trust_history']): MemoryTrustHistoryPayloadV1 {
   return {
     fact_id: 'fact-project-7',
     trust_history: events,
@@ -156,7 +139,7 @@ describe('trustDetailState', () => {
 
 /* ---- projection ---------------------------------------------------------- */
 
-function point(overrides: Partial<ProjectionPayload['points'][number]> = {}) {
+function point(overrides: Partial<MemoryProjectionPayloadV1['points'][number]> = {}) {
   return {
     fact_id: 'fact-project-1',
     payload_access: 'eligible' as const,
@@ -181,7 +164,7 @@ function point(overrides: Partial<ProjectionPayload['points'][number]> = {}) {
   };
 }
 
-function projectionPayload(overrides: Partial<ProjectionPayload> = {}): ProjectionPayload {
+function projectionPayload(overrides: Partial<MemoryProjectionPayloadV1> = {}): MemoryProjectionPayloadV1 {
   return {
     exists: true,
     dim: 64,
@@ -261,7 +244,7 @@ describe('projectionReading', () => {
 
 /* ---- similarity ---------------------------------------------------------- */
 
-function similarityPayload(overrides: Partial<SimilarityPayload> = {}): SimilarityPayload {
+function similarityPayload(overrides: Partial<MemorySimilarityPayloadV1> = {}): MemorySimilarityPayloadV1 {
   return {
     exists: true,
     dim: 64,
@@ -376,14 +359,14 @@ describe('similarityReading', () => {
     expect(reading.min).toBeNull();
     expect(reading.max).toBeNull();
     expect(reading.denominators).toBe(
-      '1 query-time encoded fact — a pair needs two, so nothing was scored',
+      '1 query-time encoded fact, a pair needs two, so nothing was scored',
     );
   });
 });
 
 /* ---- oplog --------------------------------------------------------------- */
 
-function oplogPayload(overrides: Partial<OplogPayload> = {}): OplogPayload {
+function oplogPayload(overrides: Partial<MemoryOplogPayloadV1> = {}): MemoryOplogPayloadV1 {
   return { events: [], count: 0, limit: 100, error: '', ...overrides };
 }
 
@@ -393,15 +376,15 @@ describe('oplogReading', () => {
       events: [{ id: 1, ts: 1_754_006_400_000_000, op: 'created', fact_id: 'fact-project-7' }],
       count: 1,
     });
-    expect(OplogPayloadSchema.safeParse(canonical).success).toBe(true);
+    expect(MemoryOplogPayloadV1Schema.safeParse(canonical).success).toBe(true);
     expect(
-      OplogPayloadSchema.safeParse({
+      MemoryOplogPayloadV1Schema.safeParse({
         ...canonical,
         events: [{ ...canonical.events[0], ts: '2026-08-01T00:00:00Z' }],
       }).success,
     ).toBe(false);
     expect(
-      OplogPayloadSchema.safeParse({
+      MemoryOplogPayloadV1Schema.safeParse({
         ...canonical,
         events: [{ ...canonical.events[0], ts: 1.5 }],
       }).success,

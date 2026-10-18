@@ -6,9 +6,7 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 
-
 CHECKER_PATH = Path(__file__).with_name("check-pr-dogfood-output.py")
-
 
 def load_checker() -> ModuleType:
     if not CHECKER_PATH.exists():
@@ -19,7 +17,6 @@ def load_checker() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
 
 class PrDogfoodOutputTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -76,31 +73,30 @@ class PrDogfoodOutputTests(unittest.TestCase):
             strict=True,
         )
 
-    def test_accepts_exact_partial_warmup_evidence(self) -> None:
-        self.validate(self.payload)
-
-    def test_accepts_complete_output_without_graph_unavailability(self) -> None:
-        del self.payload["status"]
-        del self.payload["verified_graph_evidence"]
-        self.payload["analysis_coverage"] = {"complete": True}
-        self.validate(self.payload)
-
-    def test_strict_accepts_graph_ready_bounded_prefix_with_more_symbols(self) -> None:
-        del self.payload["status"]
-        del self.payload["verified_graph_evidence"]
+    def strict_bounded_prefix_payload(self, *, seeds: int, config_summaries: int) -> None:
+        self.payload.pop("status", None)
+        self.payload.pop("verified_graph_evidence", None)
         self.payload["graph_generation"] = "code-graph:sha256:ready-generation"
         self.payload["next_cursor"] = "pr-context.cursor.next"
+        returned = seeds + config_summaries
+        self.payload["added"] = [
+            {"name": f"symbol_{index}", "kind": "function"} for index in range(seeds)
+        ]
+        self.payload["modified"] = [
+            {"file": f"config_{index}.toml", "kind": "config_summary", "config_keys": 3}
+            for index in range(config_summaries)
+        ]
         self.payload["symbol_page"] = {
             "limit": 500,
-            "returned": 500,
+            "returned": returned,
             "has_more": True,
             "complete": False,
             "selection": "stable_prefix",
             "continuation_available": True,
         }
         self.payload["analysis_coverage"] = {
-            "seed_symbols_analyzed": 500,
-            "symbols_returned": 500,
+            "seed_symbols_analyzed": seeds,
+            "symbols_returned": returned,
             "symbols_complete": False,
             "impact_nodes_admitted": 700,
             "impact_nodes_returned": 700,
@@ -109,7 +105,29 @@ class PrDogfoodOutputTests(unittest.TestCase):
             "impact_partial": True,
             "complete": False,
         }
+
+    def test_strict_accepts_graph_ready_bounded_prefix_with_more_symbols(self) -> None:
+        self.strict_bounded_prefix_payload(seeds=500, config_summaries=0)
         self.validate_strict(self.payload)
+
+    def test_strict_accepts_config_summaries_beside_analyzed_seeds(self) -> None:
+        # Config files fold into one `config_summary` entry per file; those
+        # entries are returned but never analyzed as seeds (run 34309279328:
+        # 193 seeds + 6 summaries = 199 returned).
+        self.strict_bounded_prefix_payload(seeds=193, config_summaries=6)
+        self.validate_strict(self.payload)
+
+    def test_strict_rejects_returned_entries_that_are_neither_seed_nor_summary(
+        self,
+    ) -> None:
+        self.strict_bounded_prefix_payload(seeds=193, config_summaries=6)
+        self.payload["analysis_coverage"]["seed_symbols_analyzed"] = 190
+        with self.assertRaisesRegex(ValueError, "analysis coverage is inconsistent"):
+            self.validate_strict(self.payload)
+        self.strict_bounded_prefix_payload(seeds=193, config_summaries=6)
+        self.payload["modified"].pop()
+        with self.assertRaisesRegex(ValueError, "analysis coverage is inconsistent"):
+            self.validate_strict(self.payload)
 
     def test_strict_rejects_partial_graph_unavailability(self) -> None:
         with self.assertRaisesRegex(ValueError, "strict.*unavailable graph"):
@@ -139,32 +157,9 @@ class PrDogfoodOutputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "graph evidence"):
             self.validate(self.payload)
 
-
 class StrictReadinessOutputTests(unittest.TestCase):
     def setUp(self) -> None:
         self.checker = load_checker()
-
-    def test_strict_status_accepts_current_text_and_observed_graph(self) -> None:
-        self.checker.validate_status(
-            {
-                "code_index_freshness": {
-                    "status": "current",
-                    "worktree": {
-                        "coverage": "complete",
-                        "staleness_state": "fresh",
-                        "latest_generation_id": "generation.ready",
-                        "code_graph_serving": {"state": "ready"},
-                    },
-                },
-                "graph_statistics": {
-                    "state": "observed",
-                    "generation_id": "generation.ready",
-                    "symbol_count": 12,
-                    "edge_count": 9,
-                },
-            },
-            strict=True,
-        )
 
     def test_strict_status_rejects_graph_that_is_not_ready_to_serve(self) -> None:
         for graph_serving in (
@@ -198,6 +193,34 @@ class StrictReadinessOutputTests(unittest.TestCase):
                         strict=True,
                     )
 
+    def test_strict_status_accepts_omitted_sources_but_not_other_partial_coverage(
+        self,
+    ) -> None:
+        def status(coverage: str) -> dict[str, object]:
+            return {
+                "code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "coverage": coverage,
+                        "staleness_state": "fresh",
+                        "latest_generation_id": "generation.ready",
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                },
+                "graph_statistics": {
+                    "state": "observed",
+                    "generation_id": "generation.ready",
+                    "symbol_count": 12,
+                    "edge_count": 9,
+                },
+            }
+
+        self.checker.validate_status(status("partial_omitted_sources"), strict=True)
+        with self.assertRaisesRegex(ValueError, "complete text-index coverage"):
+            self.checker.validate_status(
+                status("partial_hook_hint_overflow"), strict=True
+            )
+
     def test_strict_status_rejects_live_exact_scope_graph_degradation(self) -> None:
         with self.assertRaisesRegex(ValueError, "exact_scope_generation_not_ready"):
             self.checker.validate_status(
@@ -228,21 +251,71 @@ class StrictReadinessOutputTests(unittest.TestCase):
             }
         )
 
-    def test_strict_context_accepts_lexical_and_graph_symbol_evidence(self) -> None:
-        self.checker.validate_context(
-            {
-                "coverage": {
-                    "exact": "complete",
-                    "lexical": "complete",
-                    "graph": "complete",
-                    "semantic": {"status": "unavailable", "reason": "disabled"},
-                    "recall": "partial",
-                },
-                "search_matches": [{"file": "src/main.rs"}],
-                "symbols": [{"node_id": "symbol:main"}],
+    def pruned_lexical_context(self, lexical: object) -> dict[str, object]:
+        return {
+            "freshness": {"state": "fresh"},
+            "code_generation": "generation.current",
+            "coverage": {
+                "exact": "complete",
+                "lexical": lexical,
+                "graph": "complete",
+                "recall": "partial",
             },
+            "search_matches": [{"file": "src/main.rs"}],
+            "symbols": [{"node_id": "symbol:main"}],
+        }
+
+    def test_strict_context_accepts_pruned_lexical_on_current_generation(self) -> None:
+        self.checker.validate_context(
+            self.pruned_lexical_context(
+                {"status": "partial", "reason": "candidate_sources_pruned"}
+            ),
             strict=True,
         )
+
+    def test_strict_context_rejects_pruned_lexical_served_stale(self) -> None:
+        with self.assertRaisesRegex(ValueError, "stale generation=generation.old"):
+            self.checker.validate_context(
+                self.pruned_lexical_context(
+                    {
+                        "status": "partial",
+                        "generation": "generation.old",
+                        "reason": "candidate_sources_pruned",
+                    }
+                ),
+                strict=True,
+            )
+
+    def test_strict_context_rejects_pruned_lexical_when_not_fresh(self) -> None:
+        payload = self.pruned_lexical_context(
+            {"status": "partial", "reason": "candidate_sources_pruned"}
+        )
+        payload["freshness"] = {"state": "possibly_stale", "indexing": {"stale_lanes": []}}
+        with self.assertRaisesRegex(ValueError, "freshness.state=possibly_stale"):
+            self.checker.validate_context(payload, strict=True)
+
+    def test_strict_context_rejects_stale_source_partial_lexical(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reason=stale_source"):
+            self.checker.validate_context(
+                self.pruned_lexical_context({"status": "partial", "reason": "stale_source"}),
+                strict=True,
+            )
+
+    def test_strict_context_rejects_partial_lexical_without_reason(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reason=absent"):
+            self.checker.validate_context(
+                self.pruned_lexical_context({"status": "partial"}),
+                strict=True,
+            )
+
+    def test_strict_context_rejects_unavailable_lexical(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires complete lexical coverage$"):
+            self.checker.validate_context(
+                self.pruned_lexical_context(
+                    {"status": "unavailable", "reason": "retriever_unavailable"}
+                ),
+                strict=True,
+            )
 
     def test_strict_context_rejects_lexical_only_evidence(self) -> None:
         with self.assertRaisesRegex(ValueError, "graph symbol evidence"):
@@ -255,7 +328,6 @@ class StrictReadinessOutputTests(unittest.TestCase):
                             "status": "unavailable",
                             "reason": "verified_code_graph_not_ready",
                         },
-                        "semantic": {"status": "unavailable", "reason": "warming"},
                         "recall": "partial",
                     },
                     "search_matches": [{"file": "src/main.rs"}],
@@ -268,7 +340,6 @@ class StrictReadinessOutputTests(unittest.TestCase):
                 },
                 strict=True,
             )
-
 
 if __name__ == "__main__":
     unittest.main()

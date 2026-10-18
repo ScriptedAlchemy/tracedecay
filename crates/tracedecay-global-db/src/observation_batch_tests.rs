@@ -13,19 +13,17 @@ use tracedecay_domain::{
     ObservationCollisionOutcomeV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, UtcMicros,
+    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, RetrievalAnchorRecord,
+    RetrievalAnchorRecordParts, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, FOREGROUND_BATCH_MAX_OPERATIONS, ObservationBatchFallbackCause,
-    ObservationBatchPersistOutcome, ObservationPersistOutcome, ObservationStore,
-    ObservationStoreError, ObservationWrite,
+    AnchoredObservationWrite, FOREGROUND_BATCH_MAX_OPERATIONS, ObservationBatchPersistOutcome,
+    ObservationPersistOutcome, ObservationStore, ObservationStoreError, ObservationWrite,
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Dispatch, Event, Metadata, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
 
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
@@ -91,16 +89,11 @@ async fn persist_with_work_census(
     store: &impl ObservationStore,
     writes: Vec<AnchoredObservationWrite>,
 ) -> (Vec<ObservationBatchPersistOutcome>, u64, u64) {
-    // Keeps this census immune to another test thread poisoning the
-    // process-global callsite interest cache; see the helper's documentation.
-    crate::tests::harness::install_tracing_callsite_keepalive();
     let trace = Arc::new(ObservationWorkTrace::default());
-    let dispatch = Dispatch::new(ObservationWorkSubscriber {
+    let _guard = tracedecay_runtime_core::logging::set_tracing_capture(ObservationWorkSubscriber {
         trace: Arc::clone(&trace),
     });
-    let guard = tracing::dispatcher::set_default(&dispatch);
     let outcomes = store.persist_observations(writes).await.unwrap();
-    drop(guard);
     (
         outcomes,
         trace.commands.load(Ordering::Relaxed),
@@ -108,10 +101,12 @@ async fn persist_with_work_census(
     )
 }
 
+/// Committed writer operations, read from the shard checkpoint: every
+/// operation advances its commit sequence by one and opens its own
+/// `RuntimeTransactionScopeV1`, whether or not the ledger keeps a replay row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WriterTxnCensus {
     operations: i64,
-    scopes: i64,
 }
 
 async fn writer_txn_census(runtime: &HostAdmissionTestRuntimeV1) -> WriterTxnCensus {
@@ -121,8 +116,7 @@ async fn writer_txn_census(runtime: &HostAdmissionTestRuntimeV1) -> WriterTxnCen
     let snapshot = database.read_snapshot().await.expect("read snapshot");
     let mut rows = snapshot
         .query(
-            "SELECT COUNT(*), COUNT(DISTINCT transaction_scope_json)
-             FROM td_runtime_writer_idempotency_v1",
+            "SELECT COALESCE(SUM(commit_sequence), 0) FROM td_runtime_writer_checkpoint_v1",
             (),
         )
         .await
@@ -134,7 +128,6 @@ async fn writer_txn_census(runtime: &HostAdmissionTestRuntimeV1) -> WriterTxnCen
         .expect("writer ledger census row");
     WriterTxnCensus {
         operations: row.get::<i64>(0).expect("operation count"),
-        scopes: row.get::<i64>(1).expect("distinct transaction scopes"),
     }
 }
 
@@ -152,10 +145,7 @@ async fn initialize_writer_authority(
     ));
     assert_eq!(
         writer_txn_census(runtime).await,
-        WriterTxnCensus {
-            operations: 1,
-            scopes: 1,
-        }
+        WriterTxnCensus { operations: 1 }
     );
 }
 
@@ -241,7 +231,7 @@ fn anchored_write(
         "observation-batch-test",
     )
     .unwrap();
-    let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+    let anchor = tracedecay_store::build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -252,10 +242,18 @@ fn anchored_write(
 }
 
 fn sequential_writes(session_id: &SessionId, count: usize) -> Vec<AnchoredObservationWrite> {
+    sequential_writes_with_text(session_id, count, |ordinal| format!("frame {ordinal}"))
+}
+
+fn sequential_writes_with_text(
+    session_id: &SessionId,
+    count: usize,
+    text: impl Fn(u64) -> String,
+) -> Vec<AnchoredObservationWrite> {
     let mut writes = Vec::with_capacity(count);
     let mut expected = None;
     for ordinal in 0..u64::try_from(count).expect("batch fits u64") {
-        let observation = sequential_observation(session_id, ordinal, &format!("frame {ordinal}"));
+        let observation = sequential_observation(session_id, ordinal, &text(ordinal));
         let write = anchored_write(observation, expected);
         expected = Some(write.next_cursor().clone());
         writes.push(write);
@@ -265,10 +263,10 @@ fn sequential_writes(session_id: &SessionId, count: usize) -> Vec<AnchoredObserv
 
 fn with_retrieval_alias(
     write: &AnchoredObservationWrite,
-    alias: tracedecay_domain::NativeAliasV2,
+    alias: tracedecay_domain::NativeAlias,
 ) -> AnchoredObservationWrite {
     let retained = write.retrieval_anchor();
-    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    let anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target: retained.target().clone(),
         owner: retained.owner().clone(),
         aliases: vec![alias],
@@ -340,23 +338,7 @@ fn colliding_rewrite(
     anchored_write(observation, expected_cursor)
 }
 
-#[tokio::test]
-async fn empty_observation_batch_returns_no_outcomes_and_opens_no_writer_txn() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    initialize_writer_authority(&runtime, &store).await;
-    let before = writer_txn_census(&runtime).await;
-    let outcomes = store.persist_observations(Vec::new()).await.unwrap();
-    assert!(outcomes.is_empty());
-    assert_eq!(writer_txn_census(&runtime).await, before);
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn n_persist_observation_calls_open_n_writer_transactions() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -377,14 +359,9 @@ async fn n_persist_observation_calls_open_n_writer_transactions() {
     }
     let after = writer_txn_census(&runtime).await;
     assert_eq!(after.operations - before.operations, BATCH_SIZE as i64);
-    assert_eq!(
-        after.scopes - before.scopes,
-        BATCH_SIZE as i64,
-        "one persist_observation still opens one RuntimeTransactionScopeV1"
-    );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn persist_observations_opens_one_writer_transaction_for_the_batch() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -428,14 +405,9 @@ async fn persist_observations_opens_one_writer_transaction_for_the_batch() {
         1,
         "the bounded batch must be one admitted writer operation"
     );
-    assert_eq!(
-        after.scopes - before.scopes,
-        1,
-        "the bounded batch must share one RuntimeTransactionScopeV1"
-    );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn intra_batch_exact_duplicate_is_hydrated_as_a_duplicate() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -467,11 +439,13 @@ async fn intra_batch_exact_duplicate_is_hydrated_as_a_duplicate() {
     assert_eq!(outcomes[0].stored(), outcomes[1].stored());
     let after = writer_txn_census(&runtime).await;
     assert_eq!(after.operations - before.operations, 1);
-    assert_eq!(after.scopes - before.scopes, 1);
 }
 
-#[tokio::test]
-async fn intra_batch_identity_rewrite_is_typed_and_commits_no_prefix() {
+async fn open_profile_store() -> (
+    TempDir,
+    HostAdmissionTestRuntimeV1,
+    crate::GlobalDbObservationStore,
+) {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -480,51 +454,128 @@ async fn intra_batch_identity_rewrite_is_typed_and_commits_no_prefix() {
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     initialize_writer_authority(&runtime, &store).await;
+    (tmp, runtime, store)
+}
+
+/// Durable effect of admitting writes in order: each settled outcome kind up
+/// to the first error, that error, which observations are retained, and the
+/// resulting source cursor of the first write's source.
+#[derive(Debug, PartialEq, Eq)]
+struct AdmissionEffect {
+    outcomes: Vec<std::mem::Discriminant<ObservationPersistOutcome>>,
+    error: Option<String>,
+    retained: Vec<bool>,
+    cursor: Option<String>,
+}
+
+async fn admission_effect(
+    store: &crate::GlobalDbObservationStore,
+    writes: &[AnchoredObservationWrite],
+    outcomes: Vec<std::mem::Discriminant<ObservationPersistOutcome>>,
+    error: Option<String>,
+) -> AdmissionEffect {
+    let mut retained = Vec::with_capacity(writes.len());
+    for write in writes {
+        retained.push(
+            store
+                .get_observation(write.observation().observation_id())
+                .await
+                .unwrap()
+                .is_some(),
+        );
+    }
+    let source = writes[0].observation();
+    let cursor = store
+        .get_source_cursor(source.source(), source.scope())
+        .await
+        .unwrap()
+        .map(|cursor| format!("{cursor:?}"));
+    AdmissionEffect {
+        outcomes,
+        error,
+        retained,
+        cursor,
+    }
+}
+
+/// Admits `writes` as one batch and, on a separate fresh store, as sequential
+/// single writes, and requires both to leave the same durable effect. Returns
+/// the batch result for case-specific assertions.
+async fn assert_batch_settles_like_sequential_writes(
+    writes: Vec<AnchoredObservationWrite>,
+) -> (
+    Result<Vec<ObservationBatchPersistOutcome>, ObservationStoreError>,
+    AdmissionEffect,
+) {
+    let (_batch_tmp, _batch_runtime, batch_store) = open_profile_store().await;
+    let batch = batch_store.persist_observations(writes.clone()).await;
+    let batch_effect = match &batch {
+        Ok(outcomes) => {
+            admission_effect(
+                &batch_store,
+                &writes,
+                outcomes
+                    .iter()
+                    .map(|outcome| std::mem::discriminant(outcome.outcome()))
+                    .collect(),
+                None,
+            )
+            .await
+        }
+        Err(error) => {
+            admission_effect(
+                &batch_store,
+                &writes,
+                Vec::new(),
+                Some(format!("{error:?}")),
+            )
+            .await
+        }
+    };
+
+    let (_scalar_tmp, _scalar_runtime, scalar_store) = open_profile_store().await;
+    let mut outcomes = Vec::new();
+    let mut error = None;
+    for write in writes.iter().cloned() {
+        match scalar_store.persist_observation(write).await {
+            Ok(outcome) => outcomes.push(std::mem::discriminant(&outcome)),
+            Err(scalar_error) => {
+                error = Some(format!("{scalar_error:?}"));
+                outcomes.clear();
+                break;
+            }
+        }
+    }
+    let scalar_effect = admission_effect(&scalar_store, &writes, outcomes, error).await;
+    assert_eq!(
+        batch_effect, scalar_effect,
+        "a batch must settle exactly as the same writes admitted one at a time"
+    );
+    (batch, batch_effect)
+}
+
+#[asupersync::test]
+async fn intra_batch_identity_rewrite_settles_like_sequential_writes() {
     let session_id = SessionId::new("session.observation-batch.intra-rewrite").unwrap();
     let first = sequential_writes(&session_id, 1)
         .pop()
         .expect("intra-batch retained observation");
     let rewritten = colliding_rewrite(&session_id, Some(first.next_cursor().clone()));
-    let before = writer_txn_census(&runtime).await;
 
-    let error = store
-        .persist_observations(vec![first.clone(), rewritten])
-        .await
-        .unwrap_err();
+    let (batch, effect) = assert_batch_settles_like_sequential_writes(vec![first, rewritten]).await;
 
     assert!(matches!(
-        error,
-        ObservationStoreError::BatchRequiresScalarFallback {
-            cause: ObservationBatchFallbackCause::IntraBatchIdentityCollision,
-        }
+        batch,
+        Err(ObservationStoreError::ObservationCollision { .. })
     ));
-    assert_eq!(writer_txn_census(&runtime).await, before);
     assert!(
-        store
-            .get_observation(first.observation().observation_id())
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
-            .get_source_cursor(first.observation().source(), first.observation().scope())
-            .await
-            .unwrap()
-            .is_none()
+        effect.retained[0],
+        "the committed predecessor stays durable"
     );
 }
 
-#[tokio::test]
-async fn intra_batch_receipt_collision_requests_typed_scalar_fallback() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    initialize_writer_authority(&runtime, &store).await;
+#[asupersync::test]
+async fn intra_batch_receipt_collision_settles_like_sequential_writes() {
     let session_id = SessionId::new("session.observation-batch.intra-receipt").unwrap();
     let mut writes = sequential_writes(&session_id, 2);
     let first = writes.remove(0);
@@ -546,39 +597,16 @@ async fn intra_batch_receipt_collision_requests_typed_scalar_fallback() {
     )
     .unwrap();
     let conflicting = anchored_write(conflicting_observation, second.expected_cursor().cloned());
-    let before = writer_txn_census(&runtime).await;
 
-    let error = store
-        .persist_observations(vec![first.clone(), conflicting])
-        .await
-        .unwrap_err();
+    let (batch, effect) =
+        assert_batch_settles_like_sequential_writes(vec![first, conflicting]).await;
 
-    assert!(matches!(
-        error,
-        ObservationStoreError::BatchRequiresScalarFallback {
-            cause: ObservationBatchFallbackCause::IntraBatchSanitizationReceiptCollision,
-        }
-    ));
-    assert_eq!(writer_txn_census(&runtime).await, before);
-    assert!(
-        store
-            .get_observation(first.observation().observation_id())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(batch.is_err(), "a reused receipt id must not commit");
+    assert_eq!(effect.retained, vec![true, false]);
 }
 
-#[tokio::test]
-async fn intra_batch_alias_collision_is_typed_and_commits_no_prefix() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    initialize_writer_authority(&runtime, &store).await;
+#[asupersync::test]
+async fn intra_batch_alias_collision_settles_like_sequential_writes() {
     let session_id = SessionId::new("session.observation-batch.intra-alias").unwrap();
     let mut writes = sequential_writes(&session_id, 2);
     let first = writes.remove(0);
@@ -589,30 +617,17 @@ async fn intra_batch_alias_collision_is_typed_and_commits_no_prefix() {
         .cloned()
         .expect("observation retrieval alias");
     let second = with_retrieval_alias(&writes.remove(0), alias);
-    let before = writer_txn_census(&runtime).await;
 
-    let error = store
-        .persist_observations(vec![first.clone(), second])
-        .await
-        .unwrap_err();
+    let (batch, effect) = assert_batch_settles_like_sequential_writes(vec![first, second]).await;
 
     assert!(matches!(
-        error,
-        ObservationStoreError::BatchRequiresScalarFallback {
-            cause: ObservationBatchFallbackCause::IntraBatchRetrievalAnchorAliasCollision,
-        }
+        batch,
+        Err(ObservationStoreError::RetrievalAnchorAliasCollision { .. })
     ));
-    assert_eq!(writer_txn_census(&runtime).await, before);
-    assert!(
-        store
-            .get_observation(first.observation().observation_id())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert_eq!(effect.retained, vec![true, false]);
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[asupersync::test]
 async fn persist_observations_dispatches_one_runtime_command_independent_of_batch_size() {
     let mut expected_snapshot_probes = None;
     for count in [1, BATCH_SIZE, ABOVE_WRITER_COALESCING_LIMIT] {
@@ -657,11 +672,45 @@ async fn persist_observations_dispatches_one_runtime_command_independent_of_batc
         }
         let after = writer_txn_census(&runtime).await;
         assert_eq!(after.operations - before.operations, 1);
-        assert_eq!(after.scopes - before.scopes, 1);
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn persist_observations_partitions_large_windows_by_exact_admission_bytes() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    initialize_writer_authority(&runtime, &store).await;
+    let session_id = SessionId::new("session.observation-batch.byte-partition").unwrap();
+    let writes = sequential_writes_with_text(&session_id, 256, |ordinal| {
+        format!("large frame {ordinal} {}", "x".repeat(15_000))
+    });
+    let before = writer_txn_census(&runtime).await;
+
+    let (outcomes, runtime_commands, _) = persist_with_work_census(&store, writes).await;
+
+    assert_eq!(outcomes.len(), 256);
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome.outcome(), ObservationPersistOutcome::Committed(_)))
+    );
+    assert!(
+        runtime_commands > 1,
+        "the oversized source window must be split before runtime admission"
+    );
+    let after = writer_txn_census(&runtime).await;
+    assert_eq!(
+        after.operations - before.operations,
+        runtime_commands as i64
+    );
+}
+
+#[asupersync::test]
 async fn failed_batch_preflight_commits_no_valid_prefix() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -713,7 +762,7 @@ async fn failed_batch_preflight_commits_no_valid_prefix() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn persist_observations_keeps_cursor_cas_collision_and_file_identity() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -797,4 +846,46 @@ async fn persist_observations_keeps_cursor_cas_collision_and_file_identity() {
         .expect("committed cursor");
     assert_eq!(cursor.file_identity(), Some(0xfeed_face));
     assert_eq!(cursor.resume_fingerprint(), Some(0xcafe_babe));
+}
+
+#[asupersync::test]
+async fn persist_observations_recovers_a_peer_commit_as_exact_duplicate() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.observation-batch.peer-commit").unwrap();
+    let writes = sequential_writes(&session_id, 1);
+    let left_store = store.clone();
+    let right_store = store.clone();
+    let left_writes = writes.clone();
+    let right_writes = writes;
+    let (left, right) = asupersync::join!(
+        left_store.persist_observations(left_writes),
+        right_store.persist_observations(right_writes),
+    );
+    let left = left.expect("concurrent persist must not surface Storage");
+    let right = right.expect("concurrent persist must not surface Storage");
+    assert_eq!(left.len(), 1);
+    assert_eq!(right.len(), 1);
+    let persist_class = |outcome: &ObservationPersistOutcome| match outcome {
+        ObservationPersistOutcome::Committed(_) => "committed",
+        ObservationPersistOutcome::ExactDuplicate(_) => "exact_duplicate",
+        ObservationPersistOutcome::CoveredDuplicate(_) => "covered_duplicate",
+    };
+    let left_class = persist_class(left[0].outcome());
+    let right_class = persist_class(right[0].outcome());
+    let attached = left_class == right_class;
+    let serialized_replay = matches!(
+        (left_class, right_class),
+        ("committed", "exact_duplicate" | "covered_duplicate")
+            | ("exact_duplicate" | "covered_duplicate", "committed")
+    );
+    assert!(
+        attached || serialized_replay,
+        "identical peer submits must attach to one writer outcome or serialize as commit+replay, got {left:?} / {right:?}"
+    );
 }

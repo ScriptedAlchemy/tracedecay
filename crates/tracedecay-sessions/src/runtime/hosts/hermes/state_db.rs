@@ -1,32 +1,50 @@
 //! Bounded `state.db` access: schema probing, byte-capped page reads, and the
 //! per-source ingest drivers.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use rayon::prelude::*;
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, ProjectId};
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::host_sqlite::SqliteReadConn;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
-use crate::runtime::shared::{
-    ProjectRootMatcher, SqliteReadConn, StoredCursor, TranscriptIngestStats,
-};
+use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::source::run_blocking_transcript_section;
 
-use super::coverage::{
-    admit_rows_with_admission, admit_rows_with_admission_and_cancellation, sqlite_incarnation,
-};
-use super::ingest::{HermesProfileSource, ProjectIngestDestination};
+use super::coverage::{admit_rows_with_admission_and_cancellation, sqlite_incarnation};
+use super::ingest::HermesProfileSource;
 use super::observation::{HermesProjectionMetadata, project_projection_metadata};
-use super::routing::{
-    turn_project_locations, turn_project_locations_for_destinations, user_turn_locations,
-};
+use super::routing::{turn_project_locations, user_turn_locations};
 use super::rows::{HermesPageRead, HermesRow, hermes_budget_bytes, hermes_page_row_charge};
 use super::{CHUNK_ROWS, MAX_HERMES_IDENTITY_BYTES, MAX_HERMES_PAGE_BYTES, MAX_HERMES_VALUE_BYTES};
 
-/// Column names of the `messages` table — `active` (v12 rewind soft-delete)
+pub(super) const HERMES_PAYLOAD_BATCH_ROWS: usize = 256;
+
+#[derive(Clone)]
+pub(super) struct HermesReadSql {
+    admission: String,
+    payload_select: String,
+}
+
+impl HermesReadSql {
+    pub(super) fn admission_sql(&self) -> &str {
+        &self.admission
+    }
+
+    pub(super) fn payload_sql(&self, row_count: usize) -> String {
+        let admitted_values = std::iter::repeat_n("(?, ?)", row_count)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "WITH admitted(id, row_fits_budget) AS (VALUES {admitted_values}) {}",
+            self.payload_select
+        )
+    }
+}
+
+/// Column names of the `messages` table, `active` (v12 rewind soft-delete)
 /// and `reasoning` arrived in later Hermes schema revisions, so the sweep
 /// probes before selecting to stay readable on legacy stores.
 pub async fn message_columns(
@@ -154,10 +172,10 @@ fn sql_value_oversized(expr: &str, max_bytes: usize) -> String {
     )
 }
 
-pub fn select_new_messages_sql(
+pub(super) fn select_new_messages_sql(
     message_columns: &std::collections::BTreeSet<String>,
     session_columns: &std::collections::BTreeSet<String>,
-) -> String {
+) -> HermesReadSql {
     let reasoning_raw = if message_columns.contains("reasoning") {
         "m.reasoning"
     } else {
@@ -281,18 +299,18 @@ pub fn select_new_messages_sql(
         source_os = sql_value_oversized(session_source_raw, id_max),
         title_os = sql_value_oversized(session_title_raw, value_max),
     );
-    let row_fits_budget = format!("({measured}) <= ?2");
-    let session_id = sql_bounded_text("m.session_id", id_max, &row_fits_budget);
-    let role = sql_bounded_text("m.role", id_max, &row_fits_budget);
-    let content = sql_bounded_text("m.content", value_max, &row_fits_budget);
-    let reasoning = sql_bounded_text(reasoning_raw, value_max, &row_fits_budget);
-    let tool_name = sql_bounded_text(tool_name_raw, id_max, &row_fits_budget);
-    let tool_calls = sql_bounded_text(tool_calls_raw, value_max, &row_fits_budget);
-    let model = sql_bounded_text(session_model_raw, id_max, &row_fits_budget);
-    let parent_session_id = sql_bounded_text(parent_session_id_raw, id_max, &row_fits_budget);
-    let session_cwd = sql_bounded_text(session_cwd_raw, value_max, &row_fits_budget);
-    let session_source = sql_bounded_text(session_source_raw, id_max, &row_fits_budget);
-    let session_title = sql_bounded_text(session_title_raw, value_max, &row_fits_budget);
+    let row_fits_budget = "admitted.row_fits_budget != 0";
+    let session_id = sql_bounded_text("m.session_id", id_max, row_fits_budget);
+    let role = sql_bounded_text("m.role", id_max, row_fits_budget);
+    let content = sql_bounded_text("m.content", value_max, row_fits_budget);
+    let reasoning = sql_bounded_text(reasoning_raw, value_max, row_fits_budget);
+    let tool_name = sql_bounded_text(tool_name_raw, id_max, row_fits_budget);
+    let tool_calls = sql_bounded_text(tool_calls_raw, value_max, row_fits_budget);
+    let model = sql_bounded_text(session_model_raw, id_max, row_fits_budget);
+    let parent_session_id = sql_bounded_text(parent_session_id_raw, id_max, row_fits_budget);
+    let session_cwd = sql_bounded_text(session_cwd_raw, value_max, row_fits_budget);
+    let session_source = sql_bounded_text(session_source_raw, id_max, row_fits_budget);
+    let session_title = sql_bounded_text(session_title_raw, value_max, row_fits_budget);
     let timestamp = sql_bounded_number("m.timestamp");
     let session_started_at = sql_bounded_number(session_started_at);
     let session_ended_at = sql_bounded_number(session_ended_at);
@@ -306,7 +324,17 @@ pub fn select_new_messages_sql(
         "CASE WHEN ({oversized}) > 0 OR ({measured}) > {MAX_HERMES_PAGE_BYTES} \
               THEN 1 ELSE 0 END"
     );
-    format!(
+    let admission = format!(
+        "SELECT m.id,
+                CAST(({measured}) AS INTEGER) AS measured_bytes,
+                CAST(({typed_oversized}) AS INTEGER) AS value_oversized,
+                CAST(({session_usage_frontier}) AS INTEGER) AS session_usage_frontier
+         FROM messages m LEFT JOIN sessions s ON s.id = m.session_id
+         WHERE m.id > ?1
+         ORDER BY m.id
+         LIMIT {CHUNK_ROWS}"
+    );
+    let payload_select = format!(
         "SELECT m.id,
                 {session_id},
                 {role},
@@ -323,16 +351,16 @@ pub fn select_new_messages_sql(
                 {session_started_at},
                 {session_ended_at},
                 {input_tokens}, {output_tokens}, {cache_read_tokens}, {cache_write_tokens},
-                {reasoning_tokens}, {active},
-                CAST(({measured}) AS INTEGER) AS measured_bytes,
-                CAST(({typed_oversized}) AS INTEGER) AS value_oversized,
-                CAST(({row_fits_budget}) AS INTEGER) AS row_fits_budget,
-                CAST(({session_usage_frontier}) AS INTEGER) AS session_usage_frontier
-         FROM messages m LEFT JOIN sessions s ON s.id = m.session_id
-         WHERE m.id > ?1
-         ORDER BY m.id
-         LIMIT 1"
-    )
+                {reasoning_tokens}, {active}
+         FROM admitted
+         JOIN messages m ON m.id = admitted.id
+         LEFT JOIN sessions s ON s.id = m.session_id
+         ORDER BY m.id"
+    );
+    HermesReadSql {
+        admission,
+        payload_select,
+    }
 }
 
 /// Incrementally scans one Hermes `state.db`; each bounded page is admitted
@@ -349,16 +377,20 @@ async fn open_state_source(
         ObservationSourceGenerationV1,
         u64,
         u64,
-        String,
+        HermesReadSql,
     ),
     String,
 > {
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
-    let (generation, file_identity, resume_fingerprint) = hotpath::measure_block!(
-        "sessions.hosts.hermes.incarnation_blocking",
-        run_blocking_transcript_section(|| sqlite_incarnation(state_db))
-    )?;
+    let (generation, file_identity, resume_fingerprint) = {
+        run_blocking_transcript_section("hermes", {
+            let state_db = state_db.to_path_buf();
+            move || sqlite_incarnation(&state_db)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }?;
     let message_columns = message_columns(&conn).await?;
     let session_columns = table_columns(&conn, "sessions").await?;
     validate_required_columns(
@@ -383,8 +415,10 @@ async fn open_state_source(
 #[allow(clippy::too_many_arguments)]
 async fn ingest_bounded_pages<F, R>(
     admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
+    state_db: &Path,
     conn: &SqliteReadConn,
-    select_sql: &str,
+    select_sql: &HermesReadSql,
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
     file_identity: u64,
@@ -394,8 +428,8 @@ async fn ingest_bounded_pages<F, R>(
     cancellation: &ObservationCancellation,
 ) -> Result<TranscriptIngestStats, String>
 where
-    F: FnMut(&[HermesRow]) -> R,
-    R: Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
+    F: FnMut(&[HermesRow]) -> R + Send + 'static,
+    R: Fn(&HermesRow) -> Option<HermesProjectionMetadata> + Send + 'static,
 {
     let mut read_cursor = StoredCursor::default();
     let mut stats = TranscriptIngestStats::default();
@@ -416,14 +450,22 @@ where
         if bounded_count == 0 {
             return Ok(stats);
         }
-        let bounded = &new.items[..bounded_count];
-        let route = hotpath::measure_block!(
-            "sessions.hosts.hermes.route_page_blocking",
-            run_blocking_transcript_section(|| route_page(bounded))
-        );
+        let mut items = new.items;
+        let bounded = items.drain(..bounded_count).collect::<Vec<_>>();
+        let (route, bounded, next_route_page) = {
+            run_blocking_transcript_section("hermes", move || {
+                let route = route_page(&bounded);
+                (route, bounded, route_page)
+            })
+            .await
+            .map_err(|error| error.to_string())?
+        };
+        route_page = next_route_page;
         let admitted = admit_rows_with_admission_and_cancellation(
             admission,
-            bounded,
+            sweep,
+            state_db,
+            &bounded,
             scope.clone(),
             generation,
             file_identity,
@@ -459,6 +501,7 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
     project_root: &Path,
     project_id: ProjectId,
     admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
     budget: &mut IngestByteBudget,
     cancellation: &ObservationCancellation,
 ) -> Result<TranscriptIngestStats, String> {
@@ -468,8 +511,12 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
     let scope = ObservationScopeV1::Project { project_id };
+    let project_root = project_root.to_path_buf();
+    let source = source.clone();
     ingest_bounded_pages(
         admission,
+        sweep,
+        &source.state_db,
         &conn,
         &select_sql,
         scope,
@@ -477,12 +524,18 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
         file_identity,
         resume_fingerprint,
         budget,
-        |bounded| {
-            let locations = turn_project_locations(bounded, project_root, source);
-            move |row: &HermesRow| {
-                locations.get(&row.id).copied().map(|provenance| {
-                    project_projection_metadata(row, source, project_root, provenance)
-                })
+        {
+            let project_root = project_root.clone();
+            let source = source.clone();
+            move |bounded| {
+                let locations = turn_project_locations(bounded, &project_root);
+                let project_root = project_root.clone();
+                let source = source.clone();
+                move |row: &HermesRow| {
+                    locations.get(&row.id).copied().map(|provenance| {
+                        project_projection_metadata(row, &source, &project_root, provenance)
+                    })
+                }
             }
         },
         cancellation,
@@ -490,116 +543,9 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
     .await
 }
 
-/// Shared-source equivalent of [`try_ingest_state_db`]. The `SQLite` page is read
-/// once, then each destination independently admits routed rows against its own
-/// authoritative observation cursor.
-pub(super) async fn try_ingest_state_db_for_projects(
-    source: &HermesProfileSource,
-    destinations: &[ProjectIngestDestination<'_>],
-    budget: &mut IngestByteBudget,
-) -> Result<TranscriptIngestStats, String> {
-    let (conn, generation, file_identity, resume_fingerprint, select_sql) =
-        open_state_source(source).await?;
-    let scopes = destinations
-        .iter()
-        .map(|destination| ObservationScopeV1::Project {
-            project_id: destination.project_id.clone(),
-        })
-        .collect::<Vec<_>>();
-    let destination_matchers = hotpath::measure_block!(
-        "sessions.hosts.hermes.destination_matchers_blocking",
-        run_blocking_transcript_section(|| {
-            destinations
-                .par_iter()
-                .map(|destination| ProjectRootMatcher::new(destination.project_root))
-                .collect::<Vec<_>>()
-        })
-    );
-    let mut read_cursor = StoredCursor::default();
-    let mut stats = TranscriptIngestStats::default();
-    loop {
-        let new = read_new_rows_strict(&conn, &select_sql, read_cursor).await?;
-        let row_count = new.items.len();
-        if row_count == 0 {
-            return Ok(stats);
-        }
-        let bounded_count = new
-            .items
-            .iter()
-            .take_while(|row| budget.try_consume(hermes_budget_bytes(row)))
-            .count();
-        if bounded_count == 0 {
-            return Ok(stats);
-        }
-        let bounded = &new.items[..bounded_count];
-        // Per-page route cache: avoid unbounded growth across many SQLite pages.
-        let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
-        let locations = hotpath::measure_block!(
-            "sessions.hosts.hermes.destination_routes_blocking",
-            run_blocking_transcript_section(|| {
-                turn_project_locations_for_destinations(
-                    bounded,
-                    &destination_matchers,
-                    source,
-                    &mut destination_routes,
-                )
-            })
-        )
-        .map_err(|_| {
-            format!(
-                "could not classify Hermes rows from '{}' because project membership is unknown",
-                source.state_db.display()
-            )
-        })?;
-        for (index, destination) in destinations.iter().enumerate() {
-            let admitted = admit_rows_with_admission(
-                destination.admission,
-                bounded,
-                scopes[index].clone(),
-                generation,
-                file_identity,
-                resume_fingerprint,
-                |row| {
-                    locations[index]
-                        .by_row_id
-                        .get(&row.id)
-                        .copied()
-                        .map(|provenance| {
-                            project_projection_metadata(
-                                row,
-                                source,
-                                destination.project_root,
-                                provenance,
-                            )
-                        })
-                },
-            )
-            .await?;
-            stats.messages_upserted = stats
-                .messages_upserted
-                .saturating_add(admitted.messages_upserted);
-            stats.sessions_upserted = stats
-                .sessions_upserted
-                .saturating_add(admitted.sessions_upserted);
-        }
-        read_cursor.position = bounded
-            .last()
-            .and_then(|row| u64::try_from(row.id).ok())
-            .unwrap_or(read_cursor.position);
-        if bounded_count < row_count {
-            return Ok(stats);
-        }
-        if new.truncated_by_byte_budget {
-            continue;
-        }
-        if row_count < CHUNK_ROWS {
-            return Ok(stats);
-        }
-    }
-}
-
 pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
     admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
     source: &HermesProfileSource,
     _registered_roots: &[PathBuf],
     budget: &mut IngestByteBudget,
@@ -612,6 +558,8 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
         open_state_source(source).await?;
     ingest_bounded_pages(
         admission,
+        sweep,
+        &source.state_db,
         &conn,
         &select_sql,
         ObservationScopeV1::Profile,
@@ -619,22 +567,24 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
         file_identity,
         resume_fingerprint,
         budget,
-        |bounded| {
-            let locations = user_turn_locations(bounded, source);
-            let profile = source.profile.clone();
-            let fallback_provenance = source
-                .legacy_project_pin
-                .as_ref()
-                .map_or("session_cwd", |_| "profile_pin");
-            move |row: &HermesRow| {
-                locations
-                    .contains(&row.id)
-                    .then(|| HermesProjectionMetadata {
-                        project_path: None,
-                        location_path: None,
-                        profile: profile.clone(),
-                        location_provenance: Some(fallback_provenance),
-                    })
+        {
+            let source = source.clone();
+            move |bounded| {
+                let locations = user_turn_locations(bounded, &source);
+                let profile = source.profile.clone();
+                let transcript_path = source.state_db.to_string_lossy().into_owned();
+                let fallback_provenance = "session_cwd";
+                move |row: &HermesRow| {
+                    locations
+                        .contains(&row.id)
+                        .then(|| HermesProjectionMetadata {
+                            project_path: None,
+                            location_path: None,
+                            profile: profile.clone(),
+                            location_provenance: Some(fallback_provenance),
+                            transcript_path: Some(transcript_path.clone()),
+                        })
+                }
             }
         },
         cancellation,
@@ -646,7 +596,7 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
 /// to (or create) another agent's live store.
 pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
     let owned = path.to_path_buf();
-    let opened = tokio::task::spawn_blocking(move || {
+    let opened = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         tracedecay_rusqlite_runtime::open_immutable_reader(&owned)
     })
     .await
@@ -658,70 +608,121 @@ pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String
 
 pub(super) async fn read_new_rows_strict(
     conn: &SqliteReadConn,
-    select_sql: &str,
+    select_sql: &HermesReadSql,
     prev: StoredCursor,
 ) -> Result<HermesPageRead, String> {
-    let select_sql = select_sql.to_string();
+    let select_sql = select_sql.clone();
     conn.with(move |conn| read_new_rows_strict_sync(conn, &select_sql, prev))
         .await
         .unwrap_or_else(|| Err("could not query legacy Hermes state rows".to_string()))
 }
 
-/// One byte-budgeted page over the legacy Hermes state rows. The loop is a
-/// deliberate one-row-per-query cursor — the remaining page budget is bound
-/// into each fetch — but the statement text never changes, so it goes
-/// through the connection's prepared-statement cache instead of re-parsing
-/// once per row.
-#[hotpath::measure(label = "sessions.hosts.hermes.read_new_rows_strict")]
+#[derive(Clone, Copy)]
+struct AdmittedHermesRow {
+    rowid: i64,
+    measured_bytes: u64,
+    payload_fits_budget: bool,
+    value_oversized: bool,
+    session_usage_frontier: bool,
+}
+
+/// One byte-budgeted page over Hermes state rows. A scalar-only admission scan
+/// establishes exact row order, frontier state, and cumulative byte admission;
+/// payload columns are then fetched in bounded batches only for admitted ids.
+#[tracing::instrument(
+    name = "sessions.hosts.hermes.read_new_rows_strict",
+    level = "trace",
+    skip_all
+)]
 fn read_new_rows_strict_sync(
     conn: &rusqlite::Connection,
-    select_sql: &str,
+    select_sql: &HermesReadSql,
     prev: StoredCursor,
 ) -> Result<HermesPageRead, String> {
-    let mut items = Vec::new();
-    let mut max_rowid = prev.position;
+    let mut admitted = Vec::new();
     let mut page_bytes = 0_u64;
     let mut truncated_by_byte_budget = false;
-    while items.len() < CHUNK_ROWS {
-        let remaining = MAX_HERMES_PAGE_BYTES.saturating_sub(page_bytes);
+    {
         let mut statement = conn
-            .prepare_cached(select_sql)
+            .prepare_cached(select_sql.admission_sql())
             .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
         let mut rows = statement
-            .query(rusqlite::params![max_rowid as i64, remaining as i64])
+            .query(rusqlite::params![prev.position as i64])
             .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
-        let row = rows
+        while let Some(row) = rows
             .next()
-            .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?;
-        let Some(row) = row else {
-            break;
-        };
-        let rowid = row
-            .get::<_, i64>(0)
-            .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
-        // Columns 21..23 are SQL byte/typeof/budget aggregates — integers only.
-        let measured = row_i64_flag(row, 21).max(0) as u64;
-        let charge = hermes_page_row_charge(measured);
-        let row_fits_budget = row_i64_flag(row, 23) != 0;
-        if !row_fits_budget && !items.is_empty() {
-            // SQL returned NULL for every text payload in this row, so defer it
-            // without allocating the value that would cross the page budget.
-            truncated_by_byte_budget = true;
-            break;
-        }
-        let mapped = map_row(rowid, row, measured)
-            .ok_or_else(|| format!("legacy Hermes state row {rowid} is malformed"))?;
-        page_bytes = page_bytes.saturating_add(charge);
-        max_rowid = max_rowid.max(rowid as u64);
-        items.push(mapped);
-        if page_bytes >= MAX_HERMES_PAGE_BYTES {
-            truncated_by_byte_budget = true;
-            break;
+            .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?
+        {
+            let rowid = row
+                .get::<_, i64>(0)
+                .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
+            let measured_bytes = row_i64_flag(row, 1).max(0) as u64;
+            let remaining = MAX_HERMES_PAGE_BYTES.saturating_sub(page_bytes);
+            let payload_fits_budget = measured_bytes <= remaining;
+            if !payload_fits_budget && !admitted.is_empty() {
+                truncated_by_byte_budget = true;
+                break;
+            }
+            page_bytes = page_bytes.saturating_add(hermes_page_row_charge(measured_bytes));
+            admitted.push(AdmittedHermesRow {
+                rowid,
+                measured_bytes,
+                payload_fits_budget,
+                value_oversized: row_i64_flag(row, 2) != 0,
+                session_usage_frontier: row_i64_flag(row, 3) != 0,
+            });
+            if page_bytes >= MAX_HERMES_PAGE_BYTES {
+                truncated_by_byte_budget = true;
+                break;
+            }
         }
     }
-    if items.len() >= CHUNK_ROWS {
+    if admitted.len() >= CHUNK_ROWS {
         truncated_by_byte_budget = true;
     }
+
+    let mut items = Vec::with_capacity(admitted.len());
+    let mut max_rowid = prev.position;
+    for batch in admitted.chunks(HERMES_PAYLOAD_BATCH_ROWS) {
+        let payload_sql = select_sql.payload_sql(batch.len());
+        let mut statement = conn
+            .prepare_cached(&payload_sql)
+            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+        let mut rows = statement
+            .query(rusqlite::params_from_iter(batch.iter().flat_map(
+                |candidate| [candidate.rowid, i64::from(candidate.payload_fits_budget)],
+            )))
+            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+        let mut expected = batch.iter();
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?
+        {
+            let Some(candidate) = expected.next() else {
+                return Err("legacy Hermes payload query returned an unadmitted row".to_string());
+            };
+            let rowid = row
+                .get::<_, i64>(0)
+                .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
+            if rowid != candidate.rowid {
+                return Err(format!(
+                    "legacy Hermes payload row order changed: expected {}, got {rowid}",
+                    candidate.rowid
+                ));
+            }
+            let mapped = map_payload_row(*candidate, row)
+                .ok_or_else(|| format!("legacy Hermes state row {rowid} is malformed"))?;
+            max_rowid = max_rowid.max(rowid as u64);
+            items.push(mapped);
+        }
+        if let Some(missing) = expected.next() {
+            return Err(format!(
+                "legacy Hermes payload query omitted admitted row {}",
+                missing.rowid
+            ));
+        }
+    }
+
     Ok(HermesPageRead {
         items,
         #[cfg(test)]
@@ -753,8 +754,9 @@ fn row_optional_f64(row: &rusqlite::Row<'_>, idx: usize) -> Option<f64> {
     })
 }
 
-fn map_row(rowid: i64, row: &rusqlite::Row<'_>, sql_measured_bytes: u64) -> Option<HermesRow> {
-    let sql_value_oversized = row_i64_flag(row, 22) != 0;
+fn map_payload_row(candidate: AdmittedHermesRow, row: &rusqlite::Row<'_>) -> Option<HermesRow> {
+    let rowid = candidate.rowid;
+    let sql_value_oversized = candidate.value_oversized;
     let session_id = match row.get::<_, Option<String>>(1).ok().flatten() {
         Some(id) if !id.is_empty() => id,
         // Rejected/oversized session_id never materializes the hostile value; use a
@@ -787,9 +789,9 @@ fn map_row(rowid: i64, row: &rusqlite::Row<'_>, sql_measured_bytes: u64) -> Opti
         session_cache_read_tokens: row.get::<_, Option<i64>>(17).ok().flatten(),
         session_cache_write_tokens: row.get::<_, Option<i64>>(18).ok().flatten(),
         session_reasoning_tokens: row.get::<_, Option<i64>>(19).ok().flatten(),
-        is_session_usage_frontier: row_i64_flag(row, 24) != 0,
+        is_session_usage_frontier: candidate.session_usage_frontier,
         active: row.get::<_, Option<i64>>(20).ok().flatten().unwrap_or(1),
         sql_value_oversized,
-        sql_measured_bytes,
+        sql_measured_bytes: candidate.measured_bytes,
     })
 }

@@ -1,29 +1,28 @@
 use std::num::NonZeroUsize;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_domain::{
-    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
-    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-    SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
+    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros,
 };
-use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
-use tracedecay_private_fs::background_cpu::{
-    ProcessBackgroundCpuV1, install_process_background_cpu, process_background_cpu,
-};
-use tracedecay_runtime_core::privacy::{
-    ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_global_db::tests::harness::{HostAdmissionTestRuntimeV1, writer_telemetry};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::{HostAdmission, HostAdmissionScope};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationWrite,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
+    runtime::DEFAULT_MAX_READERS_PER_HOT_SHARD,
 };
 
 use super::*;
@@ -31,20 +30,16 @@ use super::*;
 const BATCH_PROVIDER: &str = "claude";
 const BATCH_SIZE: usize = 8;
 
+/// An isolated authority per facade: nothing here is process-global, so a
+/// test that saturates its width cannot gate a sibling test.
 fn background_cpu_for_host_admission_test() -> Arc<ProcessBackgroundCpuV1> {
-    process_background_cpu().unwrap_or_else(|| {
-        install_process_background_cpu(NonZeroUsize::new(4).expect("nonzero test CPU width"))
-            .expect("install canonical background CPU authority")
-    })
+    Arc::new(ProcessBackgroundCpuV1::new(
+        NonZeroUsize::new(4).expect("nonzero test CPU width"),
+    ))
 }
 
 fn committed_transactions(database: &tracedecay_global_db::RegisteredGlobalDb) -> u64 {
-    database
-        .runtime_client()
-        .writer_telemetry_snapshot()
-        .expect("registered database must expose rusqlite writer telemetry")
-        .writer
-        .expect("mounted writer must carry rusqlite writer telemetry")
+    writer_telemetry(database)
         .transactions
         .committed_transactions
 }
@@ -55,22 +50,45 @@ fn profile_facade<'a>(
     HostAdmissionFacade<'a>,
     &'a tracedecay_global_db::RegisteredGlobalDb,
 ) {
-    let _background_cpu = background_cpu_for_host_admission_test();
+    profile_facade_with_background_cpu(runtime, background_cpu_for_host_admission_test())
+}
+
+fn profile_facade_with_background_cpu<'a>(
+    runtime: &'a HostAdmissionTestRuntimeV1,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
+) -> (
+    HostAdmissionFacade<'a>,
+    &'a tracedecay_global_db::RegisteredGlobalDb,
+) {
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database");
     let shard = &database.binding().shard_id;
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
-        shard.brain_id.clone(),
-        shard.profile_id.clone(),
-        database,
-    ));
+    let facade = HostAdmissionFacade::new(
+        HostAdmissionAuthorities::for_profile(
+            shard.brain_id.clone(),
+            shard.profile_id.clone(),
+            database,
+        )
+        .with_background_cpu(background_cpu),
+    );
     (facade, database)
 }
 
 fn sequential_capture_requests(
     session_id: &SessionId,
     count: usize,
+) -> Vec<CaptureObservationRequest> {
+    generation_capture_requests(session_id, count, 1, None)
+}
+
+/// The same records under one source generation; `previous` is the cursor
+/// the generation's first record must replace.
+fn generation_capture_requests(
+    session_id: &SessionId,
+    count: usize,
+    generation: u64,
+    previous: Option<ObservationSourceCursorV1>,
 ) -> Vec<CaptureObservationRequest> {
     let mut requests = Vec::with_capacity(count);
     let mut offset = 0_u64;
@@ -105,7 +123,7 @@ fn sequential_capture_requests(
                     }],
                     CanonicalObservationEvidenceV1::new(ordering_domain, range),
                 )
-                .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
             },
         )
         .unwrap();
@@ -114,23 +132,27 @@ fn sequential_capture_requests(
             session_id.clone(),
         )
         .unwrap();
-        let expected_cursor = (start != 0).then(|| {
-            ObservationSourceCursorV1::for_ordering(
-                source.clone(),
-                ObservationScopeV1::Profile,
-                ObservationSourceGenerationV1::new(1).unwrap(),
-                ordering_domain,
-                start,
+        let expected_cursor = if start == 0 {
+            previous.clone()
+        } else {
+            Some(
+                ObservationSourceCursorV1::for_ordering(
+                    source.clone(),
+                    ObservationScopeV1::Profile,
+                    ObservationSourceGenerationV1::new(generation).unwrap(),
+                    ordering_domain,
+                    start,
+                )
+                .unwrap(),
             )
-            .unwrap()
-        });
+        };
         requests.push(
             CaptureObservationRequest::new(
                 parsed,
                 ObservationIdentityMaterialV1::for_native_record(
                     source,
                     ObservationScopeV1::Profile,
-                    ObservationSourceGenerationV1::new(1).unwrap(),
+                    ObservationSourceGenerationV1::new(generation).unwrap(),
                     range,
                     ordering_domain,
                     record,
@@ -146,7 +168,7 @@ fn sequential_capture_requests(
     requests
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn empty_capture_batch_opens_no_writer_transaction() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -161,7 +183,39 @@ async fn empty_capture_batch_opens_no_writer_transaction() {
     assert_eq!(committed_transactions(database), before);
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn provider_capture_reads_a_cursor_direct_host_admission_refuses() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let (facade, _) = profile_facade(&runtime);
+    let source = |provider: &str| {
+        ObservationSourceIdentityV1::for_provider(
+            ProviderId::new(provider).unwrap(),
+            SessionId::new("session.capture-split").unwrap(),
+        )
+        .unwrap()
+    };
+
+    let direct = facade.accept_replay("vibe", HostAdmissionScope::Profile);
+    assert_eq!(direct.status, HostAdmissionStatus::Unknown);
+    assert_eq!(direct.reason_code, Some("unknown_provider"));
+    assert_eq!(
+        HostAdmission::get_source_cursor(&facade, &source("vibe"), &ObservationScopeV1::Profile)
+            .await,
+        Ok(None)
+    );
+
+    let unknown =
+        HostAdmission::get_source_cursor(&facade, &source("roo"), &ObservationScopeV1::Profile)
+            .await
+            .unwrap_err();
+    assert_eq!(unknown.status, HostAdmissionStatus::Unknown);
+    assert_eq!(unknown.reason_code, Some("unknown_provider"));
+}
+
+#[asupersync::test]
 async fn mounted_capture_batch_reduces_writer_transactions() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -193,25 +247,343 @@ async fn mounted_capture_batch_reduces_writer_transactions() {
     );
 }
 
-#[tokio::test]
+/// Every general reader held is a capacity answer about this pool, not a
+/// failed authority write: a retry backoff keyed on the reason must see
+/// backpressure, and the same capture must commit once readers return.
+#[asupersync::test]
+async fn saturated_reader_pool_reports_backpressure_not_authority_write_failure() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let (facade, database) = profile_facade(&runtime);
+    let mut held = Vec::new();
+    for _ in 0..DEFAULT_MAX_READERS_PER_HOT_SHARD {
+        held.push(
+            database
+                .read_snapshot()
+                .await
+                .expect("hold a general reader"),
+        );
+    }
+    let occupancy = database
+        .read_connection()
+        .reader_pool_occupancy()
+        .expect("registered reader pool");
+    assert_eq!(occupancy.available_general, 0, "{occupancy:?}");
+    assert_eq!(
+        occupancy.leased_general, DEFAULT_MAX_READERS_PER_HOT_SHARD,
+        "{occupancy:?}"
+    );
+
+    let backpressured = |outcome: &HostAdmissionOutcome| {
+        assert_eq!(
+            (outcome.status, outcome.retryable, outcome.reason_code),
+            (
+                HostAdmissionStatus::Backpressured,
+                true,
+                Some("reader_pool_saturated")
+            ),
+            "cause: {:?}",
+            outcome.cause
+        );
+    };
+    let session_id = SessionId::new("session.host-admission-capture.saturated").unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(BATCH_PROVIDER).unwrap(),
+        session_id.clone(),
+    )
+    .unwrap();
+    backpressured(
+        &facade
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .expect_err("a cursor read needs a reader"),
+    );
+    backpressured(
+        &facade
+            .capture(sequential_capture_requests(&session_id, 1).remove(0))
+            .await,
+    );
+
+    drop(held);
+    let recovered = facade
+        .capture(sequential_capture_requests(&session_id, 1).remove(0))
+        .await;
+    assert_eq!(recovered.status, HostAdmissionStatus::AcceptedForReplay);
+}
+
+fn run_git(project: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .expect("run Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Canonical Git evidence is recorded as rows in the project sessions store
+/// itself, in the capture's own transaction: no graph runtime is involved.
+#[asupersync::test]
+async fn canonical_capture_records_git_evidence_rows_without_a_graph_runtime() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("source-graph-unavailable");
+    std::fs::create_dir_all(&project).unwrap();
+    run_git(&project, &["init", "-b", "capture-branch"]);
+    let project_id = ProjectId::new("project.graph-unavailable-capture").unwrap();
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project,
+            project_id.as_str(),
+        )
+        .unwrap()
+    );
+    let marker = tracedecay_runtime_core::storage::read_repository_identity_marker(&project)
+        .unwrap()
+        .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let provenance = RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+        &project,
+        &project_id,
+        &marker,
+    )
+    .unwrap();
+    let shard = &database.binding().shard_id;
+    let facade = HostAdmissionFacade::new(
+        HostAdmissionAuthorities::for_project(
+            shard.brain_id.clone(),
+            shard.profile_id.clone(),
+            project_id.clone(),
+            database,
+        )
+        .with_repository_provenance(provenance)
+        .with_background_cpu(background_cpu_for_host_admission_test()),
+    );
+
+    let project_path = project.to_string_lossy().into_owned();
+    let listed =
+        capture_session_on_branch(&facade, database, &project_id, "codex", &project_path).await;
+    let correlation = tracedecay_global_db::GlobalDbGitCorrelationStore::new(database);
+    let health = correlation.correlation_index_health().await.unwrap();
+    assert_eq!((health.span_count, health.commit_count), (1, 0));
+    assert_eq!(listed, ["session.codex-git-capture"]);
+}
+
+/// A session whose observations name no folder records the project id as its
+/// path. Live hook drains carry no repository provenance, so the admitted
+/// project root alone must place the session in the project's worktree.
+#[asupersync::test]
+async fn hook_drain_without_provenance_places_project_id_sessions_in_the_project_root() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("hook-project");
+    std::fs::create_dir_all(&project).unwrap();
+    run_git(&project, &["init", "-b", "capture-branch"]);
+    run_git(
+        &project,
+        &[
+            "-c",
+            "user.email=t@t.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "init",
+        ],
+    );
+    let project_id = ProjectId::new("project.hook-capture").unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let shard = &database.binding().shard_id;
+    let facade = HostAdmissionFacade::new(
+        HostAdmissionAuthorities::for_project(
+            shard.brain_id.clone(),
+            shard.profile_id.clone(),
+            project_id.clone(),
+            database,
+        )
+        .with_project_root(project.clone())
+        .with_background_cpu(background_cpu_for_host_admission_test()),
+    );
+
+    let listed = capture_session_on_branch(
+        &facade,
+        database,
+        &project_id,
+        "claude",
+        project_id.as_str(),
+    )
+    .await;
+    assert_eq!(listed, ["session.claude-git-capture"]);
+}
+
+/// Captures and drains one `provider` session recording `project_path`, then
+/// lists the sessions Git evidence places on `capture-branch`.
+async fn capture_session_on_branch(
+    facade: &HostAdmissionFacade<'_>,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    project_id: &ProjectId,
+    provider: &str,
+    project_path: &str,
+) -> Vec<String> {
+    let session_id = SessionId::new(format!("session.{provider}-git-capture")).unwrap();
+    let message_id = ObservationId::new(format!("message.{provider}-git-capture")).unwrap();
+    let payload = json!({"text": "ordinary canonical message remains available"});
+    let encoded = serde_json::to_vec(&payload).unwrap();
+    let range = ObservationSourceRangeV1::new(0, encoded.len() as u64).unwrap();
+    let parsed = parse_normalized_observation_record_v1(
+        &encoded,
+        range,
+        ObservationOrderingDomainV1::FileBytes,
+        {
+            let session_id = session_id.clone();
+            let message_id = message_id.clone();
+            let project_path = project_path.to_owned();
+            move |native| {
+                CanonicalObservationEnvelopeV1::new(
+                    ProviderId::new(provider).unwrap(),
+                    "message",
+                    message_id.clone(),
+                    CanonicalObservationRelationsV1::new(session_id.clone())
+                        .with_message_id(message_id.clone()),
+                    vec![
+                        CanonicalObservationFactV1::Session {
+                            project_path: Some(project_path.clone()),
+                            location_path: Some(project_path.clone()),
+                            transcript_path: None,
+                            title: None,
+                            started_at: None,
+                            ended_at: None,
+                            source: Some("codex_rollout".to_owned()),
+                            native_source: Some("codex".to_owned()),
+                            profile: None,
+                            location_provenance: Some("rollout_context".to_owned()),
+                        },
+                        CanonicalObservationFactV1::Git {
+                            evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+                            reference: Some("capture-branch".to_owned()),
+                            content: None,
+                        },
+                        CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::Assistant,
+                            content: native,
+                            model: None,
+                            timestamp: Some(1_785_000_000),
+                        },
+                    ],
+                    CanonicalObservationEvidenceV1::new(
+                        ObservationOrderingDomainV1::FileBytes,
+                        range,
+                    )
+                    .with_native_timestamp(1_785_000_000),
+                )
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+            }
+        },
+    )
+    .unwrap();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(provider).unwrap(),
+        session_id.clone(),
+    )
+    .unwrap();
+    let request = CaptureObservationRequest::new(
+        parsed,
+        ObservationIdentityMaterialV1::for_native_record(
+            source,
+            scope.clone(),
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            message_id.clone(),
+        )
+        .unwrap(),
+        None,
+        RetentionClass::new("retention.graph-unavailable-capture").unwrap(),
+        ObservationCancellation::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        facade.capture_observation(request).await.unwrap(),
+        CaptureObservationOutcome::Persisted { .. }
+            | CaptureObservationOutcome::AcceptedForReplay { .. }
+    ));
+    let drained = facade
+        .drain_projection_queue(provider, &scope, &ObservationCancellation::default(), 1)
+        .await
+        .unwrap();
+    assert!(!drained.deferred);
+    assert!(
+        facade
+            .has_session_message(&scope, provider, message_id.as_str())
+            .await
+            .unwrap()
+    );
+    let (hits, _) = tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
+        .sessions_for_with_relation_and_presence(
+            &tracedecay_sessions::runtime::git_correlation::SessionsForQuery {
+                git_ref: tracedecay_sessions::runtime::git_correlation::GitRefFilter::Branch(
+                    "capture-branch".to_owned(),
+                ),
+                since: None,
+                until: None,
+                limit: 5,
+            },
+            tracedecay_sessions::runtime::git_correlation::CommitRelationFilter::Produced,
+        )
+        .await
+        .unwrap();
+    hits.into_iter().map(|hit| hit.session_id).collect()
+}
+
+#[asupersync::test]
 async fn production_facade_preparation_waits_for_shared_background_cpu() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (facade, _) = profile_facade(&runtime);
     let authority = background_cpu_for_host_admission_test();
+    let (facade, _) = profile_facade_with_background_cpu(&runtime, Arc::clone(&authority));
     let permits = (0..authority.width().get())
         .map(|_| authority.acquire())
         .collect::<Vec<_>>();
     let session_id = SessionId::new("session.host-admission-capture.shared-cpu").unwrap();
     let capture = facade.capture_observations(sequential_capture_requests(&session_id, 2));
-    tokio::pin!(capture);
+    let mut capture = std::pin::pin!(capture);
 
     assert!(
-        tokio::time::timeout(Duration::from_millis(30), capture.as_mut())
-            .await
-            .is_err(),
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_millis(30),
+            capture.as_mut()
+        )
+        .await
+        .is_err(),
         "the production facade must mount preparation beneath the canonical CPU authority"
     );
     drop(permits);
@@ -312,7 +684,7 @@ fn anchored_write(
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "host-admission-batch")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -394,7 +766,7 @@ fn colliding_rewrite(
     anchored_write(observation, expected_cursor)
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn empty_persist_batch_opens_no_writer_transaction() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -410,7 +782,7 @@ async fn empty_persist_batch_opens_no_writer_transaction() {
     assert_eq!(committed_transactions(database), before);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn n_persist_observation_calls_open_n_writer_transactions() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -436,7 +808,7 @@ async fn n_persist_observation_calls_open_n_writer_transactions() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn persist_observations_opens_one_writer_transaction_for_the_batch() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -463,7 +835,7 @@ async fn persist_observations_opens_one_writer_transaction_for_the_batch() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn persist_observations_keeps_cursor_cas_collision_and_file_identity() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -566,7 +938,7 @@ async fn persist_observations_keeps_cursor_cas_collision_and_file_identity() {
     assert_eq!(cursor.resume_fingerprint(), Some(0xcafe_babe));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn n_capture_observation_calls_open_at_least_n_writer_transactions() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -586,4 +958,69 @@ async fn n_capture_observation_calls_open_at_least_n_writer_transactions() {
         committed >= BATCH_SIZE as u64,
         "N capture_observation calls must open at least N writer transactions: committed_transactions={committed} frames={BATCH_SIZE}"
     );
+}
+
+/// A rewritten transcript re-offers its unchanged records under a new source
+/// generation. Each resolves to its retained row as a covered duplicate, and
+/// that row's projection already landed, so re-offering it must not collide
+/// with its own external-source receipt.
+#[asupersync::test]
+async fn records_reoffered_under_a_new_generation_settle_as_covered_duplicates() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let (facade, database) = profile_facade(&runtime);
+    let session_id = SessionId::new("session.host-admission-capture.regeneration").unwrap();
+    HostAdmission::capture_observations(
+        &facade,
+        sequential_capture_requests(&session_id, BATCH_SIZE),
+    )
+    .await
+    .unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(BATCH_PROVIDER).unwrap(),
+        session_id.clone(),
+    )
+    .unwrap();
+    let first_generation_end = facade
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap()
+        .expect("first generation cursor");
+
+    let before = committed_transactions(database);
+    let outcomes = HostAdmission::capture_observations(
+        &facade,
+        generation_capture_requests(
+            &session_id,
+            BATCH_SIZE,
+            2,
+            Some(first_generation_end.clone()),
+        ),
+    )
+    .await
+    .expect("re-offered records settle instead of colliding with their own receipts");
+
+    assert_eq!(outcomes.len(), BATCH_SIZE);
+    assert!(outcomes.iter().all(|outcome| matches!(
+        outcome,
+        CaptureObservationOutcome::Persisted { outcome, .. }
+            if matches!(**outcome, ObservationPersistOutcome::CoveredDuplicate(_))
+    )));
+    assert_eq!(
+        committed_transactions(database) - before,
+        1,
+        "only the observation batch commits; retained rows project nothing"
+    );
+    let cursor = facade
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap()
+        .expect("second generation cursor");
+    assert_eq!(
+        cursor.generation(),
+        ObservationSourceGenerationV1::new(2).unwrap()
+    );
+    assert_eq!(cursor.position(), first_generation_end.position());
 }

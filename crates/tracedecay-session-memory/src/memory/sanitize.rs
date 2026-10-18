@@ -1,10 +1,10 @@
 //! Request sanitizers for canonical project-memory payloads.
 
+use crate::memory::hygiene::detect_secret_like;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_domain::{FactCategoryV1, FactRelationProvenanceV1, SanitizationReceiptV1};
-use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
 

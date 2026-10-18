@@ -19,10 +19,11 @@ use std::pin::Pin;
 
 use serde::Serialize;
 use tracedecay_domain::{
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1,
 };
+use tracedecay_store::ParseOffset;
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
-use tracedecay_store::{ObservationBatchFallbackCause, ParseOffset};
 
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
@@ -55,7 +56,7 @@ pub struct HostDiscoveryQueueEntry {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HostAdmissionOutcome {
     pub status: HostAdmissionStatus,
     pub retryable: bool,
@@ -68,11 +69,20 @@ pub struct HostAdmissionOutcome {
     /// from strings at another layer.
     #[serde(skip)]
     pub recovery: Option<HostAdmissionRecovery>,
+    /// Operator-only cause behind the reason code: the storage error for
+    /// `ObservationStoreError::Storage`, or the sanitizer's typed error for a
+    /// `privacy_boundary_failed` refusal. Without it a deterministic refusal is
+    /// one indistinguishable code across every failure the sanitizer can name.
+    ///
+    /// Host wire output stays reason-code-only. Admission callers that already
+    /// carry a detail/message slot (MCP hook JSON-RPC `detail`, ingest logs)
+    /// may copy this text; it is never reconstructed into a reason code.
+    #[serde(skip)]
+    pub cause: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostAdmissionRecovery {
-    BatchRequiresScalarFallback(ObservationBatchFallbackCause),
     DeterministicContentRefusal,
 }
 
@@ -93,7 +103,6 @@ pub enum HostAdmissionScope {
 }
 
 impl HostAdmissionOutcome {
-    #[hotpath::skip]
     const fn new(
         status: HostAdmissionStatus,
         retryable: bool,
@@ -104,55 +113,52 @@ impl HostAdmissionOutcome {
             retryable,
             reason_code,
             recovery: None,
+            cause: None,
         }
     }
 
-    #[hotpath::skip]
-    pub const fn batch_requires_scalar_fallback(cause: ObservationBatchFallbackCause) -> Self {
-        Self {
-            status: HostAdmissionStatus::Backpressured,
-            retryable: true,
-            reason_code: Some("batch_requires_scalar_fallback"),
-            recovery: Some(HostAdmissionRecovery::BatchRequiresScalarFallback(cause)),
-        }
-    }
-
-    #[hotpath::skip]
     pub const fn deterministic_content_refusal(reason_code: &'static str) -> Self {
         Self {
             status: HostAdmissionStatus::Degraded,
             retryable: false,
             reason_code: Some(reason_code),
             recovery: Some(HostAdmissionRecovery::DeterministicContentRefusal),
+            cause: None,
         }
     }
 
-    #[hotpath::skip]
+    /// A deterministic refusal that keeps the refusing authority's own
+    /// operator-facing cause beside the bounded reason code.
+    pub fn deterministic_content_refusal_with_cause(
+        reason_code: &'static str,
+        cause: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            cause: Some(cause.to_string()),
+            ..Self::deterministic_content_refusal(reason_code)
+        }
+    }
+
     pub const fn supported() -> Self {
         Self::new(HostAdmissionStatus::Supported, false, None)
     }
 
-    #[hotpath::skip]
     pub const fn accepted_for_replay() -> Self {
         Self::new(HostAdmissionStatus::AcceptedForReplay, false, None)
     }
 
-    #[hotpath::skip]
     pub const fn retained_backpressured(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Backpressured, true, Some(reason_code))
     }
 
-    #[hotpath::skip]
     pub const fn retained_unavailable(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Unavailable, true, Some(reason_code))
     }
 
-    #[hotpath::skip]
     pub const fn degraded(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Degraded, false, Some(reason_code))
     }
 
-    #[hotpath::skip]
     pub const fn replay_completed(changed: bool, exact_duplicate: bool) -> Self {
         if changed {
             Self::new(HostAdmissionStatus::Committed, false, None)
@@ -163,7 +169,11 @@ impl HostAdmissionOutcome {
         }
     }
 
-    #[hotpath::skip]
+    /// The demand does not apply. Ack the replay record and do not retry it.
+    pub const fn not_applicable(reason_code: &'static str) -> Self {
+        Self::new(HostAdmissionStatus::NotApplicable, false, Some(reason_code))
+    }
+
     pub const fn spool_overflow() -> Self {
         Self::new(
             HostAdmissionStatus::Backpressured,
@@ -172,7 +182,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_record_too_large() -> Self {
         Self::new(
             HostAdmissionStatus::Degraded,
@@ -186,7 +195,6 @@ impl HostAdmissionOutcome {
     /// [`tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES`])
     /// before durable retention.
     /// Non-retryable; full payload is not retained.
-    #[hotpath::skip]
     pub const fn wire_record_too_large() -> Self {
         Self::new(
             HostAdmissionStatus::Degraded,
@@ -195,7 +203,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_source_too_large() -> Self {
         Self::new(
             HostAdmissionStatus::Degraded,
@@ -204,7 +211,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_corrupted() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -213,12 +219,20 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
+    /// Terminal, non-retryable unavailability that requires an explicit reset
+    /// or remount before the route can accept work again.
+    ///
+    /// Distinct from [`Self::degraded`]: hosts must not treat this as soft
+    /// capacity pressure, and distinct from [`Self::retained_unavailable`]
+    /// which stays retryable.
+    pub const fn terminal_unavailable(reason_code: &'static str) -> Self {
+        Self::new(HostAdmissionStatus::Unavailable, false, Some(reason_code))
+    }
+
     pub const fn durable_payload_unsupported_version() -> Self {
         Self::retained_unavailable("host_event_payload_unsupported_version")
     }
 
-    #[hotpath::skip]
     pub const fn durable_payload_malformed() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -227,7 +241,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_ack_conflict() -> Self {
         Self::new(
             HostAdmissionStatus::Backpressured,
@@ -236,7 +249,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_recovery_required() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -245,7 +257,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn quarantine_full() -> Self {
         Self::new(
             HostAdmissionStatus::Backpressured,
@@ -254,7 +265,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn quarantine_corrupted() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -263,7 +273,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn quarantine_recovery_required() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -272,7 +281,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn project_authority_unbound() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -281,7 +289,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn project_authority_mismatch() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -290,7 +297,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn registered_authority_unavailable() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -299,7 +305,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn parse_offset_conflict() -> Self {
         Self::new(
             HostAdmissionStatus::Backpressured,
@@ -367,6 +372,37 @@ pub trait HostAdmission: Send + Sync {
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>>;
 
+    /// Reads the cursors this source's observations committed in every
+    /// generation. A rewritten transcript resumes after the longest prefix
+    /// whose record-end checkpoint is still among them.
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>>;
+
+    /// Starts a rewrite of a file-byte source from `previous` to
+    /// `generation`. The records before `retained_through` are the previous
+    /// layout's retained prefix; every later record must be offered again
+    /// before [`Self::complete_source_rewrite`] keeps it.
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    ) -> AdmissionFuture<'a, ()>;
+
+    /// Called once `generation` was read to the end of its source: retires
+    /// the records a pending rewrite did not offer again and returns how many.
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+    ) -> AdmissionFuture<'a, u64>;
+
     /// Drains up to `max` queued projections for one provider.
     fn drain_projection_queue<'a>(
         &'a self,
@@ -386,6 +422,82 @@ pub trait HostAdmission: Send + Sync {
         provider: &'a str,
         message_id: &'a str,
     ) -> AdmissionFuture<'a, bool>;
+
+    /// Reads the durable subset of one bounded provider message-id window.
+    /// The default preserves compatibility for narrow test seams; production
+    /// authorities override it with one indexed batch query.
+    fn existing_session_message_ids<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        provider: &'a str,
+        message_ids: Vec<String>,
+    ) -> AdmissionFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            let mut existing = Vec::new();
+            for message_id in message_ids {
+                if self
+                    .has_session_message(scope, provider, &message_id)
+                    .await?
+                {
+                    existing.push(message_id);
+                }
+            }
+            Ok(existing)
+        })
+    }
+
+    /// Reads one provider-owned value from the canonical session-backfill
+    /// authority selected by `scope`.
+    fn read_session_backfill_state<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key: &'a str,
+    ) -> AdmissionFuture<'a, Option<String>> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Reads one bounded keyset page from the canonical session-backfill
+    /// authority, excluding entries whose JSON status is `complete`.
+    fn list_session_backfill_state_page<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key_prefix: &'a str,
+        _after_key: Option<&'a str>,
+        _through_key: &'a str,
+    ) -> AdmissionFuture<'a, Vec<(String, String)>> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Returns the greatest incomplete key currently present under a prefix.
+    fn session_backfill_state_high_water<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key_prefix: &'a str,
+    ) -> AdmissionFuture<'a, Option<String>> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Inserts or atomically replaces one canonical session-backfill value.
+    /// `expected = None` means the key must still be absent.
+    fn compare_and_swap_session_backfill_state<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key: &'a str,
+        _expected: Option<&'a str>,
+        _replacement: &'a str,
+    ) -> AdmissionFuture<'a, bool> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Deletes one canonical session-backfill value only if it is unchanged.
+    fn compare_and_delete_session_backfill_state<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key: &'a str,
+        _expected: &'a str,
+    ) -> AdmissionFuture<'a, bool> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
 
     /// Reads the durable parse offset recorded for one transcript path.
     fn get_parse_offset<'a>(
@@ -465,7 +577,7 @@ pub(crate) mod test_support {
     use std::sync::{Arc, Mutex};
 
     use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationIdV1};
-    use tracedecay_runtime_core::privacy::RecordSanitizerV1;
+    use tracedecay_privacy::RecordSanitizerV1;
     use tracedecay_store::observation::{
         ObservationPersistOutcome, ObservationStoreError, ObservationStoreResult,
     };
@@ -473,6 +585,8 @@ pub(crate) mod test_support {
         AnchoredObservationWrite, ObservationBatchPersistOutcome, ObservationProjectionStatus,
         ObservationReplayRequest, ObservationStore, StoredObservation,
     };
+
+    type SessionBackfillPagePause = (Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>);
 
     use crate::observation::{
         AdvanceNonDurableSourceCursorRequest, ObservationApplication, ObservationApplicationError,
@@ -506,6 +620,34 @@ pub(crate) mod test_support {
             _scope: &'a ObservationScopeV1,
         ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
             panic!("pre-cancelled ingest attempted cursor read")
+        }
+
+        fn committed_source_cursors<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+        ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+            panic!("pre-cancelled ingest attempted committed cursor read")
+        }
+
+        fn begin_source_rewrite<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+            _previous: ObservationSourceGenerationV1,
+            _generation: ObservationSourceGenerationV1,
+            _retained_through: u64,
+        ) -> AdmissionFuture<'a, ()> {
+            panic!("pre-cancelled ingest attempted source rewrite")
+        }
+
+        fn complete_source_rewrite<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+            _generation: ObservationSourceGenerationV1,
+        ) -> AdmissionFuture<'a, u64> {
+            panic!("pre-cancelled ingest attempted source rewrite completion")
         }
 
         fn drain_projection_queue<'a>(
@@ -558,6 +700,8 @@ pub(crate) mod test_support {
         batch_capture_calls: usize,
         session_message_failures_remaining: usize,
         session_message_reads: usize,
+        session_backfill_state: Vec<(ObservationScopeV1, String, String)>,
+        non_durable_advances: Vec<ObservationCursorAdvance>,
     }
 
     #[derive(Clone, Default)]
@@ -595,28 +739,69 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A covered duplicate's receipt names the retained immutable row but the
+    /// candidate frontier the coverage reached. The durable adapter rebuilds
+    /// the receipt the same way, so callers can safely chain from
+    /// `receipt().committed_cursor()` under either authority.
+    fn covered_duplicate_receipt(
+        retained: &tracedecay_store::ObservationCommitReceipt,
+        covered_cursor: tracedecay_domain::ObservationSourceCursorV1,
+    ) -> ObservationStoreResult<tracedecay_store::ObservationCommitReceipt> {
+        tracedecay_store::ObservationCommitReceipt::new(
+            retained.sequence(),
+            retained.observation().clone(),
+            covered_cursor,
+            retained.retrieval_anchor().clone(),
+            retained.projection_generation().clone(),
+        )?
+        .with_repository_provenance_attachment(retained.repository_provenance_attachment().clone())
+    }
+
     impl MemoryObservationStore {
         fn persist_one(
             state: &mut MemoryObservationState,
             write: AnchoredObservationWrite,
         ) -> ObservationStoreResult<ObservationPersistOutcome> {
-            if let Some(stored) = state.observations.iter().find(|stored| {
-                stored.observation().observation_id() == write.observation().observation_id()
-            }) {
-                return Ok(ObservationPersistOutcome::ExactDuplicate(
-                    stored.commit_receipt().clone(),
-                ));
+            let retained = state
+                .observations
+                .iter()
+                .find(|stored| {
+                    stored.observation().observation_id() == write.observation().observation_id()
+                })
+                .map(|stored| stored.commit_receipt().clone());
+            if let Some(retained) = &retained
+                && retained.observation().identity() == write.observation().identity()
+            {
+                // Byte-identical identity is an exact replay: it writes nothing
+                // and moves no cursor.
+                return Ok(ObservationPersistOutcome::ExactDuplicate(retained.clone()));
             }
             let actual = Self::current_cursor(
                 state,
                 write.next_cursor().source(),
                 write.next_cursor().scope(),
             );
+            if let Some(retained) = &retained
+                && actual.as_ref() == Some(write.next_cursor())
+            {
+                return Ok(ObservationPersistOutcome::CoveredDuplicate(
+                    covered_duplicate_receipt(retained, write.next_cursor().clone())?,
+                ));
+            }
             if actual.as_ref() != write.expected_cursor() {
                 return Err(ObservationStoreError::CursorConflict {
                     expected: Box::new(write.expected_cursor().cloned()),
                     actual: Box::new(actual),
                 });
+            }
+            if let Some(retained) = retained {
+                // The same native record re-offered under a new source
+                // generation: the committed row stays immutable, but its
+                // coverage still advances the source cursor, exactly as the
+                // durable store does for a covered duplicate.
+                let receipt = covered_duplicate_receipt(&retained, write.next_cursor().clone())?;
+                Self::replace_cursor(state, write.next_cursor().clone());
+                return Ok(ObservationPersistOutcome::CoveredDuplicate(receipt));
             }
             let sequence = u64::try_from(state.observations.len())
                 .unwrap_or(u64::MAX)
@@ -644,7 +829,6 @@ pub(crate) mod test_support {
     }
 
     impl ObservationStore for MemoryObservationStore {
-        #[hotpath::skip]
         async fn persist_observation(
             &self,
             write: AnchoredObservationWrite,
@@ -652,7 +836,6 @@ pub(crate) mod test_support {
             Self::persist_one(&mut self.state(), write)
         }
 
-        #[hotpath::skip]
         async fn persist_observations(
             &self,
             writes: Vec<AnchoredObservationWrite>,
@@ -684,7 +867,6 @@ pub(crate) mod test_support {
             Ok(outcomes)
         }
 
-        #[hotpath::skip]
         async fn get_source_cursor(
             &self,
             source: &ObservationSourceIdentityV1,
@@ -693,7 +875,21 @@ pub(crate) mod test_support {
             Ok(Self::current_cursor(&self.state(), source, scope))
         }
 
-        #[hotpath::skip]
+        async fn committed_source_cursors(
+            &self,
+            source: &ObservationSourceIdentityV1,
+            scope: &ObservationScopeV1,
+        ) -> ObservationStoreResult<Vec<ObservationSourceCursorV1>> {
+            Ok(self
+                .state()
+                .observations
+                .iter()
+                .map(StoredObservation::committed_cursor)
+                .filter(|cursor| cursor.source() == source && cursor.scope() == scope)
+                .cloned()
+                .collect())
+        }
+
         async fn advance_source_cursor(
             &self,
             advance: ObservationCursorAdvance,
@@ -714,7 +910,6 @@ pub(crate) mod test_support {
             Ok(CursorAdvanceOutcome::Committed)
         }
 
-        #[hotpath::skip]
         async fn get_observation(
             &self,
             observation_id: &CanonicalObservationIdV1,
@@ -727,7 +922,6 @@ pub(crate) mod test_support {
                 .cloned())
         }
 
-        #[hotpath::skip]
         async fn replay_observations(
             &self,
             request: ObservationReplayRequest,
@@ -751,6 +945,16 @@ pub(crate) mod test_support {
         cancel_on_cursor_read: Arc<Mutex<Option<ObservationCancellation>>>,
         projection_failure: Arc<Mutex<Option<(HostAdmissionOutcome, ObservationCancellation)>>>,
         cancel_on_discovery_queue_read: Arc<Mutex<Option<ObservationCancellation>>>,
+        session_backfill_page_pause: Arc<Mutex<Option<SessionBackfillPagePause>>>,
+        deterministic_capture_refusal: Arc<Mutex<Option<&'static str>>>,
+        session_capture_failure: Arc<Mutex<Option<SessionCaptureFailure>>>,
+    }
+
+    struct SessionCaptureFailure {
+        session_id: &'static str,
+        from_position: u64,
+        outcome: HostAdmissionOutcome,
+        attempts: usize,
     }
 
     impl MemoryHostAdmission {
@@ -765,6 +969,75 @@ pub(crate) mod test_support {
 
         pub(crate) fn fail_next_capture(&self) {
             self.store.state().capture_failures_remaining = 1;
+        }
+
+        /// Refuse every capture the way a deterministic content refusal does:
+        /// the same record fails identically on every retry, so callers must
+        /// converge past it rather than re-attempt the source forever.
+        pub(crate) fn refuse_captures_deterministically(&self, reason: &'static str) {
+            *self
+                .deterministic_capture_refusal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(reason);
+        }
+
+        /// Fail every capture for `session_id` with `outcome`, the way a store
+        /// that keeps disagreeing with one source does.
+        pub(crate) fn fail_captures_for_session(
+            &self,
+            session_id: &'static str,
+            outcome: HostAdmissionOutcome,
+        ) {
+            self.fail_captures_for_session_from(session_id, 0, outcome);
+        }
+
+        /// [`Self::fail_captures_for_session`] for the session's records at
+        /// source position `from_position` and later.
+        pub(crate) fn fail_captures_for_session_from(
+            &self,
+            session_id: &'static str,
+            from_position: u64,
+            outcome: HostAdmissionOutcome,
+        ) {
+            *self
+                .session_capture_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(SessionCaptureFailure {
+                session_id,
+                from_position,
+                outcome,
+                attempts: 0,
+            });
+        }
+
+        /// Captures refused by [`Self::fail_captures_for_session`].
+        pub(crate) fn failed_session_capture_attempts(&self) -> usize {
+            self.session_capture_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .map_or(0, |failure| failure.attempts)
+        }
+
+        fn session_capture_failure<'r>(
+            &self,
+            mut requests: impl Iterator<Item = &'r CaptureObservationRequest>,
+        ) -> Option<HostAdmissionOutcome> {
+            let mut guard = self
+                .session_capture_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let failure = guard.as_mut()?;
+            requests
+                .any(|request| {
+                    let identity = request.identity();
+                    identity.source().session_id().as_str() == failure.session_id
+                        && identity.position().start() >= failure.from_position
+                })
+                .then(|| {
+                    failure.attempts += 1;
+                    failure.outcome.clone()
+                })
         }
 
         /// Make the next `count` session-message lookups report the store as
@@ -814,6 +1087,35 @@ pub(crate) mod test_support {
             self.store.state().session_message_reads
         }
 
+        pub(crate) fn session_backfill_state_entries(
+            &self,
+            key_prefix: &str,
+        ) -> Vec<(ObservationScopeV1, String, String)> {
+            self.store
+                .state()
+                .session_backfill_state
+                .iter()
+                .filter(|(_, key, _)| key.starts_with(key_prefix))
+                .cloned()
+                .collect()
+        }
+
+        #[cfg(unix)]
+        pub(crate) fn pause_next_session_backfill_page(
+            &self,
+            entered: Arc<tokio::sync::Barrier>,
+            release: Arc<tokio::sync::Barrier>,
+        ) {
+            *self
+                .session_backfill_page_pause
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some((entered, release));
+        }
+
+        pub(crate) fn non_durable_advances(&self) -> Vec<ObservationCursorAdvance> {
+            self.store.state().non_durable_advances.clone()
+        }
+
         fn application(
             &self,
         ) -> Result<ObservationApplication<MemoryObservationStore>, HostAdmissionOutcome> {
@@ -827,9 +1129,6 @@ pub(crate) mod test_support {
                 ObservationApplicationError::Cancelled => {
                     HostAdmissionOutcome::retained_backpressured("admission_cancelled")
                 }
-                ObservationApplicationError::Store(
-                    ObservationStoreError::BatchRequiresScalarFallback { cause },
-                ) => HostAdmissionOutcome::batch_requires_scalar_fallback(cause),
                 _ => HostAdmissionOutcome::registered_authority_unavailable(),
             }
         }
@@ -841,6 +1140,16 @@ pub(crate) mod test_support {
             request: CaptureObservationRequest,
         ) -> AdmissionFuture<'a, CaptureObservationOutcome> {
             Box::pin(async move {
+                if let Some(reason) = *self
+                    .deterministic_capture_refusal
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                {
+                    return Err(HostAdmissionOutcome::deterministic_content_refusal(reason));
+                }
+                if let Some(outcome) = self.session_capture_failure(std::iter::once(&request)) {
+                    return Err(outcome);
+                }
                 {
                     let mut state = self.store.state();
                     state.scalar_capture_calls = state.scalar_capture_calls.saturating_add(1);
@@ -861,6 +1170,9 @@ pub(crate) mod test_support {
             requests: Vec<CaptureObservationRequest>,
         ) -> AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
             Box::pin(async move {
+                if let Some(outcome) = self.session_capture_failure(requests.iter()) {
+                    return Err(outcome);
+                }
                 {
                     let mut state = self.store.state();
                     state.batch_capture_calls = state.batch_capture_calls.saturating_add(1);
@@ -882,13 +1194,16 @@ pub(crate) mod test_support {
             cancellation: ObservationCancellation,
         ) -> AdmissionFuture<'a, CursorAdvanceOutcome> {
             Box::pin(async move {
-                self.application()?
-                    .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
-                        advance,
-                        cancellation,
-                    ))
-                    .await
-                    .map_err(Self::application_error)
+                let recorded = advance.clone();
+                let outcome =
+                    self.application()?
+                        .advance_non_durable_source_cursor(
+                            AdvanceNonDurableSourceCursorRequest::new(advance, cancellation),
+                        )
+                        .await
+                        .map_err(Self::application_error)?;
+                self.store.state().non_durable_advances.push(recorded);
+                Ok(outcome)
             })
         }
 
@@ -911,6 +1226,41 @@ pub(crate) mod test_support {
                     .await
                     .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
             })
+        }
+
+        fn committed_source_cursors<'a>(
+            &'a self,
+            source: &'a ObservationSourceIdentityV1,
+            scope: &'a ObservationScopeV1,
+        ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+            Box::pin(async move {
+                self.store
+                    .committed_source_cursors(source, scope)
+                    .await
+                    .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
+            })
+        }
+
+        // The memory store keeps no projection, so a rewrite has nothing to
+        // retire.
+        fn begin_source_rewrite<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+            _previous: ObservationSourceGenerationV1,
+            _generation: ObservationSourceGenerationV1,
+            _retained_through: u64,
+        ) -> AdmissionFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn complete_source_rewrite<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+            _generation: ObservationSourceGenerationV1,
+        ) -> AdmissionFuture<'a, u64> {
+            Box::pin(async { Ok(0) })
         }
 
         fn drain_projection_queue<'a>(
@@ -1001,6 +1351,175 @@ pub(crate) mod test_support {
             })
         }
 
+        fn existing_session_message_ids<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            provider: &'a str,
+            message_ids: Vec<String>,
+        ) -> AdmissionFuture<'a, Vec<String>> {
+            Box::pin(async move {
+                {
+                    let mut state = self.store.state();
+                    if state.session_message_failures_remaining > 0 {
+                        state.session_message_failures_remaining -= 1;
+                        return Err(HostAdmissionOutcome::registered_authority_unavailable());
+                    }
+                }
+                let state = self.store.state();
+                Ok(message_ids
+                    .into_iter()
+                    .filter(|message_id| {
+                        state.observations.iter().any(|stored| {
+                            stored.observation().scope() == scope
+                                && stored.observation().source().provider().as_str() == provider
+                                && stored
+                                    .observation()
+                                    .payload()
+                                    .to_string()
+                                    .contains(message_id)
+                        })
+                    })
+                    .collect())
+            })
+        }
+
+        fn read_session_backfill_state<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key: &'a str,
+        ) -> AdmissionFuture<'a, Option<String>> {
+            Box::pin(async move {
+                Ok(self
+                    .store
+                    .state()
+                    .session_backfill_state
+                    .iter()
+                    .find(|(stored_scope, stored_key, _)| {
+                        stored_scope == scope && stored_key == key
+                    })
+                    .map(|(_, _, value)| value.clone()))
+            })
+        }
+
+        fn list_session_backfill_state_page<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key_prefix: &'a str,
+            after_key: Option<&'a str>,
+            through_key: &'a str,
+        ) -> AdmissionFuture<'a, Vec<(String, String)>> {
+            Box::pin(async move {
+                let mut entries = {
+                    let state = self.store.state();
+                    state
+                        .session_backfill_state
+                        .iter()
+                        .filter(|(stored_scope, key, value)| {
+                            stored_scope == scope
+                                && key.starts_with(key_prefix)
+                                && after_key.is_none_or(|after| key.as_str() > after)
+                                && key.as_str() <= through_key
+                                && !serde_json::from_str::<serde_json::Value>(value)
+                                    .ok()
+                                    .is_some_and(|value| {
+                                        value.get("status").and_then(serde_json::Value::as_str)
+                                            == Some("complete")
+                                    })
+                        })
+                        .map(|(_, key, value)| (key.clone(), value.clone()))
+                        .collect::<Vec<_>>()
+                };
+                entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                entries.truncate(8);
+                let pause = self
+                    .session_backfill_page_pause
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+                if let Some((entered, release)) = pause {
+                    entered.wait().await;
+                    release.wait().await;
+                }
+                Ok(entries)
+            })
+        }
+
+        fn session_backfill_state_high_water<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key_prefix: &'a str,
+        ) -> AdmissionFuture<'a, Option<String>> {
+            Box::pin(async move {
+                Ok(self
+                    .store
+                    .state()
+                    .session_backfill_state
+                    .iter()
+                    .filter(|(stored_scope, key, value)| {
+                        stored_scope == scope
+                            && key.starts_with(key_prefix)
+                            && !serde_json::from_str::<serde_json::Value>(value)
+                                .ok()
+                                .is_some_and(|value| {
+                                    value.get("status").and_then(serde_json::Value::as_str)
+                                        == Some("complete")
+                                })
+                    })
+                    .map(|(_, key, _)| key.clone())
+                    .max())
+            })
+        }
+
+        fn compare_and_swap_session_backfill_state<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key: &'a str,
+            expected: Option<&'a str>,
+            replacement: &'a str,
+        ) -> AdmissionFuture<'a, bool> {
+            Box::pin(async move {
+                let mut state = self.store.state();
+                let current = state.session_backfill_state.iter_mut().find(
+                    |(stored_scope, stored_key, _)| stored_scope == scope && stored_key == key,
+                );
+                match (current, expected) {
+                    (None, None) => {
+                        state.session_backfill_state.push((
+                            scope.clone(),
+                            key.to_string(),
+                            replacement.to_string(),
+                        ));
+                        Ok(true)
+                    }
+                    (Some((_, _, current)), Some(expected)) if current == expected => {
+                        *current = replacement.to_string();
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            })
+        }
+
+        fn compare_and_delete_session_backfill_state<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key: &'a str,
+            expected: &'a str,
+        ) -> AdmissionFuture<'a, bool> {
+            Box::pin(async move {
+                let mut state = self.store.state();
+                let Some(index) = state.session_backfill_state.iter().position(
+                    |(stored_scope, stored_key, value)| {
+                        stored_scope == scope && stored_key == key && value == expected
+                    },
+                ) else {
+                    return Ok(false);
+                };
+                state.session_backfill_state.remove(index);
+                Ok(true)
+            })
+        }
+
         fn get_parse_offset<'a>(
             &'a self,
             scope: &'a ObservationScopeV1,
@@ -1054,8 +1573,7 @@ pub(crate) mod test_support {
                     .find(|(stored_scope, stored_path, _)| {
                         stored_scope == scope && stored_path == path
                     })
-                    .map(|(_, _, offset)| *offset)
-                    .unwrap_or_default();
+                    .map_or_default(|(_, _, offset)| *offset);
                 if actual != expected {
                     return Err(HostAdmissionOutcome::parse_offset_conflict());
                 }
@@ -1086,8 +1604,7 @@ pub(crate) mod test_support {
                         .find(|(stored_scope, stored_path, _)| {
                             stored_scope == scope && stored_path == path
                         })
-                        .map(|(_, _, offset)| *offset)
-                        .unwrap_or_default()
+                        .map_or_default(|(_, _, offset)| *offset)
                 };
                 if actual(first.0) != first.1 || actual(second.0) != second.1 {
                     return Err(HostAdmissionOutcome::parse_offset_conflict());

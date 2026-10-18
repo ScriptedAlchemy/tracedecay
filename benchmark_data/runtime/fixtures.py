@@ -151,7 +151,9 @@ def prepare_fixture_snapshot(
 
     (home / ".config").mkdir(parents=True)
     (snapshot_root / "data" / "tracedecay").mkdir(parents=True)
-    (snapshot_root / "run").mkdir(parents=True)
+    run_root = snapshot_root / "run"
+    run_root.mkdir(parents=True)
+    run_root.chmod(0o700)
     copied_binary = snapshot_root / "bin" / "tracedecay"
     copied_binary.parent.mkdir(parents=True)
     shutil.copy2(binary, copied_binary)

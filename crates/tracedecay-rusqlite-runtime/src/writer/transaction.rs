@@ -13,18 +13,19 @@ use tracedecay_store::{
 };
 
 use crate::{
-    RuntimeWriteAuthorityStage,
+    RuntimeWriteAuthorityStage, StorageOperationExecutor,
     admission::QueueItem,
     connection,
-    read_consistency::{CommitWatermarkPublicationError, CommittedWatermarkPublisher},
+    persistence::RuntimeWriterPersistence,
     telemetry::{
         LockWorkScope, WriterBatchMetrics, WriterLockWorkSnapshot, WriterTelemetry,
         WriterTransactionMetrics, WriterTransactionOutcome, take_observed_vm,
     },
+    watermark::{CommitWatermarkPublicationError, CommittedWatermarkPublisher},
 };
 
 use super::{
-    WriterPersistence, WriterState,
+    WriterState,
     request::{AcceptedRequest, ExecutionBatch, RequestResult},
     settlement::{
         DriverFailure, committed_outcome, driver_failure, idempotency_outcome, infrastructure,
@@ -62,7 +63,7 @@ pub(super) struct BatchTiming {
 
 /// The writer actor's shared reporting handles.
 ///
-/// None of these varies per batch — they are the actor's, not the batch's —
+/// None of these varies per batch. They are the actor's, not the batch's,
 /// and every batch reports through all three, so passing them as one borrow
 /// keeps the per-batch arguments to the things that actually differ per batch.
 #[derive(Clone, Copy)]
@@ -72,13 +73,17 @@ pub(super) struct WriterReporting<'reporting> {
     pub(super) watermark_publisher: &'reporting CommittedWatermarkPublisher,
 }
 
-#[hotpath::measure(label = "rusqlite_runtime.writer.transaction_batch")]
-pub(super) fn process_batch(
+#[tracing::instrument(
+    name = "rusqlite_runtime.writer.transaction_batch",
+    level = "trace",
+    skip_all
+)]
+pub(super) fn process_batch<E: StorageOperationExecutor>(
     connection: &mut Connection,
     binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
     timing: BatchTiming,
-    persistence: &mut dyn WriterPersistence,
+    persistence: &mut RuntimeWriterPersistence<E>,
     reporting: WriterReporting<'_>,
 ) {
     let BatchTiming {
@@ -93,9 +98,9 @@ pub(super) fn process_batch(
     let command_count = u64::try_from(batch.items.len()).unwrap_or(u64::MAX);
     let rows_before = connection.total_changes();
     let lock_work = LockWorkScope::enter();
-    let mut transaction = match hotpath::measure_block!("rusqlite.writer.begin", {
-        connection.transaction_with_behavior(TransactionBehavior::Immediate)
-    }) {
+    let mut transaction = match tracing::trace_span!("rusqlite.writer.begin")
+        .in_scope(|| connection.transaction_with_behavior(TransactionBehavior::Immediate))
+    {
         Ok(transaction) => transaction,
         Err(error) => {
             let failure = driver_failure(error, "begin writer transaction");
@@ -113,6 +118,7 @@ pub(super) fn process_batch(
             return;
         }
     };
+    let schema_was_ready = persistence.ledger_schema_ready();
     let lock_held_from = Instant::now();
     let mut prepared = Vec::new();
     let mut items = batch.items.into_iter();
@@ -140,6 +146,7 @@ pub(super) fn process_batch(
             })),
         }));
         drop(transaction);
+        persistence.transaction_rolled_back(schema_was_ready);
         let lock_held = lock_held_from.elapsed();
         record_transaction(
             telemetry,
@@ -176,6 +183,7 @@ pub(super) fn process_batch(
         .collect::<Vec<_>>();
     if authority_denied.iter().any(|denied| *denied) {
         drop(transaction);
+        persistence.transaction_rolled_back(schema_was_ready);
         record_transaction(
             telemetry,
             WriterTransactionOutcome::RolledBack,
@@ -201,6 +209,7 @@ pub(super) fn process_batch(
         .collect::<Vec<_>>();
     if commit_denied.iter().any(|denied| *denied) {
         drop(transaction);
+        persistence.transaction_rolled_back(schema_was_ready);
         record_transaction(
             telemetry,
             WriterTransactionOutcome::RolledBack,
@@ -215,8 +224,29 @@ pub(super) fn process_batch(
         return;
     }
 
-    let commit_failure = match hotpath::measure_block!("rusqlite.commit", transaction.commit()) {
-        Err(error) => Some(driver_failure(error, "commit writer transaction")),
+    let has_pending_writes = prepared
+        .iter()
+        .any(|request| matches!(request.result, PreparedResult::AwaitingTransactionCommit(_)));
+    let match_result = if has_pending_writes {
+        let _span = tracing::trace_span!("rusqlite.commit").entered();
+        transaction.commit()
+    } else {
+        let result = transaction.rollback();
+        persistence.transaction_rolled_back(schema_was_ready);
+        result
+    };
+    let commit_failure = match match_result {
+        Err(error) => {
+            persistence.transaction_rolled_back(schema_was_ready);
+            Some(driver_failure(
+                error,
+                if has_pending_writes {
+                    "commit writer transaction"
+                } else {
+                    "roll back writer transaction without pending writes"
+                },
+            ))
+        }
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
             Ok(()) => None,
             Err(_) => {
@@ -230,10 +260,14 @@ pub(super) fn process_batch(
     let lock_held = lock_held_from.elapsed();
     record_transaction(
         telemetry,
-        commit_failure
-            .as_ref()
-            .map(transaction_outcome)
-            .unwrap_or(WriterTransactionOutcome::Committed),
+        commit_failure.as_ref().map_or(
+            if has_pending_writes {
+                WriterTransactionOutcome::Committed
+            } else {
+                WriterTransactionOutcome::RolledBack
+            },
+            transaction_outcome,
+        ),
         command_count,
         connection.total_changes().saturating_sub(rows_before),
         started,
@@ -270,11 +304,11 @@ fn publish_results<'a>(
     Ok(())
 }
 
-fn process_request(
+fn process_request<E: StorageOperationExecutor>(
     transaction: &mut Transaction<'_>,
     binding: &StoreRuntimeBindingV1,
     item: AcceptedRequest,
-    persistence: &mut dyn WriterPersistence,
+    persistence: &mut RuntimeWriterPersistence<E>,
 ) -> Processed {
     if item
         .authority
@@ -314,11 +348,11 @@ fn process_request(
     apply_new(transaction, binding, item, persistence)
 }
 
-fn apply_new(
+fn apply_new<E: StorageOperationExecutor>(
     transaction: &mut Transaction<'_>,
     binding: &StoreRuntimeBindingV1,
     item: AcceptedRequest,
-    persistence: &mut dyn WriterPersistence,
+    persistence: &mut RuntimeWriterPersistence<E>,
 ) -> Processed {
     let mut savepoint = match transaction.savepoint() {
         Ok(savepoint) => savepoint,
@@ -327,7 +361,8 @@ fn apply_new(
             return processed(item, result, false);
         }
     };
-    let receipt = match apply_and_record(persistence, &mut savepoint, binding, &item.request) {
+    // One operation-and-ledger boundary: the receipt is the one this savepoint recorded.
+    let receipt = match persistence.apply_and_record(&mut savepoint, binding, &item.request) {
         Ok(receipt) => receipt,
         Err(error) => {
             if let Some(outcome) = interruption_outcome(
@@ -345,7 +380,7 @@ fn apply_new(
                 };
             }
             let corrupt = is_corrupt(&error);
-            let error = rollback_or(savepoint, error, "rollback receipt/checkpoint/outbox");
+            let error = rollback_or(savepoint, error, "rollback receipt/checkpoint");
             return processed(item, Err(error.clone()), corrupt || is_corrupt(&error));
         }
     };
@@ -400,17 +435,6 @@ fn apply_new(
     }
 }
 
-/// The transaction path has one operation+ledger boundary. The persistence
-/// implementation must return the receipt produced by this same savepoint.
-fn apply_and_record(
-    persistence: &mut dyn WriterPersistence,
-    savepoint: &mut Savepoint<'_>,
-    binding: &StoreRuntimeBindingV1,
-    request: &tracedecay_store::RuntimeSubmitRequestV1,
-) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
-    persistence.apply_and_record(savepoint, binding, request)
-}
-
 fn processed(item: AcceptedRequest, result: RequestResult, fatal: bool) -> Processed {
     let fatal_error = fatal.then(|| {
         result
@@ -432,11 +456,9 @@ fn rollback_or(
     fallback: StorageRuntimeErrorV1,
     operation: &'static str,
 ) -> StorageRuntimeErrorV1 {
-    savepoint
-        .rollback()
-        .err()
-        .map(|error| driver_failure(error, operation).storage_error())
-        .unwrap_or(fallback)
+    savepoint.rollback().err().map_or(fallback, |error| {
+        driver_failure(error, operation).storage_error()
+    })
 }
 
 fn settle_batch_failure(
@@ -490,8 +512,8 @@ fn settle_prepared(
 /// is missing. Their peers were fully authorized and merely had their work
 /// rolled back with the shared transaction, so reporting `MissingAuthority` to
 /// them blames them for an unrelated request's revocation and reads as a
-/// non-retryable outcome. They get `Faulted` instead — the same "rolled back,
-/// safe to resubmit" shape the fatal path above uses — and a member that had
+/// non-retryable outcome. They get `Faulted` instead, the same "rolled back,
+/// safe to resubmit" shape the fatal path above uses, and a member that had
 /// already reached a `Final` outcome keeps it.
 fn settle_authority_denied(
     prepared: Vec<PreparedRequest>,
@@ -532,12 +554,14 @@ fn settle_commit_denied(
                 item.probe.as_ref(),
                 RuntimeCancellationStageV1::BeforeCommit,
             )
-            .map(Ok)
-            .unwrap_or_else(|| {
-                Ok(RuntimeSubmitOutcomeV1::Unavailable {
-                    reason: UnavailableReasonV1::Faulted,
-                })
-            })
+            .map_or_else(
+                || {
+                    Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                        reason: UnavailableReasonV1::Faulted,
+                    })
+                },
+                Ok,
+            )
         } else {
             match result {
                 PreparedResult::Final(result) => result,
@@ -627,10 +651,7 @@ mod tests {
     use tracedecay_store::{CommitSequenceV1, StoreCommitReceiptV1};
 
     use super::*;
-    use crate::{
-        read_consistency::{CommitWatermarkSource, WatermarkSourceState},
-        test_support::{binding, metadata},
-    };
+    use crate::test_support::{binding, metadata};
 
     fn receipt(sequence: u64) -> (StoreRuntimeBindingV1, StoreCommitReceiptV1) {
         let metadata = metadata("operation.publish", "key.publish", 'a');
@@ -658,11 +679,9 @@ mod tests {
         )
         .unwrap();
 
-        let WatermarkSourceState::Available(observed) =
-            publisher.subscribe().current(&binding.shard_id)
-        else {
-            panic!("committed watermark must be available");
-        };
+        let observed = publisher
+            .current(&binding.shard_id)
+            .expect("committed watermark must be available");
         assert_eq!(observed.commit_sequence, receipt.commit_sequence);
         assert_eq!(observed.shard_id, receipt.shard_id);
         assert_eq!(observed.incarnation, receipt.incarnation);
@@ -677,11 +696,9 @@ mod tests {
 
         publish_results([&result], &publisher).unwrap();
 
-        let WatermarkSourceState::Available(observed) =
-            publisher.subscribe().current(&binding.shard_id)
-        else {
-            panic!("initial watermark must be available");
-        };
+        let observed = publisher
+            .current(&binding.shard_id)
+            .expect("initial watermark must be available");
         assert_eq!(observed.commit_sequence, CommitSequenceV1(0));
     }
 }

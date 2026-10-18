@@ -1,5 +1,5 @@
 /**
- * REJECTED ARGUMENTS — Plan 26 frequency view over dispatcher rejections.
+ * REJECTED ARGUMENTS. Plan 26 frequency view over dispatcher rejections.
  *
  * Counts come from `GET /api/observatory` (`rejected_arguments`). The card
  * never computes a rate in the browser: when the server withheld
@@ -22,7 +22,7 @@ export function RejectedArguments({ reads }: { reads: ObservatoryAccountingReads
   return (
     <EnvelopeSection
       title="Rejected arguments"
-      blurb="dispatcher argument rejections grouped by surface, operation, and error class — rates stay absent when the attempt denominator is unknown"
+      blurb="dispatcher argument rejections grouped by surface, operation, and error class, rates stay absent when the attempt denominator is unknown"
       result={read.result}
       pending={read.pending}
       loadingDetail="requesting rejected-argument measurements"
@@ -58,8 +58,8 @@ function RejectedArgumentReadModel({ model }: { model: RejectedArgumentAnalytics
     return (
       <div data-rejected-arguments="empty">
         <StateChip kind="ready" detail="no rejected-argument observations in this window" />
-        <p className="text-2xs text-text-muted">
-          a measured empty window is not a fabricated rate — the attempt denominator is{' '}
+        <p className="text-body text-text-muted">
+          a measured empty window is not a fabricated rate, the attempt denominator is{' '}
           {model.eligible_attempts == null
             ? 'unknown'
             : model.eligible_attempts.toLocaleString()}
@@ -69,7 +69,7 @@ function RejectedArgumentReadModel({ model }: { model: RejectedArgumentAnalytics
   }
   return (
     <div className="flex flex-col gap-2" data-rejected-arguments="populated">
-      <dl className="grid gap-x-4 gap-y-1 text-3xs sm:grid-cols-2">
+      <dl className="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-2">
         <Field label="rejected total">{model.rejected_total.toLocaleString()}</Field>
         <Field label="eligible attempts">
           {model.eligible_attempts == null ? '—' : model.eligible_attempts.toLocaleString()}
@@ -80,7 +80,7 @@ function RejectedArgumentReadModel({ model }: { model: RejectedArgumentAnalytics
         <Field label="redacted names">{model.redacted_name_count.toLocaleString()}</Field>
       </dl>
       <RejectedArgumentTable groups={model.groups} />
-      <p className="text-3xs leading-relaxed text-text-muted">
+      <p className="text-sm leading-relaxed text-text-muted">
         projector {model.projector_revision} · watermark {model.watermark} · rates are
         server-published and stay blank when the eligible-attempt denominator is unknown
       </p>
@@ -90,7 +90,7 @@ function RejectedArgumentReadModel({ model }: { model: RejectedArgumentAnalytics
 
 function RejectedArgumentTable({ groups }: { groups: readonly RejectedArgumentGroupV1[] }) {
   return (
-    <table className="w-full border-collapse text-2xs">
+    <table className="w-full border-collapse text-sm">
       <caption className="sr-only">
         Rejected-argument counts by surface, operation, argument, and error class.
       </caption>

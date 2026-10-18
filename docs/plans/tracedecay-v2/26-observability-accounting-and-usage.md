@@ -280,7 +280,7 @@ are reached only through local non-exportable anchors after authorization.
 24-accepted, Plan 32-admitted, active, and useful width; runnable and blocked
 counts; capacity saturation class; critical-path and serial-fraction buckets;
 fan-in/fan-out buckets; shared-authority serialization count; and coverage.
-“Useful” requires distinct admitted attempts that each advanced a committed
+"Useful" requires distinct admitted attempts that each advanced a committed
 Plan 32 `ProgressFrontier` during the interval and are not linked by an
 adjudicated duplicate-work relation. Heartbeats, queued work, card presence,
 provider child processes, and transport fanout never count as useful
@@ -750,7 +750,7 @@ supersession, lost authority, or unfinished horizon; `Unknown` means the
 available evidence cannot classify the outcome. `Partial` review judgment does
 not imply `ObservedPartial` task outcome. Plan 32 `Completed`, `Failed`,
 `Cancelled`, `TimedOut`, and provider outcomes remain runtime evidence that may
-support—but never substitute for—these labels.
+support, but never substitute for, these labels.
 
 Plan 24 owns the graph transition table that consumes the exact label revision
 plus acceptance/dependency evidence. Plan 24 may display or branch on these

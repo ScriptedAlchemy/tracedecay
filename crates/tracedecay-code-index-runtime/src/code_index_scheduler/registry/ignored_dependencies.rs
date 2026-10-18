@@ -1,24 +1,33 @@
 //! Single-flight activation and serving publication for ignored dependencies.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::path::Path;
 use std::sync::{
-    Arc, Mutex, RwLock,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::Duration;
 
+use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 use tracedecay_domain::canonical_sha256;
 
-use super::{CodeIndexSchedulerRegistryV1, PendingWakeV1};
-use crate::code_index_scheduler::graph_activation::CodeGraphActivationAuthorityV1;
+use super::super::control_poll;
+use super::{
+    CodeIndexSchedulerRegistryV1, CodeIndexSeatParkV1, CodeIndexSeatWaitV1, PendingWakeV1,
+    ServingGenerationSlot,
+};
+use crate::code_index_scheduler::graph_activation::{
+    CodeGraphActivationAuthorityV1, CodeGraphCatalogWarmV1,
+};
 use crate::code_index_scheduler::{
     CodeGraphReplayBindingV1, CodeIndexCadenceTriggerV1, CodeIndexIgnoredDependencyIndexOutcomeV1,
     CodeIndexIgnoredDependencyRefusalV1, CodeIndexIgnoredDependencyRequestV1,
     CodeIndexSchedulerErrorV1, DaemonCodeIndexControlV1, LatestCompleteCodeIndexV1, PendingHintsV1,
     ReconcilePassGuard,
 };
+use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AdmissionFlightKeyV1 {
@@ -102,9 +111,6 @@ fn clone_scheduler_error(error: &CodeIndexSchedulerErrorV1) -> CodeIndexSchedule
         CodeIndexSchedulerErrorV1::GraphActivationRefused(reason) => {
             CodeIndexSchedulerErrorV1::GraphActivationRefused(reason)
         }
-        CodeIndexSchedulerErrorV1::SemanticSchedule(error) => {
-            CodeIndexSchedulerErrorV1::SemanticSchedule(error.clone())
-        }
         CodeIndexSchedulerErrorV1::PublicationConflict(error) => {
             CodeIndexSchedulerErrorV1::PublicationConflict(error.clone())
         }
@@ -166,6 +172,18 @@ fn clone_production_error(error: &CodeIndexProductionErrorV1) -> CodeIndexProduc
         CodeIndexProductionErrorV1::Publication(error) => {
             CodeIndexProductionErrorV1::Publication(error.clone())
         }
+        CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision) => {
+            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(*revision)
+        }
+        CodeIndexProductionErrorV1::SourceCommitmentsUnavailable => {
+            CodeIndexProductionErrorV1::SourceCommitmentsUnavailable
+        }
+        CodeIndexProductionErrorV1::SealedRowContractRefused { revision, message } => {
+            CodeIndexProductionErrorV1::SealedRowContractRefused {
+                revision: *revision,
+                message: message.clone(),
+            }
+        }
         CodeIndexProductionErrorV1::Contract(error) => {
             CodeIndexProductionErrorV1::Contract(error.clone())
         }
@@ -176,22 +194,47 @@ fn clone_production_error(error: &CodeIndexProductionErrorV1) -> CodeIndexProduc
 }
 
 pub struct AdmissionFlightV1 {
-    completion: Mutex<Option<AdmissionFlightCompletionV1>>,
+    state: Mutex<AdmissionFlightStateV1>,
     completed: tokio::sync::Notify,
+    hints: Arc<Mutex<PendingHintsV1>>,
+    wake: Arc<tokio::sync::Notify>,
+    epoch: Arc<AtomicU64>,
+    pending_wake: Arc<PendingWakeV1>,
+}
+
+#[derive(Default)]
+struct AdmissionFlightStateV1 {
+    completion: Option<AdmissionFlightCompletionV1>,
+    // The async owner and detached blocking build can finish in either order.
+    // Keeping both facts under the completion lock makes the recovery decision
+    // linearizable and preserves exactly one authoritative wake after commit.
+    owner_abandoned: bool,
+    publication_committed: bool,
+    reconcile_requested: bool,
 }
 
 impl AdmissionFlightV1 {
-    fn new() -> Self {
+    fn new(
+        hints: Arc<Mutex<PendingHintsV1>>,
+        wake: Arc<tokio::sync::Notify>,
+        epoch: Arc<AtomicU64>,
+        pending_wake: Arc<PendingWakeV1>,
+    ) -> Self {
         Self {
-            completion: Mutex::new(None),
+            state: Mutex::new(AdmissionFlightStateV1::default()),
             completed: tokio::sync::Notify::new(),
+            hints,
+            wake,
+            epoch,
+            pending_wake,
         }
     }
 
     fn completion(&self) -> Option<AdmissionFlightCompletionV1> {
-        self.completion
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .completion
             .clone()
     }
 
@@ -199,12 +242,60 @@ impl AdmissionFlightV1 {
         &self,
         result: &Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1>,
     ) {
-        *self
-            .completion
+        self.state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(AdmissionFlightCompletionV1::from_result(result));
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .completion = Some(AdmissionFlightCompletionV1::from_result(result));
         self.completed.notify_waiters();
+    }
+
+    fn owner_abandoned(&self) {
+        self.record_recovery_state(|state| state.owner_abandoned = true);
+    }
+
+    fn publication_committed(&self) {
+        self.record_recovery_state(|state| state.publication_committed = true);
+    }
+
+    fn record_recovery_state(&self, update: impl FnOnce(&mut AdmissionFlightStateV1)) {
+        let request_reconcile = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            update(&mut state);
+            let request =
+                state.owner_abandoned && state.publication_committed && !state.reconcile_requested;
+            state.reconcile_requested |= request;
+            request
+        };
+        if !request_reconcile {
+            return;
+        }
+        self.perform_authoritative_reconcile();
+    }
+
+    fn claim_reconcile_request(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let request = !state.reconcile_requested;
+        state.reconcile_requested = true;
+        request
+    }
+
+    fn perform_authoritative_reconcile(&self) {
+        self.hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .overflow();
+        DaemonCodeIndexControlV1::advance(&self.epoch);
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &self.pending_wake,
+            &self.wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
     }
 }
 
@@ -213,10 +304,6 @@ struct AdmissionFlightOwnerV1 {
     flight: Arc<AdmissionFlightV1>,
     flights: Arc<Mutex<BTreeMap<AdmissionFlightKeyV1, Arc<AdmissionFlightV1>>>>,
     bridge: Arc<AdmissionControlBridgeV1>,
-    hints: Arc<Mutex<PendingHintsV1>>,
-    wake: Arc<tokio::sync::Notify>,
-    epoch: Arc<AtomicU64>,
-    pending_wake: Arc<PendingWakeV1>,
     finished: bool,
 }
 
@@ -225,13 +312,8 @@ impl AdmissionFlightOwnerV1 {
         mut self,
         result: Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1>,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
-        match &result {
-            Ok(_) => {
-                hotpath::gauge!("daemon.code_index.ignored_dependency.admitted_total").inc(1_u64);
-            }
-            Err(_) => {
-                hotpath::gauge!("daemon.code_index.ignored_dependency.refused_total").inc(1_u64);
-            }
+        if result.is_err() {
+            self.flight.owner_abandoned();
         }
         self.flight.finish(&result);
         self.remove_flight();
@@ -251,35 +333,20 @@ impl AdmissionFlightOwnerV1 {
             flights.remove(&self.key);
         }
     }
-
-    fn request_authoritative_reconcile(&self) {
-        self.hints
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .overflow();
-        DaemonCodeIndexControlV1::advance(&self.epoch);
-        CodeIndexSchedulerRegistryV1::note_wake(
-            &self.pending_wake,
-            &self.wake,
-            CodeIndexCadenceTriggerV1::QueryAdmission,
-        );
-    }
 }
 
 impl Drop for AdmissionFlightOwnerV1 {
     fn drop(&mut self) {
         // The owner is the RAII holder of the in-flight admission slot, so the
-        // gauge cannot leak on cancellation, panic, or shutdown.
-        hotpath::gauge!("daemon.code_index.ignored_dependency.in_flight").dec(1_u64);
+        // slot cannot leak on cancellation, panic, or shutdown.
         if self.finished {
             return;
         }
-        hotpath::gauge!("daemon.code_index.ignored_dependency.cancelled_total").inc(1_u64);
         self.bridge.cancel();
+        self.flight.owner_abandoned();
         let cancellation = Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
         self.flight.finish(&cancellation);
         self.remove_flight();
-        self.request_authoritative_reconcile();
     }
 }
 
@@ -325,18 +392,22 @@ impl CodeIndexExecutionControlV1 for AdmissionControlBridgeV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    /// `deadline` is the request deadline `control` also reports, as the
+    /// instant a wait for the decoded seat ends at.
     pub async fn index_verified_ignored_dependency(
         &self,
         project_root: &Path,
         request: CodeIndexIgnoredDependencyRequestV1,
         control: Arc<dyn CodeIndexExecutionControlV1 + Send + Sync + '_>,
+        deadline: std::time::Instant,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
-        let project_root = project_root.canonicalize()?;
+        let project_root = canonical_existing_identity(project_root)?;
         let flight_key = AdmissionFlightKeyV1::for_request(&request)?;
         let (
             repository_id,
             worktree_id,
             serving_generation,
+            graph_activation_enabled,
             flights,
             hints,
             wake,
@@ -359,6 +430,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.repository_id.clone(),
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.serving_generation),
+                worktree.graph_activation.policy().is_enabled(),
                 Arc::clone(&worktree.ignored_dependency_admissions),
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
@@ -366,6 +438,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.pending_wake),
             )
         };
+        if graph_activation_enabled {
+            self.await_decoded_seat(&project_root, control.as_ref(), deadline)
+                .await?;
+        }
         let (flight, owns_flight) = {
             let mut active = flights
                 .lock()
@@ -379,41 +455,113 @@ impl CodeIndexSchedulerRegistryV1 {
                     &worktree_id,
                     &serving_generation,
                 )?;
-                let flight = Arc::new(AdmissionFlightV1::new());
+                let flight = Arc::new(AdmissionFlightV1::new(
+                    Arc::clone(&hints),
+                    Arc::clone(&wake),
+                    Arc::clone(&epoch),
+                    Arc::clone(&pending_wake),
+                ));
                 active.insert(flight_key.clone(), Arc::clone(&flight));
                 (flight, true)
             }
         };
 
         if !owns_flight {
-            hotpath::gauge!("daemon.code_index.ignored_dependency.coalesced_total").inc(1_u64);
             return await_flight(flight, control.as_ref()).await;
         }
         let bridge = Arc::new(AdmissionControlBridgeV1::new());
-        hotpath::gauge!("daemon.code_index.ignored_dependency.in_flight").inc(1_u64);
         let owner = AdmissionFlightOwnerV1 {
             key: flight_key,
-            flight,
+            flight: Arc::clone(&flight),
             flights,
             bridge: Arc::clone(&bridge),
-            hints,
-            wake,
-            epoch,
-            pending_wake,
             finished: false,
         };
         let result = self
-            .run_ignored_dependency_admission(&project_root, request, control.as_ref(), &bridge)
+            .run_ignored_dependency_admission(
+                &project_root,
+                request,
+                control.as_ref(),
+                &bridge,
+                flight,
+            )
             .await;
         owner.finish(result)
+    }
+
+    /// Admission builds on the decoded generation, but a ready generation
+    /// serves from its text owner before the worker's graph tail seats it (a
+    /// first publication), or with no seat at all until one is demanded.
+    /// Demand the seat and wait for it until `deadline`: an unexpired request
+    /// never refuses for a seat that is still being installed, an expired one
+    /// reports its deadline, and a parked worker answers with its park.
+    async fn await_decoded_seat(
+        &self,
+        project_root: &Path,
+        control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
+        deadline: std::time::Instant,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let demanded = &AtomicBool::new(false);
+        let Ok(waited) = self
+            .wait_for_seat(project_root, deadline, |_| async move {
+                let mounted = self.mounted.lock().await;
+                let Some(worktree) = mounted.get(project_root) else {
+                    return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
+                };
+                if worktree
+                    .serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+                {
+                    return Ok(Some(CodeIndexSeatWaitV1::Seated(())));
+                }
+                if control.is_cancelled() {
+                    return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
+                }
+                if control.is_deadline_exceeded() {
+                    return Ok(Some(CodeIndexSeatWaitV1::Deadline));
+                }
+                if !demanded.swap(true, Ordering::AcqRel) {
+                    let (pending_wake, wake) = (
+                        Arc::clone(&worktree.pending_wake),
+                        Arc::clone(&worktree.wake),
+                    );
+                    drop(mounted);
+                    self.request_complete_generation(project_root).await;
+                    // The demand flag flips once per mount, so this demand
+                    // posts its own wake: a park the worker re-checks answers
+                    // only after that re-check.
+                    Self::note_wake(
+                        &pending_wake,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::QueryAdmission,
+                    );
+                }
+                Ok::<_, Infallible>(None)
+            })
+            .await;
+        match waited {
+            CodeIndexSeatWaitV1::Seated(()) => Ok(()),
+            CodeIndexSeatWaitV1::Parked(CodeIndexSeatParkV1::Convergence(parked)) => {
+                Err(CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(parked).into())
+            }
+            CodeIndexSeatWaitV1::Parked(_) | CodeIndexSeatWaitV1::Cancelled => {
+                Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into())
+            }
+            CodeIndexSeatWaitV1::Deadline => {
+                Err(CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into())
+            }
+        }
     }
 
     /// The owning flight's full admission lifetime: gate waits, the blocking
     /// build/publication, graph activation, and the serving CAS. Followers
     /// coalesce onto this flight and are counted, not spanned.
-    #[hotpath::measure(
-        label = "daemon.code_index.ignored_dependency.admission",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.code_index.ignored_dependency.admission",
+        level = "trace",
+        skip_all
     )]
     async fn run_ignored_dependency_admission(
         &self,
@@ -421,16 +569,18 @@ impl CodeIndexSchedulerRegistryV1 {
         request: CodeIndexIgnoredDependencyRequestV1,
         control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
         bridge: &Arc<AdmissionControlBridgeV1>,
+        flight: Arc<AdmissionFlightV1>,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
         let (
             repository_id,
             worktree_id,
             scheduler,
             serving_generation,
-            published_generation_id,
+            serving_source_witness,
+            text_generation,
             serving_generation_epoch,
+            serving_generation_changed,
             graph_activation,
-            publication_gate,
             build_publication_lock,
             shutting_down,
             wake,
@@ -449,10 +599,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
-                Arc::clone(&worktree.published_generation_id),
+                Arc::clone(&worktree.serving_source_witness),
+                Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.serving_generation_epoch),
+                worktree.serving_generation_changed.clone(),
                 worktree.graph_activation.clone(),
-                Arc::clone(&worktree.semantic_evaluation_publication_gate),
                 Arc::clone(&worktree.build_publication_lock),
                 Arc::clone(&worktree.shutting_down),
                 Arc::clone(&worktree.wake),
@@ -465,8 +616,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let _daemon_admission =
             acquire_daemon_admission(background_reconcile_admission, control, &shutting_down)
                 .await?;
-        let _publication =
-            acquire_publication_gate(publication_gate.as_ref(), control, &shutting_down).await?;
         let _build_publication =
             acquire_publication_gate(build_publication_lock.as_ref(), control, &shutting_down)
                 .await?;
@@ -480,7 +629,8 @@ impl CodeIndexSchedulerRegistryV1 {
         let build_scheduler = Arc::clone(&scheduler);
         let build_bridge = Arc::clone(bridge);
         let build_serving = serving.clone();
-        let mut build_task = tokio::task::spawn_blocking(move || {
+        let publication_flight = Arc::clone(&flight);
+        let build_task = native_runtime::spawn_blocking(move || {
             let mut scheduler = build_scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -489,10 +639,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 request,
                 build_bridge.as_ref(),
             )?;
+            publication_flight.publication_committed();
             let replay_binding =
                 scheduler.code_graph_replay_binding(&build.outcome.generation_id)?;
             Ok::<_, CodeIndexSchedulerErrorV1>((build, replay_binding))
         });
+        let mut build_task = std::pin::pin!(build_task);
         let (build, replay_binding) = loop {
             bridge.refresh(control, &shutting_down);
             tokio::select! {
@@ -501,7 +653,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         format!("ignored-dependency indexing task failed: {error}"),
                     ))??;
                 }
-                () = tokio::time::sleep(Duration::from_millis(5)) => {}
+                () = control_poll() => {}
             }
         };
         // `build_and_publish` has now atomically advanced the durable active
@@ -510,15 +662,17 @@ impl CodeIndexSchedulerRegistryV1 {
         // must finish graph activation and the serving CAS instead of reporting
         // a refusal for a generation that a restart will restore.
         let request_reactivation = || {
-            scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .request_background_reconcile();
-            Self::note_wake(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
+            if flight.claim_reconcile_request() {
+                scheduler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .request_background_reconcile();
+                Self::note_wake(
+                    &pending_wake,
+                    &wake,
+                    CodeIndexCadenceTriggerV1::QueryAdmission,
+                );
+            }
         };
         if build
             .latest
@@ -539,19 +693,33 @@ impl CodeIndexSchedulerRegistryV1 {
             &repository_id,
             &worktree_id,
             build.latest.clone(),
+            serving.interactive_graph_store().ok(),
             replay_binding,
         )
         .await;
-        if let Err(error) = activation {
-            request_reactivation();
-            return Err(error);
-        }
+        let catalog_warm = match activation {
+            Ok(catalog_warm) => catalog_warm,
+            Err(error) => {
+                request_reactivation();
+                return Err(error);
+            }
+        };
+        *text_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(build.latest.text_generation_handle());
+        Self::note_wake(
+            &pending_wake,
+            &wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
         let swap_scheduler = Arc::clone(&scheduler);
         let swap_serving_generation = Arc::clone(&serving_generation);
+        let swap_serving_source_witness = Arc::clone(&serving_source_witness);
         let swap_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let incumbent = serving.clone();
         let candidate = build.latest.clone();
-        let swap_task = tokio::task::spawn_blocking(move || {
+        let swap_task = native_runtime::spawn_blocking(move || {
             // Durable publication already committed this candidate. Do not
             // consult request cancellation while acquiring the scheduler or
             // serving locks: this CAS must converge the live head with the
@@ -573,10 +741,19 @@ impl CodeIndexSchedulerRegistryV1 {
             let mut serving = swap_serving_generation
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut witness = swap_serving_source_witness.write().map_err(|_| {
+                CodeIndexSchedulerErrorV1::Identity(
+                    "ignored-dependency serving witness lock is poisoned".to_owned(),
+                )
+            })?;
             *serving = Some(candidate.clone());
             swap_serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+            *witness = scheduler.source_currency_witness_for(
+                &candidate.generation().manifest().generation_id,
+                &candidate.generation().snapshot().content_identity,
+            );
+            drop(witness);
             drop(serving);
-            let _ = scheduler.schedule_semantic_generation(candidate.generation_handle());
             Ok::<_, CodeIndexSchedulerErrorV1>(())
         })
         .await;
@@ -590,7 +767,10 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         };
         match swap {
-            Ok(()) => {}
+            Ok(()) => {
+                Self::record_serving_seat(&self.serving_seats);
+                serving_generation_changed.send_replace(());
+            }
             Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
                 CodeIndexIgnoredDependencyRefusalV1::StaleGeneration,
             )) => {
@@ -602,21 +782,27 @@ impl CodeIndexSchedulerRegistryV1 {
                 return Err(error);
             }
         }
-        if let Ok(authority) = build.latest.test_attribution_authority() {
-            self.test_attribution_authorities
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    project_root.to_path_buf(),
-                    (build.outcome.generation_id.clone(), authority),
-                );
-        }
-        Self::publish_generation(
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root.to_path_buf(),
+                (
+                    build.outcome.generation_id.clone(),
+                    Arc::downgrade(&build.latest.generation),
+                ),
+            );
+        // The swap above already installed this candidate in the serving
+        // slot, so the broadcast follows a witnessed seat.
+        Self::broadcast_generation_publication(
             &self.generation_publications,
-            &published_generation_id,
             project_root.to_path_buf(),
             &build.publication,
         );
+        drop((_reconcile_pass, _build_publication, _daemon_admission));
+        if let Some(catalog_warm) = catalog_warm {
+            await_catalog_warm(catalog_warm, control, &shutting_down).await;
+        }
         Ok(build.outcome)
     }
 }
@@ -625,7 +811,7 @@ fn validate_serving_request(
     request: &CodeIndexIgnoredDependencyRequestV1,
     repository_id: &tracedecay_domain::RepositoryId,
     worktree_id: &tracedecay_domain::WorktreeId,
-    serving_generation: &RwLock<Option<LatestCompleteCodeIndexV1>>,
+    serving_generation: &ServingGenerationSlot,
 ) -> Result<LatestCompleteCodeIndexV1, CodeIndexSchedulerErrorV1> {
     if request.scope.validate().is_err()
         || &request.scope.repository_id != repository_id
@@ -650,7 +836,7 @@ fn validate_serving_request(
 }
 
 pub fn exact_activated_serving_generation(
-    serving_generation: &RwLock<Option<LatestCompleteCodeIndexV1>>,
+    serving_generation: &ServingGenerationSlot,
     candidate: &LatestCompleteCodeIndexV1,
 ) -> Option<LatestCompleteCodeIndexV1> {
     let serving = serving_generation
@@ -680,7 +866,7 @@ async fn await_flight(
         refuse_if_interrupted(control, &active_route)?;
         tokio::select! {
             () = flight.completed.notified() => {}
-            () = tokio::time::sleep(Duration::from_millis(5)) => {}
+            () = control_poll() => {}
         }
     }
 }
@@ -691,18 +877,42 @@ async fn activate_committed_generation(
     repository_id: &tracedecay_domain::RepositoryId,
     worktree_id: &tracedecay_domain::WorktreeId,
     latest: LatestCompleteCodeIndexV1,
+    predecessor: Option<Arc<CodeGraphProjectionStore>>,
     replay_binding: CodeGraphReplayBindingV1,
-) -> Result<(), CodeIndexSchedulerErrorV1> {
+) -> Result<Option<CodeGraphCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
     graph_activation
         .activate(
             project_id,
             repository_id,
             worktree_id,
             latest,
+            predecessor,
             replay_binding,
             Arc::new(AtomicBool::new(false)),
         )
         .await
+}
+
+/// Admission answers "the generation advanced, retry", and the retry reads the
+/// catalog this warm builds, so the answer waits for it. A request out of time
+/// or a worktree shutting down answers without it: the generation is already
+/// committed, and catalog reads serve once the warm settles.
+async fn await_catalog_warm(
+    catalog_warm: CodeGraphCatalogWarmV1,
+    control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
+    shutting_down: &AtomicBool,
+) {
+    let mut settled = std::pin::pin!(catalog_warm.settled());
+    loop {
+        tokio::select! {
+            () = &mut settled => return,
+            () = control_poll() => {
+                if refuse_if_interrupted(control, shutting_down).is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 async fn acquire_publication_gate<'a>(
@@ -714,7 +924,7 @@ async fn acquire_publication_gate<'a>(
     loop {
         tokio::select! {
             guard = &mut lock => return Ok(guard),
-            () = tokio::time::sleep(Duration::from_millis(5)) => {
+            () = control_poll() => {
                 refuse_if_interrupted(control, shutting_down)?;
             }
         }
@@ -733,7 +943,7 @@ async fn acquire_daemon_admission(
                 return permit
                     .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
             }
-            () = tokio::time::sleep(Duration::from_millis(5)) => {
+            () = control_poll() => {
                 refuse_if_interrupted(control, shutting_down)?;
             }
         }
@@ -750,5 +960,117 @@ fn refuse_if_interrupted(
         Err(CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod flight_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn publication_after_owner_abandonment_requests_one_reconcile() {
+        let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
+        let pending_wake = Arc::new(PendingWakeV1::default());
+        let epoch = Arc::new(AtomicU64::new(0));
+        let flight = AdmissionFlightV1::new(
+            Arc::clone(&hints),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::clone(&epoch),
+            Arc::clone(&pending_wake),
+        );
+
+        flight.owner_abandoned();
+        assert_eq!(epoch.load(Ordering::Acquire), 0);
+        assert!(!hints.lock().unwrap().overflow);
+        assert!(!pending_wake.has_pending_arrival());
+
+        flight.publication_committed();
+        assert_eq!(epoch.load(Ordering::Acquire), 1);
+        assert!(hints.lock().unwrap().overflow);
+        assert!(pending_wake.has_pending_arrival());
+
+        flight.owner_abandoned();
+        flight.publication_committed();
+        assert_eq!(epoch.load(Ordering::Acquire), 1);
+    }
+}
+
+#[cfg(test)]
+mod interruption_poll_tests {
+    use super::*;
+    use std::time::Duration;
+
+    use tracedecay_runtime_core::native_runtime;
+
+    /// The gate wait reaches the control only through its poll, so this
+    /// control acts on its first check: it releases `held`, then answers
+    /// `cancel`.
+    struct OnFirstCheck {
+        held: Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>,
+        cancel: bool,
+    }
+
+    impl CodeIndexExecutionControlV1 for OnFirstCheck {
+        fn is_cancelled(&self) -> bool {
+            drop(
+                self.held
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
+            self.cancel
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    async fn gate_wait_polls_its_control() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let shutting_down = AtomicBool::new(false);
+
+        let releasing = OnFirstCheck {
+            held: Mutex::new(Some(Arc::clone(&gate).lock_owned().await)),
+            cancel: false,
+        };
+        drop(
+            acquire_publication_gate(&gate, &releasing, &shutting_down)
+                .await
+                .expect("the gate released at the first poll is taken"),
+        );
+
+        let _held = Arc::clone(&gate).lock_owned().await;
+        let cancelling = OnFirstCheck {
+            held: Mutex::new(None),
+            cancel: true,
+        };
+        let refused = acquire_publication_gate(&gate, &cancelling, &shutting_down).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
+                    CodeIndexIgnoredDependencyRefusalV1::Cancelled
+                ))
+            ),
+            "a request cancelled while the gate is held is refused"
+        );
+    }
+
+    #[test]
+    fn a_gate_wait_off_tokio_polls_its_control() {
+        native_runtime::block_on(native_runtime::timeout(
+            Duration::from_secs(30),
+            gate_wait_polls_its_control(),
+        ))
+        .expect("process runtime")
+        .expect("the gate wait settles within its bound");
+    }
+
+    #[tokio::test]
+    async fn a_gate_wait_on_tokio_polls_its_control() {
+        native_runtime::timeout(Duration::from_secs(30), gate_wait_polls_its_control())
+            .await
+            .expect("the gate wait settles within its bound");
     }
 }

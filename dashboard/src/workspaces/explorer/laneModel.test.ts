@@ -10,15 +10,20 @@ import {
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import {
   browseLane,
+  laneAnswered,
   laneEvidence,
+  laneFromScope,
   laneFromSourceProgress,
   laneFromTransport,
   laneHits,
+  lanePending,
   laneStateDetail,
   laneStateKind,
   runIsTerminal,
   runStateKind,
   searchLane,
+  SEMANTIC_UNREGISTERED_DETAIL,
+  semanticLane,
   type ExplorerLaneReadModel,
 } from './laneModel.ts';
 
@@ -64,7 +69,7 @@ function run(over: Record<string, unknown> = {}): ExplorerQueryRunV1 {
     request_revision: 'explorer-query-request-v1',
     plan_revision: 'explorer-query-plan-v1',
     merge_revision: 'source-local-no-merge-v1',
-    required_source_ids: ['code_graph', 'sessions', 'knowledge', 'semantic'],
+    required_source_ids: ['code_graph', 'sessions', 'knowledge'],
     ordering_policy: 'source_local_no_cross_source_merge',
     explanation: 'test',
     submitted_at_micros: 1,
@@ -185,8 +190,33 @@ describe('laneFromSourceProgress', () => {
       hits: [],
       reportedTotal: 0,
       unreadableRows: 0,
+      hasMore: false,
+      freshness: 'unknown',
+      watermark: null,
     });
     expect(new Set([...states, readyEmpty.state]).size).toBe(4);
+  });
+
+  it('carries the page\u2019s own continuation as hasMore, and no continuation as null', () => {
+    const paged = laneFromSourceProgress(
+      'code',
+      progress({
+        page: {
+          offset: 0,
+          limit: 1,
+          total: 3,
+          next_offset: 1,
+          rows: [{ id: 'n1', name: 'first' }],
+          metadata: {},
+        },
+      }),
+      [],
+    );
+    expect(paged).toMatchObject({ state: 'ready', hasMore: true, reportedTotal: 3 });
+    // A source that never sent a page said nothing about continuation.
+    expect(laneFromSourceProgress('code', progress({ page: null }), [])).toMatchObject({
+      hasMore: null,
+    });
   });
 
   it('carries the source error code and message rather than flattening them', () => {
@@ -219,7 +249,19 @@ describe('laneFromSourceProgress', () => {
       hits: [],
       reportedTotal: null,
       unreadableRows: 0,
+      hasMore: null,
+      freshness: 'unknown',
+      watermark: null,
     });
+  });
+
+  it('carries the source\u2019s own freshness word and watermark verbatim', () => {
+    const fresh = laneFromSourceProgress(
+      'code',
+      progress({ freshness: 'fresh', watermark: 'g-42' }),
+      [],
+    );
+    expect(fresh).toMatchObject({ state: 'ready', freshness: 'fresh', watermark: 'g-42' });
   });
 
   it('reports rows it could not read instead of silently returning fewer', () => {
@@ -275,77 +317,8 @@ describe('laneFromSourceProgress', () => {
     ).toEqual({ state: 'unanswered', lane: 'sessions' });
   });
 
-  it('keeps an indexing semantic source apart from an unavailable one, chip and all', () => {
-    const indexing = laneFromSourceProgress(
-      'semantic',
-      progress({
-        source_id: 'semantic',
-        source_label: 'Semantic',
-        outcome: 'indexing',
-        completed_units: 3,
-        total_units: 10,
-        page: null,
-        error_code: 'semantic_indexing',
-        message: 'semantic vector projection is in progress',
-      }),
-      [],
-    );
-    const unavailable = laneFromSourceProgress(
-      'semantic',
-      progress({
-        source_id: 'semantic',
-        source_label: 'Semantic',
-        outcome: 'unavailable',
-        page: null,
-        error_code: 'semantic_runtime_unavailable',
-        message: 'no mounted runtime',
-      }),
-      [],
-    );
-
-    expect(indexing).toEqual({
-      state: 'indexing',
-      lane: 'semantic',
-      errorCode: 'semantic_indexing',
-      detail: 'semantic vector projection is in progress',
-      completedUnits: 3,
-      totalUnits: 10,
-    });
-    expect(unavailable.state).toBe('unavailable');
-    // Different chips: work in progress spins, a refusal does not.
-    expect(laneStateKind(indexing)).toBe('loading');
-    expect(laneStateKind(unavailable)).toBe('unavailable');
-    expect(laneStateKind(indexing)).not.toBe(laneStateKind(unavailable));
-    // The clause carries the stage and the provider's own progress accounting.
-    expect(laneStateDetail(indexing)).toBe('semantic_indexing · 3/10');
-  });
-
-  it('reads an unactivated semantic source as a typed absence with the complete-zero chip', () => {
-    const absent = laneFromSourceProgress(
-      'semantic',
-      progress({
-        source_id: 'semantic',
-        source_label: 'Semantic',
-        outcome: 'absent',
-        page: null,
-        error_code: 'semantic_not_activated',
-        message: 'semantic search is not activated for this project',
-      }),
-      [],
-    );
-
-    expect(absent).toEqual({
-      state: 'absent',
-      lane: 'semantic',
-      errorCode: 'semantic_not_activated',
-      detail: 'semantic search is not activated for this project',
-    });
-    expect(laneStateKind(absent)).toBe('complete_zero_findings');
-    expect(laneStateKind(absent)).not.toBe('unavailable');
-  });
-
-  it('keeps stale, timed-out and unsupported as their own conditions and chips', () => {
-    const reads = (['stale', 'timed_out', 'unsupported'] as const).map((outcome) =>
+  it('keeps stale and timed-out as their own conditions and chips', () => {
+    const reads = (['stale', 'timed_out'] as const).map((outcome) =>
       laneFromSourceProgress(
         'code',
         progress({ outcome, page: null, error_code: `${outcome}_code`, message: null }),
@@ -353,12 +326,8 @@ describe('laneFromSourceProgress', () => {
       ),
     );
 
-    expect(reads.map((read) => read.state)).toEqual(['stale', 'timed_out', 'unsupported']);
-    expect(reads.map((read) => laneStateKind(read))).toEqual([
-      'stale',
-      'timed_out',
-      'unsupported',
-    ]);
+    expect(reads.map((read) => read.state)).toEqual(['stale', 'timed_out']);
+    expect(reads.map((read) => laneStateKind(read))).toEqual(['stale', 'timed_out']);
   });
 
   it('counts partial rows while keeping the omission stated', () => {
@@ -421,7 +390,7 @@ describe('searchLane', () => {
     expect(laneStateKind(sourceUnavailable)).toBe('unavailable');
     expect(laneStateKind(clientOffline)).not.toBe(laneStateKind(sourceUnavailable));
     // With the chip carrying the condition, the clause carries what the chip
-    // cannot — the reason the source reported — and never repeats the state.
+    // cannot, the reason the source reported, and never repeats the state.
     expect(laneStateDetail(clientOffline)).toBe('daemon unreachable');
     expect(laneStateDetail(sourceUnavailable)).toBe('graph_index_unavailable');
   });
@@ -551,8 +520,57 @@ describe('laneFromTransport', () => {
       state: 'indeterminate',
       lane: 'code',
       domainState: 'stale',
+      detail: null,
     });
     expect(laneStateDetail(laneFromTransport('code', 'stale', null))).toBe('stale');
+  });
+
+  it('keeps a read-only scope refusal as locked, carrying the gateway sentence', () => {
+    const locked = laneFromTransport('sessions', 'locked', 'read-only for non-active projects');
+    expect(locked).toEqual({
+      state: 'locked',
+      lane: 'sessions',
+      detail: 'read-only for non-active projects',
+    });
+    expect(laneStateKind(locked)).toBe('locked');
+    expect(laneStateDetail(locked)).toBe('read-only for non-active projects');
+  });
+});
+
+describe('semanticLane', () => {
+  it('is a standing typed absence, not an unavailable source and not an empty answer', () => {
+    const lane = semanticLane();
+    expect(lane.state).toBe('unregistered');
+    expect(lane.lane).toBe('semantic');
+    // Rendered with the taxonomy's unavailable chip, but the detail names the
+    // contract fact: there is no source to have declined.
+    expect(laneStateKind(lane)).toBe('unavailable');
+    expect(laneStateDetail(lane)).toBe(SEMANTIC_UNREGISTERED_DETAIL);
+    expect(laneHits(lane)).toEqual([]);
+    expect(laneAnswered(lane)).toBe(false);
+    expect(lanePending(lane)).toBe(false);
+    expect(laneEvidence(lane)).toBe('unknown');
+  });
+});
+
+describe('laneFromScope', () => {
+  it('lets a writable scope proceed and refuses the other two with their own reasons', () => {
+    expect(laneFromScope('code', { state: 'writable', target: 'the active project' })).toBeNull();
+    expect(
+      laneFromScope('code', { state: 'read_only', reason: 'Other is not the active project.' }),
+    ).toEqual({ state: 'locked', lane: 'code', detail: 'Other is not the active project.' });
+    const unknown = laneFromScope('knowledge', {
+      state: 'unknown',
+      reason: 'not checked against the registry yet',
+    });
+    expect(unknown).toEqual({
+      state: 'indeterminate',
+      lane: 'knowledge',
+      domainState: 'unknown',
+      detail: 'not checked against the registry yet',
+    });
+    expect(laneStateKind(unknown!)).toBe('unknown');
+    expect(laneStateDetail(unknown!)).toBe('not checked against the registry yet');
   });
 });
 

@@ -1,0 +1,3471 @@
+//! Bounded Context Scout host-facing contracts.
+//!
+//! The daemon owns retrieval, policy persistence, model execution, and every
+//! side effect. This module is deliberately limited to deterministic candidate
+//! selection, model-adapter validation, exact-address coalescing, and durable
+//! value contracts for delivery receipts and feedback.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use tracedecay_contracts::context_scout::{
+    ContextScoutAddressV1, ContextScoutCandidateEvidenceV1, ContextScoutCandidateV1,
+    ContextScoutCategoryV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
+    ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
+    ContextScoutEvidenceAvailabilityV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
+    ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
+    ContextScoutModelReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
+    ContextScoutWorkV1,
+};
+use tracedecay_contracts::{IdempotencyKey, ResolvedScope};
+use tracedecay_domain::{ActorId, ManifestDigest, RetrievalAnchorId, UtcMicros};
+use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+#[cfg(feature = "token-counting")]
+use tracedecay_tokenizer::o200k_base;
+
+pub mod address_registry;
+pub mod decision_engine;
+pub mod intent_pass;
+pub mod model;
+pub mod owner;
+pub mod session_window;
+
+const MAX_SCOUT_TEXT_BYTES: usize = 4 * 1024;
+const MAX_SCOUT_CANDIDATES: usize = 32;
+const MAX_SCOUT_EVIDENCE: usize = 16;
+const MAX_SCOUT_RECENT_DELIVERIES: usize = 32;
+const MAX_SCOUT_ACTIVE_ADDRESSES: usize = 32;
+const MAX_SCOUT_MODEL_INPUT_TOKENS: usize = 2_048;
+const MAX_SCOUT_MODEL_OUTPUT_TOKENS: usize = 256;
+
+mod evidence;
+mod store;
+#[cfg(test)]
+mod store_tests;
+
+pub use evidence::{
+    ContextScoutCandidateEvidenceExt, ContextScoutEvidenceEnvelopeExt,
+    ContextScoutSessionClaimInputV1, ContextScoutSessionEvidenceExt,
+};
+pub use store::ProjectContextScoutDurableStoreV1;
+
+pub(crate) trait ContextScoutAddressExt {
+    fn validate(self) -> Result<(), ContextScoutErrorV1>;
+}
+
+impl ContextScoutAddressExt for ContextScoutAddressV1 {
+    fn validate(self) -> Result<(), ContextScoutErrorV1> {
+        if self.profile_id == [0; 16]
+            || self.provider_id == [0; 16]
+            || self.protected_session_id == [0; 32]
+            || self.thread_id == [0; 16]
+            || self.turn_id == [0; 16]
+            || self.agent_id == [0; 16]
+            || self.logical_message_id == [0; 16]
+            || self.project_id == [0; 16]
+        {
+            return Err(ContextScoutErrorV1::InvalidAddress);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) trait ContextScoutCandidateExt {
+    fn validate(&self, limits: ContextScoutLimitsV1) -> Result<(), ContextScoutErrorV1>;
+    fn durable(&self) -> bool;
+}
+
+impl ContextScoutCandidateExt for ContextScoutCandidateV1 {
+    fn validate(&self, limits: ContextScoutLimitsV1) -> Result<(), ContextScoutErrorV1> {
+        // Code evidence cites at least one anchor; session evidence cites
+        // none, its window digest is the citation.
+        let anchors_in_bounds = match &self.evidence {
+            ContextScoutCandidateEvidenceV1::Code(_) => {
+                (1..=limits.max_evidence).contains(&self.evidence.anchor_count())
+            }
+            ContextScoutCandidateEvidenceV1::Session(_) => self.evidence.anchor_count() == 0,
+        };
+        if self.dedupe_key == [0; 32]
+            || !safe_suggestion_text(&self.suggestion_text)
+            || self.suggestion_text.len() > limits.max_text_bytes
+            || !anchors_in_bounds
+            || self.expires_at.0 <= 0
+        {
+            return Err(ContextScoutErrorV1::InvalidCandidate);
+        }
+        self.evidence.validate()?;
+        let mut anchors = BTreeSet::new();
+        for anchor in self.evidence.anchors() {
+            if !anchors.insert(anchor) {
+                return Err(ContextScoutErrorV1::InvalidCandidate);
+            }
+        }
+        Ok(())
+    }
+
+    fn durable(&self) -> bool {
+        self.evidence.validate().is_ok()
+    }
+}
+
+/// Bounded limits supplied from typed configuration. There is no source-code
+/// default model/provider or delivery timing policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutLimitsV1 {
+    pub max_candidates: usize,
+    pub max_evidence: usize,
+    pub max_text_bytes: usize,
+    pub max_model_input_tokens: usize,
+    pub max_model_output_tokens: usize,
+}
+
+impl ContextScoutLimitsV1 {
+    pub const fn bounded_defaults() -> Self {
+        Self {
+            max_candidates: MAX_SCOUT_CANDIDATES,
+            max_evidence: MAX_SCOUT_EVIDENCE,
+            max_text_bytes: MAX_SCOUT_TEXT_BYTES,
+            max_model_input_tokens: MAX_SCOUT_MODEL_INPUT_TOKENS,
+            max_model_output_tokens: MAX_SCOUT_MODEL_OUTPUT_TOKENS,
+        }
+    }
+
+    fn validate(self) -> Result<(), ContextScoutErrorV1> {
+        if self.max_candidates == 0
+            || self.max_candidates > MAX_SCOUT_CANDIDATES
+            || self.max_evidence == 0
+            || self.max_evidence > MAX_SCOUT_EVIDENCE
+            || self.max_text_bytes == 0
+            || self.max_text_bytes > MAX_SCOUT_TEXT_BYTES
+            || self.max_model_input_tokens == 0
+            || self.max_model_input_tokens > MAX_SCOUT_MODEL_INPUT_TOKENS
+            || self.max_model_output_tokens == 0
+            || self.max_model_output_tokens > MAX_SCOUT_MODEL_OUTPUT_TOKENS
+        {
+            return Err(ContextScoutErrorV1::InvalidLimits);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutTriggerV1 {
+    SavedEdit,
+    StopBoundary,
+    ExplicitRequest,
+    /// A session intent pass at a prompt, completed-tool, or stop boundary.
+    IntentBoundary,
+}
+
+/// Content-free daemon receptivity state. The selector owns delivery timing;
+/// candidates and model output cannot override it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutDeliverySelectionInputV1 {
+    pub trigger: ContextScoutTriggerV1,
+    pub quiet_mode: bool,
+    pub has_recent_delivery: bool,
+    pub has_unresolved_interaction: bool,
+    pub critical_safety_evidence: bool,
+    pub delivered_dedupe_keys: BTreeSet<[u8; 32]>,
+}
+
+pub const fn select_context_scout_delivery_window(
+    input: &ContextScoutDeliverySelectionInputV1,
+) -> ContextScoutDeliveryWindowV1 {
+    if let ContextScoutTriggerV1::ExplicitRequest = input.trigger {
+        return ContextScoutDeliveryWindowV1::OnRequest;
+    }
+    if input.critical_safety_evidence {
+        return ContextScoutDeliveryWindowV1::Immediate;
+    }
+    if input.quiet_mode {
+        return ContextScoutDeliveryWindowV1::Suppressed;
+    }
+    if input.has_unresolved_interaction {
+        return ContextScoutDeliveryWindowV1::NextBoundary;
+    }
+    if input.has_recent_delivery {
+        return ContextScoutDeliveryWindowV1::IdleWindow;
+    }
+    match input.trigger {
+        ContextScoutTriggerV1::SavedEdit => ContextScoutDeliveryWindowV1::NextBoundary,
+        ContextScoutTriggerV1::StopBoundary | ContextScoutTriggerV1::IntentBoundary => {
+            ContextScoutDeliveryWindowV1::Immediate
+        }
+        ContextScoutTriggerV1::ExplicitRequest => ContextScoutDeliveryWindowV1::OnRequest,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutSuppressionV1 {
+    Disabled,
+    Paused,
+    DirtyOverlay,
+    QuietOrUnreceptive,
+    NoEligibleCandidate,
+    Expired,
+    Duplicate,
+    Cancelled,
+    ModelOutputInvalid,
+    EvidencePartial,
+    EvidenceStale,
+    EvidenceUnavailable,
+    /// A suggestion for the same session is already pending delivery.
+    PendingSibling,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutSelectionInputV1 {
+    pub address: ContextScoutAddressV1,
+    pub input_watermark: [u8; 32],
+    pub configuration_revision: [u8; 32],
+    pub envelope_id: [u8; 16],
+    pub now: UtcMicros,
+    pub delivery_window: ContextScoutDeliveryWindowV1,
+    pub delivered_dedupe_keys: BTreeSet<[u8; 32]>,
+    pub candidates: Vec<ContextScoutCandidateV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ContextScoutDecisionV1 {
+    Ready {
+        envelope: ContextScoutSuggestionEnvelopeV1,
+    },
+    Delayed {
+        envelope: ContextScoutSuggestionEnvelopeV1,
+    },
+    Suppressed {
+        reason: ContextScoutSuppressionV1,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutSelectionV1 {
+    pub route: ContextScoutRouteV1,
+    pub decision: ContextScoutDecisionV1,
+    #[serde(default)]
+    pub model_outcome: ContextScoutModelOutcomeV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_receipt: Option<ContextScoutModelReceiptV1>,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ContextScoutErrorV1 {
+    #[error("Context Scout address is incomplete or ambiguous")]
+    InvalidAddress,
+    #[error("Context Scout evidence binding is incomplete")]
+    InvalidEvidence,
+    #[error("Context Scout candidate is malformed or exceeds a bound")]
+    InvalidCandidate,
+    #[error("Context Scout limits are invalid")]
+    InvalidLimits,
+    #[error("Context Scout typed configuration is unavailable")]
+    ConfigurationUnavailable,
+    #[error("Context Scout durable boundary received dirty-overlay evidence")]
+    DirtyOverlayDurabilityViolation,
+    #[error("Context Scout receipt or feedback does not match its envelope")]
+    ReceiptBindingMismatch,
+    #[error("Context Scout cancellation/work token is stale")]
+    StaleWork,
+    #[error("Context Scout bounded work or delivery channel is full")]
+    CapacityExceeded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutMutationOperationV1 {
+    Cancel,
+    Claim,
+    Delivery,
+    Feedback,
+}
+
+impl ContextScoutMutationOperationV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancel => "context_scout_cancel",
+            Self::Claim => "context_scout_claim",
+            Self::Delivery => "context_scout_delivery",
+            Self::Feedback => "context_scout_feedback",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutMutationBindingV1 {
+    pub effect_identity: ManifestDigest,
+    pub actor: ActorId,
+    pub scope: ResolvedScope,
+    pub operation: ContextScoutMutationOperationV1,
+    pub idempotency_key: IdempotencyKey,
+    pub input_digest: ManifestDigest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation", content = "result")]
+pub enum ContextScoutMutationResultV1 {
+    Cancel(ContextScoutDurableStoreOutcomeV1),
+    Claim(Box<ContextScoutDurableClaimOutcomeV1>),
+    Delivery {
+        outcome: ContextScoutDurableStoreOutcomeV1,
+        receipt: ContextScoutDeliveryReceiptV1,
+    },
+    Feedback(ContextScoutDurableStoreOutcomeV1),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutMutationSettlementV1 {
+    pub binding: ContextScoutMutationBindingV1,
+    pub expected_state: ManifestDigest,
+    pub committed_state: ManifestDigest,
+    pub result: ContextScoutMutationResultV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextScoutMutationSettlementOutcomeV1 {
+    Reconciled(Box<ContextScoutMutationSettlementV1>),
+    IdempotencyConflict,
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub enum ContextScoutPublicMutationV1 {
+    Cancel {
+        work: ContextScoutWorkV1,
+    },
+    Claim {
+        address: ContextScoutAddressV1,
+        window: ContextScoutDeliveryWindowV1,
+        configuration_revision: [u8; 32],
+        now: UtcMicros,
+        lease: ContextScoutLeaseV1,
+    },
+    Delivery {
+        work: ContextScoutWorkV1,
+        envelope_id: [u8; 16],
+        lease: ContextScoutLeaseV1,
+        configuration_revision: [u8; 32],
+        receipt: ContextScoutDeliveryReceiptV1,
+    },
+    Feedback {
+        address: ContextScoutAddressV1,
+        receipt: ContextScoutDeliveryReceiptV1,
+        feedback: ContextScoutFeedbackV1,
+    },
+}
+
+/// Deterministically choose at most one candidate without invoking a model,
+/// query, database, or network. Equal scores are ordered by stable dedupe key,
+/// category, and text, so replay is repeatable.
+#[tracing::instrument(name = "context_scout_select_deterministic", level = "trace", skip_all)]
+pub fn select_deterministic_context_scout(
+    input: &ContextScoutSelectionInputV1,
+    limits: ContextScoutLimitsV1,
+) -> Result<ContextScoutDecisionV1, ContextScoutErrorV1> {
+    limits.validate()?;
+    input.address.validate()?;
+    if input.input_watermark == [0; 32]
+        || input.configuration_revision == [0; 32]
+        || input.envelope_id == [0; 16]
+        || input.now.0 <= 0
+        || input.delivered_dedupe_keys.len() > MAX_SCOUT_RECENT_DELIVERIES
+        || input.candidates.len() > limits.max_candidates
+    {
+        return Err(ContextScoutErrorV1::InvalidCandidate);
+    }
+    if input.delivery_window == ContextScoutDeliveryWindowV1::Suppressed {
+        return Ok(ContextScoutDecisionV1::Suppressed {
+            reason: ContextScoutSuppressionV1::QuietOrUnreceptive,
+        });
+    }
+    validate_candidate_set(&input.candidates, limits)?;
+    let mut candidates = input.candidates.iter().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .relevance_score
+            .cmp(&left.relevance_score)
+            .then_with(|| left.dedupe_key.cmp(&right.dedupe_key))
+            .then_with(|| left.category.cmp(&right.category))
+            .then_with(|| left.suggestion_text.cmp(&right.suggestion_text))
+    });
+    let mut saw_expired = false;
+    let mut saw_duplicate = false;
+    let mut saw_partial = false;
+    let mut saw_stale = false;
+    let mut saw_unavailable = false;
+    let mut saw_cancelled = false;
+    for candidate in candidates {
+        if !candidate.durable() {
+            saw_unavailable = true;
+            continue;
+        }
+        match candidate.evidence.availability() {
+            ContextScoutEvidenceAvailabilityV1::Complete => {}
+            ContextScoutEvidenceAvailabilityV1::Partial
+                if input.delivery_window == ContextScoutDeliveryWindowV1::OnRequest => {}
+            ContextScoutEvidenceAvailabilityV1::Partial => {
+                saw_partial = true;
+                continue;
+            }
+            ContextScoutEvidenceAvailabilityV1::Stale => {
+                saw_stale = true;
+                continue;
+            }
+            ContextScoutEvidenceAvailabilityV1::Cancelled => {
+                saw_cancelled = true;
+                continue;
+            }
+            ContextScoutEvidenceAvailabilityV1::Unavailable => {
+                saw_unavailable = true;
+                continue;
+            }
+        }
+        if candidate.expires_at.0 <= input.now.0 {
+            saw_expired = true;
+            continue;
+        }
+        if input.delivered_dedupe_keys.contains(&candidate.dedupe_key) {
+            saw_duplicate = true;
+            continue;
+        }
+        let envelope = ContextScoutSuggestionEnvelopeV1 {
+            envelope_id: input.envelope_id,
+            address: input.address,
+            input_watermark: input.input_watermark,
+            configuration_revision: input.configuration_revision,
+            delivery_window: input.delivery_window,
+            candidate: candidate.clone(),
+        };
+        return Ok(match input.delivery_window {
+            ContextScoutDeliveryWindowV1::Immediate => ContextScoutDecisionV1::Ready { envelope },
+            ContextScoutDeliveryWindowV1::NextBoundary
+            | ContextScoutDeliveryWindowV1::IdleWindow
+            | ContextScoutDeliveryWindowV1::OnRequest => {
+                ContextScoutDecisionV1::Delayed { envelope }
+            }
+            ContextScoutDeliveryWindowV1::Suppressed => unreachable!("checked above"),
+        });
+    }
+    let reason = if saw_cancelled {
+        ContextScoutSuppressionV1::Cancelled
+    } else if saw_stale {
+        ContextScoutSuppressionV1::EvidenceStale
+    } else if saw_partial {
+        ContextScoutSuppressionV1::EvidencePartial
+    } else if saw_unavailable {
+        ContextScoutSuppressionV1::EvidenceUnavailable
+    } else if saw_expired {
+        ContextScoutSuppressionV1::Expired
+    } else if saw_duplicate {
+        ContextScoutSuppressionV1::Duplicate
+    } else {
+        ContextScoutSuppressionV1::NoEligibleCandidate
+    };
+    Ok(ContextScoutDecisionV1::Suppressed { reason })
+}
+
+/// Model input is already bounded and evidence-only. There is no tool,
+/// command, credential, source, path, or delivery-policy capability here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutModelRequestV1 {
+    pub candidates: Vec<ContextScoutModelCandidateInputV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutModelCandidateInputV1 {
+    pub dedupe_key: [u8; 32],
+    pub category: ContextScoutCategoryV1,
+    pub suggestion_text: String,
+    pub citation_anchor_ids: Vec<RetrievalAnchorId>,
+}
+
+/// Structured model output may refine text only. It must echo the supplied
+/// deterministic candidate's dedupe key and cite exactly its durable anchors.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutModelCandidateV1 {
+    pub selected_dedupe_key: [u8; 32],
+    pub suggestion_text: String,
+    pub cited_anchor_ids: Vec<RetrievalAnchorId>,
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum ContextScoutModelErrorV1 {
+    #[error("configured Context Scout model route is disabled")]
+    Disabled,
+    #[error("configured Context Scout model route is unavailable")]
+    Unavailable,
+    #[error("configured Context Scout model route denied the request")]
+    Denied,
+    #[error("configured Context Scout model route disconnected mid-run")]
+    Disconnected,
+    #[error("configured Context Scout model route was cancelled")]
+    Cancelled,
+    #[error("configured Context Scout model route exceeded its deadline")]
+    DeadlineExceeded,
+    #[error("configured Context Scout model route exceeded its token budget")]
+    TokenBudgetExceeded,
+    #[error("configured Context Scout model route returned invalid structured output")]
+    InvalidOutput,
+}
+
+impl ContextScoutModelErrorV1 {
+    pub const fn as_model_outcome(self) -> ContextScoutModelOutcomeV1 {
+        match self {
+            Self::Disabled => ContextScoutModelOutcomeV1::Disabled,
+            Self::Unavailable => ContextScoutModelOutcomeV1::Unavailable,
+            Self::Denied => ContextScoutModelOutcomeV1::Denied,
+            Self::Disconnected => ContextScoutModelOutcomeV1::Disconnected,
+            Self::Cancelled => ContextScoutModelOutcomeV1::Cancelled,
+            Self::DeadlineExceeded => ContextScoutModelOutcomeV1::DeadlineExceeded,
+            Self::TokenBudgetExceeded => ContextScoutModelOutcomeV1::TokenBudgetExceeded,
+            Self::InvalidOutput => ContextScoutModelOutcomeV1::InvalidOutput,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextScoutModelProposalV1 {
+    pub candidate: ContextScoutModelCandidateV1,
+    pub receipt: ContextScoutModelReceiptV1,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextScoutModelExecutionV1 {
+    pub deadline: MonotonicDeadline,
+    pub cancellation: CancellationToken,
+    pub max_input_tokens: usize,
+    pub max_output_tokens: usize,
+}
+
+impl ContextScoutModelExecutionV1 {
+    pub fn new(
+        deadline: MonotonicDeadline,
+        cancellation: CancellationToken,
+        limits: ContextScoutLimitsV1,
+    ) -> Result<Self, ContextScoutErrorV1> {
+        limits.validate()?;
+        Ok(Self {
+            deadline,
+            cancellation,
+            max_input_tokens: limits.max_model_input_tokens,
+            max_output_tokens: limits.max_model_output_tokens,
+        })
+    }
+
+    fn matches_limits(&self, limits: ContextScoutLimitsV1) -> bool {
+        self.max_input_tokens == limits.max_model_input_tokens
+            && self.max_output_tokens == limits.max_model_output_tokens
+    }
+
+    pub fn checkpoint(&self) -> Result<(), ContextScoutModelErrorV1> {
+        if self.cancellation.is_cancelled() {
+            return Err(ContextScoutModelErrorV1::Cancelled);
+        }
+        if self.deadline.is_elapsed_at(Instant::now()) {
+            return Err(ContextScoutModelErrorV1::DeadlineExceeded);
+        }
+        Ok(())
+    }
+
+    /// Returns the measured input token count so callers reuse this single
+    /// tokenization. Encoding the serialized request is the most expensive
+    /// step on a deadline-bounded proposal, a cold BPE table build alone can
+    /// spend the whole budget, so it must happen exactly once per request.
+    pub fn validate_input(
+        &self,
+        request: &ContextScoutModelRequestV1,
+    ) -> Result<usize, ContextScoutModelErrorV1> {
+        let tokens =
+            serialized_token_count(request).ok_or(ContextScoutModelErrorV1::TokenBudgetExceeded)?;
+        if tokens > self.max_input_tokens {
+            return Err(ContextScoutModelErrorV1::TokenBudgetExceeded);
+        }
+        Ok(tokens)
+    }
+
+    pub fn validate_output(
+        &self,
+        candidate: &ContextScoutModelCandidateV1,
+    ) -> Result<(), ContextScoutModelErrorV1> {
+        let tokens = serialized_token_count(candidate)
+            .ok_or(ContextScoutModelErrorV1::TokenBudgetExceeded)?;
+        if tokens > self.max_output_tokens {
+            return Err(ContextScoutModelErrorV1::TokenBudgetExceeded);
+        }
+        Ok(())
+    }
+}
+
+pub fn decode_context_scout_model_candidate(
+    bytes: &[u8],
+) -> Result<ContextScoutModelCandidateV1, ContextScoutModelErrorV1> {
+    if bytes.is_empty() || bytes.len() > MAX_SCOUT_TEXT_BYTES {
+        return Err(ContextScoutModelErrorV1::InvalidOutput);
+    }
+    serde_json::from_slice(bytes).map_err(|_| ContextScoutModelErrorV1::InvalidOutput)
+}
+
+/// The daemon's configured model gateway implements this narrow adapter. The
+/// host bundle never selects a model name or grants capabilities itself.
+pub type ContextScoutModelFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<ContextScoutModelProposalV1, ContextScoutModelErrorV1>>
+            + Send
+            + 'a,
+    >,
+>;
+
+pub trait ContextScoutModelAssistantV1: Send + Sync {
+    fn backend(&self) -> ContextScoutModelBackendV1;
+
+    fn propose(
+        &self,
+        request: ContextScoutModelRequestV1,
+        execution: ContextScoutModelExecutionV1,
+    ) -> ContextScoutModelFuture<'_>;
+}
+
+impl<T> ContextScoutModelAssistantV1 for std::sync::Arc<T>
+where
+    T: ContextScoutModelAssistantV1 + ?Sized,
+{
+    fn backend(&self) -> ContextScoutModelBackendV1 {
+        (**self).backend()
+    }
+
+    fn propose(
+        &self,
+        request: ContextScoutModelRequestV1,
+        execution: ContextScoutModelExecutionV1,
+    ) -> ContextScoutModelFuture<'_> {
+        (**self).propose(request, execution)
+    }
+}
+
+/// Run the model adapter only after constructing the deterministic candidate
+/// lane. Invalid/unavailable output falls back without compromising capture.
+#[tracing::instrument(name = "context_scout_select_model", level = "trace", skip_all)]
+pub async fn select_model_assisted_context_scout(
+    input: &ContextScoutSelectionInputV1,
+    limits: ContextScoutLimitsV1,
+    model: &impl ContextScoutModelAssistantV1,
+    execution: ContextScoutModelExecutionV1,
+) -> Result<ContextScoutSelectionV1, ContextScoutErrorV1> {
+    let deterministic = select_deterministic_context_scout(input, limits)?;
+    let selected_candidate = match &deterministic {
+        ContextScoutDecisionV1::Ready { envelope }
+        | ContextScoutDecisionV1::Delayed { envelope } => &envelope.candidate,
+        ContextScoutDecisionV1::Suppressed { .. } => {
+            return Ok(ContextScoutSelectionV1 {
+                route: ContextScoutRouteV1::Deterministic,
+                decision: deterministic,
+                model_outcome: ContextScoutModelOutcomeV1::NotRequested,
+                model_receipt: None,
+            });
+        }
+    };
+    if !execution.matches_limits(limits) {
+        return Err(ContextScoutErrorV1::InvalidLimits);
+    }
+    if let Err(error) = execution.checkpoint() {
+        return Ok(ContextScoutSelectionV1 {
+            route: ContextScoutRouteV1::DeterministicFallback,
+            decision: deterministic,
+            model_outcome: error.as_model_outcome(),
+            model_receipt: None,
+        });
+    }
+    let request = model_request(selected_candidate);
+    if let Err(error) = execution.validate_input(&request) {
+        return Ok(ContextScoutSelectionV1 {
+            route: ContextScoutRouteV1::DeterministicFallback,
+            decision: deterministic,
+            model_outcome: error.as_model_outcome(),
+            model_receipt: None,
+        });
+    }
+    let requested_backend = model.backend();
+    let max_input_tokens = execution.max_input_tokens;
+    let max_output_tokens = execution.max_output_tokens;
+    let post_execution = execution.clone();
+    let proposal = match model.propose(request, execution).await {
+        Ok(proposal) => proposal,
+        Err(error) => {
+            return Ok(ContextScoutSelectionV1 {
+                route: ContextScoutRouteV1::DeterministicFallback,
+                decision: deterministic,
+                model_outcome: error.as_model_outcome(),
+                model_receipt: None,
+            });
+        }
+    };
+    if let Err(error) = post_execution.checkpoint() {
+        return Ok(ContextScoutSelectionV1 {
+            route: ContextScoutRouteV1::DeterministicFallback,
+            decision: deterministic,
+            model_outcome: error.as_model_outcome(),
+            model_receipt: None,
+        });
+    }
+    if !valid_model_receipt(
+        &proposal.receipt,
+        requested_backend,
+        max_input_tokens,
+        max_output_tokens,
+    ) {
+        return Ok(ContextScoutSelectionV1 {
+            route: ContextScoutRouteV1::DeterministicFallback,
+            decision: deterministic,
+            model_outcome: ContextScoutModelOutcomeV1::InvalidOutput,
+            model_receipt: None,
+        });
+    }
+    let Some(candidate) = validated_model_candidate(
+        selected_candidate,
+        limits,
+        selected_candidate.dedupe_key,
+        proposal.candidate,
+    ) else {
+        return Ok(ContextScoutSelectionV1 {
+            route: ContextScoutRouteV1::DeterministicFallback,
+            decision: deterministic,
+            model_outcome: ContextScoutModelOutcomeV1::InvalidOutput,
+            model_receipt: None,
+        });
+    };
+    let mut model_input = input.clone();
+    model_input.candidates = vec![candidate];
+    Ok(ContextScoutSelectionV1 {
+        route: ContextScoutRouteV1::ModelAssisted,
+        decision: select_deterministic_context_scout(&model_input, limits)?,
+        model_outcome: ContextScoutModelOutcomeV1::Succeeded,
+        model_receipt: Some(proposal.receipt),
+    })
+}
+
+fn valid_model_receipt(
+    receipt: &ContextScoutModelReceiptV1,
+    requested_backend: ContextScoutModelBackendV1,
+    max_input_tokens: usize,
+    max_output_tokens: usize,
+) -> bool {
+    requested_backend == ContextScoutModelBackendV1::CodexAppServer
+        && receipt.requested_backend == requested_backend
+        && receipt
+            .actual_provider
+            .as_deref()
+            .is_some_and(|provider| provider == "codex")
+        && receipt
+            .actual_model
+            .as_ref()
+            .is_some_and(|model| !model.trim().is_empty() && model.len() <= MAX_SCOUT_TEXT_BYTES)
+        && receipt
+            .input_tokens
+            .is_some_and(|tokens| tokens <= max_input_tokens as u64)
+        && receipt
+            .output_tokens
+            .is_some_and(|tokens| tokens <= max_output_tokens as u64)
+        && receipt.estimated_cost_microusd.is_some()
+}
+
+/// Only the deterministic pick reaches the model. Refined text keeps that
+/// candidate's citations, so text from any other candidate would add context
+/// those anchors do not support.
+fn model_request(selected: &ContextScoutCandidateV1) -> ContextScoutModelRequestV1 {
+    ContextScoutModelRequestV1 {
+        candidates: vec![ContextScoutModelCandidateInputV1 {
+            dedupe_key: selected.dedupe_key,
+            category: selected.category,
+            suggestion_text: selected.suggestion_text.clone(),
+            citation_anchor_ids: selected.evidence.anchors().cloned().collect(),
+        }],
+    }
+}
+
+fn validated_model_candidate(
+    base: &ContextScoutCandidateV1,
+    limits: ContextScoutLimitsV1,
+    selected_dedupe_key: [u8; 32],
+    output: ContextScoutModelCandidateV1,
+) -> Option<ContextScoutCandidateV1> {
+    if output.selected_dedupe_key != selected_dedupe_key {
+        return None;
+    }
+    let output_tokens = serialized_token_count(&output)?;
+    if !base.durable()
+        || !safe_suggestion_text(&output.suggestion_text)
+        || !unsupported_code_tokens(&base.suggestion_text, &output.suggestion_text).is_empty()
+        // A dropped error code, path, or number loses what the citations support.
+        || !unsupported_code_tokens(&output.suggestion_text, &base.suggestion_text).is_empty()
+        || output.suggestion_text.len() > limits.max_text_bytes
+        || output_tokens > limits.max_model_output_tokens
+        || output.cited_anchor_ids.len() > limits.max_evidence
+    {
+        return None;
+    }
+    let expected = base.evidence.anchors().cloned().collect::<BTreeSet<_>>();
+    let cited_len = output.cited_anchor_ids.len();
+    let cited = output.cited_anchor_ids.into_iter().collect::<BTreeSet<_>>();
+    if cited.len() != cited_len || expected != cited {
+        return None;
+    }
+    Some(ContextScoutCandidateV1 {
+        suggestion_text: output.suggestion_text,
+        ..base.clone()
+    })
+}
+
+/// Code-like tokens of `refined` that never occur in `original`. The model
+/// sees only the original text, so such a token is an invented identifier,
+/// path, or number presented under the original's exact citations.
+fn unsupported_code_tokens<'a>(original: &str, refined: &'a str) -> BTreeSet<&'a str> {
+    refined
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | ':' | '/' | '.' | '-'))
+        })
+        .map(|token| token.trim_matches(['.', ',', ':', ';', '-']))
+        .filter(|token| code_like_token(token) && !original.contains(token))
+        .collect()
+}
+
+fn code_like_token(token: &str) -> bool {
+    token.contains(['_', '/', '.'])
+        || token.contains("::")
+        || token.bytes().any(|byte| byte.is_ascii_digit())
+        || token
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+}
+
+fn validate_candidate_set(
+    candidates: &[ContextScoutCandidateV1],
+    limits: ContextScoutLimitsV1,
+) -> Result<(), ContextScoutErrorV1> {
+    let mut dedupe_keys = BTreeSet::new();
+    for candidate in candidates {
+        candidate.validate(limits)?;
+        if !dedupe_keys.insert(candidate.dedupe_key) {
+            return Err(ContextScoutErrorV1::InvalidCandidate);
+        }
+    }
+    Ok(())
+}
+
+fn safe_suggestion_text(value: &str) -> bool {
+    !value.trim().is_empty()
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+}
+
+#[cfg(feature = "token-counting")]
+pub(super) fn serialized_token_count(value: &impl Serialize) -> Option<usize> {
+    let json = serde_json::to_string(value).ok()?;
+    let bpe = o200k_base()
+        .inspect_err(|error| tracing::error!(%error, "tokenizer initialization failed"))
+        .ok()?;
+    Some(bpe.encode_ordinary(&json).len())
+}
+
+#[cfg(not(feature = "token-counting"))]
+pub(super) fn serialized_token_count(_value: &impl Serialize) -> Option<usize> {
+    None
+}
+
+/// Builds the shared tokenizer table, blocking until it exists.
+///
+/// The first `serialized_token_count` anywhere in the process builds a
+/// multi-megabyte BPE table. Measured on one contended Linux core that build
+/// runs 0.9s, and 4.4s at a tenth of a core, while a Scout proposal gives
+/// itself one second for everything, tokenizer included. Paying the build
+/// inside `propose` therefore spends the whole budget before the backend is
+/// ever raced, and the proposal reports `DeadlineExceeded` over a denial or a
+/// disconnect the backend had already produced. Callers that own a
+/// deadline-free moment build it here instead.
+pub(super) fn warm_token_counter() {
+    #[cfg(feature = "token-counting")]
+    {
+        if let Err(error) = o200k_base() {
+            tracing::error!(%error, "tokenizer initialization failed");
+        }
+    }
+}
+
+/// Exact-address burst coalescer. Superseded generations are visible through a
+/// new token; callers must not persist a result after `is_current` becomes
+/// false.
+#[derive(Default)]
+pub struct ContextScoutCoalescerV1 {
+    active: BTreeMap<ContextScoutAddressV1, ContextScoutWorkV1>,
+}
+
+impl ContextScoutCoalescerV1 {
+    fn restore(&mut self, work: ContextScoutWorkV1) -> Result<(), ContextScoutErrorV1> {
+        work.address.validate()?;
+        if work.generation == 0 || work.input_watermark == [0; 32] {
+            return Err(ContextScoutErrorV1::StaleWork);
+        }
+        if !self.active.contains_key(&work.address)
+            && self.active.len() >= MAX_SCOUT_ACTIVE_ADDRESSES
+        {
+            return Err(ContextScoutErrorV1::CapacityExceeded);
+        }
+        match self.active.get(&work.address) {
+            Some(current) if current.generation > work.generation => Ok(()),
+            Some(current) if current.generation == work.generation => {
+                if current == &work {
+                    Ok(())
+                } else {
+                    Err(ContextScoutErrorV1::StaleWork)
+                }
+            }
+            _ => {
+                self.active.insert(work.address, work);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn enqueue(
+        &mut self,
+        address: ContextScoutAddressV1,
+        input_watermark: [u8; 32],
+    ) -> Result<ContextScoutWorkV1, ContextScoutErrorV1> {
+        address.validate()?;
+        if input_watermark == [0; 32] {
+            return Err(ContextScoutErrorV1::InvalidCandidate);
+        }
+        if !self.active.contains_key(&address) && self.active.len() >= MAX_SCOUT_ACTIVE_ADDRESSES {
+            return Err(ContextScoutErrorV1::CapacityExceeded);
+        }
+        let generation = self
+            .active
+            .get(&address)
+            .map_or(1, |work| work.generation.saturating_add(1));
+        let work = ContextScoutWorkV1 {
+            address,
+            generation,
+            input_watermark,
+        };
+        self.active.insert(address, work);
+        Ok(work)
+    }
+
+    pub fn is_current(&self, work: ContextScoutWorkV1) -> bool {
+        self.active.get(&work.address) == Some(&work)
+    }
+
+    pub fn cancel(&mut self, work: ContextScoutWorkV1) -> Result<(), ContextScoutErrorV1> {
+        if !self.is_current(work) {
+            return Err(ContextScoutErrorV1::StaleWork);
+        }
+        self.active.remove(&work.address);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChannelSlotV1 {
+    work: ContextScoutWorkV1,
+    envelope: ContextScoutSuggestionEnvelopeV1,
+    claimed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextScoutChannelOutcomeV1 {
+    Offered,
+    Coalesced,
+    Superseded,
+    Suppressed,
+}
+
+/// The single bounded suggestion channel. It stores no more than one pending
+/// envelope per exact address/eligibility window.
+#[derive(Default)]
+pub struct ContextScoutSuggestionChannelV1 {
+    slots: BTreeMap<ContextScoutAddressV1, ChannelSlotV1>,
+}
+
+pub struct ContextScoutClaimV1<'a> {
+    channel: &'a mut ContextScoutSuggestionChannelV1,
+    work: ContextScoutWorkV1,
+    envelope: ContextScoutSuggestionEnvelopeV1,
+    completed: bool,
+}
+
+impl ContextScoutClaimV1<'_> {
+    pub fn envelope(&self) -> &ContextScoutSuggestionEnvelopeV1 {
+        &self.envelope
+    }
+
+    pub fn complete(
+        mut self,
+        receipt: &ContextScoutDeliveryReceiptV1,
+    ) -> Result<(), ContextScoutErrorV1> {
+        validate_context_scout_delivery_receipt(&self.envelope, receipt)?;
+        let slot = self
+            .channel
+            .slots
+            .get(&self.work.address)
+            .ok_or(ContextScoutErrorV1::ReceiptBindingMismatch)?;
+        if slot.work != self.work || !slot.claimed {
+            return Err(ContextScoutErrorV1::ReceiptBindingMismatch);
+        }
+        self.channel.slots.remove(&self.work.address);
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for ContextScoutClaimV1<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        if let Some(slot) = self.channel.slots.get_mut(&self.work.address)
+            && slot.work == self.work
+        {
+            slot.claimed = false;
+        }
+    }
+}
+
+impl ContextScoutSuggestionChannelV1 {
+    pub fn offer(
+        &mut self,
+        work: ContextScoutWorkV1,
+        decision: ContextScoutDecisionV1,
+    ) -> Result<ContextScoutChannelOutcomeV1, ContextScoutErrorV1> {
+        let envelope = match decision {
+            ContextScoutDecisionV1::Ready { envelope }
+            | ContextScoutDecisionV1::Delayed { envelope } => envelope,
+            ContextScoutDecisionV1::Suppressed { .. } => {
+                return Ok(ContextScoutChannelOutcomeV1::Suppressed);
+            }
+        };
+        validate_durable_envelope(&envelope)?;
+        if work.address != envelope.address
+            || work.input_watermark != envelope.input_watermark
+            || work.generation == 0
+        {
+            return Err(ContextScoutErrorV1::StaleWork);
+        }
+        if !self.slots.contains_key(&envelope.address)
+            && self.slots.len() >= MAX_SCOUT_ACTIVE_ADDRESSES
+        {
+            return Err(ContextScoutErrorV1::CapacityExceeded);
+        }
+        match self.slots.get(&envelope.address) {
+            Some(existing) if existing.work.generation > work.generation => {
+                Err(ContextScoutErrorV1::StaleWork)
+            }
+            Some(existing) if existing.work == work && existing.envelope == envelope => {
+                Ok(ContextScoutChannelOutcomeV1::Coalesced)
+            }
+            Some(existing) if existing.work.generation == work.generation => {
+                Err(ContextScoutErrorV1::StaleWork)
+            }
+            Some(_) => {
+                self.slots.insert(
+                    envelope.address,
+                    ChannelSlotV1 {
+                        work,
+                        envelope,
+                        claimed: false,
+                    },
+                );
+                Ok(ContextScoutChannelOutcomeV1::Superseded)
+            }
+            None => {
+                self.slots.insert(
+                    envelope.address,
+                    ChannelSlotV1 {
+                        work,
+                        envelope,
+                        claimed: false,
+                    },
+                );
+                Ok(ContextScoutChannelOutcomeV1::Offered)
+            }
+        }
+    }
+
+    pub fn claim(&mut self, address: ContextScoutAddressV1) -> Option<ContextScoutClaimV1<'_>> {
+        let (work, envelope) = {
+            let slot = self.slots.get_mut(&address)?;
+            if slot.claimed {
+                return None;
+            }
+            slot.claimed = true;
+            (slot.work, slot.envelope.clone())
+        };
+        Some(ContextScoutClaimV1 {
+            channel: self,
+            work,
+            envelope,
+            completed: false,
+        })
+    }
+
+    pub fn cancel(&mut self, work: ContextScoutWorkV1) -> Result<(), ContextScoutErrorV1> {
+        let Some(slot) = self.slots.get(&work.address) else {
+            return Err(ContextScoutErrorV1::StaleWork);
+        };
+        if slot.work != work {
+            return Err(ContextScoutErrorV1::StaleWork);
+        }
+        self.slots.remove(&work.address);
+        Ok(())
+    }
+}
+
+pub fn context_scout_delivery_receipt_matches_envelope(
+    receipt: &ContextScoutDeliveryReceiptV1,
+    envelope: &HookEventEnvelopeV2,
+) -> bool {
+    receipt.receipt_id != [0; 16]
+        && receipt.envelope_id != [0; 16]
+        && receipt.delivered_at.0 > 0
+        && receipt.receipt_id
+            == context_scout_delivery_receipt_id(envelope.event_id, receipt.envelope_id)
+}
+
+/// Local hook-scope adapter. The receipt wire type lives in application, so
+/// this crate cannot implement the hooks trait on that foreign type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextScoutDeliveryReceiptHookV1 {
+    pub receipt: ContextScoutDeliveryReceiptV1,
+}
+
+impl HookScopedFeedbackV1 for ContextScoutDeliveryReceiptHookV1 {
+    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        context_scout_delivery_receipt_matches_envelope(&self.receipt, envelope)
+    }
+}
+
+pub fn context_scout_delivery_receipt_id(event_id: [u8; 16], envelope_id: [u8; 16]) -> [u8; 16] {
+    let mut material = [0; 32];
+    material[..16].copy_from_slice(&event_id);
+    material[16..].copy_from_slice(&envelope_id);
+    let digest = Sha256::digest(material);
+    let mut output = [0; 16];
+    output.copy_from_slice(&digest[..16]);
+    output
+}
+
+pub fn validate_context_scout_delivery_receipt(
+    envelope: &ContextScoutSuggestionEnvelopeV1,
+    receipt: &ContextScoutDeliveryReceiptV1,
+) -> Result<(), ContextScoutErrorV1> {
+    validate_durable_envelope(envelope)?;
+    if receipt.receipt_id == [0; 16]
+        || receipt.envelope_id != envelope.envelope_id
+        || receipt.delivered_at.0 <= 0
+        || (receipt.outcome != ContextScoutDeliveryOutcomeV1::ExpiredUnseen
+            && receipt.delivered_at.0 >= envelope.candidate.expires_at.0)
+    {
+        return Err(ContextScoutErrorV1::ReceiptBindingMismatch);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutRecentDeliveryV1 {
+    pub entry: ContextScoutDurableQueueEntryV1,
+    pub receipt: ContextScoutDeliveryReceiptV1,
+    pub feedback: Option<ContextScoutFeedbackV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutRecentStateV1 {
+    pub configuration_revision: [u8; 32],
+    pub observed_at: UtcMicros,
+    pub pending: Vec<ContextScoutDurableQueueEntryV1>,
+    pub deliveries: Vec<ContextScoutRecentDeliveryV1>,
+    pub omitted: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextScoutRecentReadOutcomeV1 {
+    Ready(ContextScoutRecentStateV1),
+    Unavailable,
+}
+
+pub fn validate_context_scout_feedback(
+    receipt: &ContextScoutDeliveryReceiptV1,
+    feedback: ContextScoutFeedbackV1,
+) -> Result<(), ContextScoutErrorV1> {
+    validate_receipt_shape(receipt)?;
+    if feedback.receipt_id != receipt.receipt_id {
+        return Err(ContextScoutErrorV1::ReceiptBindingMismatch);
+    }
+    Ok(())
+}
+
+fn validate_receipt_shape(
+    receipt: &ContextScoutDeliveryReceiptV1,
+) -> Result<(), ContextScoutErrorV1> {
+    if receipt.receipt_id == [0; 16]
+        || receipt.envelope_id == [0; 16]
+        || receipt.delivered_at.0 <= 0
+    {
+        return Err(ContextScoutErrorV1::ReceiptBindingMismatch);
+    }
+    Ok(())
+}
+
+fn validate_durable_envelope(
+    envelope: &ContextScoutSuggestionEnvelopeV1,
+) -> Result<(), ContextScoutErrorV1> {
+    envelope.address.validate()?;
+    envelope
+        .candidate
+        .validate(ContextScoutLimitsV1::bounded_defaults())?;
+    if envelope.envelope_id == [0; 16]
+        || envelope.input_watermark == [0; 32]
+        || envelope.configuration_revision == [0; 32]
+        || envelope.delivery_window == ContextScoutDeliveryWindowV1::Suppressed
+        || !envelope.candidate.durable()
+        // The public projection pins a content generation, so session
+        // evidence must carry the generation it was judged against.
+        || envelope.candidate.evidence.code_generation_id().is_none()
+    {
+        return Err(ContextScoutErrorV1::DirtyOverlayDurabilityViolation);
+    }
+    Ok(())
+}
+
+pub(crate) trait ContextScoutDurableQueueEntryExt {
+    fn validate(&self) -> Result<(), ContextScoutErrorV1>;
+}
+
+impl ContextScoutDurableQueueEntryExt for ContextScoutDurableQueueEntryV1 {
+    fn validate(&self) -> Result<(), ContextScoutErrorV1> {
+        self.work.address.validate()?;
+        if self.work.generation == 0 || self.work.input_watermark == [0; 32] {
+            return Err(ContextScoutErrorV1::StaleWork);
+        }
+        match (self.route, self.model_outcome, self.model_receipt.as_ref()) {
+            (
+                ContextScoutRouteV1::ModelAssisted,
+                ContextScoutModelOutcomeV1::Succeeded,
+                Some(receipt),
+            ) if receipt.requested_backend == ContextScoutModelBackendV1::CodexAppServer => {}
+            (
+                ContextScoutRouteV1::Deterministic | ContextScoutRouteV1::DeterministicFallback,
+                ContextScoutModelOutcomeV1::NotRequested,
+                None,
+            ) => {}
+            (
+                ContextScoutRouteV1::DeterministicFallback,
+                ContextScoutModelOutcomeV1::Disabled
+                | ContextScoutModelOutcomeV1::Unavailable
+                | ContextScoutModelOutcomeV1::DeadlineExceeded
+                | ContextScoutModelOutcomeV1::TokenBudgetExceeded
+                | ContextScoutModelOutcomeV1::InvalidOutput,
+                None,
+            ) => {}
+            // The intent pass records its engine outcome in the session
+            // evidence's decision receipt, never in a Codex model receipt.
+            (ContextScoutRouteV1::DecisionEngine, outcome, None)
+                if self
+                    .envelope
+                    .candidate
+                    .evidence
+                    .as_session()
+                    .is_some_and(|evidence| evidence.decision.outcome == outcome) => {}
+            _ => return Err(ContextScoutErrorV1::InvalidCandidate),
+        }
+        // Session evidence is produced only by the intent pass.
+        if self.envelope.candidate.evidence.as_session().is_some()
+            != (self.route == ContextScoutRouteV1::DecisionEngine)
+        {
+            return Err(ContextScoutErrorV1::InvalidCandidate);
+        }
+        validate_durable_envelope(&self.envelope)?;
+        if self.work.address != self.envelope.address
+            || self.work.input_watermark != self.envelope.input_watermark
+        {
+            return Err(ContextScoutErrorV1::StaleWork);
+        }
+        Ok(())
+    }
+}
+
+/// Result of one daemon/store serialized Scout mutation. `Duplicate` and
+/// `Superseded` are convergent outcomes, while `Unavailable` commits nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextScoutDurableStoreOutcomeV1 {
+    Stored,
+    Duplicate,
+    Superseded,
+    Unavailable,
+}
+
+pub(crate) trait ContextScoutLeaseExt {
+    fn validate(self, now: UtcMicros) -> Result<(), ContextScoutErrorV1>;
+}
+
+impl ContextScoutLeaseExt for ContextScoutLeaseV1 {
+    fn validate(self, now: UtcMicros) -> Result<(), ContextScoutErrorV1> {
+        if self.lease_id == [0; 16] || now.0 <= 0 || self.expires_at.0 <= now.0 {
+            return Err(ContextScoutErrorV1::StaleWork);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// Boxing the large variant would ripple through in-flight construction/match
+// sites; the size gap is accepted here.
+#[allow(clippy::large_enum_variant)]
+pub enum ContextScoutDurableClaimOutcomeV1 {
+    Claimed(ContextScoutDurableClaimV1),
+    Empty,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextScoutDurableStartupOutcomeV1 {
+    Ready {
+        entries: Vec<ContextScoutDurableQueueEntryV1>,
+        truncated: bool,
+    },
+    /// The stored document predated delivery provenance. Startup replaced it
+    /// with an empty current document and did not replay its receipts.
+    Reset,
+    Unavailable,
+}
+
+/// Selected only by the daemon's typed configuration. There is no built-in
+/// model name, route, retry, or timing default in this host-facing runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutRuntimeModeV1 {
+    Deterministic,
+    ConfiguredModel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutServiceStateV1 {
+    Active,
+    Paused,
+    Disabled,
+}
+
+/// Typed configuration selected by the daemon configuration authority. The
+/// Scout can report and obey this state, but cannot persist or change it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutControlV1 {
+    pub configuration_revision: [u8; 32],
+    pub state: ContextScoutServiceStateV1,
+    pub mode: ContextScoutRuntimeModeV1,
+    pub model_path: Option<ContextScoutModelBackendV1>,
+    pub limits: ContextScoutLimitsV1,
+    /// Pinned session intent pass, absent when none is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<ContextScoutIntentControlV1>,
+}
+
+/// Behavior pin of the configured intent pass: whether it runs and the digest
+/// of its whole settings block (engine, window, questions, lifecycle bounds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutIntentControlV1 {
+    pub enabled: bool,
+    pub settings_digest: [u8; 32],
+}
+
+impl ContextScoutControlV1 {
+    fn validate(self) -> Result<(), ContextScoutErrorV1> {
+        if self.configuration_revision == [0; 32]
+            || matches!(
+                (self.mode, self.model_path),
+                (ContextScoutRuntimeModeV1::Deterministic, Some(_))
+                    | (ContextScoutRuntimeModeV1::ConfiguredModel, None)
+            )
+            || self.model_path == Some(ContextScoutModelBackendV1::Disabled)
+            || self
+                .intent
+                .is_some_and(|intent| intent.settings_digest == [0; 32])
+        {
+            return Err(ContextScoutErrorV1::InvalidLimits);
+        }
+        self.limits.validate()
+    }
+}
+
+/// Read-only status for host/dashboard projection. Internal Scout work is
+/// suggestion coalescing only and never creates a task or work-graph node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextScoutStatusV1 {
+    pub configuration_revision: [u8; 32],
+    pub state: ContextScoutServiceStateV1,
+    pub mode: ContextScoutRuntimeModeV1,
+    pub model_path: Option<ContextScoutModelBackendV1>,
+    pub limits: ContextScoutLimitsV1,
+    pub active_suggestions: usize,
+    pub last_route: Option<ContextScoutRouteV1>,
+    pub last_suppression: Option<ContextScoutSuppressionV1>,
+    pub last_model_outcome: Option<ContextScoutModelOutcomeV1>,
+    pub last_model_receipt: Option<ContextScoutModelReceiptV1>,
+    pub last_delivery_outcome: Option<ContextScoutDeliveryOutcomeV1>,
+    pub last_feedback: Option<ContextScoutFeedbackKindV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutExplanationV1 {
+    pub status: ContextScoutStatusV1,
+    pub recent: ContextScoutRecentStateV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutCapabilityStateV1 {
+    pub state: ContextScoutServiceStateV1,
+    pub mode: ContextScoutRuntimeModeV1,
+    pub deterministic_available: bool,
+    pub configured_model: Option<ContextScoutModelBackendV1>,
+    pub configured_model_available: bool,
+    pub last_model_outcome: Option<ContextScoutModelOutcomeV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutBudgetStateV1 {
+    pub limits: ContextScoutLimitsV1,
+    pub last_model_outcome: Option<ContextScoutModelOutcomeV1>,
+    pub exhausted: bool,
+    pub last_input_tokens: Option<u64>,
+    pub last_output_tokens: Option<u64>,
+    pub last_estimated_cost_microusd: Option<u64>,
+}
+
+/// Result of preparing one suggestion. Silence is a successful, normal output
+/// and does not create a durable queue entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextScoutRuntimeOutcomeV1 {
+    Enqueued {
+        entry: Box<ContextScoutDurableQueueEntryV1>,
+        store_outcome: ContextScoutDurableStoreOutcomeV1,
+    },
+    Suppressed {
+        reason: ContextScoutSuppressionV1,
+    },
+    Unavailable,
+}
+
+/// Concrete deterministic/model-assisted runtime over the project's durable
+/// queue. It owns only process-local supersession tokens; every durable
+/// mutation is delegated to `store` and can therefore survive a restart.
+pub struct ContextScoutDurableRuntimeV1<M> {
+    store: Arc<ProjectContextScoutDurableStoreV1>,
+    model: M,
+    coalescer: ContextScoutCoalescerV1,
+    last_route: Option<ContextScoutRouteV1>,
+    last_suppression: Option<ContextScoutSuppressionV1>,
+    last_model_outcome: Option<ContextScoutModelOutcomeV1>,
+    last_model_receipt: Option<ContextScoutModelReceiptV1>,
+    last_delivery_outcome: Option<ContextScoutDeliveryOutcomeV1>,
+    last_feedback: Option<ContextScoutFeedbackKindV1>,
+}
+
+impl<M> ContextScoutDurableRuntimeV1<M> {
+    pub fn new(store: Arc<ProjectContextScoutDurableStoreV1>, model: M) -> Self {
+        Self {
+            store,
+            model,
+            coalescer: ContextScoutCoalescerV1::default(),
+            last_route: None,
+            last_suppression: None,
+            last_model_outcome: None,
+            last_model_receipt: None,
+            last_delivery_outcome: None,
+            last_feedback: None,
+        }
+    }
+
+    pub(crate) fn restore_startup(
+        &mut self,
+        startup: &ContextScoutDurableStartupOutcomeV1,
+    ) -> Result<(), ContextScoutErrorV1> {
+        let entries = match startup {
+            ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated } => {
+                if *truncated {
+                    return Err(ContextScoutErrorV1::CapacityExceeded);
+                }
+                entries
+            }
+            ContextScoutDurableStartupOutcomeV1::Reset => return Ok(()),
+            ContextScoutDurableStartupOutcomeV1::Unavailable => {
+                return Err(ContextScoutErrorV1::ConfigurationUnavailable);
+            }
+        };
+        for entry in entries {
+            entry.validate()?;
+            self.coalescer.restore(entry.work)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replace_model(&mut self, model: M) {
+        self.model = model;
+    }
+
+    pub fn status(
+        &self,
+        control: ContextScoutControlV1,
+    ) -> Result<ContextScoutStatusV1, ContextScoutErrorV1> {
+        control.validate()?;
+        Ok(ContextScoutStatusV1 {
+            configuration_revision: control.configuration_revision,
+            state: control.state,
+            mode: control.mode,
+            model_path: control.model_path,
+            limits: control.limits,
+            active_suggestions: self.coalescer.active.len(),
+            last_route: self.last_route,
+            last_suppression: self.last_suppression,
+            last_model_outcome: self.last_model_outcome,
+            last_model_receipt: self.last_model_receipt.clone(),
+            last_delivery_outcome: self.last_delivery_outcome,
+            last_feedback: self.last_feedback,
+        })
+    }
+}
+
+impl<M> ContextScoutDurableRuntimeV1<M>
+where
+    M: ContextScoutModelAssistantV1,
+{
+    /// Obey daemon-owned enable/pause/model configuration before creating
+    /// process-local work or invoking the configured model adapter.
+    pub(crate) async fn prepare_controlled(
+        &mut self,
+        input: &ContextScoutSelectionInputV1,
+        control: ContextScoutControlV1,
+        model_execution: ContextScoutModelExecutionV1,
+    ) -> Result<ContextScoutRuntimeOutcomeV1, ContextScoutErrorV1> {
+        control.validate()?;
+        if input.configuration_revision != control.configuration_revision {
+            return Err(ContextScoutErrorV1::InvalidCandidate);
+        }
+        match control.state {
+            ContextScoutServiceStateV1::Paused => {
+                self.last_suppression = Some(ContextScoutSuppressionV1::Paused);
+                Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
+                    reason: ContextScoutSuppressionV1::Paused,
+                })
+            }
+            ContextScoutServiceStateV1::Disabled => {
+                self.last_suppression = Some(ContextScoutSuppressionV1::Disabled);
+                Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
+                    reason: ContextScoutSuppressionV1::Disabled,
+                })
+            }
+            ContextScoutServiceStateV1::Active => {
+                if control.mode == ContextScoutRuntimeModeV1::ConfiguredModel
+                    && !model_execution.matches_limits(control.limits)
+                {
+                    return Err(ContextScoutErrorV1::InvalidLimits);
+                }
+                self.prepare(input, control.limits, control.mode, model_execution)
+                    .await
+            }
+        }
+    }
+
+    /// Select, bind, and durably enqueue at most one suggestion. Privacy and
+    /// dirty-overlay suppression run before model invocation or persistence.
+    async fn prepare(
+        &mut self,
+        input: &ContextScoutSelectionInputV1,
+        limits: ContextScoutLimitsV1,
+        mode: ContextScoutRuntimeModeV1,
+        model_execution: ContextScoutModelExecutionV1,
+    ) -> Result<ContextScoutRuntimeOutcomeV1, ContextScoutErrorV1> {
+        let selection = if let Some(model_outcome) = intent_pass_model_outcome(input)? {
+            // Intent-pass candidates were judged by the decision engine when
+            // they were built; selection among them is deterministic, and the
+            // route records the engine outcome their receipts carry.
+            ContextScoutSelectionV1 {
+                route: ContextScoutRouteV1::DecisionEngine,
+                decision: select_deterministic_context_scout(input, limits)?,
+                model_outcome,
+                model_receipt: None,
+            }
+        } else {
+            match mode {
+                ContextScoutRuntimeModeV1::Deterministic => ContextScoutSelectionV1 {
+                    route: ContextScoutRouteV1::Deterministic,
+                    decision: select_deterministic_context_scout(input, limits)?,
+                    model_outcome: ContextScoutModelOutcomeV1::NotRequested,
+                    model_receipt: None,
+                },
+                ContextScoutRuntimeModeV1::ConfiguredModel => {
+                    select_model_assisted_context_scout(input, limits, &self.model, model_execution)
+                        .await?
+                }
+            }
+        };
+        self.last_route = Some(selection.route);
+        if selection.route != ContextScoutRouteV1::DecisionEngine {
+            self.last_model_outcome = Some(selection.model_outcome);
+            self.last_model_receipt.clone_from(&selection.model_receipt);
+        }
+        if selection.model_outcome == ContextScoutModelOutcomeV1::Cancelled {
+            self.last_suppression = Some(ContextScoutSuppressionV1::Cancelled);
+            return Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
+                reason: ContextScoutSuppressionV1::Cancelled,
+            });
+        }
+        let model_receipt = selection.model_receipt.clone();
+        let envelope = match selection.decision {
+            ContextScoutDecisionV1::Ready { envelope }
+            | ContextScoutDecisionV1::Delayed { envelope } => envelope,
+            ContextScoutDecisionV1::Suppressed { reason } => {
+                self.last_suppression = Some(reason);
+                return Ok(ContextScoutRuntimeOutcomeV1::Suppressed { reason });
+            }
+        };
+        let work = self
+            .coalescer
+            .enqueue(input.address, input.input_watermark)?;
+        if !self.coalescer.is_current(work) {
+            return Err(ContextScoutErrorV1::StaleWork);
+        }
+        let entry = ContextScoutDurableQueueEntryV1 {
+            work,
+            route: selection.route,
+            model_outcome: selection.model_outcome,
+            model_receipt,
+            envelope,
+        };
+        entry.validate()?;
+        let store_outcome = self.store.enqueue(entry.clone()).await;
+        if store_outcome == ContextScoutDurableStoreOutcomeV1::Unavailable {
+            let _ = self.coalescer.cancel(work);
+            return Ok(ContextScoutRuntimeOutcomeV1::Unavailable);
+        }
+        self.last_suppression = None;
+        Ok(ContextScoutRuntimeOutcomeV1::Enqueued {
+            entry: Box::new(entry),
+            store_outcome,
+        })
+    }
+
+    /// Cancels a work generation locally first, preventing a model result from
+    /// racing a durable write after the daemon's cancellation signal.
+    pub async fn cancel(
+        &mut self,
+        work: ContextScoutWorkV1,
+    ) -> Result<ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1> {
+        self.coalescer.cancel(work)?;
+        self.last_suppression = Some(ContextScoutSuppressionV1::Cancelled);
+        Ok(self.store.cancel_work(work).await)
+    }
+
+    /// Validate receipt identity before delegating an atomic durable completion.
+    pub async fn complete_delivery(
+        &mut self,
+        claim: &ContextScoutDurableClaimV1,
+        receipt: &ContextScoutDeliveryReceiptV1,
+    ) -> Result<ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1> {
+        claim.entry.validate()?;
+        claim.lease.validate(receipt.delivered_at)?;
+        validate_context_scout_delivery_receipt(&claim.entry.envelope, receipt)?;
+        let outcome = self.store.record_delivery(claim, receipt).await;
+        if matches!(
+            outcome,
+            ContextScoutDurableStoreOutcomeV1::Stored
+                | ContextScoutDurableStoreOutcomeV1::Duplicate
+        ) && self.coalescer.is_current(claim.entry.work)
+        {
+            self.coalescer.cancel(claim.entry.work)?;
+            self.last_delivery_outcome = Some(receipt.outcome);
+        }
+        Ok(outcome)
+    }
+
+    /// Feedback remains explicit and bound to the receipt; adjacency never
+    /// becomes acceptance or correction.
+    pub async fn record_feedback(
+        &mut self,
+        receipt: &ContextScoutDeliveryReceiptV1,
+        feedback: ContextScoutFeedbackV1,
+    ) -> Result<ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1> {
+        validate_context_scout_feedback(receipt, feedback)?;
+        let outcome = self.store.record_feedback(receipt, feedback).await;
+        if matches!(
+            outcome,
+            ContextScoutDurableStoreOutcomeV1::Stored
+                | ContextScoutDurableStoreOutcomeV1::Duplicate
+        ) {
+            self.last_feedback = Some(feedback.kind);
+        }
+        Ok(outcome)
+    }
+}
+
+/// The engine outcome of an intent-pass selection, `None` for code-evidence
+/// selections. One intent pass offers session evidence only, all of it from
+/// one engine exchange; mixing evidence kinds is a malformed input.
+fn intent_pass_model_outcome(
+    input: &ContextScoutSelectionInputV1,
+) -> Result<Option<ContextScoutModelOutcomeV1>, ContextScoutErrorV1> {
+    let mut outcomes = input.candidates.iter().map(|candidate| {
+        candidate
+            .evidence
+            .as_session()
+            .map(|evidence| evidence.decision.outcome)
+    });
+    let Some(first) = outcomes.next() else {
+        return Ok(None);
+    };
+    if outcomes.any(|outcome| outcome != first) {
+        return Err(ContextScoutErrorV1::InvalidCandidate);
+    }
+    Ok(first)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use tempfile::TempDir;
+    use tracedecay_contracts::context_scout::ContextScoutCandidateEvidenceV1;
+
+    fn address() -> ContextScoutAddressV1 {
+        ContextScoutAddressV1 {
+            profile_id: [1; 16],
+            provider_id: [2; 16],
+            protected_session_id: [3; 32],
+            thread_id: [4; 16],
+            turn_id: [5; 16],
+            agent_id: [6; 16],
+            logical_message_id: [7; 16],
+            project_id: [8; 16],
+        }
+    }
+
+    #[test]
+    fn delivery_selector_uses_trigger_quiet_recent_and_unresolved_state() {
+        let base = ContextScoutDeliverySelectionInputV1 {
+            trigger: ContextScoutTriggerV1::StopBoundary,
+            quiet_mode: false,
+            has_recent_delivery: false,
+            has_unresolved_interaction: false,
+            critical_safety_evidence: false,
+            delivered_dedupe_keys: BTreeSet::new(),
+        };
+        assert_eq!(
+            select_context_scout_delivery_window(&base),
+            ContextScoutDeliveryWindowV1::Immediate
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                quiet_mode: true,
+                ..base.clone()
+            }),
+            ContextScoutDeliveryWindowV1::Suppressed
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                has_recent_delivery: true,
+                ..base.clone()
+            }),
+            ContextScoutDeliveryWindowV1::IdleWindow
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                has_unresolved_interaction: true,
+                ..base.clone()
+            }),
+            ContextScoutDeliveryWindowV1::NextBoundary
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                trigger: ContextScoutTriggerV1::ExplicitRequest,
+                quiet_mode: true,
+                has_recent_delivery: true,
+                has_unresolved_interaction: true,
+                ..base.clone()
+            }),
+            ContextScoutDeliveryWindowV1::OnRequest
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                quiet_mode: true,
+                critical_safety_evidence: true,
+                ..base
+            }),
+            ContextScoutDeliveryWindowV1::Immediate
+        );
+    }
+
+    fn evidence() -> ContextScoutCandidateEvidenceV1 {
+        super::evidence::fixture_context_scout_evidence().into()
+    }
+
+    fn candidate(key: u8, score: u16) -> ContextScoutCandidateV1 {
+        ContextScoutCandidateV1 {
+            dedupe_key: [key; 32],
+            category: ContextScoutCategoryV1::Retrieval,
+            relevance_score: score,
+            suggestion_text: format!("Use evidence {key}."),
+            evidence: evidence(),
+            expires_at: UtcMicros(100),
+        }
+    }
+
+    fn input(candidates: Vec<ContextScoutCandidateV1>) -> ContextScoutSelectionInputV1 {
+        ContextScoutSelectionInputV1 {
+            address: address(),
+            input_watermark: [14; 32],
+            configuration_revision: [16; 32],
+            envelope_id: [17; 16],
+            now: UtcMicros(10),
+            delivery_window: ContextScoutDeliveryWindowV1::Immediate,
+            delivered_dedupe_keys: BTreeSet::new(),
+            candidates,
+        }
+    }
+
+    fn work(input_watermark: [u8; 32], generation: u64) -> ContextScoutWorkV1 {
+        ContextScoutWorkV1 {
+            address: address(),
+            generation,
+            input_watermark,
+        }
+    }
+
+    fn model_execution() -> ContextScoutModelExecutionV1 {
+        warm_token_counter();
+        ContextScoutModelExecutionV1::new(
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+            CancellationToken::new(),
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap()
+    }
+
+    fn model_receipt() -> ContextScoutModelReceiptV1 {
+        ContextScoutModelReceiptV1 {
+            requested_backend: ContextScoutModelBackendV1::CodexAppServer,
+            actual_provider: Some("codex".to_owned()),
+            actual_model: Some("configured-test-model".to_owned()),
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            estimated_cost_microusd: Some(1),
+        }
+    }
+
+    #[test]
+    fn successful_model_receipt_requires_actual_model_identity() {
+        let mut receipt = model_receipt();
+        receipt.actual_model = None;
+        assert!(!valid_model_receipt(
+            &receipt,
+            ContextScoutModelBackendV1::CodexAppServer,
+            MAX_SCOUT_MODEL_INPUT_TOKENS,
+            MAX_SCOUT_MODEL_OUTPUT_TOKENS,
+        ));
+    }
+
+    #[test]
+    fn successful_model_receipt_requires_exact_provider_identity() {
+        for provider in [None, Some("claude".to_owned())] {
+            let receipt = ContextScoutModelReceiptV1 {
+                actual_provider: provider,
+                ..model_receipt()
+            };
+            assert!(!valid_model_receipt(
+                &receipt,
+                ContextScoutModelBackendV1::CodexAppServer,
+                MAX_SCOUT_MODEL_INPUT_TOKENS,
+                MAX_SCOUT_MODEL_OUTPUT_TOKENS,
+            ));
+        }
+    }
+
+    #[test]
+    fn successful_model_receipt_requires_usage_and_cost_evidence() {
+        for receipt in [
+            ContextScoutModelReceiptV1 {
+                input_tokens: None,
+                ..model_receipt()
+            },
+            ContextScoutModelReceiptV1 {
+                output_tokens: None,
+                ..model_receipt()
+            },
+            ContextScoutModelReceiptV1 {
+                estimated_cost_microusd: None,
+                ..model_receipt()
+            },
+        ] {
+            assert!(!valid_model_receipt(
+                &receipt,
+                ContextScoutModelBackendV1::CodexAppServer,
+                MAX_SCOUT_MODEL_INPUT_TOKENS,
+                MAX_SCOUT_MODEL_OUTPUT_TOKENS,
+            ));
+        }
+    }
+
+    #[test]
+    fn deterministic_selection_is_stable_and_single_channel_coalesces() {
+        let decision = select_deterministic_context_scout(
+            &input(vec![candidate(2, 50), candidate(1, 50)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap();
+        let ContextScoutDecisionV1::Ready { envelope } = decision.clone() else {
+            panic!("candidate should be ready");
+        };
+        assert_eq!(envelope.candidate.dedupe_key, [1; 32]);
+        let mut channel = ContextScoutSuggestionChannelV1::default();
+        let work = work(envelope.input_watermark, 1);
+        assert_eq!(
+            channel.offer(work, decision.clone()).unwrap(),
+            ContextScoutChannelOutcomeV1::Offered
+        );
+        assert_eq!(
+            channel.offer(work, decision).unwrap(),
+            ContextScoutChannelOutcomeV1::Coalesced
+        );
+        {
+            let claim = channel.claim(address()).unwrap();
+            assert_eq!(claim.envelope().envelope_id, [17; 16]);
+        }
+        assert!(channel.claim(address()).is_some());
+    }
+
+    #[test]
+    fn deterministic_selection_reuses_durable_dedupe_state() {
+        let mut selection = input(vec![candidate(1, 50), candidate(2, 40)]);
+        selection.delivered_dedupe_keys.insert([1; 32]);
+        let ContextScoutDecisionV1::Ready { envelope } = select_deterministic_context_scout(
+            &selection,
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap() else {
+            panic!("the next unseen candidate should be ready");
+        };
+        assert_eq!(envelope.candidate.dedupe_key, [2; 32]);
+
+        selection.delivered_dedupe_keys.insert([2; 32]);
+        assert_eq!(
+            select_deterministic_context_scout(
+                &selection,
+                ContextScoutLimitsV1::bounded_defaults()
+            )
+            .unwrap(),
+            ContextScoutDecisionV1::Suppressed {
+                reason: ContextScoutSuppressionV1::Duplicate
+            }
+        );
+    }
+
+    #[test]
+    fn selection_and_delivery_fail_closed_on_stale_time() {
+        let mut stale = input(vec![candidate(1, 10)]);
+        stale.now = UtcMicros(0);
+        assert_eq!(
+            select_deterministic_context_scout(&stale, ContextScoutLimitsV1::bounded_defaults()),
+            Err(ContextScoutErrorV1::InvalidCandidate)
+        );
+
+        let ContextScoutDecisionV1::Ready { envelope } = select_deterministic_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap() else {
+            panic!("candidate should be ready");
+        };
+        let receipt = ContextScoutDeliveryReceiptV1 {
+            receipt_id: [18; 16],
+            envelope_id: envelope.envelope_id,
+            delivered_at: envelope.candidate.expires_at,
+            outcome: ContextScoutDeliveryOutcomeV1::Displayed,
+        };
+        assert_eq!(
+            validate_context_scout_delivery_receipt(&envelope, &receipt),
+            Err(ContextScoutErrorV1::ReceiptBindingMismatch)
+        );
+        validate_context_scout_delivery_receipt(
+            &envelope,
+            &ContextScoutDeliveryReceiptV1 {
+                outcome: ContextScoutDeliveryOutcomeV1::ExpiredUnseen,
+                ..receipt
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dirty_overlay_never_crosses_durable_checkpoint_or_receipt_boundary() {
+        let mut overlay = candidate(1, 10);
+        overlay.evidence.as_code_mut().unwrap().content =
+            tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
+                session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
+                owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
+                agent_id: None,
+                document_version: 1,
+                overlay_digest: tracedecay_domain::ManifestDigest::new(format!(
+                    "sha256:{}",
+                    "e".repeat(64)
+                ))
+                .unwrap(),
+            };
+        assert_eq!(
+            select_deterministic_context_scout(
+                &input(vec![overlay]),
+                ContextScoutLimitsV1::bounded_defaults(),
+            ),
+            Err(ContextScoutErrorV1::InvalidEvidence)
+        );
+    }
+
+    #[test]
+    fn control_text_fails_closed() {
+        let mut unsafe_candidate = candidate(1, 10);
+        unsafe_candidate.suggestion_text = "render\u{1b}[31m".to_owned();
+        assert_eq!(
+            select_deterministic_context_scout(
+                &input(vec![unsafe_candidate]),
+                ContextScoutLimitsV1::bounded_defaults()
+            ),
+            Err(ContextScoutErrorV1::InvalidCandidate)
+        );
+    }
+
+    struct BadModel;
+
+    impl ContextScoutModelAssistantV1 for BadModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            _request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            Box::pin(async {
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: [1; 32],
+                        suggestion_text: "unbound model claim".to_string(),
+                        cited_anchor_ids: vec![
+                            tracedecay_domain::RetrievalAnchorId::new("anchor.model.unbound")
+                                .unwrap(),
+                        ],
+                    },
+                    receipt: model_receipt(),
+                })
+            })
+        }
+    }
+
+    // Model-assisted selection is only reachable in a `token-counting` build.
+    // Without the BPE tokenizer `serialized_token_count` yields no measurement,
+    // and an unmeasurable request can never be *proven* within the input
+    // budget, so `validate_input` refuses it as `TokenBudgetExceeded` before
+    // any assistant is consulted. That refusal is the correct production
+    // behaviour (a build that cannot count tokens must not ship unbounded
+    // input to a model), which means the *typed model outcome* these tests
+    // grade simply does not exist without the feature. They are gated for the
+    // same reason `context_scout_model.rs` gates its backend tests, rather
+    // than relaxing the budget to keep a default-feature build green.
+    #[cfg(feature = "token-counting")]
+    struct MismatchedReceiptModel;
+
+    #[cfg(feature = "token-counting")]
+    impl ContextScoutModelAssistantV1 for MismatchedReceiptModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            Box::pin(async move {
+                let candidate = request
+                    .candidates
+                    .first()
+                    .ok_or(ContextScoutModelErrorV1::InvalidOutput)?;
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: candidate.dedupe_key,
+                        suggestion_text: candidate.suggestion_text.clone(),
+                        cited_anchor_ids: candidate.citation_anchor_ids.clone(),
+                    },
+                    receipt: ContextScoutModelReceiptV1 {
+                        requested_backend: ContextScoutModelBackendV1::Unsupported,
+                        ..model_receipt()
+                    },
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    struct CancellationIgnoringModel;
+
+    #[cfg(feature = "token-counting")]
+    impl ContextScoutModelAssistantV1 for CancellationIgnoringModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            Box::pin(async move {
+                execution.cancellation.cancel();
+                let candidate = request
+                    .candidates
+                    .first()
+                    .ok_or(ContextScoutModelErrorV1::InvalidOutput)?;
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: candidate.dedupe_key,
+                        suggestion_text: candidate.suggestion_text.clone(),
+                        cited_anchor_ids: candidate.citation_anchor_ids.clone(),
+                    },
+                    receipt: model_receipt(),
+                })
+            })
+        }
+    }
+
+    struct DuplicateCitationModel;
+
+    impl ContextScoutModelAssistantV1 for DuplicateCitationModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            _request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            Box::pin(async {
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: [1; 32],
+                        suggestion_text: "bounded refinement".to_owned(),
+                        cited_anchor_ids: vec![
+                            tracedecay_domain::RetrievalAnchorId::new("anchor.scout").unwrap(),
+                            tracedecay_domain::RetrievalAnchorId::new("anchor.scout").unwrap(),
+                        ],
+                    },
+                    receipt: model_receipt(),
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    struct FailingModel(ContextScoutModelErrorV1);
+
+    #[cfg(feature = "token-counting")]
+    impl ContextScoutModelAssistantV1 for FailingModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            _request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            let error = self.0;
+            Box::pin(async move { Err(error) })
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn malformed_model_output_falls_back_to_evidence_bound_determinism() {
+        let selection = select_model_assisted_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &BadModel,
+            model_execution(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+        assert_eq!(
+            selection.model_outcome,
+            ContextScoutModelOutcomeV1::InvalidOutput
+        );
+        assert!(matches!(
+            selection.decision,
+            ContextScoutDecisionV1::Ready { .. }
+        ));
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn model_failures_are_typed_while_deterministic_fallback_survives() {
+        for (error, expected) in [
+            (
+                ContextScoutModelErrorV1::Disabled,
+                ContextScoutModelOutcomeV1::Disabled,
+            ),
+            (
+                ContextScoutModelErrorV1::Unavailable,
+                ContextScoutModelOutcomeV1::Unavailable,
+            ),
+            (
+                ContextScoutModelErrorV1::DeadlineExceeded,
+                ContextScoutModelOutcomeV1::DeadlineExceeded,
+            ),
+            (
+                ContextScoutModelErrorV1::TokenBudgetExceeded,
+                ContextScoutModelOutcomeV1::TokenBudgetExceeded,
+            ),
+        ] {
+            let selection = select_model_assisted_context_scout(
+                &input(vec![candidate(1, 10)]),
+                ContextScoutLimitsV1::bounded_defaults(),
+                &FailingModel(error),
+                model_execution(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+            assert_eq!(selection.model_outcome, expected);
+            assert!(matches!(
+                selection.decision,
+                ContextScoutDecisionV1::Ready { .. }
+            ));
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn mismatched_model_receipt_is_typed_invalid_output() {
+        let selection = select_model_assisted_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &MismatchedReceiptModel,
+            model_execution(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+        assert_eq!(
+            selection.model_outcome,
+            ContextScoutModelOutcomeV1::InvalidOutput
+        );
+        assert!(selection.model_receipt.is_none());
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn model_adapter_cannot_ignore_cancellation_before_durable_selection() {
+        let selection = select_model_assisted_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &CancellationIgnoringModel,
+            model_execution(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+        assert_eq!(
+            selection.model_outcome,
+            ContextScoutModelOutcomeV1::Cancelled
+        );
+        assert!(selection.model_receipt.is_none());
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_execution_never_calls_the_model_assistant() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let execution = ContextScoutModelExecutionV1::new(
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+            cancellation,
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap();
+        let selection = select_model_assisted_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &RecordingModel {
+                requests: Arc::clone(&requests),
+            },
+            execution,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(requests.lock().unwrap().len(), 0);
+        assert_eq!(
+            selection.model_outcome,
+            ContextScoutModelOutcomeV1::Cancelled
+        );
+        assert!(selection.model_receipt.is_none());
+    }
+
+    #[tokio::test]
+    async fn duplicate_candidate_keys_and_duplicate_model_citations_fail_closed() {
+        let duplicate = input(vec![candidate(1, 10), candidate(1, 9)]);
+        assert_eq!(
+            select_deterministic_context_scout(
+                &duplicate,
+                ContextScoutLimitsV1::bounded_defaults()
+            ),
+            Err(ContextScoutErrorV1::InvalidCandidate)
+        );
+
+        let selection = select_model_assisted_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &DuplicateCitationModel,
+            model_execution(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+    }
+
+    #[tokio::test]
+    async fn model_schema_rejects_unknown_fields_and_input_budget_falls_back() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "selected_dedupe_key": vec![1_u8; 32],
+            "suggestion_text": "bounded",
+            "cited_anchor_ids": ["anchor.scout"],
+            "tool": "forbidden"
+        }))
+        .unwrap();
+        assert_eq!(
+            decode_context_scout_model_candidate(&bytes),
+            Err(ContextScoutModelErrorV1::InvalidOutput)
+        );
+
+        let mut limits = ContextScoutLimitsV1::bounded_defaults();
+        limits.max_model_input_tokens = 1;
+        let execution = ContextScoutModelExecutionV1::new(
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+            CancellationToken::new(),
+            limits,
+        )
+        .unwrap();
+        let selection = select_model_assisted_context_scout(
+            &input(vec![candidate(1, 10)]),
+            limits,
+            &BadModel,
+            execution,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+    }
+
+    #[cfg(feature = "token-counting")]
+    fn stale_candidate(key: u8, score: u16) -> ContextScoutCandidateV1 {
+        let fresh = super::evidence::fixture_context_scout_evidence();
+        let mut sources = fresh.sources.clone();
+        sources[0].contribution_state = tracedecay_contracts::RetrieverContributionState::Stale;
+        sources[0].temporal.freshness = tracedecay_contracts::FreshnessState::Stale;
+        let evidence = tracedecay_contracts::context_scout::ContextScoutEvidenceEnvelopeV1::claim(
+            fresh.scope,
+            fresh.authorized_scope,
+            fresh.content,
+            fresh.code_generation_id,
+            fresh.authority,
+            fresh.redaction,
+            sources,
+            fresh.claimed_at,
+        )
+        .unwrap();
+        assert_eq!(
+            evidence.availability,
+            ContextScoutEvidenceAvailabilityV1::Stale
+        );
+        ContextScoutCandidateV1 {
+            evidence: evidence.into(),
+            ..candidate(key, score)
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    fn model_candidate_input(
+        candidate: &ContextScoutCandidateV1,
+    ) -> ContextScoutModelCandidateInputV1 {
+        ContextScoutModelCandidateInputV1 {
+            dedupe_key: candidate.dedupe_key,
+            category: candidate.category,
+            suggestion_text: candidate.suggestion_text.clone(),
+            citation_anchor_ids: candidate.evidence.anchors().cloned().collect(),
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn model_request_carries_only_the_deterministically_selected_candidate() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let selection = select_model_assisted_context_scout(
+            &input(vec![
+                candidate(2, 10),
+                stale_candidate(3, 30),
+                candidate(1, 20),
+            ]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &RecordingModel {
+                requests: Arc::clone(&requests),
+            },
+            model_execution(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![ContextScoutModelRequestV1 {
+                candidates: vec![ContextScoutModelCandidateInputV1 {
+                    dedupe_key: [1; 32],
+                    category: ContextScoutCategoryV1::Retrieval,
+                    suggestion_text: "Use evidence 1.".to_owned(),
+                    citation_anchor_ids: vec![RetrievalAnchorId::new("anchor.scout").unwrap()],
+                }],
+            }]
+        );
+        assert_eq!(selection.route, ContextScoutRouteV1::ModelAssisted);
+        let ContextScoutDecisionV1::Ready { envelope } = selection.decision else {
+            panic!("refined selection should stay ready");
+        };
+        assert_eq!(envelope.candidate.dedupe_key, [1; 32]);
+        assert_eq!(
+            envelope.candidate.suggestion_text,
+            "Refined: Use evidence 1."
+        );
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn input_budget_counts_only_the_selected_candidate() {
+        let candidates = (1..=8)
+            .map(|key| candidate(key, 100 - u16::from(key)))
+            .collect::<Vec<_>>();
+        let selected_only = ContextScoutModelRequestV1 {
+            candidates: vec![model_candidate_input(&candidates[0])],
+        };
+        let whole_set = ContextScoutModelRequestV1 {
+            candidates: candidates.iter().map(model_candidate_input).collect(),
+        };
+        let mut limits = ContextScoutLimitsV1::bounded_defaults();
+        limits.max_model_input_tokens = serialized_token_count(&selected_only).unwrap();
+        assert!(serialized_token_count(&whole_set).unwrap() > limits.max_model_input_tokens);
+        let execution = ContextScoutModelExecutionV1::new(
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+            CancellationToken::new(),
+            limits,
+        )
+        .unwrap();
+
+        let selection = select_model_assisted_context_scout(
+            &input(candidates),
+            limits,
+            &RecordingModel {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            execution,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            (selection.route, selection.model_outcome),
+            (
+                ContextScoutRouteV1::ModelAssisted,
+                ContextScoutModelOutcomeV1::Succeeded
+            )
+        );
+    }
+
+    #[cfg(feature = "token-counting")]
+    struct RewritingModel(&'static str);
+
+    #[cfg(feature = "token-counting")]
+    impl ContextScoutModelAssistantV1 for RewritingModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            let text = self.0;
+            Box::pin(async move {
+                let candidate = request
+                    .candidates
+                    .first()
+                    .ok_or(ContextScoutModelErrorV1::InvalidOutput)?;
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: candidate.dedupe_key,
+                        suggestion_text: text.to_owned(),
+                        cited_anchor_ids: candidate.citation_anchor_ids.clone(),
+                    },
+                    receipt: model_receipt(),
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    async fn refine_diagnostic(refined: &'static str) -> ContextScoutSelectionV1 {
+        let diagnostic = ContextScoutCandidateV1 {
+            category: ContextScoutCategoryV1::Diagnostic,
+            suggestion_text: "error[E0308]: mismatched types in order_total at src/orders.rs:42"
+                .to_owned(),
+            ..candidate(1, 10)
+        };
+        select_model_assisted_context_scout(
+            &input(vec![diagnostic]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &RewritingModel(refined),
+            model_execution(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[cfg(feature = "token-counting")]
+    fn selected_text(selection: &ContextScoutSelectionV1) -> &str {
+        let ContextScoutDecisionV1::Ready { envelope } = &selection.decision else {
+            panic!("selection should stay ready");
+        };
+        &envelope.candidate.suggestion_text
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn refinement_inventing_or_dropping_code_tokens_falls_back_to_deterministic_text() {
+        for invented in [
+            "Fix the mismatched types in apply_tax at src/orders.rs:42 (E0308).",
+            "Fix the mismatched types in order_total at src/billing.rs (E0308).",
+            "Fix the mismatched types in order_total at src/orders.rs:42 (E0308) via TaxRate.",
+            "Fix the mismatched types in order_total at src/orders.rs:42.",
+            "Fix the mismatched types in order_total (E0308).",
+        ] {
+            let selection = refine_diagnostic(invented).await;
+            assert_eq!(
+                (selection.route, selection.model_outcome),
+                (
+                    ContextScoutRouteV1::DeterministicFallback,
+                    ContextScoutModelOutcomeV1::InvalidOutput
+                ),
+                "{invented}"
+            );
+            assert_eq!(
+                selected_text(&selection),
+                "error[E0308]: mismatched types in order_total at src/orders.rs:42"
+            );
+            assert!(selection.model_receipt.is_none());
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn faithful_rewording_keeps_the_model_refinement() {
+        let reworded = "Fix the mismatched types in order_total at src/orders.rs:42 (E0308).";
+        let selection = refine_diagnostic(reworded).await;
+        assert_eq!(
+            (selection.route, selection.model_outcome),
+            (
+                ContextScoutRouteV1::ModelAssisted,
+                ContextScoutModelOutcomeV1::Succeeded
+            )
+        );
+        assert_eq!(selected_text(&selection), reworded);
+    }
+
+    #[test]
+    fn unsupported_code_tokens_flag_only_code_like_tokens_absent_from_the_original() {
+        let original = "error[E0308]: mismatched types in order_total at src/orders.rs:42";
+        for (refined, expected) in [
+            ("Plain words only, rewritten freely.", vec![]),
+            ("Check order_total in src/orders.rs:42 for E0308.", vec![]),
+            ("Check apply_tax.", vec!["apply_tax"]),
+            ("See src/billing.rs.", vec!["src/billing.rs"]),
+            ("Line 43 instead.", vec!["43"]),
+            ("Use TaxRate or orderTotal.", vec!["TaxRate", "orderTotal"]),
+            ("Call orders::total now.", vec!["orders::total"]),
+            ("Open config.toml first.", vec!["config.toml"]),
+            ("Rust CI is red; well-known issue.", vec![]),
+            ("apply_tax and apply_tax again.", vec!["apply_tax"]),
+        ] {
+            assert_eq!(
+                unsupported_code_tokens(original, refined),
+                BTreeSet::from_iter(expected),
+                "{refined}"
+            );
+        }
+    }
+
+    #[test]
+    fn saved_content_delivery_and_feedback_remain_exact() {
+        let ContextScoutDecisionV1::Ready { envelope } = select_deterministic_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap() else {
+            panic!("candidate should be ready");
+        };
+        let receipt = ContextScoutDeliveryReceiptV1 {
+            receipt_id: [18; 16],
+            envelope_id: envelope.envelope_id,
+            delivered_at: UtcMicros(11),
+            outcome: ContextScoutDeliveryOutcomeV1::Displayed,
+        };
+        validate_context_scout_delivery_receipt(&envelope, &receipt).unwrap();
+        validate_context_scout_feedback(
+            &receipt,
+            ContextScoutFeedbackV1 {
+                receipt_id: receipt.receipt_id,
+                kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+            },
+        )
+        .unwrap();
+
+        let mut channel = ContextScoutSuggestionChannelV1::default();
+        channel
+            .offer(
+                work(envelope.input_watermark, 1),
+                ContextScoutDecisionV1::Ready {
+                    envelope: envelope.clone(),
+                },
+            )
+            .unwrap();
+        channel
+            .claim(envelope.address)
+            .unwrap()
+            .complete(&receipt)
+            .unwrap();
+        assert!(channel.claim(envelope.address).is_none());
+    }
+
+    #[test]
+    fn coalescing_and_cancellation_require_the_exact_work_generation() {
+        let mut coalescer = ContextScoutCoalescerV1::default();
+        let first = coalescer.enqueue(address(), [20; 32]).unwrap();
+        let second = coalescer.enqueue(address(), [22; 32]).unwrap();
+        assert!(!coalescer.is_current(first));
+        assert_eq!(coalescer.cancel(first), Err(ContextScoutErrorV1::StaleWork));
+        coalescer.cancel(second).unwrap();
+    }
+
+    #[test]
+    fn channel_cancellation_rejects_a_superseded_generation_with_same_watermark() {
+        let ContextScoutDecisionV1::Ready { envelope } = select_deterministic_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap() else {
+            panic!("candidate should be ready");
+        };
+        let first = work(envelope.input_watermark, 1);
+        let second = work(envelope.input_watermark, 2);
+        let mut channel = ContextScoutSuggestionChannelV1::default();
+        channel
+            .offer(
+                second,
+                ContextScoutDecisionV1::Ready {
+                    envelope: envelope.clone(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            channel.offer(first, ContextScoutDecisionV1::Ready { envelope }),
+            Err(ContextScoutErrorV1::StaleWork)
+        );
+        assert_eq!(channel.cancel(first), Err(ContextScoutErrorV1::StaleWork));
+        channel.cancel(second).unwrap();
+    }
+
+    /// A real project store over a fresh test database; the runtime tests
+    /// drive the same SQLite-backed authority production uses.
+    async fn durable_store() -> (TempDir, Arc<ProjectContextScoutDurableStoreV1>) {
+        let (temporary, database) = super::store_tests::database().await;
+        let store = ProjectContextScoutDurableStoreV1::from_project_database(
+            database,
+            address().project_id,
+        )
+        .expect("project-scoped durable store");
+        (temporary, store)
+    }
+
+    async fn queued_entries(
+        store: &ProjectContextScoutDurableStoreV1,
+    ) -> Vec<ContextScoutDurableQueueEntryV1> {
+        match store
+            .startup(UtcMicros(10), MAX_SCOUT_ACTIVE_ADDRESSES)
+            .await
+        {
+            ContextScoutDurableStartupOutcomeV1::Ready { entries, .. } => entries,
+            ContextScoutDurableStartupOutcomeV1::Reset => Vec::new(),
+            ContextScoutDurableStartupOutcomeV1::Unavailable => {
+                panic!("durable store should be readable")
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingModel {
+        requests: Arc<Mutex<Vec<ContextScoutModelRequestV1>>>,
+    }
+
+    impl ContextScoutModelAssistantV1 for RecordingModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            self.requests.lock().unwrap().push(request.clone());
+            Box::pin(async move {
+                let candidate = request
+                    .candidates
+                    .first()
+                    .ok_or(ContextScoutModelErrorV1::InvalidOutput)?;
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: candidate.dedupe_key,
+                        suggestion_text: format!("Refined: {}", candidate.suggestion_text),
+                        cited_anchor_ids: candidate.citation_anchor_ids.clone(),
+                    },
+                    receipt: model_receipt(),
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn durable_runtime_replays_exact_entry_and_cancellation_is_generation_bound() {
+        let (_temporary, store) = durable_store().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let model = RecordingModel {
+            requests: Arc::clone(&requests),
+        };
+        let mut runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), model.clone());
+        let outcome = runtime
+            .prepare(
+                &input(vec![candidate(1, 10)]),
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::ConfiguredModel,
+                model_execution(),
+            )
+            .await
+            .unwrap();
+        let ContextScoutRuntimeOutcomeV1::Enqueued {
+            entry,
+            store_outcome,
+        } = outcome
+        else {
+            panic!("saved candidate should enqueue");
+        };
+        assert_eq!(store_outcome, ContextScoutDurableStoreOutcomeV1::Stored);
+        assert_eq!(entry.route, ContextScoutRouteV1::ModelAssisted);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let status = runtime
+            .status(ContextScoutControlV1 {
+                configuration_revision: [16; 32],
+                state: ContextScoutServiceStateV1::Active,
+                mode: ContextScoutRuntimeModeV1::ConfiguredModel,
+                model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
+                limits: ContextScoutLimitsV1::bounded_defaults(),
+                intent: None,
+            })
+            .unwrap();
+        assert_eq!(
+            status.last_model_outcome,
+            Some(ContextScoutModelOutcomeV1::Succeeded)
+        );
+        assert_eq!(status.last_model_receipt, Some(model_receipt()));
+        let mut forged_cancelled_entry = (*entry).clone();
+        forged_cancelled_entry.route = ContextScoutRouteV1::DeterministicFallback;
+        forged_cancelled_entry.model_outcome = ContextScoutModelOutcomeV1::Cancelled;
+        forged_cancelled_entry.model_receipt = None;
+        assert_eq!(
+            forged_cancelled_entry.validate(),
+            Err(ContextScoutErrorV1::InvalidCandidate)
+        );
+        let mut restarted = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), model);
+        let replay = restarted
+            .prepare(
+                &input(vec![candidate(1, 10)]),
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::ConfiguredModel,
+                model_execution(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            replay,
+            ContextScoutRuntimeOutcomeV1::Enqueued {
+                store_outcome: ContextScoutDurableStoreOutcomeV1::Duplicate,
+                ..
+            }
+        ));
+        assert_eq!(queued_entries(&store).await, vec![(*entry).clone()]);
+
+        assert_eq!(
+            runtime.cancel(entry.work).await.unwrap(),
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        assert_eq!(
+            runtime.cancel(entry.work).await,
+            Err(ContextScoutErrorV1::StaleWork)
+        );
+        assert!(queued_entries(&store).await.is_empty());
+        // The cancellation tombstone is durable: the same generation can never
+        // be re-enqueued, only superseded by newer work.
+        assert_eq!(
+            store.enqueue((*entry).clone()).await,
+            ContextScoutDurableStoreOutcomeV1::Superseded
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_restores_the_latest_durable_work_generation() {
+        let (_temporary, store) = durable_store().await;
+        let mut runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), BadModel);
+        let first = input(vec![candidate(1, 10)]);
+        runtime
+            .prepare(
+                &first,
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::Deterministic,
+                model_execution(),
+            )
+            .await
+            .unwrap();
+        let mut second = first.clone();
+        second.input_watermark = [21; 32];
+        second.envelope_id = [22; 16];
+        let ContextScoutRuntimeOutcomeV1::Enqueued { entry: second, .. } = runtime
+            .prepare(
+                &second,
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::Deterministic,
+                model_execution(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("second generation should enqueue");
+        };
+        assert_eq!(second.work.generation, 2);
+
+        let startup = store.startup(UtcMicros(10), 32).await;
+        let mut restarted = ContextScoutDurableRuntimeV1::new(store, BadModel);
+        restarted.restore_startup(&startup).unwrap();
+        let mut third = first;
+        third.input_watermark = [23; 32];
+        third.envelope_id = [24; 16];
+        let ContextScoutRuntimeOutcomeV1::Enqueued { entry: third, .. } = restarted
+            .prepare(
+                &third,
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::Deterministic,
+                model_execution(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("post-restart generation should enqueue");
+        };
+        assert_eq!(third.work.generation, 3);
+    }
+
+    #[tokio::test]
+    async fn controlled_model_execution_cannot_widen_daemon_limits() {
+        let (_temporary, store) = durable_store().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = ContextScoutDurableRuntimeV1::new(
+            Arc::clone(&store),
+            RecordingModel {
+                requests: Arc::clone(&requests),
+            },
+        );
+        let limits = ContextScoutLimitsV1::bounded_defaults();
+        let control = ContextScoutControlV1 {
+            configuration_revision: [16; 32],
+            state: ContextScoutServiceStateV1::Active,
+            mode: ContextScoutRuntimeModeV1::ConfiguredModel,
+            model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
+            limits,
+            intent: None,
+        };
+        let widened_execution = ContextScoutModelExecutionV1 {
+            deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+            cancellation: CancellationToken::new(),
+            max_input_tokens: limits.max_model_input_tokens.saturating_add(1),
+            max_output_tokens: limits.max_model_output_tokens,
+        };
+
+        assert_eq!(
+            runtime
+                .prepare_controlled(&input(vec![candidate(1, 10)]), control, widened_execution,)
+                .await,
+            Err(ContextScoutErrorV1::InvalidLimits)
+        );
+        assert_eq!(requests.lock().unwrap().len(), 0);
+        assert!(queued_entries(&store).await.is_empty());
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn cancelled_model_run_never_reaches_the_durable_queue() {
+        let (_temporary, store) = durable_store().await;
+        let mut runtime = ContextScoutDurableRuntimeV1::new(
+            Arc::clone(&store),
+            FailingModel(ContextScoutModelErrorV1::Cancelled),
+        );
+        let outcome = runtime
+            .prepare(
+                &input(vec![candidate(1, 10)]),
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::ConfiguredModel,
+                model_execution(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            ContextScoutRuntimeOutcomeV1::Suppressed {
+                reason: ContextScoutSuppressionV1::Cancelled,
+            }
+        );
+        assert!(queued_entries(&store).await.is_empty());
+        let status = runtime
+            .status(ContextScoutControlV1 {
+                configuration_revision: [16; 32],
+                state: ContextScoutServiceStateV1::Active,
+                mode: ContextScoutRuntimeModeV1::ConfiguredModel,
+                model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
+                limits: ContextScoutLimitsV1::bounded_defaults(),
+                intent: None,
+            })
+            .unwrap();
+        assert_eq!(
+            status.last_model_outcome,
+            Some(ContextScoutModelOutcomeV1::Cancelled)
+        );
+        assert_eq!(
+            status.last_suppression,
+            Some(ContextScoutSuppressionV1::Cancelled)
+        );
+        assert_eq!(
+            status.last_route,
+            Some(ContextScoutRouteV1::DeterministicFallback)
+        );
+        assert!(status.last_model_receipt.is_none());
+    }
+
+    #[tokio::test]
+    async fn delivery_and_explicit_feedback_are_visible_in_status() {
+        let (_temporary, store) = durable_store().await;
+        let mut runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), BadModel);
+        let ContextScoutRuntimeOutcomeV1::Enqueued { entry, .. } = runtime
+            .prepare(
+                &input(vec![candidate(1, 10)]),
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::Deterministic,
+                model_execution(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("deterministic candidate should enqueue");
+        };
+        let receipt = ContextScoutDeliveryReceiptV1 {
+            receipt_id: [31; 16],
+            envelope_id: entry.envelope.envelope_id,
+            delivered_at: UtcMicros(20),
+            outcome: ContextScoutDeliveryOutcomeV1::Displayed,
+        };
+        let lease = ContextScoutLeaseV1 {
+            lease_id: [30; 16],
+            expires_at: UtcMicros(40),
+        };
+        // Delivery authority is the store-issued claim, never a hand-built one.
+        let forged = ContextScoutDurableClaimV1 {
+            entry: (*entry).clone(),
+            lease,
+        };
+        assert_eq!(
+            runtime.complete_delivery(&forged, &receipt).await.unwrap(),
+            ContextScoutDurableStoreOutcomeV1::Superseded
+        );
+        let ContextScoutDurableClaimOutcomeV1::Claimed(claim) =
+            store.claim(address(), UtcMicros(10), lease).await
+        else {
+            panic!("queued entry should be claimable");
+        };
+        assert_eq!(claim.entry, *entry);
+        assert_eq!(
+            runtime.complete_delivery(&claim, &receipt).await.unwrap(),
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        runtime
+            .record_feedback(
+                &receipt,
+                ContextScoutFeedbackV1 {
+                    receipt_id: receipt.receipt_id,
+                    kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+                },
+            )
+            .await
+            .unwrap();
+        let status = runtime
+            .status(ContextScoutControlV1 {
+                configuration_revision: [16; 32],
+                state: ContextScoutServiceStateV1::Active,
+                mode: ContextScoutRuntimeModeV1::Deterministic,
+                model_path: None,
+                limits: ContextScoutLimitsV1::bounded_defaults(),
+                intent: None,
+            })
+            .unwrap();
+        assert_eq!(
+            status.last_delivery_outcome,
+            Some(ContextScoutDeliveryOutcomeV1::Displayed)
+        );
+        assert_eq!(
+            status.last_feedback,
+            Some(ContextScoutFeedbackKindV1::ExplicitlyAccepted)
+        );
+        assert_eq!(status.limits, ContextScoutLimitsV1::bounded_defaults());
+        assert_eq!(status.last_route, Some(ContextScoutRouteV1::Deterministic));
+        assert!(status.last_suppression.is_none());
+    }
+
+    #[tokio::test]
+    async fn dirty_overlay_never_invokes_model_or_durable_queue() {
+        let (_temporary, store) = durable_store().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = ContextScoutDurableRuntimeV1::new(
+            Arc::clone(&store),
+            RecordingModel {
+                requests: Arc::clone(&requests),
+            },
+        );
+        let mut dirty = candidate(2, 10);
+        dirty.evidence.as_code_mut().unwrap().content =
+            tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
+                session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
+                owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
+                agent_id: None,
+                document_version: 1,
+                overlay_digest: tracedecay_domain::ManifestDigest::new(format!(
+                    "sha256:{}",
+                    "f".repeat(64)
+                ))
+                .unwrap(),
+            };
+        assert_eq!(
+            runtime
+                .prepare(
+                    &input(vec![dirty]),
+                    ContextScoutLimitsV1::bounded_defaults(),
+                    ContextScoutRuntimeModeV1::ConfiguredModel,
+                    model_execution(),
+                )
+                .await,
+            Err(ContextScoutErrorV1::InvalidEvidence)
+        );
+        assert_eq!(requests.lock().unwrap().len(), 0);
+        assert!(queued_entries(&store).await.is_empty());
+    }
+
+    #[cfg(feature = "token-counting")]
+    struct ProposalCapturingModel<M> {
+        inner: M,
+        proposal: Mutex<Option<ContextScoutModelProposalV1>>,
+    }
+
+    #[cfg(feature = "token-counting")]
+    impl<M: ContextScoutModelAssistantV1> ContextScoutModelAssistantV1 for ProposalCapturingModel<M> {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            self.inner.backend()
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            Box::pin(async move {
+                let result = self.inner.propose(request, execution).await;
+                if let Ok(proposal) = &result {
+                    *self.proposal.lock().unwrap() = Some(proposal.clone());
+                }
+                result
+            })
+        }
+    }
+
+    /// Keeps the backend's failure reason, which the Scout outcome taxonomy
+    /// collapses (a spawn failure and a retryable error both read `Unavailable`).
+    #[cfg(feature = "token-counting")]
+    struct ErrorCapturingBackend {
+        inner: Arc<dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend>,
+        error: Mutex<Option<String>>,
+    }
+
+    #[cfg(feature = "token-counting")]
+    impl tracedecay_automation_runtime::automation::backend::AgentTaskBackend
+        for ErrorCapturingBackend
+    {
+        fn run_task(
+            &self,
+            request: &tracedecay_automation_runtime::automation::backend::AgentTaskRequest,
+        ) -> Result<
+            tracedecay_automation_runtime::automation::backend::AgentTaskResponse,
+            tracedecay_automation_runtime::automation::backend::AgentTaskError,
+        > {
+            let result = self.inner.run_task(request);
+            if let Err(error) = &result {
+                *self.error.lock().unwrap() = Some(error.to_string());
+            }
+            result
+        }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            self.inner.executable()
+        }
+    }
+
+    /// The prompt runner the composition root registers in
+    /// `tracedecay-project`'s `runtime_ports`; a test process has no root.
+    #[cfg(feature = "token-counting")]
+    fn eval_codex_prompt_runner(
+        prompt: &str,
+        config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
+        thread_source: &str,
+        response_schema: Option<&serde_json::Value>,
+    ) -> Result<
+        tracedecay_automation_runtime::ports::codex_app_server::Summary,
+        tracedecay_automation_runtime::automation::backend::AgentTaskError,
+    > {
+        use tracedecay_sessions::runtime::hosts::codex_app_server as sessions;
+        let config = sessions::CodexAppServerSummaryConfig {
+            codex_bin: config.codex_bin.to_string_lossy().into_owned(),
+            model: config.model.clone(),
+            timeout: config.timeout,
+        };
+        match response_schema {
+            Some(schema) => sessions::run_prompt_with_codex_app_server_response_schema(
+                prompt,
+                &config,
+                thread_source,
+                schema,
+            ),
+            None => sessions::run_prompt_with_codex_app_server(prompt, &config, thread_source),
+        }
+        .map(
+            |summary| tracedecay_automation_runtime::ports::codex_app_server::Summary {
+                text: summary.text,
+                model: summary.model,
+            },
+        )
+        .map_err(|error| {
+            tracedecay_automation_runtime::automation::backend::AgentTaskError::new(
+                error.class,
+                error.message,
+            )
+        })
+    }
+
+    /// Answers the Codex app-server prompt port with `claude -p`, so the
+    /// production prompt, response schema, validation, and drift guard can be
+    /// measured against a second model when no Codex login is available.
+    #[cfg(feature = "token-counting")]
+    fn eval_claude_prompt_runner(
+        prompt: &str,
+        config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
+        _thread_source: &str,
+        response_schema: Option<&serde_json::Value>,
+    ) -> Result<
+        tracedecay_automation_runtime::ports::codex_app_server::Summary,
+        tracedecay_automation_runtime::automation::backend::AgentTaskError,
+    > {
+        use tracedecay_automation_runtime::automation::backend::{
+            AgentTaskError, AgentTaskFailureClass,
+        };
+        let mut command = std::process::Command::new(&config.codex_bin);
+        command.args([
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--no-session-persistence",
+        ]);
+        command.args([
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--tools",
+            "",
+        ]);
+        if let Some(model) = &config.model {
+            command.args(["--model", model]);
+        }
+        if let Some(schema) = response_schema {
+            command.args(["--json-schema", &schema.to_string()]);
+        }
+        let output = command.output().map_err(|error| {
+            AgentTaskError::new(AgentTaskFailureClass::Unavailable, error.to_string())
+        })?;
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            AgentTaskError::new(
+                AgentTaskFailureClass::MalformedOutput,
+                format!("{error}: {}", String::from_utf8_lossy(&output.stderr)),
+            )
+        })?;
+        let text = match reply.get("structured_output") {
+            Some(structured) => structured.to_string(),
+            None => reply["result"].as_str().unwrap_or_default().to_owned(),
+        };
+        Ok(
+            tracedecay_automation_runtime::ports::codex_app_server::Summary {
+                text,
+                model: reply["modelUsage"]
+                    .as_object()
+                    .and_then(|models| models.keys().next().cloned()),
+            },
+        )
+    }
+
+    /// Measures factual drift of live Scout refinement over a synthetic
+    /// diagnostic corpus about the `evals/agent_adoption/fixture` orders crate.
+    ///
+    /// Ignored by default; it costs one provider call per case and repetition.
+    /// Run it with `TRACEDECAY_SCOUT_LIVE_EVAL_CODEX` set to the absolute path
+    /// of a `codex` executable (the production backend), or with
+    /// `TRACEDECAY_SCOUT_LIVE_EVAL_CLAUDE` set to a `claude` executable that
+    /// stands in for it. `TRACEDECAY_SCOUT_LIVE_EVAL_MODEL` sets the model and
+    /// `TRACEDECAY_SCOUT_LIVE_EVAL_REPS` the repetitions per case (default 1).
+    /// Bazel gives the test a throwaway `HOME`, so `CODEX_HOME` must name the
+    /// real Codex login:
+    ///
+    /// ```text
+    /// CODEX_HOME=~/.codex TRACEDECAY_SCOUT_LIVE_EVAL_CODEX=/path/to/codex \
+    /// TRACEDECAY_SCOUT_LIVE_EVAL_MODEL=<model> TRACEDECAY_SCOUT_LIVE_EVAL_REPS=3 \
+    /// env -u CC -u CXX bazel run //crates/tracedecay-agent-hosts:unit_test -- \
+    ///   --ignored --nocapture live_refinement_eval
+    /// ```
+    ///
+    /// Each row reports the route, the model outcome, the deterministic text,
+    /// the raw model proposal, the code-like tokens that proposal added (even
+    /// when the guard rejected it), receipt usage and cost, and wall time. It
+    /// asserts only that every case ends in a defined route.
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    #[ignore = "live provider call per case; needs TRACEDECAY_SCOUT_LIVE_EVAL_CODEX or _CLAUDE"]
+    async fn live_refinement_eval() {
+        use super::model::ProductionContextScoutModelAssistantV1;
+        use tracedecay_automation_runtime::automation::backend::{
+            AgentTaskBackend, CodexAppServerBackend,
+        };
+        use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
+
+        const TIMEOUT_SECS: u64 = 120;
+        let (executable, runner): (
+            _,
+            tracedecay_automation_runtime::ports::codex_app_server::RunPrompt,
+        ) = match (
+            std::env::var_os("TRACEDECAY_SCOUT_LIVE_EVAL_CODEX"),
+            std::env::var_os("TRACEDECAY_SCOUT_LIVE_EVAL_CLAUDE"),
+        ) {
+            (Some(codex), _) => (codex, eval_codex_prompt_runner),
+            (None, Some(claude)) => (claude, eval_claude_prompt_runner),
+            (None, None) => {
+                eprintln!("skipped: set TRACEDECAY_SCOUT_LIVE_EVAL_CODEX or _CLAUDE");
+                return;
+            }
+        };
+        tracedecay_automation_runtime::ports::codex_app_server::register(runner);
+        let executable = LcmSummarizerExecutableV1::configured(
+            std::fs::canonicalize(executable).expect("the eval executable must exist"),
+        )
+        .expect("canonical eval executable");
+        let reps: usize = std::env::var("TRACEDECAY_SCOUT_LIVE_EVAL_REPS")
+            .ok()
+            .map_or(1, |reps| {
+                reps.parse()
+                    .expect("TRACEDECAY_SCOUT_LIVE_EVAL_REPS is a count")
+            });
+        let model = std::env::var("TRACEDECAY_SCOUT_LIVE_EVAL_MODEL").ok();
+        let backend: Arc<dyn AgentTaskBackend> =
+            Arc::new(CodexAppServerBackend::new(model, TIMEOUT_SECS, &executable));
+        let limits = ContextScoutLimitsV1::bounded_defaults();
+        let cases = [
+            (
+                "type_error",
+                ContextScoutCategoryV1::Diagnostic,
+                "error[E0308]: mismatched types at src/pricing.rs:15:9 in compute_total: \
+                 expected `u64`, found `u32`",
+            ),
+            (
+                "unused_variable",
+                ContextScoutCategoryV1::Diagnostic,
+                "warning: unused variable: `percent` at src/discount.rs:7:34 in apply_discount",
+            ),
+            (
+                "failing_assertion",
+                ContextScoutCategoryV1::Verification,
+                "test pricing::tests::grand_total_includes_tax failed: assertion `left == right` \
+                 failed, left: 1080, right: 1000",
+            ),
+            (
+                "review_comment",
+                ContextScoutCategoryV1::Retrieval,
+                "Review: reserve_stock in src/inventory.rs decrements stock before \
+                 check_availability succeeds, so a failed order still consumes inventory.",
+            ),
+            (
+                "ci_failure",
+                ContextScoutCategoryV1::Verification,
+                "CI job orders-fixture-test failed: the first failing test is \
+                 orders::tests::place_order_rejects_unknown_sku in src/orders.rs.",
+            ),
+            (
+                "coordination",
+                ContextScoutCategoryV1::Coordination,
+                "Another active agent edited src/orders.rs place_order in the last few minutes; \
+                 coordinate before changing it.",
+            ),
+        ];
+        println!(
+            "case\troute\tmodel_outcome\ttext_guard\tdeterministic\trefined\tunsupported\tinput_tokens\t\
+             output_tokens\tcost_microusd\twall_ms\tbackend_error"
+        );
+        let runs = (1..=reps).flat_map(|rep| cases.iter().map(move |&case| (rep, case)));
+        for (rep, (name, category, text)) in runs {
+            let recorder = Arc::new(ErrorCapturingBackend {
+                inner: Arc::clone(&backend),
+                error: Mutex::new(None),
+            });
+            let model = ProposalCapturingModel {
+                inner: ProductionContextScoutModelAssistantV1::new(
+                    Arc::clone(&recorder) as Arc<dyn AgentTaskBackend>,
+                    ContextScoutModelBackendV1::CodexAppServer,
+                ),
+                proposal: Mutex::new(None),
+            };
+            let execution = ContextScoutModelExecutionV1::new(
+                MonotonicDeadline::at(Instant::now() + Duration::from_secs(TIMEOUT_SECS + 5)),
+                CancellationToken::new(),
+                limits,
+            )
+            .unwrap();
+            let case = ContextScoutCandidateV1 {
+                category,
+                suggestion_text: text.to_owned(),
+                ..candidate(1, 10)
+            };
+            let started = Instant::now();
+            let selection = select_model_assisted_context_scout(
+                &input(vec![case.clone()]),
+                limits,
+                &model,
+                execution,
+            )
+            .await
+            .unwrap();
+            let wall_ms = started.elapsed().as_millis();
+            let proposal = model.proposal.into_inner().unwrap();
+            let refined = proposal
+                .as_ref()
+                .map_or("-", |proposal| &proposal.candidate.suggestion_text);
+            // The receipt gate admits only a priced Codex turn, so a stand-in
+            // model always falls back; this column judges its text alone.
+            let text_guard = proposal.as_ref().map_or("-", |proposal| {
+                let accepted = validated_model_candidate(
+                    &case,
+                    limits,
+                    case.dedupe_key,
+                    proposal.candidate.clone(),
+                );
+                if accepted.is_some() {
+                    "accepted"
+                } else {
+                    "rejected"
+                }
+            });
+            let unsupported = proposal.as_ref().map_or_else(Vec::new, |proposal| {
+                unsupported_code_tokens(text, &proposal.candidate.suggestion_text)
+                    .into_iter()
+                    .collect()
+            });
+            let receipt = proposal.as_ref().map(|proposal| &proposal.receipt);
+            let usage =
+                |value: Option<u64>| value.map_or_else(|| "-".to_owned(), |v| v.to_string());
+            println!(
+                "{name}/r{rep}\t{:?}\t{:?}\t{text_guard}\t{text}\t{refined}\t{}\t{}\t{}\t{}\t{wall_ms}\t{}",
+                selection.route,
+                selection.model_outcome,
+                unsupported.join(","),
+                usage(receipt.and_then(|receipt| receipt.input_tokens)),
+                usage(receipt.and_then(|receipt| receipt.output_tokens)),
+                usage(receipt.and_then(|receipt| receipt.estimated_cost_microusd)),
+                recorder.error.lock().unwrap().as_deref().unwrap_or("-"),
+            );
+            assert!(
+                matches!(
+                    selection.route,
+                    ContextScoutRouteV1::ModelAssisted | ContextScoutRouteV1::DeterministicFallback
+                ),
+                "{name} ended in {:?}",
+                selection.route
+            );
+        }
+    }
+}

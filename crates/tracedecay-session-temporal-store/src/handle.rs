@@ -1,7 +1,7 @@
 //! Registered-store handle the session-temporal crate composes against.
 //!
 //! `RegisteredGlobalDb` lives in `tracedecay-global-db` and implements this
-//! trait there. This crate must not depend on that crate — doing so would
+//! trait there. This crate must not depend on that crate, doing so would
 //! recreate the wave-7 spine chain.
 //!
 //! Query/execute futures are `Send` here because RPITIT `async fn` on
@@ -15,7 +15,6 @@ use std::path::Path;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, IntoParams, Rows};
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
 
 use crate::relations::{SessionRelationGraphStore, SessionRelationScope};
 
@@ -46,6 +45,8 @@ pub trait SessionTemporalExec: SessionTemporalQuery {
 /// Write transaction the session-temporal store can query, mutate, and commit.
 pub trait SessionTemporalWriteTxn: SessionTemporalExec {
     fn commit(self) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    fn rollback(self) -> impl Future<Output = Result<(), EngineError>> + Send;
 }
 
 impl SessionTemporalQuery for DatabaseEngineReadSnapshot {
@@ -73,6 +74,10 @@ pub trait SessionTemporalRegisteredDb: Sync {
         &self,
     ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, TraceDecayError>> + Send;
 
+    fn health_read_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, EngineError>> + Send;
+
     fn begin_write_transaction(
         &self,
     ) -> impl Future<Output = Result<Self::WriteTxn<'_>, TraceDecayError>> + Send;
@@ -82,8 +87,6 @@ pub trait SessionTemporalRegisteredDb: Sync {
     fn session_relation_store(
         &self,
     ) -> Result<(SessionRelationScope, SessionRelationGraphStore), TraceDecayError>;
-
-    fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1>;
 }
 
 /// Inherent-method host for former `impl RegisteredGlobalDb` temporal operations.
@@ -94,12 +97,10 @@ pub trait SessionTemporalRegisteredDb: Sync {
 pub struct SessionTemporalAccess<'a, D: SessionTemporalRegisteredDb + ?Sized>(&'a D);
 
 impl<'a, D: SessionTemporalRegisteredDb + ?Sized> SessionTemporalAccess<'a, D> {
-    #[hotpath::skip]
     pub const fn new(db: &'a D) -> Self {
         Self(db)
     }
 
-    #[hotpath::skip]
     pub const fn inner(&self) -> &'a D {
         self.0
     }

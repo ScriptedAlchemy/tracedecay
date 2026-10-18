@@ -3,7 +3,7 @@
 //! The DB-free retrieval and rendering contracts live in
 //! [`crate::contracts`] and are re-exported here so this module remains the
 //! single import surface for the session engine.
-//! Only infrastructure-facing conversions — notably the SQL error mapping —
+//! Only infrastructure-facing conversions, notably the SQL error mapping,
 //! stay in this module.
 
 pub use crate::contracts::{
@@ -103,8 +103,6 @@ pub struct LcmLoadSessionMessage {
     pub content_hash: String,
     pub storage_kind: LcmStorageKind,
     pub payload_ref: Option<String>,
-    pub legacy_source: bool,
-    pub legacy_truncated: bool,
     pub metadata_json: Option<String>,
 }
 
@@ -118,6 +116,22 @@ pub struct LcmRecentSession {
     pub first_timestamp: Option<i64>,
     pub last_timestamp: Option<i64>,
     pub last_store_id: i64,
+}
+
+/// Per-provider raw transcript counts for one explicit session id: the raw
+/// store answers for a session the temporal projection has not published
+/// (or has only partially published), where an occurrence page serves no
+/// record to take the measured provider or message counts from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSessionRawStats {
+    pub provider: String,
+    /// Raw transcript messages stored for the session under this provider.
+    pub raw_message_count: i64,
+    /// Raw rows the session's active temporal generation has not published
+    /// as occurrences (see [`crate::schema::RAW_MESSAGE_UNPUBLISHED_SQL`]).
+    pub unpublished_message_count: i64,
+    /// Summary-DAG nodes visible in the session's active generation.
+    pub summary_node_count: i64,
 }
 
 /// Bounded turn-ordered replay slice request for one session: up to
@@ -196,44 +210,6 @@ impl std::str::FromStr for LcmGrepSort {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmGrepRequest {
-    pub provider: String,
-    pub query: String,
-    pub scope: LcmScope,
-    pub session_id: Option<String>,
-    pub include_summaries: bool,
-    pub limit: usize,
-    pub sort: LcmGrepSort,
-    pub source: Option<String>,
-    pub role: Option<String>,
-    pub start_time: Option<i64>,
-    pub end_time: Option<i64>,
-    /// Optional git-scope constraint (branch/worktree/commit). When set,
-    /// hits are limited to sessions correlated with the git ref via EXISTS
-    /// pushdown against the git-correlation tables. Defaults to `None`.
-    #[serde(default, skip_serializing_if = "crate::GitScopeFilter::is_empty")]
-    pub git_filter: crate::GitScopeFilter,
-}
-
-/// Query-only filters layered over the raw LCM request. Kept separate so
-/// compression/replay callers retain their existing request construction while
-/// interactive retrieval can select parent/subagent and semantic message type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LcmGrepFilters {
-    pub relationship_scope: crate::SessionSearchScope,
-    pub message_type: crate::SessionMessageType,
-}
-
-impl Default for LcmGrepFilters {
-    fn default() -> Self {
-        Self {
-            relationship_scope: crate::SessionSearchScope::All,
-            message_type: crate::SessionMessageType::All,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmGrepHit {
     pub kind: String,
     pub provider: String,
@@ -246,29 +222,6 @@ pub struct LcmGrepHit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     pub snippet: String,
-}
-
-/// Grep hits plus retrieval-policy disclosure: sessions whose matches were
-/// dropped by the cross-session per-session cap, with dropped-hit counts.
-/// Silent truncation reads as "covered everything"; callers must be able to
-/// see that a session has more matches and rerun with `scope=session`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmGrepOutcome {
-    pub hits: Vec<LcmGrepHit>,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub capped_sessions: std::collections::BTreeMap<String, usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmExpandQueryRequest {
-    pub provider: String,
-    pub session_id: String,
-    pub prompt: String,
-    pub query: Option<String>,
-    pub node_ids: Vec<String>,
-    pub max_results: usize,
-    pub max_tokens: usize,
-    pub context_max_tokens: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -347,23 +300,47 @@ pub struct LcmStatus {
     pub payload: LcmPayloadStatus,
     pub payload_gc: LcmPayloadGcStatus,
     pub lifecycle: LcmLifecycleStatus,
+    #[serde(default)]
+    pub summary_convergence: LcmSummaryConvergenceStatus,
     pub redaction: LcmRedactionStatus,
 }
 
+/// Durable retained-session summary work visible to operators.
+///
+/// Counts are disjoint queue states. In particular, an unsupported provider
+/// remains `unavailable` rather than looking current merely because the
+/// background scheduler completed its bounded pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryConvergenceStatus {
+    pub pending_session_count: i64,
+    pub retryable_session_count: i64,
+    pub current_session_count: i64,
+    pub unavailable_session_count: i64,
+    pub permanent_session_count: i64,
+    /// Parked and failed sessions grouped by the reason their queue state
+    /// records, ordered by state then reason.
+    #[serde(default)]
+    pub reasons: Vec<LcmSummaryConvergenceReasonCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryConvergenceReasonCount {
+    pub state: crate::summary_convergence::LcmSummaryConvergenceQueueState,
+    pub reason: String,
+    pub session_count: i64,
+}
+
 /// Default fresh-tail size applied when the host omits `fresh_tail_count`.
-/// Mirrors `compression.rs` `DEFAULT_FRESH_TAIL_COUNT`; keep in sync.
 pub const LCM_DEFAULT_FRESH_TAIL_COUNT: usize = 2;
 
 /// Default condensation fan-in applied when the host omits `summary_fan_in`.
-/// Mirrors `compression.rs` `DEFAULT_SUMMARY_FAN_IN`; keep in sync.
 pub const LCM_DEFAULT_SUMMARY_FAN_IN: usize = 4;
 
-/// Compression-boundary skip cooldown in seconds. Mirrors `compression.rs`
-/// `COMPRESSION_BOUNDARY_COOLDOWN_SECONDS`; keep in sync.
+/// Compression-boundary skip cooldown in seconds.
 pub const LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS: i64 = 60;
 
 /// Raw-store size diagnostics mirroring the hermes-lcm `lcm_status` `store`
-/// block. `estimated_tokens` uses the LCM whitespace budget heuristic
+/// block. `estimated_tokens` uses the LCM `o200k_base` token budget
 /// (`lcm_budget_tokens`) over stored message content.
 ///
 /// `messages` is the exact row count. The token estimate has to read every
@@ -391,7 +368,6 @@ pub struct LcmStoreTokenCoverage {
 }
 
 impl LcmStoreTokenCoverage {
-    #[hotpath::skip]
     pub const fn complete(scanned_messages: i64) -> Self {
         Self {
             complete: true,
@@ -402,7 +378,6 @@ impl LcmStoreTokenCoverage {
 
     /// Shallow status did not read message bodies. Resume from the start of
     /// the scope if a caller wants a budgeted estimate.
-    #[hotpath::skip]
     pub const fn unscanned() -> Self {
         Self {
             complete: false,
@@ -445,16 +420,6 @@ pub struct LcmConfigStatus {
     pub compression_boundary_cooldown_seconds: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmNoiseClassificationConfig {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ignore_session_patterns: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stateless_session_patterns: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ignore_message_patterns: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmGcConfig {
     #[serde(
@@ -468,12 +433,6 @@ pub struct LcmGcConfig {
     pub reap_missing_enabled: bool,
     #[serde(default = "default_lcm_gc_max_batch_size")]
     pub max_batch_size: usize,
-    #[serde(default = "default_lcm_gc_backup_before_reap")]
-    pub backup_before_reap: bool,
-    #[serde(default = "default_lcm_gc_interval_seconds")]
-    pub interval_seconds: u64,
-    #[serde(default = "default_lcm_gc_enabled")]
-    pub gc_enabled: bool,
 }
 
 impl LcmGcConfig {
@@ -497,9 +456,6 @@ impl Default for LcmGcConfig {
             reap_missing_after: default_lcm_gc_reap_missing_after(),
             reap_missing_enabled: default_lcm_gc_reap_missing_enabled(),
             max_batch_size: default_lcm_gc_max_batch_size(),
-            backup_before_reap: default_lcm_gc_backup_before_reap(),
-            interval_seconds: default_lcm_gc_interval_seconds(),
-            gc_enabled: default_lcm_gc_enabled(),
         }
         .normalized()
     }
@@ -519,18 +475,6 @@ fn default_lcm_gc_reap_missing_enabled() -> bool {
 
 fn default_lcm_gc_max_batch_size() -> usize {
     500
-}
-
-fn default_lcm_gc_backup_before_reap() -> bool {
-    true
-}
-
-fn default_lcm_gc_interval_seconds() -> u64 {
-    21_600
-}
-
-fn default_lcm_gc_enabled() -> bool {
-    true
 }
 
 fn deserialize_lcm_gc_grace_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -608,7 +552,6 @@ pub struct LcmLifecycleStatus {
 pub struct LcmRedactionStatus {
     pub enabled: bool,
     pub lossy_records: i64,
-    pub legacy_truncated_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -784,7 +727,6 @@ pub struct LcmCompressionResponse {
     pub replay_token_estimate: i64,
     pub replay_over_budget: bool,
     pub compression_attempts: usize,
-    pub fallback_used: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_recovery_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -802,42 +744,12 @@ mod tests {
 
     #[test]
     fn gc_config_clamps_grace_floor_from_serde() {
-        let config: LcmGcConfig = serde_json::from_str(
-            r#"{"grace_seconds":10,"reap_missing_after":0,"gc_enabled":false}"#,
-        )
-        .expect("gc config should deserialize");
+        let config: LcmGcConfig =
+            serde_json::from_str(r#"{"grace_seconds":10,"reap_missing_after":0}"#)
+                .expect("gc config should deserialize");
 
         assert_eq!(config.grace_seconds, 300);
         assert_eq!(config.reap_missing_after, 0);
-        assert!(!config.gc_enabled);
-    }
-
-    #[test]
-    fn gc_config_defaults_match_spec() {
-        let config = LcmGcConfig::default();
-
-        assert_eq!(config.grace_seconds, 86_400);
-        assert_eq!(config.reap_missing_after, 604_800);
-        assert!(!config.reap_missing_enabled);
-        assert_eq!(config.max_batch_size, 500);
-        assert!(config.backup_before_reap);
-        assert_eq!(config.interval_seconds, 21_600);
-        assert!(config.gc_enabled);
-    }
-
-    #[test]
-    fn gc_config_round_trips_with_serde_defaults() {
-        let config: LcmGcConfig =
-            serde_json::from_str("{}").expect("empty gc config should deserialize with defaults");
-        let value = serde_json::to_value(&config).expect("gc config should serialize");
-
-        assert_eq!(value["grace_seconds"], 86_400);
-        assert_eq!(value["reap_missing_after"], 604_800);
-        assert_eq!(value["reap_missing_enabled"], false);
-        assert_eq!(value["max_batch_size"], 500);
-        assert_eq!(value["backup_before_reap"], true);
-        assert_eq!(value["interval_seconds"], 21_600);
-        assert_eq!(value["gc_enabled"], true);
     }
 
     #[test]
@@ -848,17 +760,5 @@ mod tests {
 
         assert!(config.reap_missing_enabled);
         assert_eq!(config.reap_missing_after, 0);
-    }
-
-    #[test]
-    fn lcm_error_display_includes_gc_variants() {
-        assert_eq!(
-            LcmError::PayloadGcd.to_string(),
-            "payload already garbage collected"
-        );
-        assert_eq!(
-            LcmError::StillReferenced.to_string(),
-            "payload still referenced"
-        );
     }
 }

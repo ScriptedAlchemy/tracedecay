@@ -1,22 +1,20 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::errors::Result;
-use crate::ports::session_store::{
-    AnalyticsEventQuery, AnalyticsEventRecord, AutomationSessionStore, canonical_project_key,
-};
 use tracedecay_automation::analytics::{UsageKind, infer_usage_events};
+use tracedecay_domain::errors::Result;
+use tracedecay_global_db::{AnalyticsEventQuery, AnalyticsEventRecord, RegisteredGlobalDb};
 
+use super::store;
 use super::{
     SkillUsageAction, SkillUsageEvent, SkillUsageRecord, config_error, ledger_skill_id,
-    load_skill_usage_ledger, save_skill_usage_ledger,
+    record_usage_event,
 };
 
 pub async fn ingest_analytics_events(
     profile_root: &Path,
     events: &[AnalyticsEventRecord],
 ) -> Result<Vec<SkillUsageRecord>> {
-    let mut ledger = load_skill_usage_ledger(profile_root).await?;
     let mut touched = Vec::new();
     let mut seen = BTreeSet::new();
     for event in events {
@@ -33,33 +31,45 @@ pub async fn ingest_analytics_events(
             if !seen.insert(dedupe.clone()) {
                 continue;
             }
-            if !ledger.imported_analytics_events.insert(dedupe) {
+            let skill_name = usage.name.clone();
+            let provider = event.provider.clone();
+            let timestamp = event.timestamp;
+            let Some(record) = store::record_imported_event(
+                profile_root,
+                &skill_id,
+                timestamp,
+                dedupe,
+                move |record| {
+                    record_usage_event(
+                        record,
+                        &SkillUsageEvent {
+                            skill_name,
+                            action,
+                            timestamp,
+                            target: Some(provider),
+                        },
+                    );
+                },
+            )
+            .await?
+            else {
                 continue;
-            }
-            let record = ledger
-                .records
-                .entry(skill_id.clone())
-                .or_insert_with(|| SkillUsageRecord::new(skill_id, event.timestamp));
-            record.record(&SkillUsageEvent {
-                skill_name: usage.name,
-                action,
-                timestamp: event.timestamp,
-                target: Some(event.provider.clone()),
-            });
-            touched.push(record.clone());
+            };
+            touched.push(record);
         }
-    }
-    if !touched.is_empty() {
-        save_skill_usage_ledger(profile_root, &ledger).await?;
     }
     Ok(touched)
 }
 
-#[hotpath::measure(label = "automation.skill_usage.ingest_project", future = true)]
+#[tracing::instrument(
+    name = "automation.skill_usage.ingest_project",
+    level = "trace",
+    skip_all
+)]
 pub async fn ingest_project_analytics_events(
     profile_root: &Path,
     project_root: &Path,
-    global_db: Option<&dyn AutomationSessionStore>,
+    global_db: Option<&RegisteredGlobalDb>,
     limit: usize,
 ) -> Result<Vec<SkillUsageRecord>> {
     let Some(global_db) = global_db else {
@@ -68,7 +78,7 @@ pub async fn ingest_project_analytics_events(
     let events = global_db
         .query_analytics_events(&AnalyticsEventQuery {
             provider: None,
-            project_id: Some(canonical_project_key(project_root)),
+            project_id: Some(RegisteredGlobalDb::canonical_project_key(project_root)),
             session_id: None,
             event_kind: None,
             since: None,

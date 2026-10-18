@@ -1,0 +1,218 @@
+use super::common::*;
+use super::*;
+use tracedecay_temporal_query::execution::ExecutionControl;
+
+struct CapabilityDeniedSessionPorts {
+    capabilities: SessionTemporalCapabilitiesV1,
+}
+
+impl CapabilityDeniedSessionPorts {
+    fn new() -> Self {
+        Self {
+            capabilities: capabilities([]),
+        }
+    }
+}
+
+impl SessionTemporalCapabilityProvider for CapabilityDeniedSessionPorts {
+    fn session_temporal_capabilities(&self) -> &SessionTemporalCapabilitiesV1 {
+        &self.capabilities
+    }
+}
+
+impl SessionRetrievalStore for CapabilityDeniedSessionPorts {
+    async fn freeze_session_temporal_snapshot_supported(
+        &self,
+        _permit: SessionSnapshotFreezePermit,
+        _request: SessionTemporalSnapshotRequestV1,
+    ) -> SessionStoreResult<SessionTemporalSnapshotV1> {
+        panic!("capability guard was bypassed")
+    }
+
+    async fn retrieve_session_temporal_page_supported(
+        &self,
+        _permit: SessionTemporalPageRetrievePermit,
+        _request: SessionTemporalRetrievalRequestV1,
+    ) -> SessionStoreResult<SessionRetrievalPageV1> {
+        panic!("capability guard was bypassed")
+    }
+}
+
+impl SessionRefreshStore for CapabilityDeniedSessionPorts {
+    async fn begin_or_join_session_refresh_supported(
+        &self,
+        _permit: SessionRefreshBeginOrJoinPermit,
+        _request: SessionRefreshBeginOrJoinRequestV1,
+    ) -> SessionStoreResult<SessionRefreshBeginOrJoinReceiptV1> {
+        panic!("capability guard was bypassed")
+    }
+
+    async fn persist_session_refresh_progress_supported(
+        &self,
+        _permit: SessionRefreshProgressPersistPermit,
+        _progress: SessionRefreshProgressV1,
+    ) -> SessionStoreResult<SessionRefreshProgressV1> {
+        panic!("capability guard was bypassed")
+    }
+
+    async fn session_refresh_progress_supported(
+        &self,
+        _permit: SessionRefreshProgressReadPermit,
+        _request: SessionRefreshProgressRequestV1,
+    ) -> SessionStoreResult<Option<SessionRefreshProgressV1>> {
+        panic!("capability guard was bypassed")
+    }
+
+    async fn complete_session_refresh_supported(
+        &self,
+        _permit: SessionRefreshCompletePermit,
+        _request: SessionRefreshCompletionRequestV1,
+        _execution_control: ExecutionControl,
+    ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        panic!("capability guard was bypassed")
+    }
+
+    async fn fail_session_refresh_supported(
+        &self,
+        _permit: SessionRefreshFailPermit,
+        _request: SessionRefreshFailureRequestV1,
+    ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        panic!("capability guard was bypassed")
+    }
+
+    async fn cancel_session_refresh_supported(
+        &self,
+        _permit: SessionRefreshCancelPermit,
+        _request: SessionRefreshCancellationRequestV1,
+    ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        panic!("capability guard was bypassed")
+    }
+
+    async fn session_refresh_receipt_supported(
+        &self,
+        _permit: SessionRefreshReceiptReadPermit,
+        _request: SessionRefreshReceiptRequestV1,
+    ) -> SessionStoreResult<Option<SessionRefreshReceiptV1>> {
+        panic!("capability guard was bypassed")
+    }
+}
+
+#[test]
+fn refresh_ports_deny_every_unsupported_capability() {
+    let ports = CapabilityDeniedSessionPorts::new();
+    let session_id = session("session.fixture");
+    let operation_id = operation_id();
+    let partial_frontier = SessionRefreshFrontierV1::new(10, 8).unwrap();
+    let complete_frontier = SessionRefreshFrontierV1::new(10, 10).unwrap();
+    let progress = SessionRefreshProgressV1::new(
+        operation_id.clone(),
+        session_id.clone(),
+        partial_frontier,
+        coverage(),
+        2,
+        8,
+        UtcMicros(100),
+    );
+    let completion = SessionRefreshCompletionRequestV1::new(
+        operation_id.clone(),
+        session_id.clone(),
+        complete_frontier,
+        coverage(),
+    )
+    .unwrap();
+    let failure = SessionRefreshFailureRequestV1::new(
+        operation_id.clone(),
+        session_id.clone(),
+        partial_frontier,
+        coverage(),
+        "source_unavailable",
+    )
+    .unwrap();
+    let cancellation = SessionRefreshCancellationRequestV1::new(
+        operation_id.clone(),
+        session_id.clone(),
+        partial_frontier,
+        coverage(),
+    );
+    let progress_request =
+        SessionRefreshProgressRequestV1::new(operation_id.clone(), session_id.clone());
+    let receipt_request =
+        SessionRefreshReceiptRequestV1::new(operation_id.clone(), session_id.clone());
+
+    // CapabilityDeniedSessionPorts panics if any *_supported dispatch is entered.
+    // Returning UnsupportedCapability (instead of panicking) proves the public
+    // call surface never reaches unguarded dispatch without a granted permit.
+    let refresh_results = [
+        ready(
+            ports.begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+                session_id.clone(),
+                complete_frontier,
+            )),
+        )
+        .map(|_| ()),
+        ready(ports.persist_session_refresh_progress(progress)).map(|_| ()),
+        ready(ports.session_refresh_progress(progress_request)).map(|_| ()),
+        ready(ports.complete_session_refresh(completion, ExecutionControl::default())).map(|_| ()),
+        ready(ports.fail_session_refresh(failure)).map(|_| ()),
+        ready(ports.cancel_session_refresh(cancellation)).map(|_| ()),
+        ready(ports.session_refresh_receipt(receipt_request)).map(|_| ()),
+    ];
+    let expected_refresh_capabilities = [
+        SessionTemporalCapabilityV1::RefreshJoin,
+        SessionTemporalCapabilityV1::RefreshProgressPersistence,
+        SessionTemporalCapabilityV1::RefreshProgressPersistence,
+        SessionTemporalCapabilityV1::RefreshProgressPersistence,
+        SessionTemporalCapabilityV1::RefreshProgressPersistence,
+        SessionTemporalCapabilityV1::RefreshCancellation,
+        SessionTemporalCapabilityV1::RefreshProgressPersistence,
+    ];
+    for (result, capability) in refresh_results
+        .into_iter()
+        .zip(expected_refresh_capabilities)
+    {
+        assert!(matches!(
+            result,
+            Err(SessionStoreError::UnsupportedCapability {
+                capability: actual
+            }) if actual == capability
+        ));
+    }
+}
+
+#[test]
+fn adapter_capabilities_override_forged_snapshot_capabilities() {
+    let ports = CapabilityDeniedSessionPorts::new();
+    let session_id = session("session.fixture");
+    let forged_snapshot = snapshot_with_capabilities(
+        session_id.clone(),
+        [SessionTemporalCapabilityV1::FrozenWatermarks],
+    );
+    let request = SessionTemporalRetrievalRequestV1::new(
+        session_id.clone(),
+        TemporalModeV1::Current,
+        RetrievalGrainV1::Occurrence,
+        forged_snapshot,
+        1,
+        None,
+        ExecutionControl::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        ready(ports.retrieve_session_temporal_page(request)),
+        Err(SessionStoreError::UnsupportedCapability {
+            capability: SessionTemporalCapabilityV1::FrozenWatermarks
+        })
+    ));
+
+    assert!(matches!(
+        ready(
+            ports.freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(
+                session_id,
+            )),
+        ),
+        Err(SessionStoreError::UnsupportedCapability {
+            capability: SessionTemporalCapabilityV1::FrozenWatermarks
+        })
+    ));
+}

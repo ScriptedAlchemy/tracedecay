@@ -19,7 +19,11 @@ pub enum DiagnosticCurationDecisionV1 {
 
 /// Curates one durable diagnostic against the exact current projection
 /// identity. The caller still owns record lookup and LSP publication.
-#[hotpath::measure(label = "policy.diagnostic_curation.evaluate")]
+#[tracing::instrument(
+    name = "policy.diagnostic_curation.evaluate",
+    level = "trace",
+    skip_all
+)]
 pub fn curate_diagnostic(
     record: &GenerationDiagnosticV1,
     target_file: &FileOccurrenceId,

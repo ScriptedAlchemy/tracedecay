@@ -1,35 +1,16 @@
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
-use tracedecay_agent_hosts::hooks::{
-    HookWorkspaceStatus, build_codex_session_context_for_workspace, codex_apply_patch_rel_paths,
-    cursor_session_start_json, native_capture_material,
-};
-use tracedecay_domain::UtcMicros;
-use tracedecay_hooks::{HookHostV1, NativeHookCaptureSourceV1, NativeHookDecodeError};
-
-#[test]
-fn codex_unindexed_workspace_context_preserves_tool_routing() {
-    let context = build_codex_session_context_for_workspace(
-        HookWorkspaceStatus::UnindexedProject,
-        Some("last indexed 7m ago"),
-    );
-
-    assert!(context.contains("literal or regex text -> tracedecay_grep"));
-    assert!(context.contains("symbol name -> tracedecay_search"));
-    assert!(context.contains("concept -> tracedecay_context"));
-    assert!(context.contains("tracedecay_diagnostics"));
-}
-
-#[test]
-fn codex_apply_patch_paths_stay_inside_the_project() {
-    let project_root = Path::new("/workspace/project");
-    let command = "*** Begin Patch\n*** Update File: src/lib.rs\n*** Add File: ../secret.txt\n*** Move to: src/moved.rs\n*** End Patch";
-
-    assert_eq!(
-        codex_apply_patch_rel_paths(command, project_root, project_root),
-        ["src/lib.rs", "src/moved.rs"]
-    );
-}
+use serde_json::{Value, json};
+use tracedecay_agent_hosts::hooks::{cursor_session_start_json, native_capture_material};
+use tracedecay_agent_hosts::ports::hook_runtime;
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_domain::NativeHostIdentityV1;
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::{ProjectId, UtcMicros};
+use tracedecay_hooks::{DaemonHookEvent, NativeHookCaptureSourceV1, NativeHookDecodeError};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 #[test]
 fn cursor_session_behavior_preserves_workspace_identity() {
@@ -56,7 +37,7 @@ fn native_identity_ignores_provider_content_but_preserves_typed_ids() {
         "permission_mode":"default","stop_hook_active":false,
         "last_assistant_message":"secret two"
     }"#;
-    let source = NativeHookCaptureSourceV1::Host(HookHostV1::Codex);
+    let source = NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Codex);
 
     let first = native_capture_material(source, first, UtcMicros(42)).expect("first material");
     let second = native_capture_material(source, second, UtcMicros(42)).expect("second material");
@@ -77,7 +58,7 @@ fn installed_but_unsupported_events_remain_successful_noop_candidates() {
 
     assert!(matches!(
         native_capture_material(
-            NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
+            NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Codex),
             codex_subagent,
             UtcMicros(42),
         ),
@@ -85,7 +66,7 @@ fn installed_but_unsupported_events_remain_successful_noop_candidates() {
     ));
     assert!(matches!(
         native_capture_material(
-            NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+            NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
             cursor_session_end,
             UtcMicros(42),
         ),
@@ -93,28 +74,99 @@ fn installed_but_unsupported_events_remain_successful_noop_candidates() {
     ));
 }
 
+/// Two independently constructed handles coexist in one process and each
+/// answers only for itself: there is no slot to win, so the fixture that
+/// built the second handle cannot inherit the first one's capabilities.
 #[tokio::test]
-async fn unregistered_root_ports_fail_closed() {
-    let error = tracedecay_agent_hosts::ports::hook_runtime::daemon_tool_json(
-        None,
-        "tracedecay_status",
-        serde_json::json!({}),
-        false,
-    )
-    .await
-    .expect_err("unregistered daemon port must not fabricate success");
-    assert!(error.to_string().contains("no daemon tool invoker"));
-    assert!(
-        tracedecay_agent_hosts::ports::hook_runtime::resolve_project_root_with_identity(Path::new(
-            "/workspace/project",
-        ))
+async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
+    fn runtime(
+        profile: ProfileRoot,
+        timing_gate: hook_runtime::HookTimingGate,
+        daemon_tool: hook_runtime::DaemonToolInvoker,
+    ) -> hook_runtime::HookRuntimeV1 {
+        fn project_root<'a>(
+            _: &'a ProfileRoot,
+            _: &'a Path,
+        ) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>> {
+            Box::pin(async { None })
+        }
+        fn scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {
+            Err("fixture has no scope resolver".to_owned())
+        }
+        fn notify<'a>(
+            _: &'a ProfileRoot,
+            _: &'a Path,
+            _: DaemonHookEvent,
+        ) -> Pin<Box<dyn Future<Output = tracedecay_hooks::HookEventNotifyOutcomeV1> + Send + 'a>>
+        {
+            Box::pin(async { tracedecay_hooks::HookEventNotifyOutcomeV1::Unavailable })
+        }
+        fn initialized(_: &ProfileRoot, _: &Path) -> bool {
+            false
+        }
+        hook_runtime::HookRuntimeV1 {
+            profile,
+            daemon_tool,
+            project_root_resolver: project_root,
+            scope_resolver: scope,
+            event_notifier: notify,
+            timing_gate,
+            project_initialization_gate: initialized,
+        }
+    }
+    fn timings_on(_: &ProfileRoot, _: &Path) -> Option<bool> {
+        Some(true)
+    }
+    fn timings_off(_: &ProfileRoot, _: &Path) -> Option<bool> {
+        Some(false)
+    }
+    fn tool_first<'a>(
+        _: &'a ProfileRoot,
+        _: Option<&'a Path>,
+        _: &'a str,
+        _: Value,
+        _: bool,
+    ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<Value>> + Send + 'a>> {
+        Box::pin(async { Ok(json!({ "handle": "first" })) })
+    }
+    fn tool_second<'a>(
+        _: &'a ProfileRoot,
+        _: Option<&'a Path>,
+        _: &'a str,
+        _: Value,
+        _: bool,
+    ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<Value>> + Send + 'a>> {
+        Box::pin(async {
+            Err(TraceDecayError::Config {
+                message: "second handle has no daemon".to_owned(),
+            })
+        })
+    }
+
+    let first_home = tempfile::tempdir().expect("first profile home");
+    let second_home = tempfile::tempdir().expect("second profile home");
+    let first = runtime(
+        ProfileRoot::under_home(first_home.path()),
+        timings_on,
+        tool_first,
+    );
+    let second = runtime(
+        ProfileRoot::under_home(second_home.path()),
+        timings_off,
+        tool_second,
+    );
+    let root = Path::new("/workspace/project");
+
+    assert_eq!((first.timing_gate)(&first.profile, root), Some(true));
+    assert_eq!((second.timing_gate)(&second.profile, root), Some(false));
+    assert_eq!(
+        (first.daemon_tool)(&first.profile, None, "tracedecay_status", json!({}), false)
+            .await
+            .expect("first handle's daemon answers"),
+        json!({ "handle": "first" })
+    );
+    let error = (second.daemon_tool)(&second.profile, None, "tracedecay_status", json!({}), false)
         .await
-        .is_none()
-    );
-    assert!(
-        tracedecay_agent_hosts::ports::hook_runtime::hook_timings_enabled(Path::new(
-            "/workspace/project"
-        ))
-        .is_none()
-    );
+        .expect_err("second handle must not borrow the first handle's daemon");
+    assert!(error.to_string().contains("second handle has no daemon"));
 }

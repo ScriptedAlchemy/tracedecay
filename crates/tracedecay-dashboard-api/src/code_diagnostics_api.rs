@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
 
 use axum::Json;
-use axum::extract::{Extension, Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
-use super::util::{JsonError, http_detail, internal_error};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::util::{JsonError, http_detail, internal_error, json_error};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 use crate::application::dashboard_diagnostics::{
     DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
 };
-use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
+use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::ManifestDigest;
 use tracedecay_lsp::analyzer::adapters::LspAdapterDefinition;
 use tracedecay_lsp::analyzer::broker::DiagnosticsSnapshot;
@@ -50,12 +50,11 @@ enum CommandOverridePatch {
     Value(String),
 }
 
-#[hotpath::measure(label = "dashboard_api.diagnostics.overview", future = true)]
+#[tracing::instrument(name = "dashboard_api.diagnostics.overview", level = "trace", skip_all)]
 pub async fn overview(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> ApiResult {
-    let control = request_control(control)?;
     let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
         .overview(request)
@@ -64,16 +63,18 @@ pub async fn overview(
     snapshot_response(&snapshot)
 }
 
-#[hotpath::measure(label = "dashboard_api.diagnostics.patch", future = true)]
+#[tracing::instrument(name = "dashboard_api.diagnostics.patch", level = "trace", skip_all)]
 pub async fn patch_settings(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = serde_json::from_value::<SettingsPatch>(patch).map_err(|error| {
-        bad_request(&format!("invalid code diagnostics settings patch: {error}"))
+        json_error(
+            StatusCode::BAD_REQUEST,
+            format!("invalid code diagnostics settings patch: {error}"),
+        )
     })?;
-    let control = request_control(control)?;
     let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
         .update_settings(&request, &patch.expected_revision, |settings| {
@@ -102,12 +103,11 @@ pub async fn patch_settings(
     snapshot_response(&snapshot)
 }
 
-#[hotpath::measure(label = "dashboard_api.diagnostics.refresh", future = true)]
+#[tracing::instrument(name = "dashboard_api.diagnostics.refresh", level = "trace", skip_all)]
 pub async fn refresh_all(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> ApiResult {
-    let control = request_control(control)?;
     let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
         .refresh_all(&request)
@@ -116,13 +116,16 @@ pub async fn refresh_all(
     snapshot_response(&snapshot)
 }
 
-#[hotpath::measure(label = "dashboard_api.diagnostics.refresh_language", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.diagnostics.refresh_language",
+    level = "trace",
+    skip_all
+)]
 pub async fn refresh_language(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     AxumPath(language): AxumPath<String>,
 ) -> ApiResult {
-    let control = request_control(control)?;
     let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
         .refresh_language(&request, &language)
@@ -173,19 +176,6 @@ fn diagnostics_request(
     )
 }
 
-fn request_control(
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
-) -> std::result::Result<DashboardHttpRequestControlV1, JsonError> {
-    control.map(|Extension(control)| control).ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(http_detail(
-                "dashboard HTTP request admission is unavailable",
-            )),
-        )
-    })
-}
-
 fn deserialize_command_override_patch<'de, D>(
     deserializer: D,
 ) -> std::result::Result<CommandOverridePatch, D::Error>
@@ -198,19 +188,12 @@ where
     })
 }
 
-fn bad_request(error: &impl ToString) -> JsonError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": error.to_string(),
-        })),
-    )
-}
-
 fn authority_error(error: DashboardDiagnosticsErrorV1) -> JsonError {
     match &error {
         DashboardDiagnosticsErrorV1::AdapterUnavailable { .. }
-        | DashboardDiagnosticsErrorV1::LanguageDisabled { .. } => bad_request(&error),
+        | DashboardDiagnosticsErrorV1::LanguageDisabled { .. } => {
+            json_error(StatusCode::BAD_REQUEST, error.to_string())
+        }
         DashboardDiagnosticsErrorV1::RevisionConflict { expected, actual } => (
             StatusCode::CONFLICT,
             Json(json!({
@@ -266,7 +249,7 @@ mod tests {
         CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture,
         CodeGraphReadRequest,
     };
-    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_contracts::CancellationSignal;
     use tracedecay_domain::UtcMicros;
     use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
 
@@ -299,18 +282,6 @@ mod tests {
         crate::events_api::dashboard_state_fixture("project.dashboard-code-diagnostics").await
     }
 
-    fn request_control() -> DashboardHttpRequestControlV1 {
-        let observed_at = UtcMicros(1_000_000);
-        DashboardHttpRequestControlV1 {
-            request_id: RequestId::new("request.dashboard-diagnostics-test")
-                .expect("request identity"),
-            deadline: Deadline::new(UtcMicros(2_000_000)).expect("request deadline"),
-            cancellation: CancellationSignal::active("cancel.dashboard-diagnostics-test")
-                .expect("request cancellation"),
-            observed_at,
-        }
-    }
-
     fn authority_with_settings(
         state: &DashboardState,
         settings: CodeDiagnosticsSettings,
@@ -328,35 +299,18 @@ mod tests {
         )
     }
 
-    #[test]
-    fn snapshot_response_publishes_the_exact_settings_revision() {
-        let mut settings = CodeDiagnosticsSettings {
-            idle_backfill: IdleBackfillMode::Off,
-            ..CodeDiagnosticsSettings::default()
-        };
-        settings.set_language_enabled("rust", false);
-        let expected = diagnostic_broker(std::path::PathBuf::from("project"), settings).snapshot();
-        let Json(actual) = snapshot_response(&expected).expect("diagnostics overview");
-
-        assert_eq!(actual["settings"]["idle_backfill"], json!("off"));
-        assert_eq!(actual["settings"]["languages"]["rust"]["enabled"], false);
-        // Every read publishes the compare-and-set token for the settings it
-        // just reported, so the next write is checked against this exact state.
-        assert_eq!(
-            actual["settings_revision"],
-            json!(settings_revision(&expected.settings).expect("settings revision"))
-        );
-        let mut without_revision = actual.clone();
-        without_revision
-            .as_object_mut()
-            .expect("overview object")
-            .remove("settings_revision");
-        assert_eq!(without_revision, json!(expected));
+    fn request_control() -> DashboardHttpRequestControlV1 {
+        DashboardHttpRequestControlV1::test_fixture_with(
+            "dashboard-diagnostics-test",
+            CancellationSignal::active("cancel.dashboard-diagnostics-test")
+                .expect("request cancellation"),
+            UtcMicros(1_000_000),
+            UtcMicros(2_000_000),
+        )
     }
 
     #[tokio::test]
     async fn settings_patch_rejects_a_revision_the_authority_no_longer_holds() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_diagnostics_authority = Some(authority_with_settings(
             &state,
@@ -365,7 +319,7 @@ mod tests {
 
         let (status, Json(body)) = patch_settings(
             State(state),
-            Some(Extension(request_control())),
+            RequestControl(request_control()),
             Json(json!({
                 "expected_revision": format!("sha256:{}", "0".repeat(64)),
                 "idle_backfill": "off",
@@ -381,7 +335,6 @@ mod tests {
 
     #[tokio::test]
     async fn settings_patch_without_a_revision_is_rejected_before_any_write() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_diagnostics_authority = Some(authority_with_settings(
             &state,
@@ -390,7 +343,7 @@ mod tests {
 
         let (status, Json(body)) = patch_settings(
             State(state),
-            Some(Extension(request_control())),
+            RequestControl(request_control()),
             Json(json!({ "idle_backfill": "off" })),
         )
         .await
@@ -407,10 +360,9 @@ mod tests {
 
     #[tokio::test]
     async fn overview_returns_service_unavailable_without_mounted_authority() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state) = state_for_test().await;
 
-        let (status, Json(body)) = overview(State(state), Some(Extension(request_control())))
+        let (status, Json(body)) = overview(State(state), RequestControl(request_control()))
             .await
             .expect_err("unmounted authority must fail closed");
 

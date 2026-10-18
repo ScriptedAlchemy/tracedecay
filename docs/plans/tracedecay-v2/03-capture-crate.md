@@ -113,7 +113,7 @@ scaffold or declaration requirements.
   complete-snapshot and absence evidence, but Plan 04 alone derives absence
   tombstones. Partial, cancelled, mixed-revision, unauthorized, or unavailable
   scans cannot prove absence. Incremental cursors are gap-free; object revision
-  never serves as cursor; omission never means deletion; duplicate pages are
+  is never a cursor; omission never means deletion; duplicate pages are
   no-ops; and a reused revision with a different digest blocks only that
   partition without frontier advance. Incremental-to-whole-root fallback
   requires explicit support in the pinned contract.

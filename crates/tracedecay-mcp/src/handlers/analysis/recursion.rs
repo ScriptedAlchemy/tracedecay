@@ -1,107 +1,108 @@
-//! `tracedecay_recursion` — self-recursive and mutually recursive symbol detection.
+//! `tracedecay_recursion`, self-recursive and mutually recursive symbol detection.
+
+use tracedecay_contracts::retrieval::{
+    RecursionCycleV1, RecursionResultV1, RecursionSurfaceRequestV1, RecursionSymbolV1,
+};
 
 use super::*;
 
 /// Detects cycles in the call graph using iterative DFS on the calls-only
 /// edge subgraph. Each cycle is a vec of node IDs forming the loop.
-#[hotpath::measure(future = true, label = "mcp.analysis.recursion.total")]
-pub async fn handle_recursion(
+#[tracing::instrument(name = "mcp.analysis.recursion.total", level = "trace", skip_all)]
+pub(super) async fn compute_recursion(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(10, |v| v.min(100) as usize);
-    let path_prefix = effective_path(&args, scope_prefix);
+) -> Result<GraphToolCompletionV1> {
+    let request: RecursionSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_recursion")?;
+    let limit = request.limit.map_or(10, |v| v.min(100) as usize);
+    let path_prefix = request.path.as_deref().or(scope_prefix);
 
     require_positive_limit(limit, "tracedecay_recursion")?;
 
-    let (symbols, call_edges) = hotpath::measure_block!("mcp.analysis.recursion.graph", {
-        let symbols = verified_analysis_symbols(graph, path_prefix)?;
-        let call_edges = verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Calls])?;
-        (symbols, call_edges)
-    });
-    let (cycles, symbol_by_id) = hotpath::measure_block!("mcp.analysis.recursion.compute", {
-        let symbol_by_id = symbols
-            .iter()
-            .map(|symbol| (symbol.occurrence.as_str().to_string(), symbol))
-            .collect::<HashMap<_, _>>();
-        let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
-        for edge in call_edges {
-            let src = edge.edge.from_occurrence.as_str().to_string();
-            let tgt = edge.edge.to_occurrence.as_str().to_string();
-            adj.entry(src).or_default().insert(tgt.clone());
-            adj.entry(tgt).or_default();
+    let (symbols, call_edges) = {
+        let _span = tracing::trace_span!("mcp.analysis.recursion.graph").entered();
+        {
+            let symbols = verified_analysis_symbols(graph, path_prefix)?;
+            let call_edges =
+                verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Calls])?;
+            (symbols, call_edges)
         }
-
-        // Collect only the cyclic SCCs, then sort smallest-first so we keep
-        // shorter / more interesting cycles when the cap kicks in. We still need
-        // every cyclic SCC enumerated before sorting (truncating early would bias
-        // toward Tarjan emission order), but we cap the per-SCC path search.
-        let mut cyclic_sccs: Vec<Vec<String>> = tracedecay_graph_query::scc::tarjan_scc(&adj)
-            .into_iter()
-            .filter(|scc| tracedecay_graph_query::scc::is_cyclic_scc(scc, &adj))
-            .collect();
-        cyclic_sccs.sort_by_key(Vec::len);
-
-        let mut cycles: Vec<Vec<String>> = Vec::new();
-        for mut scc in cyclic_sccs {
-            if cycles.len() >= limit {
-                break;
+    };
+    let (cycles, symbol_by_id) = {
+        let _span = tracing::trace_span!("mcp.analysis.recursion.compute").entered();
+        {
+            let symbol_by_id = symbols
+                .iter()
+                .map(|symbol| (symbol.occurrence.as_str().to_string(), symbol))
+                .collect::<HashMap<_, _>>();
+            let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
+            for edge in call_edges {
+                let src = edge.from_occurrence.as_str().to_string();
+                let tgt = edge.to_occurrence.as_str().to_string();
+                adj.entry(src).or_default().insert(tgt.clone());
+                adj.entry(tgt).or_default();
             }
-            if let Some(path) = cycle_path_for_scc(&mut scc, &adj) {
-                cycles.push(path);
-            }
-        }
-        cycles.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-        cycles.truncate(limit);
-        (cycles, symbol_by_id)
-    });
 
-    let (output, touched) = hotpath::measure_block!("mcp.analysis.recursion.assemble", {
-        let mut cycle_items: Vec<Value> = Vec::new();
-        let mut touched: Vec<String> = Vec::new();
-        for cycle in &cycles {
-            let mut chain: Vec<Value> = Vec::new();
-            for node_id in cycle {
-                if let Some(symbol) = symbol_by_id.get(node_id) {
-                    touched.push(symbol.path.clone());
-                    chain.push(json!({
-                        "id": symbol.occurrence.as_str(),
-                        "name": symbol.metadata.simple_name,
-                        "kind": symbol.metadata.kind,
-                        "file": symbol.path,
-                        "line": symbol.metadata.start_line,
-                    }));
-                } else {
-                    return Err(verified_analysis_unavailable(
-                        "recursion",
-                        "a call-cycle endpoint is absent from the admitted symbol census",
-                    ));
+            // Collect only the cyclic SCCs, then sort smallest-first so we keep
+            // shorter / more interesting cycles when the cap kicks in. We still need
+            // every cyclic SCC enumerated before sorting (truncating early would bias
+            // toward Tarjan emission order), but we cap the per-SCC path search.
+            let mut cyclic_sccs: Vec<Vec<String>> = tracedecay_graph_query::scc::tarjan_scc(&adj)
+                .into_iter()
+                .filter(|scc| tracedecay_graph_query::scc::is_cyclic_scc(scc, &adj))
+                .collect();
+            cyclic_sccs.sort_by_key(Vec::len);
+
+            let mut cycles: Vec<Vec<String>> = Vec::new();
+            for mut scc in cyclic_sccs {
+                if cycles.len() >= limit {
+                    break;
+                }
+                if let Some(path) = cycle_path_for_scc(&mut scc, &adj) {
+                    cycles.push(path);
                 }
             }
-            cycle_items.push(json!({
-                "length": cycle.len() - 1,
-                "chain": chain,
-            }));
+            cycles.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+            cycles.truncate(limit);
+            (cycles, symbol_by_id)
         }
-        (
-            json!({
-                "cycle_count": cycle_items.len(),
-                "cycles": cycle_items,
-            }),
-            touched,
-        )
-    });
+    };
 
-    let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
+    let mut result_cycles: Vec<RecursionCycleV1> = Vec::with_capacity(cycles.len());
+    let mut touched: Vec<&str> = Vec::new();
+    for cycle in &cycles {
+        let mut chain: Vec<RecursionSymbolV1> = Vec::with_capacity(cycle.len());
+        for node_id in cycle {
+            let Some(symbol) = symbol_by_id.get(node_id) else {
+                return Err(verified_analysis_unavailable(
+                    "recursion",
+                    "a call-cycle endpoint is absent from the admitted symbol census",
+                ));
+            };
+            touched.push(symbol.path.as_str());
+            chain.push(RecursionSymbolV1 {
+                id: symbol.occurrence.as_str().to_owned(),
+                name: symbol.metadata.simple_name.clone(),
+                kind: symbol.metadata.kind.clone(),
+                file: symbol.path.clone(),
+                line: user_line(symbol.metadata.start_line),
+            });
+        }
+        result_cycles.push(RecursionCycleV1 {
+            length: cycle.len().saturating_sub(1) as u64,
+            chain,
+        });
+    }
+    let touched_files = unique_file_paths(touched.into_iter());
 
-    Ok(generic_tool_result(
-        Some(graph.project_root()?),
-        &args,
-        &output,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Recursion(RecursionResultV1 {
+            cycle_count: result_cycles.len() as u64,
+            cycles: result_cycles,
+            freshness: None,
+        }),
         touched_files,
     ))
 }

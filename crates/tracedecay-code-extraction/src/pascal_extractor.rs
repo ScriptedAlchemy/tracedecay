@@ -4,22 +4,23 @@
 /// for the code graph. Supports programs, units, classes, records, interfaces,
 /// functions, procedures, constructors, destructors, properties, constants,
 /// variables, uses clauses, and visibility sections.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::docstring_from_preceding_comments;
+use crate::common::{docstring_from_preceding_comments, local_node_id};
 use crate::complexity::{PASCAL_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Pascal source files using tree-sitter.
 pub struct PascalExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -27,7 +28,7 @@ struct ExtractionState {
     /// Stack of `(name, node_id)` for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Track nesting depth for classes.
     class_depth: usize,
@@ -37,12 +38,9 @@ struct ExtractionState {
     in_implementation: bool,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -50,7 +48,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
             current_visibility: Visibility::Pub,
@@ -62,8 +60,7 @@ impl ExtractionState {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -78,34 +75,12 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl PascalExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_pascal(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -123,7 +98,7 @@ impl PascalExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -137,6 +112,7 @@ impl PascalExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -157,11 +133,6 @@ impl PascalExtractor {
         )
     }
 
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("pascal", "Pascal", source)
-    }
-
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -177,37 +148,33 @@ impl PascalExtractor {
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
-            "program" => Self::visit_program(state, node),
-            "unit" => Self::visit_unit(state, node),
+            "program" => Self::visit_module(state, node, NodeKind::PascalProgram, "program"),
+            "unit" => Self::visit_module(state, node, NodeKind::PascalUnit, "unit"),
             "interface" => Self::visit_interface_section(state, node),
             "implementation" => Self::visit_implementation_section(state, node),
             "declUses" => Self::visit_uses_clause(state, node),
             "declTypes" => Self::visit_type_section(state, node),
-            "declConsts" => Self::visit_const_section(state, node),
-            "declVars" => Self::visit_var_section(state, node),
+            "declConsts" => Self::visit_decl_section(state, node, "declConst", NodeKind::Const),
+            "declVars" => Self::visit_decl_section(state, node, "declVar", NodeKind::Static),
             "defProc" => Self::visit_def_proc(state, node),
             _ => Self::visit_children(state, node),
         }
     }
 
-    /// Extract a program declaration.
-    fn visit_program(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Extract a program or unit declaration as a node of `kind`; `keyword`
+    /// heads the signature.
+    fn visit_module(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind, keyword: &str) {
         let name = Self::find_module_name(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
-            &state.file_path,
-            &NodeKind::PascalProgram,
-            &name,
-            start_line,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::PascalProgram,
+            kind,
             name: name.clone(),
             qualified_name,
             file_path: state.file_path.clone(),
@@ -216,7 +183,7 @@ impl PascalExtractor {
             end_line,
             start_column,
             end_column,
-            signature: Some(format!("program {name}")),
+            signature: Some(format!("{keyword} {name}")),
             docstring: Self::extract_docstring(state, node),
             visibility: Visibility::Pub,
             is_async: false,
@@ -227,57 +194,7 @@ impl PascalExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        state.node_stack.push((name, id));
-        Self::visit_children(state, node);
-        state.node_stack.pop();
-    }
-
-    /// Extract a unit declaration.
-    fn visit_unit(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_module_name(state, node);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::PascalUnit, &name, start_line);
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::PascalUnit,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(format!("unit {name}")),
-            docstring: Self::extract_docstring(state, node),
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -329,14 +246,16 @@ impl PascalExtractor {
 
     /// Extract a single uses reference as a Use node.
     fn visit_single_use(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| state.node_text(node), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || state.node_text(node).to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -360,6 +279,7 @@ impl PascalExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -381,6 +301,8 @@ impl PascalExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
+            argument_count: None,
         });
     }
 
@@ -403,17 +325,35 @@ impl PascalExtractor {
     /// Visit a single type declaration (declType).
     /// Dispatches based on whether it's a class, record, interface, or type alias.
     fn visit_type_decl(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         if let Some(class_node) = find_direct_child_by_kind(node, "declClass") {
             if find_direct_child_by_kind(class_node, "kRecord").is_some() {
-                Self::visit_record_type(state, &name, class_node, node);
+                Self::visit_record_or_interface_type(
+                    state,
+                    &name,
+                    class_node,
+                    node,
+                    NodeKind::PascalRecord,
+                    "record",
+                    Self::visit_record_body,
+                );
             } else {
                 Self::visit_class_type(state, &name, class_node, node);
             }
         } else if let Some(intf_node) = find_direct_child_by_kind(node, "declIntf") {
-            Self::visit_interface_type(state, &name, intf_node, node);
+            Self::visit_record_or_interface_type(
+                state,
+                &name,
+                intf_node,
+                node,
+                NodeKind::Interface,
+                "interface",
+                Self::visit_interface_body,
+            );
         } else {
             // Plain type alias (e.g., TMyAlias = Integer).
             Self::visit_type_alias(state, &name, node);
@@ -438,7 +378,13 @@ impl PascalExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            name,
+            decl_node,
+        );
 
         let mut sig = format!("{name} = class");
         if let Some(parent_ref) = find_direct_child_by_kind(class_node, "typeref") {
@@ -468,6 +414,7 @@ impl PascalExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -486,11 +433,13 @@ impl PascalExtractor {
             let parent_name = state.node_text(parent_ref);
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: id.clone(),
-                reference_name: parent_name,
+                reference_name: parent_name.to_string(),
                 reference_kind: EdgeKind::Extends,
                 line: parent_ref.start_position().row as u32,
                 column: parent_ref.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
             });
         }
 
@@ -505,12 +454,16 @@ impl PascalExtractor {
         state.class_depth -= 1;
     }
 
-    /// Extract a record type declaration.
-    fn visit_record_type(
+    /// Extract a record or interface type declaration as a node of `kind`
+    /// (signature `{name} = {keyword}`), then walk its members with `visit_body`.
+    fn visit_record_or_interface_type(
         state: &mut ExtractionState,
         name: &str,
-        class_node: TsNode<'_>,
+        body_node: TsNode<'_>,
         decl_node: TsNode<'_>,
+        kind: NodeKind,
+        keyword: &str,
+        visit_body: fn(&mut ExtractionState, TsNode<'_>),
     ) {
         let visibility = if state.in_implementation {
             Visibility::Private
@@ -523,11 +476,11 @@ impl PascalExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::PascalRecord, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, name, decl_node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::PascalRecord,
+            kind,
             name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
@@ -536,7 +489,7 @@ impl PascalExtractor {
             end_line,
             start_column,
             end_column,
-            signature: Some(format!("{name} = record")),
+            signature: Some(format!("{name} = {keyword}")),
             docstring,
             visibility,
             is_async: false,
@@ -547,6 +500,7 @@ impl PascalExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -562,68 +516,7 @@ impl PascalExtractor {
         }
 
         state.node_stack.push((name.to_string(), id));
-        Self::visit_record_body(state, class_node);
-        state.node_stack.pop();
-    }
-
-    /// Extract an interface type declaration (Pascal interface, not the section).
-    fn visit_interface_type(
-        state: &mut ExtractionState,
-        name: &str,
-        intf_node: TsNode<'_>,
-        decl_node: TsNode<'_>,
-    ) {
-        let visibility = if state.in_implementation {
-            Visibility::Private
-        } else {
-            Visibility::Pub
-        };
-        let docstring = Self::extract_docstring(state, decl_node);
-        let start_line = decl_node.start_position().row as u32;
-        let end_line = decl_node.end_position().row as u32;
-        let start_column = decl_node.start_position().column as u32;
-        let end_column = decl_node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Interface, name, start_line);
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Interface,
-            name: name.to_string(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(format!("{name} = interface")),
-            docstring,
-            visibility,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        state.node_stack.push((name.to_string(), id));
-        Self::visit_interface_body(state, intf_node);
+        visit_body(state, body_node);
         state.node_stack.pop();
     }
 
@@ -641,7 +534,13 @@ impl PascalExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::TypeAlias, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::TypeAlias,
+            name,
+            decl_node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -665,6 +564,7 @@ impl PascalExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -688,9 +588,9 @@ impl PascalExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "declSection" => Self::visit_visibility_section(state, child),
-                    "declField" => Self::visit_field(state, child),
+                    "declField" => Self::visit_member(state, child, NodeKind::Field),
                     "declProc" => Self::visit_class_method_decl(state, child),
-                    "declProp" => Self::visit_property(state, child),
+                    "declProp" => Self::visit_member(state, child, NodeKind::Property),
                     _ => {}
                 }
                 if !cursor.goto_next_sibling() {
@@ -707,7 +607,7 @@ impl PascalExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "declField" {
-                    Self::visit_field(state, child);
+                    Self::visit_member(state, child, NodeKind::Field);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -742,9 +642,9 @@ impl PascalExtractor {
                     "kPublic" => state.current_visibility = Visibility::Pub,
                     "kPrivate" => state.current_visibility = Visibility::Private,
                     "kProtected" => state.current_visibility = Visibility::PubSuper,
-                    "declField" => Self::visit_field(state, child),
+                    "declField" => Self::visit_member(state, child, NodeKind::Field),
                     "declProc" => Self::visit_class_method_decl(state, child),
-                    "declProp" => Self::visit_property(state, child),
+                    "declProp" => Self::visit_member(state, child, NodeKind::Property),
                     _ => {}
                 }
                 if !cursor.goto_next_sibling() {
@@ -754,21 +654,23 @@ impl PascalExtractor {
         }
     }
 
-    /// Extract a field declaration.
-    fn visit_field(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+    /// Extract a field (`NodeKind::Field`) or property (`NodeKind::Property`) declaration.
+    fn visit_member(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Field,
+            kind,
             name: name.clone(),
             qualified_name,
             file_path: state.file_path.clone(),
@@ -788,6 +690,7 @@ impl PascalExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -813,8 +716,8 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &node_kind, &name, start_line);
-        let metrics = count_complexity(node, &PASCAL_COMPLEXITY, &state.source);
+        let id = local_node_id(&state.file_path, state.source, &node_kind, &name, node);
+        let metrics = count_complexity(node, &PASCAL_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -838,6 +741,7 @@ impl PascalExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -863,8 +767,8 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &node_kind, &name, start_line);
-        let metrics = count_complexity(node, &PASCAL_COMPLEXITY, &state.source);
+        let id = local_node_id(&state.file_path, state.source, &node_kind, &name, node);
+        let metrics = count_complexity(node, &PASCAL_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -888,6 +792,7 @@ impl PascalExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -903,63 +808,20 @@ impl PascalExtractor {
         }
     }
 
-    /// Extract a property declaration.
-    fn visit_property(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
-        let text = state.node_text(node);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Property, &name, start_line);
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Property,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(text.trim().trim_end_matches(';').trim().to_string()),
-            docstring: None,
-            visibility: state.current_visibility.clone(),
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-    }
-
-    /// Visit a const section (declConsts), processing each constant.
-    fn visit_const_section(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Visit a const (declConsts) or var (declVars) section, emitting each
+    /// `item_kind` child as a node of `kind`.
+    fn visit_decl_section(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        item_kind: &str,
+        kind: NodeKind,
+    ) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "declConst" {
-                    Self::visit_const(state, child);
+                if child.kind() == item_kind {
+                    Self::visit_decl(state, child, kind.clone());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -968,17 +830,19 @@ impl PascalExtractor {
         }
     }
 
-    /// Extract a single constant declaration.
-    fn visit_const(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+    /// Extract a single constant (`Const`) or variable (`Static`) declaration.
+    fn visit_decl(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let visibility = if state.in_implementation {
             Visibility::Private
@@ -988,7 +852,7 @@ impl PascalExtractor {
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Const,
+            kind,
             name: name.clone(),
             qualified_name,
             file_path: state.file_path.clone(),
@@ -1008,77 +872,7 @@ impl PascalExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-    }
-
-    /// Visit a var section (declVars), processing each variable.
-    fn visit_var_section(state: &mut ExtractionState, node: TsNode<'_>) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "declVar" {
-                    Self::visit_var(state, child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Extract a single variable declaration.
-    fn visit_var(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
-        let text = state.node_text(node);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Static, &name, start_line);
-
-        let visibility = if state.in_implementation {
-            Visibility::Private
-        } else {
-            Visibility::Pub
-        };
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Static,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(text.trim().trim_end_matches(';').trim().to_string()),
-            docstring: None,
-            visibility,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1129,7 +923,13 @@ impl PascalExtractor {
             };
 
             let qualified_name = format!("{}::{}", state.qualified_prefix(), display_name);
-            let id = generate_node_id(&state.file_path, &actual_kind, &display_name, start_line);
+            let id = local_node_id(
+                &state.file_path,
+                state.source,
+                &actual_kind,
+                &display_name,
+                node,
+            );
 
             let visibility = if state.in_implementation {
                 Visibility::Private
@@ -1137,7 +937,7 @@ impl PascalExtractor {
                 Visibility::Pub
             };
 
-            let metrics = count_complexity(node, &PASCAL_COMPLEXITY, &state.source);
+            let metrics = count_complexity(node, &PASCAL_COMPLEXITY, state.source);
             let graph_node = Node {
                 id: id.clone(),
                 kind: actual_kind,
@@ -1160,6 +960,7 @@ impl PascalExtractor {
                 unsafe_blocks: metrics.unsafe_blocks,
                 unchecked_calls: metrics.unchecked_calls,
                 assertions: metrics.assertions,
+                complexity_analysis: metrics.analysis,
                 updated_at: state.timestamp,
                 parent_id: None,
             };
@@ -1183,6 +984,8 @@ impl PascalExtractor {
                     line: start_line,
                     column: start_column,
                     file_path: state.file_path.clone(),
+                    unmodeled_import: None,
+                    argument_count: None,
                 });
             }
 
@@ -1196,9 +999,9 @@ impl PascalExtractor {
     fn find_module_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(mod_name) = find_direct_child_by_kind(node, "moduleName") {
             if let Some(ident) = find_direct_child_by_kind(mod_name, "identifier") {
-                return state.node_text(ident);
+                return state.node_text(ident).to_string();
             }
-            return state.node_text(mod_name);
+            return state.node_text(mod_name).to_string();
         }
         "<unknown>".to_string()
     }
@@ -1224,10 +1027,12 @@ impl PascalExtractor {
     fn find_proc_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         // Check for genericDot first (dotted name like TMyClass.DoSomething).
         if let Some(dot_node) = find_direct_child_by_kind(node, "genericDot") {
-            return state.node_text(dot_node);
+            return state.node_text(dot_node).to_string();
         }
-        find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+        find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        )
     }
 
     /// Parse a dotted name from a declProc node.
@@ -1241,7 +1046,7 @@ impl PascalExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "identifier" {
-                        identifiers.push(state.node_text(child));
+                        identifiers.push(state.node_text(child).to_string());
                     }
                     if !cursor.goto_next_sibling() {
                         break;
@@ -1270,11 +1075,13 @@ impl PascalExtractor {
                             let callee_name = state.node_text(callee);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1294,16 +1101,18 @@ impl PascalExtractor {
                                 let callee_name = state.node_text(fc);
                                 // Skip some keywords that aren't calls.
                                 if !matches!(
-                                    callee_name.as_str(),
+                                    callee_name,
                                     "inherited" | "break" | "continue" | "exit"
                                 ) {
                                     state.unresolved_refs.push(UnresolvedRef {
                                         from_node_id: fn_node_id.to_string(),
-                                        reference_name: callee_name,
+                                        reference_name: callee_name.to_string(),
                                         reference_kind: EdgeKind::Calls,
                                         line: fc.start_position().row as u32,
                                         column: fc.start_position().column as u32,
                                         file_path: state.file_path.clone(),
+                                        unmodeled_import: None,
+                                        argument_count: None,
                                     });
                                 }
                             }
@@ -1323,7 +1132,7 @@ impl PascalExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, Self::clean_comment)
+        docstring_from_preceding_comments(state.source, node, Self::clean_comment)
     }
 
     /// Strip comment markers from a single Pascal comment text.
@@ -1369,17 +1178,16 @@ impl crate::LanguageExtractor for PascalExtractor {
         "Pascal"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        PascalExtractor::extract_pascal(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        PascalExtractor::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(
+            PascalExtractor::extract_tree(file_path, source, tree, scope),
+        )
     }
 }

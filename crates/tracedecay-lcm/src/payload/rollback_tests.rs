@@ -8,7 +8,7 @@ use super::{
     ExternalPayloadWrite, PayloadFileRollback, payload_dir, write_external_payload_tracked,
 };
 
-#[tokio::test]
+#[asupersync::test]
 async fn cancellation_guard_removes_new_file_on_drop() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
@@ -29,12 +29,15 @@ async fn cancellation_guard_removes_new_file_on_drop() {
     .unwrap();
 
     let payload_path = payload_dir(&storage_root).join(created.payload_ref);
-    assert!(payload_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(&payload_path).unwrap(),
+        "created payload"
+    );
     drop(rollback);
     assert!(!payload_path.exists());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn disarmed_guard_preserves_committed_file() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
@@ -56,10 +59,13 @@ async fn disarmed_guard_preserves_committed_file() {
 
     let payload_path = payload_dir(&storage_root).join(created.payload_ref);
     rollback.disarm();
-    assert!(payload_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(&payload_path).unwrap(),
+        "created payload"
+    );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
@@ -72,17 +78,6 @@ async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
             project_key TEXT NOT NULL,
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
-        );
-        CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
         );",
     )
     .await

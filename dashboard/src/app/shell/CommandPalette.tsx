@@ -3,19 +3,21 @@ import { Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { WORKSPACES } from '../routes';
+import { channelNumber } from '../channels.ts';
 import { cn } from '../../ui/cn';
 import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
-import { activationFor, useScope } from '../../data/scope/store.ts';
-import { StateChip } from '../../ui/StateChip.tsx';
-import { usePaletteRegistry, type PaletteEntry } from './paletteRegistry.ts';
+import {
+  activationFor,
+  scopedWorkspacePath,
+  useScope,
+} from '../../data/scope/store.ts';
 
 interface CommandPaletteRow {
   id: string;
   label: string;
   hint: string;
-  keywords?: readonly string[];
-  state?: PaletteEntry['state'];
-  scopeLabel?: string;
+  /** The channel number for a workspace row; project rows have none. */
+  channel: string | null;
   action: () => void;
 }
 
@@ -23,7 +25,7 @@ interface CommandPaletteRow {
  * The DOM id of one option row, by position.
  *
  * Positional rather than derived from the entry, because a project entry's id
- * carries its `canonical_root` — a filesystem path, which routinely contains
+ * carries its `canonical_root`, a filesystem path, which routinely contains
  * spaces and may contain quotes or `#`. Interpolated into an `id`, that
  * produced an attribute HTML forbids whitespace in, and
  * `aria-activedescendant` is an IDREF: a screen reader could not resolve the
@@ -37,8 +39,7 @@ function optionId(index: number): string {
 }
 
 /** Command palette: scope-aware search across workspaces, registered
- * projects, and page-provided entries. Results carry the same truth metadata
- * as lists. Lazy-loaded from Shell after first open so @radix-ui/react-dialog
+ * projects. Lazy-loaded from Shell after first open so @radix-ui/react-dialog
  * stays out of the initial shell chunk. */
 export function CommandPalette({
   open,
@@ -48,8 +49,8 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void;
 }) {
   const navigate = useNavigate();
+  const scope = useScope((state) => state.scope);
   const selectProject = useScope((s) => s.selectProject);
-  const providers = usePaletteRegistry((state) => state.providers);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   // Entities: registered projects become scope-setting results. Fetched only
@@ -57,7 +58,7 @@ export function CommandPalette({
   // project rows (workspace navigation never depends on it).
   // The shared registry read, so opening the palette on a surface that already
   // listed the registry costs nothing, and so a registry change invalidates this
-  // too — it used to have a private key that no event named.
+  // too, it used to have a private key that no event named.
   const projects = useProjectRegistry({ enabled: open });
 
   const entries = useMemo<CommandPaletteRow[]>(() => {
@@ -65,8 +66,9 @@ export function CommandPalette({
       id: `nav:${w.path}`,
       label: w.label,
       hint: 'workspace',
+      channel: channelNumber(w.path),
       action: () => {
-        navigate(`/${w.path}`);
+        navigate(scopedWorkspacePath(scope, w.path));
         onOpenChange(false);
       },
     }));
@@ -78,12 +80,13 @@ export function CommandPalette({
               id: `scope:${project.project_id}:${project.canonical_root}`,
               label: project.label,
               hint: `project · ${group.label}`,
+              channel: null,
               action: () => {
                 // The listing already measured `is_active`, against the same
                 // `active_project_id` the gateway accepts writes on, so the
                 // pick starts from that answer instead of `unresolved`. It is
                 // read through the shared authority rather than compared here,
-                // so a row that omits the field stays unresolved — the daemon
+                // so a row that omits the field stays unresolved, the daemon
                 // marks it optional, and absent is not "no".
                 selectProject(
                   project.project_id,
@@ -94,48 +97,19 @@ export function CommandPalette({
                     isActive: project.is_active ?? null,
                   }),
                 );
-                navigate('/brain');
+                navigate(scopedWorkspacePath(useScope.getState().scope, 'brain'));
                 onOpenChange(false);
               },
             })),
           )
         : [];
-    const providerEntries = Object.values(providers).flatMap((provided) =>
-      provided.map((entry) => ({
-        id: `provider:${entry.id}`,
-        label: entry.label,
-        hint: entry.hint,
-        keywords: entry.keywords,
-        state: entry.state,
-        scopeLabel: entry.scopeLabel,
-        action: () => {
-          switch (entry.kind) {
-            case 'navigate':
-              navigate(entry.to);
-              break;
-            case 'legal_action':
-              entry.invoke(entry.reference);
-              break;
-            default: {
-              const exhaustive: never = entry;
-              return exhaustive;
-            }
-          }
-          onOpenChange(false);
-        },
-      })),
-    );
-    return [...workspaceEntries, ...projectEntries, ...providerEntries];
-  }, [navigate, onOpenChange, projects.data, providers, selectProject]);
+    return [...workspaceEntries, ...projectEntries];
+  }, [navigate, onOpenChange, projects.data, scope, selectProject]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return entries;
-    return entries.filter(
-      (entry) =>
-        entry.label.toLowerCase().includes(q) ||
-        entry.keywords?.some((keyword) => keyword.toLowerCase().includes(q)),
-    );
+    return entries.filter((entry) => entry.label.toLowerCase().includes(q));
   }, [entries, query]);
 
   useEffect(() => setActive(0), [query, open]);
@@ -149,8 +123,8 @@ export function CommandPalette({
    *
    * `active` is only reset by a query change or a reopen, and the list has a
    * second input: the registry read behind the project rows. A listing that
-   * shrinks — a refetch returning fewer projects, or an `ok` result becoming a
-   * failure, which drops every project row at once — leaves the stored index
+   * shrinks, a refetch returning fewer projects, or an `ok` result becoming a
+   * failure, which drops every project row at once, leaves the stored index
    * past the end. That row does not exist, so `aria-activedescendant` referred
    * to nothing and Enter fired nothing: a palette that looked navigable and was
    * inert. Clamped on read rather than corrected in an effect, so there is no
@@ -161,7 +135,7 @@ export function CommandPalette({
 
   const listRef = useRef<HTMLUListElement>(null);
   useEffect(() => {
-    // The list scrolls at `max-h-72` — about eight rows — and the project rows
+    // The list scrolls at `max-h-72`, about eight rows, and the project rows
     // sit after every workspace, so on a real registry the keyboard selection
     // left the viewport almost immediately and moved something the reader could
     // not see. `nearest` keeps the list still when the row is already visible.
@@ -193,15 +167,18 @@ export function CommandPalette({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/40" />
+        <Dialog.Overlay className="fixed inset-0 bg-black/55" />
+        {/* An overlay, not channel 15 (NAVIGATION.md): the same framed
+          * night-glass panel as the shell, set over it. */}
         <Dialog.Content
           className={cn(
             'fixed left-1/2 top-24 w-[min(560px,90vw)] -translate-x-1/2',
-            'overflow-hidden rounded-[var(--radius-standard)] border border-edge-strong bg-surface-1 shadow-2xl',
+            'overflow-hidden rounded-[var(--radius-panel)] border border-edge-frame bg-surface-1 shadow-2xl',
           )}
           onKeyDown={onKeyDown}
           aria-label="Command palette"
         >
+          <span aria-hidden className="td-corners pointer-events-none absolute inset-[4px] z-10" />
           <Dialog.Title className="sr-only">Command palette</Dialog.Title>
           <div className="flex items-center gap-2 border-b border-edge-subtle px-3">
             <Search aria-hidden size={14} className="text-text-muted" />
@@ -210,7 +187,7 @@ export function CommandPalette({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Go to workspace or project…"
-              className="min-h-[var(--touch-target-min)] w-full bg-transparent text-sm outline-none placeholder:text-text-muted"
+              className="min-h-[var(--touch-target-min)] w-full bg-transparent text-body outline-none placeholder:text-text-muted"
               role="combobox"
               aria-expanded="true"
               aria-controls="td-palette-list"
@@ -224,10 +201,10 @@ export function CommandPalette({
             ref={listRef}
             id="td-palette-list"
             role="listbox"
-            className="max-h-72 overflow-auto p-1"
+            className="td-well max-h-72 overflow-auto"
           >
             {filtered.length === 0 ? (
-              <li className="px-3 py-6 text-center text-sm text-text-muted">No matches</li>
+              <li className="px-3 py-6 text-center text-body text-text-muted">No matches</li>
             ) : (
               filtered.map((entry, i) => (
                 <li
@@ -238,20 +215,28 @@ export function CommandPalette({
                   onMouseEnter={() => setActive(i)}
                   onClick={entry.action}
                   className={cn(
-                    'flex min-h-[var(--touch-target-min)] cursor-pointer items-center justify-between rounded-[var(--radius-chip)] px-2.5 text-sm',
-                    i === activeIndex ? 'bg-surface-2 text-text-primary' : 'text-text-secondary',
+                    // The same selection grammar as the rail: a cyan position
+                    // bar in the gutter and the raised face, never a glow.
+                    'relative flex min-h-[var(--touch-target-min)] cursor-pointer items-center gap-2.5 border-b border-edge-subtle pl-3.5 pr-2.5 text-body',
+                    i === activeIndex
+                      ? 'td-raised text-text-primary before:absolute before:inset-y-0 before:left-0 before:w-[3px] before:bg-accent'
+                      : 'text-text-secondary',
                   )}
                 >
-                  <span>{entry.label}</span>
-                  <span className="flex items-center gap-2 text-2xs text-text-muted">
-                    {entry.state !== undefined ? (
-                      <StateChip kind={entry.state} detail={entry.hint} />
-                    ) : (
-                      entry.hint
+                  {/* Hidden from the option's accessible name: the row is
+                    * announced as "Brain", not "01 Brain workspace". */}
+                  <code
+                    aria-hidden
+                    className={cn(
+                      'td-value w-5 shrink-0 text-2xs',
+                      i === activeIndex ? 'text-accent' : 'text-text-muted',
                     )}
-                    {entry.scopeLabel !== undefined ? (
-                      <span className="font-mono">{entry.scopeLabel}</span>
-                    ) : null}
+                  >
+                    {entry.channel ?? ''}
+                  </code>
+                  <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                  <span className="flex shrink-0 items-center gap-2 text-sm text-text-muted">
+                    {entry.hint}
                     {i === activeIndex ? <CornerDownLeft aria-hidden size={11} /> : null}
                   </span>
                 </li>

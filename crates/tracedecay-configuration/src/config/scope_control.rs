@@ -1,14 +1,12 @@
 //! Pure protected-change planning for source bindings, restrictive policy,
 //! and topology policy. Normal scalar setting changes do not enter this path.
 
-use std::path::Path;
-
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, ChangePlanId, ConfigurationRevisionId,
     ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
-    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId,
-    SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, DomainError, LocatorDigest, ManifestDigest, ProjectId, UtcMicros,
@@ -30,18 +28,21 @@ pub const DAEMON_PROJECT_SOURCE_KIND: SourceKindV1 = SourceKindV1::Cursor;
 ///
 /// This is not path-inferred authority. Both components restate identity the
 /// caller already holds: the authority is the project's own resolved id, and
-/// the locator digest is the same project-open locator digest the daemon
-/// derives for that registered root. It grants the daemon nothing it does not
-/// already own; it only makes the daemon's own binding durable so the
-/// project-open authority check has an exact binding to verify against.
+/// the locator digest is derived from that id alone, so every checkout of the
+/// repository (linked worktree or clone) verifies against one binding. It
+/// grants the daemon nothing it does not already own; it only makes the
+/// daemon's own binding durable so the project-open authority check has an
+/// exact binding to verify against.
 pub fn daemon_owned_project_source_binding(
     project_id: &ProjectId,
-    project_root: &Path,
 ) -> Result<ScopeSourceBinding, DomainError> {
-    let locator = tracedecay_runtime_core::worktree::locator_digest_for_project(project_root)
-        .map_err(|_| DomainError::NonCanonical {
-            field: "daemon project source binding locator digest",
-        })?;
+    let locator = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.project-open.repository-locator.v3",
+        project_id.as_str(),
+    ))
+    .map_err(|_| DomainError::NonCanonical {
+        field: "daemon project source binding locator digest",
+    })?;
     ScopeSourceBinding::new(
         SourceBindingId::new(DAEMON_PROJECT_SOURCE_BINDING_ID.to_owned())?,
         DAEMON_PROJECT_SOURCE_KIND,
@@ -109,21 +110,6 @@ pub fn plan_protected_change(
     Ok(plan)
 }
 
-/// A rollback is always forward-only: the application evaluates historical
-/// typed values against current schema, scope, policy, and base revision, then
-/// uses this same plan/apply shape to create a new child revision.
-#[derive(Clone, Debug)]
-pub struct RollbackPlanRequestV1 {
-    pub target_revision_id: ConfigurationRevisionId,
-    pub mode: RollbackModeV1,
-}
-
-impl RollbackPlanRequestV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.target_revision_id.validate()
-    }
-}
-
 /// Verify only immutable dry-run/request binding. Expiry, current revision,
 /// scope, membership, and policy epoch must be rechecked by the caller with
 /// current authoritative data before committing.
@@ -157,17 +143,9 @@ mod tests {
     };
     use tracedecay_domain::{LocatorDigest, ProjectId};
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     #[test]
     fn protected_dry_run_is_redacted_and_actor_bound() {
@@ -200,7 +178,19 @@ mod tests {
         )
         .unwrap();
         let rendered = serde_json::to_value(&plan).unwrap();
-        assert!(rendered.get("source_locator").is_none());
-        assert!(rendered.get("credential").is_none());
+        assert_eq!(rendered["actor_id"], "actor.fixture");
+        assert_eq!(
+            rendered["redacted_changes"],
+            serde_json::json!([{
+                "setting_key": "scope.source_bindings.v1",
+                "operation": "source_bind",
+                "before_digest": format!("sha256:{}", "d".repeat(64)),
+                "after_digest": format!("sha256:{}", "e".repeat(64)),
+            }])
+        );
+        assert!(
+            !rendered.to_string().contains(&"a".repeat(64)),
+            "the source locator digest must not be rendered: {rendered}"
+        );
     }
 }

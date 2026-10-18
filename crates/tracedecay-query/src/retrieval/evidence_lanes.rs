@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, DiagnosticProviderResult, DiagnosticProviderState, FreshnessState,
     ProviderSourceIdentity,
 };
@@ -19,19 +19,18 @@ use tracedecay_domain::{
     CursorPayloadDigest, EphemeralSanitizedQueryViewV1, EvidenceRole, FileOccurrenceId,
     FixedPointScore, FreshnessCompatibilityV1, GenerationDiagnosticV1, LogicalEvidenceId,
     ManifestDigest, ProviderId, RetrievalAnchorId, RetrievalBudgetUsage, RetrievalFailure,
-    RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceInstanceKey, SourceNamespace,
-    SourceOccurrenceId, canonical_sha256,
+    RetrievalRequest, RetrievalSourceRoleV1, RetrieverBatch, RetrieverContinuation,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
+    SourceInstanceKey, SourceNamespace, SourceOccurrenceId, TemporalLaneEvidenceV1,
+    canonical_sha256,
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
-use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::execution::TemporalPortError;
 
 use super::ports::{RetrievalPortError, contract_error};
 
 pub use super::task_session::*;
-pub use tracedecay_domain::{
-    TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
-};
 
 /// Process-local cooperative controls inherited from daemon admission.
 #[derive(Clone, Debug)]
@@ -490,6 +489,7 @@ fn diagnostic_provider_outcome(
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
+            source_role: RetrievalSourceRoleV1::default(),
             retriever: RetrieverKind::Diagnostic,
             retriever_revision: retriever_revision.clone(),
             score_domain: score_domain.clone(),
@@ -824,7 +824,7 @@ impl LaneEvidenceBinding for DiagnosticLaneEvidenceV1 {
     }
 }
 
-#[hotpath::measure(label = "query.lane.evidence")]
+#[tracing::instrument(name = "query.lane.evidence", level = "trace", skip_all)]
 pub(super) fn execute_lane<E>(
     lane: RetrieverKind,
     request: &RetrievalRequest,
@@ -836,26 +836,14 @@ where
     E: LaneEvidenceBinding,
 {
     if let Some(terminal) = control.terminal() {
-        if matches!(terminal, RetrieverOutcome::Cancelled) {
-            hotpath::gauge!("query.cancel.count").inc(1u32);
-        }
         return Ok(terminal);
     }
     let outcome = read()?;
     if let Some(terminal) = control.terminal() {
-        if matches!(terminal, RetrieverOutcome::Cancelled) {
-            hotpath::gauge!("query.cancel.count").inc(1u32);
-        }
         return Ok(terminal);
     }
     validate_lane_outcome(lane, request, &outcome, evidence_binding_matches)?;
-    crate::hotpath_metrics::record_lane(
-        "query.lane.evidence.candidates",
-        "query.lane.evidence.examined",
-        "query.lane.evidence.results",
-        "query.lane.evidence.residency",
-        &outcome,
-    );
+    crate::observe::record_lane("query.lane.evidence.residency", &outcome);
     Ok(outcome)
 }
 

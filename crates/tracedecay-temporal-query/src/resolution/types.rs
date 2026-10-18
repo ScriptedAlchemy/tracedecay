@@ -22,7 +22,6 @@ impl ResolutionEvidence {
         }
     }
 
-    #[hotpath::skip]
     pub const fn is_authorized(&self) -> bool {
         self.authorized
     }
@@ -41,7 +40,6 @@ pub enum ValidatedAuthorization {
 }
 
 impl ValidatedAuthorization {
-    #[hotpath::skip]
     pub const fn is_authorized(self) -> bool {
         matches!(self, Self::Authorized)
     }
@@ -98,23 +96,6 @@ pub struct ResolvedOccurrence {
     pub conflicted: bool,
     pub uncertain: bool,
     pub supporting_anchor_ids: BTreeSet<RetrievalAnchorId>,
-}
-
-impl ResolvedOccurrence {
-    #[hotpath::skip]
-    pub const fn certainty(&self) -> ResolutionCertainty {
-        if self.uncertain {
-            ResolutionCertainty::AuthorizedUnknown
-        } else {
-            ResolutionCertainty::Known
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResolutionCertainty {
-    Known,
-    AuthorizedUnknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

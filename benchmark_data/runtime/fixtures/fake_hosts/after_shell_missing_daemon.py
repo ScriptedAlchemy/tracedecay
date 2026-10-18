@@ -8,18 +8,27 @@ import subprocess
 import sys
 
 
-subprocess.Popen(
+# The descendant must already be ignoring SIGTERM when this host exits;
+# otherwise the harness's TERM lands during interpreter start-up and kills
+# what was meant to be stubborn. It reports readiness after installing the
+# handler, and this host waits for that line before exiting.
+stubborn = subprocess.Popen(
     [
         sys.executable,
         "-c",
         (
-            "import signal,time;"
+            "import signal,sys,time;"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+            "sys.stdout.write('ready\\n'); sys.stdout.flush();"
             "time.sleep(30)"
         ),
     ],
     stdin=subprocess.DEVNULL,
+    stdout=subprocess.PIPE,
 )
+assert stubborn.stdout is not None
+if stubborn.stdout.readline() != b"ready\n":
+    raise SystemExit("stubborn descendant did not report readiness")
 print(
     json.dumps(
         {

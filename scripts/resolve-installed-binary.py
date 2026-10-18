@@ -17,7 +17,7 @@ def main() -> int:
     name = "tracedecay.exe" if arguments.runner_os == "Windows" else "tracedecay"
     binary = arguments.install_root.resolve() / "bin" / name
     if not binary.is_file():
-        raise SystemExit(f"cargo install did not produce {binary}")
+        raise SystemExit(f"installed binary layout did not produce {binary}")
     if arguments.runner_os != "Windows" and not os.access(binary, os.X_OK):
         raise SystemExit(f"cargo-installed binary is not executable: {binary}")
     print(binary)

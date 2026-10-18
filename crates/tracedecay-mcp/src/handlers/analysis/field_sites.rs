@@ -1,85 +1,145 @@
-//! `tracedecay_field_sites` — read and write references to a named field.
+//! `tracedecay_field_sites`, read and write references to a named field.
+
+use tracedecay_code_index_runtime::code_index_scheduler::sealed_source_bytes;
+use tracedecay_contracts::retrieval::{
+    FieldSiteV1, FieldSitesResultV1, FieldSitesSurfaceRequestV1,
+};
+use tracedecay_domain::{ContentDigest, LanguageId};
 
 use super::*;
 
-#[hotpath::measure(future = true, label = "mcp.analysis.field_sites.total")]
-pub async fn handle_field_sites(
+#[tracing::instrument(name = "mcp.analysis.field_sites.total", level = "trace", skip_all)]
+pub(super) async fn compute_field_sites(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let raw =
-        args.get("field")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "tracedecay_field_sites requires a 'field' argument".to_string(),
-            })?;
-    let writes_only = args
-        .get("writes_only")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(200, |v| v.clamp(1, 2000) as usize);
+) -> Result<GraphToolCompletionV1> {
+    let request: FieldSitesSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_field_sites")?;
+    let raw = request.field.as_str();
+    let writes_only = request.writes_only.unwrap_or(false);
+    let limit = request.limit.map_or(200, |v| v.clamp(1, 2000) as usize);
 
     let (qualifier, field_name) = match raw.rsplit_once("::") {
         Some((q, f)) => (Some(q.to_string()), f.to_string()),
         None => (None, raw.to_string()),
     };
 
-    let symbols_by_file = hotpath::measure_block!("mcp.analysis.field_sites.graph", {
-        let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
-        for symbol in verified_analysis_symbols(graph, scope_prefix)? {
-            symbols_by_file
-                .entry(symbol.path.clone())
-                .or_default()
-                .push(symbol);
+    let (symbols_by_file, sealed_files, qualified_scope) = {
+        let _span = tracing::trace_span!("mcp.analysis.field_sites.graph").entered();
+        {
+            let symbols = verified_analysis_symbols(graph, scope_prefix)?;
+            let sealed_files = graph
+                .files(ANALYSIS_SYMBOL_BUDGET)?
+                .into_iter()
+                .filter_map(|file| {
+                    let language = file.language?;
+                    Some((file.logical_path, (language, file.content_digest)))
+                })
+                .collect::<HashMap<_, _>>();
+            let qualified_scope = qualifier
+                .as_deref()
+                .map(|qualifier| qualified_field_scope(graph, &symbols, qualifier, &field_name))
+                .transpose()?;
+            let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
+            for symbol in symbols {
+                symbols_by_file
+                    .entry(symbol.path.clone())
+                    .or_default()
+                    .push(symbol);
+            }
+            (symbols_by_file, sealed_files, qualified_scope)
         }
-        symbols_by_file
-    });
+    };
     // Graph phase is done. The source walk reads every candidate file, so it
     // belongs on a blocking worker like the sibling analysis scans.
     let project_root = graph.project_root()?.to_path_buf();
-    let response_project_root = project_root.clone();
-    let (writes, reads, touched) = hotpath::future!(
-        tokio::task::spawn_blocking(move || {
+    let (writes, reads, touched) = tracing::Instrument::instrument(tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
             files.sort();
-            let mut writes: Vec<Value> = Vec::new();
-            let mut reads: Vec<Value> = Vec::new();
+            let mut writes: Vec<FieldSiteV1> = Vec::new();
+            let mut reads: Vec<FieldSiteV1> = Vec::new();
             let mut touched: Vec<String> = Vec::new();
 
+            let needle = format!(".{field_name}");
             'outer: for file in &files {
                 let abs = project_root.join(file);
-                let Ok(source) = tracedecay_runtime_core::sync::read_source_file(&abs) else {
+                let Ok(disk_source) = tracedecay_runtime_core::sync::read_source_file(&abs) else {
                     continue;
                 };
 
                 // Cheap textual pre-filter before any per-file store read. Most
                 // files in a repository never mention the field, and fetching their
-                // nodes anyway cost one daemon round trip per file in the project —
+                // nodes anyway cost one daemon round trip per file in the project,
                 // O(store) work to answer a question whose result is a handful of
                 // sites.
-                let sites = find_field_references(&source, &field_name);
+                if !disk_source.contains(&needle) {
+                    continue;
+                }
+                let source = sealed_field_source(&project_root, file, sealed_files.get(file))?;
+                let masked = path_is_rust(file).then(|| {
+                    tracedecay_code_extraction::source_mask::masked_rust_source_with(
+                        &source,
+                        tracedecay_code_extraction::source_mask::MaskOptions::CODE_SCAN,
+                    )
+                });
+                let sites =
+                    find_field_references(masked.as_deref().unwrap_or(&source), &field_name);
                 if sites.is_empty() {
                     continue;
                 }
                 let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
+                let receiver_types = if qualified_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.target_exists)
+                    && path_is_rust(file)
+                {
+                    rust_field_receiver_types(&source, &field_name)?
+                } else {
+                    HashMap::new()
+                };
 
                 for site in sites {
                     let line_text = line_at(&source, site.byte).unwrap_or("");
-                    let enclosing = nodes
-                        .iter()
-                        .filter(|n| n.metadata.start_line <= site.line && site.line <= n.end_line())
-                        .min_by_key(|n| n.metadata.line_span)
-                        .map(|n| n.metadata.qualified_name.clone());
-                    let entry = json!({
-                        "file": file,
-                        "line": site.line,
-                        "enclosing": enclosing,
-                        "snippet": line_text.trim(),
-                    });
+                    // Attribute by byte containment: a read and a write of the
+                    // same field can share one line, and two declarations can
+                    // too, so a line number cannot say which declaration a
+                    // site is inside. Masking preserves byte layout, so the
+                    // offset the scan reports indexes `source` unchanged.
+                    let enclosing = enclosing_declaration(nodes, site.byte as u64);
+                    if let Some(scope) = &qualified_scope {
+                        if !scope.target_exists {
+                            continue;
+                        }
+                        match enclosing
+                            .zip(receiver_types.get(&site.byte))
+                            .and_then(|(symbol, receiver_type)| {
+                                scope.site_matches(&symbol.occurrence, receiver_type)
+                            }) {
+                            Some(true) => {}
+                            Some(false) => continue,
+                            None => {
+                                return Err(TraceDecayError::project_route(
+                                    "verified-field-qualifier-unavailable",
+                                    false,
+                                    format!(
+                                        "the indexed graph cannot bind field receiver '{}' at {file}:{} to exactly one qualified owner",
+                                        receiver_types
+                                            .get(&site.byte)
+                                            .map_or("<unresolved>", String::as_str),
+                                        site.line,
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    let enclosing = enclosing.map(|n| n.metadata.qualified_name.clone());
+                    let entry = FieldSiteV1 {
+                        file: file.clone(),
+                        line: site.line,
+                        enclosing,
+                        snippet: line_text.trim().to_owned(),
+                    };
                     if !touched.contains(file) {
                         touched.push(file.clone());
                     }
@@ -102,43 +162,396 @@ pub async fn handle_field_sites(
                     }
                 }
             }
-            (writes, reads, touched)
-        }),
-        label = "mcp.analysis.field_sites.scan"
-    )
+            Ok((writes, reads, touched))
+        }), tracing::trace_span!("mcp.analysis.field_sites.scan"))
     .await
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("tracedecay_field_sites scan failed to join: {join_error}"),
-    })?;
+    })??;
 
-    let qualifier_applied = false;
-    let payload = hotpath::measure_block!("mcp.analysis.field_sites.assemble", {
-        if writes_only {
-            json!({
-                "field": raw,
-                "qualifier": qualifier,
-                "qualifier_applied": qualifier_applied,
-                "write_count": writes.len(),
-                "write_sites": writes,
-            })
-        } else {
-            json!({
-                "field": raw,
-                "qualifier": qualifier,
-                "qualifier_applied": qualifier_applied,
-                "write_count": writes.len(),
-                "read_count": reads.len(),
-                "write_sites": writes,
-                "read_sites": reads,
-            })
-        }
-    });
-    Ok(generic_tool_result(
-        Some(&response_project_root),
-        &args,
-        &payload,
+    let qualifier_applied = qualifier.is_some();
+    let (read_count, read_sites) = if writes_only {
+        (None, None)
+    } else {
+        (Some(reads.len() as u64), Some(reads))
+    };
+    Ok(graph_tool_completion(
+        GraphToolResultV1::FieldSites(FieldSitesResultV1 {
+            qualifier,
+            qualifier_applied,
+            write_count: writes.len() as u64,
+            read_count,
+            write_sites: writes,
+            read_sites,
+            field: request.field,
+            freshness: None,
+        }),
         touched,
     ))
+}
+
+/// The text the graph's byte spans index for `file`. Sites are attributed to
+/// declarations by byte containment, so they must be found in the same bytes
+/// the generation sealed, which differ from the checkout when git's clean
+/// filters rewrite it (a CRLF checkout under `core.autocrlf=true`).
+fn sealed_field_source(
+    project_root: &Path,
+    file: &str,
+    sealed: Option<&(LanguageId, ContentDigest)>,
+) -> Result<String> {
+    let Some((language, digest)) = sealed else {
+        return Err(TraceDecayError::project_route(
+            "code-graph-corrupt",
+            false,
+            format!(
+                "indexed symbols name '{file}' but the graph has no present file record for it"
+            ),
+        ));
+    };
+    let bytes = sealed_source_bytes(project_root, file, language, digest)
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "verified-field-source-unavailable",
+                true,
+                format!("cannot read the bytes the indexed graph sealed for '{file}': {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "verified-field-source-stale",
+                true,
+                format!(
+                    "the checkout of '{file}' no longer holds the bytes the indexed graph sealed"
+                ),
+            )
+        })?;
+    String::from_utf8(bytes).map_err(|_| {
+        TraceDecayError::project_route(
+            "code-graph-corrupt",
+            false,
+            format!("the sealed source of '{file}' is not UTF-8"),
+        )
+    })
+}
+
+struct QualifiedFieldScope {
+    target_exists: bool,
+    selected_owners: HashSet<SymbolOccurrenceId>,
+    owner_names: HashMap<SymbolOccurrenceId, String>,
+    enclosing_owners: HashMap<SymbolOccurrenceId, HashSet<SymbolOccurrenceId>>,
+}
+
+impl QualifiedFieldScope {
+    fn site_matches(&self, enclosing: &SymbolOccurrenceId, receiver_type: &str) -> Option<bool> {
+        let mut owners = self
+            .enclosing_owners
+            .get(enclosing)
+            .into_iter()
+            .flatten()
+            .filter(|owner| {
+                self.owner_names
+                    .get(*owner)
+                    .is_some_and(|name| qualified_type_matches(name, receiver_type))
+            })
+            .collect::<Vec<_>>();
+        if owners.is_empty() {
+            owners = self
+                .owner_names
+                .iter()
+                .filter(|(_, name)| qualified_type_matches(name, receiver_type))
+                .map(|(owner, _)| owner)
+                .collect();
+        }
+        if owners.len() != 1 {
+            return None;
+        }
+        Some(self.selected_owners.contains(owners[0]))
+    }
+}
+
+fn qualified_field_scope(
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    symbols: &[VerifiedAnalysisSymbol],
+    qualifier: &str,
+    field_name: &str,
+) -> Result<QualifiedFieldScope> {
+    let edges = verified_analysis_edges(
+        graph,
+        symbols,
+        &[RelationEdgeKindV1::Contains, RelationEdgeKindV1::TypeOf],
+    )?;
+    let fields = symbols
+        .iter()
+        .filter(|symbol| {
+            matches!(
+                symbol.metadata.kind.as_str(),
+                "field" | "val_field" | "var_field"
+            ) && symbol.metadata.simple_name == field_name
+        })
+        .collect::<Vec<_>>();
+    let field_occurrences = fields
+        .iter()
+        .map(|field| field.occurrence.clone())
+        .collect::<HashSet<_>>();
+    let selected_fields = fields
+        .iter()
+        .filter(|field| qualified_parent_matches(&field.metadata.qualified_name, qualifier))
+        .map(|field| field.occurrence.clone())
+        .collect::<HashSet<_>>();
+    if selected_fields.is_empty() {
+        return Ok(QualifiedFieldScope {
+            target_exists: false,
+            selected_owners: HashSet::new(),
+            owner_names: HashMap::new(),
+            enclosing_owners: HashMap::new(),
+        });
+    }
+
+    let all_owners = edges
+        .iter()
+        .filter(|edge| {
+            edge.kind == RelationEdgeKindV1::Contains
+                && field_occurrences.contains(&edge.to_occurrence)
+        })
+        .map(|edge| edge.from_occurrence.clone())
+        .collect::<HashSet<_>>();
+    let selected_owners = edges
+        .iter()
+        .filter(|edge| {
+            edge.kind == RelationEdgeKindV1::Contains
+                && selected_fields.contains(&edge.to_occurrence)
+        })
+        .map(|edge| edge.from_occurrence.clone())
+        .collect::<HashSet<_>>();
+    if selected_owners.is_empty() {
+        return Err(verified_analysis_unavailable(
+            "field-qualifier",
+            "the qualified field has no extraction-attested owner relation",
+        ));
+    }
+
+    let mut enclosing_owners = HashMap::<SymbolOccurrenceId, HashSet<SymbolOccurrenceId>>::new();
+    for edge in &edges {
+        if edge.kind == RelationEdgeKindV1::TypeOf && all_owners.contains(&edge.to_occurrence) {
+            enclosing_owners
+                .entry(edge.from_occurrence.clone())
+                .or_default()
+                .insert(edge.to_occurrence.clone());
+        }
+    }
+    let owner_names = symbols
+        .iter()
+        .filter(|symbol| all_owners.contains(&symbol.occurrence))
+        .map(|symbol| {
+            (
+                symbol.occurrence.clone(),
+                symbol.metadata.qualified_name.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let owners_by_name = owner_names
+        .iter()
+        .map(|(occurrence, name)| (name.clone(), occurrence.clone()))
+        .collect::<HashMap<_, _>>();
+    let impl_owners = symbols
+        .iter()
+        .filter(|symbol| symbol.metadata.kind == "impl")
+        .filter_map(|symbol| {
+            owners_by_name
+                .get(&symbol.metadata.qualified_name)
+                .map(|owner| (symbol.occurrence.clone(), owner.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    for edge in &edges {
+        if edge.kind == RelationEdgeKindV1::Contains
+            && let Some(owner) = impl_owners.get(&edge.from_occurrence)
+        {
+            enclosing_owners
+                .entry(edge.to_occurrence.clone())
+                .or_default()
+                .insert(owner.clone());
+        }
+    }
+
+    Ok(QualifiedFieldScope {
+        target_exists: true,
+        selected_owners,
+        owner_names,
+        enclosing_owners,
+    })
+}
+
+fn qualified_parent_matches(qualified_name: &str, qualifier: &str) -> bool {
+    let Some((parent, _)) = qualified_name.rsplit_once("::") else {
+        return false;
+    };
+    parent == qualifier
+        || parent
+            .strip_suffix(qualifier)
+            .is_some_and(|prefix| prefix.ends_with("::"))
+}
+
+fn qualified_type_matches(qualified_name: &str, type_name: &str) -> bool {
+    qualified_name == type_name
+        || qualified_name
+            .strip_suffix(type_name)
+            .is_some_and(|prefix| prefix.ends_with("::"))
+}
+
+fn rust_field_receiver_types(source: &str, field: &str) -> Result<HashMap<usize, String>> {
+    let tree =
+        tracedecay_code_extraction::ts_provider::parse_extractor_source("rust", "Rust", source)
+            .map_err(|error| verified_analysis_unavailable("field-qualifier", &error))?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Err(verified_analysis_unavailable(
+            "field-qualifier",
+            "Rust field receiver parse was recovered from syntax errors",
+        ));
+    }
+    let mut receivers = HashMap::new();
+    collect_rust_field_receiver_types(root, source, field, &mut receivers);
+    Ok(receivers)
+}
+
+fn collect_rust_field_receiver_types(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    field: &str,
+    receivers: &mut HashMap<usize, String>,
+) {
+    if node.kind() == "field_expression"
+        && let Some(field_node) = node.child_by_field_name("field")
+        && node_text(source, field_node) == Some(field)
+        && let Some(value) = node.child_by_field_name("value")
+        && matches!(value.kind(), "identifier" | "self")
+        && let Some(receiver) = node_text(source, value)
+        && let Some(owner) = rust_receiver_type(node, source, receiver)
+    {
+        receivers.insert(field_node.end_byte(), owner);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_rust_field_receiver_types(child, source, field, receivers);
+    }
+}
+
+fn rust_receiver_type(node: tree_sitter::Node<'_>, source: &str, receiver: &str) -> Option<String> {
+    let function = rust_ancestor(node, "function_item")?;
+    if receiver == "self" {
+        return rust_ancestor(function, "impl_item")?
+            .child_by_field_name("type")
+            .and_then(|node| rust_simple_type(node, source));
+    }
+
+    let parameters = function.child_by_field_name("parameters")?;
+    let mut cursor = parameters.walk();
+    let parameter_type = parameters
+        .named_children(&mut cursor)
+        .find_map(|parameter| {
+            let pattern = parameter.child_by_field_name("pattern")?;
+            (pattern.kind() == "identifier" && node_text(source, pattern) == Some(receiver))
+                .then(|| parameter.child_by_field_name("type"))
+                .flatten()
+                .and_then(|node| rust_simple_type(node, source))
+        })?;
+    (!rust_receiver_is_shadowed(node, function, source, receiver)).then_some(parameter_type)
+}
+
+fn rust_ancestor<'tree>(
+    mut node: tree_sitter::Node<'tree>,
+    kind: &str,
+) -> Option<tree_sitter::Node<'tree>> {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == kind {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
+}
+
+fn rust_receiver_is_shadowed(
+    node: tree_sitter::Node<'_>,
+    function: tree_sitter::Node<'_>,
+    source: &str,
+    receiver: &str,
+) -> bool {
+    let mut child = node;
+    while let Some(parent) = child.parent() {
+        if parent == function {
+            return false;
+        }
+        if parent.kind() == "block" {
+            let mut cursor = parent.walk();
+            if parent.named_children(&mut cursor).any(|sibling| {
+                sibling.end_byte() <= child.start_byte()
+                    && sibling.kind() == "let_declaration"
+                    && sibling
+                        .child_by_field_name("pattern")
+                        .is_some_and(|pattern| rust_pattern_binds(pattern, source, receiver))
+            }) {
+                return true;
+            }
+        } else {
+            let closure_binds = parent.kind() == "closure_expression"
+                && parent
+                    .child_by_field_name("parameters")
+                    .is_some_and(|parameters| rust_pattern_binds(parameters, source, receiver));
+            let condition_binds = matches!(parent.kind(), "if_expression" | "while_expression")
+                && parent.child_by_field_name(if parent.kind() == "if_expression" {
+                    "consequence"
+                } else {
+                    "body"
+                }) == Some(child)
+                && parent
+                    .child_by_field_name("condition")
+                    .is_some_and(|condition| rust_condition_binds(condition, source, receiver));
+            let pattern_binds = parent.kind() != "let_declaration"
+                && parent
+                    .child_by_field_name("pattern")
+                    .is_some_and(|pattern| rust_pattern_binds(pattern, source, receiver));
+            if closure_binds || condition_binds || pattern_binds {
+                return true;
+            }
+        }
+        child = parent;
+    }
+    true
+}
+
+fn rust_condition_binds(node: tree_sitter::Node<'_>, source: &str, name: &str) -> bool {
+    if node.kind() == "let_condition" {
+        return node
+            .child_by_field_name("pattern")
+            .is_some_and(|pattern| rust_pattern_binds(pattern, source, name));
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(|child| rust_condition_binds(child, source, name))
+}
+
+fn rust_pattern_binds(node: tree_sitter::Node<'_>, source: &str, name: &str) -> bool {
+    if node.kind() == "identifier" && node_text(source, node) == Some(name) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(|child| rust_pattern_binds(child, source, name))
+}
+
+fn rust_simple_type(node: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    match node.kind() {
+        "type_identifier" | "scoped_type_identifier" => node_text(source, node).map(str::to_owned),
+        "reference_type" => node
+            .child_by_field_name("type")
+            .and_then(|node| rust_simple_type(node, source)),
+        _ => None,
+    }
+}
+
+fn node_text<'a>(source: &'a str, node: tree_sitter::Node<'_>) -> Option<&'a str> {
+    source.get(node.byte_range())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -257,4 +670,80 @@ fn line_is_comment(source: &str, byte: usize) -> bool {
     let line = &source[line_start..];
     let trimmed = line.trim_start();
     trimmed.starts_with("//")
+}
+
+#[cfg(test)]
+mod field_site_attribution_tests {
+    use super::*;
+    use tracedecay_domain::{ComplexityAnalysisV1, SourceSpan};
+
+    fn digest<T>(byte: char) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
+    }
+
+    fn declaration(name: &str, span: std::ops::Range<usize>) -> VerifiedAnalysisSymbol {
+        VerifiedAnalysisSymbol {
+            occurrence: SymbolOccurrenceId::new(format!("occurrence.{name}")).expect("occurrence"),
+            path: "src/lib.rs".to_owned(),
+            source_span: Some(SourceSpan {
+                start_byte: span.start as u64,
+                end_byte: span.end as u64,
+            }),
+            metadata: LineageSymbolRecordV1 {
+                occurrence: SymbolOccurrenceId::new(format!("occurrence.{name}"))
+                    .expect("occurrence"),
+                identity: digest('1'),
+                qualified_name: name.to_owned(),
+                simple_name: name.to_owned(),
+                kind: "function".to_owned(),
+                visibility: "private".to_owned(),
+                branches: 0,
+                loops: 0,
+                max_nesting: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
+                // Both declarations live on line 1: the shape that made
+                // line-based attribution a coin flip.
+                line_span: 1,
+                start_line: 0,
+                signature: None,
+                docstring: None,
+                is_async: false,
+                derives: Vec::new(),
+                skip_test_coverage: false,
+                file_identity: digest('2'),
+                content_digest: digest('3'),
+            },
+        }
+    }
+
+    /// A read and a write of one field, inside two functions that share a
+    /// line, each belong to the function whose bytes contain them. Every
+    /// candidate has `line_span == 1` here, so the old smallest-line-span
+    /// selection had nothing to break the tie with and returned whichever
+    /// symbol the graph page happened to yield first.
+    #[test]
+    fn attributes_a_read_and_a_write_sharing_one_line() {
+        let source = "fn r(s: &S) -> u32 { s.count } fn w(s: &mut S) { s.count = 1; }";
+        let write_start = source.find("fn w").expect("second function");
+        let nodes = vec![
+            declaration("r", 0..write_start),
+            declaration("w", write_start..source.len()),
+        ];
+
+        let sites = find_field_references(source, "count");
+        assert_eq!(sites.len(), 2, "one read and one write: {sites:?}");
+        assert!(matches!(sites[0].kind, FieldRefKind::Read));
+        assert!(matches!(sites[1].kind, FieldRefKind::Write));
+        assert_eq!(sites[0].line, sites[1].line, "both sites share one line");
+
+        for (site, expected) in sites.iter().zip(["r", "w"]) {
+            let enclosing = enclosing_declaration(&nodes, site.byte as u64)
+                .map(|node| node.metadata.qualified_name.as_str());
+            assert_eq!(enclosing, Some(expected), "site {site:?}");
+        }
+    }
 }

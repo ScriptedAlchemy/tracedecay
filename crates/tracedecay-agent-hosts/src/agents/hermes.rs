@@ -10,10 +10,11 @@ mod profile_config;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use crate::errors::{Result, TraceDecayError};
-pub use profile_config::read_config_pinned_project_root;
+use crate::ports::mcp_tools::{AdvertisedToolV1, advertised_tool_schemas_json, advertised_tools};
 use profile_config::{disable_plugin, enable_plugin};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext};
 
@@ -39,45 +40,43 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mHermes integration\x1b[0m");
+        dc.section("Hermes integration");
         doctor_check_plugin(dc, &ctx.home);
     }
 
     fn host_component_registration(
         &self,
-        _component: super::host_bundle_v2::HostBundleComponentV1,
+        _component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        hermes_registration_state(&ctx.home, None)
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        hermes_registration_state(&ctx.home, ctx.profile.data_dir(), None)
     }
 
     fn host_component_registration_for_lifecycle(
         &self,
-        _component: super::host_bundle_v2::HostBundleComponentV1,
+        _component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        hermes_registration_state(&ctx.home, Some(install.dashboard))
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        hermes_registration_state(&ctx.home, ctx.profile.data_dir(), Some(install.dashboard))
     }
 
     fn is_detected(&self, home: &Path) -> bool {
         hermes_home(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(hermes_home(home).join("config.yaml"))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
         let default_plugin = hermes_home(home).join("plugins/tracedecay");
         let mut paths = Vec::new();
         for plugin_dir in profile_plugin_dirs(home) {
             let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
                 continue;
             };
-            let config = profile_dir.join("config.yaml");
-            paths.push(config.clone());
-            paths.push(profile_config::original_config_path(&config));
+            paths.push(profile_dir.join("config.yaml"));
             paths.extend(dashboard_wrapper::managed_paths(&plugin_dir));
             if plugin_dir != default_plugin {
                 paths.extend(managed_plugin_paths(&plugin_dir));
@@ -90,29 +89,29 @@ impl AgentIntegration for HermesIntegration {
 
     fn host_component_registration_paths_checked(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<PathBuf>> {
-        let mut paths = self.host_registration_paths(home);
-        let profile_root =
-            tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
-                home,
-            );
+        let mut paths = self.host_registration_paths(home, profile);
         for plugin_dir in profile_plugin_dirs(home) {
-            paths.extend(managed_skill_overlay_paths(&profile_root, &plugin_dir)?);
+            paths.extend(managed_skill_overlay_paths(
+                profile.data_dir(),
+                &plugin_dir,
+            )?);
         }
         paths.sort();
         paths.dedup();
         Ok(paths)
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         detected_plugin_dirs(home)
             .into_iter()
             .any(|dir| dir.is_dir())
     }
 
-    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+    fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         let root = hermes_home(home);
         root.is_dir().then_some(root)
     }
@@ -120,12 +119,14 @@ impl AgentIntegration for HermesIntegration {
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
+        let profile_root = profile.data_dir();
         let mut exports = Vec::new();
         for plugin_dir in detected_plugin_dirs(home) {
             exports.push(tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Hermes,
                 &plugin_dir,
@@ -137,9 +138,10 @@ impl AgentIntegration for HermesIntegration {
 
 fn hermes_registration_state(
     home: &Path,
+    profile_root: &Path,
     expected_dashboard: Option<bool>,
-) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-    use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+) -> super::host_bundle::HostBundleRegistrationStateV1 {
+    use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
     let plugin_dirs = profile_plugin_dirs(home);
     let default_plugin = hermes_home(home).join("plugins/tracedecay");
@@ -161,13 +163,11 @@ fn hermes_registration_state(
     if !dashboard_wrapper::matches_policy(&default_plugin, dashboard_enabled) {
         return State::Repairable;
     }
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
     for plugin_dir in plugin_dirs {
         let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
             return State::Corrupt;
         };
-        let overlay_current = match managed_skill_overlay_is_current(&profile_root, &plugin_dir) {
+        let overlay_current = match managed_skill_overlay_is_current(profile_root, &plugin_dir) {
             Ok(current) => current,
             Err(_) => return State::Corrupt,
         };
@@ -192,11 +192,11 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     let Some(first) = existing.first() else {
         if let Some(plugin) = candidates.first() {
             dc.warn(&format!(
-                "{} not found — run `tracedecay install --agent hermes` if you use Hermes",
+                "{} not found, run `tracedecay install --agent hermes` if you use Hermes",
                 plugin.display()
             ));
         } else {
-            dc.warn("Hermes tracedecay plugin not found — run `tracedecay install --agent hermes` if you use Hermes");
+            dc.warn("Hermes tracedecay plugin not found, run `tracedecay install --agent hermes` if you use Hermes");
         }
         return;
     };
@@ -211,12 +211,12 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         match read_manifest_version(manifest_path) {
             Some(version) if version == crate::PRODUCT_VERSION => {}
             Some(version) => dc.warn(&format!(
-                "{} was generated by tracedecay {version} (installed binary is {}) — re-run `tracedecay install --agent hermes` to refresh it",
+                "{} was generated by tracedecay {version} (installed binary is {}), re-run `tracedecay install --agent hermes` to refresh it",
                 manifest_path.display(),
                 crate::PRODUCT_VERSION,
             )),
             None => dc.warn(&format!(
-                "{} has no manifest version — re-run `tracedecay install --agent hermes` to refresh it",
+                "{} has no manifest version, re-run `tracedecay install --agent hermes` to refresh it",
                 manifest_path.display(),
             )),
         }
@@ -236,7 +236,7 @@ fn read_manifest_version(manifest_path: &Path) -> Option<String> {
         .filter(|version| !version.is_empty())
 }
 
-#[hotpath::measure(label = "hermes_plugin_activate")]
+#[tracing::instrument(name = "hermes_plugin_activate", level = "trace", skip_all)]
 pub(super) fn activate_deployed_plugin_profile(
     deployed_plugin_dir: &Path,
     plugin_dir: &Path,
@@ -250,7 +250,7 @@ pub(super) fn activate_deployed_plugin_profile(
             .into_iter()
             .zip(deployed_files)
         {
-            super::safe_write_bytes_file(&path, &contents, None)?;
+            super::safe_write_bytes_file(&path, &contents)?;
         }
     }
     dashboard_wrapper::apply_install_policy(plugin_dir, tracedecay_bin, deploy_dashboard)?;
@@ -289,10 +289,22 @@ pub(crate) fn rendered_plugin_files(
     tracedecay_bin: &str,
     generator_commit: &str,
 ) -> Result<Vec<(&'static str, String)>> {
+    let tools = advertised_tools()?;
+    rendered_plugin_files_with_tools(tracedecay_bin, generator_commit, &tools)
+}
+
+fn rendered_plugin_files_with_tools(
+    tracedecay_bin: &str,
+    generator_commit: &str,
+    tools: &[AdvertisedToolV1],
+) -> Result<Vec<(&'static str, String)>> {
     Ok(vec![
-        ("plugin.yaml", templates::plugin_manifest(generator_commit)),
+        (
+            "plugin.yaml",
+            templates::plugin_manifest(generator_commit, tools),
+        ),
         ("schemas.py", templates::plugin_schemas()),
-        ("schemas.json", templates::plugin_schemas_json()?),
+        ("schemas.json", advertised_tool_schemas_json(tools)?),
         ("tools.py", templates::plugin_tools(tracedecay_bin)),
         ("__init__.py", templates::plugin_init(generator_commit)),
         ("cli.py", templates::PLUGIN_CLI_PY.to_string()),
@@ -369,10 +381,16 @@ pub(super) fn deactivate_deployed_plugin_profile(
     }
     if plugin_dir == deployed_plugin_dir {
         remove_managed_skill_overlay(plugin_dir)?;
-        dashboard_wrapper::uninstall(plugin_dir)
+        dashboard_wrapper::uninstall(plugin_dir)?;
+        purge_generated_python_bytecode(
+            plugin_dir,
+            &["__init__", "schemas", "tools", "cli"],
+            true,
+        )?;
     } else {
-        remove_generated_plugin_files(plugin_dir)
+        remove_generated_plugin_files(plugin_dir)?;
     }
+    Ok(())
 }
 
 pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
@@ -385,11 +403,8 @@ pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
     }
 
     remove_generated_file(&plugin_dir.join("plugin.yaml"))?;
-    remove_generated_file(&plugin_dir.join("schemas.py"))?;
     remove_generated_file(&plugin_dir.join("schemas.json"))?;
-    remove_generated_file(&plugin_dir.join("tools.py"))?;
-    remove_generated_file(&plugin_dir.join("__init__.py"))?;
-    remove_generated_file(&plugin_dir.join("cli.py"))?;
+    remove_generated_python_modules(plugin_dir, &["__init__", "schemas", "tools", "cli"], true)?;
     remove_generated_file(&plugin_dir.join("skills/tracedecay/SKILL.md"))?;
     remove_empty_dir(&plugin_dir.join("skills/tracedecay"))?;
     remove_managed_skill_overlay(plugin_dir)?;
@@ -554,7 +569,7 @@ fn reconcile_managed_skill_overlay(profile_root: &Path, plugin_dir: &Path) -> Re
         .into_iter()
         .collect::<BTreeSet<_>>();
     for (path, bytes) in &desired {
-        super::safe_write_bytes_file(path, bytes, None)?;
+        super::safe_write_bytes_file(path, bytes)?;
     }
     for path in existing {
         if !desired.contains_key(&path) {
@@ -618,7 +633,7 @@ pub(super) fn write_text_file(path: &Path, contents: &str) -> Result<()> {
     if current == contents {
         return Ok(());
     }
-    super::safe_write_text_file(path, contents, None)
+    super::safe_write_text_file(path, contents)
 }
 
 pub(super) fn remove_generated_file(path: &Path) -> Result<()> {
@@ -629,6 +644,69 @@ pub(super) fn remove_generated_file(path: &Path) -> Result<()> {
             message: format!("failed to remove {}: {e}", path.display()),
         }),
     }
+}
+
+/// Removes generated `<stem>.py` modules from `dir` together with the bytecode
+/// Python caches for exactly those modules (`__pycache__/<stem>.<tag>.pyc`,
+/// PEP 3147), so a host that imported them can still be cleaned up. Other
+/// cache entries are left in place, and so is `__pycache__` while it holds any.
+pub(super) fn remove_generated_python_modules(
+    dir: &Path,
+    stems: &[&str],
+    purge_remaining_bytecode: bool,
+) -> Result<()> {
+    for stem in stems {
+        remove_generated_file(&dir.join(format!("{stem}.py")))?;
+    }
+    purge_generated_python_bytecode(dir, stems, purge_remaining_bytecode)?;
+    Ok(())
+}
+
+/// Drops PEP 3147 bytecode for the given module stems without touching `.py`
+/// sources. Used when catalog-owned plugin bytes must stay on disk.
+pub(super) fn purge_generated_python_bytecode(
+    dir: &Path,
+    stems: &[&str],
+    purge_remaining_bytecode: bool,
+) -> Result<()> {
+    let cache_dir = dir.join("__pycache__");
+    let read_error = |e: std::io::Error| TraceDecayError::Config {
+        message: format!("failed to read {}: {e}", cache_dir.display()),
+    };
+    let entries = match std::fs::read_dir(&cache_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(read_error(e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(read_error)?;
+        let name = entry.file_name();
+        let is_generated_bytecode = name.to_str().is_some_and(|name| {
+            let module = name.split('.').next().unwrap_or_default();
+            let recognized = stems.contains(&module)
+                || (module == "tracedecay_plugin" && stems.contains(&"__init__"));
+            recognized && name.ends_with(".pyc") && name.len() > module.len() + ".pyc".len()
+        });
+        if is_generated_bytecode
+            || (purge_remaining_bytecode
+                && name.to_str().is_some_and(|name| name.ends_with(".pyc")))
+        {
+            remove_generated_file(&entry.path())?;
+        }
+    }
+    if purge_remaining_bytecode {
+        match std::fs::remove_dir_all(&cache_dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to remove {}: {e}", cache_dir.display()),
+                });
+            }
+        }
+    }
+    remove_empty_dir(&cache_dir)?;
+    Ok(())
 }
 
 pub(super) fn remove_empty_dir(path: &Path) -> Result<bool> {
@@ -650,11 +728,10 @@ mod registration_tests {
 
     /// Rendered commit equals provider SHA: the plugin.yaml `generator_commit`
     /// line and the `__init__.py` provenance header must carry the passed
-    /// 40-hex commit verbatim — no truncation, no baked-in build identity.
+    /// 40-hex commit verbatim, no truncation, no baked-in build identity.
     #[test]
     fn rendered_provenance_stamps_equal_the_passed_generator_commit() {
         const FIXTURE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
-        assert_eq!(FIXTURE_SHA.len(), 40);
         let files = rendered_plugin_files("tracedecay", FIXTURE_SHA).unwrap();
 
         let manifest = &files
@@ -695,8 +772,9 @@ mod registration_tests {
 
         let paths = HermesIntegration
             .host_component_registration_paths_checked(
-                &[super::super::host_bundle_v2::HostBundleComponentV1::Core],
+                &[super::super::host_bundle::HostComponentV1::Core],
                 home.path(),
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             )
             .unwrap();
 

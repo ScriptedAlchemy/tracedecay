@@ -5,7 +5,7 @@
 //! regression back to close-before-join (or to closing while the registry
 //! maps still hold their standing owner attachments) fails the close below
 //! with `graph database conflict (operation: close graph runtime for
-//! shutdown)` — the exact receipt detail this contract forbids.
+//! shutdown)`, the exact receipt detail this contract forbids.
 
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -22,7 +22,7 @@ use tracedecay_store::{FactWriteControl, ProjectMemoryFactProjectionV1};
 
 use super::{DaemonSessionRuntimeRegistryV1, ProjectRuntimeOwnerStateV1};
 use tracedecay_daemon_identity::profile_identity;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
 fn enrolled_root(base: &Path, project_id: &ProjectId) -> PathBuf {
     let root = base.join(project_id.as_str());
@@ -158,15 +158,93 @@ async fn healthy_shutdown_joins_workers_then_closes_every_retained_graph_without
         project_sessions,
     ));
     registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("retained graph runtimes close without a shutdown Conflict");
 
     // The drain is exhaustive: a second pass finds nothing left to close.
     registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("shutdown close is idempotent after the drain");
+}
+
+fn wal_bytes(database: &Path) -> u64 {
+    let mut wal = database.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::metadata(PathBuf::from(wal)).map_or(0, |metadata| metadata.len())
+}
+
+#[tokio::test]
+async fn terminal_shutdown_truncates_every_released_session_store_wal() {
+    let temp = TempDir::new().expect("shutdown wal fixture root");
+    let profile_root = temp.path().join("profile");
+    let project_id = ProjectId::new("project.shutdown-wal-truncate").expect("project id");
+    let project_root = enrolled_root(temp.path(), &project_id);
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        67,
+        "shutdown wal truncate",
+    )
+    .expect("daemon database scope");
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("daemon registry");
+    let profile_sessions = registry
+        .profile_sessions()
+        .await
+        .expect("profile sessions authority");
+    let project_sessions = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("project sessions authority");
+    let stores = [
+        profile_sessions.db_path().to_path_buf(),
+        project_sessions.db_path().to_path_buf(),
+    ];
+    for store in &stores {
+        assert!(
+            wal_bytes(store) > 0,
+            "schema install leaves frames in {}",
+            store.display()
+        );
+    }
+
+    // The daemon's terminal owner order: join terminal and reconciliation
+    // tasks, then drain the owners and close.
+    registry
+        .shutdown_terminal_tasks(
+            &tracedecay_runtime_core::native_runtime::cx()
+                .expect("native fixture execution context"),
+        )
+        .await
+        .expect("terminal tasks join");
+    registry.cancel_memory_graph_reconciliation_tasks();
+    registry
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("reconciliation workers join");
+    drop((profile_sessions, project_sessions));
+    registry
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
+        .await
+        .expect("terminal shutdown closes released runtimes");
+
+    for store in &stores {
+        assert_eq!(
+            wal_bytes(store),
+            0,
+            "a released session store keeps no WAL after shutdown: {}",
+            store.display()
+        );
+    }
 }
 
 #[tokio::test]
@@ -191,7 +269,9 @@ async fn terminal_shutdown_refuses_an_in_flight_project_owner_transition() {
         .insert(project_id, ProjectRuntimeOwnerStateV1::Opening);
 
     let error = registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect_err("terminal close must not skip an in-flight owner transition");
     assert!(
@@ -200,4 +280,74 @@ async fn terminal_shutdown_refuses_an_in_flight_project_owner_transition() {
             .contains("project runtime owner transition is unfinished"),
         "unexpected terminal transition error: {error}"
     );
+}
+
+/// A fact write publishes its memory graph inline in a detached task, outside
+/// the scheduled worker. That pass holds the retained graph runtime and a
+/// graph lease, so the terminal shutdown join must wait for it after
+/// cancellation; closing while it is in flight is the
+/// `registry.reserve_close.leased` conflict this contract forbids.
+#[tokio::test]
+async fn shutdown_joins_an_inline_post_write_pass_before_closing_the_graph() {
+    let temp = TempDir::new().expect("shutdown inline pass fixture root");
+    let profile_root = temp.path().join("profile");
+    let project_id = ProjectId::new("project.graph-shutdown-inline-pass").expect("project id");
+    let project_root = enrolled_root(temp.path(), &project_id);
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        61,
+        "graph shutdown inline pass",
+    )
+    .expect("daemon database scope");
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("daemon registry");
+    let project_memory = registry
+        .project_memory(project_id, [project_root])
+        .await
+        .expect("project memory authority");
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while project_memory.memory_graph_runtime().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("project memory graph attaches in the background");
+
+    // Model the post-write pass at its blocking point: admitted through the
+    // coordinator and holding the graph runtime it publishes through.
+    let inline_pass = project_memory
+        .begin_inline_memory_graph_reconciliation_pass()
+        .expect("inline pass is admitted before shutdown");
+    let operation = project_memory
+        .issue_memory_graph_runtime_operation()
+        .expect("graph runtime operation");
+
+    registry.cancel_memory_graph_reconciliation_tasks();
+    let mut join = std::pin::pin!(registry.shutdown_memory_graph_reconciliation_tasks());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut join)
+            .await
+            .is_err(),
+        "the reconciliation join must wait for the in-flight inline pass"
+    );
+    assert!(
+        project_memory
+            .begin_inline_memory_graph_reconciliation_pass()
+            .is_none(),
+        "no inline pass may start once shutdown has cancelled reconciliation"
+    );
+
+    drop(operation);
+    drop(inline_pass);
+    join.await
+        .expect("reconciliation join settles once the inline pass releases the runtime");
+    drop(project_memory);
+    registry
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
+        .await
+        .expect("retained graph runtimes close without a shutdown Conflict");
 }

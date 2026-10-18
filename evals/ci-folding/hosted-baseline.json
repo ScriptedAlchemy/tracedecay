@@ -1,0 +1,1427 @@
+{
+  "repository": "ScriptedAlchemy/tracedecay",
+  "run_id": 36379789956,
+  "head_sha": "3e635b8a0e0d5c5fe259122e622d04787c38d389",
+  "url": "https://github.com/ScriptedAlchemy/tracedecay/actions/runs/36379789956",
+  "jobs": [
+    {
+      "name": "Benchmark harness self-tests",
+      "job_id": 108793124869,
+      "conclusion": "success",
+      "queue_seconds": 2.0,
+      "run_seconds": 25.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 8.0
+        },
+        {
+          "name": "Test the runtime benchmark harness",
+          "conclusion": "success",
+          "seconds": 15.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Scope gate",
+      "job_id": 108793124966,
+      "conclusion": "success",
+      "queue_seconds": 2.0,
+      "run_seconds": 7.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Decide what this run may spend",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Derive the Linux test matrix",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Derive the Windows test matrix",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Derive the macOS test matrix",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Repository gates",
+      "job_id": 108793124971,
+      "conclusion": "success",
+      "queue_seconds": 2.0,
+      "run_seconds": 86.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 21.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 27.0
+        },
+        {
+          "name": "Reject tracked ignored files",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Test bounded commit range linting",
+          "conclusion": "success",
+          "seconds": 4.0
+        },
+        {
+          "name": "Test worktree GC classification and build reclamation",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Check Rust cache key lineage and the superseded-entry selection",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Test release packagers",
+          "conclusion": "success",
+          "seconds": 7.0
+        },
+        {
+          "name": "Check the release guards",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install the repository's pinned toolchain",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Check formatting",
+          "conclusion": "success",
+          "seconds": 18.0
+        },
+        {
+          "name": "Test and check dev skill host copies",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Validate commit messages",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Feature gates",
+      "job_id": 108793154722,
+      "conclusion": "success",
+      "queue_seconds": 4.0,
+      "run_seconds": 702.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 8.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 21.0
+        },
+        {
+          "name": "Check feature-gated surfaces compile",
+          "conclusion": "success",
+          "seconds": 667.0
+        },
+        {
+          "name": "Check the production feature graph",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Clippy",
+      "job_id": 108793154773,
+      "conclusion": "failure",
+      "queue_seconds": 4.0,
+      "run_seconds": 175.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 8.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 21.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run blocking Clippy policy",
+          "conclusion": "failure",
+          "seconds": 137.0
+        },
+        {
+          "name": "Check lean build",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install the Windows C cross-compiler",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Check the Windows target",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 1.0
+        }
+      ]
+    },
+    {
+      "name": "Shipped CLI build (x86_64-linux)",
+      "job_id": 108793154795,
+      "conclusion": "success",
+      "queue_seconds": 2.0,
+      "run_seconds": 1943.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 8.0
+        },
+        {
+          "name": "Run actions/setup-node@v6",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 26.0
+        },
+        {
+          "name": "Build the embedded dashboard bundle",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Pin the embedded bundle for the skip-mode build",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Resolve pinned toolchain",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 4.0
+        },
+        {
+          "name": "Build the shipped binary",
+          "conclusion": "success",
+          "seconds": 1891.0
+        },
+        {
+          "name": "Smoke-run the shipped binary",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "job_id": 108793154807,
+      "conclusion": "success",
+      "queue_seconds": 3.0,
+      "run_seconds": 191.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 10.0
+        },
+        {
+          "name": "Run actions/setup-node@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 27.0
+        },
+        {
+          "name": "Build dashboard assets",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run dashboard unit tests",
+          "conclusion": "success",
+          "seconds": 146.0
+        },
+        {
+          "name": "Verify embedded dist artifacts",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Test Linux root-lib",
+      "job_id": 108793154856,
+      "conclusion": "failure",
+      "queue_seconds": 4.0,
+      "run_seconds": 1350.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 17.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 22.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Resolve this partition's cargo selection",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Build the executables the suites spawn",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run tests",
+          "conclusion": "failure",
+          "seconds": 1294.0
+        },
+        {
+          "name": "Upload Linux partition nextest report",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Test Linux core-storage",
+      "job_id": 108793154877,
+      "conclusion": "failure",
+      "queue_seconds": 5.0,
+      "run_seconds": 811.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 16.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 20.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Resolve this partition's cargo selection",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Build the executables the suites spawn",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run tests",
+          "conclusion": "failure",
+          "seconds": 758.0
+        },
+        {
+          "name": "Upload Linux partition nextest report",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Test Linux core-contracts",
+      "job_id": 108793154882,
+      "conclusion": "failure",
+      "queue_seconds": 5.0,
+      "run_seconds": 1043.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 16.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 21.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Resolve this partition's cargo selection",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Build the executables the suites spawn",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run tests",
+          "conclusion": "failure",
+          "seconds": 990.0
+        },
+        {
+          "name": "Upload Linux partition nextest report",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Test Linux root-journeys",
+      "job_id": 108793154890,
+      "conclusion": "failure",
+      "queue_seconds": 4.0,
+      "run_seconds": 1246.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 17.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 21.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Resolve this partition's cargo selection",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Build the executables the suites spawn",
+          "conclusion": "success",
+          "seconds": 1021.0
+        },
+        {
+          "name": "Run tests",
+          "conclusion": "failure",
+          "seconds": 173.0
+        },
+        {
+          "name": "Upload Linux partition nextest report",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Test Linux root-dashboard-api",
+      "job_id": 108793154902,
+      "conclusion": "success",
+      "queue_seconds": 5.0,
+      "run_seconds": 1093.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 16.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 4.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 20.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Resolve this partition's cargo selection",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Build the executables the suites spawn",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run tests",
+          "conclusion": "success",
+          "seconds": 1036.0
+        },
+        {
+          "name": "Upload Linux partition nextest report",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Test Linux root-sessions",
+      "job_id": 108793154918,
+      "conclusion": "success",
+      "queue_seconds": 5.0,
+      "run_seconds": 1127.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 16.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 4.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 24.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Resolve this partition's cargo selection",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Build the executables the suites spawn",
+          "conclusion": "success",
+          "seconds": 966.0
+        },
+        {
+          "name": "Run tests",
+          "conclusion": "success",
+          "seconds": 100.0
+        },
+        {
+          "name": "Upload Linux partition nextest report",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Test Linux root-transport",
+      "job_id": 108793154927,
+      "conclusion": "failure",
+      "queue_seconds": 5.0,
+      "run_seconds": 1456.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 16.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 4.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 22.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Resolve this partition's cargo selection",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Build the executables the suites spawn",
+          "conclusion": "success",
+          "seconds": 953.0
+        },
+        {
+          "name": "Run tests",
+          "conclusion": "failure",
+          "seconds": 445.0
+        },
+        {
+          "name": "Upload Linux partition nextest report",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Test Linux runtime",
+      "job_id": 108793154950,
+      "conclusion": "failure",
+      "queue_seconds": 5.0,
+      "run_seconds": 1340.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 15.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 4.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 4.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 21.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Resolve this partition's cargo selection",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Build the executables the suites spawn",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run tests",
+          "conclusion": "failure",
+          "seconds": 1285.0
+        },
+        {
+          "name": "Upload Linux partition nextest report",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Test Linux",
+      "job_id": 108798279521,
+      "conclusion": "failure",
+      "queue_seconds": 38.0,
+      "run_seconds": 4.0,
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Merge the partition reports into the Linux nextest report",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Check Linux partitions and hotpath parity",
+          "conclusion": "failure",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    }
+  ]
+}

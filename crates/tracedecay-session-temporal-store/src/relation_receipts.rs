@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tracedecay_domain::{SessionId, SessionProjectionGenerationV1};
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_store::SessionStoreResult;
+use tracedecay_store::{SessionStoreError, SessionStoreResult};
+use tracing::Instrument as _;
 
 use super::query::{generation_i64, now_micros, storage, storage_message};
 use super::relations::{SessionRelationProjection, projection_watermark};
@@ -52,10 +53,11 @@ pub async fn record_relation_receipt(
         .await
         .map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if changed != 1 {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "immutable relation receipt rejected different graph identity",
-        ));
+        // The stored receipt already names a different graph. Replaying this
+        // write cannot succeed, so this is not a storage retry.
+        return Err(SessionStoreError::ReceiptIdentityMismatch {
+            context: "immutable relation receipt graph identity",
+        });
     }
     record_pending_effect_journal(conn, projection, now).await?;
     Ok(watermark)
@@ -93,66 +95,124 @@ async fn record_pending_effect_journal(
         )
         .await
         .map_err(|error| storage(RECEIPT_OPERATION, error))?;
-    if changed != 1 {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "immutable relation effect journal rejected different projection",
-        ));
+    if changed == 1 {
+        return Ok(());
     }
-    Ok(())
+    let generation = SessionProjectionGenerationV1::new(projection.generation)
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    let (_, pending) = expected_receipt(conn, &projection.session_id, generation).await?;
+    if !pending {
+        // The receipt upsert matched this projection's watermark, so an
+        // applied receipt means the graph already holds it: a retried
+        // completion replays the apply instead of journaling it again.
+        return Ok(());
+    }
+    // The journal row for this generation already holds a different
+    // projection. The next pass would submit the same row and be refused
+    // again, so retire the refresh instead of retrying it.
+    Err(SessionStoreError::ReceiptIdentityMismatch {
+        context: "immutable relation effect journal",
+    })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.txn.apply_relation")]
+#[tracing::instrument(
+    name = "session_temporal.txn.apply_relation",
+    level = "trace",
+    skip_all
+)]
 pub async fn apply_relation_projection(
     database: &impl SessionTemporalRegisteredDb,
     projection: &SessionRelationProjection,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> SessionStoreResult<GraphWatermark> {
-    let (expected, was_pending) = {
-        let snapshot = database
-            .read_snapshot()
-            .await
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?;
-        expected_receipt(
-            &snapshot,
-            &projection.session_id,
-            SessionProjectionGenerationV1::new(projection.generation)
-                .map_err(|error| storage(RECEIPT_OPERATION, error))?,
-        )
-        .await?
-    };
+    let applied = write_relation_projection(database, projection, cancellation).await?;
+    let transaction = database
+        .begin_write_transaction()
+        .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    acknowledge_relation_receipt(&transaction, projection).await?;
+    transaction
+        .commit()
+        .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    Ok(applied)
+}
+
+/// Replaces the native relation graph with `projection` and leaves its
+/// receipt pending; [`acknowledge_relation_receipt`] settles it.
+pub(crate) async fn write_relation_projection(
+    database: &impl SessionTemporalRegisteredDb,
+    projection: &SessionRelationProjection,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<GraphWatermark> {
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    write_relation_projection_on_snapshot(database, &snapshot, projection, cancellation).await
+}
+
+pub(crate) async fn write_relation_projection_on_snapshot(
+    database: &impl SessionTemporalRegisteredDb,
+    snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+    projection: &SessionRelationProjection,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<GraphWatermark> {
+    let (expected, _) = expected_receipt(
+        snapshot,
+        &projection.session_id,
+        SessionProjectionGenerationV1::new(projection.generation)
+            .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+    )
+    .await?;
     let actual =
         projection_watermark(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if actual != expected {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "reconstructed relations do not match the durable graph receipt",
-        ));
+        return Err(SessionStoreError::ReceiptIdentityMismatch {
+            context: "relation projection watermark",
+        });
     }
     let (scope, store) = database
         .session_relation_store()
         .map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if scope != projection.scope {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "relation receipt project does not match mounted graph identity",
-        ));
+        return Err(SessionStoreError::SessionMismatch {
+            context: "relation receipt graph scope",
+        });
     }
     let applied = store
         .replace_with_cancellation(projection, cancellation)
-        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+        .map_err(|error| match error {
+            super::relations::SessionRelationError::Cancelled => SessionStoreError::Cancelled,
+            super::relations::SessionRelationError::DeadlineExceeded => {
+                SessionStoreError::DeadlineExceeded
+            }
+            error => storage(RECEIPT_OPERATION, error),
+        })?;
     if applied != expected {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "native graph acknowledged a different relation watermark",
-        ));
+        return Err(SessionStoreError::ReceiptIdentityMismatch {
+            context: "native relation graph watermark",
+        });
     }
-    let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-        database
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?
-    });
+    Ok(applied)
+}
+
+/// Marks the receipt applied once the native graph holds `projection`.
+///
+/// The receipt state is read under the writer lock, so a peer applier that
+/// settled the receipt first leaves no journal row to remove.
+pub(crate) async fn acknowledge_relation_receipt(
+    transaction: &impl SessionTemporalExec,
+    projection: &SessionRelationProjection,
+) -> SessionStoreResult<()> {
+    let generation = SessionProjectionGenerationV1::new(projection.generation)
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    let (_, was_pending) =
+        expected_receipt(transaction, &projection.session_id, generation).await?;
+    let applied =
+        projection_watermark(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
     let changed = transaction
         .execute(
             "UPDATE session_relation_receipts
@@ -194,13 +254,7 @@ pub async fn apply_relation_projection(
             "relation effect journal changed during native graph acknowledgement",
         ));
     }
-    hotpath::measure_block!("session_temporal.txn.commit", {
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?
-    });
-    Ok(applied)
+    Ok(())
 }
 
 /// Reports whether a peer applier already settled this generation's receipt.

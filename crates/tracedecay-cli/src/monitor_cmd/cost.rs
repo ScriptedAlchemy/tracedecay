@@ -1,11 +1,18 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_session_memory::provider_usage::{
-    ProviderUsageCostSummaryV1, ProviderUsageCoverageV1,
+use tracedecay_session_memory::provider_usage::ProviderUsageCoverageV1;
+
+use tracedecay_contracts::retrieval::{
+    AdminCliCostSummaryV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
+
+use crate::{
+    commands::{admin_cli_result, admin_cli_result_mismatch, admin_cli_scope},
+    cost_summary::CostAdminPayload,
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -63,8 +70,9 @@ impl CostCache {
         self.refresh.is_none() && self.last_refresh.elapsed() > REFRESH_INTERVAL
     }
 
-    pub(super) fn begin_refresh(&mut self) {
-        self.begin_refresh_with(fetch_cost_snapshot_blocking);
+    pub(super) fn begin_refresh(&mut self, profile: &ProfileRoot) {
+        let profile = profile.clone();
+        self.begin_refresh_with(move || fetch_cost_snapshot_blocking(&profile));
     }
 
     fn begin_refresh_with<F>(&mut self, fetch: F)
@@ -122,31 +130,13 @@ impl CostCache {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct CostAdminPayload {
-    summary: CostSummaryPayload,
-    today: TodayCostPayload,
-}
-
-#[derive(serde::Deserialize)]
-struct CostSummaryPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
-    tokens_saved: u64,
-    efficiency_ratio: Option<f64>,
-}
-
-#[derive(serde::Deserialize)]
-struct TodayCostPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
-}
-
 fn map_cost_payloads(
-    week: serde_json::Value,
-    today: serde_json::Value,
+    week: AdminCliCostSummaryV1,
+    today: AdminCliCostSummaryV1,
 ) -> std::result::Result<Option<CostSnapshot>, String> {
-    let week = serde_json::from_value::<CostAdminPayload>(week)
+    let week = CostAdminPayload::try_from(week)
         .map_err(|error| format!("invalid daemon 7d cost response: {error}"))?;
-    let today = serde_json::from_value::<CostAdminPayload>(today)
+    let today = CostAdminPayload::try_from(today)
         .map_err(|error| format!("invalid daemon today cost response: {error}"))?;
     let week_usage = week.summary.provider_usage;
     let today_usage = today.today.provider_usage;
@@ -211,46 +201,46 @@ fn map_cost_payloads(
     }))
 }
 
-fn global_cost_handshake() -> Result<DaemonHandshake> {
+#[tracing::instrument(name = "cli.monitor.cost_fetch", level = "trace", skip_all)]
+async fn fetch_cost_snapshot(profile: &ProfileRoot) -> Result<Option<CostSnapshot>> {
     let cwd = std::env::current_dir()?;
-    let project_root = tracedecay_runtime_core::config::discover_project_root(&cwd);
-    tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)
-}
-
-async fn call_cost_summary(handshake: &DaemonHandshake, range: &str) -> Result<serde_json::Value> {
-    let result = tracedecay::daemon::call_default_tool(
-        handshake,
-        "tracedecay_admin_cli",
-        serde_json::json!({ "action": "cost_summary", "range": range }),
-    )
-    .await?;
-    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
-}
-
-#[hotpath::measure(label = "cli.monitor.cost_fetch", future = true)]
-async fn fetch_cost_snapshot() -> Result<Option<CostSnapshot>> {
-    let handshake = global_cost_handshake()?;
+    let project_root = profile.discover_project_root(&cwd);
     let fetch = async {
         let (week, today) = tokio::try_join!(
-            call_cost_summary(&handshake, "7d"),
-            call_cost_summary(&handshake, "today")
+            cost_summary(profile, project_root.as_deref(), "7d"),
+            cost_summary(profile, project_root.as_deref(), "today"),
         )?;
         map_cost_payloads(week, today).map_err(|message| TraceDecayError::Config { message })
     };
-    tokio::time::timeout(FETCH_TIMEOUT, fetch)
+    tracedecay_runtime_core::native_runtime::timeout(FETCH_TIMEOUT, fetch)
         .await
-        .map_err(|_| TraceDecayError::Config {
-            message: "daemon cost refresh timed out after 5 seconds".to_string(),
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("daemon cost refresh did not answer within 5 seconds: {error}"),
         })?
 }
 
-fn fetch_cost_snapshot_blocking() -> RefreshResult {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("could not start cost refresh runtime: {error}"))?;
-    runtime
-        .block_on(fetch_cost_snapshot())
+async fn cost_summary(
+    profile: &ProfileRoot,
+    project_root: Option<&std::path::Path>,
+    range: &str,
+) -> Result<AdminCliCostSummaryV1> {
+    match admin_cli_result(
+        profile,
+        project_root,
+        AdminCliSurfaceRequestV1::CostSummary {
+            range: range.to_owned(),
+            scope: admin_cli_scope(project_root),
+        },
+    )
+    .await?
+    {
+        AdminCliResultV1::CostSummary(cost) => Ok(cost),
+        _ => Err(admin_cli_result_mismatch("cost_summary")),
+    }
+}
+
+fn fetch_cost_snapshot_blocking(profile: &ProfileRoot) -> RefreshResult {
+    tracedecay_runtime_core::native_runtime::block_on(fetch_cost_snapshot(profile))?
         .map_err(|error| error.to_string())
 }
 
@@ -280,6 +270,7 @@ mod tests {
         today_cost: f64,
     ) -> serde_json::Value {
         serde_json::json!({
+            "range": "7d",
             "summary": {
                 "provider_usage": {
                     "coverage": coverage,
@@ -325,11 +316,15 @@ mod tests {
         })
     }
 
+    fn cost(payload: serde_json::Value) -> AdminCliCostSummaryV1 {
+        serde_json::from_value(payload).unwrap()
+    }
+
     #[test]
     fn daemon_cost_response_uses_today_model_and_week_totals() {
         let snapshot = map_cost_payloads(
-            payload(4.5, "complete", "week-leader", 3.25, 1.5),
-            payload(1.5, "complete", "today-leader", 1.25, 1.5),
+            cost(payload(4.5, "complete", "week-leader", 3.25, 1.5)),
+            cost(payload(1.5, "complete", "today-leader", 1.25, 1.5)),
         )
         .unwrap()
         .unwrap();
@@ -347,7 +342,7 @@ mod tests {
         let mut today = payload(0.0, "complete", "unused", 0.0, 0.0);
         today["today"]["provider_usage"]["by_model"] = serde_json::json!([]);
 
-        let snapshot = map_cost_payloads(week, today).unwrap().unwrap();
+        let snapshot = map_cost_payloads(cost(week), cost(today)).unwrap().unwrap();
 
         assert_eq!(snapshot.top_model, None);
         assert_eq!(snapshot.top_model_cost, None);
@@ -375,29 +370,34 @@ mod tests {
         assert!(matches!(cache.state, CostCacheState::Stale(_)));
         assert!(
             map_cost_payloads(
-                payload(-1.0, "complete", "a", 1.0, 0.0),
-                payload(0.0, "complete", "a", 0.0, 0.0)
+                cost(payload(-1.0, "complete", "a", 1.0, 0.0)),
+                cost(payload(0.0, "complete", "a", 0.0, 0.0))
             )
             .is_err()
         );
         assert_eq!(
             map_cost_payloads(
-                payload(0.0, "unavailable", "a", 0.0, 0.0),
-                payload(0.0, "unavailable", "a", 0.0, 0.0)
+                cost(payload(0.0, "unavailable", "a", 0.0, 0.0)),
+                cost(payload(0.0, "unavailable", "a", 0.0, 0.0))
             )
             .unwrap(),
             None
         );
     }
 
+    /// The refresh worker is a plain thread, so the daemon client it drives
+    /// must settle with no Tokio runtime entered.
     #[test]
-    fn cost_handshake_preserves_discovered_project_identity() {
-        let handshake = global_cost_handshake().unwrap();
-        assert_eq!(
-            handshake.project_path,
-            tracedecay_runtime_core::config::discover_project_root(
-                &std::env::current_dir().unwrap()
-            )
+    fn cost_refresh_settles_without_an_entered_tokio_runtime() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = ProfileRoot::under_home(home.path());
+        assert!(tokio::runtime::Handle::try_current().is_err());
+
+        let refreshed = fetch_cost_snapshot_blocking(&profile);
+
+        assert!(
+            refreshed.is_err(),
+            "no daemon serves this profile: {refreshed:?}"
         );
     }
 
@@ -406,11 +406,10 @@ mod tests {
         let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(0);
         let receiver = spawn_refresh_worker(move || {
             release_receiver.recv().unwrap();
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            assert_eq!(runtime.block_on(async { 42 }), 42);
+            assert_eq!(
+                tracedecay_runtime_core::native_runtime::block_on(async { 42 }),
+                Ok(42)
+            );
             Ok(None)
         })
         .unwrap();

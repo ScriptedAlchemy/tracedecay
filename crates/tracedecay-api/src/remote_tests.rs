@@ -10,35 +10,36 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, StatusCode};
 use futures_util::stream;
 use tower::ServiceExt;
-use tracedecay_application::remote::auth::{
+use tracedecay_contracts::remote::auth::{
     RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentCommitReceiptV1,
 };
-use tracedecay_application::remote::capture::RemoteCaptureReceiptV1;
-use tracedecay_application::remote::capture_protocol::RemoteCaptureRequestV1;
-use tracedecay_application::remote::composition::ExpectedRemoteShardV1;
-use tracedecay_application::remote::credential_admission::{
+use tracedecay_contracts::remote::capture::RemoteCaptureReceiptV1;
+use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
+use tracedecay_contracts::remote::composition::ExpectedRemoteShardV1;
+use tracedecay_contracts::remote::credential_admission::{
     RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionErrorV1,
     RemoteCredentialAdmissionPortV1, RemoteCredentialAdmissionServiceV1,
     RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1, RemoteCredentialLookupErrorV1,
     RemoteCredentialLookupPortV1, RemoteCredentialUseV1,
 };
-use tracedecay_application::remote::protocol::{
+use tracedecay_contracts::remote::protocol::{
     EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolExecutionControlV1,
-    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    RemoteProtocolFutureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1,
 };
-use tracedecay_application::remote::query::{
+use tracedecay_contracts::remote::query::{
     REMOTE_QUERY_SCHEMA_REVISION_V1, RemoteQueryOperationV1, RemoteQueryRequestV1,
     RemoteQueryResultV1,
 };
-use tracedecay_application::remote::recovery::{
-    BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
-    RecoveryAuthorityExpectationV1, StagedRestoreConfirmationV1, StagedRestoreProgressV1,
+use tracedecay_contracts::remote::recovery::{PromotionCasReceiptV1, PromotionConfirmationV1};
+use tracedecay_contracts::remote::replay::{
+    RemoteReplayOutcomeV1, RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1,
+    RemoteReplayRequestV1,
 };
-use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
-use tracedecay_application::remote::transfer::{
+use tracedecay_contracts::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, OperationBudgetUsage,
     PolicyDecisionRef, ResolvedScope,
 };
@@ -59,6 +60,7 @@ struct RejectingCredentialAdmission {
 }
 
 struct OneCredentialAuthority {
+    class: RemoteCredentialClassV1,
     fingerprint: RemoteCredentialFingerprintV1,
     record: RemoteCredentialAuthorityRecordV1,
 }
@@ -69,7 +71,7 @@ impl RemoteCredentialLookupPortV1 for OneCredentialAuthority {
         class: RemoteCredentialClassV1,
         fingerprint: &RemoteCredentialFingerprintV1,
     ) -> Result<RemoteCredentialAuthorityRecordV1, RemoteCredentialLookupErrorV1> {
-        if class == RemoteCredentialClassV1::Enrollment && fingerprint == &self.fingerprint {
+        if class == self.class && fingerprint == &self.fingerprint {
             return Ok(self.record.clone());
         }
         Err(RemoteCredentialLookupErrorV1::NotFound)
@@ -109,7 +111,7 @@ impl RemoteEnrollmentProtocolPortV1 for UnreachedProtocolPort {
         _enrollment_credential: OpaqueRemoteCredential,
     ) -> Result<
         RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
-        tracedecay_application::ApplicationContractError,
+        tracedecay_contracts::ApplicationContractError,
     > {
         self.calls.fetch_add(1, Ordering::SeqCst);
         unavailable_response(request)
@@ -125,12 +127,9 @@ macro_rules! unreachable_protocol_port {
                 &self,
                 request: RemoteProtocolRequestV1<$request>,
                 _credential: OpaqueRemoteCredential,
-            ) -> Result<
-                RemoteProtocolResponseV1<Self::Output>,
-                tracedecay_application::ApplicationContractError,
-            > {
+            ) -> RemoteProtocolFutureV1<'_, Self::Output> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                unavailable_response(request)
+                Box::pin(std::future::ready(unavailable_response(request)))
             }
 
             fn execute_controlled(
@@ -138,15 +137,12 @@ macro_rules! unreachable_protocol_port {
                 request: RemoteProtocolRequestV1<$request>,
                 _credential: OpaqueRemoteCredential,
                 control: RemoteProtocolExecutionControlV1,
-            ) -> Result<
-                RemoteProtocolResponseV1<Self::Output>,
-                tracedecay_application::ApplicationContractError,
-            > {
+            ) -> RemoteProtocolFutureV1<'_, Self::Output> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 if let Some(deadline) = &self.controlled_deadline {
                     deadline.store(control.deadline.0, Ordering::SeqCst);
                 }
-                unavailable_response(request)
+                Box::pin(std::future::ready(unavailable_response(request)))
             }
         }
     };
@@ -154,15 +150,18 @@ macro_rules! unreachable_protocol_port {
 
 unreachable_protocol_port!(RemoteCaptureRequestV1, RemoteCaptureReceiptV1);
 unreachable_protocol_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
+unreachable_protocol_port!(RemoteReplayPendingRequestV1, RemoteReplayPendingReceiptV1);
 unreachable_protocol_port!(RemoteQueryRequestV1, RemoteQueryResultV1);
-unreachable_protocol_port!(BackupRequestV1, BackupOperationStateV1);
-unreachable_protocol_port!(StagedRestoreConfirmationV1, StagedRestoreProgressV1);
 unreachable_protocol_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
 unreachable_protocol_port!(RemoteFrameTransferRequestV1, RemoteFrameTransferReceiptV1);
+unreachable_protocol_port!(
+    tracedecay_contracts::remote::protocol::CurrentAuthorityRequestV1,
+    tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1
+);
 
 fn unavailable_response<Request, Output>(
     request: RemoteProtocolRequestV1<Request>,
-) -> Result<RemoteProtocolResponseV1<Output>, tracedecay_application::ApplicationContractError> {
+) -> Result<RemoteProtocolResponseV1<Output>, tracedecay_contracts::ApplicationContractError> {
     let request_id = request.request_id;
     RemoteProtocolResponseV1::new(
         request_id.clone(),
@@ -184,13 +183,7 @@ const fn fixed_remote_clock() -> UtcMicros {
 
 const ACTIVE_CREDENTIAL: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn repository_scope(snapshot_id: &str) -> RemoteRepositoryScopeV1 {
     RemoteRepositoryScopeV1 {
@@ -203,6 +196,16 @@ fn repository_scope(snapshot_id: &str) -> RemoteRepositoryScopeV1 {
 }
 
 fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAuthority> {
+    credential_authority_for(RemoteCredentialClassV1::Enrollment)
+}
+
+const GRANT_CREDENTIAL: &[u8; 32] = b"fedcba9876543210fedcba9876543210";
+
+/// Admits [`ACTIVE_CREDENTIAL`] as the enrollment, or [`GRANT_CREDENTIAL`] as
+/// the grant it was enrolled from.
+fn credential_authority_for(
+    class: RemoteCredentialClassV1,
+) -> RemoteCredentialAdmissionServiceV1<OneCredentialAuthority> {
     let scope = repository_scope("snapshot.remote");
     let enrollment = EnrollmentCredentialRecordV1 {
         enrollment_id: id::<EntityId>("enrollment.remote"),
@@ -215,7 +218,8 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         revoked_at: None,
         capabilities: std::collections::BTreeSet::from([
             RemoteCapabilityV1::Query,
-            RemoteCapabilityV1::CreateBackup,
+            RemoteCapabilityV1::Promote,
+            RemoteCapabilityV1::ServeAuthority,
         ]),
         scope: scope.clone(),
     };
@@ -223,7 +227,7 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         grant_id: id::<EntityId>("grant.remote"),
         brain_id: enrollment.brain_id.clone(),
         node_id: enrollment.node_id.clone(),
-        fingerprint: RemoteCredentialFingerprintV1::from_secret(&[3_u8; 32]).unwrap(),
+        fingerprint: RemoteCredentialFingerprintV1::from_secret(GRANT_CREDENTIAL).unwrap(),
         revision: 1,
         issued_at: UtcMicros(1),
         expires_at: UtcMicros(100),
@@ -264,6 +268,16 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         Deadline::new(UtcMicros(100)).unwrap(),
     )
     .unwrap();
+    if class == RemoteCredentialClassV1::EnrollmentGrant {
+        return RemoteCredentialAdmissionServiceV1::new(OneCredentialAuthority {
+            class,
+            fingerprint: grant.fingerprint.clone(),
+            record: RemoteCredentialAuthorityRecordV1::Grant {
+                grant: Box::new(grant),
+                admission: Box::new(admission),
+            },
+        });
+    }
     let receipt = RemoteEnrollmentCommitReceiptV1 {
         admission,
         prior_grant_digest: grant_digest,
@@ -283,6 +297,7 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         receipt: Box::new(receipt),
     };
     RemoteCredentialAdmissionServiceV1::new(OneCredentialAuthority {
+        class,
         fingerprint: RemoteCredentialFingerprintV1::from_secret(ACTIVE_CREDENTIAL).unwrap(),
         record,
     })
@@ -331,8 +346,30 @@ fn query_request(scope: RemoteRepositoryScopeV1) -> RemoteHttpRequestV1<RemoteQu
     }
 }
 
-fn authenticated_router(port_calls: Arc<AtomicUsize>) -> Router {
+fn test_protocol_router(
+    port: UnreachedProtocolPort,
+    admission: Arc<dyn RemoteCredentialAdmissionPortV1>,
+    clock: fn() -> UtcMicros,
+) -> Router {
+    let port = Arc::new(port);
     remote_protocol_router(
+        port.clone(),
+        RemoteOperationProtocolPortsV1 {
+            capture: port.clone(),
+            replay: port.clone(),
+            replay_pending: port.clone(),
+            frame_transfer: port.clone(),
+            query: port.clone(),
+            promotion: port.clone(),
+            authority: port,
+        },
+        admission,
+        clock,
+    )
+}
+
+fn authenticated_router(port_calls: Arc<AtomicUsize>) -> Router {
+    test_protocol_router(
         UnreachedProtocolPort {
             calls: port_calls,
             controlled_deadline: None,
@@ -347,7 +384,7 @@ fn rejecting_router(
     admission_calls: Arc<AtomicUsize>,
     port_calls: Arc<AtomicUsize>,
 ) -> Router {
-    remote_protocol_router(
+    test_protocol_router(
         UnreachedProtocolPort {
             calls: port_calls,
             controlled_deadline: None,
@@ -364,7 +401,7 @@ fn deadline_capturing_router(
     port_calls: Arc<AtomicUsize>,
     controlled_deadline: Arc<AtomicI64>,
 ) -> Router {
-    remote_protocol_router(
+    test_protocol_router(
         UnreachedProtocolPort {
             calls: port_calls,
             controlled_deadline: Some(controlled_deadline),
@@ -384,10 +421,10 @@ fn query_http_request(body: Body) -> Request<Body> {
         .unwrap()
 }
 
-fn backup_http_request(body: Body) -> Request<Body> {
+fn recovery_http_request(route: &str, body: Body) -> Request<Body> {
     Request::builder()
         .method("POST")
-        .uri("/backup")
+        .uri(route)
         .header(AUTHORIZATION, "Bearer 0123456789abcdef0123456789abcdef")
         .header("content-type", "application/json")
         .body(body)
@@ -482,6 +519,46 @@ fn credential_authority_failures_share_one_concealed_response() {
     }
 }
 
+#[tokio::test]
+async fn revoked_enrollment_holder_gets_a_typed_refusal_without_reaching_the_port() {
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let body = serde_json::to_vec(&query_request(repository_scope("snapshot.remote"))).unwrap();
+    let response = rejecting_router(
+        RemoteCredentialAdmissionErrorV1::Revoked,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::clone(&port_calls),
+    )
+    .oneshot(query_http_request(Body::from(body)))
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let request_id = RequestId::new("request.remote.query").unwrap();
+    let expected = RemoteProtocolResponseV1::<()>::new(
+        request_id.clone(),
+        CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: RemoteAuthorityUnavailableReasonV1::EnrollmentRevoked,
+            observed_at: fixed_remote_clock(),
+        },
+        Err(remote_protocol_problem(
+            tracedecay_contracts::remote::query::remote_exact_observation_query_result_contract_v1(
+            ),
+            request_id,
+            RemoteProtocolFailureV1::EnrollmentRevoked,
+        )
+        .unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::to_value(RemoteHttpResponseV1::from(expected)).unwrap()
+    );
+    assert_eq!(port_calls.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn typed_query_scope_must_match_the_pre_body_session() {
     let port_calls = Arc::new(AtomicUsize::new(0));
@@ -520,44 +597,95 @@ async fn exactly_bound_query_delegates_once() {
     assert_eq!(port_calls.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn backup_http_route_binds_the_request_expiry_as_execution_deadline() {
-    let port_calls = Arc::new(AtomicUsize::new(0));
-    let controlled_deadline = Arc::new(AtomicI64::new(0));
+fn failover_request_body() -> Vec<u8> {
     let writer = expected_authority();
-    let body = RemoteHttpRequestV1 {
+    serde_json::to_vec(&RemoteHttpRequestV1 {
         request: RemoteProtocolRequestV1::new(
-            RequestId::new("request.remote.backup").unwrap(),
+            RequestId::new("request.remote.failover").unwrap(),
             id::<BrainId>("brain.remote"),
             id::<BrainNodeId>("node.remote"),
             4,
             Some(writer.clone()),
             UtcMicros(20),
-            BackupRequestV1 {
-                operation_id: "backup.remote".to_owned(),
-                expected: RecoveryAuthorityExpectationV1 {
-                    brain_id: writer.brain_id.as_str().to_owned(),
-                    shard_id: writer.shard_id.as_str().to_owned(),
-                    generation_id: writer.generation_id.as_str().to_owned(),
-                    authority_node_id: writer.authority_node_id.as_str().to_owned(),
-                    placement_revision: writer.placement_revision.get(),
-                    authority_epoch: writer.authority_epoch.0,
-                },
+            PromotionConfirmationV1 {
+                preview_id: "promotion.remote".to_owned(),
+                expected_authority_epoch: writer.authority_epoch.0,
+                expected_placement_revision: writer.placement_revision.get(),
                 expires_at_micros: 40,
             },
         )
         .unwrap(),
-    };
-    let body = serde_json::to_vec(&body).unwrap();
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn failover_http_route_binds_the_request_expiry_as_execution_deadline() {
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let controlled_deadline = Arc::new(AtomicI64::new(0));
     let response =
         deadline_capturing_router(Arc::clone(&port_calls), Arc::clone(&controlled_deadline))
-            .oneshot(backup_http_request(Body::from(body)))
+            .oneshot(recovery_http_request(
+                "/failover",
+                Body::from(failover_request_body()),
+            ))
             .await
             .unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(port_calls.load(Ordering::SeqCst), 1);
     assert_eq!(controlled_deadline.load(Ordering::SeqCst), 40);
+}
+
+/// The route runs the port on the native blocking pool, so a remote request
+/// settles with no Tokio runtime entered.
+#[test]
+fn failover_http_route_settles_without_an_entered_tokio_runtime() {
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let controlled_deadline = Arc::new(AtomicI64::new(0));
+    let response = tracedecay_rusqlite_runtime::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        deadline_capturing_router(Arc::clone(&port_calls), Arc::clone(&controlled_deadline))
+            .oneshot(recovery_http_request(
+                "/failover",
+                Body::from(failover_request_body()),
+            ))
+            .await
+            .unwrap()
+    })
+    .expect("native runtime");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(port_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(controlled_deadline.load(Ordering::SeqCst), 40);
+}
+
+#[tokio::test]
+async fn backup_and_restore_routes_are_not_mounted_beside_failover() {
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let router = authenticated_router(Arc::clone(&port_calls));
+    for route in ["/backup", "/restore"] {
+        let response = router
+            .clone()
+            .oneshot(recovery_http_request(
+                route,
+                Body::from(failover_request_body()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+    }
+    assert_eq!(port_calls.load(Ordering::SeqCst), 0);
+
+    let failover = router
+        .oneshot(recovery_http_request(
+            "/failover",
+            Body::from(failover_request_body()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(failover.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(port_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -584,4 +712,103 @@ fn block_on<F: Future>(future: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
+}
+
+/// Records whether its enrollment ran on a native runtime thread, where the
+/// enrollment commit's store-writer wait would park that thread.
+struct EnrollmentThreadProbe {
+    ran_on_native_thread: Arc<std::sync::Mutex<Option<bool>>>,
+}
+
+impl RemoteEnrollmentProtocolPortV1 for EnrollmentThreadProbe {
+    fn execute_enrollment(
+        &self,
+        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        _grant_credential: OpaqueRemoteCredential,
+        _enrollment_credential: OpaqueRemoteCredential,
+    ) -> Result<
+        RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
+        tracedecay_contracts::ApplicationContractError,
+    > {
+        // `block_on` refuses exactly on native runtime threads.
+        let native_thread =
+            tracedecay_rusqlite_runtime::native_runtime::block_on(async {}).is_err();
+        *self.ran_on_native_thread.lock().unwrap() = Some(native_thread);
+        unavailable_response(request)
+    }
+}
+
+/// The enrollment route runs its port on the native blocking pool, as every
+/// operation route does, so a native worker never waits on the store writer.
+#[test]
+fn enrollment_route_runs_its_port_off_native_runtime_threads() {
+    let ran_on_native_thread = Arc::new(std::sync::Mutex::new(None));
+    let operations = Arc::new(UnreachedProtocolPort {
+        calls: Arc::new(AtomicUsize::new(0)),
+        controlled_deadline: None,
+    });
+    let router = remote_protocol_router(
+        Arc::new(EnrollmentThreadProbe {
+            ran_on_native_thread: Arc::clone(&ran_on_native_thread),
+        }),
+        RemoteOperationProtocolPortsV1 {
+            capture: operations.clone(),
+            replay: operations.clone(),
+            replay_pending: operations.clone(),
+            frame_transfer: operations.clone(),
+            query: operations.clone(),
+            promotion: operations.clone(),
+            authority: operations,
+        },
+        Arc::new(credential_authority_for(
+            RemoteCredentialClassV1::EnrollmentGrant,
+        )),
+        fixed_remote_clock,
+    );
+    let scope = repository_scope("snapshot.remote");
+    let body = serde_json::to_vec(&RemoteHttpRequestV1 {
+        request: RemoteProtocolRequestV1::new_initial_enrollment(
+            RequestId::new("request.remote.enrollment").unwrap(),
+            id::<BrainId>("brain.remote"),
+            id::<BrainNodeId>("node.remote"),
+            fixed_remote_clock(),
+            EnrollmentRequestV1 {
+                grant_id: id::<EntityId>("grant.remote"),
+                grant_revision: 1,
+                enrollment_id: id::<EntityId>("enrollment.remote"),
+                brain_id: id::<BrainId>("brain.remote"),
+                node_id: id::<BrainNodeId>("node.remote"),
+                expires_at: UtcMicros(100),
+                capabilities: std::collections::BTreeSet::from([RemoteCapabilityV1::Query]),
+                scope,
+            },
+        )
+        .unwrap(),
+    })
+    .unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/enrollment")
+        .header(
+            AUTHORIZATION,
+            [b"Bearer ".as_slice(), GRANT_CREDENTIAL].concat(),
+        )
+        .header(
+            REMOTE_ENROLLMENT_CREDENTIAL_HEADER,
+            ACTIVE_CREDENTIAL.as_slice(),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+
+    let response = tracedecay_rusqlite_runtime::native_runtime::block_on(router.oneshot(request))
+        .expect("native runtime")
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        *ran_on_native_thread.lock().unwrap(),
+        Some(false),
+        "the enrollment port must run off native runtime threads"
+    );
 }

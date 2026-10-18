@@ -1,19 +1,21 @@
 /// Tree-sitter based Dockerfile source code extractor.
 ///
 /// Parses Dockerfile source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Dockerfile source files using tree-sitter.
 pub struct DockerfileExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     errors: Vec<String>,
@@ -23,16 +25,13 @@ struct ExtractionState {
     stage_targets: Vec<(String, String)>,
     stage_count: usize,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -41,7 +40,7 @@ impl ExtractionState {
             stage_targets: Vec::new(),
             stage_count: 0,
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -50,8 +49,7 @@ impl ExtractionState {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -78,34 +76,12 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl DockerfileExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_dockerfile(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -123,7 +99,7 @@ impl DockerfileExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -137,6 +113,7 @@ impl DockerfileExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -155,11 +132,6 @@ impl DockerfileExtractor {
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("dockerfile", "Dockerfile", source)
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -204,12 +176,12 @@ impl DockerfileExtractor {
             // Named stage -> Module node.
             let kind = NodeKind::Module;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), alias_name);
-            let id = generate_node_id(&state.file_path, &kind, &alias_name, start_line);
+            let id = local_node_id(&state.file_path, state.source, &kind, alias_name, node);
 
             let graph_node = Node {
                 id: id.clone(),
                 kind,
-                name: alias_name.clone(),
+                name: alias_name.to_string(),
                 qualified_name,
                 file_path: state.file_path.clone(),
                 start_line,
@@ -228,12 +200,13 @@ impl DockerfileExtractor {
                 unsafe_blocks: 0,
                 unchecked_calls: 0,
                 assertions: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
                 updated_at: state.timestamp,
                 parent_id: None,
             };
             state.nodes.push(graph_node);
             state.register_stage_target(stage_index.to_string(), &id);
-            state.register_stage_target(alias_name.clone(), &id);
+            state.register_stage_target(alias_name, &id);
 
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
@@ -245,13 +218,13 @@ impl DockerfileExtractor {
             }
 
             // Push stage onto the stack so subsequent instructions belong to it.
-            state.node_stack.push((alias_name, id));
+            state.node_stack.push((alias_name.to_string(), id));
         } else {
             // Unnamed stage -> synthetic Module node keyed by stage index.
             let stage_name = format!("stage{stage_index}");
             let kind = NodeKind::Module;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), stage_name);
-            let id = generate_node_id(&state.file_path, &kind, &stage_name, start_line);
+            let id = local_node_id(&state.file_path, state.source, &kind, &stage_name, node);
 
             let graph_node = Node {
                 id: id.clone(),
@@ -275,6 +248,7 @@ impl DockerfileExtractor {
                 unsafe_blocks: 0,
                 unchecked_calls: 0,
                 assertions: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
                 updated_at: state.timestamp,
                 parent_id: None,
             };
@@ -326,12 +300,12 @@ impl DockerfileExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -350,6 +324,7 @@ impl DockerfileExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -381,12 +356,12 @@ impl DockerfileExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -405,6 +380,7 @@ impl DockerfileExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -433,17 +409,18 @@ impl DockerfileExtractor {
                     let start_column = child.start_position().column as u32;
                     let end_column = child.end_position().column as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), port_text);
-                    let id = generate_node_id(
+                    let id = local_node_id(
                         &state.file_path,
+                        state.source,
                         &NodeKind::Field,
-                        &port_text,
-                        start_line,
+                        port_text,
+                        child,
                     );
 
                     let graph_node = Node {
                         id: id.clone(),
                         kind: NodeKind::Field,
-                        name: port_text,
+                        name: port_text.to_string(),
                         qualified_name,
                         file_path: state.file_path.clone(),
                         start_line,
@@ -462,6 +439,7 @@ impl DockerfileExtractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     };
@@ -505,12 +483,13 @@ impl DockerfileExtractor {
                     let end_column = child.end_position().column as u32;
                     let text = state.node_text(child);
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), key);
-                    let id = generate_node_id(&state.file_path, &NodeKind::Field, &key, start_line);
+                    let id =
+                        local_node_id(&state.file_path, state.source, &NodeKind::Field, key, child);
 
                     let graph_node = Node {
                         id: id.clone(),
                         kind: NodeKind::Field,
-                        name: key,
+                        name: key.to_string(),
                         qualified_name,
                         file_path: state.file_path.clone(),
                         start_line,
@@ -529,6 +508,7 @@ impl DockerfileExtractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     };
@@ -567,11 +547,12 @@ impl DockerfileExtractor {
                         let target = if let Some(target) = state.stage_target(stage_name) {
                             target
                         } else {
-                            let id = generate_node_id(
+                            let id = local_node_id(
                                 &state.file_path,
+                                state.source,
                                 &NodeKind::Use,
                                 stage_name,
-                                start_line,
+                                node,
                             );
                             let text = state.node_text(node);
                             state.nodes.push(Node {
@@ -600,6 +581,7 @@ impl DockerfileExtractor {
                                 unsafe_blocks: 0,
                                 unchecked_calls: 0,
                                 assertions: 0,
+                                complexity_analysis: ComplexityAnalysisV1::Complete,
                                 updated_at: state.timestamp,
                                 parent_id: None,
                             });
@@ -644,17 +626,16 @@ impl crate::LanguageExtractor for DockerfileExtractor {
         "Dockerfile"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_dockerfile(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

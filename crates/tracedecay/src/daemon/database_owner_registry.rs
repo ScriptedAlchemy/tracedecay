@@ -119,6 +119,20 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         true
     }
 
+    pub(super) fn mark_degraded_core_if<F>(&mut self, key: &ProjectServerKey, matches: F) -> bool
+    where
+        F: FnOnce(&Server) -> bool,
+    {
+        let Some(entry) = self.servers.get_mut(key) else {
+            return false;
+        };
+        if entry.publication != ProjectServerPublication::Core || !matches(&entry.server) {
+            return false;
+        }
+        entry.publication = ProjectServerPublication::DegradedCore;
+        true
+    }
+
     pub(super) fn replace_ready_if<F>(
         &mut self,
         key: &ProjectServerKey,
@@ -166,7 +180,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Some(entry.server)
     }
 
-    #[hotpath::measure(label = "daemon.owner_registry.remove_owner")]
+    #[tracing::instrument(name = "daemon.owner_registry.remove_owner", level = "trace", skip_all)]
     pub(super) fn remove_owner(&mut self, owner: &StoreOwnerKey) -> Vec<Server> {
         let keys = self
             .servers
@@ -238,7 +252,11 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         (candidate, true)
     }
 
-    #[hotpath::measure(label = "daemon.owner_registry.bind_or_insert")]
+    #[tracing::instrument(
+        name = "daemon.owner_registry.bind_or_insert",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn bind_or_insert_route_bounded<F>(
         &mut self,
         route: ProjectRouteKey,
@@ -271,8 +289,11 @@ impl<Server> DatabaseOwnerRegistry<Server> {
                 .servers
                 .iter()
                 .filter(|(_, entry)| {
-                    entry.publication == ProjectServerPublication::RegisteredHostIngest
-                        && !is_leased(&entry.server)
+                    matches!(
+                        entry.publication,
+                        ProjectServerPublication::RegisteredHostIngest
+                            | ProjectServerPublication::DegradedCore
+                    ) && !is_leased(&entry.server)
                 })
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(key, _)| key.clone())?;
@@ -284,10 +305,10 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Some((candidate, true, retired))
     }
 
-    /// Removes one fully published least-recently-used idle owner after the
+    /// Removes one settled least-recently-used idle owner after the
     /// canonical graph registry reports project-admission pressure. The caller
     /// must transfer the owner directly to retirement and wait before opening.
-    #[hotpath::measure(label = "daemon.owner_registry.retire_lru")]
+    #[tracing::instrument(name = "daemon.owner_registry.retire_lru", level = "trace", skip_all)]
     pub(super) fn retire_lru_ready_under_graph_pressure<F>(
         &mut self,
         mut is_leased: F,
@@ -311,8 +332,11 @@ impl<Server> DatabaseOwnerRegistry<Server> {
                 entries
                     .iter()
                     .all(|(_, entry)| {
-                        entry.publication == ProjectServerPublication::RegisteredHostIngest
-                            && !is_leased(&entry.server)
+                        matches!(
+                            entry.publication,
+                            ProjectServerPublication::RegisteredHostIngest
+                                | ProjectServerPublication::DegradedCore
+                        ) && !is_leased(&entry.server)
                     })
                     .then(|| {
                         let last_used = entries
@@ -343,7 +367,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Ok(Some((evict, retired)))
     }
 
-    #[hotpath::measure(label = "daemon.owner_registry.rekey")]
+    #[tracing::instrument(name = "daemon.owner_registry.rekey", level = "trace", skip_all)]
     pub(super) fn rekey(&mut self, old: &ProjectServerKey, new: &ProjectServerKey) -> bool {
         if old == new {
             return true;

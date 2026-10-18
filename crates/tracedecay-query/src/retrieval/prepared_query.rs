@@ -10,46 +10,67 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, FreshnessVectorDigest, ManifestDigest, PrincipalId,
-    QueryDigest, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark,
-    canonical_sha256,
+    AuthorizationRevision, CodeGenerationId, CursorBindingMismatchV1, CursorBindingStampV1,
+    CursorBindingV1, FreshnessVectorDigest, ManifestDigest, PrincipalId, QueryDigest,
+    RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
 };
 
 use super::fusion::{PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1, QueryDigestAuthenticationError};
 use super::{QueryAuthorityErrorV1, QueryAuthorityV1};
 
-const PREPARED_QUERY_CURSOR_PREFIX_V2: &str = "ccq2.";
-const PREPARED_QUERY_CURSOR_REVISION_V2: u16 = 2;
+const PREPARED_QUERY_CURSOR_PREFIX_V3: &str = "ccq3.";
+const PREPARED_QUERY_CURSOR_REVISION_V3: u16 = 3;
 const PREPARED_QUERY_CURSOR_TTL_MICROS_V1: i64 = 15 * 60 * 1_000_000;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum PreparedQueryErrorV1 {
     #[error("prepared query cursor is invalid")]
     Invalid,
+    /// Expired, or its key or generation is no longer held: restart without it.
     #[error("prepared query cursor is stale")]
     Stale,
+    /// Issued for another scope (project, repository, worktree, or ref).
+    #[error("prepared query cursor was issued for another scope")]
+    Foreign,
+    /// Authentic, but presented with a request parameter that differs from
+    /// the request that minted it.
+    #[error("prepared query cursor was issued with a different `{parameter}`")]
+    ParameterChanged { parameter: &'static str },
     #[error("prepared query authority is unavailable")]
     Unavailable,
+    /// The request pins a generation id the mounted scope does not hold.
+    #[error("the pinned code generation is not held by this scope")]
+    GenerationNotHeld,
+}
+
+impl From<CursorBindingMismatchV1> for PreparedQueryErrorV1 {
+    fn from(mismatch: CursorBindingMismatchV1) -> Self {
+        match mismatch {
+            CursorBindingMismatchV1::Foreign => Self::Invalid,
+            CursorBindingMismatchV1::ParameterChanged { parameter } => {
+                Self::ParameterChanged { parameter }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedQueryBindingsV1 {
-    operation: String,
     scope_digest: ManifestDigest,
     generation: CodeGenerationId,
-    query_binding_digest: ManifestDigest,
+    query_binding: CursorBindingV1,
 }
 
 impl PreparedQueryBindingsV1 {
+    /// `query_binding` names the operation and every parameter that shapes
+    /// its result set.
     pub fn new(
-        operation: impl Into<String>,
         scope_digest: ManifestDigest,
         generation: CodeGenerationId,
-        query_binding_digest: ManifestDigest,
+        query_binding: CursorBindingV1,
     ) -> Result<Self, PreparedQueryErrorV1> {
-        let operation = operation.into();
-        if operation.is_empty() {
+        if query_binding.operation().is_empty() {
             return Err(PreparedQueryErrorV1::Invalid);
         }
         scope_digest
@@ -58,14 +79,10 @@ impl PreparedQueryBindingsV1 {
         generation
             .validate()
             .map_err(|_| PreparedQueryErrorV1::Invalid)?;
-        query_binding_digest
-            .validate()
-            .map_err(|_| PreparedQueryErrorV1::Invalid)?;
         Ok(Self {
-            operation,
             scope_digest,
             generation,
-            query_binding_digest,
+            query_binding,
         })
     }
 }
@@ -78,12 +95,11 @@ pub struct PreparedQueryCursorRoutingV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedQueryRoutingBindingsV1 {
-    pub operation: String,
     pub scope_digest: ManifestDigest,
     pub principal: PrincipalId,
     pub root: SingleRootScopeV1,
     pub temporal_mode: TemporalModeV1,
-    pub query_binding_digest: ManifestDigest,
+    pub query_binding: CursorBindingV1,
     pub page_size: u32,
     pub authorization_revision: AuthorizationRevision,
 }
@@ -100,16 +116,32 @@ pub struct PreparedQueryPageV1<T> {
 #[serde(deny_unknown_fields)]
 struct PreparedQueryCursorPayloadV1 {
     revision: u16,
-    operation: String,
+    binding: CursorBindingStampV1,
     scope_digest: ManifestDigest,
     generation: CodeGenerationId,
-    query_binding_digest: ManifestDigest,
     candidate_set_digest: ManifestDigest,
     authentication_key_id: RetrievalCursorKeyId,
     next_offset: u32,
     page_size: u32,
     expires_at: UtcMicros,
     request_binding: PreparedQueryRequestBindingV1,
+}
+
+impl PreparedQueryCursorPayloadV1 {
+    /// Why this cursor cannot page the request `query_binding` describes at
+    /// `page_size`, or `None` when it can.
+    fn request_mismatch(
+        &self,
+        query_binding: &CursorBindingV1,
+        page_size: u32,
+    ) -> Option<PreparedQueryErrorV1> {
+        if let Err(mismatch) = query_binding.check(&self.binding) {
+            return Some(mismatch.into());
+        }
+        (self.page_size != page_size).then_some(PreparedQueryErrorV1::ParameterChanged {
+            parameter: "meta.page_size",
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,7 +190,7 @@ impl PreparedQueryV1 {
         &self.request
     }
 
-    #[hotpath::measure(label = "query.stream.prepared_page")]
+    #[tracing::instrument(name = "query.stream.prepared_page", level = "trace", skip_all)]
     pub fn paginate<T>(
         &self,
         bindings: &PreparedQueryBindingsV1,
@@ -169,38 +201,89 @@ impl PreparedQueryV1 {
     where
         T: Serialize,
     {
+        self.paginate_with(bindings, items, page_size, now, |items, start, end| {
+            Ok(items
+                .into_iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect())
+        })
+    }
+
+    /// Pages compact candidate keys and hydrates only the returned slice.
+    ///
+    /// `candidate_set_digest` is `canonical_sha256(&candidates)`. Cursors
+    /// issued by [`Self::paginate`] over fully hydrated records for these
+    /// operations will not match that digest and read as [`PreparedQueryErrorV1::Stale`].
+    /// That is acceptable: the cursor format is unreleased and generation-bound.
+    pub fn paginate_candidates<K, T>(
+        &self,
+        bindings: &PreparedQueryBindingsV1,
+        candidates: Vec<K>,
+        page_size: u32,
+        now: UtcMicros,
+        hydrate: impl FnOnce(&[K]) -> Result<Vec<T>, PreparedQueryErrorV1>,
+    ) -> Result<PreparedQueryPageV1<T>, PreparedQueryErrorV1>
+    where
+        K: Serialize,
+    {
+        self.paginate_with(
+            bindings,
+            candidates,
+            page_size,
+            now,
+            |candidates, start, end| hydrate(&candidates[start..end]),
+        )
+    }
+
+    fn paginate_with<K, T>(
+        &self,
+        bindings: &PreparedQueryBindingsV1,
+        candidates: Vec<K>,
+        page_size: u32,
+        now: UtcMicros,
+        materialize: impl FnOnce(Vec<K>, usize, usize) -> Result<Vec<T>, PreparedQueryErrorV1>,
+    ) -> Result<PreparedQueryPageV1<T>, PreparedQueryErrorV1>
+    where
+        K: Serialize,
+    {
         if page_size == 0 {
             return Err(PreparedQueryErrorV1::Invalid);
         }
-        let total = u64::try_from(items.len()).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
+        let total =
+            u64::try_from(candidates.len()).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
         let candidate_set_digest =
-            canonical_sha256(&items).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
+            canonical_sha256(&candidates).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
         let start = match &self.cursor {
             Some(cursor) => {
+                // Authenticated by this authority already, so a changed request
+                // parameter is reported before the scope or generation it moved.
+                if let Some(mismatch) = cursor
+                    .payload
+                    .request_mismatch(&bindings.query_binding, page_size)
+                {
+                    return Err(mismatch);
+                }
+                if cursor.payload.scope_digest != bindings.scope_digest {
+                    return Err(PreparedQueryErrorV1::Foreign);
+                }
                 require_unexpired(cursor, now)?;
                 if cursor.payload.generation != bindings.generation
                     || cursor.payload.candidate_set_digest != candidate_set_digest
                 {
                     return Err(PreparedQueryErrorV1::Stale);
                 }
-                if cursor.payload.operation != bindings.operation
-                    || cursor.payload.scope_digest != bindings.scope_digest
-                    || cursor.payload.query_binding_digest != bindings.query_binding_digest
-                    || cursor.payload.page_size != page_size
-                {
-                    return Err(PreparedQueryErrorV1::Invalid);
-                }
                 usize::try_from(cursor.payload.next_offset)
                     .map_err(|_| PreparedQueryErrorV1::Invalid)?
             }
             None => 0,
         };
-        if start > items.len() {
+        if start > candidates.len() {
             return Err(PreparedQueryErrorV1::Invalid);
         }
         let page_size = usize::try_from(page_size).map_err(|_| PreparedQueryErrorV1::Invalid)?;
-        let end = start.saturating_add(page_size).min(items.len());
-        let (next_cursor, expires_at) = if end < items.len() {
+        let end = start.saturating_add(page_size).min(candidates.len());
+        let (next_cursor, expires_at) = if end < candidates.len() {
             let expires_at = match &self.cursor {
                 Some(cursor) => cursor.payload.expires_at,
                 None => UtcMicros(
@@ -210,11 +293,10 @@ impl PreparedQueryV1 {
                 ),
             };
             let payload = PreparedQueryCursorPayloadV1 {
-                revision: PREPARED_QUERY_CURSOR_REVISION_V2,
-                operation: bindings.operation.clone(),
+                revision: PREPARED_QUERY_CURSOR_REVISION_V3,
+                binding: bindings.query_binding.stamp(),
                 scope_digest: bindings.scope_digest.clone(),
                 generation: bindings.generation.clone(),
-                query_binding_digest: bindings.query_binding_digest.clone(),
                 candidate_set_digest,
                 authentication_key_id: self.authority.active_query_key_id(),
                 next_offset: u32::try_from(end).map_err(|_| PreparedQueryErrorV1::Unavailable)?,
@@ -237,10 +319,8 @@ impl PreparedQueryV1 {
         } else {
             (None, None)
         };
-        let page_len = end.saturating_sub(start);
-        hotpath::gauge!("query.stream.results").set(page_len);
         Ok(PreparedQueryPageV1 {
-            items: items.into_iter().skip(start).take(page_len).collect(),
+            items: materialize(candidates, start, end)?,
             total,
             next_cursor,
             expires_at,
@@ -255,6 +335,11 @@ pub fn authenticate_prepared_query_cursor_for_routing(
     now: UtcMicros,
 ) -> Result<PreparedQueryCursorRoutingV1, PreparedQueryErrorV1> {
     let cursor = decode_cursor(encoded)?;
+    // Unauthenticated at this point, but it only selects which rejection a
+    // cursor from another scope receives; nothing is served from it.
+    if cursor.payload.scope_digest != bindings.scope_digest {
+        return Err(PreparedQueryErrorV1::Foreign);
+    }
     let request = routing_request(
         &cursor.payload.request_binding,
         &cursor.authentication,
@@ -269,14 +354,13 @@ pub fn authenticate_prepared_query_cursor_for_routing(
             &cursor_authentication_payload_bytes(&cursor.payload)?,
             &cursor.authentication,
         )
-        .map_err(map_authority_error)?;
+        .map_err(map_verification_error)?;
     require_unexpired(&cursor, now)?;
-    if cursor.payload.operation != bindings.operation
-        || cursor.payload.scope_digest != bindings.scope_digest
-        || cursor.payload.query_binding_digest != bindings.query_binding_digest
-        || cursor.payload.page_size != bindings.page_size
+    if let Some(mismatch) = cursor
+        .payload
+        .request_mismatch(&bindings.query_binding, bindings.page_size)
     {
-        return Err(PreparedQueryErrorV1::Invalid);
+        return Err(mismatch);
     }
     Ok(PreparedQueryCursorRoutingV1 {
         generation: cursor.payload.generation,
@@ -298,7 +382,9 @@ where
     let routing =
         authenticate_prepared_query_cursor_for_routing(authority, bindings, encoded, now)?;
     if expected_generation.is_some_and(|expected| expected != &routing.generation) {
-        return Err(PreparedQueryErrorV1::Invalid);
+        return Err(PreparedQueryErrorV1::ParameterChanged {
+            parameter: "scope.generation",
+        });
     }
     Ok(effect(routing.generation))
 }
@@ -316,7 +402,7 @@ fn authenticate_cursor(
             &cursor_authentication_payload_bytes(&cursor.payload)?,
             &cursor.authentication,
         )
-        .map_err(map_authority_error)?;
+        .map_err(map_verification_error)?;
     if cursor.payload.request_binding != PreparedQueryRequestBindingV1::from_request(request) {
         return Err(PreparedQueryErrorV1::Invalid);
     }
@@ -361,6 +447,21 @@ fn map_authority_error(error: QueryAuthorityErrorV1) -> PreparedQueryErrorV1 {
     }
 }
 
+/// Redeeming a cursor never waits on key availability: a key this authority
+/// does not hold is one it will not hold later, and another privacy domain's
+/// cursor belongs to another scope.
+fn map_verification_error(error: QueryAuthorityErrorV1) -> PreparedQueryErrorV1 {
+    match error {
+        QueryAuthorityErrorV1::QueryAuthentication(
+            QueryDigestAuthenticationError::KeyUnavailable,
+        ) => PreparedQueryErrorV1::Stale,
+        QueryAuthorityErrorV1::QueryAuthentication(
+            QueryDigestAuthenticationError::PrivacyDomainMismatch,
+        ) => PreparedQueryErrorV1::Foreign,
+        error => map_authority_error(error),
+    }
+}
+
 fn cursor_authentication_payload_bytes(
     payload: &PreparedQueryCursorPayloadV1,
 ) -> Result<Vec<u8>, PreparedQueryErrorV1> {
@@ -368,10 +469,9 @@ fn cursor_authentication_payload_bytes(
     struct PreparedQueryCursorAuthenticationPayloadV1<'a> {
         domain: &'static str,
         revision: u16,
-        operation: &'a str,
+        binding: &'a CursorBindingStampV1,
         scope_digest: &'a ManifestDigest,
         generation: &'a CodeGenerationId,
-        query_binding_digest: &'a ManifestDigest,
         candidate_set_digest: &'a ManifestDigest,
         authentication_key_id: &'a RetrievalCursorKeyId,
         next_offset: u32,
@@ -382,10 +482,9 @@ fn cursor_authentication_payload_bytes(
     serde_json::to_vec(&PreparedQueryCursorAuthenticationPayloadV1 {
         domain: PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1,
         revision: payload.revision,
-        operation: &payload.operation,
+        binding: &payload.binding,
         scope_digest: &payload.scope_digest,
         generation: &payload.generation,
-        query_binding_digest: &payload.query_binding_digest,
         candidate_set_digest: &payload.candidate_set_digest,
         authentication_key_id: &payload.authentication_key_id,
         next_offset: payload.next_offset,
@@ -406,7 +505,7 @@ fn encode_cursor(
     })
     .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
     Ok(format!(
-        "{PREPARED_QUERY_CURSOR_PREFIX_V2}{}",
+        "{PREPARED_QUERY_CURSOR_PREFIX_V3}{}",
         hex::encode(bytes)
     ))
 }
@@ -415,7 +514,7 @@ fn decode_cursor(
     encoded: &str,
 ) -> Result<AuthenticatedPreparedQueryCursorV1, PreparedQueryErrorV1> {
     let encoded = encoded
-        .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V2)
+        .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V3)
         .ok_or(PreparedQueryErrorV1::Invalid)?;
     let bytes = hex::decode(encoded).map_err(|_| PreparedQueryErrorV1::Invalid)?;
     if hex::encode(&bytes) != encoded {
@@ -424,7 +523,7 @@ fn decode_cursor(
     let cursor: AuthenticatedPreparedQueryCursorV1 =
         serde_json::from_slice(&bytes).map_err(|_| PreparedQueryErrorV1::Invalid)?;
     if serde_json::to_vec(&cursor).map_err(|_| PreparedQueryErrorV1::Invalid)? != bytes
-        || cursor.payload.revision != PREPARED_QUERY_CURSOR_REVISION_V2
+        || cursor.payload.revision != PREPARED_QUERY_CURSOR_REVISION_V3
     {
         return Err(PreparedQueryErrorV1::Invalid);
     }
@@ -448,6 +547,10 @@ mod tests {
 
     fn digest(label: &str) -> ManifestDigest {
         canonical_sha256(&label).expect("fixture digest")
+    }
+
+    fn binding() -> CursorBindingV1 {
+        CursorBindingV1::new("code_exact_occurrence", Vec::new()).expect("binding")
     }
 
     fn request() -> RetrievalRequest {
@@ -492,11 +595,10 @@ mod tests {
     fn cursor(next_offset: u32, expires_at: UtcMicros) -> String {
         encode_cursor(
             PreparedQueryCursorPayloadV1 {
-                revision: PREPARED_QUERY_CURSOR_REVISION_V2,
-                operation: "code_exact_occurrence".to_owned(),
+                revision: PREPARED_QUERY_CURSOR_REVISION_V3,
+                binding: binding().stamp(),
                 scope_digest: digest("scope"),
                 generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
-                query_binding_digest: digest("query"),
                 candidate_set_digest: digest("candidates"),
                 authentication_key_id: RetrievalCursorKeyId::new("cursor-key.callable-page")
                     .expect("cursor key"),
@@ -517,17 +619,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_cursor_decode_is_explicitly_untrusted() {
-        let encoded = cursor(2, UtcMicros(1_000));
-        let routing = decode_cursor(&encoded).expect("canonical cursor");
-        assert_eq!(
-            routing.payload.generation,
-            CodeGenerationId::new("generation.callable-page").expect("generation")
-        );
-        assert_eq!(routing.payload.expires_at, UtcMicros(1_000));
-    }
-
-    #[test]
     fn cursor_rejects_noncanonical_or_tampered_wire_values() {
         let encoded = cursor(2, UtcMicros(1_000));
         let decoded = decode_cursor(&encoded).expect("canonical cursor");
@@ -541,9 +632,9 @@ mod tests {
         assert_eq!(decode_cursor(&tampered), Err(PreparedQueryErrorV1::Invalid));
 
         let uppercase = format!(
-            "{PREPARED_QUERY_CURSOR_PREFIX_V2}{}",
+            "{PREPARED_QUERY_CURSOR_PREFIX_V3}{}",
             encoded
-                .trim_start_matches(PREPARED_QUERY_CURSOR_PREFIX_V2)
+                .trim_start_matches(PREPARED_QUERY_CURSOR_PREFIX_V3)
                 .to_ascii_uppercase()
         );
         assert_eq!(
@@ -560,7 +651,7 @@ mod tests {
         assert_eq!(first, second);
         let first_bytes = hex::decode(
             first
-                .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V2)
+                .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V3)
                 .expect("prepared cursor prefix"),
         )
         .expect("prepared cursor bytes");
@@ -576,11 +667,10 @@ mod tests {
         // The authentication payload is domain-separated for prepared cursors and
         // must never embed query sanitizer/normalization revision strings.
         let payload = PreparedQueryCursorPayloadV1 {
-            revision: PREPARED_QUERY_CURSOR_REVISION_V2,
-            operation: "code_exact_occurrence".to_owned(),
+            revision: PREPARED_QUERY_CURSOR_REVISION_V3,
+            binding: binding().stamp(),
             scope_digest: digest("scope"),
             generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
-            query_binding_digest: digest("query"),
             candidate_set_digest: digest("candidates"),
             authentication_key_id: RetrievalCursorKeyId::new("cursor-key.callable-page")
                 .expect("cursor key"),

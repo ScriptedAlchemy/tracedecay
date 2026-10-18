@@ -9,29 +9,27 @@ use cap_std::fs::Dir;
 use cap_std::fs::OpenOptionsExt;
 use cap_std::time::SystemClock;
 use serde::{Deserialize, Serialize};
-use tracedecay_automation::config::validate_schedule as validate_leaf_schedule;
 pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, parse_schedule};
 use tracedecay_automation::evidence_budget::{
-    SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
     SessionEvidenceBudgetBackoff, SessionEvidenceBudgetExceeded, SessionEvidenceBudgetGate,
 };
 
 use super::backend::{
     AgentTaskFailureClass, AgentTaskKind, agent_task_failure_disposition, task_key,
 };
-use super::backend_identity::{
-    BACKEND_IDENTITY_SUPPRESSED, backend_identity, is_deterministic_failure_class,
-};
+use super::backend_identity::{backend_identity, is_deterministic_failure_class};
 use super::config::{
     AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
 };
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    canonical_record_started_at_seconds, latest_record_by_canonical_completion,
-    latest_record_by_canonical_completion_key,
+    canonical_record_started_at_seconds, is_session_evidence_budget_exhausted_reason,
+    latest_record_by_canonical_completion, latest_record_by_canonical_completion_key,
 };
-use crate::errors::{Result, TraceDecayError};
-use crate::ports::session_store::AutomationSessionStore;
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_private_fs::FileLease;
 
 const DEFAULT_FAILURE_COOLDOWN_SECS: u64 = 300;
 const DEFAULT_STALE_LOCK_SECS: u64 = 6 * 60 * 60;
@@ -72,36 +70,95 @@ impl SessionActivity {
 ///
 /// This reads from the read-only store using bounded indexed timestamp lookups,
 /// so it is cheap and race-safe to call from every scheduler tick; concurrent
-/// ingest writers only ever move the value forward.
-#[hotpath::measure(label = "automation.run.load_session_activity", future = true)]
-pub async fn load_session_activity(sessions_db: &dyn AutomationSessionStore) -> SessionActivity {
-    SessionActivity {
-        last_activity_secs: sessions_db.latest_session_activity_secs().await,
-    }
+/// ingest writers only ever move the value forward. A failed read is logged and
+/// reported as no activity: a store the scheduler cannot read has no observable
+/// new activity, so automation stays idle instead of running against it.
+#[tracing::instrument(
+    name = "automation.run.load_session_activity",
+    level = "trace",
+    skip_all
+)]
+pub async fn load_session_activity(sessions_db: &RegisteredGlobalDb) -> SessionActivity {
+    let last_activity_secs = match sessions_db.latest_session_activity_secs().await {
+        Ok(latest) => latest,
+        Err(error) => {
+            tracing::warn!(
+                database = %sessions_db.db_path().display(),
+                %error,
+                "session-activity read failed; scheduler observes no new activity"
+            );
+            None
+        }
+    };
+    SessionActivity { last_activity_secs }
+}
+
+/// Consecutive project-open failures after which one scheduler loop exits.
+///
+/// The next scheduler reconcile respawns the loop, so this bounds one futile
+/// retry streak rather than retiring the automation lane.
+pub const PROJECT_OPEN_FAILURE_ESCALATION: u32 = 6;
+
+/// Longest delay between retries after a project-open failure.
+pub const PROJECT_OPEN_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// Exponential project-open retry backoff, starting from one scheduler tick.
+pub fn project_open_backoff(consecutive_failures: u32) -> std::time::Duration {
+    let base = std::time::Duration::from_secs(super::config::DEFAULT_SCHEDULER_TICK_SECS);
+    let steps = consecutive_failures.saturating_sub(1).min(16);
+    base.saturating_mul(1_u32.checked_shl(steps).unwrap_or(u32::MAX))
+        .min(PROJECT_OPEN_BACKOFF_CEILING)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutomationScheduleDecision {
-    skip_reason: Option<&'static str>,
+    skip_reason: Option<AutomationSkipReasonV1>,
+    activity_gate: Option<SessionActivityGate>,
+}
+
+/// The two timestamps a `no_new_session_activity` skip compared, so a starved
+/// gate is visible from the scheduler journal instead of looking idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionActivityGate {
+    pub last_activity_secs: Option<i64>,
+    pub cadence_started_at: Option<i64>,
 }
 
 impl AutomationScheduleDecision {
     pub fn due() -> Self {
-        Self { skip_reason: None }
-    }
-
-    pub fn skipped(reason: &'static str) -> Self {
         Self {
-            skip_reason: Some(reason),
+            skip_reason: None,
+            activity_gate: None,
         }
     }
 
-    pub fn skip_reason(&self) -> Option<&'static str> {
+    pub fn skipped(reason: AutomationSkipReasonV1) -> Self {
+        Self {
+            skip_reason: Some(reason),
+            activity_gate: None,
+        }
+    }
+
+    pub const fn activity_gate(&self) -> Option<SessionActivityGate> {
+        self.activity_gate
+    }
+
+    pub const fn skip_reason(&self) -> Option<AutomationSkipReasonV1> {
         self.skip_reason
     }
 
-    pub fn is_due(&self) -> bool {
+    pub const fn is_due(&self) -> bool {
         self.skip_reason.is_none()
+    }
+}
+
+pub(crate) fn task_disabled_skip(task: AgentTaskKind) -> AutomationSkipReasonV1 {
+    match task {
+        AgentTaskKind::MemoryCurator => AutomationSkipReasonV1::MemoryCuratorDisabled,
+        AgentTaskKind::SessionReflector => AutomationSkipReasonV1::SessionReflectorDisabled,
+        AgentTaskKind::SkillWriter => AutomationSkipReasonV1::SkillWriterDisabled,
+        AgentTaskKind::CombinedReview => AutomationSkipReasonV1::CombinedReviewDisabled,
+        AgentTaskKind::UserJob => AutomationSkipReasonV1::UserJobDisabled,
     }
 }
 
@@ -146,10 +203,11 @@ pub fn scheduler_control_path(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join(SCHEDULER_CONTROL_FILENAME)
 }
 
-#[hotpath::measure(label = "automation.scheduler.load_control", future = true)]
+#[tracing::instrument(name = "automation.scheduler.load_control", level = "trace", skip_all)]
 pub async fn load_scheduler_control(dashboard_root: &Path) -> Result<AutomationSchedulerControl> {
     let path = scheduler_control_path(dashboard_root);
-    match tokio::fs::read(&path).await {
+    let read_path = path.clone();
+    match crate::automation::blocking_fs(move || std::fs::read(read_path)).await {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| TraceDecayError::Config {
             message: format!(
                 "failed to parse automation scheduler control '{}': {e}",
@@ -168,14 +226,15 @@ pub async fn load_scheduler_control(dashboard_root: &Path) -> Result<AutomationS
     }
 }
 
-#[hotpath::measure(label = "automation.scheduler.save_control", future = true)]
+#[tracing::instrument(name = "automation.scheduler.save_control", level = "trace", skip_all)]
 pub async fn save_scheduler_control(
     dashboard_root: &Path,
     control: &AutomationSchedulerControl,
 ) -> Result<()> {
     let path = scheduler_control_path(dashboard_root);
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
+        let directory = parent.to_path_buf();
+        crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
             .await
             .map_err(|e| TraceDecayError::Config {
                 message: format!(
@@ -187,7 +246,8 @@ pub async fn save_scheduler_control(
     let bytes = serde_json::to_vec_pretty(control).map_err(|e| TraceDecayError::Config {
         message: format!("failed to encode automation scheduler control: {e}"),
     })?;
-    tokio::fs::write(&path, bytes)
+    let write_path = path.clone();
+    crate::automation::blocking_fs(move || std::fs::write(write_path, bytes))
         .await
         .map_err(|e| TraceDecayError::Config {
             message: format!(
@@ -210,22 +270,23 @@ impl AutomationTaskLock {
     /// Acquires a lock under an arbitrary key. User-defined jobs lock per
     /// job (`user_job_<id>`) so concurrent jobs never serialize on the shared
     /// fixed-task lock name.
-    #[hotpath::measure(
-        label = "automation.scheduler.task_lock",
-        impl_type = "AutomationTaskLock",
-        future = true
-    )]
+    #[tracing::instrument(name = "automation.scheduler.task_lock", level = "trace", skip_all)]
     pub async fn try_acquire_keyed(
         dashboard_root: &Path,
         key: &str,
         stale_after_secs: Option<u64>,
         now_secs: i64,
     ) -> Result<Option<Self>> {
-        let lock_dir = dashboard_root.join("automation_locks");
+        // cap-std ambient opens walk each component. On macOS `/var` is a
+        // firmlink to `/private/var`; opening the unresolved tempfile spelling
+        // can ENOENT under concurrent create. Resolve the existing prefix first.
+        let lock_dir = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(
+            &dashboard_root.join("automation_locks"),
+        );
         let path = lock_dir.join(format!("{key}.lock"));
         let ownership_token = new_automation_task_lock_token()?;
         let error_path = path.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             try_acquire_task_lock_blocking(&path, &ownership_token, stale_after_secs, now_secs)
         })
         .await
@@ -241,78 +302,64 @@ impl AutomationTaskLock {
     }
 }
 
-/// Runs a synchronous task-lock cleanup body without starving the tokio worker
-/// that happens to own the guard.
+/// Releases the lock file synchronously, without ever calling into the tokio
+/// runtime.
 ///
-/// Task-lock release is deliberately synchronous: callers (and tests such as
+/// Task-lock release must be synchronous: callers (and tests such as
 /// `retained_settlement_guard_owns_task_lock_until_drop`) rely on the lock file
 /// being gone the instant `drop` returns. The cleanup itself is genuinely
-/// blocking though — an fs2 coordination lock, `sync_all`/parent-directory
-/// fsyncs, and `std::thread::sleep` backoff between retries — and guards are
-/// routinely dropped when an async fn's future completes on a runtime worker
-/// (`_run_lock`, `_reflector_lock`, `_skill_lock`, `_task_lock`). Blocking
-/// inline there stalls every unrelated task queued on that worker.
+/// blocking, a file coordination lock, `sync_all`/parent-directory fsyncs, and
+/// `std::thread::sleep` backoff between retries, so it is tempting to hand the
+/// owning worker's run queue away with `tokio::task::block_in_place`.
 ///
-/// `block_in_place` lets tokio hand this worker's run queue to another thread
-/// for the duration, but it panics outside a multi-thread runtime, so the
-/// flavor is checked first. Empirically verified against tokio 1.53.1:
-/// - multi-thread worker: `Handle` present, flavor `MultiThread`, offload works;
-/// - `spawn_blocking` thread on a multi-thread runtime (the settlement-owner
-///   pattern in `daemon::automation_effect`): `Handle` present, flavor
-///   `MultiThread`, `block_in_place` is a no-op passthrough and does *not*
-///   panic;
-/// - current-thread runtime: `Handle` present, flavor `CurrentThread`,
-///   `block_in_place` panics — hence the inline fallback;
-/// - no runtime at all: no `Handle`, inline fallback.
+/// That is not sound here, because this guard is reachable from inside tokio's
+/// own blocking-pool spawn path. When a runtime has begun shutting down,
+/// `blocking::pool::Spawner::spawn_task` (tokio 1.53.1) shuts a refused task
+/// down *while holding* the pool's non-reentrant `parking_lot` mutex, which
+/// drops the task's future, and with it any `AutomationTaskLock` the future
+/// owned, such as the `Arc<RetainedAutomationSettlementState>` captured by
+/// `start_retained_automation_settlement_inner`. `block_in_place` re-enters
+/// `spawn_task` on that same thread to hand off the worker core, so the release
+/// self-deadlocks on the mutex it is already under; the runtime's
+/// `BlockingPool::shutdown` then waits for that thread forever.
 ///
-/// The remaining `block_in_place` panic case is a `LocalSet` on a multi-thread
-/// runtime; this workspace has none, and introducing one would need this guard
-/// revisited.
-fn run_blocking_cleanup(cleanup: impl FnOnce()) {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(cleanup);
-        }
-        _ => cleanup(),
-    }
-}
-
+/// Blocking a worker for one unlink plus its fsyncs is the cost of being
+/// correct in a destructor. Callers that care about worker latency release the
+/// guard from `spawn_blocking` instead of dropping it on a worker.
 impl Drop for AutomationTaskLock {
     fn drop(&mut self) {
         let path = &self.path;
         let ownership_token = &self.ownership_token;
         let staging_slot = &mut self.staging_path;
-        run_blocking_cleanup(move || {
-            match retry_exact_task_lock_cleanup(|| {
-                remove_owned_task_lock_blocking(path, ownership_token)
-            }) {
-                Ok(()) => {
-                    if let Some(staging_path) = staging_slot.take()
-                        && let Err(error) = retry_exact_task_lock_cleanup(|| {
-                            tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
-                                &staging_path,
-                            )
-                            .map(|_| ())
-                        })
-                    {
-                        tracing::warn!(
-                            path = %path.display(),
-                            staging_path = %staging_path.display(),
-                            error = %error,
-                            "failed to retire exact automation task-lock staging ownership"
-                        );
-                    }
-                }
-                Err(error) => {
+        match retry_exact_task_lock_cleanup(|| {
+            remove_owned_task_lock_blocking(path, ownership_token)
+        }) {
+            Ok(()) => {
+                if let Some(staging_path) = staging_slot.take()
+                    && let Err(error) = retry_exact_task_lock_cleanup(|| {
+                        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
+                            &staging_path,
+                        )
+                        .map(|_| ())
+                    })
+                {
                     tracing::warn!(
                         path = %path.display(),
-                        staging_path = ?staging_slot.as_deref(),
+                        staging_path = %staging_path.display(),
                         error = %error,
-                        "failed to release exact automation task-lock ownership; preserving retained staging evidence"
+                        "failed to retire exact automation task-lock staging ownership"
                     );
                 }
             }
-        });
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    staging_path = ?staging_slot.as_deref(),
+                    error = %error,
+                    "failed to release exact automation task-lock ownership; preserving retained staging evidence"
+                );
+            }
+        }
     }
 }
 
@@ -333,44 +380,63 @@ where
     }
 }
 
-#[hotpath::measure(label = "automation.scheduler.decision")]
+#[tracing::instrument(name = "automation.scheduler.decision", level = "trace", skip_all)]
+/// Decides whether `task` is due under `config`, given the ledger `records`
+/// and the executable the backend now in force would spawn
+/// (`AgentTaskBackend::executable`); the latter is part of the backend
+/// identity a settled deterministic failure is judged against.
 pub fn schedule_decision(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
     activity: SessionActivity,
     now_secs: i64,
 ) -> AutomationScheduleDecision {
-    schedule_decision_or_history_denial(config, task, records, activity, now_secs, true)
+    schedule_decision_or_history_denial(config, executable, task, records, activity, now_secs, true)
 }
 
 pub fn host_receipt_decision(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
     activity: SessionActivity,
     now_secs: i64,
 ) -> AutomationScheduleDecision {
-    schedule_decision_or_history_denial(config, task, records, activity, now_secs, false)
+    schedule_decision_or_history_denial(
+        config, executable, task, records, activity, now_secs, false,
+    )
 }
 
 fn schedule_decision_or_history_denial(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
     activity: SessionActivity,
     now_secs: i64,
     enforce_schedule: bool,
 ) -> AutomationScheduleDecision {
-    match schedule_decision_for_trigger(config, task, records, activity, now_secs, enforce_schedule)
-    {
+    match schedule_decision_for_trigger(
+        config,
+        executable,
+        task,
+        records,
+        activity,
+        now_secs,
+        enforce_schedule,
+    ) {
         Ok(decision) => decision,
-        Err(_) => AutomationScheduleDecision::skipped("scheduler_history_invalid"),
+        Err(_) => {
+            AutomationScheduleDecision::skipped(AutomationSkipReasonV1::SchedulerHistoryInvalid)
+        }
     }
 }
 
 fn schedule_decision_for_trigger(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
     activity: SessionActivity,
@@ -378,31 +444,41 @@ fn schedule_decision_for_trigger(
     enforce_schedule: bool,
 ) -> Result<AutomationScheduleDecision> {
     if !config.enabled {
-        return Ok(AutomationScheduleDecision::skipped("automation_disabled"));
+        return Ok(AutomationScheduleDecision::skipped(
+            AutomationSkipReasonV1::AutomationDisabled,
+        ));
     }
     if config.host_mode == AutomationHostMode::DelegatedHost {
-        return Ok(AutomationScheduleDecision::skipped("delegated_host_mode"));
+        return Ok(AutomationScheduleDecision::skipped(
+            AutomationSkipReasonV1::DelegatedHostMode,
+        ));
     }
     if config.backend == AutomationBackend::Disabled {
-        return Ok(AutomationScheduleDecision::skipped("backend_disabled"));
+        return Ok(AutomationScheduleDecision::skipped(
+            AutomationSkipReasonV1::BackendDisabled,
+        ));
     }
     let Some(task_config) = task_config(config, task) else {
-        return Ok(AutomationScheduleDecision::skipped("task_not_schedulable"));
+        return Ok(AutomationScheduleDecision::skipped(
+            AutomationSkipReasonV1::TaskNotSchedulable,
+        ));
     };
     if !task_config.enabled {
-        return Ok(AutomationScheduleDecision::skipped("task_disabled"));
+        return Ok(AutomationScheduleDecision::skipped(task_disabled_skip(
+            task,
+        )));
     }
 
     let (interval_secs, cron) = if enforce_schedule {
         let Ok(schedule) = parse_schedule(task_config.schedule.as_deref()) else {
             return Ok(AutomationScheduleDecision::skipped(
-                "scheduler_schedule_invalid",
+                AutomationSkipReasonV1::SchedulerScheduleInvalid,
             ));
         };
         let timing = match schedule {
             AutomationSchedule::Manual => {
                 return Ok(AutomationScheduleDecision::skipped(
-                    "scheduler_schedule_manual",
+                    AutomationSkipReasonV1::SchedulerScheduleManual,
                 ));
             }
             AutomationSchedule::ConfiguredInterval => (task_config.interval_secs, None),
@@ -411,7 +487,7 @@ fn schedule_decision_for_trigger(
         };
         if timing.0.is_none() && timing.1.is_none() {
             return Ok(AutomationScheduleDecision::skipped(
-                "scheduler_schedule_manual",
+                AutomationSkipReasonV1::SchedulerScheduleManual,
             ));
         }
         timing
@@ -427,7 +503,7 @@ fn schedule_decision_for_trigger(
         && elapsed_secs(last_activity, now_secs) < min_idle_secs
     {
         return Ok(AutomationScheduleDecision::skipped(
-            "scheduler_idle_window_active",
+            AutomationSkipReasonV1::SchedulerIdleWindowActive,
         ));
     }
 
@@ -452,7 +528,7 @@ fn schedule_decision_for_trigger(
             );
         if let SessionEvidenceBudgetGate::Suppressed { .. } = backoff.gate(exceeded, now_secs) {
             return Ok(AutomationScheduleDecision::skipped(
-                SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+                AutomationSkipReasonV1::SessionEvidenceBudgetSuppressed,
             ));
         }
     }
@@ -469,17 +545,14 @@ fn schedule_decision_for_trigger(
     });
     if let Some((record, completed_at)) = latest_cadence {
         if record.status == AutomationRunStatus::Failed {
-            let failure = agent_task_failure_disposition(
-                record.error_classification,
-                record.error_retryable,
-                record.error.as_deref(),
-            );
+            let failure =
+                agent_task_failure_disposition(record.error_classification, record.error_retryable);
             // Identity-stand first: a deterministic failure stamped under the
             // current backend stays suppressed until that identity changes.
-            match deterministic_backend_failure_standing(record, config) {
+            match deterministic_backend_failure_standing(record, config, executable) {
                 Ok(BackendFailureStanding::Stands) => {
                     return Ok(AutomationScheduleDecision::skipped(
-                        BACKEND_IDENTITY_SUPPRESSED,
+                        AutomationSkipReasonV1::BackendIdentitySuppressed,
                     ));
                 }
                 Ok(BackendFailureStanding::IdentityChanged) => {
@@ -496,7 +569,7 @@ fn schedule_decision_for_trigger(
                         && !matches!(failure.classification, Some(AgentTaskFailureClass::Denied))
                     {
                         return Ok(AutomationScheduleDecision::skipped(
-                            "scheduler_non_retryable_failure",
+                            AutomationSkipReasonV1::SchedulerNonRetryableFailure,
                         ));
                     }
                 }
@@ -515,7 +588,7 @@ fn schedule_decision_for_trigger(
                 .unwrap_or(DEFAULT_FAILURE_COOLDOWN_SECS);
             if elapsed_secs(completed_at, now_secs) < cooldown_secs {
                 return Ok(AutomationScheduleDecision::skipped(
-                    "scheduler_cooldown_active",
+                    AutomationSkipReasonV1::SchedulerCooldownActive,
                 ));
             }
         }
@@ -543,14 +616,14 @@ fn schedule_decision_for_trigger(
                 && elapsed_secs(completed_at, now_secs) < interval_secs
             {
                 return Ok(AutomationScheduleDecision::skipped(
-                    "scheduler_interval_not_elapsed",
+                    AutomationSkipReasonV1::SchedulerIntervalNotElapsed,
                 ));
             }
             if let Some(cron) = cron.filter(|_| !fresh_session_activity)
                 && !cron_is_due(&cron, Some(completed_at), now_secs)
             {
                 return Ok(AutomationScheduleDecision::skipped(
-                    "scheduler_cron_not_due",
+                    AutomationSkipReasonV1::SchedulerCronNotDue,
                 ));
             }
         }
@@ -558,7 +631,7 @@ fn schedule_decision_for_trigger(
         && !cron_is_due(&cron, None, now_secs)
     {
         return Ok(AutomationScheduleDecision::skipped(
-            "scheduler_cron_not_due",
+            AutomationSkipReasonV1::SchedulerCronNotDue,
         ));
     }
 
@@ -571,9 +644,15 @@ fn schedule_decision_for_trigger(
         let has_activity_authority = activity.last_activity_secs.is_some();
         let requires_fresh_activity = latest_cadence.is_some() && !retryable_cadence_terminal;
         if !has_activity_authority || (requires_fresh_activity && !fresh_session_activity) {
-            return Ok(AutomationScheduleDecision::skipped(
-                "no_new_session_activity",
-            ));
+            return Ok(AutomationScheduleDecision {
+                skip_reason: Some(AutomationSkipReasonV1::NoNewSessionActivity),
+                activity_gate: Some(SessionActivityGate {
+                    last_activity_secs: activity.last_activity_secs,
+                    cadence_started_at: latest_cadence
+                        .map(|(record, _)| parse_started_at(record))
+                        .transpose()?,
+                }),
+            });
         }
     }
 
@@ -602,7 +681,7 @@ enum BackendFailureStanding {
 /// each rules out a different kind of false positive:
 ///
 /// 1. The failure class is deterministic under a fixed backend and
-///    configuration — typed `Permanent` only. `Unavailable`, `Denied`,
+///    configuration, typed `Permanent` only. `Unavailable`, `Denied`,
 ///    `Disconnected`, `MalformedOutput`, `Timeout`, and `Retryable` keep the
 ///    ordinary failure cooldown.
 /// 2. Every attempt the backend made failed that same way. A class that got
@@ -620,6 +699,7 @@ enum BackendFailureStanding {
 fn deterministic_backend_failure_standing(
     record: &AutomationRunLedgerRecord,
     config: &AutomationConfig,
+    executable: Option<&Path>,
 ) -> Result<BackendFailureStanding> {
     let Some(classification) = record.error_classification else {
         return Ok(BackendFailureStanding::NotSettled);
@@ -630,7 +710,7 @@ fn deterministic_backend_failure_standing(
     let Some(recorded_identity) = record.backend_identity.as_deref() else {
         return Ok(BackendFailureStanding::NotSettled);
     };
-    if backend_identity(config)? != recorded_identity {
+    if backend_identity(config, executable)? != recorded_identity {
         return Ok(BackendFailureStanding::IdentityChanged);
     }
     let ladder_reproduced_the_class = !record.backend_attempts.is_empty()
@@ -659,7 +739,7 @@ fn live_session_evidence_budget_exhaustion(
         latest_record_by_canonical_completion_key(records.iter().filter(|record| {
             record.task == task
                 && record.status == AutomationRunStatus::Skipped
-                && record.error.as_deref() == Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
+                && is_session_evidence_budget_exhausted_reason(record.error.as_deref())
         }))?
     else {
         return Ok(None);
@@ -701,10 +781,9 @@ fn skipped_terminal_failure_class(
     {
         return None;
     }
-    match record.error.as_deref()? {
-        "session_evidence_timed_out" => Some(AgentTaskFailureClass::Timeout),
-        _ => None,
-    }
+    AutomationSkipReasonV1::from_ledger_reason(record.error.as_deref()?)?
+        .is_retryable_retrieval_timeout()
+        .then_some(AgentTaskFailureClass::Timeout)
 }
 
 /// A cron schedule is due when a matching wall-clock minute has occurred
@@ -720,10 +799,6 @@ pub fn stale_lock_secs(config: &AutomationConfig, task: AgentTaskKind) -> Option
     task_config(config, task)
         .and_then(|task_config| task_config.stale_lock_secs)
         .or(Some(DEFAULT_STALE_LOCK_SECS))
-}
-
-pub fn validate_schedule(schedule: Option<&str>) -> Result<()> {
-    Ok(validate_leaf_schedule(schedule)?)
 }
 
 /// User jobs carry their own schedule/enabled state (see
@@ -773,33 +848,16 @@ fn latest_cadence_terminal_record(
 /// next real attempt. Other settled skips did enter the task and consume its
 /// evidence/review opportunity, so their completion starts the next interval.
 fn is_scheduler_diagnostic_skip(reason: Option<&str>) -> bool {
-    let Some(reason) = reason else {
-        return false;
-    };
-    reason.starts_with("scheduler_")
-        || matches!(
-            reason,
-            "automation_disabled"
-                | "delegated_host_mode"
-                | "backend_disabled"
-                | "task_not_schedulable"
-                | "task_disabled"
-                | "memory_curator_disabled"
-                | "session_reflector_disabled"
-                | "skill_writer_disabled"
-                | "combined_review_disabled"
-                | "user_job_disabled"
-                | "no_new_session_activity"
-                | SESSION_EVIDENCE_BUDGET_SUPPRESSED
-                | BACKEND_IDENTITY_SUPPRESSED
-        )
+    reason
+        .and_then(AutomationSkipReasonV1::from_ledger_reason)
+        .is_some_and(AutomationSkipReasonV1::is_cadence_diagnostic)
 }
 
 fn parse_started_at(record: &AutomationRunLedgerRecord) -> Result<i64> {
     canonical_record_started_at_seconds(record, &format!("run '{}' started_at", record.run_id))
 }
 
-fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
+pub(crate) fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
     if now_secs < completed_at {
         return 0;
     }
@@ -808,10 +866,24 @@ fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
 
 fn new_automation_task_lock_token() -> Result<String> {
     let mut random = [0_u8; AUTOMATION_TASK_LOCK_TOKEN_BYTES];
-    getrandom::getrandom(&mut random).map_err(|error| TraceDecayError::Config {
+    getrandom::fill(&mut random).map_err(|error| TraceDecayError::Config {
         message: format!("failed to generate automation task-lock ownership token: {error}"),
     })?;
     Ok(hex::encode(random))
+}
+
+fn resolve_task_lock_parent(path: &Path) -> std::io::Result<PathBuf> {
+    let (parent, name) = path.parent().zip(path.file_name()).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "automation task-lock path requires a parent and file name",
+        )
+    })?;
+    // Resolve OS directory aliases without hiding a final symlink from no-follow checks.
+    Ok(
+        tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(parent)
+            .join(name),
+    )
 }
 
 fn try_acquire_task_lock_blocking(
@@ -820,21 +892,22 @@ fn try_acquire_task_lock_blocking(
     stale_after_secs: Option<u64>,
     now_secs: i64,
 ) -> std::io::Result<Option<AutomationTaskLock>> {
+    let path = resolve_task_lock_parent(path)?;
     if let Some(parent) = path.parent() {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    let coordination = acquire_task_lock_coordination(path)?;
+    let coordination = acquire_task_lock_coordination(&path)?;
     for attempt in 0..2 {
-        match create_task_lock_file(path, ownership_token, now_secs) {
+        match create_task_lock_file(&path, ownership_token, now_secs) {
             Ok(task_lock) => return Ok(Some(task_lock)),
             Err(TaskLockPublicationError::Definite(error))
                 if error.kind() == std::io::ErrorKind::AlreadyExists =>
             {
-                let Some(snapshot) = read_task_lock_snapshot(path)? else {
+                let Some(snapshot) = read_task_lock_snapshot(&path)? else {
                     continue;
                 };
                 if attempt == 0 && task_lock_is_reclaimable(&snapshot, stale_after_secs, now_secs) {
-                    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)?;
+                    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&path)?;
                     continue;
                 }
                 return Ok(None);
@@ -973,7 +1046,8 @@ fn prepare_task_lock_publication(
     ownership_token: &str,
     now_secs: i64,
 ) -> std::result::Result<PreparedTaskLockPublication, TaskLockStagingCreationError> {
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation task lock")?;
+    let path = resolve_task_lock_parent(path)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
     let parent_path = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -990,7 +1064,7 @@ fn prepare_task_lock_publication(
             )
         })?;
     let parent = Dir::open_ambient_dir(parent_path, ambient_authority())?;
-    let staging_path = task_lock_staging_path(path, ownership_token)?;
+    let staging_path = task_lock_staging_path(&path, ownership_token)?;
     let staging_name = staging_path
         .file_name()
         .map(std::ffi::OsStr::to_os_string)
@@ -1031,10 +1105,18 @@ fn prepare_task_lock_publication(
         options.mode(0o600);
         parent.open_with(&staging_name, &options)?
     };
-    let payload = format!(
-        "pid={}\ncreated_at={now_secs}\ntoken={ownership_token}\n",
-        std::process::id()
-    );
+    let started_at =
+        tracedecay_runtime_core::lifecycle_lease::process_start_time(std::process::id());
+    let payload = match started_at {
+        Some(started_at) => format!(
+            "pid={}\ncreated_at={now_secs}\nstarted_at={started_at}\ntoken={ownership_token}\n",
+            std::process::id()
+        ),
+        None => format!(
+            "pid={}\ncreated_at={now_secs}\ntoken={ownership_token}\n",
+            std::process::id()
+        ),
+    };
     let write_result = file
         .write_all(payload.as_bytes())
         .and_then(|()| file.sync_all());
@@ -1168,8 +1250,9 @@ fn remove_owned_task_lock_blocking(path: &Path, ownership_token: &str) -> std::i
     tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path).map(|_| ())
 }
 
-fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File> {
-    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(path);
+fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<FileLease> {
+    let path = resolve_task_lock_parent(path)?;
+    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&path);
     tracedecay_runtime_core::storage::reject_symlink_components(
         &coordination_path,
         "automation task-lock coordination",
@@ -1201,7 +1284,12 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File>
             .follow(FollowSymlinks::No);
         #[cfg(unix)]
         options.mode(0o600);
-        let file = parent.open_with(file_name, &options)?.into_std();
+        // Concurrent acquirers race the first creation of this coordination
+        // file; the shared helper absorbs the spurious Darwin `ENOENT`.
+        let file = tracedecay_private_fs::capability_dir::open_or_create_with(
+            &parent, file_name, &options,
+        )?
+        .into_std();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1209,7 +1297,8 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File>
         }
         file
     };
-    fs2::FileExt::lock_exclusive(&file)?;
+    file.lock()?;
+    let file = FileLease::held(file, "automation.task_lock.coordination");
     file.sync_all()?;
     tracedecay_private_fs::framed_log::sync_parent_directory(
         &coordination_path,
@@ -1221,11 +1310,16 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File>
 struct AutomationTaskLockSnapshot {
     pid: Option<u32>,
     created_at: Option<i64>,
+    /// Process start time recorded when the lock was published. Absent on
+    /// locks written before start-time fencing, and when the publisher could
+    /// not read its own start time.
+    started_at: Option<u64>,
     ownership_token: Option<String>,
 }
 
 fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTaskLockSnapshot>> {
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation task lock")?;
+    let path = resolve_task_lock_parent(path)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
     let parent_path = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1260,6 +1354,9 @@ fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTask
     let payload_created_at = contents
         .and_then(|contents| parse_unique_lock_field(contents, "created_at="))
         .and_then(|value| value.parse::<i64>().ok());
+    let started_at = contents
+        .and_then(|contents| parse_unique_lock_field(contents, "started_at="))
+        .and_then(|value| value.parse::<u64>().ok());
     let ownership_token = contents
         .and_then(|contents| parse_unique_lock_field(contents, "token="))
         .filter(|value| valid_automation_task_lock_token(value))
@@ -1275,6 +1372,7 @@ fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTask
     Ok(Some(AutomationTaskLockSnapshot {
         pid,
         created_at,
+        started_at,
         ownership_token,
     }))
 }
@@ -1299,34 +1397,65 @@ fn task_lock_is_reclaimable(
     stale_after_secs: Option<u64>,
     now_secs: i64,
 ) -> bool {
-    let Some(stale_after_secs) = stale_after_secs else {
-        return false;
-    };
     match snapshot.pid {
         Some(pid) => match process_state(pid) {
-            // A live (or unknown-liveness, kept conservative) owner still
-            // holds the lock regardless of age.
-            ProcessState::Live | ProcessState::Unknown => false,
-            // A confirmed-dead owner's lock is reclaimable once it is stale.
-            ProcessState::Dead => snapshot
-                .created_at
-                .is_some_and(|created_at| elapsed_secs(created_at, now_secs) >= stale_after_secs),
+            // A confirmed-dead owner cannot still be inside the critical
+            // section. Age is irrelevant: a reused PID would look live, not
+            // dead, so waiting `stale_after_secs` only delays the retry.
+            ProcessState::Dead => true,
+            // Unknown liveness stays on the age gate. A missing age bound
+            // means the caller disabled that fallback.
+            ProcessState::Unknown => {
+                age_lock_is_reclaimable(snapshot.created_at, stale_after_secs, now_secs)
+            }
+            // A live PID is the owner only when its start time matches the
+            // one published with the lock. A mismatch is PID reuse (including
+            // a process this user cannot signal). A live PID with no recorded
+            // start time is a legacy lock and is not stolen.
+            ProcessState::Live => recorded_owner_was_reused(pid, snapshot.started_at),
         },
         // The payload could not yield a pid (missing, oversized, non-UTF-8,
         // or duplicate `pid=` lines). Fall back to age-based staleness using
         // `created_at`, which `read_task_lock_snapshot` already backfills
         // from the file's mtime when the payload has no parseable
         // `created_at=` field.
-        None => match snapshot.created_at {
-            Some(created_at) => elapsed_secs(created_at, now_secs) >= stale_after_secs,
-            // Crash-debris escape hatch: no parseable pid AND no readable
-            // creation time (payload and mtime both unavailable) means the
-            // lock can never be aged by any other path, so treat it as
-            // reclaimable rather than permanently wedging the scheduler
-            // tick behind garbage lock contents.
-            None => true,
-        },
+        None => age_lock_is_reclaimable(snapshot.created_at, stale_after_secs, now_secs),
     }
+}
+
+fn age_lock_is_reclaimable(
+    created_at: Option<i64>,
+    stale_after_secs: Option<u64>,
+    now_secs: i64,
+) -> bool {
+    let Some(stale_after_secs) = stale_after_secs else {
+        return false;
+    };
+    match created_at {
+        Some(created_at) => elapsed_secs(created_at, now_secs) >= stale_after_secs,
+        // Crash-debris escape hatch: no parseable pid AND no readable
+        // creation time (payload and mtime both unavailable) means the
+        // lock can never be aged by any other path, so treat it as
+        // reclaimable rather than permanently wedging the scheduler
+        // tick behind garbage lock contents.
+        None => true,
+    }
+}
+
+fn recorded_owner_was_reused(pid: u32, recorded_started_at: Option<u64>) -> bool {
+    let Some(recorded_started_at) = recorded_started_at else {
+        return false;
+    };
+    tracedecay_runtime_core::lifecycle_lease::process_start_time(pid)
+        .is_some_and(|live_started_at| live_started_at != recorded_started_at)
+}
+
+/// Confirmed-dead process, as opposed to a live or unreadable one.
+///
+/// Skill-overlay crash residue and other convergent startup scans use this
+/// so they adopt a dead exporter's backup without stealing a live one's.
+pub(crate) fn foreign_process_is_dead(pid: u32) -> bool {
+    pid != std::process::id() && matches!(process_state(pid), ProcessState::Dead)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1426,9 +1555,54 @@ fn windows_process_state(pid: u32) -> ProcessState {
 #[cfg(test)]
 mod tests {
     use super::super::backend::{AgentTaskFailureClass, AgentTaskRetryAttempt};
+    use super::super::backend_identity::BACKEND_IDENTITY_SUPPRESSED;
     use super::super::config::AutomationTaskSet;
     use super::*;
     use tempfile::tempdir;
+    use tracedecay_automation::evidence_budget::{
+        SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+    };
+
+    #[test]
+    fn backoff_starts_at_one_tick_and_grows() {
+        let tick =
+            std::time::Duration::from_secs(super::super::config::DEFAULT_SCHEDULER_TICK_SECS);
+        assert_eq!(project_open_backoff(1), tick);
+        assert_eq!(project_open_backoff(2), tick * 2);
+        assert_eq!(project_open_backoff(3), tick * 4);
+    }
+
+    #[test]
+    fn backoff_is_capped_and_never_regresses() {
+        let mut previous = std::time::Duration::ZERO;
+        for attempt in 1..=64 {
+            let backoff = project_open_backoff(attempt);
+            assert!(backoff >= previous, "backoff must be monotonic");
+            assert!(
+                backoff <= PROJECT_OPEN_BACKOFF_CEILING,
+                "backoff must stay under its ceiling"
+            );
+            previous = backoff;
+        }
+        assert_eq!(project_open_backoff(64), PROJECT_OPEN_BACKOFF_CEILING);
+    }
+
+    #[test]
+    fn escalation_bounds_the_total_futile_retry_window() {
+        let total = (1..=PROJECT_OPEN_FAILURE_ESCALATION)
+            .map(project_open_backoff)
+            .sum::<std::time::Duration>();
+        let tick =
+            std::time::Duration::from_secs(super::super::config::DEFAULT_SCHEDULER_TICK_SECS);
+        assert!(
+            total > tick,
+            "escalation must allow more than one retry before exiting"
+        );
+        assert!(
+            total <= std::time::Duration::from_hours(1),
+            "a futile streak must not run for hours before escalating"
+        );
+    }
 
     fn session_evidence_task_config() -> AutomationTaskConfig {
         AutomationTaskConfig {
@@ -1490,6 +1664,7 @@ mod tests {
             backend_attempt_count: 0,
             backend_attempts: Vec::new(),
             fallback_status: None,
+            session_evidence_budget_stage: None,
             report_ref: None,
             artifacts: Vec::new(),
             started_at: completed_at.to_string(),
@@ -1522,6 +1697,7 @@ mod tests {
     /// every attempt, stamped with `identity`.
     fn settled_backend_failure(
         config: &AutomationConfig,
+        executable: Option<&Path>,
         error: &str,
         classification: AgentTaskFailureClass,
         attempts: u32,
@@ -1546,7 +1722,7 @@ mod tests {
                 backoff_millis: 0,
             })
             .collect();
-        record.backend_identity = identity.or_else(|| backend_identity(config).ok());
+        record.backend_identity = identity.or_else(|| backend_identity(config, executable).ok());
         record
     }
 
@@ -1559,6 +1735,7 @@ disconnected: config error: codex app-server closed stdout before completing";
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,
+            None,
             PERMANENT_PROTOCOL_ERROR,
             AgentTaskFailureClass::Permanent,
             3,
@@ -1567,7 +1744,7 @@ disconnected: config error: codex app-server closed stdout before completing";
         )];
 
         // The failure cooldown is the only thing that used to gate this, and
-        // it elapses. Every tick after it — including a full day later — must
+        // it elapses. Every tick after it, including a full day later, must
         // still refuse to spawn the backend again.
         for now_secs in [
             2_001,
@@ -1578,12 +1755,14 @@ disconnected: config error: codex app-server closed stdout before completing";
             assert_eq!(
                 schedule_decision(
                     &config,
+                    None,
                     AgentTaskKind::MemoryCurator,
                     &records,
                     SessionActivity::none(),
                     now_secs,
                 )
-                .skip_reason(),
+                .skip_reason()
+                .map(AutomationSkipReasonV1::as_str),
                 Some(BACKEND_IDENTITY_SUPPRESSED),
                 "tick at {now_secs} must stay settled, not relaunch",
             );
@@ -1591,81 +1770,11 @@ disconnected: config error: codex app-server closed stdout before completing";
     }
 
     #[test]
-    fn changing_the_configuration_revision_readmits_a_settled_failure() {
-        let config = curator_config();
-        let records = vec![settled_backend_failure(
-            &config,
-            PERMANENT_PROTOCOL_ERROR,
-            AgentTaskFailureClass::Permanent,
-            3,
-            2_000,
-            None,
-        )];
-        let now_secs = 2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64;
-
-        // Same identity: still settled.
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::MemoryCurator,
-                &records,
-                SessionActivity::none(),
-                now_secs,
-            )
-            .skip_reason(),
-            Some(BACKEND_IDENTITY_SUPPRESSED),
-        );
-
-        // Any effective configuration change is a new revision, and the task
-        // is re-admitted on the next tick with no operator reset step.
-        let mut changed = curator_config();
-        changed.timeout_secs = curator_config().timeout_secs.saturating_add(1);
-        assert_ne!(
-            backend_identity(&changed).unwrap(),
-            backend_identity(&config).unwrap(),
-        );
-        assert!(
-            schedule_decision(
-                &changed,
-                AgentTaskKind::MemoryCurator,
-                &records,
-                SessionActivity::none(),
-                now_secs,
-            )
-            .is_due(),
-            "a changed configuration revision must re-admit the task",
-        );
-    }
-
-    #[test]
-    fn a_settled_failure_from_another_backend_identity_does_not_suppress() {
-        let config = curator_config();
-        let records = vec![settled_backend_failure(
-            &config,
-            PERMANENT_PROTOCOL_ERROR,
-            AgentTaskFailureClass::Permanent,
-            3,
-            2_000,
-            Some("sha256:some-other-backend-identity".to_owned()),
-        )];
-
-        assert!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::MemoryCurator,
-                &records,
-                SessionActivity::none(),
-                2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
-            )
-            .is_due(),
-        );
-    }
-
-    #[test]
     fn an_unstamped_legacy_failure_keeps_the_ordinary_cooldown() {
         let config = curator_config();
         let mut record = settled_backend_failure(
             &config,
+            None,
             DISCONNECT_ERROR,
             AgentTaskFailureClass::Disconnected,
             3,
@@ -1678,6 +1787,7 @@ disconnected: config error: codex app-server closed stdout before completing";
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::MemoryCurator,
                 &records,
                 SessionActivity::none(),
@@ -1693,45 +1803,15 @@ evidence about it",
         "typed protocol contract violation: handshake rejected the turn";
 
     #[test]
-    fn typed_permanent_protocol_failure_stays_suppressed_under_the_same_identity() {
-        let config = curator_config();
-        let records = vec![settled_backend_failure(
-            &config,
-            PERMANENT_PROTOCOL_ERROR,
-            AgentTaskFailureClass::Permanent,
-            3,
-            2_000,
-            None,
-        )];
-        for now_secs in [
-            2_001,
-            2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
-            2_000 + 86_400,
-        ] {
-            assert_eq!(
-                schedule_decision(
-                    &config,
-                    AgentTaskKind::MemoryCurator,
-                    &records,
-                    SessionActivity::none(),
-                    now_secs,
-                )
-                .skip_reason(),
-                Some(BACKEND_IDENTITY_SUPPRESSED),
-                "tick at {now_secs} must stay identity-suppressed",
-            );
-        }
-    }
-
-    #[test]
     fn same_path_executable_replacement_readmits_a_permanent_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("codex-backend");
         std::fs::write(&path, b"backend-revision-one").unwrap();
-        let _env = super::super::backend_identity::CodexBinEnvGuard::set(&path);
+        let executable = Some(path.as_path());
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,
+            executable,
             PERMANENT_PROTOCOL_ERROR,
             AgentTaskFailureClass::Permanent,
             3,
@@ -1742,18 +1822,21 @@ evidence about it",
         assert_eq!(
             schedule_decision(
                 &config,
+                executable,
                 AgentTaskKind::MemoryCurator,
                 &records,
                 SessionActivity::none(),
                 now_secs,
             )
-            .skip_reason(),
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some(BACKEND_IDENTITY_SUPPRESSED),
         );
         std::fs::write(&path, b"backend-revision-two-replaced").unwrap();
         assert!(
             schedule_decision(
                 &config,
+                executable,
                 AgentTaskKind::MemoryCurator,
                 &records,
                 SessionActivity::none(),
@@ -1787,6 +1870,7 @@ evidence about it",
         ] {
             let records = vec![settled_backend_failure(
                 &config,
+                None,
                 error,
                 classification,
                 3,
@@ -1798,12 +1882,14 @@ evidence about it",
             assert_eq!(
                 schedule_decision(
                     &config,
+                    None,
                     AgentTaskKind::MemoryCurator,
                     &records,
                     SessionActivity::none(),
                     2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64 - 1,
                 )
-                .skip_reason(),
+                .skip_reason()
+                .map(AutomationSkipReasonV1::as_str),
                 Some("scheduler_cooldown_active"),
                 "transient {classification:?} must keep the ordinary cooldown",
             );
@@ -1811,6 +1897,7 @@ evidence about it",
             assert!(
                 schedule_decision(
                     &config,
+                    None,
                     AgentTaskKind::MemoryCurator,
                     &records,
                     SessionActivity::none(),
@@ -1827,6 +1914,7 @@ evidence about it",
         let config = curator_config();
         let mut record = settled_backend_failure(
             &config,
+            None,
             DISCONNECT_ERROR,
             AgentTaskFailureClass::Disconnected,
             3,
@@ -1841,6 +1929,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::MemoryCurator,
                 &records,
                 SessionActivity::none(),
@@ -1855,110 +1944,64 @@ evidence about it",
         task: AgentTaskKind,
         completed_at: i64,
     ) -> AutomationRunLedgerRecord {
+        budget_exhausted_skip_with_reason(
+            run_id,
+            task,
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED,
+            completed_at,
+        )
+    }
+
+    fn budget_exhausted_skip_with_reason(
+        run_id: &str,
+        task: AgentTaskKind,
+        reason: &'static str,
+        completed_at: i64,
+    ) -> AutomationRunLedgerRecord {
         scheduler_ledger_record(
             run_id,
             task,
             AutomationRunStatus::Skipped,
-            Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED),
+            Some(reason),
             completed_at,
         )
     }
 
     #[test]
-    fn budget_exhausted_skip_holds_the_task_in_a_typed_backoff_window() {
+    fn only_the_canonical_budget_token_activates_the_backoff() {
         let config = session_evidence_config();
-        for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
-            let records = vec![budget_exhausted_skip("run-exhausted", task, 2_000)];
-
-            // Every tick inside the window skips without a fresh attempt,
-            // under the dedicated suppression reason: not the exhausted
-            // label (no attempt ran) and not the failure cooldown.
-            for now_secs in [2_060, 2_120, 2_000 + 3_599] {
-                assert_eq!(
-                    schedule_decision(
-                        &config,
-                        task,
-                        &records,
-                        SessionActivity::at(2_500),
-                        now_secs
-                    )
-                    .skip_reason(),
-                    Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
-                    "tick at {now_secs} for {task:?} must stay suppressed"
-                );
-            }
-
-            // The window elapsing permits exactly the next attempt.
-            assert!(
-                schedule_decision(
-                    &config,
-                    task,
-                    &records,
-                    SessionActivity::at(2_500),
-                    2_000 + 3_600,
-                )
-                .is_due()
-            );
-        }
-    }
-
-    #[test]
-    fn configured_budget_backoff_window_overrides_the_one_hour_default() {
-        let mut config = session_evidence_config();
-        config
-            .tasks
-            .session_reflector
-            .session_evidence_budget_backoff_secs = Some(120);
-        let records = vec![budget_exhausted_skip(
-            "run-exhausted",
-            AgentTaskKind::SessionReflector,
-            2_000,
-        )];
-
-        assert_eq!(
+        let decision_at = |reason: &'static str, now: i64| {
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
-                &records,
+                &[budget_exhausted_skip_with_reason(
+                    "run-exhausted",
+                    AgentTaskKind::SessionReflector,
+                    reason,
+                    2_000,
+                )],
                 SessionActivity::at(2_500),
-                2_119,
+                now,
             )
-            .skip_reason(),
+        };
+
+        assert_eq!(
+            decision_at(SESSION_EVIDENCE_BUDGET_EXHAUSTED, 2_060)
+                .skip_reason()
+                .map(AutomationSkipReasonV1::as_str),
             Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
-            "the configured 120s window must still suppress its final second"
         );
-        assert!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_120,
+        assert!(decision_at(SESSION_EVIDENCE_BUDGET_EXHAUSTED, 2_000 + 3_600).is_due());
+        assert_ne!(
+            decision_at(
+                "session_evidence_budget_exhausted_request_candidate_bytes",
+                2_060
             )
-            .is_due(),
-            "the configured 120s window must end well before the 3600s default"
-        );
-    }
-
-    #[test]
-    fn budget_backoff_suppresses_host_receipt_triggers_too() {
-        let config = session_evidence_config();
-        let records = vec![budget_exhausted_skip(
-            "run-exhausted",
-            AgentTaskKind::SessionReflector,
-            2_000,
-        )];
-
-        assert_eq!(
-            host_receipt_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_060,
-            )
-            .skip_reason(),
-            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
+            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
+            "stage-suffixed reasons are not a budget-exhaustion wire form",
         );
     }
 
@@ -1981,61 +2024,13 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 &records,
                 SessionActivity::at(2_500),
                 2_130,
             )
             .is_due()
-        );
-    }
-
-    #[test]
-    fn older_failure_cooldown_cannot_bypass_a_live_budget_backoff() {
-        let mut config = session_evidence_config();
-        config.tasks.session_reflector.cooldown_secs = Some(60);
-        let records = vec![
-            scheduler_ledger_record(
-                "run-failed",
-                AgentTaskKind::SessionReflector,
-                AutomationRunStatus::Failed,
-                Some("provider unavailable"),
-                1_900,
-            ),
-            budget_exhausted_skip("run-exhausted", AgentTaskKind::SessionReflector, 2_000),
-        ];
-
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_100,
-            )
-            .skip_reason(),
-            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
-        );
-
-        // Without a live exhaustion anchor the failure state keeps its own
-        // distinct cooldown reason: the two typed states never share a label.
-        let failure_only = vec![scheduler_ledger_record(
-            "run-failed",
-            AgentTaskKind::SessionReflector,
-            AutomationRunStatus::Failed,
-            Some("timed out waiting for backend"),
-            1_900,
-        )];
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &failure_only,
-                SessionActivity::at(2_500),
-                1_930,
-            )
-            .skip_reason(),
-            Some("scheduler_cooldown_active")
         );
     }
 
@@ -2057,12 +2052,14 @@ evidence about it",
         assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 &[exhausted, earlier_success],
                 SessionActivity::at(2_500),
                 2_060,
             )
-            .skip_reason(),
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
         );
     }
@@ -2086,17 +2083,20 @@ evidence about it",
         assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SkillWriter,
                 &records,
                 SessionActivity::at(2_500),
                 2_120,
             )
-            .skip_reason(),
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
         );
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SkillWriter,
                 &records,
                 SessionActivity::at(2_500),
@@ -2123,6 +2123,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SkillWriter,
                 &records,
                 SessionActivity::at(2_500),
@@ -2146,6 +2147,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 &records,
                 SessionActivity::at(2_500),
@@ -2167,19 +2169,32 @@ evidence about it",
         );
 
         assert_eq!(
+            skipped_terminal_failure_class(&timeout),
+            Some(AgentTaskFailureClass::Timeout),
+            "ledger timeout must classify through AutomationSkipReasonV1, not an inline string match",
+        );
+        assert_eq!(
+            AutomationSkipReasonV1::from_ledger_reason("session_evidence_timed_out"),
+            Some(AutomationSkipReasonV1::SessionEvidenceTimedOut),
+        );
+
+        assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 std::slice::from_ref(&timeout),
                 SessionActivity::at(1_500),
                 2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64 - 1,
             )
-            .skip_reason(),
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some("scheduler_cooldown_active"),
         );
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 std::slice::from_ref(&timeout),
                 SessionActivity::at(1_500),
@@ -2197,26 +2212,55 @@ evidence about it",
             2_000,
         );
         assert_eq!(
+            skipped_terminal_failure_class(&cancelled),
+            None,
+            "cancellation must not enter the retryable failure class",
+        );
+        assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 &[cancelled],
                 SessionActivity::at(1_500),
                 2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
             )
-            .skip_reason(),
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some("no_new_session_activity"),
             "cancellation remains an effectful skip that needs fresh activity",
         );
     }
 
     #[test]
-    fn schedule_validation_maps_leaf_errors_at_the_runtime_boundary() {
-        assert!(validate_schedule(Some("hourly")).is_ok());
-        assert!(matches!(
-            validate_schedule(Some("after lunch")),
-            Err(TraceDecayError::Automation(_))
-        ));
+    fn no_new_activity_skip_reports_the_timestamps_it_compared() {
+        let config = session_evidence_config();
+        let anchor = scheduler_ledger_record(
+            "run-anchor",
+            AgentTaskKind::SessionReflector,
+            AutomationRunStatus::Succeeded,
+            None,
+            2_000,
+        );
+        let decision = schedule_decision(
+            &config,
+            None,
+            AgentTaskKind::SessionReflector,
+            &[anchor],
+            SessionActivity::at(1_500),
+            10_000,
+        );
+        assert_eq!(
+            decision.skip_reason(),
+            Some(AutomationSkipReasonV1::NoNewSessionActivity)
+        );
+        assert_eq!(
+            decision.activity_gate(),
+            Some(SessionActivityGate {
+                last_activity_secs: Some(1_500),
+                cadence_started_at: Some(2_000),
+            })
+        );
     }
 
     #[test]
@@ -2348,6 +2392,30 @@ evidence about it",
         assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn task_lock_rejects_final_symlink_without_touching_target() {
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let lock_path = alias.join("task.lock");
+        let outside = temp.path().join("outside");
+        let token = "1".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
+        let contents = format!("pid=invalid\ncreated_at=1\ntoken={token}\n");
+        std::fs::write(&outside, &contents).unwrap();
+        std::os::unix::fs::symlink(&outside, &lock_path).unwrap();
+
+        assert!(read_task_lock_snapshot(&lock_path).is_err());
+        assert!(prepare_task_lock_publication(&lock_path, &token, 200).is_err());
+        assert!(remove_owned_task_lock_blocking(&lock_path, &token).is_err());
+        assert!(try_acquire_task_lock_blocking(&lock_path, &token, Some(0), 200).is_err());
+        assert!(lock_path.is_symlink());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), contents);
+        assert!(!tracedecay_runtime_core::storage::append_lock_path(&outside).exists());
+    }
+
     #[test]
     fn uncertain_old_task_lock_guard_preserves_replacement_token() {
         let temp = tempdir().unwrap();
@@ -2395,6 +2463,7 @@ evidence about it",
         let snapshot = AutomationTaskLockSnapshot {
             pid: None,
             created_at: Some(100),
+            started_at: None,
             ownership_token: None,
         };
         assert!(
@@ -2408,6 +2477,7 @@ evidence about it",
         let snapshot = AutomationTaskLockSnapshot {
             pid: None,
             created_at: Some(195),
+            started_at: None,
             ownership_token: None,
         };
         assert!(
@@ -2421,6 +2491,7 @@ evidence about it",
         let snapshot = AutomationTaskLockSnapshot {
             pid: None,
             created_at: None,
+            started_at: None,
             ownership_token: None,
         };
         assert!(
@@ -2435,11 +2506,76 @@ evidence about it",
         let snapshot = AutomationTaskLockSnapshot {
             pid: Some(std::process::id()),
             created_at: Some(0),
+            started_at: None,
             ownership_token: None,
         };
         assert!(
             !task_lock_is_reclaimable(&snapshot, Some(10), 200),
             "a live owner must never be reclaimed, no matter how old the lock is"
+        );
+    }
+
+    fn reapable_process_program() -> &'static str {
+        if cfg!(windows) { "cmd" } else { "true" }
+    }
+
+    fn reapable_process_args() -> &'static [&'static str] {
+        if cfg!(windows) { &["/C", "exit"] } else { &[] }
+    }
+
+    #[test]
+    fn task_lock_is_reclaimable_for_a_fresh_confirmed_dead_pid() {
+        let mut child = std::process::Command::new(reapable_process_program())
+            .args(reapable_process_args())
+            .spawn()
+            .expect("spawn a process to reap");
+        let dead_pid = child.id();
+        child.wait().expect("reap lock owner");
+        assert!(
+            matches!(process_state(dead_pid), ProcessState::Dead),
+            "the reaped child must be a confirmed-dead owner"
+        );
+        let snapshot = AutomationTaskLockSnapshot {
+            pid: Some(dead_pid),
+            created_at: Some(200),
+            started_at: None,
+            ownership_token: None,
+        };
+        assert!(
+            task_lock_is_reclaimable(&snapshot, Some(6 * 60 * 60), 200),
+            "a confirmed-dead owner must be reclaimed immediately, not after the age gate"
+        );
+        assert!(
+            task_lock_is_reclaimable(&snapshot, None, 200),
+            "disabling the age fallback must not keep a dead owner's lock"
+        );
+    }
+
+    #[test]
+    fn task_lock_is_reclaimable_when_a_live_pid_start_time_does_not_match() {
+        let Some(live_started_at) =
+            tracedecay_runtime_core::lifecycle_lease::process_start_time(std::process::id())
+        else {
+            return;
+        };
+        let mismatched = live_started_at.saturating_add(1);
+        let snapshot = AutomationTaskLockSnapshot {
+            pid: Some(std::process::id()),
+            created_at: Some(200),
+            started_at: Some(mismatched),
+            ownership_token: None,
+        };
+        assert!(
+            task_lock_is_reclaimable(&snapshot, None, 200),
+            "a reused PID must not keep a lock published by a different process start"
+        );
+        let same_owner = AutomationTaskLockSnapshot {
+            started_at: Some(live_started_at),
+            ..snapshot
+        };
+        assert!(
+            !task_lock_is_reclaimable(&same_owner, Some(0), 10_000),
+            "a matching start time is the same owner even when the lock is old"
         );
     }
 
@@ -2495,7 +2631,7 @@ evidence about it",
     }
 
     /// A contender must be able to take the lock the instant the guard's drop
-    /// returns — the release stays synchronous even when it is offloaded.
+    /// returns.
     fn assert_lock_released(lock_path: &Path) {
         assert!(
             !lock_path.exists(),
@@ -2513,7 +2649,7 @@ evidence about it",
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_lock_release_offloads_from_a_multi_thread_worker() {
+    async fn task_lock_release_completes_on_a_multi_thread_worker() {
         let temp = tempdir().unwrap();
         let lock_path = temp
             .path()
@@ -2523,15 +2659,64 @@ evidence about it",
         // Acquire the way production does (spawn_blocking), then move the guard
         // back onto an async worker so its drop runs on the runtime.
         let acquire_path = lock_path.clone();
-        let guard =
-            tokio::task::spawn_blocking(move || acquire_lock_for_release_test(&acquire_path))
-                .await
-                .unwrap();
+        let guard = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            acquire_lock_for_release_test(&acquire_path)
+        })
+        .await
+        .unwrap();
         assert!(lock_path.exists());
 
-        // Drop directly on the async worker thread; block_in_place must let
-        // tokio migrate this worker's queue instead of stalling it.
         drop(guard);
+        assert_lock_released(&lock_path);
+    }
+
+    /// The ordering that wedged `daemon::tests::rmcp_route` for a full drain
+    /// bound: a worker offers a blocking task to a pool that has already begun
+    /// shutting down, and tokio's `blocking::pool::Spawner::spawn_task` shuts
+    /// the refused task down *while holding* the pool's non-reentrant mutex.
+    /// The refused closure owns this guard, so its release runs under that
+    /// mutex, and a release that re-enters the runtime never returns, leaving
+    /// `BlockingPool::shutdown` waiting for the thread forever.
+    ///
+    /// Ordering is fixed by channels, not timing: the worker is parked until
+    /// after `shutdown_timeout` has returned, so the pool is provably closed
+    /// before `spawn_blocking` is offered and the refusal branch is the only
+    /// branch reachable. The `shutdown_timeout` budget only bounds tokio's
+    /// attempt to join the deliberately parked worker.
+    #[test]
+    fn task_lock_release_survives_a_drop_inside_a_refused_spawn_blocking() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp
+            .path()
+            .join("automation_locks")
+            .join("refused_spawn_blocking.lock");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let guard = acquire_lock_for_release_test(&lock_path);
+        assert!(lock_path.exists());
+
+        let (on_worker_tx, on_worker_rx) = std::sync::mpsc::channel();
+        let (pool_closed_tx, pool_closed_rx) = std::sync::mpsc::channel();
+        let (offered_tx, offered_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            // Reached only from a worker thread, which is the sole context
+            // where the release can re-enter the blocking spawner.
+            on_worker_tx.send(()).unwrap();
+            pool_closed_rx.recv().unwrap();
+            let _refused = tokio::task::spawn_blocking(move || drop(guard));
+            offered_tx.send(()).unwrap();
+        });
+        on_worker_rx.recv().unwrap();
+
+        runtime.shutdown_timeout(std::time::Duration::from_millis(50));
+        pool_closed_tx.send(()).unwrap();
+
+        offered_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("releasing the guard under the blocking pool's own mutex must not deadlock");
         assert_lock_released(&lock_path);
     }
 
@@ -2551,7 +2736,7 @@ evidence about it",
     }
 
     #[tokio::test]
-    async fn task_lock_release_falls_back_inline_on_a_current_thread_runtime() {
+    async fn task_lock_release_completes_on_a_current_thread_runtime() {
         let temp = tempdir().unwrap();
         let lock_path = temp
             .path()
@@ -2563,8 +2748,6 @@ evidence about it",
             "#[tokio::test] must default to the current-thread flavor for this case"
         );
 
-        // block_in_place panics on a current-thread runtime, so the guard has to
-        // fall back to inline cleanup rather than aborting the process.
         let guard = acquire_lock_for_release_test(&lock_path);
         assert!(lock_path.exists());
         drop(guard);
@@ -2580,11 +2763,10 @@ evidence about it",
             .join("settlement_owner.lock");
 
         // The settlement-owner pattern in daemon::automation_effect acquires and
-        // drops the guard entirely inside spawn_blocking. A blocking-pool thread
-        // still reports a MultiThread handle, so this exercises block_in_place
-        // from outside a worker context.
+        // drops the guard entirely inside spawn_blocking, which is where callers
+        // that cannot afford to block a worker are expected to release it.
         let owned_path = lock_path.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let guard = acquire_lock_for_release_test(&owned_path);
             assert!(owned_path.exists());
             drop(guard);
@@ -2594,5 +2776,40 @@ evidence about it",
         .expect("dropping the guard inside spawn_blocking must not panic");
 
         assert_lock_released(&lock_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_task_locks_acquire_through_symlinked_dashboard_prefix() {
+        // cap-std ambient opens walk each component. A prefix symlink
+        // (`tmp/link` → `tmp/real`, or macOS `/var` → `/private/var`) must
+        // resolve before Dir::open_ambient_dir or concurrent acquires ENOENT.
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dashboard_root = link.join("dashboard");
+
+        let first_root = dashboard_root.clone();
+        let second_root = dashboard_root;
+        let first = tokio::spawn(async move {
+            AutomationTaskLock::try_acquire_keyed(&first_root, "concurrent-a", Some(10), 100).await
+        });
+        let second = tokio::spawn(async move {
+            AutomationTaskLock::try_acquire_keyed(&second_root, "concurrent-b", Some(10), 100).await
+        });
+        let first = first
+            .await
+            .expect("join first lock")
+            .expect("first lock acquire through prefix symlink");
+        let second = second
+            .await
+            .expect("join second lock")
+            .expect("second lock acquire through prefix symlink");
+        assert!(
+            first.is_some() && second.is_some(),
+            "distinct keys under a shared lock dir must both acquire"
+        );
     }
 }

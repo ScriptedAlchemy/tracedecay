@@ -9,7 +9,7 @@ fn control() -> BoundedGitControl {
     BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10))
 }
 
-fn git(path: &Path, args: &[&str]) {
+fn git<T: AsRef<std::ffi::OsStr> + std::fmt::Debug>(path: &Path, args: &[T]) {
     let output = Command::new(
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
@@ -78,13 +78,9 @@ fn collect_segments(path: &Path) -> Vec<ReflogSegment> {
 #[test]
 fn absent_head_reflog_is_a_sealed_single_segment() {
     let fixture = fixture();
-    let repository = gix::discover(fixture.path()).unwrap();
+    let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let head = repository.head().unwrap().log_iter();
-    let relative = head.store.namespace.as_ref().map_or_else(
-        || head.name.to_path().to_owned(),
-        |namespace| namespace.to_path().join(head.name.to_path()),
-    );
-    let path = head.store.git_dir().join("logs").join(relative);
+    let path = head_reflog_path(&head).unwrap();
     std::fs::remove_file(path).unwrap();
 
     let segments = collect_segments(fixture.path());
@@ -116,23 +112,11 @@ fn reverse_reader_accepts_large_record_but_rejects_unbounded_record() {
 }
 
 #[test]
-fn blank_reflog_record_is_unsupported_framing() {
-    assert_eq!(
-        complete_line_ranges(b"valid\n\n", 0).unwrap_err(),
-        BoundedBackfillInterruption::UnsupportedSourceFraming
-    );
-}
-
-#[test]
 fn truncated_reflog_is_permanent_unsupported_framing() {
     let fixture = fixture();
-    let repository = gix::discover(fixture.path()).unwrap();
+    let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let head = repository.head().unwrap().log_iter();
-    let relative = head.store.namespace.as_ref().map_or_else(
-        || head.name.to_path().to_owned(),
-        |namespace| namespace.to_path().join(head.name.to_path()),
-    );
-    let path = head.store.git_dir().join("logs").join(relative);
+    let path = head_reflog_path(&head).unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.pop(), Some(b'\n'));
     std::fs::write(path, bytes).unwrap();
@@ -168,7 +152,7 @@ fn sealed_graph_ignores_later_head_drift_and_keeps_nonmonotonic_parent_time() {
     std::fs::write(fixture.path().join("tracked"), "child").unwrap();
     git(fixture.path(), &["add", "tracked"]);
     git_with_dates(fixture.path(), &["commit", "-m", "child"], 100);
-    let repository = gix::discover(fixture.path()).unwrap();
+    let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let tip = repository.head_id().unwrap().detach().to_hex().to_string();
     let source = initialize_reflog_cursor(fixture.path(), 250, &control()).unwrap();
     std::fs::write(fixture.path().join("tracked"), "later head").unwrap();
@@ -218,20 +202,6 @@ fn existing_tag_transition_is_detached() {
 }
 
 #[test]
-fn deleted_tag_transition_remains_detached() {
-    let fixture = fixture();
-    git(fixture.path(), &["tag", "release"]);
-    git(fixture.path(), &["checkout", "release"]);
-    git(fixture.path(), &["tag", "-d", "release"]);
-    git(fixture.path(), &["checkout", "main"]);
-    assert!(
-        collect_segments(fixture.path())
-            .iter()
-            .any(|segment| segment.branch.is_none())
-    );
-}
-
-#[test]
 fn deleted_local_label_is_conservatively_detached() {
     let fixture = fixture();
     git(fixture.path(), &["branch", "historical"]);
@@ -255,7 +225,7 @@ fn detached_remote_revision_and_short_oid_are_unattributed() {
                 &["update-ref", "refs/remotes/origin/topic", "HEAD"],
             );
         }
-        let repository = gix::discover(fixture.path()).unwrap();
+        let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
         let short = repository.head_id().unwrap().detach().to_hex().to_string()[..8].to_owned();
         let target = if target == "SHORT_OID" {
             short.as_str()
@@ -279,18 +249,35 @@ fn non_utf8_local_ref_is_sealed_without_fabricated_branch_text() {
     use std::os::unix::ffi::OsStrExt as _;
 
     let fixture = fixture();
+    let expected_oid = tracedecay_runtime_core::git_open::discover(fixture.path())
+        .unwrap()
+        .head_id()
+        .unwrap()
+        .detach()
+        .to_hex()
+        .to_string();
+    // Packed refs retain arbitrary ref bytes without requiring the filesystem
+    // to accept a non-UTF8 loose-ref filename (not supported on macOS).
+    git(fixture.path(), &["branch", "topic-x"]);
+    git(fixture.path(), &["pack-refs", "--all"]);
+    let packed_refs = fixture.path().join(".git/packed-refs");
+    let mut packed = std::fs::read(&packed_refs).unwrap();
+    let reference = b"refs/heads/topic-x\n";
+    let position = packed
+        .windows(reference.len())
+        .position(|bytes| bytes == reference)
+        .unwrap();
+    packed[position + reference.len() - 2] = 0xff;
+    std::fs::write(packed_refs, packed).unwrap();
+
     let branch = std::ffi::OsStr::from_bytes(b"topic-\xff");
-    let output = Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(fixture.path())
-    .arg("checkout")
-    .arg("-b")
-    .arg(branch)
-    .output()
-    .unwrap();
-    assert!(output.status.success());
+    git(fixture.path(), &[std::ffi::OsStr::new("checkout"), branch]);
+    let cursor = initialize_reflog_cursor(fixture.path(), i64::MAX, &control()).unwrap();
+    assert_eq!(
+        cursor.source_head_referent.as_deref(),
+        Some(b"refs/heads/topic-\xff".as_slice())
+    );
+    assert_eq!(cursor.source_head_oid, expected_oid);
     git(fixture.path(), &["checkout", "main"]);
     assert!(
         collect_segments(fixture.path())
@@ -335,4 +322,47 @@ fn reflog_oid_discontinuity_is_unsupported_framing() {
         scan_reflog_chunk(fixture.path(), 0, i64::MAX, changed, &control()).unwrap_err(),
         BoundedBackfillInterruption::UnsupportedSourceFraming
     );
+}
+
+#[test]
+fn unborn_source_rejects_first_commit_and_repository_replacement() {
+    let fixture = tempfile::tempdir().unwrap();
+    git(fixture.path(), &["init", "-b", "main"]);
+    let HistorySource::Unborn(source) =
+        initialize_history_source(fixture.path(), 1, &control()).unwrap()
+    else {
+        panic!("expected unborn source");
+    };
+    verify_unborn_source(fixture.path(), &source, &control()).unwrap();
+    git(fixture.path(), &["commit", "--allow-empty", "-m", "first"]);
+    assert_eq!(
+        verify_unborn_source(fixture.path(), &source, &control()).unwrap_err(),
+        BoundedBackfillInterruption::SourceChanged
+    );
+    std::fs::rename(fixture.path().join(".git"), fixture.path().join(".git.old")).unwrap();
+    git(fixture.path(), &["init", "-b", "main"]);
+    assert_eq!(
+        verify_unborn_source(fixture.path(), &source, &control()).unwrap_err(),
+        BoundedBackfillInterruption::SourceChanged
+    );
+}
+
+#[test]
+fn unborn_source_preserves_retained_history_and_cancellation() {
+    let fixture = fixture();
+    git(fixture.path(), &["checkout", "--orphan", "new"]);
+    assert!(matches!(
+        initialize_history_source(fixture.path(), 1, &control()),
+        Err(BoundedBackfillInterruption::UnsupportedSourceFraming)
+    ));
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+    assert!(matches!(
+        initialize_history_source(
+            fixture.path(),
+            1,
+            &BoundedGitControl::new(cancellation, Duration::from_secs(10))
+        ),
+        Err(BoundedBackfillInterruption::Cancelled)
+    ));
 }

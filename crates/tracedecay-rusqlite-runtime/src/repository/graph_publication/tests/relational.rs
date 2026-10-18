@@ -10,21 +10,25 @@ fn oversized_sequences_are_rejected_by_both_page_request_paths() {
         "sequence": oversized,
     });
 
-    assert!(
+    assert_eq!(
         serde_json::from_value::<GraphPublicationReplayPageRequestV1>(serde_json::json!({
             "projection": projection.clone(),
             "after": cursor.clone(),
             "max_records": 1,
         }))
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "graph publication sequence value 9223372036854775808 exceeds the maximum of 9223372036854775807"
     );
-    assert!(
+    assert_eq!(
         serde_json::from_value::<GraphPublicationRetiredCleanupPageRequestV1>(serde_json::json!({
             "projection": projection,
             "after": cursor,
             "max_records": 1,
         }),)
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "graph publication sequence value 9223372036854775808 exceeds the maximum of 9223372036854775807"
     );
 }
 

@@ -1,0 +1,853 @@
+//! Graph search journeys that mount `TraceDecay` stay in the composition root.
+
+use std::collections::HashMap;
+use std::future::Future;
+
+use serde_json::{Value, json};
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexFreshnessCoverageV1, CodeIndexFreshnessReader, CodeIndexOmittedSourceV1,
+    CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1, CodeIndexStalenessStateV1,
+    CodeIndexWorktreeFreshnessV1,
+};
+use tracedecay_domain::{ExactClass, RetrievalSourceRoleV1};
+use tracedecay_mcp::ToolResult;
+use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
+
+use tracedecay_project::project::TraceDecay;
+
+fn completed_sparse_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
+    completed_sparse_search_for_generation("generation.mcp-verified-graph-fixture.1")
+}
+
+fn completed_sparse_search_for_generation(
+    generation: &str,
+) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
+    let candidate = tracedecay_domain::RankedCandidate {
+        candidate: tracedecay_domain::FusedCandidate {
+            anchor_id: tracedecay_domain::RetrievalAnchorId::new(
+                "code-symbol:sparse-lexical-widget",
+            )
+            .expect("sparse lexical candidate anchor"),
+            logical_evidence_id: tracedecay_domain::LogicalEvidenceId::new(
+                "logical.sparse-lexical-widget",
+            )
+            .expect("sparse lexical candidate logical evidence"),
+            occurrences: Vec::new(),
+            exact_class: ExactClass::Approximate,
+            source_role: RetrievalSourceRoleV1::default(),
+            utility_micros: 1,
+            contributions: Vec::new(),
+            freshness: Vec::new(),
+            decisions: Vec::new(),
+        },
+        final_ordinal: 0,
+    };
+    let fallback_coverage = tracedecay_domain::RetrieverKind::QUERY_FALLBACK_LANES
+        .into_iter()
+        .map(|lane| (lane, tracedecay_domain::PublicRetrieverStatus::Complete))
+        .collect();
+    let query_fallback = tracedecay_domain::QueryFallbackSubpayload::new(
+        tracedecay_domain::FusionProfileId::new("profile.sparse-search")
+            .expect("sparse search profile"),
+        vec![candidate.clone()],
+        fallback_coverage,
+        Vec::new(),
+        None,
+    )
+    .expect("canonical sparse lexical fallback payload");
+    let anchor = candidate.candidate.anchor_id.clone();
+    tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(
+        tracedecay_query::code_search::CodeIndexSearchCompletedV1 {
+            code_generation: generation.to_owned(),
+            ordered_candidates: vec![candidate],
+            query_fallback: std::sync::Arc::new(query_fallback),
+            display_by_anchor: HashMap::from([(
+                anchor,
+                tracedecay_query::code_search::CodeIndexSearchDisplayV1 {
+                    name: "SparseLexicalWidget".to_owned(),
+                    qualified_name: "crate::SparseLexicalWidget".to_owned(),
+                    kind: "function".to_owned(),
+                    occurrence: None,
+                    path: "src/lib.rs".to_owned(),
+                    site: None,
+                },
+            )]),
+            display_unavailable_by_anchor: HashMap::new(),
+            coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::warm(),
+            next_cursor: None,
+            lexical_routes: tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1 {
+                routes: vec![tracedecay_query::retrieval::lexical::LexicalRouteKindV1::Query],
+                matches_by_anchor: std::collections::BTreeMap::new(),
+                anchors: Vec::new(),
+                dropped_sites: std::collections::BTreeMap::new(),
+                declaring_sites: std::collections::BTreeSet::new(),
+                decision: tracedecay_query::retrieval::lexical::LexicalRouteDecisionV1::default(),
+            },
+        },
+    )
+}
+
+fn unavailable_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
+    tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
+        tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
+            code_generation: Some("generation.mcp-verified-graph-fixture.1".to_owned()),
+            reason:
+                tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+            coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
+                "search_attempt_repeated",
+            ),
+        },
+    )
+}
+
+fn search_test_options<'a>(
+    cg: &TraceDecay,
+    executor: tracedecay_query::code_search::CodeIndexSearchExecutor,
+) -> crate::mcp::tools::handlers::ToolCallRegistryOptions<'a> {
+    crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
+        cg,
+        crate::mcp::tools::handlers::ToolCallRegistryOptions {
+            code_index_search_executor: Some(executor),
+            code_index_search_authority: Some(
+                tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
+                    principal: tracedecay_domain::PrincipalId::new("principal.search-attempt-test")
+                        .expect("search attempt principal"),
+                    authorization_revision: tracedecay_domain::AuthorizationRevision::new(
+                        "authorization.search-attempt-test",
+                    )
+                    .expect("search attempt authorization revision"),
+                },
+            ),
+            ..crate::mcp::tools::handlers::ToolCallRegistryOptions::default()
+        },
+    )
+}
+
+fn run_on_current_thread(test: impl Future<Output = ()>) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("search test runtime")
+        .block_on(test);
+}
+
+#[test]
+fn completed_primary_search_is_not_retried_after_graph_admission() {
+    run_on_current_thread(completed_primary_search_is_not_retried_after_graph_admission_case());
+}
+
+async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
+    let dir = tempfile::TempDir::new().expect("single search attempt isolation");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "single-search-attempt",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.single-search-attempt",
+        )
+        .await;
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = std::sync::Arc::clone(&calls);
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor =
+        std::sync::Arc::new(move |_| {
+            let attempt = observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async move {
+                if attempt == 0 {
+                    completed_sparse_search()
+                } else {
+                    unavailable_search()
+                }
+            })
+        });
+    let options = search_test_options(&cg, executor);
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_search",
+        json!({
+            "query": "SparseLexicalWidget",
+            "limit": 5,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("first complete search outcome must remain authoritative");
+    let payload: Value = crate::mcp::tools::handlers::dispatch_test_support::tool_json(&result);
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        payload["results"][0]["display"]["name"],
+        "SparseLexicalWidget"
+    );
+    assert!(payload["status"].is_null());
+    cg.close();
+}
+
+#[test]
+fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search() {
+    run_on_current_thread(generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case());
+}
+
+async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case() {
+    let dir = tempfile::TempDir::new().expect("generation mismatch isolation");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "generation-mismatch-search",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.generation-mismatch-search",
+        )
+        .await;
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = std::sync::Arc::clone(&calls);
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor =
+        std::sync::Arc::new(move |_| {
+            let attempt = observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async move {
+                if attempt == 0 {
+                    completed_sparse_search_for_generation("generation.search-before-graph")
+                } else {
+                    unavailable_search()
+                }
+            })
+        });
+    let options = search_test_options(&cg, executor);
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_search",
+        json!({
+            "query": "SparseLexicalWidget",
+            "limit": 5,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("failed refresh must preserve the first complete search");
+    let payload: Value = crate::mcp::tools::handlers::dispatch_test_support::tool_json(&result);
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        payload["results"][0]["display"]["name"],
+        "SparseLexicalWidget"
+    );
+    assert_eq!(
+        payload["verified_graph_evidence"]["reason_code"],
+        "verified-code-graph-generation-mismatch"
+    );
+    cg.close();
+}
+
+fn freshness_reader(
+    latest_generation_id: Option<&str>,
+    staleness_state: &str,
+    rebuild_in_flight: bool,
+) -> CodeIndexFreshnessReader {
+    let latest_generation_id = latest_generation_id.map(str::to_owned);
+    let staleness_state =
+        tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::from_wire(
+            staleness_state,
+        );
+    std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: worktree_root.display().to_string(),
+            latest_generation_id: latest_generation_id.clone(),
+            staleness_state,
+            rebuild_in_flight,
+            hook_hint_count: Some(0),
+            coverage:
+                tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete,
+            ..Default::default()
+        };
+        Box::pin(async move { Ok(Some(freshness)) })
+    })
+}
+
+/// A completed sparse search whose lexical lane ran the query route plus
+/// one anchor route that ranked the single result.
+fn completed_sparse_search_with_anchor_route(
+    anchor: &str,
+) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
+    let tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(mut complete) =
+        completed_sparse_search()
+    else {
+        panic!("sparse search fixture is complete");
+    };
+    let routing = LexicalRoutingV1::new(vec![anchor.to_owned()], false).expect("anchor");
+    let route = tracedecay_query::retrieval::lexical::LexicalRouteKindV1::Anchor {
+        anchor: routing.anchors[0].clone(),
+    };
+    let candidate_anchor = complete.ordered_candidates[0].candidate.anchor_id.clone();
+    complete.lexical_routes = tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1 {
+        routes: vec![
+            tracedecay_query::retrieval::lexical::LexicalRouteKindV1::Query,
+            route.clone(),
+        ],
+        matches_by_anchor: std::collections::BTreeMap::from([(
+            candidate_anchor,
+            vec![tracedecay_query::retrieval::lexical::LexicalRouteMatchV1 {
+                route,
+                score_micros: 900_000,
+                matched_terms: vec![anchor.to_owned()],
+                spelling_variants: Vec::new(),
+            }],
+        )]),
+        anchors: Vec::new(),
+        dropped_sites: std::collections::BTreeMap::new(),
+        declaring_sites: std::collections::BTreeSet::new(),
+        decision: tracedecay_query::retrieval::lexical::LexicalRouteDecisionV1::default(),
+    };
+    tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete)
+}
+
+fn response_text(result: &ToolResult) -> String {
+    result.value["content"][0]["text"]
+        .as_str()
+        .expect("tool response text")
+        .to_owned()
+}
+
+#[test]
+fn search_opens_with_a_freshness_verdict_from_typed_state() {
+    run_on_current_thread(search_opens_with_a_freshness_verdict_from_typed_state_case());
+}
+
+async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
+    let dir = tempfile::TempDir::new().expect("freshness verdict isolation");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "freshness-verdict-search",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.freshness-verdict-search",
+        )
+        .await;
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor =
+        std::sync::Arc::new(|_| Box::pin(async { completed_sparse_search() }));
+
+    let settled = crate::mcp::tools::handlers::ToolCallRegistryOptions {
+        code_index_freshness_reader: Some(freshness_reader(
+            Some("generation.mcp-verified-graph-fixture.1"),
+            "fresh",
+            false,
+        )),
+        ..search_test_options(&cg, executor.clone())
+    };
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "SparseLexicalWidget", "limit": 5}),
+        settled,
+    )
+    .await
+    .expect("settled search renders");
+    let text = response_text(&result);
+    assert!(
+        text.starts_with("freshness: fresh\n## Search Results"),
+        "a settled generation opens with the fresh verdict: {text}"
+    );
+    assert!(!text.contains("indexing:"));
+
+    let rebuilding = crate::mcp::tools::handlers::ToolCallRegistryOptions {
+        code_index_freshness_reader: Some(freshness_reader(
+            Some("generation.mcp-verified-graph-fixture.2"),
+            "refreshing",
+            true,
+        )),
+        ..search_test_options(&cg, executor.clone())
+    };
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "SparseLexicalWidget", "limit": 5, "format": "json"}),
+        rebuilding,
+    )
+    .await
+    .expect("rebuilding search renders");
+    let payload: Value = serde_json::from_str(&response_text(&result)).expect("search JSON");
+    assert_eq!(payload["freshness"]["state"], "possibly_stale");
+    assert_eq!(
+        payload["freshness"]["indexing"]["summary"],
+        "state=refreshing rebuild_in_flight=true served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.2"
+    );
+    assert_eq!(
+        payload["freshness"]["indexing"]["latest_generation"],
+        "generation.mcp-verified-graph-fixture.2"
+    );
+    assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "SparseLexicalWidget", "limit": 5}),
+        crate::mcp::tools::handlers::ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(freshness_reader(
+                Some("generation.mcp-verified-graph-fixture.1"),
+                "stale",
+                false,
+            )),
+            ..search_test_options(&cg, executor)
+        },
+    )
+    .await
+    .expect("stalled search renders");
+    let text = response_text(&result);
+    assert!(
+        text.starts_with(
+            "freshness: possibly_stale\nindexing: state=stale rebuild_in_flight=false served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.1\n## Search Results"
+        ),
+        "a stale seat opens with the verdict and one indexing line: {text}"
+    );
+    cg.close();
+}
+
+#[test]
+fn graph_reads_carry_the_worktree_freshness_verdict_search_reports() {
+    run_on_current_thread(graph_reads_carry_the_worktree_freshness_verdict_search_reports_case());
+}
+
+async fn graph_reads_carry_the_worktree_freshness_verdict_search_reports_case() {
+    let dir = tempfile::TempDir::new().expect("graph read freshness isolation");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "freshness-verdict-graph-reads",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.freshness-verdict-graph-reads",
+        )
+        .await;
+    let options = |staleness_state: &str| {
+        crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
+            &cg,
+            crate::mcp::tools::handlers::ToolCallRegistryOptions {
+                code_index_freshness_reader: Some(freshness_reader(
+                    Some("generation.mcp-verified-graph-fixture.1"),
+                    staleness_state,
+                    false,
+                )),
+                ..crate::mcp::tools::handlers::ToolCallRegistryOptions::default()
+            },
+        )
+    };
+    let reads = [
+        (
+            "tracedecay_find_exact_symbol",
+            json!({"name": "SparseLexicalWidget"}),
+            false,
+        ),
+        (
+            "tracedecay_node",
+            json!({"node_id": "node.absent-widget"}),
+            true,
+        ),
+    ];
+
+    for (tool_name, args, not_found) in reads {
+        let markdown =
+            crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+                &cg,
+                tool_name,
+                args.clone(),
+                options("verifying"),
+            )
+            .await
+            .expect("unsettled graph read renders");
+        let text = response_text(&markdown);
+        if not_found {
+            let body: Value = serde_json::from_str(&text).expect("not-found JSON in every format");
+            assert_eq!(body["status"], "not_found", "{text}");
+            assert_eq!(
+                (
+                    &body["freshness"]["state"],
+                    &body["freshness"]["indexing"]["staleness_state"]
+                ),
+                (&json!("possibly_stale"), &json!("verifying")),
+                "{tool_name} not-found carries the verdict search reports: {text}"
+            );
+        } else {
+            assert!(
+                text.starts_with(
+                    "freshness: possibly_stale\nindexing: state=verifying rebuild_in_flight=false served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.1\n"
+                ),
+                "{tool_name} opens with the worktree verdict search reports: {text}"
+            );
+        }
+        assert_eq!(
+            markdown.structured_result().expect("typed result")["freshness"]["state"],
+            "possibly_stale",
+            "{tool_name} carries the verdict in its typed result"
+        );
+
+        let mut json_args = args.clone();
+        json_args["format"] = json!("json");
+        let json_result =
+            crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+                &cg,
+                tool_name,
+                json_args,
+                options("verifying"),
+            )
+            .await
+            .expect("unsettled graph read renders JSON");
+        let payload: Value =
+            serde_json::from_str(&response_text(&json_result)).expect("graph read JSON");
+        assert_eq!(
+            payload["freshness"]["state"], "possibly_stale",
+            "{tool_name}"
+        );
+        assert_eq!(
+            payload["freshness"]["indexing"]["served_generation"],
+            "generation.mcp-verified-graph-fixture.1",
+            "{tool_name}"
+        );
+
+        let settled =
+            crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+                &cg,
+                tool_name,
+                args,
+                options("fresh"),
+            )
+            .await
+            .expect("settled graph read renders");
+        let text = response_text(&settled);
+        if not_found {
+            let body: Value = serde_json::from_str(&text).expect("not-found JSON in every format");
+            assert_eq!(body["freshness"], json!({"state": "fresh"}), "{text}");
+        } else {
+            assert!(
+                text.starts_with("freshness: fresh\n") && !text.contains("indexing:"),
+                "{tool_name} on a settled worktree opens with the fresh verdict: {text}"
+            );
+        }
+        assert_eq!(
+            settled.structured_result().expect("typed result")["freshness"]["state"],
+            "fresh",
+            "{tool_name}"
+        );
+    }
+    cg.close();
+}
+
+#[test]
+fn search_lanes_answer_to_the_freshness_the_verdict_reports() {
+    run_on_current_thread(search_lanes_answer_to_the_freshness_the_verdict_reports_case());
+}
+
+/// The query gate served the latest generation without proving it current,
+/// so the executor marked its lanes stale. When the scheduler reports that
+/// same generation fresh, the response carries one verdict: fresh, with no
+/// lane calling itself stale. A newer sealed generation keeps them stale.
+async fn search_lanes_answer_to_the_freshness_the_verdict_reports_case() {
+    let dir = tempfile::TempDir::new().expect("lane freshness isolation");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "lane-freshness-search",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.lane-freshness-search",
+        )
+        .await;
+    let served = "generation.mcp-verified-graph-fixture.1";
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = std::sync::Arc::new(
+        move |_| {
+            Box::pin(async move {
+                let tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(mut complete) =
+                    completed_sparse_search_for_generation(served)
+                else {
+                    panic!("sparse search fixture is complete");
+                };
+                let stale = tracedecay_query::code_search::CodeIndexLaneStatusV1::Stale {
+                    generation: served.to_owned(),
+                };
+                complete.coverage = tracedecay_query::code_search::CodeIndexSearchCoverageV1 {
+                    exact: stale.clone(),
+                    lexical: tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial {
+                        generation: Some(served.to_owned()),
+                        reason: Some("candidate_sources_pruned"),
+                    },
+                    graph: stale,
+                };
+                tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete)
+            })
+        },
+    );
+    let search = |latest: &str| {
+        let options = crate::mcp::tools::handlers::ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(freshness_reader(Some(latest), "fresh", false)),
+            ..search_test_options(&cg, executor.clone())
+        };
+        crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+            &cg,
+            "tracedecay_search",
+            json!({"query": "SparseLexicalWidget", "limit": 5, "format": "json"}),
+            options,
+        )
+    };
+
+    let fresh = search(served).await.expect("fresh search renders");
+    let payload: Value = serde_json::from_str(&response_text(&fresh)).expect("search JSON");
+    assert_eq!(
+        payload["freshness"],
+        json!({"state": "fresh"}),
+        "{payload:#}"
+    );
+    assert_eq!(
+        payload["coverage"],
+        json!({
+            "exact": "complete",
+            "lexical": {
+                "status": "partial",
+                "generation": null,
+                "reason": "candidate_sources_pruned",
+            },
+            "graph": "complete",
+            "recall": "partial",
+        }),
+        "{payload:#}"
+    );
+
+    let newer = search("generation.mcp-verified-graph-fixture.2")
+        .await
+        .expect("superseded search renders");
+    let payload: Value = serde_json::from_str(&response_text(&newer)).expect("search JSON");
+    assert_eq!(payload["freshness"]["state"], "possibly_stale");
+    assert_eq!(
+        payload["freshness"]["indexing"]["stale_lanes"],
+        json!(["exact", "graph"]),
+        "{payload:#}"
+    );
+    assert_eq!(payload["coverage"]["exact"]["status"], "stale");
+    cg.close();
+}
+
+#[test]
+fn search_forwards_lexical_routing_and_renders_route_evidence() {
+    run_on_current_thread(search_forwards_lexical_routing_and_renders_route_evidence_case());
+}
+
+async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
+    let dir = tempfile::TempDir::new().expect("lexical routing isolation");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "lexical-routing-search",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.lexical-routing-search",
+        )
+        .await;
+
+    let observed_routing = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sink = std::sync::Arc::clone(&observed_routing);
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor =
+        std::sync::Arc::new(move |request| {
+            *sink.lock().expect("routing sink") = Some(request.lexical_routing.clone());
+            Box::pin(async { completed_sparse_search_with_anchor_route("SparseLexicalWidget") })
+        });
+    let options = crate::mcp::tools::handlers::ToolCallRegistryOptions {
+        code_index_freshness_reader: Some(freshness_reader(
+            Some("generation.mcp-verified-graph-fixture.1"),
+            "fresh",
+            false,
+        )),
+        ..search_test_options(&cg, executor.clone())
+    };
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_search",
+        json!({
+            "query": "sparse widget",
+            "lexical_anchors": ["SparseLexicalWidget"],
+            "prefer_symbol": true,
+            "limit": 5,
+        }),
+        options,
+    )
+    .await
+    .expect("routed search renders");
+    let routing = observed_routing
+        .lock()
+        .expect("routing sink")
+        .clone()
+        .expect("the executor received the request");
+    assert_eq!(routing.anchors[0].as_str(), "SparseLexicalWidget");
+    assert_eq!(
+        routing.prefer_symbol,
+        tracedecay_query::retrieval::lexical::SymbolRoutePreferenceV1::Always
+    );
+    let text = response_text(&result);
+    assert!(
+        text.contains("**SparseLexicalWidget** (function, approximate), rank 1 · utility 1 · via anchor:SparseLexicalWidget"),
+        "each result names the routes that ranked it: {text}"
+    );
+    assert!(
+        text.contains("Ranked routes fused into this page: query, anchor:SparseLexicalWidget"),
+        "{text}"
+    );
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_search",
+        json!({
+            "query": "sparse widget",
+            "lexical_anchors": ["SparseLexicalWidget"],
+            "format": "json",
+        }),
+        search_test_options(&cg, executor.clone()),
+    )
+    .await
+    .expect("routed JSON search renders");
+    let payload: Value = serde_json::from_str(&response_text(&result)).expect("search JSON");
+    assert_eq!(
+        payload["lexical_routes"][1],
+        json!({"route": "anchor", "anchor": "SparseLexicalWidget", "label": "anchor:SparseLexicalWidget"})
+    );
+    assert_eq!(
+        payload["results"][0]["lexical_routes"],
+        json!([{
+            "route": "anchor:SparseLexicalWidget",
+            "score_micros": 900_000,
+            "matched_terms": ["SparseLexicalWidget"],
+        }])
+    );
+
+    let too_many: Vec<String> = (0..=tracedecay_query::retrieval::lexical::MAX_LEXICAL_ANCHORS_V1)
+        .map(|index| format!("anchor_{index}"))
+        .collect();
+    let error = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "sparse widget", "lexical_anchors": too_many}),
+        search_test_options(&cg, executor.clone()),
+    )
+    .await
+    .expect_err("anchor bounds are enforced before any lane runs");
+    assert!(error.to_string().contains("at most 8 anchors"), "{error}");
+    let error = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_search",
+        json!({"query": "sparse widget", "lexical_anchors": [""]}),
+        search_test_options(&cg, executor),
+    )
+    .await
+    .expect_err("empty anchors are rejected");
+    assert!(error.to_string().contains("anchor 0 is empty"), "{error}");
+    cg.close();
+}
+
+#[test]
+fn files_names_the_worktree_sources_the_serving_snapshot_omits() {
+    run_on_current_thread(files_names_the_worktree_sources_the_serving_snapshot_omits_case());
+}
+
+async fn files_names_the_worktree_sources_the_serving_snapshot_omits_case() {
+    let dir = tempfile::TempDir::new().expect("omitted sources isolation");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "omitted-sources-files",
+            "pub fn indexed() {}\n",
+            "project.omitted-sources-files",
+        )
+        .await;
+
+    let omitted = CodeIndexOmittedSourcesV1 {
+        count: 1,
+        sources: vec![CodeIndexOmittedSourceV1 {
+            git_path_bytes: b"src/\xff.rs".to_vec(),
+            display_path: "src/\u{fffd}.rs".to_owned(),
+            reason: CodeIndexSourceOmissionReasonV1::UnrepresentablePath,
+        }],
+    };
+    let reader_for = |generation: &str| -> CodeIndexFreshnessReader {
+        let generation = generation.to_owned();
+        let served = omitted.clone();
+        std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+            let freshness = CodeIndexWorktreeFreshnessV1 {
+                worktree_root: worktree_root.display().to_string(),
+                latest_generation_id: Some(generation.clone()),
+                staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+                rebuild_in_flight: false,
+                hook_hint_count: Some(0),
+                coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+                omitted_sources: Some(served.clone()),
+                ..Default::default()
+            };
+            Box::pin(async move { Ok(Some(freshness)) })
+        })
+    };
+    let options_for = |generation: &str| {
+        crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
+            &cg,
+            crate::mcp::tools::handlers::ToolCallRegistryOptions {
+                code_index_freshness_reader: Some(reader_for(generation)),
+                ..crate::mcp::tools::handlers::ToolCallRegistryOptions::default()
+            },
+        )
+    };
+    let with_reader = || options_for("generation.mcp-verified-graph-fixture.1");
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_files",
+        json!({"format": "json"}),
+        with_reader(),
+    )
+    .await
+    .expect("files renders with omitted sources");
+    let payload: Value = serde_json::from_str(&response_text(&result)).expect("files JSON");
+    assert_eq!(
+        payload["worktree_omitted_sources"],
+        serde_json::to_value(&omitted).expect("omitted sources JSON")
+    );
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_files",
+        json!({}),
+        with_reader(),
+    )
+    .await
+    .expect("files renders markdown with omitted sources");
+    let text = response_text(&result);
+    assert!(text.contains("worktree sources not indexed"), "{text}");
+    assert!(
+        text.contains("\"src/\u{fffd}.rs\" (unrepresentable path)"),
+        "{text}"
+    );
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_files",
+        json!({"format": "json"}),
+        options_for("generation.mcp-verified-graph-fixture.2"),
+    )
+    .await
+    .expect("files renders while a newer generation is latest");
+    let payload: Value = serde_json::from_str(&response_text(&result)).expect("files JSON");
+    assert!(
+        payload.get("worktree_omitted_sources").is_none(),
+        "omissions recorded for another generation never annotate this listing: {payload}"
+    );
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_files",
+        json!({"format": "json"}),
+        crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
+            &cg,
+            crate::mcp::tools::handlers::ToolCallRegistryOptions::default(),
+        ),
+    )
+    .await
+    .expect("files renders without a freshness reader");
+    let payload: Value = serde_json::from_str(&response_text(&result)).expect("files JSON");
+    assert!(payload.get("worktree_omitted_sources").is_none());
+    cg.close();
+}

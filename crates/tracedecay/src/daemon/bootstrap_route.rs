@@ -4,21 +4,14 @@
 //! project-independent calls so a client can hand shake without paying for a
 //! project admission.
 
-use std::sync::OnceLock;
-
-use tracedecay_mcp::ToolDefinition;
-
 use super::*;
+use tracedecay_mcp::server::{
+    request_protocol_version, speaks_2026_07_28, stamp_2026_07_28_result,
+};
 
-static WARMING_BOOTSTRAP_TOOLS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
-
-#[hotpath::measure(label = "daemon.bootstrap.warming_catalog")]
-fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
-    if let Some(definitions) = WARMING_BOOTSTRAP_TOOLS.get() {
-        return Ok(definitions.clone());
-    }
+fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<serde_json::Value> {
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
-        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+        tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("MCP bootstrap profile is invalid: {error}"),
@@ -27,43 +20,39 @@ fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
         default_catalog_discovery_authority().map_err(|error| TraceDecayError::Config {
             message: format!("MCP bootstrap catalog authority is unavailable: {error}"),
         })?;
-    let definitions = get_catalog_filtered_tool_definitions_with_warming_budget(
-        explore_call_budget(0),
+    catalog_discovery_tools_list_payload(
+        node_count,
+        budget,
         &profile_id,
         &authority,
         &project_catalog_discovery_scope(),
-        ToolRegistryMode::HostAvailable,
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("MCP bootstrap catalog is unavailable: {error}"),
-    })?;
-    if WARMING_BOOTSTRAP_TOOLS.set(definitions.clone()).is_ok() {
-        return Ok(definitions);
-    }
-    WARMING_BOOTSTRAP_TOOLS
-        .get()
-        .cloned()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "MCP bootstrap catalog cache lost a concurrent publication".to_owned(),
-        })
+    })
+}
+
+#[tracing::instrument(name = "daemon.bootstrap.warming_catalog", level = "trace", skip_all)]
+fn warming_bootstrap_tools_list_payload() -> Result<serde_json::Value> {
+    bootstrap_tools_list_payload(None, explore_call_budget(0))
 }
 
 pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
-    warming_bootstrap_tool_definitions().map(|_| ())
+    warming_bootstrap_tools_list_payload().map(|_| ())
 }
 
-#[hotpath::measure(label = "daemon.bootstrap.initialize_route", future = true)]
+#[tracing::instrument(name = "daemon.bootstrap.initialize_route", level = "trace", skip_all)]
 pub(super) async fn apply_daemon_initialize_route(
     handshake: &mut DaemonHandshake,
-    first_request_line: &str,
+    first_request: &AuthenticatedFirstRequest,
     store_administration: &StoreAdministration,
 ) -> Result<Option<InitializeRouteMetadata>> {
-    apply_daemon_initialize_route_inner(handshake, first_request_line, store_administration).await
+    apply_daemon_initialize_route_inner(handshake, first_request, store_administration).await
 }
 
 fn apply_daemon_initialize_route_inner<'a>(
     handshake: &'a mut DaemonHandshake,
-    first_request_line: &'a str,
+    first_request: &'a AuthenticatedFirstRequest,
     store_administration: &'a StoreAdministration,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<InitializeRouteMetadata>>> + Send + 'a>,
@@ -74,15 +63,26 @@ fn apply_daemon_initialize_route_inner<'a>(
         if !handshake.allow_initialize_root_routing {
             return Ok(None);
         }
-        let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) else {
+        let Some(request) = first_request.parsed() else {
             return Ok(None);
         };
         if request.method != "initialize" {
             return Ok(None);
         }
         let registry = store_administration.registered_profile_database().await?;
-        let Some(route) =
-            resolve_daemon_initialize_route(request.params.as_ref(), Some(&registry)).await?
+        // Discovery runs in the requesting client's profile, with the daemon
+        // owner's home as the one ambient root no route may select.
+        let owner = store_administration.owner_profile()?;
+        let discovery_profile = crate::daemon::daemon_transcript_source_profile(
+            owner,
+            &handshake.client_identity.profile_root,
+        );
+        let Some(route) = resolve_daemon_initialize_route(
+            &discovery_profile,
+            request.params.as_ref(),
+            Some(&registry),
+        )
+        .await?
         else {
             return Ok(None);
         };
@@ -105,6 +105,34 @@ pub(super) fn attach_initialize_route_metadata(
     result["_meta"]["tracedecayInitializeRoute"] = json!(route);
 }
 
+/// Names, in an `initialize` result, every registered store the daemon serves
+/// in its typed reset-required state, so lifecycle probes that prove the
+/// daemon ready also learn the reset the operator owes. A registry that
+/// cannot be opened turns the answer into that typed error.
+pub(super) async fn attach_reset_required_stores(
+    response: &mut JsonRpcResponse,
+    store_administration: &StoreAdministration,
+) {
+    if response.result.is_none() {
+        return;
+    }
+    match store_administration.session_runtime_registry().await {
+        Ok(registry) => {
+            if let Some(result) = response.result.as_mut() {
+                result["_meta"][tracedecay_daemon_protocol::RESET_REQUIRED_STORES_META_KEY] =
+                    json!(registry.reset_required_stores());
+            }
+        }
+        Err(error) => {
+            *response = JsonRpcResponse::error(
+                response.id.clone(),
+                ErrorCode::InternalError,
+                error.to_string(),
+            );
+        }
+    }
+}
+
 /// Returns `None` for project-dependent requests, `Some(None)` for handled
 /// notifications, and `Some(Some(response))` for static MCP bootstrap calls.
 pub(super) fn daemon_bootstrap_response(
@@ -114,7 +142,12 @@ pub(super) fn daemon_bootstrap_response(
 ) -> Option<Option<JsonRpcResponse>> {
     match classify_mcp_method(&request.method) {
         McpMethod::Initialize => Some(request.id.clone().map(|id| {
-            let mut response = match initialize_result(SERVER_INSTRUCTIONS) {
+            let requested_protocol = request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("protocolVersion"))
+                .and_then(serde_json::Value::as_str);
+            let mut response = match initialize_result(SERVER_INSTRUCTIONS, requested_protocol) {
                 Ok(result) => JsonRpcResponse::success(id, result),
                 Err(error) => {
                     return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
@@ -126,56 +159,43 @@ pub(super) fn daemon_bootstrap_response(
             response
         })),
         McpMethod::InitializedAck => Some(None),
-        McpMethod::ToolsList => Some(request.id.clone().map(|id| match project_node_count {
-            None => match warming_bootstrap_tool_definitions() {
-                Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
+        McpMethod::TrivialAck => Some(
+            request
+                .id
+                .clone()
+                .map(|id| JsonRpcResponse::success(id, json!({}))),
+        ),
+        McpMethod::ToolsList => Some(request.id.clone().map(|id| {
+            let budget =
+                project_node_count.map_or_else(|| explore_call_budget(0), explore_call_budget);
+            let payload = {
+                let _span = tracing::trace_span!("daemon.bootstrap.catalog").entered();
+                bootstrap_tools_list_payload(project_node_count, budget)
+            };
+            match payload {
+                Ok(mut payload) => {
+                    if speaks_2026_07_28(request_protocol_version(request.params.as_ref()).as_ref())
+                    {
+                        stamp_2026_07_28_result(&request.method, &mut payload);
+                    }
+                    JsonRpcResponse::success(id, payload)
+                }
                 Err(_) => JsonRpcResponse::error(
                     id,
                     ErrorCode::InternalError,
                     "MCP catalog discovery unavailable".to_owned(),
                 ),
-            },
-            Some(node_count) => {
-                let budget = explore_call_budget(node_count);
-                let profile_id = tracedecay_tool_catalog::ProfileId::new(
-                    tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
-                );
-                let authority = default_catalog_discovery_authority();
-                match (profile_id, authority) {
-                    (Ok(profile_id), Ok(authority)) => {
-                        let definitions = hotpath::measure_block!(
-                            "daemon.bootstrap.catalog",
-                            get_catalog_filtered_tool_definitions_with_budget(
-                                node_count,
-                                budget,
-                                &profile_id,
-                                &authority,
-                                &project_catalog_discovery_scope(),
-                                ToolRegistryMode::HostAvailable
-                            )
-                        );
-                        match definitions {
-                            Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
-                            Err(_) => JsonRpcResponse::error(
-                                id,
-                                ErrorCode::InternalError,
-                                "MCP catalog discovery unavailable".to_owned(),
-                            ),
-                        }
-                    }
-                    _ => JsonRpcResponse::error(
-                        id,
-                        ErrorCode::InternalError,
-                        "MCP catalog discovery unavailable".to_owned(),
-                    ),
-                }
             }
         })),
         _ => None,
     }
 }
 
-#[hotpath::measure(label = "daemon.bootstrap.project_node_count", future = true)]
+#[tracing::instrument(
+    name = "daemon.bootstrap.project_node_count",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn cached_project_node_count(
     store_administration: &StoreAdministration,
     handshake: &DaemonHandshake,
@@ -191,9 +211,8 @@ fn cached_project_node_count_inner<'a>(
     // so every profiling feature can compute its layout.
     Box::pin(async move {
         let project_path = handshake.project_path.as_ref()?;
-        let canonical_project_path = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.clone());
+        let canonical_project_path =
+            tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
         let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
         let _server = {
             let servers = store_administration.project_servers().lock().await;

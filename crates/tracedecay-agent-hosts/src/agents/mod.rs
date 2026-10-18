@@ -6,126 +6,188 @@
 
 pub mod antigravity;
 mod bundle_identity;
+pub mod chatgpt;
 pub mod claude;
 pub mod cline;
 pub mod codex;
-pub mod context_scout_model;
-pub mod context_scout_owner;
-pub mod context_scout_ports;
-pub mod context_scout_v2;
+pub mod context_scout;
 pub mod copilot;
 pub mod cursor;
 pub(crate) mod cursor_diagnostics;
 pub mod devin;
-/// Legacy Cursor `serve` log marker; the root crate's `src/serve.rs`
-/// re-exports this instead of declaring its own copy.
-pub use cursor_diagnostics::DEGRADED_SERVE_STDERR_MARKER;
+pub mod droid;
 pub mod gemini;
+mod git_post_commit_hook;
 pub mod hermes;
+pub mod host_bundle;
 pub mod host_bundle_registry;
-pub mod host_bundle_v2;
 pub(crate) mod host_cli;
 pub mod host_component_registration;
+mod host_config_io;
 pub mod kilo;
 pub mod kimi;
 pub mod kiro;
+mod mcp_registration;
 pub mod opencode;
+pub mod pi;
 pub mod plugin_bundle;
 pub mod prompt_rules;
 mod text_file_transaction;
 pub(crate) use text_file_transaction::{
-    TextFileMutation, update_config_file_transactionally, update_text_file_transactionally,
+    TextFileMutation, update_text_file_transactionally, update_two_config_files_transactionally,
 };
-pub(crate) mod retired_memory_digest;
 pub mod roo_code;
+pub mod serve_args;
 pub mod vibe;
 pub mod zed;
 
-use std::borrow::Cow;
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::sha256_hex;
-
-use crate::errors::Result;
-use crate::errors::TraceDecayError;
-use crate::ports::mcp_tools::advertised_tools;
+use tracedecay_automation_runtime::automation::host_io::{
+    ManagedSkillExportReport, uses_default_user_profile,
+};
 use tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary;
+use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 pub use antigravity::AntigravityIntegration;
 pub(crate) use bundle_identity::{
-    is_auto_discovered_entrypoint, observed_bundle_content_digest,
-    observed_bundle_discovery_matches, rendered_bundle_content_digest,
+    observed_bundle_content_digest, observed_bundle_discovery_matches,
+    rendered_bundle_content_digest, unexpected_bundle_entrypoints,
 };
+pub use chatgpt::ChatGptIntegration;
 pub use claude::ClaudeIntegration;
 pub use cline::ClineIntegration;
 pub use codex::CodexIntegration;
 pub use copilot::CopilotIntegration;
 pub use cursor::CursorIntegration;
 pub use devin::DevinIntegration;
+pub use droid::DroidIntegration;
 pub use gemini::GeminiIntegration;
 pub use hermes::HermesIntegration;
 pub use kilo::KiloIntegration;
 pub use kimi::KimiIntegration;
 pub use kiro::KiroIntegration;
 pub use opencode::OpenCodeIntegration;
+pub use pi::PiIntegration;
 pub use roo_code::RooCodeIntegration;
 pub use vibe::VibeIntegration;
 pub use zed::ZedIntegration;
 
-#[hotpath::measure(label = "agent_hosts.agents.managed_skill.install_index")]
+pub use git_post_commit_hook::{install_git_post_commit_hook, report_git_post_commit_hook_status};
+pub use host_config_io::{
+    HostFileMetadataIdentityV1, JsonConfigDialect, capture_host_file_metadata, copilot_cli_dir,
+    host_config_write_intent_path, kiro_data_dir, load_json_file, load_json_file_strict,
+    load_jsonc_file, load_jsonc_file_strict, load_toml_file, parse_jsonc,
+    restore_host_file_metadata, safe_remove_host_file, safe_write_bytes_file,
+    safe_write_bytes_file_with_metadata, safe_write_json_file, safe_write_text_file,
+    vscode_data_dir, vscode_insiders_data_dir, which_tracedecay, which_tracedecay_path,
+    with_host_config_write_intents,
+};
+pub(crate) use host_config_io::{
+    JsonConfigMutation, collect_regular_files, emptied_text_mutation,
+    ensure_project_local_safe_path, ensure_project_local_safe_paths, hook_command,
+    host_home_override, lifecycle_created_container, lifecycle_created_file,
+    note_created_container, read_optional_config_bytes, record_host_config_observation_bytes,
+    root_relative_path, update_json_config_transactionally, update_toml_config_transactionally,
+    with_host_config_creations,
+};
+#[cfg(test)]
+use host_config_io::{
+    TestHostConfigWritePauseController, pause_next_host_config_write_after_validation,
+    pause_next_host_config_write_at_publication,
+};
+#[cfg(test)]
+pub(crate) use host_config_io::{recorded_install_then_uninstall, recorded_lifecycle};
+pub use mcp_registration::{
+    McpDoctorLabels, doctor_check_mcp_registration, install_mcp_server_entry,
+    mcp_config_has_tracedecay, mcp_registration_entry, mcp_servers_registration_state,
+    read_only_tool_names, report_mcp_registration, tool_names, uninstall_mcp_server_entry,
+};
+pub(crate) use mcp_registration::{
+    doctor_check_prompt_contains_tracedecay, serve_entry_registration_state,
+};
+
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.install_index",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn install_managed_skill_prompt_index(
-    profile_home: &Path,
+    profile_root: &Path,
     prompt_path: &Path,
     target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
 ) -> Result<()> {
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
-            profile_home,
-        );
-    retired_memory_digest::remove_state(&profile_root)?;
-    retired_memory_digest::remove_prompt_block(prompt_path)?;
     tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
-        &profile_root,
+        &crate::host_io(),
+        profile_root,
         target,
         prompt_path,
     )?;
     Ok(())
 }
 
-#[hotpath::measure(label = "agent_hosts.agents.managed_skill.remove_index")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.remove_index",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn remove_managed_skill_prompt_index(
-    profile_home: &Path,
     prompt_path: &Path,
     target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
 ) -> Result<()> {
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
-            profile_home,
-        );
-    retired_memory_digest::remove_state(&profile_root)?;
     tracedecay_automation_runtime::automation::skill_targets::remove_prompt_skill_index_for_target(
+        &crate::host_io(),
         prompt_path,
         target,
-    )?;
-    retired_memory_digest::remove_prompt_block(prompt_path)
+    )
 }
 
-/// Per-agent outcome of a managed-skill export refresh, keyed by agent id.
-/// `error` carries the failure message when the refresh failed; `exports`
-/// lists the destinations that were (re)written on success.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ManagedSkillExportReport {
-    pub agent: String,
-    pub exports: Vec<SkillInstallSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> bool {
-    profile_root == home.join(".tracedecay")
+/// Warns for each of a host's managed-skill prompt indexes that still
+/// advertises skills the profile's store no longer holds.
+///
+/// A host owns a *set* of index files (per-user and per-project spellings, and
+/// for some hosts one per installed editor profile), and each converges only
+/// when a lifecycle pass re-exports that file. Taking the whole set keeps one
+/// call per host answering for every index that host writes, so an unchecked
+/// spelling cannot survive by being the one the call site forgot.
+///
+/// A stale block means the host is reading a skill list the store cannot
+/// serve, so doctor names the deploy command that reconverges it. Absent files
+/// and files with no managed block read as converged, so a host the operator
+/// does not use stays silent. Doctor never repairs.
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.doctor_index",
+    level = "trace",
+    skip_all
+)]
+pub(crate) fn doctor_check_managed_skill_prompt_indexes(
+    dc: &mut DoctorCounters,
+    profile_root: &Path,
+    prompt_paths: &[PathBuf],
+    target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
+) {
+    for prompt_path in prompt_paths {
+        match tracedecay_automation_runtime::automation::skill_targets::stale_prompt_index_ids(
+            profile_root,
+            prompt_path,
+            target,
+        ) {
+            Ok(stale) if stale.is_empty() => {}
+            Ok(stale) => dc.warn(&format!(
+                "managed-skill index in {} still lists {} skill(s) absent from the managed-skill \
+                 store ({}); run `tracedecay automation skills deploy` to refresh it",
+                prompt_path.display(),
+                stale.len(),
+                stale.join(", ")
+            )),
+            Err(err) => dc.warn(&format!(
+                "could not check the managed-skill index in {}: {err}",
+                prompt_path.display()
+            )),
+        }
+    }
 }
 
 /// Re-runs the managed-skill overlay/prompt-index export for every agent
@@ -137,7 +199,11 @@ pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> boo
 /// export for one host must not block the others (or the lifecycle action
 /// that triggered the refresh). Agents with no export destinations are
 /// omitted from the result.
-#[hotpath::measure(label = "agent_hosts.agents.managed_skill.export")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.export",
+    level = "trace",
+    skip_all
+)]
 pub fn export_managed_skills_to_agents(
     home: &Path,
     profile_root: &Path,
@@ -145,9 +211,10 @@ pub fn export_managed_skills_to_agents(
     if !uses_default_user_profile(home, profile_root) {
         return Vec::new();
     }
+    let profile = ProfileRoot::new(profile_root).with_home(home);
     let mut reports = Vec::new();
     for ag in all_integrations() {
-        match ag.export_managed_skills(home, profile_root) {
+        match ag.export_managed_skills(home, &profile) {
             Ok(exports) => {
                 if !exports.is_empty() {
                     reports.push(ManagedSkillExportReport {
@@ -170,7 +237,11 @@ pub fn export_managed_skills_to_agents(
 /// Re-runs managed-skill exports for global installs under `home` plus
 /// project-local installs under `project_root`. Reports are merged per agent
 /// so dashboard callers can present one lifecycle refresh result per host.
-#[hotpath::measure(label = "agent_hosts.agents.managed_skill.export_hosts")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.export_hosts",
+    level = "trace",
+    skip_all
+)]
 pub fn export_managed_skills_to_agent_hosts(
     home: &Path,
     project_root: &Path,
@@ -179,11 +250,12 @@ pub fn export_managed_skills_to_agent_hosts(
     if !uses_default_user_profile(home, profile_root) {
         return Vec::new();
     }
+    let profile = ProfileRoot::new(profile_root).with_home(home);
     let mut reports = Vec::new();
     for ag in all_integrations() {
         let mut exports = Vec::new();
         let mut errors = Vec::new();
-        match ag.export_managed_skills(home, profile_root) {
+        match ag.export_managed_skills(home, &profile) {
             Ok(global_exports) => exports.extend(global_exports),
             Err(err) => errors.push(err.to_string()),
         }
@@ -202,9 +274,16 @@ pub fn export_managed_skills_to_agent_hosts(
     reports
 }
 
-// ---------------------------------------------------------------------------
 // AgentIntegration trait
-// ---------------------------------------------------------------------------
+
+/// What [`AgentIntegration::require_host`] proved about the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostPresence {
+    /// The host's own CLI resolved and admits its commands: it is here.
+    HostCli,
+    /// TraceDecay configures the host without a host CLI.
+    NoHostCli,
+}
 
 /// A CLI agent that can be configured to use tracedecay via MCP.
 pub trait AgentIntegration {
@@ -219,25 +298,15 @@ pub trait AgentIntegration {
         false
     }
 
-    /// Validate non-interactive install readiness without changing host state.
+    /// Whether the host has already activated what this version deploys,
+    /// read without changing host state.
     ///
-    /// This is the read-only counterpart to
-    /// [`AgentIntegration::prepare_non_interactive_install`]. Hosts that need
-    /// manual activation report the same typed deferral without staging files.
+    /// Most integrations activate through their own host CLI inside the
+    /// component transaction and are always `Ready` here. A host whose only
+    /// activation route is interactive reports a typed deferral naming the
+    /// host action; the transaction then commits the staged source it owns
+    /// and surfaces that remediation instead of claiming activation.
     fn preflight_non_interactive_install(
-        &self,
-        _ctx: &InstallContext,
-    ) -> Result<NonInteractiveInstallOutcome> {
-        Ok(NonInteractiveInstallOutcome::Ready)
-    }
-
-    /// Prepare an install requested from a non-interactive orchestration path.
-    ///
-    /// Most integrations are immediately ready. Hosts whose official lifecycle
-    /// requires user interaction may stage verified artifacts and return a
-    /// typed deferral instead. Explicit install commands still surface that
-    /// deferral as an error, while maintenance can warn and continue.
-    fn prepare_non_interactive_install(
         &self,
         _ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
@@ -248,13 +317,10 @@ pub trait AgentIntegration {
     /// through an interactive UI, or `None` for a host TraceDecay can activate
     /// non-interactively.
     ///
-    /// This is the read-only capability twin of the typed deferral
-    /// [`AgentIntegration::prepare_non_interactive_install`] returns: doctor
-    /// needs the same fact without an `InstallContext` and without staging
-    /// anything. Every integration returning `Some` here must also return
-    /// [`NonInteractiveInstallOutcome::DeferredUserAction`] from preflight —
-    /// otherwise doctor would downgrade a state that an unattended reinstall
-    /// could actually have repaired.
+    /// Doctor uses this without an `InstallContext`. Observable registrations
+    /// awaiting the host's UI return `DeferredUserAction` from preflight;
+    /// hosts without registration readback report `Unverifiable` and complete
+    /// their owned staging without a standing deferral.
     fn interactive_activation_guidance(&self) -> Option<String> {
         None
     }
@@ -265,10 +331,10 @@ pub trait AgentIntegration {
     ///
     /// The removal twin of [`AgentIntegration::interactive_activation_guidance`].
     /// A host that activates only through an interactive UI also *deactivates*
-    /// only there, so `Uninstall` must refuse while the registration stands —
+    /// only there, so `Uninstall` must refuse while the registration stands,
     /// deleting the receipt-owned artifacts underneath a live registration
     /// leaves the host resolving a bundle that no longer exists. The refusal
-    /// travels as [`host_bundle_v2::HostBundleError::NativeRemovalRequired`],
+    /// travels as [`host_bundle::HostBundleError::NativeRemovalRequired`],
     /// and this string is what makes it actionable: without it an operator is
     /// told a capability is unsupported rather than which host command to run.
     ///
@@ -279,20 +345,6 @@ pub trait AgentIntegration {
         None
     }
 
-    /// Refresh tracedecay-generated artifacts (plugin code, baked binary
-    /// paths, embedded assets) for every *detected* existing installation,
-    /// without writing to any agent config file. Pins, MCP registrations,
-    /// settings, and prompt rules are left byte-for-byte intact.
-    ///
-    /// The default reports [`UpdatePluginOutcome::ConfigOnly`]: most agents
-    /// keep their entire tracedecay integration inside shared config files
-    /// (MCP entries, hook blocks, prompt rules), so there is nothing to
-    /// refresh that would not be a config write — `tracedecay reinstall`
-    /// remains the path that reconciles those.
-    fn update_plugin(&self, _ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        Ok(UpdatePluginOutcome::ConfigOnly)
-    }
-
     /// Re-export the profile's active managed skills into every export
     /// destination this agent's existing installation owns (native overlay
     /// or prompt index), without touching any other config. Returns one
@@ -300,12 +352,12 @@ pub trait AgentIntegration {
     /// empty list for agents that either do not distribute managed skills
     /// or have no detected tracedecay installation under `home`.
     ///
-    /// Implementors must never create a new installation here — only refresh
+    /// Implementors must never create a new installation here, only refresh
     /// artifacts already owned by a catalog receipt.
     fn export_managed_skills(
         &self,
         _home: &Path,
-        _profile_root: &Path,
+        _profile: &ProfileRoot,
     ) -> Result<Vec<SkillInstallSummary>> {
         Ok(Vec::new())
     }
@@ -324,13 +376,14 @@ pub trait AgentIntegration {
     /// Verify installation health (replaces agent-specific doctor checks).
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext);
 
-    /// Whether Doctor must report this supported host's absence even when it
-    /// has no configuration directory yet. Most optional hosts stay quiet
-    /// until their own registration exists; hosts with a documented deferred
-    /// or native-only lifecycle opt in so Doctor does not turn their absence
-    /// into an empty success.
-    fn reports_absence_to_doctor(&self) -> bool {
-        false
+    /// Require the host itself on this machine: the one presence check
+    /// every lifecycle and Doctor apply before touching a host. A host whose
+    /// own CLI is not on `PATH` fails with `HostCliUnavailable`, which
+    /// classifies through `TraceDecayError::host_absence` as an
+    /// informational skip. Hosts TraceDecay configures without a host CLI
+    /// need none, and only their files can show they are here.
+    fn require_host(&self, _home: &Path) -> Result<HostPresence> {
+        Ok(HostPresence::NoHostCli)
     }
 
     /// Evidence that the host application itself is present on this machine
@@ -339,20 +392,8 @@ pub trait AgentIntegration {
     /// about detected-but-unintegrated hosts instead of printing nothing for
     /// them. The default is `None`: a host without a cheap, reliable presence
     /// probe stays quiet rather than guessing at foreign config layouts.
-    fn detected_host_surface(&self, _home: &Path) -> Option<PathBuf> {
+    fn detected_host_surface(&self, _home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         None
-    }
-
-    /// Verify installation health using the daemon-owned snapshot already
-    /// collected by Doctor. Integrations with daemon-backed diagnostics can
-    /// override this without issuing another daemon call.
-    fn healthcheck_with_daemon_status(
-        &self,
-        dc: &mut DoctorCounters,
-        ctx: &HealthcheckContext,
-        _daemon_status: Option<&serde_json::Value>,
-    ) {
-        self.healthcheck(dc, ctx);
     }
 
     /// Read-only native registration state for one receipt-backed component.
@@ -360,10 +401,10 @@ pub trait AgentIntegration {
     /// receipts; implementations must not infer uninstalled catalog pairs.
     fn host_component_registration(
         &self,
-        _component: host_bundle_v2::HostBundleComponentV1,
+        _component: host_bundle::HostComponentV1,
         _ctx: &HealthcheckContext,
-    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
-        host_bundle_v2::HostBundleRegistrationStateV1::Missing
+    ) -> host_bundle::HostBundleRegistrationStateV1 {
+        host_bundle::HostBundleRegistrationStateV1::Missing
     }
 
     /// Registration state for a concrete lifecycle policy. Most hosts ignore
@@ -371,11 +412,24 @@ pub trait AgentIntegration {
     /// dashboard-disabled registrations without weakening doctor readback.
     fn host_component_registration_for_lifecycle(
         &self,
-        component: host_bundle_v2::HostBundleComponentV1,
+        component: host_bundle::HostComponentV1,
         health: &HealthcheckContext,
         _install: &InstallContext,
-    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+    ) -> host_bundle::HostBundleRegistrationStateV1 {
         self.host_component_registration(component, health)
+    }
+
+    /// Auto-discovered entrypoints inside TraceDecay's deployed bundle that no
+    /// TraceDecay release shipped. The host loads them as part of the
+    /// TraceDecay plugin, so activating `components` cannot converge while
+    /// they remain; lifecycle preflight refuses them as an ownership conflict.
+    fn foreign_bundle_entrypoints(
+        &self,
+        _components: &[host_bundle::HostComponentV1],
+        _home: &Path,
+        _profile_root: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
     }
 
     /// Returns true if this agent appears to be installed on the system
@@ -386,7 +440,7 @@ pub trait AgentIntegration {
 
     /// Returns true if tracedecay MCP server is already registered in this
     /// agent's config. Used for migration backfill.
-    fn has_tracedecay(&self, _home: &Path) -> bool {
+    fn has_tracedecay(&self, _home: &Path, _profile: &ProfileRoot) -> bool {
         false
     }
 
@@ -398,15 +452,18 @@ pub trait AgentIntegration {
     /// should return the same path the install helper writes to, including
     /// any platform-conditional branching. Returning `None` means "no single
     /// primary config" (e.g. an append-only TOML file with no rewrite path).
-    fn primary_config_path(&self, _home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, _home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         None
     }
 
     /// Every mutable host registration/configuration path participating in an
-    /// aggregate component-set lifecycle. The transaction stages backups for
-    /// all returned paths before invoking the host registration authority.
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        self.primary_config_path(home).into_iter().collect()
+    /// aggregate component-set lifecycle. The transaction snapshots all
+    /// returned paths in memory before invoking the host registration
+    /// authority.
+    fn host_registration_paths(&self, home: &Path, profile: &ProfileRoot) -> Vec<PathBuf> {
+        self.primary_config_path(home, profile)
+            .into_iter()
+            .collect()
     }
 
     /// Mutable registration paths for the exact selected components. Hosts
@@ -414,22 +471,24 @@ pub trait AgentIntegration {
     /// transaction never snapshots or restores another component's state.
     fn host_component_registration_paths(
         &self,
-        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _components: &[host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
-        self.host_registration_paths(home)
+        self.host_registration_paths(home, profile)
     }
 
-    /// Fallible exact registration inventory used by the transaction backup.
+    /// Fallible exact registration inventory used by the transaction snapshot.
     ///
     /// Hosts whose paths depend on validated profile data override this rather
     /// than silently dropping files from rollback ownership.
     fn host_component_registration_paths_checked(
         &self,
-        components: &[host_bundle_v2::HostBundleComponentV1],
+        components: &[host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<PathBuf>> {
-        Ok(self.host_component_registration_paths(components, home))
+        Ok(self.host_component_registration_paths(components, home, profile))
     }
 
     /// Exact project-scoped paths the catalog registration projection may
@@ -437,11 +496,12 @@ pub trait AgentIntegration {
     /// complete set before invoking the projection.
     fn project_host_component_registration_paths(
         &self,
-        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _components: &[host_bundle::HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         _project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
-        Err(crate::errors::TraceDecayError::Config {
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "{} has no catalog-backed project registration projection",
                 self.name()
@@ -460,10 +520,10 @@ pub trait AgentIntegration {
     /// deployed registration boundary.
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[host_bundle_v2::HostBundleComponentV1],
+        components: &[host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&host_bundle_v2::HostBundleComponentV1::Core) {
+        if components.contains(&host_bundle::HostComponentV1::Core) {
             self.activate_deployed_host_registration(ctx)
         } else {
             Ok(())
@@ -481,10 +541,10 @@ pub trait AgentIntegration {
     /// receipt-backed components.
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[host_bundle_v2::HostBundleComponentV1],
+        components: &[host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&host_bundle_v2::HostBundleComponentV1::Core) {
+        if components.contains(&host_bundle::HostComponentV1::Core) {
             self.deactivate_deployed_host_registration(ctx)
         } else {
             Ok(())
@@ -493,16 +553,17 @@ pub trait AgentIntegration {
 
     /// Apply only this host's project-scoped registration projection.
     ///
-    /// The component-set transaction calls this boundary after it has staged
-    /// exact registration backups. Implementations must mutate only bounded
-    /// project registration paths; they must not install global assets.
+    /// The component-set transaction calls this boundary after it has
+    /// snapshotted the exact registration paths. Implementations must mutate
+    /// only bounded project registration paths; they must not install global
+    /// assets.
     fn activate_project_host_component_registration(
         &self,
-        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _components: &[host_bundle::HostComponentV1],
         _ctx: &InstallContext,
         _project_path: &Path,
     ) -> Result<()> {
-        Err(crate::errors::TraceDecayError::Config {
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "{} has no catalog-backed project registration projection",
                 self.name()
@@ -513,11 +574,11 @@ pub trait AgentIntegration {
     /// Remove only this host's project-scoped registration projection.
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _components: &[host_bundle::HostComponentV1],
         _ctx: &InstallContext,
         _project_path: &Path,
     ) -> Result<()> {
-        Err(crate::errors::TraceDecayError::Config {
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "{} has no catalog-backed project registration projection",
                 self.name()
@@ -532,8 +593,8 @@ pub trait AgentIntegration {
 pub struct DeferredUserAction {
     /// Exact operator-facing remediation.
     pub remediation: String,
-    /// Verified artifacts staged for the user to apply through the host.
-    pub staged_paths: Vec<PathBuf>,
+    /// The exact host command the operator runs to finish the operation.
+    pub command: String,
 }
 
 /// Result of preparing an install for a non-interactive caller.
@@ -545,27 +606,13 @@ pub enum NonInteractiveInstallOutcome {
     DeferredUserAction(DeferredUserAction),
 }
 
-/// Outcome of [`AgentIntegration::update_plugin`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UpdatePluginOutcome {
-    /// Generated artifacts were refreshed at these locations.
-    Refreshed(Vec<PathBuf>),
-    /// The integration ships generated artifacts, but none were detected on
-    /// this machine — nothing was written.
-    NotInstalled,
-    /// The integration only writes shared config files; there are no
-    /// tracedecay-generated artifacts to refresh without touching config.
-    ConfigOnly,
-    /// Verified artifacts were staged, but the host requires explicit user
-    /// action before it can activate them.
-    DeferredUserAction(DeferredUserAction),
-}
-
 /// Context passed to catalog-backed host registration and refresh operations.
 pub struct InstallContext {
     pub home: PathBuf,
+    /// The TraceDecay profile whose managed skills and settings the host
+    /// integration reads.
+    pub profile: ProfileRoot,
     pub tracedecay_bin: String,
-    pub tool_permissions: Vec<String>,
     /// Codex update/uninstall can use this as an explicit repo-local plugin
     /// target. Other integrations ignore it.
     pub project_root: Option<PathBuf>,
@@ -574,12 +621,18 @@ pub struct InstallContext {
     /// --no-dashboard` opts out and removes a previous deploy). Other agents
     /// ignore this field.
     pub dashboard: bool,
+    /// This agent's resolved MCP launch args; every registration writer
+    /// renders `serve` from it.
+    pub serve_args: serve_args::ServeArgs,
 }
 
 /// Context passed to [`AgentIntegration::healthcheck`].
 pub struct HealthcheckContext {
     pub home: PathBuf,
+    pub profile: ProfileRoot,
     pub project_path: PathBuf,
+    /// Every agent's expected MCP launch args; probes read their own entry.
+    pub catalog_profiles: serve_args::HostCatalogProfiles,
 }
 
 /// Where an MCP server registration is being written.
@@ -597,9 +650,7 @@ pub(crate) enum InstallScope {
     ProjectLocal,
 }
 
-// ---------------------------------------------------------------------------
 // Registry
-// ---------------------------------------------------------------------------
 
 /// Returns the agent matching `id`, or an error if unknown.
 pub fn get_integration(id: &str) -> Result<Box<dyn AgentIntegration>> {
@@ -619,7 +670,10 @@ pub fn get_integration(id: &str) -> Result<Box<dyn AgentIntegration>> {
         "kilo" => Ok(Box::new(KiloIntegration)),
         "kiro" => Ok(Box::new(KiroIntegration)),
         "kimi" => Ok(Box::new(KimiIntegration)),
+        "chatgpt" => Ok(Box::new(ChatGptIntegration)),
         "vibe" => Ok(Box::new(VibeIntegration)),
+        "pi" => Ok(Box::new(PiIntegration)),
+        "droid" => Ok(Box::new(DroidIntegration)),
         _ => Err(TraceDecayError::Config {
             message: format!(
                 "unknown agent: \"{id}\". Available agents: {}",
@@ -647,7 +701,10 @@ pub fn all_integrations() -> Vec<Box<dyn AgentIntegration>> {
         Box::new(KiloIntegration),
         Box::new(KiroIntegration),
         Box::new(KimiIntegration),
+        Box::new(ChatGptIntegration),
         Box::new(VibeIntegration),
+        Box::new(PiIntegration),
+        Box::new(DroidIntegration),
     ]
 }
 
@@ -669,36 +726,35 @@ pub fn available_integrations() -> Vec<&'static str> {
         "kilo",
         "kiro",
         "kimi",
+        "chatgpt",
         "vibe",
+        "pi",
+        "droid",
     ]
 }
 
-#[cfg(test)]
-#[test]
-fn devin_is_a_registered_independent_agent() {
-    let integration = get_integration("devin").expect("Devin integration is registered");
-    assert_eq!(integration.name(), "Devin");
-    assert!(available_integrations().contains(&"devin"));
-}
-
-pub fn integration_id_for_host(host: host_bundle_v2::HostKindV1) -> &'static str {
+pub fn integration_id_for_host(host: host_bundle::HostKindV1) -> &'static str {
     match host {
-        host_bundle_v2::HostKindV1::ClaudeCode => "claude",
-        host_bundle_v2::HostKindV1::CursorDesktop | host_bundle_v2::HostKindV1::CursorCloud => {
-            "cursor"
-        }
-        host_bundle_v2::HostKindV1::Codex => "codex",
-        host_bundle_v2::HostKindV1::Devin => "devin",
-        host_bundle_v2::HostKindV1::Hermes => "hermes",
-        host_bundle_v2::HostKindV1::Kiro => "kiro",
-        host_bundle_v2::HostKindV1::ClineFamily => "cline",
-        host_bundle_v2::HostKindV1::Cline => "cline",
-        host_bundle_v2::HostKindV1::RooCode => "roo-code",
-        host_bundle_v2::HostKindV1::Kilo => "kilo",
-        host_bundle_v2::HostKindV1::KimiCode => "kimi",
-        host_bundle_v2::HostKindV1::OpenCode => "opencode",
-        host_bundle_v2::HostKindV1::Gemini => "gemini",
-        host_bundle_v2::HostKindV1::Copilot => "copilot",
+        host_bundle::HostKindV1::ClaudeCode => "claude",
+        host_bundle::HostKindV1::CursorDesktop | host_bundle::HostKindV1::CursorCloud => "cursor",
+        host_bundle::HostKindV1::Codex => "codex",
+        host_bundle::HostKindV1::Devin => "devin",
+        host_bundle::HostKindV1::Zed => "zed",
+        host_bundle::HostKindV1::Antigravity => "antigravity",
+        host_bundle::HostKindV1::Vibe => "vibe",
+        host_bundle::HostKindV1::Hermes => "hermes",
+        host_bundle::HostKindV1::Kiro => "kiro",
+        host_bundle::HostKindV1::ClineFamily => "cline",
+        host_bundle::HostKindV1::Cline => "cline",
+        host_bundle::HostKindV1::RooCode => "roo-code",
+        host_bundle::HostKindV1::Kilo => "kilo",
+        host_bundle::HostKindV1::KimiCode => "kimi",
+        host_bundle::HostKindV1::ChatGpt => "chatgpt",
+        host_bundle::HostKindV1::OpenCode => "opencode",
+        host_bundle::HostKindV1::Gemini => "gemini",
+        host_bundle::HostKindV1::Copilot => "copilot",
+        host_bundle::HostKindV1::Pi => "pi",
+        host_bundle::HostKindV1::FactoryDroid => "droid",
     }
 }
 
@@ -711,33 +767,42 @@ struct AgentRegistrationInspector<'a> {
     context: &'a HealthcheckContext,
 }
 
-impl host_bundle_v2::HostBundleRegistrationInspectorV1 for AgentRegistrationInspector<'_> {
+impl host_bundle::HostBundleRegistrationInspectorV1 for AgentRegistrationInspector<'_> {
     fn inspect_registration(
         &self,
-        host: host_bundle_v2::HostKindV1,
-        component: host_bundle_v2::HostBundleComponentV1,
-    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+        host: host_bundle::HostKindV1,
+        component: host_bundle::HostComponentV1,
+    ) -> host_bundle::HostBundleRegistrationStateV1 {
         get_integration(integration_id_for_host(host)).map_or(
-            host_bundle_v2::HostBundleRegistrationStateV1::Missing,
+            host_bundle::HostBundleRegistrationStateV1::Missing,
             |integration| integration.host_component_registration(component, self.context),
         )
     }
 
-    fn interactive_activation_guidance(&self, host: host_bundle_v2::HostKindV1) -> Option<String> {
+    fn interactive_activation_guidance(&self, host: host_bundle::HostKindV1) -> Option<String> {
         get_integration(integration_id_for_host(host))
             .ok()
             .and_then(|integration| integration.interactive_activation_guidance())
     }
+
+    fn serve_args(&self, host: host_bundle::HostKindV1) -> serve_args::ServeArgs {
+        self.context
+            .catalog_profiles
+            .serve_args(integration_id_for_host(host))
+    }
 }
 
-#[hotpath::measure(label = "agent_hosts.agents.host_bundle.inspect")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.host_bundle.inspect",
+    level = "trace",
+    skip_all
+)]
 pub fn inspect_receipt_backed_host_components(
     context: &HealthcheckContext,
     lifecycle_root: &Path,
     generator_commit: &str,
-) -> std::result::Result<host_bundle_v2::HostBundleDoctorReportV1, host_bundle_v2::HostBundleError>
-{
-    host_bundle_v2::inspect_installed_host_bundle_components_at(
+) -> std::result::Result<host_bundle::HostBundleDoctorReportV1, host_bundle::HostBundleError> {
+    host_bundle::inspect_installed_host_bundle_components_at(
         &context.home,
         lifecycle_root,
         &AgentRegistrationInspector { context },
@@ -745,1178 +810,136 @@ pub fn inspect_receipt_backed_host_components(
     )
 }
 
-// ---------------------------------------------------------------------------
 // DoctorCounters
-// ---------------------------------------------------------------------------
 
-/// Diagnostic counters for doctor checks.
+/// Diagnostic counters for doctor checks, plus every check line in order so
+/// `tracedecay doctor --json` carries exactly what the terminal showed.
 #[derive(Default)]
 pub struct DoctorCounters {
     pub issues: u32,
     pub warnings: u32,
+    /// Steps only the operator can take; nothing failed, but the
+    /// installation is not converged until they are done.
+    pub pending_actions: u32,
+    pub checks: Vec<DoctorCheckV1>,
+    /// Section titles keyed by the check index they precede, so concurrent
+    /// collectors can replay human output in the original order.
+    pub sections: Vec<(usize, String)>,
+    quiet: bool,
+}
+
+/// One reported doctor check line.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DoctorCheckV1 {
+    pub level: DoctorCheckLevelV1,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorCheckLevelV1 {
+    Pass,
+    Issue,
+    Warning,
+    PendingOperatorAction,
+    /// A host that is not installed.
+    Skipped,
+    Info,
 }
 
 impl DoctorCounters {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn pass(&self, msg: &str) {
-        eprintln!("  \x1b[32m✔\x1b[0m {msg}");
+    /// Records checks without writing the human report, for `doctor --json`.
+    pub fn quiet() -> Self {
+        Self {
+            quiet: true,
+            ..Self::default()
+        }
+    }
+    pub fn is_quiet(&self) -> bool {
+        self.quiet
+    }
+    pub fn section(&mut self, title: &str) {
+        self.sections.push((self.checks.len(), title.to_owned()));
+        if !self.quiet {
+            eprintln!("\n\x1b[1m{title}\x1b[0m");
+        }
+    }
+    pub fn pass(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::Pass, msg);
     }
     pub fn fail(&mut self, msg: &str) {
-        eprintln!("  \x1b[31m✘\x1b[0m {msg}");
-        self.issues += 1;
+        self.report(DoctorCheckLevelV1::Issue, msg);
     }
     pub fn warn(&mut self, msg: &str) {
-        eprintln!("  \x1b[33m!\x1b[0m {msg}");
-        self.warnings += 1;
+        self.report(DoctorCheckLevelV1::Warning, msg);
     }
-    pub fn info(&self, msg: &str) {
-        eprintln!("    {msg}");
+    pub fn pending(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::PendingOperatorAction, msg);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/// Load a JSON file, returning an empty object on missing/invalid.
-/// Use this for **read-only** paths (healthcheck, `has_tracedecay`, etc.).
-/// For install/edit paths, use [`load_json_file_strict`] instead.
-pub fn load_json_file(path: &Path) -> serde_json::Value {
-    if path.exists() {
-        let contents = std::fs::read_to_string(path).unwrap_or_default();
-        serde_json::from_str(&contents).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
+    /// A host that is not installed; counted nowhere.
+    pub fn skipped(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::Skipped, msg);
     }
-}
-
-/// Dialect of a JSON-shaped host config, binding the strict content parser
-/// used on write paths. Read-only probes keep the lenient [`load_json_file`]
-/// / [`load_jsonc_file`] loaders.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JsonConfigDialect {
-    Json,
-    Jsonc,
-}
-
-impl JsonConfigDialect {
-    /// Strict parse of already-observed config contents for a write path.
-    /// Missing or blank content is a fresh `{}`; anything unparseable is a
-    /// typed error so a transform never runs against fabricated state.
-    fn parse_for_edit(self, path: &Path, contents: &str) -> Result<serde_json::Value> {
-        if contents.trim().is_empty() {
-            return Ok(serde_json::json!({}));
+    pub fn info(&mut self, msg: &str) {
+        self.report(DoctorCheckLevelV1::Info, msg);
+    }
+    /// Replays another collector's sections and check lines onto this one.
+    pub fn replay_from(&mut self, src: Self) {
+        let mut sections = src.sections.into_iter().peekable();
+        for (index, check) in src.checks.into_iter().enumerate() {
+            while let Some((_, title)) = sections.next_if(|(at, _)| *at == index) {
+                self.section(&title);
+            }
+            match check.level {
+                DoctorCheckLevelV1::Pass => self.pass(&check.message),
+                DoctorCheckLevelV1::Issue => self.fail(&check.message),
+                DoctorCheckLevelV1::Warning => self.warn(&check.message),
+                DoctorCheckLevelV1::PendingOperatorAction => self.pending(&check.message),
+                DoctorCheckLevelV1::Skipped => self.skipped(&check.message),
+                DoctorCheckLevelV1::Info => self.info(&check.message),
+            }
         }
-        let (dialect_label, parseable) = match self {
-            Self::Json => ("JSON", Cow::Borrowed(contents)),
-            Self::Jsonc => ("JSONC", Cow::Owned(strip_jsonc_comments(contents))),
+        for (_, title) in sections {
+            self.section(&title);
+        }
+    }
+    fn report(&mut self, level: DoctorCheckLevelV1, msg: &str) {
+        let marker = match level {
+            DoctorCheckLevelV1::Pass => "  \x1b[32m✔\x1b[0m ",
+            DoctorCheckLevelV1::Issue => {
+                self.issues += 1;
+                "  \x1b[31m✘\x1b[0m "
+            }
+            DoctorCheckLevelV1::Warning => {
+                self.warnings += 1;
+                "  \x1b[33m!\x1b[0m "
+            }
+            DoctorCheckLevelV1::PendingOperatorAction => {
+                self.pending_actions += 1;
+                "  \x1b[33m…\x1b[0m "
+            }
+            DoctorCheckLevelV1::Skipped => "  - ",
+            DoctorCheckLevelV1::Info => "    ",
         };
-        serde_json::from_str(&parseable).map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "cannot parse {} as {dialect_label}: {e}\n  \
-                 Hint: fix the JSON syntax manually and re-run the command,\n  \
-                 or delete the file to start fresh",
-                path.display()
-            ),
-        })
-    }
-}
-
-/// Load a JSON file for **editing**. Unlike [`load_json_file`], this returns
-/// an error if the file exists but cannot be parsed, preventing silent data
-/// loss when the modified value is written back.
-///
-/// # Error conditions
-/// - File exists but is not readable (permissions, I/O error).
-/// - File exists and has content but contains invalid JSON.
-///
-/// Returns `Ok(json!({}))` only when the file does not exist or is empty,
-/// which is safe for creating a new config from scratch.
-#[hotpath::measure(label = "agent_hosts.agents.config.load_json")]
-pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
-    if !path.exists() {
-        return Ok(serde_json::json!({}));
-    }
-    let contents = std::fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
-        message: format!("cannot read {}: {e}", path.display()),
-    })?;
-    JsonConfigDialect::Json.parse_for_edit(path, &contents)
-}
-
-pub fn config_backup_path(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.bak", path.display()))
-}
-
-/// Create a backup copy of a config file before modifying it.
-///
-/// The backup itself is written atomically: content is first written to a
-/// staging file (`.bak.new`), then renamed to `.bak`. This ensures the
-/// `.bak` file is never half-written even if the process is killed.
-///
-/// Returns `Ok(Some(backup_path))` when a backup was created, or `Ok(None)`
-/// when the file did not exist (nothing to back up).
-///
-/// # Error conditions
-/// - File exists but cannot be read (permissions, I/O error).
-/// - Staging file cannot be written (disk full, permissions).
-/// - Staging file cannot be renamed to `.bak` (cross-device, permissions).
-#[hotpath::measure(label = "agent_hosts.agents.host_config.backup")]
-pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let backup_path = config_backup_path(path);
-    let staging_path = PathBuf::from(format!("{}.bak.new", path.display()));
-
-    let content = std::fs::read(path).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to read {} for backup: {e}\n  \
-             Hint: check file permissions",
-            path.display()
-        ),
-    })?;
-    std::fs::write(&staging_path, &content).map_err(|e| {
-        std::fs::remove_file(&staging_path).ok();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to write backup staging file {}: {e}\n  \
-                 Hint: check available disk space and permissions",
-                staging_path.display()
-            ),
+        if !self.quiet {
+            eprintln!("{marker}{msg}");
         }
-    })?;
-    // The backup holds the same secrets as the original (host configs can
-    // carry credential env values), so it must not be published with the
-    // umask-default mode: copy the original's permission identity onto the
-    // staging file before it becomes `.bak`.
-    let original_metadata =
-        capture_host_file_metadata(path).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to capture metadata for {} before backup: {error}",
-                path.display()
-            ),
-        })?;
-    restore_host_file_metadata(&staging_path, &original_metadata).map_err(|error| {
-        std::fs::remove_file(&staging_path).ok();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to apply original permissions to backup staging file {}: {error}",
-                staging_path.display()
-            ),
-        }
-    })?;
-    let backup_metadata =
-        capture_host_file_metadata(&staging_path).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to inspect backup staging file {}: {error}",
-                staging_path.display()
-            ),
-        })?;
-    persist_host_config_write_intent(&backup_path, &content, Some(&backup_metadata))?;
-
-    // Atomic rename staging → .bak
-    std::fs::rename(&staging_path, &backup_path).map_err(|e| {
-        std::fs::remove_file(&staging_path).ok();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to create backup {}: {e}\n  \
-                 Hint: check file permissions",
-                backup_path.display()
-            ),
-        }
-    })?;
-
-    Ok(Some(backup_path))
-}
-
-/// Restore a config file from its backup. Prints instructions for manual
-/// recovery if the restore itself fails.
-pub fn restore_config_backup(original: &Path, backup: &Path) {
-    match std::fs::copy(backup, original) {
-        Ok(_) => {
-            eprintln!(
-                "\x1b[33m⚠\x1b[0m  Restored {} from backup",
-                original.display()
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "\x1b[31m✗\x1b[0m Failed to auto-restore {} from backup: {e}",
-                original.display()
-            );
-            eprintln!(
-                "  Manual recovery: cp '{}' '{}'",
-                backup.display(),
-                original.display()
-            );
-        }
-    }
-}
-
-/// Write a JSON value to a file via atomic rename.
-///
-/// The caller is responsible for creating the backup via
-/// [`backup_config_file`] before loading the config. Pass the backup path
-/// here so that it can be mentioned in error messages and used for restore
-/// if the rename somehow leaves the target in a bad state.
-///
-/// # Strategy
-///
-/// Serialize and re-validate, then use the shared durable atomic writer to
-/// replace the target, preserve its permissions, and sync its parent entry.
-///
-/// # Error conditions
-/// - Serialization failure (should not happen with well-formed Values).
-/// - Re-parse validation failure (internal bug).
-/// - Cannot create parent directory.
-/// - Atomic staging or publication failure (permissions, disk full).
-///
-/// In every error case the original file remains intact.
-pub fn safe_write_json_file(
-    path: &Path,
-    value: &serde_json::Value,
-    backup: Option<&Path>,
-) -> Result<()> {
-    let content = render_json_config(path, value)?;
-    safe_write_bytes_file(path, content.as_bytes(), backup)
-}
-
-/// Serialize a JSON config value for publication: pretty-printed, re-parse
-/// validated, trailing newline.
-fn render_json_config(path: &Path, value: &serde_json::Value) -> Result<String> {
-    let pretty = serde_json::to_string_pretty(value).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to serialize JSON for {}: {e}", path.display()),
-    })?;
-
-    // Re-parse to verify the serialized output is valid JSON.
-    if serde_json::from_str::<serde_json::Value>(&pretty).is_err() {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "internal error: serialized JSON for {} failed re-parse validation.\n  \
-                 This is a bug in tracedecay — please report it.",
-                path.display()
-            ),
+        self.checks.push(DoctorCheckV1 {
+            level,
+            message: msg.to_owned(),
         });
     }
-
-    Ok(format!("{pretty}\n"))
 }
 
-/// Value-level mutation for [`update_json_config_transactionally`].
-pub(crate) enum JsonConfigMutation {
-    Unchanged,
-    Write(serde_json::Value),
-    Remove,
-}
-
-/// Read-under-lock → transform → publish-from-snapshot for a JSON-shaped host
-/// config. The transform sees the value parsed strictly from the exact bytes
-/// the write lock observed, so a concurrent writer can no longer slip between
-/// load and publish, and a corrupt config is a typed error instead of a
-/// silently-empty object. Rewrites and removals of an existing file leave a
-/// `.bak` (issue #63).
-pub(crate) fn update_json_config_transactionally<T>(
-    path: &Path,
-    dialect: JsonConfigDialect,
-    update: impl FnOnce(serde_json::Value) -> Result<(T, JsonConfigMutation)>,
-) -> Result<T> {
-    update_config_file_transactionally(path, |existing| {
-        let settings = dialect.parse_for_edit(path, existing)?;
-        let (output, mutation) = update(settings)?;
-        let mutation = match mutation {
-            JsonConfigMutation::Unchanged => TextFileMutation::Unchanged,
-            JsonConfigMutation::Write(value) => {
-                TextFileMutation::Write(render_json_config(path, &value)?)
-            }
-            JsonConfigMutation::Remove => TextFileMutation::Remove,
-        };
-        Ok((output, mutation))
-    })
-}
-
-/// TOML sibling of [`update_json_config_transactionally`]. The transform
-/// returns the serialized replacement text itself because TOML publication
-/// may need post-serialization shaping (Codex's explicit `[hooks.state]`
-/// parent table).
-pub(crate) fn update_toml_config_transactionally<T>(
-    path: &Path,
-    update: impl FnOnce(toml::Value) -> Result<(T, TextFileMutation)>,
-) -> Result<T> {
-    update_config_file_transactionally(path, |existing| {
-        let value = parse_toml_config(path, existing)?;
-        update(value)
-    })
-}
-
-/// Write text to a file via atomic sibling rename.
-///
-/// Mirrors [`safe_write_json_file`] for generated prompt/rule files that are
-/// plain text rather than structured JSON. The target is not opened for writing
-/// until the final rename, so a failed write leaves the original untouched.
-pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
-    safe_write_bytes_file(path, contents.as_bytes(), backup)
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub struct HostFileMetadataIdentityV1 {
-    readonly: bool,
-    unix_mode: Option<u32>,
-    posix_acl_supported: bool,
-    posix_acl_access: Option<Vec<u8>>,
-}
-
-pub fn capture_host_file_metadata(path: &Path) -> std::io::Result<HostFileMetadataIdentityV1> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
-        return Err(std::io::Error::other(format!(
-            "unsafe host metadata path: {}",
-            path.display()
-        )));
-    }
-    let permissions = metadata.permissions();
-    #[cfg(unix)]
-    let unix_mode = {
-        use std::os::unix::fs::PermissionsExt;
-        Some(permissions.mode())
-    };
-    #[cfg(not(unix))]
-    let unix_mode = None;
-    #[cfg(target_os = "linux")]
-    let (posix_acl_supported, posix_acl_access) = match xattr::get(path, "system.posix_acl_access")
-    {
-        Ok(acl) => (true, acl),
-        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => (false, None),
-        Err(error) => return Err(error),
-    };
-    #[cfg(not(target_os = "linux"))]
-    let (posix_acl_supported, posix_acl_access) = (false, None);
-    Ok(HostFileMetadataIdentityV1 {
-        readonly: permissions.readonly(),
-        unix_mode,
-        posix_acl_supported,
-        posix_acl_access,
-    })
-}
-
-pub fn restore_host_file_metadata(
-    path: &Path,
-    state: &HostFileMetadataIdentityV1,
-) -> std::io::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
-        return Err(std::io::Error::other(format!(
-            "unsafe host metadata path: {}",
-            path.display()
-        )));
-    }
-    let mut permissions = metadata.permissions();
-    #[cfg(unix)]
-    if let Some(mode) = state.unix_mode {
-        use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(mode);
-    }
-    #[cfg(not(unix))]
-    permissions.set_readonly(state.readonly);
-    let current = std::fs::symlink_metadata(path)?;
-    if current.file_type().is_symlink()
-        || current.file_type() != metadata.file_type()
-        || !(current.is_file() || current.is_dir())
-    {
-        return Err(std::io::Error::other(format!(
-            "host metadata path changed type: {}",
-            path.display()
-        )));
-    }
-    std::fs::set_permissions(path, permissions)?;
-    #[cfg(target_os = "linux")]
-    if state.posix_acl_supported {
-        let current = std::fs::symlink_metadata(path)?;
-        if current.file_type().is_symlink() || !(current.is_file() || current.is_dir()) {
-            return Err(std::io::Error::other(format!(
-                "host metadata path changed type: {}",
-                path.display()
-            )));
-        }
-        match &state.posix_acl_access {
-            Some(acl) => xattr::set(path, "system.posix_acl_access", acl)?,
-            None => {
-                if xattr::get(path, "system.posix_acl_access")?.is_some() {
-                    xattr::remove(path, "system.posix_acl_access")?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Atomically replace a host-owned file while preserving existing permissions.
-///
-/// The shared durable writer syncs bytes and the parent entry. When replacing
-/// an existing host config, restore its exact permission bits and durably flush
-/// that metadata before returning. This authority is shared by every host:
-/// existing config symlinks are always refused so no integration can redirect
-/// a lifecycle write outside its inventoried path.
-pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>) -> Result<()> {
-    safe_write_bytes_file_with_metadata(path, contents, backup, None)
-}
-
-#[hotpath::measure(label = "agent_hosts.agents.host_config.write")]
-pub fn safe_write_bytes_file_with_metadata(
-    path: &Path,
-    contents: &[u8],
-    backup: Option<&Path>,
-    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
-) -> Result<()> {
-    text_file_transaction::write_bytes_file_locked(path, contents, backup, replacement_metadata)
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TestHostConfigWriteBoundary {
-    Validation,
-    Publication,
-    Published,
-}
-
-#[cfg(test)]
-struct TestHostConfigWritePause {
-    state: std::sync::Mutex<(bool, bool)>,
-    changed: std::sync::Condvar,
-}
-
-#[cfg(test)]
-type TestHostConfigWritePauseEntry = (
-    PathBuf,
-    TestHostConfigWriteBoundary,
-    std::sync::Weak<TestHostConfigWritePause>,
-);
-
-#[cfg(test)]
-static TEST_HOST_CONFIG_WRITE_PAUSES: std::sync::LazyLock<
-    std::sync::Mutex<Vec<TestHostConfigWritePauseEntry>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
-
-#[cfg(test)]
-struct TestHostConfigWritePauseController(std::sync::Arc<TestHostConfigWritePause>);
-
-#[cfg(test)]
-impl TestHostConfigWritePauseController {
-    fn wait_until_reached(&self) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut state = self.0.state.lock().expect("host write pause state");
-        while !state.0 {
-            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
-                drop(state);
-                panic!("host write did not reach its publication boundary");
-            };
-            let (next, timeout) = self
-                .0
-                .changed
-                .wait_timeout(state, remaining)
-                .expect("host write pause wait");
-            state = next;
-            if !state.0 && timeout.timed_out() {
-                drop(state);
-                panic!("host write pause timed out");
-            }
-        }
-    }
-
-    fn resume(&self) {
-        let mut state = self.0.state.lock().expect("host write pause state");
-        state.1 = true;
-        self.0.changed.notify_all();
-    }
-}
-
-#[cfg(test)]
-impl Drop for TestHostConfigWritePauseController {
-    fn drop(&mut self) {
-        self.resume();
-    }
-}
-
-#[cfg(test)]
-fn pause_next_host_config_write_after_validation(
-    path: &Path,
-) -> TestHostConfigWritePauseController {
-    pause_next_host_config_write(path, TestHostConfigWriteBoundary::Validation)
-}
-
-#[cfg(test)]
-fn pause_next_host_config_write_at_publication(path: &Path) -> TestHostConfigWritePauseController {
-    pause_next_host_config_write(path, TestHostConfigWriteBoundary::Publication)
-}
-
-#[cfg(test)]
-fn pause_next_host_config_write_after_publication(
-    path: &Path,
-) -> TestHostConfigWritePauseController {
-    pause_next_host_config_write(path, TestHostConfigWriteBoundary::Published)
-}
-
-#[cfg(test)]
-fn pause_next_host_config_write(
-    path: &Path,
-    boundary: TestHostConfigWriteBoundary,
-) -> TestHostConfigWritePauseController {
-    let pause = std::sync::Arc::new(TestHostConfigWritePause {
-        state: std::sync::Mutex::new((false, false)),
-        changed: std::sync::Condvar::new(),
-    });
-    TEST_HOST_CONFIG_WRITE_PAUSES
-        .lock()
-        .expect("host write pause registry")
-        .push((
-            path.to_path_buf(),
-            boundary,
-            std::sync::Arc::downgrade(&pause),
-        ));
-    TestHostConfigWritePauseController(pause)
-}
-
-#[cfg(test)]
-fn test_pause_host_config_write(path: &Path, boundary: TestHostConfigWriteBoundary) {
-    let pause = {
-        let mut pauses = TEST_HOST_CONFIG_WRITE_PAUSES
-            .lock()
-            .expect("host write pause registry");
-        let Some(index) = pauses
-            .iter()
-            .position(|(candidate, candidate_boundary, pause)| {
-                candidate == path
-                    && *candidate_boundary == boundary
-                    && std::sync::Weak::strong_count(pause) > 0
-            })
-        else {
-            return;
-        };
-        pauses.remove(index).2.upgrade()
-    };
-    let Some(pause) = pause else {
-        return;
-    };
-    let mut state = pause.state.lock().expect("host write pause state");
-    state.0 = true;
-    pause.changed.notify_all();
-    while !state.1 {
-        state = pause.changed.wait(state).expect("host write pause wait");
-    }
-}
-
-/// Crash-injection point for host-config durability acceptance tests: abort
-/// the process right after a config write publishes so recovery paths are
-/// exercised against a real torn install.
-#[cfg(feature = "test-transport")]
-fn test_abort_after_host_config_write(path: &Path) {
-    if (std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()
-        && !path
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|name| name.ends_with(".bak") || name.ends_with(".tracedecay-original")))
-        || std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH")
-            .is_some_and(|expected| Path::new(&expected) == path)
-    {
-        std::process::abort();
-    }
-}
-
-thread_local! {
-    static HOST_CONFIG_WRITE_INTENT_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
-
-pub fn with_host_config_write_intents<T>(root: PathBuf, effect: impl FnOnce() -> T) -> T {
-    struct ResetIntentRoot(Option<PathBuf>);
-
-    impl Drop for ResetIntentRoot {
-        fn drop(&mut self) {
-            HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| {
-                current.replace(self.0.take());
-            });
-        }
-    }
-
-    let previous = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.replace(Some(root)));
-    let _reset = ResetIntentRoot(previous);
-    effect()
-}
-
-pub fn host_config_write_intent_path(root: &Path, path: &Path) -> Result<PathBuf> {
-    let path_bytes = serde_json::to_vec(path).map_err(|error| TraceDecayError::Config {
-        message: format!("could not bind host config write intent: {error}"),
-    })?;
-    Ok(root.join(format!("{}.intent", sha256_hex(&path_bytes))))
-}
-
-/// Persist an already-read native-host observation without reading the file a
-/// second time. A host CLI runs outside this process, so the caller snapshots
-/// its bytes first, checks peer ownership, and then records exactly those
-/// bytes. If a foreign writer races after the snapshot, rollback compares the
-/// recorded digest to the live state and refuses instead of restoring over it.
-#[hotpath::measure(label = "agent_hosts.agents.host_config.observe")]
-pub(crate) fn record_host_config_observation_bytes(
-    path: &Path,
-    contents: Option<&[u8]>,
-) -> Result<()> {
-    if HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().is_none()) {
-        return Ok(());
-    }
-    match contents {
-        Some(contents) => {
-            let metadata =
-                capture_host_file_metadata(path).map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to capture metadata for {} after host CLI: {error}",
-                        path.display()
-                    ),
-                })?;
-            persist_host_config_write_intent(path, contents, Some(&metadata))
-        }
-        None => persist_host_config_remove_intent(path),
-    }
-}
-
-#[hotpath::measure(label = "agent_hosts.agents.host_config.remove")]
-pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
-    persist_host_config_remove_intent(path).map_err(std::io::Error::other)?;
-    std::fs::remove_file(path)?;
-    #[cfg(feature = "test-transport")]
-    if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_REMOVE_PATH")
-        .is_some_and(|expected| Path::new(&expected) == path)
-    {
-        std::process::abort();
-    }
-    Ok(())
-}
-
-#[derive(Serialize)]
-struct HostConfigWriteIntentV2<'a> {
-    schema_version: u16,
-    digest: [u8; 32],
-    metadata: Option<&'a HostFileMetadataIdentityV1>,
-}
-
-#[hotpath::measure(label = "agent_hosts.agents.host_config.persist")]
-fn persist_host_config_write_intent(
-    path: &Path,
-    contents: &[u8],
-    metadata: Option<&HostFileMetadataIdentityV1>,
-) -> Result<()> {
-    let Some(root) = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().clone()) else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not create host config write intent directory {}: {error}",
-            root.display()
-        ),
-    })?;
-    let intent_path = host_config_write_intent_path(&root, path)?;
-    let intent = serde_json::to_vec(&HostConfigWriteIntentV2 {
-        schema_version: 2,
-        digest: Sha256::digest(contents).into(),
-        metadata,
-    })
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("could not serialize host config write intent: {error}"),
-    })?;
-    tracedecay_private_fs::framed_log::atomic_write(
-        &intent_path,
-        "host-config-intent",
-        &intent,
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not persist host config write intent {}: {error}",
-            intent_path.display()
-        ),
-    })
-}
-
-#[hotpath::measure(label = "agent_hosts.agents.host_config.persist_remove")]
-fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
-    let Some(root) = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().clone()) else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not create host config remove intent directory {}: {error}",
-            root.display()
-        ),
-    })?;
-    let intent_path = host_config_write_intent_path(&root, path)?;
-    tracedecay_private_fs::framed_log::atomic_write(
-        &intent_path,
-        "host-config-remove-intent",
-        &[0],
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not persist host config remove intent {}: {error}",
-            intent_path.display()
-        ),
-    })
-}
-
-/// Write a JSON value to a file with pretty formatting.
-/// Creates a backup, writes atomically, and restores on failure.
-#[hotpath::measure(label = "agent_hosts.agents.config.write_json")]
-pub fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
-    let backup = backup_config_file(path)?;
-    safe_write_json_file(path, value, backup.as_deref())?;
-    eprintln!("\x1b[32m✔\x1b[0m Wrote {}", path.display());
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Shared MCP server registration
-// ---------------------------------------------------------------------------
-//
-// Every JSON/JSONC-configured host registers tracedecay the same way: one
-// entry named `tracedecay` under a root key (`mcpServers` for the Cline
-// family and Gemini, `mcp` for Kilo). Only the config path, the root key, the
-// entry shape, and the config dialect differ, so install, uninstall, and the
-// doctor check all live here rather than once per host.
-
-/// Register the tracedecay MCP entry under `root_key` in a host config.
-///
-/// The config is read, transformed, and published under the host-file write
-/// lock; a config that exists but cannot be parsed for `dialect` is a typed
-/// error rather than a silent overwrite. `agent_label` names the host in the
-/// directory-creation error.
-#[hotpath::measure(label = "agent_hosts.agents.mcp.install")]
-pub fn install_mcp_server_entry(
-    config_path: &Path,
-    root_key: &str,
-    entry: serde_json::Value,
-    agent_label: &str,
-    dialect: JsonConfigDialect,
-) -> Result<()> {
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "cannot create {agent_label} config directory {}: {error}",
-                parent.display()
-            ),
-        })?;
-    }
-
-    update_json_config_transactionally(config_path, dialect, |mut settings| {
-        if !settings.is_object() {
-            return Err(TraceDecayError::Config {
-                message: format!("{} must contain a JSON object", config_path.display()),
-            });
-        }
-        if settings
-            .get(root_key)
-            .is_some_and(|value| !value.is_object())
-        {
-            return Err(TraceDecayError::Config {
-                message: format!("{}.{root_key} must be a JSON object", config_path.display()),
-            });
-        }
-        settings[root_key]["tracedecay"] = entry;
-        Ok(((), JsonConfigMutation::Write(settings)))
-    })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        config_path.display()
-    );
-    Ok(())
-}
-
-/// How far an uninstall prunes a config once the tracedecay entry is gone.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct McpUninstallPolicy {
-    /// Drop the MCP root key itself once it holds no servers.
-    pub prune_empty_root: bool,
-    /// Delete the config file when an empty MCP root is all that is left.
-    pub remove_empty_file: bool,
-}
-
-/// Result of the uninstall transform, reported after publication.
-enum McpUninstallOutcome {
-    NoEntry,
-    RemovedEntry,
-    RemovedFile,
-}
-
-/// Remove the tracedecay MCP entry under `root_key` from a host config.
-///
-/// Runs under the host-file write lock like [`install_mcp_server_entry`]. A
-/// config that exists but cannot be parsed is a typed error — reporting a
-/// clean uninstall over a corrupt config would fabricate state — and callers
-/// decide whether to keep going across the remaining hosts. Every rewrite or
-/// removal of the existing file leaves a `.bak` (issue #63) and publishes
-/// through the durable conditional write/remove shared by every host-file
-/// transaction.
-#[hotpath::measure(label = "agent_hosts.agents.mcp.uninstall")]
-pub fn uninstall_mcp_server_entry(
-    config_path: &Path,
-    root_key: &str,
-    dialect: JsonConfigDialect,
-    policy: McpUninstallPolicy,
-) -> Result<()> {
-    if !config_path.exists() {
-        eprintln!("  {} not found, skipping", config_path.display());
-        return Ok(());
-    }
-
-    let outcome = update_json_config_transactionally(config_path, dialect, |mut settings| {
-        let Some(servers) = settings.get_mut(root_key).and_then(|v| v.as_object_mut()) else {
-            return Ok((McpUninstallOutcome::NoEntry, JsonConfigMutation::Unchanged));
-        };
-        if servers.remove("tracedecay").is_none() {
-            return Ok((McpUninstallOutcome::NoEntry, JsonConfigMutation::Unchanged));
-        }
-        let root_is_empty = servers.is_empty();
-
-        if policy.prune_empty_root
-            && root_is_empty
-            && let Some(object) = settings.as_object_mut()
-        {
-            object.remove(root_key);
-        }
-
-        if policy.remove_empty_file && config_holds_only_empty_root(&settings, root_key) {
-            return Ok((McpUninstallOutcome::RemovedFile, JsonConfigMutation::Remove));
-        }
-        Ok((
-            McpUninstallOutcome::RemovedEntry,
-            JsonConfigMutation::Write(settings),
-        ))
-    })?;
-    match outcome {
-        McpUninstallOutcome::NoEntry => eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        ),
-        McpUninstallOutcome::RemovedEntry => eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            config_path.display()
-        ),
-        McpUninstallOutcome::RemovedFile => eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            config_path.display()
-        ),
-    }
-    Ok(())
-}
-
-/// True when nothing survives in `settings` except an empty MCP root.
-fn config_holds_only_empty_root(settings: &serde_json::Value, root_key: &str) -> bool {
-    settings.as_object().is_some_and(|object| {
-        object.iter().all(|(key, value)| {
-            key == root_key && value.as_object().is_some_and(serde_json::Map::is_empty)
-        })
-    })
-}
-
-/// Bundle registration state for hosts that store the tracedecay MCP server
-/// under a `mcpServers.tracedecay` object with `disabled` and `args` fields.
-///
-/// A registration only counts as current when it is explicitly enabled and
-/// still launches `tracedecay serve`.
-pub fn mcp_servers_registration_state(
-    settings_path: &Path,
-) -> host_bundle_v2::HostBundleRegistrationStateV1 {
-    use host_bundle_v2::HostBundleRegistrationStateV1 as State;
-
-    let Ok(bytes) = std::fs::read(settings_path) else {
-        return State::Missing;
-    };
-    let Ok(settings) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return State::Corrupt;
-    };
-    if settings
-        .pointer("/mcpServers/tracedecay/disabled")
-        .and_then(serde_json::Value::as_bool)
-        == Some(false)
-        && settings
-            .pointer("/mcpServers/tracedecay/args")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
-    {
-        State::Current
-    } else {
-        State::Missing
-    }
-}
-
-/// Host-specific wording for [`doctor_check_mcp_registration`].
-pub struct McpDoctorLabels<'a> {
-    /// Agent id used in the ``run `tracedecay install --agent <id>` `` hint.
-    pub agent_id: &'a str,
-    /// Product name used in the "if you use ..." warning for a missing file.
-    pub product: &'a str,
-    /// Subject of the pass line, rendered as "{registered} in {path}".
-    pub registered: &'a str,
-    /// Subject of the fail line, rendered as "{missing} in {path} — run ...".
-    pub missing: &'a str,
-}
-
-/// Look up the tracedecay MCP server entry a host config stores under
-/// `root_key`, without judging its shape.
-///
-/// Hosts that only need a yes/no answer (or that accept non-object entries)
-/// can call this directly; [`doctor_check_mcp_registration`] layers the
-/// object-shape filter and doctor reporting on top.
-pub fn mcp_registration_entry(
-    config_path: &Path,
-    root_key: &str,
-    load: fn(&Path) -> serde_json::Value,
-) -> Option<serde_json::Value> {
-    load(config_path)
-        .get(root_key)
-        .and_then(|servers| servers.get("tracedecay"))
-        .cloned()
-}
-
-/// True when `config_path` already names a tracedecay entry under `root_key`.
-///
-/// Missing or unreadable files are `false` because `load` is the host's
-/// lenient loader. Shared by project-local Claude/Kimi checks and the
-/// host `has_tracedecay` implementations that only need a yes/no.
-pub fn mcp_config_has_tracedecay(
-    config_path: &Path,
-    root_key: &str,
-    load: fn(&Path) -> serde_json::Value,
-) -> bool {
-    mcp_registration_entry(config_path, root_key, load).is_some()
-}
-
-/// Resolve a host home directory from an optional environment override.
-///
-/// The override is honored only when it is non-empty and falls under `home`.
-/// That keeps isolated-HOME tests from picking up the operator's real
-/// `KIMI_CODE_HOME` / `VIBE_HOME`, and refuses a host directory that escapes
-/// the admitted profile home. Anything else — unset, empty, or outside
-/// `home` — uses `home.join(default_relative)`.
-pub(crate) fn host_home_override(home: &Path, env_key: &str, default_relative: &str) -> PathBuf {
-    std::env::var_os(env_key)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .filter(|override_home| override_home.starts_with(home))
-        .unwrap_or_else(|| home.join(default_relative))
-}
-
-/// Emit the standard doctor pass/fail line for a host MCP registration.
-///
-/// Split out from [`doctor_check_mcp_registration`] so hosts with their own
-/// missing-file or legacy-path control flow still share the wording.
-pub fn report_mcp_registration(
-    dc: &mut DoctorCounters,
-    config_path: &Path,
-    registered: bool,
-    labels: &McpDoctorLabels<'_>,
-) {
-    if registered {
-        dc.pass(&format!(
-            "{} in {}",
-            labels.registered,
-            config_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "{} in {} — run `tracedecay install --agent {}`",
-            labels.missing,
-            config_path.display(),
-            labels.agent_id
-        ));
-    }
-}
-
-/// Report whether a host config registers tracedecay under `root_key`.
-///
-/// Returns the registered server object so callers can keep checking
-/// host-specific fields (Gemini's `args`/`trust`, for example).
-pub fn doctor_check_mcp_registration(
-    dc: &mut DoctorCounters,
-    config_path: &Path,
-    root_key: &str,
-    load: fn(&Path) -> serde_json::Value,
-    labels: &McpDoctorLabels<'_>,
-) -> Option<serde_json::Value> {
-    if !config_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent {}` if you use {}",
-            config_path.display(),
-            labels.agent_id,
-            labels.product
-        ));
-        return None;
-    }
-
-    let server =
-        mcp_registration_entry(config_path, root_key, load).filter(serde_json::Value::is_object);
-    report_mcp_registration(dc, config_path, server.is_some(), labels);
-    server
-}
-
-/// Shared doctor for host prompt files that must contain the word `tracedecay`.
-///
-/// Vibe (`prompts/cli.md`) and OpenCode (`AGENTS.md`) use the same
-/// exists → contains → pass/fail/warn shape. Gemini's prompt check is the
-/// opposite polarity (legacy block must be absent) and stays host-local.
-pub(crate) fn doctor_check_prompt_contains_tracedecay(
-    dc: &mut DoctorCounters,
-    prompt_path: &Path,
-    subject: &str,
-    agent_id: &str,
-) {
-    if !prompt_path.exists() {
-        dc.warn(&format!("{subject} does not exist"));
-        return;
-    }
-    let has_rules = std::fs::read_to_string(prompt_path)
-        .unwrap_or_default()
-        .contains("tracedecay");
-    if has_rules {
-        dc.pass(&format!("{subject} contains tracedecay rules"));
-    } else {
-        dc.fail(&format!(
-            "{subject} missing tracedecay rules — run `tracedecay install --agent {agent_id}`"
-        ));
-    }
-}
-
-/// Finds the tracedecay binary path.
-///
-/// On Windows the returned path uses forward slashes so it can be safely
-/// embedded in JSON hook commands without backslash-escaping issues.
-pub fn which_tracedecay() -> Option<String> {
-    which_tracedecay_path().and_then(|path| path.to_str().map(normalize_path_separators))
-}
-
-/// Finds the tracedecay binary without converting its platform-native path.
-#[hotpath::measure(label = "agent_hosts.agents.which_tracedecay")]
-pub fn which_tracedecay_path() -> Option<PathBuf> {
-    let current_exe = std::env::current_exe().ok();
-    let path_var = std::env::var_os("PATH");
-    let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
-    which_tracedecay_path_from(
-        current_exe.as_deref(),
-        path_var.as_deref(),
-        cargo_target_dir.as_deref(),
-    )
-}
-
-#[cfg(test)]
-fn which_tracedecay_from(
-    current_exe: Option<&Path>,
-    path_var: Option<&std::ffi::OsStr>,
-    cargo_target_dir: Option<&Path>,
-) -> Option<String> {
-    which_tracedecay_path_from(current_exe, path_var, cargo_target_dir)
-        .and_then(|path| path.to_str().map(normalize_path_separators))
-}
-
-fn which_tracedecay_path_from(
-    current_exe: Option<&Path>,
-    path_var: Option<&std::ffi::OsStr>,
-    cargo_target_dir: Option<&Path>,
-) -> Option<PathBuf> {
-    if let Some(exe) = current_exe
-        .filter(|exe| is_tracedecay_exe(exe) && !is_cargo_target_binary(exe, cargo_target_dir))
-    {
-        return absolute_executable_path(exe);
-    }
-
-    let path_match = path_var.and_then(|path_var| {
-        std::env::split_paths(path_var).find_map(|dir| {
-            let candidate = dir.join(tracedecay_bin_name());
-            (candidate.exists() && !is_cargo_target_binary(&candidate, cargo_target_dir))
-                .then(|| absolute_executable_path(&candidate))
-                .flatten()
-        })
-    });
-    path_match.or_else(|| {
-        current_exe
-            .filter(|exe| is_tracedecay_exe(exe))
-            .and_then(absolute_executable_path)
-    })
-}
-
-fn absolute_executable_path(path: &Path) -> Option<PathBuf> {
-    if path.is_absolute() {
-        Some(path.to_path_buf())
-    } else {
-        std::path::absolute(path).ok()
-    }
-}
-
-fn tracedecay_bin_name() -> String {
-    format!("tracedecay{}", std::env::consts::EXE_SUFFIX)
-}
-
-fn is_tracedecay_exe(path: &Path) -> bool {
-    path.file_stem()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            if cfg!(windows) {
-                name.eq_ignore_ascii_case("tracedecay")
-            } else {
-                name == "tracedecay"
-            }
-        })
-}
-
-fn is_cargo_target_binary(path: &Path, cargo_target_dir: Option<&Path>) -> bool {
-    if cargo_target_dir.is_some_and(|target_dir| path_starts_with_platform(path, target_dir)) {
-        return true;
-    }
-
-    let mut saw_target = false;
-    for component in path.components() {
-        let value = component.as_os_str();
-        if saw_target && (path_component_eq(value, "debug") || path_component_eq(value, "release"))
-        {
-            return true;
-        }
-        if path_component_eq(value, "target") {
-            saw_target = true;
-        }
-    }
-    false
-}
-
-fn path_starts_with_platform(path: &Path, prefix: &Path) -> bool {
-    if !cfg!(windows) {
-        return path.starts_with(prefix);
-    }
-    let mut path_components = path.components();
-    prefix.components().all(|expected| {
-        path_components
-            .next()
-            .is_some_and(|actual| path_component_eq(actual.as_os_str(), expected.as_os_str()))
-    })
-}
-
-fn path_component_eq(actual: &std::ffi::OsStr, expected: impl AsRef<std::ffi::OsStr>) -> bool {
-    let expected = expected.as_ref();
-    if !cfg!(windows) {
-        return actual == expected;
-    }
-    match (actual.to_str(), expected.to_str()) {
-        (Some(actual), Some(expected)) => actual.eq_ignore_ascii_case(expected),
-        _ => actual == expected,
-    }
-}
-
-/// Replace backslashes with forward slashes so paths work in JSON/shell
-/// contexts on Windows. No-op on Unix where paths already use `/`.
-fn normalize_path_separators(path: &str) -> String {
-    path.replace('\\', "/")
-}
+// Shared helpers
 
 #[macro_export]
 macro_rules! cli_fallback_args_invocation_lit {
     () => {
-        "`tracedecay tool <name> --args '<json>'` — the same JSON arguments object as the MCP tool; \
+        "`tracedecay tool <name> --args '<json>'`, the same JSON arguments object as the MCP tool; \
 pipe it via `--args -` (a quoted heredoc) when it contains quotes or newlines"
     };
 }
@@ -1928,1900 +951,305 @@ pipe it via `--args -` (a quoted heredoc) when it contains quotes or newlines"
 /// back to the `tracedecay tool` CLI instead of abandoning tracedecay or
 /// poking at `.tracedecay` databases directly.
 pub const CLI_FALLBACK_PROMPT_RULES: &str = concat!(
-    "If a tracedecay MCP call errors, times out, \
-or the server is disconnected, every tool is also available as a shell command: ",
+    "If the MCP transport fails while the TraceDecay daemon remains available, use the \
+equivalent shell command: ",
     cli_fallback_args_invocation_lit!(),
     " \
 (`tracedecay tool` lists all tools, `tracedecay tool <name> --help` shows parameters). \
-Pass schema fields inside the JSON object; never invent per-key flags or enum values from memory. \
-Fall back to that CLI instead of querying `.tracedecay` databases directly or abandoning tracedecay."
+Pass the schema's arguments as the exact JSON object; do not invent per-key flags or enum values. \
+Do not query private databases as a fallback. If the daemon is unavailable or intentionally held, \
+report that state rather than starting or replacing it."
 );
 
-/// True when a `SKILL.md` carries a TraceDecay authorship marker. Retired
-/// plugin artifacts use this narrow check so same-name user workflows remain
-/// outside TraceDecay's cleanup authority.
-pub(crate) fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
-    contents.lines().map(str::trim).any(|line| {
-        line.starts_with("name: tracedecay:")
-            || line.starts_with("description: TraceDecay ")
-            || line.contains("TraceDecay MCP")
-            || line.contains("tracedecay_")
-            || line.contains("`tracedecay:")
-    })
-}
-
-/// Remove explicitly retired sibling plugin trees.
+/// Choose which detected agents `tracedecay install` should configure, or
+/// `None` when this machine has no supported agent yet.
 ///
-/// Both the retired suffix and ownership manifest are allow-listed: a name
-/// prefix alone is never ownership evidence. A sibling is removed only when it
-/// is a real directory, its suffix is known to have been created by
-/// `TraceDecay`, and one host-specific manifest parses with `name = "tracedecay"`.
-#[hotpath::measure(label = "agent_hosts.agents.plugin.sweep_siblings")]
-pub(crate) fn sweep_superseded_plugin_siblings(
-    current_dir: &Path,
-    ownership_manifests: &[&str],
-) -> Result<()> {
-    const RETIRED_SUFFIXES: &[&str] = &["pre-v2-adopt"];
-
-    let Some(parent) = current_dir.parent() else {
-        return Ok(());
-    };
-    let Some(current_name) = current_dir.file_name().and_then(|name| name.to_str()) else {
-        return Ok(());
-    };
-    let prefix = format!("{current_name}.");
-    let entries = match std::fs::read_dir(parent) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "failed to inspect plugin siblings in {}: {error}",
-                    parent.display()
-                ),
-            });
-        }
-    };
-
-    for entry in entries {
-        let entry = entry.map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to inspect a plugin sibling in {}: {error}",
-                parent.display()
-            ),
-        })?;
-        let file_type = entry.file_type().map_err(|error| TraceDecayError::Config {
-            message: format!("failed to inspect {}: {error}", entry.path().display()),
-        })?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let retired = name
-            .strip_prefix(&prefix)
-            .is_some_and(|suffix| RETIRED_SUFFIXES.contains(&suffix));
-        if !file_type.is_dir() || !retired {
-            continue;
-        }
-        let sibling = entry.path();
-        let owned = ownership_manifests.iter().any(|relative| {
-            load_json_file(&sibling.join(relative))
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                == Some("tracedecay")
-        });
-        if !owned {
-            continue;
-        }
-        std::fs::remove_dir_all(&sibling).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to remove superseded tracedecay plugin {}: {error}",
-                sibling.display()
-            ),
-        })?;
-    }
-    Ok(())
-}
-
-/// Recursively collect every regular file under `root` (following the same
-/// hand-rolled walk both the Cursor and Codex installers rely on).
-#[hotpath::measure(label = "agent_hosts.agents.fs.collect_regular_files")]
-pub(crate) fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    collect_regular_files_inner(root, &mut out)?;
-    Ok(out)
-}
-
-fn collect_regular_files_inner(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_regular_files_inner(&entry.path(), out)?;
-        } else if file_type.is_file() {
-            out.push(entry.path());
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn hook_command(tracedecay_bin: &str, subcommand: &str) -> String {
-    hook_command_for_platform(tracedecay_bin, subcommand, cfg!(windows))
-}
-
-pub(crate) fn hook_command_for_platform(
-    tracedecay_bin: &str,
-    subcommand: &str,
-    windows: bool,
-) -> String {
-    let quoted = if windows {
-        quote_windows_command_arg(&normalize_path_separators(tracedecay_bin))
-    } else {
-        quote_posix_command_arg(tracedecay_bin)
-    };
-    format!("{quoted} {subcommand}")
-}
-
-fn quote_windows_command_arg(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\\\""))
-}
-
-fn quote_posix_command_arg(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn relative_project_path(
-    project_root: &Path,
-    canonical_root: &Path,
-    absolute: &Path,
-    original: &Path,
-) -> Option<PathBuf> {
-    if !original.is_absolute() {
-        return Some(original.to_path_buf());
-    }
-    absolute
-        .strip_prefix(project_root)
-        .or_else(|_| absolute.strip_prefix(canonical_root))
-        .ok()
-        .map(Path::to_path_buf)
-}
-
-#[hotpath::measure(label = "agent_hosts.agents.fs.ensure_project_local")]
-pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -> Result<()> {
-    let root = project_root
-        .canonicalize()
-        .map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to resolve project root {}: {e}",
-                project_root.display()
-            ),
-        })?;
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
-    };
-    if absolute
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "refusing to write project-local config outside {}: {}",
-                root.display(),
-                absolute.display()
-            ),
-        });
-    }
-
-    if let Some(relative) = relative_project_path(project_root, &root, &absolute, path) {
-        let scan_root = if project_root.is_absolute() {
-            project_root.to_path_buf()
-        } else {
-            root.clone()
-        };
-        let mut current = scan_root;
-        for component in relative.components() {
-            if matches!(
-                component,
-                std::path::Component::Prefix(_) | std::path::Component::RootDir
-            ) {
-                continue;
-            }
-            current.push(component.as_os_str());
-            let Ok(meta) = std::fs::symlink_metadata(&current) else {
-                continue;
-            };
-            if meta.file_type().is_symlink() {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "refusing to write project-local config through symlink: {}",
-                        current.display()
-                    ),
-                });
-            }
-        }
-    }
-
-    let canonical_candidate = tracedecay_runtime_core::path_safety::canonicalize_existing_prefix(
-        &absolute,
-    )
-    .ok_or_else(|| TraceDecayError::Config {
-        message: format!(
-            "failed to resolve project-local config path {}",
-            absolute.display()
-        ),
-    })?;
-    if !canonical_candidate.starts_with(&root) {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "refusing to write project-local config outside {}: {}",
-                root.display(),
-                absolute.display()
-            ),
-        });
-    }
-
-    Ok(())
-}
-
-/// Guard every project-local write target up front: reject any path that
-/// escapes `project_root` or reaches through a symlinked parent before the
-/// installer creates directories or writes files. Mirrors the per-path
-/// [`ensure_project_local_safe_path`] contract for adapters that touch several
-/// project-local paths in one `install_local`.
-pub(crate) fn ensure_project_local_safe_paths<'a, I>(project_root: &Path, paths: I) -> Result<()>
-where
-    I: IntoIterator<Item = &'a Path>,
-{
-    for path in paths {
-        ensure_project_local_safe_path(project_root, path)?;
-    }
-    Ok(())
-}
-
-/// Returns the user's home directory, cross-platform.
-pub fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .map(PathBuf::from)
-}
-
-/// Strip `//` line comments, `/* */` block comments, and trailing commas
-/// before `}` / `]` from a JSONC string, then parse with `serde_json`.
-/// Falls back to `serde_json::json!({})` on any parse failure.
-pub fn parse_jsonc(input: &str) -> serde_json::Value {
-    let stripped = strip_jsonc_comments(input);
-    serde_json::from_str(&stripped).unwrap_or_else(|_| serde_json::json!({}))
-}
-
-/// Internal helper: removes JSONC comments and trailing commas.
-fn strip_jsonc_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    let mut in_string = false;
-
-    while i < len {
-        // Handle string literals (skip comment stripping inside strings).
-        if in_string {
-            if chars[i] == '\\' && i + 1 < len {
-                out.push(chars[i]);
-                out.push(chars[i + 1]);
-                i += 2;
-                continue;
-            }
-            if chars[i] == '"' {
-                in_string = false;
-            }
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-
-        // Start of string.
-        if chars[i] == '"' {
-            in_string = true;
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-
-        // Line comment `//`.
-        if chars[i] == '/' && i + 1 < len && chars[i + 1] == '/' {
-            // Skip until newline.
-            while i < len && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Block comment `/* ... */`.
-        if chars[i] == '/' && i + 1 < len && chars[i + 1] == '*' {
-            i += 2;
-            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i += 2; // consume `*/`
-            continue;
-        }
-
-        out.push(chars[i]);
-        i += 1;
-    }
-
-    // Remove trailing commas before `}` or `]`.
-    // Simple regex-free approach: repeatedly collapse ", <whitespace> }" patterns.
-    remove_trailing_commas(&out)
-}
-
-/// Removes trailing commas that appear immediately before `}` or `]` (with
-/// optional whitespace/newlines in between).
-fn remove_trailing_commas(input: &str) -> String {
-    // We scan for comma, optional whitespace, then `}` or `]`.
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut out = Vec::with_capacity(len);
-    let mut i = 0;
-
-    while i < len {
-        if bytes[i] == b',' {
-            // Peek ahead past whitespace.
-            let mut j = i + 1;
-            while j < len
-                && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r')
-            {
-                j += 1;
-            }
-            if j < len && (bytes[j] == b'}' || bytes[j] == b']') {
-                // Skip the comma; whitespace will be included normally.
-                i += 1;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-
-    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
-}
-
-/// Read a file and parse it as JSONC. Falls back to `json!({})` if the file
-/// is missing, unreadable, or unparseable.
-/// Use this for **read-only** paths. For install/edit paths, use
-/// [`load_jsonc_file_strict`] instead.
-pub fn load_jsonc_file(path: &Path) -> serde_json::Value {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return serde_json::json!({});
-    };
-    parse_jsonc(&contents)
-}
-
-/// Load a JSONC file for **editing**. Unlike [`load_jsonc_file`], this returns
-/// an error if the file exists but cannot be parsed after comment stripping,
-/// preventing silent data loss when the modified value is written back.
+/// The install verb is already the authorization. Detected agents that are not
+/// yet installed are selected and already-installed agents are kept. This never
+/// reads stdin and never uninstalls: removal is a separate destructive command.
 ///
-/// # Error conditions
-/// - File exists but is not readable (permissions, I/O error).
-/// - File exists and has content but contains invalid JSONC.
-///
-/// Returns `Ok(json!({}))` only when the file does not exist or is empty.
-#[hotpath::measure(label = "agent_hosts.agents.config.load_jsonc")]
-pub fn load_jsonc_file_strict(path: &Path) -> Result<serde_json::Value> {
-    if !path.exists() {
-        return Ok(serde_json::json!({}));
-    }
-    let contents = std::fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
-        message: format!("cannot read {}: {e}", path.display()),
-    })?;
-    JsonConfigDialect::Jsonc.parse_for_edit(path, &contents)
-}
-
-/// Returns the VS Code user data directory, platform-specific.
-///
-/// Canonical copy lives in `tracedecay_sessions::host_ports` (lower in the
-/// dependency graph).
-pub use tracedecay_sessions::host_ports::vscode_data_dir;
-
-/// Returns the platform-specific VS Code Insiders data directory.
-pub fn vscode_insiders_data_dir(home: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join("Library/Application Support/Code - Insiders")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        home.join(".config/Code - Insiders")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata_path = PathBuf::from(&appdata);
-            if appdata_path.starts_with(home) {
-                return appdata_path.join("Code - Insiders");
-            }
-        }
-        home.join("AppData/Roaming/Code - Insiders")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        home.join(".config/Code - Insiders")
-    }
-}
-
-/// Returns the GitHub Copilot CLI config directory.
-pub fn copilot_cli_dir(home: &Path) -> PathBuf {
-    home.join(".copilot")
-}
-
-/// Returns the Kiro IDE user data directory (VS Code-style layout).
-///
-/// Canonical copy lives in `tracedecay_sessions::host_ports` (lower in the
-/// dependency graph).
-pub use tracedecay_sessions::host_ports::kiro_data_dir;
-
-/// Interactively pick which agents to install/uninstall.
-///
-/// - 0 detected agents → returns an error.
-/// - 1 detected and not already installed → returns it directly (no prompt).
-/// - Otherwise → asks a Y/n question for each detected agent.
-///
-/// Returns `(to_install, to_uninstall)`.
-pub fn pick_integrations_interactive(
-    home: &Path,
-    installed: &[String],
-) -> Result<(Vec<String>, Vec<String>)> {
+/// Finding nothing to configure used to be an error, so the first thing a user
+/// ran on a fresh machine exited 1 and read as a broken install. It is an
+/// ordinary outcome of a setup command; the caller reports
+/// [`no_detected_integrations_notice`] and succeeds.
+pub fn select_detected_integrations(home: &Path, installed: &[String]) -> Option<Vec<String>> {
     let detected: Vec<Box<dyn AgentIntegration>> = all_integrations()
         .into_iter()
         .filter(|ag| ag.is_detected(home))
         .collect();
 
     if detected.is_empty() {
-        return Err(TraceDecayError::Config {
-            message: "No supported agents detected on this system".to_string(),
-        });
+        return None;
     }
 
-    // Fast path: exactly one detected agent and it isn't installed yet.
-    if detected.len() == 1 && !installed.contains(&detected[0].id().to_string()) {
-        let id = detected[0].id().to_string();
-        return Ok((vec![id], vec![]));
-    }
-
-    let mut to_install = Vec::new();
-    let mut to_uninstall = Vec::new();
-
-    for ag in &detected {
-        let id = ag.id().to_string();
-        let already = installed.contains(&id);
-        if already {
-            eprint!("Keep TraceDecay for {}? [Y/n] ", ag.name());
-        } else {
-            eprint!("Install TraceDecay for {}? [Y/n] ", ag.name());
-        }
-
-        let mut input = String::new();
-        std::io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("failed to read input: {e}"),
-            })?;
-        let answer = input.trim().to_lowercase();
-        let yes = answer.is_empty() || answer == "y" || answer == "yes";
-
-        if yes && !already {
-            to_install.push(id);
-        } else if !yes && already {
-            to_uninstall.push(id);
-        }
-    }
-
-    Ok((to_install, to_uninstall))
-}
-
-/// Load a TOML file as a document.
-///
-/// Returns an empty table when the file does not exist. When the file exists
-/// but cannot be parsed as a TOML document, returns a [`TraceDecayError::Config`]
-/// so callers do not silently overwrite the user's data (see issue #63).
-#[hotpath::measure(label = "agent_hosts.agents.config.load_toml")]
-pub fn load_toml_file(path: &Path) -> Result<toml::Value> {
-    if !path.exists() {
-        return Ok(toml::Value::Table(toml::map::Map::new()));
-    }
-    let contents = std::fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to read {}: {e}", path.display()),
-    })?;
-    parse_toml_config(path, &contents)
-}
-
-/// Strict parse of already-observed TOML config contents for a write path;
-/// blank content is an empty document.
-fn parse_toml_config(path: &Path, contents: &str) -> Result<toml::Value> {
-    if contents.trim().is_empty() {
-        return Ok(toml::Value::Table(toml::map::Map::new()));
-    }
-    // NOTE: `str.parse::<toml::Value>()` parses a single TOML value in toml v1,
-    // not a document — using it here would treat any well-formed config.toml as
-    // unparseable and silently drop its contents. Use `toml::from_str` instead.
-    let table: toml::Table = toml::from_str(contents).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to parse {} as TOML: {e}. Refusing to overwrite — fix the file or remove it manually.",
-            path.display()
-        ),
-    })?;
-    Ok(toml::Value::Table(table))
-}
-
-/// Copy `path` to `<path>.bak` if it exists. Used before overwriting a user
-/// config so an unexpected change is recoverable (issue #63).
-fn backup_file(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let mut backup = path.as_os_str().to_owned();
-    backup.push(".bak");
-    let backup = std::path::PathBuf::from(backup);
-    std::fs::copy(path, &backup).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to back up {} to {}: {e}",
-            path.display(),
-            backup.display()
-        ),
-    })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Backed up {} to {}",
-        path.display(),
-        backup.display()
-    );
-    Ok(())
-}
-
-/// Write a TOML value to a file, backing up any existing file first.
-#[hotpath::measure(label = "agent_hosts.agents.config.write_toml")]
-pub fn write_toml_file(path: &Path, value: &toml::Value) -> Result<()> {
-    backup_file(path)?;
-    let contents = toml::to_string_pretty(value).unwrap_or_else(|_| String::new());
-    std::fs::write(path, contents).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })?;
-    eprintln!("\x1b[32m✔\x1b[0m Wrote {}", path.display());
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Git post-commit hook
-// ---------------------------------------------------------------------------
-
-/// The marker comment used to identify tracedecay's section in a hook script.
-///
-/// NOTE: Legacy hooks written by the old "tracedecay" binary used the marker
-/// "# tracedecay: auto-sync". Those are not detected by this constant, so
-/// existing tracedecay git hooks will not be treated as already-present and a
-/// second tracedecay block may be appended on offer. This is intentional
-/// (install path only writes new identity) — users can manually remove the
-/// old block.
-const HOOK_MARKER: &str = "# tracedecay: auto-sync";
-
-/// The hook snippet appended to (or written as) the post-commit script.
-fn post_commit_snippet(tracedecay_bin: &str) -> String {
-    let bin = quote_posix_command_arg(&tracedecay_bin.replace('\\', "/"));
-    format!(
-        "{HOOK_MARKER}\n\
-         {bin} sync >/dev/null 2>&1 &\n"
+    Some(
+        detected
+            .iter()
+            .map(|agent| agent.id().to_string())
+            .filter(|id| !installed.contains(id))
+            .collect(),
     )
 }
 
-/// If a global git `post-commit` hook is not already set up for tracedecay,
-/// interactively asks the user whether to install one. Silently succeeds if
-/// the hook is already present, if stdin is not a terminal, or if the user
-/// declines.
-#[hotpath::measure(label = "agent_hosts.agents.git.offer_post_commit")]
-pub fn offer_git_post_commit_hook(tracedecay_bin: &str) {
-    let Some(home) = home_dir() else { return };
-
-    // Determine the global hooks directory by reading core.hooksPath from
-    // the global gitconfig file(s). Falls back to ~/.config/git/hooks/.
-    let hooks_dir = read_global_hooks_path(&home);
-
-    let (hooks_dir, need_set_hookspath) = match hooks_dir {
-        Some(dir) => (dir, false),
-        None => (home.join(".config").join("git").join("hooks"), true),
-    };
-
-    let hook_path = hooks_dir.join("post-commit");
-
-    if hook_path.exists()
-        && let Ok(contents) = std::fs::read_to_string(&hook_path)
-        && contents.contains(HOOK_MARKER)
-    {
-        eprintln!("  Global git post-commit hook already contains tracedecay, skipping");
-        return;
-    }
-
-    // Only prompt on a real terminal.
-    if !atty_stdin() {
-        return;
-    }
-
-    eprintln!();
-    eprint!(
-        "Install a global git post-commit hook to auto-run \x1b[1mtracedecay sync\x1b[0m after each commit? [y/N] "
-    );
-
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        return;
-    }
-    if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
-        eprintln!("  Skipped git post-commit hook");
-        return;
-    }
-
-    if let Err(e) = std::fs::create_dir_all(&hooks_dir) {
-        eprintln!(
-            "  \x1b[31m✘\x1b[0m Failed to create {}: {e}",
-            hooks_dir.display()
-        );
-        return;
-    }
-
-    // If no global hooksPath was configured, set it in ~/.gitconfig.
-    if need_set_hookspath {
-        let gitconfig_path = home.join(".gitconfig");
-        if let Err(msg) = set_global_hooks_path(&gitconfig_path, &hooks_dir) {
-            eprintln!("  \x1b[31m✘\x1b[0m {msg} — hook not installed");
-            return;
-        }
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Set git core.hooksPath to {}",
-            hooks_dir.display()
-        );
-    }
-
-    let snippet = post_commit_snippet(tracedecay_bin);
-
-    if hook_path.exists() {
-        use std::io::Write;
-        let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&hook_path) else {
-            eprintln!(
-                "  \x1b[31m✘\x1b[0m Failed to open {} for writing",
-                hook_path.display()
-            );
-            return;
-        };
-        if write!(f, "\n{snippet}").is_err() {
-            eprintln!(
-                "  \x1b[31m✘\x1b[0m Failed to write to {}",
-                hook_path.display()
-            );
-            return;
-        }
-    } else {
-        let contents = format!("#!/bin/sh\n{snippet}");
-        if std::fs::write(&hook_path, contents).is_err() {
-            eprintln!(
-                "  \x1b[31m✘\x1b[0m Failed to create {}",
-                hook_path.display()
-            );
-            return;
-        }
-    }
-
-    // Make executable (Unix).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755));
-    }
-
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Installed global git post-commit hook at {}",
-        hook_path.display()
-    );
-}
-
-/// Reads `core.hooksPath` from the global gitconfig files.
+/// What to tell a user whose machine has no supported agent installed yet.
 ///
-/// Checks `~/.gitconfig` first, then `~/.config/git/config` (the XDG
-/// location). Returns the resolved absolute path, or `None` if the key
-/// is absent from both files.
-fn read_global_hooks_path(home: &Path) -> Option<PathBuf> {
-    let candidates = [
-        home.join(".gitconfig"),
-        home.join(".config").join("git").join("config"),
-    ];
-    for path in &candidates {
-        if let Some(value) = parse_gitconfig_value(path, "core", "hookspath") {
-            let expanded = expand_tilde(&value, home);
-            let p = PathBuf::from(&expanded);
-            if p.is_absolute() {
-                return Some(p);
-            }
-            // Relative paths in gitconfig are relative to the home dir.
-            return Some(home.join(p));
-        }
-    }
-    None
-}
-
-/// Minimal gitconfig parser: finds the value of `key` under `[section]`.
-///
-/// Key matching is case-insensitive (git config keys are case-insensitive).
-/// Handles `key = value`, `key=value`, and quoted values.
-fn parse_gitconfig_value(path: &Path, section: &str, key: &str) -> Option<String> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    let section_lower = section.to_ascii_lowercase();
-    let key_lower = key.to_ascii_lowercase();
-
-    let mut in_section = false;
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            // Parse section header: [core], [core "subsection"], etc.
-            let header = trimmed
-                .trim_start_matches('[')
-                .split(']')
-                .next()
-                .unwrap_or("")
-                .trim();
-            let section_name = header.split_whitespace().next().unwrap_or("");
-            in_section = section_name.eq_ignore_ascii_case(&section_lower);
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
-            continue;
-        }
-        // Parse key = value
-        if let Some((k, v)) = trimmed.split_once('=')
-            && k.trim().to_ascii_lowercase() == key_lower
-        {
-            let v = v.trim();
-            let v = v
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .unwrap_or(v);
-            return Some(v.to_string());
-        }
-    }
-    None
-}
-
-/// Appends `core.hooksPath` to the global gitconfig file, creating it if
-/// necessary. Appends to an existing `[core]` section if one exists,
-/// otherwise adds a new one at the end of the file.
-fn set_global_hooks_path(
-    gitconfig_path: &Path,
-    hooks_dir: &Path,
-) -> std::result::Result<(), String> {
-    let hooks_str = hooks_dir.to_string_lossy().replace('\\', "/");
-    let contents = if gitconfig_path.exists() {
-        std::fs::read_to_string(gitconfig_path)
-            .map_err(|e| format!("Failed to read {}: {e}", gitconfig_path.display()))?
-    } else {
-        String::new()
-    };
-
-    let new_contents = insert_gitconfig_value(&contents, "core", "hooksPath", &hooks_str);
-
-    if let Some(parent) = gitconfig_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
-    }
-    std::fs::write(gitconfig_path, new_contents)
-        .map_err(|e| format!("Failed to write {}: {e}", gitconfig_path.display()))?;
-    Ok(())
-}
-
-/// Inserts `key = value` under `[section]` in gitconfig content.
-/// If the section exists, appends the key after the last line of that section.
-/// Otherwise appends a new section at the end.
-fn insert_gitconfig_value(contents: &str, section: &str, key: &str, value: &str) -> String {
-    let section_lower = section.to_ascii_lowercase();
-    let lines: Vec<&str> = contents.lines().collect();
-    let mut result = Vec::with_capacity(lines.len() + 3);
-    let entry = format!("\t{key} = {value}");
-
-    // Find the target section and the line index just before the next section.
-    let mut section_end: Option<usize> = None;
-    let mut in_section = false;
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            if in_section {
-                // We've hit the next section — insert before it.
-                section_end = Some(i);
-                break;
-            }
-            let header = trimmed
-                .trim_start_matches('[')
-                .split(']')
-                .next()
-                .unwrap_or("")
-                .trim();
-            let name = header.split_whitespace().next().unwrap_or("");
-            if name.eq_ignore_ascii_case(&section_lower) {
-                in_section = true;
-            }
-        }
-    }
-    if in_section && section_end.is_none() {
-        // Section runs to end of file.
-        section_end = Some(lines.len());
-    }
-
-    if let Some(insert_at) = section_end {
-        for (i, line) in lines.iter().enumerate() {
-            if i == insert_at {
-                result.push(entry.as_str());
-            }
-            result.push(line);
-        }
-        // If inserting at end-of-file.
-        if insert_at == lines.len() {
-            result.push(&entry);
-        }
-    } else {
-        // Section doesn't exist — append it.
-        for line in &lines {
-            result.push(line);
-        }
-        if !contents.is_empty() && !contents.ends_with('\n') {
-            result.push("");
-        }
-        let section_header = format!("[{section}]");
-        // We need to own these strings for the result.
-        // Re-build as a String directly instead.
-        let mut out = result.join("\n");
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&section_header);
-        out.push('\n');
-        out.push_str(&entry);
-        out.push('\n');
-        return out;
-    }
-
-    let mut out = result.join("\n");
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
-
-/// Expand a leading `~` to the given home directory.
-fn expand_tilde(s: &str, home: &Path) -> String {
-    if let Some(rest) = s.strip_prefix("~/") {
-        return home.join(rest).to_string_lossy().replace('\\', "/");
-    }
-    if s == "~" {
-        return home.to_string_lossy().to_string();
-    }
-    s.to_string()
-}
-
-/// Returns true if stdin is connected to a terminal.
-fn atty_stdin() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal()
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod git_hook_tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn parse_hookspath_basic() {
-        let config = "[core]\n\thooksPath = /home/user/.git-hooks\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            Some("/home/user/.git-hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_quoted() {
-        let config = "[core]\n\thooksPath = \"/home/user/my hooks\"\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            Some("/home/user/my hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_case_insensitive() {
-        let config = "[Core]\n\tHooksPath = /tmp/hooks\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            Some("/tmp/hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_missing() {
-        let config = "[core]\n\tautocrlf = true\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            None
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_wrong_section() {
-        let config = "[user]\n\thooksPath = /nope\n[core]\n\tautocrlf = true\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            None
-        );
-    }
-
-    #[test]
-    fn insert_into_existing_section() {
-        let config = "[user]\n\tname = Test\n[core]\n\tautocrlf = true\n";
-        let result = insert_gitconfig_value(config, "core", "hooksPath", "/tmp/hooks");
-        assert!(result.contains("\thooksPath = /tmp/hooks"));
-        assert!(result.contains("[core]"));
-        assert!(result.contains("autocrlf = true"));
-    }
-
-    #[test]
-    fn insert_new_section() {
-        let config = "[user]\n\tname = Test\n";
-        let result = insert_gitconfig_value(config, "core", "hooksPath", "/tmp/hooks");
-        assert!(result.contains("[core]\n\thooksPath = /tmp/hooks"));
-    }
-
-    #[test]
-    fn insert_into_empty_file() {
-        let result = insert_gitconfig_value("", "core", "hooksPath", "/tmp/hooks");
-        assert!(result.contains("[core]\n\thooksPath = /tmp/hooks"));
-    }
-
-    #[test]
-    fn insert_before_next_section() {
-        let config = "[core]\n\tautocrlf = true\n[user]\n\tname = Test\n";
-        let result = insert_gitconfig_value(config, "core", "hooksPath", "/tmp/hooks");
-        // hooksPath should appear after autocrlf but before [user]
-        let hooks_pos = result.find("hooksPath").unwrap();
-        let user_pos = result.find("[user]").unwrap();
-        let autocrlf_pos = result.find("autocrlf").unwrap();
-        assert!(hooks_pos > autocrlf_pos);
-        assert!(hooks_pos < user_pos);
-    }
-
-    #[test]
-    fn expand_tilde_with_slash() {
-        let home = Path::new("/home/test");
-        assert_eq!(expand_tilde("~/hooks", home), "/home/test/hooks");
-    }
-
-    #[test]
-    fn expand_tilde_bare() {
-        let home = Path::new("/home/test");
-        assert_eq!(expand_tilde("~", home), "/home/test");
-    }
-
-    #[test]
-    fn expand_tilde_no_tilde() {
-        let home = Path::new("/home/test");
-        assert_eq!(expand_tilde("/abs/path", home), "/abs/path");
-    }
-
-    /// Helper: parse from a string directly (avoids file I/O in tests).
-    fn parse_gitconfig_value_from_str(contents: &str, section: &str, key: &str) -> Option<String> {
-        let section_lower = section.to_ascii_lowercase();
-        let key_lower = key.to_ascii_lowercase();
-        let mut in_section = false;
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                let header = trimmed
-                    .trim_start_matches('[')
-                    .split(']')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                let section_name = header.split_whitespace().next().unwrap_or("");
-                in_section = section_name.eq_ignore_ascii_case(&section_lower);
-                continue;
-            }
-            if !in_section {
-                continue;
-            }
-            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
-                continue;
-            }
-            if let Some((k, v)) = trimmed.split_once('=')
-                && k.trim().to_ascii_lowercase() == key_lower
-            {
-                let v = v.trim();
-                let v = v
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .unwrap_or(v);
-                return Some(v.to_string());
-            }
-        }
-        None
-    }
-}
-
-pub fn tool_names() -> Vec<String> {
-    advertised_tools()
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect()
-}
-
-pub fn read_only_tool_names() -> Vec<String> {
-    advertised_tools()
-        .into_iter()
-        .filter(|tool| tool.read_only)
-        .map(|tool| tool.name)
-        .collect()
-}
-
-pub fn expected_tool_perms() -> Vec<String> {
-    advertised_tools()
-        .iter()
-        .map(|tool| format!("{}{}", crate::tool_name::LEGACY_TOOL_PREFIX, tool.name))
-        .collect()
+/// Built from [`all_integrations`] so the list cannot drift from the set
+/// `tracedecay install` actually detects, and it names the directory that was
+/// searched: an unexpected `HOME` is the other reason this comes up empty.
+pub fn no_detected_integrations_notice(home: &Path) -> String {
+    let integrations = all_integrations();
+    let mut names: Vec<&str> = integrations.iter().map(|agent| agent.name()).collect();
+    names.sort_unstable();
+    format!(
+        "No supported agents detected under {}.\n\
+         TraceDecay configures {}.\n\
+         Install one of them, then run `tracedecay install` again.",
+        home.display(),
+        names.join(", ")
+    )
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod jsonc_tests {
-    use super::*;
+mod select_detected_integrations_tests {
+    use super::{no_detected_integrations_notice, select_detected_integrations};
 
     #[test]
-    fn parse_jsonc_plain_json() {
-        let input = r#"{"key": "value", "num": 42}"#;
-        let v = parse_jsonc(input);
-        assert_eq!(v["key"], "value");
-        assert_eq!(v["num"], 42);
-    }
+    fn empty_home_selects_nothing_instead_of_failing() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(select_detected_integrations(home.path(), &[]), None);
 
-    #[test]
-    fn parse_jsonc_line_comment() {
-        let input = "{\n  // this is a comment\n  \"key\": \"val\"\n}";
-        let v = parse_jsonc(input);
-        assert_eq!(v["key"], "val");
-    }
-
-    #[test]
-    fn parse_jsonc_block_comment() {
-        let input = "{ /* block comment */ \"key\": \"val\" }";
-        let v = parse_jsonc(input);
-        assert_eq!(v["key"], "val");
-    }
-
-    #[test]
-    fn parse_jsonc_trailing_comma_object() {
-        let input = r#"{"a": 1, "b": 2,}"#;
-        let v = parse_jsonc(input);
-        assert_eq!(v["a"], 1);
-        assert_eq!(v["b"], 2);
-    }
-
-    #[test]
-    fn parse_jsonc_trailing_comma_array() {
-        let input = r#"{"items": [1, 2, 3,]}"#;
-        let v = parse_jsonc(input);
-        assert_eq!(v["items"][2], 3);
-    }
-
-    #[test]
-    fn parse_jsonc_combined() {
-        let input = "{\n  // comment\n  \"x\": /* inline */ 99,\n}";
-        let v = parse_jsonc(input);
-        assert_eq!(v["x"], 99);
-    }
-
-    #[test]
-    fn parse_jsonc_url_in_string_not_stripped() {
-        // A URL containing `//` inside a string must NOT be treated as a comment.
-        let input = r#"{"url": "https://example.com/path"}"#;
-        let v = parse_jsonc(input);
-        assert_eq!(v["url"], "https://example.com/path");
-    }
-
-    #[test]
-    fn parse_jsonc_invalid_falls_back_to_empty() {
-        let input = "not valid json at all !!!";
-        let v = parse_jsonc(input);
-        assert_eq!(v, serde_json::json!({}));
-    }
-
-    #[test]
-    fn parse_jsonc_empty_string() {
-        let v = parse_jsonc("");
-        assert_eq!(v, serde_json::json!({}));
-    }
-
-    #[test]
-    fn parse_jsonc_trailing_comma_with_whitespace() {
-        let input = "{\n  \"a\": 1  ,\n}";
-        let v = parse_jsonc(input);
-        assert_eq!(v["a"], 1);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Regression tests for safe config backup / load / write
-// ---------------------------------------------------------------------------
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod safe_config_tests {
-    use super::*;
-    use std::fs;
-
-    /// Create a temp directory that is cleaned up on drop.
-    fn tmpdir() -> tempfile::TempDir {
-        tempfile::tempdir().expect("failed to create temp dir")
-    }
-
-    // ----- backup_config_file -----
-
-    #[test]
-    fn backup_returns_none_when_file_missing() {
-        let dir = tmpdir();
-        let path = dir.path().join("nonexistent.json");
-        let result = backup_config_file(&path).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn backup_creates_bak_with_identical_content() {
-        let dir = tmpdir();
-        let path = dir.path().join("config.json");
-        let original = r#"{"existing": "data", "nested": {"key": 1}}"#;
-        fs::write(&path, original).unwrap();
-
-        let backup = backup_config_file(&path)
-            .unwrap()
-            .expect("should create backup");
-        assert!(backup.exists());
-        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
-        // Original is untouched
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn backup_staging_file_is_cleaned_up() {
-        let dir = tmpdir();
-        let path = dir.path().join("config.json");
-        fs::write(&path, "{}").unwrap();
-
-        backup_config_file(&path).unwrap();
-
-        let staging = dir.path().join("config.json.bak.new");
-        assert!(!staging.exists(), ".bak.new staging file should be removed");
-    }
-
-    // ----- load_json_file_strict -----
-
-    #[test]
-    fn strict_load_returns_empty_for_missing_file() {
-        let dir = tmpdir();
-        let path = dir.path().join("nope.json");
-        let val = load_json_file_strict(&path).unwrap();
-        assert_eq!(val, serde_json::json!({}));
-    }
-
-    #[test]
-    fn strict_load_returns_empty_for_blank_file() {
-        let dir = tmpdir();
-        let path = dir.path().join("empty.json");
-        fs::write(&path, "   \n  ").unwrap();
-        let val = load_json_file_strict(&path).unwrap();
-        assert_eq!(val, serde_json::json!({}));
-    }
-
-    #[test]
-    fn strict_load_parses_valid_json() {
-        let dir = tmpdir();
-        let path = dir.path().join("valid.json");
-        fs::write(&path, r#"{"hello": "world", "n": 42}"#).unwrap();
-        let val = load_json_file_strict(&path).unwrap();
-        assert_eq!(val["hello"], "world");
-        assert_eq!(val["n"], 42);
-    }
-
-    #[test]
-    fn strict_load_errors_on_invalid_json() {
-        let dir = tmpdir();
-        let path = dir.path().join("bad.json");
-        fs::write(&path, "not json {{{").unwrap();
-        let err = load_json_file_strict(&path).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("cannot parse"), "error: {msg}");
-        assert!(
-            msg.contains("bad.json"),
-            "error should mention filename: {msg}"
+        let claude_home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(claude_home.path().join(".claude")).unwrap();
+        assert_eq!(
+            select_detected_integrations(claude_home.path(), &[]),
+            Some(vec!["claude".to_string()])
         );
     }
 
     #[test]
-    fn strict_load_errors_on_truncated_json() {
-        let dir = tmpdir();
-        let path = dir.path().join("trunc.json");
-        fs::write(&path, r#"{"key": "value", "incomplete"#).unwrap();
-        assert!(load_json_file_strict(&path).is_err());
+    fn the_empty_home_notice_names_the_agents_and_the_retry() {
+        let home = tempfile::tempdir().unwrap();
+        let notice = no_detected_integrations_notice(home.path());
+        assert_eq!(
+            notice,
+            format!(
+                "No supported agents detected under {}.\n\
+                 TraceDecay configures {}.\n\
+                 Install one of them, then run `tracedecay install` again.",
+                home.path().display(),
+                "Antigravity, ChatGPT, Claude Code, Cline, Codex CLI, Cursor, Devin, \
+                 Factory Droid, Gemini CLI, GitHub Copilot, Hermes, Kilo CLI, Kimi CLI, \
+                 Kiro, Mistral Vibe, OpenCode, Pi, Roo Code, Zed"
+            )
+        );
     }
 
-    // ----- load_jsonc_file_strict -----
-
     #[test]
-    fn strict_jsonc_load_returns_empty_for_missing() {
-        let dir = tmpdir();
-        let path = dir.path().join("nope.jsonc");
-        let val = load_jsonc_file_strict(&path).unwrap();
-        assert_eq!(val, serde_json::json!({}));
+    fn detected_agents_are_installed_and_kept_without_reading_stdin() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".cursor")).unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+
+        let to_install =
+            select_detected_integrations(home.path(), &["cursor".to_string()]).unwrap();
+
+        assert_eq!(to_install, vec!["claude".to_string()]);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod managed_skill_prompt_index_doctor_tests {
+    use super::{DoctorCounters, HealthcheckContext, get_integration};
+    use std::path::{Path, PathBuf};
+
+    /// One managed-skill index a host writes, and what it takes for that
+    /// host's `healthcheck` to reach the index check at all.
+    struct IndexRow {
+        integration: &'static str,
+        /// Which of the host's index files this row exercises, so a failure
+        /// names the spelling that went unchecked.
+        scope: &'static str,
+        /// Marker slug the target's block is written under.
+        slug: &'static str,
+        index_path: fn(&Path, &Path) -> PathBuf,
+        /// Minimum state that makes the host read as installed.
+        seed: fn(&Path, &Path),
     }
 
-    #[test]
-    fn strict_jsonc_load_parses_valid_jsonc() {
-        let dir = tmpdir();
-        let path = dir.path().join("settings.json");
-        fs::write(
-            &path,
-            "{\n  // comment\n  \"key\": \"val\",\n  /* block */ \"n\": 1,\n}",
+    fn seed_nothing(_home: &Path, _project: &Path) {}
+
+    /// Kiro's healthcheck returns before every installed-only check unless its
+    /// registry carries the tracedecay server.
+    fn seed_kiro_registry(home: &Path, _project: &Path) {
+        let mcp_path = super::kiro::mcp_config_path(home);
+        std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &mcp_path,
+            br#"{"mcpServers":{"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}"#,
         )
         .unwrap();
-        let val = load_jsonc_file_strict(&path).unwrap();
-        assert_eq!(val["key"], "val");
-        assert_eq!(val["n"], 1);
     }
 
-    #[test]
-    fn strict_jsonc_load_errors_on_garbage() {
-        let dir = tmpdir();
-        let path = dir.path().join("garbage.json");
-        fs::write(&path, "totally not json or jsonc !!!").unwrap();
-        let err = load_jsonc_file_strict(&path).unwrap_err();
-        assert!(err.to_string().contains("cannot parse"));
-    }
-
-    // ----- safe_write_json_file -----
-
-    #[test]
-    fn safe_write_creates_file_from_scratch() {
-        let dir = tmpdir();
-        let path = dir.path().join("new.json");
-        let value = serde_json::json!({"created": true});
-        safe_write_json_file(&path, &value, None).unwrap();
-
-        let written = fs::read_to_string(&path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
-        assert_eq!(parsed["created"], true);
-    }
-
-    #[test]
-    fn safe_write_replaces_existing_file_atomically() {
-        let dir = tmpdir();
-        let path = dir.path().join("existing.json");
-        fs::write(&path, r#"{"old": true}"#).unwrap();
-
-        let value = serde_json::json!({"new": true});
-        safe_write_json_file(&path, &value, None).unwrap();
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(parsed["new"], true);
-        assert!(parsed.get("old").is_none());
-    }
-
-    #[test]
-    fn safe_write_cleans_up_new_file_on_success() {
-        let dir = tmpdir();
-        let path = dir.path().join("config.json");
-        safe_write_json_file(&path, &serde_json::json!({}), None).unwrap();
-
-        let new_path = dir.path().join("config.json.new");
-        assert!(!new_path.exists(), ".new staging file should be removed");
-    }
-
-    #[test]
-    fn safe_write_creates_parent_dirs() {
-        let dir = tmpdir();
-        let path = dir.path().join("deep").join("nested").join("config.json");
-        safe_write_json_file(&path, &serde_json::json!({"deep": true}), None).unwrap();
-        assert!(path.exists());
-    }
-
-    // ----- write_json_file (convenience wrapper) -----
-
-    #[test]
-    fn write_json_file_creates_backup_automatically() {
-        let dir = tmpdir();
-        let path = dir.path().join("auto.json");
-        fs::write(&path, r#"{"original": true}"#).unwrap();
-
-        write_json_file(&path, &serde_json::json!({"updated": true})).unwrap();
-
-        // .bak should exist with original content
-        let bak = dir.path().join("auto.json.bak");
-        assert!(bak.exists());
-        let backup_content: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&bak).unwrap()).unwrap();
-        assert_eq!(backup_content["original"], true);
-    }
-
-    // ----- THE KEY REGRESSION TEST -----
-    // This is the exact bug the fix addresses: load_json_file silently
-    // returned {} on parse failure, and the install wrote {} + tracedecay
-    // back, destroying the user's config.
-
-    #[test]
-    fn invalid_json_is_never_silently_replaced() {
-        let dir = tmpdir();
-        let path = dir.path().join("opencode.json");
-        // Simulate a file that serde_json can't parse (e.g. has trailing commas
-        // that the non-strict loader would silently drop).
-        let corrupted =
-            r#"{"mcp": {"other_server": {"url": "http://example.com"},}, "theme": "dark",}"#;
-        fs::write(&path, corrupted).unwrap();
-
-        // The strict loader must refuse to parse this.
-        let err = load_json_file_strict(&path);
-        assert!(err.is_err(), "strict loader must reject invalid JSON");
-
-        // The original file must be completely untouched.
-        assert_eq!(fs::read_to_string(&path).unwrap(), corrupted);
-
-        // Contrast: the old non-strict loader silently returns {} — this
-        // is the exact behavior that destroyed configs.
-        let old_style = load_json_file(&path);
-        assert_eq!(
-            old_style,
-            serde_json::json!({}),
-            "non-strict loader returns empty"
-        );
-    }
-
-    #[test]
-    fn full_install_cycle_preserves_existing_config() {
-        // Simulate the full install cycle: backup → strict load → mutate → safe write.
-        // Existing keys must be preserved.
-        let dir = tmpdir();
-        let path = dir.path().join("config.json");
-        let original = serde_json::json!({
-            "theme": "dark",
-            "mcp": {
-                "existing_server": {"url": "http://localhost:8080"}
-            },
-            "other_setting": [1, 2, 3]
-        });
-        fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
-
-        // Simulate install
-        let backup = backup_config_file(&path).unwrap();
-        let mut config = load_json_file_strict(&path).unwrap();
-        config["mcp"]["tracedecay"] = serde_json::json!({
-            "type": "local",
-            "command": ["tracedecay", "serve"]
-        });
-        safe_write_json_file(&path, &config, backup.as_deref()).unwrap();
-
-        // Verify
-        let result: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        // TraceDecay was added
-        assert!(result["mcp"]["tracedecay"].is_object());
-        // Existing keys survived
-        assert_eq!(result["theme"], "dark");
-        assert_eq!(
-            result["mcp"]["existing_server"]["url"],
-            "http://localhost:8080"
-        );
-        assert_eq!(result["other_setting"], serde_json::json!([1, 2, 3]));
-
-        // Backup exists with original content
-        let bak_content: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(backup.unwrap()).unwrap()).unwrap();
-        assert!(bak_content.get("tracedecay").is_none());
-        assert_eq!(bak_content["theme"], "dark");
-    }
-
-    #[test]
-    fn full_install_cycle_aborts_on_corrupt_file() {
-        // If the existing config is corrupt, the install must fail without
-        // touching the file. This is the core regression test.
-        let dir = tmpdir();
-        let path = dir.path().join("config.json");
-        let corrupt_content = "{ this is not valid json at all }}}";
-        fs::write(&path, corrupt_content).unwrap();
-
-        // Backup succeeds (it just copies bytes)
-        let backup = backup_config_file(&path).unwrap();
-        assert!(backup.is_some());
-
-        // Strict load fails
-        let err = load_json_file_strict(&path);
-        assert!(err.is_err());
-
-        // Original file is byte-for-byte unchanged
-        assert_eq!(fs::read_to_string(&path).unwrap(), corrupt_content);
-        // Backup also has the same content
-        assert_eq!(
-            fs::read_to_string(backup.unwrap()).unwrap(),
-            corrupt_content
-        );
-    }
-
-    #[test]
-    fn safe_write_output_is_valid_json() {
-        // Verify the written file is always parseable JSON (round-trip).
-        let dir = tmpdir();
-        let path = dir.path().join("roundtrip.json");
-        let value = serde_json::json!({
-            "unicode": "héllo wörld 🦀",
-            "nested": {"deep": {"array": [1, null, true, "str"]}},
-            "empty_obj": {},
-            "empty_arr": []
-        });
-
-        safe_write_json_file(&path, &value, None).unwrap();
-
-        let raw = fs::read_to_string(&path).unwrap();
-        let reparsed: serde_json::Value =
-            serde_json::from_str(&raw).expect("written file must be valid JSON");
-        assert_eq!(reparsed, value);
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod path_normalize_tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn path_lookup_preserves_non_unicode_parent_components() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let invalid_parent = dir
-            .path()
-            .join(std::ffi::OsString::from_vec(vec![b'n', b'o', b'n', 0xff]));
-        let executable = invalid_parent.join(tracedecay_bin_name());
-        std::fs::create_dir_all(&invalid_parent).unwrap();
-        std::fs::write(&executable, "").unwrap();
-        let path_var = std::env::join_paths([&invalid_parent]).unwrap();
-
-        assert_eq!(
-            which_tracedecay_path_from(None, Some(path_var.as_os_str()), None),
-            Some(executable)
-        );
-        assert!(which_tracedecay_from(None, Some(path_var.as_os_str()), None).is_none());
-    }
-
-    #[test]
-    fn path_lookup_absolutizes_relative_path_entries() {
-        let relative = Path::new("target").join(tracedecay_bin_name());
-
-        let absolute = absolute_executable_path(&relative).expect("absolute path");
-
-        assert!(absolute.is_absolute());
-        assert!(absolute.ends_with(&relative));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_path_classification_is_case_insensitive() {
-        assert!(is_tracedecay_exe(Path::new(r"C:\Tools\TraceDecay.EXE")));
-        assert!(is_cargo_target_binary(
-            Path::new(r"C:\Work\TARGET\DEBUG\TraceDecay.EXE"),
-            None
-        ));
-        assert!(is_cargo_target_binary(
-            Path::new(r"C:\Work\Custom\TraceDecay.EXE"),
-            Some(Path::new(r"c:\work\CUSTOM"))
-        ));
-    }
-
-    #[test]
-    fn normalizes_windows_backslashes() {
-        assert_eq!(
-            normalize_path_separators(r"C:\Users\dev\scoop\shims\tracedecay.exe"),
-            "C:/Users/dev/scoop/shims/tracedecay.exe"
-        );
-    }
-
-    #[test]
-    fn leaves_unix_paths_unchanged() {
-        assert_eq!(
-            normalize_path_separators("/usr/local/bin/tracedecay"),
-            "/usr/local/bin/tracedecay"
-        );
-    }
-
-    #[test]
-    fn which_tracedecay_prefers_path_when_current_exe_is_cargo_target_binary() {
-        let dir = tempfile::tempdir().unwrap();
-        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
-        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
-        std::fs::write(&path_bin, "").unwrap();
-        let current_exe = dir
-            .path()
-            .join("checkout/target/debug")
-            .join(tracedecay_bin_name());
-        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
-
-        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
-            .expect("PATH binary should be preferred over cargo target binary");
-
-        assert_eq!(
-            found,
-            normalize_path_separators(&path_bin.to_string_lossy())
-        );
-    }
-
-    #[test]
-    fn which_tracedecay_prefers_path_when_current_exe_is_custom_cargo_target_binary() {
-        let dir = tempfile::tempdir().unwrap();
-        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
-        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
-        std::fs::write(&path_bin, "").unwrap();
-        let cargo_target_dir = dir.path().join("custom-target");
-        let current_exe = cargo_target_dir.join("debug").join(tracedecay_bin_name());
-        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
-
-        let found = which_tracedecay_from(
-            Some(&current_exe),
-            Some(path_var.as_os_str()),
-            Some(&cargo_target_dir),
+    /// A managed block listing exactly `entries`, so the baseline and the
+    /// stale-index run differ in nothing but the listed ids.
+    fn write_index_block(path: &Path, slug: &str, entries: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "<!-- TRACEDECAY MANAGED SKILLS START {slug} -->\n{entries}\
+                 <!-- TRACEDECAY MANAGED SKILLS END {slug} -->\n"
+            ),
         )
-        .expect("PATH binary should be preferred over a custom cargo target binary");
-
-        assert_eq!(
-            found,
-            normalize_path_separators(&path_bin.to_string_lossy())
-        );
+        .unwrap();
     }
 
+    const GHOST_ENTRY: &str = "- `ghost-skill`: Ghost Skill. Summary: no longer in the store.\n";
+
+    fn index_rows() -> Vec<IndexRow> {
+        vec![
+            IndexRow {
+                integration: "claude",
+                scope: "user CLAUDE.md",
+                slug: "claude",
+                index_path: |home, _| home.join(".claude").join("CLAUDE.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "claude",
+                scope: "project CLAUDE.md",
+                slug: "claude",
+                index_path: |_, project| project.join(".claude/CLAUDE.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "vibe",
+                scope: "user prompts/cli.md",
+                slug: "agents",
+                index_path: |home, _| super::vibe::vibe_prompt_path(home),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "vibe",
+                scope: "project prompts/cli.md",
+                slug: "agents",
+                index_path: |_, project| project.join(".vibe/prompts/cli.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "copilot",
+                scope: "CLI copilot-instructions.md",
+                slug: "agents",
+                index_path: |home, _| super::copilot_cli_dir(home).join("copilot-instructions.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "copilot",
+                scope: "project copilot-instructions.md",
+                slug: "agents",
+                index_path: |_, project| project.join(".github/copilot-instructions.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "opencode",
+                scope: "user AGENTS.md",
+                slug: "opencode",
+                index_path: |home, _| {
+                    super::opencode::opencode_prompt_path(
+                        home,
+                        &tracedecay_runtime_core::config::ProfileRoot::under_home(home),
+                    )
+                },
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "opencode",
+                scope: "project AGENTS.md",
+                slug: "opencode",
+                index_path: |_, project| project.join("AGENTS.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "kimi",
+                scope: "project AGENTS.md",
+                slug: "kimi",
+                index_path: |_, project| project.join("AGENTS.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "kiro",
+                scope: "user steering index",
+                slug: "kiro",
+                index_path: |home, _| super::kiro::managed_skill_index_path(home),
+                seed: seed_kiro_registry,
+            },
+            IndexRow {
+                integration: "kiro",
+                scope: "project steering index",
+                slug: "kiro",
+                index_path: |_, project| {
+                    project.join(".kiro/steering/tracedecay-managed-skills.md")
+                },
+                seed: seed_kiro_registry,
+            },
+        ]
+    }
+
+    /// Every prompt index a host writes must also be read back by that host's
+    /// own `healthcheck`.
+    ///
+    /// Asserting the warning delta across two runs of the same healthcheck,
+    /// rather than an absolute count, keeps the unrelated warnings these hosts
+    /// emit for an unconfigured home out of the verdict. The baseline run
+    /// already has the index file in place holding an empty managed block, so
+    /// the ghost id is the only thing that changes on disk between the runs
+    /// and a rise can come from nowhere but the index check. Creating the file
+    /// only for the second run would not do: several hosts also read these
+    /// paths for their prompt rules, and vibe reclassifies an absent prompt
+    /// (warning) as a prompt missing rules (issue) once one appears, which
+    /// leaves the warning count flat while the index check is firing.
+    ///
+    /// A host wired for only some of its index files fails on the spelling it
+    /// skipped, which a check of `stale_prompt_index_ids` in isolation would
+    /// not catch.
     #[test]
-    fn which_tracedecay_skips_cargo_target_binary_on_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let target_bin = dir
-            .path()
-            .join("checkout/target/debug")
-            .join(tracedecay_bin_name());
-        let stable_bin = dir.path().join(".cargo/bin").join(tracedecay_bin_name());
-        std::fs::create_dir_all(target_bin.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(stable_bin.parent().unwrap()).unwrap();
-        std::fs::write(&target_bin, "").unwrap();
-        std::fs::write(&stable_bin, "").unwrap();
-        let path_var =
-            std::env::join_paths([target_bin.parent().unwrap(), stable_bin.parent().unwrap()])
-                .unwrap();
+    fn every_prompt_index_a_host_writes_is_read_back_by_its_healthcheck() {
+        for row in index_rows() {
+            let home = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let (home, project) = (home.path(), project.path());
+            let case = format!("{} ({})", row.integration, row.scope);
 
-        let found = which_tracedecay_from(None, Some(path_var.as_os_str()), None)
-            .expect("stable PATH binary should be found after skipping cargo target binary");
+            // An empty store makes every id the index lists stale.
+            std::fs::create_dir_all(home.join(".tracedecay/agent_managed/skills")).unwrap();
+            (row.seed)(home, project);
 
-        assert_eq!(
-            found,
-            normalize_path_separators(&stable_bin.to_string_lossy())
-        );
-    }
+            let integration = get_integration(row.integration).unwrap();
+            let ctx = HealthcheckContext {
+                profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
+                home: home.to_path_buf(),
+                project_path: project.to_path_buf(),
+                catalog_profiles: Default::default(),
+            };
+            let index = (row.index_path)(home, project);
+            write_index_block(&index, row.slug, "");
+            let mut before = DoctorCounters::new();
+            integration.healthcheck(&mut before, &ctx);
 
-    #[test]
-    fn which_tracedecay_keeps_non_target_current_exe() {
-        let dir = tempfile::tempdir().unwrap();
-        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
-        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
-        std::fs::write(&path_bin, "").unwrap();
-        let current_exe = dir.path().join(".cargo/bin").join(tracedecay_bin_name());
-        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
+            write_index_block(&index, row.slug, GHOST_ENTRY);
+            let mut after = DoctorCounters::new();
+            integration.healthcheck(&mut after, &ctx);
 
-        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
-            .expect("non-target current exe should be accepted");
-
-        assert_eq!(
-            found,
-            normalize_path_separators(&current_exe.to_string_lossy())
-        );
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod local_install_safety_tests {
-    use super::*;
-
-    fn start_paused_host_write(
-        path: &Path,
-        contents: &'static [u8],
-    ) -> (
-        TestHostConfigWritePauseController,
-        std::thread::JoinHandle<std::result::Result<(), String>>,
-    ) {
-        let pause = pause_next_host_config_write_at_publication(path);
-        let path = path.to_path_buf();
-        let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&path, contents, None).map_err(|error| error.to_string())
-        });
-        pause.wait_until_reached();
-        (pause, writer)
-    }
-
-    #[test]
-    fn windows_hook_command_quotes_windows_paths_with_spaces() {
-        let command = hook_command_for_platform(
-            r"C:\Program Files\tracedecay\tracedecay.exe",
-            "hook-test",
-            true,
-        );
-
-        assert_eq!(
-            command,
-            r#""C:/Program Files/tracedecay/tracedecay.exe" hook-test"#
-        );
-    }
-
-    #[test]
-    fn posix_hook_command_keeps_single_quote_escaping() {
-        let command = hook_command_for_platform("/tmp/tracedecay's/bin", "hook-test", false);
-
-        assert_eq!(command, "'/tmp/tracedecay'\\''s/bin' hook-test");
-    }
-
-    #[test]
-    fn post_commit_snippet_quotes_posix_binary_paths_with_spaces() {
-        let snippet = post_commit_snippet("/tmp/bin with spaces/tracedecay");
-
-        assert!(snippet.contains("'/tmp/bin with spaces/tracedecay' sync"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_local_safe_path_rejects_symlinked_target() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        let outside = dir.path().join("outside.md");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(&outside, "outside").unwrap();
-        symlink(&outside, project.join("AGENTS.md")).unwrap();
-
-        let err = ensure_project_local_safe_path(&project, &project.join("AGENTS.md")).unwrap_err();
-        assert!(
-            err.to_string().contains("symlink"),
-            "error should clearly identify the symlink risk: {err}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_local_safe_path_rejects_symlinked_parent() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        let outside = dir.path().join("outside");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, project.join(".codex")).unwrap();
-
-        let err = ensure_project_local_safe_path(&project, &project.join(".codex/config.toml"))
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("symlink"),
-            "error should clearly identify the symlink risk: {err}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_local_safe_path_allows_new_file_under_canonicalized_project_alias() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let actual = dir.path().join("actual");
-        let alias = dir.path().join("alias");
-        let project = actual.join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        symlink(&actual, &alias).unwrap();
-
-        let alias_project = alias.join("project");
-        ensure_project_local_safe_path(&alias_project, &alias_project.join(".codex/config.toml"))
-            .unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_local_safe_path_reports_symlink_under_canonicalized_project_alias() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let actual = dir.path().join("actual");
-        let alias = dir.path().join("alias");
-        let project = actual.join("project");
-        let outside = dir.path().join("outside.md");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(&outside, "outside").unwrap();
-        symlink(&actual, &alias).unwrap();
-        symlink(&outside, project.join("AGENTS.md")).unwrap();
-
-        let alias_project = alias.join("project");
-        let err = ensure_project_local_safe_path(&alias_project, &alias_project.join("AGENTS.md"))
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("symlink"),
-            "error should clearly identify the symlink risk: {err}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shared_host_writer_refuses_symlinked_config_for_every_integration() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let outside = dir.path().join("operator-config.json");
-        let config = dir.path().join("host-config.json");
-        std::fs::write(&outside, b"operator bytes").unwrap();
-        symlink(&outside, &config).unwrap();
-
-        let error = safe_write_bytes_file(&config, b"tracedecay bytes", None).unwrap_err();
-        assert!(
-            error.to_string().contains("unsafe host metadata path"),
-            "shared writer must surface its cross-host symlink refusal: {error}"
-        );
-        assert_eq!(std::fs::read(&outside).unwrap(), b"operator bytes");
-    }
-
-    #[test]
-    fn shared_host_writer_serializes_a_competing_canonical_writer() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("AGENTS.md");
-        std::fs::write(&config, b"original").unwrap();
-        let (pause, first) = start_paused_host_write(&config, b"first");
-        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-        let second_path = config.clone();
-        let second = std::thread::spawn(move || {
-            let result = safe_write_bytes_file(&second_path, b"second", None)
-                .map_err(|error| error.to_string());
-            finished_tx.send(()).unwrap();
-            result
-        });
-
-        assert!(
-            finished_rx
-                .recv_timeout(std::time::Duration::from_millis(150))
-                .is_err(),
-            "a competing canonical writer must wait for the path lock"
-        );
-        pause.resume();
-        first.join().unwrap().unwrap();
-        second.join().unwrap().unwrap();
-        assert_eq!(std::fs::read(&config).unwrap(), b"second");
-    }
-
-    #[test]
-    fn shared_host_writer_refuses_a_foreign_edit_at_publication_boundary() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("AGENTS.md");
-        std::fs::write(&config, b"original").unwrap();
-        let pause = pause_next_host_config_write_at_publication(&config);
-        let writer_path = config.clone();
-        let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&writer_path, b"tracedecay", None)
-                .map_err(|error| error.to_string())
-        });
-        pause.wait_until_reached();
-
-        std::fs::write(&config, b"foreign").unwrap();
-        pause.resume();
-        let error = writer.join().unwrap().unwrap_err();
-
-        assert!(error.contains("changed since it was read"), "{error}");
-        assert_eq!(std::fs::read(&config).unwrap(), b"foreign");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shared_host_writer_retains_both_files_when_published_staging_is_mutated() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("AGENTS.md");
-        std::fs::write(&config, b"original").unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let publication = pause_next_host_config_write_at_publication(&config);
-        let published = pause_next_host_config_write_after_publication(&config);
-        let writer_path = config.clone();
-        let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&writer_path, b"tracedecay", None)
-                .map_err(|error| error.to_string())
-        });
-        publication.wait_until_reached();
-
-        std::fs::write(&config, b"foreign at boundary").unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
-        publication.resume();
-        published.wait_until_reached();
-
-        std::fs::write(&config, b"foreign after publication").unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
-        published.resume();
-        let error = writer.join().unwrap().unwrap_err();
-
-        assert!(error.contains("retained"), "{error}");
-        assert_eq!(std::fs::read(&config).unwrap(), b"foreign at boundary");
-        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, 0o640);
-        let retained = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(std::result::Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| {
-                path != &config
-                    && std::fs::read(path)
-                        .is_ok_and(|contents| contents == b"foreign after publication")
-            })
-            .expect("the ambiguous published staging file must remain recoverable");
-        assert_eq!(std::fs::metadata(retained).unwrap().mode() & 0o777, 0o644);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shared_host_writer_refuses_a_symlink_swap_at_publication() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("AGENTS.md");
-        let outside = dir.path().join("outside.md");
-        std::fs::write(&config, b"original").unwrap();
-        std::fs::write(&outside, b"outside").unwrap();
-        let (pause, writer) = start_paused_host_write(&config, b"tracedecay");
-
-        std::fs::remove_file(&config).unwrap();
-        symlink(&outside, &config).unwrap();
-        pause.resume();
-        let error = writer.join().unwrap().unwrap_err();
-
-        assert!(error.contains("unsafe host metadata path"), "{error}");
-        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shared_host_writer_refuses_a_metadata_change_at_publication() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("AGENTS.md");
-        std::fs::write(&config, b"original").unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let (pause, writer) = start_paused_host_write(&config, b"tracedecay");
-
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
-        pause.resume();
-        let error = writer.join().unwrap().unwrap_err();
-
-        assert!(error.contains("changed since it was read"), "{error}");
-        assert_eq!(std::fs::read(&config).unwrap(), b"original");
-        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, 0o640);
-    }
-
-    #[test]
-    fn shared_host_writer_refuses_a_missing_file_create_at_publication() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("AGENTS.md");
-        let (pause, writer) = start_paused_host_write(&config, b"tracedecay");
-
-        std::fs::write(&config, b"foreign create").unwrap();
-        pause.resume();
-        let error = writer.join().unwrap().unwrap_err();
-
-        assert!(error.contains("changed since it was read"), "{error}");
-        assert_eq!(std::fs::read(&config).unwrap(), b"foreign create");
+            assert!(
+                after.warnings > before.warnings,
+                "{case} healthcheck must warn about the stale managed-skill index at {} \
+                 (warnings {} -> {})",
+                index.display(),
+                before.warnings,
+                after.warnings
+            );
+        }
     }
 }

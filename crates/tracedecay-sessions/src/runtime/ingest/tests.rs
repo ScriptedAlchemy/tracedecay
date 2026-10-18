@@ -2,25 +2,36 @@
 
 use std::path::PathBuf;
 
-use tracedecay_domain::ProjectId;
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_domain::{
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, SessionId,
+};
+use tracedecay_store::{
+    CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1, ObservationCoverageReason,
+    ObservationCoverageV1, ObservationStoreError,
+};
 
+use crate::admission::test_support::MemoryHostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::hosts::codex::session_meta_read_count_for_test;
+use crate::runtime::ingest::project_provider::ProjectProviderRun;
+use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::{SessionProvider, claude_observation, codex, git_correlation, source};
+use crate::runtime::{SessionProvider, hosts::claude_observation, hosts::codex, source};
 
 use super::failure::{
-    IngestPassBounds, IngestPassCoverage, IngestPassOutcome, allocate_pass_byte_budgets,
+    IngestPassBounds, IngestPassCoverage, allocate_pass_byte_budgets,
     classify_claude_observation_failure, classify_transcript_ingest_failure,
     plan_round_robin_admission, scheduling_write_required,
 };
-use super::project::{home_dir, parse_git_log_commits, with_transcript_source_home};
+use super::project::{home_dir, with_transcript_source_profile};
 use super::scheduler::{
     finish_user_provider_coverage, merge_project_provider_backpressure,
     plan_provider_rotation_admission,
 };
 use super::startup::{StartupUserIngestClaim, StartupUserIngestGuard, TranscriptIngestOutcome};
 use super::user::provider_selected;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     discovered_units: 16,
@@ -31,16 +42,23 @@ const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     bytes_per_pass: 4096,
     retries: 0,
 };
+/// Two owners ingest in one process at once; each source reads only its own
+/// profile's home, and outside a scope there is no transcript home at all.
 #[tokio::test]
-async fn scoped_transcript_source_home_overrides_ambient_home_without_mutating_it() {
-    let isolated_home = tempfile::tempdir().unwrap();
-    let ambient_home = std::env::var_os("HOME");
+async fn concurrent_transcript_source_profiles_each_read_their_own_home() {
+    let homes = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let [first, second] = homes.each_ref().map(|home| {
+        with_transcript_source_profile(ProfileRoot::under_home(home.path()), async {
+            tokio::task::yield_now().await;
+            home_dir()
+        })
+    });
 
-    let resolved =
-        with_transcript_source_home(isolated_home.path().to_path_buf(), async { home_dir() }).await;
+    let (first, second) = tokio::join!(first, second);
 
-    assert_eq!(resolved.as_deref(), Some(isolated_home.path()));
-    assert_eq!(std::env::var_os("HOME"), ambient_home);
+    assert_eq!(first.as_deref(), Some(homes[0].path()));
+    assert_eq!(second.as_deref(), Some(homes[1].path()));
+    assert_eq!(home_dir(), None);
 }
 
 #[tokio::test]
@@ -111,62 +129,14 @@ fn transcript_failure_classification_is_bounded_and_drives_outcome_success() {
 }
 
 #[test]
-fn bounded_pass_coverage_survives_transcript_outcome_boundary() {
-    let partial = IngestPassOutcome {
-        stats: TranscriptIngestStats {
-            sessions_upserted: 1,
-            messages_upserted: 2,
-        },
-        failures: Vec::new(),
-        coverage: IngestPassCoverage::Partial { deferred_units: 3 },
-        scheduling_state_written: true,
-        units_admitted: 2,
-        units_completed: 2,
-        units_failed: 0,
-        byte_bounds_enforced: true,
-    }
-    .into_transcript_outcome();
-
-    assert_eq!(
-        partial.coverage,
-        IngestPassCoverage::Partial { deferred_units: 3 }
-    );
-    assert!(!partial.is_success());
-
-    let backpressured = IngestPassOutcome {
-        stats: TranscriptIngestStats::default(),
-        failures: Vec::new(),
-        coverage: IngestPassCoverage::Backpressured {
-            admitted_units: 1,
-            rejected_units: 4,
-        },
-        scheduling_state_written: false,
-        units_admitted: 1,
-        units_completed: 0,
-        units_failed: 1,
-        byte_bounds_enforced: false,
-    }
-    .into_transcript_outcome();
-
-    assert_eq!(
-        backpressured.coverage,
-        IngestPassCoverage::Backpressured {
-            admitted_units: 1,
-            rejected_units: 4,
-        }
-    );
-    assert!(!backpressured.is_success());
-}
-
-#[test]
 fn transcript_contract_failures_are_not_retryable() {
-    let error = source::TranscriptIngestError::CursorKeyMismatch {
-        expected: "private expected key".to_string(),
-        actual: "private actual key".to_string(),
+    let error = source::TranscriptIngestError::InvalidSourceIdentity {
+        provider: "cursor",
+        path: std::path::PathBuf::from("/private/transcript.jsonl"),
     };
     let failure = classify_transcript_ingest_failure("cursor", "hook", &error);
 
-    assert_eq!(failure.reason_code, "transcript_cursor_key_mismatch");
+    assert_eq!(failure.reason_code, "transcript_source_contract_invalid");
     assert!(!failure.retryable);
 }
 
@@ -183,9 +153,78 @@ fn cursor_advance_receipt_collisions_are_permanent() {
 }
 
 #[test]
+fn a_claude_sanitizer_fault_quarantines_no_source() {
+    use crate::observation::ObservationApplicationError as Application;
+    use claude_observation::ClaudeObservationIngestError as Ingest;
+    use tracedecay_privacy::PrivacySanitizerError as Privacy;
+
+    use super::quarantine::SourceFailure as _;
+
+    for (index, (error, quarantined)) in [
+        (Ingest::Privacy(Privacy::InvalidPolicy), false),
+        (
+            Ingest::Application(Application::Privacy(Privacy::DetectorUnavailable)),
+            false,
+        ),
+        (Ingest::Privacy(Privacy::SourceRangeMismatch), true),
+        (
+            Ingest::Application(Application::Privacy(Privacy::CanonicalProviderMismatch)),
+            true,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            error.catch_up_failure("claude").1,
+            quarantined,
+            "case {index}: only a refusal of the record itself quarantines its source"
+        );
+    }
+}
+
+#[test]
+fn immutable_cursor_ledger_disagreements_are_permanent_and_bounded() {
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor").unwrap(),
+        SessionId::new("session.fixture").unwrap(),
+    )
+    .unwrap();
+    let coverage = ObservationCoverageV1::new(
+        ObservationSourceGenerationV1::new(7).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationSourceRangeV1::new(10, 20).unwrap(),
+    );
+    let disagreement = CursorAdvanceLedgerDisagreementV1::new(
+        source,
+        ObservationScopeV1::Profile,
+        coverage,
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::BlankFrame, None),
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::OutOfScope, None),
+    );
+    let error = claude_observation::ClaudeObservationIngestError::Store(
+        ObservationStoreError::CursorAdvanceLedgerDisagreement {
+            disagreement: Box::new(disagreement),
+        },
+    );
+
+    let failure = classify_claude_observation_failure(&error);
+
+    assert_eq!(
+        failure.reason_code,
+        "observation_cursor_advance_ledger_disagreement"
+    );
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.status,
+        crate::admission::HostAdmissionStatus::Degraded
+    );
+}
+
+#[test]
 fn transcript_privacy_and_non_durable_failures_are_bounded_and_permanent() {
     let privacy = source::TranscriptIngestError::Privacy(
-        tracedecay_runtime_core::privacy::PrivacySanitizerError::InvalidPolicy,
+        tracedecay_privacy::PrivacySanitizerError::InvalidPolicy,
     );
     let privacy = classify_transcript_ingest_failure("claude", "hook", &privacy);
     assert_eq!(privacy.reason_code, "transcript_privacy_rejected");
@@ -235,6 +274,7 @@ fn still_mounting_admission_failures_keep_the_admission_retryability() {
             retryable: true,
             reason_code: Some("authority_write_failed"),
             recovery: None,
+            cause: None,
         },
     );
 
@@ -256,6 +296,7 @@ fn permanent_admission_failures_still_classify_permanent() {
             retryable: false,
             reason_code: Some("invalid_observation_contract"),
             recovery: None,
+            cause: None,
         },
     );
 
@@ -265,12 +306,91 @@ fn permanent_admission_failures_still_classify_permanent() {
     assert!(!failure.retryable);
 }
 
+/// Only a healthy authority's permanent refusal of the record quarantines
+/// the source; an authority fault must not strand unchanged bytes it could
+/// admit once it recovers.
+#[test]
+fn only_permanent_record_refusals_quarantine_the_source() {
+    use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+    use tracedecay_privacy::PrivacySanitizerError;
+
+    let admission = |status, retryable, reason| {
+        crate::runtime::snapshot_observation::host_admission_error(
+            "codex",
+            HostAdmissionOutcome {
+                status,
+                retryable,
+                reason_code: Some(reason),
+                recovery: None,
+                cause: None,
+            },
+        )
+    };
+    let cases = [
+        (
+            admission(
+                HostAdmissionStatus::Degraded,
+                false,
+                "observation_cursor_advance_ledger_disagreement",
+            ),
+            true,
+        ),
+        (
+            admission(
+                HostAdmissionStatus::Unavailable,
+                false,
+                "sanitizer_unavailable",
+            ),
+            false,
+        ),
+        (
+            admission(
+                HostAdmissionStatus::Unavailable,
+                false,
+                "projection_store_corrupt",
+            ),
+            false,
+        ),
+        (
+            admission(HostAdmissionStatus::Unknown, false, "unknown_provider"),
+            false,
+        ),
+        (
+            admission(HostAdmissionStatus::Backpressured, true, "cursor_conflict"),
+            false,
+        ),
+        (
+            source::TranscriptIngestError::Privacy(PrivacySanitizerError::InvalidPolicy),
+            false,
+        ),
+        (
+            source::TranscriptIngestError::Privacy(PrivacySanitizerError::SourceRangeMismatch),
+            true,
+        ),
+        (
+            source::TranscriptIngestError::InvalidSourceIdentity {
+                provider: "codex",
+                path: PathBuf::from("/rollout.jsonl"),
+            },
+            true,
+        ),
+    ];
+
+    for (error, quarantines) in cases {
+        assert_eq!(
+            crate::runtime::classify_transcript_ingest_disposition(&error).quarantines_source(),
+            quarantines,
+            "{error:?}"
+        );
+    }
+}
+
 #[test]
 fn transcript_source_contract_failures_are_bounded_and_permanent() {
     let errors = [
         source::TranscriptIngestError::Domain(tracedecay_domain::SessionId::new("").unwrap_err()),
         source::TranscriptIngestError::ObservationContract(
-            tracedecay_domain::ClaudeFileGenerationV1::new(0).unwrap_err(),
+            tracedecay_domain::ObservationSourceGenerationV1::new(0).unwrap_err(),
         ),
         source::TranscriptIngestError::InvalidFrameState {
             provider: "private provider detail",
@@ -293,355 +413,15 @@ fn transcript_source_contract_failures_are_bounded_and_permanent() {
     }
 }
 
-#[test]
-fn parse_git_log_commits_reads_sha_and_time_skipping_malformed() {
-    let stdout = concat!(
-        "ABCDEF1234567890 1700000000\n",
-        "\n",
-        "missing-time\n",
-        "cafebabe not-a-number\n",
-        "deadbeefdeadbeef 1700000200\n",
-    );
-    let commits = parse_git_log_commits(stdout);
-    assert_eq!(
-        commits,
-        vec![
-            git_correlation::ScannedCommit {
-                sha: "abcdef1234567890".to_string(),
-                committed_at: 1_700_000_000,
-            },
-            git_correlation::ScannedCommit {
-                sha: "deadbeefdeadbeef".to_string(),
-                committed_at: 1_700_000_200,
-            },
-        ]
-    );
-}
-
-#[test]
-fn parse_git_log_commits_empty_is_empty() {
-    assert!(parse_git_log_commits("").is_empty());
-}
-
-use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
-
-struct GraphBackedTestStore {
-    connection: tracedecay_runtime_core::db::engine::TestConnection,
-    graph: MemoryEvidenceGraphRuntime,
-}
-
-impl git_correlation::GitCorrelationSessionStore for GraphBackedTestStore {
-    type ReadSnapshot = tracedecay_runtime_core::db::engine::ReadSnapshot;
-    type WriteTxn<'txn> = tracedecay_runtime_core::db::engine::Transaction;
-
-    fn require_project_sessions_authority(
-        &self,
-    ) -> Result<(), git_correlation::GitCorrelationError> {
-        Ok(())
-    }
-
-    async fn read_snapshot(
-        &self,
-    ) -> Result<
-        tracedecay_runtime_core::db::engine::ReadSnapshot,
-        git_correlation::GitCorrelationError,
-    > {
-        self.connection
-            .read_snapshot()
-            .await
-            .map_err(git_correlation::GitCorrelationError::from)
-    }
-
-    async fn open_write_transaction(
-        &self,
-    ) -> Result<
-        tracedecay_runtime_core::db::engine::Transaction,
-        git_correlation::GitCorrelationError,
-    > {
-        self.connection
-            .transaction_with_behavior(
-                tracedecay_runtime_core::db::engine::TransactionBehavior::Immediate,
-            )
-            .await
-            .map_err(git_correlation::GitCorrelationError::from)
-    }
-
-    fn git_evidence_publication_lock(
-        &self,
-    ) -> Result<&std::sync::Mutex<()>, git_correlation::GitCorrelationError> {
-        Ok(self.graph.git_evidence_publication_lock())
-    }
-
-    fn graph_runtime(
-        &self,
-    ) -> Result<&dyn VerifiedGraphRuntimePortV1, git_correlation::GitCorrelationError> {
-        Ok(&self.graph)
-    }
-}
-
-/// End-to-end over the real scanner: a commit made *while a session is still
-/// recording* must be attributed on the next sweep. This exercises the actual
-/// `git log` invocation and window arithmetic, not a stubbed scan, because the
-/// window bounds are where live commits were previously being missed.
-#[tokio::test]
-async fn live_session_commit_is_attributed_by_the_real_git_scan() {
-    use std::process::Command;
-
-    let repo = tempfile::tempdir().unwrap();
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .current_dir(repo.path())
-            .output()
-            .unwrap()
-    };
-    assert!(git(&["init", "-q", "-b", "main"]).status.success());
-    assert!(
-        git(&["config", "user.email", "test@example.com"])
-            .status
-            .success()
-    );
-    assert!(git(&["config", "user.name", "Test"]).status.success());
-    std::fs::write(repo.path().join("file.txt"), "one\n").unwrap();
-    assert!(git(&["add", "file.txt"]).status.success());
-    assert!(git(&["commit", "-q", "-m", "live commit"]).status.success());
-    let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let store_dir = tempfile::tempdir().unwrap();
-    let store = GraphBackedTestStore {
-        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
-            &store_dir.path().join("sessions.db"),
-        ),
-        graph: MemoryEvidenceGraphRuntime::default(),
-    };
-
-    // A session recording "now" — the commit lands inside its span, exactly as
-    // it does when an agent commits mid-session.
-    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-    let worktree = git_correlation::normalize_worktree(&repo.path().to_string_lossy());
-    let live_span = git_correlation::SessionGitSpan {
-        span_id: "span-live".to_string(),
-        provider: "claude".to_string(),
-        session_id: "live".to_string(),
-        thread_id: None,
-        branch: Some("main".to_string()),
-        worktree,
-        first_ts: now - 60,
-        last_ts: now,
-        event_count: 2,
-        source: git_correlation::SpanSource::HookRoute,
-    };
-    git_correlation::publish_graph_evidence(&store, "live-ingest", &[live_span], &[]).unwrap();
-
-    let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
-        super::project::git_scan_commits(target, gap)
-    })
-    .await
-    .unwrap();
-    assert!(
-        inserted >= 1,
-        "a commit made during a live session must be attributed"
-    );
-
-    let identity = git_correlation::git_evidence_projection_identity(
-        tracedecay_graph_db::GraphNamespace::new("project").unwrap(),
-    )
-    .unwrap();
-    let evidence = git_correlation::recover_git_evidence_projection(
-        git_correlation::GitCorrelationSessionStore::graph_runtime(&store).unwrap(),
-        &identity,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )
-    .unwrap()
-    .expect("attribution published the evidence projection");
-    let hits = evidence.sessions_for_with_relation(
-        &git_correlation::SessionsForQuery {
-            git_ref: git_correlation::GitRefFilter::parse("commit", &sha).unwrap(),
-            since: None,
-            until: None,
-            limit: 10,
-        },
-        git_correlation::CommitRelationFilter::All,
-    );
-    assert_eq!(
-        hits.len(),
-        1,
-        "the live session must be correlated: {hits:?}"
-    );
-    assert_eq!(hits[0].session_id, "live");
-    assert_eq!(
-        hits[0].span_overlap_kind,
-        Some(git_correlation::SpanOverlapKind::WithinSpan)
-    );
-
-    // Replaying the sweep must not double-attribute.
-    let again = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
-        super::project::git_scan_commits(target, gap)
-    })
-    .await
-    .unwrap();
-    assert_eq!(again, 0, "re-sweeping an attributed commit is a no-op");
-}
-
-/// A fresh project has never published a Git evidence projection. The
-/// attribution sweep must complete as a typed no-op — not report a retryable
-/// unavailability, which put the ingest pass into an endless retry loop on
-/// every fresh project (the hermes stock journey surfaced it as a
-/// "graph projection has no relational verified head" warning storm).
-#[tokio::test]
-async fn attribution_sweep_over_a_never_published_projection_is_a_typed_no_op() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let store = GraphBackedTestStore {
-        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
-            &store_dir.path().join("sessions.db"),
-        ),
-        graph: MemoryEvidenceGraphRuntime::default(),
-    };
-
-    let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |_| {
-        panic!("a never-published projection has no span targets to scan")
-    })
-    .await
-    .expect("the empty start is not an error");
-    assert_eq!(inserted, 0, "nothing to attribute on the empty start");
-}
-
-#[test]
-fn concurrent_same_session_observations_merge_under_the_publication_lock() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let graph = MemoryEvidenceGraphRuntime::default();
-    // Hold the first recovery read at a gate so the publications overlap:
-    // one publisher sits inside its snapshot read while the other contends
-    // for the publication lock. Without the lock, both would read the empty
-    // projection and the merge below would lose an observation.
-    graph.gate_snapshot_reads();
-    let store = std::sync::Arc::new(GraphBackedTestStore {
-        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
-            &store_dir.path().join("sessions.db"),
-        ),
-        graph,
-    });
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let make_observation = |ts| git_correlation::SpanObservation {
-        provider: "codex".to_owned(),
-        session_id: "session-concurrent".to_owned(),
-        thread_id: None,
-        branch: Some("main".to_owned()),
-        worktree: "/repo".to_owned(),
-        ts,
-        source: git_correlation::SpanSource::Ingest,
-    };
-    let first = make_observation(10);
-    let second = make_observation(20);
-
-    std::thread::scope(|scope| {
-        for observation in [first, second] {
-            let store = std::sync::Arc::clone(&store);
-            let barrier = std::sync::Arc::clone(&barrier);
-            scope.spawn(move || {
-                barrier.wait();
-                git_correlation::publish_transcript_graph_evidence(
-                    store.as_ref(),
-                    "concurrent-observation",
-                    std::slice::from_ref(&observation),
-                    &[],
-                    git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
-                )
-                .unwrap();
-            });
-        }
-        store.graph.await_gated_snapshot_reader();
-        store.graph.release_gated_snapshot_reads();
-    });
-
-    let identity = git_correlation::git_evidence_projection_identity(
-        tracedecay_graph_db::GraphNamespace::new("project").unwrap(),
-    )
-    .unwrap();
-    let evidence = git_correlation::recover_git_evidence_projection(
-        git_correlation::GitCorrelationSessionStore::graph_runtime(store.as_ref()).unwrap(),
-        &identity,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )
-    .unwrap()
-    .expect("concurrent publications produced a verified head");
-    let spans = evidence.projection().spans();
-    assert_eq!(spans.len(), 1);
-    assert_eq!(spans[0].first_ts, 10);
-    assert_eq!(spans[0].last_ts, 20);
-    assert_eq!(spans[0].event_count, 2);
-}
-
-#[test]
-fn admitted_bounded_publication_observes_live_operation_cancellation() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let graph = MemoryEvidenceGraphRuntime::default();
-    graph.gate_snapshot_reads();
-    let store = std::sync::Arc::new(GraphBackedTestStore {
-        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
-            &store_dir.path().join("sessions.db"),
-        ),
-        graph,
-    });
-    let cancellation = ObservationCancellation::default();
-    let publication_cancellation = cancellation.verified_graph_cancellation();
-    let publisher_store = std::sync::Arc::clone(&store);
-    let publisher = std::thread::spawn(move || {
-        git_correlation::publish_graph_evidence_controlled(
-            publisher_store.as_ref(),
-            "cancelled-bounded-publication",
-            &[],
-            &[],
-            publication_cancellation,
-        )
-    });
-    store.graph.await_gated_snapshot_reader();
-    assert_eq!(
-        store.graph.gated_snapshot_readers_entered(),
-        1,
-        "the publisher must be inside its recovery read before cancellation"
-    );
-    cancellation.cancel();
-    store.graph.release_gated_snapshot_reads();
-
-    assert_eq!(
-        publisher.join().unwrap().unwrap_err(),
-        git_correlation::GitCorrelationError::Cancelled
-    );
-}
-
-#[test]
-fn admitted_bounded_publication_settles_durable_success_before_late_cancellation() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let graph = MemoryEvidenceGraphRuntime::default();
-    graph.cancel_request_after_next_publish();
-    let store = GraphBackedTestStore {
-        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
-            &store_dir.path().join("sessions.db"),
-        ),
-        graph,
-    };
-    let cancellation = ObservationCancellation::default();
-
-    let published = git_correlation::publish_graph_evidence_controlled(
-        &store,
-        "late-cancelled-bounded-publication",
-        &[],
-        &[],
-        cancellation.verified_graph_cancellation(),
-    );
-
-    assert!(published.is_ok(), "verified-head CAS already committed");
-    assert!(cancellation.is_cancelled());
-}
+/// Serializes the tests that turn a startup claim away, since every startup
+/// sweep shares one process-wide release signal.
+static STARTUP_RELEASE_SIGNAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn startup_user_ingest_claims_are_single_flight_and_cancellation_safe() {
+    let _signal = STARTUP_RELEASE_SIGNAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let profile = tempfile::tempdir().unwrap().path().to_path_buf();
     let StartupUserIngestClaim::Acquired(first) = StartupUserIngestGuard::claim(profile.clone())
     else {
@@ -668,6 +448,38 @@ fn startup_user_ingest_claims_are_single_flight_and_cancellation_safe() {
         ),
         "a completed sweep should suppress the startup herd during cooldown"
     );
+}
+
+/// A history pass that waits for released capacity is woken when a startup
+/// sweep that turned a pass away finishes, and never by a sweep nobody
+/// waited on, such as the waiting pass's own refused sweep.
+#[test]
+fn a_startup_sweep_releases_capacity_only_to_a_pass_it_turned_away() {
+    let _signal = STARTUP_RELEASE_SIGNAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let profile = tempfile::tempdir().unwrap().path().to_path_buf();
+    let hub = codex::CodexDiscoveryHub::default();
+    let mut signals = super::subscribe_history_capacity_release(&hub);
+    let startup_release = &mut signals[0];
+
+    let StartupUserIngestClaim::Acquired(own) = StartupUserIngestGuard::claim(profile.clone())
+    else {
+        panic!("an uncontended claim must acquire");
+    };
+    drop(own);
+    assert!(!startup_release.has_changed());
+
+    let StartupUserIngestClaim::Acquired(holder) = StartupUserIngestGuard::claim(profile.clone())
+    else {
+        panic!("an uncontended claim must acquire");
+    };
+    assert!(matches!(
+        StartupUserIngestGuard::claim(profile),
+        StartupUserIngestClaim::Running
+    ));
+    drop(holder);
+    assert!(startup_release.has_changed());
 }
 
 #[test]
@@ -700,18 +512,6 @@ fn zero_unit_budget_is_typed_backpressure() {
             rejected_units: 3,
         }
     );
-}
-
-#[test]
-fn fully_covered_pass_never_requires_scheduling_write() {
-    let plan = plan_round_robin_admission(4, 7, 8);
-    assert_eq!(plan.admitted_indices, vec![3, 0, 1, 2]);
-    assert_eq!(plan.coverage, IngestPassCoverage::Complete);
-    assert!(!scheduling_write_required(
-        IngestPassCoverage::Complete,
-        plan.admitted_indices.len(),
-        false
-    ));
 }
 
 #[test]
@@ -804,5 +604,103 @@ fn project_provider_deferral_preserves_existing_deferred_work() {
             admitted_units: 5,
             rejected_units: 3,
         }
+    );
+}
+
+#[tokio::test]
+async fn unchanged_codex_contract_failure_is_quarantined_without_reopening() {
+    install_test_shared_jsonl_preparation_authority();
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let dir = home.path().join(".codex/sessions/2026/10/09");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-10-09T10-00-00-invalid.jsonl");
+    std::fs::write(&path, "{}\n").unwrap();
+    let settled = crate::runtime::source::spin_until_jsonl_change_settled(&path);
+    let hub = crate::runtime::hosts::codex::CodexDiscoveryHub::default();
+    hub.register("project", Some(home.path()));
+    hub.register("other-project", Some(home.path()));
+    let project_id = ProjectId::new("project.terminal-codex-skip").unwrap();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let admission = MemoryHostAdmission::default();
+    let cancellation = ObservationCancellation::default();
+
+    let run = || {
+        ProjectProviderRun {
+            project_root: &project,
+            project_id: &project_id,
+            facade: &admission,
+            scope: &scope,
+            candidate: SessionProvider::Codex,
+            max_new_bytes: 1 << 20,
+            cancellation: &cancellation,
+            codex_discovery: Some((&hub, "project")),
+        }
+        .run_codex()
+    };
+
+    let first = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
+    assert_eq!(first.failures.len(), 1);
+    assert_eq!(
+        first.failures[0].reason_code,
+        "transcript_source_contract_invalid"
+    );
+    assert!(!first.failures[0].retryable);
+    let reads_after_first = session_meta_read_count_for_test(&path);
+    assert!(
+        reads_after_first > 0,
+        "the first pass must open the invalid rollout"
+    );
+
+    let second = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
+    if settled {
+        assert!(
+            second.failures.is_empty(),
+            "a quarantined rollout is reported once: {:?}",
+            second.failures
+        );
+        assert_eq!(
+            session_meta_read_count_for_test(&path),
+            reads_after_first,
+            "the unchanged invalid rollout must not be reopened"
+        );
+    }
+    let observe = |consumer: &'static str| {
+        let hub = hub.clone();
+        let path = path.clone();
+        async move {
+            super::quarantine::SourceClaim::observe_file(
+                "codex",
+                hub.source_ledger(consumer),
+                &path,
+            )
+            .await
+            .unwrap()
+            .is_some()
+        }
+    };
+    assert!(
+        observe("other-project").await,
+        "another consumer reads the rollout independently"
+    );
+    if settled {
+        assert!(!observe("project").await, "the rollout stays quarantined");
+    }
+
+    let before = std::fs::metadata(&path).unwrap();
+    std::fs::write(&path, "[]\n").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    crate::runtime::source::spin_until_jsonl_change_settled(&path);
+    assert!(
+        observe("project").await,
+        "a same-size rewrite with the old mtime leaves quarantine"
     );
 }

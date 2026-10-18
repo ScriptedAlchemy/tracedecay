@@ -1,0 +1,152 @@
+{
+  "collection": {
+    "author": "ScriptedAlchemy",
+    "pr_window": "updated 2026-09-14 through 2026-09-28",
+    "workflow_window": "created 2026-09-21 through 2026-09-28",
+    "run_snapshots_utc": "2026-09-28 04:35-04:42",
+    "job_collection_end_utc": "2026-09-28 04:52",
+    "job_api_responses": 1312,
+    "tracedecay_ci_job_api_responses": 447,
+    "sampling": "TraceDecay CI plus recent owned-repository activity; API rate limit left requested details missing",
+    "durations": "completed allocated jobs with valid timestamps only; wall minutes, not billed minutes"
+  },
+  "prs": 1376,
+  "pr_repositories": {
+    "ScriptedAlchemy/tracedecay": 966,
+    "ScriptedAlchemy/cargo-hauler": 104,
+    "ScriptedAlchemy/movie-library": 14,
+    "ScriptedAlchemy/agent-bundle": 136,
+    "ScriptedAlchemy/effect-ts": 9,
+    "ScriptedAlchemy/grok-bot-cli": 52,
+    "web-infra-dev/rspack": 6,
+    "module-federation/core": 46,
+    "rstackjs/rsbuild-plugin-react-router": 10,
+    "ScriptedAlchemy/plugin-library": 18,
+    "ScriptedAlchemy/plugins": 2,
+    "lynx-family/lynx-stack": 1,
+    "rstackjs/rstack-cli": 2,
+    "vercel/next.js": 5,
+    "rstackjs/context": 1,
+    "ScriptedAlchemy/effect-rstest": 1,
+    "ScriptedAlchemy/grafeo": 2,
+    "vercel/ncc": 1
+  },
+  "runs": 3117,
+  "job_records": 11972,
+  "runs_with_jobs": 1197,
+  "repos": [
+    {
+      "repo": "ScriptedAlchemy/agent-bundle",
+      "runs": 562,
+      "job_window": "run created >=2026-09-26",
+      "jobs": 45,
+      "queue_p50_min": 165.13333333333333,
+      "queue_p95_min": 182.43333333333334,
+      "queue_max_min": 228.21666666666667,
+      "runner_minutes": 175.61666666666667,
+      "cancelled_job_minutes": 0,
+      "cancelled_run_minutes": 0
+    },
+    {
+      "repo": "ScriptedAlchemy/cargo-hauler",
+      "runs": 257,
+      "job_window": "run created >=2026-09-26",
+      "jobs": 60,
+      "queue_p50_min": 57.68333333333333,
+      "queue_p95_min": 223.41666666666666,
+      "queue_max_min": 226.58333333333334,
+      "runner_minutes": 219.4,
+      "cancelled_job_minutes": 1.5833333333333333,
+      "cancelled_run_minutes": 5.133333333333333
+    },
+    {
+      "repo": "ScriptedAlchemy/effect-rstest",
+      "runs": 6,
+      "job_window": "run created >=2026-09-26",
+      "jobs": 0,
+      "queue_p50_min": null,
+      "queue_p95_min": null,
+      "queue_max_min": null,
+      "runner_minutes": 0,
+      "cancelled_job_minutes": 0,
+      "cancelled_run_minutes": 0
+    },
+    {
+      "repo": "ScriptedAlchemy/effect-ts",
+      "runs": 15,
+      "job_window": "run created >=2026-09-26",
+      "jobs": 11,
+      "queue_p50_min": 60.13333333333333,
+      "queue_p95_min": 221.41666666666666,
+      "queue_max_min": 221.41666666666666,
+      "runner_minutes": 5.566666666666666,
+      "cancelled_job_minutes": 0,
+      "cancelled_run_minutes": 0
+    },
+    {
+      "repo": "ScriptedAlchemy/grok-bot-cli",
+      "runs": 39,
+      "job_window": "run created >=2026-09-26",
+      "jobs": 21,
+      "queue_p50_min": 187.53333333333333,
+      "queue_p95_min": 222.03333333333333,
+      "queue_max_min": 223.65,
+      "runner_minutes": 16.783333333333335,
+      "cancelled_job_minutes": 0.21666666666666667,
+      "cancelled_run_minutes": 0.21666666666666667
+    },
+    {
+      "repo": "ScriptedAlchemy/movie-library",
+      "runs": 19,
+      "job_window": "run created >=2026-09-26",
+      "jobs": 9,
+      "queue_p50_min": 183.7,
+      "queue_p95_min": 223.48333333333332,
+      "queue_max_min": 223.48333333333332,
+      "runner_minutes": 16.083333333333332,
+      "cancelled_job_minutes": 0,
+      "cancelled_run_minutes": 0
+    },
+    {
+      "repo": "ScriptedAlchemy/plugin-library",
+      "runs": 10,
+      "job_window": "run created >=2026-09-26",
+      "jobs": 7,
+      "queue_p50_min": 189.71666666666667,
+      "queue_p95_min": 225.53333333333333,
+      "queue_max_min": 225.53333333333333,
+      "runner_minutes": 3.0,
+      "cancelled_job_minutes": 0,
+      "cancelled_run_minutes": 0
+    },
+    {
+      "repo": "ScriptedAlchemy/tracedecay",
+      "runs": 2209,
+      "job_window": "run created >=2026-09-26",
+      "jobs": 3179,
+      "queue_p50_min": 0.06666666666666667,
+      "queue_p95_min": 260.8,
+      "queue_max_min": 320.15,
+      "runner_minutes": 26615.9,
+      "cancelled_job_minutes": 5431.966666666666,
+      "cancelled_run_minutes": 9515.75
+    }
+  ],
+  "ci": {
+    "jobs": 6362,
+    "queue_p50_min": 1.5333333333333334,
+    "queue_p95_min": 203.28333333333333,
+    "queue_max_min": 320.15,
+    "runner_minutes": 77492.76666666666,
+    "cancelled_job_minutes": 6831.066666666667,
+    "cancelled_run_minutes": 13664.65
+  },
+  "ci_runs": 450,
+  "ci_outcomes": {
+    "success": 67,
+    "cancelled": 179,
+    "failure": 203,
+    "in_progress": 1
+  },
+  "ci_runs_with_jobs": 439
+}

@@ -10,25 +10,21 @@
 //!     --features test-helpers -- --run all
 //! Run (per-stage attribution):
 //!   cargo bench -p tracedecay --bench transcript_ingest \
-//!     --features test-helpers,hotpath -- --run claude
+//!     --features test-helpers -- --run claude
 //!
 //! Providers: `claude` and `codex` exercise the observation capture +
-//! projection pipeline; `kiro` exercises the content-hash full-file reader;
-//! `store` drives a synthetic in-memory source so the shared
-//! persist-transcript store stack is measured without parse cost.
+//! projection pipeline; `kiro` exercises the content-hash full-file reader.
 
+#![allow(clippy::too_many_lines)]
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use futures_util::FutureExt as _;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::write_repository_identity_marker;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::source::{
-    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
-};
-use tracedecay_store::SessionMessageRecord;
 
 #[derive(Clone, Copy)]
 struct BenchConfig {
@@ -112,8 +108,9 @@ fn timestamp(index: usize) -> String {
 
 struct Sandbox {
     _tmp: tempfile::TempDir,
-    /// The process-wide sandbox `HOME`; provider fixture roots (`.claude`,
-    /// `.codex`, Kiro's data dir) are namespaced so providers cannot cross.
+    /// The sandbox user home the ingest pass's transcript source profile
+    /// names; provider fixture roots (`.claude`, `.codex`, Kiro's data dir)
+    /// live under it.
     home: PathBuf,
     project: PathBuf,
     profile: PathBuf,
@@ -124,13 +121,11 @@ fn sandbox(label: &str) -> Sandbox {
         .prefix(&format!("tracedecay-ingest-bench-{label}-"))
         .tempdir()
         .expect("create sandbox tempdir");
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .expect("bench main installed a sandbox HOME");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).expect("create sandbox home");
     let project = tmp.path().join("project");
     let profile = tmp.path().join("profile");
-    std::fs::create_dir_all(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
+    std::fs::create_dir_all(&project).unwrap();
     let git = std::process::Command::new("git")
         .args(["init", "--quiet"])
         .current_dir(&project)
@@ -255,7 +250,7 @@ fn encode_workspace_path(project: &Path) -> String {
 }
 
 fn write_kiro_fixture(sandbox: &Sandbox, config: &BenchConfig) -> PathBuf {
-    let data_dir = tracedecay::agents::kiro_data_dir(&sandbox.home);
+    let data_dir = tracedecay_agent_hosts::agents::kiro_data_dir(&sandbox.home);
     let encoded = encode_workspace_path(&sandbox.project);
     let session_dir = data_dir
         .join("User/globalStorage/kiro.kiroagent/workspace-sessions")
@@ -284,82 +279,6 @@ fn write_kiro_fixture(sandbox: &Sandbox, config: &BenchConfig) -> PathBuf {
         .unwrap();
     }
     session_dir
-}
-
-/// Synthetic parse-free source: fabricates provider-neutral messages so the
-/// shared persist path (cursor load, session merge, privacy staging, LCM raw
-/// + projection writes, cursor advance) is measured without file parsing.
-struct SyntheticStoreSource {
-    config: BenchConfig,
-    root: PathBuf,
-}
-
-impl TranscriptSource for SyntheticStoreSource {
-    fn provider(&self) -> &'static str {
-        "vibe"
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        (0..self.config.sessions)
-            .map(|session| self.root.join(format!("synthetic-{session:04}.log")))
-            .collect()
-    }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        if prev.position != 0 {
-            return None;
-        }
-        let session = path
-            .file_stem()?
-            .to_str()?
-            .rsplit('-')
-            .next()?
-            .parse::<usize>()
-            .ok()?;
-        let session_id = format!("bench-store-{session:04}");
-        let messages = (0..self.config.messages_per_session)
-            .map(|index| SessionMessageRecord {
-                provider: "vibe".to_owned(),
-                message_id: format!("bench-store-{session:04}-{index:06}"),
-                session_id: session_id.clone(),
-                role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
-                timestamp: Some(1_800_000_000_000 + index as i64 * 1_000),
-                ordinal: index as i64,
-                text: message_text(&self.config, session, index),
-                kind: None,
-                model: None,
-                tool_names: None,
-                source_path: Some(path.to_string_lossy().into_owned()),
-                source_offset: Some(index as i64),
-                metadata_json: None,
-            })
-            .collect();
-        Some(ParsedTranscript {
-            draft: SessionDraft {
-                session_id,
-                project_key: project_root.to_string_lossy().into_owned(),
-                project_path: project_root.to_string_lossy().into_owned(),
-                title: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            },
-            messages,
-            new_cursor: StoredCursor {
-                position: 1,
-                mtime: 1,
-                file_id: 0,
-            },
-        })
-    }
 }
 
 struct BenchOutcome {
@@ -435,10 +354,14 @@ async fn run_provider_bench(
     // covers the whole fixture at steady state.
     loop {
         let started = Instant::now();
-        let stats = tracedecay_sessions::runtime::ingest::with_transcript_source_home(
-            home.clone(),
+        // Boxed so the ingest pass's future layout stays out of this loop
+        // body: with instrumentation compiled in, the inlined chain
+        // overflows rustc's query depth for this bench.
+        let stats = tracedecay_sessions::runtime::ingest::with_transcript_source_profile(
+            tracedecay_runtime_core::config::ProfileRoot::new(&sandbox.profile).with_home(&home),
             runtime.ingest_project_provider_for_test(&sandbox.project, Some(provider)),
         )
+        .boxed_local()
         .await
         .expect("provider ingest pass");
         elapsed += started.elapsed();
@@ -464,29 +387,6 @@ async fn run_provider_bench(
     }
 }
 
-async fn run_store_bench(config: BenchConfig) -> BenchOutcome {
-    let sandbox = sandbox("store");
-    let runtime = open_runtime(&sandbox, "store").await;
-    let source = SyntheticStoreSource {
-        config,
-        root: sandbox.home.join("synthetic"),
-    };
-    let started = Instant::now();
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &sandbox.project, None)
-        .await
-        .expect("synthetic store ingest");
-    let elapsed = started.elapsed();
-    BenchOutcome {
-        provider: "store",
-        passes: 1,
-        elapsed,
-        messages: stats.messages_upserted,
-        sessions: stats.sessions_upserted,
-        fixture_bytes: 0,
-    }
-}
-
 fn parse_usize(arguments: &[String], flag: &str, default: usize) -> usize {
     arguments
         .iter()
@@ -497,20 +397,6 @@ fn parse_usize(arguments: &[String], flag: &str, default: usize) -> usize {
 }
 
 fn main() {
-    // Process-wide sandbox home: every provider source resolves transcripts
-    // under `HOME`, and spawned blocking scans do not inherit the task-local
-    // override, so the env var is the reliable process boundary here. This is
-    // a single-purpose bench process; nothing else reads the real home.
-    let sandbox_home = tempfile::Builder::new()
-        .prefix("tracedecay-ingest-bench-home-")
-        .tempdir()
-        .expect("create bench home");
-    // SAFETY: single-threaded startup, before the tokio runtime exists.
-    unsafe {
-        std::env::set_var("HOME", sandbox_home.path());
-        std::env::set_var("USERPROFILE", sandbox_home.path());
-    }
-
     let arguments = std::env::args()
         .skip(1)
         .filter(|argument| argument != "--bench")
@@ -518,7 +404,7 @@ fn main() {
     let run_index = arguments.iter().position(|argument| argument == "--run");
     let Some(run_index) = run_index else {
         // `cargo bench` without arguments must stay cheap and green.
-        println!("transcript_ingest bench: pass `-- --run <claude|codex|kiro|store|all>`");
+        println!("transcript_ingest bench: pass `-- --run <claude|codex|kiro|all>`");
         return;
     };
     let target = arguments
@@ -534,17 +420,10 @@ fn main() {
         small_bytes: parse_usize(&arguments, "--small-bytes", defaults.small_bytes),
     };
 
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("transcript-ingest-bench")
-        .sections_exclude(vec![hotpath::Section::FunctionsCpu])
-        .build();
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("build tokio runtime");
-    #[cfg(feature = "hotpath")]
-    hotpath::tokio_runtime!(runtime.handle());
 
     runtime.block_on(async {
         let mut outcomes = Vec::new();
@@ -570,12 +449,9 @@ fn main() {
                 run_provider_bench(SessionProvider::Kiro, "kiro", config, write_kiro_fixture).await,
             );
         }
-        if matches!(target.as_str(), "store" | "all") {
-            outcomes.push(run_store_bench(config).await);
-        }
         assert!(
             !outcomes.is_empty(),
-            "unknown bench target {target}; expected claude|codex|kiro|store|all"
+            "unknown bench target {target}; expected claude|codex|kiro|all"
         );
         for outcome in &outcomes {
             outcome.report(&config);

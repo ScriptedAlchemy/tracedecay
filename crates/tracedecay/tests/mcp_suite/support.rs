@@ -7,13 +7,8 @@ use crate::fixture;
 use serde_json::Value;
 #[cfg(feature = "test-transport")]
 use serde_json::json;
-use std::ffi::OsString;
-#[cfg(feature = "test-transport")]
-use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "test-transport")]
-use std::process::Command;
 #[cfg(feature = "test-transport")]
 use std::sync::Arc;
 #[cfg(feature = "test-transport")]
@@ -21,14 +16,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "test-transport")]
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
-use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
-#[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
-use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::errors::TraceDecayError;
 #[cfg(feature = "test-transport")]
@@ -40,14 +31,19 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1, ProjectId,
     ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
+    RetrievalAnchorRecord, RetrievalAnchorRecordParts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, SessionProjectionGenerationV1, UtcMicros, derive_exact_observation_anchor_id,
+    SessionId, UtcMicros, derive_exact_observation_anchor_id,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_mcp::McpTransport;
 use tracedecay_mcp::ToolResult;
-use tracedecay_runtime_core::storage::PrivateStoreIo;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+#[cfg(feature = "test-transport")]
+use tracedecay_project::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
+};
+use tracedecay_runtime_core::config::ProfileRoot;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
@@ -55,18 +51,12 @@ use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 #[cfg(feature = "test-transport")]
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    SessionFrozenWatermarksV1, SessionGenerationActivationRequestV1,
-    SessionGenerationRebuildRequestV1, SessionTemporalCapabilitiesV1, SessionTemporalCapabilityV1,
-    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshStore,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
-#[cfg(feature = "test-transport")]
-use tracedecay_temporal_query::ports::ExecutionControl;
-
-pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[cfg(feature = "test-transport")]
-pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = 15_000;
+pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = tracedecay_mcp::MAX_RESPONSE_CHARS;
 #[cfg(feature = "test-transport")]
 static NEXT_SOURCE_EDIT_TEST_KEY: AtomicU64 = AtomicU64::new(1);
 
@@ -85,13 +75,14 @@ const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
 #[cfg(feature = "test-transport")]
 #[derive(Default)]
 pub(crate) struct CaptureTransport {
+    pub(crate) incoming: Option<String>,
     pub(crate) output: String,
 }
 
 #[cfg(feature = "test-transport")]
 impl McpTransport for CaptureTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        Ok(None)
+        Ok(self.incoming.take())
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -120,20 +111,37 @@ pub(crate) async fn handle_real_server_tool_call(
     if let Some(text) = result["content"][0]["text"].as_str()
         && let Some(handle) = truncated_response_handle(text)
     {
-        let retrieved = handle_real_server_tool_call_raw(
-            server,
-            "tracedecay_retrieve",
-            json!({ "handle": handle }),
-        )
-        .await;
-        assert!(retrieved["error"].is_null(), "{retrieved}");
-        let record: Value = serde_json::from_str(
-            retrieved["result"]["content"][0]["text"]
-                .as_str()
-                .expect("retrieved response text"),
-        )
-        .expect("retrieved response JSON");
-        result["content"][0]["text"] = record["content"].clone();
+        // `tracedecay_retrieve` pages the stored response so every page fits
+        // the response budget; reassemble the pages exactly as an agent would.
+        let mut content = String::new();
+        let mut offset = 0_u64;
+        loop {
+            let retrieved = handle_real_server_tool_call_raw(
+                server,
+                "tracedecay_retrieve",
+                json!({ "handle": handle, "offset": offset }),
+            )
+            .await;
+            assert!(retrieved["error"].is_null(), "{retrieved}");
+            let page: Value = serde_json::from_str(
+                retrieved["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("retrieved response text"),
+            )
+            .expect("retrieved response JSON");
+            content.push_str(
+                page["content"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("retrieved page without content: {page}")),
+            );
+            if page["has_more"] != Value::Bool(true) {
+                break;
+            }
+            offset = page["next_offset"]
+                .as_u64()
+                .expect("retrieved page next_offset");
+        }
+        result["content"][0]["text"] = Value::String(content);
     }
     // Retained tools answer with the versioned `schema.application.retained.*`
     // envelope; these tests assert the owner's payload, so unwrap evidence and
@@ -179,7 +187,7 @@ pub(crate) fn retained_envelope_payload(text: &str) -> Option<Value> {
 ///
 /// Handlers that return `Err` are mapped to a JSON-RPC error rather than an
 /// `isError` tool result (see `crate::mcp::server::tool_errors`), so tests
-/// asserting on infrastructure failures need the envelope, not just `result`.
+/// asserting on infrastructure failures need the full JSON-RPC envelope.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn handle_real_server_tool_call_raw(
     server: &McpServer,
@@ -191,6 +199,20 @@ pub(crate) async fn handle_real_server_tool_call_raw(
             .entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
+    dispatch_mcp_tool_call(server, tool_name, arguments).await
+}
+
+/// JSON-RPC `tools/call` with the caller's arguments left intact.
+///
+/// [`handle_real_server_tool_call_raw`] inserts `format: "json"` when the
+/// caller omitted it. Production default is markdown, so a journey that
+/// proves that default must dispatch the arguments as the client sent them.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn dispatch_mcp_tool_call(
+    server: &McpServer,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -200,11 +222,14 @@ pub(crate) async fn handle_real_server_tool_call_raw(
             "arguments": arguments,
         }
     });
-    let mut transport = CaptureTransport::default();
+    let mut transport = CaptureTransport {
+        incoming: Some(request.to_string()),
+        output: String::new(),
+    };
     // Heap-allocate the server dispatch future so every awaiting test keeps a
     // bounded resident frame (perf-profile layouts overflow the test stack
     // when these mega-futures compose inline).
-    Box::pin(server.handle_and_write(&request.to_string(), &mut transport))
+    Box::pin(server.run_connection(&mut transport))
         .await
         .expect("real MCP server tool call");
     serde_json::from_str(transport.output.trim()).expect("JSON-RPC response")
@@ -217,86 +242,210 @@ pub(crate) fn extract_real_server_text(result: &Value) -> &str {
         .expect("MCP text result")
 }
 
+/// The owner's refusal a JSON-RPC `tools/call` response carries, as its
+/// problem kind, code, and message, after asserting the call refused through
+/// that record rather than a protocol error.
+#[cfg(feature = "test-transport")]
+pub(crate) fn tool_refusal(response: &Value) -> Value {
+    assert!(
+        response["error"].is_null(),
+        "the owner refuses through its problem record: {response}"
+    );
+    let result = &response["result"];
+    assert_eq!(result["isError"], true, "the call must refuse: {response}");
+    let problem = &result["structuredContent"]["problem"];
+    json!({
+        "kind": problem["kind"],
+        "code": problem["code"],
+        "message": problem["message"],
+    })
+}
+
+/// Asserts a refusal that names the missing `project_aliases` table. Which
+/// phase SQLite reports it in, prepare or advance, depends on whether the
+/// reader already cached that statement, so the phase is not part of the
+/// contract.
+pub(crate) fn assert_missing_alias_table_refusal(response: &Value) {
+    let refusal = tool_refusal(response);
+    assert_eq!(refusal["kind"], "execution_failed", "{refusal}");
+    assert_eq!(refusal["code"], "graph_tool.failed", "{refusal}");
+    let message = refusal["message"].as_str().expect("refusal message");
+    assert!(
+        ["prepare", "advance"].iter().any(|phase| message
+            == format!(
+                "database error: SQLite {phase} query failed: no such table: project_aliases (operation: resolve project identity alias)"
+            )),
+        "{message}"
+    );
+}
+
 /// Polls the daemon-owned code-index search authority until an exact
 /// generation is bound and its native code graph is serving.
 ///
 /// Search generation publication and native graph publication are distinct
-/// boundaries; graph-facing fixtures require both.
+/// boundaries; graph-facing fixtures require both. Status must become
+/// current before search lane coverage is judged, or a warming fusion
+/// answer can look terminal against a generation that has not sealed.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn warm_code_index_search(server: &McpServer, query: &str) {
-    wait_for_code_index_generation(server, query).await;
     wait_for_current_graph(server).await;
+    wait_for_code_index_generation(server, query).await;
 }
 
-/// Poll `tracedecay_search` until it binds a `code_generation`. Authority
-/// activation (`warm_code_index_search`) can return on a warming lexical
-/// lane; ranked `search_matches` are not stable until a generation seats.
+/// One `tracedecay_status` read held by `wait_for` until the index reaches
+/// `state`; panics unless it ends `reached`.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn wait_for_readiness(server: &McpServer, state: &str, budget: Duration) -> Value {
+    let status = handle_real_server_tool_call(
+        server,
+        "tracedecay_status",
+        json!({
+            "include_branch_diagnostics": false,
+            "include_storage_health": false,
+            "include_session_ingest": false,
+            "include_staleness": false,
+            "wait_for": {
+                "state": state,
+                "timeout_ms": u64::try_from(budget.as_millis()).expect("budget fits u64"),
+            },
+        }),
+    )
+    .await;
+    let status: Value =
+        serde_json::from_str(extract_real_server_text(&status)).expect("typed project status JSON");
+    assert_eq!(
+        status["wait"],
+        json!({ "outcome": "reached" }),
+        "code index never became {state}: {status}"
+    );
+    status
+}
+
+/// [`wait_for_readiness`] over a production composition harness.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn harness_wait_for_readiness(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    state: &str,
+    budget: Duration,
+) -> Value {
+    let response = harness
+        .call_tool(
+            project_root,
+            "tracedecay_status",
+            json!({
+                "format": "json",
+                "include_branch_diagnostics": false,
+                "include_storage_health": false,
+                "include_session_ingest": false,
+                "include_staleness": false,
+                "wait_for": {
+                    "state": state,
+                    "timeout_ms": u64::try_from(budget.as_millis()).expect("budget fits u64"),
+                },
+            }),
+        )
+        .await
+        .expect("production status call");
+    assert!(
+        response.error.is_none(),
+        "status failed: {:?}",
+        response.error
+    );
+    let result = response.result.expect("status result");
+    let status: Value = serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .expect("status text content"),
+    )
+    .expect("typed project status JSON");
+    assert_eq!(
+        status["wait"],
+        json!({ "outcome": "reached" }),
+        "code index never became {state}: {status}"
+    );
+    status
+}
+
+/// Wait until the current worktree generation is verified fresh against the
+/// source, then require `query` to answer from that generation with every
+/// lane complete and a fresh seat, the same terminal signal daemon journeys
+/// use. `ready` accepts a reading without sweeping the source, so a queued
+/// verification pass or an unreported save can follow it.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &str) {
-    let mut last = Value::Null;
-    for _ in 0..60 {
-        let result =
-            handle_real_server_tool_call(server, "tracedecay_search", json!({ "query": query }))
-                .await;
-        last =
-            serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
-        if last["reason"].as_str() == Some("authority_unavailable") {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            continue;
-        }
-        if last["code_generation"].as_str().is_some() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    panic!("code-index search did not bind a generation within the polling budget: {last}");
+    let status = wait_for_readiness(server, "fresh", Duration::from_secs(30)).await;
+    let generation = status["code_index_freshness"]["worktree"]["latest_generation_id"].as_str();
+    let result =
+        handle_real_server_tool_call(server, "tracedecay_search", json!({ "query": query })).await;
+    let search: Value =
+        serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
+    assert_eq!(search["code_generation"].as_str(), generation, "{search}");
+    assert_eq!(
+        common::incomplete_code_index_query_lanes(&search),
+        Vec::<&str>::new(),
+        "a ready generation left search lanes incomplete: {search}"
+    );
+    assert_eq!(search["freshness"], json!({ "state": "fresh" }), "{search}");
 }
 
-/// Poll `tracedecay_status` until the exact generation is current and its
-/// native code graph is serving.
-///
-/// `code_index_freshness.status = current` permits a graph that is still
-/// pending or unavailable, so graph-facing fixtures must also observe the
-/// canonical `code_graph_serving.state = ready` publication boundary.
+/// Wait until the exact generation is current and its native code graph is
+/// serving.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn wait_for_current_graph(server: &McpServer) {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    wait_for_readiness(server, "ready", Duration::from_secs(20)).await;
+}
+
+/// One production tool result, re-asked while the owner's problem directs
+/// `retry: after_delay`: the same request is expected to succeed once
+/// `retry_after_millis` passes, as when the project server is still mounting,
+/// an ingest missed the live-refresh join, or a post-admission projection
+/// drain was refused under host load. Any other result, error results
+/// included, is returned for the caller to judge.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn call_tool_when_ready(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    tool: &str,
+    arguments: Value,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(120), async {
         loop {
-            let status = handle_real_server_tool_call(
-                server,
-                "tracedecay_status",
-                json!({
-                    "include_branch_diagnostics": false,
-                    "include_storage_health": false,
-                    "include_session_ingest": false,
-                    "include_staleness": false,
-                }),
-            )
-            .await;
-            let status: Value = serde_json::from_str(extract_real_server_text(&status))
-                .expect("typed project status JSON");
-            let freshness = &status["code_index_freshness"];
-            let serving = &freshness["worktree"]["code_graph_serving"];
-            match (
-                freshness["status"].as_str(),
-                serving["state"].as_str(),
-                serving["reason"].as_str(),
-            ) {
-                (Some("current"), Some("ready"), _) => break,
-                (Some("warming"), _, _)
-                | (_, Some("pending"), _)
-                | (_, Some("unavailable"), Some("generation_unavailable")) => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                (_, Some("refused"), _) | (_, _, Some("activation_disabled")) => {
-                    panic!("graph readiness was refused: {status}");
-                }
-                actual => panic!("graph readiness became {actual:?}: {status}"),
+            let response = harness
+                .call_tool(project, tool, arguments.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{tool} production invocation failed: {error}"));
+            let result = response.result.unwrap_or_else(|| {
+                panic!(
+                    "{tool} returned a production MCP error: {:?}",
+                    response.error
+                )
+            });
+            match not_ready_retry_delay(&result) {
+                Some(delay) => tokio::time::sleep(delay).await,
+                None => break result,
             }
         }
     })
     .await
-    .expect("graph did not become current within the publication budget");
+    .unwrap_or_else(|_| panic!("{tool} stayed not ready past its deadline"))
+}
+
+#[cfg(feature = "test-transport")]
+fn not_ready_retry_delay(result: &Value) -> Option<Duration> {
+    let problem = match result.pointer("/structuredContent/problem") {
+        Some(problem) => problem.clone(),
+        None => serde_json::from_str::<Value>(result["content"][0]["text"].as_str()?)
+            .ok()?
+            .get("problem")?
+            .clone(),
+    };
+    if problem["retry"] != "after_delay" {
+        return None;
+    }
+    problem["retry_after_millis"]
+        .as_u64()
+        .map(Duration::from_millis)
 }
 
 #[cfg(feature = "test-transport")]
@@ -304,6 +453,97 @@ pub(crate) struct ProductionCompositionFixture {
     pub(crate) harness: ProductionProjectCompositionHarnessV1,
     pub(crate) project_root: PathBuf,
     _isolation: TestTempDir,
+}
+
+#[cfg(feature = "test-transport")]
+impl ProductionCompositionFixture {
+    pub(crate) async fn shutdown(self) {
+        self.harness.shutdown().await;
+    }
+
+    pub(crate) async fn reopen(self) -> Self {
+        let Self {
+            harness,
+            project_root,
+            _isolation,
+        } = self;
+        harness.shutdown().await;
+
+        let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+            _isolation.path(),
+            vec![project_root.clone()],
+        ))
+        .await
+        .expect("reopen production composition");
+        Self {
+            harness,
+            project_root,
+            _isolation,
+        }
+    }
+}
+
+/// `git init`, stage everything, and commit. Identity, hooks, and gc come
+/// from the shared fixture git config so each suite does not fork its own.
+pub(crate) fn commit_worktree(project: &Path, message: &str) {
+    crate::common::fixture::git_run(project, &["init", "-q"]);
+    crate::common::fixture::git_run(project, &["add", "."]);
+    crate::common::fixture::git_run(project, &["commit", "-qm", message]);
+}
+
+/// [`ProductionProjectCompositionHarnessV1`] openers that first seed a profile
+/// that does not exist yet from the store template, so each composition
+/// admits private copies of initialized stores instead of installing every
+/// schema again. See [`fixture::seed_production_composition_profile`].
+#[cfg(feature = "test-transport")]
+pub(crate) mod seeded_composition {
+    use std::path::{Path, PathBuf};
+
+    use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+    use tracedecay_domain::errors::Result;
+
+    async fn seed(
+        isolation_root: &Path,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Vec<PathBuf> {
+        let project_roots: Vec<PathBuf> = project_roots.into_iter().collect();
+        crate::fixture::seed_production_composition_profile(isolation_root, &project_roots).await;
+        project_roots
+    }
+
+    pub(crate) async fn open(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<ProductionProjectCompositionHarnessV1> {
+        let project_roots = seed(isolation_root.as_ref(), project_roots).await;
+        ProductionProjectCompositionHarnessV1::open(isolation_root, project_roots).await
+    }
+
+    pub(crate) async fn open_for_session_retrieval(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<ProductionProjectCompositionHarnessV1> {
+        let project_roots = seed(isolation_root.as_ref(), project_roots).await;
+        ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+            isolation_root,
+            project_roots,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_with_scope_prefix(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+        scope_prefix: impl Into<String>,
+    ) -> Result<ProductionProjectCompositionHarnessV1> {
+        let project_roots = seed(isolation_root.as_ref(), project_roots).await;
+        ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
+            isolation_root,
+            project_roots,
+            scope_prefix,
+        )
+        .await
+    }
 }
 
 #[cfg(feature = "test-transport")]
@@ -318,37 +558,11 @@ pub(crate) async fn production_composition_fixture() -> ProductionCompositionFix
 pub(crate) async fn production_composition_fixture_with_sources(
     write_sources: impl FnOnce(&Path),
 ) -> ProductionCompositionFixture {
+    common::register_process_product_runtime();
+    common::register_process_runtime_ports();
     let isolation = test_temp_dir();
-    let project_root = isolation.path().join("project");
-    fs::create_dir_all(&project_root).expect("production composition project");
-    write_sources(&project_root);
-    let init = Command::new(common::git_program())
-        .args(["init", "-q"])
-        .current_dir(&project_root)
-        .status()
-        .expect("git init");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(common::git_program())
-        .args(["add", "."])
-        .current_dir(&project_root)
-        .status()
-        .expect("git add");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "production composition fixture",
-        ])
-        .current_dir(&project_root)
-        .status()
-        .expect("git commit");
-    assert!(commit.success(), "git commit must succeed");
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let project_root = seed_production_composition_project(isolation.path(), write_sources);
+    let harness = Box::pin(seeded_composition::open(
         isolation.path(),
         vec![project_root.clone()],
     ))
@@ -359,6 +573,38 @@ pub(crate) async fn production_composition_fixture_with_sources(
         project_root,
         _isolation: isolation,
     }
+}
+
+/// Opens a second composition, with its own project and profile, alongside
+/// the one `owner` holds.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn peer_production_composition(
+    _owner: &ProductionCompositionFixture,
+) -> (ProductionProjectCompositionHarnessV1, TestTempDir) {
+    let isolation = test_temp_dir();
+    let project_root = seed_production_composition_project(
+        isolation.path(),
+        fixture::write_indexed_fixture_sources,
+    );
+    let harness = Box::pin(seeded_composition::open(
+        isolation.path(),
+        vec![project_root],
+    ))
+    .await
+    .expect("peer production composition harness");
+    (harness, isolation)
+}
+
+#[cfg(feature = "test-transport")]
+fn seed_production_composition_project(
+    isolation_root: &Path,
+    write_sources: impl FnOnce(&Path),
+) -> PathBuf {
+    let project_root = isolation_root.join("project");
+    std::fs::create_dir_all(&project_root).expect("production composition project");
+    write_sources(&project_root);
+    commit_worktree(&project_root, "production composition fixture");
+    project_root
 }
 
 /// Production-mounted source-edit fixture for projects whose exact sources are
@@ -372,49 +618,21 @@ pub(crate) struct ProductionSourceEditFixture {
 #[cfg(feature = "test-transport")]
 pub(crate) async fn init_production_source_edit_project(
     project_root: &Path,
-) -> (ProductionSourceEditFixture, ()) {
+) -> ProductionSourceEditFixture {
     let isolation_root = project_root
         .parent()
         .expect("source-edit project has an isolation parent");
-    let init = Command::new(common::git_program())
-        .args(["init", "-q"])
-        .current_dir(project_root)
-        .status()
-        .expect("git init source-edit fixture");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(common::git_program())
-        .args(["add", "."])
-        .current_dir(project_root)
-        .status()
-        .expect("git add source-edit fixture");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "source edit fixture",
-        ])
-        .current_dir(project_root)
-        .status()
-        .expect("git commit source-edit fixture");
-    assert!(commit.success(), "git commit must succeed");
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    commit_worktree(project_root, "source edit fixture");
+    let harness = Box::pin(seeded_composition::open(
         isolation_root,
         [project_root.to_path_buf()],
     ))
     .await
     .expect("production source-edit composition");
-    (
-        ProductionSourceEditFixture {
-            harness,
-            project_root: project_root.to_path_buf(),
-        },
-        (),
-    )
+    ProductionSourceEditFixture {
+        harness,
+        project_root: project_root.to_path_buf(),
+    }
 }
 
 #[cfg(feature = "test-transport")]
@@ -440,69 +658,48 @@ pub(crate) async fn activate_test_temporal_generation(
         .map(|input| input.source_frontier)
         .max()
         .expect("temporal fixture requires canonical observations");
-    let snapshot_at = inputs
-        .iter()
-        .map(|input| input.occurrence.knowledge_at.0)
-        .max()
-        .unwrap_or_default()
-        .max(99)
-        .saturating_add(1);
-    let active_generation = SessionProjectionGenerationV1::new(1).unwrap();
-    let candidate_generation = SessionProjectionGenerationV1::new(2).unwrap();
-    let cursor_key = runtime
-        .ensure_session_cursor_key_for_test(HostAdmissionScope::Project)
-        .await
-        .expect("registered project cursor key");
-    let watermarks =
-        SessionFrozenWatermarksV1::new(active_generation, source_frontier, source_frontier, 0)
-            .with_cursor_key(cursor_key);
-    let snapshot = SessionTemporalSnapshotV1::new(
-        session_id.clone(),
-        UtcMicros(snapshot_at),
-        watermarks.clone(),
-        SessionTemporalCapabilitiesV1::new([
-            SessionTemporalCapabilityV1::FrozenWatermarks,
-            SessionTemporalCapabilityV1::GenerationRebuild,
-        ]),
-    );
     let store = runtime
         .session_temporal_store_for_test(HostAdmissionScope::Project)
         .expect("registered project temporal store");
     store
-        .begin_session_generation_rebuild(
-            SessionGenerationRebuildRequestV1::new(
-                session_id.clone(),
-                candidate_generation,
-                snapshot.clone(),
-            )
-            .unwrap(),
-        )
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(source_frontier, 0).unwrap(),
+        ))
         .await
         .unwrap();
+    let mut projected = Vec::new();
+    let candidate_generation = loop {
+        let recovery = store
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .expect("refresh must be running");
+        let Some((progress, batch)) = store
+            .materialize_session_temporal_refresh_batch_for_test(&recovery)
+            .await
+            .unwrap()
+        else {
+            break recovery.candidate_generation();
+        };
+        projected.extend_from_slice(batch.occurrences());
+        store
+            .persist_session_refresh_projection_batch(progress, batch)
+            .await
+            .unwrap();
+    };
+    let mut expected = inputs
+        .into_iter()
+        .map(|input| input.occurrence)
+        .collect::<Vec<_>>();
+    expected.sort_by(|left, right| left.occurrence_id.cmp(&right.occurrence_id));
+    projected.sort_by(|left, right| left.occurrence_id.cmp(&right.occurrence_id));
+    assert_eq!(
+        projected, expected,
+        "refresh must project exactly the fixture inputs"
+    );
     store
-        .persist_session_temporal_projection_batch(
-            SessionTemporalProjectionBatchV1::new(
-                session_id.clone(),
-                candidate_generation,
-                watermarks,
-                inputs.into_iter().map(|input| input.occurrence).collect(),
-                Vec::new(),
-                Vec::new(),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    store
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id,
-                candidate_generation,
-                snapshot,
-                ExecutionControl::default(),
-            )
-            .unwrap(),
-        )
+        .complete_running_session_refresh_for_test(&session_id)
         .await
         .unwrap();
     candidate_generation.value()
@@ -512,7 +709,6 @@ pub(crate) async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
     mut args: serde_json::Value,
-    server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
 ) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
@@ -530,11 +726,30 @@ pub(crate) async fn handle_tool_call(
     //
     // Every retained-surface tool (LCM, message search, fact store, session
     // and workflow reads) executes through the daemon retained owner in
-    // production, so dispatch it through the registered test server — which
-    // mounts that owner in process — rather than the bare registry path whose
-    // missing executor truthfully reports the transport as unavailable.
+    // production, and the project-info and profile registry reads through the
+    // serving server's graph-tool or profile owner, which alone holds the
+    // request counters and scope prefix `tracedecay_status` reports, so
+    // dispatch them through the registered test server, which mounts those
+    // owners in process, rather than the bare registry path whose missing
+    // executor truthfully reports the transport as unavailable.
     #[cfg(feature = "test-transport")]
-    if tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
+    let retained =
+        tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some();
+    #[cfg(feature = "test-transport")]
+    let owner_answered =
+        tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .is_some_and(|operation| {
+                operation.is_profile_registry_read()
+                    || matches!(
+                        operation,
+                        tracedecay_tool_catalog::ApplicationSurfaceOperation::Status
+                            | tracedecay_tool_catalog::ApplicationSurfaceOperation::ActiveProject
+                            | tracedecay_tool_catalog::ApplicationSurfaceOperation::RemoteStatus
+                            | tracedecay_tool_catalog::ApplicationSurfaceOperation::Runtime
+                    )
+            });
+    #[cfg(feature = "test-transport")]
+    if retained || owner_answered {
         let runtime = open_active_project_scoped_runtime(cg).await;
         // The daemon serves retained tools only for registered projects, so
         // mirror `real_mcp_server` and register this graph's identity in the
@@ -548,9 +763,15 @@ pub(crate) async fn handle_tool_call(
         // Boxed graph-open and server-construction futures: these are the
         // deep production compositions whose inline layouts overflow the
         // perf-profile test stack.
-        let graph = Box::pin(TraceDecay::open(cg.project_root())).await?;
+        let graph = Box::pin(TraceDecay::open_with_options(
+            cg.project_root(),
+            graph_open_options(cg),
+        ))
+        .await?;
         let server = Box::pin(McpServer::new_with_host_admission_test_runtime_for_test(
-            graph, None, runtime,
+            graph,
+            scope_prefix.map(str::to_owned),
+            runtime,
         ))
         .await?;
         if !server.has_project_application_retrieval_for_test() {
@@ -597,18 +818,17 @@ pub(crate) async fn handle_tool_call(
                 Ok(response["result"].clone())
             }
         };
-        let outcome = handle_retained_dispatch(tool_name, args, dispatch).await;
+        let outcome = if retained {
+            handle_retained_dispatch(tool_name, args, dispatch).await
+        } else {
+            dispatch(tool_name.to_owned(), args)
+                .await
+                .map(|result| ToolResult::new(result, Vec::new()))
+        };
         server.shutdown().await;
         return outcome;
     }
-    Box::pin(tracedecay::mcp::handle_tool_call(
-        cg,
-        tool_name,
-        args,
-        server_stats,
-        scope_prefix,
-    ))
-    .await
+    Box::pin(tracedecay::mcp::handle_tool_call(cg, tool_name, args)).await
 }
 
 /// Dispatches `tool_name` through `dispatch`, recovers truncated responses
@@ -662,10 +882,16 @@ where
     let payload = match retained_envelope_payload(text) {
         Some(payload) => payload,
         None => {
-            let envelope: Value =
-                serde_json::from_str(text).map_err(|error| TraceDecayError::Config {
-                    message: format!("{tool_name} returned no retained envelope: {error}"),
-                })?;
+            let problem = &result["structuredContent"]["problem"];
+            let envelope: Value = match serde_json::from_str(text) {
+                Ok(envelope) => envelope,
+                Err(_) if problem.is_object() => problem.clone(),
+                Err(error) => {
+                    return Err(TraceDecayError::Config {
+                        message: format!("{tool_name} returned no retained envelope: {error}"),
+                    });
+                }
+            };
             return Err(TraceDecayError::Config {
                 message: format!("{tool_name} answered with a retained refusal: {envelope}"),
             });
@@ -679,29 +905,16 @@ where
 }
 
 #[cfg(feature = "test-transport")]
-pub(crate) async fn handle_tool_call_with_runtime(
-    cg: &TraceDecay,
-    runtime: &HostAdmissionTestRuntimeV1,
-    tool_name: &str,
-    mut args: serde_json::Value,
-    server_stats: Option<serde_json::Value>,
-    scope_prefix: Option<&str>,
-) -> tracedecay_domain::errors::Result<ToolResult> {
-    let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
-    if !owns_format && let Some(obj) = args.as_object_mut() {
-        obj.entry("format".to_string())
-            .or_insert_with(|| serde_json::json!("json"));
-    }
-    Box::pin(runtime.call_mcp_tool_for_test(cg, tool_name, args, server_stats, scope_prefix)).await
-}
-
-#[cfg(feature = "test-transport")]
 async fn handle_project_open_source_edit_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
     mut args: Value,
 ) -> tracedecay_domain::errors::Result<ToolResult> {
-    let graph = Box::pin(TraceDecay::open(cg.project_root())).await?;
+    let graph = Box::pin(TraceDecay::open_with_options(
+        cg.project_root(),
+        graph_open_options(cg),
+    ))
+    .await?;
     let server = Box::pin(McpServer::new(graph, None)).await;
     // `false` means this direct server has no production code-graph
     // projection port, so the source-edit authority cannot mount; the
@@ -762,7 +975,6 @@ pub(crate) async fn handle_production_source_edit_tool_call(
     fixture: &ProductionSourceEditFixture,
     tool_name: &str,
     mut args: Value,
-    _server_stats: Option<Value>,
     _scope_prefix: Option<&str>,
 ) -> tracedecay_domain::errors::Result<ToolResult> {
     let owns_format = tracedecay_mcp::tool_defaults_to_markdown(tool_name);
@@ -866,112 +1078,20 @@ async fn call_project_open_source_edit_server(
     server.call_tool_for_test(tool_name, arguments).await
 }
 
-pub(crate) struct GlobalDbEnvGuard {
-    pub(crate) previous: Option<OsString>,
-}
-
-impl GlobalDbEnvGuard {
-    pub(crate) fn set(db_path: &Path) -> Self {
-        let previous = std::env::var_os("TRACEDECAY_GLOBAL_DB");
-        let db_path = canonicalize_test_db_path(db_path);
-        unsafe {
-            std::env::set_var("TRACEDECAY_GLOBAL_DB", db_path);
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for GlobalDbEnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var("TRACEDECAY_GLOBAL_DB", value),
-                None => std::env::remove_var("TRACEDECAY_GLOBAL_DB"),
-            }
-        }
-    }
-}
-
-pub(crate) struct HomeEnvGuard {
-    pub(crate) previous_home: Option<OsString>,
-    pub(crate) previous_userprofile: Option<OsString>,
-    pub(crate) previous_data_dir: Option<OsString>,
-}
-
-impl HomeEnvGuard {
-    pub(crate) fn set(home: &Path) -> Self {
-        let previous_home = std::env::var_os("HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
-        let home = canonicalize_test_dir(home);
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("USERPROFILE", &home);
-            std::env::set_var(
-                tracedecay::config::USER_DATA_DIR_ENV,
-                home.join(tracedecay::config::TRACEDECAY_DIR),
-            );
-        }
-        Self {
-            previous_home,
-            previous_userprofile,
-            previous_data_dir,
-        }
-    }
-}
-
-impl Drop for HomeEnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous_home.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match self.previous_userprofile.take() {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match self.previous_data_dir.take() {
-                Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
-                None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
-            }
-        }
-    }
-}
-
 pub(crate) use crate::common::canonicalize_test_dir;
 
-pub(crate) fn canonicalize_test_db_path(path: &Path) -> PathBuf {
-    let parent = path
-        .parent()
-        .unwrap_or_else(|| panic!("test DB path '{}' has no parent", path.display()));
-    // The DB parent doubles as the profile store root; create it through the
-    // owner-private authority so production fail-closed permission validation
-    // accepts a root the fixture created first (any umask).
-    PrivateStoreIo::create_dir_all(parent).unwrap_or_else(|err| {
-        panic!(
-            "failed to create private test directory '{}': {err}",
-            parent.display()
-        )
-    });
-    canonicalize_test_dir(parent).join(
-        path.file_name()
-            .unwrap_or_else(|| panic!("test DB path '{}' has no file name", path.display())),
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Shared setup
-// ---------------------------------------------------------------------------
 pub(crate) struct TestTempDir {
-    pub(crate) dir: Option<TempDir>,
+    dir: TempDir,
 }
 
 impl TestTempDir {
     pub(crate) fn new() -> Self {
-        Self {
-            dir: Some(TempDir::new().unwrap()),
-        }
+        // Keep fixture paths aligned with macOS's canonical /private/var project roots.
+        #[cfg(target_os = "macos")]
+        let dir = TempDir::new_in(canonicalize_test_dir(&std::env::temp_dir())).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let dir = TempDir::new().unwrap();
+        Self { dir }
     }
 }
 
@@ -979,16 +1099,7 @@ impl std::ops::Deref for TestTempDir {
     type Target = TempDir;
 
     fn deref(&self) -> &Self::Target {
-        self.dir.as_ref().expect("test temp dir already kept")
-    }
-}
-
-impl Drop for TestTempDir {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        if let Some(dir) = self.dir.take() {
-            let _ = dir.keep();
-        }
+        &self.dir
     }
 }
 
@@ -996,12 +1107,10 @@ pub(crate) fn test_temp_dir() -> TestTempDir {
     TestTempDir::new()
 }
 
+/// The isolated profile a test graph was initialized in, under
+/// `<project>/home`.
 pub(crate) struct TestEnv {
-    pub(crate) _home_guard: HomeEnvGuard,
-    pub(crate) _global_db_guard: GlobalDbEnvGuard,
-    // Drop order = declaration order: the env lock must outlive the guards
-    // above so their env restores happen while the lock is still held.
-    pub(crate) _env_lock: MutexGuard<'static, ()>,
+    pub(crate) profile: ProfileRoot,
 }
 
 pub(crate) struct TestTraceDecay {
@@ -1091,19 +1200,22 @@ pub(crate) async fn close_test_graph(cg: TestTraceDecay) {
 }
 
 pub(crate) async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let home = project.join("home");
-    let home_guard = HomeEnvGuard::set(&home);
-    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    let cg = fixture::init_project_from_template(project).await.unwrap();
-    (
-        TestTraceDecay::new(cg),
-        TestEnv {
-            _env_lock: env_lock,
-            _home_guard: home_guard,
-            _global_db_guard: global_db_guard,
-        },
+    let profile = common::isolated_profile_under_home(&project.join("home"));
+    let cg = fixture::init_project_from_template_with_options(
+        project,
+        TraceDecayOpenOptions::for_profile(&profile),
     )
+    .await
+    .unwrap();
+    (TestTraceDecay::new(cg), TestEnv { profile })
+}
+
+/// Open options that reopen `cg`'s store in the profile it was created in.
+pub(crate) fn graph_open_options(cg: &TraceDecay) -> TraceDecayOpenOptions {
+    TraceDecayOpenOptions {
+        profile_root: Some(cg.profile_root().expect("test graph profile root")),
+        global_db_path: None,
+    }
 }
 
 pub(crate) async fn setup_empty_project() -> (TestTraceDecay, TestEnv, TestTempDir) {
@@ -1183,6 +1295,113 @@ pub(crate) fn expect_tool_error<T>(result: tracedecay_domain::errors::Result<T>)
     }
 }
 
+/// The refusal every tool transport answers for arguments the tool's reviewed
+/// application schema refuses before dispatch, as [`route_refusal`] reads it.
+#[cfg(feature = "test-transport")]
+pub(crate) fn application_invalid_request_error(detail: &str) -> Value {
+    application_surface_refusal_error(&format!(
+        "application surface request does not match its reviewed schema: {detail}"
+    ))
+}
+
+/// Asserts a JSON-RPC response is a reviewed-schema refusal.
+#[cfg(feature = "test-transport")]
+pub(crate) fn assert_application_invalid_request(response: &Value, detail: &str) {
+    assert_eq!(
+        route_refusal(response),
+        application_invalid_request_error(detail),
+        "{response}"
+    );
+}
+
+/// Any `application_surface_invalid_request` refusal, with its whole
+/// `detail`, as [`route_refusal`] reads it.
+#[cfg(feature = "test-transport")]
+pub(crate) fn application_surface_refusal_error(detail: &str) -> Value {
+    route_problem(
+        "invalid_request",
+        "application_surface_invalid_request",
+        detail,
+    )
+}
+
+/// A settled route refusal of `kind` with diagnostic `code` and `detail`, as
+/// [`route_refusal`] reads it.
+#[cfg(feature = "test-transport")]
+pub(crate) fn route_problem(kind: &str, code: &str, detail: &str) -> Value {
+    json!({
+        "kind": kind,
+        "retryable": false,
+        "diagnostic": {"code": code, "message": detail},
+    })
+}
+
+/// The kind, retry verdict, and diagnostic of the typed problem a JSON-RPC
+/// `tools/call` response settled its refusal with. A settled route refusal
+/// is an `isError` tool result on every transport, never a JSON-RPC error.
+#[cfg(feature = "test-transport")]
+pub(crate) fn route_refusal(response: &Value) -> Value {
+    assert!(
+        response.get("error").is_none(),
+        "a settled route refusal is a tool result, not a JSON-RPC error: {response}"
+    );
+    refusal_summary(refusal_problem(&response["result"]))
+}
+
+/// The kind, retry verdict, and diagnostic of a typed problem record.
+#[cfg(feature = "test-transport")]
+pub(crate) fn refusal_summary(problem: &Value) -> Value {
+    json!({
+        "kind": problem["kind"],
+        "retryable": problem["retryable"],
+        "diagnostic": problem["diagnostic"],
+    })
+}
+
+/// The owner's typed problem record from a refused `tools/call` result.
+///
+/// Owner-served tools answer every refusal, including arguments their typed
+/// request parser rejects, as an `isError` tool result carrying the whole
+/// problem record (an MCP 2025-11-25 tool-execution error), not as a JSON-RPC
+/// error. Every route carries the record at `structuredContent.problem`.
+pub(crate) fn refusal_problem(result: &Value) -> &Value {
+    assert_eq!(
+        result["isError"],
+        Value::Bool(true),
+        "expected an isError refusal: {result}"
+    );
+    let problem = &result["structuredContent"]["problem"];
+    assert!(
+        problem.is_object(),
+        "refusal carries no problem record: {result}"
+    );
+    problem
+}
+
+/// [`refusal_problem`] for a [`ToolResult`]: a handler's own result carries
+/// the semantic-error mark the transport later renders as `isError`, and a
+/// result rebuilt from the transport's reply carries `isError` itself.
+pub(crate) fn tool_result_problem(result: &ToolResult) -> &Value {
+    if result.semantic_error() != Some(true) {
+        return refusal_problem(&result.value);
+    }
+    let problem = &result.value["structuredContent"]["problem"];
+    assert!(
+        problem.is_object(),
+        "refusal carries no problem record: {}",
+        result.value
+    );
+    problem
+}
+
+/// [`tool_result_problem`] for a handler call that must not fail outright.
+pub(crate) fn expect_tool_refusal(result: tracedecay_domain::errors::Result<ToolResult>) -> Value {
+    match result {
+        Ok(result) => tool_result_problem(&result).clone(),
+        Err(error) => panic!("expected a semantic refusal, got an error: {error}"),
+    }
+}
+
 #[cfg(feature = "test-transport")]
 pub(crate) async fn seed_project_registry(
     db_path: &Path,
@@ -1234,7 +1453,6 @@ pub(crate) async fn seed_project_registry(
             project_id: project.project_id.clone(),
             store_id: store.store_id.clone(),
             branch_name: "main".to_string(),
-            db_relpath: "projects/proj_alpha/tracedecay.db".to_string(),
             parent_scope_id: None,
             last_synced_at: Some(1_800_000_002),
             writable: true,
@@ -1371,29 +1589,27 @@ async fn seed_lcm_message_with_role(
             .await
             .unwrap()
     );
-    assert!(
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &SessionMessageRecord {
-                    provider: provider.to_string(),
-                    message_id: message_id.to_string(),
-                    session_id: session_id.to_string(),
-                    role: role.to_string(),
-                    timestamp: Some(ordinal + 1),
-                    ordinal,
-                    text: text.into(),
-                    kind: Some(kind.to_string()),
-                    model: Some("test-model".to_string()),
-                    tool_names: None,
-                    source_path: Some(format!("{session_id}.jsonl")),
-                    source_offset: Some(0),
-                    metadata_json: None,
-                },
-            )
-            .await
-            .unwrap()
-    );
+    runtime
+        .upsert_session_message_for_test(
+            HostAdmissionScope::Project,
+            &SessionMessageRecord {
+                provider: provider.to_string(),
+                message_id: message_id.to_string(),
+                session_id: session_id.to_string(),
+                role: role.to_string(),
+                timestamp: Some(ordinal + 1),
+                ordinal,
+                text: text.into(),
+                kind: Some(kind.to_string()),
+                model: Some("test-model".to_string()),
+                tool_names: None,
+                source_path: Some(format!("{session_id}.jsonl")),
+                source_offset: Some(0),
+                metadata_json: None,
+            },
+        )
+        .await
+        .unwrap();
 }
 
 #[cfg(feature = "test-transport")]
@@ -1539,13 +1755,10 @@ pub(crate) async fn seed_temporal_lcm_tool_result_message(
         .await
         .unwrap()
         .expect("canonical tool result must project to the compatibility store");
-    assert!(
-        runtime
-            .upsert_session_message_for_test(HostAdmissionScope::Project, &projected)
-            .await
-            .unwrap(),
-        "canonical compatibility output must apply the bounded payload policy"
-    );
+    runtime
+        .upsert_session_message_for_test(HostAdmissionScope::Project, &projected)
+        .await
+        .expect("canonical compatibility output must apply the bounded payload policy");
     projection
 }
 
@@ -1605,18 +1818,18 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
     };
     let source =
         ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
-    let source_frontier = u64::try_from(ordinal).unwrap().saturating_add(1);
-    let range = ObservationSourceRangeV1::new(source_frontier - 1, source_frontier).unwrap();
+    let source_end = u64::try_from(ordinal).unwrap().saturating_add(1);
+    let range = ObservationSourceRangeV1::new(source_end - 1, source_end).unwrap();
     let stable_record_id =
         ObservationId::new(format!("record.mcp.{session_id}.{message_id}")).unwrap();
     let relations = CanonicalObservationRelationsV1::new(session_id.clone())
         .with_message_id(ObservationId::new(message_id).unwrap());
     let facts = match role {
-        CanonicalMessageRoleV1::Tool => vec![CanonicalObservationFactV1::ToolResult {
-            invocation_id: None,
-            content: Value::String(text),
-            success: Some(true),
-        }],
+        CanonicalMessageRoleV1::Tool => vec![tracedecay_capture::accounted_tool_result(
+            None,
+            Value::String(text),
+            Some(true),
+        )],
         _ => vec![CanonicalObservationFactV1::Message {
             role,
             content: Value::String(text),
@@ -1681,14 +1894,14 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
     let authorization =
         build_observation_resolution_authorization_v1(&observation, "observation-capture.v1")
             .unwrap();
-    let base_anchor = build_observation_retrieval_anchor_v2(
+    let base_anchor = build_observation_retrieval_anchor(
         &observation,
         projection_generation.clone(),
         ingested_at,
         authorization,
     )
     .unwrap();
-    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    let anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target: base_anchor.target().clone(),
         owner: base_anchor.owner().clone(),
         aliases: base_anchor.aliases().to_vec(),
@@ -1707,7 +1920,7 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
         durability: base_anchor.durability().clone(),
     })
     .unwrap();
-    observation_store
+    let committed = observation_store
         .persist_observation(
             AnchoredObservationWrite::new(write, anchor.clone(), projection_generation).unwrap(),
         )
@@ -1759,13 +1972,8 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
     .unwrap();
     TemporalLcmProjectionInput {
         occurrence,
-        source_frontier,
+        source_frontier: committed.receipt().sequence(),
     }
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) async fn project_lcm_conn(cg: &TraceDecay) -> Arc<HostAdmissionTestRuntimeV1> {
-    open_active_project_session_db(cg).await
 }
 
 #[cfg(feature = "test-transport")]
@@ -1779,7 +1987,7 @@ pub(crate) async fn lcm_raw_store_id_for_provider(
     provider: &str,
     message_id: &str,
 ) -> i64 {
-    project_lcm_conn(cg)
+    open_active_project_session_db(cg)
         .await
         .lcm_load_raw_message_for_test(provider, message_id)
         .await

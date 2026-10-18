@@ -13,7 +13,7 @@ use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{
     Error as EngineError, Executor, IntoParams, QueryExecutor, Rows,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_sessions::runtime::{
     SessionExec, SessionQuery, SessionRegisteredDb, SessionWriteTxn,
 };
@@ -57,6 +57,16 @@ impl SessionWriteTxn for RegisteredGlobalDbWriteTransaction<'_> {
     fn commit(self) -> impl Future<Output = Result<(), EngineError>> + Send {
         RegisteredGlobalDbWriteTransaction::commit(self)
     }
+
+    fn commit_with_on_commit<F>(
+        self,
+        on_commit: F,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        RegisteredGlobalDbWriteTransaction::commit_with_on_commit(self, on_commit)
+    }
 }
 
 impl SessionQuery for RegisteredGlobalDbWriterConnection<'_> {
@@ -90,7 +100,6 @@ impl SessionExec for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -104,7 +113,6 @@ impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl Executor for RegisteredGlobalDbWriterConnection<'_> {
-    #[hotpath::skip]
     async fn execute<P>(
         &self,
         sql: &str,
@@ -116,7 +124,6 @@ impl Executor for RegisteredGlobalDbWriterConnection<'_> {
         RegisteredGlobalDbWriterConnection::execute(self, sql, params).await
     }
 
-    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriterConnection::execute_batch(self, sql).await
     }

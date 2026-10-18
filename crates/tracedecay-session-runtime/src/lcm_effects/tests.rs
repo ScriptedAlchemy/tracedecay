@@ -1,0 +1,3537 @@
+use super::*;
+use serde_json::Value;
+use tracedecay_domain::ProjectId;
+use tracedecay_domain::configuration::{LcmSummarizerExecutableV1, LcmSummarizerExecutablesV1};
+use tracedecay_domain::{
+    CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1,
+    ObservationIdentityMaterialV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, PayloadReferenceV1,
+    ProjectionGenerationId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::tests::harness::{
+    RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime,
+};
+use tracedecay_lcm::{LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode};
+use tracedecay_runtime_core::db::engine::params;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_store::{
+    AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
+    SessionRefreshStore as _, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor, derive_canonical_projection,
+};
+
+mod compression_ownership;
+
+fn session(provider: &str, session_id: &str) -> SessionRecord {
+    SessionRecord {
+        provider: provider.to_string(),
+        session_id: session_id.to_string(),
+        project_key: "project.lcm-effects".to_string(),
+        project_path: "/tmp/lcm-effects".to_string(),
+        title: Some("LCM effects journey".to_string()),
+        started_at: Some(1),
+        ended_at: None,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    }
+}
+
+fn message(session_id: &str, ordinal: i64) -> SessionMessageRecord {
+    SessionMessageRecord {
+        provider: "cursor".to_string(),
+        message_id: format!("message-{ordinal}"),
+        session_id: session_id.to_string(),
+        role: "assistant".to_string(),
+        timestamp: Some(ordinal),
+        ordinal,
+        text: format!("canonical historical message {ordinal} with durable context"),
+        kind: Some("message".to_string()),
+        model: None,
+        tool_names: None,
+        source_path: None,
+        source_offset: None,
+        metadata_json: None,
+    }
+}
+
+fn compression_request(session_id: &str) -> LcmCompressionRequest {
+    LcmCompressionRequest {
+        provider: "cursor".to_string(),
+        session_id: session_id.to_string(),
+        messages: Vec::new(),
+        current_tokens: Some(1_000),
+        focus_topic: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
+        expected_current_frontier_store_id: None,
+        threshold_tokens: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: Some(1),
+        max_source_messages: Some(8),
+        summary_fan_in: None,
+        incremental_max_depth: None,
+        fresh_tail_count: Some(1),
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
+        summarizer: LcmSummarizerMode::Fake {
+            summary_text: "fixture summary preserving canonical historical context".to_string(),
+        },
+    }
+}
+
+fn daemon_summary_request(provider: &str, session_id: &str) -> LcmCompressionRequest {
+    let mut request = compression_request(session_id);
+    request.provider = provider.to_string();
+    request.summarizer = LcmSummarizerMode::HermesAuxiliary;
+    request
+}
+
+fn execution_control() -> ExecutionControl {
+    ExecutionControl::new(Some(
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    ))
+    .with_work_limit(4_096)
+}
+
+fn retained_guard(
+    expected_summary_source_range: Option<tracedecay_lcm::LcmSummarySourceRange>,
+) -> tracedecay_lcm::compression::RetainedCompressionGuard {
+    tracedecay_lcm::compression::RetainedCompressionGuard {
+        row_limit: tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize / 2,
+        byte_limit: tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64 / 2,
+        expected_summary_source_range,
+    }
+}
+
+/// A configured fake summarizer on the shortest admitted run budget, so a
+/// fake that stops answering fails the test quickly instead of at the default.
+fn fake_summarizer(executable: &std::path::Path) -> LcmSummarizerExecutableV1 {
+    LcmSummarizerExecutableV1::configured_with(
+        executable.to_path_buf(),
+        None,
+        Some(*tracedecay_domain::configuration::LCM_SUMMARIZER_TIMEOUT_SECS_RANGE.start()),
+    )
+    .unwrap()
+}
+
+/// A registered project sessions shard whose summarizer binding the test
+/// publishes explicitly through `lcm.summarizer_executables.v1`. Provider
+/// executables are never resolved from the environment or `PATH`, so a test
+/// that expects a fake summarizer to run must pin it here.
+struct ProjectSummarizerFixture {
+    runtime: RegisteredGlobalDbTestRuntime,
+    project_id: ProjectId,
+    root: tempfile::TempDir,
+}
+
+impl ProjectSummarizerFixture {
+    /// The project identity is the `project_key` every fixture session
+    /// carries, so observations scoped to this project reconcile with the
+    /// sessions the tests upsert directly.
+    async fn open() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let project_id = ProjectId::new("project.lcm-effects".to_owned()).unwrap();
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            root.path().join("profile"),
+            root.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+        Self {
+            runtime,
+            project_id,
+            root,
+        }
+    }
+
+    fn db(&self) -> RegisteredGlobalDbLeaseV1 {
+        self.runtime.project_database_arc().unwrap()
+    }
+
+    fn pin(&self, executables: LcmSummarizerExecutablesV1) {
+        tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
+            &self.db(),
+            &self.root.path().join("project"),
+            executables,
+        )
+        .unwrap();
+    }
+
+    fn pin_cursor_agent(&self, cursor_agent: &std::path::Path) {
+        self.pin(LcmSummarizerExecutablesV1 {
+            cursor_agent: fake_summarizer(cursor_agent),
+            codex: LcmSummarizerExecutableV1::Unconfigured,
+        });
+    }
+
+    fn pin_codex(&self, codex: &std::path::Path) {
+        self.pin(LcmSummarizerExecutablesV1 {
+            cursor_agent: LcmSummarizerExecutableV1::Unconfigured,
+            codex: fake_summarizer(codex),
+        });
+    }
+
+    /// Reopens the same project shard, as a daemon restart would.
+    async fn restart(self) -> Self {
+        let Self {
+            runtime,
+            project_id,
+            root,
+        } = self;
+        drop(runtime);
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            root.path().join("profile"),
+            root.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+        Self {
+            runtime,
+            project_id,
+            root,
+        }
+    }
+}
+
+/// Serializes [`ProjectSummarizerFixture`] users: fixtures share one project
+/// identity, and the process-wide pin cache holds one summarizer binding per
+/// project.
+static PINNED_SUMMARIZER_BINDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs a future while owning the shared fixture project's pinned summarizer
+/// binding, so parallel tests cannot replace it mid-run.
+fn run_with_pinned_summarizer_binding<T>(future: impl std::future::Future<Output = T>) -> T {
+    let _binding = PINNED_SUMMARIZER_BINDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("build lcm effects test runtime")
+        .block_on(future)
+}
+
+#[tokio::test]
+async fn cancellation_observed_after_a_committed_effect_does_not_replace_its_result() {
+    let cancellation = CancellationSignal::active("cancellation.lcm-settlement").unwrap();
+    let control = LcmEffectControl::new(None, Some(&cancellation));
+    let execution = control.execution_control();
+    let result = control
+        .execute(
+            &execution,
+            Box::pin(async {
+                assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
+                Ok::<_, LcmError>("committed")
+            }),
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), "committed");
+}
+
+#[tokio::test]
+async fn retained_relation_recovery_preserves_typed_cancellation() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-relation-recovery-cancelled").await;
+    let cancellation = CancellationSignal::active("cancellation.lcm-relation-recovery").unwrap();
+    assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
+    let control = LcmEffectControl::new(None, Some(&cancellation));
+    let execution = control.execution_control();
+
+    let error = SessionTemporalAccess::new(&*harness.registered)
+        .recover_pending_session_relation_projection_page(
+            1,
+            tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
+                &execution,
+            ),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        tracedecay_store::SessionStoreError::Cancelled
+    ));
+}
+
+#[tokio::test]
+async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-compress-effect-journey").await;
+    let db = harness.registered.clone();
+    assert!(
+        db.upsert_session(&session("cursor", "compress-session"))
+            .await
+    );
+    let storage_root = db.db_path().parent().unwrap();
+    for ordinal in 1..=8 {
+        db.lcm_ingest_raw_message(storage_root, &message("compress-session", ordinal))
+            .await
+            .unwrap();
+    }
+
+    let cancellation = CancellationSignal::active("cancellation.lcm-compress-journey").unwrap();
+    assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
+    let service_cancelled = DaemonLcmEffectService::new(db.clone(), None, Some(&cancellation))
+        .compress(compression_request("compress-session"))
+        .await;
+    assert_eq!(service_cancelled.unwrap_err(), LcmError::Cancelled);
+
+    let cancellation_control = execution_control();
+    let cancelled = db
+        .lcm_compress_guarded(
+            &compression_request("compress-session"),
+            &cancellation_control,
+            || Err(LcmError::Cancelled),
+        )
+        .await;
+    assert_eq!(cancelled.unwrap_err(), LcmError::Cancelled);
+    let rolled_back = db
+        .lcm_status("cursor", Some("compress-session"))
+        .await
+        .unwrap();
+    assert_eq!(rolled_back.raw_message_count, 8);
+    assert_eq!(rolled_back.summary_node_count, 0);
+
+    let response = DaemonLcmEffectService::new(db.clone(), None, None)
+        .compress(compression_request("compress-session"))
+        .await
+        .unwrap();
+    let summary = response.summary_nodes.first().unwrap();
+    let source_store_id = summary
+        .source_refs
+        .iter()
+        .find_map(|source| match source {
+            LcmSourceRef::RawMessage { store_id } => Some(*store_id),
+            LcmSourceRef::SummaryNode { .. } => None,
+        })
+        .unwrap();
+    let store_id = db
+        .lcm_raw_message_store_id("cursor", "message-1")
+        .await
+        .unwrap()
+        .expect("durable raw message");
+    assert_eq!(store_id, source_store_id);
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT content FROM lcm_raw_messages WHERE store_id = ?1",
+            params![store_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("durable raw message row");
+    let content: String = row.get(0).unwrap();
+    assert_eq!(
+        content,
+        "canonical historical message 1 with durable context"
+    );
+    assert_eq!(
+        summary.summary_text,
+        "fixture summary preserving canonical historical context"
+    );
+    assert_eq!(
+        response.relation_projection_status,
+        LcmRelationProjectionStatus::Applied
+    );
+
+    let session_id = SessionId::new("compress-session").unwrap();
+    let relation_ids = [summary.node_id.clone()];
+    let read_control = execution_control();
+    let (_, relations) = SessionTemporalAccess::new(&*db)
+        .active_session_summary_relations(
+            &session_id,
+            &relation_ids,
+            4_096,
+            tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
+                &read_control,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].sources.len(), summary.source_refs.len());
+    assert_eq!(
+        SessionTemporalAccess::new(&*db)
+            .recover_pending_session_relation_projections(
+                1,
+                tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
+                    &read_control,
+                ),
+            )
+            .await
+            .unwrap(),
+        0,
+        "compress applies the graph projection in the same journey"
+    );
+
+    let expected_relations = relations.clone();
+    drop(response);
+    drop(db);
+    let harness = harness.restart().await;
+    let restarted = harness.registered.clone();
+    let restart_control = execution_control();
+    let (_, restarted_relations) = SessionTemporalAccess::new(&*restarted)
+        .active_session_summary_relations(
+            &session_id,
+            &relation_ids,
+            4_096,
+            tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
+                &restart_control,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restarted_relations, expected_relations);
+}
+
+#[tokio::test]
+async fn preflight_reads_canonical_state_without_creating_or_ingesting_a_session() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-preflight-read-only").await;
+    let db = harness.registered.clone();
+    let response = db
+        .lcm_preflight(tracedecay_lcm::LcmPreflightRequest {
+            provider: "cursor".to_string(),
+            session_id: "missing-session".to_string(),
+            messages: Vec::new(),
+            current_tokens: Some(1_000),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert!(response.replay_messages.is_empty());
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    for table in ["sessions", "lcm_raw_messages"] {
+        let mut rows = snapshot
+            .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_identity() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-native-summary-evidence").await;
+    let db = harness.registered.clone();
+    for (provider, session_id) in [
+        ("cursor", "cursor-native-session"),
+        ("claude", "claude-native-session"),
+        ("codex", "codex-native-session"),
+    ] {
+        assert!(db.upsert_session(&session(provider, session_id)).await);
+    }
+    let cursor_text = "exact Cursor Composer compacted text".repeat(256);
+    let cursor_summary = canonical_record(canonical_envelope(
+        "cursor",
+        "cursor-native-session",
+        "cursor-summary",
+        None,
+        (10, 0),
+        vec![
+            serde_json::json!({
+                "kind": "message",
+                "role": "assistant",
+                "content": cursor_text
+            }),
+            serde_json::json!({
+                "kind": "compaction",
+                "summary": cursor_text
+            }),
+        ],
+    ));
+    ingest_canonical(&db, "cursor-native-session", &[], &[&cursor_summary]).await;
+    insert_summary_evidence(
+        (&db, "codex"),
+        "codex-native-session",
+        "codex-encrypted-summary",
+        10,
+        "Codex context compaction; encrypted body unavailable",
+        "summary",
+        &serde_json::json!({
+            "source": "codex_context_compacted",
+            "summary_body": "encrypted"
+        }),
+    )
+    .await;
+    insert_summary_evidence(
+        (&db, "codex"),
+        "codex-native-session",
+        "codex-unrelated-plaintext",
+        12,
+        "unrelated plaintext summary",
+        "summary",
+        &serde_json::json!({
+            "source": "unrelated_source",
+            "summary_body": "plaintext"
+        }),
+    )
+    .await;
+
+    let claude_text = "exact Claude compact summary wrapper and body";
+    let claude_summary = canonical_record(canonical_envelope(
+        "claude",
+        "claude-native-session",
+        "claude-summary",
+        Some("claude-boundary"),
+        (11, 0),
+        vec![
+            serde_json::json!({
+                "kind": "message",
+                "role": "user",
+                "content": claude_text
+            }),
+            serde_json::json!({
+                "kind": "compaction",
+                "summary": {
+                    "isCompactSummary": true,
+                    "isVisibleInTranscriptOnly": true
+                }
+            }),
+        ],
+    ));
+    ingest_canonical(&db, "claude-native-session", &[], &[&claude_summary]).await;
+
+    let cursor = super::super::lcm_summarization::native_summary_evidence(
+        &db,
+        "cursor",
+        "cursor-native-session",
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(cursor.text, cursor_text);
+    assert_eq!(cursor.route, "cursor_native_compaction");
+    assert!(
+        super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "claude",
+            "claude-native-session",
+            None,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "an unpaired Claude summary must remain non-authoritative"
+    );
+    assert!(
+        super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "codex",
+            "codex-native-session",
+            None,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "encrypted Codex compaction must remain non-authoritative"
+    );
+    insert_summary_evidence(
+        (&db, "codex"),
+        "codex-native-session",
+        "codex-plaintext-summary",
+        11,
+        "exact Codex plaintext summary",
+        "summary",
+        &serde_json::json!({
+            "source": "codex_context_compacted",
+            "summary_body": "plaintext"
+        }),
+    )
+    .await;
+    let codex = super::super::lcm_summarization::native_summary_evidence(
+        &db,
+        "codex",
+        "codex-native-session",
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(codex.text, "exact Codex plaintext summary");
+    assert_eq!(codex.route, "codex_native_compaction");
+
+    let boundary = canonical_record(canonical_envelope(
+        "claude",
+        "claude-native-session",
+        "claude-boundary",
+        None,
+        (12, 1),
+        vec![
+            serde_json::json!({
+                "kind": "boundary",
+                "boundary_kind": "compaction_boundary"
+            }),
+            serde_json::json!({
+                "kind": "compaction",
+                "summary": {
+                    "preservedSegment": {
+                        "anchorUuid": "claude-summary"
+                    }
+                }
+            }),
+        ],
+    ));
+    ingest_canonical(&db, "claude-native-session", &[], &[&boundary]).await;
+    let claude = super::super::lcm_summarization::native_summary_evidence(
+        &db,
+        "claude",
+        "claude-native-session",
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(claude.text, claude_text);
+    assert_eq!(claude.route, "claude_native_compaction");
+}
+
+/// Ingests one recognizable Claude compact pair and returns the store's
+/// session id. `leading_role` is the role of the rows before the pair:
+/// `system` rows are policy anchors compression pins separately, so a
+/// summary behind only those rows is owed no conversational interval.
+async fn ingest_claude_compact_pair(db: &RegisteredGlobalDb, session_id: &str, leading_role: &str) {
+    let boundary_id = format!("{session_id}-boundary");
+    let summary_id = format!("{session_id}-summary");
+    let mut messages = Vec::new();
+    for ordinal in 1..=2 {
+        let mut record = message(session_id, ordinal);
+        record.provider = "claude".to_string();
+        record.message_id = format!("{session_id}-leading-{ordinal}");
+        record.role = leading_role.to_string();
+        messages.push(record);
+    }
+    let boundary = canonical_record(canonical_envelope(
+        "claude",
+        session_id,
+        &boundary_id,
+        None,
+        (3, 0),
+        vec![
+            serde_json::json!({
+                "kind": "boundary",
+                "boundary_kind": "compaction_boundary"
+            }),
+            serde_json::json!({
+                "kind": "compaction",
+                "summary": {"preservedSegment": {"anchorUuid": summary_id}}
+            }),
+        ],
+    ));
+    let summary = canonical_record(canonical_envelope(
+        "claude",
+        session_id,
+        &summary_id,
+        Some(&boundary_id),
+        (4, 1),
+        vec![
+            serde_json::json!({
+                "kind": "message",
+                "role": "user",
+                "content": "authoritative Claude compaction"
+            }),
+            serde_json::json!({
+                "kind": "compaction",
+                "summary": {
+                    "isCompactSummary": true,
+                    "isVisibleInTranscriptOnly": true
+                }
+            }),
+        ],
+    ));
+    ingest_canonical(db, session_id, &messages, &[&boundary, &summary]).await;
+}
+
+/// An absent predecessor interval must never reach a published summary as
+/// an unannotated empty range: a session's genuinely-first conversational
+/// message has no predecessor, while an interval that is owed and missing
+/// is unavailable and the caller refuses.
+#[tokio::test]
+async fn claude_native_summary_without_a_persisted_range_is_typed_absent() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-claude-absent-range").await;
+    let db = harness.registered.clone();
+    let owed_session = "claude-owed-range-session";
+    ingest_claude_compact_pair(&db, owed_session, "assistant").await;
+
+    let ingested =
+        super::super::lcm_summarization::native_summary_evidence(&db, "claude", owed_session, None)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        ingested.source_range.interval().is_some(),
+        "ordinary ingest must persist the conversational interval: {:?}",
+        ingested.source_range
+    );
+
+    // Model the #843 window: a preserved row whose interval the
+    // background rewrite has not produced yet.
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM lcm_raw_predecessor_ranges
+                 WHERE provider = 'claude' AND session_id = ?1",
+            params![owed_session],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let unavailable =
+        super::super::lcm_summarization::native_summary_evidence(&db, "claude", owed_session, None)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        unavailable.source_range,
+        tracedecay_lcm::raw::LcmPredecessorRangeState::Unavailable
+    );
+    assert_eq!(
+        unavailable.source_range.absent_reason(),
+        Some("predecessor_interval_unavailable")
+    );
+
+    // A summary whose only earlier rows are policy anchors genuinely has
+    // no conversational predecessor, which is a different typed state.
+    let first_session = "claude-first-conversational-session";
+    ingest_claude_compact_pair(&db, first_session, "system").await;
+    let first = super::super::lcm_summarization::native_summary_evidence(
+        &db,
+        "claude",
+        first_session,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        first.source_range,
+        tracedecay_lcm::raw::LcmPredecessorRangeState::NoPredecessor
+    );
+    assert_eq!(
+        first.source_range.absent_reason(),
+        Some("no_predecessor_interval")
+    );
+}
+
+#[tokio::test]
+async fn transcript_ingest_persists_native_compaction_raw_range() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-native-summary-range").await;
+    let db = harness.registered.clone();
+    let session_id = "codex-native-range-session";
+    let mut messages = Vec::new();
+    for ordinal in 1..=4 {
+        let mut record = message(session_id, ordinal);
+        record.provider = "codex".to_string();
+        record.message_id = format!("native-range-message-{ordinal}");
+        messages.push(record);
+    }
+    let mut compaction = message(session_id, 5);
+    compaction.provider = "codex".to_string();
+    compaction.message_id = "native-range-compaction".to_string();
+    compaction.kind = Some("summary".to_string());
+    compaction.text = "production Codex compaction text".to_string();
+    compaction.metadata_json = Some(
+        serde_json::json!({
+            "source": "codex_context_compacted",
+            "source_event": "compacted",
+            "summary_body": "plaintext",
+            "replacement_history_count": 1,
+            "codex_compaction_depth": 1,
+            "source_offset": 5,
+            "encrypted": false
+        })
+        .to_string(),
+    );
+    messages.push(compaction);
+    let mut post_compaction = message(session_id, 6);
+    post_compaction.provider = "codex".to_string();
+    post_compaction.message_id = "native-range-post-compaction".to_string();
+    messages.push(post_compaction);
+
+    seed_session_messages(&db, &session("codex", session_id), &messages).await;
+    let first = db
+        .lcm_raw_message_store_id("codex", "native-range-message-1")
+        .await
+        .unwrap()
+        .unwrap();
+    let last = db
+        .lcm_raw_message_store_id("codex", "native-range-message-4")
+        .await
+        .unwrap()
+        .unwrap();
+    let evidence =
+        super::super::lcm_summarization::native_summary_evidence(&db, "codex", session_id, None)
+            .await
+            .unwrap()
+            .unwrap();
+
+    assert_eq!(evidence.text, "production Codex compaction text");
+    assert_eq!(
+        evidence.source_range,
+        tracedecay_lcm::raw::LcmPredecessorRangeState::Interval(
+            tracedecay_lcm::LcmSummarySourceRange {
+                from_store_id: first,
+                to_store_id: last,
+            }
+        )
+    );
+    let converged =
+        super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+            .await
+            .unwrap();
+    assert_eq!(converged.sessions[0].summary_nodes_created, 1);
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT summary_text, json_extract(metadata_json, '$.summary_route')
+                 FROM session_summary_nodes
+                 WHERE provider = 'codex' AND session_id = ?1",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(
+        row.get::<String>(0).unwrap(),
+        "production Codex compaction text"
+    );
+    assert_eq!(
+        row.get::<Option<String>>(1).unwrap().as_deref(),
+        Some("codex_native_compaction")
+    );
+}
+
+#[tokio::test]
+async fn successive_claude_compactions_bind_to_the_previous_native_boundary_after_restart() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-claude-successive-native-ranges").await;
+    let db = harness.registered.clone();
+    let session_id = "claude-successive-native-ranges";
+    let mut messages = Vec::new();
+    for ordinal in 1..=3 {
+        let mut record = message(session_id, ordinal);
+        record.provider = "claude".to_string();
+        record.message_id = format!("claude-before-first-{ordinal}");
+        messages.push(record);
+    }
+    let compact_pair =
+        |boundary_id: &str, summary_id: &str, (ordinal, position): (u64, u64), text: &str| {
+            let boundary = canonical_record(canonical_envelope(
+                "claude",
+                session_id,
+                boundary_id,
+                None,
+                (ordinal, position),
+                vec![
+                    serde_json::json!({
+                        "kind": "boundary",
+                        "boundary_kind": "compaction_boundary"
+                    }),
+                    serde_json::json!({
+                        "kind": "compaction",
+                        "summary": {"preservedSegment": {"anchorUuid": summary_id}}
+                    }),
+                ],
+            ));
+            let summary = canonical_record(canonical_envelope(
+                "claude",
+                session_id,
+                summary_id,
+                Some(boundary_id),
+                (ordinal + 1, position + 1),
+                vec![
+                    serde_json::json!({
+                        "kind": "message",
+                        "role": "assistant",
+                        "content": text
+                    }),
+                    serde_json::json!({
+                        "kind": "compaction",
+                        "summary": {
+                            "isCompactSummary": true,
+                            "isVisibleInTranscriptOnly": true
+                        }
+                    }),
+                ],
+            ));
+            (boundary, summary)
+        };
+    let first_summary_id = "claude-first-summary";
+    let (first_boundary, first_summary) = compact_pair(
+        "claude-first-boundary",
+        first_summary_id,
+        (4, 0),
+        "first authoritative Claude compaction",
+    );
+    ingest_canonical(
+        &db,
+        session_id,
+        &messages,
+        &[&first_boundary, &first_summary],
+    )
+    .await;
+    let mut between = Vec::new();
+    for ordinal in 6..=520 {
+        let mut record = message(session_id, ordinal);
+        record.provider = "claude".to_string();
+        record.message_id = format!("claude-between-{ordinal}");
+        between.push(record);
+    }
+    let second_summary_id = "claude-second-summary";
+    let (second_boundary, second_summary) = compact_pair(
+        "claude-second-boundary",
+        second_summary_id,
+        (521, 2),
+        "second authoritative Claude compaction",
+    );
+    ingest_canonical(
+        &db,
+        session_id,
+        &between,
+        &[&second_boundary, &second_summary],
+    )
+    .await;
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT store_id, message_id, role
+                 FROM lcm_raw_messages
+                 WHERE provider = 'claude' AND session_id = ?1
+                 ORDER BY store_id",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    let mut raw = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        raw.push((
+            row.get::<i64>(0).unwrap(),
+            row.get::<String>(1).unwrap(),
+            row.get::<String>(2).unwrap(),
+        ));
+    }
+    drop(rows);
+    drop(snapshot);
+    let first_summary_store_id = raw
+        .iter()
+        .find(|(_, message_id, _)| message_id == first_summary_id)
+        .unwrap()
+        .0;
+    let second_summary_store_id = raw
+        .iter()
+        .find(|(_, message_id, _)| message_id == second_summary_id)
+        .unwrap()
+        .0;
+    // Compression pins `system` rows (the compaction boundaries) apart from
+    // the conversational backlog a native summary is compared against.
+    let first_sources = raw
+        .iter()
+        .filter(|(store_id, _, role)| *store_id < first_summary_store_id && role != "system")
+        .map(
+            |(store_id, _, role)| tracedecay_lcm::LcmSummarySourceMessage {
+                store_id: *store_id,
+                role: role.clone(),
+                content: String::new(),
+            },
+        )
+        .collect::<Vec<_>>();
+    let first_request = tracedecay_lcm::LcmSummaryRequest {
+        provider: "claude".to_string(),
+        session_id: session_id.to_string(),
+        focus_topic: None,
+        prompt: String::new(),
+        source_range: tracedecay_lcm::LcmSummarySourceRange {
+            from_store_id: first_sources.first().unwrap().store_id,
+            to_store_id: first_sources.last().unwrap().store_id,
+        },
+        source_messages: first_sources,
+        extraction_request: None,
+    };
+    let native_without_range =
+        super::super::lcm_summarization::native_summary_evidence(&db, "claude", session_id, None)
+            .await
+            .unwrap();
+    assert!(
+        native_without_range.is_some(),
+        "production transcript rows must retain recognizable Claude compaction pairs"
+    );
+    let first = super::super::lcm_summarization::native_summary_evidence(
+        &db,
+        "claude",
+        session_id,
+        Some(&first_request),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.text, "first authoritative Claude compaction");
+
+    drop(db);
+    let harness = harness.restart().await;
+    let restarted = harness.registered.clone();
+    let second_sources = raw
+        .iter()
+        .filter(|(store_id, _, role)| {
+            *store_id >= first_summary_store_id
+                && *store_id < second_summary_store_id
+                && role != "system"
+        })
+        .map(
+            |(store_id, _, role)| tracedecay_lcm::LcmSummarySourceMessage {
+                store_id: *store_id,
+                role: role.clone(),
+                content: String::new(),
+            },
+        )
+        .collect::<Vec<_>>();
+    let second_request = tracedecay_lcm::LcmSummaryRequest {
+        provider: "claude".to_string(),
+        session_id: session_id.to_string(),
+        focus_topic: None,
+        prompt: String::new(),
+        source_range: tracedecay_lcm::LcmSummarySourceRange {
+            from_store_id: second_sources.first().unwrap().store_id,
+            to_store_id: second_sources.last().unwrap().store_id,
+        },
+        source_messages: second_sources,
+        extraction_request: None,
+    };
+    let second = super::super::lcm_summarization::native_summary_evidence(
+        &restarted,
+        "claude",
+        session_id,
+        Some(&second_request),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(second.text, "second authoritative Claude compaction");
+    assert_eq!(
+        second.source_range.interval().unwrap().from_store_id,
+        first_summary_store_id
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn native_compaction_requires_exact_selected_raw_membership() {
+    run_with_pinned_summarizer_binding(async {
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
+        let session_id = "codex-native-membership-session";
+        let mut messages = Vec::new();
+        for ordinal in 1..=4 {
+            let mut record = message(session_id, ordinal);
+            record.provider = "codex".to_string();
+            record.message_id = format!("native-membership-message-{ordinal}");
+            if ordinal == 2 {
+                record.role = "system".to_string();
+            }
+            messages.push(record);
+        }
+        let mut compaction = message(session_id, 5);
+        compaction.provider = "codex".to_string();
+        compaction.message_id = "native-membership-compaction".to_string();
+        compaction.kind = Some("summary".to_string());
+        compaction.text = "native text covering the full predecessor interval".to_string();
+        compaction.metadata_json = Some(
+            serde_json::json!({
+                "source": "codex_context_compacted",
+                "summary_body": "plaintext"
+            })
+            .to_string(),
+        );
+        messages.push(compaction);
+        let mut tail = message(session_id, 6);
+        tail.provider = "codex".to_string();
+        tail.message_id = "native-membership-tail".to_string();
+        messages.push(tail);
+        seed_session_messages(&db, &session("codex", session_id), &messages).await;
+        let policy_anchor_store_id = db
+            .lcm_raw_message_store_id("codex", "native-membership-message-2")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let temporary = tempfile::tempdir().unwrap();
+        let codex_bin = temporary.path().join("codex");
+        write_executable_script(
+            &codex_bin,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+    *'"id":1'*) printf '%s\n' '{"id":1,"result":{"thread":{"id":"thread-1","model":"codex-membership-model"}}}' ;;
+    *'"id":2'*)
+      printf '%s\n' '{"method":"item/completed","params":{"model":"codex-membership-model","item":{"content":[{"type":"output_text","text":"auxiliary membership-bound summary"}]}}}'
+      printf '%s\n' '{"method":"turn/completed"}'
+      ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        fixture.pin_codex(&codex_bin);
+
+        let converged =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(converged.sessions[0].summary_nodes_created, 1);
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT summary_id, summary_text
+                     FROM session_summary_nodes
+                     WHERE provider = 'codex' AND session_id = ?1",
+                params![session_id],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let node_id = row.get::<String>(0).unwrap();
+        assert_eq!(
+            row.get::<String>(1).unwrap(),
+            "auxiliary membership-bound summary"
+        );
+        drop(rows);
+        let mut sources = snapshot
+            .query(
+                "SELECT source_id FROM session_summary_sources
+                     WHERE summary_id = ?1 AND source_kind = 'raw_message'
+                     ORDER BY ordinal",
+                params![node_id],
+            )
+            .await
+            .unwrap();
+        let mut source_ids = Vec::new();
+        while let Some(row) = sources.next().await.unwrap() {
+            source_ids.push(row.get::<String>(0).unwrap());
+        }
+        assert_eq!(source_ids.len(), 3);
+        assert!(!source_ids.contains(&policy_anchor_store_id.to_string()));
+    });
+}
+
+#[tokio::test]
+async fn providers_without_authoritative_summarizers_keep_frontiers_pending() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-summary-unavailable").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    for provider in [
+        "claude", "hermes", "kiro", "kimi", "opencode", "cline", "roo", "kilo",
+    ] {
+        let session_id = format!("{provider}-session");
+        assert!(db.upsert_session(&session(provider, &session_id)).await);
+        for ordinal in 1..=8 {
+            let mut record = message(&session_id, ordinal);
+            record.provider = provider.to_string();
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+
+        let response = DaemonLcmEffectService::new(db.clone(), None, None)
+            .compress(daemon_summary_request(provider, &session_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status, "needs_summary", "{provider}");
+        assert_eq!(
+            response.reason, "authoritative_summarizer_unavailable",
+            "{provider}"
+        );
+        assert_eq!(
+            response.retry_status.as_deref(),
+            Some("needs_authoritative_summary"),
+            "{provider}"
+        );
+        assert!(response.summary_nodes.is_empty(), "{provider}");
+        assert_eq!(
+            response.relation_projection_status,
+            LcmRelationProjectionStatus::NotApplicable,
+            "{provider}"
+        );
+        assert_eq!(
+            response.frontier.current_frontier_store_id, None,
+            "{provider}"
+        );
+        let status = db.lcm_status(provider, Some(&session_id)).await.unwrap();
+        assert_eq!(status.summary_node_count, 0, "{provider}");
+    }
+}
+
+#[tokio::test]
+async fn summary_convergence_resumes_after_restart_without_duplicate_summaries() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-restart").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    for session_id in ["convergence-session-a", "convergence-session-b"] {
+        assert!(db.upsert_session(&session("codex", session_id)).await);
+        for ordinal in 1..=4 {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            record.provider = "codex".to_string();
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+        let summary_text = format!("native summary for {session_id}");
+        ingest_codex_compaction_evidence(
+            &db,
+            session_id,
+            &format!("{session_id}-summary"),
+            5,
+            &summary_text,
+        )
+        .await;
+    }
+
+    let first = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(first.sessions.len(), 1);
+    assert!(first.has_more);
+    assert_eq!(first.sessions[0].session_id, "convergence-session-a");
+    assert_eq!(first.sessions[0].summary_nodes_created, 1);
+    drop(db);
+
+    let harness = harness.restart().await;
+    let restarted = harness.registered.clone();
+    let second =
+        super::super::lcm_summary_convergence::run_summary_convergence_page(restarted.clone(), 1)
+            .await
+            .unwrap();
+    assert_eq!(second.sessions.len(), 1);
+    assert_eq!(second.sessions[0].session_id, "convergence-session-b");
+    assert_eq!(second.sessions[0].summary_nodes_created, 1);
+
+    let third =
+        super::super::lcm_summary_convergence::run_summary_convergence_page(restarted.clone(), 2)
+            .await
+            .unwrap();
+    assert!(
+        third
+            .sessions
+            .iter()
+            .all(|session| session.summary_nodes_created == 0)
+    );
+    for session_id in ["convergence-session-a", "convergence-session-b"] {
+        let status = restarted
+            .lcm_status("codex", Some(session_id))
+            .await
+            .unwrap();
+        assert_eq!(status.raw_message_count, 6, "{session_id}");
+        assert_eq!(status.summary_node_count, 1, "{session_id}");
+    }
+}
+
+#[tokio::test]
+async fn interrupted_atomic_summary_settlement_resumes_without_duplicate() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-crash-window").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    let session_id = "convergence-crash-window-session";
+    assert!(db.upsert_session(&session("codex", session_id)).await);
+    for ordinal in 1..=4 {
+        let mut record = message(session_id, ordinal);
+        record.message_id = format!("{session_id}-message-{ordinal}");
+        record.provider = "codex".to_string();
+        db.lcm_ingest_raw_message(storage_root, &record)
+            .await
+            .unwrap();
+    }
+    let summary_text = "native summary committed with queue settlement";
+    ingest_codex_compaction_evidence(&db, session_id, "crash-window-summary", 5, summary_text)
+        .await;
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    let candidate = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(snapshot);
+    let mut interrupted_request = daemon_summary_request("codex", session_id);
+    interrupted_request.summarizer = LcmSummarizerMode::Provided {
+        summary_text: summary_text.to_string(),
+        route: Some("codex_native_compaction".to_string()),
+    };
+    let interrupted = db
+        .lcm_compress_retained_page_guarded(
+            &interrupted_request,
+            &execution_control(),
+            || Err(LcmError::Cancelled),
+            retained_guard(None),
+            Some(&candidate),
+        )
+        .await;
+    assert_eq!(interrupted.unwrap_err(), LcmError::Cancelled);
+    let interrupted_status = db.lcm_status("codex", Some(session_id)).await.unwrap();
+    assert_eq!(interrupted_status.summary_node_count, 0);
+    assert_eq!(
+        interrupted_status.summary_convergence.pending_session_count, 1,
+        "summary and queue settlement must roll back together"
+    );
+    drop(db);
+
+    let harness = harness.restart().await;
+    let restarted = harness.registered.clone();
+    let replay =
+        super::super::lcm_summary_convergence::run_summary_convergence_page(restarted.clone(), 1)
+            .await
+            .unwrap();
+    assert_eq!(replay.sessions.len(), 1);
+    assert_eq!(replay.sessions[0].summary_nodes_created, 1);
+    let status = restarted
+        .lcm_status("codex", Some(session_id))
+        .await
+        .unwrap();
+    assert_eq!(status.summary_node_count, 1);
+    assert_eq!(status.summary_convergence.current_session_count, 1);
+}
+
+#[tokio::test]
+async fn retained_commit_defers_whole_session_replay_and_relation_application() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-retained-deferred-maintenance").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    let session_id = "retained-deferred-maintenance-session";
+    assert!(db.upsert_session(&session("cursor", session_id)).await);
+    for ordinal in 1..=8 {
+        let mut record = message(session_id, ordinal);
+        record.message_id = format!("{session_id}-message-{ordinal}");
+        db.lcm_ingest_raw_message(storage_root, &record)
+            .await
+            .unwrap();
+    }
+    let mut initial = compression_request(session_id);
+    initial.summarizer = LcmSummarizerMode::Fake {
+        summary_text: "old whole-session replay sentinel".to_string(),
+    };
+    DaemonLcmEffectService::new(db.clone(), None, None)
+        .compress(initial)
+        .await
+        .unwrap();
+    for ordinal in 9..=16 {
+        let mut record = message(session_id, ordinal);
+        record.message_id = format!("{session_id}-message-{ordinal}");
+        db.lcm_ingest_raw_message(storage_root, &record)
+            .await
+            .unwrap();
+    }
+    let snapshot = db.read_snapshot().await.unwrap();
+    let candidate = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(snapshot);
+    let mut retained = compression_request(session_id);
+    retained.summarizer = LcmSummarizerMode::Fake {
+        summary_text: "new bounded-page summary".to_string(),
+    };
+    let bounded = db
+        .lcm_compress_retained_page_guarded(
+            &retained,
+            &execution_control(),
+            || Ok(()),
+            retained_guard(None),
+            Some(&candidate),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        bounded
+            .response
+            .replay_messages
+            .iter()
+            .all(|message| !message
+                .to_string()
+                .contains("old whole-session replay sentinel")),
+        "retained convergence must not hydrate whole-session summary history"
+    );
+    assert_eq!(
+        bounded.response.relation_projection_status,
+        LcmRelationProjectionStatus::Pending,
+        "relation application belongs to its canonical bounded recovery lane"
+    );
+}
+
+#[tokio::test]
+async fn summary_convergence_keeps_unsupported_provider_typed_pending() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-pending").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    assert!(
+        db.upsert_session(&session("claude", "unsupported-convergence-session"))
+            .await
+    );
+    for ordinal in 1..=8 {
+        let mut record = message("unsupported-convergence-session", ordinal);
+        record.provider = "claude".to_string();
+        db.lcm_ingest_raw_message(storage_root, &record)
+            .await
+            .unwrap();
+    }
+
+    let page = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(page.sessions.len(), 1);
+    let result = &page.sessions[0];
+    assert_eq!(result.provider, "claude");
+    assert_eq!(
+        result.disposition,
+        super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Pending {
+            reason: "authoritative_summarizer_unavailable".to_string(),
+        }
+    );
+    assert_eq!(result.summary_nodes_created, 0);
+
+    let status = db
+        .lcm_status("claude", Some("unsupported-convergence-session"))
+        .await
+        .unwrap();
+    assert_eq!(status.raw_message_count, 8);
+    assert_eq!(status.summary_node_count, 0);
+    assert_eq!(status.lifecycle.current_frontier_store_id, None);
+    assert_eq!(status.summary_convergence.unavailable_session_count, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restart() {
+    run_with_pinned_summarizer_binding(async {
+        // A project id no other test pins, so the shard starts with no
+        // published configuration at all.
+        let root = tempfile::tempdir().unwrap();
+        let project_root = root.path().join("project");
+        let project_id = ProjectId::new("project.lcm-parked-summaries".to_owned()).unwrap();
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            root.path().join("profile"),
+            &project_root,
+            project_id,
+        )
+        .await
+        .unwrap();
+        let db = runtime.project_database_arc().unwrap();
+        let storage_root = db.db_path().parent().unwrap();
+        let session_id = "parked-until-configured-session";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        for ordinal in 1..=8 {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+        let parked_reason = |reason: &str| {
+            vec![tracedecay_lcm::LcmSummaryConvergenceReasonCount {
+                state: tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Unavailable,
+                reason: reason.to_owned(),
+                session_count: 1,
+            }]
+        };
+
+        // No pin yet: the daemon has not activated any configuration.
+        let unpublished =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(
+            unpublished.sessions[0].disposition,
+            super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Pending {
+                reason: "summarizer_configuration_unavailable".to_owned(),
+            }
+        );
+        let status = db.lcm_status("cursor", Some(session_id)).await.unwrap();
+        assert_eq!(status.summary_convergence.unavailable_session_count, 1);
+        assert_eq!(
+            status.summary_convergence.reasons,
+            parked_reason("summarizer_configuration_unavailable")
+        );
+        let idle =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert!(
+            idle.sessions.is_empty(),
+            "an unchanged binding stays parked"
+        );
+
+        // Publishing a pin is a binding change: the parked session is retried
+        // and parks again under the provider's own unconfigured reason.
+        tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
+            &db,
+            &project_root,
+            LcmSummarizerExecutablesV1::unconfigured(),
+        )
+        .unwrap();
+        let published =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(published.parked_rows_requeued, 1);
+        assert_eq!(
+            published.sessions[0].disposition,
+            super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Pending {
+                reason: "cursor_agent_unconfigured".to_owned(),
+            }
+        );
+        assert_eq!(
+            db.lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap()
+                .summary_convergence
+                .reasons,
+            parked_reason("cursor_agent_unconfigured")
+        );
+
+        // Configuring the executable resumes it in the same process, with no
+        // restart and no new raw message.
+        let temporary = tempfile::tempdir().unwrap();
+        let cursor_bin = temporary.path().join("cursor-agent");
+        write_executable_script(
+            &cursor_bin,
+            "#!/bin/sh\nprintf '%s\\n' 'summary produced after configuration'\n",
+        )
+        .unwrap();
+        tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
+            &db,
+            &project_root,
+            LcmSummarizerExecutablesV1 {
+                cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, Some(5))
+                    .unwrap(),
+                codex: LcmSummarizerExecutableV1::Unconfigured,
+            },
+        )
+        .unwrap();
+        let configured =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(configured.parked_rows_requeued, 1);
+        assert!(configured.sessions[0].summary_nodes_created > 0);
+        let status = db.lcm_status("cursor", Some(session_id)).await.unwrap();
+        assert!(status.summary_node_count > 0);
+        assert_eq!(status.summary_convergence.unavailable_session_count, 0);
+        assert!(status.summary_convergence.reasons.is_empty());
+    });
+}
+
+async fn active_projection_frontier(db: &RegisteredGlobalDb, session_id: &str) -> Option<i64> {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT CAST(json_extract(frozen_watermarks_json, '$.projection_frontier') AS INTEGER)
+             FROM session_temporal_generations
+             WHERE session_id = ?1 AND state = 'active'",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .map(|row| row.get::<i64>(0).unwrap())
+}
+
+/// An explicit refresh request shaped like the session refresh service's:
+/// bound to the caller's view of the frontier through its refresh key.
+fn explicit_refresh_request(
+    session: &SessionId,
+    observed_through: u64,
+    committed_through: u64,
+) -> tracedecay_store::SessionRefreshBeginOrJoinRequestV1 {
+    let source_id =
+        tracedecay_domain::SessionSourceIdV1::new(format!("{}:cursor", session.as_str())).unwrap();
+    let frontier = tracedecay_domain::SessionSourceFrontierV1::new(observed_through);
+    let refresh_key = tracedecay_domain::SessionRefreshKeyV1::new(
+        "root.lcm-effects",
+        session.clone(),
+        vec![
+            tracedecay_domain::SessionRefreshSourceTargetV1::new(source_id, frontier, frontier)
+                .unwrap(),
+        ],
+        "session-refresh-projector.fixture.v1",
+        format!("sha256:{committed_through:064x}"),
+    )
+    .unwrap();
+    tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+        session.clone(),
+        tracedecay_store::SessionRefreshFrontierV1::new(observed_through, committed_through)
+            .unwrap(),
+    )
+    .with_refresh_key(refresh_key)
+}
+
+async fn eventually<F, Fut>(what: &str, mut ready: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let reached = tokio::time::timeout(Duration::from_secs(30), async {
+        while !ready().await {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "timed out waiting for {what}");
+}
+
+/// Ingest, park without a summarizer, configure one, let the background
+/// scheduler project and publish summaries, then begin an explicit refresh
+/// from the caller's pre-ingest view of the frontier.
+#[cfg(unix)]
+#[test]
+fn refresh_begins_at_the_committed_frontier_after_background_summaries_publish() {
+    run_with_pinned_summarizer_binding(async {
+        let fixture = ProjectSummarizerFixture::open().await;
+        fixture.pin(LcmSummarizerExecutablesV1::unconfigured());
+        let db = fixture.db();
+        let session_id = "refresh-after-summaries-session";
+        let records = (1..=8_u64)
+            .map(|ordinal| {
+                canonical_record_for_scope(
+                    canonical_envelope(
+                        "cursor",
+                        session_id,
+                        &format!("{session_id}-message-{ordinal}"),
+                        None,
+                        (ordinal, ordinal - 1),
+                        vec![serde_json::json!({
+                            "kind": "message",
+                            "role": if ordinal % 2 == 1 { "user" } else { "assistant" },
+                            "content": format!(
+                                "canonical refresh journey message {ordinal} with durable context"
+                            )
+                        })],
+                    ),
+                    ObservationScopeV1::Project {
+                        project_id: fixture.project_id.clone(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        ingest_canonical(&db, session_id, &[], &records.iter().collect::<Vec<_>>()).await;
+
+        let parked =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(
+            parked.sessions[0].disposition,
+            super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Pending {
+                reason: "cursor_agent_unconfigured".to_owned(),
+            }
+        );
+
+        let registry = super::super::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry::default();
+        let wake = registry
+            .ensure_profile(db.db_path().to_path_buf(), db.clone())
+            .await;
+        eventually(
+            "the background projection of all eight messages",
+            || async { active_projection_frontier(&db, session_id).await == Some(8) },
+        )
+        .await;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let cursor_bin = temporary.path().join("cursor-agent");
+        write_executable_script(
+            &cursor_bin,
+            "#!/bin/sh\nprintf '%s\\n' 'summary published before the explicit refresh'\n",
+        )
+        .unwrap();
+        fixture.pin(LcmSummarizerExecutablesV1 {
+            cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, Some(5))
+                .unwrap(),
+            codex: LcmSummarizerExecutableV1::Unconfigured,
+        });
+        wake.wake();
+        eventually("background summaries to publish", || async {
+            db.lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap()
+                .summary_node_count
+                > 0
+        })
+        .await;
+        registry.wait_profile_idle(db.db_path()).await;
+
+        let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db.as_ref());
+        let session = SessionId::new(session_id).unwrap();
+        let begun = store
+            .begin_or_join_session_refresh(explicit_refresh_request(&session, 8, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            (begun.target_frontier(), begun.disposition()),
+            (
+                tracedecay_store::SessionRefreshFrontierV1::new(8, 8).unwrap(),
+                tracedecay_store::SessionRefreshDispositionV1::Started,
+            )
+        );
+
+        // A window the store already moved past is a stale request, not an
+        // unavailable store.
+        let stale = store
+            .begin_or_join_session_refresh(explicit_refresh_request(&session, 7, 0))
+            .await;
+        assert!(
+            matches!(
+                stale,
+                Err(tracedecay_store::SessionStoreError::StaleRefreshFrontier {
+                    observed_through: 7,
+                    committed_through: 0,
+                    active_projection_frontier: 8,
+                })
+            ),
+            "{stale:?}"
+        );
+
+        wake.wake();
+        let receipt_request = tracedecay_store::SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            session,
+        );
+        eventually("the explicit refresh to complete", || async {
+            store
+                .session_refresh_receipt(receipt_request.clone())
+                .await
+                .unwrap()
+                .is_some()
+        })
+        .await;
+        assert_eq!(
+            store
+                .session_refresh_receipt(receipt_request)
+                .await
+                .unwrap()
+                .map(|receipt| (
+                    receipt.state(),
+                    receipt.frontier(),
+                    receipt.failure_code().cloned()
+                )),
+            Some((
+                tracedecay_store::SessionRefreshTerminalStateV1::Complete,
+                tracedecay_store::SessionRefreshFrontierV1::new(8, 8).unwrap(),
+                None,
+            ))
+        );
+        registry.shutdown().await;
+    });
+}
+
+#[tokio::test]
+async fn mounted_schedulers_share_historical_work_admission() {
+    let mut stores = Vec::new();
+    for index in 0..3 {
+        let harness =
+            RegisteredGlobalDbHarness::open(&format!("lcm-summary-convergence-admission-{index}"))
+                .await;
+        let db = harness.registered.clone();
+        let session_id = format!("admission-session-{index}");
+        let mut messages = Vec::new();
+        for ordinal in 1..=4 {
+            let mut record = message(&session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            record.provider = "codex".to_string();
+            messages.push(record);
+        }
+        let summary_text = format!("native admission summary {index}");
+        let mut compaction = message(&session_id, 5);
+        compaction.provider = "codex".to_string();
+        compaction.message_id = format!("{session_id}-summary");
+        compaction.kind = Some("summary".to_string());
+        compaction.text = summary_text;
+        compaction.metadata_json = Some(
+            serde_json::json!({
+                "source": "codex_context_compacted",
+                "summary_body": "plaintext"
+            })
+            .to_string(),
+        );
+        messages.push(compaction);
+        let mut tail = message(&session_id, 6);
+        tail.provider = "codex".to_string();
+        tail.message_id = format!("{session_id}-tail");
+        messages.push(tail);
+        seed_session_messages(&db, &session("codex", &session_id), &messages).await;
+        stores.push((harness, db, session_id));
+    }
+
+    let registry = super::super::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry::default();
+    let admission = registry.historical_ingest_admission();
+    let permit_count = admission.available_permits();
+    let held = std::sync::Arc::clone(&admission)
+        .acquire_many_owned(u32::try_from(permit_count).unwrap())
+        .await
+        .unwrap();
+    for (_, db, _) in &stores {
+        registry
+            .ensure_profile(db.db_path().to_path_buf(), db.clone())
+            .await;
+    }
+    for (_, db, session_id) in &stores {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    registry.wait_profile_idle(db.db_path()).await;
+                    if registry.profile_pass_count(db.db_path()).await >= 1 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok(),
+            "worker must reach the occupied shared admission before it is released"
+        );
+        assert_eq!(
+            db.lcm_status("codex", Some(session_id))
+                .await
+                .unwrap()
+                .summary_node_count,
+            0,
+            "convergence bypassed the occupied daemon-wide admission"
+        );
+    }
+
+    drop(held);
+    let completed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut complete = true;
+            for (_, db, session_id) in &stores {
+                complete &= db
+                    .lcm_status("codex", Some(session_id))
+                    .await
+                    .unwrap()
+                    .summary_node_count
+                    == 1;
+            }
+            if complete {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    if completed.is_err() {
+        let mut states = Vec::new();
+        for (_, db, session_id) in &stores {
+            let status = db.lcm_status("codex", Some(session_id)).await.unwrap();
+            states.push((
+                session_id.clone(),
+                status.summary_node_count,
+                status.summary_convergence,
+                registry.profile_pass_count(db.db_path()).await,
+            ));
+        }
+        panic!(
+            "admission release should wake every bounded worker (available={}): {states:?}",
+            admission.available_permits()
+        );
+    }
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn permanent_session_failure_does_not_starve_later_sessions_after_restart() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-permanent").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    for session_id in ["permanent-session-a", "healthy-session-b"] {
+        assert!(db.upsert_session(&session("codex", session_id)).await);
+        for ordinal in 1..=4 {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            record.provider = "codex".to_string();
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+        let summary_text = format!("native summary for {session_id}");
+        ingest_codex_compaction_evidence(
+            &db,
+            session_id,
+            &format!("{session_id}-summary"),
+            5,
+            &summary_text,
+        )
+        .await;
+    }
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE lcm_raw_messages
+                 SET metadata_json = '{\"ingest_protection\":{\"sanitization_receipt\":\"invalid\"}}'
+                 WHERE provider = 'codex' AND session_id = 'permanent-session-a'",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let first = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+        .await
+        .unwrap();
+    assert!(matches!(
+        first.sessions[0].disposition,
+        super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Permanent { .. }
+    ));
+    assert_eq!(
+        db.lcm_status("codex", Some("permanent-session-a"))
+            .await
+            .unwrap()
+            .summary_convergence
+            .permanent_session_count,
+        1
+    );
+    drop(db);
+
+    let harness = harness.restart().await;
+    let restarted = harness.registered.clone();
+    let second =
+        super::super::lcm_summary_convergence::run_summary_convergence_page(restarted.clone(), 1)
+            .await
+            .unwrap();
+    assert_eq!(second.sessions[0].session_id, "healthy-session-b");
+    assert_eq!(second.sessions[0].summary_nodes_created, 1);
+    let third =
+        super::super::lcm_summary_convergence::run_summary_convergence_page(restarted.clone(), 1)
+            .await
+            .unwrap();
+    assert!(third.sessions.is_empty(), "permanent work was reselected");
+}
+
+#[tokio::test]
+async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-partial-invalidation-fairness").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    let large_session = "large-revision-session-a";
+    let peer_session = "due-peer-session-b";
+    assert!(db.upsert_session(&session("cursor", large_session)).await);
+    for ordinal in 1..=4 {
+        let mut record = message(large_session, ordinal);
+        record.message_id = format!("{large_session}-message-{ordinal}");
+        db.lcm_ingest_raw_message(storage_root, &record)
+            .await
+            .unwrap();
+    }
+    let snapshot = db.read_snapshot().await.unwrap();
+    let initial = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(snapshot);
+    let mut request = daemon_summary_request("cursor", large_session);
+    request.summarizer = LcmSummarizerMode::Provided {
+        summary_text: "summary before the raw revision".to_string(),
+        route: Some("test_partial_invalidation_fairness".to_string()),
+    };
+    db.lcm_compress_retained_page_guarded(
+        &request,
+        &execution_control(),
+        || Ok(()),
+        retained_guard(None),
+        Some(&initial),
+    )
+    .await
+    .unwrap();
+
+    assert!(db.upsert_session(&session("cursor", peer_session)).await);
+    let mut peer = message(peer_session, 1);
+    peer.message_id = format!("{peer_session}-message-1");
+    db.lcm_ingest_raw_message(storage_root, &peer)
+        .await
+        .unwrap();
+    let first_store_id = db
+        .lcm_raw_message_store_id("cursor", &format!("{large_session}-message-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "INSERT INTO retrieval_anchors (
+                     anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('synthetic-fairness-anchor', '{}', '{}', 'test');",
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO session_summary_nodes(
+                     summary_id, session_id, provider, conversation_id, depth,
+                     summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                     source_token_count, source_horizon_json, created_at
+                 ) VALUES (
+                     'synthetic-fairness-dependent', ?1, 'cursor', ?1, 0,
+                     'synthetic-fairness-anchor', 'second dependent summary',
+                     'synthetic-fairness-hash', 3, 4, '{}', 1
+                 )",
+            params![large_session],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
+                 VALUES ('synthetic-fairness-dependent', 'raw_message', CAST(?1 AS TEXT), 0)",
+            params![first_store_id],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let mut revised = message(large_session, 1);
+    revised.message_id = format!("{large_session}-message-1");
+    revised.text = "revised protected content".to_string();
+    db.lcm_ingest_raw_message(storage_root, &revised)
+        .await
+        .unwrap();
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE lcm_summary_convergence_queue
+                 SET attempt_generation = 0, next_attempt_at_ms = 0
+                 WHERE provider = 'cursor' AND session_id IN (?1, ?2)",
+            params![large_session, peer_session],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    let candidate = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.session_id, large_session);
+    drop(snapshot);
+    let (_, has_more) = db
+        .lcm_invalidate_retained_raw_revision_page(&candidate, 1)
+        .await
+        .unwrap();
+    assert!(has_more);
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    assert!(
+        tracedecay_lcm::dag::load_uncondensed_summary_nodes(&snapshot, "cursor", large_session,)
+            .await
+            .unwrap()
+            .is_empty(),
+        "active replay must fail closed between invalidation pages"
+    );
+    assert_eq!(
+        tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id,
+        peer_session,
+        "a partial invalidation page must yield to due peer work"
+    );
+}
+
+#[tokio::test]
+async fn malformed_relation_receipt_is_permanent_without_starving_summary_work() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-relation-recovery-poison").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    let poison_session = "relation-poison-session";
+    assert!(db.upsert_session(&session("cursor", poison_session)).await);
+    for ordinal in 1..=4 {
+        let mut record = message(poison_session, ordinal);
+        record.message_id = format!("{poison_session}-message-{ordinal}");
+        db.lcm_ingest_raw_message(storage_root, &record)
+            .await
+            .unwrap();
+    }
+    let snapshot = db.read_snapshot().await.unwrap();
+    let poison_candidate = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(snapshot);
+    let mut poison_request = daemon_summary_request("cursor", poison_session);
+    poison_request.summarizer = LcmSummarizerMode::Provided {
+        summary_text: "summary with a poisoned relation receipt".to_string(),
+        route: Some("test_relation_poison".to_string()),
+    };
+    let poison = db
+        .lcm_compress_retained_page_guarded(
+            &poison_request,
+            &execution_control(),
+            || Ok(()),
+            retained_guard(None),
+            Some(&poison_candidate),
+        )
+        .await
+        .unwrap();
+    assert_eq!(poison.response.summary_nodes_created, 1);
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut projection_rows = snapshot
+        .query(
+            "SELECT projection_json FROM session_relation_effect_journal
+                 WHERE session_id = ?1",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    let valid_projection_json = projection_rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    drop(projection_rows);
+    drop(snapshot);
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE session_relation_effect_journal
+                 SET projection_json = '{}'
+                 WHERE session_id = ?1",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let healthy_session = "relation-poison-healthy-session";
+    assert!(db.upsert_session(&session("codex", healthy_session)).await);
+    for ordinal in 1..=4 {
+        let mut record = message(healthy_session, ordinal);
+        record.provider = "codex".to_string();
+        record.message_id = format!("{healthy_session}-message-{ordinal}");
+        db.lcm_ingest_raw_message(storage_root, &record)
+            .await
+            .unwrap();
+    }
+    ingest_codex_compaction_evidence(
+        &db,
+        healthy_session,
+        "relation-poison-healthy-summary",
+        5,
+        "healthy summary after poisoned relation receipt",
+    )
+    .await;
+
+    let converged =
+        super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+            .await
+            .unwrap();
+    assert_eq!(converged.sessions[0].session_id, healthy_session);
+    assert_eq!(converged.sessions[0].summary_nodes_created, 1);
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT recovery_state, recovery_failure_code
+                 FROM session_relation_receipts
+                 WHERE session_id = ?1",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "permanent");
+    assert_eq!(
+        row.get::<Option<String>>(1).unwrap().as_deref(),
+        Some("journal_malformed")
+    );
+    drop(rows);
+    drop(snapshot);
+    let mut cyclic_projection =
+        serde_json::from_str::<serde_json::Value>(&valid_projection_json).unwrap();
+    cyclic_projection["parent_session_id"] = serde_json::json!(poison_session);
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE session_relation_effect_journal
+                 SET projection_json = ?2
+                 WHERE session_id = ?1",
+            params![poison_session, cyclic_projection.to_string()],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE session_relation_receipts
+                 SET recovery_state = 'pending', recovery_failure_code = NULL,
+                     recovery_failure_count = 0, recovery_next_attempt_at = 0
+                 WHERE session_id = ?1",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            16,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT recovery_state, recovery_failure_code
+                 FROM session_relation_receipts
+                 WHERE session_id = ?1",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "permanent");
+    assert_eq!(
+        row.get::<Option<String>>(1).unwrap().as_deref(),
+        Some("relation_receipt_mismatch")
+    );
+    drop(rows);
+    drop(snapshot);
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE session_relation_receipts
+                 SET recovery_state = 'retryable', recovery_next_attempt_at = unixepoch() + 60
+                 WHERE session_id = ?1",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let sleeping =
+        super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+            .await
+            .unwrap();
+    assert!(sleeping.sessions.is_empty());
+    assert!(
+        sleeping
+            .next_retry_delay
+            .is_some_and(|delay| !delay.is_zero() && delay <= std::time::Duration::from_secs(60)),
+        "the scheduler must retain the isolated relation retry deadline"
+    );
+}
+
+#[test]
+fn mega_session_convergence_bounds_protection_and_compression_pages() {
+    run_with_pinned_summarizer_binding(async {
+        // Summarization must never reach the operator's installed agent CLI:
+        // this profile shard has no `lcm.summarizer_executables.v1` binding,
+        // so every provider stays unconfigured and nothing is launched.
+        const RAW_ROWS: i64 = tracedecay_lcm::LCM_SCAN_PAGE_ROWS + 1;
+        let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-mega").await;
+        let db = harness.registered.clone();
+        let storage_root = db.db_path().parent().unwrap();
+        let session_id = "mega-convergence-session";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        for ordinal in 1..=RAW_ROWS {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            record.text = format!("{ordinal:04}:{}", "bounded retained context ".repeat(32));
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+
+        let first =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(first.sessions.len(), 1);
+        assert_eq!(
+            first.sessions[0].disposition,
+            super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Preparing
+        );
+        assert_eq!(
+            first.sessions[0].protection_rows_scanned,
+            tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize
+        );
+        assert_eq!(first.sessions[0].compression_rows_scanned, 0);
+        assert!(
+            first.sessions[0].protection_bytes_scanned
+                <= tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64
+        );
+
+        let second =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert!(
+            second.sessions[0].compression_rows_scanned
+                <= tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize
+        );
+        assert!(
+            second.sessions[0].compression_bytes_scanned
+                <= tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64
+        );
+        assert_eq!(
+            db.lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap()
+                .raw_message_count,
+            RAW_ROWS
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_pages_never_reuse_unbound_session_wide_native_text() {
+    run_with_pinned_summarizer_binding(async {
+        const RAW_ROWS: i64 = tracedecay_lcm::LCM_SCAN_PAGE_ROWS + 1;
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
+        let storage_root = db.db_path().parent().unwrap();
+        let session_id = "page-bound-summary-session";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        for ordinal in 1..=RAW_ROWS {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+        let native_text = "one native summary for the entire retained session";
+        let native_summary = canonical_record_for_scope(
+            canonical_envelope(
+                "cursor",
+                session_id,
+                "session-wide-native-summary",
+                None,
+                (u64::try_from(RAW_ROWS + 1).unwrap(), 0),
+                vec![serde_json::json!({
+                    "kind": "compaction",
+                    "summary": native_text
+                })],
+            ),
+            ObservationScopeV1::Project {
+                project_id: fixture.project_id.clone(),
+            },
+        );
+        ingest_canonical(&db, session_id, &[], &[&native_summary]).await;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let cursor_bin = temporary.path().join("cursor-agent");
+        let counter = temporary.path().join("calls");
+        write_executable_script(
+            &cursor_bin,
+            format!(
+                "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || printf 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nprintf 'page-bound summary %s\\n' \"$count\"\n",
+                counter.display(),
+                counter.display()
+            ),
+        )
+        .unwrap();
+        fixture.pin_cursor_agent(&cursor_bin);
+
+        for _ in 0..8 {
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+            if db
+                .lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap()
+                .summary_node_count
+                >= 2
+            {
+                break;
+            }
+        }
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT summary_text
+                     FROM session_summary_nodes
+                     WHERE provider = 'cursor' AND session_id = ?1 AND depth = 0
+                     ORDER BY created_at, summary_id
+                     LIMIT 2",
+                params![session_id],
+            )
+            .await
+            .unwrap();
+        let first = rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        let second = rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        assert_ne!(
+            first, second,
+            "each raw page requires page-bound summary text"
+        );
+        assert!(
+            first != native_text || second != native_text,
+            "one range-bound native result cannot be reused for another raw page"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
+    run_with_pinned_summarizer_binding(async {
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
+        let storage_root = db.db_path().parent().unwrap();
+        let session_id = "revised-raw-summary-session";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        for ordinal in 1..=4 {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+        let old_text = "native summary of the original protected content";
+        let snapshot = db.read_snapshot().await.unwrap();
+        let initial_candidate =
+            tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+                .await
+                .unwrap()
+                .unwrap();
+        drop(snapshot);
+        let mut initial_request = daemon_summary_request("cursor", session_id);
+        initial_request.summarizer = LcmSummarizerMode::Provided {
+            summary_text: old_text.to_string(),
+            route: Some("test_exact_source_summary".to_string()),
+        };
+        let initial = db
+            .lcm_compress_retained_page_guarded(
+                &initial_request,
+                &execution_control(),
+                || Ok(()),
+                retained_guard(None),
+                Some(&initial_candidate),
+            )
+            .await
+            .unwrap();
+        assert_eq!(initial.response.summary_nodes_created, 1);
+        let old_summary_id = {
+            let snapshot = db.read_snapshot().await.unwrap();
+            let mut rows = snapshot
+                .query(
+                    "SELECT summary_id FROM session_summary_nodes
+                         WHERE provider = 'cursor' AND session_id = ?1",
+                    params![session_id],
+                )
+                .await
+                .unwrap();
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap()
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let cursor_bin = temporary.path().join("cursor-agent");
+        write_executable_script(
+            &cursor_bin,
+            "#!/bin/sh\nprintf '%s\\n' 'summary of the revised protected content'\n",
+        )
+        .unwrap();
+        fixture.pin_cursor_agent(&cursor_bin);
+        let mut revised = message(session_id, 1);
+        revised.message_id = format!("{session_id}-message-1");
+        revised.text = "authoritative revised protected content".to_string();
+        db.lcm_ingest_raw_message(storage_root, &revised)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap()
+                .summary_convergence
+                .pending_session_count,
+            1
+        );
+
+        let reconverged =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(reconverged.sessions[0].summary_nodes_created, 1);
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT availability.summary_id, availability.availability,
+                            availability.reason, node.summary_text
+                     FROM session_temporal_generations AS generation
+                     JOIN session_summary_availability AS availability
+                       ON availability.session_id = generation.session_id
+                      AND availability.generation = generation.generation
+                     JOIN session_summary_nodes AS node
+                       ON node.summary_id = availability.summary_id
+                     WHERE generation.session_id = ?1 AND generation.state = 'active'
+                     ORDER BY availability.summary_id",
+                params![session_id],
+            )
+            .await
+            .unwrap();
+        let mut active = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            active.push((
+                row.get::<String>(0).unwrap(),
+                row.get::<String>(1).unwrap(),
+                row.get::<Option<String>>(2).unwrap(),
+                row.get::<String>(3).unwrap(),
+            ));
+        }
+        assert!(active.iter().any(|(id, state, reason, _)| {
+            id == &old_summary_id
+                && state == "stale"
+                && reason.as_deref() == Some("raw_source_revised")
+        }));
+        let current = active
+            .iter()
+            .filter(|(_, state, _, _)| state == "available")
+            .collect::<Vec<_>>();
+        assert_eq!(current.len(), 1);
+        assert_ne!(current[0].0, old_summary_id);
+        assert_eq!(current[0].3, "summary of the revised protected content");
+        drop(rows);
+        let replay_summaries =
+            tracedecay_lcm::dag::load_uncondensed_summary_nodes(&snapshot, "cursor", session_id)
+                .await
+                .unwrap();
+        assert_eq!(replay_summaries.len(), 1);
+        assert_eq!(
+            replay_summaries[0].node.summary_text,
+            "summary of the revised protected content"
+        );
+        assert!(
+            replay_summaries
+                .iter()
+                .all(|summary| summary.node.summary_text != old_text),
+            "active replay must exclude stale summary text and provenance"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
+    run_with_pinned_summarizer_binding(async {
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
+        let storage_root = db.db_path().parent().unwrap();
+        let session_id = "disjoint-summary-revisions";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        for ordinal in 1..=6 {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+        for (summary_index, summary_text) in ["old disjoint leaf one", "old disjoint leaf two"]
+            .into_iter()
+            .enumerate()
+        {
+            if summary_index == 1 {
+                for ordinal in 7..=12 {
+                    let mut record = message(session_id, ordinal);
+                    record.message_id = format!("{session_id}-message-{ordinal}");
+                    db.lcm_ingest_raw_message(storage_root, &record)
+                        .await
+                        .unwrap();
+                }
+            }
+            let snapshot = db.read_snapshot().await.unwrap();
+            let candidate =
+                tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            drop(snapshot);
+            let mut request = daemon_summary_request("cursor", session_id);
+            request.max_source_messages = Some(4);
+            request.fresh_tail_count = Some(0);
+            request.summarizer = LcmSummarizerMode::Provided {
+                summary_text: summary_text.to_string(),
+                route: Some("test_disjoint_revision".to_string()),
+            };
+            let compressed = db
+                .lcm_compress_retained_page_guarded(
+                    &request,
+                    &execution_control(),
+                    || Ok(()),
+                    retained_guard(None),
+                    Some(&candidate),
+                )
+                .await
+                .unwrap();
+            assert_eq!(compressed.response.summary_nodes_created, 1);
+        }
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT node.summary_id, MIN(CAST(source.source_id AS INTEGER))
+                     FROM session_summary_nodes AS node
+                     JOIN session_summary_sources AS source ON source.summary_id = node.summary_id
+                     WHERE node.provider = 'cursor' AND node.session_id = ?1
+                       AND node.depth = 0 AND source.source_kind = 'raw_message'
+                     GROUP BY node.summary_id
+                     ORDER BY MIN(CAST(source.source_id AS INTEGER))
+                     LIMIT 2",
+                params![session_id],
+            )
+            .await
+            .unwrap();
+        let mut old = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            old.push((row.get::<String>(0).unwrap(), row.get::<i64>(1).unwrap()));
+        }
+        drop(rows);
+        drop(snapshot);
+        assert_eq!(old.len(), 2);
+        assert_ne!(old[0].1, old[1].1);
+        for (revision, (_, store_id)) in old.iter().enumerate() {
+            let snapshot = db.read_snapshot().await.unwrap();
+            let mut rows = snapshot
+                .query(
+                    "SELECT message_id, ordinal FROM lcm_raw_messages WHERE store_id = ?1",
+                    params![*store_id],
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            let message_id = row.get::<String>(0).unwrap();
+            let ordinal = row.get::<i64>(1).unwrap();
+            drop(rows);
+            drop(snapshot);
+            let mut revised = message(session_id, ordinal);
+            revised.message_id = message_id;
+            revised.text = format!("revised disjoint source {revision}");
+            db.lcm_ingest_raw_message(storage_root, &revised)
+                .await
+                .unwrap();
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let cursor_bin = temporary.path().join("cursor-agent");
+        let counter = temporary.path().join("calls");
+        write_executable_script(
+            &cursor_bin,
+            format!(
+                "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || printf 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\nprintf 'replacement disjoint leaf %s\\n' \"$count\"\n",
+                counter.display(),
+                counter.display()
+            ),
+        )
+        .unwrap();
+        fixture.pin_cursor_agent(&cursor_bin);
+
+        let first =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(first.sessions[0].summary_nodes_created, 0);
+        assert!(matches!(
+            first.sessions[0].disposition,
+            super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Preparing
+        ));
+        drop(db);
+
+        let fixture = fixture.restart().await;
+        let restarted = fixture.db();
+        for _ in 0..8 {
+            super::super::lcm_summary_convergence::run_summary_convergence_page(
+                restarted.clone(),
+                1,
+            )
+            .await
+            .unwrap();
+            let status = restarted
+                .lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap();
+            if status.summary_convergence.current_session_count == 1 {
+                break;
+            }
+        }
+        let snapshot = restarted.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT availability.summary_id, availability.availability
+                     FROM session_temporal_generations AS generation
+                     JOIN session_summary_availability AS availability
+                       ON availability.session_id = generation.session_id
+                      AND availability.generation = generation.generation
+                     WHERE generation.session_id = ?1 AND generation.state = 'active'",
+                params![session_id],
+            )
+            .await
+            .unwrap();
+        let mut stale_old = 0;
+        let mut available_replacements = 0;
+        while let Some(row) = rows.next().await.unwrap() {
+            let summary_id = row.get::<String>(0).unwrap();
+            let availability = row.get::<String>(1).unwrap();
+            if old.iter().any(|(old_id, _)| old_id == &summary_id) {
+                stale_old += usize::from(availability == "stale");
+            } else {
+                available_replacements += usize::from(availability == "available");
+            }
+        }
+        assert_eq!(stale_old, 2);
+        assert!(available_replacements > 0);
+        drop(rows);
+        for (_, revised_store_id) in &old {
+            let mut sources = snapshot
+                .query(
+                    "SELECT COUNT(*)
+                         FROM session_temporal_generations AS generation
+                         JOIN session_summary_availability AS availability
+                           ON availability.session_id = generation.session_id
+                          AND availability.generation = generation.generation
+                          AND availability.availability = 'available'
+                         JOIN session_summary_sources AS source
+                           ON source.summary_id = availability.summary_id
+                          AND source.source_kind = 'raw_message'
+                         WHERE generation.session_id = ?1
+                           AND generation.state = 'active'
+                           AND source.source_id = ?2",
+                    params![session_id, revised_store_id.to_string()],
+                )
+                .await
+                .unwrap();
+            assert!(
+                sources
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get::<i64>(0)
+                    .unwrap()
+                    > 0,
+                "each revised closure must have an available replacement source"
+            );
+        }
+        let status = restarted
+            .lcm_status("cursor", Some(session_id))
+            .await
+            .unwrap();
+        assert_eq!(status.summary_convergence.current_session_count, 1);
+        assert_eq!(status.summary_convergence.permanent_session_count, 0);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_summary_rejects_a_role_revision_during_model_generation() {
+    run_with_pinned_summarizer_binding(async {
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
+        let storage_root = db.db_path().parent().unwrap().to_path_buf();
+        let session_id = "summary-revision-barrier-session";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        for ordinal in 1..=4 {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            db.lcm_ingest_raw_message(&storage_root, &record)
+                .await
+                .unwrap();
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let cursor_bin = temporary.path().join("cursor-agent");
+        let started = temporary.path().join("started");
+        let release = temporary.path().join("release");
+        write_executable_script(
+            &cursor_bin,
+            format!(
+                "#!/bin/sh\nprintf started > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nprintf '%s\\n' 'stale summary from before the revision'\n",
+                started.display(),
+                release.display(),
+            ),
+        )
+        .unwrap();
+        fixture.pin_cursor_agent(&cursor_bin);
+
+        let convergence_db = db.clone();
+        let convergence = tokio::spawn(async move {
+            super::super::lcm_summary_convergence::run_summary_convergence_page(convergence_db, 1)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !started.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("provider invocation did not reach the revision barrier");
+
+        let mut revised = message(session_id, 1);
+        revised.message_id = format!("{session_id}-message-1");
+        revised.role = "system".to_string();
+        db.lcm_ingest_raw_message(&storage_root, &revised)
+            .await
+            .unwrap();
+        std::fs::write(&release, "release").unwrap();
+
+        let first = convergence.await.unwrap().unwrap();
+        assert_eq!(first.sessions[0].summary_nodes_created, 0);
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT summary_text FROM session_summary_nodes
+                     WHERE provider = 'cursor' AND session_id = ?1",
+                params![session_id],
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "text generated before a role-only raw revision must never be published"
+        );
+        drop(rows);
+        drop(snapshot);
+        assert_eq!(
+            db.lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap()
+                .summary_convergence
+                .pending_session_count,
+            1
+        );
+    });
+}
+
+#[tokio::test]
+async fn raw_message_identity_cannot_move_between_sessions_after_summary_publication() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-raw-session-ownership").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    let old_session = "raw-owner-old-session";
+    let new_session = "raw-owner-new-session";
+    assert!(db.upsert_session(&session("cursor", old_session)).await);
+    assert!(db.upsert_session(&session("cursor", new_session)).await);
+    for ordinal in 1..=4 {
+        let mut record = message(old_session, ordinal);
+        record.message_id = format!("owned-message-{ordinal}");
+        db.lcm_ingest_raw_message(storage_root, &record)
+            .await
+            .unwrap();
+    }
+    let snapshot = db.read_snapshot().await.unwrap();
+    let candidate = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(snapshot);
+    let mut request = daemon_summary_request("cursor", old_session);
+    request.summarizer = LcmSummarizerMode::Provided {
+        summary_text: "summary owned by the original session".to_string(),
+        route: Some("test_exact_source_summary".to_string()),
+    };
+    let initial = db
+        .lcm_compress_retained_page_guarded(
+            &request,
+            &execution_control(),
+            || Ok(()),
+            retained_guard(None),
+            Some(&candidate),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.response.summary_nodes_created, 1);
+
+    let mut moved = message(new_session, 1);
+    moved.message_id = "owned-message-1".to_string();
+    let error = db
+        .lcm_ingest_raw_message(storage_root, &moved)
+        .await
+        .unwrap_err();
+    assert_eq!(error, LcmError::SummarySourceNotOwnedBySession);
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT session_id FROM lcm_raw_messages
+                 WHERE provider = 'cursor' AND message_id = 'owned-message-1'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        old_session
+    );
+    assert_eq!(
+        db.lcm_status("cursor", Some(old_session))
+            .await
+            .unwrap()
+            .summary_node_count,
+        1
+    );
+}
+
+#[tokio::test]
+async fn retained_summary_publication_requires_the_exact_planned_source_range() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-retained-source-range-cas").await;
+    let db = harness.registered.clone();
+    let storage_root = db.db_path().parent().unwrap();
+    let session_id = "retained-source-range-cas-session";
+    assert!(db.upsert_session(&session("cursor", session_id)).await);
+    for ordinal in 1..=4 {
+        let mut record = message(session_id, ordinal);
+        record.message_id = format!("range-cas-message-{ordinal}");
+        db.lcm_ingest_raw_message(storage_root, &record)
+            .await
+            .unwrap();
+    }
+    let snapshot = db.read_snapshot().await.unwrap();
+    let candidate = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT store_id FROM lcm_raw_messages
+                 WHERE provider = 'cursor' AND session_id = ?1
+                 ORDER BY store_id LIMIT 2",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    let first = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+    let second = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+    drop(rows);
+    drop(snapshot);
+    let mut request = daemon_summary_request("cursor", session_id);
+    request.summarizer = LcmSummarizerMode::Provided {
+        summary_text: "summary generated for a different page".to_string(),
+        route: Some("test_exact_source_summary".to_string()),
+    };
+    let error = db
+        .lcm_compress_retained_page_guarded(
+            &request,
+            &execution_control(),
+            || Ok(()),
+            retained_guard(Some(tracedecay_lcm::LcmSummarySourceRange {
+                from_store_id: first,
+                to_store_id: second,
+            })),
+            Some(&candidate),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        LcmError::StaleSummarySourceRange {
+            expected_from: first,
+            expected_to: second,
+            actual_from: Some(first),
+            actual_to: Some(first),
+        }
+    );
+    assert_eq!(
+        db.lcm_status("cursor", Some(session_id))
+            .await
+            .unwrap()
+            .summary_node_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn large_byte_session_stops_each_retained_pass_at_the_existing_budget() {
+    const RAW_ROWS: i64 = 2;
+    const PROTECTION_PAGE_BYTES: u64 = 1024 * 1024;
+    let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-large-bytes").await;
+    let db = harness.registered.clone();
+    let session_id = "large-byte-convergence-session";
+    assert!(db.upsert_session(&session("cursor", session_id)).await);
+    let body = "bounded retained byte context ".repeat(20_000);
+    assert!(body.len() < tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as usize);
+    let transaction = db.begin_write_transaction().await.unwrap();
+    for ordinal in 1..=RAW_ROWS {
+        let mut record = message(session_id, ordinal);
+        record.message_id = format!("{session_id}-message-{ordinal}");
+        record.text = format!("{ordinal:04}:{body}");
+        transaction
+            .execute(
+                "INSERT INTO lcm_raw_messages (
+                        provider, message_id, session_id, role, ordinal, timestamp,
+                        content, content_hash, storage_kind, metadata_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?2, 'inline', '{}')",
+                params![
+                    record.provider.as_str(),
+                    record.message_id.as_str(),
+                    record.session_id.as_str(),
+                    record.role.as_str(),
+                    record.ordinal,
+                    record.timestamp,
+                    record.text.as_str(),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+
+    let first = db
+        .lcm_protect_session_raw_messages_page(
+            "cursor",
+            session_id,
+            0,
+            tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize,
+            PROTECTION_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
+    assert!(first.has_more);
+    assert!(first.rows_scanned < RAW_ROWS as usize);
+    assert!(first.bytes_scanned <= PROTECTION_PAGE_BYTES);
+
+    let second = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+        .await
+        .unwrap();
+    assert!(second.sessions[0].compression_rows_scanned > 0);
+    assert!(
+        second.sessions[0].compression_bytes_scanned
+            <= tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64
+    );
+    assert_eq!(
+        db.lcm_status("cursor", Some(session_id))
+            .await
+            .unwrap()
+            .raw_message_count,
+        RAW_ROWS
+    );
+}
+
+#[test]
+fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
+    run_with_pinned_summarizer_binding(async {
+        const RAW_ROWS: i64 = 32;
+        let harness = RegisteredGlobalDbHarness::open("lcm-protection-revision-barrier").await;
+        let db = harness.registered.clone();
+        let storage_root = db.db_path().parent().unwrap().to_path_buf();
+        let session_id = "protection-revision-barrier-session";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        let transaction = db.begin_write_transaction().await.unwrap();
+        for ordinal in 1..=RAW_ROWS {
+            let text = format!("source-a-{ordinal}:{}", "x".repeat(768 * 1024));
+            transaction
+                .execute(
+                    "INSERT INTO lcm_raw_messages (
+                            provider, message_id, session_id, role, ordinal, timestamp,
+                            content, content_hash, storage_kind, metadata_json, kind
+                         ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, ?4, ?1,
+                                   'inline', '{}', 'tool_result')",
+                    params![
+                        format!("barrier-message-{ordinal}"),
+                        session_id,
+                        ordinal,
+                        text
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+        transaction.commit().await.unwrap();
+
+        let protection_db = db.clone();
+        let protection = tokio::spawn(async move {
+            protection_db
+                .lcm_protect_session_raw_messages_page(
+                    "cursor",
+                    session_id,
+                    0,
+                    RAW_ROWS as usize,
+                    tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64,
+                )
+                .await
+        });
+        let payload_dir = tracedecay_lcm::payload::payload_dir(&storage_root);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if payload_dir
+                    .read_dir()
+                    .is_ok_and(|mut entries| entries.next().is_some())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("protection did not reach staged payload persistence");
+
+        let unrelated_db = db.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+            assert!(
+                unrelated_db
+                    .upsert_session(&session("cursor", "unrelated-during-protection"))
+                    .await
+            );
+        })
+        .await
+        .expect("payload staging must not hold an Immediate writer transaction");
+
+        let mut revised = message(session_id, 1);
+        revised.message_id = "barrier-message-1".to_string();
+        revised.role = "tool".to_string();
+        revised.kind = Some("tool_result".to_string());
+        revised.text = format!("source-b: {}", "y".repeat(768 * 1024));
+        let expected_hash =
+            tracedecay_lcm::retrieval_content::projected_content_hash(&revised.text);
+        let revision_db = db.clone();
+        let revision_storage = storage_root.clone();
+        let revision = tokio::spawn(async move {
+            revision_db
+                .lcm_ingest_raw_message(&revision_storage, &revised)
+                .await
+        });
+
+        revision.await.unwrap().unwrap();
+        assert!(matches!(
+            protection.await.unwrap(),
+            Err(LcmError::StaleRawProtectionSource { .. })
+        ));
+        let protected = db
+            .lcm_protect_session_raw_messages_page(
+                "cursor",
+                session_id,
+                0,
+                RAW_ROWS as usize,
+                tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64,
+            )
+            .await
+            .unwrap();
+        assert_eq!(protected.rows_protected, RAW_ROWS as usize - 1);
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT store_id, content_hash FROM lcm_raw_messages
+                     WHERE provider = 'cursor' AND message_id = 'barrier-message-1'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let revised_store_id = row.get::<i64>(0).unwrap();
+        assert_eq!(row.get::<String>(1).unwrap(), expected_hash);
+        drop(rows);
+        let candidate = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.stale_from_store_id, Some(revised_store_id));
+    });
+}
+
+/// A canonical record at transcript `ordinal`, read from source bytes
+/// `[position, position + 1)`. A source's records are projected in position
+/// order from position 0, the contiguity its cursor requires.
+fn canonical_envelope(
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    parent_message_id: Option<&str>,
+    (ordinal, position): (u64, u64),
+    facts: Vec<Value>,
+) -> Value {
+    let mut relations = serde_json::json!({
+        "session_id": session_id,
+        "message_id": message_id,
+    });
+    if let Some(parent_message_id) = parent_message_id {
+        relations["parent_message_id"] = Value::String(parent_message_id.to_string());
+    }
+    serde_json::json!({
+        "version": 1,
+        "provider": provider,
+        "native_record_kind": "compaction",
+        "stable_record_id": message_id,
+        "relations": relations,
+        "facts": facts,
+        "evidence": {
+            "ordering_domain": "file_bytes",
+            "range": {"start": position, "end": position + 1},
+            "native_sequence": ordinal
+        }
+    })
+}
+
+/// A canonical Claude or Cursor record as production stores it: the message
+/// row is the observation's projection, and the envelope lives only in the
+/// observation row.
+struct CanonicalRecord {
+    observation: DurableObservationV1,
+    message: SessionMessageRecord,
+}
+
+fn canonical_record(envelope: Value) -> CanonicalRecord {
+    canonical_record_for_scope(envelope, ObservationScopeV1::Profile)
+}
+
+/// A canonical record whose observation is owned by `scope`; the scope must
+/// match the shard the record is ingested into (profile-wide or one project).
+fn canonical_record_for_scope(envelope: Value, scope: ObservationScopeV1) -> CanonicalRecord {
+    let typed: CanonicalObservationEnvelopeV1 = serde_json::from_value(envelope.clone()).unwrap();
+    let record_id = typed.stable_record_id().as_str();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(format!("receipt.lcm-effects.{record_id}")).unwrap(),
+            ComponentVersion::new("sanitizer.lcm-effects-fixture.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(PayloadReferenceV1::for_payload(&envelope).unwrap()),
+    )
+    .unwrap();
+    let observation = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            ObservationSourceIdentityV1::for_provider(
+                typed.provider().clone(),
+                typed.relations().session_id().clone(),
+            )
+            .unwrap(),
+            scope,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            typed.evidence().range(),
+            typed.evidence().ordering_domain(),
+            typed.stable_record_id().clone(),
+        )
+        .unwrap(),
+        receipt,
+        RetentionClass::new("retention.lcm-effects-fixture").unwrap(),
+        envelope,
+    )
+    .unwrap();
+    let message = derive_canonical_projection(&observation)
+        .unwrap()
+        .message()
+        .expect("canonical record projects a message")
+        .message()
+        .clone();
+    CanonicalRecord {
+        observation,
+        message,
+    }
+}
+
+/// Seeds `messages` followed by each record's projected row, then persists and projects each record's observation so
+/// the row's envelope authority exists exactly as capture leaves it.
+async fn ingest_canonical(
+    db: &RegisteredGlobalDb,
+    session_id: &str,
+    messages: &[SessionMessageRecord],
+    records: &[&CanonicalRecord],
+) {
+    let provider = records[0].message.provider.as_str();
+    let mut batch = messages.to_vec();
+    batch.extend(records.iter().map(|record| record.message.clone()));
+    seed_session_messages(db, &session(provider, session_id), &batch).await;
+    let store = db.observation_store();
+    for record in records {
+        let observation = &record.observation;
+        let previous = store
+            .get_source_cursor(observation.source(), observation.scope())
+            .await
+            .unwrap();
+        let next = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
+        )
+        .unwrap();
+        let write = ObservationWrite::new(observation.clone(), previous, next).unwrap();
+        let generation = ProjectionGenerationId::new(format!(
+            "projection.lcm-effects.{}",
+            record.message.message_id
+        ))
+        .unwrap();
+        let authorization = build_observation_resolution_authorization_v1(
+            write.observation(),
+            tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
+        )
+        .unwrap();
+        let anchor = build_observation_retrieval_anchor(
+            write.observation(),
+            generation.clone(),
+            UtcMicros(1),
+            authorization,
+        )
+        .unwrap();
+        store
+            .persist_observation(AnchoredObservationWrite::new(write, anchor, generation).unwrap())
+            .await
+            .unwrap();
+        store
+            .project_observation(observation.observation_id())
+            .await
+            .unwrap();
+    }
+}
+
+async fn insert_summary_evidence(
+    source: (&RegisteredGlobalDb, &str),
+    session_id: &str,
+    message_id: &str,
+    ordinal: i64,
+    text: &str,
+    kind: &str,
+    metadata: &Value,
+) {
+    let (db, provider) = source;
+    let mut metadata = metadata.clone();
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut source_rows = snapshot
+        .query(
+            "SELECT store_id FROM lcm_raw_messages
+                 WHERE provider = ?1 AND session_id = ?2
+                 ORDER BY store_id
+                 LIMIT 9",
+            params![provider, session_id],
+        )
+        .await
+        .unwrap();
+    let mut source_ids = Vec::new();
+    while let Some(row) = source_rows.next().await.unwrap() {
+        source_ids.push(row.get::<i64>(0).unwrap());
+    }
+    drop(source_rows);
+    drop(snapshot);
+    let summarized_source_count = source_ids
+        .len()
+        .saturating_sub(tracedecay_lcm::LCM_DEFAULT_FRESH_TAIL_COUNT);
+    if provider == "codex"
+        && let (Some(first_source_id), Some(last_source_id)) = (
+            source_ids.first().copied(),
+            source_ids
+                .get(summarized_source_count.saturating_sub(1))
+                .copied(),
+        )
+    {
+        metadata["tracedecay_lcm_source_range"] = serde_json::json!({
+            "from_store_id": first_source_id,
+            "to_store_id": last_source_id,
+        });
+    }
+    let mut evidence = message(session_id, ordinal);
+    evidence.provider = provider.to_string();
+    evidence.message_id = message_id.to_string();
+    evidence.role = "system".to_string();
+    evidence.text = text.to_string();
+    evidence.kind = Some(kind.to_string());
+    evidence.metadata_json = Some(metadata.to_string());
+    db.lcm_ingest_raw_message(db.db_path().parent().unwrap(), &evidence)
+        .await
+        .unwrap();
+}
+
+/// Seeds one session row and its raw LCM messages in order.
+async fn seed_session_messages(
+    db: &RegisteredGlobalDb,
+    session: &SessionRecord,
+    messages: &[SessionMessageRecord],
+) {
+    assert!(db.upsert_session(session).await);
+    let storage_root = db.db_path().parent().unwrap();
+    for message in messages {
+        db.lcm_ingest_raw_message(storage_root, message)
+            .await
+            .unwrap();
+    }
+}
+
+async fn ingest_codex_compaction_evidence(
+    db: &RegisteredGlobalDb,
+    session_id: &str,
+    message_id: &str,
+    ordinal: i64,
+    text: &str,
+) {
+    let mut compaction = message(session_id, ordinal);
+    compaction.provider = "codex".to_string();
+    compaction.message_id = message_id.to_string();
+    compaction.kind = Some("summary".to_string());
+    compaction.text = text.to_string();
+    compaction.metadata_json = Some(
+        serde_json::json!({
+            "source": "codex_context_compacted",
+            "summary_body": "plaintext"
+        })
+        .to_string(),
+    );
+    let mut tail = message(session_id, ordinal.saturating_add(1));
+    tail.provider = "codex".to_string();
+    tail.message_id = format!("{message_id}-tail");
+    seed_session_messages(db, &session("codex", session_id), &[compaction, tail]).await;
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_and_cursor_daemon_adapters_commit_exact_authoritative_summaries() {
+    run_with_pinned_summarizer_binding(async {
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
+        let temporary = tempfile::tempdir().unwrap();
+        let cursor_bin = temporary.path().join("cursor-agent");
+        let codex_bin = temporary.path().join("codex");
+        write_executable_script(
+            &cursor_bin,
+            "#!/bin/sh\nprintf '%s\\n' 'cursor authoritative summary'\n",
+        )
+        .unwrap();
+        write_executable_script(
+            &codex_bin,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+    *'"id":1'*) printf '%s\n' '{"id":1,"result":{"thread":{"id":"thread-1","model":"codex-test-model"}}}' ;;
+    *'"id":2'*)
+      printf '%s\n' '{"method":"item/completed","params":{"model":"codex-test-model","item":{"content":[{"type":"output_text","text":"codex authoritative summary"}]}}}'
+      printf '%s\n' '{"method":"turn/completed"}'
+      ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        fixture.pin(LcmSummarizerExecutablesV1 {
+            cursor_agent: fake_summarizer(&cursor_bin),
+            codex: fake_summarizer(&codex_bin),
+        });
+
+        for (provider, expected) in [
+            ("cursor", "cursor authoritative summary"),
+            ("codex", "codex authoritative summary"),
+        ] {
+            let session_id = format!("{provider}-adapter-session");
+            assert!(db.upsert_session(&session(provider, &session_id)).await);
+            let storage_root = db.db_path().parent().unwrap();
+            for ordinal in 1..=8 {
+                let mut record = message(&session_id, ordinal);
+                record.provider = provider.to_string();
+                db.lcm_ingest_raw_message(storage_root, &record)
+                    .await
+                    .unwrap();
+            }
+            let response = DaemonLcmEffectService::new(db.clone(), None, None)
+                .compress(daemon_summary_request(provider, &session_id))
+                .await
+                .unwrap();
+            assert_eq!(response.status, "ok");
+            assert_eq!(response.summary_nodes_created, 1);
+            assert_eq!(response.summary_nodes[0].summary_text, expected);
+            assert_eq!(
+                response.relation_projection_status,
+                LcmRelationProjectionStatus::Applied
+            );
+        }
+    });
+}
+
+#[tokio::test]
+async fn boundary_apply_and_cancelled_rollback_are_observable() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-boundary-effect-journey").await;
+    let db = harness.registered.clone();
+    for session_id in ["old-session", "new-session", "cancelled-session"] {
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+    }
+    let service = DaemonLcmEffectService::new(db.clone(), None, None);
+    let response = service
+        .session_boundary(LcmSessionBoundaryRequest {
+            provider: "cursor".to_string(),
+            session_id: "new-session".to_string(),
+            old_session_id: Some("old-session".to_string()),
+            boundary_reason: Some("compression".to_string()),
+            bound_session_id: Some("old-session".to_string()),
+            boundary_skip_at: None,
+        })
+        .await
+        .unwrap();
+    assert!(response.recorded);
+
+    let cancelled = db
+        .lcm_session_boundary_guarded(
+            LcmSessionBoundaryRequest {
+                provider: "cursor".to_string(),
+                session_id: "cancelled-session".to_string(),
+                old_session_id: Some("old-session".to_string()),
+                boundary_reason: Some("compression".to_string()),
+                bound_session_id: Some("old-session".to_string()),
+                boundary_skip_at: None,
+            },
+            || Err(LcmError::Cancelled),
+        )
+        .await;
+    assert_eq!(cancelled.unwrap_err(), LcmError::Cancelled);
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT conversation_id FROM lcm_lifecycle_state
+                 WHERE provider = 'cursor'
+                 ORDER BY conversation_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut conversation_ids = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        conversation_ids.push(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(conversation_ids, vec!["new-session"]);
+}

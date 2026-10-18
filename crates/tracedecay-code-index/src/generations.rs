@@ -4,8 +4,8 @@
 //! One immutable logical generation is planned from one fenced, receipt-bound
 //! snapshot. The planner mints monotonic per-repository generation identity,
 //! pins the registry/grammar/extractor/sanitizer/chunker/privacy inputs, and
-//! seals the manifest with [`expected_seal_digest`] — the exact rule the
-//! capability emitter verifies — before rows and the expected digest are
+//! seals the manifest with [`expected_seal_digest`], the exact rule the
+//! capability emitter verifies, before rows and the expected digest are
 //! handed to the store publication port. Planning is pure: the seal timestamp
 //! is an input, so identical inputs produce an identical seal, and re-sealing
 //! a sealed manifest reproduces its digest.
@@ -13,7 +13,7 @@
 //! Incremental reuse is planned, not assumed: given the prior sealed manifest,
 //! the prior snapshot, and the current validated snapshot, the planner emits
 //! the minimal re-extraction plan. Content identity digests are the reuse
-//! authority — a file carries forward only when its content, grammar,
+//! authority, a file carries forward only when its content, grammar,
 //! extractor, sanitizer, and chunker inputs all match; capture-declared
 //! change hints are recorded as evidence but never override a digest.
 //! Incompatible schema, grammar, extractor, sanitizer, chunker, or privacy
@@ -21,32 +21,20 @@
 //! chunks as ordinary edits.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeSearchChunkId,
-    CodeSearchChunkV1, ComponentVersion, ContentDigest, ExtractorRevision, FileOccurrenceId,
-    GenerationSealV1, GrammarRevision, LanguageId, LanguageRegistryRevision, ManifestDigest,
-    PrivacyDomainId, ProjectId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SnapshotFileDispositionV1, UtcMicros, canonical_sha256,
+    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, ComponentVersion, ContentDigest,
+    ExtractorRevision, FileOccurrenceId, GenerationSealV1, GrammarRevision, LanguageId,
+    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, ProjectId, RepositoryId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros,
+    canonical_sha256, sha256_hex_suffix,
 };
 
 use super::capabilities::expected_seal_digest;
 use super::intake::{INTAKE_DIGEST_SEPARATOR, ValidatedCodeSnapshotV1};
 use super::languages::LanguageRegistry;
-use crate::chunks::CodeSearchDocumentV1;
-
-/// A chunk-to-generation binding asserted by the index. Every eligible
-/// chunk names exactly one code generation and file occurrence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
-pub struct ChunkGenerationBindingV1 {
-    pub chunk_id: CodeSearchChunkId,
-    pub generation_id: CodeGenerationId,
-    pub file_occurrence_id: FileOccurrenceId,
-}
 
 /// Identity of this deterministic generation planner, recorded on every seal.
 pub const GENERATION_PLANNER_ID: &str = "code-index-generation-planner.v1";
@@ -249,14 +237,11 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
                 })?
             }
         };
-        let fingerprint = invalidation_digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or_else(|| {
-                GenerationPlanningErrorV1::Contract(
-                    "invalidation digest is not a sha256 manifest digest".to_owned(),
-                )
-            })?;
+        let fingerprint = sha256_hex_suffix(invalidation_digest.as_str()).ok_or_else(|| {
+            GenerationPlanningErrorV1::Contract(
+                "invalidation digest is not a sha256 manifest digest".to_owned(),
+            )
+        })?;
         CodeGenerationId::new(format!(
             "generation.v1.{discriminator}.{sequence:08}.{fingerprint}"
         ))
@@ -281,7 +266,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
     /// Plan and seal one immutable generation while binding every inferred and
     /// explicitly declared rebuild cause into its identity and publication
     /// fence.
-    #[hotpath::measure(label = "code_index.build.plan_full")]
+    #[tracing::instrument(name = "code_index.build.plan_full", level = "trace", skip_all)]
     pub fn plan_generation_with_invalidation(
         &self,
         snapshot: &ValidatedCodeSnapshotV1,
@@ -301,9 +286,8 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         let (grammar_revisions, extractor_revisions) =
             self.language_revisions(&snapshot.snapshot)?;
         let registry_revision = self.registry.registry_revision();
-        let mut rebuild_triggers = parent
-            .map(|parent| self.rebuild_triggers(parent, &snapshot.snapshot))
-            .unwrap_or_default();
+        let mut rebuild_triggers =
+            parent.map_or_default(|parent| self.rebuild_triggers(parent, &snapshot.snapshot));
         rebuild_triggers.extend(invalidations.iter().cloned());
         rebuild_triggers.sort();
         rebuild_triggers.dedup();
@@ -331,6 +315,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
             privacy_domain: self.privacy_domain.clone(),
             privacy_key_epoch: self.privacy_key_epoch,
             parent_generation,
+            source_commitments: None,
             seal: GenerationSealV1 {
                 expected_digest: placeholder_digest(),
                 sealed_at,
@@ -375,7 +360,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
     /// quarantined corruption are not inferable from a sanitized snapshot,
     /// so callers must declare them explicitly. Declared reasons are merged
     /// with descriptor, sanitizer, chunker, and privacy incompatibilities.
-    #[hotpath::measure(label = "code_index.build.plan_increment")]
+    #[tracing::instrument(name = "code_index.build.plan_increment", level = "trace", skip_all)]
     pub fn plan_increment_with_invalidation(
         &self,
         prior_manifest: &CodeGenerationManifestV1,
@@ -465,11 +450,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
             }
         }
         plans.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-        crate::hotpath_observe::record_rebuild_state(if full_rebuild {
-            "rebuild"
-        } else {
-            "increment"
-        });
+        crate::observe::record_rebuild_state(if full_rebuild { "rebuild" } else { "increment" });
 
         Ok(GenerationIncrementPlanV1 {
             prior_generation,
@@ -644,110 +625,40 @@ fn repository_discriminator(
         .collect())
 }
 
-/// Parse an identity minted by this planner. Legacy
-/// `generation.v1.<repo>.<seq>` parents remain accepted; current identities
-/// include a SHA-256 invalidation fingerprint suffix.
+/// Parse an identity minted by this planner:
+/// `generation.v1.<repo>.<seq>.<fingerprint>`, where the fingerprint is the
+/// 64-hex SHA-256 invalidation suffix. Any other shape is not ours.
 fn parse_minted_generation_id(generation_id: &CodeGenerationId) -> Option<(String, u64)> {
     let mut parts = generation_id.as_str().split('.');
     let scheme = parts.next()?;
     let version = parts.next()?;
     let discriminator = parts.next()?;
     let sequence = parts.next()?;
-    let fingerprint = parts.next();
-    if scheme != "generation" || version != "v1" || parts.next().is_some() {
-        return None;
-    }
-    if fingerprint.is_some_and(|fingerprint| {
-        fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-    }) {
+    let fingerprint = parts.next()?;
+    if scheme != "generation"
+        || version != "v1"
+        || parts.next().is_some()
+        || fingerprint.len() != 64
+        || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return None;
     }
     Some((discriminator.to_owned(), sequence.parse().ok()?))
 }
 
-/// A well-formed placeholder digest, replaced by the computed seal before the
-/// manifest is returned. The seal payload excludes the seal itself, so the
-/// placeholder never influences the computed digest.
-fn placeholder_digest() -> ManifestDigest {
+/// Canonical zero digest substituted until the caller computes the real digest.
+/// Callers exclude this placeholder from that computation, so it never
+/// influences the result.
+pub(crate) fn placeholder_digest() -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
         .expect("a zeroed sha256 digest is canonical")
-}
-
-/// Generation-aware join failures (Plan 25: consumers reject mixed-generation
-/// inputs before candidate production).
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum GenerationJoinErrorV1 {
-    #[error("the generation manifest is not sealed")]
-    UnsealedGeneration,
-    #[error("a document or chunk belongs to a different generation or file occurrence")]
-    CrossGeneration,
-    #[error("chunk {0} is not declared by the generation document")]
-    UndeclaredChunk(CodeSearchChunkId),
-    #[error("chunk {0} is joined more than once")]
-    DuplicateChunk(CodeSearchChunkId),
-}
-
-/// Join one generation-bound document's chunks to a sealed generation
-/// manifest, producing the canonical chunk-to-generation bindings (Plan 25:
-/// every eligible chunk names exactly one code generation and file
-/// occurrence). Cross-generation documents or chunks, undeclared chunks, and
-/// duplicates are typed rejections — never silently joined.
-#[hotpath::measure(label = "code_index.build.generation_join")]
-pub fn join_chunks_to_generation(
-    generation: &CodeGenerationManifestV1,
-    document: &CodeSearchDocumentV1,
-    chunks: &[Arc<CodeSearchChunkV1>],
-) -> Result<Vec<ChunkGenerationBindingV1>, GenerationJoinErrorV1> {
-    generation
-        .validate()
-        .map_err(|_| GenerationJoinErrorV1::UnsealedGeneration)?;
-    let expected =
-        expected_seal_digest(generation).map_err(|_| GenerationJoinErrorV1::UnsealedGeneration)?;
-    if generation.seal.expected_digest != expected {
-        return Err(GenerationJoinErrorV1::UnsealedGeneration);
-    }
-    if document.generation_id != generation.generation_id {
-        return Err(GenerationJoinErrorV1::CrossGeneration);
-    }
-
-    let declared: BTreeSet<&CodeSearchChunkId> = document.chunk_ids.iter().collect();
-    let mut seen = BTreeSet::new();
-    let mut bindings = Vec::with_capacity(chunks.len());
-    for chunk in chunks {
-        if chunk.anchor.generation_id != generation.generation_id
-            || chunk.anchor.file_occurrence_id != document.file_occurrence_id
-        {
-            return Err(GenerationJoinErrorV1::CrossGeneration);
-        }
-        if !declared.contains(&chunk.id) {
-            return Err(GenerationJoinErrorV1::UndeclaredChunk(chunk.id.clone()));
-        }
-        if !seen.insert(chunk.id.clone()) {
-            return Err(GenerationJoinErrorV1::DuplicateChunk(chunk.id.clone()));
-        }
-        bindings.push(ChunkGenerationBindingV1 {
-            chunk_id: chunk.id.clone(),
-            generation_id: generation.generation_id.clone(),
-            file_occurrence_id: document.file_occurrence_id.clone(),
-        });
-    }
-    bindings.sort();
-    Ok(bindings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::{
-        BoundedSanitizedText, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-        LanguageDescriptorRevision, PolicyRevisionId, SanitizationReceiptId, SensitivityDecision,
-        SensitivityLevelV1, SourceSpan,
-    };
-
-    use crate::capabilities::{BaseCapabilityEmitter, CodeIndexCapabilityEmitter};
-    use crate::chunks::CodeSearchEligibilityV1;
     use crate::languages::StaticLanguageRegistry;
-    use tracedecay_domain::{CoverageSummaryV1, LanguageDescriptorV1};
+    use tracedecay_domain::LanguageDescriptorV1;
 
     fn digest(byte: char) -> ContentDigest {
         ContentDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("valid digest")
@@ -758,13 +669,7 @@ mod tests {
             .expect("valid digest")
     }
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn repository() -> RepositoryId {
         id("repository.fixture")
@@ -814,6 +719,7 @@ mod tests {
             content_identity: digest('f'),
             captured_at: UtcMicros(1_000),
             files,
+            omitted_sources: Vec::new(),
         }
     }
 
@@ -947,33 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn emitter_accepts_planner_sealed_generations() {
-        let snapshot = validated(two_file_snapshot());
-        let planner = planner();
-        let generation = planner
-            .plan_generation(&snapshot, None, UtcMicros(3_000))
-            .expect("sealed generation");
-
-        let emitter = BaseCapabilityEmitter::new(
-            registry(),
-            CoverageSummaryV1 {
-                files_eligible: 2,
-                files_excluded: 0,
-                files_partial: 0,
-                files_unsupported: 0,
-                ranges_excluded: 0,
-                ranges_unsupported: 0,
-            },
-            vec![SanitizationReceiptId::new("receipt.a").expect("valid id")],
-        );
-        // Capability emission is the runtime seal boundary: an incorrectly
-        // sealed generation cannot be advertised.
-        let manifest = emitter.emit(&generation).expect("emission succeeds");
-        assert_eq!(manifest.generation_id, generation.generation_id);
-        assert_eq!(manifest.chunker_revision, generation.chunker_revision);
-    }
-
-    #[test]
     fn planning_rejects_unsealed_and_foreign_parents() {
         let snapshot = validated(two_file_snapshot());
         let planner = planner();
@@ -991,11 +870,14 @@ mod tests {
 
         // Foreign parent: an identity this planner never minted.
         let mut foreign = genesis.clone();
-        foreign.generation_id = id("generation.v1.00000002.00000001");
+        let fingerprint = genesis
+            .generation_id
+            .as_str()
+            .rsplit('.')
+            .next()
+            .expect("minted fingerprint");
+        foreign.generation_id = id(&format!("generation.v1.00000002.00000001.{fingerprint}"));
         foreign.parent_generation = None;
-        foreign.invalidation_digest = foreign
-            .expected_legacy_invalidation_digest()
-            .expect("foreign invalidation digest");
         foreign.seal.expected_digest = expected_seal_digest(&foreign).expect("foreign reseal");
         assert_eq!(
             planner.plan_generation(&snapshot, Some(&foreign), UtcMicros(4_000)),
@@ -1022,112 +904,6 @@ mod tests {
             planner.plan_generation(&snapshot, Some(&other_genesis), UtcMicros(4_000)),
             Err(GenerationPlanningErrorV1::ForeignParentIdentity)
         );
-    }
-
-    #[test]
-    fn increment_plan_carries_forward_unchanged_files_by_identity_digest() {
-        let planner = planner();
-        let prior_snapshot = two_file_snapshot();
-        let prior_validated = validated(prior_snapshot.clone());
-        let prior_manifest = planner
-            .plan_generation(&prior_validated, None, UtcMicros(3_000))
-            .expect("prior generation");
-
-        // src/a.rs unchanged, src/b.rs content changed, src/c.rs new.
-        let current = validated(snapshot(vec![
-            present_file("file.a2", "src/a.rs", 'a'),
-            present_file("file.b2", "src/b.rs", 'c'),
-            present_file("file.c", "src/c.rs", 'd'),
-        ]));
-        let changed: BTreeSet<String> = ["src/b.rs".to_owned(), "src/c.rs".to_owned()]
-            .into_iter()
-            .collect();
-        let plan = planner
-            .plan_increment(&prior_manifest, &prior_snapshot, &current, &changed)
-            .expect("increment plan");
-
-        assert!(!plan.is_full_rebuild());
-        assert_eq!(plan.prior_generation, prior_manifest.generation_id);
-        assert_eq!(plan.carried_forward, 1);
-        assert_eq!(plan.reextract, 2);
-        assert_eq!(plan.deleted, 0);
-        assert_eq!(
-            plan.capture_changed_files,
-            vec!["src/b.rs".to_owned(), "src/c.rs".to_owned()]
-        );
-
-        let carry = &plan.files[0];
-        assert_eq!(carry.logical_path, "src/a.rs");
-        match &carry.action {
-            FileExtractionActionV1::CarryForward {
-                file_occurrence_id,
-                prior_file_occurrence_id,
-                content_digest,
-            } => {
-                assert_eq!(file_occurrence_id.as_str(), "file.a2");
-                assert_eq!(prior_file_occurrence_id.as_str(), "file.a");
-                assert_eq!(*content_digest, digest('a'));
-            }
-            other => panic!("expected carry-forward, got {other:?}"),
-        }
-        assert!(matches!(
-            plan.files[1].action,
-            FileExtractionActionV1::ReExtract { .. }
-        ));
-        assert!(matches!(
-            plan.files[2].action,
-            FileExtractionActionV1::ReExtract { .. }
-        ));
-
-        // src/b.rs removed and src/a.rs unchanged: one deletion, one carry.
-        let shrunk = validated(snapshot(vec![present_file("file.a3", "src/a.rs", 'a')]));
-        let shrink_plan = planner
-            .plan_increment(&prior_manifest, &prior_snapshot, &shrunk, &BTreeSet::new())
-            .expect("shrink plan");
-        assert_eq!(shrink_plan.carried_forward, 1);
-        assert_eq!(shrink_plan.deleted, 1);
-        assert!(matches!(
-            shrink_plan.files[1].action,
-            FileExtractionActionV1::Deleted {
-                ref prior_file_occurrence_id
-            } if prior_file_occurrence_id.as_str() == "file.b"
-        ));
-    }
-
-    #[test]
-    fn increment_plan_digest_authority_overrides_capture_hints() {
-        let planner = planner();
-        let prior_snapshot = two_file_snapshot();
-        let prior_validated = validated(prior_snapshot.clone());
-        let prior_manifest = planner
-            .plan_generation(&prior_validated, None, UtcMicros(3_000))
-            .expect("prior generation");
-
-        // Capture hints src/a.rs changed (it did not) and misses src/b.rs
-        // (it did). Digest comparison, not the hint, decides.
-        let current = validated(snapshot(vec![
-            present_file("file.a2", "src/a.rs", 'a'),
-            present_file("file.b2", "src/b.rs", 'c'),
-        ]));
-        let hinted: BTreeSet<String> = ["src/a.rs".to_owned()].into_iter().collect();
-        let plan = planner
-            .plan_increment(&prior_manifest, &prior_snapshot, &current, &hinted)
-            .expect("increment plan");
-        let unhinted = planner
-            .plan_increment(&prior_manifest, &prior_snapshot, &current, &BTreeSet::new())
-            .expect("unhinted increment plan");
-
-        assert_eq!(plan.carried_forward, 1);
-        assert_eq!(plan.reextract, 1);
-        assert_eq!(plan.invalidation_digest, unhinted.invalidation_digest);
-        assert!(matches!(
-            plan.files[0].action,
-            FileExtractionActionV1::CarryForward { .. }
-        ));
-        assert!(matches!(
-            plan.files[1].action,
-            FileExtractionActionV1::ReExtract { .. }
-        ));
     }
 
     #[test]
@@ -1194,133 +970,6 @@ mod tests {
         assert_eq!(
             plan.rebuild_triggers,
             vec![RebuildTriggerV1::PrivacyKeyEpoch]
-        );
-    }
-
-    fn chunk(id_str: &str, generation: &CodeGenerationId, file: &str) -> Arc<CodeSearchChunkV1> {
-        Arc::new(CodeSearchChunkV1 {
-            id: id(id_str),
-            anchor: CodeSearchChunkAnchorV1 {
-                generation_id: generation.clone(),
-                file_occurrence_id: id(file),
-                symbol_occurrence_id: None,
-                parent_chunk_id: None,
-                source_span: SourceSpan {
-                    start_byte: 0,
-                    end_byte: 4,
-                },
-                grain: CodeSearchChunkGrainV1::FileWindow,
-                ordinal: 0,
-            },
-            content_digest: digest('a'),
-            language_descriptor_revision: LanguageDescriptorRevision::new("descriptor.rust.v1")
-                .expect("valid id"),
-            chunker_revision: id("chunker.v1"),
-            sanitizer_revision: id("sanitizer.v1"),
-            sensitivity: SensitivityDecision {
-                level: SensitivityLevelV1::Public,
-                policy_revision: PolicyRevisionId::new("policy.v1").expect("valid id"),
-            },
-            exact_terms: vec![],
-            subtokens: vec![],
-            sanitized_text: BoundedSanitizedText::new("text").expect("bounded text"),
-        })
-    }
-
-    #[test]
-    fn generation_aware_join_binds_only_matching_generation_chunks() {
-        let planner = planner();
-        let snapshot = validated(two_file_snapshot());
-        let generation = planner
-            .plan_generation(&snapshot, None, UtcMicros(3_000))
-            .expect("sealed generation");
-        let document = CodeSearchDocumentV1 {
-            generation_id: generation.generation_id.clone(),
-            file_occurrence_id: id("file.a"),
-            content_digest: digest('a'),
-            eligibility: CodeSearchEligibilityV1::Eligible,
-            chunk_ids: vec![id("chunk.v1.one"), id("chunk.v1.two")],
-        };
-        // Input order is not canonical; bindings come back canonically
-        // ordered by chunk identity.
-        let chunks = vec![
-            chunk("chunk.v1.two", &generation.generation_id, "file.a"),
-            chunk("chunk.v1.one", &generation.generation_id, "file.a"),
-        ];
-        let bindings =
-            join_chunks_to_generation(&generation, &document, &chunks).expect("join succeeds");
-        assert_eq!(bindings.len(), 2);
-        assert_eq!(bindings[0].chunk_id.as_str(), "chunk.v1.one");
-        assert_eq!(bindings[1].chunk_id.as_str(), "chunk.v1.two");
-        for binding in &bindings {
-            assert_eq!(binding.generation_id, generation.generation_id);
-            assert_eq!(binding.file_occurrence_id.as_str(), "file.a");
-        }
-    }
-
-    #[test]
-    fn generation_aware_join_rejects_cross_generation_undeclared_and_duplicate() {
-        let planner = planner();
-        let snapshot = validated(two_file_snapshot());
-        let generation = planner
-            .plan_generation(&snapshot, None, UtcMicros(3_000))
-            .expect("sealed generation");
-        let other_generation = planner
-            .plan_generation(&snapshot, Some(&generation), UtcMicros(4_000))
-            .expect("other sealed generation");
-        let document = CodeSearchDocumentV1 {
-            generation_id: generation.generation_id.clone(),
-            file_occurrence_id: id("file.a"),
-            content_digest: digest('a'),
-            eligibility: CodeSearchEligibilityV1::Eligible,
-            chunk_ids: vec![id("chunk.v1.one")],
-        };
-        let matching = chunk("chunk.v1.one", &generation.generation_id, "file.a");
-
-        // A chunk anchored to another generation never joins.
-        let foreign_chunk = chunk("chunk.v1.one", &other_generation.generation_id, "file.a");
-        assert_eq!(
-            join_chunks_to_generation(&generation, &document, &[foreign_chunk]),
-            Err(GenerationJoinErrorV1::CrossGeneration)
-        );
-
-        // A document from another generation never joins.
-        let foreign_document = CodeSearchDocumentV1 {
-            generation_id: other_generation.generation_id.clone(),
-            ..document.clone()
-        };
-        assert_eq!(
-            join_chunks_to_generation(
-                &generation,
-                &foreign_document,
-                std::slice::from_ref(&matching)
-            ),
-            Err(GenerationJoinErrorV1::CrossGeneration)
-        );
-
-        // A chunk the document does not declare never joins.
-        let undeclared = chunk("chunk.v1.two", &generation.generation_id, "file.a");
-        assert_eq!(
-            join_chunks_to_generation(&generation, &document, &[undeclared]),
-            Err(GenerationJoinErrorV1::UndeclaredChunk(id("chunk.v1.two")))
-        );
-
-        // A chunk joined twice is a duplicate.
-        assert_eq!(
-            join_chunks_to_generation(
-                &generation,
-                &document,
-                &[matching.clone(), matching.clone()]
-            ),
-            Err(GenerationJoinErrorV1::DuplicateChunk(id("chunk.v1.one")))
-        );
-
-        // An unsealed generation never joins.
-        let mut unsealed = generation.clone();
-        unsealed.seal.expected_digest = manifest_digest('9');
-        assert_eq!(
-            join_chunks_to_generation(&unsealed, &document, &[matching]),
-            Err(GenerationJoinErrorV1::UnsealedGeneration)
         );
     }
 }

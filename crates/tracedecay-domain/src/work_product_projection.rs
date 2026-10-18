@@ -8,8 +8,24 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ProjectionGenerationId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptStateV1,
     WorkGraphVersionV1, WorkItemV1, WorkProductContractError, WorkProductGraphV1,
-    WorkProjectionSequenceV1,
 };
+
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(transparent)]
+#[schemars(title = "WorkProjectionSequenceV1")]
+pub struct WorkProjectionSequenceV1(u64);
+
+impl WorkProjectionSequenceV1 {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
@@ -282,7 +298,7 @@ impl WorkCausalProjectionV1 {
 
     /// The DECLARED causal candidates, as edges.
     ///
-    /// These come from `WorkItemV1::causal_candidates` — relations a caller
+    /// These come from `WorkItemV1::causal_candidates`, relations a caller
     /// stated, never an order inferred from when attempts happened to finish.
     /// An empty slice therefore means "no candidate was declared", which is a
     /// true reading and not a missing one.
@@ -420,8 +436,7 @@ impl WorkProductProjectionBundleV1 {
                         &accepted,
                         runtime_by_task
                             .get(item.task_id())
-                            .map(Vec::as_slice)
-                            .unwrap_or_default(),
+                            .map_or_default(Vec::as_slice),
                         unavailable_runtime_tasks.contains(item.task_id()),
                         observed_at,
                     ),
@@ -706,15 +721,12 @@ fn critical_path(
     let mut remaining = graph
         .items()
         .iter()
-        .map(|item| (item.task_id().clone(), item.dependencies().len()))
+        .map(|item| (item.task_id(), item.dependencies().len()))
         .collect::<BTreeMap<_, _>>();
-    let mut outgoing = BTreeMap::<TaskId, Vec<TaskId>>::new();
+    let mut outgoing = BTreeMap::<&TaskId, Vec<&TaskId>>::new();
     for item in graph.items() {
         for dependency in item.dependencies() {
-            outgoing
-                .entry(dependency.clone())
-                .or_default()
-                .push(item.task_id().clone());
+            outgoing.entry(dependency).or_default().push(item.task_id());
         }
     }
     let by_id = graph
@@ -724,39 +736,71 @@ fn critical_path(
         .collect::<BTreeMap<_, _>>();
     let mut ready = remaining
         .iter()
-        .filter_map(|(task_id, count)| (*count == 0).then_some(task_id.clone()))
+        .filter_map(|(task_id, count)| (*count == 0).then_some(*task_id))
         .collect::<BTreeSet<_>>();
-    let mut best = BTreeMap::<TaskId, (u32, Vec<TaskId>)>::new();
+    let mut best = CriticalPathScores::new();
     while let Some(task_id) = ready.pop_first() {
         let item = by_id
-            .get(&task_id)
+            .get(task_id)
             .ok_or(WorkProductContractError::UnknownTask)?;
-        let prefix = item
+        let predecessor = item
             .dependencies()
             .iter()
-            .filter_map(|dependency| best.get(dependency))
-            .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
-            .cloned()
-            .unwrap_or_default();
-        let effort = prefix
-            .0
+            .filter(|dependency| best.contains_key(dependency))
+            .max_by(|left, right| compare_critical_paths(&best, left, right));
+        let effort = predecessor
+            .map_or(0, |predecessor| best[predecessor].0)
             .checked_add(item.effort())
             .ok_or(WorkProductContractError::GraphTooLarge)?;
-        let mut path = prefix.1;
-        path.push(task_id.clone());
-        best.insert(task_id.clone(), (effort, path));
-        for dependent in outgoing.get(&task_id).into_iter().flatten() {
+        best.insert(task_id, (effort, predecessor));
+        for dependent in outgoing.get(task_id).into_iter().flatten() {
             let count = remaining
                 .get_mut(dependent)
                 .ok_or(WorkProductContractError::UnknownTask)?;
             *count -= 1;
             if *count == 0 {
-                ready.insert(dependent.clone());
+                ready.insert(dependent);
             }
         }
     }
-    best.into_values()
-        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
-        .ok_or(WorkProductContractError::UnknownTask)
-        .map(|(effort, path)| (path, effort))
+    let terminal = best
+        .keys()
+        .max_by(|left, right| compare_critical_paths(&best, left, right))
+        .ok_or(WorkProductContractError::UnknownTask)?;
+    Ok((
+        critical_path_to(&best, terminal)
+            .into_iter()
+            .cloned()
+            .collect(),
+        best[terminal].0,
+    ))
+}
+
+/// Each task keeps its heaviest path's effort and that path's predecessor, so
+/// retained state stays linear in the graph instead of holding every prefix.
+type CriticalPathScores<'graph> = BTreeMap<&'graph TaskId, (u32, Option<&'graph TaskId>)>;
+
+fn critical_path_to<'graph>(
+    best: &CriticalPathScores<'graph>,
+    terminal: &'graph TaskId,
+) -> Vec<&'graph TaskId> {
+    let mut path = vec![terminal];
+    while let Some((_, Some(predecessor))) = path.last().and_then(|task_id| best.get(task_id)) {
+        path.push(*predecessor);
+    }
+    path.reverse();
+    path
+}
+
+/// Heavier paths win; equal efforts fall back to the lexically smaller whole
+/// path, rebuilt only for the tie.
+fn compare_critical_paths<'graph>(
+    best: &CriticalPathScores<'graph>,
+    left: &'graph TaskId,
+    right: &'graph TaskId,
+) -> std::cmp::Ordering {
+    best[left]
+        .0
+        .cmp(&best[right].0)
+        .then_with(|| critical_path_to(best, right).cmp(&critical_path_to(best, left)))
 }

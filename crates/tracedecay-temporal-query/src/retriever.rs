@@ -5,23 +5,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use tracedecay_domain::{
-    CompactCandidate, ComponentRevision, CursorPayloadDigest, EvidenceRole, FixedPointScore,
-    FreshnessCompatibilityV1, LogicalEvidenceId, ManifestDigest, RetrievalAnchorId,
-    RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverKind, ScoreDomainId,
-    SessionId, SessionOrThreadId, SourceFreshness, SourceInstanceKey, SourceNamespace,
-    SourceOccurrenceId, TemporalCandidateChannelV1, TemporalCandidateContributionV1,
-    TemporalLaneEvidenceV1, canonical_sha256,
+    CompactCandidate, CompactContextOmissionV1, ComponentRevision, ContextOmissionReasonV1,
+    CursorPayloadDigest, EvidenceRole, FixedPointScore, FreshnessCompatibilityV1,
+    LogicalEvidenceId, ManifestDigest, RetrievalAnchorId, RetrievalRequest, RetrievalSourceRoleV1,
+    RetrieverBatch, RetrieverContinuation, RetrieverKind, ScoreDomainId, SessionId,
+    SessionOrThreadId, SourceFreshness, SourceInstanceKey, SourceNamespace, SourceOccurrenceId,
+    TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
+    canonical_sha256,
 };
 
 use super::context::VersionedTokenEstimator;
 use super::context::assembly::assemble_context_with_frames_controlled;
+use super::cursor::{CursorPosition, SessionCursorAuthenticator, encode_cursor_position};
 use super::hydration::{TemporalHydrationPort, hydrate_selected};
-use super::ports::{TemporalParticipantGeneration, TemporalPortError, TemporalSourceAccess};
+use super::snapshot::{TemporalParticipantGeneration, TemporalSourceAccess};
 use super::{
     TemporalCandidateExport, TemporalHydratedResult, TemporalKernelError, TemporalKernelRequest,
     TemporalKernelResult, check_control, map_context_error, map_hydration_error,
-    public_summary_omissions, temporal_context_frames,
+    public_summary_omissions, stable_sort_key, temporal_context_frames,
 };
+use crate::execution::TemporalPortError;
 
 impl TemporalCandidateExport {
     /// Project this frozen temporal page into the canonical compact retrieval
@@ -159,6 +162,7 @@ impl TemporalCandidateExport {
                     logical_copy_cluster_id: None,
                     logical_copy_evidence_anchor: None,
                     evidence_role: temporal_evidence_role(ranked.evidence_role.as_deref()),
+                    source_role: RetrievalSourceRoleV1::default(),
                     retriever: RetrieverKind::Temporal,
                     retriever_revision: retriever_revision.clone(),
                     score_domain: score_domain.clone(),
@@ -254,6 +258,9 @@ const fn temporal_channel(
         super::candidates::CandidateChannel::Entity => TemporalCandidateChannelV1::Entity,
         super::candidates::CandidateChannel::Time => TemporalCandidateChannelV1::Time,
         super::candidates::CandidateChannel::Lexical => TemporalCandidateChannelV1::Lexical,
+        super::candidates::CandidateChannel::LexicalRelaxed => {
+            TemporalCandidateChannelV1::LexicalRelaxed
+        }
         super::candidates::CandidateChannel::Summary => TemporalCandidateChannelV1::Summary,
         super::candidates::CandidateChannel::Span => TemporalCandidateChannelV1::Span,
         super::candidates::CandidateChannel::Burst => TemporalCandidateChannelV1::Burst,
@@ -291,8 +298,7 @@ fn participant_freshness(
             | TemporalSourceAccess::Locked
             | TemporalSourceAccess::RetentionWithheld
             | TemporalSourceAccess::Deleted
-            | TemporalSourceAccess::Redacted
-            | TemporalSourceAccess::LegacyUnauthorized => FreshnessCompatibilityV1::Missing,
+            | TemporalSourceAccess::Redacted => FreshnessCompatibilityV1::Missing,
         },
         policy_revision,
     }
@@ -300,7 +306,7 @@ fn participant_freshness(
 
 /// Hydrate only the globally selected temporal anchors, in the supplied
 /// selected order, through the canonical temporal content authority.
-#[hotpath::measure(future = true, label = "temporal.hydrate.selection")]
+#[tracing::instrument(name = "temporal.hydrate.selection", level = "trace", skip_all)]
 pub async fn hydrate_temporal_candidate_selection(
     request: &TemporalKernelRequest,
     mut export: TemporalCandidateExport,
@@ -338,16 +344,24 @@ pub async fn hydrate_temporal_candidate_selection(
         selected.push(candidate);
     }
     export.ranked = selected;
-    hydrate_temporal_candidate_export(request, export, hydration_port, token_estimator).await
+    // The selection is fixed by its caller, so a selection that overfills the
+    // hydration bytes is refused rather than silently shortened.
+    hydrate_temporal_candidate_export(request, export, hydration_port, token_estimator, None).await
 }
 
-/// Hydrate the entire temporal page without changing its lane-local selection.
-#[hotpath::measure(future = true, label = "temporal.hydrate.export")]
+/// Hydrate the temporal page in its lane-local order.
+///
+/// A page whose payloads fill the hydration byte budget before its last anchor
+/// ends at the last anchor that fit. With `continuation`, the shortened page
+/// carries a cursor that resumes at the first anchor that did not fit; without
+/// one, or when the page has no continuation, the overfilled page is refused.
+#[tracing::instrument(name = "temporal.hydrate.export", level = "trace", skip_all)]
 pub async fn hydrate_temporal_candidate_export(
     request: &TemporalKernelRequest,
     export: TemporalCandidateExport,
     hydration_port: &impl TemporalHydrationPort,
     token_estimator: &impl VersionedTokenEstimator,
+    continuation: Option<&dyn SessionCursorAuthenticator>,
 ) -> Result<TemporalKernelResult, TemporalKernelError> {
     if !export
         .snapshot
@@ -363,18 +377,16 @@ pub async fn hydrate_temporal_candidate_export(
         snapshot,
         ranked,
         next_cursor,
-        coverage: _,
-        all_candidate_anchors,
+        coverage: candidate_coverage,
+        result_eligible_anchors,
         visible_anchors,
         resolution,
         summaries,
         summary_eligibility,
+        strict_population,
+        window_keyset,
     } = export;
     check_control(&snapshot)?;
-    let ranked_anchors = ranked
-        .iter()
-        .map(|candidate| candidate.anchor_id.clone())
-        .collect::<BTreeSet<_>>();
     let anchors = ranked
         .iter()
         .map(|candidate| candidate.anchor_id.clone())
@@ -383,8 +395,34 @@ pub async fn hydrate_temporal_candidate_export(
         .await
         .map_err(map_hydration_error)?;
     check_control(&snapshot)?;
-    let frames = temporal_context_frames(
-        &all_candidate_anchors,
+    let (ranked, next_cursor) = match hydration.page_end {
+        None => (ranked, next_cursor),
+        Some(end) => {
+            let (Some(authenticator), None) = (continuation, strict_population) else {
+                return Err(TemporalKernelError::BudgetExceeded);
+            };
+            let mut ranked = ranked;
+            ranked.truncate(end);
+            let last = ranked.last().ok_or(TemporalKernelError::BudgetExceeded)?;
+            let position = CursorPosition {
+                candidate_keyset: window_keyset,
+                last_sort_key: Some(stable_sort_key(last)),
+            };
+            let cursor = encode_cursor_position(
+                &snapshot,
+                &request.cursor_binding,
+                &position,
+                authenticator,
+            )?;
+            (ranked, Some(cursor))
+        }
+    };
+    let ranked_anchors = ranked
+        .iter()
+        .map(|candidate| candidate.anchor_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut frames = temporal_context_frames(
+        &result_eligible_anchors,
         &visible_anchors,
         &resolution,
         &resolution.lineage_edges,
@@ -393,6 +431,20 @@ pub async fn hydrate_temporal_candidate_export(
         &ranked_anchors,
         &summary_eligibility,
     );
+    if let Some(population) = strict_population {
+        frames.coverage.visible = candidate_coverage.eligible;
+        frames.coverage.hidden = candidate_coverage.excluded;
+        frames.coverage.unknown = population.lower_bound().saturating_sub(
+            candidate_coverage
+                .eligible
+                .saturating_add(candidate_coverage.excluded),
+        );
+        frames.coverage.redacted = 0;
+        frames.omissions.push(CompactContextOmissionV1 {
+            anchor_id: None,
+            reason: ContextOmissionReasonV1::RootContinuationUnavailable,
+        });
+    }
     let context = assemble_context_with_frames_controlled(
         &hydration,
         snapshot.grain(),
@@ -405,8 +457,6 @@ pub async fn hydrate_temporal_candidate_export(
     check_control(&snapshot)?;
     let summary_omissions = public_summary_omissions(&summary_eligibility);
     let hydrated = TemporalHydratedResult::from_batch(hydration, &ranked);
-    hotpath::gauge!("temporal_query.candidates.hydrated").set(hydrated.len());
-    hotpath::gauge!("temporal_query.context.assembled").set(context.bundle.records.len());
     Ok(TemporalKernelResult {
         coverage: context.bundle.coverage,
         conflicts: context.bundle.conflicts.clone(),

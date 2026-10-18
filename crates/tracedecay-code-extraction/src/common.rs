@@ -1,14 +1,90 @@
 //! Helpers shared verbatim by multiple language extractors.
 //!
-//! Each extractor keeps its own private `ExtractionState`, so these helpers
-//! take the individual pieces of state they need (source bytes, file path,
-//! unresolved-ref sink) instead of the state struct itself. Bodies are moved
-//! here unchanged from the per-language copies so extraction output stays
-//! byte-identical.
+//! Extractors whose traversal state is exactly the common shape use
+//! [`ExtractionState`]; the rest keep a private state struct with their
+//! language-specific fields, so the helpers below take the individual pieces
+//! of state they need (source bytes, file path, unresolved-ref sink) instead
+//! of a state struct. Bodies are moved here unchanged from the per-language
+//! copies so extraction output stays byte-identical.
 
-use tree_sitter::Node as TsNode;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::types::{EdgeKind, UnresolvedRef};
+use tree_sitter::{Node as TsNode, Tree};
+
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id, generate_node_id_at,
+};
+
+/// Seconds since the Unix epoch, stamped on every emitted node as `updated_at`.
+pub(crate) fn unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Traversal state for extractors that need nothing beyond the common shape.
+pub(crate) struct ExtractionState<'s> {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) edges: Vec<Edge>,
+    pub(crate) unresolved_refs: Vec<UnresolvedRef>,
+    pub(crate) errors: Vec<String>,
+    /// Stack of (name, `node_id`) for building qualified names and parent edges.
+    pub(crate) node_stack: Vec<(String, String)>,
+    pub(crate) file_path: String,
+    pub(crate) source: &'s [u8],
+    pub(crate) timestamp: u64,
+}
+
+impl<'s> ExtractionState<'s> {
+    pub(crate) fn new(file_path: &str, source: &'s str) -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            unresolved_refs: Vec::new(),
+            errors: Vec::new(),
+            node_stack: Vec::new(),
+            file_path: file_path.to_string(),
+            source: source.as_bytes(),
+            timestamp: unix_timestamp_secs(),
+        }
+    }
+
+    /// Builds the final `ExtractionResult` from the accumulated state.
+    pub(crate) fn into_result(self, start: Instant) -> ExtractionResult {
+        ExtractionResult {
+            nodes: self.nodes,
+            edges: self.edges,
+            unresolved_refs: self.unresolved_refs,
+            errors: self.errors,
+            duration_ms: start.elapsed().as_millis() as u64,
+        }
+    }
+
+    /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment.
+    pub(crate) fn qualified_prefix(&self) -> String {
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+
+    /// Returns the current parent node ID, or None if at file root level.
+    pub(crate) fn parent_node_id(&self) -> Option<&str> {
+        self.node_stack.last().map(|(_, id)| id.as_str())
+    }
+
+    /// Gets the text of a tree-sitter node from the source.
+    pub(crate) fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
+    }
+}
 
 /// Gets the text of a tree-sitter node from the source.
 fn node_text(source: &[u8], node: TsNode<'_>) -> String {
@@ -17,22 +93,166 @@ fn node_text(source: &[u8], node: TsNode<'_>) -> String {
         .to_string()
 }
 
-/// Strip comment markers from a single C-style comment text
-/// (`//` line comments and `/* ... */` block comments).
+/// `end_line` of the file root: the zero-based index of the file's last line
+/// under the `str::lines` convention every extractor has always used, i.e.
+/// `source.lines().count().saturating_sub(1)`. `lines` yields one line per
+/// `\n` plus an unterminated tail, so the value is the newline count, minus one
+/// when the source ends in `\n`.
+///
+/// The newline count is read off the parsed tree instead of rescanning the
+/// source, which kept a changed-region walk of one tiny item paying for the
+/// whole file. Tree-sitter advances a row only on `\n`, and the root node ends
+/// at the EOF token, whose padding carries all trailing trivia, so
+/// `root.end_position().row` is the file's newline count. Any bytes past the
+/// root (none for a complete parse) are counted directly so the value is exact
+/// even for a grammar whose root stops short. Composite adapters hand in their
+/// mask, which preserves every `\n` byte and the length of the real source.
+pub(crate) fn file_end_line(source: &str, tree: &Tree) -> u32 {
+    let root = tree.root_node();
+    let covered = root.end_byte().min(source.len());
+    let newlines = root.end_position().row
+        + source.as_bytes()[covered..]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count();
+    newlines.saturating_sub(usize::from(source.ends_with('\n'))) as u32
+}
+
+/// [`file_end_line`] for a source Tree-sitter produced no tree for; the only
+/// path left is the scan.
+#[cfg(any(
+    feature = "lang-lean",
+    feature = "lang-markdown",
+    feature = "lang-quint",
+    feature = "lang-toml",
+    test
+))]
+pub(crate) fn unparsed_file_end_line(source: &str) -> u32 {
+    source.lines().count().saturating_sub(1) as u32
+}
+
+/// Mints the extraction-local ID for the construct rooted at `node`.
+///
+/// Every edge and unresolved reference an extractor emits while visiting the
+/// construct is keyed by this ID, so two constructs must never share one. A
+/// construct that begins its line (only blanks precede it) keeps the line-keyed
+/// [`generate_node_id`], leaving indentation and one-construct lines
+/// identity-neutral; a construct preceded by other source on its line also
+/// carries its start column, which distinguishes `impl A { fn run() {} } impl
+/// B { fn run() {} }` before relation endpoints are bound.
+pub(crate) fn local_node_id(
+    file_path: &str,
+    source: &[u8],
+    kind: &NodeKind,
+    name: &str,
+    node: TsNode<'_>,
+) -> String {
+    let start = node.start_position();
+    let line = start.row as u32;
+    if begins_line(source, node) {
+        generate_node_id(file_path, kind, name, line)
+    } else {
+        generate_node_id_at(file_path, kind, name, line, start.column as u32)
+    }
+}
+
+/// The `(start_line, start_column)` where a declaration's own syntax begins,
+/// past the leading `prefix_kinds` children (annotations, decorators,
+/// attribute lists) and comments, including those inside a leading `modifiers`
+/// node. `node`'s own start row is its `attrs_start_line`, as a Rust item is
+/// kept apart from its preceding attributes.
+pub(crate) fn declaration_start(node: TsNode<'_>, prefix_kinds: &[&str]) -> (u32, u32) {
+    let is_prefix = |child: &TsNode<'_>| child.is_extra() || prefix_kinds.contains(&child.kind());
+    let mut cursor = node.walk();
+    let mut start = node.start_position();
+    for child in node.children(&mut cursor) {
+        if is_prefix(&child) {
+            continue;
+        }
+        if child.kind() == "modifiers" {
+            let mut modifiers = child.walk();
+            match child.children(&mut modifiers).find(|m| !is_prefix(m)) {
+                Some(modifier) => start = modifier.start_position(),
+                None => continue,
+            }
+        } else {
+            start = child.start_position();
+        }
+        break;
+    }
+    (start.row as u32, start.column as u32)
+}
+
+/// Whether only blanks precede `node` on its first line.
+fn begins_line(source: &[u8], node: TsNode<'_>) -> bool {
+    let start_byte = node.start_byte().min(source.len());
+    let line_start = source[..start_byte]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    source[line_start..start_byte]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
+}
+
+/// The owner of one module-scope statement's calls, and its `Contains` edge
+/// from the file. The statement runs when the module loads, inside no named
+/// symbol, so it becomes a `<module>` init block the way a Java static
+/// initializer owns its block. Callers add it only when the statement has
+/// calls, leaving call-free statements to the file's unowned chunks.
+pub(crate) fn module_scope_init_block(
+    file_path: &str,
+    source: &[u8],
+    file_node_id: &str,
+    statement: TsNode<'_>,
+    updated_at: u64,
+) -> (Node, Edge) {
+    const NAME: &str = "<module>";
+    let start = statement.start_position();
+    let end = statement.end_position();
+    let id = local_node_id(file_path, source, &NodeKind::InitBlock, NAME, statement);
+    let text = node_text(source, statement);
+    let node = Node {
+        id: id.clone(),
+        kind: NodeKind::InitBlock,
+        name: NAME.to_owned(),
+        qualified_name: format!("{file_path}::{NAME}"),
+        file_path: file_path.to_owned(),
+        start_line: start.row as u32,
+        attrs_start_line: start.row as u32,
+        end_line: end.row as u32,
+        start_column: start.column as u32,
+        end_column: end.column as u32,
+        signature: text.lines().next().map(|line| line.trim().to_owned()),
+        docstring: None,
+        visibility: Visibility::Private,
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
+        updated_at,
+        parent_id: None,
+    };
+    let edge = Edge {
+        source: file_node_id.to_owned(),
+        target: id,
+        kind: EdgeKind::Contains,
+        line: Some(start.row as u32),
+    };
+    (node, edge)
+}
+
+/// Strip comment markers from a single C-style comment text: `//` and `///`
+/// line comments and `/* ... */` block comments.
 pub(crate) fn clean_c_comment(comment: &str) -> String {
-    clean_c_line_or_block_comment(comment, &["//"])
-}
-
-/// Strip comment markers from a single C-style comment text, including
-/// `///` doc comments.
-pub(crate) fn clean_c_doc_comment(comment: &str) -> String {
-    // Longer prefixes first so `///` is not stripped as `//`.
-    clean_c_line_or_block_comment(comment, &["///", "//"])
-}
-
-fn clean_c_line_or_block_comment(comment: &str, line_prefixes: &[&str]) -> String {
     let trimmed = comment.trim();
-    for prefix in line_prefixes {
+    // Longer prefix first so `///` is not stripped as `//`.
+    for prefix in ["///", "//"] {
         if let Some(stripped) = trimmed.strip_prefix(prefix) {
             return stripped.strip_prefix(' ').unwrap_or(stripped).to_string();
         }
@@ -58,20 +278,33 @@ fn clean_c_line_or_block_comment(comment: &str, line_prefixes: &[&str]) -> Strin
 
 /// Extract a docstring from the run of `comment` siblings immediately
 /// preceding `node`, cleaning each comment with `clean`.
+///
+/// A comment belongs to the run only when it starts its own line and no blank
+/// line separates it from what follows, so a trailing `} // namespace x` or a
+/// detached section banner never documents the next declaration.
 pub(crate) fn docstring_from_preceding_comments(
     source: &[u8],
     node: TsNode<'_>,
     clean: fn(&str) -> String,
 ) -> Option<String> {
     let mut comments = Vec::new();
+    let mut following_row = node.start_position().row;
     let mut current = node.prev_named_sibling();
     while let Some(sibling) = current {
-        if sibling.kind() == "comment" {
-            comments.push(node_text(source, sibling));
-            current = sibling.prev_named_sibling();
+        // Some grammars end a line comment after its newline, at column 0.
+        let end = sibling.end_position();
+        let last_row = if end.column == 0 && end.row > sibling.start_position().row {
+            end.row - 1
         } else {
+            end.row
+        };
+        let adjacent = last_row + 1 >= following_row;
+        if sibling.kind() != "comment" || !adjacent || !begins_line(source, sibling) {
             break;
         }
+        comments.push(node_text(source, sibling));
+        following_row = sibling.start_position().row;
+        current = sibling.prev_named_sibling();
     }
     if comments.is_empty() {
         return None;
@@ -111,6 +344,31 @@ pub(crate) fn docstring_from_hash_comments(source: &[u8], node: TsNode<'_>) -> O
     Some(comments.join("\n"))
 }
 
+/// The full identifier lexeme around `identifier`.
+///
+/// The BASIC grammars lex `_` inside a name as an error token, splitting
+/// `MAX_RETRIES` into sibling fragments and sometimes dropping text, so the
+/// name is recovered from source by extending the node over adjacent
+/// identifier characters. Type suffixes (`$`, `%`) and member access (`.`)
+/// stay outside the lexeme.
+#[cfg(any(
+    feature = "lang-gwbasic",
+    feature = "lang-msbasic2",
+    feature = "lang-qbasic"
+))]
+pub(crate) fn basic_identifier_text<'s>(source: &'s [u8], identifier: TsNode<'_>) -> &'s str {
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut start = identifier.start_byte().min(source.len());
+    let mut end = identifier.end_byte().min(source.len());
+    while start > 0 && is_ident(source[start - 1]) {
+        start -= 1;
+    }
+    while end < source.len() && is_ident(source[end]) {
+        end += 1;
+    }
+    std::str::from_utf8(&source[start..end]).unwrap_or("<invalid utf8>")
+}
+
 /// Recursively find `call_expression` nodes and create unresolved Calls
 /// references, taking the callee name from the first named child.
 pub(crate) fn extract_call_expression_sites(
@@ -135,6 +393,8 @@ pub(crate) fn extract_call_expression_sites(
                     line: child.start_position().row as u32,
                     column: child.start_position().column as u32,
                     file_path: file_path.to_string(),
+                    unmodeled_import: None,
+                    argument_count: None,
                 });
             }
             extract_call_expression_sites(source, file_path, unresolved_refs, child, fn_node_id);
@@ -142,5 +402,133 @@ pub(crate) fn extract_call_expression_sites(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use tree_sitter::{Parser, Tree};
+
+    use super::{file_end_line, unparsed_file_end_line};
+    use crate::{LanguageRegistry, ts_provider};
+
+    /// Sources on which a raw newline count and `str::lines` disagree: empty,
+    /// terminated, unterminated, blank-only, repeated trailing blank lines,
+    /// bare `\r`, CRLF, and multi-byte text.
+    const LINE_ENDING_SHAPES: &[&str] = &[
+        "",
+        "\n",
+        "\n\n",
+        "\r",
+        "\r\n",
+        " \n\t\n",
+        "x",
+        "x\n",
+        "x\n\n",
+        "x\n\n\n",
+        "x\ny",
+        "x\ny\n",
+        "x\r\ny",
+        "x\r\ny\r\n",
+        "x\r\ny\r\n\r\n",
+        "x\ry\n",
+        "é\n界",
+        "é\n界\n",
+        "é\r\n界\r\n",
+        "x // é界\ny\n",
+    ];
+
+    /// Grammars with distinct end-of-input behaviour: plain lexers (`rust`,
+    /// `cpp`), an indentation scanner that synthesizes tokens at EOF
+    /// (`python`), the grammar composite adapters parse their masks with
+    /// (`typescript`), the Markdown block grammar, and `cobol`, whose external
+    /// scanner skips the sequence-number area and used to spin at EOF on every
+    /// shape here shorter than six columns (#1104). Grammars a feature set
+    /// does not link are skipped; the caller decides whether that is vacuous.
+    /// Degenerate inputs are not fed to every bundled grammar because an
+    /// external scanner that never terminates on them cannot be interrupted by
+    /// any parse deadline.
+    fn linked_grammar_keys() -> Vec<&'static str> {
+        ["rust", "cpp", "python", "typescript", "markdown", "cobol"]
+            .into_iter()
+            .filter(|key| ts_provider::try_language(key).is_ok())
+            .collect()
+    }
+
+    fn parse(grammar_key: &str, source: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&ts_provider::try_language(grammar_key).expect("registered grammar"))
+            .expect("configure parser");
+        parser.parse(source, None).expect("parse")
+    }
+
+    #[test]
+    fn file_end_line_matches_the_lines_convention_for_every_line_ending_shape() {
+        let keys = linked_grammar_keys();
+        assert!(
+            !keys.is_empty() || ts_provider::try_language("rust").is_err(),
+            "a build with a grammar bundle must exercise at least one grammar"
+        );
+        for key in keys {
+            for source in LINE_ENDING_SHAPES {
+                let tree = parse(key, source);
+                assert_eq!(
+                    file_end_line(source, &tree),
+                    unparsed_file_end_line(source),
+                    "{key}: {source:?}"
+                );
+            }
+        }
+    }
+
+    /// The tree-derived value must equal the source scan for every checked-in
+    /// extraction fixture, through the grammar its extractor really selects,
+    /// and the root must end at EOF so no trailing bytes are ever rescanned.
+    /// Composite adapters are checked against both the real source and the
+    /// mask their retained tree was parsed from.
+    #[test]
+    fn file_end_line_matches_the_lines_convention_for_every_checked_in_fixture() {
+        let registry = LanguageRegistry::new();
+        let mut checked = Vec::new();
+        for directory in ["../../tests/fixtures", "fixtures"] {
+            let mut entries = std::fs::read_dir(Path::new(directory))
+                .unwrap_or_else(|error| panic!("{directory}: {error}"))
+                .map(|entry| entry.expect("fixture entry").path())
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>();
+            entries.sort();
+            for path in entries {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("fixture file name");
+                let Some(extractor) = registry.extractor_for_file(name) else {
+                    continue;
+                };
+                let key = extractor.retained_grammar_key(name);
+                if ts_provider::try_language(&key).is_err() {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read fixture");
+                let mask = extractor.prepare_parse_source(&source);
+                let tree = parse(&key, &mask);
+                let expected = unparsed_file_end_line(&source);
+                assert_eq!(
+                    tree.root_node().end_byte(),
+                    source.len(),
+                    "{name}: the {key} root must end at EOF"
+                );
+                assert_eq!(file_end_line(&source, &tree), expected, "{name}");
+                assert_eq!(file_end_line(&mask, &tree), expected, "{name} (mask)");
+                checked.push(name.to_owned());
+            }
+        }
+        assert!(
+            !checked.is_empty() || ts_provider::try_language("rust").is_err(),
+            "a build with a grammar bundle must exercise the fixtures"
+        );
     }
 }

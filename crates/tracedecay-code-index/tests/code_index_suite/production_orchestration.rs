@@ -1,8 +1,8 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
-    io::Cursor,
-    sync::atomic::{AtomicBool, Ordering},
+    io::Read,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -10,54 +10,74 @@ use std::{
 use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::incremental::ParseLimits;
 use tracedecay_code_index::{
+    capabilities::expected_seal_digest,
     chunks::{CodeIndexImportEvidenceV1, ExtractionAdmittedCodeSearchChunkV1, content_digest},
+    clones::{CloneBodyEligibilityV1, CloneBodyOccurrenceV1},
     graph_projection::{
-        CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError,
-        build_published_code_graph_manifest_checked, code_graph_projection_identity,
+        CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError, SealedCodeGraphRowsError,
+        code_graph_projection_identity,
     },
     production::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
-        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-        CodeIndexRepositoryParseIdentityV1, SEALED_GENERATION_FORMAT_REVISION_V1,
+        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedBuildV1,
+        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+        CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, MemorySealedPublicationStoreV1,
+        SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentPublicationV1,
+        SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
         SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
         VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-        sealed_generation_payload_digest,
-    },
-    projection::{
-        ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-        ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
+        advance_import_dictionary_digest, initial_import_dictionary_digest,
     },
     provider::GenerationTestAttributionJoinReadPort,
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
 };
 use tracedecay_domain::{
-    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId,
-    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
-    ProviderEvaluationStateV1, RefId, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    StackNodeId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
+    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeSearchChunkGrainV1, CommitId,
+    EdgeAuthorityV1, ExtractorRevision, FileOccurrenceId, LanguageId, ManifestDigest,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1,
+    ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
+    TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId, sha256_hex_suffix,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
-use crate::support::{RUST_SOURCE, id};
+use crate::support::{PartitionedSealV1, RUST_SOURCE, cold_generation, id, reseal_manifest};
 
+mod attribution_equivalence;
 mod parallel_equivalence;
 
 #[derive(Clone, Default)]
 pub(super) struct SharedPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
+    sealed: MemorySealedPublicationStoreV1,
 }
 
 impl SharedPublicationStore {
     fn scope_count(&self) -> usize {
-        self.active.lock().expect("publication lock").len()
+        self.sealed.active_scopes()
     }
 
     fn shares_repository_store(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.active, &other.active)
+        self.sealed.shares_state_with(&other.sealed)
+    }
+
+    /// The generation `published` sealed, decoded whole from this store.
+    pub(super) fn generation(
+        &self,
+        published: &CodeIndexPublishedBuildV1,
+    ) -> Arc<CodeIndexPublishedGenerationV1> {
+        published.decoded().map_or_else(
+            || {
+                Arc::new(
+                    self.sealed
+                        .decode(published.manifest_bytes())
+                        .expect("published generation decodes"),
+                )
+            },
+            Arc::clone,
+        )
     }
 }
 
@@ -65,32 +85,18 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     fn load_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .expect("publication lock")
-            .get(scope)
-            .map(|generation| generation.as_ref().clone()))
+    ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        self.sealed.load_active(scope)
     }
 
     fn publish_atomically(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().expect("publication lock");
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
+        generation: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+        self.sealed
+            .publish_atomically(scope, expected_active_generation, generation)
     }
 }
 
@@ -99,118 +105,36 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
 /// the generation sealed for one branch/worktree is answered for every scope.
 #[derive(Clone, Default)]
 struct PartialKeyPublicationStore {
-    active: Arc<Mutex<Option<Arc<CodeIndexPublishedGenerationV1>>>>,
+    sealed: MemorySealedPublicationStoreV1,
+    pointer: Arc<Mutex<Option<CodeIndexGenerationScopeV1>>>,
 }
 
 impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
     fn load_active(
         &self,
         _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .expect("publication lock")
-            .as_ref()
-            .map(|generation| generation.as_ref().clone()))
+    ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        let pointer = self.pointer.lock().expect("publication lock").clone();
+        match pointer {
+            Some(scope) => self.sealed.load_active(&scope),
+            None => Ok(None),
+        }
     }
 
     fn publish_atomically(
         &mut self,
-        _scope: &CodeIndexGenerationScopeV1,
+        scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().expect("publication lock");
-        if active
-            .as_ref()
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        *active = Some(generation);
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub(super) struct ApplyingProjectionSink;
-
-impl CodeChunkProjectionSink for ApplyingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions: Vec<ChunkProjectionDecisionV1> = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: Some(
-                    change
-                        .current_digest
-                        .clone()
-                        .expect("added or changed chunks have a current digest"),
-                ),
-            })
-            .collect();
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        decisions.extend(
-            request
-                .changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
-                    output_digest: None,
-                }),
-        );
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
-}
-
-struct RejectingProjectionSink;
-
-impl CodeChunkProjectionSink for RejectingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        _request: &ProjectionBatchRequestV1,
-        _receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        Err(ProjectionSinkErrorV1::Rejected(
-            "projection is intentionally unavailable".to_owned(),
-        ))
+        generation: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+        let pointer = self
+            .pointer
+            .lock()
+            .expect("publication lock")
+            .get_or_insert_with(|| scope.clone())
+            .clone();
+        self.sealed
+            .publish_atomically(&pointer, expected_active_generation, generation)
     }
 }
 
@@ -288,6 +212,13 @@ pub(super) fn config() -> CodeIndexProductionConfigV1 {
     }
 }
 
+/// A production owner over a fresh in-memory publication store that applies
+/// every projection batch.
+pub(super) fn applying_owner() -> CodeIndexProductionOwnerV1<SharedPublicationStore> {
+    CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+        .expect("production owner")
+}
+
 fn projection_key() -> ProjectionKeyV1 {
     ProjectionKeyV1 {
         kind: ProjectionKindV1::Lexical,
@@ -341,6 +272,7 @@ fn request_at_path(
         content_identity: content_digest(source),
         captured_at: UtcMicros(1_000_000),
         files: vec![file.clone()],
+        omitted_sources: Vec::new(),
     };
 
     CodeIndexBuildRequestV1 {
@@ -385,64 +317,291 @@ pub(super) fn request_with_source(
     request
 }
 
+pub(super) fn add_present_typescript_file(
+    request: &mut CodeIndexBuildRequestV1,
+    occurrence: &str,
+    logical_path: &str,
+    source: &str,
+) {
+    let bytes = source.as_bytes().to_vec();
+    let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+    request.snapshot.files.push(SanitizedCodeFileV1 {
+        file_occurrence_id: file_occurrence_id.clone(),
+        logical_path: logical_path.to_owned(),
+        language: Some(id::<LanguageId>("typescript")),
+        content_digest: content_digest(&bytes),
+        disposition: SnapshotFileDispositionV1::Present,
+    });
+    request.captured_files.push(CodeIndexCapturedFileV1 {
+        file_occurrence_id,
+        sanitized_bytes: Arc::from(bytes),
+        sensitivity_level: SensitivityLevelV1::Public,
+    });
+    request.changed_files.insert(logical_path.to_owned());
+}
+
+#[test]
+fn cross_file_edges_require_path_binding_evidence() {
+    let sources = [
+        (
+            "file.binding.other-read",
+            "crates/other/src/read.rs",
+            "rust",
+            "pub struct CanonicalAffectedTestsProjectionV1;\n",
+        ),
+        (
+            "file.binding.feedback-mod",
+            "crates/tracedecay-contracts/src/feedback/mod.rs",
+            "rust",
+            "mod read;\npub use read::{CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1};\n",
+        ),
+        (
+            "file.binding.feedback-read",
+            "crates/tracedecay-contracts/src/feedback/read.rs",
+            "rust",
+            "pub struct CanonicalAffectedTestsProjectionV1;\npub struct CanonicalFeedbackImpactProjectionV1;\n",
+        ),
+        (
+            "file.binding.model",
+            "dashboard/model.tsx",
+            "typescript",
+            "import { imported } from './target.js';\nexport function str(value: unknown): string { return String(value); }\nexport function local(): string { imported(); return str('x'); }\nexport function shadowed(imported: () => void): void { imported(); }\nexport function locallyShadowed(): void { const imported = () => {}; imported(); }\nexport function arrowShadowed(): void { const run = imported => imported(); run(() => {}); }\nexport function varShadowed(): void { if (true) { var imported = () => {}; } imported(); }\nexport function nestedCapture(): () => void { const imported = () => {}; function inner(): void { imported(); } return inner; }\n",
+        ),
+        (
+            "file.binding.ts-target",
+            "dashboard/target.ts",
+            "typescript",
+            "export function imported() {}\n",
+        ),
+        (
+            "file.binding.caller",
+            "src/caller.rs",
+            "rust",
+            "use crate::target::helper;\npub fn caller(value: &str) { let _ = value; helper(); let _ = crate::target::real(); }\npub fn shadowed(helper: fn()) { helper(); }\npub fn locally_shadowed() { let helper: fn() = || {}; helper(); }\n",
+        ),
+        (
+            "file.binding.target",
+            "src/target.rs",
+            "rust",
+            "pub fn helper() {}\npub fn real() {}\n",
+        ),
+    ];
+    let mut request = request("file.binding.seed", 1_100_000);
+    request.snapshot.files.clear();
+    request.snapshot.sanitization_receipts.clear();
+    request.captured_files.clear();
+    let mut identity = Sha256::new();
+    for (ordinal, (occurrence, path, language, source)) in sources.into_iter().enumerate() {
+        identity.update(path.as_bytes());
+        identity.update([0]);
+        identity.update(source.as_bytes());
+        let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+        request.snapshot.files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: path.to_owned(),
+            language: Some(id::<LanguageId>(language)),
+            content_digest: content_digest(source.as_bytes()),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        request
+            .snapshot
+            .sanitization_receipts
+            .push(id::<SanitizationReceiptId>(&format!(
+                "receipt.binding.{ordinal}"
+            )));
+        request.captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(source.as_bytes()),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+        });
+    }
+    request.snapshot.content_identity = content_digest(&identity.finalize());
+
+    let generation = applying_owner()
+        .build_and_publish(request, &ActiveControl)
+        .expect("generation publishes");
+    let generation = cold_generation(&generation);
+    let occurrence = |qualified_name: &str| {
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == qualified_name)
+            .unwrap_or_else(|| panic!("missing {qualified_name}"))
+            .occurrence
+            .clone()
+    };
+    let caller = occurrence("src/caller.rs::caller");
+    let helper = occurrence("src/target.rs::helper");
+    let real = occurrence("src/target.rs::real");
+    let imported = occurrence("dashboard/target.ts::imported");
+    let str_helper = occurrence("dashboard/model.tsx::str");
+    let local = occurrence("dashboard/model.tsx::local");
+    let ts_shadowed = occurrence("dashboard/model.tsx::shadowed");
+    let ts_locally_shadowed = occurrence("dashboard/model.tsx::locallyShadowed");
+    let ts_arrow_shadowed = occurrence("dashboard/model.tsx::arrowShadowed");
+    let ts_var_shadowed = occurrence("dashboard/model.tsx::varShadowed");
+    let rust_shadowed = occurrence("src/caller.rs::shadowed");
+    let rust_locally_shadowed = occurrence("src/caller.rs::locally_shadowed");
+    let affected_tests = occurrence(
+        "crates/tracedecay-contracts/src/feedback/read.rs::CanonicalAffectedTestsProjectionV1",
+    );
+    let feedback_impact = occurrence(
+        "crates/tracedecay-contracts/src/feedback/read.rs::CanonicalFeedbackImpactProjectionV1",
+    );
+    let incoming = |target: &SymbolOccurrenceId| {
+        generation
+            .edges()
+            .iter()
+            .filter(|edge| &edge.to_occurrence == target)
+            .count()
+    };
+
+    assert_eq!(incoming(&str_helper), 1, "only the same-file call is real");
+    assert_eq!(
+        incoming(&helper),
+        1,
+        "the explicit Rust import remains bound"
+    );
+    assert_eq!(incoming(&real), 1, "the qualified Rust path remains bound");
+    assert_eq!(
+        incoming(&affected_tests),
+        1,
+        "the grouped re-export makes mod.rs a dependent of read.rs",
+    );
+    assert_eq!(incoming(&feedback_impact), 1);
+    assert_eq!(
+        incoming(&imported),
+        1,
+        "only the unshadowed imported call remains bound"
+    );
+    assert!(generation.edges().iter().any(|edge| {
+        edge.from_occurrence == local
+            && edge.to_occurrence == str_helper
+            && edge.kind == RelationEdgeKindV1::Calls
+            && edge.authority == EdgeAuthorityV1::SyntaxExact
+    }));
+    assert!(generation.edges().iter().any(|edge| {
+        edge.from_occurrence == caller
+            && edge.to_occurrence == helper
+            && edge.kind == RelationEdgeKindV1::Calls
+            && edge.authority == EdgeAuthorityV1::NameResolved
+    }));
+    assert!(generation.edges().iter().any(|edge| {
+        edge.from_occurrence == caller
+            && edge.to_occurrence == real
+            && edge.kind == RelationEdgeKindV1::Calls
+            && edge.authority == EdgeAuthorityV1::NameResolved
+    }));
+    assert!(generation.edges().iter().any(|edge| {
+        edge.from_occurrence == local
+            && edge.to_occurrence == imported
+            && edge.kind == RelationEdgeKindV1::Calls
+            && edge.authority == EdgeAuthorityV1::NameResolved
+    }));
+    assert!(
+        !generation
+            .edges()
+            .iter()
+            .any(|edge| { edge.from_occurrence == ts_shadowed && edge.to_occurrence == imported })
+    );
+    assert!(
+        !generation
+            .edges()
+            .iter()
+            .any(|edge| { edge.from_occurrence == rust_shadowed && edge.to_occurrence == helper })
+    );
+    assert!(!generation.edges().iter().any(|edge| {
+        edge.from_occurrence == ts_locally_shadowed && edge.to_occurrence == imported
+    }));
+    assert!(!generation.edges().iter().any(|edge| {
+        edge.from_occurrence == ts_arrow_shadowed && edge.to_occurrence == imported
+    }));
+    assert!(
+        !generation.edges().iter().any(|edge| {
+            edge.from_occurrence == ts_var_shadowed && edge.to_occurrence == imported
+        })
+    );
+    assert!(!generation.edges().iter().any(|edge| {
+        edge.from_occurrence == rust_locally_shadowed && edge.to_occurrence == helper
+    }));
+}
+
+/// A full build retains no parse tree; an increment retains the files it
+/// re-extracts, and the next increment editing one of them reparses only the
+/// changed region. The fillers keep each one-file edit an increment over its
+/// sealed parent rather than a cold rebuild.
 #[test]
 fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
-    owner
-        .build_and_publish(
-            request_with_source(
-                "file.retained.1",
-                1_100_000,
-                "commit.retained.1",
-                "tree.retained.1",
-                "fn unchanged() -> u32 { 1 }\nfn edited() -> u32 { 2 }\n",
-            ),
-            &ActiveControl,
-        )
-        .expect("initial generation");
-    owner
-        .build_and_publish(
-            request_with_source(
-                "file.retained.2",
-                1_200_000,
-                "commit.retained.2",
-                "tree.retained.2",
-                "fn unchanged() -> u32 { 1 }\nfn edited() -> u32 { 20 }\n",
-            ),
-            &ActiveControl,
-        )
-        .expect("incremental generation");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let build = |owner: &mut CodeIndexProductionOwnerV1<SharedPublicationStore>,
+                 ordinal: i64,
+                 edited: u32| {
+        let occurrence = format!("file.retained.{ordinal}");
+        let source = format!("fn unchanged() -> u32 {{ 1 }}\nfn edited() -> u32 {{ {edited} }}\n");
+        let mut sources = SPARSE_FILLERS.to_vec();
+        sources.push((&occurrence, "src/lib.rs", &source));
+        sources.sort_by_key(|&(_, path, _)| path);
+        owner
+            .build_and_publish(
+                partitioned_request(
+                    &sources,
+                    BTreeSet::from(["src/lib.rs".to_owned()]),
+                    1_000_000 + ordinal * 100_000,
+                ),
+                &ActiveControl,
+            )
+            .expect("generation");
+    };
+    let fillers = SPARSE_FILLERS.len() as u64;
+    build(&mut owner, 1, 2);
+    let cold = owner.retained_parse_stats();
+    assert_eq!(cold.initial_parses, fillers + 1);
+    assert_eq!(cold.full_extractions, fillers + 1);
+    assert_eq!(cold.retained_documents, 0);
+    let initial_clone_stats = owner.physical_artifact_pool_stats();
+    assert_eq!(initial_clone_stats.clone_payloads_computed, 2);
+    assert_eq!(initial_clone_stats.clone_payloads_reused, 0);
 
+    build(&mut owner, 2, 20);
+    let first_increment = owner.retained_parse_stats();
+    assert_eq!(first_increment.initial_parses, fillers + 2);
+    assert_eq!(first_increment.incremental_parses, 0);
+    assert_eq!(first_increment.full_extractions, fillers + 2);
+    assert_eq!(first_increment.retained_documents, 1);
+
+    build(&mut owner, 3, 200);
     let stats = owner.retained_parse_stats();
-    assert_eq!(stats.initial_parses, 1);
+    assert_eq!(stats.initial_parses, fillers + 2);
     assert_eq!(stats.incremental_parses, 1);
-    assert_eq!(stats.full_extractions, 1);
+    assert_eq!(stats.full_extractions, fillers + 2);
     assert_eq!(stats.incremental_extractions, 1);
     assert_eq!(stats.reset_extractions, 0);
     assert_eq!(stats.retained_documents, 1);
-    assert!(stats.changed_bytes < 60);
-    assert!(stats.visited_top_level_nodes <= 3);
-    assert!(stats.extracted_bytes < 120);
+    assert!(stats.changed_bytes - first_increment.changed_bytes < 60);
+    assert!(stats.visited_top_level_nodes - first_increment.visited_top_level_nodes <= 3);
+    assert!(stats.extracted_bytes - first_increment.extracted_bytes < 120);
+    let clone_stats = owner.physical_artifact_pool_stats();
+    assert_eq!(clone_stats.clone_payloads_reused, 2);
+    assert_eq!(clone_stats.clone_payloads_computed, 4);
 }
 
-/// Carry-forward rematerialize already succeeds for unchanged files, including
-/// after restore. `code_index_reused_parses` is the matching hotpath success
-/// event (`add_reused_parses(1)`); these extract counts are the readable
-/// re-extract dual on the default (non-hotpath) path. No carry-forward miss
-/// to fix — this locks the counter floor so a later fallback would fail.
+/// An unchanged file is carried by its sealed descriptor, including after
+/// restore: the increment neither parses nor extracts it and builds no clone
+/// payload for it, so a later fallback to re-extraction fails these counts.
 #[test]
 fn unchanged_increment_does_not_reextract_carried_files() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
 
     owner
         .build_and_publish(request("file.carry.1", 1_100_000), &ActiveControl)
         .expect("first generation");
     let after_first = owner.retained_parse_stats();
+    let clone_after_first = owner.physical_artifact_pool_stats();
     assert_eq!(after_first.full_extractions, 1);
     assert_eq!(after_first.initial_parses, 1);
     assert_eq!(after_first.incremental_parses, 0);
@@ -450,9 +609,10 @@ fn unchanged_increment_does_not_reextract_carried_files() {
     assert_eq!(after_first.noop_parses, 0);
 
     owner
-        .build_and_publish(request("file.carry.2", 1_200_000), &ActiveControl)
+        .build_and_publish(request("file.carry.1", 1_200_000), &ActiveControl)
         .expect("unchanged increment");
     let after_second = owner.retained_parse_stats();
+    let clone_after_second = owner.physical_artifact_pool_stats();
 
     assert_eq!(
         after_second.full_extractions, after_first.full_extractions,
@@ -468,17 +628,26 @@ fn unchanged_increment_does_not_reextract_carried_files() {
         after_first.incremental_parses
     );
     assert_eq!(after_second.noop_parses, after_first.noop_parses);
+    assert_eq!(
+        clone_after_second.clone_payloads_computed,
+        clone_after_first.clone_payloads_computed
+    );
+    assert_eq!(
+        clone_after_second.clone_payloads_reused,
+        clone_after_first.clone_payloads_reused
+    );
 
-    let mut restarted = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("restart owner");
+    let mut restarted =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("restart owner");
     let after_restart = restarted.retained_parse_stats();
     assert_eq!(after_restart.full_extractions, 0);
     assert_eq!(after_restart.initial_parses, 0);
 
     restarted
-        .build_and_publish(request("file.carry.3", 1_300_000), &ActiveControl)
+        .build_and_publish(request("file.carry.1", 1_300_000), &ActiveControl)
         .expect("unchanged increment after restore");
     let after_restored = restarted.retained_parse_stats();
+    let clone_after_restored = restarted.physical_artifact_pool_stats();
     assert_eq!(
         after_restored.full_extractions, 0,
         "restored carry-forward rematerialize must not fall back to full re-extract"
@@ -487,6 +656,8 @@ fn unchanged_increment_does_not_reextract_carried_files() {
     assert_eq!(after_restored.initial_parses, 0);
     assert_eq!(after_restored.incremental_parses, 0);
     assert_eq!(after_restored.noop_parses, 0);
+    assert_eq!(clone_after_restored.clone_payloads_computed, 0);
+    assert_eq!(clone_after_restored.clone_payloads_reused, 0);
 }
 
 /// The physical reuse pool is an index over immutable generation-owned
@@ -498,12 +669,13 @@ fn physical_artifact_pool_does_not_retain_a_dropped_generation() {
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
     {
         let store = SharedPublicationStore::default();
-        let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
             .expect("production owner")
             .with_physical_artifact_pool(pool.clone());
         let generation = owner
             .build_and_publish(request("file.physical.1", 1_100_000), &ActiveControl)
             .expect("generation publishes");
+        let generation = store.generation(&generation);
 
         assert_eq!(pool.stats().resident, 1);
         drop(generation);
@@ -524,56 +696,48 @@ fn physical_artifact_pool_does_not_retain_a_dropped_generation() {
 #[test]
 fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
-    let mut source_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("source owner")
-    .with_physical_artifact_pool(pool.clone());
+    let mut source_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("source owner")
+            .with_physical_artifact_pool(pool.clone());
     let source = source_owner
         .build_and_publish(request("file.physical.target", 1_100_000), &ActiveControl)
         .expect("source generation publishes");
+    let source = cold_generation(&source);
     assert_eq!(pool.stats().reused, 0);
     assert_eq!(pool.stats().inserted, 1);
 
-    let mut reused_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("reuse owner")
-    .with_physical_artifact_pool(pool.clone());
+    let mut reused_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("reuse owner")
+            .with_physical_artifact_pool(pool.clone());
     let reused = reused_owner
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
         .expect("physically reused generation publishes");
+    let reused = cold_generation(&reused);
     assert_eq!(
         pool.stats().reused,
         1,
         "identical path and content must reuse the source physical artifact"
     );
 
-    let mut cold_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("cold owner");
+    let mut cold_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("cold owner");
     let cold = cold_owner
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
         .expect("cold comparison generation publishes");
+    let cold = cold_generation(&cold);
 
     let foreign_occurrence = id::<FileOccurrenceId>("file.physical.foreign");
-    let mut foreign_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("foreign occurrence owner")
-    .with_physical_artifact_pool(pool.clone());
+    let mut foreign_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("foreign occurrence owner")
+            .with_physical_artifact_pool(pool.clone());
     let foreign = foreign_owner
         .build_and_publish(request("file.physical.foreign", 1_200_000), &ActiveControl)
         .expect("foreign occurrence rematerializes from the shared artifact");
+    let foreign = cold_generation(&foreign);
     assert_eq!(
         pool.stats().reused,
         2,
@@ -597,8 +761,8 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
         "rematerialize must rebind shared chunks onto the requesting occurrence"
     );
     assert_ne!(
-        foreign.encode_sealed().expect("foreign generation seals"),
-        reused.encode_sealed().expect("reused generation seals"),
+        PartitionedSealV1::of(&foreign).manifest,
+        PartitionedSealV1::of(&reused).manifest,
         "rebound occurrence identity must change the sealed corpus"
     );
 
@@ -607,13 +771,10 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     changed.snapshot.files[0].content_digest = content_digest(changed_source);
     changed.snapshot.content_identity = content_digest(changed_source);
     changed.captured_files[0].sanitized_bytes = Arc::from(changed_source.as_slice());
-    let mut changed_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("changed-content owner")
-    .with_physical_artifact_pool(pool.clone());
+    let mut changed_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("changed-content owner")
+            .with_physical_artifact_pool(pool.clone());
     changed_owner
         .build_and_publish(changed, &ActiveControl)
         .expect("different content publishes without borrowing the prior artifact");
@@ -652,23 +813,18 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
         "projection mismatch"
     );
     assert_eq!(
-        reused.encode_sealed().expect("reused generation seals"),
-        cold.encode_sealed().expect("cold generation seals"),
+        PartitionedSealV1::of(&reused),
+        PartitionedSealV1::of(&cold),
         "sharing the physical allocation must preserve every durable byte and digest"
     );
     drop(source);
 }
 
-/// One file exceeding the bounded per-file parse budget must never fail the
-/// whole build: the generation still completes, publishes, and serves, with
-/// the slow file recorded as a typed unsupported document (with a reason) and
-/// truthful coverage accounting.
+/// Expired parse quanta resume while the operation remains admitted; scheduling
+/// does not turn a valid source file into a durable unsupported document.
 #[test]
-fn slow_parse_file_publishes_a_completed_generation_with_a_typed_omission() {
-    // The retained parser's deadline is only observed every ~100 Tree-sitter
-    // parse operations, so the tiny file completes before the first progress
-    // check while the generated file reliably crosses many of them. A 1ns
-    // budget therefore deterministically times out exactly the large file.
+fn resumed_parse_quanta_publish_the_same_complete_generation() {
+    // One nanosecond forces every Tree-sitter progress checkpoint to suspend.
     let pool = SharedRetainedParsePool::new(RetainedParsePoolLimits {
         document: ParseLimits {
             max_parse_time: Duration::from_nanos(1),
@@ -678,7 +834,7 @@ fn slow_parse_file_publishes_a_completed_generation_with_a_typed_omission() {
     })
     .expect("retained parse pool");
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
         .expect("production owner")
         .with_retained_parse_pool(pool);
 
@@ -711,6 +867,7 @@ fn slow_parse_file_publishes_a_completed_generation_with_a_typed_omission() {
             content_identity: content_digest(format!("{fast_source}{slow_source}").as_bytes()),
             captured_at: UtcMicros(1_000_000),
             files: vec![fast.clone(), slow.clone()],
+            omitted_sources: Vec::new(),
         },
         captured_files: vec![
             CodeIndexCapturedFileV1 {
@@ -735,52 +892,117 @@ fn slow_parse_file_publishes_a_completed_generation_with_a_typed_omission() {
         target_projection_key: projection_key(),
     };
 
+    let cold_request = request.clone();
     let generation = owner
         .build_and_publish(request, &ActiveControl)
-        .expect("a slow-parse file must not fail the whole generation");
-
-    // Truthful coverage: both files eligible, exactly the slow one omitted.
+        .expect("admitted parsing resumes to completion");
+    let generation = store.generation(&generation);
     assert_eq!(generation.coverage().files_eligible, 2);
-    assert_eq!(generation.coverage().files_unsupported, 1);
-
-    // The generation serves: the fast file's chunks are admitted, and no
-    // chunk was invented for the timed-out file.
-    let admitted = generation
-        .admitted_chunks()
-        .expect("published generation admits exact chunks");
-    assert!(!admitted.is_empty());
+    assert_eq!(generation.coverage().files_unsupported, 0);
+    let admitted = generation.admitted_chunks().expect("published chunks");
     assert!(
         admitted
             .iter()
-            .all(|chunk| chunk.chunk().anchor.file_occurrence_id.as_str() == "file.fast")
+            .any(|chunk| chunk.chunk().anchor.file_occurrence_id.as_str() == "file.slow")
     );
+    let mut cold_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("cold production owner");
+    let cold = cold_owner
+        .build_and_publish(cold_request, &ActiveControl)
+        .expect("cold generation");
+    let cold = store.generation(&cold);
+    assert_eq!(
+        PartitionedSealV1::of(&generation),
+        PartitionedSealV1::of(&cold)
+    );
+}
 
-    // The omission is a typed per-file document state with a reason, durable
-    // through sealing.
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let value: serde_json::Value = serde_json::from_slice(&sealed).expect("sealed JSON");
-    let slow_document = value["generation"]["files"]
-        .as_array()
-        .expect("sealed files")
-        .iter()
-        .map(|file| &file["artifacts"]["chunks"]["document"])
-        .find(|document| document["file_occurrence_id"] == "file.slow")
-        .expect("slow file document is retained in the generation");
-    assert_eq!(slow_document["eligibility"]["eligibility"], "unsupported");
-    let reason = slow_document["eligibility"]["reason"]["reason"]
-        .as_str()
-        .expect("typed omission carries a reason");
-    assert!(
-        reason.contains("parse budget"),
-        "unexpected omission reason: {reason}"
-    );
+#[test]
+fn resumed_parse_aborts_without_publication_when_operation_control_expires() {
+    struct DuringParseControl {
+        checks: AtomicUsize,
+        deadline: bool,
+    }
+    impl CodeIndexExecutionControlV1 for DuringParseControl {
+        fn is_cancelled(&self) -> bool {
+            !self.deadline && self.checks.fetch_add(1, Ordering::Relaxed) >= 100
+        }
+        fn is_deadline_exceeded(&self) -> bool {
+            self.deadline && self.checks.fetch_add(1, Ordering::Relaxed) >= 100
+        }
+    }
+    let source = (0..2_000)
+        .map(|n| format!("fn item_{n}() -> u64 {{ {n} }}\n"))
+        .collect::<String>();
+    for deadline in [false, true] {
+        let pool = SharedRetainedParsePool::new(RetainedParsePoolLimits {
+            document: ParseLimits {
+                max_parse_time: Duration::from_nanos(1),
+                ..ParseLimits::default()
+            },
+            ..RetainedParsePoolLimits::default()
+        })
+        .expect("parse pool");
+        let store = SharedPublicationStore::default();
+        let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
+            .expect("owner")
+            .with_retained_parse_pool(pool.clone());
+        let request = request_with_source(
+            "file.interrupted-parse",
+            1_100_000,
+            "commit.parse",
+            "tree.parse",
+            &source,
+        );
+        let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
+        let error = owner
+            .build_and_publish(
+                request.clone(),
+                &DuringParseControl {
+                    checks: AtomicUsize::new(0),
+                    deadline,
+                },
+            )
+            .expect_err("interrupted parse cannot publish");
+        let expected = if deadline {
+            CodeIndexInterruptionV1::DeadlineExceeded
+        } else {
+            CodeIndexInterruptionV1::Cancelled
+        };
+        assert!(
+            matches!(error, CodeIndexProductionErrorV1::Interrupted(reason) if reason == expected)
+        );
+        assert_eq!(
+            pool.stats().failed_parses,
+            1,
+            "control expires inside the retained parser"
+        );
+        assert!(
+            store
+                .load_active(&scope)
+                .expect("publication state")
+                .is_none()
+        );
+        let recovered = owner
+            .build_and_publish(request, &ActiveControl)
+            .expect("retry after cancellation resets parser");
+        let recovered = store.generation(&recovered);
+        assert_eq!(recovered.coverage().files_unsupported, 0);
+        assert!(
+            !recovered
+                .admitted_chunks()
+                .expect("admitted chunks")
+                .is_empty()
+        );
+    }
 }
 
 #[test]
 fn retained_parse_syntax_errors_publish_partial_generation_coverage() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -793,6 +1015,7 @@ fn retained_parse_syntax_errors_publish_partial_generation_coverage() {
             &ActiveControl,
         )
         .expect("partial generation publishes");
+    let generation = store.generation(&generation);
 
     assert_eq!(generation.coverage().files_partial, 1);
 }
@@ -800,16 +1023,19 @@ fn retained_parse_syntax_errors_publish_partial_generation_coverage() {
 #[test]
 fn published_generation_serves_current_conservative_test_attribution() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request_at_path("file.production.test", "tests/production.rs", 1_100_000),
             &ActiveControl,
         )
         .expect("test generation publishes");
+    let generation = store.generation(&generation);
     let authority = generation
-        .test_attribution_authority()
+        .prepare_test_attribution(
+            &tracedecay_code_index::production::UninterruptibleCodeIndexControlV1,
+        )
         .expect("attribution authority");
 
     let read = authority.read_test_attribution(&generation.manifest().generation_id);
@@ -818,13 +1044,40 @@ fn published_generation_serves_current_conservative_test_attribution() {
         read.provider_state,
         ProviderEvaluationStateV1::SupportedCompletedComplete | ProviderEvaluationStateV1::Partial
     ));
-    let join = read.evidence.expect("generation attribution");
+    let join = read.evidence.as_ref().expect("generation attribution");
     assert_eq!(join.generation_id, generation.manifest().generation_id);
     assert_eq!(
         join.test_watermark.snapshot_digest,
         generation.manifest().snapshot_digest
     );
-    assert!(!join.records.is_empty());
+    // Every callable in a test file is a test; neither fixture callable calls
+    // another fixture symbol, so each covers only itself.
+    let occurrence_of = |qualified_name: &str| {
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == qualified_name)
+            .unwrap_or_else(|| panic!("fixture symbol {qualified_name}"))
+            .occurrence
+            .clone()
+    };
+    let alpha = occurrence_of("tests/production.rs::alpha");
+    let get = occurrence_of("tests/production.rs::Holder::get");
+    let attributed = join
+        .records
+        .iter()
+        .map(|record| {
+            (
+                record.attribution.test_occurrence.clone(),
+                record.attribution.covered_occurrences.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        attributed,
+        BTreeMap::from([(alpha.clone(), vec![alpha]), (get.clone(), vec![get])])
+    );
     assert!(join.records.iter().all(|record| {
         record.attribution.evidence_class
             == TestAttributionEvidenceClassV1::ConservativeDependencyCandidates
@@ -832,15 +1085,116 @@ fn published_generation_serves_current_conservative_test_attribution() {
 }
 
 #[test]
+fn published_generation_attributes_inline_rust_tests_to_called_symbols() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request_with_source(
+                "file.production.inline-test",
+                1_100_000,
+                "commit.production.inline-test",
+                "tree.production.inline-test",
+                r#"pub fn feedback_entry(input: u32) -> u32 {
+    feedback_public_replay_missing_symbol(input)
+}
+
+#[cfg(test)]
+mod tests {
+    fn support_helper() {
+        super::feedback_entry(0);
+    }
+
+    #[test]
+    fn feedback_entry_test() {
+        assert_eq!(super::feedback_entry(1), 1);
+    }
+}
+
+#[test]
+fn root_feedback_entry_test() {
+    assert_eq!(feedback_entry(2), 2);
+}
+"#,
+            ),
+            &ActiveControl,
+        )
+        .expect("test generation publishes");
+    let generation = store.generation(&generation);
+    let authority = generation
+        .prepare_test_attribution(
+            &tracedecay_code_index::production::UninterruptibleCodeIndexControlV1,
+        )
+        .expect("attribution authority");
+
+    let read = authority.read_test_attribution(&generation.manifest().generation_id);
+    let join = read.evidence.as_ref().expect("generation attribution");
+    let inline_test = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol
+                .qualified_name
+                .ends_with("::tests::feedback_entry_test")
+        })
+        .expect("inline test symbol");
+    let root_test = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol
+                .qualified_name
+                .ends_with("::root_feedback_entry_test")
+        })
+        .expect("root test symbol");
+    let support_helper = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name.ends_with("::tests::support_helper"))
+        .expect("test-module helper symbol");
+    let records = join
+        .records
+        .iter()
+        .filter(|record| {
+            record.attribution.test_occurrence == inline_test.occurrence
+                || record.attribution.test_occurrence == root_test.occurrence
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    assert!(
+        join.records
+            .iter()
+            .all(|record| record.attribution.test_occurrence != support_helper.occurrence)
+    );
+    let feedback_entry = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name.ends_with("::feedback_entry"))
+        .expect("called production symbol");
+
+    assert!(records.iter().all(|record| {
+        record
+            .attribution
+            .covered_occurrences
+            .contains(&feedback_entry.occurrence)
+    }));
+}
+
+#[test]
 fn production_owner_publishes_complete_generation_and_restores_it_after_restart() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
 
     let first = owner
         .build_and_publish(request("file.production.1", 1_100_000), &ActiveControl)
         .expect("first generation publishes");
+    let first = store.generation(&first);
 
     assert_eq!(first.coverage().files_eligible, 1);
     assert!(first.edges().len() + first.edge_abstentions().len() > 0);
@@ -854,21 +1208,40 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
         first.projection().receipt().source_generation,
         first.manifest().generation_id
     );
+    let first_commitments = first
+        .manifest()
+        .source_commitments
+        .as_ref()
+        .expect("published generation seals source commitments");
+    assert_eq!(
+        first_commitments.incremental_manifest_digest,
+        first.projection().request().changes.manifest_digest
+    );
+    assert_ne!(
+        first_commitments.incremental_manifest_digest,
+        first_commitments.full_replay_digest
+    );
 
     let mut restarted =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("restart owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("restart owner");
     let restored = restarted
         .active_generation(&CodeIndexGenerationScopeV1::for_snapshot(
             &request("file.production.scope", 1_100_000).snapshot,
         ))
         .expect("active generation loads")
         .expect("published generation survives restart");
-    assert_eq!(restored.manifest(), first.manifest());
+    assert_eq!(
+        restored
+            .metadata()
+            .expect("sealed manifest parses")
+            .manifest(),
+        first.manifest()
+    );
 
     let second = restarted
-        .build_and_publish(request("file.production.2", 1_200_000), &ActiveControl)
+        .build_and_publish(request("file.production.1", 1_200_000), &ActiveControl)
         .expect("unchanged source carries forward");
+    let second = store.generation(&second);
     assert_eq!(
         second.manifest().parent_generation,
         Some(first.manifest().generation_id.clone())
@@ -882,7 +1255,30 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
             .is_empty()
     );
     assert!(second.projection().request().changes.deleted.is_empty());
-    assert!(!second.projection().request().changes.reused.is_empty());
+    assert!(second.projection().request().changes.reused_count > 0);
+    let second_commitments = second
+        .manifest()
+        .source_commitments
+        .as_ref()
+        .expect("successor seals source commitments");
+    assert_eq!(
+        second_commitments.incremental_manifest_digest,
+        second.projection().request().changes.manifest_digest
+    );
+    assert_ne!(
+        first_commitments.incremental_manifest_digest,
+        second_commitments.incremental_manifest_digest,
+        "incremental commitments retain the physical generation transition"
+    );
+    assert_eq!(
+        second_commitments.parent_full_replay_digest.as_ref(),
+        Some(&first_commitments.full_replay_digest),
+        "successor full-replay binds the parent's authenticated digest"
+    );
+    assert_ne!(
+        first_commitments.full_replay_digest, second_commitments.full_replay_digest,
+        "parent-delta full-replay seals the successor transition, not a copied corpus hash"
+    );
     assert!(
         !second
             .admitted_chunks()
@@ -892,26 +1288,65 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
 }
 
 #[test]
+fn sealed_store_drops_whitespace_only_window_chunks() {
+    const FUNCTIONS: usize = 32;
+    let source: String = (0..FUNCTIONS)
+        .map(|index| format!("pub fn symbol_{index}() {{}}\n\n"))
+        .collect();
+    let mut owner = applying_owner();
+    let generation = owner
+        .build_and_publish(
+            request_with_source(
+                "file.whitespace-window-attribution",
+                1_260_000,
+                "commit.whitespace-window-attribution",
+                "tree.whitespace-window-attribution",
+                &source,
+            ),
+            &ActiveControl,
+        )
+        .expect("whitespace-heavy fixture publishes");
+    let generation = cold_generation(&generation);
+    let chunks = generation.chunks().chunks();
+    assert!(
+        chunks.iter().all(|chunk| {
+            chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                || !chunk
+                    .sanitized_text
+                    .as_str()
+                    .chars()
+                    .all(char::is_whitespace)
+        }),
+        "sealed rows must not include whitespace-only FileWindow chunks"
+    );
+    // One-line functions previously minted signature + body + whitespace window
+    // (3N). Attribution keeps signature + body only.
+    assert_eq!(chunks.len(), FUNCTIONS * 2);
+    assert!(
+        chunks.len() < FUNCTIONS * 3,
+        "sealed chunk count must drop below the three-per-function baseline"
+    );
+    let sealed = PartitionedSealV1::of(&generation);
+    assert!(!sealed.manifest.is_empty(), "sealed store must carry bytes");
+}
+
+#[test]
 fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_identically() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request("file.graph-projection", 1_250_000), &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let projector_revision =
         GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision");
     let projection =
         code_graph_projection_identity(GraphNamespace::new("code-graph-test").expect("namespace"))
             .expect("projection identity");
-    let manifest = build_published_code_graph_manifest_checked(
-        projection.clone(),
-        &generation,
-        &projector_revision,
-        &|| Ok(()),
-    )
-    .expect("published generation projects");
+    let sealed = PartitionedSealV1::of(&generation);
+    let manifest = sealed.graph_manifest(projection.clone(), &projector_revision);
 
     let label_count = |label: &str| {
         manifest
@@ -926,11 +1361,13 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
             .count()
     };
     assert_eq!(label_count("CodeFile"), generation.snapshot().files.len());
-    assert_eq!(label_count("CodeChunk"), generation.chunks().chunks().len());
     assert_eq!(
         label_count("CodeSymbol"),
         generation.symbols().symbols.len()
     );
+    // Chunks bind symbols but are not graph rows: no reader addresses one
+    // through the graph, and a symbol's binding already names its chunk.
+    assert_eq!(label_count("CodeChunk"), 0);
     assert!(
         manifest
             .relations
@@ -941,19 +1378,18 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
         manifest
             .relations
             .iter()
-            .any(|relation| { relation.kind.as_str() == "CodeChunkDescribesSymbol" })
+            .all(|relation| { relation.kind.as_str() != "CodeChunkDescribesSymbol" })
+    );
+    assert!(
+        manifest.entities.len() < generation.chunks().chunks().len(),
+        "the graph must not scale with the chunk count"
     );
 
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("generation restores");
-    let replayed = build_published_code_graph_manifest_checked(
-        projection,
-        &restored,
-        &projector_revision,
-        &|| Ok(()),
-    )
-    .expect("restored generation projects");
+    // The restored generation reseals to the same segments, so its graph is
+    // the same rows and the same recovered digest.
+    let replayed =
+        PartitionedSealV1::of(&sealed.restored()).graph_manifest(projection, &projector_revision);
+    assert_eq!(manifest, replayed);
     assert_eq!(
         manifest
             .expected_recovered_digest(&|| Ok(()))
@@ -964,226 +1400,98 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
     );
 }
 
-/// The graph publication manifest is a pure function of the immutable
-/// generation, so seat retries and the seat/reconcile duplicate publication of
-/// one sealed generation must not re-examine every chunk, symbol, and edge.
-/// The memo is fail-closed: a deadline mid-build records nothing, a memo hit
-/// still refuses an expired request, and a foreign projection identity or
-/// projector revision rebuilds in full instead of aliasing the cached
-/// manifest.
+/// A graph build interrupted mid-stream answers the typed interruption and
+/// publishes nothing, and the same seal then builds in full: the build reads
+/// its segments item by item, so an expired request stops it between reads.
 #[test]
-fn repeated_graph_manifest_builds_reuse_the_memo_without_reexamining_the_generation() {
+fn an_interrupted_graph_build_fails_typed_and_the_next_build_completes() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
-        .build_and_publish(request("file.graph-memo", 1_260_000), &ActiveControl)
+        .build_and_publish(request("file.graph-interrupt", 1_260_000), &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let projector_revision =
         GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision");
-    let projection =
-        code_graph_projection_identity(GraphNamespace::new("code-graph-memo").expect("namespace"))
-            .expect("projection identity");
+    let projection = code_graph_projection_identity(
+        GraphNamespace::new("code-graph-interrupt").expect("namespace"),
+    )
+    .expect("projection identity");
+    let sealed = PartitionedSealV1::of(&generation);
 
-    // A deadline mid-build is a failed generation build that memoizes nothing.
-    let interrupted_checks = Cell::new(0usize);
-    let interrupted = build_published_code_graph_manifest_checked(
-        projection.clone(),
-        &generation,
-        &projector_revision,
-        &|| {
-            interrupted_checks.set(interrupted_checks.get() + 1);
-            if interrupted_checks.get() > 3 {
+    let checks = Cell::new(0usize);
+    let interrupted = sealed
+        .graph_manifest_checked(projection.clone(), &projector_revision, &|| {
+            checks.set(checks.get() + 1);
+            if checks.get() > 3 {
                 Err(GraphDbError::DeadlineExceeded)
             } else {
                 Ok(())
             }
-        },
-    )
-    .expect_err("a deadline mid-build fails the build");
-    assert_eq!(interrupted, CodeGraphProjectionError::DeadlineExceeded);
+        })
+        .expect_err("a deadline mid-build fails the build");
+    assert!(
+        matches!(
+            interrupted,
+            SealedCodeGraphRowsError::Projection(CodeGraphProjectionError::DeadlineExceeded)
+        ),
+        "unexpected interruption: {interrupted:?}"
+    );
 
-    let first_checks = Cell::new(0usize);
-    let first = build_published_code_graph_manifest_checked(
-        projection.clone(),
-        &generation,
-        &projector_revision,
-        &|| {
-            first_checks.set(first_checks.get() + 1);
+    let complete_checks = Cell::new(0usize);
+    let complete = sealed
+        .graph_manifest_checked(projection, &projector_revision, &|| {
+            complete_checks.set(complete_checks.get() + 1);
             Ok(())
-        },
-    )
-    .expect("first complete build");
-    let second_checks = Cell::new(0usize);
-    let second = build_published_code_graph_manifest_checked(
-        projection.clone(),
-        &generation,
-        &projector_revision,
-        &|| {
-            second_checks.set(second_checks.get() + 1);
-            Ok(())
-        },
-    )
-    .expect("memoized build");
-    let first_weak = Arc::downgrade(&first);
-    assert!(
-        Arc::ptr_eq(&first, &second),
-        "a live memo hit must return the exact manifest allocation"
-    );
-    assert_eq!(first, second, "the memo returns the identical manifest");
-    assert!(
-        !first.entities.is_empty(),
-        "fixture must publish graph entities"
-    );
-    assert!(
-        !first.relations.is_empty(),
-        "fixture must publish graph relations"
-    );
+        })
+        .expect("an uninterrupted build completes");
     assert_eq!(
-        first.entities.as_ptr(),
-        second.entities.as_ptr(),
-        "a memo hit must share the immutable entity buffer instead of deep-cloning it"
-    );
-    assert_eq!(
-        first.relations.as_ptr(),
-        second.relations.as_ptr(),
-        "a memo hit must share the immutable relation buffer instead of deep-cloning it"
-    );
-    assert!(
-        first_checks.get() > 3,
-        "the interrupted build must not have been memoized (first build saw {} checks)",
-        first_checks.get()
+        complete
+            .entities
+            .iter()
+            .filter(|entity| entity
+                .labels
+                .iter()
+                .any(|label| label.as_str() == "CodeFile"))
+            .count(),
+        generation.snapshot().files.len()
     );
     assert!(
-        first_checks.get() > first.entities.len() / 4,
-        "a fresh build examines the generation item by item ({} checks over {} entities)",
-        first_checks.get(),
-        first.entities.len()
-    );
-    assert_eq!(
-        second_checks.get(),
-        1,
-        "a memo hit performs the admission check only, with no per-item examination"
-    );
-
-    // A memo hit still refuses an already-expired request.
-    let refused = build_published_code_graph_manifest_checked(
-        projection.clone(),
-        &generation,
-        &projector_revision,
-        &|| Err(GraphDbError::DeadlineExceeded),
-    )
-    .expect_err("an expired request is refused before the memo serves");
-    assert_eq!(refused, CodeGraphProjectionError::DeadlineExceeded);
-
-    drop(first);
-    drop(second);
-    assert!(
-        first_weak.upgrade().is_none(),
-        "the generation must not pin a graph manifest after its callers release it"
-    );
-
-    let rebuilt_checks = Cell::new(0usize);
-    let rebuilt_same_key = build_published_code_graph_manifest_checked(
-        projection.clone(),
-        &generation,
-        &projector_revision,
-        &|| {
-            rebuilt_checks.set(rebuilt_checks.get() + 1);
-            Ok(())
-        },
-    )
-    .expect("an expired same-key memo rebuilds");
-    assert!(
-        rebuilt_checks.get() > 3,
-        "an expired weak memo must rebuild the manifest"
-    );
-    let refreshed_checks = Cell::new(0usize);
-    let refreshed = build_published_code_graph_manifest_checked(
-        projection.clone(),
-        &generation,
-        &projector_revision,
-        &|| {
-            refreshed_checks.set(refreshed_checks.get() + 1);
-            Ok(())
-        },
-    )
-    .expect("the rebuilt manifest refreshes the memo");
-    assert!(Arc::ptr_eq(&rebuilt_same_key, &refreshed));
-    assert_eq!(
-        refreshed_checks.get(),
-        1,
-        "a live refreshed memo performs only the admission check"
-    );
-
-    // A foreign projection identity is a memo miss that rebuilds in full.
-    let foreign = code_graph_projection_identity(
-        GraphNamespace::new("code-graph-memo-other").expect("namespace"),
-    )
-    .expect("projection identity");
-    let foreign_checks = Cell::new(0usize);
-    let rebuilt = build_published_code_graph_manifest_checked(
-        foreign.clone(),
-        &generation,
-        &projector_revision,
-        &|| {
-            foreign_checks.set(foreign_checks.get() + 1);
-            Ok(())
-        },
-    )
-    .expect("foreign projection rebuilds");
-    assert_eq!(rebuilt.projection, foreign);
-    assert!(
-        foreign_checks.get() > 1,
-        "a foreign projection identity cannot serve the cached manifest"
+        complete_checks.get() > complete.entities.len(),
+        "a build checks for interruption per row ({} checks over {} entities)",
+        complete_checks.get(),
+        complete.entities.len()
     );
 }
 
 #[test]
 fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request("file.project-binding", 1_200_000), &ActiveControl)
         .expect("valid generation publishes");
-    let sealed = generation.encode_sealed().expect("valid generation seals");
-    assert_eq!(
-        generation
-            .encode_sealed()
-            .expect("memoized generation seals again"),
-        sealed
-    );
+    let generation = store.generation(&generation);
+    let sealed = PartitionedSealV1::of(&generation);
+    assert_eq!(PartitionedSealV1::of(&generation).manifest, sealed.manifest);
 
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("valid generation restores");
+    let restored = sealed.restored();
     assert_eq!(restored.manifest().project_id, config().project_id);
-    assert_eq!(
-        restored
-            .encode_sealed()
-            .expect("restored generation retains successful validation"),
-        sealed
-    );
+    assert_eq!(PartitionedSealV1::of(&restored).manifest, sealed.manifest);
 
-    let mut envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("sealed generation JSON");
-    envelope["generation"]["files"][0]["authority"]["project_id"] =
-        serde_json::Value::String("project.foreign".to_owned());
-    let state_digest = sealed_generation_payload_digest(
-        SEALED_GENERATION_FORMAT_REVISION_V1,
-        &envelope["generation"],
-    )
-    .expect("forged payload has a state digest");
-    envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
-    let forged = serde_json::to_vec(&envelope).expect("forged sealed generation JSON");
-
-    let error = CodeIndexPublishedGenerationV1::decode_sealed(&forged)
+    // A segment's project comes from the manifest that names it, so a segment
+    // that tries to carry its own is refused rather than rebound.
+    let forged = sealed.with_tampered_file_segment(0, |file| {
+        file["authority"]["project_id"] = serde_json::Value::String("project.foreign".to_owned());
+    });
+    let error = forged
+        .restore(&forged.manifest)
         .expect_err("foreign file authority must fail sealed restoration");
     assert!(
-        error
-            .to_string()
-            .contains("file authority project does not match the generation manifest"),
+        error.to_string().contains("unknown field `project_id`"),
         "unexpected project mismatch error: {error}"
     );
 }
@@ -1191,8 +1499,8 @@ fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
 #[test]
 fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellation() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1205,24 +1513,13 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
             &ActiveControl,
         )
         .expect("generation publishes");
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("sealed generation JSON");
-    let expected_state_digest = id::<ManifestDigest>(
-        envelope["state_digest"]
-            .as_str()
-            .expect("state digest string"),
-    );
+    let generation = store.generation(&generation);
+    let sealed = PartitionedSealV1::of(&generation);
+    let expected_state_digest = sealed.state_digest();
     let control = MutableCancellationControl::default();
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed.clone()),
-        u64::try_from(sealed.len()).expect("sealed length"),
-        expected_state_digest.clone(),
-        1,
-        1024 * 1024,
-        &control,
-    )
-    .expect("verified page source opens");
+    let mut source = sealed
+        .lexical_source(1, 1024 * 1024)
+        .expect("verified page source opens");
 
     let first = match source.next_page(&control).expect("first page") {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
@@ -1253,15 +1550,23 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
         .iter()
         .map(|chunk| chunk.chunk().clone())
         .collect::<Vec<_>>();
+    let mut observed_clone_bodies = first.clone_bodies().len();
     let mut final_page_digest = first.cumulative_digest().clone();
     let receipt = loop {
         match source.next_page(&control).expect("resumed page read") {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
-                assert_eq!(page.chunk_count(), 1);
-                assert_eq!(page.chunks().len(), 1);
+                assert!(
+                    page.chunks()
+                        .len()
+                        .saturating_add(page.imports().len())
+                        .saturating_add(page.clone_bodies().len())
+                        <= 1
+                );
                 assert!(page.payload_bytes() <= 1024 * 1024);
                 final_page_digest = page.cumulative_digest().clone();
                 observed.extend(page.chunks().iter().map(|chunk| chunk.chunk().clone()));
+                observed_clone_bodies =
+                    observed_clone_bodies.saturating_add(page.clone_bodies().len());
             }
             VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
         }
@@ -1277,10 +1582,15 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
     expected.sort_by(|left, right| left.id.cmp(&right.id));
     assert_eq!(observed, expected);
     assert_eq!(receipt.total_chunks(), expected.len() as u64);
-    assert_eq!(receipt.page_count(), expected.len() as u64);
+    assert!(receipt.page_count() >= expected.len() as u64);
+    assert_eq!(receipt.total_clone_bodies(), observed_clone_bodies as u64);
+    assert_eq!(observed_clone_bodies, 3);
     assert_eq!(receipt.cumulative_digest(), &final_page_digest);
     assert_eq!(receipt.source_state_digest(), &expected_state_digest);
-    assert_eq!(receipt.format_revision(), 6);
+    assert_eq!(
+        receipt.format_revision(),
+        SEALED_GENERATION_FORMAT_REVISION_V1
+    );
 }
 
 #[test]
@@ -1320,29 +1630,22 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
         .expect("two-file TypeScript snapshot is canonical");
 
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let file_digest =
-        id::<ManifestDigest>(&format!("sha256:{}", hex::encode(Sha256::digest(&sealed))));
+    let generation = store.generation(&generation);
+    let sealed = PartitionedSealV1::of(&generation);
 
-    let mut initial = VerifiedSealedLexicalPageSourceV1::open_content_addressed(
-        Cursor::new(sealed.clone()),
-        u64::try_from(sealed.len()).expect("sealed length"),
-        file_digest.clone(),
-        64,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect("content-addressed source opens");
+    let mut initial = sealed
+        .lexical_source(64, 1024 * 1024)
+        .expect("content-addressed source opens");
     let retained_layout_bytes = initial.retained_layout_bytes();
-    assert_eq!(
-        retained_layout_bytes,
-        std::mem::size_of::<u64>() * 4,
-        "source mount authority must not retain one byte range per file"
+    assert!(
+        retained_layout_bytes > std::mem::size_of::<u64>() * 4
+            && retained_layout_bytes < sealed.byte_len() / 8,
+        "source layout must count retained file positions while staying compact"
     );
     let first = match initial.next_page(&ActiveControl).expect("first page") {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
@@ -1363,16 +1666,12 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
         )
         .expect("persisted cursor restores");
 
-    let mut resumed = VerifiedSealedLexicalPageSourceV1::open_content_addressed_at(
-        Cursor::new(sealed.clone()),
-        u64::try_from(sealed.len()).expect("sealed length"),
-        file_digest,
-        cursor.clone(),
-        64,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect("persisted cursor reopens the source");
+    let mut resumed = sealed
+        .lexical_source(64, 1024 * 1024)
+        .expect("source reopens");
+    resumed
+        .restore_cursor(&cursor, &ActiveControl)
+        .expect("persisted cursor reopens the source");
     let resumed_page = match resumed.next_page(&ActiveControl).expect("resumed page") {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a resumed page"),
@@ -1410,35 +1709,20 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
             ),
             &ActiveControl,
         )
-        .expect("foreign generation publishes")
-        .encode_sealed()
-        .expect("foreign generation seals");
-    let foreign_digest =
-        id::<ManifestDigest>(&format!("sha256:{}", hex::encode(Sha256::digest(&foreign))));
-    let foreign_source = VerifiedSealedLexicalPageSourceV1::open_content_addressed(
-        Cursor::new(foreign.clone()),
-        u64::try_from(foreign.len()).expect("foreign sealed length"),
-        foreign_digest.clone(),
-        64,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect("one-file content-addressed source opens");
-    assert_eq!(
-        foreign_source.retained_layout_bytes(),
-        retained_layout_bytes,
-        "retained source layout must remain constant between one and two files"
+        .expect("foreign generation publishes");
+    let foreign = store.generation(&foreign);
+    let foreign = PartitionedSealV1::of(&foreign);
+    let mut foreign_source = foreign
+        .lexical_source(64, 1024 * 1024)
+        .expect("one-file content-addressed source opens");
+    assert!(
+        foreign_source.retained_layout_bytes() > std::mem::size_of::<u64>() * 4
+            && foreign_source.retained_layout_bytes() <= retained_layout_bytes,
+        "the one-file source must account for its positions within the two-file allocation bound"
     );
-    let error = VerifiedSealedLexicalPageSourceV1::open_content_addressed_at(
-        Cursor::new(foreign.clone()),
-        u64::try_from(foreign.len()).expect("foreign sealed length"),
-        foreign_digest,
-        cursor,
-        64,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect_err("a cursor minted for another source must fail closed");
+    let error = foreign_source
+        .restore_cursor(&cursor, &ActiveControl)
+        .expect_err("a cursor minted for another source must fail closed");
     assert!(
         error.to_string().contains("cursor") && error.to_string().contains("source"),
         "unexpected foreign cursor error: {error}"
@@ -1447,30 +1731,17 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
 
 #[test]
 fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
-    let mut source_text = String::with_capacity(1_500_000);
-    for ordinal in 0..24_000_u32 {
+    // Exceed the authenticated segment and page bounds without making
+    // parser throughput part of the cancellation and resume contract.
+    let mut source_text = String::with_capacity(128 * 1024);
+    for ordinal in 0..2_048_u32 {
         source_text.push_str(&format!(
             "pub fn bounded_item_{ordinal}() -> u32 {{ {ordinal} }}\n"
         ));
     }
-    // This test is about paging and cancellation resume, not about the parse
-    // budget, so the fixture must parse completely every time. A 1.5 MB file
-    // sits close enough to the 250ms default budget that a busy machine can
-    // time it out, publish a typed unsupported document, and fail this test
-    // for a reason it does not test. Pin a generous budget the same way the
-    // sibling budget test pins a 1ns one — deterministic in both directions.
-    let pool = SharedRetainedParsePool::new(RetainedParsePoolLimits {
-        document: ParseLimits {
-            max_parse_time: Duration::from_secs(60),
-            ..ParseLimits::default()
-        },
-        ..RetainedParsePoolLimits::default()
-    })
-    .expect("retained parse pool");
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner")
-        .with_retained_parse_pool(pool);
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1483,27 +1754,36 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
             &ActiveControl,
         )
         .expect("large generation publishes");
+    let generation = store.generation(&generation);
     let expected_chunks = generation
         .admitted_chunks()
         .expect("published generation retains exact chunks")
         .len() as u64;
     assert!(expected_chunks > 64, "fixture must require multiple pages");
-    let sealed = generation.encode_sealed().expect("large generation seals");
-    let file_digest =
-        id::<ManifestDigest>(&format!("sha256:{}", hex::encode(Sha256::digest(&sealed))));
+    let sealed = PartitionedSealV1::of(&generation);
     let control = MutableCancellationControl::default();
-    let mut source = VerifiedSealedLexicalPageSourceV1::open_content_addressed(
-        Cursor::new(sealed.clone()),
-        u64::try_from(sealed.len()).expect("sealed length"),
-        file_digest.clone(),
-        32,
-        64 * 1024,
-        &control,
-    )
-    .expect("a valid large file must not be rejected by its page bound");
+    let mut source = sealed
+        .lexical_source(32, 64 * 1024)
+        .expect("a valid large file must not be rejected by its page bound");
+    let largest_file_segment = sealed.envelope()["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .iter()
+        .map(|segment| {
+            segment["decoded_size_bytes"]
+                .as_u64()
+                .expect("decoded size")
+        })
+        .max()
+        .expect("one file segment");
     assert!(
-        source.staging_window_bytes() > 4 * 1024 * 1024,
-        "the authenticated one-file artifact must exceed four MiB"
+        largest_file_segment > 64 * 1024,
+        "the one-file segment must exceed the page byte bound"
+    );
+    assert!(
+        source.staging_window_bytes()
+            >= usize::try_from(largest_file_segment).expect("segment size fits usize"),
+        "the staging window must admit the whole authenticated file segment"
     );
 
     let mut emitted_chunks = 0_u64;
@@ -1540,16 +1820,12 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
             &persisted,
         )
         .expect("progress cursor restores");
-    let mut resumed = VerifiedSealedLexicalPageSourceV1::open_content_addressed_at(
-        Cursor::new(sealed.clone()),
-        u64::try_from(sealed.len()).expect("sealed length"),
-        file_digest,
-        cursor,
-        32,
-        64 * 1024,
-        &control,
-    )
-    .expect("resumed large source opens");
+    let mut resumed = sealed
+        .lexical_source(32, 64 * 1024)
+        .expect("resumed large source opens");
+    resumed
+        .restore_cursor(&cursor, &control)
+        .expect("progress cursor restores onto the source");
     let receipt = loop {
         match resumed.next_page(&control).expect("resumed bounded page") {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
@@ -1567,36 +1843,10 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
 }
 
 #[test]
-fn verified_sealed_lexical_source_refuses_a_foreign_state_digest() {
+fn verified_sealed_lexical_imports_are_exact_once_and_fold_their_pages() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
-    let generation = owner
-        .build_and_publish(request("file.lexical-digest", 1_260_000), &ActiveControl)
-        .expect("generation publishes");
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let error = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed.clone()),
-        u64::try_from(sealed.len()).expect("sealed length"),
-        id::<ManifestDigest>(&format!("sha256:{}", "0".repeat(64))),
-        16,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect_err("a foreign durable state digest must not authorize lexical bytes");
-    assert!(
-        error
-            .to_string()
-            .contains("state digest does not match the admitted source"),
-        "unexpected digest error: {error}"
-    );
-}
-
-#[test]
-fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent() {
-    let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let mut request = request_with_source(
         "file.lexical-imports",
         1_265_000,
@@ -1615,30 +1865,19 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     assert!(
         !generation.imports().is_empty(),
         "the fixture must contain parser-backed import evidence"
     );
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("sealed generation JSON");
-    let expected_state_digest = id::<ManifestDigest>(
-        envelope["state_digest"]
-            .as_str()
-            .expect("state digest string"),
-    );
+    let sealed = PartitionedSealV1::of(&generation);
 
     let read = |maximum_page_chunks| {
-        let mut source = VerifiedSealedLexicalPageSourceV1::open(
-            Cursor::new(sealed.clone()),
-            u64::try_from(sealed.len()).expect("sealed length"),
-            expected_state_digest.clone(),
-            maximum_page_chunks,
-            1024 * 1024,
-            &ActiveControl,
-        )
-        .expect("verified import page source opens");
+        let mut source = sealed
+            .lexical_source(maximum_page_chunks, 1024 * 1024)
+            .expect("verified import page source opens");
         let mut imports = Vec::new();
+        let mut folded = initial_import_dictionary_digest().expect("initial import dictionary");
         let receipt = loop {
             match source
                 .next_page(&ActiveControl)
@@ -1654,15 +1893,17 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
                         assert!(page.import_payload_bytes() > 0);
                     }
                     imports.extend(page.imports().iter().cloned());
+                    folded = advance_import_dictionary_digest(&folded, page.import_digest())
+                        .expect("fold page import digest");
                 }
                 VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
             }
         };
-        (imports, receipt)
+        (imports, receipt, folded)
     };
 
-    let (split_imports, split_receipt) = read(1);
-    let (wide_imports, wide_receipt) = read(64);
+    let (split_imports, split_receipt, split_folded) = read(1);
+    let (wide_imports, wide_receipt, wide_folded) = read(64);
     assert_eq!(split_imports, generation.imports());
     assert_eq!(wide_imports, generation.imports());
     assert_eq!(
@@ -1670,11 +1911,11 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
         generation.imports().len() as u64
     );
     assert!(split_receipt.import_payload_bytes() > 0);
-    assert_eq!(
-        split_receipt.import_dictionary_digest(),
-        wide_receipt.import_dictionary_digest(),
-        "the exact import dictionary cannot depend on page boundaries"
-    );
+    // The dictionary is the page-order fold of the emitted pages' own
+    // import digests, which is what a lexical artifact re-derives from its
+    // stored pages.
+    assert_eq!(split_receipt.import_dictionary_digest(), &split_folded);
+    assert_eq!(wide_receipt.import_dictionary_digest(), &wide_folded);
     assert_eq!(
         split_receipt.import_payload_bytes(),
         wide_receipt.import_payload_bytes()
@@ -1718,11 +1959,12 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
         .expect("two-file TypeScript snapshot is canonical");
 
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let import_files = generation
         .imports()
         .iter()
@@ -1734,23 +1976,10 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
         "both files must contribute parser-backed import evidence"
     );
 
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("sealed generation JSON");
-    let state_digest = id::<ManifestDigest>(
-        envelope["state_digest"]
-            .as_str()
-            .expect("state digest string"),
-    );
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed.clone()),
-        u64::try_from(sealed.len()).expect("sealed length"),
-        state_digest,
-        usize::MAX,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect("verified page source opens");
+    let sealed = PartitionedSealV1::of(&generation);
+    let mut source = sealed
+        .lexical_source(usize::MAX, 1024 * 1024)
+        .expect("verified page source opens");
     let mut previous_cursor = None;
     let mut observed_chunks = Vec::new();
     let mut observed_imports = Vec::new();
@@ -1796,28 +2025,16 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
 #[test]
 fn rejected_sealed_lexical_page_admission_does_not_advance_the_source() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request("file.lexical-admission", 1_266_500), &ActiveControl)
         .expect("generation publishes");
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("sealed generation JSON");
-    let state_digest = id::<ManifestDigest>(
-        envelope["state_digest"]
-            .as_str()
-            .expect("state digest string"),
-    );
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed.clone()),
-        u64::try_from(sealed.len()).expect("sealed length"),
-        state_digest,
-        usize::MAX,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect("verified page source opens");
+    let generation = store.generation(&generation);
+    let sealed = PartitionedSealV1::of(&generation);
+    let mut source = sealed
+        .lexical_source(usize::MAX, 1024 * 1024)
+        .expect("verified page source opens");
     let cursor_before = source
         .cursor()
         .persisted_bytes()
@@ -1893,8 +2110,8 @@ fn sealed_lexical_page_bytes(page: &VerifiedSealedLexicalPageV1) -> Vec<u8> {
 #[test]
 fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let mut request = request_with_source(
         "file.lexical-import-capacity",
         1_267_000,
@@ -1913,29 +2130,32 @@ fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("sealed generation JSON");
-    let state_digest = id::<ManifestDigest>(
-        envelope["state_digest"]
-            .as_str()
-            .expect("state digest string"),
-    );
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed.clone()),
-        u64::try_from(sealed.len()).expect("sealed length"),
-        state_digest,
-        usize::MAX,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect("verified page source opens");
+    let generation = store.generation(&generation);
+    let sealed = PartitionedSealV1::of(&generation);
+    let mut source = sealed
+        .lexical_source(usize::MAX, 1024 * 1024)
+        .expect("verified page source opens");
     let page = match source.next_page(&ActiveControl).expect("verified page") {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a page"),
     };
-    assert!(!page.chunks().is_empty());
-    assert!(!page.imports().is_empty());
+    assert!(
+        page.chunks()
+            .iter()
+            .all(|chunk| chunk.chunk().anchor.file_occurrence_id.as_str()
+                == "file.lexical-import-capacity"),
+        "every chunk belongs to the fixture file"
+    );
+    assert!(
+        page.symbol_displays()
+            .iter()
+            .flatten()
+            .any(|display| display.qualified_name() == "src/imports.ts::render"),
+        "the page carries the fixture function under its logical path"
+    );
+    assert_eq!(page.imports().len(), 1);
+    assert_eq!(page.imports()[0].module_specifier, "widget-kit");
+    assert_eq!(page.imports()[0].logical_path, "src/imports.ts");
 
     let vector_and_module_capacity_floor = page
         .chunk_capacity()
@@ -1951,44 +2171,6 @@ fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     );
 }
 
-#[test]
-fn verified_sealed_lexical_source_reads_the_legacy_v5_payload_without_full_restore() {
-    let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
-    let generation = owner
-        .build_and_publish(request("file.lexical-v5", 1_270_000), &ActiveControl)
-        .expect("generation publishes");
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let mut envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("sealed generation JSON");
-    envelope["generation"]["format_revision"] = serde_json::Value::from(5);
-    let state_digest = sealed_generation_payload_digest(5, &envelope["generation"])
-        .expect("legacy payload digest");
-    envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
-    let legacy = serde_json::to_vec(&envelope).expect("legacy sealed generation JSON");
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(legacy.clone()),
-        u64::try_from(legacy.len()).expect("legacy sealed length"),
-        state_digest,
-        64,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect("legacy verified page source opens");
-
-    let receipt = loop {
-        match source.next_page(&ActiveControl).expect("legacy page read") {
-            VerifiedSealedLexicalPageReadV1::Page(page) => {
-                assert!(!page.chunks().is_empty() || !page.imports().is_empty())
-            }
-            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
-        }
-    };
-    assert_eq!(receipt.format_revision(), 5);
-    assert!(receipt.total_chunks() > 0);
-}
-
 /// The published-generation integrity gate is an amortized load-time check.
 /// Verifying once per loaded generation must reach exactly the verdict a fresh
 /// verification reaches, and must stay fail-closed for a generation that has
@@ -1996,11 +2178,12 @@ fn verified_sealed_lexical_source_reads_the_legacy_v5_payload_without_full_resto
 #[test]
 fn published_generation_validation_is_amortized_per_loaded_generation() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request("file.validation.memo", 1_300_000), &ActiveControl)
         .expect("valid generation publishes");
+    let generation = store.generation(&generation);
 
     // Publication already ran the full gate, so the generation carries a
     // verified mark and later seals reuse it instead of re-verifying.
@@ -2008,29 +2191,24 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
         generation.is_validated(),
         "publishing a generation must run its integrity gate"
     );
-    let sealed = generation.encode_sealed().expect("valid generation seals");
-    let resealed = generation
-        .encode_sealed()
-        .expect("an already-verified generation reseals");
+    let sealed = PartitionedSealV1::of(&generation);
+    let resealed = PartitionedSealV1::of(&generation);
     assert_eq!(
-        sealed, resealed,
+        sealed.manifest, resealed.manifest,
         "the memoized gate must reach the same verdict and payload as the first check"
     );
 
     // Restoring re-reads bytes from the sealed store, so it must verify fresh
     // rather than trust any carried mark.
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("valid generation restores");
+    let restored = sealed.restored();
     assert!(
         restored.is_validated(),
         "a restored generation must be fully verified before it can serve"
     );
     assert_eq!(restored.manifest(), generation.manifest());
     assert_eq!(
-        restored
-            .encode_sealed()
-            .expect("restored generation reseals"),
-        sealed,
+        PartitionedSealV1::of(&restored).manifest,
+        sealed.manifest,
         "a restored generation must reseal to identical bytes"
     );
 
@@ -2050,26 +2228,44 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
             .all(|(first, second)| first.chunk() == second.chunk()),
         "amortized admission must return the same chunks as the first admission"
     );
+}
 
-    // Repeat attribution reads are memoized and must stay identical.
-    let first_attribution = restored
-        .test_attribution_authority()
-        .expect("test attribution authority");
-    let second_attribution = restored
-        .test_attribution_authority()
-        .expect("repeat attribution read is amortized");
-    let generation_id = restored.manifest().generation_id.clone();
-    assert_eq!(
-        format!(
-            "{:?}",
-            first_attribution.read_test_attribution(&generation_id)
-        ),
-        format!(
-            "{:?}",
-            second_attribution.read_test_attribution(&generation_id)
-        ),
-        "amortized attribution must return the same evidence as the first read"
+#[test]
+fn sealed_manifest_authenticates_source_commitments_and_refuses_missing_history() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request("file.source-commitments", 1_350_000),
+            &ActiveControl,
+        )
+        .expect("valid generation publishes");
+    let generation = store.generation(&generation);
+    let sealed = PartitionedSealV1::of(&generation);
+    let envelope = sealed.envelope();
+
+    let mut tampered = envelope.clone();
+    tampered["generation"]["manifest"]["source_commitments"]["full_replay_digest"] =
+        serde_json::json!(format!("sha256:{}", "f".repeat(64)));
+    assert!(
+        sealed
+            .restore(&reseal_manifest(tampered))
+            .expect_err("the authenticated source commitment must reject tampering")
+            .to_string()
+            .contains("seal")
     );
+
+    let mut historical = envelope;
+    historical["generation"]["manifest"]
+        .as_object_mut()
+        .expect("generation manifest")
+        .remove("source_commitments")
+        .expect("current manifest carries source commitments");
+    assert!(matches!(
+        sealed.restore(&reseal_manifest(historical)),
+        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
+    ));
 }
 
 /// Corruption of chunk evidence must still be caught by the very first
@@ -2078,36 +2274,29 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
 #[test]
 fn corrupted_chunk_evidence_fails_the_first_validation_of_a_restored_generation() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request("file.validation.corrupt", 1_400_000),
             &ActiveControl,
         )
         .expect("valid generation publishes");
-    let sealed = generation.encode_sealed().expect("valid generation seals");
-
-    let mut envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("sealed generation JSON");
-    let chunk = &mut envelope["generation"]["files"][0]["artifacts"]["chunks"]["chunks"][0];
-    assert!(
-        !chunk.is_null(),
-        "the fixture generation must contain at least one chunk"
-    );
+    let generation = store.generation(&generation);
     // Break the chunk's canonical identity so it no longer matches the document
-    // membership its file artifact claims.
-    chunk["id"] = serde_json::Value::String("chunk.tampered".to_owned());
-    // Re-seal the envelope so the outer state digest cannot be what rejects it.
-    let state_digest = sealed_generation_payload_digest(
-        SEALED_GENERATION_FORMAT_REVISION_V1,
-        &envelope["generation"],
-    )
-    .expect("forged payload has a state digest");
-    envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
-    let forged = serde_json::to_vec(&envelope).expect("forged sealed generation JSON");
+    // membership its file artifact claims, then re-address the segment and
+    // reseal the manifest so neither digest can be what rejects it.
+    let forged = PartitionedSealV1::of(&generation).with_tampered_file_segment(0, |file| {
+        let chunk = &mut file["artifacts"]["chunks"]["chunks"][0];
+        assert!(
+            !chunk.is_null(),
+            "the fixture generation must contain at least one chunk"
+        );
+        chunk["id"] = serde_json::Value::String("chunk.tampered".to_owned());
+    });
 
-    let error = CodeIndexPublishedGenerationV1::decode_sealed(&forged)
+    let error = forged
+        .restore(&forged.manifest)
         .expect_err("corrupted chunk evidence must fail the first validation");
     let message = error.to_string();
     assert!(
@@ -2124,8 +2313,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
     assert!(primary_store.shares_repository_store(&linked_store));
 
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let primary_request = request_in_scope(
         "file.primary.1",
         1_100_000,
@@ -2137,6 +2325,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
     let primary = owner
         .build_and_publish(primary_request, &ActiveControl)
         .expect("primary generation publishes");
+    let primary = store.generation(&primary);
 
     let linked_request = request_in_scope(
         "file.linked.1",
@@ -2149,6 +2338,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
     let linked = owner
         .build_and_publish(linked_request, &ActiveControl)
         .expect("linked-worktree generation publishes");
+    let linked = store.generation(&linked);
 
     assert_ne!(primary_scope, linked_scope);
     assert_ne!(
@@ -2162,6 +2352,8 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
             .load_active(&primary_scope)
             .expect("primary scope read")
             .expect("primary remains active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         primary.manifest()
     );
@@ -2170,6 +2362,8 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
             .load_active(&linked_scope)
             .expect("linked scope read")
             .expect("linked remains active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         linked.manifest()
     );
@@ -2179,8 +2373,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
 fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let first = owner
         .build_and_publish(
             request_in_scope(
@@ -2193,10 +2386,11 @@ fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
             &ActiveControl,
         )
         .expect("first linked-worktree generation");
+    let first = store.generation(&first);
     let second = owner
         .build_and_publish(
             request_in_scope(
-                "file.linked.2",
+                "file.linked.1",
                 1_200_000,
                 "refs/heads/feature",
                 Some("worktree.feature"),
@@ -2205,6 +2399,7 @@ fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
             &ActiveControl,
         )
         .expect("no-op linked-worktree generation");
+    let second = store.generation(&second);
 
     assert_eq!(
         second.manifest().parent_generation,
@@ -2219,22 +2414,21 @@ fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
             .is_empty()
     );
     assert!(second.projection().request().changes.deleted.is_empty());
-    assert!(!second.projection().request().changes.reused.is_empty());
+    assert!(second.projection().request().changes.reused_count > 0);
     assert_eq!(store.scope_count(), 1);
 }
 
 /// A checkout misclassified as "not a git repository" resolves a scope
 /// without a reference or worktree while the store still answers with the
 /// sealed git-identified generation. That answer must be one terminal typed
-/// reset state — never the generic contract error callers can only retry on
-/// a one-second cadence — and the sealed generation's git identity must
+/// reset state, never the generic contract error callers can only retry on
+/// a one-second cadence, and the sealed generation's git identity must
 /// survive the refusal untouched.
 #[test]
 fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retrying() {
     let store = PartialKeyPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let hawk_request = request_in_scope(
         "file.identity.hawk",
         1_100_000,
@@ -2246,6 +2440,7 @@ fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retryin
     let sealed = owner
         .build_and_publish(hawk_request, &ActiveControl)
         .expect("git-identified generation publishes");
+    let sealed = cold_generation(&sealed);
 
     let non_git = request("file.identity.non-git", 1_200_000);
     let non_git_scope = CodeIndexGenerationScopeV1::for_snapshot(&non_git.snapshot);
@@ -2283,6 +2478,7 @@ fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retryin
         .load_active(&hawk_scope)
         .expect("read publication state")
         .expect("the sealed generation is never dropped by the refusal");
+    let retained = retained.metadata().expect("sealed manifest parses");
     assert_eq!(retained.manifest(), sealed.manifest());
     assert_eq!(retained.sealed_scope(), hawk_scope);
 }
@@ -2294,8 +2490,7 @@ fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retryin
 fn non_git_scope_stays_independently_active_beside_git_identified_generations() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let hawk_request = request_in_scope(
         "file.terminal.hawk",
         1_100_000,
@@ -2307,12 +2502,14 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
     let hawk = owner
         .build_and_publish(hawk_request, &ActiveControl)
         .expect("git-identified generation publishes");
+    let hawk = store.generation(&hawk);
 
     let non_git_request = request("file.terminal.non-git", 1_200_000);
     let non_git_scope = CodeIndexGenerationScopeV1::for_snapshot(&non_git_request.snapshot);
     let non_git = owner
         .build_and_publish(non_git_request, &ActiveControl)
         .expect("a non-git snapshot indexes as its own terminal outcome");
+    let non_git = store.generation(&non_git);
 
     assert!(non_git.manifest().parent_generation.is_none());
     assert_eq!(store.scope_count(), 2);
@@ -2321,6 +2518,8 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
             .active_generation(&hawk_scope)
             .expect("hawk scope read")
             .expect("hawk stays active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         hawk.manifest()
     );
@@ -2329,6 +2528,8 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
             .active_generation(&non_git_scope)
             .expect("non-git scope read")
             .expect("non-git stays active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         non_git.manifest()
     );
@@ -2338,13 +2539,13 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
 /// partial key (repository-only pointer) must never adopt a generation
 /// sealed for another checkout. A same-checkout label move is a rebuild
 /// that still names the incumbent as the compare-and-swap expected token
-/// (`active_generation` stays `Option<Published>` — reuse denied is
+/// (`active_generation` stays `Option<Published>`, reuse denied is
 /// `Ok(None)`; CAS is proven by a successful publish against the slot).
 #[test]
 fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     let store = PartialKeyPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let hawk_request = request_in_scope(
         "file.dispatch.hawk",
         1_100_000,
@@ -2356,6 +2557,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     let hawk = owner
         .build_and_publish(hawk_request, &ActiveControl)
         .expect("hawk generation publishes");
+    let hawk = cold_generation(&hawk);
 
     let pr_worktree_scope = CodeIndexGenerationScopeV1 {
         repository: hawk_scope.repository.clone(),
@@ -2389,12 +2591,14 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     );
 
     // The exact sealed full scope still dispatches while the incumbent sits
-    // in the slot — before the label-move publish replaces it.
+    // in the slot, before the label-move publish replaces it.
     assert_eq!(
         owner
             .active_generation(&hawk_scope)
             .expect("exact scope read")
             .expect("hawk stays active for its own scope")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         hawk.manifest()
     );
@@ -2411,6 +2615,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
             &ActiveControl,
         )
         .expect("label-move publish must CAS against the prior-label incumbent");
+    let moved = cold_generation(&moved);
     assert_ne!(
         moved.manifest().generation_id,
         hawk.manifest().generation_id,
@@ -2418,7 +2623,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     );
 }
 
-/// The code shard/slot key is the sealed branch label inside the full scope —
+/// The code shard/slot key is the sealed branch label inside the full scope,
 /// never a filesystem path (the scope carries none) and never the generation
 /// id: successive generations share their branch's slot while a second branch
 /// on the same worktree splits into its own independently active slot.
@@ -2426,8 +2631,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
 fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let first = owner
         .build_and_publish(
             request_in_scope(
@@ -2440,6 +2644,7 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
             &ActiveControl,
         )
         .expect("first hawk generation publishes");
+    let first = store.generation(&first);
     let second = owner
         .build_and_publish(
             request_in_scope(
@@ -2452,6 +2657,7 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
             &ActiveControl,
         )
         .expect("second hawk generation publishes");
+    let second = store.generation(&second);
 
     // A new generation id under the same sealed branch label reuses the slot.
     assert_ne!(
@@ -2474,6 +2680,7 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
             &ActiveControl,
         )
         .expect("pr generation publishes");
+    let pr = store.generation(&pr);
     assert_eq!(pr.sealed_scope().worktree, first.sealed_scope().worktree);
     assert_ne!(pr.sealed_scope(), first.sealed_scope());
     assert_eq!(
@@ -2487,57 +2694,23 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
             .active_generation(&second.sealed_scope())
             .expect("hawk slot read")
             .expect("hawk slot stays active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         second.manifest()
     );
 
     // The sealed branch label is durable through the sealed codec, so a
     // restored generation still names the exact slot it was sealed for.
-    let restored = CodeIndexPublishedGenerationV1::decode_sealed(
-        &pr.encode_sealed().expect("pr generation seals"),
-    )
-    .expect("pr generation restores");
+    let restored = PartitionedSealV1::of(&pr).restored();
     assert_eq!(restored.sealed_scope(), pr.sealed_scope());
-}
-
-#[test]
-fn branch_stack_nodes_and_snapshots_derive_the_same_path_free_scope() {
-    let request = request_in_scope(
-        "file.branch-stack.1",
-        1_100_000,
-        "refs/heads/feature",
-        Some("worktree.feature"),
-        "commit.feature.1",
-    );
-    let node = BranchStackNodeV1 {
-        node_id: id::<StackNodeId>("stack-node.feature"),
-        project_id: id("project.fixture"),
-        repository_id: request.snapshot.repository.clone(),
-        reference: request
-            .snapshot
-            .reference
-            .clone()
-            .expect("branch reference"),
-        tip: request
-            .snapshot
-            .source_revision
-            .clone()
-            .expect("branch tip"),
-        worktree_id: request.snapshot.worktree.clone(),
-    };
-
-    assert_eq!(
-        CodeIndexGenerationScopeV1::for_branch_stack_node(&node),
-        CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot)
-    );
 }
 
 #[test]
 fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
 
     let cancelled = owner
         .build_and_publish(
@@ -2578,33 +2751,9 @@ fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
     );
 }
 
-#[test]
-fn production_owner_never_activates_a_generation_after_projection_failure() {
-    let store = SharedPublicationStore::default();
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), RejectingProjectionSink)
-            .expect("production owner");
-
-    let error = owner
-        .build_and_publish(
-            request("file.production.rejected", 1_100_000),
-            &ActiveControl,
-        )
-        .expect_err("rejected projection must not publish");
-    assert!(matches!(error, CodeIndexProductionErrorV1::Projection(_)));
-    assert!(
-        store
-            .load_active(&CodeIndexGenerationScopeV1::for_snapshot(
-                &request("file.production.rejected.scope", 1_100_000).snapshot,
-            ))
-            .expect("read publication state")
-            .is_none()
-    );
-}
-
 /// Width is sizing policy, never semantics. A generation built with the
 /// per-file sweep running inline must be byte-identical to one built at full
-/// machine width — same manifest, same chunks, same digests, same order.
+/// machine width, same manifest, same chunks, same digests, same order.
 #[test]
 fn parallel_and_sequential_generations_are_byte_identical() {
     parallel_equivalence::assert_parallel_and_sequential_generations_are_byte_identical();
@@ -2619,8 +2768,1773 @@ fn parallel_and_sequential_decodes_are_byte_identical() {
     parallel_equivalence::assert_parallel_and_sequential_decodes_are_byte_identical();
 }
 
+/// Sealing resolves each file's retained cross-file references against the
+/// whole staged file set, one ordered fan-out over the indexing pool. Width
+/// must not change which references bind or where the resulting edges sort.
 #[test]
-#[ignore = "sealed-decode measurement harness; run one width per process, see fn docs"]
-fn sealed_decode_width_probe() {
-    parallel_equivalence::run_sealed_decode_width_probe();
+fn cross_file_resolution_is_width_invariant() {
+    parallel_equivalence::assert_cross_file_resolution_is_width_invariant();
+}
+
+/// A build request over `(file_occurrence, logical_path, source)` Rust files
+/// for the partitioned-codec fixtures; `changed_files` names the paths the
+/// increment re-extracts.
+fn partitioned_request(
+    sources: &[(&str, &str, &str)],
+    changed_files: BTreeSet<String>,
+    sealed_at: i64,
+) -> CodeIndexBuildRequestV1 {
+    let mut identity = Sha256::new();
+    let mut files = Vec::new();
+    let mut captured_files = Vec::new();
+    let mut receipts = Vec::new();
+    for (index, &(occurrence, logical_path, source)) in sources.iter().enumerate() {
+        identity.update(logical_path.as_bytes());
+        identity.update([0]);
+        identity.update(source.as_bytes());
+        let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+        files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: logical_path.to_owned(),
+            language: Some(id::<LanguageId>("rust")),
+            content_digest: content_digest(source.as_bytes()),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(source.as_bytes()),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+        });
+        receipts.push(id::<SanitizationReceiptId>(&format!(
+            "receipt.partitioned.{index}"
+        )));
+    }
+    CodeIndexBuildRequestV1 {
+        snapshot: SanitizedCodeSnapshotV1 {
+            repository: id::<RepositoryId>("repository.production"),
+            worktree: None,
+            reference: None,
+            source_revision: None,
+            sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
+            sanitization_receipts: receipts,
+            content_identity: content_digest(&identity.finalize()),
+            captured_at: UtcMicros(1_000_000),
+            files,
+            omitted_sources: Vec::new(),
+        },
+        captured_files,
+        changed_files,
+        invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
+        sealed_at: UtcMicros(sealed_at),
+        target_projection_key: projection_key(),
+    }
+}
+
+/// Files no fixture edit touches. With them a one-file edit stays within the
+/// share of a corpus an increment seals over its parent.
+const SPARSE_FILLERS: [(&str, &str, &str); 7] = [
+    (
+        "file.filler.0",
+        "src/filler_0.rs",
+        "pub const FILLER_0: u64 = 0;\n",
+    ),
+    (
+        "file.filler.1",
+        "src/filler_1.rs",
+        "pub const FILLER_1: u64 = 1;\n",
+    ),
+    (
+        "file.filler.2",
+        "src/filler_2.rs",
+        "pub const FILLER_2: u64 = 2;\n",
+    ),
+    (
+        "file.filler.3",
+        "src/filler_3.rs",
+        "pub const FILLER_3: u64 = 3;\n",
+    ),
+    (
+        "file.filler.4",
+        "src/filler_4.rs",
+        "pub const FILLER_4: u64 = 4;\n",
+    ),
+    (
+        "file.filler.5",
+        "src/filler_5.rs",
+        "pub const FILLER_5: u64 = 5;\n",
+    ),
+    (
+        "file.filler.6",
+        "src/filler_6.rs",
+        "pub const FILLER_6: u64 = 6;\n",
+    ),
+];
+
+fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
+    let mut sources = vec![
+        (
+            "file.partitioned.alpha",
+            "src/alpha.rs",
+            "pub struct Alpha;\nimpl Alpha { pub fn call(&self) -> u64 { crate::beta::beta() } }\n",
+        ),
+        (
+            "file.partitioned.beta",
+            "src/beta.rs",
+            if beta_value == 1 {
+                "pub fn beta() -> u64 { 1 }\n"
+            } else {
+                "pub fn beta() -> u64 { 2 }\n"
+            },
+        ),
+        (
+            "file.partitioned.unresolved",
+            "src/unresolved.rs",
+            "pub fn unresolved() { missing_external(); }\n",
+        ),
+    ];
+    sources.extend(SPARSE_FILLERS);
+    sources.sort_by_key(|&(_, path, _)| path);
+    let changed_files = if beta_value == 1 {
+        BTreeSet::new()
+    } else {
+        BTreeSet::from(["src/beta.rs".to_owned()])
+    };
+    partitioned_request(&sources, changed_files, sealed_at)
+}
+
+/// A segment publisher that stores every published segment under its digest
+/// (evidence pages assembled into one pack under the commit digest) and counts
+/// the file segments the encoder actually published, as opposed to reused.
+fn collect_published_segments<'a>(
+    segments: &'a mut BTreeMap<String, Vec<u8>>,
+    published_files: &'a mut usize,
+) -> impl FnMut(SealedGenerationSegmentPublicationV1<'_>) -> Result<(), CodeIndexProductionErrorV1> + 'a
+{
+    let mut evidence_pack = Vec::new();
+    move |publication| {
+        match publication {
+            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                *published_files += 1;
+                segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+            | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+                segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                page_digest, bytes, ..
+            } => {
+                segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                evidence_pack.extend_from_slice(bytes);
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                segment_digest,
+                ..
+            } => {
+                segments.insert(
+                    segment_digest.as_str().to_owned(),
+                    std::mem::take(&mut evidence_pack),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn partitioned_codec_fixture() -> (
+    CodeIndexPublishedGenerationV1,
+    Vec<u8>,
+    BTreeMap<String, Vec<u8>>,
+) {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
+        .expect("partitioned fixture owner");
+    let first = owner
+        .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
+        .expect("partitioned parent generation");
+    let first = store.generation(&first);
+    let mut segments = BTreeMap::new();
+    let mut parent_file_segments = 0;
+    let parent_manifest = first
+        .encode_partitioned_sealed(collect_published_segments(
+            &mut segments,
+            &mut parent_file_segments,
+        ))
+        .expect("partitioned parent encoding");
+    let second = owner
+        .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
+        .expect("partitioned child generation");
+    let second = store.generation(&second);
+    let mut child_file_segments = 0;
+    let manifest = second
+        .encode_partitioned_sealed_with_parent(
+            Some(&parent_manifest),
+            collect_published_segments(&mut segments, &mut child_file_segments),
+        )
+        .expect("partitioned child encoding");
+    assert!(
+        child_file_segments < second.snapshot().files.len(),
+        "the child fixture must reuse at least one parent file segment"
+    );
+    assert!(
+        !second.lineage().is_empty(),
+        "the child fixture needs lineage"
+    );
+    assert!(
+        !second.edges().is_empty(),
+        "the child fixture needs edge evidence"
+    );
+    (second.as_ref().clone(), manifest, segments)
+}
+
+const PARTITIONED_FORMAT_STATE_DIGEST: &str =
+    "sha256:0ba68ca337a4760c0221c1212eec669965f43abdd244f0b21be7f705f7449918";
+const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
+    (
+        "sha256:9b175e6aa1ddf6db4138181c0dd1cd522f37381898a58d46e26b1165b613727b",
+        1_758,
+    ),
+    (
+        "sha256:6c08cbbdb70f1525840cfa56105776d2a40a3266063d1c236bc39326debd7411",
+        1_299,
+    ),
+    (
+        "sha256:a816a13067d1a67f8e586e1124d24a668fbd8f91efab1b870e8ad3a4bc0a7429",
+        1_078,
+    ),
+    (
+        "sha256:a675b6ca3bc6589ce763361ab9a89d26b919c13a4b4d1b74f18066fd8b44d710",
+        1_079,
+    ),
+    (
+        "sha256:4f0fca93b58223c5c8a6f4730ba587b8fe8ea38c7138936029cf15ba9984d138",
+        1_079,
+    ),
+    (
+        "sha256:9550ad83470e480d446e707d8bbc5a5097c5b11eacffe01190354235c279942e",
+        1_075,
+    ),
+    (
+        "sha256:ec436e840d50c4a8d132ade521b020a55ff6c7159a7ece8019237b1e5386ccb0",
+        1_078,
+    ),
+    (
+        "sha256:7f3477103cfeed2582bc2bbad44b3c581ff6fbd68c6bf962869485915f0b33bd",
+        1_080,
+    ),
+    (
+        "sha256:7419618fb4744be808a03079a7ca6f3e5250a59d356949a894f000214278eef9",
+        1_078,
+    ),
+    (
+        "sha256:5feaff499e2ec9fd2c1d39f41e45c789890fa58ff104619390875488dd40cdb1",
+        1_354,
+    ),
+    (
+        "sha256:165f48c378905b4ce90684ece5cab75ed183f64fb6dc297685e2971efc2c3cf8",
+        121,
+    ),
+    (
+        "sha256:c533708b147f5e43f09a12ee3127bbd64e534941e5cf073cf67ab3f4822fdb42",
+        465,
+    ),
+    (
+        "sha256:cfac493dd3ca30c60f7279e72b8d5db400dc22e47b405927954db971576dddf1",
+        1_858,
+    ),
+    (
+        "sha256:d9a3da7c730fc4958e219d5e7921b645f7e6731c6ce9d22dc9f3f622fe768ea1",
+        3_984,
+    ),
+    (
+        "sha256:0a5746563e2465439f54069e2dccc4972170d206bd5420a8955a3ebb863e9a51",
+        1_329,
+    ),
+    (
+        "sha256:273097cb57adc4f92277d3e1238825105adf9a23bd4494a43d5cda0bee510e51",
+        1_338,
+    ),
+    (
+        "sha256:40e0101a2244ae4d1a6232d909356b8577bb3606b95575dee2639fd65eb6213e",
+        1_338,
+    ),
+    (
+        "sha256:82df89e24eb0771ca1c6c31d05c262d1b971356e2ab26bf876eefc1c501edca8",
+        1_338,
+    ),
+    (
+        "sha256:84ad00e4dd24d6f67d4a2fa8379aefdeaf94c5fe3b525d7e4e0048e4e9ac700b",
+        1_338,
+    ),
+    (
+        "sha256:ffe8998ec315fd8954d2f0e5c05f56e6e5403afbb7c2a02882a60a9ffd3dcce2",
+        1_338,
+    ),
+    (
+        "sha256:f4ccf95c125276ed143d69c9d478f91ceb4107d8fb5c8bb1801cda81d8e4eaf1",
+        1_338,
+    ),
+    (
+        "sha256:a45cee5d0ac5b5e2da64db826421b5b414d7c96a75a18f68b71dc1a9fcbc2f04",
+        1_338,
+    ),
+    (
+        "sha256:e303343adb9c31758c787fe148e8e88cff01d183e26650d682a7013dbd042187",
+        1_370,
+    ),
+    (
+        "sha256:4ae2068fdf1dc444f1c34af2f270d0ce1313e6acef3a4c4cc2e797469796be7a",
+        2_565,
+    ),
+    (
+        "sha256:a222088a3f8a3b846e44eb924fe09389f047fe4fcb6957d31a1b5d308426661f",
+        84,
+    ),
+    (
+        "sha256:4e28da181f8c91d90cd5eccd0899f0bdf35c00e2591f2d342afb7428da3ceeac",
+        4,
+    ),
+];
+
+/// A sealed file segment stores each identity once: chunk ids, symbol
+/// identities, file identities, symbol content digests, and WholeSymbol term
+/// occurrences that the segment already determines are omitted (restore
+/// rebuilds them; the round trip above proves it exactly).
+#[test]
+fn partitioned_file_segments_omit_the_identities_they_determine() {
+    let (_, manifest, segments) = partitioned_codec_fixture();
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+        .expect("partitioned segment identities parse");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    let file_segment_count = envelope["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .len();
+    let files = &identities[..file_segment_count];
+    let mut chunks = 0;
+    let mut explicit_ids = 0;
+    let mut whole_symbol_terms = 0;
+    for identity in files {
+        let mut decoded = Vec::new();
+        flate2::read::DeflateDecoder::new(segments[identity.digest.as_str()].as_slice())
+            .read_to_end(&mut decoded)
+            .expect("file segment inflates");
+        let segment: serde_json::Value =
+            serde_json::from_slice(&decoded).expect("file segment JSON");
+        let artifacts = &segment["file"]["artifacts"];
+        for symbol in artifacts["symbols"].as_array().expect("symbol rows") {
+            for field in ["identity", "file_identity", "content_digest"] {
+                assert!(
+                    symbol.get(field).is_none(),
+                    "a symbol row repeats its derivable {field}: {symbol}"
+                );
+            }
+        }
+        for chunk in artifacts["chunks"]["chunks"]
+            .as_array()
+            .expect("chunk rows")
+        {
+            chunks += 1;
+            explicit_ids += usize::from(chunk.get("id").is_some());
+            for term in chunk["exact_terms"].as_array().expect("exact term rows") {
+                if term["kind"] == "whole_symbol" {
+                    whole_symbol_terms += 1;
+                    assert!(
+                        term.get("symbol_occurrence_id").is_none(),
+                        "a WholeSymbol term repeats its chunk's occurrence: {chunk}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        chunks > 0 && whole_symbol_terms > 0,
+        "the fixture must exercise both rules"
+    );
+    assert!(
+        explicit_ids < chunks,
+        "symbol chunks must omit their derivable ids ({explicit_ids} of {chunks} explicit)"
+    );
+}
+
+#[test]
+fn partitioned_codec_has_stable_bytes_and_round_trips() {
+    let (expected, manifest, segments) = partitioned_codec_fixture();
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    assert_eq!(
+        envelope["state_digest"], PARTITIONED_FORMAT_STATE_DIGEST,
+        "the canonical manifest payload bytes changed"
+    );
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+        .expect("partitioned segment identities parse");
+    let graph_page_digests = envelope["generation"]["code_graph_pages"]
+        .as_array()
+        .expect("code graph page descriptors")
+        .iter()
+        .map(|page| {
+            page["page_digest"]
+                .as_str()
+                .expect("code graph page digest")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    let index = &envelope["generation"]["resolution_index"];
+    let resolution_index_digests = index["definitions"]
+        .as_array()
+        .expect("definition page descriptors")
+        .iter()
+        .chain(
+            index["references"]
+                .as_array()
+                .expect("reference page descriptors"),
+        )
+        .chain([&index["import_aliases"]])
+        .map(|page| {
+            page["segment_digest"]
+                .as_str()
+                .expect("resolution index page digest")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(!resolution_index_digests.is_empty());
+    assert_eq!(
+        identities
+            .iter()
+            .map(|identity| (identity.digest.as_str(), identity.size_bytes))
+            .collect::<Vec<_>>(),
+        PARTITIONED_FORMAT_SEGMENTS,
+        "a file or evidence segment changed bytes"
+    );
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+            .expect("partitioned text metadata parses")
+            .generation_statistics(),
+        &expected.generation_statistics().expect("fixture census"),
+        "a sealed manifest carries the generation's own census"
+    );
+
+    // The census is a required field of this revision, not an optional one:
+    // these same bytes minus that field are a decode failure naming it, so no
+    // reader can serve a manifest whose census was never written.
+    let mut censusless: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    censusless["generation"]
+        .as_object_mut()
+        .expect("generation payload")
+        .remove("statistics")
+        .expect("a sealed manifest carries a census to remove");
+    censusless["state_digest"] = serde_json::json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&censusless["generation"]).expect("census-less payload bytes")
+        ))
+    ));
+    let censusless = serde_json::to_vec(&censusless).expect("census-less manifest bytes");
+    let error = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&censusless)
+        .expect_err("a manifest without a census must not decode at this revision");
+    assert!(
+        error.to_string().contains("missing field `statistics`"),
+        "a census-less manifest reached the wrong rejection: {error}"
+    );
+
+    // Decode at width two with three file segments: the third file read must
+    // reuse a slot from the first window, so the bound below covers cross-window
+    // buffer reuse and not just a single window. Width is sizing policy only.
+    struct ForcedDecodeWidth;
+    impl Drop for ForcedDecodeWidth {
+        fn drop(&mut self) {
+            tracedecay_code_index::parallelism::clear_forced_indexing_workers_for_test();
+        }
+    }
+    tracedecay_code_index::parallelism::force_indexing_workers_for_test(2);
+    let _forced_width = ForcedDecodeWidth;
+    let window = CodeIndexPublishedGenerationV1::partitioned_decode_window_files();
+    let file_segment_count = envelope["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .len();
+    assert!(
+        window == 2 && file_segment_count > window,
+        "the fixture must span more file segments than one decode window"
+    );
+
+    let file_evidence_digests = envelope["generation"]["file_evidence"]
+        .as_array()
+        .expect("file evidence descriptors")
+        .iter()
+        .map(|evidence| {
+            evidence["segment_digest"]
+                .as_str()
+                .expect("file evidence digest")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !file_evidence_digests.is_empty(),
+        "the fixture must seal file evidence"
+    );
+    // Buffer address -> its capacity after the last read it served.
+    let mut file_buffers = BTreeMap::new();
+    let mut file_evidence_buffers = BTreeMap::new();
+    let largest_file_evidence = Cell::new(0_usize);
+    let evidence_buffer_address = Cell::new(None);
+    let segment_reads = RefCell::new(BTreeSet::new());
+    let largest_file_segment = Cell::new(0_usize);
+    let largest_evidence_page = Cell::new(0_usize);
+    let evidence_buffer_capacity = Cell::new(0_usize);
+    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| {
+            let address = buffer as *const Vec<u8> as usize;
+            let (digest, offset, length, reading_file) = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                    (digest, 0, size_bytes, true)
+                }
+                SealedGenerationSegmentReadV1::Range {
+                    digest,
+                    offset,
+                    length,
+                    ..
+                } => (digest, offset, length, false),
+            };
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("golden segment is missing".to_owned())
+            })?;
+            let start = usize::try_from(offset).expect("segment range offset");
+            let end = start + usize::try_from(length).expect("segment range length");
+            buffer.clear();
+            // Exact growth, so a buffer's capacity records the largest read
+            // it served rather than the allocator's amortized doubling.
+            buffer.reserve_exact(end - start);
+            buffer.extend_from_slice(&bytes[start..end]);
+            if reading_file && file_evidence_digests.contains(digest.as_str()) {
+                largest_file_evidence.set(largest_file_evidence.get().max(bytes.len()));
+                file_evidence_buffers.insert(address, buffer.capacity());
+            } else if reading_file {
+                largest_file_segment.set(largest_file_segment.get().max(bytes.len()));
+                file_buffers.insert(address, buffer.capacity());
+            } else {
+                if let Some(first_address) = evidence_buffer_address.get() {
+                    assert_eq!(
+                        address, first_address,
+                        "the evidence phase must reuse one Vec"
+                    );
+                } else {
+                    evidence_buffer_address.set(Some(address));
+                }
+                largest_evidence_page.set(largest_evidence_page.get().max(end - start));
+                evidence_buffer_capacity.set(buffer.capacity());
+            }
+            segment_reads
+                .borrow_mut()
+                .insert(digest.as_str().to_owned());
+            Ok(())
+        },
+    )
+    .expect("partitioned bytes decode");
+    assert!(
+        segment_reads.borrow().is_disjoint(&graph_page_digests),
+        "text decode must leave independently served graph pages untouched"
+    );
+    assert!(
+        segment_reads
+            .borrow()
+            .is_disjoint(&resolution_index_digests),
+        "text decode must leave the resolution index to successor builds"
+    );
+    let eagerly_decoded_digests = identities
+        .iter()
+        .map(|identity| identity.digest.as_str().to_owned())
+        .filter(|digest| {
+            !graph_page_digests.contains(digest) && !resolution_index_digests.contains(digest)
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        *segment_reads.borrow(),
+        eagerly_decoded_digests,
+        "decode must read every segment but graph pages and resolution index pages"
+    );
+    let largest_file_segment = largest_file_segment.get();
+    assert_eq!(
+        file_buffers.len(),
+        window,
+        "file reads must cycle through exactly one buffer per decode window slot"
+    );
+    assert!(
+        file_buffers.values().max() >= Some(&largest_file_segment)
+            && file_buffers
+                .values()
+                .all(|&capacity| capacity <= largest_file_segment.next_power_of_two()),
+        "each file buffer must be bounded by the largest file segment"
+    );
+    assert!(
+        file_buffers.values().sum::<usize>() <= window * largest_file_segment.next_power_of_two(),
+        "the file allocation must be bounded by {window} decode slots x the largest file segment"
+    );
+    let largest_file_evidence = largest_file_evidence.get();
+    assert!(
+        file_evidence_buffers.len() <= window
+            && file_evidence_buffers
+                .values()
+                .all(|&capacity| capacity <= largest_file_evidence.next_power_of_two()),
+        "file evidence reads must reuse one buffer per decode window slot, bounded by the largest file evidence segment"
+    );
+    assert!(
+        evidence_buffer_capacity.get() >= largest_evidence_page.get()
+            && evidence_buffer_capacity.get() <= largest_evidence_page.get().next_power_of_two(),
+        "the evidence allocation must be bounded by the largest evidence page"
+    );
+    assert_eq!(
+        sealed_clone_bindings(&restored),
+        sealed_clone_bindings(&expected),
+        "decode must restore every file's clone bodies"
+    );
+    let restored_seal = PartitionedSealV1::of(&restored);
+    let expected_seal = PartitionedSealV1::of(&expected);
+    assert_eq!(
+        restored_seal, expected_seal,
+        "decode must restore the same typed generation"
+    );
+
+    // Segment authentication without decoding, which graph replay verifies a
+    // retained generation through: intact segments verify, and one flipped
+    // byte in any of them is refused. Text decode authenticates only the file
+    // and evidence segments it consumes; graph pages stay lazy and authenticate
+    // when the graph store reads them.
+    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+        let (digest, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                offset,
+                length,
+                ..
+            } => (digest, offset, length),
+        };
+        let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract("golden segment is missing".to_owned())
+        })?;
+        let start = usize::try_from(offset).expect("segment range offset");
+        let end = start + usize::try_from(length).expect("segment range length");
+        buffer.clear();
+        buffer.extend_from_slice(&bytes[start..end]);
+        Ok(())
+    };
+    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read)
+        .expect("the fixture's own segments must verify against its manifest");
+    for (corrupted, _) in PARTITIONED_FORMAT_SEGMENTS {
+        let flip = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+            let hit = match &request {
+                SealedGenerationSegmentReadV1::Whole { digest, .. }
+                | SealedGenerationSegmentReadV1::Range { digest, .. } => {
+                    digest.as_str() == *corrupted
+                }
+            };
+            read(request, buffer)?;
+            if hit {
+                *buffer
+                    .first_mut()
+                    .expect("an authenticated segment read is never empty") ^= 1;
+            }
+            Ok(())
+        };
+        assert!(
+            CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, flip).is_err(),
+            "one flipped byte in segment {corrupted} must fail authentication"
+        );
+        let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            &SharedDecodedContentPoolV1::default(),
+            flip,
+        );
+        if graph_page_digests.contains(*corrupted) || resolution_index_digests.contains(*corrupted)
+        {
+            decoded.expect("text decode must not read a graph or resolution index page");
+        } else {
+            decoded.expect_err("a consumed corrupt segment must fail text decode");
+        }
+    }
+
+    let mut reencoded_segments = BTreeMap::new();
+    let mut reencoded_evidence_pack = Vec::new();
+    let reencoded_manifest = restored
+        .encode_partitioned_sealed(|publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+                    reencoded_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    page_digest, bytes, ..
+                } => {
+                    reencoded_segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                    reencoded_evidence_pack.extend_from_slice(bytes);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    segment_digest,
+                    ..
+                } => {
+                    reencoded_segments.insert(
+                        segment_digest.as_str().to_owned(),
+                        std::mem::take(&mut reencoded_evidence_pack),
+                    );
+                }
+            }
+            Ok(())
+        })
+        .expect("restored partitioned generation re-encodes");
+    assert_eq!(reencoded_manifest, manifest);
+    for (digest, _) in PARTITIONED_FORMAT_SEGMENTS {
+        assert_eq!(
+            reencoded_segments.get(*digest),
+            segments.get(*digest),
+            "round-trip segment {digest} changed bytes"
+        );
+    }
+}
+
+#[test]
+fn partitioned_text_metadata_exposes_commitments_without_payload_reads() {
+    let (expected, manifest, _) = partitioned_codec_fixture();
+    let metadata = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+        .expect("authenticated text metadata");
+    assert_eq!(
+        metadata
+            .source_commitments()
+            .expect("verified source commitments"),
+        expected
+            .manifest()
+            .source_commitments
+            .as_ref()
+            .expect("published generation commitments")
+    );
+
+    let error = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |_, _| {
+            Err(CodeIndexProductionErrorV1::Contract(
+                "payload segment requested".to_owned(),
+            ))
+        },
+    )
+    .expect_err("full decode must request payload segments");
+    assert_eq!(
+        error.to_string(),
+        "code-index contract failed: payload segment requested"
+    );
+}
+
+/// Bytes the unmodified pre-paging writer emitted (see the fixture README and
+/// `provenance.json`), sealed at the retired manifest revision seven. That
+/// revision named two payload shapes, a manifest with its census and one
+/// without, so every reader that authenticates or decodes a manifest refuses
+/// the carrier with the typed rebuild error instead of picking a shape, and
+/// refuses it before reading a single segment byte. Only retention's
+/// descriptor projection abstains, because a store that still holds a retired
+/// generation must stay plannable while the daemon rebuilds past it.
+#[test]
+fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
+    let fixture = std::path::Path::new("tests/fixtures/partitioned_pre_paging");
+    let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
+    let historical: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("historical manifest json");
+    let retired = u32::try_from(
+        historical["generation"]["format_revision"]
+            .as_u64()
+            .expect("historical format revision"),
+    )
+    .expect("historical format revision fits u32");
+    assert!(
+        retired < SEALED_GENERATION_FORMAT_REVISION_V1,
+        "the archival carrier must stay behind the revision this build serves"
+    );
+    let expected =
+        std::fs::read(fixture.join("expected-generation.json")).expect("historical generation");
+    let provenance: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.join("provenance.json")).expect("fixture provenance"),
+    )
+    .expect("provenance JSON");
+    assert_eq!(
+        hex::encode(Sha256::digest(&manifest)),
+        provenance["manifest_sha256"],
+        "manifest bytes are the exported historical bytes"
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(&expected)),
+        provenance["expected_generation_sha256"],
+        "expected generation bytes are the exported historical bytes"
+    );
+    // No reader inventories a retired manifest, so the segment bytes shipped
+    // beside it are proven against the export's provenance directly rather
+    // than through the manifest's descriptors. The codec's own historical-row
+    // tests are what prove the descriptors still address these bytes; this
+    // only proves the fixture ships the export's segments and no others.
+    assert_eq!(
+        std::fs::read_dir(fixture.join("segments"))
+            .expect("historical segment directory")
+            .map(|entry| {
+                let path = entry.expect("segment entry").path();
+                let bytes = std::fs::read(&path).expect("historical segment bytes");
+                (
+                    format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
+                    bytes.len() as u64,
+                )
+            })
+            .collect::<BTreeSet<_>>(),
+        provenance["referenced_segments"]
+            .as_array()
+            .expect("referenced segments")
+            .iter()
+            .map(|segment| {
+                (
+                    segment["digest"]
+                        .as_str()
+                        .expect("segment digest")
+                        .to_owned(),
+                    segment["bytes"].as_u64().expect("segment size"),
+                )
+            })
+            .collect::<BTreeSet<_>>(),
+        "the fixture ships exactly the segments the historical export referenced"
+    );
+
+    let segment_reads = Cell::new(0_usize);
+    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+        segment_reads.set(segment_reads.get() + 1);
+        let (digest, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                offset,
+                length,
+                ..
+            } => (digest, offset, length),
+        };
+        let name = sha256_hex_suffix(digest.as_str()).expect("sha256 segment digest");
+        let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
+            .expect("historical segment bytes");
+        let start = usize::try_from(offset).expect("segment offset");
+        let end = start + usize::try_from(length).expect("segment length");
+        buffer.clear();
+        buffer.extend_from_slice(&bytes[start..end]);
+        Ok(())
+    };
+
+    for refusal in [
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest).err(),
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest).err(),
+        CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read).err(),
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            &SharedDecodedContentPoolV1::default(),
+            read,
+        )
+        .err(),
+    ] {
+        let error = refusal.expect("a retired manifest revision must be refused, never migrated");
+        assert!(
+            matches!(
+                error,
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                    if revision == retired
+            ),
+            "retired carrier reached the wrong rejection: {error}"
+        );
+        assert!(
+            error.to_string().contains("will be rebuilt from source"),
+            "a retired revision must tell the operator it rebuilds: {error}"
+        );
+    }
+    assert_eq!(
+        segment_reads.get(),
+        0,
+        "a retired manifest revision must be refused before any segment read"
+    );
+
+    // Retention's projection abstains instead, so the sweep that would
+    // reclaim this generation's now-unreferenced segments still runs.
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            manifest.as_slice(),
+        )
+        .expect("retention reader projects a retired manifest"),
+        None,
+    );
+}
+
+/// Segment reuse is an optimization over a readable parent, never a
+/// precondition for publishing: a parent sealed at a revision this build has
+/// retired offers nothing to reuse, so the child re-encodes every one of its
+/// own segments and still verifies and decodes completely. Refusing the
+/// encoding instead would leave a store that holds a retired generation
+/// unable to publish the rebuild meant to replace it.
+#[test]
+fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
+        .expect("retired-parent fixture owner");
+    let parent = owner
+        .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
+        .expect("parent generation");
+    let parent = store.generation(&parent);
+    let parent_manifest = parent
+        .encode_partitioned_sealed(|_| Ok(()))
+        .expect("parent encoding");
+    let child = owner
+        .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
+        .expect("child generation");
+    let child = store.generation(&child);
+
+    let encode = |parent_manifest_bytes: Option<&[u8]>| {
+        let mut segments = BTreeMap::new();
+        let mut evidence_pack = Vec::new();
+        let mut file_segments = 0_usize;
+        let manifest = child
+            .encode_partitioned_sealed_with_parent(parent_manifest_bytes, |publication| {
+                match publication {
+                    SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                        file_segments += 1;
+                        segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                    }
+                    SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                    | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+                        segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                    }
+                    SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                        page_digest,
+                        bytes,
+                        ..
+                    } => {
+                        segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+                    }
+                    SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
+                        bytes, ..
+                    } => {
+                        evidence_pack.extend_from_slice(bytes);
+                    }
+                    SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                        segment_digest,
+                        ..
+                    } => {
+                        segments.insert(
+                            segment_digest.as_str().to_owned(),
+                            std::mem::take(&mut evidence_pack),
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .expect("child encoding");
+        (manifest, segments, file_segments)
+    };
+
+    let (reusing_manifest, _, reused_file_segments) = encode(Some(&parent_manifest));
+    assert!(
+        reused_file_segments < child.snapshot().files.len(),
+        "the fixture child must reuse a segment from its readable parent"
+    );
+
+    let retired_parent = std::fs::read("tests/fixtures/partitioned_pre_paging/manifest.json")
+        .expect("historical manifest");
+    let (manifest, segments, published_file_segments) = encode(Some(&retired_parent));
+    assert_eq!(
+        published_file_segments,
+        child.snapshot().files.len(),
+        "a retired parent offers no reuse, so every file segment is re-encoded"
+    );
+    assert_eq!(
+        manifest, reusing_manifest,
+        "reuse decides which segment bytes are published, never the manifest"
+    );
+
+    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+        let (digest, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                offset,
+                length,
+                ..
+            } => (digest, offset, length),
+        };
+        let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract("re-encoded segment is missing".to_owned())
+        })?;
+        let start = usize::try_from(offset).expect("segment range offset");
+        let end = start + usize::try_from(length).expect("segment range length");
+        buffer.clear();
+        buffer.extend_from_slice(&bytes[start..end]);
+        Ok(())
+    };
+    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read)
+        .expect("a child encoded without reuse must be self-sufficient");
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            &SharedDecodedContentPoolV1::default(),
+            read
+        )
+        .map(|restored| PartitionedSealV1::of(&restored))
+        .expect("the child decodes from its own segments"),
+        PartitionedSealV1::of(&child),
+        "no reuse must restore the same typed generation"
+    );
+}
+
+/// Revision seven named two manifest payloads: the one the writer emitted
+/// before the census became required, and the same payload carrying it. The
+/// revision is refused before its payload is parsed, so both shapes reach the
+/// one typed refusal and no reader has to tell them apart. The archival
+/// carrier above is the census-less shape as a real writer produced it; these
+/// are live encoder bytes relabelled to the revision that admitted both.
+#[test]
+fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
+    let (_, manifest, _) = partitioned_codec_fixture();
+    CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+        .expect("the current revision opens");
+    let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
+
+    for census in [true, false] {
+        let mut retired: serde_json::Value =
+            serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+        let payload = retired["generation"]
+            .as_object_mut()
+            .expect("generation payload");
+        payload.insert("format_revision".to_owned(), serde_json::json!(previous));
+        if !census {
+            payload
+                .remove("statistics")
+                .expect("a sealed manifest carries a census to remove");
+        }
+        retired["state_digest"] = serde_json::json!(format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(
+                serde_json::to_vec(&retired["generation"]).expect("retired payload bytes")
+            ))
+        ));
+        let retired = serde_json::to_vec(&retired).expect("retired manifest bytes");
+
+        let Err(error) = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&retired) else {
+            panic!("a retired manifest revision must be refused, never migrated")
+        };
+        assert!(
+            matches!(
+                error,
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                    if revision == previous
+            ),
+            "the previous revision with census={census} reached the wrong rejection: {error}"
+        );
+    }
+}
+
+/// Revision 10 stored generation-bound symbol occurrence lists on each file
+/// segment descriptor. The current writer emits generation-independent
+/// symbol identities (revision 11), so a revision-10 carrier must be refused
+/// before its payload is parsed, never migrated in place.
+#[test]
+fn prior_partitioned_symbol_occurrence_revision_reaches_the_typed_refusal() {
+    let (_, manifest, _) = partitioned_codec_fixture();
+    CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+        .expect("the current revision opens");
+    let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
+    let mut retired: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    let payload = retired["generation"]
+        .as_object_mut()
+        .expect("generation payload");
+    payload.insert("format_revision".to_owned(), serde_json::json!(previous));
+    retired["state_digest"] = serde_json::json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&retired["generation"]).expect("retired payload bytes")
+        ))
+    ));
+    let retired = serde_json::to_vec(&retired).expect("retired manifest bytes");
+
+    let Err(error) = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&retired) else {
+        panic!("a prior partitioned revision must be refused, never migrated")
+    };
+    assert!(
+        matches!(
+            error,
+            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                if revision == previous
+        ),
+        "the previous revision reached the wrong rejection: {error}"
+    );
+}
+
+/// Both public descriptor readers share one layout validator, so every
+/// malformed descriptor mutation, including a descriptor without a page
+/// table, must be refused by both. Only the outer authentication differs:
+/// the full reader verifies the state digest itself, the retention
+/// projection leaves that to its caller.
+#[test]
+fn partitioned_descriptor_readers_share_validation_without_sharing_authentication() {
+    let (_, manifest, _) = partitioned_codec_fixture();
+    let authenticated = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+        .expect("authenticate current manifest");
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            manifest.as_slice(),
+        )
+        .expect("read caller-authenticated descriptors"),
+        Some(authenticated.clone()),
+    );
+    let original: serde_json::Value = serde_json::from_slice(&manifest).expect("fixture envelope");
+
+    // A missing page table is the retired pre-paging descriptor; a current
+    // manifest revision carrying it is malformed for both readers.
+    let mut historical = original.clone();
+    historical["generation"]["generation_evidence"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pages")
+        .expect("current descriptor carries evidence pages");
+    let historical_bytes = reseal_manifest(historical);
+    assert!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&historical_bytes).is_err(),
+        "the full reader refuses an unpaged descriptor"
+    );
+    assert!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            historical_bytes.as_slice(),
+        )
+        .is_err(),
+        "the retention reader refuses an unpaged descriptor"
+    );
+
+    for mutation in [
+        "empty_pages",
+        "null_pages",
+        "duplicate_ordinal",
+        "out_of_order",
+        "zero_page",
+        "oversized_page",
+        "aggregate_mismatch",
+        "aggregate_maximum",
+        "missing_file",
+        "wrong_file_key",
+        "wrong_file_binding",
+    ] {
+        let mut envelope = original.clone();
+        let generation = &mut envelope["generation"];
+        match mutation {
+            "empty_pages" => generation["generation_evidence"]["pages"] = serde_json::json!([]),
+            "null_pages" => generation["generation_evidence"]["pages"] = serde_json::Value::Null,
+            "duplicate_ordinal" => {
+                let pages = generation["generation_evidence"]["pages"]
+                    .as_array_mut()
+                    .unwrap();
+                pages.push(pages[0].clone());
+            }
+            "out_of_order" => {
+                generation["generation_evidence"]["pages"][0]["page_ordinal"] = serde_json::json!(1)
+            }
+            "zero_page" => {
+                generation["generation_evidence"]["pages"][0]["page_size_bytes"] =
+                    serde_json::json!(0)
+            }
+            "oversized_page" => {
+                generation["generation_evidence"]["pages"][0]["page_size_bytes"] =
+                    serde_json::json!(256 * 1024 + 1)
+            }
+            "aggregate_mismatch" => {
+                generation["generation_evidence"]["segment_size_bytes"] = serde_json::json!(1)
+            }
+            "aggregate_maximum" => {
+                generation["generation_evidence"]["segment_size_bytes"] =
+                    serde_json::json!(u64::MAX)
+            }
+            "missing_file" => {
+                generation["file_segments"].as_array_mut().unwrap().pop();
+            }
+            "wrong_file_key" => generation["file_segments"][0]["file_key"] = serde_json::json!(1),
+            "wrong_file_binding" => {
+                generation["file_segments"][0]["file_occurrence_id"] =
+                    serde_json::json!("file.foreign")
+            }
+            _ => unreachable!(),
+        }
+        // Authenticate the mutation so refusal exercises descriptors rather
+        // than being masked by the full reader's outer digest check.
+        let bytes = reseal_manifest(envelope);
+        assert!(
+            CodeIndexPublishedGenerationV1::partitioned_segment_identities(&bytes).is_err(),
+            "full reader accepted {mutation}"
+        );
+        assert!(
+            CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+                bytes.as_slice()
+            )
+            .is_err(),
+            "retention reader accepted {mutation}"
+        );
+    }
+
+    let mut unauthenticated = original;
+    unauthenticated["state_digest"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    let bytes = serde_json::to_vec(&unauthenticated).expect("unauthenticated envelope");
+    assert!(
+        matches!(
+            CodeIndexPublishedGenerationV1::partitioned_segment_identities(&bytes),
+            Err(CodeIndexProductionErrorV1::Contract(message))
+                if message == "sealed generation manifest state digest does not match its payload"
+        ),
+        "an unauthenticated envelope must be refused as a digest mismatch"
+    );
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            bytes.as_slice()
+        )
+        .expect("retention leaves outer authentication to its caller"),
+        Some(authenticated),
+    );
+}
+
+/// One edited file must publish exactly one file segment, whatever the rest of
+/// the repository holds: every unchanged file keeps the parent generation's
+/// content address, so its bytes are never re-encoded, re-hashed or rewritten.
+/// Generation evidence is emitted as bounded authenticated pages in one pack
+/// beside that delta-proportional file publication.
+#[test]
+fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("revision fixture owner");
+    let parent = owner
+        .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
+        .expect("revision parent generation");
+    let parent = store.generation(&parent);
+    let parent_manifest = parent
+        .encode_partitioned_sealed(|_| Ok(()))
+        .expect("revision parent encoding");
+    let mut parent_envelope: serde_json::Value =
+        serde_json::from_slice(&parent_manifest).expect("parent manifest JSON");
+    let mut historical_manifest: CodeGenerationManifestV1 =
+        serde_json::from_value(parent_envelope["generation"]["manifest"].clone())
+            .expect("parent generation manifest");
+    let (_, revision) = historical_manifest
+        .extractor_revisions
+        .iter_mut()
+        .find(|(language, _)| language.as_str() == "rust")
+        .expect("Rust extractor revision");
+    *revision = ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
+    historical_manifest.seal.expected_digest =
+        expected_seal_digest(&historical_manifest).expect("historical manifest seal");
+    parent_envelope["generation"]["manifest"] =
+        serde_json::to_value(historical_manifest).expect("historical manifest JSON");
+    let historical_parent = reseal_manifest(parent_envelope);
+
+    let child = owner
+        .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
+        .expect("revision child generation");
+    let child = store.generation(&child);
+    let mut published_files = 0;
+    child
+        .encode_partitioned_sealed_with_parent(Some(&historical_parent), |publication| {
+            if matches!(
+                publication,
+                SealedGenerationSegmentPublicationV1::File { .. }
+            ) {
+                published_files += 1;
+            }
+            Ok(())
+        })
+        .expect("revision child encoding");
+
+    assert_eq!(
+        published_files,
+        child.snapshot().files.len(),
+        "no file segment may cross an extractor revision"
+    );
+}
+
+fn assert_reused_segment_descriptors_stable(parent_manifest: &[u8], child_manifest: &[u8]) {
+    let parent: serde_json::Value =
+        serde_json::from_slice(parent_manifest).expect("parent manifest JSON");
+    let child: serde_json::Value =
+        serde_json::from_slice(child_manifest).expect("child manifest JSON");
+    let parent_segments = parent["generation"]["file_segments"]
+        .as_array()
+        .expect("parent file segments");
+    let child_segments = child["generation"]["file_segments"]
+        .as_array()
+        .expect("child file segments");
+    for child_segment in child_segments {
+        let Some(parent_segment) = parent_segments.iter().find(|parent_segment| {
+            parent_segment["segment_digest"] == child_segment["segment_digest"]
+        }) else {
+            continue;
+        };
+        assert_eq!(
+            child_segment, parent_segment,
+            "a reused content-addressed segment must keep a generation-independent descriptor"
+        );
+    }
+}
+
+fn file_segment_digests_by_path(manifest: &[u8]) -> BTreeMap<String, String> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(manifest).expect("partitioned manifest JSON");
+    let files = manifest["generation"]["snapshot"]["files"]
+        .as_array()
+        .expect("snapshot files");
+    manifest["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .iter()
+        .map(|segment| {
+            let file_key = usize::try_from(segment["file_key"].as_u64().expect("file segment key"))
+                .expect("file segment key fits usize");
+            let path = files[file_key]["logical_path"]
+                .as_str()
+                .expect("snapshot logical path")
+                .to_owned();
+            let digest = segment["segment_digest"]
+                .as_str()
+                .expect("file segment digest")
+                .to_owned();
+            (path, digest)
+        })
+        .collect()
+}
+
+#[test]
+fn partitioned_encode_publishes_only_the_edited_file_segment() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("delta fixture owner");
+    let parent = owner
+        .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
+        .expect("delta parent generation");
+    let parent = store.generation(&parent);
+    let parent_manifest = parent
+        .encode_partitioned_sealed(|_| Ok(()))
+        .expect("delta parent encoding");
+    let child = owner
+        .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
+        .expect("delta child generation");
+    let child = store.generation(&child);
+
+    let mut published_files = Vec::new();
+    let mut published_evidence_pages = BTreeSet::new();
+    let mut committed_evidence_pages = None;
+    let child_manifest = child
+        .encode_partitioned_sealed_with_parent(Some(&parent_manifest), |publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                    published_files.push((digest.as_str().to_owned(), bytes.len()));
+                }
+                SealedGenerationSegmentPublicationV1::FileEvidence { .. }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { .. }
+                | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {}
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
+                    page_ordinal,
+                    ..
+                } => {
+                    published_evidence_pages.insert(page_ordinal);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    page_count,
+                    ..
+                } => {
+                    assert!(
+                        committed_evidence_pages.replace(page_count).is_none(),
+                        "generation evidence must commit exactly once"
+                    );
+                }
+            }
+            Ok(())
+        })
+        .expect("delta child encoding");
+
+    assert!(
+        child.snapshot().files.len() > published_files.len(),
+        "the fixture must carry unchanged files beside the edited one"
+    );
+    let parent_file_digests = file_segment_digests_by_path(&parent_manifest);
+    let child_file_digests = file_segment_digests_by_path(&child_manifest);
+    assert_eq!(
+        child_file_digests.get("src/alpha.rs"),
+        parent_file_digests.get("src/alpha.rs"),
+        "the unchanged caller must reuse its file segment"
+    );
+    assert_eq!(
+        child_file_digests.get("src/unresolved.rs"),
+        parent_file_digests.get("src/unresolved.rs"),
+        "the unchanged unresolved fixture must reuse its file segment"
+    );
+    assert_ne!(
+        child_file_digests.get("src/beta.rs"),
+        parent_file_digests.get("src/beta.rs"),
+        "the edited file must replace its file segment"
+    );
+    let replaced_file_digests = child_file_digests
+        .iter()
+        .filter_map(|(path, digest)| {
+            (parent_file_digests.get(path) != Some(digest)).then_some(digest.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        published_files
+            .iter()
+            .map(|(digest, _)| digest.clone())
+            .collect::<BTreeSet<_>>(),
+        replaced_file_digests,
+        "the encoder must publish exactly the replaced file segments"
+    );
+    assert_eq!(
+        committed_evidence_pages,
+        Some(
+            u32::try_from(published_evidence_pages.len())
+                .expect("published evidence page count fits u32")
+        ),
+        "the commit must cover every published evidence page"
+    );
+
+    assert_reused_segment_descriptors_stable(&parent_manifest, &child_manifest);
+}
+
+/// The carried-forward file of the increment wedge: several clone bodies whose
+/// sorted-by-id order differs from source order, with `walk_one` above
+/// `MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1` (eligible) and the rest below it
+/// (excluded as too small), so both eligibility classes ride the reused segment.
+const INCREMENT_WEDGE_CARRIED_SOURCE: &str = concat!(
+    "pub fn walk_one(items: &[u32]) -> u32 {\n",
+    "    let mut total = 0;\n",
+    "    for item in items.iter().copied() {\n",
+    "        if item % 2 == 0 { total += item; } else { total += item * 3 + 1; }\n",
+    "    }\n",
+    "    total.wrapping_mul(7).wrapping_add(11)\n",
+    "}\n",
+    "pub fn walk_two(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 3 == 0).sum() }\n",
+    "pub fn walk_three(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 5 == 0).sum() }\n",
+    "pub fn walk_four(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 7 == 0).sum() }\n",
+    "pub fn walk_five(items: &[u32]) -> u32 { items.iter().copied().filter(|i| i % 11 == 0).sum() }\n",
+);
+
+/// The one-edit increment the daemon publishes: one re-extracted file beside
+/// a carried-forward file whose segment the child reuses from the parent.
+fn increment_wedge_request(edited_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
+    let edited = if edited_value == 1 {
+        "pub fn edited() -> u64 { 1 }\n"
+    } else {
+        "pub fn edited() -> u64 { 2 }\npub fn appended_marker() -> u64 { 1103 }\n"
+    };
+    let sources = [
+        (
+            "file.wedge.carried",
+            "src/carried.rs",
+            INCREMENT_WEDGE_CARRIED_SOURCE,
+        ),
+        ("file.wedge.edited", "src/edited.rs", edited),
+    ];
+    let changed_files = if edited_value == 1 {
+        BTreeSet::new()
+    } else {
+        BTreeSet::from(["src/edited.rs".to_owned()])
+    };
+    partitioned_request(&sources, changed_files, sealed_at)
+}
+
+/// Every clone body occurrence per file path, in the order the file carries
+/// them, read back through the generation's sealed lexical page source.
+fn sealed_clone_bindings(
+    generation: &CodeIndexPublishedGenerationV1,
+) -> BTreeMap<String, Vec<CloneBodyOccurrenceV1>> {
+    let mut source = PartitionedSealV1::of(generation)
+        .lexical_source(64, 1 << 20)
+        .expect("sealed generation opens as a lexical source");
+    let mut bindings: BTreeMap<String, Vec<CloneBodyOccurrenceV1>> = BTreeMap::new();
+    loop {
+        match source
+            .next_page(&ActiveControl)
+            .expect("sealed generation pages")
+        {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                for body in page.clone_bodies() {
+                    bindings
+                        .entry(body.occurrence.path.clone())
+                        .or_default()
+                        .push(body.occurrence.clone());
+                }
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(_) => return bindings,
+        }
+    }
+}
+
+/// The daemon publishes a one-file increment with parent-segment reuse and
+/// then projects its text through `open_partitioned_sealed`, admitting every
+/// restored file under `CodeFileIndexArtifactsV1::validate`. A carried-forward
+/// file's clone bodies must come back through that sealed path bound to the
+/// same file symbols, in the same strict order, with the same payload digests
+/// the in-memory generation published; otherwise the text projection refuses
+/// the generation and the index never serves the edit.
+#[test]
+fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("increment owner");
+    let parent = owner
+        .build_and_publish(increment_wedge_request(1, 1_100_000), &ActiveControl)
+        .expect("parent generation");
+    let parent = store.generation(&parent);
+    let mut segments = BTreeMap::new();
+    let mut parent_file_segments = 0;
+    let parent_manifest = parent
+        .encode_partitioned_sealed(collect_published_segments(
+            &mut segments,
+            &mut parent_file_segments,
+        ))
+        .expect("parent encoding");
+    assert_eq!(
+        parent_file_segments,
+        parent.snapshot().files.len(),
+        "a parentless encoding publishes every file segment"
+    );
+    let child = owner
+        .build_and_publish(increment_wedge_request(2, 1_200_000), &ActiveControl)
+        .expect("child generation");
+    let child = store.generation(&child);
+    let mut child_file_segments = 0;
+    let child_manifest = child
+        .encode_partitioned_sealed_with_parent(
+            Some(&parent_manifest),
+            collect_published_segments(&mut segments, &mut child_file_segments),
+        )
+        .expect("child encoding");
+    // Counted at the publisher, not inferred from store growth: a re-encoded
+    // carried file hashes to its parent's digest (the encoder writes the
+    // generation as a marker), so only the publication itself proves the
+    // carried file took the `Reused(descriptor)` path this test exercises.
+    let parent_file_digests = file_segment_digests_by_path(&parent_manifest);
+    let child_file_digests = file_segment_digests_by_path(&child_manifest);
+    let replaced_file_segments = child_file_digests
+        .iter()
+        .filter(|(path, digest)| parent_file_digests.get(*path) != Some(*digest))
+        .count();
+    assert_eq!(
+        child_file_segments, replaced_file_segments,
+        "only replaced file segments may be published"
+    );
+    assert_eq!(
+        child_file_digests.get("src/carried.rs"),
+        parent_file_digests.get("src/carried.rs"),
+        "the carried file must keep its parent's content address"
+    );
+    assert_ne!(
+        child_file_digests.get("src/edited.rs"),
+        parent_file_digests.get("src/edited.rs"),
+        "the edited file must replace its parent's content address"
+    );
+
+    let expected = sealed_clone_bindings(&child);
+    let carried = expected
+        .get("src/carried.rs")
+        .expect("carried file is in the child generation");
+    assert!(
+        carried.len() >= 2,
+        "the carried file needs several clone bodies to pin their order: {carried:#?}"
+    );
+    assert!(
+        carried
+            .iter()
+            .any(|body| body.eligibility == CloneBodyEligibilityV1::Eligible),
+        "the carried file needs an eligible clone body: {carried:#?}"
+    );
+    assert!(
+        carried.iter().any(|body| matches!(
+            body.eligibility,
+            CloneBodyEligibilityV1::ExcludedTooSmall { .. }
+        )),
+        "the carried file needs a too-small clone body: {carried:#?}"
+    );
+
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&child_manifest).expect("child manifest JSON");
+    let state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("child state digest"),
+    );
+    let segments = Arc::new(segments);
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        &child_manifest,
+        state_digest,
+        move |digest, _, buffer, _control| {
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("published segment is missing".to_owned())
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
+        },
+        64,
+        1 << 20,
+    )
+    .expect("child manifest opens through the daemon's text projection path");
+
+    let mut restored: BTreeMap<String, Vec<CloneBodyOccurrenceV1>> = BTreeMap::new();
+    let receipt = loop {
+        match source
+            .next_page(&ActiveControl)
+            .expect("every carried and re-extracted file admits under sealed validation")
+        {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                for body in page.clone_bodies() {
+                    restored
+                        .entry(body.occurrence.path.clone())
+                        .or_default()
+                        .push(body.occurrence.clone());
+                }
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+        }
+    };
+    let expected_total = expected.values().map(Vec::len).sum::<usize>();
+    assert_eq!(receipt.total_clone_bodies(), expected_total as u64);
+    assert_eq!(
+        restored, expected,
+        "sealed decode must yield the clone binding the in-memory generation published"
+    );
+    // Segment reuse is sound only because a carried-forward file's clone
+    // binding is generation-independent: the parent's segment bytes restore
+    // under the child's manifest to exactly the child's in-memory binding,
+    // which differs from the parent's only in the generation it now serves.
+    let rebound_from_parent = sealed_clone_bindings(&parent)
+        .remove("src/carried.rs")
+        .expect("carried file is in the parent generation")
+        .into_iter()
+        .map(|mut occurrence| {
+            occurrence.source_generation = child.manifest().generation_id.clone();
+            occurrence.snapshot_digest = child.manifest().snapshot_digest.clone();
+            occurrence
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &rebound_from_parent, carried,
+        "a carried-forward file keeps its parent clone binding across generations"
+    );
+}
+
+/// A Python suite that is empty or only comments is a missing clone
+/// candidate. Emitting its zero-width span used to fail chunk identity
+/// (`clone_body_empty_span`) and refuse the whole generation (#3401). The
+/// stub stays a symbol; the neighboring function still publishes.
+#[test]
+fn empty_python_clone_bodies_do_not_refuse_the_generation() {
+    const PYTHON_SOURCE: &str = "\
+def pending():
+    # leftover from a generator
+
+def publish(value):
+    parsed = parse(value)
+    return validate(parsed)
+";
+    let mut request = request_at_path("file.empty-span.python", "src/hooks.py", 1_100_000);
+    request.snapshot.files[0].language = Some(id::<LanguageId>("python"));
+    request.snapshot.files[0].content_digest = content_digest(PYTHON_SOURCE.as_bytes());
+    request.snapshot.content_identity = content_digest(PYTHON_SOURCE.as_bytes());
+    request.captured_files[0].sanitized_bytes = Arc::from(PYTHON_SOURCE.as_bytes());
+
+    let generation = applying_owner()
+        .build_and_publish(request, &ActiveControl)
+        .expect("one empty Python suite must not refuse the generation");
+    let generation = cold_generation(&generation);
+    let names = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        names.iter().any(|name| name.ends_with("::pending")),
+        "the stub remains a symbol: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.ends_with("::publish")),
+        "the neighboring function remains a symbol: {names:?}"
+    );
+    let bindings = sealed_clone_bindings(&generation);
+    assert!(
+        bindings
+            .values()
+            .flatten()
+            .all(|body| !body.body_span.is_empty()),
+        "published clone bodies must stay non-empty: {bindings:?}"
+    );
+}
+
+/// Every function body keeps a conservative and a rename clone-token stream
+/// for the life of the generation, so their resident form bounds what one
+/// index holds. On this 500-file fixture the generation retains 12,203,554
+/// bytes with compact streams; one 48-byte enum per token, with the rename
+/// stream repeated in full, held another 6.9 MB of token streams on top.
+#[test]
+fn a_500_file_generation_holds_its_clone_streams_within_the_resident_budget() {
+    const RESIDENT_BUDGET_BYTES: u64 = 13_500_000;
+
+    let mut request = request("file.resident.seed", 1_100_000);
+    request.snapshot.files.clear();
+    request.snapshot.sanitization_receipts.clear();
+    request.captured_files.clear();
+    let mut identity = Sha256::new();
+    for ordinal in 0..500 {
+        let source = format!(
+            "pub fn transform_{ordinal}(input: &str, limit: usize) -> usize {{\n    let trimmed = input.trim();\n    let mut total = 0;\n    for (index, part) in trimmed.split(',').enumerate() {{\n        if index >= limit {{ break; }}\n        total += part.len() * {ordinal};\n    }}\n    total\n}}\n\npub fn describe_{ordinal}(value: u64) -> String {{\n    let doubled = value * 2;\n    let label = format!(\"{{doubled}}-{ordinal}\");\n    label.to_uppercase()\n}}\n"
+        );
+        let path = format!("src/module_{ordinal:03}.rs");
+        identity.update(path.as_bytes());
+        identity.update([0]);
+        identity.update(source.as_bytes());
+        let file_occurrence_id = id::<FileOccurrenceId>(&format!("file.resident.{ordinal:03}"));
+        request.snapshot.files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: path,
+            language: Some(id::<LanguageId>("rust")),
+            content_digest: content_digest(source.as_bytes()),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        request
+            .snapshot
+            .sanitization_receipts
+            .push(id::<SanitizationReceiptId>(&format!(
+                "receipt.resident.{ordinal:03}"
+            )));
+        request.captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(source.as_bytes()),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+        });
+    }
+    request.snapshot.content_identity = content_digest(&identity.finalize());
+
+    let generation = applying_owner()
+        .build_and_publish(request, &ActiveControl)
+        .expect("generation publishes");
+    let generation = cold_generation(&generation);
+
+    assert_eq!(generation.symbols().symbols.len(), 1_000);
+    let retained = generation.retained_bytes();
+    assert!(
+        retained <= RESIDENT_BUDGET_BYTES,
+        "a 500-file generation retains {retained} bytes, over its {RESIDENT_BUDGET_BYTES}-byte budget"
+    );
 }

@@ -1,100 +1,21 @@
 /// Tree-sitter based Nix source code extractor.
 ///
 /// Parses Nix source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{ExtractionState, local_node_id};
 use crate::complexity::{ComplexityMetrics, NIX_COMPLEXITY, count_complexity};
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Nix source files using tree-sitter.
 pub struct NixExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 impl NixExtractor {
-    /// Extract code graph nodes and edges from a Nix source file.
-    ///
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the Nix source code to parse.
-    pub fn extract_nix(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -112,7 +33,7 @@ impl NixExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -126,6 +47,7 @@ impl NixExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -140,15 +62,10 @@ impl NixExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("nix", "Nix", source)
     }
 
     /// Visit all children of a node.
@@ -242,11 +159,11 @@ impl NixExtractor {
             Some(BindingKind::Function) => {
                 let kind = NodeKind::Function;
                 let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+                let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
                 let signature = Self::extract_function_signature(state, node);
                 let metrics = if let Some(expr_node) = expr {
                     if expr_node.child_count() > 0 {
-                        count_complexity(expr_node, &NIX_COMPLEXITY, &state.source)
+                        count_complexity(expr_node, &NIX_COMPLEXITY, state.source)
                     } else {
                         ComplexityMetrics::default()
                     }
@@ -276,6 +193,7 @@ impl NixExtractor {
                     unsafe_blocks: metrics.unsafe_blocks,
                     unchecked_calls: metrics.unchecked_calls,
                     assertions: metrics.assertions,
+                    complexity_analysis: metrics.analysis,
                     updated_at: state.timestamp,
                     parent_id: None,
                 };
@@ -308,7 +226,7 @@ impl NixExtractor {
             Some(BindingKind::Module) => {
                 let kind = NodeKind::Module;
                 let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+                let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
                 let text = state.node_text(node);
                 let signature = text
@@ -339,6 +257,7 @@ impl NixExtractor {
                     unsafe_blocks: 0,
                     unchecked_calls: 0,
                     assertions: 0,
+                    complexity_analysis: ComplexityAnalysisV1::Complete,
                     updated_at: state.timestamp,
                     parent_id: None,
                 };
@@ -373,7 +292,7 @@ impl NixExtractor {
                 // Const binding.
                 let kind = NodeKind::Const;
                 let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+                let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
                 let text = state.node_text(node);
                 let signature = Some(text.lines().next().unwrap_or("").trim().to_string())
@@ -401,6 +320,7 @@ impl NixExtractor {
                     unsafe_blocks: 0,
                     unchecked_calls: 0,
                     assertions: 0,
+                    complexity_analysis: ComplexityAnalysisV1::Complete,
                     updated_at: state.timestamp,
                     parent_id: None,
                 };
@@ -489,18 +409,19 @@ impl NixExtractor {
                                 let kind = NodeKind::Use;
                                 let qualified_name =
                                     format!("{}::{}", state.qualified_prefix(), attr_name);
-                                let id = generate_node_id(
+                                let id = local_node_id(
                                     &state.file_path,
+                                    state.source,
                                     &kind,
-                                    &attr_name,
-                                    start_line,
+                                    attr_name,
+                                    node,
                                 );
                                 let attr_line = attr.start_position().row as u32;
 
                                 let graph_node = Node {
                                     id: id.clone(),
                                     kind,
-                                    name: attr_name.clone(),
+                                    name: attr_name.to_string(),
                                     qualified_name,
                                     file_path: state.file_path.clone(),
                                     start_line: attr_line,
@@ -519,6 +440,7 @@ impl NixExtractor {
                                     unsafe_blocks: 0,
                                     unchecked_calls: 0,
                                     assertions: 0,
+                                    complexity_analysis: ComplexityAnalysisV1::Complete,
                                     updated_at: state.timestamp,
                                     parent_id: None,
                                 };
@@ -536,11 +458,13 @@ impl NixExtractor {
                                 // Also create an unresolved Uses ref
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: id,
-                                    reference_name: attr_name,
+                                    reference_name: attr_name.to_string(),
                                     reference_kind: EdgeKind::Uses,
                                     line: start_line,
                                     column: start_column,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                             if !attr_cursor.goto_next_sibling() {
@@ -556,9 +480,7 @@ impl NixExtractor {
         }
     }
 
-    // ----------------------------
     // Classification helpers
-    // ----------------------------
 
     /// Classify a binding's value expression.
     fn classify_expression(node: TsNode<'_>) -> BindingKind {
@@ -703,11 +625,12 @@ impl NixExtractor {
                                 let kind = NodeKind::Field;
                                 let qualified_name =
                                     format!("{}::{}", state.qualified_prefix(), field_name);
-                                let id = generate_node_id(
+                                let id = local_node_id(
                                     &state.file_path,
+                                    state.source,
                                     &kind,
                                     &field_name,
-                                    start_line,
+                                    item,
                                 );
 
                                 let text = state.node_text(item);
@@ -739,6 +662,7 @@ impl NixExtractor {
                                     unsafe_blocks: 0,
                                     unchecked_calls: 0,
                                     assertions: 0,
+                                    complexity_analysis: ComplexityAnalysisV1::Complete,
                                     updated_at: state.timestamp,
                                     parent_id: None,
                                 };
@@ -764,9 +688,7 @@ impl NixExtractor {
         }
     }
 
-    // ----------------------------
     // Name/signature extraction
-    // ----------------------------
 
     /// Extract the name from a binding's attrpath.
     fn extract_binding_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
@@ -778,7 +700,7 @@ impl NixExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "identifier" {
-                        return Some(state.node_text(child));
+                        return Some(state.node_text(child).to_string());
                     }
                     if !cursor.goto_next_sibling() {
                         break;
@@ -860,6 +782,8 @@ impl NixExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
 
@@ -871,7 +795,7 @@ impl NixExtractor {
                             && arg.kind() == "path_expression"
                         {
                             let path_text = state.node_text(arg);
-                            Self::emit_import_use_node(state, &path_text, child);
+                            Self::emit_import_use_node(state, path_text, child);
                         }
 
                         // Recurse into the apply_expression for nested calls.
@@ -901,7 +825,7 @@ impl NixExtractor {
                 && arg.kind() == "path_expression"
             {
                 let path_text = state.node_text(arg);
-                Self::emit_import_use_node(state, &path_text, node);
+                Self::emit_import_use_node(state, path_text, node);
             }
         }
         // Recurse into children
@@ -924,7 +848,7 @@ impl NixExtractor {
         let end_column = apply_node.end_position().column as u32;
         let kind = NodeKind::Use;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &kind, path, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, path, apply_node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -948,6 +872,7 @@ impl NixExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -969,6 +894,8 @@ impl NixExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
+            argument_count: None,
         });
     }
 
@@ -977,30 +904,20 @@ impl NixExtractor {
         match node.kind() {
             "variable_expression" => {
                 // variable_expression has a `name` field (identifier)
-                node.child_by_field_name("name").map(|n| state.node_text(n))
+                node.child_by_field_name("name")
+                    .map(|n| state.node_text(n).to_string())
             }
             "select_expression" => {
                 // select_expression: expression.attrpath
                 // Extract the full dotted path for the callee name.
-                Some(state.node_text(node))
+                Some(state.node_text(node).to_string())
             }
             "apply_expression" => {
-                // Curried call: (f x) y — extract the innermost function name
+                // Curried call: (f x) y. Extract the innermost function name
                 node.child_by_field_name("function")
                     .and_then(|f| Self::extract_callee_name(state, f))
             }
-            _ => Some(state.node_text(node)),
-        }
-    }
-
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
+            _ => Some(state.node_text(node).to_string()),
         }
     }
 }
@@ -1044,17 +961,16 @@ impl crate::LanguageExtractor for NixExtractor {
         "Nix"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_nix(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

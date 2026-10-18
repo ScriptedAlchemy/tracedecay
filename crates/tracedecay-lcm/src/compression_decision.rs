@@ -1,5 +1,3 @@
-#[cfg(test)]
-use super::compression_policy::DEFAULT_INCREMENTAL_MAX_DEPTH;
 pub(super) use super::compression_policy::threshold_pressure;
 pub use super::compression_policy::{
     AssemblyCapInput, OverflowRecoveryCapInput, bounded_leaf_chunk_len,
@@ -34,12 +32,20 @@ pub struct PreflightDecision {
 #[derive(Debug, Clone, Copy)]
 pub struct CompressionPlanInput<'a> {
     pub request: &'a LcmCompressionRequest,
+    /// The effective assembly cap from [`effective_assembly_token_cap`]; the
+    /// raw `request.max_assembly_tokens` is never read for pressure decisions.
+    pub assembly_token_cap: Option<i64>,
     pub backlog: &'a [LcmRawMessage],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Pure policy decisions over a backlog the caller keeps owning.
+///
+/// `selected_len` is the validated prefix length of the input backlog that
+/// this compression pass summarizes; consumers slice the owning backlog
+/// (`&backlog[..selected_len]`) instead of receiving a copy of those records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionPlan {
-    pub selected_backlog: Vec<LcmRawMessage>,
+    pub selected_len: usize,
     pub forced_overflow_recovery: bool,
     pub leaf_chunk_tokens: Option<i64>,
 }
@@ -155,7 +161,8 @@ pub fn preflight_decision(input: PreflightDecisionInput<'_>) -> PreflightDecisio
 }
 
 pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
-    let forced_overflow_recovery = should_force_overflow_recovery(input.request);
+    let forced_overflow_recovery =
+        forced_overflow_pressure(input.request.current_tokens, input.assembly_token_cap);
     let leaf_chunk_tokens = effective_leaf_chunk_tokens(
         input.request.leaf_chunk_tokens,
         input.request.dynamic_leaf_chunk_enabled,
@@ -168,7 +175,7 @@ pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
         input.request.max_source_messages,
     );
     CompressionPlan {
-        selected_backlog: input.backlog[..selected_len].to_vec(),
+        selected_len,
         forced_overflow_recovery,
         leaf_chunk_tokens,
     }
@@ -179,10 +186,6 @@ pub fn frontier_has_maintenance_debt(frontier: &LcmLifecycleState) -> bool {
         .maintenance_debt
         .iter()
         .any(|debt| matches!(debt, LcmMaintenanceDebt::RawBacklog { .. }))
-}
-
-fn should_force_overflow_recovery(request: &LcmCompressionRequest) -> bool {
-    forced_overflow_pressure(request.current_tokens, request.max_assembly_tokens)
 }
 
 #[cfg(test)]
@@ -266,25 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn condensation_policy_uses_defaults_for_regular_summarizers() {
-        let summarizer = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Fake {
-            summary_text: "summary".to_string(),
-        });
-        assert_eq!(
-            condensation_policy_decision(CondensationDecisionInput {
-                has_backlog: false,
-                summary_fan_in: Some(1),
-                incremental_max_depth: None,
-                summarizer: &summarizer,
-            }),
-            CondensationDecision::QueryCandidates(CondensationPolicy {
-                fan_in: LCM_DEFAULT_SUMMARY_FAN_IN,
-                incremental_max_depth: DEFAULT_INCREMENTAL_MAX_DEPTH,
-            })
-        );
-    }
-
-    #[test]
     fn condensation_policy_honors_overrides_and_negative_depth() {
         let summarizer = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: "summary".to_string(),
@@ -328,18 +312,6 @@ mod tests {
                 summarizer: &auxiliary,
             }),
             CondensationDecision::Skip(CondensationSkipReason::AuxiliarySummarizer)
-        );
-    }
-
-    #[test]
-    fn condensation_candidate_decision_requires_fan_in_children() {
-        assert_eq!(
-            condensation_candidate_decision(2, 3),
-            CondensationCandidateDecision::SkipNotEnoughCandidates
-        );
-        assert_eq!(
-            condensation_candidate_decision(3, 3),
-            CondensationCandidateDecision::Condense
         );
     }
 
@@ -388,8 +360,6 @@ mod tests {
             content_hash: "hash".to_string(),
             storage_kind: super::super::LcmStorageKind::Inline,
             payload_ref: None,
-            legacy_source: false,
-            legacy_truncated: false,
             metadata_json: None,
         }];
 

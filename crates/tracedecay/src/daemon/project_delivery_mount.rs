@@ -1,11 +1,11 @@
 //! Project-open ordering for the delivery and observability authority.
 
 use super::*;
-use tracedecay_application::ResolvedScope;
+use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
-use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
-#[hotpath::measure(label = "daemon.project.mount", future = true)]
+#[tracing::instrument(name = "daemon.project.mount", level = "trace", skip_all)]
 pub(super) async fn ensure_project_delivery_settlement(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -29,19 +29,16 @@ pub(super) async fn ensure_project_delivery_settlement(
             session_db,
             scope.project_id.clone(),
             access.configuration_digest.clone(),
-            access.configuration_provenance_digest.clone(),
             configuration_policy_digest.clone(),
         )
         .await
-        .map_err(|error| {
-            // Fail-closed mount outcome; successes are already counted by the
-            // enclosing measure span.
-            hotpath::gauge!("daemon.project.mount.failed").inc(1.0);
-            TraceDecayError::Config {
+        .map_err(|error| match error {
+            error @ TraceDecayError::ProjectRoute { .. } => error,
+            error => TraceDecayError::Config {
                 message: format!(
                     "project-open observability producer registration failed: {error}"
                 ),
-            }
+            },
         })?;
     Ok(configuration_policy_digest)
 }

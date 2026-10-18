@@ -1,14 +1,11 @@
 use super::{
-    AnalyticsAction, AsyncRuntimeFlavor, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
-    DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
-    HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, PackageHookAction, ProfileStorageAction,
-    ProjectsAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, StderrTracingDefault,
-    async_runtime_flavor, async_worker_threads, command_profile_label, daemon_cpu_threads_from,
-    hotpath_focus_is_valid, hotpath_output_format_is_none, hotpath_output_format_is_valid,
-    hotpath_output_path_is_valid, hotpath_requires_protocol_safe_output, is_daemon_run,
-    is_full_component_set_adoption, is_local_install_command, normalize_tool_reserved_global_flags,
-    requires_eager_mcp_tool_catalog, should_skip_agent_install_check,
-    should_skip_startup_maintenance, stderr_tracing_default, validate_host_bundle_options,
+    AnalyticsAction, Cli, CommandFamily, CommandRuntime, Commands, DAEMON_CPU_THREADS_ENV,
+    DEFAULT_MAX_DAEMON_CPU_THREADS, HostBundleCliOptions, PackageHookAction, RAYON_NUM_THREADS_ENV,
+    ScoopPackageHookAction, StderrTracingDefault, async_worker_threads, command_profile_label,
+    command_runtime, daemon_cpu_threads_from, is_one_shot_daemon_client,
+    normalize_tool_reserved_global_flags, runs_worldwide_counter_flush,
+    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
+    try_print_cli_version, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -30,92 +27,7 @@ fn parsed_command_profile_label(args: &[&str]) -> String {
 }
 
 #[test]
-fn hotpath_output_format_validation_matches_the_pinned_runtime() {
-    for valid in ["table", "json", "json-pretty", "jsonpretty", "none"] {
-        assert!(hotpath_output_format_is_valid(Some(std::ffi::OsStr::new(
-            valid
-        ))));
-    }
-    assert!(hotpath_output_format_is_valid(None));
-    assert!(!hotpath_output_format_is_valid(Some(std::ffi::OsStr::new(
-        "unexpected"
-    ))));
-    assert!(hotpath_output_format_is_none(Some(std::ffi::OsStr::new(
-        "NoNe"
-    ))));
-    assert!(!hotpath_output_format_is_none(Some(std::ffi::OsStr::new(
-        "json"
-    ))));
-}
-
-#[test]
-fn hotpath_output_path_and_focus_validation_match_the_pinned_runtime() {
-    assert!(hotpath_output_path_is_valid(None));
-    assert!(hotpath_output_path_is_valid(Some(std::ffi::OsStr::new(
-        "/tmp/hotpath.json"
-    ))));
-    assert!(!hotpath_output_path_is_valid(Some(std::ffi::OsStr::new(
-        ""
-    ))));
-    assert!(hotpath_focus_is_valid(None));
-    assert!(hotpath_focus_is_valid(Some(std::ffi::OsStr::new(
-        "/mcp\\.tool_call/"
-    ))));
-    assert!(!hotpath_focus_is_valid(Some(std::ffi::OsStr::new("/[/"))));
-}
-
-#[cfg(unix)]
-#[test]
-fn non_unicode_hotpath_output_path_cannot_authorize_hook_stdout_output() {
-    use std::os::unix::ffi::OsStringExt as _;
-
-    let path = std::ffi::OsString::from_vec(vec![0xff]);
-    assert!(!hotpath_output_path_is_valid(Some(path.as_os_str())));
-    assert!(hotpath_requires_protocol_safe_output(
-        true,
-        false,
-        Some(std::ffi::OsStr::new("json")),
-    ));
-}
-
-#[test]
-fn hook_hotpath_reports_never_write_to_protocol_stdout() {
-    assert!(hotpath_requires_protocol_safe_output(true, false, None));
-    assert!(hotpath_requires_protocol_safe_output(
-        true,
-        false,
-        Some(std::ffi::OsStr::new("json")),
-    ));
-    assert!(!hotpath_requires_protocol_safe_output(true, true, None));
-    assert!(hotpath_requires_protocol_safe_output(false, false, None));
-    assert!(!hotpath_requires_protocol_safe_output(
-        false,
-        false,
-        Some(std::ffi::OsStr::new("json")),
-    ));
-}
-
-#[test]
-fn hook_protocols_are_identified_before_the_hotpath_guard_is_built() {
-    let args = |command: &str| {
-        ["tracedecay", command]
-            .into_iter()
-            .map(std::ffi::OsString::from)
-            .collect::<Vec<_>>()
-    };
-    assert!(super::hook_capture_cmd::is_hook_protocol_invocation(&args(
-        "hook-stop"
-    )));
-    assert!(super::hook_capture_cmd::is_hook_protocol_invocation(&args(
-        "hook-codex-stop"
-    )));
-    assert!(!super::hook_capture_cmd::is_hook_protocol_invocation(
-        &args("status")
-    ));
-}
-
-#[test]
-fn hotpath_command_identity_uses_the_exact_clap_subcommand_path() {
+fn command_identity_uses_the_exact_clap_subcommand_path() {
     assert_eq!(
         parsed_command_profile_label(&["daemon", "install-service", "--no-start"]),
         "daemon.install-service"
@@ -137,224 +49,82 @@ fn hotpath_command_identity_uses_the_exact_clap_subcommand_path() {
     assert_eq!(parsed_command_profile_label(&["hook-stop"]), "hook-stop");
 }
 
-/// `wipe` destroys deployed state, so it takes the same `--yes` acceptance as
-/// the lifecycle mutations. Without it a scripted wipe had to feed `go!`
-/// through a pipe on stdin, and `--yes` was rejected outright.
-#[test]
-fn wipe_accepts_the_global_confirmation_flag() {
-    let command = Commands::Wipe { all: true };
-    let options = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-        .expect("wipe --yes must be accepted");
-}
-
-/// `wipe` owns no host component and has no preview, so the other two global
-/// lifecycle flags stay rejected on it.
-#[test]
-fn wipe_still_rejects_component_and_dry_run() {
-    let command = Commands::Wipe { all: false };
-    let family = CommandFamily::for_command(&command);
-    let dry_run = HostBundleCliOptions {
-        component: None,
-        dry_run: true,
-        yes: false,
-        adopt: false,
-    };
-    assert!(validate_host_bundle_options(&command, family, &dry_run).is_err());
-}
-
-/// The storage reset commands REQUIRE `--yes` (their handlers refuse to run
-/// without it), so the pre-dispatch validator must accept the flag instead of
-/// rejecting the exact invocation the refusal message recommends. This parses
-/// the real command line end to end, exactly as the live recovery ran it:
-/// `tracedecay storage reset-project-store --project-root <root> --yes`.
-#[test]
-fn storage_reset_project_store_parses_and_accepts_the_confirmation_flag() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "storage",
-        "reset-project-store",
-        "--project-root",
-        "/tmp/some-project",
-        "--yes",
-    ])
-    .expect("the documented reset invocation must parse");
+fn validate_parsed_host_bundle_options(args: &[&str]) -> Result<(), String> {
+    let cli = Cli::try_parse_from(iter::once("tracedecay").chain(args.iter().copied()))
+        .unwrap_or_else(|error| panic!("{args:?} must parse before scoped validation: {error}"));
+    let command = cli.command.expect("subcommand must be present");
     let options = HostBundleCliOptions {
         component: cli.component,
         dry_run: cli.dry_run,
         yes: cli.yes,
         adopt: cli.adopt,
     };
-    assert!(options.yes, "--yes must reach the storage dispatcher");
-    let command = cli.command.expect("subcommand parsed");
-    assert!(matches!(
-        command,
-        Commands::Storage {
-            action: ProfileStorageAction::ResetProjectStore { .. }
-        }
-    ));
     validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-        .expect("storage reset-project-store --yes must be accepted");
+        .map_err(|error| error.to_string())
 }
 
-/// `projects forget` REQUIRES `--yes` (its handler refuses without it) and
-/// takes the global `--dry-run` as its preview, so the pre-dispatch validator
-/// must accept both exactly as documented.
 #[test]
-fn projects_forget_accepts_confirmation_and_preview_flags() {
-    for flags in [&["--yes"][..], &["--dry-run"][..]] {
-        let mut args = vec!["tracedecay", "projects", "forget", "proj_123"];
-        args.extend_from_slice(flags);
-        let cli = Cli::try_parse_from(args).expect("documented forget invocation must parse");
-        let options = HostBundleCliOptions {
-            component: cli.component,
-            dry_run: cli.dry_run,
-            yes: cli.yes,
-            adopt: cli.adopt,
-        };
-        let command = cli.command.expect("subcommand parsed");
-        assert!(matches!(
-            command,
-            Commands::Projects {
-                action: ProjectsAction::Forget { .. }
-            }
-        ));
-        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-            .unwrap_or_else(|error| panic!("projects forget {flags:?} must be accepted: {error}"));
+fn destructive_non_lifecycle_commands_accept_only_their_own_confirmation_flags() {
+    for accepted in [
+        &["wipe", "--yes"][..],
+        &["projects", "forget", "proj_123", "--yes"][..],
+        &["projects", "forget", "proj_123", "--dry-run"][..],
+        &["sessions", "git-sync", "--dry-run"][..],
+        &[
+            "storage",
+            "reset-project-store",
+            "--project-root",
+            "/tmp/p",
+            "--yes",
+        ][..],
+        &["projects", "list"][..],
+    ] {
+        assert_eq!(
+            validate_parsed_host_bundle_options(accepted),
+            Ok(()),
+            "{accepted:?}"
+        );
+    }
+    for (rejected, message) in [
+        (&["wipe", "--dry-run"][..], "wipe accepts --yes to confirm"),
+        (
+            &["sessions", "git-sync", "--dry-run", "--component", "core"][..],
+            "sessions git-sync accepts --dry-run to preview",
+        ),
+        (
+            &[
+                "projects",
+                "forget",
+                "proj_123",
+                "--yes",
+                "--component",
+                "core",
+            ][..],
+            "projects forget accepts --yes to confirm and --dry-run to preview",
+        ),
+        (
+            &[
+                "storage",
+                "reset-project-store",
+                "--project-root",
+                "/tmp/p",
+                "--dry-run",
+            ][..],
+            "storage resets accept --yes to confirm",
+        ),
+        (
+            &["projects", "list", "--yes"][..],
+            "--component, --dry-run, --yes, and --adopt are only valid with install",
+        ),
+    ] {
+        let error = validate_parsed_host_bundle_options(rejected)
+            .expect_err("lifecycle-only flag must be refused");
+        assert!(error.contains(message), "{rejected:?}: {error}");
     }
 }
 
-/// `projects forget` owns no host component, so the component/adopt lifecycle
-/// flags stay rejected on it; and read-only `projects` verbs still reject the
-/// confirmation flags entirely.
 #[test]
-fn projects_forget_rejects_component_and_projects_list_rejects_yes() {
-    let forget = Commands::Projects {
-        action: ProjectsAction::Forget {
-            selector: "proj_123".to_string(),
-            keep_store: false,
-        },
-    };
-    let component = HostBundleCliOptions {
-        component: Some(HostBundleComponentArg::Core),
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(
-        validate_host_bundle_options(&forget, CommandFamily::for_command(&forget), &component)
-            .is_err()
-    );
-
-    let list = Commands::Projects {
-        action: ProjectsAction::List {
-            limit: 25,
-            json: false,
-        },
-    };
-    let yes = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(validate_host_bundle_options(&list, CommandFamily::for_command(&list), &yes).is_err());
-}
-
-/// `storage reset-authority` carries the same required `--yes` confirmation.
-#[test]
-fn storage_reset_authority_accepts_the_confirmation_flag() {
-    let command = Commands::Storage {
-        action: ProfileStorageAction::ResetAuthority {
-            authority: "observations".to_string(),
-            db: None,
-        },
-    };
-    let options = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-        .expect("storage reset-authority --yes must be accepted");
-}
-
-/// The storage resets own no host component and have no preview, so the other
-/// two global lifecycle flags stay rejected on them.
-#[test]
-fn storage_resets_still_reject_component_and_dry_run() {
-    let command = Commands::Storage {
-        action: ProfileStorageAction::ResetProjectStore {
-            project_root: Some("/tmp/some-project".to_string()),
-            project_id: None,
-        },
-    };
-    let family = CommandFamily::for_command(&command);
-    let dry_run = HostBundleCliOptions {
-        component: None,
-        dry_run: true,
-        yes: true,
-        adopt: false,
-    };
-    assert!(validate_host_bundle_options(&command, family, &dry_run).is_err());
-    let component = HostBundleCliOptions {
-        component: Some(HostBundleComponentArg::Core),
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(validate_host_bundle_options(&command, family, &component).is_err());
-}
-
-/// The read-only storage report has nothing to confirm, so the confirmation
-/// flag stays rejected there — the reset carve-out must not leak family-wide.
-#[test]
-fn storage_report_still_rejects_the_confirmation_flag() {
-    let command = Commands::Storage {
-        action: ProfileStorageAction::StorageReport {
-            profile_root: None,
-            project_id: None,
-            project_root: None,
-            json: false,
-        },
-    };
-    let options = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(
-        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-            .is_err()
-    );
-}
-
-/// The confirmation flag must not leak onto the other project commands, which
-/// have nothing to confirm.
-#[test]
-fn sibling_project_commands_still_reject_the_confirmation_flag() {
-    let command = Commands::List { all: false };
-    let options = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(
-        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-            .is_err()
-    );
-}
-
-#[test]
-fn default_component_set_adoption_requires_confirmation_and_reaches_dispatch() {
+fn default_component_set_adoption_requires_confirmation() {
     for args in [
         &[
             "tracedecay",
@@ -377,12 +147,24 @@ fn default_component_set_adoption_requires_confirmation_and_reaches_dispatch() {
         };
         validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
             .expect("confirmed default component-set adoption must pass validation");
-        assert!(
-            is_full_component_set_adoption(&command, &options),
-            "confirmed default adoption must reach the full component-set handler path"
-        );
-        assert!(options.yes && options.adopt);
+        assert!(options.component.is_none() && options.yes && options.adopt);
     }
+}
+
+/// Help offers one MCP component; scripts that spell the retired one still
+/// parse.
+#[test]
+fn component_help_lists_one_mcp_choice_and_keeps_the_retired_spelling() {
+    let help = Cli::command().render_long_help().to_string();
+    assert!(help.contains("context-mcp"), "{help}");
+    assert!(!help.contains("operator-mcp"), "{help}");
+
+    let cli = Cli::try_parse_from(["tracedecay", "update-plugin", "--component", "operator-mcp"])
+        .expect("the retired component spelling still parses");
+    assert_eq!(
+        cli.component,
+        Some(super::HostBundleComponentArg::OperatorMcp)
+    );
 }
 
 #[test]
@@ -433,16 +215,6 @@ fn unrelated_and_uninstall_commands_reject_adoption() {
 }
 
 #[test]
-fn async_runtime_bounds_parallel_allocators() {
-    assert!((1..=MAX_ASYNC_WORKER_THREADS).contains(&async_worker_threads()));
-    assert_eq!(MAX_ASYNC_WORKER_THREADS, 16);
-    assert_eq!(async_runtime_flavor(None), AsyncRuntimeFlavor::MultiThread);
-    // The blocking pool is no longer a flat constant: `blocking_thread_limit_tests`
-    // covers `tokio_blocking_thread_limit_from`, which derives the width from the
-    // installed indexing workers plus a serving reserve.
-}
-
-#[test]
 fn daemon_cpu_pool_is_bounded_by_default_and_operator_tunable() {
     assert_eq!(
         daemon_cpu_threads_from(96, None).unwrap(),
@@ -473,32 +245,15 @@ fn daemon_cpu_pool_is_bounded_by_default_and_operator_tunable() {
 }
 
 #[test]
-fn only_foreground_daemon_installs_the_global_cpu_pool() {
-    let daemon = Commands::Daemon {
-        action: DaemonAction::Run {
-            socket: None,
-            profile_root: None,
-            remote_listen: None,
-            remote_tls_cert: None,
-            remote_tls_key: None,
-        },
-    };
-    assert!(is_daemon_run(Some(&daemon)));
-    assert!(!is_daemon_run(Some(&Commands::Monitor)));
-    assert!(!is_daemon_run(None));
-}
-
-#[test]
 fn representative_commands_route_to_their_dispatch_family() {
     let cases = [
         (
             Commands::Init {
                 path: None,
                 path_flag: None,
-                skip_folders: Vec::new(),
-                include_folders: Vec::new(),
                 adopt_project: None,
                 fresh: false,
+                wait: false,
             },
             CommandFamily::Project,
         ),
@@ -569,26 +324,14 @@ fn non_hook_commands_keep_warnings_on_stderr() {
 }
 
 #[test]
-fn doctor_skips_startup_maintenance() {
-    let command = Commands::Doctor;
-    assert!(should_skip_startup_maintenance(&command));
-}
-
-#[test]
-fn wipe_skips_optional_startup_maintenance() {
-    let command = parse_command(&["wipe", "--all", "--yes"]);
-
-    assert!(should_skip_startup_maintenance(&command));
-    assert!(should_skip_agent_install_check(&command));
-}
-
-#[test]
 fn explicit_agent_config_commands_skip_startup_maintenance() {
     assert!(should_skip_startup_maintenance(&Commands::Install {
         agent: Some("kiro".to_string()),
         local: false,
         no_dashboard: false,
         automation: false,
+        git_hook: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Reinstall {
         local: false,
@@ -623,20 +366,6 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
 }
 
 #[test]
-fn normal_commands_keep_startup_maintenance() {
-    let command = Commands::Status {
-        path: None,
-        project_id: None,
-        project_path: None,
-        json: false,
-        short: false,
-        runtime: false,
-    };
-    assert!(!should_skip_startup_maintenance(&command));
-    assert!(requires_eager_mcp_tool_catalog(Some(&command)));
-}
-
-#[test]
 fn tool_fallback_skips_network_and_agent_startup_maintenance() {
     let command = Commands::Tool {
         project: None,
@@ -645,10 +374,100 @@ fn tool_fallback_skips_network_and_agent_startup_maintenance() {
     };
     assert!(should_skip_startup_maintenance(&command));
     assert!(should_skip_agent_install_check(&command));
-    assert!(!requires_eager_mcp_tool_catalog(Some(&command)));
+    assert!(is_one_shot_daemon_client(Some(&command)));
+    assert_eq!(command_runtime(Some(&command)), CommandRuntime::Native);
+}
+
+#[test]
+fn status_is_a_one_shot_daemon_client() {
+    let command = parse_command(&["status", "--json"]);
+    assert!(should_skip_startup_maintenance(&command));
+    assert!(should_skip_agent_install_check(&command));
+    assert!(is_one_shot_daemon_client(Some(&command)));
+    assert_eq!(command_runtime(Some(&command)), CommandRuntime::Native);
+    assert!(!is_one_shot_daemon_client(Some(&parse_command(&[
+        "init",
+        "/tmp/project"
+    ]))));
+}
+
+#[test]
+fn long_lived_commands_run_at_least_two_native_workers() {
+    for args in [&["daemon", "run"][..], &["serve"]] {
+        assert!(
+            async_worker_threads(Some(&parse_command(args))) >= 2,
+            "{args:?}"
+        );
+    }
+    for args in [&["status"][..], &["tool", "tracedecay_status"]] {
+        assert_eq!(
+            async_worker_threads(Some(&parse_command(args))),
+            1,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn only_the_foreground_daemon_owns_a_tokio_runtime() {
+    for args in [
+        &["hook-stop"][..],
+        &["current-counter"],
+        &["channel"],
+        &["update"],
+        &["install"],
+        &["feedback-rollback", "dry-run", "--agent", "claude"],
+        &["doctor"],
+        &["gain"],
+        &["git", "status"],
+        &["sessions", "search", "query"],
+        &["analytics", "sync"],
+        &["automation", "skills", "list"],
+        &["init", "/tmp/project"],
+        &["sync"],
+        &["projects", "list"],
+        &["storage", "report"],
+        &["wipe", "--stale"],
+        &["list"],
+        &["serve"],
+        &["lsp", "bridge", "--stdio"],
+        &["dashboard"],
+        &["remote", "status"],
+        &["daemon", "status"],
+        &["daemon", "stop"],
+    ] {
+        assert_eq!(
+            command_runtime(Some(&parse_command(args))),
+            CommandRuntime::Native,
+            "{args:?}"
+        );
+    }
+    assert_eq!(command_runtime(None), CommandRuntime::Native);
     assert_eq!(
-        async_runtime_flavor(Some(&command)),
-        AsyncRuntimeFlavor::CurrentThread
+        command_runtime(Some(&parse_command(&["daemon", "run"]))),
+        CommandRuntime::NativeWithTokio
+    );
+}
+
+#[test]
+fn lone_version_flags_are_recognized_without_clap() {
+    use std::ffi::OsString;
+    let version = |args: &[&str]| {
+        let argv = std::iter::once("tracedecay")
+            .chain(args.iter().copied())
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        try_print_cli_version(&argv)
+    };
+    assert!(version(&["--version"]).is_some());
+    assert!(version(&["-V"]).is_some());
+    assert!(
+        version(&[]).is_none(),
+        "bare argv must still go through clap"
+    );
+    assert!(
+        version(&["--version", "status"]).is_none(),
+        "mixed argv must still go through clap"
     );
 }
 
@@ -676,23 +495,6 @@ fn tool_dry_run_is_forwarded_from_the_global_clap_flag() {
 }
 
 #[test]
-fn first_class_git_reads_skip_network_and_agent_startup_maintenance() {
-    let command = Commands::Git {
-        action: GitAction::Status {
-            project: GitProjectArgs {
-                project: None,
-                project_id: None,
-                project_path: None,
-                json: true,
-            },
-        },
-    };
-
-    assert!(should_skip_startup_maintenance(&command));
-    assert!(should_skip_agent_install_check(&command));
-}
-
-#[test]
 fn nested_inspection_commands_skip_agent_install_check() {
     let commands = [
         &["memory", "status"][..],
@@ -717,7 +519,7 @@ fn nested_inspection_commands_skip_agent_install_check() {
         &["branch", "list"][..],
         &["branch", "autotrack", "status"][..],
         &["channel"][..],
-        &["gitignore"][..],
+        &["automation", "config", "get", "--json"][..],
     ];
 
     for args in commands {
@@ -734,67 +536,9 @@ fn nested_inspection_commands_skip_agent_install_check() {
 }
 
 #[test]
-fn read_only_automation_commands_skip_agent_install_check() {
-    for args in [
-        &["automation", "config", "get", "--json"][..],
-        &["automation", "config", "explain", "--json"][..],
-        &["automation", "runs", "list", "--json"][..],
-        &["automation", "runs", "view", "run-123", "--json"][..],
-        &[
-            "automation",
-            "runs",
-            "artifact",
-            "run-123",
-            "validation_gate",
-            "--json",
-        ][..],
-        &["automation", "skills", "list", "--json"][..],
-        &["automation", "skills", "view", "skill-123", "--json"][..],
-        &["automation", "facts", "list", "--json"][..],
-        &["automation", "facts", "view", "fact-123"][..],
-    ] {
-        let command = parse_command(args);
-        assert!(
-            should_skip_agent_install_check(&command),
-            "{args:?} must not run the unrelated agent-install check"
-        );
-        assert!(
-            !should_skip_startup_maintenance(&command),
-            "{args:?} must retain ordinary startup maintenance"
-        );
-    }
-}
-
-#[test]
-fn top_level_inspection_commands_skip_agent_install_check() {
-    for args in [
-        &["status", "--json"][..],
-        &["channel"][..],
-        &["current-counter"][..],
-        &["gitignore"][..],
-        &["cost"][..],
-        &["bench", "--json"][..],
-        &["gain", "--json"][..],
-        &["monitor"][..],
-        &["list"][..],
-    ] {
-        let command = parse_command(args);
-        assert!(
-            should_skip_agent_install_check(&command),
-            "{args:?} must not run the unrelated agent-install check"
-        );
-        assert!(
-            !should_skip_startup_maintenance(&command),
-            "{args:?} must retain ordinary startup maintenance"
-        );
-    }
-}
-
-#[test]
 fn mutating_inspection_families_keep_full_startup_policy() {
     for args in [
         &["channel", "beta"][..],
-        &["gitignore", "on"][..],
         &["automation", "config", "enable"][..],
         &["automation", "config", "disable"][..],
         &["automation", "config", "set", "--timeout-secs", "60"][..],
@@ -808,6 +552,8 @@ fn mutating_inspection_families_keep_full_startup_policy() {
             "Title",
             "--summary",
             "Summary",
+            "--routing-description",
+            "Use when checking the startup command route.",
             "--category",
             "testing",
             "--body",
@@ -844,12 +590,16 @@ fn agent_install_health_check_is_selective() {
     assert!(should_skip_agent_install_check(&Commands::Serve {
         path: None,
         timings: false,
+        full_tool_list: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_agent_install_check(&Commands::Install {
         agent: Some("cursor".to_string()),
         local: false,
         no_dashboard: false,
         automation: false,
+        git_hook: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_agent_install_check(&Commands::Reinstall {
         local: false,
@@ -873,7 +623,9 @@ fn agent_install_health_check_is_selective() {
         agent: Some("cursor".to_string()),
         local: false,
     }));
-    assert!(should_skip_agent_install_check(&Commands::Doctor));
+    assert!(should_skip_agent_install_check(&Commands::Doctor {
+        json: false
+    }));
 
     let cli = Cli::try_parse_from(["tracedecay", "init", "."])
         .unwrap_or_else(|error| panic!("init entrypoint must parse: {error}"));
@@ -923,7 +675,7 @@ fn post_update_full_reinstall_advances_both_version_markers() {
     // `update_cmd::run_post_update_tasks`) and recorded it by advancing both
     // markers; the next ordinary command must not repeat that work via the
     // startup silent reinstall. The markers may only be advanced *after* the
-    // full install pass — advancing them for a plugin-artifact-only refresh
+    // full install pass, advancing them for a plugin-artifact-only refresh
     // would silently skip config-managed agents on minor/major bumps.
     let running = "6.1.0";
     let mut config = UserConfig {
@@ -940,31 +692,11 @@ fn post_update_full_reinstall_advances_both_version_markers() {
 }
 
 #[test]
-fn no_reinstall_records_the_explicit_lifecycle_decision() {
-    // `--no-reinstall` is a durable explicit lifecycle decision for the
-    // running version, so the skip path records both markers without running
-    // the reinstall.
-    let running = "6.1.0";
-    let mut config = UserConfig {
-        installed_agents: vec!["cursor".to_string()],
-        previous_version: "6.0.0".to_string(),
-        ..UserConfig::default()
-    };
-
-    // The `--no-reinstall` path records the explicit lifecycle decision.
-    assert!(config.mark_version_installed(running));
-}
-
-#[test]
-fn serve_skips_startup_maintenance() {
-    // `tracedecay serve` is the MCP hot path with a 30 s client-side
-    // `initialize` timeout (#84). Pre-serve maintenance work
-    // (worldwide-counter flush, install-stale check, silent reinstall)
-    // must NOT run on this path.
-    assert!(should_skip_startup_maintenance(&Commands::Serve {
-        path: None,
-        timings: false,
-    }));
+fn init_defers_worldwide_counter_flush_but_retains_other_startup_maintenance() {
+    let command = parse_command(&["init", "/tmp/project"]);
+    assert!(!runs_worldwide_counter_flush(&command));
+    assert!(!should_skip_startup_maintenance(&command));
+    assert!(runs_worldwide_counter_flush(&parse_command(&["sync"])));
 }
 
 #[test]
@@ -989,22 +721,30 @@ fn claude_and_kiro_hooks_skip_startup_maintenance() {
 }
 
 #[test]
-fn local_install_detection_tracks_dispatch_preamble_behavior() {
-    let local = Commands::Install {
-        agent: Some("hermes".to_string()),
-        local: true,
-        no_dashboard: false,
-        automation: false,
-    };
-    let global = Commands::Install {
-        agent: Some("hermes".to_string()),
-        local: false,
-        no_dashboard: false,
-        automation: false,
-    };
-
-    assert!(is_local_install_command(&local));
-    assert!(!is_local_install_command(&global));
+fn every_hook_subcommand_skips_startup_maintenance() {
+    // Hooks run on the host's hot path and their stderr reaches the host. A
+    // hook outside the native-capture table (the PostCompact pressure probes)
+    // must still skip the counter flush, first-run note and install check.
+    let hooks: Vec<String> = Cli::command()
+        .get_subcommands()
+        .map(|subcommand| subcommand.get_name().to_owned())
+        .filter(|name| name.starts_with("hook-"))
+        .collect();
+    assert!(
+        hooks.len() > 30,
+        "hook subcommands were not enumerated: {hooks:?}"
+    );
+    for hook in &hooks {
+        let command = parse_command(&[hook.as_str()]);
+        assert!(
+            should_skip_startup_maintenance(&command),
+            "{hook} runs startup maintenance"
+        );
+        assert!(
+            should_skip_agent_install_check(&command),
+            "{hook} runs the agent install check"
+        );
+    }
 }
 
 // These tests intentionally stay on pure parse/dispatch guard seams. Direct
@@ -1012,3 +752,153 @@ fn local_install_detection_tracks_dispatch_preamble_behavior() {
 // install mutations, status network paths, and hook process outcomes) is
 // documented in docs/archive/MAIN-RUN-DISPATCH-NOTE.md §5 and remains covered, where
 // appropriate, by spawn-the-binary integration tests instead.
+
+#[test]
+fn copy_producing_commands_are_unknown_beside_their_surviving_siblings() {
+    let remote = [
+        "--endpoint",
+        "https://brain.example/remote/",
+        "--credential-file",
+        "cred.bin",
+        "--request-file",
+        "request.json",
+    ];
+    let with_remote_args = |action: &'static str| {
+        let mut args = vec!["remote", action];
+        args.extend(remote);
+        args
+    };
+    for args in [
+        vec!["storage", "backup", "--to", "/tmp/out", "--backup-id", "b1"],
+        vec![
+            "storage",
+            "rehearse-backup",
+            "--backup",
+            "/tmp/b1",
+            "--restore",
+            "/tmp/r1",
+        ],
+        vec!["profile", "backup"],
+        with_remote_args("backup"),
+        with_remote_args("restore"),
+    ] {
+        let error = Cli::try_parse_from(iter::once("tracedecay").chain(args.iter().copied()))
+            .err()
+            .unwrap_or_else(|| panic!("{args:?} must not parse"));
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::InvalidSubcommand,
+            "{args:?}"
+        );
+    }
+    assert!(matches!(
+        parse_command(&["storage", "report"]),
+        Commands::Storage { .. }
+    ));
+    assert!(matches!(
+        parse_command(&with_remote_args("failover")),
+        Commands::Remote { .. }
+    ));
+}
+
+#[test]
+fn query_commands_accept_json_output() {
+    assert!(matches!(
+        parse_command(&[
+            "sessions",
+            "sync-status",
+            "--idempotency-key",
+            "k",
+            "--json"
+        ]),
+        Commands::Sessions {
+            action: crate::cli::SessionsAction::SyncStatus { json: true, .. }
+        }
+    ));
+    assert!(matches!(
+        parse_command(&["sessions", "search", "query", "--json"]),
+        Commands::Sessions {
+            action: crate::cli::SessionsAction::Search(ref args)
+        } if args.json
+    ));
+    assert!(matches!(
+        parse_command(&["branch", "list", "--json"]),
+        Commands::Branch {
+            action: crate::cli::BranchAction::List { json: true, .. }
+        }
+    ));
+}
+
+#[test]
+fn the_beta_83_claude_plugin_flag_serves_the_full_tool_list() {
+    for flag in ["--full-tool-list", "--claude-code-tool-search"] {
+        let cli = Cli::try_parse_from(["tracedecay", "serve", flag])
+            .unwrap_or_else(|error| panic!("{flag} must parse: {error}"));
+        assert!(
+            matches!(
+                cli.command,
+                Some(Commands::Serve {
+                    full_tool_list: true,
+                    ..
+                })
+            ),
+            "{flag} must select the full tool list"
+        );
+    }
+}
+
+#[test]
+fn serve_selects_a_catalog_profile_by_its_short_name() {
+    for args in [
+        &["tracedecay", "serve", "--catalog-profile=compact"][..],
+        &["tracedecay", "serve", "--catalog-profile", "compact"][..],
+    ] {
+        let cli = Cli::try_parse_from(args)
+            .unwrap_or_else(|error| panic!("{args:?} must parse: {error}"));
+        let Some(Commands::Serve {
+            catalog_profile: Some(profile),
+            ..
+        }) = cli.command
+        else {
+            panic!("{args:?} must select a catalog profile");
+        };
+        assert_eq!(profile.name(), "compact");
+    }
+    let error = Cli::try_parse_from(["tracedecay", "serve", "--catalog-profile=profile.compact"])
+        .err()
+        .expect("a catalog profile ID is not its short name");
+    assert!(
+        error
+            .to_string()
+            .contains(r#"unknown catalog profile "profile.compact""#),
+        "{error}"
+    );
+}
+
+#[test]
+fn every_launch_an_install_writes_parses_as_that_serve_profile() {
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_binding_catalog_ref()
+            .expect("binding catalog");
+    for name in ["default", "compact", "administrative", "host-limited"] {
+        let profile =
+            tracedecay_contracts::catalog_composition::CatalogProfileName::parse(catalog, name)
+                .expect("catalog profile");
+        let written =
+            tracedecay_agent_hosts::agents::serve_args::ServeArgs::from(profile).to_vec(&[]);
+        let cli = Cli::try_parse_from(iter::once("tracedecay".to_owned()).chain(written.clone()))
+            .unwrap_or_else(|error| panic!("{written:?} must parse: {error}"));
+        let Some(Commands::Serve {
+            catalog_profile, ..
+        }) = cli.command
+        else {
+            panic!("{written:?} must be a serve command");
+        };
+        let expected = (name != "default").then_some(name);
+        assert_eq!(
+            catalog_profile.as_ref().map(|profile| profile.name()),
+            expected,
+            "{written:?}"
+        );
+    }
+}

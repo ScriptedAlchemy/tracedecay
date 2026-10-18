@@ -1,0 +1,57 @@
+use tracedecay_domain::configuration::{
+    ProtectedChangePlan, RedactedConfigurationChangeV1, RollbackModeV1, ScopeControlOperationV1,
+    SettingKey,
+};
+use tracedecay_domain::{AccessPolicyDigest, UtcMicros};
+use tracedecay_store::configuration::{
+    ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1,
+};
+
+use tracedecay_domain::test_fixtures::id;
+
+use tracedecay_domain::test_fixtures::digest;
+
+#[test]
+fn protected_plan_records_bind_the_redacted_plan_to_the_exact_operation() {
+    let operation = ConfigurationProtectedOperationV1::Rollback {
+        target_revision_id: id("revision.target"),
+        mode: RollbackModeV1::AllOrNothing,
+    };
+    let record = ConfigurationProtectedPlanRecordV1 {
+        plan: ProtectedChangePlan {
+            plan_id: id("plan.exact-operation"),
+            actor_id: id("actor.fixture"),
+            base_revision_id: id("revision.base"),
+            operation_digest: operation.operation_digest().unwrap(),
+            resolved_scope_digest: digest('a'),
+            membership_digest: None,
+            authorization_policy_digest: AccessPolicyDigest::new(format!(
+                "sha256:{}",
+                "b".repeat(64)
+            ))
+            .unwrap(),
+            policy_epoch: 7,
+            created_at: UtcMicros(1),
+            expires_at: UtcMicros(2),
+            redacted_changes: vec![RedactedConfigurationChangeV1 {
+                setting_key: SettingKey::new("scope.source_bindings.v1").unwrap(),
+                operation: ScopeControlOperationV1::Rollback,
+                before_digest: Some(digest('c')),
+                after_digest: Some(digest('d')),
+            }],
+        },
+        operation,
+    };
+
+    record.validate().unwrap();
+
+    let mut conflicting = record;
+    conflicting.operation = ConfigurationProtectedOperationV1::Rollback {
+        target_revision_id: id("revision.other"),
+        mode: RollbackModeV1::AllOrNothing,
+    };
+    assert_eq!(
+        conflicting.validate().unwrap_err().to_string(),
+        "configuration protected plan operation binding is not pinned to the required snapshot"
+    );
+}

@@ -1,0 +1,1287 @@
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tracedecay_contracts::retained_surfaces::{
+    GitScopeV1, HydrationStateResultV1, MessageSearchHitV1, MessageSearchRequestV1,
+    MessageSearchResultV1, RetainedNextActionV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
+    RetainedSurfaceResultV1, SessionMessageV1, SessionRecordV1, SessionRefreshRequestV1,
+    SessionRefreshScopeV1, SessionsForRequestV1, SessionsForResultV1, TemporalCoverageOmissionV1,
+    TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1,
+    TemporalPopulationCountV1, WorkflowsRequestV1, WorkflowsResultV1,
+};
+use tracedecay_contracts::{
+    ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
+    RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+    RetainedSurfaceExecutionFutureV1, now_micros,
+};
+use tracedecay_domain::{
+    ManifestDigest, ProjectId, RetrievalGrainV1, SessionId, TemporalModeV1, UserProfileId,
+    canonical_sha256,
+};
+use tracedecay_runtime_core::native_runtime;
+use tracedecay_session_memory::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
+use tracedecay_session_memory::session::{
+    SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
+};
+use tracedecay_sessions::WorkflowIndexReadPort;
+use tracedecay_sessions::runtime::git_correlation::{GitScopeFilter, git_scope_filter_from_args};
+use tracedecay_sessions::runtime::{
+    ProviderScope, SessionMessageRecord, SessionMessageSearchResult, SessionMessageType,
+    SessionRecord, SessionSearchScope,
+};
+use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::snapshot::TemporalCandidateFilterV1;
+use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
+
+use super::session_refresh::{
+    MountedSessionRefreshAuthorityV1, RetainedSessionRefreshPortV1,
+    admitted_session_refresh_command,
+};
+use crate::session_retrieval::{
+    DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
+    SessionRetrievalCoverageOmissionView, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
+    SessionRetrievalStoreScope, SessionTemporalMetadataView, temporal_message_type,
+    temporal_session_scope,
+};
+use tracedecay_contracts::retained_receipts::{evidence_outcome, session_refresh_effect_outcome};
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
+mod refresh;
+
+const MESSAGE_SEARCH_ROOT_SESSION_ID: &str = "session.message-search.root";
+/// The admitted retrieval ceiling; a larger context budget is refused rather
+/// than trimmed.
+const MESSAGE_SEARCH_CONTEXT_BYTES: u64 = crate::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES;
+
+pub struct ProjectRetainedSessionAuthoritiesV1 {
+    pub project_root: PathBuf,
+    pub project_id: ProjectId,
+    pub profile_id: UserProfileId,
+    pub session_store_id: SessionStoreId,
+    pub session_root_id: SessionRootId,
+    pub configuration_digest: ManifestDigest,
+    pub refresh: Arc<dyn RetainedSessionRefreshPortV1>,
+    pub retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+    pub session_database: RegisteredGlobalDbLeaseV1,
+    pub workflow_index: Arc<dyn WorkflowIndexReadPort>,
+}
+
+enum RetainedSessionAuthority<'a> {
+    Project(ProjectRetainedSessionAuthoritiesV1),
+    Profile {
+        session_database: super::ProfileSessionDatabaseSource<'a>,
+        identity: ResolvedSessionIdentity,
+        configuration_digest: ManifestDigest,
+        refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+        refresh_status:
+            Option<Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
+    },
+}
+
+pub struct DirectRetainedSessionPortV1<'a> {
+    authorities: RetainedSessionAuthority<'a>,
+}
+
+impl<'a> DirectRetainedSessionPortV1<'a> {
+    pub fn profile(
+        session_database: super::ProfileSessionDatabaseSource<'a>,
+        identity: ResolvedSessionIdentity,
+        configuration_digest: ManifestDigest,
+        refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+        refresh_status: Option<
+            Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
+        >,
+    ) -> Self {
+        Self {
+            authorities: RetainedSessionAuthority::Profile {
+                session_database,
+                identity,
+                configuration_digest,
+                refresh,
+                refresh_status,
+            },
+        }
+    }
+
+    async fn execute_profile_session_refresh(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &SessionRefreshRequestV1,
+        identity: &ResolvedSessionIdentity,
+        configuration_digest: &ManifestDigest,
+        refresh: Option<&dyn RetainedSessionRefreshPortV1>,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let SessionRefreshScopeV1::Profile {} = &request.request.scope else {
+            return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
+        };
+        let refresh = refresh.ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the profile session refresh authority is not mounted for this connection",
+            )
+        })?;
+        let profile_id = UserProfileId::new(identity.profile_id().as_str())
+            .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+        execute_admitted_session_refresh(
+            context,
+            request,
+            MountedSessionRefreshAuthorityV1 {
+                profile_id: &profile_id,
+                session_store_id: identity.store_id(),
+                session_root_id: identity.root_id(),
+                configuration_digest,
+                policy_digest: configuration_digest,
+                refresh,
+            },
+        )
+        .await
+    }
+
+    async fn execute_profile_message_search(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &MessageSearchRequestV1,
+        session_database: &super::ProfileSessionDatabaseSource<'_>,
+        identity: &ResolvedSessionIdentity,
+        refresh_status: Option<
+            Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
+        >,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        ensure_profile_message_scope(request)?;
+        let input = MessageSearchInput::parse(request)?;
+        let query = input.query()?;
+        let database =
+            super::bounded_execution(context, async { session_database().await }).await?;
+        let retrieval = DaemonSessionRetrievalService::new_admitted_profile(
+            database,
+            identity.clone(),
+            refresh_status,
+        )
+        .ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the profile session retrieval service could not be admitted",
+            )
+        })?;
+        let outcome = retrieve_bounded(context, &retrieval, query).await?;
+        let result = input.result(outcome, SessionRetrievalStoreScope::Profile)?;
+        let result = if result.outcome == RetainedOutcomeStatusV1::CompleteZero {
+            let database =
+                super::bounded_execution(context, async { session_database().await }).await?;
+            finish_empty_message_search(result, database.as_ref()).await?
+        } else {
+            result
+        };
+        evidence_outcome(
+            context,
+            RetainedSurfaceOperation::MessageSearch,
+            RetainedSurfaceResultV1::MessageSearch(result),
+        )
+    }
+
+    pub const fn project(authorities: ProjectRetainedSessionAuthoritiesV1) -> Self {
+        Self {
+            authorities: RetainedSessionAuthority::Project(authorities),
+        }
+    }
+
+    #[tracing::instrument(
+        name = "daemon.store_runtime.session.message_search",
+        level = "trace",
+        skip_all
+    )]
+    async fn execute_message_search(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &MessageSearchRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let RetainedSessionAuthority::Project(authorities) = &self.authorities else {
+            return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
+        };
+        ensure_project_message_scope(context, request, authorities)?;
+        let input = MessageSearchInput::parse(request)?;
+        let query = input.query()?;
+        let outcome = retrieve_bounded(context, authorities.retrieval.as_ref(), query).await?;
+        let result = input.result(outcome, SessionRetrievalStoreScope::Project)?;
+        let result =
+            finish_empty_message_search(result, authorities.session_database.as_ref()).await?;
+        evidence_outcome(
+            context,
+            RetainedSurfaceOperation::MessageSearch,
+            RetainedSurfaceResultV1::MessageSearch(result),
+        )
+    }
+
+    #[tracing::instrument(
+        name = "daemon.store_runtime.session.refresh",
+        level = "trace",
+        skip_all
+    )]
+    async fn execute_session_refresh(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &SessionRefreshRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        match &self.authorities {
+            RetainedSessionAuthority::Profile {
+                identity,
+                configuration_digest,
+                refresh,
+                ..
+            } => {
+                return self
+                    .execute_profile_session_refresh(
+                        context,
+                        request,
+                        identity,
+                        configuration_digest,
+                        *refresh,
+                    )
+                    .await;
+            }
+            RetainedSessionAuthority::Project(authorities) => {
+                ensure_session_refresh_identity(context, request, authorities)?;
+                execute_admitted_session_refresh(
+                    context,
+                    request,
+                    MountedSessionRefreshAuthorityV1 {
+                        profile_id: &authorities.profile_id,
+                        session_store_id: &authorities.session_store_id,
+                        session_root_id: &authorities.session_root_id,
+                        configuration_digest: &authorities.configuration_digest,
+                        policy_digest: &context.request_context.grant().digest,
+                        refresh: authorities.refresh.as_ref(),
+                    },
+                )
+                .await
+            }
+        }
+    }
+
+    #[tracing::instrument(
+        name = "daemon.store_runtime.session.sessions_for",
+        level = "trace",
+        skip_all
+    )]
+    async fn execute_sessions_for(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &SessionsForRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let RetainedSessionAuthority::Project(authorities) = &self.authorities else {
+            return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
+        };
+        ensure_mounted_project_context(context, authorities)?;
+        let queried: Pin<
+            Box<
+                dyn Future<Output = Result<SessionsForResultV1, RetainedSurfaceExecutionErrorV1>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(crate::session_queries::sessions_for(
+            Some(authorities.session_database.as_ref()),
+            request,
+        ));
+        let result = self
+            .bounded(context, async { Ok::<_, TraceDecayError>(queried.await) })
+            .await??;
+        evidence_outcome(
+            context,
+            RetainedSurfaceOperation::SessionsFor,
+            RetainedSurfaceResultV1::SessionsFor(result),
+        )
+    }
+
+    #[tracing::instrument(
+        name = "daemon.store_runtime.session.workflows",
+        level = "trace",
+        skip_all
+    )]
+    async fn execute_workflows(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &WorkflowsRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let RetainedSessionAuthority::Project(authorities) = &self.authorities else {
+            return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
+        };
+        ensure_mounted_project_context(context, authorities)?;
+        let queried: Pin<
+            Box<
+                dyn Future<Output = Result<WorkflowsResultV1, RetainedSurfaceExecutionErrorV1>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(crate::session_queries::workflows(
+            Some(authorities.workflow_index.as_ref()),
+            request,
+        ));
+        let result = self
+            .bounded(context, async { Ok::<_, TraceDecayError>(queried.await) })
+            .await??;
+        if result.status == RetainedOutcomeStatusV1::Unavailable {
+            let detail = result.error.as_ref().map_or_else(
+                || "workflow index unavailable".to_owned(),
+                |error| {
+                    format!(
+                        "{}: {}",
+                        error.reason.as_deref().unwrap_or(error.code.as_str()),
+                        error.message
+                    )
+                },
+            );
+            return Err(RetainedSurfaceExecutionErrorV1::unavailable(detail));
+        }
+        evidence_outcome(
+            context,
+            RetainedSurfaceOperation::Workflows,
+            RetainedSurfaceResultV1::Workflows(result),
+        )
+    }
+
+    async fn bounded<T, F>(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        future: F,
+    ) -> Result<T, RetainedSurfaceExecutionErrorV1>
+    where
+        F: std::future::Future<Output = Result<T, TraceDecayError>>,
+    {
+        tokio::select! {
+            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead)),
+            result = crate::retained::bounded_execution(context, future) => result,
+        }
+    }
+}
+
+/// Shared refresh execution for both session owners once the request has been
+/// matched to the exact mounted identity.
+async fn execute_admitted_session_refresh(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    request: &SessionRefreshRequestV1,
+    mounted: MountedSessionRefreshAuthorityV1<'_>,
+) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    let operation = request.operation();
+    let scope = &request.request.scope;
+    let command = admitted_session_refresh_command(
+        request,
+        context.request_context,
+        context.cancellation_signal,
+        &mounted,
+    )?;
+    if operation == RetainedSurfaceOperation::SessionRefreshStatus {
+        let execute = tracing::Instrument::instrument(
+            mounted.refresh.execute(command),
+            tracing::trace_span!("daemon.store_runtime.session.refresh.status"),
+        );
+        let handled = tokio::select! {
+            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead)),
+            result = crate::retained::bounded_execution(context, async { Ok::<_, TraceDecayError>(execute.await) }) => result,
+        }?;
+        return evidence_outcome(context, operation, refresh::status_result(handled, scope)?);
+    }
+
+    // Once an administrative refresh crosses its effect boundary it must
+    // settle to a durable receipt. A transport cancellation may win before
+    // this CAS; after it wins, cancellation cannot drop the in-flight DB
+    // transaction and misreport an unknown effect as a pre-admission error.
+    if !context.cancellation_signal.try_begin_commit() {
+        return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_contracts::CancellationStage::BeforeEffect,
+        ));
+    }
+    let handled = tracing::Instrument::instrument(
+        mounted.refresh.execute(command),
+        tracing::trace_span!("daemon.store_runtime.session.refresh.execute"),
+    )
+    .await;
+    let projected = match operation {
+        RetainedSurfaceOperation::SessionRefreshBegin => refresh::begin_result(handled, scope)?,
+        RetainedSurfaceOperation::SessionRefreshCancel => {
+            refresh::cancel_result(handled, scope, request.request.handle.as_deref())?
+        }
+        _ => return Err(RetainedSurfaceExecutionErrorV1::Unsupported),
+    };
+    session_refresh_effect_outcome(
+        context,
+        operation,
+        mounted.configuration_digest,
+        request,
+        &projected.operation_id,
+        projected.result,
+        projected.reconciliation_required,
+    )
+}
+
+impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1<'_> {
+    fn execute_session<'a>(
+        &'a self,
+        context: RetainedSurfaceExecutionContextV1<'a>,
+        request: RetainedSessionRequestV1<'a>,
+    ) -> RetainedSurfaceExecutionFutureV1<'a> {
+        Box::pin(async move {
+            match (&self.authorities, request) {
+                (
+                    RetainedSessionAuthority::Profile {
+                        session_database,
+                        identity,
+                        refresh_status,
+                        ..
+                    },
+                    RetainedSessionRequestV1::MessageSearch(request),
+                ) => {
+                    self.execute_profile_message_search(
+                        &context,
+                        request,
+                        session_database,
+                        identity,
+                        refresh_status.clone(),
+                    )
+                    .await
+                }
+                (
+                    RetainedSessionAuthority::Project(_),
+                    RetainedSessionRequestV1::MessageSearch(request),
+                ) => self.execute_message_search(&context, request).await,
+                (_, RetainedSessionRequestV1::SessionRefresh(request)) => {
+                    self.execute_session_refresh(&context, request).await
+                }
+                (
+                    RetainedSessionAuthority::Project(_),
+                    RetainedSessionRequestV1::SessionsFor(request),
+                ) => self.execute_sessions_for(&context, request).await,
+                (
+                    RetainedSessionAuthority::Project(_),
+                    RetainedSessionRequestV1::Workflows(request),
+                ) => self.execute_workflows(&context, request).await,
+                (
+                    RetainedSessionAuthority::Profile { .. },
+                    RetainedSessionRequestV1::SessionsFor(_)
+                    | RetainedSessionRequestV1::Workflows(_),
+                ) => Err(RetainedSurfaceExecutionErrorV1::Unsupported),
+            }
+        })
+    }
+}
+
+/// The provider parser names the offending value and the accepted set; keep
+/// that corrective diagnostic in the refusal instead of collapsing it to the
+/// generic invalid-request problem. A value the sanitized diagnostic cannot
+/// carry (oversized or control characters) still refuses with the generic
+/// problem.
+fn invalid_provider(error: String) -> RetainedSurfaceExecutionErrorV1 {
+    tracedecay_contracts::SafeDiagnostic::new(
+        "application.retained.message-search-provider-invalid",
+        error,
+    )
+    .map_or(
+        RetainedSurfaceExecutionErrorV1::InvalidRequest,
+        |diagnostic| {
+            RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+                tracedecay_contracts::ApplicationProblem::InvalidRequest {
+                    diagnostic,
+                    retry: tracedecay_contracts::RetryDirective::Never,
+                    legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
+                },
+            )
+        },
+    )
+}
+
+struct MessageSearchInput {
+    query: String,
+    goals: bool,
+    provider: ProviderScope,
+    project_key: Option<String>,
+    include_subagents: bool,
+    require_fresh: bool,
+    cursor: Option<String>,
+    parent_session_id: Option<String>,
+    since: Option<i64>,
+    until: Option<i64>,
+    scope: SessionSearchScope,
+    message_type: SessionMessageType,
+    limit: usize,
+    git: GitScopeFilter,
+    workflow_run: Option<String>,
+    workflow_agent: Option<String>,
+}
+
+impl MessageSearchInput {
+    fn parse(request: &MessageSearchRequestV1) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
+        let goals = request.goals;
+        let query = optional_string(request.query.as_deref())?;
+        let query = match query {
+            Some(query) => query,
+            None if goals => String::new(),
+            None => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
+        };
+        let provider =
+            ProviderScope::parse_optional(request.provider.as_deref()).map_err(invalid_provider)?;
+        let include_subagents = request.include_subagents.unwrap_or(true);
+        let mut scope = super::lcm::relationship_scope(request.scope);
+        if !include_subagents && scope == SessionSearchScope::SubagentsOnly {
+            return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+        }
+        if !include_subagents && scope == SessionSearchScope::All {
+            scope = SessionSearchScope::ParentsOnly;
+        }
+        let message_type = super::lcm::message_type(request.message_type);
+        let workflow_run = optional_string(request.workflow_run.as_deref())?;
+        let workflow_agent = optional_string(request.workflow_agent.as_deref())?;
+        if workflow_agent.is_some() && workflow_run.is_none() {
+            return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+        }
+        let since = time_filter(request.since.as_ref(), SearchTimeBound::Start)?;
+        let until = time_filter(request.until.as_ref(), SearchTimeBound::End)?;
+        if since.zip(until).is_some_and(|(since, until)| since > until) {
+            return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+        }
+        let branch = optional_string(request.branch.as_deref())?;
+        let worktree = optional_string(request.worktree.as_deref())?;
+        let commit = optional_string(request.commit.as_deref())?;
+        let git =
+            git_scope_filter_from_args(branch.as_deref(), worktree.as_deref(), commit.as_deref())
+                .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+        Ok(Self {
+            query,
+            goals,
+            provider,
+            project_key: optional_string(request.project_key.as_deref())?,
+            include_subagents,
+            require_fresh: request.require_fresh.unwrap_or(false),
+            cursor: optional_string(request.cursor.as_deref())?,
+            parent_session_id: optional_string(request.parent_session_id.as_deref())?,
+            since,
+            until,
+            scope,
+            message_type,
+            limit: request.limit.unwrap_or(10).clamp(1, 50) as usize,
+            git,
+            workflow_run,
+            workflow_agent,
+        })
+    }
+
+    fn query(&self) -> Result<SessionTemporalQuery, RetainedSurfaceExecutionErrorV1> {
+        let semantic_filter = TemporalCandidateFilterV1 {
+            project_key: self.project_key.clone(),
+            parent_session_id: self.parent_session_id.clone(),
+            source: None,
+            include_summaries: false,
+            session_scope: temporal_session_scope(self.scope),
+            message_type: temporal_message_type(self.message_type),
+            roles: Vec::new(),
+            start_time: self.since,
+            end_time: self.until,
+            git_branch: self.git.branch.clone(),
+            git_worktree: self.git.worktree.clone(),
+            git_commit: self.git.commit.clone(),
+            workflow_run: self.workflow_run.clone(),
+            workflow_agent: self.workflow_agent.clone(),
+            goals: self.goals,
+        };
+        let filter_digest = canonical_sha256(&(
+            "tracedecay.daemon.retained.message-search.filter.v1",
+            &semantic_filter,
+        ))
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+        let cursor_request = super::lcm::cursor_request("message_search", |bound| {
+            bound
+                .parameter("goals", &self.goals)?
+                .parameter("project_key", &self.project_key)?
+                .parameter("include_subagents", &self.include_subagents)?
+                .parameter("require_fresh", &self.require_fresh)?
+                .parameter("parent_session_id", &self.parent_session_id)?
+                .parameter("since", &self.since)?
+                .parameter("until", &self.until)?
+                .parameter("scope", &temporal_session_scope(self.scope))?
+                .parameter("message_type", &temporal_message_type(self.message_type))?
+                .parameter("branch", &self.git.branch)?
+                .parameter("worktree", &self.git.worktree)?
+                .parameter("commit", &self.git.commit)?
+                .parameter("workflow_run", &self.workflow_run)?
+                .parameter("workflow_agent", &self.workflow_agent)
+        })?;
+        SessionTemporalQuery::new(
+            SessionId::new(MESSAGE_SEARCH_ROOT_SESSION_ID).map_err(|_| {
+                RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the message-search root session anchor could not be constructed",
+                )
+            })?,
+            self.provider.provider_id().map(str::to_owned),
+            &self.query,
+            self.cursor.clone(),
+            TemporalModeV1::Current,
+            RetrievalGrainV1::LogicalMessage,
+            self.limit,
+            DiversityLimits::default(),
+            ContextBudget {
+                max_bytes: MESSAGE_SEARCH_CONTEXT_BYTES,
+                max_tokens: MESSAGE_SEARCH_CONTEXT_BYTES / 4,
+                estimator_version: "words-v1".to_owned(),
+            },
+        )
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        .map(|query| {
+            query
+                .with_cursor_request(cursor_request)
+                .with_retrieval_scope(SessionRetrievalScope::AllSessionsInAuthorizedRoot)
+                .with_freshness_policy(if self.require_fresh {
+                    SessionFreshnessPolicy::RequireFresh
+                } else {
+                    SessionFreshnessPolicy::AllowStored
+                })
+                .with_compatibility_filter_digest(filter_digest.as_str().to_owned())
+                .with_semantic_filter(semantic_filter)
+                // Without this the query carries the multi-MiB
+                // `ExecutionLimits::default()`, which the admitted binding
+                // refuses terminally, every message search would answer
+                // a structural budget refusal instead of searching.
+                .with_execution_limits(crate::session_retrieval::admitted_execution_limits(
+                    self.limit,
+                ))
+        })
+    }
+
+    fn result(
+        &self,
+        outcome: SessionRetrievalServiceOutcome,
+        store_scope: SessionRetrievalStoreScope,
+    ) -> Result<MessageSearchResultV1, RetainedSurfaceExecutionErrorV1> {
+        let mut result = self.base_result(store_scope);
+        match outcome {
+            SessionRetrievalServiceOutcome::Complete { page, freshness } => {
+                result.outcome = RetainedOutcomeStatusV1::Complete;
+                apply_page(&mut result, page, freshness)?;
+            }
+            SessionRetrievalServiceOutcome::CompleteZero {
+                temporal,
+                freshness,
+            } => {
+                result.status = RetainedOutcomeStatusV1::CompleteZero;
+                apply_temporal(&mut result, temporal, freshness);
+            }
+            SessionRetrievalServiceOutcome::Stale {
+                temporal,
+                freshness,
+            } => {
+                result.status = RetainedOutcomeStatusV1::Stale;
+                result.outcome = RetainedOutcomeStatusV1::Stale;
+                result.refresh_required = self.require_fresh;
+                apply_temporal(&mut result, temporal, freshness);
+            }
+            SessionRetrievalServiceOutcome::Partial {
+                page,
+                freshness,
+                omitted,
+                ..
+            } => {
+                result.status = RetainedOutcomeStatusV1::Partial;
+                result.outcome = RetainedOutcomeStatusV1::Partial;
+                result.omitted = Some(omitted);
+                result.refresh_required =
+                    self.require_fresh && !matches!(freshness, SessionDataFreshness::Fresh);
+                apply_page(&mut result, page, freshness)?;
+            }
+            SessionRetrievalServiceOutcome::Redacted => {
+                result.status = RetainedOutcomeStatusV1::Redacted;
+                result.outcome = RetainedOutcomeStatusV1::Redacted;
+            }
+            SessionRetrievalServiceOutcome::Deleted => {
+                result.status = RetainedOutcomeStatusV1::Deleted;
+                result.outcome = RetainedOutcomeStatusV1::Deleted;
+            }
+            SessionRetrievalServiceOutcome::WrongScope | SessionRetrievalServiceOutcome::Denied => {
+                return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
+            }
+            SessionRetrievalServiceOutcome::ResetRequired { store_scope } => {
+                return Err(match store_scope {
+                    SessionRetrievalStoreScope::Project => {
+                        RetainedSurfaceExecutionErrorV1::ProjectResetRequired
+                    }
+                    SessionRetrievalStoreScope::Profile => {
+                        RetainedSurfaceExecutionErrorV1::ProfileResetRequired
+                    }
+                });
+            }
+            SessionRetrievalServiceOutcome::Locked => {
+                return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the session store is locked for retrieval",
+                ));
+            }
+            SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+                return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                    crate::retained::session_retrieval_unavailable_detail(&unavailable),
+                ));
+            }
+            SessionRetrievalServiceOutcome::CursorStale => {
+                return Err(RetainedSurfaceExecutionErrorV1::cursor_stale_refusal());
+            }
+            SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+                return Err(RetainedSurfaceExecutionErrorV1::cursor_refused(&mismatch));
+            }
+            SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+                kind,
+                observed,
+                maximum,
+            } => {
+                return Err(message_search_cursor_manifest_refusal(
+                    kind, observed, maximum,
+                ));
+            }
+            SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
+                return Err(RetainedSurfaceExecutionErrorV1::structural_budget_refusal(
+                    stage, accounting,
+                ));
+            }
+            SessionRetrievalServiceOutcome::TimedOut => {
+                return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                    tracedecay_contracts::CancellationStage::DuringRead,
+                ));
+            }
+            SessionRetrievalServiceOutcome::Cancelled => {
+                return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                    tracedecay_contracts::CancellationStage::DuringRead,
+                ));
+            }
+        }
+        Ok(result)
+    }
+
+    fn base_result(&self, store_scope: SessionRetrievalStoreScope) -> MessageSearchResultV1 {
+        MessageSearchResultV1 {
+            require_fresh: self.require_fresh,
+            count: Some(0),
+            goals: self.goals,
+            include_subagents: self.include_subagents,
+            message_type: self.message_type.as_str().to_owned(),
+            next_action: None,
+            outcome: RetainedOutcomeStatusV1::CompleteZero,
+            parent_session_id: self.parent_session_id.clone(),
+            project_key: self.project_key.clone(),
+            provider: self.provider.response_label().to_owned(),
+            query: Some(self.query.clone()),
+            refresh_required: false,
+            requested_provider: self.provider.provider_id().map(str::to_owned),
+            results: Some(Vec::new()),
+            scope: self.scope.as_str().to_owned(),
+            since: self.since,
+            status: RetainedOutcomeStatusV1::Ok,
+            until: self.until,
+            error: None,
+            git_filter: (!self.git.is_empty()).then(|| GitScopeV1 {
+                branch: self.git.branch.clone(),
+                worktree: self.git.worktree.clone(),
+                commit: self.git.commit.clone(),
+            }),
+            git_filter_applied: (!self.git.is_empty()).then_some(true),
+            message: None,
+            omitted: None,
+            service_status: None,
+            store_scope: Some(
+                match store_scope {
+                    SessionRetrievalStoreScope::Project => "project",
+                    SessionRetrievalStoreScope::Profile => "profile",
+                }
+                .to_owned(),
+            ),
+            temporal: None,
+            workflow_agent: self.workflow_agent.clone(),
+            workflow_filter_applied: self.workflow_run.as_ref().map(|_| true),
+            workflow_run: self.workflow_run.clone(),
+            workflow_run_parent_session: None,
+        }
+    }
+}
+
+async fn finish_empty_message_search(
+    mut result: MessageSearchResultV1,
+    store: &RegisteredGlobalDb,
+) -> Result<MessageSearchResultV1, RetainedSurfaceExecutionErrorV1> {
+    if result.outcome != RetainedOutcomeStatusV1::CompleteZero {
+        return Ok(result);
+    }
+    let count = store.session_message_count().await.map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the session store could not be counted: {error}"
+        ))
+    })?;
+    annotate_empty_message_search(&mut result, count == 0);
+    Ok(result)
+}
+
+/// Distinguish an empty mounted store from a real query miss.
+fn annotate_empty_message_search(result: &mut MessageSearchResultV1, store_empty: bool) {
+    if result.outcome != RetainedOutcomeStatusV1::CompleteZero {
+        return;
+    }
+    if store_empty {
+        result.status = RetainedOutcomeStatusV1::Unavailable;
+        result.outcome = RetainedOutcomeStatusV1::Unavailable;
+        result.message = Some(
+            "no ingested session transcripts in the mounted store. \
+             Run `tracedecay sessions import` to ingest host transcripts, then search again."
+                .to_owned(),
+        );
+        result.next_action = Some(RetainedNextActionV1 {
+            kind: "import".to_owned(),
+            tool: "tracedecay sessions import".to_owned(),
+            action: "schedule host transcript ingest".to_owned(),
+            reason: "the mounted session store has no ingested messages".to_owned(),
+        });
+        return;
+    }
+    result.status = RetainedOutcomeStatusV1::CompleteZero;
+    if result.message.is_none() {
+        result.message = Some("no indexed messages matched".to_owned());
+    }
+}
+
+fn message_search_cursor_manifest_refusal(
+    kind: tracedecay_domain::CursorManifestLimitKindV1,
+    observed: usize,
+    maximum: usize,
+) -> RetainedSurfaceExecutionErrorV1 {
+    RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
+}
+
+fn ensure_project_message_scope(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    request: &MessageSearchRequestV1,
+    authorities: &ProjectRetainedSessionAuthoritiesV1,
+) -> Result<(), RetainedSurfaceExecutionErrorV1> {
+    ensure_mounted_project_context(context, authorities)?;
+    if request
+        .project_selector
+        .as_ref()
+        .is_some_and(|selector| selector.project_id != authorities.project_id)
+    {
+        return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
+    }
+    Ok(())
+}
+
+fn ensure_profile_message_scope(
+    request: &MessageSearchRequestV1,
+) -> Result<(), RetainedSurfaceExecutionErrorV1> {
+    request
+        .project_selector
+        .is_none()
+        .then_some(())
+        .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
+}
+
+fn ensure_session_refresh_identity(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    request: &SessionRefreshRequestV1,
+    authorities: &ProjectRetainedSessionAuthoritiesV1,
+) -> Result<(), RetainedSurfaceExecutionErrorV1> {
+    ensure_mounted_project_context(context, authorities)?;
+    // A profile-owned refresh is served by the profile session authority; the
+    // project owner never redirects it through its own store.
+    let SessionRefreshScopeV1::Project {} = &request.request.scope else {
+        return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
+    };
+    Ok(())
+}
+
+fn ensure_mounted_project_context(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    authorities: &ProjectRetainedSessionAuthoritiesV1,
+) -> Result<(), RetainedSurfaceExecutionErrorV1> {
+    (context.request_context.scope().project_id == authorities.project_id)
+        .then_some(())
+        .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
+}
+
+fn optional_string(value: Option<&str>) -> Result<Option<String>, RetainedSurfaceExecutionErrorV1> {
+    value
+        .map(str::trim)
+        .map(|value| {
+            (!value.is_empty())
+                .then(|| value.to_owned())
+                .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        })
+        .transpose()
+}
+
+fn time_filter(
+    value: Option<&tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1>,
+    bound: SearchTimeBound,
+) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
+    let value = match value {
+        None => return Ok(None),
+        Some(tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1::Micros(value)) => {
+            i64::try_from(*value).map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
+        }
+        Some(tracedecay_contracts::retained_surfaces::RetainedTimeFilterV1::Expression(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+            }
+            match value.parse::<i64>() {
+                Ok(value) if value >= 0 => value,
+                Ok(_) => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
+                Err(_) => parse_search_time_filter_bound(
+                    value,
+                    tracedecay_runtime_core::tracedecay::current_timestamp(),
+                    bound,
+                )
+                .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+            }
+        }
+    };
+    Ok(Some(value))
+}
+
+#[tracing::instrument(
+    name = "daemon.store_runtime.session.retrieve",
+    level = "trace",
+    skip_all
+)]
+async fn retrieve_bounded(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    service: &dyn SessionApplicationRetrievalPortV1,
+    query: SessionTemporalQuery,
+) -> Result<SessionRetrievalServiceOutcome, RetainedSurfaceExecutionErrorV1> {
+    let now = now_micros();
+    match context.request_context.admission_at(now) {
+        RequestAdmission::Admitted => {}
+        RequestAdmission::Cancelled => {
+            return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_contracts::CancellationStage::BeforeRead,
+            ));
+        }
+        RequestAdmission::TimedOut => {
+            return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                tracedecay_contracts::CancellationStage::BeforeRead,
+            ));
+        }
+        RequestAdmission::GrantExpired => {
+            return Err(RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+                tracedecay_contracts::ApplicationProblem::grant_expired_before_admission(),
+            ));
+        }
+    }
+    let remaining = context
+        .request_context
+        .deadline()
+        .expires_at
+        .0
+        .saturating_sub(now.0);
+    let remaining = u64::try_from(remaining)
+        .ok()
+        .map(Duration::from_micros)
+        .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_contracts::CancellationStage::BeforeRead,
+        ))?;
+    let retrieval = tracing::Instrument::instrument(
+        service.retrieve_admitted_with_cancellation(
+            context.request_context,
+            context.cancellation_signal,
+            query,
+        ),
+        tracing::trace_span!("daemon.store_runtime.session.retrieve.wait"),
+    );
+    tokio::select! {
+        () = context.cancellation_signal.cancelled() => {
+            Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead))
+        }
+        outcome = native_runtime::timeout(remaining, retrieval) => {
+            outcome.map_err(super::read_timeout_error)
+        }
+    }
+}
+
+fn apply_page(
+    result: &mut MessageSearchResultV1,
+    page: SessionRetrievalPageView,
+    freshness: SessionDataFreshness,
+) -> Result<(), RetainedSurfaceExecutionErrorV1> {
+    result.count = Some(page.results.len());
+    result.results = Some(
+        page.results
+            .into_iter()
+            .map(message_search_hit)
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    result.temporal = Some(temporal(page.temporal, freshness));
+    Ok(())
+}
+
+fn apply_temporal(
+    result: &mut MessageSearchResultV1,
+    temporal_view: SessionTemporalMetadataView,
+    freshness: SessionDataFreshness,
+) {
+    result.temporal = Some(temporal(temporal_view, freshness));
+}
+
+fn message_search_hit(
+    result: SessionMessageSearchResult,
+) -> Result<MessageSearchHitV1, RetainedSurfaceExecutionErrorV1> {
+    if !result.score.is_finite() {
+        return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+            "message search produced a non-finite relevance score",
+        ));
+    }
+    Ok(MessageSearchHitV1 {
+        session: session_record(result.session),
+        message: session_message(result.message),
+        score: result.score,
+        project_id: None,
+        root: None,
+    })
+}
+
+fn session_record(record: SessionRecord) -> SessionRecordV1 {
+    SessionRecordV1 {
+        provider: record.provider,
+        session_id: record.session_id,
+        project_key: record.project_key,
+        project_path: record.project_path,
+        title: record.title,
+        started_at: record.started_at,
+        ended_at: record.ended_at,
+        transcript_path: record.transcript_path,
+        metadata_json: record.metadata_json,
+        parent_session_id: record.parent_session_id,
+        is_subagent: record.is_subagent,
+        agent_id: record.agent_id,
+        parent_tool_use_id: record.parent_tool_use_id,
+    }
+}
+
+fn session_message(message: SessionMessageRecord) -> SessionMessageV1 {
+    SessionMessageV1 {
+        provider: message.provider,
+        message_id: message.message_id,
+        session_id: message.session_id,
+        role: message.role,
+        timestamp: message.timestamp,
+        ordinal: message.ordinal,
+        text: message.text,
+        kind: message.kind,
+        model: message.model,
+        tool_names: message.tool_names,
+        source_path: message.source_path,
+        source_offset: message.source_offset,
+        metadata_json: message.metadata_json,
+    }
+}
+
+fn temporal(
+    value: SessionTemporalMetadataView,
+    freshness: SessionDataFreshness,
+) -> TemporalMetadataV1 {
+    TemporalMetadataV1 {
+        anchors: value
+            .anchors
+            .into_iter()
+            .map(|anchor| anchor.as_str().to_owned())
+            .collect(),
+        watermarks: temporal_watermarks(value.watermarks),
+        coverage: coverage(value.coverage),
+        source_coverage: value
+            .source_coverage
+            .into_iter()
+            .map(source_coverage)
+            .collect(),
+        explanations: value
+            .explanations
+            .into_iter()
+            .map(|explanation| TemporalExplanationV1 {
+                anchor: explanation.anchor.as_str().to_owned(),
+                summary: explanation.summary,
+            })
+            .collect(),
+        omissions: value
+            .omissions
+            .into_iter()
+            .map(|omission| TemporalOmissionV1 {
+                rank: omission.rank,
+                anchor: omission.anchor.as_str().to_owned(),
+                reason: HydrationStateResultV1::from(omission.reason),
+            })
+            .collect(),
+        coverage_omissions: value
+            .coverage_omissions
+            .into_iter()
+            .map(coverage_omission)
+            .collect(),
+        next_cursor: value.cursor,
+        freshness: Some(match freshness {
+            SessionDataFreshness::Fresh => TemporalFreshnessV1::Fresh,
+            SessionDataFreshness::Stored { generation_lag } => {
+                TemporalFreshnessV1::Stored { generation_lag }
+            }
+            SessionDataFreshness::Partial { generation_lag } => {
+                TemporalFreshnessV1::Partial { generation_lag }
+            }
+        }),
+    }
+}
+
+fn coverage_omission(omission: SessionRetrievalCoverageOmissionView) -> TemporalCoverageOmissionV1 {
+    match omission {
+        SessionRetrievalCoverageOmissionView::RootContinuationUnavailable {
+            strict_population,
+        } => {
+            TemporalCoverageOmissionV1::RootContinuationUnavailable {
+                strict_population: match strict_population {
+                    TemporalCandidatePopulationCount::Exact(count) => {
+                        TemporalPopulationCountV1::Exact { count }
+                    }
+                    TemporalCandidatePopulationCount::AtLeast(count) => {
+                        TemporalPopulationCountV1::AtLeast { count }
+                    }
+                },
+                detail: "root continuation unavailable: strict population exceeds the supported window; narrow the scope".to_owned(),
+            }
+        }
+    }
+}
+
+pub(super) use super::wire::{coverage, source_coverage, temporal_watermarks};
+
+#[cfg(test)]
+mod refusal_tests {
+    use tracedecay_contracts::{
+        ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
+    };
+    use tracedecay_domain::CursorManifestLimitKindV1;
+    use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
+
+    use crate::session_retrieval::{
+        SessionRetrievalCoverageOmissionView, SessionTemporalMetadataView,
+    };
+
+    use super::{message_search_cursor_manifest_refusal, temporal};
+
+    #[test]
+    fn message_search_cursor_manifest_kinds_have_distinct_invalid_request_diagnostics() {
+        for (kind, expected_code) in [
+            (
+                CursorManifestLimitKindV1::Participants,
+                "application.retained.session-cursor-manifest-participants-limit-exceeded",
+            ),
+            (
+                CursorManifestLimitKindV1::CanonicalBytes,
+                "application.retained.session-cursor-manifest-canonical-bytes-limit-exceeded",
+            ),
+        ] {
+            let error = message_search_cursor_manifest_refusal(kind, 257, 256);
+            assert!(!matches!(
+                &error,
+                tracedecay_contracts::RetainedSurfaceExecutionErrorV1::Saturated
+            ));
+            let problem = retained_surface_execution_problem(error);
+            assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
+            assert_eq!(problem.retry(), RetryDirective::Never);
+            assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
+            assert_eq!(
+                problem
+                    .diagnostic()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some(expected_code)
+            );
+        }
+    }
+
+    #[test]
+    fn root_continuation_omission_carries_scope_guidance() {
+        let metadata = temporal(
+            SessionTemporalMetadataView {
+                coverage_omissions: vec![
+                    SessionRetrievalCoverageOmissionView::RootContinuationUnavailable {
+                        strict_population: TemporalCandidatePopulationCount::Exact(280),
+                    },
+                ],
+                ..SessionTemporalMetadataView::default()
+            },
+            super::SessionDataFreshness::Fresh,
+        );
+        let wire = serde_json::to_value(metadata).expect("temporal metadata");
+
+        assert_eq!(
+            wire["coverage_omissions"][0]["kind"],
+            "root_continuation_unavailable"
+        );
+        assert_eq!(
+            wire["coverage_omissions"][0]["detail"],
+            "root continuation unavailable: strict population exceeds the supported window; narrow the scope"
+        );
+        assert_eq!(
+            wire["coverage_omissions"][0]["strict_population"],
+            serde_json::json!({"kind": "exact", "count": 280})
+        );
+    }
+}
+
+#[cfg(test)]
+mod empty_search_annotation_tests {
+    use serde_json::json;
+    use tracedecay_contracts::retained_surfaces::MessageSearchResultV1;
+
+    use super::annotate_empty_message_search;
+
+    fn complete_zero_result() -> MessageSearchResultV1 {
+        serde_json::from_value(json!({
+            "require_fresh": false,
+            "count": 0,
+            "goals": false,
+            "include_subagents": false,
+            "message_type": "any",
+            "outcome": "complete_zero",
+            "provider": "all",
+            "query": "indexLocalPlugins",
+            "refresh_required": false,
+            "results": [],
+            "scope": "all",
+            "status": "complete_zero",
+        }))
+        .expect("complete-zero search result decodes")
+    }
+
+    #[test]
+    fn an_empty_store_is_unavailable_with_import_guidance() {
+        let mut result = complete_zero_result();
+        annotate_empty_message_search(&mut result, true);
+        assert_eq!(
+            result.status,
+            tracedecay_contracts::retained_surfaces::RetainedOutcomeStatusV1::Unavailable
+        );
+        assert_eq!(
+            result.outcome,
+            tracedecay_contracts::retained_surfaces::RetainedOutcomeStatusV1::Unavailable
+        );
+        let message = result.message.expect("empty source names the import");
+        assert!(message.contains("tracedecay sessions import"), "{message}");
+        let next = result.next_action.expect("empty source has a next action");
+        assert_eq!(next.tool, "tracedecay sessions import");
+        assert_eq!(next.kind, "import");
+    }
+
+    #[test]
+    fn a_populated_store_miss_stays_complete_zero() {
+        let mut result = complete_zero_result();
+        annotate_empty_message_search(&mut result, false);
+        assert_eq!(
+            result.status,
+            tracedecay_contracts::retained_surfaces::RetainedOutcomeStatusV1::CompleteZero
+        );
+        assert_eq!(
+            result.outcome,
+            tracedecay_contracts::retained_surfaces::RetainedOutcomeStatusV1::CompleteZero
+        );
+        assert_eq!(
+            result.message.as_deref(),
+            Some("no indexed messages matched")
+        );
+        assert!(result.next_action.is_none());
+    }
+}

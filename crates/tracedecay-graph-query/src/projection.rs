@@ -5,16 +5,20 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracedecay_application::{
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphProjectionStore,
+    CodeGraphReadinessRequirement, InteractiveCatalogReaderLeaseV1,
+};
+pub use tracedecay_contracts::retrieval::CodeGraphReadFreshnessV1;
+use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, Deadline, RequestAdmission, RequestContext,
     RequestId, ResolvedScope,
 };
-use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphProjectionStore,
-};
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_domain::{CodeGenerationId, UtcMicros};
+use tracedecay_domain::{ApplicationProblemDetailV1, CodeGenerationId, UtcMicros};
 use tracedecay_graph_db::GraphCancellation;
+
+const CODE_GRAPH_PARKED_REASON: &str = "code-graph-parked";
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum CodeGraphReadError {
@@ -22,8 +26,27 @@ pub enum CodeGraphReadError {
     MissingRegistry,
     #[error("the exact project code graph is unavailable: {detail}")]
     Unavailable { detail: String },
+    /// The graph's released engine or catalog was still warming again when
+    /// the read's budget ran out; it needs `retry_after_millis` more.
+    #[error(
+        "the exact project code graph is warming again after a release; retry after \
+         {retry_after_millis}ms"
+    )]
+    Rewarming { retry_after_millis: u64 },
+    /// The serving generation's graph is refused for that generation's
+    /// lifetime; a retry answers the same until another generation seals.
+    #[error("the exact project code graph is refused for this generation: {detail}")]
+    Refused { detail: String },
     #[error("the exact project code graph requires reset: {detail}")]
     ResetRequired { detail: String },
+    /// The worktree's code index is parked until the operator applies
+    /// `remedy`; no wake retries it, so repeating the read cannot help.
+    #[error("the exact project code index is parked: {cause}; remedy: {remedy}")]
+    Parked {
+        cause: String,
+        remedy: String,
+        retries_on_wake: bool,
+    },
     #[error("the requested code-graph generation is stale: {detail}")]
     Stale { detail: String },
     #[error("the code-graph read was cancelled")]
@@ -40,11 +63,51 @@ pub enum CodeGraphReadError {
     Corrupt { detail: String },
 }
 
+/// Read and incomplete-evidence refusals remain typed until the host chooses
+/// its public outcome; other query and source failures keep their runtime cause.
+#[derive(Debug, Error)]
+pub enum GraphQueryError {
+    #[error(transparent)]
+    Read(#[from] CodeGraphReadError),
+    /// A query could not establish complete evidence. Hosts classify this
+    /// variant; the reason code is retained only for the outbound runtime error.
+    #[error("{detail}")]
+    EvidenceUnavailable {
+        reason_code: &'static str,
+        detail: String,
+    },
+    #[error(transparent)]
+    Runtime(#[from] TraceDecayError),
+}
+
+pub type GraphQueryResult<T> = Result<T, GraphQueryError>;
+
+impl From<CodeGraphProjectionError> for GraphQueryError {
+    fn from(error: CodeGraphProjectionError) -> Self {
+        Self::Read(map_projection_error(error))
+    }
+}
+
+/// The outbound adapter for hosts that still return the runtime error contract.
+impl From<GraphQueryError> for TraceDecayError {
+    fn from(error: GraphQueryError) -> Self {
+        match error {
+            GraphQueryError::Read(error) => map_code_graph_read_runtime_error(error),
+            GraphQueryError::EvidenceUnavailable {
+                reason_code,
+                detail,
+            } => Self::project_route(reason_code, false, detail),
+            GraphQueryError::Runtime(error) => error,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CodeGraphReadRequest<'a> {
     pub context: &'a RequestContext,
     pub observed_at: UtcMicros,
     pub cancellation: Arc<dyn GraphCancellation>,
+    pub readiness: CodeGraphReadinessRequirement,
     pub deadline: Option<Deadline>,
     pub live_cancellation: Option<&'a CancellationSignal>,
 }
@@ -59,9 +122,15 @@ impl<'a> CodeGraphReadRequest<'a> {
             context,
             observed_at,
             cancellation,
+            readiness: CodeGraphReadinessRequirement::Catalog,
             deadline: None,
             live_cancellation: None,
         }
+    }
+
+    pub fn with_readiness(mut self, readiness: CodeGraphReadinessRequirement) -> Self {
+        self.readiness = readiness;
+        self
     }
 
     pub fn with_deadline(mut self, deadline: Deadline) -> Self {
@@ -147,47 +216,12 @@ where
     }
 }
 
-/// Freshness of the generation a verified graph read serves.
-///
-/// Mirrors the search lane's `served_stale` contract: the serving arm of
-/// query admission answers from the last complete seated generation while a
-/// rebuild is in flight, and the answer must say so rather than present
-/// itself as current.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CodeGraphReadFreshnessV1 {
-    /// The ready gate proved the served generation current against the live
-    /// checkout when the read opened.
-    Current,
-    /// The last complete seated generation answered because no proven-current
-    /// generation was admissible (the scheduler owns a rebuild pass or the
-    /// checkout drifted past the currency witness). Recall is sound for the
-    /// served generation; freshness is not. The payload carries the evidence
-    /// a caller needs to say how stale and whether a remedy is in motion: a
-    /// seat sealed days ago with no rebuild pass in flight is a wedged route,
-    /// not a routine rebuild window.
-    LastCompleteStale {
-        /// When the served generation was durably sealed.
-        sealed_at: UtcMicros,
-        /// Whether a reconcile pass or pending scheduler wake existed for the
-        /// route when the read opened.
-        rebuild_in_flight: bool,
-    },
-}
-
-impl CodeGraphReadFreshnessV1 {
-    pub fn is_stale(self) -> bool {
-        match self {
-            Self::Current => false,
-            Self::LastCompleteStale { .. } => true,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct VerifiedCodeGraphRead {
     scope: ResolvedScope,
     store: Arc<CodeGraphProjectionStore>,
     freshness: CodeGraphReadFreshnessV1,
+    _catalog_retain: Option<Arc<InteractiveCatalogReaderLeaseV1>>,
 }
 
 impl VerifiedCodeGraphRead {
@@ -195,6 +229,7 @@ impl VerifiedCodeGraphRead {
         scope: ResolvedScope,
         store: Arc<CodeGraphProjectionStore>,
         freshness: CodeGraphReadFreshnessV1,
+        catalog_retain: Option<Arc<InteractiveCatalogReaderLeaseV1>>,
     ) -> Result<Self, CodeGraphReadError> {
         scope
             .validate()
@@ -205,6 +240,7 @@ impl VerifiedCodeGraphRead {
             scope,
             store,
             freshness,
+            _catalog_retain: catalog_retain,
         })
     }
 
@@ -232,7 +268,7 @@ impl VerifiedCodeGraphRead {
         self.reader_with_cancellation(context, observed_at, request_graph_cancellation(context))
     }
 
-    #[hotpath::measure(label = "usecases.graph.reader")]
+    #[tracing::instrument(name = "usecases.graph.reader", level = "trace", skip_all)]
     pub fn reader_with_cancellation(
         &self,
         context: &RequestContext,
@@ -251,6 +287,7 @@ impl VerifiedCodeGraphRead {
             RequestAdmission::Admitted => {}
             RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
             RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
+            RequestAdmission::GrantExpired => return Err(CodeGraphReadError::Denied),
         }
         self.store
             .interactive_reader_with_cancellation(self.store.generation(), cancellation)
@@ -320,16 +357,41 @@ pub fn map_projection_error(error: CodeGraphProjectionError) -> CodeGraphReadErr
     }
 }
 
+/// Render a typed graph refusal for an outbound runtime-error boundary.
 pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDecayError {
     match error {
         CodeGraphReadError::ResetRequired { detail } => TraceDecayError::ResetRequired {
             authority: "verified code graph".to_owned(),
             reason: detail,
         },
+        CodeGraphReadError::Parked {
+            cause,
+            remedy,
+            retries_on_wake,
+        } => TraceDecayError::project_route_with_detail(
+            CODE_GRAPH_PARKED_REASON,
+            false,
+            ApplicationProblemDetailV1::Parked {
+                cause,
+                remedy,
+                retries_on_wake,
+            },
+        ),
+        // Route readers keep treating it as the retryable unavailable graph.
+        CodeGraphReadError::Rewarming { retry_after_millis } => {
+            TraceDecayError::project_route_with_detail(
+                "code-graph-unavailable",
+                true,
+                ApplicationProblemDetailV1::CodeGraphRewarming { retry_after_millis },
+            )
+        }
         error => TraceDecayError::ProjectRoute {
             reason_code: match &error {
                 CodeGraphReadError::MissingRegistry => "code-graph-registry-missing",
-                CodeGraphReadError::Unavailable { .. } => "code-graph-unavailable",
+                CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Rewarming { .. } => {
+                    "code-graph-unavailable"
+                }
+                CodeGraphReadError::Refused { .. } => "code-graph-refused",
                 CodeGraphReadError::Stale { .. } => "code-graph-stale",
                 CodeGraphReadError::Cancelled => "code-graph-cancelled",
                 CodeGraphReadError::TimedOut => "code-graph-timed-out",
@@ -338,6 +400,7 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
                 CodeGraphReadError::InvalidRequest { .. } => "code-graph-invalid-request",
                 CodeGraphReadError::Corrupt { .. } => "code-graph-corrupt",
                 CodeGraphReadError::ResetRequired { .. } => "code-graph-reset-required",
+                CodeGraphReadError::Parked { .. } => CODE_GRAPH_PARKED_REASON,
             }
             .to_owned(),
             retryable: matches!(
@@ -348,6 +411,7 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
                     | CodeGraphReadError::TimedOut
             ),
             detail: error.to_string(),
+            typed_detail: None,
         },
     }
 }

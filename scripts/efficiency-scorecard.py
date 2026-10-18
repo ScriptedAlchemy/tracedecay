@@ -7,7 +7,7 @@ regression can be proven by running the same command on two commits and
 diffing two files.
 
     scripts/efficiency-scorecard.py                       # build + run (3 runs)
-    scripts/efficiency-scorecard.py --binary target/release/tracedecay
+    scripts/efficiency-scorecard.py --binary /path/to/tracedecay
     scripts/efficiency-scorecard.py --quick               # 1 run smoke (~1 min)
     scripts/efficiency-scorecard.py --label b9181367ba \
         --binary /path/to/old/tracedecay --output target/effscore-base
@@ -18,8 +18,8 @@ Outputs (under --output, default target/efficiency-scorecard):
 
 What is measured
 ----------------
-Every run builds a fresh SANDBOX under the OS temp dir — isolated HOME/XDG,
-isolated TRACEDECAY_DATA_DIR/GLOBAL_DB, private daemon socket — and drives
+Every run builds a fresh SANDBOX under the OS temp dir, isolated HOME/XDG,
+isolated TRACEDECAY_DATA_DIR/GLOBAL_DB, private daemon socket, and drives
 the pinned fixture repo through the production journeys with the real
 binary. The operator's daemon, profile, and stores are never touched.
 
@@ -29,14 +29,15 @@ binary. The operator's daemon, profile, and stores are never touched.
     cold_index           `tracedecay init` -> code_index_freshness "current"
                          (wall), plus the daemon's own generation build
                          elapsed and the seal->activation span
+    baseline_restart     populated cold store -> same generation/revision current
     tool_calls           p50/p95/max of `tool` CLI round-trips: search, grep,
                          context, status, fact_store_search (memory recall);
                          N samples per tool after fixed warm-up
-    incremental_sync     one-file edit + commit, `tracedecay sync` -> the NEW
+    incremental_sync     after baseline restart and serving reads: one-file
+                         edit + commit, `tracedecay sync` -> the NEW
                          generation is "current" (wall + seal->activation)
     daemon_restart       SIGTERM -> exit, respawn -> freshness "current"
-                         again over the populated store (activation/replay
-                         cost on startup)
+                         again with the exact successor generation/revision
     store size           tracedecay.db/-wal/-shm bytes and per-generation
                          artifact sizes after cold index and after sync
     peak RSS             per-phase max daemon VmRSS (50 ms sampling) plus
@@ -50,12 +51,16 @@ Determinism policy
 - The fixture copy is committed in the sandbox with pinned git author,
   committer, and timestamps, so the fixture commit SHA is a constant.
 - Fixed query set, fixed warm-up (2 untimed calls per tool), fixed sample
-  counts, fixed poll cadence (50 ms). Repetition: the whole scenario runs
+  counts, fixed observer cadence (50 ms). Repetition: the whole scenario runs
   --runs times (default 3); the scorecard reports per-run values and the
   cross-run median for every scalar.
-- Wall times that end on a poll observation quantize at the poll cadence
-  plus one CLI round-trip; the identical policy applies to every commit
-  being compared, and the medians absorb scheduler noise.
+- Each measured wait uses one long-lived MCP observer process/connection
+  on the healthy path. If that observer becomes unusable (proxy exit or
+  handshake failure), it is closed and a new observer is opened; reconnects
+  increment the recorded process/connection counts. Wall times that end on
+  an observation quantize at the observer cadence plus one protocol
+  round-trip; the identical policy applies to every commit being compared,
+  and the medians absorb scheduler noise.
 - Load averages before/after are recorded; compare scorecards captured
   under comparable load.
 
@@ -82,6 +87,7 @@ import json
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import statistics
@@ -92,6 +98,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from lib.portable_process import dies_with_this_process
 
 SCHEMA = "tracedecay.efficiency-scorecard/v1"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -254,13 +262,181 @@ class RssSampler:
             return dict(self._peaks), dict(self._hwm)
 
 
+class StatusObserver:
+    """One persistent MCP connection for a measured readiness phase."""
+
+    def __init__(self, sandbox: Sandbox) -> None:
+        self._sandbox = sandbox
+        self.log_path = sandbox.root / f"status-observer-{sandbox.observer_process_count}.log"
+        self._stderr = self.log_path.open("wb")
+        try:
+            self._process = subprocess.Popen(
+                (str(sandbox.binary), "serve", "--path", str(sandbox.project)),
+                cwd=sandbox.project,
+                env=sandbox.env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self._stderr,
+                start_new_session=True,
+                bufsize=0,
+            )
+        except OSError:
+            self._stderr.close()
+            raise
+        if self._process.stdin is None or self._process.stdout is None:
+            self.close()
+            raise HarnessError("could not create status observer MCP pipes")
+        self._input = self._process.stdin
+        self._output = self._process.stdout
+        self._next_id = 0
+        self._buffer = b""
+        self._initialized = False
+        self._usable = True
+
+    @property
+    def usable(self) -> bool:
+        return self._usable
+
+    def __enter__(self) -> StatusObserver:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        process = self._process
+        input_stream = getattr(self, "_input", None)
+        output_stream = getattr(self, "_output", None)
+        if input_stream is not None:
+            try:
+                input_stream.close()
+            except OSError:
+                pass
+        if process.poll() is None:
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=2)
+        if output_stream is not None:
+            try:
+                output_stream.close()
+            except OSError:
+                pass
+        if not self._stderr.closed:
+            self._stderr.close()
+
+    def status_payload(self) -> dict | None:
+        """Read status through this observer; None while the route is unavailable."""
+        if not self._usable:
+            return None
+        try:
+            if not self._initialized:
+                self._initialize()
+            self._sandbox.observer_request_count += 1
+            response = self._request(
+                "tools/call",
+                {
+                    "name": "tracedecay_status",
+                    "arguments": {
+                        "format": "json",
+                        "include_branch_diagnostics": False,
+                    },
+                },
+                TOOL_CALL_TIMEOUT,
+            )
+            if response is None or response.get("error") is not None:
+                return None
+            result = response["result"]
+            if result.get("isError") is True:
+                return None
+            return json.loads(result["content"][0]["text"])
+        except (KeyError, OSError, TypeError, ValueError):
+            self._usable = False
+            return None
+
+    def _initialize(self) -> None:
+        response = self._request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "tracedecay-efficiency-scorecard", "version": "1"},
+            },
+            TOOL_CALL_TIMEOUT,
+        )
+        if response is None or response.get("error") is not None:
+            raise OSError("status observer MCP initialize failed")
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            }
+        )
+        self._initialized = True
+
+    def _request(self, method: str, params: dict, timeout: float) -> dict | None:
+        self._next_id += 1
+        request_id = self._next_id
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            message = self._read(remaining)
+            if message is None:
+                return None
+            if message.get("id") == request_id:
+                return message
+        return None
+
+    def _send(self, value: dict) -> None:
+        if self._process.poll() is not None:
+            raise OSError(f"status observer exited with {self._process.returncode}")
+        self._input.write(json.dumps(value, separators=(",", ":")).encode() + b"\n")
+        self._input.flush()
+
+    def _read(self, timeout: float) -> dict | None:
+        while True:
+            if b"\n" in self._buffer:
+                line, _, self._buffer = self._buffer.partition(b"\n")
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError("status observer emitted a non-object response")
+                return value
+            ready, _, _ = select.select([self._output.fileno()], [], [], timeout)
+            if not ready:
+                return None
+            chunk = os.read(self._output.fileno(), 65_536)
+            if not chunk:
+                raise OSError("status observer closed stdout before responding")
+            self._buffer += chunk
+
+
 @dataclass
 class Sandbox:
     """One disposable, isolated profile + fixture project + daemon."""
 
     binary: Path
     fixture: Path
-    keep: bool
     root: Path = field(init=False)
     project: Path = field(init=False)
     profile: Path = field(init=False)
@@ -268,6 +444,9 @@ class Sandbox:
     env: dict[str, str] = field(init=False)
     daemon: subprocess.Popen | None = field(init=False, default=None)
     daemon_log_index: int = field(init=False, default=0)
+    observer_process_count: int = field(init=False, default=0)
+    observer_connection_count: int = field(init=False, default=0)
+    observer_request_count: int = field(init=False, default=0)
     # Called with the daemon pid immediately after spawn, before the socket
     # bind wait, so the RSS sampler covers the startup window too.
     on_spawn: object = field(init=False, default=None)
@@ -349,6 +528,7 @@ class Sandbox:
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                preexec_fn=dies_with_this_process(),
             )
         if callable(self.on_spawn):
             self.on_spawn(self.daemon.pid)
@@ -380,7 +560,10 @@ class Sandbox:
                     os.killpg(daemon.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                daemon.wait(timeout=5)
+                # SIGKILL cannot be ignored, but tearing down a multi-GB
+                # daemon can outlast a short bound and a timeout here would
+                # mask the run's own result from the caller's `finally`.
+                daemon.wait()
         self.socket.unlink(missing_ok=True)
 
     def daemon_alive(self) -> bool:
@@ -427,21 +610,15 @@ class Sandbox:
         envelope = json.loads(completed.stdout)
         return json.loads(envelope["content"][0]["text"])
 
-    def status_payload(self) -> dict | None:
-        """One freshness poll; None while the project/store is not answering."""
-        try:
-            return self.tool_json(
-                "status", {"format": "json", "include_branch_diagnostics": False}
-            )
-        except (PhaseFailure, json.JSONDecodeError, KeyError, subprocess.TimeoutExpired):
-            return None
+    def open_status_observer(self) -> StatusObserver:
+        observer = StatusObserver(self)
+        self.observer_process_count += 1
+        self.observer_connection_count += 1
+        return observer
 
     def cleanup(self) -> None:
         self.stop_daemon()
-        if self.keep:
-            print(f"scorecard: sandbox kept at {self.root}", file=sys.stderr)
-        else:
-            shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.root, ignore_errors=True)
 
 
 def freshness(payload: dict) -> dict:
@@ -468,22 +645,44 @@ def wait_for(
     deadline_seconds: float,
     predicate,
 ) -> tuple[float, dict, float]:
-    """Poll `status` until predicate(payload); return (wall, payload, observed_at)."""
+    """Observe `status` until predicate(payload); return (wall, payload, observed_at).
+
+    One observer process/connection is used for the whole wait on the healthy
+    path. An unusable observer (proxy death, failed handshake, broken JSON-RPC
+    stream) is closed and a new one is opened so readiness polling keeps the
+    same retry cadence as the old per-poll CLI, with reconnects visible in
+    the observer process/connection counts.
+    """
     started = time.monotonic()
     deadline = started + deadline_seconds
     while True:
-        payload = sandbox.status_payload()
-        observed_at = time.time()
-        if payload is not None and predicate(payload):
-            return time.monotonic() - started, payload, observed_at
-        if not sandbox.daemon_alive():
-            raise PhaseFailure(phase, f"daemon exited; log tail: {sandbox.daemon_log_tail()}")
-        if time.monotonic() > deadline:
-            state = "unanswered" if payload is None else json.dumps(freshness(payload))[:300]
-            raise PhaseFailure(
-                phase, f"not ready within {deadline_seconds}s (last freshness: {state})"
-            )
-        time.sleep(POLL_INTERVAL_SECONDS)
+        with sandbox.open_status_observer() as observer:
+            while True:
+                payload = observer.status_payload()
+                observed_at = time.time()
+                if payload is not None and predicate(payload):
+                    return time.monotonic() - started, payload, observed_at
+                if not sandbox.daemon_alive():
+                    raise PhaseFailure(
+                        phase, f"daemon exited; log tail: {sandbox.daemon_log_tail()}"
+                    )
+                if time.monotonic() > deadline:
+                    state = (
+                        "unanswered"
+                        if payload is None
+                        else json.dumps(freshness(payload))[:300]
+                    )
+                    reason = (
+                        f"not ready within {deadline_seconds}s (last freshness: {state})"
+                    )
+                    if not observer.usable:
+                        reason = (
+                            f"{reason}; last observer unusable, stderr: {observer.log_path}"
+                        )
+                    raise PhaseFailure(phase, reason)
+                time.sleep(POLL_INTERVAL_SECONDS)
+                if not observer.usable:
+                    break
 
 
 def seal_to_activation_seconds(payload: dict, observed_at: float) -> float | None:
@@ -503,7 +702,7 @@ def store_measurements(sandbox: Sandbox) -> dict:
 
     - `generation_payload_bytes`: files under `**/code-generations-v*/`
       grouped by the 64-hex generation digest embedded in the file name
-      (generation-<digest>.json) — the manifest-size-per-generation signal.
+      (generation-<digest>.json), the manifest-size-per-generation signal.
     - `generation_segment_bytes`: physical bytes in the shared
       `code-generation-segments-v*/` content-addressed pool.
     - `code_index_children_bytes`: one-level size breakdown under each
@@ -644,10 +843,41 @@ def tool_battery(sandbox: Sandbox, samples: int) -> dict:
     }
 
 
-def run_scenario(
-    binary: Path, fixture: Path, tool_samples: int, keep_sandbox: bool, sampler: RssSampler
+def restart_current_generation(
+    sandbox: Sandbox,
+    sampler: RssSampler,
+    phase: str,
+    generation: str,
+    revision: str,
 ) -> dict:
-    sandbox = Sandbox(binary=binary, fixture=fixture, keep=keep_sandbox)
+    """Measure populated-store recovery against the previously served identity."""
+    sampler.set_phase(phase)
+    sandbox.stop_daemon()
+    sampler.set_pid(None)
+    started = time.monotonic()
+    socket_seconds = sandbox.spawn_daemon()
+    _, payload, _ = wait_for(
+        sandbox,
+        phase,
+        RESTART_DEADLINE,
+        lambda payload: (
+            freshness_current(payload)
+            and latest_generation(payload) == generation
+            and source_revision(payload) == revision
+        ),
+    )
+    return {
+        "spawn_to_socket_seconds": round(socket_seconds, 3),
+        "spawn_to_current_seconds": round(time.monotonic() - started, 3),
+        "generation_id": latest_generation(payload),
+        "source_revision": source_revision(payload),
+    }
+
+
+def run_scenario(
+    binary: Path, fixture: Path, tool_samples: int, sampler: RssSampler
+) -> dict:
+    sandbox = Sandbox(binary=binary, fixture=fixture)
     sandbox.on_spawn = sampler.set_pid
     run: dict = {"sandbox": str(sandbox.root), "fixture_commit": sandbox.head_commit()}
     try:
@@ -665,7 +895,14 @@ def run_scenario(
         init_returned = time.monotonic() - init_started
         remaining = COLD_INDEX_DEADLINE - init_returned
         wall, payload, observed_at = wait_for(
-            sandbox, "cold_index", remaining, freshness_current
+            sandbox,
+            "cold_index",
+            remaining,
+            lambda payload: (
+                freshness_current(payload)
+                and bool(latest_generation(payload))
+                and source_revision(payload) == run["fixture_commit"]
+            ),
         )
         cold_generation = latest_generation(payload)
         worktree = freshness(payload).get("worktree") or {}
@@ -680,6 +917,7 @@ def run_scenario(
                 else None
             ),
             "generation_id": cold_generation,
+            "source_revision": source_revision(payload),
             "sealed_source_digest": progress.get("sealed_source_digest"),
             "graph_statistics": graph_statistics(payload),
             "store": store_measurements(sandbox),
@@ -692,6 +930,12 @@ def run_scenario(
                 "fact_store_add",
                 {"content": fact, "category": "decision", "format": "json"},
             )
+
+        # Recover the retained baseline in a new process before serving reads
+        # and the edit; the incremental phase must not reuse the cold builder.
+        run["baseline_restart"] = restart_current_generation(
+            sandbox, sampler, "baseline_restart", cold_generation, run["fixture_commit"]
+        )
 
         # ── tool_calls ───────────────────────────────────────────────────
         sampler.set_phase("tool_calls")
@@ -719,6 +963,7 @@ def run_scenario(
             # wait early.
             return (
                 freshness_current(payload)
+                and bool(latest_generation(payload))
                 and latest_generation(payload) != cold_generation
                 and source_revision(payload) == probe_commit
             )
@@ -731,23 +976,21 @@ def run_scenario(
             "sync_returned_seconds": round(sync_returned, 3),
             "seal_to_activation_seconds": seal_to_activation_seconds(payload, observed_at),
             "generation_id": latest_generation(payload),
+            "source_revision": source_revision(payload),
+            "probe_revision": probe_commit,
+            "baseline_generation_id": run["baseline_restart"]["generation_id"],
+            "baseline_source_revision": run["baseline_restart"]["source_revision"],
             "store": store_measurements(sandbox),
         }
 
         # ── daemon_restart (populated store -> serving again) ────────────
-        sampler.set_phase("daemon_restart")
-        sandbox.stop_daemon()
-        sampler.set_pid(None)
-        restart_started = time.monotonic()
-        socket_seconds = sandbox.spawn_daemon()
-        wall, payload, _observed_at = wait_for(
-            sandbox, "daemon_restart", RESTART_DEADLINE, freshness_current
+        run["daemon_restart"] = restart_current_generation(
+            sandbox,
+            sampler,
+            "daemon_restart",
+            run["incremental_sync"]["generation_id"],
+            probe_commit,
         )
-        run["daemon_restart"] = {
-            "spawn_to_socket_seconds": round(socket_seconds, 3),
-            "spawn_to_current_seconds": round(time.monotonic() - restart_started, 3),
-            "generation_id": latest_generation(payload),
-        }
 
         sampler.set_phase("idle")
         run["status"] = "ok"
@@ -758,6 +1001,11 @@ def run_scenario(
         run["daemon_log_tail"] = sandbox.daemon_log_tail()
         return run
     finally:
+        run["observer"] = {
+            "process_count": sandbox.observer_process_count,
+            "connection_count": sandbox.observer_connection_count,
+            "request_count": sandbox.observer_request_count,
+        }
         sampler.set_pid(None)
         sandbox.cleanup()
 
@@ -781,9 +1029,11 @@ def collect_scalars(run: dict) -> dict[str, float]:
     for section in (
         "daemon_start_empty",
         "cold_index",
+        "baseline_restart",
         "tool_calls",
         "incremental_sync",
         "daemon_restart",
+        "observer",
         "rss",
     ):
         visit(section, run.get(section))
@@ -834,7 +1084,7 @@ def human_summary(scorecard: dict) -> str:
     runs = scorecard["runs"]
     ok = sum(1 for run in runs if run.get("status") == "ok")
     lines = [
-        f"## TraceDecay efficiency scorecard — {scorecard.get('label') or 'unlabeled'}",
+        f"## TraceDecay efficiency scorecard, {scorecard.get('label') or 'unlabeled'}",
         "",
         f"binary `{scorecard['binary']['version']}` · fixture "
         f"`{scorecard['fixture']['tree_sha256'][:12]}` ({scorecard['fixture']['files']} files) · "
@@ -858,9 +1108,13 @@ def human_summary(scorecard: dict) -> str:
     row("cold index → freshness current", "cold_index.wall_seconds")
     row("cold index seal → activation", "cold_index.seal_to_activation_seconds")
     row("cold index daemon build elapsed", "cold_index.daemon_build_elapsed_seconds")
-    row("incremental sync (1-file) → new generation current", "incremental_sync.wall_seconds")
+    row("baseline restart → same generation current", "baseline_restart.spawn_to_current_seconds")
+    row("incremental sync after restart → new generation current", "incremental_sync.wall_seconds")
     row("incremental sync seal → activation", "incremental_sync.seal_to_activation_seconds")
     row("daemon restart → serving (populated store)", "daemon_restart.spawn_to_current_seconds")
+    row("readiness observer processes", "observer.process_count", "")
+    row("readiness observer connections", "observer.connection_count", "")
+    row("readiness observer requests", "observer.request_count", "")
     lines.append("| | |")
     for tool in ("search", "grep", "context", "status", "memory_recall"):
         row(f"{tool} p50", f"tool_calls.{tool}.p50_ms", "ms")
@@ -899,11 +1153,12 @@ def human_summary(scorecard: dict) -> str:
     for phase in (
         "daemon_start_empty",
         "cold_index",
+        "baseline_restart",
         "tool_calls",
         "incremental_sync",
         "daemon_restart",
     ):
-        row(f"peak daemon RSS — {phase}", f"rss.peak_bytes.{phase}", "B")
+        row(f"peak daemon RSS, {phase}", f"rss.peak_bytes.{phase}", "B")
     lines.append("")
     return "\n".join(lines)
 
@@ -950,28 +1205,29 @@ def flatten_store_bytes(run: dict) -> None:
 
 
 def build_binary() -> Path:
-    jobs = os.environ.get("CARGO_BUILD_JOBS", "8")
-    print(f"scorecard: building tracedecay (release, jobs={jobs})", file=sys.stderr)
-    env = dict(os.environ, CARGO_BUILD_JOBS=jobs, TRACEDECAY_SKIP_DASHBOARD_BUILD="1")
+    print("scorecard: building tracedecay (Bazel release)", file=sys.stderr)
     completed = subprocess.run(
         (
-            "cargo",
+            "bazel",
             "build",
-            "--locked",
-            "--release",
-            "-p",
-            "tracedecay-cli",
-            "--bin",
-            "tracedecay",
+            "--config=release",
+            "//crates/tracedecay-cli:tracedecay",
         ),
         cwd=REPO_ROOT,
-        env=env,
         check=False,
     )
     if completed.returncode != 0:
         raise HarnessError("the tracedecay release build failed")
-    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", REPO_ROOT / "target"))
-    binary = target_dir / "release" / "tracedecay"
+    output = subprocess.run(
+        ("bazel", "info", "--config=release", "bazel-bin"),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if output.returncode != 0 or not output.stdout.strip():
+        raise HarnessError(f"could not resolve the Bazel output directory: {output.stderr.strip()}")
+    binary = Path(output.stdout.strip()) / "crates" / "tracedecay-cli" / "tracedecay"
     if not binary.is_file():
         raise HarnessError(f"expected a binary at {binary} after the build")
     return binary
@@ -988,7 +1244,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--binary", help="prebuilt tracedecay binary (default: cargo build)")
+    parser.add_argument("--binary", help="prebuilt tracedecay binary (default: Bazel release build)")
     parser.add_argument(
         "--output",
         default=str(REPO_ROOT / "target" / "efficiency-scorecard"),
@@ -1002,7 +1258,6 @@ def main() -> int:
         "--fixture", default=str(DEFAULT_FIXTURE), help="pinned fixture corpus directory"
     )
     parser.add_argument("--label", default="", help="free-form label recorded in the scorecard")
-    parser.add_argument("--keep-sandbox", action="store_true", help="do not delete sandboxes")
     parser.add_argument(
         "--quick", action="store_true", help="smoke settings: --runs 1 --tool-samples 8"
     )
@@ -1065,7 +1320,7 @@ def main() -> int:
     for index in range(args.runs):
         print(f"scorecard: run {index + 1}/{args.runs}", file=sys.stderr)
         sampler = RssSampler()
-        run = run_scenario(binary, fixture, args.tool_samples, args.keep_sandbox, sampler)
+        run = run_scenario(binary, fixture, args.tool_samples, sampler)
         peaks, hwm = sampler.finish()
         run["rss"] = {"peak_bytes": peaks, "vmhwm_bytes_at_phase_end": hwm}
         flatten_store_bytes(run)

@@ -6,7 +6,7 @@ import { cn } from "../../ui/cn.ts";
  * The camera over the Knowledge workspace.
  *
  * Four positions over one store. `facts` is the explorer split this workspace
- * has always been — search, list, fact inspector. The other three read the
+ * has always been, search, list, fact inspector. The other three read the
  * holographic-memory routes the daemon has been mounting unconsumed:
  * `geometry` is the phase projection and the pairwise similarity it implies,
  * `curation` is the daemon's automatic curation outcomes and explicit run
@@ -16,19 +16,19 @@ import { cn } from "../../ui/cn.ts";
  * They are camera positions rather than separate pages for the same reason
  * Work's are: the selected fact lives in the address, not in a view, so moving
  * the camera keeps it, and a link carrying both parameters reopens the exact
- * position. Both parameters are replaced rather than pushed — panning across
+ * position. Both parameters are replaced rather than pushed, panning across
  * four positions is not four places to go back to.
  *
  * The tabs are the ARIA tabs pattern with a roving tabindex: one stop in the
  * page's tab order, arrows between positions, Home and End to the ends.
  * Activation follows focus, which the pattern permits when switching is
- * immediate — and it is: each view owns its own reads, and a view whose read
+ * immediate, and it is: each view owns its own reads, and a view whose read
  * has not landed states that rather than blocking the switch.
  */
 
 export type KnowledgeViewKind = "facts" | "geometry" | "curation" | "oplog";
 
-export const KNOWLEDGE_VIEWS: readonly KnowledgeViewKind[] = [
+const KNOWLEDGE_VIEWS: readonly KnowledgeViewKind[] = [
   "facts",
   "geometry",
   "curation",
@@ -37,7 +37,7 @@ export const KNOWLEDGE_VIEWS: readonly KnowledgeViewKind[] = [
 
 /** The query parameter that positions the camera, so a view survives a reload
  * and can be linked to. */
-export const KNOWLEDGE_VIEW_PARAM = "view";
+const KNOWLEDGE_VIEW_PARAM = "view";
 
 export function knowledgeViewLabel(kind: KnowledgeViewKind): string {
   switch (kind) {
@@ -67,7 +67,7 @@ export function knowledgeViewNote(kind: KnowledgeViewKind): string {
     case "curation":
       return "automatic curation outcomes, run receipts, and the policy-owned run control";
     case "oplog":
-      return "the store’s append-only record of memory operations";
+      return "the store's append-only record of memory operations";
     default: {
       const unhandled: never = kind;
       return unhandled;

@@ -1,9 +1,9 @@
 /**
  * Minimal file:// screenshooter for the structure-viz mockups.
  *
- * Deliberately NOT the product's stories/shot.ts: these are standalone concept
- * pages with no daemon, no dev server and no #td-main to wait for. Each page
- * reads ?theme=… itself, so one pass per theme is all this needs.
+ * These are standalone concept pages with no daemon, no dev server and no
+ * #td-main to wait for. Each page reads ?theme=… itself, so one pass per theme
+ * is all this needs.
  *
  *   node mockups/structure-viz/shoot.mjs            # all pages, both themes
  *   node mockups/structure-viz/shoot.mjs anatomy    # one page
@@ -15,7 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/* A git worktree has no node_modules of its own — the dashboard's install
+/* A git worktree has no node_modules of its own. The dashboard's install
  * lives in the primary checkout. Resolve Playwright from whichever dashboard
  * dir actually has it rather than requiring an install per worktree. */
 function loadPlaywright() {

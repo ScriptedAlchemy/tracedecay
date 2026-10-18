@@ -41,7 +41,7 @@ async fn claude_updates_with_one_native_message_id_drain_without_collisions() {
     hits.sort();
     assert_eq!(hits, ["row.first", "row.second"]);
     assert_eq!(table_count(&tmp, "sessions").await, 1);
-    assert_eq!(table_count(&tmp, "session_messages").await, 2);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 2);
     assert_eq!(
         table_count(&tmp, "observation_projection_dispositions").await,
         0
@@ -63,11 +63,16 @@ async fn claude_updates_with_one_native_message_id_drain_without_collisions() {
             },
         )
         .unwrap();
-    assert_eq!(session, ("user".to_owned(), "user".to_owned(), None));
+    assert_eq!((session.0.as_str(), session.1.as_str()), ("user", "user"));
+    let metadata: serde_json::Value = serde_json::from_str(&session.2.unwrap()).unwrap();
+    assert_eq!(
+        metadata["claude_session_cwd"], "/workspace/first",
+        "the first record's cwd annotates the session"
+    );
 }
 
 #[tokio::test]
-async fn v3_projection_persists_stable_multi_output_ordinals() {
+async fn composer_bubble_projects_one_row_carrying_every_part() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -114,7 +119,7 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
                 content: Some(json!("reasoning")),
             },
             CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: ObservationId::new("tool.multi-output").unwrap(),
+                invocation_id: Some(ObservationId::new("tool.multi-output").unwrap()),
                 name: "edit_file".to_owned(),
                 arguments: json!({"path": "src/lib.rs"}),
             },
@@ -149,10 +154,9 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
         .unwrap();
     let queued = store.next_queued_observation().await.unwrap().unwrap();
     let outcome = store.project_observation(&queued).await.unwrap();
-    let ProjectionPersistOutcome::Projected(projected) = outcome else {
+    let ProjectionPersistOutcome::Projected(_) = outcome else {
         panic!("observation should project");
     };
-    assert_eq!(projected.output_count(), 4);
     drop(runtime);
 
     let conn = rusqlite::Connection::open(database_path).unwrap();
@@ -172,14 +176,28 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
+    assert_eq!(actual, vec![(0, message_id.as_str().to_owned())]);
+    let row = conn
+        .query_row(
+            "SELECT kind, tool_names, content FROM lcm_raw_messages WHERE message_id = ?1",
+            rusqlite::params![message_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
     assert_eq!(
-        actual,
-        vec![
-            (0, message_id.as_str().to_owned()),
-            (1, format!("{}:thinking", message_id.as_str())),
-            (2, format!("{}:tool", message_id.as_str())),
-            (3, format!("{}:pr:0", message_id.as_str())),
-        ]
+        row,
+        (
+            "message".to_owned(),
+            "edit_file".to_owned(),
+            "authored\n\nreasoning\n\n{\"path\":\"src/lib.rs\"}\n\nhttps://example.invalid/pr/1"
+                .to_owned(),
+        )
     );
 }
 
@@ -243,19 +261,17 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     );
     let hits = search_session_messages(&tmp, "atomic searchable", 10).await;
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].message.message_id, "message-atomic");
+    // The row `uuid` names the output; the API `message.id` does not.
+    assert_eq!(hits[0].message.message_id, "record-message-atomic");
     assert_eq!(hits[0].message.role, "assistant");
     assert_eq!(hits[0].message.timestamp, Some(1_750_000_123));
     assert_eq!(hits[0].message.ordinal, 0);
+    assert_eq!(hits[0].message.text, "atomic searchable canary");
     assert_eq!(hits[0].message.kind.as_deref(), Some("message"));
     assert_eq!(hits[0].message.model.as_deref(), Some("claude-sonnet-4"));
     assert_eq!(hits[0].message.tool_names.as_deref(), Some("Read"));
-    assert_eq!(
-        hits[0].message.source_path.as_deref(),
-        Some("claude:session-atomic")
-    );
+    assert_eq!(hits[0].message.source_path, None);
     assert_eq!(hits[0].message.source_offset, Some(0));
-    assert!(!hits[0].message.text.contains("private-reasoning-canary"));
     assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
     let provenance = projection_provenance_rows(&tmp).await;
     assert_eq!(provenance.len(), 1);
@@ -269,22 +285,77 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     );
     assert_eq!(provenance[0].3, "receipt.atomic-projection");
     assert_eq!(provenance[0].4, "claude");
-    assert_eq!(provenance[0].5, "message-atomic");
+    assert_eq!(provenance[0].5, "record-message-atomic");
     assert!(PayloadDigestV1::new(provenance[0].6.clone()).is_ok());
 
-    let raw_conn = rusqlite::Connection::open(database_path).unwrap();
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let error = raw_conn
+        .execute(
+            "UPDATE observation_projection_provenance SET retrieval_anchor_id = NULL
+         WHERE projector_version = ?1 AND observation_id = ?2",
+            rusqlite::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                candidate.observation_id().as_str()
+            ],
+        )
+        .expect_err("current projection must preserve its anchor binding");
+    assert_eq!(
+        error.sqlite_error().unwrap().extended_code,
+        rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+    );
     assert!(
-        raw_conn
-            .execute(
-                "UPDATE observation_projection_provenance
-                 SET retrieval_anchor_id = NULL
-                 WHERE projector_version = ?1 AND observation_id = ?2",
-                rusqlite::params![
-                    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
-                    candidate.observation_id().as_str()
-                ],
+        error
+            .to_string()
+            .contains("invalid projection provenance binding")
+    );
+    // Retained stores can still carry the earlier V4-only guard. Admission
+    // must replace that definition before a V5 writer can reuse the store.
+    raw_conn
+        .execute_batch(
+            "DROP TRIGGER projection_provenance_binding_update_v4;
+         CREATE TRIGGER projection_provenance_binding_update_v4
+         BEFORE UPDATE OF projector_version, observation_id, retrieval_anchor_id, receipt_id
+         ON observation_projection_provenance
+         WHEN NEW.projector_version = 'claude-session-message-v4' AND (
+            NEW.retrieval_anchor_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM observation_retrieval_anchors AS binding
+                JOIN observations AS observation
+                  ON observation.observation_id = binding.observation_id
+                WHERE binding.observation_id = NEW.observation_id
+                  AND binding.anchor_id = NEW.retrieval_anchor_id
+                  AND observation.receipt_id = NEW.receipt_id
             )
-            .is_err()
+         ) BEGIN
+            SELECT RAISE(ABORT, 'invalid v4 projection provenance binding');
+         END;",
+        )
+        .unwrap();
+    drop(raw_conn);
+    drop(store);
+    drop(runtime);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let error = raw_conn
+        .execute(
+            "UPDATE observation_projection_provenance SET retrieval_anchor_id = NULL
+         WHERE projector_version = ?1 AND observation_id = ?2",
+            rusqlite::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                candidate.observation_id().as_str()
+            ],
+        )
+        .expect_err("reopened current projection must preserve its anchor binding");
+    assert_eq!(
+        error.sqlite_error().unwrap().extended_code,
+        rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("invalid projection provenance binding")
     );
     drop(raw_conn);
 

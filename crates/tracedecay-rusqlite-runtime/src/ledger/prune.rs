@@ -15,10 +15,19 @@
 //! a duplicate write - the only observable change is that a submission under
 //! revoked authority fails closed instead of replaying its original receipt.
 //!
-//! Records are deliberately *not* pruned by age. Idempotency keys are derived
-//! from request content, so a resubmission of the same content reproduces the
-//! same key with no bound on how much later it can arrive. Only supersession by
-//! authority is a provable end to the duplicate window.
+//! A live incarnation's records are deliberately *not* pruned by age.
+//! Idempotency keys are derived from request content, so a resubmission of the
+//! same content reproduces the same key with no bound on how much later it can
+//! arrive. Only supersession by authority ends that duplicate window.
+//!
+//! Every other incarnation's records are a different case. The incarnation is
+//! the daemon's generation, so each daemon restart leaves the previous
+//! incarnation's records behind, and no lookup by the new incarnation can
+//! match them. Before this rule nothing ever removed them. A commit therefore
+//! also retires the records of any other incarnation whose checkpoint on this
+//! shard has been quiet for [`RETIRED_INCARNATION_QUIET_MICROS`]: one daemon
+//! owns a profile at a time, so an incarnation with no commit in a week is
+//! a daemon that has exited (docs/plans/storage, growth source 9).
 
 use rusqlite::params;
 
@@ -40,6 +49,10 @@ use super::{
 /// matter how much retention work remains.
 pub(super) const MAX_PRUNED_ROWS_PER_COMMIT: i64 = 256;
 
+/// How long another incarnation's checkpoint on a shard must stay unchanged
+/// before its idempotency records are retired: seven days.
+pub(super) const RETIRED_INCARNATION_QUIET_MICROS: i64 = 7 * 24 * 60 * 60 * 1_000_000;
+
 /// Deletes at most one bounded batch of rows whose `(incarnation,
 /// authority_epoch)` can no longer be carried by any admissible submission.
 ///
@@ -53,15 +66,15 @@ pub(super) const MAX_PRUNED_ROWS_PER_COMMIT: i64 = 256;
 /// stop. A neighbour's superseded records are retired by that incarnation's own
 /// commits, under its own validated checkpoint.
 ///
-/// The candidate scan matches the table's primary-key prefix and is therefore
+/// The candidate scan matches the table's unique key prefix and is therefore
 /// already in key order, which makes each bounded pass deterministic and lets
 /// repeated commits converge on the remaining backlog.
 const DELETE_SUPERSEDED: &str = r#"
-DELETE FROM td_runtime_writer_idempotency_v1
+DELETE FROM td_runtime_writer_idempotency_v2
 WHERE (shard_json, incarnation, authority_epoch, idempotency_key) IN (
     SELECT candidate.shard_json, candidate.incarnation,
            candidate.authority_epoch, candidate.idempotency_key
-    FROM td_runtime_writer_idempotency_v1 AS candidate
+    FROM td_runtime_writer_idempotency_v2 AS candidate
     WHERE candidate.shard_json = ?1
       AND candidate.incarnation = ?2
       AND candidate.authority_epoch < ?3
@@ -70,8 +83,34 @@ WHERE (shard_json, incarnation, authority_epoch, idempotency_key) IN (
 )
 "#;
 
-/// Removes idempotency records that authority supersession has made
-/// unreachable, returning how many rows were deleted.
+/// The records of incarnations whose last commit on this shard is older than
+/// the cutoff. Each checkpoint row carries its incarnation's last commit time,
+/// so the candidates are found through the small checkpoint table and the
+/// idempotency key prefix, never by scanning record ages. The committing
+/// incarnation is never a candidate: this commit has just persisted its
+/// checkpoint at the commit's own time, which is newer than the cutoff, so the
+/// prune must stay after `checkpoint::persist`. This reads a
+/// neighbour's raw `committed_at_micros`, which the epoch rule above refuses
+/// to do for authority. Here a wrong value can only retire the receipts of a
+/// daemon generation that no longer owns the profile.
+const DELETE_RETIRED_INCARNATIONS: &str = r#"
+DELETE FROM td_runtime_writer_idempotency_v2
+WHERE (shard_json, incarnation, authority_epoch, idempotency_key) IN (
+    SELECT record.shard_json, record.incarnation,
+           record.authority_epoch, record.idempotency_key
+    FROM td_runtime_writer_checkpoint_v1 AS retired
+    JOIN td_runtime_writer_idempotency_v2 AS record
+      ON record.shard_json = retired.shard_json
+     AND record.incarnation = retired.incarnation
+    WHERE retired.shard_json = ?1
+      AND retired.committed_at_micros < ?2
+    LIMIT ?3
+)
+"#;
+
+/// Removes idempotency records that authority supersession or a retired
+/// incarnation has made unreachable, returning how many rows were deleted.
+/// Both rules share one bounded batch per commit.
 ///
 /// Runs in the caller's transaction, like every other ledger operation, so the
 /// deletion shares the commit boundary of the mutation that advances cleanup.
@@ -79,8 +118,8 @@ WHERE (shard_json, incarnation, authority_epoch, idempotency_key) IN (
 /// or already present in an upgraded database - converges over subsequent
 /// commits instead of being tied to the single transition commit that first
 /// discovered it.
-#[hotpath::measure(label = "rusqlite.ledger.prune_superseded")]
-pub(super) fn prune_superseded(
+#[tracing::instrument(name = "rusqlite.ledger.prune_unreachable", level = "trace", skip_all)]
+pub(super) fn prune_unreachable(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
     checkpoint: &NextCheckpoint,
@@ -98,6 +137,21 @@ pub(super) fn prune_superseded(
             MAX_PRUNED_ROWS_PER_COMMIT,
         ],
     )?;
-    crate::hotpath_observe::record_ledger_pruned_rows(u64::try_from(pruned).unwrap_or(u64::MAX));
-    Ok(pruned)
+    let remaining = MAX_PRUNED_ROWS_PER_COMMIT - i64::try_from(pruned).unwrap_or(i64::MAX);
+    if remaining <= 0 {
+        return Ok(pruned);
+    }
+    let retired = transaction.execute(
+        DELETE_RETIRED_INCARNATIONS,
+        params![
+            &submission.binding_key.shard_json,
+            submission
+                .metadata
+                .admitted_at
+                .0
+                .saturating_sub(RETIRED_INCARNATION_QUIET_MICROS),
+            remaining,
+        ],
+    )?;
+    Ok(pruned + retired)
 }

@@ -3,31 +3,36 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorProvenanceRelationV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    AnchorProvenanceRelation, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CopyProofV1, DurableObservationV1, MessageId, MessageOccurrenceIdV1, MessageOccurrenceRecordV1,
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId,
     ProjectionOutputOrdinalV1, ProviderId, RetentionClass, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
-    SessionProjectionGenerationV1, TemporalAssertionKindV1, TemporalAssertionRecordV1,
-    TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
+    RetrievalAnchorRecord, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, SessionProjectionGenerationV1,
+    TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalValidityV1, UtcMicros,
+    derive_exact_observation_anchor_id,
 };
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionTemporalStore};
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
     ObservationProjectionStore, ObservationStore, ObservationWrite, SessionFrozenWatermarksV1,
-    SessionGenerationActivationRequestV1, SessionGenerationRebuildDispositionV1,
-    SessionGenerationRebuildRequestV1, SessionStoreError, SessionTemporalCapabilitiesV1,
-    SessionTemporalCapabilityV1, SessionTemporalProjectionBatchDispositionV1,
-    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
+    SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
+    SessionRefreshProgressRequestV1, SessionRefreshProgressV1, SessionRefreshStore,
+    SessionStoreError, SessionStoreResult, SessionTemporalProjectionBatchDispositionV1,
+    SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
+
+pub(crate) type TemporalStore<'a> = SessionTemporalStore<'a, RegisteredGlobalDb>;
 
 pub(crate) async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
@@ -52,22 +57,6 @@ pub(crate) fn watermarks(
         source_frontier,
         source_frontier,
         0,
-    )
-}
-
-pub(crate) fn snapshot(
-    session_id: &SessionId,
-    active_generation: u64,
-    source_frontier: u64,
-) -> SessionTemporalSnapshotV1 {
-    SessionTemporalSnapshotV1::new(
-        session_id.clone(),
-        UtcMicros(100),
-        watermarks(active_generation, source_frontier),
-        SessionTemporalCapabilitiesV1::new([
-            SessionTemporalCapabilityV1::FrozenWatermarks,
-            SessionTemporalCapabilityV1::GenerationRebuild,
-        ]),
     )
 }
 
@@ -170,7 +159,7 @@ pub(crate) fn anchored_write(observation: DurableObservationV1) -> AnchoredObser
 
 pub(crate) fn anchored_write_with_lineage(
     observation: DurableObservationV1,
-    lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
+    lineage: Option<(AnchorProvenanceRelation, RetrievalAnchorId)>,
     occurred_at: Option<i64>,
 ) -> AnchoredObservationWrite {
     let identity = observation.identity();
@@ -187,7 +176,7 @@ pub(crate) fn anchored_write_with_lineage(
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "temporal-test")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -208,7 +197,7 @@ pub(crate) fn anchored_write_with_lineage(
             "end": valid_at.saturating_add(1),
         });
     }
-    let anchor: RetrievalAnchorRecordV2 = serde_json::from_value(anchor_json).unwrap();
+    let anchor: RetrievalAnchorRecord = serde_json::from_value(anchor_json).unwrap();
     AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap()
 }
 
@@ -254,7 +243,7 @@ where
 async fn persist_custom_observation_with_lineage<S>(
     store: &S,
     observation: DurableObservationV1,
-    relation: AnchorProvenanceRelationV2,
+    relation: AnchorProvenanceRelation,
     object_anchor_id: RetrievalAnchorId,
 ) -> DurableObservationV1
 where
@@ -280,7 +269,7 @@ pub(crate) async fn persist_observation_with_lineage<S>(
     session_id: &SessionId,
     ordinal: u64,
     text: &str,
-    relation: AnchorProvenanceRelationV2,
+    relation: AnchorProvenanceRelation,
     object_anchor_id: RetrievalAnchorId,
     valid_at: Option<i64>,
 ) -> DurableObservationV1
@@ -301,6 +290,35 @@ where
         .await
         .unwrap();
     observation
+}
+
+/// Persists a `first` observation and a `second` whose anchor supersedes it,
+/// returning their canonical occurrences.
+pub(crate) async fn persist_superseding_pair<S>(
+    store: &S,
+    session_id: &SessionId,
+) -> (MessageOccurrenceRecordV1, MessageOccurrenceRecordV1)
+where
+    S: ObservationStore + ObservationProjectionStore,
+{
+    let first = occurrence(
+        session_id,
+        &persist_observation(store, session_id, 0, "first").await,
+    );
+    let second = occurrence(
+        session_id,
+        &persist_observation_with_lineage(
+            store,
+            session_id,
+            1,
+            "second",
+            AnchorProvenanceRelation::Supersedes,
+            first.retrieval_anchor_id.clone(),
+            None,
+        )
+        .await,
+    );
+    (first, second)
 }
 
 pub(crate) fn occurrence(
@@ -432,23 +450,158 @@ fn assertion_with_kind(
     .unwrap()
 }
 
+/// A batch bound to the running refresh candidate's generation and frozen
+/// watermarks, checkpointed through the candidate's whole frontier.
 pub(crate) fn batch(
-    session_id: &SessionId,
-    candidate_generation: u64,
-    source_frontier: u64,
+    candidate: &SessionRefreshRecoveryV1,
     occurrences: Vec<MessageOccurrenceRecordV1>,
     copies: Vec<tracedecay_domain::LogicalCopyRecordV1>,
     assertions: Vec<TemporalAssertionRecordV1>,
 ) -> SessionTemporalProjectionBatchV1 {
     SessionTemporalProjectionBatchV1::new(
-        session_id.clone(),
-        generation(candidate_generation),
-        watermarks(1, source_frontier),
+        candidate.session_id().clone(),
+        candidate.candidate_generation(),
+        candidate.frozen_watermarks().clone(),
         occurrences,
         copies,
         assertions,
     )
     .unwrap()
+}
+
+/// Begins a refresh of `session_id` through `source_frontier` and returns the
+/// candidate it allocated.
+pub(crate) async fn begin_candidate(
+    store: &TemporalStore<'_>,
+    session_id: &SessionId,
+    source_frontier: u64,
+) -> SessionRefreshRecoveryV1 {
+    store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(source_frontier, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+    store
+        .session_refresh_recovery(session_id)
+        .await
+        .unwrap()
+        .expect("begun refresh must be running")
+}
+
+async fn committed_progress(
+    store: &TemporalStore<'_>,
+    candidate: &SessionRefreshRecoveryV1,
+) -> SessionStoreResult<Option<SessionRefreshProgressV1>> {
+    store
+        .session_refresh_progress(SessionRefreshProgressRequestV1::new(
+            candidate.operation_id().clone(),
+            candidate.session_id().clone(),
+        ))
+        .await
+}
+
+/// Persists `batch` through the candidate's refresh with the progress a
+/// projector reports for it. Resubmitting the latest committed batch replays
+/// its recorded progress, as a restarted projector does.
+pub(crate) async fn persist_batch(
+    store: &TemporalStore<'_>,
+    candidate: &SessionRefreshRecoveryV1,
+    batch: SessionTemporalProjectionBatchV1,
+) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
+    let previous = committed_progress(store, candidate).await?;
+    let progress = match previous {
+        Some(previous) if previous.committed_batches() == batch.batch_ordinal() + 1 => previous,
+        previous => {
+            let records = previous
+                .as_ref()
+                .map_or(0, SessionRefreshProgressV1::committed_records)
+                + u64::try_from(batch.item_count()).unwrap();
+            let now = UtcMicros(
+                i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_micros(),
+                )
+                .unwrap(),
+            );
+            let updated_at = previous.as_ref().map_or(now, |previous| {
+                UtcMicros(previous.updated_at().0 + 1).max(now)
+            });
+            SessionRefreshProgressV1::new(
+                candidate.operation_id().clone(),
+                candidate.session_id().clone(),
+                SessionRefreshFrontierV1::new(
+                    candidate.target_frontier().observed_through(),
+                    batch.source_through(),
+                )
+                .unwrap(),
+                tracedecay_domain::TemporalCoverageCountsV1 {
+                    visible: records,
+                    hidden: 0,
+                    unknown: 0,
+                    redacted: 0,
+                },
+                batch.batch_ordinal() + 1,
+                records,
+                updated_at,
+            )
+            .with_source_coverage(candidate.source_coverage(batch.source_through()).unwrap())
+        }
+    };
+    store
+        .persist_session_refresh_projection_batch(progress, batch)
+        .await
+        .map(|(_, receipt)| receipt)
+}
+
+/// Completes the candidate's refresh, activating its generation.
+pub(crate) async fn complete_candidate(
+    store: &TemporalStore<'_>,
+    candidate: &SessionRefreshRecoveryV1,
+) -> SessionStoreResult<()> {
+    let progress = committed_progress(store, candidate)
+        .await?
+        .expect("completion requires projected progress");
+    let mut request = SessionRefreshCompletionRequestV1::new(
+        candidate.operation_id().clone(),
+        candidate.session_id().clone(),
+        progress.frontier(),
+        *progress.coverage(),
+    )?;
+    if let Some(source_coverage) = progress.source_coverage() {
+        request = request.with_source_coverage(source_coverage.clone());
+    }
+    store
+        .complete_session_refresh(request, ExecutionControl::default())
+        .await
+        .map(|_| ())
+}
+
+/// Retires the candidate's refresh as failed, as the scheduler does after a
+/// deterministic refusal, so the session can admit a new refresh.
+pub(crate) async fn fail_candidate(
+    store: &TemporalStore<'_>,
+    candidate: &SessionRefreshRecoveryV1,
+) {
+    let progress = committed_progress(store, candidate)
+        .await
+        .unwrap()
+        .expect("failure follows projected progress");
+    let mut request = SessionRefreshFailureRequestV1::new(
+        candidate.operation_id().clone(),
+        candidate.session_id().clone(),
+        progress.frontier(),
+        *progress.coverage(),
+        "temporal_test_refused",
+    )
+    .unwrap();
+    if let Some(source_coverage) = progress.source_coverage() {
+        request = request.with_source_coverage(source_coverage.clone());
+    }
+    store.fail_session_refresh(request).await.unwrap();
 }
 
 pub(crate) async fn scalar(path: &std::path::Path, sql: &str) -> i64 {
@@ -485,30 +638,7 @@ pub(crate) async fn rows_runtime(runtime: &HostAdmissionTestRuntimeV1, sql: &str
     rows(&path, sql).await
 }
 
-pub(crate) async fn begin_candidate<S>(
-    store: &S,
-    session_id: &SessionId,
-    candidate_generation: u64,
-    source_frontier: u64,
-) -> SessionGenerationRebuildDispositionV1
-where
-    S: SessionTemporalProjectionStore,
-{
-    store
-        .begin_session_generation_rebuild(
-            SessionGenerationRebuildRequestV1::new(
-                session_id.clone(),
-                generation(candidate_generation),
-                snapshot(session_id, 1, source_frontier),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap()
-        .disposition()
-}
-
 mod activation;
 mod batch_commit;
 mod lineage;
-mod rebuild_lifecycle;
+mod refresh_lifecycle;

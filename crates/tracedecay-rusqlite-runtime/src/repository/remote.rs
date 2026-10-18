@@ -140,19 +140,31 @@ pub(super) fn install_writer_fence(
     install
         .validate()
         .map_err(|error| invalid(error.to_string()))?;
-    let expected_json = encode(&install.expected)?;
     let replacement_json = encode(&install.replacement)?;
-    let changed = savepoint.execute(
-        "UPDATE remote_writer_fences
-         SET writer_fence_json = ?1, updated_at = ?2
-         WHERE authority_key = ?3 AND writer_fence_json = ?4",
-        params![
-            replacement_json,
-            install.installed_at.0,
-            install.authority_key.as_str(),
-            expected_json,
-        ],
-    )?;
+    let changed = match &install.expected {
+        Some(expected) => savepoint.execute(
+            "UPDATE remote_writer_fences
+             SET writer_fence_json = ?1, updated_at = ?2
+             WHERE authority_key = ?3 AND writer_fence_json = ?4",
+            params![
+                replacement_json,
+                install.installed_at.0,
+                install.authority_key.as_str(),
+                encode(expected)?,
+            ],
+        )?,
+        None => savepoint.execute(
+            "INSERT INTO remote_writer_fences (
+                authority_key, writer_fence_json, frontier_sequence, updated_at
+             ) VALUES (?1, ?2, 0, ?3)
+             ON CONFLICT(authority_key) DO NOTHING",
+            params![
+                install.authority_key.as_str(),
+                replacement_json,
+                install.installed_at.0,
+            ],
+        )?,
+    };
     if changed == 1 {
         return Ok(());
     }
@@ -174,7 +186,9 @@ pub(super) fn install_writer_fence(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_domain::{ManifestDigest, RemoteWriterFenceV1, UtcMicros, canonical_sha256};
+    use tracedecay_domain::{
+        ManifestDigest, RemoteWriterFenceV1, UtcMicros, remote_recovery_authority_key,
+    };
 
     use super::*;
 
@@ -191,13 +205,7 @@ mod tests {
     }
 
     fn authority_key() -> ManifestDigest {
-        canonical_sha256(&(
-            "tracedecay.remote-recovery-authority.v1",
-            "brain.remote",
-            "shard.remote",
-            "generation.remote",
-        ))
-        .unwrap()
+        remote_recovery_authority_key("brain.remote", "shard.remote", "generation.remote").unwrap()
     }
 
     fn install() -> RemoteWriterFenceInstallV1 {
@@ -217,10 +225,21 @@ mod tests {
             }))
             .unwrap(),
             authority_key: authority_key(),
-            expected: fence(11, 1, "node.old"),
+            expected: Some(fence(11, 1, "node.old")),
             replacement: fence(12, 2, "node.new"),
             installed_at: UtcMicros(20),
         }
+    }
+
+    fn stored_fences(savepoint: &Savepoint<'_>) -> Vec<(String, i64)> {
+        let mut statement = savepoint
+            .prepare("SELECT writer_fence_json, frontier_sequence FROM remote_writer_fences")
+            .unwrap();
+        statement
+            .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
     }
 
     fn connection() -> rusqlite::Connection {
@@ -249,7 +268,7 @@ mod tests {
                 "INSERT INTO remote_writer_fences VALUES (?1, ?2, 7, 10)",
                 rusqlite::params![
                     install.authority_key.as_str(),
-                    encode(&install.expected).unwrap(),
+                    encode(install.expected.as_ref().unwrap()).unwrap(),
                 ],
             )
             .unwrap();
@@ -285,6 +304,53 @@ mod tests {
     }
 
     #[test]
+    fn writer_fence_seed_installs_only_the_first_writer_of_a_lineage() {
+        let mut connection = connection();
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        let mut seed = install();
+        seed.expected = None;
+        seed.replacement = fence(1, 1, "node.first");
+
+        install_writer_fence(&savepoint, &seed).unwrap();
+        install_writer_fence(&savepoint, &seed).unwrap();
+        let mut rival = seed.clone();
+        rival.replacement = fence(1, 1, "node.rival");
+        assert!(install_writer_fence(&savepoint, &rival).is_err());
+
+        assert_eq!(
+            stored_fences(&savepoint),
+            vec![(encode(&seed.replacement).unwrap(), 0)]
+        );
+    }
+
+    #[test]
+    fn writer_fence_seed_never_overwrites_a_promoted_fence() {
+        let mut connection = connection();
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        let promotion = install();
+        savepoint
+            .execute(
+                "INSERT INTO remote_writer_fences VALUES (?1, ?2, 7, 10)",
+                rusqlite::params![
+                    promotion.authority_key.as_str(),
+                    encode(&promotion.replacement).unwrap(),
+                ],
+            )
+            .unwrap();
+        let mut stale_seed = promotion.clone();
+        stale_seed.expected = None;
+        stale_seed.replacement = promotion.expected.clone().unwrap();
+
+        assert!(install_writer_fence(&savepoint, &stale_seed).is_err());
+        assert_eq!(
+            stored_fences(&savepoint),
+            vec![(encode(&promotion.replacement).unwrap(), 7)]
+        );
+    }
+
+    #[test]
     fn writer_fence_install_rejects_a_different_project_binding() {
         let mut install = install();
         install.target_binding = serde_json::from_value(json!({
@@ -301,6 +367,9 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(install.validate().is_err());
+        assert_eq!(
+            install.validate().unwrap_err().to_string(),
+            "repository payload for install remote writer fence failed its owning store contract"
+        );
     }
 }

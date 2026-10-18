@@ -3,16 +3,18 @@ use tracedecay_automation_runtime::automation::managed_skills::{
     default_managed_skill_targets,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
-    AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
-    record_skill_usage, record_skill_usage_event, skill_improvement_recommendations,
-    stale_skill_recommendations, summarize_skill_usage,
+    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, record_skill_usage,
+    record_skill_usage_event, skill_improvement_recommendations, stale_skill_recommendations,
+    summarize_skill_usage,
 };
+use tracedecay_global_db::AnalyticsEventRecord;
 
 fn draft(id: &str, source: ManagedSkillSource) -> ManagedSkillDraft {
     ManagedSkillDraft {
         id: id.to_string(),
         title: format!("{id} skill"),
         summary: "Managed skill usage test fixture.".to_string(),
+        routing_description: "Managed skill usage test fixture.".to_string(),
         category: "maintenance".to_string(),
         targets: default_managed_skill_targets(),
         body_markdown: "Use this skill when maintaining automation.".to_string(),
@@ -26,53 +28,6 @@ fn draft(id: &str, source: ManagedSkillSource) -> ManagedSkillDraft {
             run_id: Some("run_usage".to_string()),
         },
     }
-}
-
-#[tokio::test]
-async fn skill_usage_ledger_records_views_uses_patches_and_metadata() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let skill = create_managed_skill(
-        &profile_root,
-        draft("repo-hygiene", ManagedSkillSource::AutomationRun),
-    )
-    .await
-    .unwrap();
-
-    for (action, timestamp, target) in [
-        (SkillUsageAction::View, 100, Some("Cursor")),
-        (SkillUsageAction::Use, 150, Some("codex")),
-        (SkillUsageAction::Patch, 125, None),
-    ] {
-        record_skill_usage_event(
-            &profile_root,
-            SkillUsageEvent {
-                skill_name: "repo-hygiene".to_string(),
-                action,
-                timestamp,
-                target: target.map(str::to_string),
-            },
-            Some(&skill),
-        )
-        .await
-        .unwrap();
-    }
-
-    let summaries = summarize_skill_usage(&profile_root, std::slice::from_ref(&skill))
-        .await
-        .unwrap();
-    let summary = &summaries[0];
-    assert_eq!(summary.skill_id, "repo-hygiene");
-    assert_eq!(summary.view_count, 1);
-    assert_eq!(summary.use_count, 1);
-    assert_eq!(summary.patch_count, 1);
-    assert_eq!(summary.last_activity_at, 150);
-    assert_eq!(summary.targets, vec!["codex", "cursor"]);
-    assert_eq!(summary.created_by.as_deref(), Some("tracedecay"));
-    assert_eq!(
-        summary.provenance_source,
-        Some(ManagedSkillSource::AutomationRun)
-    );
 }
 
 #[tokio::test]
@@ -150,8 +105,8 @@ async fn analytics_ingest_skips_failed_tracedecay_skill_view_rows() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
 
-    let events = vec![AnalyticsEventRecord {
-        id: 10,
+    let skill_view = |id: i64, skill_id: &str, outcome: Option<&str>| AnalyticsEventRecord {
+        id,
         provider: "codex".to_string(),
         project_id: "project".to_string(),
         session_id: Some("session".to_string()),
@@ -163,17 +118,22 @@ async fn analytics_ingest_skips_failed_tracedecay_skill_view_rows() {
         skill_name: None,
         hint_category: None,
         hint_id: None,
-        outcome: Some("error".to_string()),
-        metadata_json: Some(
-            r#"{"request_id":"req-failed","function":{"name":"tracedecay_skill_view","arguments":{"id":"repo-hygiene"}}}"#
-                .to_string(),
-        ),
-    }];
+        outcome: outcome.map(str::to_string),
+        metadata_json: Some(format!(
+            r#"{{"request_id":"req-{id}","function":{{"name":"tracedecay_skill_view","arguments":{{"id":"{skill_id}"}}}}}}"#
+        )),
+    };
+    let events = vec![
+        skill_view(10, "repo-hygiene", Some("error")),
+        skill_view(11, "release-notes", None),
+    ];
 
     let touched = ingest_analytics_events(&profile_root, &events)
         .await
         .unwrap();
-    assert!(touched.is_empty());
+    assert_eq!(touched.len(), 1);
+    assert_eq!(touched[0].skill_id, "release-notes");
+    assert_eq!(touched[0].view_count, 1);
     assert!(
         tracedecay_automation_runtime::automation::skill_usage::load_skill_usage_record(
             &profile_root,
@@ -362,7 +322,7 @@ async fn analytics_ingest_is_idempotent_and_accepts_bare_skill_name_rows() {
 }
 
 #[tokio::test]
-async fn stale_scoring_explains_archive_candidates_and_exclusions() {
+async fn stale_scoring_treats_unmeasured_use_as_unknown_and_keeps_exclusions() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let stale_skill = create_managed_skill(
@@ -406,21 +366,29 @@ async fn stale_scoring_explains_archive_candidates_and_exclusions() {
     let summaries = summarize_skill_usage(&profile_root, &[stale_skill, pinned, user_skill])
         .await
         .unwrap();
-    let recommendations = stale_skill_recommendations(&summaries, 10_000, 1_000);
+    let recommendations = stale_skill_recommendations(&summaries);
 
-    let stale = recommendations
+    let viewed_long_ago = recommendations
         .iter()
         .find(|recommendation| recommendation.skill_id == "stale-skill")
         .unwrap();
-    assert!(stale.stale);
-    assert_eq!(stale.recommendation, "archive_candidate");
-    assert!(stale.reason.contains("no recorded uses or patches"));
-    assert!(
-        stale
-            .evidence
-            .iter()
-            .any(|entry| entry == "provenance_source=automation_run")
-    );
+    assert!(!viewed_long_ago.stale);
+    assert_eq!(viewed_long_ago.recommendation, "keep");
+    assert!(viewed_long_ago.reason.contains("unknown, not stale"));
+    for expected in [
+        "views=1",
+        "uses=0",
+        "use_telemetry=unobserved",
+        "provenance_source=automation_run",
+    ] {
+        assert!(
+            viewed_long_ago
+                .evidence
+                .iter()
+                .any(|entry| entry == expected),
+            "missing {expected}: {viewed_long_ago:?}"
+        );
+    }
 
     let pinned = recommendations
         .iter()

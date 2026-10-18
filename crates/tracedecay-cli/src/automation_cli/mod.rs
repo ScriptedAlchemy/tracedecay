@@ -4,11 +4,14 @@ mod runs;
 mod skills;
 
 use crate::cli::AutomationAction;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 async fn daemon_project_dashboard_root(
+    profile: &ProfileRoot,
     project_path: &std::path::Path,
 ) -> tracedecay_domain::errors::Result<std::path::PathBuf> {
     let context = crate::commands::daemon_tool_json(
+        profile,
         Some(project_path),
         "tracedecay_active_project",
         serde_json::json!({ "format": "json" }),
@@ -24,78 +27,38 @@ async fn daemon_project_dashboard_root(
     Ok(std::path::PathBuf::from(data_root).join("dashboard"))
 }
 
-async fn daemon_automation_action(
-    project_path: &std::path::Path,
-    args: serde_json::Value,
-) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    crate::commands::daemon_tool_json(Some(project_path), "tracedecay_admin_project", args).await
-}
-
 pub(crate) async fn handle_automation_command(
+    profile: &ProfileRoot,
     action: AutomationAction,
 ) -> tracedecay_domain::errors::Result<()> {
     match action {
         AutomationAction::Config { action } => {
-            hotpath::future!(
-                config::handle_automation_config_command(action),
-                label = "cli.automation.config"
+            tracing::Instrument::instrument(
+                config::handle_automation_config_command(profile, action),
+                tracing::trace_span!("cli.automation.config"),
             )
             .await
         }
         AutomationAction::Runs { action } => {
-            hotpath::future!(
-                runs::handle_automation_runs_command(action),
-                label = "cli.automation.runs"
+            tracing::Instrument::instrument(
+                runs::handle_automation_runs_command(profile, action),
+                tracing::trace_span!("cli.automation.runs"),
             )
             .await
         }
         AutomationAction::Skills { action } => {
-            hotpath::future!(
-                skills::handle_automation_skills_command(action),
-                label = "cli.automation.skills"
+            tracing::Instrument::instrument(
+                skills::handle_automation_skills_command(profile, action),
+                tracing::trace_span!("cli.automation.skills"),
             )
             .await
         }
         AutomationAction::Facts { action } => {
-            hotpath::future!(
-                facts::handle_automation_facts_command(action),
-                label = "cli.automation.facts"
+            tracing::Instrument::instrument(
+                facts::handle_automation_facts_command(profile, action),
+                tracing::trace_span!("cli.automation.facts"),
             )
             .await
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::facts::{
-        automatic_fact_receipt_list_rpc_args, automatic_fact_receipt_view_rpc_args,
-    };
-
-    #[test]
-    fn automatic_fact_receipt_rpc_requests_preserve_arguments() {
-        assert_eq!(
-            automatic_fact_receipt_list_rpc_args(Some("applied"), 50),
-            serde_json::json!({
-                "action": "automatic_fact_receipt_list",
-                "state": "applied",
-                "limit": 50,
-            })
-        );
-        assert_eq!(
-            automatic_fact_receipt_view_rpc_args("fact_7"),
-            serde_json::json!({ "action": "automatic_fact_receipt_view", "id": "fact_7" })
-        );
-    }
-
-    #[test]
-    fn automation_reconcile_request_binds_project_scope() {
-        assert_eq!(
-            super::config::project_automation_reconcile_args(),
-            serde_json::json!({
-                "action": "automation_reconcile",
-                "scope": "project"
-            })
-        );
     }
 }

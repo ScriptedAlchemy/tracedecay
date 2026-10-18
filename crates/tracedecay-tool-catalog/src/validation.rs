@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::binding::{BindingSurface, SurfaceBindingV1, SurfaceOperationName};
 use crate::id::{BindingId, CapabilityId, ContributionId, ProfileId, RetrieverId, UseCaseId};
 use crate::manifest::{CapabilityManifestV1, EffectClass, InverseContract};
-use crate::profile::{ProfileDefinition, RoutingFixtureExpectation};
+use crate::profile::ProfileDefinition;
 use crate::retrieval::RetrievalPrimitiveManifestV1;
 use crate::snapshot::{ApplicationHandlerDescriptorV1, CatalogContributionV1};
 
@@ -37,6 +37,8 @@ pub enum CatalogValidationError {
     ContributionDependencyCycle { contribution_id: ContributionId },
     #[error("duplicate capability ID {0}")]
     DuplicateCapabilityId(CapabilityId),
+    #[error("duplicate capability use case {0}")]
+    DuplicateCapabilityUseCaseId(UseCaseId),
     #[error("duplicate handler descriptor for use case {0}")]
     DuplicateHandlerUseCaseId(UseCaseId),
     #[error("capability {capability_id} has no application handler descriptor for {use_case_id}")]
@@ -48,13 +50,6 @@ pub enum CatalogValidationError {
     MissingInverseCapability {
         capability_id: CapabilityId,
         inverse_id: CapabilityId,
-    },
-    #[error("capability {capability_id} and its application handler use incompatible schemas")]
-    HandlerSchemaMismatch { capability_id: CapabilityId },
-    #[error("capability {capability_id} resolves to a handler for {handler_capability_id}")]
-    HandlerCapabilityMismatch {
-        capability_id: CapabilityId,
-        handler_capability_id: CapabilityId,
     },
     #[error("duplicate binding ID {0}")]
     DuplicateBindingId(BindingId),
@@ -83,15 +78,6 @@ pub enum CatalogValidationError {
         binding_id: BindingId,
         capability_id: CapabilityId,
     },
-    #[error("binding {binding_id} aliases missing binding {alias_of}")]
-    MissingAliasTarget {
-        binding_id: BindingId,
-        alias_of: BindingId,
-    },
-    #[error("binding alias {binding_id} must target the same capability")]
-    AliasCapabilityMismatch { binding_id: BindingId },
-    #[error("binding alias {binding_id} cannot target another alias")]
-    AliasTargetsAlias { binding_id: BindingId },
     #[error("duplicate retrieval primitive capability ID {0}")]
     DuplicateRetrievalCapabilityId(CapabilityId),
     #[error("duplicate retriever ID {0}")]
@@ -146,16 +132,11 @@ pub enum CatalogValidationError {
         capability_id: CapabilityId,
         surface: BindingSurface,
     },
-    #[error(
-        "profile {profile_id} routing fixture references incompatible capability {capability_id}"
-    )]
-    InvalidRoutingFixtureCapability {
-        profile_id: ProfileId,
-        capability_id: CapabilityId,
-    },
+    #[error("catalog digest document failed to serialize: {reason}")]
+    DigestSerialization { reason: String },
 }
 
-#[hotpath::measure(label = "tool_catalog.validate")]
+#[tracing::instrument(name = "tool_catalog.validate", level = "trace", skip_all)]
 pub(crate) fn validate_catalog(
     contributions: &[CatalogContributionV1],
     profiles: &[ProfileDefinition],
@@ -262,6 +243,7 @@ fn index_capabilities(
     contributions: &[CatalogContributionV1],
 ) -> Result<BTreeMap<CapabilityId, &CapabilityManifestV1>, CatalogValidationError> {
     let mut capabilities = BTreeMap::new();
+    let mut use_cases = BTreeSet::new();
     for capability in contributions
         .iter()
         .flat_map(|contribution| contribution.capabilities())
@@ -273,6 +255,11 @@ fn index_capabilities(
         {
             return Err(CatalogValidationError::DuplicateCapabilityId(
                 capability.capability_id().clone(),
+            ));
+        }
+        if !use_cases.insert(capability.use_case_id().clone()) {
+            return Err(CatalogValidationError::DuplicateCapabilityUseCaseId(
+                capability.use_case_id().clone(),
             ));
         }
     }
@@ -301,25 +288,12 @@ fn validate_handler_contracts(
     handlers: &BTreeMap<UseCaseId, &ApplicationHandlerDescriptorV1>,
 ) -> Result<(), CatalogValidationError> {
     for capability in capabilities.values() {
-        let Some(handler) = handlers.get(capability.use_case_id()) else {
+        let Some(_handler) = handlers.get(capability.use_case_id()) else {
             return Err(CatalogValidationError::MissingHandler {
                 capability_id: capability.capability_id().clone(),
                 use_case_id: capability.use_case_id().clone(),
             });
         };
-        if handler.capability_id() != capability.capability_id() {
-            return Err(CatalogValidationError::HandlerCapabilityMismatch {
-                capability_id: capability.capability_id().clone(),
-                handler_capability_id: handler.capability_id().clone(),
-            });
-        }
-        if handler.request_schema() != capability.request_schema()
-            || handler.result_schema() != capability.result_schema()
-        {
-            return Err(CatalogValidationError::HandlerSchemaMismatch {
-                capability_id: capability.capability_id().clone(),
-            });
-        }
     }
     Ok(())
 }
@@ -377,28 +351,6 @@ fn index_bindings<'a>(
                     capability_id: capability.capability_id().clone(),
                 });
             }
-        }
-    }
-
-    for binding in bindings.values() {
-        let Some(alias_of) = binding.alias_of() else {
-            continue;
-        };
-        let Some(canonical) = bindings.get(alias_of) else {
-            return Err(CatalogValidationError::MissingAliasTarget {
-                binding_id: binding.binding_id().clone(),
-                alias_of: alias_of.clone(),
-            });
-        };
-        if canonical.is_alias() {
-            return Err(CatalogValidationError::AliasTargetsAlias {
-                binding_id: binding.binding_id().clone(),
-            });
-        }
-        if canonical.capability_id() != binding.capability_id() {
-            return Err(CatalogValidationError::AliasCapabilityMismatch {
-                binding_id: binding.binding_id().clone(),
-            });
         }
     }
 
@@ -559,7 +511,6 @@ fn validate_profiles(
     for profile in profiles.values() {
         validate_profile_budget(profile, capabilities, bindings)?;
         validate_paired_profile(profile, bindings)?;
-        validate_routing_fixtures(profile, capabilities)?;
     }
     Ok(())
 }
@@ -638,55 +589,6 @@ fn validate_paired_profile(
                 capability_id: capability_id.clone(),
                 surface: BindingSurface::Mcp,
             });
-        }
-    }
-    Ok(())
-}
-
-/// Check that every routing fixture names capabilities that exist and sit on
-/// the side of the profile boundary its expectation claims.
-///
-/// Fixture *completeness* is deliberately not checked. A fixture carries an
-/// utterance and an expectation tag but nothing in the catalog evaluates an
-/// utterance, so demanding one fixture per capability only forced composers to
-/// mint a placeholder per capability and made every profile that omitted a
-/// capability invalid the moment a capability was added anywhere.
-fn validate_routing_fixtures(
-    profile: &ProfileDefinition,
-    capabilities: &BTreeMap<CapabilityId, &CapabilityManifestV1>,
-) -> Result<(), CatalogValidationError> {
-    let invalid =
-        |capability_id: &CapabilityId| CatalogValidationError::InvalidRoutingFixtureCapability {
-            profile_id: profile.profile_id().clone(),
-            capability_id: capability_id.clone(),
-        };
-
-    for fixture in profile.routing_fixtures() {
-        match fixture.expectation() {
-            // A selectable or ambiguous outcome must name capabilities the
-            // profile actually exposes.
-            RoutingFixtureExpectation::Select { capability_id } => {
-                if !profile.includes_capability(capability_id) {
-                    return Err(invalid(capability_id));
-                }
-            }
-            RoutingFixtureExpectation::Ambiguous { capability_ids } => {
-                for capability_id in capability_ids {
-                    if !profile.includes_capability(capability_id) {
-                        return Err(invalid(capability_id));
-                    }
-                }
-            }
-            // An insufficient-capability outcome is only meaningful for a
-            // known capability the profile withholds.
-            RoutingFixtureExpectation::InsufficientCapability { capability_id } => {
-                if !capabilities.contains_key(capability_id)
-                    || profile.includes_capability(capability_id)
-                {
-                    return Err(invalid(capability_id));
-                }
-            }
-            RoutingFixtureExpectation::Reject => {}
         }
     }
     Ok(())

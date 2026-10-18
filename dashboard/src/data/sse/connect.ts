@@ -1,5 +1,7 @@
+import { dashboardFetch } from '../auth/credential.ts';
 import type { SseEventEnvelope } from './types.ts';
 import { createSseReducer, type SseReducer } from './reducer.ts';
+import { isRecord } from '../query/responseBody.ts';
 
 const DASHBOARD_EVENT_NAMES = [
   'heartbeat',
@@ -31,6 +33,10 @@ const MAX_ACTIVITY_PULSES = 64;
  * already knows the daemon's event shape.
  */
 export interface LiveActivityPulse {
+  /** Exact admitted envelope identity; distinct from a transcript/message id. */
+  eventId: string;
+  /** Server observation time in microseconds, preserved from the envelope. */
+  observationTime: string;
   /** Registered project id from the event's exact scope, when profile-backed. */
   projectId: string | null;
   /** Event family (`heartbeat`, `project_registry_changed`, …). */
@@ -39,6 +45,10 @@ export interface LiveActivityPulse {
   streamId: string;
   /** Client receipt time (ms since epoch). */
   at: number;
+  /** The daemon's bounded detail word for the pulse (`leased`, `file_edit`,
+   * …) when the family carried one; `null` when the frame named none. Absent
+   * on pulses built before this field existed. */
+  detail?: string | null;
 }
 
 export interface SseConnection {
@@ -48,7 +58,7 @@ export interface SseConnection {
   /** Recent accepted pulses, oldest first. Non-consuming: reading this never
    * disturbs the reducer's batch boundary. */
   activity(): readonly LiveActivityPulse[];
-  /** Monotone counter — a stable `useSyncExternalStore` snapshot. */
+  /** Monotone counter, a stable `useSyncExternalStore` snapshot. */
   activityRevision(): number;
   subscribe(listener: () => void): () => void;
   close(): void;
@@ -76,17 +86,20 @@ export function connectEvents(url = '/api/events'): SseConnection {
   let activityRevision = 0;
   const deliveryAckUrl = `${url.replace(/\?.*$/, '').replace(/\/$/, '')}/delivery-ack`;
 
-  /** Record an accepted event as a pulse. Only newly accepted events pulse —
+  /** Record an accepted event as a pulse. Only newly accepted events pulse,
    * duplicates, stale generations, and superseded revisions must not light the
    * visualization twice for one real occurrence. */
   const recordActivity = (event: DecodedSseEvent) => {
     const payload = event.payload;
     activity.push({
+      eventId: event.event_id,
+      observationTime: event.observation_time,
       projectId: event.projectId,
       family:
         isRecord(payload) && typeof payload.family === 'string' ? payload.family : event.stream.stream_id,
       streamId: event.stream.stream_id,
       at: Date.now(),
+      detail: isRecord(payload) && typeof payload.detail === 'string' ? payload.detail : null,
     });
     if (activity.length > MAX_ACTIVITY_PULSES) activity.shift();
     activityRevision += 1;
@@ -139,7 +152,7 @@ export function connectEvents(url = '/api/events'): SseConnection {
 async function acknowledgeDelivery(url: string, receipt: string): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const response = await fetch(url, {
+      const response = await dashboardFetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ receipt }),
@@ -242,17 +255,13 @@ function parseScopeProjectId(scope: string): string | null {
  * Refusing those frames is not a stricter check, it is a silent outage: it drops
  * every hook, session-ingest, code-index, tool-call and task frame the daemon
  * sends, while `receive` has already reported the link as live. A run id with no
- * epoch is a lane that never rotates one, which is generation zero — and the
+ * epoch is a lane that never rotates one, which is generation zero, and the
  * reducer still orders the lane by revision, so nothing is loosened by saying
  * so. Malformation is caught by the field checks above, which this never was.
  */
 function streamGeneration(runId: string): number {
   const epoch = Number(runId.split('-').at(-1));
   return Number.isSafeInteger(epoch) && epoch >= 0 ? epoch : 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isRevision(value: unknown): value is number {

@@ -1,60 +1,18 @@
+use asupersync::Cx;
 use std::sync::atomic::AtomicBool;
 
 use super::test_runtime::TestRuntimeShardFamilyV1;
 use super::{
     Arc, Database, DatabaseAuthority, DatabaseOwnerErrorV1, DatabaseOwnerWeakLeaseIssuerErrorV1,
-    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope, adaptive_cache_sizes,
-    platform_safe_mmap_size,
+    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
 };
 use crate::db::DatabaseOwnerV1;
-use crate::store_runtime::VerifiedGraphRuntimePortV1;
+use crate::shard_runtime::VerifiedGraphRuntimePortV1;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
     VerifiedGraphSnapshot,
 };
-use tracedecay_store::{
-    FactReadControl, ProjectId, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1,
-    StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
-};
-
-const KB: u64 = 1024;
-const MB: u64 = 1024 * 1024;
-
-struct CancelledSnapshotProbe {
-    cancellation: RuntimeCancellationIdentityV1,
-    deadline: RuntimeDeadlineV1,
-}
-
-impl RuntimeRequestProbeV1 for CancelledSnapshotProbe {
-    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
-        &self.cancellation
-    }
-
-    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
-        &self.deadline
-    }
-
-    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-        Some(RuntimeInterruptionV1::Cancelled)
-    }
-
-    fn try_begin_commit(&self) -> bool {
-        false
-    }
-}
-
-fn cancelled_snapshot_probe() -> Arc<dyn RuntimeRequestProbeV1> {
-    Arc::new(CancelledSnapshotProbe {
-        cancellation: RuntimeCancellationIdentityV1 {
-            cancellation_id: RuntimeCancellationIdV1::new("cancellation.snapshot-test").unwrap(),
-            generation: 1,
-        },
-        deadline: RuntimeDeadlineV1 {
-            deadline_id: RuntimeDeadlineIdV1::new("deadline.snapshot-test").unwrap(),
-        },
-    })
-}
+use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
 macro_rules! assert_retained_purpose_adapter_blocks_one_client {
     ($owner:expr, $control:expr, $database:ident, $adapter:ident) => {{
@@ -66,14 +24,14 @@ macro_rules! assert_retained_purpose_adapter_blocks_one_client {
             .unwrap()
             .into_store_retirement_target()
             .unwrap();
-        let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+        let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
             $control.registry().reserve_retirement_batch(vec![target])
         else {
             panic!("a retained purpose adapter must block database owner retirement");
         };
         assert!(refusal.blockers().iter().any(|blocker| matches!(
             blocker,
-            crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+            crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
                 count: 1,
                 ..
             }
@@ -192,54 +150,7 @@ impl VerifiedGraphRuntimePortV1 for OwnerAccessTestGraphRuntime {
     }
 }
 
-#[test]
-fn adaptive_new_db_gets_minimum() {
-    let (cache_kb, mmap) = adaptive_cache_sizes(0);
-    assert_eq!(cache_kb, 2 * MB / KB); // 2 MB in KiB = 2048
-    assert_eq!(mmap, 0);
-}
-
-#[test]
-fn adaptive_small_db() {
-    // 5 MB DB → cache = 2 MB (floor), mmap = 10 MB
-    let (cache_kb, mmap) = adaptive_cache_sizes(5 * MB);
-    assert_eq!(cache_kb, 2 * MB / KB);
-    assert_eq!(mmap, 10 * MB);
-}
-
-#[test]
-fn adaptive_medium_db() {
-    // 100 MB DB → cache = 25 MB, mmap = 200 MB
-    let (cache_kb, mmap) = adaptive_cache_sizes(100 * MB);
-    assert_eq!(cache_kb, 25 * MB / KB);
-    assert_eq!(mmap, 200 * MB);
-}
-
-#[test]
-fn adaptive_large_db() {
-    // 500 MB DB → cache = 64 MB (cap), mmap = 256 MB (cap)
-    let (cache_kb, mmap) = adaptive_cache_sizes(500 * MB);
-    assert_eq!(cache_kb, 64 * MB / KB);
-    assert_eq!(mmap, 256 * MB);
-}
-
-#[test]
-fn adaptive_very_large_db() {
-    // 2 GB DB → both capped at max
-    let (cache_kb, mmap) = adaptive_cache_sizes(2 * 1024 * MB);
-    assert_eq!(cache_kb, 64 * MB / KB);
-    assert_eq!(mmap, 256 * MB);
-}
-
-#[test]
-fn mmap_disabled_for_every_graph_database() {
-    let raw = 200 * MB;
-    let effective = platform_safe_mmap_size(raw);
-    assert_eq!(effective, 0);
-    assert_eq!(platform_safe_mmap_size(0), 0);
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn database_owner_issues_client_leases_over_one_stable_database_inner() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");
@@ -268,54 +179,7 @@ async fn database_owner_issues_client_leases_over_one_stable_database_inner() {
     assert!(first.is_writable());
 }
 
-#[tokio::test]
-async fn repeated_authorized_opens_share_one_writer_lane() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "writer reuse").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let first = owner.issue_lease().unwrap();
-    let second = owner.issue_lease().unwrap();
-
-    let first_writer = first.writer().await;
-    assert!(second.inner.writer.try_lock().is_err());
-    drop(first_writer);
-    assert!(second.inner.writer.try_lock().is_ok());
-}
-
-#[tokio::test]
-async fn database_owner_leases_preserve_registered_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "preflight reuse").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let first = owner.issue_lease().unwrap();
-    let second = owner.issue_lease().unwrap();
-
-    assert_eq!(first.registered_binding(), second.registered_binding());
-    assert_eq!(
-        first.registered_verified_locator(),
-        second.registered_verified_locator()
-    );
-    assert_eq!(first.opened_file_identity(), second.opened_file_identity());
-    assert!(Arc::ptr_eq(&first.inner, &second.inner));
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn retained_daemon_database_refuses_writes_after_scope_drops() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("projects/project/tracedecay.db");
@@ -363,7 +227,7 @@ async fn retained_daemon_database_refuses_writes_after_scope_drops() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn authority_revalidated_batch_uses_the_canonical_long_lease_writer() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("authority-revalidated.db");
@@ -398,7 +262,7 @@ async fn authority_revalidated_batch_uses_the_canonical_long_lease_writer() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn authority_revalidated_batch_rolls_back_when_the_batch_fails() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("authority-revalidated-rollback.db");
@@ -437,7 +301,7 @@ async fn authority_revalidated_batch_rolls_back_when_the_batch_fails() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn twelve_handles_serialize_isolated_writer_connections() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");
@@ -465,18 +329,23 @@ async fn twelve_handles_serialize_isolated_writer_connections() {
     let mut tasks = Vec::new();
     for _ in 0..12 {
         let handle = owner.issue_lease().unwrap();
-        tasks.push(tokio::spawn(async move {
-            handle
-                .writer_connection("increment writer counter")
-                .await
+        tasks.push(
+            Cx::current()
                 .unwrap()
-                .execute("UPDATE writer_counter SET value = value + 1", ())
-                .await
-                .unwrap();
-        }));
+                .spawn(move |_cx| async move {
+                    handle
+                        .writer_connection("increment writer counter")
+                        .await
+                        .unwrap()
+                        .execute("UPDATE writer_counter SET value = value + 1", ())
+                        .await
+                        .unwrap();
+                })
+                .unwrap(),
+        );
     }
-    for task in tasks {
-        task.await.unwrap();
+    for mut task in tasks {
+        task.join(&Cx::current().unwrap()).await.unwrap();
     }
 
     let mut rows = first
@@ -490,7 +359,7 @@ async fn twelve_handles_serialize_isolated_writer_connections() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn retained_reader_never_observes_uncommitted_writer_state() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");
@@ -543,7 +412,7 @@ async fn retained_reader_never_observes_uncommitted_writer_state() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn memory_transactions_serialize_and_commit_through_the_final_writer() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");
@@ -564,9 +433,13 @@ async fn memory_transactions_serialize_and_commit_through_the_final_writer() {
     let mut second = Box::pin(db.begin_memory_write_transaction("commit final memory write"));
 
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut second)
-            .await
-            .is_err()
+        asupersync::time::timeout(
+            Cx::current().unwrap().now(),
+            std::time::Duration::from_millis(25),
+            &mut second
+        )
+        .await
+        .is_err()
     );
     drop(first);
     let second = second.await.unwrap();
@@ -598,7 +471,7 @@ async fn memory_transactions_serialize_and_commit_through_the_final_writer() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn cancelled_write_transaction_rolls_back_before_releasing_lane() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");
@@ -622,26 +495,29 @@ async fn cancelled_write_transaction_rolls_back_before_releasing_lane() {
         .await
         .unwrap();
 
-    let task_db = db.clone();
-    let (updated_tx, updated_rx) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(async move {
-        let transaction = task_db
-            .begin_write_transaction("cancelled update")
-            .await
-            .unwrap();
-        transaction
-            .execute("UPDATE cancelled_writer SET value = 1", ())
-            .await
-            .unwrap();
-        let _ = updated_tx.send(());
+    let transaction = db
+        .begin_write_transaction("cancelled update")
+        .await
+        .unwrap();
+    transaction
+        .execute("UPDATE cancelled_writer SET value = 1", ())
+        .await
+        .unwrap();
+    let mut caller = Box::pin(async move {
         std::future::pending::<()>().await;
         drop(transaction);
     });
-    updated_rx.await.unwrap();
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        std::future::poll_fn(|context| {
+            std::task::Poll::Ready(std::future::Future::poll(caller.as_mut(), context))
+        })
+        .await
+        .is_pending()
+    );
+    drop(caller);
 
-    let transaction = tokio::time::timeout(
+    let transaction = asupersync::time::timeout(
+        Cx::current().unwrap().now(),
         std::time::Duration::from_secs(2),
         db.begin_write_transaction("writer after cancellation"),
     )
@@ -660,49 +536,7 @@ async fn cancelled_write_transaction_rolls_back_before_releasing_lane() {
     transaction.commit().await.unwrap();
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn owner_leases_never_derive_a_second_database_from_a_symlink_alias() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "writer alias reuse").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let direct = owner.issue_lease().unwrap();
-    let through_alias = owner.issue_lease().unwrap();
-
-    assert!(Arc::ptr_eq(&direct.inner, &through_alias.inner));
-}
-
-#[cfg(windows)]
-#[tokio::test]
-async fn owner_leases_never_derive_a_second_database_from_a_case_alias() {
-    let temp = tempfile::tempdir().unwrap();
-    let directory = temp.path().join("SlotCase");
-    std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join("Graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "writer case reuse").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let direct = owner.issue_lease().unwrap();
-    let through_alias = owner.issue_lease().unwrap();
-
-    assert!(Arc::ptr_eq(&direct.inner, &through_alias.inner));
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn checkpoint_waits_for_shared_writer_lane() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");
@@ -717,19 +551,30 @@ async fn checkpoint_waits_for_shared_writer_lane() {
     .unwrap();
     let first = owner.issue_lease().unwrap();
     let second = owner.issue_lease().unwrap();
-    let writer = first.writer().await;
-    let mut checkpoint = tokio::spawn(async move { second.checkpoint().await });
+    let writer = first.writer().await.unwrap();
+    let mut checkpoint = Cx::current()
+        .unwrap()
+        .spawn(move |_cx| async move { second.checkpoint().await })
+        .unwrap();
 
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut checkpoint)
-            .await
-            .is_err()
+        asupersync::time::timeout(
+            Cx::current().unwrap().now(),
+            std::time::Duration::from_millis(25),
+            std::future::poll_fn(|context| checkpoint.poll_join(context))
+        )
+        .await
+        .is_err()
     );
     drop(writer);
-    checkpoint.await.unwrap().unwrap();
+    checkpoint
+        .join(&Cx::current().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn retained_database_guard_keeps_authority_alive_for_query_connection() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");
@@ -762,38 +607,7 @@ async fn retained_database_guard_keeps_authority_alive_for_query_connection() {
     );
 }
 
-#[tokio::test]
-async fn owner_leases_share_the_canonical_read_and_write_boundaries() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "readonly upgrade").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let reader = owner.issue_lease().unwrap();
-    let writer = owner.issue_lease().unwrap();
-    assert!(Arc::ptr_eq(&reader.inner, &writer.inner));
-    writer
-        .writer_connection("reader isolation test")
-        .await
-        .unwrap()
-        .execute("CREATE TABLE reader_did_not_poison_writer (id INTEGER)", ())
-        .await
-        .unwrap();
-    let mut rows = reader
-        .read_connection()
-        .query("SELECT 1", ())
-        .await
-        .unwrap();
-    assert!(rows.next().await.unwrap().is_some());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[asupersync::test(flavor = "multi_thread", workers = 2)]
 async fn owner_issuance_and_retirement_fence_race_without_losing_the_exact_attachment() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -829,11 +643,11 @@ async fn owner_issuance_and_retirement_fence_race_without_losing_the_exact_attac
     ) {
         (
             Ok(lease),
-            crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal),
+            crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal),
         ) => {
             assert!(refusal.blockers().iter().any(|blocker| matches!(
                 blocker,
-                crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+                crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
                     count: 1,
                     ..
                 }
@@ -842,7 +656,7 @@ async fn owner_issuance_and_retirement_fence_race_without_losing_the_exact_attac
         }
         (
             Err(DatabaseOwnerErrorV1::RetirementFenced),
-            crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation),
+            crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation),
         ) => drop(reservation),
         _ => panic!(
             "issuance and fencing must linearize as one client blocker or one exact reservation"
@@ -851,7 +665,7 @@ async fn owner_issuance_and_retirement_fence_race_without_losing_the_exact_attac
     assert!(owner.issue_lease().is_ok());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn weak_owner_issuer_does_not_block_retirement_and_restores_ready_issuance() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -875,7 +689,7 @@ async fn weak_owner_issuer_does_not_block_retirement_and_restores_ready_issuance
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a weak issuer must not retain a Store client or block retirement");
@@ -891,7 +705,7 @@ async fn weak_owner_issuer_does_not_block_retirement_and_restores_ready_issuance
     assert_eq!(restored.registered_verified_locator(), &locator);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[asupersync::test(flavor = "multi_thread", workers = 2)]
 async fn weak_owner_issuer_and_retirement_fence_race_as_client_or_reservation() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -928,11 +742,11 @@ async fn weak_owner_issuer_and_retirement_fence_race_as_client_or_reservation() 
     ) {
         (
             Ok(lease),
-            crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal),
+            crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal),
         ) => {
             assert!(refusal.blockers().iter().any(|blocker| matches!(
                 blocker,
-                crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+                crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
                     count: 1,
                     ..
                 }
@@ -941,7 +755,7 @@ async fn weak_owner_issuer_and_retirement_fence_race_as_client_or_reservation() 
         }
         (
             Err(DatabaseOwnerWeakLeaseIssuerErrorV1::Retiring),
-            crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation),
+            crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation),
         ) => drop(reservation),
         _ => panic!(
             "weak issuance and fencing must linearize as one client blocker or one exact reservation"
@@ -950,7 +764,7 @@ async fn weak_owner_issuer_and_retirement_fence_race_as_client_or_reservation() 
     assert!(issuer.issue_lease().is_ok());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn weak_owner_issuer_denies_terminal_and_dropped_owner() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -971,7 +785,7 @@ async fn weak_owner_issuer_denies_terminal_and_dropped_owner() {
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a weak issuer must not block terminal retirement");
@@ -1003,7 +817,7 @@ async fn weak_owner_issuer_denies_terminal_and_dropped_owner() {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn owner_issued_database_clones_share_one_external_client_blocker() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1026,14 +840,14 @@ async fn owner_issued_database_clones_share_one_external_client_blocker() {
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a cloned database issuance must remain one external client blocker");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
@@ -1044,7 +858,7 @@ async fn owner_issued_database_clones_share_one_external_client_blocker() {
     assert!(owner.issue_lease().is_ok());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn derived_connection_snapshot_and_telemetry_retain_the_one_client_blocker() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1073,14 +887,14 @@ async fn derived_connection_snapshot_and_telemetry_retain_the_one_client_blocker
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a derived database handle must retain the exact client token");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
@@ -1094,7 +908,7 @@ async fn derived_connection_snapshot_and_telemetry_retain_the_one_client_blocker
     assert!(owner.issue_lease().is_ok());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn runtime_client_clones_share_the_issuing_database_client_blocker() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1124,7 +938,7 @@ async fn runtime_client_clones_share_the_issuing_database_client_blocker() {
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, runtime);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn independently_issued_runtime_clients_are_separate_retirement_blockers() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1153,14 +967,14 @@ async fn independently_issued_runtime_clients_are_separate_retirement_blockers()
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("independently issued runtime clients must block owner retirement");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 2,
             ..
         }
@@ -1172,7 +986,7 @@ async fn independently_issued_runtime_clients_are_separate_retirement_blockers()
     assert!(owner.issue_lease().is_ok());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn work_storage_retains_one_issuing_client_until_all_clones_drop() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1193,7 +1007,7 @@ async fn work_storage_retains_one_issuing_client_until_all_clones_drop() {
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, storage);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn workflow_storage_retains_one_issuing_client_until_all_clones_drop() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1211,11 +1025,11 @@ async fn workflow_storage_retains_one_issuing_client_until_all_clones_drop() {
 
     let database = owner.issue_lease().unwrap();
     install_workflow_schema_for_purpose_test(&database).await;
-    let storage = database.workflow_storage().unwrap();
+    let storage = database.workflow_storage().await.unwrap();
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, storage);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn authorized_scope_set_storage_retains_one_issuing_client_until_all_clones_drop() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1236,7 +1050,7 @@ async fn authorized_scope_set_storage_retains_one_issuing_client_until_all_clone
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, storage);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn handoff_open_storage_validates_mounted_schema_and_retains_one_client() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1269,11 +1083,11 @@ async fn handoff_open_storage_validates_mounted_schema_and_retains_one_client() 
         .await
         .unwrap();
     assert!(rows.next().await.unwrap().is_some());
-    let storage = database.handoff_open_storage().unwrap();
+    let storage = database.handoff_open_storage().await.unwrap();
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, storage);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn remote_storage_factories_validate_and_retain_one_issuing_client() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("remote-node.db");
@@ -1290,8 +1104,9 @@ async fn remote_storage_factories_validate_and_retain_one_issuing_client() {
     drop(runtime);
 
     let database = owner.issue_lease().unwrap();
+    let member_brain = database.registered_binding().shard_id.brain_id.clone();
     let provisioned = database
-        .provision_remote_storage(purpose_test_remote_keyring())
+        .provision_remote_storage(purpose_test_remote_keyring(), &member_brain)
         .unwrap();
     assert_eq!(provisioned.binding(), database.registered_binding());
     drop(provisioned);
@@ -1304,7 +1119,7 @@ async fn remote_storage_factories_validate_and_retain_one_issuing_client() {
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, storage);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn graph_publication_storage_retains_the_issuing_client_token() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("profile-memory.db");
@@ -1329,14 +1144,14 @@ async fn graph_publication_storage_retains_the_issuing_client_token() {
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("graph publication storage must retain its issuing client token");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
@@ -1347,52 +1162,7 @@ async fn graph_publication_storage_retains_the_issuing_client_token() {
     assert!(owner.issue_lease().is_ok());
 }
 
-#[tokio::test]
-async fn semantic_vector_staging_retains_the_issuing_client_token() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("project.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "semantic staging guard").unwrap();
-    let fixture = Database::publish_registered_test_runtime_with_retirement_control(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestDatabaseRuntimeScope::Project {
-            project_id: ProjectId::try_from("project.semantic-guard".to_owned()).unwrap(),
-        },
-    )
-    .await
-    .unwrap();
-    let (owner, runtime, control) = fixture.into_parts();
-    drop(runtime);
-
-    let database = owner.issue_lease().unwrap();
-    let storage = database.semantic_vector_publication_authority().unwrap();
-    drop(database);
-
-    let target = owner
-        .reserve_retirement()
-        .unwrap()
-        .into_store_retirement_target()
-        .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
-        control.registry().reserve_retirement_batch(vec![target])
-    else {
-        panic!("semantic staging must retain its issuing client token");
-    };
-    assert!(refusal.blockers().iter().any(|blocker| matches!(
-        blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
-            count: 1,
-            ..
-        }
-    )));
-    drop(refusal);
-
-    drop(storage);
-    assert!(owner.issue_lease().is_ok());
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn owner_reservation_restore_faults_when_the_exact_attachment_is_missing_or_stale() {
     let temp = tempfile::tempdir().unwrap();
     let authority =
@@ -1412,7 +1182,7 @@ async fn owner_reservation_restore_faults_when_the_exact_attachment_is_missing_o
     assert!(matches!(
         missing_owner.issue_lease(),
         Err(DatabaseOwnerErrorV1::RetirementFaulted(
-            crate::store_runtime::registry::StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost { .. }
+            crate::shard_runtime::registry::StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost { .. }
         ))
     ));
 
@@ -1432,12 +1202,12 @@ async fn owner_reservation_restore_faults_when_the_exact_attachment_is_missing_o
     assert!(matches!(
         stale_owner.issue_lease(),
         Err(DatabaseOwnerErrorV1::RetirementFaulted(
-            crate::store_runtime::registry::StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost { .. }
+            crate::shard_runtime::registry::StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost { .. }
         ))
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn read_write_owner_can_issue_independent_read_only_clients_without_escalation() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1488,21 +1258,21 @@ async fn read_write_owner_can_issue_independent_read_only_clients_without_escala
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("both independently issued clients must block owner retirement");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 3,
             ..
         }
     )));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn read_only_owner_issuance_preserves_the_published_access_policy() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("readonly.db");
@@ -1544,9 +1314,9 @@ async fn read_only_owner_issuance_preserves_the_published_access_policy() {
             .is_err()
     );
     assert!(database.work_storage().is_err());
-    assert!(database.workflow_storage().is_err());
+    assert!(database.workflow_storage().await.is_err());
     assert!(database.authorized_scope_set_storage().is_err());
-    assert!(database.handoff_open_storage().is_err());
+    assert!(database.handoff_open_storage().await.is_err());
     assert!(
         database
             .remote_storage(purpose_test_remote_keyring())
@@ -1554,67 +1324,15 @@ async fn read_only_owner_issuance_preserves_the_published_access_policy() {
     );
     assert!(
         database
-            .provision_remote_storage(purpose_test_remote_keyring())
-            .is_err()
-    );
-    assert!(
-        database
-            .snapshot_to(&temp.path().join("readonly.snapshot"))
-            .await
-            .is_err()
-    );
-    assert!(
-        database
-            .snapshot_to_interruptible(
-                &temp.path().join("readonly-interruptible.snapshot"),
-                cancelled_snapshot_probe(),
+            .provision_remote_storage(
+                purpose_test_remote_keyring(),
+                &database.registered_binding().shard_id.brain_id,
             )
-            .await
             .is_err()
     );
 }
 
-#[tokio::test]
-async fn read_write_database_snapshot_uses_the_canonical_writer_runtime() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("snapshot-source.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "database snapshot").unwrap();
-    let (database, _) = Database::publish_fixture_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-        None,
-    )
-    .await
-    .unwrap();
-    database
-        .set_metadata("snapshot", "canonical")
-        .await
-        .unwrap();
-
-    let destination = temp.path().join("snapshot-destination.db");
-    let receipt = database
-        .snapshot_to_interruptible(
-            &destination,
-            Arc::new(super::database_checkpoint_probe().unwrap()),
-        )
-        .await
-        .unwrap();
-    assert!(destination.is_file());
-    assert!(receipt.destination_bytes > 0);
-
-    let cancelled_destination = temp.path().join("snapshot-cancelled.db");
-    assert!(
-        database
-            .snapshot_to_interruptible(&cancelled_destination, cancelled_snapshot_probe())
-            .await
-            .is_err()
-    );
-    assert!(!cancelled_destination.exists());
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn owner_reservation_rollback_preserves_database_inner_and_publication_identity() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1640,7 +1358,7 @@ async fn owner_reservation_rollback_preserves_database_inner_and_publication_ide
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("the exact owner attachment must be reservable without a count allowance");
@@ -1653,7 +1371,7 @@ async fn owner_reservation_rollback_preserves_database_inner_and_publication_ide
     assert_eq!(restored.registered_verified_locator(), &locator);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn paired_target_composition_refusal_preserves_exact_inputs_for_ready_restore_and_retry() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("readonly-paired-owner.db");
@@ -1678,7 +1396,7 @@ async fn paired_target_composition_refusal_preserves_exact_inputs_for_ready_rest
     .unwrap();
     let (owner, runtime, control) = fixture.into_parts();
     drop(runtime);
-    let key = crate::store_runtime::registry::StoreRuntimeKey::new(
+    let key = crate::shard_runtime::registry::StoreRuntimeKey::new(
         control.binding().shard_id.clone(),
         control.binding().incarnation,
     );
@@ -1714,13 +1432,13 @@ async fn paired_target_composition_refusal_preserves_exact_inputs_for_ready_rest
     // the graph; cancellation returns it through the normal paired handoff.
     let database_reservation = owner.reserve_retirement().unwrap();
     let retry_target =
-        crate::store_runtime::registry::StoreRuntimeRetirementTarget::with_owner_attachments(
+        crate::shard_runtime::registry::StoreRuntimeRetirementTarget::with_owner_attachments(
             owner.registered_binding().clone(),
             authority.clone(),
             Box::new(database_reservation),
             graph_target,
         );
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control
             .registry()
             .reserve_retirement_batch(vec![retry_target])
@@ -1743,7 +1461,7 @@ async fn paired_target_composition_refusal_preserves_exact_inputs_for_ready_rest
     drop(graph_owner);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn paired_database_and_graph_owner_target_restores_the_exact_database_owner() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1762,7 +1480,7 @@ async fn paired_database_and_graph_owner_target_restores_the_exact_database_owne
     let inner = Arc::as_ptr(&first.inner);
     drop(first);
 
-    let key = crate::store_runtime::registry::StoreRuntimeKey::new(
+    let key = crate::shard_runtime::registry::StoreRuntimeKey::new(
         control.binding().shard_id.clone(),
         control.binding().incarnation,
     );
@@ -1776,7 +1494,7 @@ async fn paired_database_and_graph_owner_target_restores_the_exact_database_owne
         .unwrap()
         .into_store_retirement_target_with_graph(graph_target)
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("paired owner target must reserve one exact Store entry");
@@ -1793,7 +1511,7 @@ async fn paired_database_and_graph_owner_target_restores_the_exact_database_owne
     drop(graph_owner);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounting() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1812,7 +1530,7 @@ async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounti
     let issued = owner.issue_lease().unwrap();
     let inner = Arc::as_ptr(&issued.inner);
     drop(issued);
-    let key = crate::store_runtime::registry::StoreRuntimeKey::new(
+    let key = crate::shard_runtime::registry::StoreRuntimeKey::new(
         control.binding().shard_id.clone(),
         control.binding().incarnation,
     );
@@ -1828,14 +1546,14 @@ async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounti
         .into_store_retirement_target_with_graph(graph_target)
         .unwrap();
 
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("a live client must block the exact paired owner target");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
@@ -1858,7 +1576,7 @@ async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounti
         .unwrap()
         .into_store_retirement_target_with_graph(graph_target)
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("the restored paired owner target must reserve without remounting");
@@ -1880,7 +1598,7 @@ async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounti
         .unwrap()
         .into_store_retirement_target_with_graph(graph_target)
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("the exact graph target must remain reusable after cancellation");
@@ -1893,7 +1611,7 @@ async fn paired_owner_target_handoff_restores_ready_and_retries_without_remounti
     drop(graph_owner);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn external_client_clone_and_operation_remain_typed_owner_retirement_blockers() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
@@ -1909,7 +1627,7 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
     let (owner, runtime, control) = fixture.into_parts();
     drop(runtime);
     let external = match control.registry().lookup(control.binding()) {
-        crate::store_runtime::registry::StoreRuntimeLookup::Ready(lease) => lease,
+        crate::shard_runtime::registry::StoreRuntimeLookup::Ready(lease) => lease,
         other => panic!("expected the exact registered runtime before retirement: {other:?}"),
     };
     let external_clone = external.clone();
@@ -1921,21 +1639,21 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(refusal) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("external client and operation must block the exact owner reservation");
     };
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
             count: 1,
             ..
         }
     )));
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
-        crate::store_runtime::registry::StoreRuntimeRetirementBlocker::OperationLeases {
+        crate::shard_runtime::registry::StoreRuntimeRetirementBlocker::OperationLeases {
             count: 1,
             ..
         }
@@ -1949,7 +1667,7 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
         .unwrap()
         .into_store_retirement_target()
         .unwrap();
-    let crate::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
+    let crate::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(mut reservation) =
         control.registry().reserve_retirement_batch(vec![target])
     else {
         panic!("releasing external client tokens must permit exact retirement");
@@ -1958,7 +1676,7 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
     assert!(
         matches!(
             commit.outcomes(),
-            [crate::store_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }]
+            [crate::shard_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }]
         ),
         "unexpected retirement outcomes: {:?}",
         commit.outcomes()
@@ -1977,4 +1695,125 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
     );
     assert!(reopened.binding().authority_epoch > control.binding().authority_epoch);
     assert_eq!(reopened.verified_locator(), control.locator());
+}
+
+async fn graph_transaction_generation(database: &Database) -> u64 {
+    database
+        .get_metadata("graph_transaction_generation")
+        .await
+        .unwrap()
+        .map_or(0, |raw| raw.parse().unwrap())
+}
+
+async fn write_probe(
+    executor: &impl crate::db::engine::Executor,
+    value: &str,
+) -> crate::db::engine::Result<u64> {
+    executor
+        .execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('job-probe', ?1)",
+            (value,),
+        )
+        .await
+}
+
+async fn write_probe_then_yield(
+    executor: &impl crate::db::engine::Executor,
+) -> crate::db::engine::Result<()> {
+    write_probe(executor, "lost").await?;
+    let mut yielded = false;
+    std::future::poll_fn(|context| {
+        if std::mem::replace(&mut yielded, true) {
+            std::task::Poll::Ready(())
+        } else {
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    Ok(())
+}
+
+async fn publish_transact_fixture(label: &str) -> (tempfile::TempDir, DatabaseOwnerV1) {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(format!("{label}.db"));
+    let authority = DatabaseAuthority::acquire_test(&path, label).unwrap();
+    let owner = publish_fixture_owner_runtime(
+        &path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+        TestRuntimeShardFamilyV1::Code,
+    )
+    .await
+    .unwrap();
+    (temp, owner)
+}
+
+#[asupersync::test]
+async fn transact_runs_an_executor_helper_and_advances_the_graph_generation_once() {
+    let (_temp, owner) = publish_transact_fixture("transact-generation").await;
+    let database = owner.issue_lease().unwrap();
+    let before = graph_transaction_generation(&database).await;
+
+    let changed = database
+        .transact("transact generation", async |tx| {
+            write_probe(tx, "committed").await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        database.get_metadata("job-probe").await.unwrap().as_deref(),
+        Some("committed")
+    );
+    assert_eq!(graph_transaction_generation(&database).await, before + 1);
+}
+
+#[asupersync::test]
+async fn a_transact_body_that_awaits_a_foreign_future_is_refused_and_writes_nothing() {
+    let (_temp, owner) = publish_transact_fixture("transact-foreign-await").await;
+    let database = owner.issue_lease().unwrap();
+    let before = graph_transaction_generation(&database).await;
+
+    let error = database
+        .open_writer_connection_unguarded("transact foreign await")
+        .unwrap()
+        .transact(
+            tracedecay_rusqlite_runtime::exact_sql::JobPolicy::Bounded,
+            async |tx| write_probe_then_yield(tx).await,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, crate::db::engine::Error::JobAwaitedForeignFuture);
+    assert!(
+        database
+            .transact("transact foreign await", async |tx| {
+                write_probe_then_yield(tx).await
+            })
+            .await
+            .is_err()
+    );
+
+    assert_eq!(database.get_metadata("job-probe").await.unwrap(), None);
+    assert_eq!(graph_transaction_generation(&database).await, before);
+}
+
+#[asupersync::test]
+async fn transact_refuses_a_client_without_an_active_write_scope() {
+    let (_temp, owner) = publish_transact_fixture("transact-write-scope").await;
+    let writable = owner.issue_lease().unwrap();
+    let read_only = owner.issue_read_only_lease().unwrap();
+    let before = graph_transaction_generation(&writable).await;
+
+    let refused = read_only
+        .transact("read-only transact", async |tx| {
+            write_probe(tx, "refused").await
+        })
+        .await;
+
+    assert!(refused.is_err());
+    assert_eq!(writable.get_metadata("job-probe").await.unwrap(), None);
+    assert_eq!(graph_transaction_generation(&writable).await, before);
 }

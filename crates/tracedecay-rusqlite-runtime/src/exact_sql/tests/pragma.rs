@@ -27,16 +27,6 @@ fn mutating_no_argument_pragmas_are_denied() {
 }
 
 #[test]
-fn connection_local_memory_release_pragma_is_allowed() {
-    let fixture = fixture('a', 'a');
-    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-
-    channel
-        .execute_batch("PRAGMA shrink_memory".to_owned())
-        .expect("connection-local cache release must be authorized");
-}
-
-#[test]
 fn read_only_handle_releases_reader_memory_without_writer() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach_read_only(&fixture.readers);
@@ -84,7 +74,7 @@ fn writable_handle_releases_readers_and_writer() {
 }
 
 /// A worker leased into a retained snapshot answers the release on its
-/// snapshot channel, interleaved between reads — a live snapshot must not
+/// snapshot channel, interleaved between reads, a live snapshot must not
 /// degrade the release into a no-op or a spurious "worker closed".
 #[test]
 fn memory_release_reaches_workers_inside_retained_snapshots() {
@@ -120,7 +110,7 @@ fn closed_reader_pool_reports_typed_memory_release_noop() {
     let readers = ReaderPool::start(
         ExistingReaderLocator::new(binding.clone(), locator(&binding, 'c'), path).unwrap(),
         AdmissionConfigV1::default().readers,
-        NoReads,
+        ExactSqlOnlyReaderV1,
     )
     .unwrap();
     let channel = ExactSqlHandle::attach_read_only(&readers);

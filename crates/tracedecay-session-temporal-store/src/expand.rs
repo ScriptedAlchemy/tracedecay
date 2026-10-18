@@ -20,10 +20,12 @@ use tracedecay_store::{
     SessionTemporalCapabilityV1, SessionTemporalRetrievalRequestV1,
     SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
-use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::execution::TemporalPortError;
 
-use super::query::{now_micros, storage, storage_message};
+use super::query::{decode_generation_i64, now_micros, storage, storage_message};
 use super::relations::{SessionRelationError, SummarySourceRef};
+use super::retrieval::partial_summary_invalidation_exists;
 use super::store::execution_control_graph_cancellation;
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
 
@@ -40,7 +42,7 @@ struct SummarySeed {
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    #[hotpath::measure(future = true, label = "session_temporal.snapshot.freeze")]
+    #[tracing::instrument(name = "session_temporal.snapshot.freeze", level = "trace", skip_all)]
     pub async fn freeze_session_temporal_snapshot_result(
         &self,
         request: SessionTemporalSnapshotRequestV1,
@@ -106,14 +108,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             request.session_id().clone(),
             frozen_at,
             watermarks,
-            SessionTemporalCapabilitiesV1::new([
-                SessionTemporalCapabilityV1::FrozenWatermarks,
-                SessionTemporalCapabilityV1::GenerationRebuild,
-            ]),
+            SessionTemporalCapabilitiesV1::new([SessionTemporalCapabilityV1::FrozenWatermarks]),
         ))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.query.retrieve")]
+    #[tracing::instrument(name = "session_temporal.query.retrieve", level = "trace", skip_all)]
     pub async fn retrieve_session_temporal_page_result(
         &self,
         request: SessionTemporalRetrievalRequestV1,
@@ -135,7 +134,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     "SELECT knowledge_at
                          FROM session_occurrences
                          WHERE session_id = ?1
-                           AND generation = ?2
+                           AND +generation <= ?2
                            AND occurrence_id = ?3
                          LIMIT 2",
                     params![request.session_id().as_str(), generation, after.as_str()],
@@ -185,7 +184,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                         role, knowledge_at, valid_time_json, evidence_json
                  FROM session_occurrences AS occurrence
                  WHERE occurrence.session_id = ?1
-                   AND occurrence.generation = ?2
+                   AND +occurrence.generation <= ?2
                    AND (
                        occurrence.knowledge_at > ?3
                        OR (
@@ -212,7 +211,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                                SELECT 1
                                FROM session_derived_evidence_members AS member
                                WHERE member.session_id = occurrence.session_id
-                                 AND member.generation = occurrence.generation
+                                 AND +member.generation <= ?2
                                  AND member.occurrence_id = occurrence.occurrence_id
                                  AND member.evidence_kind = CASE ?7
                                      WHEN 'evidence_span' THEN 'span'
@@ -349,7 +348,7 @@ fn map_execution_control_error(error: TemporalPortError) -> SessionStoreError {
     match error {
         TemporalPortError::Cancelled => SessionStoreError::Cancelled,
         TemporalPortError::DeadlineExceeded => SessionStoreError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { resource } => {
+        TemporalPortError::BudgetExceeded { resource, .. } => {
             SessionStoreError::BudgetExceeded { resource }
         }
         _ => SessionStoreError::InvalidStateTransition {
@@ -421,7 +420,7 @@ async fn assertions_for_anchors(
                     knowledge_at, valid_time_json, evidence_json
              FROM session_assertions AS assertion
              WHERE assertion.session_id = ?1
-               AND assertion.generation = ?2
+               AND +assertion.generation <= ?2
                AND (
                    assertion.subject_anchor_id IN (SELECT value FROM json_each(?3))
                    OR assertion.object_anchor_id IN (SELECT value FROM json_each(?3))
@@ -444,7 +443,7 @@ async fn assertions_for_anchors(
                        SELECT 1
                        FROM session_assertion_supersession AS supersession
                        WHERE supersession.session_id = assertion.session_id
-                         AND supersession.generation = assertion.generation
+                         AND +supersession.generation <= ?2
                          AND supersession.superseded_assertion_id =
                              assertion.assertion_id
                    )
@@ -535,7 +534,8 @@ async fn retrieve_summary_page(
         .map_err(|error| storage(EXPAND_OPERATION, error))?;
     let mut rows = read
         .query(
-            "SELECT node.summary_id, node.summary_anchor_id,
+            concat!(
+                "SELECT node.summary_id, node.summary_anchor_id,
                     node.source_horizon_json, node.created_at,
                     node.publication_json
              FROM session_summary_nodes AS node
@@ -546,8 +546,15 @@ async fn retrieve_summary_page(
               AND availability.availability = 'available'
              WHERE node.session_id = ?1
                AND (?3 <> 'as_of' OR node.created_at <= ?4)
+               AND (?3 <> 'current' OR NOT ",
+                partial_summary_invalidation_exists!(
+                    "json_extract(node.publication_json, '$.provider')",
+                    "node.session_id"
+                ),
+                ")
              ORDER BY node.created_at, node.summary_id
-             LIMIT ?5",
+             LIMIT ?5"
+            ),
             params![
                 request.session_id().as_str(),
                 generation,
@@ -826,14 +833,6 @@ fn decode_summary_publication(encoded: &str) -> SessionStoreResult<SummaryPublic
         value
     };
     decode_json_value(value)
-}
-
-fn decode_generation_i64(
-    value: i64,
-    operation: &'static str,
-) -> SessionStoreResult<SessionProjectionGenerationV1> {
-    let generation = u64::try_from(value).map_err(|error| storage(operation, error))?;
-    SessionProjectionGenerationV1::new(generation).map_err(SessionStoreError::from)
 }
 
 fn decode_frozen_watermarks(

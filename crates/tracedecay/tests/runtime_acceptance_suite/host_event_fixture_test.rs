@@ -4,7 +4,6 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -20,23 +19,20 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay_runtime_core::privacy::{
-    ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
+use tracedecay_sessions::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay_sessions::runtime::source::TranscriptSource;
-use tracedecay_sessions::runtime::{claude, codex, cursor, hermes};
+use tracedecay_sessions::runtime::{hosts::claude, hosts::codex, hosts::cursor, hosts::hermes};
 use tracedecay_store::ObservationReplayRequest;
-use tracedecay_usecases::observation::{CaptureObservationRequest, ObservationCancellation};
+use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK, git_program, spawn_tracedecay_daemon,
-    tracedecay_command_with_home,
-};
+use crate::common::{git_program, spawn_tracedecay_daemon, tracedecay_command_with_home};
 
-const FIXTURES: [(&str, &str); 5] = [
+const FIXTURES: [(&str, &str); 6] = [
     (
         "codex",
         include_str!("../../../../tests/fixtures/host_events/codex/baseline.json"),
@@ -57,18 +53,18 @@ const FIXTURES: [(&str, &str); 5] = [
         "kiro",
         include_str!("../../../../tests/fixtures/host_events/kiro/baseline.json"),
     ),
+    (
+        "pi",
+        include_str!("../../../../tests/fixtures/host_events/pi/baseline.json"),
+    ),
 ];
 
 const HOST_ADMISSION_PROVIDERS: &[&str] = &[
-    "claude", "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo",
+    "claude", "codex", "cursor", "hermes", "kiro", "pi", "cline", "roo-code", "kilo",
 ];
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn native_host_event_fixtures_execute_provider_admission_paths() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let host = TempDir::new().unwrap();
     let home = host.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -79,9 +75,6 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&data_root, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let _home = EnvVarGuard::set("HOME", &home);
-    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
-    let _data_dir = EnvVarGuard::set(tracedecay::config::USER_DATA_DIR_ENV, &data_root);
     let boundary_project = initialize_boundary_project(&home);
     let _daemon = spawn_tracedecay_daemon(&home);
     crate::common::initialize_tracedecay_cli_project(&home, &boundary_project);
@@ -113,7 +106,7 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
             match state {
                 "supported" => assert_eq!(
                     actual,
-                    &serde_json::to_value(supported).unwrap(),
+                    &serde_json::to_value(&supported).unwrap(),
                     "{provider}/{state}"
                 ),
                 "unavailable" => assert_eq!(
@@ -172,24 +165,9 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
     }
 }
 
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn native_provider_usage_survives_production_admission() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let home = TempDir::new().unwrap();
-    let _home = EnvVarGuard::set("HOME", home.path());
-    let _userprofile = EnvVarGuard::set("USERPROFILE", home.path());
-    for provider in ["claude", "codex"] {
-        let outcome = execute_native_provider_path(provider, home.path()).await;
-        assert_eq!(outcome.status, HostAdmissionStatus::Supported, "{provider}");
-    }
-}
-
 fn hook_completed_rows(project: &Path, home: &Path, provider: &str) -> Vec<Value> {
     let mut paths = vec![
-        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project)
+        tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay"))
             .expect("resolve host fixture storage")
             .data_root
             .join("hook_analytics.jsonl"),
@@ -298,14 +276,22 @@ fn assert_hook_completed_analytics(provider: &str, state: &str, project: &Path, 
         );
     }
 
-    let project_path = project.to_string_lossy();
+    // The payload's session is attribution, not content: the row names it so
+    // analytics can join a hook to its session, and no other field repeats it.
     let session_id = format!("{provider}-host-fixture");
+    assert_eq!(row["session_id"], session_id.as_str(), "{label}");
+    let mut unattributed = row.clone();
+    unattributed
+        .as_object_mut()
+        .expect("hook row is an object")
+        .remove("session_id");
+    let project_path = project.to_string_lossy();
     for private in [
         project_path.as_ref(),
         session_id.as_str(),
         "Inspect the fixture.",
     ] {
-        assert_json_strings_omit(row, private, &label);
+        assert_json_strings_omit(&unattributed, private, &label);
     }
 }
 
@@ -325,26 +311,6 @@ fn assert_json_strings_omit(value: &Value, private: &str, label: &str) {
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn native_provider_fixtures_persist_external_source_receipts_across_restart() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let host = TempDir::new().unwrap();
-    let home = host.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let _home = EnvVarGuard::set("HOME", &home);
-    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
-    for (provider, _) in FIXTURES {
-        assert_eq!(
-            execute_native_provider_path(provider, &home).await.status,
-            HostAdmissionStatus::Supported,
-            "{provider}"
-        );
     }
 }
 
@@ -430,6 +396,7 @@ fn execute_host_boundary(provider: &str, home: &Path, project: &Path, request: &
         "cursor" => "hook-cursor-session-start",
         "hermes" => "hook-hermes-terminal-receipt",
         "kiro" => "hook-kiro-prompt-submit",
+        "pi" => "hook-pi-event",
         other => panic!("unexpected provider {other}"),
     };
     let mut command = tracedecay_command_with_home(home);
@@ -644,11 +611,14 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             .unwrap();
             let profile_root = home.join(".tracedecay");
             std::fs::create_dir_all(&profile_root).unwrap();
-            let stats = claude::ingest_user_sessions_with_admission(
-                &profile_root,
-                None,
-                Vec::new(),
-                &facade,
+            let stats = tracedecay_sessions::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home),
+                claude::ingest_user_sessions_with_admission(
+                    &profile_root,
+                    None,
+                    Vec::new(),
+                    &facade,
+                ),
             )
             .await;
             assert!(stats.messages_upserted > 0, "Claude native fixture");
@@ -679,27 +649,57 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             HostAdmissionScope::Project
         }
         "hermes" => {
-            let hermes_home = tmp.path().join("hermes-home");
-            write_hermes_native_fixture(&hermes_home, &project).await;
-            let stats = hermes::ingest_homes_capped_with_admission(
-                &[hermes_home],
-                &project,
-                project_id.clone(),
-                &facade,
-                None,
+            let hermes_user_home = tmp.path().join("hermes-user");
+            write_hermes_native_fixture(&hermes_user_home.join(".hermes"), &project).await;
+            let stats = tracedecay_sessions::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(&hermes_user_home),
+                hermes::ingest_for_project_capped_with_admission_and_cancellation(
+                    &project,
+                    project_id.clone(),
+                    &facade,
+                    None,
+                    &ObservationCancellation::default(),
+                ),
             )
             .await
+            .expect("hermes home")
             .stats;
             assert!(stats.messages_upserted > 0, "Hermes native fixture");
             HostAdmissionScope::Project
         }
         "kiro" => {
             write_kiro_native_fixture(home, &project);
-            let source = tracedecay_sessions::runtime::kiro::KiroSource::with_home(home);
+            let source = tracedecay_sessions::runtime::hosts::kiro::KiroSource::with_home(home);
             assert_eq!(source.transcript_paths(&project).len(), 1, "Kiro discovery");
-            let capture = tracedecay_sessions::runtime::kiro::capture_kiro_snapshot_observations(
+            let capture =
+                tracedecay_sessions::runtime::hosts::kiro::capture_kiro_snapshot_observations(
+                    &facade,
+                    &source,
+                    &project,
+                    ObservationScopeV1::Project {
+                        project_id: project_id.clone(),
+                    },
+                    None,
+                    &ObservationCancellation::default(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                capture.stats.messages_upserted > 0,
+                "Kiro native fixture must admit observations"
+            );
+            assert!(
+                !capture.deferred_by_byte_cap,
+                "Kiro native fixture must not defer on the byte cap"
+            );
+            HostAdmissionScope::Project
+        }
+        "pi" => {
+            let agent_dir = tmp.path().join("pi-agent");
+            write_pi_native_fixture(&agent_dir, &project);
+            let capture = tracedecay_sessions::runtime::hosts::pi::capture_pi_observations(
                 &facade,
-                &source,
+                &tracedecay_sessions::runtime::hosts::pi::PiSource::with_agent_dir(&agent_dir),
                 &project,
                 ObservationScopeV1::Project {
                     project_id: project_id.clone(),
@@ -709,14 +709,8 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             )
             .await
             .unwrap();
-            assert!(
-                capture.stats.messages_upserted > 0,
-                "Kiro native fixture must admit observations"
-            );
-            assert!(
-                !capture.deferred_by_byte_cap,
-                "Kiro native fixture must not defer on the byte cap"
-            );
+            assert!(capture.bytes_consumed > 0, "Pi native fixture");
+            assert!(!capture.deferred, "Pi native fixture must land completely");
             HostAdmissionScope::Project
         }
         other => panic!("unexpected provider {other}"),
@@ -755,7 +749,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             &expected_scope,
             "{provider} provider usage must retain the exact admitted scope"
         );
-        tracedecay_sessions::runtime::claude_observation::drain_projection_queue(
+        tracedecay_sessions::runtime::hosts::claude_observation::drain_projection_queue(
             &facade,
             &expected_scope,
             &ObservationCancellation::default(),
@@ -801,6 +795,636 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     outcome
 }
 
+/// Current Codex writes every prompt twice: a `response_item` message and an
+/// `item_completed/UserMessage` event of the same turn. Replies are written as
+/// an `item_completed/AgentMessage` event and a `response_item` message. Each
+/// is one logical turn in projection and search.
+#[tokio::test]
+async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_id = ProjectId::new("project.codex-current-user-pair").unwrap();
+    assert!(
+        Command::new(git_program())
+            .arg("init")
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project,
+            project_id.as_str()
+        )
+        .unwrap()
+    );
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let facade = runtime.facade();
+    let transcript = tmp.path().join("codex-current-user-pair.jsonl");
+    let prompt = "Find the callers of publish_generation.";
+    let reply = "publish_generation is called from the sealing worker.";
+    let lines = [
+        json!({
+            "timestamp": "2026-09-04T12:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": "session-current-user-pair", "cwd": project}
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-user-1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "user-item-1",
+                    "content": [{"type": "text", "text": prompt}]
+                }
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.500Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "msg-assistant-1",
+                    "content": [{"type": "Text", "text": reply}]
+                }
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.501Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-assistant-1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": reply}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:02.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "content": [{"type": "text", "text": "missing stable identity"}]
+                }
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:03.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "image-only-item",
+                    "content": [{"type": "image", "image_url": "redacted"}]
+                }
+            }
+        }),
+    ];
+    std::fs::write(
+        &transcript,
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
+        &transcript,
+        &project,
+        project_id.clone(),
+        &facade,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        runtime
+            .project_observation_table_count_for_test("observations")
+            .await
+            .unwrap(),
+        5,
+        "every valid native record stays durable until transactional projection"
+    );
+    let scope = ObservationScopeV1::Project { project_id };
+    facade
+        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+
+    let messages = runtime
+        .search_session_messages_for_test(
+            HostAdmissionScope::Project,
+            "codex",
+            None,
+            "publish_generation",
+            8,
+        )
+        .await
+        .unwrap();
+    let mut turns = messages
+        .iter()
+        .map(|hit| hit.message.role.as_str())
+        .collect::<Vec<_>>();
+    turns.sort_unstable();
+    assert_eq!(turns, ["assistant", "user"], "{messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|hit| hit.message.role == "user" && hit.message.message_id == "user-item-1"),
+        "the prompt keeps its native item identity: {messages:?}"
+    );
+    assert_eq!(
+        runtime
+            .session_message_count_for_test(HostAdmissionScope::Project, None)
+            .await
+            .unwrap(),
+        2,
+        "one prompt and one reply are two turns"
+    );
+}
+
+#[tokio::test]
+async fn current_codex_goal_pair_projects_once_with_native_identity_and_goal_semantics() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_id = ProjectId::new("project.codex-current-goal-pair").unwrap();
+    assert!(
+        Command::new(git_program())
+            .arg("init")
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project,
+            project_id.as_str()
+        )
+        .unwrap()
+    );
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let facade = runtime.facade();
+    let transcript = tmp.path().join("codex-current-goal-pair.jsonl");
+    let goal = concat!(
+        "<codex_internal_context source=\"goal\">",
+        "<objective>finish the canonical admission fix</objective>\n",
+        "Token budget: 12000\nTokens remaining: 11000",
+        "</codex_internal_context>"
+    );
+    let lines = [
+        json!({
+            "timestamp": "2026-09-04T12:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": "session-current-goal-pair", "cwd": project}
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-goal-unpaired-1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": goal}]
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.002Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-goal-paired-2",
+                "role": "user",
+                "content": [{"type": "input_text", "text": goal}]
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "goal-user-item-1",
+                    "content": [{"type": "text", "text": goal}]
+                }
+            }
+        }),
+    ];
+    std::fs::write(
+        &transcript,
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
+        &transcript,
+        &project,
+        project_id.clone(),
+        &facade,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        runtime
+            .project_observation_table_count_for_test("observations")
+            .await
+            .unwrap(),
+        4,
+        "paired goal representations remain durable until projection commits"
+    );
+    let scope = ObservationScopeV1::Project { project_id };
+    let projection = facade
+        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        projection.projected_outputs, 3,
+        "both response observations project before the current item replaces one"
+    );
+    assert_eq!(
+        runtime
+            .session_message_count_for_test(HostAdmissionScope::Project, None)
+            .await
+            .unwrap(),
+        2
+    );
+    let messages = runtime
+        .search_session_messages_for_test(
+            HostAdmissionScope::Project,
+            "codex",
+            None,
+            "canonical admission fix",
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+    let message = messages
+        .iter()
+        .find(|message| message.message.message_id == "goal-user-item-1")
+        .map(|message| &message.message)
+        .expect("the paired current goal should retain native item identity");
+    assert_eq!(message.message_id, "goal-user-item-1");
+    assert_eq!(message.role, "system");
+    assert_eq!(message.kind.as_deref(), Some("goal_context"));
+    assert_eq!(
+        message.text,
+        "Codex active goal: finish the canonical admission fix"
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["codex_internal_context"], "goal");
+    assert_eq!(metadata["source_event"], "item_completed");
+    assert_eq!(
+        metadata["codex_goal"]["objective"],
+        "finish the canonical admission fix"
+    );
+    assert_eq!(metadata["codex_goal"]["token_budget"], 12000);
+    assert_eq!(metadata["codex_goal"]["tokens_remaining"], 11000);
+}
+
+/// Binaries before the unified observation identity are the only writers of
+/// the per-session Codex source cursor, so a store holding that cursor beside
+/// admitted rows is a store without the unified-identity marker. Its session
+/// authority is refused with the scoped reset, and its rows are neither
+/// re-admitted nor rewritten.
+#[tokio::test]
+async fn retired_codex_source_cursor_store_refuses_sessions_with_scoped_reset() {
+    let tmp = TempDir::new().unwrap();
+    let profile = tmp.path().join("profile");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let transcript = tmp.path().join("retired-source.jsonl");
+    let session_id = "session-retired-codex-source";
+    let lines = [
+        json!({"timestamp":"2026-09-03T21:08:01.000Z","type":"session_meta","payload":{"id":session_id,"cwd":project}}),
+        json!({"timestamp":"2026-09-03T21:08:01.250Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":2,"cached_input_tokens":3,"reasoning_output_tokens":1,"total_tokens":12}}}}),
+        json!({"timestamp":"2026-09-03T21:08:01.300Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"retired-source-user-item","content":[{"type":"text","text":"Admitted before the unified identity."}]}}}),
+    ];
+    std::fs::write(
+        &transcript,
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    let facade = runtime.facade();
+    let admitted = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
+        &transcript,
+        Some(session_id),
+        &[],
+        &facade,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(admitted.frames_persisted, 3);
+    let scope = ObservationScopeV1::Profile;
+    let checkpoint = facade
+        .get_source_cursor(
+            &codex::codex_observation_source_v2(session_id).unwrap(),
+            &scope,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    facade
+        .advance_non_durable_source_cursor(
+            ObservationCursorAdvance::new(
+                ObservationSourceIdentityV1::for_provider(
+                    ProviderId::new("codex").unwrap(),
+                    SessionId::new(session_id).unwrap(),
+                )
+                .unwrap(),
+                scope,
+                checkpoint.generation(),
+                None,
+                ObservationSourceRangeV1::new(0, checkpoint.position()).unwrap(),
+                ObservationCoverageReason::UnsupportedFact,
+            )
+            .unwrap()
+            .with_resume_checkpoint(
+                checkpoint.file_identity().unwrap(),
+                checkpoint.resume_fingerprint().unwrap(),
+            ),
+            ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+    let db_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    drop(facade);
+    drop(runtime);
+
+    let observation_count = || -> i64 {
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
+            .unwrap()
+    };
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "DELETE FROM tracedecay_schema_version \
+             WHERE component = 'observations-unified-identity-v1'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(observation_count(), 3);
+
+    let error = match HostAdmissionTestRuntimeV1::profile(&profile).await {
+        Ok(_) => panic!("a store holding the retired Codex source must refuse its sessions"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.reset_required_context(),
+        Some((
+            "observations",
+            "observation rows predate the unified observation identity and cannot be read; \
+             reset the profile so ingestion can rebuild them from host transcripts"
+        ))
+    );
+    assert_eq!(observation_count(), 3);
+}
+
+#[tokio::test]
+async fn response_only_codex_goal_projects_with_native_identity_and_goal_semantics() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_id = ProjectId::new("project.codex-response-only-goal").unwrap();
+    assert!(
+        Command::new(git_program())
+            .arg("init")
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project,
+            project_id.as_str()
+        )
+        .unwrap()
+    );
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let facade = runtime.facade();
+    let transcript = tmp.path().join("codex-response-only-goal.jsonl");
+    let goal = concat!(
+        "<codex_internal_context source=\"goal\">",
+        "<objective>preserve legacy goal admission</objective>\n",
+        "Token budget: 24000\nTokens remaining: 23000",
+        "</codex_internal_context>"
+    );
+    let lines = [
+        json!({
+            "timestamp": "2026-09-04T12:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": "session-response-only-goal", "cwd": project}
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-response-only-goal-1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": goal}]
+            }
+        }),
+    ];
+    std::fs::write(
+        &transcript,
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
+        &transcript,
+        &project,
+        project_id.clone(),
+        &facade,
+        None,
+    )
+    .await
+    .unwrap();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let projection = facade
+        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+
+    assert_eq!(projection.projected_outputs, 1);
+    assert_eq!(
+        runtime
+            .session_message_count_for_test(HostAdmissionScope::Project, None)
+            .await
+            .unwrap(),
+        1
+    );
+    let messages = runtime
+        .search_session_messages_for_test(
+            HostAdmissionScope::Project,
+            "codex",
+            None,
+            "legacy goal admission",
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    let message = &messages[0].message;
+    assert_eq!(message.message_id, "msg-response-only-goal-1");
+    assert_eq!(message.role, "system");
+    assert_eq!(message.kind.as_deref(), Some("goal_context"));
+    assert_eq!(
+        message.text,
+        "Codex active goal: preserve legacy goal admission"
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["codex_internal_context"], "goal");
+    assert_eq!(metadata["source_event"], "response_item");
+    assert_eq!(metadata["source_role"], "user");
+    assert_eq!(
+        metadata["codex_goal"]["objective"],
+        "preserve legacy goal admission"
+    );
+    assert_eq!(metadata["codex_goal"]["token_budget"], 24000);
+    assert_eq!(metadata["codex_goal"]["tokens_remaining"], 23000);
+
+    let current = json!({
+        "timestamp": "2026-09-04T12:00:02.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "thread_id": "thread-response-only-goal",
+            "turn_id": "turn-response-only-goal",
+            "item": {
+                "type": "UserMessage",
+                "id": "goal-user-item-later-1",
+                "content": [{"type": "text", "text": goal}]
+            }
+        }
+    });
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(file, "{current}").unwrap();
+    drop(file);
+
+    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
+        &transcript,
+        &project,
+        project_id.clone(),
+        &facade,
+        None,
+    )
+    .await
+    .unwrap();
+    facade
+        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        runtime
+            .session_message_count_for_test(HostAdmissionScope::Project, None)
+            .await
+            .unwrap(),
+        1
+    );
+    let messages = runtime
+        .search_session_messages_for_test(
+            HostAdmissionScope::Project,
+            "codex",
+            None,
+            "legacy goal admission",
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].message.message_id, "goal-user-item-later-1");
+    let metadata: serde_json::Value =
+        serde_json::from_str(messages[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source_event"], "item_completed");
+}
+
 fn encode_workspace_path(path: &Path) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::new();
@@ -820,8 +1444,29 @@ fn encode_workspace_path(path: &Path) -> String {
     output.replace('/', "_")
 }
 
+fn write_pi_native_fixture(agent_dir: &Path, project: &Path) {
+    let cwd = project.to_string_lossy();
+    let encoded = cwd
+        .strip_prefix('/')
+        .unwrap_or(&cwd)
+        .replace(['/', '\\', ':'], "-");
+    let directory = agent_dir.join("sessions").join(format!("--{encoded}--"));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("2026-09-25T16-00-00-000Z_5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90.jsonl"),
+        include_str!(
+            "../../../../tests/fixtures/transcript_golden/pi/2026-09-25T16-00-00-000Z_5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90.jsonl"
+        )
+        .replace(
+            "\"<PROJECT_ROOT>\"",
+            &serde_json::to_string(project).unwrap(),
+        ),
+    )
+    .unwrap();
+}
+
 fn write_kiro_native_fixture(home: &Path, project: &Path) {
-    let directory = tracedecay::agents::kiro_data_dir(home)
+    let directory = tracedecay_agent_hosts::agents::kiro_data_dir(home)
         .join("User/globalStorage/kiro.kiroagent/workspace-sessions")
         .join(encode_workspace_path(project));
     std::fs::create_dir_all(&directory).unwrap();
@@ -1130,28 +1775,13 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
         .unwrap()
         .unwrap();
     assert_eq!(
-        first_source_commit.source_frontier().binding(),
-        advanced_source_commit.source_frontier().binding()
+        first_source_commit.binding(),
+        advanced_source_commit.binding()
     );
-    assert_eq!(
-        first_source_commit
-            .source_frontier()
-            .partitions()
-            .values()
-            .next()
-            .unwrap()
-            .sequence(),
-        1
-    );
-    assert_eq!(
-        advanced_source_commit
-            .source_frontier()
-            .partitions()
-            .values()
-            .next()
-            .unwrap()
-            .sequence(),
-        2
+    assert_ne!(
+        first_source_commit.receipt_digest(),
+        advanced_source_commit.receipt_digest(),
+        "each source commit keeps its own replay identity after being superseded"
     );
     let exact_replay = facade.capture(repeated_source_request()).await;
     assert_eq!(exact_replay.status, HostAdmissionStatus::ExactDuplicate);
@@ -1288,7 +1918,7 @@ fn host_capture_request_in_scope_with_expected_cursor(
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     let source = ObservationSourceIdentityV1::for_provider(

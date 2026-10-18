@@ -3,14 +3,14 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::config_error;
-use crate::errors::Result;
-use crate::storage::PrivateStoreIo;
-use crate::tracedecay::current_timestamp;
+use tracedecay_domain::errors::Result;
 use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
+use tracedecay_private_fs::FileLease;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 const STATE_FILE: &str = "host_receipts.json";
 const LOCK_FILE: &str = "host_receipts.lock";
@@ -51,22 +51,23 @@ struct HostReceiptState {
 
 fn protect_route_structural_ids(mut route: HookRouteMetadata) -> Result<HookRouteMetadata> {
     route.session_id =
-        crate::privacy::protect_optional_sensitive_structural_id(route.session_id.as_deref())
+        tracedecay_privacy::protect_optional_sensitive_structural_id(route.session_id.as_deref())
             .map_err(|_| config_error("invalid host receipt route identity"))?;
     route.thread_id =
-        crate::privacy::protect_optional_sensitive_structural_id(route.thread_id.as_deref())
+        tracedecay_privacy::protect_optional_sensitive_structural_id(route.thread_id.as_deref())
             .map_err(|_| config_error("invalid host receipt route identity"))?;
     Ok(route)
 }
 
 fn protect_receipt_structural_ids(mut receipt: HookTerminalReceipt) -> Result<HookTerminalReceipt> {
-    receipt.tool_call_id =
-        crate::privacy::protect_optional_sensitive_structural_id(receipt.tool_call_id.as_deref())
-            .map_err(|_| config_error("invalid host receipt identity"))?;
+    receipt.tool_call_id = tracedecay_privacy::protect_optional_sensitive_structural_id(
+        receipt.tool_call_id.as_deref(),
+    )
+    .map_err(|_| config_error("invalid host receipt identity"))?;
     receipt.turn_id =
-        crate::privacy::protect_optional_sensitive_structural_id(receipt.turn_id.as_deref())
+        tracedecay_privacy::protect_optional_sensitive_structural_id(receipt.turn_id.as_deref())
             .map_err(|_| config_error("invalid host receipt identity"))?;
-    receipt.transcript_watermark = crate::privacy::protect_optional_sensitive_structural_id(
+    receipt.transcript_watermark = tracedecay_privacy::protect_optional_sensitive_structural_id(
         receipt.transcript_watermark.as_deref(),
     )
     .map_err(|_| config_error("invalid host receipt identity"))?;
@@ -106,15 +107,16 @@ fn with_locked_state<T>(
         config_error(format!("failed to create host receipt directory: {error}"))
     })?;
     let (state_path, temp_path, lock_path) = paths(dashboard_root);
-    let mut lock = OpenOptions::new()
+    let lock = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
         .open(&lock_path)
         .map_err(|error| config_error(format!("failed to open host receipt lock: {error}")))?;
-    lock.lock_exclusive()
+    lock.lock()
         .map_err(|error| config_error(format!("failed to lock host receipts: {error}")))?;
+    let mut lock = FileLease::held(lock, "automation.host_receipts");
     let mut state = std::fs::read(&state_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -124,7 +126,7 @@ fn with_locked_state<T>(
     PrivateStoreIo::write_file_atomically(&state_path, &temp_path, &bytes)
         .map_err(|error| config_error(format!("failed to persist host receipts: {error}")))?;
     let _ = lock.flush();
-    let _ = lock.unlock();
+    drop(lock);
     Ok(output)
 }
 
@@ -132,7 +134,11 @@ fn with_locked_state<T>(
 /// read-modify-write of the dashboard state file. This is the per-tool-call
 /// disk boundary, so it is measured as one unit rather than its internal
 /// dedupe/serialize steps.
-#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.record")]
+#[tracing::instrument(
+    name = "hosts.automation.host_receipts.record",
+    level = "trace",
+    skip_all
+)]
 pub async fn record(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,
@@ -141,7 +147,7 @@ pub async fn record(
     let root = dashboard_root.to_path_buf();
     let route = route.map(protect_route_structural_ids).transpose()?;
     let receipt = protect_receipt_structural_ids(receipt)?;
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
             let key = dedupe_key(&session, &receipt);
@@ -173,7 +179,11 @@ pub async fn record(
 
 /// Per-turn boundary write: the same locked state file as [`record`], but
 /// gated on transcript ingestion rather than the raw tool-call receipt.
-#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.turn_ingested")]
+#[tracing::instrument(
+    name = "hosts.automation.host_receipts.turn_ingested",
+    level = "trace",
+    skip_all
+)]
 pub async fn mark_turn_ingested(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,
@@ -181,9 +191,9 @@ pub async fn mark_turn_ingested(
 ) -> Result<()> {
     let root = dashboard_root.to_path_buf();
     let route = route.map(protect_route_structural_ids).transpose()?;
-    let watermark = crate::privacy::protect_sensitive_structural_id(transcript_watermark)
+    let watermark = tracedecay_privacy::protect_sensitive_structural_id(transcript_watermark)
         .map_err(|_| config_error("invalid host receipt watermark"))?;
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
             state.readiness.insert(
@@ -200,10 +210,14 @@ pub async fn mark_turn_ingested(
     .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
 }
 
-#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.oldest_ready")]
+#[tracing::instrument(
+    name = "hosts.automation.host_receipts.oldest_ready",
+    level = "trace",
+    skip_all
+)]
 pub async fn oldest_ready(dashboard_root: &Path) -> Result<Option<ReadyHostReceipt>> {
     let root = dashboard_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let pending = state
                 .sessions
@@ -231,7 +245,11 @@ pub async fn oldest_ready(dashboard_root: &Path) -> Result<Option<ReadyHostRecei
     .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
 }
 
-#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.mark_consumed")]
+#[tracing::instrument(
+    name = "hosts.automation.host_receipts.mark_consumed",
+    level = "trace",
+    skip_all
+)]
 pub async fn mark_consumed(
     dashboard_root: &Path,
     session_key: &str,
@@ -239,7 +257,7 @@ pub async fn mark_consumed(
 ) -> Result<()> {
     let root = dashboard_root.to_path_buf();
     let session_key = session_key.to_string();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             if state
                 .sessions
@@ -317,7 +335,7 @@ mod tests {
     async fn credential_canary_receipt_join_survives_state_reopen() {
         let tmp = tempfile::tempdir().unwrap();
         let raw = ["AKIA", "SYNTHETIC", "CANARY", "5"].concat();
-        let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
+        let protected = tracedecay_privacy::protect_sensitive_structural_id(&raw).unwrap();
         let route = Some(pending_route(&raw));
         let mut terminal = receipt(&raw);
         terminal.turn_id = Some(raw.clone());

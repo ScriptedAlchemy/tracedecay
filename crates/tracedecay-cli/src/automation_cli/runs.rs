@@ -1,8 +1,10 @@
 use super::daemon_project_dashboard_root;
 use crate::cli::AutomationRunsAction;
 use crate::resolve_cli_project_root;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 pub(super) async fn handle_automation_runs_command(
+    profile: &ProfileRoot,
     action: AutomationRunsAction,
 ) -> tracedecay_domain::errors::Result<()> {
     use tracedecay_automation_runtime::automation::run_ledger::{
@@ -14,8 +16,8 @@ pub(super) async fn handle_automation_runs_command(
         | AutomationRunsAction::View { path, .. }
         | AutomationRunsAction::Artifact { path, .. } => path.clone(),
     };
-    let project_path = resolve_cli_project_root(path, None, None).await?;
-    let dashboard_root = daemon_project_dashboard_root(&project_path).await?;
+    let project_path = resolve_cli_project_root(profile, path, None, None).await?;
+    let dashboard_root = daemon_project_dashboard_root(profile, &project_path).await?;
 
     match action {
         AutomationRunsAction::List { limit, json, .. } => {

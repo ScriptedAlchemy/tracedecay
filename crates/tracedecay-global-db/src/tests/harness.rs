@@ -6,82 +6,38 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
+use tracedecay_domain::canonical_text::sha256_hex;
+#[cfg(test)]
+use tracedecay_domain::{
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
+    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, RetrievalAnchorRecord,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros,
+};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
+use tracedecay_rusqlite_runtime::repository::RepositoryWriterRuntimeSnapshot;
+#[cfg(test)]
+use tracedecay_store::{
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
+    ObservationStore, ObservationWrite, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor,
+};
 
-static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+pub(super) static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 static HOST_ADMISSION_TEST_RESIDENT_MEMORY: OnceLock<
     Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
 > = OnceLock::new();
-
 #[cfg(test)]
-static TRACING_CALLSITE_KEEPALIVE: OnceLock<[tracing::Dispatch; 2]> = OnceLock::new();
-
-/// Pins every `tracing` callsite in this test binary to `Interest::sometimes`
-/// so per-test `Dispatch` censuses stay thread-isolated.
-///
-/// `tracing_core` caches callsite interest **process-globally**, and computes
-/// it from `Dispatchers::rebuilder()`. While at most one `Dispatch` is
-/// registered, that rebuilder takes the `Rebuilder::JustOne` fast path, which
-/// asks *the current thread's* default subscriber. Callsites register lazily on
-/// first execution, so under `--test-threads=N` an unrelated test that reaches
-/// `tracedecay::observation_admission_work` first — on a thread with no scoped
-/// dispatcher, i.e. `NoSubscriber` — permanently caches `Interest::never()` for
-/// that callsite. Every later census then observes zero events and reports work
-/// that did happen as work that did not: `persist_observations_dispatches_one_
-/// runtime_command_independent_of_batch_size` saw `runtime_commands == 0`, and
-/// the collision tests' `runtime_commands == 0` assertions passed vacuously.
-///
-/// Registering two permanently-live dispatchers makes `has_just_one` false for
-/// the life of the process, so interest is always folded over the real
-/// registry instead of one arbitrary thread's default. Both keepalives claim
-/// `Interest::sometimes()` for every callsite, which folds to `sometimes`
-/// against any other subscriber — meaning enablement is decided per event by
-/// the *calling thread's* dispatcher, exactly the isolation these censuses
-/// assume. Constructing them also rebuilds the interest cache, repairing any
-/// callsite already poisoned before the first census ran.
-///
-/// This is test-only observability plumbing; it changes no production path.
-#[cfg(test)]
-pub(crate) fn install_tracing_callsite_keepalive() {
-    struct AlwaysConsultThreadDispatch;
-
-    impl tracing::Subscriber for AlwaysConsultThreadDispatch {
-        fn register_callsite(
-            &self,
-            _metadata: &'static tracing::Metadata<'static>,
-        ) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::sometimes()
-        }
-
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            false
-        }
-
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-        fn event(&self, _event: &tracing::Event<'_>) {}
-
-        fn enter(&self, _span: &tracing::span::Id) {}
-
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    TRACING_CALLSITE_KEEPALIVE.get_or_init(|| {
-        [
-            tracing::Dispatch::new(AlwaysConsultThreadDispatch),
-            tracing::Dispatch::new(AlwaysConsultThreadDispatch),
-        ]
-    });
-}
+static HOST_ADMISSION_TEST_BACKGROUND_CPU: OnceLock<
+    Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+> = OnceLock::new();
 
 pub struct RegisteredGlobalDbHarness {
     pub registered: RegisteredGlobalDbLeaseV1,
@@ -104,7 +60,7 @@ pub(crate) struct RegisteredGlobalDbRetirementHarnessV1 {
 #[cfg(test)]
 impl RegisteredGlobalDbRetirementHarnessV1 {
     pub(crate) async fn open(label: &str) -> Self {
-        crate::register_test_schema_installer();
+        crate::register_registered_schema_installer();
         let directory = tempfile::tempdir().expect("temporary registered global database");
         let profile_root = directory.path().join("profile");
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root)
@@ -238,7 +194,7 @@ impl RegisteredGlobalDbTestRuntime {
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
         profile_identity: Option<tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1>,
     ) -> tracedecay_domain::errors::Result<Self> {
-        crate::register_test_schema_installer();
+        crate::register_registered_schema_installer();
         // A profile root is a profile-identity root in production and must be
         // mode 0700; creating it with the ambient umask (0775 under umask 0002)
         // makes identity validation fail, so use the private-store helper
@@ -270,14 +226,10 @@ impl RegisteredGlobalDbTestRuntime {
         bind_test_session_relation_graph_with_registry(&profile_registered, &graph_registry)?;
         let (project_registered, project_owner) = match project {
             Some((project_root, project_id)) => {
-                let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
-                    project_id: project_id.to_string(),
-                    storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-                };
                 let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
                     project_root,
                     profile_root,
-                    &marker,
+                    project_id.as_str(),
                 )?;
                 let (registered, owner) = open_registered_test_database_with_identity(
                     &layout.sessions_db_path,
@@ -433,7 +385,7 @@ impl RegisteredGlobalDbHarness {
     /// Opens the registered store without binding the session relation graph,
     /// staging the unbound state doctor health must report as partial.
     pub async fn open_without_relation_graph(label: &str) -> Self {
-        crate::register_test_schema_installer();
+        crate::register_registered_schema_installer();
         let directory = tempfile::tempdir().expect("temporary registered global database");
         let profile_root = directory.path().join("profile");
         // The profile root must exist on disk before it is canonicalized into
@@ -525,7 +477,60 @@ impl RegisteredGlobalDbHarness {
 
     #[cfg(test)]
     pub(crate) fn revoke(&mut self) {
-        drop(self._scope.take());
+        drop(self.take_scope());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_scope(&mut self) -> Option<DaemonDatabaseScope> {
+        self._scope.take()
+    }
+
+    /// Remounts through daemon admission, which defers historical convergence
+    /// to the returned background plan.
+    #[cfg(test)]
+    pub(crate) async fn restart_for_daemon(
+        self,
+    ) -> (Self, crate::schema_stages::RegisteredSchemaConvergence) {
+        let Self {
+            registered,
+            _database,
+            _directory,
+            _scope,
+        } = self;
+        let path = registered.db_path().to_path_buf();
+        drop(registered);
+        drop(_database);
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_owned_runtime(
+            &path,
+            "restart registered global-db daemon test runtime",
+        )
+        .expect("daemon test runtime authority");
+        let (database_owner, _runtime, _retirement) =
+            tracedecay_runtime_core::db::Database::publish_registered_daemon_test_runtime_with_retirement_control(
+                &path,
+                &authority,
+                tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Existing,
+                tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+            )
+            .await
+            .expect("publish daemon test runtime")
+            .into_parts();
+        let (database, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database_owner,
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        )
+        .await
+        .expect("daemon admission");
+        let registered = database.issue_lease().expect("issue daemon test lease");
+        (
+            Self {
+                registered,
+                _database: database,
+                _directory,
+                _scope,
+            },
+            convergence.expect("an admissible store returns its convergence plan"),
+        )
     }
 }
 
@@ -557,15 +562,15 @@ pub struct HostAdmissionTestRuntimeV1 {
 impl HostAdmissionTestRuntimeV1 {
     /// Opens the registered host-admission fixture after mounting the same
     /// process-scoped CPU and resident-memory authorities required by the
-    /// production JSONL capture composition.
+    /// production JSONL capture composition. Both are test-binary statics so
+    /// every fixture in the binary configures preparation with the same pair;
+    /// the sessions preparation authority keeps whichever pair mounted first.
     #[cfg(test)]
     pub(crate) async fn profile_with_session_capture_resources(
         profile_root: impl AsRef<std::path::Path>,
     ) -> tracedecay_domain::errors::Result<Self> {
         use std::num::NonZeroUsize;
-        use tracedecay_private_fs::background_cpu::{
-            install_process_background_cpu, process_background_cpu,
-        };
+        use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
         use tracedecay_runtime_core::resident_memory::{
             DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
         };
@@ -575,24 +580,12 @@ impl HostAdmissionTestRuntimeV1 {
                 DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
             ))
         }));
-        let _cpu = if let Some(installed) = process_background_cpu() {
-            installed
-        } else {
-            match install_process_background_cpu(NonZeroUsize::MIN) {
-                Ok(installed) => installed,
-                // Another fixture can win the process-wide installation race
-                // at a different canonical width. Reuse that authority instead
-                // of making test success depend on execution order.
-                Err(error) => process_background_cpu().ok_or_else(|| {
-                    tracedecay_domain::errors::TraceDecayError::Database {
-                        operation: "mount host-admission test background CPU authority".to_owned(),
-                        message: error.to_string(),
-                    }
-                })?,
-            }
-        };
-        tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default()
-            .configure_preparation_resources(memory)
+        let background_cpu = Arc::clone(
+            HOST_ADMISSION_TEST_BACKGROUND_CPU
+                .get_or_init(|| Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN))),
+        );
+        tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub::default()
+            .configure_preparation_resources(memory, background_cpu)
             .map_err(
                 |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "mount host-admission test resident-memory authority".to_owned(),
@@ -600,25 +593,6 @@ impl HostAdmissionTestRuntimeV1 {
                 },
             )?;
         Self::open(profile_root.as_ref(), None).await
-    }
-
-    /// Wraps databases whose authority is retained by a higher composition
-    /// runtime. This constructor grants no authority and owns no runtime scope.
-    #[doc(hidden)]
-    pub fn from_registered_databases_for_test(
-        profile_registry: RegisteredGlobalDbLeaseV1,
-        profile_registered: RegisteredGlobalDbLeaseV1,
-        project_registered: Option<RegisteredGlobalDbLeaseV1>,
-    ) -> Self {
-        Self {
-            profile_registry,
-            _profile_registry_owner: None,
-            profile_registered,
-            _profile_registered_owner: None,
-            project_registered,
-            _project_registered_owner: None,
-            _scope: None,
-        }
     }
 
     pub fn registered_database(&self, scope: HostAdmissionScope) -> Option<&RegisteredGlobalDb> {
@@ -646,10 +620,6 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn profile_registry(&self) -> &RegisteredGlobalDb {
         self.profile_registry.as_ref()
     }
-
-    pub fn canonical_project_key(project_path: &std::path::Path) -> String {
-        RegisteredGlobalDb::canonical_project_key(project_path)
-    }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -676,7 +646,7 @@ impl HostAdmissionTestRuntimeV1 {
         profile_root: &std::path::Path,
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
     ) -> tracedecay_domain::errors::Result<Self> {
-        crate::register_test_schema_installer();
+        crate::register_registered_schema_installer();
         // See the note in `RegisteredGlobalDbTestRuntimeV1::open`: profile
         // identity roots must be 0700 regardless of the ambient umask.
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(profile_root)?;
@@ -704,14 +674,10 @@ impl HostAdmissionTestRuntimeV1 {
         bind_test_session_relation_graph(&profile_registered)?;
         let (project_registered, project_registered_owner) = match project {
             Some((project_root, project_id)) => {
-                let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
-                    project_id: project_id.to_string(),
-                    storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-                };
                 let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
                     project_root,
                     profile_root,
-                    &marker,
+                    project_id.as_str(),
                 )?;
                 let (registered, owner) = open_registered_test_database_with(
                     &layout.sessions_db_path,
@@ -769,35 +735,6 @@ impl HostAdmissionTestRuntimeV1 {
             .await)
     }
 
-    pub async fn upsert_session_message_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        message: &tracedecay_sessions::runtime::SessionMessageRecord,
-    ) -> tracedecay_domain::errors::Result<bool> {
-        let database = self.session_database_for_test(scope)?;
-        let session = database
-            .get_session(&message.provider, &message.session_id)
-            .await
-            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Database {
-                operation: "seed registered session message fixture".to_owned(),
-                message: format!(
-                    "session {}/{} is unavailable",
-                    message.provider, message.session_id
-                ),
-            })?;
-        Ok(database
-            .upsert_transcript_batch(
-                &session,
-                std::slice::from_ref(message),
-                &format!(
-                    "global-db-test-message:{}:{}",
-                    message.provider, message.message_id
-                ),
-                crate::ParseOffset::default(),
-            )
-            .await)
-    }
-
     pub async fn session_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -805,10 +742,15 @@ impl HostAdmissionTestRuntimeV1 {
         session_id: &str,
     ) -> tracedecay_domain::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
     {
-        Ok(self
-            .session_database_for_test(scope)?
+        self.session_database_for_test(scope)?
             .get_session(provider, session_id)
-            .await)
+            .await
+            .map_err(
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
+                    operation: "load registered session".to_owned(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     pub async fn transcript_store_counts_for_test(
@@ -817,7 +759,7 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         session_id: &str,
         transcript_path: &std::path::Path,
-    ) -> tracedecay_domain::errors::Result<(i64, i64, i64, i64, i64, i64, i64)> {
+    ) -> tracedecay_domain::errors::Result<(i64, i64, i64, i64, i64, i64)> {
         let snapshot = self
             .session_database_for_test(scope)?
             .read_snapshot()
@@ -827,8 +769,6 @@ impl HostAdmissionTestRuntimeV1 {
                 "SELECT
                     (SELECT COUNT(*) FROM sessions
                      WHERE provider = ?1 AND session_id = ?2),
-                    (SELECT COUNT(*) FROM session_messages
-                     WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages_fts
@@ -836,14 +776,16 @@ impl HostAdmissionTestRuntimeV1 {
                        ON raw.store_id = lcm_raw_messages_fts.rowid
                      WHERE raw.provider = ?1 AND raw.session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages_fts),
-                    (SELECT COUNT(*) FROM lcm_summary_nodes
+                    (SELECT COUNT(*) FROM session_summary_nodes
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM parse_offsets
                      WHERE file_path = ?3)",
                 tracedecay_runtime_core::db::engine::params![
                     provider,
                     session_id,
-                    transcript_path.to_string_lossy().as_ref()
+                    tracedecay_sessions::runtime::shared::path_identity_key(
+                        transcript_path.to_string_lossy().as_ref()
+                    )
                 ],
             )
             .await?;
@@ -860,28 +802,7 @@ impl HostAdmissionTestRuntimeV1 {
             row.get(3)?,
             row.get(4)?,
             row.get(5)?,
-            row.get(6)?,
         ))
-    }
-
-    pub async fn delete_session_message_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        provider: &str,
-        message_id: &str,
-    ) -> tracedecay_domain::errors::Result<u64> {
-        let transaction = self
-            .session_database_for_test(scope)?
-            .begin_write_transaction()
-            .await?;
-        let deleted = transaction
-            .execute(
-                "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
-                tracedecay_runtime_core::db::engine::params![provider, message_id],
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok(deleted)
     }
 
     pub async fn project_session_message_count_for_test(
@@ -903,13 +824,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_domain::errors::Result<
-        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
-            '_,
-            crate::RegisteredGlobalDb,
-        >,
+        tracedecay_session_temporal_store::SessionTemporalStore<'_, crate::RegisteredGlobalDb>,
     > {
         Ok(
-            tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
+            tracedecay_session_temporal_store::SessionTemporalStore::new(
                 self.session_database_for_test(scope)?,
             ),
         )
@@ -1010,10 +928,10 @@ impl HostAdmissionTestRuntimeV1 {
         }
 
         let external_content = "canonical external payload";
-        let external_hash = tracedecay_lcm::util::sha256_hex(external_content.as_bytes());
-        let raw_hash = tracedecay_lcm::util::sha256_hex(b"canonical raw message");
-        let child_summary_hash = tracedecay_lcm::util::sha256_hex(b"canonical child summary");
-        let parent_summary_hash = tracedecay_lcm::util::sha256_hex(b"canonical parent summary");
+        let external_hash = sha256_hex(external_content.as_bytes());
+        let raw_hash = sha256_hex(b"canonical raw message");
+        let child_summary_hash = sha256_hex(b"canonical child summary");
+        let parent_summary_hash = sha256_hex(b"canonical parent summary");
         let payload_dir = database
             .db_path()
             .parent()
@@ -1044,48 +962,64 @@ impl HostAdmissionTestRuntimeV1 {
                  );
                  INSERT INTO lcm_raw_messages(
                     provider, message_id, session_id, store_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
+                    content, content_hash, storage_kind, payload_ref, metadata_json
                  ) VALUES (
                     'codex', 'message-a', 'session-a', 11, 'assistant', 0, 11,
                     'canonical raw message', '{raw_hash}', 'inline', NULL,
-                    'canonical raw message', 'canonical raw message', 0, 0,
                     '{raw_message_metadata}'
                  );
                  INSERT INTO lcm_raw_messages(
                     provider, message_id, session_id, store_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
+                    content, content_hash, storage_kind, payload_ref, placeholder_text,
+                    metadata_json
                  ) VALUES (
                     'codex', 'message-b', 'session-a', 12, 'tool', 1, 12,
                     NULL, '{external_hash}', 'external', 'payload-a',
-                    'canonical external payload', 'canonical external payload', 0, 0,
+                    'canonical external payload',
                     '{external_message_metadata}'
                  );
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count,
-                    source_time_start, source_time_end, expand_hint, metadata_json, created_at
+                 INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('summary-child-anchor', '{{}}', '{{}}', 'test'),
+                          ('summary-parent-anchor', '{{}}', '{{}}', 'test');
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_time_start, source_time_end, expand_hint,
+                    metadata_json, source_horizon_json, created_at
                  ) VALUES (
-                    'summary-child', 'codex', 'session-a', 'session-a', 0,
-                    'canonical child summary', '{child_summary_hash}', 3, 3,
-                    11, 11, NULL, NULL, 13
+                    'summary-child', 'session-a', 'codex', 'session-a', 0,
+                    'summary-child-anchor', 'canonical child summary',
+                    '{child_summary_hash}', 3, 3, 11, 11, NULL, NULL, '{{}}', 13
                  );
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count,
-                    source_time_start, source_time_end, expand_hint, metadata_json, created_at
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_time_start, source_time_end, expand_hint,
+                    metadata_json, source_horizon_json, created_at
                  ) VALUES (
-                    'summary-parent', 'codex', 'session-a', 'session-a', 1,
-                    'canonical parent summary', '{parent_summary_hash}', 3, 6,
-                    11, 12, NULL, NULL, 14
+                    'summary-parent', 'session-a', 'codex', 'session-a', 1,
+                    'summary-parent-anchor', 'canonical parent summary',
+                    '{parent_summary_hash}', 3, 6, 11, 12, NULL, NULL, '{{}}', 14
                  );
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  VALUES ('summary-child', 'raw_message', '11', 0);
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  VALUES ('summary-parent', 'summary_node', 'summary-child', 0);
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-                 VALUES ('summary-parent', 'raw_message', '12', 1);",
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
+                 VALUES ('summary-parent', 'raw_message', '12', 1);
+                 INSERT INTO session_temporal_generations(
+                    session_id, generation, state, frozen_watermarks_json, created_at
+                 ) VALUES ('session-a', 1, 'building', '{{}}', 10);
+                 UPDATE session_temporal_generations SET state = 'ready', ready_at = 10
+                  WHERE session_id = 'session-a' AND generation = 1;
+                 UPDATE session_temporal_generations SET state = 'active', activated_at = 10
+                  WHERE session_id = 'session-a' AND generation = 1;
+                 INSERT INTO session_summary_availability(
+                    session_id, generation, summary_id, availability,
+                    source_horizon_json, checked_at
+                 ) VALUES ('session-a', 1, 'summary-child', 'available', '{{}}', 13),
+                          ('session-a', 1, 'summary-parent', 'available', '{{}}', 14);",
                 byte_count = external_content.len(),
                 char_count = external_content.chars().count(),
             ))
@@ -1102,13 +1036,12 @@ impl HostAdmissionTestRuntimeV1 {
 fn lcm_render_fixture_sanitization_metadata(
     content: &str,
 ) -> tracedecay_domain::errors::Result<String> {
-    let sanitization = tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(content)
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Database {
-                operation: "seed canonical lcm render sanitization receipt".to_owned(),
-                message: format!("payload sanitizer rejected fixture content: {error:?}"),
-            },
-        )?;
+    let sanitization = tracedecay_privacy::sanitize_lcm_payload_text(content).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Database {
+            operation: "seed canonical lcm render sanitization receipt".to_owned(),
+            message: format!("payload sanitizer rejected fixture content: {error:?}"),
+        }
+    })?;
     let receipt = serde_json::to_value(sanitization.receipt()).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Database {
             operation: "seed canonical lcm render sanitization receipt".to_owned(),
@@ -1187,8 +1120,137 @@ pub async fn publish_test_session_relation_projection(
     )
 }
 
+/// Commits and projects messages `indexes` of one session through the real
+/// observation store, continuing its source cursor from the message before
+/// the first index. Returns each observation with the retrieval anchor it was
+/// persisted under.
+#[cfg(test)]
+pub(crate) async fn seed_projected_messages(
+    runtime: &HostAdmissionTestRuntimeV1,
+    indexes: std::ops::Range<usize>,
+) -> Vec<(DurableObservationV1, RetrievalAnchorRecord)> {
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let provider = ProviderId::new("codex").unwrap();
+    let session_id = SessionId::new("session.audit-batch").unwrap();
+    let source =
+        ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
+    let mut expected_cursor = (indexes.start > 0).then(|| {
+        ObservationSourceCursorV1::for_ordering(
+            source.clone(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            u64::try_from(indexes.start).unwrap() * 100,
+        )
+        .unwrap()
+    });
+    let mut seeded = Vec::with_capacity(indexes.len());
+    for index in indexes {
+        let record_id = format!("record.audit-batch-{index}");
+        let record = ObservationId::new(record_id.clone()).unwrap();
+        let start = u64::try_from(index).unwrap() * 100;
+        let range = ObservationSourceRangeV1::new(start, start + 100).unwrap();
+        let relations = CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_message_id(ObservationId::new(format!("message.{record_id}")).unwrap());
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider.clone(),
+            "message",
+            record.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: serde_json::json!({ "text": format!("audit batch {index}") }),
+                model: None,
+                timestamp: Some(1_750_000_000),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+        )
+        .unwrap();
+        let payload = serde_json::to_value(envelope).unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(format!("receipt.audit-batch-{index}")).unwrap(),
+                ComponentVersion::new("sanitizer.audit-batch.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        let observation = DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                source.clone(),
+                ObservationScopeV1::Profile,
+                ObservationSourceGenerationV1::new(1).unwrap(),
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                record,
+            )
+            .unwrap(),
+            receipt,
+            RetentionClass::new("retention.audit-batch").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
+        )
+        .unwrap();
+        let write = ObservationWrite::new(
+            observation.clone(),
+            expected_cursor.clone(),
+            next_cursor.clone(),
+        )
+        .unwrap();
+        let generation = ProjectionGenerationId::new("projection.audit-batch.v1").unwrap();
+        let authorization =
+            build_observation_resolution_authorization_v1(write.observation(), "audit-batch")
+                .unwrap();
+        let anchor = build_observation_retrieval_anchor(
+            write.observation(),
+            generation.clone(),
+            UtcMicros(1),
+            authorization,
+        )
+        .unwrap();
+        let anchored = AnchoredObservationWrite::new(write, anchor.clone(), generation).unwrap();
+        assert!(matches!(
+            store.persist_observation(anchored).await.unwrap(),
+            ObservationPersistOutcome::Committed(_)
+        ));
+        store
+            .project_observation(observation.observation_id())
+            .await
+            .unwrap();
+        expected_cursor = Some(next_cursor);
+        seeded.push((observation, anchor));
+    }
+    seeded
+}
+
+/// The mounted writer's rusqlite telemetry for `database`: the SQLite work its
+/// write transactions executed and how they ended.
+pub fn writer_telemetry(database: &RegisteredGlobalDb) -> RepositoryWriterRuntimeSnapshot {
+    database
+        .runtime_client()
+        .writer_telemetry_snapshot()
+        .expect("registered database must expose rusqlite writer telemetry")
+        .writer
+        .expect("mounted writer must carry rusqlite writer telemetry")
+}
+
+/// Mounts the daemon-owned relation graph a registered session shard needs to
+/// serve a query. A fixture that only freezes a snapshot can skip it; one that
+/// runs `execute` cannot, because the read and hydration ports both bind it.
 #[cfg(any(test, feature = "test-helpers"))]
-fn bind_test_session_relation_graph(
+pub fn bind_test_session_relation_graph(
     database: &RegisteredGlobalDb,
 ) -> tracedecay_domain::errors::Result<()> {
     let registry =
@@ -1366,14 +1428,14 @@ async fn open_registered_test_database_with_identity(
     write_authority: RegisteredTestWriteAuthority,
     profile_identity: Option<tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1>,
 ) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)> {
-    crate::register_test_schema_installer();
+    crate::register_registered_schema_installer();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     // The exact test-runtime resolver refuses `Initialize` for a store that is
     // already on disk (and `Existing` for one that is not). Fixtures reach this
-    // helper both ways — a fresh profile root, and a shard some earlier stage of
-    // the same test already materialised — so pick the mode from the file.
+    // helper both ways, a fresh profile root, and a shard some earlier stage of
+    // the same test already materialised, so pick the mode from the file.
     let mode = if path.try_exists()? {
         tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Existing
     } else {
@@ -1441,6 +1503,23 @@ async fn open_registered_test_database_with_identity(
         }
     })?;
     Ok((registered, database))
+}
+
+/// Reopens one sessions database under a new project id.
+///
+/// A re-enroll keeps the sessions file and admits later observations for the
+/// current project. The previous projection rows stay in place.
+#[cfg(test)]
+pub(crate) async fn reopen_project_sessions_database(
+    path: &std::path::Path,
+    project_id: tracedecay_domain::ProjectId,
+) -> tracedecay_domain::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)> {
+    open_registered_test_database_with(
+        path,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions { project_id },
+        RegisteredTestWriteAuthority::DaemonScoped,
+    )
+    .await
 }
 
 /// Opens a registered-store fixture through the same physical publication,
@@ -1516,6 +1595,9 @@ impl Executor for RegisteredGlobalDbTestFixture {
 }
 
 #[cfg(test)]
+crate::observation_projection::impl_send_projection_derive!(RegisteredGlobalDbTestFixture);
+
+#[cfg(test)]
 pub(crate) async fn open_registered_test_fixture(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
@@ -1525,23 +1607,4 @@ pub(crate) async fn open_registered_test_fixture(
         database,
         _owner: owner,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::RegisteredGlobalDbTestRuntime;
-    use tracedecay_store::StoreShardScopeV1;
-
-    #[tokio::test]
-    async fn profile_runtime_publishes_a_profile_sessions_shard() {
-        let temporary = tempfile::tempdir().expect("temporary profile root");
-        let runtime = RegisteredGlobalDbTestRuntime::profile(temporary.path())
-            .await
-            .expect("registered profile runtime");
-
-        assert!(matches!(
-            runtime.profile_database().binding().shard_id.scope,
-            StoreShardScopeV1::ProfileSessions
-        ));
-    }
 }

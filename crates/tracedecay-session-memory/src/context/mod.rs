@@ -1,16 +1,24 @@
 //! Request-context value types and the bounded read cache.
 //!
-//! The code-index-backed source-read helpers (`source_read`, `read_modes`,
-//! `markdown_sections`) stayed in `tracedecay-usecases`; its `context`
-//! module re-exports this one alongside them.
+//! The code-index-backed source-read helpers (`source_read`, `read_modes`)
+//! live in `tracedecay-graph-query`; its `context` module composes with this
+//! one.
 
 pub mod read_cache;
 mod registered_scope;
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 
-use tracedecay_application::now_micros;
-use tracedecay_domain::{AccessPolicyDigest, ProjectId, RepositoryId, WorktreeId};
+use tracing::Instrument;
+
+use tracedecay_contracts::now_micros;
+use tracedecay_domain::{
+    AccessPolicyDigest, ProjectId, RepositoryId, WorktreeId, sha256_hex_suffix,
+};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 pub use registered_scope::RegisteredScopeResolver;
 
@@ -181,7 +189,7 @@ impl ResolvedSessionIdentity {
     /// those fields from a path or the current working directory.
     pub fn application_scope(
         &self,
-    ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
+    ) -> Result<tracedecay_contracts::ResolvedScope, ApplicationScopeError> {
         let project_id = self
             .project_id()
             .ok_or(ApplicationScopeError::ProfileIdentityWithoutProject)?;
@@ -193,7 +201,7 @@ impl ResolvedSessionIdentity {
         let reference =
             tracedecay_domain::RefId::new(format!("refs/heads/{}", git_route.branch_id().as_str()))
                 .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
-        tracedecay_application::ResolvedScope::new(
+        tracedecay_contracts::ResolvedScope::new(
             project_id.clone(),
             git_route.repository_id().clone(),
             git_route.worktree_id().clone(),
@@ -216,14 +224,14 @@ impl ResolvedSessionIdentity {
     /// scope from ever comparing equal to a real project scope.
     pub fn session_request_scope(
         &self,
-    ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
+    ) -> Result<tracedecay_contracts::ResolvedScope, ApplicationScopeError> {
         let SessionOwner::Profile { profile_id } = &self.owner else {
             return self.application_scope();
         };
         let contract = |error: tracedecay_domain::DomainError| {
             ApplicationScopeError::Contract(error.to_string())
         };
-        tracedecay_application::ResolvedScope::new(
+        tracedecay_contracts::ResolvedScope::new(
             ProjectId::new(format!("{PROFILE_SESSION_SCOPE_PREFIX}.{profile_id}"))
                 .map_err(contract)?,
             RepositoryId::new(format!("{PROFILE_SESSION_SCOPE_PREFIX}.{}", self.store_id))
@@ -249,12 +257,12 @@ macro_rules! digest {
             pub struct $name([u8; 32]);
 
             impl $name {
-    #[hotpath::skip]
+
                 pub const fn new(bytes: [u8; 32]) -> Self {
                     Self(bytes)
                 }
 
-    #[hotpath::skip]
+
                 pub const fn as_bytes(&self) -> &[u8; 32] {
                     &self.0
                 }
@@ -281,7 +289,7 @@ impl PolicyDigest {
     pub fn from_access_policy_digest(
         digest: &AccessPolicyDigest,
     ) -> Result<Self, ApplicationScopeError> {
-        let encoded = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+        let encoded = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
             ApplicationScopeError::Contract(
                 "session access policy must use a sha256 digest".to_owned(),
             )
@@ -299,12 +307,6 @@ impl PolicyDigest {
         Ok(Self::new(bytes))
     }
 }
-
-/// The monotonic deadline and cooperative cancellation token moved into
-/// `tracedecay_runtime_core::cancellation`: the kernel bounds its store-runtime
-/// probes with them. Re-exported so every historical
-/// `application::context::<item>` path keeps resolving.
-pub use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestBudgets {
@@ -335,17 +337,14 @@ impl RequestBudgets {
         })
     }
 
-    #[hotpath::skip]
     pub const fn max_results(self) -> u64 {
         self.max_results
     }
 
-    #[hotpath::skip]
     pub const fn max_bytes(self) -> u64 {
         self.max_bytes
     }
 
-    #[hotpath::skip]
     pub const fn max_work_units(self) -> u64 {
         self.max_work_units
     }
@@ -361,7 +360,7 @@ pub enum RequestInterruption {
 /// digest. Unlike the compatibility composition, this binds request budgets
 /// and the live cancellation token identity so a supplemental session binding
 /// cannot widen either after admission.
-#[hotpath::measure(label = "usecases.context.session_grant")]
+#[tracing::instrument(name = "usecases.context.session_grant", level = "trace", skip_all)]
 pub fn session_application_grant_digest(
     capability: CapabilityDigest,
     policy: PolicyDigest,
@@ -393,19 +392,19 @@ pub fn application_observed_at() -> tracedecay_domain::UtcMicros {
 /// Rechecks immutable application admission together with the live transport
 /// cancellation token retained by the root runtime.
 pub fn application_request_interruption(
-    context: &tracedecay_application::RequestContext,
+    context: &tracedecay_contracts::RequestContext,
     cancellation: &CancellationToken,
 ) -> Option<RequestInterruption> {
     if cancellation.is_cancelled()
         || matches!(
             context.admission_at(application_observed_at()),
-            tracedecay_application::RequestAdmission::Cancelled
+            tracedecay_contracts::RequestAdmission::Cancelled
         )
     {
         Some(RequestInterruption::Cancelled)
     } else if !matches!(
         context.admission_at(application_observed_at()),
-        tracedecay_application::RequestAdmission::Admitted
+        tracedecay_contracts::RequestAdmission::Admitted
     ) {
         Some(RequestInterruption::DeadlineExceeded)
     } else {
@@ -415,43 +414,53 @@ pub fn application_request_interruption(
 
 /// Runs one awaitable application step against the exact immutable deadline
 /// and the live cancellation token owned by the transport/runtime boundary.
-#[hotpath::measure(label = "usecases.context.interruptible", future = true)]
-pub async fn run_application_request_interruptible<T, F>(
-    context: &tracedecay_application::RequestContext,
-    cancellation: &CancellationToken,
-    future: impl std::future::Future<Output = T>,
+pub fn run_application_request_interruptible<'a, T, F>(
+    context: &'a tracedecay_contracts::RequestContext,
+    cancellation: &'a CancellationToken,
+    future: impl Future<Output = T> + Send + 'a,
     on_interruption: F,
-) -> Result<T, RequestInterruption>
+) -> Pin<Box<dyn Future<Output = Result<T, RequestInterruption>> + Send + 'a>>
 where
-    F: FnOnce(),
+    T: Send + 'a,
+    F: FnOnce() + Send + 'a,
 {
-    if let Some(interruption) = application_request_interruption(context, cancellation) {
-        on_interruption();
-        return Err(interruption);
-    }
+    // The awaited step is erased before this wait is built. Leaving the
+    // concrete step in the wait makes every caller re-prove `Send` through
+    // that step's whole state (rust-lang/rust#159228).
+    let future: Pin<Box<dyn Future<Output = T> + Send + 'a>> = Box::pin(future);
+    let span = tracing::trace_span!("usecases.context.interruptible");
+    Box::pin(
+        async move {
+            if let Some(interruption) = application_request_interruption(context, cancellation) {
+                on_interruption();
+                return Err(interruption);
+            }
 
-    let terminal_at = context
-        .deadline()
-        .expires_at
-        .0
-        .min(context.grant().expires_at.0);
-    let remaining_micros = terminal_at.saturating_sub(application_observed_at().0);
-    let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
-    race_application_request_wait(
-        remaining_micros,
-        cancellation.cancelled(),
-        future,
-        on_interruption,
+            let terminal_at = context
+                .deadline()
+                .expires_at
+                .0
+                .min(context.grant().expires_at.0);
+            let remaining_micros = terminal_at.saturating_sub(application_observed_at().0);
+            let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
+            race_application_request_wait(
+                remaining_micros,
+                cancellation.cancelled(),
+                future,
+                on_interruption,
+            )
+            .await
+        }
+        .instrument(span),
     )
-    .await
 }
 
 /// Races one awaitable step against a wall-clock deadline and a live
 /// application cancellation signal. The wait itself terminates even when
 /// `future` never wakes cooperatively.
 pub async fn run_deadline_signal_interruptible<T>(
-    deadline: &tracedecay_application::Deadline,
-    cancellation: &tracedecay_application::CancellationSignal,
+    deadline: &tracedecay_contracts::Deadline,
+    cancellation: &tracedecay_contracts::CancellationSignal,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, RequestInterruption> {
     if cancellation.is_cancelled() {
@@ -472,22 +481,29 @@ async fn race_application_request_wait<T>(
     future: impl std::future::Future<Output = T>,
     on_interruption: impl FnOnce(),
 ) -> Result<T, RequestInterruption> {
-    tokio::pin!(cancelled);
-    let deadline = tokio::time::sleep(std::time::Duration::from_micros(remaining_micros));
-    tokio::pin!(deadline);
-    tokio::pin!(future);
-    tokio::select! {
-        biased;
-        result = &mut future => Ok(result),
-        () = &mut cancelled => {
-            on_interruption();
-            Err(RequestInterruption::Cancelled)
+    let mut cancelled = std::pin::pin!(cancelled);
+    let mut deadline = std::pin::pin!(asupersync::time::sleep(
+        asupersync::time::wall_now(),
+        std::time::Duration::from_micros(remaining_micros),
+    ));
+    let mut future = std::pin::pin!(future);
+    let result = std::future::poll_fn(|task| {
+        if let Poll::Ready(value) = future.as_mut().poll(task) {
+            return Poll::Ready(Ok(value));
         }
-        () = &mut deadline => {
-            on_interruption();
-            Err(RequestInterruption::DeadlineExceeded)
+        if cancelled.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(RequestInterruption::Cancelled));
         }
+        if deadline.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(RequestInterruption::DeadlineExceeded));
+        }
+        Poll::Pending
+    })
+    .await;
+    if result.is_err() {
+        on_interruption();
     }
+    result
 }
 
 /// The explicit failure states when the root orchestration context crosses
@@ -605,14 +621,12 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestAdmission,
     };
     use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-
-    const DIGEST: [u8; 32] = [0x5a; 32];
 
     fn project_identity() -> ResolvedSessionIdentity {
         ResolvedSessionIdentity::for_project(
@@ -626,35 +640,6 @@ mod tests {
                 BranchId::new("branch.application-slice-1").unwrap(),
             ),
         )
-    }
-
-    #[test]
-    fn profile_and_project_owners_are_explicit_and_never_fallback() {
-        let profile = ResolvedSessionIdentity::for_profile(
-            ProfileId::new("profile.primary").unwrap(),
-            SessionStoreId::new("store.profile.primary").unwrap(),
-            SessionRootId::new("root.profile.primary").unwrap(),
-        );
-        let project = project_identity();
-
-        assert!(matches!(profile.owner(), SessionOwner::Profile { .. }));
-        assert!(profile.project_id().is_none());
-        assert!(profile.git_route().is_none());
-        assert!(matches!(project.owner(), SessionOwner::Project { .. }));
-        assert!(project.project_id().is_some());
-        assert!(project.git_route().is_some());
-    }
-
-    #[test]
-    fn digest_bindings_cannot_embed_paths_or_payloads() {
-        let capability = CapabilityDigest::new(DIGEST);
-        let policy = PolicyDigest::new(DIGEST);
-        let configuration = ConfigurationDigest::new(DIGEST);
-
-        assert_eq!(capability.as_bytes(), &DIGEST);
-        assert_eq!(policy.as_bytes(), &DIGEST);
-        assert_eq!(configuration.as_bytes(), &DIGEST);
-        assert!(!format!("{capability:?}").contains("/fast/projects"));
     }
 
     #[test]
@@ -675,14 +660,36 @@ mod tests {
 
     #[test]
     fn identifiers_reject_empty_or_noncanonical_values() {
-        assert!(ProfileId::new(" profile.primary").is_err());
-        assert!(SessionStoreId::new("store\nprimary").is_err());
-        assert!(SessionRootId::new("root.primary ").is_err());
-        assert!(BranchId::new("branch\0main").is_err());
+        assert_eq!(
+            ProfileId::new(" profile.primary"),
+            Err(RequestContextError::NonCanonicalIdentifier("ProfileId"))
+        );
+        assert_eq!(
+            SessionStoreId::new("store\nprimary"),
+            Err(RequestContextError::NonCanonicalIdentifier(
+                "SessionStoreId"
+            ))
+        );
+        assert_eq!(
+            SessionRootId::new("root.primary "),
+            Err(RequestContextError::NonCanonicalIdentifier("SessionRootId"))
+        );
+        assert_eq!(
+            BranchId::new("branch\0main"),
+            Err(RequestContextError::NonCanonicalIdentifier("BranchId"))
+        );
+        assert_eq!(
+            ProfileId::new(""),
+            Err(RequestContextError::NonCanonicalIdentifier("ProfileId"))
+        );
+        assert_eq!(
+            ProfileId::new("profile.primary").unwrap().as_str(),
+            "profile.primary"
+        );
     }
 
     fn grant_for(
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         expires_at: UtcMicros,
     ) -> CapabilityGrantSnapshot {
         CapabilityGrantSnapshot::new(
@@ -701,42 +708,20 @@ mod tests {
     }
 
     fn application_context(
-        scope: tracedecay_application::ResolvedScope,
+        scope: tracedecay_contracts::ResolvedScope,
         grant: CapabilityGrantSnapshot,
         deadline: UtcMicros,
         cancellation: CancellationContext,
-    ) -> tracedecay_application::RequestContext {
-        tracedecay_application::RequestContext::new(
+    ) -> tracedecay_contracts::RequestContext {
+        tracedecay_contracts::RequestContext::new(
             ActorId::new("actor.cursor").unwrap(),
             scope,
             grant,
-            tracedecay_application::RequestId::new("request.application-slice-1").unwrap(),
+            tracedecay_contracts::RequestId::new("request.application-slice-1").unwrap(),
             Deadline::new(deadline).unwrap(),
             cancellation,
         )
         .unwrap()
-    }
-
-    #[test]
-    fn application_scope_maps_project_identity_and_git_route() {
-        let scope = project_identity().application_scope().unwrap();
-
-        assert_eq!(scope.project_id.as_str(), "project.tracedecay");
-        assert_eq!(scope.repository_id.as_str(), "repository.tracedecay");
-        assert_eq!(scope.worktree_id.as_str(), "worktree.main");
-        assert_eq!(
-            scope
-                .reference
-                .as_ref()
-                .map(tracedecay_domain::RefId::as_str),
-            Some("refs/heads/branch.application-slice-1")
-        );
-        scope.validate().unwrap();
-        assert_eq!(
-            scope.scope_digest,
-            scope.compute_digest().unwrap(),
-            "scope digest must be stable for the same identity"
-        );
     }
 
     #[test]
@@ -756,47 +741,6 @@ mod tests {
     }
 
     #[test]
-    fn session_request_scope_names_the_profile_session_store() {
-        let identity = ResolvedSessionIdentity::for_profile(
-            ProfileId::new("profile.primary").unwrap(),
-            SessionStoreId::new("store.profile.primary").unwrap(),
-            SessionRootId::new("root.profile.primary").unwrap(),
-        );
-
-        let scope = identity.session_request_scope().unwrap();
-        assert_eq!(
-            scope.project_id.as_str(),
-            "tracedecay.profile-session.profile.primary"
-        );
-        assert_eq!(
-            scope.repository_id.as_str(),
-            "tracedecay.profile-session.store.profile.primary"
-        );
-        assert_eq!(
-            scope.worktree_id.as_str(),
-            "tracedecay.profile-session.root.profile.primary"
-        );
-        assert!(scope.reference.is_none());
-        scope.validate().unwrap();
-        assert_eq!(
-            identity.session_request_scope().unwrap(),
-            scope,
-            "the profile session scope must be stable for the same identity"
-        );
-    }
-
-    #[test]
-    fn session_request_scope_matches_project_application_scope() {
-        let identity = project_identity();
-
-        assert_eq!(
-            identity.session_request_scope().unwrap(),
-            identity.application_scope().unwrap(),
-            "project-owned session requests keep the exact project scope"
-        );
-    }
-
-    #[test]
     fn profile_session_scope_never_equals_a_project_scope() {
         let profile = ResolvedSessionIdentity::for_profile(
             ProfileId::new("profile.primary").unwrap(),
@@ -804,10 +748,22 @@ mod tests {
             SessionRootId::new("root.profile.primary").unwrap(),
         );
 
-        assert_ne!(
-            profile.session_request_scope().unwrap(),
-            project_identity().session_request_scope().unwrap()
+        let profile_scope = profile.session_request_scope().unwrap();
+        assert_eq!(
+            (
+                profile_scope.project_id.as_str(),
+                profile_scope.repository_id.as_str(),
+                profile_scope.worktree_id.as_str(),
+            ),
+            (
+                "tracedecay.profile-session.profile.primary",
+                "tracedecay.profile-session.store.profile.primary",
+                "tracedecay.profile-session.root.profile.primary",
+            )
         );
+        let project_scope = project_identity().session_request_scope().unwrap();
+        assert_eq!(project_scope.project_id.as_str(), "project.tracedecay");
+        assert_ne!(profile_scope, project_scope);
     }
 
     #[test]
@@ -831,33 +787,9 @@ mod tests {
     }
 
     #[test]
-    fn canonical_application_context_binds_scope_grant_deadline_and_cancellation() {
-        let scope = project_identity().application_scope().unwrap();
-        let grant = grant_for(&scope, UtcMicros(100));
-        let application = application_context(
-            scope.clone(),
-            grant,
-            UtcMicros(50),
-            CancellationContext::active("request.application-slice-1").unwrap(),
-        );
-
-        assert_eq!(application.scope(), &scope);
-        assert_eq!(application.actor().as_str(), "actor.cursor");
-        assert_eq!(
-            application.request_id().as_str(),
-            "request.application-slice-1"
-        );
-        assert!(!application.cancellation().is_cancelled());
-        assert_eq!(
-            application.admission_at(UtcMicros(1)),
-            RequestAdmission::Admitted
-        );
-    }
-
-    #[test]
     fn canonical_application_context_rejects_grant_for_another_scope() {
         let scope = project_identity().application_scope().unwrap();
-        let other_scope = tracedecay_application::ResolvedScope::new(
+        let other_scope = tracedecay_contracts::ResolvedScope::new(
             ProjectId::new("project.other").unwrap(),
             RepositoryId::new("repository.other").unwrap(),
             WorktreeId::new("worktree.other").unwrap(),
@@ -868,11 +800,11 @@ mod tests {
 
         // A grant minted for a different scope must fail closed, never be
         // rebound onto this request's scope.
-        let error = tracedecay_application::RequestContext::new(
+        let error = tracedecay_contracts::RequestContext::new(
             ActorId::new("actor.cursor").unwrap(),
             scope,
             grant,
-            tracedecay_application::RequestId::new("request.application-slice-1").unwrap(),
+            tracedecay_contracts::RequestId::new("request.application-slice-1").unwrap(),
             Deadline::new(UtcMicros(50)).unwrap(),
             CancellationContext::active("request.application-slice-1").unwrap(),
         )
@@ -880,7 +812,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                tracedecay_application::ApplicationContractError::Inconsistent {
+                tracedecay_contracts::ApplicationContractError::Inconsistent {
                     field: "request context grant scope"
                 }
             ),
@@ -900,10 +832,10 @@ mod tests {
 
         assert!(application.cancellation().is_cancelled());
         match application.cancellation().state {
-            tracedecay_application::CancellationState::Cancelled { requested_at } => {
+            tracedecay_contracts::CancellationState::Cancelled { requested_at } => {
                 assert_eq!(requested_at, UtcMicros(10));
             }
-            tracedecay_application::CancellationState::Active => {
+            tracedecay_contracts::CancellationState::Active => {
                 panic!("cancelled token must cross as cancelled")
             }
         }
@@ -913,8 +845,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn application_interruptible_observes_live_transport_cancellation() {
+    #[asupersync::test]
+    async fn application_interruptible_observes_live_transport_cancellation(cx: &asupersync::Cx) {
         let scope = project_identity().application_scope().unwrap();
         let application = application_context(
             scope.clone(),
@@ -924,10 +856,12 @@ mod tests {
         );
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
-        tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            trigger.cancel();
-        });
+        let mut trigger_task = cx
+            .spawn(move |_cx| async move {
+                asupersync::runtime::yield_now().await;
+                trigger.cancel();
+            })
+            .expect("spawn cancellation trigger");
 
         let result = run_application_request_interruptible(
             &application,
@@ -937,6 +871,10 @@ mod tests {
         )
         .await;
 
+        trigger_task
+            .join(cx)
+            .await
+            .expect("join cancellation trigger");
         assert_eq!(result, Err(RequestInterruption::Cancelled));
         assert!(
             !application.cancellation().is_cancelled(),

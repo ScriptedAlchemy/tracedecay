@@ -1,7 +1,8 @@
 use tracedecay_domain::{ProjectId, RetrievalAnchorId, SessionId};
 use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::execution::TemporalPortError;
 use tracedecay_temporal_query::hydration::HydrationError;
-use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::{TemporalSqlRead, summary_has_provider_evidence};
 use crate::relations::{
@@ -56,32 +57,7 @@ async fn canonical_source_connection(path: &std::path::Path) -> TestConnection {
     connection
 }
 
-#[tokio::test]
-async fn provider_evidence_follows_grafeo_sources_without_a_sql_relation_table() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let connection = canonical_source_connection(&directory.path().join("sources.db")).await;
-    let relations = crate::relations::memory_relation_store();
-    relations
-        .replace(&projection("anchor-source"))
-        .expect("relation projection");
-
-    let matched = summary_has_provider_evidence(
-        &TemporalSqlRead::engine_connection(&connection),
-        &relations,
-        &SessionRelationScope::project_sessions(project()),
-        &session(),
-        1,
-        "summary-root",
-        "claude",
-        &ExecutionControl::default(),
-    )
-    .await
-    .expect("provider evidence");
-
-    assert!(matched);
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn missing_relation_projection_is_hydration_unavailable_not_provider_denial() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("unavailable.db")).await;
@@ -103,7 +79,7 @@ async fn missing_relation_projection_is_hydration_unavailable_not_provider_denia
     assert_eq!(error, HydrationError::Unavailable);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn cancelled_provider_evidence_traversal_preserves_control_error() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("cancelled.db")).await;

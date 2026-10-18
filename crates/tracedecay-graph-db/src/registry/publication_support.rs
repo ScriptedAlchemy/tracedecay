@@ -6,7 +6,7 @@ use tracedecay_store::runtime::{
     GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
     GraphPublicationIdempotencyKeyV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationReplayCursorV1, GraphPublicationReplayLookupV1, GraphPublicationReplayRecordV1,
-    GraphPublicationStoreErrorV1, GraphVerifiedHeadV1, RuntimeInterruptionV1,
+    GraphVerifiedHeadV1, RuntimeInterruptionV1,
 };
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
@@ -236,8 +236,8 @@ impl GraphDbRegistry {
                 }
                 // An in-flight open or close always settles within its owning
                 // call (Ready, Faulted, or removed). A verified operation that
-                // races such a transition — e.g. a first activation whose
-                // graph runtime is still binding asynchronously — waits it out
+                // races such a transition, e.g. a first activation whose
+                // graph runtime is still binding asynchronously, waits it out
                 // under its own deadline, exactly like the resolve path, so a
                 // mid-transition mount is never surfaced as unavailability.
                 super::RegistryEntry::Opening {
@@ -282,7 +282,7 @@ impl GraphDbRegistry {
         }
     }
 
-    #[hotpath::measure(label = "graph_db.snapshot.verified", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.snapshot.verified", level = "trace", skip_all)]
     pub fn verified_snapshot(
         &self,
         registration: GraphDbRegistration,
@@ -354,7 +354,14 @@ pub(super) fn locator_from_dependency(
     registration: &GraphDbRegistration,
     dependency: &tracedecay_store::runtime::GraphDependencyGenerationIdentityV1,
 ) -> Result<GenerationLocator, GraphDbError> {
-    if dependency.projection.shard_id != registration.binding().shard_id {
+    locator_from_dependency_in_binding(registration.binding(), dependency)
+}
+
+pub(super) fn locator_from_dependency_in_binding(
+    binding: &StoreRuntimeBindingV1,
+    dependency: &tracedecay_store::runtime::GraphDependencyGenerationIdentityV1,
+) -> Result<GenerationLocator, GraphDbError> {
+    if dependency.projection.shard_id != binding.shard_id {
         return Err(GraphDbError::conflict(
             "publication_support.locator_from_dependency",
         ));
@@ -484,13 +491,6 @@ pub(super) fn validate_exact_dependency_closure(
     Ok(())
 }
 
-pub(super) fn require_publication_binding(
-    registration: &GraphDbRegistration,
-    key: &GraphPublicationKeyV1,
-) -> Result<(), GraphDbError> {
-    require_projection_binding(registration, &key.projection)
-}
-
 pub(super) fn require_projection_binding(
     registration: &GraphDbRegistration,
     projection: &GraphProjectionIdentityV1,
@@ -562,24 +562,6 @@ fn interruption_error(context: &GraphPublicationOperationContextV1<'_>) -> Optio
         })
 }
 
-pub(super) fn map_publication_error(error: GraphPublicationStoreErrorV1) -> GraphDbError {
-    match error {
-        GraphPublicationStoreErrorV1::InvalidRequest(error) => {
-            GraphDbError::invalid(error.to_string())
-        }
-        GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::Cancelled) => {
-            GraphDbError::Cancelled
-        }
-        GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::DeadlineExceeded) => {
-            GraphDbError::DeadlineExceeded
-        }
-        GraphPublicationStoreErrorV1::Infrastructure => {
-            GraphDbError::unavailable("relational graph publication authority is unavailable")
-        }
-        GraphPublicationStoreErrorV1::Corrupt(message) => GraphDbError::Corrupt { message },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use tracedecay_store::runtime::{
@@ -587,7 +569,7 @@ mod tests {
         GraphPublicationSequenceV1, ProjectId, StoreShardIdV1, UserProfileId,
     };
 
-    use super::{GraphProjectionIdentityV1, validate_replay_cursor};
+    use super::{GraphDbError, GraphProjectionIdentityV1, validate_replay_cursor};
 
     fn projection(project: &str) -> GraphProjectionIdentityV1 {
         GraphProjectionIdentityV1 {
@@ -610,7 +592,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(validate_replay_cursor(&expected, None, &continuation, "cleanup").is_err());
+        assert_eq!(
+            validate_replay_cursor(&expected, None, &continuation, "cleanup"),
+            Err(GraphDbError::Corrupt {
+                message: "cleanup cursor escaped its projection".to_owned(),
+            })
+        );
     }
 
     #[test]
@@ -623,8 +610,20 @@ mod tests {
         .unwrap();
         let continuation = previous.clone();
 
-        assert!(
-            validate_replay_cursor(&expected, Some(&previous), &continuation, "cleanup").is_err()
+        assert_eq!(
+            validate_replay_cursor(&expected, Some(&previous), &continuation, "cleanup"),
+            Err(GraphDbError::Corrupt {
+                message: "cleanup cursor did not advance".to_owned(),
+            })
+        );
+        let advanced = GraphPublicationReplayCursorV1::new(
+            expected.clone(),
+            GraphPublicationSequenceV1::new(3).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_replay_cursor(&expected, Some(&previous), &advanced, "cleanup"),
+            Ok(())
         );
     }
 }

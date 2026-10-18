@@ -3,35 +3,6 @@
 use super::*;
 
 pub const WORK_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS work_owner_cursors_v1 (
-    project_id TEXT NOT NULL,
-    repository_id TEXT NOT NULL,
-    worktree_id TEXT NOT NULL,
-    actor_id TEXT NOT NULL,
-    policy_digest TEXT NOT NULL,
-    sequence INTEGER NOT NULL CHECK (sequence > 0),
-    PRIMARY KEY (project_id, repository_id, worktree_id, actor_id, policy_digest)
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS work_events_v1 (
-    project_id TEXT NOT NULL,
-    repository_id TEXT NOT NULL,
-    worktree_id TEXT NOT NULL,
-    actor_id TEXT NOT NULL,
-    policy_digest TEXT NOT NULL,
-    task_id TEXT NOT NULL,
-    version INTEGER NOT NULL CHECK (version > 0),
-    command_id TEXT NOT NULL,
-    input_digest TEXT NOT NULL,
-    occurred_at INTEGER NOT NULL,
-    event_payload TEXT NOT NULL,
-    PRIMARY KEY (
-        project_id, repository_id, worktree_id, actor_id, policy_digest, task_id, version
-    ),
-    UNIQUE (
-        project_id, repository_id, worktree_id, actor_id, policy_digest, task_id, command_id
-    )
-) STRICT;
 CREATE TABLE IF NOT EXISTS work_attempt_fences_v1 (
     project_id TEXT NOT NULL,
     repository_id TEXT NOT NULL,
@@ -164,12 +135,46 @@ CREATE TABLE IF NOT EXISTS work_placements_v1 (
     )
 ) STRICT;
 
--- A released placement no longer holds its root, so it is excluded: the index
--- constrains holders, not history.
-CREATE UNIQUE INDEX IF NOT EXISTS work_placements_v1_exclusive_root
-    ON work_placements_v1 (
-        project_id, repository_id, worktree_id, actor_id, policy_digest, target_root
-    )
+-- A root is a physical resource: at most one admitted or quarantined
+-- placement holds it per project and repository, whichever actor, policy
+-- digest, or worktree route admitted it. A released placement no longer holds
+-- its root, so it is excluded: the index constrains holders, not history.
+--
+-- Migration from `work_placements_v1_exclusive_root`, which also keyed on
+-- worktree, actor and policy digest and so let two authorities hold one root.
+-- Every statement is idempotent. Where a store already holds a root twice, the
+-- oldest holder (lowest rowid) keeps it and each later holder is demoted to
+-- `quarantined` (an admitted one gains the `active_holder` blocker; a
+-- quarantined one keeps its own blockers) and its `target_root` column is
+-- cleared so the new index admits it. Nothing is deleted and the payload still
+-- names the root; a later release publishes the row normally.
+DROP INDEX IF EXISTS work_placements_v1_exclusive_root;
+
+-- ponytail: correlated MIN scan is O(held rows) per open until the index below
+-- exists to serve it; placements are few, add an index if that ever changes.
+UPDATE work_placements_v1 SET
+    placement_payload = CASE WHEN state = 'admitted' THEN json_set(
+        placement_payload,
+        '$.state', 'quarantined',
+        '$.authority_version', authority_version + 1,
+        '$.blockers', json('[\"active_holder\"]')
+    ) ELSE placement_payload END,
+    authority_version = CASE WHEN state = 'admitted'
+        THEN authority_version + 1 ELSE authority_version END,
+    state = 'quarantined',
+    target_root = NULL
+WHERE target_root IS NOT NULL
+  AND state IN ('admitted', 'quarantined')
+  AND rowid > (
+      SELECT MIN(older.rowid) FROM work_placements_v1 AS older
+      WHERE older.project_id = work_placements_v1.project_id
+        AND older.repository_id = work_placements_v1.repository_id
+        AND older.target_root = work_placements_v1.target_root
+        AND older.state IN ('admitted', 'quarantined')
+  );
+
+CREATE UNIQUE INDEX IF NOT EXISTS work_placements_v1_exclusive_target
+    ON work_placements_v1 (project_id, repository_id, target_root)
     WHERE target_root IS NOT NULL AND state IN ('admitted', 'quarantined');
 
 -- Explicit duplicate-effort adjudications are revisioned owner facts. They
@@ -314,18 +319,15 @@ ON work_duplicate_adjudications_v1 (
 /// The canonical Work product graph authority: its immutable event journal,
 /// and the verified graph versions committed atomically with it.
 ///
-/// This is a second, deliberately separate Work authority. `work_events_v1`
-/// above is scoped by [`WorkAuthority`](tracedecay_domain::WorkAuthority)
-/// (project/repository/worktree/actor/policy) and carries the task command
-/// history; the product journal is scoped by the registered profile OWNER
-/// (brain + profile), because that is the scope
+/// The product journal is scoped by the registered profile OWNER (brain +
+/// profile), because that is the scope
 /// `WorkProductEventV1::owner_scope` declares and the only scope its
 /// authorization port resolves. The two are never joined: correlating a task
 /// row with a product item would invent a correspondence neither authority
 /// records.
 ///
-/// Every measurement the product projections expose — item effort, declared
-/// causal candidates, scheduled_at, deadline — lives inside `event_payload`
+/// Every measurement the product projections expose, item effort, declared
+/// causal candidates, scheduled_at, deadline, lives inside `event_payload`
 /// exactly as the caller declared it in the event. Nothing in this schema
 /// derives, estimates, or backfills one.
 pub const WORK_PRODUCT_SCHEMA_V1: &str = "
@@ -361,7 +363,15 @@ CREATE TABLE IF NOT EXISTS work_product_graph_versions_v1 (
 ) STRICT;
 ";
 
+/// `work_events_v1` shipped in `v0.1.0-beta.37`; retirement must therefore be
+/// journaled rather than erased from migration history.
+pub const RETIRE_WORK_EVENT_JOURNAL_V1: &str = "
+DROP TABLE IF EXISTS work_events_v1;
+DROP TABLE IF EXISTS work_owner_cursors_v1;
+";
+
 pub fn install_work_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(WORK_SCHEMA_V1)?;
+    connection.execute_batch(RETIRE_WORK_EVENT_JOURNAL_V1)?;
     connection.execute_batch(WORK_PRODUCT_SCHEMA_V1)
 }

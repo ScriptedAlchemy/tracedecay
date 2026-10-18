@@ -1,14 +1,13 @@
 #![cfg(unix)]
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblemKind, CancellationContext, Deadline, MultiRootExecuteRequestV1,
     MultiRootOperationV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1,
     MultiRootScopeSetReadRequestV1, RegisteredRootSelectorV1,
@@ -24,27 +23,17 @@ use crate::daemon::{
 };
 use tracedecay_daemon_service::{
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationRequest, cancel, parse_daemon_invocation_request,
+    DaemonInvocationRequest, parse_daemon_invocation_request,
 };
-
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .status()
-        .expect("run Git fixture command");
-    assert!(status.success(), "git {args:?}");
-}
 
 fn repository() -> TempDir {
     let repository = TempDir::new().expect("repository");
-    git(repository.path(), &["init", "--quiet"]);
-    git(
+    super::git(repository.path(), &["init", "--quiet"]);
+    super::git(
         repository.path(),
         &["config", "user.name", "TraceDecay Test"],
     );
-    git(
+    super::git(
         repository.path(),
         &["config", "user.email", "tracedecay@example.com"],
     );
@@ -53,8 +42,25 @@ fn repository() -> TempDir {
         "pub fn value() -> u8 { 1 }\n",
     )
     .expect("source");
-    git(repository.path(), &["add", "."]);
-    git(repository.path(), &["commit", "--quiet", "-m", "base"]);
+    super::git(repository.path(), &["add", "."]);
+    super::git(repository.path(), &["commit", "--quiet", "-m", "base"]);
+    repository
+}
+
+fn paginated_repository(prefix: &str) -> TempDir {
+    let repository = repository();
+    let source = (0..120)
+        .map(|index| {
+            format!("pub fn {prefix}_{index}() -> &'static str {{ \"multi-root-page-marker\" }}\n")
+        })
+        .collect::<Vec<_>>()
+        .concat();
+    std::fs::write(repository.path().join("lib.rs"), source).expect("paged source");
+    super::git(repository.path(), &["add", "."]);
+    super::git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "paged source"],
+    );
     repository
 }
 
@@ -104,6 +110,225 @@ fn authenticated_multi_root_journey_reaches_scope_set_storage() {
         .expect("multi-root journey thread")
         .join()
         .expect("multi-root journey thread must not panic");
+}
+
+#[test]
+fn scope_set_cas_opens_registered_cold_roots_before_persisting() {
+    const STACK_SIZE: usize = 16 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .name("multi-root-cold-roots".to_owned())
+        .stack_size(STACK_SIZE)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("multi-root cold-root runtime")
+                .block_on(run_scope_set_cas_with_registered_cold_root());
+        })
+        .expect("multi-root cold-root thread")
+        .join()
+        .expect("multi-root cold-root thread must not panic");
+}
+
+async fn run_scope_set_cas_with_registered_cold_root() {
+    let home = TempDir::new().expect("home");
+    let profile_root = home.path().join("profile");
+    let active = repository();
+    let cold = repository();
+    let handshake = DaemonHandshake {
+        project_path: Some(active.path().to_path_buf()),
+        allow_init: true,
+        client_identity: test_client_identity_for(profile_root.clone()),
+        ..test_handshake_defaults()
+    };
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "multi-root-cold-roots");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    engine
+        .open_project_server(&handshake)
+        .await
+        .expect("register active project");
+    let cold_handshake = DaemonHandshake {
+        project_path: Some(cold.path().to_path_buf()),
+        ..handshake.clone()
+    };
+    let (cold_key, _, _, _) = engine
+        .open_project_server(&cold_handshake)
+        .await
+        .expect("register cold project");
+
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("registered profile database");
+    let projects = registry
+        .list_code_projects(usize::MAX)
+        .await
+        .expect("list registered projects");
+    let registered_project = |root: &Path| {
+        let canonical = root.canonicalize().expect("canonical registered root");
+        projects
+            .iter()
+            .find(|project| Path::new(&project.canonical_root) == canonical)
+            .unwrap_or_else(|| panic!("registered project missing for {}", canonical.display()))
+    };
+    let active_project =
+        tracedecay_domain::ProjectId::new(registered_project(active.path()).project_id.clone())
+            .expect("active project id");
+    let cold_project =
+        tracedecay_domain::ProjectId::new(registered_project(cold.path()).project_id.clone())
+            .expect("cold project id");
+    let cold_roots = std::collections::BTreeSet::from([cold
+        .path()
+        .canonicalize()
+        .expect("canonical cold root")]);
+    let profile_id = engine
+        .store_administration
+        .profile_identity()
+        .expect("profile identity")
+        .profile_id()
+        .clone();
+    let cold_quiescence = engine
+        .invocation
+        .quiesce_project_runtime_owners(&profile_id, &cold_project, &cold_roots)
+        .await
+        .expect("quiesce cold project runtime");
+    let cold_servers = engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .remove_owner(&cold_key.owner);
+    crate::daemon::project_server_lifecycle::retire_evicted_project_owner(
+        &engine.store_administration,
+        cold_key.owner,
+        cold_servers,
+        None,
+    )
+    .await;
+    engine
+        .store_administration
+        .join_project_server_retirements()
+        .await;
+    drop(cold_quiescence);
+    assert!(
+        engine
+            .invocation
+            .service
+            .admit_project_request(active.path())
+            .is_some(),
+        "the active project runtime must remain mounted"
+    );
+    assert!(
+        engine
+            .invocation
+            .service
+            .admit_project_request(cold.path())
+            .is_none(),
+        "registry discovery must not pretend the cold project runtime is mounted"
+    );
+
+    let capacity_gate = super::super::project_open_capacity_gate(&engine.project_open_gates).await;
+    let capacity_guard = capacity_gate.lock_owned().await;
+    let release_capacity = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        drop(capacity_guard);
+    });
+
+    let scope_set_id = ScopeSetId::new("scope-set.cold-roots").expect("scope set id");
+    let roots = vec![
+        RegisteredRootSelectorV1::new(
+            active_project,
+            active.path().canonicalize().expect("canonical active root"),
+        )
+        .expect("active selector"),
+        RegisteredRootSelectorV1::new(
+            cold_project,
+            cold.path().canonicalize().expect("canonical cold root"),
+        )
+        .expect("cold selector"),
+    ];
+    let observed_at = now();
+    let (deadline, cancellation) = controls("cold-roots-cas", observed_at);
+    let cas = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+            "request.multi-root.cold-roots-cas",
+            MultiRootScopeSetCasRequestV1::new(scope_set_id.clone(), None, roots.clone())
+                .expect("CAS request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    release_capacity
+        .await
+        .expect("release cold-root capacity gate");
+    let DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { outcome, .. } = cas.outcome
+    else {
+        panic!("cold-root CAS must reach storage: {:?}", cas.outcome);
+    };
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
+        panic!("cold-root CAS must return evidence");
+    };
+    let applied = packet
+        .payload
+        .expect("CAS evidence payload")
+        .scope_set
+        .expect("applied scope set");
+
+    let observed_at = now();
+    let (deadline, cancellation) = controls("cold-roots-read", observed_at);
+    let read = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        DaemonInvocationRequest::multi_root_scope_set_read(
+            "request.multi-root.cold-roots-read",
+            MultiRootScopeSetReadRequestV1::new(scope_set_id.clone()).expect("read request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootScopeSetRead { outcome, .. } = read.outcome else {
+        panic!("scope-set read must reach storage: {:?}", read.outcome);
+    };
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
+        panic!("scope-set read must return evidence");
+    };
+    assert_eq!(packet.payload.flatten(), Some(applied.clone()));
+
+    let observed_at = now();
+    let (deadline, cancellation) = controls("cold-roots-stale-cas", observed_at);
+    let stale = execute_daemon_invocation(
+        &engine,
+        &handshake,
+        DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+            "request.multi-root.cold-roots-stale-cas",
+            MultiRootScopeSetCasRequestV1::new(scope_set_id, None, roots)
+                .expect("stale CAS request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { outcome, .. } = stale.outcome
+    else {
+        panic!("stale CAS must reach storage: {:?}", stale.outcome);
+    };
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
+        panic!("stale CAS must return evidence");
+    };
+    let conflict = packet.payload.expect("stale CAS evidence payload");
+    assert_eq!(conflict.status, MultiRootScopeSetCasStatusV1::Conflict);
+    assert_eq!(conflict.scope_set.as_ref(), Some(&applied));
 }
 
 #[test]
@@ -166,9 +391,10 @@ async fn run_multi_root_quiescence() {
     let cancelled_read_id = "request.multi-root.cancelled-read";
     let cancelled_cas_id = "request.multi-root.cancelled-cas";
     let cancelled_execute_id = "request.multi-root.cancelled-execute";
-    assert!(!cancel(cancelled_read_id));
-    assert!(!cancel(cancelled_cas_id));
-    assert!(!cancel(cancelled_execute_id));
+    let request_cancellations = engine.invocation.service.request_cancellations();
+    assert!(!request_cancellations.cancel(cancelled_read_id));
+    assert!(!request_cancellations.cancel(cancelled_cas_id));
+    assert!(!request_cancellations.cancel(cancelled_execute_id));
     let interrupted = [
         (
             DaemonInvocationRequest::multi_root_scope_set_read(
@@ -351,8 +577,8 @@ async fn run_multi_root_quiescence() {
 async fn run_authenticated_multi_root_journey() {
     let home = TempDir::new().expect("home");
     let profile_root = home.path().join("profile");
-    let first = repository();
-    let second = repository();
+    let first = paginated_repository("alpha_page_item");
+    let second = paginated_repository("beta_page_item");
     let first_handshake = DaemonHandshake {
         project_path: Some(first.path().to_path_buf()),
         allow_init: true,
@@ -396,7 +622,7 @@ async fn run_authenticated_multi_root_journey() {
             problem: DaemonInvocationProblem::InvalidRequest
         }
     ));
-    let portable_invalid = execute_portable_daemon_invocation(
+    let portable_invalid = Box::pin(execute_portable_daemon_invocation(
         engine.lifecycle.clone(),
         engine.store_administration.clone(),
         Arc::clone(&engine.project_open_gates),
@@ -405,7 +631,7 @@ async fn run_authenticated_multi_root_journey() {
         engine.http_application_registry.clone(),
         wire_round_trip(&invalid_read),
         Some(Arc::clone(&engine.project_open_attempts)),
-    )
+    ))
     .await;
     assert!(matches!(
         portable_invalid.outcome,
@@ -427,6 +653,28 @@ async fn run_authenticated_multi_root_journey() {
         .open_project_server(&second_handshake)
         .await
         .expect("second owner");
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if engine
+                .invocation
+                .code_index_schedulers
+                .latest_complete_ready(first.path())
+                .await
+                .is_some()
+                && engine
+                    .invocation
+                    .code_index_schedulers
+                    .latest_complete_ready(second.path())
+                    .await
+                    .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both roots must publish a query generation");
     let first_project = tracedecay_domain::ProjectId::new(
         first_key
             .owner
@@ -449,6 +697,33 @@ async fn run_authenticated_multi_root_journey() {
     let second_uri = url::Url::from_file_path(second.path())
         .expect("second URI")
         .to_string();
+
+    // The direct MCP route must collapse an unknown and an unauthorized
+    // scope-set identity into the same denial; an empty evidence packet would
+    // otherwise falsely claim the read completed.
+    let unknown_scope_set_id =
+        ScopeSetId::new("scope-set.daemon-journey.unknown").expect("unknown scope set id");
+    let observed_at = now();
+    let (deadline, cancellation) = controls("unknown-read", observed_at);
+    let unknown_read = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_scope_set_read(
+            "request.multi-root.unknown-read",
+            MultiRootScopeSetReadRequestV1::new(unknown_scope_set_id)
+                .expect("unknown read request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    assert!(matches!(
+        unknown_read.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+    ));
 
     // A single folder that is not the active project is still refused: a lone
     // sibling hint must not reroute the session.
@@ -592,7 +867,7 @@ async fn run_authenticated_multi_root_journey() {
     else {
         panic!("multi-root CAS must reach the executor: {:?}", cas.outcome);
     };
-    let tracedecay_application::ApplicationOutcome::Evidence(packet) = outcome else {
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
         panic!("multi-root CAS must return evidence");
     };
     let cas_result = packet
@@ -640,7 +915,7 @@ async fn run_authenticated_multi_root_journey() {
             read.outcome
         );
     };
-    let tracedecay_application::ApplicationOutcome::Evidence(packet) = outcome else {
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
         panic!("multi-root read must return evidence");
     };
     assert_eq!(packet.payload.clone().flatten().as_ref(), Some(&stored));
@@ -675,6 +950,219 @@ async fn run_authenticated_multi_root_journey() {
             problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
     ));
+
+    let operation = MultiRootOperationV1::Query {
+        request: json!({
+            "operation": "code_signature_search",
+            "request": {
+                "returns": "str",
+                "params": [],
+                "is_async": null,
+                "scope": {"path_prefix": null},
+                "meta": {"projection": "summary", "order": "source_position", "cursor": null}
+            }
+        }),
+    };
+    let observed_at = now();
+    let (deadline, cancellation) = controls("paged-query-0", observed_at);
+    let first_page_response = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.paged-query-0",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                operation.clone(),
+                0,
+                None,
+            )
+            .expect("first page request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootQueryPage {
+        outcome: tracedecay_contracts::ApplicationOutcome::Evidence(first_evidence),
+        ..
+    } = first_page_response.outcome
+    else {
+        panic!("first query page must return evidence")
+    };
+    let first_page = first_evidence.payload.expect("first page payload");
+    assert_eq!(first_page.roots.len(), 2);
+    assert_ne!(
+        first_page.roots[0].scope_digest,
+        first_page.roots[1].scope_digest
+    );
+    for root in &first_page.roots {
+        let tracedecay_domain::ScopeOutcome::Exact(values) = &root.outcome else {
+            panic!("each root must return an exact first page")
+        };
+        assert_eq!(
+            values[0]["items"].as_array().map(Vec::len),
+            Some(100),
+            "each child must fill the first 100-item page"
+        );
+    }
+    let continuation = first_page
+        .continuation
+        .clone()
+        .expect("120 matches per root must exceed the 100-item child page");
+
+    let mut changed_operation = operation.clone();
+    let MultiRootOperationV1::Query { request } = &mut changed_operation else {
+        unreachable!("constructed query operation")
+    };
+    request["request"]["returns"] = json!("String");
+    let observed_at = now();
+    let (deadline, cancellation) = controls("paged-query-changed", observed_at);
+    let changed = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.paged-query-changed",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                changed_operation,
+                1,
+                Some(continuation.clone()),
+            )
+            .expect("changed-operation page request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = changed.outcome else {
+        panic!("a continuation replayed with another operation must be refused")
+    };
+    assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
+    assert_eq!(
+        problem
+            .diagnostic()
+            .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.message.as_str())),
+        Some((
+            "cursor.parameter_changed",
+            "The cursor was issued for a request with a different `operation`. Repeat the \
+             request with the parameters that returned the cursor, or restart without it."
+        ))
+    );
+
+    let observed_at = now();
+    let (deadline, cancellation) = controls("paged-query-1", observed_at);
+    let second_page_response = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.paged-query-1",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                operation,
+                1,
+                Some(continuation),
+            )
+            .expect("second page request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootQueryPage {
+        outcome: tracedecay_contracts::ApplicationOutcome::Evidence(second_evidence),
+        ..
+    } = second_page_response.outcome
+    else {
+        panic!("second query page must return evidence")
+    };
+    let second_page = second_evidence.payload.expect("second page payload");
+    assert_ne!(first_page.roots, second_page.roots);
+    for root in &second_page.roots {
+        let tracedecay_domain::ScopeOutcome::Exact(values) = &root.outcome else {
+            panic!("each root must return an exact second page")
+        };
+        assert_eq!(
+            values[0]["items"].as_array().map(Vec::len),
+            Some(20),
+            "each child must return only its remaining 20 items"
+        );
+    }
+    assert!(second_page.continuation.is_none());
+
+    let capped_phrase_operation = MultiRootOperationV1::Query {
+        request: json!({
+            "operation": "code_phrase_search",
+            "request": {
+                "query": "multi-root-page-marker",
+                "phrases": ["multi-root-page-marker"],
+                "field_filters": [],
+                "fuzzy_budget": 0,
+                "scope": {"generation": "code-generation:unpinned-latest.v1", "path_prefix": null},
+                "meta": {"projection": "summary", "order": "relevance", "cursor": null}
+            }
+        }),
+    };
+    let observed_at = now();
+    let (deadline, cancellation) = controls("capped-phrase-query", observed_at);
+    let capped_phrase_response = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.capped-phrase-query",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                capped_phrase_operation,
+                0,
+                None,
+            )
+            .expect("capped phrase request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootQueryPage {
+        outcome: tracedecay_contracts::ApplicationOutcome::Evidence(capped_phrase_evidence),
+        ..
+    } = capped_phrase_response.outcome
+    else {
+        panic!("capped phrase query must return evidence")
+    };
+    let capped_phrase_page = capped_phrase_evidence
+        .payload
+        .expect("capped phrase payload");
+    for root in &capped_phrase_page.roots {
+        let tracedecay_domain::ScopeOutcome::Partial { value, reason } = &root.outcome else {
+            panic!("each capped phrase root must remain partial")
+        };
+        assert_eq!(
+            *reason,
+            tracedecay_domain::ScopePartialReasonV1::BudgetExceeded
+        );
+        assert_eq!(value[0]["items"].as_array().map(Vec::len), Some(32));
+        assert_eq!(value[0]["total"].as_u64(), Some(32));
+        assert!(value[0]["next_cursor"].is_null());
+    }
+    assert!(matches!(
+        capped_phrase_page.aggregate,
+        tracedecay_domain::ScopeOutcome::Partial {
+            reason: tracedecay_domain::ScopePartialReasonV1::BudgetExceeded,
+            ..
+        }
+    ));
+    assert!(capped_phrase_page.continuation.is_none());
 
     // Every operation family fans out over the authorized scope set.
     for (index, operation) in [
@@ -723,7 +1211,7 @@ async fn run_authenticated_multi_root_journey() {
     // resolves or mounts any selected root, then reach the same executor.
     let observed_at = now();
     let (deadline, cancellation) = controls("portable-execute", observed_at);
-    let portable_execute = execute_portable_daemon_invocation(
+    let portable_execute = Box::pin(execute_portable_daemon_invocation(
         engine.lifecycle.clone(),
         engine.store_administration.clone(),
         Arc::clone(&engine.project_open_gates),
@@ -746,7 +1234,7 @@ async fn run_authenticated_multi_root_journey() {
             cancellation,
         ),
         Some(Arc::clone(&engine.project_open_attempts)),
-    )
+    ))
     .await;
     assert!(
         matches!(

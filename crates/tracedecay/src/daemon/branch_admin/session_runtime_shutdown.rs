@@ -18,12 +18,18 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
         }
     }
 
-    #[hotpath::measure(label = "daemon.branch_admin.session_runtime_shutdown", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.session_runtime_shutdown",
+        level = "trace",
+        skip_all
+    )]
     pub(in crate::daemon) async fn shutdown(&self) -> std::result::Result<(), String> {
         self.cancel();
+        let cx = tracedecay_runtime_core::native_runtime::cx()
+            .ok_or_else(|| "native execution runtime is unavailable".to_owned())?;
         let mut failures = Vec::new();
         for registry in &self.registries {
-            if let Err(error) = registry.shutdown_terminal_tasks().await {
+            if let Err(error) = registry.shutdown_terminal_tasks(&cx).await {
                 failures.push(error);
             }
             if let Err(error) = registry.shutdown_memory_graph_reconciliation_tasks().await {
@@ -40,7 +46,6 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
 
 impl StoreAdministration {
     #[cfg(test)]
-    #[hotpath::skip]
     pub(in crate::daemon) async fn install_long_lived_session_runtime_registry_for_test(
         &self,
     ) -> Result<()> {
@@ -71,7 +76,6 @@ impl StoreAdministration {
         })
     }
 
-    #[hotpath::skip]
     pub(in crate::daemon) async fn session_runtime_registry(
         &self,
     ) -> Result<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>> {
@@ -121,7 +125,6 @@ impl StoreAdministration {
         Ok(registry)
     }
 
-    #[hotpath::skip]
     pub(in crate::daemon) async fn registered_runtime_registry(
         &self,
     ) -> Result<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>> {
@@ -134,8 +137,15 @@ impl StoreAdministration {
     /// [`SessionRuntimeMemoryGraphReconciliationShutdownV1::shutdown`] has
     /// joined terminal hook, schema-convergence, and reconciliation workers;
     /// the drain drops the runtimes those workers publish through.
-    #[hotpath::measure(label = "daemon.branch_admin.close_graph_runtimes", future = true)]
-    pub(in crate::daemon) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
+    #[tracing::instrument(
+        name = "daemon.branch_admin.close_graph_runtimes",
+        level = "trace",
+        skip_all
+    )]
+    pub(in crate::daemon) async fn close_retained_graph_runtimes_for_shutdown(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
         let registries = self
             .session_runtime_registries
             .lock()
@@ -145,7 +155,9 @@ impl StoreAdministration {
             .collect::<Vec<_>>();
         let mut first_error = None;
         for registry in registries {
-            if let Err(error) = registry.close_retained_graph_runtimes_for_shutdown().await
+            if let Err(error) = registry
+                .close_retained_graph_runtimes_for_shutdown(deadline)
+                .await
                 && first_error.is_none()
             {
                 first_error = Some(error);
@@ -157,7 +169,46 @@ impl StoreAdministration {
         }
     }
 
-    #[hotpath::skip]
+    /// Terminal store close. Ordering is the correctness contract: close
+    /// registry admission, cancel reconciliation, join the workers while their
+    /// runtimes are still alive, release the telemetry sampler's retained
+    /// store handles, and only then drain the retained owners and close every
+    /// store no lease still holds, so each writer truncates its WAL. A store
+    /// still held is waited on until `deadline`. Closing before the join
+    /// leaves the standing owner attachments leased.
+    #[tracing::instrument(
+        name = "daemon.branch_admin.close_stores_for_shutdown",
+        level = "trace",
+        skip_all
+    )]
+    pub(in crate::daemon) async fn close_stores_for_shutdown(
+        &self,
+        deadline: std::time::Instant,
+    ) -> std::result::Result<(), String> {
+        let owner = self
+            .prepare_memory_graph_reconciliation_shutdown()
+            .await
+            .map_err(|error| error.to_string())?;
+        owner.cancel();
+        owner.shutdown().await?;
+        self.store_telemetry_sampling()
+            .release_retained_handles_for_shutdown();
+        self.close_retained_graph_runtimes_for_shutdown(deadline)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Shutdown-only: stops the store opens and schema installs of every
+    /// mounted session runtime registry at their next safe point, so an
+    /// admitted project open returns promptly instead of finishing its mount.
+    pub(in crate::daemon) async fn cancel_store_opens_for_shutdown(&self) {
+        for entry in self.session_runtime_registries.lock().await.values() {
+            if let Some(registry) = entry.registry.get() {
+                registry.cancel_store_opens_for_shutdown();
+            }
+        }
+    }
+
     pub(in crate::daemon) async fn prepare_memory_graph_reconciliation_shutdown(
         &self,
     ) -> Result<SessionRuntimeMemoryGraphReconciliationShutdownV1> {

@@ -48,8 +48,8 @@ pub(in super::super) fn verify_repository_source(
     control: &BoundedGitControl,
 ) -> Result<(), BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     verify_repository_identity(&repository, seal)?;
     control.check()
 }
@@ -142,12 +142,12 @@ mod tests {
     #[test]
     fn repository_seal_allows_mutable_git_state_but_rejects_same_path_replacement() {
         let fixture = fixture();
-        let repository = gix::discover(fixture.path()).unwrap();
+        let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
         let seal = capture_repository_seal(&repository).unwrap();
 
         std::fs::write(fixture.path().join("tracked"), "two").unwrap();
         git(fixture.path(), &["commit", "-am", "advance head"]);
-        let moved = gix::discover(fixture.path()).unwrap();
+        let moved = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
         verify_repository_identity(&moved, &seal).unwrap();
 
         std::fs::rename(
@@ -156,7 +156,7 @@ mod tests {
         )
         .unwrap();
         git(fixture.path(), &["init", "-b", "main"]);
-        let replacement = gix::discover(fixture.path()).unwrap();
+        let replacement = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
         assert_eq!(
             verify_repository_identity(&replacement, &seal).unwrap_err(),
             BoundedBackfillInterruption::SourceChanged
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn repository_source_check_observes_control() {
         let fixture = fixture();
-        let repository = gix::discover(fixture.path()).unwrap();
+        let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
         let seal = capture_repository_seal(&repository).unwrap();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();

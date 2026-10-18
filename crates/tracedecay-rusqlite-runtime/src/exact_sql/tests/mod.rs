@@ -1,22 +1,20 @@
 use std::{
-    sync::atomic::AtomicUsize,
-    time::{Duration, Instant},
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 
-use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
 use tracedecay_store::{
-    AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use crate::{
-    ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
-    reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
+    ExactSqlOnlyStorageOperationV1, ExistingWriterLocator, PersistentWriter,
+    reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool},
 };
 
-use super::*;
+use super::{clock::fake::FakeClock, *};
 
 struct AtomicWriteAuthority(Arc<AtomicBool>);
 
@@ -30,50 +28,55 @@ impl ExactSqlWriteAuthority for AtomicWriteAuthority {
     }
 }
 
-/// Drives the writer thread's fake lease clock from inside the lease it
-/// probes: authority verification is the only test code that runs on the
-/// writer thread. `run_transaction` verifies with `Execute` intent exactly
-/// twice per bounded step — before and after execution — so every even check
-/// is the pre-step hook.
-struct LeaseClockAdvancingAuthority {
-    step: Duration,
-    execute_checks: AtomicUsize,
+/// Puts the writer thread on `clock`, so the test holding `clock` decides when
+/// every writer-side deadline passes. Authority verification is the only test
+/// code that runs on the writer thread, and a transaction's begin check runs
+/// before the writer computes its lease deadlines.
+///
+/// `advance`, when set, moves the clock at every check of its intent. The
+/// writer checks a command's lease before that verification and computes the
+/// statement's own deadline after it.
+struct FakeClockAuthority {
+    clock: Arc<FakeClock>,
+    advance: Option<(ExactSqlWriteIntent, Duration)>,
 }
 
-impl LeaseClockAdvancingAuthority {
-    fn fake_elapsed(&self) -> Duration {
-        let steps = self.execute_checks.load(Ordering::Acquire).div_ceil(2);
-        self.step * u32::try_from(steps).unwrap()
+impl FakeClockAuthority {
+    fn installing(clock: &Arc<FakeClock>) -> Arc<Self> {
+        Arc::new(Self {
+            clock: Arc::clone(clock),
+            advance: None,
+        })
     }
 }
 
-impl ExactSqlWriteAuthority for LeaseClockAdvancingAuthority {
+impl ExactSqlWriteAuthority for FakeClockAuthority {
     fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
-        if intent == ExactSqlWriteIntent::Execute
-            && self
-                .execute_checks
-                .fetch_add(1, Ordering::AcqRel)
-                .is_multiple_of(2)
+        self.clock.install();
+        if let Some((advance_intent, by)) = self.advance
+            && advance_intent == intent
         {
-            command::lease_clock::advance(self.step);
+            self.clock.advance(by);
         }
         Ok(())
     }
 }
 
 struct SlowSchemaAuthority {
+    clock: Arc<FakeClock>,
     execute_batch_checks: AtomicUsize,
 }
 
 impl ExactSqlWriteAuthority for SlowSchemaAuthority {
     fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
-        // Three slow checks must push the whole batch past the ordinary
-        // per-statement deadline, whatever the test-mode limit is calibrated
-        // to, so the revalidated batch provably carries no guessed deadline.
+        self.clock.install();
+        // The check before the batch and two from its progress callbacks
+        // together pass the ordinary per-statement deadline, so the
+        // revalidated batch provably carries none.
         if intent == ExactSqlWriteIntent::ExecuteBatch
             && self.execute_batch_checks.fetch_add(1, Ordering::AcqRel) < 3
         {
-            std::thread::sleep(EXACT_SQL_EXECUTION_LIMIT / 2);
+            self.clock.advance(EXACT_SQL_EXECUTION_LIMIT / 2);
         }
         Ok(())
     }
@@ -96,35 +99,10 @@ impl ExactSqlWriteAuthority for RevokeDuringSchemaStep {
     }
 }
 
-struct NoWrites;
-
-impl StorageOperationExecutor for NoWrites {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct NoReads;
-
-impl ReaderQueryExecutor for NoReads {
-    fn execute_read(
-        &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
-        _request: &RuntimeReadRequestV1,
-    ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
-        unreachable!("exact SQL queries bypass the closed product read executor")
-    }
-}
-
 struct Fixture {
     _directory: TempDir,
     writer: PersistentWriter,
-    readers: ReaderPool<NoReads>,
+    readers: ReaderPool<ExactSqlOnlyReaderV1>,
 }
 
 fn binding() -> StoreRuntimeBindingV1 {
@@ -155,6 +133,7 @@ fn fixture(writer_digest: char, reader_digest: char) -> Fixture {
     let path = path.canonicalize().unwrap();
     let binding = binding();
     let writer = PersistentWriter::start(
+        &crate::native_runtime::handle().expect("native runtime"),
         ExistingWriterLocator::new(
             binding.clone(),
             locator(&binding, writer_digest),
@@ -162,14 +141,14 @@ fn fixture(writer_digest: char, reader_digest: char) -> Fixture {
         )
         .unwrap(),
         AdmissionConfigV1::default(),
-        NoWrites,
+        ExactSqlOnlyStorageOperationV1,
     )
     .unwrap();
     let readers = ReaderPool::start(
         ExistingReaderLocator::new(binding.clone(), locator(&binding, reader_digest), path)
             .unwrap(),
         AdmissionConfigV1::default().readers,
-        NoReads,
+        ExactSqlOnlyReaderV1,
     )
     .unwrap();
     Fixture {
@@ -183,10 +162,13 @@ fn statement(sql: &str, params: Vec<ExactSqlValue>) -> ExactSqlStatement {
     ExactSqlStatement::new(sql.to_owned(), params).unwrap()
 }
 
+mod async_dispatch;
 mod authority;
 mod dispatch;
 mod guard;
 mod lease;
 mod limits;
 mod pragma;
+mod prepare_cache;
+mod reader_contention;
 mod transaction;

@@ -3,27 +3,27 @@
 //! Hooks record a `hint_emitted` analytics event (carrying a first-class
 //! `hint_id`, `hint_category`, `session_id`, and `hook_<agent>` provider) every
 //! time a soft hint surfaces. Whether the model *acted* on that hint is not
-//! known at emit time — it depends on which tools fire next. This module closes
+//! known at emit time, it depends on which tools fire next. This module closes
 //! that loop after the fact: for each emitted hint that has not yet been
-//! resolved, it inspects the session's ingested [`session_messages`] activity
+//! resolved, it inspects the session's ingested session message activity
 //! *after* the hint timestamp and appends a new `hint_outcome` analytics event:
 //!
-//! * `acted`   — a tracedecay tool matching the hint's category fired inside the
+//! * `acted`  , a tracedecay tool matching the hint's category fired inside the
 //!   bounded horizon after the hint.
-//! * `ignored` — the horizon closed (see below) with post-hint activity but no
+//! * `ignored`, the horizon closed (see below) with post-hint activity but no
 //!   matching tool.
-//! * *(unresolved)* — the session has no ingested tool activity after the hint
+//! * *(unresolved)*, the session has no ingested tool activity after the hint
 //!   yet, so nothing is written and a later pass re-evaluates it.
 //!
 //! ## Horizon
 //!
 //! A hint is judged over the earlier of two bounds after its timestamp:
-//! [`HORIZON_TOOL_STEPS`] tool-activity steps or [`HORIZON_SECS`] of wall time.
+//! `HORIZON_TOOL_STEPS` tool-activity steps or `HORIZON_SECS` of wall time.
 //! The window is treated as *closed* (making a no-match verdict `ignored`
 //! rather than unresolved) when any of these hold:
 //!   * a tool-activity step is observed beyond `hint_ts + HORIZON_SECS`
 //!     (activity ingested past the time horizon), or
-//!   * [`HORIZON_TOOL_STEPS`] steps were observed inside the window, or
+//!   * `HORIZON_TOOL_STEPS` steps were observed inside the window, or
 //!   * wall-clock `now` is already past `hint_ts + HORIZON_SECS` (the horizon
 //!     has elapsed in real time even if the session then went quiet).
 //!
@@ -36,14 +36,14 @@
 //!
 //! Concrete analytics and session stores stay behind the application port.
 //! The daemon may compose one or two authorities without exposing either
-//! handle to this policy. The production caller is the daemon transcript
-//! ingest: every project-scope `ingest_transcript` ends with a best-effort
-//! settlement pass (`hint_outcomes::settle_project_hint_outcomes`)
-//! because freshly ingested activity is exactly what resolves open hints.
+//! handle to this policy. The production caller is the daemon's
+//! best-effort settlement pass (`hint_outcomes::settle_project_hint_outcomes`),
+//! run after project-scope transcript ingest, Codex prompt counter resets,
+//! and session-boundary admissions.
 
 use std::collections::HashSet;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     HintOutcomeCorrelationPort, HintOutcomeObservation, HintOutcomePortError, HintOutcomeResolution,
 };
 
@@ -62,7 +62,7 @@ const HORIZON_TOOL_STEPS: usize = 25;
 
 /// Upper bound on session-message rows fetched per hint when scanning for
 /// post-hint tool activity. Comfortably exceeds [`HORIZON_TOOL_STEPS`] so the
-/// horizon — not this cap — decides the window.
+/// horizon, not this cap, decides the window.
 const SESSION_SCAN_LIMIT: u32 = 256;
 
 /// Upper bound on emitted/outcome hint events pulled per correlation pass.
@@ -114,15 +114,15 @@ pub async fn correlate_hint_outcomes(
     let mut stats = HintOutcomeStats::default();
 
     // Hints that already carry an outcome: never re-resolve them.
-    let mut resolved = hotpath::future!(
+    let mut resolved = tracing::Instrument::instrument(
         port.resolved_hint_ids(project_id, HINT_EVENT_LIMIT),
-        label = "hosts.hooks.hint_outcomes.query_resolved"
+        tracing::trace_span!("hosts.hooks.hint_outcomes.query_resolved"),
     )
     .await
     .map(|ids| ids.into_iter().collect::<HashSet<_>>())?;
-    let emitted = hotpath::future!(
+    let emitted = tracing::Instrument::instrument(
         port.emitted_hints(project_id, HINT_EVENT_LIMIT),
-        label = "hosts.hooks.hint_outcomes.query_emitted"
+        tracing::trace_span!("hosts.hooks.hint_outcomes.query_emitted"),
     )
     .await?;
 
@@ -140,14 +140,14 @@ pub async fn correlate_hint_outcomes(
         stats.scanned += 1;
         resolved.insert(emission.hint_id.clone());
 
-        let steps = hotpath::future!(
+        let steps = tracing::Instrument::instrument(
             port.session_tool_activity(
                 session_provider(&emission.provider),
                 &emission.session_id,
                 emission.timestamp,
                 SESSION_SCAN_LIMIT,
             ),
-            label = "hosts.hooks.hint_outcomes.session_activity"
+            tracing::trace_span!("hosts.hooks.hint_outcomes.session_activity"),
         )
         .await
         .map(|activity| {
@@ -160,9 +160,11 @@ pub async fn correlate_hint_outcomes(
                 .collect::<Vec<_>>()
         })?;
 
-        match hotpath::measure_block!("hosts.hooks.hint_outcomes.resolve", {
+        let match_result = {
+            let _span = tracing::trace_span!("hosts.hooks.hint_outcomes.resolve").entered();
             resolve(emission.timestamp, &steps, expected, now_secs)
-        }) {
+        };
+        match match_result {
             Some(resolution) => {
                 let resolution = match resolution {
                     Resolution::Acted(tool) => {
@@ -185,9 +187,9 @@ pub async fn correlate_hint_outcomes(
     }
 
     if !pending.is_empty() {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             port.append_outcomes(&pending),
-            label = "hosts.hooks.hint_outcomes.append"
+            tracing::trace_span!("hosts.hooks.hint_outcomes.append"),
         )
         .await?;
     }

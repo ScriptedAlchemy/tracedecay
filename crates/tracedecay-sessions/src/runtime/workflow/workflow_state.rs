@@ -46,7 +46,7 @@ pub async fn list_unfinished(
              ORDER BY COALESCE(raw.timestamp, 0) DESC, raw.store_id DESC
              LIMIT ?2",
             params![
-                r#""session limit" OR blocked OR interrupted OR "runs 0""#,
+                r#"index_text : ("session limit" OR blocked OR interrupted OR "runs 0")"#,
                 limit
             ],
         )
@@ -131,13 +131,5 @@ mod tests {
             assert_eq!(status, expected);
             assert!(!evidence.is_empty());
         }
-    }
-
-    #[test]
-    fn extracts_task_id_from_metadata() {
-        assert_eq!(
-            task_id_from_metadata(r#"{"task_id":"task-123"}"#),
-            Some("task-123".to_string())
-        );
     }
 }

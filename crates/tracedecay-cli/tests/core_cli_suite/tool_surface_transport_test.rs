@@ -5,7 +5,7 @@
 //! path resolves that route by walking up from the working directory, so
 //! `tracedecay tool circular` works from a checkout without `--project`. The
 //! typed application-surface path must present the same authenticated route:
-//! otherwise `storage_status`, `source_outline`, `file_metadata`, and the git
+//! otherwise `storage_status`, `source_outline`, and the git
 //! reads answer `application.surface.unavailable` /
 //! `not_found_or_not_authorized` from a checkout the operator is standing in.
 
@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use crate::common::fixture::{
+    TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_FIXTURE_TSC_RELEASE,
+    TYPESCRIPT_MONOREPO_APP_FILE, TypeScriptFixtureCompiler, typescript_fixture_build_info,
+    write_typescript_diagnostics_fixture, write_typescript_monorepo_diagnostics_fixture,
+};
 use crate::common::{
     canonical_existing_path, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
@@ -64,7 +69,10 @@ fn init_indexed_git_project(home: &Path, project: &Path) {
 }
 
 struct SurfaceOutcome {
+    /// Printed with `--json`: the tool-result document.
+    json: bool,
     success: bool,
+    code: Option<i32>,
     stdout: String,
     stderr: String,
 }
@@ -79,10 +87,30 @@ impl SurfaceOutcome {
         })
     }
 
+    /// The typed result an answer printed: the `--json` document's
+    /// `structuredContent`, or the `format: "json"` result itself.
+    fn answer(&self) -> Value {
+        let payload = self.payload();
+        if self.json {
+            payload["structuredContent"].clone()
+        } else {
+            payload
+        }
+    }
+
+    /// The typed problem record a refusal printed.
+    fn problem(&self) -> Value {
+        let payload = self.payload();
+        if self.json {
+            payload["structuredContent"]["problem"].clone()
+        } else {
+            payload["problem"].clone()
+        }
+    }
+
     fn problem_code(&self) -> Option<String> {
-        self.payload()
-            .get("problem")
-            .and_then(|problem| problem.get("code"))
+        self.problem()
+            .get("code")
             .and_then(Value::as_str)
             .map(str::to_owned)
     }
@@ -118,6 +146,79 @@ fn tool_dry_run_reads_piped_args_in_either_order() {
     }
 }
 
+/// A flag the tool's schema cannot bind is the caller's invalid request, not a
+/// configuration error: `--json` prints the typed problem, stderr names its
+/// reason code, and the process exits 1 before any daemon is contacted.
+#[test]
+fn tool_argument_errors_are_typed_invalid_requests() {
+    let home = TempDir::new().expect("isolated home");
+    let project = TempDir::new().expect("working directory");
+    let detail = "--limit: expected integer, got `abc`";
+    let outcome = run_tool_from(
+        home.path(),
+        project.path(),
+        "fact_store_list",
+        &["--limit", "abc", "--json"],
+    );
+    let printed = outcome.payload();
+    let problem = &printed["structuredContent"]["problem"];
+    assert_eq!(
+        (
+            &printed["isError"],
+            &problem["kind"],
+            &problem["code"],
+            &problem["message"],
+            &problem["retry"],
+            &problem["legal_actions"],
+        ),
+        (
+            &serde_json::json!(true),
+            &serde_json::json!("invalid_request"),
+            &serde_json::json!("tool_arguments_invalid"),
+            &serde_json::json!(detail),
+            &serde_json::json!("never"),
+            &serde_json::json!([]),
+        ),
+        "stderr:\n{}\n{printed}",
+        outcome.stderr
+    );
+    assert_eq!(
+        (outcome.code, outcome.stderr.as_str()),
+        (
+            Some(1),
+            format!("Error: project route error (tool_arguments_invalid): {detail}\n").as_str()
+        )
+    );
+}
+
+/// The diagnostics read answers to its MCP spelling, with or without the
+/// `tracedecay_` prefix, and per-key flags parse against its advertised schema.
+#[test]
+fn tool_dry_run_resolves_diagnostics_by_mcp_spelling() {
+    let home = TempDir::new().expect("isolated home");
+    let project = TempDir::new().expect("working directory");
+    for name in ["diagnostics", "tracedecay_diagnostics"] {
+        let output = tracedecay_command_with_home(home.path())
+            .current_dir(project.path())
+            .args(["tool", name, "--scope", "workspace", "--dry-run"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|error| panic!("tool {name} dry-run should run: {error}"));
+        assert!(
+            output.status.success(),
+            "tool {name} dry-run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let parsed: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("tool {name} dry-run must print JSON: {error}"));
+        assert_eq!(
+            parsed,
+            serde_json::json!({ "scope": "workspace" }),
+            "{name}"
+        );
+    }
+}
+
 /// Runs `tracedecay tool <tool>` with the given working directory and **no**
 /// `--project`, exactly as an agent or operator standing in a checkout does.
 fn run_surface_tool_from(
@@ -126,31 +227,36 @@ fn run_surface_tool_from(
     tool: &str,
     args: &str,
 ) -> SurfaceOutcome {
+    run_tool_from(home, working_directory, tool, &["--args", args])
+}
+
+/// [`run_surface_tool_from`] with `--json`, which prints the canonical
+/// envelope.
+fn run_surface_tool_json_from(
+    home: &Path,
+    working_directory: &Path,
+    tool: &str,
+    args: &str,
+) -> SurfaceOutcome {
+    run_tool_from(home, working_directory, tool, &["--args", args, "--json"])
+}
+
+fn run_tool_from(
+    home: &Path,
+    working_directory: &Path,
+    tool: &str,
+    tool_args: &[&str],
+) -> SurfaceOutcome {
     let mut command = tracedecay_command_with_home(home);
     command
         .current_dir(working_directory)
-        .args(["tool", tool, "--args", args])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .unwrap_or_else(|error| panic!("tracedecay tool {tool} should spawn: {error}"));
-    let started = Instant::now();
-    loop {
-        if child.try_wait().expect("poll tool child").is_some() {
-            break;
-        }
-        assert!(
-            started.elapsed() < SURFACE_TIMEOUT,
-            "tracedecay tool {tool} hung for {:?}",
-            started.elapsed()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let output = child.wait_with_output().expect("collect tool output");
+        .args(["tool", tool])
+        .args(tool_args);
+    let output = crate::common::output_with_timeout(command, SURFACE_TIMEOUT);
     SurfaceOutcome {
+        json: tool_args.contains(&"--json"),
         success: output.status.success(),
+        code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
@@ -170,28 +276,12 @@ fn run_git_read_from(
         .current_dir(working_directory)
         .arg("git")
         .args(command_args)
-        .arg("--json")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .unwrap_or_else(|error| panic!("tracedecay git {command_args:?} should spawn: {error}"));
-    let started = Instant::now();
-    loop {
-        if child.try_wait().expect("poll git child").is_some() {
-            break;
-        }
-        assert!(
-            started.elapsed() < SURFACE_TIMEOUT,
-            "tracedecay git {command_args:?} hung for {:?}",
-            started.elapsed()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let output = child.wait_with_output().expect("collect git output");
+        .arg("--json");
+    let output = crate::common::output_with_timeout(command, SURFACE_TIMEOUT);
     SurfaceOutcome {
+        json: true,
         success: output.status.success(),
+        code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
@@ -220,13 +310,36 @@ fn assert_surface_resolves_project(
         outcome.stdout,
         outcome.stderr
     );
-    let payload = outcome.payload();
+    let payload = outcome.answer();
     assert!(
         payload.get("scope").is_some(),
         "`{tool}` must answer with an authenticated scope, got:\n{}",
         outcome.stdout
     );
     payload
+}
+
+/// Holds until the cold daemon serves a published generation's code graph.
+/// Graph-backed surfaces answer the retryable `application.code-graph.unavailable`
+/// before that, which is the truthful state of a daemon still activating.
+fn await_graph_ready(home: &Path, project: &Path) {
+    let outcome = run_surface_tool_from(
+        home,
+        project,
+        "status",
+        r#"{"format":"json","wait_for":{"state":"graph_ready","timeout_ms":50000}}"#,
+    );
+    assert!(
+        outcome.success,
+        "status wait failed\nstdout:\n{}\nstderr:\n{}",
+        outcome.stdout, outcome.stderr
+    );
+    assert_eq!(
+        outcome.answer()["wait"],
+        serde_json::json!({ "outcome": "reached" }),
+        "the daemon never served a published code graph: {}",
+        outcome.stdout
+    );
 }
 
 fn surface_fixture() -> (TempDir, TempDir, PathBuf, PathBuf) {
@@ -249,28 +362,13 @@ fn application_surface_primitive_tools_resolve_the_working_directory_project() {
         "storage_status",
         r#"{"format":"json"}"#,
     );
+    await_graph_ready(&home_path, &project_path);
     assert_surface_resolves_project(
         &home_path,
         &project_path,
         "source_outline",
         r#"{"file":"src/lib.rs","format":"json"}"#,
     );
-    assert_surface_resolves_project(
-        &home_path,
-        &project_path,
-        "file_metadata",
-        r#"{"files":["src/lib.rs"],"format":"json"}"#,
-    );
-}
-
-#[test]
-fn application_surface_git_reads_resolve_the_working_directory_worktree() {
-    let (_home, _project, home_path, project_path) = surface_fixture();
-    let _daemon = spawn_tracedecay_daemon(&home_path);
-
-    for tool in ["git_status", "git_diff", "git_history"] {
-        assert_surface_resolves_project(&home_path, &project_path, tool, r#"{"format":"json"}"#);
-    }
 }
 
 #[test]
@@ -290,7 +388,7 @@ fn first_class_git_reads_wait_for_full_publication_then_dispatch() {
              route\nstdout:\n{}\nstderr:\n{}",
             command_args[0], outcome.stdout, outcome.stderr
         );
-        let payload = outcome.payload();
+        let payload = outcome.answer();
         assert!(
             payload.get("scope").is_some(),
             "first-class git {} must preserve the authenticated scope, got:\n{}",
@@ -343,6 +441,280 @@ fn application_surface_tools_resolve_the_project_from_a_subdirectory() {
     assert_surface_resolves_project(&home_path, &nested, "git_status", r#"{"format":"json"}"#);
 }
 
+/// Commits a TypeScript checkout and initializes it, so the daemon admits the
+/// project and, when the project carries its own compiler, its diagnostics
+/// producer.
+fn init_typescript_project(home: &Path, project: &Path, write_fixture: impl FnOnce(&Path)) {
+    write_fixture(project);
+    git(project, &["init", "--initial-branch=master"]);
+    git(project, &["config", "user.email", "surface@example.com"]);
+    git(project, &["config", "user.name", "Surface Test"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "initial"]);
+    crate::common::initialize_tracedecay_cli_project(home, project);
+}
+
+const DIAGNOSTICS_FILE_ARGS: &str = r#"{"scope":"file","path":"src/index.ts","format":"json"}"#;
+
+/// Polls `tracedecay tool diagnostics` until the daemon's producer has
+/// published for the current generation; pending is the only state worth
+/// waiting through.
+fn await_published_cli_diagnostics(home: &Path, project: &Path, args: &str) -> serde_json::Value {
+    let started = Instant::now();
+    loop {
+        let outcome = run_surface_tool_from(home, project, "diagnostics", args);
+        match outcome.problem_code().as_deref() {
+            None => break outcome.answer(),
+            Some("application.diagnostics.pending" | "application.diagnostics.stale") => {
+                assert!(
+                    started.elapsed() < SURFACE_TIMEOUT,
+                    "the TypeScript producer did not publish within {:?}\nstdout:\n{}",
+                    started.elapsed(),
+                    outcome.stdout
+                );
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Some(code) => panic!(
+                "the producer reported a terminal state instead of publishing: {code}\nstdout:\n{}\nstderr:\n{}",
+                outcome.stdout, outcome.stderr
+            ),
+        }
+    }
+}
+
+/// The CLI fallback the MCP error text names must answer exactly like the
+/// MCP tool: a fresh TypeScript project with its own `tsc` yields the
+/// compiler's `TS4023` on the file once the daemon's producer has published.
+#[test]
+fn tool_diagnostics_reads_the_typescript_producer_publication() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Present);
+    });
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let payload = await_published_cli_diagnostics(&home_path, &project_path, DIAGNOSTICS_FILE_ARGS);
+    let records = payload["outcome"]["value"]["payload"]["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diagnostics evidence lists its records: {payload}"));
+    assert_eq!(records.len(), 1, "{payload}");
+    assert_eq!(records[0]["logical_path"], "src/index.ts", "{payload}");
+    assert_eq!(records[0]["diagnostic"]["code"], "TS4023", "{payload}");
+    assert_eq!(records[0]["diagnostic"]["severity"], "error", "{payload}");
+
+    let invocations =
+        std::fs::read_to_string(project_path.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS))
+            .expect("the fixture compiler records every invocation");
+    for invocation in invocations.lines() {
+        let build_info = typescript_fixture_build_info(invocation, &project_path, "tsconfig.json")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the producer runs the project's own tsc from the project root: {invocations}"
+                )
+            });
+        assert!(
+            build_info.starts_with(&home_path),
+            "incremental state lives in the isolated profile's project store: {invocations}"
+        );
+    }
+}
+
+/// Before `npm install` the same read is a typed refusal that carries the
+/// exact setup command and a legal action.
+#[test]
+fn tool_diagnostics_names_the_install_command_without_a_compiler() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Missing);
+    });
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let outcome = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "diagnostics",
+        DIAGNOSTICS_FILE_ARGS,
+    );
+    assert_eq!(
+        outcome.problem_code().as_deref(),
+        Some("application.diagnostics.producer-missing"),
+        "stdout:\n{}\nstderr:\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+    let problem = &outcome.problem();
+    assert_eq!(
+        problem["legal_actions"],
+        serde_json::json!(["refresh"]),
+        "{problem}"
+    );
+    assert!(
+        problem["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("`npm install --save-dev typescript`")),
+        "{problem}"
+    );
+}
+
+/// `--json` carries the typed facts of a scope no tsconfig owns: the file and
+/// every location the owner search checked.
+#[test]
+fn tool_diagnostics_json_carries_the_unowned_scope_detail() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let outcome = run_surface_tool_json_from(
+        &home_path,
+        &project_path,
+        "diagnostics",
+        r#"{"scope":"file","path":"src/lib.rs"}"#,
+    );
+    assert!(!outcome.success, "stdout:\n{}", outcome.stdout);
+    let problem = &outcome.problem();
+    assert_eq!(
+        (&problem["code"], &problem["detail"]),
+        (
+            &serde_json::json!("application.diagnostics.unsupported"),
+            &serde_json::json!({
+                "kind": "diagnostics_unsupported",
+                "file": "src/lib.rs",
+                "searched": [
+                    {"path": "src/tsconfig.json", "present": false},
+                    {"path": "tsconfig.json", "present": false},
+                ],
+            }),
+        ),
+        "stdout:\n{}\nstderr:\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+/// While the project's own compiler is still running, `--json` carries the
+/// pending producer and that it has published no generation yet.
+#[test]
+fn tool_diagnostics_json_carries_the_pending_producer_detail() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Held);
+    });
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let started = Instant::now();
+    let pending = loop {
+        let outcome = run_surface_tool_json_from(
+            &home_path,
+            &project_path,
+            "diagnostics",
+            r#"{"scope":"file","path":"src/index.ts"}"#,
+        );
+        match outcome.problem_code().as_deref() {
+            Some("application.diagnostics.pending") => break outcome.problem(),
+            Some("application.diagnostics.stale") => {
+                assert!(
+                    started.elapsed() < SURFACE_TIMEOUT,
+                    "the read never reached the pending producer\nstdout:\n{}",
+                    outcome.stdout
+                );
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            code => panic!(
+                "a held producer can only be stale or pending, got {code:?}\nstdout:\n{}\nstderr:\n{}",
+                outcome.stdout, outcome.stderr
+            ),
+        }
+    };
+    assert_eq!(
+        pending["detail"],
+        serde_json::json!({
+            "kind": "diagnostics_pending",
+            "producer": "node_modules/.bin/tsc",
+            "generation": null,
+        }),
+        "{pending}"
+    );
+    std::fs::write(project_path.join(TYPESCRIPT_FIXTURE_TSC_RELEASE), "")
+        .expect("release the held compiler");
+}
+
+const MONOREPO_APP_FILE_ARGS: &str =
+    r#"{"scope":"file","path":"packages/app/src/index.ts","format":"json"}"#;
+
+/// Issue #2025 through the CLI fallback: a pnpm monorepo with per-package
+/// tsconfigs and no root `tsconfig.json` publishes a package's `TS4023`.
+#[test]
+fn tool_diagnostics_reads_a_monorepo_package_finding() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_monorepo_diagnostics_fixture(project, TypeScriptFixtureCompiler::Present);
+    });
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let payload =
+        await_published_cli_diagnostics(&home_path, &project_path, MONOREPO_APP_FILE_ARGS);
+    let records = payload["outcome"]["value"]["payload"]["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diagnostics evidence lists its records: {payload}"));
+    assert_eq!(records.len(), 1, "{payload}");
+    assert_eq!(
+        records[0]["logical_path"], TYPESCRIPT_MONOREPO_APP_FILE,
+        "{payload}"
+    );
+    assert_eq!(records[0]["diagnostic"]["code"], "TS4023", "{payload}");
+}
+
+/// The issue's reported command and state, dependencies not installed: the
+/// CLI names the owning tsconfig and `pnpm install`, never "no tsconfig.json".
+#[test]
+fn tool_diagnostics_names_pnpm_install_for_an_uninstalled_monorepo() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_monorepo_diagnostics_fixture(project, TypeScriptFixtureCompiler::Missing);
+    });
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let outcome = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "diagnostics",
+        MONOREPO_APP_FILE_ARGS,
+    );
+    assert_eq!(
+        outcome.problem_code().as_deref(),
+        Some("application.diagnostics.producer-missing"),
+        "stdout:\n{}\nstderr:\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+    let problem = &outcome.problem();
+    assert_eq!(
+        problem["legal_actions"],
+        serde_json::json!(["refresh"]),
+        "{problem}"
+    );
+    assert!(
+        problem["message"].as_str().is_some_and(|message| {
+            message.contains("`packages/app/tsconfig.json`") && message.contains("`pnpm install`")
+        }),
+        "{problem}"
+    );
+}
+
 /// The filesystem root is not a project. A surface call from there must keep
 /// reporting the typed unavailable/unauthorized state rather than inventing a
 /// project from an unrelated ancestor directory.
@@ -369,5 +741,225 @@ fn application_surface_tools_do_not_invent_a_project_outside_a_checkout() {
         outcome.problem_code().is_some(),
         "an unresolved project must surface a typed problem, got:\n{}",
         outcome.stdout
+    );
+}
+
+/// The executable binding id and result schema a Work or Workflow tool's
+/// typed envelope must carry.
+fn family_binding(
+    registry: &tracedecay_tool_catalog::ExecutableBindingRegistryV1,
+    operation_id: &str,
+) -> (String, String) {
+    let operation_id = tracedecay_tool_catalog::OperationId::new(operation_id.to_owned()).unwrap();
+    let binding = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+        .unwrap_or_else(|| panic!("{} is not executable", operation_id.as_str()));
+    let (binding_id, _) = binding
+        .public_route()
+        .unwrap_or_else(|| panic!("{} has no public route", operation_id.as_str()));
+    (
+        binding_id.as_str().to_owned(),
+        binding
+            .result_schema()
+            .schema_ref()
+            .schema_id()
+            .as_str()
+            .to_owned(),
+    )
+}
+
+fn assert_cli_family_envelope(
+    outcome: &SurfaceOutcome,
+    tool: &str,
+    kind: &str,
+    schema_id: &str,
+    binding_id: Option<&str>,
+) -> Value {
+    let payload = outcome.payload();
+    assert_eq!(
+        payload["kind"], kind,
+        "`tracedecay tool {tool}` must answer with the family's typed envelope\nstdout:\n{}\nstderr:\n{}",
+        outcome.stdout, outcome.stderr
+    );
+    let value = &payload["value"];
+    assert_eq!(value["contract"]["schema_id"], schema_id, "{tool}");
+    assert_eq!(value["binding_id"].as_str(), binding_id, "{tool}");
+    let request_id = value["request_id"].as_str().unwrap_or_default();
+    assert!(
+        request_id.starts_with("request.cli."),
+        "`tracedecay tool {tool}` must reach the owner as a CLI request, not a daemon MCP \
+         tool call; request_id was {request_id:?}"
+    );
+    payload
+}
+
+/// `tracedecay tool` runs Work and Workflow through their canonical owner over
+/// the daemon socket: the answer is the family's typed envelope, bound to its
+/// executable result contract, under the CLI's own request identity.
+#[test]
+fn work_and_workflow_tools_answer_through_their_typed_owner() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let work = tracedecay_contracts::work_executable_binding_registry().unwrap();
+    let workflow = tracedecay_contracts::workflow_executable_binding_registry().unwrap();
+
+    let listed = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "tracedecay_work_list_attempts",
+        r#"{"page_size":10}"#,
+    );
+    assert!(
+        listed.success,
+        "stdout:\n{}\nstderr:\n{}",
+        listed.stdout, listed.stderr
+    );
+    let (binding_id, schema_id) = family_binding(work, "operation.work.list_attempts");
+    assert_cli_family_envelope(
+        &listed,
+        "tracedecay_work_list_attempts",
+        "success",
+        &schema_id,
+        Some(&binding_id),
+    );
+
+    let definitions =
+        run_surface_tool_from(&home_path, &project_path, "workflow_list_definitions", "{}");
+    assert!(
+        definitions.success,
+        "stdout:\n{}\nstderr:\n{}",
+        definitions.stdout, definitions.stderr
+    );
+    let (binding_id, schema_id) = family_binding(workflow, "operation.workflow.list_definitions");
+    assert_cli_family_envelope(
+        &definitions,
+        "workflow_list_definitions",
+        "success",
+        &schema_id,
+        Some(&binding_id),
+    );
+
+    // An unknown definition is a concealed denial: it keeps the operation's
+    // result contract but withholds the binding, and fails the process.
+    let concealed = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "tracedecay_workflow_get_definition",
+        r#"{"definition_id":"workflow.absent","definition_version":1}"#,
+    );
+    assert!(
+        !concealed.success,
+        "a typed Workflow problem must fail the process\nstdout:\n{}",
+        concealed.stdout
+    );
+    let (_, schema_id) = family_binding(workflow, "operation.workflow.get_definition");
+    let concealed = assert_cli_family_envelope(
+        &concealed,
+        "tracedecay_workflow_get_definition",
+        "problem",
+        &schema_id,
+        None,
+    );
+    assert_eq!(
+        concealed["value"]["problem"]["kind"],
+        "not_found_or_not_authorized"
+    );
+}
+
+/// A refusal raised before dispatch answers `--json` with the typed problem
+/// record at `structuredContent.problem`, as every refusal does, so a shell
+/// caller branches on `code` instead of parsing prose, and the refused edit
+/// writes nothing.
+#[test]
+fn tool_json_reports_argument_refusals_as_typed_problems() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let source_before = std::fs::read_to_string(project_path.join("src/lib.rs")).unwrap();
+
+    for (tool, args, detail) in [
+        (
+            "configuration_get",
+            r#"{"key":"sweep"}"#,
+            "application surface request does not match its reviewed schema: configuration surface request is inconsistent with the application contract",
+        ),
+        (
+            "str_replace",
+            r#"{"path":"src/lib.rs","old_str":"42","new_str":"43"}"#,
+            "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
+        ),
+        (
+            "fact_store_get",
+            r#"{"fact_id":7}"#,
+            "application surface request does not match its reviewed schema: fact_id: invalid type: integer `7`, expected a string",
+        ),
+        (
+            "lcm_doctor",
+            r#"{"storage_scope":"hermes_profile"}"#,
+            "application surface request does not match its reviewed schema: storage_scope must be one of project, user",
+        ),
+    ] {
+        let outcome = run_surface_tool_json_from(&home_path, &project_path, tool, args);
+        assert!(
+            !outcome.success,
+            "`tracedecay tool {tool}` must fail\nstdout:\n{}\nstderr:\n{}",
+            outcome.stdout, outcome.stderr
+        );
+        let printed = outcome.payload();
+        let problem = &printed["structuredContent"]["problem"];
+        assert_eq!(
+            (
+                &printed["isError"],
+                &problem["kind"],
+                &problem["code"],
+                &problem["message"],
+                &problem["retry"],
+            ),
+            (
+                &serde_json::json!(true),
+                &serde_json::json!("invalid_request"),
+                &serde_json::json!("application_surface_invalid_request"),
+                &serde_json::json!(detail),
+                &serde_json::json!("never"),
+            ),
+            "stderr:\n{}\n{printed}",
+            outcome.stderr
+        );
+        assert_eq!(
+            (outcome.code, outcome.stderr.lines().last()),
+            (
+                Some(1),
+                Some(
+                    format!(
+                        "Error: project route error (application_surface_invalid_request): {detail}"
+                    )
+                    .as_str()
+                )
+            ),
+            "stderr:\n{}",
+            outcome.stderr
+        );
+    }
+
+    let unknown = run_tool_from(&home_path, &project_path, "not_a_real_tool", &["--json"]);
+    assert!(
+        !unknown.success,
+        "an unknown tool must fail: {}",
+        unknown.stderr
+    );
+    let problem = &unknown.problem();
+    assert_eq!(
+        (&problem["code"], &problem["kind"], &problem["retryable"]),
+        (
+            &serde_json::json!("unknown_tool"),
+            &serde_json::json!("invalid_request"),
+            &serde_json::json!(false)
+        ),
+        "{problem}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
+        source_before
     );
 }

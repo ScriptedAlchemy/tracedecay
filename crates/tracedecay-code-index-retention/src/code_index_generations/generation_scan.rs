@@ -7,17 +7,39 @@ use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_lowercas
 
 use super::{
     CodeGenerationRetentionErrorV1, GenerationDigestVerificationV1,
-    MAX_GENERATION_METADATA_PREFIX_BYTES, SealedGenerationManifestMetadataV1, storage,
+    MAX_GENERATION_METADATA_PREFIX_BYTES, SealedGenerationManifestMetadataV1, deferred_if_absent,
+    storage,
 };
 
-#[hotpath::measure(label = "usecases.retention.read_metadata")]
+const MAX_FORMAT_REVISION_PREFIX_BYTES: usize = 4 * 1024;
+
+pub(super) fn read_generation_format_revision(
+    path: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<u32, CodeGenerationRetentionErrorV1> {
+    let mut file = File::open(path).map_err(deferred_if_absent)?;
+    let mut prefix = vec![0_u8; MAX_FORMAT_REVISION_PREFIX_BYTES];
+    let bytes_read = file.read(&mut prefix).map_err(storage)?;
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
+    prefix.truncate(bytes_read);
+    parse_json_u32_field(&prefix, b"format_revision").ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "generation file '{}' has no readable format revision in its bounded prefix",
+            path.display()
+        ))
+    })
+}
+
+#[tracing::instrument(name = "usecases.retention.read_metadata", level = "trace", skip_all)]
 pub(super) fn read_generation_metadata(
     path: &Path,
     verification: GenerationDigestVerificationV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(u32, SealedGenerationManifestMetadataV1, String, u64), CodeGenerationRetentionErrorV1>
 {
-    let mut file = File::open(path).map_err(storage)?;
+    let mut file = File::open(path).map_err(deferred_if_absent)?;
     let size_bytes = file.metadata().map_err(storage)?.len();
     let mut hasher = Sha256::new();
     let mut prefix = Vec::with_capacity(MAX_GENERATION_METADATA_PREFIX_BYTES);
@@ -27,15 +49,12 @@ pub(super) fn read_generation_metadata(
         if bytes_read == 0 {
             break;
         }
-        crate::hotpath_observe::retention_inspected(bytes_read as u64);
         if verification == GenerationDigestVerificationV1::Full {
             hasher.update(&buffer[..bytes_read]);
-            crate::hotpath_observe::retention_hashed(bytes_read as u64);
         }
         let remaining = MAX_GENERATION_METADATA_PREFIX_BYTES.saturating_sub(prefix.len());
         prefix.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
         if is_cancelled() {
-            crate::hotpath_observe::retention_cancelled();
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         if verification == GenerationDigestVerificationV1::MetadataOnly

@@ -1,48 +1,42 @@
-use std::sync::mpsc;
+use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::Duration;
 
 use tracedecay::session_temporal_benchmark::IsolatedBenchmarkEnv;
 
+/// Benchmark environments hand their home and data directory to the harness
+/// explicitly, so two of them run at the same time without sharing either.
 #[test]
-fn concurrent_benchmark_environments_do_not_overlap() {
-    let (first_entered_tx, first_entered_rx) = mpsc::channel();
-    let (first_release_tx, first_release_rx) = mpsc::channel();
-    let first = thread::spawn(move || {
-        let _isolated = IsolatedBenchmarkEnv::enter("session-temporal-env-first-").unwrap();
-        first_entered_tx.send(()).unwrap();
-        first_release_rx.recv().unwrap();
-    });
-    first_entered_rx.recv().unwrap();
+fn concurrent_benchmark_environments_stay_disjoint() {
+    let both_entered = Arc::new(Barrier::new(2));
+    let enter = |prefix: &'static str| {
+        let both_entered = Arc::clone(&both_entered);
+        thread::spawn(move || {
+            let isolated = IsolatedBenchmarkEnv::enter(prefix).unwrap();
+            both_entered.wait();
+            (
+                isolated.home().to_path_buf(),
+                isolated.data_dir().to_path_buf(),
+                isolated.home().is_dir() && isolated.data_dir().is_dir(),
+            )
+        })
+    };
+    let first = enter("session-temporal-env-first-");
+    let second = enter("session-temporal-env-second-");
+    let (first_home, first_data, first_ready) = first.join().unwrap();
+    let (second_home, second_data, second_ready) = second.join().unwrap();
 
-    let (second_entered_tx, second_entered_rx) = mpsc::channel();
-    let (second_release_tx, second_release_rx) = mpsc::channel();
-    let second = thread::spawn(move || {
-        let _isolated = IsolatedBenchmarkEnv::enter("session-temporal-env-second-").unwrap();
-        second_entered_tx.send(()).unwrap();
-        second_release_rx.recv().unwrap();
-    });
-
-    let overlapped = second_entered_rx
-        .recv_timeout(Duration::from_secs(1))
-        .is_ok();
-    if overlapped {
-        second_release_tx.send(()).unwrap();
-        second.join().unwrap();
-        first_release_tx.send(()).unwrap();
-        first.join().unwrap();
-    } else {
-        first_release_tx.send(()).unwrap();
-        first.join().unwrap();
-        second_entered_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("second environment guard should enter after the first is released");
-        second_release_tx.send(()).unwrap();
-        second.join().unwrap();
+    assert!(first_ready && second_ready);
+    for (left, right) in [
+        (&first_home, &second_home),
+        (&first_data, &second_data),
+        (&first_home, &second_data),
+        (&first_data, &second_home),
+    ] {
+        assert!(
+            !left.starts_with(right) && !right.starts_with(left),
+            "concurrent benchmark environments share {} and {}",
+            left.display(),
+            right.display()
+        );
     }
-
-    assert!(
-        !overlapped,
-        "process-global environment guards must not overlap"
-    );
 }

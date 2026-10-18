@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -7,54 +7,71 @@ use std::sync::{
 };
 
 use serde_json::json;
-
+use tracedecay_application::pr_tracking::{
+    ManualBranchLifecycleLeaseV1, acquire_manual_branch_lifecycle,
+    manual_branch_source_owns_artifacts,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_host_admission::{HostAdmissionBroker, HostAdmissionRuntime, SpoolOpenReport};
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+#[cfg(unix)]
+use tracedecay_runtime_core::branch::BranchAddOutcome;
+#[cfg(unix)]
+use tracedecay_runtime_core::cancellation::CancellationToken;
+#[cfg(unix)]
+use tracedecay_runtime_core::native_runtime;
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
-use super::profile_host_admission_replay::{
+#[cfg(unix)]
+use super::scheduler::{AutomationSchedulerHandle, AutomationSchedulerSignal};
+use super::{DaemonHandshake, DatabaseOwnerRegistry, write_daemon_response};
+use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry;
+#[cfg(unix)]
+use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
+use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
+use tracedecay_daemon_identity::{authority, profile_identity};
+use tracedecay_daemon_service::{
     ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
     ProfileHostAdmissionReplayRegistry,
 };
-#[cfg(unix)]
-use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
-use super::store_writer_gate::StoreWriterGates;
-pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
-use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
-use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
-use tracedecay_daemon_identity::{authority, profile_identity};
-use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
+use tracedecay_mcp::handlers::hook_runtime::replay_projectless_hermes_host_admission;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_store_runtime::StoreWriterGates;
+pub(super) use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 mod project_retirement;
+pub(crate) use project_retirement::retire_registered_context_scout_owner;
 mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;
 
-#[cfg(all(unix, feature = "hotpath"))]
-type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(all(unix, not(feature = "hotpath")))]
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
-#[cfg(all(unix, feature = "hotpath"))]
-type ProfiledStdMutexGuard<'a, T> = hotpath::mutexes::MutexGuard<'a, T>;
-#[cfg(all(unix, not(feature = "hotpath")))]
-type ProfiledStdMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+type HostAdmissionBrokerSlot =
+    Arc<tokio::sync::OnceCell<tracedecay_host_admission::SharedHostAdmissionBroker>>;
+type HostAdmissionBrokers = Arc<tokio::sync::Mutex<HashMap<PathBuf, HostAdmissionBrokerSlot>>>;
+/// One profile session refresh service per profile session store. The service
+/// owns the opaque refresh handles it issued, so every route that reaches the
+/// same store (project MCP servers and the projectless client) must share the
+/// instance for `status`/`cancel` to resolve a `begin` handle.
+type ProfileSessionRefreshServices =
+    Arc<tokio::sync::Mutex<HashMap<PathBuf, ProfileSessionRefreshAuthorityV1>>>;
 
-#[cfg(feature = "hotpath")]
-type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
-
-type HostAdmissionBrokers =
-    Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_host_admission::SharedHostAdmissionBroker>>>;
+/// The daemon-wide refresh service of one profile session store and the
+/// serving status of the scheduler worker it wakes.
+#[derive(Clone)]
+pub(super) struct ProfileSessionRefreshAuthorityV1 {
+    pub(super) service: Arc<tracedecay_daemon_service::DaemonSessionRefreshService>,
+    pub(super) serving: Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
+}
 
 /// Resolves the writer scope for one store family.
 ///
-/// The key is the canonical `data_root` — the exact value
-/// [`StoreOwnerKey::store_root`](super::StoreOwnerKey) carries — so every lane
+/// The key is the canonical `data_root`, the exact value
+/// [`StoreOwnerKey::store_root`](super::StoreOwnerKey) carries, so every lane
 /// naming the same store lands on the same gate. A path that cannot be
 /// canonicalized degrades to daemon-wide, which is strictly *more* exclusive and
 /// therefore can never split one store's gate into two.
@@ -77,10 +94,18 @@ pub(super) fn owner_writer_scope(key: &ProjectServerKey) -> WriterScope {
 
 /// [`store_writer_scope`] for the store an open graph is serving.
 pub(super) fn graph_writer_scope(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     class: StoreWriterClass,
 ) -> WriterScope {
     store_writer_scope(&cg.store_layout().data_root, class)
+}
+
+/// What a caller reads from a project session store: session features are
+/// refused while the store is held reset-required, its configuration is not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectSessionShardUse {
+    Sessions,
+    Configuration,
 }
 
 #[cfg(unix)]
@@ -99,9 +124,8 @@ struct MaintenanceReaperKey {
 
 #[cfg(unix)]
 struct MaintenanceReaperHandle {
-    retired_task: tokio::task::AbortHandle,
+    retired_task: Arc<native_runtime::NativeTask<()>>,
     termination: Arc<MaintenanceTaskTermination>,
-    _task: tokio::task::JoinHandle<()>,
 }
 
 #[cfg(unix)]
@@ -114,7 +138,7 @@ struct MaintenanceReaperRegistryState {
 
 #[cfg(unix)]
 struct MaintenanceReaperRegistry {
-    state: ProfiledStdMutex<MaintenanceReaperRegistryState>,
+    state: std::sync::Mutex<MaintenanceReaperRegistryState>,
     changed: tokio::sync::Notify,
     #[cfg(test)]
     registration_barrier: std::sync::Mutex<Option<Arc<RetirementReaperRegistrationBarrier>>>,
@@ -128,15 +152,12 @@ struct MaintenanceReaperRegistry {
 impl Default for MaintenanceReaperRegistry {
     fn default() -> Self {
         Self {
-            state: hotpath::mutex!(
-                std::sync::Mutex::new(MaintenanceReaperRegistryState {
-                    accepting: true,
-                    pending: HashMap::new(),
-                    next_generation: 1,
-                    reapers: HashMap::new(),
-                }),
-                label = "daemon.branch_admin.retirement_reapers.state"
-            ),
+            state: std::sync::Mutex::new(MaintenanceReaperRegistryState {
+                accepting: true,
+                pending: HashMap::new(),
+                next_generation: 1,
+                reapers: HashMap::new(),
+            }),
             changed: tokio::sync::Notify::new(),
             #[cfg(test)]
             registration_barrier: std::sync::Mutex::new(None),
@@ -150,17 +171,10 @@ impl Default for MaintenanceReaperRegistry {
 
 #[cfg(unix)]
 impl MaintenanceReaperRegistry {
-    fn state(&self) -> ProfiledStdMutexGuard<'_, MaintenanceReaperRegistryState> {
+    fn state(&self) -> std::sync::MutexGuard<'_, MaintenanceReaperRegistryState> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn publish_counts(state: &MaintenanceReaperRegistryState) {
-        hotpath::gauge!("daemon.branch_admin.retirement_reapers.pending")
-            .set(state.pending.values().copied().sum::<usize>() as u64);
-        hotpath::gauge!("daemon.branch_admin.retirement_reapers.active")
-            .set(state.reapers.len() as u64);
     }
 
     fn reserve(self: &Arc<Self>, owner: &ProjectServerKey) -> Option<MaintenanceReaperReservation> {
@@ -169,7 +183,6 @@ impl MaintenanceReaperRegistry {
             return None;
         }
         *state.pending.entry(owner.owner.clone()).or_default() += 1;
-        Self::publish_counts(&state);
         drop(state);
         self.changed.notify_waiters();
         Some(MaintenanceReaperReservation {
@@ -190,7 +203,6 @@ impl MaintenanceReaperRegistry {
         if remove {
             state.pending.remove(owner);
         }
-        Self::publish_counts(&state);
         drop(state);
         self.changed.notify_waiters();
     }
@@ -217,7 +229,6 @@ impl MaintenanceReaperRegistry {
     fn finish(&self, key: &MaintenanceReaperKey) {
         let mut state = self.state();
         state.reapers.remove(key);
-        Self::publish_counts(&state);
         drop(state);
         self.changed.notify_waiters();
     }
@@ -249,8 +260,10 @@ struct MaintenanceReaperFinalizer {
 #[cfg(unix)]
 impl Drop for MaintenanceReaperFinalizer {
     fn drop(&mut self) {
-        self.termination.finish();
+        // Termination is the reaper's completion latch: waiters that wake on it
+        // must already see the registry record gone.
         self.registry.finish(&self.key);
+        self.termination.finish();
     }
 }
 
@@ -319,8 +332,8 @@ pub(super) struct SessionRuntimeRegistryEntryV1 {
     pub(super) registry:
         Arc<tokio::sync::OnceCell<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>>,
 }
-type SessionRuntimeRegistries = HashMap<PathBuf, SessionRuntimeRegistryEntryV1>;
-pub(super) type SharedSessionRuntimeRegistries = Arc<ProfiledTokioMutex<SessionRuntimeRegistries>>;
+pub(super) type SessionRuntimeRegistries = HashMap<PathBuf, SessionRuntimeRegistryEntryV1>;
+pub(super) type SharedSessionRuntimeRegistries = Arc<tokio::sync::Mutex<SessionRuntimeRegistries>>;
 
 #[derive(Clone)]
 struct ProfileHostAdmissionBootstrapContext {
@@ -329,11 +342,9 @@ struct ProfileHostAdmissionBootstrapContext {
     session_runtime_registry:
         Arc<tokio::sync::OnceCell<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>>,
     host_admission_brokers: HostAdmissionBrokers,
-    host_admission_broker_gate: Arc<ProfiledTokioMutex<()>>,
     profile_host_admission_replay: Weak<ProfileHostAdmissionReplayRegistry>,
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl ProfileHostAdmissionBootstrapContext {
     async fn ensure(&self) -> Result<()> {
         let profile_identity = self.profile_identity.clone();
@@ -372,7 +383,12 @@ impl ProfileHostAdmissionBootstrapContext {
                     error.to_string(),
                 )
             })?;
-        let broker = self.open_broker(&broker_path).await?;
+        let broker = open_host_admission_broker(
+            &self.host_admission_brokers,
+            &broker_path,
+            HostAdmissionRuntime::open_for_database,
+        )
+        .await?;
         let Some(replay) = self.profile_host_admission_replay.upgrade() else {
             return Err(TraceDecayError::project_route(
                 "daemon_shutting_down",
@@ -385,28 +401,24 @@ impl ProfileHostAdmissionBootstrapContext {
             .await;
         Ok(())
     }
+}
 
-    #[hotpath::measure(label = "daemon.branch_admin.open_broker", future = true)]
-    async fn open_broker(
-        &self,
-        path: &Path,
-    ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
-        if let Some(broker) = self.host_admission_brokers.lock().await.get(path).cloned() {
-            return Ok(broker);
-        }
-
-        let _open = self.host_admission_broker_gate.lock().await;
-        let brokers = self.host_admission_brokers.lock().await;
-        if let Some(broker) = brokers.get(path) {
-            return Ok(Arc::clone(broker));
-        }
-        drop(brokers);
+/// Returns the cached broker for `path`, opening its runtime at most once.
+/// Openers of one path share its in-flight open; a slow spool open never
+/// delays the first open of another path.
+#[tracing::instrument(name = "daemon.branch_admin.open_broker", level = "trace", skip_all)]
+async fn open_host_admission_broker(
+    brokers: &HostAdmissionBrokers,
+    path: &Path,
+    open: impl FnOnce(&Path) -> Result<(HostAdmissionRuntime, SpoolOpenReport)> + Send + 'static,
+) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
+    let slot = Arc::clone(brokers.lock().await.entry(path.to_path_buf()).or_default());
+    slot.get_or_try_init(|| async {
         let open_path = path.to_path_buf();
-        let (runtime, _) = tokio::task::spawn_blocking(move || {
-            hotpath::measure_block!(
-                "daemon.branch_admin.host_admission_runtime.open",
-                tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&open_path)
-            )
+        let (runtime, _) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            let _span =
+                tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open").entered();
+            open(&open_path)
         })
         .await
         .map_err(|_| {
@@ -416,21 +428,18 @@ impl ProfileHostAdmissionBootstrapContext {
                 "host-admission spool runtime task failed",
             )
         })??;
-        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
-        self.host_admission_brokers
-            .lock()
-            .await
-            .insert(path.to_path_buf(), Arc::clone(&broker));
-        Ok(broker)
-    }
+        Ok(Arc::new(HostAdmissionBroker::new(runtime)))
+    })
+    .await
+    .cloned()
 }
 
 /// Coordinates every daemon operation that can create, rekey, or remove a
 /// database owner. There is one copy of each shared registry so branch
 /// administration cannot prove ownership against stale daemon state.
 ///
-/// Writer admission itself is *per store* — see
-/// [`store_writer_gate`](super::store_writer_gate) for the hierarchy and the
+/// Writer admission itself is *per store*, see
+/// [`tracedecay_store_runtime::writer_gate`] for the hierarchy and the
 /// exclusivity argument. The proof branch administration performs is computed
 /// from one store family's database paths, so a writer on another store can
 /// never invalidate it; a single daemon-wide gate only meant a sync of project
@@ -438,8 +447,10 @@ impl ProfileHostAdmissionBootstrapContext {
 #[derive(Clone)]
 pub(super) struct StoreAdministration {
     profile_identity: Option<profile_identity::LocalProfileIdentityAuthorityV1>,
+    /// The profile the daemon process serves, as its boundary resolved it.
+    owner_profile: Option<tracedecay_runtime_core::config::ProfileRoot>,
     authenticated_profile_database_scopes:
-        Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_runtime_core::db::DaemonDatabaseScope>>>,
+        Arc<tokio::sync::Mutex<HashMap<PathBuf, tracedecay_runtime_core::db::DaemonDatabaseScope>>>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
     session_runtime_registry_admission_closed: Arc<AtomicBool>,
     gate: Arc<StoreWriterGates>,
@@ -450,16 +461,26 @@ pub(super) struct StoreAdministration {
         Arc<tokio::sync::Mutex<Vec<RetainedProjectShutdownOwner>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: HostAdmissionBrokers,
-    host_admission_broker_gate: Arc<ProfiledTokioMutex<()>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
+    profile_session_refresh_services: ProfileSessionRefreshServices,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
-    store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
+    store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
+    /// Held by a maintenance tick while its telemetry pass or a store unit
+    /// leases stores, and by a capacity retirement's store release, which
+    /// refuses a leased store.
+    maintenance_store_clients: Arc<tokio::sync::Mutex<()>>,
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
+    /// Early-stop handles of every started automation loop, kept outside the
+    /// async scheduler map so synchronous cancel never waits for that map.
+    #[cfg(unix)]
+    automation_scheduler_signals: Arc<std::sync::Mutex<Vec<AutomationSchedulerSignal>>>,
+    #[cfg(unix)]
+    manual_branch_publications: Arc<ManualBranchPublicationTasks>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
-    native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
+    native_integration_services: Arc<DaemonNativeIntegrationServiceRegistry>,
     remote_recovery_project_lifecycles:
         remote_recovery_lifecycle::SharedRemoteRecoveryProjectLifecyclesV1,
     #[cfg(unix)]
@@ -470,6 +491,64 @@ pub(super) struct StoreAdministration {
     /// remainder of the deletion.
     remote_account_deletion_tombstone_persist:
         Arc<tokio::sync::watch::Sender<Option<tracedecay_global_db::RemoteDeletionTombstone>>>,
+    /// How often this daemon may run a global-database retention pass, shared
+    /// by every project scheduler loop that clones this handle. The cadence
+    /// type lives in the unix scheduler, which is the only caller.
+    #[cfg(unix)]
+    global_retention_cadence: super::scheduler::SharedGlobalRetentionCadence,
+}
+
+#[cfg(unix)]
+struct ManualBranchPublicationTasks {
+    closed: AtomicBool,
+    join_failed: AtomicBool,
+    cancellation: CancellationToken,
+    tasks: tokio::sync::Mutex<Vec<ManualBranchPublication>>,
+}
+
+#[cfg(unix)]
+impl Default for ManualBranchPublicationTasks {
+    fn default() -> Self {
+        Self {
+            closed: AtomicBool::new(false),
+            join_failed: AtomicBool::new(false),
+            cancellation: CancellationToken::new(),
+            tasks: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+/// One admitted publication; dropping it aborts the task, as a dropped
+/// `JoinSet` did.
+#[cfg(unix)]
+struct ManualBranchPublication(native_runtime::NativeTask<()>);
+
+#[cfg(unix)]
+impl Drop for ManualBranchPublication {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(unix)]
+impl ManualBranchPublicationTasks {
+    /// Logs and records a publication that ended without completing.
+    fn record_join_failure(&self, action: &str, outcome: native_runtime::NativeTaskOutcome<()>) {
+        let reason = match outcome {
+            native_runtime::NativeTaskOutcome::Completed(()) => return,
+            native_runtime::NativeTaskOutcome::Cancelled => "task cancelled".to_owned(),
+            native_runtime::NativeTaskOutcome::Panicked(panic) => format!("task panicked: {panic}"),
+        };
+        self.join_failed.store(true, Ordering::Release);
+        log_daemon_event(
+            "manual_branch_publication",
+            &[
+                ("action", action.to_owned()),
+                ("outcome", "task_join_failed".to_owned()),
+                ("reason", reason),
+            ],
+        );
+    }
 }
 
 /// Waitable receipt for the durable account-deletion tombstone persist.
@@ -508,44 +587,47 @@ impl Default for StoreAdministration {
     fn default() -> Self {
         Self {
             profile_identity: None,
-            authenticated_profile_database_scopes: Arc::new(hotpath::mutex!(
+            owner_profile: None,
+            authenticated_profile_database_scopes: Arc::new(
                 tokio::sync::Mutex::new(HashMap::new()),
-                label = "daemon.branch_admin.profile_scopes"
-            )),
-            session_runtime_registries: Arc::new(hotpath::mutex!(
-                tokio::sync::Mutex::new(HashMap::new()),
-                label = "daemon.branch_admin.session_runtime_registries"
-            )),
+            ),
+            session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_runtime_registry_admission_closed: Arc::new(AtomicBool::new(false)),
             gate: Arc::new(StoreWriterGates::default()),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
             project_server_retirements: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             retained_project_shutdown_owners: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
-            host_admission_brokers: Arc::new(hotpath::mutex!(
-                tokio::sync::Mutex::new(HashMap::new()),
-                label = "daemon.branch_admin.host_admission_brokers"
-            )),
-            host_admission_broker_gate: Arc::new(hotpath::mutex!(
-                tokio::sync::Mutex::new(()),
-                label = "daemon.branch_admin.host_admission_broker.gate"
-            )),
-            profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
+            host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            profile_host_admission_replay: Arc::new(
+                ProfileHostAdmissionReplayRegistry::with_replay_pass(Arc::new(
+                    |broker, profile_root| {
+                        Box::pin(async move {
+                            replay_projectless_hermes_host_admission(&broker, &profile_root).await
+                        })
+                    },
+                )),
+            ),
+            profile_session_refresh_services: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_sync_service: Arc::new(
                 tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default(),
             ),
-            store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry::default(),
+            store_telemetry_sampling:
+                tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::default(),
+            maintenance_store_clients: Arc::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            #[cfg(unix)]
+            automation_scheduler_signals: Arc::default(),
+            #[cfg(unix)]
+            manual_branch_publications: Arc::new(ManualBranchPublicationTasks::default()),
             session_temporal_refresh_schedulers: Arc::new(
                 SessionTemporalRefreshSchedulerRegistry::default(),
             ),
             git_index_transaction_services: Arc::new(
-                DaemonGitIndexTransactionServiceRegistry::default(),
+                DaemonGitIndexTransactionServiceRegistry::new(build_application_catalog_snapshot),
             ),
-            native_integration_services: Arc::new(
-                DaemonNativeIntegrationRuntimeRegistrar::default(),
-            ),
+            native_integration_services: Arc::new(DaemonNativeIntegrationServiceRegistry::default()),
             remote_recovery_project_lifecycles: Arc::default(),
             #[cfg(unix)]
             retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
@@ -553,23 +635,181 @@ impl Default for StoreAdministration {
                 let (sender, _) = tokio::sync::watch::channel(None);
                 sender
             }),
+            #[cfg(unix)]
+            global_retention_cadence: Arc::default(),
         }
     }
 }
 
 impl StoreAdministration {
+    /// This daemon's global-database retention cadence.
+    #[cfg(unix)]
+    pub(super) fn global_retention_cadence(
+        &self,
+    ) -> &super::scheduler::SharedGlobalRetentionCadence {
+        &self.global_retention_cadence
+    }
+
+    #[cfg(unix)]
+    async fn spawn_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<BranchAddOutcome>>>
+    where
+        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        if self
+            .manual_branch_publications
+            .closed
+            .load(Ordering::Acquire)
+        {
+            return Err(TraceDecayError::project_route(
+                "branch_tracking_failed",
+                true,
+                "manual branch publication admission is closed",
+            ));
+        }
+        let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+        {
+            let mut tasks = self.manual_branch_publications.tasks.lock().await;
+            if self
+                .manual_branch_publications
+                .closed
+                .load(Ordering::Acquire)
+            {
+                return Err(TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    "manual branch publication admission is closed",
+                ));
+            }
+            tasks.retain(|task| match task.0.try_finished() {
+                Some(outcome) => {
+                    self.manual_branch_publications
+                        .record_join_failure("reap", outcome);
+                    false
+                }
+                None => true,
+            });
+            let cancellation = self.manual_branch_publications.cancellation.clone();
+            let task = native_runtime::NativeTask::spawn(async move {
+                let _ = result_sender.send(publication(cancellation).await);
+            })
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication could not start: {error}"),
+                )
+            })?;
+            tasks.push(ManualBranchPublication(task));
+        }
+        Ok(result_receiver)
+    }
+
+    #[cfg(all(unix, any(test, feature = "test-transport")))]
+    pub(super) async fn run_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        self.spawn_manual_branch_publication(publication)
+            .await?
+            .await
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before completion: {error}"),
+                )
+            })?
+    }
+
+    /// Admit exact branch publication to the daemon-owned task set. The
+    /// caller returns while activation and indexing continue under shutdown
+    /// ownership.
+    #[cfg(unix)]
+    pub(super) async fn admit_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication:
+            FnOnce(CancellationToken, tokio::sync::oneshot::Sender<()>) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        let (admitted_sender, admitted_receiver) = tokio::sync::oneshot::channel();
+        let completion = self
+            .spawn_manual_branch_publication(move |cancellation| {
+                publication(cancellation, admitted_sender)
+            })
+            .await?;
+        match admitted_receiver.await {
+            Ok(()) => Ok(BranchAddOutcome::Deferred),
+            Err(_) => completion.await.map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before admission: {error}"),
+                )
+            })?,
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn cancel_manual_branch_publications(&self) {
+        self.manual_branch_publications
+            .closed
+            .store(true, Ordering::Release);
+        self.manual_branch_publications.cancellation.cancel();
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn shutdown_manual_branch_publications(
+        &self,
+    ) -> std::result::Result<(), String> {
+        self.cancel_manual_branch_publications();
+        let tasks = {
+            let mut owned = self.manual_branch_publications.tasks.lock().await;
+            std::mem::take(&mut *owned)
+        };
+        for task in tasks {
+            let outcome = task.0.wait().await;
+            self.manual_branch_publications
+                .record_join_failure("shutdown", outcome);
+        }
+        if self
+            .manual_branch_publications
+            .join_failed
+            .load(Ordering::Acquire)
+        {
+            Err("manual branch publication task failed to join".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
     pub(super) fn configure_codex_preparation_resources(
         &self,
         memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
+        background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
     ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<()> {
         self.session_temporal_refresh_schedulers
-            .configure_codex_preparation_resources(memory)
+            .configure_codex_preparation_resources(memory, background_cpu)
     }
 
     pub(super) fn store_telemetry_sampling(
         &self,
-    ) -> super::maintenance::StoreTelemetrySamplingRegistry {
+    ) -> tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry {
         self.store_telemetry_sampling.clone()
+    }
+
+    pub(super) fn maintenance_store_clients(&self) -> &tokio::sync::Mutex<()> {
+        &self.maintenance_store_clients
     }
 
     pub(super) fn project_routes(&self) -> crate::mcp::project_route::SharedHookProjectRouteCache {
@@ -582,6 +822,34 @@ impl StoreAdministration {
     ) -> Self {
         self.profile_identity = Some(profile_identity);
         self
+    }
+
+    pub(super) fn with_owner_profile(
+        mut self,
+        owner_profile: tracedecay_runtime_core::config::ProfileRoot,
+    ) -> Self {
+        self.store_telemetry_sampling =
+            tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::persisted_under(
+                owner_profile.data_dir(),
+            );
+        self.owner_profile = Some(owner_profile);
+        self
+    }
+
+    /// Home of the daemon owner's user, which no request may open as a
+    /// project.
+    pub(super) fn owner_home(&self) -> Result<Option<&Path>> {
+        Ok(self.owner_profile()?.home())
+    }
+
+    /// The profile the daemon process serves: its home, data directory, and
+    /// global database.
+    pub(super) fn owner_profile(&self) -> Result<&tracedecay_runtime_core::config::ProfileRoot> {
+        self.owner_profile
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon owner profile is unavailable".to_string(),
+            })
     }
 
     pub(super) fn profile_identity(
@@ -601,7 +869,11 @@ impl StoreAdministration {
     /// project/runtime owners keep the authority after the admitting socket
     /// closes. Concurrent first requests for one profile reuse exactly one
     /// process-stable election scope.
-    #[hotpath::measure(label = "daemon.branch_admin.retain_profile_scope", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.retain_profile_scope",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn retain_authenticated_profile_database_scope(
         &self,
         profile_root: &Path,
@@ -620,9 +892,10 @@ impl StoreAdministration {
         Ok(())
     }
 
-    #[hotpath::measure(
-        label = "daemon.branch_admin.registered_profile_session_database",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.branch_admin.registered_profile_session_database",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn registered_profile_session_database(
         &self,
@@ -634,40 +907,23 @@ impl StoreAdministration {
         Box::pin(registry.profile_sessions()).await
     }
 
-    #[hotpath::measure(
-        label = "daemon.branch_admin.registered_profile_database",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.branch_admin.registered_profile_database",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn registered_profile_database(
         &self,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let database = Box::pin(self.raw_registered_profile_database()).await?;
-        let profile_id = self.profile_identity()?.profile_id().as_str();
-        if database
-            .remote_account_deletion_tombstone(profile_id)
-            .await?
-            .is_some()
-        {
-            return Err(TraceDecayError::project_route(
-                "remote_deleted",
-                false,
-                "authenticated profile was remotely deleted",
-            ));
-        }
+        self.refuse_remotely_deleted_profile(&database).await?;
         Ok(database)
     }
 
-    #[hotpath::skip]
-    async fn raw_registered_profile_database(
+    async fn refuse_remotely_deleted_profile(
         &self,
-    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
-        let registry = Box::pin(self.session_runtime_registry()).await?;
-        Box::pin(registry.profile_database()).await
-    }
-
-    #[hotpath::measure(label = "daemon.branch_admin.ensure_account_active", future = true)]
-    pub(super) async fn ensure_account_active(&self) -> Result<()> {
-        let database = Box::pin(self.raw_registered_profile_database()).await?;
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    ) -> Result<()> {
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
             .remote_account_deletion_tombstone(profile_id)
@@ -683,9 +939,27 @@ impl StoreAdministration {
         Ok(())
     }
 
-    #[hotpath::measure(
-        label = "daemon.branch_admin.remote_account_deletion_tombstone",
-        future = true
+    async fn raw_registered_profile_database(
+        &self,
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
+        let registry = Box::pin(self.session_runtime_registry()).await?;
+        Box::pin(registry.profile_database()).await
+    }
+
+    #[tracing::instrument(
+        name = "daemon.branch_admin.ensure_account_active",
+        level = "trace",
+        skip_all
+    )]
+    pub(super) async fn ensure_account_active(&self) -> Result<()> {
+        let database = Box::pin(self.raw_registered_profile_database()).await?;
+        self.refuse_remotely_deleted_profile(&database).await
+    }
+
+    #[tracing::instrument(
+        name = "daemon.branch_admin.remote_account_deletion_tombstone",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn remote_account_deletion_tombstone(
         &self,
@@ -699,7 +973,7 @@ impl StoreAdministration {
     /// Subscribe to the durable account-tombstone persist receipt.
     ///
     /// The receipt settles when remote account deletion records or replays a
-    /// tombstone — before admitted project opens are joined. If the
+    /// tombstone, before admitted project opens are joined. If the
     /// administration is dropped without settling, wait fails closed.
     #[cfg(test)]
     pub(super) fn remote_account_deletion_tombstone_persist_receipt(
@@ -718,30 +992,64 @@ impl StoreAdministration {
             .send_replace(Some(tombstone.clone()));
     }
 
-    #[hotpath::measure(label = "daemon.branch_admin.mounted_session_databases", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.mounted_session_databases",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn mounted_registered_session_databases(
         &self,
     ) -> Vec<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
-        let Ok(profile_root) = self
+        match self.mounted_session_runtime_registry().await {
+            Some(registry) => registry.mounted_session_databases().await,
+            None => Vec::new(),
+        }
+    }
+
+    /// The profile's session-runtime registry when it is already open; never
+    /// opens it.
+    pub(super) async fn mounted_session_runtime_registry(
+        &self,
+    ) -> Option<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>> {
+        let profile_root = self
             .profile_identity()
             .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
-        else {
-            return Vec::new();
-        };
+            .ok()?;
         let registry = {
             let registries = self.session_runtime_registries.lock().await;
             registries
                 .get(&profile_root)
                 .map(|entry| Arc::clone(&entry.registry))
         };
-        let Some(registry) = registry.and_then(|registry| registry.get().cloned()) else {
-            return Vec::new();
-        };
-        registry.mounted_session_databases().await
+        registry.and_then(|registry| registry.get().cloned())
     }
 
-    #[hotpath::measure(label = "daemon.branch_admin.mounted_project_servers", future = true)]
-    pub(super) async fn mounted_project_servers(&self) -> Vec<Arc<crate::mcp::McpServer>> {
+    /// The profile's session-runtime registry map and its canonical root,
+    /// taken without locking either.
+    ///
+    /// Branch publication resolves the project's durable cursor-key authority
+    /// through this inside its own background task, so an explicitly published
+    /// branch can mount its own query authority without the admitting caller
+    /// paying for a registry lock it never reads.
+    #[cfg(unix)]
+    pub(super) fn session_runtime_registries(
+        &self,
+    ) -> Option<(SharedSessionRuntimeRegistries, std::path::PathBuf)> {
+        let profile_root = self
+            .profile_identity()
+            .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
+            .ok()?;
+        Some((Arc::clone(&self.session_runtime_registries), profile_root))
+    }
+
+    #[tracing::instrument(
+        name = "daemon.branch_admin.mounted_project_graphs",
+        level = "trace",
+        skip_all
+    )]
+    pub(super) async fn mounted_project_graphs(
+        &self,
+    ) -> Vec<Arc<tracedecay_project::project::TraceDecay>> {
         let Ok(profile_root) = self
             .profile_identity()
             .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
@@ -749,32 +1057,72 @@ impl StoreAdministration {
             return Vec::new();
         };
 
-        {
+        // A cloned server handle counts as a client lease, and a bounded route
+        // bind never evicts a leased server. Take the graph slots under the
+        // registry lock and read them after it drops, so a held graph swap
+        // parks neither a route bind nor an eviction.
+        let slots = {
             let servers = self.project_servers.lock().await;
             servers
                 .servers
                 .iter()
                 .filter(|(key, _)| key.owner.profile_root == profile_root)
-                .map(|(_, entry)| Arc::clone(&entry.server))
+                .map(|(_, entry)| entry.server.graph_slot())
                 .collect::<Vec<_>>()
-        }
-    }
-
-    #[hotpath::measure(label = "daemon.branch_admin.mounted_project_graphs", future = true)]
-    pub(super) async fn mounted_project_graphs(&self) -> Vec<Arc<crate::tracedecay::TraceDecay>> {
-        let servers = self.mounted_project_servers().await;
-        let mut graphs = Vec::with_capacity(servers.len());
-        for server in &servers {
-            graphs.push(server.cg().await);
+        };
+        let mut graphs = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            graphs.push(slot.read().await.clone());
         }
         graphs
     }
 
-    #[hotpath::measure(label = "daemon.branch_admin.project_session_database", future = true)]
+    /// The project session store for session features. A store held in its
+    /// typed reset-required state answers that refusal.
+    #[tracing::instrument(
+        name = "daemon.branch_admin.project_session_database",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn registered_project_session_database(
         &self,
         project_root: &Path,
         store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
+        Box::pin(self.registered_project_session_shard(
+            project_root,
+            store_layout,
+            ProjectSessionShardUse::Sessions,
+        ))
+        .await
+    }
+
+    /// The project session store as the project's configuration authority,
+    /// served even while the store's session features answer a reset
+    /// refusal.
+    #[tracing::instrument(
+        name = "daemon.branch_admin.project_configuration_database",
+        level = "trace",
+        skip_all
+    )]
+    pub(super) async fn registered_project_configuration_database(
+        &self,
+        project_root: &Path,
+        store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
+        Box::pin(self.registered_project_session_shard(
+            project_root,
+            store_layout,
+            ProjectSessionShardUse::Configuration,
+        ))
+        .await
+    }
+
+    async fn registered_project_session_shard(
+        &self,
+        project_root: &Path,
+        store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+        shard_use: ProjectSessionShardUse,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let project_id = store_layout
             .identity
@@ -813,15 +1161,21 @@ impl StoreAdministration {
         if let Some(database) = registry.mounted_project_sessions(&project_id).await {
             return Ok(database);
         }
-        let enrollment_roots =
-            Box::pin(crate::tracedecay::TraceDecay::registered_enrollment_roots(
-                project_root,
-                store_layout,
-                &project_id,
-                profile_database.as_ref(),
-            ))
-            .await?;
-        Box::pin(registry.project_sessions(project_id, enrollment_roots)).await
+        let enrollment_roots = Box::pin(tracedecay_global_db::registered_enrollment_roots(
+            profile_database.as_ref(),
+            project_root,
+            store_layout,
+            &project_id,
+        ))
+        .await?;
+        match shard_use {
+            ProjectSessionShardUse::Sessions => {
+                Box::pin(registry.project_sessions(project_id, enrollment_roots)).await
+            }
+            ProjectSessionShardUse::Configuration => {
+                Box::pin(registry.project_session_store(project_id, enrollment_roots)).await
+            }
+        }
     }
 
     #[cfg(test)]
@@ -838,85 +1192,46 @@ impl StoreAdministration {
         &self.project_servers
     }
 
-    #[hotpath::measure(
-        label = "daemon.branch_admin.host_admission_broker.admit",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.branch_admin.host_admission_broker.admit",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn host_admission_broker(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
-        let profile_id = self.profile_identity()?.profile_id().as_str();
-        if database
-            .remote_account_deletion_tombstone(profile_id)
-            .await?
-            .is_some()
-        {
-            return Err(TraceDecayError::project_route(
-                "remote_deleted",
-                false,
-                "authenticated profile was remotely deleted",
-            ));
-        }
+        self.refuse_remotely_deleted_profile(database).await?;
         self.host_admission_broker_for_path(database.db_path())
             .await
     }
 
-    #[hotpath::measure(label = "daemon.branch_admin.host_admission_broker", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.host_admission_broker",
+        level = "trace",
+        skip_all
+    )]
     async fn host_admission_broker_for_path(
         &self,
         database_path: &Path,
     ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
         let path = authority::canonical_identity_path(database_path)?;
-        if let Some(broker) = self.host_admission_brokers.lock().await.get(&path).cloned() {
-            self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
-                .await;
-            return Ok(broker);
-        }
-
-        // Serialize first-open publication without retaining the broker map
-        // lock across blocking filesystem work.
-        let _open = self.host_admission_broker_gate.lock().await;
-        let state = {
-            let brokers = self.host_admission_brokers.lock().await;
-            if let Some(broker) = brokers.get(&path) {
-                Arc::clone(broker)
-            } else {
-                drop(brokers);
-                let open_path = path.clone();
-                let (runtime, _) = tokio::task::spawn_blocking(move || {
-                    hotpath::measure_block!(
-                        "daemon.branch_admin.host_admission_runtime.open",
-                        tracedecay_host_admission::HostAdmissionRuntime::open_for_database(
-                            &open_path
-                        )
-                    )
-                })
-                .await
-                .map_err(|_| {
-                    TraceDecayError::project_route(
-                        "spool_runtime_unavailable",
-                        true,
-                        "host-admission spool runtime task failed",
-                    )
-                })??;
-                let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
-                self.host_admission_brokers
-                    .lock()
-                    .await
-                    .insert(path.clone(), Arc::clone(&broker));
-                broker
-            }
-        };
-        self.maybe_ensure_user_profile_host_admission_replay(&path, &state)
+        let broker = open_host_admission_broker(
+            &self.host_admission_brokers,
+            &path,
+            HostAdmissionRuntime::open_for_database,
+        )
+        .await?;
+        self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
             .await;
-        Ok(state)
+        Ok(broker)
     }
 
     /// Kick the coalesced user-profile replay worker. Never awaits a replay pass.
-    #[hotpath::measure(
-        label = "daemon.branch_admin.host_admission_replay.ensure",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.branch_admin.host_admission_replay.ensure",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn ensure_user_profile_host_admission_replay(
         &self,
@@ -929,7 +1244,11 @@ impl StoreAdministration {
             .await;
     }
 
-    #[hotpath::measure(label = "daemon.branch_admin.profile_bootstrap", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.profile_bootstrap",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn ensure_profile_host_admission_bootstrap(
         &self,
         profile_root: &Path,
@@ -978,14 +1297,13 @@ impl StoreAdministration {
             profile_identity,
             session_runtime_registry,
             host_admission_brokers: Arc::clone(&self.host_admission_brokers),
-            host_admission_broker_gate: Arc::clone(&self.host_admission_broker_gate),
             profile_host_admission_replay: Arc::downgrade(&self.profile_host_admission_replay),
         };
         let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
             let context = context.clone();
-            Box::pin(hotpath::future!(
+            Box::pin(tracing::Instrument::instrument(
                 async move { context.ensure().await },
-                label = "daemon.branch_admin.profile_bootstrap.ensure"
+                tracing::trace_span!("daemon.branch_admin.profile_bootstrap.ensure"),
             ))
         });
         self.profile_host_admission_replay
@@ -994,7 +1312,6 @@ impl StoreAdministration {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub(super) async fn profile_host_admission_bootstrap_status(
         &self,
         profile_root: &Path,
@@ -1013,14 +1330,13 @@ impl StoreAdministration {
             .await)
     }
 
-    #[hotpath::skip]
     async fn maybe_ensure_user_profile_host_admission_replay(
         &self,
         broker_path: &Path,
         broker: &tracedecay_host_admission::SharedHostAdmissionBroker,
     ) {
         let is_user_sessions = broker_path.file_name().and_then(|name| name.to_str())
-            == Some(tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME);
+            == Some(tracedecay_runtime_core::storage::USER_SESSIONS_DB_FILENAME);
         if !is_user_sessions {
             return;
         }
@@ -1031,9 +1347,10 @@ impl StoreAdministration {
             .await;
     }
 
-    #[hotpath::measure(
-        label = "daemon.branch_admin.host_admission_replay.wait_idle",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.branch_admin.host_admission_replay.wait_idle",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn wait_user_profile_host_admission_replay_idle(
         &self,
@@ -1045,9 +1362,14 @@ impl StoreAdministration {
             .await
     }
 
-    #[hotpath::measure(
-        label = "daemon.branch_admin.host_admission_replay.shutdown",
-        future = true
+    pub(super) fn cancel_host_admission_replay(&self) {
+        self.profile_host_admission_replay.cancel();
+    }
+
+    #[tracing::instrument(
+        name = "daemon.branch_admin.host_admission_replay.shutdown",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn shutdown_host_admission_replay(&self) {
         self.profile_host_admission_replay.shutdown().await;
@@ -1059,9 +1381,13 @@ impl StoreAdministration {
         Arc::clone(&self.session_sync_service)
     }
 
-    #[hotpath::measure(label = "daemon.branch_admin.session_sync.shutdown", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.session_sync.shutdown",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn shutdown_session_sync(&self) {
-        tracedecay_application::session_sync::SessionSyncServicePort::shutdown(
+        tracedecay_contracts::session_sync::SessionSyncServicePort::shutdown(
             self.session_sync_service.as_ref(),
         )
         .await;
@@ -1074,10 +1400,56 @@ impl StoreAdministration {
         &self.automation_schedulers
     }
 
+    #[cfg(unix)]
+    pub(super) fn automation_scheduler_signals(
+        &self,
+    ) -> &std::sync::Mutex<Vec<AutomationSchedulerSignal>> {
+        &self.automation_scheduler_signals
+    }
+
     pub(super) fn session_temporal_refresh_schedulers(
         &self,
     ) -> &Arc<SessionTemporalRefreshSchedulerRegistry> {
         &self.session_temporal_refresh_schedulers
+    }
+
+    /// The daemon-wide refresh authority for one registered profile session
+    /// store, bound to that store's temporal refresh scheduler.
+    #[tracing::instrument(
+        name = "daemon.branch_admin.profile_session_refresh",
+        level = "trace",
+        skip_all
+    )]
+    pub(super) async fn profile_session_refresh(
+        &self,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    ) -> ProfileSessionRefreshAuthorityV1 {
+        let path = database.db_path().to_path_buf();
+        let mut services = self.profile_session_refresh_services.lock().await;
+        if let Some(authority) = services.get(&path) {
+            return authority.clone();
+        }
+        let wake = Arc::new(
+            self.session_temporal_refresh_schedulers
+                .ensure_profile(path.clone(), database.clone())
+                .await,
+        );
+        let authority = ProfileSessionRefreshAuthorityV1 {
+            service: Arc::new(tracedecay_daemon_service::DaemonSessionRefreshService::new(
+                database.clone(),
+                Arc::clone(&wake) as _,
+                None,
+            )),
+            serving: wake,
+        };
+        services.insert(path, authority.clone());
+        authority
+    }
+
+    /// Drops the cached profile refresh services so their profile session
+    /// leases no longer keep the store runtime open at terminal close.
+    pub(super) async fn release_profile_session_refresh_services(&self) {
+        self.profile_session_refresh_services.lock().await.clear();
     }
 
     pub(super) fn git_index_transaction_services(
@@ -1088,7 +1460,7 @@ impl StoreAdministration {
 
     pub(super) fn native_integration_services(
         &self,
-    ) -> &Arc<DaemonNativeIntegrationRuntimeRegistrar> {
+    ) -> &Arc<DaemonNativeIntegrationServiceRegistry> {
         &self.native_integration_services
     }
 
@@ -1101,13 +1473,17 @@ impl StoreAdministration {
     }
 
     #[cfg(unix)]
-    #[hotpath::measure(label = "daemon.branch_admin.retirement_reaper.spawn")]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.retirement_reaper.spawn",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn spawn_retirement_reaper<F>(
         &self,
         mut reservation: MaintenanceReaperReservation,
         kind: MaintenanceReaperKind,
         owner: ProjectServerKey,
-        task: tokio::task::JoinHandle<()>,
+        task: native_runtime::NativeTask<()>,
         termination: Arc<MaintenanceTaskTermination>,
         cleanup: F,
     ) where
@@ -1126,31 +1502,44 @@ impl StoreAdministration {
             barrier.block();
         }
 
-        let retired_task = task.abort_handle();
         task.abort();
-        let mut state = self.retirement_reapers.state();
-        let key = MaintenanceReaperRegistry::next_key(&mut state, kind, &owner);
+        let retired_task = Arc::new(task);
+        let key =
+            MaintenanceReaperRegistry::next_key(&mut self.retirement_reapers.state(), kind, &owner);
         let finalizer = MaintenanceReaperFinalizer {
             registry: Arc::clone(&self.retirement_reapers),
             key: key.clone(),
             termination: Arc::clone(&termination),
         };
         let (start, registered) = tokio::sync::oneshot::channel();
-        let reaper = tokio::spawn(hotpath::future!(
+        let reaped_task = Arc::clone(&retired_task);
+        // Spawned before the registry lock: a refused spawn drops the
+        // finalizer, which takes that lock.
+        if let Err(error) = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
             async move {
                 let _finalizer = finalizer;
                 let _ = registered.await;
-                let _ = task.await;
+                let _ = reaped_task.wait().await;
                 cleanup.await;
             },
-            label = "daemon.branch_admin.retirement_reaper"
-        ));
+            tracing::trace_span!("daemon.branch_admin.retirement_reaper"),
+        )) {
+            log_daemon_event(
+                "retirement_reaper",
+                &[
+                    ("owner", format!("{:?}", owner.owner.project_id)),
+                    ("outcome", "runtime_unavailable".to_owned()),
+                    ("error", error),
+                ],
+            );
+            return;
+        }
+        let mut state = self.retirement_reapers.state();
         let replaced = state.reapers.insert(
             key,
             MaintenanceReaperHandle {
                 retired_task,
                 termination,
-                _task: reaper,
             },
         );
         debug_assert!(replaced.is_none());
@@ -1164,16 +1553,16 @@ impl StoreAdministration {
             state.pending.remove(&reservation.owner);
         }
         reservation.active = false;
-        MaintenanceReaperRegistry::publish_counts(&state);
         drop(state);
         self.retirement_reapers.changed.notify_waiters();
         let _ = start.send(());
     }
 
     #[cfg(unix)]
-    #[hotpath::measure(
-        label = "daemon.branch_admin.retirement_reapers.shutdown",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.branch_admin.retirement_reapers.shutdown",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn shutdown_retirement_reapers(&self) {
         loop {
@@ -1224,14 +1613,12 @@ impl StoreAdministration {
     }
 
     #[cfg(unix)]
-    #[hotpath::skip]
     pub(super) async fn settle_retirement_reapers(&self, timeout: std::time::Duration) -> bool {
         self.settle_retirement_reapers_for_owner(None, timeout, true)
             .await
     }
 
     #[cfg(unix)]
-    #[hotpath::skip]
     pub(super) async fn settle_retirement_reapers_for_project(
         &self,
         profile_root: &Path,
@@ -1243,14 +1630,18 @@ impl StoreAdministration {
     }
 
     #[cfg(unix)]
-    #[hotpath::measure(label = "daemon.branch_admin.retirement_reapers.settle", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.retirement_reapers.settle",
+        level = "trace",
+        skip_all
+    )]
     async fn settle_retirement_reapers_for_owner(
         &self,
         owner: Option<(&Path, &str)>,
         timeout: std::time::Duration,
         stop_accepting: bool,
     ) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             let changed = self.retirement_reapers.changed.notified();
             let (pending, matching) = {
@@ -1291,13 +1682,13 @@ impl StoreAdministration {
                 task.abort();
             }
             if matching.is_empty() {
-                if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                if native_runtime::timeout_at(deadline, changed).await.is_err() {
                     return false;
                 }
                 continue;
             }
             for (_, termination) in matching {
-                if tokio::time::timeout_at(deadline, termination.wait())
+                if native_runtime::timeout_at(deadline, termination.wait())
                     .await
                     .is_err()
                 {
@@ -1308,13 +1699,11 @@ impl StoreAdministration {
     }
 
     #[cfg(all(test, unix))]
-    #[hotpath::skip]
-    pub(super) async fn retirement_reaper_count(&self) -> usize {
+    pub(super) fn retirement_reaper_count(&self) -> usize {
         self.retirement_reapers.state().reapers.len()
     }
 
     #[cfg(all(test, unix))]
-    #[hotpath::skip]
     pub(super) async fn wait_for_retirement_reaper_count_for_test(&self, expected: usize) {
         loop {
             let changed = self.retirement_reapers.changed.notified();
@@ -1346,7 +1735,6 @@ impl StoreAdministration {
     }
 
     #[cfg(all(test, unix))]
-    #[hotpath::skip]
     pub(super) async fn wait_for_retirement_reaper_shutdown_pass_for_test(&self, after: u64) {
         loop {
             let changed = self.retirement_reapers.shutdown_changed.notified();
@@ -1362,11 +1750,16 @@ impl StoreAdministration {
         }
     }
 
-    #[hotpath::measure(label = "daemon.branch_admin.reconcile_automation", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.reconcile_automation",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn reconcile_cached_automation_for_profile(
         &self,
         profile_root: &Path,
-    ) -> Result<Vec<tracedecay_dashboard_api::AutomationSchedulerOwnerReconcileOutcome>> {
+    ) -> Result<Vec<tracedecay_contracts::retrieval::AutomationSchedulerOwnerReconcileOutcome>>
+    {
         self.ensure_account_active().await?;
         let profile_root = authority::canonical_identity_path(profile_root)?;
         let servers = {
@@ -1381,10 +1774,14 @@ impl StoreAdministration {
         let mut outcomes = Vec::with_capacity(servers.len());
         for (key, server) in servers {
             outcomes.push(
-                tracedecay_dashboard_api::AutomationSchedulerOwnerReconcileOutcome {
+                tracedecay_contracts::retrieval::AutomationSchedulerOwnerReconcileOutcome {
                     project_id: key.owner.project_id,
-                    store_root: key.owner.store_root,
-                    graph_db_path: key.owner.graph_db_path,
+                    store_root: tracedecay_runtime_core::path_safety::plain_host_path(
+                        &key.owner.store_root,
+                    ),
+                    graph_db_path: tracedecay_runtime_core::path_safety::plain_host_path(
+                        &key.owner.graph_db_path,
+                    ),
                     scope_prefix: key.scope_prefix,
                     outcome: server.reconcile_automation_scheduler().await,
                 },
@@ -1398,7 +1795,6 @@ impl StoreAdministration {
     ///
     /// Prefer [`Self::with_writer_in`] with a store scope. This lane excludes
     /// every store and is reserved for operations that sweep all of them.
-    #[hotpath::skip]
     pub(super) async fn with_writer<Operation, OperationFuture, Output>(
         &self,
         operation: Operation,
@@ -1412,7 +1808,6 @@ impl StoreAdministration {
 
     /// Acquires writer administration for `scope` before constructing the
     /// supplied future and holds it until that future completes.
-    #[hotpath::skip]
     pub(super) async fn with_writer_in<Operation, OperationFuture, Output>(
         &self,
         scope: WriterScope,
@@ -1425,15 +1820,14 @@ impl StoreAdministration {
         // Queueing for the writer is a park, not work: a background refresh or a
         // generation rebuild can hold a store's gate for minutes. Surrender the
         // admission slot while queued and take it back before running.
-        let _writer = hotpath::future!(
+        let _writer = tracing::Instrument::instrument(
             super::park_admission(self.gate.acquire(&scope)),
-            label = "daemon.branch_admin.writer.acquire"
+            tracing::trace_span!("daemon.branch_admin.writer.acquire"),
         )
         .await;
         operation().await
     }
 
-    #[hotpath::skip]
     pub(super) async fn try_with_writer<Operation, OperationFuture, Output>(
         &self,
         operation: Operation,
@@ -1450,7 +1844,7 @@ impl StoreAdministration {
 
     /// Resolves the authenticated client's project layout and runs destructive
     /// branch administration against that exact profile-owned store.
-    #[hotpath::measure(label = "daemon.branch_admin.handshake", future = true)]
+    #[tracing::instrument(name = "daemon.branch_admin.handshake", level = "trace", skip_all)]
     pub(super) async fn execute_branch_admin_for_handshake(
         &self,
         schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -1480,37 +1874,37 @@ impl StoreAdministration {
             });
         };
         let configuration_database = self
-            .registered_project_session_database(project_root, &layout)
+            .registered_project_configuration_database(project_root, &layout)
             .await?;
         // Branch administration runs inside the daemon, which owns the durable
         // configuration store. Resolve the pinned snapshot on demand when this
         // process has not yet opened the project (first operation, or the first
         // after a daemon restart) instead of failing closed. The resolver reads
-        // only durable authority; it never consults legacy config input and a
-        // genuinely unresolvable store still fails before any destructive store
-        // action.
-        let config = crate::config::resolve_runtime_configuration_for_registered_database(
-            project_root,
-            &layout,
-            configuration_database,
-        )
-        .await?
-        .config
-        .sync;
+        // only durable authority; a genuinely unresolvable store still fails
+        // before any destructive store action.
+        let config =
+            tracedecay_project::config::resolve_runtime_configuration_for_registered_database(
+                project_root,
+                &layout,
+                configuration_database,
+            )
+            .await?
+            .config()
+            .sync
+            .clone();
         self.execute_branch_admin_in_layout(
             schedulers,
             project_root,
             &layout.data_root,
             action,
             config.branch_gc_days,
-            config.orphan_db_gc_days,
         )
         .await
     }
 
-    /// Prepares, proves, and commits one destructive branch-store mutation under
-    /// the physical runtime registry's exact path reservation.
-    #[hotpath::measure(label = "daemon.branch_admin.execute", future = true)]
+    /// Prepares one branch-tracking mutation, retires the exact artifacts of
+    /// sealed manual branches, then CAS-publishes the metadata.
+    #[tracing::instrument(name = "daemon.branch_admin.execute", level = "trace", skip_all)]
     pub(super) async fn execute_branch_admin_in_layout(
         &self,
         schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -1518,20 +1912,18 @@ impl StoreAdministration {
         data_root: &Path,
         action: tracedecay_runtime_core::branch::BranchAdminAction,
         branch_gc_days: u64,
-        orphan_db_gc_days: u64,
     ) -> Result<tracedecay_runtime_core::branch::BranchAdminReport> {
         let prepared = tracedecay_runtime_core::branch::prepare_branch_admin_mutation(
             project_root,
             data_root,
             action,
             branch_gc_days,
-            orphan_db_gc_days,
         )?;
         let retirements = prepared
             .single_store_retirements()
             .iter()
             .filter(|retirement| {
-                super::pr_autotrack::manual_branch_source_owns_artifacts(
+                manual_branch_source_owns_artifacts(
                     data_root,
                     &retirement.branch,
                     &retirement.source,
@@ -1539,106 +1931,59 @@ impl StoreAdministration {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let lifecycle_leases = acquire_manual_branch_retirement_leases(data_root, &retirements)?;
-        let database_paths = canonical_branch_database_paths(prepared.database_paths())?;
-        if database_paths.is_empty() {
-            let lifecycle_leases = cleanup_manual_branch_retirements(
-                project_root,
-                data_root,
-                schedulers,
-                &retirements,
-                lifecycle_leases,
-            )
-            .await?;
-            let report = prepared.finish_without_database_deletion()?;
-            drop(lifecycle_leases);
-            return Ok(report);
-        }
-
-        {
-            let project_servers = self.project_servers.lock().await;
-            let refresh_scheduler_busy = self
-                .session_temporal_refresh_schedulers
-                .owns_project_database_paths(&database_paths)
-                .await;
-            #[cfg(unix)]
-            let scheduler_busy = cached_scheduler_owns_selected(
-                &*self.automation_schedulers.lock().await,
-                &database_paths,
-            ) || refresh_scheduler_busy;
-            #[cfg(not(unix))]
-            let scheduler_busy = refresh_scheduler_busy;
-            ensure_no_cached_store_owners(&project_servers, scheduler_busy, &database_paths)?;
-        }
-
-        let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
-        canonical_paths.sort();
-        let reservation = self
-            .session_runtime_registry()
-            .await?
-            .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
-            .await?;
-        let lifecycle_leases = match cleanup_manual_branch_retirements(
+        let lifecycle_leases =
+            acquire_manual_branch_retirement_leases(data_root, &retirements).await?;
+        let lifecycle_leases = cleanup_manual_branch_retirements(
             project_root,
             data_root,
             schedulers,
             &retirements,
             lifecycle_leases,
         )
-        .await
-        {
-            Ok(lifecycle_leases) => lifecycle_leases,
-            Err(error) => {
-                reservation
-                    .abort_preserved()
-                    .map_err(destructive_reservation_error)?;
-                return Err(error);
-            }
-        };
-        let report = match prepared.commit_destructive() {
-            Ok(report) => report,
-            Err(error) => {
-                reservation
-                    .abort_preserved()
-                    .map_err(destructive_reservation_error)?;
-                return Err(error);
-            }
-        };
-        reservation
-            .finish_deleted()
-            .map_err(destructive_reservation_error)?;
+        .await?;
+        let report = prepared.commit()?;
         drop(lifecycle_leases);
         Ok(report)
     }
 }
 
-#[hotpath::measure(label = "daemon.branch_admin.acquire_retirement_leases")]
-fn acquire_manual_branch_retirement_leases(
+#[tracing::instrument(
+    name = "daemon.branch_admin.acquire_retirement_leases",
+    level = "trace",
+    skip_all
+)]
+async fn acquire_manual_branch_retirement_leases(
     data_root: &Path,
     retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
-) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
-    retirements
-        .iter()
-        .map(|retirement| {
-            super::pr_autotrack::try_acquire_manual_branch_lifecycle(data_root, &retirement.branch)
+) -> Result<Vec<ManualBranchLifecycleLeaseV1>> {
+    let mut leases = Vec::with_capacity(retirements.len());
+    for retirement in retirements {
+        leases.push(
+            acquire_manual_branch_lifecycle(data_root, &retirement.branch)
+                .await
                 .map_err(|error| TraceDecayError::Config {
                     message: format!(
                         "branch removal for '{}' is contended or unavailable: {error}",
                         retirement.branch
                     ),
-                })
-        })
-        .collect()
+                })?,
+        );
+    }
+    Ok(leases)
 }
 
-#[hotpath::measure(label = "daemon.branch_admin.cleanup_retirements", future = true)]
+#[tracing::instrument(
+    name = "daemon.branch_admin.cleanup_retirements",
+    level = "trace",
+    skip_all
+)]
 async fn cleanup_manual_branch_retirements(
     project_root: &Path,
     data_root: &Path,
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
-    lifecycle_leases: Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>,
-) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
+    lifecycle_leases: Vec<ManualBranchLifecycleLeaseV1>,
+) -> Result<Vec<ManualBranchLifecycleLeaseV1>> {
     if retirements.len() != lifecycle_leases.len() {
         return Err(TraceDecayError::Config {
             message: "branch retirement lifecycle ownership did not match metadata selection"
@@ -1673,8 +2018,10 @@ pub(super) struct BranchAdminRequest {
         std::result::Result<tracedecay_runtime_core::branch::BranchAdminAction, String>,
 }
 
-pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminRequest> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
+pub(super) fn parse_branch_admin_request(
+    request: Option<&JsonRpcRequest>,
+) -> Option<BranchAdminRequest> {
+    let request = request?;
     if request.method != "tools/call" {
         return None;
     }
@@ -1687,65 +2034,14 @@ pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminReques
         .cloned()
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     Some(BranchAdminRequest {
-        id: request.id.unwrap_or(serde_json::Value::Null),
+        id: request.id.clone().unwrap_or(serde_json::Value::Null),
         action: serde_json::from_value(arguments)
             .map_err(|error| format!("invalid branch administration arguments: {error}")),
     })
 }
 
-fn canonical_branch_database_paths(paths: &[PathBuf]) -> Result<HashSet<PathBuf>> {
-    paths
-        .iter()
-        .map(|path| authority::canonical_identity_path(path))
-        .collect()
-}
-
-fn branch_administration_busy(detail: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::project_route("branch_administration_busy", true, detail)
-}
-
-#[cfg(any(unix, test))]
-fn cached_scheduler_owns_selected<Scheduler>(
-    automation_schedulers: &HashMap<ProjectServerKey, Scheduler>,
-    database_paths: &HashSet<PathBuf>,
-) -> bool {
-    automation_schedulers
-        .keys()
-        .any(|key| database_paths.contains(&key.owner.graph_db_path))
-}
-
-fn ensure_no_cached_store_owners<Server>(
-    project_servers: &DatabaseOwnerRegistry<Server>,
-    scheduler_busy: bool,
-    database_paths: &HashSet<PathBuf>,
-) -> Result<()> {
-    let server_busy = project_servers
-        .servers
-        .keys()
-        .any(|key| database_paths.contains(&key.owner.graph_db_path));
-    if !server_busy && !scheduler_busy {
-        return Ok(());
-    }
-
-    let cached_as = match (server_busy, scheduler_busy) {
-        (true, true) => "a project server and a background scheduler",
-        (true, false) => "a project server",
-        (false, true) => "a background scheduler",
-        (false, false) => return Ok(()),
-    };
-    let mut paths = database_paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    paths.sort();
-    Err(branch_administration_busy(format!(
-        "branch store administration is busy: selected database(s) {} are still cached by the daemon as {cached_as}; restart the TraceDecay daemon before retrying",
-        paths.join(", ")
-    )))
-}
-
 fn destructive_reservation_error(
-    error: crate::daemon::store_runtime::registry::StoreRuntimeRegistryFailure,
+    error: tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure,
 ) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("destructive store runtime reservation failed: {error:?}"),
@@ -1780,7 +2076,7 @@ fn branch_admin_error_response(id: serde_json::Value, error: &TraceDecayError) -
     JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string())
 }
 
-#[hotpath::measure(label = "daemon.branch_admin.response", future = true)]
+#[tracing::instrument(name = "daemon.branch_admin.response", level = "trace", skip_all)]
 pub(super) async fn write_branch_admin_response(
     transport: &mut impl McpTransport,
     request: BranchAdminRequest,
@@ -1793,15 +2089,21 @@ pub(super) async fn write_branch_admin_response(
         }
         (Ok(_), Err(error)) => branch_admin_error_response(request.id, &error),
     };
-    write_json_rpc_response(transport, &response).await
+    write_daemon_response(transport, &response).await
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::super::{ProjectRouteKey, StoreOwnerKey};
+    use super::super::AuthenticatedFirstRequest;
     use super::*;
     use std::time::Duration;
+    use tracedecay_daemon_service::BootstrapCompletion;
+
+    fn parsed_branch_admin_request(line: String) -> Option<BranchAdminRequest> {
+        let request = AuthenticatedFirstRequest::new(line);
+        parse_branch_admin_request(request.parsed())
+    }
 
     fn write_future_spool_metadata(database_path: &Path) -> (PathBuf, Vec<u8>) {
         let file_name = database_path.file_name().unwrap().to_str().unwrap();
@@ -1815,35 +2117,6 @@ mod tests {
         let meta_path = spool_path.join("meta.json");
         std::fs::write(&meta_path, &bytes).unwrap();
         (meta_path, bytes)
-    }
-
-    #[test]
-    fn branch_administration_busy_is_retryable_and_typed() {
-        let error = branch_administration_busy("another daemon writer is active");
-
-        assert_eq!(
-            error.project_route_context(),
-            Some((
-                "branch_administration_busy",
-                true,
-                "another daemon writer is active",
-            ))
-        );
-
-        let response = branch_admin_error_response(json!(7), &error);
-        let response_error = response
-            .error
-            .expect("branch busy response must be an error");
-        assert_eq!(response_error.code, ErrorCode::InternalError.as_i32());
-        assert_eq!(
-            response_error.data,
-            Some(json!({
-                "tool": BRANCH_ADMIN_TOOL_NAME,
-                "reason_code": "branch_administration_busy",
-                "retryable": true,
-                "detail": "another daemon writer is active",
-            }))
-        );
     }
 
     /// Rank 1 regression: a git-watch sync of project A used to hold the one
@@ -1922,6 +2195,97 @@ mod tests {
         administration.shutdown_host_admission_replay().await;
     }
 
+    /// A spool open can stall for seconds on fsync under load. A first open of
+    /// one database must not park the first open of an unrelated database,
+    /// while a second opener of the same database shares the in-flight open.
+    #[tokio::test]
+    async fn stalled_first_open_does_not_block_an_unrelated_first_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let stalled_path = temp.path().join("stalled.db");
+        let unrelated_path = temp.path().join("unrelated.db");
+        let brokers: HostAdmissionBrokers = Arc::default();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        let (stalled, (shared, unrelated)) = tokio::join!(
+            open_host_admission_broker(&brokers, &stalled_path, move |path| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                HostAdmissionRuntime::open_for_database(path)
+            }),
+            async {
+                entered_rx.await.expect("stalled open started");
+                tokio::join!(
+                    open_host_admission_broker(&brokers, &stalled_path, |_| {
+                        panic!("a concurrent opener of the same path must share the open")
+                    }),
+                    async {
+                        // Deadlock guard only: the stalled open stays held
+                        // until the unrelated open returns.
+                        let unrelated = tokio::time::timeout(
+                            Duration::from_mins(1),
+                            open_host_admission_broker(
+                                &brokers,
+                                &unrelated_path,
+                                HostAdmissionRuntime::open_for_database,
+                            ),
+                        )
+                        .await
+                        .expect("an unrelated first open waited on another path's open");
+                        release_tx.send(()).unwrap();
+                        unrelated
+                    },
+                )
+            },
+        );
+
+        let stalled = stalled.unwrap();
+        assert!(Arc::ptr_eq(&stalled, &shared.unwrap()));
+        assert!(!Arc::ptr_eq(&stalled, &unrelated.unwrap()));
+    }
+
+    #[tokio::test]
+    async fn profile_replay_uses_installed_hermes_callback_to_commit_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let database_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let (runtime, _) =
+            tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
+                .unwrap();
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+        let event = serde_json::json!({
+            "agent": "hermes", "event": "turnCompleted",
+            "route": { "session_id": "installed-replay" },
+            "receipt": { "status": "success", "transcript_watermark": "replay-watermark" }
+        });
+        let event = tracedecay_mcp::hook_events::parse_hook_event(Some(&event)).unwrap();
+        let plan = tracedecay_mcp::hook_events::plan_hook_event(&event, &profile_root, None);
+        let payload = tracedecay_mcp::hook_events::encode_durable_hook_event_plan(&plan).unwrap();
+        broker
+            .admit(&event.admission_source(), &payload)
+            .await
+            .unwrap();
+        assert_eq!(broker.pending_count().await, 1);
+
+        let administration = StoreAdministration::default();
+        administration
+            .ensure_user_profile_host_admission_replay(&profile_root, &broker, &database_path)
+            .await;
+        assert!(
+            administration
+                .profile_host_admission_replay
+                .wait_idle(&database_path, Duration::from_secs(5))
+                .await
+        );
+        assert_eq!(broker.pending_count().await, 0);
+        let automation_root =
+            tracedecay_automation_runtime::automation::runner::user_automation_root(&profile_root);
+        let receipts = std::fs::read_to_string(automation_root.join("host_receipts.json")).unwrap();
+        assert!(receipts.contains("installed-replay"), "{receipts}");
+        assert!(receipts.contains("replay-watermark"), "{receipts}");
+        administration.shutdown_host_admission_replay().await;
+    }
+
     #[tokio::test]
     async fn future_spool_version_reaches_branch_admin_as_typed_reset_without_mutation() {
         let temp = tempfile::tempdir().unwrap();
@@ -1950,6 +2314,7 @@ mod tests {
     #[tokio::test]
     async fn profile_bootstrap_preserves_future_spool_reset_without_retry_mapping() {
         let temp = tempfile::tempdir().unwrap();
+        let capture = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
         // The profile identity root must be a directory `load_or_create`
         // creates (and restricts to 0700) itself; a umask-default tempdir
         // trips the fail-closed private-root validation.
@@ -1963,15 +2328,12 @@ mod tests {
             .ensure_profile_host_admission_bootstrap(&profile_root)
             .await
             .unwrap();
-        // The worker performs a real session-runtime-registry open before it
-        // can surface the spool error, so give it a generous (still bounded)
-        // wait; completion notifies immediately, so a healthy run never
-        // sleeps this long.
-        assert!(
+        assert_eq!(
             administration
                 .profile_host_admission_replay
-                .wait_bootstrap_completed(&profile_root, Duration::from_mins(1))
+                .wait_bootstrap_completed(&profile_root, None)
                 .await,
+            BootstrapCompletion::Completed,
             "production bootstrap worker must publish its terminal state"
         );
         assert_eq!(
@@ -2003,6 +2365,12 @@ mod tests {
         );
         assert!(error.project_route_context().is_none());
         assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
+        let log = capture.text();
+        assert!(
+            log.contains("profile_host_admission_bootstrap_stopped"),
+            "{log}"
+        );
+        assert!(log.contains("reason_code="), "{log}");
 
         let client_identity = tracedecay_daemon_protocol::DaemonClientIdentity {
             profile_root: profile_root.clone(),
@@ -2032,173 +2400,23 @@ mod tests {
 
         let unrelated_path = temp.path().join("unrelated.db");
         std::fs::File::create(&unrelated_path).unwrap();
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            administration.host_admission_broker_for_path(&unrelated_path),
-        )
-        .await
-        .expect("typed bootstrap terminal must not block unrelated broker opens")
-        .unwrap();
-        administration.shutdown_host_admission_replay().await;
-    }
-
-    fn owner(graph_db_path: &str) -> StoreOwnerKey {
-        StoreOwnerKey {
-            profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
-            project_id: Some("project".to_string()),
-            store_root: PathBuf::from("/profile/projects/project"),
-            graph_db_path: PathBuf::from(graph_db_path),
-        }
-    }
-
-    fn server_key(graph_db_path: &str, scope_prefix: Option<&str>) -> ProjectServerKey {
-        ProjectServerKey {
-            owner: owner(graph_db_path),
-            project_root: PathBuf::from("/project"),
-            scope_prefix: scope_prefix.map(str::to_string),
-        }
-    }
-
-    fn route(project_path: &str, scope_prefix: Option<&str>) -> ProjectRouteKey {
-        ProjectRouteKey {
-            profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
-            project_path: PathBuf::from(project_path),
-            scope_prefix: scope_prefix.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn matching_cached_server_and_scheduler_fail_busy_without_mutation() {
-        let target_a = server_key("/profile/projects/project/branches/feature.db", None);
-        let target_b = server_key("/profile/projects/project/branches/feature.db", Some("src"));
-        let survivor = server_key("/profile/projects/project/tracedecay.db", None);
-        let target_route_a = route("/repo", None);
-        let target_route_b = route("/repo", Some("src"));
-        let survivor_route = route("/repo-main", None);
-        let target_server_a = Arc::new("target-a");
-        let target_server_b = Arc::new("target-b");
-        let survivor_server = Arc::new("survivor");
-        let mut registry = DatabaseOwnerRegistry::default();
-        registry.insert_route(
-            target_route_a.clone(),
-            target_a.clone(),
-            Arc::clone(&target_server_a),
-        );
-        registry.insert_route(
-            target_route_b.clone(),
-            target_b.clone(),
-            Arc::clone(&target_server_b),
-        );
-        registry.insert_route(
-            survivor_route.clone(),
-            survivor.clone(),
-            Arc::clone(&survivor_server),
-        );
-        let scheduler = Arc::new("scheduler");
-        let mut schedulers = HashMap::from([(target_b.clone(), Arc::clone(&scheduler))]);
-        let selected = HashSet::from([PathBuf::from(
-            "/profile/projects/project/branches/feature.db",
-        )]);
-
-        let error = ensure_no_cached_store_owners(
-            &registry,
-            cached_scheduler_owns_selected(&schedulers, &selected),
-            &selected,
-        )
-        .expect_err("matching daemon owners must fail closed");
-
-        let message = error.to_string();
-        assert!(message.contains("busy"), "{message}");
+        // An unrelated first open takes only the broker map lock; its own
+        // spool fsyncs are real IO with no latency contract.
         assert!(
-            message.contains("restart the TraceDecay daemon"),
-            "{message}"
+            administration.host_admission_brokers.try_lock().is_ok(),
+            "typed bootstrap terminal must not block unrelated broker opens"
         );
-        ensure_no_cached_store_owners(&registry, false, &selected)
-            .expect_err("a matching project server alone must fail closed");
-        let no_servers: DatabaseOwnerRegistry<Arc<&str>> = DatabaseOwnerRegistry::default();
-        ensure_no_cached_store_owners(
-            &no_servers,
-            cached_scheduler_owns_selected(&schedulers, &selected),
-            &selected,
-        )
-        .expect_err("a matching scheduler alone must fail closed");
-        assert!(Arc::ptr_eq(
-            registry
-                .get_route(&target_route_a)
-                .expect("target a route")
-                .1,
-            &target_server_a
-        ));
-        assert!(Arc::ptr_eq(
-            registry
-                .get_route(&target_route_b)
-                .expect("target b route")
-                .1,
-            &target_server_b
-        ));
-        assert!(Arc::ptr_eq(
-            registry
-                .get_route(&survivor_route)
-                .expect("survivor route")
-                .1,
-            &survivor_server
-        ));
-        assert!(Arc::ptr_eq(
-            schedulers.get(&target_b).expect("scheduler entry"),
-            &scheduler
-        ));
-        assert_eq!(registry.servers.len(), 3);
-        assert_eq!(registry.aliases.len(), 3);
-        assert_eq!(schedulers.len(), 1);
-
-        // Keep the maps mutable in this regression test so accidental eviction
-        // implementations cannot hide behind immutable test fixtures.
-        assert!(schedulers.remove(&survivor).is_none());
-    }
-
-    #[test]
-    fn unmatched_cached_owners_allow_administration_to_continue() {
-        let survivor = server_key("/profile/projects/project/tracedecay.db", None);
-        let survivor_route = route("/repo-main", None);
-        let survivor_server = Arc::new("survivor");
-        let mut registry = DatabaseOwnerRegistry::default();
-        registry.insert_route(
-            survivor_route.clone(),
-            survivor.clone(),
-            Arc::clone(&survivor_server),
-        );
-        let scheduler = Arc::new("scheduler");
-        let schedulers = HashMap::from([(survivor.clone(), Arc::clone(&scheduler))]);
-        let selected = HashSet::from([PathBuf::from(
-            "/profile/projects/project/branches/feature.db",
-        )]);
-
-        ensure_no_cached_store_owners(
-            &registry,
-            cached_scheduler_owns_selected(&schedulers, &selected),
-            &selected,
-        )
-        .expect("unmatched owners must proceed to holder proof and commit");
-
-        assert!(Arc::ptr_eq(
-            registry
-                .get_route(&survivor_route)
-                .expect("survivor route")
-                .1,
-            &survivor_server
-        ));
-        assert!(Arc::ptr_eq(
-            schedulers.get(&survivor).expect("scheduler entry"),
-            &scheduler
-        ));
+        administration
+            .host_admission_broker_for_path(&unrelated_path)
+            .await
+            .unwrap();
+        administration.shutdown_host_admission_replay().await;
     }
 
     #[test]
     fn branch_admin_parser_accepts_only_the_hidden_destructive_tool() {
-        let request = parse_branch_admin_request(
-            &serde_json::json!({
+        let request = parsed_branch_admin_request(
+            serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 7,
                 "method": "tools/call",
@@ -2219,8 +2437,8 @@ mod tests {
         );
 
         assert!(
-            parse_branch_admin_request(
-                &serde_json::json!({
+            parsed_branch_admin_request(
+                serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 8,
                     "method": "tools/call",
@@ -2234,8 +2452,8 @@ mod tests {
 
     #[test]
     fn branch_admin_parser_preserves_invalid_arguments_for_error_response() {
-        let request = parse_branch_admin_request(
-            &serde_json::json!({
+        let request = parsed_branch_admin_request(
+            serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": "bad",
                 "method": "tools/call",

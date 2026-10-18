@@ -12,10 +12,21 @@
  */
 import { http, HttpResponse, type JsonBodyType, type RequestHandler } from 'msw';
 import { setupServer, type SetupServer } from 'msw/node';
-import { resolveFixture } from './data.ts';
+import { lookupFixture } from './data.ts';
 
-/** Catch-all GET for /api/** — resolves the pathname to its fixture payload. */
-export const handlers = [
+/**
+ * The fixture for a request, or nothing. A resolver that returns nothing leaves
+ * the request unhandled, so a server listening with `onUnhandledFrame:
+ * 'error'` fails on a path no fixture models instead of answering it.
+ */
+function fixtureResponse(request: Request): Response | undefined {
+  const url = new URL(request.url);
+  const payload = lookupFixture(url.pathname, url.search);
+  return payload === undefined ? undefined : HttpResponse.json(payload as JsonBodyType);
+}
+
+/** Every modelled `/api` GET, resolved from the pathname to its fixture payload. */
+const handlers = [
   http.get('*/api/events', () =>
     // The event stream is intentionally empty in fixtures: the app degrades to
     // its "offline" liveness state, which is a valid surface to audit.
@@ -25,26 +36,27 @@ export const handlers = [
     }),
   ),
   http.get('*/api/*', ({ request }) => {
-    const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+    return fixtureResponse(request);
   }),
   http.post('*/api/application/retained/fact_store_curate', ({ request }) => {
-    const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+    return fixtureResponse(request);
   }),
-  // The Work routes are the one family the dashboard reads with POST — they are
+  // The Work routes are the one family the dashboard reads with POST. They are
   // nested onto the application router, whose reads take a request body. Scoped
   // to `/api/work/*` rather than to `/api/*` on purpose: a POST catch-all would
   // turn every unmodelled command in every other workspace's MSW test from a
   // loud unhandled-request error into a silent empty body.
   http.post('*/api/work/*', ({ request }) => {
-    const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+    return fixtureResponse(request);
   }),
   // The Workflow reads share the Work family's POST-read application wrapper.
   http.post('*/api/application/workflow/*', ({ request }) => {
-    const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+    return fixtureResponse(request);
+  }),
+  // The Agents token frontier is the same POST-read wrapper, scoped to the
+  // one mounted list route so an unmodelled handoff command still fails loudly.
+  http.post('*/api/application/handoff/list-task', ({ request }) => {
+    return fixtureResponse(request);
   }),
 ];
 
@@ -60,7 +72,7 @@ export const handlers = [
 export type HttpFault =
   /** The daemon answered, and its handler failed. */
   | 'server_error'
-  /** The route is not bound — a renamed or unbuilt API surface. */
+  /** The route is not bound. A renamed or unbuilt API surface. */
   | 'not_found'
   /** No identity: the caller is not authenticated. */
   | 'unauthorized'
@@ -72,7 +84,7 @@ export type HttpFault =
    * unbound `/api` route with the SPA's own `index.html` produces exactly
    * this, which is why it is HTML here and not random bytes. */
   | 'malformed_body'
-  /** 200 with well-formed JSON the build's decoder rejects — the daemon moved
+  /** 200 with well-formed JSON the build's decoder rejects. The daemon moved
    * ahead of this bundle. A list where every schema expects an object is the
    * cheapest shape that no workspace decoder accepts. */
   | 'unsupported_shape';
@@ -81,7 +93,7 @@ const SPA_INDEX_HTML =
   '<!doctype html><html><head><title>TraceDecay</title></head><body><div id="root"></div></body></html>';
 
 /** The response (or transport failure) for one fault. */
-export function faultResponse(fault: HttpFault): Response {
+function faultResponse(fault: HttpFault): Response {
   switch (fault) {
     case 'server_error':
       return new HttpResponse('handler panicked', { status: 500 });
@@ -114,7 +126,7 @@ export function faultHandler(pathPattern: string, fault: HttpFault): RequestHand
   return http.get(pathPattern, () => faultResponse(fault));
 }
 
-/** Every `/api` GET fails the same way — the whole daemon is in one bad state. */
+/** Every `/api` GET fails the same way. The whole daemon is in one bad state. */
 export function allRoutesFail(fault: HttpFault): RequestHandler {
   return faultHandler('*/api/*', fault);
 }

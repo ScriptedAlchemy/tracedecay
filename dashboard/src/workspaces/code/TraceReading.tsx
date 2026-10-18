@@ -5,7 +5,7 @@
  * TYPE. This is the single renderer of that type, which is what carries the
  * same property into the markup: the plate above the field and the key below it
  * both print readings, and a second copy of this would be a second answer to
- * "what does it look like when the wire was silent" — the two would agree until
+ * "what does it look like when the wire was silent", the two would agree until
  * one of them was edited.
  */
 import { cn } from '../../ui/cn';
@@ -13,7 +13,7 @@ import type { ReadoutValue } from '../../viz/trace/readout.ts';
 
 /**
  * Absence is printed as the word `absent` plus the reason, never as a blank
- * cell and never as a zero — a blank reads as "nothing to report" and a zero
+ * cell and never as a zero, a blank reads as "nothing to report" and a zero
  * reads as "none", and on this surface the truth is usually "the wire did not
  * carry it".
  */

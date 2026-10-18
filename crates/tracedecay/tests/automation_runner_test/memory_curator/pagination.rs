@@ -40,6 +40,10 @@ impl AgentTaskBackend for ReviewFactRecordingBackend {
             output_tokens: None,
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 #[tokio::test]
@@ -63,8 +67,8 @@ async fn memory_curator_resumes_from_the_durable_next_page_cursor() {
     };
 
     for _ in 0..2 {
-        tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-            &cg,
+        settle_memory_curator(
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,

@@ -2,9 +2,9 @@
 use std::path::Path;
 use std::time::Duration;
 
+use asupersync::channel::oneshot;
+use asupersync::time::{timeout, wall_now};
 use tempfile::TempDir;
-use tokio::sync::oneshot;
-use tokio::time::timeout;
 
 use tracedecay_runtime_core::db::engine::{
     Connection, TestConnection, TransactionBehavior, params,
@@ -34,8 +34,8 @@ async fn open_read_only_global_db(
     }
     // Publishing a runtime materialises a profile-scoped sidecar shard, which
     // the kernel initialises through its fail-closed registered-schema port.
-    // Idempotent — the port keeps the first registration.
-    crate::register_test_schema_installer();
+    // Idempotent, the port keeps the first registration.
+    crate::register_registered_schema_installer();
     let authority = DatabaseAuthority::acquire_test(db_path, "LCM schema read-only fixture")?;
     let (database, _) = Database::publish_registered_test_runtime(
         db_path,
@@ -174,49 +174,22 @@ async fn schema_version(db_path: &Path) -> i64 {
 async fn schema_version_on(conn: &Connection) -> i64 {
     let mut rows = conn
         .query(
-            "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+            "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
             (),
         )
         .await
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     row.get(0).unwrap()
-}
-
-async fn migration_applied_at(db_path: &Path) -> i64 {
-    let db = TestConnection::open(db_path);
-    let conn = (*db).clone();
-    let mut rows = conn
-        .query(
-            "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    row.get(0).unwrap()
-}
-
-async fn set_migration_applied_at(db_path: &Path, applied_at: i64) {
-    let db = TestConnection::open(db_path);
-    let conn = (*db).clone();
-    conn.execute(
-        "UPDATE session_schema_migrations
-         SET applied_at = ?1
-         WHERE name = 'lcm'",
-        params![applied_at],
-    )
-    .await
-    .unwrap();
 }
 
 async fn set_migration_version(db_path: &Path, version: i64) {
     let db = TestConnection::open(db_path);
     let conn = (*db).clone();
     conn.execute(
-        "UPDATE session_schema_migrations
+        "UPDATE tracedecay_schema_version
          SET version = ?1
-         WHERE name = 'lcm'",
+         WHERE component = 'lcm'",
         params![version],
     )
     .await
@@ -243,145 +216,6 @@ async fn normalized_trigger_sql(db_path: &Path, trigger: &str) -> String {
         .split_whitespace()
         .collect::<String>()
 }
-
-const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
-    ("index", "idx_session_assertion_supersession_successor"),
-    ("index", "idx_session_assertions_generation_order"),
-    ("index", "idx_session_assertions_kind_order"),
-    ("index", "idx_session_assertions_object_order"),
-    ("index", "idx_session_assertions_subject"),
-    ("index", "idx_session_current_entities_assertion"),
-    ("index", "idx_session_current_entities_occurrence"),
-    ("index", "idx_session_external_payload_manifests_session"),
-    ("index", "idx_session_occurrences_agent"),
-    ("index", "idx_session_occurrences_anchor_order"),
-    ("index", "idx_session_occurrences_generation_order"),
-    ("index", "idx_session_occurrences_message"),
-    ("index", "idx_session_occurrences_root_generation_order"),
-    ("index", "idx_session_occurrences_session_time"),
-    ("index", "idx_session_occurrences_thread"),
-    ("index", "idx_session_occurrences_turn"),
-    ("index", "idx_session_query_cursor_keys_active"),
-    ("index", "idx_session_refresh_operations_join"),
-    ("index", "idx_session_refresh_operations_one_running"),
-    ("index", "idx_session_refresh_operations_state"),
-    ("index", "idx_session_refresh_receipts_session"),
-    ("index", "idx_session_relation_receipts_pending"),
-    ("index", "idx_session_summary_availability_generation"),
-    ("index", "idx_session_summary_nodes_root_created_order"),
-    ("index", "idx_session_summary_nodes_session_created"),
-    ("index", "idx_session_temporal_generations_one_active"),
-    ("index", "idx_session_temporal_generations_session_state"),
-    ("index", "idx_session_temporal_observation_effects_session"),
-    ("index", "idx_session_turn_members_occurrence"),
-    ("table", "session_agents"),
-    ("table", "session_assertion_supersession"),
-    ("table", "session_assertions"),
-    ("table", "session_current_entities"),
-    ("table", "session_external_payload_manifests"),
-    ("table", "session_occurrences"),
-    ("table", "session_occurrences_fts"),
-    ("table", "session_query_cursor_keys"),
-    ("table", "session_refresh_batch_bindings"),
-    ("table", "session_refresh_bindings"),
-    ("table", "session_refresh_operations"),
-    ("table", "session_refresh_progress"),
-    ("table", "session_refresh_receipts"),
-    ("table", "session_relation_effect_journal"),
-    ("table", "session_relation_receipts"),
-    ("table", "session_summary_availability"),
-    ("table", "session_summary_nodes"),
-    ("table", "session_summary_nodes_fts"),
-    ("table", "session_temporal_generations"),
-    ("table", "session_temporal_observation_effects"),
-    ("table", "session_temporal_projection_receipts"),
-    ("table", "session_temporal_schema_migrations"),
-    ("table", "session_threads"),
-    ("table", "session_turn_members"),
-    ("table", "session_turns"),
-    (
-        "trigger",
-        "session_external_payload_manifests_immutable_delete_v1",
-    ),
-    (
-        "trigger",
-        "session_external_payload_manifests_immutable_update_v1",
-    ),
-    ("trigger", "session_occurrences_fts_delete_v1"),
-    ("trigger", "session_occurrences_fts_insert_v1"),
-    ("trigger", "session_occurrences_fts_update_v1"),
-    ("trigger", "session_query_cursor_keys_immutable_delete_v1"),
-    ("trigger", "session_query_cursor_keys_insert_guard_v1"),
-    ("trigger", "session_query_cursor_keys_retire_update_v1"),
-    ("trigger", "session_query_cursor_keys_rotate_insert_v1"),
-    (
-        "trigger",
-        "session_refresh_batch_bindings_immutable_delete_v1",
-    ),
-    (
-        "trigger",
-        "session_refresh_batch_bindings_immutable_update_v1",
-    ),
-    ("trigger", "session_refresh_batch_bindings_insert_guard_v1"),
-    ("trigger", "session_refresh_bindings_immutable_delete_v1"),
-    ("trigger", "session_refresh_bindings_immutable_update_v1"),
-    ("trigger", "session_refresh_bindings_insert_guard_v1"),
-    ("trigger", "session_refresh_operations_delete_guard_v1"),
-    ("trigger", "session_refresh_operations_insert_guard_v1"),
-    ("trigger", "session_refresh_operations_state_guard_v1"),
-    ("trigger", "session_refresh_progress_insert_guard_v1"),
-    ("trigger", "session_refresh_progress_immutable_delete_v1"),
-    ("trigger", "session_refresh_progress_immutable_update_v1"),
-    ("trigger", "session_refresh_receipts_insert_guard_v1"),
-    ("trigger", "session_refresh_receipts_immutable_delete_v1"),
-    ("trigger", "session_refresh_receipts_immutable_update_v1"),
-    ("trigger", "session_summary_nodes_fts_delete_v1"),
-    ("trigger", "session_summary_nodes_fts_insert_v1"),
-    ("trigger", "session_summary_nodes_fts_update_v1"),
-    ("trigger", "session_summary_nodes_immutable_delete_v1"),
-    ("trigger", "session_summary_nodes_immutable_update_v1"),
-    ("trigger", "session_summary_availability_owner_insert_v1"),
-    ("trigger", "session_summary_availability_owner_update_v1"),
-    (
-        "trigger",
-        "session_external_payload_manifests_owner_guard_v1",
-    ),
-    ("trigger", "session_temporal_generations_delete_guard_v1"),
-    ("trigger", "session_temporal_generations_insert_guard_v1"),
-    (
-        "trigger",
-        "session_temporal_generations_single_active_insert_v1",
-    ),
-    (
-        "trigger",
-        "session_temporal_generations_single_active_update_v1",
-    ),
-    ("trigger", "session_temporal_generations_state_guard_v1"),
-    (
-        "trigger",
-        "session_temporal_observation_effects_immutable_delete_v1",
-    ),
-    (
-        "trigger",
-        "session_temporal_observation_effects_immutable_update_v1",
-    ),
-    (
-        "trigger",
-        "session_temporal_observation_effects_insert_guard_v1",
-    ),
-    (
-        "trigger",
-        "session_temporal_projection_receipts_immutable_delete_v1",
-    ),
-    (
-        "trigger",
-        "session_temporal_projection_receipts_immutable_update_v1",
-    ),
-    (
-        "trigger",
-        "session_temporal_projection_receipts_insert_guard_v1",
-    ),
-];
 
 async fn temporal_schema_object_catalog(db_path: &Path) -> Vec<(String, String)> {
     let db = TestConnection::open(db_path);
@@ -480,8 +314,8 @@ async fn temporal_schema_version(db_path: &Path) -> i64 {
     let mut rows = conn
         .query(
             "SELECT version
-             FROM session_temporal_schema_migrations
-             WHERE name = 'session-temporal'",
+             FROM tracedecay_schema_version
+             WHERE component = 'session-temporal'",
             (),
         )
         .await

@@ -2,29 +2,38 @@
 ///
 /// Parses TypeScript (.ts, .tsx) and JavaScript (.js, .jsx) source files and
 /// emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{declaration_start, local_node_id};
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
 use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 mod imports;
 mod test_calls;
 
+pub use test_calls::is_test_framework_call_signature;
+
 /// Extracts code graph nodes and edges from TypeScript/JavaScript source files
 /// using tree-sitter.
 pub struct TypeScriptExtractor;
 
+#[derive(Default)]
+struct ShadowedCallNames {
+    names: Vec<String>,
+}
+
 /// Internal state used during AST traversal.
 ///
 /// Borrows the caller's source for the lifetime of the walk: copying the
-/// whole file here made every `extract_parsed` pass — including incremental
-/// walks of one tiny item — pay a full-file memcpy before visiting a node.
+/// whole file here made every `extract_parsed` pass, including incremental
+/// walks of one tiny item, pay a full-file memcpy before visiting a node.
 struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
@@ -42,10 +51,7 @@ struct ExtractionState<'s> {
 
 impl<'s> ExtractionState<'s> {
     fn new(file_path: &str, source: &'s str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -64,8 +70,7 @@ impl<'s> ExtractionState<'s> {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -90,13 +95,6 @@ impl<'s> ExtractionState<'s> {
 }
 
 impl TypeScriptExtractor {
-    /// Extract code graph nodes and edges from a TypeScript/JavaScript source file.
-    ///
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_typescript(file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_typescript_artifact(file_path, source).result
-    }
-
     pub(crate) fn extract_typescript_artifact(
         file_path: &str,
         source: &str,
@@ -117,16 +115,17 @@ impl TypeScriptExtractor {
             &tree,
             crate::parsed_extraction::ParsedExtractionScope::FullDocument,
         )
+        .with_conservative_clone_bodies(
+            &tree,
+            source,
+            match ext {
+                "tsx" => "tsx",
+                "js" | "jsx" => "javascript",
+                _ => "typescript",
+            },
+            file_path,
+        )
         .artifact
-    }
-
-    fn extract_tree(
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree_artifact(file_path, source, tree, scope).into_parsed()
     }
 
     fn extract_tree_artifact(
@@ -146,7 +145,7 @@ impl TypeScriptExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -160,15 +159,19 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
         let file_node_id = file_node.id.clone();
         state.nodes.push(file_node);
-        state.node_stack.push((file_path.to_string(), file_node_id));
+        state
+            .node_stack
+            .push((file_path.to_string(), file_node_id.clone()));
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit_node(&mut state, child);
+            Self::visit_module_scope_calls(&mut state, &file_node_id, child);
         });
 
         state.node_stack.pop();
@@ -230,12 +233,17 @@ impl TypeScriptExtractor {
     fn visit_node(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         match node.kind() {
             "export_statement" => Self::visit_export_statement(state, node),
-            "function_declaration" => Self::visit_function(state, node),
-            "lexical_declaration" => Self::visit_lexical_declaration(state, node),
-            "class_declaration" => Self::visit_class(state, node),
+            "function_declaration" | "generator_function_declaration" => {
+                Self::visit_function(state, node);
+            }
+            "lexical_declaration" | "variable_declaration" => {
+                Self::visit_lexical_declaration(state, node, None);
+            }
+            "class_declaration" | "abstract_class_declaration" => Self::visit_class(state, node),
             "interface_declaration" => Self::visit_interface(state, node),
             "enum_declaration" => Self::visit_enum(state, node),
             "type_alias_declaration" => Self::visit_type_alias(state, node),
+            "internal_module" | "module" => Self::visit_namespace(state, node),
             "import_statement" => imports::visit_import(state, node),
             "expression_statement" => {
                 // Namespace declarations appear as expression_statement > internal_module.
@@ -247,14 +255,194 @@ impl TypeScriptExtractor {
                     // graph. Attribute those callbacks so tests map to sources.
                     if test_calls::is_test_framework_call(state, call) {
                         test_calls::visit_test_call(state, call);
+                    } else {
+                        imports::visit_commonjs_export(state, node);
                     }
+                } else if let Some((assignment, name)) =
+                    Self::commonjs_export_assignment(state, node)
+                {
+                    // `module.exports = { … }` and `exports.foo = …` are the
+                    // CommonJS public surface. Without a symbol grain they
+                    // stay off the indexed-file census even though `.js`
+                    // admission already captured them.
+                    Self::visit_commonjs_export(state, assignment, name);
+                    // `module.exports = Name` is also the CommonJS default
+                    // export; collect that binding so `require()` can resolve
+                    // the exported identifier.
+                    imports::visit_commonjs_export(state, node);
                 }
             }
             _ => {
-                // For other node types, skip — children are visited explicitly
+                // For other node types, skip. Children are visited explicitly
                 // by the specific visit_* methods when needed.
             }
         }
+    }
+
+    /// Whether no symbol visit owns a module- or namespace-scope statement's
+    /// calls: `createRoot(el).render(<App />)`,
+    /// `export default defineConfig({ plugins: [react()] })`. Declarations own
+    /// their calls, and namespaces and test-framework calls are visited as
+    /// their own symbols.
+    fn has_unowned_calls(state: &ExtractionState<'_>, statement: TsNode<'_>) -> bool {
+        match statement.kind() {
+            "expression_statement" => {
+                find_direct_child_by_kind(statement, "internal_module").is_none()
+                    && !find_direct_child_by_kind(statement, "call_expression")
+                        .is_some_and(|call| test_calls::is_test_framework_call(state, call))
+                    && Self::commonjs_export_assignment(state, statement).is_none()
+            }
+            "export_statement" => statement.child_by_field_name("declaration").is_none(),
+            "import_statement" | "comment" | "internal_module" | "module" => false,
+            kind => !kind.ends_with("declaration"),
+        }
+    }
+
+    /// Give a module-scope statement's unowned calls a `<module>` owner.
+    fn visit_module_scope_calls(
+        state: &mut ExtractionState<'_>,
+        file_node_id: &str,
+        statement: TsNode<'_>,
+    ) {
+        if !Self::has_unowned_calls(state, statement) {
+            return;
+        }
+        let (owner, contains) = crate::common::module_scope_init_block(
+            &state.file_path,
+            state.source,
+            file_node_id,
+            statement,
+            state.timestamp,
+        );
+        let before = state.unresolved_refs.len();
+        Self::extract_owned_call_sites(state, statement, &owner.id);
+        if state.unresolved_refs.len() > before {
+            state.nodes.push(owner);
+            state.edges.push(contains);
+        }
+    }
+
+    /// `module.exports = …`, `exports.foo = …`, or `module.exports.foo = …`.
+    fn commonjs_export_assignment<'a>(
+        state: &ExtractionState<'_>,
+        statement: TsNode<'a>,
+    ) -> Option<(TsNode<'a>, String)> {
+        let assignment = find_direct_child_by_kind(statement, "assignment_expression")?;
+        let left = assignment.child_by_field_name("left")?;
+        let name = Self::commonjs_export_name(state, left)?;
+        Some((assignment, name))
+    }
+
+    fn commonjs_export_name(state: &ExtractionState<'_>, left: TsNode<'_>) -> Option<String> {
+        if left.kind() != "member_expression" {
+            return None;
+        }
+        if Self::member_is(state, left, "module", "exports") {
+            return Some("module.exports".to_owned());
+        }
+        if let Some(object) = left.child_by_field_name("object") {
+            if Self::identifier_is(state, object, "exports") {
+                return Self::member_property_name(state, left)
+                    .map(|property| format!("exports.{property}"));
+            }
+            if object.kind() == "member_expression"
+                && Self::member_is(state, object, "module", "exports")
+            {
+                return Self::member_property_name(state, left)
+                    .map(|property| format!("module.exports.{property}"));
+            }
+        }
+        None
+    }
+
+    fn member_is(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        object: &str,
+        property: &str,
+    ) -> bool {
+        node.kind() == "member_expression"
+            && node
+                .child_by_field_name("object")
+                .is_some_and(|object_node| Self::identifier_is(state, object_node, object))
+            && node
+                .child_by_field_name("property")
+                .is_some_and(|property_node| Self::property_is(state, property_node, property))
+    }
+
+    fn identifier_is(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> bool {
+        node.kind() == "identifier" && state.node_text(node) == name
+    }
+
+    fn property_is(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> bool {
+        matches!(node.kind(), "property_identifier" | "identifier") && state.node_text(node) == name
+    }
+
+    fn member_property_name<'s>(
+        state: &ExtractionState<'s>,
+        member: TsNode<'_>,
+    ) -> Option<&'s str> {
+        let property = member.child_by_field_name("property")?;
+        if !matches!(property.kind(), "property_identifier" | "identifier") {
+            return None;
+        }
+        let name = state.node_text(property);
+        (!name.is_empty() && name != "<invalid utf8>").then_some(name)
+    }
+
+    fn visit_commonjs_export(
+        state: &mut ExtractionState<'_>,
+        assignment: TsNode<'_>,
+        name: String,
+    ) {
+        let text = state.node_text(assignment);
+        let start_line = assignment.start_position().row as u32;
+        let end_line = assignment.end_position().row as u32;
+        let start_column = assignment.start_position().column as u32;
+        let end_column = assignment.end_position().column as u32;
+        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            &name,
+            assignment,
+        );
+        state.nodes.push(Node {
+            id: id.clone(),
+            kind: NodeKind::Const,
+            name,
+            qualified_name,
+            file_path: state.file_path.clone(),
+            start_line,
+            attrs_start_line: start_line,
+            end_line,
+            start_column,
+            end_column,
+            signature: Some(text.trim().to_string()),
+            docstring: None,
+            visibility: Visibility::Pub,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            updated_at: state.timestamp,
+            parent_id: None,
+        });
+        if let Some(parent_id) = state.parent_node_id() {
+            state.edges.push(Edge {
+                source: parent_id.to_string(),
+                target: id.clone(),
+                kind: EdgeKind::Contains,
+                line: Some(start_line),
+            });
+        }
+        Self::extract_owned_call_sites(state, assignment, &id);
     }
 
     /// Visit an `export_statement`. Sets `in_export` flag and recurses into the
@@ -264,25 +452,39 @@ impl TypeScriptExtractor {
         state.in_export = true;
 
         let start_line = node.start_position().row as u32;
+        imports::visit_reexport(state, node);
+        imports::visit_default_export(state, node);
 
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
                 match child.kind() {
-                    "function_declaration" => Self::visit_function(state, child),
-                    "class_declaration" => Self::visit_class(state, child),
+                    "function_declaration" | "generator_function_declaration" => {
+                        Self::visit_function(state, child);
+                    }
+                    "class_declaration" | "abstract_class_declaration" => {
+                        Self::visit_class(state, child);
+                    }
                     "interface_declaration" => Self::visit_interface(state, child),
                     "enum_declaration" => Self::visit_enum(state, child),
                     "type_alias_declaration" => Self::visit_type_alias(state, child),
-                    "lexical_declaration" => Self::visit_lexical_declaration(state, child),
+                    "internal_module" | "module" => Self::visit_namespace(state, child),
+                    "lexical_declaration" | "variable_declaration" => {
+                        Self::visit_lexical_declaration(state, child, None);
+                    }
                     // Re-export or bare export like `export { foo }`
                     "export_clause" => {
                         let text = state.node_text(node);
                         let name = "export";
                         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                        let id =
-                            generate_node_id(&state.file_path, &NodeKind::Export, text, start_line);
+                        let id = local_node_id(
+                            &state.file_path,
+                            state.source,
+                            &NodeKind::Export,
+                            text,
+                            node,
+                        );
                         let graph_node = Node {
                             id: id.clone(),
                             kind: NodeKind::Export,
@@ -305,6 +507,7 @@ impl TypeScriptExtractor {
                             unsafe_blocks: 0,
                             unchecked_calls: 0,
                             assertions: 0,
+                            complexity_analysis: ComplexityAnalysisV1::Complete,
                             updated_at: state.timestamp,
                             parent_id: None,
                         };
@@ -345,7 +548,13 @@ impl TypeScriptExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
         let metrics = count_complexity(node, &TYPESCRIPT_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -370,6 +579,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -386,36 +596,40 @@ impl TypeScriptExtractor {
 
         Self::extract_type_refs(state, node, &id);
 
-        // Extract call sites from the function body. Function declarations
-        // always carry a `statement_block`, but fall back to scanning the node
-        // itself for robustness against unusual grammars.
-        if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
-            Self::extract_call_sites(state, body, &id);
-        } else {
-            Self::extract_call_sites(state, node, &id);
-        }
+        // The body and default parameter values (`x = defaults()`) run on
+        // each call.
+        Self::extract_owned_call_sites(state, node, &id);
     }
 
-    /// Extract a lexical declaration (const/let/var) looking for arrow functions
-    /// and constant declarations.
-    fn visit_lexical_declaration(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-        let is_const = Self::has_child_kind(node, "const");
+    /// Extract a `const`/`let`/`var` declaration, looking for arrow functions
+    /// and variable declarations. An arrow binding owns its body's calls;
+    /// other initializer calls belong to `initializer_owner` when given (a
+    /// test callback that maps its setup to sources), else to the binding.
+    fn visit_lexical_declaration(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        initializer_owner: Option<&str>,
+    ) {
+        let variable_kind = if Self::has_child_kind(node, "const") {
+            NodeKind::Const
+        } else {
+            NodeKind::VarField
+        };
 
         let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "variable_declarator" {
-                    if let Some(arrow) = find_direct_child_by_kind(child, "arrow_function") {
-                        Self::visit_arrow_function(state, child, arrow);
-                    } else if is_const {
-                        // It's a const variable (not an arrow function).
-                        Self::visit_const_variable(state, child);
-                    }
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
+        for declarator in node
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "variable_declarator")
+        {
+            if let Some(arrow) = find_direct_child_by_kind(declarator, "arrow_function") {
+                Self::visit_arrow_function(state, declarator, arrow);
+                continue;
+            }
+            let binding = Self::visit_variable(state, declarator, variable_kind.clone());
+            imports::visit_require_declarator(state, declarator);
+            match initializer_owner {
+                Some(owner) => Self::extract_call_sites(state, declarator, owner),
+                None => Self::extract_owned_call_sites(state, declarator, &binding),
             }
         }
     }
@@ -447,11 +661,12 @@ impl TypeScriptExtractor {
         let start_column = declarator.start_position().column as u32;
         let end_column = arrow_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::ArrowFunction,
             &name,
-            start_line,
+            declarator,
         );
         let metrics = count_complexity(arrow_node, &TYPESCRIPT_COMPLEXITY, state.source);
 
@@ -477,6 +692,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -502,10 +718,15 @@ impl TypeScriptExtractor {
         } else {
             Self::extract_call_sites(state, arrow_node, &id);
         }
+        Self::suppress_shadowed_calls(state, arrow_node, &id);
     }
 
-    /// Extract a const variable declaration (not an arrow function).
-    fn visit_const_variable(state: &mut ExtractionState<'_>, declarator: TsNode<'_>) {
+    /// Extract a typed or untyped variable declaration (not an arrow function).
+    fn visit_variable(
+        state: &mut ExtractionState<'_>,
+        declarator: TsNode<'_>,
+        kind: NodeKind,
+    ) -> String {
         let name = Self::child_name(state, find_direct_child_by_kind(declarator, "identifier"));
         let visibility = if state.in_export {
             Visibility::Pub
@@ -518,11 +739,11 @@ impl TypeScriptExtractor {
         let start_column = declarator.start_position().column as u32;
         let end_column = declarator.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, declarator);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Const,
+            kind,
             name,
             qualified_name,
             file_path: state.file_path.clone(),
@@ -542,6 +763,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -550,11 +772,16 @@ impl TypeScriptExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
-                target: id,
+                target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
             });
         }
+
+        if let Some(annotation) = find_direct_child_by_kind(declarator, "type_annotation") {
+            Self::collect_type_identifiers(state, annotation, &id, EdgeKind::TypeOf);
+        }
+        id
     }
 
     /// Extract a class declaration node.
@@ -572,12 +799,17 @@ impl TypeScriptExtractor {
         };
         let docstring = Self::extract_jsdoc(state, node);
         let signature = Some(Self::extract_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, &["decorator"]);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -586,7 +818,7 @@ impl TypeScriptExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -601,6 +833,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -616,6 +849,13 @@ impl TypeScriptExtractor {
         }
 
         Self::extract_decorators(state, node, &id);
+        // `@Component({ … })` is called to wrap the declaration.
+        for decorator in node
+            .children(&mut node.walk())
+            .filter(|child| child.kind() == "decorator")
+        {
+            Self::extract_call_sites(state, decorator, &id);
+        }
 
         Self::extract_class_heritage(state, node, &id);
 
@@ -634,7 +874,16 @@ impl TypeScriptExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "method_definition" => Self::visit_method(state, child),
-                    "public_field_definition" => Self::visit_field(state, child),
+                    "public_field_definition" | "field_definition" => {
+                        Self::visit_field(state, child);
+                    }
+                    // `static { … }` and member decorators (`@memo()`) run
+                    // when the class is defined.
+                    "class_static_block" | "decorator" => {
+                        if let Some(class_id) = state.parent_node_id().map(str::to_owned) {
+                            Self::extract_owned_call_sites(state, child, &class_id);
+                        }
+                    }
                     _ => {}
                 }
                 if !cursor.goto_next_sibling() {
@@ -666,7 +915,7 @@ impl TypeScriptExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let metrics = count_complexity(node, &TYPESCRIPT_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -691,6 +940,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -707,9 +957,8 @@ impl TypeScriptExtractor {
 
         Self::extract_type_refs(state, node, &id);
 
-        if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
-            Self::extract_call_sites(state, body, &id);
-        }
+        // Default parameter values and the body run on each call.
+        Self::extract_owned_call_sites(state, node, &id);
     }
 
     /// Extract a field from a class body (`public_field_definition`).
@@ -720,12 +969,18 @@ impl TypeScriptExtractor {
         );
         let visibility = Self::extract_ts_accessibility(state, node);
         let text = state.node_text(node);
-        let start_line = node.start_position().row as u32;
+        // Unlike a method's, a field's decorators are its own leading children.
+        let (start_line, start_column) = declaration_start(node, &["decorator"]);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -734,7 +989,7 @@ impl TypeScriptExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -749,6 +1004,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -757,11 +1013,18 @@ impl TypeScriptExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
-                target: id,
+                target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
             });
         }
+
+        Self::extract_decorators(state, node, &id);
+
+        // A field initializer (`onClick = () => this.save()`) runs as part of
+        // construction, and `@Input()` wraps the field; the field is the
+        // named symbol that owns both calls.
+        Self::extract_owned_call_sites(state, node, &id);
     }
 
     /// Extract an interface declaration node.
@@ -779,7 +1042,13 @@ impl TypeScriptExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Interface, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Interface,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -803,6 +1072,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -815,6 +1085,30 @@ impl TypeScriptExtractor {
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
             });
+        }
+
+        if let Some(heritage) = find_direct_child_by_kind(node, "extends_type_clause") {
+            let mut cursor = heritage.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let parent = cursor.node();
+                    if let Some(reference_name) = Self::declared_type_name(state, parent) {
+                        state.unresolved_refs.push(UnresolvedRef {
+                            from_node_id: id.clone(),
+                            reference_name,
+                            reference_kind: EdgeKind::Extends,
+                            line: parent.start_position().row as u32,
+                            column: parent.start_position().column as u32,
+                            file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
+                        });
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
         }
 
         if let Some(body) = find_direct_child_by_kind(node, "interface_body") {
@@ -852,7 +1146,13 @@ impl TypeScriptExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Method,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -876,6 +1176,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -907,7 +1208,7 @@ impl TypeScriptExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -931,6 +1232,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -958,8 +1260,15 @@ impl TypeScriptExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "property_identifier" {
-                    Self::visit_enum_member(state, child);
+                match child.kind() {
+                    "property_identifier" => Self::visit_enum_member(state, child),
+                    // `A = compute()` runs when the enum is defined.
+                    "enum_assignment" => {
+                        if let Some(enum_id) = state.parent_node_id().map(str::to_owned) {
+                            Self::extract_call_sites(state, child, &enum_id);
+                        }
+                    }
+                    _ => {}
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -976,7 +1285,13 @@ impl TypeScriptExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1000,6 +1315,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1029,7 +1345,13 @@ impl TypeScriptExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::TypeAlias, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::TypeAlias,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1053,6 +1375,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1068,9 +1391,18 @@ impl TypeScriptExtractor {
         }
     }
 
-    /// Extract a namespace (`internal_module`) declaration.
+    /// Extract a `namespace` (`internal_module`) or `module` declaration.
+    /// `namespace A.B {}` nests `B` in `A`, so it qualifies as `A::B`.
     fn visit_namespace(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-        let name = Self::child_name(state, find_direct_child_by_kind(node, "identifier"));
+        let name_node = node.child_by_field_name("name");
+        let mut name = Self::child_name(state, name_node);
+        if name_node.is_some_and(|n| n.kind() == "nested_identifier") {
+            name = name
+                .split('.')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("::");
+        }
         let visibility = if state.in_export {
             Visibility::Pub
         } else {
@@ -1084,7 +1416,13 @@ impl TypeScriptExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Namespace, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Namespace,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1108,6 +1446,7 @@ impl TypeScriptExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1123,17 +1462,25 @@ impl TypeScriptExtractor {
         }
 
         if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
-            state.node_stack.push((name, id));
+            state.node_stack.push((name, id.clone()));
+            let in_export = std::mem::replace(&mut state.in_export, false);
             Self::visit_children(state, body);
+            state.in_export = in_export;
             state.node_stack.pop();
+            // The namespace owns the calls its body runs when it is entered.
+            let mut cursor = body.walk();
+            for statement in body.named_children(&mut cursor) {
+                if Self::has_unowned_calls(state, statement) {
+                    Self::extract_owned_call_sites(state, statement, &id);
+                }
+            }
         }
     }
 
-    // ----------------------------
     // Helper extraction methods
-    // ----------------------------
 
-    /// Extract decorators from a class or method declaration.
+    /// Extract the leading decorators of a class or field declaration. Their
+    /// call sites are left to the caller.
     fn extract_decorators(state: &mut ExtractionState<'_>, node: TsNode<'_>, parent_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -1152,8 +1499,13 @@ impl TypeScriptExtractor {
                     let start_column = child.start_position().column as u32;
                     let end_column = child.end_position().column as u32;
                     let qualified_name = format!("{}::@{}", state.qualified_prefix(), name);
-                    let id =
-                        generate_node_id(&state.file_path, &NodeKind::Decorator, &name, start_line);
+                    let id = local_node_id(
+                        &state.file_path,
+                        state.source,
+                        &NodeKind::Decorator,
+                        &name,
+                        child,
+                    );
 
                     let graph_node = Node {
                         id: id.clone(),
@@ -1177,6 +1529,7 @@ impl TypeScriptExtractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     };
@@ -1217,6 +1570,8 @@ impl TypeScriptExtractor {
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -1226,8 +1581,7 @@ impl TypeScriptExtractor {
                             if inner.goto_first_child() {
                                 loop {
                                     let iface = inner.node();
-                                    if iface.kind() == "type_identifier" {
-                                        let name = state.node_text(iface).to_string();
+                                    if let Some(name) = Self::declared_type_name(state, iface) {
                                         state.unresolved_refs.push(UnresolvedRef {
                                             from_node_id: class_id.to_string(),
                                             reference_name: name,
@@ -1235,6 +1589,8 @@ impl TypeScriptExtractor {
                                             line: iface.start_position().row as u32,
                                             column: iface.start_position().column as u32,
                                             file_path: state.file_path.clone(),
+                                            unmodeled_import: None,
+                                            argument_count: None,
                                         });
                                     }
                                     if !inner.goto_next_sibling() {
@@ -1253,35 +1609,183 @@ impl TypeScriptExtractor {
         }
     }
 
-    /// Recursively find `call_expression` nodes inside a node and create
-    /// unresolved Calls references.
+    fn declared_type_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
+        match node.kind() {
+            "type_identifier" => Some(state.node_text(node).to_string()),
+            "generic_type" => node
+                .child_by_field_name("name")
+                .and_then(|name| Self::declared_type_name(state, name)),
+            "nested_type_identifier" => Some(state.node_text(node).replace('.', "::")),
+            _ => None,
+        }
+    }
+
+    /// Recursively find call sites inside a node and create unresolved Calls
+    /// references. Nested arrow functions, function expressions, and local
+    /// function declarations are not graph symbols, so the calls in their
+    /// bodies (`.map((row) => format(row))`, JSX event handlers) belong to the
+    /// enclosing symbol. A JSX element naming a component (`<Card />`,
+    /// `<Layout.Header>`) renders, and so calls, that component.
     fn extract_call_sites(state: &mut ExtractionState<'_>, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                match child.kind() {
-                    "call_expression" => {
-                        let callee = child.named_child(0);
-                        if let Some(callee) = callee {
-                            let callee_name = state.node_text(callee).to_string();
-                            state.unresolved_refs.push(UnresolvedRef {
-                                from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
-                                reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
-                                file_path: state.file_path.clone(),
-                            });
-                        }
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
-                    // Skip nested arrow functions to avoid polluting call sites.
-                    "arrow_function" | "function" | "function_declaration" => {}
-                    _ => {
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
+                let callee = match child.kind() {
+                    "call_expression" => child.named_child(0).map(|callee| (callee, child)),
+                    // `new Foo()` is a constructor call site of `Foo`. Omitting
+                    // it left callers of a class empty while the disk still
+                    // had `new` invocations.
+                    "new_expression" => child
+                        .child_by_field_name("constructor")
+                        .or_else(|| child.named_child(0))
+                        .map(|callee| (callee, child)),
+                    "jsx_opening_element" | "jsx_self_closing_element" => child
+                        .child_by_field_name("name")
+                        .filter(|name| Self::is_jsx_component_name(state, *name))
+                        .map(|name| (name, name)),
+                    _ => None,
+                };
+                if let Some((callee, site)) = callee {
+                    state.unresolved_refs.push(UnresolvedRef {
+                        from_node_id: fn_node_id.to_string(),
+                        reference_name: state.node_text(callee).to_string(),
+                        reference_kind: EdgeKind::Calls,
+                        line: site.start_position().row as u32,
+                        column: site.start_position().column as u32,
+                        file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                        argument_count: None,
+                    });
                 }
+                Self::extract_call_sites(state, child, fn_node_id);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Lower-case JSX names (`<div>`) and namespaced names (`<svg:rect>`) are
+    /// intrinsic elements, not components.
+    fn is_jsx_component_name(state: &ExtractionState<'_>, name: TsNode<'_>) -> bool {
+        match name.kind() {
+            "member_expression" => true,
+            "identifier" => state
+                .node_text(name)
+                .starts_with(|first: char| first.is_ascii_uppercase()),
+            _ => false,
+        }
+    }
+
+    /// Call sites owned by the symbol `owner_id`, less calls to names a
+    /// binding inside `scope` shadows.
+    fn extract_owned_call_sites(
+        state: &mut ExtractionState<'_>,
+        scope: TsNode<'_>,
+        owner_id: &str,
+    ) {
+        Self::extract_call_sites(state, scope, owner_id);
+        Self::suppress_shadowed_calls(state, scope, owner_id);
+    }
+
+    /// Import rows are file-scoped, so a local binding makes the same bare
+    /// call name ambiguous for its whole owning function. Withhold that call
+    /// rather than claiming statement-level resolution the artifact lacks.
+    fn suppress_shadowed_calls(
+        state: &mut ExtractionState<'_>,
+        function: TsNode<'_>,
+        fn_node_id: &str,
+    ) {
+        let mut shadows = ShadowedCallNames::default();
+        Self::collect_shadowed_names(state, function, function, &mut shadows);
+        state.unresolved_refs.retain(|reference| {
+            reference.from_node_id != fn_node_id
+                || reference.reference_kind != EdgeKind::Calls
+                || !shadows.names.contains(&reference.reference_name)
+        });
+    }
+
+    fn collect_shadowed_names(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        if let Some(binding) = Self::declared_binding(node, function) {
+            Self::record_binding_pattern(state, binding, shadows);
+        }
+        if node.kind() == "formal_parameters" {
+            Self::record_bare_parameters(state, node, shadows);
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::collect_shadowed_names(state, cursor.node(), function, shadows);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// JavaScript parameters are bare patterns, not `required_parameter`.
+    fn record_bare_parameters(
+        state: &ExtractionState<'_>,
+        parameters: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            let binding = match parameter.kind() {
+                "identifier" | "object_pattern" | "array_pattern" | "rest_pattern" => {
+                    Some(parameter)
+                }
+                "assignment_pattern" => parameter.child_by_field_name("left"),
+                _ => None,
+            };
+            if let Some(binding) = binding {
+                Self::record_binding_pattern(state, binding, shadows);
+            }
+        }
+    }
+
+    /// The binding pattern `node` declares in `function`'s scope. A nested
+    /// function declaration is a local binding too: its body's calls are
+    /// attributed to `function`, so its name shadows there.
+    fn declared_binding<'t>(node: TsNode<'t>, function: TsNode<'t>) -> Option<TsNode<'t>> {
+        match node.kind() {
+            "required_parameter" | "optional_parameter" | "rest_parameter" => {
+                node.child_by_field_name("pattern")
+            }
+            "variable_declarator" => node.child_by_field_name("name"),
+            "catch_clause" | "for_in_statement" => node
+                .child_by_field_name("parameter")
+                .or_else(|| node.child_by_field_name("left")),
+            "arrow_function" => node.child_by_field_name("parameter"),
+            "function_declaration" | "generator_function_declaration" if node != function => {
+                node.child_by_field_name("name")
+            }
+            _ => None,
+        }
+    }
+
+    fn record_binding_pattern(
+        state: &ExtractionState<'_>,
+        pattern: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        if pattern.kind() == "identifier" {
+            shadows.names.push(state.node_text(pattern).to_owned());
+            return;
+        }
+        // Only walk the parser's binding field. Destructuring property and
+        // default-value subtrees may add names, deliberately withholding an
+        // ambiguous edge rather than inventing one.
+        let mut cursor = pattern.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::record_binding_pattern(state, cursor.node(), shadows);
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -1305,7 +1809,7 @@ impl TypeScriptExtractor {
                 // Parameter nodes contain type_annotation children; also the return type annotation
                 "required_parameter" | "optional_parameter" | "rest_parameter"
                 | "type_annotation" => {
-                    Self::collect_type_identifiers(state, child, fn_node_id);
+                    Self::collect_type_identifiers(state, child, fn_node_id, EdgeKind::Uses);
                 }
                 // Formal parameters container
                 "formal_parameters" => {
@@ -1319,11 +1823,12 @@ impl TypeScriptExtractor {
         }
     }
 
-    /// Recursively collect `type_identifier` nodes and emit "uses" refs.
+    /// Recursively collect `type_identifier` nodes and emit unresolved refs.
     fn collect_type_identifiers(
         state: &mut ExtractionState<'_>,
         node: TsNode<'_>,
-        fn_node_id: &str,
+        from_node_id: &str,
+        reference_kind: EdgeKind,
     ) {
         let mut cursor = node.walk();
         if !cursor.goto_first_child() {
@@ -1350,16 +1855,18 @@ impl TypeScriptExtractor {
                         | "bigint"
                 ) {
                     state.unresolved_refs.push(UnresolvedRef {
-                        from_node_id: fn_node_id.to_string(),
+                        from_node_id: from_node_id.to_string(),
                         reference_name: type_name.to_string(),
-                        reference_kind: EdgeKind::Uses,
+                        reference_kind,
                         line: child.start_position().row as u32,
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
             } else {
-                Self::collect_type_identifiers(state, child, fn_node_id);
+                Self::collect_type_identifiers(state, child, from_node_id, reference_kind);
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -1495,6 +2002,10 @@ impl TypeScriptExtractor {
                 duration_ms: start.elapsed().as_millis() as u64,
             },
             imports: state.imports,
+            clone_bodies: Vec::new(),
+            schema_evidence: None,
+            callable_arities: Vec::new(),
+            go_method_sets: Vec::new(),
         }
     }
 }
@@ -1508,33 +2019,17 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
         "TypeScript"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        TypeScriptExtractor::extract_typescript(file_path, source)
-    }
-
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::hotpath_observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || TypeScriptExtractor::extract_typescript_artifact(file_path, source),
-            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
-        )
+        crate::observe::measure_extract_file(|| {
+            TypeScriptExtractor::extract_typescript_artifact(file_path, source)
+        })
     }
 
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        TypeScriptExtractor::extract_tree(file_path, source, tree, scope)
-    }
-
-    fn extract_parsed_artifact(
-        &self,
-        file_path: &str,
-        source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {

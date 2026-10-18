@@ -3,25 +3,69 @@
 //! Output content remains opaque except for the one protocol-defined session
 //! start frame needed to bind a durable Work attempt to its owning transcript.
 
+use std::io::{ErrorKind, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptProviderOutcomeV1, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
 use tracedecay_domain::{
     ManifestDigest, ObservationSourceIdentityV1, ProviderId, SessionId, WorkProviderProtocol,
 };
 
-pub(super) async fn read_capped(
-    stream: Option<impl AsyncRead + Unpin>,
+/// How often a reader parked on a quiet pipe re-checks its stop flag.
+const STOP_POLL_INTERVAL_MS: i32 = 50;
+
+/// A captured pipe end the reader can wait on without blocking in `read`.
+#[cfg(unix)]
+pub(super) trait CapturedPipe: Read + std::os::fd::AsFd {}
+#[cfg(unix)]
+impl<T: Read + std::os::fd::AsFd> CapturedPipe for T {}
+#[cfg(not(unix))]
+pub(super) trait CapturedPipe: Read {}
+#[cfg(not(unix))]
+impl<T: Read> CapturedPipe for T {}
+
+/// Whether the pipe has data, EOF, or an error to read. A pipe held open by a
+/// descendant stays quiet until `STOP_POLL_INTERVAL_MS` elapses.
+#[cfg(unix)]
+fn readable(stream: &impl std::os::fd::AsFd) -> bool {
+    use std::os::fd::AsRawFd;
+
+    let mut poll = libc::pollfd {
+        fd: stream.as_fd().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `poll` is one valid `pollfd` and the count passed is 1.
+    let ready = unsafe { libc::poll(&raw mut poll, 1, STOP_POLL_INTERVAL_MS) };
+    ready > 0 || (ready < 0 && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted)
+}
+
+#[cfg(not(unix))]
+fn readable(_stream: &impl Read) -> bool {
+    true
+}
+
+/// Reads `stream` to EOF, retaining at most `cap` bytes. Once `stop` is set the
+/// reader returns what it has so far, so a pipe a descendant never closes
+/// cannot pin the thread or its file descriptor.
+pub(super) fn read_capped(
+    stream: Option<impl CapturedPipe>,
     cap: u64,
+    stop: &AtomicBool,
 ) -> Option<(Vec<u8>, u64)> {
     let mut stream = stream?;
     let mut retained: Vec<u8> = Vec::new();
     let mut total: u64 = 0;
     let mut buffer = [0_u8; 16 * 1024];
-    loop {
-        match stream.read(&mut buffer).await {
+    while !stop.load(Ordering::Acquire) {
+        if !readable(&stream) {
+            continue;
+        }
+        match stream.read(&mut buffer) {
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Ok(0) | Err(_) => break,
             Ok(read) => {
                 total = total.saturating_add(read as u64);
@@ -144,6 +188,11 @@ mod tests {
                 "content or an invalid identity must not become Work authority",
             );
         }
+        let started = captured(b"{\"type\":\"thread.started\",\"thread_id\":\"codex-thread\"}\n");
+        let source = provider_session(WorkProviderProtocol::CodexExecJson, Some(&started))
+            .expect("Codex thread.started session");
+        assert_eq!(source.provider().as_str(), "codex");
+        assert_eq!(source.session_id().as_str(), "codex-thread");
     }
 
     fn captured(bytes: &[u8]) -> (Vec<u8>, u64) {

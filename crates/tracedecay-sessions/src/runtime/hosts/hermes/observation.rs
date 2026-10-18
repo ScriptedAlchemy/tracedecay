@@ -16,7 +16,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::observation::{CaptureObservationRequest, ObservationCancellation};
 use crate::runtime::shared::path_belongs_to_project;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
     parse_normalized_observation_record_v1,
 };
@@ -38,6 +38,7 @@ pub struct HermesProjectionMetadata {
     pub location_path: Option<String>,
     pub profile: Option<String>,
     pub location_provenance: Option<&'static str>,
+    pub transcript_path: Option<String>,
 }
 
 pub(super) fn project_projection_metadata(
@@ -47,7 +48,6 @@ pub(super) fn project_projection_metadata(
     location_provenance: &'static str,
 ) -> HermesProjectionMetadata {
     let presentation_path = match location_provenance {
-        "profile_pin" => source.legacy_project_pin.as_deref(),
         "session_cwd" => row.session_cwd.as_deref().map(Path::new),
         _ => None,
     }
@@ -58,6 +58,7 @@ pub(super) fn project_projection_metadata(
         location_path: Some(presentation_path.to_string_lossy().into_owned()),
         profile: source.profile.clone(),
         location_provenance: Some(location_provenance),
+        transcript_path: Some(source.state_db.to_string_lossy().into_owned()),
     }
 }
 
@@ -101,6 +102,7 @@ struct HermesNativeObservation {
     source: Option<String>,
     profile: Option<String>,
     location_provenance: Option<String>,
+    transcript_path: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -160,6 +162,7 @@ pub fn native_observation_record(
         "source": row.session_source,
         "profile": projection.profile,
         "location_provenance": projection.location_provenance,
+        "transcript_path": projection.transcript_path,
         "usage": include_session_usage.then(|| json!({
             "input_tokens": row.session_input_tokens,
             "output_tokens": row.session_output_tokens,
@@ -243,7 +246,7 @@ pub fn normalize_native_observation(
     let mut facts = vec![CanonicalObservationFactV1::Session {
         project_path: native.project_path,
         location_path: native.location_path,
-        transcript_path: None,
+        transcript_path: native.transcript_path,
         title: native.title,
         started_at: native.started_at.map(|value| value as i64),
         ended_at: native.ended_at.map(|value| value as i64),
@@ -269,13 +272,13 @@ pub fn normalize_native_observation(
         });
     }
     if role == CanonicalMessageRoleV1::Tool {
-        facts.push(CanonicalObservationFactV1::ToolResult {
-            invocation_id: None,
-            content: native.content.clone().map_or(Value::Null, Value::String),
-            success: None,
-        });
+        facts.push(tracedecay_capture::accounted_tool_result(
+            None,
+            native.content.clone().map_or(Value::Null, Value::String),
+            None,
+        ));
     }
-    append_tool_invocations(&mut facts, native.tool_calls.as_ref(), &stable_record_id)?;
+    append_tool_invocations(&mut facts, native.tool_calls.as_ref())?;
 
     let (visibility, content) = match native.reasoning {
         Some(content) => (
@@ -345,19 +348,13 @@ pub fn normalize_native_observation(
 fn canonical_message_role(
     role: &str,
 ) -> Result<CanonicalMessageRoleV1, ObservationRecordParseErrorV1> {
-    match role {
-        "user" => Ok(CanonicalMessageRoleV1::User),
-        "assistant" => Ok(CanonicalMessageRoleV1::Assistant),
-        "system" => Ok(CanonicalMessageRoleV1::System),
-        "tool" => Ok(CanonicalMessageRoleV1::Tool),
-        _ => Err(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope),
-    }
+    CanonicalMessageRoleV1::from_known_label(role)
+        .ok_or(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)
 }
 
 fn append_tool_invocations(
     facts: &mut Vec<CanonicalObservationFactV1>,
     tool_calls: Option<&Value>,
-    message_id: &ObservationId,
 ) -> Result<(), ObservationRecordParseErrorV1> {
     let Some(tool_calls) = tool_calls else {
         return Ok(());
@@ -380,20 +377,11 @@ fn append_tool_invocations(
             Value::String(raw) => serde_json::from_str(&raw).unwrap_or(Value::String(raw)),
             value => value,
         };
-        let invocation_evidence = match call.get("id") {
-            Some(native_id) => json!({
-                "message_id": message_id.as_str(),
-                "native_tool_id": native_id,
-            }),
-            None => json!({
-                "message_id": message_id.as_str(),
-                "tool_call": call,
-            }),
-        };
-        let invocation_id = stable_native_id("hermes.tool", &invocation_evidence)
-            .map_err(|()| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
         facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id,
+            invocation_id: call
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| ObservationId::new(id).ok()),
             name: name.to_owned(),
             arguments,
         });

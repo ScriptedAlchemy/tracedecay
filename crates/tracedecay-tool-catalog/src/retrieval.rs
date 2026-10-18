@@ -198,26 +198,6 @@ impl RetrievalPrimitiveManifestV1 {
         &self.evidence_packet_schema
     }
 
-    pub fn coverage_contract(&self) -> &CoverageContractRef {
-        &self.coverage_contract
-    }
-
-    pub fn omission_contract(&self) -> &OmissionContractRef {
-        &self.omission_contract
-    }
-
-    pub fn scoring_contract(&self) -> &ScoringContractRef {
-        &self.scoring_contract
-    }
-
-    pub fn contribution_contract(&self) -> &ContributionContractRef {
-        &self.contribution_contract
-    }
-
-    pub fn deterministic_order(&self) -> &SortContract {
-        &self.deterministic_order
-    }
-
     pub const fn default_page_size(&self) -> u32 {
         self.default_page_size
     }

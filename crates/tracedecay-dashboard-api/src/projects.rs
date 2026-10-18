@@ -12,20 +12,25 @@ use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     scope_from_state,
 };
-use super::{DashboardState, build_selected_project_state, config_error};
-use crate::project_registry::{
-    PublicCodeProject, build_project_registry_view, public_code_project_from_record,
+use super::{
+    DashboardSessionAuthorityStateV1, DashboardSessionResolutionV1, DashboardState,
+    build_selected_project_state, config_error,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use crate::project_registry::{
+    PublicCodeProject, align_public_checkout_branches, build_project_registry_view,
+    public_code_project_for_checkout, public_code_project_from_record,
+};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::ProjectRegistryContext;
 
 #[derive(Clone)]
 pub struct DashboardRuntime {
-    active: DashboardState,
+    /// Replaced once, when a still-opening project's session authorities
+    /// mount; every other field of the active state is fixed at composition.
+    active: Arc<std::sync::RwLock<DashboardState>>,
     project_api: Router<DashboardState>,
     project_states: Arc<RwLock<HashMap<String, CachedProjectState>>>,
 }
-
 #[derive(Clone)]
 struct CachedProjectState {
     registry_context: ProjectRegistryContext,
@@ -35,40 +40,84 @@ struct CachedProjectState {
 impl DashboardRuntime {
     pub fn new(active: DashboardState, project_api: Router<DashboardState>) -> Self {
         Self {
-            active,
+            active: Arc::new(std::sync::RwLock::new(active)),
             project_api,
             project_states: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub fn active_state(&self) -> DashboardState {
-        self.active.clone()
+    fn active(&self) -> DashboardState {
+        self.active
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
-    pub fn active_project_id(&self) -> Option<&str> {
-        self.active.project_id.as_deref()
+    /// The active project's state. While its session authorities are still
+    /// opening, this reads the resolution the daemon published, mounting the
+    /// authorities or recording them unavailable the first time it is
+    /// terminal. It never waits on or calls into the daemon.
+    pub fn active_state(&self) -> DashboardState {
+        let current = self.active();
+        let Some(publication) = current.session_mount.as_ref() else {
+            return current;
+        };
+        let resolution = publication.borrow().clone();
+        if matches!(resolution, DashboardSessionResolutionV1::Opening) {
+            return current;
+        }
+        let (state, mounted) = {
+            let mut active = self
+                .active
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let terminal_first_seen = active.session_mount.take().is_some();
+            match resolution {
+                DashboardSessionResolutionV1::Ready(authorities) if terminal_first_seen => {
+                    active.mount_session_authorities(authorities);
+                }
+                DashboardSessionResolutionV1::Unavailable if terminal_first_seen => {
+                    active.session_authority = DashboardSessionAuthorityStateV1::Unavailable;
+                }
+                _ => {}
+            }
+            let mounted = terminal_first_seen
+                && active.session_authority == DashboardSessionAuthorityStateV1::Ready;
+            (active.clone(), mounted)
+        };
+        if mounted {
+            tracing::info!(
+                event = "dashboard_session_authorities_mounted",
+                project_root = %state.project_root.display(),
+            );
+            crate::token_count::spawn_warm(&state);
+        }
+        state
+    }
+
+    pub fn active_project_id(&self) -> Option<String> {
+        self.active().project_id
     }
 
     pub fn project_api_router(&self) -> Router<DashboardState> {
         self.project_api.clone()
     }
 
-    fn active_project_root(&self) -> String {
-        self.active.project_root.display().to_string()
-    }
-
-    pub async fn selected_project_state(&self, project_id: &str) -> Result<SelectedProjectState> {
-        if self.active.project_id.as_deref() == Some(project_id) {
+    pub async fn selected_project_state(
+        &self,
+        project_id: &str,
+    ) -> std::result::Result<SelectedProjectState, SelectedProjectError> {
+        let active = self.active();
+        if active.project_id.as_deref() == Some(project_id) {
             return Ok(SelectedProjectState {
-                state: self.active.clone(),
+                state: self.active_state(),
             });
         }
 
-        let db = self
-            .active
+        let db = active
             .savings_db
             .as_ref()
-            .ok_or_else(|| config_error("tracedecay project registry is unavailable"))?;
+            .ok_or(SelectedProjectError::RegistryNotMounted)?;
         let context = db
             .project_registry_context_by_id(project_id)
             .await?
@@ -81,7 +130,7 @@ impl DashboardRuntime {
             });
         }
         let project_root = std::path::PathBuf::from(&context.project.canonical_root);
-        let resolver = self.active.project_graph_resolver.as_ref().ok_or_else(|| {
+        let resolver = active.project_graph_resolver.as_ref().ok_or_else(|| {
             config_error(format!(
                 "registered project graph is not mounted: {project_id}"
             ))
@@ -95,13 +144,14 @@ impl DashboardRuntime {
                 "registered project graph is not mounted: {project_id}"
             ))
         })?;
-        if cg.store_layout().identity.project_id.as_deref() != Some(project_id) {
+        if cg.store_layout.identity.project_id.as_deref() != Some(project_id) {
             return Err(config_error(format!(
                 "registered project id mismatch for {project_id}: {}",
                 project_root.display()
-            )));
+            ))
+            .into());
         }
-        let state = build_selected_project_state(cg, &self.active).await?;
+        let state = build_selected_project_state(cg, &active).await?;
         let mut project_states = self.project_states.write().await;
         if let Some(cached) = project_states.get(project_id).cloned()
             && cached.registry_context == context
@@ -123,6 +173,20 @@ impl DashboardRuntime {
 
 pub struct SelectedProjectState {
     pub state: DashboardState,
+}
+
+/// Why a non-active project's dashboard state could not be selected.
+#[derive(Debug)]
+pub enum SelectedProjectError {
+    /// This dashboard mounts no project registry to resolve the id against.
+    RegistryNotMounted,
+    Failed(TraceDecayError),
+}
+
+impl From<TraceDecayError> for SelectedProjectError {
+    fn from(error: TraceDecayError) -> Self {
+        Self::Failed(error)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,26 +219,28 @@ pub(super) struct ProjectContextPayloadV1 {
     aliases: Vec<tracedecay_global_db::ProjectAliasRecord>,
 }
 
-#[hotpath::measure(label = "dashboard_api.projects.list", future = true)]
+#[tracing::instrument(name = "dashboard_api.projects.list", level = "trace", skip_all)]
 pub async fn list(
     State(runtime): State<DashboardRuntime>,
     Query(params): Query<ProjectsParams>,
 ) -> Json<DashboardEnvelopeV1<ProjectsPayloadV1>> {
+    let active = runtime.active();
     let limit = params.limit.unwrap_or(100).clamp(1, 250);
-    let Some(db) = runtime.active.savings_db.as_ref() else {
+    let unavailable_payload = |status: &str, error: Option<String>| ProjectsPayloadV1 {
+        status: status.to_owned(),
+        error,
+        limit,
+        truncated: None,
+        projects: None,
+        active_project_id: active.project_id.clone(),
+        active_project_root: active.project_root.display().to_string(),
+        summary: None,
+        project_tree: None,
+    };
+    let Some(db) = active.savings_db.as_ref() else {
         return registry_list_unavailable(
-            &runtime,
-            ProjectsPayloadV1 {
-                status: "missing_registry".to_owned(),
-                error: None,
-                limit,
-                truncated: None,
-                projects: None,
-                active_project_id: runtime.active_project_id().map(str::to_owned),
-                active_project_root: runtime.active_project_root(),
-                summary: None,
-                project_tree: None,
-            },
+            &active,
+            unavailable_payload("missing_registry", None),
             "project_registry_not_mounted",
         );
     };
@@ -183,50 +249,36 @@ pub async fn list(
         Ok(projects) => projects,
         Err(error) => {
             return registry_list_unavailable(
-                &runtime,
-                ProjectsPayloadV1 {
-                    status: "registry_unavailable".to_owned(),
-                    error: Some(error.to_string()),
-                    limit,
-                    truncated: None,
-                    projects: None,
-                    active_project_id: runtime.active_project_id().map(str::to_owned),
-                    active_project_root: runtime.active_project_root(),
-                    summary: None,
-                    project_tree: None,
-                },
+                &active,
+                unavailable_payload("registry_unavailable", Some(error.to_string())),
                 error.to_string(),
             );
         }
     };
     let truncated = projects.len() > limit;
     projects.truncate(limit);
-    let active_project_id = runtime.active_project_id().map(str::to_string);
+    let active_project_id = active.project_id.clone();
     let contexts = match db.project_registry_contexts_for_projects(&projects).await {
         Ok(contexts) => contexts,
         Err(error) => {
             return registry_list_unavailable(
-                &runtime,
-                ProjectsPayloadV1 {
-                    status: "registry_unavailable".to_owned(),
-                    error: Some(error.to_string()),
-                    limit,
-                    truncated: None,
-                    projects: None,
-                    active_project_id,
-                    active_project_root: runtime.active_project_root(),
-                    summary: None,
-                    project_tree: None,
-                },
+                &active,
+                unavailable_payload("registry_unavailable", Some(error.to_string())),
                 error.to_string(),
             );
         }
     };
-    let view = build_project_registry_view(&contexts, runtime.active_project_id(), truncated);
-    let rows = projects
+    let view = build_project_registry_view(
+        &contexts,
+        active.project_id.as_deref(),
+        Some(active.project_root.as_path()),
+        truncated,
+    );
+    let mut rows = projects
         .iter()
-        .map(|project| public_code_project_from_record(project, runtime.active_project_id()))
+        .map(|project| public_code_project_from_record(project, active.project_id.as_deref()))
         .collect::<Vec<_>>();
+    align_public_checkout_branches(&mut rows, &view);
     let row_count = rows.len() as u64;
 
     let payload = ProjectsPayloadV1 {
@@ -236,13 +288,13 @@ pub async fn list(
         truncated: Some(truncated),
         projects: Some(rows),
         active_project_id,
-        active_project_root: runtime.active_project_root(),
+        active_project_root: active.project_root.display().to_string(),
         summary: Some(view.summary),
         project_tree: Some(view.project_tree),
     };
     let envelope = if truncated {
         DashboardEnvelopeV1::new(
-            scope_from_state(&runtime.active),
+            scope_from_state(&active),
             DashboardDomainStateV1::Partial,
             DashboardCoverageV1::unknown(),
             DashboardFreshnessV1::fresh_now(),
@@ -250,7 +302,7 @@ pub async fn list(
         )
     } else {
         DashboardEnvelopeV1::ready(
-            scope_from_state(&runtime.active),
+            scope_from_state(&active),
             DashboardCoverageV1::complete(row_count, "projects"),
             payload,
         )
@@ -259,12 +311,12 @@ pub async fn list(
 }
 
 fn registry_list_unavailable(
-    runtime: &DashboardRuntime,
+    active: &DashboardState,
     payload: ProjectsPayloadV1,
     reason: impl Into<String>,
 ) -> Json<DashboardEnvelopeV1<ProjectsPayloadV1>> {
     Json(DashboardEnvelopeV1::unavailable(
-        scope_from_state(&runtime.active),
+        scope_from_state(active),
         payload,
         reason,
     ))
@@ -274,38 +326,35 @@ pub fn is_registry_unavailable_error(error: &TraceDecayError) -> bool {
     matches!(
         error,
         TraceDecayError::Database { .. } | TraceDecayError::Sqlite(_)
-    ) || matches!(
-        error,
-        TraceDecayError::Config { message }
-            if message == "tracedecay project registry is unavailable"
     )
 }
 
 pub fn registry_unavailable_response(
     state: &DashboardState,
-    error: &TraceDecayError,
+    detail: String,
 ) -> Json<DashboardEnvelopeV1<ProjectContextPayloadV1>> {
     Json(DashboardEnvelopeV1::unavailable(
         scope_from_state(state),
         ProjectContextPayloadV1 {
             status: "registry_unavailable".to_owned(),
-            error: Some(error.to_string()),
+            error: Some(detail.clone()),
             is_active: None,
             project: None,
             aliases: Vec::new(),
         },
-        error.to_string(),
+        detail,
     ))
 }
 
-#[hotpath::measure(label = "dashboard_api.projects.context", future = true)]
+#[tracing::instrument(name = "dashboard_api.projects.context", level = "trace", skip_all)]
 pub async fn context(
     State(runtime): State<DashboardRuntime>,
     AxumPath(project_id): AxumPath<String>,
 ) -> Json<DashboardEnvelopeV1<ProjectContextPayloadV1>> {
-    let Some(db) = runtime.active.savings_db.as_ref() else {
+    let active = runtime.active();
+    let Some(db) = active.savings_db.as_ref() else {
         return Json(DashboardEnvelopeV1::unavailable(
-            scope_from_state(&runtime.active),
+            scope_from_state(&active),
             ProjectContextPayloadV1 {
                 status: "missing_registry".to_owned(),
                 error: None,
@@ -318,11 +367,11 @@ pub async fn context(
     };
     let context = match db.project_registry_context_by_id(&project_id).await {
         Ok(context) => context,
-        Err(error) => return registry_unavailable_response(&runtime.active, &error),
+        Err(error) => return registry_unavailable_response(&active, error.to_string()),
     };
     let Some(context) = context else {
         return Json(DashboardEnvelopeV1::complete_zero_findings(
-            scope_from_state(&runtime.active),
+            scope_from_state(&active),
             DashboardCoverageV1::complete(1, "projects"),
             ProjectContextPayloadV1 {
                 status: "not_found".to_owned(),
@@ -333,55 +382,21 @@ pub async fn context(
             },
         ));
     };
-    let is_active = Some(project_id.as_str()) == runtime.active_project_id();
+    let is_active = Some(project_id.as_str()) == active.project_id.as_deref();
     Json(DashboardEnvelopeV1::ready(
-        scope_from_state(&runtime.active),
+        scope_from_state(&active),
         DashboardCoverageV1::complete(1, "projects"),
         ProjectContextPayloadV1 {
             status: "ok".to_owned(),
             error: None,
             is_active: Some(is_active),
-            project: Some(public_code_project_from_record(
+            project: Some(public_code_project_for_checkout(
                 &context.project,
-                runtime.active_project_id(),
+                &context.aliases,
+                active.project_id.as_deref(),
+                is_active.then_some(active.project_root.as_path()),
             )),
             aliases: context.aliases,
         },
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext};
-
-    fn code_project() -> CodeProjectRecord {
-        CodeProjectRecord {
-            project_id: "proj_test".to_string(),
-            canonical_root: "/repo".to_string(),
-            display_root: "/repo".to_string(),
-            git_common_dir: Some("/repo/.git".to_string()),
-            git_remote_url: Some("https://example.com/repo.git".to_string()),
-            default_branch: Some("main".to_string()),
-            created_at: 100,
-            last_seen_at: 200,
-        }
-    }
-
-    fn registry_context() -> ProjectRegistryContext {
-        ProjectRegistryContext {
-            project: code_project(),
-            aliases: Vec::new(),
-            stores: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn registry_context_changes_with_project_metadata() {
-        let base = registry_context();
-        let mut changed = registry_context();
-        changed.project.canonical_root = "/new-repo".to_string();
-        changed.project.last_seen_at += 1;
-
-        assert_ne!(base, changed);
-    }
 }

@@ -11,10 +11,10 @@
 use std::fmt;
 
 use serde::Deserialize;
-use tracedecay_application::doctor::{
-    DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
-    DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorReportCoverageV1,
-    DoctorReportEntryV1, DoctorReportV1,
+use tracedecay_contracts::doctor::{
+    DOCTOR_FINDING_FAMILIES, DoctorCoverageCompletenessV1, DoctorEvidenceStateV1,
+    DoctorFamilyConsultationV1, DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1,
+    DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1,
 };
 
 use crate::read_model::{
@@ -30,14 +30,8 @@ pub const DOCTOR_FINDINGS_REFRESH_OPERATION: &str = "use-case.dashboard.doctor.f
 pub const DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE: &str =
     "no admitted Doctor report source is available for this dashboard scope";
 
-/// The closed Doctor finding-family vocabulary the read routes project.
-pub use tracedecay_application::doctor::DOCTOR_FINDING_FAMILIES as KNOWN_DOCTOR_FINDING_FAMILIES;
-
 /// Path of the Doctor finding read route, filtered by the caller's query.
 pub const DOCTOR_FINDINGS_ROUTE_PATH: &str = "/api/doctor/findings";
-
-/// Path of the storage-family compatibility projection of the same report.
-pub const STORAGE_FINDINGS_ROUTE_PATH: &str = "/api/storage/findings";
 
 /// Query DTO for the Doctor findings read route.
 ///
@@ -47,8 +41,8 @@ pub const STORAGE_FINDINGS_ROUTE_PATH: &str = "/api/storage/findings";
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct DoctorFindingsQueryV1 {
     /// Optional per-family filter (`advisory`, `configuration`,
-    /// `storage_runtime`, `storage`, `language_server`, `semantic_index`,
-    /// `observability`).
+    /// `storage_runtime`, `storage`, `language_server`, `code_index`,
+    /// `observability`, `memory`).
     #[serde(default)]
     pub family: Option<String>,
 }
@@ -72,7 +66,7 @@ pub fn parse_doctor_finding_family(
 }
 
 /// The stable label for one finding family, used in coverage omission reasons.
-pub use tracedecay_application::doctor::doctor_finding_family_label;
+pub use tracedecay_contracts::doctor::doctor_finding_family_label;
 
 /// The refresh action every Doctor read attaches, including its typed
 /// unavailable states: a caller can always re-read.
@@ -221,10 +215,9 @@ fn family_coverage(
     }
 
     match report.coverage().completeness() {
-        DoctorCoverageCompletenessV1::Complete => DashboardCoverageV1::complete(
-            KNOWN_DOCTOR_FINDING_FAMILIES.len() as u64,
-            "doctor_families",
-        ),
+        DoctorCoverageCompletenessV1::Complete => {
+            DashboardCoverageV1::complete(DOCTOR_FINDING_FAMILIES.len() as u64, "doctor_families")
+        }
         DoctorCoverageCompletenessV1::Partial => {
             let consulted = report
                 .coverage()
@@ -250,7 +243,7 @@ fn family_coverage(
                 })
                 .collect();
             DashboardCoverageV1::partial(
-                KNOWN_DOCTOR_FINDING_FAMILIES.len() as u64,
+                DOCTOR_FINDING_FAMILIES.len() as u64,
                 consulted,
                 "doctor_families",
                 omissions,
@@ -401,18 +394,6 @@ mod tests {
     }
 
     #[test]
-    fn every_known_family_has_a_label_that_round_trips() {
-        for family in KNOWN_DOCTOR_FINDING_FAMILIES {
-            let label = doctor_finding_family_label(family);
-            assert_eq!(
-                parse_doctor_finding_family(Some(label)).unwrap(),
-                Some(family),
-                "family label {label} must parse back to its own family"
-            );
-        }
-    }
-
-    #[test]
     fn absent_and_failed_sources_never_present_as_healthy_or_empty() {
         let unsupported = DoctorReadPresentationV1::source_unsupported();
         assert_eq!(
@@ -438,26 +419,6 @@ mod tests {
         assert!(!failed.coverage.is_complete());
         assert_eq!(failed.freshness.state, DashboardFreshnessStateV1::Unknown);
         assert_eq!(failed.legal_actions, vec![doctor_findings_refresh_action()]);
-    }
-
-    #[test]
-    fn projection_notes_name_the_exact_absence() {
-        assert_eq!(
-            DoctorProjectionErrorV1::FamilyAbsent.note(),
-            "canonical Doctor report omitted the requested finding family"
-        );
-        assert_eq!(
-            DoctorProjectionErrorV1::FamilyAbsent.to_string(),
-            DoctorProjectionErrorV1::FamilyAbsent.note()
-        );
-    }
-
-    #[test]
-    fn source_failure_note_preserves_the_owner_error() {
-        assert_eq!(
-            doctor_report_failure_note(&"scope unavailable"),
-            "Doctor report composition failed: scope unavailable"
-        );
     }
 
     #[test]

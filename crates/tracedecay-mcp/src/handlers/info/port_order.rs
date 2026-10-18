@@ -1,20 +1,20 @@
-//! `tracedecay_port_order` — dependency-first porting order (Kahn levels) with SCC cycle reporting.
+//! `tracedecay_port_order`, dependency-first porting order (Kahn levels) with SCC cycle reporting.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ToolResult;
-use crate::{decode_primitive_request, generic_tool_result, unique_file_paths};
+use crate::handlers::graph::graph_tool_completion;
+use crate::{decode_primitive_request, unique_file_paths};
 use serde_json::Value;
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
     PortCycleAnchorV1, PortCycleFileV1, PortCycleSymbolV1, PortCycleV1, PortOrderLevelV1,
     PortOrderResultV1, PortOrderSurfaceRequestV1, PortOrderSymbolV1,
 };
 use tracedecay_domain::RelationEdgeKindV1;
-use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::VerifiedGraphQuery;
 
-use super::PORT_DEFAULT_KINDS;
+use super::port_kinds;
 use super::verified::{INFO_RELATION_LIMIT, required_symbol_parts, symbols_in_dir};
 
 #[derive(Clone, Copy)]
@@ -26,38 +26,20 @@ struct PortOrderSymbol<'a> {
     start_line: u32,
 }
 
-#[hotpath::measure(label = "mcp.info.port_order.total")]
-pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Result<ToolResult> {
+#[tracing::instrument(name = "mcp.info.port_order.total", level = "trace", skip_all)]
+pub async fn compute_port_order(
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<GraphToolCompletionV1> {
     let request: PortOrderSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_port_order")?;
-    let kind_strs = request.kinds.as_ref().map_or_else(
-        || {
-            PORT_DEFAULT_KINDS
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect()
-        },
-        Clone::clone,
-    );
-
     let limit = request.limit.map_or(50, |value| value.min(500) as usize);
+    let kinds = port_kinds(request.kinds.as_deref())?;
 
-    let kinds: Vec<NodeKind> = kind_strs
-        .iter()
-        .filter_map(|s| NodeKind::from_str(s))
-        .collect();
-
-    if kinds.is_empty() {
-        return Err(TraceDecayError::Config {
-            message: "invalid parameter: kinds must contain at least one supported node kind"
-                .to_owned(),
-        });
-    }
-
-    let summaries = hotpath::measure_block!(
-        "mcp.info.port_order.symbols",
+    let summaries = {
+        let _span = tracing::trace_span!("mcp.info.port_order.symbols").entered();
         symbols_in_dir(graph, &request.source_dir, &kinds)?
-    );
+    };
     let nodes = summaries
         .iter()
         .map(|symbol| {
@@ -80,13 +62,11 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
             returned: 0,
             levels: Vec::new(),
             cycles: Vec::new(),
+            freshness: None,
         };
-        let output = serde_json::to_value(result)?;
-        return Ok(generic_tool_result(
-            Some(graph.project_root()?),
-            &args,
-            &output,
-            vec![],
+        return Ok(graph_tool_completion(
+            GraphToolResultV1::PortOrder(result),
+            Vec::new(),
         ));
     }
 
@@ -99,8 +79,8 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
         .iter()
         .map(|symbol| symbol.occurrence.clone())
         .collect::<Vec<_>>();
-    let edges = hotpath::measure_block!(
-        "mcp.info.port_order.edges",
+    let edges = {
+        let _span = tracing::trace_span!("mcp.info.port_order.edges").entered();
         graph.edges_among(
             &occurrences,
             &[
@@ -111,10 +91,10 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
             ],
             INFO_RELATION_LIMIT,
         )?
-    );
+    };
 
-    let (levels, emitted, cycles, dep_graph) = hotpath::measure_block!(
-        "mcp.info.port_order.compute",
+    let (levels, emitted, cycles, dep_graph) = {
+        let _span = tracing::trace_span!("mcp.info.port_order.compute").entered();
         {
             // Build adjacency list and in-degree map for Kahn's algorithm.
             // Edge direction: source depends on target (source calls/uses target),
@@ -144,8 +124,8 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
             }
 
             for edge in &edges {
-                let source = edge.edge.from_occurrence.as_str();
-                let target = edge.edge.to_occurrence.as_str();
+                let source = edge.from_occurrence.as_str();
+                let target = edge.to_occurrence.as_str();
                 if !id_set.contains(source) || !id_set.contains(target) {
                     continue;
                 }
@@ -178,8 +158,13 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
             let mut emitted = 0usize;
 
             while !queue.is_empty() && emitted < limit {
-                let mut current_level: Vec<&str> = Vec::new();
+                queue.make_contiguous().sort_by_key(|id| {
+                    node_map
+                        .get(id)
+                        .map(|node| (node.file, node.start_line, node.kind, node.name, node.id))
+                });
                 let level_size = queue.len();
+                let mut current_level: Vec<&str> = Vec::new();
                 for _ in 0..level_size {
                     // Safety: we checked queue is non-empty above and iterate exactly level_size times
                     let Some(id) = queue.pop_front() else { break };
@@ -226,7 +211,7 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
 
             // Group cycles into SCCs so multiple disjoint mutually-recursive
             // groups don't collapse into one mega-cycle. Each non-trivial SCC
-            // becomes its own entry with the files forming it surfaced — gives
+            // becomes its own entry with the files forming it surfaced, gives
             // the user a clear "break this cycle" target instead of a 200+
             // symbol blob.
             let mut cycle_adj: HashMap<&str, HashSet<&str>> = HashMap::new();
@@ -254,7 +239,7 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
                 // smallest out-degree is the leaf-most node inside the cycle and is
                 // the natural starting point: porting it requires stubbing the
                 // fewest peers. The symbol with the largest out-degree is the
-                // "hub" — the best candidate to break the cycle by refactoring its
+                // "hub", the best candidate to break the cycle by refactoring its
                 // call sites.
                 let mut ranked: Vec<(&str, usize, usize)> = scc
                     .iter()
@@ -262,7 +247,7 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
                         let out_in_cycle = cycle_adj.get(id).map_or(0, |neighbors| {
                             neighbors.iter().filter(|n| scc_set.contains(*n)).count()
                         });
-                        // In-degree (within the cycle) — how many SCC members
+                        // In-degree (within the cycle), how many SCC members
                         // depend on this symbol. High in-degree = "many callers
                         // inside the cycle", which is another useful break-point
                         // signal.
@@ -298,7 +283,7 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
                     })
                     .collect();
 
-                // Rank files by how many cycle members each contains — the file
+                // Rank files by how many cycle members each contains, the file
                 // with the most members is the best refactor target.
                 let mut file_counts: HashMap<&str, usize> = HashMap::new();
                 for id in &scc {
@@ -337,25 +322,25 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
                 file: node.file.to_owned(),
                 line: node.start_line,
                 rationale: Some(
-                    "Highest in-cycle in-degree — refactoring its callers is the most effective way to fragment this SCC."
+                    "Highest in-cycle in-degree. Refactoring its callers is the most effective way to fragment this SCC."
                         .to_owned(),
                 ),
             }),
-            note: "Mutual dependency — port together, starting at `entry_point` and refactoring `break_point_candidate` to split the cycle."
+            note: "Mutual dependency. Port together, starting at `entry_point` and refactoring `break_point_candidate` to split the cycle."
                 .to_owned(),
         });
             }
 
             (levels, emitted, cycles, dep_graph)
         }
-    );
+    };
 
     let result_levels = levels
         .iter()
         .enumerate()
         .map(|(i, level_ids)| {
             let description = if i == 0 {
-                "No internal dependencies — port these first".to_string()
+                "No internal dependencies. Port these first".to_string()
             } else {
                 format!("Depends only on levels 0–{}", i - 1)
             };
@@ -402,13 +387,10 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
         returned: emitted,
         levels: result_levels,
         cycles,
+        freshness: None,
     };
-    let output = serde_json::to_value(result)?;
-
-    Ok(generic_tool_result(
-        Some(graph.project_root()?),
-        &args,
-        &output,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::PortOrder(result),
         touched_files,
     ))
 }

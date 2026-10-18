@@ -12,9 +12,9 @@
     "required_first": [
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body",
-      "tracedecay_outline",
-      "tracedecay_read",
+      "tracedecay_find_exact_symbol",
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
       "tracedecay_grep",
       "tracedecay_dashboard",
       "tracedecay_module_api",
@@ -38,11 +38,25 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "pricing",
-    "inventory",
-    "orders"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states pricing",
+          "pattern": "\\bpricing\\b"
+        },
+        {
+          "id": "states inventory",
+          "pattern": "\\binventory\\b"
+        },
+        {
+          "id": "states orders",
+          "pattern": "\\borders\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 6,
   "notes": "Architecture orientation; modules are pricing, inventory, orders, discount."
 }

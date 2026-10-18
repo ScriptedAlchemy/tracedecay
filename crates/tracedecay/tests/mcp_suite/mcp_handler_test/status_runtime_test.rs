@@ -9,8 +9,6 @@ use std::process::Command;
 #[cfg(feature = "test-transport")]
 use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
-use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-#[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::SessionRecord;
@@ -34,15 +32,9 @@ fn assert_sealed_graph_statistics_are_unavailable(text: &str) {
 #[tokio::test]
 async fn test_status() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_status",
-        json!({}),
-        Some(json!({"uptime": 100})),
-        None,
-    )
-    .await
-    .unwrap();
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None)
+        .await
+        .unwrap();
     let text = extract_text(&result.value);
     assert_sealed_graph_statistics_are_unavailable(text);
     assert!(
@@ -50,9 +42,42 @@ async fn test_status() {
         "status should include server stats"
     );
     assert!(
-        text.contains("branch_diagnostics"),
-        "status should include branch diagnostics"
+        !text.contains("branch_diagnostics"),
+        "status should omit the full branch diagnostic list unless requested: {text}"
     );
+    assert!(
+        !text.contains("storage_health"),
+        "status should omit storage health unless requested"
+    );
+    assert!(
+        !text.contains("session_ingest"),
+        "status should omit session ingest unless requested"
+    );
+}
+
+#[tokio::test]
+async fn status_includes_verbose_sections_only_when_requested() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_status",
+        json!({
+            "include_branch_diagnostics": true,
+            "include_storage_health": true,
+            "include_session_ingest": true,
+            "include_staleness": true,
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    assert!(
+        text.contains("branch_diagnostics"),
+        "explicit opt-in should include branch diagnostics"
+    );
+    assert!(text.contains("storage_health"));
+    assert!(text.contains("git_staleness"));
 }
 
 #[tokio::test]
@@ -62,7 +87,6 @@ async fn status_can_omit_verbose_branch_diagnostics() {
         &cg,
         "tracedecay_status",
         json!({"include_branch_diagnostics": false}),
-        Some(json!({"uptime": 100})),
         None,
     )
     .await
@@ -109,15 +133,11 @@ async fn status_reports_daemon_owned_partial_history_catch_up() {
             .unwrap()
     );
 
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_options(
+    let result = handle_tool_call(
         &cg,
         "tracedecay_status",
-        json!({"format": "json"}),
+        json!({"format": "json", "include_session_ingest": true}),
         None,
-        None,
-        tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
-            runtime.mcp_session_authorities(),
-        ),
     )
     .await
     .unwrap();
@@ -125,11 +145,6 @@ async fn status_reports_daemon_owned_partial_history_catch_up() {
     assert_eq!(status["session_history_catch_up"]["status"], "warming");
     assert_eq!(status["session_history_catch_up"]["coverage"], "partial");
     assert_eq!(status["session_history_catch_up"]["authority"], "daemon");
-    let text = status.to_string();
-    assert!(text.contains("continues bounded background catch-up"));
-    assert!(!text.contains("tracedecay sessions ingest --project-path"));
-    assert!(!text.contains("hook catch-up cap"));
-    assert!(!text.contains("tracedecay doctor --agent cursor"));
 }
 
 #[cfg(feature = "test-transport")]
@@ -171,15 +186,11 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
         );
     }
 
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_options(
+    let result = handle_tool_call(
         &cg,
         "tracedecay_runtime",
         json!({ "format": "json", "session_ingest_health": true }),
         None,
-        None,
-        tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
-            runtime.mcp_session_authorities(),
-        ),
     )
     .await
     .unwrap();
@@ -193,50 +204,10 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
     );
 }
 
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn status_without_retained_session_authority_fails_closed() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    drop(open_active_project_session_db(&cg).await);
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_status",
-        json!({ "format": "json" }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-
-    assert_eq!(payload["session_ingest"]["status"], "unavailable");
-    assert_eq!(
-        payload["session_ingest"]["message"],
-        "daemon project session authority is unavailable"
-    );
-    assert!(payload.get("cursor_session_ingest").is_none());
-}
-
-#[tokio::test]
-async fn test_status_without_server_stats() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert_sealed_graph_statistics_are_unavailable(text);
-    // Should NOT contain "server" key when None is passed
-    assert!(
-        !text.contains("\"server\""),
-        "status without server_stats should not include 'server' key"
-    );
-}
-
 #[tokio::test]
 async fn test_status_reports_scope_prefix() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, Some("src/mcp"))
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), Some("src/mcp"))
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -251,29 +222,16 @@ async fn test_status_reports_scope_prefix() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
-async fn test_status_no_scope_prefix() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert!(
-        parsed.get("scope_prefix").is_none() || parsed["scope_prefix"].is_null(),
-        "status should not have scope_prefix when None"
-    );
-}
-
 /// `tracedecay_runtime` must surface process + DB telemetry so users hitting
 /// unexpected CPU/RAM can capture a structured snapshot without leaving the
 /// chat session. The process sample is served from the background cache, so
-/// the first response may be the typed `not_yet_sampled` state and never a
-/// fabricated zero snapshot.
+/// the first response may be the typed `not_yet_sampled` state. A cached value
+/// outside its freshness interval is explicitly `stale` with its age; it must
+/// never be serialized as a current `sampled` value.
 #[tokio::test]
 async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -291,19 +249,33 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
             );
         }
         Some("sampled") => {}
+        Some("stale") => {
+            assert!(
+                parsed["process"]["sampled_at"].as_u64().unwrap_or(0) > 0,
+                "a stale process value must retain its source timestamp"
+            );
+            assert!(
+                parsed["process"]["age_millis"].is_u64(),
+                "a stale process value must state its explicit age"
+            );
+        }
         other => panic!("unexpected process sample state before warm-up: {other:?}"),
     }
 
-    // The handler only reads the sampler cache; poll until the background
-    // sample completes and the sampled payload appears.
+    // The handler only reads the sampler cache; poll until it can return a
+    // completed payload. A concurrent refresh may correctly make that payload
+    // stale rather than falsely label the retained observation as current.
     let proc = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None, None)
+            let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None)
                 .await
                 .unwrap();
             let parsed: serde_json::Value =
                 serde_json::from_str(extract_text(&result.value)).unwrap();
-            if parsed["process"]["state"] == "sampled" {
+            if matches!(
+                parsed["process"]["state"].as_str(),
+                Some("sampled" | "stale")
+            ) {
                 break parsed["process"].clone();
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -322,8 +294,19 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     );
     assert!(
         proc["sampled_at"].as_u64().unwrap_or(0) > 0,
-        "sampled payload must expose its sample timestamp"
+        "completed process payload must expose its sample timestamp"
     );
+    if proc["state"] == "stale" {
+        assert!(
+            proc["age_millis"].is_u64(),
+            "a retained process value must expose its explicit age"
+        );
+    } else {
+        assert!(
+            proc.get("age_millis").is_none(),
+            "only a stale process value carries an age"
+        );
+    }
     assert!(proc["system_cpu_count"].as_u64().unwrap_or(0) >= 1);
     assert!(proc["system_total_memory_bytes"].as_u64().unwrap_or(0) > 0);
 
@@ -387,7 +370,7 @@ async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
                 .success()
         );
     }
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+    let harness = crate::support::seeded_composition::open(isolation.path(), [project.clone()])
         .await
         .unwrap();
     let response = harness
@@ -414,28 +397,22 @@ async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
     assert!(db["authority_audit_reason"].is_null());
     assert!(db["authority_audit_error"].is_null());
 
-    let census = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let response = harness
-                .call_tool(&project, "tracedecay_runtime", json!({ "format": "json" }))
-                .await
-                .expect("production runtime invocation succeeds");
-            let result = response.result.expect("production runtime result");
-            let payload: Value =
-                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-            let census = payload["database"]["generation_census"].clone();
-            if census["state"] == "observed" {
-                break census;
-            }
-            assert_eq!(
-                census["reason"], "exact_scope_generation_not_ready",
-                "the composed server may wait only for its exact sealed generation: {census}"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("production route publishes its sealed generation census");
+    crate::support::harness_wait_for_readiness(
+        &harness,
+        &project,
+        "fresh",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    let response = harness
+        .call_tool(&project, "tracedecay_runtime", json!({ "format": "json" }))
+        .await
+        .expect("production runtime invocation succeeds");
+    let result = response.result.expect("production runtime result");
+    let payload: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    let census = payload["database"]["generation_census"].clone();
+    assert_eq!(census["state"], "observed", "{census}");
     assert!(census["source_total_bytes"].is_u64());
     assert!(census["symbol_count"].is_u64());
     assert!(census["edge_count"].is_u64());

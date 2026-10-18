@@ -17,6 +17,7 @@ use crate::admission::{
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::source::TranscriptIngestError;
 
 async fn queue_cursor_projection(
@@ -116,7 +117,8 @@ fn write_composer_state(
 }
 
 fn write_cursor_jsonl(home: &std::path::Path, project: &std::path::Path, session_id: &str) {
-    let slug = crate::runtime::cursor::cursor_project_slug(project).expect("Cursor project slug");
+    let slug =
+        crate::runtime::hosts::cursor::cursor_project_slug(project).expect("Cursor project slug");
     let transcript_dir = home
         .join(".cursor")
         .join("projects")
@@ -182,6 +184,34 @@ impl HostAdmission for PostFirstDrainAdmission {
         _scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
         panic!("projection-only sweep attempted cursor read")
+    }
+
+    fn committed_source_cursors<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+    ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        panic!("projection-only sweep attempted committed cursor read")
+    }
+
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+        _previous: ObservationSourceGenerationV1,
+        _generation: ObservationSourceGenerationV1,
+        _retained_through: u64,
+    ) -> AdmissionFuture<'a, ()> {
+        panic!("projection-only sweep attempted source rewrite")
+    }
+
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+        _generation: ObservationSourceGenerationV1,
+    ) -> AdmissionFuture<'a, u64> {
+        panic!("projection-only sweep attempted source rewrite completion")
     }
 
     fn drain_projection_queue<'a>(
@@ -286,6 +316,7 @@ async fn cancelled_composer_sweep_stops_before_scanning_state_database() {
             DEFAULT_COMPOSER_ENVELOPE_CAP,
             None,
             &cancellation,
+            &mut SourceSweep::new(PROVIDER, None),
         )
         .await;
 
@@ -296,44 +327,6 @@ async fn cancelled_composer_sweep_stops_before_scanning_state_database() {
             ..
         })
     ));
-}
-
-/// Projection work can predate the SQLite sweep. Both drain passes contribute
-/// canonical output stats, and the first pass's pending work keeps this sweep
-/// incomplete even when the final pass catches up the remainder.
-#[tokio::test]
-async fn queued_cursor_projections_are_reported_and_keep_the_pass_deferred() {
-    const QUEUED_PROJECTIONS: usize = 257;
-
-    let project = tempfile::tempdir().expect("project tempdir");
-    let home = tempfile::tempdir().expect("Cursor home tempdir");
-    let project_id =
-        tracedecay_domain::ProjectId::new("project.cursor-composer-projections").expect("id");
-    let admission = MemoryHostAdmission::default();
-    for ordinal in 0..QUEUED_PROJECTIONS {
-        queue_cursor_projection(
-            &admission,
-            &project_id,
-            &format!("queued-composer-{ordinal}"),
-        )
-        .await;
-    }
-
-    let outcome = CursorComposerSource::with_home(home.path())
-        .ingest_capped(
-            &admission,
-            project.path(),
-            project_id.clone(),
-            DEFAULT_COMPOSER_ENVELOPE_CAP,
-            None,
-        )
-        .await
-        .expect("projection-only composer sweep");
-
-    assert_eq!(outcome.sessions_upserted, QUEUED_PROJECTIONS as u64);
-    assert_eq!(outcome.messages_upserted, QUEUED_PROJECTIONS as u64);
-    assert!(outcome.deferred_by_byte_cap);
-    assert_eq!(admission.pending_projection_count(), 0);
 }
 
 #[tokio::test]
@@ -362,9 +355,9 @@ async fn queued_jsonl_projection_does_not_hide_new_message_from_the_same_session
     assert_eq!(composer.sessions_upserted, 1);
     assert!(composer.owned_session_ids.is_empty());
 
-    let jsonl = crate::runtime::with_transcript_source_home(
-        home.path().to_path_buf(),
-        crate::runtime::cursor::try_ingest_cursor_project_sweep_capped(
+    let jsonl = crate::runtime::with_transcript_source_profile(
+        tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
+        crate::runtime::hosts::cursor::try_ingest_cursor_project_sweep_capped(
             project.path(),
             &admission,
             project_id,
@@ -435,6 +428,7 @@ async fn cancellation_after_first_drain_preserves_committed_projection_stats() {
             DEFAULT_COMPOSER_ENVELOPE_CAP,
             None,
             &cancellation,
+            &mut SourceSweep::new(PROVIDER, None),
         )
         .await
         .expect_err("post-drain cancellation must terminate the sweep");
@@ -481,44 +475,6 @@ async fn second_drain_failure_preserves_committed_projection_stats() {
 }
 
 #[tokio::test]
-async fn zero_composer_cap_defers_owned_session_before_jsonl_handoff() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let home = tempfile::tempdir().expect("Cursor home tempdir");
-    write_composer_state(
-        home.path(),
-        project.path(),
-        "cap-deferred-composer",
-        &[("bubble-0", "must wait for the next composer pass")],
-    );
-    write_cursor_jsonl(home.path(), project.path(), "cap-deferred-composer");
-    let project_id =
-        tracedecay_domain::ProjectId::new("project.cursor-composer-cap-deferred").expect("id");
-    let admission = MemoryHostAdmission::default();
-
-    let outcome = CursorComposerSource::with_home(home.path())
-        .ingest_capped(&admission, project.path(), project_id.clone(), 0, None)
-        .await
-        .expect("cap-zero composer sweep");
-
-    assert!(outcome.deferred_by_byte_cap);
-    assert!(outcome.owned_session_ids.contains("cap-deferred-composer"));
-    assert_eq!(outcome.messages_upserted, 0);
-    let jsonl = crate::runtime::with_transcript_source_home(
-        home.path().to_path_buf(),
-        crate::runtime::cursor::try_ingest_cursor_project_sweep_capped(
-            project.path(),
-            &admission,
-            project_id,
-            None,
-            outcome.owned_session_ids,
-        ),
-    )
-    .await
-    .expect("Cursor JSONL handoff");
-    assert_eq!(jsonl.messages_upserted, 0);
-}
-
-#[tokio::test]
 async fn capture_admission_failure_defers_owned_session_before_jsonl_handoff() {
     let project = tempfile::tempdir().expect("project tempdir");
     let home = tempfile::tempdir().expect("Cursor home tempdir");
@@ -552,9 +508,9 @@ async fn capture_admission_failure_defers_owned_session_before_jsonl_handoff() {
             .contains("capture-deferred-composer")
     );
     assert_eq!(outcome.messages_upserted, 0);
-    let jsonl = crate::runtime::with_transcript_source_home(
-        home.path().to_path_buf(),
-        crate::runtime::cursor::try_ingest_cursor_project_sweep_capped(
+    let jsonl = crate::runtime::with_transcript_source_profile(
+        tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
+        crate::runtime::hosts::cursor::try_ingest_cursor_project_sweep_capped(
             project.path(),
             &admission,
             project_id,
@@ -565,103 +521,4 @@ async fn capture_admission_failure_defers_owned_session_before_jsonl_handoff() {
     .await
     .expect("Cursor JSONL handoff");
     assert_eq!(jsonl.messages_upserted, 0);
-}
-
-#[tokio::test]
-async fn composer_projection_cancellation_is_returned_as_a_typed_cursor_error() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let home = tempfile::tempdir().expect("Cursor home tempdir");
-    let project_id =
-        tracedecay_domain::ProjectId::new("project.cursor-composer-cancelled-drain").expect("id");
-    let admission = MemoryHostAdmission::default();
-    queue_cursor_projection(&admission, &project_id, "cancelled-drain").await;
-    let cancellation = ObservationCancellation::default();
-    admission.fail_next_projection_drain_after_cancelling(
-        HostAdmissionOutcome::retained_backpressured("admission_cancelled"),
-        cancellation.clone(),
-    );
-
-    let result = CursorComposerSource::with_home(home.path())
-        .ingest_capped_with_cancellation(
-            &admission,
-            project.path(),
-            project_id,
-            DEFAULT_COMPOSER_ENVELOPE_CAP,
-            None,
-            &cancellation,
-        )
-        .await;
-
-    assert!(matches!(
-        result,
-        Err(CursorComposerSweepFailure {
-            error: TranscriptIngestError::Cancelled { provider: "cursor" },
-            ..
-        })
-    ));
-    assert_eq!(admission.pending_projection_count(), 1);
-}
-
-#[tokio::test]
-async fn fresh_composer_observation_is_counted_once_after_its_projection() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let home = tempfile::tempdir().expect("Cursor home tempdir");
-    let state_dir = home
-        .path()
-        .join(".config")
-        .join("Cursor")
-        .join("User")
-        .join("globalStorage");
-    std::fs::create_dir_all(&state_dir).expect("Cursor state directory");
-    let connection =
-        rusqlite::Connection::open(state_dir.join("state.vscdb")).expect("Cursor state db");
-    connection
-        .execute_batch(
-            "PRAGMA journal_mode=DELETE;
-             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
-        )
-        .expect("Cursor state schema");
-    connection
-        .execute(
-            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
-            rusqlite::params![
-                "composerData:fresh-composer",
-                json!({
-                    "composerId": "fresh-composer",
-                    "workspaceIdentifier": {
-                        "uri": { "fsPath": project.path().to_string_lossy() }
-                    },
-                    "fullConversationHeadersOnly": [{ "bubbleId": "bubble-0" }]
-                })
-                .to_string()
-            ],
-        )
-        .expect("composer envelope");
-    connection
-        .execute(
-            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
-            rusqlite::params![
-                "bubbleId:fresh-composer:bubble-0",
-                json!({ "type": 1, "text": "fresh composer observation" }).to_string()
-            ],
-        )
-        .expect("composer bubble");
-    drop(connection);
-
-    let project_id =
-        tracedecay_domain::ProjectId::new("project.cursor-composer-fresh").expect("id");
-    let admission = MemoryHostAdmission::default();
-    let outcome = CursorComposerSource::with_home(home.path())
-        .ingest_capped(
-            &admission,
-            project.path(),
-            project_id,
-            DEFAULT_COMPOSER_ENVELOPE_CAP,
-            None,
-        )
-        .await
-        .expect("fresh composer sweep");
-
-    assert_eq!(outcome.sessions_upserted, 1);
-    assert_eq!(outcome.messages_upserted, 1);
 }

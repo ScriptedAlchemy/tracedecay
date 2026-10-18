@@ -3,7 +3,7 @@ design_status: current
 evidence_class: concept_synthetic
 ---
 
-# Costs — provider spend attribution
+# Costs, provider spend attribution
 
 - **Asset:** `01-provider-spend-attribution.png`
 - **Route:** `/costs`
@@ -17,7 +17,7 @@ Understand actual provider spend and usage for the selected scope and time range
 
 - The primary chart shows actual priced spend over an explicit UTC range. Provider totals reconcile to the selected range and the detailed ledger.
 - Project, model, session, and execution-topology tables explain attribution. Selecting a provider or row cross-filters the other views and preserves the query in the URL.
-- Usage events and token quantities are facts independent of pricing. “Saved tokens” is count-only unless a canonical pricing authority can price both the observed and avoided usage on the same basis.
+- Usage events and token quantities are facts independent of pricing. "Saved tokens" is count-only unless a canonical pricing authority can price both the observed and avoided usage on the same basis.
 - Budgets show configured amount, scope, period, spend-to-date, remaining/overage, and freshness. Missing or invalid budgets are not treated as unlimited.
 - Pricing classes stay distinct: priced, unpriced, null/unknown, unavailable, denied, stale, and measured-empty. Unpriced usage contributes to usage totals but never silently contributes `$0` to spend.
 

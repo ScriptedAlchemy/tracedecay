@@ -4,9 +4,9 @@
 //! "instrumentation remains on the canonical application retrieval pipeline
 //! and its existing retriever and temporal adapters rather than a parallel
 //! measurement path". This module is that instrumentation: every count below
-//! is read out of values the pipeline already produced — the admitted
+//! is read out of values the pipeline already produced, the admitted
 //! [`CompositionLaneInput`] lanes and the [`CompositionOutputV1`] the
-//! composition kernel returned — and nothing here re-runs, re-ranks, or
+//! composition kernel returned, and nothing here re-runs, re-ranks, or
 //! re-queries.
 //!
 //! Three disciplines are load-bearing:
@@ -18,8 +18,8 @@
 //!   or exhausted its budget contributes an *unknown* source, never an
 //!   observed zero-match one.
 //! * **Unmeasured is not zero.** Where a dimension genuinely is not available
-//!   at the composition boundary — context tokens are only countable after
-//!   hydration — the projection reports the weaker
+//!   at the composition boundary, context tokens are only countable after
+//!   hydration, the projection reports the weaker
 //!   [`CoverageStateV1::Partial`] beside the payload instead of publishing a
 //!   fabricated zero as fact.
 //! * **Counts are clamped to their own denominators, never inflated.** The
@@ -70,7 +70,6 @@ pub const fn retriever_lane_label(lane: RetrieverKind) -> &'static str {
     match lane {
         RetrieverKind::ExactLiteral => "exact_literal",
         RetrieverKind::Lexical => "lexical",
-        RetrieverKind::Semantic => "semantic",
         RetrieverKind::Graph => "graph",
         RetrieverKind::Temporal => "temporal",
         RetrieverKind::TaskSession => "task_session",
@@ -83,10 +82,7 @@ pub const fn retriever_lane_label(lane: RetrieverKind) -> &'static str {
 /// said.
 pub const fn retriever_source_kind(lane: RetrieverKind) -> &'static str {
     match lane {
-        RetrieverKind::ExactLiteral
-        | RetrieverKind::Lexical
-        | RetrieverKind::Semantic
-        | RetrieverKind::Graph => "code",
+        RetrieverKind::ExactLiteral | RetrieverKind::Lexical | RetrieverKind::Graph => "code",
         RetrieverKind::Temporal => "git",
         RetrieverKind::TaskSession => "session",
         RetrieverKind::Diagnostic => "diagnostic",
@@ -158,7 +154,7 @@ fn unique_contributions(output: &CompositionOutputV1) -> BTreeMap<RetrieverKind,
 /// `context_tokens` is `None` whenever the caller has not hydrated the page
 /// yet; the synthesis observation then reports partial coverage rather than a
 /// zero token count.
-#[hotpath::measure(label = "query.observation.compose")]
+#[tracing::instrument(name = "query.observation.compose", level = "trace", skip_all)]
 pub fn observe_composition(
     lanes: &[CompositionLaneInput],
     output: &CompositionOutputV1,
@@ -293,8 +289,6 @@ pub fn observe_composition(
         },
     };
 
-    hotpath::gauge!("query.observation.lanes").set(lanes.len());
-    hotpath::gauge!("query.observation.results").set(output.ranked_candidates.len());
     RetrievalPipelineObservationV1 {
         planner,
         retrievers,
@@ -314,7 +308,6 @@ pub enum ContextUseOutcomeV1 {
 }
 
 impl ContextUseOutcomeV1 {
-    #[hotpath::skip]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Supplied => "context_supplied",

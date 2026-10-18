@@ -21,21 +21,16 @@
  */
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type {
-  OplogPayload,
-  ProjectionPayload,
-  SimilarityPayload,
-  TrustDetailAvailability,
-  TrustHistoryPayload,
-} from '../../data/query/memory.ts';
+  MemoryFeedbackDetailsAvailabilityV1,
+  MemoryOplogPayloadV1,
+  MemoryProjectionPayloadV1,
+  MemorySimilarityPayloadV1,
+  MemoryTrustHistoryPayloadV1,
+} from '../../contracts/generated.ts';
 
 /* ---- trust history ------------------------------------------------------- */
 
-/** Formats canonical UTC microseconds only at the presentation boundary. */
-export function formatUtcMicros(value: number): string {
-  return new Date(Math.trunc(value / 1_000)).toISOString();
-}
-
-export interface TrustHistoryReading {
+interface TrustHistoryReading {
   /** Events this bounded audit response returned. */
   readonly count: number;
   readonly helpful: number;
@@ -48,12 +43,12 @@ export interface TrustHistoryReading {
   readonly net: number | null;
   /** How many events carry each detail availability, zeroes included, so the
    * panel can state "3 of 11 redacted" rather than only listing the survivors. */
-  readonly availability: Readonly<Record<TrustDetailAvailability, number>>;
+  readonly availability: Readonly<Record<MemoryFeedbackDetailsAvailabilityV1, number>>;
 }
 
-export function trustHistoryReading(payload: TrustHistoryPayload): TrustHistoryReading {
+export function trustHistoryReading(payload: MemoryTrustHistoryPayloadV1): TrustHistoryReading {
   const events = payload.trust_history;
-  const availability: Record<TrustDetailAvailability, number> = {
+  const availability: Record<MemoryFeedbackDetailsAvailabilityV1, number> = {
     available: 0,
     redacted: 0,
     unknown: 0,
@@ -80,10 +75,10 @@ export function trustHistoryReading(payload: TrustHistoryPayload): TrustHistoryR
   };
 }
 
-/** The state a feedback event's detail is in. `available` is not a state chip —
- * the detail is simply shown — so this is only called for the other two. */
+/** The state a feedback event's detail is in. `available` is not a state chip , 
+ * the detail is simply shown, so this is only called for the other two. */
 export function trustDetailState(
-  availability: TrustDetailAvailability,
+  availability: MemoryFeedbackDetailsAvailabilityV1,
 ): DomainStateKind | null {
   switch (availability) {
     case 'available':
@@ -101,12 +96,12 @@ export function trustDetailState(
 
 /* ---- projection ---------------------------------------------------------- */
 
-export interface ProjectionReading {
+interface ProjectionReading {
   /** `true` only when the daemon decomposed query-time-derived phase encodings. */
   readonly projected: boolean;
-  /** What the panel says the axes mean — or that they mean nothing. */
+  /** What the panel says the axes mean, or that they mean nothing. */
   readonly note: string;
-  readonly points: ProjectionPayload['points'];
+  readonly points: MemoryProjectionPayloadV1['points'];
   /** Drawing extents, `null` when there is nothing to draw. */
   readonly extent: { x: [number, number]; y: [number, number] } | null;
   /** Categories present, ranked by population, for the legend. */
@@ -115,7 +110,7 @@ export interface ProjectionReading {
   readonly dim: number;
 }
 
-export function projectionReading(payload: ProjectionPayload): ProjectionReading {
+export function projectionReading(payload: MemoryProjectionPayloadV1): ProjectionReading {
   const points = payload.points;
   const projected = payload.method === 'pca' && points.length >= 2;
   const counts = new Map<string, number>();
@@ -142,12 +137,12 @@ export function projectionReading(payload: ProjectionPayload): ProjectionReading
   return {
     projected,
     note: projected
-      ? `principal components of ${points.length.toLocaleString()} query-time-derived phase encodings returned by a request bounded to ${payload.limit.toLocaleString()} facts, of width ${payload.dim.toLocaleString()} — the axes are the two directions of greatest variance, and carry no unit`
+      ? `principal components of ${points.length.toLocaleString()} query-time-derived phase encodings returned by a request bounded to ${payload.limit.toLocaleString()} facts, of width ${payload.dim.toLocaleString()}, the axes are the two directions of greatest variance, and carry no unit`
       : points.length === 0
         ? payload.coverage.completeness === 'complete'
           ? `the complete eligible set returned no phase encodings, so there is nothing to project`
           : `this ${payload.coverage.completeness} request, bounded to ${payload.limit.toLocaleString()} facts, returned no phase encodings; whole-store coverage is unknown`
-        : `too few comparable query-time-derived phase encodings to decompose (${points.length.toLocaleString()} of width ${payload.dim.toLocaleString()}) — the positions below are placeholders, not a projection`,
+        : `too few comparable query-time-derived phase encodings to decompose (${points.length.toLocaleString()} of width ${payload.dim.toLocaleString()}), the positions below are placeholders, not a projection`,
     points,
     extent,
     categories,
@@ -157,8 +152,8 @@ export function projectionReading(payload: ProjectionPayload): ProjectionReading
 
 /* ---- similarity ---------------------------------------------------------- */
 
-export interface SimilarityReading {
-  /** Facts successfully encoded on read — never the store's fact total. */
+interface SimilarityReading {
+  /** Facts successfully encoded on read, never the store's fact total. */
   readonly encoded: number;
   /** Pairs scored above the computation's own floor, before this request's. */
   readonly scored: number;
@@ -177,7 +172,7 @@ export interface SimilarityReading {
   readonly denominators: string;
 }
 
-export function similarityReading(payload: SimilarityPayload): SimilarityReading {
+export function similarityReading(payload: MemorySimilarityPayloadV1): SimilarityReading {
   const distribution = payload.score_distribution;
   const returned = payload.pairs.length;
   const capped = returned < payload.limit ? false : null;
@@ -191,22 +186,22 @@ export function similarityReading(payload: SimilarityPayload): SimilarityReading
     max: distribution.max_score,
     denominators:
       payload.count < 2
-        ? `${payload.count.toLocaleString()} query-time encoded fact${payload.count === 1 ? '' : 's'} — a pair needs two, so nothing was scored`
+        ? `${payload.count.toLocaleString()} query-time encoded fact${payload.count === 1 ? '' : 's'}, a pair needs two, so nothing was scored`
         : `${returned.toLocaleString()} pairs shown at or above ${payload.min_similarity.toFixed(2)}; ${payload.total_pairs.toLocaleString()} finite pairs scored globally over ${payload.count.toLocaleString()} query-time encoded facts`,
   };
 }
 
 /* ---- oplog --------------------------------------------------------------- */
 
-export interface OplogReading {
-  readonly events: OplogPayload['events'];
+interface OplogReading {
+  readonly events: MemoryOplogPayloadV1['events'];
   /** Operations by name, ranked, for the summary rail. */
   readonly operations: readonly { op: string; count: number }[];
   /** The store's own read failure, when it had one. */
   readonly storeError: string | null;
 }
 
-export function oplogReading(payload: OplogPayload): OplogReading {
+export function oplogReading(payload: MemoryOplogPayloadV1): OplogReading {
   const counts = new Map<string, number>();
   for (const event of payload.events) {
     counts.set(event.op, (counts.get(event.op) ?? 0) + 1);

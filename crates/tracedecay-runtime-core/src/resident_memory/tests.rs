@@ -1,37 +1,27 @@
+use std::cell::Cell;
 use std::fs;
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
+use tracedecay_domain::process_heap::{
+    ProcessAllocatorReleaseV1, collect_calling_thread_allocator_v1, collect_idle_thread_heap_v1,
+    install_process_allocator_release_v1, request_idle_thread_collection_v1,
+};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-    RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
-    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
-    RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1, ResidentMemoryAdmissionFailureV1,
+    CgroupMemoryCeilingV1, ProcessResidentMemoryV1, ProcessResidentSampleV1,
+    RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1,
+    RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
-    ResidentMemoryPressureV1, cgroup_v2_memory_limit_v1, effective_memory_bytes_v1,
-    process_resident_memory_limit_for_system_v1, resident_memory_watermark_bytes_v1,
+    ResidentMemoryPressureV1, cgroup_service_ceiling_bytes, cgroup_v2_memory_ceiling_v1,
+    resident_memory_authority_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("test byte count is non-zero")
-}
-
-#[test]
-fn host_capacity_reserves_one_quarter_without_a_universal_ceiling() {
-    assert_eq!(
-        process_resident_memory_limit_for_system_v1(8 * 1024 * 1024 * 1024).get(),
-        6 * 1024 * 1024 * 1024
-    );
-    assert_eq!(
-        process_resident_memory_limit_for_system_v1(88 * 1024 * 1024 * 1024).get(),
-        66 * 1024 * 1024 * 1024
-    );
-    assert_eq!(
-        process_resident_memory_limit_for_system_v1(0),
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
-    );
 }
 
 fn cgroup_fixture(
@@ -57,34 +47,122 @@ fn cgroup_fixture(
     (directory, proc_self_cgroup, cgroup_root)
 }
 
-fn effective_memory_bytes(
-    total_memory_bytes: u64,
+fn service_ceiling_bytes(
     proc_self_cgroup: &std::path::Path,
     cgroup_root: &std::path::Path,
-) -> u64 {
-    effective_memory_bytes_v1(
-        total_memory_bytes,
-        cgroup_v2_memory_limit_v1(proc_self_cgroup, cgroup_root),
-    )
+) -> Option<u64> {
+    cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root)
+        .and_then(cgroup_service_ceiling_bytes)
 }
 
 #[test]
 fn absent_cgroup_membership_keeps_host_memory_capacity() {
     let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(None, None, None);
-    assert_eq!(
-        effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
-        88 * 1024 * 1024 * 1024
-    );
+    assert_eq!(service_ceiling_bytes(&proc_self_cgroup, &cgroup_root), None);
 }
 
 #[test]
 fn absent_cgroup_memory_files_keep_host_memory_capacity() {
     let (_directory, proc_self_cgroup, cgroup_root) =
         cgroup_fixture(Some("0::/trace.slice/daemon.scope\n"), None, None);
-    assert_eq!(
-        effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
-        88 * 1024 * 1024 * 1024
+    assert_eq!(service_ceiling_bytes(&proc_self_cgroup, &cgroup_root), None);
+}
+
+#[test]
+fn cgroup_v1_only_membership_does_not_invent_a_v2_ceiling() {
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("12:memory:/trace.slice/daemon.scope\n"),
+        Some("32212254720\n"),
+        Some("max\n"),
     );
+
+    assert_eq!(service_ceiling_bytes(&proc_self_cgroup, &cgroup_root), None);
+}
+
+#[test]
+fn hybrid_membership_uses_the_unified_v2_memory_ceiling() {
+    let gib = 1024 * 1024 * 1024;
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("12:memory:/legacy.slice\n0::/trace.slice/daemon.scope\n"),
+        Some("32212254720\n"),
+        Some("max\n"),
+    );
+
+    assert_eq!(
+        service_ceiling_bytes(&proc_self_cgroup, &cgroup_root),
+        Some(30 * gib)
+    );
+}
+
+#[test]
+fn root_v2_membership_reads_the_mount_root_ceiling() {
+    let gib = 1024 * 1024 * 1024;
+    let directory = tempfile::tempdir().expect("cgroup fixture root");
+    let proc_self_cgroup = directory.path().join("proc-self-cgroup");
+    let cgroup_root = directory.path().join("sys-fs-cgroup");
+    fs::create_dir_all(&cgroup_root).expect("cgroup mount fixture");
+    fs::write(&proc_self_cgroup, "0::/\n").expect("root process cgroup membership fixture");
+    fs::write(cgroup_root.join("memory.max"), "32212254720\n").expect("root memory.max fixture");
+    fs::write(cgroup_root.join("memory.high"), "max\n").expect("root memory.high fixture");
+
+    assert_eq!(
+        service_ceiling_bytes(&proc_self_cgroup, &cgroup_root),
+        Some(30 * gib)
+    );
+}
+
+fn hard_ceiling(max_bytes: u64) -> CgroupMemoryCeilingV1 {
+    CgroupMemoryCeilingV1 {
+        max_bytes: Some(max_bytes),
+        high_bytes: None,
+    }
+}
+
+#[test]
+fn configured_override_cannot_exceed_the_cgroup_ceiling() {
+    let gib = 1024 * 1024 * 1024;
+    let capped = resident_memory_authority_v1(
+        88 * gib,
+        Some(CgroupMemoryCeilingV1 {
+            max_bytes: Some(30 * gib),
+            high_bytes: Some(26 * gib),
+        }),
+        Some(bytes(64 * gib)),
+    );
+
+    assert_eq!(
+        capped.limit_bytes.get(),
+        30 * gib,
+        "an override is capped by memory.max, not by the reclaim line"
+    );
+    assert_eq!(capped.reclaim_watermark_bytes, Some(26 * gib));
+}
+
+#[test]
+fn cgroup_service_allowance_is_not_discounted_twice() {
+    let gib = 1024 * 1024 * 1024;
+    let only_high = resident_memory_authority_v1(
+        128 * gib,
+        Some(CgroupMemoryCeilingV1 {
+            max_bytes: None,
+            high_bytes: Some(26 * gib),
+        }),
+        None,
+    );
+    assert_eq!(
+        only_high.limit_bytes.get(),
+        26 * gib,
+        "a lone memory.high is the service ceiling and is not quartered again"
+    );
+    assert_eq!(only_high.reclaim_watermark_bytes, None);
+
+    let small_host = resident_memory_authority_v1(16 * gib, Some(hard_ceiling(30 * gib)), None);
+    assert_eq!(
+        small_host.limit_bytes.get(),
+        12 * gib,
+        "a larger cgroup must not erase the physical-host reserve"
+    );
+    assert_eq!(small_host.reclaim_watermark_bytes, None);
 }
 
 #[test]
@@ -94,28 +172,11 @@ fn unlimited_cgroup_memory_files_keep_host_memory_capacity() {
         Some("max\n"),
         Some("max\n"),
     );
-    assert_eq!(
-        effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
-        88 * 1024 * 1024 * 1024
-    );
+    assert_eq!(service_ceiling_bytes(&proc_self_cgroup, &cgroup_root), None);
 }
 
 #[test]
-fn finite_memory_max_bounds_host_memory_capacity() {
-    let gib = 1024 * 1024 * 1024;
-    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
-        Some("0::/trace.slice/daemon.scope\n"),
-        Some("32212254720\n"),
-        Some("max\n"),
-    );
-    assert_eq!(
-        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        30 * gib
-    );
-}
-
-#[test]
-fn finite_memory_high_below_max_is_the_effective_capacity() {
+fn memory_high_does_not_replace_memory_max_as_the_hard_capacity() {
     let gib = 1024 * 1024 * 1024;
     let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
         Some("0::/trace.slice/daemon.scope\n"),
@@ -123,9 +184,14 @@ fn finite_memory_high_below_max_is_the_effective_capacity() {
         Some("25769803776\n"),
     );
     assert_eq!(
-        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        24 * gib
+        service_ceiling_bytes(&proc_self_cgroup, &cgroup_root),
+        Some(30 * gib),
+        "memory.max is the kernel kill line"
     );
+    let ceiling = cgroup_v2_memory_ceiling_v1(&proc_self_cgroup, &cgroup_root).expect("cgroup");
+    let authority = resident_memory_authority_v1(88 * gib, Some(ceiling), None);
+    assert_eq!(authority.limit_bytes.get(), 30 * gib);
+    assert_eq!(authority.reclaim_watermark_bytes, Some(24 * gib));
 }
 
 #[test]
@@ -142,8 +208,92 @@ fn finite_ancestor_limit_bounds_an_unlimited_process_cgroup() {
         .expect("ancestor memory.high fixture");
 
     assert_eq!(
-        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        30 * gib
+        service_ceiling_bytes(&proc_self_cgroup, &cgroup_root),
+        Some(30 * gib)
+    );
+    drop(directory);
+}
+
+/// The slice owns `memory.max` and the service owns `memory.high`.
+///
+/// On a 128 GiB host those are 30 GiB and 26 GiB. RSS at 24 GiB is still under
+/// the reclaim line, so the authority admits growth instead of latching at a
+/// percentage of a ceiling the operator never set.
+#[test]
+fn slice_max_and_service_high_keep_the_reclaim_band_usable() {
+    let gib = 1024 * 1024 * 1024;
+    let (directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("0::/trace.slice/daemon.scope\n"),
+        Some("max\n"),
+        Some(&format!("{}\n", 26 * gib)),
+    );
+    fs::write(
+        cgroup_root.join("trace.slice/memory.max"),
+        format!("{}\n", 30 * gib),
+    )
+    .expect("ancestor memory.max fixture");
+    fs::write(cgroup_root.join("trace.slice/memory.high"), "max\n")
+        .expect("ancestor memory.high fixture");
+
+    let ceiling = cgroup_v2_memory_ceiling_v1(&proc_self_cgroup, &cgroup_root).expect("cgroup");
+    let detected = resident_memory_authority_v1(128 * gib, Some(ceiling), None);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_reclaim_line(
+        detected.limit_bytes,
+        detected.reclaim_watermark_bytes,
+        Arc::new(|| None),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        detected.limit_bytes,
+        Arc::clone(&pressure),
+    ));
+
+    assert_eq!(detected.limit_bytes.get(), 30 * gib);
+    assert_eq!(pressure.high_watermark_bytes(), 26 * gib);
+    assert_eq!(
+        pressure.low_watermark_bytes(),
+        23_264_406_186,
+        "hysteresis stays at 750/900 of memory.high, not 75% of memory.max"
+    );
+    assert!(
+        !pressure
+            .publish_observed_resident_bytes(22 * gib)
+            .is_over_budget()
+    );
+    assert!(
+        !pressure
+            .publish_observed_resident_bytes(24 * gib)
+            .is_over_budget(),
+        "rss under memory.high is not over budget"
+    );
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "text-build"),
+            bytes(3 * gib),
+        )
+        .expect("the process authority admits a 3 GiB reservation at 24 GiB RSS");
+
+    // Text-artifact admission spends the band down to the reclaim line, never
+    // down to memory.max: `text_artifact_admitted_build_budget` subtracts the
+    // same watermark headroom it charges, so its growth budget reduces to
+    // `high_watermark - observed`. At 24 GiB observed that is 2 GiB, clearing
+    // the 1536 MiB builder floor. The 90%-of-26 GiB watermark left 0 and
+    // deadlocked the replacement build.
+    let headroom = detected
+        .limit_bytes
+        .get()
+        .saturating_sub(pressure.high_watermark_bytes());
+    let available_for_growth = detected
+        .limit_bytes
+        .get()
+        .saturating_sub(24 * gib)
+        .saturating_sub(headroom);
+    assert_eq!(available_for_growth, 2 * gib);
+    assert!(available_for_growth >= 1536 * 1024 * 1024);
+
+    assert!(
+        pressure
+            .publish_observed_resident_bytes(26 * gib)
+            .is_over_budget()
     );
     drop(directory);
 }
@@ -156,17 +306,27 @@ fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
         Some("134217728\n"),
         Some("100663296\n"),
     );
-    let effective = effective_memory_bytes(8 * 1024 * mib, &proc_self_cgroup, &cgroup_root);
-    let limit = process_resident_memory_limit_for_system_v1(effective);
-    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let ceiling = cgroup_v2_memory_ceiling_v1(&proc_self_cgroup, &cgroup_root).expect("cgroup");
+    let detected = resident_memory_authority_v1(8 * 1024 * mib, Some(ceiling), None);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_reclaim_line(
+        detected.limit_bytes,
+        detected.reclaim_watermark_bytes,
+        Arc::new(|| None),
+    ));
     let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
-        limit,
+        detected.limit_bytes,
         Arc::clone(&pressure),
     ));
 
-    assert_eq!(effective, 96 * mib);
-    assert_eq!(limit.get(), 72 * mib);
-    assert!(pressure.high_watermark_bytes() < effective);
+    assert_eq!(detected.limit_bytes.get(), 128 * mib);
+    assert_eq!(pressure.high_watermark_bytes(), 96 * mib);
+    assert!(pressure.high_watermark_bytes() < detected.limit_bytes.get());
+    assert!(
+        !pressure
+            .publish_observed_resident_bytes(95 * mib)
+            .is_over_budget(),
+        "rss below memory.high is still under the hard ceiling"
+    );
     assert!(
         pressure
             .publish_observed_resident_bytes(pressure.high_watermark_bytes())
@@ -181,6 +341,35 @@ fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
             .expect_err("cgroup-bounded pressure must refuse growth")
             .is_observed_over_budget()
     );
+}
+
+#[test]
+fn keyed_and_process_shared_reservations_compete_for_one_ceiling() {
+    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
+    let keyed = key("project-a", "worktree-a", "generation-a", "code-index");
+    let shared = ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap();
+    let _keyed_reservation = authority
+        .reserve(keyed.clone(), bytes(60))
+        .expect("keyed reservation");
+    let _shared_reservation = authority
+        .reserve_process_shared(shared, bytes(40))
+        .expect("process-shared reservation fills the common ceiling");
+
+    let error = authority
+        .reserve_process_shared(shared, bytes(1))
+        .expect_err("neither ownership kind can overcommit the process ceiling");
+    assert_eq!(
+        error,
+        ResidentMemoryAdmissionFailureV1::ReservationCeiling {
+            used_bytes: 100,
+            requested_bytes: 1,
+            limit_bytes: 100,
+        }
+    );
+    let snapshot = authority.snapshot();
+    assert_eq!(snapshot.used_bytes, 100);
+    assert_eq!(snapshot.charge_for(&keyed), 60);
+    assert_eq!(snapshot.process_shared_charge_for(shared), 40);
 }
 
 #[test]
@@ -207,35 +396,6 @@ fn process_shared_reservation_uses_same_ceiling_and_releases_exactly() {
     );
     drop(reservation);
     assert_eq!(authority.snapshot().used_bytes, 0);
-}
-
-#[test]
-fn keyed_and_process_shared_reservations_compete_for_one_ceiling() {
-    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
-    let keyed = key("project-a", "worktree-a", "generation-a", "semantic-index");
-    let shared = ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap();
-    let _keyed_reservation = authority
-        .reserve(keyed.clone(), bytes(60))
-        .expect("keyed reservation");
-    let _shared_reservation = authority
-        .reserve_process_shared(shared, bytes(40))
-        .expect("process-shared reservation fills the common ceiling");
-
-    let error = authority
-        .reserve_process_shared(shared, bytes(1))
-        .expect_err("neither ownership kind can overcommit the process ceiling");
-    assert_eq!(
-        error,
-        ResidentMemoryAdmissionFailureV1::ReservationCeiling {
-            used_bytes: 100,
-            requested_bytes: 1,
-            limit_bytes: 100,
-        }
-    );
-    let snapshot = authority.snapshot();
-    assert_eq!(snapshot.used_bytes, 100);
-    assert_eq!(snapshot.charge_for(&keyed), 60);
-    assert_eq!(snapshot.process_shared_charge_for(shared), 40);
 }
 
 #[test]
@@ -267,7 +427,7 @@ fn same_component_process_shared_reservations_shrink_and_release_independently()
     let released = authority.snapshot();
     assert_eq!(released.used_bytes, 0);
     assert_eq!(released.process_shared_charge_for(component), 0);
-    assert!(released.process_shared_charges.is_empty());
+    assert_eq!(released.process_shared_charges.len(), 0);
 }
 
 fn key(
@@ -308,6 +468,93 @@ fn reservation_tracks_exact_identity_and_releases_on_drop() {
 
     drop(lexical_reservation);
     assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn additional_reservations_share_identity_but_charge_and_release_independently() {
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(100),
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(100),
+            Arc::new(|| {
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: 0,
+                    unreclaimable_bytes: 0,
+                    swapped_bytes: 0,
+                    cgroup_committed_bytes: None,
+                })
+            }),
+        )),
+    ));
+    let owner = key("project-a", "worktree-a", "generation-a", "reader");
+    let baseline = authority
+        .reserve(owner.clone(), bytes(60))
+        .expect("baseline");
+    let additional = baseline
+        .reserve_additional(bytes(40))
+        .expect("overlap charge");
+    assert_eq!(authority.snapshot().charge_for(&owner), 100);
+    assert!(baseline.reserve_additional(bytes(1)).is_err());
+    drop(additional);
+    assert_eq!(authority.snapshot().charge_for(&owner), 60);
+    let next = baseline
+        .reserve_additional(bytes(40))
+        .expect("released capacity reused");
+    drop(baseline);
+    assert_eq!(authority.snapshot().charge_for(&owner), 40);
+    drop(next);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn transfer_keeps_retained_bytes_when_a_new_admission_cannot() {
+    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
+    let build = key(
+        "project-a",
+        "worktree-a",
+        "generation-a",
+        "code-text-artifact-build",
+    );
+    let reader = key(
+        "project-a",
+        "worktree-a",
+        "generation-a",
+        "code-text-artifact-reader",
+    );
+    let mut held = authority
+        .reserve(build.clone(), bytes(80))
+        .expect("build reservation");
+    let _neighbor = authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "graph"),
+            bytes(20),
+        )
+        .expect("neighbor fills the ceiling");
+    let denied = authority
+        .reserve(reader.clone(), bytes(30))
+        .expect_err("a fresh reader admission does not fit beside the held build charge");
+    assert!(matches!(
+        denied,
+        ResidentMemoryAdmissionFailureV1::ReservationCeiling { .. }
+    ));
+
+    held.transfer_component(reader.component, 30)
+        .expect("the held charge moves without a new admission");
+    assert_eq!(held.key(), &reader);
+    assert_eq!(held.reserved_bytes(), 30);
+    let snapshot = authority.snapshot();
+    assert_eq!(snapshot.used_bytes, 50);
+    assert_eq!(snapshot.charge_for(&build), 0);
+    assert_eq!(snapshot.charge_for(&reader), 30);
+
+    let grown = held.transfer_component(reader.component, 40);
+    assert!(grown.is_err(), "a transfer cannot grow the held charge");
+    assert_eq!(held.reserved_bytes(), 30);
+    assert_eq!(authority.snapshot().charge_for(&reader), 30);
+
+    drop(held);
+    assert_eq!(authority.snapshot().used_bytes, 20);
+    assert_eq!(authority.snapshot().charge_for(&reader), 0);
 }
 
 #[test]
@@ -358,94 +605,6 @@ fn reservation_can_only_adjust_down_to_measured_retained_bytes() {
         .expect_err("a reservation cannot grow after allocation");
     assert_eq!(error.reserved_bytes, 55);
     assert_eq!(error.measured_bytes, 56);
-}
-
-#[test]
-fn reclaimers_run_outside_the_lock_in_stable_order_until_reservation_fits() {
-    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
-    let held = Arc::new(Mutex::new(Some(
-        authority
-            .reserve(
-                key("project-a", "worktree-a", "generation-a", "historical"),
-                bytes(80),
-            )
-            .expect("historical reservation"),
-    )));
-    let calls = Arc::new(Mutex::new(Vec::new()));
-
-    let first_calls = Arc::clone(&calls);
-    let _first = authority
-        .register_reclaimer(
-            10,
-            Arc::new(move |request| {
-                first_calls.lock().expect("call log").push(10);
-                assert_eq!(request.used_bytes, 80);
-                assert_eq!(request.requested_bytes, 30);
-            }),
-        )
-        .expect("first reclaimer");
-    let second_calls = Arc::clone(&calls);
-    let second_held = Arc::clone(&held);
-    let _second = authority
-        .register_reclaimer(
-            20,
-            Arc::new(move |_| {
-                second_calls.lock().expect("call log").push(20);
-                drop(second_held.lock().expect("held reservation").take());
-            }),
-        )
-        .expect("second reclaimer");
-    let third_calls = Arc::clone(&calls);
-    let _third = authority
-        .register_reclaimer(
-            30,
-            Arc::new(move |_| {
-                third_calls.lock().expect("call log").push(30);
-            }),
-        )
-        .expect("third reclaimer");
-
-    let replacement = authority
-        .reserve(
-            key("project-b", "worktree-b", "generation-b", "canonical"),
-            bytes(30),
-        )
-        .expect("second reclaimer releases enough bytes");
-
-    assert_eq!(*calls.lock().expect("call log"), vec![10, 20]);
-    assert_eq!(authority.snapshot().used_bytes, 30);
-    drop(replacement);
-}
-
-#[test]
-fn dropped_reclaimer_registration_is_not_called() {
-    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(10)));
-    let calls = Arc::new(Mutex::new(0_u64));
-    let callback_calls = Arc::clone(&calls);
-    let registration = authority
-        .register_reclaimer(
-            10,
-            Arc::new(move |_| {
-                *callback_calls.lock().expect("call count") += 1;
-            }),
-        )
-        .expect("reclaimer registration");
-    drop(registration);
-
-    let _held = authority
-        .reserve(
-            key("project-a", "worktree-a", "generation-a", "canonical"),
-            bytes(10),
-        )
-        .expect("full reservation");
-    let _error = authority
-        .reserve(
-            key("project-b", "worktree-b", "generation-b", "canonical"),
-            bytes(1),
-        )
-        .expect_err("no registered reclaimer remains");
-
-    assert_eq!(*calls.lock().expect("call count"), 0);
 }
 
 #[test]
@@ -505,28 +664,6 @@ fn growth_request() -> NonZeroU64 {
 }
 
 #[test]
-fn watermarks_derive_from_the_configured_limit_and_keep_low_below_high() {
-    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
-    let pressure = ResidentMemoryPressureV1::new(limit);
-    assert_eq!(
-        pressure.high_watermark_bytes(),
-        resident_memory_watermark_bytes_v1(
-            limit,
-            RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1
-        )
-    );
-    assert_eq!(
-        pressure.low_watermark_bytes(),
-        resident_memory_watermark_bytes_v1(
-            limit,
-            RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1
-        )
-    );
-    assert!(pressure.low_watermark_bytes() < pressure.high_watermark_bytes());
-    assert_eq!(pressure.state(), ResidentMemoryPressureStateV1::Unobserved);
-}
-
-#[test]
 fn unobserved_rss_leaves_admission_on_the_reservation_ceiling_alone() {
     let (authority, _pressure) = pressure_authority();
     authority
@@ -535,6 +672,106 @@ fn unobserved_rss_leaves_admission_on_the_reservation_ceiling_alone() {
             growth_request(),
         )
         .expect("no measured sample means no measured refusal");
+}
+
+#[test]
+fn nominal_rss_refuses_growth_that_would_cross_the_limit() {
+    let (authority, pressure) = pressure_authority();
+    let requested = bytes(PRESSURE_TEST_LIMIT_BYTES / 4);
+    let observed = pressure.limit_bytes() - requested.get() + 1;
+    assert!(
+        !pressure
+            .publish_observed_resident_bytes(observed)
+            .is_over_budget()
+    );
+
+    let failure = authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect_err("growth must fit measured headroom before allocation");
+    assert!(failure.is_observed_over_budget());
+    let failure = authority
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap(),
+            requested,
+        )
+        .expect_err("shared growth must fit the same measured headroom");
+    assert!(failure.is_observed_over_budget());
+    assert_eq!(authority.snapshot().used_bytes, 0);
+
+    pressure.publish_observed_resident_bytes(observed - 1);
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect("growth that fits the headroom can proceed");
+}
+
+#[test]
+fn a_refused_request_is_announced_once_a_release_makes_it_fit() {
+    let (authority, pressure) = pressure_authority();
+    let mut headroom = pressure.subscribe_headroom();
+    let requested = bytes(PRESSURE_TEST_LIMIT_BYTES / 4);
+    let quarter = ResidentMemoryComponentIdV1::new("test.quarter").unwrap();
+    let held = [(); 4].map(|()| {
+        authority
+            .reserve_process_shared(quarter, requested)
+            .expect("four quarters fill the ledger")
+    });
+    let [first, second, third, fourth] = held;
+    drop(first);
+    assert!(
+        !headroom.has_changed(),
+        "a release with nothing refused announces nothing"
+    );
+    let refill = authority
+        .reserve_process_shared(quarter, requested)
+        .expect("the freed quarter is admitted");
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect_err("a full ledger refuses");
+    assert!(!headroom.has_changed());
+
+    let mut shrinking = second;
+    shrinking.shrink_to(requested.get() - 1).unwrap();
+    assert!(
+        !headroom.has_changed(),
+        "one byte back does not fit the refused quarter"
+    );
+    drop(third);
+    assert!(
+        headroom.has_changed(),
+        "the quarter the refused request needs is back"
+    );
+    assert_eq!(*headroom.borrow_and_update(), 1);
+    drop(fourth);
+    assert!(
+        !headroom.has_changed(),
+        "the waiter was satisfied; later releases wait for a new refusal"
+    );
+
+    let observed = pressure.limit_bytes() - requested.get() + 1;
+    pressure.publish_observed_resident_bytes(observed);
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect_err("measured RSS leaves no room for the quarter");
+    pressure.publish_observed_resident_bytes(observed);
+    assert!(!headroom.has_changed());
+    pressure.publish_observed_resident_bytes(observed - 1);
+    assert!(
+        headroom.has_changed(),
+        "a sample that fits the refused quarter announces it"
+    );
+    drop((refill, shrinking));
 }
 
 #[test]
@@ -711,6 +948,62 @@ fn reaching_the_high_watermark_runs_pressure_reclaimers_with_the_measurement() {
 }
 
 #[test]
+fn post_reclaim_observation_replaces_pressure_state_without_reentering_reclaimers() {
+    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
+    let after_reclaim = 1;
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: after_reclaim,
+                unreclaimable_bytes: after_reclaim,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    let calls = Arc::new(Mutex::new(0_u64));
+    let callback_calls = Arc::clone(&calls);
+    let callback_pressure = Arc::downgrade(&pressure);
+    let _registration = pressure
+        .register_pressure_reclaimer(
+            10,
+            Arc::new(move |_| {
+                *callback_calls.lock().expect("call count") += 1;
+                callback_pressure
+                    .upgrade()
+                    .expect("pressure authority remains live")
+                    .sample_for_checkpoint();
+                4096
+            }),
+        )
+        .expect("pressure reclaimer registration");
+
+    let state = pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
+
+    assert_eq!(*calls.lock().expect("call count"), 1);
+    assert_eq!(
+        state,
+        ResidentMemoryPressureStateV1::Nominal {
+            observed_bytes: after_reclaim,
+            limit_bytes: PRESSURE_TEST_LIMIT_BYTES,
+            high_watermark_bytes: pressure.high_watermark_bytes(),
+        },
+        "admission must consume the observation measured after reclaim"
+    );
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            growth_request(),
+        )
+        .expect("post-reclaim nominal RSS must immediately re-admit growth");
+}
+
+#[test]
 fn dropped_pressure_reclaimer_registration_is_not_called() {
     let (_authority, pressure) = pressure_authority();
     let calls = Arc::new(Mutex::new(0_u64));
@@ -728,4 +1021,517 @@ fn dropped_pressure_reclaimer_registration_is_not_called() {
 
     pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
     assert_eq!(*calls.lock().expect("call count"), 0);
+}
+
+#[test]
+fn allocator_trim_reclaimer_runs_under_pressure_and_reports_only_measured_release() {
+    let (_authority, pressure) = pressure_authority();
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let state_order = Arc::clone(&order);
+    let _state = pressure
+        .register_pressure_reclaimer(
+            10,
+            Arc::new(move |_| {
+                state_order.lock().expect("order").push("state");
+                0
+            }),
+        )
+        .expect("state reclaimer registration");
+    let _trim = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
+        .expect("allocator trim registration");
+
+    // Below the high watermark the trim never runs: freed pages are only
+    // returned once measured RSS threatens admission.
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    assert!(order.lock().expect("order").is_empty());
+
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
+    assert_eq!(order.lock().expect("order").as_slice(), ["state"]);
+
+    let trim = super::release_process_allocator_memory_v1();
+    // A trim can only claim bytes the kernel surface measured on both sides.
+    match (trim.before_bytes, trim.after_bytes) {
+        (Some(before), Some(after)) => {
+            assert_eq!(trim.released_bytes(), before.saturating_sub(after));
+        }
+        _ => assert_eq!(trim.released_bytes(), 0),
+    }
+}
+
+#[test]
+fn allocator_trim_readmits_growth_when_memory_recovers_inside_checkpoint_throttle() {
+    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
+    let measured = Arc::new(AtomicU64::new(PRESSURE_TEST_LIMIT_BYTES));
+    let sampled = Arc::clone(&measured);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            let observed = sampled.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: observed,
+                unreclaimable_bytes: observed,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    let _trim = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
+        .expect("allocator trim registration");
+    let owner = key("project-a", "worktree-a", "generation-a", "canonical");
+
+    pressure.sample_for_checkpoint();
+    let refused = authority
+        .reserve(owner.clone(), growth_request())
+        .expect_err("a process at its limit refuses growth");
+    assert!(refused.is_observed_over_budget());
+
+    measured.store(64 * 1024 * 1024, Ordering::Release);
+    pressure.publish_observed_resident_bytes(PRESSURE_TEST_LIMIT_BYTES);
+
+    let _admitted = authority
+        .reserve(owner, growth_request())
+        .expect("growth is admitted once the trim measures recovered memory");
+    assert_eq!(authority.snapshot().used_bytes, 16 * 1024 * 1024);
+}
+
+#[test]
+fn allocator_pressure_reclaimer_installation_preserves_registration_failure() {
+    let pressure = Arc::new(ResidentMemoryPressureV1::new(bytes(
+        PRESSURE_TEST_LIMIT_BYTES,
+    )));
+    pressure.lock_state().next_sequence = u64::MAX;
+    let registration = OnceLock::new();
+
+    let failure =
+        super::install_process_allocator_pressure_reclaimer_on_v1(&registration, &pressure)
+            .expect_err("sequence exhaustion must not report an installed reclaimer");
+
+    assert_eq!(failure, super::ResidentMemoryPressureRegistrationFailureV1);
+    assert!(registration.get().is_some_and(Result::is_err));
+    assert_eq!(
+        super::install_process_allocator_pressure_reclaimer_on_v1(&registration, &pressure)
+            .expect_err("a stored registration failure must remain truthful"),
+        failure
+    );
+}
+
+#[test]
+fn psi_some_avg10_reads_the_memory_stall_share() {
+    let pressure = "some avg10=12.50 avg60=3.10 avg300=0.80 total=123456\n\
+                    full avg10=4.00 avg60=1.00 avg300=0.20 total=45678\n";
+    assert_eq!(super::psi_some_avg10_v1(pressure), Some(12.5));
+    assert_eq!(
+        super::psi_some_avg10_v1("full avg10=4.00 avg60=1.00\n"),
+        None
+    );
+}
+
+thread_local! {
+    static INSTALLED_RELEASES: Cell<usize> = const { Cell::new(0) };
+    static INSTALLED_THREAD_COLLECTS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn count_installed_release() {
+    INSTALLED_RELEASES.with(|count| count.set(count.get() + 1));
+}
+
+fn count_installed_thread_collect() {
+    INSTALLED_THREAD_COLLECTS.with(|count| count.set(count.get() + 1));
+}
+
+const COUNTING_RELEASE: ProcessAllocatorReleaseV1 = ProcessAllocatorReleaseV1 {
+    release: count_installed_release,
+    collect_calling_thread: count_installed_thread_collect,
+};
+
+/// The allocator the composition root installed is released: glibc's
+/// `malloc_trim` alone returns nothing from mimalloc's pages. The process
+/// release and the calling-thread collection each run their own installed
+/// call. Installation happens once; a second is refused.
+#[test]
+fn allocator_release_runs_the_installed_allocator_release() {
+    install_process_allocator_release_v1(COUNTING_RELEASE).expect("first installation");
+    let (releases, collects) = (
+        INSTALLED_RELEASES.with(Cell::get),
+        INSTALLED_THREAD_COLLECTS.with(Cell::get),
+    );
+    let trim = super::release_process_allocator_memory_v1();
+    assert_eq!(INSTALLED_RELEASES.with(Cell::get), releases + 1);
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects);
+    assert!(trim.trimmed);
+    collect_calling_thread_allocator_v1();
+    assert_eq!(INSTALLED_RELEASES.with(Cell::get), releases + 1);
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 1);
+    assert_eq!(
+        install_process_allocator_release_v1(COUNTING_RELEASE),
+        Err("the process allocator release is already installed".to_owned())
+    );
+
+    // An idle long-lived thread collects once per sampler request: never
+    // before one, once after it, and not again until the next request.
+    collect_idle_thread_heap_v1();
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 1);
+    request_idle_thread_collection_v1();
+    collect_idle_thread_heap_v1();
+    collect_idle_thread_heap_v1();
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 2);
+    request_idle_thread_collection_v1();
+    collect_idle_thread_heap_v1();
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 3);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
+    let status = "Name:\ttracedecay\nVmHWM:\t 6553600 kB\nVmRSS:\t 3355444 kB\n\
+                  RssAnon:\t 2528172 kB\nRssFile:\t  807272 kB\nRssShmem:\t   20000 kB\n\
+                  VmSwap:\t  491520 kB\n";
+    let sample = super::process_resident_sample_from_status_v1(status);
+    assert_eq!(
+        sample,
+        Some(super::ProcessResidentSampleV1 {
+            resident_bytes: 3_355_444 * 1024,
+            unreclaimable_bytes: 2_548_172 * 1024,
+            swapped_bytes: 491_520 * 1024,
+            cgroup_committed_bytes: None,
+        })
+    );
+    assert_eq!(
+        sample.map(super::ProcessResidentSampleV1::admission_bytes),
+        Some((2_548_172 + 491_520) * 1024),
+        "swapped anonymous pages are the daemon's heap and count toward admission"
+    );
+    assert_eq!(
+        super::process_resident_sample_from_status_v1("VmRSS:\t 1024 kB\n"),
+        None,
+        "a kernel without split RSS counters is unobserved, not zero"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_task_sampler_reads_current_process_memory() {
+    let sample = super::process_resident_sample_from_task_v1().expect("current task sample");
+    assert!(sample.resident_bytes > 0);
+    assert!(sample.unreclaimable_bytes > 0);
+    assert!(sample.resident_bytes >= sample.unreclaimable_bytes);
+}
+
+#[test]
+fn macos_phys_footprint_is_the_admission_charge() {
+    let sample = super::process_resident_sample_from_macos_vm_info_v1(
+        6_400 * 1024 * 1024,
+        5_200 * 1024 * 1024,
+        45 * 1024 * 1024,
+    )
+    .expect("a populated TASK_VM_INFO reading is observed");
+    assert_eq!(sample.resident_bytes, 6_400 * 1024 * 1024);
+    assert_eq!(sample.unreclaimable_bytes, 5_200 * 1024 * 1024);
+    assert_eq!(
+        sample.admission_bytes(),
+        5_200 * 1024 * 1024,
+        "jetsam charges phys_footprint, not the larger resident_size"
+    );
+    assert_eq!(
+        super::process_resident_sample_from_macos_vm_info_v1(0, 0, 0),
+        None,
+        "an empty TASK_VM_INFO reading is unobserved, not zero"
+    );
+    let internal_only = super::process_resident_sample_from_macos_vm_info_v1(8, 0, 5)
+        .expect("internal is the fallback when footprint is missing");
+    assert_eq!(internal_only.unreclaimable_bytes, 5);
+    assert_eq!(internal_only.admission_bytes(), 5);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cgroup_committed_bytes_refuse_growth_that_unreclaimable_bytes_would_admit() {
+    let limit_bytes = 100 * 1024 * 1024;
+    let limit = bytes(limit_bytes);
+    let decide = |memory_max: &str, inactive_file: u64| {
+        let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+            Some("0::/trace.slice/daemon.scope\n"),
+            Some(memory_max),
+            None,
+        );
+        let cgroup = cgroup_root.join("trace.slice/daemon.scope");
+        fs::write(cgroup.join("memory.current"), format!("{limit_bytes}\n")).expect("current");
+        fs::write(
+            cgroup.join("memory.stat"),
+            format!("inactive_file {inactive_file}\n"),
+        )
+        .expect("stat");
+        let committed = super::cgroup_committed_bytes_v1(&proc_self_cgroup, &cgroup_root);
+        let sample = Arc::new(Mutex::new(super::ProcessResidentSampleV1 {
+            resident_bytes: 10,
+            unreclaimable_bytes: 10,
+            swapped_bytes: 0,
+            cgroup_committed_bytes: committed,
+        }));
+        let sampled = Arc::clone(&sample);
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(move || Some(*sampled.lock().expect("sample"))),
+        ));
+        pressure.sample_and_publish();
+        Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure)).reserve(
+            key(
+                "project-a",
+                "worktree-a",
+                "generation-a",
+                "sealed-graph-build",
+            ),
+            bytes(16 * 1024 * 1024),
+        )
+    };
+
+    assert!(
+        matches!(
+            decide(&format!("{limit_bytes}\n"), 0),
+            Err(ResidentMemoryAdmissionFailureV1::ObservedOverBudget { .. })
+        ),
+        "committed bytes at a finite memory.max refuse growth while anonymous bytes are small"
+    );
+    assert!(
+        decide(&format!("{limit_bytes}\n"), limit_bytes).is_ok(),
+        "inactive file cache is not a reason to refuse the same growth"
+    );
+    assert!(
+        decide("max\n", 0).is_ok(),
+        "an unlimited cgroup does not treat memory.current as a kill line"
+    );
+}
+
+/// A daemon the kernel swaps under its cgroup ceiling has small resident
+/// counters and large live heap. Both the process sample and the cgroup's
+/// committed figure count those pages, so admission is refused.
+#[cfg(target_os = "linux")]
+#[test]
+fn admission_counts_swapped_anonymous_pages() {
+    let limit_bytes = 100 * 1024 * 1024;
+    let limit = bytes(limit_bytes);
+    let admit = |sample: super::ProcessResidentSampleV1| {
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(move || Some(sample)),
+        ));
+        pressure.sample_and_publish();
+        Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure)).reserve(
+            key(
+                "project-a",
+                "worktree-a",
+                "generation-a",
+                "code-index-worker",
+            ),
+            bytes(32 * 1024 * 1024),
+        )
+    };
+    let resident = 40 * 1024 * 1024;
+    let status = format!(
+        "VmRSS:\t {} kB\nRssAnon:\t {} kB\nRssFile:\t 0 kB\nRssShmem:\t 0 kB\nVmSwap:\t {} kB\n",
+        resident / 1024,
+        resident / 1024,
+        resident / 1024,
+    );
+    let swapped = super::process_resident_sample_from_status_v1(&status).expect("status sample");
+    assert_eq!(
+        admit(swapped).err(),
+        Some(ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
+            observed_bytes: 80 * 1024 * 1024,
+            limit_bytes,
+            high_watermark_bytes: 90 * 1024 * 1024,
+            requested_bytes: 32 * 1024 * 1024,
+            floor_bytes: super::RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
+        })
+    );
+    assert!(
+        admit(super::ProcessResidentSampleV1 {
+            swapped_bytes: 0,
+            ..swapped
+        })
+        .is_ok(),
+        "the same resident set without swap leaves room for the request"
+    );
+
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("0::/trace.slice/daemon.scope\n"),
+        Some(&format!("{limit_bytes}\n")),
+        None,
+    );
+    let cgroup = cgroup_root.join("trace.slice/daemon.scope");
+    fs::write(cgroup.join("memory.current"), format!("{resident}\n")).expect("current");
+    fs::write(cgroup.join("memory.stat"), "inactive_file 0\n").expect("stat");
+    fs::write(cgroup.join("memory.swap.current"), format!("{resident}\n")).expect("swap");
+    assert_eq!(
+        super::cgroup_committed_bytes_v1(&proc_self_cgroup, &cgroup_root),
+        Some(2 * resident),
+        "the cgroup's swapped pages are committed to it"
+    );
+}
+
+/// A checkpoint polled from a per-row loop reads the process at most once per
+/// interval: a sealed graph build that sampled `/proc` and the cgroup files on
+/// every row spent its whole budget in those reads (#2505). Once the interval
+/// has passed, the next checkpoint reads a fresh sample and sees the growth.
+#[test]
+fn checkpoints_read_the_process_once_per_interval_and_then_see_growth() {
+    let limit = bytes(1024 * 1024 * 1024);
+    let reads = Arc::new(AtomicU64::new(0));
+    let observed = Arc::new(AtomicU64::new(1));
+    let (counted, bytes_now) = (Arc::clone(&reads), Arc::clone(&observed));
+    let pressure = ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+            let resident = bytes_now.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: resident,
+                unreclaimable_bytes: resident,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    );
+
+    let started = Instant::now();
+    for _ in 0..200_000 {
+        assert!(!pressure.sample_for_checkpoint().is_over_budget());
+    }
+    let elapsed = started.elapsed();
+    let reads_taken = reads.load(Ordering::Acquire);
+    let ceiling =
+        1 + elapsed.as_micros() / RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1.as_micros();
+    assert!(
+        u128::from(reads_taken) <= ceiling,
+        "200000 checkpoints in {elapsed:?} read the process {reads_taken} times; at most {ceiling} fit the interval"
+    );
+
+    observed.store(limit.get(), Ordering::Release);
+    std::thread::sleep(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1);
+    assert!(
+        pressure.sample_for_checkpoint().is_over_budget(),
+        "a checkpoint past the interval must read the grown process"
+    );
+    assert_eq!(reads.load(Ordering::Acquire), reads_taken + 1);
+}
+
+/// Every admission sizes from one view: the ceiling less the larger of the
+/// ledger and the measured process, and nothing while the pressure latch
+/// holds, so a width planned from it is one admission accepts.
+#[test]
+fn headroom_is_the_ceiling_less_the_larger_of_ledger_and_measurement() {
+    const MIB: u64 = 1024 * 1024;
+    let measured = Arc::new(AtomicU64::new(300 * MIB));
+    let sampled = Arc::clone(&measured);
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(1000 * MIB),
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(1000 * MIB),
+            Arc::new(move || {
+                let observed = sampled.load(Ordering::SeqCst);
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: observed,
+                    unreclaimable_bytes: observed,
+                    swapped_bytes: 0,
+                    cgroup_committed_bytes: None,
+                })
+            }),
+        )),
+    ));
+    let owner = key("project-a", "worktree-a", "generation-a", "reader");
+    let charged = authority
+        .reserve(owner.clone(), bytes(100 * MIB))
+        .expect("charged owner");
+
+    let headroom = authority.headroom_below(u64::MAX);
+    assert_eq!(
+        (
+            headroom.used_bytes,
+            headroom.observed_bytes,
+            headroom.available_bytes
+        ),
+        (100 * MIB, 300 * MIB, 700 * MIB),
+        "state no owner charges counts through the measurement"
+    );
+    assert_eq!(
+        authority.headroom_below(500 * MIB).available_bytes,
+        200 * MIB
+    );
+    assert!(
+        authority.reserve(owner.clone(), bytes(701 * MIB)).is_err(),
+        "admission refuses past the same view"
+    );
+
+    let in_flight = authority
+        .reserve(owner, bytes(300 * MIB))
+        .expect("in-flight work");
+    assert_eq!(
+        authority.headroom_below(u64::MAX).available_bytes,
+        600 * MIB,
+        "a ledger above the measurement counts in full"
+    );
+
+    measured.store(990 * MIB, Ordering::SeqCst);
+    assert_eq!(authority.headroom_below(u64::MAX).available_bytes, 0);
+    measured.store(800 * MIB, Ordering::SeqCst);
+    assert_eq!(
+        authority.headroom_below(u64::MAX).available_bytes,
+        0,
+        "the latch holds until the low watermark"
+    );
+    drop((charged, in_flight));
+}
+
+#[test]
+fn allocator_reclaim_preserves_cgroup_pressure_until_sample_recovers() {
+    let limit = bytes(1024 * 1024 * 1024 * 1024);
+    let sample = Arc::new(Mutex::new(ProcessResidentSampleV1 {
+        resident_bytes: 1,
+        unreclaimable_bytes: 1,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: Some(limit.get()),
+    }));
+    let sampled = Arc::clone(&sample);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || Some(*sampled.lock().expect("sample"))),
+    ));
+    let _reclaimer = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
+        .expect("register allocator reclaimer");
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+
+    assert_eq!(pressure.measure_admission_bytes(), limit.get());
+    assert!(matches!(
+        pressure.state(),
+        ResidentMemoryPressureStateV1::OverBudget { .. }
+    ));
+    assert!(matches!(
+        authority.reserve(
+            key("project", "worktree", "generation", "graph"),
+            growth_request()
+        ),
+        Err(ResidentMemoryAdmissionFailureV1::ObservedOverBudget { .. })
+    ));
+
+    sample.lock().expect("sample").cgroup_committed_bytes = Some(1);
+    assert_eq!(pressure.measure_admission_bytes(), 1);
+    assert!(matches!(
+        pressure.state(),
+        ResidentMemoryPressureStateV1::Nominal { .. }
+    ));
+    assert!(
+        authority
+            .reserve(
+                key("project", "worktree", "generation", "graph"),
+                growth_request()
+            )
+            .is_ok()
+    );
 }

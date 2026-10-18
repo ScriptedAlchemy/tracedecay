@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_sha256;
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
 use super::{
@@ -44,10 +45,7 @@ fn release_path(
         .join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY)
         .join(format!(
             "release-{}.json",
-            digest
-                .as_str()
-                .strip_prefix("sha256:")
-                .unwrap_or(digest.as_str())
+            sha256_hex_suffix(digest.as_str()).unwrap_or(digest.as_str())
         )))
 }
 
@@ -76,7 +74,6 @@ pub(super) fn write_events(
         )
         .map_err(storage)?;
     }
-    crate::hotpath_observe::retention_replay_releases_queued(receipt.deleted_generations.len());
     sync_directory(&root)
 }
 
@@ -128,7 +125,38 @@ pub(super) fn remove_events(
     Ok(())
 }
 
-#[hotpath::measure(label = "usecases.retention.replay_release_page")]
+/// The receipt digest every queued release names. Each queued release is
+/// validated against its receipt when the graph consumes it, so this is the
+/// set of generation receipts the queue still reads.
+pub(super) fn queued_release_receipt_digests(
+    store_root: &Path,
+) -> Result<BTreeSet<String>, CodeGenerationRetentionErrorV1> {
+    let root = store_root.join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY);
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(storage(error)),
+    };
+    let mut digests = BTreeSet::new();
+    for entry in entries {
+        let path = entry.map_err(storage)?.path();
+        let bytes = read_bounded_regular_file(&path, "graph replay release")?;
+        let release: CodeGenerationGraphReplayReleaseV1 =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "graph replay release is unreadable: {error}"
+                ))
+            })?;
+        digests.insert(release.receipt_digest);
+    }
+    Ok(digests)
+}
+
+#[tracing::instrument(
+    name = "usecases.retention.replay_release_page",
+    level = "trace",
+    skip_all
+)]
 pub fn code_generation_graph_replay_release_page(
     store_root: &Path,
     after: Option<&str>,
@@ -199,7 +227,6 @@ pub fn code_generation_graph_replay_release_page(
         (&left.receipt_digest, &left.generation.generation_id)
             .cmp(&(&right.receipt_digest, &right.generation.generation_id))
     });
-    crate::hotpath_observe::retention_replay_releases_pending(releases.len());
     Ok(CodeGenerationGraphReplayReleasePageV1 {
         releases,
         continuation,
@@ -261,7 +288,7 @@ fn validate_receipt(
     let digest = canonical_sha256(&material)
         .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
     if receipt.schema != RECEIPT_SCHEMA
-        || digest.as_str().strip_prefix("sha256:") != Some(receipt.receipt_digest.as_str())
+        || sha256_hex_suffix(digest.as_str()) != Some(receipt.receipt_digest.as_str())
         || receipt.receipt_digest != release.receipt_digest
         || !receipt.deleted_generations.contains(&release.generation)
     {
@@ -272,12 +299,15 @@ fn validate_receipt(
     Ok(())
 }
 
-#[hotpath::measure(label = "code_index_retention.complete_replay_release")]
+#[tracing::instrument(
+    name = "code_index_retention.complete_replay_release",
+    level = "trace",
+    skip_all
+)]
 pub fn complete_code_generation_graph_replay_release(
     store_root: &Path,
     release: &CodeGenerationGraphReplayReleaseV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     std::fs::remove_file(release_path(store_root, release)?).map_err(storage)?;
-    crate::hotpath_observe::retention_replay_release_completed();
     sync_directory(&store_root.join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY))
 }

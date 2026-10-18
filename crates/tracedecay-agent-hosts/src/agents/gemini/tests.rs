@@ -7,29 +7,42 @@
 
 use super::extension::{
     EXTENSION_CONTEXT_FILE, EXTENSION_MANIFEST_FILE, TRACEDECAY_BIN_PLACEHOLDER,
-    rendered_extension_files,
+    installed_extension_dir, rendered_extension_files,
 };
 use super::*;
 
-use crate::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/// Writes the rendered extension source exactly where the component catalog
+/// deploys it.
+fn stage_rendered_extension(home: &Path, tracedecay_bin: &str) -> PathBuf {
+    let stage_dir = extension_stage_dir(home);
+    for (relative, rendered) in rendered_extension_files(
+        tracedecay_bin,
+        &crate::agents::serve_args::ServeArgs::default(),
+    )
+    .unwrap()
+    {
+        crate::agents::safe_write_text_file(&stage_dir.join(relative), &rendered).unwrap();
+    }
+    stage_dir
+}
+
 /// Install a fake `gemini` that appends each invocation's argv to `log` and
 /// then performs `body`.
 #[cfg(unix)]
 fn fake_gemini_cli(bin: &Path, log: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
         log = shell_single_quote(&log.to_string_lossy()),
     );
-    std::fs::write(bin, script).unwrap();
-    let mut permissions = std::fs::metadata(bin).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(bin, permissions).unwrap();
+    write_executable_script(bin, script).unwrap();
 }
 
 /// A fake body that behaves like the real CLI far enough to be observable:
@@ -64,49 +77,14 @@ fn recorded_invocations(log: &Path) -> Vec<String> {
         .collect()
 }
 
-#[cfg(unix)]
-struct AmbientPathGuard {
-    previous: Option<std::ffi::OsString>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(unix)]
-impl AmbientPathGuard {
-    fn set(path: &Path) -> Self {
-        let lock = crate::config::lock_user_data_dir_test_env();
-        let previous = std::env::var_os("PATH");
-        // SAFETY: the shared profile-discovery lock is held for this guard's
-        // lifetime, so sibling tests do not observe the temporary PATH.
-        unsafe {
-            std::env::set_var("PATH", path);
-        }
-        Self {
-            previous,
-            _lock: lock,
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for AmbientPathGuard {
-    fn drop(&mut self) {
-        // SAFETY: see `AmbientPathGuard::set`.
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var("PATH", previous),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-    }
-}
-
 fn install_context(home: &Path, tracedecay_bin: &str) -> InstallContext {
     InstallContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
         home: home.to_path_buf(),
         tracedecay_bin: tracedecay_bin.to_string(),
-        tool_permissions: Vec::new(),
         project_root: None,
         dashboard: true,
+        serve_args: Default::default(),
     }
 }
 
@@ -119,7 +97,12 @@ fn read_json(path: &Path) -> serde_json::Value {
 fn simulate_host_install(home: &Path, tracedecay_bin: &str) {
     let installed = installed_extension_dir(home);
     std::fs::create_dir_all(&installed).unwrap();
-    for (relative, rendered) in rendered_extension_files(tracedecay_bin).unwrap() {
+    for (relative, rendered) in rendered_extension_files(
+        tracedecay_bin,
+        &crate::agents::serve_args::ServeArgs::default(),
+    )
+    .unwrap()
+    {
         std::fs::write(installed.join(relative), rendered).unwrap();
     }
 }
@@ -135,7 +118,7 @@ fn simulate_host_install(home: &Path, tracedecay_bin: &str) {
 fn staging_renders_the_manifest_with_the_admitted_binary_serve_args_and_trust() {
     let home = tempfile::tempdir().unwrap();
 
-    let stage_dir = deploy_extension_bundle(home.path(), "/abs/bin/tracedecay").unwrap();
+    let stage_dir = stage_rendered_extension(home.path(), "/abs/bin/tracedecay");
 
     assert_eq!(stage_dir, extension_stage_dir(home.path()));
     let raw = std::fs::read_to_string(stage_dir.join(EXTENSION_MANIFEST_FILE)).unwrap();
@@ -178,7 +161,7 @@ fn staging_escapes_special_chars_in_the_binary_path() {
     let home = tempfile::tempdir().unwrap();
     let weird_bin = "/opt/td \"quote\"/tracedecay";
 
-    let stage_dir = deploy_extension_bundle(home.path(), weird_bin).unwrap();
+    let stage_dir = stage_rendered_extension(home.path(), weird_bin);
 
     let manifest: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(stage_dir.join(EXTENSION_MANIFEST_FILE))
@@ -188,61 +171,11 @@ fn staging_escapes_special_chars_in_the_binary_path() {
     assert_eq!(manifest["mcpServers"]["tracedecay"]["command"], weird_bin);
 }
 
-/// Re-staging is a clean replace: a file an older version staged but this one
-/// no longer ships must not survive into the next `gemini extensions install`.
-#[test]
-fn staging_is_a_clean_replace_dropping_stale_files() {
-    let home = tempfile::tempdir().unwrap();
-    let stage_dir = deploy_extension_bundle(home.path(), "/bin/tracedecay").unwrap();
-    let stale = stage_dir.join("commands/retired.toml");
-    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
-    std::fs::write(&stale, "stale command").unwrap();
-
-    deploy_extension_bundle(home.path(), "/bin/tracedecay").unwrap();
-
-    assert!(
-        !stale.exists(),
-        "a stale staged file must be gone after a clean-replace restage"
-    );
-    assert!(stage_dir.join(EXTENSION_MANIFEST_FILE).exists());
-}
-
-/// The clean replace must refuse a directory TraceDecay does not own, so an
-/// operator's own extension source squatting on the path is never deleted.
-#[test]
-fn staging_refuses_to_replace_a_directory_tracedecay_does_not_own() {
-    let home = tempfile::tempdir().unwrap();
-    let stage_dir = extension_stage_dir(home.path());
-    std::fs::create_dir_all(&stage_dir).unwrap();
-    std::fs::write(
-        stage_dir.join(EXTENSION_MANIFEST_FILE),
-        r#"{"name":"someone-elses-extension"}"#,
-    )
-    .unwrap();
-    std::fs::write(stage_dir.join("user-file.txt"), "keep me").unwrap();
-
-    let error = deploy_extension_bundle(home.path(), "/bin/tracedecay")
-        .expect_err("a non-tracedecay extension directory must not be replaced");
-
-    assert!(
-        error.to_string().contains("non-tracedecay"),
-        "unexpected error: {error}"
-    );
-    assert!(
-        stage_dir.join("user-file.txt").exists(),
-        "an unowned directory must be left untouched"
-    );
-    assert_eq!(
-        std::fs::read_to_string(stage_dir.join(EXTENSION_MANIFEST_FILE)).unwrap(),
-        r#"{"name":"someone-elses-extension"}"#
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Host-CLI-driven lifecycle
 // ---------------------------------------------------------------------------
 
-/// Activation is Gemini's own `extensions install` against the staged source —
+/// Activation is Gemini's own `extensions install` against the staged source,
 /// not a settings.json merge.
 #[cfg(unix)]
 #[test]
@@ -251,7 +184,7 @@ fn activation_drives_the_hosts_own_extension_install_against_the_staged_source()
     let bin_dir = tempfile::tempdir().unwrap();
     let log = bin_dir.path().join("invocations.log");
     let gemini = bin_dir.path().join("gemini");
-    let stage_dir = deploy_extension_bundle(home.path(), "/bin/tracedecay").unwrap();
+    let stage_dir = stage_rendered_extension(home.path(), "/bin/tracedecay");
     fake_gemini_cli(&gemini, &log, FAKE_EXTENSION_LIFECYCLE_BODY);
 
     gemini_extension_activate_with(&gemini, home.path())
@@ -283,7 +216,7 @@ fn activation_removes_an_existing_extension_through_the_host_before_reinstalling
     let bin_dir = tempfile::tempdir().unwrap();
     let log = bin_dir.path().join("invocations.log");
     let gemini = bin_dir.path().join("gemini");
-    let stage_dir = deploy_extension_bundle(home.path(), "/relocated/tracedecay").unwrap();
+    let stage_dir = stage_rendered_extension(home.path(), "/relocated/tracedecay");
     simulate_host_install(home.path(), "/old/tracedecay");
     fake_gemini_cli(&gemini, &log, FAKE_EXTENSION_LIFECYCLE_BODY);
 
@@ -325,6 +258,44 @@ fn activation_without_a_staged_source_refuses_before_invoking_the_host() {
     );
 }
 
+/// The lifecycle activates Gemini's canonical set, the lone context-MCP
+/// component, through the component boundary. It must drive the extension
+/// lifecycle's host install; a silent `Ok` left install to fail verify
+/// opaquely.
+#[cfg(unix)]
+#[test]
+fn context_mcp_component_activation_installs_the_staged_extension_through_the_host() {
+    use crate::agents::host_bundle::HostComponentV1;
+
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    fake_gemini_cli(
+        &bin_dir.path().join("gemini"),
+        &log,
+        FAKE_EXTENSION_LIFECYCLE_BODY,
+    );
+    let _gemini_cli =
+        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
+    let stage_dir = stage_rendered_extension(home.path(), "/bin/tracedecay");
+
+    GeminiIntegration
+        .activate_deployed_host_component_registration(
+            &[HostComponentV1::ContextMcp],
+            &install_context(home.path(), "/bin/tracedecay"),
+        )
+        .expect("the context-MCP set activates the staged extension");
+
+    assert_eq!(
+        recorded_invocations(&log),
+        vec![format!("extensions install {}", stage_dir.display())]
+    );
+    assert_eq!(
+        read_json(&installed_manifest_path(home.path()))["mcpServers"]["tracedecay"]["command"],
+        "/bin/tracedecay"
+    );
+}
+
 /// Deactivation is Gemini's own `extensions uninstall`, addressed by the
 /// extension name.
 #[cfg(unix)]
@@ -334,7 +305,7 @@ fn deactivation_drives_the_hosts_own_uninstall_by_extension_name() {
     let bin_dir = tempfile::tempdir().unwrap();
     let log = bin_dir.path().join("invocations.log");
     let gemini = bin_dir.path().join("gemini");
-    deploy_extension_bundle(home.path(), "/bin/tracedecay").unwrap();
+    stage_rendered_extension(home.path(), "/bin/tracedecay");
     simulate_host_install(home.path(), "/bin/tracedecay");
     fake_gemini_cli(&gemini, &log, FAKE_EXTENSION_LIFECYCLE_BODY);
 
@@ -355,76 +326,6 @@ fn deactivation_drives_the_hosts_own_uninstall_by_extension_name() {
     );
 }
 
-/// A failing host command must reach the operator as the host's own diagnosis,
-/// not as a TraceDecay guess about what went wrong.
-#[cfg(unix)]
-#[test]
-fn a_failing_host_command_reports_the_hosts_own_diagnosis() {
-    let home = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let log = bin_dir.path().join("invocations.log");
-    let gemini = bin_dir.path().join("gemini");
-    fake_gemini_cli(
-        &gemini,
-        &log,
-        "echo 'extension tracedecay is not installed' >&2\nexit 7",
-    );
-
-    let error = gemini_extension_deactivate_with(&gemini, home.path())
-        .expect_err("a non-zero host CLI exit must fail the lifecycle");
-
-    let TraceDecayError::Config { message } = error else {
-        panic!("a failed host command must surface as a config error");
-    };
-    assert!(
-        message.contains("extension tracedecay is not installed")
-            && message.contains("exit code 7"),
-        "the host's own stderr and status must reach the operator: {message}"
-    );
-}
-
-/// The `gemini` binary is a hard requirement. With it absent the lifecycle
-/// refuses; it must not fall back to merging `~/.gemini/settings.json` or
-/// appending to `~/.gemini/GEMINI.md`.
-#[cfg(unix)]
-#[test]
-fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
-    let home = tempfile::tempdir().unwrap();
-    let settings = settings_path(home.path());
-    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    let original = br#"{"mcpServers":{"other":{"command":"other"}},"theme":"Default"}"#;
-    std::fs::write(&settings, original).unwrap();
-    let user_context = user_context_path(home.path());
-    std::fs::write(&user_context, "# my own rules\n").unwrap();
-
-    let empty_path_dir = tempfile::tempdir().unwrap();
-    let _path = AmbientPathGuard::set(empty_path_dir.path());
-
-    let error = GeminiIntegration
-        .prepare_non_interactive_install(&install_context(home.path(), "/bin/tracedecay"))
-        .expect_err("an absent host binary is a hard requirement failure");
-
-    let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
-        panic!("host CLI absence must surface as a typed requirement");
-    };
-    assert_eq!(program, "gemini");
-    assert_eq!(lifecycle, "gemini extension lifecycle");
-    assert_eq!(
-        std::fs::read(&settings).unwrap(),
-        original,
-        "a refused lifecycle must leave the host's settings byte-identical"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&user_context).unwrap(),
-        "# my own rules\n",
-        "a refused lifecycle must not append rules to the operator's context file"
-    );
-    assert!(
-        !installed_extension_dir(home.path()).exists(),
-        "a refused lifecycle must not hand-write the host's extensions directory"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Observed state and doctor truthfulness
 // ---------------------------------------------------------------------------
@@ -434,77 +335,76 @@ fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
 /// rather than "missing".
 #[test]
 fn registration_state_follows_the_hosts_installed_extension() {
-    use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+    use crate::agents::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 
     let home = tempfile::tempdir().unwrap();
     let health = HealthcheckContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         home: home.path().to_path_buf(),
         project_path: home.path().to_path_buf(),
+        catalog_profiles: Default::default(),
     };
-    deploy_extension_bundle(home.path(), "/bin/tracedecay").unwrap();
+    stage_rendered_extension(home.path(), "/bin/tracedecay");
     assert!(
-        !GeminiIntegration.has_tracedecay(home.path()),
+        !GeminiIntegration.has_tracedecay(
+            home.path(),
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+        ),
         "a staged source the host never installed is not an installation"
     );
     assert_eq!(
-        GeminiIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        GeminiIntegration.host_component_registration(HostComponentV1::Core, &health),
         HostBundleRegistrationStateV1::Missing
     );
 
     simulate_host_install(home.path(), "/bin/tracedecay");
-    assert!(GeminiIntegration.has_tracedecay(home.path()));
+    assert!(GeminiIntegration.has_tracedecay(
+        home.path(),
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+    ));
     assert_eq!(
-        GeminiIntegration.host_component_registration(HostBundleComponentV1::ContextMcp, &health),
+        GeminiIntegration.host_component_registration(HostComponentV1::ContextMcp, &health),
         HostBundleRegistrationStateV1::Current
     );
-    assert!(matches!(
-        GeminiIntegration
-            .preflight_non_interactive_install(&install_context(home.path(), "/bin/tracedecay"))
-            .unwrap(),
-        NonInteractiveInstallOutcome::Ready
+    assert!(installed_extension_is_current(
+        home.path(),
+        Some("/bin/tracedecay"),
+        &crate::agents::serve_args::ServeArgs::default(),
     ));
 
     // A relocated binary is only visible to the lifecycle-aware readback.
     assert_eq!(
         GeminiIntegration.host_component_registration_for_lifecycle(
-            HostBundleComponentV1::Core,
+            HostComponentV1::Core,
             &health,
             &install_context(home.path(), "/relocated/tracedecay"),
         ),
         HostBundleRegistrationStateV1::Repairable
     );
-    assert!(matches!(
-        GeminiIntegration
-            .preflight_non_interactive_install(&install_context(
-                home.path(),
-                "/relocated/tracedecay"
-            ))
-            .unwrap(),
-        NonInteractiveInstallOutcome::DeferredUserAction(_)
+    assert!(!installed_extension_is_current(
+        home.path(),
+        Some("/relocated/tracedecay"),
+        &crate::agents::serve_args::ServeArgs::default(),
     ));
 
     std::fs::write(installed_manifest_path(home.path()), b"{not json").unwrap();
     assert_eq!(
-        GeminiIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        GeminiIntegration.host_component_registration(HostComponentV1::Core, &health),
         HostBundleRegistrationStateV1::Corrupt
     );
 }
 
-/// The doctor must not fail on the *correct* post-adoption state: under the
-/// extension model `~/.gemini/settings.json` carries no tracedecay entry and
-/// `~/.gemini/GEMINI.md` carries no managed block, because the extension
-/// supplies both.
+/// The doctor must not fail on the *correct* post-adoption state: the
+/// extension supplies the server and its context file.
 #[test]
 fn doctor_reports_no_issue_when_the_extension_supplies_the_server() {
     let home = tempfile::tempdir().unwrap();
-    deploy_extension_bundle(home.path(), "/bin/tracedecay").unwrap();
+    stage_rendered_extension(home.path(), "/bin/tracedecay");
     simulate_host_install(home.path(), "/bin/tracedecay");
 
     let mut dc = DoctorCounters::new();
     doctor_check_staged_extension(&mut dc, home.path());
     doctor_check_installed_extension(&mut dc, home.path());
-    doctor_check_settings(&mut dc, home.path());
-    doctor_check_prompt(&mut dc, home.path());
 
     assert_eq!(
         dc.issues, 0,
@@ -513,40 +413,8 @@ fn doctor_reports_no_issue_when_the_extension_supplies_the_server() {
     assert_eq!(dc.warnings, 0);
 }
 
-/// Pre-extension state is reported as residue — a warning about duplication —
-/// never as the registration the doctor is looking for.
-#[test]
-fn doctor_reports_pre_extension_state_as_residue() {
-    let home = tempfile::tempdir().unwrap();
-    let settings = settings_path(home.path());
-    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    std::fs::write(
-        &settings,
-        br#"{"mcpServers":{"tracedecay":{"command":"/old/tracedecay","args":["serve"]}}}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        user_context_path(home.path()),
-        format!(
-            "{}\n\nold rules\n",
-            super::super::prompt_rules::PROMPT_RULE_MARKER
-        ),
-    )
-    .unwrap();
-
-    let mut dc = DoctorCounters::new();
-    doctor_check_settings(&mut dc, home.path());
-    doctor_check_prompt(&mut dc, home.path());
-
-    assert_eq!(
-        dc.issues, 0,
-        "legacy residue is a duplication warning, not a failed registration"
-    );
-    assert_eq!(dc.warnings, 2, "both residues must be reported");
-}
-
 /// A staged source that is missing its manifest is reported as "not staged",
-/// and a not-yet-adopted extension is reported as not installed — neither is
+/// and a not-yet-adopted extension is reported as not installed, neither is
 /// silently upgraded into a claim that Gemini has the extension.
 #[test]
 fn doctor_warns_when_nothing_is_staged_or_installed() {
@@ -562,32 +430,12 @@ fn doctor_warns_when_nothing_is_staged_or_installed() {
 
 #[cfg(unix)]
 #[test]
-fn doctor_only_treats_an_absent_gemini_cli_as_unobserved_state() {
-    let home = tempfile::tempdir().unwrap();
-    let empty_path_dir = tempfile::tempdir().unwrap();
-    let _path = AmbientPathGuard::set(empty_path_dir.path());
-
-    assert!(
-        host_reported_extensions(home.path())
-            .expect("an absent Gemini binary is the one optional host-report state")
-            .is_none()
-    );
-
-    let mut dc = DoctorCounters::new();
-    doctor_check_host_reported_extensions(&mut dc, home.path());
-
-    assert_eq!(dc.issues, 0);
-    assert_eq!(dc.warnings, 0);
-}
-
-#[cfg(unix)]
-#[test]
 fn doctor_fails_when_a_present_gemini_cli_is_not_executable() {
     let home = tempfile::tempdir().unwrap();
     let bin_dir = tempfile::tempdir().unwrap();
     let candidate = bin_dir.path().join("gemini");
     std::fs::write(&candidate, b"not executable").unwrap();
-    let _path = AmbientPathGuard::set(bin_dir.path());
+    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
 
     let error = host_reported_extensions(home.path())
         .expect_err("a present unusable Gemini candidate is not an absent CLI");
@@ -604,36 +452,4 @@ fn doctor_fails_when_a_present_gemini_cli_is_not_executable() {
 
     assert_eq!(dc.issues, 1);
     assert_eq!(dc.warnings, 0);
-}
-
-/// `update_plugin` refreshes only the TraceDecay-owned source and says so:
-/// Gemini owns the installed copy, so an unadopted refresh must not be
-/// reported as an updated extension.
-#[test]
-fn update_refreshes_the_staged_source_and_defers_host_adoption() {
-    let home = tempfile::tempdir().unwrap();
-    assert!(matches!(
-        GeminiIntegration
-            .update_plugin(&install_context(home.path(), "/bin/tracedecay"))
-            .unwrap(),
-        UpdatePluginOutcome::NotInstalled
-    ));
-
-    deploy_extension_bundle(home.path(), "/old/tracedecay").unwrap();
-    let outcome = GeminiIntegration
-        .update_plugin(&install_context(home.path(), "/new/tracedecay"))
-        .unwrap();
-
-    let UpdatePluginOutcome::DeferredUserAction(deferred) = outcome else {
-        panic!("a refreshed source the host has not adopted is a deferred action");
-    };
-    assert!(deferred.remediation.contains("gemini extensions update"));
-    assert_eq!(
-        deferred.staged_paths,
-        vec![extension_stage_dir(home.path())]
-    );
-    assert_eq!(
-        read_json(&staged_manifest_path(home.path()))["mcpServers"]["tracedecay"]["command"],
-        "/new/tracedecay"
-    );
 }

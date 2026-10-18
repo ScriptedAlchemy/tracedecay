@@ -1,26 +1,29 @@
 use std::sync::Arc;
 
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest, SessionLookupResult,
     SessionRetrievalStructuralRefusalV1, TemporalRetrievalFailure, TemporalRetrievalFuture,
     TemporalRetrievalPort,
 };
-use tracedecay_application::{
-    CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
-    EvidenceCoverage, EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor,
-    OperationBudgetUsage, PageCursor, PageState, RetrievalEvidence, TemporalState, now_micros,
+use tracedecay_contracts::{
+    ApplicationProblem, CancellationObservation, CancellationStage, CoverageCompleteness,
+    CoverageDomainState, EvidenceCoverage, EvidenceDomain, FreshnessState, Omission,
+    OmissionReason, OpaqueCursor, OperationBudgetUsage, PageCursor, PageState, RetrievalEvidence,
+    TemporalState, now_micros,
 };
 use tracedecay_domain::{RetrievalGrainV1, UtcMicros};
-use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
+use tracedecay_session_memory::session::{
+    SessionCursorRequest, SessionDataFreshness, SessionTemporalQuery,
+};
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::SortContractId;
 
 use super::{
-    SessionApplicationRetrievalPortV1, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
+    APPLICATION_RETRIEVAL_MAX_BYTES, SessionApplicationRetrievalPortV1, SessionRetrievalPageView,
+    SessionRetrievalServiceOutcome, admitted_execution_limits,
 };
 
-const SESSION_LOOKUP_CONTEXT_BYTES: u64 = 64 * 1024;
 const SESSION_LOOKUP_SORT: &str = "sort.session.temporal.anchor.v1";
 
 pub struct DaemonSessionLookupPrimitiveV1 {
@@ -39,8 +42,16 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
         context: RetrievalPortContext<'a>,
         request: &'a SessionLookupRequest,
     ) -> TemporalRetrievalFuture<'a> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
+                let limit = usize::try_from(request.meta.page.page_size)
+                    .map_err(|_| TemporalRetrievalFailure::Unavailable)?;
+                // The admitted binding refuses any query whose execution
+                // limits exceed `APPLICATION_RETRIEVAL_MAX_BYTES` as a
+                // non-retryable structural refusal, so the adapter must size
+                // them itself: the schema exposes no budget knob a caller
+                // could correct, and the multi-MiB `ExecutionLimits::default()`
+                // made the advertised minimum page fail admission.
                 let query = SessionTemporalQuery::new(
                     request.session_id.clone(),
                     None,
@@ -53,23 +64,29 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
                         .map(|cursor| cursor.as_str().to_owned()),
                     request.meta.temporal,
                     RetrievalGrainV1::Occurrence,
-                    usize::try_from(request.meta.page.page_size)
-                        .map_err(|_| TemporalRetrievalFailure::Unavailable)?,
+                    limit,
                     DiversityLimits::unbounded(),
                     ContextBudget {
-                        max_bytes: SESSION_LOOKUP_CONTEXT_BYTES,
-                        max_tokens: SESSION_LOOKUP_CONTEXT_BYTES / 4,
+                        max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+                        max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
                         estimator_version: "words-v1".to_owned(),
                     },
                 )
-                .map_err(|_| TemporalRetrievalFailure::Unavailable)?;
+                .map_err(|_| TemporalRetrievalFailure::Unavailable)?
+                .with_cursor_request(
+                    SessionCursorRequest::new("session_lookup")
+                        .parameter("temporal", &request.meta.temporal)
+                        .and_then(|bound| bound.parameter("page_size", &limit))
+                        .map_err(|_| TemporalRetrievalFailure::Unavailable)?,
+                )
+                .with_execution_limits(admitted_execution_limits(limit));
                 let outcome = self
                     .retrieval
                     .retrieve_admitted(context.request, query)
                     .await;
                 map_outcome(outcome, request, now_micros())
             },
-            label = "daemon.session_retrieval.lookup"
+            tracing::trace_span!("daemon.session_retrieval.lookup"),
         ))
     }
 }
@@ -87,6 +104,7 @@ fn map_outcome(
             page,
             freshness,
             omitted,
+            ..
         } => partial_outcome(page, freshness, omitted, request, finished_at),
         SessionRetrievalServiceOutcome::ResetRequired { .. } => {
             Err(TemporalRetrievalFailure::ResetRequired)
@@ -111,6 +129,12 @@ fn map_outcome(
         SessionRetrievalServiceOutcome::CursorStale => Ok(RetrievalPortOutcome::Unavailable(
             terminal_evidence(request, finished_at, OmissionReason::Stale, None)?,
         )),
+        SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+            Ok(RetrievalPortOutcome::Refused(
+                terminal_evidence(request, finished_at, OmissionReason::Unavailable, None)?,
+                Box::new(ApplicationProblem::cursor_refused(&mismatch)),
+            ))
+        }
         SessionRetrievalServiceOutcome::Redacted => Ok(RetrievalPortOutcome::Unavailable(
             terminal_evidence(request, finished_at, OmissionReason::Redacted, None)?,
         )),
@@ -133,9 +157,9 @@ fn map_outcome(
                 maximum,
             },
         )),
-        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
             Err(TemporalRetrievalFailure::StructuralRefusal(
-                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage },
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage, accounting },
             ))
         }
     }
@@ -261,6 +285,7 @@ fn page_evidence(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     })
 }
 
@@ -279,6 +304,7 @@ fn terminal_evidence(
             requested_at: finished_at,
             resolved_at: finished_at,
             source_generation: None,
+            code_graph_freshness: None,
             watermark_digest: None,
             freshness: if reason == OmissionReason::Stale {
                 FreshnessState::Stale
@@ -310,6 +336,7 @@ fn terminal_evidence(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation,
+        cost: None,
     })
 }
 
@@ -323,6 +350,7 @@ fn temporal_state(
         requested_at: finished_at,
         resolved_at: finished_at,
         source_generation: None,
+        code_graph_freshness: None,
         watermark_digest: None,
         freshness: match freshness {
             SessionDataFreshness::Fresh => FreshnessState::Current,
@@ -335,7 +363,7 @@ fn temporal_state(
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::retrieval::{
+    use tracedecay_contracts::retrieval::{
         PageRequest, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
     };
     use tracedecay_domain::{RetrievalAnchorId, SessionId};
@@ -463,18 +491,27 @@ mod tests {
     }
 
     #[test]
-    fn budget_refusal_preserves_stage() {
+    fn budget_refusal_preserves_stage_and_accounting() {
         let stage =
             tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ContextTokens;
+        let accounting = Some(
+            tracedecay_session_memory::session::SessionRetrievalBudgetAccountingV1 {
+                limit: 4_096,
+                observed:
+                    tracedecay_session_memory::session::SessionRetrievalBudgetObservationV1::Requested {
+                        units: 8_192,
+                    },
+            },
+        );
 
         assert_eq!(
             map_outcome(
-                SessionRetrievalServiceOutcome::BudgetExhausted { stage },
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting },
                 &request(),
                 UtcMicros(7),
             ),
             Err(TemporalRetrievalFailure::StructuralRefusal(
-                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage }
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage, accounting }
             ))
         );
     }

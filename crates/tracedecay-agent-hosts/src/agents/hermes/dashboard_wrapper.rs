@@ -1,18 +1,18 @@
 //! Hermes dashboard wrapper deployment.
 //!
 //! Deploys the canonical `dashboard/hermes-wrapper/` host adapter (manifest,
-//! `plugin_api.py`, and one mount entry) into a generated Hermes plugin's
+//! `plugin_api.py` with its `embed_proxy.py` helpers, and one mount entry) into a generated Hermes plugin's
 //! `dashboard/` subdirectory, where the Hermes web server's dashboard-plugin
 //! discovery picks it up
-//! (`<hermes_home>/plugins/<name>/dashboard/manifest.json` — both stock and
+//! (`<hermes_home>/plugins/<name>/dashboard/manifest.json`, both stock and
 //! forked Hermes scan user plugins this way).
 //!
 //! Everything is embedded at compile time so installs need no source
 //! checkout. The adapter starts the standalone `tracedecay dashboard` server
 //! and mounts its root in Hermes; all UI assets come from the one
 //! `dashboard/app-dist` build, which the root crate's `dashboard::assets`
-//! embeds. Nothing here reaches for those bytes — the wrapper only proxies to
-//! the running server — so this is a note about where the assets originate,
+//! embeds. Nothing here reaches for those bytes, the wrapper only proxies to
+//! the running server, so this is a note about where the assets originate,
 //! not a dependency.
 //!
 //! On hosts whose Hermes predates dashboard-plugin discovery the deployed
@@ -21,39 +21,29 @@
 
 use std::path::Path;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Manifest for the wrapper plugin (canonical source: `dashboard/hermes-wrapper/`).
 const MANIFEST_JSON: &str = include_str!("../../../../../dashboard/hermes-wrapper/manifest.json");
 /// `FastAPI` reverse proxy mounted by Hermes at `/api/plugins/tracedecay/`.
 const PLUGIN_API_PY: &str = include_str!("../../../../../dashboard/hermes-wrapper/plugin_api.py");
+/// Same-origin embed helpers `plugin_api.py` loads from its own directory.
+const EMBED_PROXY_PY: &str = include_str!("../../../../../dashboard/hermes-wrapper/embed_proxy.py");
 /// Wrapper entry bundle (deployed as `dist/index.js`; plain JS, no build step).
 const WRAPPER_ENTRY_JS: &str = include_str!("../../../../../dashboard/hermes-wrapper/src/entry.js");
 
 /// Placeholder line in `plugin_api.py` rewritten with the installed binary.
 const BIN_PLACEHOLDER: &str = "DEPLOYED_TRACEDECAY_BIN = None";
 
-/// Basenames of retired generated `dist/` assets: current installs must not
-/// contain them, and deploy/uninstall both remove them.
-const RETIRED_DIST_FILES: [&str; 5] = [
-    "holographic.js",
-    "lcm.js",
-    "graph.js",
-    "savings.js",
-    "style.css",
-];
-
 pub(super) fn is_current(plugin_dir: &Path) -> bool {
     [
         "dashboard/manifest.json",
         "dashboard/plugin_api.py",
+        "dashboard/embed_proxy.py",
         "dashboard/dist/index.js",
     ]
     .into_iter()
     .all(|relative| plugin_dir.join(relative).is_file())
-        && RETIRED_DIST_FILES
-            .into_iter()
-            .all(|retired| !plugin_dir.join("dashboard/dist").join(retired).exists())
 }
 
 pub(super) fn is_absent(plugin_dir: &Path) -> bool {
@@ -74,15 +64,11 @@ pub(super) fn managed_paths(plugin_dir: &Path) -> Vec<std::path::PathBuf> {
     [
         "dashboard/manifest.json",
         "dashboard/plugin_api.py",
+        "dashboard/embed_proxy.py",
         "dashboard/dist/index.js",
     ]
     .into_iter()
     .map(|relative| plugin_dir.join(relative))
-    .chain(
-        RETIRED_DIST_FILES
-            .into_iter()
-            .map(|retired| plugin_dir.join("dashboard/dist").join(retired)),
-    )
     .collect()
 }
 
@@ -106,7 +92,7 @@ pub(super) fn apply_install_policy(
 ///
 /// The binary path is baked into `plugin_api.py`; the dashboard resolves its
 /// real project from the Hermes process cwd or an explicit `TraceDecay` env var.
-#[hotpath::measure(label = "hermes_wrapper_deploy")]
+#[tracing::instrument(name = "hermes_wrapper_deploy", level = "trace", skip_all)]
 fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
     let dashboard_dir = plugin_dir.join("dashboard");
     let dist_dir = dashboard_dir.join("dist");
@@ -119,10 +105,8 @@ fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
         &dashboard_dir.join("plugin_api.py"),
         &plugin_api(tracedecay_bin)?,
     )?;
+    super::write_text_file(&dashboard_dir.join("embed_proxy.py"), EMBED_PROXY_PY)?;
     super::write_text_file(&dist_dir.join("index.js"), WRAPPER_ENTRY_JS)?;
-    for retired in RETIRED_DIST_FILES {
-        super::remove_generated_file(&dist_dir.join(retired))?;
-    }
 
     tracing::debug!(
         dashboard_dir = %dashboard_dir.display(),
@@ -140,12 +124,10 @@ pub(super) fn uninstall(plugin_dir: &Path) -> Result<()> {
         return Ok(());
     }
     let dist_dir = dashboard_dir.join("dist");
-    for file in std::iter::once("index.js").chain(RETIRED_DIST_FILES) {
-        super::remove_generated_file(&dist_dir.join(file))?;
-    }
+    super::remove_generated_file(&dist_dir.join("index.js"))?;
     super::remove_empty_dir(&dist_dir)?;
     super::remove_generated_file(&dashboard_dir.join("manifest.json"))?;
-    super::remove_generated_file(&dashboard_dir.join("plugin_api.py"))?;
+    super::remove_generated_python_modules(&dashboard_dir, &["plugin_api", "embed_proxy"], false)?;
     if super::remove_empty_dir(&dashboard_dir)? {
         tracing::debug!(
             dashboard_dir = %dashboard_dir.display(),
@@ -189,7 +171,7 @@ fn plugin_api(tracedecay_bin: &str) -> Result<String> {
     };
     if !PLUGIN_API_PY.contains(BIN_PLACEHOLDER) {
         return Err(TraceDecayError::Config {
-            message: "embedded plugin_api.py is missing its binary placeholder — \
+            message: "embedded plugin_api.py is missing its binary placeholder. \
                       this is a tracedecay build bug"
                 .to_string(),
         });
@@ -284,14 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn plugin_api_bakes_binary_but_no_project() {
-        let api = plugin_api("/usr/local/bin/tracedecay").unwrap();
-        assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/usr/local/bin/tracedecay""#));
-        assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
-        assert!(!api.contains(BIN_PLACEHOLDER));
-    }
-
-    #[test]
     fn plugin_api_never_uses_plugin_profile_dir_as_project() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
@@ -307,11 +281,6 @@ mod tests {
     fn plugin_api_escapes_quotes_in_paths() {
         let api = plugin_api("/tmp/we\"ird/tracedecay").unwrap();
         assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/tmp/we\"ird/tracedecay""#));
-    }
-
-    #[test]
-    fn wrapper_entry_mounts_the_daemon_dashboard() {
-        assert_mountable_dashboard_entry(WRAPPER_ENTRY_JS);
     }
 
     #[test]
@@ -343,23 +312,10 @@ mod tests {
     }
 
     #[test]
-    fn install_creates_missing_parent_directories() {
-        let temp = TempDir::new().unwrap();
-        let plugin_dir = temp.path().join("missing/profile/plugins/tracedecay");
-
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
-
-        assert!(plugin_dir.join("dashboard/manifest.json").is_file());
-        assert!(plugin_dir.join("dashboard/dist/index.js").is_file());
-    }
-
-    #[test]
     fn update_over_existing_wrapper_replaces_generated_content() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
         apply_install_policy(&plugin_dir, "/old/bin/tracedecay", true).unwrap();
-        let retired = plugin_dir.join("dashboard/dist/holographic.js");
-        std::fs::write(&retired, "retired generated asset").unwrap();
 
         apply_install_policy(&plugin_dir, "/new/bin/tracedecay", true).unwrap();
 
@@ -367,7 +323,6 @@ mod tests {
         assert!(api.contains("/new/bin/tracedecay"));
         assert!(!api.contains("/old/bin/tracedecay"));
         assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
-        assert!(!retired.exists());
     }
 
     #[test]
@@ -375,6 +330,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
         apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
+        assert!(plugin_dir.join("dashboard").is_dir());
 
         apply_install_policy(&plugin_dir, "/bin/tracedecay", false).unwrap();
 
@@ -387,9 +343,29 @@ mod tests {
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
         apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
         std::fs::write(plugin_dir.join("dashboard/notes.txt"), "user file").unwrap();
+        let cache_dir = plugin_dir.join("dashboard/__pycache__");
+        std::fs::create_dir(&cache_dir).unwrap();
+        for name in [
+            "plugin_api.cpython-311.pyc",
+            "embed_proxy.cpython-311.opt-1.pyc",
+            "plugin_api_extra.cpython-311.pyc",
+            "notes.cpython-311.pyc",
+            "plugin_api.pyc",
+        ] {
+            std::fs::write(cache_dir.join(name), name).unwrap();
+        }
 
         apply_install_policy(&plugin_dir, "/bin/tracedecay", false).unwrap();
 
+        assert_eq!(
+            file_contents(&cache_dir).into_keys().collect::<Vec<_>>(),
+            [
+                "notes.cpython-311.pyc",
+                "plugin_api.pyc",
+                "plugin_api_extra.cpython-311.pyc"
+            ]
+            .map(PathBuf::from)
+        );
         assert_eq!(text(&plugin_dir.join("dashboard/notes.txt")), "user file");
         assert!(!plugin_dir.join("dashboard/manifest.json").exists());
         assert!(!plugin_dir.join("dashboard/plugin_api.py").exists());

@@ -32,7 +32,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 }
                 super::ProjectRuntimeOwnerStateV1::Opening
                 | super::ProjectRuntimeOwnerStateV1::ReplacingSessions
-                | super::ProjectRuntimeOwnerStateV1::Recovering
                 | super::ProjectRuntimeOwnerStateV1::Retiring => None,
             };
             if let Some(owner) = memory
@@ -55,7 +54,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    #[hotpath::skip]
     pub async fn shutdown_memory_graph_reconciliation_tasks(
         &self,
     ) -> std::result::Result<(), String> {
@@ -87,7 +85,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    #[hotpath::skip]
     pub async fn retire_memory_graph_reconciliation_task(
         &self,
         shard_id: &StoreShardIdV1,
@@ -111,7 +108,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                     Some(
                         super::ProjectRuntimeOwnerStateV1::Opening
                         | super::ProjectRuntimeOwnerStateV1::ReplacingSessions
-                        | super::ProjectRuntimeOwnerStateV1::Recovering
                         | super::ProjectRuntimeOwnerStateV1::Retiring,
                     )
                     | None => None,

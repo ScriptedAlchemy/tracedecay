@@ -1,6 +1,4 @@
 use std::path::PathBuf;
-#[cfg(unix)]
-use std::process::Command;
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::PoisonError;
@@ -13,33 +11,45 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 use tracedecay_query::code_search;
+#[cfg(unix)]
+use tracedecay_runtime_core::native_runtime::NativeTask;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+#[cfg(unix)]
+use super::AutomationSchedulerHandle;
+#[cfg(unix)]
+use super::engine::DaemonEngine;
 #[cfg(unix)]
 use super::explicit_git_state;
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
-#[cfg(unix)]
-use super::{AutomationSchedulerHandle, DaemonEngine};
 use super::{
-    DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
+    DaemonClientIdentity, DaemonHandshake, DatabaseOwnerRegistry, ProjectRouteKey,
     ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
     store_owner_key_from_paths,
 };
+use crate::test_support::git::git;
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 
 mod bootstrap;
 mod code_index_hydration;
+mod feedback_impact;
 mod handshake;
 mod invocation_ownership;
 mod lifecycle;
 mod logging;
+mod multi_root_execute_mcp;
 mod multi_root_journey;
+mod multi_root_scope_set_cas_mcp;
 mod ownership;
+#[cfg(unix)]
+mod profile_retained;
 mod remote_project_deletion;
-mod remote_project_recovery;
 mod replay;
 mod restart_proxy;
 mod rmcp_route;
+mod route_discovery;
+#[cfg(unix)]
 mod runtime_identity;
 mod scheduler_config;
 mod scheduler_shutdown;
@@ -48,7 +58,6 @@ mod socket;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ObservedMcpRoute {
     Rmcp,
-    Legacy,
 }
 
 fn observed_mcp_routes()
@@ -59,10 +68,22 @@ fn observed_mcp_routes()
     ROUTES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+fn observed_first_request_replays()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> {
+    static REPLAYS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    > = std::sync::OnceLock::new();
+    REPLAYS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 fn register_mcp_route_observer(client_instance_id: &str) {
     observed_mcp_routes()
         .lock()
         .expect("route observer")
+        .insert(client_instance_id.to_owned(), Vec::new());
+    observed_first_request_replays()
+        .lock()
+        .expect("first request replay observer")
         .insert(client_instance_id.to_owned(), Vec::new());
 }
 
@@ -76,6 +97,25 @@ pub(super) fn record_mcp_route(client_instance_id: &str, route: ObservedMcpRoute
     }
 }
 
+pub(super) fn record_first_request_replay(client_instance_id: &str, raw: &str) {
+    if let Some(replays) = observed_first_request_replays()
+        .lock()
+        .expect("first request replay observer")
+        .get_mut(client_instance_id)
+    {
+        replays.push(raw.to_owned());
+    }
+}
+
+fn first_request_replays(client_instance_id: &str) -> Vec<String> {
+    observed_first_request_replays()
+        .lock()
+        .expect("first request replay observer")
+        .get(client_instance_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
 async fn wait_for_mcp_routes(client_instance_id: &str, expected: &[ObservedMcpRoute]) {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
@@ -85,7 +125,12 @@ async fn wait_for_mcp_routes(client_instance_id: &str, expected: &[ObservedMcpRo
                 .get(client_instance_id)
                 .cloned()
                 .unwrap_or_default();
-            if observed.len() >= expected.len() {
+            let replay_count = observed_first_request_replays()
+                .lock()
+                .expect("first request replay observer")
+                .get(client_instance_id)
+                .map_or(0, Vec::len);
+            if observed.len() >= expected.len() && replay_count >= expected.len() {
                 assert_eq!(observed, expected);
                 return;
             }
@@ -100,23 +145,29 @@ fn test_client_identity() -> DaemonClientIdentity {
     test_client_identity_for(PathBuf::from("/profiles/client"))
 }
 
+#[test]
+fn authenticated_first_request_preserves_raw_and_optional_parsed_view() {
+    let raw =
+        " \t{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"initialize\",\"params\":{}}\r\n".to_owned();
+
+    let request = super::AuthenticatedFirstRequest::new(raw.clone());
+
+    assert_eq!(request.raw(), raw);
+    assert_eq!(
+        request.parsed().map(|request| request.method.as_str()),
+        Some("initialize")
+    );
+    let malformed = super::AuthenticatedFirstRequest::new("not json-rpc".to_owned());
+    assert!(malformed.parsed().is_none());
+}
+
 #[cfg(unix)]
 #[test]
 fn multi_root_git_generation_reads_each_explicit_root() {
-    fn init(root: &std::path::Path) {
-        let status = Command::new("git")
-            .arg("init")
-            .arg("--quiet")
-            .arg(root)
-            .status()
-            .expect("git init");
-        assert!(status.success());
-    }
-
     let first = TempDir::new().expect("first root");
     let second = TempDir::new().expect("second root");
-    init(first.path());
-    init(second.path());
+    git(first.path(), &["init", "--quiet"]);
+    git(second.path(), &["init", "--quiet"]);
     std::fs::write(first.path().join("first.txt"), "first").expect("first source");
     std::fs::write(second.path().join("second.txt"), "second").expect("second source");
 
@@ -137,7 +188,7 @@ fn multi_root_git_generation_reads_each_explicit_root() {
 
 #[test]
 fn multi_root_families_refuse_cross_family_fallback() {
-    use tracedecay_application::MultiRootOperationV1;
+    use tracedecay_contracts::MultiRootOperationV1;
 
     let git = MultiRootOperationV1::Git { request: json!({}) };
     assert!(multi_root_family_allows(
@@ -176,23 +227,28 @@ fn prepare_test_profile_root(profile_root: &std::path::Path) {
     }
 }
 
-#[test]
-fn daemon_test_transcript_source_home_is_profile_parent() {
-    let isolated_home = TempDir::new().expect("isolated home");
-    let profile_root = isolated_home.path().join("profile");
-
-    assert_eq!(
-        super::daemon_transcript_source_home(&profile_root).as_deref(),
-        Some(isolated_home.path())
-    );
-}
-
 fn test_store_administration_for_profile(profile_root: &std::path::Path) -> StoreAdministration {
     prepare_test_profile_root(profile_root);
     let profile_identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
             .expect("load test profile identity");
-    StoreAdministration::default().with_profile_identity(profile_identity)
+    StoreAdministration::default()
+        .with_owner_profile(tracedecay_runtime_core::config::ProfileRoot::new(
+            profile_root,
+        ))
+        .with_profile_identity(profile_identity)
+}
+
+/// Finishes the profile's cold session-runtime open before a client connects.
+///
+/// The handshake's profile binding answers `project_warming` when that open
+/// outlasts its 10 s liveness bound, which a loaded suite run can reach. A
+/// test that is not about warming waits for the open here instead.
+async fn prewarm_test_profile_runtime(store_administration: &StoreAdministration) {
+    store_administration
+        .registered_profile_database()
+        .await
+        .expect("prewarm exact test profile runtime");
 }
 
 #[cfg(unix)]
@@ -202,12 +258,16 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     // that drives the engine without ever building a handshake (for example
     // the unparseable-handshake refusals) would otherwise depend on some other
     // fixture in the same process registering it first.
-    crate::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
     prepare_test_profile_root(profile_root);
     let profile_identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
             .expect("load test profile identity");
-    let engine = DaemonEngine::default().with_profile_identity(profile_identity);
+    let engine = DaemonEngine::default()
+        .with_owner_profile(tracedecay_runtime_core::config::ProfileRoot::new(
+            profile_root,
+        ))
+        .with_profile_identity(profile_identity);
     // Daemon bootstrap installs the profile worker plan before it publishes any
     // transport endpoint (`bootstrap::install_profile_worker_plan`), and project
     // open refuses outright without it. A freshly created test profile always
@@ -219,57 +279,15 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     engine
         .invocation
         .install_worker_selection(
+            &engine.store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install test daemon profile worker plan");
     engine
         .store_administration
-        .install_remote_recovery_project_lifecycle(
-            engine.invocation.clone(),
-            Arc::clone(&engine.project_open_gates),
-        )
+        .install_remote_recovery_project_lifecycle()
         .unwrap();
     engine
-}
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
-
-/// Pins the codex app-server launcher to a path that cannot exist so any
-/// automation tick reached during the test fails with the typed spawn error
-/// instead of invoking the operator's real `codex` binary. Without this,
-/// a tick spawns a live external process whose runtime depends on a real
-/// backend, and a harness kill (e.g. nextest SIGTERM) orphans that process
-/// group because in-process cleanup never runs.
-fn isolate_codex_app_server_binary(root: &std::path::Path) -> EnvVarGuard {
-    EnvVarGuard::set(
-        "TRACEDECAY_CODEX_BIN",
-        root.join("missing-codex-app-server-binary"),
-    )
 }
 
 fn enter_test_daemon_database_scope(
@@ -297,13 +315,16 @@ async fn initialize_test_project(
         &client_identity.profile_root,
         "daemon test fixture initialization",
     );
+    // The composition root registers the daemon's runtime ports before any
+    // project opens; this fixture stands in for that root.
+    crate::register_runtime_ports().expect("runtime port registration");
     // Heap-allocate the graph-init composition so every test awaiting this
     // fixture keeps a bounded resident frame (perf-profile layouts overflow
     // the test stack when the mega-future is inlined).
     let project = Box::pin(
-        crate::tracedecay::TraceDecay::init_with_exclusive_maintenance(
+        tracedecay_project::project::TraceDecay::init_with_exclusive_maintenance(
             project_root,
-            crate::tracedecay::TraceDecayOpenOptions {
+            tracedecay_project::project::TraceDecayOpenOptions {
                 profile_root: Some(client_identity.profile_root.clone()),
                 global_db_path: Some(client_identity.global_db_path.clone()),
             },
@@ -320,7 +341,8 @@ async fn initialize_test_project(
 fn test_handshake_defaults() -> DaemonHandshake {
     // Test processes only ever register the fixture product runtime, so every
     // handshake in the suite advertises one identical fixture version.
-    let build_version = crate::product_runtime::register_fixture_product_runtime().build_version();
+    let build_version =
+        tracedecay_project::product_runtime::register_fixture_product_runtime().build_version();
     DaemonHandshake {
         project_path: None,
         scope_prefix: None,
@@ -332,17 +354,136 @@ fn test_handshake_defaults() -> DaemonHandshake {
         client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     }
+}
+
+/// Daemon credential the in-process socket fixtures serve and present.
+const TEST_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+/// Serves one socket client through the production authenticated entry.
+#[cfg(unix)]
+async fn serve_authenticated_test_client(
+    stream: tokio::net::UnixStream,
+    engine: DaemonEngine,
+) -> tracedecay_domain::errors::Result<()> {
+    Box::pin(super::serve_authenticated_socket_client_with_class(
+        tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+            .expect("daemon end of the test socket"),
+        engine,
+        TEST_AUTH_TOKEN.to_owned(),
+        super::DaemonClientAdmissionClass::General,
+    ))
+    .await
+}
+
+/// Dials a portable server fixture. Like the Unix fixtures' socket pairs, these
+/// server tests drive the daemon from a plain Tokio peer.
+pub(super) async fn connect_loopback_test_peer(
+    endpoint: &tracedecay_daemon_protocol::DaemonEndpoint,
+) -> tokio::net::TcpStream {
+    let tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) = endpoint else {
+        panic!("portable server fixtures bind loopback, got {endpoint}");
+    };
+    tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect loopback test peer")
+}
+
+/// Writes the auth preface an authenticated client sends before its handshake.
+async fn write_test_auth_preface(writer: &mut (impl tokio::io::AsyncWrite + Unpin)) {
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TEST_AUTH_TOKEN)
+        .to_line()
+        .expect("test auth preface");
+    writer
+        .write_all(preface.as_bytes())
+        .await
+        .expect("write auth preface");
+    writer.write_all(b"\n").await.expect("auth preface newline");
+}
+
+/// One in-process client served by `engine`, past the auth preface.
+#[cfg(unix)]
+type AuthenticatedTestClient = (
+    tokio::net::unix::OwnedReadHalf,
+    tokio::net::unix::OwnedWriteHalf,
+    JoinHandle<tracedecay_domain::errors::Result<()>>,
+);
+
+/// Connects a socket client to `engine` and writes its auth preface.
+#[cfg(unix)]
+async fn connect_authenticated_test_client(engine: DaemonEngine) -> AuthenticatedTestClient {
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(Box::pin(serve_authenticated_test_client(server, engine)));
+    let (reader, mut writer) = client.into_split();
+    write_test_auth_preface(&mut writer).await;
+    (reader, writer, server_task)
+}
+
+/// Connects an authenticated socket client to `engine` and writes `handshake`.
+#[cfg(unix)]
+async fn handshake_authenticated_test_client(
+    engine: DaemonEngine,
+    handshake: &DaemonHandshake,
+) -> AuthenticatedTestClient {
+    let (reader, mut writer, server_task) = connect_authenticated_test_client(engine).await;
+    writer
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    (reader, writer, server_task)
+}
+
+/// Publishes the authority record beside `socket` that clients resolve it
+/// through. Hold the authority for as long as the socket should be served.
+#[cfg(unix)]
+pub(super) fn seed_socket_authority(
+    socket: &std::path::Path,
+) -> tracedecay_daemon_identity::authority::DaemonAuthority {
+    tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        socket.parent().expect("socket parent"),
+        &tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.to_path_buf()),
+        "test",
+    )
+    .expect("seed daemon authority")
+}
+
+/// Reads what a fake daemon receives first: the auth preface carrying
+/// `token`, then the handshake.
+#[cfg(unix)]
+async fn read_authenticated_handshake<R>(
+    lines: &mut tokio::io::Lines<R>,
+    token: &str,
+) -> DaemonHandshake
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let preface = lines
+        .next_line()
+        .await
+        .expect("read auth preface")
+        .expect("auth preface line");
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(preface.trim())
+        .expect("auth preface");
+    assert!(
+        preface.authenticate(token),
+        "client must present the current daemon token"
+    );
+    let handshake = lines
+        .next_line()
+        .await
+        .expect("read handshake")
+        .expect("handshake line");
+    DaemonHandshake::from_line(&handshake).expect("parse handshake")
 }
 
 #[test]
 fn search_request_controls_distinguish_cancellation_and_timeout() {
-    let cancellation =
-        tracedecay_application::CancellationSignal::active("cancellation.search-test")
-            .expect("cancellation");
+    let cancellation = tracedecay_contracts::CancellationSignal::active("cancellation.search-test")
+        .expect("cancellation");
     let deadline =
-        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(10)).expect("deadline");
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(10)).expect("deadline");
 
     assert_eq!(
         super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 9),
@@ -360,22 +501,11 @@ fn search_request_controls_distinguish_cancellation_and_timeout() {
 }
 
 #[test]
-fn search_scope_resolution_failure_is_authority_unavailable() {
-    assert!(matches!(
-        super::code_index_scope_unavailable(),
-        code_search::CodeIndexSearchOutcomeV1::Unavailable(
-            code_search::CodeIndexSearchUnavailableV1 {
-                reason: code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                ..
-            }
-        )
-    ));
-}
-
-#[test]
 fn an_unservable_search_reports_every_lane_down() {
     let code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) =
-        super::code_index_scope_unavailable()
+        super::code_index_scope_unavailable(
+            tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeUnavailableV1::AuthorityUnavailable,
+        )
     else {
         panic!("an unresolvable scope has no servable lane");
     };
@@ -395,44 +525,62 @@ fn an_unservable_search_reports_every_lane_down() {
 }
 
 #[cfg(unix)]
-fn test_automation_scheduler_handle(task: JoinHandle<()>) -> AutomationSchedulerHandle {
+fn test_automation_scheduler_handle(task: NativeTask<()>) -> AutomationSchedulerHandle {
     AutomationSchedulerHandle::for_test(task)
+}
+
+/// Reports whether a native test task's future has finished or been dropped.
+#[cfg(unix)]
+struct NativeTaskProbe(std::sync::Weak<()>);
+
+#[cfg(unix)]
+impl NativeTaskProbe {
+    fn is_finished(&self) -> bool {
+        self.0.strong_count() == 0
+    }
+}
+
+#[cfg(unix)]
+fn probed_native_test_task(
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) -> (NativeTask<()>, NativeTaskProbe) {
+    let alive = Arc::new(());
+    let probe = NativeTaskProbe(Arc::downgrade(&alive));
+    let task = NativeTask::spawn(async move {
+        work.await;
+        drop(alive);
+    })
+    .expect("native test task");
+    (task, probe)
 }
 
 #[cfg(unix)]
 async fn wait_for_automation_scheduler_state(
     engine: &DaemonEngine,
-    deadline: tokio::time::Instant,
-    description: &str,
     mut matches: impl FnMut(
         &std::collections::HashMap<ProjectServerKey, AutomationSchedulerHandle>,
     ) -> bool,
 ) {
-    let message = format!("timed out waiting for {description}");
-    tokio::time::timeout(remaining_test_budget(deadline, &message), async {
-        loop {
-            let changed = engine.automation_scheduler_state_changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            let schedulers = engine
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await;
-            if matches(&schedulers) {
-                return;
-            }
-            drop(schedulers);
-            changed.await;
+    loop {
+        let changed = engine.automation_scheduler_state_changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let schedulers = engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await;
+        if matches(&schedulers) {
+            return;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{message}"));
+        drop(schedulers);
+        changed.await;
+    }
 }
 
 #[cfg(unix)]
 async fn wait_for_finished_task(
-    task: &JoinHandle<()>,
+    task: &NativeTask<()>,
     deadline: tokio::time::Instant,
     description: &str,
 ) {
@@ -473,6 +621,44 @@ impl Drop for NoncooperativeTaskRelease {
     fn drop(&mut self) {
         self.release();
     }
+}
+
+/// A native owner stuck in synchronous work until released: an abort cannot
+/// drop it before it yields. It runs on its own one-worker runtime so the
+/// blocked worker is never one the process runtime needs.
+#[cfg(unix)]
+fn spawn_noncooperative_native_test_task() -> (
+    NativeTask<()>,
+    NativeTaskProbe,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Receiver<()>,
+    NoncooperativeTaskRelease,
+) {
+    let release = NoncooperativeTaskRelease {
+        state: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+    };
+    let task_release = release.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    let runtime: &'static tracedecay_runtime_core::native_runtime::Runtime = Box::leak(Box::new(
+        tracedecay_runtime_core::native_runtime::RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("dedicated native runtime"),
+    ));
+    let (task, probe) = runtime.block_on(async move {
+        probed_native_test_task(async move {
+            let _ = started_tx.send(());
+            let (released, changed) = &*task_release.state;
+            let mut ready = released.lock().unwrap_or_else(PoisonError::into_inner);
+            while !*ready {
+                ready = changed.wait(ready).unwrap_or_else(PoisonError::into_inner);
+            }
+            drop(ready);
+            let _ = completed_tx.send(());
+        })
+    });
+    (task, probe, started_rx, completed_rx, release)
 }
 
 #[cfg(unix)]
@@ -524,27 +710,57 @@ async fn apply_project_automation_patch_via_surface(
     handshake: &DaemonHandshake,
     patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
 ) -> Arc<crate::mcp::McpServer> {
+    apply_project_setting_via_surface(engine, handshake, |snapshot| {
+        let configured =
+            tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+                snapshot,
+            )
+            .expect("decode pinned automation configuration");
+        let desired = tracedecay_automation_runtime::automation::config::effective_config(
+            &configured,
+            Some(&patch),
+        )
+        .expect("apply automation configuration patch");
+        (
+            tracedecay_domain::configuration::SettingKey::new(
+                tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
+            )
+            .expect("automation setting key"),
+            tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(Box::new(
+                desired,
+            )),
+        )
+    })
+    .await
+}
+
+/// Writes one project-layer setting through the production configuration
+/// surface (the same `ConfigurationBatch` path the CLI and MCP tools take),
+/// pinned to the revision the project currently serves. `setting` derives the
+/// key and value from that revision's snapshot.
+#[cfg(unix)]
+async fn apply_project_setting_via_surface(
+    engine: &DaemonEngine,
+    handshake: &DaemonHandshake,
+    setting: impl FnOnce(
+        &tracedecay_domain::configuration::ConfigurationSnapshotV1,
+    ) -> (
+        tracedecay_domain::configuration::SettingKey,
+        tracedecay_domain::configuration::ConfigurationValueV1,
+    ),
+) -> Arc<crate::mcp::McpServer> {
     let server = engine
         .project_server(handshake)
         .await
-        .expect("open project server before configuring automation");
+        .expect("open project server before writing configuration");
     let graph = server.cg().await;
     let current = graph
         .configuration_runtime()
         .client()
         .current()
         .await
-        .expect("read pinned automation configuration");
-    let configured =
-        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-            &current.snapshot,
-        )
-        .expect("decode pinned automation configuration");
-    let desired = tracedecay_automation_runtime::automation::config::effective_config(
-        &configured,
-        Some(&patch),
-    )
-    .expect("apply automation configuration patch");
+        .expect("read pinned project configuration");
+    let (key, value) = setting(current.snapshot());
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),
@@ -562,80 +778,74 @@ async fn apply_project_automation_patch_via_surface(
     );
     let operation = ApplicationSurfaceOperation::ConfigurationBatch;
     let application_operation =
-        tracedecay_application::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
         .deadline()
         .maximum_millis();
-    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
-    let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+    let observed_at = tracedecay_contracts::now_micros();
+    let deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
     .expect("configuration deadline");
-    let request_id = tracedecay_application::request_identity::mint_global_request_id(
-        tracedecay_application::request_identity::GlobalRequestSurface::Cli,
+    let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+        tracedecay_contracts::request_identity::GlobalRequestSurface::Cli,
     )
     .expect("surface request id");
     let idempotency_key = tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
-        format!("daemon-test-automation-{}", request_id.as_str()),
+        format!("daemon-test-setting-{}", request_id.as_str()),
     )
     .expect("configuration idempotency key");
-    let key = tracedecay_domain::configuration::SettingKey::new(
-        tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
-    )
-    .expect("automation setting key");
-    let request = crate::application_surface::ApplicationSurfaceRequest::Configuration(
-        tracedecay_application::ConfigurationWireRequestV1::Batch(
-            tracedecay_application::ConfigurationBatchRequestV1 {
+    let request = tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
+        tracedecay_contracts::ConfigurationWireRequestV1::Batch(
+            tracedecay_contracts::ConfigurationBatchRequestV1 {
                 mutations: vec![
-                    tracedecay_application::ConfigurationDirectMutationRequestV1::Set {
+                    tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
                         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
                             project_id: target.project_id,
                         },
                         key,
-                        value: Box::new(
-                            tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(
-                                Box::new(desired),
-                            ),
-                        ),
+                        value: Box::new(value),
                     },
                 ],
-                expected_revision: current.revision_id,
+                expected_revision: current.revision_id().clone(),
                 idempotency_key,
             },
         ),
     );
-    let cancellation = tracedecay_application::CancellationSignal::active(format!(
+    let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
         "cancellation.surface.{}",
         request_id.as_str()
     ))
     .expect("surface cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             tracedecay_tool_catalog::BindingSurface::Cli,
             operation,
             request_id,
             request,
-            tracedecay_application::PageRequest::first(10).expect("surface page"),
+            tracedecay_contracts::PageRequest::first(10).expect("surface page"),
             Some(deadline),
             cancellation,
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
-    Box::pin(crate::application_surface::execute_application_surface(
-        operation,
-        dispatched,
-        Some(&executor),
-    ))
+    Box::pin(
+        tracedecay_daemon_service::application_surface::execute_application_surface(
+            operation,
+            dispatched,
+            Some(&executor),
+        ),
+    )
     .await
     .expect("configuration batch application invocation")
     .result
-    .expect("automation configuration effect");
+    .expect("configuration setting effect");
     server
 }
 

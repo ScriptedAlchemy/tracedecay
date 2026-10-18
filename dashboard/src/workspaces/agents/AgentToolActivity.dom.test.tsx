@@ -30,7 +30,7 @@ function read(overrides: Partial<ToolActivityRead> = {}): ToolActivityRead {
       { agent: 'Codex', tool_name: 'tracedecay_grep', session_id: 's1' },
       { agent: 'Codex', tool_name: 'tracedecay_grep', session_id: 's1' },
       { agent: 'Codex', tool_name: 'Bash', session_id: 's2' },
-      { agent: 'Claude', tool_name: 'tracedecay_body', session_id: 's3' },
+      { agent: 'Claude', tool_name: 'tracedecay_source_body', session_id: 's3' },
     ],
     hook_window: { truncated: true },
     ...overrides,

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestId,
 };
@@ -30,35 +30,17 @@ struct FakeStore {
 
 impl FakeStore {
     fn calls(&self) -> Vec<LcmAuthorityOperation> {
-        self.calls
-            .lock()
-            .map(|calls| calls.clone())
-            .unwrap_or_default()
+        self.calls.lock().map_or_default(|calls| calls.clone())
     }
 
     fn compact_requests(&self) -> Vec<LcmCompressionRequest> {
         self.compact_requests
             .lock()
-            .map(|requests| requests.clone())
-            .unwrap_or_default()
+            .map_or_default(|requests| requests.clone())
     }
 }
 
 impl LcmDaemonStore for FakeStore {
-    fn ingest(&self, _request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
-        if let Ok(mut calls) = self.calls.lock() {
-            calls.push(LcmAuthorityOperation::Ingest);
-        }
-        Box::pin(async {
-            Ok(LcmPreflightResponse {
-                status: "ok".to_owned(),
-                should_compress: false,
-                reason: "below_threshold".to_owned(),
-                replay_messages: Vec::new(),
-            })
-        })
-    }
-
     fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(LcmAuthorityOperation::Compact);
@@ -76,7 +58,6 @@ impl LcmDaemonStore for FakeStore {
                 replay_token_estimate: 0,
                 replay_over_budget: false,
                 compression_attempts: 0,
-                fallback_used: false,
                 context_recovery_hint: None,
                 retry_status: None,
                 relation_projection_status:
@@ -216,37 +197,10 @@ fn request_context_for_target(
 
 fn default_target(operation: LcmAuthorityOperation) -> LcmAuthorityTarget {
     match operation {
-        LcmAuthorityOperation::Ingest => target("hermes", Some("session.lcm-test")),
         LcmAuthorityOperation::Compact => target("cursor", Some("session.lcm-test")),
         LcmAuthorityOperation::Status => target("claude", None),
         LcmAuthorityOperation::Doctor => LcmAuthorityTarget::Store,
     }
-}
-
-fn hermes_ingest(messages: Vec<serde_json::Value>) -> LcmTranscriptIngestCommand {
-    let mut preflight = preflight("hermes");
-    preflight.messages = messages;
-    let event_digest = canonical_sha256(&(
-        &preflight.provider,
-        &preflight.session_id,
-        &preflight.messages,
-    ))
-    .unwrap();
-    LcmTranscriptIngestCommand {
-        preflight,
-        protocol_revision: "hermes.turn-completed.v1".to_owned(),
-        event_digest,
-    }
-}
-
-#[test]
-fn pressure_compression_uses_the_daemon_summarizer_route() {
-    let request = pressure_compression_request(preflight("cursor"));
-    assert_eq!(request.summarizer, LcmSummarizerMode::HermesAuxiliary);
-    assert!(
-        request.messages.is_empty(),
-        "daemon compaction must compress already-ingested canonical content only"
-    );
 }
 
 fn preflight(provider: &str) -> LcmPreflightRequest {
@@ -303,67 +257,6 @@ async fn denied_command_never_reaches_daemon_store() {
         .await;
 
     assert_eq!(response.outcome, LcmAuthorityOutcome::Denied);
-    assert!(store.calls().is_empty());
-}
-
-#[tokio::test]
-async fn authentic_hermes_turn_is_committed_through_daemon_store() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
-    let command = hermes_ingest(vec![serde_json::json!({
-        "id": "message.hermes.1",
-        "role": "user",
-        "content": "authentic callback content"
-    })]);
-    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Ingest, true);
-
-    let response = authority
-        .execute(LcmAuthorityInvocation {
-            context,
-            binding,
-            target: target("hermes", Some("session.lcm-test")),
-            cancellation,
-            request: LcmAuthorityRequest::Ingest(command),
-        })
-        .await;
-
-    assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
-    assert!(response.receipt.committed_state.is_some());
-    assert!(matches!(
-        response.payload,
-        Some(LcmAuthorityPayload::Ingest(_))
-    ));
-    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Ingest]);
-}
-
-#[tokio::test]
-async fn altered_hermes_turn_is_rejected_before_store_effect() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
-    let mut command = hermes_ingest(vec![serde_json::json!({
-        "id": "message.hermes.1",
-        "role": "user",
-        "content": "original callback content"
-    })]);
-    command.preflight.messages[0]["content"] = serde_json::json!("altered");
-    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Ingest, true);
-
-    let response = authority
-        .execute(LcmAuthorityInvocation {
-            context,
-            binding,
-            target: target("hermes", Some("session.lcm-test")),
-            cancellation,
-            request: LcmAuthorityRequest::Ingest(command),
-        })
-        .await;
-
-    assert_eq!(
-        response.outcome,
-        LcmAuthorityOutcome::Unavailable {
-            reason: LcmAuthorityUnavailableReason::HostProtocolUnavailable
-        }
-    );
     assert!(store.calls().is_empty());
 }
 
@@ -513,7 +406,7 @@ async fn pressure_only_event_compacts_daemon_owned_without_caller_payload() {
             binding,
             target: target("cursor", Some("session.lcm-test")),
             cancellation,
-            request: LcmAuthorityRequest::Compact(command),
+            request: LcmAuthorityRequest::Compact(Box::new(command)),
         })
         .await;
 
@@ -560,7 +453,7 @@ async fn pressure_protocol_provider_mismatch_is_typed_before_ingest() {
             binding,
             target: target("cursor", Some("session.lcm-test")),
             cancellation,
-            request: LcmAuthorityRequest::Compact(command),
+            request: LcmAuthorityRequest::Compact(Box::new(command)),
         })
         .await;
 
@@ -572,65 +465,6 @@ async fn pressure_protocol_provider_mismatch_is_typed_before_ingest() {
     );
     assert!(store.calls().is_empty());
     assert!(response.receipt.committed_state.is_none());
-}
-
-#[tokio::test]
-async fn registered_authority_restart_reads_committed_hermes_turn() {
-    let directory = tempfile::tempdir().unwrap();
-    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
-        directory.path(),
-    )
-    .await
-    .unwrap();
-    let first = DaemonLcmAuthority::registered(runtime.profile_database_arc());
-    let command = hermes_ingest(vec![serde_json::json!({
-        "id": "message.restart.1",
-        "role": "user",
-        "content": "durable session content"
-    })]);
-    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Ingest, true);
-
-    let written = first
-        .execute(LcmAuthorityInvocation {
-            context,
-            binding,
-            target: target("hermes", Some("session.lcm-test")),
-            cancellation,
-            request: LcmAuthorityRequest::Ingest(command),
-        })
-        .await;
-
-    assert_eq!(written.outcome, LcmAuthorityOutcome::Ready);
-    assert!(written.receipt.committed_state.is_some());
-    drop(first);
-
-    let remounted = runtime.remount_profile_database_for_test().await.unwrap();
-    let restarted = DaemonLcmAuthority::registered(remounted);
-    let (context, binding, cancellation) = request_context_for_target(
-        LcmAuthorityOperation::Status,
-        true,
-        UtcMicros(i64::MAX - 1),
-        target("hermes", Some("session.lcm-test")),
-    );
-    let read = restarted
-        .execute(LcmAuthorityInvocation {
-            context,
-            binding,
-            target: target("hermes", Some("session.lcm-test")),
-            cancellation,
-            request: LcmAuthorityRequest::Status(LcmStatusQuery {
-                provider: "hermes".to_owned(),
-                session_id: Some("session.lcm-test".to_owned()),
-                deep: false,
-            }),
-        })
-        .await;
-
-    assert_eq!(read.outcome, LcmAuthorityOutcome::Ready);
-    let Some(LcmAuthorityPayload::Status(status)) = read.payload else {
-        panic!("restarted authority must return typed LCM status");
-    };
-    assert_eq!(status.raw_message_count, 1);
 }
 
 #[tokio::test]
@@ -656,7 +490,7 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
             binding,
             target: target("cursor", Some("session.lcm-test")),
             cancellation,
-            request: LcmAuthorityRequest::Compact(LcmCompactionCommand {
+            request: LcmAuthorityRequest::Compact(Box::new(LcmCompactionCommand {
                 preflight: request,
                 evidence: LcmCompressionEvidence::PressureOnly {
                     protocol: LcmHostProtocol::CursorPreCompact {
@@ -664,7 +498,7 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
                         event_digest: canonical_sha256(&"read-only-pressure").unwrap(),
                     },
                 },
-            }),
+            })),
         })
         .await;
 
@@ -675,10 +509,9 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
     assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
     for table in [
         "lcm_raw_messages",
-        "lcm_summary_nodes",
-        "lcm_summary_sources",
         "lcm_lifecycle_state",
         "session_summary_nodes",
+        "session_summary_sources",
     ] {
         assert_eq!(
             table_row_count(&database, table).await,
@@ -786,6 +619,8 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
         }))
         .await
         .unwrap();
+    assert_eq!(first.outcome, LcmAuthorityOutcome::Ready);
+    assert_eq!(second.outcome, LcmAuthorityOutcome::Ready);
     assert_ne!(first.receipt.grant_digest, second.receipt.grant_digest);
 
     let project_identity = ResolvedSessionIdentity::for_project(

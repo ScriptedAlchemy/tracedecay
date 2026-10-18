@@ -5,6 +5,7 @@
 //! explicitly, including the `multi_root_family_allows` kill-switch.
 
 use std::sync::Arc;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use serde_json::Value;
 use tracedecay_code_index_runtime::code_index_scheduler;
@@ -14,20 +15,25 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
-use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+use tracedecay_application::work::{
+    WorkFederatedQueryAuthorityFutureV1, WorkFederatedQueryAuthorityPortV1,
+};
 use tracedecay_daemon_service::{
     DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar, DaemonInvocationOutcome,
     DaemonInvocationProblem, DaemonInvocationService, DaemonLspOwnerRegistrar,
-    DaemonPrimitiveRuntimeRegistrar, DaemonRetainedRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrar, DaemonWorkRuntimeRegistrar, ProjectRuntimeRequestLeaseV1,
-    ProjectRuntimeRootQuiescenceV1, WorkApplicationInvocationV1,
+    DaemonPrimitiveRuntimeRegistrar, DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
+    ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1, WorkApplicationInvocationV1,
 };
+use tracedecay_domain::CursorBindingMismatchV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_store_runtime::ShutdownStatus;
 
 use super::*;
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod project_invocation;
 
@@ -43,23 +49,22 @@ pub(crate) struct DaemonInvocationState {
     pub(super) github_credential_lifecycle:
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
-    work_federated_query_authority:
-        Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1>,
-    semantic_projection_scheduler:
-        tracedecay_usecases::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
+    work_federated_query_authority: Arc<dyn WorkFederatedQueryAuthorityPortV1>,
 }
 
 impl Default for DaemonInvocationState {
     fn default() -> Self {
-        Self::with_progress_producer_incarnation(1)
+        Self::with_progress_producer_incarnation(1, None)
     }
 }
 
 impl DaemonInvocationState {
     /// Construct one daemon-generation invocation state whose dashboard
     /// progress is ordered by the existing durable daemon-authority epoch.
-    pub(super) fn with_progress_producer_incarnation(producer_incarnation: u64) -> Self {
+    pub(super) fn with_progress_producer_incarnation(
+        producer_incarnation: u64,
+        owner_home: Option<&std::path::Path>,
+    ) -> Self {
         let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
             detected_process_resident_memory_limit_v1(),
         ));
@@ -69,25 +74,18 @@ impl DaemonInvocationState {
             producer_incarnation,
         );
         let service =
-            DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
-        let query_authority_provider =
-            query_authority_provider::DaemonQueryAuthorityProviderV1::default();
+            DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone())
+                .with_owner_home(owner_home.map(std::path::Path::to_path_buf));
         let work_federated_query_authority = Arc::new(DaemonWorkFederatedQueryAuthorityV1 {
             schedulers: code_index_schedulers.clone(),
-            provider: query_authority_provider.clone(),
         });
         Self {
-            lsp_session_registry: Arc::new(tokio::sync::Mutex::new(
-                LspSessionRegistry::default(),
-            )),
+            lsp_session_registry: Arc::new(tokio::sync::Mutex::new(LspSessionRegistry::default())),
             service,
             github_credential_lifecycle:
                 github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
             code_index_schedulers,
-            query_authority_provider,
             work_federated_query_authority,
-            semantic_projection_scheduler:
-                tracedecay_usecases::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1::default(),
         }
     }
 
@@ -97,39 +95,63 @@ impl DaemonInvocationState {
 
     pub(in crate::daemon) fn github_stack_coordinator(
         &self,
-    ) -> Arc<tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
+    ) -> Arc<tracedecay_application::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
         self.service.github_stack_coordinator()
     }
 
     /// Mount the profile-owned background-worker plan before any projectless
     /// session or host-admission work can start. The exact `ProfileSessions`
     /// shard is the persisted user-profile authority; project configuration
-    /// must never win this process-wide installation by opening first.
-    #[hotpath::skip]
-    pub(crate) async fn install_profile_worker_plan(
+    /// must never win this process-wide installation by opening first. The
+    /// returned receipt carries the one process background CPU authority the
+    /// plan installed, already mounted into session preparation.
+    pub(super) async fn install_profile_worker_plan(
         &self,
+        store_administration: &StoreAdministration,
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
-    ) -> Result<tracedecay_domain::configuration::CodeIndexWorkerStatusV1> {
-        let configured = crate::config::read_or_initialize_profile_code_index_worker_selection(
-            database, profile_id,
-        )
-        .await?;
-        self.install_worker_selection(configured)
+    ) -> Result<tracedecay_code_index::parallelism::InstalledCodeIndexWorkerPlanV1> {
+        let configured =
+            tracedecay_project::config::read_or_initialize_profile_code_index_worker_selection(
+                database, profile_id,
+            )
+            .await?;
+        self.install_worker_selection(store_administration, configured)
+    }
+
+    /// Fixture composition for tests that drive a bare invocation state:
+    /// installs the profile worker plan through a store administration bound
+    /// to `profile_identity`, exactly as bootstrap does, so the plan's
+    /// preparation resources are mounted alongside it.
+    #[cfg(test)]
+    pub(crate) async fn install_profile_worker_plan_for_test(
+        &self,
+        profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    ) -> Result<tracedecay_code_index::parallelism::InstalledCodeIndexWorkerPlanV1> {
+        let profile_id = profile_identity.profile_id().clone();
+        let store_administration =
+            StoreAdministration::default().with_profile_identity(profile_identity);
+        self.install_profile_worker_plan(&store_administration, database, &profile_id)
+            .await
     }
 
     /// Charge one already-resolved worker selection against this daemon's own
-    /// resident-memory authority. Keeping the arithmetic here means the
-    /// persisted-profile path and any other admitted caller install the exact
-    /// same plan for the same selection instead of re-deriving the available
-    /// byte budget from a second estimator.
-    pub(crate) fn install_worker_selection(
+    /// resident-memory authority, then mount the process resources session
+    /// preparation meters against, that same resident-memory authority and
+    /// the background CPU authority the plan installed, into the store
+    /// administration's session runtimes. Keeping both steps here means the
+    /// persisted-profile path, the production harness, and every in-process
+    /// test engine install the exact same plan for the same selection and can
+    /// never install a plan without its preparation resources.
+    pub(super) fn install_worker_selection(
         &self,
+        store_administration: &StoreAdministration,
         configured: tracedecay_domain::configuration::CodeIndexWorkerSelectionV1,
-    ) -> Result<tracedecay_domain::configuration::CodeIndexWorkerStatusV1> {
+    ) -> Result<tracedecay_code_index::parallelism::InstalledCodeIndexWorkerPlanV1> {
         let resident_memory = self.code_index_schedulers.process_resident_memory();
         let resident_snapshot = resident_memory.snapshot();
-        tracedecay_code_index::parallelism::install_worker_plan(
+        let installed = tracedecay_code_index::parallelism::install_worker_plan(
             configured,
             resident_snapshot
                 .limit_bytes
@@ -137,10 +159,18 @@ impl DaemonInvocationState {
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("code-index worker plan refused: {error}"),
-        })
+        })?;
+        store_administration
+            .configure_codex_preparation_resources(
+                resident_memory,
+                Arc::clone(&installed.background_cpu),
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to configure Codex preparation resources: {error}"),
+            })?;
+        Ok(installed)
     }
 
-    #[hotpath::skip]
     pub(super) async fn retire_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -152,7 +182,15 @@ impl DaemonInvocationState {
             .map(drop)
     }
 
-    #[hotpath::skip]
+    pub(super) async fn settle_store_observability_retirement(
+        &self,
+        database_path: &std::path::Path,
+    ) -> Result<()> {
+        self.service
+            .settle_store_observability_retirement(database_path)
+            .await
+    }
+
     pub(super) async fn quiesce_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -169,7 +207,11 @@ impl DaemonInvocationState {
             })
     }
 
-    #[hotpath::measure(label = "daemon.invocation_state.project_drain", future = true)]
+    #[tracing::instrument(
+        name = "daemon.invocation_state.project_drain",
+        level = "trace",
+        skip_all
+    )]
     async fn drain_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -177,31 +219,18 @@ impl DaemonInvocationState {
         project_roots: &std::collections::BTreeSet<std::path::PathBuf>,
         reopenable: bool,
     ) -> Result<Option<ProjectRuntimeRootQuiescenceV1>> {
-        // Bounded static transition names: a project leaves the invocation
-        // runtime either by capacity quiescence (reopenable) or by terminal
-        // remote-deletion retirement.
-        if reopenable {
-            hotpath::gauge!("daemon.invocation_state.transition.quiesce_total").inc(1_u64);
-        } else {
-            hotpath::gauge!("daemon.invocation_state.transition.retire_total").inc(1_u64);
-        }
+        // A project leaves the invocation runtime either by capacity
+        // quiescence (reopenable) or by terminal remote-deletion retirement.
         let retirement_kind = if reopenable {
             "capacity-retired"
         } else {
             "remote-deleted"
         };
-        self.query_authority_provider
-            .retire_project(profile_id, project_id);
-        let worktree_ids = project_roots
-            .iter()
-            .filter_map(|root| code_index_scheduler::identity::worktree_id_for(root).ok())
-            .collect::<std::collections::BTreeSet<_>>();
         if !self
             .code_index_schedulers
             .retire_project_roots(project_roots)
             .await
         {
-            hotpath::gauge!("daemon.invocation_state.drain.code_index_refused_total").inc(1_u64);
             return Err(TraceDecayError::Config {
                 message: format!(
                     "code-index workers for {retirement_kind} project '{}' did not drain",
@@ -209,13 +238,6 @@ impl DaemonInvocationState {
                 ),
             });
         }
-        let semantic_projection_retirements = worktree_ids
-            .iter()
-            .map(|worktree_id| {
-                self.semantic_projection_scheduler
-                    .begin_worktree_retirement(worktree_id)
-            })
-            .collect::<Vec<_>>();
         let runtime_quiescence = if reopenable {
             Some(
                 self.service
@@ -227,8 +249,6 @@ impl DaemonInvocationState {
                     )
                     .await
                     .ok_or_else(|| {
-                        hotpath::gauge!("daemon.invocation_state.drain.owners_refused_total")
-                            .inc(1_u64);
                         TraceDecayError::Config {
                             message: format!(
                                 "invocation runtime owners for {retirement_kind} project '{}' did not drain",
@@ -248,7 +268,6 @@ impl DaemonInvocationState {
                 )
                 .await
             {
-                hotpath::gauge!("daemon.invocation_state.drain.owners_refused_total").inc(1_u64);
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "invocation runtime owners for {retirement_kind} project '{}' did not drain",
@@ -258,26 +277,6 @@ impl DaemonInvocationState {
             }
             None
         };
-        let semantic_projection_deadline =
-            tokio::time::Instant::now() + super::DAEMON_TASK_ABORT_DEADLINE;
-        for retirement in semantic_projection_retirements {
-            if !retirement.wait_until(semantic_projection_deadline).await {
-                hotpath::gauge!("daemon.invocation_state.drain.semantic_refused_total").inc(1_u64);
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "semantic projection work for {retirement_kind} project '{}' did not drain",
-                        project_id.as_str()
-                    ),
-                });
-            }
-        }
-        for root in project_roots {
-            // Upstream also unregistered the redundancy authority separately.
-            // At this tip `unregister_project_semantic_runtime` already drops
-            // the project's retained generation, redundancy state, and
-            // activation gate, so one call is the whole teardown.
-            tracedecay_usecases::semantic_runtime::unregister_project_semantic_runtime(root);
-        }
         Ok(runtime_quiescence)
     }
 
@@ -293,8 +292,8 @@ impl DaemonInvocationState {
         profile_id: &tracedecay_domain::UserProfileId,
         repository_owner: &str,
         repository_name: &str,
-    ) -> tracedecay_usecases::advisory::github_runtime::ProfileGitHubReadOnlyCredentialMountOutcomeV1
-    {
+    ) -> tracedecay_application::advisory::github_runtime::ProfileGitHubReadOnlyCredentialMountOutcomeV1
+{
         self.github_credential_lifecycle
             .mount(profile_id, repository_owner, repository_name)
     }
@@ -327,40 +326,15 @@ impl DaemonInvocationState {
         DaemonRetainedRuntimeRegistrar::new(&self.service)
     }
 
-    pub(super) fn semantic_runtime_registrar(&self) -> DaemonSemanticRuntimeRegistrar {
-        DaemonSemanticRuntimeRegistrar::new(&self.service)
-    }
-
     pub(super) fn lsp_owner_registrar(&self) -> DaemonLspOwnerRegistrar {
         DaemonLspOwnerRegistrar::new(&self.service)
     }
 
-    #[hotpath::skip]
-    pub(super) async fn mount_query_authority_for_project(
-        &self,
-        project_root: &Path,
-        profile_id: &tracedecay_domain::configuration::UserProfileId,
-        scope: &tracedecay_application::ResolvedScope,
-    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
-    {
-        let provider = self
-            .query_authority_provider
-            .for_profile(profile_id.clone());
-        code_index_scheduler::query_runtime::mount_query_authority_on_project_open(
-            &self.code_index_schedulers,
-            project_root,
-            scope,
-            &provider,
-        )
-        .await
-    }
-
-    #[hotpath::skip]
     pub(super) async fn mount_core_query_authority_for_project(
         &self,
         project_root: &Path,
-        scope: &tracedecay_application::ResolvedScope,
-        cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+        scope: &tracedecay_contracts::ResolvedScope,
+        cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
         code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
@@ -372,89 +346,32 @@ impl DaemonInvocationState {
         .await
     }
 
-    #[hotpath::skip]
-    pub(super) async fn mount_core_query_authority_for_committed_fallback(
-        &self,
-        project_root: &Path,
-        scope: &tracedecay_application::ResolvedScope,
-        expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
-        cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
-    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
-    {
-        code_index_scheduler::query_runtime::
-            mount_core_query_authority_for_committed_fallback_on_project_open(
-                &self.code_index_schedulers,
-                project_root,
-                scope,
-                expected_revision,
-                cursor_keys,
-            )
-            .await
-    }
-
     pub(super) fn work_federated_query_authority(
         &self,
-    ) -> Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1> {
+    ) -> Arc<dyn WorkFederatedQueryAuthorityPortV1> {
         Arc::clone(&self.work_federated_query_authority)
     }
 
-    pub(super) fn restore_initial_query_authority_for_project(
-        &self,
-        project_root: &Path,
-        profile_id: tracedecay_domain::configuration::UserProfileId,
-        scope: tracedecay_application::ResolvedScope,
-        state: crate::config::retrieval::RetrievalProfileStateV1,
-        cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
-    ) -> std::result::Result<
-        query_authority_provider::QueryAuthorityProviderStatusV1,
-        query_authority_provider::QueryAuthorityUpdateErrorV1,
-    > {
-        let status = self
-            .query_authority_provider
-            .install_evaluated_initial_state(profile_id, scope, state.clone(), cursor_keys)?;
-        if !tracedecay_usecases::semantic_runtime::commit_project_initial_semantic_roots(
-            project_root.to_path_buf(),
-            &state,
-        ) {
-            return Err(
-                query_authority_provider::QueryAuthorityUpdateErrorV1::ActivationNotCurrent,
-            );
-        }
-        Ok(status)
-    }
-
-    pub(super) fn query_activation_registrar(
-        &self,
-        project_root: &Path,
-        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    ) -> Arc<dyn tracedecay_usecases::semantic_runtime::RetrievalProfileActivationObserverV1> {
-        Arc::new(
-            query_authority_provider::DaemonQueryActivationRegistrarV1::new(
-                self.query_authority_provider.clone(),
-                self.code_index_schedulers.clone(),
-                project_root.to_path_buf(),
-                session_db,
-            ),
-        )
-    }
-
-    #[hotpath::measure(label = "daemon.invocation_state.code_index_mount", future = true)]
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        name = "daemon.invocation_state.code_index_mount",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn mount_code_index(
         &self,
         project_id: tracedecay_domain::ProjectId,
         project_root: &Path,
         store_root: PathBuf,
-        semantic_runtime: Option<&tracedecay_semantic::DaemonSemanticRuntimeHandleV1>,
-        semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-        semantic_resources: Option<SemanticResourceCeilings>,
         native_graph_activation: bool,
+        index_paths: tracedecay_domain::IndexPathPolicyV1,
         graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Result<()> {
         // Code-index identity is anchored on the project root's own git
-        // repository (`IndexingIdentityV1::resolve` uses `gix::open` on the
+        // repository (`IndexingIdentityV1::resolve` uses `git_open::open` on the
         // root, no upward discovery). A non-git project has no code-index
-        // identity by design: skip mounting instead of failing project open —
+        // identity by design: skip mounting instead of failing project open,
         // every non-code-index surface stays available.
         let git_control = project_root.join(".git");
         if !git_control.is_dir() && !git_control.is_file() {
@@ -465,78 +382,26 @@ impl DaemonInvocationState {
                 reason = "missing project-root .git control path",
                 "project root is not a git repository; code index disabled"
             );
-            hotpath::gauge!("daemon.invocation_state.code_index_mount.skipped_total").inc(1_u64);
             return Ok(());
         }
-        let canonical_project_root = project_root
-            .canonicalize()
+        let canonical_project_root = canonical_existing_identity(project_root)
             .unwrap_or_else(|_| project_root.to_path_buf());
-        let scoped_code_index_store_root = code_index_scheduler::scoped_code_index_store_root(
-            &store_root,
-            &canonical_project_root,
-        );
-        // The vector graph provider is registered unconditionally: retention
-        // and Doctor must resolve published vectors through the mounted code
-        // graph even when the semantic runtime itself is not configured.
-        let vector_graph: Arc<
-            dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1,
-        > = Arc::new(
-            code_index_scheduler::semantic_vector_graph::DaemonSemanticVectorGraphProviderV1::new(
-                project_id.clone(),
-                canonical_project_root.clone(),
-                self.code_index_schedulers.clone(),
-                graph_runtime.code_graph_seat_port(),
-                Arc::clone(&graph_publication_database),
-            ),
-        );
-        let semantic_schedule = semantic_runtime
-            .zip(semantic_lifecycle)
-            .zip(semantic_resources)
-            .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
-            .map(|(((handle, lifecycle), resources), worktree_id)| {
-                let graph = Arc::clone(&vector_graph);
-                tracedecay_usecases::semantic_runtime::production_saved_generation_schedule_hook(
-                    tracedecay_usecases::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
-                        project_root: project_root.to_path_buf(),
-                        code_index_store_root: scoped_code_index_store_root.clone(),
-                        worktree_id,
-                        handle: handle.clone(),
-                        graph,
-                        lifecycle,
-                        resources,
-                        fair_scheduler: self.semantic_projection_scheduler.clone(),
-                    },
-                )
-            });
         self.code_index_schedulers
             .mount_worktree_with_graph_runtime(
                 project_id,
                 project_root,
                 store_root,
-                semantic_schedule,
                 graph_runtime.code_graph_seat_port(),
                 graph_publication_database,
                 code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                     native_graph_activation,
                 ),
+                index_paths,
             )
             .await
-            .map_err(|error| {
-                hotpath::gauge!("daemon.invocation_state.code_index_mount.failed_total").inc(1_u64);
-                TraceDecayError::Config {
-                    message: format!("code-index scheduler could not be mounted: {error}"),
-                }
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("code-index scheduler could not be mounted: {error}"),
             })?;
-        if !self
-            .code_index_schedulers
-            .install_semantic_vector_graph_provider(&canonical_project_root, vector_graph)
-            .await
-        {
-            hotpath::gauge!("daemon.invocation_state.code_index_mount.failed_total").inc(1_u64);
-            return Err(TraceDecayError::Config {
-                message: "semantic vector graph provider could not be installed in the mounted code-index authority".to_owned(),
-            });
-        }
         // The deferred code-index mount runs after the project-open delivery
         // mount that owns the producer; an absent producer leaves the
         // observability lane uninstalled and nothing records.
@@ -577,16 +442,24 @@ impl DaemonInvocationState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "daemon.invocation_state.multi_root_execute", future = true)]
+    #[tracing::instrument(
+        name = "daemon.invocation_state.multi_root_execute",
+        level = "trace",
+        skip_all
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Multi-root execute is one scoped dispatch across the admitted root set."
+    )]
     pub(super) async fn execute_multi_root_for_project(
         &self,
         store_administration: &StoreAdministration,
         active_project_root: &Path,
         request_id: String,
-        request: tracedecay_application::MultiRootExecuteRequestV1,
+        request: tracedecay_contracts::MultiRootExecuteRequestV1,
         observed_at: tracedecay_domain::UtcMicros,
-        deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationContext,
+        deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationContext,
         request_cancellation: Option<CancellationToken>,
     ) -> DaemonInvocationResponse {
         let Some(scope_set) = self
@@ -643,6 +516,18 @@ impl DaemonInvocationState {
                 DaemonInvocationProblem::InvalidRequest,
             );
         };
+        if let Err(mismatch) = multi_root_continuation_binding(
+            request.continuation.as_ref(),
+            request.page,
+            &scope_set,
+            &query_digest,
+            &order_digest,
+        ) {
+            return DaemonInvocationResponse::application_problem(
+                request_id,
+                tracedecay_contracts::ApplicationProblem::cursor_refused(&mismatch),
+            );
+        }
         let database = match store_administration.registered_profile_database().await {
             Ok(database) => database,
             Err(_) => {
@@ -652,11 +537,6 @@ impl DaemonInvocationState {
                 );
             }
         };
-        // Items-processed: the multi_root_execute span is inclusive over every
-        // admitted root, so per-request root counts are what divide its wall
-        // time into per-root service demand.
-        hotpath::gauge!("daemon.invocation_state.multi_root_roots_total")
-            .inc(scope_set.roots().len() as u64);
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
         let mut outcomes = BTreeMap::new();
@@ -670,15 +550,15 @@ impl DaemonInvocationState {
             {
                 return DaemonInvocationResponse::application_problem(
                     request_id,
-                    tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
                 );
             }
             if deadline.is_elapsed_at(observed_at)
-                || deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+                || deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
             {
                 return DaemonInvocationResponse::application_problem(
                     request_id,
-                    tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
                 );
             }
             let Some(locator) = root.locator() else {
@@ -727,7 +607,7 @@ impl DaemonInvocationState {
                     continue;
                 }
             };
-            let Some(registry_context) = registry_context else {
+            let Some(_registry_context) = registry_context else {
                 let Ok(generation) = denied_root_generation(scope) else {
                     return DaemonInvocationResponse::problem(
                         request_id,
@@ -737,8 +617,14 @@ impl DaemonInvocationState {
                 generations.push(generation);
                 continue;
             };
-            let root = PathBuf::from(registry_context.project.canonical_root);
-            if !root.is_absolute() || root.canonicalize().ok().as_ref() != Some(&root) {
+            // A registered project may contribute more than one exact linked
+            // worktree. The persisted locator is the authorized root for this
+            // scope; resolving only by project id aliases every linked scope
+            // back to the project's primary checkout.
+            let root = locator.canonical_root.clone();
+            if !root.is_absolute()
+                || canonical_existing_identity(&root).ok().as_ref() != Some(&root)
+            {
                 let Ok(generation) = unavailable_root_generation(
                     scope,
                     tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
@@ -765,40 +651,95 @@ impl DaemonInvocationState {
                 generations.push(generation);
                 continue;
             };
-            let source_revision = if matches!(
+            let query_operation = matches!(
                 request.operation,
-                tracedecay_application::MultiRootOperationV1::Git { .. }
-            ) {
-                match explicit_git_state(&root) {
-                    Some(head) => head,
-                    None => {
-                        let Ok(generation) = unavailable_root_generation(
-                            scope,
-                            tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
-                        ) else {
-                            return DaemonInvocationResponse::problem(
-                                request_id,
-                                DaemonInvocationProblem::InvalidRequest,
-                            );
-                        };
-                        generations.push(generation);
-                        continue;
+                tracedecay_contracts::MultiRootOperationV1::Query { .. }
+            );
+            let source_revision = match request.operation {
+                tracedecay_contracts::MultiRootOperationV1::Git { .. } => {
+                    match explicit_git_state(&root) {
+                        Some(state) => Some(state),
+                        None => {
+                            let Ok(generation) = unavailable_root_generation(
+                                scope,
+                                tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
+                            ) else {
+                                return DaemonInvocationResponse::problem(
+                                    request_id,
+                                    DaemonInvocationProblem::InvalidRequest,
+                                );
+                            };
+                            generations.push(generation);
+                            continue;
+                        }
                     }
                 }
-            } else {
-                scope.scope_digest.as_str().to_owned()
+                tracedecay_contracts::MultiRootOperationV1::Query { .. } => self
+                    .code_index_schedulers
+                    .latest_generation_id(&root)
+                    .await
+                    .map(|generation| generation.as_str().to_owned()),
+                tracedecay_contracts::MultiRootOperationV1::Work { .. }
+                | tracedecay_contracts::MultiRootOperationV1::Feedback { .. }
+                | tracedecay_contracts::MultiRootOperationV1::Impact { .. } => None,
             };
-            let Ok(generation) = frozen_root_generation(
-                scope,
-                scope_set.digest(),
-                &source_revision,
-                &operation_value,
+            let generation_outcome = match source_revision.as_deref() {
+                Some(source_revision) => match frozen_root_generation(
+                    scope,
+                    scope_set.digest(),
+                    source_revision,
+                    &operation_value,
+                ) {
+                    Ok(generation) => tracedecay_domain::ScopeOutcome::Exact(Some(generation)),
+                    Err(_) => {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            DaemonInvocationProblem::InvalidRequest,
+                        );
+                    }
+                },
+                None => tracedecay_domain::ScopeOutcome::Exact(None),
+            };
+            if request.continuation.as_ref().is_some_and(|continuation| {
+                continuation.root_generation(&scope.scope_digest) != Some(&generation_outcome)
+            }) {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    multi_root_continuation_stale(),
+                );
+            }
+            let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
+                scope.scope_digest.clone(),
+                generation_outcome.clone(),
             ) else {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
                 );
             };
+            let child_cursor = request.continuation.as_ref().and_then(|continuation| {
+                match continuation.root_cursor(&scope.scope_digest) {
+                    Some(
+                        tracedecay_domain::ScopeOutcome::Exact(cursor)
+                        | tracedecay_domain::ScopeOutcome::Partial { value: cursor, .. },
+                    ) => cursor.clone(),
+                    _ => None,
+                }
+            });
+            if request.continuation.is_some() && child_cursor.is_none() {
+                contexts.push(context);
+                generations.push(generation);
+                outcomes.insert(
+                    scope.scope_digest.clone(),
+                    tracedecay_domain::ScopeOutcome::Exact(
+                        tracedecay_contracts::MultiRootRootPageV1 {
+                            value: Vec::new(),
+                            next_cursor: None,
+                        },
+                    ),
+                );
+                continue;
+            }
             let value = match parsed_operation.as_ref() {
                 Ok(parsed) => {
                     self.execute_one_multi_root_operation(
@@ -812,6 +753,7 @@ impl DaemonInvocationState {
                         cancellation.clone(),
                         request_lease,
                         request_cancellation.clone(),
+                        child_cursor,
                     )
                     .await
                 }
@@ -823,34 +765,91 @@ impl DaemonInvocationState {
             {
                 return DaemonInvocationResponse::application_problem(
                     request_id,
-                    tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
                 );
             }
-            if deadline.is_elapsed_at(tracedecay_application::clock::now_micros()) {
+            if deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros()) {
                 return DaemonInvocationResponse::application_problem(
                     request_id,
-                    tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
                 );
             }
-            let outcome = match value {
-                Ok(value) => tracedecay_domain::ScopeOutcome::Exact(vec![value]),
-                Err(DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
-                    tracedecay_domain::ScopeOutcome::Denied
+            let (outcome, served_revision) = match value {
+                Ok((child_outcome, next_cursor)) => {
+                    let served_revision = match child_outcome.as_ref() {
+                        tracedecay_domain::ScopeOutcome::Exact(value)
+                        | tracedecay_domain::ScopeOutcome::Partial { value, .. } => value
+                            .get("generation")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        tracedecay_domain::ScopeOutcome::Denied
+                        | tracedecay_domain::ScopeOutcome::Unavailable { .. } => None,
+                    };
+                    let outcome = if query_operation
+                        && child_outcome.has_value()
+                        && served_revision.is_none()
+                    {
+                        tracedecay_domain::ScopeOutcome::Unavailable {
+                            reason:
+                                tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+                        }
+                    } else {
+                        child_outcome.map(|value| tracedecay_contracts::MultiRootRootPageV1 {
+                            value: vec![value],
+                            next_cursor,
+                        })
+                    };
+                    (outcome, served_revision)
                 }
-                Err(_) => tracedecay_domain::ScopeOutcome::Unavailable {
-                    reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
-                },
+                Err(DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
+                    (tracedecay_domain::ScopeOutcome::Denied, None)
+                }
+                Err(_) => (
+                    tracedecay_domain::ScopeOutcome::Unavailable {
+                        reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+                    },
+                    None,
+                ),
+            };
+            let generation = if query_operation {
+                match served_revision.as_deref() {
+                    Some(served_revision) => {
+                        let Ok(served_generation) = frozen_root_generation(
+                            scope,
+                            scope_set.digest(),
+                            served_revision,
+                            &operation_value,
+                        ) else {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                DaemonInvocationProblem::InvalidRequest,
+                            );
+                        };
+                        let served_outcome =
+                            tracedecay_domain::ScopeOutcome::Exact(Some(served_generation));
+                        if served_outcome != generation_outcome {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                DaemonInvocationProblem::InvalidRequest,
+                            );
+                        }
+                        let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
+                            scope.scope_digest.clone(),
+                            served_outcome,
+                        ) else {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                DaemonInvocationProblem::InvalidRequest,
+                            );
+                        };
+                        generation
+                    }
+                    None => generation,
+                }
+            } else {
+                generation
             };
             contexts.push(context);
-            let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
-                scope.scope_digest.clone(),
-                tracedecay_domain::ScopeOutcome::Exact(generation),
-            ) else {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            };
             generations.push(generation);
             outcomes.insert(scope.scope_digest.clone(), outcome);
         }
@@ -870,7 +869,7 @@ impl DaemonInvocationState {
                 DaemonInvocationProblem::Unavailable,
             );
         };
-        let query = tracedecay_application::MultiRootQueryRequestV1 {
+        let query = tracedecay_contracts::MultiRootQueryRequestV1 {
             scope_set,
             contexts,
             root_generations: generations,
@@ -883,11 +882,24 @@ impl DaemonInvocationState {
             page: request.page,
             continuation: request.continuation,
         };
-        let page = match self
-            .service
-            .execute_multi_root_query(PrecomputedMultiRootQueryPort { outcomes }, query)
+        let page = match tracedecay_contracts::AuthorizedMultiRootQueryService::new(
+            PrecomputedMultiRootQueryPort { outcomes },
+        )
+        .execute(query)
         {
             Ok(page) => page,
+            Err(tracedecay_contracts::MultiRootQueryError::CursorRefused(mismatch)) => {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    tracedecay_contracts::ApplicationProblem::cursor_refused(&mismatch),
+                );
+            }
+            Err(tracedecay_contracts::MultiRootQueryError::ContinuationStale) => {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    multi_root_continuation_stale(),
+                );
+            }
             Err(_) => {
                 return DaemonInvocationResponse::problem(
                     request_id,
@@ -895,7 +907,7 @@ impl DaemonInvocationState {
                 );
             }
         };
-        let Ok(application_request_id) = tracedecay_application::RequestId::new(request_id.clone())
+        let Ok(application_request_id) = tracedecay_contracts::RequestId::new(request_id.clone())
         else {
             return DaemonInvocationResponse::problem(
                 request_id,
@@ -927,23 +939,29 @@ impl DaemonInvocationState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::skip]
     pub(super) async fn execute_one_multi_root_operation(
         &self,
         store_administration: &StoreAdministration,
         root: &Path,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         ordinal: usize,
         operation: &ParsedMultiRootOperationV1,
         observed_at: tracedecay_domain::UtcMicros,
-        deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationContext,
+        deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationContext,
         project_admission: ProjectRuntimeRequestLeaseV1,
         request_cancellation: Option<CancellationToken>,
-    ) -> std::result::Result<Value, DaemonInvocationProblem> {
+        child_cursor: Option<tracedecay_contracts::OpaqueCursor>,
+    ) -> std::result::Result<
+        (
+            tracedecay_domain::ScopeOutcome<Value>,
+            Option<tracedecay_contracts::OpaqueCursor>,
+        ),
+        DaemonInvocationProblem,
+    > {
         match operation {
             ParsedMultiRootOperationV1::Work(request) => {
-                let control_cancellation = tracedecay_application::CancellationSignal::active(
+                let control_cancellation = tracedecay_contracts::CancellationSignal::active(
                     cancellation.token_id.as_str(),
                 )
                 .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
@@ -982,9 +1000,10 @@ impl DaemonInvocationState {
                     return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
                 }
                 extract_work_application_payload(&outcome)
+                    .map(|value| (tracedecay_domain::ScopeOutcome::Exact(value), None))
             }
             ParsedMultiRootOperationV1::Surface { operation, request } => {
-                crate::application_surface::invoke_multi_root_surface_request(
+                tracedecay_daemon_service::application_surface::invoke_multi_root_surface_request(
                     Arc::new(InProcessDaemonInvocationExecutor::with_project_admission(
                         self.clone(),
                         store_administration.clone(),
@@ -994,14 +1013,14 @@ impl DaemonInvocationState {
                         request_cancellation,
                     )),
                     *operation,
-                    tracedecay_application::RequestId::new(format!(
+                    tracedecay_contracts::RequestId::new(format!(
                         "request.multi-root.surface.{ordinal}"
                     ))
                     .map_err(|_| DaemonInvocationProblem::InvalidRequest)?,
-                    tracedecay_application::PageRequest::new(100, None)
+                    tracedecay_contracts::PageRequest::new(100, child_cursor)
                         .map_err(|_| DaemonInvocationProblem::InvalidRequest)?,
                     deadline,
-                    tracedecay_application::CancellationSignal::active(
+                    tracedecay_contracts::CancellationSignal::active(
                         cancellation.token_id.as_str(),
                     )
                     .map_err(|_| DaemonInvocationProblem::InvalidRequest)?,
@@ -1009,13 +1028,28 @@ impl DaemonInvocationState {
                 )
                 .await
                 .map_err(|_| DaemonInvocationProblem::Unavailable)
+                .and_then(|outcome| {
+                    let next_cursor = match outcome.as_ref() {
+                        tracedecay_domain::ScopeOutcome::Exact(value)
+                        | tracedecay_domain::ScopeOutcome::Partial { value, .. } => {
+                            value.get("next_cursor")
+                        }
+                        tracedecay_domain::ScopeOutcome::Denied
+                        | tracedecay_domain::ScopeOutcome::Unavailable { .. } => None,
+                    }
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+                    Ok((outcome, next_cursor.flatten()))
+                })
             }
         }
     }
 
     /// Close every invocation admission gate that can be closed without
     /// awaiting, so no new provider, code-index, or project-runtime work is
-    /// admitted once shutdown has been *requested* — not merely once this
+    /// admitted once shutdown has been *requested*, not merely once this
     /// owner's drain phase is reached.
     ///
     /// The invocation owner sits behind the producer phase in the daemon
@@ -1024,26 +1058,63 @@ impl DaemonInvocationState {
     /// at prepare time and, critically, keeps them closed even if the
     /// coordinator later aborts the drain runner. Idempotent.
     pub(super) fn cancel_admissions(&self) {
-        // Counts cancel *requests*, not distinct transitions: the owner's
-        // synchronous cancel side is intentionally idempotent, and a repeat
-        // request after a coordinator retry is itself worth observing.
-        hotpath::gauge!("daemon.invocation_state.cancel_admissions_total").inc(1_u64);
         self.service.cancel_admissions();
         self.github_credential_lifecycle.shutdown();
+        // Code-index workers only observe `shutting_down` / closed admission
+        // once cancel runs. Leaving this until the join lets an in-flight
+        // reconcile (graph seat, follow-up pass) keep the worker alive for
+        // the whole background-drain budget.
+        self.code_index_schedulers.cancel();
     }
 
-    #[hotpath::measure(label = "daemon.invocation_state.shutdown", future = true)]
-    pub(super) async fn shutdown(&self) -> bool {
+    #[tracing::instrument(name = "daemon.invocation_state.shutdown", level = "trace", skip_all)]
+    pub(super) async fn shutdown(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> tracedecay_daemon_service::shutdown::ShutdownJoined {
+        let started = std::time::Instant::now();
+        let step = |outcome: &str| {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", outcome.to_string()),
+                    ("owner", "invocation".to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+        };
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
-        self.code_index_schedulers.shutdown().await;
+        self.code_index_schedulers.cancel();
+        step("invocation_admissions_closed");
+        // The bounded wait may expire while a blocking reconcile is still
+        // unwinding. The registry retains its worker until a retry joins it;
+        // an incomplete sweep must keep the outer shutdown receipt unclean.
+        let schedulers_timed_out = tracedecay_runtime_core::native_runtime::timeout(
+            DAEMON_TASK_ABORT_DEADLINE,
+            self.code_index_schedulers.shutdown(),
+        )
+        .await
+        .is_err();
+        step("code_index_schedulers_join_returned");
+        if schedulers_timed_out {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "code_index_scheduler_pending".to_string()),
+                    (
+                        "reason",
+                        "reconcile_join_exceeded_abort_deadline".to_string(),
+                    ),
+                ],
+            );
+        }
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
-        let expired = self.service.expire_all().await;
-        if !expired {
-            // A false expire-all means invocation sessions survived the
-            // drain; record the incomplete shutdown instead of hiding it
-            // behind the boolean.
-            hotpath::gauge!("daemon.invocation_state.shutdown_incomplete_total").inc(1_u64);
+        step("lsp_sessions_expired");
+        let mut expired = self.service.expire_all(deadline).await;
+        step("invocation_service_expired");
+        if expired.status.is_clean() && schedulers_timed_out {
+            expired.status = ShutdownStatus::TimedOut;
         }
         expired
     }
@@ -1063,10 +1134,10 @@ pub(super) enum ParsedMultiRootOperationV1 {
 }
 
 fn parse_multi_root_operation(
-    operation: &tracedecay_application::MultiRootOperationV1,
+    operation: &tracedecay_contracts::MultiRootOperationV1,
 ) -> std::result::Result<ParsedMultiRootOperationV1, DaemonInvocationProblem> {
     match operation {
-        tracedecay_application::MultiRootOperationV1::Work { request } => {
+        tracedecay_contracts::MultiRootOperationV1::Work { request } => {
             let request = serde_json::from_value::<WorkApplicationInvocationV1>(request.clone())
                 .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
             if !matches!(request, WorkApplicationInvocationV1::Views(_)) {
@@ -1074,10 +1145,10 @@ fn parse_multi_root_operation(
             }
             Ok(ParsedMultiRootOperationV1::Work(Box::new(request)))
         }
-        tracedecay_application::MultiRootOperationV1::Git { request }
-        | tracedecay_application::MultiRootOperationV1::Feedback { request }
-        | tracedecay_application::MultiRootOperationV1::Impact { request }
-        | tracedecay_application::MultiRootOperationV1::Query { request } => {
+        tracedecay_contracts::MultiRootOperationV1::Git { request }
+        | tracedecay_contracts::MultiRootOperationV1::Feedback { request }
+        | tracedecay_contracts::MultiRootOperationV1::Impact { request }
+        | tracedecay_contracts::MultiRootOperationV1::Query { request } => {
             let wire = serde_json::from_value::<FederatedSurfaceRequestV1>(request.clone())
                 .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
             if !multi_root_family_allows(operation, wire.operation) {
@@ -1091,44 +1162,129 @@ fn parse_multi_root_operation(
     }
 }
 
+/// Whether `continuation` pages this execute request: the scope set, the
+/// operation, and the page it was minted for.
+fn multi_root_continuation_binding(
+    continuation: Option<&tracedecay_contracts::MultiRootContinuationV1>,
+    page: u64,
+    scope_set: &tracedecay_contracts::AuthorizedScopeSet,
+    query_digest: &tracedecay_domain::ManifestDigest,
+    order_digest: &tracedecay_domain::ManifestDigest,
+) -> std::result::Result<(), CursorBindingMismatchV1> {
+    let changed = |parameter| CursorBindingMismatchV1::ParameterChanged { parameter };
+    let Some(continuation) = continuation else {
+        return if page == 0 {
+            Ok(())
+        } else {
+            Err(changed("page"))
+        };
+    };
+    let covers_every_root = continuation.root_generations().len() == scope_set.roots().len()
+        && continuation.root_cursors().len() == scope_set.roots().len()
+        && scope_set.roots().iter().all(|root| {
+            continuation
+                .root_generation(&root.scope().scope_digest)
+                .is_some()
+                && continuation
+                    .root_cursor(&root.scope().scope_digest)
+                    .is_some()
+        });
+    if continuation.validate().is_err() {
+        Err(CursorBindingMismatchV1::Foreign)
+    } else if continuation.scope_set_digest() != scope_set.digest()
+        || continuation.order_digest() != order_digest
+        || !covers_every_root
+    {
+        Err(changed("scope_set_digest"))
+    } else if continuation.query_digest() != query_digest {
+        Err(changed("operation"))
+    } else if continuation.next_page() != page {
+        Err(changed("page"))
+    } else {
+        Ok(())
+    }
+}
+
+fn multi_root_continuation_stale() -> tracedecay_contracts::ApplicationProblem {
+    tracedecay_contracts::ApplicationProblem::stale(tracedecay_contracts::SafeDiagnostic {
+        code: "multi_root.continuation_stale".to_owned(),
+        message: "A root's generation moved since the continuation was minted; restart \
+                  without it."
+            .to_owned(),
+    })
+}
+
+/// Work evidence reads through the exact/lexical/graph authority mounted for
+/// the scope; an unmounted scope is the typed `None`, not a fabricated
+/// authority.
 #[derive(Clone)]
 struct DaemonWorkFederatedQueryAuthorityV1 {
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
 }
 
-impl crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1
-    for DaemonWorkFederatedQueryAuthorityV1
-{
+impl WorkFederatedQueryAuthorityPortV1 for DaemonWorkFederatedQueryAuthorityV1 {
     fn authority_for<'a>(
         &'a self,
-        scope: &'a tracedecay_application::ResolvedScope,
-    ) -> crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityFutureV1<'a> {
-        Box::pin(async move {
-            let mounted = self.schedulers.query_authority_for_scope(scope).await?;
-            self.provider
-                .federated_authority_for(scope, mounted.privacy_domain())
-                .ok()
-        })
+        scope: &'a tracedecay_contracts::ResolvedScope,
+    ) -> WorkFederatedQueryAuthorityFutureV1<'a> {
+        Box::pin(self.schedulers.query_authority_for_scope(scope))
     }
 }
 
 #[cfg(test)]
-mod resident_memory_tests {
+mod shutdown_tests {
     use super::*;
 
-    #[test]
-    fn invocation_state_and_code_index_registry_share_one_process_resident_authority() {
+    #[tokio::test]
+    async fn failed_lsp_lease_is_preserved_in_the_invocation_owner_receipt() {
         let state = DaemonInvocationState::default();
-        let cloned = state.clone();
-        let state_memory = state.code_index_schedulers.process_resident_memory();
-        let cloned_memory = cloned.code_index_schedulers.process_resident_memory();
-
-        assert!(Arc::ptr_eq(&state_memory, &cloned_memory));
+        let (started, observed) = tokio::sync::oneshot::channel();
+        state
+            .service
+            .lsp_lease_tasks
+            .start(
+                tracedecay_daemon_protocol::LspSessionId::new("lsp-failed-shutdown")
+                    .expect("lease identity"),
+                async move {
+                    let _ = started.send(());
+                    panic!("lease worker failed");
+                },
+            )
+            .await
+            .expect("admit lease worker");
+        observed.await.expect("lease worker was polled");
+        let receipt = tracedecay_daemon_service::shutdown::join_shutdown_owners(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            vec![
+                tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
+                    "invocation",
+                    || {},
+                    move |deadline| async move { state.shutdown(Some(deadline)).await },
+                ),
+            ],
+        )
+        .await;
         assert_eq!(
-            state_memory.snapshot().limit_bytes,
-            tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
-                .get()
+            receipt.owners[0].status,
+            ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
+        );
+        assert_eq!(receipt.unfinished(), &["invocation"]);
+        assert_eq!(receipt.lost_work, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn cancel_admissions_then_empty_shutdown_is_prompt() {
+        let state = DaemonInvocationState::default();
+        state.cancel_admissions();
+        state.cancel_admissions();
+        let started = std::time::Instant::now();
+        assert!(
+            state.shutdown(None).await.status.is_clean(),
+            "empty invocation shutdown must expire cleanly"
+        );
+        assert!(
+            started.elapsed() < DAEMON_TASK_ABORT_DEADLINE,
+            "empty code-index join must not spend the TERM grace"
         );
     }
 }

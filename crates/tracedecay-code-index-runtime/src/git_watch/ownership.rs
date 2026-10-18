@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
-use super::{GIT_OBSERVATION_BUDGET, GitWatcherInner, WatchState, log_daemon_event};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+
+use super::{GitWatcherInner, WatchState, log_daemon_event};
 
 #[cfg(test)]
 #[derive(Default)]
@@ -129,20 +133,11 @@ impl GitWatcherShutdownOutcome {
         &self.failures
     }
 
-    fn record_join(
-        &mut self,
-        owner: GitWatcherTaskOwner,
-        result: Result<(), tokio::task::JoinError>,
-    ) {
-        let Err(error) = result else {
-            return;
-        };
-        let kind = if error.is_cancelled() {
-            hotpath::gauge!("daemon.git.watch.task_failures.cancelled_total").inc(1_u64);
-            GitWatcherTaskFailureKind::Cancelled
-        } else {
-            hotpath::gauge!("daemon.git.watch.task_failures.panicked_total").inc(1_u64);
-            GitWatcherTaskFailureKind::Panicked
+    fn record_join(&mut self, owner: GitWatcherTaskOwner, outcome: NativeTaskOutcome<()>) {
+        let kind = match outcome {
+            NativeTaskOutcome::Completed(()) => return,
+            NativeTaskOutcome::Cancelled => GitWatcherTaskFailureKind::Cancelled,
+            NativeTaskOutcome::Panicked(_) => GitWatcherTaskFailureKind::Panicked,
         };
         log_daemon_event(
             "git_watch_task_join_failed",
@@ -155,7 +150,6 @@ impl GitWatcherShutdownOutcome {
     }
 
     fn record_timeout(&mut self, owner: GitWatcherTaskOwner) {
-        hotpath::gauge!("daemon.git.watch.task_failures.timed_out_total").inc(1_u64);
         log_daemon_event(
             "git_watch_task_join_failed",
             &[
@@ -172,27 +166,35 @@ impl GitWatcherShutdownOutcome {
 
 async fn join_before(
     outcome: &mut GitWatcherShutdownOutcome,
+    abandoned: &CancellationToken,
     owner: GitWatcherTaskOwner,
-    mut handle: tokio::task::JoinHandle<()>,
-    deadline: tokio::time::Instant,
+    task: NativeTask<()>,
+    deadline: Instant,
 ) {
-    match tokio::time::timeout_at(deadline, &mut handle).await {
-        Ok(result) => outcome.record_join(owner, result),
-        Err(_) => {
-            handle.abort();
-            let _ = handle.await;
+    // An unavailable timer fails closed like an elapsed deadline.
+    let joined = tokio::select! {
+        biased;
+        joined = native_runtime::timeout_at(deadline, task.wait()) => joined.ok(),
+        () = abandoned.cancelled() => task.try_finished(),
+    };
+    match joined {
+        Some(result) => outcome.record_join(owner, result),
+        None => {
+            task.abort();
+            let _ = task.wait().await;
             outcome.record_timeout(owner);
         }
     }
 }
 
-#[hotpath::measure(label = "daemon.git.watch.join", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.join", level = "trace", skip_all)]
 pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdownOutcome {
     let mut outcome = GitWatcherShutdownOutcome::default();
-    let deadline = tokio::time::Instant::now() + GIT_OBSERVATION_BUDGET;
+    let deadline = Instant::now() + inner.cadence.join_budget;
     if let Some(handle) = inner.backstop_task.lock().await.take() {
         join_before(
             &mut outcome,
+            &inner.join_abandoned,
             GitWatcherTaskOwner::Backstop,
             handle,
             deadline,
@@ -200,7 +202,7 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
         .await;
     }
 
-    let identity_retries: Vec<(std::path::PathBuf, tokio::task::JoinHandle<()>)> = {
+    let identity_retries: Vec<(PathBuf, NativeTask<()>)> = {
         let mut retries = inner
             .identity_retries
             .lock()
@@ -210,6 +212,7 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
     for (root, handle) in identity_retries {
         join_before(
             &mut outcome,
+            &inner.join_abandoned,
             GitWatcherTaskOwner::IdentityDiscovery(root),
             handle,
             deadline,
@@ -221,12 +224,12 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
         let mut projects = inner.projects.lock().await;
         projects.drain().map(|(_, state)| state).collect()
     };
-    hotpath::gauge!("daemon.git.watch.repositories.watched").set(0_u64);
     for state in states {
         state.retire();
         if let Some(handle) = state.take_task() {
             join_before(
                 &mut outcome,
+                &inner.join_abandoned,
                 GitWatcherTaskOwner::Repository(state.common_dir.clone()),
                 handle,
                 deadline,
@@ -237,7 +240,7 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
     outcome
 }
 
-#[hotpath::measure(label = "daemon.git.watch.retire", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.retire", level = "trace", skip_all)]
 pub async fn retire_missing_repository_owners(inner: &Arc<GitWatcherInner>) {
     let mut projects = inner.projects.lock().await;
     let candidates = projects.keys().cloned().collect::<Vec<_>>();
@@ -267,25 +270,22 @@ pub async fn retire_missing_repository_owners(inner: &Arc<GitWatcherInner>) {
             retired.push(state);
         }
     }
-    if !retired.is_empty() {
-        hotpath::gauge!("daemon.git.watch.repositories.retired_total").inc(retired.len());
-        hotpath::gauge!("daemon.git.watch.repositories.watched").set(projects.len());
-    }
     drop(projects);
     for state in retired {
-        join_retired_repository_state(&state).await;
+        join_retired_repository_state(inner, &state).await;
     }
 }
 
-pub async fn join_retired_repository_state(state: &WatchState) {
+pub async fn join_retired_repository_state(inner: &GitWatcherInner, state: &WatchState) {
     state.retire();
     if let Some(handle) = state.take_task() {
         let mut outcome = GitWatcherShutdownOutcome::default();
         join_before(
             &mut outcome,
+            &inner.join_abandoned,
             GitWatcherTaskOwner::Repository(state.common_dir.clone()),
             handle,
-            tokio::time::Instant::now() + GIT_OBSERVATION_BUDGET,
+            Instant::now() + inner.cadence.join_budget,
         )
         .await;
         log_daemon_event(

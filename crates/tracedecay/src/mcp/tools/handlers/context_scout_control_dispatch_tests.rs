@@ -1,4 +1,3 @@
-use std::fs;
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
@@ -6,8 +5,9 @@ use tempfile::TempDir;
 
 use super::dispatch_test_support::*;
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
-use crate::tracedecay::TraceDecay;
+use crate::daemon::retained_test_support::{
+    forward_application_surface, ignore_feedback_observations,
+};
 
 #[derive(Default)]
 struct RecordingUnavailableExecutor {
@@ -20,18 +20,18 @@ struct RecordingUnavailableExecutor {
     >,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for RecordingUnavailableExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for RecordingUnavailableExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -39,8 +39,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailab
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-        _deadline: tracedecay_application::Deadline,
-        _cancellation: tracedecay_application::CancellationSignal,
+        _deadline: tracedecay_contracts::Deadline,
+        _cancellation: tracedecay_contracts::CancellationSignal,
         policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -64,33 +64,19 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailab
         Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: tracedecay_domain::ManifestDigest,
-        _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
 async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("context-scout-control-dispatch");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "context-scout-control-dispatch",
+        "pub fn probe() {}\n",
         "project.mcp-context-scout-control-dispatch",
     )
-    .await
-    .unwrap();
+    .await;
     let executor = RecordingUnavailableExecutor::default();
     let address = json!({
         "profile_id": vec![1; 16],
@@ -116,7 +102,7 @@ async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
     ];
 
     for (tool_name, _, idempotency_key) in controls {
-        let cancellation = tracedecay_application::CancellationSignal::active(format!(
+        let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
             "cancellation.{}",
             tool_name.strip_prefix("tracedecay_").unwrap()
         ))
@@ -129,8 +115,6 @@ async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
                 "expected_revision": "revision.mcp-context-scout-control-dispatch",
                 "idempotency_key": idempotency_key
             }),
-            None,
-            None,
             ToolCallRegistryOptions {
                 application_invocation_executor: Some(&executor),
                 application_cancellation: Some(cancellation.clone()),

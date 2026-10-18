@@ -1,21 +1,26 @@
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationObservation, EffectId, EffectResult, SourceEditVerificationStateV1,
     SourceEditVerificationV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
+use tracedecay_private_fs::{FileLease, LockAdmissionError, lock_until};
 
-use tracedecay_domain::errors::Result;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::JOURNAL_VERSION;
 use super::digest::{load_record, persist_record, source_edit_recovery_digest};
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
+use super::plan::PlannedSourceEditFile;
+use super::port::SourceEditRuntime;
 use super::verify::{application_contract_error, config_error, domain_error, io_error};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,11 +45,12 @@ pub(super) struct SourceEditJournalV1 {
     pub(super) effect_id: EffectId,
     pub(super) input_digest: ManifestDigest,
     pub(super) expected_state: ManifestDigest,
-    #[serde(default)]
+    /// `None` only on in-memory pre-effect records; every persisted journal
+    /// carries the exact previewed postimage digest.
     pub(super) predicted_state: Option<ManifestDigest>,
     pub(super) candidate_files: Vec<String>,
     #[serde(default)]
-    pub(super) recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
+    pub(super) recovery_files: Vec<PlannedSourceEditFile>,
     #[serde(default)]
     pub(super) recovery_digest: Option<ManifestDigest>,
     pub(super) request: SourceEditDurableRequestV1,
@@ -52,7 +58,12 @@ pub(super) struct SourceEditJournalV1 {
 }
 
 impl SourceEditJournalV1 {
-    fn validate_recovery(&self) -> Result<()> {
+    fn validate_persisted(&self) -> Result<()> {
+        if self.predicted_state.is_none() {
+            return Err(config_error(
+                "unsupported source edit journal: it carries no predicted state",
+            ));
+        }
         match (&self.recovery_digest, self.recovery_files.is_empty()) {
             (None, true) => Ok(()),
             (Some(digest), false)
@@ -71,13 +82,13 @@ impl SourceEditJournalV1 {
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceEditDurableRequestV1 {
     pub(super) operation: tracedecay_tool_catalog::UseCaseId,
-    pub(super) request_id: tracedecay_application::RequestId,
+    pub(super) request_id: tracedecay_contracts::RequestId,
     pub(super) actor: tracedecay_domain::ActorId,
-    pub(super) scope: tracedecay_application::ResolvedScope,
-    pub(super) authority: tracedecay_application::AuthorityReceipt,
-    pub(super) authority_proof: tracedecay_application::SourceEditEffectProofV1,
-    pub(super) idempotency_key: tracedecay_application::IdempotencyKey,
-    pub(super) deadline: tracedecay_application::Deadline,
+    pub(super) scope: tracedecay_contracts::ResolvedScope,
+    pub(super) authority: tracedecay_contracts::AuthorityReceipt,
+    pub(super) authority_proof: tracedecay_contracts::SourceEditEffectProofV1,
+    pub(super) idempotency_key: tracedecay_contracts::IdempotencyKey,
+    pub(super) deadline: tracedecay_contracts::Deadline,
     pub(super) started_at: UtcMicros,
     pub(super) dry_run: bool,
     #[serde(default)]
@@ -90,13 +101,13 @@ pub(super) struct SourceEditRollbackRecordV1 {
     pub(super) version: u8,
     pub(super) effect_id: EffectId,
     pub(super) input_digest: ManifestDigest,
-    pub(super) idempotency_key: tracedecay_application::IdempotencyKey,
+    pub(super) idempotency_key: tracedecay_contracts::IdempotencyKey,
     pub(super) operation: tracedecay_tool_catalog::UseCaseId,
     pub(super) actor: tracedecay_domain::ActorId,
-    pub(super) scope: tracedecay_application::ResolvedScope,
+    pub(super) scope: tracedecay_contracts::ResolvedScope,
     pub(super) expected_state: ManifestDigest,
     pub(super) committed_state: ManifestDigest,
-    pub(super) recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
+    pub(super) recovery_files: Vec<PlannedSourceEditFile>,
     pub(super) recovery_digest: ManifestDigest,
     pub(super) record_digest: ManifestDigest,
 }
@@ -139,7 +150,7 @@ impl SourceEditRollbackRecordV1 {
 pub(super) struct SourceEditDurableResultV1 {
     pub(super) version: u8,
     pub(super) input_digest: ManifestDigest,
-    pub(super) authority_proof: tracedecay_application::SourceEditEffectProofV1,
+    pub(super) authority_proof: tracedecay_contracts::SourceEditEffectProofV1,
     pub(super) dry_run: bool,
     #[serde(default)]
     pub(super) predicted_state: Option<ManifestDigest>,
@@ -156,7 +167,30 @@ pub(super) struct ResolvedSourceEditPreview {
     pub(super) candidate_files: Vec<String>,
     pub(super) expected_state: Option<ManifestDigest>,
     pub(super) predicted_state: Option<ManifestDigest>,
-    pub(super) planned_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
+    pub(super) planned_files: Vec<PlannedSourceEditFile>,
+}
+
+/// Same-project callers queue this long for the store before the edit fails
+/// with a typed lock-deadline error.
+const SOURCE_EDIT_ADMISSION_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Held for one edit: the in-process queue position and the cross-process
+/// lock file, released together on drop.
+pub(super) struct SourceEditLease {
+    _file: FileLease,
+    _queued: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// The daemon's single owner per source-edit store root.
+// ponytail: entries are never evicted; one empty mutex per project store this
+// process has edited, bounded by its registered projects.
+fn source_edit_owner(root: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    static OWNERS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut owners = OWNERS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(owners.entry(root.to_path_buf()).or_default())
 }
 
 impl SourceEditDurability {
@@ -169,11 +203,49 @@ impl SourceEditDurability {
         }
     }
 
-    #[hotpath::measure(label = "usecases.edit.lock")]
-    pub(super) fn lock(&self) -> Result<tracedecay_usecases::tracedecay::SyncLockGuard> {
-        tracedecay_usecases::tracedecay::try_acquire_sync_lock_at(
-            &self.root.join("source-edit.lock"),
+    /// Serializes every preview, apply, rollback, and reconciliation on this
+    /// store. The daemon owns the store: same-project callers queue on its
+    /// in-process owner, and the lock file fences any other process. Both
+    /// waits share one admission deadline, past which the edit fails with a
+    /// typed, retryable lock-deadline error.
+    #[tracing::instrument(name = "usecases.edit.lock", level = "trace", skip_all)]
+    pub(super) async fn lock(&self) -> Result<SourceEditLease> {
+        let deadline = Instant::now() + SOURCE_EDIT_ADMISSION_DEADLINE;
+        let lock_path = self.root.join("source-edit.lock");
+        let deadline_error = || TraceDecayError::LockDeadline {
+            resource: "source-edit writer lock",
+            deadline_ms: u64::try_from(SOURCE_EDIT_ADMISSION_DEADLINE.as_millis())
+                .unwrap_or(u64::MAX),
+        };
+        let queued = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            deadline.saturating_duration_since(Instant::now()),
+            source_edit_owner(&self.root).lock_owned(),
         )
+        .await
+        .map_err(|_| deadline_error())?;
+        fs::create_dir_all(&self.root)
+            .map_err(|error| io_error("create source edit root", error))?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| io_error("open source edit lock", error))?;
+        let file = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            lock_until(&file, deadline).map(|()| file)
+        })
+        .await
+        .map_err(|error| config_error(format!("source edit lock admission task failed: {error}")))?
+        .map_err(|error| match error {
+            LockAdmissionError::TimedOut => deadline_error(),
+            LockAdmissionError::Io(error) => io_error("acquire source edit lock", error),
+        })?;
+        Ok(SourceEditLease {
+            _file: FileLease::held(file, "source_edit.writer"),
+            _queued: queued,
+        })
     }
 
     pub(super) fn journal_path(&self) -> PathBuf {
@@ -182,7 +254,7 @@ impl SourceEditDurability {
 
     pub(super) fn receipt_path(
         &self,
-        key: &tracedecay_application::IdempotencyKey,
+        key: &tracedecay_contracts::IdempotencyKey,
     ) -> Result<PathBuf> {
         let digest = canonical_sha256(&("tracedecay.source-edit-receipt-key.v1", key.as_str()))
             .map_err(domain_error)?;
@@ -194,7 +266,7 @@ impl SourceEditDurability {
 
     fn reconciliation_receipt_path(
         &self,
-        key: &tracedecay_application::IdempotencyKey,
+        key: &tracedecay_contracts::IdempotencyKey,
     ) -> Result<PathBuf> {
         let digest = canonical_sha256(&(
             "tracedecay.source-edit-reconciliation-receipt-key.v1",
@@ -227,7 +299,7 @@ impl SourceEditDurability {
                 &journal.request.authority,
                 &journal.request.authority_proof,
             )?;
-            journal.validate_recovery()?;
+            journal.validate_persisted()?;
         }
         Ok(journal)
     }
@@ -261,8 +333,8 @@ impl SourceEditDurability {
         committed_state: &ManifestDigest,
         succeeded: bool,
     ) -> Result<()> {
-        let move_operation = tracedecay_application::source_edit_operation(
-            tracedecay_application::SourceEditKind::MoveSymbol,
+        let move_operation = tracedecay_contracts::source_edit_operation(
+            tracedecay_contracts::SourceEditKind::MoveSymbol,
         )
         .map_err(application_contract_error)?;
         if &journal.request.operation != move_operation.use_case_id()
@@ -317,7 +389,7 @@ impl SourceEditDurability {
 
     pub(super) fn load_receipt(
         &self,
-        key: &tracedecay_application::IdempotencyKey,
+        key: &tracedecay_contracts::IdempotencyKey,
     ) -> Result<Option<SourceEditDurableResultV1>> {
         let receipt = load_record::<SourceEditDurableResultV1>(
             &self.receipt_path(key)?,
@@ -347,7 +419,7 @@ impl SourceEditDurability {
 
     pub(super) fn load_reconciliation_receipt(
         &self,
-        key: &tracedecay_application::IdempotencyKey,
+        key: &tracedecay_contracts::IdempotencyKey,
     ) -> Result<Option<SourceEditDurableResultV1>> {
         let receipt = load_record::<SourceEditDurableResultV1>(
             &self.reconciliation_receipt_path(key)?,
@@ -426,8 +498,8 @@ impl SourceEditDurableResultV1 {
 }
 
 fn validate_durable_authority(
-    authority: &tracedecay_application::AuthorityReceipt,
-    proof: &tracedecay_application::SourceEditEffectProofV1,
+    authority: &tracedecay_contracts::AuthorityReceipt,
+    proof: &tracedecay_contracts::SourceEditEffectProofV1,
 ) -> Result<()> {
     proof
         .validate_for(authority)
@@ -435,8 +507,8 @@ fn validate_durable_authority(
 }
 
 pub(super) fn same_source_edit_authority(
-    left: &tracedecay_application::AuthorityReceipt,
-    right: &tracedecay_application::AuthorityReceipt,
+    left: &tracedecay_contracts::AuthorityReceipt,
+    right: &tracedecay_contracts::AuthorityReceipt,
 ) -> bool {
     left.grant_id == right.grant_id
         && left.grant_revision == right.grant_revision

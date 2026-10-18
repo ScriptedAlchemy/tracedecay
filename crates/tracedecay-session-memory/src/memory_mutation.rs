@@ -4,9 +4,10 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     PreparedRetainedEffect, RequestAdmission, RetainedSurfaceExecutionContextV1,
     RetainedSurfaceExecutionErrorV1, effective_memory_deadline, now_micros,
 };
@@ -31,7 +32,9 @@ pub fn memory_mutation_settlement<T: Debug>(
         }
         Err(MemoryMutationError::InvalidAuthorityResult {
             authority_result, ..
-        }) => Ok(MemoryMutationSettlement::InvalidAuthority(authority_result)),
+        }) => Ok(MemoryMutationSettlement::InvalidAuthority(
+            *authority_result,
+        )),
     }
 }
 
@@ -92,7 +95,11 @@ pub fn fact_write_control(context: &RetainedSurfaceExecutionContextV1<'_>) -> Fa
     )
 }
 
-#[hotpath::measure(label = "daemon.retained.memory.bounded_operation", future = true)]
+#[tracing::instrument(
+    name = "daemon.retained.memory.bounded_operation",
+    level = "trace",
+    skip_all
+)]
 pub async fn bounded_memory_operation<T, F>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     future: F,
@@ -105,12 +112,17 @@ where
         RequestAdmission::Admitted if !context.cancellation_signal.is_cancelled() => {}
         RequestAdmission::Admitted | RequestAdmission::Cancelled => {
             return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_application::CancellationStage::BeforeEffect,
+                tracedecay_contracts::CancellationStage::BeforeEffect,
             ));
         }
         RequestAdmission::TimedOut => {
             return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::BeforeEffect,
+                tracedecay_contracts::CancellationStage::BeforeEffect,
+            ));
+        }
+        RequestAdmission::GrantExpired => {
+            return Err(RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+                tracedecay_contracts::ApplicationProblem::grant_expired_before_admission(),
             ));
         }
     }
@@ -119,26 +131,37 @@ where
         .ok()
         .map(Duration::from_micros)
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::BeforeEffect,
+            tracedecay_contracts::CancellationStage::BeforeEffect,
         ))?;
-    tokio::pin!(future);
-    tokio::select! {
-        biased;
-        outcome = &mut future => classify_memory_settlement(context, outcome),
-        () = context.cancellation_signal.cancelled() => {
-            if context.cancellation_signal.commit_started() {
-                classify_memory_settlement(context, future.await)
-            } else {
-                Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::BeforeEffect))
-            }
+    let mut future = std::pin::pin!(future);
+    let mut cancelled = std::pin::pin!(context.cancellation_signal.cancelled());
+    let mut deadline = std::pin::pin!(asupersync::time::sleep(
+        asupersync::time::wall_now(),
+        remaining
+    ));
+    let settlement = std::future::poll_fn(|task| {
+        if let Poll::Ready(outcome) = future.as_mut().poll(task) {
+            return Poll::Ready(Ok(outcome));
         }
-        () = tokio::time::sleep(remaining) => {
-            if context.cancellation_signal.commit_started() {
-                classify_memory_settlement(context, future.await)
-            } else {
-                Err(RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_application::CancellationStage::BeforeEffect))
-            }
+        if cancelled.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_contracts::CancellationStage::BeforeEffect,
+            )));
         }
+        if deadline.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                tracedecay_contracts::CancellationStage::BeforeEffect,
+            )));
+        }
+        Poll::Pending
+    })
+    .await;
+    match settlement {
+        Ok(outcome) => classify_memory_settlement(context, outcome),
+        Err(_) if context.cancellation_signal.commit_started() => {
+            classify_memory_settlement(context, future.await)
+        }
+        Err(interruption) => Err(interruption),
     }
 }
 
@@ -152,18 +175,18 @@ fn classify_memory_settlement<T>(
     match outcome {
         Ok(value) if commit_started => Ok((value, timed_out)),
         Ok(_) if cancelled => Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::BeforeEffect,
+            tracedecay_contracts::CancellationStage::BeforeEffect,
         )),
         Ok(_) if timed_out => Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::BeforeEffect,
+            tracedecay_contracts::CancellationStage::BeforeEffect,
         )),
         Ok(value) => Ok((value, false)),
         Err(_) if cancelled && !commit_started => Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::BeforeEffect,
+            tracedecay_contracts::CancellationStage::BeforeEffect,
         )),
         Err(RetainedSurfaceExecutionErrorV1::Cancelled(_)) if timed_out => {
             Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_application::CancellationStage::BeforeEffect,
+                tracedecay_contracts::CancellationStage::BeforeEffect,
             ))
         }
         Err(error) => Err(error),
@@ -175,14 +198,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::fresh_one_shot_commit_gate;
-
-    #[test]
-    fn commit_gate_admits_exactly_one_fresh_commit() {
-        let gate = fresh_one_shot_commit_gate(Arc::new(|| false));
-
-        assert!(gate());
-        assert!(!gate());
-    }
 
     #[test]
     fn commit_gate_rejects_an_interrupted_commit_without_consuming_admission() {

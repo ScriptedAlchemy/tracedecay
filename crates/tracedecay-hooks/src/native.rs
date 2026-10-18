@@ -8,13 +8,15 @@
 use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_domain::{NativeHostIdentityV1, UtcMicros};
+use tracedecay_domain::{NativeHostIdentityV1, ObservationId, SessionId, UtcMicros};
+use tracedecay_framing::MAX_WIRE_MESSAGE_BYTES;
 
 use crate::{
     HOOK_EVENT_SCHEMA_VERSION, HookBoundaryV1, HookContractError, HookEventEnvelopeV2,
     HookEventFamily, HookEventSupportV1, HookEventV2, HookLifecyclePhaseV1, HookOrderingV1,
-    HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES, stock_event_support,
+    HookScopeBindingV1, stock_event_support,
 };
 
 /// The bounded, content-free signal yielded from one native host event.
@@ -36,15 +38,48 @@ pub enum OpenCodePluginSurfaceV1 {
     ToolExecuteAfter,
 }
 
-/// Content-free result of decoding OpenCode's native project-scoped LSP event.
+/// Provider-native identity retained with a replayable lifecycle event.
 ///
-/// `lsp.updated` has no session identity and therefore must not be coerced into
-/// the session-scoped Hook V2 envelope. The daemon ingests it through the
-/// project-scoped host-event path instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The session and call identifiers come directly from the host callback, and
+/// `event_id` binds them to the exact content-free envelope stored beside it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DecodedOpenCodeLspEventV1 {
-    pub ordering: HookOrderingV1,
+pub struct NativeContextScoutLifecycleV1 {
+    pub session_id: SessionId,
+    pub call_id: ObservationId,
+    pub event_id: [u8; 16],
+}
+
+impl NativeContextScoutLifecycleV1 {
+    pub fn new(session_id: &str, call_id: &str, event_id: [u8; 16]) -> Option<Self> {
+        Some(Self {
+            session_id: SessionId::new(session_id.to_owned()).ok()?,
+            call_id: ObservationId::new(call_id.to_owned()).ok()?,
+            event_id,
+        })
+    }
+
+    /// Hosts whose tool callbacks name the session and call the Context Scout
+    /// lifecycle is bound to: their transcripts carry no turn tuple of their own.
+    pub const fn host_mounts_lifecycle(host: NativeHostIdentityV1) -> bool {
+        matches!(
+            host,
+            NativeHostIdentityV1::ClaudeCode
+                | NativeHostIdentityV1::KimiCode
+                | NativeHostIdentityV1::OpenCode
+        )
+    }
+
+    pub fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        Self::host_mounts_lifecycle(envelope.producer)
+            && <[u8; 32]>::from(Sha256::digest(self.session_id.as_str().as_bytes()))
+                == envelope.protected_session_id
+            && self.event_id == envelope.event_id
+            && matches!(
+                envelope.event,
+                HookEventV2::SavedEdit { .. } | HookEventV2::ToolLifecycle { .. }
+            )
+    }
 }
 
 impl NativeHookSignalV1 {
@@ -160,7 +195,7 @@ impl ProfileScopedNativeHookAdmissionV1 {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum NativeHookDecodeError {
-    #[error("native hook payload exceeds the Hook V2 bound")]
+    #[error("native hook payload exceeds the host wire bound")]
     PayloadTooLarge,
     #[error("native hook payload is malformed")]
     MalformedPayload,
@@ -185,7 +220,7 @@ pub enum NativeHookDecodeError {
 /// Per-payload decode fan-out. Every native hook byte stream a host receives
 /// passes through here once, so this is the boundary that reflects decode
 /// cost across all provider shapes without measuring each `decode_*` helper.
-#[hotpath::measure(label = "hooks.native.decode_event")]
+#[tracing::instrument(name = "hooks.native.decode_event", level = "trace", skip_all)]
 pub fn decode_native_hook_event(
     host: NativeHostIdentityV1,
     payload: &[u8],
@@ -201,6 +236,8 @@ pub fn decode_native_hook_event(
         NativeHostIdentityV1::Kiro => decode_kiro(&raw)?,
         NativeHostIdentityV1::KimiCode => decode_kimi(&raw)?,
         NativeHostIdentityV1::OpenCode => decode_opencode_event(&raw)?,
+        NativeHostIdentityV1::Pi => decode_pi(&raw)?,
+        NativeHostIdentityV1::FactoryDroid => decode_droid(&raw)?,
         NativeHostIdentityV1::Cline
         | NativeHostIdentityV1::RooCode
         | NativeHostIdentityV1::Kilo => {
@@ -213,7 +250,7 @@ pub fn decode_native_hook_event(
 /// OpenCode plugin callbacks enter here directly instead of through
 /// [`decode_native_hook_event`], so this surface needs its own decode
 /// boundary to stay visible.
-#[hotpath::measure(label = "hooks.native.decode_plugin_event")]
+#[tracing::instrument(name = "hooks.native.decode_plugin_event", level = "trace", skip_all)]
 pub fn decode_opencode_plugin_event(
     surface: OpenCodePluginSurfaceV1,
     payload: &[u8],
@@ -226,30 +263,14 @@ pub fn decode_opencode_plugin_event(
     finish_decoded_native_event(NativeHostIdentityV1::OpenCode, signal, &raw)
 }
 
-/// Project-scoped LSP decode also bypasses [`decode_native_hook_event`] and
-/// runs as a probe on every OpenCode dispatch, so it is measured separately.
-#[hotpath::measure(label = "hooks.native.decode_lsp_event")]
-pub fn decode_opencode_lsp_event(
-    payload: &[u8],
-) -> Result<DecodedOpenCodeLspEventV1, NativeHookDecodeError> {
-    let raw = parse_native_payload(payload)?;
-    if event_name(&raw, "type")? != "lsp.updated" {
-        return Err(NativeHookDecodeError::UnsupportedNativeEvent);
-    }
-    let event = decode_shape::<OpenCodeLspUpdatedEvent>(&raw)?;
-    if event.id.is_empty() {
-        return Err(NativeHookDecodeError::MissingTypedIdentity);
-    }
-    Ok(DecodedOpenCodeLspEventV1 {
-        ordering: native_ordering(&raw)?,
-    })
-}
-
 fn parse_native_payload(payload: &[u8]) -> Result<Value, NativeHookDecodeError> {
     const MAX_NATIVE_DEPTH: usize = 32;
     const MAX_NATIVE_VALUES: usize = 2_048;
 
-    if payload.len() > MAX_HOOK_PAYLOAD_BYTES {
+    // Decoders keep only typed identity, never host content, so the raw
+    // payload is bounded by the host wire authority rather than by the
+    // content-free envelope a spool record holds.
+    if payload.len() > MAX_WIRE_MESSAGE_BYTES {
         return Err(NativeHookDecodeError::PayloadTooLarge);
     }
     let raw: Value =
@@ -531,67 +552,59 @@ struct KimiStopEvent {
     _stop_hook_active: IgnoredAny,
 }
 
+/// The lifecycle payload the TraceDecay Pi extension writes for Pi's
+/// in-process `session_start` and `agent_end` events.
 #[derive(Deserialize)]
-struct OpenCodeEventProperties {
-    file: Option<String>,
-    #[serde(rename = "sessionID")]
-    session_id: Option<String>,
-    status: Option<OpenCodeSessionStatus>,
+struct PiLifecycleEvent {
+    id: String,
+    session_id: String,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
 }
 
+/// The lifecycle payload Factory Droid writes for its `SessionStart` and
+/// `Stop` hooks (`~/.factory/hooks.json` commands receive one JSON object on
+/// stdin; see fixtures/host_events/droid.json for the captured shape).
 #[derive(Deserialize)]
-struct OpenCodeSessionStatus {
-    #[serde(rename = "type")]
-    kind: String,
+struct DroidLifecycleEvent {
+    session_id: String,
+    #[serde(rename = "transcript_path")]
+    _transcript_path: IgnoredAny,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
+    #[serde(rename = "permission_mode")]
+    _permission_mode: IgnoredAny,
 }
 
+/// One event from OpenCode's V2 public stream: a typed envelope whose
+/// session-scoped payload lives under `data`.
 #[derive(Deserialize)]
 struct OpenCodeBusEvent {
     #[serde(rename = "id")]
     _id: IgnoredAny,
-    properties: OpenCodeEventProperties,
+    #[serde(rename = "created")]
+    _created: IgnoredAny,
+    data: OpenCodeEventData,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OpenCodeLspUpdatedEvent {
-    id: String,
-    #[serde(rename = "type")]
-    _kind: IgnoredAny,
-    #[serde(rename = "properties")]
-    _properties: OpenCodeLspUpdatedProperties,
+struct OpenCodeEventData {
+    #[serde(rename = "sessionID")]
+    session_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OpenCodeLspUpdatedProperties {}
-
+/// The V2 `execute.after` tool hook event: one object carrying the call
+/// identity, the tool input, and either a completed result or an error.
 #[derive(Deserialize)]
 struct OpenCodeToolAfterEvent {
-    input: OpenCodeToolAfterInput,
-    #[serde(rename = "output")]
-    _output: OpenCodeToolAfterOutput,
-}
-
-#[derive(Deserialize)]
-struct OpenCodeToolAfterInput {
     tool: String,
     #[serde(rename = "sessionID")]
     _session_id: IgnoredAny,
-    #[serde(rename = "callID")]
+    #[serde(rename = "id")]
     _call_id: IgnoredAny,
-    #[serde(rename = "args")]
-    _args: IgnoredAny,
-}
-
-#[derive(Deserialize)]
-struct OpenCodeToolAfterOutput {
-    #[serde(rename = "title")]
-    _title: IgnoredAny,
-    #[serde(rename = "output")]
-    _output: IgnoredAny,
-    #[serde(rename = "metadata")]
-    _metadata: IgnoredAny,
+    #[serde(rename = "input")]
+    _input: IgnoredAny,
+    status: String,
 }
 
 fn decode_shape<T: DeserializeOwned>(raw: &Value) -> Result<T, NativeHookDecodeError> {
@@ -746,36 +759,46 @@ fn decode_kimi(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError>
     }
 }
 
+fn decode_pi(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
+    let boundary = match event_name(raw, "hook_event_name")? {
+        "session_start" => HookBoundaryV1::Start,
+        "agent_end" => HookBoundaryV1::TurnComplete,
+        _ => return Err(NativeHookDecodeError::UnsupportedNativeEvent),
+    };
+    let event = decode_shape::<PiLifecycleEvent>(raw)?;
+    if event.id.is_empty() || event.session_id.is_empty() {
+        return Err(NativeHookDecodeError::MissingTypedIdentity);
+    }
+    Ok(NativeHookSignalV1::SessionBoundary(boundary))
+}
+
+fn decode_droid(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
+    let boundary = match event_name(raw, "hook_event_name")? {
+        "SessionStart" => HookBoundaryV1::Start,
+        "Stop" => HookBoundaryV1::TurnComplete,
+        _ => return Err(NativeHookDecodeError::UnsupportedNativeEvent),
+    };
+    let event = decode_shape::<DroidLifecycleEvent>(raw)?;
+    if event.session_id.is_empty() {
+        return Err(NativeHookDecodeError::MissingTypedIdentity);
+    }
+    Ok(NativeHookSignalV1::SessionBoundary(boundary))
+}
+
+/// The V2 stream reports a turn's end only through the durable execution
+/// terminal events; `session.idle` / `session.status` are not emitted for V2
+/// executions and no stream event reports an edit, so edits arrive solely via
+/// [`decode_opencode_tool_after`].
 fn decode_opencode_event(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
-    let event = decode_shape::<OpenCodeBusEvent>(raw)?;
     match event_name(raw, "type")? {
-        "file.edited" => {
-            event
-                .properties
-                .file
-                .filter(|file| !file.is_empty())
-                .ok_or(NativeHookDecodeError::MalformedPayload)?;
-            Ok(NativeHookSignalV1::SavedEdit)
-        }
-        "session.idle" => {
-            event
-                .properties
+        "session.execution.succeeded"
+        | "session.execution.failed"
+        | "session.execution.interrupted" => {
+            decode_shape::<OpenCodeBusEvent>(raw)?
+                .data
                 .session_id
                 .filter(|session| !session.is_empty())
                 .ok_or(NativeHookDecodeError::MalformedPayload)?;
-            Ok(NativeHookSignalV1::SessionBoundary(
-                HookBoundaryV1::TurnComplete,
-            ))
-        }
-        "session.status" => {
-            event
-                .properties
-                .session_id
-                .filter(|session| !session.is_empty())
-                .ok_or(NativeHookDecodeError::MalformedPayload)?;
-            if event.properties.status.map(|status| status.kind).as_deref() != Some("idle") {
-                return Err(NativeHookDecodeError::UnsupportedNativeEvent);
-            }
             Ok(NativeHookSignalV1::SessionBoundary(
                 HookBoundaryV1::TurnComplete,
             ))
@@ -786,13 +809,14 @@ fn decode_opencode_event(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDe
 
 fn decode_opencode_tool_after(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     let event = decode_shape::<OpenCodeToolAfterEvent>(raw)?;
-    Ok(
-        if matches!(event.input.tool.as_str(), "apply_patch" | "edit" | "write") {
+    Ok(match event.status.as_str() {
+        "completed" if matches!(event.tool.as_str(), "edit" | "write" | "patch") => {
             NativeHookSignalV1::SavedEdit
-        } else {
-            NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed)
-        },
-    )
+        }
+        "completed" => NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
+        "error" => NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Failed),
+        _ => return Err(NativeHookDecodeError::MalformedPayload),
+    })
 }
 
 fn event_name<'a>(raw: &'a Value, key: &str) -> Result<&'a str, NativeHookDecodeError> {
@@ -818,15 +842,19 @@ fn native_ordering(raw: &Value) -> Result<HookOrderingV1, NativeHookDecodeError>
 mod tests {
     use super::*;
 
-    fn fixture_request(document: &str, identity: &str) -> Vec<u8> {
+    fn fixture_request_value(document: &str, identity: &str) -> serde_json::Value {
         let document: serde_json::Value = serde_json::from_str(document).unwrap();
-        let event = document["events"]
+        document["events"]
             .as_array()
             .unwrap()
             .iter()
             .find(|event| event["identity"].as_str() == Some(identity))
-            .unwrap();
-        serde_json::to_vec(&event["request"]).unwrap()
+            .unwrap()["request"]
+            .clone()
+    }
+
+    fn fixture_request(document: &str, identity: &str) -> Vec<u8> {
+        serde_json::to_vec(&fixture_request_value(document, identity)).unwrap()
     }
 
     #[test]
@@ -892,6 +920,16 @@ mod tests {
                 include_bytes!("../fixtures/host_events/kimi/stop.json"),
                 NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
             ),
+            (
+                NativeHostIdentityV1::Pi,
+                include_bytes!("../fixtures/host_events/pi/session-start.json"),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start),
+            ),
+            (
+                NativeHostIdentityV1::Pi,
+                include_bytes!("../fixtures/host_events/pi/agent-end.json"),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
         ];
 
         for (host, payload, signal) in captures {
@@ -902,41 +940,159 @@ mod tests {
         }
 
         let opencode = include_str!("../fixtures/host_events/opencode/baseline.json");
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::OpenCode,
+                fixture_request(opencode, "stop").as_slice()
+            )
+            .unwrap()
+            .signal,
+            NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete)
+        );
         for (identity, signal) in [
-            ("saved_edit", NativeHookSignalV1::SavedEdit),
+            ("post_tool_use", NativeHookSignalV1::SavedEdit),
             (
-                "idle_status",
-                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
-            ),
-            (
-                "stop",
-                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+                "tool_completed",
+                NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
             ),
         ] {
             assert_eq!(
-                decode_native_hook_event(
-                    NativeHostIdentityV1::OpenCode,
-                    fixture_request(opencode, identity).as_slice()
+                decode_opencode_plugin_event(
+                    OpenCodePluginSurfaceV1::ToolExecuteAfter,
+                    fixture_request(opencode, identity).as_slice(),
                 )
                 .unwrap()
                 .signal,
                 signal
             );
         }
+    }
+
+    /// The V2 stream's execution start and the deprecated idle events are not
+    /// turn boundaries; a completed edit whose hook reports `error` is a
+    /// failed tool, not a saved edit.
+    #[test]
+    fn opencode_v2_shapes_reject_non_boundary_and_failed_edits() {
+        let opencode = include_str!("../fixtures/host_events/opencode/baseline.json");
+        let mut started = fixture_request_value(opencode, "stop");
+        started["type"] = serde_json::json!("session.execution.started");
+        assert!(matches!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::OpenCode,
+                serde_json::to_vec(&started).unwrap().as_slice()
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+        ));
+        let mut unsessioned = fixture_request_value(opencode, "stop");
+        unsessioned["data"] = serde_json::json!({});
+        assert!(matches!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::OpenCode,
+                serde_json::to_vec(&unsessioned).unwrap().as_slice()
+            ),
+            Err(NativeHookDecodeError::MalformedPayload)
+        ));
+
+        let mut failed_edit = fixture_request_value(opencode, "post_tool_use");
+        failed_edit["status"] = serde_json::json!("error");
         assert_eq!(
             decode_opencode_plugin_event(
                 OpenCodePluginSurfaceV1::ToolExecuteAfter,
-                fixture_request(opencode, "post_tool_use").as_slice(),
+                serde_json::to_vec(&failed_edit).unwrap().as_slice(),
             )
             .unwrap()
             .signal,
-            NativeHookSignalV1::SavedEdit
+            NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Failed)
         );
+    }
+
+    #[test]
+    fn pi_evidence_catalog_requests_are_the_checked_in_captures() {
+        let catalog = include_str!("../fixtures/host_events/pi.json");
+        for (identity, capture, signal) in [
+            (
+                "session_start",
+                &include_bytes!("../fixtures/host_events/pi/session-start.json")[..],
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start),
+            ),
+            (
+                "stop",
+                &include_bytes!("../fixtures/host_events/pi/agent-end.json")[..],
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+        ] {
+            let request = fixture_request(catalog, identity);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&request).unwrap(),
+                serde_json::from_slice::<Value>(capture).unwrap(),
+                "{identity} catalog request drifted from its capture"
+            );
+            assert_eq!(
+                decode_native_hook_event(NativeHostIdentityV1::Pi, &request)
+                    .unwrap()
+                    .signal,
+                signal
+            );
+        }
+    }
+
+    #[test]
+    fn pi_lifecycle_requires_its_own_event_and_session_identity() {
+        let agent_end = include_bytes!("../fixtures/host_events/pi/agent-end.json");
+        let mut payload = serde_json::from_slice::<Value>(agent_end).unwrap();
+        payload["session_id"] = Value::String(String::new());
         assert_eq!(
-            decode_opencode_lsp_event(fixture_request(opencode, "lsp_updated").as_slice(),)
-                .unwrap()
-                .ordering,
-            HookOrderingV1::Unknown
+            decode_native_hook_event(
+                NativeHostIdentityV1::Pi,
+                &serde_json::to_vec(&payload).unwrap()
+            ),
+            Err(NativeHookDecodeError::MissingTypedIdentity)
+        );
+        payload["hook_event_name"] = Value::String("tool_result".to_owned());
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::Pi,
+                &serde_json::to_vec(&payload).unwrap()
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+        );
+        // Another host's event shape never decodes as a Pi boundary.
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::Pi,
+                include_bytes!("../fixtures/host_events/codex/stop.json")
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+        );
+    }
+
+    #[test]
+    fn droid_lifecycle_requires_its_own_event_and_session_identity() {
+        let stop = include_bytes!("../fixtures/host_events/droid/stop.json");
+        let mut payload = serde_json::from_slice::<Value>(stop).unwrap();
+        payload["session_id"] = Value::String(String::new());
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::FactoryDroid,
+                &serde_json::to_vec(&payload).unwrap()
+            ),
+            Err(NativeHookDecodeError::MissingTypedIdentity)
+        );
+        payload["hook_event_name"] = Value::String("PreToolUse".to_owned());
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::FactoryDroid,
+                &serde_json::to_vec(&payload).unwrap()
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+        );
+        // Another host's event shape never decodes as a Droid boundary.
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::FactoryDroid,
+                include_bytes!("../fixtures/host_events/pi/agent-end.json")
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeEvent)
         );
     }
 
@@ -947,7 +1103,10 @@ mod tests {
                 NativeHostIdentityV1::KimiCode,
                 r#""hook_event_name":"Stop""#,
             ),
-            (NativeHostIdentityV1::OpenCode, r#""type":"session.idle""#),
+            (
+                NativeHostIdentityV1::OpenCode,
+                r#""type":"session.execution.succeeded""#,
+            ),
         ] {
             let nested = format!("{}null{}", "[".repeat(33), "]".repeat(33));
             let deep = format!(r#"{{{discriminator},"nested":{nested}}}"#);
@@ -956,10 +1115,56 @@ mod tests {
                 Err(NativeHookDecodeError::StructureLimit)
             );
 
-            let oversized = vec![b' '; MAX_HOOK_PAYLOAD_BYTES + 1];
+            let oversized = vec![b' '; MAX_WIRE_MESSAGE_BYTES + 1];
             assert_eq!(
                 decode_native_hook_event(host, &oversized),
                 Err(NativeHookDecodeError::PayloadTooLarge)
+            );
+        }
+    }
+
+    #[test]
+    fn native_events_carrying_large_host_content_still_decode() {
+        let content = "fn f() {}\n".repeat(4_000);
+        let enlarge = |fixture: &[u8], pointers: &[&str]| {
+            let mut payload = serde_json::from_slice::<Value>(fixture).unwrap();
+            for pointer in pointers {
+                *payload.pointer_mut(pointer).unwrap() = Value::String(content.clone());
+            }
+            serde_json::to_vec(&payload).unwrap()
+        };
+        let cases = [
+            (
+                NativeHostIdentityV1::ClaudeCode,
+                enlarge(
+                    include_bytes!("../fixtures/host_events/claude/post_tool_use_write.json"),
+                    &["/tool_input/content", "/tool_response/content"],
+                ),
+                NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
+            ),
+            (
+                NativeHostIdentityV1::Codex,
+                enlarge(
+                    include_bytes!("../fixtures/host_events/codex/stop.json"),
+                    &["/last_assistant_message"],
+                ),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+            (
+                NativeHostIdentityV1::CursorDesktop,
+                enlarge(
+                    include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
+                    &["/edits/0/new_string"],
+                ),
+                NativeHookSignalV1::SavedEdit,
+            ),
+        ];
+        for (host, payload, signal) in cases {
+            assert!(payload.len() > 40_000, "{host:?} payload lost its content");
+            assert_eq!(
+                decode_native_hook_event(host, &payload).map(|decoded| decoded.signal),
+                Ok(signal),
+                "{host:?}"
             );
         }
     }

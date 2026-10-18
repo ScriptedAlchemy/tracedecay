@@ -2,12 +2,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
-use tracedecay_query::search_quality::{CandidateWorkloadV1, SearchEvalError, packaged};
+use tracedecay_query::search_quality::candidate_output::WORKLOAD_RELATIVE;
+use tracedecay_query::search_quality::{
+    CandidateWorkloadV1, SearchEvalError, load_candidate_workload, packaged,
+};
 
 const SOURCE_COMMIT: &str = "8312618fee8109b16be09e65f45118b4e550fa14";
 const PACK_ID: &str = "184f6ca1eafd40e7889d15a20b7a5c861e80a47b";
+const CONTEXT_PACK_ID: &str = "f3c7116c6c911657b2b0d933cbf89ae00dfdee64";
 
 pub(crate) struct PackagedEvaluatorAssets {
     _directory: TempDir,
@@ -21,8 +25,7 @@ impl PackagedEvaluatorAssets {
     }
 
     pub(crate) fn workload_path(&self) -> PathBuf {
-        self.root
-            .join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json")
+        self.root.join(WORKLOAD_RELATIVE)
     }
 
     pub(crate) fn workload(&self) -> &CandidateWorkloadV1 {
@@ -30,6 +33,7 @@ impl PackagedEvaluatorAssets {
     }
 }
 
+#[tracing::instrument(name = "search_eval.package.materialize", level = "trace", skip_all)]
 pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> {
     let workload = packaged::load_workload()?;
     let directory = tempfile::tempdir().map_err(|error| {
@@ -57,16 +61,19 @@ pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> 
         })?;
     }
     materialize_git_authority(directory.path())?;
-    let materialized_workload = tracedecay_query::search_quality::load_candidate_workload(
-        &directory
-            .path()
-            .join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
-    )?;
-    if materialized_workload != workload {
-        return Err(SearchEvalError::Contract(
-            "materialized evaluator workload differs from packaged bytes".to_owned(),
-        ));
-    }
+    {
+        let _span = tracing::trace_span!("search_eval.package.verify").entered();
+        {
+            let materialized_workload =
+                load_candidate_workload(&directory.path().join(WORKLOAD_RELATIVE))?;
+            if materialized_workload != workload {
+                return Err(SearchEvalError::Contract(
+                    "materialized evaluator workload differs from packaged bytes".to_owned(),
+                ));
+            }
+            Ok::<(), SearchEvalError>(())
+        }
+    }?;
     Ok(PackagedEvaluatorAssets {
         root: directory.path().to_path_buf(),
         _directory: directory,
@@ -74,37 +81,66 @@ pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> 
     })
 }
 
-fn materialize_git_authority(root: &Path) -> Result<(), SearchEvalError> {
-    let git = root.join(".git");
+/// Writes the checked-in evaluator object pack into an existing `.git`
+/// directory.
+///
+/// The pack is a genuine sparse subset of the product repository: it carries
+/// the exact commit, tree spine, and blob objects the checked-in workload pins
+/// for its historical queries, under their real object identities. Writing it
+/// into a repository therefore only backfills objects. It can never replace or
+/// contradict an object the repository already holds.
+///
+/// The evaluator needs that backfill because the pinned historical commits live
+/// on a long-running integration branch. A rebase there re-parents the commit,
+/// which mints a new commit identity and leaves the pinned one unreachable from
+/// every ref. Local clones keep resolving it, because cloning a path on the same
+/// filesystem hard-links the whole object store including unreachable objects.
+/// A wire-protocol clone, which is what CI checks out, transfers only
+/// ref-reachable objects and drops it. Materializing the checked-in pack keeps
+/// the pinned history resolvable in both.
+fn write_checked_in_object_pack(git: &Path) -> Result<(), SearchEvalError> {
     let pack_root = git.join("objects/pack");
-    let refs_root = git.join("refs");
     fs::create_dir_all(&pack_root).map_err(|error| {
         SearchEvalError::Contract(format!("create packaged evaluator Git authority: {error}"))
-    })?;
-    fs::create_dir_all(&refs_root).map_err(|error| {
-        SearchEvalError::Contract(format!("create packaged evaluator Git refs: {error}"))
     })?;
     let decode = |encoded: &str, kind: &str| {
         hex::decode(encoded.split_whitespace().collect::<String>()).map_err(|error| {
             SearchEvalError::Contract(format!("decode packaged evaluator Git {kind}: {error}"))
         })
     };
-    let pack = decode(
-        include_str!("../assets/git/evaluator.pack.hex"),
-        "object pack",
-    )?;
-    let index = decode(
-        include_str!("../assets/git/evaluator.idx.hex"),
-        "object index",
-    )?;
-    fs::write(pack_root.join(format!("pack-{PACK_ID}.pack")), pack).map_err(|error| {
-        SearchEvalError::Contract(format!("write packaged evaluator Git object pack: {error}"))
+    for (id, pack, index) in [
+        (
+            PACK_ID,
+            include_str!("../assets/git/evaluator.pack.hex"),
+            include_str!("../assets/git/evaluator.idx.hex"),
+        ),
+        (
+            CONTEXT_PACK_ID,
+            include_str!("../assets/git/evaluator-context.pack.hex"),
+            include_str!("../assets/git/evaluator-context.idx.hex"),
+        ),
+    ] {
+        let pack = decode(pack, "object pack")?;
+        let index = decode(index, "object index")?;
+        fs::write(pack_root.join(format!("pack-{id}.pack")), pack).map_err(|error| {
+            SearchEvalError::Contract(format!("write packaged evaluator Git object pack: {error}"))
+        })?;
+        fs::write(pack_root.join(format!("pack-{id}.idx")), index).map_err(|error| {
+            SearchEvalError::Contract(format!(
+                "write packaged evaluator Git object index: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn materialize_git_authority(root: &Path) -> Result<(), SearchEvalError> {
+    let git = root.join(".git");
+    let refs_root = git.join("refs");
+    fs::create_dir_all(&refs_root).map_err(|error| {
+        SearchEvalError::Contract(format!("create packaged evaluator Git refs: {error}"))
     })?;
-    fs::write(pack_root.join(format!("pack-{PACK_ID}.idx")), index).map_err(|error| {
-        SearchEvalError::Contract(format!(
-            "write packaged evaluator Git object index: {error}"
-        ))
-    })?;
+    write_checked_in_object_pack(&git)?;
     fs::write(git.join("HEAD"), format!("{SOURCE_COMMIT}\n")).map_err(|error| {
         SearchEvalError::Contract(format!("write packaged evaluator Git HEAD: {error}"))
     })?;
@@ -120,9 +156,9 @@ fn materialize_git_authority(root: &Path) -> Result<(), SearchEvalError> {
 
 pub(crate) fn admitted_scope(_root: &Path) -> Option<ResolvedScope> {
     ResolvedScope::new(
-        ProjectId::new("project.semantic-evaluator-assets").ok()?,
-        RepositoryId::new("repository.semantic-evaluator-assets").ok()?,
-        WorktreeId::new("worktree.semantic-evaluator-assets").ok()?,
+        ProjectId::new("project.packaged-evaluator-assets").ok()?,
+        RepositoryId::new("repository.packaged-evaluator-assets").ok()?,
+        WorktreeId::new("worktree.packaged-evaluator-assets").ok()?,
         None,
     )
     .ok()
@@ -130,34 +166,25 @@ pub(crate) fn admitted_scope(_root: &Path) -> Option<ResolvedScope> {
 
 #[cfg(test)]
 mod tests {
+    /// The packaged evaluator carries its own workload, corpus, and Git
+    /// authority, so `compare` needs nothing from the checkout it runs in.
     #[test]
-    fn packaged_workload_is_independent_of_mounted_project() {
-        let unrelated = tempfile::tempdir().expect("unrelated project");
-        std::fs::write(
-            unrelated.path().join("Cargo.toml"),
-            "[package]\nname = \"unrelated\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("unrelated project content");
-
-        let summary = crate::validate_default_activation_workload(unrelated.path())
-            .expect("packaged evaluator workload");
-        assert_eq!(summary.query_count, 28);
-        assert_eq!(summary.profile_count, 3);
-    }
-
-    #[test]
-    fn packaged_evaluator_runs_against_an_unrelated_project() {
-        let unrelated = tempfile::tempdir().expect("unrelated project");
-        std::fs::write(
-            unrelated.path().join("Cargo.toml"),
-            "[package]\nname = \"unrelated\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("unrelated project content");
+    fn packaged_evaluator_compares_the_fallback_profile_from_its_own_root() {
         let profiles = vec!["query-fallback".to_owned()];
 
-        let report = crate::compare_default_direct(unrelated.path(), Some(&profiles))
-            .expect("packaged evaluator execution");
+        let report =
+            crate::compare_default_direct(Some(&profiles)).expect("packaged evaluator execution");
         assert_eq!(report.command, "compare");
-        assert!(!report.profiles.is_empty());
+        assert_eq!(
+            report
+                .profiles
+                .iter()
+                .map(|profile| (profile.profile_id.as_str(), profile.partition.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("query-fallback", "train"),
+                ("query-fallback", "validation")
+            ]
+        );
     }
 }

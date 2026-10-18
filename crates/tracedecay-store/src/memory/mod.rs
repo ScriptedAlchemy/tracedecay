@@ -31,8 +31,8 @@ pub use project_memory::{
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardNamedCountV1, ProjectMemoryDashboardOplogEntryV1,
     ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryEntityIdV1,
-    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryDashboardVectorSnapshotV1,
+    ProjectMemoryEntityIdV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactAddOutcomeV1,
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
     ProjectMemoryFactContradictionV1, ProjectMemoryFactCurationAddV1,
@@ -53,9 +53,11 @@ pub use project_memory::{
     ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchGraphCoverageV1,
     ProjectMemoryFactSearchGraphDegradationV1, ProjectMemoryFactSearchHitV1,
     ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchScoresV1,
-    ProjectMemoryFactSnapshotV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
-    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
-    ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1,
+    ProjectMemoryFactSnapshotV1, ProjectMemoryFactSupersedeCommandV1,
+    ProjectMemoryFactSupersedeOutcomeV1, ProjectMemoryFactUnavailableV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
+    ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1, ProjectMemoryPrivacyPurgeCursorV1,
+    ProjectMemoryPrivacyPurgeReceiptV1, ProjectMemoryStoreRevisionV1,
     derive_project_memory_fact_curation_child_operation_id,
 };
 pub use queries::{
@@ -87,7 +89,7 @@ use queries::MAX_LINEAGE_LIMIT;
 #[cfg(test)]
 use tracedecay_domain::{
     DomainError, FactAssertionV1, FactLineageEventKindV1, FactLineageEventV1, RetrievalAnchorId,
-    RetrievalAnchorRecordV2,
+    RetrievalAnchorRecord,
 };
 #[cfg(test)]
 use write::{MAX_FACT_WRITE_BATCH_EVENTS, MAX_FACT_WRITE_BATCH_NEW_ANCHORS};

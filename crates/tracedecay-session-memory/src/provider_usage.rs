@@ -35,7 +35,7 @@ pub enum ProviderUsageCoverageV1 {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderUsageIssueKindV1 {
     InitialCumulativeCheckpoint,
@@ -57,7 +57,7 @@ pub enum ProviderUsageIssueKindV1 {
     PaginationCursorDidNotAdvance,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderUsageIssueV1 {
     pub kind: ProviderUsageIssueKindV1,
     pub observation_sequence: Option<u64>,
@@ -76,7 +76,6 @@ pub struct AggregatedProviderUsageCountersV1 {
 }
 
 impl AggregatedProviderUsageCountersV1 {
-    #[hotpath::skip]
     pub const fn unknown() -> Self {
         Self {
             input_tokens: None,
@@ -89,14 +88,14 @@ impl AggregatedProviderUsageCountersV1 {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderUsageDeltaDerivationV1 {
     NativeDelta,
     CumulativeDifference,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderUsageDeltaV1 {
     pub observation_id: String,
     pub receipt_id: String,
@@ -117,7 +116,7 @@ pub struct ProviderUsageDeltaV1 {
     pub counters: AggregatedProviderUsageCountersV1,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderUsageAggregateV1 {
     pub coverage: ProviderUsageCoverageV1,
     pub observations_seen: u64,
@@ -127,7 +126,53 @@ pub struct ProviderUsageAggregateV1 {
     pub upper_observation_sequence: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+/// Provider-reported usage attributed to one `(provider, session_id)`, summed
+/// from the reduced deltas of one aggregate.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct ProviderUsageSessionTotalsV1 {
+    pub usage_events: u64,
+    pub counters: AggregatedProviderUsageCountersV1,
+    /// `false` when the reduction recorded an issue against this session, so
+    /// the sums are a lower bound on what the provider wrote.
+    pub complete: bool,
+}
+
+/// Groups one aggregate's deltas by `(provider, session_id)`. A session that
+/// only appears in `issues` is present with zero events and unknown counters:
+/// the provider wrote usage for it that could not be reduced.
+pub fn provider_usage_by_session(
+    aggregate: &ProviderUsageAggregateV1,
+) -> BTreeMap<(String, String), ProviderUsageSessionTotalsV1> {
+    let mut sums: BTreeMap<(String, String), (u64, CounterSum, bool)> = BTreeMap::new();
+    for delta in &aggregate.deltas {
+        let entry = sums
+            .entry((delta.provider.clone(), delta.session_id.clone()))
+            .or_insert_with(|| (0, CounterSum::default(), true));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1.add_aggregated(&delta.counters);
+    }
+    for issue in &aggregate.issues {
+        if let (Some(provider), Some(session_id)) = (&issue.provider, &issue.session_id) {
+            sums.entry((provider.clone(), session_id.clone()))
+                .or_insert_with(|| (0, CounterSum::default(), true))
+                .2 = false;
+        }
+    }
+    sums.into_iter()
+        .map(|(key, (usage_events, counters, complete))| {
+            (
+                key,
+                ProviderUsageSessionTotalsV1 {
+                    usage_events,
+                    counters: counters.finish(),
+                    complete,
+                },
+            )
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProviderUsageModelCostV1 {
     pub provider: String,
     pub model: String,
@@ -136,7 +181,7 @@ pub struct ProviderUsageModelCostV1 {
     pub cost_usd: Option<f64>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProviderUsageCostSummaryV1 {
     pub coverage: ProviderUsageCoverageV1,
     pub pricing_revision: String,
@@ -272,7 +317,7 @@ impl ProviderUsageScanV1 {
 /// Walks one pinned provider-usage snapshot to exhaustion. Pagination and
 /// truncation semantics live here so HTTP, MCP, hooks, and CLI cannot each
 /// implement a subtly different bounded scan.
-#[hotpath::measure(label = "usecases.provider_usage.aggregate", future = true)]
+#[tracing::instrument(name = "usecases.provider_usage.aggregate", level = "trace", skip_all)]
 pub async fn provider_usage_aggregate(
     db: &RegisteredGlobalDb,
     scope: &ObservationScopeV1,
@@ -423,6 +468,15 @@ impl CounterSum {
         self.cache_write.add(counters.cache_write);
         self.reasoning.add(counters.reasoning);
         self.total.add(counters.total);
+    }
+
+    fn add_aggregated(&mut self, counters: &AggregatedProviderUsageCountersV1) {
+        self.input.add(counters.input_tokens);
+        self.output.add(counters.output_tokens);
+        self.cache_read.add(counters.cache_read_tokens);
+        self.cache_write.add(counters.cache_write_tokens);
+        self.reasoning.add(counters.reasoning_tokens);
+        self.total.add(counters.total_tokens);
     }
 
     fn finish(self) -> AggregatedProviderUsageCountersV1 {

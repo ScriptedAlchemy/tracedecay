@@ -1,6 +1,6 @@
 /**
  * Explorer read-model: normalises the three independent memories the daemon
- * exposes — the code graph, session transcripts, and holographic knowledge —
+ * exposes, the code graph, session transcripts, and holographic knowledge , 
  * into one comparable result shape.
  *
  * Rules this module exists to enforce:
@@ -13,7 +13,20 @@
  */
 import { matchedFieldNames, matchWindow } from '../../ui/search/terms.ts';
 
+/**
+ * The four Explorer lanes. Three are backed by a coordinator source and can
+ * deliver rows; `semantic` is the lane the product contract names for
+ * semantic/graph retrieval, for which no production authority is registered
+ * today. It is a lane so its absence is rendered as a typed state beside the
+ * lanes that answer, never as a missing column a reader could mistake for
+ * "nothing to say".
+ */
 export type LaneId = 'code' | 'sessions' | 'knowledge' | 'semantic';
+
+/** The lanes a coordinator source answers for, the only lanes rows come from. */
+export type SourceLaneId = Exclude<LaneId, 'semantic'>;
+
+export const SOURCE_LANE_IDS: readonly SourceLaneId[] = ['code', 'sessions', 'knowledge'];
 
 export interface LaneSpec {
   readonly id: LaneId;
@@ -22,6 +35,8 @@ export interface LaneSpec {
   readonly searches: string;
   /** What the lane shows before a query is submitted. */
   readonly browseLabel: string;
+  /** Legend over the lane's headline count. */
+  readonly countLabel: string;
   /** Utility class for the lane's identity rail. */
   readonly railClass: string;
   readonly textClass: string;
@@ -32,9 +47,10 @@ export interface LaneSpec {
 export const LANES: readonly LaneSpec[] = [
   {
     id: 'code',
-    label: 'Code graph',
-    searches: 'name, qualified_name, signature, and file_path',
+    label: 'Code',
+    searches: 'name, qualified_name, signature, and file_path in the code graph',
     browseLabel: 'most-connected symbols',
+    countLabel: 'Exact symbol matches',
     railClass: 'bg-accent',
     textClass: 'text-accent',
     facetLabel: 'Symbol kind',
@@ -44,6 +60,7 @@ export const LANES: readonly LaneSpec[] = [
     label: 'Sessions',
     searches: 'message content and summary text in the active LCM store',
     browseLabel: 'latest session summaries',
+    countLabel: 'Transcript matches',
     railClass: 'bg-state-partial',
     textClass: 'text-state-partial',
     facetLabel: 'Role',
@@ -53,6 +70,7 @@ export const LANES: readonly LaneSpec[] = [
     label: 'Knowledge',
     searches: 'content and tags in a bounded fact overview',
     browseLabel: 'a bounded fact overview',
+    countLabel: 'Fact matches',
     railClass: 'bg-state-ready',
     textClass: 'text-state-ready',
     facetLabel: 'Category',
@@ -60,17 +78,17 @@ export const LANES: readonly LaneSpec[] = [
   {
     id: 'semantic',
     label: 'Semantic',
-    searches:
-      'nothing yet from this surface — the coordinator reports the semantic provider\u2019s typed state per run',
-    browseLabel: 'nothing to browse; the provider\u2019s state is reported per search',
-    railClass: 'bg-state-loading',
-    textClass: 'text-state-loading',
-    facetLabel: 'Symbol kind',
+    searches: 'nothing: no semantic retrieval authority is registered with the coordinator',
+    browseLabel: 'nothing: no semantic index is served',
+    countLabel: 'Semantic matches',
+    railClass: 'bg-state-locked',
+    textClass: 'text-state-locked',
+    facetLabel: 'Basis',
   },
 ];
 
-export interface Signal {
-  /** The payload field this number came from — shown verbatim to the user. */
+interface Signal {
+  /** The payload field this number came from, shown verbatim to the user. */
   readonly field: string;
   readonly value: number;
   /** Largest value seen across the lane's loaded rows, for the proportion. */
@@ -81,7 +99,7 @@ export interface Signal {
 
 export interface Hit {
   readonly key: string;
-  readonly lane: LaneId;
+  readonly lane: SourceLaneId;
   /** 1-based position in the named response collection. */
   readonly rank: number;
   readonly orderLabel: string;
@@ -127,19 +145,8 @@ export function codeHits(
   return symbolHits('code', 'graph endpoint rows', rows, terms);
 }
 
-/** Semantic rows share the graph-symbol grammar: if the semantic source ever
- * serves a page from this surface it will carry the same symbol rows, ordered
- * by the provider. Today the source only reports typed state, so this
- * normaliser exists for the contract, not for a live payload. */
-export function semanticHits(
-  rows: readonly Record<string, unknown>[],
-  terms: readonly string[],
-): Hit[] {
-  return symbolHits('semantic', 'semantic provider rows', rows, terms);
-}
-
 function symbolHits(
-  lane: 'code' | 'semantic',
+  lane: 'code',
   orderLabel: string,
   rows: readonly Record<string, unknown>[],
   terms: readonly string[],
@@ -301,13 +308,13 @@ export function knowledgeHits(
   });
 }
 
-export interface FacetCount {
+interface FacetCount {
   readonly id: string;
   readonly label: string;
   readonly count: number;
 }
 
-/** Pivot counts over the rows actually loaded — never over the whole index. */
+/** Pivot counts over the rows actually loaded, never over the whole index. */
 export function facetCounts(hits: readonly Hit[]): FacetCount[] {
   const counts = new Map<string, number>();
   for (const hit of hits) {

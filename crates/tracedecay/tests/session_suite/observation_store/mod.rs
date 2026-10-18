@@ -5,34 +5,36 @@ use std::path::Path;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalMessageRoleV1,
+    AnchorDurabilityClass, AnchorSourceGeneration, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
-    CanonicalObservationRelationsV1, ClaudeByteRangeV1, ClaudeFileGenerationV1,
-    ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, CommitId,
-    ComponentVersion, CoverageReportV1, DurableClaudeObservationV1, EvidenceAvailabilityV1,
-    EvidenceClass, GenerationBoundRepositoryProvenanceV1, NativeAliasV2,
-    ObservationCollisionOutcomeV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
-    ProjectionGenerationId, ProviderId, RefId, RepositoryDirtyStateV1, RepositoryEvidenceV1,
-    RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId, TreeId, UtcMicros, VectorWatermark, WorktreeId,
+    CanonicalObservationRelationsV1, CommitId, ComponentVersion, CoverageReportV1,
+    DurableObservationV1, EvidenceAvailabilityV1, EvidenceClass,
+    GenerationBoundRepositoryProvenanceV1, NativeAlias, ObservationId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1,
+    PrivacyDomainBoundLocatorDigest, ProjectionGenerationId, ProviderId, RefId,
+    RepositoryDirtyStateV1, RepositoryEvidenceV1, RepositoryId, RepositoryProvenanceV1,
+    RepositoryRemoteIdentityV1, RetentionClass, RetrievalAnchorRecord, RetrievalAnchorRecordParts,
+    RetrievalAnchorTarget, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, TreeId, UtcMicros, VectorWatermark,
+    WorktreeId, is_canonical_payload_revision_replay,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCoverageV1,
+    ObservationCursorAdvance,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStatus,
     ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationWrite,
     SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    build_observation_retrieval_anchor,
 };
+
+use crate::claude_records;
 
 const GENERATION: u64 = 7;
 
@@ -42,29 +44,30 @@ async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
         .unwrap()
 }
 
-fn source() -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new("session.observation-store").unwrap()).unwrap()
+fn source() -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(SessionId::new("session.observation-store").unwrap()).unwrap()
 }
 
 fn scope() -> ObservationScopeV1 {
     ObservationScopeV1::Profile
 }
 
-fn cursor(byte_offset: u64) -> ClaudeSourceCursorV1 {
+fn cursor(byte_offset: u64) -> ObservationSourceCursorV1 {
     cursor_in_generation(GENERATION, byte_offset)
 }
 
-fn cursor_in_generation(generation: u64, byte_offset: u64) -> ClaudeSourceCursorV1 {
-    ClaudeSourceCursorV1::new(
+fn cursor_in_generation(generation: u64, byte_offset: u64) -> ObservationSourceCursorV1 {
+    ObservationSourceCursorV1::for_ordering(
         source(),
         scope(),
-        ClaudeFileGenerationV1::new(generation).unwrap(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         byte_offset,
     )
     .unwrap()
 }
 
-fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableClaudeObservationV1 {
+fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableObservationV1 {
     observation_in_generation(GENERATION, start, end, receipt_id, body)
 }
 
@@ -74,7 +77,7 @@ fn observation_in_generation(
     end: u64,
     receipt_id: &str,
     body: &str,
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     observation_in_scope(generation, start, end, receipt_id, body, scope())
 }
 
@@ -85,11 +88,13 @@ fn observation_in_scope(
     receipt_id: &str,
     body: &str,
     scope: ObservationScopeV1,
-) -> DurableClaudeObservationV1 {
-    let payload = json!({
-        "kind": "assistant_message",
-        "body": body,
-    });
+) -> DurableObservationV1 {
+    let payload = claude_records::canonical_envelope(
+        &claude_records::assistant_record(body),
+        source().session_id().as_str(),
+        start,
+        end,
+    );
     let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
     let receipt = SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
@@ -102,15 +107,15 @@ fn observation_in_scope(
         Some(payload_reference),
     )
     .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::new(
         source(),
         scope,
-        ClaudeFileGenerationV1::new(generation).unwrap(),
-        ClaudeByteRangeV1::new(start, end).unwrap(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationSourceRangeV1::new(start, end).unwrap(),
     )
     .unwrap();
 
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         identity,
         receipt,
         RetentionClass::new("retention.test").unwrap(),
@@ -120,13 +125,14 @@ fn observation_in_scope(
 }
 
 fn write(
-    observation: DurableClaudeObservationV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    observation: DurableObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
-    let next_cursor = ClaudeSourceCursorV1::new(
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
         observation.scope().clone(),
         observation.identity().generation(),
+        ObservationOrderingDomainV1::FileBytes,
         observation.identity().position().end(),
     )
     .unwrap();
@@ -155,7 +161,7 @@ fn anchored_write_at_with_projection_generation(
         "observation-store-test.v1",
     )
     .unwrap();
-    let retrieval_anchor = build_observation_retrieval_anchor_v2(
+    let retrieval_anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         ingested_at,
@@ -177,7 +183,7 @@ fn known_repository_provenance_write(write: ObservationWrite) -> AnchoredObserva
         "observation-store-provenance-test.v1",
     )
     .unwrap();
-    let observation_anchor = build_observation_retrieval_anchor_v2(
+    let observation_anchor = build_observation_retrieval_anchor(
         &observation,
         projection_generation.clone(),
         UtcMicros(7),
@@ -216,8 +222,8 @@ fn known_repository_provenance_write(write: ObservationWrite) -> AnchoredObserva
         Some(observation.observation_id().clone()),
     )
     .unwrap();
-    let repository_anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::RepositoryCapture {
+    let repository_anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::RepositoryCapture {
             repository_id,
             capture_id: provenance.capture_id().clone(),
             receipt: observation.receipt().receipt().clone(),
@@ -227,7 +233,7 @@ fn known_repository_provenance_write(write: ObservationWrite) -> AnchoredObserva
         occurred_at: None,
         ingested_at: UtcMicros(7),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::RepositoryCapture(
+        source_generation: AnchorSourceGeneration::RepositoryCapture(
             provenance.capture_id().clone(),
         ),
         projection_generation: projection_generation.clone(),
@@ -251,10 +257,10 @@ fn known_repository_provenance_write(write: ObservationWrite) -> AnchoredObserva
 }
 
 fn anchor_with_aliases(
-    anchor: &RetrievalAnchorRecordV2,
-    aliases: Vec<NativeAliasV2>,
-) -> RetrievalAnchorRecordV2 {
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    anchor: &RetrievalAnchorRecord,
+    aliases: Vec<NativeAlias>,
+) -> RetrievalAnchorRecord {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target: anchor.target().clone(),
         owner: anchor.owner().clone(),
         aliases,
@@ -323,7 +329,7 @@ fn native_observation(
     receipt_id: &str,
     native_record_id: &str,
     body: &str,
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     provider_observation(ProviderObservationFixture {
         provider: "hermes",
         session_id: "session.observation-store-native",
@@ -347,7 +353,7 @@ struct ProviderObservationFixture<'a> {
     body: &'a str,
 }
 
-fn provider_observation(fixture: ProviderObservationFixture<'_>) -> DurableClaudeObservationV1 {
+fn provider_observation(fixture: ProviderObservationFixture<'_>) -> DurableObservationV1 {
     let ProviderObservationFixture {
         provider,
         session_id,
@@ -384,7 +390,7 @@ fn provider_observation(fixture: ProviderObservationFixture<'_>) -> DurableClaud
     )
     .unwrap();
 
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         identity,
         receipt,
         RetentionClass::new("retention.test").unwrap(),
@@ -401,7 +407,7 @@ fn canonical_revision_observation(
     receipt_id: &str,
     legacy: bool,
     content: &str,
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     let session_id = format!("session.{provider}.canonical-revision");
     let stable_record_id = ObservationId::new("record.stable").unwrap();
     let mut relations =
@@ -495,7 +501,75 @@ fn canonical_revision_observation(
     )
     .unwrap();
 
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
+        identity,
+        receipt,
+        RetentionClass::new("retention.test").unwrap(),
+        payload,
+    )
+    .unwrap()
+}
+
+/// Snapshot-provider analogue of [`canonical_revision_observation`]: a
+/// message-only canonical envelope ordered by snapshot position, like records
+/// admitted before location facts were projected.
+fn snapshot_revision_observation(
+    provider: &str,
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    content: &str,
+) -> DurableObservationV1 {
+    let session_id = format!("session.{provider}.location-revision");
+    let stable_record_id = ObservationId::new("record.snapshot.stable").unwrap();
+    let relations =
+        CanonicalObservationRelationsV1::new(SessionId::new(session_id.clone()).unwrap())
+            .with_message_id(stable_record_id.clone());
+    let message = CanonicalObservationFactV1::Message {
+        role: CanonicalMessageRoleV1::Assistant,
+        content: json!(content),
+        model: None,
+        timestamp: None,
+    };
+    let range = ObservationSourceRangeV1::new(start, end).unwrap();
+    let evidence =
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range);
+    let payload = serde_json::to_value(
+        CanonicalObservationEnvelopeV1::new(
+            ProviderId::new(provider).unwrap(),
+            "message",
+            stable_record_id.clone(),
+            relations,
+            vec![message],
+            evidence,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(receipt_id).unwrap(),
+            ComponentVersion::new("privacy.observation-record.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(payload_reference),
+    )
+    .unwrap();
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        provider_source(provider, &session_id),
+        scope(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        stable_record_id,
+    )
+    .unwrap();
+
+    DurableObservationV1::new(
         identity,
         receipt,
         RetentionClass::new("retention.test").unwrap(),
@@ -505,10 +579,10 @@ fn canonical_revision_observation(
 }
 
 fn mutate_observation_payload(
-    observation: &DurableClaudeObservationV1,
+    observation: &DurableObservationV1,
     receipt_id: &str,
     mutate: impl FnOnce(&mut serde_json::Value),
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     let mut payload = observation.payload().clone();
     mutate(&mut payload);
     let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
@@ -523,7 +597,7 @@ fn mutate_observation_payload(
         Some(payload_reference),
     )
     .unwrap();
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         observation.identity().clone(),
         receipt,
         observation.retention_class().clone(),
@@ -533,14 +607,14 @@ fn mutate_observation_payload(
 }
 
 fn native_write(
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
     provider_write(observation, expected_cursor)
 }
 
 fn provider_write(
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
     let generation = observation.identity().generation().generation_id();
@@ -570,22 +644,24 @@ fn provider_malformed_advance(
         ObservationOrderingDomainV1::SqliteRowId,
         expected_cursor,
         ObservationSourceRangeV1::new(start, end).unwrap(),
-        NonDurableFrameReason::MalformedFrame,
+        ObservationCoverageReason::MalformedFrame,
     )
     .unwrap()
 }
 
 fn cursor_advance(
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
     start: u64,
     end: u64,
-    reason: NonDurableFrameReason,
+    reason: ObservationCoverageReason,
 ) -> ObservationCursorAdvance {
-    let generation = ClaudeFileGenerationV1::new(GENERATION).unwrap();
-    let covered = ClaudeByteRangeV1::new(start, end).unwrap();
+    let generation = ObservationSourceGenerationV1::new(GENERATION).unwrap();
+    let covered = ObservationSourceRangeV1::new(start, end).unwrap();
     let disposition = match reason {
-        NonDurableFrameReason::SanitizerRejected => Some(SanitizerDispositionV1::Rejected),
-        NonDurableFrameReason::SanitizerQuarantined => Some(SanitizerDispositionV1::Quarantined),
+        ObservationCoverageReason::SanitizerRejected => Some(SanitizerDispositionV1::Rejected),
+        ObservationCoverageReason::SanitizerQuarantined => {
+            Some(SanitizerDispositionV1::Quarantined)
+        }
         _ => None,
     };
     let Some(disposition) = disposition else {
@@ -854,11 +930,12 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     assert_eq!(deltas.get("observation_repository_provenance"), Some(&1));
 }
 
-/// The `idempotency_key` observation shape never shipped in a published
-/// release, so admission must refuse it with the typed `ResetRequired` state
-/// naming the observation authority — never migrate it in place.
+/// An `observations` table that drifted from the authority schema contract
+/// (here the pre-release `idempotency_key` shape) refuses admission with the
+/// typed `ResetRequired` state naming the drifted table, never migrates in
+/// place, and leaves the refused rows for recovery.
 #[tokio::test]
-async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_required() {
+async fn drifted_observation_shape_refuses_admission_with_reset_required() {
     let tmp = TempDir::new().unwrap();
     let bootstrap = profile_runtime(&tmp).await;
     let db_path = bootstrap
@@ -898,10 +975,10 @@ async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_
     let (authority, reason) = error
         .reset_required_context()
         .unwrap_or_else(|| panic!("expected the typed ResetRequired state, got: {error}"));
-    assert_eq!(authority, "observations");
+    assert_eq!(authority, "authority schema");
     assert!(
-        reason.contains("no sanctioned migration"),
-        "the refusal must explain that the shape never shipped: {reason}"
+        reason.contains("table 'observations' has an incompatible number of columns"),
+        "the refusal must name the drifted table: {reason}"
     );
 
     let verify_conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -1232,7 +1309,7 @@ async fn canonical_payload_revision_replays_advance_typed_coverage() {
 }
 
 #[tokio::test]
-async fn canonical_payload_revision_compatibility_rejects_unshipped_differences() {
+async fn canonical_payload_revision_compatibility_separates_revisions_from_unshipped_differences() {
     for provider in ["codex", "cursor"] {
         let tmp = TempDir::new().unwrap();
         let runtime = profile_runtime(&tmp).await;
@@ -1334,24 +1411,225 @@ async fn canonical_payload_revision_compatibility_rejects_unshipped_differences(
             _ => unreachable!("fixture provider is allowlisted"),
         }
 
+        // Three shipped dispositions share this loop, keyed by where the
+        // candidate sits relative to the durable scan frontier:
+        //
+        // * No expected cursor: the candidate's range is already covered, so
+        //   the store cannot tell an unshipped difference from a stale writer
+        //   that lost a cursor race. The verdict is the retryable
+        //   `CursorConflict`, and no ledger, cursor, or row moves.
+        // * At the frontier with a moved range, Codex: the Codex revision
+        //   normalizer never adopts a candidate's `evidence.range`, so the
+        //   record is an unshipped difference and stays fail-closed with the
+        //   terminal `ObservationCollision`. The refusal still records
+        //   coverage, the cursor advances past the refused range so ingest
+        //   does not re-read the refused record forever.
+        // * At the frontier with a moved range, Cursor: the Cursor normalizer
+        //   deliberately replaces `evidence.range` with the candidate's
+        //   (`normalize_cursor_payload_revision`), because a Cursor record
+        //   carries its own `stable_record_id` and a rewritten transcript
+        //   moves it. That is the shipped canonical-payload-revision replay,
+        //   so it settles as `CoveredDuplicate` over the retained row and
+        //   advances the cursor rather than refusing.
+        let mut durable_cursor = old_cursor.clone();
         for (difference, changed, expected_cursor) in candidates {
-            let error = store
+            let at_scan_frontier = expected_cursor.is_some();
+            let result = store
                 .persist_observation(provider_write(changed.clone(), expected_cursor))
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(error, ObservationStoreError::ObservationCollision { .. }),
-                "{provider} {difference} must remain fail-closed, got {error:?}"
-            );
+                .await;
+            if at_scan_frontier {
+                match provider {
+                    "codex" => {
+                        let error = result.expect_err(
+                            "a moved Codex range is an unshipped difference and must refuse",
+                        );
+                        assert!(
+                            matches!(error, ObservationStoreError::ObservationCollision { .. }),
+                            "{provider} {difference} must remain fail-closed, got {error:?}"
+                        );
+                    }
+                    "cursor" => {
+                        let outcome = result.expect(
+                            "a moved Cursor range is the shipped canonical payload revision",
+                        );
+                        assert!(
+                            matches!(outcome, ObservationPersistOutcome::CoveredDuplicate(_)),
+                            "{provider} {difference} must settle as a covered duplicate, \
+                             got {outcome:?}"
+                        );
+                    }
+                    _ => unreachable!("fixture provider is allowlisted"),
+                }
+                durable_cursor = provider_cursor(
+                    provider,
+                    &format!("session.{provider}.canonical-revision"),
+                    changed.identity().generation().generation_id(),
+                    changed.identity().position().end(),
+                );
+            } else {
+                let error = result
+                    .expect_err("a covered replay of an unshipped difference must not commit");
+                assert!(
+                    matches!(error, ObservationStoreError::CursorConflict { .. }),
+                    "{provider} {difference} must be a retryable cursor conflict, \
+                     got {error:?}"
+                );
+            }
             assert_eq!(
                 store
                     .get_source_cursor(changed.source(), changed.scope())
                     .await
                     .unwrap(),
-                Some(old_cursor.clone()),
-                "{provider} {difference} must not advance the cursor"
+                Some(durable_cursor.clone()),
+                "{provider} {difference} left the wrong durable cursor"
             );
         }
+    }
+}
+
+/// Codex capture used to drop every `response_item` tool-call `arguments` to
+/// null, so a rewritten rollout now carries the real arguments for the same
+/// observation id. The revision normalizer adopts them only when the retained
+/// payload has none; a retained non-null value or any other authored change
+/// stays an identity collision.
+#[test]
+fn canonical_payload_revision_adopts_only_dropped_codex_tool_arguments() {
+    let base = canonical_revision_observation(
+        "codex",
+        1,
+        41,
+        42,
+        "receipt.codex.tool-args.base",
+        false,
+        "stable authored content",
+    );
+    let with_tool_invocation = |receipt_id: &str, name: &str, arguments: serde_json::Value| {
+        mutate_observation_payload(&base, receipt_id, |payload| {
+            payload["facts"].as_array_mut().unwrap().push(json!({
+                "kind": "tool_invocation",
+                "invocation_id": "call-merge",
+                "name": name,
+                "arguments": arguments,
+            }));
+        })
+    };
+
+    let stored_dropped = with_tool_invocation(
+        "receipt.codex.tool-args.dropped",
+        "exec_command",
+        serde_json::Value::Null,
+    );
+    let current_captured = with_tool_invocation(
+        "receipt.codex.tool-args.captured",
+        "exec_command",
+        json!({"cmd": "gh pr merge 366 --squash"}),
+    );
+    assert!(is_canonical_payload_revision_replay(
+        &stored_dropped,
+        &current_captured
+    ));
+
+    let stored_authored = with_tool_invocation(
+        "receipt.codex.tool-args.authored-a",
+        "exec_command",
+        json!({"cmd": "a"}),
+    );
+    let current_authored = with_tool_invocation(
+        "receipt.codex.tool-args.authored-b",
+        "exec_command",
+        json!({"cmd": "b"}),
+    );
+    assert!(!is_canonical_payload_revision_replay(
+        &stored_authored,
+        &current_authored
+    ));
+
+    let current_renamed = with_tool_invocation(
+        "receipt.codex.tool-args.renamed",
+        "apply_patch",
+        json!({"cmd": "gh pr merge 366 --squash"}),
+    );
+    assert!(!is_canonical_payload_revision_replay(
+        &stored_dropped,
+        &current_renamed
+    ));
+}
+
+/// Snapshot hosts and Vibe now lead every canonical payload with a
+/// location-only `Session` fact. The revision normalizer adopts that fact for
+/// records admitted before the change, and for retained location-only sessions
+/// adopts a moved path/provenance, but any other authored difference stays an
+/// identity collision.
+#[test]
+fn canonical_payload_revision_adopts_snapshot_location_session() {
+    for provider in ["cline", "kiro"] {
+        let stored = snapshot_revision_observation(
+            provider,
+            1,
+            41,
+            42,
+            &format!("receipt.{provider}.location.stored"),
+            "stable authored content",
+        );
+        let location_session = |payload: &mut serde_json::Value| {
+            let session = serde_json::to_value(CanonicalObservationFactV1::Session {
+                project_path: None,
+                location_path: Some("/workspace/task".to_string()),
+                transcript_path: None,
+                title: None,
+                started_at: None,
+                ended_at: None,
+                source: None,
+                native_source: None,
+                profile: None,
+                location_provenance: Some("task_metadata".to_string()),
+            })
+            .unwrap();
+            payload["facts"].as_array_mut().unwrap().insert(0, session);
+        };
+        let current = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.current"),
+            location_session,
+        );
+        assert!(
+            is_canonical_payload_revision_replay(&stored, &current),
+            "{provider}: a leading location session must adopt on replay"
+        );
+
+        let moved = mutate_observation_payload(&current, "receipt.location.moved", |payload| {
+            payload["facts"][0]["location_path"] = json!("/workspace/moved");
+        });
+        assert!(
+            is_canonical_payload_revision_replay(&current, &moved),
+            "{provider}: a moved location path must adopt on replay"
+        );
+
+        let changed_content = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.changed"),
+            |payload| {
+                location_session(payload);
+                payload["facts"][1]["content"] = json!("changed authored content");
+            },
+        );
+        assert!(
+            !is_canonical_payload_revision_replay(&stored, &changed_content),
+            "{provider}: location adoption must not launder authored changes"
+        );
+
+        let bloated_session = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.bloated"),
+            |payload| {
+                location_session(payload);
+                payload["facts"][0]["project_path"] = json!("/workspace/task");
+            },
+        );
+        assert!(
+            !is_canonical_payload_revision_replay(&stored, &bloated_session),
+            "{provider}: a session with authored fields is not location-only"
+        );
     }
 }
 
@@ -1367,10 +1645,13 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
         .unwrap()
         .to_path_buf();
     let before = user_table_counts(&database_path);
-    let advance = cursor_advance(None, 0, 10, NonDurableFrameReason::BlankFrame);
+    let advance = cursor_advance(None, 0, 10, ObservationCoverageReason::BlankFrame);
 
-    assert_eq!(advance.covered(), ClaudeByteRangeV1::new(0, 10).unwrap());
-    assert_eq!(advance.reason(), NonDurableFrameReason::BlankFrame);
+    assert_eq!(
+        advance.covered(),
+        ObservationSourceRangeV1::new(0, 10).unwrap()
+    );
+    assert_eq!(advance.reason(), ObservationCoverageReason::BlankFrame);
     assert_eq!(
         store.advance_source_cursor(advance.clone()).await.unwrap(),
         CursorAdvanceOutcome::Committed
@@ -1419,42 +1700,65 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
 }
 
 #[tokio::test]
-async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
+/// A second owner replaying the same range with a different coverage reason
+/// finds the durable cursor already at its `next_cursor`: the coverage it
+/// wanted to record is applied, so the replay is a duplicate, not a
+/// collision that blocks ingest (#1842). The committed reason stays.
+async fn cursor_already_owned_keeps_the_first_reason_for_a_later_owner() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
 
     store
         .advance_source_cursor(cursor_advance(
             None,
             0,
             10,
-            NonDurableFrameReason::BlankFrame,
+            ObservationCoverageReason::BlankFrame,
         ))
         .await
         .unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         store
             .advance_source_cursor(cursor_advance(
                 None,
                 0,
                 10,
-                NonDurableFrameReason::OutOfScope,
+                ObservationCoverageReason::OutOfScope,
             ))
-            .await,
-        Err(ObservationStoreError::CursorAdvanceCollision)
-    ));
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
     assert_eq!(
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
     );
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let reason: String = conn
+        .query_row("SELECT reason FROM source_cursor_advances", (), |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(reason, "blank_frame");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM source_cursor_advances", (), |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
-async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
+async fn cursor_already_past_a_narrower_range_keeps_the_owned_frontier() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -1466,22 +1770,23 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
             None,
             0,
             10,
-            NonDurableFrameReason::BlankFrame,
+            ObservationCoverageReason::BlankFrame,
         ))
         .await
         .unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         store
             .advance_source_cursor(cursor_advance(
                 Some(cursor(5)),
                 5,
                 10,
-                NonDurableFrameReason::BlankFrame,
+                ObservationCoverageReason::BlankFrame,
             ))
-            .await,
-        Err(ObservationStoreError::CursorAdvanceCollision)
-    ));
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
     assert_eq!(
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
@@ -1504,7 +1809,7 @@ async fn contiguous_observation_commit_is_atomic() {
             None,
             0,
             10,
-            NonDurableFrameReason::OutOfScope,
+            ObservationCoverageReason::OutOfScope,
         ))
         .await
         .unwrap();
@@ -1565,7 +1870,7 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
             None,
             0,
             10,
-            NonDurableFrameReason::SanitizerRejected,
+            ObservationCoverageReason::SanitizerRejected,
         ))
         .await
         .unwrap();
@@ -1574,7 +1879,7 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
         Some(cursor(0)),
         0,
         20,
-        NonDurableFrameReason::SanitizerRejected,
+        ObservationCoverageReason::SanitizerRejected,
     );
     assert!(matches!(
         store.advance_source_cursor(stale).await,
@@ -1585,10 +1890,10 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
         ObservationCursorAdvance::new(
             source(),
             scope(),
-            ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+            ObservationSourceGenerationV1::new(GENERATION).unwrap(),
             Some(cursor(10)),
-            ClaudeByteRangeV1::new(11, 20).unwrap(),
-            NonDurableFrameReason::BlankFrame,
+            ObservationSourceRangeV1::new(11, 20).unwrap(),
+            ObservationCoverageReason::BlankFrame,
         ),
         Err(ObservationStoreError::CursorCoverageMismatch)
     ));
@@ -1611,7 +1916,7 @@ async fn sanitizer_cursor_progress_persists_typed_nonpayload_receipt_atomically(
             .database_path(HostAdmissionScope::Profile)
             .unwrap()
             .to_path_buf();
-        let advance = cursor_advance(None, 0, 10, NonDurableFrameReason::SanitizerRejected);
+        let advance = cursor_advance(None, 0, 10, ObservationCoverageReason::SanitizerRejected);
         assert_eq!(
             store.advance_source_cursor(advance.clone()).await.unwrap(),
             CursorAdvanceOutcome::Committed
@@ -1662,23 +1967,29 @@ async fn cursor_only_progress_allows_file_replacement_from_zero_with_exact_cas()
             None,
             0,
             42,
-            NonDurableFrameReason::BlankFrame,
+            ObservationCoverageReason::BlankFrame,
         ))
         .await
         .unwrap();
 
-    let replacement_generation = ClaudeFileGenerationV1::new(GENERATION + 1).unwrap();
+    let replacement_generation = ObservationSourceGenerationV1::new(GENERATION + 1).unwrap();
     let advance = ObservationCursorAdvance::new(
         source(),
         scope(),
         replacement_generation,
         Some(cursor(42)),
-        ClaudeByteRangeV1::new(0, 10).unwrap(),
-        NonDurableFrameReason::OutOfScope,
+        ObservationSourceRangeV1::new(0, 10).unwrap(),
+        ObservationCoverageReason::OutOfScope,
     )
     .unwrap();
-    let replacement_cursor =
-        ClaudeSourceCursorV1::new(source(), scope(), replacement_generation, 10).unwrap();
+    let replacement_cursor = ObservationSourceCursorV1::for_ordering(
+        source(),
+        scope(),
+        replacement_generation,
+        ObservationOrderingDomainV1::FileBytes,
+        10,
+    )
+    .unwrap();
 
     assert_eq!(
         store.advance_source_cursor(advance.clone()).await.unwrap(),
@@ -1700,10 +2011,10 @@ fn cursor_only_progress_rejects_file_replacement_after_zero() {
         ObservationCursorAdvance::new(
             source(),
             scope(),
-            ClaudeFileGenerationV1::new(GENERATION + 1).unwrap(),
+            ObservationSourceGenerationV1::new(GENERATION + 1).unwrap(),
             Some(cursor(42)),
-            ClaudeByteRangeV1::new(1, 10).unwrap(),
-            NonDurableFrameReason::OutOfScope,
+            ObservationSourceRangeV1::new(1, 10).unwrap(),
+            ObservationCoverageReason::OutOfScope,
         ),
         Err(ObservationStoreError::CursorCoverageMismatch)
     ));
@@ -1722,7 +2033,7 @@ async fn cursor_only_progress_survives_restart() {
                 None,
                 0,
                 10,
-                NonDurableFrameReason::SanitizerQuarantined,
+                ObservationCoverageReason::SanitizerQuarantined,
             ))
             .await
             .unwrap();
@@ -1741,7 +2052,7 @@ async fn cursor_only_progress_survives_restart() {
             Some(cursor(10)),
             10,
             20,
-            NonDurableFrameReason::SanitizerQuarantined,
+            ObservationCoverageReason::SanitizerQuarantined,
         ))
         .await
         .unwrap();
@@ -1751,8 +2062,15 @@ async fn cursor_only_progress_survives_restart() {
     );
 }
 
+/// Re-submitting the same canonical identity material after it committed is a
+/// *covered* replay: the durable source cursor already stands past the
+/// candidate's range, so the store cannot tell a genuine content collision
+/// from a stale reader that lost a cursor race. The typed verdict is therefore
+/// the retryable [`ObservationStoreError::CursorConflict`], never a terminal
+/// [`ObservationStoreError::ObservationCollision`], and no ledger, cursor, or
+/// row may move.
 #[tokio::test]
-async fn identity_collision_is_typed_and_leaves_all_authoritative_state_unchanged() {
+async fn covered_identity_collision_is_retryable_and_leaves_all_authoritative_state_unchanged() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -1786,26 +2104,19 @@ async fn identity_collision_is_typed_and_leaves_all_authoritative_state_unchange
     let error = store
         .persist_observation(write(colliding.clone(), None))
         .await
-        .expect_err("same canonical identity with another payload must collide");
+        .expect_err("same canonical identity with another payload must not commit");
     match error {
-        ObservationStoreError::ObservationCollision {
-            observation_id,
-            existing_digest,
-            candidate_digest,
-            outcome,
-        } => {
-            assert_eq!(observation_id.as_ref(), original.observation_id());
+        ObservationStoreError::CursorConflict { expected, actual } => {
             assert_eq!(
-                existing_digest.as_ref(),
-                original.payload_reference().digest()
+                *expected, None,
+                "the stale writer carried no expected cursor"
             );
             assert_eq!(
-                candidate_digest.as_ref(),
-                colliding.payload_reference().digest()
+                *actual, cursor_before,
+                "the retry must resume from the durable winning cursor"
             );
-            assert_eq!(outcome, ObservationCollisionOutcomeV1::IdentityCollision);
         }
-        other => panic!("expected typed observation collision, got {other:?}"),
+        other => panic!("expected a retryable cursor conflict, got {other:?}"),
     }
 
     assert_eq!(
@@ -1963,8 +2274,18 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
     }
 }
 
+/// Two writers submitting byte-identical evidence settle one sequence and one
+/// receipt.
+///
+/// Which typed outcome the follower reports is a scheduling detail, not a
+/// contract: a follower that reaches the writer while the leader is still
+/// queued or in flight attaches to that leader and settles the leader's
+/// `Committed` outcome, while one that arrives after the commit reads the
+/// retained row and reports `ExactDuplicate`. Both carry the same receipt, so
+/// the invariant under test is "one sequence, one row set, identical receipts",
+/// never a second commit.
 #[tokio::test]
-async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate() {
+async fn concurrent_exact_retry_commits_one_sequence_and_settles_one_receipt() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store_left = runtime
@@ -1992,16 +2313,23 @@ async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate()
             | ObservationPersistOutcome::CoveredDuplicate(_) => None,
         })
         .expect("one concurrent writer must commit");
-    let duplicate = outcomes
+    let settled = outcomes
         .iter()
-        .find_map(|outcome| match outcome {
-            ObservationPersistOutcome::ExactDuplicate(receipt) => Some(receipt),
-            ObservationPersistOutcome::Committed(_)
-            | ObservationPersistOutcome::CoveredDuplicate(_) => None,
+        .map(|outcome| match outcome {
+            ObservationPersistOutcome::Committed(receipt)
+            | ObservationPersistOutcome::ExactDuplicate(receipt) => receipt,
+            ObservationPersistOutcome::CoveredDuplicate(receipt) => panic!(
+                "a byte-identical retry keeps its own identity and can never be a covered \
+                 duplicate, got {receipt:?}"
+            ),
         })
-        .expect("the other concurrent writer must observe the duplicate");
-
-    assert_eq!(committed, duplicate);
+        .collect::<Vec<_>>();
+    assert_eq!(settled.len(), 2);
+    assert_eq!(
+        settled[0], settled[1],
+        "both writers must settle the same receipt"
+    );
+    assert_eq!(committed, settled[0]);
     let replay = store_left
         .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
         .await
@@ -2233,16 +2561,17 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
             native_record_id: &record_id,
             body: "conflicting cross-provider payload",
         });
+        // The committed cursor already covers this range, so a conflicting
+        // re-submission is indistinguishable from a stale writer that lost a
+        // cursor race: the typed verdict is the retryable cursor conflict, and
+        // nothing below it may move.
         let collision = store
             .persist_observation(provider_write(colliding, None))
             .await
             .expect_err("{provider}: conflicting identity must fail closed");
         assert!(
-            matches!(
-                collision,
-                ObservationStoreError::ObservationCollision { .. }
-            ),
-            "{provider}: expected ObservationCollision, got {collision:?}"
+            matches!(collision, ObservationStoreError::CursorConflict { .. }),
+            "{provider}: expected a retryable CursorConflict, got {collision:?}"
         );
         assert_eq!(
             store.get_source_cursor(&source, &scope()).await.unwrap(),

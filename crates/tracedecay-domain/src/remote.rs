@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -44,7 +45,7 @@ impl RemoteRepositoryScopeV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct RemotePlacementRevisionV1(u64);
 
@@ -85,7 +86,7 @@ impl<'de> Deserialize<'de> for RemotePlacementRevisionV1 {
 }
 
 /// The complete single-writer identity for one mutable shard.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteWriterFenceV1 {
     pub brain_id: BrainId,
@@ -120,6 +121,29 @@ impl RemoteWriterFenceV1 {
     pub fn fences(&self, older: &Self) -> bool {
         self.same_mutable_shard(older) && self.authority_epoch > older.authority_epoch
     }
+
+    pub fn recovery_authority_key(&self) -> Result<ManifestDigest, DomainError> {
+        remote_recovery_authority_key(
+            self.brain_id.as_str(),
+            self.shard_id.as_str(),
+            self.generation_id.as_str(),
+        )
+    }
+}
+
+/// The key every remote recovery table joins a writer lineage on. It names
+/// the mutable shard only, so it stays the same across failover.
+pub fn remote_recovery_authority_key(
+    brain_id: &str,
+    shard_id: &str,
+    generation_id: &str,
+) -> Result<ManifestDigest, DomainError> {
+    canonical_sha256(&(
+        "tracedecay.remote-recovery-authority.v1",
+        brain_id,
+        shard_id,
+        generation_id,
+    ))
 }
 
 /// Remote operation capability retained with an enrollment credential.
@@ -133,10 +157,6 @@ pub enum RemoteCapabilityV1 {
     Replay,
     Query,
     RefreshReplica,
-    ReadBackup,
-    CreateBackup,
-    StageRestore,
-    PublishRestore,
     Promote,
     RevokeEnrollment,
     ServeAuthority,
@@ -396,7 +416,7 @@ pub struct CredentialRevocationReceiptV1 {
 }
 
 /// Authenticated current authority for a mutable shard.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CurrentRemoteAuthorityV1 {
     pub fence: RemoteWriterFenceV1,
@@ -417,11 +437,16 @@ impl CurrentRemoteAuthorityV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteAuthorityUnavailableReasonV1 {
     RegistryUnavailable,
     PlacementUnknown,
+    /// The RemoteNode store has never had a writer authority published for
+    /// this Brain, so no capture, replay, query, or failover can bind to one.
+    WriterAuthorityUnpublished,
     AuthorityUnreachable,
     AuthorityAuthenticationFailed,
     CallerAuthenticationFailed,
@@ -435,7 +460,7 @@ pub enum RemoteAuthorityUnavailableReasonV1 {
 
 /// Truthful authority lookup state. Missing evidence is never represented as
 /// an available authority or a successful empty response.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
 pub enum CurrentRemoteAuthorityStateV1 {
     Available(CurrentRemoteAuthorityV1),
@@ -638,6 +663,41 @@ mod tests {
             missing: BTreeSet::new(),
             observed_at: UtcMicros(20),
         };
-        assert!(state.validate().is_err());
+        assert_eq!(
+            state.validate().unwrap_err().to_string(),
+            "partial authority evidence must not be empty"
+        );
+    }
+
+    #[test]
+    fn recovery_authority_key_names_the_lineage_and_survives_failover() {
+        let fence = RemoteWriterFenceV1 {
+            brain_id: id(BrainId::new, "brain.remote"),
+            shard_id: id(ShardId::new, "shard.remote"),
+            generation_id: id(ProjectionGenerationId::new, "generation.remote"),
+            placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
+            authority_epoch: AuthorityEpoch(1),
+            authority_node_id: id(BrainNodeId::new, "node.remote"),
+        };
+        let promoted = RemoteWriterFenceV1 {
+            placement_revision: RemotePlacementRevisionV1::new(2).unwrap(),
+            authority_epoch: AuthorityEpoch(2),
+            authority_node_id: id(BrainNodeId::new, "node.promoted"),
+            ..fence.clone()
+        };
+        let other_generation = RemoteWriterFenceV1 {
+            generation_id: id(ProjectionGenerationId::new, "generation.other"),
+            ..fence.clone()
+        };
+
+        let key = fence.recovery_authority_key().unwrap();
+        assert_eq!(
+            key,
+            remote_recovery_authority_key("brain.remote", "shard.remote", "generation.remote")
+                .unwrap(),
+            "typed fences and stored lineage text derive one key"
+        );
+        assert_eq!(promoted.recovery_authority_key().unwrap(), key);
+        assert_ne!(other_generation.recovery_authority_key().unwrap(), key);
     }
 }

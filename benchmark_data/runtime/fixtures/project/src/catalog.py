@@ -21,3 +21,23 @@ def fixture_catalog() -> tuple[CatalogItem, ...]:
 
 def total_quantity(items: tuple[CatalogItem, ...]) -> int:
     return sum(item.quantity for item in items)
+
+
+class CatalogBase:
+    """Base fixture for the inheritance graph read."""
+
+    def label_prefix(self) -> str:
+        return "catalog"
+
+
+class CatalogChild(CatalogBase):
+    """Concrete fixture subclass with one inherited method."""
+
+    pass
+
+
+def fixture_countdown(value: int) -> int:
+    """Return the triangular number through a real recursive call edge."""
+    if value <= 0:
+        return 0
+    return value + fixture_countdown(value - 1)

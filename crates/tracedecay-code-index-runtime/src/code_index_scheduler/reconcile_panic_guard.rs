@@ -4,7 +4,7 @@
 //! A reconcile fans per-file work across the indexing pool over arbitrary user
 //! source. A panic there aborts the pass and surfaces as an opaque `JoinError`
 //! on the worker loop. The loop then restored the pending arrival and waited
-//! for the next wake — and because the offending input is still on disk, the
+//! for the next wake, and because the offending input is still on disk, the
 //! next wake reproduced the identical panic. One malformed file therefore
 //! blocked a project's entire code index indefinitely, retrying forever with
 //! no backoff and no terminal state.
@@ -14,11 +14,12 @@
 //! the worker stops re-attempting until the input actually changes (the
 //! code-index control epoch advances) or a pass makes progress. The shape
 //! mirrors the sealed-generation activation backoff already used by the
-//! registry worker; tests shrink the clock, not the shape.
+//! registry worker; tests shrink the clock, not the shape. A typed failure
+//! the same input reproduces shares the quarantine without the backoff.
 
 use std::time::Duration;
 
-use tokio::time::Instant;
+use std::time::Instant;
 
 /// Bounded exponential backoff between reconcile retries after a panicking
 /// pass. The floor keeps a transient panic from hot-looping the pool; the
@@ -69,7 +70,6 @@ impl Default for ReconcilePanicGuardV1 {
 }
 
 impl ReconcilePanicGuardV1 {
-    #[hotpath::skip]
     pub const fn new() -> Self {
         Self {
             consecutive_panics: 0,
@@ -94,13 +94,11 @@ impl ReconcilePanicGuardV1 {
     pub fn record_panic(&mut self, now: Instant, epoch: u64) -> ReconcilePanicDecisionV1 {
         self.consecutive_panics = self.consecutive_panics.saturating_add(1);
         if self.consecutive_panics >= MAX_CONSECUTIVE_RECONCILE_PANICS_V1 {
-            hotpath::gauge!("daemon.code_index.reconcile.panic.quarantined_total").inc(1_u64);
             self.quarantined = true;
             self.quarantined_at_epoch = epoch;
             self.next_attempt_at = None;
             return ReconcilePanicDecisionV1::Quarantine;
         }
-        hotpath::gauge!("daemon.code_index.reconcile.panic.retry_total").inc(1_u64);
         let delay = self.backoff;
         self.next_attempt_at = Some(now + delay);
         self.backoff = self
@@ -110,10 +108,19 @@ impl ReconcilePanicGuardV1 {
         ReconcilePanicDecisionV1::RetryAfter(delay)
     }
 
+    /// Quarantine after one pass: a deterministic failure over unchanged
+    /// input reproduces byte-for-byte, so backoff retries would only repeat
+    /// the whole build. `epoch` is the control epoch the failing pass began
+    /// under; any later advance is new input and lifts the quarantine.
+    pub fn quarantine_unchanged_input(&mut self, epoch: u64) {
+        self.quarantined = true;
+        self.quarantined_at_epoch = epoch;
+        self.next_attempt_at = None;
+    }
+
     /// Consecutive panics observed since the last progressing pass. Reported
     /// on the warn path so an operator sees a bounded counter rather than an
     /// undifferentiated repeating line.
-    #[hotpath::skip]
     pub const fn consecutive_panics(&self) -> u32 {
         self.consecutive_panics
     }
@@ -131,14 +138,239 @@ impl ReconcilePanicGuardV1 {
                 self.next_attempt_at = None;
                 return false;
             }
-            hotpath::gauge!("daemon.code_index.reconcile.panic.suppressed_wakes_total").inc(1_u64);
             return true;
         }
-        let suppressed = self.next_attempt_at.is_some_and(|at| now < at);
-        if suppressed {
-            hotpath::gauge!("daemon.code_index.reconcile.panic.backoff_wakes_total").inc(1_u64);
+
+        self.next_attempt_at.is_some_and(|at| now < at)
+    }
+}
+
+/// Bounded delayed retry for a reconcile pass that failed because shared
+/// process capacity was momentarily exhausted.
+///
+/// A reconcile reserves against one process-wide resident-memory authority. A
+/// sibling worktree or artifact build can hold that budget when this pass asks
+/// for it, and the request is refused before any indexing work starts. Nothing
+/// wakes this worker when the competing holder releases: the failure path only
+/// restored the pending arrival, so the worktree stayed stale until an
+/// unrelated query or edit happened to wake it.
+///
+/// The retry is deliberately narrow. A panicking or permanently refused pass
+/// reproduces on every attempt, so retrying it forever is the failure this
+/// module exists to prevent; only a failure that is *transient by construction*,
+/// capacity another holder will release, earns a re-arm, and even that is
+/// capped so a genuinely undersized budget degrades to stale instead of
+/// spinning.
+pub const RECONCILE_CAPACITY_RETRY_FLOOR: Duration = if cfg!(any(test, feature = "test-helpers")) {
+    Duration::from_millis(40)
+} else {
+    Duration::from_secs(2)
+};
+pub const RECONCILE_CAPACITY_RETRY_CEILING: Duration = if cfg!(any(test, feature = "test-helpers"))
+{
+    Duration::from_millis(320)
+} else {
+    Duration::from_mins(1)
+};
+
+/// Consecutive capacity refusals after which the shared budget is not
+/// momentarily contended but structurally too small for this worktree. Further
+/// self-scheduled wakes only burn the pool; the next real hint still retries.
+pub const MAX_CONSECUTIVE_CAPACITY_RETRIES_V1: u32 = 5;
+
+/// Consecutive-capacity-refusal accounting for one mounted worktree's worker.
+#[derive(Debug)]
+pub struct ReconcileCapacityRetryV1 {
+    consecutive: u32,
+    backoff: Duration,
+}
+
+impl Default for ReconcileCapacityRetryV1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReconcileCapacityRetryV1 {
+    pub const fn new() -> Self {
+        Self {
+            consecutive: 0,
+            backoff: RECONCILE_CAPACITY_RETRY_FLOOR,
         }
-        suppressed
+    }
+
+    /// Any pass that did not fail on capacity clears the accounting.
+    pub fn record_progress(&mut self) {
+        self.consecutive = 0;
+        self.backoff = RECONCILE_CAPACITY_RETRY_FLOOR;
+    }
+
+    /// `Some(delay)` arms exactly one delayed wake; `None` means the bound is
+    /// spent and this worker stops self-scheduling until real input arrives.
+    pub fn record_capacity_failure(&mut self) -> Option<Duration> {
+        if self.consecutive >= MAX_CONSECUTIVE_CAPACITY_RETRIES_V1 {
+            return None;
+        }
+        self.consecutive = self.consecutive.saturating_add(1);
+        let delay = self.backoff;
+        self.backoff = self
+            .backoff
+            .saturating_mul(2)
+            .min(RECONCILE_CAPACITY_RETRY_CEILING);
+        Some(delay)
+    }
+
+    /// Consecutive capacity refusals since the last non-capacity pass.
+    pub const fn consecutive(&self) -> u32 {
+        self.consecutive
+    }
+}
+
+/// Deterministic reconcile fault installed by the worker-loop isolation tests.
+///
+/// The guard types above are pure state machines; on their own they prove
+/// nothing about whether the background worker consults them. These tests
+/// therefore drive the real registry worker over a real mounted worktree and
+/// count the passes it actually attempts, which is only observable if the
+/// scheduler can be made to fail on demand.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconcileFaultKindV1 {
+    /// Unwinds inside the blocking reconcile task, exactly as a malformed
+    /// source file did through `generate_node_id`.
+    Panic,
+    /// Refused because a sibling worktree held a graph operation budget. It
+    /// clears once that holder finishes, which wakes nothing here.
+    TransientCapacity,
+    /// Refused before any indexing work because a sibling worktree or artifact
+    /// build was holding the shared resident-memory budget. The request fits
+    /// the limit, so memory given back makes it admissible.
+    ResidentMemory,
+    /// Refused because the request is larger than the whole process limit. It
+    /// is shaped like a capacity refusal and is not one: no release by any
+    /// other holder can ever admit it.
+    OversizedCapacity,
+    /// A source observation superseded the active reconcile.
+    Cancelled,
+    /// The active reconcile exhausted its own deadline.
+    DeadlineExceeded,
+    /// A refusal the same input reproduces forever.
+    Permanent,
+    /// The durable publication authority requires an explicit index reset.
+    PublicationCorruption,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub struct ReconcileFaultInjectionV1 {
+    kind: ReconcileFaultKindV1,
+    /// Passes to fault before behaving normally; `usize::MAX` never recovers.
+    faulting_passes: usize,
+    attempts: std::sync::atomic::AtomicUsize,
+    paused: std::sync::Mutex<bool>,
+    resumed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl ReconcileFaultInjectionV1 {
+    pub const fn new(kind: ReconcileFaultKindV1, faulting_passes: usize) -> Self {
+        Self {
+            kind,
+            faulting_passes,
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            paused: std::sync::Mutex::new(false),
+            resumed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Hold an admitted blocking pass until the retirement fixture releases it.
+    pub fn paused() -> Self {
+        let mut fault = Self::new(ReconcileFaultKindV1::Permanent, 0);
+        fault.paused = std::sync::Mutex::new(true);
+        fault
+    }
+
+    pub fn resume(&self) {
+        *self.paused.lock().expect("reconcile pause lock") = false;
+        self.resumed.notify_all();
+    }
+
+    /// Reconcile passes the worker actually dispatched, faulting or not.
+    pub fn attempts(&self) -> usize {
+        self.attempts.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Called at the top of every real reconcile pass.
+    pub fn arrive(&self) -> Result<(), super::CodeIndexSchedulerErrorV1> {
+        let seen = self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let mut paused = self.paused.lock().expect("reconcile pause lock");
+        while *paused {
+            paused = self
+                .resumed
+                .wait(paused)
+                .expect("resume admitted reconcile");
+        }
+        drop(paused);
+        if seen >= self.faulting_passes {
+            return Ok(());
+        }
+        match self.kind {
+            ReconcileFaultKindV1::Panic => {
+                panic!("injected reconcile panic (pass {})", seen + 1)
+            }
+            ReconcileFaultKindV1::TransientCapacity => Err(super::CodeIndexSchedulerErrorV1::GraphProjection(
+                tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
+                    budget: tracedecay_graph_db::GraphBudgetKind::Capacity.as_str().to_owned(),
+                    limit: 1_000,
+                },
+            )),
+            // Exactly the shape `ProcessResidentMemoryV1::reserve` returns when
+            // the process budget is already spoken for by another holder.
+            ReconcileFaultKindV1::ResidentMemory => {
+                Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(
+                    tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1::ReservationCeiling {
+                        used_bytes: 900,
+                        requested_bytes: 200,
+                        limit_bytes: 1_000,
+                    },
+                ))
+            }
+            // Same variant, but the request alone exceeds the whole limit.
+            ReconcileFaultKindV1::OversizedCapacity => {
+                Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(
+                    tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1::ReservationCeiling {
+                        used_bytes: 0,
+                        requested_bytes: 4_000,
+                        limit_bytes: 1_000,
+                    },
+                ))
+            }
+            ReconcileFaultKindV1::Cancelled => Err(
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Interrupted(
+                    tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
+                )
+                .into(),
+            ),
+            ReconcileFaultKindV1::DeadlineExceeded => Err(
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Interrupted(
+                    tracedecay_code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+                )
+                .into(),
+            ),
+            ReconcileFaultKindV1::Permanent => Err(super::CodeIndexSchedulerErrorV1::Identity(
+                "injected permanent reconcile refusal".to_owned(),
+            )),
+            ReconcileFaultKindV1::PublicationCorruption => Err(
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Publication(
+                    tracedecay_code_index::production::CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(
+                        "injected corrupt publication authority".to_owned(),
+                    ),
+                )
+                .into(),
+            ),
+        }
     }
 }
 
@@ -252,179 +484,5 @@ mod tests {
             ReconcilePanicDecisionV1::RetryAfter(RECONCILE_PANIC_BACKOFF_FLOOR),
             "the next panic restarts at the floor"
         );
-    }
-}
-
-/// Bounded delayed retry for a reconcile pass that failed because shared
-/// process capacity was momentarily exhausted.
-///
-/// A reconcile reserves against one process-wide resident-memory authority. A
-/// sibling worktree or artifact build can hold that budget when this pass asks
-/// for it, and the request is refused before any indexing work starts. Nothing
-/// wakes this worker when the competing holder releases: the failure path only
-/// restored the pending arrival, so the worktree stayed stale until an
-/// unrelated query or edit happened to wake it.
-///
-/// The retry is deliberately narrow. A panicking or permanently refused pass
-/// reproduces on every attempt, so retrying it forever is the failure this
-/// module exists to prevent; only a failure that is *transient by construction*
-/// — capacity another holder will release — earns a re-arm, and even that is
-/// capped so a genuinely undersized budget degrades to stale instead of
-/// spinning.
-pub const RECONCILE_CAPACITY_RETRY_FLOOR: Duration = if cfg!(any(test, feature = "test-helpers")) {
-    Duration::from_millis(40)
-} else {
-    Duration::from_secs(2)
-};
-pub const RECONCILE_CAPACITY_RETRY_CEILING: Duration = if cfg!(any(test, feature = "test-helpers"))
-{
-    Duration::from_millis(320)
-} else {
-    Duration::from_mins(1)
-};
-
-/// Consecutive capacity refusals after which the shared budget is not
-/// momentarily contended but structurally too small for this worktree. Further
-/// self-scheduled wakes only burn the pool; the next real hint still retries.
-pub const MAX_CONSECUTIVE_CAPACITY_RETRIES_V1: u32 = 5;
-
-/// Consecutive-capacity-refusal accounting for one mounted worktree's worker.
-#[derive(Debug)]
-pub struct ReconcileCapacityRetryV1 {
-    consecutive: u32,
-    backoff: Duration,
-}
-
-impl Default for ReconcileCapacityRetryV1 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ReconcileCapacityRetryV1 {
-    #[hotpath::skip]
-    pub const fn new() -> Self {
-        Self {
-            consecutive: 0,
-            backoff: RECONCILE_CAPACITY_RETRY_FLOOR,
-        }
-    }
-
-    /// Any pass that did not fail on capacity clears the accounting.
-    pub fn record_progress(&mut self) {
-        self.consecutive = 0;
-        self.backoff = RECONCILE_CAPACITY_RETRY_FLOOR;
-    }
-
-    /// `Some(delay)` arms exactly one delayed wake; `None` means the bound is
-    /// spent and this worker stops self-scheduling until real input arrives.
-    pub fn record_capacity_failure(&mut self) -> Option<Duration> {
-        if self.consecutive >= MAX_CONSECUTIVE_CAPACITY_RETRIES_V1 {
-            hotpath::gauge!("daemon.code_index.reconcile.capacity.exhausted_total").inc(1_u64);
-            return None;
-        }
-        hotpath::gauge!("daemon.code_index.reconcile.capacity.retry_total").inc(1_u64);
-        self.consecutive = self.consecutive.saturating_add(1);
-        let delay = self.backoff;
-        self.backoff = self
-            .backoff
-            .saturating_mul(2)
-            .min(RECONCILE_CAPACITY_RETRY_CEILING);
-        Some(delay)
-    }
-
-    /// Consecutive capacity refusals since the last non-capacity pass.
-    #[hotpath::skip]
-    pub const fn consecutive(&self) -> u32 {
-        self.consecutive
-    }
-}
-
-/// Deterministic reconcile fault installed by the worker-loop isolation tests.
-///
-/// The guard types above are pure state machines; on their own they prove
-/// nothing about whether the background worker consults them. These tests
-/// therefore drive the real registry worker over a real mounted worktree and
-/// count the passes it actually attempts, which is only observable if the
-/// scheduler can be made to fail on demand.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReconcileFaultKindV1 {
-    /// Unwinds inside the blocking reconcile task, exactly as a malformed
-    /// source file did through `generate_node_id`.
-    Panic,
-    /// Refused before any indexing work because a sibling worktree or artifact
-    /// build was holding the shared resident-memory budget. The request fits
-    /// the limit, so releasing that budget makes it admissible.
-    TransientCapacity,
-    /// Refused because the request is larger than the whole process limit. It
-    /// is shaped like a capacity refusal and is not one: no release by any
-    /// other holder can ever admit it.
-    OversizedCapacity,
-    /// A refusal the same input reproduces forever.
-    Permanent,
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-pub struct ReconcileFaultInjectionV1 {
-    kind: ReconcileFaultKindV1,
-    /// Passes to fault before behaving normally; `usize::MAX` never recovers.
-    faulting_passes: usize,
-    attempts: std::sync::atomic::AtomicUsize,
-}
-
-#[cfg(test)]
-impl ReconcileFaultInjectionV1 {
-    pub const fn new(kind: ReconcileFaultKindV1, faulting_passes: usize) -> Self {
-        Self {
-            kind,
-            faulting_passes,
-            attempts: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    /// Reconcile passes the worker actually dispatched, faulting or not.
-    pub fn attempts(&self) -> usize {
-        self.attempts.load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    /// Called at the top of every real reconcile pass.
-    pub fn arrive(&self) -> Result<(), super::CodeIndexSchedulerErrorV1> {
-        let seen = self
-            .attempts
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        if seen >= self.faulting_passes {
-            return Ok(());
-        }
-        match self.kind {
-            ReconcileFaultKindV1::Panic => {
-                panic!("injected reconcile panic (pass {})", seen + 1)
-            }
-            // Exactly the shape `ProcessResidentMemoryV1::reserve` returns when
-            // the process budget is already spoken for by another holder.
-            ReconcileFaultKindV1::TransientCapacity => {
-                Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(
-                    tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1::ReservationCeiling {
-                        used_bytes: 900,
-                        requested_bytes: 200,
-                        limit_bytes: 1_000,
-                    },
-                ))
-            }
-            // Same variant, but the request alone exceeds the whole limit.
-            ReconcileFaultKindV1::OversizedCapacity => {
-                Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(
-                    tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1::ReservationCeiling {
-                        used_bytes: 0,
-                        requested_bytes: 4_000,
-                        limit_bytes: 1_000,
-                    },
-                ))
-            }
-            ReconcileFaultKindV1::Permanent => Err(super::CodeIndexSchedulerErrorV1::Identity(
-                "injected permanent reconcile refusal".to_owned(),
-            )),
-        }
     }
 }

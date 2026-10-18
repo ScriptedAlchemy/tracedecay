@@ -59,29 +59,22 @@ def main() -> int:
     parser.add_argument("--mcpbs", type=Path)
     arguments = parser.parse_args()
     targets = target_matrix(arguments.manifest)
-    binary_prefix = "tracedecay-beta" if arguments.profile == "beta" else "tracedecay"
-
-    require_exact(
-        "binary",
-        files(arguments.binaries),
-        {
-            f"{binary_prefix}-{arguments.tag}-{target['name']}.{target['archive']}"
-            for target in targets
-        },
-    )
+    prefix = "tracedecay-beta" if arguments.profile == "beta" else "tracedecay"
+    binary_name = {
+        target["name"]: f"{prefix}-{arguments.tag}-{target['name']}.{target['archive']}"
+        for target in targets
+    }
+    mcpb_name = {
+        target["name"]: f"{prefix}-{arguments.tag}-{target['name']}.mcpb"
+        for target in targets
+    }
     if arguments.mcpbs is None:
         raise SystemExit("release validation requires an MCPB directory")
-    mcpb_prefix = (
-        "tracedecay-beta" if arguments.profile == "beta" else "tracedecay"
-    )
-    require_exact(
-        "MCPB",
-        files(arguments.mcpbs),
-        {
-            f"{mcpb_prefix}-{arguments.tag}-{target['name']}.mcpb"
-            for target in targets
-        },
-    )
+    binaries = files(arguments.binaries)
+    mcpbs = files(arguments.mcpbs)
+
+    require_exact("binary", binaries, set(binary_name.values()))
+    require_exact("MCPB", mcpbs, set(mcpb_name.values()))
     print("release artifact coverage matches target manifest")
     return 0
 

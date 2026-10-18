@@ -2,14 +2,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::db::{DatabaseAuthority, engine::Connection};
-use crate::profiled_lock::ProfiledMutex;
 use tracedecay_domain::errors::TraceDecayError;
 // The store-runtime registry moved into this kernel, so the facade retains the
 // concrete handle rather than an erased port.
 use super::memory_graph_reconciliation::{
     MemoryGraphReconciliationCoordinatorV1, ProjectMemoryReconciliationTelemetryV1,
 };
-use crate::store_runtime::registry::{
+use crate::shard_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, DatabaseRuntimeAttachment,
     DatabaseRuntimeOwnerAttachmentReservationIdentityV1, DatabaseRuntimeOwnerIdentityV1,
     StoreRuntimeClientLease, StoreRuntimeOwnerAttachmentRetirementReservationV1,
@@ -83,7 +82,6 @@ impl DatabaseRuntimeClientV1 {
         self.guard.runtime().verified_locator()
     }
 
-    #[hotpath::skip]
     pub async fn dispatch_submit(
         &self,
         request: tracedecay_store::RuntimeSubmitRequestV1,
@@ -107,12 +105,12 @@ impl DatabaseRuntimeClientV1 {
             .await
     }
 
-    pub fn dispatch_read(
+    pub async fn dispatch_read(
         &self,
         request: tracedecay_store::RuntimeReadRequestV1,
-        probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
+        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
     ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
-        self.guard.runtime().dispatch_read(request, probe)
+        self.guard.runtime().dispatch_read(request, probe).await
     }
 
     /// Exact rusqlite writer/reader telemetry for this guarded client.
@@ -123,7 +121,7 @@ impl DatabaseRuntimeClientV1 {
     #[must_use]
     pub fn writer_telemetry_snapshot(
         &self,
-    ) -> Option<crate::store_runtime::registry::RepositoryRuntimePhysicalSnapshot> {
+    ) -> Option<crate::shard_runtime::registry::RepositoryRuntimePhysicalSnapshot> {
         self.guard.runtime().writer_telemetry_snapshot()
     }
 }
@@ -153,7 +151,7 @@ struct DatabaseOwnerStateV1 {
     inner: Arc<DatabaseInner>,
     access: DatabaseAccessMode,
     owner_id: DatabaseRuntimeOwnerIdentityV1,
-    lifecycle: ProfiledMutex<DatabaseOwnerLifecycleV1>,
+    lifecycle: std::sync::Mutex<DatabaseOwnerLifecycleV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -252,7 +250,7 @@ pub(super) struct DatabaseInner {
     /// Descriptor-derived identity reported by the physical attachment.
     pub(super) opened_file_identity: u64,
     /// Serializes logical writers sharing this canonical database slot.
-    pub(super) writer: tokio::sync::Mutex<()>,
+    pub(super) writer: Arc<asupersync::sync::Mutex<()>>,
     /// Coalesces and retains background memory-graph catch-up for this exact
     /// relational attachment.
     pub(super) memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1,
@@ -271,7 +269,7 @@ pub(super) struct DatabaseInner {
     /// The cell is shared (`Arc`) so a deferred-activation graph proxy can
     /// resolve it at use time without retaining this inner allocation.
     pub(super) memory_graph_runtime:
-        Arc<OnceLock<Weak<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>>>,
+        Arc<OnceLock<Weak<dyn crate::shard_runtime::VerifiedGraphRuntimePortV1>>>,
     /// Watermark of the projected memory-graph source, keyed by the exact
     /// append-only lineage stamp it was computed under. See
     /// [`super::graph_binding`] for the invariant that makes the stamp a
@@ -279,6 +277,39 @@ pub(super) struct DatabaseInner {
     pub(super) memory_graph_source_watermark:
         std::sync::Mutex<Option<super::graph_binding::MemoryGraphSourceStampedWatermarkV1>>,
 }
+
+// One `Send` proof of every attachment field exceeds the recursion limit
+// (rust-lang/rust#159228). Each field below is a separate proof.
+unsafe impl Send for DatabaseInner {}
+unsafe impl Sync for DatabaseInner {}
+
+const _: fn(&DatabaseInner) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let DatabaseInner {
+        conn,
+        write_conn,
+        runtime,
+        opened_file_identity,
+        writer,
+        memory_graph_reconciliation,
+        memory_graph_reconciliation_telemetry,
+        canonical_path,
+        _authority,
+        memory_graph_runtime,
+        memory_graph_source_watermark,
+    } = value;
+    assert_send_sync(conn);
+    assert_send_sync(write_conn);
+    assert_send_sync(runtime);
+    assert_send_sync(opened_file_identity);
+    assert_send_sync(writer);
+    assert_send_sync(memory_graph_reconciliation);
+    assert_send_sync(memory_graph_reconciliation_telemetry);
+    assert_send_sync(canonical_path);
+    assert_send_sync(_authority);
+    assert_send_sync(memory_graph_runtime);
+    assert_send_sync(memory_graph_source_watermark);
+};
 
 impl DatabaseInner {
     /// Publishes an already-open canonical registry runtime without reopening
@@ -348,7 +379,7 @@ impl DatabaseInner {
             canonical_path: runtime.client().canonical_path().to_path_buf(),
             runtime,
             opened_file_identity,
-            writer: tokio::sync::Mutex::new(()),
+            writer: Arc::new(asupersync::sync::Mutex::new(())),
             memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1::default(),
             memory_graph_reconciliation_telemetry: Arc::new(
                 ProjectMemoryReconciliationTelemetryV1::default(),
@@ -457,10 +488,7 @@ impl DatabaseOwnerV1 {
                 inner,
                 access,
                 owner_id,
-                lifecycle: hotpath::mutex!(
-                    Mutex::new(DatabaseOwnerLifecycleV1::Ready),
-                    label = "runtime_core.db.lease.lifecycle"
-                ),
+                lifecycle: Mutex::new(DatabaseOwnerLifecycleV1::Ready),
             }),
         })
     }
@@ -468,7 +496,7 @@ impl DatabaseOwnerV1 {
     /// Issues one independently counted client facade with this owner's
     /// original access policy. Cloning the returned `Database` shares both
     /// its issuance token and access mode.
-    #[hotpath::measure(label = "runtime_core.db.lease.issue")]
+    #[tracing::instrument(name = "runtime_core.db.lease.issue", level = "trace", skip_all)]
     pub fn issue_lease(&self) -> Result<Database, DatabaseOwnerErrorV1> {
         self.issue_client_lease(self.state.access)
     }
@@ -478,7 +506,7 @@ impl DatabaseOwnerV1 {
     /// A read-write owner may reduce an issued client to read-only, while an
     /// owner published read-only remains read-only. No client can elevate its
     /// access mode after issuance.
-    #[hotpath::measure(label = "runtime_core.db.lease.issue_read")]
+    #[tracing::instrument(name = "runtime_core.db.lease.issue_read", level = "trace", skip_all)]
     pub fn issue_read_only_lease(&self) -> Result<Database, DatabaseOwnerErrorV1> {
         self.issue_client_lease(DatabaseAccessMode::ReadOnly)
     }
@@ -550,7 +578,11 @@ impl DatabaseOwnerV1 {
         self.state.inner.registered_verified_locator()
     }
 
-    #[hotpath::measure(label = "runtime_core.db.lease.reserve_retirement")]
+    #[tracing::instrument(
+        name = "runtime_core.db.lease.reserve_retirement",
+        level = "trace",
+        skip_all
+    )]
     pub fn reserve_retirement(
         &self,
     ) -> Result<DatabaseOwnerRetirementReservationV1, DatabaseOwnerErrorV1> {

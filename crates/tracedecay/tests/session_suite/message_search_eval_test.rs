@@ -9,19 +9,19 @@
 //!
 //! The corpus is seeded into a real per-test global store and every query runs
 //! the production `search_session_messages` path (bm25 over
-//! `session_messages_fts`), not a reimplementation. Where current master ranks
+//! `lcm_raw_messages_fts`), not a reimplementation. Where current master ranks
 //! a case worse than the ranking we ultimately want, the case is marked
 //! `expected_current_failure: true`: the test asserts the DOCUMENTED current
 //! outcome (keeping the suite green today) while printing the aspirational one,
 //! forming a known-gap ledger that a later ranking fix must consciously flip.
 //!
 //! Set `TD_MSG_EVAL_RECORD=1` to print the live ranking of every query and
-//! skip assertions — the calibration path used to author/refresh the fixture.
+//! skip assertions, the calibration path used to author/refresh the fixture.
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
 
@@ -83,13 +83,14 @@ async fn seed_corpus(db: &HostAdmissionTestRuntimeV1, fixture: &Value) {
             .with_tool_names(message["tool_names"].as_str())
             .with_source(Some("/tmp/project/transcript.jsonl"), Some(ordinal as i64))
             .build();
-            assert!(
-                db.upsert_session_message_for_test(HostAdmissionScope::Project, &record)
-                    .await
-                    .expect("seed registered session message"),
-                "seed message {}",
-                message["id"].as_str().unwrap_or("?")
-            );
+            db.upsert_session_message_for_test(HostAdmissionScope::Project, &record)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "seed message {}: {error}",
+                        message["id"].as_str().unwrap_or("?")
+                    )
+                });
         }
     }
 }
@@ -115,13 +116,12 @@ fn str_vec(value: &Value, key: &str) -> Vec<String> {
     value
         .get(key)
         .and_then(Value::as_array)
-        .map(|arr| {
+        .map_or_default(|arr| {
             arr.iter()
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 fn index_of(ranked: &[String], id: &str) -> Option<usize> {

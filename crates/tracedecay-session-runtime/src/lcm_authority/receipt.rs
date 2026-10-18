@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationObservation, CancellationStage, OperationBudgetUsage, OperationReceipt,
     OperationTermination, RequestContext,
 };
@@ -31,7 +31,7 @@ pub(super) fn terminal_failure(
     context: &RequestContext,
     operation: LcmAuthorityOperation,
     started_at: UtcMicros,
-    diagnostic: &'static str,
+    diagnostic: &str,
 ) -> LcmAuthorityResponse {
     terminal(
         context,

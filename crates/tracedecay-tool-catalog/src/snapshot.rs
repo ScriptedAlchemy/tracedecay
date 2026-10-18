@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tracedecay_domain::ManifestDigest;
 
 use crate::binding::{BindingSurface, SurfaceBindingV1, SurfaceOperationName};
 use crate::executable::ExecutableSchemaAuthority;
@@ -15,45 +18,22 @@ use crate::validation::{CatalogValidationError, validate_catalog};
 
 /// Validation-only evidence that an owning application use case exists.
 ///
-/// This descriptor intentionally cannot invoke anything: it contains no
-/// function pointer, trait object, service locator, or runtime registration.
+/// Capability identity and schemas remain authoritative on the manifest. A
+/// handler descriptor only proves that the application has registered the
+/// manifest's use case; copying the manifest fields here made validation compare
+/// two records generated from the same specification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationHandlerDescriptorV1 {
-    capability_id: CapabilityId,
     use_case_id: UseCaseId,
-    request_schema: SchemaRef,
-    result_schema: SchemaRef,
 }
 
 impl ApplicationHandlerDescriptorV1 {
-    pub fn new(
-        capability_id: CapabilityId,
-        use_case_id: UseCaseId,
-        request_schema: SchemaRef,
-        result_schema: SchemaRef,
-    ) -> Self {
-        Self {
-            capability_id,
-            use_case_id,
-            request_schema,
-            result_schema,
-        }
-    }
-
-    pub fn capability_id(&self) -> &CapabilityId {
-        &self.capability_id
+    pub fn new(use_case_id: UseCaseId) -> Self {
+        Self { use_case_id }
     }
 
     pub fn use_case_id(&self) -> &UseCaseId {
         &self.use_case_id
-    }
-
-    pub fn request_schema(&self) -> &SchemaRef {
-        &self.request_schema
-    }
-
-    pub fn result_schema(&self) -> &SchemaRef {
-        &self.result_schema
     }
 }
 
@@ -67,11 +47,36 @@ pub struct CatalogContributionInputV1 {
     pub bindings: Vec<SurfaceBindingV1>,
 }
 
+impl CatalogContributionInputV1 {
+    pub fn new(
+        contribution_id: ContributionId,
+        depends_on: Vec<ContributionId>,
+        capabilities: Vec<CapabilityManifestV1>,
+        bindings: Vec<SurfaceBindingV1>,
+    ) -> Self {
+        Self {
+            contribution_id,
+            depends_on,
+            capabilities,
+            retrieval_primitives: Vec::new(),
+            bindings,
+        }
+    }
+
+    pub fn with_retrieval_primitives(
+        mut self,
+        retrieval_primitives: Vec<RetrievalPrimitiveManifestV1>,
+    ) -> Self {
+        self.retrieval_primitives = retrieval_primitives;
+        self
+    }
+}
+
 /// A reviewed, application-owned set of inert catalog records.
 ///
-/// Contributions carry metadata only. The root composition layer validates and
-/// folds them into a snapshot; neither contributions nor this crate dispatch
-/// to a handler.
+/// Contributions carry metadata only. `tracedecay-contracts` validates them
+/// against its handler descriptors and folds them into a snapshot; neither
+/// contributions nor this crate dispatch to a handler.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CatalogContributionV1 {
     contribution_id: ContributionId,
@@ -209,31 +214,52 @@ impl CatalogSnapshotBuilderV1 {
         self
     }
 
-    #[hotpath::measure(label = "tool_catalog.snapshot.build")]
+    #[tracing::instrument(name = "tool_catalog.snapshot.build", level = "trace", skip_all)]
     pub fn build(self) -> Result<CatalogSnapshotV1, CatalogValidationError> {
+        // Duplicate and reference validation runs over the borrowed input
+        // first, so no map insertion below can silently overwrite a record.
         validate_catalog(&self.contributions, &self.profiles, &self.handlers)?;
 
+        let Self {
+            contributions,
+            profiles,
+            handlers: _,
+        } = self;
+        let mut contribution_entries = Vec::with_capacity(contributions.len());
         let mut capabilities = BTreeMap::new();
         let mut retrieval_primitives = BTreeMap::new();
         let mut bindings = BTreeMap::new();
         let mut executable_schemas = BTreeMap::new();
-        for contribution in &self.contributions {
-            for capability in contribution.capabilities() {
-                capabilities.insert(capability.capability_id().clone(), capability.clone());
+        for contribution in contributions {
+            let CatalogContributionV1 {
+                contribution_id,
+                depends_on,
+                capabilities: contributed_capabilities,
+                retrieval_primitives: contributed_retrievals,
+                bindings: contributed_bindings,
+                executable_schemas: contributed_schemas,
+            } = contribution;
+            contribution_entries.push(ContributionDigestEntry {
+                contribution_id,
+                depends_on,
+            });
+            for capability in contributed_capabilities {
+                capabilities.insert(capability.capability_id().clone(), capability);
             }
-            for retrieval in contribution.retrieval_primitives() {
-                retrieval_primitives.insert(retrieval.capability_id().clone(), retrieval.clone());
+            for retrieval in contributed_retrievals {
+                retrieval_primitives.insert(retrieval.capability_id().clone(), retrieval);
             }
-            for binding in contribution.bindings() {
-                bindings.insert(binding.binding_id().clone(), binding.clone());
+            for binding in contributed_bindings {
+                bindings.insert(binding.binding_id().clone(), binding);
             }
-            for authority in contribution.executable_schemas() {
-                executable_schemas.insert(authority.capability_id().clone(), authority.clone());
+            for authority in contributed_schemas {
+                executable_schemas.insert(authority.capability_id().clone(), authority);
             }
         }
+        contribution_entries
+            .sort_by(|left, right| left.contribution_id.cmp(&right.contribution_id));
 
-        let profiles: BTreeMap<_, _> = self
-            .profiles
+        let profiles: BTreeMap<_, _> = profiles
             .into_iter()
             .map(|profile| (profile.profile_id().clone(), profile))
             .collect();
@@ -247,19 +273,15 @@ impl CatalogSnapshotBuilderV1 {
             })
             .collect();
         let schema_index = collect_schema_index(&capabilities, &retrieval_primitives);
-        let digest = calculate_digest(
-            &self.contributions,
-            &capabilities,
-            &retrieval_primitives,
-            &bindings,
-            &executable_schemas,
-            &profiles,
-        );
-        crate::hotpath_observe::snapshot_entries(
-            capabilities.len(),
-            bindings.len(),
-            profiles.len(),
-        );
+        let digest = calculate_digest(&SnapshotDigestDocument {
+            revision: 1,
+            contributions: contribution_entries,
+            capabilities: capabilities.values().collect(),
+            retrieval_primitives: retrieval_primitives.values().collect(),
+            bindings: bindings.values().collect(),
+            executable_schemas: executable_schemas.values().collect(),
+            profiles: profiles.values().collect(),
+        })?;
 
         Ok(CatalogSnapshotV1 {
             digest,
@@ -289,8 +311,8 @@ pub struct CatalogSnapshotV1 {
 }
 
 impl CatalogSnapshotV1 {
-    pub const fn digest(&self) -> CatalogDigest {
-        self.digest
+    pub fn digest(&self) -> CatalogDigest {
+        self.digest.clone()
     }
 
     pub fn capability(&self, capability_id: &CapabilityId) -> Option<&CapabilityManifestV1> {
@@ -333,27 +355,12 @@ impl CatalogSnapshotV1 {
 
     /// Resolves metadata only. `None` deliberately covers unknown, unavailable,
     /// feature-incompatible, profile-hidden, and protocol-incompatible entries.
-    #[hotpath::measure(label = "tool_catalog.snapshot.resolve_binding")]
+    #[tracing::instrument(
+        name = "tool_catalog.snapshot.resolve_binding",
+        level = "trace",
+        skip_all
+    )]
     pub fn resolve_binding(
-        &self,
-        profile_id: &ProfileId,
-        surface: BindingSurface,
-        operation: &SurfaceOperationName,
-        protocol_revision: u32,
-        negotiated_features: &BTreeSet<FeatureId>,
-    ) -> Option<&CapabilityManifestV1> {
-        let resolved = self.resolve_binding_capability(
-            profile_id,
-            surface,
-            operation,
-            protocol_revision,
-            negotiated_features,
-        );
-        crate::hotpath_observe::binding_resolution(resolved.is_some());
-        resolved
-    }
-
-    fn resolve_binding_capability(
         &self,
         profile_id: &ProfileId,
         surface: BindingSurface,
@@ -408,7 +415,11 @@ impl CatalogSnapshotV1 {
     /// The caller supplies its already-resolved scope and authorization
     /// intersection. This keeps transport adapters from publishing a static
     /// superset and preserves indistinguishable omission for hidden entries.
-    #[hotpath::measure(label = "tool_catalog.snapshot.visible_bindings")]
+    #[tracing::instrument(
+        name = "tool_catalog.snapshot.visible_bindings",
+        level = "trace",
+        skip_all
+    )]
     #[allow(clippy::too_many_arguments)]
     pub fn visible_bindings<'a>(
         &'a self,
@@ -419,6 +430,28 @@ impl CatalogSnapshotV1 {
         authorized_capabilities: &BTreeSet<CapabilityId>,
         available_scope: &BTreeSet<ScopeDimension>,
     ) -> Vec<(&'a SurfaceBindingV1, &'a CapabilityManifestV1)> {
+        let mut visible =
+            self.profile_bindings(profile_id, surface, protocol_revision, negotiated_features);
+        visible.retain(|(_, capability)| {
+            authorized_capabilities.contains(capability.capability_id())
+                && capability
+                    .scope()
+                    .dimensions()
+                    .iter()
+                    .all(|dimension| available_scope.contains(dimension))
+        });
+        visible
+    }
+
+    /// Lists the callable bindings a profile exposes on one surface, before
+    /// any caller's authority or scope narrows them, in operation order.
+    pub fn profile_bindings<'a>(
+        &'a self,
+        profile_id: &ProfileId,
+        surface: BindingSurface,
+        protocol_revision: u32,
+        negotiated_features: &BTreeSet<FeatureId>,
+    ) -> Vec<(&'a SurfaceBindingV1, &'a CapabilityManifestV1)> {
         let surface_enabled = self
             .profiles
             .get(profile_id)
@@ -426,15 +459,6 @@ impl CatalogSnapshotV1 {
         let mut visible = Vec::new();
         if surface_enabled {
             for capability in self.visible_capabilities(profile_id, negotiated_features) {
-                if !authorized_capabilities.contains(capability.capability_id())
-                    || !capability
-                        .scope()
-                        .dimensions()
-                        .iter()
-                        .all(|dimension| available_scope.contains(dimension))
-                {
-                    continue;
-                }
                 for binding_id in capability.binding_ids() {
                     let Some(binding) = self.bindings.get(binding_id) else {
                         continue;
@@ -451,7 +475,6 @@ impl CatalogSnapshotV1 {
                 left.operation().as_str().cmp(right.operation().as_str())
             });
         }
-        crate::hotpath_observe::visible_bindings_published(visible.len());
         visible
     }
 }
@@ -486,43 +509,50 @@ fn collect_schema_index(
     schemas
 }
 
-fn calculate_digest(
-    contributions: &[CatalogContributionV1],
-    capabilities: &BTreeMap<CapabilityId, CapabilityManifestV1>,
-    retrieval_primitives: &BTreeMap<CapabilityId, RetrievalPrimitiveManifestV1>,
-    bindings: &BTreeMap<BindingId, SurfaceBindingV1>,
-    executable_schemas: &BTreeMap<CapabilityId, ExecutableSchemaAuthority>,
-    profiles: &BTreeMap<ProfileId, ProfileDefinition>,
-) -> CatalogDigest {
-    let mut contributions: Vec<_> = contributions.iter().collect();
-    contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
+const SNAPSHOT_DIGEST_DOMAIN: &[u8] = b"tracedecay-tool-catalog.snapshot.v1\0";
 
-    let document = SnapshotDigestDocument {
-        revision: 1,
-        contributions: contributions
-            .into_iter()
-            .map(|contribution| ContributionDigestEntry {
-                contribution_id: contribution.contribution_id(),
-                depends_on: contribution.depends_on(),
-            })
-            .collect(),
-        capabilities: capabilities.values().collect(),
-        retrieval_primitives: retrieval_primitives.values().collect(),
-        bindings: bindings.values().collect(),
-        executable_schemas: executable_schemas.values().collect(),
-        profiles: profiles.values().collect(),
-    };
-    let document =
-        serde_json::to_vec(&document).expect("catalog records serialize without fallible values");
-    let mut canonical = b"tracedecay-tool-catalog.snapshot.v1\0".to_vec();
-    canonical.extend_from_slice(&document);
-    CatalogDigest::sha256(canonical)
+/// Hash the domain separator followed by the canonical JSON document, streaming
+/// the serializer straight into the hasher so neither the document nor a
+/// prefixed copy of it is ever materialized.
+fn calculate_digest(
+    document: &SnapshotDigestDocument<'_>,
+) -> Result<CatalogDigest, CatalogValidationError> {
+    let mut hasher = DigestWriter(Sha256::new());
+    hasher.0.update(SNAPSHOT_DIGEST_DOMAIN);
+    serde_json::to_writer(&mut hasher, document).map_err(|error| {
+        CatalogValidationError::DigestSerialization {
+            reason: error.to_string(),
+        }
+    })?;
+    let digest = ManifestDigest::from_sha256_bytes(&hasher.0.finalize()).map_err(|error| {
+        CatalogValidationError::DigestSerialization {
+            reason: error.to_string(),
+        }
+    })?;
+    CatalogDigest::from_manifest_digest(digest).map_err(|error| {
+        CatalogValidationError::DigestSerialization {
+            reason: error.to_string(),
+        }
+    })
+}
+
+struct DigestWriter(Sha256);
+
+impl io::Write for DigestWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
 struct SnapshotDigestDocument<'a> {
     revision: u8,
-    contributions: Vec<ContributionDigestEntry<'a>>,
+    contributions: Vec<ContributionDigestEntry>,
     capabilities: Vec<&'a CapabilityManifestV1>,
     retrieval_primitives: Vec<&'a RetrievalPrimitiveManifestV1>,
     bindings: Vec<&'a SurfaceBindingV1>,
@@ -530,8 +560,10 @@ struct SnapshotDigestDocument<'a> {
     profiles: Vec<&'a ProfileDefinition>,
 }
 
+/// The only contribution material that participates in catalog identity; the
+/// contributed records themselves are digested from the folded maps.
 #[derive(Serialize)]
-struct ContributionDigestEntry<'a> {
-    contribution_id: &'a ContributionId,
-    depends_on: &'a [ContributionId],
+struct ContributionDigestEntry {
+    contribution_id: ContributionId,
+    depends_on: Vec<ContributionId>,
 }

@@ -32,14 +32,14 @@ Enabling it protects newly ingested values; it does not rewrite transcripts
 already at rest. Structural payload externalization remains independent of
 this sensitive-value setting.
 
-**Dated amendment (2026-08-07, recorded decision — supersedes the
+**Dated amendment (2026-08-07, recorded decision, supersedes the
 conditional guarantee above).** The owner setting described above no longer
 exists in code. `d69ffa3504 fix(privacy): hard cut durable content
 boundaries` deleted `IngestProtectionDefaults` and
 `UserConfig::lcm_sensitive_redaction_enabled`
 (`crates/tracedecay-sessions/src/runtime/lcm/raw.rs`,
 `ingest_protection_defaults_tests.rs` removed); sensitive-value redaction of
-`lcm_raw_messages` input is now mandatory and unconditional at ingest — there
+`lcm_raw_messages` input is now mandatory and unconditional at ingest, there
 is no per-profile opt-in and no per-message metadata override. Ingest marks
 affected payloads `redacted: true, lossy: true` in metadata (`raw.rs:779-786`
 at the time of this note). This is a hard cut, stricter (safer) than the
@@ -168,7 +168,7 @@ detector upgrade, and detector evaluation corpora remain absent (see the
 - Representative structured and malformed inputs prove parse-before-scan behavior.
 - Every covered sink rejects raw, tainted, unmarked, and stale-policy payloads;
   LCM raw sensitive values follow the conditional guarantee above (see the
-  2026-08-07 dated amendment above — this is now a mandatory hard cut, not a
+  2026-08-07 dated amendment above, this is now a mandatory hard cut, not a
   conditional guarantee; the "conditional" and "profile setting" language in
   this bullet and the next describes the retired mechanism).
 - End-to-end tests prove secrets do not appear in covered databases, indexes,

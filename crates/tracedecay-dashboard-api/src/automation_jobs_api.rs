@@ -12,11 +12,12 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::DashboardState;
-use super::util::{JsonError, http_detail, internal_error};
+use super::util::{JsonError, internal_error, json_error};
 use super::{
     DashboardAutomationRunRequestV1, DashboardHttpRequestControlV1,
     automation_authority_error_response, exact_automation_authority,
@@ -26,6 +27,7 @@ use tracedecay_automation_runtime::automation::jobs::{
     validate_job_id,
 };
 use tracedecay_domain::canonical_text::default_true;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -86,18 +88,30 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.list", future = true)]
-pub async fn list(State(state): State<DashboardState>) -> ApiResult {
+/// `GET /api/automation/jobs`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct AutomationJobsPayloadV1 {
+    jobs: Vec<AutomationJob>,
+    count: usize,
+}
+
+#[tracing::instrument(name = "dashboard_api.jobs.list", level = "trace", skip_all)]
+pub async fn list(
+    State(state): State<DashboardState>,
+) -> std::result::Result<Json<AutomationJobsPayloadV1>, JsonError> {
     let jobs = load_jobs(&state.dashboard_root)
         .await
         .map_err(|err| internal_error(&err))?;
-    Ok(Json(json!({ "jobs": jobs, "count": jobs.len() })))
+    Ok(Json(AutomationJobsPayloadV1 {
+        count: jobs.len(),
+        jobs,
+    }))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.create", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.create", level = "trace", skip_all)]
 pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>) -> ApiResult {
     let body = serde_json::from_value::<CreateJobBody>(body)
-        .map_err(|err| bad_request(&format!("invalid job: {err}")))?;
+        .map_err(|err| json_error(StatusCode::BAD_REQUEST, format!("invalid job: {err}")))?;
     let now = current_timestamp();
     let job = AutomationJob {
         id: match body.id {
@@ -117,7 +131,7 @@ pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>
         updated_at: now,
         extra: BTreeMap::new(),
     };
-    validate_job(&job).map_err(|err| bad_request(&err.to_string()))?;
+    validate_job(&job).map_err(|err| json_error(StatusCode::BAD_REQUEST, err.to_string()))?;
     let job_for_write = job.clone();
     let result = super::automation_run_service::execute_dashboard_automation_write(
         &state,
@@ -139,12 +153,15 @@ pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>
     .await
     .map_err(|err| internal_error(&err))?;
     if result["conflict"] == true {
-        return Err(bad_request(&format!("job '{}' already exists", job.id)));
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            format!("job '{}' already exists", job.id),
+        ));
     }
     Ok(Json(json!({ "job": job })))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.view", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.view", level = "trace", skip_all)]
 pub async fn view(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
@@ -153,14 +170,14 @@ pub async fn view(
     Ok(Json(json!({ "job": job })))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.update", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.update", level = "trace", skip_all)]
 pub async fn update(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
     Json(body): Json<Value>,
 ) -> ApiResult {
     let patch = serde_json::from_value::<PatchJobBody>(body)
-        .map_err(|err| bad_request(&format!("invalid job patch: {err}")))?;
+        .map_err(|err| json_error(StatusCode::BAD_REQUEST, format!("invalid job patch: {err}")))?;
     let job_id_for_write = job_id.clone();
     let result = super::automation_run_service::execute_dashboard_automation_write(
         &state,
@@ -219,14 +236,14 @@ pub async fn update(
         return Err(not_found(&job_id));
     }
     if let Some(message) = result["validation_error"].as_str() {
-        return Err(bad_request(message));
+        return Err(json_error(StatusCode::BAD_REQUEST, message));
     }
     let updated = serde_json::from_value::<AutomationJob>(result["job"].clone())
         .map_err(|err| internal_error(&err))?;
     Ok(Json(json!({ "job": updated })))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.delete", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.delete", level = "trace", skip_all)]
 pub async fn delete(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
@@ -258,7 +275,7 @@ pub async fn delete(
     Ok(Json(json!({ "deleted": job_id })))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.run", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.run", level = "trace", skip_all)]
 pub async fn run(
     State(state): State<DashboardState>,
     Extension(control): Extension<DashboardHttpRequestControlV1>,
@@ -280,12 +297,18 @@ pub async fn run(
         job_id: job.id.clone(),
         run_id: run_id.clone(),
     };
-    tokio::spawn(async move {
+    native_runtime::NativeTask::spawn(async move {
         let job_id = job.id.clone();
         if let Err(err) = authority.run(&project_root, request, control).await {
             tracing::warn!(%job_id, error = err.detail(), "dashboard user job failed");
         }
-    });
+    })
+    .map_err(|error| {
+        json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("dashboard user job could not start: {error}"),
+        )
+    })?;
     Ok((StatusCode::ACCEPTED, Json(payload)))
 }
 
@@ -293,7 +316,7 @@ async fn load_job_or_404(
     state: &DashboardState,
     job_id: &str,
 ) -> std::result::Result<AutomationJob, JsonError> {
-    validate_job_id(job_id).map_err(|err| bad_request(&err.to_string()))?;
+    validate_job_id(job_id).map_err(|err| json_error(StatusCode::BAD_REQUEST, err.to_string()))?;
     match find_job(&state.dashboard_root, job_id).await {
         Ok(Some(job)) => Ok(job),
         Ok(None) => Err(not_found(job_id)),
@@ -304,8 +327,7 @@ async fn load_job_or_404(
 fn micros_now() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_micros())
-        .unwrap_or_default()
+        .map_or_default(|duration| duration.as_micros())
 }
 
 fn generated_job_id(name: &str) -> String {
@@ -331,13 +353,115 @@ fn generated_job_id(name: &str) -> String {
     format!("{slug}-{}", micros_now() % 1_000_000)
 }
 
-fn bad_request(message: &str) -> JsonError {
-    (StatusCode::BAD_REQUEST, Json(http_detail(message)))
+fn not_found(job_id: &str) -> JsonError {
+    json_error(
+        StatusCode::NOT_FOUND,
+        format!("automation job '{job_id}' not found"),
+    )
 }
 
-fn not_found(job_id: &str) -> JsonError {
-    (
-        StatusCode::NOT_FOUND,
-        Json(http_detail(&format!("automation job '{job_id}' not found"))),
-    )
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1};
+
+    #[test]
+    fn accepted_user_job_runs_without_a_tokio_runtime() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-jobs-native",
+        ));
+        let job: AutomationJob = serde_json::from_value(json!({
+            "id": "native-job",
+            "name": "Native job",
+            "prompt": "Do nothing.",
+            "enabled": true,
+        }))
+        .expect("fixture job");
+        fixture
+            .block_on(save_jobs(&dash.dashboard_root, &[job]))
+            .expect("fixture job saved");
+        let (ran, runs) = mpsc::channel();
+        let ran = std::sync::Mutex::new(ran);
+        dash.automation_authority = Some(
+            DashboardAutomationAuthorityV1::new(
+                dash.profile_root.clone(),
+                Arc::new(move |invocation| {
+                    let on_tokio = tokio::runtime::Handle::try_current().is_ok();
+                    let _ = ran
+                        .lock()
+                        .expect("run channel")
+                        .send((invocation.request, on_tokio));
+                    Box::pin(async {
+                        Err(DashboardAutomationAuthorityErrorV1::unavailable(
+                            "fixture run port",
+                        ))
+                    })
+                }),
+                Arc::new(|_| {
+                    Box::pin(async {
+                        Err(DashboardAutomationAuthorityErrorV1::unavailable(
+                            "fixture skill port",
+                        ))
+                    })
+                }),
+            )
+            .expect("fixture automation authority"),
+        );
+        let writer_waits = native_runtime::native_thread_writer_waits();
+
+        let (status, _payload) = native_runtime::block_on(run(
+            State(dash),
+            Extension(DashboardHttpRequestControlV1::test_fixture(
+                "dashboard-job-run",
+            )),
+            AxumPath("native-job".to_owned()),
+        ))
+        .expect("native block_on")
+        .expect("job run accepted");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let (request, on_tokio) = runs
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the accepted job reaches the run port");
+        assert!(
+            matches!(request, DashboardAutomationRunRequestV1::UserJob { job_id, .. } if job_id == "native-job")
+        );
+        assert!(!on_tokio, "the job ran on a Tokio worker");
+        assert_eq!(
+            native_runtime::native_thread_writer_waits(),
+            writer_waits,
+            "the job run parked no native thread on a writer"
+        );
+    }
+
+    #[test]
+    fn scheduler_reconcile_runs_without_a_tokio_runtime() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-reconcile-native",
+        ));
+        let (reconciled, reconciles) = mpsc::channel();
+        let reconciled = std::sync::Mutex::new(reconciled);
+        dash.automation_scheduler_reconciler = Some(Arc::new(move || {
+            let on_tokio = tokio::runtime::Handle::try_current().is_ok();
+            let _ = reconciled.lock().expect("reconcile channel").send(on_tokio);
+            Box::pin(async {
+                tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
+            })
+        }));
+
+        native_runtime::block_on(async { dash.reconcile_automation_scheduler() })
+            .expect("native block_on");
+
+        let on_tokio = reconciles
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the reconcile reaches the daemon's reconciler");
+        assert!(!on_tokio, "the reconcile ran on a Tokio worker");
+    }
 }

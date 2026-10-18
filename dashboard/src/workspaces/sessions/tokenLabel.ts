@@ -6,7 +6,7 @@
  * times the copies had already begun to word themselves differently, so the
  * measured case lives here once. A count whose provenance the store disclaims
  * (`unavailable`) or never recorded (`null` on the wire) is not a measurement
- * to print — those return `null`, and each surface words its own absence.
+ * to print, those return `null`, and each surface words its own absence.
  */
 import {
   assertNever,

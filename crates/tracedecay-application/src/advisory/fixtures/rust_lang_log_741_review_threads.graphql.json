@@ -1,0 +1,142 @@
+{
+  "capture": {
+    "captured_at": "2026-09-26T09:50:00Z",
+    "method": "POST",
+    "url": "https://api.github.com/graphql",
+    "operation_kind": "query",
+    "operation_name": "TraceDecayGitHubReviewThreads",
+    "variables": {
+      "owner": "rust-lang",
+      "repository": "log",
+      "number": 741,
+      "loadThreads": true,
+      "loadComments": false
+    },
+    "documentation": "https://docs.github.com/en/graphql/reference/objects#pullrequestreviewthread"
+  },
+  "response": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "baseRefOid": "8034743dd9d7f7583bd9a670271483d176130911",
+          "headRefOid": "1a4b67cfc41237e673dafd0dfc414577f0b5d327",
+          "reviewThreads": {
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0yMlQwODoyMDoxNVrOpKYGqQ=="
+            },
+            "nodes": [
+              {
+                "id": "PRRT_kwDOAarcas6kpfiI",
+                "isResolved": false,
+                "isOutdated": false,
+                "path": ".github/workflows/main.yml",
+                "line": 135,
+                "originalLine": 135,
+                "startLine": 135,
+                "originalStartLine": null,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0yMlQwODoxOTozMVrO8pJ9nw=="
+                  },
+                  "nodes": [
+                    {
+                      "databaseId": 4069686687,
+                      "url": "https://github.com/rust-lang/log/pull/741#discussion_r4069686687",
+                      "bodyText": "I don't think we need Clippy here? Same for the msrv-check job.\nView changes since the review",
+                      "createdAt": "2026-09-22T08:19:31Z",
+                      "updatedAt": "2026-09-22T08:26:05Z",
+                      "authorAssociation": "COLLABORATOR",
+                      "replyTo": null,
+                      "author": {
+                        "__typename": "User",
+                        "login": "Thomasdezeeuw"
+                      },
+                      "pullRequestReview": {
+                        "databaseId": 5275645212,
+                        "state": "APPROVED",
+                        "commit": {
+                          "oid": "1a4b67cfc41237e673dafd0dfc414577f0b5d327"
+                        }
+                      },
+                      "originalCommit": {
+                        "oid": "1a4b67cfc41237e673dafd0dfc414577f0b5d327"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "PRRT_kwDOAarcas6kpgap",
+                "isResolved": false,
+                "isOutdated": false,
+                "path": ".github/workflows/main.yml",
+                "line": 113,
+                "originalLine": 113,
+                "startLine": 113,
+                "originalStartLine": null,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0yMlQwODozMjozOFrO8pPh8g=="
+                  },
+                  "nodes": [
+                    {
+                      "databaseId": 4069691901,
+                      "url": "https://github.com/rust-lang/log/pull/741#discussion_r4069691901",
+                      "bodyText": "Nit: the job short name is check, the display name is build and we're actually running of the test, probably want to make that consistent.\nView changes since the review",
+                      "createdAt": "2026-09-22T08:20:15Z",
+                      "updatedAt": "2026-09-22T08:26:06Z",
+                      "authorAssociation": "COLLABORATOR",
+                      "replyTo": null,
+                      "author": {
+                        "__typename": "User",
+                        "login": "Thomasdezeeuw"
+                      },
+                      "pullRequestReview": {
+                        "databaseId": 5275645212,
+                        "state": "APPROVED",
+                        "commit": {
+                          "oid": "1a4b67cfc41237e673dafd0dfc414577f0b5d327"
+                        }
+                      },
+                      "originalCommit": {
+                        "oid": "1a4b67cfc41237e673dafd0dfc414577f0b5d327"
+                      }
+                    },
+                    {
+                      "databaseId": 4069777906,
+                      "url": "https://github.com/rust-lang/log/pull/741#discussion_r4069777906",
+                      "bodyText": "Fair 👍 I’ll clean these up",
+                      "createdAt": "2026-09-22T08:32:38Z",
+                      "updatedAt": "2026-09-22T08:32:39Z",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "replyTo": {
+                        "databaseId": 4069691901
+                      },
+                      "author": {
+                        "__typename": "User",
+                        "login": "KodrAus"
+                      },
+                      "pullRequestReview": {
+                        "databaseId": 5275761549,
+                        "state": "COMMENTED",
+                        "commit": {
+                          "oid": "1a4b67cfc41237e673dafd0dfc414577f0b5d327"
+                        }
+                      },
+                      "originalCommit": {
+                        "oid": "1a4b67cfc41237e673dafd0dfc414577f0b5d327"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

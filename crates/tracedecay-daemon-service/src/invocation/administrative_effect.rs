@@ -6,15 +6,18 @@
 //! shape identical across families instead of letting copies drift.
 
 use serde::Serialize;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, AuthorityReceipt, Deadline, EffectId,
     EffectReceipt, EffectResult, EffectTermination, IdempotencyKey, OperationBudgetUsage,
     OperationReceipt, PolicyDecisionRef, ReconciliationState, RequestContext, RequestId,
 };
-use tracedecay_domain::{ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
+};
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
-use super::{RegisteredWorkRuntime, current_micros};
+use super::RegisteredWorkRuntime;
+use tracedecay_contracts::now_micros;
 
 /// Policy-bound authority receipt and completed operation receipt for one
 /// admitted operation of the `family` request family.
@@ -47,7 +50,7 @@ pub(super) fn administrative_authority(
     let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )?;
@@ -58,7 +61,11 @@ pub(super) fn administrative_authority(
 /// key, and a durable effect receipt asserting the committed state change,
 /// with every digest domain namespaced under the `family` token.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.administrative.effect")]
+#[tracing::instrument(
+    name = "daemon.service.administrative.effect",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn administrative_command_effect<T>(
     family: &'static str,
     registered: &RegisteredWorkRuntime,
@@ -83,9 +90,7 @@ where
         observed_at,
         deadline,
     )?;
-    let suffix = input_digest
-        .as_str()
-        .strip_prefix("sha256:")
+    let suffix = sha256_hex_suffix(input_digest.as_str())
         .ok_or(ApplicationContractError::Inconsistent {
             field: "administrative input digest",
         })?

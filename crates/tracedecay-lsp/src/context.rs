@@ -5,11 +5,11 @@
 //! one already-authorized, single-root LSP session.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedecay_domain::ContentDigest;
+use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
 
 use crate::gateway::operation_table::{
     BoundedOperationCapacity, BoundedOperationTable, OperationAdmission, OperationPoll,
@@ -149,6 +149,21 @@ pub struct ContextProjectionIdentity {
     pub document_content_digest: Option<String>,
 }
 
+impl ContextProjectionIdentity {
+    /// Whether every component parses as its canonical domain identity.
+    pub fn is_valid(&self) -> bool {
+        CommitId::new(self.head_commit_id.clone()).is_ok()
+            && CodeGenerationId::new(self.code_generation_id.clone()).is_ok()
+            && ManifestDigest::new(self.snapshot_digest.clone()).is_ok()
+            && ManifestDigest::new(self.invalidation_digest.clone()).is_ok()
+            && ContentDigest::new(self.snapshot_content_digest.clone()).is_ok()
+            && self
+                .document_content_digest
+                .as_ref()
+                .is_none_or(|digest| ContentDigest::new(digest.clone()).is_ok())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ContextFreshness {
@@ -184,7 +199,7 @@ pub struct ContextProjectionRequest {
 impl ContextProjectionRequest {
     /// Builds a request with no bound content identity. Only the protocol
     /// actor may bind one, so a caller-constructed request always starts
-    /// unbound — the same state a decoded client payload starts in.
+    /// unbound. The same state a decoded client payload starts in.
     pub fn new(kind: ContextProjectionKind, document_uri: Option<String>) -> Self {
         Self {
             kind,
@@ -384,6 +399,12 @@ impl ContextProjectionAdapter {
         }
     }
 
+    fn delivered_changes(&self) -> MutexGuard<'_, DeliveredContextChanges> {
+        self.delivered_changes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn key(root: &AdmittedRoot, request_id: &LspRequestId) -> ContextRequestKey {
         ContextRequestKey {
             root_uri: root.uri().to_owned(),
@@ -416,9 +437,6 @@ impl ContextProjectionPort for ContextProjectionAdapter {
             OperationAdmission::Started(()) | OperationAdmission::Existing(()) => {
                 ContextProjectionOutcome::Pending
             }
-            OperationAdmission::Busy => ContextProjectionOutcome::Deferred {
-                reason: "runtime-busy".to_owned(),
-            },
             OperationAdmission::Saturated => ContextProjectionOutcome::Deferred {
                 reason: "context-projection-capacity".to_owned(),
             },
@@ -439,10 +457,9 @@ impl ContextProjectionPort for ContextProjectionAdapter {
             OperationPoll::Dropped(()) => Some(ContextProjectionOutcome::Failed {
                 reason: "context-operation-dropped".to_owned(),
             }),
-            OperationPoll::Pending(())
-            | OperationPoll::Missing
-            | OperationPoll::Busy
-            | OperationPoll::Mismatch(()) => None,
+            OperationPoll::Pending(()) | OperationPoll::Missing | OperationPoll::Mismatch(()) => {
+                None
+            }
         }
     }
 
@@ -465,9 +482,6 @@ impl ContextProjectionPort for ContextProjectionAdapter {
             OperationAdmission::Started(()) | OperationAdmission::Existing(()) => {
                 ContextExpansionOutcome::Pending
             }
-            OperationAdmission::Busy => ContextExpansionOutcome::Failed {
-                reason: "runtime-busy".to_owned(),
-            },
             OperationAdmission::Saturated => ContextExpansionOutcome::Failed {
                 reason: "context-expansion-capacity".to_owned(),
             },
@@ -488,10 +502,9 @@ impl ContextProjectionPort for ContextProjectionAdapter {
             OperationPoll::Dropped(()) => Some(ContextExpansionOutcome::Failed {
                 reason: "context-expansion-operation-dropped".to_owned(),
             }),
-            OperationPoll::Pending(())
-            | OperationPoll::Missing
-            | OperationPoll::Busy
-            | OperationPoll::Mismatch(()) => None,
+            OperationPoll::Pending(()) | OperationPoll::Missing | OperationPoll::Mismatch(()) => {
+                None
+            }
         }
     }
 
@@ -514,9 +527,7 @@ impl ContextProjectionPort for ContextProjectionAdapter {
             return Vec::new();
         }
         let changes = self.authority.poll_changes(root, subscriptions);
-        let Ok(mut delivered) = self.delivered_changes.try_lock() else {
-            return Vec::new();
-        };
+        let mut delivered = self.delivered_changes();
         let mut ready = Vec::with_capacity(maximum);
         for change in changes {
             if ready.len() == maximum {
@@ -541,15 +552,13 @@ impl ContextProjectionPort for ContextProjectionAdapter {
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) {
-        if let Ok(mut delivered) = self.delivered_changes.try_lock() {
-            delivered.retain(|(root_uri, _, kind), _| {
-                root_uri != root.uri()
-                    || subscriptions.contains(&ContextProjectionRegistration {
-                        kind: kind.clone(),
-                        revision: TRACEDECAY_CONTEXT_REVISION,
-                    })
-            });
-        }
+        self.delivered_changes().retain(|(root_uri, _, kind), _| {
+            root_uri != root.uri()
+                || subscriptions.contains(&ContextProjectionRegistration {
+                    kind: kind.clone(),
+                    revision: TRACEDECAY_CONTEXT_REVISION,
+                })
+        });
     }
 }
 
@@ -860,7 +869,7 @@ mod tests {
         .collect();
         adapter.update_subscriptions(&root, &subscriptions);
         assert_eq!(adapter.poll_changes(&root, &subscriptions, 1).len(), 1);
-        assert!(adapter.poll_changes(&root, &subscriptions, 1).is_empty());
+        assert_eq!(adapter.poll_changes(&root, &subscriptions, 1).len(), 0);
     }
 
     #[test]
@@ -891,6 +900,50 @@ mod tests {
             second[0].document_uri.as_deref(),
             Some("file:///root/16.rs")
         );
-        assert!(adapter.poll_changes(&root, &subscriptions, 16).is_empty());
+        assert_eq!(adapter.poll_changes(&root, &subscriptions, 16).len(), 0);
+    }
+
+    /// A poll or subscription change that lands while a peer session updates
+    /// the delivered-change map waits for it. Answering empty would hide a
+    /// change, and skipping the prune would suppress it after resubscription.
+    #[test]
+    fn change_delivery_waits_for_a_peer_instead_of_dropping_work() {
+        let root = AdmittedRoot::new("file:///root");
+        let subscriptions: BTreeSet<_> = [ContextProjectionRegistration {
+            kind: ContextProjectionKind::diagnostics(),
+            revision: TRACEDECAY_CONTEXT_REVISION,
+        }]
+        .into_iter()
+        .collect();
+        let adapter = Arc::new(ContextProjectionAdapter::new(
+            Arc::new(InlineSpawner),
+            Arc::new(Authority { change_count: 1 }),
+        ));
+
+        let peer = adapter.delivered_changes.lock().unwrap();
+        let polling = std::thread::spawn({
+            let adapter = Arc::clone(&adapter);
+            let root = root.clone();
+            let subscriptions = subscriptions.clone();
+            move || adapter.poll_changes(&root, &subscriptions, 1)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        drop(peer);
+        assert_eq!(polling.join().unwrap().len(), 1, "the change is delivered");
+
+        let peer = adapter.delivered_changes.lock().unwrap();
+        let unsubscribing = std::thread::spawn({
+            let adapter = Arc::clone(&adapter);
+            let root = root.clone();
+            move || adapter.update_subscriptions(&root, &BTreeSet::new())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        drop(peer);
+        unsubscribing.join().unwrap();
+        assert_eq!(
+            adapter.poll_changes(&root, &subscriptions, 1).len(),
+            1,
+            "resubscribing redelivers the pruned change"
+        );
     }
 }

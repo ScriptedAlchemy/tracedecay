@@ -10,9 +10,9 @@ Read-only branch exploration for the `tracedecay:exploring-code` skill.
 
 1. **What's tracked → `tracedecay_branch_list`**; **search another branch →
    `tracedecay_branch_search`** (`branch`, `query`); **compare branches →
-   `tracedecay_branch_diff`** (`base?`, `head?`, `file?`, `kind?`) — all
+   `tracedecay_branch_diff`** (`base?`, `head?`, `file?`, `kind?`). All
    read-only, never touching your checkout.
 2. Branch tracking is opt-in per branch (`tracedecay branch add <branch>` in
    the terminal; the hooks auto-track branches you visit). A branch-fallback
-   `WARNING` prefix means results came from the nearest tracked ancestor —
-   surface that to the user.
+   `WARNING` prefix means results came from the nearest tracked ancestor.
+   Surface that to the user.

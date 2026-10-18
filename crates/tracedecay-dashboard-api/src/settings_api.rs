@@ -1,9 +1,9 @@
 //! Dashboard endpoints for project and user settings.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
@@ -12,13 +12,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, PROJECT_SETTINGS_APPLY_OPERATION,
-    SETTINGS_REFRESH_OPERATION, configuration_application_problem_error,
+    SETTINGS_REFRESH_OPERATION, admit_user_settings_patch, configuration_application_problem_error,
     configuration_authority_unavailable_error, configuration_revision_conflict_error,
     parse_code_index_worker_settings_patch, parse_project_settings_patch,
     parse_user_settings_patch, settings_validation_error,
-    validate_code_index_worker_settings_patch, validate_user_settings_patch,
+    validate_code_index_worker_settings_patch,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemEnvelope, ApplicationProblemKind,
 };
 
@@ -32,17 +32,17 @@ use crate::application::settings_control::{
     TelemetrySettingsPatchV1, context_scout_settings_are_enabled, effective_context_scout_settings,
     preview_project_settings,
 };
-use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
 use tracedecay_configuration::{
-    DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
-    parse_duration_millis, plan_user_settings_mutation,
+    UserSettingsMutationV1, UserSettingsSnapshotV1, parse_duration_millis,
+    plan_user_settings_mutation,
 };
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1, ConfigurationIdempotencyKey,
     ConfigurationRevisionId,
 };
+use tracedecay_global_db::configuration::contracts::DirectConfigurationMutation;
 
 use crate::application_surface::{DashboardConfigurationApplyError, configuration_apply_error};
 
@@ -149,13 +149,9 @@ pub struct ProjectSettingsPatchResponseV1 {
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct ProjectSettingsPayloadV1 {
-    config_path: String,
-    legacy_config_path: String,
-    legacy_config_read_only: bool,
     configuration_snapshot_id: String,
     configuration_revision_id: String,
     config: ProjectEditableSettingsV1,
-    tracedecay_dir_gitignored: bool,
     pr_autotrack: PrAutoTrackPayloadV1,
 }
 
@@ -166,7 +162,6 @@ struct ProjectEditableSettingsV1 {
     max_file_size: u64,
     extract_docstrings: bool,
     track_call_sites: bool,
-    git_ignore: bool,
     telemetry: TelemetrySettingsV1,
     sync: SyncSettingsV1,
     /// Rendered from the effective `context_scout.settings.v1` value;
@@ -177,14 +172,13 @@ struct ProjectEditableSettingsV1 {
 fn project_editable_settings(
     configuration: &crate::config::PinnedRuntimeConfiguration,
 ) -> ProjectEditableSettingsV1 {
-    let config: &TraceDecayConfig = &configuration.config;
+    let config = configuration.config();
     ProjectEditableSettingsV1 {
-        include: config.include.clone(),
-        exclude: config.exclude.clone(),
+        include: config.index_paths.include_patterns().to_vec(),
+        exclude: config.index_paths.exclude_patterns().to_vec(),
         max_file_size: config.max_file_size,
         extract_docstrings: config.extract_docstrings,
         track_call_sites: config.track_call_sites,
-        git_ignore: config.git_ignore,
         telemetry: TelemetrySettingsV1 {
             timings: config.telemetry.timings,
         },
@@ -193,7 +187,7 @@ fn project_editable_settings(
             auto_track_pr_poll_secs: config.sync.auto_track_pr_poll_secs,
         },
         context_scout: context_scout_settings_are_enabled(&effective_context_scout_settings(
-            &configuration.snapshot,
+            configuration.snapshot(),
         )),
     }
 }
@@ -211,8 +205,6 @@ struct SyncSettingsV1 {
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct UserSettingsPayloadV1 {
-    legacy_config_path: String,
-    legacy_config_read_only: bool,
     configuration_snapshot_id: String,
     configuration_revision_id: String,
     /// Independent ProfileSessions revision for the code-index worker
@@ -296,43 +288,47 @@ struct PrAutoTrackPayloadV1 {
     tracked: Vec<PrAutoTrackEntryV1>,
 }
 
-#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize)]
 struct PrAutoTrackEntryV1 {
     branch: String,
     pr: u64,
     head_branch: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct DashboardPrAutoTrackEntryV1 {
+/// One managed PR branch projected for dashboard settings payloads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrAutoTrackManagedSummaryEntryV1 {
     pub branch: String,
     pub pr: u64,
     pub head_branch: String,
 }
 
-pub trait DashboardPrAutoTrackReadPort: Send + Sync {
-    fn managed_summary(&self, store_root: &Path) -> Vec<DashboardPrAutoTrackEntryV1>;
-}
+/// Root-addressed read over the daemon-owned PR-autotrack state sidecar.
+pub type PrAutoTrackManagedSummaryReader = Arc<
+    dyn Fn(PathBuf) -> tracedecay_domain::errors::Result<Vec<PrAutoTrackManagedSummaryEntryV1>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
-static PR_AUTOTRACK_READ_PORT: OnceLock<Arc<dyn DashboardPrAutoTrackReadPort>> = OnceLock::new();
-
-pub fn install_dashboard_pr_autotrack_read_port(
-    port: Arc<dyn DashboardPrAutoTrackReadPort>,
-) -> Result<(), Arc<dyn DashboardPrAutoTrackReadPort>> {
-    PR_AUTOTRACK_READ_PORT.set(port)
-}
-
-#[hotpath::measure(label = "dashboard_api.settings.get", future = true)]
+#[tracing::instrument(name = "dashboard_api.settings.get", level = "trace", skip_all)]
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
-    Ok(Json(settings_envelope(&state, None, None, None).await?))
+    Ok(Json(
+        settings_envelope(&state, None, None, None, pr_autotrack_payload(&state)?).await?,
+    ))
 }
 
-#[hotpath::measure(label = "dashboard_api.settings.patch_project", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.settings.patch_project",
+    level = "trace",
+    skip_all
+)]
 pub async fn patch_project_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ProjectSettingsPatchResult {
     let patch = parse_project_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
             settings_validation_error(json!([{
@@ -340,7 +336,8 @@ pub async fn patch_project_settings(
                 "message": "idempotency_key must be one non-empty canonical caller-stable value"
             }]))
         })?;
-    let current = crate::config::cached_runtime_configuration(&state.project_root)
+    let current = state
+        .cached_runtime_configuration()
         .map_err(|_| configuration_authority_unavailable_error())?;
     let project_id = state
         .project_id
@@ -350,28 +347,8 @@ pub async fn patch_project_settings(
             tracedecay_domain::ProjectId::new(project_id)
                 .map_err(|_| configuration_authority_unavailable_error())
         })?;
-    let preview = preview_project_settings(
-        &project_id,
-        &current,
-        ProjectSettingsPatchV1 {
-            expected_revision_id: patch.expected_revision_id,
-            include: patch.include,
-            exclude: patch.exclude,
-            max_file_size: patch.max_file_size,
-            extract_docstrings: patch.extract_docstrings,
-            track_call_sites: patch.track_call_sites,
-            git_ignore: patch.git_ignore,
-            telemetry: patch.telemetry.map(|telemetry| TelemetrySettingsPatchV1 {
-                timings: telemetry.timings,
-            }),
-            sync: patch.sync.map(|sync| SyncSettingsPatchV1 {
-                auto_track_pr_branches: sync.auto_track_pr_branches,
-                auto_track_pr_poll_secs: sync.auto_track_pr_poll_secs,
-            }),
-            context_scout: patch.context_scout,
-        },
-    )
-    .map_err(project_preview_error)?;
+    let preview = preview_project_settings(&project_id, &current, application_project_patch(patch))
+        .map_err(project_preview_error)?;
     let application_outcome = if preview.changed {
         let runtime = state
             .application_invocation_executor
@@ -394,11 +371,7 @@ pub async fn patch_project_settings(
         {
             Ok(outcome) => Some(outcome),
             Err(DashboardConfigurationApplyError::ApplicationProblem(problem)) => {
-                return Err(project_apply_error(
-                    &state.project_root,
-                    &expected_revision,
-                    problem,
-                ));
+                return Err(project_apply_error(&state, &expected_revision, problem));
             }
             Err(error) => return Err(configuration_apply_error(error)),
         }
@@ -408,17 +381,25 @@ pub async fn patch_project_settings(
 
     Ok(Json(ProjectSettingsPatchResponseV1 {
         application_outcome,
-        current: settings_envelope(&state, Some(preview.resync_recommended), None, None).await?,
+        current: settings_envelope(
+            &state,
+            Some(preview.resync_recommended),
+            None,
+            None,
+            pr_autotrack,
+        )
+        .await?,
     }))
 }
 
-#[hotpath::measure(label = "dashboard_api.settings.patch_user", future = true)]
+#[tracing::instrument(name = "dashboard_api.settings.patch_user", level = "trace", skip_all)]
 pub async fn patch_user_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_user_settings_patch(patch)?;
-    validate_user_settings_patch(&patch, |value| parse_duration_millis(value).is_some())?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
+    let admitted = admit_user_settings_patch(&patch, parse_duration_millis)?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
             settings_validation_error(json!([{
@@ -450,9 +431,9 @@ pub async fn patch_user_settings(
         &current,
         profile_id,
         UserSettingsMutationV1 {
-            upload_enabled: patch.upload_enabled,
-            watcher_debounce: patch.watcher_debounce,
-            extraction_timeout_secs: patch.extraction_timeout_secs,
+            upload_enabled: admitted.upload_enabled,
+            watcher_debounce_ms: admitted.watcher_debounce_ms,
+            extraction_timeout_secs: admitted.extraction_timeout_secs,
         },
     )
     .map_err(|_| configuration_authority_unavailable_error())?;
@@ -473,19 +454,31 @@ pub async fn patch_user_settings(
     }
 
     Ok(Json(
-        settings_envelope(&state, None, Some(plan.restart_recommended), None).await?,
+        settings_envelope(
+            &state,
+            None,
+            Some(plan.restart_recommended),
+            None,
+            pr_autotrack,
+        )
+        .await?,
     ))
 }
 
 /// Saves only the ProfileSessions-backed code-index worker selection. This is
 /// deliberately not a branch of `patch_user_settings`: its independent CAS
 /// revision makes a mixed project/profile mutation unrepresentable.
-#[hotpath::measure(label = "dashboard_api.settings.patch_workers", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.settings.patch_workers",
+    level = "trace",
+    skip_all
+)]
 pub async fn patch_code_index_worker_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_code_index_worker_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     validate_code_index_worker_settings_patch(&patch)?;
     let worker_admission_errors = code_index_worker_admission_errors(
         &patch.code_index_workers,
@@ -534,7 +527,14 @@ pub async fn patch_code_index_worker_settings(
     };
 
     Ok(Json(
-        settings_envelope(&state, None, Some(true), Some(&committed.current)).await?,
+        settings_envelope(
+            &state,
+            None,
+            Some(true),
+            Some(&committed.current),
+            pr_autotrack,
+        )
+        .await?,
     ))
 }
 
@@ -576,11 +576,12 @@ async fn settings_envelope(
     resync_recommended: Option<bool>,
     restart_recommended: Option<bool>,
     committed_worker_configuration: Option<&DashboardCodeIndexWorkerConfigurationV1>,
+    pr_autotrack: PrAutoTrackPayloadV1,
 ) -> std::result::Result<DashboardEnvelopeV1<SettingsPayloadV1>, DashboardConfigurationRouteErrorV1>
 {
-    let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
+    let project_configuration = state
+        .cached_runtime_configuration()
         .map_err(|_| configuration_authority_unavailable_error())?;
-    let legacy_config_path = state.config_path.clone();
     let user = state
         .user_settings
         .read()
@@ -599,18 +600,14 @@ async fn settings_envelope(
     let automation = automation_settings_payload(&project_configuration);
     let payload = SettingsPayloadV1 {
         project: ProjectSettingsPayloadV1 {
-            config_path: legacy_config_path.display().to_string(),
-            legacy_config_path: legacy_config_path.display().to_string(),
-            legacy_config_read_only: true,
             configuration_snapshot_id: project_configuration
-                .snapshot
+                .snapshot()
                 .snapshot_id
                 .as_str()
                 .to_owned(),
-            configuration_revision_id: project_configuration.revision_id.as_str().to_owned(),
+            configuration_revision_id: project_configuration.revision_id().as_str().to_owned(),
             config: project_editable_settings(&project_configuration),
-            tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
-            pr_autotrack: pr_autotrack_payload(state),
+            pr_autotrack,
         },
         user: user_settings_payload(&user, &worker_configuration),
         automation,
@@ -640,7 +637,7 @@ async fn settings_envelope(
         restart_recommended,
     };
     // Both editable scopes settle through the one cataloged daemon
-    // configuration effect. A profile write additionally requires the exact
+    // configuration effect. A profile write also requires the exact
     // profile identity bound by the daemon handshake.
     let mut legal_actions = Vec::new();
     if state.application_invocation_executor.is_some() {
@@ -673,8 +670,6 @@ fn user_settings_payload(
     worker_configuration: &DashboardCodeIndexWorkerConfigurationV1,
 ) -> UserSettingsPayloadV1 {
     UserSettingsPayloadV1 {
-        legacy_config_path: user.legacy_config_path.clone(),
-        legacy_config_read_only: true,
         configuration_snapshot_id: user.configuration_snapshot_id.clone(),
         configuration_revision_id: user.configuration_revision_id.clone(),
         code_index_worker_configuration_snapshot_id: worker_configuration
@@ -695,7 +690,7 @@ fn user_settings_payload(
 fn automation_settings_payload(
     project_configuration: &crate::config::PinnedRuntimeConfiguration,
 ) -> AutomationSettingsPayloadV1 {
-    match from_configuration_snapshot(&project_configuration.snapshot) {
+    match from_configuration_snapshot(project_configuration.snapshot()) {
         Ok(automation) => AutomationSettingsPayloadV1 {
             config_endpoint: AUTOMATION_CONFIG_ENDPOINT.to_owned(),
             availability: SettingsAvailabilityV1 {
@@ -703,7 +698,9 @@ fn automation_settings_payload(
                 reason: None,
                 required_authority: None,
             },
-            configuration_revision_id: Some(project_configuration.revision_id.as_str().to_owned()),
+            configuration_revision_id: Some(
+                project_configuration.revision_id().as_str().to_owned(),
+            ),
             enabled: Some(automation.enabled),
             backend: Some(automation.backend.as_str().to_owned()),
             host_mode: Some(automation.host_mode.as_str().to_owned()),
@@ -717,7 +714,9 @@ fn automation_settings_payload(
                 )),
                 required_authority: Some("pinned automation configuration".to_owned()),
             },
-            configuration_revision_id: Some(project_configuration.revision_id.as_str().to_owned()),
+            configuration_revision_id: Some(
+                project_configuration.revision_id().as_str().to_owned(),
+            ),
             enabled: None,
             backend: None,
             host_mode: None,
@@ -726,23 +725,32 @@ fn automation_settings_payload(
 }
 
 /// Lists the PR branches the daemon currently auto-tracks for this project, read
-/// from the store's PR-autotrack state sidecar. Empty on non-unix or when the
-/// feature has tracked nothing yet.
-fn pr_autotrack_payload(state: &DashboardState) -> PrAutoTrackPayloadV1 {
-    let tracked = PR_AUTOTRACK_READ_PORT
-        .get()
-        .map(|port| {
-            port.managed_summary(&state.store_root)
-                .into_iter()
-                .map(|entry| PrAutoTrackEntryV1 {
-                    branch: entry.branch,
-                    pr: entry.pr,
-                    head_branch: entry.head_branch,
-                })
-                .collect()
+/// from the store's PR-autotrack state sidecar.
+fn pr_autotrack_payload(
+    state: &DashboardState,
+) -> std::result::Result<PrAutoTrackPayloadV1, DashboardConfigurationRouteErrorV1> {
+    let reader = state
+        .pr_autotrack_reader
+        .as_ref()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let tracked = map_managed_pr_autotrack_entries(
+        reader(state.store_root.clone())
+            .map_err(|_| configuration_authority_unavailable_error())?,
+    );
+    Ok(PrAutoTrackPayloadV1 { tracked })
+}
+
+fn map_managed_pr_autotrack_entries(
+    entries: Vec<PrAutoTrackManagedSummaryEntryV1>,
+) -> Vec<PrAutoTrackEntryV1> {
+    entries
+        .into_iter()
+        .map(|entry| PrAutoTrackEntryV1 {
+            branch: entry.branch,
+            pr: entry.pr,
+            head_branch: entry.head_branch,
         })
-        .unwrap_or_default();
-    PrAutoTrackPayloadV1 { tracked }
+        .collect()
 }
 
 fn environment_payload() -> EnvironmentSettingsPayloadV1 {
@@ -752,10 +760,6 @@ fn environment_payload() -> EnvironmentSettingsPayloadV1 {
         global_accounting_enabled: accounting_mode.enabled(),
         pricing_offline: true,
         variables: vec![
-            env_variable(
-                "TRACEDECAY_ENABLE_GLOBAL_DB",
-                "Force-enables (truthy) or disables (falsy) global savings-ledger recording. Wins over TRACEDECAY_DISABLE_GLOBAL_DB.",
-            ),
             env_variable(
                 "TRACEDECAY_DISABLE_GLOBAL_DB",
                 "A truthy value disables global savings/accounting recording.",
@@ -786,6 +790,26 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+fn application_project_patch(patch: ProjectSettingsPatch) -> ProjectSettingsPatchV1 {
+    ProjectSettingsPatchV1 {
+        expected_revision_id: patch.expected_revision_id,
+        include: patch.include,
+        exclude: patch.exclude,
+        max_file_size: patch.max_file_size,
+        extract_docstrings: patch.extract_docstrings,
+        track_call_sites: patch.track_call_sites,
+        telemetry: patch.telemetry.map(|telemetry| TelemetrySettingsPatchV1 {
+            timings: telemetry.timings,
+        }),
+        sync: patch.sync.map(|sync| SyncSettingsPatchV1 {
+            auto_track_pr_branches: sync.auto_track_pr_branches,
+            auto_track_pr_poll_secs: sync.auto_track_pr_poll_secs,
+        }),
+        context_scout: patch.context_scout,
+        context_scout_intent: patch.context_scout_intent,
+    }
+}
+
 fn project_preview_error(
     error: ProjectSettingsPreviewErrorV1,
 ) -> DashboardConfigurationRouteErrorV1 {
@@ -810,30 +834,30 @@ fn project_preview_error(
 /// The local preview only refuses a stale revision when the patch carries no
 /// mutation at all: a stale patch that does carry one may still be an exact
 /// idempotent replay, and only the daemon owns that replay authority. So the
-/// authority is the one that rejects a genuinely superseded edit — and it
+/// authority is the one that rejects a genuinely superseded edit, and it
 /// collapses revision and idempotency conflicts into a single opaque
 /// `configuration.conflict`, which names neither the CAS precondition nor the
 /// revision that now holds.
 ///
 /// This re-reads the pinned runtime configuration the same route already
-/// serves as the revision authority. When the revision that now holds is no
+/// uses as the revision authority. When the revision that now holds is no
 /// longer the one this edit expected, the CAS precondition provably failed and
-/// the typed conflict carries both revisions. Every other rejection — an
-/// idempotency conflict against the current revision included — keeps the
+/// the typed conflict carries both revisions. Every other rejection, an
+/// idempotency conflict against the current revision included, keeps the
 /// daemon's own problem envelope rather than being relabeled by a guess.
 fn project_apply_error(
-    project_root: &Path,
+    state: &DashboardState,
     expected_revision: &ConfigurationRevisionId,
     problem: ApplicationProblemEnvelope,
 ) -> DashboardConfigurationRouteErrorV1 {
     if problem.problem.kind() == ApplicationProblemKind::Conflict
-        && let Ok(current) = crate::config::cached_runtime_configuration(project_root)
-        && current.revision_id != *expected_revision
+        && let Ok(current) = state.cached_runtime_configuration()
+        && current.revision_id() != expected_revision
     {
         return configuration_revision_conflict_error(
             "settings changed after this edit began; refresh and retry",
             expected_revision.as_str(),
-            current.revision_id.as_str(),
+            current.revision_id().as_str(),
         );
     }
     configuration_application_problem_error(problem)
@@ -843,7 +867,103 @@ fn project_apply_error(
 mod tests {
     use super::*;
     use serde_json::json;
-    use tracedecay_domain::configuration::CodeIndexWorkerLimitingReasonV1;
+    use tracedecay_configuration::config::registry::ConfigurationRegistry;
+    use tracedecay_configuration::config::resolver::resolve_configuration;
+    use tracedecay_domain::ProjectId;
+    use tracedecay_domain::configuration::{
+        CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CodeIndexWorkerLimitingReasonV1, ConfigurationValueV1,
+        ContextScoutConfigurationStateV1, ContextScoutIntentSettingsV1,
+    };
+
+    fn pinned_defaults(
+        revision: &ConfigurationRevisionId,
+    ) -> crate::config::PinnedRuntimeConfiguration {
+        let snapshot = resolve_configuration(&ConfigurationRegistry::core().unwrap(), &[])
+            .unwrap()
+            .snapshot;
+        crate::config::PinnedRuntimeConfiguration::new(
+            tracedecay_configuration::config::RuntimeConfigurationTarget {
+                profile_root: PathBuf::from("/profile"),
+                project_id: ProjectId::new("project.settings.scout").unwrap(),
+                project_root: PathBuf::from("/project"),
+            },
+            revision.clone(),
+            snapshot,
+        )
+        .unwrap()
+    }
+
+    fn intent_patch_body(base_url: &str, revision: &ConfigurationRevisionId) -> Value {
+        json!({
+            "expected_revision_id": revision.as_str(),
+            "idempotency_key": "intent-patch",
+            "context_scout": true,
+            "context_scout_intent": {
+                "enabled": true,
+                "engine": {
+                    "base_url": base_url,
+                    "model": "intent-small",
+                    "timeout_ms": 250,
+                    "max_concurrent": 2,
+                    "max_state_bytes": 65536
+                },
+                "window": {
+                    "max_user_turns": 3,
+                    "max_messages": 12,
+                    "max_bytes": 16384,
+                    "max_age_secs": 1800,
+                    "freshen_budget_ms": 150
+                },
+                "questions": [],
+                "action_fact_score_permille": 700,
+                "ttl_secs": 600,
+                "min_delivery_gap_secs": 30,
+                "prompt_lookup_deadline_ms": 200
+            }
+        })
+    }
+
+    #[test]
+    fn http_patch_carries_the_scout_intent_block_into_the_effective_settings() {
+        let revision = ConfigurationRevisionId::new("configuration.revision.scout").unwrap();
+        let current = pinned_defaults(&revision);
+        let project_id = ProjectId::new("project.settings.scout").unwrap();
+
+        let patch =
+            parse_project_settings_patch(intent_patch_body("http://127.0.0.1:8088", &revision))
+                .expect("intent block parses");
+        let preview =
+            preview_project_settings(&project_id, &current, application_project_patch(patch))
+                .expect("valid intent block previews");
+        assert!(preview.changed);
+        let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
+            panic!("project settings must be atomic")
+        };
+        let [DirectConfigurationMutation::Set { key, value, .. }] = mutations.as_slice() else {
+            panic!("the flag and the intent block must plan exactly one typed Set")
+        };
+        assert_eq!(key.as_str(), CONTEXT_SCOUT_SETTINGS_SETTING_KEY);
+        let ConfigurationValueV1::ContextScoutSettings(settings) = value.as_ref() else {
+            panic!("the patch must write the typed Context Scout value")
+        };
+        assert_eq!(settings.state, ContextScoutConfigurationStateV1::Active);
+        let intent = settings.intent.as_ref().expect("intent block written");
+        assert_eq!(intent.engine.base_url, "http://127.0.0.1:8088");
+        assert_eq!(
+            intent.questions,
+            ContextScoutIntentSettingsV1::reference_questions()
+        );
+
+        let patch = parse_project_settings_patch(intent_patch_body("not-a-url", &revision))
+            .expect("shape is valid; the engine URL is a domain check");
+        let Err(ProjectSettingsPreviewErrorV1::Validation(issues)) =
+            preview_project_settings(&project_id, &current, application_project_patch(patch))
+        else {
+            panic!("an invalid engine URL must be a validation error")
+        };
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].field, "context_scout_intent");
+    }
 
     fn serialization_schema<T: JsonSchema>() -> Value {
         let generator = schemars::generate::SchemaSettings::default()
@@ -907,6 +1027,37 @@ mod tests {
                 "field": "code_index_workers",
                 "message": "code_index_workers exact mode must request no more than 4 available logical CPUs",
             })]
+        );
+    }
+
+    #[test]
+    fn managed_pr_autotrack_projection_preserves_payload_fields() {
+        let mapped = map_managed_pr_autotrack_entries(vec![
+            PrAutoTrackManagedSummaryEntryV1 {
+                branch: "tracedecay/autotrack/pr/1".into(),
+                pr: 1,
+                head_branch: "alpha".into(),
+            },
+            PrAutoTrackManagedSummaryEntryV1 {
+                branch: "tracedecay/autotrack/pr/3".into(),
+                pr: 3,
+                head_branch: "beta".into(),
+            },
+        ]);
+        assert_eq!(
+            mapped,
+            vec![
+                PrAutoTrackEntryV1 {
+                    branch: "tracedecay/autotrack/pr/1".into(),
+                    pr: 1,
+                    head_branch: "alpha".into(),
+                },
+                PrAutoTrackEntryV1 {
+                    branch: "tracedecay/autotrack/pr/3".into(),
+                    pr: 3,
+                    head_branch: "beta".into(),
+                },
+            ]
         );
     }
 

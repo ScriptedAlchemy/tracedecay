@@ -1,7 +1,9 @@
 use std::fs;
+use std::path::PathBuf;
 
 use crate::schema;
 use crate::util::{self, file_mtime_seconds};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
 
 use super::pending_delete::{PENDING_PAYLOAD_DELETE_ERROR_PREFIX, pending_payload_delete_key};
@@ -68,19 +70,6 @@ async fn ensure_gc_test_schema(conn: &Connection) -> Result<(), String> {
             title TEXT,
             started_at INTEGER,
             PRIMARY KEY(provider, session_id)
-        );
-        CREATE TABLE IF NOT EXISTS session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id),
-            FOREIGN KEY(provider, session_id)
-                REFERENCES sessions(provider, session_id) ON DELETE CASCADE
         );",
     )
     .await
@@ -114,8 +103,7 @@ struct RawMessage<'a> {
     storage_kind: &'a str,
     payload_ref: Option<&'a str>,
     content: Option<&'a str>,
-    snippet_text: &'a str,
-    index_text: &'a str,
+    placeholder_text: Option<&'a str>,
     metadata_json: Option<&'a str>,
 }
 
@@ -123,9 +111,9 @@ async fn insert_raw_message(conn: &Connection, message: RawMessage<'_>) -> Resul
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
-            content, content_hash, storage_kind, payload_ref, snippet_text,
-            index_text, legacy_source, legacy_truncated, metadata_json
-         ) VALUES (?1, ?2, ?3, 'assistant', 1, 2, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, ?10)",
+            content, content_hash, storage_kind, payload_ref, placeholder_text,
+            metadata_json
+         ) VALUES (?1, ?2, ?3, 'assistant', 1, 2, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             PROVIDER,
             message.message_id,
@@ -134,8 +122,7 @@ async fn insert_raw_message(conn: &Connection, message: RawMessage<'_>) -> Resul
             format!("{}-hash", message.message_id),
             message.storage_kind,
             message.payload_ref,
-            message.snippet_text,
-            message.index_text,
+            message.placeholder_text,
             message.metadata_json
         ],
     )
@@ -176,8 +163,7 @@ async fn seed_payload(
             storage_kind: "external",
             payload_ref: Some(&payload_ref.payload_ref),
             content: None,
-            snippet_text: &placeholder,
-            index_text: &placeholder,
+            placeholder_text: Some(&placeholder),
             metadata_json: Some(&placeholder),
         },
     )
@@ -211,7 +197,11 @@ async fn insert_gc_mark(
         .conn
         .execute(
             "INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
-             VALUES (?1, ?2, ?3, ?3)",
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(payload_ref) DO UPDATE SET
+                state = excluded.state,
+                first_seen_at = excluded.first_seen_at,
+                updated_at = excluded.updated_at",
             params![payload_ref, state, first_seen_at],
         )
         .await
@@ -255,51 +245,115 @@ fn tombstone_helper_rewrites_repeated_refs_and_is_idempotent() {
     );
 }
 
-#[tokio::test]
-async fn referenced_payload_refs_ignores_tombstoned_placeholders() -> Result<(), String> {
-    let store = test_store().await?;
+/// Writes a payload file and its metadata owned by `message_id`, without the
+/// owner row.
+async fn seed_payload_metadata(
+    store: &TestStore,
+    message_id: &str,
+    content: &str,
+) -> Result<String, String> {
     insert_session(&store.conn, &store.storage_root, "session-a").await?;
-    let live = format!("prefix [externalized payload: bytes=12 ref={PRIMARY_REF}; marker] suffix");
-    let tombstoned =
-        format!("prefix [gc'd externalized payload: bytes=12 ref={SECONDARY_REF}; marker] suffix");
-    insert_raw_message(
-        &store.conn,
-        RawMessage {
-            session_id: "session-a",
-            message_id: "message-1",
-            storage_kind: "inline",
-            payload_ref: None,
-            content: Some(&live),
-            snippet_text: &live,
-            index_text: &live,
-            metadata_json: None,
-        },
+    let payload_ref = payload::write_external_payload(
+        &store.storage_root,
+        PROVIDER,
+        "session-a",
+        message_id,
+        "message",
+        content,
+        None,
     )
-    .await?;
-    insert_raw_message(
-        &store.conn,
-        RawMessage {
-            session_id: "session-a",
-            message_id: "message-2",
-            storage_kind: "inline",
-            payload_ref: None,
-            content: Some(&tombstoned),
-            snippet_text: &tombstoned,
-            index_text: &tombstoned,
-            metadata_json: None,
-        },
-    )
-    .await?;
-
-    let refs = referenced_payload_refs(&store.conn, PROVIDER, Some("session-a"))
+    .map_err(|err| err.to_string())?;
+    payload::upsert_payload_metadata(&store.conn, &payload_ref)
         .await
         .map_err(|err| err.to_string())?;
-    assert_eq!(refs, BTreeSet::from([PRIMARY_REF.to_string()]));
-    assert!(text_has_tombstoned_payload_ref(&tombstoned, SECONDARY_REF));
+    Ok(payload_ref.payload_ref)
+}
+
+#[asupersync::test]
+async fn payload_batch_replay_checks_every_duplicate_reference() -> Result<(), String> {
+    let store = test_store().await?;
+    insert_session(&store.conn, &store.storage_root, "session-a").await?;
+    let stored = payload::write_external_payload(
+        &store.storage_root,
+        PROVIDER,
+        "session-a",
+        "message-1",
+        "message",
+        "shared media body",
+        Some(r#"{"field_path":"content.b"}"#.to_string()),
+    )
+    .map_err(|err| err.to_string())?;
+    payload::upsert_payload_metadata(&store.conn, &stored)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    payload::upsert_payload_metadata_batch(&store.conn, &[stored.clone(), stored.clone()])
+        .await
+        .map_err(|err| format!("identical duplicates must replay cleanly: {err}"))?;
+
+    // An earlier duplicate whose metadata disagrees with the stored manifest
+    // must conflict even though the last duplicate matches it.
+    let earlier = crate::LcmPayloadRef {
+        metadata_json: Some(r#"{"field_path":"content.a"}"#.to_string()),
+        ..stored.clone()
+    };
+    let error = payload::upsert_payload_metadata_batch(&store.conn, &[earlier, stored.clone()])
+        .await
+        .expect_err("conflicting earlier duplicate must be rejected");
+    assert!(
+        matches!(
+            &error,
+            crate::LcmError::ImmutablePayloadConflict { payload_ref }
+                if payload_ref == &stored.payload_ref
+        ),
+        "unexpected error: {error}"
+    );
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn only_live_placeholders_in_the_owner_row_reference_a_payload() -> Result<(), String> {
+    let store = test_store().await?;
+    let live = seed_payload_metadata(&store, "message-1", "live body").await?;
+    let tombstoned = seed_payload_metadata(&store, "message-2", "gone body").await?;
+    let quoted = seed_payload_metadata(&store, "message-3", "quoted body").await?;
+    let owner_text = format!(
+        "prefix [externalized payload: bytes=9 ref={live}; marker] quotes \
+         [externalized payload: bytes=11 ref={quoted}; copied] suffix"
+    );
+    let tombstoned_text =
+        format!("prefix [gc'd externalized payload: bytes=9 ref={tombstoned}; marker] suffix");
+    for (message_id, content) in [("message-1", &owner_text), ("message-2", &tombstoned_text)] {
+        insert_raw_message(
+            &store.conn,
+            RawMessage {
+                session_id: "session-a",
+                message_id,
+                storage_kind: "inline",
+                payload_ref: None,
+                content: Some(content),
+                placeholder_text: None,
+                metadata_json: None,
+            },
+        )
+        .await?;
+    }
+
+    let referenced = owner_referenced_metadata(
+        &store.conn,
+        &BTreeSet::from([live.clone(), tombstoned.clone(), quoted]),
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    assert_eq!(referenced, BTreeSet::from([live]));
+    assert!(text_has_tombstoned_payload_ref(
+        &tombstoned_text,
+        &tombstoned
+    ));
+    Ok(())
+}
+
+#[asupersync::test]
 async fn delete_external_payload_aborts_when_still_referenced() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
@@ -327,7 +381,7 @@ async fn delete_external_payload_aborts_when_still_referenced() -> Result<(), St
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn delete_external_payload_applies_db_then_file_and_is_idempotent() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
@@ -372,7 +426,7 @@ async fn delete_external_payload_applies_db_then_file_and_is_idempotent() -> Res
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to preserve").await?;
@@ -392,9 +446,10 @@ async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), Str
     )
     .await
     .map_err(|err| err.to_string())?;
-    assert!(
-        prepared.pending_removal_bytes.is_some(),
-        "the transaction should stage deletion"
+    assert_eq!(
+        prepared.pending_removal_bytes,
+        Some("body to preserve".len() as u64),
+        "the transaction should stage deletion of the payload's bytes"
     );
     assert!(
         payload_path(&store, &payload_ref).is_file(),
@@ -406,16 +461,18 @@ async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), Str
         .map_err(|err| err.to_string())?;
 
     assert!(payload_path(&store, &payload_ref).is_file());
-    assert!(
-        payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok()
+    let metadata = payload::load_payload_metadata(&store.conn, &payload_ref)
+        .await
+        .map_err(|err| err.to_string())?;
+    assert_eq!(
+        (metadata.message_id.as_str(), metadata.byte_count),
+        ("message-1", "body to preserve".len() as u64)
     );
-    assert!(
+    assert_eq!(
         gc_mark(&store.conn, &payload_ref)
             .await
-            .map_err(|err| err.to_string())?
-            .is_some(),
+            .map_err(|err| err.to_string())?,
+        Some(("unreferenced".to_owned(), 1)),
         "rollback must restore the payload's GC mark"
     );
     assert!(
@@ -427,48 +484,7 @@ async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), Str
     Ok(())
 }
 
-#[tokio::test]
-async fn committed_payload_delete_tombstone_recovers_unlink() -> Result<(), String> {
-    let store = test_store().await?;
-    let payload_ref = seed_payload(&store, "message-1", "body to reap").await?;
-    drop_raw_reference(&store, &payload_ref).await?;
-
-    let transaction = store
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|err| err.to_string())?;
-    payload::delete_external_payload_in_transaction(
-        &transaction,
-        &store.storage_root,
-        &payload_ref,
-        &payload::DeleteOpts::default(),
-    )
-    .await
-    .map_err(|err| err.to_string())?;
-    transaction.commit().await.map_err(|err| err.to_string())?;
-
-    assert!(payload_path(&store, &payload_ref).is_file());
-    assert!(
-        payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_err()
-    );
-    let removed = drain_pending_payload_delete(&store.conn, &store.storage_root, &payload_ref)
-        .await
-        .map_err(|err| err.to_string())?;
-    assert!(removed.is_some());
-    assert!(!payload_path(&store, &payload_ref).exists());
-    assert!(
-        schema::get_gc_meta(&store.conn, &pending_payload_delete_key(&payload_ref))
-            .await
-            .map_err(|err| err.to_string())?
-            .is_none()
-    );
-    Ok(())
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn committed_payload_delete_drain_failure_returns_pending_then_retries() -> Result<(), String>
 {
     let store = test_store().await?;
@@ -512,12 +528,12 @@ async fn committed_payload_delete_drain_failure_returns_pending_then_retries() -
     let removed = drain_pending_payload_delete(&store.conn, &store.storage_root, &payload_ref)
         .await
         .map_err(|err| err.to_string())?;
-    assert!(removed.is_some());
+    assert_eq!(removed, Some("body to retry".len() as u64));
     assert!(!payload_path(&store, &payload_ref).exists());
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn corrupt_tombstone_does_not_block_healthy_pending_delete() -> Result<(), String> {
     let store = test_store().await?;
     let dir = payload::payload_dir(&store.storage_root);
@@ -581,7 +597,7 @@ async fn corrupt_tombstone_does_not_block_healthy_pending_delete() -> Result<(),
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<(), String> {
     let store = test_store().await?;
     let dir = payload::payload_dir(&store.storage_root);
@@ -591,11 +607,13 @@ async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<
     let mtime = file_mtime_seconds(&fs::symlink_metadata(&path).map_err(|err| err.to_string())?);
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
 
+    let snapshot = read_payload_gc_snapshot(&store.conn, &store.storage_root, PROVIDER, None)
+        .await
+        .map_err(|err| err.to_string())?;
     let transaction = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -609,6 +627,7 @@ async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<
         &cfg,
         true,
         mtime + LcmGcConfig::MIN_GRACE_SECONDS as i64,
+        &snapshot,
     )
     .await
     .map_err(|err| err.to_string())?;
@@ -639,7 +658,7 @@ async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence() -> Result<(), String>
 {
     let store = test_store().await?;
@@ -669,7 +688,6 @@ async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence() -
     );
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -690,7 +708,59 @@ async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence() -
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn applied_gc_reaps_in_place_without_copying_the_database() -> Result<(), String> {
+    let store = test_store().await?;
+    let payload_ref = seed_payload(&store, "message-1", "body to reap").await?;
+    drop_raw_reference(&store, &payload_ref).await?;
+    payload::delete_external_payload(
+        &store.conn,
+        &store.storage_root,
+        &payload_ref,
+        &payload::DeleteOpts {
+            rewrite_placeholders: true,
+            remove_file: false,
+            verify_hash: false,
+        },
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let root_entries = |root: &Path| -> Result<Vec<String>, String> {
+        let mut names = fs::read_dir(root)
+            .map_err(|err| err.to_string())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?;
+        names.retain(|name| !name.starts_with("sessions.db-"));
+        names.sort();
+        Ok(names)
+    };
+    let file_mtime = file_mtime_seconds(
+        &fs::symlink_metadata(payload_path(&store, &payload_ref)).map_err(|err| err.to_string())?,
+    );
+
+    let report = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &LcmGcConfig::default(),
+        true,
+        file_mtime + LcmGcConfig::default().grace_seconds as i64,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    assert_eq!(report.orphans.count, 1);
+    assert!(!payload_path(&store, &payload_ref).exists());
+    assert_eq!(
+        root_entries(&store.storage_root)?,
+        vec!["lcm-payloads".to_string(), "sessions.db".to_string()]
+    );
+    Ok(())
+}
+
+#[asupersync::test]
 async fn delete_external_payload_hash_gate_preserves_corrupted_payload() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "trusted body").await?;
@@ -719,7 +789,7 @@ async fn delete_external_payload_hash_gate_preserves_corrupted_payload() -> Resu
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn delete_external_payload_rejects_symlink_payload_at_hash_gate() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "trusted body").await?;
@@ -755,7 +825,7 @@ async fn delete_external_payload_rejects_symlink_payload_at_hash_gate() -> Resul
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn delete_external_payload_rejects_invalid_refs() -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -782,12 +852,11 @@ async fn delete_external_payload_rejects_invalid_refs() -> Result<(), String> {
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn gc_on_store_without_payload_dir_reports_empty_run() -> Result<(), String> {
     let store = test_store().await?;
     assert!(!payload::payload_dir(&store.storage_root).exists());
     let cfg = LcmGcConfig {
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -813,14 +882,13 @@ async fn gc_on_store_without_payload_dir_reports_empty_run() -> Result<(), Strin
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn gc_reports_missing_payloads_when_payload_dir_was_deleted() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "msg-1", "externalized content").await?;
     std::fs::remove_dir_all(payload::payload_dir(&store.storage_root))
         .map_err(|err| format!("remove payload dir: {err}"))?;
     let cfg = LcmGcConfig {
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -842,14 +910,14 @@ async fn gc_reports_missing_payloads_when_payload_dir_was_deleted() -> Result<()
     Ok(())
 }
 
-#[tokio::test]
-async fn unreferenced_payload_two_scan_reaps_after_grace() -> Result<(), String> {
+#[asupersync::test]
+async fn unreferenced_payload_reaps_after_grace_from_reference_removal() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
     drop_raw_reference(&store, &payload_ref).await?;
+    let dropped_at = tracedecay_runtime_core::tracedecay::current_timestamp();
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -860,11 +928,12 @@ async fn unreferenced_payload_two_scan_reaps_after_grace() -> Result<(), String>
         None,
         &cfg,
         true,
-        1_000,
+        dropped_at,
     )
     .await
     .map_err(|err| err.to_string())?;
     assert_eq!(first.unreferenced.count, 0);
+    assert_eq!(first.deferred.count, 1);
     assert!(
         payload::load_payload_metadata(&store.conn, &payload_ref)
             .await
@@ -878,7 +947,7 @@ async fn unreferenced_payload_two_scan_reaps_after_grace() -> Result<(), String>
         None,
         &cfg,
         true,
-        1_000 + LcmGcConfig::MIN_GRACE_SECONDS as i64,
+        dropped_at + LcmGcConfig::MIN_GRACE_SECONDS as i64,
     )
     .await
     .map_err(|err| err.to_string())?;
@@ -896,61 +965,7 @@ async fn unreferenced_payload_two_scan_reaps_after_grace() -> Result<(), String>
     Ok(())
 }
 
-#[tokio::test]
-async fn session_scoped_unreferenced_payload_reaps_after_grace() -> Result<(), String> {
-    let store = test_store().await?;
-    let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
-    drop_raw_reference(&store, &payload_ref).await?;
-    let cfg = LcmGcConfig {
-        grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
-        ..Default::default()
-    }
-    .normalized();
-    let first = run_payload_gc_with_apply(
-        &store.conn,
-        &store.storage_root,
-        PROVIDER,
-        Some("session-a"),
-        &cfg,
-        true,
-        1_000,
-    )
-    .await
-    .map_err(|err| err.to_string())?;
-    assert_eq!(first.unreferenced.count, 0);
-    assert!(
-        payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok()
-    );
-
-    let second = run_payload_gc_with_apply(
-        &store.conn,
-        &store.storage_root,
-        PROVIDER,
-        Some("session-a"),
-        &cfg,
-        true,
-        1_000 + LcmGcConfig::MIN_GRACE_SECONDS as i64,
-    )
-    .await
-    .map_err(|err| err.to_string())?;
-    assert_eq!(second.unreferenced.count, 1);
-    assert!(
-        payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_err()
-    );
-    assert!(
-        !payload::payload_dir(&store.storage_root)
-            .join(&payload_ref)
-            .exists()
-    );
-    Ok(())
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn run_payload_gc_dry_run_does_not_mutate() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
@@ -958,7 +973,6 @@ async fn run_payload_gc_dry_run_does_not_mutate() -> Result<(), String> {
     insert_gc_mark(&store, &payload_ref, "unreferenced", 1).await?;
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -987,7 +1001,7 @@ async fn run_payload_gc_dry_run_does_not_mutate() -> Result<(), String> {
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn orphan_phase_honors_mtime_grace_then_reaps() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "orphan body").await?;
@@ -1005,7 +1019,6 @@ async fn orphan_phase_honors_mtime_grace_then_reaps() -> Result<(), String> {
     );
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1039,7 +1052,7 @@ async fn orphan_phase_honors_mtime_grace_then_reaps() -> Result<(), String> {
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_window()
 -> Result<(), String> {
     let store = test_store().await?;
@@ -1048,7 +1061,6 @@ async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_wi
     let cfg = LcmGcConfig {
         reap_missing_enabled: false,
         reap_missing_after: 10,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1085,7 +1097,6 @@ async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_wi
     let cfg = LcmGcConfig {
         reap_missing_enabled: true,
         reap_missing_after: 10,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1124,14 +1135,234 @@ async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_wi
             .await
             .is_err()
     );
-    let refs = referenced_payload_refs(&store.conn, PROVIDER, None)
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT storage_kind, payload_ref, placeholder_text
+             FROM lcm_raw_messages WHERE message_id = 'message-1'",
+            (),
+        )
         .await
         .map_err(|err| err.to_string())?;
-    assert!(!refs.contains(&payload_ref));
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "owner row vanished".to_string())?;
+    assert_eq!(
+        row.get::<String>(0).map_err(|err| err.to_string())?,
+        "inline"
+    );
+    assert_eq!(
+        row.get::<Option<String>>(1)
+            .map_err(|err| err.to_string())?,
+        None
+    );
+    let placeholder: String = row.get(2).map_err(|err| err.to_string())?;
+    assert!(
+        text_has_tombstoned_payload_ref(&placeholder, &payload_ref),
+        "owner placeholder was not tombstoned: {placeholder}"
+    );
     Ok(())
 }
 
-#[tokio::test]
+fn grace_config() -> LcmGcConfig {
+    LcmGcConfig {
+        grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
+        ..Default::default()
+    }
+    .normalized()
+}
+
+async fn mark_state(store: &TestStore, payload_ref: &str) -> Result<Option<String>, String> {
+    Ok(gc_mark(&store.conn, payload_ref)
+        .await
+        .map_err(|err| err.to_string())?
+        .map(|(state, _)| state))
+}
+
+/// A change to a payload's owner row records the payload as a GC candidate.
+/// Once due, a candidate its owner still references only loses its mark, and
+/// one its owner dropped is reaped; a payload whose owner never changed is
+/// never visited.
+#[asupersync::test]
+async fn owner_row_changes_record_candidates_that_gc_verifies() -> Result<(), String> {
+    let store = test_store().await?;
+    let kept = seed_payload(&store, "message-kept", "kept body").await?;
+    let dropped = seed_payload(&store, "message-dropped", "dropped body").await?;
+    let untouched = seed_payload(&store, "message-untouched", "untouched body").await?;
+    store
+        .conn
+        .execute(
+            "UPDATE lcm_raw_messages SET metadata_json = '{}' WHERE message_id = 'message-kept'",
+            (),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    drop_raw_reference(&store, &dropped).await?;
+    let changed_at = tracedecay_runtime_core::tracedecay::current_timestamp();
+    assert_eq!(
+        (
+            mark_state(&store, &kept).await?,
+            mark_state(&store, &dropped).await?,
+            mark_state(&store, &untouched).await?
+        ),
+        (
+            Some("unreferenced".to_string()),
+            Some("unreferenced".to_string()),
+            None
+        )
+    );
+
+    let report = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &grace_config(),
+        true,
+        changed_at + LcmGcConfig::MIN_GRACE_SECONDS as i64,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    assert_eq!(report.unreferenced.refs, vec![dropped.clone()]);
+    assert_eq!(mark_state(&store, &kept).await?, None);
+    assert!(
+        payload::load_payload_metadata(&store.conn, &kept)
+            .await
+            .is_ok()
+    );
+    assert!(
+        payload::load_payload_metadata(&store.conn, &untouched)
+            .await
+            .is_ok()
+    );
+    assert!(
+        payload::load_payload_metadata(&store.conn, &dropped)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+/// A store whose candidate triggers predate this schema lost references no
+/// trigger recorded. Installing the triggers records every existing payload as
+/// a candidate, so GC still reaps a payload whose owner was dropped before.
+#[asupersync::test]
+async fn installing_candidate_triggers_records_existing_payloads() -> Result<(), String> {
+    let store = test_store().await?;
+    let orphaned = seed_payload(&store, "message-orphaned", "orphaned body").await?;
+    let live = seed_payload(&store, "message-live", "live body").await?;
+    store
+        .conn
+        .execute_batch(
+            "DROP TRIGGER lcm_raw_messages_gc_candidate_delete;
+             DROP TRIGGER lcm_raw_messages_gc_candidate_update;",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    drop_raw_reference(&store, &orphaned).await?;
+    assert_eq!(mark_state(&store, &orphaned).await?, None);
+
+    schema::ensure_lcm_schema(&store.conn)
+        .await
+        .map_err(|err| err.to_string())?;
+    let installed_at = tracedecay_runtime_core::tracedecay::current_timestamp();
+    assert_eq!(
+        (
+            mark_state(&store, &orphaned).await?,
+            mark_state(&store, &live).await?
+        ),
+        (
+            Some("unreferenced".to_string()),
+            Some("unreferenced".to_string())
+        )
+    );
+    let report = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &grace_config(),
+        true,
+        installed_at + LcmGcConfig::MIN_GRACE_SECONDS as i64,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    assert_eq!(report.unreferenced.refs, vec![orphaned]);
+    assert_eq!(mark_state(&store, &live).await?, None);
+    Ok(())
+}
+
+/// A live placeholder that arrives in a new row naming a payload with neither
+/// metadata nor a file is tombstoned by the next applied pass, which then
+/// moves past that row.
+#[asupersync::test]
+async fn new_rows_with_dangling_placeholders_are_tombstoned_once() -> Result<(), String> {
+    let store = test_store().await?;
+    insert_session(&store.conn, &store.storage_root, "session-a").await?;
+    let quoted = format!("see [externalized tool output: bytes=4 ref={PRIMARY_REF}; out]");
+    insert_raw_message(
+        &store.conn,
+        RawMessage {
+            session_id: "session-a",
+            message_id: "message-quoting",
+            storage_kind: "inline",
+            payload_ref: None,
+            content: Some(&quoted),
+            placeholder_text: None,
+            metadata_json: None,
+        },
+    )
+    .await?;
+
+    let first = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &grace_config(),
+        true,
+        1_000,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let second = run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &grace_config(),
+        true,
+        1_000,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    assert_eq!(first.dangling.refs, vec![PRIMARY_REF.to_string()]);
+    assert_eq!(second.dangling.count, 0);
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT content FROM lcm_raw_messages WHERE message_id = 'message-quoting'",
+            (),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let content: String = rows
+        .next()
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "quoting row vanished".to_string())?
+        .get(0)
+        .map_err(|err| err.to_string())?;
+    assert!(text_has_tombstoned_payload_ref(&content, PRIMARY_REF));
+    Ok(())
+}
+
+#[asupersync::test]
 async fn missing_metadata_clears_mark_when_file_reappears() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "restored body").await?;
@@ -1139,7 +1370,6 @@ async fn missing_metadata_clears_mark_when_file_reappears() -> Result<(), String
     let cfg = LcmGcConfig {
         reap_missing_enabled: true,
         reap_missing_after: 10,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1191,7 +1421,7 @@ async fn missing_metadata_clears_mark_when_file_reappears() -> Result<(), String
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn run_payload_gc_isolates_corrupted_ref_errors_while_reaping_orphans() -> Result<(), String>
 {
     let store = test_store().await?;
@@ -1216,7 +1446,6 @@ async fn run_payload_gc_isolates_corrupted_ref_errors_while_reaping_orphans() ->
     let newest_orphan_mtime = orphan_a_mtime.max(orphan_b_mtime);
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1253,7 +1482,7 @@ async fn run_payload_gc_isolates_corrupted_ref_errors_while_reaping_orphans() ->
     Ok(())
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn unreadable_payload_path_never_reaps_live_metadata() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-1", "live metadata").await?;
@@ -1264,7 +1493,6 @@ async fn unreadable_payload_path_never_reaps_live_metadata() -> Result<(), Strin
     let cfg = LcmGcConfig {
         reap_missing_enabled: true,
         reap_missing_after: 10,
-        backup_before_reap: false,
         ..Default::default()
     }
     .normalized();
@@ -1305,7 +1533,7 @@ fn committed_delete_quarantine_preserves_rename_replacement() -> Result<(), Stri
     let path = dir.join(PRIMARY_REF);
     let original = b"original payload";
     fs::write(&path, original).map_err(|err| err.to_string())?;
-    let expected_hash = util::sha256_hex(original);
+    let expected_hash = sha256_hex(original);
 
     let removal = payload::remove_committed_payload_file_with(
         temp.path(),
@@ -1339,7 +1567,7 @@ fn committed_delete_quarantine_restores_in_place_rewrite() -> Result<(), String>
     let path = dir.join(PRIMARY_REF);
     let original = b"original payload";
     fs::write(&path, original).map_err(|err| err.to_string())?;
-    let expected_hash = util::sha256_hex(original);
+    let expected_hash = sha256_hex(original);
 
     let removal = payload::remove_committed_payload_file_with(
         temp.path(),
@@ -1367,7 +1595,7 @@ fn committed_delete_quarantine_restores_in_place_rewrite() -> Result<(), String>
 #[test]
 fn committed_delete_requires_exact_hash_byte_and_char_sizes() -> Result<(), String> {
     let original = "héllo 雪";
-    let expected_hash = util::sha256_hex(original.as_bytes());
+    let expected_hash = sha256_hex(original.as_bytes());
     let expected_bytes = original.len() as u64;
     let expected_chars = original.chars().count() as u64;
     for (hash, bytes, chars) in [
@@ -1428,7 +1656,7 @@ fn committed_delete_retry_succeeds_after_same_id_content_restore() -> Result<(),
     fs::create_dir(&dir).map_err(|err| err.to_string())?;
     let path = dir.join(PRIMARY_REF);
     let original = b"original";
-    let expected_hash = util::sha256_hex(original);
+    let expected_hash = sha256_hex(original);
     fs::write(&path, original).map_err(|err| err.to_string())?;
 
     let first = payload::remove_committed_payload_file_with(
@@ -1467,20 +1695,18 @@ fn committed_delete_retry_succeeds_after_same_id_content_restore() -> Result<(),
 // ---------------------------------------------------------------------------
 // SQL batching regression coverage.
 //
-// These tests measure *work*: how many round trips a GC path issues, how many
-// rows those round trips visit, and which rows survive. Nothing here inspects
+// These tests measure *work*: how many round trips a GC path issues and which
+// rows survive. Nothing here inspects
 // statement text, so a query rewrite that preserves the work a pass does keeps
 // the gate green, while a regression back to per-row SQL breaks it. Elapsed
 // time is never asserted: a set-sized workload costing a fixed number of round
 // trips is a property of the access pattern, not of the machine.
 // ---------------------------------------------------------------------------
 
-/// Counts the work forwarded through it: one tick per round trip, plus the rows
-/// each query actually returned. It never retains statement text.
+/// Counts the round trips forwarded through it. It never retains statement text.
 #[derive(Default)]
 struct WorkCounter {
     round_trips: std::cell::Cell<usize>,
-    rows_visited: std::cell::Cell<usize>,
 }
 
 impl WorkCounter {
@@ -1488,18 +1714,9 @@ impl WorkCounter {
         self.round_trips.get()
     }
 
-    fn rows_visited(&self) -> usize {
-        self.rows_visited.get()
-    }
-
     fn tick(&self) {
         self.round_trips
             .set(self.round_trips.get().saturating_add(1));
-    }
-
-    fn add_rows(&self, rows: usize) {
-        self.rows_visited
-            .set(self.rows_visited.get().saturating_add(rows));
     }
 }
 
@@ -1518,28 +1735,8 @@ impl<E: QueryExecutor + ?Sized> QueryExecutor for CountingExecutor<'_, E> {
     where
         P: tracedecay_runtime_core::db::engine::IntoParams,
     {
-        use tracedecay_runtime_core::db::engine::{Row, Rows, Value};
-
         self.counter.tick();
-        let mut rows = self.inner.query(sql, params).await?;
-        // Drain and replay so the row count is measured, not estimated. The
-        // replayed `Rows` is indistinguishable to the caller: same column
-        // names, same values, same order.
-        let columns = (0..rows.column_count())
-            .map(|index| rows.column_name(index).unwrap_or_default().to_string())
-            .collect::<Vec<_>>();
-        let mut replay = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let mut values = Vec::new();
-            let mut column = 0_i32;
-            while let Ok(value) = row.get::<Value>(column) {
-                values.push(value);
-                column += 1;
-            }
-            replay.push(Row::from_values(values));
-        }
-        self.counter.add_rows(replay.len());
-        Ok(Rows::from_parts(columns, replay))
+        self.inner.query(sql, params).await
     }
 }
 
@@ -1631,10 +1828,10 @@ async fn drain_round_trips_for_tombstones(count: usize) -> Result<usize, String>
 /// trips. Each extra tombstone still costs its own tombstone clear, and that
 /// marginal is pinned below; a per-tombstone existence probe would raise it by
 /// one and fail the gate, whatever the statements happen to say.
-#[tokio::test]
+#[asupersync::test]
 async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result<(), String> {
     /// Round trips one additional tombstone adds: the `gc_meta` clear that
-    /// retires that tombstone. The batched existence probe is *not* here — it
+    /// retires that tombstone. The batched existence probe is *not* here, it
     /// is paid once for the whole drain.
     const PER_TOMBSTONE_ROUND_TRIPS: usize = 1;
     const SMALL: usize = 2;
@@ -1655,8 +1852,8 @@ async fn pending_delete_drain_probes_metadata_once_for_the_whole_set() -> Result
 
 /// M11 equivalence: a tombstone whose metadata row is still present must be
 /// preserved (not unlinked) and a tombstone whose row is gone must be reaped,
-/// in the same drain — the batched probe must not conflate the two.
-#[tokio::test]
+/// in the same drain, the batched probe must not conflate the two.
+#[asupersync::test]
 async fn pending_delete_drain_batches_mixed_metadata_presence() -> Result<(), String> {
     let store = test_store().await?;
     let dir = payload::payload_dir(&store.storage_root);
@@ -1731,13 +1928,15 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
     let refs = seed_reapable_payloads(&store, count).await?;
     let cfg = LcmGcConfig {
         grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
         max_batch_size: 64,
         ..Default::default()
     }
     .normalized();
 
     let counter = WorkCounter::default();
+    let snapshot = read_payload_gc_snapshot(&store.conn, &store.storage_root, PROVIDER, None)
+        .await
+        .map_err(|err| err.to_string())?;
     let transaction = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1756,6 +1955,7 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
             &cfg,
             true,
             1_000_000,
+            &snapshot,
         )
         .await
         .map_err(|err| err.to_string())?
@@ -1774,30 +1974,33 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
     Ok(counter.round_trips())
 }
 
-/// M1: the reference-closure scan is hoisted out of the reap loop, so it costs
-/// the pass a fixed amount however many payloads the batch reaps.
+/// The reap loop's pass-level reads (the due marks and their batched owner
+/// verification) cost the pass a fixed amount however many payloads the batch
+/// reaps.
 ///
 /// Measured as a marginal, not read off the SQL: reap two batch sizes and
 /// compare. Each extra payload still pays for the work that is irreducibly its
-/// own — its metadata read, its placeholder sweep, its row deletes. What must
-/// *not* be in the marginal is a pass-level query; if a reference-closure scan
+/// own, its metadata read, its owner-row check, its owner-row placeholder
+/// rewrite read, its row deletes. What must *not* be in the marginal is a pass-level query; if one
 /// creeps back into the loop the marginal rises and this fails, whatever the
 /// statement text looks like.
 ///
 /// The reap loop prepares each delete and clears the whole batch's GC marks in
 /// one bounded statement afterwards, so the mark delete is not in the marginal
 /// either. That is a batch-only property: `delete_external_payload_in_transaction`
-/// still clears a single payload's own mark, and no batching removes that —
+/// still clears a single payload's own mark, and no batching removes that,
 /// `delete_external_payload_applies_db_then_file_and_is_idempotent` gates it.
-#[tokio::test]
-async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Result<(), String> {
+#[asupersync::test]
+async fn unreferenced_reap_pays_pass_level_reads_once_for_the_batch() -> Result<(), String> {
     /// Round trips one additional reaped payload adds, measured. It covers the
     /// work that is irreducibly that payload's own: loading its metadata row,
-    /// its residual-placeholder sweep, its metadata-row delete, and its
-    /// pending-delete tombstone write. Neither a reference-closure scan nor a
-    /// GC-mark delete is in there — both are paid once for the batch, and that
-    /// is what this test guards.
-    const PER_PAYLOAD_ROUND_TRIPS: usize = 4;
+    /// re-checking its owner row inside the delete, reading that owner row to
+    /// tombstone its placeholders, its metadata-row delete, and its
+    /// pending-delete tombstone write.
+    /// Neither the marks read, the batched owner verification, nor the GC-mark
+    /// delete is in there; each is paid once for the batch, and that is what
+    /// this test guards.
+    const PER_PAYLOAD_ROUND_TRIPS: usize = 5;
     const SMALL: usize = 2;
     const LARGE: usize = 8;
 
@@ -1808,18 +2011,17 @@ async fn unreferenced_reap_scans_reference_closure_once_for_the_batch() -> Resul
         large - small,
         (LARGE - SMALL) * PER_PAYLOAD_ROUND_TRIPS,
         "reap cost {small} round trips for {SMALL} payloads and {large} for {LARGE}: \
-         the per-payload marginal is not {PER_PAYLOAD_ROUND_TRIPS}, so the reference-closure \
-         scan, the GC-mark delete, or another batch-level statement is back inside the \
-         per-payload loop"
+         the per-payload marginal is not {PER_PAYLOAD_ROUND_TRIPS}, so the marks read, the \
+         batched owner verification, the GC-mark delete, or another batch-level statement \
+         is back inside the per-payload loop"
     );
     Ok(())
 }
 
-/// M1 equivalence: a payload that *is* still referenced must still abort with
-/// `StillReferenced` even when it shares a cached closure with payloads that
-/// were reaped earlier in the same batch.
-#[tokio::test]
-async fn shared_reference_closure_still_rejects_a_referenced_payload() -> Result<(), String> {
+/// A payload its owner row still references aborts with `StillReferenced` in
+/// the same transaction that just reaped an unreferenced one.
+#[asupersync::test]
+async fn batched_delete_still_rejects_a_referenced_payload() -> Result<(), String> {
     let store = test_store().await?;
     let reaped = seed_payload(&store, "message-reaped", "reap me").await?;
     drop_raw_reference(&store, &reaped).await?;
@@ -1830,22 +2032,19 @@ async fn shared_reference_closure_still_rejects_a_referenced_payload() -> Result
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|err| err.to_string())?;
-    let mut cache = payload::ReferencedClosureCache::default();
-    payload::prepare_external_payload_delete_in_transaction_with_cache(
+    payload::prepare_external_payload_delete_in_transaction(
         &transaction,
         &store.storage_root,
         &reaped,
         &payload::DeleteOpts::default(),
-        &mut cache,
     )
     .await
     .map_err(|err| err.to_string())?;
-    let still_referenced = payload::prepare_external_payload_delete_in_transaction_with_cache(
+    let still_referenced = payload::prepare_external_payload_delete_in_transaction(
         &transaction,
         &store.storage_root,
         &kept,
         &payload::DeleteOpts::default(),
-        &mut cache,
     )
     .await;
     transaction.commit().await.map_err(|err| err.to_string())?;
@@ -1869,131 +2068,12 @@ async fn shared_reference_closure_still_rejects_a_referenced_payload() -> Result
     Ok(())
 }
 
-/// Tombstones `PRIMARY_REF` in a store holding one live placeholder plus
-/// `decoys` inline-prose rows that merely name the ref, and returns how many
-/// rows the delete's queries visited.
-///
-/// The payload deliberately has no metadata row, which is the state the
-/// missing-metadata reap and the crash-recovery path both operate in. That
-/// keeps the live-reference closure scan — a different, deliberately broad
-/// query this PR does not touch — out of the measurement, so what is counted
-/// is the residual-placeholder sweep's own selectivity.
-async fn residual_sweep_rows_visited(decoys: usize) -> Result<usize, String> {
-    let store = test_store().await?;
-    insert_session(&store.conn, &store.storage_root, "session-a").await?;
-    let live = format!("[externalized tool output: bytes=4 ref={PRIMARY_REF}; out]");
-    insert_raw_message(
-        &store.conn,
-        RawMessage {
-            session_id: "session-a",
-            message_id: "message-live",
-            storage_kind: "inline",
-            payload_ref: None,
-            content: Some(&live),
-            snippet_text: &live,
-            index_text: &live,
-            metadata_json: Some(&live),
-        },
-    )
-    .await?;
-
-    for index in 0..decoys {
-        let prose = format!("the operator mentioned {PRIMARY_REF} in note {index}");
-        insert_raw_message(
-            &store.conn,
-            RawMessage {
-                session_id: "session-a",
-                message_id: &format!("message-decoy-{index}"),
-                storage_kind: "inline",
-                payload_ref: None,
-                content: Some(&prose),
-                snippet_text: &prose,
-                index_text: &prose,
-                metadata_json: Some(&prose),
-            },
-        )
-        .await?;
-    }
-
-    let counter = WorkCounter::default();
-    let transaction = store
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|err| err.to_string())?;
-    {
-        let counting = CountingExecutor {
-            inner: &transaction,
-            counter: &counter,
-        };
-        payload::delete_external_payload_in_transaction(
-            &counting,
-            &store.storage_root,
-            PRIMARY_REF,
-            &payload::DeleteOpts {
-                rewrite_placeholders: true,
-                remove_file: false,
-                verify_hash: false,
-            },
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    }
-    transaction.commit().await.map_err(|err| err.to_string())?;
-
-    // The sweep must still have tombstoned the row that needed it, or a low
-    // row count would only mean the prefilter matched nothing at all.
-    let mut rows = store
-        .conn
-        .query(
-            "SELECT snippet_text FROM lcm_raw_messages WHERE message_id = 'message-live'",
-            (),
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| "tombstoned row vanished".to_string())?;
-    let snippet: String = row.get(0).map_err(|err| err.to_string())?;
-    drop(rows);
-    assert!(
-        text_has_tombstoned_payload_ref(&snippet, PRIMARY_REF),
-        "sweep did not tombstone the live placeholder: {snippet}"
-    );
-
-    Ok(counter.rows_visited())
-}
-
-/// M2: the residual-placeholder sweep prefilters on live-prefix + ref rather
-/// than a bare `%ref%`, so its cost is set by the rows that can actually be
-/// rewritten, not by every row that happens to name the ref.
-///
-/// Measured as rows visited, not as `LIKE` terms counted in the statement text:
-/// a bare `%ref%` prefilter pulls inline prose that merely mentions the ref
-/// back into the sweep, so its row count grows with the decoys. The narrowed
-/// prefilter excludes them and the row count stays flat.
-#[tokio::test]
-async fn residual_placeholder_sweep_prefilters_on_live_prefixes() -> Result<(), String> {
-    let without_decoys = residual_sweep_rows_visited(0).await?;
-    let with_decoys = residual_sweep_rows_visited(32).await?;
-
-    assert_eq!(
-        with_decoys, without_decoys,
-        "sweep visited {without_decoys} rows with no decoys and {with_decoys} with 32 of them: \
-         the prefilter is matching rows it can never rewrite, which is what a bare `%ref%` \
-         pattern does"
-    );
-    Ok(())
-}
-
-/// M2 equivalence: the narrowed prefilter must rewrite exactly the rows the bare
-/// `%ref%` form rewrote — live placeholders in every text column, plus the
-/// stored `payload_ref` — and must leave inline prose that merely mentions the
-/// ref, and already-tombstoned placeholders, untouched.
-#[tokio::test]
-async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
+/// A delete tombstones the payload's placeholders, and clears its stored ref,
+/// in its owner row only. A live placeholder quoted into another row, prose
+/// naming the ref, and an already-tombstoned placeholder are text, not
+/// references, and stay as they are.
+#[asupersync::test]
+async fn delete_tombstones_only_the_owner_row() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-live", "body to tombstone").await?;
 
@@ -2008,8 +2088,7 @@ async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
             storage_kind: "inline",
             payload_ref: None,
             content: Some(&live),
-            snippet_text: &live,
-            index_text: &live,
+            placeholder_text: None,
             metadata_json: Some(&live),
         },
     )
@@ -2022,8 +2101,7 @@ async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
             storage_kind: "inline",
             payload_ref: None,
             content: Some(&already_gcd),
-            snippet_text: &already_gcd,
-            index_text: &already_gcd,
+            placeholder_text: None,
             metadata_json: Some(&already_gcd),
         },
     )
@@ -2036,8 +2114,7 @@ async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
             storage_kind: "inline",
             payload_ref: None,
             content: Some(&prose),
-            snippet_text: &prose,
-            index_text: &prose,
+            placeholder_text: None,
             metadata_json: Some(&prose),
         },
     )
@@ -2091,11 +2168,8 @@ async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
                 assert!(text_has_tombstoned_payload_ref(&index_text, &payload_ref));
             }
             "message-other-live" => {
-                assert!(
-                    text_has_tombstoned_payload_ref(&snippet, &payload_ref),
-                    "live tool-output placeholder was not tombstoned: {snippet}"
-                );
-                assert!(text_has_tombstoned_payload_ref(&index_text, &payload_ref));
+                assert_eq!(snippet, live, "a quoted placeholder was rewritten");
+                assert_eq!(index_text, live);
             }
             "message-already-gcd" => {
                 assert_eq!(snippet, already_gcd, "already-tombstoned row was rewritten");

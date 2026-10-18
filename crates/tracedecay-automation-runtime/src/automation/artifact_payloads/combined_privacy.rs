@@ -19,10 +19,10 @@ pub(super) fn skill_handoff_response(ctx: &ArtifactPayloadContext<'_>) -> Value 
 mod tests {
     use super::*;
     use crate::automation::artifact_payloads::ArtifactPayloadContext;
-    use crate::automation::artifact_policy::artifact_policy;
     use crate::automation::backend::{AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
     use crate::automation::outcomes::AutomationOutcomesSnapshot;
     use crate::automation::run_ledger::AutomationRunLedgerRecord;
+    use tracedecay_automation::artifact_policy::artifact_policy;
 
     #[test]
     fn combined_skill_response_excludes_fact_output_payloads() {
@@ -56,7 +56,7 @@ mod tests {
             run_id: "run-combined.skill",
             task: AgentTaskKind::SkillWriter,
             task_key: "skill_writer",
-            prompt_version: "combined_review:v1",
+            prompt_version: "combined_review:v2",
             policy: artifact_policy(AgentTaskKind::SkillWriter),
             request: &request,
             response: &response,

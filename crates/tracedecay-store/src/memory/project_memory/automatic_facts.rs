@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
@@ -45,7 +46,7 @@ struct AutomaticFactDigestProjection<'a> {
 /// The only durable outcomes of an automatic fact apply. Candidate discovery
 /// and in-flight work are owned by the automation run receipt, never this
 /// terminal audit record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectMemoryAutomaticFactStateV1 {
     Applied,
@@ -139,7 +140,6 @@ impl ProjectMemoryAutomaticFactEffectV1 {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> ProjectMemoryAutomaticFactStateV1 {
         match self {
             Self::Applied { .. } => ProjectMemoryAutomaticFactStateV1::Applied,
@@ -237,7 +237,6 @@ impl ProjectMemoryAutomaticFactReceiptV1 {
         &self.owner
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> ProjectMemoryAutomaticFactStateV1 {
         self.state
     }
@@ -278,7 +277,6 @@ impl ProjectMemoryAutomaticFactReceiptV1 {
         self.effect.quarantine_reason()
     }
 
-    #[hotpath::skip]
     pub const fn recorded_at(&self) -> UtcMicros {
         self.recorded_at
     }
@@ -331,7 +329,6 @@ impl ProjectMemoryAutomaticFactApplyResultV1 {
         &self.receipt
     }
 
-    #[hotpath::skip]
     pub const fn disposition(&self) -> ProjectMemoryAutomaticFactApplyDispositionV1 {
         self.disposition
     }
@@ -349,8 +346,9 @@ impl ProjectMemoryAutomaticFactApplyResultV1 {
         let (target_owner, target_fact_id) = receipt
             .effect()
             .applied_target()
-            .map(|target| (Some(target.owner()), Some(target.fact_id())))
-            .unwrap_or((None, None));
+            .map_or((None, None), |target| {
+                (Some(target.owner()), Some(target.fact_id()))
+            });
         canonical_sha256(&AutomaticFactDigestProjection {
             domain: "tracedecay.project-memory.automatic-fact-apply-result.v1",
             apply_id: receipt.apply_id(),

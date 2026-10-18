@@ -19,13 +19,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--format", choices=("tar.gz", "zip"), required=True)
     parser.add_argument("--entry-name", required=True)
-    parser.add_argument(
-        "--companion",
-        action="append",
-        default=[],
-        metavar="PATH=ENTRY_NAME",
-        help="include a non-executable runtime companion beside the binary",
-    )
     parser.add_argument("--epoch", type=int, required=True)
     return parser.parse_args()
 
@@ -93,26 +86,12 @@ def read_entry(path: Path, entry_name: str, mode: int) -> tuple[str, bytes, int]
     return entry_name, payload, mode
 
 
-def parse_companion(spec: str) -> tuple[Path, str]:
-    path_text, separator, entry_name = spec.rpartition("=")
-    if not separator or not path_text or not entry_name:
-        raise ValueError("companion must use PATH=ENTRY_NAME")
-    return Path(path_text), entry_name
-
-
 def main() -> None:
     args = parse_args()
     validate_entry_name(args.entry_name)
     if args.epoch < 0:
         raise ValueError("epoch must be nonnegative")
     entries = [read_entry(args.binary, args.entry_name, 0o755)]
-    entries.extend(
-        read_entry(path, entry_name, 0o644)
-        for path, entry_name in map(parse_companion, args.companion)
-    )
-    entry_names = [entry_name for entry_name, _, _ in entries]
-    if len(set(entry_names)) != len(entry_names):
-        raise ValueError("release archive entry names must be unique")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.format == "tar.gz":

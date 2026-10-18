@@ -1,35 +1,40 @@
 ---
-description: Use tracedecay MCP tools and workflow skills before native search, broad reads, editing, and recall
+description: Preserve TraceDecay scope, coverage, and mutation authority when using its operations
 alwaysApply: true
 ---
 
-# Use tracedecay before native code tools
+# TraceDecay operational boundaries
 
-If there is even a 1% chance this workspace has a TraceDecay index, the graph, memory store, and session archive are the first stop — before the first Grep, Glob, Read, `gh pr diff`, test run, or memory-file write. Graph before grep. Facts before files. Invoke `tracedecay:using-tracedecay` and follow its moment table. For project/store identity use `tracedecay_active_project` / `tracedecay_storage_status` (the resolved active project store), never repo-local DB probing.
+TraceDecay keeps a code graph, past sessions, and recorded decisions for each repository it indexes.
 
-## Moment to mandatory action
+In an indexed repository, load a TraceDecay skill before the first tool call when a task meets any of these:
 
-| The moment you are in | Do this instead |
-|---|---|
-| Grep/rg a literal string, regex, or config key | `tracedecay_grep` — `tracedecay:exploring-code` |
-| Search a symbol/concept, or open a source file | `tracedecay_search` / `tracedecay_context`, then outline→body→read — `tracedecay:exploring-code` |
-| "Who calls X" / "what does X call" / "trace this" | `tracedecay:tracing-functions` |
-| What breaks / which tests to run | `tracedecay:assessing-impact` |
-| `gh pr diff` or read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline) — `tracedecay:reviewing-changes` |
-| Write a helper, rename, or mass-edit | `tracedecay:editing-safely` |
-| Build/type errors, or run cargo check/tsc | `tracedecay:fixing-build-and-type-errors` |
-| Write MEMORY.md/CLAUDE.md, or a past decision | `tracedecay:project-memory` (`fact_store`) |
-| Architecture, tech debt, index/project status | `tracedecay:code-health` |
-| An MCP call failed | `tracedecay:using-the-cli` — `tracedecay tool <name>`, never abandon over transport |
+- it asks how code works or where something lives, and the answer spans more than one file
+- it asks who calls a function, what a change breaks, or which tests cover it
+- it changes a symbol, signature, or field that other files use
+- it reviews a diff, branch, or PR, or fixes a build or type error that spans files
+- it asks what an earlier session said or what the project decided
 
-## Red flags — these thoughts mean STOP, you are rationalizing
+When unsure which skill fits, load `routing-tracedecay`. When the intent is already specific, load that skill directly: `exploring-code`, `tracing-functions`, `assessing-impact`, `editing-safely`, `reviewing-changes`, `fixing-build-and-type-errors`, `project-memory`, `managing-session-context`.
 
-- "Grep is faster" — `tracedecay_grep` runs the same match and returns the enclosing symbol.
-- "I'll just read the whole file" — `outline`/`body` answer at a fraction of the tokens.
-- "This repo probably isn't indexed" — check `tracedecay_status`; guessing is the rationalization.
-- "I'll use gh for the PR diff" — `pr_context` computes changed symbols offline; gh is for comments/CI only.
-- "I'll jot this in MEMORY.md" — durable facts go to `fact_store` (add); MEMORY.md is not memory.
-- "The index might be stale, sync first" — hooks auto-sync; never run manual sync.
-- "The MCP call might fail" — `tracedecay tool <name>` always works. Transport ≠ capability.
+Work directly, without a skill, to read a file you can already name, edit inside one file, handle text the index does not cover, or ask a clarifying question.
 
-If an MCP call errors or times out, fall back to `tracedecay tool <name> --args '<json>'` — the same JSON arguments object as the MCP tool (see `tracedecay:using-the-cli`) — never query `.tracedecay` databases directly or abandon tracedecay. Fall back to plain Grep/Read only for non-indexed content or after the graph pinpoints exact files.
+User instructions (CLAUDE.md, AGENTS.md, direct requests) take precedence.
+
+Read freshness and coverage with results; an empty index result does not prove
+absence. Preserve exact project/worktree selectors and opaque continuation or
+mutation identities. Cross-project operations must use the selected registered
+store, not whichever project is active.
+
+MCP and CLI share daemon authority. A transport failure may use the equivalent
+CLI operation when the daemon remains available. Preserve an unavailable or
+intentionally held daemon and report the limitation. Private database reads are
+not a supported fallback.
+
+Preview and read results do not grant mutation authority. Apply, cancellation,
+and rollback consume their returned identities and typed state; reconcile
+committed effects before retrying an interrupted operation.
+
+Once the user authorizes a change, carry it through implementation and relevant
+verification. Pause only for a missing decision or an external or destructive
+action outside that authority.

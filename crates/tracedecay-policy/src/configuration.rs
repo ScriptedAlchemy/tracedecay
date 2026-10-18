@@ -82,20 +82,12 @@ pub enum ConfigurationMutationRecheckDispositionV1 {
     Indeterminate,
 }
 
-pub trait ConfigurationMutationPolicyEvaluator {
-    fn evaluate(
-        &self,
-        current: &ConfigurationMutationGrantSnapshotV1,
-        input: ConfigurationMutationRecheckInputV1<'_>,
-    ) -> ConfigurationMutationRecheckDispositionV1;
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConfigurationMutationPolicyEvaluatorV1;
 
-impl ConfigurationMutationPolicyEvaluator for ConfigurationMutationPolicyEvaluatorV1 {
-    #[hotpath::measure(label = "policy.configuration.evaluate")]
-    fn evaluate(
+impl ConfigurationMutationPolicyEvaluatorV1 {
+    #[tracing::instrument(name = "policy.configuration.evaluate", level = "trace", skip_all)]
+    pub fn evaluate(
         &self,
         current: &ConfigurationMutationGrantSnapshotV1,
         input: ConfigurationMutationRecheckInputV1<'_>,
@@ -156,17 +148,9 @@ mod tests {
     use super::*;
     use tracedecay_domain::configuration::ConfigurationGrantReceiptId;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn policy_digest(byte: char) -> AccessPolicyDigest {
         AccessPolicyDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
@@ -266,7 +250,7 @@ mod tests {
             ConfigurationMutationPolicyEvaluatorV1.evaluate(
                 &snapshot,
                 ConfigurationMutationRecheckInputV1 {
-                    operation: ConfigurationMutationOperationV1::CredentialWrite,
+                    operation: ConfigurationMutationOperationV1::ProtectedApply,
                     ..input
                 },
             ),

@@ -13,9 +13,9 @@ use tracedecay_daemon_identity::authority;
 fn sole_mounted_server_matching(
     servers: &[(
         Arc<crate::mcp::McpServer>,
-        Arc<crate::tracedecay::TraceDecay>,
+        Arc<tracedecay_project::project::TraceDecay>,
     )],
-    predicate: impl Fn(&crate::tracedecay::TraceDecay) -> bool,
+    predicate: impl Fn(&tracedecay_project::project::TraceDecay) -> bool,
 ) -> std::result::Result<Option<Arc<crate::mcp::McpServer>>, ()> {
     let mut matches = servers
         .iter()
@@ -29,12 +29,16 @@ fn sole_mounted_server_matching(
     Ok(Some(Arc::clone(server)))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Retained project resolution binds one request to the mounted server or a typed miss."
+)]
 pub(super) fn retained_project_server_resolver(
     administration: StoreAdministration,
 ) -> crate::mcp::server::RetainedProjectServerResolver {
     crate::mcp::server::install_retained_project_server_resolver(move |request| {
         let administration = administration.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let expected_profile_id = administration.profile_identity()?.profile_id().clone();
                 let mounted_servers = {
@@ -115,13 +119,14 @@ pub(super) fn retained_project_server_resolver(
                                 })
                     })
                     .collect::<Vec<_>>();
-                let branch_matches = |graph: &crate::tracedecay::TraceDecay| {
+                let branch_matches = |graph: &tracedecay_project::project::TraceDecay| {
                     request.requested_branch.as_deref().is_some_and(|branch| {
                         graph.serving_branch() == Some(branch)
                             || graph.active_branch() == Some(branch)
                     })
                 };
-                let root_matches = |graph: &crate::tracedecay::TraceDecay, root: &Path| {
+                let root_matches = |graph: &tracedecay_project::project::TraceDecay,
+                                    root: &Path| {
                     authority::canonical_identity_path(graph.project_root()).ok()
                         == Some(root.to_path_buf())
                 };
@@ -155,7 +160,7 @@ pub(super) fn retained_project_server_resolver(
                 }
                 Ok(None)
             },
-            label = "daemon.graph_resolution.resolve"
+            tracing::trace_span!("daemon.graph_resolution.resolve"),
         ))
     })
 }

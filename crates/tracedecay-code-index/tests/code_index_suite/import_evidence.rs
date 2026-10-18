@@ -1,28 +1,25 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use serde_json::Value;
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_code_index::{
-    chunks::{
-        ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexImportEvidenceV1, content_digest,
-    },
-    extract::EXTRACTION_ROWS_SEPARATOR,
+    chunks::{CodeIndexImportEvidenceV1, content_digest},
+    graph_projection::UnresolvedCallerGapsV1,
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
-        CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
-        SEALED_GENERATION_FORMAT_REVISION_V1, sealed_generation_payload_digest,
+        CodeIndexPublishedGenerationV1, SEALED_GENERATION_FORMAT_REVISION_V1,
     },
 };
 use tracedecay_domain::{
-    CodeGenerationId, FileOccurrenceId, LanguageId, SanitizedCodeFileV1, SensitivityLevelV1,
-    SnapshotFileDispositionV1, SourceSpan, canonical_sha256,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageId, RelationEdgeKindV1, SanitizationReceiptId,
+    SanitizedCodeFileV1, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
+    SymbolOccurrenceId, UnmodeledImportShapeV1,
 };
+use tracedecay_graph_db::NeverCancelled;
 
 use crate::{
-    production_orchestration::{
-        ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
-    },
-    support::id,
+    production_orchestration::{ActiveControl, applying_owner, request_with_source},
+    support::{PartitionedSealV1, cold_generation, id},
 };
 
 const FIRST_SOURCE: &str = concat!(
@@ -76,89 +73,1086 @@ fn import_request() -> CodeIndexBuildRequestV1 {
 }
 
 fn published_import_generation() -> Arc<CodeIndexPublishedGenerationV1> {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
+    let mut owner = applying_owner();
+    cold_generation(
+        &owner
+            .build_and_publish(import_request(), &ActiveControl)
+            .expect("parser-backed import generation publishes"),
     )
-    .expect("production owner");
-    owner
-        .build_and_publish(import_request(), &ActiveControl)
-        .expect("parser-backed import generation publishes")
 }
 
-fn sealed_envelope(generation: &CodeIndexPublishedGenerationV1) -> Value {
-    serde_json::from_slice(&generation.encode_sealed().expect("import generation seals"))
-        .expect("sealed generation JSON")
+fn published_rust_workspace(sources: &[(&str, &str, &str)]) -> Arc<CodeIndexPublishedGenerationV1> {
+    published_workspace("rust", sources)
 }
 
-fn file_artifact(envelope: &Value, index: usize) -> CodeFileIndexArtifactsV1 {
-    serde_json::from_value(envelope["generation"]["files"][index]["artifacts"].clone())
-        .expect("file artifact JSON")
+fn published_workspace(
+    language: &str,
+    sources: &[(&str, &str, &str)],
+) -> Arc<CodeIndexPublishedGenerationV1> {
+    let mut request = request_with_source(
+        "file.rust-workspace.seed",
+        1_500_000,
+        "commit.rust-workspace.1",
+        "tree.rust-workspace.1",
+        "",
+    );
+    request.snapshot.files.clear();
+    request.snapshot.sanitization_receipts.clear();
+    request.captured_files.clear();
+    request.changed_files.clear();
+    let mut identity = Vec::new();
+    for (ordinal, (occurrence, path, source)) in sources.iter().copied().enumerate() {
+        let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+        let bytes = source.as_bytes();
+        request.snapshot.files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: path.to_owned(),
+            language: Some(id::<LanguageId>(language)),
+            content_digest: content_digest(bytes),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        request
+            .snapshot
+            .sanitization_receipts
+            .push(id::<SanitizationReceiptId>(&format!(
+                "receipt.rust-workspace.{ordinal}"
+            )));
+        request.captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(bytes),
+            sensitivity_level: SensitivityLevelV1::Public,
+        });
+        request.changed_files.insert(path.to_owned());
+        identity.extend_from_slice(path.as_bytes());
+        identity.push(0);
+        identity.extend_from_slice(bytes);
+    }
+    request.snapshot.files.sort_by(|left, right| {
+        (&left.logical_path, &left.file_occurrence_id)
+            .cmp(&(&right.logical_path, &right.file_occurrence_id))
+    });
+    request.snapshot.content_identity = content_digest(&identity);
+    request
+        .snapshot
+        .validate()
+        .expect("workspace snapshot is canonical");
+
+    cold_generation(
+        &applying_owner()
+            .build_and_publish(request, &ActiveControl)
+            .expect("workspace generation publishes"),
+    )
 }
 
-fn import_rows_mut(envelope: &mut Value, file_index: usize) -> &mut Vec<Value> {
-    envelope["generation"]["files"][file_index]["artifacts"]["imports"]
+fn symbol_occurrence(
+    generation: &CodeIndexPublishedGenerationV1,
+    qualified_name: &str,
+) -> SymbolOccurrenceId {
+    generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name == qualified_name)
+        .unwrap_or_else(|| panic!("missing symbol {qualified_name}"))
+        .occurrence
+        .clone()
+}
+
+fn assert_resolved_edge(
+    generation: &CodeIndexPublishedGenerationV1,
+    from: &SymbolOccurrenceId,
+    to: &SymbolOccurrenceId,
+    kind: RelationEdgeKindV1,
+) {
+    assert!(
+        generation.edges().iter().any(|edge| {
+            edge.from_occurrence == *from
+                && edge.to_occurrence == *to
+                && edge.kind == kind
+                && edge.authority == EdgeAuthorityV1::NameResolved
+        }),
+        "missing {kind:?} edge from {from} to {to}"
+    );
+}
+
+#[test]
+fn rust_child_glob_imports_parent_use_bindings_for_calls() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.glob.parent",
+            "crates/service/src/parent.rs",
+            "mod child;\nuse child::f;\nmod dispatch;\n",
+        ),
+        (
+            "file.glob.target",
+            "crates/service/src/parent/child.rs",
+            "pub fn f() {}\n",
+        ),
+        (
+            "file.glob.dispatch",
+            "crates/service/src/parent/dispatch.rs",
+            "use super::*;\npub fn g() { f(); f(); }\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/service/src/parent/dispatch.rs::g");
+    let target = symbol_occurrence(&generation, "crates/service/src/parent/child.rs::f");
+    assert!(
+        generation.imports().iter().any(|binding| {
+            binding.logical_path == "crates/service/src/parent/dispatch.rs"
+                && binding.module_specifier == "super"
+                && binding.is_glob
+        }),
+        "the parser must retain the child glob as structured import evidence: {:?}",
+        generation.imports()
+    );
+
+    assert_resolved_edge(&generation, &caller, &target, RelationEdgeKindV1::Calls);
+    assert_eq!(
+        generation
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == caller
+                    && edge.to_occurrence == target
+                    && edge.kind == RelationEdgeKindV1::Calls
+            })
+            .count(),
+        2,
+        "resolution caching must preserve each call site's evidence edge"
+    );
+}
+
+#[test]
+fn rust_cross_crate_impl_binds_through_public_reexport_chain() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.reexport.a-lib",
+            "crates/a/src/lib.rs",
+            "mod api;\npub use api::T;\n",
+        ),
+        (
+            "file.reexport.a-api",
+            "crates/a/src/api.rs",
+            "mod traits;\npub use traits::T;\n",
+        ),
+        (
+            "file.reexport.a-trait",
+            "crates/a/src/api/traits.rs",
+            "pub trait T {}\n",
+        ),
+        (
+            "file.reexport.b-lib",
+            "crates/b/src/lib.rs",
+            "use a::T;\npub struct S;\nimpl T for S {}\n",
+        ),
+    ]);
+    let implementor = symbol_occurrence(&generation, "crates/b/src/lib.rs::S");
+    let target = symbol_occurrence(&generation, "crates/a/src/api/traits.rs::T");
+
+    assert_resolved_edge(
+        &generation,
+        &implementor,
+        &target,
+        RelationEdgeKindV1::Implements,
+    );
+}
+
+/// tokio 1.53.1 `tokio/tests/macros_rename_test.rs`, verbatim.
+const TOKIO_MACROS_RENAME_TEST: &str = r#"#![cfg(all(feature = "full", not(target_os = "wasi")))] // Wasi doesn't support threading
+
+#[allow(unused_imports)]
+use std as tokio;
+
+use ::tokio as tokio1;
+
+mod test {
+    pub use ::tokio;
+}
+
+async fn compute() -> usize {
+    let join = tokio1::spawn(async { 1 });
+    join.await.unwrap()
+}
+
+#[tokio1::main(crate = "tokio1")]
+async fn compute_main() -> usize {
+    compute().await
+}
+
+#[test]
+fn crate_rename_main() {
+    assert_eq!(1, compute_main());
+}
+
+#[tokio1::test(crate = "tokio1")]
+async fn crate_rename_test() {
+    assert_eq!(1, compute().await);
+}
+
+#[test::tokio::test(crate = "test::tokio")]
+async fn crate_path_test() {
+    assert_eq!(1, compute().await);
+}
+"#;
+
+#[test]
+fn rust_extern_prelude_absolute_use_paths_index_like_their_relative_form() {
+    let generation = published_rust_workspace(&[
+        ("file.absolute.a", "crates/a/src/lib.rs", "pub trait T {}\n"),
+        (
+            "file.absolute.b",
+            "crates/b/src/lib.rs",
+            // The local `mod a` must not capture the extern-prelude path `::a`.
+            "mod a {}\nuse ::a::T;\npub struct S;\nimpl T for S {}\n",
+        ),
+        (
+            "file.absolute.tokio",
+            "tokio/tests/macros_rename_test.rs",
+            TOKIO_MACROS_RENAME_TEST,
+        ),
+    ]);
+
+    let bindings = |path: &str| {
+        generation
+            .imports()
+            .iter()
+            .filter(|binding| binding.logical_path == path)
+            .map(|binding| {
+                (
+                    binding.module_specifier.as_str(),
+                    binding.imported_name.as_deref(),
+                    binding.local_name.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        bindings("crates/b/src/lib.rs"),
+        [("a", Some("T"), Some("T"))]
+    );
+    // `use ::tokio as tokio1;` binds a crate root, exactly like `use std as tokio;`.
+    assert_eq!(
+        bindings("tokio/tests/macros_rename_test.rs"),
+        Vec::<(&str, Option<&str>, Option<&str>)>::new()
+    );
+
+    assert_resolved_edge(
+        &generation,
+        &symbol_occurrence(&generation, "crates/b/src/lib.rs::S"),
+        &symbol_occurrence(&generation, "crates/a/src/lib.rs::T"),
+        RelationEdgeKindV1::Implements,
+    );
+    let compute_main = symbol_occurrence(
+        &generation,
+        "tokio/tests/macros_rename_test.rs::compute_main",
+    );
+    let compute = symbol_occurrence(&generation, "tokio/tests/macros_rename_test.rs::compute");
+    assert!(
+        generation
+            .edges()
+            .iter()
+            .any(|edge| edge.from_occurrence == compute_main
+                && edge.to_occurrence == compute
+                && edge.kind == RelationEdgeKindV1::Calls),
+        "the file behind `use ::tokio as tokio1;` must be indexed with its calls"
+    );
+}
+
+#[test]
+fn rust_constructor_and_typed_receiver_calls_bind_through_the_crate_path() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.builder.lib",
+            "crates/widgets/src/lib.rs",
+            "mod builder;\npub use crate::builder::{Builder, Widget};\n",
+        ),
+        (
+            "file.builder.impl",
+            "crates/widgets/src/builder.rs",
+            "pub struct Widget;\npub struct Builder;\nimpl Builder {\n    pub fn new() -> Builder { Builder }\n    pub fn build(&self) -> Widget { Widget }\n}\n",
+        ),
+        (
+            "file.builder.app",
+            "crates/app/src/main.rs",
+            "fn assemble() -> widgets::Widget {\n    let mut builder: widgets::Builder = widgets::Builder::new();\n    builder.build()\n}\nfn main() { assemble(); }\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let constructor = symbol_occurrence(&generation, "crates/widgets/src/builder.rs::Builder::new");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/builder.rs::Builder::build");
+
+    assert_resolved_edge(
+        &generation,
+        &caller,
+        &constructor,
+        RelationEdgeKindV1::Calls,
+    );
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+    let builder = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/widgets/src/builder.rs::Builder"
+                && symbol.kind == "struct"
+        })
+        .expect("Builder struct definition")
+        .occurrence
+        .clone();
+    assert_resolved_edge(&generation, &caller, &builder, RelationEdgeKindV1::TypeOf);
+}
+
+/// `GrafeoDB::open` in grafeo-cli must be a caller of the struct, not only of
+/// the associated function. Otherwise callers of `GrafeoDB` is empty-complete
+/// while rg still finds the construction sites.
+#[test]
+fn rust_associated_open_is_a_caller_of_the_struct() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.grafeo.lib",
+            "crates/engine/src/lib.rs",
+            "pub struct GrafeoDB;\nimpl GrafeoDB {\n    pub fn open(_path: &str) -> GrafeoDB { GrafeoDB }\n}\n",
+        ),
+        (
+            "file.grafeo.cli",
+            "crates/cli/src/data.rs",
+            "pub fn load(path: &str) -> engine::GrafeoDB {\n    engine::GrafeoDB::open(path)\n}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/cli/src/data.rs::load");
+    let database = symbol_occurrence(&generation, "crates/engine/src/lib.rs::GrafeoDB");
+    let open = symbol_occurrence(&generation, "crates/engine/src/lib.rs::GrafeoDB::open");
+    assert_resolved_edge(&generation, &caller, &open, RelationEdgeKindV1::Calls);
+    assert_resolved_edge(&generation, &caller, &database, RelationEdgeKindV1::TypeOf);
+}
+
+#[test]
+fn rust_generic_associated_calls_seal_exact_owner_and_member_tokens() {
+    let source = concat!(
+        "pub struct Factory<T>(core::marker::PhantomData<T>);\n",
+        "impl<T> Factory<T> { pub fn new() -> Self { Self(core::marker::PhantomData) } }\n",
+        "pub struct Flag<const CHECK: bool>;\n",
+        "impl<const CHECK: bool> Flag<CHECK> { pub fn new() -> Self { Self } }\n",
+        "pub fn café() {}\n",
+        "pub fn assemble() {\n",
+        "    Factory::<fn() -> u8>::new();\n",
+        "    Flag::<{ 1 > 0 }>::new();\n",
+        "    café();\n",
+        "}\n",
+    );
+    let generation =
+        published_rust_workspace(&[("file.generic.calls", "crates/app/src/lib.rs", source)]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/lib.rs::assemble");
+    let observed = generation
+        .edges()
+        .iter()
+        .filter(|edge| {
+            edge.from_occurrence == caller
+                && matches!(
+                    edge.kind,
+                    RelationEdgeKindV1::Calls | RelationEdgeKindV1::TypeOf
+                )
+                && edge.authority == EdgeAuthorityV1::SyntaxExact
+        })
+        .map(|edge| {
+            let target = generation
+                .symbols()
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence == edge.to_occurrence)
+                .expect("edge target");
+            let token = &source
+                [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize];
+            (target.qualified_name.as_str(), token)
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        observed,
+        BTreeSet::from([
+            ("crates/app/src/lib.rs::Factory", "Factory"),
+            ("crates/app/src/lib.rs::Factory<T>::new", "new"),
+            ("crates/app/src/lib.rs::Flag", "Flag"),
+            ("crates/app/src/lib.rs::Flag<CHECK>::new", "new"),
+            ("crates/app/src/lib.rs::café", "café"),
+        ])
+    );
+}
+
+#[test]
+fn rust_factory_new_style_receivers_do_not_fabricate_calls_edges() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.factory.lib",
+            "crates/widgets/src/lib.rs",
+            "pub struct Factory;\npub struct Product;\nimpl Factory {\n    pub fn new() -> Product { Product }\n    pub fn run(&self) {}\n}\nimpl Product {\n    pub fn run(&self) {}\n}\n",
+        ),
+        (
+            "file.factory.app",
+            "crates/app/src/main.rs",
+            "fn assemble() {\n    let p = widgets::Factory::new();\n    p.run();\n}\nfn main() { assemble(); }\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let factory_run = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Factory::run");
+    let product_run = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Product::run");
+    let factory_new = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Factory::new");
+
+    assert_resolved_edge(
+        &generation,
+        &caller,
+        &factory_new,
+        RelationEdgeKindV1::Calls,
+    );
+    assert!(
+        !generation.edges().iter().any(|edge| {
+            edge.from_occurrence == caller
+                && edge.to_occurrence == factory_run
+                && edge.kind == RelationEdgeKindV1::Calls
+        }),
+        "Factory::new() must not invent a Factory::run caller edge"
+    );
+    assert!(
+        !generation.edges().iter().any(|edge| {
+            edge.from_occurrence == caller
+                && edge.to_occurrence == product_run
+                && edge.kind == RelationEdgeKindV1::Calls
+        }),
+        "without an explicit type, abstain from a Product::run caller edge"
+    );
+}
+
+#[test]
+fn rust_inherent_impl_methods_resolve_when_type_and_impl_are_in_different_files() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.split.lib",
+            "crates/widgets/src/lib.rs",
+            "mod methods;\npub struct Builder;\n",
+        ),
+        (
+            "file.split.methods",
+            "crates/widgets/src/methods.rs",
+            "use super::Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.split.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/methods.rs::Builder::build");
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_generic_inherent_impl_matches_a_nominal_typed_receiver() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.generic.lib",
+            "crates/widgets/src/lib.rs",
+            "mod methods;\npub struct Builder<T>(pub T);\n",
+        ),
+        (
+            "file.generic.methods",
+            "crates/widgets/src/methods.rs",
+            "use super::Builder;\nimpl<T> Builder<T> {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.generic.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder<u8>) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(
+        &generation,
+        "crates/widgets/src/methods.rs::Builder<T>::build",
+    );
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_qualified_inherent_impl_owner_resolves_to_its_type() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.qualified-owner.lib",
+            "crates/widgets/src/lib.rs",
+            "pub mod builder;\nmod methods;\npub use builder::Builder;\n",
+        ),
+        (
+            "file.qualified-owner.builder",
+            "crates/widgets/src/builder.rs",
+            "pub struct Builder;\n",
+        ),
+        (
+            "file.qualified-owner.methods",
+            "crates/widgets/src/methods.rs",
+            "impl crate::builder::Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.qualified-owner.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(
+        &generation,
+        "crates/widgets/src/methods.rs::crate::builder::Builder::build",
+    );
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_public_trait_methods_are_callable_across_crates() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.public-trait.lib",
+            "crates/dep/src/lib.rs",
+            "pub trait PublicTrait {\n    fn work(&self);\n}\n",
+        ),
+        (
+            "file.public-trait.app",
+            "crates/app/src/main.rs",
+            "fn run(value: &dyn dep::PublicTrait) {\n    value.work();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::run");
+    let work = symbol_occurrence(&generation, "crates/dep/src/lib.rs::PublicTrait::work");
+
+    assert_resolved_edge(&generation, &caller, &work, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_trait_impl_methods_do_not_masquerade_as_inherent_methods() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.trait-impl.lib",
+            "crates/widgets/src/lib.rs",
+            "mod first;\nmod second;\npub struct Builder;\npub trait First { fn build(&self); }\npub trait Second { fn build(&self); }\n",
+        ),
+        (
+            "file.trait-impl.first",
+            "crates/widgets/src/first.rs",
+            "impl crate::First for crate::Builder { fn build(&self) {} }\n",
+        ),
+        (
+            "file.trait-impl.second",
+            "crates/widgets/src/second.rs",
+            "impl crate::Second for crate::Builder { fn build(&self) {} }\n",
+        ),
+        (
+            "file.trait-impl.app",
+            "crates/app/src/main.rs",
+            "use widgets::First;\nfn assemble(builder: &widgets::Builder) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let first = symbol_occurrence(
+        &generation,
+        "crates/widgets/src/first.rs::<crate::Builder as crate::First>::build",
+    );
+    let second = symbol_occurrence(
+        &generation,
+        "crates/widgets/src/second.rs::<crate::Builder as crate::Second>::build",
+    );
+
+    assert!(generation.edges().iter().all(|edge| {
+        edge.from_occurrence != caller
+            || (edge.to_occurrence != first && edge.to_occurrence != second)
+            || edge.kind != RelationEdgeKindV1::Calls
+    }));
+}
+
+#[test]
+fn rust_type_path_call_binds_unique_trait_impl_method() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.ufcs-from.lib",
+            "crates/walk/src/lib.rs",
+            concat!(
+                "mod build;\n",
+                "pub struct WalkDir;\n",
+                "pub struct WalkEventIter;\n",
+                "impl From<WalkDir> for WalkEventIter {\n",
+                "    fn from(it: WalkDir) -> Self { let _ = it; WalkEventIter }\n",
+                "}\n",
+            ),
+        ),
+        (
+            "file.ufcs-from.build",
+            "crates/walk/src/build.rs",
+            concat!(
+                "use crate::{WalkDir, WalkEventIter};\n",
+                "pub fn build(wd: WalkDir) {\n",
+                "    let _ = WalkEventIter::from(wd);\n",
+                "}\n",
+            ),
+        ),
+        (
+            "file.ufcs-from.same",
+            "crates/app/src/main.rs",
+            concat!(
+                "struct Local;\n",
+                "impl From<u8> for Local {\n",
+                "    fn from(value: u8) -> Self { let _ = value; Local }\n",
+                "}\n",
+                "fn main() {\n",
+                "    let _ = Local::from(1u8);\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    let same_file_caller = symbol_occurrence(&generation, "crates/app/src/main.rs::main");
+    let same_crate_caller = symbol_occurrence(&generation, "crates/walk/src/build.rs::build");
+    let local_from = symbol_occurrence(
+        &generation,
+        "crates/app/src/main.rs::<Local as From<u8>>::from",
+    );
+    let walk_from = symbol_occurrence(
+        &generation,
+        "crates/walk/src/lib.rs::<WalkEventIter as From<WalkDir>>::from",
+    );
+
+    assert!(
+        generation.edges().iter().any(|edge| {
+            edge.from_occurrence == same_file_caller
+                && edge.to_occurrence == local_from
+                && edge.kind == RelationEdgeKindV1::Calls
+                && edge.authority == EdgeAuthorityV1::SyntaxExact
+        }),
+        "same-file Local::from must bind the UFCS From impl"
+    );
+    assert_resolved_edge(
+        &generation,
+        &same_crate_caller,
+        &walk_from,
+        RelationEdgeKindV1::Calls,
+    );
+}
+
+#[test]
+fn rust_inherent_method_does_not_bind_to_a_same_named_type_in_another_module() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.homonym.lib",
+            "crates/widgets/src/lib.rs",
+            "mod inner;\npub struct Builder;\nimpl Builder {\n    pub fn finish(&self) {}\n}\n",
+        ),
+        (
+            "file.homonym.inner",
+            "crates/widgets/src/inner.rs",
+            "pub struct Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.homonym.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n    builder.finish();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let finish = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Builder::finish");
+    let inner_build = symbol_occurrence(&generation, "crates/widgets/src/inner.rs::Builder::build");
+
+    assert_resolved_edge(&generation, &caller, &finish, RelationEdgeKindV1::Calls);
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != caller
+                || edge.to_occurrence != inner_build
+                || edge.kind != RelationEdgeKindV1::Calls
+        }),
+        "`inner::Builder::build` belongs to a different type than `widgets::Builder`"
+    );
+}
+
+#[test]
+fn rust_inherent_impl_resolves_when_type_is_reexported_from_a_submodule() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.reexported-type.lib",
+            "crates/widgets/src/lib.rs",
+            "mod builder;\nmod methods;\nmod finish;\npub use crate::builder::Builder;\n",
+        ),
+        (
+            "file.reexported-type.builder",
+            "crates/widgets/src/builder.rs",
+            "pub struct Builder;\n",
+        ),
+        (
+            "file.reexported-type.methods",
+            "crates/widgets/src/methods.rs",
+            "use crate::builder::Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.reexported-type.finish",
+            "crates/widgets/src/finish.rs",
+            "use crate::Builder;\nimpl Builder {\n    pub fn finish(&self) {}\n}\n",
+        ),
+        (
+            "file.reexported-type.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n    builder.finish();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/methods.rs::Builder::build");
+    let finish = symbol_occurrence(&generation, "crates/widgets/src/finish.rs::Builder::finish");
+
+    assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+    assert_resolved_edge(&generation, &caller, &finish, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_std_module_paths_do_not_bind_to_same_stem_project_files() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.std-stem.widgets-lib",
+            "crates/widgets/src/lib.rs",
+            "pub mod fs;\n",
+        ),
+        (
+            "file.std-stem.widgets-fs",
+            "crates/widgets/src/fs.rs",
+            "pub fn read(path: &str) -> Vec<u8> { path.as_bytes().to_vec() }\n",
+        ),
+        (
+            "file.std-stem.ignore-lib",
+            "crates/ignore/src/lib.rs",
+            "mod walk;\npub use walk::WalkBuilder;\n",
+        ),
+        (
+            "file.std-stem.ignore-walk",
+            "crates/ignore/src/walk.rs",
+            "pub struct WalkBuilder;\nimpl WalkBuilder {\n    pub fn new() -> WalkBuilder { WalkBuilder }\n}\n",
+        ),
+        (
+            "file.std-stem.app",
+            "crates/app/src/main.rs",
+            "use std::fs;\nfn load() {\n    fs::read(\"x\");\n}\nfn walk() {\n    ignore::WalkBuilder::new();\n}\nfn main() { load(); walk(); }\n",
+        ),
+    ]);
+    let load = symbol_occurrence(&generation, "crates/app/src/main.rs::load");
+    let project_read = symbol_occurrence(&generation, "crates/widgets/src/fs.rs::read");
+    let walk = symbol_occurrence(&generation, "crates/app/src/main.rs::walk");
+    let walk_builder_new =
+        symbol_occurrence(&generation, "crates/ignore/src/walk.rs::WalkBuilder::new");
+
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != load
+                || edge.to_occurrence != project_read
+                || edge.kind != RelationEdgeKindV1::Calls
+        }),
+        "`fs::read` through `use std::fs` must not bind to a project `fs.rs::read`"
+    );
+    assert_resolved_edge(
+        &generation,
+        &walk,
+        &walk_builder_new,
+        RelationEdgeKindV1::Calls,
+    );
+}
+
+#[test]
+fn rust_typed_parameter_method_call_binds_through_import_and_crate_reexport() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.hiargs.main",
+            "crates/core/src/main.rs",
+            "mod flags;\nuse crate::flags::HiArgs;\nfn search(args: &HiArgs) -> bool {\n    args.walk_builder();\n    true\n}\nfn main() {}\n",
+        ),
+        (
+            "file.hiargs.flags",
+            "crates/core/src/flags/mod.rs",
+            "mod hiargs;\npub(crate) use crate::flags::hiargs::HiArgs;\n",
+        ),
+        (
+            "file.hiargs.impl",
+            "crates/core/src/flags/hiargs.rs",
+            "pub(crate) struct HiArgs;\nimpl HiArgs {\n    pub(crate) fn walk_builder(&self) {}\n}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/core/src/main.rs::search");
+    let target = symbol_occurrence(
+        &generation,
+        "crates/core/src/flags/hiargs.rs::HiArgs::walk_builder",
+    );
+
+    assert_resolved_edge(&generation, &caller, &target, RelationEdgeKindV1::Calls);
+}
+
+#[test]
+fn rust_restricted_reexport_does_not_escape_its_crate() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.restricted.lib",
+            "crates/widgets/src/lib.rs",
+            "mod hidden;\npub(crate) use hidden::Builder;\n",
+        ),
+        (
+            "file.restricted.hidden",
+            "crates/widgets/src/hidden.rs",
+            "pub struct Builder;\nimpl Builder { pub fn build(&self) {} }\n",
+        ),
+        (
+            "file.restricted.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builder: &widgets::Builder) {\n    builder.build();\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/hidden.rs::Builder::build");
+
+    assert!(generation.edges().iter().all(|edge| {
+        edge.from_occurrence != caller
+            || edge.to_occurrence != build
+            || edge.kind != RelationEdgeKindV1::Calls
+    }));
+}
+
+#[test]
+fn rust_dotted_call_on_untyped_receiver_stays_unresolved() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.untyped.lib",
+            "crates/widgets/src/lib.rs",
+            "pub struct Builder;\nimpl Builder {\n    pub fn build(&self) {}\n}\n",
+        ),
+        (
+            "file.untyped.app",
+            "crates/app/src/main.rs",
+            "fn assemble(builders: Vec<widgets::Builder>) {\n    for builder in builders {\n        builder.build();\n    }\n}\nfn main() {}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/main.rs::assemble");
+    let build = symbol_occurrence(&generation, "crates/widgets/src/lib.rs::Builder::build");
+
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != caller
+                || edge.to_occurrence != build
+                || edge.kind != RelationEdgeKindV1::Calls
+        }),
+        "a receiver bound by a `for` pattern has no stated type and must not bind"
+    );
+}
+
+#[test]
+fn ruby_receiver_call_of_the_same_name_is_not_recursion() {
+    let generation = published_workspace(
+        "ruby",
+        &[(
+            "file.ruby.util",
+            "lib/util.rb",
+            "module Util\n  def self.clamp(x, lo, hi)\n    x.clamp(lo, hi)\n  end\n\n  def self.fact(n)\n    n <= 1 ? 1 : n * fact(n - 1)\n  end\nend\n",
+        )],
+    );
+    let method = |name: &str| {
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.simple_name == name)
+            .unwrap_or_else(|| panic!("missing Ruby method {name}"))
+            .occurrence
+            .clone()
+    };
+    let self_calls = |occurrence: &SymbolOccurrenceId| {
+        generation
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == *occurrence
+                    && edge.to_occurrence == *occurrence
+                    && edge.kind == RelationEdgeKindV1::Calls
+            })
+            .count()
+    };
+
+    assert_eq!(self_calls(&method("fact")), 1, "`fact(n - 1)` recurses");
+    assert_eq!(
+        self_calls(&method("clamp")),
+        0,
+        "`x.clamp(lo, hi)` calls the receiver's method, not the enclosing one"
+    );
+}
+
+#[test]
+fn rust_calls_inside_macro_arguments_bind_like_calls_outside_them() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.macro.main",
+            "crates/app/src/main.rs",
+            "mod legacy;\nmod math;\nmod util;\n\nfn total() -> i64 { 0 }\n\nfn main() {\n    let store = util::Store;\n    println!(\"{} {}\", math::fact(5), util::normalize(\"x\"));\n    assert_eq!(store.total(), 0);\n}\n",
+        ),
+        (
+            "file.macro.math",
+            "crates/app/src/math.rs",
+            "pub fn fact(n: u64) -> u64 { n }\n",
+        ),
+        (
+            "file.macro.util",
+            "crates/app/src/util.rs",
+            "pub struct Store;\nimpl Store {\n    pub fn total(&self) -> i64 { 0 }\n}\npub fn normalize(s: &str) -> String { s.to_owned() }\n",
+        ),
+        (
+            "file.macro.legacy",
+            "crates/app/src/legacy.rs",
+            "pub fn normalize(s: &str) -> String { s.to_owned() }\n",
+        ),
+    ]);
+    let main = symbol_occurrence(&generation, "crates/app/src/main.rs::main");
+    let calls_from_main = |qualified_name: &str| {
+        let target = symbol_occurrence(&generation, qualified_name);
+        generation.edges().iter().any(|edge| {
+            edge.from_occurrence == main
+                && edge.to_occurrence == target
+                && edge.kind == RelationEdgeKindV1::Calls
+        })
+    };
+
+    assert_resolved_edge(
+        &generation,
+        &main,
+        &symbol_occurrence(&generation, "crates/app/src/math.rs::fact"),
+        RelationEdgeKindV1::Calls,
+    );
+    assert_resolved_edge(
+        &generation,
+        &main,
+        &symbol_occurrence(&generation, "crates/app/src/util.rs::normalize"),
+        RelationEdgeKindV1::Calls,
+    );
+    assert!(
+        !calls_from_main("crates/app/src/legacy.rs::normalize"),
+        "`util::normalize` names its module, not the same-named legacy function"
+    );
+    assert!(
+        !calls_from_main("crates/app/src/main.rs::total"),
+        "`store.total()` is a receiver call, not the same-file `total`"
+    );
+}
+
+#[test]
+fn rust_in_file_relative_calls_bind_the_same_file_item() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.relative.lib",
+            "crates/app/src/lib.rs",
+            "mod other;\n\npub fn helper() -> u32 { 0 }\n\npub fn via_self() -> u32 { self::helper() }\n\npub fn via_crate() -> u32 { crate::helper() }\n\nmod tests {\n    fn via_super() -> u32 { super::helper() }\n    fn via_super_in_macro() { assert_eq!(super::helper(), 0); }\n}\n",
+        ),
+        (
+            "file.relative.other",
+            "crates/app/src/other.rs",
+            "fn helper() -> u32 { 1 }\n\npub fn via_parent() -> u32 { super::helper() }\n",
+        ),
+    ]);
+    let callers_of = |qualified_name: &str| {
+        let target = symbol_occurrence(&generation, qualified_name);
+        let callers = generation
+            .edges()
+            .iter()
+            .filter(|edge| edge.to_occurrence == target && edge.kind == RelationEdgeKindV1::Calls)
+            .map(|edge| edge.from_occurrence.clone())
+            .collect::<Vec<_>>();
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .filter(|symbol| callers.contains(&symbol.occurrence))
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<BTreeSet<_>>()
+    };
+
+    assert_eq!(
+        callers_of("crates/app/src/lib.rs::helper"),
+        [
+            "crates/app/src/lib.rs::tests::via_super",
+            "crates/app/src/lib.rs::tests::via_super_in_macro",
+            "crates/app/src/lib.rs::via_crate",
+            "crates/app/src/lib.rs::via_self",
+            "crates/app/src/other.rs::via_parent",
+        ]
+        .into()
+    );
+    assert_eq!(
+        callers_of("crates/app/src/other.rs::helper"),
+        [].into(),
+        "`super::helper` in other.rs names the crate root's helper"
+    );
+}
+
+#[test]
+fn rust_parent_glob_does_not_override_a_local_type_binding() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.shadow.parent",
+            "crates/service/src/parent.rs",
+            "mod target;\nuse target::T;\nmod dispatch;\n",
+        ),
+        (
+            "file.shadow.target",
+            "crates/service/src/parent/target.rs",
+            "pub trait T {}\n",
+        ),
+        (
+            "file.shadow.dispatch",
+            "crates/service/src/parent/dispatch.rs",
+            "use super::*;\ntrait T {}\npub struct S;\nimpl T for S {}\n",
+        ),
+    ]);
+    let implementor = symbol_occurrence(&generation, "crates/service/src/parent/dispatch.rs::S");
+    let glob_target = symbol_occurrence(&generation, "crates/service/src/parent/target.rs::T");
+
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != implementor
+                || edge.to_occurrence != glob_target
+                || edge.kind != RelationEdgeKindV1::Implements
+        }),
+        "a local binding must suppress the parent-glob candidate"
+    );
+}
+
+fn import_rows_mut(file: &mut Value) -> &mut Vec<Value> {
+    file["artifacts"]["imports"]
         .as_array_mut()
         .expect("sealed file imports")
 }
 
-fn assert_serialized_artifact_has_no_self_digest(envelope: &Value, file_index: usize) {
-    let imports = serde_json::from_value::<Vec<CodeIndexImportEvidenceV1>>(
-        envelope["generation"]["files"][file_index]["artifacts"]["imports"].clone(),
-    )
-    .expect("forged canonical import rows");
-    let recomputed = canonical_sha256(&("attacker-controlled-import-rows", imports.as_slice()))
-        .expect("forged canonical import-row digest");
-    assert!(recomputed.as_str().starts_with("sha256:"));
-    assert!(
-        envelope["generation"]["files"][file_index]["artifacts"]
-            .get("import_rows_digest")
-            .is_none(),
-        "sealed file artifacts must not contain a recomputable self-digest authority"
-    );
-}
-
-fn reseal_import_envelope(mut envelope: Value) -> Vec<u8> {
-    let format_revision = u32::try_from(
-        envelope["generation"]["format_revision"]
-            .as_u64()
-            .expect("forged payload format revision"),
-    )
-    .expect("format revision fits u32");
-    let state_digest = sealed_generation_payload_digest(format_revision, &envelope["generation"])
-        .expect("forged payload state digest");
-    envelope["state_digest"] = Value::String(state_digest.as_str().to_owned());
-    serde_json::to_vec(&envelope).expect("forged sealed generation JSON")
-}
-
-fn resealed_import_payload_error(envelope: Value, mutation: &str) -> CodeIndexProductionErrorV1 {
-    let bytes = reseal_import_envelope(envelope);
-
-    match CodeIndexPublishedGenerationV1::decode_sealed(&bytes) {
-        Ok(_) => panic!("{mutation} restored after the outer state digest was recomputed"),
+/// Tamper the first file's sealed import rows, re-address the segment, and
+/// reseal the manifest, so the refusal comes from the restored file payload.
+fn tampered_import_payload_error(
+    sealed: &PartitionedSealV1,
+    mutation: &str,
+    mutate: impl FnOnce(&mut Vec<Value>),
+) -> CodeIndexProductionErrorV1 {
+    let tampered = sealed.with_tampered_file_segment(0, |file| mutate(import_rows_mut(file)));
+    match tampered.restore(&tampered.manifest) {
+        Ok(_) => panic!("{mutation} restored after the segment and manifest were re-addressed"),
         Err(error) => error,
     }
 }
 
-fn assert_resealed_import_payload_is_rejected(envelope: Value, mutation: &str) {
-    let _ = resealed_import_payload_error(envelope, mutation);
-}
-
-fn assert_sealed_envelope_restores(envelope: &Value) {
-    CodeIndexPublishedGenerationV1::decode_sealed(&reseal_import_envelope(envelope.clone()))
-        .expect("baseline generation restores");
+fn file_imports(generation: &CodeIndexPublishedGenerationV1) -> Vec<CodeIndexImportEvidenceV1> {
+    generation
+        .imports()
+        .iter()
+        .filter(|row| row.logical_path == "src/a.ts")
+        .cloned()
+        .collect()
 }
 
 #[test]
 fn file_import_artifacts_require_nondefault_canonical_rows() {
     let generation = published_import_generation();
-    let envelope = sealed_envelope(&generation);
-    let artifacts = file_artifact(&envelope, 0);
 
     assert_eq!(
-        artifacts
-            .imports
+        file_imports(&generation)
             .iter()
             .map(|row| (
                 row.logical_path.as_str(),
@@ -206,61 +1200,47 @@ fn file_import_artifacts_require_nondefault_canonical_rows() {
             ),
         ]
     );
-    artifacts.validate().expect("canonical import rows");
 
-    let mut missing = envelope["generation"]["files"][0]["artifacts"].clone();
-    assert!(
-        missing
-            .as_object_mut()
-            .expect("file artifact object")
-            .remove("imports")
-            .is_some(),
-        "the serialized artifact must carry its required imports field"
-    );
-    let error = serde_json::from_value::<CodeFileIndexArtifactsV1>(missing)
+    let sealed = PartitionedSealV1::of(&generation);
+    let missing = sealed.with_tampered_file_segment(0, |file| {
+        assert!(
+            file["artifacts"]
+                .as_object_mut()
+                .expect("file artifact object")
+                .remove("imports")
+                .is_some(),
+            "the sealed artifact must carry its required imports field"
+        );
+    });
+    let error = missing
+        .restore(&missing.manifest)
         .expect_err("imports must be a required field without a serde default");
     assert!(
         error.to_string().contains("missing field `imports`"),
         "unexpected missing-imports error: {error}"
     );
-
-    let mut reordered = artifacts.clone();
-    reordered.imports.swap(0, 1);
-    let error = reordered
-        .validate()
-        .expect_err("source-order reversal must be rejected");
-    assert!(matches!(error, ChunkingFailureV1::NonCanonicalIdentity(_)));
-
-    let mut duplicated = artifacts;
-    let duplicate = duplicated.imports[0].clone();
-    duplicated.imports.insert(1, duplicate);
-    let error = duplicated
-        .validate()
-        .expect_err("duplicate import rows must be rejected");
-    assert!(matches!(error, ChunkingFailureV1::NonCanonicalIdentity(_)));
 }
 
 #[test]
 fn file_import_artifacts_bind_file_consistent_path_and_nonempty_span_to_indexed_extent() {
     let generation = published_import_generation();
-    let artifacts = file_artifact(&sealed_envelope(&generation), 0);
-    let indexed_end = artifacts
-        .chunks
-        .chunks
+    let imports = file_imports(&generation);
+    let indexed_end = generation
+        .chunks()
+        .chunks()
         .iter()
+        .filter(|chunk| chunk.anchor.file_occurrence_id.as_str() == "file.import.a")
         .map(|chunk| chunk.anchor.source_span.end_byte)
         .max()
         .expect("complete file has indexed chunks");
 
-    assert!(artifacts.imports.iter().all(|row| {
-        row.logical_path == "src/a.ts"
-            && row.file_occurrence_id == artifacts.chunks.document.file_occurrence_id
+    assert!(imports.iter().all(|row| {
+        row.file_occurrence_id.as_str() == "file.import.a"
             && !row.span.is_empty()
             && row.span.end_byte <= indexed_end
     }));
     assert_eq!(
-        artifacts
-            .imports
+        imports
             .iter()
             .map(|row| {
                 &FIRST_SOURCE[usize::try_from(row.span.start_byte).expect("span start")
@@ -268,130 +1248,6 @@ fn file_import_artifacts_bind_file_consistent_path_and_nonempty_span_to_indexed_
             })
             .collect::<Vec<_>>(),
         vec!["Foo", "Bar as Baz"]
-    );
-
-    let mut wrong_file = artifacts.clone();
-    for row in &mut wrong_file.imports {
-        row.file_occurrence_id = id("file.foreign");
-    }
-    assert!(wrong_file.validate().is_err());
-
-    let mut inconsistent_path = artifacts.clone();
-    inconsistent_path.imports[1].logical_path = "src/foreign.ts".to_owned();
-    assert!(inconsistent_path.validate().is_err());
-
-    let mut empty_span = artifacts.clone();
-    empty_span.imports[0].span.end_byte = empty_span.imports[0].span.start_byte;
-    assert!(empty_span.validate().is_err());
-
-    let mut out_of_bounds = artifacts;
-    out_of_bounds.imports[0].span.end_byte = indexed_end + 1;
-    assert!(out_of_bounds.validate().is_err());
-}
-
-#[test]
-fn import_rows_rematerialize_file_occurrence_and_aggregate_exactly_per_generation() {
-    let generation = published_import_generation();
-    let envelope = sealed_envelope(&generation);
-    let artifacts = file_artifact(&envelope, 0);
-    let rematerialized = artifacts
-        .rematerialize_for_generation(
-            id::<CodeGenerationId>("generation.imports.rematerialized"),
-            id::<FileOccurrenceId>("file.import.rematerialized"),
-        )
-        .expect("import artifact rematerializes");
-
-    assert!(
-        rematerialized
-            .imports
-            .iter()
-            .all(|row| row.file_occurrence_id.as_str() == "file.import.rematerialized")
-    );
-    assert_eq!(
-        rematerialized
-            .imports
-            .iter()
-            .map(|row| (
-                row.logical_path.as_str(),
-                row.module_specifier.as_str(),
-                row.imported_name.as_deref(),
-                row.local_name.as_deref(),
-                row.namespace,
-                row.module_kind,
-                row.span,
-            ))
-            .collect::<Vec<_>>(),
-        artifacts
-            .imports
-            .iter()
-            .map(|row| (
-                row.logical_path.as_str(),
-                row.module_specifier.as_str(),
-                row.imported_name.as_deref(),
-                row.local_name.as_deref(),
-                row.namespace,
-                row.module_kind,
-                row.span,
-            ))
-            .collect::<Vec<_>>()
-    );
-
-    assert_eq!(
-        generation
-            .imports()
-            .iter()
-            .map(|row| (
-                row.logical_path.as_str(),
-                row.file_occurrence_id.as_str(),
-                row.module_specifier.as_str(),
-                row.imported_name.as_deref(),
-                row.local_name.as_deref(),
-                row.namespace,
-                row.module_kind,
-                row.span,
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                "src/a.ts",
-                "file.import.a",
-                "../models",
-                Some("Foo"),
-                Some("Foo"),
-                ImportNamespaceV1::Type,
-                ImportModuleKindV1::ProjectRelative,
-                SourceSpan {
-                    start_byte: 14,
-                    end_byte: 17,
-                },
-            ),
-            (
-                "src/a.ts",
-                "file.import.a",
-                "../models",
-                Some("Bar"),
-                Some("Baz"),
-                ImportNamespaceV1::Type,
-                ImportModuleKindV1::ProjectRelative,
-                SourceSpan {
-                    start_byte: 19,
-                    end_byte: 29,
-                },
-            ),
-            (
-                "src/b.ts",
-                "file.import.b",
-                "runner",
-                Some("run"),
-                Some("execute"),
-                ImportNamespaceV1::Value,
-                ImportModuleKindV1::BareModule,
-                SourceSpan {
-                    start_byte: 9,
-                    end_byte: 23,
-                },
-            ),
-        ]
     );
 }
 
@@ -414,123 +1270,486 @@ fn raw_use_and_imported_bindings_never_become_canonical_symbols() {
 }
 
 #[test]
-fn import_generation_pins_extractor_rows_and_chunker_revision_axes() {
-    assert_eq!(EXTRACTION_ROWS_SEPARATOR, "tracedecay.extraction-rows.v2");
-    let generation = published_import_generation();
-    let manifest = generation.manifest();
-
-    assert_eq!(manifest.extractor_revisions.len(), 1);
-    let (language, extractor_revision) = &manifest.extractor_revisions[0];
-    assert_eq!(language.as_str(), "typescript");
-    assert_eq!(extractor_revision.as_str(), "extractor.typescript.v2");
-    assert_eq!(manifest.chunker_revision.as_str(), "chunker.v2");
-}
-
-#[test]
-fn sealed_revision_six_import_generation_round_trips_to_identical_bytes() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 7);
+fn sealed_import_generation_round_trips_to_identical_bytes() {
     let first = published_import_generation();
-    let first_sealed = first.encode_sealed().expect("first generation seals");
-    let second_sealed = published_import_generation()
-        .encode_sealed()
-        .expect("identical generation seals");
-    assert_eq!(first_sealed, second_sealed);
+    let first_sealed = PartitionedSealV1::of(&first);
+    let second_sealed = PartitionedSealV1::of(&published_import_generation());
+    assert_eq!(first_sealed.manifest, second_sealed.manifest);
+    assert_eq!(first_sealed.segments, second_sealed.segments);
 
-    let envelope: Value = serde_json::from_slice(&first_sealed).expect("sealed generation JSON");
-    assert_eq!(envelope["generation"]["format_revision"], 6);
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_sealed(&first_sealed).expect("rev6 restores");
+    assert_eq!(
+        first_sealed.envelope()["generation"]["format_revision"],
+        SEALED_GENERATION_FORMAT_REVISION_V1
+    );
+    let restored = first_sealed.restored();
     assert_eq!(restored.imports(), first.imports());
     assert_eq!(
-        restored.encode_sealed().expect("restored generation seals"),
-        first_sealed
+        PartitionedSealV1::of(&restored).manifest,
+        first_sealed.manifest
     );
 }
 
 #[test]
-fn sealed_import_generation_rejects_semantic_tampering_after_outer_digest_recompute() {
-    let generation = published_import_generation();
-    let mut envelope = sealed_envelope(&generation);
-    assert_sealed_envelope_restores(&envelope);
-
-    import_rows_mut(&mut envelope, 0)[0]["imported_name"] = Value::String("Forged".to_owned());
-    file_artifact(&envelope, 0)
-        .validate()
-        .expect("binding-name tamper remains structurally canonical");
-    let error = resealed_import_payload_error(envelope, "binding-name tamper");
+fn sealed_import_generation_rejects_semantic_tampering_after_segment_readdress() {
+    let sealed = PartitionedSealV1::of(&published_import_generation());
+    sealed.restored();
     assert!(
-        error
-            .to_string()
-            .contains("import evidence does not match parser-backed extraction rows"),
-        "semantic tamper reached the wrong authority rejection: {error}"
+        sealed.file_segment_payload(0)["artifacts"]
+            .get("import_rows_digest")
+            .is_none(),
+        "sealed file artifacts must not contain a recomputable self-digest authority"
     );
-}
 
-#[test]
-fn sealed_import_generation_rejects_semantic_tampering_after_import_and_outer_digest_recompute() {
-    let generation = published_import_generation();
-    let mut envelope = sealed_envelope(&generation);
-    assert_sealed_envelope_restores(&envelope);
-
-    import_rows_mut(&mut envelope, 0)[0]["imported_name"] = Value::String("Forged".to_owned());
-    assert_serialized_artifact_has_no_self_digest(&envelope, 0);
-    file_artifact(&envelope, 0)
-        .validate()
-        .expect("self-consistent import digest remains structurally canonical");
-
-    let error = resealed_import_payload_error(
-        envelope,
-        "binding-name tamper with recomputed import-row digest",
-    );
+    let error = tampered_import_payload_error(&sealed, "binding-name tamper", |rows| {
+        rows[0]["imported_name"] = Value::String("Forged".to_owned());
+    });
     assert!(
-        error
-            .to_string()
-            .contains("import evidence does not match parser-backed extraction rows"),
-        "self-consistent import forgery reached the wrong authority rejection: {error}"
+        matches!(
+            &error,
+            CodeIndexProductionErrorV1::Chunk(
+                tracedecay_code_index::chunks::ChunkingFailureV1::NonCanonicalIdentity(cause)
+            ) if cause.reason_code()
+                == tracedecay_code_index::noncanonical::NonCanonicalReasonCodeV1::ImportAuthorityMismatch
+        ),
+        "semantic tamper reached the wrong authority rejection: {error:?}"
     );
 }
 
 #[test]
-fn sealed_import_generation_rejects_reorder_and_duplicate_after_outer_digest_recompute() {
-    let generation = published_import_generation();
-    let envelope = sealed_envelope(&generation);
-    assert_sealed_envelope_restores(&envelope);
+fn sealed_import_generation_rejects_reorder_and_duplicate_after_segment_readdress() {
+    let sealed = PartitionedSealV1::of(&published_import_generation());
+    sealed.restored();
 
-    let mut reordered = envelope.clone();
-    import_rows_mut(&mut reordered, 0).swap(0, 1);
-    assert_resealed_import_payload_is_rejected(reordered, "row reorder");
-
-    let mut duplicated = envelope;
-    let duplicate = import_rows_mut(&mut duplicated, 0)[0].clone();
-    import_rows_mut(&mut duplicated, 0).insert(1, duplicate);
-    assert_resealed_import_payload_is_rejected(duplicated, "duplicate row");
+    tampered_import_payload_error(&sealed, "row reorder", |rows| rows.swap(0, 1));
+    tampered_import_payload_error(&sealed, "duplicate row", |rows| {
+        let duplicate = rows[0].clone();
+        rows.insert(1, duplicate);
+    });
 }
 
 #[test]
-fn sealed_import_generation_rejects_wrong_file_path_and_span_after_outer_digest_recompute() {
-    let generation = published_import_generation();
-    let envelope = sealed_envelope(&generation);
-    assert_sealed_envelope_restores(&envelope);
+fn sealed_import_generation_rejects_wrong_file_path_and_span_after_segment_readdress() {
+    let sealed = PartitionedSealV1::of(&published_import_generation());
+    sealed.restored();
 
-    let mut wrong_file = envelope.clone();
-    for row in import_rows_mut(&mut wrong_file, 0) {
-        row["file_occurrence_id"] = Value::String("file.foreign".to_owned());
+    tampered_import_payload_error(&sealed, "foreign file occurrence", |rows| {
+        for row in rows {
+            row["file_occurrence_id"] = Value::String("file.foreign".to_owned());
+        }
+    });
+    tampered_import_payload_error(&sealed, "foreign logical path", |rows| {
+        for row in rows {
+            row["logical_path"] = Value::String("src/foreign.ts".to_owned());
+        }
+    });
+    tampered_import_payload_error(&sealed, "empty source span", |rows| {
+        let start = rows[0]["span"]["start_byte"].clone();
+        rows[0]["span"]["end_byte"] = start;
+    });
+    tampered_import_payload_error(&sealed, "out-of-bounds source span", |rows| {
+        rows[0]["span"]["end_byte"] = Value::from(FIRST_SOURCE.len() as u64 + 1);
+    });
+}
+
+/// starship@cc825b00 `src/modules/mod.rs::handle`: `container::module` has one
+/// `#[cfg]` variant per target, and `status::module` goes through the file's
+/// own `mod status;` although `status` is also a blocklisted std name and a
+/// second `status` module exists under `configs`.
+#[test]
+fn rust_calls_bind_every_cfg_variant_and_declared_modules_named_like_std() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.starship.main",
+            "src/main.rs",
+            "mod configs;\nmod modules;\n",
+        ),
+        (
+            "file.starship.configs",
+            "src/configs/mod.rs",
+            "pub mod status;\n",
+        ),
+        (
+            "file.starship.configs-status",
+            "src/configs/status.rs",
+            "pub struct StatusConfig;\n",
+        ),
+        (
+            "file.starship.modules",
+            "src/modules/mod.rs",
+            "mod aws;\nmod container;\nmod status;\n\npub fn handle() -> u32 {\n    \
+             aws::module() + container::module() + status::module()\n}\n",
+        ),
+        (
+            "file.starship.aws",
+            "src/modules/aws.rs",
+            "pub fn module() -> u32 { 1 }\n",
+        ),
+        (
+            "file.starship.container",
+            "src/modules/container.rs",
+            "#[cfg(not(target_os = \"linux\"))]\npub fn module() -> u32 { 0 }\n\n\
+             #[cfg(target_os = \"linux\")]\npub fn module() -> u32 { 2 }\n",
+        ),
+        (
+            "file.starship.status",
+            "src/modules/status.rs",
+            "pub fn module() -> u32 { 3 }\n",
+        ),
+    ]);
+    let handle = symbol_occurrence(&generation, "src/modules/mod.rs::handle");
+    let by_occurrence = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| (&symbol.occurrence, symbol))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut callees = generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.from_occurrence == handle && edge.kind == RelationEdgeKindV1::Calls)
+        .map(|edge| {
+            let symbol = by_occurrence[&edge.to_occurrence];
+            (symbol.qualified_name.as_str(), symbol.start_line)
+        })
+        .collect::<Vec<_>>();
+    callees.sort();
+    assert_eq!(
+        callees,
+        vec![
+            ("src/modules/aws.rs::module", 0),
+            ("src/modules/container.rs::module", 1),
+            ("src/modules/container.rs::module", 4),
+            ("src/modules/status.rs::module", 0),
+        ],
+        "handle calls three module identities; the cfg-duplicated one binds at both sites"
+    );
+}
+
+/// tokio declares modules inside `cfg_rt! { ... }` item lists; a function in
+/// such a module is a symbol whose same-file and cross-file callers resolve.
+#[test]
+fn rust_items_inside_item_list_macros_are_symbols_with_resolved_callers() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.cfg-rt.lib",
+            "src/lib.rs",
+            "cfg_rt! { pub mod foo { pub fn bar() {} } }\n\
+             mod user;\n\
+             pub fn local() { foo::bar(); }\n",
+        ),
+        (
+            "file.cfg-rt.user",
+            "src/user.rs",
+            "pub fn remote() { crate::foo::bar(); }\n",
+        ),
+    ]);
+    let bar = symbol_occurrence(&generation, "src/lib.rs::foo::bar");
+    let mut callers = generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.to_occurrence == bar && edge.kind == RelationEdgeKindV1::Calls)
+        .map(|edge| {
+            generation
+                .symbols()
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence == edge.from_occurrence)
+                .map(|symbol| (symbol.qualified_name.as_str(), edge.authority))
+        })
+        .collect::<Vec<_>>();
+    callers.sort_by_key(|caller| caller.as_ref().map(|(name, _)| *name));
+    assert_eq!(
+        callers,
+        vec![
+            Some(("src/lib.rs::local", EdgeAuthorityV1::SyntaxExact)),
+            Some(("src/user.rs::remote", EdgeAuthorityV1::NameResolved)),
+        ]
+    );
+}
+
+fn resolved_callers<'a>(
+    generation: &'a CodeIndexPublishedGenerationV1,
+    target: &SymbolOccurrenceId,
+) -> Vec<&'a str> {
+    let mut callers = generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.to_occurrence == *target && edge.kind == RelationEdgeKindV1::Calls)
+        .filter_map(|edge| {
+            generation
+                .symbols()
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence == edge.from_occurrence)
+                .map(|symbol| symbol.qualified_name.as_str())
+        })
+        .collect::<Vec<_>>();
+    callers.sort_unstable();
+    callers
+}
+
+#[test]
+fn rust_struct_calls_require_tuple_constructor_evidence() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.struct-kind.lib",
+            "crates/app/src/lib.rs",
+            "mod types;\nmod caller;\npub struct LocalUnit;\npub struct LocalNamed { pub value: u8 }\npub struct LocalTuple(pub u8);\nfn local() { LocalUnit(); LocalNamed(); LocalTuple(0); }\n",
+        ),
+        (
+            "file.struct-kind.types",
+            "crates/app/src/types.rs",
+            "pub struct Unit;\npub struct Named { pub value: u8 }\npub struct Tuple(pub u8);\n",
+        ),
+        (
+            "file.struct-kind.caller",
+            "crates/app/src/caller.rs",
+            "use crate::types::{Unit, Named, Tuple};\nfn imported() { Unit(); Named(); Tuple(0); }\nfn qualified() { crate::types::Unit(); crate::types::Named(); crate::types::Tuple(0); }\n",
+        ),
+    ]);
+    for name in [
+        "crates/app/src/lib.rs::LocalUnit",
+        "crates/app/src/lib.rs::LocalNamed",
+        "crates/app/src/types.rs::Unit",
+        "crates/app/src/types.rs::Named",
+    ] {
+        assert!(
+            resolved_callers(&generation, &symbol_occurrence(&generation, name)).is_empty(),
+            "a unit or named-field struct has no callable constructor: {name}"
+        );
     }
-    assert_resealed_import_payload_is_rejected(wrong_file, "foreign file occurrence");
+    assert_eq!(
+        resolved_callers(
+            &generation,
+            &symbol_occurrence(&generation, "crates/app/src/lib.rs::LocalTuple")
+        ),
+        ["crates/app/src/lib.rs::local"]
+    );
+    assert_eq!(
+        resolved_callers(
+            &generation,
+            &symbol_occurrence(&generation, "crates/app/src/types.rs::Tuple")
+        ),
+        [
+            "crates/app/src/caller.rs::imported",
+            "crates/app/src/caller.rs::qualified"
+        ]
+    );
+}
 
-    let mut wrong_path = envelope.clone();
-    for row in import_rows_mut(&mut wrong_path, 0) {
-        row["logical_path"] = Value::String("src/foreign.ts".to_owned());
-    }
-    assert_resealed_import_payload_is_rejected(wrong_path, "foreign logical path");
+#[test]
+fn rust_value_call_binds_the_function_not_the_same_named_struct() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.namespaces.lib",
+            "crates/app/src/lib.rs",
+            "pub struct helper;\n\nfn helper() {}\n\nfn caller() { helper(); }\n",
+        ),
+        (
+            "file.namespaces.other",
+            "crates/app/src/other.rs",
+            "pub fn unrelated() {}\n",
+        ),
+    ]);
+    let function = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/app/src/lib.rs::helper" && symbol.kind == "function"
+        })
+        .expect("missing fn helper")
+        .occurrence
+        .clone();
+    assert_eq!(
+        resolved_callers(&generation, &function),
+        ["crates/app/src/lib.rs::caller"],
+        "a `helper()` site invokes the function namespace; the same-named \
+         unit struct must not render the call ambiguous"
+    );
+}
 
-    let mut empty_span = envelope.clone();
-    let start = import_rows_mut(&mut empty_span, 0)[0]["span"]["start_byte"].clone();
-    import_rows_mut(&mut empty_span, 0)[0]["span"]["end_byte"] = start;
-    assert_resealed_import_payload_is_rejected(empty_span, "empty source span");
+#[test]
+fn rust_generic_call_binds_the_function_past_a_named_field_struct() {
+    let generation = published_rust_workspace(&[(
+        "file.generic.lib",
+        "crates/app/src/lib.rs",
+        "pub struct helper<T: Fn(u8)> /* note /* ( */ still braced */ { pub value: T }\n\nfn helper<T>() {}\n\nfn caller() { helper::<u32>(); }\n",
+    )]);
+    let function = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/app/src/lib.rs::helper" && symbol.kind == "function"
+        })
+        .expect("missing fn helper")
+        .occurrence
+        .clone();
+    assert_eq!(
+        resolved_callers(&generation, &function),
+        ["crates/app/src/lib.rs::caller"],
+        "a named-field struct cannot be constructed by a call, so \
+         `helper::<u32>()` names the generic function"
+    );
+}
 
-    let mut out_of_bounds = envelope;
-    import_rows_mut(&mut out_of_bounds, 0)[0]["span"]["end_byte"] =
-        Value::from(FIRST_SOURCE.len() as u64 + 1);
-    assert_resealed_import_payload_is_rejected(out_of_bounds, "out-of-bounds source span");
+#[test]
+fn rust_tuple_struct_constructor_keeps_the_generic_call_ambiguous() {
+    let generation = published_rust_workspace(&[(
+        "file.tuple.lib",
+        "crates/app/src/lib.rs",
+        "pub struct helper<T> /* documented inline */ (pub T);\n\nfn helper<T>() {}\n\nfn caller() { helper::<u8>(0); }\n",
+    )]);
+    let function = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/app/src/lib.rs::helper" && symbol.kind == "function"
+        })
+        .expect("missing fn helper")
+        .occurrence
+        .clone();
+    assert_eq!(
+        resolved_callers(&generation, &function),
+        Vec::<&str>::new(),
+        "`helper::<u8>(0)` spells tuple-struct construction and generic \
+         invocation identically; it must stay ambiguous, never guess"
+    );
+}
+
+#[test]
+fn rust_calls_bind_through_a_use_declared_in_the_calling_block() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.block-use.lib",
+            "crates/app/src/lib.rs",
+            "mod m;\nmod n;\nmod runtime;\nuse crate::n::g;\n\
+             pub fn f() { use crate::m::g; g(); }\n\
+             pub fn module_scope() { g(); }\n\
+             pub fn spawn_inner() {\n    use crate::runtime::{context, task};\n    context::with_current();\n    task::schedule();\n}\n\
+             pub fn timer() {\n    #[cfg(feature = \"rt\")]\n    {\n        use crate::runtime::context;\n        context::with_current();\n    }\n}\n\
+             mod inner { pub fn x() {} }\n\
+             pub fn same_file() { use self::inner::x; x(); }\n",
+        ),
+        ("file.block-use.m", "crates/app/src/m.rs", "pub fn g() {}\n"),
+        ("file.block-use.n", "crates/app/src/n.rs", "pub fn g() {}\n"),
+        (
+            "file.block-use.runtime",
+            "crates/app/src/runtime/mod.rs",
+            "pub mod context;\npub mod task;\n",
+        ),
+        (
+            "file.block-use.context",
+            "crates/app/src/runtime/context.rs",
+            "mod current;\npub(crate) use current::with_current;\n",
+        ),
+        (
+            "file.block-use.current",
+            "crates/app/src/runtime/context/current.rs",
+            "pub(crate) fn with_current() {}\n",
+        ),
+        (
+            "file.block-use.task",
+            "crates/app/src/runtime/task.rs",
+            "pub fn schedule() {}\n",
+        ),
+    ]);
+    let block_g = symbol_occurrence(&generation, "crates/app/src/m.rs::g");
+    let module_g = symbol_occurrence(&generation, "crates/app/src/n.rs::g");
+    let with_current = symbol_occurrence(
+        &generation,
+        "crates/app/src/runtime/context/current.rs::with_current",
+    );
+    let schedule = symbol_occurrence(&generation, "crates/app/src/runtime/task.rs::schedule");
+    let inner_x = symbol_occurrence(&generation, "crates/app/src/lib.rs::inner::x");
+
+    // The block's `use` shadows the module-scope import only inside `f`.
+    assert_eq!(
+        resolved_callers(&generation, &block_g),
+        ["crates/app/src/lib.rs::f"]
+    );
+    assert_eq!(
+        resolved_callers(&generation, &module_g),
+        ["crates/app/src/lib.rs::module_scope"]
+    );
+    assert_eq!(
+        resolved_callers(&generation, &with_current),
+        [
+            "crates/app/src/lib.rs::spawn_inner",
+            "crates/app/src/lib.rs::timer"
+        ]
+    );
+    assert_eq!(
+        resolved_callers(&generation, &schedule),
+        ["crates/app/src/lib.rs::spawn_inner"]
+    );
+    // A block `use` of this file's own item keeps binding it in-file.
+    assert_eq!(
+        resolved_callers(&generation, &inner_x),
+        ["crates/app/src/lib.rs::same_file"]
+    );
+}
+
+#[test]
+fn rust_calls_bind_through_block_globs_and_inline_module_uses() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.glob-use.lib",
+            "crates/app/src/lib.rs",
+            "mod m;\nmod n;\nuse crate::n::only_in_n;\n\
+             pub fn glob_caller() {\n    use crate::m::*;\n    g();\n}\n\
+             pub fn glob_miss() {\n    use crate::m::*;\n    only_in_n();\n}\n\
+             mod inner {\n    use crate::m::h;\n    pub fn inline_caller() {\n        h();\n    }\n}\n\
+             mod globbed {\n    use crate::m::*;\n    pub fn inline_glob_caller() {\n        g();\n    }\n}\n",
+        ),
+        (
+            "file.glob-use.m",
+            "crates/app/src/m.rs",
+            "pub fn g() {}\npub fn h() {}\n",
+        ),
+        (
+            "file.glob-use.n",
+            "crates/app/src/n.rs",
+            "pub fn only_in_n() {}\n",
+        ),
+    ]);
+    let g = symbol_occurrence(&generation, "crates/app/src/m.rs::g");
+    let h = symbol_occurrence(&generation, "crates/app/src/m.rs::h");
+    let only_in_n = symbol_occurrence(&generation, "crates/app/src/n.rs::only_in_n");
+
+    assert_eq!(
+        resolved_callers(&generation, &g),
+        [
+            "crates/app/src/lib.rs::glob_caller",
+            "crates/app/src/lib.rs::globbed::inline_glob_caller"
+        ]
+    );
+    assert_eq!(
+        resolved_callers(&generation, &h),
+        ["crates/app/src/lib.rs::inner::inline_caller"]
+    );
+
+    // The block glob's module does not define `only_in_n`, and whether Rust
+    // then reaches the module-scope import is not modeled: the call stays a
+    // disclosed gap naming the glob, never a silently complete answer.
+    assert_eq!(
+        resolved_callers(&generation, &only_in_n),
+        Vec::<&str>::new()
+    );
+    let reader = crate::typescript_module_resolution::reader(&generation);
+    let gaps = |target: &SymbolOccurrenceId| {
+        reader
+            .unresolved_caller_gaps(std::slice::from_ref(target), None, Arc::new(NeverCancelled))
+            .expect("unresolved caller gaps")
+    };
+    assert_eq!(
+        gaps(&only_in_n),
+        UnresolvedCallerGapsV1 {
+            exact_target_unavailable: false,
+            unmodeled_imports: [UnmodeledImportShapeV1::BlockGlob].into(),
+        }
+    );
+    assert_eq!(gaps(&g), UnresolvedCallerGapsV1::default());
 }

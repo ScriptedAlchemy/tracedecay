@@ -3,6 +3,7 @@
 //! Former standalone `test-transport` targets, compiled as modules of one
 //! binary so a root-crate edit no longer relinks six ~700 MiB test binaries.
 
+#![allow(clippy::too_many_lines)]
 // Deeply nested async fixture bodies exceed rustc's default layout query
 // depth under the perf profile; match the workspace-standard limit used by
 // the tracedecay lib and CLI crate roots.

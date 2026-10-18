@@ -6,21 +6,21 @@ use super::artifact_feedback::{
     validation_feedback_entries, validation_gate_decision, validation_report_hash,
 };
 use super::artifact_generated_evals::{
-    generated_eval_definitions, generated_eval_replay_results, generated_evals_status,
-    improvement_gate_decision,
+    INDEPENDENT_EVALUATION_REASON, INDEPENDENT_EVALUATION_STATUS, generated_eval_definitions,
+    generated_evals_status, improvement_gate_decision, recorded_validation_integrity,
 };
 use super::artifact_optimizer::{
     codex_handoff_status, is_blocked_improvement_decision, optimizer_blockers,
     optimizer_diagnosis_summary, optimizer_ranked_changes, optimizer_recommendations,
 };
-use super::artifact_policy::TaskArtifactPolicy;
 use super::artifact_refs::{automation_run_artifact_api, automation_run_artifacts_api};
 use super::backend::{AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
 use super::outcomes::{
     AutomationOutcomesSnapshot, outcome_eval_definitions, outcome_feedback_section,
 };
 use super::run_ledger::{AutomationRunArtifactKind, AutomationRunLedgerRecord};
-use super::text::truncate_chars_for_prompt;
+use tracedecay_automation::artifact_policy::TaskArtifactPolicy;
+use tracedecay_automation::text::truncate_chars_for_prompt;
 
 pub(super) struct ArtifactPayloadContext<'a> {
     pub(super) run_id: &'a str,
@@ -39,13 +39,13 @@ pub(super) struct ArtifactPayloadContext<'a> {
 pub(super) struct GeneratedEvalPayloads {
     pub(super) definitions: Vec<Value>,
     pub(super) count: usize,
-    pub(super) runner_status: &'static str,
-    pub(super) replay_results: Vec<Value>,
+    pub(super) record_integrity_status: &'static str,
+    pub(super) record_integrity_checks: Vec<Value>,
     pub(super) status: &'static str,
     pub(super) validation_decision: &'static str,
-    /// Evals derived from real post-activation outcomes; tracked separately
-    /// from the validation-replay definitions so the replay gate semantics
-    /// stay unchanged.
+    /// Unevaluated observations of post-activation proxies; tracked separately
+    /// from the validation examples so the record-integrity check covers only
+    /// what the validation report recorded.
     pub(super) outcome_definitions: Vec<Value>,
 }
 
@@ -79,22 +79,18 @@ pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
         "input_hash": ctx.record.input_hash,
         "output_hash": ctx.record.output_hash,
         "context_keys": ctx.request.context.as_object()
-            .map(|object| object.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default(),
+            .map_or_default(|object| object.keys().cloned().collect::<Vec<_>>()),
         "curation_result": curation_result,
     })
 }
 
 fn context_evidence_mode(context: &Value) -> Value {
-    let modes = context
-        .as_object()
-        .map(|object| {
-            object
-                .values()
-                .filter_map(|value| value.get("evidence_mode").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let modes = context.as_object().map_or_default(|object| {
+        object
+            .values()
+            .filter_map(|value| value.get("evidence_mode").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+    });
     if modes.contains(&"session_replay_with_grep") {
         json!("session_replay_with_grep")
     } else if modes.contains(&"grep_only") {
@@ -120,7 +116,7 @@ fn session_reflection_summary(record: &AutomationRunLedgerRecord) -> Value {
 
 pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Value) -> Value {
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": ctx.run_id,
         "task": ctx.task_key,
         "loop_stage": "feedback",
@@ -143,13 +139,14 @@ pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Val
 pub(super) fn generated_eval_payloads(ctx: &ArtifactPayloadContext<'_>) -> GeneratedEvalPayloads {
     let definitions = generated_eval_definitions(ctx.record, ctx.task, ctx.policy);
     let count = definitions.len();
-    let (runner_status, replay_results) = generated_eval_replay_results(&definitions, ctx.record);
+    let (record_integrity_status, record_integrity_checks) =
+        recorded_validation_integrity(&definitions, ctx.record);
     GeneratedEvalPayloads {
         definitions,
         count,
-        runner_status,
-        replay_results,
-        status: generated_evals_status(count, runner_status),
+        record_integrity_status,
+        record_integrity_checks,
+        status: generated_evals_status(count),
         validation_decision: validation_gate_decision(ctx.record),
         outcome_definitions: outcome_eval_definitions(ctx.task, ctx.task_key, ctx.outcomes),
     }
@@ -162,7 +159,7 @@ pub(super) fn generated_evals_payload(
 ) -> Value {
     let (trace_ref, feedback_ref) = refs;
     json!({
-        "schema_version": 1,
+        "schema_version": 3,
         "run_id": ctx.run_id,
         "task": ctx.task_key,
         "loop_stage": "generated_evals",
@@ -183,25 +180,16 @@ pub(super) fn generated_evals_payload(
             "rejected_count": ctx.record.rejected_count,
             "outcome_eval_count": evals.outcome_definitions.len(),
         },
-        "runner": {
-            "type": "validation_replay",
-            "commands": ctx.policy.eval_replay_commands(),
-            "artifact_api": automation_run_artifact_api(ctx.run_id, AutomationRunArtifactKind::GeneratedEvals),
+        "record_integrity": {
+            "type": "recorded_validation_integrity",
             "inputs": {
-                "run_id": ctx.run_id,
-                "artifact_kind": AutomationRunArtifactKind::GeneratedEvals.as_str(),
                 "validation_report_hash": validation_report_hash(ctx.record.validation_report.as_ref()),
                 "expected_eval_count": evals.count,
             },
-            "checks": [
-                "load generated eval artifact from the dashboard artifact API or sidecar path",
-                "replay validation definitions against the recorded validation report",
-                "preserve expected_outcome for accepted and rejected examples",
-            ],
-            "status": evals.runner_status,
-            "results": evals.replay_results.clone(),
+            "status": evals.record_integrity_status,
+            "checks": evals.record_integrity_checks.clone(),
         },
-        "automatic_application": generated_eval_application_effect(ctx.record, evals),
+        "independent_evaluation": independent_evaluation(ctx),
         "eval_definitions": evals.definitions.clone(),
         "outcome_eval_definitions": evals.outcome_definitions.clone(),
         "result_refs": [{
@@ -216,7 +204,8 @@ pub(super) fn improvement_gate_payload(
     ctx: &ArtifactPayloadContext<'_>,
     evals: &GeneratedEvalPayloads,
 ) -> ImprovementGatePayload {
-    let decision = improvement_gate_decision(ctx.record, evals.count, evals.runner_status);
+    let decision =
+        improvement_gate_decision(ctx.record, evals.count, evals.record_integrity_status);
     ImprovementGatePayload {
         decision,
         blockers: optimizer_blockers(decision, evals.count),
@@ -238,7 +227,7 @@ pub(super) fn validation_gate_payload(
         ctx.record.validation_report.clone().unwrap_or(Value::Null)
     };
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": ctx.run_id,
         "task": ctx.task_key,
         "loop_stage": "validation_gate",
@@ -254,6 +243,7 @@ pub(super) fn validation_gate_payload(
             "decision": gate.decision,
             "feedback_status": "derived_from_validation",
             "generated_evals_status": evals.status,
+            "record_integrity_status": evals.record_integrity_status,
             "optimizer_status": if gate.blocked {
                 "blocked"
             } else if gate.decision == "ready_for_handoff" {
@@ -296,12 +286,17 @@ pub(super) fn optimizer_diagnosis_payload(
 ) -> Value {
     let (trace_ref, feedback_ref, generated_evals_ref, validation_gate_ref) = refs;
     json!({
-        "schema_version": 1,
+        "schema_version": 3,
         "run_id": ctx.run_id,
         "task": ctx.task_key,
         "loop_stage": "optimizer_diagnosis",
         "status": "generated",
         "summary": optimizer_diagnosis_summary(ctx.record),
+        "diagnosis_basis": {
+            "type": "validation_accept_reject_policy",
+            "measured_improvement": "not_measured",
+            "reason": "derived from validation accept/reject counts and record integrity; no task outcome was measured",
+        },
         "signals": {
             "validation_decision": evals.validation_decision,
             "accepted_count": ctx.record.accepted_count,
@@ -309,6 +304,7 @@ pub(super) fn optimizer_diagnosis_payload(
             "reviewed_count": ctx.record.reviewed_count,
             "feedback_status": "derived_from_validation",
             "generated_evals_status": evals.status,
+            "record_integrity_status": evals.record_integrity_status,
             "validation_gate_decision": gate.decision,
         },
         "recommendations": optimizer_recommendations(ctx.record),
@@ -371,7 +367,7 @@ pub(super) fn codex_handoff_payload(
         })
     };
     json!({
-        "schema_version": 1,
+        "schema_version": 3,
         "run_id": ctx.run_id,
         "task": ctx.task_key,
         "loop_stage": "codex_handoff",
@@ -401,8 +397,11 @@ pub(super) fn codex_handoff_payload(
         "readiness": {
             "validation_gate_decision": gate.decision,
             "eval_count": evals.count,
+            "record_integrity_status": evals.record_integrity_status,
+            "independent_evaluation_status": INDEPENDENT_EVALUATION_STATUS,
+            "measured_improvement": "not_measured",
             "blockers": gate.blockers.clone(),
-            "automatic_application": automatic_application.clone(),
+            "automatic_application": automatic_application,
         },
         "source_refs": [
             refs.validation_gate.clone(),
@@ -415,8 +414,7 @@ pub(super) fn codex_handoff_payload(
             "status": codex_handoff_status(gate.decision),
             "next_stage": match gate.decision {
                 "blocked_pending_feedback_or_evals" => "collect_feedback_or_evals",
-                "blocked_pending_eval_run" => "run_generated_evals",
-                "blocked_failed_eval_replay" => "fix_generated_evals",
+                "blocked_failed_record_integrity" => "repair_recorded_validation",
                 _ => "monitor_applied_outcomes",
             },
             "accepted_count": ctx.record.accepted_count,
@@ -431,7 +429,7 @@ pub(super) fn codex_handoff_payload(
             ],
         },
         "validation_requirements": {
-            "must_run_tests": ctx.policy.handoff_tests(),
+            "must_run_tests": [ctx.policy.handoff_test()],
             "automatic_application": true,
         },
         "artifact_manifest": {
@@ -452,14 +450,9 @@ pub(super) fn codex_handoff_payload(
                 refs.optimizer_diagnosis,
             ],
         },
-        "eval_replay": {
-            "artifact_kind": AutomationRunArtifactKind::GeneratedEvals.as_str(),
-            "artifact_api": automation_run_artifact_api(ctx.run_id, AutomationRunArtifactKind::GeneratedEvals),
-            "commands": ctx.policy.eval_replay_commands(),
-            "application": automatic_application,
-        },
-        "next_actions": ctx.policy.next_actions(ctx.record),
-        "tests_to_run": ctx.policy.handoff_tests(),
+        "independent_evaluation": independent_evaluation(ctx),
+        "next_actions": ctx.policy.next_actions(ctx.record.accepted_count),
+        "tests_to_run": [ctx.policy.handoff_test()],
     })
 }
 
@@ -500,47 +493,33 @@ fn automatic_application_effect(record: &AutomationRunLedgerRecord) -> Value {
     })
 }
 
-fn generated_eval_application_effect(
-    record: &AutomationRunLedgerRecord,
-    evals: &GeneratedEvalPayloads,
-) -> Value {
-    match evals.runner_status {
-        "passed" => automatic_application_effect(record),
-        "failed" => json!({
-            "status": "quarantined",
-            "reason": "validation_replay_failed",
-            "retry_required": false,
-            "deployment_receipt": Value::Null,
-        }),
-        _ if evals.count == 0 => json!({
-            "status": "no_candidate",
-            "reason": "no_validation_examples",
-            "retry_required": false,
-            "deployment_receipt": Value::Null,
-        }),
-        _ => json!({
-            "status": "retry",
-            "reason": "validation_replay_incomplete",
-            "retry_required": true,
-            "deployment_receipt": Value::Null,
-        }),
-    }
+fn independent_evaluation(ctx: &ArtifactPayloadContext<'_>) -> Value {
+    json!({
+        "status": INDEPENDENT_EVALUATION_STATUS,
+        "reason": INDEPENDENT_EVALUATION_REASON,
+        "artifact_kind": AutomationRunArtifactKind::GeneratedEvals.as_str(),
+        "artifact_api": automation_run_artifact_api(ctx.run_id, AutomationRunArtifactKind::GeneratedEvals),
+        "harness_commands": [ctx.policy.handoff_test()],
+    })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::super::artifact_policy::artifact_policy;
-    use super::super::outcomes::{SkillOutcomeRecord, SkillOutcomeVerdict};
+    use super::super::outcomes::{
+        FactOutcomeRecord, FactOutcomeVerdict, SkillOutcomeRecord, SkillOutcomeVerdict,
+    };
     use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
     use super::*;
+    use tracedecay_automation::artifact_policy::artifact_policy;
     use tracedecay_domain::{
         DomainError, FactEventId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
         ProvenanceId, RunId,
     };
     use tracedecay_store::{
-        FactCommitReceipt, ProjectMemoryFactCurationOperationEffectV1,
-        ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactIdV1,
+        FactCommitReceipt, ProjectMemoryAutomaticFactStateV1,
+        ProjectMemoryFactCurationOperationEffectV1, ProjectMemoryFactCurationReceiptV1,
+        ProjectMemoryFactIdV1,
     };
 
     fn payload_fixture() -> (
@@ -591,6 +570,7 @@ mod tests {
             rejected_count: 0,
             skipped_count: 0,
             fallback_status: None,
+            session_evidence_budget_stage: None,
             error: None,
             error_classification: None,
             error_retryable: None,
@@ -607,15 +587,15 @@ mod tests {
 
     fn outcomes_snapshot() -> AutomationOutcomesSnapshot {
         AutomationOutcomesSnapshot {
-            schema_version: 2,
+            schema_version: 4,
             skills: vec![SkillOutcomeRecord {
-                skill_id: "ignored-skill".to_string(),
-                title: Some("Ignored skill".to_string()),
+                skill_id: "unmeasured-skill".to_string(),
+                title: Some("Unmeasured skill".to_string()),
                 activated_at: 1_000,
                 days_since_activation: 30,
                 views_since_activation: 2,
                 uses_since_activation: 0,
-                verdict: SkillOutcomeVerdict::Ignored,
+                verdict: SkillOutcomeVerdict::Unknown,
             }],
             facts: Vec::new(),
             skills_refreshed_at: Some(2_000),
@@ -643,12 +623,12 @@ mod tests {
         let section = payload.get("applied_change_outcomes").unwrap();
         assert_eq!(section.get("status").unwrap(), &json!("available"));
         assert_eq!(
-            section.pointer("/skill_verdicts/ignored").unwrap(),
-            &json!(1)
+            section.pointer("/skill_verdicts"),
+            Some(&json!({"unknown": 1}))
         );
         assert_eq!(
             section.pointer("/skills/0/skill_id").unwrap(),
-            &json!("ignored-skill")
+            &json!("unmeasured-skill")
         );
 
         let evals = generated_eval_payloads(&ctx);
@@ -662,13 +642,201 @@ mod tests {
             generated.pointer("/summary/outcome_eval_count").unwrap(),
             &json!(1)
         );
-        assert_eq!(
-            generated
-                .pointer("/outcome_eval_definitions/0/observed_outcome")
-                .unwrap(),
-            &json!("ignored")
-        );
+        let observation = generated.pointer("/outcome_eval_definitions/0").unwrap();
+        assert_eq!(observation["observed_outcome"], "unknown");
+        assert_eq!(observation["status"], "unknown");
+        assert!(observation.get("passed").is_none());
         assert_eq!(evals.count, 0);
+    }
+
+    fn fact_outcome_record(apply_id: &str, verdict: FactOutcomeVerdict) -> FactOutcomeRecord {
+        FactOutcomeRecord {
+            apply_id: apply_id.to_string(),
+            run_id: Some("run-facts".to_string()),
+            state: ProjectMemoryAutomaticFactStateV1::Applied,
+            canonical_fact_id: Some(format!("fact:{apply_id}")),
+            recorded_at: 1_000,
+            days_since_recorded: 30,
+            retrieval_count: None,
+            access_count: None,
+            helpful_count: None,
+            unhelpful_count: None,
+            last_recalled_at: None,
+            still_exists: verdict != FactOutcomeVerdict::Unavailable,
+            verdict,
+        }
+    }
+
+    #[test]
+    fn outcome_evals_publish_unmeasured_use_as_unknown_observations_not_failures() {
+        let (request, response, record) = payload_fixture();
+        let mut outcomes: AutomationOutcomesSnapshot = serde_json::from_value(json!({
+            "schema_version": 3,
+            "skills": [
+                {
+                    "skill_id": "unmeasured-skill",
+                    "activated_at": 1_000,
+                    "days_since_activation": 30,
+                    "views_since_activation": 2,
+                    "uses_since_activation": 0,
+                    "verdict": "ignored",
+                },
+                {
+                    "skill_id": "adopted-skill",
+                    "activated_at": 1_000,
+                    "days_since_activation": 30,
+                    "views_since_activation": 1,
+                    "uses_since_activation": 4,
+                    "verdict": "adopted",
+                },
+            ],
+        }))
+        .unwrap();
+        outcomes.facts = vec![
+            fact_outcome_record("unreadable", FactOutcomeVerdict::Unavailable),
+            fact_outcome_record("idle", FactOutcomeVerdict::NeverRecalled),
+        ];
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::CombinedReview,
+            task_key: "combined_review",
+            prompt_version: "combined_review:v2",
+            policy: artifact_policy(AgentTaskKind::CombinedReview),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+
+        let evals = generated_eval_payloads(&ctx);
+        let generated = generated_evals_payload(
+            &ctx,
+            (&json!({"kind": "traces"}), &json!({"kind": "feedback"})),
+            &evals,
+        );
+
+        assert_eq!(generated["schema_version"], 3);
+        let definitions = generated["outcome_eval_definitions"].as_array().unwrap();
+        let observed = definitions
+            .iter()
+            .map(|definition| {
+                (
+                    definition["eval_id"].as_str().unwrap(),
+                    definition["status"].as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            vec![
+                (
+                    "combined_review:outcome:skill:unmeasured-skill",
+                    Some("unknown")
+                ),
+                (
+                    "combined_review:outcome:skill:adopted-skill",
+                    Some("observed")
+                ),
+                ("combined_review:outcome:fact:unreadable", Some("unknown")),
+                ("combined_review:outcome:fact:idle", Some("observed")),
+            ]
+        );
+        for definition in definitions {
+            assert!(definition.get("passed").is_none(), "{definition}");
+            assert!(definition.get("expected_outcome").is_none(), "{definition}");
+            assert_eq!(definition["evaluation"], "not_run", "{definition}");
+            assert!(
+                definition["unknowns"]
+                    .as_array()
+                    .is_some_and(|unknowns| unknowns.contains(&json!("task_opportunity"))),
+                "{definition}"
+            );
+        }
+        assert_eq!(definitions[0]["observed_outcome"], "unknown");
+        assert!(
+            definitions[0]["unknowns"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("host_use_telemetry"))
+        );
+        assert_eq!(definitions[3]["observed_outcome"], "never_recalled");
+    }
+
+    #[test]
+    fn feedback_outcomes_declare_task_improvement_unmeasured() {
+        let (request, response, record) = payload_fixture();
+        let outcomes = outcomes_snapshot();
+        let ctx = skill_writer_ctx(&request, &response, &record, &outcomes);
+
+        let payload = feedback_payload(&ctx, &json!({"kind": "traces"}));
+
+        assert_eq!(payload["schema_version"], 2);
+        assert_eq!(
+            payload.pointer("/applied_change_outcomes/signals"),
+            Some(&json!({
+                "skills": "adoption_proxy",
+                "facts": "recall_proxy",
+                "task_improvement": "not_measured",
+            }))
+        );
+    }
+
+    #[test]
+    fn optimizer_diagnosis_is_labeled_as_accept_reject_policy_not_measured_improvement() {
+        let (request, response, mut record) = payload_fixture();
+        record.reviewed_count = 1;
+        record.accepted_count = 1;
+        record.applied_ops = Some(json!([{"skill_id": "accepted-skill"}]));
+        record.validation_report = Some(json!({"status": "applied"}));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = skill_writer_ctx(&request, &response, &record, &outcomes);
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+
+        let diagnosis = optimizer_diagnosis_payload(
+            &ctx,
+            (
+                &refs.trace,
+                &refs.feedback,
+                &refs.generated_evals,
+                &refs.validation_gate,
+            ),
+            &evals,
+            &gate,
+        );
+        let handoff = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+
+        assert_eq!(diagnosis["schema_version"], 3);
+        assert_eq!(
+            diagnosis.pointer("/diagnosis_basis/type"),
+            Some(&json!("validation_accept_reject_policy"))
+        );
+        assert_eq!(
+            diagnosis.pointer("/diagnosis_basis/measured_improvement"),
+            Some(&json!("not_measured"))
+        );
+        assert!(
+            !diagnosis["recommendations"][0]["rationale"]
+                .as_str()
+                .unwrap()
+                .contains("regression")
+        );
+        assert_eq!(handoff["schema_version"], 3);
+        assert_eq!(
+            handoff.pointer("/readiness/measured_improvement"),
+            Some(&json!("not_measured"))
+        );
+        assert_eq!(
+            handoff.pointer("/readiness/validation_gate_decision"),
+            Some(&json!("ready_for_handoff"))
+        );
     }
 
     #[test]
@@ -687,7 +855,7 @@ mod tests {
             run_id: "run-outcomes",
             task: AgentTaskKind::CombinedReview,
             task_key: "combined_review",
-            prompt_version: "combined_review:v1",
+            prompt_version: "combined_review:v2",
             policy: artifact_policy(AgentTaskKind::CombinedReview),
             request: &request,
             response: &response,
@@ -897,7 +1065,7 @@ mod tests {
             payload.pointer("/applied_change_outcomes/status").unwrap(),
             &json!("no_outcomes_recorded")
         );
-        assert!(generated_eval_payloads(&ctx).outcome_definitions.is_empty());
+        assert_eq!(generated_eval_payloads(&ctx).outcome_definitions.len(), 0);
     }
 
     #[test]
@@ -966,6 +1134,130 @@ mod tests {
                 .pointer("/validation_requirements/automatic_application")
                 .unwrap(),
             &json!(true)
+        );
+    }
+
+    fn skill_writer_ctx<'a>(
+        request: &'a AgentTaskRequest,
+        response: &'a AgentTaskResponse,
+        record: &'a AutomationRunLedgerRecord,
+        outcomes: &'a AutomationOutcomesSnapshot,
+    ) -> ArtifactPayloadContext<'a> {
+        ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::SkillWriter,
+            task_key: "skill_writer",
+            prompt_version: "skill_writer:v1",
+            policy: artifact_policy(AgentTaskKind::SkillWriter),
+            request,
+            response,
+            record,
+            outcomes,
+        }
+    }
+
+    fn generated_chain(ctx: &ArtifactPayloadContext<'_>) -> (Value, Value, Value) {
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(ctx);
+        let gate = improvement_gate_payload(ctx, &evals);
+        (
+            generated_evals_payload(ctx, (&refs.trace, &refs.feedback), &evals),
+            validation_gate_payload(
+                ctx,
+                (&refs.trace, &refs.feedback, &refs.generated_evals),
+                &evals,
+                &gate,
+            ),
+            codex_handoff_payload(ctx, &refs, &evals, &gate),
+        )
+    }
+
+    #[test]
+    fn artifact_generation_never_reports_independent_evaluation_passed() {
+        let (request, response, mut record) = payload_fixture();
+        record.reviewed_count = 1;
+        record.accepted_count = 1;
+        record.applied_ops = Some(json!([{"skill_id": "accepted-skill"}]));
+        record.validation_report = Some(json!({"status": "applied"}));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = skill_writer_ctx(&request, &response, &record, &outcomes);
+
+        let (evals, gate, handoff) = generated_chain(&ctx);
+
+        assert_eq!(
+            evals.pointer("/record_integrity/status"),
+            Some(&json!("passed"))
+        );
+        assert_eq!(
+            evals.pointer("/independent_evaluation/status"),
+            Some(&json!("not_run"))
+        );
+        assert_eq!(
+            evals.pointer("/eval_definitions/0/harness/status"),
+            Some(&json!("not_run"))
+        );
+        assert_eq!(
+            gate.pointer("/improvement_gate/generated_evals_status"),
+            Some(&json!("not_run"))
+        );
+        assert_eq!(
+            gate.pointer("/improvement_gate/record_integrity_status"),
+            Some(&json!("passed"))
+        );
+        assert_eq!(
+            handoff.pointer("/independent_evaluation/status"),
+            Some(&json!("not_run"))
+        );
+        assert_eq!(
+            handoff.pointer("/readiness/independent_evaluation_status"),
+            Some(&json!("not_run"))
+        );
+        assert!(evals.get("runner").is_none());
+        assert!(evals.get("automatic_application").is_none());
+        assert!(handoff.get("eval_replay").is_none());
+    }
+
+    #[test]
+    fn corrupt_recorded_counts_fail_integrity_not_behavioral_replay() {
+        let (request, response, mut record) = payload_fixture();
+        record.reviewed_count = 2;
+        record.accepted_count = 2;
+        record.applied_ops = Some(json!([{"skill_id": "only-one-receipt"}]));
+        record.validation_report = Some(json!({"status": "applied"}));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = skill_writer_ctx(&request, &response, &record, &outcomes);
+
+        let (evals, gate, handoff) = generated_chain(&ctx);
+
+        assert_eq!(
+            evals.pointer("/record_integrity/status"),
+            Some(&json!("failed"))
+        );
+        assert_eq!(
+            evals.pointer("/independent_evaluation/status"),
+            Some(&json!("not_run"))
+        );
+        assert_eq!(
+            gate.pointer("/improvement_gate/decision"),
+            Some(&json!("blocked_failed_record_integrity"))
+        );
+        assert_eq!(
+            gate.pointer("/improvement_gate/generated_evals_status"),
+            Some(&json!("not_run"))
+        );
+        assert_eq!(
+            gate.pointer("/task_validation/automatic_application/status"),
+            Some(&json!("applied"))
+        );
+        assert_eq!(
+            handoff.pointer("/machine_summary/next_stage"),
+            Some(&json!("repair_recorded_validation"))
         );
     }
 

@@ -6,7 +6,8 @@ use std::time::Duration;
 use serde_json::Value;
 use url::{Host, Url};
 
-use crate::errors::{Result, TraceDecayError};
+use super::job_error;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(crate) fn validate_url(raw: &str) -> Result<()> {
     let url = parse_url(raw)?;
@@ -21,7 +22,7 @@ pub(crate) enum WebhookPostError {
     Indeterminate,
 }
 
-#[hotpath::measure(label = "automation.job_webhook.post")]
+#[tracing::instrument(name = "automation.job_webhook.post", level = "trace", skip_all)]
 pub(crate) fn post_json_url(
     raw_url: &str,
     payload: &Value,
@@ -229,7 +230,12 @@ fn post_json_over_https(
     let root_store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
-    let config = rustls::ClientConfig::builder()
+    // reqwest links aws-lc-rs into the same rustls, so the process default
+    // provider is ambiguous and `ClientConfig::builder()` would panic.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| WebhookPostError::NotAttempted(target_free_tls_error("protocol selection")))?
         .with_root_certificates(root_store)
         .with_no_client_auth();
     let host_label = host_label(&endpoint.url).map_err(WebhookPostError::NotAttempted)?;
@@ -318,7 +324,7 @@ fn read_status<R: Read>(reader: &mut R) -> Result<u16> {
             }
             // A server that sends its full response and then closes abruptly can
             // surface the close as a read error before we observe the end of the
-            // headers — e.g. a Windows peer resets the connection (os error
+            // headers, e.g. a Windows peer resets the connection (os error
             // 10053) right after `write_all`. If a complete status line already
             // arrived the delivery succeeded, so parse what we have rather than
             // discarding it; only propagate the error when no status was read.
@@ -395,12 +401,6 @@ fn host_header(url: &Url) -> Result<String> {
     }
 }
 
-fn job_error<T>(message: &str) -> Result<T> {
-    Err(TraceDecayError::Config {
-        message: message.to_string(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +465,22 @@ mod tests {
     }
 
     #[test]
+    fn https_webhook_to_a_non_tls_peer_is_a_typed_handshake_failure() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind peer");
+        let addr = listener.local_addr().expect("peer address");
+        let peer = thread::spawn(move || drop(listener.accept()));
+        let endpoint = WebhookEndpoint::new_for_test(
+            Url::parse("https://example.test/hook").expect("url"),
+            addr,
+        );
+
+        let outcome = post_json_over_https(&endpoint, b"{}", Duration::from_secs(5));
+
+        assert!(matches!(outcome, Err(WebhookPostError::NotAttempted(_))));
+        peer.join().expect("peer thread");
+    }
+
+    #[test]
     fn resolution_failure_does_not_disclose_the_webhook_host() {
         let url = Url::parse("http://tenant-secret.invalid/hook?token=private").unwrap();
         let detail = resolve_endpoint(&url)
@@ -483,7 +499,7 @@ mod tests {
     }
 
     /// A reader that yields a canned buffer once, then fails every subsequent
-    /// read with `ConnectionAborted` — models a peer that sends its full
+    /// read with `ConnectionAborted`. It models a peer that sends its full
     /// response and then resets the socket (Windows os error 10053).
     struct ResetAfterResponse {
         response: Vec<u8>,
@@ -512,7 +528,7 @@ mod tests {
             sent: false,
         };
         // The trailing `\r\n\r\n` never arrives before the reset, so the loop
-        // hits the read error — but a full status line was already received.
+        // hits the read error, but a full status line was already received.
         let status = match read_status(&mut reader) {
             Ok(status) => status,
             Err(err) => panic!("read_status should succeed: {err}"),
@@ -527,7 +543,10 @@ mod tests {
             response: Vec::new(),
             sent: true,
         };
-        assert!(read_status(&mut reader).is_err());
+        assert_eq!(
+            read_status(&mut reader).unwrap_err().to_string(),
+            "config error: failed to read webhook response: connection aborted"
+        );
     }
 
     #[test]

@@ -1,20 +1,32 @@
-#[cfg(unix)]
-use std::process::Command;
-
 use super::*;
 #[cfg(unix)]
 use tracedecay_daemon_protocol::{FramePoll, FrameSend};
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+/// How long a half-closed one-shot client may wait for its single response.
+///
+/// This bound proves the daemon cannot pin a half-closed connection; it is not
+/// a latency budget. It used to be 2s, which the whole-suite run exceeded
+/// whenever several of these tests opened their own cold profile runtimes at
+/// once, a measured 500ms+ per `DaemonSessionRuntimeRegistryV1::open` under
+/// six-way contention, on top of the route open each request still needs. That
+/// made an environment-speed reading look like a daemon hang. The portable
+/// broker tests use it too, so it is not gated on unix.
+const HALF_CLOSE_ROUND_TRIP_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[cfg(unix)]
-fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_application::Deadline {
+const LSP_TEST_TOKEN: &str = "lsp-test-token";
+
+#[cfg(unix)]
+fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_contracts::Deadline {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_micros();
     let now = i64::try_from(now).unwrap_or(i64::MAX);
     let delta = i64::try_from(after.as_micros()).unwrap_or(i64::MAX);
-    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(now.saturating_add(delta)))
+    tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(now.saturating_add(delta)))
         .expect("LSP deadline")
 }
 
@@ -22,12 +34,12 @@ fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_application::De
 fn active_lsp_control(
     token: &str,
 ) -> (
-    tracedecay_application::Deadline,
-    tracedecay_application::CancellationSignal,
+    tracedecay_contracts::Deadline,
+    tracedecay_contracts::CancellationSignal,
 ) {
     (
         future_lsp_deadline(std::time::Duration::from_secs(2)),
-        tracedecay_application::CancellationSignal::active(token).expect("LSP cancellation"),
+        tracedecay_contracts::CancellationSignal::active(token).expect("LSP cancellation"),
     )
 }
 
@@ -48,10 +60,10 @@ fn lsp_test_invocation(
         client_instance_id: client_instance_id.to_owned(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
     tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),
+        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, LSP_TEST_TOKEN.to_owned()),
         handshake,
     )
 }
@@ -84,7 +96,7 @@ async fn project_owner_wait_stops_when_the_client_disconnects() {
     .expect_err("a never-ready owner must return a warming error");
 
     assert!(
-        super::super::error_message_is_project_warming(&error.to_string()),
+        super::super::error_is_project_warming(&error),
         "unexpected owner timeout: {error}"
     );
     assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
@@ -125,11 +137,11 @@ fn closed_feedback_list_request(
         ApplicationSurfaceOperation::FeedbackList,
         request_handle.to_owned(),
         observed_at,
-        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
             observed_at.0.saturating_add(60_000_000),
         ))
         .expect("future deadline"),
-        tracedecay_application::CancellationContext::active(format!("cancel.{request_id}"))
+        tracedecay_contracts::CancellationContext::active(format!("cancel.{request_id}"))
             .expect("cancellation"),
     )
 }
@@ -144,13 +156,9 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
     .expect("loopback listener");
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let open: Value = serde_json::from_str(
             &lines
                 .next_line()
@@ -206,118 +214,133 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
+enum LspOpenInterrupt {
+    Cancel,
+    /// Lets the open's own deadline run out.
+    ExpireDeadline,
+}
+
+#[cfg(unix)]
+impl LspOpenInterrupt {
+    fn fire(self, cancellation: &tracedecay_contracts::CancellationSignal) {
+        match self {
+            Self::Cancel => {
+                cancellation.cancel(tracedecay_contracts::clock::now_micros());
+            }
+            Self::ExpireDeadline => {}
+        }
+    }
+}
+
+/// What one LSP open against a never-answering daemon settled to: the open's
+/// error, the control its `lsp_open` carried (`None` when the client settled
+/// before sending one), and the daemon's next read after the interruption
+/// (`None` once the client closed the stream).
+#[cfg(unix)]
+type UnansweredLspOpen = (
+    Option<tracedecay_contracts::InvocationError>,
+    Option<Value>,
+    Option<String>,
+);
+
+/// Opens an LSP session against a daemon that reads the `lsp_open` and never
+/// answers it; `interrupt` fires once the request is in flight.
+///
+/// The daemon's `accept` is bounded by the client's own deadline, because a
+/// client that settles before connecting leaves nothing to wake it. Once
+/// connected, every client exit closes the stream and ends the daemon's reads.
+/// The whole exchange is bounded one second past the deadline, so a client
+/// that ignores its control yields `Err(Elapsed)` rather than a hang.
+#[cfg(unix)]
+async fn interrupt_unanswered_lsp_open(
+    client_instance_id: &str,
+    interrupt: LspOpenInterrupt,
+) -> Result<UnansweredLspOpen, tokio::time::error::Elapsed> {
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
         &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
-    let deadline = future_lsp_deadline(std::time::Duration::from_millis(40));
-    let expected_deadline = deadline.expires_at.0;
-    let server = tokio::spawn(async move {
-        let stream = listener.accept().await.expect("accept client");
-        let (reader, _writer) = stream.into_split();
-        let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake");
-        let open: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("read open")
-                .expect("open request"),
-        )
-        .expect("open json");
-        assert_eq!(open["operation"], "lsp_open");
-        assert_eq!(open["deadline"]["expires_at"], expected_deadline);
-        assert_eq!(open["cancellation"]["state"]["state"], "active");
-        lines.next_line().await.expect("client disconnect");
-    });
     let profile = TempDir::new().expect("profile");
-    let invocation = lsp_test_invocation(endpoint, &profile, "client.lsp-deadline-test");
-    let cancellation =
-        tracedecay_application::CancellationSignal::active("cancel.lsp.deadline-test")
-            .expect("cancellation");
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        tracedecay_daemon_protocol::DaemonLspSessionClient::open(
-            invocation,
-            env!("CARGO_PKG_VERSION"),
-            None,
-            Vec::new(),
-            deadline,
-            cancellation,
-        ),
-    )
-    .await
-    .expect("gateway deadline must terminate the open");
-
-    assert!(matches!(
-        result,
-        Err(tracedecay_application::InvocationError::DeadlineExceeded)
+    let invocation = lsp_test_invocation(endpoint, &profile, client_instance_id);
+    let (deadline, cancellation) = active_lsp_control(&format!("cancel.{client_instance_id}"));
+    let expected_deadline = deadline.expires_at.0;
+    let expiry = tokio::time::Instant::now()
+        + tracedecay_daemon_protocol::deadline_remaining(&deadline).expect("future LSP deadline");
+    let daemon_cancellation = cancellation.clone();
+    let daemon = async move {
+        let Ok(stream) = tokio::time::timeout_at(expiry, listener.accept()).await else {
+            return (None, None);
+        };
+        let (reader, _writer) = tokio::io::split(stream.expect("accept client"));
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
+        let Some(open) = lines.next_line().await.expect("read open") else {
+            return (None, None);
+        };
+        let open: Value = serde_json::from_str(&open).expect("open json");
+        let control = serde_json::json!({
+            "operation": open["operation"],
+            "carries_deadline": open["deadline"]["expires_at"] == expected_deadline,
+            "cancellation": open["cancellation"]["state"]["state"],
+        });
+        interrupt.fire(&daemon_cancellation);
+        (
+            Some(control),
+            lines.next_line().await.expect("read after interruption"),
+        )
+    };
+    let open = Box::pin(tracedecay_daemon_protocol::DaemonLspSessionClient::open(
+        invocation,
+        env!("CARGO_PKG_VERSION"),
+        None,
+        Vec::new(),
+        deadline,
+        cancellation,
     ));
-    server.await.expect("server task");
+
+    tokio::time::timeout_at(expiry + std::time::Duration::from_secs(1), async {
+        let (result, (control, after_interrupt)) = tokio::join!(open, daemon);
+        (result.err(), control, after_interrupt)
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
+    assert_eq!(
+        interrupt_unanswered_lsp_open("client.lsp-deadline-test", LspOpenInterrupt::ExpireDeadline)
+            .await,
+        Ok((
+            Some(tracedecay_contracts::InvocationError::DeadlineExceeded),
+            Some(serde_json::json!({
+                "operation": "lsp_open",
+                "carries_deadline": true,
+                "cancellation": "active",
+            })),
+            None,
+        )),
+        "a timed-out open must carry its control, settle typed, and close its stream"
+    );
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn lsp_gateway_open_returns_typed_cancellation() {
-    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
-        &tracedecay_daemon_protocol::default_loopback_endpoint(),
-    )
-    .await
-    .expect("loopback listener");
-    let server = tokio::spawn(async move {
-        let stream = listener.accept().await.expect("accept client");
-        let (reader, _writer) = stream.into_split();
-        let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake");
-        lines
-            .next_line()
-            .await
-            .expect("read open")
-            .expect("open request");
-        lines.next_line().await.expect("client disconnect");
-    });
-    let profile = TempDir::new().expect("profile");
-    let invocation = lsp_test_invocation(endpoint, &profile, "client.lsp-cancel-test");
-    let cancellation = tracedecay_application::CancellationSignal::active("cancel.lsp.cancel-test")
-        .expect("cancellation");
-    let cancellation_request = cancellation.clone();
-    let cancel = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        cancellation_request.cancel(tracedecay_application::clock::now_micros());
-    });
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        tracedecay_daemon_protocol::DaemonLspSessionClient::open(
-            invocation,
-            env!("CARGO_PKG_VERSION"),
+    assert_eq!(
+        interrupt_unanswered_lsp_open("client.lsp-cancel-test", LspOpenInterrupt::Cancel).await,
+        Ok((
+            Some(tracedecay_contracts::InvocationError::Cancelled),
+            Some(serde_json::json!({
+                "operation": "lsp_open",
+                "carries_deadline": true,
+                "cancellation": "active",
+            })),
             None,
-            Vec::new(),
-            future_lsp_deadline(std::time::Duration::from_secs(1)),
-            cancellation,
-        ),
-    )
-    .await
-    .expect("gateway cancellation must terminate the open");
-
-    assert!(matches!(
-        result,
-        Err(tracedecay_application::InvocationError::Cancelled)
-    ));
-    cancel.await.expect("cancellation task");
-    server.await.expect("server task");
+        )),
+        "a cancelled open must carry its control, settle typed, and close its stream"
+    );
 }
 
 #[cfg(unix)]
@@ -330,13 +353,9 @@ async fn lsp_gateway_open_returns_typed_unavailable_when_daemon_disconnects() {
     .expect("loopback listener");
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
-        let (reader, _writer) = stream.into_split();
+        let (reader, _writer) = tokio::io::split(stream);
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         lines
             .next_line()
             .await
@@ -363,7 +382,7 @@ async fn lsp_gateway_open_returns_typed_unavailable_when_daemon_disconnects() {
 
     assert!(matches!(
         result,
-        Err(tracedecay_application::InvocationError::Unavailable)
+        Err(tracedecay_contracts::InvocationError::Unavailable)
     ));
     server.await.expect("server task");
 }
@@ -378,13 +397,9 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
     .expect("loopback listener");
     let server = tokio::spawn(async move {
         let first = listener.accept().await.expect("accept first connection");
-        let (reader, mut writer) = first.into_split();
+        let (reader, mut writer) = tokio::io::split(first);
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read first handshake")
-            .expect("first handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let open: Value = serde_json::from_str(
             &lines
                 .next_line()
@@ -425,13 +440,9 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         drop(writer);
 
         let second = listener.accept().await.expect("accept fresh connection");
-        let (reader, mut writer) = second.into_split();
+        let (reader, mut writer) = tokio::io::split(second);
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read second handshake")
-            .expect("second handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let reconnect: Value = serde_json::from_str(
             &lines
                 .next_line()
@@ -560,10 +571,10 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         client_instance_id: "client.reconnect-test".to_owned(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
     let invocation = tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),
+        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, LSP_TEST_TOKEN.to_owned()),
         handshake,
     );
     let (deadline, cancellation) = active_lsp_control("cancel.lsp.reconnect-open");
@@ -657,20 +668,14 @@ async fn socket_client_requires_user_storage_scope_without_project() {
     let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "projectless-socket-test");
+    prewarm_test_profile_runtime(&engine.store_administration).await;
 
-    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
-
-    let (reader, mut writer) = client.into_split();
     let handshake = DaemonHandshake {
         client_identity,
         ..test_handshake_defaults()
     };
-    writer
-        .write_all(handshake.to_line().expect("handshake").as_bytes())
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("newline");
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(engine, &handshake).await;
     writer
         .write_all(
             serde_json::to_string(&json!({
@@ -694,7 +699,7 @@ async fn socket_client_requires_user_storage_scope_without_project() {
     writer.shutdown().await.expect("shutdown writer");
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
-    let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+    let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
         .await
         .expect("projectless rejection should not time out")
         .expect("read response")
@@ -708,6 +713,357 @@ async fn socket_client_requires_user_storage_scope_without_project() {
          names no parameter because the admission check reads `storage_scope` on the \
          retained path and `memory_scope` otherwise, so naming only one would be wrong \
          for half the callers it rejects."
+    );
+
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("projectless client shutdown should be clean");
+}
+
+/// A projectless connection reads the profile's real project registry: an
+/// enrolled-nothing profile answers `ok` with an empty listing, the same
+/// answer `tracedecay projects list` gives, not a claim that the registry is
+/// absent.
+#[cfg(unix)]
+#[tokio::test]
+async fn projectless_project_list_reads_the_empty_profile_registry() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "projectless-registry-test",
+    );
+    prewarm_test_profile_runtime(&engine.store_administration).await;
+
+    let handshake = DaemonHandshake {
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(engine, &handshake).await;
+    writer
+        .write_all(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_project_list",
+                    "arguments": {"format": "json", "limit": 5}
+                }
+            }))
+            .expect("tools/call json")
+            .as_bytes(),
+        )
+        .await
+        .expect("write tools/call");
+    writer.write_all(b"\n").await.expect("newline");
+    writer
+        .write_all(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_project_list",
+                    "arguments": {"format": "json", "limt": 5}
+                }
+            }))
+            .expect("tools/call json")
+            .as_bytes(),
+        )
+        .await
+        .expect("write refused tools/call");
+    writer.write_all(b"\n").await.expect("newline");
+    writer.shutdown().await.expect("shutdown writer");
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
+        .await
+        .expect("projectless project list should not time out")
+        .expect("read response")
+        .expect("projectless response");
+    let response: Value = serde_json::from_str(&line).expect("response json");
+    assert_eq!(response["id"], json!(8));
+    let payload = super::super::tool_json_payload(&response["result"], "tracedecay_project_list")
+        .expect("typed project-list payload");
+    assert_eq!(payload["status"], "ok", "payload: {payload}");
+    assert_eq!(payload["projects"], json!([]));
+    assert_eq!(payload["summary"]["project_count"], json!(0));
+    assert_eq!(payload["truncated"], json!(false));
+    assert!(
+        payload["registry_path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("global.db")),
+        "listing must name the registry it read: {payload}"
+    );
+
+    // A request outside the typed contract is the owner's refusal, flagged as
+    // a tool error rather than served as a listing. Its record travels as MCP
+    // structured content, as on a project connection, never as a result
+    // member MCP clients drop.
+    let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
+        .await
+        .expect("refused project list should not time out")
+        .expect("read refusal")
+        .expect("projectless refusal");
+    let refused: Value = serde_json::from_str(&line).expect("refusal json");
+    let result = &refused["result"];
+    let problem = &result["structuredContent"]["problem"];
+    assert_eq!(
+        (
+            &refused["id"],
+            &result["isError"],
+            result.get("problem"),
+            &problem["kind"],
+            &problem["code"],
+            &problem["message"],
+        ),
+        (
+            &json!(9),
+            &json!(true),
+            None,
+            &json!("invalid_request"),
+            &json!("application.surface.invalid_request"),
+            &json!(
+                "invalid arguments for tracedecay_project_list: unknown field `limt`, expected `limit`"
+            ),
+        ),
+        "{refused}"
+    );
+
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("projectless client shutdown should be clean");
+}
+
+/// Every JSON pointer at which a tool result carries a `problem` member.
+#[cfg(unix)]
+fn problem_placement(value: &Value, pointer: &str, found: &mut Vec<String>) {
+    if let Value::Object(members) = value {
+        for (key, member) in members {
+            let path = format!("{pointer}/{key}");
+            if key == "problem" {
+                found.push(path.clone());
+            }
+            problem_placement(member, &path, found);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn problem_placements(result: &Value) -> Vec<String> {
+    let mut found = Vec::new();
+    problem_placement(result, "", &mut found);
+    found
+}
+
+/// A projectless refusal and a project-route refusal carry the typed problem
+/// record at the same single location, so one reader serves every route.
+#[cfg(unix)]
+#[tokio::test]
+async fn projectless_and_project_route_refusals_place_the_problem_identically() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&client_identity.profile_root, "problem-placement-test");
+    prewarm_test_profile_runtime(&engine.store_administration).await;
+
+    let handshake = DaemonHandshake {
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(engine, &handshake).await;
+    writer
+        .write_all(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_project_list",
+                    "arguments": {"format": "json", "limt": 5}
+                }
+            }))
+            .expect("tools/call json")
+            .as_bytes(),
+        )
+        .await
+        .expect("write refused tools/call");
+    writer.write_all(b"\n").await.expect("newline");
+    writer.shutdown().await.expect("shutdown writer");
+    let line = tokio::io::BufReader::new(reader)
+        .lines()
+        .next_line()
+        .await
+        .expect("read refusal")
+        .expect("projectless refusal");
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("projectless client shutdown should be clean");
+    let projectless: Value = serde_json::from_str(&line).expect("refusal json");
+    let projectless = &projectless["result"];
+
+    let request: tracedecay_mcp::JsonRpcRequest = serde_json::from_value(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": { "name": "tracedecay_storage_status", "arguments": {} },
+    }))
+    .expect("project tools/call request");
+    let project = super::super::project_open_handshake::tool_call_open_refusal_response(
+        &request,
+        "connection.problem-placement",
+        &tracedecay_domain::errors::TraceDecayError::reset_required(
+            "project store",
+            "schema v26 is incompatible",
+        ),
+    )
+    .expect("a project-route refusal")
+    .result
+    .expect("project-route tool result");
+
+    assert_eq!(
+        (&projectless["isError"], &project["isError"]),
+        (&json!(true), &json!(true))
+    );
+    assert_eq!(
+        serde_json::to_string(&problem_placements(projectless)).expect("placement bytes"),
+        serde_json::to_string(&problem_placements(&project)).expect("placement bytes"),
+        "projectless {projectless}\nproject {project}"
+    );
+    assert_eq!(
+        problem_placements(&project),
+        ["/structuredContent/problem"],
+        "{project}"
+    );
+}
+
+/// A fresh MCP host discovers tools through `tools/list` before `tools/call`.
+/// After a projectless session is admitted, `tools/list` must advertise the
+/// registry reads that dispatcher can serve and must not advertise
+/// project-mounted graph tools that still refuse without a project.
+#[cfg(unix)]
+#[tokio::test]
+async fn projectless_tools_list_advertises_registry_tools() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "projectless-tools-list-test",
+    );
+    prewarm_test_profile_runtime(&engine.store_administration).await;
+
+    let handshake = DaemonHandshake {
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(engine, &handshake).await;
+    // First request must not be bootstrap-handled (`initialize` / `tools/list`),
+    // or the connection never enters the projectless session loop Codex named.
+    writer
+        .write_all(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_project_list",
+                    "arguments": {"format": "json", "limit": 5}
+                }
+            }))
+            .expect("tools/call json")
+            .as_bytes(),
+        )
+        .await
+        .expect("write tools/call");
+    writer.write_all(b"\n").await.expect("newline");
+    writer
+        .write_all(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/list"
+            }))
+            .expect("tools/list json")
+            .as_bytes(),
+        )
+        .await
+        .expect("write tools/list");
+    writer.write_all(b"\n").await.expect("newline");
+    writer.shutdown().await.expect("shutdown writer");
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let call_line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
+        .await
+        .expect("projectless tools/call should not time out")
+        .expect("read tools/call response")
+        .expect("tools/call response");
+    let call_response: Value = serde_json::from_str(&call_line).expect("tools/call json");
+    assert_eq!(call_response["id"], json!(8));
+    assert!(
+        call_response.get("error").is_none(),
+        "projectless tools/call must admit the session: {call_response}"
+    );
+
+    let list_line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
+        .await
+        .expect("projectless tools/list should not time out")
+        .expect("read tools/list response")
+        .expect("tools/list response");
+    let response: Value = serde_json::from_str(&list_line).expect("tools/list json");
+    assert_eq!(response["id"], json!(9));
+    assert!(
+        response.get("error").is_none(),
+        "projectless tools/list must not return MethodNotFound: {response}"
+    );
+    let tools = response["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list must carry a tool array: {response}"));
+    let names: std::collections::BTreeSet<&str> = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
+    for required in [
+        "tracedecay_project_list",
+        "tracedecay_project_search",
+        "tracedecay_project_context",
+    ] {
+        assert!(
+            names.contains(required),
+            "projectless tools/list must advertise {required}; got {names:?}"
+        );
+    }
+    assert!(
+        !names.contains("tracedecay_search"),
+        "projectless tools/list must not advertise project-mounted graph tools: {names:?}"
+    );
+    let configuration: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| name.starts_with("tracedecay_configuration_"))
+        .collect();
+    assert_eq!(
+        configuration,
+        [
+            "tracedecay_configuration_batch",
+            "tracedecay_configuration_get",
+            "tracedecay_configuration_set",
+            "tracedecay_configuration_unset",
+        ],
+        "projectless tools/list advertises only the configuration tools a user setting \
+         can address"
     );
 
     server_task
@@ -738,23 +1094,17 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     )
     .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    prewarm_test_profile_runtime(&engine.store_administration).await;
     let unregistered_project = home.join("unregistered-project");
     std::fs::create_dir_all(&unregistered_project).expect("unregistered project directory");
 
-    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
-
-    let (reader, mut writer) = client.into_split();
     let handshake = DaemonHandshake {
         project_path: Some(unregistered_project),
         client_identity,
         ..test_handshake_defaults()
     };
-    writer
-        .write_all(handshake.to_line().expect("handshake").as_bytes())
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("newline");
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(engine, &handshake).await;
     writer
         .write_all(
             serde_json::to_string(&json!({
@@ -779,7 +1129,7 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     writer.shutdown().await.expect("shutdown writer");
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
-    let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+    let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
         .await
         .expect("user session read should not time out")
         .expect("read response")
@@ -794,8 +1144,8 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     )
     .expect("message search payload");
     let message_search = &payload["outcome"]["value"]["payload"];
-    assert_eq!(message_search["status"], "ok", "{payload}");
-    assert_eq!(message_search["outcome"], "complete_zero", "{payload}");
+    assert_eq!(message_search["status"], "unavailable", "{payload}");
+    assert_eq!(message_search["outcome"], "unavailable", "{payload}");
     assert_eq!(message_search["store_scope"], "profile");
 
     server_task
@@ -815,19 +1165,13 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
         &client_identity.profile_root,
         "closed-invocation-socket-test",
     );
-    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
-
-    let (reader, mut writer) = client.into_split();
+    prewarm_test_profile_runtime(&engine.store_administration).await;
     let handshake = DaemonHandshake {
         client_identity,
         ..test_handshake_defaults()
     };
-    writer
-        .write_all(handshake.to_line().expect("handshake").as_bytes())
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("newline");
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(engine, &handshake).await;
     let mut lines = tokio::io::BufReader::new(reader).lines();
     for (request_id, request_handle) in [("request.1", "handle.1"), ("request.2", "handle.2")] {
         writer
@@ -840,7 +1184,7 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
             .expect("write invocation");
         writer.write_all(b"\n").await.expect("newline");
 
-        let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
             .await
             .expect("invocation response should not time out")
             .expect("read invocation response")
@@ -848,8 +1192,14 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
         let response: serde_json::Value = serde_json::from_str(&line).expect("response json");
         assert_eq!(response["protocol"], "tracedecay.daemon.invocation");
         assert_eq!(response["request_id"], request_id);
-        assert_eq!(response["status"], "problem");
-        assert_eq!(response["problem"], "unavailable");
+        // The handshake names no project, so the project-scoped read is a
+        // terminal refusal the client must correct, not a retryable outage.
+        assert_eq!(response["status"], "application_problem", "{response:#}");
+        assert_eq!(response["problem"]["kind"], "invalid_request");
+        assert_eq!(
+            response["problem"]["diagnostic"]["code"],
+            "project_required"
+        );
         assert!(response.get("jsonrpc").is_none());
     }
 
@@ -862,24 +1212,12 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonical() {
-    use std::process::Command;
-
-    use tracedecay_application::{CancellationContext, Deadline, IdempotencyKey};
-    use tracedecay_domain::{
-        GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexSigningPolicyV1,
-        GitIndexTransactionOperationV1, UtcMicros,
-    };
-
-    fn git(root: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .status()
-            .expect("run Git fixture command");
-        assert!(status.success(), "git {args:?}");
-    }
+    use tracedecay_contracts::git::GitReadRequestV1;
+    use tracedecay_contracts::{CancellationContext, Deadline, IdempotencyKey};
+    use tracedecay_daemon_protocol::surface::GitReadSurfaceRequest;
+    use tracedecay_domain::{GitIndexTransactionOperationV1, UtcMicros};
 
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
@@ -915,7 +1253,6 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         .await
         .expect("mount project owner");
     std::fs::write(repository.path().join("packet.txt"), "base\nnext\n").expect("changed file");
-    git(repository.path(), &["add", "packet.txt"]);
     let observed_at = UtcMicros(
         i64::try_from(
             std::time::SystemTime::now()
@@ -925,39 +1262,73 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         )
         .unwrap_or(i64::MAX),
     );
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: observed_at,
-    };
-    let request = crate::application_surface::GitPreviewSurfaceRequest {
-        operation: GitIndexTransactionOperationV1::CommitIndex,
-        preview_input_id: None,
-        selected_hunk_digests: Vec::new(),
-        commit_intent: Some(
-            GitIndexCommitIntentV1::new(
-                "socket Git transaction\n".to_owned(),
-                identity.clone(),
-                identity,
-                GitIndexSigningPolicyV1::UnsignedPermitted,
-            )
-            .expect("commit intent"),
-        ),
-    };
     let deadline =
         Deadline::new(UtcMicros(observed_at.0.saturating_add(60_000_000))).expect("deadline");
     let cancellation = CancellationContext::active("cancel.socket-git").expect("cancellation");
 
-    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let engine_for_test = engine.clone();
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
-    let (reader, mut writer) = client.into_split();
-    writer
-        .write_all(handshake.to_line().expect("handshake").as_bytes())
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(engine, &handshake).await;
     let mut lines = tokio::io::BufReader::new(reader).lines();
+
+    async fn read_hunks(
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+        request_id: &str,
+        observed_at: UtcMicros,
+        deadline: &Deadline,
+        cancellation: &CancellationContext,
+    ) -> tracedecay_contracts::git::GitHunkPreviewInputV1 {
+        let read_request = super::super::DaemonInvocationRequest::git_read(
+            request_id,
+            ApplicationSurfaceOperation::GitHunks,
+            GitReadSurfaceRequest {
+                request: GitReadRequestV1::Hunks {
+                    scope: tracedecay_domain::GitDiffScopeV1::WorkingTree,
+                    daemon_binding: None,
+                },
+                max_entries: 1_000,
+                max_bytes: 4 * 1024 * 1024,
+            },
+            observed_at,
+            deadline.clone(),
+            cancellation.clone(),
+        );
+        writer
+            .write_all(serde_json::to_string(&read_request).unwrap().as_bytes())
+            .await
+            .unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        let line = lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("hunks read response");
+        let response: Value = serde_json::from_str(&line).expect("read JSON");
+        assert_eq!(response["status"], "git_read", "{response:#}");
+        serde_json::from_value(response["result"]["payload"]["result"]["value"].clone())
+            .expect("typed hunk preview input")
+    }
+
+    let hunks_input = read_hunks(
+        &mut writer,
+        &mut lines,
+        "request.socket.hunks",
+        observed_at,
+        &deadline,
+        &cancellation,
+    )
+    .await;
+    assert_ne!(hunks_input.hunks.len(), 0);
+    let request = tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
+        operation: GitIndexTransactionOperationV1::StageHunks,
+        preview_input_id: Some(hunks_input.preview_input_id.clone()),
+        selected_hunk_digests: hunks_input
+            .hunks
+            .iter()
+            .map(|entry| entry.digest.clone())
+            .collect(),
+    };
 
     let preview_request = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.preview",
@@ -980,18 +1351,13 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     let preview: tracedecay_domain::GitIndexPreviewV1 =
         serde_json::from_value(preview_response["preview"]["payload"].clone())
             .expect("typed immutable preview");
-    // An unsupported preview is never cached for apply, so a disposition
-    // regression here surfaces as an unexplained abort several requests later
-    // rather than as the blocker the daemon actually found.
     assert_eq!(
         preview.disposition,
-        tracedecay_domain::GitIndexPreviewDispositionV1::Unsupported(
-            tracedecay_domain::GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
-        ),
+        tracedecay_domain::GitIndexPreviewDispositionV1::Applicable,
         "{preview_response:#}"
     );
 
-    let apply = crate::application_surface::GitApplySurfaceRequest {
+    let apply = tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
         preview_id: preview.preview_id.clone(),
         preview_digest: preview.preview_digest.clone(),
         idempotency_key: IdempotencyKey::new("idempotency.socket-git").expect("idempotency"),
@@ -1001,7 +1367,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         apply.clone(),
         UtcMicros(1),
         deadline.clone(),
-        cancellation,
+        cancellation.clone(),
     );
     let apply_request_json = serde_json::to_string(&apply_request).unwrap();
     for attempt in 1..=2 {
@@ -1018,20 +1384,14 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
             response["status"], "git_apply",
             "attempt {attempt}: {response:#}"
         );
-        // Ref publication is typed-unavailable, so attempt 1 must abort with
-        // no repository change and attempt 2 must replay that same terminal
-        // failed receipt rather than re-entering native Git.
+        // Attempt 1 commits the staged hunk; attempt 2 must replay that same
+        // terminal receipt rather than re-entering native Git.
         assert_eq!(
-            response["effect"]["receipt"]["outcome"], "failed",
+            response["effect"]["receipt"]["outcome"], "completed",
             "attempt {attempt}: {response:#}"
         );
         assert_eq!(
-            response["effect"]["payload"]["outcome"], "aborted_no_change",
-            "attempt {attempt}: {response:#}"
-        );
-        assert_eq!(
-            response["effect"]["payload"]["created_commit"],
-            Value::Null,
+            response["effect"]["payload"]["outcome"], "committed",
             "attempt {attempt}: {response:#}"
         );
         assert_ne!(response["effect"]["execution"]["started_at"], 1);
@@ -1039,7 +1399,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
 
     let stale = super::super::DaemonInvocationRequest::git_apply(
         "request.socket.stale",
-        crate::application_surface::GitApplySurfaceRequest {
+        tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
             preview_id: apply.preview_id.clone(),
             preview_digest: apply.preview_digest.clone(),
             idempotency_key: IdempotencyKey::new("idempotency.socket-stale").unwrap(),
@@ -1056,6 +1416,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     let response: Value =
         serde_json::from_str(&lines.next_line().await.unwrap().expect("stale response")).unwrap();
     assert_eq!(response["status"], "git_apply", "{response:#}");
+    // The repository moved past the preview snapshot, so a new idempotency key
+    // reaches a terminal no-change receipt rather than a second mutation.
     assert_eq!(
         response["effect"]["payload"]["outcome"],
         "aborted_no_change"
@@ -1066,30 +1428,25 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         "base\nnext\nrecovery\n",
     )
     .expect("recovery fixture change");
-    git(repository.path(), &["add", "packet.txt"]);
+    let recovery_input = read_hunks(
+        &mut writer,
+        &mut lines,
+        "request.socket.recovery-hunks",
+        observed_at,
+        &deadline,
+        &cancellation,
+    )
+    .await;
     let recovery_preview_request = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.recovery-preview",
-        crate::application_surface::GitPreviewSurfaceRequest {
-            operation: GitIndexTransactionOperationV1::CommitIndex,
-            preview_input_id: None,
-            selected_hunk_digests: Vec::new(),
-            commit_intent: Some(
-                GitIndexCommitIntentV1::new(
-                    "socket recovery fence\n".to_owned(),
-                    GitCommitIdentityV1 {
-                        name: "TraceDecay Test".to_owned(),
-                        email: "tracedecay@example.com".to_owned(),
-                        at: observed_at,
-                    },
-                    GitCommitIdentityV1 {
-                        name: "TraceDecay Test".to_owned(),
-                        email: "tracedecay@example.com".to_owned(),
-                        at: observed_at,
-                    },
-                    GitIndexSigningPolicyV1::UnsignedPermitted,
-                )
-                .unwrap(),
-            ),
+        tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
+            operation: GitIndexTransactionOperationV1::StageHunks,
+            preview_input_id: Some(recovery_input.preview_input_id.clone()),
+            selected_hunk_digests: recovery_input
+                .hunks
+                .iter()
+                .map(|entry| entry.digest.clone())
+                .collect(),
         },
         observed_at,
         deadline.clone(),
@@ -1124,7 +1481,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         .unwrap();
     let recovery_blocked = super::super::DaemonInvocationRequest::git_apply(
         "request.socket.recovery-blocked",
-        crate::application_surface::GitApplySurfaceRequest {
+        tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
             preview_id: recovery_preview.preview_id,
             preview_digest: recovery_preview.preview_digest,
             idempotency_key: IdempotencyKey::new("idempotency.socket-recovery").unwrap(),
@@ -1209,6 +1566,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
         &client_identity.profile_root,
         "portable-closed-invocation-test",
     );
+    prewarm_test_profile_runtime(&store_administration).await;
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
         &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
@@ -1230,10 +1588,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
         .await
     });
 
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect client");
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
     let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
         .to_line()
         .expect("auth preface");
@@ -1260,7 +1615,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
             .expect("write invocation");
         writer.write_all(b"\n").await.expect("invocation newline");
 
-        let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
             .await
             .expect("invocation response should not time out")
             .expect("read invocation response")
@@ -1268,8 +1623,14 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
         let response: serde_json::Value = serde_json::from_str(&line).expect("response json");
         assert_eq!(response["protocol"], "tracedecay.daemon.invocation");
         assert_eq!(response["request_id"], request_id);
-        assert_eq!(response["status"], "problem");
-        assert_eq!(response["problem"], "unavailable");
+        // The handshake names no project, so the project-scoped read is a
+        // terminal refusal the client must correct, not a retryable outage.
+        assert_eq!(response["status"], "application_problem", "{response:#}");
+        assert_eq!(response["problem"]["kind"], "invalid_request");
+        assert_eq!(
+            response["problem"]["diagnostic"]["code"],
+            "project_required"
+        );
         assert!(response.get("jsonrpc").is_none());
     }
     writer.shutdown().await.expect("shutdown writer");
@@ -1289,22 +1650,6 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
     let linked = root.join("linked");
     let profile_root = root.join("profile");
     std::fs::create_dir_all(&primary).expect("primary dir");
-    let git = |cwd: &std::path::Path, args: &[&str]| {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.local")
-            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.local")
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
     git(&primary, &["init", "-b", "main", "--quiet"]);
     std::fs::create_dir_all(primary.join("src")).expect("fixture source dir");
     std::fs::write(primary.join("src/main.rs"), "fn main() {}\n").expect("fixture source");
@@ -1381,17 +1726,11 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .expect("linked project registry context present");
     assert_eq!(
         context.project.canonical_root,
-        crate::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&primary)
+        RegisteredGlobalDb::canonical_project_key(&primary)
     );
-    assert!(context.aliases.iter().any(|alias| {
-        alias.alias_path
-            == crate::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
-    }));
-}
-
-#[test]
-fn unsupported_daemon_transport_never_falls_back_to_local_sqlite() {
-    assert!(super::super::proxy_required_by_platform(false, false));
-    assert!(super::super::proxy_required_by_platform(false, true));
-    assert!(!super::super::proxy_required_by_platform(true, false));
+    assert!(
+        context.aliases.iter().any(|alias| {
+            alias.alias_path == RegisteredGlobalDb::canonical_project_key(&linked)
+        })
+    );
 }

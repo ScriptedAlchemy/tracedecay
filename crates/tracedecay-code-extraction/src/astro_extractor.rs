@@ -18,7 +18,6 @@
 
 use std::borrow::Cow;
 
-use crate::types::ExtractionResult;
 use crate::typescript_extractor::TypeScriptExtractor;
 use crate::{ExtractionArtifactV1, LanguageExtractor};
 use tree_sitter::Tree;
@@ -28,11 +27,6 @@ use tree_sitter::Tree;
 pub struct AstroExtractor;
 
 impl AstroExtractor {
-    pub fn extract_astro(file_path: &str, source: &str) -> ExtractionResult {
-        let masked = Self::mask_non_frontmatter(source);
-        TypeScriptExtractor::extract_typescript(file_path, &masked)
-    }
-
     /// Replace every byte outside the `---` frontmatter block with whitespace.
     ///
     /// Keeping both byte length and line endings unchanged means the TypeScript
@@ -51,7 +45,7 @@ impl AstroExtractor {
         let content_end = lines[content_start..]
             .iter()
             .position(|l| l.trim() == "---")
-            .map_or(lines.len(), |rel| content_start + rel); // unclosed — include everything
+            .map_or(lines.len(), |rel| content_start + rel); // unclosed. Include everything
 
         Self::mask_lines(source, |line| line >= content_start && line < content_end)
     }
@@ -83,45 +77,14 @@ impl LanguageExtractor for AstroExtractor {
     }
 
     fn prepare_parse_source<'a>(&self, source: &'a str) -> Cow<'a, str> {
-        crate::hotpath_observe::measure_language(|| Cow::Owned(Self::mask_non_frontmatter(source)))
-    }
-
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_astro(file_path, source)
+        crate::observe::measure_language(|| Cow::Owned(Self::mask_non_frontmatter(source)))
     }
 
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::hotpath_observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || {
-                let masked = Self::mask_non_frontmatter(source);
-                TypeScriptExtractor::extract_typescript_artifact(file_path, &masked)
-            },
-            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
-        )
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let masked = Self::mask_non_frontmatter(source);
-        TypeScriptExtractor.extract_parsed(file_path, &masked, tree, scope)
-    }
-
-    fn extract_parsed_artifact(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        let masked = Self::mask_non_frontmatter(source);
-        TypeScriptExtractor.extract_parsed_artifact(file_path, &masked, tree, scope)
+        crate::observe::measure_extract_file(|| {
+            let masked = Self::mask_non_frontmatter(source);
+            TypeScriptExtractor::extract_typescript_artifact(file_path, &masked)
+        })
     }
 
     /// The retained document already holds this extractor's mask as its parse
@@ -134,7 +97,13 @@ impl LanguageExtractor for AstroExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        TypeScriptExtractor.extract_parsed_artifact(file_path, parsed_source, tree, scope)
+        TypeScriptExtractor.extract_parsed_artifact_prepared(
+            file_path,
+            parsed_source,
+            parsed_source,
+            tree,
+            scope,
+        )
     }
 }
 

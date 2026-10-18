@@ -1,0 +1,31 @@
+{
+  "id": "routing_clarification_required",
+  "category": "routing",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Please change the behavior. I have not specified which behavior or the desired result yet.",
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "asks which behavior to change",
+          "pattern": "\\bwhich\\b[^.\\n]{0,60}\\bbehavio"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "claims the change was made",
+          "pattern": "\\bI(?:'ve| have)?\\s+(?:already\\s+)?(?:changed|updated|modified|edited|implemented|renamed|applied)\\b"
+        }
+      ]
+    }
+  },
+  "max_tool_calls": 0,
+  "allowed_skills": [],
+  "max_tracedecay_calls": 0
+}

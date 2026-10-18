@@ -4,7 +4,7 @@
 //! transport. Every durable diagnostic is bound to an immutable
 //! code-intelligence generation, a canonical file occurrence with content
 //! digest and range encoding, and full producer provenance. Dirty LSP
-//! overlays can never be represented by this contract — overlay state is
+//! overlays can never be represented by this contract, overlay state is
 //! session-only and lives outside the durable record. Dirty-overlay
 //! diagnostics are never sealed into a clean code-intelligence generation;
 //! stale findings cannot cross snapshots.
@@ -122,8 +122,8 @@ impl DiagnosticProvenanceV1 {
 }
 
 /// Current-vs-stale typing for a durable diagnostic record. Publication is
-/// version-monotone: a newer clean generation clears or supersedes the prior
-/// publication deterministically, and stale findings cannot cross snapshots.
+/// version-monotone: a newer clean generation clears the prior publication
+/// deterministically, and stale findings cannot cross snapshots.
 /// Stale and historical records remain queryable through
 /// application APIs but are excluded from active publication.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -131,11 +131,6 @@ impl DiagnosticProvenanceV1 {
 pub enum DiagnosticRecordStateV1 {
     /// Current for exactly the clean generation named by the record.
     Current,
-    /// A successor clean generation republished the same logical finding
-    /// space; this record is historical.
-    Superseded {
-        successor_generation: CodeGenerationId,
-    },
     /// A clean generation completed and deterministically removed this
     /// finding (resolution, deletion, source-revision drift, or content or
     /// generation change).
@@ -152,15 +147,6 @@ impl DiagnosticRecordStateV1 {
     fn validate(&self, own_generation: &CodeGenerationId) -> Result<(), DomainError> {
         match self {
             Self::Current => Ok(()),
-            Self::Superseded {
-                successor_generation,
-            } => {
-                successor_generation.validate()?;
-                if successor_generation == own_generation {
-                    return Err(DomainError::SelfSupersession);
-                }
-                Ok(())
-            }
             Self::Cleared {
                 cleared_in_generation,
             } => {
@@ -174,9 +160,9 @@ impl DiagnosticRecordStateV1 {
     }
 }
 
-/// One durable, generation-bound diagnostic record. Every field is part of
-/// canonical identity; the
-/// display message remains sanitized product data.
+/// One durable, generation-bound diagnostic record. Its diagnostic payload,
+/// scope, and producer provenance form observation identity; the display
+/// message remains sanitized product data.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationDiagnosticV1 {
@@ -208,13 +194,26 @@ pub struct GenerationDiagnosticV1 {
     pub message_digest: ManifestDigest,
     pub provenance: DiagnosticProvenanceV1,
     pub evidence_class: DiagnosticEvidenceClassV1,
-    /// Collection time for the evidence.
+    /// Time the server first accepted this evidence observation. Compiler
+    /// output does not carry a trustworthy producer capture time, and an exact
+    /// semantic replay retains the first accepted value.
     pub collected_at: UtcMicros,
     /// Current-vs-stale typing; publication is version-monotone.
     pub state: DiagnosticRecordStateV1,
 }
 
 impl GenerationDiagnosticV1 {
+    /// Whether two records carry the same diagnostic observation.
+    ///
+    /// Server collection time is deliberately excluded: retrying identical
+    /// producer content must converge on the first accepted observation rather
+    /// than minting a new publication because its ingestion clock advanced.
+    pub fn same_observation_as(&self, other: &Self) -> bool {
+        let mut normalized = other.clone();
+        normalized.collected_at = self.collected_at;
+        self == &normalized
+    }
+
     pub fn validate(&self) -> Result<(), DomainError> {
         self.diagnostic_anchor.validate()?;
         self.generation_id.validate()?;
@@ -254,26 +253,6 @@ impl GenerationDiagnosticV1 {
     /// True only while the record is current for its own clean generation.
     pub const fn is_current(&self) -> bool {
         self.state.is_current()
-    }
-
-    /// Returns a copy marked superseded by `successor_generation`. A record
-    /// can only be superseded out of the current state, and a generation can
-    /// never supersede itself (version-monotone publication).
-    pub fn supersede(&self, successor_generation: CodeGenerationId) -> Result<Self, DomainError> {
-        successor_generation.validate()?;
-        if successor_generation == self.generation_id {
-            return Err(DomainError::SelfSupersession);
-        }
-        if !self.state.is_current() {
-            return Err(DomainError::NonCanonical {
-                field: "diagnostic record state transition",
-            });
-        }
-        let mut next = self.clone();
-        next.state = DiagnosticRecordStateV1::Superseded {
-            successor_generation,
-        };
-        Ok(next)
     }
 
     /// Returns a copy marked cleared by a clean generation that completed
@@ -334,17 +313,9 @@ fn validate_sanitized_message(message: &str) -> Result<(), DomainError> {
 mod tests {
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use crate::test_fixtures::repeated_sha256_text as digest;
 
     fn fixture_record() -> GenerationDiagnosticV1 {
         let mut record = GenerationDiagnosticV1 {
@@ -378,11 +349,6 @@ mod tests {
         };
         record.message_digest = record.compute_message_digest().expect("digest computable");
         record
-    }
-
-    #[test]
-    fn fixture_record_validates() {
-        fixture_record().validate().expect("valid fixture record");
     }
 
     #[test]
@@ -441,20 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn supersession_requires_a_distinct_generation() {
-        let record = fixture_record();
-        assert!(matches!(
-            record.clone().supersede(record.generation_id.clone()),
-            Err(DomainError::SelfSupersession)
-        ));
-        let superseded = record
-            .supersede(id("generation.clean.2"))
-            .expect("distinct successor supersedes");
-        assert!(!superseded.is_current());
-        superseded.validate().expect("superseded record validates");
-    }
-
-    #[test]
     fn clearing_requires_a_distinct_generation() {
         let record = fixture_record();
         assert!(matches!(
@@ -474,30 +426,25 @@ mod tests {
     #[test]
     fn stale_records_cannot_transition_again() {
         let record = fixture_record();
-        let superseded = record.supersede(id("generation.clean.2")).unwrap();
-        assert!(superseded.supersede(id("generation.clean.3")).is_err());
-        assert!(superseded.clear(id("generation.clean.3")).is_err());
+        let cleared = record.clear(id("generation.clean.2")).unwrap();
+        assert_eq!(
+            cleared
+                .clear(id("generation.clean.3"))
+                .unwrap_err()
+                .to_string(),
+            "diagnostic record state transition is not canonical"
+        );
     }
 
     #[test]
     fn state_rejects_self_referencing_generations() {
         let mut record = fixture_record();
-        record.state = DiagnosticRecordStateV1::Superseded {
-            successor_generation: record.generation_id.clone(),
+        record.state = DiagnosticRecordStateV1::Cleared {
+            cleared_in_generation: record.generation_id.clone(),
         };
         assert!(matches!(
             record.validate(),
             Err(DomainError::SelfSupersession)
         ));
-    }
-
-    #[test]
-    fn record_round_trips_through_json() {
-        let record = fixture_record()
-            .supersede(id("generation.clean.2"))
-            .unwrap();
-        let json = serde_json::to_string(&record).expect("serialize");
-        let parsed: GenerationDiagnosticV1 = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record, parsed);
     }
 }

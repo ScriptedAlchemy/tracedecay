@@ -1,21 +1,25 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tracedecay_capture::claude::{normalize, stable_record_id};
-use tracedecay_domain::{ClaudeByteRangeV1, ObservationOrderingDomainV1};
+use tracedecay_capture::claude::{ClaudeSpawnParent, normalize_spawned, stable_record_id};
+use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
-    JsonlFrameDeferral, JsonlResumeState, RawJsonlSkippedReason, TranscriptCursorCheckpoint,
-    TranscriptCursorKey, TranscriptIngestResult, try_stream_new_jsonl_raw_strict_with_resume,
+    JsonlFrameDeferral, JsonlPrefixRecovery, JsonlResumeState, MAX_JSONL_FRAMES_PER_BATCH,
+    RawJsonlSkippedReason, TranscriptCursorCheckpoint, TranscriptCursorKey, TranscriptIngestError,
+    TranscriptIngestResult, try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit,
 };
-use tracedecay_runtime_core::privacy::{
-    MAX_OBSERVATION_RECORD_BYTES, ParsedClaudeRecordV1, SanitizedClaudeRecordV1,
+use tracedecay_privacy::{
+    MAX_OBSERVATION_RECORD_BYTES, ParsedObservationRecordV1,
     parse_normalized_observation_record_v1, protect_sensitive_structural_id,
 };
 
 use super::PROVIDER;
-use super::cursor::{claude_cursor_key, claude_observation_source_id, claude_source_id};
+use super::cursor::{
+    claude_cursor_key, claude_observation_path_source_id, claude_source_id,
+    claude_stem_observation_source_id,
+};
 
 /// Stable identity available before the durable cursor lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,12 +27,12 @@ pub struct ClaudeSourceScanIdentity {
     pub provider: &'static str,
     pub session_id: String,
     pub source_id: String,
+    /// Stem-derived key from before path keying. A transcript whose physical
+    /// file owns a cursor under it keeps it, so its observation ids never
+    /// change.
+    pub stem_source_id: String,
     pub source_path: PathBuf,
     pub cursor_key: TranscriptCursorKey,
-}
-
-pub(super) struct ClaudeFrameScope {
-    pub project_root: PathBuf,
 }
 
 /// Exact byte coverage achieved by one bounded scan.
@@ -51,6 +55,7 @@ pub enum ClaudeSkippedFrameReason {
     OutOfScope,
     Malformed,
     Oversized,
+    RetainedPrefix,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,70 +66,22 @@ pub struct ClaudeSkippedFrame {
     pub reason: ClaudeSkippedFrameReason,
 }
 
-enum ClaudeFramePayload {
-    Parsed(ParsedClaudeRecordV1),
-    Sanitized(SanitizedClaudeRecordV1),
-    Consumed,
-}
-
 /// One privacy-parsed Claude frame with its exact original source range.
 pub struct ClaudeSourceFrame {
     pub offset: u64,
     pub end_offset: u64,
     pub resume_fingerprint: u64,
-    raw_message_id: Option<String>,
-    raw_tool_event_ids: Vec<String>,
-    raw_hook_tool_use_id: Option<String>,
-    raw_logical_parent_uuid: Option<String>,
     scope_record: Value,
-    payload: ClaudeFramePayload,
+    parsed_record: Option<ParsedObservationRecordV1>,
 }
 
 impl ClaudeSourceFrame {
-    pub fn take_parsed_record(&mut self) -> Option<ParsedClaudeRecordV1> {
-        match std::mem::replace(&mut self.payload, ClaudeFramePayload::Consumed) {
-            ClaudeFramePayload::Parsed(record) => Some(record),
-            other => {
-                self.payload = other;
-                None
-            }
-        }
+    pub fn take_parsed_record(&mut self) -> Option<ParsedObservationRecordV1> {
+        self.parsed_record.take()
     }
 
-    pub fn set_sanitized_record(&mut self, value: SanitizedClaudeRecordV1) -> bool {
-        if !matches!(self.payload, ClaudeFramePayload::Consumed) {
-            return false;
-        }
-        self.payload = ClaudeFramePayload::Sanitized(value);
-        true
-    }
-
-    pub fn sanitized_record(&self) -> Option<&SanitizedClaudeRecordV1> {
-        match &self.payload {
-            ClaudeFramePayload::Sanitized(value) => Some(value),
-            ClaudeFramePayload::Parsed(_) | ClaudeFramePayload::Consumed => None,
-        }
-    }
-
-    #[hotpath::skip]
     pub(super) const fn scope_value(&self) -> &Value {
         &self.scope_record
-    }
-
-    pub(super) fn raw_message_id(&self) -> Option<&str> {
-        self.raw_message_id.as_deref()
-    }
-
-    pub(super) fn raw_tool_event_ids(&self) -> &[String] {
-        &self.raw_tool_event_ids
-    }
-
-    pub(super) fn raw_hook_tool_use_id(&self) -> Option<&str> {
-        self.raw_hook_tool_use_id.as_deref()
-    }
-
-    pub(super) fn raw_logical_parent_uuid(&self) -> Option<&str> {
-        self.raw_logical_parent_uuid.as_deref()
     }
 }
 
@@ -141,7 +98,8 @@ pub struct ClaudeSourceFrameScan {
     pub frames: Vec<ClaudeSourceFrame>,
     pub skipped_frames: Vec<ClaudeSkippedFrame>,
     pub coverage: ClaudeFrameCoverage,
-    pub(super) scope: Option<ClaudeFrameScope>,
+    /// See [`crate::runtime::source::RawNewJsonl::prefix_diverged`].
+    pub prefix_diverged: bool,
 }
 
 /// Identify a Claude transcript before loading its durable cursor.
@@ -149,13 +107,21 @@ pub struct ClaudeSourceFrameScan {
 /// Session identities are privacy-protected here so scan, capture, and
 /// source-cursor lookup/persistence all reuse the same durable key. Public
 /// identifiers are preserved byte-for-byte; credential-shaped stems become
-/// stable `privacy.structural-id.v1.*` digests. The observation source ID is
-/// already an opaque path digest and remains unchanged.
-pub fn identify_claude_source(path: &Path) -> Option<ClaudeSourceScanIdentity> {
+/// stable `privacy.structural-id.v1.*` digests. Both source keys are opaque
+/// digests: `source_id` of the path relative to `projects_dir`, and
+/// `stem_source_id` of the stem alone.
+pub fn identify_claude_source(
+    projects_dir: &Path,
+    path: &Path,
+) -> Option<ClaudeSourceScanIdentity> {
+    if !super::is_claude_session_transcript(path) {
+        return None;
+    }
     let session_id = protect_sensitive_structural_id(&claude_source_id(path)?).ok()?;
     Some(ClaudeSourceScanIdentity {
         provider: PROVIDER,
-        source_id: claude_observation_source_id(path),
+        source_id: claude_observation_path_source_id(projects_dir, path),
+        stem_source_id: claude_stem_observation_source_id(path),
         session_id,
         source_path: path.to_path_buf(),
         cursor_key: claude_cursor_key(path),
@@ -169,7 +135,13 @@ pub fn scan_claude_source_frames(
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
 ) -> Option<ClaudeSourceFrameScan> {
-    match try_scan_claude_source_frames(identity, previous, max_new_bytes) {
+    match try_scan_claude_source_frames_with_resume(
+        identity,
+        previous,
+        max_new_bytes,
+        None,
+        JsonlPrefixRecovery::rescan(),
+    ) {
         Ok(scan) => scan,
         Err(error) => {
             tracing::debug!(error = %error, "skipping Claude transcript scan");
@@ -178,28 +150,36 @@ pub fn scan_claude_source_frames(
     }
 }
 
-pub fn try_scan_claude_source_frames(
-    identity: ClaudeSourceScanIdentity,
-    previous: StoredCursor,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<Option<ClaudeSourceFrameScan>> {
-    try_scan_claude_source_frames_with_resume(identity, previous, max_new_bytes, None)
-}
-
-#[hotpath::measure(label = "sessions.hosts.claude.scan_frames_resume")]
+#[tracing::instrument(
+    name = "sessions.hosts.claude.scan_frames_resume",
+    level = "trace",
+    skip_all
+)]
 pub fn try_scan_claude_source_frames_with_resume(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
     resume_state: Option<JsonlResumeState>,
+    prefix_recovery: JsonlPrefixRecovery,
 ) -> TranscriptIngestResult<Option<ClaudeSourceFrameScan>> {
-    let mut raw = try_stream_new_jsonl_raw_strict_with_resume(
+    let mut raw = match try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
         &identity.source_path,
         previous,
         max_new_bytes,
         MAX_OBSERVATION_RECORD_BYTES,
         resume_state,
-    )?;
+        prefix_recovery,
+        MAX_JSONL_FRAMES_PER_BATCH,
+    ) {
+        // Discovery lists the symlink. A removed target is not a retry: the
+        // next pass would fail the provider on the same missing file.
+        Err(TranscriptIngestError::ScanIo { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(None);
+        }
+        other => other?,
+    };
     let mut frames = Vec::new();
     let mut skipped_frames = raw
         .skipped
@@ -211,60 +191,43 @@ pub fn try_scan_claude_source_frames_with_resume(
             reason: match range.reason {
                 RawJsonlSkippedReason::Whitespace => ClaudeSkippedFrameReason::Whitespace,
                 RawJsonlSkippedReason::Oversized => ClaudeSkippedFrameReason::Oversized,
+                RawJsonlSkippedReason::RetainedPrefix => ClaudeSkippedFrameReason::RetainedPrefix,
             },
         })
         .collect::<Vec<_>>();
 
+    let spawn = super::claude_spawn_parent(&identity.source_path);
+    let spawn = spawn
+        .as_ref()
+        .map(|(session_id, tool_use_id)| ClaudeSpawnParent {
+            session_id,
+            tool_use_id: tool_use_id.as_deref(),
+        });
+    let transcript_path = identity.source_path.to_string_lossy();
     for frame in raw.frames.drain(..) {
-        let Ok(range) = ClaudeByteRangeV1::new(frame.offset, frame.end_offset) else {
+        let Ok(range) = ObservationSourceRangeV1::new(frame.offset, frame.end_offset) else {
             return Ok(None);
         };
-        let mut raw_message_id = None;
-        let mut raw_tool_event_ids = Vec::new();
-        let mut raw_hook_tool_use_id = None;
-        let mut raw_logical_parent_uuid = None;
         let mut scope_record = None;
         let Ok(record) = parse_normalized_observation_record_v1(
             &frame.bytes,
             range,
             ObservationOrderingDomainV1::FileBytes,
             |native| {
-                raw_message_id = native
-                    .pointer("/message/id")
-                    .and_then(Value::as_str)
-                    .or_else(|| native.get("uuid").and_then(Value::as_str))
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_owned);
-                raw_tool_event_ids = native
-                    .pointer("/message/content")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|item| {
-                        item.get("id")
-                            .or_else(|| item.get("tool_use_id"))
-                            .and_then(Value::as_str)
-                            .filter(|id| !id.is_empty())
-                            .map(str::to_owned)
-                    })
-                    .collect();
-                raw_hook_tool_use_id = native
-                    .get("toolUseID")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_owned);
-                raw_logical_parent_uuid = native
-                    .get("logicalParentUuid")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_owned);
                 scope_record = Some(serde_json::json!({
                     "type": native.get("type").cloned().unwrap_or(Value::Null),
                     "cwd": native.get("cwd").cloned().unwrap_or(Value::Null),
                 }));
                 let stable_record_id =
                     stable_record_id(&native, &identity.session_id, frame.offset)?;
-                normalize(&native, &identity.session_id, stable_record_id, range)
+                normalize_spawned(
+                    &native,
+                    &identity.session_id,
+                    spawn,
+                    Some(transcript_path.as_ref()),
+                    stable_record_id,
+                    range,
+                )
             },
         ) else {
             skipped_frames.push(ClaudeSkippedFrame {
@@ -279,12 +242,8 @@ pub fn try_scan_claude_source_frames_with_resume(
             offset: frame.offset,
             end_offset: frame.end_offset,
             resume_fingerprint: frame.resume_fingerprint,
-            raw_message_id,
-            raw_tool_event_ids,
-            raw_hook_tool_use_id,
-            raw_logical_parent_uuid,
             scope_record: scope_record.unwrap_or(Value::Null),
-            payload: ClaudeFramePayload::Parsed(record),
+            parsed_record: Some(record),
         });
     }
 
@@ -316,7 +275,7 @@ pub fn try_scan_claude_source_frames_with_resume(
         frames,
         skipped_frames,
         coverage,
-        scope: None,
+        prefix_diverged: raw.prefix_diverged,
     }))
 }
 
@@ -344,10 +303,16 @@ mod tests {
         });
         std::fs::write(&path, format!("{native}\n")).unwrap();
 
-        let identity = identify_claude_source(&path).unwrap();
-        let mut scan = try_scan_claude_source_frames(identity, StoredCursor::default(), None)
-            .unwrap()
-            .unwrap();
+        let identity = identify_claude_source(temp.path(), &path).unwrap();
+        let mut scan = try_scan_claude_source_frames_with_resume(
+            identity,
+            StoredCursor::default(),
+            None,
+            None,
+            JsonlPrefixRecovery::rescan(),
+        )
+        .unwrap()
+        .unwrap();
         let parsed = scan.frames[0].take_parsed_record().unwrap();
         let envelope =
             serde_json::from_value::<CanonicalObservationEnvelopeV1>(parsed.value().clone())

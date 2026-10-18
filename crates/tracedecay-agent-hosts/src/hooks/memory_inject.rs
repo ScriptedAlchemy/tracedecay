@@ -6,12 +6,16 @@
 //! host-integration configuration gate.
 
 /// Whether daemon-owned memory guidance is enabled: the environment override
-/// wins when set, otherwise the user configuration applies.
-pub fn memory_injection_enabled() -> bool {
-    injection_enabled_from(
+/// wins when set, otherwise the configuration of the profile whose data
+/// directory is `profile_root` applies.
+pub fn memory_injection_enabled(
+    profile_root: &std::path::Path,
+) -> Result<bool, tracedecay_session_memory::user_config::ConfigSaveError> {
+    Ok(injection_enabled_from(
         std::env::var("TRACEDECAY_MEMORY_INJECTION").ok().as_deref(),
-        crate::user_config::UserConfig::load().memory_injection_enabled,
-    )
+        tracedecay_session_memory::user_config::UserConfig::load(profile_root)?
+            .memory_injection_enabled,
+    ))
 }
 
 fn injection_enabled_from(env_value: Option<&str>, config_flag: bool) -> bool {

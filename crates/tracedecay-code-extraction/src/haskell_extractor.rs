@@ -1,30 +1,29 @@
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 pub struct HaskellExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         let file_node_id = generate_node_id(file_path, &NodeKind::File, file_path, 0);
         Self {
             nodes: Vec::new(),
@@ -32,16 +31,14 @@ impl ExtractionState {
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     fn emit(
@@ -54,7 +51,7 @@ impl ExtractionState {
         docstring: Option<String>,
     ) {
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&self.file_path, &kind, &name, start_line);
+        let id = local_node_id(&self.file_path, self.source, &kind, &name, node);
         let graph_node = Node {
             id: id.clone(),
             kind,
@@ -77,6 +74,7 @@ impl ExtractionState {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: self.timestamp,
             parent_id: None,
         };
@@ -91,25 +89,6 @@ impl ExtractionState {
 }
 
 impl HaskellExtractor {
-    pub fn extract_haskell(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(t) => t,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -127,7 +106,7 @@ impl HaskellExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -141,6 +120,7 @@ impl HaskellExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -155,10 +135,6 @@ impl HaskellExtractor {
             scope,
             metrics,
         )
-    }
-
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("haskell", "Haskell", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -197,7 +173,7 @@ impl HaskellExtractor {
     }
 
     fn visit_bind(state: &mut ExtractionState, node: TsNode<'_>) {
-        // `bind` is a pattern binding — skip signatures, only emit function-shaped binds.
+        // `bind` is a pattern binding. Skip signatures, only emit function-shaped binds.
         let name = Self::extract_function_name(state, node);
         let Some(name) = name else { return };
 
@@ -268,7 +244,7 @@ impl HaskellExtractor {
             .to_string();
 
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -292,6 +268,7 @@ impl HaskellExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -308,7 +285,7 @@ impl HaskellExtractor {
     fn extract_function_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // Try the `name` field first.
         if let Some(n) = node.child_by_field_name("name") {
-            return Some(state.node_text(n));
+            return Some(state.node_text(n).to_string());
         }
         // Fall back to first child with kind "variable" or "operator".
         let mut cursor = node.walk();
@@ -316,7 +293,7 @@ impl HaskellExtractor {
             loop {
                 let child = cursor.node();
                 if matches!(child.kind(), "variable" | "operator" | "prefix_id") {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -335,7 +312,7 @@ impl HaskellExtractor {
                 if matches!(child.kind(), "constructor" | "type" | "name") {
                     let text = state.node_text(child);
                     if text.chars().next().is_some_and(char::is_uppercase) {
-                        return Some(text);
+                        return Some(text.to_string());
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -371,17 +348,16 @@ impl crate::LanguageExtractor for HaskellExtractor {
         "Haskell"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_haskell(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

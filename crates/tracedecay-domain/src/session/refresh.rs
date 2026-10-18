@@ -112,10 +112,6 @@ impl SessionRefreshKeyV1 {
         &self.sources
     }
 
-    pub fn store_root_id(&self) -> &str {
-        &self.store_root_id
-    }
-
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }

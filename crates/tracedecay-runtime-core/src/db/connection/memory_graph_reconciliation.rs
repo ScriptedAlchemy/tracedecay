@@ -3,8 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use tokio::sync::Notify;
-use tokio::task::JoinHandle;
+use asupersync::{
+    Budget, Cx,
+    runtime::{JoinError, TaskHandle},
+    sync::Notify,
+};
 
 use super::{Database, WeakDatabase};
 
@@ -12,9 +15,10 @@ const AUTOMATIC_RETRY_LIMIT: u32 = 3;
 const AUTOMATIC_RETRY_BASE: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MemoryGraphReconciliationTaskScheduleV1 {
+pub enum MemoryGraphReconciliationTaskScheduleV1 {
     Scheduled,
     AlreadyScheduled,
+    RuntimeUnavailable,
     Retiring,
     Closed,
 }
@@ -26,6 +30,7 @@ pub enum MemoryGraphReconciliationRetirementBlockerV1 {
     Pending,
     Running,
     InFlightWeakUpgrade,
+    InlinePass,
     RetainedJoinWork,
     Retiring,
     Closed,
@@ -61,7 +66,7 @@ pub enum MemoryGraphReconciliationRetirementTerminalV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryGraphReconciliationRetirementStartErrorV1 {
     RetirementReserved,
-    TokioRuntimeUnavailable,
+    RuntimeUnavailable,
 }
 
 /// A non-destructive fence over an idle reconciliation coordinator.
@@ -96,7 +101,7 @@ pub struct ProjectMemoryReconciliationTelemetrySnapshotV1 {
 }
 
 #[derive(Default)]
-pub(crate) struct ProjectMemoryReconciliationTelemetryV1 {
+pub struct ProjectMemoryReconciliationTelemetryV1 {
     reconciliation_passes: AtomicU64,
     active_reconciliation_pass_count: AtomicU64,
     source_rows_loaded: AtomicU64,
@@ -110,7 +115,7 @@ pub struct ProjectMemoryReconciliationTelemetryObserverV1 {
     database: Weak<super::registry::DatabaseInner>,
 }
 
-pub(crate) struct ProjectMemoryReconciliationPassLeaseV1 {
+pub struct ProjectMemoryReconciliationPassLeaseV1 {
     telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
 }
 
@@ -177,12 +182,12 @@ impl ProjectMemoryReconciliationTelemetryV1 {
         })
     }
 
-    pub(crate) fn record_source_load(&self, rows: u64, bytes: u64) -> Result<(), &'static str> {
+    pub fn record_source_load(&self, rows: u64, bytes: u64) -> Result<(), &'static str> {
         increment_counter(&self.source_rows_loaded, rows, "source rows loaded")?;
         increment_counter(&self.source_bytes_loaded, bytes, "source bytes loaded")
     }
 
-    pub(crate) fn record_publication_attempt(&self) -> Result<(), &'static str> {
+    pub fn record_publication_attempt(&self) -> Result<(), &'static str> {
         increment_counter(&self.publication_attempts, 1, "publication attempts")
     }
 }
@@ -201,7 +206,7 @@ fn increment_counter(
     counter_name: &'static str,
 ) -> Result<(), &'static str> {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             current.checked_add(increment)
         })
         .map(|_| ())
@@ -210,7 +215,7 @@ fn increment_counter(
 
 fn decrement_counter(counter: &AtomicU64, counter_name: &'static str) -> Result<(), &'static str> {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             current.checked_sub(1)
         })
         .map(|_| ())
@@ -226,11 +231,26 @@ struct MemoryGraphReconciliationTaskStateV1 {
     pending: bool,
     running: bool,
     in_flight_weak_upgrades: usize,
+    /// Post-write reconciliation passes running outside the worker. They hold
+    /// the verified graph runtime and a graph lease, so shutdown must join
+    /// them like workers before the retained graph owner can close.
+    inline_passes: usize,
     current_identity: Option<Arc<()>>,
-    current: Option<JoinHandle<()>>,
-    retired: Vec<JoinHandle<()>>,
+    current: Option<TaskHandle<()>>,
+    retired: Vec<TaskHandle<()>>,
     joining: bool,
     joining_task_count: usize,
+    /// Bumped under this lock by every worker wake. The worker waits for it
+    /// to move past the value it last checked, so a wake that lands between
+    /// that check and the wait is never lost.
+    wakes: u64,
+}
+
+impl MemoryGraphReconciliationTaskStateV1 {
+    fn wake_worker(&mut self, wake: &Notify) {
+        self.wakes = self.wakes.wrapping_add(1);
+        wake.notify_waiters();
+    }
 }
 
 struct MemoryGraphReconciliationSharedV1 {
@@ -324,13 +344,20 @@ impl MemoryGraphReconciliationCoordinatorV1 {
         if state.retirement_reserved {
             return MemoryGraphReconciliationTaskScheduleV1::Retiring;
         }
+        let Some(runtime) = crate::native_runtime::handle() else {
+            return MemoryGraphReconciliationTaskScheduleV1::RuntimeUnavailable;
+        };
+        let Ok(settlement) = runtime.try_request_cx_with_budget(Budget::INFINITE) else {
+            return MemoryGraphReconciliationTaskScheduleV1::RuntimeUnavailable;
+        };
+        let was_pending = state.pending;
         state.pending = true;
         if state
             .current
             .as_ref()
             .is_some_and(|task| !task.is_finished())
         {
-            self.shared.wake.notify_one();
+            state.wake_worker(&self.shared.wake);
             return MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled;
         }
         if let Some(finished) = state.current.take() {
@@ -341,21 +368,36 @@ impl MemoryGraphReconciliationCoordinatorV1 {
         let weak_shared = Arc::downgrade(&self.shared);
         let wake = Arc::clone(&self.shared.wake);
         let task_identity = Arc::clone(&worker_identity);
-        let task = tokio::spawn(async move {
-            run_memory_graph_reconciliation_worker(
+        let task = settlement.spawn(move |cx| async move {
+            let worker = run_memory_graph_reconciliation_worker(
+                &cx,
                 weak_shared,
                 task_identity,
                 wake,
                 weak_database,
                 operation,
-            )
+            );
+            let mut worker = std::pin::pin!(worker);
+            std::future::poll_fn(|context| {
+                if cx.checkpoint().is_err() {
+                    return std::task::Poll::Ready(());
+                }
+                worker.as_mut().poll(context)
+            })
             .await;
         });
+        let task = match task {
+            Ok(task) => task,
+            Err(_) => {
+                state.pending = was_pending;
+                return MemoryGraphReconciliationTaskScheduleV1::RuntimeUnavailable;
+            }
+        };
         // The worker needs this same state lock before its first pass, so the
         // join handle is retained before the task can complete or be replaced.
         state.current_identity = Some(worker_identity);
         state.current = Some(task);
-        self.shared.wake.notify_one();
+        state.wake_worker(&self.shared.wake);
         MemoryGraphReconciliationTaskScheduleV1::Scheduled
     }
 
@@ -376,6 +418,45 @@ impl MemoryGraphReconciliationCoordinatorV1 {
             + state.retired.len()
             + state.joining_task_count
             + usize::from(state.retirement_task_running)
+    }
+
+    /// Admits one reconciliation pass that runs inline in a caller-owned task
+    /// (the post-write publication) instead of the scheduled worker. `None`
+    /// once admission is closed or a retirement fence is held: the pass must
+    /// not start, exactly like a refused schedule.
+    pub(super) fn begin_inline_pass(&self) -> Option<MemoryGraphReconciliationInlinePassV1> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting || state.retirement_reserved {
+            return None;
+        }
+        state.inline_passes = state.inline_passes.saturating_add(1);
+        Some(MemoryGraphReconciliationInlinePassV1 {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+}
+
+/// One admitted inline reconciliation pass. Dropping it (normal completion,
+/// error, or the owning task being aborted) releases the join blocker and
+/// wakes a shutdown join waiting on it.
+pub struct MemoryGraphReconciliationInlinePassV1 {
+    shared: Arc<MemoryGraphReconciliationSharedV1>,
+}
+
+impl Drop for MemoryGraphReconciliationInlinePassV1 {
+    fn drop(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.inline_passes = state.inline_passes.saturating_sub(1);
+        drop(state);
+        self.shared.joined.notify_waiters();
     }
 }
 
@@ -447,6 +528,7 @@ impl Drop for MemoryGraphReconciliationWorkerGuardV1 {
 }
 
 async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
+    cx: &Cx,
     weak_shared: Weak<MemoryGraphReconciliationSharedV1>,
     identity: Arc<()>,
     wake: Arc<Notify>,
@@ -462,11 +544,10 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
     };
     let mut automatic_failures = 0_u32;
     loop {
-        let notified = wake.notified();
         let Some(shared) = weak_shared.upgrade() else {
             return;
         };
-        let should_run = {
+        let (should_run, checked) = {
             let mut state = shared
                 .state
                 .lock()
@@ -474,14 +555,14 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
             if !state.accepting {
                 return;
             }
-            if state.pending {
+            let should_run = state.pending;
+            if should_run {
                 state.pending = false;
                 state.running = true;
-                true
-            } else {
-                false
             }
+            (should_run, state.wakes)
         };
+        let notified = wait_for_wake(&wake, &weak_shared, checked);
         if !should_run {
             drop(shared);
             notified.await;
@@ -514,7 +595,6 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
                 let retry_delay = (automatic_failures < AUTOMATIC_RETRY_LIMIT).then(|| {
                     let delay = AUTOMATIC_RETRY_BASE.saturating_mul(1 << automatic_failures);
                     automatic_failures += 1;
-                    hotpath::gauge!("runtime_core.memory_graph.worker_retries").inc(1.0);
                     delay
                 });
                 Some((false, retry_delay))
@@ -532,9 +612,11 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
         }
         if let Some(delay) = retry_delay {
             drop(shared);
-            tokio::select! {
-                () = tokio::time::sleep(delay) => {}
-                () = notified => automatic_failures = 0,
+            if asupersync::time::timeout(cx.now(), delay, notified)
+                .await
+                .is_ok()
+            {
+                automatic_failures = 0;
             }
         } else {
             drop(shared);
@@ -542,6 +624,28 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
             automatic_failures = 0;
         }
     }
+}
+
+/// Waits until a worker wake lands after `checked`, or the coordinator is
+/// gone. Asupersync's `Notify::notified` arms only when first polled, so a
+/// broadcast between the worker's state check and that poll would be lost;
+/// `wait_until` arms before it reads `wakes`.
+async fn wait_for_wake(
+    wake: &Notify,
+    weak_shared: &Weak<MemoryGraphReconciliationSharedV1>,
+    checked: u64,
+) {
+    wake.wait_until(|| {
+        weak_shared.upgrade().is_none_or(|shared| {
+            shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .wakes
+                != checked
+        })
+    })
+    .await;
 }
 
 impl MemoryGraphReconciliationTaskOwnerV1 {
@@ -566,7 +670,7 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         }
         state.accepting = false;
         state.pending = false;
-        self.shared.wake.notify_waiters();
+        state.wake_worker(&self.shared.wake);
         Ok(())
     }
 
@@ -600,6 +704,9 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         if state.in_flight_weak_upgrades != 0 {
             return Err(MemoryGraphReconciliationRetirementBlockerV1::InFlightWeakUpgrade);
         }
+        if state.inline_passes != 0 {
+            return Err(MemoryGraphReconciliationRetirementBlockerV1::InlinePass);
+        }
         if state.joining || !state.retired.is_empty() || state.joining_task_count != 0 {
             return Err(MemoryGraphReconciliationRetirementBlockerV1::RetainedJoinWork);
         }
@@ -610,7 +717,6 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         })
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(
         &self,
     ) -> std::result::Result<
@@ -637,9 +743,11 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         {
             return Err(MemoryGraphReconciliationRetirementStartErrorV1::RetirementReserved);
         }
-        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
-            MemoryGraphReconciliationRetirementStartErrorV1::TokioRuntimeUnavailable
-        })?;
+        let runtime = crate::native_runtime::handle()
+            .ok_or(MemoryGraphReconciliationRetirementStartErrorV1::RuntimeUnavailable)?;
+        let settlement = runtime
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|_| MemoryGraphReconciliationRetirementStartErrorV1::RuntimeUnavailable)?;
         {
             let mut state = shared
                 .state
@@ -658,23 +766,24 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
             state.retirement_reserved = false;
             state.retirement_task_running = true;
             state.retirement_terminal = None;
-            shared.wake.notify_waiters();
+            state.wake_worker(&shared.wake);
         }
         let owner = self.clone();
         let finalizer =
             MemoryGraphReconciliationRetirementTaskFinalizerV1::new(Arc::clone(&shared));
-        let task = runtime.spawn(async move {
-            let mut finalizer = finalizer;
-            finalizer.finish(owner.cancel_and_join().await);
-        });
+        let task = settlement
+            .spawn(move |cx| async move {
+                let mut finalizer = finalizer;
+                finalizer.finish(owner.cancel_and_join(&cx).await);
+            })
+            .map_err(|_| MemoryGraphReconciliationRetirementStartErrorV1::RuntimeUnavailable)?;
         drop(task);
         Ok(MemoryGraphReconciliationRetirementReceiptV1 { shared })
     }
 
-    #[hotpath::skip]
-    async fn cancel_and_join(&self) -> MemoryGraphReconciliationRetirementTerminalV1 {
+    async fn cancel_and_join(&self, cx: &Cx) -> MemoryGraphReconciliationRetirementTerminalV1 {
         let cancellation_error = (self.cancel_reconciliation)().err();
-        let joined = self.join_workers().await;
+        let joined = self.join_workers(cx).await;
         match (cancellation_error, joined) {
             (None, terminal) => terminal,
             (
@@ -691,40 +800,35 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         }
     }
 
-    #[hotpath::skip]
-    async fn join_workers(&self) -> MemoryGraphReconciliationRetirementTerminalV1 {
-        loop {
-            let joined = self.shared.joined.notified();
-            let tasks = {
+    async fn join_workers(&self, cx: &Cx) -> MemoryGraphReconciliationRetirementTerminalV1 {
+        let mut tasks = Vec::new();
+        self.shared
+            .joined
+            .wait_until(|| {
                 let mut state = self
                     .shared
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if state.joining {
-                    None
-                } else {
-                    state.joining = true;
-                    let mut tasks = std::mem::take(&mut state.retired);
-                    if let Some(current) = state.current.take() {
-                        tasks.push(current);
-                    }
-                    state.joining_task_count = tasks.len();
-                    Some(tasks)
+                    return false;
                 }
-            };
-            let Some(tasks) = tasks else {
-                joined.await;
-                continue;
-            };
-            return self.join(tasks).await;
-        }
+                state.joining = true;
+                tasks = std::mem::take(&mut state.retired);
+                if let Some(current) = state.current.take() {
+                    tasks.push(current);
+                }
+                state.joining_task_count = tasks.len();
+                true
+            })
+            .await;
+        self.join(cx, tasks).await
     }
 
-    #[hotpath::skip]
     async fn join(
         &self,
-        tasks: Vec<JoinHandle<()>>,
+        cx: &Cx,
+        tasks: Vec<TaskHandle<()>>,
     ) -> MemoryGraphReconciliationRetirementTerminalV1 {
         let mut lease = MemoryGraphReconciliationJoinLeaseV1 {
             shared: Arc::clone(&self.shared),
@@ -736,16 +840,30 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
                 let Some(task) = lease.tasks.last_mut() else {
                     break;
                 };
-                task.await
+                task.join(cx).await
             };
             lease.remove_completed_task();
             match result {
                 Ok(()) => {}
-                Err(error) if error.is_cancelled() => {}
+                Err(JoinError::Cancelled(_)) => {}
                 Err(_) => worker_panicked = true,
             }
         }
         drop(lease);
+        // Admission is already closed, so no new inline pass can start; wait
+        // for the ones admitted before cancellation to release their graph
+        // runtime. The owner's deadline still bounds this like the task joins.
+        self.shared
+            .joined
+            .wait_until(|| {
+                self.shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .inline_passes
+                    == 0
+            })
+            .await;
         if worker_panicked {
             MemoryGraphReconciliationRetirementTerminalV1::WorkerPanicked
         } else {
@@ -763,25 +881,35 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
 }
 
 impl MemoryGraphReconciliationRetirementReceiptV1 {
-    #[hotpath::skip]
     pub(in crate::db) async fn wait(self) -> MemoryGraphReconciliationRetirementTerminalV1 {
+        let mut terminal = None;
         loop {
-            let settled = self.shared.joined.notified();
-            let terminal = self
-                .shared
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retirement_terminal;
+            // `wait_until` returns only after it saw a terminal, so this
+            // loop body runs once.
+            self.shared
+                .joined
+                .wait_until(|| {
+                    terminal = self
+                        .shared
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .retirement_terminal;
+                    #[cfg(test)]
+                    if terminal.is_none() {
+                        tests::pause_after_receipt_check();
+                    }
+                    terminal.is_some()
+                })
+                .await;
             if let Some(terminal) = terminal {
                 return terminal;
             }
-            settled.await;
         }
     }
 }
 
-/// Guarantees a terminal receipt even when Tokio aborts the detached
+/// Guarantees a terminal receipt even when Asupersync aborts the detached
 /// cancellation-and-join task during runtime teardown.
 struct MemoryGraphReconciliationRetirementTaskFinalizerV1 {
     shared: Arc<MemoryGraphReconciliationSharedV1>,
@@ -845,7 +973,6 @@ impl MemoryGraphReconciliationRetirementReservationV1 {
     /// state. This is the only public completion boundary; callers cannot
     /// accidentally retain a detached receipt while proceeding to graph or
     /// Store close.
-    #[hotpath::skip]
     pub async fn commit_and_wait(
         self,
     ) -> std::result::Result<
@@ -869,14 +996,14 @@ impl Drop for MemoryGraphReconciliationRetirementReservationV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.accepting {
             state.retirement_reserved = false;
-            self.owner.shared.wake.notify_waiters();
+            state.wake_worker(&self.owner.shared.wake);
         }
     }
 }
 
 struct MemoryGraphReconciliationJoinLeaseV1 {
     shared: Arc<MemoryGraphReconciliationSharedV1>,
-    tasks: Vec<JoinHandle<()>>,
+    tasks: Vec<TaskHandle<()>>,
 }
 
 impl MemoryGraphReconciliationJoinLeaseV1 {
@@ -914,7 +1041,7 @@ mod tests {
     use std::sync::Weak;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use tokio::sync::Notify;
+    use asupersync::sync::Notify;
 
     use super::*;
     use crate::db::connection::registry::{DatabaseClientLeaseV1, DatabaseInner};
@@ -938,14 +1065,39 @@ mod tests {
         (owner, cancelled)
     }
 
+    /// Waits for a coordinator state transition, bounded by wall clock.
+    ///
+    /// Some of these tests drive a multi-threaded runtime, so the transition is
+    /// completed by a reconciliation worker on a *different* thread. A bound
+    /// counted in `yield_now()` polls measures nothing about that thread's
+    /// progress: the waiting task burns hundreds of yields in microseconds
+    /// while the worker is merely waiting to be scheduled, which reports a
+    /// descheduled runtime as a stuck state machine whenever the host is
+    /// contended. Yield first so an uncontended run stays instant, then fall
+    /// back to short sleeps that leave the core to the worker.
     async fn wait_until(mut predicate: impl FnMut() -> bool) {
-        for _ in 0..256 {
+        const YIELD_ATTEMPTS: usize = 256;
+        const WAIT_LIMIT: Duration = Duration::from_secs(10);
+
+        let deadline = std::time::Instant::now() + WAIT_LIMIT;
+        let mut yields = 0_usize;
+        loop {
             if predicate() {
                 return;
             }
-            tokio::task::yield_now().await;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "memory graph reconciliation task did not reach expected state \
+                 within {WAIT_LIMIT:?}"
+            );
+            if yields < YIELD_ATTEMPTS {
+                yields += 1;
+                asupersync::runtime::yield_now().await;
+            } else {
+                asupersync::time::sleep(Cx::current().unwrap().now(), Duration::from_millis(1))
+                    .await;
+            }
         }
-        panic!("memory graph reconciliation task did not reach expected state");
     }
 
     fn reconciliation_retirement_is_admissible(
@@ -960,7 +1112,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn cancellation_before_start_refuses_task_admission() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, cancelled) = task_owner(&coordinator);
@@ -986,7 +1138,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn failed_pass_and_concurrent_trigger_have_no_lost_wakeup() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
@@ -1027,7 +1179,7 @@ mod tests {
         owner.shutdown().await.expect("join reconciler worker");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn shutdown_observation_counts_join_lease_tasks_until_join_completes() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
@@ -1051,7 +1203,10 @@ mod tests {
         started.notified().await;
 
         let shutdown_owner = owner.clone();
-        let shutdown = tokio::spawn(async move { shutdown_owner.shutdown().await });
+        let mut shutdown = Cx::current()
+            .unwrap()
+            .spawn(move |_cx| async move { shutdown_owner.shutdown().await })
+            .unwrap();
         wait_until(|| {
             let state = coordinator
                 .shared
@@ -1065,6 +1220,7 @@ mod tests {
 
         release.notify_one();
         let terminal = shutdown
+            .join(&Cx::current().unwrap())
             .await
             .expect("shutdown task must not panic")
             .expect("shutdown must join retained reconciliation task");
@@ -1075,17 +1231,20 @@ mod tests {
         assert_eq!(coordinator.retained_task_count(), 0);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[asupersync::test]
     async fn transient_failure_retries_without_a_later_write_trigger() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
         let calls = Arc::new(AtomicUsize::new(0));
         let succeeded = Arc::new(Notify::new());
+        let attempt_times = Arc::new(Mutex::new(Vec::new()));
+        let task_times = Arc::clone(&attempt_times);
         let task_calls = Arc::clone(&calls);
         let task_succeeded = Arc::clone(&succeeded);
 
         assert_eq!(
             coordinator.schedule_weak(closed_database(), move |_| {
+                task_times.lock().unwrap().push(std::time::Instant::now());
                 let call = task_calls.fetch_add(1, Ordering::SeqCst);
                 let task_succeeded = Arc::clone(&task_succeeded);
                 async move {
@@ -1099,46 +1258,24 @@ mod tests {
             }),
             MemoryGraphReconciliationTaskScheduleV1::Scheduled
         );
-        // The first failed pass retries immediately through the wake permit
-        // its own schedule stored; the second failure has no permit left, so
-        // the worker re-arms itself and parks on its backoff timer. The
-        // worker publishes that re-armed state and registers its timer
-        // within one poll, so on this single-threaded paused runtime the
-        // explicit advances below race with nothing.
-        wait_until(|| {
-            let state = coordinator
-                .shared
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            calls.load(Ordering::SeqCst) == 2 && state.pending && !state.running
-        })
-        .await;
-
-        let just_before_retry = AUTOMATIC_RETRY_BASE
-            .checked_sub(Duration::from_millis(1))
-            .expect("automatic retry base exceeds one millisecond");
-        tokio::time::advance(just_before_retry).await;
-        for _ in 0..64 {
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "automatic retry must wait out its full base backoff"
-        );
-
-        tokio::time::advance(Duration::from_millis(1)).await;
-        tokio::time::timeout(Duration::from_secs(1), succeeded.notified())
-            .await
-            .expect("lifecycle retry must settle without another write");
+        asupersync::time::timeout(
+            Cx::current().unwrap().now(),
+            Duration::from_secs(1),
+            succeeded.notified(),
+        )
+        .await
+        .expect("lifecycle retry must settle without another write");
         wait_until(|| reconciliation_retirement_is_admissible(&owner)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+        {
+            let attempt_times = attempt_times.lock().unwrap();
+            assert!(attempt_times[2].duration_since(attempt_times[1]) >= AUTOMATIC_RETRY_BASE);
+        }
         assert!(!owner.pending());
         owner.shutdown().await.expect("join reconciler worker");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn panicked_worker_clears_matching_running_identity() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
@@ -1169,7 +1306,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[asupersync::test(flavor = "multi_thread", workers = 2)]
     async fn installed_handle_remains_current_across_idle_reschedule_and_shutdown() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, cancelled) = task_owner(&coordinator);
@@ -1214,11 +1351,15 @@ mod tests {
         owner.cancel().expect("cancel reconciliation");
         assert!(cancelled.load(Ordering::Acquire));
         let shutdown_owner = owner.clone();
-        let shutdown = tokio::spawn(async move { shutdown_owner.shutdown().await });
-        tokio::task::yield_now().await;
+        let mut shutdown = Cx::current()
+            .unwrap()
+            .spawn(move |_cx| async move { shutdown_owner.shutdown().await })
+            .unwrap();
+        asupersync::runtime::yield_now().await;
         assert!(!shutdown.is_finished());
         block_second.notify_one();
         let terminal = shutdown
+            .join(&Cx::current().unwrap())
             .await
             .expect("join shutdown task")
             .expect("cancel and join current persistent worker");
@@ -1232,7 +1373,48 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
+    async fn shutdown_joins_an_admitted_inline_pass_before_reporting_terminal() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, cancelled) = task_owner(&coordinator);
+        let pass = coordinator
+            .begin_inline_pass()
+            .expect("inline pass is admitted while accepting");
+        assert_eq!(
+            owner.reserve_retirement().err(),
+            Some(MemoryGraphReconciliationRetirementBlockerV1::InlinePass)
+        );
+
+        let mut shutdown = std::pin::pin!(owner.shutdown());
+        assert!(
+            std::future::poll_fn(|context| {
+                std::task::Poll::Ready(shutdown.as_mut().poll(context))
+            })
+            .await
+            .is_pending()
+        );
+        wait_until(|| cancelled.load(Ordering::Acquire)).await;
+        assert!(
+            std::future::poll_fn(|context| {
+                std::task::Poll::Ready(shutdown.as_mut().poll(context))
+            })
+            .await
+            .is_pending(),
+            "shutdown must not report terminal while an inline pass holds the runtime"
+        );
+        assert!(
+            coordinator.begin_inline_pass().is_none(),
+            "no inline pass may start after cancellation"
+        );
+
+        drop(pass);
+        assert_eq!(
+            shutdown.await.expect("shutdown starts"),
+            MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined
+        );
+    }
+
+    #[asupersync::test]
     async fn idle_retirement_reservation_fences_new_schedules_and_drop_restores_them() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
@@ -1253,7 +1435,7 @@ mod tests {
         owner.shutdown().await.expect("join reconciler worker");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn reservation_refuses_cancel_and_drop_restores_admission() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, cancelled) = task_owner(&coordinator);
@@ -1284,7 +1466,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn reservation_refuses_shutdown_and_drop_restores_admission() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, cancelled) = task_owner(&coordinator);
@@ -1315,7 +1497,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn active_reconciliation_refuses_retirement_without_mutating_admission() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
@@ -1351,7 +1533,7 @@ mod tests {
         owner.shutdown().await.expect("join reconciler worker");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn aborting_a_worker_releases_its_weak_upgrade_fence() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
@@ -1401,7 +1583,7 @@ mod tests {
             .expect("join aborted reconciliation worker");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn idle_worker_does_not_retain_its_coordinator_after_the_source_drops() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
@@ -1426,7 +1608,7 @@ mod tests {
         wait_until(|| weak_shared.upgrade().is_none()).await;
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn active_weak_upgrade_does_not_self_retain_its_coordinator() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let weak_shared = Arc::downgrade(&coordinator.shared);
@@ -1452,7 +1634,7 @@ mod tests {
         wait_until(|| weak_shared.upgrade().is_none()).await;
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn retry_wait_does_not_retain_its_coordinator_after_the_source_drops() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let weak_shared = Arc::downgrade(&coordinator.shared);
@@ -1483,7 +1665,7 @@ mod tests {
         wait_until(|| weak_shared.upgrade().is_none()).await;
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn committed_retirement_settles_after_the_requester_drops_its_receipt() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, cancelled) = task_owner(&coordinator);
@@ -1507,28 +1689,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn retirement_commit_and_wait_returns_the_terminal_state() {
-        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
-        let (owner, cancelled) = task_owner(&coordinator);
-
-        assert_eq!(
-            owner
-                .reserve_retirement()
-                .expect("idle reconciler retirement reservation")
-                .commit_and_wait()
-                .await
-                .expect("commit and wait for reconciliation retirement"),
-            MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined
-        );
-        assert!(cancelled.load(Ordering::Acquire));
-        assert_eq!(
-            coordinator.schedule_weak(closed_database(), |_| async { true }),
-            MemoryGraphReconciliationTaskScheduleV1::Closed
-        );
-    }
-
-    #[tokio::test]
+    #[asupersync::test]
     async fn retirement_receipt_reports_runtime_unavailable_without_erasing_it() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let owner = coordinator.task_owner(Arc::new(|| {
@@ -1547,30 +1708,55 @@ mod tests {
     }
 
     #[test]
-    fn dropping_an_undriven_runtime_records_a_typed_retirement_terminal() {
+    fn dropping_an_undriven_runtime_settles_its_retained_retirement() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build undriven test runtime");
-        let receipt = {
-            let _entered = runtime.enter();
+        let receipt = runtime.block_on(async {
             owner
                 .reserve_retirement()
                 .expect("idle reconciler retirement reservation")
                 .commit()
                 .expect("linearize reconciliation retirement")
-        };
+        });
         drop(runtime);
-        let observer = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+        let observer = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build terminal observer runtime");
 
+        // A native runtime drains its tasks when it drops, so the retained
+        // retirement still cancels and joins the reconcilers it fenced.
         assert_eq!(
             observer.block_on(receipt.wait()),
-            MemoryGraphReconciliationRetirementTerminalV1::RetainedTaskAborted
+            MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined
+        );
+    }
+
+    thread_local! {
+        static RECEIPT_CHECK_PAUSE: std::cell::Cell<Duration> =
+            const { std::cell::Cell::new(Duration::ZERO) };
+    }
+
+    /// Stands in for the waiter being preempted after a receipt check found
+    /// no terminal, which lets the retirement publish inside that gap.
+    pub(super) fn pause_after_receipt_check() {
+        std::thread::sleep(RECEIPT_CHECK_PAUSE.get());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_settles_when_retirement_publishes_after_the_receipt_check() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, _) = task_owner(&coordinator);
+        RECEIPT_CHECK_PAUSE.set(Duration::from_millis(20));
+        let terminal = tokio::time::timeout(Duration::from_secs(5), owner.shutdown())
+            .await
+            .expect("shutdown hung: the retirement broadcast was lost")
+            .expect("shutdown starts");
+        assert_eq!(
+            terminal,
+            MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined
         );
     }
 }

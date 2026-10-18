@@ -1,39 +1,92 @@
-use tracedecay_domain::{
-    CredentialRevocationReceiptV1, CredentialRotationReceiptV1, EnrollmentCredentialRecordV1,
-};
+use tracedecay_contracts::remote::auth::revoke_credential;
+use tracedecay_domain::{CredentialRevocationReceiptV1, EnrollmentCredentialRecordV1};
 
 use super::*;
 
 impl RemoteSqliteStorageV1 {
-    pub fn rotate_enrollment(
+    /// Revokes every enrollment `node_id` holds in this store and returns one
+    /// receipt per enrollment. A row revoked earlier keeps its original
+    /// revocation and receipt and is not rewritten, so a repeat, or a rerun
+    /// after a crash between rows, converges on the same state.
+    pub fn revoke_node_enrollments(
         &self,
-        expected: &EnrollmentCredentialRecordV1,
-        replacement: &EnrollmentCredentialRecordV1,
-        receipt: &CredentialRotationReceiptV1,
-    ) -> Result<(), RemoteSqliteStorageErrorV1> {
-        expected
-            .validate()
+        node_id: &BrainNodeId,
+        revoked_at: UtcMicros,
+    ) -> Result<Vec<CredentialRevocationReceiptV1>, RemoteSqliteStorageErrorV1> {
+        let rows = query(
+            self.handle(),
+            "SELECT enrollment_json FROM remote_enrollments
+             WHERE node_id = ?1 ORDER BY enrollment_id",
+            vec![text(node_id.as_str())],
+        )?;
+        rows.rows
+            .iter()
+            .map(|row| {
+                let current: EnrollmentCredentialRecordV1 = serde_json::from_str(
+                    crate::exact_sql::text_at(&row.values, 0)
+                        .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?,
+                )
+                .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+                let at = current
+                    .revoked_at
+                    .unwrap_or_else(|| revoked_at.max(current.issued_at));
+                let (next, receipt) = revoke_credential(&current, current.revision, at)
+                    .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+                if current.revoked_at.is_none() {
+                    self.revoke_enrollment(&current, &next, &receipt)?;
+                }
+                Ok(receipt)
+            })
+            .collect()
+    }
+
+    /// Spends every grant issued to `node_id` that no enrollment has
+    /// consumed yet and returns the ids this call spent. A spent grant is
+    /// refused at credential lookup like any consumed grant, and
+    /// reprovisioning it is refused as a conflict. A repeat finds nothing
+    /// left to spend.
+    ///
+    /// Revocation reuses `consumed_at`: the grant record and its admission
+    /// evidence are digest-bound at issuance, so neither can carry a later
+    /// revocation, and the store contract has no column for one. A spent
+    /// grant without an enrollment row is therefore a revoked grant.
+    pub fn revoke_node_grants(
+        &self,
+        node_id: &BrainNodeId,
+        revoked_at: UtcMicros,
+    ) -> Result<Vec<EntityId>, RemoteSqliteStorageErrorV1> {
+        let rows = query(
+            self.handle(),
+            "SELECT grant_json FROM remote_enrollment_grants
+             WHERE consumed_at IS NULL ORDER BY grant_id",
+            Vec::new(),
+        )?;
+        let mut revoked = Vec::new();
+        for row in &rows.rows {
+            let grant: EnrollmentGrantV1 = serde_json::from_str(
+                crate::exact_sql::text_at(&row.values, 0)
+                    .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?,
+            )
             .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        replacement
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        if receipt.enrollment_id != expected.enrollment_id
-            || receipt.node_id != expected.node_id
-            || receipt.prior_revision != expected.revision
-            || receipt.current_revision != replacement.revision
-            || receipt.rotated_at != replacement.issued_at
-            || receipt.expires_at != replacement.expires_at
-            || replacement.revision != expected.revision.checked_add(1).unwrap_or(0)
-            || replacement.enrollment_id != expected.enrollment_id
-            || replacement.brain_id != expected.brain_id
-            || replacement.node_id != expected.node_id
-            || replacement.scope != expected.scope
-            || replacement.capabilities != expected.capabilities
-            || replacement.revoked_at.is_some()
-        {
-            return Err(RemoteSqliteStorageErrorV1::Corruption);
+            if grant.node_id != *node_id {
+                continue;
+            }
+            // Zero rows means a concurrent enrollment consumed the grant
+            // first; the node's enrollment revocation covers that row.
+            let spent = self.handle().execute(ExactSqlStatement::new(
+                "UPDATE remote_enrollment_grants SET consumed_at = ?1
+                 WHERE grant_id = ?2 AND consumed_at IS NULL"
+                    .to_owned(),
+                vec![
+                    ExactSqlValue::Integer(revoked_at.0),
+                    text(grant.grant_id.as_str()),
+                ],
+            )?)?;
+            if spent.changed_rows == 1 {
+                revoked.push(grant.grant_id);
+            }
         }
-        replace_enrollment(self, expected, replacement)
+        Ok(revoked)
     }
 
     pub fn revoke_enrollment(

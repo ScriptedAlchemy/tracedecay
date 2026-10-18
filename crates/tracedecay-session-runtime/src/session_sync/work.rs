@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use super::*;
 
 const GIT_SYNC_COMMAND_DEADLINE: Duration = Duration::from_secs(5);
@@ -10,7 +13,6 @@ pub enum SessionSyncInterruption {
 }
 
 impl SessionSyncInterruption {
-    #[hotpath::skip]
     pub const fn termination(self) -> Option<OperationTermination> {
         match self {
             Self::Cancelled => Some(OperationTermination::Cancelled),
@@ -19,7 +21,6 @@ impl SessionSyncInterruption {
         }
     }
 
-    #[hotpath::skip]
     const fn git_after_commit_reason(self) -> &'static str {
         match self {
             Self::Cancelled => "git_sync_cancelled_after_commit",
@@ -30,7 +31,6 @@ impl SessionSyncInterruption {
 }
 
 impl DaemonSessionSyncService {
-    #[hotpath::skip]
     pub(super) async fn mirror_primary_terminal(
         &self,
         context: &SessionSyncProjectContext,
@@ -53,11 +53,13 @@ impl DaemonSessionSyncService {
         self.persist_terminal(
             context,
             alias_key,
-            completion.termination,
-            completion.stats,
-            completion.coverage,
-            completion.source_frontiers,
-            completion.failure_codes,
+            SessionSyncTerminalMaterial {
+                termination: completion.termination,
+                stats: completion.stats,
+                coverage: completion.coverage,
+                source_frontiers: completion.source_frontiers,
+                failure_codes: completion.failure_codes,
+            },
         )
         .await
         .map(Some)
@@ -84,7 +86,7 @@ impl DaemonSessionSyncService {
         let task_key = key.clone();
         let task_cancellation = cancellation.clone();
         let key_for_cleanup = key.clone();
-        let task = tokio::spawn(async move {
+        let task = NativeTask::spawn(async move {
             let worker = async {
                 loop {
                     let journal_changed = service.journal_changed.notified();
@@ -105,13 +107,16 @@ impl DaemonSessionSyncService {
                                         .persist_terminal(
                                             &context,
                                             &key,
-                                            OperationTermination::Unavailable,
-                                            journal.stats.clone(),
-                                            journal.coverage.clone(),
-                                            journal.source_frontiers.clone(),
-                                            vec![
-                                                "session_sync_coalesced_journal_invalid".to_owned(),
-                                            ],
+                                            SessionSyncTerminalMaterial {
+                                                termination: OperationTermination::Unavailable,
+                                                stats: journal.stats.clone(),
+                                                coverage: journal.coverage.clone(),
+                                                source_frontiers: journal.source_frontiers.clone(),
+                                                failure_codes: vec![
+                                                    "session_sync_coalesced_journal_invalid"
+                                                        .to_owned(),
+                                                ],
+                                            },
                                         )
                                         .await;
                                     return;
@@ -122,11 +127,13 @@ impl DaemonSessionSyncService {
                                     .persist_terminal(
                                         &context,
                                         &key,
-                                        completion.termination,
-                                        completion.stats,
-                                        completion.coverage,
-                                        completion.source_frontiers,
-                                        completion.failure_codes,
+                                        SessionSyncTerminalMaterial {
+                                            termination: completion.termination,
+                                            stats: completion.stats,
+                                            coverage: completion.coverage,
+                                            source_frontiers: completion.source_frontiers,
+                                            failure_codes: completion.failure_codes,
+                                        },
                                     )
                                     .await;
                                 return;
@@ -153,11 +160,15 @@ impl DaemonSessionSyncService {
                                 .persist_terminal(
                                     &context,
                                     &key,
-                                    OperationTermination::Unavailable,
-                                    journal.stats.clone(),
-                                    journal.coverage.clone(),
-                                    journal.source_frontiers.clone(),
-                                    vec!["session_sync_coalesced_journal_missing".to_owned()],
+                                    SessionSyncTerminalMaterial {
+                                        termination: OperationTermination::Unavailable,
+                                        stats: journal.stats.clone(),
+                                        coverage: journal.coverage.clone(),
+                                        source_frontiers: journal.source_frontiers.clone(),
+                                        failure_codes: vec![
+                                            "session_sync_coalesced_journal_missing".to_owned(),
+                                        ],
+                                    },
                                 )
                                 .await;
                             return;
@@ -168,11 +179,15 @@ impl DaemonSessionSyncService {
                                 .persist_terminal(
                                     &context,
                                     &key,
-                                    OperationTermination::Unavailable,
-                                    journal.stats.clone(),
-                                    journal.coverage.clone(),
-                                    journal.source_frontiers.clone(),
-                                    vec!["session_sync_coalesced_journal_read_failed".to_owned()],
+                                    SessionSyncTerminalMaterial {
+                                        termination: OperationTermination::Unavailable,
+                                        stats: journal.stats.clone(),
+                                        coverage: journal.coverage.clone(),
+                                        source_frontiers: journal.source_frontiers.clone(),
+                                        failure_codes: vec![
+                                            "session_sync_coalesced_journal_read_failed".to_owned(),
+                                        ],
+                                    },
                                 )
                                 .await;
                             return;
@@ -196,17 +211,27 @@ impl DaemonSessionSyncService {
                             return;
                         }
                         () = &mut journal_changed => {}
-                        () = tokio::time::sleep(COALESCED_JOURNAL_RECHECK_INTERVAL) => {}
+                        fired = native_runtime::sleep_until(Instant::now() + COALESCED_JOURNAL_RECHECK_INTERVAL) => {
+                            // The interruption wait times out on the same
+                            // missing timer, so this loop cannot spin.
+                            if let Err(error) = fired {
+                                tracing::warn!(%error, "coalesced session sync recheck has no native timer");
+                            }
+                        }
                     }
                 }
             };
             worker.await;
-            service
-                .active
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&key_for_cleanup);
+            service.release_active(&key_for_cleanup, None);
         });
+        let task = match task {
+            Ok(task) => task,
+            Err(error) => {
+                tracing::warn!(%error, "coalesced session sync wait did not start");
+                self.release_active(&task_key, None);
+                return;
+            }
+        };
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.task.is_finished());
         tasks.push(super::project_lifecycle::SessionSyncTaskV1 {
@@ -217,7 +242,6 @@ impl DaemonSessionSyncService {
         });
     }
 
-    #[hotpath::skip]
     pub(super) async fn cancel_request(
         &self,
         control: SessionSyncControlV1,
@@ -374,8 +398,17 @@ impl DaemonSessionSyncService {
     }
 }
 
+fn import_transcript_stats(
+    imported: tracedecay_sessions::TranscriptIngestStats,
+) -> SessionSyncStatsV1 {
+    SessionSyncStatsV1 {
+        sessions_imported: imported.sessions_upserted,
+        messages_imported: imported.messages_upserted,
+        ..SessionSyncStatsV1::default()
+    }
+}
+
 impl SessionSyncProjectContext {
-    #[hotpath::skip]
     pub(super) async fn source_frontiers_for(
         &self,
         project_sessions: &RegisteredGlobalDbLeaseV1,
@@ -392,7 +425,6 @@ impl SessionSyncProjectContext {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn source_frontiers(
         &self,
         project_sessions: &RegisteredGlobalDbLeaseV1,
@@ -402,10 +434,15 @@ impl SessionSyncProjectContext {
             ("project", project_sessions.as_ref()),
             ("profile", self.user_sessions.as_ref()),
         ] {
-            for (source_json, scope_json, committed_cursor_json) in database
-                .list_session_sync_source_frontiers()
-                .await
-                .map_err(store_error)?
+            let listed = tracedecay_runtime_core::erase_send!(
+                database.list_session_sync_source_frontiers(),
+                std::result::Result<
+                    Vec<(String, String, String)>,
+                    tracedecay_domain::TraceDecayError,
+                >
+            );
+            for (source_json, scope_json, committed_cursor_json) in
+                listed.await.map_err(store_error)?
             {
                 frontiers.push(SessionSyncSourceFrontierV1 {
                     store_scope: store_scope.to_owned(),
@@ -432,16 +469,15 @@ impl SessionSyncProjectContext {
         Ok(frontiers)
     }
 
-    #[hotpath::skip]
     async fn git_history_source_frontiers(
         &self,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let store = GlobalDbGitCorrelationStore::new(project_sessions);
         let snapshot = store.read_snapshot().await.map_err(store_error)?;
-        let activity_timestamp = tracedecay_sessions::runtime::git_correlation::read_meta_value(
+        let change_sequence = tracedecay_sessions::runtime::git_correlation::read_meta_value(
             &snapshot,
-            tracedecay_sessions::runtime::git_correlation::AUTO_BACKFILL_WATERMARK_KEY,
+            tracedecay_sessions::runtime::git_correlation::GIT_HISTORY_SEQUENCE_FRONTIER_KEY,
         )
         .await
         .map_err(store_error)?;
@@ -452,240 +488,73 @@ impl SessionSyncProjectContext {
         .await
         .map_err(store_error)?;
         Ok(
-            git_history_frontier_from_meta(activity_timestamp, source_rowid)
-                .map(|frontier| vec![git_history_source_frontier(&self.project_id, frontier)])
-                .unwrap_or_default(),
+            git_history_frontier_from_meta(change_sequence, source_rowid).map_or_default(
+                |frontier| vec![git_history_source_frontier(&self.project_id, frontier)],
+            ),
         )
     }
 
-    #[hotpath::measure(label = "daemon.session_sync.ingest.project", future = true)]
-    async fn ingest_project_transcripts(
-        &self,
-        authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
-        cancellation: &tracedecay_usecases::observation::ObservationCancellation,
-    ) -> tracedecay_sessions::runtime::TranscriptIngestOutcome {
-        let pass =
-            tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
-                &self.brain_id,
-                &self.profile_id,
-                authority,
-                &self.project_root,
-                Some(self.project_id.clone()),
-                None,
-                true,
-                cancellation,
-            );
-        Box::pin(pass).await
-    }
-
-    #[hotpath::measure(label = "daemon.session_sync.ingest.profile", future = true)]
-    async fn ingest_profile_transcripts(
-        &self,
-        user_authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
-        registry_authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
-        cancellation: &tracedecay_usecases::observation::ObservationCancellation,
-    ) -> tracedecay_sessions::runtime::TranscriptIngestOutcome {
-        let pass = tracedecay_sessions::runtime::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
-            &self.brain_id,
-            &self.profile_id,
-            user_authority,
-            registry_authority,
-            &self.profile_root,
-            None,
-            cancellation,
-        );
-        Box::pin(pass).await
-    }
-
-    #[hotpath::skip]
     pub(super) async fn import_transcripts(
         &self,
         service: &DaemonSessionSyncService,
         journal_key: &str,
-        admitted_at: UtcMicros,
         request: &SessionSyncRequestV1,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
-        let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
-        let pass_cancellation = cancellation.clone();
-        let pass = async {
-            let project_authority = GlobalDbSessionIngestAuthority::new(project_sessions.clone());
-            let project = self
-                .ingest_project_transcripts(&project_authority, &pass_cancellation)
-                .await;
-            let project_stats = SessionSyncStatsV1 {
-                sessions_imported: project.stats.sessions_upserted,
-                messages_imported: project.stats.messages_upserted,
-                ..SessionSyncStatsV1::default()
-            };
-            let project_coverage = vec![source_coverage("project", project.coverage)];
-            let project_progress = hotpath::future!(
-                service.persist_progress(
-                    self,
-                    &project_sessions,
-                    journal_key,
-                    project_stats.clone(),
-                    project_coverage.clone(),
-                ),
-                label = "daemon.session_sync.project_frontier_persist"
-            )
-            .await;
-            let project_progress_failed = project_progress.is_err();
-            let project_frontiers = project_progress.unwrap_or_default();
-
-            let profile_sweep_satisfied = {
-                let completed_profile_sweeps = service
-                    .completed_profile_sweeps
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                completed_profile_sweep_covers(
-                    completed_profile_sweeps.get(self.profile_id.as_str()),
-                    admitted_at,
-                )
-            };
-            let (user, profile_sweep_started_at) = if profile_sweep_satisfied
-                || pass_cancellation.is_cancelled()
-            {
-                (None, None)
-            } else {
-                let profile_sweep_started_at = now_micros();
-                let user_authority =
-                    GlobalDbSessionIngestAuthority::new(self.user_sessions.clone());
-                let registry_authority = GlobalDbSessionIngestAuthority::new(self.registry.clone());
-                let user = self
-                    .ingest_profile_transcripts(
-                        &user_authority,
-                        &registry_authority,
-                        &pass_cancellation,
-                    )
-                    .await;
-                (Some(user), Some(profile_sweep_started_at))
-            };
-            if let Some(user) = user.as_ref()
-                && user.coverage.is_complete()
-                && user.failures.is_empty()
-                && let Some(profile_sweep_started_at) = profile_sweep_started_at
-            {
-                service
-                    .completed_profile_sweeps
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(
-                        self.profile_id.as_str().to_owned(),
-                        profile_sweep_started_at,
-                    );
-            }
-            let combined = user
-                .as_ref()
-                .map_or(project.stats, |user| project.stats.merge(user.stats));
-            let stats = SessionSyncStatsV1 {
-                sessions_imported: combined.sessions_upserted,
-                messages_imported: combined.messages_upserted,
-                ..SessionSyncStatsV1::default()
-            };
-            let mut coverage = project_coverage;
-            coverage.push(user.as_ref().map_or_else(
-                || {
-                    source_coverage(
-                        "profile",
-                        if profile_sweep_satisfied {
-                            tracedecay_sessions::runtime::IngestPassCoverage::Complete
-                        } else {
-                            tracedecay_sessions::runtime::IngestPassCoverage::Partial {
-                                deferred_units: 1,
-                            }
-                        },
-                    )
-                },
-                |user| source_coverage("profile", user.coverage),
-            ));
-            let source_frontiers = hotpath::future!(
-                service.persist_progress(
-                    self,
-                    &project_sessions,
-                    journal_key,
-                    stats.clone(),
-                    coverage.clone(),
-                ),
-                label = "daemon.session_sync.combined_frontier_persist"
-            )
-            .await;
-            (
-                project,
-                user,
-                stats,
-                coverage,
-                source_frontiers,
-                project_frontiers,
-                project_progress_failed,
-            )
+        let observation = match service.schedule_import_history(self, request) {
+            Ok(observation) => observation,
+            Err(interruption) => return SessionSyncWorkResult::Interrupted(interruption),
         };
+        let stats = import_transcript_stats(tracedecay_sessions::TranscriptIngestStats::default());
+        let coverage = observation.coverage.clone();
+        let persisted: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_domain::errors::Result<
+                            Vec<SessionSyncSourceFrontierV1>,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(service.persist_progress(
+            self,
+            &project_sessions,
+            journal_key,
+            stats.clone(),
+            coverage.clone(),
+        ));
         let pass = async {
-            match &self.transcript_source_home {
-                Some(home) => {
-                    tracedecay_sessions::runtime::with_transcript_source_home(home.clone(), pass)
-                        .await
-                }
-                None => pass.await,
-            }
+            let source_frontiers = tracing::Instrument::instrument(
+                persisted,
+                tracing::trace_span!("daemon.session_sync.combined_frontier_persist"),
+            )
+            .await;
+            (stats, coverage, source_frontiers)
         };
         tokio::pin!(pass);
         let (outcomes, interrupted) = tokio::select! {
             biased;
             outcomes = &mut pass => (outcomes, None),
             interruption = service.wait_for_interruption(request) => {
-                cancellation.cancel();
                 (pass.await, Some(interruption))
             }
         };
-        let (
-            project,
-            user,
-            stats,
-            coverage,
-            source_frontiers,
-            project_frontiers,
-            project_progress_failed,
-        ) = outcomes;
-        let committed = project.scheduling_state_written
-            || user
-                .as_ref()
-                .is_some_and(|outcome| outcome.scheduling_state_written)
-            || stats != SessionSyncStatsV1::default();
-        let mut failure_codes = project
-            .failures
-            .into_iter()
-            .chain(user.into_iter().flat_map(|outcome| outcome.failures))
-            .map(|failure| failure.reason_code.to_owned())
-            .collect::<Vec<_>>();
-        if project_progress_failed || source_frontiers.is_err() {
+        let (stats, coverage, source_frontiers) = outcomes;
+        let mut failure_codes = observation.failure_codes;
+        if source_frontiers.is_err() {
             failure_codes.push("session_sync_frontier_persist_failed".to_owned());
         }
-        let source_frontiers = source_frontiers.unwrap_or(project_frontiers);
-        if committed {
-            return SessionSyncWorkResult::Finished {
-                interruption: interrupted,
-                committed: true,
-                stats,
-                coverage,
-                source_frontiers,
-                failure_codes,
-            };
-        }
-        match interrupted {
-            Some(interrupted) => SessionSyncWorkResult::Interrupted(interrupted),
-            None => SessionSyncWorkResult::Finished {
-                interruption: None,
-                committed: false,
-                stats,
-                coverage,
-                source_frontiers,
-                failure_codes,
-            },
+        let committed = stats != SessionSyncStatsV1::default();
+        SessionSyncWorkResult::Finished {
+            interruption: interrupted,
+            committed,
+            stats,
+            coverage,
+            source_frontiers: source_frontiers.unwrap_or_default(),
+            failure_codes,
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn synchronize_git(
         &self,
         service: &DaemonSessionSyncService,
@@ -698,7 +567,7 @@ impl SessionSyncProjectContext {
         {
             return SessionSyncWorkResult::Interrupted(interruption);
         }
-        let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
+        let cancellation = tracedecay_sessions::observation::ObservationCancellation::default();
         let control = tracedecay_sessions::runtime::git_correlation::BoundedGitControl::new(
             cancellation.clone(),
             GIT_SYNC_COMMAND_DEADLINE,
@@ -711,8 +580,19 @@ impl SessionSyncProjectContext {
                 tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
             max_commits_per_repo: usize::MAX,
             dry_run: options.dry_run(),
+            project_root: Some(self.project_root.clone()),
         };
-        let backfill = store.run_bounded_history_index_page(&backfill_options, &control);
+        let backfill: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            tracedecay_sessions::runtime::git_correlation::BoundedBackfillOutcome,
+                            tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(store.run_bounded_history_index_page(&backfill_options, &control));
         tokio::pin!(backfill);
         let (result, mut requested_interruption) = tokio::select! {
             biased;
@@ -818,6 +698,7 @@ pub fn git_sync_work_result(
         return SessionSyncWorkResult::Interrupted(interruption);
     }
     let git_errors = saturating_usize_to_u64(outcome.stats.skipped_git_error);
+    let unavailable_attributions = saturating_usize_to_u64(outcome.stats.unavailable_attributions);
     let terminal_without_progress = interrupted && !outcome.committed;
     let remaining_work = if terminal_without_progress {
         1
@@ -848,14 +729,26 @@ pub fn git_sync_work_result(
     if git_errors > 0 || outcome.unresolved_failures > 0 {
         failure_codes.push("git_source_failed".to_owned());
     }
+    if unavailable_attributions > 0 {
+        failure_codes.push("git_historical_attribution_unavailable".to_owned());
+    }
+    let mut coverage = vec![SessionSyncSourceCoverageV1 {
+        store_scope: "git".to_owned(),
+        coverage,
+    }];
+    if unavailable_attributions > 0 {
+        coverage.push(SessionSyncSourceCoverageV1 {
+            store_scope: "git_attribution".to_owned(),
+            coverage: SessionSyncCoverageV1::Partial {
+                deferred_units: unavailable_attributions,
+            },
+        });
+    }
     SessionSyncWorkResult::Finished {
         interruption: requested_interruption,
         committed: outcome.committed,
         stats,
-        coverage: vec![SessionSyncSourceCoverageV1 {
-            store_scope: "git".to_owned(),
-            coverage,
-        }],
+        coverage,
         source_frontiers: (!terminal_without_progress)
             .then(|| git_history_source_frontier(project_id, outcome.frontier))
             .into_iter()
@@ -889,12 +782,12 @@ const fn git_history_interruption_reason(
 }
 
 pub fn git_history_frontier_from_meta(
-    activity_timestamp: Option<i64>,
+    change_sequence: Option<i64>,
     source_rowid: Option<i64>,
 ) -> Option<tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier> {
-    activity_timestamp.map(|activity_timestamp| {
+    change_sequence.map(|change_sequence| {
         tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
-            activity_timestamp,
+            change_sequence,
             source_rowid: source_rowid.unwrap_or(0),
         }
     })
@@ -915,7 +808,7 @@ pub fn git_history_source_frontier(
         })
         .to_string(),
         committed_cursor_json: serde_json::json!({
-            "activity_timestamp": frontier.activity_timestamp,
+            "change_sequence": frontier.change_sequence,
             "source_rowid": frontier.source_rowid,
         })
         .to_string(),
@@ -939,10 +832,8 @@ pub fn coalesced_alias_local_interruption(
     }
 }
 
-pub(super) fn log_session_sync_join(result: Result<(), tokio::task::JoinError>) {
-    if let Err(error) = result
-        && !error.is_cancelled()
-    {
-        tracing::warn!(%error, "session sync worker join failed");
+pub(super) fn log_session_sync_join(outcome: NativeTaskOutcome<()>) {
+    if let NativeTaskOutcome::Panicked(payload) = outcome {
+        tracing::warn!(%payload, "session sync worker panicked");
     }
 }

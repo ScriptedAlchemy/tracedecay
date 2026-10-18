@@ -2,7 +2,7 @@
 //! across the workspace.
 //!
 //! These are storage-neutral logical records. The index stores only typed
-//! references to `GenerationDiagnosticV1` (`crate::diagnostics`) — never a
+//! references to `GenerationDiagnosticV1` (`crate::diagnostics`), never a
 //! duplicate diagnostic record.
 //!
 //! Intake-rejection, extraction, and lineage records are owned by
@@ -11,14 +11,14 @@
 
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
+use crate::research::DomainError;
 use crate::research::id::{
     CommitId, ManifestDigest, PrivacyDomainId, ProjectId, RefId, RepositoryId, RetrievalAnchorId,
     SanitizationReceiptId, WorktreeId,
 };
 use crate::research::time::UtcMicros;
-use crate::research::{DomainError, canonical_sha256};
 
 use super::identity::{
     ChunkerRevision, CodeGenerationId, ContentDigest, ExtractorRevision, FileOccurrenceId,
@@ -26,8 +26,9 @@ use super::identity::{
     SymbolOccurrenceId,
 };
 use super::language::EdgeAuthorityV1;
+use super::search::CodeGenerationSourceCommitmentsV1;
 
-/// One receipt-bound sanitized repository snapshot — the only legal intake.
+/// One receipt-bound sanitized repository snapshot, the only legal intake.
 /// Carries repository, checkout, worktree, ref, source revision,
 /// sanitizer revision, and content identity. Missing, stale, mixed-snapshot,
 /// or unsanitized input is rejected before parsing.
@@ -43,6 +44,8 @@ pub struct SanitizedCodeSnapshotV1 {
     pub content_identity: ContentDigest,
     pub captured_at: UtcMicros,
     pub files: Vec<SanitizedCodeFileV1>,
+    /// Sources the capture saw but does not index, ordered by Git path.
+    pub omitted_sources: Vec<OmittedCodeSourceV1>,
 }
 
 impl SanitizedCodeSnapshotV1 {
@@ -97,8 +100,60 @@ impl SanitizedCodeSnapshotV1 {
                 field: "snapshot file order",
             });
         }
+        if self
+            .omitted_sources
+            .windows(2)
+            .any(|sources| sources[0].git_path >= sources[1].git_path)
+        {
+            return Err(DomainError::NonCanonical {
+                field: "snapshot omitted source order",
+            });
+        }
+        for source in &self.omitted_sources {
+            let logical_path = std::str::from_utf8(&source.git_path).ok();
+            let representable =
+                logical_path.is_some_and(|path| validate_code_logical_path(path).is_ok());
+            let consistent = match &source.reason {
+                CodeSourceOmissionReasonV1::UnrepresentablePath => !representable,
+                CodeSourceOmissionReasonV1::PrivacyWithheld { .. } => logical_path
+                    .filter(|_| representable)
+                    .and_then(|path| {
+                        self.files
+                            .binary_search_by(|file| file.logical_path.as_str().cmp(path))
+                            .ok()
+                    })
+                    .is_some_and(|index| {
+                        self.files[index].disposition == SnapshotFileDispositionV1::Ignored
+                    }),
+            };
+            if !consistent {
+                return Err(DomainError::NonCanonical {
+                    field: "snapshot omitted source reason",
+                });
+            }
+        }
         Ok(())
     }
+}
+
+/// One source a snapshot captured but does not index. The raw Git path
+/// bytes are kept because an unrepresentable path has no logical path.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OmittedCodeSourceV1 {
+    pub git_path: Vec<u8>,
+    pub reason: CodeSourceOmissionReasonV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CodeSourceOmissionReasonV1 {
+    /// Not UTF-8, or fails [`validate_code_logical_path`]: no snapshot row
+    /// can name it.
+    UnrepresentablePath,
+    /// The privacy boundary withheld the bytes; the snapshot keeps an
+    /// `Ignored` row under the same path.
+    PrivacyWithheld { detail: String },
 }
 
 /// One sanitized file inside a snapshot.
@@ -179,7 +234,7 @@ pub struct ValidatedCodeFileV1 {
 
 /// The sealed manifest of one immutable logical generation. Generations are
 /// planned, sealed, digested, and never mutated after publication.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeGenerationManifestV1 {
     pub project_id: ProjectId,
@@ -196,69 +251,12 @@ pub struct CodeGenerationManifestV1 {
     pub privacy_domain: PrivacyDomainId,
     pub privacy_key_epoch: u64,
     pub parent_generation: Option<CodeGenerationId>,
+    /// Source identities computed after canonical chunk materialization and
+    /// authenticated by `seal.expected_digest`. `None` exists only while the
+    /// production planner is materializing that source or when historical
+    /// bytes predate source commitments; published readers reject it typed.
+    pub source_commitments: Option<CodeGenerationSourceCommitmentsV1>,
     pub seal: GenerationSealV1,
-}
-
-const LEGACY_GENERATION_INVALIDATION_DIGEST_DOMAIN: &str =
-    "tracedecay.code-generation-legacy-v1-migration.v1";
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodeGenerationManifestWireV1 {
-    project_id: ProjectId,
-    generation_id: CodeGenerationId,
-    snapshot_digest: ManifestDigest,
-    #[serde(default)]
-    invalidation_digest: Option<ManifestDigest>,
-    registry_revision: LanguageRegistryRevision,
-    grammar_revisions: Vec<(LanguageId, GrammarRevision)>,
-    extractor_revisions: Vec<(LanguageId, ExtractorRevision)>,
-    sanitizer_revision: SanitizerRevision,
-    chunker_revision: ChunkerRevision,
-    privacy_domain: PrivacyDomainId,
-    privacy_key_epoch: u64,
-    parent_generation: Option<CodeGenerationId>,
-    seal: GenerationSealV1,
-}
-
-impl<'de> Deserialize<'de> for CodeGenerationManifestV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = CodeGenerationManifestWireV1::deserialize(deserializer)?;
-        let needs_legacy_migration = wire.invalidation_digest.is_none();
-        let mut manifest = Self {
-            project_id: wire.project_id,
-            generation_id: wire.generation_id,
-            snapshot_digest: wire.snapshot_digest,
-            invalidation_digest: match wire.invalidation_digest {
-                Some(digest) => digest,
-                None => ManifestDigest::zero().map_err(serde::de::Error::custom)?,
-            },
-            registry_revision: wire.registry_revision,
-            grammar_revisions: wire.grammar_revisions,
-            extractor_revisions: wire.extractor_revisions,
-            sanitizer_revision: wire.sanitizer_revision,
-            chunker_revision: wire.chunker_revision,
-            privacy_domain: wire.privacy_domain,
-            privacy_key_epoch: wire.privacy_key_epoch,
-            parent_generation: wire.parent_generation,
-            seal: wire.seal,
-        };
-        if needs_legacy_migration {
-            if !manifest
-                .uses_legacy_v1_identity()
-                .map_err(serde::de::Error::custom)?
-            {
-                return Err(serde::de::Error::missing_field("invalidation_digest"));
-            }
-            manifest.invalidation_digest = manifest
-                .expected_legacy_invalidation_digest()
-                .map_err(serde::de::Error::custom)?;
-        }
-        Ok(manifest)
-    }
 }
 
 /// The seal applied before rows and the expected digest are handed to the
@@ -299,6 +297,24 @@ pub enum RelationEdgeKindV1 {
     Annotates,
     Returns,
     Receives,
+}
+
+impl RelationEdgeKindV1 {
+    /// The `snake_case` serde spelling as a borrowed string, for read models
+    /// that carry the kind as text without allocating through `serde_json`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Calls => "calls",
+            Self::Uses => "uses",
+            Self::TypeOf => "type_of",
+            Self::Contains => "contains",
+            Self::Implements => "implements",
+            Self::Extends => "extends",
+            Self::Annotates => "annotates",
+            Self::Returns => "returns",
+            Self::Receives => "receives",
+        }
+    }
 }
 
 /// A typed reference to the generation-bound diagnostic contract. The
@@ -345,30 +361,6 @@ pub enum TestAttributionEvidenceClassV1 {
 }
 
 impl CodeGenerationManifestV1 {
-    pub fn uses_legacy_v1_identity(&self) -> Result<bool, DomainError> {
-        Ok(matches!(
-            generation_identity_kind(&self.generation_id)?,
-            GenerationIdentityKind::Legacy
-        ))
-    }
-
-    pub fn expected_legacy_invalidation_digest(&self) -> Result<ManifestDigest, DomainError> {
-        canonical_sha256(&(
-            LEGACY_GENERATION_INVALIDATION_DIGEST_DOMAIN,
-            &self.project_id,
-            &self.generation_id,
-            &self.snapshot_digest,
-            &self.registry_revision,
-            &self.grammar_revisions,
-            &self.extractor_revisions,
-            &self.sanitizer_revision,
-            &self.chunker_revision,
-            &self.privacy_domain,
-            self.privacy_key_epoch,
-            &self.parent_generation,
-        ))
-    }
-
     /// A manifest is single-generation: it names exactly one generation and
     /// at most one parent. Mixed-generation manifests are rejected before
     /// publication.
@@ -381,30 +373,24 @@ impl CodeGenerationManifestV1 {
         self.sanitizer_revision.validate()?;
         self.chunker_revision.validate()?;
         self.privacy_domain.validate()?;
+        if let Some(commitments) = &self.source_commitments {
+            commitments.validate()?;
+        }
         self.seal.expected_digest.validate()?;
         self.seal.planner.validate()?;
-        match generation_identity_kind(&self.generation_id)? {
-            GenerationIdentityKind::Legacy => {
-                if self.invalidation_digest != self.expected_legacy_invalidation_digest()? {
-                    return Err(DomainError::DigestMismatch);
-                }
-            }
-            GenerationIdentityKind::Fingerprinted(fingerprint) => {
-                let expected = crate::canonical_text::sha256_hex_body(
-                    self.invalidation_digest.as_str(),
-                    "generation invalidation digest",
-                )?;
-                if fingerprint != expected {
-                    return Err(DomainError::DigestMismatch);
-                }
-            }
+        let expected = crate::canonical_text::sha256_hex_body(
+            self.invalidation_digest.as_str(),
+            "generation invalidation digest",
+        )?;
+        if generation_identity_fingerprint(&self.generation_id)? != expected {
+            return Err(DomainError::DigestMismatch);
         }
         if self.parent_generation.as_ref() == Some(&self.generation_id) {
             return Err(DomainError::SelfSupersession);
         }
         if let Some(parent_generation) = &self.parent_generation {
             parent_generation.validate()?;
-            generation_identity_kind(parent_generation)?;
+            generation_identity_fingerprint(parent_generation)?;
         }
         validate_language_revisions(
             &self.grammar_revisions,
@@ -433,14 +419,9 @@ impl CodeGenerationManifestV1 {
     }
 }
 
-enum GenerationIdentityKind<'a> {
-    Legacy,
-    Fingerprinted(&'a str),
-}
-
-fn generation_identity_kind(
-    generation_id: &CodeGenerationId,
-) -> Result<GenerationIdentityKind<'_>, DomainError> {
+/// The invalidation fingerprint of a canonical
+/// `generation.v1.<repo>.<sequence>.<fingerprint>` identity.
+fn generation_identity_fingerprint(generation_id: &CodeGenerationId) -> Result<&str, DomainError> {
     let mut parts = generation_id.as_str().split('.');
     let scheme = parts.next();
     let version = parts.next();
@@ -460,11 +441,8 @@ fn generation_identity_kind(
         });
     }
     match fingerprint {
-        None => Ok(GenerationIdentityKind::Legacy),
-        Some(value) if crate::canonical_text::is_lowercase_hex(value, 64) => {
-            Ok(GenerationIdentityKind::Fingerprinted(value))
-        }
-        Some(_) => Err(DomainError::NonCanonical {
+        Some(value) if crate::canonical_text::is_lowercase_hex(value, 64) => Ok(value),
+        _ => Err(DomainError::NonCanonical {
             field: "code generation identity fingerprint",
         }),
     }
@@ -489,17 +467,9 @@ fn validate_language_revisions<T>(
 mod tests {
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use crate::test_fixtures::repeated_sha256_text as digest;
 
     fn snapshot() -> SanitizedCodeSnapshotV1 {
         SanitizedCodeSnapshotV1 {
@@ -527,13 +497,17 @@ mod tests {
                     disposition: SnapshotFileDispositionV1::Present,
                 },
             ],
+            omitted_sources: Vec::new(),
         }
     }
 
     fn generation_manifest() -> CodeGenerationManifestV1 {
-        let mut manifest = CodeGenerationManifestV1 {
+        CodeGenerationManifestV1 {
             project_id: id("project.fixture"),
-            generation_id: id("generation.v1.aaaaaaaa.00000002"),
+            generation_id: id(&format!(
+                "generation.v1.aaaaaaaa.00000002.{}",
+                "b".repeat(64)
+            )),
             snapshot_digest: id(&digest('a')),
             invalidation_digest: id(&digest('b')),
             registry_revision: id("registry.v1"),
@@ -549,17 +523,78 @@ mod tests {
             chunker_revision: id("chunker.v1"),
             privacy_domain: id("privacy.fixture"),
             privacy_key_epoch: 1,
-            parent_generation: Some(id("generation.v1.aaaaaaaa.00000001")),
+            parent_generation: Some(id(&format!(
+                "generation.v1.aaaaaaaa.00000001.{}",
+                "c".repeat(64)
+            ))),
+            source_commitments: None,
             seal: GenerationSealV1 {
                 expected_digest: id(&digest('d')),
                 sealed_at: UtcMicros(20),
                 planner: id("planner.v1"),
             },
-        };
-        manifest.invalidation_digest = manifest
-            .expected_legacy_invalidation_digest()
-            .expect("legacy invalidation digest");
-        manifest
+        }
+    }
+
+    #[test]
+    fn generation_manifest_requires_fingerprinted_identities() {
+        let mut unfingerprinted = generation_manifest();
+        unfingerprinted.generation_id = id("generation.v1.aaaaaaaa.00000002");
+        assert_eq!(
+            unfingerprinted.validate().unwrap_err().to_string(),
+            "code generation identity fingerprint is not canonical"
+        );
+
+        let mut unfingerprinted_parent = generation_manifest();
+        unfingerprinted_parent.parent_generation = Some(id("generation.v1.aaaaaaaa.00000001"));
+        assert_eq!(
+            unfingerprinted_parent.validate().unwrap_err().to_string(),
+            "code generation identity fingerprint is not canonical"
+        );
+
+        let mut mismatched = generation_manifest();
+        mismatched.invalidation_digest = id(&digest('e'));
+        assert_eq!(
+            mismatched.validate().unwrap_err().to_string(),
+            "manifest digest does not match its canonical domain-separated payload"
+        );
+
+        let mut wire = serde_json::to_value(generation_manifest()).expect("serialize");
+        wire.as_object_mut()
+            .expect("manifest object")
+            .remove("invalidation_digest");
+        assert_eq!(
+            serde_json::from_value::<CodeGenerationManifestV1>(wire)
+                .unwrap_err()
+                .to_string(),
+            "missing field `invalidation_digest`"
+        );
+    }
+
+    #[test]
+    fn relation_edge_kinds_have_literal_wire_spellings() {
+        for (kind, wire) in [
+            (RelationEdgeKindV1::Calls, "calls"),
+            (RelationEdgeKindV1::Uses, "uses"),
+            (RelationEdgeKindV1::TypeOf, "type_of"),
+            (RelationEdgeKindV1::Contains, "contains"),
+            (RelationEdgeKindV1::Implements, "implements"),
+            (RelationEdgeKindV1::Extends, "extends"),
+            (RelationEdgeKindV1::Annotates, "annotates"),
+            (RelationEdgeKindV1::Returns, "returns"),
+            (RelationEdgeKindV1::Receives, "receives"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(kind).expect("serialize"),
+                serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<RelationEdgeKindV1>(serde_json::json!(wire))
+                    .expect("deserialize"),
+                kind
+            );
+            assert_eq!(kind.as_str(), wire);
+        }
     }
 
     #[test]
@@ -570,15 +605,86 @@ mod tests {
         duplicate_receipt
             .sanitization_receipts
             .push(id("receipt.b"));
-        assert!(duplicate_receipt.validate().is_err());
+        assert_eq!(
+            duplicate_receipt.validate().unwrap_err().to_string(),
+            "snapshot sanitization receipt order is not canonical"
+        );
 
         let mut reordered_files = snapshot();
         reordered_files.files.reverse();
-        assert!(reordered_files.validate().is_err());
+        assert_eq!(
+            reordered_files.validate().unwrap_err().to_string(),
+            "snapshot file order is not canonical"
+        );
 
         let mut noncanonical_path = snapshot();
         noncanonical_path.files[0].logical_path = "./src/a.rs".to_owned();
-        assert!(noncanonical_path.validate().is_err());
+        assert_eq!(
+            noncanonical_path.validate().unwrap_err().to_string(),
+            "snapshot logical path is not canonical"
+        );
+    }
+
+    fn snapshot_with_omitted_sources() -> SanitizedCodeSnapshotV1 {
+        let mut snapshot = snapshot();
+        snapshot.files[1].disposition = SnapshotFileDispositionV1::Ignored;
+        snapshot.omitted_sources = vec![
+            OmittedCodeSourceV1 {
+                git_path: b"src/b.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::PrivacyWithheld {
+                    detail: "quarantined".to_owned(),
+                },
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"src/odd\\name.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"src/\xff.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+        ];
+        snapshot
+    }
+
+    #[test]
+    fn omitted_sources_must_be_ordered_and_carry_a_reason_their_path_supports() {
+        snapshot_with_omitted_sources()
+            .validate()
+            .expect("canonical omitted sources");
+
+        let mut duplicate = snapshot_with_omitted_sources();
+        duplicate
+            .omitted_sources
+            .push(duplicate.omitted_sources[2].clone());
+        assert_eq!(
+            duplicate.validate().unwrap_err().to_string(),
+            "snapshot omitted source order is not canonical"
+        );
+
+        let mut representable = snapshot_with_omitted_sources();
+        representable.omitted_sources[1].git_path = b"src/odd_name.rs".to_vec();
+        assert_eq!(
+            representable.validate().unwrap_err().to_string(),
+            "snapshot omitted source reason is not canonical",
+            "a path a row could name is not unrepresentable"
+        );
+
+        let mut withheld_present = snapshot_with_omitted_sources();
+        withheld_present.files[1].disposition = SnapshotFileDispositionV1::Present;
+        assert_eq!(
+            withheld_present.validate().unwrap_err().to_string(),
+            "snapshot omitted source reason is not canonical",
+            "a withheld source cannot also be indexed"
+        );
+
+        let mut withheld_without_row = snapshot_with_omitted_sources();
+        withheld_without_row.omitted_sources[0].git_path = b"src/absent.rs".to_vec();
+        assert_eq!(
+            withheld_without_row.validate().unwrap_err().to_string(),
+            "snapshot omitted source reason is not canonical",
+            "a withheld source keeps its ignored row"
+        );
     }
 
     #[test]
@@ -589,10 +695,16 @@ mod tests {
 
         let mut reordered = generation_manifest();
         reordered.grammar_revisions.reverse();
-        assert!(reordered.validate().is_err());
+        assert_eq!(
+            reordered.validate().unwrap_err().to_string(),
+            "generation grammar revisions is not canonical"
+        );
 
         let mut mismatched = generation_manifest();
         mismatched.extractor_revisions.pop();
-        assert!(mismatched.validate().is_err());
+        assert_eq!(
+            mismatched.validate().unwrap_err().to_string(),
+            "generation language revision sets is not pinned to the required snapshot"
+        );
     }
 }

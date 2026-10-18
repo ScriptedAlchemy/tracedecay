@@ -41,7 +41,7 @@ pub(super) struct NextCheckpoint {
     pub(super) watermark: ShardWatermarkV1,
 }
 
-#[hotpath::measure(label = "rusqlite.ledger.checkpoint_next")]
+#[tracing::instrument(name = "rusqlite.ledger.checkpoint_next", level = "trace", skip_all)]
 pub(super) fn next(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
@@ -77,7 +77,7 @@ pub(super) fn next(
     })
 }
 
-#[hotpath::measure(label = "rusqlite.ledger.checkpoint_persist")]
+#[tracing::instrument(name = "rusqlite.ledger.checkpoint_persist", level = "trace", skip_all)]
 pub(super) fn persist(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
@@ -226,11 +226,16 @@ fn decode_sequence(raw: i64, field: &'static str) -> Result<CommitSequenceV1, Le
     Ok(CommitSequenceV1(raw))
 }
 
-#[cfg(test)]
 pub(crate) fn current_watermark(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
 ) -> Result<Option<ShardWatermarkV1>, LedgerError> {
+    // A mounted database has no ledger authority before its first writer submit.
+    let mut schema = transaction
+        .prepare("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)")?;
+    if !schema.query_row([CHECKPOINT_TABLE], |row| row.get::<_, bool>(0))? {
+        return Ok(None);
+    }
     let binding_key = BindingKey::from_binding(binding)?;
     let Some(checkpoint) = load(transaction, &binding_key)? else {
         return Ok(None);
@@ -241,8 +246,11 @@ pub(crate) fn current_watermark(
             requested: binding.authority_epoch,
         });
     }
-    Ok(
-        (checkpoint.watermark.authority_epoch == binding.authority_epoch)
-            .then_some(checkpoint.watermark),
-    )
+    // Commit sequences continue across authority epochs of one incarnation, so
+    // a newer authority that has not committed yet stands at the frontier it
+    // inherited.
+    Ok(Some(ShardWatermarkV1 {
+        authority_epoch: binding.authority_epoch,
+        ..checkpoint.watermark
+    }))
 }

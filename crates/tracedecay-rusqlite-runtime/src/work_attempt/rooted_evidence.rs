@@ -1,6 +1,6 @@
 //! Exact sealed-attempt receipt lookup for TaskId-rooted evidence composition.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptReceiptReadErrorV1, WorkAttemptReceiptReadPortV1, WorkAttemptReceiptV1,
 };
 use tracedecay_domain::{WorkAttemptIdentityV1, WorkAuthority};
@@ -47,7 +47,7 @@ impl WorkAttemptReceiptReadPortV1 for WorkSqliteStorage {
             .transpose()
             .map_err(|_| WorkAttemptReceiptReadErrorV1::Unavailable)?;
         if evidence.as_ref().is_some_and(
-            |record: &tracedecay_application::WorkAttemptEvidenceRecordV1| {
+            |record: &tracedecay_contracts::WorkAttemptEvidenceRecordV1| {
                 &record.identity != identity
             },
         ) {

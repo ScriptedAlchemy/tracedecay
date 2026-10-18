@@ -1,32 +1,33 @@
 //! Delivery read gate journey over the production project composition.
 //!
 //! Project open must register the daemon-owned Delivery read authority even
-//! when no GitHub credential is configured, so the dashboard reads the exact
-//! typed mount gate instead of a generic missing-authority answer. The gate
-//! must stay readable while the feedback/advisory owners remain deferred.
+//! when no GitHub provider can mount, so the dashboard reads the exact typed
+//! mount gate instead of a generic missing-authority answer. The gate must
+//! stay readable while the feedback/advisory owners remain deferred.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use tracedecay_application::feedback::{
+use tracedecay_application::advisory::GitHubReleaseReadControlV1;
+use tracedecay_application::delivery::{
+    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadKindV1, ProjectDeliveryReadOutcomeV1,
+    ProjectDeliveryReadRequestV1,
+};
+use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
 };
 use tracedecay_domain::{ActorId, CommitId, ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::advisory::GitHubReleaseReadControlV1;
-use tracedecay_usecases::delivery::{
-    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1,
-};
 
-use super::journey_test_support::git;
 use super::*;
+use crate::test_support::git::git;
 
 #[tokio::test]
-async fn project_open_registers_the_typed_delivery_gate_without_a_github_credential() {
+async fn project_open_registers_the_typed_delivery_gate_without_a_github_remote() {
     let isolation = tempfile::TempDir::new().expect("production harness isolation");
     let project = isolation.path().join("project");
     std::fs::create_dir_all(&project).expect("project root");
@@ -36,15 +37,15 @@ async fn project_open_registers_the_typed_delivery_gate_without_a_github_credent
     )
     .expect("project source");
     git(&project, &["init", "--quiet", "-b", "main"]);
-    // A recognizable GitHub remote with no registered credential is the exact
-    // production shape behind the GitHubCredentialNotConfigured gate.
+    // A remote on a host other than github.com is the exact production shape
+    // behind the NoGitRemote gate.
     git(
         &project,
         &[
             "remote",
             "add",
             "origin",
-            "https://github.com/tracedecay-fixture/delivery-gate-journey.git",
+            "https://git.example.invalid/tracedecay-fixture/delivery-gate-journey.git",
         ],
     );
     git(&project, &["add", "."]);
@@ -65,7 +66,7 @@ async fn project_open_registers_the_typed_delivery_gate_without_a_github_credent
 
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
-        .expect("production composition opens without a GitHub credential");
+        .expect("production composition opens without a GitHub remote");
     let resources = harness.resources.as_ref().expect("live harness resources");
     let canonical_project = resources
         .servers
@@ -78,7 +79,9 @@ async fn project_open_registers_the_typed_delivery_gate_without_a_github_credent
         .service
         .delivery_read_authority(Some(&canonical_project))
         .await
-        .expect("project open must register the Delivery read authority even without a credential");
+        .expect(
+            "project open must register the Delivery read authority even without a GitHub remote",
+        );
 
     let scope = authority.scope().clone();
     let grant = CapabilityGrantSnapshot::new(
@@ -106,6 +109,7 @@ async fn project_open_registers_the_typed_delivery_gate_without_a_github_credent
     )
     .expect("delivery read context");
     let request = ProjectDeliveryReadRequestV1 {
+        kind: ProjectDeliveryReadKindV1::Overview,
         expected_head_commit_id: CommitId::new(head_commit).expect("head commit"),
         max_pull_requests: 1,
         max_review_items: 1,
@@ -117,10 +121,11 @@ async fn project_open_registers_the_typed_delivery_gate_without_a_github_credent
     assert_eq!(
         authority.handle().read(&context, &request, &control).await,
         ProjectDeliveryReadOutcomeV1::NotMounted {
-            gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+            gate: ProjectDeliveryProviderMountGateV1::NoGitRemote,
         },
-        "the registered Delivery read must answer with the exact typed credential gate"
+        "the registered Delivery read must answer with the exact typed remote gate"
     );
 
+    drop(authority);
     harness.shutdown().await;
 }

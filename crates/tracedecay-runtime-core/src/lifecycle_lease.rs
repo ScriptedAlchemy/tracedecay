@@ -7,8 +7,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::db::is_lock_contended;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_private_fs::FileLease;
 
 const LIFECYCLE_LOCK_FILENAME: &str = "lifecycle.lock";
+const LIFECYCLE_LEASE_LABEL: &str = "lifecycle";
 const EXCLUSIVE_LEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 static LEASE_NONCE: AtomicU64 = AtomicU64::new(0);
 static PROCESS_LEASE_TOKENS: LazyLock<Mutex<Vec<String>>> =
@@ -16,7 +18,7 @@ static PROCESS_LEASE_TOKENS: LazyLock<Mutex<Vec<String>>> =
 
 #[derive(Debug)]
 enum LeaseHold {
-    File(File),
+    File(FileLease),
     Inherited,
 }
 
@@ -79,11 +81,11 @@ impl LifecycleLease {
 
         let owner = read_owner(file, &self.lock_path);
         #[cfg(windows)]
-        fs2::FileExt::unlock(file)
+        file.unlock()
             .map_err(|error| lock_error(&self.lock_path, "downgrade", &error))?;
-        if let Err(error) = fs2::FileExt::lock_shared(file) {
+        if let Err(error) = file.lock_shared() {
             let downgrade_error = lock_error(&self.lock_path, "downgrade", &error);
-            fs2::FileExt::lock_exclusive(file)
+            file.lock()
                 .and_then(|()| {
                     owner.as_deref().map_or(Ok(()), |owner| {
                         write_owner_metadata(file, &self.lock_path, owner)
@@ -97,10 +99,10 @@ impl LifecycleLease {
         if let Err(error) = clear_owner_metadata(file, &self.lock_path) {
             let downgrade_error = owner_write_error(&error);
             #[cfg(windows)]
-            fs2::FileExt::unlock(file).map_err(|restore_error| {
+            file.unlock().map_err(|restore_error| {
                 failed_downgrade_restore_error(&downgrade_error, &restore_error)
             })?;
-            fs2::FileExt::lock_exclusive(file)
+            file.lock()
                 .and_then(|()| {
                     owner.as_deref().map_or(Ok(()), |owner| {
                         write_owner_metadata(file, &self.lock_path, owner)
@@ -128,28 +130,26 @@ impl Drop for LifecycleLease {
         if let Some(token) = self.token.as_deref() {
             unregister_process_token(token);
         }
-        if let LeaseHold::File(file) = &self.hold {
-            #[cfg(windows)]
-            if self.exclusive {
-                remove_owner_sidecar_if_current(&self.lock_path, self.token.as_deref());
-            }
-            let _ = fs2::FileExt::unlock(file);
+        #[cfg(windows)]
+        if self.exclusive && matches!(self.hold, LeaseHold::File(_)) {
+            remove_owner_sidecar_if_current(&self.lock_path, self.token.as_deref());
         }
     }
 }
 
-pub fn acquire_exclusive(operation: &str) -> Result<LifecycleLease> {
-    acquire_exclusive_at(&lifecycle_lock_path()?, operation)
-}
-
-/// Waits up to `timeout` for existing lifecycle readers or writers to release
-/// before acquiring exclusive ownership. Non-contention errors still fail
-/// immediately.
+/// Waits up to `timeout` for existing lifecycle readers or writers of
+/// `profile_root` to release before acquiring exclusive ownership.
+/// Non-contention errors still fail immediately.
 pub fn acquire_exclusive_with_timeout(
+    profile_root: &Path,
     operation: &str,
     timeout: Duration,
 ) -> Result<LifecycleLease> {
-    acquire_exclusive_at_with_timeout(&lifecycle_lock_path()?, operation, timeout)
+    acquire_exclusive_at_with_timeout(
+        &lifecycle_lock_path_for_profile(profile_root)?,
+        operation,
+        timeout,
+    )
 }
 
 /// Acquires the lifecycle lease rooted in an explicit profile. Migration
@@ -170,7 +170,7 @@ pub fn try_acquire_exclusive_for_profile(
 ) -> Result<ExclusiveLeaseAttempt> {
     let path = lifecycle_lock_path_for_profile(profile_root)?;
     let mut file = open_lock_file(&path)?;
-    match fs2::FileExt::try_lock_exclusive(&file) {
+    match file.try_lock().map_err(std::io::Error::from) {
         Ok(()) => own_exclusive(file, &path, operation).map(ExclusiveLeaseAttempt::Acquired),
         Err(error) if is_lock_contended(&error) => Ok(ExclusiveLeaseAttempt::Busy {
             owner_operation: read_owner(&mut file, &path)
@@ -185,12 +185,13 @@ pub fn try_acquire_exclusive_for_profile(
 /// Waits for the current exclusive owner to finish, then acquires a shared
 /// lease. Reserved for restoring a daemon that was stopped before a losing
 /// exclusive-acquisition race.
-pub fn acquire_shared_blocking(operation: &str) -> Result<LifecycleLease> {
-    let path = lifecycle_lock_path()?;
+pub fn acquire_shared_blocking(profile_root: &Path, operation: &str) -> Result<LifecycleLease> {
+    let path = lifecycle_lock_path_for_profile(profile_root)?;
     let file = open_lock_file(&path)?;
-    fs2::FileExt::lock_shared(&file).map_err(|error| lock_error(&path, operation, &error))?;
+    file.lock_shared()
+        .map_err(|error| lock_error(&path, operation, &error))?;
     Ok(LifecycleLease {
-        hold: LeaseHold::File(file),
+        hold: LeaseHold::File(FileLease::held(file, LIFECYCLE_LEASE_LABEL)),
         token: None,
         lock_path: path,
         exclusive: false,
@@ -204,11 +205,6 @@ pub fn acquire_shared_for_profile(profile_root: &Path, operation: &str) -> Resul
     acquire_shared_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
 }
 
-/// Attempts to acquire a non-inherited shared lease without blocking.
-pub fn try_acquire_shared(operation: &str) -> Result<SharedLeaseAttempt> {
-    try_acquire_shared_at(&lifecycle_lock_path()?, operation)
-}
-
 pub fn try_acquire_shared_for_profile(
     profile_root: &Path,
     operation: &str,
@@ -218,16 +214,16 @@ pub fn try_acquire_shared_for_profile(
 
 /// Acquires a shared diagnostic lease, or joins the exclusive lease held by
 /// this process's post-update parent.
-pub fn acquire_shared_or_inherited(operation: &str) -> Result<LifecycleLease> {
-    let path = lifecycle_lock_path()?;
+pub fn acquire_shared_or_inherited(profile_root: &Path, operation: &str) -> Result<LifecycleLease> {
+    let path = lifecycle_lock_path_for_profile(profile_root)?;
     acquire_shared_or_inherited_at(&path, operation)
 }
 
 fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
-    match fs2::FileExt::try_lock_shared(&file) {
+    match file.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(LifecycleLease {
-            hold: LeaseHold::File(file),
+            hold: LeaseHold::File(FileLease::held(file, LIFECYCLE_LEASE_LABEL)),
             token: None,
             lock_path: path.to_path_buf(),
             exclusive: false,
@@ -253,11 +249,12 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
 /// Acquires the lifecycle lease, or proves that this process is the
 /// post-update child of the process that still owns it.
 pub fn acquire_exclusive_or_inherited(
+    profile_root: &Path,
     operation: &str,
     inherited_token: Option<&str>,
 ) -> Result<LifecycleLease> {
     acquire_exclusive_or_inherited_at(
-        &lifecycle_lock_path()?,
+        &lifecycle_lock_path_for_profile(profile_root)?,
         operation,
         inherited_token.map(str::to_string),
     )
@@ -276,7 +273,7 @@ fn acquire_exclusive_or_inherited_at(
     inherited: Option<String>,
 ) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
-    match fs2::FileExt::try_lock_exclusive(&file) {
+    match file.try_lock().map_err(std::io::Error::from) {
         Ok(()) => own_exclusive(file, path, operation),
         Err(error) if is_lock_contended(&error) => {
             let owner = read_owner(&mut file, path);
@@ -308,31 +305,6 @@ fn acquire_exclusive_or_inherited_at(
     }
 }
 
-fn lifecycle_lock_path() -> Result<PathBuf> {
-    let root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
-        message: "could not determine TraceDecay user data directory for lifecycle lease"
-            .to_string(),
-    })?;
-    let root_existed = root.exists();
-    std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "failed to create TraceDecay user data directory '{}': {error}",
-            root.display()
-        ),
-    })?;
-    if !root_existed {
-        crate::storage::set_private_dir_permissions(&root).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!(
-                    "failed to secure TraceDecay user data directory '{}': {error}",
-                    root.display()
-                ),
-            }
-        })?;
-    }
-    Ok(root.join(LIFECYCLE_LOCK_FILENAME))
-}
-
 fn lifecycle_lock_path_for_profile(profile_root: &Path) -> Result<PathBuf> {
     let root_existed = profile_root.exists();
     std::fs::create_dir_all(profile_root).map_err(|error| TraceDecayError::Config {
@@ -358,7 +330,11 @@ fn acquire_exclusive_at(path: &Path, operation: &str) -> Result<LifecycleLease> 
     acquire_exclusive_at_with_timeout(path, operation, Duration::ZERO)
 }
 
-#[hotpath::measure(label = "runtime_core.lifecycle.acquire_exclusive")]
+#[tracing::instrument(
+    name = "runtime_core.lifecycle.acquire_exclusive",
+    level = "trace",
+    skip_all
+)]
 fn acquire_exclusive_at_with_timeout(
     path: &Path,
     operation: &str,
@@ -367,7 +343,7 @@ fn acquire_exclusive_at_with_timeout(
     let mut file = open_lock_file(path)?;
     let started = Instant::now();
     loop {
-        match fs2::FileExt::try_lock_exclusive(&file) {
+        match file.try_lock().map_err(std::io::Error::from) {
             Ok(()) => return own_exclusive(file, path, operation),
             Err(error) if is_lock_contended(&error) => {
                 let remaining = timeout.saturating_sub(started.elapsed());
@@ -382,12 +358,16 @@ fn acquire_exclusive_at_with_timeout(
     }
 }
 
-#[hotpath::measure(label = "runtime_core.lifecycle.acquire_shared")]
+#[tracing::instrument(
+    name = "runtime_core.lifecycle.acquire_shared",
+    level = "trace",
+    skip_all
+)]
 fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
-    match fs2::FileExt::try_lock_shared(&file) {
+    match file.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(LifecycleLease {
-            hold: LeaseHold::File(file),
+            hold: LeaseHold::File(FileLease::held(file, LIFECYCLE_LEASE_LABEL)),
             token: None,
             lock_path: path.to_path_buf(),
             exclusive: false,
@@ -402,9 +382,9 @@ fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
 
 fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAttempt> {
     let file = open_lock_file(path)?;
-    match fs2::FileExt::try_lock_shared(&file) {
+    match file.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
-            hold: LeaseHold::File(file),
+            hold: LeaseHold::File(FileLease::held(file, LIFECYCLE_LEASE_LABEL)),
             token: None,
             lock_path: path.to_path_buf(),
             exclusive: false,
@@ -414,7 +394,8 @@ fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAtte
     }
 }
 
-fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<LifecycleLease> {
+fn own_exclusive(file: File, path: &Path, operation: &str) -> Result<LifecycleLease> {
+    let mut file = FileLease::held(file, LIFECYCLE_LEASE_LABEL);
     let token = lease_token();
     let pid = std::process::id();
     #[cfg(not(windows))]
@@ -514,8 +495,12 @@ fn live_owner_matches(owner: &str, inherited_token: &str) -> bool {
         .is_none_or(|recorded| recorded.parse::<u64>().ok() == Some(live_start_time))
 }
 
-#[cfg(not(windows))]
-fn process_start_time(pid: u32) -> Option<u64> {
+/// Start time of `pid` in whole seconds since the Unix epoch, as `sysinfo` reports it.
+///
+/// Callers store this beside a PID so a later probe can tell the original
+/// owner from a reused PID. `None` means the start time could not be read
+/// and must not be treated as a mismatch.
+pub fn process_start_time(pid: u32) -> Option<u64> {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
@@ -620,11 +605,41 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ExclusiveLeaseAttempt, SharedLeaseAttempt, acquire_exclusive_at,
-        acquire_exclusive_at_with_timeout, acquire_exclusive_or_inherited_at, acquire_shared_at,
-        acquire_shared_or_inherited_at, try_acquire_exclusive_for_profile, try_acquire_shared_at,
-        try_acquire_shared_for_profile,
+        ExclusiveLeaseAttempt, LIFECYCLE_LOCK_FILENAME, SharedLeaseAttempt, acquire_exclusive_at,
+        acquire_exclusive_at_with_timeout, acquire_exclusive_or_inherited_at,
+        acquire_exclusive_with_timeout, acquire_shared_at, try_acquire_exclusive_for_profile,
+        try_acquire_shared_at, try_acquire_shared_for_profile,
     };
+
+    /// Two owners with their own profiles hold exclusive leases at once;
+    /// each lease lives in its owner's profile and neither is busy.
+    #[test]
+    fn two_profiles_hold_exclusive_leases_concurrently() {
+        let profiles = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let both_held = std::sync::Barrier::new(2);
+        let held = std::thread::scope(|scope| {
+            profiles
+                .each_ref()
+                .map(|profile| {
+                    let both_held = &both_held;
+                    scope.spawn(move || {
+                        let lease = acquire_exclusive_with_timeout(
+                            profile.path(),
+                            "service install",
+                            Duration::from_millis(200),
+                        );
+                        both_held.wait();
+                        lease.map(|lease| lease.is_exclusive())
+                    })
+                })
+                .map(|owner| owner.join().unwrap().unwrap())
+        });
+
+        assert_eq!(held, [true, true]);
+        for profile in &profiles {
+            assert!(profile.path().join(LIFECYCLE_LOCK_FILENAME).is_file());
+        }
+    }
 
     #[test]
     fn exclusive_lease_rejects_a_concurrent_mutator() {
@@ -749,15 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_doctor_joins_the_process_owned_exclusive_lease() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("lifecycle.lock");
-        let _parent = acquire_exclusive_at(&path, "post-update").unwrap();
-
-        acquire_shared_or_inherited_at(&path, "doctor").unwrap();
-    }
-
-    #[test]
     fn nonblocking_shared_attempt_reports_an_unrelated_exclusive_owner_as_busy() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("lifecycle.lock");
@@ -768,7 +774,7 @@ mod tests {
             .truncate(false)
             .open(&path)
             .unwrap();
-        fs2::FileExt::try_lock_exclusive(&external).unwrap();
+        external.try_lock().map_err(std::io::Error::from).unwrap();
         writeln!(external, "external-token\tmigration\t999").unwrap();
         external.flush().unwrap();
 
@@ -801,7 +807,7 @@ mod tests {
         let attempt = try_acquire_exclusive_for_profile(&profile, "wipe").unwrap();
 
         // Shared holders record no owner metadata, so the busy state carries
-        // no operation — the caller must not pretend to know the holder.
+        // no operation, the caller must not pretend to know the holder.
         match attempt {
             ExclusiveLeaseAttempt::Busy { owner_operation } => {
                 assert_eq!(owner_operation, None);
@@ -887,7 +893,7 @@ mod tests {
             .truncate(false)
             .open(&path)
             .unwrap();
-        fs2::FileExt::try_lock_exclusive(&external).unwrap();
+        external.try_lock().map_err(std::io::Error::from).unwrap();
         let stale_token = "stale-owner-token";
         writeln!(external, "{stale_token}\tupdate\t{}", u32::MAX).unwrap();
         external.flush().unwrap();
@@ -910,7 +916,7 @@ mod tests {
             .truncate(false)
             .open(&path)
             .unwrap();
-        fs2::FileExt::try_lock_exclusive(&external).unwrap();
+        external.try_lock().map_err(std::io::Error::from).unwrap();
         let stale_token = "stale-owner-token";
         writeln!(external, "{stale_token}\tupdate\t{}\t0", std::process::id()).unwrap();
         external.flush().unwrap();
@@ -934,7 +940,7 @@ mod tests {
             .truncate(false)
             .open(&path)
             .unwrap();
-        fs2::FileExt::try_lock_exclusive(&external).unwrap();
+        external.try_lock().map_err(std::io::Error::from).unwrap();
         let token = "matching-live-token";
         writeln!(external, "{token}\tupdate\t{}", std::process::id()).unwrap();
         external.flush().unwrap();

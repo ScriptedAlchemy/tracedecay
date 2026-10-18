@@ -1,7 +1,7 @@
 //! Process-lifetime admission policy for session transcript ingest.
 
 /// Truthy `TRACEDECAY_SESSION_INGEST_DISABLED` turns off every session
-/// transcript ingest lane for the process lifetime — the session-temporal
+/// transcript ingest lane for the process lifetime, the session-temporal
 /// refresh workers and the session-sync import service alike. A dev/profiling
 /// switch: session history simply stays un-ingested, reported as a typed
 /// unavailable outcome rather than an empty success.

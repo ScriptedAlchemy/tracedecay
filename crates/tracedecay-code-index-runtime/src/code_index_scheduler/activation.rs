@@ -11,12 +11,22 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use tracedecay_application::ResolvedScope;
+use tokio::sync::watch;
+use tracedecay_contracts::ResolvedScope;
 
-use tracedecay_session_memory::context::CancellationToken;
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+use tracedecay_runtime_core::git_discovery::{
+    GitRepositoryIdentityOutcome, discover_repository_identity,
+};
+use tracedecay_runtime_core::native_runtime;
 
+use super::demand_admission::{
+    CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
+};
 use super::identity::IndexingIdentityV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const ACTIVATION_IDLE: u8 = 0;
 const ACTIVATION_MOUNTING: u8 = 1;
@@ -27,7 +37,8 @@ pub type CodeIndexActivationMountFutureV1 =
     Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'static>>;
 pub type CodeIndexActivationMountV1 =
     Arc<dyn Fn() -> CodeIndexActivationMountFutureV1 + Send + Sync + 'static>;
-pub type CodeIndexActivationHintFutureV1 = Pin<Box<dyn Future<Output = bool> + Send + 'static>>;
+pub type CodeIndexActivationHintFutureV1 =
+    Pin<Box<dyn Future<Output = CodeIndexDemandAdmissionV1> + Send + 'static>>;
 pub type CodeIndexActivationHintSinkV1 =
     Arc<dyn Fn(CodeIndexActivationHookBatchV1) -> CodeIndexActivationHintFutureV1 + Send + Sync>;
 
@@ -36,6 +47,15 @@ pub type CodeIndexActivationHintSinkV1 =
 pub enum CodeIndexAutomaticAdmissionV1 {
     Admitted,
     LinkedWorktreeDisabled,
+}
+
+/// Who asked for this activation: the daemon's own watch/hook plumbing, or an
+/// operator naming the route. Only the former is subject to
+/// [`CodeIndexAutomaticAdmissionV1`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationDemandV1 {
+    Automatic,
+    Explicit,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -112,13 +132,14 @@ impl Drop for CodeIndexActivationRetirementV1 {
 #[derive(Clone)]
 pub struct CodeIndexActivationV1 {
     project_root: PathBuf,
-    identity: Option<IndexingIdentityV1>,
+    identity: Arc<Mutex<Option<IndexingIdentityV1>>>,
     route_registered: Arc<AtomicBool>,
     cancellation: CancellationToken,
     automatic_admission: CodeIndexAutomaticAdmissionV1,
     state: Arc<AtomicU8>,
     pending_hooks: Arc<Mutex<PendingHookPathsV1>>,
     mount: CodeIndexActivationMountV1,
+    mount_failed: watch::Sender<bool>,
     hint_sink: CodeIndexActivationHintSinkV1,
     retirement: Arc<CodeIndexActivationRetirementV1>,
     #[cfg(test)]
@@ -152,10 +173,9 @@ impl CodeIndexActivationV1 {
         mount: CodeIndexActivationMountV1,
         hint_sink: CodeIndexActivationHintSinkV1,
     ) -> Self {
-        let project_root = project_root
-            .canonicalize()
+        let project_root = canonical_existing_identity(project_root)
             .unwrap_or_else(|_| project_root.to_path_buf());
-        let identity = IndexingIdentityV1::resolve(&project_root).ok();
+        let identity = Arc::new(Mutex::new(IndexingIdentityV1::resolve(&project_root).ok()));
         Self {
             project_root,
             identity,
@@ -165,6 +185,7 @@ impl CodeIndexActivationV1 {
             state: Arc::new(AtomicU8::new(ACTIVATION_IDLE)),
             pending_hooks: Arc::new(Mutex::new(PendingHookPathsV1::default())),
             mount,
+            mount_failed: watch::channel(false).0,
             hint_sink,
             retirement: Arc::new(CodeIndexActivationRetirementV1::new()),
             #[cfg(test)]
@@ -182,14 +203,31 @@ impl CodeIndexActivationV1 {
     }
 
     fn accepts_root(&self, project_root: &Path) -> bool {
-        self.identity.is_some()
-            && project_root
-                .canonicalize()
-                .is_ok_and(|root| root == self.project_root)
+        canonical_existing_identity(project_root).is_ok_and(|root| root == self.project_root)
     }
 
-    pub fn identity(&self) -> Option<&IndexingIdentityV1> {
-        self.identity.as_ref()
+    pub fn identity(&self) -> Option<IndexingIdentityV1> {
+        self.identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether the last mount attempt failed and no later attempt mounted.
+    pub fn mount_failed(&self) -> bool {
+        *self.mount_failed.borrow()
+    }
+
+    /// Subscribe to failed-mount publication for a readiness wait.
+    pub fn subscribe_mount_failure(&self) -> watch::Receiver<bool> {
+        self.mount_failed.subscribe()
+    }
+
+    /// Whether a mount attempt is currently in flight for this route. A
+    /// retained mount failure while one is in flight is a retry underway,
+    /// not the terminal observation the flag alone would name.
+    pub fn mount_in_progress(&self) -> bool {
+        self.state.load(Ordering::Acquire) == ACTIVATION_MOUNTING
     }
 
     pub fn install_retirement(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
@@ -199,7 +237,7 @@ impl CodeIndexActivationV1 {
     pub fn authorizes_scope(&self, scope: &ResolvedScope) -> bool {
         self.route_is_live()
             && scope.validate().is_ok()
-            && self.identity.as_ref().is_some_and(|identity| {
+            && self.identity().is_some_and(|identity| {
                 identity.repository_id() == &scope.repository_id
                     && identity.worktree_id() == &scope.worktree_id
             })
@@ -220,14 +258,38 @@ impl CodeIndexActivationV1 {
         self.activate()
     }
 
-    #[hotpath::measure(label = "daemon.code_index.activation.activate")]
     pub fn activate(&self) -> bool {
-        if self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted
+        self.activate_with_demand(ActivationDemandV1::Automatic)
+    }
+
+    /// Start the mount for a demand `admit` already cleared: the watcher policy
+    /// question was answered there, and asking it again would refuse an
+    /// operator-named reconcile on a linked worktree.
+    fn activate_for_demand(&self) -> bool {
+        self.activate_with_demand(ActivationDemandV1::Explicit)
+    }
+
+    /// Start automatic or explicit activation.
+    ///
+    /// [`CodeIndexAutomaticAdmissionV1`] answers "may the daemon start indexing
+    /// this route on its own?", a watcher policy, not an authorization
+    /// boundary. Explicit demand (an operator-named reconcile: `tracedecay
+    /// init`, `tracedecay sync`, `tracedecay_admin_sync`) skips exactly that
+    /// question and nothing else: route liveness, the indexing identity check
+    /// inside the mount, and the activation state machine all still apply.
+    #[tracing::instrument(
+        name = "daemon.code_index.activation.activate",
+        level = "trace",
+        skip_all
+    )]
+    fn activate_with_demand(&self, demand: ActivationDemandV1) -> bool {
+        if (demand == ActivationDemandV1::Automatic
+            && self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted)
             || !self.route_is_live()
         {
             return false;
         }
-        let Some(expected_identity) = self.identity.clone() else {
+        let Some(expected_identity) = self.identity() else {
             return false;
         };
         match self.state.compare_exchange(
@@ -236,42 +298,37 @@ impl CodeIndexActivationV1 {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => {
-                hotpath::gauge!("daemon.code_index.generation_state")
-                    .set(f64::from(ACTIVATION_MOUNTING));
-            }
+            Ok(_) => {}
             Err(ACTIVATION_MOUNTING | ACTIVATION_MOUNTED) => return true,
             Err(_) => return false,
         }
         #[cfg(test)]
         self.activation_attempts.fetch_add(1, Ordering::SeqCst);
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            self.state.store(ACTIVATION_IDLE, Ordering::Release);
-            hotpath::gauge!("daemon.code_index.generation_state").set(f64::from(ACTIVATION_IDLE));
-            return false;
-        };
         let project_root = self.project_root.clone();
         let route_registered = Arc::clone(&self.route_registered);
         let cancellation = self.cancellation.clone();
         let state = Arc::clone(&self.state);
         let pending_hooks = Arc::clone(&self.pending_hooks);
         let mount = Arc::clone(&self.mount);
+        let mount_failed = self.mount_failed.clone();
         let hint_sink = Arc::clone(&self.hint_sink);
-        runtime.spawn(hotpath::future!(
+        let spawned = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
             async move {
                 let route_is_live =
                     || route_registered.load(Ordering::Acquire) && !cancellation.is_cancelled();
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-                    hotpath::gauge!("daemon.code_index.generation_state")
-                        .set(f64::from(ACTIVATION_IDLE));
                     return;
                 }
-                if let Err(error) = mount().await {
+                let mounted = mount().await;
+                if let Err(error) = mounted {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-                    hotpath::gauge!("daemon.code_index.generation_state")
-                        .set(f64::from(ACTIVATION_IDLE));
+                    // The retained failure publishes only once the attempt
+                    // has fully settled: a waiter that reads the flag while
+                    // `mount_in_progress` still holds is observing a retry
+                    // underway, not the terminal observation this flag names.
+                    mount_failed.send_replace(true);
                     tracing::warn!(
                         event = "code_index_activation",
                         project = %project_root.display(),
@@ -281,11 +338,10 @@ impl CodeIndexActivationV1 {
                     );
                     return;
                 }
+                mount_failed.send_replace(false);
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-                    hotpath::gauge!("daemon.code_index.generation_state")
-                        .set(f64::from(ACTIVATION_IDLE));
                     return;
                 }
                 let batch = {
@@ -293,8 +349,6 @@ impl CodeIndexActivationV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     state.store(ACTIVATION_MOUNTED, Ordering::Release);
-                    hotpath::gauge!("daemon.code_index.generation_state")
-                        .set(f64::from(ACTIVATION_MOUNTED));
                     pending.take()
                 };
                 if route_is_live() && (!batch.paths.is_empty() || batch.overflow) {
@@ -307,22 +361,111 @@ impl CodeIndexActivationV1 {
                     "demand-driven code-index activation mounted"
                 );
             },
-            label = "daemon.code_index.activation.mount"
+            tracing::trace_span!("daemon.code_index.activation.mount"),
         ));
+        if let Err(error) = spawned {
+            self.state.store(ACTIVATION_IDLE, Ordering::Release);
+            self.mount_failed.send_replace(true);
+            tracing::warn!(
+                event = "code_index_activation",
+                project = %self.project_root.display(),
+                outcome = "degraded",
+                %error,
+                "demand-driven code-index activation did not start"
+            );
+            return false;
+        }
         true
     }
 
-    /// Accept exact after-edit hints immediately, even while the background
-    /// mount is still opening. Returns `true` only when this exact live route
-    /// accepted the paths for queued or direct delivery.
-    #[hotpath::measure(
-        label = "daemon.code_index.activation.notify_hook_paths",
-        future = true
-    )]
-    pub async fn notify_hook_paths(&self, project_root: &Path, rel_paths: Vec<String>) -> bool {
-        if rel_paths.is_empty() || !self.route_is_live() || !self.accepts_root(project_root) {
-            return false;
+    /// Classify a missing constructor identity. A confirmed non-repository is
+    /// terminal. An undecided probe is retryable and is not cached.
+    async fn ensure_indexing_identity(&self) -> Result<(), CodeIndexDemandAdmissionV1> {
+        if self.identity().is_some() {
+            return Ok(());
         }
+        let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
+        match discover_repository_identity(&self.project_root, deadline, &self.cancellation).await {
+            GitRepositoryIdentityOutcome::NotRepository => {
+                Err(CodeIndexDemandAdmissionV1::NotApplicable)
+            }
+            GitRepositoryIdentityOutcome::Resolved(_) => {
+                match IndexingIdentityV1::resolve(&self.project_root) {
+                    Ok(identity) => {
+                        *self
+                            .identity
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity);
+                        Ok(())
+                    }
+                    Err(_) => Err(CodeIndexDemandAdmissionV1::Unavailable(
+                        CodeIndexDemandUnavailableV1::IdentityUnresolved,
+                    )),
+                }
+            }
+            GitRepositoryIdentityOutcome::Unknown(_) => {
+                Err(CodeIndexDemandAdmissionV1::Unavailable(
+                    CodeIndexDemandUnavailableV1::IdentityUnresolved,
+                ))
+            }
+        }
+    }
+
+    /// Route, policy, and identity checks shared by demand admission and the
+    /// freshness probe. `None` means the scheduler may be asked.
+    pub async fn gate_demand(
+        &self,
+        project_root: &Path,
+        demand: &CodeIndexDemandV1,
+    ) -> Option<CodeIndexDemandAdmissionV1> {
+        if !self.route_is_live() {
+            return Some(CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::RouteRetired,
+            ));
+        }
+        if !self.accepts_root(project_root) {
+            return Some(CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::ForeignRoot,
+            ));
+        }
+        if demand.is_watcher_policy_governed()
+            && self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted
+        {
+            return Some(CodeIndexDemandAdmissionV1::RefusedByPolicy);
+        }
+        self.ensure_indexing_identity().await.err()
+    }
+
+    /// The one front door for code-index demand.
+    ///
+    /// Every caller above, MCP after-edit hooks, `tracedecay sync`, the
+    /// server's startup catch-up, host admission, asks here and reports the
+    /// verdict it gets. The watcher policy, route liveness, the exact-root
+    /// check, and the choice between the mounted scheduler and the bounded
+    /// pre-mount queue all live in this one place, so no layer above can
+    /// rebuild a reason the front door did not mint.
+    #[tracing::instrument(name = "daemon.code_index.activation.admit", level = "trace", skip_all)]
+    pub async fn admit(
+        &self,
+        project_root: &Path,
+        demand: CodeIndexDemandV1,
+    ) -> CodeIndexDemandAdmissionV1 {
+        if let Some(verdict) = self.gate_demand(project_root, &demand).await {
+            return verdict;
+        }
+        let overflow = !matches!(demand, CodeIndexDemandV1::HookPaths(_));
+        let rel_paths = match demand {
+            CodeIndexDemandV1::HookPaths(rel_paths) => {
+                if rel_paths.is_empty() {
+                    // Empty path batches are a no-op, not a queue seat.
+                    return CodeIndexDemandAdmissionV1::Unavailable(
+                        CodeIndexDemandUnavailableV1::NoProvenChange,
+                    );
+                }
+                rel_paths
+            }
+            CodeIndexDemandV1::Reconcile | CodeIndexDemandV1::OperatorReconcile => Vec::new(),
+        };
         let direct = {
             let mut pending = self
                 .pending_hooks
@@ -331,51 +474,27 @@ impl CodeIndexActivationV1 {
             if self.state.load(Ordering::Acquire) == ACTIVATION_MOUNTED {
                 Some(CodeIndexActivationHookBatchV1 {
                     paths: rel_paths,
-                    overflow: false,
+                    overflow,
                 })
             } else {
                 pending.extend(rel_paths);
+                pending.overflow |= overflow;
                 None
             }
         };
         match direct {
+            // A mounted route forwards to the scheduler, which owns the only
+            // verdict this activation cannot know: the terminal park.
             Some(batch) if self.route_is_live() => (self.hint_sink)(batch).await,
-            Some(_) => false,
-            None => self.activate(),
-        }
-    }
-
-    /// Request one authoritative worktree reconciliation without waiting for
-    /// indexing. The bounded pre-mount queue collapses repeated overflow
-    /// requests into one bit, while a mounted route forwards the same signal
-    /// to the retained scheduler owner.
-    #[hotpath::measure(
-        label = "daemon.code_index.activation.notify_hook_overflow",
-        future = true
-    )]
-    pub async fn notify_hook_overflow(&self, project_root: &Path) -> bool {
-        if !self.route_is_live() || !self.accepts_root(project_root) {
-            return false;
-        }
-        let direct = {
-            let mut pending = self
-                .pending_hooks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.state.load(Ordering::Acquire) == ACTIVATION_MOUNTED {
-                Some(CodeIndexActivationHookBatchV1 {
-                    paths: Vec::new(),
-                    overflow: true,
-                })
-            } else {
-                pending.overflow = true;
-                None
+            Some(_) => {
+                CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::RouteRetired)
             }
-        };
-        match direct {
-            Some(batch) if self.route_is_live() => (self.hint_sink)(batch).await,
-            Some(_) => false,
-            None => self.activate(),
+            // The bounded queue holds the demand; the mount it starts delivers
+            // it. Nothing terminal is knowable before a scheduler is mounted.
+            None if self.activate_for_demand() => CodeIndexDemandAdmissionV1::Queued,
+            None => CodeIndexDemandAdmissionV1::Unavailable(
+                CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+            ),
         }
     }
 
@@ -397,25 +516,13 @@ impl CodeIndexActivationV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use super::super::tests::git;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tempfile::TempDir;
     use tracedecay_domain::ProjectId;
 
     use super::*;
-
-    fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .current_dir(root)
-        .args(arguments)
-        .status()
-        .expect("run git");
-        assert!(status.success(), "git {arguments:?}");
-    }
 
     fn repository() -> TempDir {
         let root = TempDir::new().expect("repository root");
@@ -462,7 +569,7 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(batch);
-                true
+                CodeIndexDemandAdmissionV1::Queued
             })
         });
         CodeIndexActivationV1::new(
@@ -509,9 +616,50 @@ mod tests {
         }
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         assert_eq!(activation.activation_attempts(), 1);
-        gate.notify_waiters();
+        gate.notify_one();
         wait_until(|| activation.is_mounted()).await;
         assert_eq!(mount_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_hook_paths_are_unavailable_no_proven_change_not_queued() {
+        let repository = repository();
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let activation = activation(
+            repository.path(),
+            Arc::clone(&mount_attempts),
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+        );
+
+        assert_eq!(
+            activation
+                .admit(repository.path(), CodeIndexDemandV1::HookPaths(Vec::new()))
+                .await,
+            CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::NoProvenChange)
+        );
+        assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
+        assert!(!activation.is_mounted());
+    }
+
+    #[tokio::test]
+    async fn operator_reconcile_admits_a_non_git_project_root() {
+        let project = TempDir::new().expect("project root");
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let activation = activation(
+            project.path(),
+            Arc::clone(&mount_attempts),
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+        );
+
+        assert_eq!(
+            activation
+                .admit(project.path(), CodeIndexDemandV1::OperatorReconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::NotApplicable
+        );
+        assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -529,9 +677,14 @@ mod tests {
         let mut paths = vec!["src/lib.rs".to_owned(), "src/lib.rs".to_owned()];
         paths.extend((0..=MAX_PENDING_HOOK_PATHS).map(|index| format!("src/{index}.rs")));
 
-        assert!(activation.notify_hook_paths(repository.path(), paths).await);
+        assert!(matches!(
+            activation
+                .admit(repository.path(), CodeIndexDemandV1::HookPaths(paths))
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        ));
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
-        gate.notify_waiters();
+        gate.notify_one();
         wait_until(|| !batches.lock().expect("batches").is_empty()).await;
         let batch = batches.lock().expect("batches").remove(0);
         assert!(batch.overflow);
@@ -590,14 +743,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linked_worktree_disabled_admission_never_mounts() {
+    async fn failed_mount_stays_visible_until_a_retry_mounts() {
         let repository = repository();
         let mount_attempts = Arc::new(AtomicUsize::new(0));
         let attempts = Arc::clone(&mount_attempts);
-        let activation = CodeIndexActivationV1::new_with_admission(
+        let activation = CodeIndexActivationV1::new(
             repository.path(),
             Arc::new(AtomicBool::new(true)),
             CancellationToken::new(),
+            Arc::new(move || {
+                let attempts = Arc::clone(&attempts);
+                Box::pin(async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err("private mount detail".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                })
+            }),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
+        );
+
+        assert!(activation.activate_for_root(repository.path()));
+        while !activation.mount_failed() {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(activation.activate_for_root(repository.path()));
+        while !activation.is_mounted() {
+            tokio::task::yield_now().await;
+        }
+        assert!(!activation.mount_failed());
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_disabled_admission_never_mounts() {
+        let repository = repository();
+        let foreign = TempDir::new().expect("foreign root");
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::clone(&mount_attempts);
+        let cancellation = CancellationToken::new();
+        let activation = CodeIndexActivationV1::new_with_admission(
+            repository.path(),
+            Arc::new(AtomicBool::new(true)),
+            cancellation.clone(),
             CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
             Arc::new(move || {
                 let attempts = Arc::clone(&attempts);
@@ -606,16 +795,111 @@ mod tests {
                     Ok(())
                 })
             }),
-            Arc::new(|_| Box::pin(async { true })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
         );
 
         assert_eq!(
             activation.automatic_admission(),
             CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
         );
+        assert_eq!(
+            activation
+                .admit(foreign.path(), CodeIndexDemandV1::Reconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::ForeignRoot)
+        );
+        assert_eq!(
+            activation
+                .admit(repository.path(), CodeIndexDemandV1::Reconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::RefusedByPolicy
+        );
+        cancellation.cancel();
+        assert_eq!(
+            activation
+                .admit(repository.path(), CodeIndexDemandV1::Reconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Unavailable(CodeIndexDemandUnavailableV1::RouteRetired)
+        );
         assert!(!activation.activate());
         tokio::task::yield_now().await;
         assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
+    }
+
+    /// `3b0d7c458` answers both project-open deferred owners with
+    /// `automatic_admission_for_scope` at spawn time, so a route the daemon may
+    /// never index automatically parks no background task. That admission is
+    /// frozen into the activation when the route is composed from
+    /// `sync.watch_linked_worktrees`; nothing re-reads the configuration
+    /// afterwards. Disabling automatic indexing must therefore not be a
+    /// permanent loss of the dependent owners: this pins the requirement the
+    /// code actually carries, the enabling transition takes effect on the next
+    /// route mount, which replaces the registered activation for the scope.
+    #[tokio::test]
+    async fn a_disabled_route_regains_its_deferred_owners_only_on_a_remount() {
+        let repository = repository();
+        let identity = IndexingIdentityV1::resolve(repository.path()).expect("indexing identity");
+        let scope = ResolvedScope::new(
+            ProjectId::new("project.disabled-route-remount").expect("project id"),
+            identity.repository_id().clone(),
+            identity.worktree_id().clone(),
+            identity.head_ref().cloned(),
+        )
+        .expect("resolved scope");
+        let registry = super::super::CodeIndexSchedulerRegistryV1::new(1);
+
+        let disabled = Arc::new(CodeIndexActivationV1::new_with_admission(
+            repository.path(),
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+            Arc::new(|| Box::pin(async { Ok(()) })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
+        ));
+        assert!(registry.register_activation(&scope, &disabled));
+        assert_eq!(
+            registry.automatic_admission_for_scope(&scope),
+            Some(CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled),
+            "the deferred owners must read the route's disabled admission"
+        );
+
+        // The configuration flips to enabled. The retained activation is the
+        // only thing the deferred owners consult, and it does not re-read
+        // configuration, so on its own the flip changes nothing.
+        assert_eq!(
+            disabled.automatic_admission(),
+            CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+            "a live activation must not silently change the admission it was composed with"
+        );
+        assert_eq!(
+            registry.automatic_admission_for_scope(&scope),
+            Some(CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
+        );
+
+        // The route remount composes a new activation from the new
+        // configuration and re-registers it for the same scope. From here the
+        // deferred owners are admitted again: the disablement was never
+        // terminal for the capability, only for that mount.
+        let enabled = Arc::new(CodeIndexActivationV1::new_with_admission(
+            repository.path(),
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            CodeIndexAutomaticAdmissionV1::Admitted,
+            Arc::new(|| Box::pin(async { Ok(()) })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
+        ));
+        assert!(registry.register_activation(&scope, &enabled));
+        assert_eq!(
+            registry.automatic_admission_for_scope(&scope),
+            Some(CodeIndexAutomaticAdmissionV1::Admitted),
+            "a route remount under the enabled configuration must readmit the deferred owners"
+        );
+        drop(disabled);
+        assert_eq!(
+            registry.automatic_admission_for_scope(&scope),
+            Some(CodeIndexAutomaticAdmissionV1::Admitted),
+            "retiring the superseded activation must not revoke the remounted admission"
+        );
     }
 
     #[tokio::test]
@@ -652,7 +936,7 @@ mod tests {
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         assert_eq!(activation.activation_attempts(), 1);
 
-        gate.notify_waiters();
+        gate.notify_one();
         wait_until(|| activation.is_mounted()).await;
         assert_eq!(registry.activation_count(), 1);
         drop(activation);
@@ -683,13 +967,13 @@ mod tests {
             Arc::clone(&route_registered),
             CancellationToken::new(),
             mount,
-            Arc::new(|_| Box::pin(async { true })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
         );
 
         assert!(activation.activate());
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         route_registered.store(false, Ordering::Release);
-        gate.notify_waiters();
+        gate.notify_one();
         wait_until(|| activation.is_idle()).await;
 
         assert!(!activation.is_mounted());

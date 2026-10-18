@@ -5,11 +5,11 @@ import { EvidencePattern, type EvidenceQuality } from './EvidencePattern.tsx';
 /** The subset of the generated `DashboardCoverageV1` contract the strip
  * renders. Doctor coverage statements are assignable too: their completeness
  * variants are a subset of the dashboard completeness enum. */
-export type EvidenceStripCoverage = Partial<
+type EvidenceStripCoverage = Partial<
   Pick<DashboardCoverageV1, 'completeness' | 'eligible' | 'examined'>
 >;
 
-export interface EvidenceFreshness {
+interface EvidenceFreshness {
   state?: string;
   observed_at?: string;
 }
@@ -34,7 +34,7 @@ export function EvidenceTruthStrip({
   return (
     <div
       className={cn(
-        'flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-text-muted tabular',
+        'flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-muted tabular',
         className,
       )}
       aria-label="Evidence"
@@ -54,7 +54,7 @@ export function EvidenceTruthStrip({
         isEvidenceQuality(scoreKind) ? (
           <EvidencePattern quality={scoreKind} />
         ) : (
-          <span className="uppercase tracking-wide">{scoreKind}</span>
+          <span className="uppercase tracking-wide text-3xs">{scoreKind}</span>
         )
       ) : null}
     </div>

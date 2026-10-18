@@ -32,8 +32,8 @@ WORKTREE_ROOT="$(cd -- "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd -P)"
 TMP_ROOT="${TMPDIR:-/tmp}"
 TMP_ROOT="${TMP_ROOT%/}"
 
-# Default project to index/eval against: the main tracedecay checkout.
-DEFAULT_PROJECT="/fast/projects/tracedecay"
+# Default to the checkout that owns this harness, independent of the caller's cwd.
+DEFAULT_PROJECT="${WORKTREE_ROOT}"
 
 log()  { printf '[hermetic] %s\n' "$*" >&2; }
 die()  { printf '[hermetic] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -120,7 +120,7 @@ make_env_dir() {
 }
 
 # Write env.sh into an env dir so it can be sourced by `run`/`smoke` and by a
-# human debugging with --keep.
+# human debugging a `setup` env.
 write_env_file() {
   local env_dir="$1" staged_bin="$2"
   local home_dir="${env_dir}/home"
@@ -141,21 +141,17 @@ export HERMETIC_TRACEDECAY_BIN="${staged_bin}"
 EOF
 }
 
-# Copy just enough of the real ~/.claude for `claude -p` to authenticate.
+# Give `claude -p` a credential without copying the real login.
 # We do NOT symlink the whole dir (that would let the isolated session mutate
-# the real config). We copy credentials read-only-ish and let claude create the
-# rest fresh under the isolated CLAUDE_CONFIG_DIR.
+# the real config). Claude authenticates from a setup-token or API key, and
+# creates the rest fresh under the isolated CLAUDE_CONFIG_DIR.
 seed_auth() {
   local env_dir="$1"
   local real_claude="${REAL_CLAUDE_DIR:-${ORIG_HOME}/.claude}"
   local real_codex="${REAL_CODEX_HOME:-${ORIG_HOME}/.codex}"
-  local dst="${env_dir}/home/.claude"
   local seeded=0
-  if [[ -f "${real_claude}/.credentials.json" ]]; then
-    cp -f "${real_claude}/.credentials.json" "${dst}/.credentials.json"
-    chmod 600 "${dst}/.credentials.json"
-    seeded=1
-  fi
+  # Never copy .credentials.json: its refresh token is shared with the real
+  # profile, so a refresh inside the isolated session signs the real one out.
   if [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
     seeded=1
   fi
@@ -167,10 +163,12 @@ seed_auth() {
       >>"${env_dir}/env.sh"
   fi
   if [[ "${seeded}" == "0" ]]; then
-    log "WARNING: no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY;"
+    log "WARNING: no CLAUDE_CODE_OAUTH_TOKEN, .claude_code_oauth_token, or ANTHROPIC_API_KEY;"
     log "         'claude -p' will report 'Not logged in' and scenarios will fail."
   fi
   if [[ -f "${real_codex}/auth.json" ]]; then
+    python3 "${SCRIPT_DIR}/../codex_auth_fresh.py" "${real_codex}/auth.json" \
+      || die "refusing to copy a Codex login that would refresh inside the eval"
     cp -f "${real_codex}/auth.json" "${env_dir}/home/.codex/auth.json"
     chmod 600 "${env_dir}/home/.codex/auth.json"
   else
@@ -245,40 +243,50 @@ install_plugin() {
 
 run_agent_turn() {
   local agent="$1" model="$2" prompt="$3" cwd="$4" env_dir="$5" id="$6"
-  local out
+  local status=0
   case "${agent}" in
     claude)
-      # `</dev/null`: the agent must never inherit the caller's stdin — the
-      # corpus while-read loop feeds from it, and an agent that slurps stdin
-      # (codex exec does) would silently eat every remaining scenario line.
-      out="$(cd "${cwd}" && claude -p "${prompt}" \
+      # Do not inherit the corpus reader's stdin. Preserve the real exit code.
+      (cd "${cwd}" && claude -p "${prompt}" \
           --model "${model:-sonnet}" \
           --output-format json \
-          --dangerously-skip-permissions </dev/null 2>"${env_dir}/results/${id}.stderr")" || \
-        log "scenario ${id}: claude -p exited non-zero (see ${id}.stderr)"
-      printf '%s' "${out}" >"${env_dir}/results/${id}.claude.json"
+          --dangerously-skip-permissions) </dev/null \
+          >"${env_dir}/results/${id}.claude.json" 2>"${env_dir}/results/${id}.stderr" || status=$?
       ;;
     codex)
-      local -a cmd=(codex exec --json --cd "${cwd}" --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust)
+      local -a cmd=(codex exec --json --cd "${cwd}" --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT:-medium}\"")
       if [[ -n "${model}" ]]; then
         cmd+=(--model "${model}")
       fi
       cmd+=("${prompt}")
-      if ! (cd "${cwd}" && "${cmd[@]}" </dev/null >"${env_dir}/results/${id}.codex.jsonl" 2>"${env_dir}/results/${id}.stderr"); then
-        log "scenario ${id}: codex exec exited non-zero (see ${id}.stderr)"
-      fi
+      (cd "${cwd}" && "${cmd[@]}") </dev/null \
+        >"${env_dir}/results/${id}.codex.jsonl" 2>"${env_dir}/results/${id}.stderr" || status=$?
       ;;
     *)
       die "unsupported agent: ${agent}"
       ;;
   esac
+  if [[ "${status}" -ne 0 ]]; then
+    log "scenario ${id}: ${agent} exited ${status} (see ${id}.stderr)"
+  fi
+  return "${status}"
 }
 
 score_agent_turn() {
   local agent="$1" line="$2" cwd="$3" env_dir="$4" id="$5" verify_status="${6:-}" rep="${7:-1}"
+  local setup_status="${8:-}" agent_status="${9:-}" scenario_index="${10:-}"
   local -a extra=(--rep "${rep}")
+  if [[ -n "${scenario_index}" ]]; then
+    extra+=(--scenario-index "${scenario_index}")
+  fi
   if [[ -n "${verify_status}" ]]; then
     extra+=(--verify-status "${verify_status}")
+  fi
+  if [[ -n "${setup_status}" ]]; then
+    extra+=(--setup-status "${setup_status}")
+  fi
+  if [[ -n "${agent_status}" ]]; then
+    extra+=(--agent-status "${agent_status}")
   fi
   case "${agent}" in
     claude)
@@ -307,7 +315,7 @@ score_agent_turn() {
 default_model_for_agent() {
   case "$1" in
     claude) printf 'sonnet\n' ;;
-    codex) printf '\n' ;;
+    codex) printf 'gpt-5.6-sol\n' ;;
     *) die "unsupported agent: $1" ;;
   esac
 }
@@ -360,7 +368,7 @@ stage_fixtures() {
     if [[ "${name}" == "tool-args" ]]; then
       python3 - "${env_dir}/fixtures/${name}/cargo-output.txt" <<'PY'
 import sys
-line = "error[E0308]: mismatched types in fixture module alpha::beta — expected `i32`, found `String`\n"
+line = "error[E0308]: mismatched types in fixture module alpha::beta, expected `i32`, found `String`\n"
 with open(sys.argv[1], "w") as fh:
     fh.write(line * 2000)  # ~190 KiB, comfortably over MAX_ARG_STRLEN
 PY
@@ -371,7 +379,7 @@ PY
 
 # Index a project, tolerating re-staging: `init` refuses when the project is
 # already registered in the isolated data dir (it advises `sync`), so fall
-# back to a forced sync to rebuild the index for the fresh copy.
+# back to `sync` to reconcile the index for the fresh copy.
 reindex_project() {
   local env_dir="$1" staged_bin="$2" project="$3"
   if HOME="${env_dir}/home" \
@@ -381,12 +389,12 @@ reindex_project() {
        "${staged_bin}" init "${project}" >&2; then
     return 0
   fi
-  log "init refused for ${project} (already registered); running sync --force"
+  log "init refused for ${project} (already registered); running sync"
   HOME="${env_dir}/home" \
   TRACEDECAY_DATA_DIR="${env_dir}/tracedecay-data" \
   TRACEDECAY_DAEMON_SOCKET="${env_dir}/tracedecay-data/daemon.sock" \
   PATH="${env_dir}/bin:${PATH}" \
-    "${staged_bin}" sync "${project}" --force >&2 \
+    "${staged_bin}" sync "${project}" >&2 \
     || die "re-indexing failed for ${project}"
 }
 
@@ -438,49 +446,64 @@ run_corpus() {
       log "rep ${rep}/${reps}: resetting staged fixtures"
       stage_fixtures "${env_dir}" "${HERMETIC_TRACEDECAY_BIN}"
     fi
+    local scenario_index=0
     while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
     total=$((total + 1))
+    scenario_index=$((scenario_index + 1))
 
-    local id project prompt setup_cmd verify_cmd
+    local id project prompt setup_cmd verify_cmd prompt_valid
     id="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))')"
     project="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("project_dir",""))')"
     prompt="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("prompt",""))')"
     setup_cmd="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("setup_cmd",""))')"
     verify_cmd="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("verify_cmd",""))')"
 
-    [[ -n "${prompt}" ]] || { log "scenario ${id}: empty prompt, skipping"; continue; }
+    prompt_valid="$(printf '%s' "${line}" | python3 -c 'import json,sys; p=json.load(sys.stdin).get("prompt"); print(int(isinstance(p,str) and bool(p.strip())))')"
+    if [[ "${prompt_valid}" != "1" ]]; then
+      log "scenario ${id}: invalid prompt; recording an error without execution"
+    fi
     local run_cwd
-    run_cwd="$(resolve_project_dir "${env_dir}" "${project}")"
-    [[ -d "${run_cwd}" ]] || run_cwd="${default_project}"
-
-    local run_id="${id}"
-    [[ "${reps}" -gt 1 ]] && run_id="${id}.r${rep}"
-
-    if [[ -n "${setup_cmd}" ]]; then
-      log "scenario ${id}: setup (${setup_cmd})"
-      (cd "${run_cwd}" && bash -c "${setup_cmd}") \
-        || log "scenario ${id}: WARNING setup_cmd failed"
+    if [[ -z "${project}" ]]; then
+      run_cwd="${default_project}"
+    else
+      run_cwd="$(resolve_project_dir "${env_dir}" "${project}")"
+    fi
+    if [[ ! -d "${run_cwd}" ]]; then
+      log "scenario ${id}: project directory does not exist: ${run_cwd}; skipping execution"
     fi
 
-    log "scenario ${id} rep ${rep}: running (agent=${label}, cwd=${run_cwd})"
-    run_agent_turn "${agent}" "${model}" "${prompt}" "${run_cwd}" "${env_dir}" "${run_id}"
+    # The ordinal avoids a duplicate scenario ID overwriting the earlier run.
+    local run_id="${total}.r${rep}"
+    local setup_status="" agent_status="" verify_status=""
+    if [[ "${prompt_valid}" == "1" && -d "${run_cwd}" && -n "${setup_cmd}" ]]; then
+      log "scenario ${id}: setup (${setup_cmd})"
+      setup_status=0
+      (cd "${run_cwd}" && bash -c "${setup_cmd}") </dev/null \
+        >"${env_dir}/results/${run_id}.setup.log" 2>&1 || setup_status=$?
+      if [[ "${setup_status}" -ne 0 ]]; then
+        log "scenario ${id}: setup exited ${setup_status}; skipping agent"
+      fi
+    fi
 
-    # Post-session effect check, with the staged dev binary first on PATH.
-    local verify_status=""
-    if [[ -n "${verify_cmd}" ]]; then
-      if (cd "${run_cwd}" && PATH="${env_dir}/bin:${PATH}" bash -c "${verify_cmd}" \
-            >"${env_dir}/results/${run_id}.verify.log" 2>&1); then
+    if [[ "${prompt_valid}" == "1" && -d "${run_cwd}" && "${setup_status:-0}" -eq 0 ]]; then
+      log "scenario ${id} rep ${rep}: running (agent=${label}, cwd=${run_cwd})"
+      agent_status=0
+      run_agent_turn "${agent}" "${model}" "${prompt}" "${run_cwd}" "${env_dir}" "${run_id}" || agent_status=$?
+    fi
+
+    if [[ "${agent_status}" == "0" && -n "${verify_cmd}" ]]; then
+      if (cd "${run_cwd}" && PATH="${env_dir}/bin:${PATH}" bash -c "${verify_cmd}") </dev/null \
+            >"${env_dir}/results/${run_id}.verify.log" 2>&1; then
         verify_status=0
       else
-        verify_status=1
+        verify_status=$?
       fi
       log "scenario ${id}: verify_cmd exit ${verify_status}"
     fi
 
-    # Score: inspect the isolated transcript/output and count tools/commands.
     local scored
-    scored="$(score_agent_turn "${agent}" "${line}" "${run_cwd}" "${env_dir}" "${run_id}" "${verify_status}" "${rep}")"
+    scored="$(score_agent_turn "${agent}" "${line}" "${run_cwd}" "${env_dir}" "${run_id}" "${verify_status}" "${rep}" "${setup_status}" "${agent_status}" "${scenario_index}")"
     printf '%s\n' "${scored}" >>"${results}"
 
     if printf '%s' "${scored}" | python3 -c 'import sys,json;sys.exit(0 if json.load(sys.stdin).get("pass") else 1)'; then
@@ -500,8 +523,8 @@ run_corpus() {
     printf -- '- Agent: `%s`\n' "${label}"
     printf -- '- Dev binary: `%s`\n' "${HERMETIC_TRACEDECAY_BIN}"
     printf -- '- Passed: **%s / %s**\n\n' "${passed}" "${total}"
-    printf '| id | rep | pass | tracedecay tools | CLI commands | attempts | verify | native tools | session |\n'
-    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
+    printf '| id | rep | pass | error | tracedecay tools | CLI commands | attempts | verify | native tools | session |\n'
+    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
     python3 - "${results}" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
@@ -512,10 +535,11 @@ with open(sys.argv[1]) as fh:
         r = json.loads(ln)
         vp = r.get("verify_pass")
         verify = "-" if vp is None else ("yes" if vp else "no")
-        print("| {id} | {rep} | {ok} | {td} | {cli} | {attempts} | {verify} | {nat} | {sid} |".format(
+        print("| {id} | {rep} | {ok} | {error} | {td} | {cli} | {attempts} | {verify} | {nat} | {sid} |".format(
             id=r.get("id",""),
             rep=r.get("rep", 1),
             ok="yes" if r.get("pass") else "no",
+            error=(r.get("error") or {}).get("code", ""),
             td=r.get("tracedecay_tool_uses",0),
             cli=r.get("cli_command_uses",0),
             attempts=r.get("tool_cmd_attempts", ""),
@@ -531,6 +555,7 @@ PY
   log "SCORE: ${passed}/${total} passed"
   # Echo summary to stdout for the caller.
   cat "${summary}"
+  [[ "${total}" -gt 0 && "${passed}" -eq "${total}" ]]
 }
 
 # --------------------------------------------------------------------------
@@ -565,15 +590,14 @@ Subcommands:
 Common options:
   --env-dir <path>      Reuse an existing env dir (else a fresh one is created).
   --agent <name>        Agent driver: claude or codex (default: claude).
-  --project <path>      Project to index / default cwd (default: main tracedecay checkout).
+  --project <path>      Project to index / default cwd (default: this harness's checkout).
   --corpus <path.jsonl> Corpus file for `run`.
-  --model <name>        Model override (default: sonnet for claude; Codex default for codex).
+  --model <name>        Model override (default: sonnet for claude; gpt-5.6-sol for codex).
   --reps <N>            Re-run the corpus N times (default: 1; `run` only).
   --debug               Reuse/produce a debug build instead of release (faster).
-  --keep                Do not tear down the env dir on exit.
 
 Examples:
-  run.sh smoke --agent claude --debug --keep
+  run.sh smoke --agent claude --debug
   run.sh setup --agent codex --debug
   run.sh run --agent claude --env-dir /tmp/eval-env-... --corpus my-corpus.jsonl --model sonnet
 EOF
@@ -584,7 +608,7 @@ main() {
   local sub="$1"; shift
 
   local env_dir="" project="${DEFAULT_PROJECT}" corpus="" model="" agent="claude"
-  local keep=0 reps=1
+  local reps=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --env-dir) env_dir="$2"; shift 2 ;;
@@ -594,7 +618,6 @@ main() {
       --model)   model="$2"; shift 2 ;;
       --reps)    reps="$2"; shift 2 ;;
       --debug)   export BUILD_DEBUG=1; shift ;;
-      --keep)    keep=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown option: $1" ;;
     esac
@@ -666,20 +689,14 @@ print(json.dumps({
 PY
       run_corpus "${env_dir}" "${smoke_corpus}" "${model}" "${agent}" "${project}"
 
-      if [[ "${keep}" == "1" ]]; then
-        log "kept env dir: ${env_dir}"
-      elif [[ "${created}" == "1" ]]; then
+      if [[ "${created}" == "1" ]]; then
         rm -rf "${env_dir}"
-        log "removed env dir ${env_dir} (pass --keep to preserve)"
+        log "removed env dir ${env_dir}"
       fi
       ;;
 
     *) usage; exit 2 ;;
   esac
-
-  if [[ "${keep}" == "1" && -n "${env_dir}" && -d "${env_dir}" ]]; then
-    log "env preserved: ${env_dir}"
-  fi
 }
 
 main "$@"

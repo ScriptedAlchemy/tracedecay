@@ -1,6 +1,6 @@
 //! Deterministic task classification for Claude Code turns.
 //!
-//! Classifies each API turn into one of 14 categories based on tool usage
+//! Classifies each API turn into one of 13 categories based on tool usage
 //! patterns and keyword matching. Adapted from AgentSeal/codeburn (MIT).
 
 use std::fmt;
@@ -23,7 +23,6 @@ pub enum TaskCategory {
     Brainstorming,
     Conversation,
     General,
-    Redundancy,
 }
 
 impl fmt::Display for TaskCategory {
@@ -48,7 +47,6 @@ impl TaskCategory {
             Self::Brainstorming => ("brainstorming", "Brainstorming"),
             Self::Conversation => ("conversation", "Conversation"),
             Self::General => ("general", "General"),
-            Self::Redundancy => ("redundancy", "Redundancy"),
         }
     }
 
@@ -65,7 +63,7 @@ impl TaskCategory {
 ///
 /// `tool_names`: names of all `tool_use` blocks in the turn (e.g. "Edit", "Bash").
 /// `bash_commands`: content of Bash tool inputs (the `command` field).
-#[hotpath::measure(label = "hosts.task_classifier.classify")]
+#[tracing::instrument(name = "hosts.task_classifier.classify", level = "trace", skip_all)]
 pub fn classify(tool_names: &[&str], bash_commands: &[&str]) -> TaskCategory {
     if tool_names.is_empty() {
         return TaskCategory::Conversation;
@@ -79,12 +77,6 @@ pub fn classify(tool_names: &[&str], bash_commands: &[&str]) -> TaskCategory {
     // Planning tools
     if tool_names.contains(&"EnterPlanMode") || tool_names.contains(&"TaskCreate") {
         return TaskCategory::Planning;
-    }
-
-    // Redundancy analysis tool → dedicated bucket so dashboards can track
-    // tracedecay_redundancy adoption separately from generic MCP tool calls.
-    if tool_names.contains(&"tracedecay_redundancy") {
-        return TaskCategory::Redundancy;
     }
 
     let has_edit = tool_names.contains(&"Edit") || tool_names.contains(&"Write");
@@ -211,11 +203,6 @@ mod tests {
     }
 
     #[test]
-    fn test_write_is_coding() {
-        assert_eq!(classify(&["Write"], &[]), TaskCategory::Coding);
-    }
-
-    #[test]
     fn test_agent_is_delegation() {
         assert_eq!(classify(&["Agent", "Edit"], &[]), TaskCategory::Delegation);
     }
@@ -269,25 +256,5 @@ mod tests {
             classify(&["Bash", "Edit"], &["fix the broken import"]),
             TaskCategory::Debugging
         );
-    }
-
-    #[test]
-    fn test_category_display() {
-        assert_eq!(TaskCategory::GitOps.as_str(), "git_ops");
-        assert_eq!(TaskCategory::GitOps.label(), "Git Ops");
-    }
-
-    #[test]
-    fn test_redundancy_tool_is_redundancy() {
-        assert_eq!(
-            classify(&["tracedecay_redundancy"], &[]),
-            TaskCategory::Redundancy
-        );
-    }
-
-    #[test]
-    fn test_redundancy_category_display() {
-        assert_eq!(TaskCategory::Redundancy.as_str(), "redundancy");
-        assert_eq!(TaskCategory::Redundancy.label(), "Redundancy");
     }
 }

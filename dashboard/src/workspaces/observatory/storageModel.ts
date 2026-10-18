@@ -8,7 +8,6 @@ import type {
   StoreGrowthDimensionV1,
   TableGrowthDimensionV1,
   TableGrowthOmissionV1,
-  DashboardLegalActionRefV1,
 } from '../../contracts/generated.ts';
 
 const FINDING_LABELS: Partial<Record<DoctorStorageFindingKindV1, string>> = {
@@ -51,14 +50,10 @@ export function storageSourcePresentation(status: StorageFindingKindStatusV1): {
   }
 }
 
-export function refreshOperation(actions: DashboardLegalActionRefV1[]): string | undefined {
-  return actions.find((action) => action.kind === 'refresh')?.operation;
-}
-
 /** Visual tone for a dimension row. `unset` is deliberately its own tone: a
  * budget the owner has not configured must not read like a budget the server
  * could not determine. */
-export type DimensionTone = 'ready' | 'over' | 'unset' | 'baseline' | 'unknown';
+type DimensionTone = 'ready' | 'over' | 'unset' | 'baseline' | 'unknown';
 
 export interface DimensionPresentation {
   /** Wire state, surfaced as a data attribute for tests and the audit. */
@@ -67,7 +62,7 @@ export interface DimensionPresentation {
   /** The one-line honest summary rendered beside the dimension label. */
   summary: string;
   /** Provenance rendered verbatim beneath the summary (server reasons and the
-   * growth coverage sentence — never paraphrased). */
+   * growth coverage sentence, never paraphrased). */
   notes: string[];
   /** The owner setting a value would come from, rendered as a mono token. This
    * is what visually separates `unset` from `unknown`. */
@@ -203,7 +198,7 @@ export function tableGrowthPresentation(growth: TableGrowthDimensionV1): Dimensi
   }
 }
 
-export interface TableGrowthOmissionPresentation {
+interface TableGrowthOmissionPresentation {
   kind: TableGrowthOmissionV1['kind'];
   table: string;
   /** The headline figure this omission actually has: a measured delta for a
@@ -241,10 +236,10 @@ export function tableGrowthOmissionPresentation(
 }
 
 /** Every role this one store file serves. More than one means the roles share a
- * database — not that a store was reported twice. */
-export function storeRolesLabel(roles: string[], role: string): string {
-  const ordered = roles.length > 0 ? roles : [role];
-  return ordered.length > 1 ? `${ordered.join(' · ')} (shared store file)` : ordered.join(' · ');
+ * database, not that a store was reported twice. */
+export function storeRolesLabel(roles: string[]): string {
+  if (roles.length === 0) return 'role unrecorded';
+  return roles.length > 1 ? `${roles.join(' · ')} (shared store file)` : roles.join(' · ');
 }
 
 /** The shared byte magnitudes, joined for a sentence rather than split for a
@@ -253,11 +248,4 @@ export function storeRolesLabel(roles: string[], role: string): string {
 export function formatBytes(bytes: number | null): string {
   const { value, unit } = splitSignedBytes(bytes);
   return unit ? `${value} ${unit}` : value;
-}
-
-/** Growth is signed on the wire; a shrinking store must read as a shrink and an
- * unchanged store must not read as "grew by nothing measured". */
-export function formatSignedBytes(bytes: number): string {
-  if (bytes === 0) return 'no size change';
-  return `${bytes > 0 ? '+' : '−'}${formatBytes(Math.abs(bytes))}`;
 }

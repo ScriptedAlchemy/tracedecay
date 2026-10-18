@@ -1,66 +1,71 @@
-use std::fmt;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
-#[cfg(test)]
-use serde::de::DeserializeOwned;
-use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
+use tracedecay_code_extraction::ExtractedSchemaEvidenceV1;
+use tracedecay_domain::{
+    BoundedSanitizedText, ChunkLogicalIdentityV1, ChunkerRevision, CodeSearchChunkAnchorV1,
+    CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComplexityAnalysisV1,
+    ContentDigest, ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileIdentityDigest,
+    LanguageDescriptorRevision, SensitivityDecision, SourceSpan, SymbolIdentityDigest,
+    SymbolOccurrenceId,
+};
 
-use super::lexical_page_source::scan_layout;
+use crate::chunks::{
+    CodeFileChunksV1, CodeIndexCallableArityV1, CodeIndexGoMethodSetRowV1,
+    CodeIndexUnresolvedReferenceV1, CodeSearchDocumentV1, CodeSearchEligibilityV1, code_chunk_id,
+    code_file_identity, published_symbol_spans,
+};
+use crate::extract::ExtractionBatchV1;
+use crate::intake::content_digest;
+use crate::lineage::LineageSymbolRecordV1;
+use crate::parallelism;
+
+use super::clone_rows::{PersistedCloneBodiesRefV1, PersistedCloneBodiesV1};
+use super::go_satisfaction::go_satisfaction;
+use super::module_resolution::ModuleImportIndexV1;
 use super::*;
 
-/// The sealed-generation envelope revision this build writes.
+/// The partitioned generation manifest revision, which the daemon publishes.
 ///
-/// Every reader that gates on the sealed format — the publication store, the
-/// worker probe, and code-generation retention — must gate on this one value.
-pub(super) const LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION: u32 = 5;
-pub(super) const MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION: u32 = 6;
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 7;
-/// One bound, enforced on both sides of the sealed store: encoding refuses to
-/// publish a generation larger than this, and decoding refuses to admit one.
-/// The bound previously applied only to reads while publication happily wrote
-/// larger envelopes, so a large repository sealed generations (~1.5 GB here)
-/// that every later load refused as "corrupt" — permanently denying its own
-/// graph. Two GiB admits those real generations while keeping decode memory
-/// bounded.
+/// File segments are compact (DEFLATE-compressed, clone token streams
+/// interned, chunk text stored once per file, symbol identities inside the
+/// segment), each described by its decoded size and an identity digest. They
+/// live in the project's `code-index-v1/`, shared by every worktree scope, and
+/// carry no scope identity. File occurrences are minted without the worktree,
+/// so identical trees in linked worktrees derive identical artifacts. Each
+/// segment descriptor holds generation-independent `symbol_identities`, and
+/// restore rebinds occurrences, so a one-file seal does not SHA-256-rebind
+/// every unchanged file's symbols. `full_replay_digest` is sealed as a
+/// parent delta (optional parent binding). Evidence request and receipt rows
+/// leave implicit what the generation's own chunks imply and name chunks by
+/// their file and position within it. Each file's cross-file evidence, the
+/// edges sealing resolved from it, its call sites sealing could not bind,
+/// and its symbols' lineage when it is not identity lineage, is a segment of
+/// its own keyed by stable symbol identity, so a restore never re-resolves
+/// the corpus and one file's evidence decodes without any other file's
+/// symbols. The manifest carries the generation's chunk count and policy
+/// census and its paged resolution index, so a successor builds from the
+/// sealed manifest and the files it changes. The snapshot carries the
+/// sources capture omitted, with the reason.
+///
+/// Every other revision is refused through
+/// [`superseded_sealed_generation_revision`], and the generation is rebuilt
+/// from source rather than migrated. Revisions through eight also predate
+/// required clone-body source rows, so the rebuild keeps them from reading as
+/// successful empty clone evidence.
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 21;
+
+/// The typed refusal for a sealed generation this build no longer reads.
+pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {
+    CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+}
+
+/// The largest sealed generation file readers admit. Two GiB admits real
+/// large-repository generations while keeping decode memory bounded, and the
+/// graph write batch bound is sized to cover it.
 pub const MAX_SEALED_CODE_GENERATION_BYTES_V1: u64 = 2 * 1024 * 1024 * 1024;
-
-fn admit_sealed_generation_len(len: u64) -> Result<(), CodeIndexProductionErrorV1> {
-    if len > MAX_SEALED_CODE_GENERATION_BYTES_V1 {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation exceeds the canonical byte limit".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-pub const fn sealed_generation_format_revision_is_compatible(revision: u32) -> bool {
-    matches!(
-        revision,
-        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION
-            | MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION
-            | SEALED_GENERATION_FORMAT_REVISION_V1
-    )
-}
-
-pub fn sealed_generation_payload_digest<T: Serialize>(
-    format_revision: u32,
-    generation: &T,
-) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
-    match format_revision {
-        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => canonical_sha256(generation)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string())),
-        MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION | SEALED_GENERATION_FORMAT_REVISION_V1 => {
-            json_generation_bytes_and_digest(generation).map(|(_, digest)| digest)
-        }
-        _ => Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation format revision is incompatible".to_owned(),
-        )),
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,126 +75,1013 @@ pub(super) struct PersistedFileGenerationArtifactsV1 {
     pub(super) artifacts: CodeFileIndexArtifactsV1,
 }
 
+/// The revision-2 file segment payload: the same file record with its chunk
+/// rows reduced to what the file does not already say.
+///
+/// Every chunk of one file shares the file's generation and occurrence
+/// (enforced by [`CodeFileChunksV1::validate`]) and, in production, its
+/// descriptor, chunker, sanitizer, and sensitivity decision. The row form
+/// therefore drops the two anchors, hoists the per-file constants into
+/// `chunk_defaults` (a row still carries its own value when it differs, so
+/// the form is lossless), names a same-file parent by chunk index, and omits
+/// the document's chunk-id roster, which is exactly the rows' ids in order.
+/// Decoding expands back into [`PersistedFileGenerationArtifactsV1`], and
+/// every restored row then passes the same chunk validation as a revision-1
+/// row before it can be served.
+///
+/// Every chunk's text is a span of the file's one sanitized source, and a
+/// chunk's exact terms are spans of its text, so the file stores the source
+/// its chunks cover once ([`ChunkTextBaseV1`]) and rows keep only spans. A
+/// chunk's content digest is the digest of that text and is recomputed. Clone
+/// bodies use the row form in [`super::clone_rows`].
+///
+/// Identities and digests are stored once. A chunk id, a symbol's file
+/// identity, and a symbol's content digest are omitted where they equal what
+/// the segment already determines (the chunk id recipe over the file, the
+/// row's symbol, and an empty split path; the file's identity; the digest of
+/// the stored text its chunks span). A symbol's identity is the one its
+/// occurrence key names, and a WholeSymbol term's occurrence is its chunk's.
+/// Each is written only when it differs, so the form stays lossless.
 #[derive(Serialize)]
-pub(super) struct PersistedFileGenerationArtifactsRefV1<'a> {
-    pub(super) authority: &'a ReceiptBoundCodeFileAuthorityV1,
-    pub(super) extraction: &'a ExtractionBatchV1,
-    pub(super) artifacts: &'a CodeFileIndexArtifactsV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedPublishedGenerationV1 {
-    format_revision: CompatibleSealedFormatRevisionV1,
-    manifest: CodeGenerationManifestV1,
-    snapshot: SanitizedCodeSnapshotV1,
-    repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
-    ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
-    ignored_source_admissions_digest: ManifestDigest,
-    files: Vec<PersistedFileGenerationArtifactsV1>,
-    lineage: Vec<SymbolLineageCandidateV1>,
-    coverage: CoverageSummaryV1,
-    capability: CodeIndexCapabilityManifestV1,
-    projection_request: ProjectionBatchRequestV1,
-    projection_receipt: ProjectionBatchReceiptV1,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct CompatibleSealedFormatRevisionV1(pub(super) u32);
-
-impl Serialize for CompatibleSealedFormatRevisionV1 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_u32(self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for CompatibleSealedFormatRevisionV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let revision = u32::deserialize(deserializer)?;
-        if !sealed_generation_format_revision_is_compatible(revision) {
-            return Err(serde::de::Error::custom(
-                "sealed generation format revision is incompatible",
-            ));
-        }
-        Ok(Self(revision))
-    }
-}
-
-/// The sealed `files` array, decoded page by page. The visitor is pure
-/// decode: each persist page accumulates exactly once (the pages are the
-/// restored corpus), and the CPU-bound authority reconstruction is deferred
-/// to [`assemble_published_generation`]'s pool fan-out so the deserializer
-/// thread never serializes corpus-scale digest work.
-pub(super) struct StreamingRestoredFilesV1 {
-    pub(super) files: Vec<PersistedFileGenerationArtifactsV1>,
-}
-
-impl<'de> Deserialize<'de> for StreamingRestoredFilesV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct FilesVisitor;
-
-        impl<'de> Visitor<'de> for FilesVisitor {
-            type Value = StreamingRestoredFilesV1;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a sealed generation files array")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                let mut files = Vec::new();
-                if let Some(hint) = seq.size_hint() {
-                    files.reserve(hint);
-                }
-                while let Some(file) = seq.next_element::<PersistedFileGenerationArtifactsV1>()? {
-                    files.push(file);
-                }
-                Ok(StreamingRestoredFilesV1 { files })
-            }
-        }
-
-        deserializer.deserialize_seq(FilesVisitor)
-    }
+pub(super) struct PersistedFileGenerationArtifactsRefV2<'a> {
+    authority: PersistedFileAuthorityRefV1<'a>,
+    extraction: &'a ExtractionBatchV1,
+    artifacts: PersistedFileIndexArtifactsRefV2<'a>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct PersistedFileGenerationArtifactsV2 {
+    authority: PersistedFileAuthorityV1,
+    extraction: ExtractionBatchV1,
+    artifacts: PersistedFileIndexArtifactsV2,
+}
+
+/// The identity every file authority of one generation repeats, which
+/// validation requires to equal the generation's manifest and snapshot.
+/// Segments leave it to the generation that addresses them, so worktrees of
+/// one project that seal the same file share that file's segment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FileScopeIdentityV1 {
+    project_id: ProjectId,
+    repository_id: RepositoryId,
+}
+
+impl FileScopeIdentityV1 {
+    pub(super) fn of(
+        manifest: &CodeGenerationManifestV1,
+        snapshot: &SanitizedCodeSnapshotV1,
+    ) -> Self {
+        Self {
+            project_id: manifest.project_id.clone(),
+            repository_id: snapshot.repository.clone(),
+        }
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.project_id
+            .as_str()
+            .len()
+            .saturating_add(self.repository_id.as_str().len())
+    }
+
+    pub(super) fn update_content_digest(&self, hasher: &mut Sha256) {
+        hasher.update(self.project_id.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.repository_id.as_str().as_bytes());
+        hasher.update(b"\0");
+    }
+}
+
+#[derive(Serialize)]
+struct PersistedFileAuthorityRefV1<'a> {
+    logical_path: &'a str,
+    content_digest: &'a ContentDigest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedFileAuthorityV1 {
+    logical_path: String,
+    content_digest: ContentDigest,
+}
+
+#[derive(Serialize)]
+struct PersistedFileIndexArtifactsRefV2<'a> {
+    chunks: PersistedFileChunksRefV2<'a>,
+    /// In symbol identity order, which is also their occurrence key order.
+    symbols: Vec<PersistedSymbolRefV1<'a>>,
+    edges: &'a [CanonicalRelationEdgeV1],
+    edge_abstentions: &'a [CodeIndexEdgeAbstentionV1],
+    imports: &'a [CodeIndexImportEvidenceV1],
+    clone_bodies: PersistedCloneBodiesRefV1<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_evidence: Option<&'a ExtractedSchemaEvidenceV1>,
+    unresolved_references: &'a [CodeIndexUnresolvedReferenceV1],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    callable_arities: &'a [CodeIndexCallableArityV1],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    go_method_sets: &'a [CodeIndexGoMethodSetRowV1],
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedFileIndexArtifactsV2 {
+    chunks: PersistedFileChunksV2,
+    symbols: Vec<PersistedSymbolV1>,
+    edges: Vec<CanonicalRelationEdgeV1>,
+    edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
+    imports: Vec<CodeIndexImportEvidenceV1>,
+    clone_bodies: PersistedCloneBodiesV1,
+    schema_evidence: Option<ExtractedSchemaEvidenceV1>,
+    unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
+    #[serde(default)]
+    callable_arities: Vec<CodeIndexCallableArityV1>,
+    #[serde(default)]
+    go_method_sets: Vec<CodeIndexGoMethodSetRowV1>,
+}
+
+#[derive(Serialize)]
+struct PersistedFileChunksRefV2<'a> {
+    generation_id: &'a CodeGenerationId,
+    file_occurrence_id: &'a FileOccurrenceId,
+    content_digest: &'a ContentDigest,
+    eligibility: &'a CodeSearchEligibilityV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunk_defaults: Option<PersistedChunkDefaultsRefV2<'a>>,
+    #[serde(flatten)]
+    text: ChunkTextBaseV1,
+    chunks: Vec<PersistedChunkRefV2<'a>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedFileChunksV2 {
+    generation_id: CodeGenerationId,
+    file_occurrence_id: FileOccurrenceId,
+    content_digest: ContentDigest,
+    eligibility: CodeSearchEligibilityV1,
+    #[serde(default)]
+    chunk_defaults: Option<PersistedChunkDefaultsV2>,
+    text_ranges: Vec<[u64; 2]>,
+    text: String,
+    chunks: Vec<PersistedChunkV2>,
+}
+
+/// The maximal source ranges a file's chunks cover, and the sanitized text of
+/// those ranges concatenated in order. Overlapping chunks (a body, its
+/// members, its signature) therefore share one stored copy of their bytes.
+#[derive(Serialize)]
+struct ChunkTextBaseV1 {
+    text_ranges: Vec<[u64; 2]>,
+    text: String,
+}
+
+impl ChunkTextBaseV1 {
+    /// The base for `rows`, and per row whether its text is the base's bytes
+    /// at its span. A row whose text is not keeps it explicitly, so the form
+    /// stays lossless.
+    fn build(rows: &[Arc<CodeSearchChunkV1>]) -> (Self, Vec<bool>) {
+        let mut order = (0..rows.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&index| {
+            let span = rows[index].anchor.source_span;
+            (span.start_byte, span.end_byte)
+        });
+        let mut base = Self {
+            text_ranges: Vec::new(),
+            text: String::new(),
+        };
+        let mut derived = vec![false; rows.len()];
+        for index in order {
+            let chunk = &rows[index];
+            derived[index] = base.admit(chunk.anchor.source_span, chunk.sanitized_text.as_str());
+        }
+        (base, derived)
+    }
+
+    /// Extend the base with `text` at `span`, or report that the bytes it
+    /// already holds there disagree. Spans arrive in ascending start order.
+    fn admit(&mut self, span: SourceSpan, text: &str) -> bool {
+        let (Ok(start), Ok(end)) = (
+            usize::try_from(span.start_byte),
+            usize::try_from(span.end_byte),
+        ) else {
+            return false;
+        };
+        if end.checked_sub(start) != Some(text.len()) {
+            return false;
+        }
+        let last = self
+            .text_ranges
+            .last()
+            .copied()
+            .and_then(|[range_start, range_end]| {
+                Some((
+                    usize::try_from(range_start).ok()?,
+                    usize::try_from(range_end).ok()?,
+                ))
+            });
+        let Some((range_start, range_end)) = last.filter(|(_, range_end)| start <= *range_end)
+        else {
+            self.text_ranges.push([span.start_byte, span.end_byte]);
+            self.text.push_str(text);
+            return true;
+        };
+        let Some(offset) = start.checked_sub(range_start) else {
+            return false;
+        };
+        let covered = range_end.min(end) - start;
+        let base_start = self.text.len() - (range_end - range_start) + offset;
+        if self.text.as_bytes().get(base_start..base_start + covered)
+            != text.as_bytes().get(..covered)
+        {
+            return false;
+        }
+        if end > range_end {
+            let Some(tail) = text.get(covered..) else {
+                return false;
+            };
+            self.text.push_str(tail);
+            if let Some(range) = self.text_ranges.last_mut() {
+                range[1] = span.end_byte;
+            }
+        }
+        true
+    }
+}
+
+/// Restores chunk text from a decoded [`ChunkTextBaseV1`].
+struct ChunkTextSlicesV1<'a> {
+    ranges: &'a [[u64; 2]],
+    offsets: Vec<u64>,
+    text: &'a str,
+}
+
+impl<'a> ChunkTextSlicesV1<'a> {
+    fn new(ranges: &'a [[u64; 2]], text: &'a str) -> Result<Self, CodeIndexProductionErrorV1> {
+        let mut offsets = Vec::with_capacity(ranges.len());
+        let mut total = 0_u64;
+        let mut previous_end = None;
+        for [start, end] in ranges {
+            if end <= start || previous_end.is_some_and(|previous| previous > *start) {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed file segment text ranges are not ascending and disjoint".to_owned(),
+                ));
+            }
+            offsets.push(total);
+            total = total.checked_add(end - start).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed file segment text length exceeds u64".to_owned(),
+                )
+            })?;
+            previous_end = Some(*end);
+        }
+        if u64::try_from(text.len()).ok() != Some(total) {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed file segment text does not match its ranges".to_owned(),
+            ));
+        }
+        Ok(Self {
+            ranges,
+            offsets,
+            text,
+        })
+    }
+
+    fn slice(&self, span: SourceSpan) -> Result<&'a str, CodeIndexProductionErrorV1> {
+        let text = self.text;
+        self.ranges
+            .partition_point(|range| range[0] <= span.start_byte)
+            .checked_sub(1)
+            .filter(|index| span.end_byte <= self.ranges[*index][1])
+            .and_then(|index| {
+                let from =
+                    self.offsets[index].checked_add(span.start_byte - self.ranges[index][0])?;
+                let to = from.checked_add(span.end_byte.checked_sub(span.start_byte)?)?;
+                text.get(usize::try_from(from).ok()?..usize::try_from(to).ok()?)
+            })
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed file segment chunk span is outside its stored text".to_owned(),
+                )
+            })
+    }
+}
+
+/// An exact term row: its bytes are the chunk text at `span`, and a
+/// WholeSymbol term without an occurrence names its chunk's symbol.
+#[derive(Serialize)]
+struct PersistedExactTermRefV1<'a> {
+    kind: ExactTechnicalTermKindV1,
+    span: SourceSpan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_occurrence_id: Option<&'a SymbolOccurrenceId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedExactTermV1 {
+    kind: ExactTechnicalTermKindV1,
+    span: SourceSpan,
+    #[serde(default)]
+    symbol_occurrence_id: Option<SymbolOccurrenceId>,
+}
+
+impl<'a> PersistedExactTermRefV1<'a> {
+    fn new(
+        chunk: &CodeSearchChunkV1,
+        term: &'a ExactTechnicalTermV1,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        if term_bytes(
+            chunk.sanitized_text.as_str(),
+            chunk.anchor.source_span,
+            term.span(),
+        ) != Some(term.original_bytes())
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed chunk exact term is not its chunk text at its span".to_owned(),
+            ));
+        }
+        let symbol_occurrence_id = term.symbol_occurrence_id().filter(|occurrence| {
+            term.kind() != ExactTechnicalTermKindV1::WholeSymbol
+                || chunk.anchor.symbol_occurrence_id.as_ref() != Some(*occurrence)
+        });
+        Ok(Self {
+            kind: term.kind(),
+            span: term.span(),
+            symbol_occurrence_id,
+        })
+    }
+}
+
+/// A symbol row: the record without the facts the segment already holds.
+/// See [`PersistedFileGenerationArtifactsRefV2`].
+#[derive(Serialize)]
+struct PersistedSymbolRefV1<'a> {
+    occurrence: &'a SymbolOccurrenceId,
+    qualified_name: &'a str,
+    simple_name: &'a str,
+    kind: &'a str,
+    visibility: &'a str,
+    branches: u32,
+    loops: u32,
+    max_nesting: u32,
+    #[serde(skip_serializing_if = "ComplexityAnalysisV1::is_complete")]
+    complexity_analysis: ComplexityAnalysisV1,
+    line_span: u32,
+    start_line: u32,
+    signature: Option<&'a str>,
+    docstring: Option<&'a str>,
+    is_async: bool,
+    derives: &'a [String],
+    skip_test_coverage: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_identity: Option<&'a FileIdentityDigest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_digest: Option<&'a ContentDigest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedSymbolV1 {
+    occurrence: SymbolOccurrenceId,
+    qualified_name: String,
+    simple_name: String,
+    kind: String,
+    visibility: String,
+    branches: u32,
+    loops: u32,
+    max_nesting: u32,
+    #[serde(default)]
+    complexity_analysis: ComplexityAnalysisV1,
+    line_span: u32,
+    start_line: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
+    signature: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    docstring: Option<String>,
+    is_async: bool,
+    derives: Vec<String>,
+    skip_test_coverage: bool,
+    #[serde(default)]
+    file_identity: Option<FileIdentityDigest>,
+    #[serde(default)]
+    content_digest: Option<ContentDigest>,
+}
+
+impl<'a> PersistedSymbolRefV1<'a> {
+    fn new(
+        symbol: &'a LineageSymbolRecordV1,
+        file_identity: &FileIdentityDigest,
+        span_digest: Option<&ContentDigest>,
+    ) -> Self {
+        Self {
+            occurrence: &symbol.occurrence,
+            qualified_name: &symbol.qualified_name,
+            simple_name: &symbol.simple_name,
+            kind: &symbol.kind,
+            visibility: &symbol.visibility,
+            branches: symbol.branches,
+            loops: symbol.loops,
+            max_nesting: symbol.max_nesting,
+            complexity_analysis: symbol.complexity_analysis,
+            line_span: symbol.line_span,
+            start_line: symbol.start_line,
+            signature: symbol.signature.as_deref(),
+            docstring: symbol.docstring.as_deref(),
+            is_async: symbol.is_async,
+            derives: &symbol.derives,
+            skip_test_coverage: symbol.skip_test_coverage,
+            file_identity: (file_identity != &symbol.file_identity)
+                .then_some(&symbol.file_identity),
+            content_digest: (span_digest != Some(&symbol.content_digest))
+                .then_some(&symbol.content_digest),
+        }
+    }
+}
+
+impl PersistedSymbolV1 {
+    fn expand(
+        self,
+        identity: SymbolIdentityDigest,
+        file_identity: &FileIdentityDigest,
+        span_digest: Option<ContentDigest>,
+    ) -> Result<LineageSymbolRecordV1, CodeIndexProductionErrorV1> {
+        let omitted = |field: &str| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed file segment symbol omits {field} without a derivation"
+            ))
+        };
+        Ok(LineageSymbolRecordV1 {
+            occurrence: self.occurrence,
+            identity,
+            qualified_name: self.qualified_name,
+            simple_name: self.simple_name,
+            kind: self.kind,
+            visibility: self.visibility,
+            branches: self.branches,
+            loops: self.loops,
+            max_nesting: self.max_nesting,
+            complexity_analysis: self.complexity_analysis,
+            line_span: self.line_span,
+            start_line: self.start_line,
+            signature: self.signature,
+            docstring: self.docstring,
+            is_async: self.is_async,
+            derives: self.derives,
+            skip_test_coverage: self.skip_test_coverage,
+            file_identity: self.file_identity.unwrap_or_else(|| file_identity.clone()),
+            content_digest: match self.content_digest {
+                Some(explicit) => explicit,
+                None => span_digest.ok_or_else(|| omitted("content_digest"))?,
+            },
+        })
+    }
+}
+
+/// The id [`code_chunk_id`] mints for a chunk of this file with an empty
+/// split path, which every chunk has unless the chunker windowed it or placed
+/// it in a gap.
+fn derived_chunk_id(
+    scope: &FileScopeIdentityV1,
+    file_identity: &FileIdentityDigest,
+    symbol_identity: Option<&SymbolIdentityDigest>,
+    grain: CodeSearchChunkGrainV1,
+    chunker_revision: &ChunkerRevision,
+) -> Result<CodeSearchChunkId, CodeIndexProductionErrorV1> {
+    code_chunk_id(ChunkLogicalIdentityV1 {
+        repository: scope.repository_id.clone(),
+        file_identity: file_identity.clone(),
+        symbol_identity: symbol_identity.cloned(),
+        grain,
+        split_path: Vec::new(),
+        chunker_revision: chunker_revision.clone(),
+    })
+    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+}
+
+fn term_bytes(text: &str, chunk_span: SourceSpan, term_span: SourceSpan) -> Option<&[u8]> {
+    let from = usize::try_from(term_span.start_byte.checked_sub(chunk_span.start_byte)?).ok()?;
+    let to = usize::try_from(term_span.end_byte.checked_sub(chunk_span.start_byte)?).ok()?;
+    text.as_bytes().get(from..to)
+}
+
+#[derive(Serialize)]
+struct PersistedChunkDefaultsRefV2<'a> {
+    language_descriptor_revision: &'a LanguageDescriptorRevision,
+    chunker_revision: &'a ChunkerRevision,
+    sanitizer_revision: &'a SanitizerRevision,
+    sensitivity: &'a SensitivityDecision,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedChunkDefaultsV2 {
+    language_descriptor_revision: LanguageDescriptorRevision,
+    chunker_revision: ChunkerRevision,
+    sanitizer_revision: SanitizerRevision,
+    sensitivity: SensitivityDecision,
+}
+
+#[derive(Serialize)]
+struct PersistedChunkRefV2<'a> {
+    /// Present only when it is not [`derived_chunk_id`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a CodeSearchChunkId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_occurrence_id: Option<&'a SymbolOccurrenceId>,
+    /// Index of the parent row within this file; a parent outside the file
+    /// (never produced by the chunker, but representable) stays explicit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_chunk_id: Option<&'a CodeSearchChunkId>,
+    source_span: SourceSpan,
+    grain: CodeSearchChunkGrainV1,
+    ordinal: u32,
+    /// Present only when it is not the digest of the chunk's text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_digest: Option<&'a ContentDigest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language_descriptor_revision: Option<&'a LanguageDescriptorRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunker_revision: Option<&'a ChunkerRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sanitizer_revision: Option<&'a SanitizerRevision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sensitivity: Option<&'a SensitivityDecision>,
+    exact_terms: Vec<PersistedExactTermRefV1<'a>>,
+    subtokens: &'a [String],
+    /// Present only when the file's text base does not hold it at its span.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sanitized_text: Option<&'a BoundedSanitizedText>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedChunkV2 {
+    #[serde(default)]
+    id: Option<CodeSearchChunkId>,
+    #[serde(default)]
+    symbol_occurrence_id: Option<SymbolOccurrenceId>,
+    #[serde(default)]
+    parent: Option<u32>,
+    #[serde(default)]
+    parent_chunk_id: Option<CodeSearchChunkId>,
+    source_span: SourceSpan,
+    grain: CodeSearchChunkGrainV1,
+    ordinal: u32,
+    #[serde(default)]
+    content_digest: Option<ContentDigest>,
+    #[serde(default)]
+    language_descriptor_revision: Option<LanguageDescriptorRevision>,
+    #[serde(default)]
+    chunker_revision: Option<ChunkerRevision>,
+    #[serde(default)]
+    sanitizer_revision: Option<SanitizerRevision>,
+    #[serde(default)]
+    sensitivity: Option<SensitivityDecision>,
+    exact_terms: Vec<PersistedExactTermV1>,
+    subtokens: Vec<String>,
+    #[serde(default)]
+    sanitized_text: Option<BoundedSanitizedText>,
+}
+
+impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
+    /// Refuses a file whose authority names another scope than its
+    /// generation, rather than persisting a row that restores differently.
+    pub(super) fn new(
+        scope: &FileScopeIdentityV1,
+        authority: &'a ReceiptBoundCodeFileAuthorityV1,
+        extraction: &'a ExtractionBatchV1,
+        artifacts: &'a CodeFileIndexArtifactsV1,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        if authority.project_id != scope.project_id
+            || authority.repository_id != scope.repository_id
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed file authority names another scope than its generation".to_owned(),
+            ));
+        }
+        let rows = &artifacts.chunks.chunks;
+        let (text, derived_text) = ChunkTextBaseV1::build(rows);
+        let defaults = rows.first().map(|first| PersistedChunkDefaultsRefV2 {
+            language_descriptor_revision: &first.language_descriptor_revision,
+            chunker_revision: &first.chunker_revision,
+            sanitizer_revision: &first.sanitizer_revision,
+            sensitivity: &first.sensitivity,
+        });
+        let row_index = rows
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| (&chunk.id, index))
+            .collect::<HashMap<_, _>>();
+        let file_identity =
+            code_file_identity(scope.repository_id.as_str(), &authority.logical_path)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let symbol_identities = artifacts
+            .symbols
+            .iter()
+            .map(|symbol| (&symbol.occurrence, &symbol.identity))
+            .collect::<HashMap<_, _>>();
+        let text_slices = ChunkTextSlicesV1::new(&text.text_ranges, &text.text)?;
+        let span_digests = published_symbol_spans(rows.iter().map(Arc::as_ref))
+            .into_iter()
+            .filter_map(|(occurrence, span)| {
+                let text = text_slices.slice(span).ok()?;
+                Some((occurrence, content_digest(text.as_bytes())))
+            })
+            .collect::<HashMap<_, _>>();
+        let chunks = rows
+            .iter()
+            .zip(derived_text)
+            .map(|(chunk, derived_text)| {
+                let parent = chunk
+                    .anchor
+                    .parent_chunk_id
+                    .as_ref()
+                    .and_then(|parent| row_index.get(parent))
+                    .and_then(|index| u32::try_from(*index).ok());
+                let derived_id = match &chunk.anchor.symbol_occurrence_id {
+                    None => Some(derived_chunk_id(
+                        scope,
+                        &file_identity,
+                        None,
+                        chunk.anchor.grain,
+                        &chunk.chunker_revision,
+                    )?),
+                    Some(occurrence) => symbol_identities
+                        .get(occurrence)
+                        .map(|identity| {
+                            derived_chunk_id(
+                                scope,
+                                &file_identity,
+                                Some(identity),
+                                chunk.anchor.grain,
+                                &chunk.chunker_revision,
+                            )
+                        })
+                        .transpose()?,
+                };
+                Ok(PersistedChunkRefV2 {
+                    id: (derived_id.as_ref() != Some(&chunk.id)).then_some(&chunk.id),
+                    symbol_occurrence_id: chunk.anchor.symbol_occurrence_id.as_ref(),
+                    parent,
+                    parent_chunk_id: if parent.is_none() {
+                        chunk.anchor.parent_chunk_id.as_ref()
+                    } else {
+                        None
+                    },
+                    source_span: chunk.anchor.source_span,
+                    grain: chunk.anchor.grain,
+                    ordinal: chunk.anchor.ordinal,
+                    content_digest: (chunk.content_digest
+                        != content_digest(chunk.sanitized_text.as_str().as_bytes()))
+                    .then_some(&chunk.content_digest),
+                    language_descriptor_revision: own_unless_default(
+                        &chunk.language_descriptor_revision,
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.language_descriptor_revision),
+                    ),
+                    chunker_revision: own_unless_default(
+                        &chunk.chunker_revision,
+                        defaults.as_ref().map(|defaults| defaults.chunker_revision),
+                    ),
+                    sanitizer_revision: own_unless_default(
+                        &chunk.sanitizer_revision,
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.sanitizer_revision),
+                    ),
+                    sensitivity: own_unless_default(
+                        &chunk.sensitivity,
+                        defaults.as_ref().map(|defaults| defaults.sensitivity),
+                    ),
+                    exact_terms: chunk
+                        .exact_terms
+                        .iter()
+                        .map(|term| PersistedExactTermRefV1::new(chunk, term))
+                        .collect::<Result<_, _>>()?,
+                    subtokens: &chunk.subtokens,
+                    sanitized_text: (!derived_text).then_some(&chunk.sanitized_text),
+                })
+            })
+            .collect::<Result<_, CodeIndexProductionErrorV1>>()?;
+        let mut symbols = artifacts
+            .symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.identity.as_str(),
+                    PersistedSymbolRefV1::new(
+                        symbol,
+                        &file_identity,
+                        span_digests.get(&symbol.occurrence),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        symbols.sort_by(|left, right| left.0.cmp(right.0));
+        Ok(Self {
+            authority: PersistedFileAuthorityRefV1 {
+                logical_path: &authority.logical_path,
+                content_digest: &authority.content_digest,
+            },
+            extraction,
+            artifacts: PersistedFileIndexArtifactsRefV2 {
+                chunks: PersistedFileChunksRefV2 {
+                    generation_id: &artifacts.chunks.document.generation_id,
+                    file_occurrence_id: &artifacts.chunks.document.file_occurrence_id,
+                    content_digest: &artifacts.chunks.document.content_digest,
+                    eligibility: &artifacts.chunks.document.eligibility,
+                    chunk_defaults: defaults,
+                    text,
+                    chunks,
+                },
+                symbols: symbols.into_iter().map(|(_, symbol)| symbol).collect(),
+                edges: &artifacts.edges,
+                edge_abstentions: &artifacts.edge_abstentions,
+                imports: &artifacts.imports,
+                clone_bodies: PersistedCloneBodiesRefV1::new(
+                    authority,
+                    extraction,
+                    &clone_bodies_by_symbol_identity(artifacts),
+                )?,
+                schema_evidence: artifacts.schema_evidence.as_ref(),
+                unresolved_references: &artifacts.unresolved_references,
+                callable_arities: &artifacts.callable_arities,
+                go_method_sets: &artifacts.go_method_sets,
+            },
+        })
+    }
+}
+
+/// Clone bodies in memory sort by symbol occurrence, which hashes the
+/// worktree's file occurrence; persisting them by symbol identity instead
+/// lets identical files in linked worktrees seal to one segment. Restore
+/// re-sorts by occurrence.
+fn clone_bodies_by_symbol_identity(
+    artifacts: &CodeFileIndexArtifactsV1,
+) -> Vec<&CodeIndexCloneBodyV1> {
+    let identities = artifacts
+        .symbols
+        .iter()
+        .map(|symbol| (&symbol.occurrence, &symbol.identity))
+        .collect::<HashMap<_, _>>();
+    let mut bodies = artifacts.clone_bodies.iter().collect::<Vec<_>>();
+    bodies.sort_by(|left, right| {
+        let (left, right) = (
+            &left.occurrence.symbol_occurrence_id,
+            &right.occurrence.symbol_occurrence_id,
+        );
+        identities
+            .get(left)
+            .cmp(&identities.get(right))
+            .then_with(|| left.cmp(right))
+    });
+    bodies
+}
+
+/// A row carries its own value only where it differs from the file default.
+fn own_unless_default<'a, T: PartialEq>(value: &'a T, default: Option<&'a T>) -> Option<&'a T> {
+    (default != Some(value)).then_some(value)
+}
+
+impl PersistedFileGenerationArtifactsV2 {
+    /// Expand the row form back into the full file record. Rows are rebuilt
+    /// exactly as the chunker emitted them; the caller's chunk validation
+    /// then decides whether the expanded file is admissible.
+    ///
+    /// `symbol_occurrences` are the segment's occurrence keys bound to this
+    /// file occurrence, in the order of `symbol_identities`.
+    pub(super) fn expand(
+        self,
+        scope: &FileScopeIdentityV1,
+        symbol_occurrences: &[SymbolOccurrenceId],
+        symbol_identities: &[SymbolIdentityDigest],
+    ) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
+        let authority = ReceiptBoundCodeFileAuthorityV1 {
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+            logical_path: self.authority.logical_path,
+            content_digest: self.authority.content_digest,
+        };
+        let artifacts = self.artifacts;
+        let clone_bodies = artifacts
+            .clone_bodies
+            .expand(&authority, &self.extraction)?;
+        let file = artifacts.chunks;
+        let defaults = file.chunk_defaults;
+        let text = ChunkTextSlicesV1::new(&file.text_ranges, &file.text)?;
+        let missing_default = |field: &str| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed file segment chunk omits {field} without a file default"
+            ))
+        };
+        let file_identity =
+            code_file_identity(scope.repository_id.as_str(), &authority.logical_path)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let identities = symbol_occurrences
+            .iter()
+            .zip(symbol_identities)
+            .collect::<HashMap<_, _>>();
+        let ids = file
+            .chunks
+            .iter()
+            .map(|chunk| match &chunk.id {
+                Some(explicit) => Ok(explicit.clone()),
+                None => {
+                    let symbol_identity = chunk
+                        .symbol_occurrence_id
+                        .as_ref()
+                        .map(|occurrence| {
+                            identities.get(occurrence).copied().ok_or_else(|| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "sealed file segment chunk omits its id for a symbol outside its file"
+                                        .to_owned(),
+                                )
+                            })
+                        })
+                        .transpose()?;
+                    let chunker_revision = chunk
+                        .chunker_revision
+                        .as_ref()
+                        .or_else(|| defaults.as_ref().map(|defaults| &defaults.chunker_revision))
+                        .ok_or_else(|| missing_default("chunker_revision"))?;
+                    derived_chunk_id(
+                        scope,
+                        &file_identity,
+                        symbol_identity,
+                        chunk.grain,
+                        chunker_revision,
+                    )
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut chunks = Vec::with_capacity(file.chunks.len());
+        for (chunk, id) in file.chunks.into_iter().zip(&ids) {
+            let parent_chunk_id = match (chunk.parent, chunk.parent_chunk_id) {
+                (Some(index), None) => Some(ids.get(index as usize).cloned().ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed file segment chunk names a parent row outside its file".to_owned(),
+                    )
+                })?),
+                (None, explicit) => explicit,
+                (Some(_), Some(_)) => {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed file segment chunk names its parent twice".to_owned(),
+                    ));
+                }
+            };
+            let sanitized_text = match chunk.sanitized_text {
+                Some(explicit) => explicit,
+                None => BoundedSanitizedText::new(text.slice(chunk.source_span)?)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
+            };
+            let exact_terms = chunk
+                .exact_terms
+                .into_iter()
+                .map(|term| {
+                    let bytes = term_bytes(sanitized_text.as_str(), chunk.source_span, term.span)
+                        .ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed chunk exact term span is outside its chunk text".to_owned(),
+                        )
+                    })?;
+                    let symbol_occurrence_id = match term.symbol_occurrence_id {
+                        None if term.kind == ExactTechnicalTermKindV1::WholeSymbol => {
+                            chunk.symbol_occurrence_id.clone()
+                        }
+                        explicit => explicit,
+                    };
+                    ExactTechnicalTermV1::from_persisted_parts(
+                        term.kind,
+                        bytes.to_vec(),
+                        term.span,
+                        symbol_occurrence_id,
+                    )
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let content_digest = chunk
+                .content_digest
+                .unwrap_or_else(|| content_digest(sanitized_text.as_str().as_bytes()));
+            chunks.push(Arc::new(CodeSearchChunkV1 {
+                id: id.clone(),
+                anchor: CodeSearchChunkAnchorV1 {
+                    generation_id: file.generation_id.clone(),
+                    file_occurrence_id: file.file_occurrence_id.clone(),
+                    symbol_occurrence_id: chunk.symbol_occurrence_id,
+                    parent_chunk_id,
+                    source_span: chunk.source_span,
+                    grain: chunk.grain,
+                    ordinal: chunk.ordinal,
+                },
+                content_digest,
+                language_descriptor_revision: chunk
+                    .language_descriptor_revision
+                    .or_else(|| {
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.language_descriptor_revision.clone())
+                    })
+                    .ok_or_else(|| missing_default("language_descriptor_revision"))?,
+                chunker_revision: chunk
+                    .chunker_revision
+                    .or_else(|| {
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.chunker_revision.clone())
+                    })
+                    .ok_or_else(|| missing_default("chunker_revision"))?,
+                sanitizer_revision: chunk
+                    .sanitizer_revision
+                    .or_else(|| {
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.sanitizer_revision.clone())
+                    })
+                    .ok_or_else(|| missing_default("sanitizer_revision"))?,
+                sensitivity: chunk
+                    .sensitivity
+                    .or_else(|| {
+                        defaults
+                            .as_ref()
+                            .map(|defaults| defaults.sensitivity.clone())
+                    })
+                    .ok_or_else(|| missing_default("sensitivity"))?,
+                exact_terms,
+                subtokens: chunk.subtokens,
+                sanitized_text,
+            }));
+        }
+        let symbol_spans = published_symbol_spans(chunks.iter().map(Arc::as_ref));
+        let symbols = artifacts
+            .symbols
+            .into_iter()
+            .map(|symbol| {
+                let identity = identities
+                    .get(&symbol.occurrence)
+                    .map(|identity| (*identity).clone())
+                    .ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed file segment symbol has no identity key".to_owned(),
+                        )
+                    })?;
+                let span_digest = symbol_spans
+                    .get(&symbol.occurrence)
+                    .and_then(|span| text.slice(*span).ok())
+                    .map(|text| content_digest(text.as_bytes()));
+                symbol
+                    .expand(identity, &file_identity, span_digest)
+                    .map(Arc::new)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PersistedFileGenerationArtifactsV1 {
+            authority,
+            extraction: self.extraction,
+            artifacts: CodeFileIndexArtifactsV1 {
+                chunks: CodeFileChunksV1 {
+                    document: CodeSearchDocumentV1 {
+                        generation_id: file.generation_id,
+                        file_occurrence_id: file.file_occurrence_id,
+                        content_digest: file.content_digest,
+                        eligibility: file.eligibility,
+                        chunk_ids: ids,
+                    },
+                    chunks,
+                },
+                symbols,
+                edges: artifacts.edges,
+                edge_abstentions: artifacts.edge_abstentions,
+                imports: artifacts.imports,
+                clone_bodies,
+                schema_evidence: artifacts.schema_evidence,
+                unresolved_references: artifacts.unresolved_references,
+                callable_arities: artifacts.callable_arities,
+                go_method_sets: artifacts.go_method_sets,
+            },
+        })
+    }
+}
+
 pub(super) struct StreamingPersistedPublishedGenerationV1 {
-    pub(super) format_revision: CompatibleSealedFormatRevisionV1,
     pub(super) manifest: CodeGenerationManifestV1,
     pub(super) snapshot: SanitizedCodeSnapshotV1,
     pub(super) repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     pub(super) ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     pub(super) ignored_source_admissions_digest: ManifestDigest,
-    pub(super) files: StreamingRestoredFilesV1,
+    pub(super) content: Arc<DecodedGenerationContentV1>,
     pub(super) lineage: Vec<SymbolLineageCandidateV1>,
     pub(super) coverage: CoverageSummaryV1,
     pub(super) capability: CodeIndexCapabilityManifestV1,
     pub(super) projection_request: ProjectionBatchRequestV1,
     pub(super) projection_receipt: ProjectionBatchReceiptV1,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StreamingSealedEnvelopeV1 {
-    state_digest: ManifestDigest,
-    generation: StreamingPersistedPublishedGenerationV1,
-}
-
-enum CompatibleSealedMaterializationV1 {
-    Streamed(StreamingPersistedPublishedGenerationV1),
-    Legacy(SealedPublishedGenerationEnvelopeV1),
+    /// The edges sealing derived across files, restored as sealed.
+    pub(super) cross_file_edges: Vec<CanonicalRelationEdgeV1>,
+    pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+    pub(super) ambiguous_name_drops: Option<u64>,
 }
 
 /// Rebuild every file's parser-backed exact authority on the indexing pool,
@@ -197,16 +1089,14 @@ enum CompatibleSealedMaterializationV1 {
 ///
 /// The digest remints are by-ref and independent per file, so the fan-out
 /// keeps the sequential failure semantics (lowest-index error) while the
-/// pages themselves move — the persist corpus is never copied.
+/// pages themselves move, the persist corpus is never copied.
 pub(super) fn restore_file_pages(
     pages: Vec<PersistedFileGenerationArtifactsV1>,
 ) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
-    let authorities = collect_bounded_ordered(&pages, |page, _worker| {
-        hotpath::measure_block!(
-            "code_index.sealed_decode.file_page",
-            ExactExtractionAuthorityV1::restore(&page.artifacts.chunks)
-                .map_err(CodeIndexProductionErrorV1::Chunk)
-        )
+    let authorities = collect_bounded_ordered(&pages, |page| {
+        let _span = tracing::trace_span!("code_index.sealed_decode.file_page").entered();
+        ExactExtractionAuthorityV1::restore(&page.artifacts.chunks)
+            .map_err(CodeIndexProductionErrorV1::Chunk)
     })?;
     Ok(pages
         .into_iter()
@@ -222,35 +1112,82 @@ pub(super) fn restore_file_pages(
         .collect())
 }
 
+/// Unreclaimable process bytes sampled at a decode's pass boundaries. Pages a
+/// pass frees stay with the allocator until it is collected, so the sample
+/// after each pass reads that pass's high-water mark.
+pub(super) struct DecodePeakProbeV1 {
+    start_bytes: Option<u64>,
+    peak_bytes: u64,
+}
+
+impl DecodePeakProbeV1 {
+    pub(super) fn start() -> Self {
+        let start_bytes =
+            tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1();
+        Self {
+            start_bytes,
+            peak_bytes: start_bytes.unwrap_or(0),
+        }
+    }
+
+    pub(super) fn sample(&mut self) {
+        if let Some(bytes) =
+            tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
+        {
+            self.peak_bytes = self.peak_bytes.max(bytes);
+        }
+    }
+
+    fn growth_bytes(&self) -> Option<u64> {
+        self.start_bytes
+            .map(|start| self.peak_bytes.saturating_sub(start))
+    }
+}
+
 pub(super) fn assemble_published_generation(
     generation: StreamingPersistedPublishedGenerationV1,
+    mut probe: DecodePeakProbeV1,
 ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
     let StreamingPersistedPublishedGenerationV1 {
-        format_revision: _,
         manifest,
         snapshot,
         repository_parse_identity,
         ignored_source_admissions,
         ignored_source_admissions_digest,
-        files: StreamingRestoredFilesV1 { files },
+        content,
         lineage,
         coverage,
         capability,
         projection_request,
         projection_receipt,
+        cross_file_edges,
+        mut unresolved_calls,
+        ambiguous_name_drops,
     } = generation;
-    let files = hotpath::measure_block!(
-        "code_index.sealed_decode.page_restore",
-        restore_file_pages(files)
-    )?;
-    let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
-        hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
-            let ignored_source_roster = IgnoredSourceRosterV1::restore(
-                &snapshot,
-                &repository_parse_identity,
-                ignored_source_admissions,
-                ignored_source_admissions_digest,
-            )?;
+    let files = content.files.clone();
+    if files
+        .iter()
+        .any(|file| !file.artifacts.go_method_sets.is_empty())
+    {
+        unresolved_calls.extend(go_satisfaction(&files, &ModuleImportIndexV1::new(&files)).gaps);
+        unresolved_calls.sort();
+        unresolved_calls.dedup();
+    }
+    let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) = {
+        let _span = tracing::trace_span!("code_index.sealed_decode.authority_restore").entered();
+        {
+            let ignored_source_roster = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.ignored_roster").entered();
+                {
+                    IgnoredSourceRosterV1::restore(
+                        &snapshot,
+                        &repository_parse_identity,
+                        ignored_source_admissions,
+                        ignored_source_admissions_digest,
+                    )
+                }
+            }?;
             // Persist pages moved into `files` exactly once, and chunk/symbol
             // rows are `Arc`-shared between those pages and the generation
             // aggregates: this flatten clones row pointers and per-file
@@ -263,15 +1200,43 @@ pub(super) fn assemble_published_generation(
                 .iter()
                 .flat_map(|file| file.artifacts.symbols.iter().cloned())
                 .collect::<Vec<_>>();
-            let chunks = GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
-                .map_err(CodeIndexProductionErrorV1::Increment)?;
-            let symbols = GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
-                .map_err(CodeIndexProductionErrorV1::Lineage)?;
-            let imports = derive_import_evidence(&files);
-            let (edges, edge_abstentions) = collect_edge_evidence(&files);
-            let projection =
+            let chunks = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.chunk_manifest").entered();
+                {
+                    // Aggregate validation fans out over chunks too. Keep it on
+                    // the same admitted pool as file restoration instead of
+                    // entering Rayon's unrelated global worker pool.
+                    parallelism::install(|| {
+                        GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
+                    })
+                }
+            }?
+            .map_err(CodeIndexProductionErrorV1::Increment)?;
+            probe.sample();
+            let symbols = {
+                let _span = tracing::trace_span!("code_index.sealed_decode.symbol_index").entered();
+                GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
+            }
+            .map_err(CodeIndexProductionErrorV1::Lineage)?;
+            probe.sample();
+            let imports = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.import_evidence").entered();
+                derive_import_evidence(&files)
+            };
+            let (edges, edge_abstentions) = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.edge_evidence").entered();
+                edge_evidence(&files, cross_file_edges)
+            };
+            probe.sample();
+            let projection = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.projection_handoff").entered();
                 ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
-                    .map_err(CodeIndexProductionErrorV1::Projection)?;
+            }
+            .map_err(CodeIndexProductionErrorV1::Projection)?;
             Ok::<_, CodeIndexProductionErrorV1>((
                 ignored_source_roster,
                 chunks,
@@ -281,901 +1246,60 @@ pub(super) fn assemble_published_generation(
                 edge_abstentions,
                 projection,
             ))
-        })?;
-    let published = CodeIndexPublishedGenerationV1 {
+        }
+    }?;
+    probe.sample();
+    let mut published = CodeIndexPublishedGenerationV1 {
+        statistics: {
+            let _span = tracing::trace_span!("code_index.sealed_decode.statistics").entered();
+            CodeIndexGenerationStatisticsV1::from_generation_parts(
+                &files,
+                symbols.symbols.len(),
+                edges.len(),
+                ambiguous_name_drops,
+            )
+        }?,
         manifest,
         snapshot,
         repository_parse_identity,
         ignored_source_roster,
         files,
+        content: Some(content),
         chunks,
         symbols,
         lineage,
         imports,
         edges,
+        unresolved_calls,
         edge_abstentions,
+        clone_payloads_reused: 0,
+        clone_payloads_computed: 0,
+        clone_stale_invalidations: 0,
         coverage,
         capability,
         projection,
         validated: OnceLock::new(),
         admitted: OnceLock::new(),
-        attribution: OnceLock::new(),
+        attribution: Arc::new(OnceLock::new()),
+        attribution_build: Arc::new(Mutex::new(
+            tracedecay_domain::ProviderEvaluationStateV1::Indexing,
+        )),
         chunk_policy: OnceLock::new(),
-        graph_manifest: OnceLock::new(),
+        retained_bytes: OnceLock::new(),
+        decode_peak_growth_bytes: None,
     };
-    hotpath::measure_block!(
-        "code_index.sealed_decode.corpus_validation",
+    {
+        let _span = tracing::trace_span!("code_index.sealed_decode.corpus_validation").entered();
         published.validate_fresh()
-    )?;
+    }?;
+    probe.sample();
+    published.decode_peak_growth_bytes = probe.growth_bytes();
     Ok(published)
-}
-
-#[derive(Serialize)]
-struct PersistedPublishedGenerationRefV1<'a> {
-    format_revision: u32,
-    manifest: &'a CodeGenerationManifestV1,
-    snapshot: &'a SanitizedCodeSnapshotV1,
-    repository_parse_identity: &'a CodeIndexRepositoryParseIdentityV1,
-    ignored_source_admissions: &'a [CodeIndexIgnoredSourceAdmissionV1],
-    ignored_source_admissions_digest: &'a ManifestDigest,
-    /// Pre-encoded file JSON. Each file is serialized on the indexing pool
-    /// before the envelope is stitched so a 700+ file generation does not
-    /// pay a single-threaded `to_writer` of the whole files array.
-    files: Vec<Box<RawValue>>,
-    lineage: &'a [SymbolLineageCandidateV1],
-    coverage: CoverageSummaryV1,
-    capability: &'a CodeIndexCapabilityManifestV1,
-    projection_request: &'a ProjectionBatchRequestV1,
-    projection_receipt: &'a ProjectionBatchReceiptV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SealedPublishedGenerationEnvelopeV1 {
-    state_digest: ManifestDigest,
-    generation: PersistedPublishedGenerationV1,
-}
-
-#[derive(Deserialize)]
-struct SealedPublishedGenerationRawEnvelopeV1<'a> {
-    state_digest: ManifestDigest,
-    #[serde(borrow)]
-    generation: &'a RawValue,
-}
-
-#[derive(Deserialize)]
-struct SealedPublishedGenerationFormatProbeV1 {
-    generation: PersistedPublishedGenerationFormatProbeV1,
-}
-
-#[derive(Deserialize)]
-struct PersistedPublishedGenerationFormatProbeV1 {
-    format_revision: u32,
-}
-
-/// Materialize one sealed envelope with the fewest corpus-scale passes,
-/// returning `None` for incompatible format revisions.
-///
-/// The V1 happy path is exactly one boundary parse (isolating the payload
-/// bytes), one payload digest, and one typed materialization. The standalone
-/// format probe used to re-scan the entire corpus-sized envelope before every
-/// decode; it now runs only when this single-pass decode cannot accept the
-/// bytes, where [`classify_unaccepted_envelope`] reproduces the historical
-/// probe-first outcomes exactly. The digest is computed and compared before
-/// the payload is materialized, so a corrupt V1 envelope is still rejected
-/// without building corpus-scale structures from unverified bytes.
-fn materialize_compatible_envelope(
-    bytes: &[u8],
-) -> Result<Option<CompatibleSealedMaterializationV1>, CodeIndexProductionErrorV1> {
-    let raw: SealedPublishedGenerationRawEnvelopeV1 = match hotpath::measure_block!(
-        "code_index.generation.decode.raw_envelope_parse",
-        serde_json::from_slice(bytes)
-    ) {
-        Ok(raw) => raw,
-        Err(error) => {
-            return classify_unaccepted_envelope(
-                bytes,
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation decoding failed: {error}"
-                )),
-            )
-            .map(|envelope| envelope.map(CompatibleSealedMaterializationV1::Legacy));
-        }
-    };
-    let payload_digest = hotpath::measure_block!(
-        "code_index.sealed_decode.v6_payload_digest",
-        json_generation_digest(raw.generation.get().as_bytes())
-    )?;
-    if payload_digest != raw.state_digest {
-        // Expected under the legacy canonical-digest rule, corrupt under the
-        // V1 raw-bytes rule. The probe — never the digest — decides which, so
-        // the format-revision gate stays authoritative.
-        return classify_unaccepted_envelope(
-            bytes,
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation state digest does not match its payload".to_owned(),
-            ),
-        )
-        .map(|envelope| envelope.map(CompatibleSealedMaterializationV1::Legacy));
-    }
-    let streamed: Result<StreamingPersistedPublishedGenerationV1, _> = hotpath::measure_block!(
-        "code_index.sealed_decode.persisted_materialization",
-        serde_json::from_str(raw.generation.get())
-    );
-    match streamed {
-        Ok(generation)
-            if generation.format_revision.0 == MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION =>
-        {
-            Ok(Some(CompatibleSealedMaterializationV1::Streamed(
-                generation,
-            )))
-        }
-        Ok(generation) if generation.format_revision.0 == SEALED_GENERATION_FORMAT_REVISION_V1 => {
-            Ok(None)
-        }
-        Ok(_) => {
-            // A compatible non-V1 revision whose raw payload bytes coincide
-            // with its canonical serialization: restore through the strict
-            // legacy envelope parse so envelope-level admission stays
-            // identical to the legacy reader.
-            decode_legacy_envelope(bytes)
-                .map(|envelope| Some(CompatibleSealedMaterializationV1::Legacy(envelope)))
-        }
-        Err(error) => classify_unaccepted_envelope(
-            bytes,
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation payload decoding failed: {error}"
-            )),
-        )
-        .map(|envelope| envelope.map(CompatibleSealedMaterializationV1::Legacy)),
-    }
-}
-
-/// Historical probe-first classification for bytes the single-pass V1 decode
-/// did not accept: a legacy revision restores through the strict legacy
-/// envelope parse, an incompatible revision is `Ok(None)`, and a V1 revision
-/// keeps the exact typed rejection that interrupted the decode.
-fn classify_unaccepted_envelope(
-    bytes: &[u8],
-    v1_rejection: CodeIndexProductionErrorV1,
-) -> Result<Option<SealedPublishedGenerationEnvelopeV1>, CodeIndexProductionErrorV1> {
-    let probe: SealedPublishedGenerationFormatProbeV1 = hotpath::measure_block!(
-        "code_index.generation.decode.format_probe",
-        serde_json::from_slice(bytes).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation format probe failed: {error}"
-            ))
-        })
-    )?;
-    match probe.generation.format_revision {
-        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
-            decode_legacy_envelope(bytes).map(Some)
-        }
-        MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION => Err(v1_rejection),
-        SEALED_GENERATION_FORMAT_REVISION_V1 => Ok(None),
-        _ => Ok(None),
-    }
-}
-
-fn decode_legacy_envelope(
-    bytes: &[u8],
-) -> Result<SealedPublishedGenerationEnvelopeV1, CodeIndexProductionErrorV1> {
-    hotpath::measure_block!(
-        "code_index.sealed_decode.persisted_materialization",
-        serde_json::from_slice(bytes).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation decoding failed: {error}"
-            ))
-        })
-    )
-}
-
-#[cfg(test)]
-fn decode_admitted_json<T: DeserializeOwned, R: std::io::Read>(
-    reader: R,
-    admitted_len: u64,
-) -> Result<T, CodeIndexProductionErrorV1> {
-    let bytes = read_admitted_bytes(reader, admitted_len)?;
-    serde_json::from_slice(&bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed generation decoding failed: {error}"))
-    })
-}
-
-fn read_admitted_bytes<R: std::io::Read>(
-    reader: R,
-    admitted_len: u64,
-) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
-    admit_sealed_generation_len(admitted_len)?;
-    let read_limit = admitted_len.checked_add(1).ok_or_else(|| {
-        CodeIndexProductionErrorV1::Contract("sealed generation length overflowed".to_owned())
-    })?;
-    let mut reader = reader.take(read_limit);
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed generation decoding failed: {error}"))
-    })?;
-    if read_limit - reader.limit() != admitted_len {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation length does not match its admitted length".to_owned(),
-        ));
-    }
-    Ok(bytes)
-}
-
-fn admit_sealed_generation_bytes(
-    bytes: &[u8],
-    admitted_len: u64,
-) -> Result<&[u8], CodeIndexProductionErrorV1> {
-    admit_sealed_generation_len(admitted_len)?;
-    let actual_len = u64::try_from(bytes.len()).map_err(|_| {
-        CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())
-    })?;
-    if actual_len != admitted_len {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation length does not match its admitted length".to_owned(),
-        ));
-    }
-    Ok(bytes)
-}
-
-const SEALED_GENERATION_WRITE_CHUNK_BYTES_V1: usize = 1024 * 1024;
-
-struct BoundedChunkWriterV1<'a, W> {
-    writer: &'a mut W,
-    written: u64,
-    byte_limit: u64,
-    maximum_write: usize,
-    limit_exceeded: bool,
-}
-
-impl<W: Write> Write for BoundedChunkWriterV1<'_, W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.is_empty() {
-            return Ok(0);
-        }
-        let remaining = self.byte_limit.saturating_sub(self.written);
-        if remaining == 0 {
-            self.limit_exceeded = true;
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::FileTooLarge,
-                "sealed generation exceeds the canonical byte limit",
-            ));
-        }
-        let remaining = usize::try_from(remaining).unwrap_or(usize::MAX);
-        let admitted = bytes.len().min(self.maximum_write).min(remaining);
-        let written = self.writer.write(&bytes[..admitted])?;
-        self.written = self
-            .written
-            .checked_add(u64::try_from(written).map_err(std::io::Error::other)?)
-            .ok_or_else(|| std::io::Error::other("sealed generation length overflowed"))?;
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
-}
-
-struct GenerationDigestWriterV1<'writer, 'sink, W> {
-    writer: &'writer mut BoundedChunkWriterV1<'sink, W>,
-    hasher: Sha256,
-}
-
-impl<W: Write> Write for GenerationDigestWriterV1<'_, '_, W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let written = self.writer.write(bytes)?;
-        self.hasher.update(&bytes[..written]);
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
-}
-
-fn byte_limit_error() -> CodeIndexProductionErrorV1 {
-    CodeIndexProductionErrorV1::Contract(
-        "sealed generation exceeds the canonical byte limit".to_owned(),
-    )
-}
-
-fn write_chunked<W: Write>(
-    writer: &mut W,
-    mut bytes: &[u8],
-    maximum_write: usize,
-) -> std::io::Result<()> {
-    while !bytes.is_empty() {
-        let written = writer.write(&bytes[..bytes.len().min(maximum_write)])?;
-        if written == 0 {
-            return Err(std::io::ErrorKind::WriteZero.into());
-        }
-        bytes = &bytes[written..];
-    }
-    Ok(())
-}
-
-fn write_generation_envelope_with_limits<T: Serialize, W: Write + Seek>(
-    generation: &T,
-    writer: &mut W,
-    byte_limit: u64,
-    maximum_write: usize,
-) -> Result<u64, CodeIndexProductionErrorV1> {
-    if maximum_write == 0 {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation write chunk must be non-zero".to_owned(),
-        ));
-    }
-    let placeholder = ManifestDigest::from_sha256_bytes(&[0; 32])
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    let envelope_start = writer.stream_position().map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation writer position failed: {error}"
-        ))
-    })?;
-    let mut writer = BufWriter::with_capacity(maximum_write, writer);
-    let (digest_start, digest_end, generation_hash, written) = {
-        let mut bounded = BoundedChunkWriterV1 {
-            writer: &mut writer,
-            written: 0,
-            byte_limit,
-            maximum_write,
-            limit_exceeded: false,
-        };
-        bounded.write_all(b"{\"state_digest\":").map_err(|error| {
-            if bounded.limit_exceeded {
-                byte_limit_error()
-            } else {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation serialization failed: {error}"
-                ))
-            }
-        })?;
-        let digest_start = envelope_start.checked_add(bounded.written).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation writer position overflowed".to_owned(),
-            )
-        })?;
-        if let Err(error) = serde_json::to_writer(&mut bounded, &placeholder) {
-            return Err(if bounded.limit_exceeded {
-                byte_limit_error()
-            } else {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation digest serialization failed: {error}"
-                ))
-            });
-        }
-        let digest_end = envelope_start.checked_add(bounded.written).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation writer position overflowed".to_owned(),
-            )
-        })?;
-        bounded.write_all(b",\"generation\":").map_err(|error| {
-            if bounded.limit_exceeded {
-                byte_limit_error()
-            } else {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation serialization failed: {error}"
-                ))
-            }
-        })?;
-        let generation_hash = {
-            let mut generation_writer = GenerationDigestWriterV1 {
-                writer: &mut bounded,
-                hasher: Sha256::new(),
-            };
-            if let Err(error) = serde_json::to_writer(&mut generation_writer, generation) {
-                return Err(if generation_writer.writer.limit_exceeded {
-                    byte_limit_error()
-                } else {
-                    CodeIndexProductionErrorV1::Contract(format!(
-                        "sealed generation serialization failed: {error}"
-                    ))
-                });
-            }
-            generation_writer.hasher.finalize()
-        };
-        bounded.write_all(b"}").map_err(|error| {
-            if bounded.limit_exceeded {
-                byte_limit_error()
-            } else {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation serialization failed: {error}"
-                ))
-            }
-        })?;
-        bounded.flush().map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation serialization flush failed: {error}"
-            ))
-        })?;
-        (digest_start, digest_end, generation_hash, bounded.written)
-    };
-
-    let state_digest = ManifestDigest::from_sha256_bytes(&generation_hash)
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    let digest_bytes = serde_json::to_vec(&state_digest).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation digest serialization failed: {error}"
-        ))
-    })?;
-    let digest_width = digest_end
-        .checked_sub(digest_start)
-        .and_then(|width| usize::try_from(width).ok())
-        .ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation digest width overflowed".to_owned(),
-            )
-        })?;
-    if digest_bytes.len() != digest_width {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation digest width changed during encoding".to_owned(),
-        ));
-    }
-    writer
-        .seek(SeekFrom::Start(digest_start))
-        .map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation digest seek failed: {error}"
-            ))
-        })?;
-    write_chunked(&mut writer, &digest_bytes, maximum_write).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation digest serialization failed: {error}"
-        ))
-    })?;
-    writer.flush().map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation digest flush failed: {error}"
-        ))
-    })?;
-    let envelope_end = envelope_start.checked_add(written).ok_or_else(|| {
-        CodeIndexProductionErrorV1::Contract(
-            "sealed generation writer position overflowed".to_owned(),
-        )
-    })?;
-    writer
-        .seek(SeekFrom::Start(envelope_end))
-        .map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation final seek failed: {error}"
-            ))
-        })?;
-    writer.flush().map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation final flush failed: {error}"
-        ))
-    })?;
-    Ok(written)
-}
-
-fn encode_persisted_files_parallel(
-    files: &[Arc<FileGenerationArtifactsV1>],
-) -> Result<Vec<Box<RawValue>>, CodeIndexProductionErrorV1> {
-    hotpath::measure_block!("code_index.sealed_encode.files", {
-        super::collect_bounded_ordered(files, |file, _| {
-            let persisted = PersistedFileGenerationArtifactsRefV1 {
-                authority: &file.authority,
-                extraction: &file.extraction,
-                artifacts: &file.artifacts,
-            };
-            serde_json::value::to_raw_value(&persisted).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation file serialization failed: {error}"
-                ))
-            })
-        })
-    })
-}
-
-fn json_generation_digest(
-    generation_bytes: &[u8],
-) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
-    ManifestDigest::from_sha256_bytes(&Sha256::digest(generation_bytes))
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
-}
-
-fn json_generation_bytes_and_digest<T: Serialize>(
-    generation: &T,
-) -> Result<(Vec<u8>, ManifestDigest), CodeIndexProductionErrorV1> {
-    let generation_bytes = serde_json::to_vec(generation).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation serialization failed: {error}"
-        ))
-    })?;
-    let state_digest = json_generation_digest(&generation_bytes)?;
-    Ok((generation_bytes, state_digest))
-}
-
-impl CodeIndexPublishedGenerationV1 {
-    /// Stream the complete sealed generation into one seekable immutable-store
-    /// sink. Writes and the total envelope are bounded independently, and the
-    /// payload digest is patched in place after the generation has been hashed.
-    #[hotpath::measure(label = "code_index.sealed_encode.write")]
-    pub fn write_sealed<W: Write + Seek>(
-        &self,
-        writer: &mut W,
-    ) -> Result<u64, CodeIndexProductionErrorV1> {
-        self.validate()?;
-        let files = encode_persisted_files_parallel(&self.files)?;
-        let generation = PersistedPublishedGenerationRefV1 {
-            format_revision: MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION,
-            manifest: &self.manifest,
-            snapshot: &self.snapshot,
-            repository_parse_identity: &self.repository_parse_identity,
-            ignored_source_admissions: self.ignored_source_roster.admissions(),
-            ignored_source_admissions_digest: self.ignored_source_roster.digest(),
-            files,
-            lineage: &self.lineage,
-            coverage: self.coverage,
-            capability: &self.capability,
-            projection_request: self.projection.request(),
-            projection_receipt: self.projection.receipt(),
-        };
-        let written = write_generation_envelope_with_limits(
-            &generation,
-            writer,
-            MAX_SEALED_CODE_GENERATION_BYTES_V1,
-            SEALED_GENERATION_WRITE_CHUNK_BYTES_V1,
-        )?;
-        crate::hotpath_observe::record_seal_bytes(written);
-        Ok(written)
-    }
-
-    /// Encode the complete sealed generation in memory for callers that need
-    /// an owned wire payload. Durable publication uses [`Self::write_sealed`]
-    /// so it never materializes a corpus-sized intermediate buffer.
-    pub fn encode_sealed(&self) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
-        let mut sealed = std::io::Cursor::new(Vec::new());
-        self.write_sealed(&mut sealed)?;
-        Ok(sealed.into_inner())
-    }
-
-    /// Restore and revalidate a complete sealed generation.
-    #[hotpath::measure(label = "code_index.sealed_decode")]
-    pub fn decode_sealed(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
-        Self::decode_sealed_if_compatible(bytes)?.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation format revision is incompatible".to_owned(),
-            )
-        })
-    }
-
-    /// Restore one compatible sealed generation without a separate format
-    /// probe over the same corpus-sized byte slice.
-    #[hotpath::measure(label = "code_index.generation.decode")]
-    pub fn decode_sealed_if_compatible(
-        bytes: &[u8],
-    ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
-        let admitted_len = u64::try_from(bytes.len()).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())
-        })?;
-        Self::decode_admitted_sealed_bytes_if_compatible(bytes, admitted_len)
-    }
-
-    pub fn decode_sealed_reader<R: std::io::Read>(
-        reader: R,
-        admitted_len: u64,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let bytes = hotpath::measure_block!(
-            "code_index.sealed_decode.admitted_read",
-            read_admitted_bytes(reader, admitted_len)
-        )?;
-        Self::decode_admitted_sealed_bytes(&bytes, admitted_len)
-    }
-
-    fn decode_admitted_sealed_bytes(
-        bytes: &[u8],
-        admitted_len: u64,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        Self::decode_admitted_sealed_bytes_if_compatible(bytes, admitted_len)?.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation format revision is incompatible".to_owned(),
-            )
-        })
-    }
-
-    fn decode_admitted_sealed_bytes_if_compatible(
-        bytes: &[u8],
-        admitted_len: u64,
-    ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
-        let bytes = hotpath::measure_block!(
-            "code_index.sealed_decode.input_admission",
-            admit_sealed_generation_bytes(bytes, admitted_len)
-        )?;
-        crate::hotpath_observe::record_seal_bytes(admitted_len);
-        match materialize_compatible_envelope(bytes)? {
-            Some(CompatibleSealedMaterializationV1::Streamed(generation)) => {
-                assemble_published_generation(generation).map(Some)
-            }
-            Some(CompatibleSealedMaterializationV1::Legacy(envelope)) => {
-                Self::assemble_legacy_envelope(envelope).map(Some)
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn assemble_legacy_envelope(
-        envelope: SealedPublishedGenerationEnvelopeV1,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let expected_digest = match envelope.generation.format_revision.0 {
-            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => sealed_generation_payload_digest(
-                LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION,
-                &envelope.generation,
-            )?,
-            MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION => envelope.state_digest.clone(),
-            _ => {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation format revision is incompatible".to_owned(),
-                ));
-            }
-        };
-        if expected_digest != envelope.state_digest {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation state digest does not match its payload".to_owned(),
-            ));
-        }
-        let streamed = StreamingPersistedPublishedGenerationV1 {
-            format_revision: envelope.generation.format_revision,
-            manifest: envelope.generation.manifest,
-            snapshot: envelope.generation.snapshot,
-            repository_parse_identity: envelope.generation.repository_parse_identity,
-            ignored_source_admissions: envelope.generation.ignored_source_admissions,
-            ignored_source_admissions_digest: envelope.generation.ignored_source_admissions_digest,
-            files: StreamingRestoredFilesV1 {
-                files: envelope.generation.files,
-            },
-            lineage: envelope.generation.lineage,
-            coverage: envelope.generation.coverage,
-            capability: envelope.generation.capability,
-            projection_request: envelope.generation.projection_request,
-            projection_receipt: envelope.generation.projection_receipt,
-        };
-        assemble_published_generation(streamed)
-    }
-
-    /// Stream one compatible sealed generation from a seekable reader without
-    /// holding the envelope bytes or the persist corpus in memory at once.
-    ///
-    /// The layout scan proves the envelope digest incrementally (the same
-    /// `sha256(generation_json)` rule as [`Self::decode_sealed_if_compatible`])
-    /// and optionally the durable file digest. Each `files` element is then
-    /// restored and dropped before the next is decoded.
-    #[hotpath::measure(label = "code_index.generation.decode.seek")]
-    pub fn decode_sealed_seek_reader<R: Read + Seek>(
-        mut reader: R,
-        admitted_len: u64,
-        expected_file_digest: Option<&ManifestDigest>,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
-        admit_sealed_generation_len(admitted_len)?;
-        crate::hotpath_observe::record_seal_bytes(admitted_len);
-        let layout = match scan_layout(&mut reader, admitted_len, expected_file_digest, control) {
-            Ok(layout) => layout,
-            Err(CodeIndexProductionErrorV1::Contract(message))
-                if message.contains("format revision is incompatible") =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        reader.seek(SeekFrom::Start(0)).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation decode seek failed: {error}"
-            ))
-        })?;
-        match layout.format_revision {
-            MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION => {
-                let envelope: StreamingSealedEnvelopeV1 = hotpath::measure_block!(
-                    "code_index.sealed_decode.persisted_materialization",
-                    serde_json::from_reader(BufReader::with_capacity(64 * 1024, reader))
-                )
-                .map_err(|error| {
-                    CodeIndexProductionErrorV1::Contract(format!(
-                        "sealed generation payload decoding failed: {error}"
-                    ))
-                })?;
-                if envelope.state_digest != layout.state_digest {
-                    return Err(CodeIndexProductionErrorV1::Contract(
-                        "sealed generation state digest does not match its payload".to_owned(),
-                    ));
-                }
-                assemble_published_generation(envelope.generation).map(Some)
-            }
-            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
-                let bytes = read_admitted_bytes(reader, admitted_len)?;
-                Self::decode_admitted_sealed_bytes_if_compatible(&bytes, admitted_len)
-            }
-            _ => Ok(None),
-        }
-    }
-
-    pub fn sealed_format_is_compatible(bytes: &[u8]) -> Result<bool, CodeIndexProductionErrorV1> {
-        let probe: SealedPublishedGenerationFormatProbeV1 =
-            serde_json::from_slice(bytes).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation format probe failed: {error}"
-                ))
-            })?;
-        Ok(sealed_generation_format_revision_is_compatible(
-            probe.generation.format_revision,
-        ))
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
     use super::*;
-
-    #[test]
-    fn format_gate_accepts_partitioned_revision_and_monolithic_history() {
-        assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 7);
-        assert!(sealed_generation_format_revision_is_compatible(5));
-        assert!(sealed_generation_format_revision_is_compatible(6));
-        assert!(sealed_generation_format_revision_is_compatible(7));
-        assert!(!sealed_generation_format_revision_is_compatible(4));
-        assert!(!sealed_generation_format_revision_is_compatible(8));
-    }
-
-    struct LargestAllocationRecorderV1;
-
-    thread_local! {
-        static LARGEST_ALLOCATION_BYTES: Cell<usize> = const { Cell::new(0) };
-    }
-
-    unsafe impl GlobalAlloc for LargestAllocationRecorderV1 {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            LARGEST_ALLOCATION_BYTES.with(|largest| largest.set(largest.get().max(layout.size())));
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            LARGEST_ALLOCATION_BYTES.with(|largest| largest.set(largest.get().max(layout.size())));
-            unsafe { System.alloc_zeroed(layout) }
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            LARGEST_ALLOCATION_BYTES.with(|largest| largest.set(largest.get().max(new_size)));
-            unsafe { System.realloc(ptr, layout, new_size) }
-        }
-    }
-
-    #[global_allocator]
-    static TEST_ALLOCATOR: LargestAllocationRecorderV1 = LargestAllocationRecorderV1;
-
-    fn measure_largest_allocation<T>(work: impl FnOnce() -> T) -> (T, usize) {
-        LARGEST_ALLOCATION_BYTES.with(|largest| largest.set(0));
-        let value = work();
-        let largest = LARGEST_ALLOCATION_BYTES.with(Cell::get);
-        (value, largest)
-    }
-
-    struct MaximumWriteSink {
-        inner: std::io::Cursor<Vec<u8>>,
-        maximum_write: usize,
-        write_calls: usize,
-        largest_write: usize,
-    }
-
-    impl Write for MaximumWriteSink {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > self.maximum_write {
-                return Err(std::io::Error::other("write exceeded the fixture bound"));
-            }
-            self.write_calls += 1;
-            self.largest_write = self.largest_write.max(bytes.len());
-            self.inner.write(bytes)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.inner.flush()
-        }
-    }
-
-    impl std::io::Seek for MaximumWriteSink {
-        fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
-            self.inner.seek(position)
-        }
-    }
-
-    #[derive(Serialize)]
-    struct EnvelopeParityFixture<'a> {
-        state_digest: &'a ManifestDigest,
-        generation: &'a serde_json::Value,
-    }
-
-    #[test]
-    fn direct_envelope_encoding_matches_canonical_serde_bytes() {
-        let generation = serde_json::json!({
-            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
-            "manifest": {"generation_id": "generation.parity", "payload": "x".repeat(256)}
-        });
-        let mut assembled = MaximumWriteSink {
-            inner: std::io::Cursor::new(Vec::new()),
-            maximum_write: 7,
-            write_calls: 0,
-            largest_write: 0,
-        };
-        write_generation_envelope_with_limits(&generation, &mut assembled, u64::MAX, 7)
-            .expect("direct sealed envelope encoding");
-        let assembled = assembled.inner.into_inner();
-        let generation_bytes =
-            serde_json::to_vec(&generation).expect("generation fixture serialization");
-        let state_digest =
-            json_generation_digest(&generation_bytes).expect("generation fixture digest");
-        let prior = serde_json::to_vec(&EnvelopeParityFixture {
-            state_digest: &state_digest,
-            generation: &generation,
-        })
-        .expect("serde envelope serialization");
-
-        assert_eq!(assembled, prior);
-    }
-
-    #[test]
-    fn direct_envelope_encoding_coalesces_small_serialization_writes() {
-        const WRITE_BOUND: usize = 1024 * 1024;
-        let generation = serde_json::json!({
-            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
-            "payload": vec![1_u8; WRITE_BOUND]
-        });
-        let mut assembled = MaximumWriteSink {
-            inner: std::io::Cursor::new(Vec::new()),
-            maximum_write: WRITE_BOUND,
-            write_calls: 0,
-            largest_write: 0,
-        };
-
-        write_generation_envelope_with_limits(&generation, &mut assembled, u64::MAX, WRITE_BOUND)
-            .expect("direct sealed envelope encoding");
-
-        assert!(
-            assembled.write_calls <= 8,
-            "a two-megabyte seal must use coalesced writes, observed {}",
-            assembled.write_calls
-        );
-        assert!(assembled.largest_write <= WRITE_BOUND);
-    }
-
-    #[test]
-    fn direct_envelope_encoding_refuses_before_exceeding_its_byte_limit() {
-        let generation = serde_json::json!({
-            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
-            "payload": "x".repeat(256)
-        });
-        let generation_bytes =
-            serde_json::to_vec(&generation).expect("generation fixture serialization");
-        let state_digest =
-            json_generation_digest(&generation_bytes).expect("generation fixture digest");
-        let canonical = serde_json::to_vec(&EnvelopeParityFixture {
-            state_digest: &state_digest,
-            generation: &generation,
-        })
-        .expect("canonical envelope serialization");
-        let byte_limit = u64::try_from(canonical.len() - 1).expect("fixture length fits u64");
-        let mut refused = MaximumWriteSink {
-            inner: std::io::Cursor::new(Vec::new()),
-            maximum_write: 7,
-            write_calls: 0,
-            largest_write: 0,
-        };
-
-        let error = write_generation_envelope_with_limits(&generation, &mut refused, byte_limit, 7)
-            .expect_err("an oversized envelope must be refused");
-
-        assert!(error.to_string().contains("canonical byte limit"));
-        assert!(
-            u64::try_from(refused.inner.get_ref().len()).expect("fixture length fits u64")
-                <= byte_limit,
-            "a refused stream must never write beyond its admitted limit"
-        );
-    }
 
     /// Publishing a sealed generation re-encodes its content as one canonical
     /// graph write batch, with record payloads JSON-escaped into string
@@ -1191,148 +1315,86 @@ mod tests {
         );
     }
 
-    /// Encode and decode share one admission bound, so publication can never
-    /// seal a generation that every later load would refuse as corrupt.
-    #[test]
-    fn sealed_generation_byte_bound_is_symmetric() {
-        assert!(admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1).is_ok());
-        assert!(matches!(
-            admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1 + 1),
-            Err(CodeIndexProductionErrorV1::Contract(message))
-                if message.contains("canonical byte limit")
-        ));
-    }
-
-    #[test]
-    fn admitted_json_rejects_extra_and_missing_bytes() {
-        let extra = decode_admitted_json::<serde_json::Value, _>(std::io::Cursor::new(b"{} "), 2);
-        let missing = decode_admitted_json::<serde_json::Value, _>(std::io::Cursor::new(b"{}"), 3);
-
-        assert!(matches!(
-            extra,
-            Err(CodeIndexProductionErrorV1::Contract(message))
-                if message.contains("admitted length")
-        ));
-        assert!(matches!(
-            missing,
-            Err(CodeIndexProductionErrorV1::Contract(message))
-                if message.contains("admitted length")
-        ));
-    }
-
-    fn sealed_fixture(state_digest: &ManifestDigest, generation: &str) -> Vec<u8> {
-        format!(
-            "{{\"state_digest\":{},\"generation\":{}}}",
-            serde_json::to_string(state_digest).expect("fixture digest serialization"),
-            generation
-        )
-        .into_bytes()
-    }
-
-    /// An incompatible revision must stay `Ok(None)` on every classification
-    /// path: with a payload digest that matches the V1 raw-bytes rule (the
-    /// single-pass decode fails inside materialization) and with one that does
-    /// not (the digest gate fails first).
-    #[test]
-    fn incompatible_revision_stays_none_with_and_without_a_matching_payload_digest() {
-        let generation = "{\"format_revision\":9}";
-        let matching = json_generation_digest(generation.as_bytes()).expect("fixture digest");
-        let mismatched = ManifestDigest::from_sha256_bytes(&[0; 32]).expect("fixture digest");
-
-        for state_digest in [matching, mismatched] {
-            let sealed = sealed_fixture(&state_digest, generation);
-            assert!(matches!(
-                CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&sealed),
-                Ok(None)
-            ));
-            assert!(matches!(
-                CodeIndexPublishedGenerationV1::decode_sealed(&sealed),
-                Err(CodeIndexProductionErrorV1::Contract(message))
-                    if message.contains("format revision is incompatible")
-            ));
+    fn span(start_byte: u64, end_byte: u64) -> SourceSpan {
+        SourceSpan {
+            start_byte,
+            end_byte,
         }
     }
 
     #[test]
-    fn undecodable_bytes_are_rejected_as_a_format_probe_failure() {
-        let error = CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(b"not sealed json")
-            .expect_err("garbage bytes must not decode");
+    fn chunk_text_base_stores_overlapping_chunks_once_and_restores_each_span() {
+        let source = "fn a() { let x = 1; }\n// gap\nfn b() {}\n";
+        let text = |start: u64, end: u64| &source[start as usize..end as usize];
+        let mut base = ChunkTextBaseV1 {
+            text_ranges: Vec::new(),
+            text: String::new(),
+        };
+        assert_eq!(source.len(), 39);
+        let chunks = [
+            span(0, 6),
+            span(0, 22),
+            span(7, 21),
+            span(29, 38),
+            span(29, 39),
+        ];
+        for chunk in chunks {
+            assert!(base.admit(chunk, text(chunk.start_byte, chunk.end_byte)));
+        }
+        assert_eq!(base.text_ranges, [[0, 22], [29, 39]]);
+        assert_eq!(base.text, format!("{}{}", text(0, 22), text(29, 39)));
 
+        let slices = ChunkTextSlicesV1::new(&base.text_ranges, &base.text).expect("slices");
+        for chunk in chunks {
+            assert_eq!(
+                slices.slice(chunk).expect("slice"),
+                text(chunk.start_byte, chunk.end_byte)
+            );
+        }
         assert!(
-            error.to_string().contains("format probe failed"),
-            "garbage bytes reached the wrong rejection: {error}"
+            slices.slice(span(20, 31)).is_err(),
+            "a span across a gap is refused"
         );
-    }
-
-    /// A revision-six envelope whose digest verifies but whose payload does
-    /// not materialize must keep the payload-decoding rejection, never the
-    /// probe or digest one.
-    #[test]
-    fn v1_payload_that_fails_materialization_keeps_the_payload_rejection() {
-        let generation =
-            format!("{{\"format_revision\":{MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION}}}");
-        let state_digest = json_generation_digest(generation.as_bytes()).expect("fixture digest");
-        let sealed = sealed_fixture(&state_digest, &generation);
-
-        let error = CodeIndexPublishedGenerationV1::decode_sealed(&sealed)
-            .expect_err("an incomplete revision-six payload must not decode");
-
         assert!(
-            error.to_string().contains("payload decoding failed"),
-            "incomplete revision-six payload reached the wrong rejection: {error}"
+            slices.slice(span(38, 41)).is_err(),
+            "a span past the text is refused"
         );
-    }
 
-    #[test]
-    fn borrowed_decode_does_not_allocate_a_second_corpus_sized_buffer() {
-        const PADDING_BYTES: usize = 8 * 1024 * 1024;
-        let wrong_digest = ManifestDigest::from_sha256_bytes(&[0; 32]).expect("fixture digest");
-        let mut sealed = format!(
-            "{{\"state_digest\":{},\"generation\":{{\"format_revision\":{},\"padding\":\"",
-            serde_json::to_string(&wrong_digest).expect("fixture digest serialization"),
-            MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION,
-        )
-        .into_bytes();
-        sealed.resize(sealed.len() + PADDING_BYTES, b'x');
-        sealed.extend_from_slice(b"\"}}");
-
-        let (result, largest_allocation) =
-            measure_largest_allocation(|| CodeIndexPublishedGenerationV1::decode_sealed(&sealed));
-
-        assert!(matches!(
-            result,
-            Err(CodeIndexProductionErrorV1::Contract(message))
-                if message.contains("state digest does not match")
-        ));
         assert!(
-            largest_allocation < sealed.len() / 2,
-            "borrowed decode allocated {largest_allocation} bytes for a {} byte sealed input",
-            sealed.len()
+            !base.admit(span(33, 38), "XXXXX"),
+            "a chunk whose text disagrees with the stored bytes keeps its own text"
+        );
+        assert!(
+            !base.admit(span(35, 38), "ab"),
+            "a text whose length is not its span keeps its own text"
+        );
+        assert_eq!(
+            base.text_ranges,
+            [[0, 22], [29, 39]],
+            "refused chunks do not extend the base"
         );
     }
 
     #[test]
-    fn raw_v6_payload_borrows_the_callers_admitted_bytes() {
-        const PADDING_BYTES: usize = 4 * 1024 * 1024;
-        let digest = ManifestDigest::from_sha256_bytes(&[0; 32]).expect("fixture digest");
-        let mut sealed = format!(
-            "{{\"state_digest\":{},\"generation\":{{\"format_revision\":{},\"padding\":\"",
-            serde_json::to_string(&digest).expect("fixture digest serialization"),
-            MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION,
-        )
-        .into_bytes();
-        sealed.resize(sealed.len() + PADDING_BYTES, b'x');
-        sealed.extend_from_slice(b"\"}}");
-
-        let raw: SealedPublishedGenerationRawEnvelopeV1 =
-            serde_json::from_slice(&sealed).expect("raw envelope parses");
-        let payload_start = raw.generation.get().as_ptr() as usize;
-        let admitted_start = sealed.as_ptr() as usize;
-        let admitted_end = admitted_start + sealed.len();
-
-        assert!(
-            (admitted_start..admitted_end).contains(&payload_start),
-            "the raw payload must point into the caller's admitted byte slice"
+    fn chunk_text_slices_refuse_ranges_that_disagree_with_their_text() {
+        let refusal = |ranges: &[[u64; 2]], text: &str| match ChunkTextSlicesV1::new(ranges, text) {
+            Err(CodeIndexProductionErrorV1::Contract(message)) => message,
+            other => panic!("expected a contract refusal, got {:?}", other.map(|_| ())),
+        };
+        assert_eq!(
+            refusal(&[[0, 4]], "abc"),
+            "sealed file segment text does not match its ranges"
         );
+        assert_eq!(
+            refusal(&[[0, 4], [2, 6]], "abcdefgh"),
+            "sealed file segment text ranges are not ascending and disjoint"
+        );
+        assert_eq!(
+            refusal(&[[4, 4]], ""),
+            "sealed file segment text ranges are not ascending and disjoint"
+        );
+        let accepted = ChunkTextSlicesV1::new(&[[0, 4], [6, 10]], "abcdefgh")
+            .expect("ascending disjoint ranges covering the text");
+        assert_eq!(accepted.slice(span(6, 9)).expect("slice"), "efg");
     }
 }

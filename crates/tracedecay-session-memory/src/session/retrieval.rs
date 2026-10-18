@@ -2,22 +2,26 @@ use std::fmt;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tracedecay_application::RequestContext;
-use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
+use tracedecay_contracts::RequestContext;
+use tracedecay_contracts::retrieval::{
+    SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
+};
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_domain::{
-    ContextOmissionReasonV1, CursorManifestLimitKindV1, RetrievalAnchorId, RetrievalGrainV1,
-    SessionId, TemporalModeV1,
+    ContextOmissionReasonV1, CursorBindingMismatchV1, CursorBindingV1, CursorManifestLimitKindV1,
+    DomainError, ManifestDigest, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
+    canonical_sha256,
 };
 use tracedecay_temporal_query::context::{ContextBudget, ContextError, VersionedTokenEstimator};
 use tracedecay_temporal_query::cursor::CursorError;
+use tracedecay_temporal_query::execution::TemporalPortError;
+use tracedecay_temporal_query::execution::{ExecutionControl, ExecutionLimits};
 use tracedecay_temporal_query::hydration::HydrationError;
-use tracedecay_temporal_query::ports::{
-    ExecutionControl, ExecutionLimits, TemporalAuthorizedRoot, TemporalCandidateFilterV1,
-    TemporalPortError, TemporalRetrievalScope,
-};
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_temporal_query::resolution::SummaryLineageRejection;
+use tracedecay_temporal_query::snapshot::{
+    TemporalAuthorizedRoot, TemporalCandidateFilterV1, TemporalRetrievalScope,
+};
 use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
 use crate::context::{
@@ -25,17 +29,26 @@ use crate::context::{
     application_observed_at, application_request_interruption,
     run_application_request_interruptible,
 };
-use crate::session::ports::{
-    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError, SessionTemporalExecutionPort,
-};
 use crate::session::types::{
     SessionAccess, SessionAuthorizationError, SessionDataFreshness, SessionFreshnessPolicy,
     SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionRetrievalUnavailableCause, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+};
+use tracedecay_session_temporal_store::execution::{
+    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
+    SessionTemporalExecutionReport,
+};
+use tracedecay_session_temporal_store::{
+    RegisteredGlobalDbSessionTemporalExecution, SessionTemporalRegisteredDb,
 };
 
 mod task_session;
 pub use task_session::TaskSessionRetrievalOutcomeV1;
+
+/// The operation of retrievals that never hand a caller a continuation
+/// (automation context, Work evidence); user-facing operations name
+/// themselves with [`SessionTemporalQuery::with_cursor_request`].
+const INTERNAL_SESSION_RETRIEVAL_OPERATION: &str = "session_retrieval";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionRetrievalConfiguration {
@@ -60,19 +73,60 @@ impl SessionRetrievalConfiguration {
         })
     }
 
-    #[hotpath::skip]
     pub const fn schema_version(self) -> u32 {
         self.schema_version
     }
 
-    #[hotpath::skip]
     pub const fn ranking_version(self) -> u32 {
         self.ranking_version
     }
 }
 
+/// The operation a session retrieval continuation belongs to and the
+/// caller-visible request parameters that shape its result set.
+///
+/// The caller names its own request fields, so a refused cursor names the
+/// field the caller changed; the query's own normalized fields are bound
+/// after them and catch anything the caller did not name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionCursorRequest {
+    operation: &'static str,
+    parameters: Vec<(&'static str, ManifestDigest)>,
+}
+
+impl SessionCursorRequest {
+    #[must_use]
+    pub const fn new(operation: &'static str) -> Self {
+        Self {
+            operation,
+            parameters: Vec::new(),
+        }
+    }
+
+    /// Binds the caller-visible request field `name` to `value`.
+    pub fn parameter<T: Serialize + ?Sized>(
+        mut self,
+        name: &'static str,
+        value: &T,
+    ) -> Result<Self, DomainError> {
+        self.parameters.push((name, canonical_sha256(&value)?));
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn operation(&self) -> &'static str {
+        self.operation
+    }
+
+    /// The binding over the caller's parameters.
+    pub fn binding(self) -> Result<CursorBindingV1, DomainError> {
+        CursorBindingV1::new(self.operation, self.parameters)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionTemporalQuery {
+    cursor_request: SessionCursorRequest,
     session_id: SessionId,
     retrieval_scope: SessionRetrievalScope,
     provider: Option<String>,
@@ -125,6 +179,7 @@ impl SessionTemporalQuery {
         }
         let retrieval_scope = SessionRetrievalScope::Session(session_id.clone());
         Ok(Self {
+            cursor_request: SessionCursorRequest::new(INTERNAL_SESSION_RETRIEVAL_OPERATION),
             session_id,
             retrieval_scope,
             provider,
@@ -141,6 +196,14 @@ impl SessionTemporalQuery {
             execution_limits: ExecutionLimits::default(),
             freshness_policy: SessionFreshnessPolicy::AllowStored,
         })
+    }
+
+    /// Names the user-facing operation, and its request fields, a
+    /// continuation from this query is minted for.
+    #[must_use]
+    pub fn with_cursor_request(mut self, cursor_request: SessionCursorRequest) -> Self {
+        self.cursor_request = cursor_request;
+        self
     }
 
     #[must_use]
@@ -210,22 +273,18 @@ impl SessionTemporalQuery {
         self.cursor.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn limit(&self) -> usize {
         self.limit
     }
 
-    #[hotpath::skip]
     pub const fn diversity(&self) -> DiversityLimits {
         self.diversity
     }
@@ -234,12 +293,10 @@ impl SessionTemporalQuery {
         &self.context_budget
     }
 
-    #[hotpath::skip]
     pub const fn execution_limits(&self) -> ExecutionLimits {
         self.execution_limits
     }
 
-    #[hotpath::skip]
     pub const fn freshness_policy(&self) -> SessionFreshnessPolicy {
         self.freshness_policy
     }
@@ -274,18 +331,17 @@ impl fmt::Display for SessionTemporalQueryError {
 
 impl std::error::Error for SessionTemporalQueryError {}
 
-pub struct SessionRetrievalService<A, P, E> {
+pub struct SessionRetrievalService<'db, A, D: SessionTemporalRegisteredDb, E> {
     authorizer: A,
-    execution: P,
+    execution: RegisteredGlobalDbSessionTemporalExecution<'db, D>,
     estimator: E,
     configuration: SessionRetrievalConfiguration,
 }
 
-impl<A, P, E> SessionRetrievalService<A, P, E> {
-    #[hotpath::skip]
+impl<'db, A, D: SessionTemporalRegisteredDb, E> SessionRetrievalService<'db, A, D, E> {
     pub const fn new(
         authorizer: A,
-        execution: P,
+        execution: RegisteredGlobalDbSessionTemporalExecution<'db, D>,
         estimator: E,
         configuration: SessionRetrievalConfiguration,
     ) -> Self {
@@ -298,13 +354,13 @@ impl<A, P, E> SessionRetrievalService<A, P, E> {
     }
 }
 
-impl<A, P, E> SessionRetrievalService<A, P, E>
+impl<A, D, E> SessionRetrievalService<'_, A, D, E>
 where
     A: SessionScopeAuthorizer,
-    P: SessionTemporalExecutionPort,
+    D: SessionTemporalRegisteredDb + Sync,
     E: VersionedTokenEstimator + Sync,
 {
-    #[hotpath::measure(label = "usecases.session.retrieve")]
+    #[tracing::instrument(name = "usecases.session.retrieve", level = "trace", skip_all)]
     pub async fn retrieve(
         &self,
         context: &RequestContext,
@@ -316,16 +372,16 @@ where
             Err(failure) => return failure.into_outcome(),
         };
         let expected_execution = admitted.execution.clone();
-        let result = hotpath::future!(
+        let result = tracing::Instrument::instrument(
             run_application_request_interruptible(
                 context,
                 binding.cancellation(),
-                self.execution.execute(admitted.execution, &self.estimator),
+                Box::pin(self.execution.execute(admitted.execution, &self.estimator)),
                 || {
                     admitted.cancellation_control.cancel();
                 },
             ),
-            label = "usecases.session.execute"
+            tracing::trace_span!("usecases.session.execute"),
         )
         .await;
         let result = match result {
@@ -339,7 +395,9 @@ where
             Ok(report) if expected_execution.validates_report(&report) => {
                 map_report(report, query.freshness_policy)
             }
-            Ok(_) => SessionRetrievalOutcome::Unavailable,
+            Ok(_) => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::KernelRefused,
+            ),
             Err(error) => map_execution_error(error),
         }
     }
@@ -356,9 +414,11 @@ fn execution_deadline(context: &RequestContext) -> std::time::Instant {
     std::time::Instant::now() + std::time::Duration::from_micros(remaining_micros)
 }
 
-fn budget_exhausted<T>(stage: SessionRetrievalBudgetStageV1) -> SessionRetrievalOutcome<T> {
-    crate::session::hotpath_observe::session_retrieval_budget_stage(stage);
-    SessionRetrievalOutcome::BudgetExhausted { stage }
+fn budget_exhausted<T>(
+    stage: SessionRetrievalBudgetStageV1,
+    accounting: Option<SessionRetrievalBudgetAccountingV1>,
+) -> SessionRetrievalOutcome<T> {
+    SessionRetrievalOutcome::BudgetExhausted { stage, accounting }
 }
 
 fn request_budget_refusal(
@@ -376,23 +436,16 @@ fn request_budget_refusal(
     if query.context_budget.max_bytes > budgets.max_bytes() {
         return Some(SessionRetrievalBudgetStageV1::RequestContextBytes);
     }
-    for (bytes, stage) in [
-        (
-            limits.candidate_total_bytes,
-            SessionRetrievalBudgetStageV1::RequestCandidateBytes,
-        ),
-        (
-            limits.record_total_bytes,
-            SessionRetrievalBudgetStageV1::RequestRecordBytes,
-        ),
-        (
-            limits.hydration_total_bytes,
-            SessionRetrievalBudgetStageV1::RequestHydrationBytes,
-        ),
-    ] {
-        if !u64::try_from(bytes).is_ok_and(|bytes| bytes <= budgets.max_bytes()) {
-            return Some(stage);
-        }
+    let workspace = ExecutionLimits::default();
+    if limits.candidate_total_bytes > workspace.candidate_total_bytes {
+        return Some(SessionRetrievalBudgetStageV1::RequestCandidateBytes);
+    }
+    if limits.record_total_bytes > workspace.record_total_bytes {
+        return Some(SessionRetrievalBudgetStageV1::RequestRecordBytes);
+    }
+    if !u64::try_from(limits.hydration_total_bytes).is_ok_and(|bytes| bytes <= budgets.max_bytes())
+    {
+        return Some(SessionRetrievalBudgetStageV1::RequestHydrationBytes);
     }
     None
 }
@@ -427,7 +480,7 @@ fn temporal_authorized_root(
 }
 
 fn map_report(
-    report: crate::session::ports::SessionTemporalExecutionReport,
+    report: SessionTemporalExecutionReport,
     freshness_policy: SessionFreshnessPolicy,
 ) -> SessionRetrievalOutcome<TemporalKernelResult> {
     let (result, freshness) = report.into_parts();
@@ -447,9 +500,8 @@ fn map_report(
         SessionDataFreshness::Partial { generation_lag } => generation_lag.max(1),
         SessionDataFreshness::Fresh | SessionDataFreshness::Stored { .. } => 0,
     };
-    let omitted = coverage_omitted
-        .max(explicit_omitted)
-        .max(freshness_omitted);
+    let record_omitted = coverage_omitted.max(explicit_omitted);
+    let omitted = record_omitted.max(freshness_omitted);
     let has_partial_coverage =
         omitted != 0 || !omissions.is_empty() || !result.summary_omissions.is_empty();
     if result.ranked.is_empty() {
@@ -510,7 +562,7 @@ fn map_report(
                 ContextOmissionReasonV1::ByteBudget | ContextOmissionReasonV1::TokenBudget
             )
         }) {
-            return budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes);
+            return budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes, None);
         }
         if !freshness_policy.accepts(freshness) {
             return SessionRetrievalOutcome::Stale { freshness };
@@ -520,10 +572,13 @@ fn map_report(
                 items: vec![result],
                 freshness,
                 omitted,
+                record_omitted,
             };
         }
         if has_partial_coverage || result.next_cursor.is_some() || coverage.visible != 0 {
-            return SessionRetrievalOutcome::Unavailable;
+            return SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::HydrationUnavailable,
+            );
         }
         // Authorized empty roots are searchable zero-hit results, not unavailable.
         return SessionRetrievalOutcome::CompleteZero { freshness };
@@ -545,6 +600,7 @@ fn map_report(
             items: vec![result],
             freshness,
             omitted,
+            record_omitted,
         };
     }
     SessionRetrievalOutcome::Complete {
@@ -565,15 +621,37 @@ fn map_execution_error(
         SessionTemporalExecutionError::Redacted => SessionRetrievalOutcome::Redacted,
         SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
-        SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
+        SessionTemporalExecutionError::Unavailable => {
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::AuthorityAbsent)
+        }
         SessionTemporalExecutionError::ResetRequired => SessionRetrievalOutcome::ResetRequired,
+        // A partial generation is a projection still converging, not an
+        // authoritative empty root: answering `CompleteZero` there publishes
+        // "nothing exists, and that is final" for rows the store has already
+        // committed but not yet published. `map_report` refuses that for an
+        // empty ranked page; the execution-error path owes the same refusal,
+        // so the caller re-reads instead of believing the zero.
+        SessionTemporalExecutionError::Empty {
+            freshness: freshness @ SessionDataFreshness::Partial { generation_lag },
+        } => SessionRetrievalOutcome::Partial {
+            items: Vec::new(),
+            freshness,
+            omitted: generation_lag.max(1),
+            record_omitted: 0,
+        },
         SessionTemporalExecutionError::Empty { freshness } => {
             SessionRetrievalOutcome::CompleteZero { freshness }
         }
-        SessionTemporalExecutionError::BudgetExhausted => {
-            budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
+        SessionTemporalExecutionError::BudgetExhausted { stage, accounting } => {
+            budget_exhausted(stage, accounting)
+        }
+        // A failed storage read is not an absent authority; the operation and
+        // cause travel with it so the surface can say which read broke.
+        SessionTemporalExecutionError::Storage { .. } => {
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::ReadFailed)
         }
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
+        SessionTemporalExecutionError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
     }
 }
@@ -581,23 +659,25 @@ fn map_execution_error(
 fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<TemporalKernelResult> {
     match error {
         TemporalKernelError::InvalidLimit => {
-            budget_exhausted(SessionRetrievalBudgetStageV1::KernelResultLimit)
+            budget_exhausted(SessionRetrievalBudgetStageV1::KernelResultLimit, None)
         }
         TemporalKernelError::BudgetExceeded => {
-            budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
+            budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted, None)
         }
         TemporalKernelError::Cancelled => SessionRetrievalOutcome::Cancelled,
         TemporalKernelError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
         TemporalKernelError::Port(error) => match error {
             TemporalPortError::Cancelled => SessionRetrievalOutcome::Cancelled,
             TemporalPortError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
-            TemporalPortError::BudgetExceeded { .. } => {
-                budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
-            }
+            TemporalPortError::BudgetExceeded {
+                resource,
+                accounting,
+            } => budget_exhausted(
+                SessionRetrievalBudgetStageV1::for_port_budget_resource(resource),
+                accounting
+                    .map(tracedecay_session_temporal_store::execution::port_budget_accounting),
+            ),
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
-                crate::session::hotpath_observe::session_retrieval_budget_stage(
-                    SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,
-                );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
                     kind: CursorManifestLimitKindV1::Participants,
                     observed,
@@ -605,9 +685,6 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 }
             }
             TemporalPortError::ParticipantManifestBytesExceeded { observed, maximum } => {
-                crate::session::hotpath_observe::session_retrieval_budget_stage(
-                    SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes,
-                );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
                     kind: CursorManifestLimitKindV1::CanonicalBytes,
                     observed,
@@ -615,28 +692,37 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 }
             }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
-            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::Unavailable,
+            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::AuthorityAbsent,
+            ),
             TemporalPortError::ResetRequired { .. } => SessionRetrievalOutcome::ResetRequired,
             TemporalPortError::InvalidBinding { .. }
             | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
-            | TemporalPortError::ZeroVersion { .. }
-            | TemporalPortError::Read { .. } => SessionRetrievalOutcome::Unavailable,
+            | TemporalPortError::ZeroVersion { .. } => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::KernelRefused,
+            ),
+            TemporalPortError::Read { .. } => {
+                SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::ReadFailed)
+            }
         },
         TemporalKernelError::Cursor(error) => match error {
+            CursorError::Binding(mismatch) => SessionRetrievalOutcome::CursorRefused(mismatch),
+            // Unverifiable, or authentic with a matching binding but minted
+            // for another admitted request: no retry repairs either.
+            CursorError::Malformed | CursorError::Tampered | CursorError::WrongRequest => {
+                SessionRetrievalOutcome::CursorRefused(CursorBindingMismatchV1::Foreign)
+            }
             CursorError::RootMismatch
             | CursorError::SessionMismatch
             | CursorError::WrongAccess
             | CursorError::FilterMismatch
             | CursorError::TemporalModeMismatch
             | CursorError::GrainMismatch => SessionRetrievalOutcome::WrongScope,
-            CursorError::Malformed
-            | CursorError::Tampered
-            | CursorError::Expired
+            CursorError::Expired
             | CursorError::UnknownOrExpiredKey
             | CursorError::SortKeyMismatch => SessionRetrievalOutcome::Denied,
-            CursorError::WrongRequest
-            | CursorError::SchemaMismatch
+            CursorError::SchemaMismatch
             | CursorError::RankingMismatch
             | CursorError::ConfigurationMismatch
             | CursorError::GenerationMismatch
@@ -648,13 +734,17 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | CursorError::SummaryWatermarkMismatch
             | CursorError::KeyIdMismatch
             | CursorError::KeyVersionMismatch
-            | CursorError::KeyUnavailable
-            | CursorError::InvalidKeyMaterial => SessionRetrievalOutcome::Unavailable,
+            | CursorError::InvalidKeyMaterial => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::KernelRefused,
+            ),
+            CursorError::KeyUnavailable => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::AuthorityAbsent,
+            ),
             CursorError::CandidateCohortMismatch => SessionRetrievalOutcome::CursorStale,
         },
         TemporalKernelError::Hydration(error) => match error {
             HydrationError::BudgetExceeded { .. } => {
-                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes)
+                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes, None)
             }
             HydrationError::Interrupted(TemporalPortError::Cancelled) => {
                 SessionRetrievalOutcome::Cancelled
@@ -663,7 +753,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 SessionRetrievalOutcome::TimedOut
             }
             HydrationError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
-                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes)
+                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes, None)
             }
             HydrationError::ResetRequired { .. }
             | HydrationError::Interrupted(TemporalPortError::ResetRequired { .. }) => {
@@ -671,11 +761,13 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             }
             HydrationError::Unavailable
             | HydrationError::InvalidDenial
-            | HydrationError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
+            | HydrationError::Interrupted(_) => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::HydrationUnavailable,
+            ),
         },
         TemporalKernelError::Context(error) => match error {
             ContextError::BudgetExceeded { resource } => {
-                budget_exhausted(context_budget_stage(resource))
+                budget_exhausted(context_budget_stage(resource), None)
             }
             ContextError::Interrupted(TemporalPortError::Cancelled) => {
                 SessionRetrievalOutcome::Cancelled
@@ -684,17 +776,19 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 SessionRetrievalOutcome::TimedOut
             }
             ContextError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
-                budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes)
+                budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes, None)
             }
             ContextError::Interrupted(TemporalPortError::ResetRequired { .. }) => {
                 SessionRetrievalOutcome::ResetRequired
             }
             ContextError::EstimatorVersionMismatch
             | ContextError::InvalidBundle(_)
-            | ContextError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
+            | ContextError::Interrupted(_) => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::KernelRefused,
+            ),
         },
         TemporalKernelError::Ranking(_) | TemporalKernelError::CandidateExportContract(_) => {
-            SessionRetrievalOutcome::Unavailable
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::KernelRefused)
         }
     }
 }
@@ -903,6 +997,28 @@ fn digest_request(
     })
 }
 
+/// The operation and request parameters a session retrieval continuation is
+/// minted for: the caller's named fields first, then the normalized query.
+fn session_cursor_binding(query: &SessionTemporalQuery) -> Result<CursorBindingV1, DomainError> {
+    query
+        .cursor_request
+        .clone()
+        .parameter("query", &query.query)?
+        .parameter("scope", &query.retrieval_scope.kind())?
+        .parameter(
+            "session_id",
+            &query.retrieval_scope.session_id().map(SessionId::as_str),
+        )?
+        .parameter("provider", &query.provider)?
+        .parameter("direct_anchor", &query.direct_anchor)?
+        .parameter("filters", &query.semantic_filter)?
+        .parameter("compatibility_filter", &query.compatibility_filter_digest)?
+        .parameter("temporal_mode", &query.temporal_mode)?
+        .parameter("grain", &query.grain)?
+        .parameter("limit", &query.limit)?
+        .binding()
+}
+
 fn digest_filters(query: &SessionTemporalQuery) -> String {
     #[derive(Serialize)]
     struct FilterBinding<'a> {
@@ -950,35 +1066,482 @@ fn sha256_binding(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tracedecay_contracts::retrieval::SessionRetrievalBudgetObservationV1;
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
+    use tracedecay_domain::{
+        CompactContextBundleV1, CompactContextOmissionV1, SessionSummaryIdV1,
+        TemporalCoverageCountsV1,
+    };
+    use tracedecay_temporal_query::context::CompactContext;
+    use tracedecay_temporal_query::execution::BindingDigest;
+    use tracedecay_temporal_query::ranking::RankedCandidate;
+    use tracedecay_temporal_query::resolution::{SummaryOmission, ValidatedAuthorization};
+    use tracedecay_temporal_query::snapshot::{
+        KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest, TemporalWatermarks,
+    };
+
     use super::*;
 
-    #[test]
-    fn cursor_manifest_limits_remain_typed_application_outcomes() {
-        assert_eq!(
-            map_kernel_error(TemporalKernelError::Port(
-                TemporalPortError::ParticipantLimitExceeded {
-                    observed: 257,
-                    maximum: 256,
+    /// One executed page as the store reports it, before the application maps
+    /// it onto a retrieval outcome.
+    #[derive(Default)]
+    struct Page {
+        coverage: TemporalCoverageCountsV1,
+        ranked: usize,
+        omissions: Vec<ContextOmissionReasonV1>,
+        summary_rejections: Vec<SummaryLineageRejection>,
+        next_cursor: Option<String>,
+    }
+
+    fn anchor(index: usize) -> RetrievalAnchorId {
+        RetrievalAnchorId::new(format!("anchor-{index}")).unwrap()
+    }
+
+    fn outcome(
+        page: Page,
+        freshness: SessionDataFreshness,
+        policy: SessionFreshnessPolicy,
+    ) -> SessionRetrievalOutcome<TemporalKernelResult> {
+        let snapshot = TemporalExecutionSnapshot::new_authorized(
+            TemporalSnapshotRequest::new(
+                SessionId::new("session.mapping").unwrap(),
+                digest('0'),
+                digest('1'),
+                digest('2'),
+                TemporalModeV1::Current,
+                RetrievalGrainV1::LogicalMessage,
+            )
+            .unwrap(),
+            TemporalWatermarks {
+                generation: 1,
+                source: 2,
+                projection: 3,
+                index: 3,
+                summary: 4,
+            },
+            KernelVersions {
+                schema: 3,
+                ranking: 5,
+                configuration_digest: BindingDigest::new("configuration_digest", digest('3'))
+                    .unwrap(),
+            },
+            None,
+            ValidatedAuthorization::Authorized,
+        )
+        .unwrap();
+        let omissions = page
+            .omissions
+            .into_iter()
+            .map(|reason| CompactContextOmissionV1 {
+                anchor_id: Some(anchor(0)),
+                reason,
+            })
+            .collect();
+        let summary_omissions = page
+            .summary_rejections
+            .into_iter()
+            .enumerate()
+            .map(|(index, rejection)| SummaryOmission {
+                summary_id: SessionSummaryIdV1::new(format!("summary-{index}")).unwrap(),
+                anchor_id: anchor(index),
+                rejection,
+            })
+            .collect();
+        let ranked = (0..page.ranked)
+            .map(|index| RankedCandidate {
+                stable_id: format!("candidate-{index}"),
+                anchor_id: anchor(index),
+                normalized_score_micros: 1,
+                knowledge_at_micros: 1,
+                logical_message: None,
+                turn: None,
+                session: None,
+                source: None,
+                evidence_role: None,
+                contributions: Vec::new(),
+            })
+            .collect();
+        let result = TemporalKernelResult {
+            snapshot,
+            ranked,
+            hydrated: Vec::new(),
+            context: CompactContext {
+                rendered: String::new(),
+                bundle: CompactContextBundleV1 {
+                    omissions,
+                    coverage: page.coverage,
+                    ..CompactContextBundleV1::default()
                 },
-            )),
-            SessionRetrievalOutcome::CursorManifestLimitExceeded {
-                kind: CursorManifestLimitKindV1::Participants,
-                observed: 257,
-                maximum: 256,
-            }
+                accounted_bytes: 0,
+                estimated_tokens: 0,
+                estimator_version: "words-v1".to_owned(),
+            },
+            coverage: page.coverage,
+            conflicts: Vec::new(),
+            lineage: Vec::new(),
+            summary_omissions,
+            next_cursor: page.next_cursor,
+        };
+        map_report(
+            SessionTemporalExecutionReport::new(result, freshness),
+            policy,
+        )
+    }
+
+    fn fresh(page: Page) -> SessionRetrievalOutcome<TemporalKernelResult> {
+        outcome(
+            page,
+            SessionDataFreshness::Fresh,
+            SessionFreshnessPolicy::AllowStored,
+        )
+    }
+
+    fn coverage(
+        visible: u64,
+        hidden: u64,
+        unknown: u64,
+        redacted: u64,
+    ) -> TemporalCoverageCountsV1 {
+        TemporalCoverageCountsV1 {
+            visible,
+            hidden,
+            unknown,
+            redacted,
+        }
+    }
+
+    #[test]
+    fn empty_page_omissions_keep_their_typed_outcome() {
+        for (reason, coverage, expected) in [
+            (
+                ContextOmissionReasonV1::Deleted,
+                coverage(0, 0, 0, 1),
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                ContextOmissionReasonV1::RetentionExpired,
+                coverage(0, 0, 0, 1),
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                ContextOmissionReasonV1::Redacted,
+                coverage(0, 0, 0, 1),
+                SessionRetrievalOutcome::Redacted,
+            ),
+            (
+                ContextOmissionReasonV1::Unauthorized,
+                coverage(0, 1, 0, 0),
+                SessionRetrievalOutcome::Denied,
+            ),
+            (
+                ContextOmissionReasonV1::Locked,
+                coverage(0, 0, 1, 0),
+                SessionRetrievalOutcome::Locked,
+            ),
+            (
+                ContextOmissionReasonV1::Unavailable,
+                coverage(0, 0, 1, 0),
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
+            ),
+            (
+                ContextOmissionReasonV1::ByteBudget,
+                coverage(0, 0, 1, 0),
+                SessionRetrievalOutcome::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::ContextBytes,
+                    accounting: None,
+                },
+            ),
+        ] {
+            assert_eq!(
+                fresh(Page {
+                    coverage,
+                    omissions: vec![reason],
+                    ..Page::default()
+                }),
+                expected,
+                "{reason:?}"
+            );
+        }
+        assert_eq!(
+            outcome(
+                Page {
+                    coverage: coverage(0, 0, 0, 1),
+                    omissions: vec![ContextOmissionReasonV1::Deleted],
+                    ..Page::default()
+                },
+                SessionDataFreshness::Stored { generation_lag: 2 },
+                SessionFreshnessPolicy::RequireFresh,
+            ),
+            SessionRetrievalOutcome::Deleted,
+            "deletion outranks a stale generation"
         );
         assert_eq!(
-            map_kernel_error(TemporalKernelError::Port(
-                TemporalPortError::ParticipantManifestBytesExceeded {
-                    observed: 65_537,
-                    maximum: 65_536,
+            fresh(Page {
+                coverage: coverage(1, 0, 0, 0),
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::HydrationUnavailable
+            ),
+            "visible coverage without ranked items is not an authoritative zero"
+        );
+    }
+
+    #[test]
+    fn empty_page_summary_rejections_keep_their_typed_outcome() {
+        let anchor_id = anchor(0);
+        for (rejection, expected) in [
+            (
+                SummaryLineageRejection::LockedSource {
+                    anchor_id: anchor_id.clone(),
                 },
-            )),
-            SessionRetrievalOutcome::CursorManifestLimitExceeded {
-                kind: CursorManifestLimitKindV1::CanonicalBytes,
-                observed: 65_537,
-                maximum: 65_536,
+                SessionRetrievalOutcome::Locked,
+            ),
+            (
+                SummaryLineageRejection::DeletedSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                SummaryLineageRejection::ExpiredSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                SummaryLineageRejection::RedactedSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Redacted,
+            ),
+            (
+                SummaryLineageRejection::UnauthorizedSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Denied,
+            ),
+            (
+                SummaryLineageRejection::StaleSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
+            ),
+            (
+                SummaryLineageRejection::UnavailableSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
+            ),
+            (
+                SummaryLineageRejection::MissingSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
+            ),
+            (
+                SummaryLineageRejection::CycleSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
+            ),
+        ] {
+            let label = format!("{rejection:?}");
+            assert_eq!(
+                fresh(Page {
+                    coverage: coverage(0, 0, 1, 0),
+                    summary_rejections: vec![rejection],
+                    ..Page::default()
+                }),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn ranked_pages_preserve_partial_coverage_continuation_and_freshness() {
+        assert!(matches!(
+            fresh(Page {
+                coverage: coverage(1, 0, 2, 0),
+                ranked: 1,
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Partial { omitted: 2, .. }
+        ));
+        assert!(matches!(
+            fresh(Page {
+                coverage: coverage(1, 0, 0, 0),
+                ranked: 1,
+                next_cursor: Some("cursor.next".to_owned()),
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Partial { omitted: 0, .. }
+        ));
+        let unavailable = |index| SummaryLineageRejection::UnavailableSource {
+            anchor_id: anchor(index),
+        };
+        assert!(matches!(
+            fresh(Page {
+                coverage: coverage(1, 0, 1, 0),
+                ranked: 1,
+                summary_rejections: vec![unavailable(0), unavailable(1)],
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Partial { omitted: 2, .. }
+        ));
+        assert_eq!(
+            outcome(
+                Page {
+                    coverage: coverage(1, 0, 0, 0),
+                    ranked: 1,
+                    ..Page::default()
+                },
+                SessionDataFreshness::Stored { generation_lag: 2 },
+                SessionFreshnessPolicy::RequireFresh,
+            ),
+            SessionRetrievalOutcome::Stale {
+                freshness: SessionDataFreshness::Stored { generation_lag: 2 }
             }
+        );
+        assert!(matches!(
+            fresh(Page {
+                coverage: coverage(1, 0, 0, 0),
+                ranked: 1,
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Complete {
+                freshness: SessionDataFreshness::Fresh,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn execution_refusals_keep_their_typed_outcome() {
+        let accounting = SessionRetrievalBudgetAccountingV1 {
+            limit: 1_024,
+            observed: SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
+                units: 1_024,
+            },
+        };
+        for (error, expected) in [
+            (
+                SessionTemporalExecutionError::WrongScope,
+                SessionRetrievalOutcome::WrongScope,
+            ),
+            (
+                SessionTemporalExecutionError::Stale { generation_lag: 3 },
+                SessionRetrievalOutcome::Stale {
+                    freshness: SessionDataFreshness::Stored { generation_lag: 3 },
+                },
+            ),
+            (
+                SessionTemporalExecutionError::Locked,
+                SessionRetrievalOutcome::Locked,
+            ),
+            (
+                SessionTemporalExecutionError::Redacted,
+                SessionRetrievalOutcome::Redacted,
+            ),
+            (
+                SessionTemporalExecutionError::Deleted,
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                SessionTemporalExecutionError::Denied,
+                SessionRetrievalOutcome::Denied,
+            ),
+            (
+                SessionTemporalExecutionError::Unavailable,
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::AuthorityAbsent,
+                ),
+            ),
+            // The store names the boundary it refused at and the numbers that
+            // boundary counted; the service forwards both instead of
+            // re-labelling every refusal as work-unit exhaustion.
+            (
+                SessionTemporalExecutionError::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::RecordReadExhausted,
+                    accounting: Some(accounting),
+                },
+                SessionRetrievalOutcome::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::RecordReadExhausted,
+                    accounting: Some(accounting),
+                },
+            ),
+            (
+                SessionTemporalExecutionError::Cancelled,
+                SessionRetrievalOutcome::Cancelled,
+            ),
+        ] {
+            let label = format!("{error:?}");
+            assert_eq!(map_execution_error(error), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn cursor_refusals_split_into_scope_denial_refusal_and_unavailability() {
+        for error in [
+            CursorError::RootMismatch,
+            CursorError::SessionMismatch,
+            CursorError::WrongAccess,
+            CursorError::TemporalModeMismatch,
+            CursorError::GrainMismatch,
+        ] {
+            assert_eq!(
+                map_kernel_error(TemporalKernelError::Cursor(error)),
+                SessionRetrievalOutcome::WrongScope
+            );
+        }
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Cursor(CursorError::SortKeyMismatch)),
+            SessionRetrievalOutcome::Denied
+        );
+        for error in [
+            CursorError::Malformed,
+            CursorError::Tampered,
+            CursorError::WrongRequest,
+        ] {
+            assert_eq!(
+                map_kernel_error(TemporalKernelError::Cursor(error)),
+                SessionRetrievalOutcome::CursorRefused(CursorBindingMismatchV1::Foreign)
+            );
+        }
+        for error in [
+            CursorError::SchemaMismatch,
+            CursorError::RankingMismatch,
+            CursorError::ConfigurationMismatch,
+            CursorError::GenerationMismatch,
+            CursorError::SourceWatermarkMismatch,
+            CursorError::ProjectionWatermarkMismatch,
+            CursorError::IndexWatermarkMismatch,
+            CursorError::SummaryWatermarkMismatch,
+            CursorError::KeyIdMismatch,
+            CursorError::KeyVersionMismatch,
+            CursorError::InvalidKeyMaterial,
+        ] {
+            assert_eq!(
+                map_kernel_error(TemporalKernelError::Cursor(error)),
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::KernelRefused
+                )
+            );
+        }
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Cursor(CursorError::KeyUnavailable)),
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::AuthorityAbsent)
         );
     }
 
@@ -1007,12 +1570,14 @@ mod tests {
                 TemporalKernelError::InvalidLimit,
                 SessionRetrievalOutcome::BudgetExhausted {
                     stage: SessionRetrievalBudgetStageV1::KernelResultLimit,
+                    accounting: None,
                 },
             ),
             (
                 TemporalKernelError::BudgetExceeded,
                 SessionRetrievalOutcome::BudgetExhausted {
                     stage: SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+                    accounting: None,
                 },
             ),
             (
@@ -1056,7 +1621,21 @@ mod tests {
             map_kernel_error(TemporalKernelError::Port(
                 TemporalPortError::EmptyParticipantManifest,
             )),
-            SessionRetrievalOutcome::Unavailable
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::AuthorityAbsent)
+        );
+    }
+
+    #[test]
+    fn partial_generation_empty_execution_is_never_an_authoritative_zero() {
+        let freshness = SessionDataFreshness::Partial { generation_lag: 1 };
+        assert_eq!(
+            map_execution_error(SessionTemporalExecutionError::Empty { freshness }),
+            SessionRetrievalOutcome::Partial {
+                items: Vec::new(),
+                freshness,
+                omitted: 1,
+                record_omitted: 0,
+            }
         );
     }
 
@@ -1075,7 +1654,23 @@ mod tests {
                 operation: "read temporal candidates",
                 message: "unavailable".to_owned(),
             })),
-            SessionRetrievalOutcome::Unavailable
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::ReadFailed)
+        );
+    }
+
+    #[test]
+    fn kernel_refusal_is_not_reported_as_a_missing_store() {
+        assert_eq!(
+            map_execution_error(SessionTemporalExecutionError::Kernel(
+                TemporalKernelError::CandidateExportContract(
+                    "temporal export repeated a hydration anchor".to_owned(),
+                ),
+            )),
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::KernelRefused)
+        );
+        assert_eq!(
+            map_execution_error(SessionTemporalExecutionError::Unavailable),
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::AuthorityAbsent)
         );
     }
 

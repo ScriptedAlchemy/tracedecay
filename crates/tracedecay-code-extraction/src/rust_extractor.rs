@@ -1,50 +1,215 @@
 /// Tree-sitter based Rust source code extractor.
 ///
 /// Parses Rust source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, btree_map::Entry},
+    time::Instant,
+};
 
-use tree_sitter::{Node as TsNode, Tree};
+use tree_sitter::{Node as TsNode, Parser, Point, Range, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{RUST_COMPLEXITY, count_complexity};
+use crate::extraction_artifact::{
+    CallableArityV1, ExtractedCallableArityV1, ExtractedImportEvidenceV1, ExtractionArtifactV1,
+    ImportNamespaceV1, ImportReexportScopeV1, import_module_kind,
+};
+use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, SourceSpan,
+    UnmodeledImportShapeV1, UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Rust source files using tree-sitter.
 pub struct RustExtractor;
 
+#[derive(Default)]
+struct ShadowedCallNames {
+    names: Vec<String>,
+}
+
+/// The names one block's or inline module's `use` declarations bind.
+struct UseScope {
+    start: Point,
+    end: Point,
+    /// Named bindings with the path each names; `None` binds the name to an
+    /// item this file may itself define.
+    paths: BTreeMap<String, Option<String>>,
+    /// Project modules outside this file that the scope glob-imports.
+    globs: Vec<String>,
+    shape: UnmodeledImportShapeV1,
+}
+
+/// Call heads a glob import cannot supply in practice: path roots, the
+/// prelude's constructors and containers, and primitive types.
+// ponytail: a fixed list, not name resolution; a project module that exports
+// one of these names through a glob keeps the name unqualified.
+const GLOB_EXEMPT_CALL_HEADS: &[&str] = &[
+    "crate", "self", "super", "Self", "std", "core", "alloc", "Some", "None", "Ok", "Err", "Box",
+    "Vec", "String", "Option", "Result", "Default", "drop", "bool", "char", "str", "u8", "u16",
+    "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64",
+];
+
+/// Receiver bindings whose type the function body states outright: typed
+/// parameters, typed `let`s, `let`s initialised by a struct literal
+/// (`T { .. }`, possibly behind `?`), and `self` in a method. A dotted
+/// call on such a binding also names the method by its type
+/// (`builder.build()` → `ignore::WalkBuilder::build`), which is the only form
+/// the resolver can bind across files. Method calls and constructor-like names
+/// (`new`, `with_*`, `from_*`, `default`) are never treated as return-type evidence.
+/// Rust does not require those associated functions to return their owning
+/// type. Bindings are function-scoped: a name bound more than once to
+/// different or unknown types is withheld rather than guessed.
+#[derive(Default)]
+struct ReceiverTypes {
+    by_name: BTreeMap<String, Option<String>>,
+}
+
+impl ReceiverTypes {
+    fn record(&mut self, name: String, type_path: Option<String>) {
+        match self.by_name.entry(name) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(type_path);
+            }
+            Entry::Occupied(mut occupied) => {
+                if *occupied.get() != type_path {
+                    occupied.insert(None);
+                }
+            }
+        }
+    }
+
+    fn type_of(&self, name: &str) -> Option<&str> {
+        self.by_name.get(name)?.as_deref()
+    }
+}
+
+/// One type parameter's trait bounds, as a method owner.
+///
+/// `T: Processor` makes `value.process()` the callee `Processor::process`.
+/// Two bounds, or a bound the syntax does not name, stay unresolved so the
+/// call is not attached to both traits. This does not rename `self`: #1814
+/// still records that binding from the enclosing type.
+enum ParamBound {
+    Unbound,
+    Unique(String),
+    Ambiguous,
+}
+
+#[derive(Default)]
+struct TraitBounds {
+    parameters: BTreeMap<String, ParamBound>,
+}
+
+struct BoundClause {
+    paths: Vec<String>,
+    ambiguous: bool,
+}
+
+impl TraitBounds {
+    fn declare(&mut self, name: String) {
+        self.parameters.insert(name, ParamBound::Unbound);
+    }
+
+    fn knows(&self, name: &str) -> bool {
+        self.parameters.contains_key(name)
+    }
+
+    fn constrain(&mut self, name: &str, clause: BoundClause) {
+        if clause.paths.is_empty() && !clause.ambiguous {
+            return;
+        }
+        let Some(slot) = self.parameters.get_mut(name) else {
+            return;
+        };
+        if clause.ambiguous || clause.paths.len() != 1 {
+            *slot = ParamBound::Ambiguous;
+            return;
+        }
+        let Some(path) = clause.paths.into_iter().next() else {
+            *slot = ParamBound::Ambiguous;
+            return;
+        };
+        match slot {
+            ParamBound::Unbound => *slot = ParamBound::Unique(path),
+            ParamBound::Unique(existing) if existing == &path => {}
+            ParamBound::Unique(_) | ParamBound::Ambiguous => *slot = ParamBound::Ambiguous,
+        }
+    }
+
+    /// Replace a written type-parameter name with its unique trait. Any other
+    /// path, including the enclosing type recorded for `self`, is unchanged.
+    fn resolve(&self, path: String) -> Option<String> {
+        match self.parameters.get(path.as_str()) {
+            Some(ParamBound::Unique(bound)) => Some(bound.clone()),
+            Some(ParamBound::Ambiguous) => None,
+            Some(ParamBound::Unbound) | None => Some(path),
+        }
+    }
+}
+
 /// Internal state used during AST traversal.
 ///
 /// Borrows the caller's source for the lifetime of the walk: copying the
-/// whole file here made every `extract_parsed` pass — including incremental
-/// walks of one tiny item — pay a full-file memcpy before visiting a node.
+/// whole file here made every `extract_parsed` pass, including incremental
+/// walks of one tiny item, pay a full-file memcpy before visiting a node.
 struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
+    imports: Vec<ExtractedImportEvidenceV1>,
+    callable_arities: Vec<ExtractedCallableArityV1>,
+    root_modules: BTreeMap<String, String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
     source: &'s [u8],
     timestamp: u64,
+    /// Created on the first item-position macro body; most files have none.
+    macro_body_parser: Option<Parser>,
+}
+
+/// What an item-position macro's delimited body holds once re-parsed.
+enum MacroItemBody {
+    Empty,
+    Items(Tree),
+    Unparsed,
+}
+
+/// Whether a top-level Rust node is an item (or trivia) rather than an
+/// expression or statement, so a macro body of only these is a plain item
+/// list.
+fn is_rust_item_kind(kind: &str) -> bool {
+    kind.ends_with("_item")
+        || matches!(
+            kind,
+            "use_declaration"
+                | "extern_crate_declaration"
+                | "macro_invocation"
+                | "macro_definition"
+                | "line_comment"
+                | "block_comment"
+                | "empty_statement"
+        )
 }
 
 impl<'s> ExtractionState<'s> {
     fn new(file_path: &str, source: &'s str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
+            imports: Vec::new(),
+            callable_arities: Vec::new(),
+            root_modules: BTreeMap::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
             source: source.as_bytes(),
             timestamp,
+            macro_body_parser: None,
         }
     }
 
@@ -52,8 +217,7 @@ impl<'s> ExtractionState<'s> {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -78,34 +242,15 @@ impl<'s> ExtractionState<'s> {
 }
 
 impl RustExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
-    fn extract_tree(
+    fn extract_tree_artifact(
         file_path: &str,
         source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        state.root_modules = Self::root_module_names(&mut state, tree.root_node());
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -115,7 +260,7 @@ impl RustExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -129,6 +274,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -142,16 +288,11 @@ impl RustExtractor {
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            Self::build_artifact(state, start),
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("rust", "Rust", source)
     }
 
     fn visit_children(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
@@ -175,8 +316,8 @@ impl RustExtractor {
             "trait_item" => Self::visit_trait(state, node),
             "impl_item" => Self::visit_impl(state, node),
             "use_declaration" => Self::visit_use(state, node),
-            "const_item" => Self::visit_const(state, node),
-            "static_item" => Self::visit_static(state, node),
+            "const_item" => Self::visit_const_or_static(state, node, NodeKind::Const),
+            "static_item" => Self::visit_const_or_static(state, node, NodeKind::Static),
             "type_item" => Self::visit_type_alias(state, node),
             "mod_item" => Self::visit_module(state, node),
             "macro_invocation" => Self::visit_macro_invocation(state, node),
@@ -202,7 +343,18 @@ impl RustExtractor {
         } else {
             NodeKind::Function
         };
-        let visibility = Self::extract_visibility(node, state);
+        let visibility = if is_inside_trait {
+            state
+                .parent_node_id()
+                .and_then(|parent_id| state.nodes.iter().rev().find(|node| node.id == parent_id))
+                .filter(|parent| parent.kind == NodeKind::Trait)
+                .map_or_else(
+                    || Self::extract_visibility(node, state),
+                    |parent| parent.visibility.clone(),
+                )
+        } else {
+            Self::extract_visibility(node, state)
+        };
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let is_async = Self::detect_async(state, node);
@@ -211,7 +363,7 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let metrics = count_complexity(node, &RUST_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -236,9 +388,13 @@ impl RustExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
+        if graph_node.kind == NodeKind::Function {
+            Self::record_arity(state, node, &id);
+        }
         state.nodes.push(graph_node);
 
         if let Some(parent_id) = state.parent_node_id() {
@@ -250,7 +406,13 @@ impl RustExtractor {
             });
         }
 
-        Self::extract_call_sites(state, node, &id);
+        let mut receivers = ReceiverTypes::default();
+        Self::collect_receiver_types(state, node, node, &mut receivers);
+        Self::extract_call_sites(state, node, &id, &receivers);
+        Self::suppress_shadowed_calls(state, node, &id);
+        let in_file_calls = Self::in_file_relative_calls(state, node, &id);
+        Self::qualify_block_scoped_uses(state, node, &id);
+        Self::unqualify_calls(state, in_file_calls);
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
@@ -276,6 +438,69 @@ impl RustExtractor {
         }
     }
 
+    fn record_arity(state: &mut ExtractionState<'_>, node: TsNode<'_>, node_id: &str) {
+        let Some(parameters) = node
+            .child_by_field_name("parameters")
+            .filter(|parameters| !parameters.has_error())
+        else {
+            return;
+        };
+        let mut cursor = parameters.walk();
+        let count = parameters
+            .named_children(&mut cursor)
+            .filter(|parameter| !parameter.is_extra())
+            .try_fold(0_u32, |count, parameter| {
+                (parameter.kind() == "parameter")
+                    .then(|| count.checked_add(1))
+                    .flatten()
+            });
+        if let Some(parameters) = count {
+            state.callable_arities.push(ExtractedCallableArityV1 {
+                node_id: node_id.to_owned(),
+                arity: CallableArityV1 {
+                    parameters,
+                    variadic: false,
+                },
+            });
+        }
+    }
+
+    fn argument_count(node: TsNode<'_>) -> Option<u32> {
+        let arguments = node
+            .child_by_field_name("arguments")
+            .filter(|arguments| !arguments.has_error())?;
+        let mut cursor = arguments.walk();
+        u32::try_from(
+            arguments
+                .named_children(&mut cursor)
+                .filter(|argument| !argument.is_extra())
+                .count(),
+        )
+        .ok()
+    }
+
+    fn record_tuple_struct_arity(state: &mut ExtractionState<'_>, node: TsNode<'_>, node_id: &str) {
+        let Some(body) = node
+            .child_by_field_name("body")
+            .filter(|body| body.kind() == "ordered_field_declaration_list" && !body.has_error())
+        else {
+            return;
+        };
+        let mut cursor = body.walk();
+        let Ok(parameters) =
+            u32::try_from(body.children_by_field_name("type", &mut cursor).count())
+        else {
+            return;
+        };
+        state.callable_arities.push(ExtractedCallableArityV1 {
+            node_id: node_id.to_owned(),
+            arity: CallableArityV1 {
+                parameters,
+                variadic: false,
+            },
+        });
+    }
+
     /// Extract a struct node and its fields.
     fn visit_struct(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
@@ -287,7 +512,13 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Struct, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Struct,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -311,9 +542,11 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
+        Self::record_tuple_struct_arity(state, node, &id);
         state.nodes.push(graph_node);
 
         if let Some(parent_id) = state.parent_node_id() {
@@ -346,7 +579,7 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -370,6 +603,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -404,7 +638,13 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Trait, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Trait,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -428,6 +668,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -444,7 +685,7 @@ impl RustExtractor {
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Supertrait bounds (`trait Leaf: Middle + Base`) — emit one
+        // Supertrait bounds (`trait Leaf: Middle + Base`). Emit one
         // unresolved `Extends` ref per bound so the resolver can hook them
         // up to the corresponding trait nodes. Each bound is a
         // `type_identifier` reachable through the `bounds: trait_bounds`
@@ -469,6 +710,8 @@ impl RustExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -491,7 +734,7 @@ impl RustExtractor {
     fn extract_trait_bound_name(state: &ExtractionState<'_>, bound: TsNode<'_>) -> Option<String> {
         match bound.kind() {
             "type_identifier" => Some(state.node_text(bound).to_string()),
-            // `Module::Trait` or `Trait<Generics>` — take the right-most
+            // `Module::Trait` or `Trait<Generics>`. Take the right-most
             // identifier so we ignore module paths and generic args.
             "scoped_type_identifier" | "generic_type" => {
                 let mut cursor = bound.walk();
@@ -527,7 +770,13 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), type_name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Impl, &type_name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Impl,
+            &type_name,
+            node,
+        );
 
         let signature = if let Some(ref trait_n) = trait_name {
             Some(format!("impl {trait_n} for {type_name}"))
@@ -557,6 +806,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -580,13 +830,18 @@ impl RustExtractor {
                 line: start_line,
                 column: start_column,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
             });
         }
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
         // Visit impl body: functions become Method nodes.
-        state.node_stack.push((type_name, id));
+        let method_owner = trait_name.as_ref().map_or(type_name.clone(), |trait_name| {
+            format!("<{type_name} as {trait_name}>")
+        });
+        state.node_stack.push((method_owner, id));
         if let Some(body) = node.child_by_field_name("body") {
             Self::visit_children(state, body);
         }
@@ -609,8 +864,17 @@ impl RustExtractor {
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
+        let first_import = state.imports.len();
+        let top_level_argument = node
+            .parent()
+            .filter(|parent| parent.kind() == "source_file")
+            .and_then(|_| node.child_by_field_name("argument"));
+        if let Some(argument) = top_level_argument {
+            let (is_public, reexport_scope) = Self::use_reexport_visibility(node, state);
+            Self::extract_use_bindings(state, argument, None, is_public, reexport_scope.as_ref());
+        }
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &path, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -634,6 +898,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -648,69 +913,285 @@ impl RustExtractor {
             });
         }
 
-        state.unresolved_refs.push(UnresolvedRef {
-            from_node_id: id,
-            reference_name: path,
-            reference_kind: EdgeKind::Uses,
-            line: start_line,
-            column: start_column,
-            file_path: state.file_path.clone(),
+        // Named bindings cannot account for wildcard members. Retain the original
+        // declaration as unresolved evidence rather than dropping those dependencies.
+        if top_level_argument.is_none() || state.imports.len() == first_import || path.contains('*')
+        {
+            state.unresolved_refs.push(UnresolvedRef {
+                from_node_id: id.clone(),
+                reference_name: path,
+                reference_kind: EdgeKind::Uses,
+                line: start_line,
+                column: start_column,
+                file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
+            });
+        }
+        if top_level_argument.is_some() {
+            for import in &state.imports[first_import..] {
+                if let Some(local_name) = import.local_name.as_deref() {
+                    if import.module_specifier == "self"
+                        && import.imported_name.as_deref() == Some(local_name)
+                        && state.root_modules.contains_key(local_name)
+                    {
+                        continue;
+                    }
+                    let from_node_id = Self::use_binding_anchor(state, import)
+                        .unwrap_or(id.as_str())
+                        .to_owned();
+                    state.unresolved_refs.push(UnresolvedRef {
+                        from_node_id,
+                        reference_name: local_name.to_owned(),
+                        reference_kind: EdgeKind::Uses,
+                        line: import.start_line,
+                        column: import.start_column,
+                        file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                        argument_count: None,
+                    });
+                }
+            }
+        }
+    }
+
+    fn extract_use_bindings(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        prefix: Option<&str>,
+        is_public: bool,
+        reexport_scope: Option<&ImportReexportScopeV1>,
+    ) {
+        match node.kind() {
+            "scoped_use_list" => {
+                let path = node
+                    .child_by_field_name("path")
+                    .map(|path| state.node_text(path));
+                let combined = Self::join_use_path(prefix, path);
+                if let Some(list) = node.child_by_field_name("list") {
+                    Self::extract_use_bindings(
+                        state,
+                        list,
+                        combined.as_deref(),
+                        is_public,
+                        reexport_scope,
+                    );
+                }
+            }
+            "use_list" => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    Self::extract_use_bindings(state, child, prefix, is_public, reexport_scope);
+                }
+            }
+            "use_as_clause" => {
+                let Some(path) = node.child_by_field_name("path") else {
+                    return;
+                };
+                let Some(alias) = node.child_by_field_name("alias") else {
+                    return;
+                };
+                let full_path = Self::join_use_path(prefix, Some(state.node_text(path)));
+                if let Some(full_path) = full_path {
+                    Self::push_use_binding(
+                        state,
+                        &full_path,
+                        state.node_text(alias),
+                        node,
+                        is_public,
+                        reexport_scope,
+                    );
+                }
+            }
+            "use_wildcard" => {
+                let text = state.node_text(node);
+                let module = node
+                    .child_by_field_name("path")
+                    .map(|path| state.node_text(path))
+                    .or(prefix)
+                    .or_else(|| text.strip_suffix("::*"));
+                if let Some(module) = module {
+                    Self::push_glob_binding(state, module, node, is_public, reexport_scope);
+                }
+            }
+            _ => {
+                let full_path = Self::join_use_path(prefix, Some(state.node_text(node)));
+                if let Some(full_path) = full_path {
+                    let local_name = full_path.rsplit("::").next().unwrap_or(full_path.as_str());
+                    Self::push_use_binding(
+                        state,
+                        &full_path,
+                        local_name,
+                        node,
+                        is_public,
+                        reexport_scope,
+                    );
+                }
+            }
+        }
+    }
+
+    fn join_use_path(prefix: Option<&str>, path: Option<&str>) -> Option<String> {
+        match (prefix, path) {
+            (Some(prefix), Some("self")) => Some(prefix.to_owned()),
+            (Some(prefix), Some(path)) => Some(format!("{prefix}::{path}")),
+            (Some(prefix), None) => Some(prefix.to_owned()),
+            (None, Some(path)) if !path.is_empty() => Some(path.to_owned()),
+            (None, _) => None,
+        }
+    }
+
+    fn push_use_binding(
+        state: &mut ExtractionState<'_>,
+        full_path: &str,
+        local_name: &str,
+        evidence_node: TsNode<'_>,
+        is_public: bool,
+        reexport_scope: Option<&ImportReexportScopeV1>,
+    ) {
+        let (module_specifier, imported_name) = match full_path.rsplit_once("::") {
+            // `use ::krate;` binds an extern crate root, exactly like `use krate;`.
+            Some(("", _)) => return,
+            Some(parts) => parts,
+            None if Self::declares_module(state, full_path) => ("self", full_path),
+            None => return,
+        };
+        let module_specifier = Self::canonical_rust_import_module(state, module_specifier);
+        let Some(module_kind) = import_module_kind("rust", &module_specifier) else {
+            return;
+        };
+        state.imports.push(ExtractedImportEvidenceV1 {
+            logical_path: state.file_path.clone(),
+            module_specifier,
+            imported_name: Some(imported_name.to_owned()),
+            local_name: Some(local_name.to_owned()),
+            is_public,
+            reexport_scope: reexport_scope.cloned(),
+            is_glob: false,
+            namespace: ImportNamespaceV1::Value,
+            module_kind,
+            span: SourceSpan {
+                start_byte: evidence_node.start_byte() as u64,
+                end_byte: evidence_node.end_byte() as u64,
+            },
+            start_line: evidence_node.start_position().row as u32,
+            start_column: evidence_node.start_position().column as u32,
         });
     }
 
-    /// Extract a const item node.
-    fn visit_const(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-        let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
-        let visibility = Self::extract_visibility(node, state);
-        let docstring = Self::extract_docstring(state, node);
-        let text = state.node_text(node);
-        let signature = Some(text.lines().next().unwrap_or("").to_string());
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Const,
-            name,
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: Self::compute_attrs_start_line(node),
-            end_line,
-            start_column,
-            end_column,
-            signature,
-            docstring,
-            visibility,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
+    fn push_glob_binding(
+        state: &mut ExtractionState<'_>,
+        module: &str,
+        evidence_node: TsNode<'_>,
+        is_public: bool,
+        reexport_scope: Option<&ImportReexportScopeV1>,
+    ) {
+        let module_specifier = Self::canonical_rust_import_module(state, module);
+        let Some(module_kind) = import_module_kind("rust", &module_specifier) else {
+            return;
         };
-        state.nodes.push(graph_node);
+        state.imports.push(ExtractedImportEvidenceV1 {
+            logical_path: state.file_path.clone(),
+            module_specifier,
+            imported_name: Some("*".to_owned()),
+            local_name: None,
+            is_public,
+            reexport_scope: reexport_scope.cloned(),
+            is_glob: true,
+            namespace: ImportNamespaceV1::Value,
+            module_kind,
+            span: SourceSpan {
+                start_byte: evidence_node.start_byte() as u64,
+                end_byte: evidence_node.end_byte() as u64,
+            },
+            start_line: evidence_node.start_position().row as u32,
+            start_column: evidence_node.start_position().column as u32,
+        });
+    }
 
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
+    fn canonical_rust_import_module(state: &ExtractionState<'_>, module: &str) -> String {
+        // `::krate::path` resolves through the extern prelude only, so a local
+        // module of the same name never shadows it.
+        if let Some(extern_path) = module.strip_prefix("::") {
+            return extern_path.to_owned();
+        }
+        let first = module.split("::").next().unwrap_or(module);
+        if matches!(first, "crate" | "self" | "super") || !Self::declares_module(state, first) {
+            module.to_owned()
+        } else {
+            format!("self::{module}")
         }
     }
 
-    /// Extract a static item node.
-    fn visit_static(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
+    fn declares_module(state: &ExtractionState<'_>, name: &str) -> bool {
+        state.root_modules.contains_key(name)
+    }
+
+    fn use_binding_anchor<'a>(
+        state: &'a ExtractionState<'_>,
+        import: &ExtractedImportEvidenceV1,
+    ) -> Option<&'a str> {
+        let module = import
+            .module_specifier
+            .strip_prefix("self::")
+            .and_then(|path| path.split("::").next())
+            .or_else(|| {
+                (import.module_specifier == "self")
+                    .then_some(import.imported_name.as_deref())
+                    .flatten()
+            })?;
+        state.root_modules.get(module).map(String::as_str)
+    }
+
+    /// Modules declared at the file root, including those inside root-level
+    /// macro item bodies (`cfg_rt! { mod builder; }`).
+    fn root_module_names(
+        state: &mut ExtractionState<'_>,
+        root: TsNode<'_>,
+    ) -> BTreeMap<String, String> {
+        let mut modules = BTreeMap::new();
+        Self::collect_module_names(state, root, &mut modules);
+        modules
+    }
+
+    fn collect_module_names(
+        state: &mut ExtractionState<'_>,
+        container: TsNode<'_>,
+        modules: &mut BTreeMap<String, String>,
+    ) {
+        let mut cursor = container.walk();
+        let children = container.named_children(&mut cursor).collect::<Vec<_>>();
+        for child in children {
+            match child.kind() {
+                "mod_item" => {
+                    let Some(name) = child.child_by_field_name("name") else {
+                        continue;
+                    };
+                    let name = state.node_text(name).to_owned();
+                    let id = local_node_id(
+                        &state.file_path,
+                        state.source,
+                        &NodeKind::Module,
+                        &name,
+                        child,
+                    );
+                    modules.insert(name, id);
+                }
+                "macro_invocation" => {
+                    let Some(body) = find_direct_child_by_kind(child, "token_tree") else {
+                        continue;
+                    };
+                    if let MacroItemBody::Items(tree) = Self::parse_macro_item_body(state, body) {
+                        Self::collect_module_names(state, tree.root_node(), modules);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Extract a const (`NodeKind::Const`) or static (`NodeKind::Static`) item node.
+    fn visit_const_or_static(state: &mut ExtractionState<'_>, node: TsNode<'_>, kind: NodeKind) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_docstring(state, node);
@@ -721,11 +1202,11 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Static, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Static,
+            kind,
             name,
             qualified_name,
             file_path: state.file_path.clone(),
@@ -745,6 +1226,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -753,11 +1235,14 @@ impl RustExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
-                target: id,
+                target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
             });
         }
+        // A `const`/`static` initializer (`LazyLock::new(|| build())`) is
+        // evaluated as the item; the item owns its calls.
+        Self::extract_call_sites(state, node, &id, &ReceiverTypes::default());
     }
 
     /// Extract a type alias node.
@@ -772,7 +1257,13 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::TypeAlias, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::TypeAlias,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -796,6 +1287,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -821,7 +1313,13 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -845,6 +1343,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -868,7 +1367,11 @@ impl RustExtractor {
         state.node_stack.pop();
     }
 
-    /// Record a macro invocation as an unresolved call reference.
+    /// Record an item-position macro invocation as an unresolved call
+    /// reference, then extract its body: a body that is a clean item list
+    /// (`cfg_rt! { pub mod runtime; }`) contributes its items to the enclosing
+    /// scope as if unwrapped; any other body becomes an unexpanded `name!`
+    /// macro node that owns the calls written inside it.
     fn visit_macro_invocation(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let macro_name = node.child_by_field_name("macro").map_or_else(
             || {
@@ -884,13 +1387,136 @@ impl RustExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: parent_id.to_string(),
-                reference_name: macro_name,
+                reference_name: macro_name.clone(),
                 reference_kind: EdgeKind::Calls,
                 line: start_line,
                 column: start_column,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
             });
         }
+        let Some(body) = find_direct_child_by_kind(node, "token_tree") else {
+            return;
+        };
+        match Self::parse_macro_item_body(state, body) {
+            MacroItemBody::Empty => {}
+            MacroItemBody::Items(tree) => Self::visit_children(state, tree.root_node()),
+            MacroItemBody::Unparsed => {
+                Self::visit_unparsed_macro_body(state, node, body, &macro_name);
+            }
+        }
+    }
+
+    /// Re-parse the inside of an item-position macro's delimited body at its
+    /// original source positions, so node ids, spans, and text of the items
+    /// found there are exactly those of the enclosing file.
+    fn parse_macro_item_body(state: &mut ExtractionState<'_>, body: TsNode<'_>) -> MacroItemBody {
+        let last = body.child_count().checked_sub(1);
+        let (Some(open), Some(close)) = (body.child(0), last.and_then(|index| body.child(index)))
+        else {
+            return MacroItemBody::Unparsed;
+        };
+        if open.id() == close.id() {
+            return MacroItemBody::Unparsed;
+        }
+        if open.end_byte() >= close.start_byte() {
+            return MacroItemBody::Empty;
+        }
+        if state.macro_body_parser.is_none() {
+            let mut parser = Parser::new();
+            if parser
+                .set_language(&crate::ts_provider::rust_grammar::LANGUAGE.into())
+                .is_err()
+            {
+                return MacroItemBody::Unparsed;
+            }
+            state.macro_body_parser = Some(parser);
+        }
+        let Some(parser) = state.macro_body_parser.as_mut() else {
+            return MacroItemBody::Unparsed;
+        };
+        let range = Range {
+            start_byte: open.end_byte(),
+            end_byte: close.start_byte(),
+            start_point: open.end_position(),
+            end_point: close.start_position(),
+        };
+        if parser.set_included_ranges(&[range]).is_err() {
+            return MacroItemBody::Unparsed;
+        }
+        let Some(tree) = parser.parse(state.source, None) else {
+            return MacroItemBody::Unparsed;
+        };
+        let items_only = {
+            let root = tree.root_node();
+            let mut cursor = root.walk();
+            !root.has_error()
+                && root
+                    .named_children(&mut cursor)
+                    .all(|child| is_rust_item_kind(child.kind()))
+        };
+        if items_only {
+            MacroItemBody::Items(tree)
+        } else {
+            MacroItemBody::Unparsed
+        }
+    }
+
+    /// A body that is not an item list has no syntax the extractor can model
+    /// until the macro expands. The invocation becomes a `name!` macro node so
+    /// calls written in it remain attributed evidence, and readers can
+    /// disclose that the expansion itself is not covered.
+    fn visit_unparsed_macro_body(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        body: TsNode<'_>,
+        macro_name: &str,
+    ) {
+        let name = format!("{macro_name}!");
+        let start_line = node.start_position().row as u32;
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::MacroInvocation,
+            &name,
+            node,
+        );
+        state.nodes.push(Node {
+            id: id.clone(),
+            kind: NodeKind::MacroInvocation,
+            name: name.clone(),
+            qualified_name: format!("{}::{name}", state.qualified_prefix()),
+            file_path: state.file_path.clone(),
+            start_line,
+            attrs_start_line: Self::compute_attrs_start_line(node),
+            end_line: node.end_position().row as u32,
+            start_column: node.start_position().column as u32,
+            end_column: node.end_position().column as u32,
+            signature: Some(name),
+            docstring: None,
+            visibility: Visibility::Private,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            updated_at: state.timestamp,
+            parent_id: None,
+        });
+        if let Some(parent_id) = state.parent_node_id() {
+            state.edges.push(Edge {
+                source: parent_id.to_string(),
+                target: id.clone(),
+                kind: EdgeKind::Contains,
+                line: Some(start_line),
+            });
+        }
+        Self::extract_calls_in_token_tree(state, body, &id);
     }
 
     /// Extract the name of a node by looking for a "name" field child.
@@ -911,6 +1537,41 @@ impl RustExtractor {
     fn extract_impl_trait_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
         node.child_by_field_name("trait")
             .map(|n| state.node_text(n).to_string())
+    }
+
+    fn use_reexport_visibility(
+        node: TsNode<'_>,
+        state: &ExtractionState<'_>,
+    ) -> (bool, Option<ImportReexportScopeV1>) {
+        let mut cursor = node.walk();
+        if !cursor.goto_first_child() {
+            return (false, None);
+        }
+        loop {
+            let child = cursor.node();
+            if child.kind() == "visibility_modifier" {
+                let visibility = state.node_text(child);
+                return match visibility {
+                    "pub" => (true, None),
+                    "pub(crate)" | "pub(in crate)" => (false, Some(ImportReexportScopeV1::Crate)),
+                    "pub(super)" | "pub(in super)" => (false, Some(ImportReexportScopeV1::Super)),
+                    "pub(self)" | "pub(in self)" => {
+                        (false, Some(ImportReexportScopeV1::SelfModule))
+                    }
+                    _ => (
+                        false,
+                        visibility
+                            .strip_prefix("pub(in crate::")
+                            .and_then(|module| module.strip_suffix(')'))
+                            .filter(|module| !module.is_empty())
+                            .map(|module| ImportReexportScopeV1::Module(module.replace("::", "/"))),
+                    ),
+                };
+            }
+            if !cursor.goto_next_sibling() {
+                return (false, None);
+            }
+        }
     }
 
     /// Extract visibility from a node.
@@ -1062,7 +1723,13 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1086,6 +1753,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1128,12 +1796,19 @@ impl RustExtractor {
     fn extract_single_variant(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
         let text = state.node_text(node);
+        let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1147,7 +1822,7 @@ impl RustExtractor {
             start_column,
             end_column,
             signature: Some(text.trim().trim_end_matches(',').to_string()),
-            docstring: None,
+            docstring,
             visibility: Visibility::Pub,
             is_async: false,
             branches: 0,
@@ -1157,6 +1832,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1174,7 +1850,12 @@ impl RustExtractor {
 
     /// Recursively find `call_expression` nodes inside a given node and create
     /// unresolved Calls references.
-    fn extract_call_sites(state: &mut ExtractionState<'_>, node: TsNode<'_>, fn_node_id: &str) {
+    fn extract_call_sites(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        fn_node_id: &str,
+        receivers: &ReceiverTypes,
+    ) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -1182,32 +1863,86 @@ impl RustExtractor {
                 match child.kind() {
                     "call_expression" => {
                         if let Some(callee) = child.child_by_field_name("function") {
-                            let callee_name = state.node_text(callee);
+                            let member_callee = if callee.kind() == "generic_function" {
+                                callee.child_by_field_name("function").unwrap_or(callee)
+                            } else {
+                                callee
+                            };
+                            let receiver = (member_callee.kind() == "field_expression")
+                                .then(|| {
+                                    member_callee
+                                        .child_by_field_name("value")
+                                        .zip(member_callee.child_by_field_name("field"))
+                                })
+                                .flatten()
+                                .filter(|(_, field)| field.kind() == "field_identifier");
+                            // Receiver spelling is not target authority. The field
+                            // node owns the member identity and exact token site,
+                            // independently of comments or whitespace after `.`.
+                            let named_callee = Self::callee_path(state, callee);
+                            let (callee_name, position) = match receiver {
+                                Some((value, field)) => (
+                                    format!(
+                                        "{}.{}",
+                                        state.node_text(value),
+                                        state.node_text(field)
+                                    ),
+                                    field.start_position(),
+                                ),
+                                None => match named_callee {
+                                    Some((name, token)) => (name, token.start_position()),
+                                    None => {
+                                        (state.node_text(callee).to_owned(), child.start_position())
+                                    }
+                                },
+                            };
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name.to_string(),
+                                reference_name: callee_name.clone(),
                                 reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
+                                line: position.row as u32,
+                                column: position.column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
+                                argument_count: Self::argument_count(child),
                             });
-                            // For dot-calls (e.g. `instance.method()`), also emit
-                            // a ref with just the method name so the resolver can
-                            // match it against impl method definitions.
-                            if let Some(method_name) = callee_name.rsplit('.').next()
-                                && method_name != callee_name
+                            if let Some((owner, token)) = member_callee
+                                .child_by_field_name("path")
+                                .and_then(|path| Self::callee_path(state, path))
+                            {
+                                let position = token.start_position();
+                                state.unresolved_refs.push(UnresolvedRef {
+                                    from_node_id: fn_node_id.to_string(),
+                                    reference_name: owner,
+                                    reference_kind: EdgeKind::TypeOf,
+                                    line: position.row as u32,
+                                    column: position.column as u32,
+                                    file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
+                                });
+                            }
+                            // The simple name of a dotted call is not itself a call.
+                            // `items.push()` must not bind a same-file `fn push`.
+                            // Only a stated receiver type names the method
+                            // (`Rows::len`), which is also the form that binds
+                            // across files.
+                            if let Some(typed_method) =
+                                Self::typed_receiver_method(state, member_callee, receivers)
                             {
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: fn_node_id.to_string(),
-                                    reference_name: method_name.to_string(),
+                                    reference_name: typed_method,
                                     reference_kind: EdgeKind::Calls,
-                                    line: child.start_position().row as u32,
-                                    column: child.start_position().column as u32,
+                                    line: position.row as u32,
+                                    column: position.column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: Self::argument_count(child),
                                 });
                             }
                         }
-                        Self::extract_call_sites(state, child, fn_node_id);
+                        Self::extract_call_sites(state, child, fn_node_id, receivers);
                     }
                     "macro_invocation" => {
                         let macro_name = child.child_by_field_name("macro").map_or_else(
@@ -1224,8 +1959,10 @@ impl RustExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
-                        Self::extract_call_sites(state, child, fn_node_id);
+                        Self::extract_call_sites(state, child, fn_node_id, receivers);
                     }
                     // Inside a macro's token_tree, the grammar does not produce
                     // call_expression nodes. Instead, a function call appears as
@@ -1236,12 +1973,793 @@ impl RustExtractor {
                     "token_tree" => {
                         Self::extract_calls_in_token_tree(state, child, fn_node_id);
                     }
-                    // Skip nested function definitions — they are handled separately.
+                    // Skip nested function definitions. They are handled separately.
                     "function_item" => {}
                     _ => {
-                        Self::extract_call_sites(state, child, fn_node_id);
+                        Self::extract_call_sites(state, child, fn_node_id, receivers);
                     }
                 }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The named path and terminal token observed by Rust syntax, without
+    /// treating operators inside generic arguments as path delimiters.
+    fn callee_path<'tree>(
+        state: &ExtractionState<'_>,
+        callee: TsNode<'tree>,
+    ) -> Option<(String, TsNode<'tree>)> {
+        match callee.kind() {
+            "generic_function" => Self::callee_path(state, callee.child_by_field_name("function")?),
+            "generic_type" => Self::callee_path(state, callee.child_by_field_name("type")?),
+            "scoped_identifier" | "scoped_type_identifier" => {
+                let (path, _) = Self::callee_path(state, callee.child_by_field_name("path")?)?;
+                let (name, token) = Self::callee_path(state, callee.child_by_field_name("name")?)?;
+                Some((format!("{path}::{name}"), token))
+            }
+            "identifier" | "type_identifier" | "self" | "super" | "crate" => {
+                let name = state.node_text(callee);
+                let path = if name == "Self" {
+                    Self::enclosing_receiver_type(state)?
+                } else {
+                    name.to_owned()
+                };
+                Some((path, callee))
+            }
+            _ => None,
+        }
+    }
+
+    /// `Type::method` for a `binding.method(..)` callee whose binding has one
+    /// stated type in this function; `None` for every other callee shape.
+    fn typed_receiver_method(
+        state: &ExtractionState<'_>,
+        callee: TsNode<'_>,
+        receivers: &ReceiverTypes,
+    ) -> Option<String> {
+        if callee.kind() != "field_expression" {
+            return None;
+        }
+        let value = callee.child_by_field_name("value")?;
+        let field = callee.child_by_field_name("field")?;
+        if field.kind() != "field_identifier" {
+            return None;
+        }
+        // `self` is its own token, not an identifier. Both name a binding.
+        let receiver_name = match value.kind() {
+            "identifier" | "self" => state.node_text(value),
+            _ => return None,
+        };
+        let type_path = receivers.type_of(receiver_name)?;
+        Some(format!("{type_path}::{}", state.node_text(field)))
+    }
+
+    /// The type `self` names in the enclosing impl or trait, carrying the
+    /// enclosing module path.
+    ///
+    /// Trait impls store `<Type as Trait>` so the method keeps a UFCS name.
+    /// `self` still names `Type`, the path a call site writes and the alias
+    /// same-file resolution binds. Same-file resolution keys a definition by
+    /// its file-relative qualified name, so an impl inside `mod inner` has to
+    /// name `inner::Type::method` or the call binds nothing.
+    fn enclosing_receiver_type(state: &ExtractionState<'_>) -> Option<String> {
+        let owner = state
+            .node_stack
+            .iter()
+            .rposition(|(_, id)| id.starts_with("impl:") || id.starts_with("trait:"))?;
+        let (name, id) = &state.node_stack[owner];
+        let type_name = if id.starts_with("impl:") {
+            Self::impl_owner_type_name(name)
+        } else {
+            name.as_str()
+        };
+        if type_name.is_empty()
+            || type_name == "Self"
+            || type_name == "<unknown>"
+            || type_name == "<anonymous>"
+        {
+            return None;
+        }
+        // Frame 0 is the file root, which the qualified name drops.
+        let mut path = state
+            .node_stack
+            .get(1..owner)
+            .unwrap_or_default()
+            .iter()
+            .map(|(segment, _)| segment.as_str())
+            .collect::<Vec<_>>();
+        path.push(type_name);
+        Some(path.join("::"))
+    }
+
+    /// The self type inside a stored impl owner name.
+    ///
+    /// A trait impl stores `<Type as Trait>`, and `Type` can itself be a
+    /// projection (`<Foo as Assoc>::Item`), so the delimiter is the ` as ` at
+    /// depth zero inside the wrapper, not the first one in the string.
+    fn impl_owner_type_name(owner: &str) -> &str {
+        let Some(inner) = owner.strip_prefix('<') else {
+            return owner;
+        };
+        let mut depth = 0_i32;
+        for (index, character) in inner.char_indices() {
+            match character {
+                '<' => depth += 1,
+                '>' => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {
+                    if depth == 0 && inner[index..].starts_with(" as ") {
+                        return inner[..index].trim();
+                    }
+                }
+            }
+        }
+        owner
+    }
+
+    /// Records every binding the function introduces with the type it states,
+    /// or `None` for a binding whose type the syntax does not state (pattern
+    /// destructuring, `if let`, `match` arms, closure parameters, `for`).
+    fn collect_receiver_types(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        receivers: &mut ReceiverTypes,
+    ) {
+        let bounds = Self::trait_bounds_for(state, function);
+        Self::collect_receiver_bindings(state, node, function, receivers, &bounds);
+    }
+
+    fn collect_receiver_bindings(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        receivers: &mut ReceiverTypes,
+        bounds: &TraitBounds,
+    ) {
+        match node.kind() {
+            "self_parameter" => {
+                if let Some(type_path) = Self::enclosing_receiver_type(state) {
+                    receivers.record("self".to_owned(), Some(type_path));
+                }
+            }
+            "parameter" => {
+                if let Some(pattern) = node.child_by_field_name("pattern") {
+                    let type_path = node
+                        .child_by_field_name("type")
+                        .and_then(|ty| Self::receiver_type_path(state, ty, bounds));
+                    Self::record_receiver_pattern(state, pattern, type_path, receivers);
+                }
+            }
+            "let_declaration" => {
+                if let Some(pattern) = node.child_by_field_name("pattern") {
+                    let type_path = match node.child_by_field_name("type") {
+                        Some(ty) => Self::receiver_type_path(state, ty, bounds),
+                        None => node
+                            .child_by_field_name("value")
+                            .and_then(|value| Self::stated_initializer_type_path(state, value)),
+                    };
+                    Self::record_receiver_pattern(state, pattern, type_path, receivers);
+                }
+            }
+            "let_condition" | "match_arm" | "for_expression" => {
+                if let Some(pattern) = node.child_by_field_name("pattern") {
+                    Self::record_receiver_pattern(state, pattern, None, receivers);
+                }
+            }
+            // Typed closure parameters are `parameter` nodes handled above;
+            // untyped ones are bare patterns that shadow with unknown type.
+            "closure_parameters" => {
+                let mut cursor = node.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        let child = cursor.node();
+                        if child.is_named() && child.kind() != "parameter" {
+                            Self::record_receiver_pattern(state, child, None, receivers);
+                        }
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if node != function && node.kind() == "function_item" {
+            return;
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::collect_receiver_bindings(state, cursor.node(), function, receivers, bounds);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// A bare identifier or `self` pattern takes `type_path`; every identifier
+    /// inside any other pattern is bound with an unknown type.
+    fn record_receiver_pattern(
+        state: &ExtractionState<'_>,
+        pattern: TsNode<'_>,
+        type_path: Option<String>,
+        receivers: &mut ReceiverTypes,
+    ) {
+        if pattern.kind() == "identifier" || pattern.kind() == "self" {
+            receivers.record(state.node_text(pattern).to_owned(), type_path);
+            return;
+        }
+        let mut cursor = pattern.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::record_receiver_pattern(state, cursor.node(), None, receivers);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The nominal type path a type annotation names, seen through references,
+    /// generic arguments, and `dyn`/`impl` trait objects; `None` for tuples,
+    /// slices, function pointers, and anything else without one nominal head.
+    /// `Self` is the enclosing impl or trait type when one is on the stack.
+    fn stated_type_path(state: &ExtractionState<'_>, ty: TsNode<'_>) -> Option<String> {
+        match ty.kind() {
+            "type_identifier" | "scoped_type_identifier" => {
+                let path = state.node_text(ty);
+                if path == "Self" {
+                    // `Self` in an annotation is the enclosing impl or trait,
+                    // not a type the file declared under that name.
+                    Self::enclosing_receiver_type(state)
+                } else {
+                    Some(path.to_owned())
+                }
+            }
+            "reference_type" | "generic_type" => ty
+                .child_by_field_name("type")
+                .and_then(|inner| Self::stated_type_path(state, inner)),
+            "dynamic_type" | "abstract_type" => ty
+                .child_by_field_name("trait")
+                .and_then(|inner| Self::stated_type_path(state, inner)),
+            "higher_ranked_trait_bound" => ty
+                .child_by_field_name("type")
+                .and_then(|inner| Self::stated_type_path(state, inner)),
+            // `impl Trait + 'a` still names that trait. Two nominals do not.
+            "bounded_type" => Self::unique_sum_type_path(state, ty),
+            _ => None,
+        }
+    }
+
+    /// A parameter type, with a type parameter replaced by its unique trait
+    /// bound. `Self` is left as #1814 mapped it: the enclosing type, not the
+    /// trait the parameter happens to implement.
+    fn receiver_type_path(
+        state: &ExtractionState<'_>,
+        ty: TsNode<'_>,
+        bounds: &TraitBounds,
+    ) -> Option<String> {
+        if Self::annotation_is_self(state, ty) {
+            return Self::enclosing_receiver_type(state);
+        }
+        bounds.resolve(Self::stated_type_path(state, ty)?)
+    }
+
+    fn annotation_is_self(state: &ExtractionState<'_>, ty: TsNode<'_>) -> bool {
+        match ty.kind() {
+            "type_identifier" => state.node_text(ty) == "Self",
+            "reference_type" => ty
+                .child_by_field_name("type")
+                .is_some_and(|inner| Self::annotation_is_self(state, inner)),
+            _ => false,
+        }
+    }
+
+    fn unique_sum_type_path(state: &ExtractionState<'_>, ty: TsNode<'_>) -> Option<String> {
+        let mut found = None;
+        let mut cursor = ty.walk();
+        if !cursor.goto_first_child() {
+            return None;
+        }
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                let path = match child.kind() {
+                    "lifetime" | "use_bounds" => None,
+                    "bounded_type" => Self::unique_sum_type_path(state, child),
+                    _ => Self::stated_type_path(state, child),
+                };
+                match path {
+                    None if matches!(child.kind(), "lifetime" | "use_bounds") => {}
+                    None => return None,
+                    Some(path) => {
+                        if found.replace(path).is_some() {
+                            return None;
+                        }
+                    }
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        found
+    }
+
+    fn trait_bounds_for(state: &ExtractionState<'_>, function: TsNode<'_>) -> TraitBounds {
+        let mut ancestors = Vec::new();
+        let mut current = function.parent();
+        while let Some(node) = current {
+            if matches!(node.kind(), "function_item" | "function_signature_item") {
+                break;
+            }
+            if matches!(node.kind(), "impl_item" | "trait_item") {
+                ancestors.push(node);
+            }
+            current = node.parent();
+        }
+        ancestors.reverse();
+        let mut bounds = TraitBounds::default();
+        for item in ancestors {
+            Self::absorb_generic_bounds(state, item, &mut bounds);
+        }
+        Self::absorb_generic_bounds(state, function, &mut bounds);
+        bounds
+    }
+
+    fn absorb_generic_bounds(
+        state: &ExtractionState<'_>,
+        item: TsNode<'_>,
+        bounds: &mut TraitBounds,
+    ) {
+        if let Some(parameters) = item.child_by_field_name("type_parameters") {
+            let mut cursor = parameters.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.kind() == "type_parameter"
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        let name = state.node_text(name_node).to_owned();
+                        bounds.declare(name.clone());
+                        if let Some(clause) = child.child_by_field_name("bounds") {
+                            bounds.constrain(&name, Self::trait_bound_clause(state, clause));
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+        let Some(where_clause) = find_direct_child_by_kind(item, "where_clause") else {
+            return;
+        };
+        let mut cursor = where_clause.walk();
+        if !cursor.goto_first_child() {
+            return;
+        }
+        loop {
+            let child = cursor.node();
+            if child.kind() == "where_predicate"
+                && let Some(left) = child.child_by_field_name("left")
+                && left.kind() == "type_identifier"
+            {
+                let name = state.node_text(left);
+                if bounds.knows(name)
+                    && let Some(clause) = child.child_by_field_name("bounds")
+                {
+                    bounds.constrain(name, Self::trait_bound_clause(state, clause));
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    fn trait_bound_clause(state: &ExtractionState<'_>, bounds: TsNode<'_>) -> BoundClause {
+        let mut clause = BoundClause {
+            paths: Vec::new(),
+            ambiguous: false,
+        };
+        let mut cursor = bounds.walk();
+        if !cursor.goto_first_child() {
+            return clause;
+        }
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                match child.kind() {
+                    "lifetime" | "use_bounds" | "removed_trait_bound" => {}
+                    _ => match Self::stated_type_path(state, child) {
+                        Some(path) => clause.paths.push(path),
+                        None => clause.ambiguous = true,
+                    },
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        clause
+    }
+
+    /// The type a `let` initialiser states in syntax: a `T { .. }` literal,
+    /// optionally behind `?`. Method names are never return-type evidence.
+    /// Abstain rather than fabricate a receiver type.
+    fn stated_initializer_type_path(
+        state: &ExtractionState<'_>,
+        value: TsNode<'_>,
+    ) -> Option<String> {
+        match value.kind() {
+            "try_expression" => value
+                .child(0)
+                .and_then(|inner| Self::stated_initializer_type_path(state, inner)),
+            "struct_expression" => value
+                .child_by_field_name("name")
+                .and_then(|name| Self::stated_type_path(state, name)),
+            _ => None,
+        }
+    }
+
+    /// Import rows are file-scoped, so a local binding makes the same bare
+    /// call name ambiguous for its whole owning function. Withhold that call
+    /// rather than claiming statement-level resolution the artifact lacks.
+    fn suppress_shadowed_calls(
+        state: &mut ExtractionState<'_>,
+        function: TsNode<'_>,
+        fn_node_id: &str,
+    ) {
+        let mut shadows = ShadowedCallNames::default();
+        Self::collect_shadowed_names(state, function, function, &mut shadows);
+        state.unresolved_refs.retain(|reference| {
+            reference.from_node_id != fn_node_id
+                || reference.reference_kind != EdgeKind::Calls
+                || !shadows.names.contains(&reference.reference_name)
+        });
+    }
+
+    /// A `use` inside a block binds its names for that whole block, nested
+    /// blocks included, and shadows a module-scope import of the same name;
+    /// a `use` in an inline `mod` body binds for every item of that module.
+    /// Import rows are file-scoped, so a call through such a `use` is
+    /// rewritten to the declared path here; the qualified resolver then binds
+    /// it exactly like a `crate::`/`super::`/extern path. A path that may
+    /// stay inside this file keeps its bare name, which binds same-file
+    /// items; the cross-file resolver never binds into the referencing file.
+    ///
+    /// A glob names every public item of a module this file cannot see, and
+    /// Rust resolves it ahead of outer-scope names. A call it could supply
+    /// is rewritten into the one project module the scope glob-imports and
+    /// marked with the glob's shape, so the seal keeps it as a disclosed gap
+    /// if that module does not define the name.
+    fn qualify_block_scoped_uses(
+        state: &mut ExtractionState<'_>,
+        function: TsNode<'_>,
+        fn_node_id: &str,
+    ) {
+        let depth = Self::ancestors(function)
+            .filter(|node| node.kind() == "mod_item")
+            .count();
+        let mut scopes = Vec::new();
+        if let Some(module_body) = Self::ancestors(function)
+            .find(|node| node.kind() == "mod_item")
+            .and_then(|module| module.child_by_field_name("body"))
+        {
+            Self::push_use_scope(
+                state,
+                function,
+                module_body,
+                depth,
+                UnmodeledImportShapeV1::InlineModuleGlob,
+                &mut scopes,
+            );
+        }
+        let mut macro_sites = Vec::new();
+        Self::collect_block_use_scopes(
+            state,
+            function,
+            function,
+            depth,
+            &mut scopes,
+            &mut macro_sites,
+        );
+        if scopes.is_empty() {
+            return;
+        }
+        for reference in &mut state.unresolved_refs {
+            if reference.from_node_id != fn_node_id || reference.reference_name.contains('.') {
+                continue;
+            }
+            let head = reference
+                .reference_name
+                .split("::")
+                .next()
+                .unwrap_or_default();
+            let site = Point {
+                row: reference.line as usize,
+                column: reference.column as usize,
+            };
+            let glob_candidate = reference.reference_kind == EdgeKind::Calls
+                && !macro_sites.contains(&site)
+                && !GLOB_EXEMPT_CALL_HEADS.contains(&head)
+                && !state.root_modules.contains_key(head);
+            // Pre-order: the module scope comes first and an inner block
+            // follows the block that contains it.
+            for scope in scopes
+                .iter()
+                .rev()
+                .filter(|scope| scope.start <= site && site < scope.end)
+            {
+                if let Some(declared) = scope.paths.get(head) {
+                    if let Some(path) = declared {
+                        reference.reference_name =
+                            format!("{path}{}", &reference.reference_name[head.len()..]);
+                    }
+                    break;
+                }
+                if glob_candidate && !scope.globs.is_empty() {
+                    if let [module] = scope.globs.as_slice() {
+                        reference.reference_name =
+                            format!("{module}::{}", reference.reference_name);
+                    }
+                    reference.unmodeled_import = Some(scope.shape);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The `self::`/`super::`/`crate::` calls, as written, that stay inside
+    /// this file. Only their bare name binds same-file items: the qualified
+    /// resolver never binds into the referencing file. Selected before
+    /// `qualify_block_scoped_uses` rewrites `use`-bound calls to file-level
+    /// paths, which must not be read again against the inline module.
+    fn in_file_relative_calls(
+        state: &ExtractionState<'_>,
+        function: TsNode<'_>,
+        fn_node_id: &str,
+    ) -> Vec<usize> {
+        let depth = Self::ancestors(function)
+            .filter(|node| node.kind() == "mod_item")
+            .count();
+        state
+            .unresolved_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, reference)| {
+                reference.from_node_id == fn_node_id
+                    && reference.reference_kind == EdgeKind::Calls
+                    && !reference.reference_name.contains('.')
+                    && matches!(
+                        reference.reference_name.split("::").next(),
+                        Some("self" | "super" | "crate")
+                    )
+                    && reference.reference_name.contains("::")
+                    && Self::file_level_use_path(&reference.reference_name, depth)
+                        .is_none_or(|path| !Self::use_path_leaves_file(state, function, &path))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn unqualify_calls(state: &mut ExtractionState<'_>, calls: Vec<usize>) {
+        for index in calls {
+            let reference = &mut state.unresolved_refs[index];
+            if let Some((_, name)) = reference.reference_name.rsplit_once("::") {
+                reference.reference_name = name.to_owned();
+            }
+        }
+    }
+
+    /// Rewrites a `use` path written `depth` inline modules below the file's
+    /// own module to the path the file's module would write, or `None` when
+    /// it names an item inside those inline modules.
+    fn file_level_use_path(path: &str, depth: usize) -> Option<String> {
+        if depth == 0 {
+            return Some(path.to_owned());
+        }
+        let segments = path.split("::").collect::<Vec<_>>();
+        let supers = segments
+            .iter()
+            .take_while(|segment| **segment == "super")
+            .count();
+        match segments.first() {
+            Some(&"self") => None,
+            Some(&"super") if supers < depth || supers == segments.len() => None,
+            Some(&"super") => {
+                let rest = segments[supers..].join("::");
+                Some(if supers == depth {
+                    format!("self::{rest}")
+                } else {
+                    format!("{}{rest}", "super::".repeat(supers - depth))
+                })
+            }
+            _ => Some(path.to_owned()),
+        }
+    }
+
+    /// Whether a file-level `use` path names an item outside this file:
+    /// `self::` (and `crate::` from a crate root) only when it continues
+    /// through a root `mod name;` file module; `super::` always does.
+    fn use_path_leaves_file(state: &ExtractionState<'_>, function: TsNode<'_>, path: &str) -> bool {
+        let crate_root = state.file_path == "lib.rs"
+            || state.file_path == "main.rs"
+            || state.file_path.ends_with("/lib.rs")
+            || state.file_path.ends_with("/main.rs");
+        let mut segments = path.split("::");
+        let file_relative = match segments.next() {
+            Some("self") => true,
+            Some("crate") => crate_root,
+            _ => false,
+        };
+        if !file_relative {
+            return true;
+        }
+        let Some(module) = segments.next() else {
+            return false;
+        };
+        let Some(root) = Self::ancestors(function).find(|node| node.kind() == "source_file") else {
+            return false;
+        };
+        let mut cursor = root.walk();
+        root.named_children(&mut cursor).any(|item| {
+            item.kind() == "mod_item"
+                && item.child_by_field_name("body").is_none()
+                && item
+                    .child_by_field_name("name")
+                    .is_some_and(|name| state.node_text(name) == module)
+        })
+    }
+
+    fn ancestors(node: TsNode<'_>) -> impl Iterator<Item = TsNode<'_>> {
+        std::iter::successors(node.parent(), TsNode::parent)
+    }
+
+    /// Records the `use` declarations directly inside `container` (a block
+    /// or an inline module body) as one scope.
+    fn push_use_scope(
+        state: &mut ExtractionState<'_>,
+        function: TsNode<'_>,
+        container: TsNode<'_>,
+        depth: usize,
+        shape: UnmodeledImportShapeV1,
+        scopes: &mut Vec<UseScope>,
+    ) {
+        let mut paths = BTreeMap::new();
+        let mut globs = Vec::new();
+        let mut cursor = container.walk();
+        for child in container.named_children(&mut cursor) {
+            if child.kind() != "use_declaration" {
+                continue;
+            }
+            let Some(argument) = child.child_by_field_name("argument") else {
+                continue;
+            };
+            let first = state.imports.len();
+            Self::extract_use_bindings(state, argument, None, false, None);
+            let bindings = state.imports.drain(first..).collect::<Vec<_>>();
+            for import in bindings {
+                if import.is_glob {
+                    let Some(module) = Self::file_level_use_path(&import.module_specifier, depth)
+                    else {
+                        continue;
+                    };
+                    let project =
+                        matches!(module.split("::").next(), Some("crate" | "self" | "super"));
+                    if project && Self::use_path_leaves_file(state, function, &module) {
+                        globs.push(module);
+                    }
+                } else if let (Some(local), Some(imported)) =
+                    (import.local_name, import.imported_name)
+                {
+                    let path = Self::file_level_use_path(
+                        &format!("{}::{imported}", import.module_specifier),
+                        depth,
+                    )
+                    .filter(|path| Self::use_path_leaves_file(state, function, path));
+                    paths.insert(local, path);
+                }
+            }
+        }
+        if !paths.is_empty() || !globs.is_empty() {
+            scopes.push(UseScope {
+                start: container.start_position(),
+                end: container.end_position(),
+                paths,
+                globs,
+                shape,
+            });
+        }
+    }
+
+    fn collect_block_use_scopes(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        depth: usize,
+        scopes: &mut Vec<UseScope>,
+        macro_sites: &mut Vec<Point>,
+    ) {
+        if node != function && node.kind() == "function_item" {
+            return;
+        }
+        match node.kind() {
+            "block" => Self::push_use_scope(
+                state,
+                function,
+                node,
+                depth,
+                UnmodeledImportShapeV1::BlockGlob,
+                scopes,
+            ),
+            "macro_invocation" => macro_sites.push(node.start_position()),
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            Self::collect_block_use_scopes(state, child, function, depth, scopes, macro_sites);
+        }
+    }
+
+    fn collect_shadowed_names(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        if matches!(
+            node.kind(),
+            "parameter" | "let_declaration" | "for_expression"
+        ) && let Some(pattern) = node.child_by_field_name("pattern")
+        {
+            Self::record_binding_pattern(state, pattern, shadows);
+        }
+        if node.kind() == "closure_expression"
+            && let Some(parameters) = node.child_by_field_name("parameters")
+        {
+            Self::record_binding_pattern(state, parameters, shadows);
+        }
+        if node != function && node.kind() == "function_item" {
+            return;
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::collect_shadowed_names(state, cursor.node(), function, shadows);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn record_binding_pattern(
+        state: &ExtractionState<'_>,
+        pattern: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        if pattern.kind() == "identifier" {
+            shadows.names.push(state.node_text(pattern).to_owned());
+            return;
+        }
+        // Only walk the parser's binding field. Destructuring property and
+        // default-value subtrees may add names, deliberately withholding an
+        // ambiguous edge rather than inventing one.
+        let mut cursor = pattern.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::record_binding_pattern(state, cursor.node(), shadows);
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -1276,28 +2794,68 @@ impl RustExtractor {
             if cur.kind() == "identifier" {
                 // Check whether the next sibling is a token_tree (call arguments).
                 if i + 1 < children.len() && children[i + 1].kind() == "token_tree" {
-                    let callee_name = state.node_text(cur);
+                    let (callee_name, position) = Self::token_tree_callee(state, &children, i);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: fn_node_id.to_string(),
-                        reference_name: callee_name.to_string(),
+                        reference_name: callee_name,
                         reference_kind: EdgeKind::Calls,
-                        line: cur.start_position().row as u32,
-                        column: cur.start_position().column as u32,
+                        line: position.row as u32,
+                        column: position.column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                        argument_count: None,
                     });
                     Self::extract_calls_in_token_tree(state, children[i + 1], fn_node_id);
                     i += 2; // skip the token_tree we just handled
                     continue;
                 }
             } else if cur.kind() == "token_tree" {
-                // Standalone token_tree (e.g. `{…}` or `(…)` block) — recurse.
+                // Standalone token_tree (e.g. `{…}` or `(…)` block). Recurse.
                 Self::extract_calls_in_token_tree(state, cur, fn_node_id);
             } else if cur.kind() == "macro_invocation" {
-                // Nested macro inside a macro — handled via extract_call_sites.
-                Self::extract_call_sites(state, cur, fn_node_id);
+                // Nested macro inside a macro. Handled via extract_call_sites.
+                // Receiver types are not tracked through macro token trees.
+                Self::extract_call_sites(state, cur, fn_node_id, &ReceiverTypes::default());
             }
             i += 1;
         }
+    }
+
+    /// Spell the call whose callee identifier is `children[name]` the way
+    /// `extract_call_sites` spells the same call outside a macro: the whole
+    /// `a::b::f` path, or `receiver.method` for a dotted call, so neither
+    /// binds as a bare same-named function.
+    fn token_tree_callee(
+        state: &ExtractionState<'_>,
+        children: &[TsNode<'_>],
+        name: usize,
+    ) -> (String, Point) {
+        let mut start = name;
+        while start >= 2
+            && children[start - 1].kind() == "::"
+            && matches!(
+                children[start - 2].kind(),
+                "identifier" | "self" | "super" | "crate"
+            )
+        {
+            start -= 2;
+        }
+        if start < name {
+            let path = children[start..=name]
+                .iter()
+                .step_by(2)
+                .map(|segment| state.node_text(*segment))
+                .collect::<Vec<_>>()
+                .join("::");
+            return (path, children[start].start_position());
+        }
+        let callee = children[name];
+        if name >= 2 && children[name - 1].kind() == "." {
+            let receiver = state.node_text(children[name - 2]);
+            let method = state.node_text(callee);
+            return (format!("{receiver}.{method}"), callee.start_position());
+        }
+        (state.node_text(callee).to_owned(), callee.start_position())
     }
 
     /// Extract derive macros from attribute items preceding a struct/enum.
@@ -1343,6 +2901,8 @@ impl RustExtractor {
                             line,
                             column: attr_node.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                 }
@@ -1375,7 +2935,7 @@ impl RustExtractor {
     /// Walks a type expression and emits an `UnresolvedRef` of the given kind
     /// for every named type identifier it contains. For a type like
     /// `Result<Vec<T>, MyError>` this yields refs for `Result`, `Vec`, `T`,
-    /// and `MyError` — letting the resolver wire them up to declared nodes.
+    /// and `MyError`, letting the resolver wire them up to declared nodes.
     fn emit_type_refs(
         state: &mut ExtractionState<'_>,
         type_node: TsNode<'_>,
@@ -1393,6 +2953,26 @@ impl RustExtractor {
         kind: EdgeKind,
     ) {
         let n = cursor.node();
+        // A scoped type carries its own namespace (`fmt::Result`). Emitting it
+        // whole, and not descending into its `path`/`name` children, is what
+        // keeps resolution honest: the bare `Result` child would bind a
+        // same-named local type through the simple-name index, inventing an
+        // edge to a type the source never named. Resolution narrows a
+        // qualified name to its simple form itself when it looks cross-file,
+        // so nothing is lost by naming the reference exactly.
+        if n.kind() == "scoped_type_identifier" {
+            state.unresolved_refs.push(UnresolvedRef {
+                from_node_id: from_id.to_string(),
+                reference_name: state.node_text(n).to_string(),
+                reference_kind: kind,
+                line: n.start_position().row as u32,
+                column: n.start_position().column as u32,
+                file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
+            });
+            return;
+        }
         if n.kind() == "type_identifier" || n.kind() == "primitive_type" {
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: from_id.to_string(),
@@ -1401,6 +2981,8 @@ impl RustExtractor {
                 line: n.start_position().row as u32,
                 column: n.start_position().column as u32,
                 file_path: state.file_path.clone(),
+                unmodeled_import: None,
+                argument_count: None,
             });
         }
         if cursor.goto_first_child() {
@@ -1426,7 +3008,7 @@ impl RustExtractor {
         while let Some(sibling) = current {
             if sibling.kind() == "attribute_item" {
                 let text = state.node_text(sibling);
-                // Skip derive attributes — they are handled by extract_derive_macros.
+                // Skip derive attributes. They are handled by extract_derive_macros.
                 if !text.contains("derive") {
                     Self::extract_annotations_from_node(state, sibling, target_id);
                 }
@@ -1451,11 +3033,12 @@ impl RustExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::@{}", state.qualified_prefix(), annot_name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::AnnotationUsage,
             &annot_name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -1480,6 +3063,7 @@ impl RustExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1492,6 +3076,8 @@ impl RustExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
+            argument_count: None,
         });
 
         state.edges.push(Edge {
@@ -1517,14 +3103,21 @@ impl RustExtractor {
         inner.split('(').next().unwrap_or(inner).trim().to_string()
     }
 
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState<'_>, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
+    /// Build the graph and parser-backed import evidence accumulated in one traversal.
+    fn build_artifact(state: ExtractionState<'_>, start: Instant) -> ExtractionArtifactV1 {
+        ExtractionArtifactV1 {
+            result: ExtractionResult {
+                nodes: state.nodes,
+                edges: state.edges,
+                unresolved_refs: state.unresolved_refs,
+                errors: state.errors,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            imports: state.imports,
+            clone_bodies: Vec::new(),
+            schema_evidence: None,
+            callable_arities: state.callable_arities,
+            go_method_sets: Vec::new(),
         }
     }
 }
@@ -1538,17 +3131,14 @@ impl crate::LanguageExtractor for RustExtractor {
         "Rust"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        RustExtractor::extract(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        RustExtractor::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        RustExtractor::extract_tree_artifact(file_path, source, tree, scope)
     }
 }

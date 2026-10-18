@@ -1,0 +1,618 @@
+use tracedecay_code_extraction::LanguageExtractor;
+use tracedecay_code_extraction::PythonExtractor;
+use tracedecay_domain::*;
+
+// Inlined rather than `mod`: `include!` splices the shared docstring helpers
+// into this module's own namespace, so the tests below call them unqualified
+// without each extractor module re-declaring the support module.
+include!("support/docstrings.rs");
+
+include!("support/edges.rs");
+include!("support/calls.rs");
+
+#[test]
+fn test_py_function_declaration() {
+    let source = r#"
+def add(a, b):
+    return a + b
+
+def helper():
+    pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("math.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    assert_eq!(fns.len(), 2);
+    let add_fn = fns.iter().find(|f| f.name == "add").unwrap();
+    assert_eq!(add_fn.visibility, Visibility::Pub);
+    assert!(add_fn.signature.as_ref().unwrap().contains("add"));
+    assert!(add_fn.signature.as_ref().unwrap().contains("a, b"));
+    let helper_fn = fns.iter().find(|f| f.name == "helper").unwrap();
+    assert_eq!(helper_fn.visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_py_async_function() {
+    let source = r#"
+async def fetch_data(url):
+    pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("async_mod.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    assert_eq!(fns.len(), 1);
+    assert_eq!(fns[0].name, "fetch_data");
+    assert!(
+        fns[0].is_async,
+        "async function should have is_async = true"
+    );
+}
+
+#[test]
+fn test_py_class_extraction() {
+    let source = r#"
+class MyClass:
+    pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("classes.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let classes: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class)
+        .collect();
+    assert_eq!(classes.len(), 1);
+    assert_eq!(classes[0].name, "MyClass");
+    assert_eq!(classes[0].visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_py_method_extraction() {
+    let source = r#"
+class Dog:
+    def bark(self):
+        print("Woof!")
+
+    def fetch(self, item):
+        return item
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("dog.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 2);
+    let bark = methods.iter().find(|m| m.name == "bark").unwrap();
+    assert_eq!(bark.visibility, Visibility::Pub);
+    let fetch = methods.iter().find(|m| m.name == "fetch").unwrap();
+    assert_eq!(fetch.visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_py_decorator_extraction() {
+    let source = r#"
+@staticmethod
+def my_func():
+    pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("decorators.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let decorators: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Decorator)
+        .collect();
+    assert_eq!(decorators.len(), 1);
+    assert_eq!(decorators[0].name, "staticmethod");
+    // Check Annotates edge from decorator to the function
+    let annotates: Vec<_> = result
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Annotates)
+        .collect();
+    assert_eq!(annotates.len(), 1);
+}
+
+#[test]
+fn test_py_decorator_with_args() {
+    let source = r#"
+class MyClass:
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        self._name = value
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("props.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let decorators: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Decorator)
+        .collect();
+    assert_eq!(
+        decorators
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect::<Vec<_>>(),
+        ["property", "name.setter"]
+    );
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [("property", "name"), ("name.setter", "name")]
+    );
+}
+
+#[test]
+fn test_py_import_statement() {
+    let source = r#"
+import os
+import sys
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("imports.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let uses: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Use)
+        .collect();
+    assert_eq!(uses.len(), 2);
+    assert!(uses.iter().any(|u| u.name == "os"));
+    assert!(uses.iter().any(|u| u.name == "sys"));
+}
+
+#[test]
+fn test_py_from_import_statement() {
+    let source = r#"
+from os.path import join, exists
+from collections import defaultdict
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("imports.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let uses: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Use)
+        .collect();
+    // from os.path import join, exists → 2 Use nodes
+    // from collections import defaultdict → 1 Use node
+    assert_eq!(
+        uses.len(),
+        3,
+        "uses: {:?}",
+        uses.iter().map(|u| &u.name).collect::<Vec<_>>()
+    );
+}
+
+/// Every docstring shape Python must lift onto the node it documents, across
+/// both the node kinds that carry docstrings. The table is a fixed-size array,
+/// so it can never iterate empty.
+#[test]
+fn test_py_docstring_shapes() {
+    let cases: [(&str, &str, &str, NodeKind, &[&str]); 3] = [
+        (
+            "function triple double quotes",
+            "greet.py",
+            r#"
+def greet(name):
+    """Greet someone by name."""
+    print(f"Hello, {name}!")
+"#,
+            NodeKind::Function,
+            &["Greet someone by name"],
+        ),
+        (
+            "class triple double quotes",
+            "calc.py",
+            r#"
+class Calculator:
+    """A simple calculator class."""
+
+    def add(self, a, b):
+        return a + b
+"#,
+            NodeKind::Class,
+            &["simple calculator"],
+        ),
+        (
+            "function triple single quotes",
+            "proc.py",
+            r#"
+def process():
+    '''Process data using triple single quotes.'''
+    pass
+"#,
+            NodeKind::Function,
+            &["Process data"],
+        ),
+    ];
+
+    for (shape, path, source, kind, expected) in cases {
+        let extractor = PythonExtractor;
+        let result = extractor.extract_artifact(path, source).result;
+        assert_node_docstring(shape, &result, kind, None, expected);
+    }
+}
+
+#[test]
+fn test_py_visibility_private_underscore() {
+    let source = r#"
+def _private_func():
+    pass
+
+def public_func():
+    pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("vis.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let fns: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .collect();
+    let private_fn = fns.iter().find(|f| f.name == "_private_func").unwrap();
+    assert_eq!(private_fn.visibility, Visibility::Private);
+    let public_fn = fns.iter().find(|f| f.name == "public_func").unwrap();
+    assert_eq!(public_fn.visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_py_visibility_dunder() {
+    let source = r#"
+class MyClass:
+    def __init__(self):
+        pass
+
+    def __mangled(self):
+        pass
+
+    def normal(self):
+        pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("vis2.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .collect();
+    let init = methods.iter().find(|m| m.name == "__init__").unwrap();
+    assert_eq!(
+        init.visibility,
+        Visibility::Pub,
+        "__init__ should be Pub (dunder)"
+    );
+    let mangled = methods.iter().find(|m| m.name == "__mangled").unwrap();
+    assert_eq!(
+        mangled.visibility,
+        Visibility::Private,
+        "__mangled should be Private (name mangling)"
+    );
+    let normal = methods.iter().find(|m| m.name == "normal").unwrap();
+    assert_eq!(normal.visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_py_module_level_constants() {
+    let source = r#"
+MAX_SIZE = 1024
+MIN_VALUE = 0
+some_var = "hello"
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("consts.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let consts: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .collect();
+    assert_eq!(
+        consts.len(),
+        2,
+        "should detect UPPER_CASE assignments as consts: {:?}",
+        consts.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+    assert!(consts.iter().any(|c| c.name == "MAX_SIZE"));
+    assert!(consts.iter().any(|c| c.name == "MIN_VALUE"));
+}
+
+#[test]
+fn test_py_call_site_tracking() {
+    let source = r#"
+def main():
+    print("hello")
+    some_func(42)
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("main.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let call_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .collect();
+    assert_eq!(
+        call_refs
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["print", "some_func"]
+    );
+}
+
+#[test]
+fn test_py_nested_class() {
+    let source = r#"
+class Outer:
+    class Inner:
+        def method(self):
+            pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("nested.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let classes: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class)
+        .collect();
+    assert_eq!(classes.len(), 2);
+    assert!(classes.iter().any(|c| c.name == "Outer"));
+    assert!(classes.iter().any(|c| c.name == "Inner"));
+}
+
+#[test]
+fn test_py_contains_edges() {
+    let source = r#"
+class Dog:
+    def bark(self):
+        pass
+
+def standalone():
+    pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("edges.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("edges.py", "Dog"),
+            ("Dog", "bark"),
+            ("edges.py", "standalone")
+        ]
+    );
+}
+
+#[test]
+fn test_py_class_inheritance() {
+    let source = r#"
+class Animal:
+    pass
+
+class Dog(Animal):
+    pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("inherit.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let has_extends = result.edges.iter().any(|e| e.kind == EdgeKind::Extends)
+        || result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Extends);
+    assert!(has_extends, "should detect class inheritance as Extends");
+    // Check the reference name
+    let extends_ref = result
+        .unresolved_refs
+        .iter()
+        .find(|r| r.reference_kind == EdgeKind::Extends);
+    if let Some(r) = extends_ref {
+        assert_eq!(r.reference_name, "Animal");
+    }
+}
+
+#[test]
+fn test_py_class_multiple_inheritance() {
+    let source = r#"
+class Mixin:
+    pass
+
+class Base:
+    pass
+
+class Child(Base, Mixin):
+    pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("multi.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let extends_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Extends)
+        .collect();
+    assert_eq!(
+        extends_refs
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["Base", "Mixin"]
+    );
+}
+
+#[test]
+fn test_py_qualified_names() {
+    let source = r#"
+class MyClass:
+    def method(self):
+        pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("pkg/module.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 1);
+    assert!(
+        methods[0].qualified_name.contains("module.py"),
+        "qualified_name should contain file path: {}",
+        methods[0].qualified_name
+    );
+    assert!(
+        methods[0].qualified_name.contains("MyClass"),
+        "qualified_name should contain class name: {}",
+        methods[0].qualified_name
+    );
+    assert!(
+        methods[0].qualified_name.contains("method"),
+        "qualified_name should contain method name: {}",
+        methods[0].qualified_name
+    );
+}
+
+#[test]
+fn test_py_async_method() {
+    let source = r#"
+class Server:
+    async def handle_request(self, request):
+        pass
+"#;
+    let extractor = PythonExtractor;
+    let result = extractor.extract_artifact("server.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 1);
+    assert!(
+        methods[0].is_async,
+        "async method should have is_async = true"
+    );
+}
+
+#[test]
+fn test_py_calls_inside_nested_defs_and_lambdas_belong_to_the_enclosing_function() {
+    let source = r#"
+def traced(fn):
+    def wrapper(*args):
+        record(fn)
+        return fn(*args)
+    return sorted([wrapper], key=lambda item: rank(item))
+"#;
+    let result = PythonExtractor.extract_artifact("traced.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let traced = result
+        .nodes
+        .iter()
+        .find(|n| n.name == "traced")
+        .expect("traced");
+    let calls: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls && r.from_node_id == traced.id)
+        .map(|r| r.reference_name.as_str())
+        .collect();
+    assert_eq!(calls, ["record", "fn", "sorted", "rank"]);
+}
+
+#[test]
+fn test_py_module_class_and_decorator_calls_have_owners() {
+    let source = r#"import logging
+
+logger = logging.getLogger(__name__)
+MAX_ROWS = compute_limit()
+
+@app.route("/")
+def index():
+    return render()
+
+class Config(Base, metaclass=registry()):
+    rows = field(default_factory=list)
+
+    @cached(ttl=5)
+    def load(self, timeout=default_timeout()):
+        return read(timeout)
+
+if __name__ == "__main__":
+    main()
+"#;
+    let result = PythonExtractor.extract_artifact("app.py", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    assert_eq!(
+        calls_by_owner(&result),
+        [
+            ("init_block", "<module>", 2, vec!["logging.getLogger"]),
+            ("const", "MAX_ROWS", 3, vec!["compute_limit"]),
+            ("function", "index", 6, vec!["app.route", "render"]),
+            ("class", "Config", 9, vec!["registry", "field"]),
+            (
+                "method",
+                "load",
+                13,
+                vec!["cached", "default_timeout", "read"]
+            ),
+            ("init_block", "<module>", 16, vec!["main"]),
+        ]
+    );
+}
+
+#[test]
+fn imported_calls_respect_callable_bindings_and_default_scope() {
+    let source = "from dep import callback\nimport dep as ns\ndef direct():\n    return callback()\ndef param(callback):\n    return callback()\ndef local():\n    callback = lambda: 1\n    return callback()\ndef namespace(ns):\n    return ns.callback()\ndef defaults(callback=callback()):\n    return callback()\ndef decorated():\n    @wrap\n    def callback():\n        pass\n    return callback()\n";
+    let result = PythonExtractor
+        .extract_artifact("bindings.py", source)
+        .result;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    for (name, expected) in [
+        ("direct", 1),
+        ("param", 0),
+        ("local", 0),
+        ("namespace", 0),
+        ("defaults", 1),
+        ("decorated", 0),
+    ] {
+        let owner = result
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .expect("function");
+        let calls = result
+            .unresolved_refs
+            .iter()
+            .filter(|reference| {
+                reference.from_node_id == owner.id && reference.reference_kind == EdgeKind::Calls
+            })
+            .count();
+        assert_eq!(calls, expected, "{name}");
+    }
+}

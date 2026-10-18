@@ -14,7 +14,7 @@
  *   coverage         carries observed/completed/censored/excluded/unknown as
  *                    separate counts. Censored and excluded are not "missing";
  *                    collapsing them would turn a bounded read into a total.
- *   evidence_class   is an axis of its own — a measurement, an association, and
+ *   evidence_class   is an axis of its own, a measurement, an association, and
  *                    a calibrated prediction are different KINDS of claim, not
  *                    different confidence levels of one claim.
  *   calibration      is the only thing that licenses the word "calibrated".
@@ -36,13 +36,13 @@ import { assertNever } from '../contracts/generated.ts';
 import type { EvidenceQuality } from './EvidencePattern.tsx';
 
 /** One measurement, reduced to the strings a plate renders. */
-export interface MetricPresentation {
+interface MetricPresentation {
   /** Underscored wire identifier turned into words. The identifier itself
    * stays available to callers as `metric.metric`. */
   label: string;
   /** Formatted figure, or an em dash when the server reported no value. */
   figure: string;
-  /** Display unit — `null` whenever there is no figure, because a bare unit
+  /** Display unit, `null` whenever there is no figure, because a bare unit
    * beside an em dash reads as a measurement that was taken and lost. */
   unit: string | null;
   /** The unconverted server figure, when the display figure is a conversion of
@@ -56,7 +56,7 @@ export interface MetricPresentation {
   evidenceClass: MetricEvidenceClassV1;
   evidenceQuality: EvidenceQuality;
   provenance: string;
-  /** Only present for a real interval — see the module note on degenerate
+  /** Only present for a real interval, see the module note on degenerate
    * bounds. */
   interval: string | null;
   /** Only present when the wire carries a baseline to compare against. */
@@ -147,8 +147,8 @@ export function denominatorSentence(metric: MetricValueV1): string {
  *
  * `observed` and `completed` always print, because a read where those two
  * disagree is the whole reason coverage exists. The remaining three print only
- * when nonzero — a run with nothing censored should not carry three zeroes that
- * make the eye work — and `eligible` prints its unknown state in words rather
+ * when nonzero, a run with nothing censored should not carry three zeroes that
+ * make the eye work, and `eligible` prints its unknown state in words rather
  * than as a missing figure.
  */
 export function coverageSentence(coverage: MetricCoverageV1): string {
@@ -205,7 +205,7 @@ function calibrationSentence(metric: MetricValueV1): string | null {
 
 /** Maps the wire's evidence class onto the shared pattern axis. Severity is a
  * separate axis and never borrows this one. */
-export function evidenceQuality(evidenceClass: MetricEvidenceClassV1): EvidenceQuality {
+function evidenceQuality(evidenceClass: MetricEvidenceClassV1): EvidenceQuality {
   switch (evidenceClass) {
     case 'measurement':
       return 'measured';

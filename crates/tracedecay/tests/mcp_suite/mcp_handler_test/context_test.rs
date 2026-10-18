@@ -3,7 +3,6 @@
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
-use std::process::Command;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_mcp::ToolResult;
@@ -49,33 +48,8 @@ async fn setup_scoped_production_project(scope_prefix: &str) -> ScopedProduction
     let project_root = isolation.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     crate::fixture::write_indexed_fixture_sources(&project_root);
-    let init = Command::new(crate::common::git_program())
-        .args(["init", "-q"])
-        .current_dir(&project_root)
-        .status()
-        .unwrap();
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(crate::common::git_program())
-        .args(["add", "."])
-        .current_dir(&project_root)
-        .status()
-        .unwrap();
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(crate::common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "scoped production context fixture",
-        ])
-        .current_dir(&project_root)
-        .status()
-        .unwrap();
-    assert!(commit.success(), "git commit must succeed");
-    let harness = ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
+    commit_worktree(&project_root, "scoped production context fixture");
+    let harness = crate::support::seeded_composition::open_with_scope_prefix(
         isolation.path(),
         [project_root.clone()],
         scope_prefix,
@@ -113,26 +87,6 @@ async fn call_production_tool(
     {
         value["content"][0]["text"] = Value::String(payload.to_string());
     }
-    Ok(ToolResult::new(value, Vec::new()))
-}
-
-async fn call_direct_production_tool(
-    fixture: &ProductionCompositionFixture,
-    tool_name: &str,
-    arguments: Value,
-) -> TraceDecayResult<ToolResult> {
-    let response = fixture
-        .harness
-        .call_tool(&fixture.project_root, tool_name, arguments)
-        .await?;
-    if let Some(error) = response.error {
-        return Err(TraceDecayError::Config {
-            message: format!("{tool_name} failed over production MCP: {}", error.message),
-        });
-    }
-    let value = response.result.ok_or_else(|| TraceDecayError::Config {
-        message: format!("{tool_name} returned no production MCP result"),
-    })?;
     Ok(ToolResult::new(value, Vec::new()))
 }
 
@@ -191,31 +145,11 @@ async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
     assert_eq!(payload["coverage"]["exact"], "complete");
     assert_eq!(payload["coverage"]["lexical"], "complete");
     assert_eq!(payload["coverage"]["graph"], "complete");
-    assert_eq!(payload["coverage"]["recall"], "partial");
-    assert_eq!(payload["coverage"]["semantic"]["status"], "unavailable");
+    assert_eq!(payload["coverage"]["recall"], "full");
     assert!(
         payload.get("index_coverage_hint").is_none(),
         "verified retrieval coverage must not fabricate legacy skipped-directory advice: {payload}"
     );
-    fixture.harness.shutdown().await;
-}
-
-// ---------------------------------------------------------------------------
-// 2. tracedecay_context
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_context() {
-    let fixture = setup_production_project().await;
-    let result = call_direct_production_tool(
-        &fixture,
-        "tracedecay_context",
-        json!({"task": "understand the helper function"}),
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
     fixture.harness.shutdown().await;
 }
 

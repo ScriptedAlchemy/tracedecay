@@ -25,7 +25,7 @@ import type { WorkProductView, WorkTaskView } from './workProductView.ts';
  * has none, and the stage each group here names is read directly off
  * `accepted_proposal`, `task_accepted`, `execution_admitted` and terminal
  * attempts in the exact Work graph. Every column below is likewise a field the
- * daemon sent — there is no derived progress, no elapsed time, no health.
+ * daemon sent, there is no derived progress, no elapsed time, no health.
  *
  * Empty groups are drawn, with a count of zero. A stage with no tasks in it is
  * a fact the snapshot supports; hiding it would leave a reader unable to tell an
@@ -34,7 +34,7 @@ import type { WorkProductView, WorkTaskView } from './workProductView.ts';
 
 /** The query parameter that selects a task, so a board position survives a
  * reload and can be linked to. */
-export const TASK_PARAM = 'task';
+const TASK_PARAM = 'task';
 
 export function useSelectedTask(): [string | null, (taskId: string | null) => void] {
   const [params, setParams] = useSearchParams();
@@ -212,7 +212,7 @@ function StageGroup({
             exact Work graph.
           </caption>
           <thead>
-            <tr className="border-b border-edge text-text-muted">
+            <tr className="border-b border-edge-subtle text-text-muted">
               <th scope="col" className="px-2 py-1 text-left font-medium">
                 Task
               </th>

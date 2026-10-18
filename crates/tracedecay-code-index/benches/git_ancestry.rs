@@ -1,7 +1,8 @@
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use tracedecay_code_index::git_projection::{
     GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitTopologyProjectionStore, GitTopologyProjectionV1,
     GitTopologyRefV1, build_git_topology_manifest_checked, git_topology_namespace,

@@ -3,19 +3,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
-#[cfg(test)]
-use std::time::Instant as StdInstant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
-use tokio::time::Instant;
+use tracedecay_runtime_core::native_runtime::NativeTask;
 
 use super::DirtySet;
 use super::health::ProjectHealth;
 use crate::ports::{
     GitWatchMaintenanceWakeV1 as MaintenanceCoordinator, GitWatchSyncConfigV1 as SyncConfig,
 };
-use tracedecay_session_memory::context::CancellationToken;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 pub enum WorktreeRegistration {
     Ready,
@@ -83,7 +81,7 @@ impl OperationScanProbe {
         }
         self.active.fetch_add(1, Ordering::AcqRel);
         self.entered.notify_one();
-        let started = StdInstant::now();
+        let started = Instant::now();
         let mut guard = self
             .wait_lock
             .lock()
@@ -133,28 +131,102 @@ impl RetirementRaceProbe {
 /// OS watchers without collapsing their freshness requests.
 pub struct WatchState {
     pub common_dir: PathBuf,
-    ownership: super::ProfiledStdMutex<WatchStateOwnership>,
-    pub dirty: super::ProfiledTokioMutex<DirtySet>,
+    ownership: std::sync::Mutex<WatchStateOwnership>,
+    pub dirty: tokio::sync::Mutex<DirtySet>,
     pub reconciliation_pending: AtomicBool,
     pub wake: Notify,
     pub reconfigure: Notify,
-    retry_not_before: super::ProfiledStdMutex<Option<Instant>>,
+    retry_not_before: std::sync::Mutex<Option<Instant>>,
     retry_backoff_ms: AtomicU64,
     pub maintenance: MaintenanceCoordinator,
     pub health: ProjectHealth,
-    task: super::ProfiledStdMutex<Option<tokio::task::JoinHandle<()>>>,
+    task: std::sync::Mutex<Option<NativeTask<()>>>,
     retirement: CancellationToken,
     #[cfg(test)]
+    retained_tasks: AtomicU64,
+    #[cfg(test)]
     pub entered_debounce: Notify,
+    #[cfg(test)]
+    pub heartbeat: Notify,
     #[cfg(test)]
     pub drained_plans: AtomicU64,
     #[cfg(test)]
     pub plan_drained: Notify,
     #[cfg(test)]
+    pub operation_held: Notify,
+    #[cfg(test)]
     pub operation_scan_probe: OperationScanProbe,
     #[cfg(test)]
     pub retirement_probe: RetirementRaceProbe,
 }
+
+// Futures that capture a watcher prove this state through the maintenance
+// coordinator. That walk exceeds the recursion limit (rust-lang/rust#159228);
+// each field is checked on its own.
+unsafe impl Send for WatchState {}
+unsafe impl Sync for WatchState {}
+
+const _: fn(&WatchState) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let WatchState {
+        common_dir,
+        ownership,
+        dirty,
+        reconciliation_pending,
+        wake,
+        reconfigure,
+        retry_not_before,
+        retry_backoff_ms,
+        maintenance,
+        health,
+        task,
+        retirement,
+        #[cfg(test)]
+        retained_tasks,
+        #[cfg(test)]
+        entered_debounce,
+        #[cfg(test)]
+        heartbeat,
+        #[cfg(test)]
+        drained_plans,
+        #[cfg(test)]
+        plan_drained,
+        #[cfg(test)]
+        operation_held,
+        #[cfg(test)]
+        operation_scan_probe,
+        #[cfg(test)]
+        retirement_probe,
+    } = value;
+    assert_send_sync(common_dir);
+    assert_send_sync(ownership);
+    assert_send_sync(dirty);
+    assert_send_sync(reconciliation_pending);
+    assert_send_sync(wake);
+    assert_send_sync(reconfigure);
+    assert_send_sync(retry_not_before);
+    assert_send_sync(retry_backoff_ms);
+    assert_send_sync(maintenance);
+    assert_send_sync(health);
+    assert_send_sync(task);
+    assert_send_sync(retirement);
+    #[cfg(test)]
+    assert_send_sync(retained_tasks);
+    #[cfg(test)]
+    assert_send_sync(entered_debounce);
+    #[cfg(test)]
+    assert_send_sync(heartbeat);
+    #[cfg(test)]
+    assert_send_sync(drained_plans);
+    #[cfg(test)]
+    assert_send_sync(plan_drained);
+    #[cfg(test)]
+    assert_send_sync(operation_held);
+    #[cfg(test)]
+    assert_send_sync(operation_scan_probe);
+    #[cfg(test)]
+    assert_send_sync(retirement_probe);
+};
 
 impl WatchState {
     #[cfg(test)]
@@ -182,38 +254,35 @@ impl WatchState {
     ) -> Self {
         Self {
             common_dir,
-            ownership: hotpath::mutex!(
-                std::sync::Mutex::new(WatchStateOwnership {
-                    worktrees: BTreeMap::from([(
-                        project_root,
-                        WorktreeWatchRegistration { git_dir, config },
-                    )]),
-                    retired: false,
-                }),
-                label = "daemon.git.watch.ownership"
-            ),
-            dirty: hotpath::mutex!(
-                tokio::sync::Mutex::new(DirtySet::default()),
-                label = "daemon.git.watch.dirty"
-            ),
+            ownership: std::sync::Mutex::new(WatchStateOwnership {
+                worktrees: BTreeMap::from([(
+                    project_root,
+                    WorktreeWatchRegistration { git_dir, config },
+                )]),
+                retired: false,
+            }),
+            dirty: tokio::sync::Mutex::new(DirtySet::default()),
             reconciliation_pending: AtomicBool::new(false),
             wake: Notify::new(),
             reconfigure: Notify::new(),
-            retry_not_before: hotpath::mutex!(
-                std::sync::Mutex::new(None),
-                label = "daemon.git.watch.retry"
-            ),
+            retry_not_before: std::sync::Mutex::new(None),
             retry_backoff_ms: AtomicU64::new(250),
             maintenance,
             health: ProjectHealth::default(),
-            task: hotpath::mutex!(std::sync::Mutex::new(None), label = "daemon.git.watch.task"),
+            task: std::sync::Mutex::new(None),
             retirement: CancellationToken::new(),
             #[cfg(test)]
+            retained_tasks: AtomicU64::new(0),
+            #[cfg(test)]
             entered_debounce: Notify::new(),
+            #[cfg(test)]
+            heartbeat: Notify::new(),
             #[cfg(test)]
             drained_plans: AtomicU64::new(0),
             #[cfg(test)]
             plan_drained: Notify::new(),
+            #[cfg(test)]
+            operation_held: Notify::new(),
             #[cfg(test)]
             operation_scan_probe: OperationScanProbe::default(),
             #[cfg(test)]
@@ -347,33 +416,40 @@ impl WatchState {
         self.signal_retirement();
     }
 
+    pub fn is_retired(&self) -> bool {
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retired
+    }
+
     fn signal_retirement(&self) {
         self.retirement.cancel();
         self.wake.notify_waiters();
         self.reconfigure.notify_waiters();
     }
 
-    pub fn retain_task(&self, handle: tokio::task::JoinHandle<()>) {
+    pub fn retain_task(&self, task: NativeTask<()>) {
+        #[cfg(test)]
+        self.retained_tasks.fetch_add(1, Ordering::AcqRel);
         *self
             .task
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
     }
 
-    pub fn take_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn take_task(&self) -> Option<NativeTask<()>> {
         self.task
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
 
+    /// Which retention the held task came from, counted per owner.
     #[cfg(test)]
-    pub fn retained_task_id(&self) -> Option<tokio::task::Id> {
-        self.task
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(tokio::task::JoinHandle::id)
+    pub fn retained_task_id(&self) -> Option<u64> {
+        self.has_retained_task()
+            .then(|| self.retained_tasks.load(Ordering::Acquire))
     }
 
     #[cfg(test)]

@@ -38,12 +38,16 @@ async fn string_column(conn: &Connection, sql: &str) -> Vec<String> {
     values
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn fresh_store_carries_only_the_final_memory_shape() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
     assert_eq!(
-        scalar(&conn, "PRAGMA user_version").await,
+        scalar(
+            &conn,
+            "SELECT version FROM tracedecay_schema_version WHERE component = 'graph'",
+        )
+        .await,
         i64::from(super::super::migrations::SCHEMA_VERSION)
     );
     assert_eq!(
@@ -56,6 +60,7 @@ async fn fresh_store_carries_only_the_final_memory_shape() {
         .await,
         [
             "memory_v2_assertion_evidence",
+            "memory_v2_assertion_payload_digests",
             "memory_v2_assertion_payload_purges",
             "memory_v2_assertion_payloads",
             "memory_v2_assertion_payloads_fts",
@@ -103,7 +108,7 @@ async fn fresh_store_carries_only_the_final_memory_shape() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn feedback_history_permits_only_detail_redaction() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
@@ -144,14 +149,24 @@ async fn feedback_history_permits_only_detail_redaction() {
              WHERE fact_id = 'history.fact'",
             (),
         )
-        .await;
-    assert!(tampered.is_err());
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        tampered.contains("memory_v2 feedback history permits only detail redaction"),
+        "{tampered}"
+    );
     // Deleting recorded history aborts.
     let deleted = conn
         .execute(
             "DELETE FROM memory_v2_feedback_history WHERE fact_id = 'history.fact'",
             (),
         )
-        .await;
-    assert!(deleted.is_err());
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        deleted.contains("memory_v2 feedback history records are immutable"),
+        "{deleted}"
+    );
 }

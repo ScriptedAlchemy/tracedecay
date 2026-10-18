@@ -136,6 +136,10 @@ impl WorkExecutionLimits {
     pub const fn max_protocol_bytes(self) -> u64 {
         self.max_protocol_bytes
     }
+
+    pub const fn max_concurrency(self) -> u32 {
+        self.max_concurrency
+    }
 }
 
 impl<'de> Deserialize<'de> for WorkExecutionLimits {
@@ -326,6 +330,18 @@ impl WorkExecutionSnapshot {
 
     pub fn executable(&self) -> &WorkExecutableReference {
         &self.executable
+    }
+
+    pub const fn approval(&self) -> WorkApprovalPolicy {
+        self.approval
+    }
+
+    pub const fn filesystem(&self) -> WorkFilesystemPolicy {
+        self.filesystem
+    }
+
+    pub const fn egress(&self) -> WorkEgressPolicy {
+        self.egress
     }
 
     pub fn environment_allowlist(&self) -> &BTreeSet<String> {

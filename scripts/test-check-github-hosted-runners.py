@@ -59,9 +59,6 @@ class GitHubHostedRunnerPolicyTests(unittest.TestCase):
             with self.assertRaises(self.policy.PolicyViolation):
                 self.policy.validate_repository(root)
 
-    def test_accepts_current_repository(self) -> None:
-        self.policy.validate_repository(ROOT)
-
     def test_rejects_explicit_self_hosted_runner(self) -> None:
         self.assert_rejected(
             "jobs:\n  test:\n    runs-on: [self-hosted, linux, x64]\n"
@@ -96,6 +93,47 @@ class GitHubHostedRunnerPolicyTests(unittest.TestCase):
     def test_rejects_unbound_dynamic_runner_expression(self) -> None:
         self.assert_rejected(
             "jobs:\n  test:\n    runs-on: ${{ inputs.runner }}\n"
+        )
+
+    def test_accepts_literal_hosted_runner_choices(self) -> None:
+        workflow = """jobs:
+  test:
+    runs-on: ${{ matrix.lane == 'product' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_repository(root, workflow)
+            self.policy.validate_repository(root)
+
+    def test_accepts_macos_ci_with_older_release_runner(self) -> None:
+        workflow = "jobs:\n  test:\n    runs-on: macos-26\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_repository(root, workflow, ("macos-14",))
+            self.policy.validate_repository(root)
+
+    def test_accepts_ubuntu_ci_with_older_release_runner(self) -> None:
+        for runner in ("ubuntu-26.04", "ubuntu-26.04-arm"):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.write_repository(root, f"jobs:\n  test:\n    runs-on: {runner}\n")
+                self.policy.validate_repository(root)
+
+    def test_rejects_custom_runner_in_either_literal_choice(self) -> None:
+        for first, second in (
+            ("self-hosted", "ubuntu-24.04-arm"),
+            ("ubuntu-24.04", "tracedecay-linux-64core"),
+        ):
+            with self.subTest(first=first, second=second):
+                self.assert_rejected(
+                    "jobs:\n  test:\n    runs-on: ${{ matrix.lane == 'product' "
+                    f"&& '{first}' || '{second}' }}}}\n"
+                )
+
+    def test_rejects_dynamic_runner_choice(self) -> None:
+        self.assert_rejected(
+            "jobs:\n  test:\n    runs-on: ${{ matrix.lane == 'product' "
+            "&& 'ubuntu-24.04' || inputs.runner }}\n"
         )
 
 

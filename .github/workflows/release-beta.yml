@@ -1,12 +1,14 @@
 name: Release (Beta)
 
+# Dispatched on `master` by release-please after it creates the immutable
+# tag. GitHub Actions caches are scoped by the workflow run ref: a run on a
+# unique tag cannot restore the previous tag's cache, while master can reuse
+# the same target/profile dependency cache across releases.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing prerelease tag to recover
+        description: Prerelease tag to build or recover
         required: true
         type: string
 
@@ -15,19 +17,19 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
 
 concurrency:
-  group: release-beta-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  group: release-beta-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   validate:
     if: >-
       github.repository == 'ScriptedAlchemy/tracedecay' &&
-      vars.BETA_CHANNEL_ENABLED == 'true' &&
-      (github.event_name == 'workflow_dispatch' || github.event.release.prerelease)
-    runs-on: ubuntu-22.04
+      vars.BETA_CHANNEL_ENABLED == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
     permissions:
       contents: read
       attestations: read
@@ -43,8 +45,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate manual prerelease recovery
-        if: github.event_name == 'workflow_dispatch'
+      - name: Validate prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -64,10 +65,12 @@ jobs:
           test "$version" != "null"
           [[ "$version" == *-* ]]
           test "$RELEASE_TAG" = "v${version}"
-          test "$GITHUB_REF" = "refs/tags/${RELEASE_TAG}"
-          test "$GITHUB_SHA" = "$source_sha"
+          test "$GITHUB_REF" = "refs/heads/master"
           git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
           test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$source_sha"
+          # Recovery may run after master has moved, but a release tag must
+          # remain on master's history.
+          git merge-base --is-ancestor "$source_sha" "$GITHUB_SHA"
           echo "source_sha=${source_sha}" >> "$GITHUB_OUTPUT"
           echo "source_epoch=${source_epoch}" >> "$GITHUB_OUTPUT"
           gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
@@ -85,6 +88,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
             --source-digest "$source_sha" \
+            --signer-ref "refs/tags/${RELEASE_TAG}" \
+            --signer-ref "refs/heads/master" \
             --asset-names retained-asset-names \
             --download-dir retained-assets
 
@@ -92,7 +97,13 @@ jobs:
     needs: validate
     if: needs.validate.outputs.build_required == 'true'
     name: Build ${{ matrix.name }}
+    # Gold crashes in its Cortex-A53 erratum fixup during the ARM CLI link.
+    # The workflow setting also recovers immutable release sources.
+    env:
+      BAZEL_LINKOPTS: ${{ matrix.name == 'aarch64-linux' && '-fuse-ld=bfd' || '' }}
     runs-on: ${{ matrix.runner }}
+    # Windows 81 min, macOS 54 min on recent betas. 180 is ~2x the Windows max.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
@@ -102,297 +113,76 @@ jobs:
           ref: ${{ needs.validate.outputs.source_sha }}
           persist-credentials: false
 
-      - name: Checkout release automation
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate.outputs.source_sha }}
-          path: .release-automation
-          persist-credentials: false
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22.23.2"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
+      # Composite actions come from the tag's checkout, so recovering an older
+      # tag needs this here too; see .github/actions/setup-bazel.
+      - name: Allow long git paths
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          git config --global core.longpaths true
+          git config --system core.longpaths true
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          # 3.12.10 is the newest 3.12 patch published for every release
-          # matrix architecture, including macOS 14 ARM.
-          python-version: "3.12.10"
+          python-version: "3.15.0"
 
-      - name: Build dashboard
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
-
-      - name: Validate portable distribution harnesses
-        run: |
-          python3 .release-automation/scripts/test-check-packaged-lsp-bridge.py
-          python3 .release-automation/scripts/test-build-mcpb.py
-          python3 .release-automation/scripts/test-resolve-installed-binary.py
-          python3 .release-automation/scripts/test-check-packaged-mcp-stdio.py
-          python3 .release-automation/scripts/test-check-distribution-feature-wiring.py
-          python3 .release-automation/scripts/test-resolve-release-source-profile.py
-          python3 .release-automation/scripts/test-package-release-archive.py
-          python3 .release-automation/scripts/test-prepare-release-runtime.py
-          bash .release-automation/scripts/test-check-distribution-clean-source.sh
-          bash .release-automation/scripts/test-check-distribution-snapshot.sh
-
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@acdba816b0980ba6b63f1109f89a046e15fc301a # nextest
-
-      - name: Resolve release source feature profile
-        id: release-profile
-        shell: bash
-        run: |
-          python3 .release-automation/scripts/resolve-release-source-profile.py \
-            --source . \
-            --target "${{ matrix.target }}" \
-            --github-output "$GITHUB_OUTPUT"
-          if [[ -f crates/tracedecay-cli/Cargo.toml ]]; then
-            echo "binary_args=--package tracedecay-cli --bin tracedecay" >> "$GITHUB_OUTPUT"
-          else
-            echo "binary_args=--bin tracedecay" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Prepare target release runtime
-        id: target-runtime
-        shell: bash
-        run: |
-          python3 .release-automation/scripts/prepare-release-runtime.py \
-            --manifest .github/release-targets.json \
-            --name "${{ matrix.name }}" \
-            --output "$RUNNER_TEMP/tracedecay-release-runtime" \
-            --github-env "$GITHUB_ENV" \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Verify target runtime compatibility
-        if: steps.target-runtime.outputs.runtime_library != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          runtime="${{ steps.target-runtime.outputs.runtime_library }}"
-          test "$(readelf -d "$runtime" | sed -n 's/.*SONAME.*\[\([^]]*\)\].*/\1/p')" = \
-            "${{ steps.target-runtime.outputs.runtime_entry_name }}"
-          max_glibc="$(readelf --version-info "$runtime" \
-            | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
-            | sort -Vu \
-            | tail -n 1)"
-          test "$max_glibc" = "${{ matrix.runtime.max_glibc }}"
-
-      - name: Install mold
-        if: runner.os == 'Linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-        with:
-          mold-version: 2.41.0
-          make-default: true
-
-      - name: Verify mold is the default linker
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mold --version
-          ld --version | head -n 1 | grep -i mold
-
-      - name: Use lld-link
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          where.exe lld-link
-          lld-link --version
-          "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: release-beta-${{ matrix.target }}
-          cache-on-failure: true
-
-      - name: Test release distribution
-        if: matrix.name == 'x86_64-linux'
-        run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
-
-      # Runs before the default build so it never leaves an all-features
-      # binary (e.g. test-transport) on disk at the shared release output
-      # path for later packaging steps to pick up.
-      - name: Verify all-feature release build compiles
-        if: runner.os != 'Windows'
-        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} --all-features --locked
-
+      # Bazel builds the dashboard bundle the binary embeds (//dashboard:app_dist).
       - name: Build release binary for packaging
-        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
+        id: cli
+        uses: ./.github/actions/build-cli
+        with:
+          config: dist
+          dest: target/${{ matrix.target }}/release
+          cache-key: release-${{ matrix.target }}
 
-      - name: Install modern Bash for distribution acceptance
-        if: runner.os == 'macOS'
-        run: brew install bash
+      # Packaging orchestration comes from this immutable workflow revision,
+      # so recovery also works for tags predating the shared helper. The CLI
+      # and its packager inputs still come from the validated release source.
+      - name: Checkout release packaging helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-automation
+          persist-credentials: false
+          sparse-checkout: .github/actions/package-release
 
-      - name: Validate immutable FastEmbed fixture pins
-        if: steps.release-profile.outputs.profile == 'production'
-        shell: bash
-        run: |
-          set -euo pipefail
-          gate="scripts/check-distribution-acceptance.sh"
-          prepare="tests/distribution/fastembed/prepare_fixture.py"
-          validator="tests/distribution/fastembed/validate_fixture.py"
-          if [[ ! -x "$gate" || ! -f "$prepare" || ! -f "$validator" ]]; then
-            echo "::error title=FastEmbed acceptance setup missing::Expected executable $gate plus $prepare and $validator from the distribution fixture work."
-            exit 1
-          fi
-          python3 "$prepare" --check tests/distribution/fastembed
-          cargo fetch --locked --target ${{ matrix.target }}
-
-      - name: Run distribution acceptance
-        if: steps.release-profile.outputs.profile == 'production'
-        shell: bash
-        run: |
-          set -euo pipefail
-          gate_shell="bash"
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            gate_shell="$(brew --prefix)/bin/bash"
-          fi
-          lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 \
-            "$gate_shell" scripts/check-distribution-acceptance.sh
-          actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          test "$actual_lockfile_sha" = "$lockfile_sha"
-
-      - name: Run historical release binary smoke
-        if: steps.release-profile.outputs.profile == 'legacy-default'
-        shell: bash
-        run: |
-          set -euo pipefail
-          binary="target/${{ matrix.target }}/release/tracedecay"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            binary="${binary}.exe"
-          fi
-          test -f "$binary"
-          "$binary" --version
-          "$binary" --help >/dev/null
-
-      - name: Get version
-        id: version
-        shell: bash
-        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Package MCPB
-        shell: bash
-        run: |
-          set -euo pipefail
-          binary="target/${{ matrix.target }}/release/tracedecay"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            binary="${binary}.exe"
-          fi
-          bundle="tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.mcpb"
-          runtime_args=()
-          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
-            runtime_args+=(
-              --runtime-library "${{ steps.target-runtime.outputs.runtime_library }}"
-              --runtime-license "${{ steps.target-runtime.outputs.runtime_license }}"
-              --runtime-notices "${{ steps.target-runtime.outputs.runtime_notices }}"
-            )
-          fi
-          python3 .release-automation/scripts/build-mcpb.py build \
-            --binary "$binary" \
-            --output "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
-            --platform "${{ matrix.name }}" \
-            "${runtime_args[@]}"
-          python3 .release-automation/scripts/build-mcpb.py verify \
-            --bundle "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
-            --platform "${{ matrix.name }}"
-
-      - name: Verify MCPB runtime (unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          bundle="tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.mcpb"
-          rm -rf verify-mcpb
-          python3 -m zipfile -e "$bundle" verify-mcpb
-          test -x verify-mcpb/server/tracedecay
-          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --version
-          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --help >/dev/null
+      - name: Package and verify native archive and MCPB
+        uses: ./.release-automation/.github/actions/package-release
+        with:
+          binary: ${{ steps.cli.outputs.path }}
+          tag: ${{ env.RELEASE_TAG }}
+          asset-prefix: tracedecay-beta-${{ env.RELEASE_TAG }}
+          platform: ${{ matrix.name }}
+          archive: ${{ matrix.archive }}
+          epoch: ${{ needs.validate.outputs.source_epoch }}
 
       - name: Upload MCPB artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mcpb-beta-${{ matrix.name }}
           path: tracedecay-beta-${{ env.RELEASE_TAG }}-${{ matrix.name }}.mcpb
           if-no-files-found: error
 
-      - name: Package binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          source="target/${{ matrix.target }}/release/tracedecay"
-          entry_name="tracedecay"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            source="${source}.exe"
-            entry_name="${entry_name}.exe"
-          fi
-          companion_args=()
-          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
-            companion_args+=(
-              --companion
-              "${{ steps.target-runtime.outputs.runtime_library }}=${{ steps.target-runtime.outputs.runtime_entry_name }}"
-              --companion
-              "${{ steps.target-runtime.outputs.runtime_license }}=onnxruntime-LICENSE"
-              --companion
-              "${{ steps.target-runtime.outputs.runtime_notices }}=onnxruntime-ThirdPartyNotices.txt"
-            )
-          fi
-          python3 .release-automation/scripts/package-release-archive.py \
-            --binary "$source" \
-            --output "tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.${{ matrix.archive }}" \
-            --format "${{ matrix.archive }}" \
-            --entry-name "$entry_name" \
-            --epoch "${{ needs.validate.outputs.source_epoch }}" \
-            "${companion_args[@]}"
-
-      - name: Verify binary archive (unix)
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        run: |
-          set -euo pipefail
-          archive="tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.tar.gz"
-          mkdir verify-binary
-          tar xzf "$archive" -C verify-binary
-          test -x verify-binary/tracedecay
-          env -u LD_LIBRARY_PATH verify-binary/tracedecay --version
-          env -u LD_LIBRARY_PATH verify-binary/tracedecay --help >/dev/null
-
-      - name: Verify binary archive (windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $archive = "tracedecay-beta-${env:RELEASE_TAG}-${{ matrix.name }}.zip"
-          Expand-Archive -Path $archive -DestinationPath verify-binary
-          & "./verify-binary/tracedecay.exe" --version
-          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --version" }
-          & "./verify-binary/tracedecay.exe" --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --help" }
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Upload binary archive artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beta-${{ matrix.name }}
-          path: tracedecay-beta-*
+          path: tracedecay-beta-${{ env.RELEASE_TAG }}-${{ matrix.name }}.${{ matrix.archive }}
           if-no-files-found: error
 
   publish:
     needs: [validate, build]
+    # Publish only a whole release. beta.86 shipped without macOS because a
+    # failed target still published the rest (#3756), and `tracedecay upgrade`
+    # then told Mac users the previous beta was current. Re-dispatching the tag
+    # rebuilds only the targets the release lacks. `skipped` means every
+    # asset is already published.
     if: >-
       always() &&
       needs.validate.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
     permissions:
       contents: write
       id-token: write
@@ -402,87 +192,65 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.source_sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: needs.validate.outputs.build_required == 'true'
         with:
           pattern: beta-*
           path: new-binaries
           merge-multiple: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: needs.validate.outputs.build_required == 'true'
         with:
           pattern: mcpb-beta-*
           path: new-mcpbs
           merge-multiple: true
 
+      # Use the helpers from the running workflow revision for older-tag recovery.
+      - name: Checkout release recovery helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-automation
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            scripts/assemble-release-artifacts.sh
+            scripts/update-release-checksums.py
+
       - name: Assemble retained and newly built prerelease assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          TAG: ${{ env.RELEASE_TAG }}
+          BUILD_REQUIRED: ${{ needs.validate.outputs.build_required }}
+        shell: bash
         run: |
           set -euo pipefail
           git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
           test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$SOURCE_SHA"
           test "$(gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" --json isDraft,isPrerelease --jq '[.isPrerelease, .isDraft] | @tsv')" = $'true\tfalse'
-          mkdir binaries mcpbs retained-assets
-          gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
-            --jq '.assets[].name' > remote-asset-names
-          python3 scripts/plan-release-recovery.py \
-            --manifest .github/release-targets.json \
-            --tag "$RELEASE_TAG" \
-            --profile beta \
-            --asset-names remote-asset-names \
-            --retained-output retained-asset-names \
-            --github-output planner-output
-          scripts/verify-retained-release-assets.sh \
-            --tag "$RELEASE_TAG" \
-            --repo "${{ github.repository }}" \
-            --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
-            --source-digest "$SOURCE_SHA" \
-            --asset-names retained-asset-names \
-            --download-dir retained-assets
-          while IFS= read -r asset; do
-            [[ -z "$asset" ]] && continue
-            if [[ "$asset" == *.mcpb ]]; then
-              cp "retained-assets/$asset" "mcpbs/$asset"
-            else
-              cp "retained-assets/$asset" "binaries/$asset"
-            fi
-          done < retained-asset-names
-          if [[ "${{ needs.validate.outputs.build_required }}" == "true" ]]; then
-            for artifact in new-binaries/tracedecay-beta-*; do
-              destination="binaries/$(basename "$artifact")"
-              [[ -e "$destination" ]] || cp "$artifact" "$destination"
-            done
-            for artifact in new-mcpbs/*.mcpb; do
-              destination="mcpbs/$(basename "$artifact")"
-              [[ -e "$destination" ]] || cp "$artifact" "$destination"
-            done
-          fi
-          python3 scripts/check-release-artifacts.py \
-            --manifest .github/release-targets.json \
-            --profile beta \
-            --tag "$RELEASE_TAG" \
-            --binaries binaries \
-            --mcpbs mcpbs
-          for bundle in mcpbs/*.mcpb; do
-            platform="${bundle#mcpbs/tracedecay-beta-"${RELEASE_TAG}"-}"
-            platform="${platform%.mcpb}"
-            python3 scripts/build-mcpb.py verify \
-              --bundle "$bundle" \
-              --version "${RELEASE_TAG#v}" \
-              --platform "$platform"
-          done
+          bash .release-automation/scripts/assemble-release-artifacts.sh \
+            "$TAG" "$SOURCE_SHA" "${{ github.repository }}" beta \
+            "${{ github.repository }}/.github/workflows/release-beta.yml" "$BUILD_REQUIRED"
+
+      - name: Count newly built artifacts
+        id: built
+        run: |
+          shopt -s nullglob
+          archives=(new-binaries/tracedecay-beta-*)
+          bundles=(new-mcpbs/*.mcpb)
+          echo "archives=${#archives[@]}" >>"$GITHUB_OUTPUT"
+          echo "bundles=${#bundles[@]}" >>"$GITHUB_OUTPUT"
 
       - name: Attest newly built prerelease archives
-        if: needs.validate.outputs.build_required == 'true'
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        if: steps.built.outputs.archives != '0'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: new-binaries/tracedecay-beta-*
 
       - name: Attest newly built prerelease MCPBs
-        if: needs.validate.outputs.build_required == 'true'
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        if: steps.built.outputs.bundles != '0'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: new-mcpbs/*.mcpb
 
@@ -503,33 +271,42 @@ jobs:
           test "${#archives[@]}" -gt 0
           mapfile -t bundles < <(find mcpbs -maxdepth 1 -type f -name '*.mcpb' -print | sort)
           test "${#bundles[@]}" -gt 0
-          release_assets=("${archives[@]}" "${bundles[@]}" SHA256SUMS)
+          # `install.sh` ships with the prerelease as it does with a stable
+          # release. README tells users to curl the installer from a release,
+          # and only release.yml published one, so the hardened script on
+          # master reached nobody following the beta line. The checkout is
+          # pinned to the tag's source sha, so this is that tag's installer.
+          release_assets=("${archives[@]}" "${bundles[@]}" SHA256SUMS install.sh)
           gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
             --jq '.assets[].name' > remote-asset-names
           for release_asset in "${release_assets[@]}"; do
             name="$(basename "$release_asset")"
             if grep -Fxq "$name" remote-asset-names; then
               if [[ "$name" == "SHA256SUMS" ]]; then
-                mkdir -p retained-metadata
-                gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-                  --pattern "$name" --dir retained-metadata
-                cmp -s "$release_asset" "retained-metadata/$name"
+                python3 .release-automation/scripts/update-release-checksums.py \
+                  --tag "$RELEASE_TAG" --repo "${{ github.repository }}" --checksums "$release_asset"
               fi
             else
               gh release upload "$RELEASE_TAG" "$release_asset" \
                 --repo "${{ github.repository }}"
             fi
           done
+          # Verify by name, not by glob: a partial publish may have no .zip
+          # (Windows) or no .tar.gz yet, and `gh release download --pattern`
+          # fails on an empty match.
           mkdir verified-binaries verified-mcpbs
-          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-beta-${RELEASE_TAG}-*.tar.gz" \
-            --dir verified-binaries
-          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-beta-${RELEASE_TAG}-*.zip" \
-            --dir verified-binaries
-          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-beta-${RELEASE_TAG}-*.mcpb" \
-            --dir verified-mcpbs
+          gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
+            --jq '.assets[].name' > remote-asset-names
+          while IFS= read -r name; do
+            case "$name" in
+              tracedecay-beta-"${RELEASE_TAG}"-*.mcpb)
+                gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir verified-mcpbs ;;
+              tracedecay-beta-"${RELEASE_TAG}"-*.tar.gz | tracedecay-beta-"${RELEASE_TAG}"-*.zip)
+                gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir verified-binaries ;;
+            esac
+          done < remote-asset-names
           python3 scripts/check-release-artifacts.py \
             --manifest .github/release-targets.json \
             --profile beta \
@@ -541,4 +318,6 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
             --source-digest "${{ needs.validate.outputs.source_sha }}" \
+            --signer-ref "refs/tags/${RELEASE_TAG}" \
+            --signer-ref "refs/heads/master" \
             --files verified-binaries/* verified-mcpbs/*

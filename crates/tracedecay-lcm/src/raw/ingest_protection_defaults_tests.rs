@@ -1,5 +1,5 @@
 use tracedecay_runtime_core::db::engine::TestConnection;
-use tracedecay_store::SessionMessageRecord;
+use tracedecay_store::{CANONICAL_BODIES_TABLE_SQL, SessionMessageRecord};
 
 const RAW_MESSAGE_TEST_SCHEMA: &str = "CREATE TABLE lcm_raw_messages (
     store_id INTEGER PRIMARY KEY,
@@ -13,29 +13,35 @@ const RAW_MESSAGE_TEST_SCHEMA: &str = "CREATE TABLE lcm_raw_messages (
     content_hash TEXT NOT NULL,
     storage_kind TEXT NOT NULL,
     payload_ref TEXT,
-    snippet_text TEXT NOT NULL,
-    index_text TEXT NOT NULL,
-    legacy_source INTEGER NOT NULL,
-    legacy_truncated INTEGER NOT NULL,
-    metadata_json TEXT
+    placeholder_text TEXT,
+    snippet_text TEXT NOT NULL DEFAULT '',
+    index_text TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT,
+    kind TEXT,
+    model TEXT,
+    tool_names TEXT,
+    source_path TEXT,
+    source_offset INTEGER
 );";
 
-#[tokio::test]
+#[asupersync::test]
 async fn exact_identity_reader_rejects_tampered_inline_content() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
-    conn.execute_batch(RAW_MESSAGE_TEST_SCHEMA)
-        .await
-        .expect("raw message schema");
+    conn.execute_batch(&format!(
+        "{CANONICAL_BODIES_TABLE_SQL}{RAW_MESSAGE_TEST_SCHEMA}"
+    ))
+    .await
+    .expect("raw message schema");
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
             content, content_hash, storage_kind, payload_ref,
-            snippet_text, index_text, legacy_source, legacy_truncated
+            snippet_text, index_text
          ) VALUES (
             'cursor', 'message-1', 'session-1', 'assistant', 1, 1,
             'canary-secret', 'not-the-content-hash', 'inline', NULL,
-            'canary-secret', 'canary-secret', 0, 0
+            'canary-secret', 'canary-secret'
          )",
         (),
     )
@@ -47,22 +53,24 @@ async fn exact_identity_reader_rejects_tampered_inline_content() {
     assert_eq!(result, Err(super::LcmError::PayloadIntegrityMismatch));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn exact_identity_reader_rejects_missing_inline_content() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
-    conn.execute_batch(RAW_MESSAGE_TEST_SCHEMA)
-        .await
-        .expect("raw message schema");
+    conn.execute_batch(&format!(
+        "{CANONICAL_BODIES_TABLE_SQL}{RAW_MESSAGE_TEST_SCHEMA}"
+    ))
+    .await
+    .expect("raw message schema");
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
             content, content_hash, storage_kind, payload_ref,
-            snippet_text, index_text, legacy_source, legacy_truncated
+            snippet_text, index_text
          ) VALUES (
             'cursor', 'message-1', 'session-1', 'assistant', 1, 1,
             NULL, 'not-an-empty-content-hash', 'inline', NULL,
-            '', '', 0, 0
+            '', ''
          )",
         (),
     )
@@ -74,7 +82,7 @@ async fn exact_identity_reader_rejects_missing_inline_content() {
     assert_eq!(result, Err(super::LcmError::PayloadIntegrityMismatch));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn inline_upsert_preserves_the_storage_failure_cause() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -113,5 +121,153 @@ async fn inline_upsert_preserves_the_storage_failure_cause() {
             .to_string()
             .contains("no such table: lcm_raw_messages"),
         "storage cause was lost: {error}"
+    );
+}
+
+#[asupersync::test]
+async fn predecessor_range_skips_policy_anchor_roles() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    conn.execute_batch(
+        "CREATE TABLE lcm_raw_messages (
+            store_id INTEGER PRIMARY KEY,
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            timestamp INTEGER,
+            content TEXT,
+            content_hash TEXT NOT NULL,
+            storage_kind TEXT NOT NULL,
+            payload_ref TEXT,
+            placeholder_text TEXT,
+            metadata_json TEXT,
+            kind TEXT,
+            model TEXT,
+            tool_names TEXT,
+            source_path TEXT,
+            source_offset INTEGER,
+            UNIQUE(provider, message_id)
+        );
+        CREATE TABLE lcm_raw_predecessor_ranges (
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            from_store_id INTEGER NOT NULL,
+            to_store_id INTEGER NOT NULL,
+            PRIMARY KEY(provider, message_id)
+        );",
+    )
+    .await
+    .expect("predecessor schema");
+    let storage_root = temp.path().join("storage");
+    let mut rollback = super::payload::PayloadFileRollback::begin_cancellation_safe(&storage_root);
+    for (message_id, role, ordinal, text) in [
+        (
+            "prior-user",
+            "user",
+            1,
+            "keep this conversational predecessor",
+        ),
+        (
+            "compact_boundary:marker",
+            "system",
+            2,
+            "Claude compaction boundary",
+        ),
+        (
+            "compact-summary",
+            "user",
+            3,
+            "exact Claude compact summary wrapper and body",
+        ),
+    ] {
+        let message = SessionMessageRecord {
+            provider: "claude".to_string(),
+            message_id: message_id.to_string(),
+            session_id: "session-1".to_string(),
+            role: role.to_string(),
+            timestamp: Some(ordinal),
+            ordinal,
+            text: text.to_string(),
+            kind: Some("message".to_string()),
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        super::upsert_raw_message_with_payload_tracked(
+            &*conn,
+            &storage_root,
+            &message,
+            &mut rollback,
+        )
+        .await
+        .expect("ingest predecessor fixture");
+    }
+    let mut rows = conn
+        .query(
+            "SELECT from_store_id, to_store_id
+             FROM lcm_raw_predecessor_ranges
+             WHERE provider = 'claude' AND message_id = 'compact-summary'",
+            (),
+        )
+        .await
+        .expect("read predecessor range");
+    let row = rows
+        .next()
+        .await
+        .expect("advance predecessor range")
+        .expect("compact-summary must keep a conversational predecessor interval");
+    assert_eq!(row.get::<i64>(0).expect("from"), 1);
+    assert_eq!(row.get::<i64>(1).expect("to"), 1);
+}
+
+#[asupersync::test]
+async fn message_record_readers_restore_compacted_bodies_and_reject_missing_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = TestConnection::open(&temp.path().join("body-record.db"));
+    conn.execute_batch(&format!(
+        "{CANONICAL_BODIES_TABLE_SQL}{RAW_MESSAGE_TEST_SCHEMA}"
+    ))
+    .await
+    .unwrap();
+    let text = "complete canonical message".repeat(super::INLINE_BODY_BYTES);
+    let body = super::StoredCanonicalBody::pack(text.as_bytes()).unwrap();
+    conn.execute(
+        super::UPSERT_CANONICAL_BODY_SQL,
+        super::params![
+            body.content_hash.as_str(),
+            body.encoding,
+            body.blob.as_slice(),
+            body.uncompressed_bytes
+        ],
+    )
+    .await
+    .unwrap();
+    conn.execute("INSERT INTO lcm_raw_messages (provider, message_id, session_id, role, ordinal, content_hash, storage_kind, placeholder_text) VALUES ('codex', 'message', 'session', 'user', 1, ?1, 'inline', 'short placeholder')", super::params![body.content_hash.as_str()]).await.unwrap();
+    for columns in [
+        super::message_body_record_select_columns("message"),
+        super::stored_message_record_select_columns("message"),
+    ] {
+        let sql = format!("SELECT {columns} FROM lcm_raw_messages AS message");
+        let mut rows = conn.query(&sql, ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(super::message_body_from_record_row(&row, 0).unwrap(), text);
+    }
+    conn.execute("DELETE FROM session_canonical_bodies", ())
+        .await
+        .unwrap();
+    let sql = format!(
+        "SELECT {} FROM lcm_raw_messages AS message",
+        super::message_body_record_select_columns("message")
+    );
+    let mut rows = conn.query(&sql, ()).await.unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(
+        super::message_body_from_record_row(&row, 0),
+        Err(super::LcmError::PayloadIntegrityMismatch)
     );
 }

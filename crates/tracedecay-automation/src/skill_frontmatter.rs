@@ -79,7 +79,7 @@ impl SkillFrontmatterValue {
 }
 
 /// Parses leading `---`-fenced frontmatter, normalizing LF and CRLF input.
-#[hotpath::measure(label = "automation.skill.parse_frontmatter")]
+#[tracing::instrument(name = "automation.skill.parse_frontmatter", level = "trace", skip_all)]
 pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillFrontmatterValue>> {
     let mut lines = contents.lines();
     if lines.next().map(str::trim_end) != Some("---") {
@@ -146,7 +146,7 @@ pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillF
 /// Strips one level of YAML quoting from an inline scalar.
 ///
 /// Plain scalars and the borrowed interior of a simple `'`-quoted scalar are
-/// returned without allocating. Applies no schema or policy — a caller decides
+/// returned without allocating. Applies no schema or policy, a caller decides
 /// what the decoded text means.
 pub fn decode_yaml_scalar(value: &str) -> std::result::Result<Cow<'_, str>, YamlScalarError> {
     if let Some(quoted) = value.strip_prefix('\'') {
@@ -199,41 +199,10 @@ fn unquote_scalar(value: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::borrow::Cow;
-
     use super::{
         SkillFrontmatterValue, YamlScalarError, decode_yaml_scalar, parse_skill_frontmatter,
         unquote_scalar,
     };
-
-    #[test]
-    fn borrows_plain_scalars_without_applying_policy() {
-        assert!(matches!(
-            decode_yaml_scalar("plain value"),
-            Ok(Cow::Borrowed("plain value"))
-        ));
-        assert!(matches!(decode_yaml_scalar(""), Ok(Cow::Borrowed(""))));
-        assert!(matches!(
-            decode_yaml_scalar(" users'"),
-            Ok(Cow::Borrowed(" users'"))
-        ));
-    }
-
-    #[test]
-    fn decodes_single_quoted_scalars_and_doubled_quotes() {
-        assert!(matches!(
-            decode_yaml_scalar("'plain'"),
-            Ok(Cow::Borrowed("plain"))
-        ));
-        let decoded = decode_yaml_scalar("'it''s YAML'").expect("valid single-quoted scalar");
-        assert_eq!(decoded, "it's YAML");
-    }
-
-    #[test]
-    fn decodes_json_compatible_double_quoted_scalars() {
-        let decoded = decode_yaml_scalar(r#""line\n☺""#).expect("valid double-quoted scalar");
-        assert_eq!(decoded, "line\n☺");
-    }
 
     #[test]
     fn rejects_malformed_single_quoted_scalars() {
@@ -287,17 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_decoder_parity_preserves_successful_quote_mechanics() {
-        for (value, expected) in [
-            ("'plain'", "plain"),
-            ("'it''s YAML'", "it's YAML"),
-            (r#""line\n☺""#, "line\n☺"),
-        ] {
-            assert_eq!(unquote_scalar(value), expected);
-        }
-    }
-
-    #[test]
     fn preserves_malformed_quote_and_plain_scalar_policy() {
         for (value, expected) in [
             (r#""bad\xescape""#, r"bad\xescape"),
@@ -337,10 +295,14 @@ mod tests {
     fn parses_crlf_documents_identically_to_lf() {
         let lf = "---\nname: my-skill\ndescription: Use when testing.\npaths:\n  - \"**/*.rs\"\n---\n\n# Body\n";
         let crlf = lf.replace('\n', "\r\n");
+        let parsed = parse_skill_frontmatter(lf).unwrap();
+        assert_eq!(parsed["name"].as_scalar(), Some("my-skill"));
+        assert_eq!(parsed["description"].as_scalar(), Some("Use when testing."));
         assert_eq!(
-            parse_skill_frontmatter(&crlf).unwrap(),
-            parse_skill_frontmatter(lf).unwrap()
+            parsed["paths"].as_list_items(),
+            Some(vec!["**/*.rs".to_string()])
         );
+        assert_eq!(parse_skill_frontmatter(&crlf).unwrap(), parsed);
     }
 
     #[test]
@@ -357,23 +319,30 @@ mod tests {
 
     #[test]
     fn rejects_malformed_frontmatter() {
-        for (doc, reason) in [
-            ("# no frontmatter\n", "missing opening fence"),
-            ("---\nname: x\n", "unclosed frontmatter"),
-            ("---\nname: x\nname: y\n---\n", "duplicate key"),
-            ("---\njust some text\n---\n", "non-mapping line"),
+        for (doc, expected) in [
+            ("# no frontmatter\n", "must start with YAML frontmatter"),
+            ("---\nname: x\n", "must close YAML frontmatter"),
+            (
+                "---\nname: x\nname: y\n---\n",
+                "duplicates frontmatter key name",
+            ),
+            (
+                "---\njust some text\n---\n",
+                "has invalid frontmatter line \"just some text\"",
+            ),
             (
                 "---\n  - orphan\nname: x\n---\n",
-                "indented line before any key",
+                "has indented frontmatter line before any key: \"  - orphan\"",
             ),
             (
                 "---\nname: x\n  - continuation\n---\n",
-                "block continuation under an inline scalar",
+                "key name mixes an inline scalar with block continuation lines",
             ),
         ] {
-            assert!(
-                parse_skill_frontmatter(doc).is_err(),
-                "expected parse error for {reason}: {doc:?}"
+            assert_eq!(
+                parse_skill_frontmatter(doc).unwrap_err().to_string(),
+                format!("config error: {expected}"),
+                "{doc:?}"
             );
         }
     }

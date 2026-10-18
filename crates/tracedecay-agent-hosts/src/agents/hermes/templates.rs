@@ -4,12 +4,14 @@
 //! `tracedecay install --agent hermes`, keeping the installer flow in
 //! `super::write_plugin_files` focused on filesystem orchestration.
 
-use crate::errors::{Result, TraceDecayError};
-use crate::ports::mcp_tools::{advertised_tools, format_capable_tool_names};
+use crate::ports::mcp_tools::{AdvertisedToolV1, format_capable_tool_names};
 
-pub(super) fn plugin_manifest(generator_commit: &str) -> String {
-    let tools = advertised_tools()
-        .into_iter()
+pub(super) fn plugin_manifest(
+    generator_commit: &str,
+    advertised_tools: &[AdvertisedToolV1],
+) -> String {
+    let tools = advertised_tools
+        .iter()
         .map(|tool| format!("  - {}", tool.name))
         .collect::<Vec<_>>()
         .join("\n");
@@ -43,24 +45,6 @@ with Path(__file__).with_name("schemas.json").open("r", encoding="utf-8") as sch
     TOOL_SCHEMAS = json.load(schema_file)
 "#
     .to_string()
-}
-
-pub(super) fn plugin_schemas_json() -> Result<String> {
-    let defs = advertised_tools()
-        .into_iter()
-        .map(|tool| {
-            serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.input_schema,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&defs)
-        .map(|json| format!("{json}\n"))
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to serialize Hermes schemas.json: {e}"),
-        })
 }
 
 pub(super) fn plugin_tools(tracedecay_bin: &str) -> String {
@@ -227,6 +211,7 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
         user_scoped = (
             tool_args.get("memory_scope") == "user"
             or tool_args.get("storage_scope") == "user"
+            or tool_args.get("user_scope") is True
         )
         if user_scoped:
             project_root = None

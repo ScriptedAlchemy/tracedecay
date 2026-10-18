@@ -1,27 +1,48 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::maintenance::ExclusiveMaintenancePermit;
-
-use super::driver::{CheckpointDriver, RusqliteCheckpointDriver};
+use super::driver::{RusqliteCheckpointDriver, RusqliteCheckpointError};
 use super::types::{
     CheckpointBlockers, CheckpointConfig, CheckpointDecision, CheckpointError,
-    CheckpointInterruption, CheckpointMode, CheckpointResult, WalPressure,
+    CheckpointInterruption, CheckpointMode, CheckpointReport, CheckpointResult, EXPIRED_RETRY_MAX,
+    EXPIRED_RETRY_MIN, FENCE_LIMIT, FENCE_READ_DEADLINE, FENCED_RETRY_INTERVAL, WalPressure,
 };
 
-/// Checkpoint policy state owned by the persistent writer.
-pub(crate) struct WriterCheckpointController<D> {
-    driver: D,
-    config: CheckpointConfig,
-    hard_drain_required: bool,
+/// Where a hard-pressure drain stands.
+///
+/// An incomplete checkpoint at hard pressure raises a fence: new general reads
+/// and writes wait while the writer retries. In-flight snapshots get one read
+/// deadline, then are revoked. A fence never outlives [`FENCE_LIMIT`]: whatever
+/// still pins the WAL after it (a wedged reader, another process) is named,
+/// the fence drops and writes resume, and the checkpoint retries with backoff.
+/// Writes block again only past twice the hard limit, so the WAL stays bounded
+/// and nothing spins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Drain {
+    Open,
+    Fenced {
+        since: Instant,
+    },
+    Expired {
+        retry_at: Instant,
+        backoff: Duration,
+        wal_bytes: u64,
+    },
 }
 
-impl<D: CheckpointDriver> WriterCheckpointController<D> {
+/// Checkpoint policy state owned by the persistent writer.
+pub(crate) struct WriterCheckpointController {
+    driver: RusqliteCheckpointDriver,
+    config: CheckpointConfig,
+    drain: Drain,
+}
+
+impl WriterCheckpointController {
     /// Construct policy state and disable SQLite's connection-local automatic
     /// checkpointing. Startup fails closed when this cannot be established.
     pub(crate) fn new(
-        mut driver: D,
+        mut driver: RusqliteCheckpointDriver,
         config: CheckpointConfig,
-    ) -> Result<Self, CheckpointError<D::Error>> {
+    ) -> Result<Self, CheckpointError<RusqliteCheckpointError>> {
         let config = config.validate().map_err(CheckpointError::InvalidConfig)?;
         driver
             .disable_auto_checkpoint()
@@ -29,53 +50,58 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         Ok(Self {
             driver,
             config,
-            hard_drain_required: false,
+            drain: Drain::Open,
         })
     }
 
-    #[hotpath::skip]
+    /// Whether general writes wait for the checkpoint: while the fence is up,
+    /// and after it expired only once the WAL passed twice the hard limit.
     pub(crate) const fn hard_drain_required(&self) -> bool {
-        self.hard_drain_required
+        blocks_general(self.drain, self.config.hard_wal_bytes)
+    }
+
+    /// When the writer should try the checkpoint again, if a drain is open.
+    pub(crate) fn retry_due(&self, now: Instant) -> Option<Instant> {
+        match self.drain {
+            Drain::Open => None,
+            Drain::Fenced { .. } => Some(now + FENCED_RETRY_INTERVAL),
+            Drain::Expired { retry_at, .. } => Some(retry_at),
+        }
+    }
+
+    /// The fence has waited one read deadline: in-flight snapshots must end.
+    pub(crate) fn revocation_due(&self, now: Instant) -> bool {
+        matches!(self.drain, Drain::Fenced { since } if now.saturating_duration_since(since) >= FENCE_READ_DEADLINE)
+    }
+
+    /// The fence has expired or the next incomplete attempt expires it, so
+    /// the attempt should name whatever still holds the WAL.
+    pub(crate) fn names_holders(&self, now: Instant) -> bool {
+        match self.drain {
+            Drain::Open => false,
+            Drain::Fenced { since } => now.saturating_duration_since(since) >= FENCE_LIMIT,
+            Drain::Expired { .. } => true,
+        }
+    }
+
+    /// After the fence expired, the checkpoint after each batch waits for the
+    /// backoff instead of retrying on every commit.
+    pub(crate) fn defers_scheduled(&self, now: Instant) -> bool {
+        matches!(self.drain, Drain::Expired { retry_at, .. } if now < retry_at)
     }
 
     pub(crate) fn evaluate_scheduled(
         &mut self,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointResult, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
         self.evaluate_interruptible(snapshot_blockers, || None)
-    }
-
-    pub(crate) fn restart_scheduled(
-        &mut self,
-        permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointResult, CheckpointError<D::Error>> {
-        if !snapshot_blockers.is_clear() {
-            return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
-        }
-        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
-        let decision = self.restart(sample.bytes, permit, snapshot_blockers)?;
-        Ok(CheckpointResult::Decision { sample, decision })
-    }
-
-    pub(crate) fn truncate_scheduled(
-        &mut self,
-        permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointResult, CheckpointError<D::Error>> {
-        if !snapshot_blockers.is_clear() {
-            return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
-        }
-        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
-        let decision = self.truncate(sample.bytes, permit, snapshot_blockers)?;
-        Ok(CheckpointResult::Decision { sample, decision })
     }
 
     pub(crate) fn evaluate_interruptible<F>(
         &mut self,
         snapshot_blockers: CheckpointBlockers,
         mut interruption: F,
-    ) -> Result<CheckpointResult, CheckpointError<D::Error>>
+    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>>
     where
         F: FnMut() -> Option<CheckpointInterruption>,
     {
@@ -98,68 +124,47 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         Ok(CheckpointResult::Decision { sample, decision })
     }
 
-    /// Apply automatic WAL pressure policy. Soft and hard pressure both first
-    /// attempt PASSIVE. An incomplete hard-pressure attempt requests a drain;
-    /// the snapshot authority remains the source of blocker inventory.
+    /// Apply automatic WAL pressure policy. Soft and hard pressure both
+    /// attempt RESTART. Backfilling every frame does not shrink the log:
+    /// SQLite restarts it only once no reader holds a WAL read slot, and only
+    /// RESTART reports a held slot as busy. An incomplete hard-pressure
+    /// attempt raises the fence ([`Drain`]); the snapshot authority remains
+    /// the source of blocker inventory.
     pub(crate) fn evaluate(
         &mut self,
         wal_bytes: u64,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
         let pressure = self.pressure(wal_bytes);
-        if pressure == WalPressure::BelowSoft && !self.hard_drain_required {
+        if pressure == WalPressure::BelowSoft && self.drain == Drain::Open {
             return Ok(CheckpointDecision::BelowSoftLimit { wal_bytes });
         }
         self.run_checkpoint(
-            CheckpointMode::Passive,
+            CheckpointMode::Restart,
             pressure,
             wal_bytes,
             snapshot_blockers,
         )
     }
 
-    /// RESTART and TRUNCATE are reachable only through the exclusive permit
-    /// issued after maintenance drains admission, readers, snapshots, and
-    /// writer work. PASSIVE remains available through [`Self::evaluate`].
-    pub(crate) fn restart(
+    /// Returns the whole WAL to the database as the writer stops.
+    ///
+    /// Only the writer's own shutdown may call this: its admission is closed,
+    /// its queues are empty, and the attachment released every reader before
+    /// joining it, so the writer holds the exclusivity TRUNCATE needs. A reader
+    /// outside this attachment can still keep the checkpoint pending; the WAL
+    /// then stays for the next open.
+    pub(crate) fn truncate_at_shutdown(
         &mut self,
-        wal_bytes: u64,
-        permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
-        self.run_exclusive(
-            CheckpointMode::Restart,
-            wal_bytes,
-            permit,
-            snapshot_blockers,
-        )
-    }
-
-    pub(crate) fn truncate(
-        &mut self,
-        wal_bytes: u64,
-        permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
-        self.run_exclusive(
+    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
+        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
+        let decision = self.run_checkpoint(
             CheckpointMode::Truncate,
-            wal_bytes,
-            permit,
-            snapshot_blockers,
-        )
-    }
-
-    fn run_exclusive(
-        &mut self,
-        mode: CheckpointMode,
-        wal_bytes: u64,
-        _permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
-        if !snapshot_blockers.is_clear() {
-            return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
-        }
-        self.run_checkpoint(mode, self.pressure(wal_bytes), wal_bytes, snapshot_blockers)
+            self.pressure(sample.bytes),
+            sample.bytes,
+            CheckpointBlockers::default(),
+        )?;
+        Ok(CheckpointResult::Decision { sample, decision })
     }
 
     fn run_checkpoint(
@@ -168,50 +173,30 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         pressure: WalPressure,
         wal_bytes: u64,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
         let started = Instant::now();
         let report = match self.driver.checkpoint(mode) {
             Ok(report) => report,
             Err(error) => {
-                crate::hotpath_observe::record_checkpoint_error(
-                    checkpoint_attribution(mode),
-                    started.elapsed(),
-                );
                 return Err(CheckpointError::Driver(error));
             }
         };
         let elapsed = started.elapsed();
-        crate::hotpath_observe::record_checkpoint(
-            checkpoint_attribution(mode),
-            elapsed,
-            report.complete(),
-            wal_bytes,
-            report.checkpointed_frames,
-        );
-
-        if report.complete() {
-            self.hard_drain_required = false;
-            return Ok(CheckpointDecision::Complete {
+        let (decision, drain) = checkpoint_decision(
+            CheckpointAttempt {
+                report,
                 mode,
                 pressure,
                 wal_bytes,
-                report,
+                snapshot_blockers,
                 elapsed,
-            });
-        }
-
-        if pressure == WalPressure::Hard || self.hard_drain_required {
-            self.hard_drain_required = true;
-        }
-        Ok(CheckpointDecision::Pending {
-            mode,
-            pressure,
-            wal_bytes,
-            report,
-            snapshot_blockers,
-            hard_drain_required: self.hard_drain_required,
-            elapsed,
-        })
+            },
+            self.drain,
+            self.config.hard_wal_bytes,
+            Instant::now(),
+        );
+        self.drain = drain;
+        Ok(decision)
     }
 
     fn pressure(&self, wal_bytes: u64) -> WalPressure {
@@ -223,18 +208,87 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
             WalPressure::BelowSoft
         }
     }
-}
 
-fn checkpoint_attribution(mode: CheckpointMode) -> crate::hotpath_observe::CheckpointAttribution {
-    match mode {
-        CheckpointMode::Passive => crate::hotpath_observe::CheckpointAttribution::Passive,
-        CheckpointMode::Restart => crate::hotpath_observe::CheckpointAttribution::Restart,
-        CheckpointMode::Truncate => crate::hotpath_observe::CheckpointAttribution::Truncate,
-    }
-}
-
-impl WriterCheckpointController<RusqliteCheckpointDriver> {
     pub(crate) fn connection_mut(&mut self) -> &mut rusqlite::Connection {
         self.driver.connection_mut()
     }
+}
+
+/// One checkpoint the driver ran, before the drain policy reads it.
+pub(super) struct CheckpointAttempt {
+    pub(super) report: CheckpointReport,
+    pub(super) mode: CheckpointMode,
+    pub(super) pressure: WalPressure,
+    pub(super) wal_bytes: u64,
+    pub(super) snapshot_blockers: CheckpointBlockers,
+    pub(super) elapsed: Duration,
+}
+
+const fn blocks_general(drain: Drain, hard_wal_bytes: u64) -> bool {
+    match drain {
+        Drain::Open => false,
+        Drain::Fenced { .. } => true,
+        Drain::Expired { wal_bytes, .. } => wal_bytes >= hard_wal_bytes.saturating_mul(2),
+    }
+}
+
+/// The drain policy: the decision this attempt reports and the drain state it
+/// leaves. Pure over `now`, so every transition is testable without a clock.
+pub(super) fn checkpoint_decision(
+    attempt: CheckpointAttempt,
+    drain: Drain,
+    hard_wal_bytes: u64,
+    now: Instant,
+) -> (CheckpointDecision, Drain) {
+    let CheckpointAttempt {
+        report,
+        mode,
+        pressure,
+        wal_bytes,
+        snapshot_blockers,
+        elapsed,
+    } = attempt;
+    if report.complete() {
+        return (
+            CheckpointDecision::Complete {
+                mode,
+                pressure,
+                wal_bytes,
+                report,
+                elapsed,
+            },
+            Drain::Open,
+        );
+    }
+    let next = match drain {
+        Drain::Open if pressure == WalPressure::Hard => Drain::Fenced { since: now },
+        Drain::Open => Drain::Open,
+        Drain::Fenced { since } if now.saturating_duration_since(since) < FENCE_LIMIT => drain,
+        Drain::Fenced { .. } => Drain::Expired {
+            retry_at: now + EXPIRED_RETRY_MIN,
+            backoff: EXPIRED_RETRY_MIN,
+            wal_bytes,
+        },
+        Drain::Expired { backoff, .. } => {
+            let backoff = backoff.saturating_mul(2).min(EXPIRED_RETRY_MAX);
+            Drain::Expired {
+                retry_at: now + backoff,
+                backoff,
+                wal_bytes,
+            }
+        }
+    };
+    (
+        CheckpointDecision::Pending {
+            mode,
+            pressure,
+            wal_bytes,
+            report,
+            snapshot_blockers,
+            hard_drain_required: blocks_general(next, hard_wal_bytes),
+            fence_expired: matches!(next, Drain::Expired { .. }),
+            elapsed,
+        },
+        next,
+    )
 }

@@ -24,6 +24,8 @@ describe('DoctorInspector', () => {
               entries: [],
               report_coverage: null,
               known_families: ['configuration'],
+              schema_convergences: [],
+              storage_kind_statuses: [],
               note: 'no admitted Doctor report source is available for this dashboard scope',
             },
             'unsupported',
@@ -48,7 +50,7 @@ describe('DoctorInspector', () => {
   });
 
   /** The three named degradation reasons must render as the observations they
-   * are — an unreachable source, a rebuild-required source, a corrupt source —
+   * are, an unreachable source, a rebuild-required source, a corrupt source,
    * and never collapse back into the undetermined "unknown" they were carried
    * as before the reasons were named. */
   it('names each degraded source coverage gap with its own reason', async () => {
@@ -57,7 +59,7 @@ describe('DoctorInspector', () => {
       families: [
         { family: 'storage', consultation: { status: 'unavailable', reason: 'unavailable' } },
         {
-          family: 'semantic_index',
+          family: 'code_index',
           consultation: { status: 'unavailable', reason: 'reset_required' },
         },
         { family: 'storage_runtime', consultation: { status: 'unavailable', reason: 'corrupt' } },
@@ -150,7 +152,49 @@ describe('DoctorInspector', () => {
       0,
     );
   });
+
+  it('renders every typed schema convergence state with progress and failure detail', async () => {
+    const response = findingsEnvelope();
+    response.payload.schema_convergences = [
+      convergence('pending_schema_migration', 1),
+      convergence('released_shape_convergence_in_progress', 2, {
+        unit: 'pages',
+        done: 4,
+        remaining: 7,
+      }),
+      {
+        ...convergence('degraded', 3),
+        degraded_row: 'observation_id=obs-7 projector=session_message',
+      },
+      convergence('completed', 4),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(response)));
+
+    renderDoctor();
+
+    expect(await screen.findByText('Pending schema migration')).toBeTruthy();
+    expect(screen.getByText('Released-shape convergence in progress')).toBeTruthy();
+    expect(screen.getByText('Schema convergence degraded')).toBeTruthy();
+    expect(screen.getByText('Schema convergence completed')).toBeTruthy();
+    expect(screen.getByText(/pages 4 done \/ 7 remaining/)).toBeTruthy();
+    expect(screen.getByText(/observation_id=obs-7 projector=session_message/)).toBeTruthy();
+  });
 });
+
+function convergence(
+  state: import('../../contracts/generated.ts').SchemaConvergenceStateV1,
+  startedAt: number,
+  progress: import('../../contracts/generated.ts').SchemaConvergenceProgressV1 | null = null,
+): import('../../contracts/generated.ts').SchemaConvergenceFindingV1 {
+  return {
+    store: 'profile-sessions',
+    stage: 'registered_schema',
+    state,
+    progress,
+    started_at_micros: startedAt,
+    degraded_row: null,
+  };
+}
 
 function renderDoctor() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -249,6 +293,8 @@ function findingsEnvelope() {
         },
       },
       known_families: ['configuration'],
+      schema_convergences: [],
+      storage_kind_statuses: [],
       note: 'configuration drift observed',
     },
     'partial',

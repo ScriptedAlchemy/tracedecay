@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::Serialize;
-use tracedecay_application::storage::telemetry::TableGrowthTelemetryReadV1;
-use tracedecay_application::storage::{
+use tracedecay_contracts::storage::telemetry::TableGrowthTelemetryReadV1;
+use tracedecay_contracts::storage::{
     SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES, SIGNIFICANT_TABLE_GROWTH_PERCENT,
     SIGNIFICANT_TABLE_GROWTH_RELATIVE_FLOOR_BYTES, is_significant_table_growth,
 };
@@ -15,8 +15,6 @@ const TABLE_GROWTH_UNSUPPORTED_REASON: &str =
     "per-table payload growth measurement is unsupported for this store";
 const TABLE_GROWTH_DENIED_REASON: &str =
     "per-table payload growth measurement was denied for this store";
-const TABLE_GROWTH_UNKNOWN_REASON: &str =
-    "per-table payload growth measurement is unavailable for this store";
 
 /// Informational threshold applied to per-table payload growth samples.
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
@@ -215,8 +213,8 @@ pub(super) fn table_growth_dimension(read: TableGrowthTelemetryReadV1) -> TableG
                 omission_reasons: vec![reason],
             }
         }
-        TableGrowthTelemetryReadV1::Unknown { .. } => {
-            let reason = TABLE_GROWTH_UNKNOWN_REASON.to_string();
+        TableGrowthTelemetryReadV1::Unknown { reason, .. } => {
+            let reason = reason.statement().to_string();
             TableGrowthDimensionV1::Unknown {
                 coverage: unavailable_table_growth_coverage(&reason),
                 omission_reasons: vec![reason],
@@ -280,9 +278,9 @@ pub(super) fn table_growth_payload_coverage(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use tracedecay_application::storage::identity::StoreKeyV1;
-    use tracedecay_application::storage::telemetry::TableGrowthTelemetryReadV1;
-    use tracedecay_application::storage::{
+    use tracedecay_contracts::storage::identity::StoreKeyV1;
+    use tracedecay_contracts::storage::telemetry::TableGrowthTelemetryReadV1;
+    use tracedecay_contracts::storage::{
         StorageByteSizeV1, TableGrowthBaselinePendingV1, TableGrowthSampleV1, TableNameV1,
     };
     use tracedecay_domain::UtcMicros;
@@ -313,13 +311,17 @@ mod tests {
             other => panic!("expected baseline state, got {other:?}"),
         }
 
-        let unknown = table_growth_dimension(TableGrowthTelemetryReadV1::Unknown { store });
+        let unknown = table_growth_dimension(TableGrowthTelemetryReadV1::Unknown {
+            store,
+            reason:
+                tracedecay_contracts::storage::TableGrowthUnavailableReasonV1::ReaderUnavailable,
+        });
         match unknown {
             TableGrowthDimensionV1::Unknown {
                 omission_reasons, ..
             } => {
                 let serialized = serde_json::to_string(&omission_reasons).expect("serialize");
-                assert!(serialized.contains("unavailable"));
+                assert!(serialized.contains("no reader was available"));
                 assert!(!serialized.contains("0 B"));
             }
             other => panic!("expected unknown state, got {other:?}"),

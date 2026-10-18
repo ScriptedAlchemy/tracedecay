@@ -153,7 +153,7 @@ Every product surface can run the same bounded query use case and receive determ
   `tracedecay-query` extraction with the Plan 19 evidence (reuse across the
   temporal kernel and this slice; same-host compile-graph measurement).
   Either outcome, lexical-code work lands against the same typed-request/port contract
-  the temporal kernel modules already enforce — location changes, contracts do not.
+  the temporal kernel modules already enforce, location changes, contracts do not.
 - **Lexical code:** add exact identifier, phrase, token, field, bounded
   fuzzy, relation, path, impact, affected-test, facet, and timeline requests.
   Preserve a non-demotable exact tier for identifiers, paths, quoted phrases,
@@ -214,10 +214,10 @@ Every product surface can run the same bounded query use case and receive determ
   the dashboard delivery; the surface delivery does not ship dashboard adapters.
 - **Export/live:** stream bounded frozen exports with manifests and ordered snapshot/delta/gap contracts. Filesystem publication and SSE framing remain adapter responsibilities.
 
-  **Owner decision (2026-08-08, Zack): NOT NEEDED — descoped without
+  **Owner decision (2026-08-08, Zack): NOT NEEDED, descoped without
   replacement.** The kernel-level frozen-export mechanism has no remaining
   consumer on either half. The live-view half is satisfied by deviation:
-  the dashboard — the only live consumer that ever existed — gets its
+  the dashboard, the only live consumer that ever existed, gets its
   streaming consistency from the Plan 11 revision-monotone HTTP/SSE state
   path (envelope watermarks + the events stream) at the adapter layer,
   not from kernel export contracts. The export half's only intended
@@ -229,15 +229,15 @@ Every product surface can run the same bounded query use case and receive determ
   long-lived subscription to changing results. This includes the two
   surfaces that return system context outward: hook hint returns are a
   fresh bounded read per triggering event (a stream of independent
-  one-shot reads, each deliberately reflecting the newest state), and
+  one-shot reads, each returning the newest state), and
   the Plan 35 LSP gateway pins its projections to an exact generation
   and answers staleness with typed retrigger/target-generation
-  invalidations — a poll-with-invalidation model that replaces delta
+  invalidations, a poll-with-invalidation model that replaces delta
   streaming for that surface. Revisit clause: if
   subscription-style consumers materialize post-V2 (for example MCP
   resource subscriptions letting agents watch a query), the
   snapshot/delta/gap contract described above is the design to implement
-  then — nothing in this decision forecloses it.
+  then, nothing in this decision forecloses it.
 - **Task/work reuse:** accept Plan 24-owned typed request and projection
   descriptors through narrow consumer-owned ports, then provide only shared
   scope resolution inputs, budgets, cancellation, pagination, watermarks,

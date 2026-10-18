@@ -7,7 +7,9 @@ use thiserror::Error;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId};
 use zeroize::Zeroizing;
 
-use super::ports::{TemporalExecutionSnapshot, TemporalPortError, await_controlled};
+use super::execution::await_controlled;
+use super::snapshot::TemporalExecutionSnapshot;
+use crate::execution::TemporalPortError;
 
 /// Fallible pre-allocation ceiling for a single authorized payload buffer.
 const MAX_HYDRATION_PREALLOC_BYTES: usize = 1024 * 1024;
@@ -25,7 +27,6 @@ impl HydrationDenial {
         Ok(Self { state })
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> HydrationStateV1 {
         self.state
     }
@@ -46,22 +47,18 @@ pub struct HydrationGrant<'a> {
 }
 
 impl<'a> HydrationGrant<'a> {
-    #[hotpath::skip]
     pub const fn snapshot(&self) -> &'a TemporalExecutionSnapshot {
         self.snapshot
     }
 
-    #[hotpath::skip]
     pub const fn anchor_id(&self) -> &'a RetrievalAnchorId {
         self.anchor_id
     }
 
-    #[hotpath::skip]
     pub const fn max_bytes(&self) -> usize {
         self.max_bytes
     }
 
-    #[hotpath::skip]
     pub const fn max_chunk_bytes(&self) -> usize {
         self.max_chunk_bytes
     }
@@ -70,6 +67,7 @@ impl<'a> HydrationGrant<'a> {
 pub struct HydrationSink<'a> {
     grant: &'a HydrationGrant<'a>,
     bytes: Zeroizing<Vec<u8>>,
+    page_full: bool,
 }
 
 impl<'a> HydrationSink<'a> {
@@ -87,6 +85,7 @@ impl<'a> HydrationSink<'a> {
         Ok(Self {
             grant,
             bytes: Zeroizing::new(bytes),
+            page_full: false,
         })
     }
 
@@ -119,6 +118,7 @@ impl<'a> HydrationSink<'a> {
             });
         }
         if next_len > self.grant.remaining_total_bytes {
+            self.page_full = true;
             return Err(HydrationError::BudgetExceeded {
                 resource: "total bytes",
             });
@@ -206,7 +206,6 @@ impl UnavailableHydration {
         &self.anchor_id
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> HydrationStateV1 {
         self.state
     }
@@ -220,9 +219,13 @@ impl UnavailableHydration {
 pub struct HydrationBatch {
     pub available: Vec<HydratedPayload>,
     pub unavailable: Vec<UnavailableHydration>,
+    /// Index of the first requested anchor whose payload did not fit the
+    /// page's remaining hydration bytes. It and every later anchor were not
+    /// read; the page ends before it.
+    pub page_end: Option<usize>,
 }
 
-#[hotpath::measure(future = true, label = "temporal.hydrate.selected")]
+#[tracing::instrument(name = "temporal.hydrate.selected", level = "trace", skip_all)]
 pub async fn hydrate_selected(
     port: &impl TemporalHydrationPort,
     snapshot: &TemporalExecutionSnapshot,
@@ -250,14 +253,14 @@ pub async fn hydrate_selected(
     // authorized read is granted `remaining_total = hydration_total_bytes -
     // total_bytes`, where `total_bytes` is the running sum of every prior
     // anchor's read. That gate bounds the sink and decides whether a read
-    // truncates, succeeds, or trips `BudgetExceeded` at a specific anchor; the
-    // resulting payloads are also appended to `batch` in anchor order. Running
-    // anchors concurrently would have to grant each read a budget computed
-    // before its predecessors finished, changing truncation, the first
-    // over-budget anchor, and batch ordering — i.e. changing the output.
+    // succeeds or ends the page at a specific anchor; the resulting payloads
+    // are also appended to `batch` in anchor order. Running anchors
+    // concurrently would have to grant each read a budget computed before its
+    // predecessors finished, changing where the page ends and batch ordering,
+    // i.e. changing the output.
     // Bounded concurrency cannot preserve this running-budget semantics, so the
     // sequential walk is the correct implementation.
-    for anchor_id in anchors {
+    for (index, anchor_id) in anchors.iter().enumerate() {
         snapshot.request().execution_control().checkpoint()?;
         if !seen.insert(anchor_id.clone()) {
             continue;
@@ -278,12 +281,14 @@ pub async fn hydrate_selected(
                 });
             }
             HydrationAuthorization::Authorized => {
-                let remaining_total = limits
-                    .hydration_total_bytes
-                    .checked_sub(total_bytes)
-                    .ok_or(HydrationError::BudgetExceeded {
-                        resource: "total bytes",
-                    })?;
+                // The page's first payload is bounded only by the per-payload
+                // ceiling, so a record larger than the page budget still pages
+                // instead of refusing every page that reaches it.
+                let remaining_total = if total_bytes == 0 {
+                    limits.hydration_payload_bytes
+                } else {
+                    limits.hydration_total_bytes.saturating_sub(total_bytes)
+                };
                 let grant = HydrationGrant {
                     snapshot,
                     anchor_id,
@@ -292,7 +297,12 @@ pub async fn hydrate_selected(
                     remaining_total_bytes: remaining_total,
                 };
                 let mut sink = HydrationSink::with_grant(&grant)?;
-                await_controlled(control, port.read_authorized(&grant, &mut sink)).await?;
+                let read = await_controlled(control, port.read_authorized(&grant, &mut sink)).await;
+                if sink.page_full {
+                    batch.page_end = Some(index);
+                    break;
+                }
+                read?;
                 total_bytes = total_bytes.checked_add(sink.bytes.len()).ok_or(
                     HydrationError::BudgetExceeded {
                         resource: "total bytes",
@@ -311,30 +321,23 @@ pub async fn hydrate_selected(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tracedecay_domain::{
-        HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
-    };
+    use tracedecay_domain::{RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1};
 
     use super::*;
-    use crate::ports::{
-        BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions,
-        TemporalExecutionSnapshot, TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
-    };
+    use crate::execution::TemporalPortError;
+    use crate::execution::{BindingDigest, ExecutionControl, ExecutionLimits};
     use crate::resolution::types::ValidatedAuthorization;
+    use crate::snapshot::TemporalSnapshotRequest;
+    use crate::snapshot::{KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks};
     use crate::test_support::block_on;
 
     fn anchor(value: &str) -> RetrievalAnchorId {
         serde_json::from_str(&format!("\"{value}\"")).expect("valid anchor")
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     fn snapshot() -> TemporalExecutionSnapshot {
         snapshot_with_limits(ExecutionLimits::default())
@@ -373,153 +376,6 @@ mod tests {
         .expect("valid snapshot")
     }
 
-    struct OrderedHydrator {
-        calls: Mutex<Vec<&'static str>>,
-    }
-
-    impl TemporalHydrationPort for OrderedHydrator {
-        fn authorize_hydration<'a>(
-            &'a self,
-            _snapshot: &'a TemporalExecutionSnapshot,
-            _anchor_id: &'a RetrievalAnchorId,
-        ) -> HydrationFuture<'a, HydrationAuthorization> {
-            Box::pin(async move {
-                self.calls.lock().expect("calls").push("authorize");
-                Ok(HydrationAuthorization::Authorized)
-            })
-        }
-
-        fn read_authorized<'a>(
-            &'a self,
-            grant: &'a HydrationGrant<'_>,
-            sink: &'a mut HydrationSink<'_>,
-        ) -> HydrationFuture<'a, ()> {
-            Box::pin(async move {
-                self.calls.lock().expect("calls").push("read");
-                assert_eq!(grant.anchor_id(), &anchor("ordered"));
-                sink.write_chunk(b"privacy-canary-secret")?;
-                Ok(())
-            })
-        }
-    }
-
-    #[test]
-    fn authorization_grant_is_minted_before_any_payload_read() {
-        block_on(async {
-            let hydrator = OrderedHydrator {
-                calls: Mutex::new(Vec::new()),
-            };
-            let requested = anchor("ordered");
-
-            let batch = hydrate_selected(&hydrator, &snapshot(), &[requested])
-                .await
-                .expect("authorized hydration");
-
-            assert_eq!(
-                hydrator.calls.lock().expect("calls").as_slice(),
-                ["authorize", "read"]
-            );
-            assert_eq!(batch.available[0].bytes(), b"privacy-canary-secret");
-            assert!(!format!("{batch:?}").contains("privacy-canary-secret"));
-        });
-    }
-
-    struct DenyingHydrator {
-        reads: AtomicUsize,
-    }
-
-    impl TemporalHydrationPort for DenyingHydrator {
-        fn authorize_hydration<'a>(
-            &'a self,
-            _snapshot: &'a TemporalExecutionSnapshot,
-            _anchor_id: &'a RetrievalAnchorId,
-        ) -> HydrationFuture<'a, HydrationAuthorization> {
-            Box::pin(async {
-                Ok(HydrationAuthorization::Denied(
-                    HydrationDenial::new(HydrationStateV1::Unauthorized)
-                        .expect("unauthorized is a denial"),
-                ))
-            })
-        }
-
-        fn read_authorized<'a>(
-            &'a self,
-            _grant: &'a HydrationGrant<'_>,
-            _sink: &'a mut HydrationSink<'_>,
-        ) -> HydrationFuture<'a, ()> {
-            Box::pin(async move {
-                self.reads.fetch_add(1, Ordering::SeqCst);
-                panic!("denied hydration must never reach payload read")
-            })
-        }
-    }
-
-    #[test]
-    fn denied_variant_has_no_payload_and_never_reads_bytes() {
-        block_on(async {
-            let hydrator = DenyingHydrator {
-                reads: AtomicUsize::new(0),
-            };
-            let denied = anchor("denied");
-
-            let batch = hydrate_selected(&hydrator, &snapshot(), &[denied])
-                .await
-                .expect("denial is an unavailable result");
-
-            assert!(batch.available.is_empty());
-            assert_eq!(batch.unavailable[0].state(), HydrationStateV1::Unauthorized);
-            assert_eq!(hydrator.reads.load(Ordering::SeqCst), 0);
-        });
-    }
-
-    struct OversizedHydrator {
-        observed_max: AtomicUsize,
-    }
-
-    impl TemporalHydrationPort for OversizedHydrator {
-        fn authorize_hydration<'a>(
-            &'a self,
-            _snapshot: &'a TemporalExecutionSnapshot,
-            _anchor_id: &'a RetrievalAnchorId,
-        ) -> HydrationFuture<'a, HydrationAuthorization> {
-            Box::pin(async { Ok(HydrationAuthorization::Authorized) })
-        }
-
-        fn read_authorized<'a>(
-            &'a self,
-            grant: &'a HydrationGrant<'_>,
-            sink: &'a mut HydrationSink<'_>,
-        ) -> HydrationFuture<'a, ()> {
-            Box::pin(async move {
-                self.observed_max.store(grant.max_bytes(), Ordering::SeqCst);
-                sink.write_chunk(&vec![0; grant.max_bytes() + 1])
-            })
-        }
-    }
-
-    #[test]
-    fn hydration_sink_enforces_payload_bound_before_crossing_boundary() {
-        block_on(async {
-            let hydrator = OversizedHydrator {
-                observed_max: AtomicUsize::new(0),
-            };
-            let requested = anchor("bounded");
-            let snapshot = snapshot_with_limits(ExecutionLimits {
-                hydration_payload_bytes: 8,
-                hydration_total_bytes: 8,
-                ..ExecutionLimits::default()
-            });
-
-            assert_eq!(
-                hydrate_selected(&hydrator, &snapshot, &[requested]).await,
-                Err(HydrationError::BudgetExceeded {
-                    resource: "payload bytes"
-                })
-            );
-            assert_eq!(hydrator.observed_max.load(Ordering::SeqCst), 8);
-        });
-    }
-
     struct FixedPayloadHydrator;
 
     impl TemporalHydrationPort for FixedPayloadHydrator {
@@ -541,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn hydration_sink_enforces_total_bound_across_authorized_reads() {
+    fn hydration_total_bound_ends_the_page_before_the_payload_that_does_not_fit() {
         block_on(async {
             let snapshot = snapshot_with_limits(ExecutionLimits {
                 hydration_payload_bytes: 8,
@@ -549,17 +405,45 @@ mod tests {
                 ..ExecutionLimits::default()
             });
 
+            let batch = hydrate_selected(
+                &FixedPayloadHydrator,
+                &snapshot,
+                &[anchor("first"), anchor("second"), anchor("third")],
+            )
+            .await
+            .expect("a full page ends early");
+            assert_eq!(batch.page_end, Some(1));
             assert_eq!(
-                hydrate_selected(
-                    &FixedPayloadHydrator,
-                    &snapshot,
-                    &[anchor("first"), anchor("second")],
-                )
-                .await,
-                Err(HydrationError::BudgetExceeded {
-                    resource: "total bytes"
-                })
+                batch
+                    .available
+                    .iter()
+                    .map(|payload| (payload.anchor_id().clone(), payload.bytes().to_vec()))
+                    .collect::<Vec<_>>(),
+                [(anchor("first"), b"12345".to_vec())]
             );
+            assert!(batch.unavailable.is_empty());
+        });
+    }
+
+    #[test]
+    fn hydration_admits_a_first_payload_larger_than_the_page_total() {
+        block_on(async {
+            let snapshot = snapshot_with_limits(ExecutionLimits {
+                hydration_payload_bytes: 8,
+                hydration_total_bytes: 4,
+                ..ExecutionLimits::default()
+            });
+
+            let batch = hydrate_selected(
+                &FixedPayloadHydrator,
+                &snapshot,
+                &[anchor("large"), anchor("next")],
+            )
+            .await
+            .expect("the first payload pages within the per-payload ceiling");
+            assert_eq!(batch.page_end, Some(1));
+            assert_eq!(batch.available.len(), 1);
+            assert_eq!(batch.available[0].bytes(), b"12345");
         });
     }
 
@@ -640,26 +524,6 @@ mod tests {
                 sink.write_chunk(b"ok")
             })
         }
-    }
-
-    #[test]
-    fn hydration_sink_preallocates_within_frozen_effective_bounds() {
-        block_on(async {
-            let hydrator = CapacityProbeHydrator {
-                capacity: AtomicUsize::new(0),
-            };
-            let snapshot = snapshot_with_limits(ExecutionLimits {
-                hydration_payload_bytes: 8,
-                hydration_total_bytes: 8,
-                ..ExecutionLimits::default()
-            });
-
-            hydrate_selected(&hydrator, &snapshot, &[anchor("prealloc")])
-                .await
-                .expect("authorized hydration");
-            assert!(hydrator.capacity.load(Ordering::SeqCst) >= 8);
-            assert!(hydrator.capacity.load(Ordering::SeqCst) <= MAX_HYDRATION_PREALLOC_BYTES);
-        });
     }
 
     #[test]

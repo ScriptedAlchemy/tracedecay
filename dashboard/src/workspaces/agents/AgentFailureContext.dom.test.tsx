@@ -2,7 +2,7 @@ import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { WorkGraphReadV1Schema } from '../../contracts/generated.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
-import type { WorkGraphReadV1 } from '../../contracts/index.ts';
+import type { WorkGraphReadV1 } from '../../contracts/generated.ts';
 import type { WorkResult } from '../work/workApi.ts';
 import { AgentFailureContext } from './AgentFailureContext.tsx';
 import { readAttemptFailures, type AttemptFailureReading } from './failure.ts';
@@ -27,7 +27,7 @@ const OUTCOMES = [
 
 const EVENTS = [
   { timestamp: SECOND, tool_name: 'tracedecay_grep', event_kind: 'mcp_tool_call', outcome: 'success' },
-  { timestamp: SECOND - 30, tool_name: 'tracedecay_read', event_kind: 'mcp_tool_call', outcome: 'error' },
+  { timestamp: SECOND - 30, tool_name: 'tracedecay_source_lines', event_kind: 'mcp_tool_call', outcome: 'error' },
   { timestamp: SECOND - 90, tool_name: 'Bash', event_kind: 'tool_call', outcome: 'timed_out' },
 ];
 
@@ -59,7 +59,7 @@ describe('AgentFailureContext', () => {
   it('accounts for the window outcomes against the population they describe', () => {
     renderContext(readAttemptFailures(attempts()));
     // 800 of 10,000, and the denominator is the accounted set rather than the
-    // window's own count — which the fold measures separately.
+    // window's own count, which the fold measures separately.
     expect(screen.getByText(/800/)).toBeTruthy();
     expect(screen.getByText(/8\.00%/)).toBeTruthy();
     expect(
@@ -87,7 +87,7 @@ describe('AgentFailureContext', () => {
   it('reads the failures off the served tape and says what the tape is', () => {
     renderContext(readAttemptFailures(attempts()));
     const tape = document.querySelector('[data-agent-failure-tape="2"]')!;
-    expect(within(tape as HTMLElement).getByText('tracedecay_read')).toBeTruthy();
+    expect(within(tape as HTMLElement).getByText('tracedecay_source_lines')).toBeTruthy();
     expect(within(tape as HTMLElement).getByText('Bash')).toBeTruthy();
     expect(within(tape as HTMLElement).queryByText('tracedecay_grep')).toBeNull();
     expect(screen.getByText(/nothing here explains why any of them failed/)).toBeTruthy();

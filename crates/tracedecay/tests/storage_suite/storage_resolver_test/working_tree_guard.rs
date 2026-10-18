@@ -38,18 +38,23 @@ fn visible_working_tree_entries(root: &Path) -> BTreeSet<PathBuf> {
 
 #[tokio::test]
 async fn init_and_open_leave_a_git_working_tree_unchanged() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
     let home = test_home(&dir);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn guarded() {}\n").unwrap();
-    let _home_guard = HomeGuard::set(&home);
+    let profile = test_profile(&home);
     init_repo_with_commit(&project);
     let before = visible_working_tree_entries(&project);
 
-    init_with_maintenance(&project).await.unwrap().close();
-    open_with_maintenance(&project).await.unwrap().close();
+    init_with_maintenance(&profile, &project)
+        .await
+        .unwrap()
+        .close();
+    open_with_maintenance(&profile, &project)
+        .await
+        .unwrap()
+        .close();
 
     let after = visible_working_tree_entries(&project);
     assert_eq!(
@@ -60,7 +65,7 @@ async fn init_and_open_leave_a_git_working_tree_unchanged() {
         after.difference(&before).collect::<Vec<_>>(),
         before.difference(&after).collect::<Vec<_>>()
     );
-    // The identity did persist — in the sanctioned `.git/` anchor, which is
+    // The identity did persist, in the sanctioned `.git/` anchor, which is
     // deliberately outside the guarded snapshot.
     assert!(
         read_repository_identity_marker(&project).unwrap().is_some(),
@@ -70,23 +75,28 @@ async fn init_and_open_leave_a_git_working_tree_unchanged() {
 
 #[tokio::test]
 async fn init_and_open_leave_a_non_git_working_tree_unchanged() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("plain-project");
     let home = test_home(&dir);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn guarded() {}\n").unwrap();
-    let _home_guard = HomeGuard::set(&home);
+    let profile = test_profile(&home);
     let before = visible_working_tree_entries(&project);
 
-    init_with_maintenance(&project).await.unwrap().close();
-    open_with_maintenance(&project).await.unwrap().close();
+    init_with_maintenance(&profile, &project)
+        .await
+        .unwrap()
+        .close();
+    open_with_maintenance(&profile, &project)
+        .await
+        .unwrap()
+        .close();
 
     let after = visible_working_tree_entries(&project);
     assert_eq!(
         before,
         after,
-        "a non-git project must gain no entries at all — its identity is \
+        "a non-git project must gain no entries at all, its identity is \
          deterministic and lives only in the profile registry; \
          new entries: {:?}",
         after.difference(&before).collect::<Vec<_>>()

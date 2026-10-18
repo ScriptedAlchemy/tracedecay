@@ -1,23 +1,26 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use tracedecay_application::session_sync::{
+use tracedecay_contracts::session_sync::{
     SessionSyncCommandV1, SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1,
     SessionSyncRequestV1, SessionSyncScopeV1, SessionTranscriptImportV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId, now_micros,
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
 use super::{
     ActiveSessionImport, DaemonSessionSyncConfig, DaemonSessionSyncService,
-    SESSION_SYNC_SHUTDOWN_DEADLINE, contract_error, import_scope_key, journal_decode_error,
-    journal_key, journal_prefix, store_error, work,
+    SESSION_SYNC_SHUTDOWN_DEADLINE, SessionSyncTerminalMaterial, contract_error, import_scope_key,
+    journal_decode_error, journal_key, journal_prefix, store_error, work,
 };
 
 const SESSION_SYNC_STARTUP_DEADLINE_MICROS: i64 = 60_000_000;
@@ -26,9 +29,7 @@ pub struct SessionSyncProjectContext {
     pub(super) brain_id: BrainId,
     pub(super) profile_id: UserProfileId,
     pub(super) project_id: ProjectId,
-    pub(super) profile_root: PathBuf,
     pub(super) project_root: PathBuf,
-    pub(super) transcript_source_home: Option<PathBuf>,
     pub(super) project_sessions: RwLock<Option<RegisteredGlobalDbLeaseV1>>,
     project_sessions_locator: VerifiedStoreLocatorV1,
     pub(super) user_sessions: RegisteredGlobalDbLeaseV1,
@@ -42,7 +43,7 @@ pub struct SessionSyncTaskV1 {
     pub scope: SessionSyncScopeV1,
     pub key: String,
     pub cancellation: CancellationSignal,
-    pub task: tokio::task::JoinHandle<()>,
+    pub task: NativeTask<()>,
 }
 
 impl SessionSyncProjectContext {
@@ -107,7 +108,6 @@ impl DaemonSessionSyncService {
         )
     }
 
-    #[hotpath::skip]
     async fn recover_project(
         &self,
         context: &Arc<SessionSyncProjectContext>,
@@ -150,11 +150,13 @@ impl DaemonSessionSyncService {
                         self.persist_terminal(
                             context,
                             &key,
-                            OperationTermination::Cancelled,
-                            journal.stats,
-                            journal.coverage,
-                            journal.source_frontiers,
-                            Vec::new(),
+                            SessionSyncTerminalMaterial {
+                                termination: OperationTermination::Cancelled,
+                                stats: journal.stats,
+                                coverage: journal.coverage,
+                                source_frontiers: journal.source_frontiers,
+                                failure_codes: Vec::new(),
+                            },
                         )
                         .await?;
                         continue;
@@ -163,11 +165,13 @@ impl DaemonSessionSyncService {
                         self.persist_terminal(
                             context,
                             &key,
-                            OperationTermination::TimedOut,
-                            journal.stats,
-                            journal.coverage,
-                            journal.source_frontiers,
-                            Vec::new(),
+                            SessionSyncTerminalMaterial {
+                                termination: OperationTermination::TimedOut,
+                                stats: journal.stats,
+                                coverage: journal.coverage,
+                                source_frontiers: journal.source_frontiers,
+                                failure_codes: Vec::new(),
+                            },
                         )
                         .await?;
                         continue;
@@ -192,11 +196,13 @@ impl DaemonSessionSyncService {
                     self.persist_terminal(
                         context,
                         &key,
-                        OperationTermination::Cancelled,
-                        journal.stats,
-                        journal.coverage,
-                        journal.source_frontiers,
-                        Vec::new(),
+                        SessionSyncTerminalMaterial {
+                            termination: OperationTermination::Cancelled,
+                            stats: journal.stats,
+                            coverage: journal.coverage,
+                            source_frontiers: journal.source_frontiers,
+                            failure_codes: Vec::new(),
+                        },
                     )
                     .await?;
                     continue;
@@ -205,11 +211,13 @@ impl DaemonSessionSyncService {
                     self.persist_terminal(
                         context,
                         &key,
-                        OperationTermination::TimedOut,
-                        journal.stats,
-                        journal.coverage,
-                        journal.source_frontiers,
-                        Vec::new(),
+                        SessionSyncTerminalMaterial {
+                            termination: OperationTermination::TimedOut,
+                            stats: journal.stats,
+                            coverage: journal.coverage,
+                            source_frontiers: journal.source_frontiers,
+                            failure_codes: Vec::new(),
+                        },
                     )
                     .await?;
                     continue;
@@ -278,7 +286,6 @@ impl DaemonSessionSyncService {
         Ok(recovered_import)
     }
 
-    #[hotpath::skip]
     pub async fn register_project(
         &self,
         config: DaemonSessionSyncConfig,
@@ -292,9 +299,7 @@ impl DaemonSessionSyncService {
             brain_id: config.brain_id,
             profile_id: config.profile_id,
             project_id: config.project_id,
-            profile_root: config.profile_root,
             project_root: config.project_root,
-            transcript_source_home: config.transcript_source_home,
             project_sessions: RwLock::new(None),
             project_sessions_locator,
             user_sessions: config.user_sessions,
@@ -372,7 +377,6 @@ impl DaemonSessionSyncService {
         Ok(())
     }
 
-    #[hotpath::skip]
     async fn schedule_startup_import(
         &self,
         context: &Arc<SessionSyncProjectContext>,
@@ -428,7 +432,7 @@ impl DaemonSessionSyncService {
         match outcome {
             SessionSyncOutcomeV1::Accepted(_)
             | SessionSyncOutcomeV1::Joined(_)
-            | SessionSyncOutcomeV1::Complete(_) => Ok(()),
+            | SessionSyncOutcomeV1::Complete { .. } => Ok(()),
             SessionSyncOutcomeV1::Unavailable { reason_code }
                 if reason_code == SESSION_INGEST_DISABLED_REASON_V1 =>
             {
@@ -457,7 +461,6 @@ impl DaemonSessionSyncService {
             .cloned()
     }
 
-    #[hotpath::measure(label = "daemon.session_sync.lifecycle.execute_request", future = true)]
     pub(super) async fn execute_request(
         &self,
         request: SessionSyncRequestV1,
@@ -472,11 +475,12 @@ impl DaemonSessionSyncService {
                 reason_code: "session_sync_project_retired",
             };
         };
-        self.execute_request_admitted(request, Arc::clone(&context), project_sessions)
-            .await
+        let admitted: Pin<Box<dyn Future<Output = SessionSyncOutcomeV1> + Send + '_>> = Box::pin(
+            self.execute_request_admitted(request, Arc::clone(&context), project_sessions),
+        );
+        admitted.await
     }
 
-    #[hotpath::skip]
     pub async fn retire_project(
         &self,
         profile_id: &UserProfileId,
@@ -504,7 +508,6 @@ impl DaemonSessionSyncService {
         Ok(true)
     }
 
-    #[hotpath::skip]
     pub async fn rebind_project(
         &self,
         profile_id: &UserProfileId,
@@ -530,15 +533,12 @@ impl DaemonSessionSyncService {
             return Err(format!(
                 "session sync project '{}' could not recover after rebind: {error}{}",
                 project_id.as_str(),
-                drain
-                    .map(|drain| format!("; rollback failed: {drain}"))
-                    .unwrap_or_default(),
+                drain.map_or_default(|drain| format!("; rollback failed: {drain}")),
             ));
         }
         Ok(true)
     }
 
-    #[hotpath::skip]
     async fn drain_project_tasks(&self, scope: &SessionSyncScopeV1) -> Result<(), String> {
         let mut project_tasks = {
             let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -558,21 +558,23 @@ impl DaemonSessionSyncService {
         for task in &project_tasks {
             task.cancellation.cancel(cancelled_at);
         }
-        let joined = tokio::time::timeout(SESSION_SYNC_SHUTDOWN_DEADLINE, async {
-            futures_util::future::join_all(project_tasks.iter_mut().map(|task| &mut task.task))
-                .await
+        let joined = native_runtime::timeout(SESSION_SYNC_SHUTDOWN_DEADLINE, async {
+            futures_util::future::join_all(project_tasks.iter().map(|task| task.task.wait())).await
         })
         .await;
-        let Ok(results) = joined else {
-            project_tasks.retain(|task| !task.task.is_finished());
-            self.tasks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .extend(project_tasks);
-            return Err(format!(
-                "session sync tasks for project '{}' did not retire before the deadline",
-                scope.project_id().as_str()
-            ));
+        let results = match joined {
+            Ok(results) => results,
+            Err(error) => {
+                project_tasks.retain(|task| !task.task.is_finished());
+                self.tasks
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend(project_tasks);
+                return Err(format!(
+                    "session sync tasks for project '{}' did not retire: {error}",
+                    scope.project_id().as_str()
+                ));
+            }
         };
         for result in results {
             work::log_session_sync_join(result);
@@ -612,7 +614,6 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::skip]
     async fn restore_previous_context(
         &self,
         scope: &SessionSyncScopeV1,

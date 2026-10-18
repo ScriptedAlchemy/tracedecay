@@ -14,11 +14,11 @@ use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, configuration_authority_unavailable_error,
     configuration_revision_conflict_error, settings_validation_error,
 };
-use tracedecay_application::ApplicationOutcome;
+use tracedecay_contracts::ApplicationOutcome;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
-    ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
+    ConfigurationRevisionId, ConfigurationValueV1, LcmSummarizerExecutableV1, SettingKey,
 };
 
 use super::DashboardState;
@@ -27,7 +27,7 @@ use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{
     AutomationConfig, AutomationConfigPatch, effective_config, from_configuration_snapshot,
 };
-use tracedecay_configuration::DirectConfigurationMutation;
+use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 
 use crate::application_surface::configuration_apply_error;
 
@@ -44,18 +44,27 @@ pub struct AutomationConfigMutationRequest {
     pub patch: AutomationConfigPatch,
 }
 
-#[hotpath::measure(label = "dashboard_api.automation.get_config", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.automation.get_config",
+    level = "trace",
+    skip_all
+)]
 pub async fn get_config(State(state): State<DashboardState>) -> ApiResult {
-    let (configuration_revision_id, effective) = effective_automation_config(&state)
+    let (configuration_revision_id, effective, codex) = effective_automation_config(&state)
         .map_err(|_| configuration_authority_unavailable_error())?;
     Ok(Json(config_payload(
         &configuration_revision_id,
         &effective,
+        &codex,
         None,
     )?))
 }
 
-#[hotpath::measure(label = "dashboard_api.automation.patch_config", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.automation.patch_config",
+    level = "trace",
+    skip_all
+)]
 pub async fn patch_config(
     State(state): State<DashboardState>,
     request: std::result::Result<Json<AutomationConfigMutationRequest>, JsonRejection>,
@@ -80,7 +89,7 @@ pub async fn patch_config(
                 "message": "idempotency_key must be one non-empty canonical caller-stable value"
             }]))
         })?;
-    let (current_revision, current) = effective_automation_config(&state)
+    let (current_revision, current, _) = effective_automation_config(&state)
         .map_err(|_| configuration_authority_unavailable_error())?;
     if expected_revision != current_revision {
         return Err(configuration_revision_conflict_error(
@@ -136,36 +145,47 @@ pub async fn patch_config(
     // The runtime refreshes the pinned snapshot as part of a settled
     // configuration effect. Re-read it instead of projecting the submitted
     // candidate, so a response never claims a setting that failed activation.
-    let (configuration_revision_id, effective) = effective_automation_config(&state)
+    let (configuration_revision_id, effective, codex) = effective_automation_config(&state)
         .map_err(|_| configuration_authority_unavailable_error())?;
     Ok(Json(config_payload(
         &configuration_revision_id,
         &effective,
+        &codex,
         application_outcome.as_ref(),
     )?))
 }
 
-/// Returns the one admitted runtime configuration for an automation caller.
-/// The revision is returned with the value so consumers cannot accidentally
-/// pair a status result with an unrelated configuration revision.
+/// Returns the one admitted runtime configuration for an automation caller:
+/// the automation settings and the `codex` executable the same pinned snapshot
+/// binds. The revision is returned with the values so consumers cannot
+/// accidentally pair a status result with an unrelated configuration revision.
 pub(crate) fn effective_automation_config(
     state: &DashboardState,
-) -> tracedecay_domain::errors::Result<(ConfigurationRevisionId, AutomationConfig)> {
-    let pinned = crate::config::cached_runtime_configuration(&state.project_root)?;
-    let config = from_configuration_snapshot(&pinned.snapshot)?;
-    Ok((pinned.revision_id, config))
+) -> tracedecay_domain::errors::Result<(
+    ConfigurationRevisionId,
+    AutomationConfig,
+    LcmSummarizerExecutableV1,
+)> {
+    let pinned = state.cached_runtime_configuration()?;
+    let config = from_configuration_snapshot(pinned.snapshot())?;
+    Ok((
+        pinned.revision_id().clone(),
+        config,
+        pinned.config().lcm_summarizers.codex.clone(),
+    ))
 }
 
 fn config_payload(
     configuration_revision_id: &ConfigurationRevisionId,
     effective: &AutomationConfig,
+    codex: &LcmSummarizerExecutableV1,
     application_outcome: Option<&ApplicationOutcome<Value>>,
 ) -> std::result::Result<Value, DashboardConfigurationRouteErrorV1> {
     let mut payload = json!({
         "configuration_revision_id": configuration_revision_id.as_str(),
         "source": "daemon_pinned_snapshot",
         "effective": effective,
-        "backend_availability": backend::backend_availability(effective),
+        "backend_availability": backend::backend_availability(effective, codex),
     });
     if let Some(application_outcome) = application_outcome {
         payload["application_outcome"] = serde_json::to_value(application_outcome)

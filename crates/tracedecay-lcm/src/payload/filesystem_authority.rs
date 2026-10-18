@@ -10,7 +10,9 @@ use std::os::windows::io::AsRawHandle;
 
 use super::LcmError;
 
+mod payload_stream;
 mod verified_read;
+pub use payload_stream::{PayloadStreamError, VerifiedPayloadStream};
 use verified_read::{
     authority_for_content, authority_for_content_with_checkpoint,
     read_stable_payload_bytes_bounded_with, read_stable_payload_bytes_bounded_with_checkpoint,
@@ -30,6 +32,17 @@ pub(super) struct PayloadFileIdentity {
     volume_serial_number: u64,
     #[cfg(windows)]
     file_id: [u8; 16],
+}
+
+pub(super) fn same_payload_file_identity(
+    actual: &PayloadFileIdentity,
+    expected: &PayloadFileIdentity,
+) -> Result<(), LcmError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(LcmError::InvalidPayloadRef)
+    }
 }
 
 /// Opaque proof that a payload's locator, stable file identity, digest, and
@@ -123,7 +136,7 @@ pub(super) fn remove_verified_payload_file(
     remove_verified_payload_file_with(authority, || Ok(()))
 }
 
-#[hotpath::measure(label = "sessions.lcm_fs_authority.remove")]
+#[tracing::instrument(name = "sessions.lcm_fs_authority.remove", level = "trace", skip_all)]
 fn remove_verified_payload_file_with<F>(
     authority: &VerifiedPayloadAuthority,
     before_verify: F,
@@ -185,7 +198,11 @@ fn read_payload_file_for_verify_bounded(
     read_payload_file_for_verify_bounded_with_checkpoint(path, max_bytes, &mut || Ok(()))
 }
 
-#[hotpath::measure(label = "sessions.lcm_fs_authority.read_verify")]
+#[tracing::instrument(
+    name = "sessions.lcm_fs_authority.read_verify",
+    level = "trace",
+    skip_all
+)]
 fn read_payload_file_for_verify_bounded_with_checkpoint(
     path: &Path,
     max_bytes: u64,
@@ -213,25 +230,14 @@ pub(super) fn verify_payload_file_authority(
     expected_bytes: u64,
     expected_chars: u64,
 ) -> Result<Option<VerifiedPayloadAuthority>, LcmError> {
-    Ok(
-        read_verified_payload_file(path, expected_hash, expected_bytes, expected_chars)?
-            .map(|(_content, authority)| authority),
-    )
-}
-
-pub(super) fn read_verified_payload_file(
-    path: &Path,
-    expected_hash: &str,
-    expected_bytes: u64,
-    expected_chars: u64,
-) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
-    read_verified_payload_file_with_checkpoint(
+    Ok(read_verified_payload_file_with_checkpoint(
         path,
         expected_hash,
         expected_bytes,
         expected_chars,
         &mut || Ok(()),
-    )
+    )?
+    .map(|(_content, authority)| authority))
 }
 
 pub(super) fn read_verified_payload_file_with_checkpoint(
@@ -276,7 +282,7 @@ fn open_verified_payload_file_for_delete(
     open_verified_payload_file_with(path, &mut delete_file_options())
 }
 
-#[hotpath::measure(label = "sessions.lcm_fs_authority.open")]
+#[tracing::instrument(name = "sessions.lcm_fs_authority.open", level = "trace", skip_all)]
 fn open_verified_payload_file_with(
     path: &Path,
     options: &mut fs::OpenOptions,
@@ -364,18 +370,6 @@ fn payload_file_identity(
     })
 }
 
-#[cfg(unix)]
-pub(super) fn same_payload_file_identity(
-    actual: &PayloadFileIdentity,
-    expected: &PayloadFileIdentity,
-) -> Result<(), LcmError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(LcmError::InvalidPayloadRef)
-    }
-}
-
 #[cfg(windows)]
 fn same_file_identity(
     file: &fs::File,
@@ -383,7 +377,7 @@ fn same_file_identity(
     _lstat: &fs::Metadata,
     path: &Path,
 ) -> Result<(), LcmError> {
-    let current = verification_file_options()
+    let current = private_file_options()
         .read(true)
         .open(path)
         .map_err(|err| classify_payload_open_error(path, err))?;
@@ -400,18 +394,6 @@ fn payload_file_identity(
     _metadata: &fs::Metadata,
 ) -> Result<PayloadFileIdentity, LcmError> {
     windows_file_identity(file)
-}
-
-#[cfg(windows)]
-pub(super) fn same_payload_file_identity(
-    actual: &PayloadFileIdentity,
-    expected: &PayloadFileIdentity,
-) -> Result<(), LcmError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(LcmError::InvalidPayloadRef)
-    }
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -431,15 +413,6 @@ fn payload_file_identity(
     _metadata: &fs::Metadata,
 ) -> Result<PayloadFileIdentity, LcmError> {
     Ok(PayloadFileIdentity {})
-}
-
-#[cfg(all(not(unix), not(windows)))]
-#[allow(clippy::trivially_copy_pass_by_ref, clippy::unnecessary_wraps)] // Keep the identity API uniform even where the platform identity is opaque.
-pub(super) fn same_payload_file_identity(
-    _actual: &PayloadFileIdentity,
-    _expected: &PayloadFileIdentity,
-) -> Result<(), LcmError> {
-    Ok(())
 }
 
 fn ensure_regular_non_reparse_file(metadata: &fs::Metadata) -> Result<(), LcmError> {
@@ -617,9 +590,13 @@ fn classify_directory_path_error(path: &Path, error: std::io::Error) -> LcmError
     }
 }
 
-#[hotpath::measure(label = "sessions.lcm_fs_authority.prepare_dir")]
+#[tracing::instrument(
+    name = "sessions.lcm_fs_authority.prepare_dir",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
-    let root = super::canonical_storage_root(storage_root)?;
+    let root = canonical_storage_root(storage_root)?;
     #[cfg(windows)]
     let _root_guard = open_verified_directory(&root)?;
     let dir = root.join("lcm-payloads");
@@ -662,12 +639,16 @@ pub fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
 
 /// Like `existing_payload_dir`, but a payload directory that was never
 /// created (it is made lazily on first externalization) or has been removed
-/// reports as `None` instead of an I/O error. Invalid configurations —
-/// symlinked dir, wrong file type, dir escaping the storage root — still
+/// reports as `None` instead of an I/O error. Invalid configurations,
+/// symlinked dir, wrong file type, dir escaping the storage root, still
 /// error.
-#[hotpath::measure(label = "sessions.lcm_fs_authority.existing_dir")]
+#[tracing::instrument(
+    name = "sessions.lcm_fs_authority.existing_dir",
+    level = "trace",
+    skip_all
+)]
 pub fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {
-    let root = super::canonical_storage_root(storage_root)?;
+    let root = canonical_storage_root(storage_root)?;
     #[cfg(windows)]
     let _root_guard = open_verified_directory(&root)?;
     let dir = root.join("lcm-payloads");
@@ -764,7 +745,7 @@ pub fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
     same_windows_handle_identity(&root_handle, &parent_handle)
 }
 
-#[hotpath::measure(label = "sessions.lcm_fs_authority.write")]
+#[tracing::instrument(name = "sessions.lcm_fs_authority.write", level = "trace", skip_all)]
 pub(super) fn write_private_file(
     path: &Path,
     content: &[u8],
@@ -966,15 +947,6 @@ fn private_create_file_options() -> fs::OpenOptions {
 }
 
 #[cfg(windows)]
-fn verification_file_options() -> fs::OpenOptions {
-    let mut options = fs::OpenOptions::new();
-    options
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
-    options
-}
-
-#[cfg(windows)]
 fn private_directory_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
     options
@@ -1069,7 +1041,6 @@ mod windows_tests {
         assert_eq!(align_of::<FileIdInfo>(), 8);
         assert_eq!(offset_of!(FileIdInfo, volume_serial_number), 0);
         assert_eq!(offset_of!(FileIdInfo, file_id), 8);
-        assert_eq!(FILE_ID_INFO_CLASS, 18);
     }
 
     #[test]
@@ -1102,30 +1073,6 @@ mod windows_tests {
     }
 
     #[test]
-    fn ntfs_and_refs_shaped_file_ids_are_valid() {
-        let ntfs = validate_file_id_info(raw_file_id_info(
-            0x55aa_0123_89ab_cdef,
-            [
-                0x32, 0x10, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0, 0, 0, 0, 0, 0, 0, 0,
-            ],
-        ))
-        .unwrap();
-        assert_eq!(
-            ntfs.file_id,
-            [
-                0x32, 0x10, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0, 0, 0, 0, 0, 0, 0, 0,
-            ]
-        );
-
-        let refs_id = [
-            0x90, 0x8f, 0x7e, 0x6d, 0x5c, 0x4b, 0x3a, 0x29, 0x18, 0x07, 0xf6, 0xe5, 0xd4, 0xc3,
-            0xb2, 0xa1,
-        ];
-        let refs = validate_file_id_info(raw_file_id_info(0xa5a5_5a5a_1234_5678, refs_id)).unwrap();
-        assert_eq!(refs.file_id, refs_id);
-    }
-
-    #[test]
     fn successful_file_id_query_reads_the_complete_identity() {
         let expected = raw_file_id_info(
             0x1020_3040_5060_7080,
@@ -1137,7 +1084,7 @@ mod windows_tests {
         let identity = query_windows_file_identity_with(
             std::ptr::null_mut(),
             |_, information_class, information, buffer_size| {
-                assert_eq!(information_class, FILE_ID_INFO_CLASS);
+                assert_eq!(information_class, 18);
                 assert_eq!(buffer_size as usize, size_of::<FileIdInfo>());
                 // SAFETY: The seam supplies a writable `FileIdInfo` buffer.
                 unsafe {
@@ -1170,7 +1117,7 @@ mod windows_tests {
         let volume_only = query_windows_file_identity_with(
             std::ptr::null_mut(),
             |_, information_class, information, buffer_size| {
-                assert_eq!(information_class, FILE_ID_INFO_CLASS);
+                assert_eq!(information_class, 18);
                 assert_eq!(buffer_size as usize, size_of::<FileIdInfo>());
                 // SAFETY: The seam supplies a writable `FileIdInfo` buffer.
                 unsafe {
@@ -1189,7 +1136,7 @@ mod windows_tests {
             std::ptr::null_mut(),
             |_, information_class, _, buffer_size| {
                 calls.set(calls.get() + 1);
-                assert_eq!(information_class, FILE_ID_INFO_CLASS);
+                assert_eq!(information_class, 18);
                 assert_eq!(buffer_size as usize, size_of::<FileIdInfo>());
                 0
             },
@@ -1368,24 +1315,6 @@ mod windows_tests {
     }
 
     #[test]
-    fn stable_read_bytes_match_reported_size_and_hash() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
-        fs::create_dir(&root).unwrap();
-        let dir = prepare_payload_dir(&root).unwrap();
-        let path = dir.join("payload_hash.payload");
-        let expected = b"stable hash input";
-        fs::write(&path, expected).unwrap();
-
-        let (content, _) = read_payload_file_for_verify(&path).unwrap().unwrap();
-        assert_eq!(content.len() as u64, expected.len() as u64);
-        assert_eq!(
-            super::super::util::sha256_hex(&content),
-            super::super::util::sha256_hex(expected)
-        );
-    }
-
-    #[test]
     fn handle_delete_blocks_writer_and_removes_opened_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("root");
@@ -1444,11 +1373,13 @@ mod windows_tests {
 
 #[cfg(test)]
 mod authority_tests {
+    use tracedecay_domain::canonical_text::sha256_hex;
+
     use super::*;
 
     fn expectation(content: &str) -> (String, u64, u64) {
         (
-            super::super::util::sha256_hex(content.as_bytes()),
+            sha256_hex(content.as_bytes()),
             content.len() as u64,
             content.chars().count() as u64,
         )
@@ -1500,11 +1431,14 @@ mod authority_tests {
         let path = temp.path().join("oversized.payload");
         let file = fs::File::create(&path).unwrap();
         file.set_len(MAX_VERIFIED_PAYLOAD_FILE_BYTES + 1).unwrap();
+        // Close the creator handle before size-only admission. A held Windows
+        // handle reports sharing/lock violation instead of the size refusal.
+        drop(file);
 
-        assert!(matches!(
-            read_payload_file_for_verify(&path),
-            Err(LcmError::PayloadIntegrityMismatch)
-        ));
+        assert_eq!(
+            read_payload_file_for_verify(&path).expect_err("oversized payload"),
+            LcmError::PayloadIntegrityMismatch
+        );
     }
 
     #[test]
@@ -1554,9 +1488,16 @@ mod authority_tests {
             .unwrap()
             .unwrap();
         let debug = format!("{authority:?}");
+        assert_eq!(
+            &debug[debug.find("content_hash:").expect("content hash field")..],
+            "content_hash: \"25b36376c50544179d61adce27285045fbd8824ca4c024a33efff88e22a234a9\", byte_count: 10, char_count: 7, locator: \"<redacted>\" }"
+        );
         assert!(!debug.contains(content));
         assert!(!debug.contains("秘密-payload.payload"));
-        assert!(debug.contains(&hash));
+        assert_eq!(
+            hash,
+            "25b36376c50544179d61adce27285045fbd8824ca4c024a33efff88e22a234a9"
+        );
         assert!(remove_verified_payload_file(&authority).unwrap());
         assert!(!path.exists());
     }

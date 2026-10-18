@@ -5,10 +5,11 @@
 //! takes the database write lock bumps the epoch, so a cached hit is valid
 //! only for the exact store generation it was built against.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
+use grafeo_common::memory::heap::{arc_slice_bytes, std_hash_map_bytes, string_bytes, vec_bytes};
 use grafeo_core::graph::GraphStore;
 
 use crate::schema::label_keys;
@@ -27,21 +28,45 @@ struct LabelKeyEntries {
 }
 
 impl LabelKeyCache {
+    /// Marks every cached list stale and drops them; see
+    /// [`crate::projection_identity_index::IdentityIndexCache::invalidate`].
     pub(crate) fn invalidate(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        entries.keys = HashMap::new();
     }
 
+    /// Heap bytes the cached lists hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        entries
+            .keys
+            .iter()
+            .fold(std_hash_map_bytes(&entries.keys), |bytes, (label, keys)| {
+                bytes
+                    + string_bytes(label)
+                    + arc_slice_bytes::<String>(keys.len())
+                    + keys.iter().map(string_bytes).sum::<usize>()
+            })
+    }
+
+    /// The store keys that carry `label` at the current epoch, shared with
+    /// the cache entry rather than copied out of it.
+    ///
+    /// The returned slice is immutable and stays valid for the caller that
+    /// holds it, but it authorizes nothing: after a write bumps the epoch,
+    /// the next lookup recomputes from the store while an in-flight read may
+    /// finish with its old list.
     pub(crate) fn keys(
         &self,
         store: &dyn GraphStore,
         label: &str,
-    ) -> Result<Vec<String>, GraphDbError> {
+    ) -> Result<Arc<[String]>, GraphDbError> {
         let epoch = self.epoch.load(Ordering::Acquire);
         if let Some(keys) = self.cached(label, epoch)? {
-            return Ok(keys.to_vec());
+            return Ok(keys);
         }
-        let keys = label_keys(store, label);
-        let stored = Arc::<[String]>::from(keys);
+        let stored = Arc::<[String]>::from(label_keys(store, label));
         let mut entries = self
             .entries
             .write()
@@ -51,7 +76,7 @@ impl LabelKeyCache {
             entries.epoch = epoch;
         }
         entries.keys.insert(label.to_owned(), Arc::clone(&stored));
-        Ok(stored.to_vec())
+        Ok(stored)
     }
 
     fn cached(&self, label: &str, epoch: u64) -> Result<Option<Arc<[String]>>, GraphDbError> {
@@ -72,15 +97,31 @@ pub(crate) struct ProjectionApprovalCache {
     entries: RwLock<ApprovalEntries>,
 }
 
+/// A store holds a handful of projections, so the approvals are a list.
 #[derive(Default)]
 struct ApprovalEntries {
     epoch: u64,
-    approved: BTreeSet<(GraphNamespace, GraphProjectionId)>,
+    approved: Vec<(GraphNamespace, GraphProjectionId)>,
 }
 
 impl ProjectionApprovalCache {
+    /// Marks every approval stale and drops them; see
+    /// [`crate::projection_identity_index::IdentityIndexCache::invalidate`].
     pub(crate) fn invalidate(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        entries.approved = Vec::new();
+    }
+
+    /// Heap bytes the approvals hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        entries.approved.iter().fold(
+            vec_bytes(&entries.approved),
+            |bytes, (namespace, projection)| {
+                bytes + namespace.as_str().len() + projection.as_str().len()
+            },
+        )
     }
 
     pub(crate) fn approve(
@@ -107,7 +148,53 @@ impl ProjectionApprovalCache {
             entries.approved.clear();
             entries.epoch = epoch;
         }
-        entries.approved.insert(key);
+        if !entries.approved.contains(&key) {
+            entries.approved.push(key);
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod label_key_cache_tests {
+    use grafeo_core::graph::lpg::LpgStore;
+
+    use super::*;
+
+    #[test]
+    fn hits_share_one_list_and_invalidation_recomputes_without_revoking_it() {
+        let store = LpgStore::new().expect("in-memory store");
+        store.create_node(&["Entity"]);
+        let cache = LabelKeyCache::default();
+
+        let first = cache.keys(&store, "Entity").expect("first lookup");
+        let second = cache.keys(&store, "Entity").expect("cached lookup");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a hit shares the cached slice"
+        );
+        assert_eq!(&*first, ["Entity".to_owned()]);
+
+        let missing = cache.keys(&store, "Absent").expect("missing label");
+        assert_eq!(
+            &*missing,
+            ["Absent".to_owned()],
+            "a label the store lacks still resolves to itself"
+        );
+
+        cache.invalidate();
+        store.create_node(&["Entity|Fresh"]);
+        let refreshed = cache.keys(&store, "Fresh").expect("post-write lookup");
+        assert_eq!(&*refreshed, ["Entity|Fresh".to_owned()]);
+        let after_write = cache.keys(&store, "Entity").expect("recomputed lookup");
+        assert!(
+            !Arc::ptr_eq(&first, &after_write),
+            "a bumped epoch recomputes rather than serving the old list"
+        );
+        assert_eq!(
+            &*first,
+            ["Entity".to_owned()],
+            "the admitted old list is intact"
+        );
     }
 }

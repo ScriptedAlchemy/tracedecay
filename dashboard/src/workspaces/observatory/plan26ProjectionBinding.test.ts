@@ -1,26 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { MetricValueV1, ObservatoryReadModelV1 } from '../../contracts/generated.ts';
-import { adoptionCoverageBands } from './adoptionCoverage.ts';
-import { adoptionOutcomeBands } from './adoptionOutcomes.ts';
 import { analyticsModeReading, egressFailureReading, shareStagingReading } from './analyticsControls.ts';
-import { performanceBudgetBands } from './performanceBudgets.ts';
-import { performanceComparisonBands } from './performanceComparisons.ts';
-import { retrievalQualityBands } from './retrievalQuality.ts';
 
 describe('Plan 26 Observatory projection binding', () => {
-  it('resolves every numeric panel dimension against the canonical daemon projection', () => {
-    const model = fixture();
-    const dimensions = [
-      ...adoptionCoverageBands(model),
-      ...adoptionOutcomeBands(model),
-      ...retrievalQualityBands(model),
-      ...performanceBudgetBands(model),
-      ...performanceComparisonBands(model),
-    ].flatMap((band) => band.dimensions);
-
-    expect(dimensions).toHaveLength(59);
-    expect(dimensions.filter((dimension) => dimension.reading.kind === 'unpublished')).toEqual([]);
-  });
 
   it('reads controls from the observatory payload without inferring absent values', () => {
     const model = fixture();

@@ -1,7 +1,9 @@
 use std::fmt;
 
+use tracedecay_runtime_core::erase_send;
+
 use sha2::{Digest, Sha256};
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     RetrievalGrainV1, SessionId, SessionRefreshKeyV1, SessionRefreshOperationIdV1,
@@ -107,17 +109,14 @@ impl SessionRefreshTarget {
         self.source_scope.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn frozen_frontier(&self) -> SessionRefreshFrontierV1 {
         self.frozen_frontier
     }
@@ -127,7 +126,6 @@ impl SessionRefreshTarget {
 pub struct SessionRefreshDigest([u8; 32]);
 
 impl SessionRefreshDigest {
-    #[hotpath::skip]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -151,17 +149,14 @@ impl SessionRefreshHandle {
         &self.target
     }
 
-    #[hotpath::skip]
     pub const fn accepted_at(&self) -> UtcMicros {
         self.accepted_at
     }
 
-    #[hotpath::skip]
     pub const fn caller_idempotency_digest(&self) -> SessionRefreshDigest {
         self.caller_idempotency_digest
     }
 
-    #[hotpath::skip]
     pub const fn join_digest(&self) -> SessionRefreshDigest {
         self.join_digest
     }
@@ -182,10 +177,57 @@ pub enum SessionRefreshOutcome {
     Denied,
     WrongScope,
     Stale,
+    /// The requested window (observed through `requested`, committed
+    /// through `committed`) no longer contains the committed projection
+    /// frontier `active`; the caller rebuilds the request from `active`.
+    StaleFrontier {
+        requested: u64,
+        committed: u64,
+        active: u64,
+    },
     NotFound,
     Aborted,
     DeadlineExceeded,
-    Unavailable,
+    Unavailable(SessionRefreshUnavailable),
+}
+
+/// Why the refresh authority could not answer, carried to the caller instead
+/// of a bare "unavailable".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionRefreshUnavailable {
+    /// The session-temporal store failed the operation; `detail` is its error.
+    Store { detail: String },
+    /// The target cannot form a canonical refresh key.
+    RefreshKey,
+    /// The store answered for a different session or frontier.
+    ReceiptMismatch,
+    /// Scope authorization could not produce a grant.
+    Authorization(SessionAuthorizationError),
+    /// The daemon's refresh configuration is invalid.
+    Configuration(SessionRefreshRequestError),
+}
+
+impl SessionRefreshUnavailable {
+    fn store(error: &SessionStoreError) -> Self {
+        Self::Store {
+            detail: error.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for SessionRefreshUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store { detail } => write!(formatter, "session refresh store failed: {detail}"),
+            Self::RefreshKey => {
+                formatter.write_str("the refresh target cannot form a canonical refresh key")
+            }
+            Self::ReceiptMismatch => formatter
+                .write_str("the refresh store answered for a different session or frontier"),
+            Self::Authorization(error) => write!(formatter, "{error}"),
+            Self::Configuration(error) => write!(formatter, "{error}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,19 +240,6 @@ impl fmt::Display for SessionRefreshSchedulerError {
 }
 
 impl std::error::Error for SessionRefreshSchedulerError {}
-
-pub trait SessionRefreshSchedulerPort {
-    fn wake(&self) -> Result<(), SessionRefreshSchedulerError>;
-}
-
-impl<T> SessionRefreshSchedulerPort for &T
-where
-    T: SessionRefreshSchedulerPort + ?Sized,
-{
-    fn wake(&self) -> Result<(), SessionRefreshSchedulerError> {
-        (*self).wake()
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionRefreshRequestError {
@@ -258,9 +287,9 @@ impl<A, S, W> SessionRefreshService<A, S, W>
 where
     A: SessionScopeAuthorizer,
     S: SessionRefreshStore,
-    W: SessionRefreshSchedulerPort,
+    W: Fn() -> Result<(), SessionRefreshSchedulerError>,
 {
-    #[hotpath::measure(label = "usecases.session.refresh.begin", future = true)]
+    #[tracing::instrument(name = "usecases.session.refresh.begin", level = "trace", skip_all)]
     pub async fn begin_or_join(
         &self,
         context: &RequestContext,
@@ -272,7 +301,7 @@ where
         }
         let grant = match authorize(&self.authorizer, context, binding, &target) {
             Ok(grant) => grant,
-            Err(outcome) => return outcome,
+            Err(outcome) => return *outcome,
         };
         let digests = refresh_digests(context, binding, &target, &grant, &self.configuration);
         let Ok(source_id) = SessionSourceIdV1::new(format!(
@@ -280,7 +309,7 @@ where
             target.session_id().as_str(),
             target.source_scope().unwrap_or("all")
         )) else {
-            return SessionRefreshOutcome::Unavailable;
+            return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::RefreshKey);
         };
         let Ok(refresh_key) = SessionRefreshKeyV1::new(
             grant.scope().identity().root_id().as_str(),
@@ -291,12 +320,16 @@ where
                 SessionSourceFrontierV1::new(target.frozen_frontier().observed_through()),
             ) {
                 Ok(source) => source,
-                Err(_) => return SessionRefreshOutcome::Unavailable,
+                Err(_) => {
+                    return SessionRefreshOutcome::Unavailable(
+                        SessionRefreshUnavailable::RefreshKey,
+                    );
+                }
             }],
             self.configuration.projector_version(),
             encode_tagged_lowercase_hex("sha256:", digests.projection.as_bytes()),
         ) else {
-            return SessionRefreshOutcome::Unavailable;
+            return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::RefreshKey);
         };
         let request = SessionRefreshBeginOrJoinRequestV1::new(
             target.session_id().clone(),
@@ -306,25 +339,51 @@ where
         .with_coverage_request(SessionTemporalCoverageRequestV1::new(
             target.temporal_mode(),
         ));
-        let receipt = match await_with_request_controls(
-            context,
-            binding,
+        let joined = erase_send!(
             self.store.begin_or_join_session_refresh(request),
-        )
-        .await
-        {
+            tracedecay_store::SessionStoreResult<
+                tracedecay_store::SessionRefreshBeginOrJoinReceiptV1,
+            >
+        );
+        let receipt = match await_with_request_controls(context, binding, joined).await {
             Ok(Ok(receipt)) => receipt,
             Ok(Err(SessionStoreError::IdempotencyConflict { .. })) => {
                 return SessionRefreshOutcome::Busy;
             }
-            Ok(Err(_)) => return SessionRefreshOutcome::Unavailable,
-            Err(outcome) => return outcome,
+            Ok(Err(SessionStoreError::StaleRefreshFrontier {
+                observed_through,
+                committed_through,
+                active_projection_frontier,
+            })) => {
+                return SessionRefreshOutcome::StaleFrontier {
+                    requested: observed_through,
+                    committed: committed_through,
+                    active: active_projection_frontier,
+                };
+            }
+            Ok(Err(error)) => {
+                return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
+                    &error,
+                ));
+            }
+            Err(outcome) => return *outcome,
         };
+        // The store begins the window at the committed projection frontier,
+        // which may have advanced past the caller's view but never past the
+        // requested target; the handle binds the window that actually began.
+        let effective = receipt.target_frontier();
+        let requested = target.frozen_frontier();
         if receipt.session_id() != target.session_id()
-            || receipt.target_frontier() != target.frozen_frontier()
+            || effective.observed_through() != requested.observed_through()
+            || effective.committed_through() < requested.committed_through()
         {
-            return SessionRefreshOutcome::Unavailable;
+            return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::ReceiptMismatch);
         }
+        let target = SessionRefreshTarget {
+            frozen_frontier: effective,
+            ..target
+        };
+        let digests = refresh_digests(context, binding, &target, &grant, &self.configuration);
         let handle = SessionRefreshHandle {
             operation_id: receipt.operation_id().clone(),
             target,
@@ -336,7 +395,7 @@ where
         // The durable operation is authoritative once the store call returns.
         // Delivery failure must preserve that commit and require reconciliation
         // through the persisted recovery row rather than report plain acceptance.
-        match (receipt.disposition(), self.scheduler.wake()) {
+        match (receipt.disposition(), (self.scheduler)()) {
             (SessionRefreshDispositionV1::Started, Ok(())) => {
                 SessionRefreshOutcome::Started(handle)
             }
@@ -350,7 +409,7 @@ where
         }
     }
 
-    #[hotpath::measure(label = "usecases.session.refresh.status", future = true)]
+    #[tracing::instrument(name = "usecases.session.refresh.status", level = "trace", skip_all)]
     pub async fn status(
         &self,
         context: &RequestContext,
@@ -361,22 +420,24 @@ where
             return outcome;
         }
         if let Err(outcome) = self.authorize_handle(context, binding, handle) {
-            return outcome;
+            return *outcome;
         }
-        let progress = match await_with_request_controls(
-            context,
-            binding,
+        let query = erase_send!(
             self.store
                 .session_refresh_progress(SessionRefreshProgressRequestV1::new(
                     handle.operation_id.clone(),
                     handle.target.session_id.clone(),
                 )),
-        )
-        .await
-        {
+            tracedecay_store::SessionStoreResult<Option<SessionRefreshProgressV1>>
+        );
+        let progress = match await_with_request_controls(context, binding, query).await {
             Ok(Ok(progress)) => progress,
-            Ok(Err(_)) => return SessionRefreshOutcome::Unavailable,
-            Err(outcome) => return outcome,
+            Ok(Err(error)) => {
+                return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
+                    &error,
+                ));
+            }
+            Err(outcome) => return *outcome,
         }
         .map(|progress| {
             let source_coverage = progress.source_coverage().and_then(|coverage| {
@@ -390,12 +451,12 @@ where
         match self.read_receipt(context, binding, handle).await {
             Ok(Some(receipt)) => return terminal_outcome(receipt),
             Ok(None) => {}
-            Err(outcome) => return outcome,
+            Err(outcome) => return *outcome,
         }
         SessionRefreshOutcome::Running(progress)
     }
 
-    #[hotpath::measure(label = "usecases.session.refresh.cancel", future = true)]
+    #[tracing::instrument(name = "usecases.session.refresh.cancel", level = "trace", skip_all)]
     pub async fn cancel(
         &self,
         context: &RequestContext,
@@ -406,80 +467,74 @@ where
             return outcome;
         }
         if let Err(outcome) = self.authorize_handle(context, binding, handle) {
-            return outcome;
+            return *outcome;
         }
-        let progress = match await_with_request_controls(
-            context,
-            binding,
-            self.store
-                .session_refresh_progress(SessionRefreshProgressRequestV1::new(
-                    handle.operation_id.clone(),
-                    handle.target.session_id.clone(),
-                )),
-        )
-        .await
-        {
-            Ok(Ok(progress)) => progress,
-            Ok(Err(_)) => return SessionRefreshOutcome::Unavailable,
-            Err(outcome) => return outcome,
-        };
-        match self.read_receipt(context, binding, handle).await {
-            Ok(Some(receipt)) => return terminal_outcome(receipt),
-            Ok(None) => {}
-            Err(outcome) => return outcome,
-        }
-        let (frontier, coverage) = progress.as_ref().map_or_else(
-            || (handle.target.frozen_frontier(), empty_coverage()),
-            |progress| (progress.frontier(), *progress.coverage()),
-        );
-        let request = SessionRefreshCancellationRequestV1::new(
-            handle.operation_id.clone(),
-            handle.target.session_id.clone(),
-            frontier,
-            coverage,
-        );
-        let request = match progress
-            .as_ref()
-            .and_then(SessionRefreshProgressV1::source_coverage)
-            .cloned()
-            .or_else(|| source_coverage_for_target(None, &handle.target, frontier))
-        {
-            Some(source_coverage) => request.with_source_coverage(source_coverage),
-            None => request,
-        };
-        match await_with_request_controls(
-            context,
-            binding,
-            self.store.cancel_session_refresh(request),
-        )
-        .await
-        {
-            Ok(Ok(receipt)) => {
-                if self.scheduler.wake().is_err() {
-                    SessionRefreshOutcome::CancelledReconciliationRequired(receipt)
-                } else {
-                    terminal_outcome(receipt)
-                }
+        // The receipt read and the cancel write are separate store calls. The
+        // worker can commit a terminal receipt, or a newer progress row, in
+        // that gap. A terminal receipt is the answer; a newer progress row is
+        // retried. The same progress snapshot conflicting again is a real
+        // refusal, so status reports it instead of spinning.
+        let mut attempted_progress = None;
+        loop {
+            if let Some(outcome) = request_interruption(context, binding) {
+                return outcome;
             }
-            Ok(Err(
-                SessionStoreError::InvalidRefreshState { .. }
-                | SessionStoreError::InvalidStateTransition { .. }
-                | SessionStoreError::ReceiptIdentityMismatch { .. },
-            )) => self.status(context, binding, handle).await,
-            Ok(Err(_)) => SessionRefreshOutcome::Unavailable,
-            Err(outcome) => outcome,
+            let query = erase_send!(
+                self.store
+                    .session_refresh_progress(SessionRefreshProgressRequestV1::new(
+                        handle.operation_id.clone(),
+                        handle.target.session_id.clone(),
+                    )),
+                tracedecay_store::SessionStoreResult<Option<SessionRefreshProgressV1>>
+            );
+            let progress = match await_with_request_controls(context, binding, query).await {
+                Ok(Ok(progress)) => progress,
+                Ok(Err(error)) => {
+                    return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
+                        &error,
+                    ));
+                }
+                Err(outcome) => return *outcome,
+            };
+            match self.read_receipt(context, binding, handle).await {
+                Ok(Some(receipt)) => return terminal_outcome(receipt),
+                Ok(None) => {}
+                Err(outcome) => return *outcome,
+            }
+            if attempted_progress.as_ref() == Some(&progress) {
+                return self.status(context, binding, handle).await;
+            }
+            attempted_progress = Some(progress.clone());
+            let request = cancellation_request(handle, progress.as_ref());
+            let cancelled = erase_send!(
+                self.store.cancel_session_refresh(request),
+                tracedecay_store::SessionStoreResult<SessionRefreshReceiptV1>
+            );
+            match await_with_request_controls(context, binding, cancelled).await {
+                Ok(Ok(receipt)) => {
+                    return if (self.scheduler)().is_err() {
+                        SessionRefreshOutcome::CancelledReconciliationRequired(receipt)
+                    } else {
+                        terminal_outcome(receipt)
+                    };
+                }
+                Ok(Err(error)) if refresh_cancel_lost_the_race(&error) => continue,
+                Ok(Err(error)) => {
+                    return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
+                        &error,
+                    ));
+                }
+                Err(outcome) => return *outcome,
+            }
         }
     }
 
-    // The outcome enum carries receipts/handles by value; boxing its variants
-    // for this private Result would churn the public refresh API.
-    #[allow(clippy::result_large_err)]
     fn authorize_handle(
         &self,
         context: &RequestContext,
         binding: &SessionRequestBinding,
         handle: &SessionRefreshHandle,
-    ) -> Result<(), SessionRefreshOutcome> {
+    ) -> Result<(), Box<SessionRefreshOutcome>> {
         let grant = authorize(&self.authorizer, context, binding, &handle.target)?;
         let digests = refresh_digests(
             context,
@@ -490,29 +545,26 @@ where
         );
         if digests.join != handle.join_digest || digests.caller != handle.caller_idempotency_digest
         {
-            return Err(SessionRefreshOutcome::WrongScope);
+            return Err(Box::new(SessionRefreshOutcome::WrongScope));
         }
         Ok(())
     }
 
-    #[hotpath::skip]
     async fn read_receipt(
         &self,
         context: &RequestContext,
         binding: &SessionRequestBinding,
         handle: &SessionRefreshHandle,
-    ) -> Result<Option<SessionRefreshReceiptV1>, SessionRefreshOutcome> {
-        match await_with_request_controls(
-            context,
-            binding,
+    ) -> Result<Option<SessionRefreshReceiptV1>, Box<SessionRefreshOutcome>> {
+        let query = erase_send!(
             self.store
                 .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
                     handle.operation_id.clone(),
                     handle.target.session_id.clone(),
                 )),
-        )
-        .await
-        {
+            tracedecay_store::SessionStoreResult<Option<SessionRefreshReceiptV1>>
+        );
+        match await_with_request_controls(context, binding, query).await {
             Ok(Ok(receipt)) => Ok(receipt.map(|receipt| {
                 let source_coverage = receipt.source_coverage().and_then(|coverage| {
                     source_coverage_for_target(Some(coverage), &handle.target, receipt.frontier())
@@ -522,7 +574,9 @@ where
                     None => receipt,
                 }
             })),
-            Ok(Err(_)) => Err(SessionRefreshOutcome::Unavailable),
+            Ok(Err(error)) => Err(Box::new(SessionRefreshOutcome::Unavailable(
+                SessionRefreshUnavailable::store(&error),
+            ))),
             Err(outcome) => Err(outcome),
         }
     }
@@ -535,15 +589,12 @@ struct RefreshDigests {
     projection: SessionRefreshDigest,
 }
 
-// The outcome enum carries receipts/handles by value; boxing its variants
-// for this private Result would churn the public refresh API.
-#[allow(clippy::result_large_err)]
 fn authorize<A>(
     authorizer: &A,
     context: &RequestContext,
     binding: &SessionRequestBinding,
     target: &SessionRefreshTarget,
-) -> Result<SessionAuthorizationGrant, SessionRefreshOutcome>
+) -> Result<SessionAuthorizationGrant, Box<SessionRefreshOutcome>>
 where
     A: SessionScopeAuthorizer,
 {
@@ -556,13 +607,17 @@ where
         target.grain,
         SessionAccess::Hydrate,
     )
-    .map_err(|_| SessionRefreshOutcome::Unavailable)?;
+    .map_err(|error| {
+        Box::new(SessionRefreshOutcome::Unavailable(
+            SessionRefreshUnavailable::Authorization(error),
+        ))
+    })?;
     let grant = authorizer
         .authorize(context, binding, &request)
-        .map_err(map_authorization_error)?;
+        .map_err(|error| Box::new(map_authorization_error(error)))?;
     grant
         .validate(context, binding, &request)
-        .map_err(map_authorization_error)?;
+        .map_err(|error| Box::new(map_authorization_error(error)))?;
     Ok(grant)
 }
 
@@ -581,7 +636,9 @@ fn map_authorization_error(error: SessionAuthorizationError) -> SessionRefreshOu
         SessionAuthorizationError::Unavailable
         | SessionAuthorizationError::InvalidGrantId
         | SessionAuthorizationError::InvalidProviderScope
-        | SessionAuthorizationError::ZeroRevision => SessionRefreshOutcome::Unavailable,
+        | SessionAuthorizationError::ZeroRevision => {
+            SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::Authorization(error))
+        }
     }
 }
 
@@ -606,19 +663,21 @@ fn request_interruption(
     }
 }
 
-async fn await_with_request_controls<T>(
+async fn await_with_request_controls<T: Send>(
     context: &RequestContext,
     binding: &SessionRequestBinding,
-    future: impl std::future::Future<Output = T>,
-) -> Result<T, SessionRefreshOutcome> {
+    future: impl std::future::Future<Output = T> + Send,
+) -> Result<T, Box<SessionRefreshOutcome>> {
     if let Some(outcome) = request_interruption(context, binding) {
-        return Err(outcome);
+        return Err(Box::new(outcome));
     }
     run_application_request_interruptible(context, binding.cancellation(), future, || {})
         .await
-        .map_err(|interruption| match interruption {
-            RequestInterruption::Cancelled => SessionRefreshOutcome::Aborted,
-            RequestInterruption::DeadlineExceeded => SessionRefreshOutcome::DeadlineExceeded,
+        .map_err(|interruption| {
+            Box::new(match interruption {
+                RequestInterruption::Cancelled => SessionRefreshOutcome::Aborted,
+                RequestInterruption::DeadlineExceeded => SessionRefreshOutcome::DeadlineExceeded,
+            })
         })
 }
 
@@ -629,6 +688,43 @@ const fn empty_coverage() -> TemporalCoverageCountsV1 {
         unknown: 0,
         redacted: 0,
     }
+}
+
+fn cancellation_request(
+    handle: &SessionRefreshHandle,
+    progress: Option<&SessionRefreshProgressV1>,
+) -> SessionRefreshCancellationRequestV1 {
+    let (frontier, coverage) = progress.map_or_else(
+        || (handle.target.frozen_frontier(), empty_coverage()),
+        |progress| (progress.frontier(), *progress.coverage()),
+    );
+    let request = SessionRefreshCancellationRequestV1::new(
+        handle.operation_id.clone(),
+        handle.target.session_id.clone(),
+        frontier,
+        coverage,
+    );
+    match progress
+        .and_then(SessionRefreshProgressV1::source_coverage)
+        .cloned()
+        .or_else(|| source_coverage_for_target(None, &handle.target, frontier))
+    {
+        Some(source_coverage) => request.with_source_coverage(source_coverage),
+        None => request,
+    }
+}
+
+/// The store refuses a cancel whose snapshot is no longer the running
+/// operation: another terminal receipt won, or progress moved. Both are races
+/// with the worker, not unavailable storage.
+fn refresh_cancel_lost_the_race(error: &SessionStoreError) -> bool {
+    matches!(
+        error,
+        SessionStoreError::InvalidRefreshState { .. }
+            | SessionStoreError::InvalidStateTransition { .. }
+            | SessionStoreError::ReceiptIdentityMismatch { .. }
+            | SessionStoreError::IdempotencyConflict { .. }
+    )
 }
 
 fn source_coverage_for_target(
@@ -805,6 +901,10 @@ impl CanonicalDigest {
         SessionRefreshDigest(self.0.finalize().into())
     }
 }
+
+#[cfg(test)]
+#[path = "refresh_cancel_tests.rs"]
+mod refresh_cancel_tests;
 
 fn validate_component(
     value: &str,

@@ -1,36 +1,45 @@
 //! Opening a project for one handshake, and how open failures are reported.
 //!
 //! Classifies the failure modes that first-touch bootstrap may repair -
-//! never-enrolled identity, a missing index, a read-only store - apart from
-//! genuine conflicts, and renders the client-visible refusal.
+//! never-enrolled identity and a missing index - apart from genuine
+//! conflicts, and renders the client-visible refusal.
 
 use super::*;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::test_support::hold_after_project_sessions_for_test;
 
-#[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
+/// Each store it mounts is one transactionally safe unit that cannot observe
+/// `cancellation` from inside; the token is checked between them so a
+/// draining daemon waits for at most the unit in flight, not the whole open.
+#[tracing::instrument(name = "daemon.project.handshake.open", level = "trace", skip_all)]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
-) -> Result<crate::tracedecay::TraceDecay> {
+    cancellation: &CancellationToken,
+) -> Result<tracedecay_project::project::TraceDecay> {
     let open_options = crate::daemon::handshake_open_options(handshake);
     let registry_database = store_administration.registered_profile_database().await?;
-    let (store_layout, first_touch) =
-        match Box::pin(crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+    let (store_layout, first_touch) = match Box::pin(
+        tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
             project_path,
             &open_options,
             registry_database.as_ref(),
-        ))
-        .await
-        {
-            Ok(layout) => (layout, false),
-            // A brand-new project has no enrollment marker or registry match,
-            // so identity resolution fails closed. When the client
-            // explicitly asked to initialize (first-touch `tracedecay init`),
-            // mint a fresh path-derived identity and let the missing-index
-            // fallback below bootstrap it.
-            Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
+        ),
+    )
+    .await
+    {
+        Ok(layout) => (layout, false),
+        // A brand-new project has no enrollment marker or registry match,
+        // so identity resolution fails closed. When the client
+        // explicitly asked to initialize (first-touch `tracedecay init`),
+        // mint a fresh path-derived identity and let the missing-index
+        // fallback below bootstrap it.
+        Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => {
+            refuse_enrollment_from_another_build(project_path, handshake)?;
+            (
                 Box::pin(
-                    crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+                    tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
                         project_path,
                         &open_options,
                         registry_database.as_ref(),
@@ -39,17 +48,19 @@ pub(super) async fn open_project_for_handshake(
                 )
                 .await?,
                 true,
-            ),
-            Err(err) if is_unregistered_identity_error(&err) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "no TraceDecay index found at '{}'; run 'tracedecay init' first",
-                        project_path.display()
-                    ),
-                });
-            }
-            Err(err) => return Err(err),
-        };
+            )
+        }
+        Err(err) if is_unregistered_identity_error(&err) => {
+            return Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::IndexMissing,
+                format!(
+                    "no TraceDecay index found at '{}'; run 'tracedecay init' first",
+                    project_path.display()
+                ),
+            ));
+        }
+        Err(err) => return Err(err),
+    };
     let project_id =
         store_layout
             .identity
@@ -59,29 +70,36 @@ pub(super) async fn open_project_for_handshake(
                 message: "registered project open requires an authoritative project identity"
                     .to_owned(),
             })?;
+    project_open_cancellation_checkpoint(cancellation)?;
     // First-touch enrollment: persist the minted identity in the `.git/`
     // repository identity marker so a subsequent open resolves the same
     // identity before the registry row lands. A non-git root persists
-    // nothing — its identity is deterministic from the canonical path and
+    // nothing, its identity is deterministic from the canonical path and
     // the registry registration below is its durable home. TraceDecay never
     // creates files inside a project's working tree.
     if first_touch {
-        tracedecay_runtime_core::storage::write_repository_identity_marker(
+        tracedecay_runtime_core::storage::claim_repository_identity_marker(
             project_path,
             project_id,
+            &handshake.client_identity.profile_root,
         )?;
     }
     let configuration_database = Box::pin(
-        store_administration.registered_project_session_database(project_path, &store_layout),
+        store_administration.registered_project_configuration_database(project_path, &store_layout),
     )
     .await?;
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        Box::pin(hold_after_project_sessions_for_test()).await?;
+    }
+    project_open_cancellation_checkpoint(cancellation)?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
     // The retired relational graph health/index lane is never spent on the
     // admission path. Opening establishes the exact registered configuration
     // and durable store authority; project composition schedules the maintained
     // bounded code-index owner after publication.
     let open_result = Box::pin(
-        crate::tracedecay::TraceDecay::open_with_registered_configuration(
+        tracedecay_project::project::TraceDecay::open_with_registered_configuration(
             project_path,
             open_options.clone(),
             store_layout.clone(),
@@ -93,33 +111,13 @@ pub(super) async fn open_project_for_handshake(
     .await;
     match open_result {
         Ok(cg) => Ok(cg),
-        Err(open_err) if is_readonly_database_error(&open_err) => {
-            match Box::pin(
-                crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
-                    project_path,
-                    open_options,
-                    store_layout,
-                    configuration_database,
-                    registry_database,
-                    runtime_registry,
-                ),
-            )
-            .await
-            {
-                Ok(cg) => {
-                    cg.ensure_schema_current().await?;
-                    Ok(cg)
-                }
-                Err(_) => Err(open_err),
-            }
-        }
         Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
             // First-touch bootstrap creates the final registered store and
             // exact configuration authority only. The bounded code-index
             // activation owner performs indexing after admission, so opening a
             // project never waits for a repository scan or rebuild.
             Box::pin(
-                crate::tracedecay::TraceDecay::init_with_registered_configuration(
+                tracedecay_project::project::TraceDecay::init_with_registered_configuration(
                     project_path,
                     open_options,
                     store_layout,
@@ -134,63 +132,65 @@ pub(super) async fn open_project_for_handshake(
     }
 }
 
+/// First-touch enrollment writes this profile's registry before any request
+/// is served. A client from another build, such as a checkout build that
+/// resolved the installed profile, is not this installation's client: it is
+/// refused before it enrolls anything.
+fn refuse_enrollment_from_another_build(
+    project_path: &Path,
+    handshake: &DaemonHandshake,
+) -> Result<()> {
+    let daemon_version = super::core_handshake::binary_version()?;
+    let Some(client_version) =
+        tracedecay_daemon_protocol::client_version_skew(&handshake.client_version, daemon_version)
+    else {
+        return Ok(());
+    };
+    Err(TraceDecayError::project_route(
+        tracedecay_daemon_protocol::client::DAEMON_PROTOCOL_REVISION_SKEW,
+        false,
+        format!(
+            "daemon (version {daemon_version}) refuses to enroll '{}' for client version \
+             {client_version}; {}",
+            project_path.display(),
+            tracedecay_daemon_protocol::version_skew_action(daemon_version, &client_version)
+        ),
+    ))
+}
+
 /// Whether `err` is the specific fail-closed error raised when identity
 /// resolution finds no enrollment marker or registry match for a project.
 fn is_unregistered_identity_error(err: &TraceDecayError) -> bool {
-    matches!(
-        err,
-        TraceDecayError::Config { message }
-            if message.contains(
-                "registered configuration layout requires an enrolled or registry-resolved project identity"
-            )
-    )
+    err.project_open_failure_kind() == Some(ProjectOpenFailureKind::IdentityUnregistered)
 }
 
 pub(super) fn is_missing_index_error(err: &TraceDecayError) -> bool {
-    matches!(
-        err,
-        TraceDecayError::Config { message }
-            if message.contains("no TraceDecay index found")
-                || message.contains("no TraceDecay database found")
-    )
-}
-
-fn is_readonly_database_error(err: &TraceDecayError) -> bool {
-    if !err.is_database_error() {
-        return false;
-    }
-    match err {
-        TraceDecayError::Database { message, .. } => {
-            message.to_ascii_lowercase().contains("readonly database")
-        }
-        _ => false,
-    }
+    err.project_open_failure_kind() == Some(ProjectOpenFailureKind::IndexMissing)
 }
 
 pub(super) async fn write_project_open_error(
     transport: &mut impl McpTransport,
-    request_line: &str,
+    first_request: &AuthenticatedFirstRequest,
     connection_scope: &str,
     error: &TraceDecayError,
 ) -> Result<()> {
-    let request = serde_json::from_str::<JsonRpcRequest>(request_line).ok();
+    let request = first_request.parsed();
     let response = request
-        .as_ref()
         .and_then(|request| tool_call_open_refusal_response(request, connection_scope, error))
         .unwrap_or_else(|| {
             let id = request
-                .and_then(|request| request.id)
+                .and_then(|request| request.id.clone())
                 .unwrap_or(serde_json::Value::Null);
             project_open_error_response(id, error)
         });
-    write_json_rpc_response(transport, &response).await
+    write_daemon_response(transport, &response).await
 }
 
-/// A `tools/call` refused at project open answers on the MCP tool surface
+/// A `tools/call` refused at project open answers on the MCP tool interface
 /// when the refusal is the reset-required terminal, matching the canonical
 /// problem envelope CLI and HTTP callers receive for the same operation.
 /// Non-application tools and every other open failure keep the raw shape.
-fn tool_call_open_refusal_response(
+pub(super) fn tool_call_open_refusal_response(
     request: &JsonRpcRequest,
     connection_scope: &str,
     error: &TraceDecayError,
@@ -198,87 +198,102 @@ fn tool_call_open_refusal_response(
     if !matches!(classify_mcp_method(&request.method), McpMethod::ToolsCall) {
         return None;
     }
-    let TraceDecayError::ResetRequired { authority, reason } = error else {
-        return None;
-    };
+    let detail = tracedecay_mcp::reset_required_detail(error)?;
     let id = request.id.clone()?;
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
     let request_id =
-        tracedecay_application::request_identity::mcp_connection_request_id(&id, connection_scope)?;
-    let envelope = crate::application_surface::mcp_project_open_reset_refusal(
-        tool_name, request_id, authority, reason,
+        tracedecay_contracts::request_identity::mcp_connection_request_id(&id, connection_scope)?;
+    let (_, envelope) = tracedecay_daemon_service::application_surface::settled_tool_refusal(
+        tracedecay_tool_catalog::BindingSurface::Mcp,
+        tool_name,
+        request_id,
+        tracedecay_contracts::ApplicationProblem::from_detail(detail),
     )?;
     let text = serde_json::to_string(&envelope).ok()?;
-    let problem = serde_json::to_value(envelope.problem.as_ref()).ok()?;
+    let structured_content =
+        tracedecay_mcp::tool_errors::problem_structured_content(&envelope.problem).ok()?;
     Some(JsonRpcResponse::success(
         id,
         json!({
             "content": [{ "type": "text", "text": text }],
             "isError": true,
-            "problem": problem,
+            "structuredContent": structured_content,
         }),
     ))
 }
 
-pub(super) fn project_open_error_response(
+/// Which route-admission failures turn an MCP `initialize` into an error.
+///
+/// A route the profile has not enrolled is the client's state, not an open
+/// failure: the handshake completes (the host sees the catalog) and every
+/// later `tools/call` re-derives the typed [`PROJECT_NOT_ENROLLED_REASON_CODE`]
+/// refusal until `tracedecay init` or a corrected `--path` makes admission
+/// succeed. Propagating it here used to close the connection with no
+/// response, which the proxy could only report as an unknown transport
+/// outcome. Every other refusal (deferred discovery, remote deletion, reset
+/// required) still answers `initialize` as the typed open error it is.
+pub(super) fn initialize_project_open_error(error: TraceDecayError) -> Option<TraceDecayError> {
+    (!error_is_project_not_enrolled(&error)).then_some(error)
+}
+
+pub(crate) fn project_open_error_response(
     id: serde_json::Value,
     error: &TraceDecayError,
 ) -> JsonRpcResponse {
     match error {
-        TraceDecayError::Config { message }
-            if message.contains(PROJECT_OPEN_FAILURE_RETRY_HINT) =>
+        TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable,
+            detail,
+            ..
+        } if project_open_retryable_reason(reason_code)
+            || reason_code == PROJECT_NOT_ENROLLED_REASON_CODE =>
         {
+            let mut data = json!({
+                "reason_code": reason_code,
+                "retryable": retryable,
+                "detail": detail,
+                "kind": reason_code,
+            });
+            if let Some(capacity) = project_open_capacity_limit(reason_code)
+                && let Some(object) = data.as_object_mut()
+            {
+                object.insert("capacity".to_owned(), json!(capacity));
+            }
             JsonRpcResponse::error_with_data(
                 id,
                 ErrorCode::InternalError,
-                message.clone(),
-                Some(json!({
-                    "kind": "project_route_open_backoff",
-                    "retryable": true,
-                    "retry_after_ms": PROJECT_OPEN_FAILURE_RETRY_BACKOFF.as_millis() as u64,
-                })),
+                detail.clone(),
+                Some(data),
             )
         }
-        TraceDecayError::Config { message }
-            if message.starts_with("daemon project open task capacity reached") =>
-        {
-            JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::InternalError,
-                message.clone(),
-                Some(json!({
-                    "kind": "project_open_task_capacity_reached",
-                    "retryable": true,
-                    "capacity": MAX_TRACKED_PROJECT_OPEN_TASKS,
-                })),
-            )
-        }
-        TraceDecayError::Config { message }
-            if message.starts_with("daemon project server capacity reached") =>
-        {
-            JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::InternalError,
-                message.clone(),
-                Some(json!({
-                    "kind": "project_server_capacity_reached",
-                    "retryable": true,
-                    "capacity": MAX_CACHED_PROJECT_SERVERS,
-                })),
-            )
-        }
-        TraceDecayError::ResetRequired { authority, reason } => JsonRpcResponse::error_with_data(
+        TraceDecayError::ProjectOpen {
+            kind: ProjectOpenFailureKind::BackedOff { retry_after_ms },
+            detail,
+        } => JsonRpcResponse::error_with_data(
             id,
             ErrorCode::InternalError,
-            error.to_string(),
+            detail.clone(),
             Some(json!({
-                "kind": "reset_required",
-                "retryable": false,
-                "authority": authority,
-                "reason": reason,
+                "kind": "project_route_open_backoff",
+                "retryable": true,
+                "retry_after_ms": retry_after_ms,
             })),
         ),
-        _ => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        _ => match tracedecay_mcp::reset_required_context(error) {
+            Some((authority, reason)) => JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::InternalError,
+                error.to_string(),
+                Some(json!({
+                    "kind": "reset_required",
+                    "retryable": false,
+                    "authority": authority,
+                    "reason": reason,
+                })),
+            ),
+            None => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        },
     }
 }
 
@@ -303,9 +318,13 @@ mod tests {
         assert!(response.error.is_none(), "the refusal is a tool result");
         let result = response.result.expect("tool result payload");
         assert_eq!(result["isError"], serde_json::json!(true));
-        assert_eq!(result["problem"]["kind"], "reset_required");
+        assert_eq!(result.get("problem"), None);
         assert_eq!(
-            result["problem"]["legal_actions"],
+            result["structuredContent"]["problem"]["kind"],
+            "reset_required"
+        );
+        assert_eq!(
+            result["structuredContent"]["problem"]["legal_actions"],
             serde_json::json!(["reset"])
         );
         let text = result["content"][0]["text"]
@@ -318,11 +337,16 @@ mod tests {
             envelope["problem"]["legal_actions"],
             serde_json::json!(["reset"])
         );
+        let message = envelope["problem"]["diagnostic"]["message"]
+            .as_str()
+            .expect("diagnostic message");
         assert!(
-            envelope["problem"]["diagnostic"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("schema v26 is incompatible")),
+            message.contains("schema v26 is incompatible"),
             "the refusal must carry the store's own reason: {envelope}"
+        );
+        assert!(
+            message.contains("tracedecay storage reset-project-store"),
+            "the refusal must name the exact reset command: {envelope}"
         );
     }
 

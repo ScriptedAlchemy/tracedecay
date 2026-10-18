@@ -8,19 +8,24 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
-    CompactContextLineageEdgeV1, CursorManifestLimitKindV1, HydrationStateV1, RetrievalAnchorId,
-    RetrievalGrainV1, SessionId, SessionSourceCoverageV1, TemporalCoverageCountsV1,
+    CompactContextLineageEdgeV1, CursorBindingMismatchV1, CursorManifestLimitKindV1,
+    HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
+    TemporalCoverageCountsV1,
 };
 use tracedecay_lcm::contracts::LcmRetrievalOutcome;
-use tracedecay_temporal_query::ports::{
+use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
+use tracedecay_temporal_query::snapshot::{
     TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
 
-use tracedecay_global_db::WorkflowScopeFilter;
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
-use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
+use tracedecay_session_memory::session::{
+    SessionCursorRequest, SessionDataFreshness, SessionRetrievalBudgetAccountingV1,
+    SessionRetrievalBudgetStageV1, SessionTemporalQuery,
+};
+use tracedecay_sessions::WorkflowScopeFilter;
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
 use tracedecay_sessions::runtime::{
     SessionMessageSearchResult, SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
@@ -65,6 +70,26 @@ impl SessionRetrievalCommand {
     }
 }
 
+pub(crate) const fn temporal_session_scope(
+    scope: SessionSearchScope,
+) -> TemporalSessionScopeFilterV1 {
+    match scope {
+        SessionSearchScope::All => TemporalSessionScopeFilterV1::All,
+        SessionSearchScope::ParentsOnly => TemporalSessionScopeFilterV1::ParentsOnly,
+        SessionSearchScope::SubagentsOnly => TemporalSessionScopeFilterV1::SubagentsOnly,
+    }
+}
+
+pub(crate) const fn temporal_message_type(
+    message_type: SessionMessageType,
+) -> TemporalMessageTypeFilterV1 {
+    match message_type {
+        SessionMessageType::All => TemporalMessageTypeFilterV1::All,
+        SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,
+        SessionMessageType::ToolResult => TemporalMessageTypeFilterV1::ToolResult,
+    }
+}
+
 fn temporal_candidate_filter(
     filters: &SessionRetrievalFilters,
     goals: bool,
@@ -77,16 +102,8 @@ fn temporal_candidate_filter(
         parent_session_id: filters.parent_session_id.clone(),
         source: filters.source.clone(),
         include_summaries: filters.include_summaries,
-        session_scope: match filters.scope {
-            SessionSearchScope::All => TemporalSessionScopeFilterV1::All,
-            SessionSearchScope::ParentsOnly => TemporalSessionScopeFilterV1::ParentsOnly,
-            SessionSearchScope::SubagentsOnly => TemporalSessionScopeFilterV1::SubagentsOnly,
-        },
-        message_type: match filters.message_type {
-            SessionMessageType::All => TemporalMessageTypeFilterV1::All,
-            SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,
-            SessionMessageType::ToolResult => TemporalMessageTypeFilterV1::ToolResult,
-        },
+        session_scope: temporal_session_scope(filters.scope),
+        message_type: temporal_message_type(filters.message_type),
         roles,
         start_time: filters.time_range.start_time,
         end_time: filters.time_range.end_time,
@@ -166,12 +183,10 @@ impl LcmDescribeServiceCommand {
         &self.target
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
     }
@@ -187,6 +202,7 @@ pub struct LcmExpandServiceCommand {
     source_limit: Option<usize>,
     cursor: Option<String>,
     store_scope: SessionRetrievalStoreScope,
+    cursor_request: SessionCursorRequest,
 }
 
 impl LcmExpandServiceCommand {
@@ -210,6 +226,7 @@ impl LcmExpandServiceCommand {
             source_limit,
             cursor,
             store_scope,
+            cursor_request: SessionCursorRequest::new("lcm_expand"),
         }
     }
 
@@ -225,17 +242,14 @@ impl LcmExpandServiceCommand {
         &self.target
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn content_slice(&self) -> LcmContentSlice {
         self.content_slice
     }
 
-    #[hotpath::skip]
     pub const fn source_limit(&self) -> Option<usize> {
         self.source_limit
     }
@@ -244,9 +258,20 @@ impl LcmExpandServiceCommand {
         self.cursor.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
+    }
+
+    /// Names the user-facing operation, and its request fields, a summary
+    /// source continuation from this expansion is minted for.
+    #[must_use]
+    pub fn with_cursor_request(mut self, cursor_request: SessionCursorRequest) -> Self {
+        self.cursor_request = cursor_request;
+        self
+    }
+
+    pub fn cursor_request(&self) -> &SessionCursorRequest {
+        &self.cursor_request
     }
 }
 
@@ -266,6 +291,14 @@ pub struct SessionRetrievalOmissionView {
     pub rank: u32,
     pub anchor: RetrievalAnchorId,
     pub reason: HydrationStateV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRetrievalCoverageOmissionView {
+    RootContinuationUnavailable {
+        strict_population: TemporalCandidatePopulationCount,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -288,6 +321,8 @@ pub struct SessionTemporalMetadataView {
     pub explanations: Vec<SessionRetrievalExplanationView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub omissions: Vec<SessionRetrievalOmissionView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_omissions: Vec<SessionRetrievalCoverageOmissionView>,
     pub authorized_root: Option<String>,
 }
 
@@ -302,7 +337,14 @@ pub enum SessionRetrievalUnavailableReason {
     HistoricalRetry,
     HistoricalBlocked,
     TemporalStoreUnavailable,
+    /// A temporal store read failed. Distinct from `TemporalStoreUnavailable`:
+    /// the store is there and answered with an error, which is a different
+    /// operator problem from a store that is not present at all.
+    TemporalStoreReadFailed,
     HydrationUnavailable,
+    /// The temporal kernel refused the request, its cursor, or the projected
+    /// index it read. The store answered; what it was handed is defective.
+    TemporalKernelRefused,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -339,7 +381,6 @@ pub struct SessionRetrievalUnavailable {
 }
 
 impl SessionRetrievalUnavailable {
-    #[hotpath::skip]
     pub const fn service_not_configured() -> Self {
         Self {
             reason: SessionRetrievalUnavailableReason::ServiceNotConfigured,
@@ -347,7 +388,6 @@ impl SessionRetrievalUnavailable {
         }
     }
 
-    #[hotpath::skip]
     pub const fn without_worker(reason: SessionRetrievalUnavailableReason) -> Self {
         Self {
             reason,
@@ -380,6 +420,9 @@ pub enum LcmDescribeServiceOutcome {
         retrieval: LcmRetrievalOutcome,
     },
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     WrongScope,
     Locked,
     Redacted,
@@ -394,7 +437,11 @@ pub enum LcmDescribeServiceOutcome {
         observed: usize,
         maximum: usize,
     },
-    BudgetExhausted,
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
+    },
     TimedOut,
     Cancelled,
 }
@@ -421,6 +468,9 @@ pub enum LcmExpandServiceOutcome {
         retrieval: LcmRetrievalOutcome,
     },
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     WrongScope,
     Locked,
     Redacted,
@@ -435,7 +485,11 @@ pub enum LcmExpandServiceOutcome {
         observed: usize,
         maximum: usize,
     },
-    BudgetExhausted,
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
+    },
     TimedOut,
     Cancelled,
 }
@@ -461,10 +515,19 @@ pub enum SessionRetrievalServiceOutcome {
         freshness: SessionDataFreshness,
     },
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     Partial {
         page: SessionRetrievalPageView,
         freshness: SessionDataFreshness,
+        /// The folded omission count: the freshness lag flag folded into the
+        /// same count as genuine record omissions (see `record_omitted`).
         omitted: u64,
+        /// Genuine missing records only — coverage and explicit omission
+        /// entries count the same records two ways, so the larger stands; the
+        /// lag flag measures projection distance, not records, and stays out.
+        record_omitted: u64,
     },
     WrongScope,
     Locked,
@@ -481,8 +544,48 @@ pub enum SessionRetrievalServiceOutcome {
         maximum: usize,
     },
     BudgetExhausted {
-        stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1,
+        stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
     },
     TimedOut,
     Cancelled,
+}
+
+#[cfg(test)]
+mod temporal_filter_wire_tests {
+    use serde_json::json;
+
+    use super::{
+        SessionMessageType, SessionSearchScope, temporal_message_type, temporal_session_scope,
+    };
+
+    #[test]
+    fn temporal_scope_keeps_the_session_wire_label() {
+        for scope in [
+            SessionSearchScope::All,
+            SessionSearchScope::ParentsOnly,
+            SessionSearchScope::SubagentsOnly,
+        ] {
+            assert_eq!(
+                serde_json::to_value(temporal_session_scope(scope)).expect("scope serializes"),
+                json!(scope.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_message_type_keeps_the_session_wire_label() {
+        for message_type in [
+            SessionMessageType::All,
+            SessionMessageType::DirectUser,
+            SessionMessageType::ToolResult,
+        ] {
+            assert_eq!(
+                serde_json::to_value(temporal_message_type(message_type))
+                    .expect("message type serializes"),
+                json!(message_type.as_str())
+            );
+        }
+    }
 }

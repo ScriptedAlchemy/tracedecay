@@ -1,12 +1,14 @@
 //! How the worker loop learns there is work, and where that work is parked.
 //!
-//! One await point ([`wait_for_work`]) covers every ingress channel so the
+//! One wait point ([`wait_for_work`]) covers every ingress channel so the
 //! worker never spins, and [`select_auxiliary_work`] is the round-robin that
 //! keeps maintenance from starving product writes.
 
-use std::{collections::VecDeque, future::poll_fn, pin::Pin, task::Poll};
+use std::{collections::HashMap, collections::VecDeque, task::Poll, time::Instant};
 
-use tokio::sync::mpsc;
+use asupersync::{Cx, channel::mpsc};
+use tracedecay_domain::process_heap::collect_idle_thread_heap_v1;
+use tracedecay_store::{StorageRuntimeErrorV1, StoreOperationIdV1};
 
 use crate::{
     admission::{FairQueue, QueueItem},
@@ -14,18 +16,13 @@ use crate::{
     telemetry::WriterTelemetry,
 };
 
-use super::super::{
-    backup::OnlineBackupCommand,
-    request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand},
-    settlement::infrastructure,
+use super::super::request::{
+    AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand, SharedReply,
 };
-use super::HARD_CHECKPOINT_RETRY_INTERVAL;
-
 pub(super) enum WorkerWake {
     Write(Option<AcceptedRequest>),
     ExactSql(Box<Option<ExactSqlWriterCommand>>),
     IncrementalVacuum(Box<Option<IncrementalVacuumCommand>>),
-    OnlineBackup(Box<Option<OnlineBackupCommand>>),
     Checkpoint(Box<Option<CheckpointCommand>>),
     Shutdown,
     CheckpointRetry,
@@ -33,80 +30,90 @@ pub(super) enum WorkerWake {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn wait_for_work(
+    cx: &Cx,
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     exact_sql_receiver: &mut mpsc::Receiver<ExactSqlWriterCommand>,
     incremental_vacuum_receiver: &mut mpsc::Receiver<IncrementalVacuumCommand>,
-    online_backup_receiver: &mut mpsc::Receiver<OnlineBackupCommand>,
     checkpoint_receiver: &mut mpsc::Receiver<CheckpointCommand>,
     shutdown_receiver: &mut mpsc::UnboundedReceiver<()>,
     input_closed: bool,
     exact_sql_closed: bool,
     incremental_vacuum_closed: bool,
-    online_backup_closed: bool,
     checkpoint_closed: bool,
-    retry_checkpoint: bool,
+    deadline: Option<Instant>,
 ) -> WorkerWake {
-    let receive = poll_fn(|context| {
-        if Pin::new(&mut *shutdown_receiver)
-            .poll_recv(context)
-            .is_ready()
-        {
-            return Poll::Ready(WorkerWake::Shutdown);
+    let arm = |deadline: Instant| {
+        Box::pin(crate::storage_pool::sleep(
+            deadline.saturating_duration_since(Instant::now()),
+        ))
+    };
+    let mut retry = deadline.map(arm);
+    std::future::poll_fn(|task_cx| {
+        // Writer shutdown, rather than request cancellation, owns accepted work.
+        let wake = cx.masked(|| {
+            if shutdown_receiver.poll_recv(cx, task_cx).is_ready() {
+                return Poll::Ready(WorkerWake::Shutdown);
+            }
+            if !checkpoint_closed
+                && let Poll::Ready(command) = checkpoint_receiver.poll_recv(cx, task_cx)
+            {
+                return Poll::Ready(WorkerWake::Checkpoint(Box::new(command.ok())));
+            }
+            if !exact_sql_closed
+                && let Poll::Ready(command) = exact_sql_receiver.poll_recv(cx, task_cx)
+            {
+                return Poll::Ready(WorkerWake::ExactSql(Box::new(command.ok())));
+            }
+            if !incremental_vacuum_closed
+                && let Poll::Ready(command) = incremental_vacuum_receiver.poll_recv(cx, task_cx)
+            {
+                return Poll::Ready(WorkerWake::IncrementalVacuum(Box::new(command.ok())));
+            }
+            if !input_closed && let Poll::Ready(item) = receiver.poll_recv(cx, task_cx) {
+                return Poll::Ready(WorkerWake::Write(item.ok()));
+            }
+            Poll::Pending
+        });
+        if wake.is_ready() {
+            return wake;
         }
-        if !checkpoint_closed
-            && let Poll::Ready(command) = Pin::new(&mut *checkpoint_receiver).poll_recv(context)
-        {
-            return Poll::Ready(WorkerWake::Checkpoint(Box::new(command)));
+        // `Instant` decides the deadline. The pool timer keeps its own clock
+        // and only wakes the task, so one that fires early is armed again for
+        // the rest of the wait.
+        if let (Some(deadline), Some(retry)) = (deadline, retry.as_mut()) {
+            loop {
+                if Instant::now() >= deadline {
+                    return Poll::Ready(WorkerWake::CheckpointRetry);
+                }
+                if retry.as_mut().poll(task_cx).is_pending() {
+                    break;
+                }
+                *retry = arm(deadline);
+            }
         }
-        if !exact_sql_closed
-            && let Poll::Ready(command) = Pin::new(&mut *exact_sql_receiver).poll_recv(context)
-        {
-            return Poll::Ready(WorkerWake::ExactSql(Box::new(command)));
-        }
-        if !incremental_vacuum_closed
-            && let Poll::Ready(command) =
-                Pin::new(&mut *incremental_vacuum_receiver).poll_recv(context)
-        {
-            return Poll::Ready(WorkerWake::IncrementalVacuum(Box::new(command)));
-        }
-        if !online_backup_closed
-            && let Poll::Ready(command) = Pin::new(&mut *online_backup_receiver).poll_recv(context)
-        {
-            return Poll::Ready(WorkerWake::OnlineBackup(Box::new(command)));
-        }
-        if !input_closed && let Poll::Ready(item) = Pin::new(&mut *receiver).poll_recv(context) {
-            return Poll::Ready(WorkerWake::Write(item));
-        }
+        collect_idle_thread_heap_v1();
         Poll::Pending
-    });
-    if retry_checkpoint {
-        match tokio::time::timeout(HARD_CHECKPOINT_RETRY_INTERVAL, receive).await {
-            Ok(wake) => wake,
-            Err(_) => WorkerWake::CheckpointRetry,
-        }
-    } else {
-        receive.await
-    }
+    })
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_wake(
     wake: WorkerWake,
     queue: &mut FairQueue<AcceptedRequest>,
+    inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     exact_sql_queue: &mut VecDeque<ExactSqlWriterCommand>,
     incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
-    online_backup_queue: &mut VecDeque<OnlineBackupCommand>,
     checkpoint_queue: &mut VecDeque<CheckpointCommand>,
     telemetry: &WriterTelemetry,
     input_closed: &mut bool,
     exact_sql_closed: &mut bool,
     incremental_vacuum_closed: &mut bool,
-    online_backup_closed: &mut bool,
     checkpoint_closed: &mut bool,
 ) {
     match wake {
         WorkerWake::Write(Some(item)) => {
-            let _ = enqueue(queue, item, telemetry);
+            let _ = enqueue(queue, inflight, item, telemetry);
         }
         WorkerWake::Write(None) => *input_closed = true,
         WorkerWake::ExactSql(command) => match *command {
@@ -116,10 +123,6 @@ pub(super) fn apply_wake(
         WorkerWake::IncrementalVacuum(command) => match *command {
             Some(command) => incremental_vacuum_queue.push_back(command),
             None => *incremental_vacuum_closed = true,
-        },
-        WorkerWake::OnlineBackup(command) => match *command {
-            Some(command) => online_backup_queue.push_back(command),
-            None => *online_backup_closed = true,
         },
         WorkerWake::Checkpoint(command) => match *command {
             Some(command) => checkpoint_queue.push_back(command),
@@ -132,9 +135,9 @@ pub(super) fn apply_wake(
 
 /// Move every command already sitting in `receiver` into `queue`.
 ///
-/// Each auxiliary channel (exact SQL, incremental vacuum, online backup,
-/// checkpoint) drains identically — park the command, stop on empty, and latch
-/// `input_closed` once the sender is gone — so they share this one loop. The
+/// Each auxiliary channel (exact SQL, incremental vacuum,
+/// checkpoint) drains identically, park the command, stop on empty, and latch
+/// `input_closed` once the sender is gone, so they share this one loop. The
 /// product-write channel does not: it settles duplicates through
 /// [`drain_ingress`] instead of parking them.
 pub(super) fn drain_command_ingress<T>(
@@ -145,8 +148,8 @@ pub(super) fn drain_command_ingress<T>(
     loop {
         match receiver.try_recv() {
             Ok(command) => queue.push_back(command),
-            Err(mpsc::error::TryRecvError::Empty) => break,
-            Err(mpsc::error::TryRecvError::Disconnected) => {
+            Err(mpsc::RecvError::Empty) => break,
+            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => {
                 *input_closed = true;
                 break;
             }
@@ -158,13 +161,11 @@ pub(super) fn drain_command_ingress<T>(
 pub(super) enum AuxiliaryWork {
     ExactSql,
     IncrementalVacuum,
-    OnlineBackup,
 }
 
 pub(super) fn select_auxiliary_work(
     exact_sql_waiting: bool,
     incremental_vacuum_waiting: bool,
-    online_backup_waiting: bool,
     product_queue_empty: bool,
     prefer_auxiliary: bool,
     next: AuxiliaryWork,
@@ -175,24 +176,12 @@ pub(super) fn select_auxiliary_work(
     let waiting = |work| match work {
         AuxiliaryWork::ExactSql => exact_sql_waiting,
         AuxiliaryWork::IncrementalVacuum => incremental_vacuum_waiting,
-        AuxiliaryWork::OnlineBackup => online_backup_waiting,
     };
     let order = match next {
-        AuxiliaryWork::ExactSql => [
-            AuxiliaryWork::ExactSql,
-            AuxiliaryWork::IncrementalVacuum,
-            AuxiliaryWork::OnlineBackup,
-        ],
-        AuxiliaryWork::IncrementalVacuum => [
-            AuxiliaryWork::IncrementalVacuum,
-            AuxiliaryWork::OnlineBackup,
-            AuxiliaryWork::ExactSql,
-        ],
-        AuxiliaryWork::OnlineBackup => [
-            AuxiliaryWork::OnlineBackup,
-            AuxiliaryWork::ExactSql,
-            AuxiliaryWork::IncrementalVacuum,
-        ],
+        AuxiliaryWork::ExactSql => [AuxiliaryWork::ExactSql, AuxiliaryWork::IncrementalVacuum],
+        AuxiliaryWork::IncrementalVacuum => {
+            [AuxiliaryWork::IncrementalVacuum, AuxiliaryWork::ExactSql]
+        }
     };
     order.into_iter().find(|work| waiting(*work))
 }
@@ -200,16 +189,17 @@ pub(super) fn select_auxiliary_work(
 pub(super) fn drain_ingress(
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     queue: &mut FairQueue<AcceptedRequest>,
+    inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     telemetry: &WriterTelemetry,
     input_closed: &mut bool,
 ) {
     loop {
         match receiver.try_recv() {
             Ok(item) => {
-                let _ = enqueue(queue, item, telemetry);
+                let _ = enqueue(queue, inflight, item, telemetry);
             }
-            Err(mpsc::error::TryRecvError::Empty) => break,
-            Err(mpsc::error::TryRecvError::Disconnected) => {
+            Err(mpsc::RecvError::Empty) => break,
+            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => {
                 *input_closed = true;
                 break;
             }
@@ -219,28 +209,57 @@ pub(super) fn drain_ingress(
 
 pub(super) fn enqueue(
     queue: &mut FairQueue<AcceptedRequest>,
+    inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     item: AcceptedRequest,
     telemetry: &WriterTelemetry,
 ) -> bool {
+    let operation_id = item.operation_id().clone();
+    let admission_bytes = item.admission_bytes();
+    if let Some(leader) = queue.get_mut(&operation_id) {
+        if leader.matches_follower(&item) {
+            leader.attach_follower(item);
+            telemetry.released(1, admission_bytes);
+            return true;
+        }
+        return reject_duplicate(item, operation_id, telemetry);
+    }
+    if let Some(hub) = inflight.get(&operation_id)
+        && hub.overlaps(&item)
+    {
+        if !hub.matches(&item) {
+            return reject_duplicate(item, operation_id, telemetry);
+        }
+        hub.attach_request(item);
+        telemetry.released(1, admission_bytes);
+        return true;
+    }
     if let Err(item) = queue.push(item) {
-        let result = Err(infrastructure(
-            "duplicate operation id reached persistent writer",
-        ));
-        telemetry.released(1, item.admission_bytes());
-        telemetry.completed(&result);
-        item.settle(result);
-        return false;
+        return reject_duplicate(item, operation_id, telemetry);
     }
     true
 }
 
+fn reject_duplicate(
+    item: AcceptedRequest,
+    operation_id: StoreOperationIdV1,
+    telemetry: &WriterTelemetry,
+) -> bool {
+    let result = Err(StorageRuntimeErrorV1::DuplicateOperationInFlight {
+        operation_id: operation_id.as_str().to_owned(),
+    });
+    telemetry.released(1, item.admission_bytes());
+    telemetry.completed(&result);
+    item.settle(result);
+    false
+}
+
 #[cfg(test)]
 mod tests {
-    use tokio::{runtime::Builder, sync::mpsc};
+    use asupersync::{Budget, channel::mpsc, runtime::RuntimeBuilder};
 
     use super::{
         AcceptedRequest, CheckpointCommand, ExactSqlWriterCommand, IncrementalVacuumCommand,
-        OnlineBackupCommand, WorkerWake, wait_for_work,
+        WorkerWake, wait_for_work,
     };
 
     #[test]
@@ -248,30 +267,92 @@ mod tests {
         let (_write_tx, mut write_rx) = mpsc::channel::<AcceptedRequest>(1);
         let (_exact_sql_tx, mut exact_sql_rx) = mpsc::channel::<ExactSqlWriterCommand>(1);
         let (_vacuum_tx, mut vacuum_rx) = mpsc::channel::<IncrementalVacuumCommand>(1);
-        let (_backup_tx, mut backup_rx) = mpsc::channel::<OnlineBackupCommand>(1);
         let (_checkpoint_tx, mut checkpoint_rx) = mpsc::channel::<CheckpointCommand>(1);
         let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
         shutdown_tx.send(()).expect("shutdown receiver is open");
-        let runtime = Builder::new_current_thread()
-            .enable_time()
+        let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("test runtime");
 
+        let cx = runtime
+            .handle()
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .unwrap();
         let wake = runtime.block_on(wait_for_work(
+            &cx,
             &mut write_rx,
             &mut exact_sql_rx,
             &mut vacuum_rx,
-            &mut backup_rx,
             &mut checkpoint_rx,
             &mut shutdown_rx,
             false,
             false,
             false,
             false,
-            false,
-            false,
+            None,
         ));
 
         assert!(matches!(wake, WorkerWake::Shutdown));
+    }
+    #[test]
+    fn cancelled_context_does_not_abandon_the_writer_shutdown_wait() {
+        let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+        let cx = runtime
+            .handle()
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .unwrap();
+        cx.set_cancel_requested(true);
+        let (_write_tx, mut write_rx) = mpsc::channel::<AcceptedRequest>(1);
+        let (_exact_sql_tx, mut exact_sql_rx) = mpsc::channel::<ExactSqlWriterCommand>(1);
+        let (_vacuum_tx, mut vacuum_rx) = mpsc::channel::<IncrementalVacuumCommand>(1);
+        let (_checkpoint_tx, mut checkpoint_rx) = mpsc::channel::<CheckpointCommand>(1);
+        let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
+        let shutdown = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            shutdown_tx.send(()).expect("shutdown receiver is open");
+        });
+        let wake = runtime.block_on(wait_for_work(
+            &cx,
+            &mut write_rx,
+            &mut exact_sql_rx,
+            &mut vacuum_rx,
+            &mut checkpoint_rx,
+            &mut shutdown_rx,
+            false,
+            false,
+            false,
+            false,
+            None,
+        ));
+        assert!(matches!(wake, WorkerWake::Shutdown));
+        shutdown.join().unwrap();
+    }
+
+    #[test]
+    fn checkpoint_deadline_wakes_empty_ingress() {
+        let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+        let cx = runtime
+            .handle()
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .unwrap();
+        let (_write_tx, mut write_rx) = mpsc::channel::<AcceptedRequest>(1);
+        let (_exact_sql_tx, mut exact_sql_rx) = mpsc::channel::<ExactSqlWriterCommand>(1);
+        let (_vacuum_tx, mut vacuum_rx) = mpsc::channel::<IncrementalVacuumCommand>(1);
+        let (_checkpoint_tx, mut checkpoint_rx) = mpsc::channel::<CheckpointCommand>(1);
+        let (_shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
+        let wake = runtime.block_on(wait_for_work(
+            &cx,
+            &mut write_rx,
+            &mut exact_sql_rx,
+            &mut vacuum_rx,
+            &mut checkpoint_rx,
+            &mut shutdown_rx,
+            false,
+            false,
+            false,
+            false,
+            Some(std::time::Instant::now()),
+        ));
+        assert!(matches!(wake, WorkerWake::CheckpointRetry));
     }
 }

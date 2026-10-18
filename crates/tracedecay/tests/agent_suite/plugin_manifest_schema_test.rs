@@ -72,8 +72,8 @@ fn assert_component_paths_resolve(manifest: &Value, bundle_root: &Path, manifest
 }
 
 /// The manifests now live in the single shared `plugin/` tree, but their
-/// component pointers are *deploy-relative* (e.g. `mcp.json`, `hooks/hooks.json`
-/// — sourced from `mcp-cursor.json` / `hooks/hooks-cursor.json`). Stage the
+/// component pointers are *deploy-relative* (e.g. `mcp.json`, `hooks/hooks.json`,
+/// sourced from `mcp-cursor.json` / `hooks/hooks-cursor.json`). Stage the
 /// per-host deploy layout into a temp dir so `assert_component_paths_resolve`
 /// checks against the tree each host actually installs.
 fn stage_host_deploy(copies: &[(&str, &str)]) -> tempfile::TempDir {

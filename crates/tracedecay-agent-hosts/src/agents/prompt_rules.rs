@@ -4,33 +4,157 @@
 //! tracedecay rules block. Claude and Kiro keep host-specific text but reuse
 //! the block-splicing helpers here.
 
+use std::ops::Range;
 use std::path::Path;
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 /// Marker heading shared by every standard prompt-rules host.
 pub(crate) const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
 
-/// Managed-skill index marker; strip heuristics stop here.
-pub(crate) const SKILL_INDEX_START: &str = "<!-- TRACEDECAY MANAGED SKILLS START -->";
+/// Explicit ownership sentinels of a tracedecay-managed steering block.
+///
+/// The sentinels, not any heading or sentence inside the block, are the
+/// ownership contract: install rewrites exactly the span between them,
+/// uninstall removes exactly that span, and doctor judges the span's bytes
+/// against the embedded block. Prose can therefore change freely without
+/// another marker migration.
+#[derive(Clone, Copy)]
+pub(crate) struct OwnedBlockSentinels {
+    pub start: &'static str,
+    pub end: &'static str,
+}
+
+impl OwnedBlockSentinels {
+    /// Render `body` wrapped in this block's sentinels.
+    pub(crate) fn render(self, body: &str) -> String {
+        format!("{}\n{body}\n{}", self.start, self.end)
+    }
+
+    /// Byte range of the first sentinel-delimited block starting at or after
+    /// `from`. A start sentinel without an end sentinel is not a block.
+    pub(crate) fn block_range(self, contents: &str, from: usize) -> Option<Range<usize>> {
+        let start = from + contents[from..].find(self.start)?;
+        let end = start + contents[start..].find(self.end)? + self.end.len();
+        Some(start..end)
+    }
+}
+
+/// Every tracedecay-owned range in `contents` in document order. `locate_first`
+/// returns the earliest owned block starting at or after an offset; ranges never overlap because each search resumes at the
+/// previous block's end.
+pub(crate) fn owned_block_ranges(
+    contents: &str,
+    locate_first: impl Fn(&str, usize) -> Option<Range<usize>>,
+) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    while from < contents.len() {
+        let Some(range) = locate_first(contents, from) else {
+            break;
+        };
+        from = range.end.max(range.start + 1);
+        ranges.push(range);
+    }
+    ranges
+}
+
+/// Peer text with every owned range removed; when `replacement` is given it
+/// takes the first range's place. Later ranges (duplicate or mixed-marker
+/// installs) are dropped so the file converges on exactly one block. Peer
+/// segments keep their order; only the blank lines around removed blocks are
+/// normalized. `None` when nothing remains.
+pub(crate) fn rebuild_with_owned_blocks(
+    contents: &str,
+    ranges: &[Range<usize>],
+    replacement: Option<&str>,
+) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut cursor = 0;
+    for (index, range) in ranges.iter().enumerate() {
+        let peer = contents[cursor..range.start].trim();
+        if !peer.is_empty() {
+            parts.push(peer);
+        }
+        if index == 0
+            && let Some(block) = replacement
+        {
+            parts.push(block);
+        }
+        cursor = range.end;
+    }
+    let tail = contents[cursor..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    if ranges.is_empty()
+        && let Some(block) = replacement
+    {
+        parts.push(block);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut rebuilt = parts.join("\n\n");
+    rebuilt.push('\n');
+    Some(rebuilt)
+}
+
+/// Whether the owned ranges already are exactly one copy of `block`, so a
+/// reinstall is a no-op rather than a rewrite.
+pub(crate) fn owned_block_is_current(contents: &str, ranges: &[Range<usize>], block: &str) -> bool {
+    matches!(ranges, [range] if &contents[range.clone()] == block)
+}
+
+/// Install `block` as the single owned block: unchanged when already current,
+/// otherwise converge every owned range onto one copy
+/// (the first range's position, or appended when none exists).
+pub(crate) fn converge_owned_block(
+    existing: &str,
+    ranges: &[Range<usize>],
+    block: &str,
+) -> PromptRulesEdit {
+    if owned_block_is_current(existing, ranges, block) {
+        return PromptRulesEdit::Unchanged;
+    }
+    let rebuilt = rebuild_with_owned_blocks(existing, ranges, Some(block))
+        .unwrap_or_else(|| format!("{block}\n"));
+    if ranges.is_empty() {
+        PromptRulesEdit::Added(rebuilt)
+    } else {
+        PromptRulesEdit::Refreshed(rebuilt)
+    }
+}
+
+/// Remove every owned range, deleting the file when only owned text was there.
+pub(crate) fn remove_owned_blocks(contents: &str, ranges: &[Range<usize>]) -> PromptRulesRemoval {
+    if ranges.is_empty() {
+        return PromptRulesRemoval::Unchanged;
+    }
+    match rebuild_with_owned_blocks(contents, ranges, None) {
+        Some(rebuilt) => PromptRulesRemoval::Rewrite(rebuilt),
+        None => PromptRulesRemoval::Remove,
+    }
+}
+
+/// Managed-skill index marker prefix (the full marker carries a per-host
+/// suffix); strip heuristics stop here.
 const SKILL_INDEX_START_PREFIX: &str = "<!-- TRACEDECAY MANAGED SKILLS START";
 
 /// Canonical rules paragraphs shared by the standard hosts.
 const STANDARD_PARAGRAPHS: &[&str] = &[
-    "Before reading source files or scanning the codebase, use the tracedecay MCP tools \
-     (`tracedecay_context`, `tracedecay_grep`, `tracedecay_search`, `tracedecay_callers`, \
-     `tracedecay_callees`, `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, \
-     `tracedecay_affected`). Route literal/regex text to `tracedecay_grep`, symbol names \
-     to `tracedecay_search`, and concepts to `tracedecay_context`. They provide instant \
-     semantic results from a pre-built knowledge graph and are faster than file reads.",
+    "Use TraceDecay when its graph, durable memory, or session evidence answers the task. \
+     For unfamiliar code structure or concepts, start with `tracedecay_context`; use \
+     `tracedecay_search` for symbols, `tracedecay_grep` for literal or regex text, and \
+     `tracedecay_callers`, `tracedecay_callees`, or `tracedecay_impact` for relationships. \
+     Known-file reads, ordinary local edits, and non-indexed material can use the host's \
+     native workflow directly.",
     "For project/storage identity questions, use `tracedecay_active_project` \
      or `tracedecay_storage_status` instead of inferring from repo-local marker \
      files or direct DB paths.",
-    "If a code analysis question cannot be fully answered by tracedecay MCP tools, \
-     prefer built-in MCP tools first. If the user explicitly needs raw store \
-     inspection, use the resolved graph DB path reported by `tracedecay_storage_status` \
-     rather than a hardcoded repo-local path. Use SQL to answer complex structural \
-     queries that go beyond what the built-in tools expose.",
+    "Read freshness and coverage with graph results; an empty result does not prove \
+     absence. Preserve exact project/worktree selectors and opaque continuation or \
+     mutation identities. Use the selected registered store for cross-project requests.",
     "For durable project/user facts, use `tracedecay_fact_store_add` to persist them and \
      `tracedecay_fact_store_search` to recall or deduplicate them; use \
      `tracedecay_fact_feedback` and read-only `tracedecay_memory_status` over ad-hoc notes. \
@@ -40,12 +164,15 @@ const STANDARD_PARAGRAPHS: &[&str] = &[
      prior conversation context matters. Do not store secrets, credentials, or \
      unnecessary PII in persistent facts.",
     super::CLI_FALLBACK_PROMPT_RULES,
-    "If you discover a gap where an extractor, schema, or tracedecay tool could be \
-     improved to answer a question natively, propose to the user that they open an issue \
-     at https://github.com/ScriptedAlchemy/tracedecay describing the limitation. \
-     **Remind the user to strip any sensitive or proprietary code from the bug description \
-     before submitting.**",
+    "A preview or read result does not authorize mutation. Once the user has authorized a \
+     change, continue through implementation and relevant verification; pause only for a \
+     missing decision or an external or destructive action outside that authority.",
 ];
+
+/// Extra paragraphs for a host that ships the bundled skills but has no
+/// session-start context to carry the skill mandate.
+pub(crate) const SKILL_MANDATE_PARAGRAPHS: &[&str] =
+    &[crate::hooks::SKILL_MANDATE.trim_ascii_end()];
 
 /// Host-specific knobs for [`standard_prompt_rules`].
 pub(crate) struct PromptRulesOptions {
@@ -62,12 +189,6 @@ pub(crate) fn standard_prompt_rules(marker: &str, options: &PromptRulesOptions) 
         block.push_str(paragraph);
     }
     block
-}
-
-/// The CLI-fallback paragraph every host's rules must carry; exposed so
-/// integration tests can assert parity across hosts.
-pub fn cli_fallback_paragraph() -> &'static str {
-    super::CLI_FALLBACK_PROMPT_RULES
 }
 
 /// End offset of a managed block whose marker heading ends at `search_from`:
@@ -197,7 +318,7 @@ pub(crate) fn remove_prompt_rules_with(
             PromptRulesRemoval::Rewrite(contents) => {
                 (true, super::TextFileMutation::Write(contents))
             }
-            PromptRulesRemoval::Remove => (true, super::TextFileMutation::Remove),
+            PromptRulesRemoval::Remove => (true, super::emptied_text_mutation(path, String::new())),
         })
     })?;
     if removed {

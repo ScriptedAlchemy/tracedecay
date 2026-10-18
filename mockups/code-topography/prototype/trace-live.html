@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>TRACE — live watershed (round two prototype)</title>
+<title>TRACE, live watershed (round two prototype)</title>
 <style>
 /* Token block transcribed from dashboard/src/theme/tokens.css, trimmed to what
  * this page draws. The canvas cannot read custom properties, so the page
- * resolves them once per theme flip and hands the renderer resolved strings —
+ * resolves them once per theme flip and hands the renderer resolved strings,
  * tokens.css stays the single source of the instrument's colour. */
 :root {
   --raw-surface-0: oklch(0.145 0.003 260);
@@ -178,7 +178,7 @@ html, body {
     <h1>Trace</h1>
     <span class="sub">The static watershed with its physics turned on. Every node is a body whose mass is its degree;
       every channel is a spring whose stiffness is its call-site count. Hover to feel weight, drag to feel coupling,
-      release to watch it settle. Nothing here is eased for looks — the motion is the measurement.</span>
+      release to watch it settle. Nothing here is eased for looks. The motion is the measurement.</span>
   </header>
 
   <div class="readbar">
@@ -224,7 +224,7 @@ html, body {
     <div class="keycell">
       <div class="keyhead"><span class="td-legend">Rest</span><span class="td-rule"></span></div>
       <div class="cap">Each channel's rest length is the distance between its two <b>layout anchors</b>, so the field at
-        rest is the static sheet exactly — no drift, no relayout. A channel only stores energy once a gesture has
+        rest is the static sheet exactly, no drift, no relayout. A channel only stores energy once a gesture has
         displaced something.</div>
     </div>
     <div class="keycell">
@@ -237,7 +237,7 @@ html, body {
     <div class="keycell">
       <div class="keyhead"><span class="td-legend">Determinism</span><span class="td-rule"></span></div>
       <div class="cap">One fixed 1/60 s step per animation frame, subdivided to 1/240 s inside the integrator. Wall
-        clock never reaches the physics — it is measured, in <code>frameMs</code>, and reported. Same seed plus same
+        clock never reaches the physics. It is measured, in <code>frameMs</code>, and reported. Same seed plus same
         gestures gives the same trajectory, which is what the QA gate replays.</div>
     </div>
   </div>
@@ -247,7 +247,7 @@ html, body {
       <h2>What round two adds</h2>
       <p class="td-caption">Round one settled the spatial language. This page answers the only question a static sheet
         cannot: does the structure <b>feel</b> like what it is. Weight and tension are the two channels of the sensory
-        contract that a spring field can carry honestly, and both are wired to numbers already on the payload —
+        contract that a spring field can carry honestly, and both are wired to numbers already on the payload,
         <code>degree</code> and per-edge <code>call sites</code>.</p>
       <p class="td-caption">Warmth (churn recency) and grain (cyclomatic complexity) are deliberately absent: they are
         real channels in the contract but they need a time axis and a contour pass, and mixing them in here would make
@@ -258,9 +258,9 @@ html, body {
       <dl>
         <dt>mass</dt><dd>symbol <code>degree</code>, floored at 3 so an unresolved node still has inertia.</dd>
         <dt>anchor k</dt><dd><code>90 · mass^0.5</code>. The exponent is the one compression on this page and it is a
-          tuning knob, not a measurement — see the README table.</dd>
+          tuning knob, not a measurement. See the README table.</dd>
         <dt>channel k</dt><dd><code>6 · call sites</code> on that single edge.</dd>
-        <dt>damping</dt><dd>ratio 0.72 against each node's own anchor — one overshoot, no ringing.</dd>
+        <dt>damping</dt><dd>ratio 0.72 against each node's own anchor, one overshoot, no ringing.</dd>
         <dt>bloom rate</dt><dd><code>9.5 / mass^0.42</code> per second, growing; <code>5.0 / mass^0.42</code> decaying.</dd>
         <dt>rest length</dt><dd>anchor-to-anchor distance. Makes the layout an exact equilibrium.</dd>
       </dl>
@@ -595,7 +595,7 @@ window.__traceHarness = {
   heaviestId() {
     return nodeIds.reduce((best, id) => (sim.massOf(id) > sim.massOf(best) ? id : best), nodeIds[0]);
   },
-  /** Lightest node with exactly one channel — a true leaf, not just a light hub. */
+  /** Lightest node with exactly one channel. A true leaf, not a light hub. */
   leafId() {
     const leaves = nodeIds.filter((id) => sim.springsOf(id).length === 1 && sim.massOf(id) > 3);
     return leaves.reduce((best, id) => (sim.massOf(id) < sim.massOf(best) ? id : best), leaves[0]);

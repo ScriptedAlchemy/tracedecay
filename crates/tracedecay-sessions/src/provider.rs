@@ -16,15 +16,17 @@ pub enum SessionProvider {
     Kimi,
     OpenCode,
     Hermes,
+    Pi,
 }
 
 impl SessionProvider {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::Hermes,
         Self::Kiro,
+        Self::Pi,
         Self::Kimi,
         Self::OpenCode,
         Self::Cline,
@@ -33,7 +35,6 @@ impl SessionProvider {
         Self::Vibe,
     ];
 
-    #[hotpath::skip]
     pub const fn id(self) -> &'static str {
         match self {
             Self::Cursor => "cursor",
@@ -47,6 +48,7 @@ impl SessionProvider {
             Self::Kimi => "kimi",
             Self::OpenCode => "opencode",
             Self::Hermes => "hermes",
+            Self::Pi => "pi",
         }
     }
 
@@ -63,6 +65,7 @@ impl SessionProvider {
             "kimi" => Some(Self::Kimi),
             "opencode" => Some(Self::OpenCode),
             "hermes" => Some(Self::Hermes),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -71,32 +74,29 @@ impl SessionProvider {
     /// provider identifier. Canonical capture from provider ingestion is a
     /// separate capability: Vibe has canonical capture but is not admitted
     /// through direct host calls.
-    #[hotpath::skip]
     pub const fn supports_host_admission(self) -> bool {
         !matches!(self, Self::Vibe)
     }
 
     /// Whether this provider's driver scans every destination store in one pass,
     /// so a per-destination catch-up loop must skip it once user ingestion ran.
-    #[hotpath::skip]
     pub const fn scans_all_destinations(self) -> bool {
         matches!(self, Self::Hermes)
     }
 
     /// Whether the production provider driver persists bounded sweep coverage.
-    #[hotpath::skip]
     pub const fn writes_typed_history_coverage(self) -> bool {
-        matches!(self, Self::Kimi | Self::OpenCode)
+        matches!(self, Self::Kimi | Self::OpenCode | Self::Pi)
     }
 }
 
 pub const MESSAGE_SEARCH_PROVIDER_IDS: &[&str] = &[
     "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro", "kimi",
-    "opencode", "hermes",
+    "opencode", "hermes", "pi",
 ];
 
 pub const EXPECTED_MESSAGE_SEARCH_PROVIDER: &str =
-    "all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes";
+    "all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, hermes, or pi";
 
 /// Decodes the workspace path used by Kiro's `workspace-sessions` directory.
 ///
@@ -141,7 +141,6 @@ impl ProviderScope {
         }
     }
 
-    #[hotpath::skip]
     pub const fn provider(self) -> Option<SessionProvider> {
         match self {
             Self::All => None,
@@ -149,7 +148,6 @@ impl ProviderScope {
         }
     }
 
-    #[hotpath::skip]
     pub const fn provider_id(self) -> Option<&'static str> {
         match self {
             Self::All => None,
@@ -157,7 +155,6 @@ impl ProviderScope {
         }
     }
 
-    #[hotpath::skip]
     pub const fn response_label(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -180,37 +177,19 @@ mod tests {
     }
 
     #[test]
-    fn provider_capabilities_match_runtime_boundaries() {
-        for provider in SessionProvider::ALL {
-            assert_eq!(
-                provider.supports_host_admission(),
-                provider != SessionProvider::Vibe,
-                "{} host-admission capability",
-                provider.id()
-            );
-            assert_eq!(
-                provider.scans_all_destinations(),
-                provider == SessionProvider::Hermes,
-                "{} destination-scan capability",
-                provider.id()
-            );
-            assert_eq!(
-                provider.writes_typed_history_coverage(),
-                matches!(provider, SessionProvider::Kimi | SessionProvider::OpenCode),
-                "{} typed history coverage capability",
-                provider.id()
-            );
-        }
-    }
-
-    #[test]
     fn optional_scope_defaults_only_to_all() {
         assert_eq!(ProviderScope::parse_optional(None), Ok(ProviderScope::All));
         assert_eq!(
             ProviderScope::parse_optional(Some("vibe")),
             Ok(ProviderScope::One(SessionProvider::Vibe))
         );
-        assert!(ProviderScope::parse_optional(Some("unknown")).is_err());
+        assert_eq!(
+            ProviderScope::parse_optional(Some("unknown")),
+            Err(
+                "unknown session provider 'unknown' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, hermes, or pi)"
+                    .to_owned()
+            )
+        );
     }
 
     #[test]

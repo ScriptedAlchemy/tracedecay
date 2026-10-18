@@ -1,4 +1,3 @@
-use std::fs;
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -10,8 +9,9 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::dispatch_test_support::*;
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
-use crate::tracedecay::TraceDecay;
+use crate::daemon::retained_test_support::{
+    forward_application_surface, ignore_feedback_observations,
+};
 
 #[derive(Default)]
 struct UnavailableEffectExecutor {
@@ -26,15 +26,15 @@ struct UnavailableEffectExecutor {
     >,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for UnavailableEffectExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for UnavailableEffectExecutor {
     fn invoke(
         &self,
-        invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
         self.invocations.fetch_add(1, Ordering::SeqCst);
@@ -47,7 +47,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for UnavailableEffect
                 .unwrap()
                 .push((binding.operation().as_str().to_owned(), payload.clone()));
         }
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -55,8 +55,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectE
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
-        _deadline: tracedecay_application::Deadline,
-        _cancellation: tracedecay_application::CancellationSignal,
+        _deadline: tracedecay_contracts::Deadline,
+        _cancellation: tracedecay_contracts::CancellationSignal,
         policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -65,7 +65,6 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectE
             tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
-        self.invocations.fetch_add(1, Ordering::SeqCst);
         if let tracedecay_daemon_protocol::DaemonInvocationPayload::Configuration {
             surface_operation,
             request,
@@ -81,35 +80,21 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectE
         Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: tracedecay_domain::ManifestDigest,
-        _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
 async fn available_configuration_effect_reaches_canonical_executor() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("unavailable-application-effect");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "unavailable-application-effect",
+        "pub fn probe() {}\n",
         "project.mcp-unavailable-application-effect",
     )
-    .await
-    .unwrap();
+    .await;
     let executor = UnavailableEffectExecutor::default();
-    let request = serde_json::to_value(tracedecay_application::ConfigurationSetRequestV1 {
+    let request = serde_json::to_value(tracedecay_contracts::ConfigurationSetRequestV1 {
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Default,
         key: tracedecay_domain::configuration::SettingKey::new("mcp.tool_timings").unwrap(),
         value: tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
@@ -124,15 +109,13 @@ async fn available_configuration_effect_reaches_canonical_executor() {
     })
     .unwrap();
     let cancellation =
-        tracedecay_application::CancellationSignal::active("configuration-set-canonical-effect")
+        tracedecay_contracts::CancellationSignal::active("configuration-set-canonical-effect")
             .unwrap();
 
     let result = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_configuration_set",
         request,
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_cancellation: Some(cancellation.clone()),
@@ -165,18 +148,14 @@ async fn available_configuration_effect_reaches_canonical_executor() {
 
 #[tokio::test]
 async fn every_other_configuration_effect_reaches_the_authoritative_daemon_executor() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("configuration-effect-dispatch");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "configuration-effect-dispatch",
+        "pub fn probe() {}\n",
         "project.mcp-configuration-effect-dispatch",
     )
-    .await
-    .unwrap();
+    .await;
     let executor = UnavailableEffectExecutor::default();
     let revision = "revision.mcp-configuration-effect-dispatch";
     let digest = format!("sha256:{}", "a".repeat(64));
@@ -208,18 +187,6 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
             }),
         ),
         (
-            "tracedecay_configuration_write_credential",
-            ApplicationSurfaceOperation::ConfigurationWriteCredential,
-            "configuration.idempotency.mcp-credential",
-            json!({
-                "expected_reference_id": null,
-                "kind": "api_token",
-                "write_handle": "credential-write-handle.mcp",
-                "expected_revision": revision,
-                "idempotency_key": "configuration.idempotency.mcp-credential"
-            }),
-        ),
-        (
             "tracedecay_configuration_protected_apply",
             ApplicationSurfaceOperation::ConfigurationProtectedApply,
             "configuration.idempotency.mcp-protected-apply",
@@ -244,7 +211,7 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
     ];
 
     for (tool_name, _, _, request) in &effects {
-        let cancellation = tracedecay_application::CancellationSignal::active(format!(
+        let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
             "cancellation.{}",
             tool_name.strip_prefix("tracedecay_").unwrap()
         ))
@@ -253,8 +220,6 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
             &cg,
             tool_name,
             request.clone(),
-            None,
-            None,
             ToolCallRegistryOptions {
                 application_invocation_executor: Some(&executor),
                 application_cancellation: Some(cancellation.clone()),
@@ -276,10 +241,9 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
     }
 
     let application_invocations = executor.application_surface_invocations.lock().unwrap();
-    let migrated_effects = &effects[..2];
-    assert_eq!(application_invocations.len(), migrated_effects.len());
+    assert_eq!(application_invocations.len(), effects.len());
     for ((actual_operation, request), (_, expected_operation, idempotency_key, _)) in
-        application_invocations.iter().zip(migrated_effects)
+        application_invocations.iter().zip(&effects)
     {
         assert_eq!(actual_operation, expected_operation.as_str());
         assert_eq!(request["idempotency_key"], *idempotency_key);
@@ -287,10 +251,9 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
     drop(application_invocations);
 
     let invocations = executor.configuration_invocations.lock().unwrap();
-    let daemon_effects = &effects[2..];
-    assert_eq!(invocations.len(), daemon_effects.len());
+    assert_eq!(invocations.len(), effects.len());
     for ((actual_operation, request, policy), (_, expected_operation, idempotency_key, _)) in
-        invocations.iter().zip(daemon_effects)
+        invocations.iter().zip(&effects)
     {
         assert_eq!(actual_operation, expected_operation);
         assert_eq!(
@@ -305,18 +268,14 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
 
 #[tokio::test]
 async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handler() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("configuration-read-dispatch");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "configuration-read-dispatch",
+        "pub fn probe() {}\n",
         "project.mcp-configuration-read-dispatch",
     )
-    .await
-    .unwrap();
+    .await;
     let executor = UnavailableEffectExecutor::default();
     let revision = "revision.mcp-configuration-read-dispatch";
     let reads = [
@@ -324,11 +283,6 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
             "tracedecay_configuration_list",
             ApplicationSurfaceOperation::ConfigurationList,
             json!({}),
-        ),
-        (
-            "tracedecay_configuration_explain",
-            ApplicationSurfaceOperation::ConfigurationExplain,
-            json!({"key": "mcp.tool_timings"}),
         ),
         (
             "tracedecay_configuration_get",
@@ -362,7 +316,7 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
         (
             "tracedecay_configuration_audit",
             ApplicationSurfaceOperation::ConfigurationAudit,
-            json!({"after_event_id": null, "limit": 10}),
+            json!({"cursor": null, "limit": 10}),
         ),
     ];
 
@@ -371,8 +325,6 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
             &cg,
             tool_name,
             request.clone(),
-            None,
-            None,
             ToolCallRegistryOptions {
                 application_invocation_executor: Some(&executor),
                 ..Default::default()
@@ -388,23 +340,24 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
     }
 
     let application_invocations = executor.application_surface_invocations.lock().unwrap();
-    assert_eq!(application_invocations.len(), 1);
-    assert_eq!(application_invocations[0].0, "configuration_get");
+    assert_eq!(application_invocations.len(), reads.len());
+    for ((actual_operation, _), (_, expected_operation, _)) in
+        application_invocations.iter().zip(&reads)
+    {
+        assert_eq!(actual_operation, expected_operation.as_str());
+    }
     assert_eq!(
-        application_invocations[0].1,
+        application_invocations[1].1,
         json!({"key": "mcp.tool_timings"})
     );
     drop(application_invocations);
 
     let invocations = executor.configuration_invocations.lock().unwrap();
-    assert_eq!(invocations.len(), reads.len() - 1);
-    let expected_operations = reads.iter().filter_map(|(_, operation, _)| {
-        (*operation != ApplicationSurfaceOperation::ConfigurationGet).then_some(*operation)
-    });
-    for ((actual_operation, request, policy), expected_operation) in
-        invocations.iter().zip(expected_operations)
+    assert_eq!(invocations.len(), reads.len());
+    for ((actual_operation, request, policy), (_, expected_operation, _)) in
+        invocations.iter().zip(&reads)
     {
-        assert_eq!(actual_operation, &expected_operation);
+        assert_eq!(actual_operation, expected_operation);
         assert_eq!(
             policy,
             &tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly

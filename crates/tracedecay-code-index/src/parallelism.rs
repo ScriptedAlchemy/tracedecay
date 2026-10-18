@@ -1,23 +1,22 @@
-//! Process-wide code-index worker policy and its dedicated Rayon pool.
+//! Code-index worker policy: each owner's Rayon pool and CPU authority.
 //!
 //! Automatic sizing races small machines at full width and reserves half of a
 //! larger host for serving. A conservative per-worker resident budget then
 //! caps that CPU target. Exact profile or environment selections are never
 //! silently narrowed: an unsafe count is a typed startup refusal.
 
+use std::cell::RefCell;
 use std::fmt;
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
-use std::sync::{
-    Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tracedecay_domain::configuration::{
     CodeIndexWorkerLimitingReasonV1, CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1,
 };
-use tracedecay_private_fs::background_cpu::{
-    BackgroundCpuInstallErrorV1, install_process_background_cpu, process_background_cpu,
-};
+use tracedecay_domain::process_heap::collect_calling_thread_allocator_v1;
+pub use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 /// Operator override for the indexing width. It has higher precedence than
 /// the profile setting and must be a positive `u16`.
@@ -133,7 +132,6 @@ pub enum CodeIndexWorkerPlanInstallErrorV1 {
     PoolBuild {
         message: String,
     },
-    BackgroundCpu(BackgroundCpuInstallErrorV1),
     ConflictingPlan {
         existing: CodeIndexWorkerStatusV1,
         requested: CodeIndexWorkerStatusV1,
@@ -150,7 +148,6 @@ impl fmt::Display for CodeIndexWorkerPlanInstallErrorV1 {
                     "code-index worker pool could not start: {message}"
                 )
             }
-            Self::BackgroundCpu(error) => error.fmt(formatter),
             Self::ConflictingPlan {
                 existing,
                 requested,
@@ -170,15 +167,272 @@ impl From<CodeIndexWorkerPlanErrorV1> for CodeIndexWorkerPlanInstallErrorV1 {
     }
 }
 
+/// The process-resident worker runtime: the indexing Rayon pool, a separate
+/// interactive source-scan pool of the same width, and the one background
+/// CPU authority sized to that width. Indexing pool and background admission
+/// stay one installation so leaf fan-outs meter against the width the pool
+/// was built for. Interactive scans use the second pool so a verification
+/// sweep that occupies indexing workers and the CPU FIFO cannot starve a
+/// foreground grep of admission.
 struct InstalledCodeIndexWorkerRuntimeV1 {
     plan: CodeIndexWorkerPlanV1,
     pool: rayon::ThreadPool,
+    interactive_pool: rayon::ThreadPool,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
+    activity: PoolActivityV1,
+    interactive_activity: PoolActivityV1,
 }
 
-static WORKER_RUNTIME: OnceLock<InstalledCodeIndexWorkerRuntimeV1> = OnceLock::new();
+/// Fan-outs running on the pool now, and whether its workers have freed
+/// pages to return since they last collected.
+#[derive(Default)]
+struct PoolActivityV1 {
+    running: AtomicUsize,
+    collect_pending: AtomicBool,
+}
+
+struct RunningFanOutV1<'pool>(&'pool PoolActivityV1);
+
+impl<'pool> RunningFanOutV1<'pool> {
+    fn new(activity: &'pool PoolActivityV1) -> Self {
+        activity.running.fetch_add(1, Ordering::AcqRel);
+        Self(activity)
+    }
+}
+
+impl Drop for RunningFanOutV1<'_> {
+    fn drop(&mut self) {
+        self.0.collect_pending.store(true, Ordering::Release);
+        self.0.running.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Queue an allocator collection on `pool` when it is idle and has a
+/// collection pending. The collection is queued behind whatever the workers
+/// run next, so this never waits on a busy pool.
+fn collect_idle_pool_heaps(pool: &rayon::ThreadPool, activity: &PoolActivityV1) -> bool {
+    if activity.running.load(Ordering::Acquire) != 0
+        || !activity.collect_pending.swap(false, Ordering::AcqRel)
+    {
+        return false;
+    }
+    pool.spawn_broadcast(|_| collect_calling_thread_allocator_v1());
+    true
+}
+
+impl InstalledCodeIndexWorkerRuntimeV1 {
+    fn installed_plan(&self) -> InstalledCodeIndexWorkerPlanV1 {
+        InstalledCodeIndexWorkerPlanV1 {
+            status: self.plan.status(),
+            background_cpu: Arc::clone(&self.background_cpu),
+        }
+    }
+
+    /// Run a fan-out on the pool.
+    ///
+    /// This is the pool boundary: the caller is not a leaf waiting on stolen
+    /// children. Yielding here moves the caller's units to the leaves for the
+    /// join. A leaf that already holds a permit must not start another join.
+    fn install<R, F>(&self, operation: F) -> R
+    where
+        F: FnOnce() -> R + Send,
+        R: Send,
+    {
+        let _running = RunningFanOutV1::new(&self.activity);
+        self.background_cpu
+            .with_yielded_permits(|| self.pool.install(operation))
+    }
+
+    /// Run a foreground source scan on the interactive pool. Its leaves take
+    /// no background CPU units; the fan-out is tracked on the pool's own
+    /// activity so its workers collect their heaps once it goes idle.
+    fn install_interactive<R, F>(&self, operation: F) -> R
+    where
+        F: FnOnce() -> R + Send,
+        R: Send,
+    {
+        let _running = RunningFanOutV1::new(&self.interactive_activity);
+        self.interactive_pool.install(operation)
+    }
+
+    fn collect_worker_heaps_when_idle(&self) {
+        self.activity.collect_pending.store(true, Ordering::Release);
+        self.interactive_activity
+            .collect_pending
+            .store(true, Ordering::Release);
+    }
+
+    /// Each pool's workers return their allocator pages once it has gone idle
+    /// after a fan-out. Workers allocate a build's rows and scratch (source
+    /// buffers on the interactive pool); other threads free most of it after
+    /// the build, and those frees reach the kernel only when the owning worker
+    /// collects its heap. Measured on a 36-worker daemon settled after a cold
+    /// index: 233 MB of anonymous RSS held that way, 6.5 MB per worker.
+    fn collect_idle_worker_heaps(&self) -> bool {
+        let indexing = collect_idle_pool_heaps(&self.pool, &self.activity);
+        let interactive =
+            collect_idle_pool_heaps(&self.interactive_pool, &self.interactive_activity);
+        indexing || interactive
+    }
+
+    /// Run one admitted work unit of `requested_units` on the calling thread.
+    fn with_permits<R>(&self, requested_units: usize, operation: impl FnOnce() -> R) -> R {
+        self.background_cpu.with_permits(requested_units, operation)
+    }
+}
+
+/// Receipt of [`install_worker_plan`]: the configuration status projection
+/// and the process background CPU authority the plan installed. The
+/// composition root injects `background_cpu` into session preparation and
+/// host admission; index and semantic fan-outs on the indexing pool reach
+/// the same authority through this module's leaf admission helpers.
+/// Interactive source scans use [`install_interactive`] instead.
+#[derive(Clone, Debug)]
+pub struct InstalledCodeIndexWorkerPlanV1 {
+    pub status: CodeIndexWorkerStatusV1,
+    pub background_cpu: Arc<ProcessBackgroundCpuV1>,
+}
+
+/// The composition root's plan. A process that runs one owner (the daemon)
+/// installs it once; owners that coexist in one process (in-process test
+/// schedulers) enter their own [`CodeIndexWorkerRuntimeV1`] instead, so one
+/// owner's plan never meters another owner's work.
+static WORKER_RUNTIME: OnceLock<CodeIndexWorkerRuntimeV1> = OnceLock::new();
 static WORKER_RUNTIME_INSTALL: Mutex<()> = Mutex::new(());
 static STANDALONE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 static STANDALONE_POOL_INSTALL: Mutex<()> = Mutex::new(());
+static STANDALONE_INTERACTIVE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+static STANDALONE_INTERACTIVE_POOL_INSTALL: Mutex<()> = Mutex::new(());
+
+/// One owner's worker runtime: its plan, pool, and background CPU authority.
+///
+/// Work reaches the runtime its caller entered with [`Self::enter`]; the
+/// runtime's pool threads carry it for every job they run, so fan-outs meter
+/// against the owner that started them.
+#[derive(Clone)]
+pub struct CodeIndexWorkerRuntimeV1(Arc<InstalledCodeIndexWorkerRuntimeV1>);
+
+/// Scope in which [`install`] and the leaf admission helpers on this thread
+/// use the entered runtime. Restores the previous scope on drop.
+pub struct EnteredCodeIndexWorkerRuntimeV1 {
+    previous: Option<Arc<InstalledCodeIndexWorkerRuntimeV1>>,
+    _thread_bound: PhantomData<*const ()>,
+}
+
+thread_local! {
+    static ENTERED_RUNTIME: RefCell<Option<Arc<InstalledCodeIndexWorkerRuntimeV1>>> =
+        const { RefCell::new(None) };
+    static POOL_RUNTIME: RefCell<Option<Arc<OnceLock<Weak<InstalledCodeIndexWorkerRuntimeV1>>>>> =
+        const { RefCell::new(None) };
+}
+
+impl CodeIndexWorkerRuntimeV1 {
+    /// Build a runtime for one owner without touching the process plan.
+    ///
+    /// The width comes from these inputs alone: neither the host's core count
+    /// nor the operator environment override reaches an owner built here, so
+    /// in-process owners that coexist (test schedulers) never size from the
+    /// machine they happen to run on.
+    pub fn build(
+        configured: CodeIndexWorkerSelectionV1,
+        available_logical_cpus: usize,
+        available_memory_bytes: u64,
+    ) -> Result<Self, CodeIndexWorkerPlanInstallErrorV1> {
+        let plan = worker_plan_from(
+            configured,
+            available_logical_cpus,
+            available_memory_bytes,
+            None,
+        )?;
+        Self::from_plan(plan)
+    }
+
+    fn from_plan(plan: CodeIndexWorkerPlanV1) -> Result<Self, CodeIndexWorkerPlanInstallErrorV1> {
+        let owner = Arc::new(OnceLock::<Weak<InstalledCodeIndexWorkerRuntimeV1>>::new());
+        let pool_owner = Arc::clone(&owner);
+        let interactive_owner = Arc::clone(&owner);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(plan.effective_workers)
+            .thread_name(|index| format!("tracedecay-index-{index}"))
+            .start_handler(move |_| {
+                POOL_RUNTIME.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&pool_owner)));
+            })
+            .build()
+            .map_err(|error| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
+                message: error.to_string(),
+            })?;
+        let interactive_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(plan.effective_workers)
+            .thread_name(|index| format!("tracedecay-source-scan-{index}"))
+            .start_handler(move |_| {
+                POOL_RUNTIME.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&interactive_owner)));
+            })
+            .build()
+            .map_err(|error| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
+                message: error.to_string(),
+            })?;
+        let runtime = Arc::new(InstalledCodeIndexWorkerRuntimeV1 {
+            plan,
+            pool,
+            interactive_pool,
+            background_cpu: Arc::new(ProcessBackgroundCpuV1::new(
+                NonZeroUsize::new(plan.effective_workers).unwrap_or(NonZeroUsize::MIN),
+            )),
+            activity: PoolActivityV1::default(),
+            interactive_activity: PoolActivityV1::default(),
+        });
+        owner.set(Arc::downgrade(&runtime)).map_err(|_| {
+            CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
+                message: "worker pool owner was bound twice".to_owned(),
+            }
+        })?;
+        Ok(Self(runtime))
+    }
+
+    #[must_use]
+    pub fn status(&self) -> CodeIndexWorkerStatusV1 {
+        self.0.plan.status()
+    }
+
+    #[must_use]
+    pub fn background_cpu(&self) -> Arc<ProcessBackgroundCpuV1> {
+        Arc::clone(&self.0.background_cpu)
+    }
+
+    /// Route this thread's code-index work to this runtime until the guard
+    /// drops.
+    #[must_use]
+    pub fn enter(&self) -> EnteredCodeIndexWorkerRuntimeV1 {
+        let previous = ENTERED_RUNTIME.with(|slot| slot.borrow_mut().replace(Arc::clone(&self.0)));
+        EnteredCodeIndexWorkerRuntimeV1 {
+            previous,
+            _thread_bound: PhantomData,
+        }
+    }
+}
+
+impl Drop for EnteredCodeIndexWorkerRuntimeV1 {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ENTERED_RUNTIME.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// The runtime this thread's work belongs to: the entered owner, the owner
+/// of the pool thread running it, or the composition root's plan.
+fn current_runtime() -> Option<Arc<InstalledCodeIndexWorkerRuntimeV1>> {
+    ENTERED_RUNTIME
+        .with(|slot| slot.borrow().clone())
+        .or_else(|| {
+            POOL_RUNTIME.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .and_then(|owner| owner.get())
+                    .and_then(Weak::upgrade)
+            })
+        })
+        .or_else(|| WORKER_RUNTIME.get().map(|runtime| Arc::clone(&runtime.0)))
+}
 
 /// Automatic CPU target: use every logical CPU through eight, then floor half.
 #[must_use]
@@ -326,39 +580,6 @@ fn environment_override_value() -> Result<Option<String>, CodeIndexWorkerPlanErr
     }
 }
 
-/// Preview the worker status without constructing a pool or installing any
-/// process authority. `available_memory_bytes` must come from the caller's
-/// canonical resident-memory authority (`limit - used`), never a second
-/// estimator. Environment precedence and every typed refusal are identical to
-/// [`install_worker_plan`].
-pub fn preview_worker_plan(
-    configured: CodeIndexWorkerSelectionV1,
-    available_memory_bytes: u64,
-) -> Result<CodeIndexWorkerStatusV1, CodeIndexWorkerPlanErrorV1> {
-    let environment_override = environment_override_value()?;
-    preview_worker_plan_from(
-        configured,
-        detected_cores(),
-        available_memory_bytes,
-        environment_override.as_deref(),
-    )
-}
-
-fn preview_worker_plan_from(
-    configured: CodeIndexWorkerSelectionV1,
-    available_logical_cpus: usize,
-    available_memory_bytes: u64,
-    environment_override: Option<&str>,
-) -> Result<CodeIndexWorkerStatusV1, CodeIndexWorkerPlanErrorV1> {
-    worker_plan_from(
-        configured,
-        available_logical_cpus,
-        available_memory_bytes,
-        environment_override,
-    )
-    .map(CodeIndexWorkerPlanV1::status)
-}
-
 fn compare_installed_plan(
     existing: &CodeIndexWorkerPlanV1,
     requested: &CodeIndexWorkerPlanV1,
@@ -373,29 +594,14 @@ fn compare_installed_plan(
     }
 }
 
-fn record_plan(plan: CodeIndexWorkerPlanV1) {
-    hotpath::gauge!("code_index_workers_requested").set(plan.requested_workers);
-    hotpath::gauge!("code_index_workers_effective").set(plan.effective_workers);
-    hotpath::gauge!("code_index_workers_memory_safe").set(plan.memory_safe_workers);
-    hotpath::gauge!("code_index_workers_memory_headroom_bytes")
-        .set(plan.memory_headroom_bytes as f64);
-    hotpath::gauge!("code_index_workers_limiting_reason").set(match plan.limiting_reason {
-        CodeIndexWorkerLimitingReasonV1::AutomaticAllCores => 1,
-        CodeIndexWorkerLimitingReasonV1::AutomaticHalfCores => 2,
-        CodeIndexWorkerLimitingReasonV1::ResidentMemory => 3,
-        CodeIndexWorkerLimitingReasonV1::ConfiguredExact => 4,
-        CodeIndexWorkerLimitingReasonV1::EnvironmentOverride => 5,
-    });
-    hotpath::gauge!("code_index_workers_reservation_bytes").set(plan.reservation_bytes as f64);
-}
-
 /// Install the process-resident plan before the first code-index build.
-/// Repeating the byte-identical plan is idempotent; a second owner asking for
-/// a different process-wide pool is refused.
+/// Repeating the byte-identical plan is idempotent and returns the same
+/// installed authority; a second owner asking for a different process-wide
+/// pool is refused.
 pub fn install_worker_plan(
     configured: CodeIndexWorkerSelectionV1,
     available_memory_bytes: u64,
-) -> Result<CodeIndexWorkerStatusV1, CodeIndexWorkerPlanInstallErrorV1> {
+) -> Result<InstalledCodeIndexWorkerPlanV1, CodeIndexWorkerPlanInstallErrorV1> {
     // Planning and pool construction are one initialization transaction. This
     // prevents concurrent registrars from constructing duplicate large pools
     // from different instantaneous memory snapshots before the OnceLock wins.
@@ -405,11 +611,10 @@ pub fn install_worker_plan(
     let environment_override = environment_override_value()?;
     let environment_override_workers = parse_environment_override(environment_override.as_deref())?;
     if let Some(installed) = WORKER_RUNTIME.get()
-        && installed.plan.configured == configured
-        && installed.plan.environment_override_workers == environment_override_workers
+        && installed.0.plan.configured == configured
+        && installed.0.plan.environment_override_workers == environment_override_workers
     {
-        record_plan(installed.plan);
-        return Ok(installed.plan.status());
+        return Ok(installed.0.installed_plan());
     }
     let requested = worker_plan_from(
         configured,
@@ -417,42 +622,56 @@ pub fn install_worker_plan(
         available_memory_bytes,
         environment_override.as_deref(),
     )?;
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(requested.effective_workers)
-        .thread_name(|index| format!("tracedecay-index-{index}"))
-        .build()
-        .map_err(|error| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
-            message: error.to_string(),
-        })?;
-    install_process_background_cpu(
-        NonZeroUsize::new(requested.effective_workers).unwrap_or(NonZeroUsize::MIN),
-    )
-    .map_err(CodeIndexWorkerPlanInstallErrorV1::BackgroundCpu)?;
-    match WORKER_RUNTIME.set(InstalledCodeIndexWorkerRuntimeV1 {
-        plan: requested,
-        pool,
-    }) {
-        Ok(()) => {
-            record_plan(requested);
-            Ok(requested.status())
-        }
-        Err(_) => {
-            let Some(existing) = WORKER_RUNTIME.get() else {
-                return Err(CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
-                    message: "worker runtime installation did not settle".to_owned(),
-                });
-            };
-            compare_installed_plan(&existing.plan, &requested)?;
-            record_plan(existing.plan);
-            Ok(existing.plan.status())
-        }
+    if let Some(existing) = WORKER_RUNTIME.get() {
+        compare_installed_plan(&existing.0.plan, &requested)?;
+        return Ok(existing.0.installed_plan());
     }
+    let runtime = CodeIndexWorkerRuntimeV1::from_plan(requested)?;
+    let installed = runtime.0.installed_plan();
+    WORKER_RUNTIME
+        .set(runtime)
+        .map_err(|_| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
+            message: "worker runtime installation did not settle".to_owned(),
+        })?;
+    Ok(installed)
+}
+
+/// Run `operation` once on every thread of the process's installed pools and
+/// wait for all of them, so per-thread state (the thread's allocator heap) is
+/// released on the thread that owns it before the caller measures. A process
+/// without an installed plan has no pools and runs nothing.
+pub fn run_on_every_installed_worker(operation: fn()) {
+    if let Some(runtime) = WORKER_RUNTIME.get() {
+        runtime.0.pool.broadcast(|_| operation());
+        runtime.0.interactive_pool.broadcast(|_| operation());
+    }
+}
+
+/// Have the installed pools' workers collect their heaps again once they are
+/// idle. A fan-out's rows outlive it: the build that ran it and the serving
+/// swap that retires the generation it replaced free them on other threads
+/// after the fan-out's own collection, and those pages reach the kernel only
+/// when the worker that owns them collects.
+pub fn collect_installed_worker_heaps_when_idle() {
+    if let Some(runtime) = WORKER_RUNTIME.get() {
+        runtime.0.collect_worker_heaps_when_idle();
+    }
+}
+
+/// Queue an allocator collection on every worker of the installed pools when
+/// one is idle and has a collection pending: a fan-out finished, or
+/// [`collect_installed_worker_heaps_when_idle`] asked. Returns whether a
+/// collection was queued.
+pub fn collect_idle_installed_worker_heaps() -> bool {
+    WORKER_RUNTIME
+        .get()
+        .is_some_and(|runtime| runtime.0.collect_idle_worker_heaps())
 }
 
 /// Canonical runtime status for configuration/dashboard projection.
 #[must_use]
 pub fn installed_worker_status() -> Option<CodeIndexWorkerStatusV1> {
-    WORKER_RUNTIME.get().map(|runtime| runtime.plan.status())
+    current_runtime().map(|runtime| runtime.plan.status())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -460,7 +679,6 @@ pub enum CodeIndexParallelismErrorV1 {
     PoolBuild {
         message: String,
     },
-    BackgroundCpuNotInstalled,
     /// A per-item unit fanned out on the indexing pool panicked. Per-file work
     /// runs over arbitrary user source, so a malformed input must be contained
     /// to its own unit and named, never allowed to unwind out of the pool and
@@ -494,12 +712,6 @@ impl fmt::Display for CodeIndexParallelismErrorV1 {
                     "code-index worker pool is unavailable: {message}"
                 )
             }
-            Self::BackgroundCpuNotInstalled => {
-                write!(
-                    formatter,
-                    "process background CPU authority is not installed"
-                )
-            }
             Self::WorkerPanic { index, message } => {
                 write!(
                     formatter,
@@ -512,20 +724,33 @@ impl fmt::Display for CodeIndexParallelismErrorV1 {
 
 impl std::error::Error for CodeIndexParallelismErrorV1 {}
 
-/// 0 means "use the configured host width".
-static FORCED_WORKERS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(test, feature = "test-helpers"))]
+thread_local! {
+    /// Forced worker width. Thread-scoped so one equivalence or batching
+    /// test cannot change a sibling test's scheduling policy.
+    static FORCED_WORKERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Forces [`install`] on this thread to return
+    /// [`CodeIndexParallelismErrorV1::PoolBuild`]. Thread-scoped so a fault
+    /// test cannot leak into sibling tests running in the same process.
+    static FORCE_INSTALL_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Indexing width callers should fan out to. A width below 2 means "run
 /// inline".
 #[must_use]
 pub fn indexing_workers() -> usize {
-    match FORCED_WORKERS.load(Ordering::Relaxed) {
-        0 => WORKER_RUNTIME.get().map_or_else(
-            || indexing_worker_target(detected_cores()),
-            |runtime| runtime.plan.effective_workers,
-        ),
-        forced => forced,
+    #[cfg(any(test, feature = "test-helpers"))]
+    if let forced @ 1.. = FORCED_WORKERS.with(std::cell::Cell::get) {
+        return forced;
     }
+    current_runtime().map_or_else(
+        || indexing_worker_target(detected_cores()),
+        |runtime| runtime.plan.effective_workers,
+    )
 }
 
 /// Force the indexing width for an equivalence test.
@@ -533,26 +758,33 @@ pub fn indexing_workers() -> usize {
 /// Width is sizing policy, never semantics: the same inputs must produce the
 /// same generation bytes at any width. This exists so one test process can
 /// build a fixture at width 1 and at full width and compare the sealed
-/// digests directly. It is not a supported runtime control — production sizing
-/// comes from [`indexing_workers`].
-#[doc(hidden)]
+/// digests directly. Production sizing comes from [`indexing_workers`].
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn force_indexing_workers_for_test(workers: usize) {
-    FORCED_WORKERS.store(workers.max(1), Ordering::Relaxed);
+    FORCED_WORKERS.with(|forced| forced.set(workers.max(1)));
 }
 
 /// Restore production sizing after [`force_indexing_workers_for_test`].
-#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn clear_forced_indexing_workers_for_test() {
-    FORCED_WORKERS.store(0, Ordering::Relaxed);
+    FORCED_WORKERS.with(|forced| forced.set(0));
 }
 
-/// Run one active work unit under the process background CPU authority.
-/// Standalone callers without an installed daemon plan run directly.
+/// Force [`install`] to fail so callers can assert operational pool errors stay
+/// typed as parallelism failures instead of identity corruption.
+#[cfg(test)]
+pub(crate) fn force_install_failure_for_test(force: bool) {
+    FORCE_INSTALL_FAILURE.with(|flag| flag.set(force));
+}
+
+/// Run one active work unit under the installed worker runtime's background
+/// CPU authority. Standalone callers without an installed daemon plan run
+/// directly.
 pub fn with_background_cpu_permits<R>(requested_units: usize, operation: impl FnOnce() -> R) -> R {
-    if let Some(authority) = process_background_cpu() {
-        return authority.with_permits(requested_units, operation);
+    match current_runtime() {
+        Some(runtime) => runtime.with_permits(requested_units, operation),
+        None => operation(),
     }
-    operation()
 }
 
 /// One-unit convenience for ordinary index/session preparation work.
@@ -560,60 +792,141 @@ pub fn with_background_cpu_permit<R>(operation: impl FnOnce() -> R) -> R {
     with_background_cpu_permits(1, operation)
 }
 
+/// Request-bound leaf work relinquishes its queued demand on cancellation.
+pub fn with_background_cpu_permit_cancellable<R>(
+    is_cancelled: impl Fn() -> bool,
+    operation: impl FnOnce() -> R,
+) -> Option<R> {
+    match current_runtime() {
+        Some(runtime) => runtime
+            .background_cpu
+            .with_permit_cancellable(is_cancelled, operation),
+        None if is_cancelled() => None,
+        None => Some(operation()),
+    }
+}
+
 /// Run `operation` on the configured indexing pool.
 ///
 /// CPU admission happens inside each active parallel work unit through
 /// [`with_background_cpu_permit`] or [`with_background_cpu_permits`], allowing
 /// indexing, semantic inference, and session preparation to share idle width.
+/// [`install`] yields the caller's units for this join only. A leaf that
+/// already holds a permit must not start another pool join: returning that
+/// unit around a nested join is what assigned the same parent the CPU role on
+/// every batch, and the wrap was dropped by merge more than once.
 /// A standalone caller without registration shares one process-wide automatic
 /// pool. Building one all-core pool per request oversubscribes concurrent
 /// tests and profiling harnesses, which can turn bounded parser work into
 /// false timeout/unsupported-document results.
-#[hotpath::measure(label = "code_index.workers.install")]
 pub fn install<R, F>(operation: F) -> Result<R, CodeIndexParallelismErrorV1>
 where
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    hotpath::gauge!("code_index_worker_count").set(indexing_workers());
-    if let Some(runtime) = WORKER_RUNTIME.get() {
-        let authority = process_background_cpu()
-            .ok_or(CodeIndexParallelismErrorV1::BackgroundCpuNotInstalled)?;
-        return Ok(authority.with_yielded_permits(|| runtime.pool.install(operation)));
-    }
-    let pool = standalone_pool()?;
-    Ok(pool.install(operation))
+    install_on(WorkerPoolV1::Indexing, operation)
 }
 
-#[hotpath::measure(label = "code_index.workers.standalone_pool")]
+/// Run request-bound source-scan work on the owner's interactive pool.
+///
+/// Foreground grep uses this instead of [`install`] so it is not queued
+/// behind verification or rebuild work that already holds the indexing pool
+/// and the background CPU FIFO, so its leaves take no background CPU units.
+/// Standalone callers without an installed owner get their own process-wide
+/// pool rather than queueing behind the standalone indexing pool.
+pub fn install_interactive<R, F>(operation: F) -> Result<R, CodeIndexParallelismErrorV1>
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    install_on(WorkerPoolV1::Interactive, operation)
+}
+
+enum WorkerPoolV1 {
+    Indexing,
+    Interactive,
+}
+
+fn install_on<R, F>(pool: WorkerPoolV1, operation: F) -> Result<R, CodeIndexParallelismErrorV1>
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    let _span = match pool {
+        WorkerPoolV1::Indexing => tracing::trace_span!("code_index.workers.install"),
+        WorkerPoolV1::Interactive => tracing::trace_span!("code_index.workers.install_interactive"),
+    }
+    .entered();
+    #[cfg(test)]
+    if FORCE_INSTALL_FAILURE.with(std::cell::Cell::get) {
+        return Err(CodeIndexParallelismErrorV1::PoolBuild {
+            message: "forced code-index worker pool failure for test".to_owned(),
+        });
+    }
+    match (current_runtime(), pool) {
+        (Some(runtime), WorkerPoolV1::Indexing) => Ok(runtime.install(operation)),
+        (Some(runtime), WorkerPoolV1::Interactive) => Ok(runtime.install_interactive(operation)),
+        (None, WorkerPoolV1::Indexing) => Ok(standalone_pool()?.install(operation)),
+        (None, WorkerPoolV1::Interactive) => Ok(standalone_interactive_pool()?.install(operation)),
+    }
+}
+
+#[tracing::instrument(name = "code_index.workers.standalone_pool", level = "trace", skip_all)]
 fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismErrorV1> {
-    if let Some(pool) = STANDALONE_POOL.get() {
+    standalone_pool_in(
+        &STANDALONE_POOL,
+        &STANDALONE_POOL_INSTALL,
+        "tracedecay-index-standalone",
+    )
+}
+
+/// Standalone foreground scans get their own process-wide pool so a live
+/// source read is not admitted behind whatever standalone indexing work is
+/// already running.
+#[tracing::instrument(
+    name = "code_index.workers.standalone_interactive_pool",
+    level = "trace",
+    skip_all
+)]
+fn standalone_interactive_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismErrorV1>
+{
+    standalone_pool_in(
+        &STANDALONE_INTERACTIVE_POOL,
+        &STANDALONE_INTERACTIVE_POOL_INSTALL,
+        "tracedecay-source-scan-standalone",
+    )
+}
+
+fn standalone_pool_in(
+    slot: &'static OnceLock<rayon::ThreadPool>,
+    installation: &'static Mutex<()>,
+    thread_name: &'static str,
+) -> Result<&'static rayon::ThreadPool, CodeIndexParallelismErrorV1> {
+    if let Some(pool) = slot.get() {
         return Ok(pool);
     }
     let _installation =
-        STANDALONE_POOL_INSTALL
+        installation
             .lock()
             .map_err(|_| CodeIndexParallelismErrorV1::PoolBuild {
                 message: "standalone code-index worker pool installation lock is poisoned"
                     .to_owned(),
             })?;
-    if let Some(pool) = STANDALONE_POOL.get() {
+    if let Some(pool) = slot.get() {
         return Ok(pool);
     }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(indexing_worker_target(detected_cores()))
-        .thread_name(|index| format!("tracedecay-index-standalone-{index}"))
+        .thread_name(move |index| format!("{thread_name}-{index}"))
         .build()
         .map_err(|error| CodeIndexParallelismErrorV1::PoolBuild {
             message: error.to_string(),
         })?;
-    STANDALONE_POOL
-        .set(pool)
+    slot.set(pool)
         .map_err(|_| CodeIndexParallelismErrorV1::PoolBuild {
             message: "standalone code-index worker pool installation raced".to_owned(),
         })?;
-    STANDALONE_POOL
-        .get()
+    slot.get()
         .ok_or_else(|| CodeIndexParallelismErrorV1::PoolBuild {
             message: "standalone code-index worker pool installation did not settle".to_owned(),
         })
@@ -623,13 +936,222 @@ fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismE
 mod tests {
     use super::*;
     use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+    use tracedecay_domain::process_heap::{
+        ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
+    };
+
+    /// Two owners in one process run concurrently, each under its own plan:
+    /// its width, its pool, and the width its pool's leaves report.
+    #[test]
+    fn two_owners_in_one_process_each_run_under_their_own_plan() {
+        let available = 64 * 1024 * 1024 * 1024;
+        let one = CodeIndexWorkerRuntimeV1::build(
+            CodeIndexWorkerSelectionV1::Exact { workers: 1 },
+            2,
+            available,
+        )
+        .expect("one-worker owner");
+        let two = CodeIndexWorkerRuntimeV1::build(
+            CodeIndexWorkerSelectionV1::Exact { workers: 2 },
+            2,
+            available,
+        )
+        .expect("two-worker owner");
+        let barrier = std::sync::Barrier::new(2);
+        let observed = std::thread::scope(|scope| {
+            [&one, &two]
+                .map(|owner| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let _entered = owner.enter();
+                        barrier.wait();
+                        let pooled = install(|| (rayon::current_num_threads(), indexing_workers()))
+                            .expect("owner pool");
+                        (indexing_workers(), pooled)
+                    })
+                })
+                .map(|worker| worker.join().expect("owner thread"))
+        });
+        assert_eq!(observed, [(1, (1, 1)), (2, (2, 2))]);
+    }
+
+    static COLLECTED_ON_INDEXING_WORKERS: AtomicUsize = AtomicUsize::new(0);
+    static COLLECTED_ON_INTERACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_worker_collect() {
+        if rayon::current_thread_index().is_none() {
+            return;
+        }
+        match std::thread::current().name() {
+            Some(name) if name.starts_with("tracedecay-source-scan") => {
+                COLLECTED_ON_INTERACTIVE_WORKERS.fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {
+                COLLECTED_ON_INDEXING_WORKERS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn wait_for_collects(counter: &AtomicUsize, expected: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while counter.load(Ordering::SeqCst) < expected && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), expected);
+    }
+
+    fn release_nothing() {}
+
+    /// A pool's workers return their allocator heaps once per idle period:
+    /// not while a fan-out on it runs, once on every one of its workers after
+    /// it ends, and not again until another fan-out ran or a release of what
+    /// one built asked for it. Each pool collects under its own activity, so
+    /// work on one pool neither blocks nor fakes a collection on the other.
+    #[test]
+    fn an_idle_pool_collects_every_worker_heap_once_after_a_fan_out() {
+        install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
+            release: release_nothing,
+            collect_calling_thread: count_worker_collect,
+        })
+        .expect("the only allocator release installed in this binary");
+        let owner = CodeIndexWorkerRuntimeV1::build(
+            CodeIndexWorkerSelectionV1::Exact { workers: 2 },
+            2,
+            64 * 1024 * 1024 * 1024,
+        )
+        .expect("two-worker owner");
+        let runtime = &owner.0;
+        assert!(!runtime.collect_idle_worker_heaps());
+
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let (finish, finish_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                runtime.install(move || {
+                    started.send(()).expect("test waits for the fan-out");
+                    finish_rx.recv().expect("test ends the fan-out");
+                });
+            });
+            started_rx.recv().expect("fan-out started");
+            assert!(!runtime.collect_idle_worker_heaps());
+            finish.send(()).expect("fan-out waits for the test");
+        });
+        assert_eq!(COLLECTED_ON_INDEXING_WORKERS.load(Ordering::SeqCst), 0);
+
+        assert!(runtime.collect_idle_worker_heaps());
+        wait_for_collects(&COLLECTED_ON_INDEXING_WORKERS, 2);
+        assert_eq!(COLLECTED_ON_INTERACTIVE_WORKERS.load(Ordering::SeqCst), 0);
+        assert!(!runtime.collect_idle_worker_heaps());
+
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let (finish, finish_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                runtime.install_interactive(move || {
+                    started.send(()).expect("test waits for the fan-out");
+                    finish_rx.recv().expect("test ends the fan-out");
+                });
+            });
+            started_rx.recv().expect("fan-out started");
+            assert!(!runtime.collect_idle_worker_heaps());
+            finish.send(()).expect("fan-out waits for the test");
+        });
+
+        assert!(runtime.collect_idle_worker_heaps());
+        wait_for_collects(&COLLECTED_ON_INTERACTIVE_WORKERS, 2);
+        assert_eq!(COLLECTED_ON_INDEXING_WORKERS.load(Ordering::SeqCst), 2);
+        assert!(!runtime.collect_idle_worker_heaps());
+
+        runtime.collect_worker_heaps_when_idle();
+        assert!(runtime.collect_idle_worker_heaps());
+        wait_for_collects(&COLLECTED_ON_INDEXING_WORKERS, 4);
+        wait_for_collects(&COLLECTED_ON_INTERACTIVE_WORKERS, 4);
+        assert!(!runtime.collect_idle_worker_heaps());
+    }
 
     #[test]
-    fn standalone_install_reuses_one_process_pool() {
-        let first = standalone_pool().expect("first standalone pool");
-        let second = standalone_pool().expect("reused standalone pool");
+    fn automatic_owner_width_follows_its_constructor_not_the_host() {
+        let owner = CodeIndexWorkerRuntimeV1::build(
+            CodeIndexWorkerSelectionV1::Automatic {},
+            2,
+            64 * 1024 * 1024 * 1024,
+        )
+        .expect("automatic owner");
+        let _entered = owner.enter();
+        let pooled =
+            install(|| (rayon::current_num_threads(), indexing_workers())).expect("owner pool");
+        assert_eq!((indexing_workers(), pooled), (2, (2, 2)));
+    }
 
-        assert!(std::ptr::eq(first, second));
+    #[test]
+    fn install_runs_the_caller_on_an_admitted_rayon_worker() {
+        let on_worker =
+            install(|| rayon::current_thread_index().is_some()).expect("code-index worker pool");
+        assert!(
+            on_worker,
+            "direct-seal encode only parallelizes when the caller is already a rayon worker"
+        );
+    }
+
+    /// Without an entered or installed owner, a foreground scan gets its own
+    /// process-wide pool: while every standalone indexing worker is parked
+    /// the scan's units still run instead of queueing behind them.
+    #[test]
+    fn standalone_interactive_install_runs_while_the_standalone_indexing_pool_is_held() {
+        let width = standalone_pool()
+            .expect("standalone indexing pool")
+            .current_num_threads();
+        let released = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (held, held_rx) = std::sync::mpsc::channel();
+        for _ in 0..width {
+            let held = held.clone();
+            let released = Arc::clone(&released);
+            standalone_pool()
+                .expect("standalone indexing pool")
+                .spawn(move || {
+                    held.send(()).expect("test counts the held workers");
+                    let (lock, wake) = &*released;
+                    let mut done = lock.lock().expect("release lock");
+                    while !*done {
+                        done = wake.wait(done).expect("release wait");
+                    }
+                });
+        }
+        for _ in 0..width {
+            held_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("every standalone indexing worker held");
+        }
+
+        let (settled, settled_rx) = std::sync::mpsc::channel();
+        let scanner = std::thread::spawn(move || {
+            settled
+                .send(install_interactive(|| {
+                    rayon::scope(|scope| {
+                        for _ in 0..width {
+                            scope.spawn(|_| {
+                                assert!(
+                                    std::thread::current().name().is_some_and(
+                                        |name| name.starts_with("tracedecay-source-scan")
+                                    ),
+                                    "interactive units run on source-scan workers"
+                                );
+                            });
+                        }
+                    });
+                }))
+                .expect("test waits for the scan");
+        });
+        let outcome = settled_rx.recv_timeout(std::time::Duration::from_secs(5));
+        {
+            let (lock, wake) = &*released;
+            *lock.lock().expect("release lock") = true;
+            wake.notify_all();
+        }
+        scanner.join().expect("scanner");
+        outcome
+            .expect("interactive scan must settle while the standalone indexing pool is held")
+            .expect("interactive install");
     }
 
     #[test]
@@ -639,24 +1161,6 @@ mod tests {
         assert_eq!(indexing_worker_target(8), 8);
         assert_eq!(indexing_worker_target(20), 10);
         assert_eq!(indexing_worker_target(128), 64);
-    }
-
-    #[test]
-    fn exact_selection_uses_the_configured_core_count() {
-        let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Exact { workers: 7 },
-            8,
-            32 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-            None,
-        )
-        .expect("exact selection");
-
-        assert_eq!(plan.requested_workers, 7);
-        assert_eq!(plan.effective_workers, 7);
-        assert_eq!(
-            plan.limiting_reason,
-            CodeIndexWorkerLimitingReasonV1::ConfiguredExact
-        );
     }
 
     #[test]
@@ -691,25 +1195,6 @@ mod tests {
     }
 
     #[test]
-    fn environment_override_has_highest_precedence() {
-        let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Exact { workers: 3 },
-            128,
-            64 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-            Some("11"),
-        )
-        .expect("environment override");
-
-        assert_eq!(plan.requested_workers, 11);
-        assert_eq!(plan.effective_workers, 11);
-        assert_eq!(plan.environment_override_workers, Some(11));
-        assert_eq!(
-            plan.limiting_reason,
-            CodeIndexWorkerLimitingReasonV1::EnvironmentOverride
-        );
-    }
-
-    #[test]
     fn malformed_environment_override_is_a_typed_refusal() {
         assert!(matches!(
             worker_plan_from(
@@ -732,46 +1217,6 @@ mod tests {
     }
 
     #[test]
-    fn automatic_width_is_capped_by_the_resident_budget() {
-        let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic {},
-            128,
-            12 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-            None,
-        )
-        .expect("memory-capped automatic selection");
-
-        assert_eq!(plan.requested_workers, 64);
-        assert_eq!(plan.memory_safe_workers, 8);
-        assert_eq!(plan.effective_workers, 8);
-        assert_eq!(
-            plan.limiting_reason,
-            CodeIndexWorkerLimitingReasonV1::ResidentMemory
-        );
-    }
-
-    #[test]
-    fn default_authority_preserves_source_and_component_headroom() {
-        let available = 6 * 1024 * 1024 * 1024;
-        let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic {},
-            96,
-            available,
-            None,
-        )
-        .expect("default-memory automatic selection");
-
-        assert_eq!(plan.requested_workers, 48);
-        assert_eq!(plan.memory_safe_workers, 36);
-        assert_eq!(plan.effective_workers, 36);
-        assert_eq!(plan.memory_headroom_bytes, 1536 * 1024 * 1024);
-        assert_eq!(
-            plan.reservation_bytes + plan.memory_headroom_bytes,
-            available
-        );
-    }
-
-    #[test]
     fn explicit_width_above_the_resident_budget_is_refused() {
         let error = worker_plan_from(
             CodeIndexWorkerSelectionV1::Exact { workers: 9 },
@@ -787,28 +1232,6 @@ mod tests {
                 requested_workers: 9,
                 memory_safe_workers: 8,
             }
-        );
-    }
-
-    #[test]
-    fn worker_reservation_scales_linearly_with_the_documented_rss_budget() {
-        assert_eq!(
-            worker_reservation_bytes(1),
-            INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1
-        );
-        assert_eq!(
-            worker_reservation_bytes(16),
-            16 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1
-        );
-        assert_eq!(memory_safe_worker_count(6 * 1024 * 1024 * 1024), 36);
-        assert_eq!(
-            worker_memory_headroom_bytes(6 * 1024 * 1024 * 1024),
-            1536 * 1024 * 1024
-        );
-        assert_eq!(
-            worker_memory_budget_bytes(6 * 1024 * 1024 * 1024)
-                + worker_memory_headroom_bytes(6 * 1024 * 1024 * 1024),
-            6 * 1024 * 1024 * 1024
         );
     }
 
@@ -834,29 +1257,5 @@ mod tests {
             compare_installed_plan(&plan, &conflicting),
             Err(CodeIndexWorkerPlanInstallErrorV1::ConflictingPlan { .. })
         ));
-    }
-
-    #[test]
-    fn preview_matches_install_derivation_without_installing_runtime() {
-        let runtime_before = installed_worker_status();
-        let available = 20 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1;
-        let preview = preview_worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic {},
-            20,
-            available,
-            None,
-        )
-        .expect("worker-plan preview");
-        let installation_derivation = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic {},
-            20,
-            available,
-            None,
-        )
-        .expect("worker-plan installation derivation")
-        .status();
-
-        assert_eq!(preview, installation_derivation);
-        assert_eq!(installed_worker_status(), runtime_before);
     }
 }

@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
 use serde_json::Value;
+use tracedecay_domain::collapse_whitespace;
 
 use super::render::{self, Md};
 
@@ -64,18 +65,37 @@ pub fn skill_view_md(value: &Value) -> String {
     if !body.is_empty() {
         md.blank().heading(3, "Body").line(body);
     }
-    if let Some(files) = skill.get("support_files").and_then(Value::as_array) {
+    let summaries = value
+        .get("support_file_summaries")
+        .and_then(Value::as_array);
+    let files = skill.get("support_files").and_then(Value::as_array);
+    if summaries.is_some_and(|items| !items.is_empty())
+        || files.is_some_and(|items| !items.is_empty())
+    {
         md.blank().heading(3, "Support Files");
-        if files.is_empty() {
-            md.empty_note("No support files.");
-        } else {
+        if let Some(summaries) = summaries.filter(|items| !items.is_empty()) {
+            let bodies_included = value
+                .get("support_files_included")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            for summary in summaries {
+                let path = value_str(summary, "/path");
+                let bytes = summary.get("byte_len").and_then(Value::as_u64).unwrap_or(0);
+                if bodies_included {
+                    md.bullet(&format!("**{path}** - {bytes} bytes"));
+                } else {
+                    md.bullet(&format!(
+                        "**{path}** - {bytes} bytes (pass include_support_files=true only for a required body)"
+                    ));
+                }
+            }
+        } else if let Some(files) = files {
             for file in files {
                 let path = value_str(file, "/path");
                 let bytes = file
                     .get("bytes")
                     .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or_default();
+                    .map_or_default(Vec::len);
                 md.bullet(&format!("**{path}** - {bytes} bytes"));
             }
         }
@@ -194,16 +214,13 @@ fn value_i64(value: &Value, pointer: &str) -> Option<i64> {
 }
 
 fn string_array(value: Option<&Value>) -> String {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default()
+    value.and_then(Value::as_array).map_or_default(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
 }
 
 fn append_skill_item(md: &mut Md, skill: &Value) {
@@ -223,10 +240,7 @@ fn append_skill_item(md: &mut Md, skill: &Value) {
 
     let summary = value_str(metadata, "/summary");
     if !summary.is_empty() {
-        md.line(&format!(
-            "  summary: {}",
-            summary.split_whitespace().collect::<Vec<_>>().join(" ")
-        ));
+        md.line(&format!("  summary: {}", collapse_whitespace(summary)));
     }
     let category = value_str(metadata, "/category");
     let targets = string_array(metadata.get("targets"));
@@ -307,8 +321,16 @@ fn append_analytics_tools(md: &mut Md, tools: &Value) {
         return;
     }
     md.field(
-        "distinct_tools_called",
-        &render::field_i64(tools, "distinct_tools_called").to_string(),
+        "raw distinct event names",
+        &render::field_i64(tools, "raw_distinct_event_name_count").to_string(),
+    );
+    md.field(
+        "called available defined tools",
+        &render::field_i64(tools, "called_available_defined_tool_count").to_string(),
+    );
+    md.field(
+        "available defined tool count",
+        &render::field_i64(tools, "available_defined_tool_count").to_string(),
     );
     if let Some(tiers) = tools.get("tiers").and_then(Value::as_array) {
         md.blank().heading(4, "By Tier");
@@ -337,9 +359,9 @@ fn append_analytics_tools(md: &mut Md, tools: &Value) {
             }
         }
     }
-    if let Some(zero_call) = tools.get("zero_call_tools") {
+    if let Some(zero_call) = tools.get("zero_call_available_defined_tools") {
         let count = render::field_i64(zero_call, "count");
-        md.blank().heading(4, "Zero-Call Defined Tools");
+        md.blank().heading(4, "Zero-Call Available Defined Tools");
         md.field("count", &count.to_string());
         if let Some(sample) = zero_call.get("sample").and_then(Value::as_array) {
             let names: Vec<&str> = sample.iter().filter_map(Value::as_str).collect();
@@ -356,6 +378,44 @@ fn append_analytics_tools(md: &mut Md, tools: &Value) {
                     count as usize - names.len()
                 ));
             }
+        }
+    }
+    for (field, heading, canonical) in [
+        ("aliased_call_names", "Aliased Call Names", true),
+        (
+            "bound_internal_call_names",
+            "Bound Internal Call Names",
+            false,
+        ),
+        (
+            "unknown_or_retired_call_names",
+            "Unknown or Retired Call Names",
+            false,
+        ),
+    ] {
+        let Some(names) = tools.get(field).and_then(Value::as_array) else {
+            continue;
+        };
+        md.blank().heading(4, heading);
+        if names.is_empty() {
+            md.empty_note("None.");
+            continue;
+        }
+        for name in names {
+            let event_name = render::field_str(name, "event_name");
+            let label = if canonical {
+                format!(
+                    "**{event_name}** → **{}**",
+                    render::field_str(name, "canonical_tool_name")
+                )
+            } else {
+                format!("**{event_name}**")
+            };
+            md.bullet(&format!(
+                "{label} - {} calls, {} errors",
+                render::field_i64(name, "calls"),
+                render::field_i64(name, "errors"),
+            ));
         }
     }
 }
@@ -452,6 +512,21 @@ fn append_analytics_automation(md: &mut Md, automation: &Value) {
         "records_in_window",
         &render::field_i64(automation, "records_in_window").to_string(),
     );
+    // The ledger read is bounded to the newest rows; a frequent no-op job can
+    // push the window's older runs past that bound, so say the counts are partial.
+    if automation
+        .get("records_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        md.field(
+            "records_truncated",
+            &format!(
+                "true (newest {} ledger rows only)",
+                render::field_i64(automation, "records_considered")
+            ),
+        );
+    }
     let Some(by_job) = automation.get("by_job").and_then(Value::as_array) else {
         md.empty_note("No automation jobs recorded.");
         return;
@@ -469,5 +544,35 @@ fn append_analytics_automation(md: &mut Md, automation: &Value) {
             render::field_i64(job, "skipped"),
             render::field_i64(job, "other"),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    fn automation_md(records_truncated: bool) -> String {
+        super::analytics_md(&json!({
+            "scope": "project",
+            "window_days": 14,
+            "event_count": 0,
+            "automation": {
+                "available": true,
+                "records_considered": 200,
+                "records_in_window": 200,
+                "records_truncated": records_truncated,
+                "by_job": [{"job": "memory_curator", "succeeded": 0, "failed": 0, "skipped": 200, "other": 0}],
+            },
+        }))
+    }
+
+    #[test]
+    fn automation_markdown_flags_a_ledger_bounded_window() {
+        assert!(
+            automation_md(true).contains("records_truncated:** true (newest 200 ledger rows only)"),
+            "{}",
+            automation_md(true)
+        );
+        assert!(!automation_md(false).contains("records_truncated"));
     }
 }

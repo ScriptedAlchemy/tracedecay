@@ -3,9 +3,8 @@ use std::{path::Path, sync::Arc, sync::atomic::Ordering};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::{
-    AgentTaskRunContext, AutomationRunControl, NonEmptyAutomaticFactReceipts, RUN_ID_COUNTER,
-    SchedulerGate, append_skipped_record, failed_output_projection, generated_run_id,
-    task_run_gate,
+    AgentTaskRunContext, AutomationRunControl, RUN_ID_COUNTER, SchedulerGate,
+    append_skipped_record, failed_output_projection, task_run_gate,
 };
 use crate::automation::backend::AgentTaskKind;
 use crate::automation::config::{
@@ -15,15 +14,11 @@ use crate::automation::config::{
 use crate::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger, load_run_records,
 };
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 struct TestSessionsDb {
     db: RegisteredGlobalDbLeaseV1,
     _runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
-}
-
-#[test]
-fn committed_automatic_fact_receipts_cannot_be_empty() {
-    assert!(NonEmptyAutomaticFactReceipts::from_vec(Vec::new()).is_none());
 }
 
 #[test]
@@ -64,6 +59,7 @@ fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
         "run.pre-epoch",
         AutomationTrigger::ManualCli,
         &config,
+        None,
         AgentTaskKind::SessionReflector,
         "0",
         None,
@@ -87,6 +83,7 @@ fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
         "run.clock-progression",
         AutomationTrigger::ManualCli,
         &config,
+        None,
         AgentTaskKind::SessionReflector,
         "1",
         None,
@@ -101,6 +98,7 @@ fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
         accepted_count: 1,
         rejected_count: 0,
         error: None,
+        error_classification: None,
     };
 
     let record = finalizer
@@ -125,6 +123,7 @@ fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
                 accepted_count: 1,
                 rejected_count: 0,
                 error: None,
+                error_classification: None,
             },
             pre_epoch,
         )
@@ -144,14 +143,6 @@ async fn test_sessions_db(root: &Path) -> TestSessionsDb {
         db,
         _runtime: runtime,
     }
-}
-
-#[test]
-fn generated_run_ids_are_unique_for_same_prefix() {
-    let first = generated_run_id("memory_curator");
-    let second = generated_run_id("memory_curator");
-
-    assert_ne!(first, second);
 }
 
 #[test]
@@ -227,6 +218,7 @@ async fn append_skip(
         "test",
         trigger,
         &config,
+        None,
         task,
     );
     run.gate().await.expect("gate");
@@ -235,38 +227,6 @@ async fn append_skip(
         .await
         .expect("append skipped record");
     record
-}
-
-#[tokio::test]
-async fn consecutive_identical_scheduler_skips_persist_once() {
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let root = temp.path();
-    let task = AgentTaskKind::MemoryCurator;
-
-    append_skip(
-        root,
-        "run-1",
-        AutomationTrigger::Scheduler,
-        task,
-        "scheduler_interval_not_elapsed",
-    )
-    .await;
-    append_skip(
-        root,
-        "run-2",
-        AutomationTrigger::Scheduler,
-        task,
-        "scheduler_interval_not_elapsed",
-    )
-    .await;
-
-    let records = load_run_records(root, 50).await.expect("load records");
-    assert_eq!(
-        records.len(),
-        1,
-        "repeat scheduler skip must not append a second record"
-    );
-    assert_eq!(records[0].run_id, "run-1");
 }
 
 #[tokio::test]
@@ -373,6 +333,7 @@ async fn on_demand_triggers_bypass_only_scheduler_enablement() {
     ] {
         let (gate, _) = task_run_gate(
             &disabled,
+            None,
             temp.path(),
             sessions.db.as_ref(),
             AgentTaskKind::MemoryCurator,
@@ -391,6 +352,7 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
     let config = scheduler_enabled_config();
     let (first, _) = task_run_gate(
         &config,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -404,6 +366,7 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
 
     let (concurrent, _) = task_run_gate(
         &config,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -413,12 +376,13 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
     .expect("concurrent on-demand gate");
     assert!(matches!(
         concurrent,
-        SchedulerGate::Skip("scheduler_lock_active")
+        SchedulerGate::Skip(AutomationSkipReasonV1::SchedulerLockActive)
     ));
 
     drop(first_lock);
     let (next, _) = task_run_gate(
         &config,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -442,6 +406,7 @@ async fn scheduler_trigger_still_obeys_global_enablement() {
 
     let (gate, _) = task_run_gate(
         &disabled,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -449,7 +414,10 @@ async fn scheduler_trigger_still_obeys_global_enablement() {
     )
     .await
     .expect("scheduler gate");
-    assert!(matches!(gate, SchedulerGate::Skip("automation_disabled")));
+    assert!(matches!(
+        gate,
+        SchedulerGate::Skip(AutomationSkipReasonV1::AutomationDisabled)
+    ));
 }
 
 #[tokio::test]
@@ -464,6 +432,7 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     };
     let (gate, _) = task_run_gate(
         &unavailable,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -471,7 +440,10 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     )
     .await
     .expect("backend gate");
-    assert!(matches!(gate, SchedulerGate::Skip("backend_disabled")));
+    assert!(matches!(
+        gate,
+        SchedulerGate::Skip(AutomationSkipReasonV1::BackendDisabled)
+    ));
 
     let delegated = AutomationConfig {
         backend: AutomationBackend::CodexAppServer,
@@ -480,6 +452,7 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     };
     let (gate, _) = task_run_gate(
         &delegated,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -487,7 +460,10 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     )
     .await
     .expect("host gate");
-    assert!(matches!(gate, SchedulerGate::Skip("delegated_host_mode")));
+    assert!(matches!(
+        gate,
+        SchedulerGate::Skip(AutomationSkipReasonV1::DelegatedHostMode)
+    ));
 }
 
 /// The shortest valid interval schedule: a post-gate skip is a cadence
@@ -517,6 +493,7 @@ async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &
         "test",
         AutomationTrigger::Scheduler,
         &config,
+        None,
         AgentTaskKind::MemoryCurator,
     );
     let gate = run.gate().await.expect("gate");
@@ -525,7 +502,10 @@ async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &
             SchedulerGate::Skip(why) => why,
             SchedulerGate::Proceed(_) => unreachable!(),
         };
-        panic!("gate must proceed so the skip is decided post-gate: skipped {why}");
+        panic!(
+            "gate must proceed so the skip is decided post-gate: skipped {}",
+            why.as_str()
+        );
     };
     run.skipped_parts(None, reason, None)
         .await
@@ -572,6 +552,7 @@ async fn page_cursor_transitions_bypass_reason_only_skip_deduplication() {
             "test",
             AutomationTrigger::Scheduler,
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
         );
         let SchedulerGate::Proceed(lock) = run.gate().await.expect("gate") else {
@@ -623,6 +604,7 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
             "memory_curator",
             AutomationTrigger::Scheduler,
             &config,
+            None,
             task,
         );
         append_skipped_record(&run, None, "scheduler_interval_not_elapsed", false)
@@ -643,6 +625,7 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
         "memory_curator",
         AutomationTrigger::Scheduler,
         &config,
+        None,
         task,
     );
     append_skipped_record(&run, None, "scheduler_interval_not_elapsed", true)

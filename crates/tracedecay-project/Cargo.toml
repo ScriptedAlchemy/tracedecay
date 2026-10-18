@@ -1,0 +1,107 @@
+[package]
+name = "tracedecay-project"
+# Workspace-versioned on purpose: `version::PACKAGE_VERSION` is this crate's
+# `CARGO_PKG_VERSION`, the released version the product runtime validates the
+# generating binary against.
+version.workspace = true
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Registered TraceDecay project handle: configuration authority, runtime-port wiring, product runtime, and the registered test-runtime fixture"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[features]
+# Integration fixture surface: `HostAdmissionTestRuntimeV1`, the registered
+# database scaffolding it owns, and the explicit `TraceDecay::*_for_test`
+# constructors that open a project through it. Production code is never gated
+# by this feature; it compiles only under `cfg(test)` or when a consumer asks
+# for it explicitly.
+test-helpers = [
+    "dep:rusqlite",
+    "tracedecay-automation-runtime/test-helpers",
+    "tracedecay-code-index-runtime/test-helpers",
+    "tracedecay-host-admission/test-helpers",
+    "tracedecay-runtime-core/test-helpers",
+    "tracedecay-session-runtime/test-helpers",
+    "tracedecay-sessions/test-helpers",
+    "tracedecay-store-runtime/test-helpers",
+    "tracedecay-global-db/test-helpers",
+    "tracedecay-session-temporal-store/test-helpers",
+    "tracedecay-code-index/test-helpers",
+    "tracedecay-graph-query/test-helpers",
+    "dep:tracedecay-temporal-query",
+]
+
+# Mirrors the composition root's `test-transport`: the standalone
+# `TraceDecay::init` / `open` / `open_read_only_with_options` entry points route through
+# the registered test runtime instead of the exclusive maintenance lease.
+test-transport = [
+    "test-helpers",
+    "tracedecay-rusqlite-runtime/test-transport",
+    "tracedecay-runtime-core/test-transport",
+    "tracedecay-session-memory/test-transport",
+    "tracedecay-agent-hosts/test-transport",
+    "tracedecay-automation-runtime/test-transport",
+    "tracedecay-dashboard-api/test-transport",
+    "tracedecay-host-admission/test-transport",
+    "tracedecay-application/test-transport",
+    "tracedecay-code-index-runtime/test-transport",
+]
+
+[dependencies]
+asupersync.workspace = true
+# Only the `test-helpers` LCM fixture opens a raw connection.
+rusqlite = { version = "0.40.1", default-features = false, optional = true }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tracing = "0.1"
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }
+tracedecay-api = { path = "../tracedecay-api" }
+tracedecay-application = { path = "../tracedecay-application" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime" }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-global-db = { path = "../tracedecay-global-db" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query" }
+tracedecay-hooks = { path = "../tracedecay-hooks" }
+tracedecay-host-admission = { path = "../tracedecay-host-admission" }
+tracedecay-lcm = { path = "../tracedecay-lcm" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory" }
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-source-edit = { path = "../tracedecay-source-edit" }
+tracedecay-store = { path = "../tracedecay-store" }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", optional = true }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
+
+[dev-dependencies]
+rusqlite = { version = "0.40.1", default-features = false }
+tempfile = "3"
+tracedecay-application = { path = "../tracedecay-application", features = ["test-helpers"] }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", features = ["test-helpers"] }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false, features = ["test-helpers", "test-transport"] }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", features = ["test-transport"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", features = ["test-helpers"] }
+tracedecay-host-admission = { path = "../tracedecay-host-admission", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", features = ["test-helpers"] }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }

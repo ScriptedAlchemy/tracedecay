@@ -2,7 +2,7 @@
  * The measured field behind the Agents workspace, as pure functions.
  *
  * Everything here exists because the analytics endpoints serve one shape of
- * data — a single runaway leader over a long tail — that a linear bar chart is
+ * data, a single runaway leader over a long tail, that a linear bar chart is
  * physically unable to render. `tracedecay_mcp` carries 6,774 events in the
  * same window in which `workflow_skill` carries 1. Drawn linearly, eleven of
  * the twelve rows are a sliver one pixel tall, and the reader learns nothing
@@ -17,8 +17,8 @@ export interface UsageRow {
   events: number;
 }
 
-export interface Dominance {
-  /** Sum of every row's events — the denominator the shares are taken against. */
+interface Dominance {
+  /** Sum of every row's events, the denominator the shares are taken against. */
   total: number;
   leader: UsageRow | null;
   /** The leader's share of `total`, 0–1. Null when there is nothing to divide. */
@@ -75,7 +75,7 @@ export function percent(share: number | null | undefined): number | null {
   return Math.round(share * 100);
 }
 
-export interface EventWindow {
+interface EventWindow {
   /** How many events the endpoint actually counted. */
   events: number | null;
   /** Whether that count is the endpoint's own cap rather than the true total. */
@@ -83,7 +83,7 @@ export interface EventWindow {
   /** Events per hour, straight off the diagnostics payload. */
   perHour: number | null;
   /**
-   * How long the counted events span, in hours. DERIVED — the endpoint serves
+   * How long the counted events span, in hours. DERIVED, the endpoint serves
    * a count and a rate but never the window's own bounds, so this is the one
    * over the other and is labelled as derived wherever it is printed.
    */
@@ -131,12 +131,12 @@ export interface FamilyRow {
   underused?: boolean | undefined;
 }
 
-export interface FamilyNote {
+interface FamilyNote {
   /** Which tools count as this family, per `record_tool_family`. */
   covers: string;
   /**
    * Which non-TraceDecay actions the analyzer counts as a moment where this
-   * family SHOULD have been reached for. Null when no such detector exists —
+   * family SHOULD have been reached for. Null when no such detector exists , 
    * in which case `relevant_events` is structurally always zero and the family
    * can never be flagged under-used, which is a property of the analyzer, not
    * a statement about the agent.
@@ -169,9 +169,9 @@ export const FAMILY_NOTES: Readonly<Record<string, FamilyNote>> = {
   },
 };
 
-export type FamilyState = 'underused' | 'covered' | 'unmeasurable' | 'idle';
+type FamilyState = 'underused' | 'covered' | 'unmeasurable' | 'idle';
 
-export interface FamilyVerdict {
+interface FamilyVerdict {
   state: FamilyState;
   /** One line a reader can act on, or decide not to. */
   line: string;

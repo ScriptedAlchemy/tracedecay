@@ -2,12 +2,13 @@
 //!
 //! Content-size estimation has two quality tiers:
 //!
-//! 1. **tokenized** — stored text counted with a
-//!    real BPE tokenizer (tiktoken). Exact for OpenAI-family models
-//!    (`o200k_base` / `cl100k_base` per family); for other vendors
-//!    (Claude/Gemini have no public tokenizer) `o200k_base` serves as a
-//!    much-better-than-chars/4 approximation and is labeled as such.
-//! 2. **estimated** — the legacy `(len+3)/4` chars/4 heuristic, used when
+//! 1. **tokenized**, stored text counted with a
+//!    real BPE tokenizer (tiktoken). Exact for modern OpenAI-family models
+//!    on `o200k_base`; legacy GPT-4 / GPT-3.5 / embeddings and other vendors
+//!    (Claude/Gemini have no public tokenizer) use the same vocabulary as a
+//!    labeled approximation. Shipping only gzip-compressed `o200k_base`
+//!    keeps legacy vocabularies out of `.rodata`.
+//! 2. **estimated**, the legacy `(len+3)/4` chars/4 heuristic, used when
 //!    the `token-counting` feature is compiled out (or a count failed).
 //!
 //! Provider-reported billing usage comes exclusively from the canonical raw
@@ -30,11 +31,12 @@ use sha2::{Digest, Sha256};
 
 use super::DashboardState;
 use super::util::{query_rows, str_field};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 
 #[cfg(feature = "token-counting")]
-use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
+use tracedecay_tokenizer::o200k_base;
 
 /// Per-message content-token columns, derived once and reused by every savings
 /// aggregate. Billing usage never enters this content-sizing projection.
@@ -45,9 +47,9 @@ pub(super) const MESSAGE_TOKENS_CTE: &str = "
            role,
            timestamp,
            TRIM(COALESCE(model, '')) AS model,
-           LENGTH(COALESCE(text, '')) AS msg_len,
-           (LENGTH(COALESCE(text, '')) + 3) / 4 AS est_tokens
-    FROM session_messages
+           LENGTH(COALESCE(content, placeholder_text, '')) AS msg_len,
+           (LENGTH(COALESCE(content, placeholder_text, '')) + 3) / 4 AS est_tokens
+    FROM lcm_raw_messages
     WHERE kind IS NULL OR kind NOT IN ('summary', 'tool_event', 'hook_event', 'reasoning')";
 
 /// Which BPE vocabulary a model id maps to, and whether the resulting count
@@ -59,15 +61,14 @@ pub struct ModelEncoder {
 }
 
 pub const O200K: &str = "o200k_base";
-pub const CL100K: &str = "cl100k_base";
 
 /// Maps a transcript model id to its tokenizer.
 ///
-/// `OpenAI` families are exact: GPT-5 / GPT-4o / GPT-4.1 / GPT-4.5,
-/// o-series, codex, and gpt-oss use `o200k_base`; legacy GPT-4 / GPT-3.5 /
-/// embeddings use `cl100k_base`. Everything else (Claude, Gemini, Grok, …)
-/// has no public tokenizer, so `o200k_base` is used as an approximation
-/// with `exact: false` so the UI can label it honestly.
+/// Modern OpenAI families are exact on the single shipped vocabulary
+/// (`o200k_base`): GPT-5 / GPT-4o / GPT-4.1 / GPT-4.5, o-series, codex, and
+/// gpt-oss. Legacy GPT-4 / GPT-3.5 / embeddings and every other vendor
+/// (Claude, Gemini, Grok, …) reuse `o200k_base` with `exact: false` so the UI
+/// can label the count honestly. A second vocabulary is not linked.
 pub fn encoder_for_model(model: &str) -> ModelEncoder {
     let id = model.trim().to_ascii_lowercase();
     let exact_o200k = id.starts_with("gpt-5")
@@ -79,21 +80,9 @@ pub fn encoder_for_model(model: &str) -> ModelEncoder {
         || id.starts_with("codex")
         || matches!(id.as_str(), "o1" | "o3" | "o4")
         || ["o1-", "o3-", "o4-"].iter().any(|p| id.starts_with(p));
-    if exact_o200k {
-        return ModelEncoder {
-            name: O200K,
-            exact: true,
-        };
-    }
-    if id.starts_with("gpt-4") || id.starts_with("gpt-3.5") || id.starts_with("text-embedding") {
-        return ModelEncoder {
-            name: CL100K,
-            exact: true,
-        };
-    }
     ModelEncoder {
         name: O200K,
-        exact: false,
+        exact: exact_o200k,
     }
 }
 
@@ -102,20 +91,20 @@ pub fn counting_available() -> bool {
     cfg!(feature = "token-counting")
 }
 
-/// Counts `text` with the BPE the model maps to. The singletons decode the
-/// embedded vocabularies lazily, so the first call pays the init cost and
-/// builds without the feature never do.
+/// Counts `text` with the shipped BPE. The singleton decodes the embedded
+/// vocabulary lazily, so the first call pays the init cost and builds without
+/// the feature never do. Counting always uses `o200k_base`; model-specific
+/// exactness is reported separately by [`encoder_for_model`].
 #[cfg(feature = "token-counting")]
-pub fn count_text_tokens(text: &str, model: &str) -> Option<i64> {
-    let bpe = match encoder_for_model(model).name {
-        CL100K => cl100k_base_singleton(),
-        _ => o200k_base_singleton(),
-    };
+pub fn count_text_tokens(text: &str) -> Option<i64> {
+    let bpe = o200k_base()
+        .inspect_err(|error| tracing::error!(%error, "tokenizer initialization failed"))
+        .ok()?;
     i64::try_from(bpe.encode_ordinary(text).len()).ok()
 }
 
 #[cfg(not(feature = "token-counting"))]
-pub fn count_text_tokens(_text: &str, _model: &str) -> Option<i64> {
+pub fn count_text_tokens(_text: &str) -> Option<i64> {
     None
 }
 
@@ -165,10 +154,10 @@ fn displayed_message_cache() -> DisplayedMessageCache {
     CLruCache::new(DISPLAYED_MESSAGE_CACHE_CAPACITY)
 }
 
-/// Cached non-usage overlay plus the `session_messages` fingerprint it was
+/// Cached non-usage overlay plus the `lcm_raw_messages` fingerprint it was
 /// built from.
 struct OverlayCache {
-    /// Cheap aggregate fingerprint of `session_messages` at build time:
+    /// Cheap aggregate fingerprint of `lcm_raw_messages` at build time:
     /// `(COUNT(*), MAX(rowid))`. Provider-accounting metadata is deliberately
     /// excluded because it is not content-token evidence.
     fingerprint: OverlayFingerprint,
@@ -182,18 +171,17 @@ pub struct TokenCountCache {
     map: Mutex<HashMap<(String, String), CachedCount>>,
     /// Last built non-usage overlay; `/overview`, `/sessions`, and `/models`
     /// all need it, so without this every Savings-tab interaction re-ran the
-    /// full `session_messages` scan + fold three times.
+    /// full `lcm_raw_messages` scan + fold three times.
     overlay: tokio::sync::Mutex<Option<OverlayCache>>,
     /// Displayed-content counts for the LCM render path, keyed by provider
     /// then message id and guarded by a content fingerprint. Bounded LRU
     /// levels prevent a long-lived dashboard from retaining every message it
     /// has ever rendered. Two levels let a hit borrow the caller's `&str`
-    /// keys without allocating — every polled search/session/overview/timeline
+    /// keys without allocating, every polled search/session/overview/timeline
     /// message takes this path.
     /// Kept apart from `map`: LCM counts canonically hydrated display
-    /// content with `o200k_base` specifically, while `map` counts stored
-    /// text with the model-mapped tokenizer, so entries are not
-    /// interchangeable.
+    /// content, while `map` counts stored text. Those content authorities
+    /// are different, so entries are not interchangeable.
     lcm_display: Mutex<DisplayedProviderCache>,
 }
 
@@ -263,8 +251,6 @@ struct ComputedTokenCount {
 /// best-available token count.
 #[derive(Debug, Clone)]
 pub struct MessageTokens {
-    pub provider: String,
-    pub session_id: String,
     /// Normalized like the SQL CTE: `""` when no model id was recorded.
     pub model: String,
     pub role: String,
@@ -280,22 +266,24 @@ pub struct MessageTokens {
 /// session store is being served (callers fall back to the SQL estimates).
 ///
 /// The result is cached on [`TokenCountCache`] keyed by a cheap
-/// `(COUNT(*), MAX(rowid))` fingerprint of `session_messages`; the cache
+/// `(COUNT(*), MAX(rowid))` fingerprint of `lcm_raw_messages`; the cache
 /// lock is held across a rebuild so the three savings endpoints firing
 /// concurrently share one scan instead of racing three.
-pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<MessageTokens>>> {
-    let db = state.lcm_db.as_deref()?;
-    let conn = db.read_connection();
+pub async fn non_usage_message_tokens(
+    cache: &TokenCountCache,
+    lcm_db: Option<&RegisteredGlobalDbLeaseV1>,
+) -> Option<Arc<Vec<MessageTokens>>> {
+    let conn = lcm_db?.read_connection();
 
     let fingerprint = overlay_fingerprint(&conn).await?;
-    let mut cached = state.token_counts.overlay.lock().await;
+    let mut cached = cache.overlay.lock().await;
     if let Some(existing) = cached.as_ref()
         && existing.fingerprint == fingerprint
     {
         return Some(existing.overlay.clone());
     }
 
-    let overlay = Arc::new(build_overlay(state, &conn).await?);
+    let overlay = Arc::new(build_overlay(cache, &conn).await?);
     *cached = Some(OverlayCache {
         fingerprint,
         overlay: overlay.clone(),
@@ -303,12 +291,12 @@ pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<
     Some(overlay)
 }
 
-/// Aggregate fingerprint of `session_messages` — see [`OverlayCache`].
+/// Aggregate fingerprint of `lcm_raw_messages`, see [`OverlayCache`].
 async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<OverlayFingerprint> {
     let rows = query_rows(
         conn,
         "SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS max_rowid
-         FROM session_messages",
+         FROM lcm_raw_messages",
         (),
     )
     .await
@@ -321,22 +309,21 @@ async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<Ove
 }
 
 async fn build_overlay(
-    state: &DashboardState,
+    cache: &TokenCountCache,
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Option<Vec<MessageTokens>> {
-    // Metadata only — text never leaves SQLite unless a count is missing.
+    // Metadata only, text never leaves SQLite unless a count is missing.
     let sql = format!(
-        "SELECT provider, message_id, session_id, role, timestamp, model, msg_len
+        "SELECT provider, message_id, role, timestamp, model, msg_len
          FROM ({MESSAGE_TOKENS_CTE})"
     );
     let rows = query_rows(conn, &sql, ()).await.ok()?;
 
     // Resolve cache hits and collect misses without holding the lock
     // across any await point.
-    let mut misses: Vec<(String, String, String, i64)> = Vec::new();
+    let mut misses: Vec<(String, String, i64)> = Vec::new();
     {
-        let map = state
-            .token_counts
+        let map = cache
             .map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -347,17 +334,16 @@ async fn build_overlay(
             let key = (provider.to_owned(), message_id.to_owned());
             let stale = map.get(&key).is_none_or(|c| c.text_len != len);
             if stale && counting_available() && len > 0 {
-                misses.push((key.0, key.1, str_field(row, "model").to_owned(), len));
+                misses.push((key.0, key.1, len));
             }
         }
     }
 
     if !misses.is_empty() {
-        count_and_store(state, conn, misses).await;
+        count_and_store(cache, conn, misses).await;
     }
 
-    let map = state
-        .token_counts
+    let map = cache
         .map
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -371,8 +357,6 @@ async fn build_overlay(
                 .get(&(provider.to_owned(), message_id.to_owned()))
                 .filter(|c| c.text_len == len);
             MessageTokens {
-                provider: provider.to_owned(),
-                session_id: str_field(row, "session_id").to_owned(),
                 model: str_field(row, "model").to_owned(),
                 role: str_field(row, "role").to_owned(),
                 timestamp: row.get("timestamp").and_then(Value::as_i64),
@@ -388,13 +372,13 @@ async fn build_overlay(
 /// runtime, then updates the process-local derived cache.
 ///
 /// Chunks are keyed `(provider, message_id)` so the lookup can use the
-/// table's composite primary key — a `message_id IN (…)` filter alone cannot,
+/// table's composite primary key, a `message_id IN (…)` filter alone cannot,
 /// and full-scanned the text-heavy table once per 200-row chunk (a 15k-message
 /// first warm paid ~75 full scans).
 async fn count_and_store(
-    state: &DashboardState,
+    cache: &TokenCountCache,
     conn: &(impl QueryExecutor + ?Sized),
-    mut misses: Vec<(String, String, String, i64)>,
+    mut misses: Vec<(String, String, i64)>,
 ) {
     const CHUNK: usize = 200;
     let mut computed: Vec<ComputedTokenCount> = Vec::with_capacity(misses.len());
@@ -406,15 +390,15 @@ async fn count_and_store(
     {
         let placeholders = build_qmark_placeholders(chunk.len());
         let sql = format!(
-            "SELECT provider, message_id, COALESCE(text, '') AS text
-             FROM session_messages WHERE provider = ? AND message_id IN ({placeholders})"
+            "SELECT provider, message_id, COALESCE(content, placeholder_text, '') AS text
+             FROM lcm_raw_messages WHERE provider = ? AND message_id IN ({placeholders})"
         );
         let mut params: Vec<DbValue> = Vec::with_capacity(chunk.len() + 1);
         params.push(DbValue::Text(chunk[0].0.clone()));
         params.extend(
             chunk
                 .iter()
-                .map(|(_, message_id, _, _)| DbValue::Text(message_id.clone())),
+                .map(|(_, message_id, _)| DbValue::Text(message_id.clone())),
         );
         let Ok(rows) = query_rows(conn, &sql, params_from_iter(params)).await else {
             continue;
@@ -432,29 +416,21 @@ async fn count_and_store(
             })
             .collect();
 
-        let batch: Vec<(String, String, String, i64, String)> = chunk
+        let batch: Vec<(String, String, i64, String)> = chunk
             .iter()
-            .filter_map(|(provider, message_id, model, len)| {
+            .filter_map(|(provider, message_id, len)| {
                 texts
                     .remove(&(provider.clone(), message_id.clone()))
-                    .map(|text| {
-                        (
-                            provider.clone(),
-                            message_id.clone(),
-                            model.clone(),
-                            *len,
-                            text,
-                        )
-                    })
+                    .map(|text| (provider.clone(), message_id.clone(), *len, text))
             })
             .collect();
 
         // BPE encoding is CPU-bound; keep it off the async worker threads.
-        let counted = tokio::task::spawn_blocking(move || {
+        let counted = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             batch
                 .into_iter()
-                .filter_map(|(provider, message_id, model, len, text)| {
-                    count_text_tokens(&text, &model).map(|token_count| ComputedTokenCount {
+                .filter_map(|(provider, message_id, len, text)| {
+                    count_text_tokens(&text).map(|token_count| ComputedTokenCount {
                         token_count,
                         provider,
                         message_id,
@@ -471,8 +447,7 @@ async fn count_and_store(
     if computed.is_empty() {
         return;
     }
-    let mut map = state
-        .token_counts
+    let mut map = cache
         .map
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -488,13 +463,19 @@ async fn count_and_store(
 }
 
 /// Detached warm-up so the first Savings-tab request finds a hot cache.
-pub fn spawn_warm(state: DashboardState) {
+pub fn spawn_warm(state: &DashboardState) {
     if !counting_available() {
         return;
     }
-    tokio::spawn(async move {
-        let _ = non_usage_message_tokens(&state).await;
-    });
+    // Only the cache and store: the last `DashboardState` clone must not drop
+    // on a native worker, where daemon-owned ports may expect Tokio.
+    let cache = Arc::clone(&state.token_counts);
+    let lcm_db = state.lcm_db.clone();
+    if let Err(error) = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+        let _ = non_usage_message_tokens(&cache, lcm_db.as_ref()).await;
+    }) {
+        tracing::warn!(%error, "dashboard token-count warm-up not admitted");
+    }
 }
 
 #[cfg(test)]
@@ -517,7 +498,7 @@ mod tests {
         let cache = TokenCountCache::new();
         let fingerprint = content_fingerprint("hello");
         // Hits are looked up with `&str` keys borrowed from caller-owned
-        // data — the hit path must never require freshly owned Strings.
+        // data, the hit path must never require freshly owned Strings.
         let composed = "codex m1".to_owned();
         let (provider, message_id) = composed.split_once(' ').expect("two borrowed keys");
         assert_eq!(
@@ -609,8 +590,11 @@ mod tests {
         }
         for model in ["gpt-4", "gpt-3.5-turbo", "text-embedding-3-small"] {
             let enc = encoder_for_model(model);
-            assert_eq!(enc.name, CL100K, "{model}");
-            assert!(enc.exact, "{model} should be exact");
+            assert_eq!(enc.name, O200K, "{model}");
+            assert!(
+                !enc.exact,
+                "{model} must be labeled approximate without cl100k_base"
+            );
         }
     }
 
@@ -633,33 +617,21 @@ mod tests {
         assert!(!encoder_for_model("opus-large").exact);
     }
 
-    // The two vocabulary tests are split so each test process pays only one
-    // BPE model load (the dominant cost, especially on Windows) and nextest
-    // can run them in parallel.
     #[cfg(feature = "token-counting")]
     #[test]
     fn bpe_counts_diverge_from_chars4() {
         let text = "fn main() { println!(\"hello tokenizer world\"); }";
-        let bpe = count_text_tokens(text, "gpt-5").expect("token counting is compiled in");
+        let bpe = count_text_tokens(text).expect("token counting is compiled in");
         assert!(bpe > 0);
         // Code-heavy text tokenizes denser than chars/4 predicts; the exact
         // value is vocabulary-dependent, so only sanity-bound it.
         assert!(bpe <= text.len() as i64);
     }
 
-    #[cfg(feature = "token-counting")]
-    #[test]
-    fn bpe_counts_use_cl100k_for_legacy_models() {
-        let text = "fn main() { println!(\"hello tokenizer world\"); }";
-        let cl = count_text_tokens(text, "gpt-4").expect("token counting is compiled in");
-        assert!(cl > 0);
-        assert!(cl <= text.len() as i64);
-    }
-
     #[cfg(not(feature = "token-counting"))]
     #[test]
     fn a_compiled_out_tokenizer_is_unavailable_instead_of_zero() {
-        assert_eq!(count_text_tokens("visible content", ""), None);
+        assert_eq!(count_text_tokens("visible content"), None);
     }
 
     #[tokio::test]
@@ -667,27 +639,28 @@ mod tests {
         let (_dir, conn) = test_conn();
         if let Err(err) = conn
             .execute_batch(
-            "CREATE TABLE session_messages (
+            "CREATE TABLE lcm_raw_messages (
                 provider TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 timestamp INTEGER,
                 ordinal INTEGER NOT NULL,
-                text TEXT NOT NULL,
+                content TEXT,
+                placeholder_text TEXT,
                 kind TEXT,
                 model TEXT,
                 metadata_json TEXT,
-                PRIMARY KEY(provider, message_id)
+                UNIQUE(provider, message_id)
             );
-            INSERT INTO session_messages
-                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model, metadata_json)
+            INSERT INTO lcm_raw_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, content, kind, model, metadata_json)
             VALUES
                 ('codex', 'm1', 's1', 'assistant', 1, 1, 'hello', NULL, 'gpt-5', NULL);",
             )
             .await
         {
-            panic!("failed to seed session_messages: {err}");
+            panic!("failed to seed lcm_raw_messages: {err}");
         }
 
         let Some(before) = overlay_fingerprint(&*conn).await else {
@@ -695,7 +668,7 @@ mod tests {
         };
         if let Err(err) = conn
             .execute(
-                "UPDATE session_messages
+                "UPDATE lcm_raw_messages
              SET metadata_json = '{\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'
              WHERE provider = 'codex' AND message_id = 'm1'",
                 (),
@@ -720,7 +693,7 @@ mod tests {
         };
         if let Err(err) = conn
             .execute(
-                "UPDATE session_messages
+                "UPDATE lcm_raw_messages
              SET metadata_json = '{\"usage\":{\"input_tokens\":9,\"output_tokens\":8}}'
              WHERE provider = 'codex' AND message_id = 'm1'",
                 (),
@@ -770,21 +743,22 @@ mod tests {
     async fn derived_kinds_are_excluded_from_token_cte() {
         let (_dir, conn) = test_conn();
         conn.execute_batch(
-            "CREATE TABLE session_messages (
+            "CREATE TABLE lcm_raw_messages (
                 provider TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 timestamp INTEGER,
                 ordinal INTEGER NOT NULL,
-                text TEXT NOT NULL,
+                content TEXT,
+                placeholder_text TEXT,
                 kind TEXT,
                 model TEXT,
                 metadata_json TEXT,
-                PRIMARY KEY(provider, message_id)
+                UNIQUE(provider, message_id)
             );
-            INSERT INTO session_messages
-                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model, metadata_json)
+            INSERT INTO lcm_raw_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, content, kind, model, metadata_json)
             VALUES
                 ('codex', 'm1', 's1', 'assistant', 1, 1, 'kept', NULL, 'gpt-5', NULL),
                 ('codex', 'm2', 's1', 'assistant', 2, 2, 'sum', 'summary', 'gpt-5', NULL),
@@ -793,7 +767,7 @@ mod tests {
                 ('codex', 'm5', 's1', 'assistant', 5, 5, 're', 'reasoning', 'gpt-5', NULL);",
         )
         .await
-        .expect("seed session_messages");
+        .expect("seed lcm_raw_messages");
 
         let sql = format!("SELECT COUNT(*) FROM ({MESSAGE_TOKENS_CTE})");
         let mut rows = conn.query(&sql, ()).await.expect("run token CTE count");

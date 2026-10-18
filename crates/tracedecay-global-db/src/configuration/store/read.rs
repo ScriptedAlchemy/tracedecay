@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::codec::{
     CONFIGURATION_SNAPSHOT_ENTRY_PAYLOAD_SCHEMA_VERSION, StoredConfigurationSnapshotEntryV1,
-    StoredRevisionMetadata, decode_id, decode_plan_row,
+    StoredRevisionMetadata, decode_id, plan_row_columns,
 };
 use super::{
     ActorId, ChangePlanId, ConfigurationProtectedPlanRecordV1, ConfigurationRegistry,
@@ -242,29 +242,17 @@ pub(super) async fn read_change_plan_from_executor(
 ) -> ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>> {
     let mut rows = executor
         .query(
-            "SELECT p.plan_id, p.actor_id, p.base_revision_id, p.operation_digest,
-                    p.resolved_scope_digest, p.membership_digest,
-                    p.authorization_policy_digest, p.policy_epoch, p.expires_at, p.created_at,
-                    o.sequence, o.payload_schema_revision, o.sealed_typed_operation,
-                    o.operation_digest
-             FROM configuration_change_plans p
-             LEFT JOIN configuration_change_plan_operations o ON o.plan_id = p.plan_id
-             WHERE p.plan_id = ?1
-             ORDER BY o.sequence ASC",
+            tracedecay_rusqlite_runtime::repository::STORED_CHANGE_PLAN_SQL,
             params![plan_id.as_str()],
         )
         .await
         .map_err(unavailable_store)?;
-    let mut plans = Vec::new();
+    let mut columns = Vec::new();
     while let Some(row) = rows.next().await.map_err(unavailable_store)? {
-        plans.push(decode_plan_row(&row)?);
+        columns.push(plan_row_columns(&row)?);
     }
-    if plans.len() > 1 {
-        return Err(invalid_store_data(
-            "configuration plan has multiple operation payloads unsupported by this contract",
-        ));
-    }
-    Ok(plans.pop())
+    tracedecay_rusqlite_runtime::repository::decode_stored_change_plan_rows(columns)
+        .map_err(invalid_store_data)
 }
 
 pub(super) async fn current_revision_id_from_executor(

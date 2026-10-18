@@ -6,7 +6,7 @@
 // The anchor-owner authority predicate shared by every root-scope query: a
 // participant is readable when its anchor owner matches the authorized root
 // (profile owners under the 'user' root, project owners under project roots).
-// `ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY` alone additionally accepts
+// `ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY` alone also accepts
 // session-owned anchors; that deliberate divergence is the `with_session_owner`
 // arm and is documented at that query's definition.
 macro_rules! anchor_owner_authority_predicate {
@@ -57,6 +57,35 @@ macro_rules! summary_publication_provider {
         "json_extract(n.publication_json, '$.provider')"
     };
 }
+
+// Current-mode summary reads fail closed only while a raw revision's
+// invalidation closure is partially applied: the walk enqueues `summary_node`
+// work exactly when it has already staled at least one summary and has more
+// to visit, so a session with pending `summary_node` rows has a half-staled
+// summary set. Queued-but-unstarted work (only `raw_message` rows, which every
+// protection revision seeds) leaves a consistent view; hiding on those rows
+// would blank every freshly protected session until convergence drains it.
+// Mirrors `tracedecay_lcm::dag::load_uncondensed_summary_nodes`.
+macro_rules! partial_summary_invalidation_exists {
+    ($provider:expr, $session_id:literal) => {
+        concat!(
+            "EXISTS (
+          SELECT 1
+          FROM lcm_summary_convergence_invalidation_work AS partial
+          WHERE partial.provider = ",
+            $provider,
+            "
+            AND partial.session_id = ",
+            $session_id,
+            "
+            AND partial.source_kind = 'summary_node'
+            AND partial.state = 'pending'
+      )"
+        )
+    };
+}
+
+pub(crate) use partial_summary_invalidation_exists;
 
 // Shared per-row identity byte caps for occurrence candidate listing.
 // `$provider` is `o.source_provider` on session scope and
@@ -311,7 +340,7 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = concat!(
            o.source_provider,
            o.snippet_text, ?4
     FROM session_occurrences AS o
-    WHERE o.session_id = ?1 AND o.generation = ?2
+    WHERE o.session_id = ?1 AND +o.generation <= ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND instr(o.snippet_text, ?4) > 0
       ",
@@ -331,7 +360,7 @@ pub(super) const SCOPE_CANDIDATE_QUERY: &str = concat!(
            o.message_id, o.turn_id, o.session_id, o.role,
            o.source_provider
     FROM session_occurrences AS o
-    WHERE o.session_id = ?1 AND o.generation = ?2
+    WHERE o.session_id = ?1 AND +o.generation <= ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       ",
     occurrence_keyset!("?4", "?5"),
@@ -364,6 +393,9 @@ pub(super) const SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     summary_publication_provider!(),
     " = ?3)
       AND a.availability <> 'unavailable'
+      AND (?11 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!(summary_publication_provider!(), "n.session_id"),
+    ")
       ",
     summary_keyset!("?4", "?5"),
     "
@@ -384,7 +416,7 @@ pub(super) const ANCHOR_CANDIDATE_QUERY: &str = concat!(
                o.turn_id AS turn_id, o.session_id AS session_id, o.role AS evidence_role,
                o.source_provider AS provider
         FROM session_occurrences AS o
-        WHERE o.session_id = ?1 AND o.generation = ?2
+        WHERE o.session_id = ?1 AND +o.generation <= ?2
           AND (?3 IS NULL OR o.source_provider = ?3)
           AND o.retrieval_anchor_id = ?4
         UNION ALL
@@ -398,6 +430,9 @@ pub(super) const ANCHOR_CANDIDATE_QUERY: &str = concat!(
     summary_publication_provider!(),
     " = ?3)
           AND n.summary_anchor_id = ?4
+          AND (?8 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!(summary_publication_provider!(), "n.session_id"),
+    ")
     )
     WHERE knowledge_at < ?5 OR (knowledge_at = ?5 AND stable_id > ?6)
     ORDER BY knowledge_at DESC, stable_id
@@ -412,7 +447,7 @@ pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = concat!(
     FROM session_temporal_generations AS frozen
     JOIN session_occurrences AS o
       ON o.session_id = frozen.session_id
-     AND o.generation = frozen.generation
+     AND +o.generation <= frozen.generation
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
     JOIN sessions AS authority_session
@@ -439,7 +474,7 @@ pub(super) const OCCURRENCE_FTS_QUERY: &str = concat!(
            o.source_provider
     FROM session_occurrences_fts
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
-    WHERE o.session_id = ?1 AND o.generation = ?2
+    WHERE o.session_id = ?1 AND +o.generation <= ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND session_occurrences_fts MATCH ?4
       ",
@@ -458,7 +493,7 @@ pub(super) const TIME_CANDIDATE_QUERY: &str = concat!(
            o.message_id, o.turn_id, o.session_id, o.role,
            o.source_provider
     FROM session_occurrences AS o INDEXED BY idx_session_occurrences_generation_order
-    WHERE o.session_id = ?1 AND o.generation = ?2
+    WHERE o.session_id = ?1 AND +o.generation <= ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND o.knowledge_at >= ?4 AND o.knowledge_at < ?5
       ",
@@ -487,6 +522,9 @@ pub(super) const SUMMARY_CANDIDATE_QUERY: &str = concat!(
     WHERE n.session_id = ?1
       AND session_summary_nodes_fts MATCH ?3
       AND a.availability <> 'unavailable'
+      AND (?11 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!(summary_publication_provider!(), "n.session_id"),
+    ")
       ",
     summary_keyset!("?4", "?5"),
     "
@@ -502,10 +540,11 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            authority_session.provider, o.snippet_text, ?3, frozen.generation
-    FROM session_occurrences AS o
+    FROM session_occurrences_fts
+    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
-     AND frozen.generation = o.generation
+     AND +o.generation <= frozen.generation
      AND frozen.state = 'active'
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
@@ -517,19 +556,20 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
     anchor_owner_authority_predicate!(),
     "
       AND (?2 IS NULL OR o.source_provider = ?2)
+      AND session_occurrences_fts MATCH ?4
       AND instr(o.snippet_text, ?3) > 0
       ",
-    occurrence_root_keyset!("?4", "?5", "?6"),
+    occurrence_root_keyset!("?5", "?6", "?7"),
     "
       ",
-    occurrence_row_length_bounds!("?7", "?8", "?9", "?10", "authority_session.provider"),
+    occurrence_row_length_bounds!("?8", "?9", "?10", "?11", "authority_session.provider"),
     "
-      AND length(CAST(o.snippet_text AS BLOB)) <= ?12
+      AND length(CAST(o.snippet_text AS BLOB)) <= ?13
       ",
-    root_occurrence_cursor_bound!("?11"),
+    root_occurrence_cursor_bound!("?12"),
     "
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
-    LIMIT ?13"
+    LIMIT ?14"
 );
 
 pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
@@ -541,7 +581,7 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
-     AND frozen.generation = o.generation
+     AND +o.generation <= frozen.generation
      AND frozen.state = 'active'
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
@@ -567,6 +607,80 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
     LIMIT ?12"
 );
 
+pub(super) const ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = concat!(
+    "
+    SELECT COUNT(*)
+    FROM (
+        SELECT DISTINCT o.retrieval_anchor_id
+        FROM session_occurrences_fts
+        JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
+        JOIN session_temporal_generations AS frozen
+          ON frozen.session_id = o.session_id
+         AND +o.generation <= frozen.generation
+         AND frozen.state = 'active'
+        JOIN retrieval_anchors AS authority_anchor
+          ON authority_anchor.anchor_id = o.retrieval_anchor_id
+        JOIN sessions AS authority_session
+          ON authority_session.session_id = o.session_id
+         AND authority_session.provider = o.source_provider
+         AND authority_session.project_key = ?1
+        WHERE ",
+    anchor_owner_authority_predicate!(),
+    "
+          AND (?2 IS NULL OR o.source_provider = ?2)
+          AND session_occurrences_fts MATCH ?3
+          ",
+    occurrence_row_length_bounds!("?4", "?5", "?6", "?7", "authority_session.provider"),
+    "
+          ",
+    root_occurrence_cursor_bound!("?8"),
+    "
+        LIMIT ?9
+    )"
+);
+
+// Newest-first empty-query browse across every active participant. The
+// leading table is the occurrence index on knowledge_at so LIMIT can stop
+// after one keyset page instead of joining every generation to every
+// occurrence and sorting the project. `ROOT_TIME_CANDIDATE_QUERY` keeps the
+// generation-first shape because its window already bounds that join.
+// CROSS JOIN pins that order: once ANALYZE records a near-empty
+// `retrieval_anchors`, SQLite otherwise drives from the anchor scan and
+// sorts every occurrence before LIMIT.
+pub(super) const ROOT_SCOPE_CANDIDATE_QUERY: &str = concat!(
+    "
+    SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
+           o.message_id, o.turn_id, o.session_id, o.role,
+           authority_session.provider, frozen.generation
+    FROM session_occurrences AS o
+    INDEXED BY idx_session_occurrences_root_generation_order
+    CROSS JOIN session_temporal_generations AS frozen
+      ON frozen.session_id = o.session_id
+     AND frozen.state = 'active'
+     AND +o.generation <= frozen.generation
+    CROSS JOIN retrieval_anchors AS authority_anchor
+      ON authority_anchor.anchor_id = o.retrieval_anchor_id
+    CROSS JOIN sessions AS authority_session
+      ON authority_session.session_id = o.session_id
+     AND authority_session.provider = o.source_provider
+     AND authority_session.project_key = ?1
+    WHERE ",
+    anchor_owner_authority_predicate!(),
+    "
+      AND (?2 IS NULL OR o.source_provider = ?2)
+      ",
+    occurrence_root_keyset!("?3", "?4", "?5"),
+    "
+      ",
+    occurrence_row_length_bounds!("?6", "?7", "?8", "?9", "authority_session.provider"),
+    "
+      ",
+    root_occurrence_cursor_bound!("?10"),
+    "
+    ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
+    LIMIT ?11"
+);
+
 pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
@@ -576,7 +690,7 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     JOIN session_occurrences AS o
       INDEXED BY idx_session_occurrences_root_generation_order
       ON o.session_id = frozen.session_id
-     AND o.generation = frozen.generation
+     AND +o.generation <= frozen.generation
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
     JOIN sessions AS authority_session
@@ -629,6 +743,9 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
     "
       AND session_summary_nodes_fts MATCH ?2
       AND a.availability <> 'unavailable'
+      AND (?12 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!("authority_session.provider", "n.session_id"),
+    ")
       ",
     summary_root_keyset!("?3", "?4", "?5"),
     "
@@ -670,6 +787,9 @@ pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     "
       AND (?2 IS NULL OR authority_session.provider = ?2)
       AND a.availability <> 'unavailable'
+      AND (?12 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!("authority_session.provider", "n.session_id"),
+    ")
       ",
     summary_root_keyset!("?3", "?4", "?5"),
     "
@@ -691,9 +811,9 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
     FROM session_derived_evidence AS evidence
     JOIN session_occurrences AS first_occurrence
       ON first_occurrence.session_id = evidence.session_id
-     AND first_occurrence.generation = evidence.generation
+     AND +first_occurrence.generation <= ?2
      AND first_occurrence.occurrence_id = evidence.first_occurrence_id
-    WHERE evidence.session_id = ?1 AND evidence.generation = ?2
+    WHERE evidence.session_id = ?1 AND +evidence.generation <= ?2
       AND evidence.evidence_kind = ?3
       AND (?4 IS NULL OR first_occurrence.source_provider = ?4)
       AND EXISTS (
@@ -701,14 +821,14 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
           FROM session_derived_evidence_members AS member
           JOIN session_occurrences AS member_occurrence
             ON member_occurrence.session_id = member.session_id
-           AND member_occurrence.generation = member.generation
+           AND +member_occurrence.generation <= ?2
            AND member_occurrence.occurrence_id = member.occurrence_id
           JOIN session_occurrences_fts
             ON session_occurrences_fts.rowid = member_occurrence.rowid
           WHERE member.session_id = evidence.session_id
-            AND member.generation = evidence.generation
+            AND +member.generation <= ?2
             AND member.evidence_kind = evidence.evidence_kind
-            AND member.evidence_id = evidence.evidence_id
+            AND member.first_occurrence_id = evidence.first_occurrence_id
             AND session_occurrences_fts MATCH ?5
       )
       ",
@@ -718,9 +838,12 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
     LIMIT ?8"
 );
 
-// Fresh stores have no planner statistics. CROSS JOIN pins authorized sessions
-// as the outer loop so SQLite probes evidence by session/generation/kind instead
-// of scanning every evidence row before applying the root boundary.
+// The FTS match is the selective end of this join, so it drives. Probing the
+// root's evidence rows and testing each one for a matching member instead ran
+// the correlated FTS subquery once per evidence row in the whole root, and the
+// keyset ORDER BY needs a temp b-tree, so LIMIT could not stop that scan early.
+// Fresh stores have no planner statistics, so CROSS JOIN pins the match as the
+// outer loop; GROUP BY collapses an evidence row several matching members reach.
 pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
@@ -729,44 +852,43 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
                 THEN first_occurrence.message_id ELSE NULL END,
            NULL, evidence.session_id, evidence.evidence_kind,
            authority_session.provider, frozen.generation
-    FROM sessions AS authority_session
-    CROSS JOIN session_temporal_generations AS frozen
+    FROM session_occurrences_fts
+    CROSS JOIN session_occurrences AS member_occurrence
+      ON member_occurrence.rowid = session_occurrences_fts.rowid
+    CROSS JOIN session_derived_evidence_members AS member
+      ON member.session_id = member_occurrence.session_id
+     AND member.occurrence_id = member_occurrence.occurrence_id
+     AND member.evidence_kind = ?2
     CROSS JOIN session_derived_evidence AS evidence
+      ON evidence.session_id = member.session_id
+     AND evidence.evidence_kind = member.evidence_kind
+     AND evidence.first_occurrence_id = member.first_occurrence_id
+    CROSS JOIN session_temporal_generations AS frozen
+      ON frozen.session_id = evidence.session_id
+     AND +member_occurrence.generation <= frozen.generation
+     AND +member.generation <= frozen.generation
+     AND +evidence.generation <= frozen.generation
+     AND frozen.state = 'active'
     CROSS JOIN session_occurrences AS first_occurrence
+      ON first_occurrence.session_id = evidence.session_id
+     AND +first_occurrence.generation <= frozen.generation
+     AND first_occurrence.occurrence_id = evidence.first_occurrence_id
     CROSS JOIN retrieval_anchors AS authority_anchor
-    WHERE authority_session.project_key = ?1
+      ON authority_anchor.anchor_id = evidence.retrieval_anchor_id
+    CROSS JOIN sessions AS authority_session
+      ON authority_session.session_id = evidence.session_id
+     AND authority_session.provider = first_occurrence.source_provider
+     AND authority_session.project_key = ?1
+    WHERE session_occurrences_fts MATCH ?4
       AND (?3 IS NULL OR authority_session.provider = ?3)
-      AND frozen.session_id = authority_session.session_id
-      AND frozen.state = 'active'
-      AND evidence.session_id = frozen.session_id
-      AND evidence.generation = frozen.generation
-      AND evidence.evidence_kind = ?2
-      AND first_occurrence.session_id = evidence.session_id
-      AND first_occurrence.generation = evidence.generation
-      AND first_occurrence.occurrence_id = evidence.first_occurrence_id
-      AND authority_anchor.anchor_id = evidence.retrieval_anchor_id
-      AND authority_session.provider = first_occurrence.source_provider
-      AND EXISTS (
-          SELECT 1
-          FROM session_derived_evidence_members AS member
-          JOIN session_occurrences AS member_occurrence
-            ON member_occurrence.session_id = member.session_id
-           AND member_occurrence.generation = member.generation
-           AND member_occurrence.occurrence_id = member.occurrence_id
-          JOIN session_occurrences_fts
-            ON session_occurrences_fts.rowid = member_occurrence.rowid
-          WHERE member.session_id = evidence.session_id
-            AND member.generation = evidence.generation
-            AND member.evidence_kind = evidence.evidence_kind
-            AND member.evidence_id = evidence.evidence_id
-            AND session_occurrences_fts MATCH ?4
-      )
       AND ",
     anchor_owner_authority_predicate!(),
     "
       ",
     derived_root_keyset!("?5", "?6", "?7"),
     "
+    GROUP BY evidence.session_id, frozen.generation,
+             evidence.evidence_kind, evidence.evidence_id
     ORDER BY first_occurrence.knowledge_at DESC, evidence.session_id, evidence.evidence_id
     LIMIT ?8"
 );

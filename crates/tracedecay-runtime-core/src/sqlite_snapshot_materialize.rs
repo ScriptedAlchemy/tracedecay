@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 
 use super::control::SnapshotReadControl;
@@ -25,33 +26,61 @@ const FOLD_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// the `-wal` sidecar. A `SQLite` backup would instead rewrite every page of
 /// the database into a second file, doubling both the bytes written and the
 /// peak scratch space for large families.
-#[hotpath::measure(label = "runtime_core.db.snapshot.materialize")]
-pub(super) async fn materialize(path: &Path, control: SnapshotReadControl) -> io::Result<()> {
+#[tracing::instrument(
+    name = "runtime_core.db.snapshot.materialize",
+    level = "trace",
+    skip_all
+)]
+pub async fn materialize(path: &Path, control: SnapshotReadControl) -> io::Result<()> {
+    let cx = crate::native_runtime::cx().ok_or_else(|| {
+        io::Error::other(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "snapshot materialization requires a native task context".into(),
+        })
+    })?;
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        control.checkpoint()?;
-        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .map_err(io::Error::other)?;
-        let mode = fold_wal_in_place(&connection, &control)?;
-        if !mode.eq_ignore_ascii_case("delete") {
-            return Err(io::Error::other(format!(
-                "SQLite left the snapshot copy '{}' in journal mode '{mode}'",
-                path.display()
-            )));
+    cx.spawn_blocking(move |_| materialize_on_thread(&path, &control))
+        .map_err(|error| {
+            io::Error::other(format!(
+                "snapshot materialization admission failed: {error}"
+            ))
+        })?
+        .join(&cx)
+        .await
+        .map_err(|error| {
+            io::Error::other(format!("snapshot materialization task failed: {error}"))
+        })?
+}
+
+pub(super) fn materialize_on_thread(path: &Path, control: &SnapshotReadControl) -> io::Result<()> {
+    control.checkpoint()?;
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
+    // The scratch copy is exclusive, but a busy handler would still hide a
+    // lock that should fail closed. Folding is an explicit journal-mode
+    // change, not a close-time checkpoint.
+    connection
+        .busy_timeout(Duration::ZERO)
+        .map_err(io::Error::other)?;
+    connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .map_err(io::Error::other)?;
+    let mode = fold_wal_in_place(&connection, control)?;
+    if !mode.eq_ignore_ascii_case("delete") {
+        return Err(io::Error::other(format!(
+            "SQLite left the snapshot copy '{}' in journal mode '{mode}'",
+            path.display()
+        )));
+    }
+    drop(connection);
+    control.checkpoint()?;
+    for suffix in ["-wal", "-shm"] {
+        match fs::remove_file(with_suffix(path, suffix)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        drop(connection);
-        control.checkpoint()?;
-        for suffix in ["-wal", "-shm"] {
-            match fs::remove_file(with_suffix(&path, suffix)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|error| io::Error::other(format!("snapshot materialization task failed: {error}")))?
+    }
+    Ok(())
 }
 
 fn fold_wal_in_place(connection: &Connection, control: &SnapshotReadControl) -> io::Result<String> {
@@ -61,10 +90,7 @@ fn fold_wal_in_place(connection: &Connection, control: &SnapshotReadControl) -> 
 
     let interrupt = connection.get_interrupt_handle();
     let watcher_control = control.clone();
-    let (completed, completion) = hotpath::channel!(
-        mpsc::channel(),
-        label = "runtime_core.db.snapshot.fold_cancel"
-    );
+    let (completed, completion) = mpsc::channel();
     let (fold, cancellation) = thread::scope(|scope| -> io::Result<_> {
         let watcher = thread::Builder::new()
             .name("tracedecay-sqlite-wal-fold-cancel".into())

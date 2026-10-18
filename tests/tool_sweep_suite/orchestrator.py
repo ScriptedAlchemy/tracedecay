@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +23,7 @@ SUITE_DIR = Path(__file__).resolve().parent
 if str(SUITE_DIR) not in sys.path:
     sys.path.insert(0, str(SUITE_DIR))
 
+from outcomes import utc_now
 from runner import READ_EFFECTS, SweepError, load_manifest, tool_policy
 
 
@@ -64,10 +65,6 @@ class WholeRunDeadline:
 
     def expired(self) -> bool:
         return self.remaining_s() == 0.0
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def catalog_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:
@@ -224,11 +221,18 @@ def run_bounded_command(
 def _phase_environment(root: Path, *, temp_root: Path | None = None) -> dict[str, str]:
     """Build one hermetic phase environment with a pre-created short temp root."""
     tmp_root = temp_root or root / "tmp"
+    rustup_home = os.environ.get("RUSTUP_HOME")
+    if rustup_home is None:
+        user_home = os.environ.get("HOME")
+        if user_home and (Path(user_home) / ".rustup").is_dir():
+            rustup_home = str(Path(user_home) / ".rustup")
     environment = {
         key: value
         for key, value in os.environ.items()
         if value and (key in INHERITED_ENVIRONMENT or key.startswith("LC_"))
     }
+    if rustup_home is not None:
+        environment["RUSTUP_HOME"] = rustup_home
     environment.update(
         {
             "HOME": str(root / "home"),
@@ -257,6 +261,20 @@ def _phase_environment(root: Path, *, temp_root: Path | None = None) -> dict[str
     return environment
 
 
+def _stage_codex_auth(temp_root: Path) -> Path | None:
+    """Give the real provider short-lived credentials without retaining them."""
+    source_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    source = source_home / "auth.json"
+    if not source.is_file():
+        return None
+    destination_home = temp_root / "codex"
+    destination_home.mkdir(mode=0o700, parents=True)
+    destination = destination_home / "auth.json"
+    shutil.copyfile(source, destination)
+    destination.chmod(0o600)
+    return destination_home
+
+
 def _phase_label(name: str, index: int) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-.")
     if not safe:
@@ -266,27 +284,52 @@ def _phase_label(name: str, index: int) -> str:
 
 def run_phase(
     *, repo: Path, binary: Path, out: Path, deadline: WholeRunDeadline, label: str,
-    phase: str, effect: str | None = None, catalog: Path | None = None,
+    phase: str, read: str | None = None, effect: str | None = None,
+    catalog: Path | None = None,
 ) -> PhaseResult:
     root = out / "phases" / label
     root.mkdir(parents=True, exist_ok=False)
-    command = [
+    launcher = [
         str(repo / "scripts/with-isolated-tracedecay-daemon.sh"), "--bin", str(binary),
-        "--ready-timeout", "60", "--stop-timeout", "10", "--lifecycle-label", f"MCP catalog sweep {label}",
-        "--", sys.executable, str(repo / "tests/tool_sweep_suite/runner.py"),
-        "--bin", str(binary), "--out", str(root), "--phase", phase,
+        "--ready-timeout", "60", "--stop-timeout", "10",
     ]
+    runner_base = [
+        sys.executable, str(repo / "tests/tool_sweep_suite/runner.py"),
+        "--bin", str(binary), "--out", str(root),
+    ]
+    runner = [*runner_base, "--phase", phase]
+    if read is not None:
+        runner.extend(["--read", read])
     if effect is not None:
-        command.extend(["--effect", effect])
+        runner.extend(["--effect", effect])
     if catalog is not None:
-        command.extend(["--catalog", str(catalog)])
+        runner.extend(["--catalog", str(catalog)])
     # The daemon wrapper appends another random directory and a Unix socket below
     # TMPDIR. Keep that root short even when the retained artifact path is deep.
     with tempfile.TemporaryDirectory(prefix="tds-") as raw_tmp:
-        environment = _phase_environment(root, temp_root=Path(raw_tmp))
+        temp_root = Path(raw_tmp)
+        environment = _phase_environment(root, temp_root=temp_root)
+        codex_home = _stage_codex_auth(temp_root)
+        if codex_home is not None:
+            environment["CODEX_HOME"] = str(codex_home)
+        profile = Path(raw_tmp) / "profile"
+        profile.mkdir()
+        environment["TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR"] = str(profile)
+        prepare = [
+            *launcher, "--lifecycle-label", f"MCP catalog sweep {label} setup",
+            "--", *runner_base, "--phase", "prepare",
+        ]
+        with (root / "prepare.stdout.log").open("wb") as stdout, (root / "prepare.stderr.log").open("wb") as stderr:
+            prepared = run_bounded_command(
+                prepare, cwd=repo, environment=environment, remaining_s=deadline.remaining_s(),
+                stdout=stdout, stderr=stderr,
+            )
+        if prepared.returncode != 0 or prepared.cancelled or prepared.launch_error:
+            return PhaseResult(label, root, prepared)
         with (root / "stdout.log").open("wb") as stdout, (root / "stderr.log").open("wb") as stderr:
             outcome = run_bounded_command(
-                command, cwd=repo, environment=environment, remaining_s=deadline.remaining_s(),
+                [*launcher, "--lifecycle-label", f"MCP catalog sweep {label}", "--", *runner],
+                cwd=repo, environment=environment, remaining_s=deadline.remaining_s(),
                 stdout=stdout, stderr=stderr,
             )
     return PhaseResult(label, root, outcome)
@@ -419,7 +462,7 @@ def run(args: argparse.Namespace) -> int:
     """Run discovery first, then isolated mutation journeys, always emitting final artifacts."""
     deadline = WholeRunDeadline(args.whole_run_deadline_ms)
     report: dict[str, Any] = {
-        "schema_version": 1, "phase": "aggregate", "started_at": _utc_now(), "entries": [],
+        "schema_version": 1, "phase": "aggregate", "started_at": utc_now(), "entries": [],
         "summary": {"discovered": 0, "completed": 0, "failed": 0, "cancelled": 0},
     }
     phases: list[PhaseResult] = []
@@ -458,8 +501,8 @@ def run(args: argparse.Namespace) -> int:
         report["fatal"] = str(error)
         report["fatal_problem_code"] = "tool_sweep.orchestration_failed"
     finally:
-        report["started_at"] = report.get("started_at", _utc_now())
-        report["finished_at"] = _utc_now()
+        report["started_at"] = report.get("started_at", utc_now())
+        report["finished_at"] = utc_now()
         report["phases"] = [phase.value() for phase in phases]
         write_final_report(args.out, report)
     return 0 if "fatal" not in report and report["summary"]["failed"] == 0 and report["summary"]["cancelled"] == 0 else 1

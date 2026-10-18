@@ -1,11 +1,13 @@
 pub mod candidates;
 pub mod context;
 pub mod cursor;
+pub mod execution;
 pub mod hydration;
-pub mod ports;
+pub mod paging;
 pub mod ranking;
 pub mod resolution;
 mod retriever;
+pub mod snapshot;
 
 pub use retriever::{hydrate_temporal_candidate_export, hydrate_temporal_candidate_selection};
 
@@ -15,8 +17,8 @@ use std::fmt;
 use thiserror::Error;
 use tracedecay_domain::{
     CompactContextConflictV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
-    ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, RetrieverCoverage,
-    SessionAuthorityClassV1, SessionSummaryRecordV1, TemporalAssertionKindV1,
+    ContextOmissionReasonV1, CursorBindingV1, HydrationStateV1, RetrievalAnchorId,
+    RetrieverCoverage, SessionAuthorityClassV1, SessionSummaryRecordV1, TemporalAssertionKindV1,
     TemporalCoverageCountsV1,
 };
 use zeroize::Zeroizing;
@@ -24,15 +26,19 @@ use zeroize::Zeroizing;
 use self::context::{
     CompactContext, ContextBudget, ContextError, TemporalContextFrames, VersionedTokenEstimator,
 };
-use self::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
-use self::hydration::{HydrationBatch, HydrationError, TemporalHydrationPort};
-use self::ports::{
-    CandidateReadState, PageLimits, PageStatus, SessionCursorAuthenticator,
-    TemporalExecutionSnapshot, TemporalPortError, TemporalReadPort, TemporalRecord,
-    TemporalRecordBatch, TemporalRecordReadState, TemporalRetrievalScope, pull_candidate_page,
-    pull_temporal_record_page,
+use self::cursor::{
+    CursorError, CursorPosition, SessionCursorAuthenticator, StableSortKey, encode_cursor_position,
+    verify_cursor_position,
 };
-use self::ranking::{DiversityLimits, RankedCandidate, RankingError, rank_candidates};
+use self::execution::{ExecutionLimits, TemporalPortError};
+use self::hydration::{HydrationBatch, HydrationError, TemporalHydrationPort};
+use self::paging::{
+    CandidateReadState, PageKey, PageLimits, PageStatus, TemporalReadPort, TemporalRecord,
+    TemporalRecordBatch, TemporalRecordReadState, pull_candidate_page, pull_temporal_record_page,
+};
+use self::ranking::{
+    DiversityLimits, RankedCandidate, RankingCandidate, RankingError, rank_candidates,
+};
 use self::resolution::resolver::resolve_temporal_controlled;
 use self::resolution::summary::{
     SummaryLineageEligibility, SummaryLineageRejection, SummaryOmission, SummarySourceState,
@@ -41,10 +47,13 @@ use self::resolution::summary::{
 use self::resolution::types::{
     ResolutionLineageEdge, ResolutionLineageEdgeKind, ResolvedOccurrence, TemporalResolution,
 };
+use self::snapshot::{TemporalExecutionSnapshot, TemporalRetrievalScope};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemporalKernelRequest {
     pub snapshot: TemporalExecutionSnapshot,
+    /// The operation and request parameters a continuation is minted for.
+    pub cursor_binding: CursorBindingV1,
     pub query: String,
     pub direct_anchor: Option<RetrievalAnchorId>,
     pub cursor: Option<String>,
@@ -133,7 +142,6 @@ impl TemporalHydratedResult {
         Self::unavailable(rank, stable_id.into(), anchor_id, state)
     }
 
-    #[hotpath::skip]
     pub const fn rank(&self) -> u32 {
         self.rank
     }
@@ -146,7 +154,6 @@ impl TemporalHydratedResult {
         &self.anchor_id
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> HydrationStateV1 {
         self.state
     }
@@ -241,11 +248,15 @@ pub struct TemporalCandidateExport {
     ranked: Vec<RankedCandidate>,
     next_cursor: Option<String>,
     coverage: RetrieverCoverage,
-    all_candidate_anchors: BTreeSet<RetrievalAnchorId>,
+    result_eligible_anchors: BTreeSet<RetrievalAnchorId>,
     visible_anchors: BTreeSet<RetrievalAnchorId>,
     resolution: TemporalResolution,
     summaries: Vec<SessionSummaryRecordV1>,
     summary_eligibility: SummaryLineageEligibility,
+    strict_population: Option<snapshot::TemporalCandidatePopulationCount>,
+    /// The candidate window this page was ranked in. A page that ends early
+    /// at its hydration byte budget continues inside the same window.
+    window_keyset: Option<String>,
 }
 
 impl TemporalCandidateExport {
@@ -261,7 +272,6 @@ impl TemporalCandidateExport {
         self.next_cursor.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn coverage(&self) -> RetrieverCoverage {
         self.coverage
     }
@@ -291,7 +301,7 @@ pub enum TemporalKernelError {
     Context(#[from] ContextError),
 }
 
-#[hotpath::measure(future = true, label = "temporal.kernel.execute")]
+#[tracing::instrument(name = "temporal.kernel.execute", level = "trace", skip_all)]
 pub async fn execute_temporal_kernel(
     request: &TemporalKernelRequest,
     read_port: &impl TemporalReadPort,
@@ -300,15 +310,92 @@ pub async fn execute_temporal_kernel(
     token_estimator: &impl VersionedTokenEstimator,
 ) -> Result<TemporalKernelResult, TemporalKernelError> {
     let export = execute_temporal_candidate_export(request, read_port, authenticator).await?;
-    hydrate_temporal_candidate_export(request, export, hydration_port, token_estimator).await
+    hydrate_temporal_candidate_export(
+        request,
+        export,
+        hydration_port,
+        token_estimator,
+        Some(authenticator),
+    )
+    .await
 }
 
 /// Execute the canonical Plan-23 candidate, temporal-resolution, fusion,
 /// dedupe, diversity, and pagination phases without reading payload bytes.
 ///
-/// Hotpath names are static crate stages. Candidate-page and record-page
+/// Span names are static crate stages. Candidate-page and record-page
 /// ports are left unmeasured so storage/query crates own those spans.
-#[hotpath::measure(future = true, label = "temporal.candidates.export")]
+#[tracing::instrument(name = "temporal.candidates.export", level = "trace", skip_all)]
+/// Read one bounded candidate cohort window, resuming past `resume`'s keyset.
+///
+/// The window is the unit a cursor can rank inside: scores are cohort-relative,
+/// so a ranked position is only meaningful against the same window. Filling the
+/// window while storage still holds rows is a continuation, the returned key
+/// is where the next window starts, not exhausted coverage.
+///
+/// An empty query is a scope browse, the authorized scope's records in
+/// temporal order, never a zero-clause (structurally empty) plan. Text queries
+/// rank through the lexical/phrase/entity channels instead.
+async fn read_candidate_window(
+    read_port: &impl TemporalReadPort,
+    snapshot: &TemporalExecutionSnapshot,
+    request: &TemporalKernelRequest,
+    limits: ExecutionLimits,
+    resume: &CursorPosition,
+) -> Result<(Vec<RankingCandidate>, Option<String>), TemporalKernelError> {
+    let plan = {
+        let _span = tracing::trace_span!("temporal_query.candidates.plan").entered();
+        {
+            plan_temporal_candidates(
+                &request.query,
+                request.direct_anchor.as_ref(),
+                snapshot.request().semantic_filter().goals,
+            )
+        }
+    };
+    let candidate_limits = PageLimits::new(
+        limits.candidate_limit,
+        limits.candidate_total_bytes,
+        limits.candidate_item_bytes,
+        limits.candidate_limit.min(64),
+    )
+    .map_err(map_port_error)?;
+    let mut state = CandidateReadState::resumed(
+        candidate_limits,
+        resume.candidate_keyset.clone().map(PageKey::new),
+    );
+    let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
+    let mut next_window_keyset = None;
+    {
+        use tracing::Instrument as _;
+        let generate_span = tracing::trace_span!("temporal_query.candidates.generate");
+        {
+            loop {
+                let page = pull_candidate_page(read_port, snapshot, &plan, &mut state)
+                    .instrument(generate_span.clone())
+                    .await
+                    .map_err(map_port_error)?;
+                let status = page.status();
+                candidates.extend(page.into_items());
+                if status == PageStatus::Complete {
+                    break;
+                }
+                if state.is_exhausted() {
+                    next_window_keyset = state.keyset().map(|keyset| keyset.as_str().to_owned());
+                    break;
+                }
+            }
+        }
+    };
+    if state.is_exhausted() && next_window_keyset.is_none() {
+        return Err(map_port_error(TemporalPortError::Read {
+            operation: "bound candidate cohort window",
+            message: "producer omitted the continuation key".to_string(),
+        }));
+    }
+    Ok((candidates, next_window_keyset))
+}
+
 pub async fn execute_temporal_candidate_export(
     request: &TemporalKernelRequest,
     read_port: &impl TemporalReadPort,
@@ -317,27 +404,11 @@ pub async fn execute_temporal_candidate_export(
     if request.limit == 0 {
         return Err(TemporalKernelError::InvalidLimit);
     }
-    let mut snapshot = request.snapshot.clone();
-    if let Err(error) = hotpath::measure_block!(
-        "temporal_query.participant_manifest.validate",
+    let snapshot = request.snapshot.clone();
+    if let Err(error) = {
+        let _span = tracing::trace_span!("temporal_query.participant_manifest.validate").entered();
         snapshot.participant_manifest().validate()
-    ) {
-        match &error {
-            TemporalPortError::ParticipantLimitExceeded { .. } => {
-                hotpath::gauge!("temporal_query.refusal.participant_manifest.participants_total")
-                    .inc(1_u64);
-            }
-            TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
-                hotpath::gauge!(
-                    "temporal_query.refusal.participant_manifest.canonical_bytes_total"
-                )
-                .inc(1_u64);
-            }
-            _ => {
-                hotpath::gauge!("temporal_query.refusal.participant_manifest.invalid_total")
-                    .inc(1_u64);
-            }
-        }
+    } {
         return Err(map_port_error(error));
     }
     check_control(&snapshot)?;
@@ -347,68 +418,27 @@ pub async fn execute_temporal_candidate_export(
     }
 
     check_control(&snapshot)?;
-    // Authenticate and route cursors before storage work. A cohort mismatch is
-    // the one binding that cannot be decided until ordinary (non-prepared)
-    // session reads have produced their bounded cohort.
-    let preflight_after = request
+    // Authenticate and route the cursor before any storage work: its keyset
+    // half selects the candidate window this execution reads, so the read
+    // cannot start until the position is known to be authentic and bound to
+    // this snapshot.
+    let resume = request
         .cursor
         .as_deref()
-        .map(
-            |cursor| match verify_cursor(cursor, &snapshot, authenticator) {
-                Ok(sort_key) => Ok(Some(sort_key)),
-                Err(CursorError::CandidateCohortMismatch) => Ok(None),
-                Err(error) => Err(error),
-            },
-        )
+        .map(|cursor| {
+            verify_cursor_position(cursor, &snapshot, &request.cursor_binding, authenticator)
+        })
         .transpose()?
-        .flatten();
-    // An empty query is a scope browse — the authorized scope's records in
-    // temporal order — never a zero-clause (structurally empty) plan. Text
-    // queries rank through the lexical/phrase/entity channels instead.
-    let candidates = if let Some(prepared) = snapshot.prepared_candidate_cohort() {
-        prepared.candidates().to_vec()
-    } else {
-        let plan = hotpath::measure_block!("temporal_query.candidates.plan", {
-            plan_temporal_candidates(
-                &request.query,
-                request.direct_anchor.as_ref(),
-                snapshot.request().semantic_filter().goals,
-            )
-        });
-        let candidate_page_items = limits.candidate_limit.min(64);
-        let candidate_limits = PageLimits::new(
-            limits.candidate_limit,
-            limits.candidate_total_bytes,
-            limits.candidate_item_bytes,
-            candidate_page_items,
-        )
-        .map_err(map_port_error)?;
-        let mut candidate_state = CandidateReadState::new(candidate_limits);
-        let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
-        hotpath::measure_block!("temporal_query.candidates.generate", {
-            loop {
-                let page = pull_candidate_page(read_port, &snapshot, &plan, &mut candidate_state)
-                    .await
-                    .map_err(map_port_error)?;
-                let status = page.status();
-                candidates.extend(page.into_items());
-                if status == PageStatus::Complete {
-                    break;
-                }
-            }
-        });
-        snapshot = snapshot
-            .with_observed_candidate_cohort(&candidates)
-            .map_err(map_port_error)?;
-        candidates
+        .unwrap_or_default();
+    let strict_population = snapshot
+        .prepared_candidate_cohort()
+        .and_then(snapshot::TemporalPreparedCandidateCohort::strict_population);
+    let (candidates, next_window_keyset) = match snapshot.prepared_candidate_cohort() {
+        Some(prepared) => (prepared.candidates().to_vec(), None),
+        None => read_candidate_window(read_port, &snapshot, request, limits, &resume).await?,
     };
-    hotpath::gauge!("temporal_query.candidates.generated").set(candidates.len());
 
-    let after = match (preflight_after, request.cursor.as_deref()) {
-        (Some(sort_key), _) => Some(sort_key),
-        (None, Some(cursor)) => Some(verify_cursor(cursor, &snapshot, authenticator)?),
-        (None, None) => None,
-    };
+    let after = resume.last_sort_key.clone();
     check_control(&snapshot)?;
 
     let record_page_items = limits.record_limit.min(64);
@@ -421,10 +451,20 @@ pub async fn execute_temporal_candidate_export(
     .map_err(map_port_error)?;
     let mut record_state = TemporalRecordReadState::new(record_limits);
     let mut records = TemporalRecordBatch::default();
+    // Candidate channels are ranking evidence; temporal records are stable-anchor
+    // state. Resolve each anchor once, then retain every channel contribution for
+    // rank fusion below.
+    let mut record_candidate_anchors = BTreeSet::new();
+    let record_candidates = candidates
+        .iter()
+        .filter(|candidate| record_candidate_anchors.insert(&candidate.anchor_id))
+        .cloned()
+        .collect::<Vec<_>>();
     loop {
-        let page = pull_temporal_record_page(read_port, &snapshot, &candidates, &mut record_state)
-            .await
-            .map_err(map_port_error)?;
+        let page =
+            pull_temporal_record_page(read_port, &snapshot, &record_candidates, &mut record_state)
+                .await
+                .map_err(map_port_error)?;
         let status = page.status();
         for record in page.into_items() {
             match record {
@@ -494,7 +534,12 @@ pub async fn execute_temporal_candidate_export(
         })
         .map(|candidate| candidate.anchor_id.clone())
         .collect::<BTreeSet<_>>();
-    let mut all_candidate_anchors = all_candidates
+    // Coverage answers "of what this query could have returned, how much did it".
+    // The population is therefore the anchors a candidate channel proposed as
+    // results: one per distinct anchor, group containers excluded. A group's
+    // non-matching members never entered that population, so counting them as
+    // hidden results would report omissions the query never had.
+    let result_eligible_anchors = all_candidates
         .iter()
         .filter(|candidate| {
             !matches!(
@@ -504,25 +549,12 @@ pub async fn execute_temporal_candidate_export(
         })
         .map(|candidate| candidate.anchor_id.clone())
         .collect::<BTreeSet<_>>();
-    all_candidate_anchors.extend(
-        resolved
-            .iter()
-            .filter(|item| {
-                item.occurrence
-                    .evidence
-                    .supporting_anchor_ids
-                    .iter()
-                    .any(|anchor| derived_candidate_anchors.contains(anchor))
-            })
-            .map(|item| item.occurrence.anchor_id.clone()),
-    );
     // A derived-evidence group anchor names a span/burst container, never a
     // retrievable payload: no hydration authority resolves a group, so ranking
     // one as a standalone row can only spend a result slot and a diversity
-    // slot, then report an unresolvable omission — evicting real messages from
-    // the page it was supposed to enrich. Groups keep their existing role of
-    // pulling every member occurrence into the record read (so a member that
-    // matches on its own is ranked); they never become results themselves.
+    // slot, then report an unresolvable omission, evicting real messages from
+    // the page it was supposed to enrich. Groups contribute their bounds to the
+    // record read and their evidence to rank fusion; they never become results.
     let visible_candidates = all_candidates
         .into_iter()
         .filter(|candidate| {
@@ -530,36 +562,44 @@ pub async fn execute_temporal_candidate_export(
                 && visible_anchors.contains(&candidate.anchor_id)
         })
         .collect::<Vec<_>>();
-    hotpath::gauge!("temporal_query.candidates.visible").set(visible_candidates.len());
     let eligible =
         u64::try_from(visible_candidates.len()).map_err(|_| TemporalKernelError::BudgetExceeded)?;
     let excluded = examined
         .checked_sub(eligible)
         .ok_or(TemporalKernelError::BudgetExceeded)?;
     let mut ranked = rank_candidates(&visible_candidates, request.diversity)?;
-    hotpath::gauge!("temporal_query.candidates.ranked").set(ranked.len());
     if let Some(after) = &after {
         ranked.retain(|candidate| is_after(candidate, after));
     }
-    hotpath::gauge!("temporal_query.candidates.after_cursor").set(ranked.len());
     let mut deduplicated_anchors = BTreeSet::new();
     ranked.retain(|candidate| deduplicated_anchors.insert(candidate.anchor_id.clone()));
-    hotpath::gauge!("temporal_query.candidates.deduped").set(ranked.len());
 
-    let has_more = ranked.len() > request.limit;
+    // Two independent reasons to continue: this window still ranks rows past
+    // the page, or the window itself was bounded and storage holds more. The
+    // first keeps the keyset and advances the ranked key; the second advances
+    // the keyset and restarts the ranked walk in the next window.
+    let window_has_more = ranked.len() > request.limit;
     let capped = u64::try_from(ranked.len().saturating_sub(request.limit))
         .map_err(|_| TemporalKernelError::BudgetExceeded)?;
     ranked.truncate(request.limit);
-    hotpath::gauge!("temporal_query.candidates.paged").set(ranked.len());
-    let next_cursor = if has_more {
-        ranked
-            .last()
-            .map(stable_sort_key)
-            .map(|sort_key| encode_cursor(&snapshot, &sort_key, authenticator))
-            .transpose()?
-    } else {
+    let next_position = if strict_population.is_some() {
         None
+    } else if window_has_more {
+        ranked.last().map(|candidate| CursorPosition {
+            candidate_keyset: resume.candidate_keyset.clone(),
+            last_sort_key: Some(stable_sort_key(candidate)),
+        })
+    } else {
+        next_window_keyset.map(|keyset| CursorPosition {
+            candidate_keyset: Some(keyset),
+            last_sort_key: None,
+        })
     };
+    let next_cursor = next_position
+        .map(|position| {
+            encode_cursor_position(&snapshot, &request.cursor_binding, &position, authenticator)
+        })
+        .transpose()?;
 
     Ok(TemporalCandidateExport {
         snapshot,
@@ -573,11 +613,13 @@ pub async fn execute_temporal_candidate_export(
             unknown: u64::try_from(resolved.iter().filter(|item| item.uncertain).count())
                 .map_err(|_| TemporalKernelError::BudgetExceeded)?,
         },
-        all_candidate_anchors,
+        result_eligible_anchors,
         visible_anchors,
         resolution: resolved,
         summaries: records.summaries,
         summary_eligibility,
+        strict_population,
+        window_keyset: resume.candidate_keyset,
     })
 }
 
@@ -586,7 +628,7 @@ fn evaluate_summaries_for_scope(
     source_states: &BTreeMap<RetrievalAnchorId, SummarySourceState>,
     scope: &TemporalRetrievalScope,
     mode: tracedecay_domain::TemporalModeV1,
-    control: &ports::ExecutionControl,
+    control: &execution::ExecutionControl,
 ) -> Result<SummaryLineageEligibility, TemporalPortError> {
     match scope {
         TemporalRetrievalScope::Session(session_id) => {
@@ -648,8 +690,11 @@ fn map_port_error(error: TemporalPortError) -> TemporalKernelError {
     match error {
         TemporalPortError::Cancelled => TemporalKernelError::Cancelled,
         TemporalPortError::DeadlineExceeded => TemporalKernelError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { .. } => TemporalKernelError::BudgetExceeded,
-        TemporalPortError::ParticipantLimitExceeded { .. }
+        // The port names the resource it exhausted. Collapsing it into the
+        // bare kernel budget error left every caller unable to tell a candidate
+        // read cap from a record read cap from a work-unit ceiling.
+        TemporalPortError::BudgetExceeded { .. }
+        | TemporalPortError::ParticipantLimitExceeded { .. }
         | TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
             TemporalKernelError::Port(error)
         }
@@ -702,7 +747,7 @@ fn is_after(candidate: &RankedCandidate, after: &StableSortKey) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn temporal_context_frames(
-    all_candidate_anchors: &BTreeSet<RetrievalAnchorId>,
+    result_eligible_anchors: &BTreeSet<RetrievalAnchorId>,
     visible_anchors: &BTreeSet<RetrievalAnchorId>,
     resolved: &[ResolvedOccurrence],
     lineage_edges: &[ResolutionLineageEdge],
@@ -733,7 +778,7 @@ fn temporal_context_frames(
         })
         .collect::<BTreeMap<_, _>>();
     let mut coverage = TemporalCoverageCountsV1::default();
-    for anchor_id in all_candidate_anchors {
+    for anchor_id in result_eligible_anchors {
         if let Some(state) = hydration_states.get(anchor_id) {
             increment_hydration_coverage(&mut coverage, *state);
         } else if let Some(class) = summary_states.get(anchor_id) {
@@ -774,7 +819,7 @@ fn temporal_context_frames(
     // Ranked summaries carry their own provenance: each summary anchor
     // supports-derives from its source anchors. Surfacing that as Supports
     // lineage keeps summary describes traceable without a stored assertion
-    // row per source. Only summaries actually returned contribute edges —
+    // row per source. Only summaries actually returned contribute edges,
     // merely-eligible summaries must not pollute unrelated results' lineage.
     for summary in summaries {
         if !ranked_anchors.contains(summary.summary_anchor_id())
@@ -837,7 +882,7 @@ fn increment_hydration_coverage(coverage: &mut TemporalCoverageCountsV1, state: 
         | HydrationStateV1::RetentionExpired => CoverageClass::Redacted,
         HydrationStateV1::RetainedButUnavailable
         | HydrationStateV1::Locked
-        | HydrationStateV1::UnverifiableLegacy => CoverageClass::Unknown,
+        | HydrationStateV1::Unverifiable => CoverageClass::Unknown,
         HydrationStateV1::Available => return,
     };
     increment_coverage(coverage, class);
@@ -852,7 +897,6 @@ enum SummaryRejectionClass {
 }
 
 impl SummaryRejectionClass {
-    #[hotpath::skip]
     const fn coverage(self) -> CoverageClass {
         match self {
             Self::Unauthorized | Self::SessionMismatch => CoverageClass::Hidden,
@@ -861,7 +905,6 @@ impl SummaryRejectionClass {
         }
     }
 
-    #[hotpath::skip]
     const fn hides_details(self) -> bool {
         match self {
             Self::Unauthorized | Self::SessionMismatch => true,
@@ -980,11 +1023,12 @@ mod scope_tests {
         SummarySourceHorizonV1, TemporalModeV1, TemporalValidityV1, UtcMicros,
     };
 
+    use super::execution::ExecutionControl;
     use super::hydration::HydrationBatch;
-    use super::ports::{ExecutionControl, TemporalRetrievalScope};
     use super::resolution::summary::{
         SummaryLineageEligibility, SummaryLineageRejection, SummaryOmission, SummarySourceState,
     };
+    use super::snapshot::TemporalRetrievalScope;
     use super::{evaluate_summaries_for_scope, public_summary_omissions, temporal_context_frames};
 
     fn anchor(value: &str) -> RetrievalAnchorId {
@@ -1286,7 +1330,7 @@ mod test_support {
     }
 
     pub fn block_on<F: Future>(future: F) -> F::Output {
-        let mut future = Box::pin(future);
+        let mut future = std::pin::pin!(future);
         let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
         let mut context = Context::from_waker(&waker);
         loop {

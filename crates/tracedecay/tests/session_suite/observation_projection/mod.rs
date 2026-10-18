@@ -1,30 +1,30 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
-    CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, ClaudeByteRangeV1,
-    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
-    ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1, DurableObservationV1,
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId,
-    ProviderId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
-    derive_exact_observation_anchor_id,
+    CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, ComponentVersion,
+    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_global_db::GlobalDbObservationStore;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
     AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V5, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor,
 };
-use tracedecay_usecases::observation::ObservationCancellation;
 
+use crate::claude_records;
 use crate::common::isolated_lcm_db_path;
 
 const GENERATION: u64 = 11;
@@ -35,11 +35,11 @@ async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
         .unwrap()
 }
 
-fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
+fn source(session_id: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
 }
 
-fn cursor(session_id: &str, byte_offset: u64) -> ClaudeSourceCursorV1 {
+fn cursor(session_id: &str, byte_offset: u64) -> ObservationSourceCursorV1 {
     cursor_in_generation(session_id, GENERATION, byte_offset)
 }
 
@@ -47,11 +47,12 @@ fn cursor_in_generation(
     session_id: &str,
     generation: u64,
     byte_offset: u64,
-) -> ClaudeSourceCursorV1 {
-    ClaudeSourceCursorV1::new(
+) -> ObservationSourceCursorV1 {
+    ObservationSourceCursorV1::for_ordering(
         source(session_id),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(generation).unwrap(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         byte_offset,
     )
     .unwrap()
@@ -71,14 +72,19 @@ fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
     .unwrap()
 }
 
+/// A Claude transcript record read at `start..end`, persisted as the canonical
+/// envelope the host builds from it. Identity stays positional (file bytes in
+/// one source generation) so re-observing the same record in a later
+/// generation is a distinct observation whose output the projector must
+/// reconcile, which is what these suites exercise.
 fn observation(
     session_id: &str,
     start: u64,
     end: u64,
     receipt_id: &str,
-    payload: Value,
-) -> DurableClaudeObservationV1 {
-    observation_in_generation(session_id, GENERATION, start, end, receipt_id, payload)
+    native: Value,
+) -> DurableObservationV1 {
+    observation_in_generation(session_id, GENERATION, start, end, receipt_id, native)
 }
 
 fn observation_in_generation(
@@ -87,14 +93,15 @@ fn observation_in_generation(
     start: u64,
     end: u64,
     receipt_id: &str,
-    payload: Value,
-) -> DurableClaudeObservationV1 {
-    DurableClaudeObservationV1::new(
-        ClaudeObservationIdentityMaterialV1::new(
+    native: Value,
+) -> DurableObservationV1 {
+    let payload = claude_records::canonical_envelope(&native, session_id, start, end);
+    DurableObservationV1::new(
+        ObservationIdentityMaterialV1::new(
             source(session_id),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(generation).unwrap(),
-            ClaudeByteRangeV1::new(start, end).unwrap(),
+            ObservationSourceGenerationV1::new(generation).unwrap(),
+            ObservationSourceRangeV1::new(start, end).unwrap(),
         )
         .unwrap(),
         receipt(receipt_id, &payload),
@@ -253,7 +260,7 @@ fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "projection-test")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         generation.clone(),
         UtcMicros(1),
@@ -264,8 +271,8 @@ fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
 }
 
 fn write(
-    observation: DurableClaudeObservationV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    observation: DurableObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
     let next_cursor = cursor_in_generation(
         observation.source().session_id().as_str(),
@@ -277,8 +284,8 @@ fn write(
 
 async fn persist(
     store: &GlobalDbObservationStore,
-    observation: DurableClaudeObservationV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    observation: DurableObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> u64 {
     match store
         .persist_observation(write(observation, expected_cursor))
@@ -309,18 +316,14 @@ async fn rebuild_projection_to_completion(
     panic!("projection rebuild did not complete within the bounded test budget");
 }
 
+/// One assistant transcript row. Claude projects a row under its `uuid`, so
+/// `message_id` is the projected message id; `message.id` is the API message
+/// id shared by every row of one response and does not name the output.
 fn conversational_payload(message_id: &str, text: &str) -> Value {
-    json!({
-        "type": "assistant",
-        "uuid": format!("record-{message_id}"),
-        "timestamp": "2025-06-15T15:06:40Z",
-        "message": {
-            "id": message_id,
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-            "model": "claude-sonnet-4"
-        }
-    })
+    let mut record = claude_records::assistant_record(text);
+    record["uuid"] = Value::from(message_id);
+    record["message"]["id"] = Value::from(format!("api-{message_id}"));
+    record
 }
 
 async fn table_count(tmp: &TempDir, table: &str) -> i64 {
@@ -381,17 +384,18 @@ async fn search_session_messages(
     let mut statement = conn
         .prepare(
             "SELECT message.message_id, message.role, message.timestamp, message.ordinal,
-                    message.text, message.kind, message.model, message.tool_names,
-                    message.source_path, message.source_offset
-             FROM session_messages_fts
-             JOIN session_messages AS message ON message.rowid = session_messages_fts.rowid
+                    COALESCE(message.content, message.placeholder_text, ''), message.kind,
+                    message.model, message.tool_names, message.source_path,
+                    message.source_offset
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages AS message ON message.store_id = lcm_raw_messages_fts.rowid
              JOIN sessions AS session
                ON session.provider = message.provider
               AND session.session_id = message.session_id
-             WHERE session_messages_fts MATCH ?1
+             WHERE lcm_raw_messages_fts MATCH ?1
                AND message.provider = 'claude'
                AND session.project_key = 'user'
-             ORDER BY bm25(session_messages_fts)
+             ORDER BY bm25(lcm_raw_messages_fts)
              LIMIT ?2",
         )
         .unwrap();
@@ -479,6 +483,92 @@ fn seed_v4_predecessor(tmp: &TempDir, observation_id: &CanonicalObservationIdV1)
         .unwrap();
 }
 
+fn seed_v5_predecessor_with_stale_split_output(
+    tmp: &TempDir,
+    observation_id: &CanonicalObservationIdV1,
+) {
+    const STALE_MESSAGE_ID: &str = "message-v5-stale-split";
+
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    raw_conn
+        .execute(
+            "UPDATE observation_projection_provenance
+             SET projector_version = ?1
+             WHERE projector_version = ?2 AND observation_id = ?3",
+            rusqlite::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+            ],
+        )
+        .unwrap();
+    if SESSION_MESSAGE_PROJECTOR_VERSION != SESSION_MESSAGE_PROJECTOR_VERSION_V5 {
+        raw_conn
+            .execute(
+                "INSERT OR REPLACE INTO observation_projection_checkpoints (
+                    projector_version, last_sequence
+                 )
+                 SELECT ?1, last_sequence
+                 FROM observation_projection_checkpoints
+                 WHERE projector_version = ?2",
+                rusqlite::params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                ],
+            )
+            .unwrap();
+        raw_conn
+            .execute(
+                "DELETE FROM observation_projection_checkpoints WHERE projector_version = ?1",
+                [SESSION_MESSAGE_PROJECTOR_VERSION],
+            )
+            .unwrap();
+    }
+    raw_conn
+        .execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, timestamp, content,
+                content_hash, storage_kind, payload_ref, placeholder_text, metadata_json,
+                kind, model, tool_names, source_path, source_offset
+             )
+             SELECT message.provider, ?1, message.session_id, message.role, message.ordinal + 1,
+                    message.timestamp, 'obsolete split projection output', ?1, 'inline', NULL,
+                    NULL, message.metadata_json, message.kind, message.model, message.tool_names,
+                    message.source_path, message.source_offset
+             FROM observation_projection_provenance AS provenance
+             JOIN lcm_raw_messages AS message
+               ON message.provider = provenance.output_provider
+              AND message.message_id = provenance.output_message_id
+             WHERE provenance.projector_version = ?2
+               AND provenance.observation_id = ?3
+               AND provenance.output_ordinal = 0",
+            rusqlite::params![
+                STALE_MESSAGE_ID,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+                observation_id.as_str(),
+            ],
+        )
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO observation_projection_provenance (
+                projector_version, observation_id, output_ordinal, retrieval_anchor_id,
+                receipt_id, output_provider, output_message_id, output_digest, message_created
+             )
+             SELECT projector_version, observation_id, 1, retrieval_anchor_id, receipt_id,
+                    output_provider, ?1, ?2, 1
+             FROM observation_projection_provenance
+             WHERE projector_version = ?3 AND observation_id = ?4 AND output_ordinal = 0",
+            rusqlite::params![
+                STALE_MESSAGE_ID,
+                format!("sha256:{}", "0".repeat(64)),
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+                observation_id.as_str(),
+            ],
+        )
+        .unwrap();
+}
+
 fn projection_owner_count(tmp: &TempDir, projector_version: &str) -> i64 {
     rusqlite::Connection::open(isolated_lcm_db_path(tmp))
         .unwrap()
@@ -518,7 +608,7 @@ async fn audited_projection_fixture(session_id: &str, message_id: &str) -> TempD
 async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64, i64) {
     (
         table_count(tmp, "sessions").await,
-        table_count(tmp, "session_messages").await,
+        table_count(tmp, "lcm_raw_messages").await,
         table_count(tmp, "observation_projection_provenance").await,
         table_count(tmp, "observation_projection_checkpoints").await,
         table_count(tmp, "observation_projection_dispositions").await,
@@ -560,15 +650,19 @@ async fn projected_message_texts(tmp: &TempDir) -> Vec<String> {
 }
 
 async fn projected_raw_store_ids(tmp: &TempDir) -> Vec<(String, i64)> {
+    projected_raw_store_ids_for_provider(tmp, "claude").await
+}
+
+async fn projected_raw_store_ids_for_provider(tmp: &TempDir, provider: &str) -> Vec<(String, i64)> {
     let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT message_id, store_id FROM lcm_raw_messages
-             WHERE provider = 'claude' ORDER BY message_id",
+             WHERE provider = ?1 ORDER BY message_id",
         )
         .unwrap();
     statement
-        .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([provider], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
@@ -580,7 +674,10 @@ async fn all_projected_message_texts(tmp: &TempDir) -> Vec<String> {
 
 async fn projected_message_texts_where(tmp: &TempDir, predicate: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
-    let sql = format!("SELECT text FROM session_messages {predicate} ORDER BY message_id");
+    let sql = format!(
+        "SELECT COALESCE(content, placeholder_text, '') FROM lcm_raw_messages {predicate}
+         ORDER BY message_id"
+    );
     let mut statement = conn.prepare(&sql).unwrap();
     statement
         .query_map((), |row| row.get(0))
@@ -617,3 +714,4 @@ mod failure_audit;
 mod message_ids;
 mod queue;
 mod rebuild;
+mod source_transition;

@@ -5,7 +5,7 @@ use thiserror::Error;
 use tracedecay_domain::{ProjectId, UserProfileId};
 
 use super::super::{DaemonInvocationService, InvocationProjectRuntimeIdentityV1};
-use tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1;
+use tracedecay_agent_hosts::agents::context_scout::address_registry::ProjectContextScoutAddressRegistryV1;
 use tracedecay_runtime_core::db::Database;
 
 #[derive(Debug, Error)]
@@ -28,9 +28,10 @@ impl DaemonContextScoutRuntimeRegistrar {
         }
     }
 
-    #[hotpath::measure(
-        label = "daemon.service.context_scout.open_and_register",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.service.context_scout.open_and_register",
+        level = "trace",
+        skip_all
     )]
     pub async fn open_and_register(
         &self,
@@ -54,7 +55,6 @@ impl DaemonContextScoutRuntimeRegistrar {
         Ok(registry)
     }
 
-    #[hotpath::skip]
     pub async fn get(
         &self,
         profile_id: &UserProfileId,

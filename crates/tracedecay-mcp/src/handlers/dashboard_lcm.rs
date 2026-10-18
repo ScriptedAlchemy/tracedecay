@@ -1,0 +1,1644 @@
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use futures_util::stream::{self, StreamExt};
+use tracedecay_contracts::{
+    CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestContext,
+};
+use tracedecay_domain::{
+    ActorId, DomainError, RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256,
+};
+use tracedecay_session_memory::session::{
+    SessionCursorRequest, SessionDataFreshness, SessionRetrievalScope, SessionTemporalQuery,
+};
+use tracedecay_temporal_query::context::{ContextBudget, MAX_CONTEXT_RECORDS};
+use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+use tracedecay_dashboard_api::{
+    DashboardHttpRequestControlV1, DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1,
+    DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1, DashboardLcmCanonicalSummaryV1,
+    DashboardLcmReadFutureV1, DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1,
+    DashboardLcmReadRequestV1, DashboardLcmReadStateV1,
+};
+use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
+use tracedecay_lcm::{LcmDescribeResponse, LcmDescribeTarget};
+use tracedecay_sessions::runtime::SessionSearchTimeRange;
+
+use tracedecay_session_memory::context::ResolvedSessionIdentity;
+use tracedecay_session_runtime::session_retrieval::{
+    LcmDescribeServiceCommand, LcmDescribeServiceOutcome, SessionApplicationRetrievalPortV1,
+    SessionRetrievalPageView, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
+    SessionRetrievalUnavailableReason, admitted_execution_limits,
+};
+
+const SUMMARY_DESCRIBE_CONCURRENCY: usize = 8;
+const DASHBOARD_AGGREGATE_PAGE_LIMIT: usize = 16;
+const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DashboardLcmRequestAdmissionErrorV1 {
+    DeadlineElapsed,
+    Unavailable(&'static str),
+}
+
+impl DashboardLcmRequestAdmissionErrorV1 {
+    const fn read_state_and_reason(self) -> (DashboardLcmReadStateV1, &'static str) {
+        match self {
+            Self::DeadlineElapsed => (
+                DashboardLcmReadStateV1::TimedOut,
+                "lcm_dashboard_request_deadline_elapsed",
+            ),
+            Self::Unavailable(reason) => (DashboardLcmReadStateV1::Unavailable, reason),
+        }
+    }
+}
+
+struct SummaryHydrationRequest {
+    provider: String,
+    session_id: SessionId,
+    node_id: String,
+    content: String,
+}
+
+pub struct DashboardLcmReadAdapter {
+    retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+    identity: ResolvedSessionIdentity,
+    project_id: String,
+}
+
+impl DashboardLcmReadAdapter {
+    pub fn new(
+        retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+        identity: ResolvedSessionIdentity,
+    ) -> Option<Self> {
+        let project_id = identity.project_id()?.as_str().to_owned();
+        Some(Self {
+            retrieval,
+            identity,
+            project_id,
+        })
+    }
+
+    #[tracing::instrument(name = "mcp.lcm.total", level = "trace", skip_all)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Dashboard LCM execute is one action match onto the session-memory authority."
+    )]
+    async fn execute(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        project_id: Option<&str>,
+        request: DashboardLcmReadRequestV1,
+    ) -> DashboardLcmReadOutcomeV1 {
+        if project_id != Some(self.project_id.as_str()) {
+            return not_ready(
+                DashboardLcmReadStateV1::Unavailable,
+                "lcm_selected_project_authority_unavailable",
+            );
+        }
+        if let DashboardLcmReadRequestV1::Overview { query, limit } = &request
+            && !query.trim().is_empty()
+        {
+            return self
+                .execute_overview_with_matches(control, project_id, query.clone(), *limit)
+                .await;
+        }
+        let (context, cancellation) = match self.request_context(&control) {
+            Ok(admission) => admission,
+            Err(error) => {
+                let (state, reason) = error.read_state_and_reason();
+                return not_ready(state, reason);
+            }
+        };
+        let aggregate = matches!(
+            request,
+            DashboardLcmReadRequestV1::Overview { .. } | DashboardLcmReadRequestV1::Timeline { .. }
+        );
+        let mut cursor = initial_cursor(&request);
+        let mut seen_cursors = BTreeSet::new();
+        let mut aggregate_results = Vec::new();
+        // Genuine record omissions accumulate separately from the folded
+        // `omitted` count, which also carries the freshness lag flag; the
+        // flag names projection distance, not records.
+        let mut aggregate_record_omitted = 0_u64;
+        // The freshness lag flag rides inside each page's `omitted` count
+        // but names the same projection gap the unpublished raw count
+        // measures exactly, so it is tracked apart from genuine record
+        // omissions.
+        let mut aggregate_lag_omitted = 0_u64;
+        let mut aggregate_pages = 0_usize;
+        // A non-aggregate session read serves one window: a Partial outcome
+        // (continuation cursor or genuine omission) keeps the page visibly
+        // partial. Aggregate reads drain to the terminal cursor, so only
+        // their accumulated omissions matter.
+        let mut window_partial = false;
+        // A session read's stats come from the canonical describe authority,
+        // addressed by the session's measured provider, taken from the
+        // hydrated page itself, never a wildcard the exact-identity describe
+        // reads would treat as a provider named "all".
+        let session_request_id = match &request {
+            DashboardLcmReadRequestV1::Session { session_id, .. } => {
+                match SessionId::new(session_id) {
+                    Ok(session_id) => Some(session_id),
+                    Err(_) => {
+                        return not_ready(
+                            DashboardLcmReadStateV1::Unavailable,
+                            "lcm_dashboard_request_invalid",
+                        );
+                    }
+                }
+            }
+            DashboardLcmReadRequestV1::Search { .. }
+            | DashboardLcmReadRequestV1::Overview { .. }
+            | DashboardLcmReadRequestV1::Timeline { .. } => None,
+        };
+        // Aggregate reads consume the daemon-issued continuation to its
+        // terminal page. The opaque cursor binds the frozen participant/source
+        // manifest and ordering, while each execute call reauthorizes and
+        // canonically hydrates that page.
+        let temporal = loop {
+            let Some(query) = retrieval_query(&request, cursor.clone()) else {
+                return not_ready(
+                    DashboardLcmReadStateV1::Unavailable,
+                    "lcm_dashboard_request_invalid",
+                );
+            };
+            let (page, record_omitted, paged_partial) = match tracing::Instrument::instrument(
+                self.retrieval
+                    .retrieve_admitted_with_cancellation(&context, &cancellation, query),
+                tracing::trace_span!("mcp.lcm.retrieve"),
+            )
+            .await
+            {
+                SessionRetrievalServiceOutcome::Complete { page, .. } => (page, 0, false),
+                SessionRetrievalServiceOutcome::CompleteZero { temporal, .. } => (
+                    SessionRetrievalPageView {
+                        results: Vec::new(),
+                        temporal,
+                    },
+                    0,
+                    false,
+                ),
+                SessionRetrievalServiceOutcome::Partial {
+                    page,
+                    freshness,
+                    record_omitted,
+                    ..
+                } => {
+                    aggregate_lag_omitted =
+                        aggregate_lag_omitted.saturating_add(session_freshness_lag(freshness));
+                    (page, record_omitted, true)
+                }
+                SessionRetrievalServiceOutcome::Stale { .. } => {
+                    return not_ready(
+                        DashboardLcmReadStateV1::Stale,
+                        "lcm_temporal_projection_stale",
+                    );
+                }
+                SessionRetrievalServiceOutcome::CursorStale => {
+                    return not_ready(DashboardLcmReadStateV1::Stale, "lcm_temporal_cursor_stale");
+                }
+                SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+                    return not_ready(DashboardLcmReadStateV1::CursorRefused, mismatch.code());
+                }
+                SessionRetrievalServiceOutcome::WrongScope => return wrong_scope_not_ready(),
+                SessionRetrievalServiceOutcome::Locked => {
+                    return not_ready(DashboardLcmReadStateV1::Locked, "lcm_temporal_read_locked");
+                }
+                SessionRetrievalServiceOutcome::Redacted => {
+                    return not_ready(
+                        DashboardLcmReadStateV1::Redacted,
+                        "lcm_temporal_read_redacted",
+                    );
+                }
+                SessionRetrievalServiceOutcome::Deleted => {
+                    return not_ready(DashboardLcmReadStateV1::Absent, "lcm_session_absent");
+                }
+                SessionRetrievalServiceOutcome::Denied => {
+                    return not_ready(DashboardLcmReadStateV1::Denied, "lcm_temporal_read_denied");
+                }
+                SessionRetrievalServiceOutcome::ResetRequired { .. } => {
+                    return not_ready(
+                        DashboardLcmReadStateV1::Unavailable,
+                        "lcm_temporal_reset_required",
+                    );
+                }
+                SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+                    // A session whose transcript never reached the temporal
+                    // projection has no generation for the page read, so the
+                    // temporal authority reports `TemporalStoreUnavailable`
+                    // with no worker state rather than an empty page. Only
+                    // that workerless miss reads the raw store for the
+                    // session's measured counts: every other reason — an
+                    // unconfigured service, a refused kernel read, a failed
+                    // store read, or a refresh worker that reports its own
+                    // state — keeps the typed unavailable instead of serving
+                    // counts past a genuine authority failure. A silent or
+                    // fully published raw store keeps the typed state too.
+                    if matches!(
+                        unavailable.reason,
+                        SessionRetrievalUnavailableReason::TemporalStoreUnavailable
+                    ) && unavailable.worker.is_none()
+                        && let Some(session_id) = &session_request_id
+                        && let Ok(stats) = self
+                            .retrieval
+                            .lcm_session_raw_stats_admitted(session_id.as_str())
+                            .await
+                        && let Some(stats) = stats.first()
+                        && stats.unpublished_message_count > 0
+                    {
+                        return unpublished_session_page(stats);
+                    }
+                    return not_ready(
+                        DashboardLcmReadStateV1::Unavailable,
+                        "lcm_temporal_authority_unavailable",
+                    );
+                }
+                SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { kind, .. } => {
+                    let (state, reason) = cursor_manifest_not_ready(kind);
+                    return not_ready(state, reason);
+                }
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage, .. } => {
+                    return not_ready(
+                        DashboardLcmReadStateV1::BudgetExhausted,
+                        session_budget_reason(stage),
+                    );
+                }
+                SessionRetrievalServiceOutcome::TimedOut => {
+                    return not_ready(
+                        DashboardLcmReadStateV1::TimedOut,
+                        "lcm_temporal_read_timed_out",
+                    );
+                }
+                SessionRetrievalServiceOutcome::Cancelled => {
+                    return not_ready(
+                        DashboardLcmReadStateV1::Cancelled,
+                        "lcm_temporal_read_cancelled",
+                    );
+                }
+            };
+            aggregate_pages = aggregate_pages.saturating_add(1);
+            aggregate_record_omitted = aggregate_record_omitted.saturating_add(record_omitted);
+            if !aggregate {
+                window_partial |= paged_partial;
+            }
+            let next_cursor = page.temporal.cursor.clone();
+            aggregate_results.extend(page.results);
+            let temporal = page.temporal;
+            if !aggregate || next_cursor.is_none() {
+                break temporal;
+            }
+            if aggregate_pages >= DASHBOARD_AGGREGATE_PAGE_LIMIT {
+                // The daemon cursor proves more frozen-manifest records exist,
+                // but this aggregate view is deliberately bounded. Preserve a
+                // truthful partial state instead of turning a read into
+                // unbounded background work.
+                aggregate_record_omitted = aggregate_record_omitted.saturating_add(1);
+                break temporal;
+            }
+            let Some(next_cursor) = next_cursor else {
+                break temporal;
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return not_ready(
+                    DashboardLcmReadStateV1::Unavailable,
+                    "lcm_temporal_cursor_did_not_advance",
+                );
+            }
+            cursor = Some(next_cursor);
+        };
+        let page = SessionRetrievalPageView {
+            results: aggregate_results,
+            temporal,
+        };
+        let record_omitted = aggregate_record_omitted;
+
+        // Summary-node hydration drops are genuinely distinct records and
+        // always add; the session describe's own omissions are tracked
+        // apart because they already contain the unpublished rows.
+        let mut summary_omitted = 0_u64;
+        let mut session_describe_omitted = 0_u64;
+        // The measured provider names the session's exact describe
+        // authority and is taken from the hydrated page itself, never a
+        // wildcard. A session whose raw rows are all unpublished serves no
+        // occurrence to take it from, and no anchor a describe can hydrate:
+        // the session-scoped raw-store stats answer both the provider and
+        // the describe counts in one read, and an empty answer is the
+        // absent-session evidence the typed state below reads.
+        let mut session_raw_stats = None;
+        let session_provider = match page
+            .results
+            .first()
+            .map(|result| result.message.provider.clone())
+        {
+            Some(provider) => Some(provider),
+            None => match &session_request_id {
+                Some(session_id) => match self
+                    .retrieval
+                    .lcm_session_raw_stats_admitted(session_id.as_str())
+                    .await
+                {
+                    Ok(stats) => {
+                        let provider = stats.first().map(|stats| stats.provider.clone());
+                        session_raw_stats = provider.is_some().then_some(stats);
+                        provider
+                    }
+                    Err(_) => {
+                        return not_ready(
+                            DashboardLcmReadStateV1::Unavailable,
+                            "lcm_session_description_unavailable",
+                        );
+                    }
+                },
+                None => None,
+            },
+        };
+
+        let mut messages = Vec::new();
+        let mut summary_requests = Vec::new();
+        for result in page.results {
+            if result.message.role == "summary" {
+                let session_id = match SessionId::new(&result.message.session_id) {
+                    Ok(session_id) => session_id,
+                    Err(_) => {
+                        return not_ready(
+                            DashboardLcmReadStateV1::Unavailable,
+                            "lcm_summary_metadata_unavailable",
+                        );
+                    }
+                };
+                summary_requests.push(SummaryHydrationRequest {
+                    provider: result.message.provider,
+                    session_id,
+                    node_id: result.message.message_id,
+                    content: result.message.text,
+                });
+            } else {
+                messages.push(DashboardLcmCanonicalMessageV1 {
+                    session_id: result.message.session_id,
+                    provider: result.message.provider,
+                    role: result.message.role,
+                    timestamp: result.message.timestamp,
+                    ordinal: result.message.ordinal,
+                    content: result.message.text,
+                    message_id: result.message.message_id,
+                    metadata_json: result.message.metadata_json,
+                    tool_names: result.message.tool_names,
+                });
+            }
+        }
+        let hydrated_summaries = stream::iter(summary_requests)
+            .map(|request| self.hydrate_summary(&context, &cancellation, request))
+            .buffered(SUMMARY_DESCRIBE_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut summary_nodes = Vec::with_capacity(hydrated_summaries.len());
+        for result in hydrated_summaries {
+            match result {
+                Ok((summary, summary_dropped)) => {
+                    summary_omitted = summary_omitted.saturating_add(summary_dropped);
+                    summary_nodes.push(summary);
+                }
+                Err((state, _)) => {
+                    return not_ready(state, "lcm_summary_metadata_unavailable");
+                }
+            }
+        }
+
+        let stats = if let Some(session_id) = session_request_id {
+            match (session_provider, session_raw_stats) {
+                // The page served no record, so describe has no temporal
+                // anchor to hydrate from: the raw-store stats carry the
+                // session's transcript counts instead.
+                (Some(_), Some(raw_stats)) => {
+                    let session_stats = raw_stats.first().map_or_default(|stats| {
+                        (
+                            stats.raw_message_count,
+                            stats.unpublished_message_count,
+                            stats.summary_node_count,
+                        )
+                    });
+                    DashboardLcmCanonicalStatsV1 {
+                        message_count: session_stats.0,
+                        unpublished_message_count: session_stats.1,
+                        summary_node_count: session_stats.2,
+                        summary_token_count: None,
+                        source_token_count: None,
+                        token_estimate_total: None,
+                    }
+                }
+                (Some(provider), None) => {
+                    let (description, session_description_omitted) = match self
+                        .describe(
+                            &context,
+                            &cancellation,
+                            &provider,
+                            session_id,
+                            LcmDescribeTarget::Session,
+                            RetrievalGrainV1::Session,
+                        )
+                        .await
+                    {
+                        Ok(described) => described,
+                        Err((state, reason)) => return not_ready(state, reason),
+                    };
+                    session_describe_omitted = session_description_omitted;
+                    DashboardLcmCanonicalStatsV1 {
+                        message_count: description.raw_message_count,
+                        unpublished_message_count: description.unpublished_message_count,
+                        summary_node_count: description.summary_node_count,
+                        summary_token_count: None,
+                        source_token_count: None,
+                        token_estimate_total: description.session_token_estimate,
+                    }
+                }
+                // No temporal record surfaced for the session, so there is no
+                // measured provider to describe under: the zero stats feed the
+                // typed session-absent state below.
+                (None, _) => DashboardLcmCanonicalStatsV1::default(),
+            }
+        } else {
+            DashboardLcmCanonicalStatsV1::default()
+        };
+
+        if messages.is_empty()
+            && summary_nodes.is_empty()
+            && stats.message_count == 0
+            && stats.summary_node_count == 0
+        {
+            // Only a session read has a subject that can be absent. An
+            // aggregate read over a readable store with zero temporal
+            // results is a measured zero, served as a complete empty page,
+            // never collapsed into the Absent state.
+            if let DashboardLcmReadRequestV1::Session { .. } = request {
+                return not_ready(DashboardLcmReadStateV1::Absent, "lcm_session_absent");
+            }
+        }
+
+        let next_cursor = page.temporal.cursor;
+        let canonical_page = {
+            let _span = tracing::trace_span!("mcp.lcm.assemble").entered();
+            {
+                DashboardLcmCanonicalPageV1 {
+                    messages,
+                    summary_nodes,
+                    overview_matches: None,
+                    stats,
+                    has_more: next_cursor.is_some(),
+                    next_cursor,
+                }
+            }
+        };
+        // `record_omitted` is the retrieval authority's genuine missing-
+        // record count with the freshness lag flag already kept out. On the
+        // terminal page the flag, the session describe's hydration drops,
+        // and the unpublished raw count all measure the same projection
+        // gap: an unpublished row always fails describe hydration (it has
+        // no published occurrence anchor), so describe omissions already
+        // contain the unpublished rows. Only the largest of the three
+        // stands; the page's record omissions and dropped summary nodes
+        // count different missing records and always add. A windowed page
+        // instead keeps the flag on top: its partiality is pagination, not
+        // proof of missing records, and there is no terminal count to
+        // deduplicate against.
+        let total_omitted = if canonical_page.has_more {
+            record_omitted
+                .saturating_add(summary_omitted)
+                .saturating_add(session_describe_omitted)
+                .saturating_add(aggregate_lag_omitted)
+        } else {
+            record_omitted
+                .saturating_add(summary_omitted)
+                .saturating_add(
+                    aggregate_lag_omitted.max(session_describe_omitted).max(
+                        canonical_page
+                            .stats
+                            .unpublished_message_count
+                            .unsigned_abs(),
+                    ),
+                )
+        };
+        // A windowed page with a continuation cursor stays visibly partial
+        // even when nothing was genuinely omitted (omitted stays 0): the
+        // partiality is a state carried from the retrieval outcome, never
+        // re-derived from the count.
+        if total_omitted > 0 || window_partial {
+            DashboardLcmReadOutcomeV1::Partial {
+                page: canonical_page,
+                omitted: total_omitted,
+            }
+        } else {
+            DashboardLcmReadOutcomeV1::Ready(canonical_page)
+        }
+    }
+
+    #[tracing::instrument(name = "mcp.lcm.overview", level = "trace", skip_all)]
+    async fn execute_overview_with_matches(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        project_id: Option<&str>,
+        query: String,
+        limit: i64,
+    ) -> DashboardLcmReadOutcomeV1 {
+        let base = Box::pin(self.execute(
+            control.clone(),
+            project_id,
+            DashboardLcmReadRequestV1::Overview {
+                query: String::new(),
+                limit,
+            },
+        ))
+        .await;
+        let (mut page, base_omitted) = match base {
+            DashboardLcmReadOutcomeV1::Ready(page) => (page, 0),
+            DashboardLcmReadOutcomeV1::Partial { page, omitted } => (page, omitted),
+            not_ready @ DashboardLcmReadOutcomeV1::NotReady { .. } => return not_ready,
+        };
+        let matches = Box::pin(self.execute(
+            control,
+            project_id,
+            DashboardLcmReadRequestV1::Search {
+                query,
+                limit,
+                cursor: None,
+                role: None,
+                source: None,
+                session_id: None,
+                since: None,
+                until: None,
+            },
+        ))
+        .await;
+        let (matches, match_omitted) = match matches {
+            DashboardLcmReadOutcomeV1::Ready(matches) => (matches, 0),
+            DashboardLcmReadOutcomeV1::Partial {
+                page: matches,
+                omitted,
+            } => (matches, omitted),
+            DashboardLcmReadOutcomeV1::NotReady {
+                state: DashboardLcmReadStateV1::Absent,
+                ..
+            } => (
+                DashboardLcmCanonicalPageV1 {
+                    messages: Vec::new(),
+                    summary_nodes: Vec::new(),
+                    overview_matches: None,
+                    stats: DashboardLcmCanonicalStatsV1::default(),
+                    has_more: false,
+                    next_cursor: None,
+                },
+                0,
+            ),
+            not_ready @ DashboardLcmReadOutcomeV1::NotReady { .. } => return not_ready,
+        };
+        page.overview_matches = Some(DashboardLcmCanonicalMatchesV1 {
+            messages: matches.messages,
+            summary_nodes: matches.summary_nodes,
+        });
+        let omitted = base_omitted.saturating_add(match_omitted);
+        if omitted > 0 {
+            DashboardLcmReadOutcomeV1::Partial { page, omitted }
+        } else {
+            DashboardLcmReadOutcomeV1::Ready(page)
+        }
+    }
+
+    #[tracing::instrument(name = "mcp.lcm.hydrate", level = "trace", skip_all)]
+    async fn hydrate_summary(
+        &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
+        request: SummaryHydrationRequest,
+    ) -> Result<(DashboardLcmCanonicalSummaryV1, u64), (DashboardLcmReadStateV1, &'static str)>
+    {
+        let (description, describe_omitted) = self
+            .describe(
+                context,
+                cancellation,
+                &request.provider,
+                request.session_id,
+                LcmDescribeTarget::SummaryNode {
+                    node_id: request.node_id,
+                },
+                RetrievalGrainV1::Summary,
+            )
+            .await?;
+        let Some(summary) = description.summary_node else {
+            return Err((
+                DashboardLcmReadStateV1::Unavailable,
+                "lcm_summary_metadata_unavailable",
+            ));
+        };
+        let Some(expand_hint) = summary.expand_hint else {
+            return Err((
+                DashboardLcmReadStateV1::Unavailable,
+                "lcm_summary_metadata_unavailable",
+            ));
+        };
+        Ok((
+            DashboardLcmCanonicalSummaryV1 {
+                node_id: summary.node_id,
+                session_id: summary.conversation_id,
+                depth: summary.depth,
+                token_count: Some(summary.summary_token_count),
+                source_token_count: Some(summary.source_token_count),
+                latest_at: summary.source_time_end,
+                created_at: summary.created_at,
+                expand_hint,
+                summary: request.content,
+            },
+            describe_omitted,
+        ))
+    }
+
+    async fn describe(
+        &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
+        provider: &str,
+        session_id: SessionId,
+        target: LcmDescribeTarget,
+        grain: RetrievalGrainV1,
+    ) -> Result<(LcmDescribeResponse, u64), (DashboardLcmReadStateV1, &'static str)> {
+        match tracing::Instrument::instrument(
+            self.retrieval.describe_lcm_admitted(
+                context,
+                cancellation,
+                LcmDescribeServiceCommand::new(
+                    provider,
+                    session_id,
+                    target,
+                    grain,
+                    SessionRetrievalStoreScope::Project,
+                ),
+            ),
+            tracing::trace_span!("mcp.lcm.describe"),
+        )
+        .await
+        {
+            LcmDescribeServiceOutcome::Complete { description, .. } => Ok((description, 0)),
+            LcmDescribeServiceOutcome::Partial {
+                description: Some(description),
+                retrieval,
+                ..
+            } => Ok((description, lcm_describe_record_omitted(retrieval))),
+            LcmDescribeServiceOutcome::Stale { .. } => Err((
+                DashboardLcmReadStateV1::Stale,
+                "lcm_temporal_projection_stale",
+            )),
+            LcmDescribeServiceOutcome::CursorStale => {
+                Err((DashboardLcmReadStateV1::Stale, "lcm_temporal_cursor_stale"))
+            }
+            LcmDescribeServiceOutcome::CursorRefused(mismatch) => {
+                Err((DashboardLcmReadStateV1::CursorRefused, mismatch.code()))
+            }
+            LcmDescribeServiceOutcome::WrongScope => Err(wrong_scope_error()),
+            LcmDescribeServiceOutcome::Locked => {
+                Err((DashboardLcmReadStateV1::Locked, "lcm_temporal_read_locked"))
+            }
+            LcmDescribeServiceOutcome::Redacted => Err((
+                DashboardLcmReadStateV1::Redacted,
+                "lcm_temporal_read_redacted",
+            )),
+            LcmDescribeServiceOutcome::Deleted => {
+                Err((DashboardLcmReadStateV1::Absent, "lcm_session_absent"))
+            }
+            LcmDescribeServiceOutcome::Denied => {
+                Err((DashboardLcmReadStateV1::Denied, "lcm_temporal_read_denied"))
+            }
+            LcmDescribeServiceOutcome::ResetRequired { .. } => Err((
+                DashboardLcmReadStateV1::Unavailable,
+                "lcm_temporal_reset_required",
+            )),
+            LcmDescribeServiceOutcome::Partial {
+                description: None, ..
+            }
+            | LcmDescribeServiceOutcome::Unavailable(_) => Err((
+                DashboardLcmReadStateV1::Unavailable,
+                "lcm_session_description_unavailable",
+            )),
+            LcmDescribeServiceOutcome::CursorManifestLimitExceeded { kind, .. } => {
+                Err(cursor_manifest_not_ready(kind))
+            }
+            LcmDescribeServiceOutcome::BudgetExhausted { stage, .. } => Err((
+                DashboardLcmReadStateV1::BudgetExhausted,
+                session_budget_reason(stage),
+            )),
+            LcmDescribeServiceOutcome::TimedOut => Err((
+                DashboardLcmReadStateV1::TimedOut,
+                "lcm_temporal_read_timed_out",
+            )),
+            LcmDescribeServiceOutcome::Cancelled => Err((
+                DashboardLcmReadStateV1::Cancelled,
+                "lcm_temporal_read_cancelled",
+            )),
+        }
+    }
+
+    fn request_context(
+        &self,
+        control: &DashboardHttpRequestControlV1,
+    ) -> Result<(RequestContext, CancellationSignal), DashboardLcmRequestAdmissionErrorV1> {
+        if control.deadline().is_elapsed_at(control.observed_at()) {
+            return Err(DashboardLcmRequestAdmissionErrorV1::DeadlineElapsed);
+        }
+        let scope = self.identity.session_request_scope().map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_scope_unavailable")
+        })?;
+        let actor = ActorId::new("dashboard.session-retrieval").map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+        })?;
+        let cancellation = control.cancellation().clone();
+        // The grant digest names the authority, never the HTTP request: it
+        // feeds every continuation's request binding, so a per-request id,
+        // deadline, or cancellation token here refused every next page.
+        let digest = canonical_sha256(&(
+            "tracedecay.dashboard.session-retrieval.grant.v2",
+            self.identity.profile_id().as_str(),
+            self.identity
+                .project_id()
+                .map(tracedecay_domain::ProjectId::as_str),
+            self.identity.store_id().as_str(),
+            self.identity.root_id().as_str(),
+        ))
+        .map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+        })?;
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.dashboard.session-retrieval").map_err(|_| {
+                DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+            })?,
+            1,
+            digest,
+            actor.clone(),
+            control.observed_at(),
+            control.deadline().expires_at,
+            scope.clone(),
+            BTreeSet::from([
+                CapabilityId::new("capability.session.temporal-retrieval").map_err(|_| {
+                    DashboardLcmRequestAdmissionErrorV1::Unavailable(
+                        "lcm_dashboard_admission_invalid",
+                    )
+                })?,
+            ]),
+            BTreeSet::from([UseCaseId::new("use-case.dashboard.lcm-read").map_err(|_| {
+                DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+            })?]),
+            DisclosureClass::Evidence,
+        )
+        .map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+        })?;
+        let context = RequestContext::new(
+            actor,
+            scope,
+            grant,
+            control.request_id(),
+            control.deadline(),
+            cancellation.context(),
+        )
+        .map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+        })?;
+        Ok((context, cancellation))
+    }
+}
+
+fn cursor_manifest_not_ready(
+    kind: tracedecay_domain::CursorManifestLimitKindV1,
+) -> (DashboardLcmReadStateV1, &'static str) {
+    let reason = match kind {
+        tracedecay_domain::CursorManifestLimitKindV1::Participants => {
+            "lcm_temporal_cursor_manifest_participants_limit_exceeded"
+        }
+        tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes => {
+            "lcm_temporal_cursor_manifest_canonical_bytes_limit_exceeded"
+        }
+    };
+    (DashboardLcmReadStateV1::CursorManifestLimitExceeded, reason)
+}
+
+const fn session_budget_reason(
+    stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1,
+) -> &'static str {
+    use tracedecay_session_memory::session::SessionRetrievalBudgetStageV1;
+
+    match stage {
+        SessionRetrievalBudgetStageV1::RequestResultLimit => {
+            "lcm_temporal_budget_request_result_limit"
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationLimit => {
+            "lcm_temporal_budget_request_hydration_limit"
+        }
+        SessionRetrievalBudgetStageV1::RequestContextBytes => {
+            "lcm_temporal_budget_request_context_bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestCandidateBytes => {
+            "lcm_temporal_budget_request_candidate_bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestRecordBytes => {
+            "lcm_temporal_budget_request_record_bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationBytes => {
+            "lcm_temporal_budget_request_hydration_bytes"
+        }
+        SessionRetrievalBudgetStageV1::EstimatorVersionMismatch => {
+            "lcm_temporal_budget_estimator_version_mismatch"
+        }
+        SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
+            "lcm_temporal_budget_execution_work_exhausted"
+        }
+        SessionRetrievalBudgetStageV1::CandidateReadExhausted => {
+            "lcm_temporal_budget_candidate_read_exhausted"
+        }
+        SessionRetrievalBudgetStageV1::RecordReadExhausted => {
+            "lcm_temporal_budget_record_read_exhausted"
+        }
+        SessionRetrievalBudgetStageV1::KernelResultLimit => {
+            "lcm_temporal_budget_kernel_result_limit"
+        }
+        SessionRetrievalBudgetStageV1::CursorManifestLimit => {
+            "lcm_temporal_budget_cursor_manifest_limit"
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
+            "lcm_temporal_budget_participant_manifest_participants"
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes => {
+            "lcm_temporal_budget_participant_manifest_canonical_bytes"
+        }
+        SessionRetrievalBudgetStageV1::HydrationBytes => "lcm_temporal_budget_hydration_bytes",
+        SessionRetrievalBudgetStageV1::ContextBytes => "lcm_temporal_budget_context_bytes",
+        SessionRetrievalBudgetStageV1::ContextTokens => "lcm_temporal_budget_context_tokens",
+    }
+}
+
+/// The freshness lag flag a retrieval outcome's `omitted` count embeds.
+/// The flag names the same projection gap `unpublished_message_count`
+/// measures exactly, so it is separated from genuine record omissions
+/// before the two counts are combined.
+fn session_freshness_lag(freshness: SessionDataFreshness) -> u64 {
+    match freshness {
+        SessionDataFreshness::Partial { generation_lag } => generation_lag.max(1),
+        SessionDataFreshness::Fresh | SessionDataFreshness::Stored { .. } => 0,
+    }
+}
+
+/// A describe outcome's genuine record omissions: its compressed count
+/// minus the freshness lag flag, which measures the same projection gap as
+/// the unpublished raw count.
+fn lcm_describe_record_omitted(retrieval: LcmRetrievalOutcome) -> u64 {
+    let lag = match retrieval.freshness() {
+        LcmDataFreshness::Partial { generation_lag } => generation_lag.max(1),
+        LcmDataFreshness::Fresh | LcmDataFreshness::Stored { .. } => 0,
+    };
+    retrieval.omitted().saturating_sub(lag)
+}
+
+/// A session the temporal projection has not published at all: no generation
+/// exists for the page read, so the raw store's session-scoped stats build
+/// the page directly. Its counts are the transcript's own authority, and the
+/// unpublished rows are the whole omission — the page stays visibly partial.
+fn unpublished_session_page(
+    stats: &tracedecay_lcm::types::LcmSessionRawStats,
+) -> DashboardLcmReadOutcomeV1 {
+    DashboardLcmReadOutcomeV1::Partial {
+        page: DashboardLcmCanonicalPageV1 {
+            messages: Vec::new(),
+            summary_nodes: Vec::new(),
+            overview_matches: None,
+            stats: DashboardLcmCanonicalStatsV1 {
+                message_count: stats.raw_message_count,
+                unpublished_message_count: stats.unpublished_message_count,
+                summary_node_count: stats.summary_node_count,
+                summary_token_count: None,
+                source_token_count: None,
+                token_estimate_total: None,
+            },
+            has_more: false,
+            next_cursor: None,
+        },
+        omitted: stats.unpublished_message_count.unsigned_abs(),
+    }
+}
+
+impl DashboardLcmReadPortV1 for DashboardLcmReadAdapter {
+    fn read(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        project_id: Option<&str>,
+        request: DashboardLcmReadRequestV1,
+    ) -> DashboardLcmReadFutureV1<'_> {
+        let project_id = project_id.map(str::to_owned);
+        Box::pin(async move { self.execute(control, project_id.as_deref(), request).await })
+    }
+}
+
+fn not_ready(state: DashboardLcmReadStateV1, reason: &str) -> DashboardLcmReadOutcomeV1 {
+    DashboardLcmReadOutcomeV1::NotReady {
+        state,
+        reason: reason.to_owned(),
+    }
+}
+
+fn wrong_scope_not_ready() -> DashboardLcmReadOutcomeV1 {
+    let (state, reason) = wrong_scope_error();
+    not_ready(state, reason)
+}
+
+fn wrong_scope_error() -> (DashboardLcmReadStateV1, &'static str) {
+    (
+        DashboardLcmReadStateV1::Unavailable,
+        "lcm_temporal_wrong_scope",
+    )
+}
+
+fn initial_cursor(request: &DashboardLcmReadRequestV1) -> Option<String> {
+    match request {
+        DashboardLcmReadRequestV1::Search { cursor, .. }
+        | DashboardLcmReadRequestV1::Session { cursor, .. } => cursor.clone(),
+        DashboardLcmReadRequestV1::Overview { .. } | DashboardLcmReadRequestV1::Timeline { .. } => {
+            None
+        }
+    }
+}
+
+/// The route and query parameters a dashboard LCM continuation is minted for.
+fn dashboard_cursor_request(
+    request: &DashboardLcmReadRequestV1,
+) -> Result<SessionCursorRequest, DomainError> {
+    match request {
+        DashboardLcmReadRequestV1::Overview { query, limit } => {
+            SessionCursorRequest::new("dashboard_lcm_overview")
+                .parameter("q", query)?
+                .parameter("limit", limit)
+        }
+        DashboardLcmReadRequestV1::Search {
+            query,
+            limit,
+            cursor: _,
+            role,
+            source,
+            session_id,
+            since,
+            until,
+        } => SessionCursorRequest::new("dashboard_lcm_search")
+            .parameter("q", query)?
+            .parameter("limit", limit)?
+            .parameter("role", role)?
+            .parameter("source", source)?
+            .parameter("session_id", session_id)?
+            .parameter("since", since)?
+            .parameter("until", until),
+        DashboardLcmReadRequestV1::Session {
+            session_id,
+            limit,
+            cursor: _,
+        } => SessionCursorRequest::new("dashboard_lcm_session")
+            .parameter("session_id", session_id)?
+            .parameter("limit", limit),
+        DashboardLcmReadRequestV1::Timeline { session_id, .. } => {
+            SessionCursorRequest::new("dashboard_lcm_timeline").parameter("session_id", session_id)
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "LCM retrieval query is one hydrate-and-page of the selected session store."
+)]
+fn retrieval_query(
+    request: &DashboardLcmReadRequestV1,
+    cursor: Option<String>,
+) -> Option<SessionTemporalQuery> {
+    let (session_id, cursor, query_text, limit, retrieval_scope, roles, source, time_range) =
+        match request {
+            DashboardLcmReadRequestV1::Overview { query, .. } => (
+                SessionId::new("session.dashboard-lcm.root").ok()?,
+                cursor,
+                query.as_str(),
+                500,
+                SessionRetrievalScope::AllSessionsInAuthorizedRoot,
+                Vec::new(),
+                None,
+                SessionSearchTimeRange::default(),
+            ),
+            DashboardLcmReadRequestV1::Search {
+                query,
+                limit,
+                cursor: _,
+                role,
+                source,
+                session_id,
+                since,
+                until,
+            } => {
+                let root = session_id
+                    .as_deref()
+                    .map_or("session.dashboard-lcm.root", |session_id| session_id);
+                let session = SessionId::new(root).ok()?;
+                let scope = if session_id.is_some() {
+                    SessionRetrievalScope::Session(session.clone())
+                } else {
+                    SessionRetrievalScope::AllSessionsInAuthorizedRoot
+                };
+                (
+                    session,
+                    cursor,
+                    query.as_str(),
+                    *limit,
+                    scope,
+                    role.iter().cloned().collect(),
+                    source.clone(),
+                    SessionSearchTimeRange {
+                        start_time: *since,
+                        end_time: *until,
+                    },
+                )
+            }
+            DashboardLcmReadRequestV1::Session {
+                session_id,
+                limit,
+                cursor: _,
+            } => {
+                let session = SessionId::new(session_id).ok()?;
+                (
+                    session.clone(),
+                    cursor,
+                    "",
+                    *limit,
+                    SessionRetrievalScope::Session(session),
+                    Vec::new(),
+                    None,
+                    SessionSearchTimeRange::default(),
+                )
+            }
+            DashboardLcmReadRequestV1::Timeline { session_id, .. } => {
+                let root = session_id
+                    .as_deref()
+                    .unwrap_or("session.dashboard-lcm.root");
+                let session = SessionId::new(root).ok()?;
+                let scope = if session_id.is_some() {
+                    SessionRetrievalScope::Session(session.clone())
+                } else {
+                    SessionRetrievalScope::AllSessionsInAuthorizedRoot
+                };
+                (
+                    session,
+                    cursor,
+                    "",
+                    500,
+                    scope,
+                    Vec::new(),
+                    None,
+                    SessionSearchTimeRange::default(),
+                )
+            }
+        };
+    let limit = usize::try_from(limit.max(1)).ok()?.min(MAX_CONTEXT_RECORDS);
+    // Selection must fit the canonical context assembler before hydration. Larger
+    // dashboard windows advance only through its opaque cursor, preserving the
+    // same immutable authorization and frozen participant manifest per page.
+    let execution_limits = admitted_execution_limits(limit);
+    let query = SessionTemporalQuery::new(
+        session_id,
+        None,
+        query_text,
+        cursor,
+        TemporalModeV1::Current,
+        RetrievalGrainV1::Occurrence,
+        limit,
+        // Only a ranked search spreads hits across sources; a session page is
+        // the transcript window itself and must serve every record in it.
+        if matches!(request, DashboardLcmReadRequestV1::Search { .. }) {
+            DiversityLimits::default()
+        } else {
+            DiversityLimits::unbounded()
+        },
+        ContextBudget {
+            max_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT as u64,
+            max_tokens: 16 * 1024,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .ok()?
+    .with_cursor_request(dashboard_cursor_request(request).ok()?)
+    .with_execution_limits(execution_limits)
+    .with_retrieval_scope(retrieval_scope);
+    Some(query.with_semantic_filter(
+        tracedecay_temporal_query::snapshot::TemporalCandidateFilterV1 {
+            source,
+            include_summaries: true,
+            roles,
+            start_time: time_range.start_time,
+            end_time: time_range.end_time,
+            ..tracedecay_temporal_query::snapshot::TemporalCandidateFilterV1::default()
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnusedSessionRetrieval;
+
+    struct EmptyTemporalRetrieval;
+
+    impl SessionApplicationRetrievalPortV1 for EmptyTemporalRetrieval {
+        fn retrieve_admitted<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _query: SessionTemporalQuery,
+        ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
+        {
+            Box::pin(async {
+                SessionRetrievalServiceOutcome::CompleteZero {
+                    temporal: tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView::default(),
+                    freshness: SessionDataFreshness::Fresh,
+                }
+            })
+        }
+    }
+
+    impl SessionApplicationRetrievalPortV1 for UnusedSessionRetrieval {
+        fn retrieve_admitted<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _query: SessionTemporalQuery,
+        ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
+        {
+            panic!("expired dashboard admission must not invoke retrieval")
+        }
+    }
+
+    /// Retrieval authority whose per-call outcomes the test sets outright,
+    /// so omission accounting is exercised through the adapter's public
+    /// `execute` rather than its private arithmetic.
+    struct StubSessionRetrieval {
+        retrieve: SessionRetrievalServiceOutcome,
+        raw_stats: Vec<tracedecay_lcm::types::LcmSessionRawStats>,
+        describe: LcmDescribeServiceOutcome,
+    }
+
+    impl SessionApplicationRetrievalPortV1 for StubSessionRetrieval {
+        fn retrieve_admitted<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _query: SessionTemporalQuery,
+        ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
+        {
+            Box::pin(async move { self.retrieve.clone() })
+        }
+
+        fn describe_lcm_admitted<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _cancellation: &'a CancellationSignal,
+            _command: LcmDescribeServiceCommand,
+        ) -> tracedecay_session_runtime::session_retrieval::LcmDescribeServiceFuture<'a> {
+            Box::pin(async move { self.describe.clone() })
+        }
+
+        fn lcm_session_raw_stats_admitted<'a>(
+            &'a self,
+            _session_id: &'a str,
+        ) -> tracedecay_session_runtime::session_retrieval::LcmSessionRawStatsFutureV1<'a> {
+            let raw_stats = self.raw_stats.clone();
+            Box::pin(async move { Ok(raw_stats) })
+        }
+    }
+
+    fn stub_message_result(
+        provider: &str,
+        session_id: &str,
+        ordinal: i64,
+    ) -> tracedecay_sessions::runtime::SessionMessageSearchResult {
+        tracedecay_sessions::runtime::SessionMessageSearchResult {
+            session: tracedecay_sessions::runtime::SessionRecord {
+                provider: provider.to_owned(),
+                session_id: session_id.to_owned(),
+                project_key: "project.dashboard-lcm-test".to_owned(),
+                project_path: "/project/dashboard-lcm-test".to_owned(),
+                title: None,
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            },
+            message: tracedecay_sessions::runtime::SessionMessageRecord {
+                provider: provider.to_owned(),
+                message_id: format!("{session_id}.message.{ordinal}"),
+                session_id: session_id.to_owned(),
+                role: "user".to_owned(),
+                timestamp: Some(1_700_002_000 + ordinal),
+                ordinal,
+                text: "a canonical message".to_owned(),
+                kind: None,
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: None,
+                metadata_json: None,
+            },
+            score: 0.0,
+        }
+    }
+
+    fn stub_describe_response(
+        provider: &str,
+        session_id: &str,
+        raw_message_count: i64,
+        unpublished_message_count: i64,
+    ) -> LcmDescribeResponse {
+        LcmDescribeResponse {
+            target: "session".to_owned(),
+            provider: provider.to_owned(),
+            session_id: session_id.to_owned(),
+            raw_message_count,
+            unpublished_message_count,
+            summary_node_count: 0,
+            external_payload_count: 0,
+            first_store_id: Some(1),
+            last_store_id: Some(raw_message_count),
+            raw_messages: Vec::new(),
+            summary_nodes: Vec::new(),
+            summary_node: None,
+            external_payload: None,
+            session_token_estimate: None,
+        }
+    }
+
+    fn stub_control(name: &str) -> DashboardHttpRequestControlV1 {
+        let now = tracedecay_contracts::now_micros();
+        DashboardHttpRequestControlV1::from_parts_for_test(
+            tracedecay_contracts::RequestId::new(format!("request.{name}"))
+                .expect("request identity"),
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(now.0 + 30_000_000))
+                .expect("request deadline"),
+            CancellationSignal::active(format!("cancel.{name}")).expect("request cancellation"),
+            now,
+        )
+    }
+
+    fn dashboard_lcm_test_identity() -> ResolvedSessionIdentity {
+        ResolvedSessionIdentity::for_project(
+            tracedecay_session_memory::context::ProfileId::new("profile.dashboard-lcm-test")
+                .expect("profile identity"),
+            tracedecay_domain::ProjectId::new("project.dashboard-lcm-test")
+                .expect("project identity"),
+            tracedecay_session_memory::context::SessionStoreId::new("store.dashboard-lcm-test")
+                .expect("store identity"),
+            tracedecay_session_memory::context::SessionRootId::new("root.dashboard-lcm-test")
+                .expect("root identity"),
+            tracedecay_session_memory::context::ResolvedGitRoute::new(
+                tracedecay_domain::RepositoryId::new("repository.dashboard-lcm-test")
+                    .expect("repository identity"),
+                tracedecay_domain::WorktreeId::new("worktree.dashboard-lcm-test")
+                    .expect("worktree identity"),
+                tracedecay_session_memory::context::BranchId::new("branch.dashboard-lcm-test")
+                    .expect("branch identity"),
+            ),
+        )
+    }
+
+    /// A published occurrence omitted by the page and unpublished raw rows
+    /// are different missing records: the omission count adds them, never
+    /// collapses to the larger count.
+    #[tokio::test]
+    async fn page_omissions_and_unpublished_rows_count_distinct_records() {
+        let retrieval = StubSessionRetrieval {
+            retrieve: SessionRetrievalServiceOutcome::Partial {
+                page: SessionRetrievalPageView {
+                    results: vec![stub_message_result(
+                        "cursor",
+                        "session.dashboard-disjoint",
+                        1,
+                    )],
+                    temporal: tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView::default(),
+                },
+                freshness: SessionDataFreshness::Fresh,
+                omitted: 1,
+                record_omitted: 1,
+            },
+            raw_stats: Vec::new(),
+            describe: LcmDescribeServiceOutcome::Partial {
+                description: Some(stub_describe_response(
+                    "cursor",
+                    "session.dashboard-disjoint",
+                    4,
+                    2,
+                )),
+                temporal: tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView::default(),
+                grain: RetrievalGrainV1::Session,
+                state: Some(tracedecay_domain::HydrationStateV1::Available),
+                lineage: Vec::new(),
+                retrieval: LcmRetrievalOutcome::partial(LcmDataFreshness::Fresh, 2),
+            },
+        };
+        let adapter =
+            DashboardLcmReadAdapter::new(Arc::new(retrieval), dashboard_lcm_test_identity())
+                .expect("project dashboard adapter");
+
+        let outcome = adapter
+            .execute(
+                stub_control("dashboard-lcm-disjoint"),
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Session {
+                    session_id: "session.dashboard-disjoint".to_owned(),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .await;
+
+        let DashboardLcmReadOutcomeV1::Partial { page, omitted } = outcome else {
+            panic!("a page short of the counted messages stays partial");
+        };
+        assert_eq!(page.stats.message_count, 4);
+        assert_eq!(page.stats.unpublished_message_count, 2);
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(
+            omitted, 3,
+            "one omitted published record plus two unpublished rows"
+        );
+    }
+
+    /// Every stored message unpublished means no temporal generation exists
+    /// for the page read and the temporal authority reports unavailable; the
+    /// session's raw store resolves the counted transcript instead of absent.
+    #[tokio::test]
+    async fn fully_unpublished_session_reports_counts_instead_of_absent() {
+        let retrieval = StubSessionRetrieval {
+            retrieve: SessionRetrievalServiceOutcome::Unavailable(
+                tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+                ),
+            ),
+            raw_stats: vec![tracedecay_lcm::types::LcmSessionRawStats {
+                provider: "cursor".to_owned(),
+                raw_message_count: 5,
+                unpublished_message_count: 5,
+                summary_node_count: 0,
+            }],
+            describe: LcmDescribeServiceOutcome::Unavailable(
+                tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable::service_not_configured(),
+            ),
+        };
+        let adapter =
+            DashboardLcmReadAdapter::new(Arc::new(retrieval), dashboard_lcm_test_identity())
+                .expect("project dashboard adapter");
+
+        let outcome = adapter
+            .execute(
+                stub_control("dashboard-lcm-unpublished"),
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Session {
+                    session_id: "session.dashboard-unpublished".to_owned(),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .await;
+
+        let DashboardLcmReadOutcomeV1::Partial { page, omitted } = outcome else {
+            panic!("a stored but unpublished session is partial, not absent");
+        };
+        assert_eq!(page.stats.message_count, 5);
+        assert_eq!(page.stats.unpublished_message_count, 5);
+        assert_eq!(omitted, 5);
+        assert!(page.messages.is_empty());
+    }
+
+    /// When neither the temporal page nor the raw store holds anything for
+    /// the session, no provider resolves and the absent state stands.
+    #[tokio::test]
+    async fn session_with_no_stored_messages_stays_absent() {
+        let retrieval = StubSessionRetrieval {
+            retrieve: SessionRetrievalServiceOutcome::CompleteZero {
+                temporal: tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView::default(),
+                freshness: SessionDataFreshness::Fresh,
+            },
+            raw_stats: Vec::new(),
+            describe: LcmDescribeServiceOutcome::Unavailable(
+                tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable::service_not_configured(),
+            ),
+        };
+        let adapter =
+            DashboardLcmReadAdapter::new(Arc::new(retrieval), dashboard_lcm_test_identity())
+                .expect("project dashboard adapter");
+
+        let outcome = adapter
+            .execute(
+                stub_control("dashboard-lcm-absent"),
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Session {
+                    session_id: "session.dashboard-absent".to_owned(),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .await;
+
+        let DashboardLcmReadOutcomeV1::NotReady { state, reason } = outcome else {
+            panic!("a session with no stored messages is absent");
+        };
+        assert_eq!(state, DashboardLcmReadStateV1::Absent);
+        assert_eq!(reason, "lcm_session_absent");
+    }
+
+    #[tokio::test]
+    async fn unavailable_raw_authority_does_not_report_an_absent_session() {
+        let retrieval = EmptyTemporalRetrieval;
+        let unavailable = retrieval
+            .lcm_session_raw_stats_admitted("session.dashboard-unavailable")
+            .await
+            .expect_err("an unconfigured raw authority is not an empty store");
+        assert_eq!(
+            unavailable,
+            tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable::service_not_configured(),
+        );
+        let adapter =
+            DashboardLcmReadAdapter::new(Arc::new(retrieval), dashboard_lcm_test_identity())
+                .expect("project dashboard adapter");
+        let outcome = adapter
+            .execute(
+                stub_control("dashboard-lcm-unavailable"),
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Session {
+                    session_id: "session.dashboard-unavailable".to_owned(),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .await;
+        let DashboardLcmReadOutcomeV1::NotReady { state, reason } = outcome else {
+            panic!("missing raw authority must remain unavailable");
+        };
+        assert_eq!(state, DashboardLcmReadStateV1::Unavailable);
+        assert_eq!(reason, "lcm_session_description_unavailable");
+    }
+
+    #[tokio::test]
+    async fn expired_dashboard_request_is_timed_out_before_retrieval() {
+        let adapter = DashboardLcmReadAdapter::new(
+            Arc::new(UnusedSessionRetrieval),
+            dashboard_lcm_test_identity(),
+        )
+        .expect("project dashboard adapter");
+        let control = DashboardHttpRequestControlV1::from_parts_for_test(
+            tracedecay_contracts::RequestId::new("request.dashboard-lcm-expired")
+                .expect("request identity"),
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(100))
+                .expect("request deadline"),
+            CancellationSignal::active("cancel.dashboard-lcm-expired")
+                .expect("request cancellation"),
+            tracedecay_domain::UtcMicros(100),
+        );
+
+        let outcome = adapter
+            .execute(
+                control,
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Overview {
+                    query: String::new(),
+                    limit: 1,
+                },
+            )
+            .await;
+
+        let DashboardLcmReadOutcomeV1::NotReady { state, reason } = outcome else {
+            panic!("expired dashboard request must be terminal");
+        };
+        assert_eq!(state, DashboardLcmReadStateV1::TimedOut);
+        assert_eq!(reason, "lcm_dashboard_request_deadline_elapsed");
+    }
+
+    /// The dashboard pages through separate HTTP requests, so the authority a
+    /// continuation is bound to must not change with the request id, deadline,
+    /// or cancellation token of the request that happens to carry it.
+    #[test]
+    fn every_dashboard_request_admits_the_same_continuation_authority() {
+        let adapter = DashboardLcmReadAdapter::new(
+            Arc::new(UnusedSessionRetrieval),
+            dashboard_lcm_test_identity(),
+        )
+        .expect("project dashboard adapter");
+        let now = tracedecay_contracts::now_micros();
+        let admit = |request: &str, cancellation: &str, lifetime_micros: i64| {
+            let control = DashboardHttpRequestControlV1::from_parts_for_test(
+                tracedecay_contracts::RequestId::new(request).expect("request identity"),
+                tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
+                    now.0 + lifetime_micros,
+                ))
+                .expect("request deadline"),
+                CancellationSignal::active(cancellation).expect("request cancellation"),
+                now,
+            );
+            adapter
+                .request_context(&control)
+                .expect("admitted dashboard request")
+                .0
+        };
+
+        let first_page = admit("request.dashboard-page-one", "cancel.page-one", 30_000_000);
+        let next_page = admit("request.dashboard-page-two", "cancel.page-two", 90_000_000);
+
+        assert_ne!(first_page.request_id(), next_page.request_id());
+        assert_eq!(first_page.grant().digest, next_page.grant().digest);
+    }
+
+    #[test]
+    fn wrong_scope_is_unavailable_and_never_reported_as_locked() {
+        let DashboardLcmReadOutcomeV1::NotReady { state, reason } = wrong_scope_not_ready() else {
+            panic!("wrong scope must be terminal");
+        };
+
+        assert_eq!(state, DashboardLcmReadStateV1::Unavailable);
+        assert_eq!(reason, "lcm_temporal_wrong_scope");
+        assert_eq!(
+            wrong_scope_error(),
+            (
+                DashboardLcmReadStateV1::Unavailable,
+                "lcm_temporal_wrong_scope"
+            )
+        );
+    }
+
+    #[test]
+    fn cursor_manifest_refusals_keep_distinct_dashboard_diagnostics() {
+        assert_eq!(
+            cursor_manifest_not_ready(tracedecay_domain::CursorManifestLimitKindV1::Participants),
+            (
+                DashboardLcmReadStateV1::CursorManifestLimitExceeded,
+                "lcm_temporal_cursor_manifest_participants_limit_exceeded",
+            )
+        );
+        assert_eq!(
+            cursor_manifest_not_ready(tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes),
+            (
+                DashboardLcmReadStateV1::CursorManifestLimitExceeded,
+                "lcm_temporal_cursor_manifest_canonical_bytes_limit_exceeded",
+            )
+        );
+    }
+
+    #[test]
+    fn dashboard_budget_refusal_preserves_stage_in_reason() {
+        assert_eq!(
+            session_budget_reason(
+                tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ContextTokens
+            ),
+            "lcm_temporal_budget_context_tokens"
+        );
+        assert_eq!(
+            session_budget_reason(
+                tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted
+            ),
+            "lcm_temporal_budget_execution_work_exhausted"
+        );
+    }
+
+    #[test]
+    fn dashboard_session_page_preserves_cursor_with_context_bounded_selection() {
+        let request = DashboardLcmReadRequestV1::Session {
+            session_id: "session.dashboard.cursor".to_owned(),
+            limit: 100,
+            cursor: Some("opaque-temporal-cursor".to_owned()),
+        };
+        let query = retrieval_query(&request, initial_cursor(&request))
+            .expect("cursor-backed dashboard page");
+
+        assert_eq!(query.limit(), MAX_CONTEXT_RECORDS);
+        assert_eq!(query.cursor(), Some("opaque-temporal-cursor"));
+        assert!(query.semantic_filter().include_summaries);
+        assert_eq!(
+            query.diversity(),
+            DiversityLimits::unbounded(),
+            "a transcript page serves every record, never a diversity-capped sample"
+        );
+    }
+
+    #[test]
+    fn dashboard_aggregate_pages_use_the_canonical_cursor_and_authorized_root() {
+        let request = DashboardLcmReadRequestV1::Timeline {
+            bucket: tracedecay_dashboard_api::DashboardLcmTimelineBucketV1::Day,
+            session_id: None,
+            limit: 400,
+        };
+        let query = retrieval_query(&request, Some("opaque-frozen-manifest-cursor".to_owned()))
+            .expect("aggregate continuation");
+
+        assert_eq!(query.limit(), MAX_CONTEXT_RECORDS);
+        assert_eq!(query.cursor(), Some("opaque-frozen-manifest-cursor"));
+        assert_eq!(
+            query.retrieval_scope(),
+            &SessionRetrievalScope::AllSessionsInAuthorizedRoot
+        );
+        assert!(query.semantic_filter().include_summaries);
+    }
+}

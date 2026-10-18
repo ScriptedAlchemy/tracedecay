@@ -5,44 +5,25 @@
 //! default-success commit.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::Value;
 use tempfile::TempDir;
 
 use super::writer_test_support::{
-    WriterTestFixtureAuthority, init_indexed_repo, registered_context,
+    WriterTestFixtureAuthority, counting_reconcile_sink, default_spool_broker, init_indexed_repo,
+    registered_context, server_with_broker, session_start,
 };
 use super::{CodeIndexReconcileSink, McpServer};
 use crate::mcp::project_route::HookProjectRouteCache;
-use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent};
-use tracedecay_host_admission::{
-    HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker, SpoolBounds,
-};
+use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_hooks::core_events::DaemonHookEvent;
+use tracedecay_host_admission::{HostAdmissionBroker, HostAdmissionRuntime, SpoolBounds};
 use tracedecay_sessions::admission::HostAdmissionStatus;
 
-fn session_start(root: PathBuf) -> Value {
-    serde_json::to_value(DaemonHookEvent::session_start(HookAgent::Codex, root)).unwrap()
-}
-
-async fn server_with_broker(
-    cg: crate::tracedecay::TraceDecay,
-    authority: &WriterTestFixtureAuthority,
-    broker: SharedHostAdmissionBroker,
-    reconcile_sink: CodeIndexReconcileSink,
-) -> Arc<McpServer> {
-    let mut context =
-        registered_context(cg, authority).with_code_index_reconcile_sink(reconcile_sink);
-    context.host_admission_broker = Some(broker);
-    McpServer::new_with_registered_test_context(context, Vec::new())
-        .await
-        .expect("registered test server")
-}
-
 async fn server_without_broker(
-    cg: crate::tracedecay::TraceDecay,
+    cg: tracedecay_project::project::TraceDecay,
     authority: &WriterTestFixtureAuthority,
     reconcile_sink: CodeIndexReconcileSink,
 ) -> Arc<McpServer> {
@@ -53,15 +34,11 @@ async fn server_without_broker(
 }
 
 fn failing_reconcile_sink() -> CodeIndexReconcileSink {
-    Arc::new(|_request: PathBuf| Box::pin(async { false }))
-}
-
-fn counting_success_reconcile_sink(attempts: Arc<Mutex<usize>>) -> CodeIndexReconcileSink {
-    Arc::new(move |_request: PathBuf| {
-        let attempts = Arc::clone(&attempts);
-        Box::pin(async move {
-            *attempts.lock().unwrap() += 1;
-            true
+    Arc::new(|_request: PathBuf, _demand| {
+        Box::pin(async {
+            super::CodeIndexDemandAdmissionV1::Unavailable(
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+            )
         })
     })
 }
@@ -70,16 +47,13 @@ fn counting_success_reconcile_sink(attempts: Arc<Mutex<usize>>) -> CodeIndexReco
 async fn matrix_identical_notifications_are_distinct_without_frontier_corruption() {
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let attempts = Arc::new(Mutex::new(0usize));
+    let broker = default_spool_broker(spool.path());
+    let attempts = Arc::new(AtomicUsize::new(0));
     let server = server_with_broker(
         cg,
         &authority,
         Arc::clone(&broker),
-        counting_success_reconcile_sink(Arc::clone(&attempts)),
+        counting_reconcile_sink(Arc::clone(&attempts)),
     )
     .await;
     let mut routes = HookProjectRouteCache::default();
@@ -93,7 +67,7 @@ async fn matrix_identical_notifications_are_distinct_without_frontier_corruption
     // idempotent production effect, not for spool-level payload coalescing.
     assert_eq!(first.status, HostAdmissionStatus::Committed);
     assert_eq!(second.status, HostAdmissionStatus::Committed);
-    assert_eq!(*attempts.lock().unwrap(), 2);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(broker.pending_count().await, 0);
     server.shutdown().await;
 }
@@ -102,10 +76,7 @@ async fn matrix_identical_notifications_are_distinct_without_frontier_corruption
 async fn matrix_reordered_completion_waits_for_contiguous_frontier() {
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let server = server_with_broker(
         cg,
         &authority,
@@ -142,10 +113,7 @@ async fn matrix_reordered_completion_waits_for_contiguous_frontier() {
 #[tokio::test]
 async fn matrix_timeout_cancels_in_flight_replay_and_preserves_durable_frontier() {
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let admitted = broker.admit("cancel-test", b"durable-event").await.unwrap();
     let lease_observed = Arc::new(AtomicBool::new(false));
     let replay_broker = Arc::clone(&broker);
@@ -186,27 +154,15 @@ async fn matrix_timeout_cancels_in_flight_replay_and_preserves_durable_frontier(
     drop(broker);
 
     // Persistence, not only in-memory queue state: reopen retains the frontier.
-    let reopened = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let reopened = HostAdmissionBroker::new(reopened);
+    let reopened = default_spool_broker(spool.path());
     assert_eq!(reopened.pending_count().await, 1);
 }
 
 #[tokio::test]
 async fn matrix_daemon_unavailable_without_broker_skips_reconcile_and_frontier() {
     let (cg, project, authority) = init_indexed_repo().await;
-    let attempted = Arc::new(Mutex::new(false));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request: PathBuf| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                *attempted.lock().unwrap() = true;
-                true
-            })
-        })
-    };
+    let attempted = Arc::new(AtomicUsize::new(0));
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let server = server_without_broker(cg, &authority, reconcile_sink).await;
     let mut routes = HookProjectRouteCache::default();
 
@@ -218,8 +174,9 @@ async fn matrix_daemon_unavailable_without_broker_skips_reconcile_and_frontier()
 
     assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
     assert_eq!(outcome.reason_code, Some("spool_unavailable"));
-    assert!(
-        !*attempted.lock().unwrap(),
+    assert_eq!(
+        attempted.load(Ordering::SeqCst),
+        0,
         "unavailable daemon path must not open a local canonical reconcile_sink"
     );
     server.shutdown().await;
@@ -240,11 +197,13 @@ async fn matrix_backpressure_overflow_rejects_before_reconcile_without_pending_g
     let attempted = Arc::new(Mutex::new(0usize));
     let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request: PathBuf| {
+        Arc::new(move |_request: PathBuf, _demand| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() += 1;
-                false
+                super::CodeIndexDemandAdmissionV1::Unavailable(
+                    tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+                )
             })
         })
     };
@@ -277,10 +236,7 @@ async fn matrix_backpressure_overflow_rejects_before_reconcile_without_pending_g
 async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier() {
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let server = server_with_broker(
         cg,
         &authority,
@@ -304,22 +260,19 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
     drop(server);
     drop(broker);
 
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let attempts = Arc::new(Mutex::new(0usize));
+    let broker = default_spool_broker(spool.path());
+    let attempts = Arc::new(AtomicUsize::new(0));
     let reopened_cg = authority.reopen_project_graph(project.path()).await;
     let server = server_with_broker(
         reopened_cg,
         &authority,
         Arc::clone(&broker),
-        counting_success_reconcile_sink(Arc::clone(&attempts)),
+        counting_reconcile_sink(Arc::clone(&attempts)),
     )
     .await;
     Box::pin(server.replay_host_admission(None)).await;
     assert_eq!(broker.pending_count().await, 0);
-    assert_eq!(*attempts.lock().unwrap(), 1);
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
     server.shutdown().await;
 }
 
@@ -340,7 +293,7 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
         Box::pin(async move {
             sink_recorded.lock().unwrap().push((root, rel_paths));
             // Report "delivered": a mounted worktree accepted the paths.
-            true
+            super::CodeIndexDemandAdmissionV1::Queued
         })
     });
     let context = registered_context(cg, &authority).with_code_index_hook_sink(sink);
@@ -349,7 +302,7 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
         .expect("registered test server");
     let mut routes = HookProjectRouteCache::default();
     let event = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
-        HookAgent::Codex,
+        HostIntegrationIdV1::Codex,
         vec!["src/lib.rs".to_owned()],
         project.path().to_path_buf(),
     ))

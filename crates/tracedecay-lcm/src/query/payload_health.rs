@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{Value, params_from_iter};
 
 use super::scope::LcmScopeSql;
@@ -27,7 +28,11 @@ pub(super) fn payload_summary_query(
     (sql, scope.into_values())
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.payload_summary", future = true)]
+#[tracing::instrument(
+    name = "sessions.lcm.status.payload_summary",
+    level = "trace",
+    skip_all
+)]
 pub async fn payload_health_summary(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -90,7 +95,7 @@ pub async fn payload_health_summary(
     })
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.payload_detail", future = true)]
+#[tracing::instrument(name = "sessions.lcm.status.payload_detail", level = "trace", skip_all)]
 pub async fn payload_health_detail(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -107,7 +112,7 @@ pub async fn payload_health_detail(
         maintenance::payload_metadata_refs_for_scope(conn, provider, session_id).await?;
     let metadata_bytes = payload_byte_counts_for_scope(conn, provider, session_id).await?;
     let payload_locations = payload_ref_locations_for_scope(conn, provider, session_id).await?;
-    let referenced_refs = gc::referenced_payload_refs(conn, provider, session_id).await?;
+    let referenced_refs = gc::owner_referenced_metadata(conn, &metadata_refs).await?;
     let placeholder_status = placeholder_payload_status(
         conn,
         storage_root,
@@ -137,14 +142,7 @@ pub async fn payload_health_detail(
     let last_reaped_bytes = gc_meta_i64(conn, "last_reaped_bytes")
         .await?
         .map(|value| value.max(0) as u64);
-    let last_gc_status = schema::get_gc_meta(conn, "last_gc_status")
-        .await?
-        .or_else(|| match (last_gc_at, last_gc_error.as_deref()) {
-            (None, _) => None,
-            (Some(_), None | Some("")) => Some("ok".to_string()),
-            (Some(_), Some("partial")) => Some("partial".to_string()),
-            (Some(_), Some(_)) => Some("failed".to_string()),
-        });
+    let last_gc_status = schema::get_gc_meta(conn, "last_gc_status").await?;
 
     let mut missing_count = 0_i64;
     let mut missing_payload_refs = Vec::new();
@@ -318,28 +316,6 @@ pub async fn payload_health_detail(
     })
 }
 
-pub fn payload_health_state(
-    payload: &LcmPayloadStatus,
-    payload_gc: &LcmPayloadGcStatus,
-) -> &'static str {
-    if payload.missing_count > 0
-        || payload.missing_placeholder_file_count > 0
-        || payload.integrity_mismatch_count.unwrap_or(0) > 0
-        || payload_gc.last_gc_status.as_deref() == Some("failed")
-        || !payload.root_contained
-    {
-        "error"
-    } else if payload.coverage.state == LcmPayloadCoverageState::Partial
-        || payload.orphan_file_count > 0
-        || payload.unreferenced_count > 0
-        || payload_gc.last_gc_at.is_none()
-    {
-        "warning"
-    } else {
-        "healthy"
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct PayloadHealthDetail {
     pub payload: LcmPayloadStatus,
@@ -467,8 +443,7 @@ async fn payload_ref_locations_for_scope(
                 };
                 for payload_ref in value
                     .as_deref()
-                    .map(payload::extract_payload_refs_from_text)
-                    .unwrap_or_default()
+                    .map_or_default(payload::extract_payload_refs_from_text)
                 {
                     refs.entry(payload_ref.clone())
                         .or_insert_with(|| PayloadRefLocation {
@@ -691,7 +666,7 @@ async fn payload_has_integrity_mismatch(
         return Ok(true);
     }
     let bytes = fs::read(&path).map_err(|err| LcmError::Io(err.to_string()))?;
-    Ok(util::sha256_hex(&bytes) != metadata.content_hash)
+    Ok(sha256_hex(&bytes) != metadata.content_hash)
 }
 
 fn payload_root_contained(storage_root: &Path) -> bool {

@@ -2,7 +2,7 @@
 
 use super::*;
 #[cfg(all(test, not(windows)))]
-use tracedecay_usecases::feedback::FeedbackCycleRuntime;
+use tracedecay_application::feedback::FeedbackCycleRuntime;
 
 pub fn daemon_operation_event_authority() -> OperationEventAuthority {
     operation_event_authority()
@@ -19,6 +19,37 @@ pub(crate) struct DaemonFeedbackInvocationRequest {
 pub struct DaemonFeedbackInvocationResult {
     pub(crate) scope: ResolvedScope,
     pub(crate) evidence: EvidencePacket<serde_json::Value>,
+    pub(crate) touched_files: Vec<String>,
+    pub(crate) cost: Option<tracedecay_contracts::RequestCostReceiptV1>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DaemonFeedbackProximityPayloadError {
+    #[error("feedback proximity evidence payload is missing")]
+    Missing,
+    #[error("feedback proximity evidence payload is invalid: {0}")]
+    Invalid(#[source] serde_json::Error),
+}
+
+impl DaemonFeedbackInvocationResult {
+    pub fn project_id(&self) -> &tracedecay_domain::ProjectId {
+        &self.scope.project_id
+    }
+
+    /// Recover the typed proximity read carried in the evidence payload.
+    /// Production Delivery inbox mounts this as the single join authority.
+    pub fn feedback_proximity_read_result(
+        &self,
+    ) -> Result<FeedbackProximityReadResultV1, DaemonFeedbackProximityPayloadError> {
+        decode_feedback_proximity_payload(self.evidence.payload.as_ref())
+    }
+}
+
+fn decode_feedback_proximity_payload(
+    payload: Option<&serde_json::Value>,
+) -> Result<FeedbackProximityReadResultV1, DaemonFeedbackProximityPayloadError> {
+    let payload = payload.ok_or(DaemonFeedbackProximityPayloadError::Missing)?;
+    serde_json::from_value(payload.clone()).map_err(DaemonFeedbackProximityPayloadError::Invalid)
 }
 
 pub(crate) type DaemonFeedbackInvocationFuture<'a> = Pin<
@@ -41,17 +72,54 @@ pub struct DaemonAdvisoryCycleInvocationRequest {
     pub cancellation: CancellationContext,
 }
 
+pub struct DaemonFeedbackProximityInvocationRequest {
+    pub request_id: RequestId,
+    pub request: FeedbackProximityReadRequestV1,
+    pub deadline: Deadline,
+    pub cancellation: CancellationContext,
+}
+
 pub type DaemonAdvisoryCycleInvocationFuture<'a> = Pin<
     Box<
         dyn Future<Output = Result<DaemonFeedbackInvocationResult, ApplicationProblem>> + Send + 'a,
     >,
 >;
 
+pub type DaemonFeedbackProximityInvocationFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<DaemonFeedbackInvocationResult, ApplicationProblem>> + Send + 'a,
+    >,
+>;
+
+/// Whether an advisory-cycle owner answers for its project now, or stands in
+/// for a full cycle its mount is still publishing.
+pub enum DaemonAdvisoryCycleMountV1 {
+    Answers,
+    /// Resolves when the owner's own mount state next moves, so a waiting
+    /// request re-reads it instead of holding out for its deadline.
+    Mounting(DaemonAdvisoryCycleMountChangedFuture),
+}
+
+pub type DaemonAdvisoryCycleMountChangedFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+pub type DaemonAdvisoryCycleMountFuture<'a> =
+    Pin<Box<dyn Future<Output = DaemonAdvisoryCycleMountV1> + Send + 'a>>;
+
 pub trait DaemonAdvisoryCycleInvocationPort: Send + Sync {
     fn invoke(
         &self,
         request: DaemonAdvisoryCycleInvocationRequest,
     ) -> DaemonAdvisoryCycleInvocationFuture<'_>;
+
+    /// A mounted cycle answers; only a pre-mount owner reports `Mounting`.
+    fn mount(&self) -> DaemonAdvisoryCycleMountFuture<'_> {
+        Box::pin(async { DaemonAdvisoryCycleMountV1::Answers })
+    }
+
+    fn invoke_proximity(
+        &self,
+        request: DaemonFeedbackProximityInvocationRequest,
+    ) -> DaemonFeedbackProximityInvocationFuture<'_>;
 }
 
 #[derive(Clone)]
@@ -66,6 +134,17 @@ impl DaemonAdvisoryCycleInvocationOwner {
             project_id,
             service,
         }
+    }
+
+    pub fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    pub fn invoke_proximity(
+        &self,
+        request: DaemonFeedbackProximityInvocationRequest,
+    ) -> DaemonFeedbackProximityInvocationFuture<'_> {
+        self.service.invoke_proximity(request)
     }
 }
 
@@ -129,14 +208,10 @@ where
                     .await
                 }
                 _ => {
-                    return Err(ApplicationProblem::InvalidRequest {
-                        diagnostic: SafeDiagnostic {
-                            code: "feedback.invalid_operation".to_owned(),
-                            message: "The feedback read operation is invalid".to_owned(),
-                        },
-                        retry: RetryDirective::Never,
-                        legal_actions: Vec::new(),
-                    });
+                    return Err(ApplicationProblem::invalid_request_without_action(
+                        "feedback.invalid_operation",
+                        "The feedback read operation is invalid",
+                    ));
                 }
             }
             .map_err(feedback_owner_problem)?;
@@ -194,7 +269,9 @@ fn feedback_invocation_result_with<T>(
     let application = result.map_err(|problem| problem.problem.into_source())?;
     let evidence = match application.outcome {
         ApplicationOutcome::Evidence(packet) => packet,
-        ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
+        ApplicationOutcome::Preview(_)
+        | ApplicationOutcome::Effect(_)
+        | ApplicationOutcome::Result(_) => {
             return Err(ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "feedback.invalid_owner_result".to_owned(),
                 message: "The feedback read owner returned an invalid outcome".to_owned(),
@@ -221,6 +298,8 @@ fn feedback_invocation_result_with<T>(
             execution: evidence.execution,
             payload,
         },
+        touched_files: application.touched_files,
+        cost: application.cost,
     })
 }
 
@@ -253,7 +332,7 @@ pub(super) fn feedback_scope_matches(
         .is_ok_and(|scope| &scope == expected)
 }
 
-#[hotpath::measure(label = "daemon.service.feedback.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.feedback.execute", level = "trace", skip_all)]
 pub(super) async fn execute_feedback(
     wire_request_id: String,
     owner: Option<DaemonFeedbackInvocationOwner>,
@@ -298,7 +377,9 @@ pub(super) async fn execute_feedback(
                 wire_request_id,
                 DaemonInvocationOutcome::Feedback {
                     scope: result.scope,
-                    result: DaemonFeedbackResult::from_application(result.evidence),
+                    result: DaemonFeedbackResult::from_application(result.evidence)
+                        .with_touched_files(result.touched_files)
+                        .with_cost(result.cost),
                 },
             )
         }
@@ -312,12 +393,12 @@ pub fn advisory_cycle_invocation_result(
     started_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
-    outcome: tracedecay_usecases::advisory::AdvisoryCycleOutcome,
+    outcome: tracedecay_application::advisory::AdvisoryCycleOutcome,
 ) -> Result<DaemonFeedbackInvocationResult, ApplicationProblem> {
+    use tracedecay_application::advisory::AdvisoryCycleOutcome;
     use tracedecay_domain::feedback::FeedbackCycleTerminationV1;
-    use tracedecay_usecases::advisory::AdvisoryCycleOutcome;
 
-    let ended_at = current_micros();
+    let ended_at = now_micros();
     let policy_digest = canonical_sha256(&(
         "tracedecay.daemon.feedback-advisory-policy",
         context.scope(),
@@ -383,19 +464,17 @@ pub fn advisory_cycle_invocation_result(
                 | OperationTermination::Failed
                 | OperationTermination::EffectUnknown => None,
             };
-            let omissions = omission_reason
-                .map(|reason| {
-                    vec![Omission {
-                        domain: EvidenceDomain::Diagnostic,
-                        count: cycle
-                            .execution
-                            .cycle
-                            .omitted_findings
-                            .max(u64::from(returned == total)),
-                        reason,
-                    }]
-                })
-                .unwrap_or_default();
+            let omissions = omission_reason.map_or_default(|reason| {
+                vec![Omission {
+                    domain: EvidenceDomain::Diagnostic,
+                    count: cycle
+                        .execution
+                        .cycle
+                        .omitted_findings
+                        .max(u64::from(returned == total)),
+                    reason,
+                }]
+            });
             let finding_handles = cycle
                 .finding_handles
                 .iter()
@@ -408,6 +487,14 @@ pub fn advisory_cycle_invocation_result(
                     })
                 })
                 .collect::<Vec<_>>();
+            let read_handles = cycle.read_handles.as_ref().map(|handles| {
+                tracedecay_contracts::feedback::FeedbackAdvisoryReadHandlesV1 {
+                    diagnostics_handle: handles.diagnostics_handle.clone(),
+                    impact_handle: handles.diagnostics_handle.clone(),
+                    affected_tests_handle: handles.diagnostics_handle.clone(),
+                    list_handle: handles.list_handle.clone(),
+                }
+            });
             let mut cycle_wire = serde_json::to_value(&cycle.execution.cycle)
                 .map_err(|_| advisory_cycle_contract_problem())?;
             cycle_wire["published"] =
@@ -427,6 +514,7 @@ pub fn advisory_cycle_invocation_result(
                 page,
                 Some(serde_json::json!({
                     "cycle": cycle_wire,
+                    "read_handles": read_handles,
                     "finding_handles": finding_handles,
                 })),
             )
@@ -466,6 +554,10 @@ pub fn advisory_cycle_invocation_result(
             RequestAdmission::TimedOut => {
                 Some((OperationTermination::TimedOut, OmissionReason::TimedOut))
             }
+            RequestAdmission::GrantExpired => Some((
+                OperationTermination::Unavailable,
+                OmissionReason::Unavailable,
+            )),
             RequestAdmission::Admitted => None,
         }
     };
@@ -481,15 +573,15 @@ pub fn advisory_cycle_invocation_result(
         payload = None;
     }
     let cancellation = match termination {
-        OperationTermination::Cancelled => Some(tracedecay_application::CancellationObservation {
-            stage: tracedecay_application::CancellationStage::DuringRead,
+        OperationTermination::Cancelled => Some(tracedecay_contracts::CancellationObservation {
+            stage: tracedecay_contracts::CancellationStage::DuringRead,
             observed_at: match cancellation.state {
                 CancellationState::Cancelled { requested_at } => requested_at,
                 CancellationState::Active => ended_at,
             },
         }),
-        OperationTermination::TimedOut => Some(tracedecay_application::CancellationObservation {
-            stage: tracedecay_application::CancellationStage::DuringRead,
+        OperationTermination::TimedOut => Some(tracedecay_contracts::CancellationObservation {
+            stage: tracedecay_contracts::CancellationStage::DuringRead,
             observed_at: deadline.expires_at,
         }),
         OperationTermination::Completed
@@ -523,6 +615,148 @@ pub fn advisory_cycle_invocation_result(
             execution,
             payload,
         },
+        touched_files: Vec::new(),
+        cost: None,
+    })
+}
+
+pub fn feedback_proximity_invocation_result(
+    context: &RequestContext,
+    started_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+    result: FeedbackProximityReadResultV1,
+) -> Result<DaemonFeedbackInvocationResult, ApplicationProblem> {
+    result
+        .validate()
+        .map_err(|_| feedback_proximity_contract_problem())?;
+    let ended_at = now_micros();
+    let (termination, completeness, returned, omission_reason) = match &result {
+        FeedbackProximityReadResultV1::Complete { page } => (
+            OperationTermination::Completed,
+            CoverageCompleteness::Complete,
+            page.encounters.len() as u64,
+            None,
+        ),
+        FeedbackProximityReadResultV1::CompleteZero { .. } => (
+            OperationTermination::Completed,
+            CoverageCompleteness::Complete,
+            0,
+            None,
+        ),
+        FeedbackProximityReadResultV1::Partial { page, .. } => (
+            OperationTermination::Partial,
+            CoverageCompleteness::Partial,
+            page.encounters.len() as u64,
+            Some(OmissionReason::Unsupported),
+        ),
+        FeedbackProximityReadResultV1::Stale { page, .. } => (
+            OperationTermination::Partial,
+            CoverageCompleteness::Partial,
+            page.encounters.len() as u64,
+            Some(OmissionReason::Stale),
+        ),
+        FeedbackProximityReadResultV1::Denied { .. } => (
+            OperationTermination::Partial,
+            CoverageCompleteness::Partial,
+            0,
+            Some(OmissionReason::Redacted),
+        ),
+        FeedbackProximityReadResultV1::Unavailable { .. } => (
+            OperationTermination::Unavailable,
+            CoverageCompleteness::Partial,
+            0,
+            Some(OmissionReason::Unavailable),
+        ),
+    };
+    let eligible = returned.saturating_add(u64::from(omission_reason.is_some()));
+    let coverage = EvidenceCoverage {
+        requested_domains: vec![EvidenceDomain::Graph],
+        visited: Some(eligible),
+        eligible: Some(eligible),
+        returned,
+        completeness,
+        domains: vec![CoverageDomainState {
+            domain: EvidenceDomain::Graph,
+            completeness,
+        }],
+    };
+    coverage
+        .validate()
+        .map_err(|_| feedback_proximity_contract_problem())?;
+    let policy = PolicyDecisionRef::new(
+        "policy.daemon.feedback-proximity",
+        1,
+        canonical_sha256(&(
+            "tracedecay.daemon.feedback-proximity-policy.v1",
+            context.scope(),
+            context.grant().digest.as_str(),
+        ))
+        .map_err(|_| feedback_proximity_contract_problem())?,
+        ComponentVersion::new("tracedecay.daemon.feedback-proximity")
+            .map_err(|_| feedback_proximity_contract_problem())?,
+    )
+    .map_err(|_| feedback_proximity_contract_problem())?;
+    let authority = AuthorityReceipt::from_context(context, policy, ended_at)
+        .map_err(|_| feedback_proximity_contract_problem())?;
+    let execution = OperationReceipt {
+        started_at,
+        ended_at,
+        effective_deadline: deadline,
+        cancellation: match cancellation.state {
+            CancellationState::Cancelled { requested_at } => {
+                Some(tracedecay_contracts::CancellationObservation {
+                    stage: tracedecay_contracts::CancellationStage::DuringRead,
+                    observed_at: requested_at,
+                })
+            }
+            CancellationState::Active => None,
+        },
+        budget: OperationBudgetUsage::default(),
+        termination,
+    };
+    execution
+        .validate()
+        .map_err(|_| feedback_proximity_contract_problem())?;
+    let omissions = omission_reason.map_or_default(|reason| {
+        vec![Omission {
+            domain: EvidenceDomain::Graph,
+            count: 1,
+            reason,
+        }]
+    });
+    let payload =
+        serde_json::to_value(result).map_err(|_| feedback_proximity_contract_problem())?;
+    Ok(DaemonFeedbackInvocationResult {
+        scope: context.scope().clone(),
+        evidence: EvidencePacket {
+            temporal: TemporalState::current(ended_at),
+            authority,
+            evidence_authorities: Vec::new(),
+            coverage,
+            omissions,
+            scores: Vec::new(),
+            contributions: Vec::new(),
+            page: PageState::first_page(
+                SortContractId::new("sort.application.feedback.proximity.stable")
+                    .map_err(|_| feedback_proximity_contract_problem())?,
+                1,
+                Some(returned),
+                returned,
+            )
+            .map_err(|_| feedback_proximity_contract_problem())?,
+            execution,
+            payload: Some(payload),
+        },
+        touched_files: Vec::new(),
+        cost: None,
+    })
+}
+
+fn feedback_proximity_contract_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "feedback.proximity.contract".to_owned(),
+        message: "The feedback proximity read returned an invalid application result".to_owned(),
     })
 }
 
@@ -558,7 +792,11 @@ fn advisory_cycle_contract_problem() -> ApplicationProblem {
     })
 }
 
-#[hotpath::measure(label = "daemon.service.feedback.advisory_cycle", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.feedback.advisory_cycle",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_feedback_advisory_cycle(
     wire_request_id: String,
     owner: Option<DaemonAdvisoryCycleInvocationOwner>,
@@ -582,7 +820,7 @@ pub(super) async fn execute_feedback_advisory_cycle(
             ApplicationProblem::cancelled_before_admission(),
         );
     }
-    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(now_micros()) {
         return application_problem(
             wire_request_id,
             ApplicationProblem::timed_out_before_admission(),
@@ -603,7 +841,60 @@ pub(super) async fn execute_feedback_advisory_cycle(
                 wire_request_id,
                 DaemonInvocationOutcome::Feedback {
                     scope: result.scope,
-                    result: DaemonFeedbackResult::from_application(result.evidence),
+                    result: DaemonFeedbackResult::from_application(result.evidence)
+                        .with_touched_files(result.touched_files)
+                        .with_cost(result.cost),
+                },
+            )
+        }
+        Ok(_) => concealed_application_problem(wire_request_id),
+        Err(problem) => application_problem(wire_request_id, problem),
+    }
+}
+
+#[tracing::instrument(name = "daemon.service.feedback.proximity", level = "trace", skip_all)]
+pub(super) async fn execute_feedback_proximity(
+    wire_request_id: String,
+    owner: Option<DaemonAdvisoryCycleInvocationOwner>,
+    request: FeedbackProximityReadRequestV1,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(owner) = owner else {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "feedback.proximity.unavailable".to_owned(),
+                message: "The feedback proximity authority is unavailable".to_owned(),
+            }),
+        );
+    };
+    match owner
+        .service
+        .invoke_proximity(DaemonFeedbackProximityInvocationRequest {
+            request_id: match RequestId::new(wire_request_id.clone()) {
+                Ok(request_id) => request_id,
+                Err(_) => {
+                    return DaemonInvocationResponse::problem(
+                        wire_request_id,
+                        DaemonInvocationProblem::InvalidRequest,
+                    );
+                }
+            },
+            request,
+            deadline,
+            cancellation,
+        })
+        .await
+    {
+        Ok(result) if result.scope.project_id == owner.project_id => {
+            DaemonInvocationResponse::with_outcome(
+                wire_request_id,
+                DaemonInvocationOutcome::Feedback {
+                    scope: result.scope,
+                    result: DaemonFeedbackResult::from_application(result.evidence)
+                        .with_touched_files(result.touched_files)
+                        .with_cost(result.cost),
                 },
             )
         }
@@ -613,7 +904,6 @@ pub(super) async fn execute_feedback_advisory_cycle(
 }
 
 impl DaemonInvocationService {
-    #[hotpath::skip]
     pub async fn feedback_runtime(
         &self,
         project_root: Option<&Path>,
@@ -625,7 +915,6 @@ impl DaemonInvocationService {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn feedback_cycle(
         &self,
         project_root: Option<&Path>,
@@ -633,7 +922,6 @@ impl DaemonInvocationService {
         self.project_runtimes.get(project_root?).await
     }
 
-    #[hotpath::skip]
     pub async fn delivery_read_authority(
         &self,
         project_root: Option<&Path>,
@@ -646,7 +934,66 @@ impl DaemonInvocationService {
             .await
     }
 
-    #[hotpath::skip]
+    pub async fn advisory_cycle_owner(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Option<DaemonAdvisoryCycleInvocationOwner> {
+        self.project_runtimes
+            .read::<DaemonAdvisoryCycleInvocationOwner, _, _>(project_root?, Clone::clone)
+            .await
+    }
+
+    /// The owner that answers an advisory-cycle request for `project_root`.
+    ///
+    /// A reopened project serves its first requests while project open is
+    /// still publishing owners, and then while its mount publishes the full
+    /// cycle behind a placeholder. Those requests wait for the publication
+    /// within their own deadline instead of failing a call a retry would
+    /// answer, and re-read the placeholder whenever its mount state moves. A
+    /// finished publication without an owner, or an owner that answers,
+    /// returns at once.
+    #[tracing::instrument(
+        name = "daemon.service.feedback.advisory_owner_wait",
+        level = "trace",
+        skip_all
+    )]
+    pub(super) async fn answering_advisory_cycle_owner(
+        &self,
+        project_root: Option<&Path>,
+        deadline: &Deadline,
+    ) -> Option<DaemonAdvisoryCycleInvocationOwner> {
+        let project_root = project_root?;
+        loop {
+            let (owner, publication, mut changed) =
+                self.project_runtimes.advisory_cycle_view(project_root);
+            let mount_changed: DaemonAdvisoryCycleMountChangedFuture = match &owner {
+                Some(current) => match current.service.mount().await {
+                    DaemonAdvisoryCycleMountV1::Answers => return owner,
+                    DaemonAdvisoryCycleMountV1::Mounting(mount_changed) => mount_changed,
+                },
+                None if publication == Some(ProjectRuntimePublicationStateV1::Warming) => {
+                    Box::pin(std::future::pending())
+                }
+                None => return owner,
+            };
+            let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
+            if remaining_micros <= 0 {
+                return owner;
+            }
+            let remaining = Duration::from_micros(remaining_micros.unsigned_abs());
+            let woke = tracedecay_runtime_core::native_runtime::timeout(remaining, async {
+                tokio::select! {
+                    published = changed.changed() => published.is_ok(),
+                    () = mount_changed => true,
+                }
+            })
+            .await;
+            if !matches!(woke, Ok(true)) {
+                return owner;
+            }
+        }
+    }
+
     pub(super) async fn feedback_cycle_input(
         &self,
         project_root: Option<&Path>,
@@ -655,5 +1002,22 @@ impl DaemonInvocationService {
             .get::<Arc<SwitchableFeedbackCycleRuntimeV1>>(project_root?)
             .await
             .map(|input| -> Arc<dyn FeedbackCycleRuntimePort> { input })
+    }
+}
+
+#[cfg(test)]
+mod payload_decode_tests {
+    use super::{DaemonFeedbackProximityPayloadError, decode_feedback_proximity_payload};
+
+    #[test]
+    fn missing_or_invalid_proximity_payload_is_a_typed_failure() {
+        assert!(matches!(
+            decode_feedback_proximity_payload(None),
+            Err(DaemonFeedbackProximityPayloadError::Missing)
+        ));
+        assert!(matches!(
+            decode_feedback_proximity_payload(Some(&serde_json::json!({"unexpected": true}))),
+            Err(DaemonFeedbackProximityPayloadError::Invalid(_))
+        ));
     }
 }

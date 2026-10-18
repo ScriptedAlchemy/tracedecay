@@ -1,25 +1,24 @@
-use std::fs;
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeSourceIdentityV1, EvidenceAvailabilityV1,
-    MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES, ObservationScopeV1,
-    ProjectId, RepositoryId, RetrievalAnchorTargetV2, SessionId, WorktreeId,
+    EvidenceAvailabilityV1, MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, RepositoryId,
+    RetrievalAnchorTarget, SessionId, WorktreeId,
 };
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
     ObservationBatchPersistOutcome, ObservationCommitReceipt, ObservationStore,
     ObservationStoreResult,
 };
 
-use tracedecay_runtime_core::privacy::{ClaudeSanitizerPolicyV1, parse_claude_record_v1};
+use tracedecay_privacy::{ClaudeSanitizerPolicyV1, parse_observation_record_v1};
 
 use super::*;
 
@@ -57,6 +56,10 @@ impl ConcurrencyProbe {
     fn peak(&self) -> usize {
         self.peak.load(Ordering::Acquire)
     }
+
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
 }
 
 struct ConcurrencyProbeGuard<'probe> {
@@ -75,35 +78,48 @@ struct PreparationProbe {
     probe: Arc<ConcurrencyProbe>,
 }
 
-static PREPARATION_PROBE: Mutex<Option<PreparationProbe>> = Mutex::new(None);
+/// One entry per live lease: libtest runs these tests concurrently in one
+/// process, so a single slot would let one test's install or drop silently
+/// disarm another test's probe.
+static PREPARATION_PROBE: Mutex<Vec<PreparationProbe>> = Mutex::new(Vec::new());
 
 pub(super) fn observe_capture_preparation(request: &CaptureObservationRequest) {
-    let probe = PREPARATION_PROBE.lock().unwrap().clone();
+    let session_id = request.identity.source().session_id();
+    let probe = PREPARATION_PROBE
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|probe| probe.session_id == session_id.as_str())
+        .cloned();
     let Some(probe) = probe else {
         return;
     };
-    if request.identity.source().session_id().as_str() != probe.session_id {
-        return;
-    }
     let _running = probe.probe.enter();
     std::thread::sleep(Duration::from_millis(50));
 }
 
-struct PreparationProbeLease;
+struct PreparationProbeLease {
+    session_id: String,
+}
 
 impl PreparationProbeLease {
     fn install(session_id: &str, probe: Arc<ConcurrencyProbe>) -> Self {
-        *PREPARATION_PROBE.lock().unwrap() = Some(PreparationProbe {
+        PREPARATION_PROBE.lock().unwrap().push(PreparationProbe {
             session_id: session_id.to_owned(),
             probe,
         });
-        Self
+        Self {
+            session_id: session_id.to_owned(),
+        }
     }
 }
 
 impl Drop for PreparationProbeLease {
     fn drop(&mut self) {
-        *PREPARATION_PROBE.lock().unwrap() = None;
+        PREPARATION_PROBE
+            .lock()
+            .unwrap()
+            .retain(|probe| probe.session_id != self.session_id);
     }
 }
 
@@ -186,7 +202,7 @@ impl ObservationStore for FakeStore {
 
     async fn get_source_cursor(
         &self,
-        source: &ClaudeSourceIdentityV1,
+        source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
     ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
         Ok(self
@@ -196,6 +212,22 @@ impl ObservationStore for FakeStore {
             .iter()
             .find(|cursor| cursor.source() == source && cursor.scope() == scope)
             .cloned())
+    }
+
+    async fn committed_source_cursors(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> ObservationStoreResult<Vec<ObservationSourceCursorV1>> {
+        Ok(self
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(StoredObservation::committed_cursor)
+            .filter(|cursor| cursor.source() == source && cursor.scope() == scope)
+            .cloned()
+            .collect())
     }
 
     async fn advance_source_cursor(
@@ -270,11 +302,11 @@ impl ObservationStore for FakeStore {
     }
 }
 
-fn request(record: &Value) -> CaptureClaudeObservationRequest {
+fn request(record: &Value) -> CaptureObservationRequest {
     request_at(record, 0)
 }
 
-fn request_at(record: &Value, start: u64) -> CaptureClaudeObservationRequest {
+fn request_at(record: &Value, start: u64) -> CaptureObservationRequest {
     request_at_with_cancellation(record, start, ObservationCancellation::default())
 }
 
@@ -282,7 +314,7 @@ fn request_at_with_cancellation(
     record: &Value,
     start: u64,
     cancellation: ObservationCancellation,
-) -> CaptureClaudeObservationRequest {
+) -> CaptureObservationRequest {
     request_at_for_session(record, start, "session.application-test", cancellation)
 }
 
@@ -291,28 +323,38 @@ fn request_at_for_session(
     start: u64,
     session_id: &str,
     cancellation: ObservationCancellation,
-) -> CaptureClaudeObservationRequest {
+) -> CaptureObservationRequest {
     let encoded_frame = serde_json::to_vec(record).unwrap();
     let end = start + u64::try_from(encoded_frame.len()).unwrap();
-    let parsed_record =
-        parse_claude_record_v1(&encoded_frame, ClaudeByteRangeV1::new(start, end).unwrap())
-            .unwrap();
-    let source = ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
+    let parsed_record = parse_observation_record_v1(
+        &encoded_frame,
+        ObservationSourceRangeV1::new(start, end).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+    )
+    .unwrap();
+    let source = ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
     let scope = ObservationScopeV1::Project {
         project_id: ProjectId::new("project.application-test").unwrap(),
     };
-    let generation = ClaudeFileGenerationV1::new(1).unwrap();
+    let generation = ObservationSourceGenerationV1::new(1).unwrap();
     let expected_cursor = (start != 0).then(|| {
-        ObservationSourceCursorV1::new(source.clone(), scope.clone(), generation, start).unwrap()
+        ObservationSourceCursorV1::for_ordering(
+            source.clone(),
+            scope.clone(),
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            start,
+        )
+        .unwrap()
     });
     let identity = ObservationIdentityMaterialV1::new(
         source,
         scope,
         generation,
-        ClaudeByteRangeV1::new(start, end).unwrap(),
+        ObservationSourceRangeV1::new(start, end).unwrap(),
     )
     .unwrap();
-    CaptureClaudeObservationRequest::new(
+    CaptureObservationRequest::new(
         parsed_record,
         identity,
         expected_cursor,
@@ -333,10 +375,7 @@ fn application_with_batch_concurrency(max_in_flight: usize) -> ObservationApplic
     application().with_batch_concurrency(std::num::NonZeroUsize::new(max_in_flight).unwrap())
 }
 
-fn consecutive_requests(
-    records: &[Value],
-    session_id: &str,
-) -> Vec<CaptureClaudeObservationRequest> {
+fn consecutive_requests(records: &[Value], session_id: &str) -> Vec<CaptureObservationRequest> {
     let mut start = 0;
     records
         .iter()
@@ -390,47 +429,17 @@ fn mark_first_observation_not_queued(store: &FakeStore) {
 }
 
 #[tokio::test]
-async fn non_durable_cursor_advance_stays_inside_application_boundary() {
-    let application = application();
-    let source =
-        ClaudeSourceIdentityV1::new(SessionId::new("session.cursor-advance").unwrap()).unwrap();
-    let advance = ObservationCursorAdvance::new(
-        source,
-        ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).unwrap(),
-        None,
-        ClaudeByteRangeV1::new(0, 4).unwrap(),
-        NonDurableFrameReason::BlankFrame,
-    )
-    .unwrap();
-
-    let outcome = application
-        .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
-            advance,
-            ObservationCancellation::default(),
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(outcome, CursorAdvanceOutcome::Committed);
-    let advances = application.store.cursor_advances.lock().unwrap();
-    assert_eq!(advances.len(), 1);
-    assert_eq!(advances[0].covered(), ClaudeByteRangeV1::new(0, 4).unwrap());
-    assert_eq!(advances[0].reason(), NonDurableFrameReason::BlankFrame);
-}
-
-#[tokio::test]
 async fn non_durable_cursor_advance_honors_cancellation_before_and_after_commit() {
     let application = application();
     let source =
-        ClaudeSourceIdentityV1::new(SessionId::new("session.cursor-cancel").unwrap()).unwrap();
+        ObservationSourceIdentityV1::new(SessionId::new("session.cursor-cancel").unwrap()).unwrap();
     let advance = ObservationCursorAdvance::new(
         source,
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).unwrap(),
+        ObservationSourceGenerationV1::new(1).unwrap(),
         None,
-        ClaudeByteRangeV1::new(0, 4).unwrap(),
-        NonDurableFrameReason::BlankFrame,
+        ObservationSourceRangeV1::new(0, 4).unwrap(),
+        ObservationCoverageReason::BlankFrame,
     )
     .unwrap();
 
@@ -475,7 +484,7 @@ async fn capture_redacts_before_the_store_and_replays_the_receipt_bound_row() {
     let application = application();
     let secret = "sk-proj-application-secret-1234567890";
     let outcome = application
-        .capture_claude_observation(request(&json!({
+        .capture_observation(request(&json!({
             "type": "user",
             "message": { "role": "user", "content": "hello" },
             "api_key": secret
@@ -488,6 +497,10 @@ async fn capture_redacts_before_the_store_and_replays_the_receipt_bound_row() {
         } => sanitized_record,
         other => panic!("capture must persist, got {other:?}"),
     };
+    assert_eq!(
+        sanitized_record.payload().to_string(),
+        r#"{"api_key":"[TraceDecay redacted: sensitive field]","message":{"content":"hello","role":"user"},"type":"user"}"#
+    );
     assert!(!sanitized_record.payload().to_string().contains(secret));
     assert!(matches!(
         outcome,
@@ -511,34 +524,19 @@ async fn capture_redacts_before_the_store_and_replays_the_receipt_bound_row() {
         EvidenceAvailabilityV1::Unavailable
     ));
     let payload = page.observations()[0].observation().payload().to_string();
+    assert_eq!(
+        payload,
+        r#"{"api_key":"[TraceDecay redacted: sensitive field]","message":{"content":"hello","role":"user"},"type":"user"}"#
+    );
     assert!(!payload.contains(secret));
-    assert!(payload.contains("TraceDecay redacted"));
 }
+
+const SANITIZED_REPOSITORY_PAYLOAD: &str = r#"{"api_key":"[TraceDecay redacted: sensitive field]","message":{"content":"repository evidence","role":"user"},"type":"user"}"#;
 
 #[tokio::test]
 async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
-    let repository = TempDir::new().unwrap();
-    let git = |args: &[&str]| {
-        let output = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .args(args)
-        .current_dir(repository.path())
-        .output()
-        .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.name", "TraceDecay Test"]);
-    git(&["config", "user.email", "tracedecay@example.invalid"]);
-    fs::write(repository.path().join("tracked.txt"), "content").unwrap();
-    git(&["add", "--", "tracked.txt"]);
-    git(&["commit", "-q", "-m", "initial"]);
+    let repository = crate::repository_provenance::repository_provenance_test::GitFixture::new();
+    repository.commit("initial");
 
     let application = application();
     let request = request(&json!({
@@ -554,9 +552,17 @@ async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
         [0x5a; 32],
     )));
     let outcome = application.capture_observation(request).await.unwrap();
-    let CaptureObservationOutcome::Persisted { outcome, .. } = outcome else {
+    let CaptureObservationOutcome::Persisted {
+        outcome,
+        sanitized_record,
+        ..
+    } = outcome
+    else {
         panic!("repository observation must persist");
     };
+    let sanitized_payload = sanitized_record.payload().to_string();
+    assert_eq!(sanitized_payload, SANITIZED_REPOSITORY_PAYLOAD);
+    assert!(!sanitized_payload.contains("sk-repository-provenance-secret"));
     let attachment = outcome.receipt().repository_provenance_attachment();
     let EvidenceAvailabilityV1::Known(provenance) = attachment.availability() else {
         panic!("repository provenance must be known");
@@ -566,13 +572,19 @@ async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
         Some(outcome.receipt().observation().observation_id())
     );
     assert!(matches!(
-        attachment.anchor().map(tracedecay_domain::RetrievalAnchorRecordV2::target),
-        Some(RetrievalAnchorTargetV2::RepositoryCapture { capture_id, .. })
+        attachment.anchor().map(tracedecay_domain::RetrievalAnchorRecord::target),
+        Some(RetrievalAnchorTarget::RepositoryCapture { capture_id, .. })
             if capture_id == provenance.capture_id()
     ));
     let encoded = serde_json::to_string(attachment).unwrap();
+    let attachment_value: Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        attachment_value["availability"]["value"]["capture"]["evidence"]["remote_identity"],
+        json!({"availability": "missing"})
+    );
     assert!(!encoded.contains(repository.path().to_string_lossy().as_ref()));
     assert!(!encoded.contains("sk-repository-provenance-secret"));
+    assert!(encoded.contains("repository.application-test"));
 }
 
 #[tokio::test]
@@ -608,30 +620,32 @@ async fn repository_provenance_context_refuses_cross_project_reuse() {
 fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
     let identity = |start, end| {
         ObservationIdentityMaterialV1::new(
-            ClaudeSourceIdentityV1::new(SessionId::new("session.frame-test").unwrap()).unwrap(),
+            ObservationSourceIdentityV1::new(SessionId::new("session.frame-test").unwrap())
+                .unwrap(),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(1).unwrap(),
-            ClaudeByteRangeV1::new(start, end).unwrap(),
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            ObservationSourceRangeV1::new(start, end).unwrap(),
         )
         .unwrap()
     };
     let retention = || RetentionClass::new("retention.application-test").unwrap();
 
     let raw = b"{}";
-    let parsed = parse_claude_record_v1(
+    let parsed = parse_observation_record_v1(
         raw,
-        ClaudeByteRangeV1::new(10, 10 + u64::try_from(raw.len()).unwrap()).unwrap(),
+        ObservationSourceRangeV1::new(10, 10 + u64::try_from(raw.len()).unwrap()).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
     )
     .unwrap();
     assert!(matches!(
-        CaptureClaudeObservationRequest::new(
+        CaptureObservationRequest::new(
             parsed,
             identity(0, u64::try_from(raw.len()).unwrap()),
             None,
             retention(),
             ObservationCancellation::default(),
         ),
-        Err(CaptureClaudeObservationRequestError::SourceRangeMismatch)
+        Err(CaptureObservationRequestError::SourceRangeMismatch)
     ));
 }
 
@@ -641,7 +655,7 @@ async fn committed_capture_with_missed_read_back_stays_persisted_as_queued() {
     *application.store.read_none_once.lock().unwrap() = true;
 
     let outcome = application
-        .capture_claude_observation(request(&json!({
+        .capture_observation(request(&json!({
             "type": "user",
             "message": { "role": "user", "content": "read-your-writes miss" }
         })))
@@ -673,7 +687,7 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
         "message": { "role": "user", "content": "duplicate" }
     });
     let first = application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .unwrap();
     let first_sanitized_record = match first {
@@ -685,7 +699,7 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
     mark_first_observation_not_queued(&application.store);
 
     let duplicate = application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .unwrap();
     match duplicate {
@@ -731,7 +745,7 @@ async fn assert_duplicate_read_miss_status_is_unavailable(
         }
     });
     application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .expect("first capture persists");
     match seeded_projection_status {
@@ -748,7 +762,7 @@ async fn assert_duplicate_read_miss_status_is_unavailable(
     *application.store.read_none_once.lock().unwrap() = true;
 
     let outcome = application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .expect("a duplicate receipt proves the row is durable despite a read miss");
 
@@ -795,24 +809,6 @@ async fn exact_duplicate_with_missed_read_back_has_unavailable_projection_status
 }
 
 #[tokio::test]
-async fn not_queued_exact_duplicate_with_missed_read_back_has_unavailable_projection_status() {
-    assert_duplicate_read_miss_status_is_unavailable(
-        DuplicatePersistKind::Exact,
-        ObservationProjectionStatus::NotQueued,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn covered_duplicate_with_missed_read_back_has_unavailable_projection_status() {
-    assert_duplicate_read_miss_status_is_unavailable(
-        DuplicatePersistKind::Covered,
-        ObservationProjectionStatus::Queued,
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn not_queued_covered_duplicate_with_missed_read_back_has_unavailable_projection_status() {
     assert_duplicate_read_miss_status_is_unavailable(
         DuplicatePersistKind::Covered,
@@ -827,7 +823,7 @@ async fn first_write_persist_error_stays_typed_and_skips_read_back() {
     *application.store.persist_error_once.lock().unwrap() = true;
 
     let error = application
-        .capture_claude_observation(request(&json!({
+        .capture_observation(request(&json!({
             "type": "user",
             "message": { "role": "user", "content": "first write failure" }
         })))
@@ -855,7 +851,7 @@ async fn replay_reports_partial_coverage_and_a_truthful_continuation() {
             }
         });
         application
-            .capture_claude_observation(request_at(&record, start))
+            .capture_observation(request_at(&record, start))
             .await
             .unwrap();
         start += u64::try_from(serde_json::to_vec(&record).unwrap().len()).unwrap();
@@ -887,53 +883,12 @@ async fn replay_reports_partial_coverage_and_a_truthful_continuation() {
 }
 
 #[tokio::test]
-async fn replay_at_the_store_limit_uses_a_bounded_probe_for_coverage() {
-    let application = application();
-    application
-        .capture_claude_observation(request(&json!({
-            "type": "user",
-            "message": { "role": "user", "content": "replay seed" }
-        })))
-        .await
-        .unwrap();
-    {
-        let mut observations = application.store.observations.lock().unwrap();
-        let seed = observations[0].clone();
-        *observations = (1..=1_001)
-            .map(|sequence| {
-                StoredObservation::new(
-                    sequence,
-                    seed.observation().clone(),
-                    seed.committed_cursor().clone(),
-                    seed.retrieval_anchor().clone(),
-                    seed.projection_generation().clone(),
-                    seed.projection_status(),
-                )
-                .unwrap()
-            })
-            .collect();
-    }
-
-    let page = application
-        .replay_observations(ReplayObservationsRequest::new(
-            ObservationReplayRequest::new(0, 1_000).unwrap(),
-            ObservationCancellation::default(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(page.coverage(), ObservationReplayCoverage::Partial);
-    assert!(page.has_more());
-    assert_eq!(page.next_after_sequence(), Some(1_000));
-    assert_eq!(page.observations().len(), 1_000);
-}
-
-#[tokio::test]
 async fn pre_cancelled_capture_never_reaches_the_store() {
     let application = application();
     let cancellation = ObservationCancellation::default();
     cancellation.cancel();
     let result = application
-        .capture_claude_observation(request_at_with_cancellation(
+        .capture_observation(request_at_with_cancellation(
             &json!({
                 "type": "user",
                 "message": { "role": "user", "content": "cancelled" }
@@ -961,13 +916,13 @@ async fn cancellation_during_atomic_commit_is_reported_after_commit_and_retry_is
     });
 
     let first = application
-        .capture_claude_observation(request_at_with_cancellation(&record, 0, cancellation))
+        .capture_observation(request_at_with_cancellation(&record, 0, cancellation))
         .await;
     assert!(matches!(first, Err(ObservationApplicationError::Cancelled)));
     assert_eq!(application.store.observations.lock().unwrap().len(), 1);
 
     let retry = application
-        .capture_claude_observation(request(&record))
+        .capture_observation(request(&record))
         .await
         .unwrap();
     let CaptureObservationOutcome::Persisted { outcome, .. } = retry else {
@@ -984,7 +939,7 @@ async fn cancellation_during_atomic_commit_is_reported_after_commit_and_retry_is
 async fn cancellation_after_point_read_and_replay_discards_non_atomic_results() {
     let application = application();
     let capture = application
-        .capture_claude_observation(request(&json!({
+        .capture_observation(request(&json!({
             "type": "user",
             "message": { "role": "user", "content": "read cancellation" }
         })))
@@ -1021,39 +976,57 @@ async fn cancellation_after_point_read_and_replay_discards_non_atomic_results() 
     ));
 }
 
+/// A slow preparation span must leave the runtime worker free.
+///
+/// Single-record preparation sanitizes the record and captures repository
+/// provenance, which opens the repository and reads loose refs and the Git
+/// index, synchronous and unbounded on a large repository. The probe stands
+/// in for that span at a controllable 50ms. `#[tokio::test]` runs on one
+/// worker, so the watcher can observe `active` above zero only if the span is
+/// genuinely off that worker: preparing inline leaves the watcher unpolled
+/// until the span has already finished and `active` is back to zero.
 #[tokio::test]
-async fn capture_observations_empty_skips_persist_authority() {
+async fn capture_observation_prepares_off_the_runtime_worker() {
+    let session_id = "session.application-single-preparation";
+    let probe = Arc::new(ConcurrencyProbe::default());
+    let _probe = PreparationProbeLease::install(session_id, Arc::clone(&probe));
     let application = application();
-    let outcomes = application.capture_observations(Vec::new()).await.unwrap();
-    assert!(outcomes.is_empty());
-    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 0);
-    assert!(application.store.observations.lock().unwrap().is_empty());
-}
 
-#[tokio::test]
-async fn capture_observations_sanitizes_then_persists_once() {
-    let application = application();
-    let first = json!({
-        "type": "user",
-        "message": { "role": "user", "content": "batch-one" }
+    let observed_in_flight = Arc::new(AtomicBool::new(false));
+    let watcher_probe = Arc::clone(&probe);
+    let watcher_flag = Arc::clone(&observed_in_flight);
+    let watcher = tokio::spawn(async move {
+        for _ in 0..500 {
+            if watcher_probe.active() > 0 {
+                watcher_flag.store(true, Ordering::Release);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     });
-    let second = json!({
-        "type": "user",
-        "message": { "role": "user", "content": "batch-two" }
-    });
-    let start_two = u64::try_from(serde_json::to_vec(&first).unwrap().len()).unwrap();
-    let outcomes = application
-        .capture_observations(vec![request(&first), request_at(&second, start_two)])
+
+    let outcome = application
+        .capture_observation(request_at_for_session(
+            &json!({
+                "type": "user",
+                "message": { "role": "user", "content": "single-preparation" }
+            }),
+            0,
+            session_id,
+            ObservationCancellation::default(),
+        ))
         .await
-        .unwrap();
-    assert_eq!(outcomes.len(), 2);
+        .expect("single-record capture remains durable");
+    watcher.await.expect("watcher joins");
+
     assert!(
-        outcomes
-            .iter()
-            .all(|outcome| { matches!(outcome, CaptureObservationOutcome::Persisted { .. }) })
+        matches!(outcome, CaptureObservationOutcome::Persisted { .. }),
+        "the offloaded preparation must still persist the record"
     );
-    assert_eq!(*application.store.persist_batch_calls.lock().unwrap(), 1);
-    assert_eq!(application.store.observations.lock().unwrap().len(), 2);
+    assert!(
+        observed_in_flight.load(Ordering::Acquire),
+        "a concurrent task must run while preparation blocks the worker"
+    );
 }
 
 #[tokio::test]
@@ -1215,7 +1188,7 @@ async fn capture_observations_reports_cancellation_after_the_single_batch_commit
 
 #[tokio::test]
 async fn capture_observations_refuses_mixed_privacy_batch_before_persist() {
-    // `parse_claude_record_v1` (used by `request`/`request_at` below) enforces
+    // `parse_observation_record_v1` (used by `request`/`request_at` below) enforces
     // the parser's own 1 MiB ceiling before any record reaches the sanitizer,
     // so a record large enough to trip that ceiling can never reach
     // `sanitize_parsed`'s own `RecordSize` disposition through this path. To

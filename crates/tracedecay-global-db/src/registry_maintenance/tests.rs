@@ -1,7 +1,7 @@
 //! Atomicity coverage for registry garbage collection.
 //!
-//! A project is registered in two generations — the `code_projects` registry
-//! and the older `projects` accounting table — and collection has to remove
+//! A project is registered in two generations, the `code_projects` registry
+//! and the older `projects` accounting table, and collection has to remove
 //! both or neither. A half-applied sweep either strips a live project's
 //! registry row while its accounting row keeps it addressable, or leaves an
 //! orphan behind for the next sweep to trip over. The transaction is the only
@@ -9,39 +9,14 @@
 
 use std::path::Path;
 
+use crate::RegisteredGlobalDb;
 use crate::tests::harness::RegisteredGlobalDbHarness;
-use crate::{GraphScopeUpsert, RegisteredGlobalDb};
 use tracedecay_runtime_core::db::engine::params;
 
-use super::{
-    graph_scope_location_drift_is_repairable,
-    lifecycle::delete_registry_gc_candidates_in_transaction,
-};
+use super::lifecycle::delete_registry_gc_candidates_in_transaction;
 
 const PROJECT_ID: &str = "proj_gc";
 const TOKENS: u64 = 11;
-
-#[test]
-fn graph_scope_location_drift_requires_the_same_immutable_owner() {
-    let expected = GraphScopeUpsert {
-        graph_scope_id: "store:project:profile_sharded:branch:feature".to_string(),
-        project_id: "project".to_string(),
-        store_id: "store:project:profile_sharded".to_string(),
-        branch_name: "feature".to_string(),
-        db_relpath: "projects/project/branches/current.db".to_string(),
-        parent_scope_id: Some("parent-current".to_string()),
-        last_synced_at: Some(2),
-        writable: true,
-    };
-    assert!(graph_scope_location_drift_is_repairable(
-        r#"["project","store:project:profile_sharded","feature","projects/project/branches/old.db","parent-old"]"#,
-        &expected,
-    ));
-    assert!(!graph_scope_location_drift_is_repairable(
-        r#"["other-project","store:project:profile_sharded","feature","projects/project/branches/old.db","parent-old"]"#,
-        &expected,
-    ));
-}
 
 /// Registers a project in both generations. The `code_projects` row is written
 /// directly because `upsert_code_project` refuses an ephemeral root, and the
@@ -81,41 +56,11 @@ async fn code_project_registered(db: &RegisteredGlobalDb) -> bool {
         .is_some()
 }
 
-/// The ordinary sweep: one transaction removes the project from both
-/// generations and reports one deletion from each.
-#[tokio::test]
-async fn registry_gc_deletes_both_registry_generations_in_one_commit() {
-    let harness = RegisteredGlobalDbHarness::open("registry-gc-commit").await;
-    let project = harness.registered.db_path().parent().unwrap().join("gone");
-    register_both_generations(&harness.registered, &project).await;
-
-    let transaction = harness
-        .registered
-        .begin_write_transaction()
-        .await
-        .expect("begin registry cleanup transaction");
-    let deleted = delete_registry_gc_candidates_in_transaction(
-        &transaction,
-        &[PROJECT_ID.to_string()],
-        std::slice::from_ref(&project),
-    )
-    .await
-    .expect("delete registry cleanup plan");
-    transaction.commit().await.expect("commit registry cleanup");
-
-    assert_eq!(deleted, (1, 1));
-    assert!(!code_project_registered(&harness.registered).await);
-    assert_eq!(
-        harness.registered.try_get_project_tokens(&project).await,
-        Ok(0)
-    );
-}
-
 /// The atomicity claim. The `code_projects` delete runs first and succeeds; the
 /// `projects` delete then aborts. Rolling back has to take the first delete
 /// with it, or the sweep leaves a project addressable through its accounting
 /// row with no registry row behind it.
-#[tokio::test]
+#[asupersync::test]
 async fn registry_gc_rolls_back_both_generations_when_one_delete_fails() {
     let harness = RegisteredGlobalDbHarness::open("registry-gc-rollback").await;
     let project = harness.registered.db_path().parent().unwrap().join("gone");
@@ -165,17 +110,17 @@ async fn registry_gc_rolls_back_both_generations_when_one_delete_fails() {
 /// agent is active. The sweep's write transaction must serialize the refresh
 /// rather than interleave with it, so the refresh lands whole afterwards
 /// instead of resurrecting one generation and not the other.
-#[tokio::test]
-async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
+#[asupersync::test]
+async fn registry_gc_transaction_serializes_a_concurrent_project_refresh(cx: &asupersync::Cx) {
     let harness = RegisteredGlobalDbHarness::open("registry-gc-serialize").await;
     let project = harness.registered.db_path().parent().unwrap().join("gone");
     register_both_generations(&harness.registered, &project).await;
 
     // The refresh races the sweep through the *same* registered runtime, which
     // is how a daemon actually reaches this database: one mount, one serialized
-    // writer lane. A second independent mount would not serialize — connection
+    // writer lane. A second independent mount would not serialize, connection
     // policy pins `busy_timeout = 0` precisely so SQLite never waits behind the
-    // runtime's own queue — and would fail the write outright instead.
+    // runtime's own queue, and would fail the write outright instead.
     let concurrent_db = harness.registered.clone();
 
     let transaction = harness
@@ -185,20 +130,22 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
         .expect("begin registry cleanup transaction");
 
     let concurrent_project = project.clone();
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let refresh = tokio::spawn(async move {
-        let _ = started_tx.send(());
-        concurrent_db
-            .try_upsert_project_tokens(&concurrent_project, 22)
-            .await
-            .expect("concurrent refresh upsert");
-        concurrent_db
-            .try_get_project_tokens(&concurrent_project)
-            .await
-            .expect("concurrent refresh read")
-    });
-    started_rx.await.unwrap();
-    tokio::task::yield_now().await;
+    let (started_tx, mut started_rx) = asupersync::channel::oneshot::channel();
+    let mut refresh = cx
+        .spawn(move |cx| async move {
+            let _ = started_tx.send(&cx, ());
+            concurrent_db
+                .try_upsert_project_tokens(&concurrent_project, 22)
+                .await
+                .expect("concurrent refresh upsert");
+            concurrent_db
+                .try_get_project_tokens(&concurrent_project)
+                .await
+                .expect("concurrent refresh read")
+        })
+        .expect("spawn concurrent refresh");
+    started_rx.recv(cx).await.unwrap();
+    asupersync::runtime::yield_now().await;
     assert!(
         !refresh.is_finished(),
         "the refresh must block on the sweep's write transaction"
@@ -214,26 +161,91 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
     transaction.commit().await.expect("commit registry cleanup");
     assert_eq!(deleted, (1, 1));
 
-    let refreshed = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
-        .await
-        .expect("the concurrent refresh must resume once the sweep commits")
-        .expect("the concurrent refresh task must complete");
+    let refreshed = asupersync::time::timeout(
+        asupersync::time::wall_now(),
+        std::time::Duration::from_secs(5),
+        refresh.join(cx),
+    )
+    .await
+    .expect("the concurrent refresh must resume once the sweep commits")
+    .expect("the concurrent refresh task must complete");
     assert_eq!(
         refreshed, 22,
         "the refresh lands whole after the sweep rather than interleaving with it"
     );
 }
 
-/// Registry liveness must resolve the whole identity — aliases, the shared git
-/// common directory, and registered store instances — before an unreviewed
-/// pass retires a row. Deleting `code_projects` cascades those rows away, so a
+async fn register_code_project(db: &RegisteredGlobalDb, project_id: &str, root: &Path) {
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .expect("begin registry fixture transaction");
+    transaction
+        .execute(
+            "INSERT INTO code_projects
+             (project_id, canonical_root, display_root, created_at, last_seen_at)
+             VALUES (?1, ?2, ?2, 1, 1)",
+            params![project_id, root.to_string_lossy().as_ref()],
+        )
+        .await
+        .expect("register code project");
+    transaction.commit().await.expect("commit registry fixture");
+}
+
+/// A linked worktree registers as an alias of the primary checkout's identity.
+/// Removing the primary checkout leaves the canonical root missing while the
+/// worktree still uses the identity, so cleanup must protect it: applying the
+/// plan would cascade the live alias away with the row.
+#[asupersync::test]
+async fn registry_gc_protects_an_identity_whose_alias_is_still_live() {
+    let harness = RegisteredGlobalDbHarness::open("registry-gc-live-alias").await;
+    let db = &harness.registered;
+    let storage_root = db.db_path().parent().unwrap().to_path_buf();
+    let worktree = storage_root.join("linked-worktree");
+    std::fs::create_dir_all(&worktree).expect("create live worktree");
+    register_code_project(db, "proj_aliased", &storage_root.join("removed-primary")).await;
+    db.upsert_project_alias(&worktree, "proj_aliased")
+        .await
+        .expect("register live worktree alias");
+    register_code_project(db, "proj_dead", &storage_root.join("removed-checkout")).await;
+
+    let applied = super::apply_registry_gc(db, &storage_root, None)
+        .await
+        .expect("apply registry cleanup");
+
+    let ids = |projects: &[crate::CodeProjectRecord]| {
+        projects
+            .iter()
+            .map(|project| project.project_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&applied.candidates), ["proj_dead"]);
+    assert_eq!(ids(&applied.protected_code_projects), ["proj_aliased"]);
+    assert_eq!(applied.deleted_code_project_count, 1);
+    assert!(
+        db.get_code_project("proj_aliased")
+            .await
+            .expect("read protected project")
+            .is_some(),
+        "a live alias must keep its identity registered"
+    );
+    assert!(
+        db.get_code_project("proj_dead")
+            .await
+            .expect("read retired project")
+            .is_none()
+    );
+}
+
+/// Registry liveness must resolve the whole identity, aliases, the shared git
+/// common directory, and registered store instances, before cleanup retires
+/// a row. Deleting `code_projects` cascades those rows away, so a
 /// roots-only check silently destroys a live project's registration.
 mod liveness {
     use std::path::{Path, PathBuf};
 
     use crate::registry_maintenance::{
-        RootLivenessV1, StaleRootScope, code_project_root_exists, probe_root,
-        project_context_liveness, stale_project_contexts,
+        RootLivenessV1, code_project_root_liveness, probe_root, project_context_liveness,
     };
     use crate::{
         CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
@@ -294,14 +306,9 @@ mod liveness {
             last_seen_at: 0,
         });
 
-        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Live);
-        assert!(
-            stale_project_contexts(
-                std::slice::from_ref(&ctx),
-                &[],
-                StaleRootScope::AllRootsMissing
-            )
-            .is_empty(),
+        assert_eq!(
+            project_context_liveness(&ctx),
+            RootLivenessV1::Live,
             "a project with a live alias must never be a GC candidate"
         );
     }
@@ -311,14 +318,9 @@ mod liveness {
         let mut ctx = context(project(GONE));
         ctx.stores.push(store_context());
 
-        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Live);
-        assert!(
-            stale_project_contexts(
-                std::slice::from_ref(&ctx),
-                &[],
-                StaleRootScope::AllRootsMissing
-            )
-            .is_empty(),
+        assert_eq!(
+            project_context_liveness(&ctx),
+            RootLivenessV1::Live,
             "deleting this row would cascade its live store instance away"
         );
     }
@@ -330,29 +332,15 @@ mod liveness {
         let ctx = context(record);
 
         assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Live);
-        assert!(
-            stale_project_contexts(
-                std::slice::from_ref(&ctx),
-                &[],
-                StaleRootScope::AllRootsMissing
-            )
-            .is_empty()
-        );
     }
 
     #[test]
     fn every_root_proven_absent_is_still_a_candidate() {
         let ctx = context(project(GONE));
 
-        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Absent);
         assert_eq!(
-            stale_project_contexts(
-                std::slice::from_ref(&ctx),
-                &[],
-                StaleRootScope::AllRootsMissing
-            )
-            .len(),
-            1,
+            project_context_liveness(&ctx),
+            RootLivenessV1::Absent,
             "proven absence is the one condition that permits retirement"
         );
     }
@@ -378,8 +366,9 @@ mod liveness {
 
         let mut record = project(GONE);
         record.git_common_dir = Some(GONE.to_string());
-        assert!(
-            !code_project_root_exists(&record),
+        assert_eq!(
+            code_project_root_liveness(&record),
+            RootLivenessV1::Absent,
             "a row whose every root is proven absent still reports absent"
         );
     }

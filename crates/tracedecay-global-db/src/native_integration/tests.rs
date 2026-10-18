@@ -1,7 +1,9 @@
 use tracedecay_domain::{
-    ActorId, CapabilityId, FrozenIndependentBranchSelectionV1, GitHeadStateV1, GitObjectFormatV1,
-    GitOidV1, GitOperationStateV1, ManifestDigest, MechanicalIntegrationModeV1,
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPhaseV1,
+    ActorId, CapabilityId, CodeGenerationId, ContentDigest, FrozenIndependentBranchSelectionV1,
+    GitHeadStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1, MechanicalIntegrationModeV1,
+    NativeIntegrationAnalysisCoverageV1, NativeIntegrationAnalysisLaneV1,
+    NativeIntegrationAnalysisReportV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationGenerationBindingV1, NativeIntegrationPhaseV1,
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
     NativeIntegrationReceiptV1, NativeIntegrationRepositorySnapshotV1,
     NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
@@ -15,12 +17,62 @@ use tracedecay_store::{
 use super::store::GlobalDbNativeIntegrationStore;
 use crate::{RegisteredGlobalDb, tests::harness::RegisteredGlobalDbHarness};
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture object id")
+}
+
+fn analysis_fixture(
+    snapshot: &NativeIntegrationRepositorySnapshotV1,
+) -> NativeIntegrationAnalysisReportV1 {
+    let binding = |name: &str, revision: Option<GitOidV1>, tree: GitOidV1| {
+        NativeIntegrationGenerationBindingV1 {
+            generation_id: CodeGenerationId::new(format!("generation.native.fixture.{name}"))
+                .expect("generation id"),
+            project_id: snapshot.project_id.clone(),
+            repository_id: snapshot.repository_id.clone(),
+            worktree_id: None,
+            reference: Some(if name == "source" || name == "merge-base" {
+                snapshot.source_ref.clone()
+            } else {
+                snapshot.destination_ref.clone()
+            }),
+            snapshot_digest: digest('e'),
+            content_identity: ContentDigest::new(digest('f').as_str().to_owned())
+                .expect("content identity"),
+            source_revision: revision,
+            source_tree: tree,
+            seal_digest: digest('0'),
+        }
+    };
+    let complete = NativeIntegrationAnalysisLaneV1 {
+        coverage: NativeIntegrationAnalysisCoverageV1::Complete,
+        gaps: Vec::new(),
+    };
+    NativeIntegrationAnalysisReportV1 {
+        merge_base: binding("merge-base", Some(snapshot.merge_base.clone()), oid('a')),
+        source: binding(
+            "source",
+            Some(snapshot.source_tip.clone()),
+            snapshot.source_tree.clone(),
+        ),
+        destination: binding(
+            "destination",
+            Some(snapshot.destination_tip.clone()),
+            snapshot.destination_tree.clone(),
+        ),
+        candidate: binding("candidate", None, snapshot.source_tree.clone()),
+        graph: complete.clone(),
+        tests: complete.clone(),
+        schema: complete.clone(),
+        migrations: complete,
+        conflicts: Vec::new(),
+        analyzer_revision: "native-global-db-test.v1".to_owned(),
+        digest: digest('1'),
+    }
+    .seal()
+    .expect("sealed analysis")
 }
 
 fn preview_fixture(preview_id: &str) -> NativeIntegrationPreviewV1 {
@@ -71,16 +123,14 @@ fn preview_fixture(preview_id: &str) -> NativeIntegrationPreviewV1 {
     }
     .seal()
     .expect("sealed snapshot");
+    let analysis = analysis_fixture(&snapshot);
     NativeIntegrationPreviewV1 {
         preview_id: NativeIntegrationPreviewId::new(preview_id).expect("preview id"),
         selection: NativeIntegrationSelectionV1::IndependentBranch(selection),
         repository_snapshot: snapshot,
         grant_digest: digest('c'),
         policy_digest: digest('d'),
-        graph_revision_digest: digest('e'),
-        test_revision_digest: digest('f'),
-        schema_revision_digest: digest('0'),
-        migration_revision_digest: digest('1'),
+        analysis: Some(analysis),
         disposition: NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(
             MechanicalIntegrationModeV1::FastForward,
         ),
@@ -174,7 +224,7 @@ fn test_store(database: &RegisteredGlobalDb) -> GlobalDbNativeIntegrationStore<'
     GlobalDbNativeIntegrationStore::new(database)
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -206,7 +256,7 @@ async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn issued_approvals_persist_and_conflicting_reissue_is_rejected() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -243,7 +293,7 @@ async fn issued_approvals_persist_and_conflicting_reissue_is_rejected() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn begin_consumes_the_approval_exactly_once() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -303,7 +353,7 @@ fn preview_with_expiry(preview_id: &str, expires_at: UtcMicros) -> NativeIntegra
     value.seal().expect("resealed preview")
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn status_compare_and_swap_rejects_stale_revisions_and_identity_rebinds() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -375,7 +425,7 @@ async fn status_compare_and_swap_rejects_stale_revisions_and_identity_rebinds() 
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn terminal_receipts_replay_and_survive_restart() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -432,6 +482,13 @@ async fn terminal_receipts_replay_and_survive_restart() {
             .read_receipt(&record.status.transaction_id)
             .await
             .expect("read receipt after restart"),
+        Some(receipt.clone())
+    );
+    assert_eq!(
+        store
+            .read_receipt_by_digest(&receipt.receipt_digest)
+            .await
+            .expect("read receipt by digest after restart"),
         Some(receipt)
     );
     assert_eq!(
@@ -443,7 +500,7 @@ async fn terminal_receipts_replay_and_survive_restart() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn needs_inspection_quarantines_the_repository_until_recovery() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -482,7 +539,7 @@ async fn needs_inspection_quarantines_the_repository_until_recovery() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn pending_transactions_expose_unfinished_work_for_restart_recovery() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());

@@ -65,15 +65,6 @@ pub enum GitObjectFormatV1 {
     Sha256,
 }
 
-impl GitObjectFormatV1 {
-    pub const fn oid_hex_len(self) -> usize {
-        match self {
-            Self::Sha1 => 40,
-            Self::Sha256 => 64,
-        }
-    }
-}
-
 fn validate_git_oid(value: &str, field: &'static str) -> Result<(), DomainError> {
     if value.is_empty() {
         return Err(DomainError::Empty { field });
@@ -330,7 +321,7 @@ impl GitCoverageV1 {
     /// Tracked entries, the index tree, and the index checksum are all still
     /// captured exactly, so it is not evidence that a read failed. Counting it
     /// as one made every index transaction ineligible in any repository that
-    /// keeps an ignored directory beside tracked files — `target/`,
+    /// keeps an ignored directory beside tracked files. `target/`,
     /// `node_modules/`, `.tracedecay/`.
     pub fn leaves_state_unread(&self) -> bool {
         self.degradations

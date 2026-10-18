@@ -4,14 +4,14 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::TempDir;
-use tracedecay_application::retained_surfaces::{
-    AutomationRunRequestV1, AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1,
-    AutomationTaskRequestV1, AutomationTaskV1, MemoryCuratorRunInputV1, RetainedSurfaceOperation,
-    RetainedSurfaceRequestV1, RetainedSurfaceResultV1,
+use tracedecay_contracts::retained_surfaces::{
+    AutomationRunRequestV1, AutomationTaskRequestV1, FactStoreCurateResultV1,
+    MemoryCuratorRunInputV1, RetainedSurfaceOperation, RetainedSurfaceRequestV1,
+    RetainedSurfaceResultV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblem, AuthorityReceipt, CancellationSignal,
     CapabilityGrantId, Deadline, DisclosureClass, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, LegalAction, OperationBudgetUsage, OperationReceipt,
@@ -19,19 +19,17 @@ use tracedecay_application::{
     SafeDiagnostic,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, RunId, UtcMicros,
-    WorktreeId,
+    ActorId, ComponentVersion, ProjectId, RepositoryId, RunId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use super::dispatch_test_support::SelectorEnv;
+use super::dispatch_test_support::{registered_lib_fixture, tool_json};
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
-use crate::tracedecay::TraceDecay;
+use crate::daemon::retained_test_support::{
+    forward_application_surface, ignore_feedback_observations,
+};
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn retained_scope() -> ResolvedScope {
     ResolvedScope::new(
@@ -54,7 +52,7 @@ fn post_commit_partial_effect(
         )
         .expect("fixture diagnostic"),
         committed_receipt: Box::new(EffectReceipt {
-            operation: tracedecay_application::retained_surface_application_operation(operation)
+            operation: tracedecay_contracts::retained_surface_application_operation(operation)
                 .expect("retained application operation")
                 .use_case_id()
                 .clone(),
@@ -82,48 +80,24 @@ fn post_commit_partial_effect(
 fn deadline_from_now(offset: Duration) -> Deadline {
     let offset = i64::try_from(offset.as_micros()).expect("fixture deadline fits domain clock");
     Deadline::new(UtcMicros(
-        tracedecay_daemon_protocol::invocation_now_micros()
-            .0
-            .saturating_add(offset),
+        tracedecay_contracts::now_micros().0.saturating_add(offset),
     ))
     .expect("fixture deadline")
-}
-
-fn mcp_payload(result: ToolResult) -> Value {
-    serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("retained MCP JSON result"),
-    )
-    .expect("retained MCP JSON envelope")
 }
 
 fn fact_store_curate_run(
     run_id: &str,
     fact_review_limit: u32,
     min_confidence_millionths: u32,
-) -> AutomationRunResultV1 {
-    let request = AutomationRunRequestV1 {
+) -> FactStoreCurateResultV1 {
+    FactStoreCurateResultV1::started(&AutomationRunRequestV1 {
         run_id: RunId::new(run_id).expect("curation run id"),
         task: AutomationTaskRequestV1::MemoryCurator(MemoryCuratorRunInputV1 {
             fact_review_limit,
             min_confidence_millionths,
         }),
-    };
-    AutomationRunResultV1 {
-        run_id: request.run_id.clone(),
-        task: AutomationTaskV1::MemoryCurator,
-        request_digest: request.input_digest().expect("curation request digest"),
-        terminal: AutomationRunTerminalV1::Completed {
-            summary: AutomationRunSummaryV1 {
-                reviewed_count: 0,
-                accepted_count: 0,
-                rejected_count: 0,
-                skipped_count: 0,
-            },
-        },
-        committed_receipts: Vec::new(),
-    }
+    })
+    .expect("curation receipt")
 }
 
 fn fact_store_curate_effect(
@@ -135,7 +109,7 @@ fn fact_store_curate_effect(
     let idempotency_key =
         IdempotencyKey::new("idempotency.retained.fact-store-curate").expect("idempotency key");
     let receipt = EffectReceipt {
-        operation: tracedecay_application::retained_surface_application_operation(
+        operation: tracedecay_contracts::retained_surface_application_operation(
             RetainedSurfaceOperation::FactStoreCurate,
         )
         .expect("fact-store curation operation")
@@ -204,18 +178,18 @@ struct FactStoreCurateSuccessExecutor {
     expected_bounds: (u32, u32),
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for FactStoreCurateSuccessExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for FactStoreCurateSuccessExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -272,17 +246,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for FactStoreCurateSuc
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 struct ExpiredDeadlineExecutor {
@@ -290,18 +254,18 @@ struct ExpiredDeadlineExecutor {
     mutations: AtomicUsize,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for ExpiredDeadlineExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for ExpiredDeadlineExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -324,57 +288,41 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExe
             policy,
             tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect,
         );
-        assert!(deadline.is_elapsed_at(tracedecay_daemon_protocol::invocation_now_micros()));
-        let response =
-            if deadline.is_elapsed_at(tracedecay_daemon_protocol::invocation_now_micros()) {
-                tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
-                    &request.request_id,
-                    ApplicationProblem::timed_out_before_admission(),
-                )
-            } else {
-                self.mutations.fetch_add(1, Ordering::SeqCst);
-                tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
-                    &request.request_id,
-                    ApplicationProblem::unavailable(
-                        SafeDiagnostic::new(
-                            "retained.fixture.unexpected-deadline-mutation",
-                            "The expired fixture would have attempted a mutation.",
-                        )
-                        .expect("fixture diagnostic"),
-                    ),
-                )
-            };
+        assert!(deadline.is_elapsed_at(tracedecay_contracts::now_micros()));
+        let response = if deadline.is_elapsed_at(tracedecay_contracts::now_micros()) {
+            tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+                &request.request_id,
+                ApplicationProblem::timed_out_before_admission(),
+            )
+        } else {
+            self.mutations.fetch_add(1, Ordering::SeqCst);
+            tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+                &request.request_id,
+                ApplicationProblem::unavailable(
+                    SafeDiagnostic::new(
+                        "retained.fixture.unexpected-deadline-mutation",
+                        "The expired fixture would have attempted a mutation.",
+                    )
+                    .expect("fixture diagnostic"),
+                ),
+            )
+        };
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
 async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("fixture directory");
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("fact-store-curate-success");
-    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
-    std::fs::write(project.join("src/lib.rs"), "pub fn curate_success() {}\n")
-        .expect("fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "fact-store-curate-success",
+        "pub fn curate_success() {}\n",
         "project.mcp-fact-store-curate-success",
     )
-    .await
-    .expect("registered retained fixture");
+    .await;
     let executor = FactStoreCurateSuccessExecutor {
         calls: AtomicUsize::new(0),
         scope: retained_scope(),
@@ -390,8 +338,6 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
             "min_confidence_millionths": 810_000,
             "format": "json",
         }),
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_request_id: Some(request_id.clone()),
@@ -405,7 +351,7 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
     )
     .await
     .expect("canonical fact-store curation result");
-    let payload = mcp_payload(result);
+    let payload = tool_json(&result);
 
     assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
     assert_eq!(payload["request_id"], request_id.as_str());
@@ -418,28 +364,20 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
         payload["outcome"]["value"]["payload"]["task"],
         "memory_curator"
     );
-    assert_eq!(
-        payload["outcome"]["value"]["payload"]["terminal"]["summary"]["reviewed_count"],
-        0
-    );
+    assert_eq!(payload["outcome"]["value"]["payload"]["state"], "started");
     cg.close();
 }
 
 #[tokio::test]
 async fn fact_store_curate_expired_deadline_does_not_mutate() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("fixture directory");
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("fact-store-curate-deadline");
-    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
-    std::fs::write(project.join("src/lib.rs"), "pub fn curate_deadline() {}\n")
-        .expect("fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "fact-store-curate-deadline",
+        "pub fn curate_deadline() {}\n",
         "project.mcp-fact-store-curate-deadline",
     )
-    .await
-    .expect("registered retained fixture");
+    .await;
     let executor = ExpiredDeadlineExecutor {
         calls: AtomicUsize::new(0),
         mutations: AtomicUsize::new(0),
@@ -449,8 +387,6 @@ async fn fact_store_curate_expired_deadline_does_not_mutate() {
         &cg,
         "tracedecay_fact_store_curate",
         json!({"fact_review_limit": 5, "min_confidence_millionths": 700_000}),
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_request_id: Some(
@@ -501,18 +437,18 @@ impl PostCommitPartialEffectExecutor {
     }
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for PostCommitPartialEffectExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for PostCommitPartialEffectExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -544,17 +480,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PostCommitPartialE
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 struct PreCommitInterruptionExecutor {
@@ -562,18 +488,18 @@ struct PreCommitInterruptionExecutor {
     mutations: AtomicUsize,
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for PreCommitInterruptionExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for PreCommitInterruptionExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -618,34 +544,19 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PreCommitInterrupt
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
 async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("fixture directory");
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("fact-store-curate-scope-mismatch");
-    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
-    std::fs::write(project.join("src/lib.rs"), "pub fn curate_scope() {}\n")
-        .expect("fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "fact-store-curate-scope-mismatch",
+        "pub fn curate_scope() {}\n",
         "project.mcp-fact-store-curate-scope-mismatch",
     )
-    .await
-    .expect("registered retained fixture");
+    .await;
     let request_id = RequestId::new("request.retained.mcp.fact-store-curate-scope-mismatch")
         .expect("request id");
     let authority_scope = ResolvedScope::new(
@@ -665,8 +576,6 @@ async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
         &cg,
         "tracedecay_fact_store_curate",
         json!({"fact_review_limit": 8, "min_confidence_millionths": 730_000}),
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_request_id: Some(request_id),
@@ -681,25 +590,23 @@ async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
     .await
     .expect("scope mismatch must render an unavailable result");
 
-    assert_eq!(result.value["problem"]["kind"], "unavailable");
+    assert_eq!(
+        result.value["structuredContent"]["problem"]["kind"],
+        "unavailable"
+    );
     cg.close();
 }
 
 #[tokio::test]
 async fn fact_store_curate_pre_commit_cancellation_does_not_mutate() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("fixture directory");
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("fact-store-curate-cancelled");
-    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
-    std::fs::write(project.join("src/lib.rs"), "pub fn retained_cancel() {}\n")
-        .expect("fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "fact-store-curate-cancelled",
+        "pub fn retained_cancel() {}\n",
         "project.mcp-fact-store-curate-cancelled",
     )
-    .await
-    .expect("registered retained fixture");
+    .await;
     let executor = PreCommitInterruptionExecutor {
         calls: AtomicUsize::new(0),
         mutations: AtomicUsize::new(0),
@@ -712,8 +619,6 @@ async fn fact_store_curate_pre_commit_cancellation_does_not_mutate() {
         &cg,
         "tracedecay_fact_store_curate",
         json!({"fact_review_limit": 5, "min_confidence_millionths": 700_000}),
-        None,
-        None,
         ToolCallRegistryOptions {
             application_invocation_executor: Some(&executor),
             application_request_id: Some(
@@ -730,6 +635,153 @@ async fn fact_store_curate_pre_commit_cancellation_does_not_mutate() {
 
     assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
     assert_eq!(executor.mutations.load(Ordering::SeqCst), 0);
-    assert_eq!(result.value["problem"]["kind"], "cancelled");
+    assert_eq!(
+        result.value["structuredContent"]["problem"]["kind"],
+        "cancelled"
+    );
+    cg.close();
+}
+
+/// Answers every invocation with one daemon response after a wire round trip,
+/// so the problem the adapter renders is the one the daemon protocol carried.
+struct WireProblemExecutor {
+    problem: ApplicationProblem,
+}
+
+impl tracedecay_contracts::ApplicationInvocationExecutor for WireProblemExecutor {
+    fn invoke(
+        &self,
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
+        '_,
+        std::result::Result<
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
+        >,
+    > {
+        forward_application_surface(self, invocation)
+    }
+}
+
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for WireProblemExecutor {
+    fn invoke_controlled(
+        &self,
+        request: tracedecay_daemon_protocol::DaemonInvocationRequest,
+        _deadline: Deadline,
+        _cancellation: CancellationSignal,
+        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+        '_,
+        std::result::Result<
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
+        >,
+    > {
+        let response = tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+            &request.request_id,
+            self.problem.clone(),
+        );
+        let response = serde_json::from_value(
+            serde_json::to_value(&response).expect("daemon response serializes"),
+        )
+        .expect("daemon response decodes");
+        Box::pin(async move { Ok(response) })
+    }
+
+    ignore_feedback_observations!();
+}
+
+#[tokio::test]
+async fn a_stale_refresh_frontier_reaches_mcp_as_typed_detail() {
+    let dir = TempDir::new().expect("fixture directory");
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "session-refresh-stale-frontier",
+        "pub fn refresh() {}\n",
+        "project.mcp-session-refresh-stale-frontier",
+    )
+    .await;
+    let executor = WireProblemExecutor {
+        problem: ApplicationProblem::from_detail(
+            tracedecay_contracts::ApplicationProblemDetailV1::StaleRefreshFrontier {
+                requested: 120,
+                committed: 40,
+                active: 80,
+            },
+        ),
+    };
+
+    for format in ["json", "markdown"] {
+        let result = handle_tool_call_with_registry_options(
+            &cg,
+            "tracedecay_session_refresh_begin",
+            json!({
+                "scope": { "kind": "project" },
+                "session": { "id": "session.stale-frontier" },
+                "source": { "scope": "cursor" },
+                "target": {
+                    "temporal_mode": { "kind": "current" },
+                    "grain": "session",
+                    "frontier": { "observed_through": 120, "committed_through": 40 }
+                },
+                "format": format,
+            }),
+            ToolCallRegistryOptions {
+                application_invocation_executor: Some(&executor),
+                application_request_id: Some(
+                    RequestId::new(format!("request.retained.mcp.stale-frontier.{format}"))
+                        .expect("request id"),
+                ),
+                application_deadline: Some(deadline_from_now(Duration::from_secs(5))),
+                application_cancellation: Some(
+                    CancellationSignal::active("cancel.retained.mcp.stale-frontier")
+                        .expect("cancellation"),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a stale frontier renders a typed problem");
+
+        let problem = result.value["structuredContent"]["problem"].clone();
+        assert_eq!(
+            (
+                &problem["kind"],
+                &problem["code"],
+                &problem["message"],
+                &problem["detail"],
+            ),
+            (
+                &json!("stale"),
+                &json!("application.retained.refresh-frontier-stale"),
+                &json!(
+                    "The refresh window no longer contains the committed projection frontier \
+                     80; begin again from source frontier 80."
+                ),
+                &json!({
+                    "kind": "stale_refresh_frontier",
+                    "requested": 120,
+                    "committed": 40,
+                    "active": 80,
+                }),
+            ),
+            "{format}: {}",
+            result.value
+        );
+        if format == "markdown" {
+            let text = result.value["content"][0]["text"]
+                .as_str()
+                .expect("markdown tool text");
+            for line in [
+                "- Requested frontier: 120",
+                "- Committed frontier: 40",
+                "- Active frontier: 80",
+            ] {
+                assert!(text.contains(line), "missing `{line}` in:\n{text}");
+            }
+        } else {
+            assert_eq!(tool_json(&result)["problem"], problem);
+        }
+    }
     cg.close();
 }

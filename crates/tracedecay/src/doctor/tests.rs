@@ -2,80 +2,19 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::*;
-use crate::agents::AgentIntegration;
-use tracedecay_runtime_core::text::format_bytes;
-
-#[test]
-fn supported_kimi_and_kiro_absence_reaches_doctor_without_host_directories() {
-    let home = tempfile::tempdir().expect("isolated home");
-    let reported = agents::all_integrations()
-        .into_iter()
-        .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
-        .map(|agent| agent.id())
-        .collect::<std::collections::BTreeSet<_>>();
-
-    assert_eq!(
-        reported,
-        std::collections::BTreeSet::from(["kimi", "kiro"]),
-        "supported Kimi and Kiro absences must remain visible while unrelated absent hosts stay quiet"
-    );
-
-    let context = HealthcheckContext {
-        home: home.path().to_path_buf(),
-        project_path: home.path().to_path_buf(),
-    };
-    let mut counters = DoctorCounters::new();
-    for agent in agents::all_integrations()
-        .into_iter()
-        .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
-    {
-        agent.healthcheck(&mut counters, &context);
-    }
-    assert_eq!(
-        counters.issues, 0,
-        "an absent optional host is a truthful Doctor warning, not a broken installation"
-    );
-    assert_eq!(counters.warnings, 2);
-}
-
-#[test]
-fn detected_kiro_without_a_tracedecay_registration_is_optional_absence() {
-    let home = tempfile::tempdir().expect("isolated Kiro home");
-    let mcp_config = home.path().join(".kiro/settings/mcp.json");
-    std::fs::create_dir_all(mcp_config.parent().expect("Kiro settings parent"))
-        .expect("create Kiro settings");
-    std::fs::write(
-        &mcp_config,
-        br#"{"mcpServers":{"operator":{"command":"other"}}}"#,
-    )
-    .expect("write operator-owned Kiro config");
-
-    let kiro = agents::KiroIntegration;
-    assert!(
-        should_run_host_healthcheck(&kiro, home.path()),
-        "Kiro remains a visible optional host"
-    );
-
-    let mut counters = DoctorCounters::new();
-    kiro.healthcheck(
-        &mut counters,
-        &HealthcheckContext {
-            home: home.path().to_path_buf(),
-            project_path: home.path().to_path_buf(),
-        },
-    );
-
-    assert_eq!(counters.issues, 0);
-    assert_eq!(counters.warnings, 1);
-}
+use tracedecay_session_temporal_store::{
+    SessionTemporalAccess, SessionTemporalHealthFindingKind, SessionTemporalHealthStatus,
+};
 
 #[test]
 fn domain_symbol_rules_warning_is_silent_without_the_file() {
     let project = tempfile::tempdir().expect("temp project root");
     assert_eq!(domain_symbol_rules_warning(project.path()), None);
 
-    std::fs::create_dir_all(crate::config::get_tracedecay_dir(project.path()))
-        .expect("create project marker dir");
+    std::fs::create_dir_all(tracedecay_runtime_core::config::get_tracedecay_dir(
+        project.path(),
+    ))
+    .expect("create project marker dir");
     assert_eq!(
         domain_symbol_rules_warning(project.path()),
         None,
@@ -84,120 +23,70 @@ fn domain_symbol_rules_warning_is_silent_without_the_file() {
 }
 
 #[test]
-fn domain_symbol_rules_warning_names_the_unread_file() {
-    let project = tempfile::tempdir().expect("temp project root");
-    let marker_dir = crate::config::get_tracedecay_dir(project.path());
-    std::fs::create_dir_all(&marker_dir).expect("create project marker dir");
-    let rules = marker_dir.join(DOMAIN_SYMBOL_RULES_FILENAME);
-    std::fs::write(&rules, "[[rule]]\nname = \"elisp\"\n").expect("write rules file");
-
-    let warning = domain_symbol_rules_warning(project.path()).expect("rules file must be reported");
-    assert!(
-        warning.contains(&rules.display().to_string()),
-        "warning must name the file: {warning}"
+fn pr_autotrack_state_findings_name_stale_entries_and_blocking_state() {
+    let data_root = tempfile::tempdir().expect("data root");
+    assert_eq!(
+        pr_autotrack_state_findings(data_root.path()),
+        Ok(Vec::new())
     );
-    assert!(
-        warning.contains("docs/DOMAIN-EXTRACTORS.md"),
-        "warning must point at the doc: {warning}"
+
+    let state_path = tracedecay_application::pr_tracking::state_path(data_root.path());
+    std::fs::write(
+        &state_path,
+        r#"{"managed":{"tracedecay/autotrack/pr/8":{"pr":8,"head_branch":"legacy","worktree":"pr-worktrees/pr-8","tracking_ref":"refs/tracedecay/pr/8"}}}"#,
+    )
+    .expect("write stale state");
+    let warnings = pr_autotrack_state_findings(data_root.path()).expect("stale entries warn");
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("'tracedecay/autotrack/pr/8'"));
+    assert!(warnings[0].contains("head_sha"));
+    assert!(warnings[0].contains("drops this entry"));
+
+    std::fs::write(&state_path, "{not json").expect("write malformed state");
+    let failure =
+        pr_autotrack_state_findings(data_root.path()).expect_err("malformed state is blocking");
+    assert!(failure.contains(&state_path.display().to_string()));
+    assert!(failure.contains("until that file is removed"));
+}
+
+#[test]
+fn automation_effect_reset_findings_name_each_refused_journal_by_run_id() {
+    let dashboard_root = tempfile::tempdir().expect("dashboard root");
+    assert_eq!(
+        automation_effect_reset_findings(dashboard_root.path()),
+        Ok(Vec::new())
     );
-}
+    let journals = dashboard_root.path().join("automation_effects");
+    std::fs::create_dir_all(&journals).expect("journal directory");
+    let journal_file = |run_id: &str| {
+        let run_id = tracedecay_domain::RunId::new(run_id).expect("run id");
+        let key = tracedecay_domain::canonical_sha256(&(
+            "tracedecay.automation-run.terminal-key.v1",
+            &run_id,
+        ))
+        .expect("journal key");
+        journals.join(format!(
+            "{}.json",
+            key.as_str().trim_start_matches("sha256:")
+        ))
+    };
+    let legacy = br#"{"retirement":null,"admission":{"request":{"run_id":"run.legacy-memory"}}}"#;
+    std::fs::write(journal_file("run.legacy-memory"), legacy).expect("legacy journal");
+    // A journal whose admission names a run id that does not own its filename.
+    let misfiled = journal_file("run.other");
+    std::fs::write(&misfiled, legacy).expect("misfiled journal");
+    std::fs::write(journals.join("pending-index.json"), b"{}").expect("index");
 
-#[test]
-fn format_bytes_boundaries() {
-    assert_eq!(format_bytes(0), "0 B");
-    assert_eq!(format_bytes(1023), "1023 B");
-    assert_eq!(format_bytes(1024), "1.0 KB");
-    assert_eq!(format_bytes(1536), "1.5 KB");
-    assert_eq!(format_bytes(1024 * 1024 - 1), "1024.0 KB");
-    assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
-    assert_eq!(format_bytes(1024 * 1024 * 512), "512.0 MB");
-    assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
-    assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.0 GB");
-}
-
-#[test]
-fn format_bytes_fractional_kb() {
-    // 2048 bytes = 2.0 KB
-    assert_eq!(format_bytes(2048), "2.0 KB");
-    // 1536 = 1.5 KB
-    assert_eq!(format_bytes(1536), "1.5 KB");
-}
-
-#[test]
-fn database_recovery_guidance_names_the_preserved_recovery_set() {
-    let db_path = PathBuf::from("/profile/projects/proj_test/tracedecay.db");
-    let guidance = database_recovery_guidance(&db_path);
-
-    for path in [
-        db_path.clone(),
-        db_path.with_extension("db-wal"),
-        db_path.with_extension("db-shm"),
-        PathBuf::from(format!("{}.dirty", db_path.display())),
-        db_path.parent().unwrap().join("dirty"),
-    ] {
-        assert!(guidance.contains(&path.display().to_string()));
-    }
-    assert!(guidance.contains("stop all TraceDecay daemon and MCP processes"));
-    assert!(
-        guidance.contains(
-            "Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe`"
-        )
-    );
-    assert!(guidance.contains("`sessions.db` is separate and must not be removed"));
-    assert!(guidance.contains("Facts are stored in the graph database"));
-    assert!(guidance.contains("automatic default-store rebuild is intentionally blocked"));
-}
-
-#[test]
-fn daemon_runtime_parser_extracts_storage_health_and_owner() {
-    let parsed = super::daemon_runtime_status(&serde_json::json!({
-        "content": [
-            {"type": "text", "text": "daemon notice"},
-            {
-                "type": "text",
-                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}},"doctor_report":{"kind":"unknown","table_growth_evidence":[]}}"#
-            }
+    let mut findings = automation_effect_reset_findings(dashboard_root.path()).expect("findings");
+    findings.sort();
+    assert_eq!(
+        findings,
+        vec![
+            "Automation effect journal ".to_owned()
+                + &misfiled.display().to_string()
+                + " requires reset: its shape is refused (unknown field `retirement`, expected `admission` or `state` at line 1 column 13); project-open recovery removes it",
+            "Automation run run.legacy-memory requires reset: its effect journal shape is refused (unknown field `retirement`, expected `admission` or `state` at line 1 column 13); project-open recovery removes the journal and the run id can run again".to_owned(),
         ]
-    }))
-    .unwrap();
-
-    assert_eq!(
-        parsed.pointer("/storage_health/quick_check_ok"),
-        Some(&serde_json::Value::Bool(true))
-    );
-    assert_eq!(
-        parsed.pointer("/storage_health/daemon_owner_pid"),
-        Some(&serde_json::json!(1234))
-    );
-    assert_eq!(
-        parsed.pointer("/storage_health/daemon_version"),
-        Some(&serde_json::json!("0.0.66"))
-    );
-    assert_eq!(
-        parsed.pointer("/storage_health/authority_audit_ok"),
-        Some(&serde_json::Value::Bool(true))
-    );
-    assert_eq!(
-        parsed.pointer("/storage_health/authority_audit_error"),
-        Some(&serde_json::Value::Null)
-    );
-    assert_eq!(
-        parsed.pointer("/doctor_report/kind"),
-        Some(&serde_json::json!("unknown"))
-    );
-}
-
-#[test]
-fn daemon_doctor_request_uses_comprehensive_ready_owner() {
-    assert_eq!(
-        super::daemon_doctor_runtime_args(),
-        serde_json::json!({
-            "format": "json",
-            "startup_health": false,
-            "authority_audit": true,
-            "doctor_report": true,
-            "session_ingest_health": false,
-        })
     );
 }
 
@@ -217,7 +106,9 @@ async fn temporal_health_adapter_is_read_only_and_clean_on_canonical_schema() {
     let before = std::fs::read(&db_path).unwrap();
     let before_family = temporal_family_manifest(&db_path);
 
-    let report = db.session_temporal_doctor_health().await;
+    let report = SessionTemporalAccess::new(db)
+        .session_temporal_doctor_health()
+        .await;
 
     let encoded = serde_json::to_value(report).unwrap();
     assert_eq!(encoded["status"], "complete");
@@ -280,7 +171,12 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
         )
         .await
         .unwrap();
-    let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
+    let report = serde_json::to_value(
+        SessionTemporalAccess::new(db)
+            .session_temporal_doctor_health()
+            .await,
+    )
+    .unwrap();
     assert_eq!(report["status"], "partial");
     let findings = report["findings"].as_array().unwrap();
     assert!(
@@ -291,17 +187,11 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
     );
 }
 
-#[test]
-fn daemon_runtime_parser_rejects_missing_json_payload() {
-    let error = super::daemon_runtime_status(&serde_json::json!({ "content": [] })).unwrap_err();
-    assert!(error.to_string().contains("returned no JSON payload"));
-}
-
 fn storage_runtime_finding(
-    state: tracedecay_application::doctor::DoctorEvidenceStateV1,
+    state: tracedecay_contracts::doctor::DoctorEvidenceStateV1,
     reference: &str,
-) -> tracedecay_application::doctor::DoctorFindingV1 {
-    use tracedecay_application::doctor::{
+) -> tracedecay_contracts::doctor::DoctorFindingV1 {
+    use tracedecay_contracts::doctor::{
         DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
         DoctorEvidenceReferenceV1, DoctorFindingFamilyV1, DoctorFindingV1,
     };
@@ -322,37 +212,42 @@ fn storage_runtime_finding(
     .unwrap()
 }
 
+/// The rendered canonical findings are the only verdict: a degraded storage
+/// runtime finding is one issue line, and the exit counts exactly that line.
 #[test]
-fn canonical_storage_runtime_findings_are_the_only_storage_verdict() {
-    use tracedecay_application::doctor::DoctorEvidenceStateV1 as State;
+fn a_degraded_canonical_finding_is_the_one_issue_the_exit_counts() {
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1 as State;
 
-    let healthy = storage_runtime_finding(State::HealthyCompleteCoverage, "runtime.healthy");
-    let unknown = storage_runtime_finding(State::Denied, "runtime.denied");
-    let failed = storage_runtime_finding(State::Degraded, "runtime.degraded");
+    let mut healthy = DoctorCounters::new();
+    super::render_doctor_finding(
+        &mut healthy,
+        &storage_runtime_finding(State::HealthyCompleteCoverage, "runtime.healthy"),
+    );
+    assert_eq!(
+        super::doctor_result(&healthy, false),
+        super::DoctorCompletion::Healthy
+    );
 
+    let mut degraded = DoctorCounters::new();
+    for (state, reference) in [
+        (State::HealthyCompleteCoverage, "runtime.healthy"),
+        (State::Degraded, "runtime.degraded"),
+    ] {
+        super::render_doctor_finding(&mut degraded, &storage_runtime_finding(state, reference));
+    }
     assert_eq!(
-        super::database_health_from_storage_runtime_findings([&healthy]),
-        DatabaseHealth::Healthy
+        degraded.checks[1].message,
+        "storage_runtime: canonical storage runtime evidence (runtime.degraded)"
     );
-    assert!(matches!(
-        super::database_health_from_storage_runtime_findings([&healthy, &unknown]),
-        DatabaseHealth::Unknown { .. }
-    ));
     assert_eq!(
-        super::database_health_from_storage_runtime_findings([&healthy, &unknown, &failed]),
-        DatabaseHealth::Failed {
-            reason: "runtime.degraded".to_string()
-        }
+        super::doctor_result(&degraded, false),
+        super::DoctorCompletion::Issues(1)
     );
-    assert!(matches!(
-        super::database_health_from_storage_runtime_findings(std::iter::empty()),
-        DatabaseHealth::Unknown { .. }
-    ));
 }
 
 #[test]
 fn denied_canonical_evidence_warns_instead_of_inventing_failure() {
-    use tracedecay_application::doctor::DoctorEvidenceStateV1 as State;
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1 as State;
 
     let mut counters = DoctorCounters::new();
     super::render_doctor_finding(
@@ -364,10 +259,46 @@ fn denied_canonical_evidence_warns_instead_of_inventing_failure() {
 }
 
 #[test]
+fn a_live_ingest_refusal_is_reported_informationally_and_never_fails_the_exit() {
+    let finding = tracedecay_contracts::doctor::ingest_refusal_finding(
+        &tracedecay_contracts::doctor::IngestRefusalCensusReadV1::Observed {
+            refusals: vec![tracedecay_contracts::doctor::IngestRefusalV1 {
+                provider: "cursor".to_owned(),
+                session_id: "445777ad-0c9a-4c0e-bb98-7e8f7fb500ce".to_owned(),
+                reason: "observation_identity_collision".to_owned(),
+                start: 364_052,
+                end: 364_900,
+            }],
+        },
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    super::render_doctor_finding(&mut counters, &finding);
+
+    assert_eq!(
+        (counters.issues, counters.warnings, counters.pending_actions),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        counters.checks[0].message,
+        "observability: durable ingest coverage converged past 1 refused source record(s), \
+         informational, nothing needs doing: each was skipped by design and re-reading it would \
+         refuse it again; cursor session 445777ad-0c9a-4c0e-bb98-7e8f7fb500ce range \
+         364052..364900 observation_identity_collision (a different record with the same \
+         identity is already retained) (observability.ingest-coverage.refused-informational)"
+    );
+    assert_eq!(
+        super::doctor_result(&counters, false),
+        super::DoctorCompletion::Healthy
+    );
+}
+
+#[test]
 fn canonical_doctor_unavailable_states_remain_typed_nonfatal_reads() {
     assert_eq!(
         super::canonical_daemon_doctor_report(&serde_json::json!({})).unwrap(),
-        None
+        super::CanonicalDoctorReport::Unavailable
     );
     for kind in ["unknown", "unsupported"] {
         let status = serde_json::json!({
@@ -378,19 +309,27 @@ fn canonical_doctor_unavailable_states_remain_typed_nonfatal_reads() {
         });
         assert_eq!(
             super::canonical_daemon_doctor_report(&status).unwrap(),
-            None
+            super::CanonicalDoctorReport::Unavailable,
+            "empty table-growth evidence is unavailable, never a pass"
         );
     }
+}
+
+/// Right after a daemon restart the project runtime that owns the report is
+/// still mounting; the daemon says so, and Doctor names that state and its
+/// wait remedy instead of an unexplained unknown.
+#[test]
+fn a_mounting_project_runtime_is_the_typed_mounting_state() {
+    let status = serde_json::json!({
+        "doctor_report": {
+            "kind": "unknown",
+            "reason": "doctor_report_owner_warming",
+            "table_growth_evidence": []
+        }
+    });
     assert_eq!(
-        super::canonical_daemon_doctor_report(&serde_json::json!({
-            "doctor_report": {
-                "kind": "unknown",
-                "table_growth_evidence": []
-            }
-        }))
-        .unwrap(),
-        None,
-        "empty legacy table-growth evidence is unavailable, never a pass"
+        super::canonical_daemon_doctor_report(&status).unwrap(),
+        super::CanonicalDoctorReport::Mounting
     );
 }
 
@@ -424,166 +363,213 @@ fn canonical_doctor_revalidates_observed_report_wire_contract() {
     assert!(invalid.to_string().contains("violated its wire contract"));
 }
 
+/// A reachable daemon that has not admitted the project yet answers without a
+/// `database` block. That is the warming state Doctor keeps polling, distinct
+/// from an unreachable owner (an error) and from malformed telemetry (an error).
 #[test]
-fn daemon_runtime_parser_rejects_missing_database_telemetry() {
-    let error = super::daemon_runtime_status(&serde_json::json!({
-        "content": [{"type": "text", "text": r#"{"process":{"pid":1234}}"#}]
-    }))
-    .unwrap_err();
-    assert!(error.to_string().contains("omitted database telemetry"));
-}
+fn daemon_runtime_parser_reports_missing_database_telemetry_as_pending() {
+    let pending =
+        super::daemon_runtime_status(serde_json::json!({"process": {"pid": 1234}})).unwrap();
+    assert!(
+        pending.is_none(),
+        "absent telemetry is warming, not an error"
+    );
 
-#[test]
-fn doctor_result_fails_when_checks_report_issues() {
-    let mut counters = DoctorCounters::new();
-    counters.fail("broken integration");
-
-    let error = super::doctor_result(&counters, &DatabaseHealth::Healthy).unwrap_err();
-    assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
-}
-
-#[test]
-fn doctor_result_allows_warnings_without_issues() {
-    let mut counters = DoctorCounters::new();
-    counters.warn("optional check unavailable");
-
-    super::doctor_result(&counters, &DatabaseHealth::Healthy).unwrap();
-}
-
-#[test]
-fn doctor_result_preserves_canonical_storage_failures() {
-    let counters = DoctorCounters::new();
-    let failed = DatabaseHealth::Failed {
-        reason: "runtime.health.stuck".to_string(),
-    };
-
-    let error = super::doctor_result(&counters, &failed).unwrap_err();
+    let published = serde_json::json!({
+        "process": {"pid": 1234},
+        "database": {"quick_check_ok": true},
+        "doctor_report": {"kind": "unknown", "table_growth_evidence": []}
+    });
     assert_eq!(
-        error.to_string(),
-        "config error: doctor storage health check failed [runtime.health.stuck]"
+        super::daemon_runtime_status(published.clone()).unwrap(),
+        Some(published)
     );
+
+    let malformed =
+        super::daemon_runtime_status(serde_json::json!({"process": {"pid": 1234}, "database": 7}))
+            .unwrap_err();
+    assert!(malformed.to_string().contains("was not an object"));
 }
 
+/// The sole daemon owner is the only authority that can observe storage
+/// health, so Doctor losing it is an issue, not a warning: nothing else in the
+/// run opened the store, and a zero exit reads as "checked and fine" to every
+/// caller and CI gate. `doctor_result` already turns any issue into a non-zero
+/// exit, so grading this `fail` is what makes an unavailable daemon fail closed.
 #[test]
-fn doctor_result_treats_unavailable_canonical_report_as_unknown() {
-    let counters = DoctorCounters::new();
-    super::doctor_result(
-        &counters,
-        &DatabaseHealth::Unknown {
-            reason: "canonical_doctor_report_unavailable".to_string(),
-        },
-    )
-    .unwrap();
-}
-
-fn canonical_temp_path(path: &std::path::Path) -> std::path::PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
-}
-
-#[tokio::test]
-async fn store_layout_resolution_surfaces_split_identity_conflict()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::TempDir::new()?;
-    let profile_root = dir.path().join("profile");
-    let project_root = dir.path().join("repo");
-    std::fs::create_dir_all(&project_root)?;
-    let project_root = canonical_temp_path(&project_root);
-    let status = std::process::Command::new("git")
-        .args(["init", "--quiet"])
-        .current_dir(&project_root)
-        .status()?;
-    assert!(status.success());
-
-    for project_id in ["proj_doctor_selected", "proj_doctor_legacy"] {
-        let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
-            &project_root,
-            &profile_root,
-            &tracedecay_runtime_core::storage::EnrollmentMarker {
-                project_id: project_id.to_string(),
-                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-            },
-        )?;
-        std::fs::create_dir_all(&layout.data_root)?;
-        std::fs::write(&layout.graph_db_path, b"graph")?;
-        tracedecay_runtime_core::storage::write_store_manifest(&layout)?;
-    }
-    tracedecay_runtime_core::storage::write_repository_identity_marker(
-        &project_root,
-        "proj_doctor_selected",
-    )?;
-
-    let open_options = crate::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(dir.path().join("global.db")),
+fn doctor_reports_a_discovery_blocked_daemon_without_recovery_guidance() {
+    let path = std::path::Path::new("/Volumes/external/checkout");
+    let blocked = tracedecay_domain::errors::TraceDecayError::project_route(
+        crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+        true,
+        format!(
+            "repository discovery for '{}' is deferred (DeadlineExceeded); repository discovery blocked on {}; retry after 2000ms",
+            path.display(),
+            path.display()
+        ),
+    );
+    let message = super::daemon_warming_doctor_message(path, &blocked)
+        .expect("discovery-blocked daemon is a warming report");
+    assert!(
+        message.contains(&format!(
+            "daemon is still warming: repository discovery blocked on {}",
+            path.display()
+        )),
+        "{message}"
+    );
+    assert!(
+        !message.contains("daemon closed the connection")
+            && !message.contains("Preserve this recovery set")
+            && !message.contains("WAL:"),
+        "{message}"
+    );
+    let mut counters = DoctorCounters::new();
+    let findings = super::classify_daemon_status_error(
+        &mut counters,
+        std::path::Path::new("/Volumes/external/profile"),
+        path,
+        &blocked,
+    );
+    let super::DoctorDaemonFindingsV1::Unread { reason } = findings else {
+        panic!("discovery-blocked warming must stay an unread report: {findings:?}");
     };
-    let selected_db = profile_root.join("projects/proj_doctor_selected/tracedecay.db");
-    let legacy_db = profile_root.join("projects/proj_doctor_legacy/tracedecay.db");
-    let selected_before = std::fs::read(&selected_db)?;
-    let legacy_before = std::fs::read(&legacy_db)?;
+    assert_eq!(
+        (reason, counters.issues, counters.warnings),
+        ("daemon_warming", 0, 1)
+    );
 
-    let resolution = crate::tracedecay::TraceDecay::try_initialized_store_layout_with_options(
-        &project_root,
-        &open_options,
-    )
-    .await;
-    let diagnostic = format!("{resolution:?}");
-    assert!(
-        diagnostic.contains("identity cutover conflict"),
-        "{diagnostic}"
+    let warming = tracedecay_domain::errors::TraceDecayError::project_route(
+        crate::daemon::PROJECT_WARMING_REASON_CODE,
+        true,
+        "TraceDecay profile runtime is warming in the background; retry the same tool shortly",
     );
-    assert!(diagnostic.contains("proj_doctor_selected"), "{diagnostic}");
-    assert!(diagnostic.contains("proj_doctor_legacy"), "{diagnostic}");
+    let warming_message = super::daemon_warming_doctor_message(path, &warming)
+        .expect("profile warming is a warming report");
     assert!(
-        diagnostic.contains("tracedecay migrate consolidate"),
-        "{diagnostic}"
+        warming_message.contains("daemon is still warming: profile runtime is warming"),
+        "{warming_message}"
     );
     assert!(
-        diagnostic.contains("--source-project-id proj_doctor_legacy"),
-        "{diagnostic}"
+        !warming_message.contains("Preserve this recovery set")
+            && !warming_message.contains("WAL:"),
+        "{warming_message}"
     );
+
+    let closed = tracedecay_domain::errors::TraceDecayError::Config {
+        message: "daemon closed the connection after the tool request was sent but before returning a result; the outcome is unknown and the request was not retried".to_owned(),
+    };
     assert!(
-        diagnostic.contains("--target-project-id proj_doctor_selected"),
-        "{diagnostic}"
+        super::daemon_warming_doctor_message(path, &closed).is_none(),
+        "a closed connection is not a warming report"
     );
-    assert!(diagnostic.contains("no files changed"), "{diagnostic}");
-    assert_eq!(std::fs::read(selected_db)?, selected_before);
-    assert_eq!(std::fs::read(legacy_db)?, legacy_before);
-    Ok(())
 }
 
 #[test]
-fn doctor_fails_stopped_or_disabled_units_with_enable_now_remedy() {
-    use super::{DaemonServiceDoctorVerdict, daemon_service_doctor_verdict};
-    use tracedecay_daemon_control::DaemonServiceState;
+fn stalled_snapshot_on_successful_status_is_a_typed_doctor_failure() {
+    let status = serde_json::json!({
+        "project_open": {
+            "state": "stalled",
+            "reason": "retry_backoff",
+            "retry_after_ms": 1000,
+            "detail": "observability drain for 'project.capacity' is still settling",
+        }
+    });
+    let mut counters = DoctorCounters::new();
+    let mut pending_reset = false;
+    let findings = super::render_current_project_daemon_status(
+        &mut counters,
+        std::path::Path::new("/tmp/profile"),
+        std::path::Path::new("/tmp/project.capacity"),
+        Some(&Ok(Some(status))),
+        &mut pending_reset,
+    )
+    .expect("a leaked stalled snapshot must stay a doctor finding");
+    let super::DoctorDaemonFindingsV1::Unread { reason } = findings else {
+        panic!("a leaked stalled snapshot must stay an unread report: {findings:?}");
+    };
+    assert_eq!(
+        (reason, counters.issues, counters.warnings, pending_reset),
+        ("project_route_open_backoff", 1, 0, false)
+    );
+}
 
+#[test]
+fn stalled_capacity_status_is_a_typed_doctor_failure_not_a_closed_connection() {
+    let path = std::path::Path::new("/tmp/project.capacity");
+    let capacity = tracedecay_domain::errors::TraceDecayError::project_route(
+        crate::daemon::PROJECT_SERVER_CAPACITY_REASON_CODE,
+        true,
+        "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases { count: 1 } / ProjectSessions",
+    );
+    let mut counters = DoctorCounters::new();
+    let findings = super::classify_daemon_status_error(
+        &mut counters,
+        std::path::Path::new("/tmp/profile"),
+        path,
+        &capacity,
+    );
+    let super::DoctorDaemonFindingsV1::Unread { reason } = findings else {
+        panic!("a stalled capacity refusal must stay an unread report: {findings:?}");
+    };
+    assert_eq!(
+        (reason, counters.issues, counters.warnings),
+        ("project_server_capacity_reached", 1, 0)
+    );
+}
+
+#[test]
+fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
+    let mut counters = DoctorCounters::new();
+    super::report_daemon_diagnostics_unavailable(
+        &mut counters,
+        None,
+        &tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon socket is unavailable".to_string(),
+        },
+    );
+
+    assert_eq!(counters.issues, 1, "an unobserved store is not a warning");
+    assert_eq!(counters.warnings, 0);
+    assert_eq!(
+        super::doctor_result(&counters, true),
+        super::DoctorCompletion::Issues(1)
+    );
+}
+
+/// A store the daemon serves reset-required is the operator's pending
+/// action: with no issue, Doctor completes pending rather than healthy.
+#[test]
+fn doctor_result_reports_a_pending_reset_without_issues_as_pending() {
+    let counters = DoctorCounters::new();
+    assert_eq!(
+        super::doctor_result(&counters, true),
+        super::DoctorCompletion::PendingOperatorAction
+    );
+}
+
+#[test]
+fn doctor_warns_for_intentionally_held_service_states_without_activation_advice() {
+    use super::{DaemonServiceDoctorVerdict, daemon_service_doctor_verdict};
+    use tracedecay_daemon_control::{DaemonProcessProofV1, DaemonServiceState};
+
+    let unproven = DaemonProcessProofV1::Unproven {
+        detail: "not probed".to_owned(),
+    };
     for state in [
         DaemonServiceState::StoppedEnabled,
         DaemonServiceState::StoppedDisabled,
         DaemonServiceState::Masked,
     ] {
         assert_eq!(
-            daemon_service_doctor_verdict(state),
-            DaemonServiceDoctorVerdict::Fail,
-            "{state:?} must be a Doctor failure"
+            daemon_service_doctor_verdict(state, &unproven),
+            DaemonServiceDoctorVerdict::Warn,
+            "{state:?} may be an intentional hold and must be a Doctor warning"
         );
         let message = state.lifecycle_operator_advice();
         assert!(
-            message.contains("tracedecay daemon install-service"),
-            "{state:?} must name install-service, got: {message}"
+            message.contains("intentional") && !message.contains("enable --now"),
+            "{state:?} must preserve operator intent without enabling the service, got: {message}"
         );
-        if cfg!(target_os = "linux") {
-            assert!(
-                message.contains("systemctl --user enable --now tracedecay.service"),
-                "{state:?} must name enable --now, got: {message}"
-            );
-        }
     }
 
     let stopped_disabled = DaemonServiceState::StoppedDisabled.lifecycle_operator_advice();
@@ -604,20 +590,41 @@ fn doctor_fails_stopped_or_disabled_units_with_enable_now_remedy() {
 
 #[test]
 fn doctor_warns_on_missing_or_running_disabled_units() {
-    use super::{DaemonServiceDoctorVerdict, daemon_service_doctor_verdict};
-    use tracedecay_daemon_control::DaemonServiceState;
+    use super::{
+        DaemonServiceDoctorVerdict, daemon_service_doctor_message, daemon_service_doctor_verdict,
+    };
+    use tracedecay_daemon_control::{DaemonProcessProofV1, DaemonServiceState};
 
+    let unproven = DaemonProcessProofV1::Unproven {
+        detail: "initialize timed out".to_owned(),
+    };
+    let ready = DaemonProcessProofV1::Ready;
     assert_eq!(
-        daemon_service_doctor_verdict(DaemonServiceState::Missing),
+        daemon_service_doctor_verdict(DaemonServiceState::Missing, &unproven),
         DaemonServiceDoctorVerdict::Warn
     );
     assert_eq!(
-        daemon_service_doctor_verdict(DaemonServiceState::RunningDisabled),
+        daemon_service_doctor_verdict(DaemonServiceState::RunningDisabled, &ready),
         DaemonServiceDoctorVerdict::Warn
     );
     assert_eq!(
-        daemon_service_doctor_verdict(DaemonServiceState::RunningEnabled),
+        daemon_service_doctor_verdict(DaemonServiceState::RunningEnabled, &ready),
         DaemonServiceDoctorVerdict::Pass
+    );
+    assert_eq!(
+        daemon_service_doctor_verdict(DaemonServiceState::RunningEnabled, &unproven),
+        DaemonServiceDoctorVerdict::Warn,
+        "an active unit that did not answer initialize must not pass"
+    );
+    let active_without_process =
+        daemon_service_doctor_message(DaemonServiceState::RunningEnabled, &unproven);
+    assert!(
+        active_without_process.contains("did not answer initialize"),
+        "{active_without_process}"
+    );
+    assert!(
+        !active_without_process.contains("enabled, and running"),
+        "an unproven unit must not be reported as a running daemon: {active_without_process}"
     );
     let missing = DaemonServiceState::Missing.lifecycle_operator_advice();
     assert!(
@@ -625,7 +632,164 @@ fn doctor_warns_on_missing_or_running_disabled_units() {
         "missing unit must name install-service, got: {missing}"
     );
     assert!(
-        missing.contains("ensure the service is running"),
-        "missing unit keeps the generic ensure-running text, got: {missing}"
+        missing.contains("only if you want a managed daemon"),
+        "missing-unit advice must make installation intentional, got: {missing}"
+    );
+}
+
+#[test]
+fn schema_convergence_severity_tracks_typed_state() {
+    for (state, issues, warnings) in [
+        (SchemaConvergenceStateV1::PendingSchemaMigration, 0, 1),
+        (
+            SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
+            0,
+            1,
+        ),
+        (SchemaConvergenceStateV1::Degraded, 1, 0),
+        (SchemaConvergenceStateV1::Completed, 0, 0),
+    ] {
+        let status = serde_json::json!({"doctor_report": {"schema_convergences": [{
+            "store": "profile-sessions", "stage": "registered_schema", "state": state,
+            "progress": {"unit": "pages", "done": 4, "remaining": 7},
+            "started_at_micros": 42, "degraded_row": "observation_id=obs-7"
+        }]}});
+        let mut counters = DoctorCounters::new();
+        render_schema_convergences(&mut counters, &status).unwrap();
+        assert_eq!((counters.issues, counters.warnings), (issues, warnings));
+    }
+    assert!(
+        render_schema_convergences(
+            &mut DoctorCounters::new(),
+            &serde_json::json!({"doctor_report": {"schema_convergences": [{}]}})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn project_open_severity_tracks_typed_state() {
+    for (state, reason, issues, warnings) in [
+        (
+            ProjectOpenStatusStateV1::Completed,
+            ProjectOpenStatusReasonV1::Ready,
+            0,
+            0,
+        ),
+        (
+            ProjectOpenStatusStateV1::Converging,
+            ProjectOpenStatusReasonV1::Converging,
+            0,
+            1,
+        ),
+        (
+            ProjectOpenStatusStateV1::Stalled,
+            ProjectOpenStatusReasonV1::UnrepairableVerdict,
+            1,
+            0,
+        ),
+    ] {
+        let status = serde_json::json!({"project_open": {
+            "state": state, "reason": reason, "retry_after_ms": null,
+            "detail": "project authority verdict"
+        }});
+        let mut counters = DoctorCounters::new();
+        render_project_open_status(&mut counters, &status).unwrap();
+        assert_eq!((counters.issues, counters.warnings), (issues, warnings));
+    }
+}
+
+#[tokio::test]
+async fn temporal_health_does_not_block_on_a_saturated_general_reader_lane() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let runtime = DoctorTestRuntime::open(
+        &dir.path().join("profile"),
+        "doctor temporal health concurrent reader",
+    )
+    .await;
+    let db = runtime.database();
+    let occupancy = db
+        .read_connection()
+        .reader_pool_occupancy()
+        .expect("reader pool occupancy");
+    let mut held = Vec::new();
+    for _ in 0..occupancy.available_general {
+        held.push(
+            db.read_snapshot()
+                .await
+                .expect("hold a general-lane snapshot"),
+        );
+    }
+    assert_eq!(
+        db.read_connection()
+            .reader_pool_occupancy()
+            .map(|snapshot| snapshot.available_general),
+        Some(0),
+        "the general lane must stay leased for the whole diagnosis"
+    );
+
+    let report = SessionTemporalAccess::new(db)
+        .session_temporal_doctor_health()
+        .await;
+
+    assert_eq!(
+        report.status(),
+        SessionTemporalHealthStatus::Complete,
+        "{report:?}"
+    );
+    assert!(
+        !report.findings().iter().any(|finding| {
+            finding.kind() == SessionTemporalHealthFindingKind::RelationGraphUnavailable
+        }),
+        "relation health must use the reserved health snapshot, not the general lane: {report:?}"
+    );
+    drop(held);
+}
+
+static NETWORK_PROBE_STARTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn rendezvous_network_probe() {
+    use std::sync::atomic::Ordering;
+
+    NETWORK_PROBE_STARTED.fetch_add(1, Ordering::SeqCst);
+    while NETWORK_PROBE_STARTED.load(Ordering::SeqCst) < 2 {
+        std::thread::yield_now();
+    }
+}
+
+#[tokio::test]
+async fn independent_network_probes_overlap() {
+    use std::sync::atomic::Ordering;
+
+    NETWORK_PROBE_STARTED.store(0, Ordering::SeqCst);
+    let mut counters = DoctorCounters::quiet();
+    let mut network = DoctorNetworkChecks::start(AdmittedDoctorNetworkProbes {
+        fetch_worldwide_total: || {
+            rendezvous_network_probe();
+            Some(7)
+        },
+        fetch_latest_version: || {
+            rendezvous_network_probe();
+            Ok("1.2.3".to_owned())
+        },
+    });
+    network.admit_worldwide(Ok(&UploadSetting::Resolved(true)));
+    network
+        .report(&mut counters, Ok(&UploadSetting::Resolved(true)))
+        .await
+        .unwrap();
+    assert!(
+        counters.checks.iter().any(|check| check
+            .message
+            .contains("Worldwide counter reachable (total: 7)")),
+        "{:?}",
+        counters.checks
+    );
+    assert!(
+        counters.checks.iter().any(|check| check
+            .message
+            .contains("GitHub releases API reachable (latest v1.2.3)")),
+        "{:?}",
+        counters.checks
     );
 }

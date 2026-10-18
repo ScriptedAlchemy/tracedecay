@@ -7,15 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::canonical_text::{
     CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within, validated_string_newtype,
 };
-use crate::code_intelligence::{
-    CodeGenerationId, ProjectionKeyV1, SemanticSearchIndexKeyV1, VectorGenerationIdV1,
-};
+use crate::code_intelligence::CodeGenerationId;
 use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId, digest_id};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
@@ -54,7 +53,7 @@ fn retrieval_digest_error(error: DomainError) -> RetrievalContractError {
 }
 
 validated_string_newtype!(
-    plain,
+    schema,
     RetrievalContractError,
     validate_retrieval_identity;
     PrincipalId,
@@ -68,7 +67,6 @@ validated_string_newtype!(
     CalibrationProfileId,
     FusionProfileId,
     DiversityPolicyId,
-    RerankPolicyId,
     ComponentRevision,
     ExactAdmissionRuleRevision,
     AuthorizationRevision,
@@ -212,12 +210,13 @@ pub enum RetrievalContractError {
 /// Runtime-backed retrieval lanes. Each lane is independently testable,
 /// disableable, budgeted, and attributable; one lane is never an alias over
 /// another.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrieverKind {
     ExactLiteral,
     Lexical,
-    Semantic,
     Graph,
     Temporal,
     TaskSession,
@@ -225,10 +224,9 @@ pub enum RetrieverKind {
 }
 
 impl RetrieverKind {
-    pub const ALL_LANES: [Self; 7] = [
+    pub const ALL_LANES: [Self; 6] = [
         Self::ExactLiteral,
         Self::Lexical,
-        Self::Semantic,
         Self::Graph,
         Self::Temporal,
         Self::TaskSession,
@@ -242,7 +240,6 @@ impl RetrieverKind {
         match self {
             Self::ExactLiteral => "exact_literal",
             Self::Lexical => "lexical",
-            Self::Semantic => "semantic",
             Self::Graph => "graph",
             Self::Temporal => "temporal",
             Self::TaskSession => "task_session",
@@ -265,7 +262,11 @@ pub enum TemporalCandidateChannelV1 {
     Phrase,
     Entity,
     Time,
+    /// Strict lexical tier: every term matched one message.
     Lexical,
+    /// Drop-one lexical tier, reached only after the strict tier was verified
+    /// empty under the same filters and snapshot.
+    LexicalRelaxed,
     Summary,
     Span,
     Burst,
@@ -301,7 +302,18 @@ pub struct TemporalLaneEvidenceV1 {
 /// Deterministic fixed-point score in millionths. No floating point crosses
 /// this boundary.
 #[derive(
-    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    JsonSchema,
 )]
 #[serde(transparent)]
 pub struct FixedPointScore(pub u64);
@@ -478,24 +490,32 @@ pub struct RetrievalBudgetUsage {
     pub elapsed_micros: u64,
 }
 
-/// Public, sanitized budget usage: no lane-identifying counts. Public bytes
-/// must not distinguish denied from absent evidence.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SanitizedBudgetUsage {
-    pub elapsed_micros: u64,
-    pub truncated: bool,
-}
-
 /// Typed lane failure. Denial is never surfaced as a distinct public state.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "failure", content = "detail", rename_all = "snake_case")]
 pub enum RetrievalFailure {
-    AuthorityUnavailable { detail: String },
-    IncompatibleProjection { detail: String },
+    /// Ranked results omit documents matching only these lexical term sources.
+    CandidateSourcesPruned {
+        term_sources: Vec<(String, u64)>,
+        document_frequency_budget: u64,
+    },
+    AuthorityUnavailable {
+        detail: String,
+    },
+    /// The generation's code graph has not seated yet (a restart recovering
+    /// its verified head, or a publication still building it); exact and
+    /// lexical serve meanwhile.
+    GraphWarming,
+    IncompatibleProjection {
+        detail: String,
+    },
     StaleSource,
-    InvalidRequest { detail: String },
-    Internal { detail: String },
+    InvalidRequest {
+        detail: String,
+    },
+    Internal {
+        detail: String,
+    },
 }
 
 /// Fatal request-level error (distinct from per-lane typed outcomes).
@@ -553,7 +573,7 @@ pub struct RetrievalRequest {
 /// Source freshness is source- and retriever-specific: there is no global
 /// age-decay multiplier. Missing, stale, incompatible, and current are
 /// distinct states.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceFreshness {
     pub source_namespace: SourceNamespace,
@@ -568,7 +588,9 @@ pub struct SourceFreshness {
 }
 
 /// Compatibility state of one source/projection pair.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FreshnessCompatibilityV1 {
     Current,
@@ -580,13 +602,57 @@ pub enum FreshnessCompatibilityV1 {
 
 /// Evidence role used by dedupe/diversity caps. Independent corroboration
 /// and contradictions are preserved.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceRole {
     Primary,
     Corroboration,
     Contradiction,
     Context,
+}
+
+/// Source-role evidence used at lane admission and fusion.
+///
+/// A production definition outranks a test-file hit for the same symbol even
+/// when the test has a higher measured score. Non-definition production hits
+/// compete with test hits on measured scores so comments and references do
+/// not crowd out relevant tests.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalSourceRoleV1 {
+    /// Non-test path whose name or signature matched the query.
+    ProductionDefinition,
+    /// Non-test path that is not a name or signature definition match.
+    #[default]
+    ProductionOther,
+    /// Hit under a test path.
+    TestReference,
+}
+
+impl RetrievalSourceRoleV1 {
+    /// Admission and fusion priority. Production definitions occupy their
+    /// own tier; every other role shares the measured-score tier.
+    pub const fn admission_rank(self) -> u8 {
+        match self {
+            Self::ProductionDefinition => 0,
+            Self::ProductionOther | Self::TestReference => 1,
+        }
+    }
 }
 
 /// Proof that a typed field admitted a candidate to the exact tier. Only the
@@ -683,7 +749,18 @@ pub enum ExactFieldV1 {
 /// The exact tiers, lexicographically ordered above all approximate
 /// candidates. Fusion derives this only from a validated [`ExactAdmissionProof`].
 #[derive(
-    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ExactClass {
@@ -711,6 +788,10 @@ pub struct CompactCandidate {
     pub logical_copy_cluster_id: Option<LogicalCopyClusterId>,
     pub logical_copy_evidence_anchor: Option<RetrievalAnchorId>,
     pub evidence_role: EvidenceRole,
+    /// Source-role evidence for the same-symbol definition/reference order.
+    /// Absent historical candidates deserialize as a non-definition hit.
+    #[serde(default)]
+    pub source_role: RetrievalSourceRoleV1,
     pub retriever: RetrieverKind,
     pub retriever_revision: ComponentRevision,
     pub score_domain: ScoreDomainId,
@@ -850,15 +931,26 @@ pub enum RetrieverOutcome<T> {
     Cancelled,
 }
 
-/// The single generic retriever port. Composition lives in the query
-/// adapters; this crate owns the pure contract. `R` is the lane's typed
-/// request; `E` is the lane's typed per-occurrence evidence.
-pub trait Retriever<R, E> {
-    /// Retrieve one committed candidate prefix against the pinned snapshot.
-    ///
-    /// Implementations are provided by root query adapters, never by this
-    /// crate.
-    fn retrieve(&self, request: &R) -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalError>;
+impl<T> RetrieverOutcome<T> {
+    /// Transform available evidence while preserving the lane's terminal state.
+    pub fn try_map<U, E>(
+        self,
+        map: impl FnOnce(T) -> Result<U, E>,
+    ) -> Result<RetrieverOutcome<U>, E> {
+        Ok(match self {
+            Self::Complete(value) => RetrieverOutcome::Complete(map(value)?),
+            Self::Partial { value, reason } => RetrieverOutcome::Partial {
+                value: map(value)?,
+                reason,
+            },
+            Self::Unavailable(reason) => RetrieverOutcome::Unavailable(reason),
+            Self::Denied => RetrieverOutcome::Denied,
+            Self::Stale(freshness) => RetrieverOutcome::Stale(freshness),
+            Self::BudgetExceeded(usage) => RetrieverOutcome::BudgetExceeded(usage),
+            Self::TimedOut(usage) => RetrieverOutcome::TimedOut(usage),
+            Self::Cancelled => RetrieverOutcome::Cancelled,
+        })
+    }
 }
 
 /// The sole authority that may mint an [`ExactAdmissionProof`].
@@ -878,7 +970,7 @@ pub trait ExactAdmissionValidator {
 /// One retriever's scored contribution to a fused candidate. Every ranked
 /// candidate retains every retriever's raw score domain, ordinal rank,
 /// calibrated feature, weight, and weighted contribution.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateContribution {
     pub retriever: RetrieverKind,
@@ -896,7 +988,7 @@ pub struct CandidateContribution {
 /// Structured occurrence provenance retained through fusion. Fusion
 /// preserves each exact `(source_occurrence_id, retriever_evidence_anchor)`
 /// pair; parallel unassociated provenance vectors are forbidden.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OccurrenceProvenance {
     pub source_occurrence_id: SourceOccurrenceId,
@@ -912,13 +1004,17 @@ pub struct OccurrenceProvenance {
 }
 
 /// A candidate after contribution grouping and fixed-point fusion.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FusedCandidate {
     pub anchor_id: RetrievalAnchorId,
     pub logical_evidence_id: LogicalEvidenceId,
     pub occurrences: Vec<OccurrenceProvenance>,
     pub exact_class: ExactClass,
+    /// Strongest source role across the fused occurrences. Absent historical
+    /// candidates deserialize as a non-definition hit.
+    #[serde(default)]
+    pub source_role: RetrievalSourceRoleV1,
     pub utility_micros: u64,
     pub contributions: Vec<CandidateContribution>,
     pub freshness: Vec<SourceFreshness>,
@@ -961,7 +1057,7 @@ impl FusedCandidate {
 }
 
 /// A fused candidate with its final deterministic ordinal.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RankedCandidate {
     pub candidate: FusedCandidate,
@@ -970,7 +1066,7 @@ pub struct RankedCandidate {
 
 /// One recorded ranking decision. Explanations are rendered from this
 /// provenance, never reconstructed from a final scalar score.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RankingDecision {
     pub kind: RankingDecisionKind,
@@ -981,7 +1077,9 @@ pub struct RankingDecision {
 }
 
 /// The decision kinds the pipeline must record.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RankingDecisionKind {
     ExactTierAdmission,
@@ -990,7 +1088,6 @@ pub enum RankingDecisionKind {
     ContradictionPreservation,
     DiversityCap,
     ComparatorProvenance,
-    RerankAdmission,
     Fallback,
 }
 
@@ -1009,7 +1106,6 @@ pub struct FusionProfile {
     pub minimum_calibrated_feature_micros: BTreeMap<RetrieverKind, u32>,
     pub weights_micros: BTreeMap<RetrieverKind, u32>,
     pub diversity_policy_id: DiversityPolicyId,
-    pub rerank_policy_id: Option<RerankPolicyId>,
     pub retrieval_budget: RetrievalBudget,
 }
 
@@ -1030,33 +1126,6 @@ pub struct DiversityPolicy {
     pub per_evidence_role: Option<u32>,
 }
 
-/// Optional bounded rerank contract. Exact tiers bypass the reranker;
-/// failure returns the exact pre-rerank order with a typed reason.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RerankPolicy {
-    pub policy_id: RerankPolicyId,
-    pub evaluation_result_anchor: RetrievalAnchorId,
-    pub max_candidates: u32,
-    pub max_input_bytes: u64,
-    pub max_input_tokens: u64,
-    pub max_work_units: u64,
-    pub max_model_invocations: u32,
-    pub deadline_micros: Option<u64>,
-}
-
-/// Ephemeral authorized rerank view: only approved source-local text or
-/// token features, never cached or persisted.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AuthorizedRerankView {
-    pub anchor_id: RetrievalAnchorId,
-    pub snapshot_digest: CandidateSetDigest,
-    pub privacy_domain: PrivacyDomainId,
-    pub compatibility: FreshnessCompatibilityV1,
-    pub approved_features: Vec<u8>,
-}
-
 /// Per-anchor hydration receipt. Every contribution and hydration receipt
 /// keys back to one `OccurrenceProvenance`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1070,76 +1139,13 @@ pub struct HydrationReceipt {
     pub freshness: SourceFreshness,
 }
 
-/// Authenticated retrieval cursor. Binds the query snapshot, profile ID,
-/// authorized freshness digest, authorization revision, ordered candidate
-/// set digest, sanitized lane statuses, and lane checkpoints; resume uses
-/// the bound set or rejects, it never recomputes.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticRetrievalContinuationV1 {
-    pub profile_id: FusionProfileId,
-    pub profile_digest: ManifestDigest,
-    pub code_generation: CodeGenerationId,
-    pub vector_generation: VectorGenerationIdV1,
-    pub projection_key: ProjectionKeyV1,
-    pub search_index_key: SemanticSearchIndexKeyV1,
-    pub candidate_set_digest: CandidateSetDigest,
-    pub public_lane_statuses: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
-    pub lane_checkpoints: Vec<RetrieverContinuation>,
-    pub ranking_revision: RankingRevision,
-    pub rerank: OptionalStagePublicStatus,
-    pub ordered_candidate_anchors: Vec<RetrievalAnchorId>,
-    pub next_ordinal: u32,
-}
-
-impl SemanticRetrievalContinuationV1 {
-    pub fn validate(&self) -> Result<(), RetrievalContractError> {
-        self.search_index_key.validate().map_err(|_| {
-            RetrievalContractError::InvalidCursorBinding {
-                field: "semantic search index key",
-            }
-        })?;
-        if !self
-            .public_lane_statuses
-            .contains_key(&RetrieverKind::Semantic)
-        {
-            return Err(RetrievalContractError::InvalidCursorBinding {
-                field: "semantic lane status",
-            });
-        }
-        if self
-            .lane_checkpoints
-            .iter()
-            .any(|checkpoint| !self.public_lane_statuses.contains_key(&checkpoint.lane))
-        {
-            return Err(RetrievalContractError::InvalidCursorBinding {
-                field: "semantic lane checkpoint without admitted lane status",
-            });
-        }
-        let unique_anchors = self
-            .ordered_candidate_anchors
-            .iter()
-            .collect::<BTreeSet<_>>();
-        if unique_anchors.len() != self.ordered_candidate_anchors.len()
-            || usize::try_from(self.next_ordinal)
-                .ok()
-                .is_none_or(|next| next > self.ordered_candidate_anchors.len())
-        {
-            return Err(RetrievalContractError::InvalidCursorBinding {
-                field: "semantic frozen candidate order",
-            });
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeSourceCursorBindingV1 {
     pub reference: crate::research::id::RefId,
     pub commit: crate::GitOidV1,
     pub tree: crate::GitOidV1,
-    pub generation: crate::code_intelligence::CodeGenerationId,
+    pub generation: CodeGenerationId,
 }
 
 impl CodeSourceCursorBindingV1 {
@@ -1152,6 +1158,10 @@ impl CodeSourceCursorBindingV1 {
     }
 }
 
+/// Authenticated retrieval cursor. Binds the query snapshot, profile ID,
+/// authorized freshness digest, authorization revision, ordered candidate
+/// set digest, sanitized lane statuses, and lane checkpoints; resume uses
+/// the bound set or rejects, it never recomputes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalCursor {
@@ -1169,10 +1179,6 @@ pub struct RetrievalCursor {
     pub ranking_revision: RankingRevision,
     /// First final ordinal in the next page of the frozen candidate set.
     pub next_ordinal: u32,
-    /// Optional semantic continuation authenticated by the same query cursor key.
-    /// Its absence preserves the canonical query cursor bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic: Option<SemanticRetrievalContinuationV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_source: Option<CodeSourceCursorBindingV1>,
     pub expiry: UtcMicros,
@@ -1203,9 +1209,6 @@ impl RetrievalCursor {
                 field: "lane checkpoint without admitted lane status",
             });
         }
-        if let Some(semantic) = &self.semantic {
-            semantic.validate()?;
-        }
         Ok(())
     }
 }
@@ -1221,47 +1224,12 @@ pub enum PublicRetrieverStatus {
     Stale,
 }
 
-/// Public status of an optional stage. Deliberately no denied variant —
-/// denied and absent coalesce through the same sanitized unavailable shape.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "status", content = "detail", rename_all = "snake_case")]
-pub enum OptionalStagePublicStatus {
-    NotRequested,
-    Complete,
-    Unavailable(SanitizedStageFailure),
-    Rejected(SanitizedStageFailure),
-    Cancelled,
-    BudgetExceeded(SanitizedBudgetUsage),
-}
-
-/// Sanitized optional-stage failure: class only, no internal detail.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum SanitizedStageFailure {
-    AuthorityUnavailable,
-    Incompatible,
-    Stale,
-    Invalid,
-    Internal,
-}
-
-/// Semantic/rerank outcome reported outside the query fallback subpayload.
-/// It may never change the subpayload, its digest, or cursor identity.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticRerankOutcome {
-    pub semantic: OptionalStagePublicStatus,
-    pub rerank: OptionalStagePublicStatus,
-}
-
 /// The typed, independently hashed query fallback subpayload. Canonical-encoded
 /// and hashed with
 /// [`QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN`]; the `digest` field is excluded
 /// from the hashed bytes. It contains the complete accepted
-/// exact+lexical+graph result — IDs, order, contributions, explanations,
-/// coverage, and cursor bytes. semantic must preserve it byte-for-byte whenever
-/// the semantic or rerank stage is disabled, unavailable, rejected, or
-/// cancelled.
+/// exact+lexical+graph result. IDs, order, contributions, explanations,
+/// coverage, and cursor bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct QueryFallbackSubpayload {
@@ -1411,25 +1379,6 @@ fn compute_query_fallback_subpayload_digest(
     FallbackSubpayloadDigest::new(digest.as_str())
 }
 
-/// The assembled retrieval result.
-/// `internal_lane_outcomes` is sealed server-side audit data: excluded from
-/// fallback bytes/digest, cursors, public coverage, and cache keys.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RetrievalResult {
-    pub snapshot: RetrievalSnapshot,
-    pub profile_id: FusionProfileId,
-    pub query_fallback: QueryFallbackSubpayload,
-    pub ordered_candidates: Vec<RankedCandidate>,
-    #[serde(skip)]
-    pub internal_lane_outcomes: BTreeMap<RetrieverKind, RetrieverOutcome<()>>,
-    pub public_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
-    pub freshness: Vec<SourceFreshness>,
-    pub semantic_rerank_outcome: SemanticRerankOutcome,
-    pub hydration_receipts: Vec<HydrationReceipt>,
-    pub cursor: Option<RetrievalCursor>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1439,13 +1388,7 @@ mod tests {
     const ONE_DIGEST: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     fn freshness() -> SourceFreshness {
         SourceFreshness {
@@ -1494,6 +1437,7 @@ mod tests {
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
+            source_role: RetrievalSourceRoleV1::default(),
             retriever,
             retriever_revision: id("retriever.fixture.v1"),
             score_domain: id("score.fixture.v1"),
@@ -1534,33 +1478,33 @@ mod tests {
             .validate()
             .expect("query fallback lanes are admissible");
 
-        let lane = RetrieverKind::Semantic;
-        let rejected = subpayload(&[lane]);
-        assert_eq!(
-            rejected.validate(),
-            Err(RetrievalContractError::FallbackLaneViolation),
-            "lane {lane:?} must not enter the query fallback subpayload"
-        );
+        for lane in [
+            RetrieverKind::Temporal,
+            RetrieverKind::TaskSession,
+            RetrieverKind::Diagnostic,
+        ] {
+            let rejected = subpayload(&[lane]);
+            assert_eq!(
+                rejected.validate(),
+                Err(RetrievalContractError::FallbackLaneViolation),
+                "lane {lane:?} must not enter the query fallback subpayload"
+            );
+        }
     }
 
     #[test]
     fn retriever_contract_names_every_runtime_lane() {
-        assert_eq!(
-            RetrieverKind::ALL_LANES,
-            [
-                RetrieverKind::ExactLiteral,
-                RetrieverKind::Lexical,
-                RetrieverKind::Semantic,
-                RetrieverKind::Graph,
-                RetrieverKind::Temporal,
-                RetrieverKind::TaskSession,
-                RetrieverKind::Diagnostic,
-            ],
+        let retired = serde_json::from_str::<RetrieverKind>("\"semantic\"")
+            .expect_err("the retired dense lane must not deserialize");
+        assert!(
+            retired
+                .to_string()
+                .starts_with("unknown variant `semantic`"),
+            "{retired}"
         );
         for (wire, expected) in [
             ("exact_literal", RetrieverKind::ExactLiteral),
             ("lexical", RetrieverKind::Lexical),
-            ("semantic", RetrieverKind::Semantic),
             ("graph", RetrieverKind::Graph),
             ("temporal", RetrieverKind::Temporal),
             ("task_session", RetrieverKind::TaskSession),
@@ -1576,15 +1520,6 @@ mod tests {
                 format!("\"{wire}\""),
             );
         }
-        assert_eq!(
-            RetrieverKind::QUERY_FALLBACK_LANES,
-            [
-                RetrieverKind::ExactLiteral,
-                RetrieverKind::Lexical,
-                RetrieverKind::Graph,
-            ],
-            "task/session evidence must never broaden query fallback",
-        );
     }
 
     #[test]
@@ -1625,15 +1560,16 @@ mod tests {
                 logical_evidence_id: id("evidence.fused"),
                 occurrences: vec![],
                 exact_class: ExactClass::Approximate,
+                source_role: RetrievalSourceRoleV1::default(),
                 utility_micros: 1,
                 contributions: vec![CandidateContribution {
-                    retriever: RetrieverKind::Semantic,
-                    retriever_revision: id("retriever.semantic.v1"),
-                    source_occurrence_id: id("occurrence.semantic"),
+                    retriever: RetrieverKind::Temporal,
+                    retriever_revision: id("retriever.temporal.v1"),
+                    source_occurrence_id: id("occurrence.temporal"),
                     ordinal_rank: 0,
                     raw_score: FixedPointScore(1),
-                    score_domain: id("score.semantic.v1"),
-                    calibration_profile_id: id("calibration.semantic.v1"),
+                    score_domain: id("score.temporal.v1"),
+                    calibration_profile_id: id("calibration.temporal.v1"),
                     calibrated_feature_micros: 1,
                     weight_micros: 1,
                     weighted_contribution_micros: 1,
@@ -1644,7 +1580,10 @@ mod tests {
             final_ordinal: 1,
         }];
         payload.digest = payload.compute_digest().unwrap();
-        assert!(payload.validate().is_err());
+        assert_eq!(
+            payload.validate().unwrap_err().to_string(),
+            "fallback candidate ordinals is not in canonical order"
+        );
     }
 
     #[test]
@@ -1712,7 +1651,10 @@ mod tests {
             coverage: RetrieverCoverage::default(),
             continuation: None,
         };
-        assert!(batch.validate().is_err());
+        assert_eq!(
+            batch.validate().unwrap_err().to_string(),
+            "batch evidence is missing for a returned occurrence: retriever batch evidence"
+        );
 
         let candidate = &batch.candidates[0];
         let provenance = provenance(candidate);
@@ -1722,7 +1664,10 @@ mod tests {
         batch
             .evidence_by_occurrence
             .insert(id("occurrence.extra"), provenance);
-        assert!(batch.validate().is_err());
+        assert_eq!(
+            batch.validate().unwrap_err().to_string(),
+            "batch evidence has no returned occurrence: retriever batch evidence"
+        );
     }
 
     #[test]
@@ -1737,7 +1682,10 @@ mod tests {
             coverage: RetrieverCoverage::default(),
             continuation: None,
         };
-        assert!(duplicate_batch.validate().is_err());
+        assert_eq!(
+            duplicate_batch.validate().unwrap_err().to_string(),
+            "retriever batch source occurrences contains a duplicate identity"
+        );
 
         let lexical = candidate("occurrence.lexical", RetrieverKind::Lexical, 0);
         let graph = candidate("occurrence.graph", RetrieverKind::Graph, 1);
@@ -1750,6 +1698,9 @@ mod tests {
             coverage: RetrieverCoverage::default(),
             continuation: None,
         };
-        assert!(mixed_batch.validate().is_err());
+        assert_eq!(
+            mixed_batch.validate().unwrap_err().to_string(),
+            "a retriever batch may contain candidates from only one lane"
+        );
     }
 }

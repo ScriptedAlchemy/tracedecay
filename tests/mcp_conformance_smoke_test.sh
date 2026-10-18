@@ -42,6 +42,17 @@ while (($# > 0)); do
   esac
 done
 
+bump_attempts() {
+  local file=$1
+  local attempts=0
+  if [[ -f $file ]]; then
+    attempts=$(<"$file")
+  fi
+  attempts=$((attempts + 1))
+  printf '%s\n' "$attempts" >"$file"
+  printf '%s\n' "$attempts"
+}
+
 case "$method:$tool" in
   tools/list:)
     printf '%s\n' '{"tools":[{"name":"tracedecay_search","inputSchema":{"type":"object"}},{"name":"tracedecay_diagnostics","inputSchema":{"type":"object"}},{"name":"tracedecay_impact","inputSchema":{"type":"object"}},{"name":"tracedecay_affected","inputSchema":{"type":"object"}},{"name":"tracedecay_test_map","inputSchema":{"type":"object"}},{"name":"tracedecay_find_exact_symbol","inputSchema":{"type":"object"}}]}'
@@ -56,12 +67,7 @@ case "$method:$tool" in
     printf '%s\n' '{"content":[{"type":"text","text":"typed evidence"}]}'
     ;;
   tools/call:tracedecay_test_map)
-    attempts=0
-    if [[ -f "$FAKE_TEST_MAP_ATTEMPTS" ]]; then
-      attempts=$(<"$FAKE_TEST_MAP_ATTEMPTS")
-    fi
-    attempts=$((attempts + 1))
-    printf '%s\n' "$attempts" >"$FAKE_TEST_MAP_ATTEMPTS"
+    attempts=$(bump_attempts "$FAKE_TEST_MAP_ATTEMPTS")
     if [[ ${FAKE_TEST_MAP_TERMINAL:-0} == 1 ]]; then
       echo "Failed to call tool tracedecay_test_map: MCP error -32602: tool project route failed: reason_code=code-graph-invalid-request retryable=false: invalid test-map arguments" >&2
       exit 1
@@ -73,12 +79,7 @@ case "$method:$tool" in
     printf '%s\n' '{"content":[{"type":"text","text":"typed evidence"}]}'
     ;;
   tools/call:tracedecay_impact)
-    attempts=0
-    if [[ -f "$FAKE_IMPACT_ATTEMPTS" ]]; then
-      attempts=$(<"$FAKE_IMPACT_ATTEMPTS")
-    fi
-    attempts=$((attempts + 1))
-    printf '%s\n' "$attempts" >"$FAKE_IMPACT_ATTEMPTS"
+    attempts=$(bump_attempts "$FAKE_IMPACT_ATTEMPTS")
     if ((attempts == 1)); then
       echo "Failed to call tool tracedecay_impact: MCP error -32603: tool project route failed: reason_code=code-graph-stale retryable=true: the exact graph generation is changing" >&2
       exit 1

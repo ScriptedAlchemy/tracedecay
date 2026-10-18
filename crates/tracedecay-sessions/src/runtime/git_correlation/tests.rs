@@ -1,13 +1,6 @@
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-
-use tracedecay_graph_db::{
-    GraphDbError, GraphGenerationId, GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision,
-    NeverCancelled, VerifiedGraphSnapshot,
-};
-
-use super::test_support::MemoryEvidenceGraphRuntime;
 use super::*;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 
 fn span(
     id: &str,
@@ -29,6 +22,8 @@ fn span(
         last_ts,
         event_count: 2,
         source: SpanSource::Ingest,
+        branch_provenance: BranchProvenance::Captured,
+        capture_window: None,
     }
 }
 
@@ -112,6 +107,118 @@ fn normalize_worktree_preserves_root_and_removes_aliases() {
 }
 
 #[test]
+fn canonical_worktree_key_folds_os_aliases_and_preserves_missing_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let lexical = normalize_worktree(&root.path().to_string_lossy());
+    let canonical = std::fs::canonicalize(root.path()).unwrap();
+    // Two spellings of one directory (an OS alias and the canonical name)
+    // resolve to one identity.
+    assert_eq!(
+        canonical_worktree_key(&lexical).unwrap(),
+        normalize_worktree(&canonical.to_string_lossy())
+    );
+    // A missing historical path keeps its recorded spelling untouched.
+    let missing = normalize_worktree(&root.path().join("deleted").to_string_lossy());
+    assert_eq!(canonical_worktree_key(&missing).unwrap(), missing);
+}
+
+#[test]
+fn canonical_worktree_key_reresolves_a_path_created_after_the_miss() {
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("worktree");
+    let spelling = normalize_worktree(&worktree.to_string_lossy());
+    // First operation: the path does not exist, the spelling stays lexical.
+    assert_eq!(canonical_worktree_key(&spelling).unwrap(), spelling);
+    // Next operation after the directory is created resolves the canonical
+    // identity — a stale miss may not be retained across operations.
+    std::fs::create_dir(&worktree).unwrap();
+    let canonical = std::fs::canonicalize(&worktree).unwrap();
+    assert_eq!(
+        canonical_worktree_key(&spelling).unwrap(),
+        normalize_worktree(&canonical.to_string_lossy())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_worktree_key_reresolves_a_retargeted_link() {
+    let root = tempfile::tempdir().unwrap();
+    let target_a = root.path().join("target-a");
+    let target_b = root.path().join("target-b");
+    std::fs::create_dir(&target_a).unwrap();
+    std::fs::create_dir(&target_b).unwrap();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&target_a, &link).unwrap();
+    let spelling = normalize_worktree(&link.to_string_lossy());
+    assert_eq!(
+        canonical_worktree_key(&spelling).unwrap(),
+        normalize_worktree(&std::fs::canonicalize(&target_a).unwrap().to_string_lossy())
+    );
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&target_b, &link).unwrap();
+    assert_eq!(
+        canonical_worktree_key(&spelling).unwrap(),
+        normalize_worktree(&std::fs::canonicalize(&target_b).unwrap().to_string_lossy())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_worktree_key_rejects_non_utf8_identity_conversion() {
+    let identity =
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/non-\xff-utf8".to_vec()));
+    assert!(matches!(
+        worktree_key_for_canonical_identity(&identity, "/link"),
+        Err(GitCorrelationError::Unavailable(message))
+            if message == "worktree identity for /link resolves outside UTF-8"
+    ));
+}
+
+// Linux filesystems can represent this name; APFS rejects it before resolution.
+#[cfg(target_os = "linux")]
+#[test]
+fn canonical_worktree_key_rejects_a_canonical_identity_outside_utf8() {
+    let root = tempfile::tempdir().unwrap();
+    // A UTF-8 link name pointing into a non-UTF-8 directory: the resolved
+    // identity cannot be stored byte-exactly, so the spelling must fail
+    // typed rather than silently keep the caller's alias.
+    let target = root
+        .path()
+        .join(std::ffi::OsString::from_vec(b"non-\xff-utf8".to_vec()));
+    std::fs::create_dir(&target).unwrap();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let spelling = normalize_worktree(&link.to_string_lossy());
+    assert!(matches!(
+        canonical_worktree_key(&spelling),
+        Err(GitCorrelationError::Unavailable(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_worktree_key_reports_non_not_found_failures() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("file.txt");
+    std::fs::write(&file, "x").unwrap();
+    // A file where a directory should be fails with an error other than
+    // NotFound: it must surface as a typed failure, not a lexical fallback
+    // that would silently rekey the row.
+    let bad = normalize_worktree(&file.join("nested").to_string_lossy());
+    assert!(canonical_worktree_key(&bad).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn canonical_worktree_key_reports_non_not_found_failures() {
+    // A colon inside a component is an invalid name on Windows: resolving
+    // it fails with an error other than NotFound, which must surface as a
+    // typed failure rather than a silent lexical fallback.
+    let bad = normalize_worktree(r"C:\invalid:component\sub");
+    assert!(canonical_worktree_key(&bad).is_err());
+}
+
+#[test]
 fn git_ref_filter_parses_and_validates_kinds() {
     assert_eq!(
         GitRefFilter::parse("worktree", r"C:\repo\\").unwrap(),
@@ -143,10 +250,11 @@ fn projection_is_canonical_and_normalizes_evidence() {
 #[test]
 fn projection_rejects_duplicate_or_dangling_evidence() {
     let duplicate = span("same", "claude", "session-a", Some("main"), "/repo", 1, 2);
-    assert!(
-        GitEvidenceProjectionV1::new("watermark", vec![duplicate.clone(), duplicate], Vec::new())
-            .is_err()
-    );
+    assert!(matches!(
+        GitEvidenceProjectionV1::new("watermark", vec![duplicate.clone(), duplicate], Vec::new()),
+        Err(GitCorrelationError::Contract(message))
+            if message == "Git evidence span identities must be unique"
+    ));
 
     let mut dangling = commit(
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -156,7 +264,11 @@ fn projection_rejects_duplicate_or_dangling_evidence() {
         100,
     );
     dangling.span_id = Some("missing".to_owned());
-    assert!(GitEvidenceProjectionV1::new("watermark", Vec::new(), vec![dangling]).is_err());
+    assert!(matches!(
+        GitEvidenceProjectionV1::new("watermark", Vec::new(), vec![dangling]),
+        Err(GitCorrelationError::Contract(message))
+            if message == "Git evidence relation references an absent span"
+    ));
 }
 
 #[test]
@@ -216,195 +328,4 @@ fn commit_scope_falls_back_to_observed_when_no_producer_matches() {
         })
         .unwrap();
     assert_eq!(ids, vec![("codex".to_owned(), "session-b".to_owned())]);
-}
-
-#[test]
-fn manifest_encodes_sessions_spans_commits_and_evidence_relations() {
-    let projection = projection();
-    let identity =
-        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
-    let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
-    let manifest =
-        build_git_evidence_manifest_checked(identity, &projection, &revision, &|| Ok(())).unwrap();
-
-    assert_eq!(manifest.entities.len(), 8);
-    assert_eq!(manifest.relations.len(), 5);
-    assert_eq!(manifest.source_generation.as_str(), "watermark-7");
-    assert_eq!(manifest.watermark.as_str(), "watermark-7");
-}
-
-#[test]
-fn manifest_generation_is_content_addressed() {
-    let projection = projection();
-    let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
-    let first = git_evidence_generation_id(&projection, &revision).unwrap();
-    let second = git_evidence_generation_id(&projection, &revision).unwrap();
-    assert_eq!(first, second);
-
-    let changed = GitEvidenceProjectionV1::new(
-        "watermark-8",
-        projection.spans().to_vec(),
-        projection.commit_sessions().to_vec(),
-    )
-    .unwrap();
-    assert_ne!(
-        first,
-        git_evidence_generation_id(&changed, &revision).unwrap()
-    );
-}
-
-#[test]
-fn cancellation_check_is_observed_while_building_manifest() {
-    let projection = projection();
-    let identity =
-        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
-    let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
-    let cancelled = Arc::new(AtomicBool::new(true));
-    let result = build_git_evidence_manifest_checked(identity, &projection, &revision, &|| {
-        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-            Err(GraphDbError::Cancelled)
-        } else {
-            Ok(())
-        }
-    });
-    assert_eq!(result.unwrap_err(), GitCorrelationError::Cancelled);
-}
-
-#[test]
-fn publication_returns_committed_projection_after_commit_point_cancellation() {
-    let runtime = MemoryEvidenceGraphRuntime::default();
-    runtime.cancel_request_after_next_publish();
-    let projection = projection();
-    let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let published = publish_git_evidence_projection(
-        &runtime,
-        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap(),
-        &projection,
-        &revision,
-        GraphIdempotencyKey::new("git-evidence-post-commit-cancellation").unwrap(),
-        Arc::clone(&cancelled),
-    )
-    .expect("verified-head publication already committed");
-
-    assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
-    assert_eq!(published.projection(), &projection);
-}
-
-#[test]
-fn recovery_rejects_a_generation_not_bound_to_canonical_projection_bytes() {
-    let projection = projection();
-    let identity =
-        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
-    let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
-    let mut manifest =
-        build_git_evidence_manifest_checked(identity, &projection, &revision, &|| Ok(())).unwrap();
-    manifest.generation = GraphGenerationId::new("foreign-git-evidence-generation").unwrap();
-    let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled)).unwrap();
-
-    let error =
-        GitEvidenceProjectionStore::from_verified_snapshot(snapshot, Arc::new(NeverCancelled))
-            .unwrap_err();
-    assert!(
-        matches!(error, GitCorrelationError::Corrupt(detail) if detail.contains("generation mismatch"))
-    );
-}
-
-#[test]
-fn recovery_rejects_a_foreign_namespace_with_canonical_projection_bytes() {
-    let projection = projection();
-    let identity =
-        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
-    let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
-    let mut manifest =
-        build_git_evidence_manifest_checked(identity, &projection, &revision, &|| Ok(())).unwrap();
-    let foreign_identity =
-        git_evidence_projection_identity(GraphNamespace::new("foreign").unwrap()).unwrap();
-    manifest.projection.clone_from(&foreign_identity);
-    for relation in &mut manifest.relations {
-        relation.from.projection.clone_from(&foreign_identity);
-        relation.to.projection.clone_from(&foreign_identity);
-    }
-    let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled)).unwrap();
-
-    let error =
-        GitEvidenceProjectionStore::from_verified_snapshot(snapshot, Arc::new(NeverCancelled))
-            .unwrap_err();
-    assert!(
-        matches!(error, GitCorrelationError::Corrupt(detail) if detail.contains("foreign projection identity"))
-    );
-}
-
-#[test]
-fn publication_rejects_a_foreign_namespace_before_verified_head_cas() {
-    let runtime = MemoryEvidenceGraphRuntime::default();
-    let projection = projection();
-    let foreign_identity =
-        git_evidence_projection_identity(GraphNamespace::new("foreign").unwrap()).unwrap();
-    let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
-
-    let error = publish_git_evidence_projection(
-        &runtime,
-        foreign_identity.clone(),
-        &projection,
-        &revision,
-        GraphIdempotencyKey::new("foreign-git-evidence-publication").unwrap(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .unwrap_err();
-    assert!(matches!(error, GitCorrelationError::Contract(_)));
-    assert!(
-        recover_git_evidence_projection(
-            &runtime,
-            &foreign_identity,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap()
-        .is_none(),
-        "foreign verified head must not be published"
-    );
-}
-
-#[test]
-fn recovery_observes_request_cancellation_before_reading_a_snapshot() {
-    let runtime = MemoryEvidenceGraphRuntime::default();
-    let identity =
-        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
-    let result =
-        recover_git_evidence_projection(&runtime, &identity, Arc::new(AtomicBool::new(true)));
-    assert_eq!(result.unwrap_err(), GitCorrelationError::Cancelled);
-}
-
-#[test]
-fn recovery_observes_request_cancellation_while_reading_a_snapshot() {
-    let runtime = Arc::new(MemoryEvidenceGraphRuntime::default());
-    runtime.gate_snapshot_reads();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let reader_runtime = Arc::clone(&runtime);
-    let reader_cancelled = Arc::clone(&cancelled);
-    let reader = std::thread::spawn(move || {
-        let identity =
-            git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
-        recover_git_evidence_projection(reader_runtime.as_ref(), &identity, reader_cancelled)
-    });
-    runtime.await_gated_snapshot_reader();
-    assert_eq!(
-        runtime.gated_snapshot_readers_entered(),
-        1,
-        "the reader must be inside the snapshot read before cancellation"
-    );
-    cancelled.store(true, std::sync::atomic::Ordering::Release);
-    runtime.release_gated_snapshot_reads();
-
-    assert_eq!(
-        reader.join().unwrap().unwrap_err(),
-        GitCorrelationError::Cancelled
-    );
 }

@@ -9,15 +9,49 @@
 //! probes that must not open pack indexes use
 //! [`discover_repository_identity_cli_first`].
 
+use std::collections::HashMap;
 use std::fmt;
+use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::task::Poll;
 use std::time::{Duration, Instant};
+
+use asupersync::Cx;
 
 use crate::cancellation::{CancellationToken, MonotonicDeadline};
 
-const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
-const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Modelled slow-volume in-process topology walk. Matches the injected delay
+/// used by the slow-volume discovery tests.
+const MODELLED_SLOW_AUTHORITY_WALK: Duration = Duration::from_millis(750);
+/// Reserved budget for the supported `git rev-parse` CLI fallback after an
+/// unreadable in-process authority.
+///
+/// Measured 2026-09-16 on this host for
+/// `git rev-parse --show-toplevel --git-dir --git-common-dir`:
+/// warm large-worktree p95 ≈ 8 ms (n=50), deep-nested p95 ≈ 4 ms (n=40),
+/// 8-way contended p95 ≈ 5 ms (n=40). Pad to 250 ms so a slow-volume authority
+/// walk that exhausts [`MODELLED_SLOW_AUTHORITY_WALK`] still leaves CLI
+/// headroom without restoring the old 2 s default.
+const CLI_FALLBACK_HEADROOM: Duration = Duration::from_millis(250);
+/// Default probe budget for synchronous discovery without an explicit deadline.
+///
+/// The total is the modelled first-phase cost plus reserved CLI headroom. The
+/// fallback is also granted [`CLI_FALLBACK_HEADROOM`] from when the authority
+/// returns, so an authority slower than its model cannot starve it.
+const DEFAULT_DISCOVERY_TIMEOUT: Duration =
+    MODELLED_SLOW_AUTHORITY_WALK.saturating_add(CLI_FALLBACK_HEADROOM);
+/// Upper bound between `try_wait` polls. Keep slices short enough that cancel
+/// and deadline still interrupt quickly, but avoid waking every 10 ms for the
+/// full discovery budget on a blocking pool worker.
+const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Wire reason a route stays unresolved because repository discovery did not
+/// finish inside its budget. Shared with daemon status and Doctor so a blocked
+/// walk is one typed refusal, not a closed connection.
+pub const REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE: &str = "repository_discovery_deferred";
+
 const REPOSITORY_IDENTITY_ARGS: [&str; 4] = [
     "rev-parse",
     "--show-toplevel",
@@ -64,14 +98,15 @@ pub enum GitRepositoryIdentityOutcome {
 
 impl GitRepositoryIdentityOutcome {
     /// True when membership could not be decided.
-    #[hotpath::skip]
     pub const fn is_unknown(&self) -> bool {
         matches!(self, Self::Unknown(_))
     }
 }
 
 /// Resolve a repository identity without blocking the async executor.
-#[hotpath::measure(label = "runtime_core.git.discover")]
+///
+/// The work runs on the native runtime, so a caller on any executor can await it.
+#[tracing::instrument(name = "runtime_core.git.discover", level = "trace", skip_all)]
 pub async fn discover_repository_identity(
     directory: &Path,
     deadline: MonotonicDeadline,
@@ -80,62 +115,385 @@ pub async fn discover_repository_identity(
     if cancellation.is_cancelled() {
         return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled);
     }
-    if deadline.is_elapsed_at(Instant::now()) {
+    let expired = deadline.is_elapsed_at(Instant::now());
+    #[cfg(any(test, feature = "test-helpers"))]
+    let expired = expired && !crate::git_repository::repository_discovery_clock_held(directory);
+    if expired {
         return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
     }
 
-    if !repository_control_may_exist(directory) {
-        return GitRepositoryIdentityOutcome::NotRepository;
+    match authority_identity_off_executor(directory, deadline, cancellation).await {
+        Ok(IdentityResolutionResult::Decided(outcome)) => outcome,
+        Ok(IdentityResolutionResult::Unreadable) => {
+            cli_identity_off_executor(directory, deadline, cancellation).await
+        }
+        Err(reason) => GitRepositoryIdentityOutcome::Unknown(reason),
     }
-    if let Some(identity) = repository_identity_from_authority(directory) {
-        return identity;
-    }
+}
 
-    let Ok(mut command) = async_repository_identity_command(directory) else {
-        return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed);
+/// Run `probe` on the native blocking pool, bounded by the discovery budget
+/// for `directory`.
+///
+/// Live defect this exists for: a daemon connection resolved its route by
+/// running `gix` discovery, enrollment-marker reads, and a HEAD read inline on
+/// the async worker that was serving it. With sixteen clients arriving at once
+/// against a checkout on a slow volume, every worker sat inside that
+/// filesystem work, the accept loop was never polled, and the listening socket
+/// refused new connections while the process stayed alive.
+///
+/// The probe cannot be interrupted once it starts, but the caller is bounded:
+/// a probe that outlives `deadline` yields the same
+/// [`GitDiscoveryUnknown::DeadlineExceeded`] a timed-out `git` helper does,
+/// and the abandoned probe still finishes on the blocking pool, warming the
+/// retained topology for the next caller.
+pub async fn bounded_repository_probe<Probe, Value>(
+    directory: &Path,
+    deadline: MonotonicDeadline,
+    probe: Probe,
+) -> Result<Value, GitDiscoveryUnknown>
+where
+    Probe: FnOnce() -> Value + Send + 'static,
+    Value: Send + 'static,
+{
+    let (answer, mut answered) = asupersync::channel::oneshot::channel();
+    // A probe the pool never runs drops its sender, which reads as `ProbeFailed`.
+    if let Some(runtime) = crate::native_runtime::handle() {
+        let _ = runtime.spawn_blocking(move || {
+            let _ = answer.send_blocking(probe());
+        });
+    }
+    within_discovery_budget(
+        directory,
+        deadline,
+        &CancellationToken::new(),
+        move |cx| async move { answered.recv(&cx).await.ok() },
+    )
+    .await
+}
+
+/// What one resolution published, once it finished.
+#[derive(Clone, Debug)]
+enum IdentityResolutionResult {
+    Decided(GitRepositoryIdentityOutcome),
+    /// The repository exists but its authority is unreadable, so the `git`
+    /// helper is still worth asking.
+    Unreadable,
+}
+
+type PublishedIdentity = asupersync::channel::watch::Receiver<Option<IdentityResolutionResult>>;
+
+/// One resolution that is still running, and every caller's view of its answer.
+struct IdentityResolution {
+    started: Instant,
+    published: PublishedIdentity,
+}
+
+/// In-flight identity resolutions, keyed by the directory each was asked about.
+///
+/// An entry exists only while its resolution runs: the answer itself is
+/// retained by the per-root topology the resolution publishes into, not here.
+static IDENTITY_RESOLUTIONS: LazyLock<Mutex<HashMap<PathBuf, IdentityResolution>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn identity_resolutions() -> MutexGuard<'static, HashMap<PathBuf, IdentityResolution>> {
+    IDENTITY_RESOLUTIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How long the in-flight resolution for `directory` has been running, when one
+/// is still running.
+///
+/// A deferred caller reports this so its refusal says the root is *being*
+/// resolved rather than merely unresolved.
+#[must_use]
+pub fn identity_resolution_elapsed(directory: &Path) -> Option<Duration> {
+    identity_resolutions()
+        .get(directory)
+        .map(|resolution| resolution.started.elapsed())
+}
+
+/// Join the resolution running for `directory`, starting one if none is.
+///
+/// Single-flight per directory: concurrent callers share one walk, and a
+/// caller that abandons its bounded wait does not abandon the work. The
+/// resolution runs to completion on the blocking pool and publishes into the
+/// retained per-root topology, so the next caller reads a resolved root
+/// instead of starting the walk over.
+fn join_identity_resolution(directory: &Path) -> PublishedIdentity {
+    let mut resolutions = identity_resolutions();
+    if let Some(resolution) = resolutions.get(directory) {
+        return resolution.published.clone();
+    }
+    let (publish, published) = asupersync::channel::watch::channel(None);
+    resolutions.insert(
+        directory.to_path_buf(),
+        IdentityResolution {
+            started: Instant::now(),
+            published: published.clone(),
+        },
+    );
+    drop(resolutions);
+
+    // The slot is retired when the resolution ends, however it ends: normally,
+    // by panic, or by the runtime dropping a blocking task it never ran. A root
+    // is never left pointing at a resolution that will never publish, and no
+    // typed failure survives its own resolution to poison the next one.
+    let retire = RetireResolution(directory.to_path_buf());
+    let resolve = move || {
+        let result = resolve_identity_from_authority(&retire.0);
+        // Retired before publishing, so a caller arriving after the answer
+        // starts a fresh resolution, which the retained topology answers
+        // without a walk, instead of joining a resolution that is history.
+        drop(retire);
+        let _ = publish.send(Some(result));
     };
-    let child = match command.spawn() {
-        Ok(child) => child,
-        Err(_) => {
-            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed);
-        }
+    // The walk is a detached blocking task, not part of any caller's future,
+    // so a caller that stops waiting leaves it running.
+    if let Some(runtime) = crate::native_runtime::handle() {
+        let _ = runtime.spawn_blocking(resolve);
+    }
+    published
+}
+
+/// Retires one directory's resolution slot when the resolution ends.
+struct RetireResolution(PathBuf);
+
+impl Drop for RetireResolution {
+    fn drop(&mut self) {
+        identity_resolutions().remove(&self.0);
+    }
+}
+
+fn resolve_identity_from_authority(path: &Path) -> IdentityResolutionResult {
+    let exists = {
+        let _span = tracing::trace_span!("runtime_core.git.discover.control_walk").entered();
+        repository_control_may_exist(path)
     };
-    let output = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => {
-            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled);
+    if !exists {
+        return IdentityResolutionResult::Decided(GitRepositoryIdentityOutcome::NotRepository);
+    }
+    {
+        let _span = tracing::trace_span!("runtime_core.git.discover.authority").entered();
+        repository_identity_from_authority(path)
+    }
+    .map_or(
+        IdentityResolutionResult::Unreadable,
+        IdentityResolutionResult::Decided,
+    )
+}
+
+/// Run the ancestor walk and repository open on the blocking pool.
+///
+/// Live defect this exists for: this function promises discovery "without
+/// blocking the async executor", but the in-process authority probe ran inline
+/// on the calling worker with no bound at all, only the `git` subprocess
+/// fallback below ever observed the deadline. On a slow volume every async
+/// worker serving daemon connections sat inside `gix` discovery at once, so
+/// the accept loop was never polled and the listening socket refused new
+/// clients while the process stayed alive.
+///
+/// The blocking task cannot be interrupted once started, but the caller is:
+/// an elapsed deadline or a cancelled token returns the typed uncertainty the
+/// module contract already defines, and the resolution finishes on the
+/// blocking pool without holding a worker.
+///
+/// Second live defect: that abandoned probe used to be *forgotten* as well as
+/// abandoned, so every retry started its own walk and a root on a slow volume
+/// stayed deferred for as long as clients kept asking. The resolution is now
+/// single-flight and outlives the caller that started it.
+async fn authority_identity_off_executor(
+    directory: &Path,
+    deadline: MonotonicDeadline,
+    cancellation: &CancellationToken,
+) -> Result<IdentityResolutionResult, GitDiscoveryUnknown> {
+    let mut published = join_identity_resolution(directory);
+    within_discovery_budget(directory, deadline, cancellation, move |cx| async move {
+        published_identity(&cx, &mut published).await
+    })
+    .await
+}
+
+/// Ask the `git` helper on the native blocking pool after an unreadable
+/// in-process authority.
+async fn cli_identity_off_executor(
+    directory: &Path,
+    deadline: MonotonicDeadline,
+    cancellation: &CancellationToken,
+) -> GitRepositoryIdentityOutcome {
+    // A running blocking task outlives an abandoned join, so the helper is
+    // killed through its token instead. The join is raced against the budget
+    // because a helper queued behind a full blocking pool checks neither
+    // bound until it starts.
+    let abandoned = CancelOnDrop(cancellation.child_token());
+    let helper_cancellation = abandoned.0.clone();
+    let helper_directory = directory.to_path_buf();
+    within_discovery_budget(directory, deadline, cancellation, move |cx| async move {
+        match cx.spawn_blocking(move |_| {
+            cli_identity(&helper_directory, deadline, &helper_cancellation)
+        }) {
+            Ok(mut helper) => helper.join(&cx).await.ok(),
+            Err(_) => Some(GitRepositoryIdentityOutcome::Unknown(
+                GitDiscoveryUnknown::SpawnFailed,
+            )),
         }
-        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.instant())) => {
-            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
-        }
-        output = child.wait_with_output() => output,
+    })
+    .await
+    .unwrap_or_else(GitRepositoryIdentityOutcome::Unknown)
+}
+
+/// Cancels its token when dropped.
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// Race `answer` against `cancellation` and the discovery budget for
+/// `directory`, in that order, inside a native task: the Asupersync timer must
+/// not be polled by a foreign executor. `None` from `answer` means the work
+/// ended without one.
+async fn within_discovery_budget<Answer, AnswerFuture, Value>(
+    directory: &Path,
+    deadline: MonotonicDeadline,
+    cancellation: &CancellationToken,
+    answer: Answer,
+) -> Result<Value, GitDiscoveryUnknown>
+where
+    Answer: FnOnce(Cx) -> AnswerFuture + Send + 'static,
+    AnswerFuture: Future<Output = Option<Value>> + Send + 'static,
+    Value: Send + 'static,
+{
+    let Some(cx) = crate::native_runtime::cx() else {
+        return Err(GitDiscoveryUnknown::ProbeFailed);
     };
-    match output {
-        Ok(output) if output.status.success() => {
-            parse_repository_identity(directory, &output.stdout).unwrap_or(
-                GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::ProbeFailed),
-            )
+    let directory = directory.to_path_buf();
+    let cancellation = cancellation.clone();
+    let race = cx.spawn(move |cx| async move {
+        let mut answer = pin!(answer(cx.clone()));
+        let mut cancelled = pin!(cancellation.cancelled());
+        let mut budget = pin!(repository_discovery_budget(
+            &cx,
+            &directory,
+            deadline.instant()
+        ));
+        poll_fn(|task| {
+            if let Poll::Ready(answer) = answer.as_mut().poll(task) {
+                return Poll::Ready(answer.ok_or(GitDiscoveryUnknown::ProbeFailed));
+            }
+            if cancelled.as_mut().poll(task).is_ready() {
+                return Poll::Ready(Err(GitDiscoveryUnknown::Cancelled));
+            }
+            if budget.as_mut().poll(task).is_ready() {
+                return Poll::Ready(Err(GitDiscoveryUnknown::DeadlineExceeded));
+            }
+            Poll::Pending
+        })
+        .await
+    });
+    match race {
+        Ok(mut race) => race
+            .join(&cx)
+            .await
+            .unwrap_or(Err(GitDiscoveryUnknown::ProbeFailed)),
+        Err(_) => Err(GitDiscoveryUnknown::ProbeFailed),
+    }
+}
+
+/// Completes at `deadline`, the wall-clock bound on one caller's wait for
+/// discovery of `directory`.
+///
+/// A test that parks the walk on a channel ends the budget as soon as the
+/// walk is parked: the project is discovery-blocked, and sleeping out the
+/// deadline would hold the caller open for the whole hang. A test that holds
+/// the discovery clock keeps the budget open until the walk finishes.
+async fn repository_discovery_budget(cx: &Cx, directory: &Path, deadline: Instant) {
+    let elapsed =
+        asupersync::time::sleep(cx.now(), deadline.saturating_duration_since(Instant::now()));
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        if crate::git_repository::repository_discovery_clock_held(directory) {
+            return std::future::pending().await;
         }
-        Ok(_) | Err(_) => GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::ProbeFailed),
+        let mut elapsed = pin!(elapsed);
+        let mut parked = pin!(crate::git_repository::repository_discovery_parked(
+            cx, directory
+        ));
+        poll_fn(|task| {
+            if elapsed.as_mut().poll(task).is_ready() || parked.as_mut().poll(task).is_ready() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+    #[cfg(not(any(test, feature = "test-helpers")))]
+    {
+        let _ = directory;
+        elapsed.await;
+    }
+}
+
+/// Await the answer a joined resolution publishes, or `None` when the
+/// resolution ended without one.
+#[tracing::instrument(
+    name = "runtime_core.git.discover.single_flight_wait",
+    level = "trace",
+    skip_all
+)]
+async fn published_identity(
+    cx: &Cx,
+    published: &mut PublishedIdentity,
+) -> Option<IdentityResolutionResult> {
+    loop {
+        if let Some(result) = published.borrow_and_update_clone() {
+            return Some(result);
+        }
+        published.changed(cx).await.ok()?;
     }
 }
 
 /// Synchronous bounded discovery for legacy parser seams that cannot await.
 ///
+/// Daemon, MCP, and other composition edges must mint one parent
+/// [`MonotonicDeadline`] per request and pass it through
+/// [`discover_repository_identity`] / [`discover_repository_identity_with_control`]
+/// instead of calling this helper in a multi-root loop (which would stack
+/// N×[`DEFAULT_DISCOVERY_TIMEOUT`] budgets). Prefer an explicit deadline at
+/// every composition edge.
+///
 /// Daemon and other async callers should use [`discover_repository_identity`].
 pub fn discover_repository_identity_bounded(directory: &Path) -> GitRepositoryIdentityOutcome {
-    discover_repository_identity_with_control(
+    discover_repository_identity_sync(
         directory,
         MonotonicDeadline::at(Instant::now() + DEFAULT_DISCOVERY_TIMEOUT),
+        Some(CLI_FALLBACK_HEADROOM),
         &CancellationToken::new(),
     )
 }
 
 /// Synchronous discovery with explicit cancellation and monotonic deadline.
-#[hotpath::measure(label = "runtime_core.git.discover_control")]
+///
+/// The caller's deadline bounds the Git CLI fallback as well: it is never
+/// extended, however long the in-process authority took.
 pub fn discover_repository_identity_with_control(
     directory: &Path,
     deadline: MonotonicDeadline,
+    cancellation: &CancellationToken,
+) -> GitRepositoryIdentityOutcome {
+    discover_repository_identity_sync(directory, deadline, None, cancellation)
+}
+
+/// `fallback_share` guarantees the Git CLI fallback at least that long after
+/// the authority returns, extending `deadline` when the authority overran it.
+#[tracing::instrument(name = "runtime_core.git.discover_control", level = "trace", skip_all)]
+fn discover_repository_identity_sync(
+    directory: &Path,
+    deadline: MonotonicDeadline,
+    fallback_share: Option<Duration>,
     cancellation: &CancellationToken,
 ) -> GitRepositoryIdentityOutcome {
     if cancellation.is_cancelled() {
@@ -150,7 +508,21 @@ pub fn discover_repository_identity_with_control(
     if let Some(identity) = repository_identity_from_authority(directory) {
         return identity;
     }
+    // The in-process authority cannot be interrupted, so an authority slower
+    // than its model would otherwise leave the fallback none of the budget.
+    let deadline = fallback_share.map_or(deadline, |share| {
+        MonotonicDeadline::at(deadline.instant().max(Instant::now() + share))
+    });
+    cli_identity(directory, deadline, cancellation)
+}
 
+/// Ask the `git` helper for the paired identity, killing it at `deadline` or
+/// on cancellation.
+fn cli_identity(
+    directory: &Path,
+    deadline: MonotonicDeadline,
+    cancellation: &CancellationToken,
+) -> GitRepositoryIdentityOutcome {
     let Ok(mut command) = repository_identity_command(directory) else {
         return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed);
     };
@@ -225,8 +597,7 @@ fn repository_control_may_exist(directory: &Path) -> bool {
     }
     directory
         .canonicalize()
-        .ok()
-        .is_some_and(|canonical| canonical.ancestors().any(git_control_exists_or_unknown))
+        .is_ok_and(|canonical| canonical.ancestors().any(git_control_exists_or_unknown))
 }
 
 fn git_control_exists_or_unknown(candidate: &Path) -> bool {
@@ -234,22 +605,27 @@ fn git_control_exists_or_unknown(candidate: &Path) -> bool {
 }
 
 fn repository_identity_from_authority(directory: &Path) -> Option<GitRepositoryIdentityOutcome> {
-    match crate::git_repository::GitRepositoryAuthority::discover(directory) {
-        Ok(repository) => {
-            let Some(worktree_root) = repository.worktree_root() else {
+    match crate::git_repository::try_repository_topology(directory) {
+        Ok(topology) => {
+            let Some(worktree_root) = topology.worktree_root.clone() else {
                 return Some(GitRepositoryIdentityOutcome::NotRepository);
             };
             Some(GitRepositoryIdentityOutcome::Resolved(
                 GitRepositoryIdentity {
-                    worktree_root: worktree_root.to_path_buf(),
-                    git_dir: repository.git_dir().to_path_buf(),
-                    common_dir: repository.common_dir().to_path_buf(),
+                    worktree_root,
+                    git_dir: topology.git_dir.clone(),
+                    common_dir: topology.common_dir.clone(),
                 },
             ))
         }
-        Err(crate::git_repository::GitRepositoryError::NotARepository { .. }) => {
-            Some(GitRepositoryIdentityOutcome::NotRepository)
-        }
+        Err(crate::git_repository::GitTopologyProbeError::Repository(
+            crate::git_repository::GitRepositoryError::NotARepository { .. },
+        )) => Some(GitRepositoryIdentityOutcome::NotRepository),
+        // The walk is already owned by another thread. Falling through to the
+        // git CLI would start a second blocking probe of the same volume.
+        Err(crate::git_repository::GitTopologyProbeError::Blocked(_)) => Some(
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded),
+        ),
         Err(_) => None,
     }
 }
@@ -268,24 +644,6 @@ fn repository_identity_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    Ok(command)
-}
-
-fn async_repository_identity_command(
-    directory: &Path,
-) -> Result<tokio::process::Command, crate::git::GitProgramUnavailable> {
-    let mut command = tokio::process::Command::new(crate::git::try_git_program()?);
-    command
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .arg("-C")
-        .arg(directory)
-        .args(REPOSITORY_IDENTITY_ARGS)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
     Ok(command)
 }
 
@@ -366,6 +724,9 @@ fn capture_child(
             kill_and_reap(&mut child);
             return ChildCaptureOutcome::DeadlineExceeded;
         }
+        // Sleep at most CHILD_WAIT_POLL_INTERVAL, and never past the deadline.
+        // Larger slices cut blocking-pool wakeups vs a fixed 10 ms poll without
+        // losing cancel/deadline checks between waits.
         std::thread::sleep(
             deadline
                 .instant()
@@ -392,8 +753,38 @@ mod tests {
             .args(args)
             .current_dir(cwd)
             .status()
-            .expect("git not on PATH — required for identity tests");
+            .expect("git not on PATH, required for identity tests");
         assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+    }
+
+    #[asupersync::test]
+    async fn held_discovery_clock_covers_entry_expiry_without_disabling_cancellation() {
+        let root = tempdir().unwrap();
+        run_git(root.path(), &["init", "--quiet"]);
+        crate::git_repository::hold_repository_discovery_clock_for_test(root.path());
+        let expired = MonotonicDeadline::at(Instant::now());
+        let outcome =
+            discover_repository_identity(root.path(), expired, &CancellationToken::new()).await;
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let cancellation = discover_repository_identity(root.path(), expired, &cancelled).await;
+        let other_root = tempdir().unwrap();
+        let unrelated =
+            discover_repository_identity(other_root.path(), expired, &CancellationToken::new())
+                .await;
+        crate::git_repository::reset_repository_discovery_for_test(root.path());
+        assert!(
+            matches!(outcome, GitRepositoryIdentityOutcome::Resolved(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            cancellation,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled)
+        );
+        assert_eq!(
+            unrelated,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
     }
 
     #[test]
@@ -472,6 +863,323 @@ mod tests {
             outcome,
             GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::ProbeFailed)
         );
+    }
+
+    /// What one discovery walk costs on the modelled slow volume.
+    const SLOW_WALK: Duration = Duration::from_millis(750);
+
+    fn budget(within: Duration) -> MonotonicDeadline {
+        MonotonicDeadline::at(Instant::now() + within)
+    }
+
+    /// A repository whose every live discovery walk costs [`SLOW_WALK`].
+    fn slow_volume_repository(fixture: &Path) -> PathBuf {
+        let repository = fixture.join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "-b", "main", "--quiet"]);
+        crate::git_repository::delay_repository_discovery_for_test(&repository, SLOW_WALK);
+        repository
+    }
+
+    /// An unreadable authority that alone outlasts the whole default budget
+    /// still leaves the Git CLI fallback its full reserve. The fallback's
+    /// `git` is held on a FIFO config include, so the outcome cannot depend on
+    /// how fast `git` runs on a loaded host; only the granted wait is measured.
+    #[cfg(unix)]
+    #[test]
+    fn default_budget_keeps_cli_fallback_after_slow_unreadable_authority() {
+        let tmp = tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "-b", "main", "--quiet"]);
+        let held = repository.join(".git").join("held-config");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&held)
+                .status()
+                .unwrap()
+                .success()
+        );
+        run_git(
+            &repository,
+            &["config", "include.path", held.to_str().unwrap()],
+        );
+        crate::git_repository::unreadable_repository_discovery_for_test(
+            &repository,
+            DEFAULT_DISCOVERY_TIMEOUT,
+        );
+
+        let started = Instant::now();
+        let outcome = discover_repository_identity_bounded(&repository);
+        let elapsed = started.elapsed();
+        crate::git_repository::reset_repository_discovery_for_test(&repository);
+
+        assert_eq!(
+            outcome,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+        assert!(
+            elapsed >= DEFAULT_DISCOVERY_TIMEOUT + CLI_FALLBACK_HEADROOM,
+            "the held CLI fallback must be granted its reserve after the authority: {elapsed:?}"
+        );
+    }
+
+    /// The Git CLI fallback can queue behind a full blocking pool, where it
+    /// observes neither the deadline nor cancellation. The caller's wait must
+    /// still end at its deadline.
+    #[asupersync::test(blocking = 1)]
+    async fn a_cli_fallback_queued_behind_a_full_pool_still_meets_its_deadline() {
+        let cx = Cx::current().expect("test task context");
+        let tmp = tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "-b", "main", "--quiet"]);
+        crate::git_repository::unreadable_repository_discovery_for_test(
+            &repository,
+            Duration::from_millis(100),
+        );
+
+        let probed = repository.clone();
+        let mut discovery = cx
+            .spawn(move |_| async move {
+                discover_repository_identity(
+                    &probed,
+                    budget(Duration::from_millis(400)),
+                    &CancellationToken::new(),
+                )
+                .await
+            })
+            .expect("discovery task");
+        while crate::git_repository::repository_discovery_count_for_test(&repository) == 0 {
+            asupersync::runtime::yield_now().await;
+        }
+        // The walk holds the pool's only thread; this blocker queues next, so
+        // the CLI helper queues behind it.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let _blocker = cx
+            .spawn_blocking(move |_| {
+                let _ = held.recv();
+            })
+            .expect("pool blocker");
+
+        let outcome =
+            asupersync::time::timeout(cx.now(), Duration::from_secs(5), discovery.join(&cx)).await;
+        drop(release);
+        crate::git_repository::reset_repository_discovery_for_test(&repository);
+
+        assert_eq!(
+            outcome
+                .expect("a queued CLI helper must not hold the caller past its deadline")
+                .expect("discovery join"),
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+    }
+
+    /// A probe abandoned at its deadline must still finish and publish, or the
+    /// deferral never converges: every retry starts the walk over and a root on
+    /// a slow volume stays deferred for as long as clients keep asking.
+    #[asupersync::test]
+    async fn a_probe_over_its_budget_publishes_for_the_next_resolution() {
+        let cx = Cx::current().expect("test task context");
+        let tmp = tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "-b", "main", "--quiet"]);
+        // The walk stays parked until released, so it is still running when
+        // the deferral returns however late a loaded host schedules either.
+        let block = crate::git_repository::block_repository_discovery_for_test(&repository);
+
+        let deferred = discover_repository_identity(
+            &repository,
+            budget(Duration::from_millis(100)),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(
+            deferred,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded),
+            "a probe past its budget is deferred, not decided"
+        );
+        assert!(
+            identity_resolution_elapsed(&repository).is_some(),
+            "the abandoned resolution must still be running, not discarded with its caller"
+        );
+        block.release();
+
+        // Joining the abandoned walk waits for its publication without a
+        // timer; a walk that already retired is answered by what it retained.
+        published_identity(&cx, &mut join_identity_resolution(&repository)).await;
+        crate::git_repository::hold_repository_discovery_clock_for_test(&repository);
+        let converged = discover_repository_identity(
+            &repository,
+            budget(Duration::ZERO),
+            &CancellationToken::new(),
+        )
+        .await;
+        let resolutions =
+            crate::git_repository::repository_topology_resolution_count_for_test(&repository);
+        crate::git_repository::reset_repository_discovery_for_test(&repository);
+
+        let GitRepositoryIdentityOutcome::Resolved(identity) = converged else {
+            panic!("the abandoned resolution must decide the next probe: {converged:?}");
+        };
+        assert_eq!(identity.worktree_root, repository.canonicalize().unwrap());
+        assert_eq!(
+            resolutions, 1,
+            "the converged probe walked the volume again"
+        );
+    }
+
+    /// An abandoned probe still finishes and publishes, and the caller gets
+    /// the typed deferral instead of waiting the probe out.
+    #[asupersync::test]
+    async fn a_bounded_probe_over_its_budget_is_deferred_and_still_finishes() {
+        let cx = Cx::current().expect("test task context");
+        let tmp = tempdir().unwrap();
+        let (finished, mut probe_finished) = asupersync::channel::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+
+        let deferred = bounded_repository_probe(tmp.path(), budget(Duration::ZERO), move || {
+            let _ = released.recv();
+            let _ = finished.send_blocking(());
+        })
+        .await;
+        release.send(()).unwrap();
+
+        assert_eq!(deferred, Err(GitDiscoveryUnknown::DeadlineExceeded));
+        assert!(
+            probe_finished.recv(&cx).await.is_ok(),
+            "the abandoned probe must run to completion"
+        );
+        assert_eq!(
+            bounded_repository_probe(tmp.path(), budget(Duration::from_secs(5)), || 7).await,
+            Ok(7)
+        );
+    }
+
+    /// Once a root's topology is published, reading its HEAD must not walk the
+    /// volume to find the repository again.
+    ///
+    /// Live wedge this covers: the topology memo only short-circuited topology
+    /// questions. Every route resolution still read HEAD through a complete
+    /// repository discovery, so a deferred root on a slow volume was rediscovered
+    /// from scratch on every retry and the deferral never converged.
+    #[asupersync::test]
+    async fn a_head_read_after_a_published_topology_does_not_walk_again() {
+        let tmp = tempdir().unwrap();
+        let repository = slow_volume_repository(tmp.path());
+        let resolved = discover_repository_identity(
+            &repository,
+            budget(Duration::from_secs(5)),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(
+            resolved,
+            GitRepositoryIdentityOutcome::Resolved(_)
+        ));
+
+        let branch = crate::branch::current_branch(&repository);
+        let walks = crate::git_repository::repository_discovery_count_for_test(&repository);
+        crate::git_repository::reset_repository_discovery_for_test(&repository);
+
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(
+            walks, 1,
+            "the HEAD read walked the volume again instead of opening the published Git directory"
+        );
+    }
+
+    /// Reusing a retained topology opens the repository at its own Git
+    /// directory instead of walking to it. A linked worktree is where that can
+    /// go wrong: its HEAD lives beside its per-worktree Git directory, not in
+    /// the common directory it shares with the main checkout.
+    #[asupersync::test]
+    async fn a_retained_topology_still_reports_the_linked_worktree_head() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "-b", "main", "--quiet"]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        );
+        let linked = tmp.path().join("linked");
+        run_git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "linked-branch",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let within = Duration::from_secs(2);
+
+        let cold =
+            discover_repository_identity(&linked, budget(within), &CancellationToken::new()).await;
+        let warm =
+            discover_repository_identity(&linked, budget(within), &CancellationToken::new()).await;
+
+        assert_eq!(
+            cold, warm,
+            "a retained topology must name the same identity the walk did"
+        );
+        assert!(matches!(warm, GitRepositoryIdentityOutcome::Resolved(_)));
+        assert_eq!(
+            crate::branch::current_branch(&linked).as_deref(),
+            Some("linked-branch"),
+            "a worktree opened at its own Git directory must report its own HEAD"
+        );
+        assert_eq!(
+            crate::branch::current_branch(&main).as_deref(),
+            Some("main"),
+            "the main checkout must keep reporting its own HEAD"
+        );
+    }
+
+    /// A decided-but-negative answer is an observation, not a verdict about the
+    /// root: nothing about it survives the resolution that produced it.
+    #[asupersync::test]
+    async fn a_typed_probe_failure_does_not_poison_the_root() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let within = Duration::from_secs(2);
+
+        let absent =
+            discover_repository_identity(&workspace, budget(within), &CancellationToken::new())
+                .await;
+        assert_eq!(
+            absent,
+            GitRepositoryIdentityOutcome::NotRepository,
+            "an ordinary directory is not a repository"
+        );
+        assert!(
+            identity_resolution_elapsed(&workspace).is_none(),
+            "a finished resolution must not stay in flight"
+        );
+
+        run_git(&workspace, &["init", "--quiet"]);
+        let outcome =
+            discover_repository_identity(&workspace, budget(within), &CancellationToken::new())
+                .await;
+
+        let GitRepositoryIdentityOutcome::Resolved(identity) = outcome else {
+            panic!("a repository created after a negative answer must resolve: {outcome:?}");
+        };
+        assert_eq!(identity.worktree_root, workspace.canonicalize().unwrap());
     }
 
     #[test]

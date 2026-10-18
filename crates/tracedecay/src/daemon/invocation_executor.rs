@@ -10,12 +10,14 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+use tracedecay_application::operation_stream::OperationRequestControls;
+use tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationProblem, ProjectRuntimeRequestLeaseV1,
-    WorkApplicationOutcomeV1, cancel,
+    WorkApplicationOutcomeV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::operation_stream::OperationRequestControls;
+use tracedecay_runtime_core::native_runtime;
 
 use super::*;
 
@@ -30,18 +32,20 @@ pub(super) struct FederatedSurfaceRequestV1 {
 }
 
 pub(super) struct PrecomputedMultiRootQueryPort {
-    pub(super) outcomes:
-        BTreeMap<tracedecay_domain::ManifestDigest, tracedecay_domain::ScopeOutcome<Vec<Value>>>,
+    pub(super) outcomes: BTreeMap<
+        tracedecay_domain::ManifestDigest,
+        tracedecay_domain::ScopeOutcome<tracedecay_contracts::MultiRootRootPageV1<Value>>,
+    >,
 }
 
-impl tracedecay_application::MultiRootQueryPort<Value, Value> for PrecomputedMultiRootQueryPort {
+impl tracedecay_contracts::MultiRootQueryPort<Value, Value> for PrecomputedMultiRootQueryPort {
     fn query_root(
         &self,
-        context: &tracedecay_application::RequestContext,
-        _generation: &tracedecay_domain::RootGenerationV1,
+        context: &tracedecay_contracts::RequestContext,
+        _generation: Option<&tracedecay_domain::RootGenerationV1>,
         _query: &Value,
-        _page: u64,
-    ) -> tracedecay_domain::ScopeOutcome<Vec<Value>> {
+        _cursor: Option<&tracedecay_contracts::OpaqueCursor>,
+    ) -> tracedecay_domain::ScopeOutcome<tracedecay_contracts::MultiRootRootPageV1<Value>> {
         self.outcomes
             .get(&context.scope().scope_digest)
             .cloned()
@@ -52,9 +56,9 @@ impl tracedecay_application::MultiRootQueryPort<Value, Value> for PrecomputedMul
 }
 
 pub(super) fn denied_root_generation(
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
 ) -> std::result::Result<
-    tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
+    tracedecay_domain::RootScopeOutcomeV1<Option<tracedecay_domain::RootGenerationV1>>,
     DaemonInvocationProblem,
 > {
     tracedecay_domain::RootScopeOutcomeV1::new(
@@ -65,10 +69,10 @@ pub(super) fn denied_root_generation(
 }
 
 pub(super) fn unavailable_root_generation(
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     reason: tracedecay_domain::ScopeUnavailableReasonV1,
 ) -> std::result::Result<
-    tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
+    tracedecay_domain::RootScopeOutcomeV1<Option<tracedecay_domain::RootGenerationV1>>,
     DaemonInvocationProblem,
 > {
     tracedecay_domain::RootScopeOutcomeV1::new(
@@ -79,7 +83,7 @@ pub(super) fn unavailable_root_generation(
 }
 
 pub(super) fn frozen_root_generation(
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     scope_set_digest: &tracedecay_domain::ManifestDigest,
     source_revision: &str,
     operation: &Value,
@@ -147,11 +151,11 @@ pub(super) fn extract_work_application_payload(
 }
 
 pub(super) fn multi_root_family_allows(
-    family: &tracedecay_application::MultiRootOperationV1,
+    family: &tracedecay_contracts::MultiRootOperationV1,
     operation: ApplicationSurfaceOperation,
 ) -> bool {
     match family {
-        tracedecay_application::MultiRootOperationV1::Git { .. } => matches!(
+        tracedecay_contracts::MultiRootOperationV1::Git { .. } => matches!(
             operation,
             ApplicationSurfaceOperation::GitStatus
                 | ApplicationSurfaceOperation::GitDiff
@@ -159,7 +163,7 @@ pub(super) fn multi_root_family_allows(
                 | ApplicationSurfaceOperation::GitBlame
                 | ApplicationSurfaceOperation::GitHunks
         ),
-        tracedecay_application::MultiRootOperationV1::Feedback { .. } => matches!(
+        tracedecay_contracts::MultiRootOperationV1::Feedback { .. } => matches!(
             operation,
             ApplicationSurfaceOperation::FeedbackDiagnostics
                 | ApplicationSurfaceOperation::FeedbackGet
@@ -167,13 +171,13 @@ pub(super) fn multi_root_family_allows(
                 | ApplicationSurfaceOperation::FeedbackList
                 | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
         ),
-        tracedecay_application::MultiRootOperationV1::Impact { .. } => matches!(
+        tracedecay_contracts::MultiRootOperationV1::Impact { .. } => matches!(
             operation,
             ApplicationSurfaceOperation::FeedbackImpact
                 | ApplicationSurfaceOperation::AffectedTests
                 | ApplicationSurfaceOperation::TestResults
         ),
-        tracedecay_application::MultiRootOperationV1::Query { .. } => matches!(
+        tracedecay_contracts::MultiRootOperationV1::Query { .. } => matches!(
             operation,
             ApplicationSurfaceOperation::CodeExactOccurrence
                 | ApplicationSurfaceOperation::CodePhraseSearch
@@ -186,11 +190,10 @@ pub(super) fn multi_root_family_allows(
                 | ApplicationSurfaceOperation::CodeFacets
                 | ApplicationSurfaceOperation::CodeTimeline
                 | ApplicationSurfaceOperation::CodeDeclaration
-                | ApplicationSurfaceOperation::CodeDefinition
                 | ApplicationSurfaceOperation::CodeTypeDefinition
                 | ApplicationSurfaceOperation::CodeReferences
         ),
-        tracedecay_application::MultiRootOperationV1::Work { .. } => false,
+        tracedecay_contracts::MultiRootOperationV1::Work { .. } => false,
     }
 }
 
@@ -199,7 +202,7 @@ pub(super) struct InProcessDaemonInvocationExecutor {
     invocation: DaemonInvocationState,
     store_administration: StoreAdministration,
     project_path: PathBuf,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     project_admission: Option<ProjectRuntimeRequestLeaseV1>,
     admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
 }
@@ -209,7 +212,7 @@ impl InProcessDaemonInvocationExecutor {
         invocation: DaemonInvocationState,
         store_administration: StoreAdministration,
         project_path: PathBuf,
-        scope: tracedecay_application::ResolvedScope,
+        scope: tracedecay_contracts::ResolvedScope,
     ) -> Self {
         Self {
             invocation,
@@ -225,7 +228,7 @@ impl InProcessDaemonInvocationExecutor {
         invocation: DaemonInvocationState,
         store_administration: StoreAdministration,
         project_path: PathBuf,
-        scope: tracedecay_application::ResolvedScope,
+        scope: tracedecay_contracts::ResolvedScope,
         project_admission: ProjectRuntimeRequestLeaseV1,
         admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
     ) -> Self {
@@ -239,9 +242,15 @@ impl InProcessDaemonInvocationExecutor {
         }
     }
 
-    #[hotpath::skip]
     async fn invoke_once(&self, request: DaemonInvocationRequest) -> DaemonInvocationResponse {
-        if let Some(project_admission) = self.project_admission.as_ref() {
+        if let Some(project_admission) = self.project_admission.as_ref()
+            && !matches!(
+                request.payload,
+                tracedecay_daemon_service::DaemonInvocationPayload::ProfileRetainedApplication { .. }
+                    | tracedecay_daemon_service::DaemonInvocationPayload::ProfileGraphTool { .. }
+                    | tracedecay_daemon_service::DaemonInvocationPayload::ProfileConfiguration { .. }
+            )
+        {
             let git_service = if invocation_is_git_operation(request.operation()) {
                 git_service_for_project_path(&self.store_administration, Some(&self.project_path))
                     .await
@@ -283,131 +292,47 @@ impl InProcessDaemonInvocationExecutor {
     }
 }
 
-impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonInvocationExecutor {
+impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvocationExecutor {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "The executor resolves the invocation target against this server's scope before any surface or daemon payload is dispatched."
+    )]
     fn invoke(
         &self,
-        invocation: tracedecay_application::ApplicationInvocation,
-    ) -> tracedecay_application::ApplicationInvocationFuture<
+        invocation: tracedecay_contracts::ApplicationInvocation,
+    ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
-            tracedecay_application::ApplicationResponse,
-            tracedecay_application::InvocationError,
+            tracedecay_contracts::ApplicationResponse,
+            tracedecay_contracts::InvocationError,
         >,
     > {
         Box::pin(async move {
             let (context, request) = invocation.into_parts();
-            let (request_id, target, deadline, cancellation) = context.into_parts();
-            if target.resolved().is_some_and(|scope| scope != &self.scope) {
-                return Err(tracedecay_application::InvocationError::Denied);
+            if context
+                .target()
+                .resolved()
+                .is_some_and(|scope| scope != &self.scope)
+            {
+                return Err(tracedecay_contracts::InvocationError::Denied);
             }
-            let target = match target {
-                tracedecay_application::InvocationTarget::CurrentProject => {
-                    tracedecay_application::InvocationTarget::Resolved(self.scope.clone())
-                }
-                target @ tracedecay_application::InvocationTarget::Resolved(_) => target,
-            };
             match request {
-                tracedecay_application::ApplicationRequest::Surface { binding, payload } => {
-                    let (_binding_id, surface, operation, result_contract, _page) =
-                        binding.into_parts();
-                    let operation = ApplicationSurfaceOperation::from_tool_name(operation.as_str())
-                        .ok_or(tracedecay_application::InvocationError::InvalidRequest)?;
-                    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
-                    let cancellation_context = cancellation.context();
-                    let scope = match target {
-                        tracedecay_application::InvocationTarget::CurrentProject => None,
-                        tracedecay_application::InvocationTarget::Resolved(scope) => Some(scope),
-                    };
-                    let policy = if matches!(
-                        operation,
-                        ApplicationSurfaceOperation::ConfigurationSet
-                            | ApplicationSurfaceOperation::ConfigurationUnset
-                            | ApplicationSurfaceOperation::ConfigurationBatch
-                    ) {
-                        tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect
-                    } else {
-                        tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly
-                    };
-                    let request = match operation {
-                        ApplicationSurfaceOperation::ConfigurationGet
-                        | ApplicationSurfaceOperation::ConfigurationSet
-                        | ApplicationSurfaceOperation::ConfigurationUnset
-                        | ApplicationSurfaceOperation::ConfigurationBatch => {
-                            let request = tracedecay_application::configuration_wire_request_from_invocation_payload(
-                                operation.as_str(),
-                                payload,
-                            )
-                            .map_err(|_| {
-                                tracedecay_application::InvocationError::InvalidRequest
-                            })?;
-                            DaemonInvocationRequest::configuration(
-                                request_id.as_str(),
-                                operation,
-                                request,
-                                observed_at,
-                                deadline.clone(),
-                                cancellation_context,
-                            )
-                            .with_resolved_scope(scope)
-                        }
-                        ApplicationSurfaceOperation::FeedbackGet => {
-                            let typed = crate::application_surface::parse_application_surface_request(
-                                operation, payload,
-                            )
-                            .map_err(|_| {
-                                tracedecay_application::InvocationError::InvalidRequest
-                            })?;
-                            let crate::application_surface::ApplicationSurfaceRequest::Feedback(
-                                request,
-                            ) = typed
-                            else {
-                                return Err(
-                                    tracedecay_application::InvocationError::InvalidRequest,
-                                );
-                            };
-                            DaemonInvocationRequest::feedback(
-                                request_id.as_str(),
-                                operation,
-                                request.request_handle,
-                                observed_at,
-                                deadline.clone(),
-                                cancellation_context,
-                            )
-                            .with_resolved_scope(scope)
-                        }
-                        _ => {
-                            return Err(
-                                tracedecay_application::InvocationError::InvalidRequest,
-                            );
-                        }
-                    }
-                    .with_delivery_route(tracedecay_daemon_protocol::application_delivery_route(surface));
-                    let response =
-                        <Self as tracedecay_daemon_protocol::DaemonInvocationExecutor>::invoke_controlled(
-                            self,
-                            request,
-                            deadline,
-                            cancellation,
-                            policy,
-                        )
-                        .await
-                        .map_err(tracedecay_daemon_protocol::map_invocation_error)?;
-                    tracedecay_daemon_protocol::application_response(
-                        request_id,
-                        result_contract,
-                        response.outcome,
+                tracedecay_contracts::ApplicationRequest::Surface { binding, payload } => {
+                    tracedecay_daemon_protocol::invoke_application_surface(
+                        self, context, binding, payload,
                     )
+                    .await
                 }
-                tracedecay_application::ApplicationRequest::FeedbackObservation {
+                tracedecay_contracts::ApplicationRequest::FeedbackObservation {
                     configuration_digest,
                     observed_at,
                     event,
                 } => {
                     let event = serde_json::from_value(event)
-                        .map_err(|_| tracedecay_application::InvocationError::InvalidRequest)?;
+                        .map_err(|_| tracedecay_contracts::InvocationError::InvalidRequest)?;
                     let response = self
                         .invoke_once(DaemonInvocationRequest::feedback_observation(
-                            request_id.as_str(),
+                            context.request_id().as_str(),
                             configuration_digest,
                             observed_at,
                             event,
@@ -417,21 +342,24 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         response.outcome,
                         DaemonInvocationOutcome::ObservationAccepted
                     ) {
-                        Ok(tracedecay_application::ApplicationResponse::ObservationAccepted)
+                        Ok(tracedecay_contracts::ApplicationResponse::ObservationAccepted)
                     } else {
-                        Err(tracedecay_application::InvocationError::Unavailable)
+                        Err(tracedecay_contracts::InvocationError::Unavailable)
                     }
                 }
-                tracedecay_application::ApplicationRequest::OperationEvents {
+                tracedecay_contracts::ApplicationRequest::OperationEvents {
                     operation_id,
                     max_events,
                     after_sequence,
                 } => {
+                    let (request_id, _, deadline, cancellation) = context.into_parts();
+                    let target =
+                        tracedecay_contracts::InvocationTarget::Resolved(self.scope.clone());
                     let operation_id =
-                        tracedecay_usecases::operation_stream::OperationId::from_request(
+                        tracedecay_application::operation_stream::OperationId::from_request(
                             operation_id.clone(),
                         );
-                    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
+                    let observed_at = tracedecay_contracts::now_micros();
                     let authority = self.invocation.service.operation_events();
                     let admitted = authority
                         .resolve_invocation_context(
@@ -464,37 +392,36 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                     let mut terminated = false;
                     for _ in 0..max_events {
                         let Ok(Some(event)) =
-                            timeout(Duration::from_millis(1), stream.next()).await
+                            native_runtime::timeout(Duration::from_millis(1), stream.next()).await
                         else {
                             break;
                         };
                         terminated = matches!(
                             &event.kind,
-                            tracedecay_application::StreamEventKind::Terminal(_)
+                            tracedecay_contracts::StreamEventKind::Terminal(_)
                         );
                         let kind = match event.kind {
-                            tracedecay_application::StreamEventKind::Item(item) => {
-                                tracedecay_application::StreamEventKind::Item(
+                            tracedecay_contracts::StreamEventKind::Item(item) => {
+                                tracedecay_contracts::StreamEventKind::Item(
                                     serde_json::to_value(item).map_err(|_| {
-                                        tracedecay_application::InvocationError::Unavailable
+                                        tracedecay_contracts::InvocationError::Unavailable
                                     })?,
                                 )
                             }
-                            tracedecay_application::StreamEventKind::Progress {
+                            tracedecay_contracts::StreamEventKind::Progress {
                                 completed,
                                 total,
-                            } => tracedecay_application::StreamEventKind::Progress {
-                                completed,
-                                total,
-                            },
-                            tracedecay_application::StreamEventKind::Gap(gap) => {
-                                tracedecay_application::StreamEventKind::Gap(gap)
+                            } => {
+                                tracedecay_contracts::StreamEventKind::Progress { completed, total }
                             }
-                            tracedecay_application::StreamEventKind::Terminal(terminal) => {
-                                tracedecay_application::StreamEventKind::Terminal(terminal)
+                            tracedecay_contracts::StreamEventKind::Gap(gap) => {
+                                tracedecay_contracts::StreamEventKind::Gap(gap)
+                            }
+                            tracedecay_contracts::StreamEventKind::Terminal(terminal) => {
+                                tracedecay_contracts::StreamEventKind::Terminal(terminal)
                             }
                         };
-                        events.push(tracedecay_application::StreamEvent {
+                        events.push(tracedecay_contracts::StreamEvent {
                             sequence: event.sequence,
                             kind,
                         });
@@ -503,9 +430,9 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         }
                     }
                     let next_sequence = (!terminated).then_some(frontier.next_sequence);
-                    Ok(tracedecay_application::ApplicationResponse::Stream(
-                        tracedecay_application::ApplicationStreamResponse {
-                            stream: tracedecay_application::ApplicationStream {
+                    Ok(tracedecay_contracts::ApplicationResponse::Stream(
+                        tracedecay_contracts::ApplicationStreamResponse {
+                            stream: tracedecay_contracts::ApplicationStream {
                                 operation_id: operation_id.request_id().clone(),
                                 events,
                                 frontier,
@@ -515,12 +442,15 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         },
                     ))
                 }
-                tracedecay_application::ApplicationRequest::OperationCancel { operation_id } => {
+                tracedecay_contracts::ApplicationRequest::OperationCancel { operation_id } => {
+                    let (request_id, _, deadline, cancellation) = context.into_parts();
+                    let target =
+                        tracedecay_contracts::InvocationTarget::Resolved(self.scope.clone());
                     let operation_id =
-                        tracedecay_usecases::operation_stream::OperationId::from_request(
+                        tracedecay_application::operation_stream::OperationId::from_request(
                             operation_id.clone(),
                         );
-                    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
+                    let observed_at = tracedecay_contracts::now_micros();
                     let authority = self.invocation.service.operation_events();
                     let admitted = authority
                         .resolve_invocation_context(
@@ -541,12 +471,12 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         .await
                         .map_err(map_operation_event_invocation_error)?
                     {
-                        tracedecay_usecases::operation_stream::OperationCancelOutcome::Requested
-                        | tracedecay_usecases::operation_stream::OperationCancelOutcome::AlreadyRequested => true,
-                        tracedecay_usecases::operation_stream::OperationCancelOutcome::AlreadyTerminal => false,
+                        tracedecay_application::operation_stream::OperationCancelOutcome::Requested
+                        | tracedecay_application::operation_stream::OperationCancelOutcome::AlreadyRequested => true,
+                        tracedecay_application::operation_stream::OperationCancelOutcome::AlreadyTerminal => false,
                     };
-                    Ok(tracedecay_application::ApplicationResponse::Cancellation(
-                        tracedecay_application::InvocationCancellation {
+                    Ok(tracedecay_contracts::ApplicationResponse::Cancellation(
+                        tracedecay_contracts::InvocationCancellation {
                             operation_id: operation_id.request_id().clone(),
                             cancelled,
                         },
@@ -557,16 +487,26 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
     }
 }
 
-async fn settle_in_process_invocation(
+/// Settles one in-process invocation. `request_cancellations` is the owning
+/// service's table: a caller-side cancellation or deadline is relayed to the
+/// daemon-side registration through it when no pre-admitted token exists.
+/// An authoritative effect gets `response_grace` past cancellation to settle.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one settlement owns its join, deadline, both cancellation sources, policy and grace"
+)]
+pub(super) async fn settle_in_process_invocation(
+    request_cancellations: &tracedecay_daemon_service::RequestCancellationRegistryV1,
     request_id: &str,
-    invocation: tokio::task::JoinHandle<DaemonInvocationResponse>,
+    invocation: native_runtime::NativeTask<DaemonInvocationResponse>,
     remaining: Duration,
-    cancellation: tracedecay_application::CancellationSignal,
+    cancellation: tracedecay_contracts::CancellationSignal,
     admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
     policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    response_grace: Duration,
 ) -> std::result::Result<DaemonInvocationResponse, tracedecay_daemon_protocol::DaemonInvocationError>
 {
-    use tracedecay_application::CancellationStage;
+    use tracedecay_contracts::CancellationStage;
 
     let stage = match policy {
         tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly => {
@@ -576,8 +516,8 @@ async fn settle_in_process_invocation(
             CancellationStage::EffectInFlight
         }
     };
-    let invocation = invocation;
-    tokio::pin!(invocation);
+    let invocation_wait = invocation.wait();
+    tokio::pin!(invocation_wait);
     let cancellation_wait = tracedecay_daemon_protocol::wait_for_cancellation(cancellation);
     tokio::pin!(cancellation_wait);
     let has_admitted_cancellation = admitted_cancellation.is_some();
@@ -589,19 +529,18 @@ async fn settle_in_process_invocation(
     };
     tokio::pin!(admitted_cancellation_wait);
     let timed_out = tokio::select! {
-        response = &mut invocation => {
-            return response.map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable);
-        }
+        outcome = &mut invocation_wait => return invocation_response(outcome),
         () = &mut cancellation_wait => false,
         () = &mut admitted_cancellation_wait => false,
-        () = tokio::time::sleep(remaining) => true,
+        // A timer that cannot start fails closed, as an elapsed deadline.
+        _ = native_runtime::sleep_until(std::time::Instant::now() + remaining) => true,
     };
     if !has_admitted_cancellation {
-        cancel(request_id);
+        request_cancellations.cancel(request_id);
     }
     match policy {
         tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly => {
-            if tokio::time::timeout(Duration::from_secs(1), &mut invocation)
+            if native_runtime::timeout(Duration::from_secs(1), &mut invocation_wait)
                 .await
                 .is_err()
             {
@@ -617,51 +556,72 @@ async fn settle_in_process_invocation(
             // An authoritative effect settles itself: its own budget bounds it,
             // and when that budget expires after the commit point it reports
             // `PartialEffect` with a committed receipt. Waiting only
-            // `DAEMON_TASK_ABORT_DEADLINE` — two seconds, a *shutdown* bound —
+            // `DAEMON_TASK_ABORT_DEADLINE`, two seconds, a *shutdown* bound,
             // replaced that answer with `ResetRequired` whenever settlement
             // took a moment longer than the deadline, which tells the operator
             // their store is corrupt and must be reset when in truth one
             // effect merely outlived its budget. Wait for the authoritative
             // settlement over the same grace the daemon's own clients keep
             // reading for, so the effect's real terminal is the one reported.
-            match tokio::time::timeout(crate::daemon::DAEMON_TOOL_RESPONSE_GRACE, &mut invocation)
-                .await
-            {
-                Ok(Ok(response)) => Ok(response),
-                Ok(Err(_)) | Err(_) => Ok(DaemonInvocationResponse::problem(
-                    request_id,
-                    tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired,
-                )),
+            match native_runtime::timeout(response_grace, &mut invocation_wait).await {
+                Ok(native_runtime::NativeTaskOutcome::Completed(response)) => Ok(response),
+                Err(native_runtime::TimeoutError::TimerUnavailable(_)) => {
+                    Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)
+                }
+                Ok(_) | Err(native_runtime::TimeoutError::Elapsed) => {
+                    Ok(DaemonInvocationResponse::problem(
+                        request_id,
+                        tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired,
+                    ))
+                }
             }
         }
     }
 }
 
+fn invocation_response(
+    outcome: native_runtime::NativeTaskOutcome<DaemonInvocationResponse>,
+) -> std::result::Result<DaemonInvocationResponse, tracedecay_daemon_protocol::DaemonInvocationError>
+{
+    match outcome {
+        native_runtime::NativeTaskOutcome::Completed(response) => Ok(response),
+        native_runtime::NativeTaskOutcome::Cancelled
+        | native_runtime::NativeTaskOutcome::Panicked(_) => {
+            Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)
+        }
+    }
+}
+
 fn map_operation_event_invocation_error(
-    error: tracedecay_usecases::operation_stream::OperationEventError,
-) -> tracedecay_application::InvocationError {
+    error: tracedecay_application::operation_stream::OperationEventError,
+) -> tracedecay_contracts::InvocationError {
     match error {
-        tracedecay_usecases::operation_stream::OperationEventError::NotFoundOrNotAuthorized => {
-            tracedecay_application::InvocationError::Denied
+        tracedecay_application::operation_stream::OperationEventError::NotFoundOrNotAuthorized => {
+            tracedecay_contracts::InvocationError::Denied
         }
-        tracedecay_usecases::operation_stream::OperationEventError::RequestNotAdmitted => {
-            tracedecay_application::InvocationError::DeadlineExceeded
+        tracedecay_application::operation_stream::OperationEventError::CursorRefused(mismatch) => {
+            tracedecay_contracts::InvocationError::Problem(Box::new(
+                tracedecay_contracts::ApplicationProblem::cursor_refused(&mismatch),
+            ))
         }
-        tracedecay_usecases::operation_stream::OperationEventError::InvalidFrontier
-        | tracedecay_usecases::operation_stream::OperationEventError::FrontierExpired
-        | tracedecay_usecases::operation_stream::OperationEventError::ResumeExpired => {
-            tracedecay_application::InvocationError::Conflict
+        tracedecay_application::operation_stream::OperationEventError::RequestNotAdmitted => {
+            tracedecay_contracts::InvocationError::DeadlineExceeded
         }
-        tracedecay_usecases::operation_stream::OperationEventError::InvalidConfiguration
-        | tracedecay_usecases::operation_stream::OperationEventError::InvalidContext(_)
-        | tracedecay_usecases::operation_stream::OperationEventError::AlreadyBound
-        | tracedecay_usecases::operation_stream::OperationEventError::Saturated
-        | tracedecay_usecases::operation_stream::OperationEventError::ResumeUnavailable
-        | tracedecay_usecases::operation_stream::OperationEventError::InvalidProgress
-        | tracedecay_usecases::operation_stream::OperationEventError::TerminalAlreadyPublished
-        | tracedecay_usecases::operation_stream::OperationEventError::InvalidTerminal(_)
-        | tracedecay_usecases::operation_stream::OperationEventError::InvalidTestRunEvent => {
-            tracedecay_application::InvocationError::Unavailable
+        tracedecay_application::operation_stream::OperationEventError::InvalidFrontier
+        | tracedecay_application::operation_stream::OperationEventError::FrontierExpired
+        | tracedecay_application::operation_stream::OperationEventError::ResumeExpired => {
+            tracedecay_contracts::InvocationError::Conflict
+        }
+        tracedecay_application::operation_stream::OperationEventError::InvalidConfiguration
+        | tracedecay_application::operation_stream::OperationEventError::InvalidContext(_)
+        | tracedecay_application::operation_stream::OperationEventError::AlreadyBound
+        | tracedecay_application::operation_stream::OperationEventError::Saturated
+        | tracedecay_application::operation_stream::OperationEventError::ResumeUnavailable
+        | tracedecay_application::operation_stream::OperationEventError::InvalidProgress
+        | tracedecay_application::operation_stream::OperationEventError::TerminalAlreadyPublished
+        | tracedecay_application::operation_stream::OperationEventError::InvalidTerminal(_)
+        | tracedecay_application::operation_stream::OperationEventError::InvalidTestRunEvent => {
+            tracedecay_contracts::InvocationError::Unavailable
         }
     }
 }
@@ -670,8 +630,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
     fn invoke_controlled(
         &self,
         request: DaemonInvocationRequest,
-        deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationSignal,
+        deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationSignal,
         policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
@@ -681,7 +641,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
         >,
     > {
         Box::pin(async move {
-            use tracedecay_application::CancellationStage;
+            use tracedecay_contracts::CancellationStage;
 
             if cancellation.is_cancelled()
                 || self.admitted_cancellation.as_ref().is_some_and(
@@ -701,24 +661,37 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
             )?;
             let executor = self.clone();
             let admitted_cancellation = self.admitted_cancellation.clone();
-            tokio::spawn(async move {
+            let request_cancellations = self.invocation.service.request_cancellations().clone();
+            let unavailable = |_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable;
+            match native_runtime::NativeTask::spawn(async move {
                 let request_id = request.request_id.clone();
-                let invocation = tokio::spawn(hotpath::future!(
-                    async move { executor.invoke_once(request).await },
-                    label = "daemon.invocation.invoke_once"
-                ));
+                let invocation =
+                    native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
+                        async move { executor.invoke_once(request).await },
+                        tracing::trace_span!("daemon.invocation.invoke_once"),
+                    ))
+                    .map_err(unavailable)?;
                 settle_in_process_invocation(
+                    &request_cancellations,
                     &request_id,
                     invocation,
                     remaining,
                     cancellation,
                     admitted_cancellation,
                     policy,
+                    DAEMON_TOOL_RESPONSE_GRACE,
                 )
                 .await
             })
+            .map_err(unavailable)?
             .await
-            .map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)?
+            {
+                native_runtime::NativeTaskOutcome::Completed(result) => result,
+                native_runtime::NativeTaskOutcome::Cancelled
+                | native_runtime::NativeTaskOutcome::Panicked(_) => {
+                    Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)
+                }
+            }
         })
     }
 
@@ -726,11 +699,11 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
         &self,
         subject_digest: tracedecay_domain::ManifestDigest,
         observed_at: tracedecay_domain::UtcMicros,
-        event: tracedecay_application::feedback::observations::FeedbackSourceEventV1,
+        event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async move {
-            let request_id = tracedecay_application::request_identity::mint_global_request_id(
-                tracedecay_application::request_identity::GlobalRequestSurface::FeedbackObservation,
+            let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+                tracedecay_contracts::request_identity::GlobalRequestSurface::FeedbackObservation,
             )
             .map_err(|error| TraceDecayError::Config {
                 message: error.to_string(),
@@ -782,5 +755,10 @@ pub(super) fn invocation_is_native_integration_operation(
             | DaemonInvocationOperation::NativeIntegrationApply
             | DaemonInvocationOperation::NativeIntegrationStatus
             | DaemonInvocationOperation::NativeIntegrationCancel
+            | DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+            | DaemonInvocationOperation::NativeIntegrationWorktreeInspect
+            | DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
+            | DaemonInvocationOperation::NativeIntegrationWorktreeRemove
+            | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
     )
 }

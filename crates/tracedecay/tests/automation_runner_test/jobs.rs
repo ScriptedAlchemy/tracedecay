@@ -8,15 +8,19 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use tokio::sync::Barrier;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
+
 use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 use tracedecay_automation_runtime::automation::jobs::{
     AutomationJob, JobDelivery, UserJobRunOptions, evaluate_and_record_scheduler_skip,
-    job_schedule_decision, job_task_key, load_jobs, run_user_job_with_backend,
+    job_schedule_decision, job_task_key, load_jobs,
     run_user_job_with_backend_for_retained_settlement, save_jobs, validate_job,
 };
 use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedule, cron_is_due, parse_schedule,
 };
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 fn sample_job(id: &str) -> AutomationJob {
     AutomationJob {
@@ -72,7 +76,7 @@ impl AgentTaskBackend for ContentBackend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::UserJob);
         assert!(request.contract.task_key.starts_with("user_job:"));
-        assert_eq!(request.contract.prompt_version, "user_job:v1");
+        assert_eq!(request.contract.prompt_version, "user_job:v2");
         assert!(!request.contract.strict_json);
         assert!(request.prompt.contains("## Job prompt"));
         Ok(AgentTaskResponse {
@@ -85,6 +89,10 @@ impl AgentTaskBackend for ContentBackend {
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -334,7 +342,7 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
     ran_after.task_key = Some(job_task_key(&job.id));
     assert_eq!(
         job_schedule_decision(&job, std::slice::from_ref(&ran_after), now),
-        Some("scheduler_cron_not_due")
+        Some(AutomationSkipReasonV1::SchedulerCronNotDue)
     );
 
     // Prior run before the occurrence: due again.
@@ -350,7 +358,7 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
     recent.completed_at_micros = None;
     assert_eq!(
         job_schedule_decision(&job, std::slice::from_ref(&recent), now),
-        Some("scheduler_interval_not_elapsed")
+        Some(AutomationSkipReasonV1::SchedulerIntervalNotElapsed)
     );
     let mut stale = recent.clone();
     stale.completed_at = (now - 7_200).to_string();
@@ -362,14 +370,14 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
     failed.error = Some("rate limit".to_string());
     assert_eq!(
         job_schedule_decision(&job, std::slice::from_ref(&failed), now),
-        Some("scheduler_cooldown_active")
+        Some(AutomationSkipReasonV1::SchedulerCooldownActive)
     );
 
     // Disabled jobs never run from the scheduler.
     job.enabled = false;
     assert_eq!(
         job_schedule_decision(&job, &[], now),
-        Some("user_job_disabled")
+        Some(AutomationSkipReasonV1::UserJobDisabled)
     );
 
     // Manual schedules are never picked up.
@@ -377,7 +385,7 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
     job.schedule = Some("manual".to_string());
     assert_eq!(
         job_schedule_decision(&job, &[], now),
-        Some("scheduler_schedule_manual")
+        Some(AutomationSkipReasonV1::SchedulerScheduleManual)
     );
 }
 
@@ -391,7 +399,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
     let job = sample_job("daily-digest");
     let config = enabled_job_config();
     let backend = ContentBackend::new("# Digest\n\nNothing changed today.");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -434,7 +442,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
     let record = &run.ledger_record;
     assert_eq!(record.task, AgentTaskKind::UserJob);
     assert_eq!(record.task_key.as_deref(), Some("user_job:daily-digest"));
-    assert_eq!(record.prompt_version.as_deref(), Some("user_job:v1"));
+    assert_eq!(record.prompt_version.as_deref(), Some("user_job:v2"));
     assert_eq!(record.status, AutomationRunStatus::Succeeded);
     assert_eq!(record.trigger, AutomationTrigger::Dashboard);
     let kinds: Vec<&str> = record
@@ -464,6 +472,61 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
 }
 
 #[tokio::test]
+async fn scheduled_user_job_resets_a_schema_v1_ledger_and_records_a_v2_run() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let profile_root = temp.path().join("profile");
+    fs::create_dir_all(&profile_root).unwrap();
+    fs::create_dir_all(&dashboard_root).unwrap();
+    let ledger_path = dashboard_root.join("automation_runs.jsonl");
+    fs::write(
+        &ledger_path,
+        concat!(
+            r#"{"schema_version":1,"run_id":"released-v1-run","trigger":"scheduler","#,
+            r#""task":"user_job","task_key":"user_job:daily-digest","backend":"codex_app_server","#,
+            r#""status":"succeeded","accepted_count":0,"rejected_count":0,"#,
+            r#""started_at":"2099-01-01T00:00:00Z","completed_at":"2099-01-01T00:00:01Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let backend = ContentBackend::new("# Digest\n\nNothing changed today.");
+    let run = settle_user_job(
+        &dashboard_root,
+        &enabled_job_config(),
+        &backend,
+        &sample_job("daily-digest"),
+        UserJobRunOptions {
+            trigger: AutomationTrigger::Scheduler,
+            run_id: Some("after-reset-run".to_string()),
+            profile_root: Some(profile_root),
+            project_root: None,
+            occurrence_anchor_run_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(run.report["status"], json!("delivered"));
+    let records = load_run_records(&dashboard_root, 10).await.unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| (record.run_id.as_str(), record.schema_version, record.status))
+            .collect::<Vec<_>>(),
+        [("after-reset-run", 2, AutomationRunStatus::Succeeded)]
+    );
+    assert!(
+        !fs::read_to_string(&ledger_path)
+            .unwrap()
+            .contains("released-v1-run"),
+        "the retired row is deleted with its ledger"
+    );
+}
+
+#[tokio::test]
 async fn user_job_pre_run_command_is_refused_unless_allowed() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
@@ -477,7 +540,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
     let config = enabled_job_config();
     assert!(!config.allow_job_commands);
     let backend = ContentBackend::new("unused");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -522,12 +585,16 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
                 output_tokens: None,
             })
         }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
+        }
     }
     let config = AutomationConfig {
         allow_job_commands: true,
         ..enabled_job_config()
     };
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &AssertCommandOutputBackend,
@@ -578,13 +645,17 @@ async fn user_job_pre_run_command_runs_from_project_root() {
                 output_tokens: None,
             })
         }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
+        }
     }
 
     let config = AutomationConfig {
         allow_job_commands: true,
         ..enabled_job_config()
     };
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &AssertProjectCommandOutputBackend,
@@ -602,6 +673,116 @@ async fn user_job_pre_run_command_runs_from_project_root() {
     assert_eq!(run.report["status"], json!("delivered"));
 }
 
+async fn run_scheduled_pre_run_failure(
+    job_id: &str,
+    command: &str,
+    project_root: std::path::PathBuf,
+) -> (AutomationJob, AutomationRunLedgerRecord) {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let profile_root = temp.path().join("profile");
+    fs::create_dir_all(&profile_root).unwrap();
+
+    let mut job = sample_job(job_id);
+    job.pre_run_command = Some(command.to_string());
+    let config = AutomationConfig {
+        allow_job_commands: true,
+        ..enabled_job_config()
+    };
+    let backend = ContentBackend::new("unused");
+    let run = settle_user_job(
+        &dashboard_root,
+        &config,
+        &backend,
+        &job,
+        UserJobRunOptions {
+            trigger: AutomationTrigger::Scheduler,
+            run_id: Some(format!("{job_id}-run")),
+            profile_root: Some(profile_root),
+            project_root: Some(project_root),
+            occurrence_anchor_run_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.report["status"], json!("failed"));
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Failed);
+    assert_eq!(run.ledger_record.trigger, AutomationTrigger::Scheduler);
+    (job, run.ledger_record)
+}
+
+fn after_failure_cooldown(record: &AutomationRunLedgerRecord) -> i64 {
+    record.completed_at.parse::<i64>().unwrap() + 301
+}
+
+#[tokio::test]
+async fn scheduled_pre_run_spawn_failure_is_retried_after_cooldown() {
+    let temp = tempdir().unwrap();
+    let missing_root = temp.path().join("missing-project");
+
+    let (job, record) =
+        run_scheduled_pre_run_failure("cmd-spawn", "echo unreachable", missing_root).await;
+
+    assert_eq!(
+        record.error_classification,
+        Some(AgentTaskFailureClass::Unavailable)
+    );
+    assert_eq!(record.error_retryable, Some(true));
+    assert!(
+        record
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("job pre-run command failed: failed to spawn command:"),
+        "{:?}",
+        record.error
+    );
+    assert_eq!(
+        job_schedule_decision(
+            &job,
+            std::slice::from_ref(&record),
+            after_failure_cooldown(&record)
+        ),
+        None
+    );
+}
+
+#[cfg(windows)]
+const NONZERO_EXIT_PRE_RUN_COMMAND: &str = "echo bad-input 1>&2 & exit 3";
+#[cfg(not(windows))]
+const NONZERO_EXIT_PRE_RUN_COMMAND: &str = "echo bad-input >&2; exit 3";
+
+#[tokio::test]
+async fn scheduled_pre_run_nonzero_exit_is_not_retried() {
+    let temp = tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&project_root).unwrap();
+
+    let (job, record) =
+        run_scheduled_pre_run_failure("cmd-exit", NONZERO_EXIT_PRE_RUN_COMMAND, project_root).await;
+
+    assert_eq!(
+        record.error_classification,
+        Some(AgentTaskFailureClass::Permanent)
+    );
+    assert_eq!(record.error_retryable, Some(false));
+    let error = record.error.as_deref().unwrap();
+    assert!(
+        error.starts_with("job pre-run command failed: command exited with"),
+        "{error}"
+    );
+    assert!(error.ends_with(": bad-input"), "{error}");
+    assert_eq!(
+        job_schedule_decision(
+            &job,
+            std::slice::from_ref(&record),
+            after_failure_cooldown(&record)
+        ),
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
+    );
+}
+
 #[tokio::test]
 async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
     let temp = tempdir().unwrap();
@@ -616,6 +797,7 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
             id: "job-context".to_string(),
             title: "Job context".to_string(),
             summary: "Adds job context.".to_string(),
+            routing_description: "Adds job context.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
@@ -655,9 +837,13 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
                 output_tokens: None,
             })
         }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
+        }
     }
 
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &enabled_job_config(),
         &AssertAttachedSkillBackend,
@@ -689,6 +875,7 @@ async fn user_job_does_not_attach_archived_managed_skills() {
             id: "archived-job-context".to_string(),
             title: "Archived job context".to_string(),
             summary: "Must not be attached after archival.".to_string(),
+            routing_description: "Must not be attached after archival.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
@@ -737,9 +924,13 @@ async fn user_job_does_not_attach_archived_managed_skills() {
                 output_tokens: None,
             })
         }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
+        }
     }
 
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &enabled_job_config(),
         &AssertArchivedSkillExcludedBackend,
@@ -770,7 +961,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
         ..enabled_job_config()
     };
     let backend = FailingBackend::new(AgentTaskKind::UserJob);
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -787,7 +978,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
     .unwrap();
 
     // The backend failure is transient, but this test pins the failed-ledger
-    // record, not retry semantics (covered by backend.rs retry tests) —
+    // record, not retry semantics (covered by backend.rs retry tests),
     // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     assert_eq!(run.report["status"], json!("failed"));
@@ -809,57 +1000,49 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
 async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
-    let profile_root = temp.path().join("profile");
-    fs::create_dir_all(&profile_root).unwrap();
 
     let mut job = sample_job("sched-job");
     job.schedule = Some("manual".to_string());
     let config = enabled_job_config();
-    let backend = ContentBackend::new("unused");
 
-    // Manual schedule: the scheduler skips, recording the skip once.
-    for run_id in ["sched-run-1", "sched-run-2"] {
-        let run = run_user_job_with_backend(
+    // Manual schedule: every scheduler tick of the same occurrence reaches
+    // the prefilter, which records the skip once.
+    let mut first = None;
+    for _ in 0..2 {
+        let run = evaluate_and_record_scheduler_skip(
             &dashboard_root,
             &config,
-            &backend,
+            None,
             &job,
-            UserJobRunOptions {
-                trigger: AutomationTrigger::Scheduler,
-                run_id: Some(run_id.to_string()),
-                profile_root: Some(profile_root.clone()),
-                project_root: None,
-                occurrence_anchor_run_id: None,
-            },
+            "sched-occurrence",
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a manual schedule is never due");
         assert_eq!(run.report["reason"], json!("scheduler_schedule_manual"));
+        first.get_or_insert(run);
     }
-    assert_eq!(backend.calls(), 0);
+    let first = first.unwrap();
     let records = load_run_records(&dashboard_root, 10).await.unwrap();
     assert_eq!(
         records.len(),
         1,
         "repeat scheduler skips must persist only once"
     );
-    assert_eq!(records[0].run_id, "sched-run-1");
+    assert_eq!(records[0].run_id, first.run_id);
 
-    let repeated = run_user_job_with_backend(
+    let repeated = evaluate_and_record_scheduler_skip(
         &dashboard_root,
         &config,
-        &backend,
+        None,
         &job,
-        UserJobRunOptions {
-            trigger: AutomationTrigger::Scheduler,
-            run_id: Some("sched-run-3".to_owned()),
-            profile_root: Some(profile_root),
-            project_root: None,
-            occurrence_anchor_run_id: None,
-        },
+        "sched-occurrence",
+        None,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("a manual schedule is never due");
     assert_eq!(
         repeated.ledger_record, records[0],
         "an immediate repeat skip must return the exact durable prior row"
@@ -879,7 +1062,7 @@ async fn manual_job_trigger_respects_existing_per_job_lock() {
     let job = sample_job("locked-job");
     let config = enabled_job_config();
     let backend = ContentBackend::new("unused");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -915,7 +1098,7 @@ async fn disabled_automation_skip_precedes_existing_per_job_lock() {
     let mut config = enabled_job_config();
     config.enabled = false;
     let backend = ContentBackend::new("unused");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -988,12 +1171,12 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     drop(guard);
 
     let first =
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
             .await
             .unwrap()
             .expect("disabled automation must produce an out-of-band diagnostic");
     let repeated =
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
             .await
             .unwrap()
             .expect("the same config skip must return its exact diagnostic");
@@ -1049,7 +1232,7 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
     let config = enabled_job_config();
     let occurrence = "locked-prefilter-occurrence";
     let prefilter =
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
             .await
             .unwrap()
             .expect("the live job lock must produce a diagnostic");
@@ -1105,7 +1288,7 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
     let occurrence = "prefilter-gap-occurrence";
 
     assert!(
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
             .await
             .unwrap()
             .is_none(),
@@ -1164,7 +1347,7 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_manual_job_triggers_do_not_double_execute() {
     struct SlowBackend {
         calls: AtomicUsize,
@@ -1188,45 +1371,60 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
                 output_tokens: None,
             })
         }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
+        }
     }
 
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
     let profile_root = temp.path().join("profile");
-    fs::create_dir_all(&profile_root).unwrap();
+    let lock_dir = dashboard_root.join("automation_locks");
+    PrivateStoreIo::create_dir_all_durable(&profile_root).unwrap();
+    PrivateStoreIo::create_dir_all_durable(&lock_dir).unwrap();
     let job = sample_job("concurrent-job");
     let config = enabled_job_config();
     let backend = SlowBackend {
         calls: AtomicUsize::new(0),
     };
+    let barrier = Barrier::new(2);
 
     let (first, second) = tokio::join!(
-        run_user_job_with_backend(
-            &dashboard_root,
-            &config,
-            &backend,
-            &job,
-            UserJobRunOptions {
-                trigger: AutomationTrigger::Dashboard,
-                run_id: Some("concurrent-run-1".to_string()),
-                profile_root: Some(profile_root.clone()),
-                project_root: None,
-                occurrence_anchor_run_id: None,
-            },
-        ),
-        run_user_job_with_backend(
-            &dashboard_root,
-            &config,
-            &backend,
-            &job,
-            UserJobRunOptions {
-                trigger: AutomationTrigger::ManualCli,
-                run_id: Some("concurrent-run-2".to_string()),
-                profile_root: Some(profile_root),
-                project_root: None,
-                occurrence_anchor_run_id: None,
-            },
-        )
+        async {
+            barrier.wait().await;
+            settle_user_job(
+                &dashboard_root,
+                &config,
+                &backend,
+                &job,
+                UserJobRunOptions {
+                    trigger: AutomationTrigger::Dashboard,
+                    run_id: Some("concurrent-run-1".to_string()),
+                    profile_root: Some(profile_root.clone()),
+                    project_root: None,
+                    occurrence_anchor_run_id: None,
+                },
+            )
+            .await
+        },
+        async {
+            barrier.wait().await;
+            settle_user_job(
+                &dashboard_root,
+                &config,
+                &backend,
+                &job,
+                UserJobRunOptions {
+                    trigger: AutomationTrigger::ManualCli,
+                    run_id: Some("concurrent-run-2".to_string()),
+                    profile_root: Some(profile_root.clone()),
+                    project_root: None,
+                    occurrence_anchor_run_id: None,
+                },
+            )
+            .await
+        }
     );
     let runs = [first.unwrap(), second.unwrap()];
     let delivered = runs
@@ -1278,7 +1476,7 @@ async fn retained_user_job_defers_ledger_and_keeps_exact_keyed_lock() {
         "retained user-job history must await outer settlement"
     );
 
-    let competing = run_user_job_with_backend(
+    let competing = settle_user_job(
         &dashboard_root,
         &config,
         &backend,

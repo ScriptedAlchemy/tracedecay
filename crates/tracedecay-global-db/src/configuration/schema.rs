@@ -12,7 +12,41 @@ use inspection::{configuration_definition_digest, registered_store_is_empty};
 pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
 pub const CONFIGURATION_FORMAT_REVISION: i64 = 1;
 const FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
+    "sha256:8ed9dff8077f0cd9a8c62588ef1fe1a7a1e9caed6a433a4fa0c4a57e65d63beb";
+/// Tip shape that retired semantic-retrieval state but still carried the
+/// accepted-profile tables. Converges by dropping those accepted-profile
+/// tables only.
+const PRIOR_FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
+    "sha256:14cfab8b33e57816605c7275e7f3140d6755c933a84239b1608dbdf653b56a1b";
+/// Campaign tip before #1303 residue deletion: credential-free but still
+/// carried the three semantic-retrieval tables (and accepted-profile tables).
+/// Converges by dropping all five semantic tables.
+const PRE_RESIDUE_FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
+    "sha256:c79fac916ce535c2b90bd46af0fec9dcd80bdb85ae7e226879dd6eb765e6ca63";
+/// The configuration shape every release from v0.1.0-beta.25 through
+/// v0.1.0-beta.37 published. It includes the inert credential-reference table
+/// and the retired semantic-retrieval and accepted-profile tables.
+const RELEASED_CONFIGURATION_SCHEMA_DIGEST: &str =
     "sha256:99b8f5f5cebc584ab564181d8a67ee665031c20bbdf63b479c212d16a1c63746";
+const CONVERGE_RELEASED_CONFIGURATION_SQL: &str = "
+DROP TABLE configuration_credential_references;
+DROP TABLE configuration_semantic_retrieval_state_v1;
+DROP TABLE configuration_semantic_retrieval_pending_v1;
+DROP TABLE configuration_semantic_retrieval_inventory_v1;
+DROP TABLE configuration_semantic_accepted_profiles_v1;
+DROP TABLE configuration_semantic_accepted_profile_receipt_key_v1;
+";
+const CONVERGE_PRIOR_FINAL_CONFIGURATION_SQL: &str = "
+DROP TABLE configuration_semantic_accepted_profiles_v1;
+DROP TABLE configuration_semantic_accepted_profile_receipt_key_v1;
+";
+const CONVERGE_PRE_RESIDUE_FINAL_CONFIGURATION_SQL: &str = "
+DROP TABLE configuration_semantic_retrieval_state_v1;
+DROP TABLE configuration_semantic_retrieval_pending_v1;
+DROP TABLE configuration_semantic_retrieval_inventory_v1;
+DROP TABLE configuration_semantic_accepted_profiles_v1;
+DROP TABLE configuration_semantic_accepted_profile_receipt_key_v1;
+";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigurationSchemaError {
@@ -254,19 +288,6 @@ CREATE TABLE IF NOT EXISTS configuration_audit_redaction_keys (
     created_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS configuration_credential_references (
-    reference_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    reference_digest TEXT NOT NULL,
-    operation_digest TEXT NOT NULL,
-    authorization_policy_epoch INTEGER NOT NULL,
-    authorization_policy_digest TEXT NOT NULL,
-    authority_revalidated_at INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    effective_deadline_at INTEGER NOT NULL,
-    rotation INTEGER NOT NULL
-);
-
 -- Activation is append-only evidence. The latest row per component exposes
 -- desired versus observed state, while a failed activation keeps the prior
 -- last-working revision rather than rewriting runtime history.
@@ -285,127 +306,6 @@ CREATE TABLE IF NOT EXISTS configuration_component_activation_events (
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY(last_working_revision_id) REFERENCES configuration_revisions(revision_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
-);
-
--- Semantic retrieval state is scoped compare-and-swap configuration: the
--- latest epoch per scope is current, and pending rows stage transitions until
--- a central commit lands them.
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_state_v1 (
-    project_id TEXT NOT NULL,
-    scope_digest TEXT NOT NULL,
-    scope_json TEXT NOT NULL,
-    epoch INTEGER NOT NULL CHECK (epoch >= 0),
-    configuration_revision TEXT NOT NULL,
-    transition_digest TEXT,
-    activation_receipt_digest TEXT,
-    active_vector_generation TEXT,
-    rollback_vector_generation TEXT,
-    state_json TEXT NOT NULL,
-    activation_receipt_json TEXT,
-    PRIMARY KEY (project_id, scope_digest, epoch)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS configuration_semantic_retrieval_transition_v1
-    ON configuration_semantic_retrieval_state_v1(project_id, scope_digest, transition_digest)
-    WHERE transition_digest IS NOT NULL;
-CREATE INDEX IF NOT EXISTS configuration_semantic_retrieval_active_vector_v1
-    ON configuration_semantic_retrieval_state_v1(
-        project_id, active_vector_generation, scope_digest, epoch
-    )
-    WHERE active_vector_generation IS NOT NULL;
-CREATE INDEX IF NOT EXISTS configuration_semantic_retrieval_rollback_vector_v1
-    ON configuration_semantic_retrieval_state_v1(
-        project_id, rollback_vector_generation, scope_digest, epoch
-    )
-    WHERE rollback_vector_generation IS NOT NULL;
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_pending_v1 (
-    project_id TEXT NOT NULL,
-    scope_digest TEXT NOT NULL,
-    scope_json TEXT NOT NULL,
-    transition_digest TEXT NOT NULL,
-    base_epoch INTEGER NOT NULL CHECK (base_epoch >= 0),
-    base_configuration_revision TEXT NOT NULL,
-    transition_json TEXT NOT NULL,
-    resulting_state_json TEXT NOT NULL,
-    staged_at INTEGER NOT NULL,
-    PRIMARY KEY (project_id, scope_digest, transition_digest)
-);
-CREATE TRIGGER configuration_semantic_retrieval_state_scope_insert_v1
-BEFORE INSERT ON configuration_semantic_retrieval_state_v1
-WHEN json_valid(NEW.scope_json) != 1
-  OR json_extract(NEW.scope_json, '$.project_id') IS NULL
-  OR json_extract(NEW.scope_json, '$.project_id') != NEW.project_id
-  OR json_extract(NEW.scope_json, '$.scope_digest') IS NULL
-  OR json_extract(NEW.scope_json, '$.scope_digest') != NEW.scope_digest
-BEGIN
-    SELECT RAISE(ABORT, 'semantic retrieval state scope binding is invalid');
-END;
-CREATE TRIGGER configuration_semantic_retrieval_state_scope_update_v1
-BEFORE UPDATE ON configuration_semantic_retrieval_state_v1
-BEGIN
-    SELECT RAISE(ABORT, 'semantic retrieval state is append-only');
-END;
-CREATE TRIGGER configuration_semantic_retrieval_pending_scope_insert_v1
-BEFORE INSERT ON configuration_semantic_retrieval_pending_v1
-WHEN json_valid(NEW.scope_json) != 1
-  OR json_extract(NEW.scope_json, '$.project_id') IS NULL
-  OR json_extract(NEW.scope_json, '$.project_id') != NEW.project_id
-  OR json_extract(NEW.scope_json, '$.scope_digest') IS NULL
-  OR json_extract(NEW.scope_json, '$.scope_digest') != NEW.scope_digest
-BEGIN
-    SELECT RAISE(ABORT, 'semantic retrieval pending scope binding is invalid');
-END;
-CREATE TRIGGER configuration_semantic_retrieval_pending_scope_update_v1
-BEFORE UPDATE ON configuration_semantic_retrieval_pending_v1
-BEGIN
-    SELECT RAISE(ABORT, 'semantic retrieval pending transition is immutable');
-END;
--- The revision binds bounded project-wide semantic configuration inventory
--- pages. State and pending-transition changes both advance it so an inventory
--- can never become complete across a configuration transition it did not
--- observe.
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_inventory_v1 (
-    project_id TEXT PRIMARY KEY NOT NULL,
-    revision INTEGER NOT NULL CHECK (revision >= 0)
-);
-CREATE TRIGGER configuration_semantic_retrieval_state_inventory_insert_v1
-AFTER INSERT ON configuration_semantic_retrieval_state_v1
-BEGIN
-    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
-    VALUES (NEW.project_id, 1)
-    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
-END;
-CREATE TRIGGER configuration_semantic_retrieval_state_inventory_delete_v1
-AFTER DELETE ON configuration_semantic_retrieval_state_v1
-BEGIN
-    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
-    VALUES (OLD.project_id, 1)
-    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
-END;
-CREATE TRIGGER configuration_semantic_retrieval_pending_inventory_insert_v1
-AFTER INSERT ON configuration_semantic_retrieval_pending_v1
-BEGIN
-    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
-    VALUES (NEW.project_id, 1)
-    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
-END;
-CREATE TRIGGER configuration_semantic_retrieval_pending_inventory_delete_v1
-AFTER DELETE ON configuration_semantic_retrieval_pending_v1
-BEGIN
-    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
-    VALUES (OLD.project_id, 1)
-    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
-END;
-CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profiles_v1 (
-    profile_digest TEXT PRIMARY KEY NOT NULL,
-    authority_json TEXT NOT NULL
-);
--- Retained accepted-profile receipts do not carry a fallback signer.
--- Replacing this singleton would invalidate every accepted profile, so its
--- database lifetime is enforced rather than allowing an unjournaled key
--- rotation.
-CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_v1 (
-    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-    key_material BLOB NOT NULL CHECK (length(key_material) = 32)
 );
 
 CREATE INDEX IF NOT EXISTS idx_configuration_revision_parent
@@ -507,41 +407,45 @@ BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); E
 CREATE TRIGGER IF NOT EXISTS configuration_audit_redaction_keys_immutable_delete
 BEFORE DELETE ON configuration_audit_redaction_keys
 BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_credential_references_immutable_update
-BEFORE UPDATE ON configuration_credential_references
-BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_credential_references_immutable_delete
-BEFORE DELETE ON configuration_credential_references
-BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_component_activation_events_immutable_update
 BEFORE UPDATE ON configuration_component_activation_events
 BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_component_activation_events_immutable_delete
 BEFORE DELETE ON configuration_component_activation_events
 BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_no_update_v1
-BEFORE UPDATE ON configuration_semantic_accepted_profile_receipt_key_v1
-BEGIN
-    SELECT RAISE(ABORT, 'accepted profile receipt key is immutable');
-END;
-CREATE TRIGGER IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_no_delete_v1
-BEFORE DELETE ON configuration_semantic_accepted_profile_receipt_key_v1
-BEGIN
-    SELECT RAISE(ABORT, 'accepted profile receipt key is immutable');
-END;
 ";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigurationShape {
+    Absent,
+    Final,
+    /// Tip shape before accepted-profile table retirement.
+    PriorFinal,
+    /// Tip shape before #1303 semantic-retrieval residue deletion.
+    PreResidueFinal,
+    /// The exact shape shipped by beta.25 through beta.37.
+    Released,
+}
 
 async fn validate_configuration_schema(
     connection: &impl QueryExecutor,
-) -> Result<bool, ConfigurationSchemaError> {
+) -> Result<ConfigurationShape, ConfigurationSchemaError> {
     let Some(definition_digest) = configuration_definition_digest(connection).await? else {
-        return Ok(false);
+        return Ok(ConfigurationShape::Absent);
     };
-    if definition_digest != FINAL_CONFIGURATION_SCHEMA_DIGEST {
+    let shape = if definition_digest == FINAL_CONFIGURATION_SCHEMA_DIGEST {
+        ConfigurationShape::Final
+    } else if definition_digest == PRIOR_FINAL_CONFIGURATION_SCHEMA_DIGEST {
+        ConfigurationShape::PriorFinal
+    } else if definition_digest == PRE_RESIDUE_FINAL_CONFIGURATION_SCHEMA_DIGEST {
+        ConfigurationShape::PreResidueFinal
+    } else if definition_digest == RELEASED_CONFIGURATION_SCHEMA_DIGEST {
+        ConfigurationShape::Released
+    } else {
         return Err(ConfigurationSchemaError::ResetRequired {
             reason: "persisted schema is not the exact final configuration shape",
         });
-    }
+    };
 
     let mut rows = connection
         .query(
@@ -562,19 +466,24 @@ async fn validate_configuration_schema(
             reason: "configuration format marker is not the exact final revision",
         });
     }
-    Ok(true)
+    Ok(shape)
 }
 
+/// Read-only admission: the final shape and convergeable prior shapes are
+/// admissible; the writer converges prior shapes on its next open.
 pub async fn admit_configuration_schema(
     connection: &impl QueryExecutor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,
 ) -> Result<(), ConfigurationSchemaError> {
-    if validate_configuration_schema(connection).await? || fresh_store.is_some() {
-        Ok(())
-    } else {
-        Err(ConfigurationSchemaError::ResetRequired {
+    match validate_configuration_schema(connection).await? {
+        ConfigurationShape::Final
+        | ConfigurationShape::PriorFinal
+        | ConfigurationShape::PreResidueFinal
+        | ConfigurationShape::Released => Ok(()),
+        ConfigurationShape::Absent if fresh_store.is_some() => Ok(()),
+        ConfigurationShape::Absent => Err(ConfigurationSchemaError::ResetRequired {
             reason: "configuration schema is missing from a non-fresh registered store",
-        })
+        }),
     }
 }
 
@@ -582,8 +491,18 @@ pub async fn ensure_configuration_schema(
     connection: &impl Executor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,
 ) -> Result<(), ConfigurationSchemaError> {
-    if validate_configuration_schema(connection).await? {
-        return Ok(());
+    match validate_configuration_schema(connection).await? {
+        ConfigurationShape::Final => return Ok(()),
+        ConfigurationShape::PriorFinal => {
+            return converge_prior_final_configuration(connection).await;
+        }
+        ConfigurationShape::PreResidueFinal => {
+            return converge_pre_residue_final_configuration(connection).await;
+        }
+        ConfigurationShape::Released => {
+            return converge_released_configuration(connection).await;
+        }
+        ConfigurationShape::Absent => {}
     }
     if fresh_store.is_none() {
         return Err(ConfigurationSchemaError::ResetRequired {
@@ -596,11 +515,72 @@ pub async fn ensure_configuration_schema(
         });
     }
     connection.execute_batch(CONFIGURATION_SCHEMA_SQL).await?;
-    if validate_configuration_schema(connection).await? {
+    if validate_configuration_schema(connection).await? == ConfigurationShape::Final {
         Ok(())
     } else {
         Err(ConfigurationSchemaError::ResetRequired {
             reason: "fresh configuration schema publication was incomplete",
+        })
+    }
+}
+
+/// Converges a shipped store to the final shape. The credential table never
+/// had a writer, while semantic-retrieval rows have no remaining consumer.
+async fn converge_released_configuration(
+    connection: &impl Executor,
+) -> Result<(), ConfigurationSchemaError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM configuration_credential_references LIMIT 1",
+            (),
+        )
+        .await?;
+    if rows.next().await?.is_some() {
+        return Err(ConfigurationSchemaError::ResetRequired {
+            reason: "released configuration store holds credential references no shipped binary wrote",
+        });
+    }
+    drop(rows);
+    connection
+        .execute_batch(CONVERGE_RELEASED_CONFIGURATION_SQL)
+        .await?;
+    if validate_configuration_schema(connection).await? == ConfigurationShape::Final {
+        Ok(())
+    } else {
+        Err(ConfigurationSchemaError::ResetRequired {
+            reason: "released configuration store did not converge to the final shape",
+        })
+    }
+}
+
+/// Converges a tip store that still carries retired accepted-profile tables.
+async fn converge_prior_final_configuration(
+    connection: &impl Executor,
+) -> Result<(), ConfigurationSchemaError> {
+    connection
+        .execute_batch(CONVERGE_PRIOR_FINAL_CONFIGURATION_SQL)
+        .await?;
+    if validate_configuration_schema(connection).await? == ConfigurationShape::Final {
+        Ok(())
+    } else {
+        Err(ConfigurationSchemaError::ResetRequired {
+            reason: "prior-final configuration store did not converge to the final shape",
+        })
+    }
+}
+
+/// Converges a pre-#1303 tip store that still carries retrieval + accepted-profile tables.
+async fn converge_pre_residue_final_configuration(
+    connection: &impl Executor,
+) -> Result<(), ConfigurationSchemaError> {
+    connection
+        .execute_batch(CONVERGE_PRE_RESIDUE_FINAL_CONFIGURATION_SQL)
+        .await?;
+    if validate_configuration_schema(connection).await? == ConfigurationShape::Final {
+        Ok(())
+    } else {
+        Err(ConfigurationSchemaError::ResetRequired {
+            reason: "pre-residue-final configuration store did not converge to the final shape",
         })
     }
 }
@@ -631,7 +611,7 @@ mod tests {
         (directory, connection)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn every_revision_owned_and_append_only_table_rejects_update_and_delete() {
         let (_directory, connection) = connection().await;
         connection
@@ -687,38 +667,18 @@ mod tests {
                       NULL, NULL, NULL, 1);
                   INSERT INTO configuration_audit_redaction_keys VALUES
                      (1, zeroblob(32), 1);
-                INSERT INTO configuration_credential_references VALUES
-                    ('credential.1', 'api_token',
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac',
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad',
-                     1,
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae',
-                     1,
-                     1, 2, 0);
                  INSERT INTO configuration_component_activation_events (
                     component, desired_revision_id, observed_revision_id,
                     last_working_revision_id, restart_required, activation_error_code, occurred_at
-                 ) VALUES ('gateway', 'revision.1', 'revision.1', 'revision.1', 0, NULL, 1);
-                 INSERT INTO configuration_semantic_accepted_profile_receipt_key_v1 VALUES
-                    (1, zeroblob(32));",
+                 ) VALUES ('gateway', 'revision.1', 'revision.1', 'revision.1', 0, NULL, 1);",
             )
             .await
             .unwrap();
 
-        // The semantic retrieval state, pending-transition, and accepted
-        // profile tables are compare-and-swap surfaces whose rows are
-        // rewritten or cleared by production commits, so they are not part of
-        // the append-only contract.
         let mut rows = connection
             .query(
                 "SELECT name FROM sqlite_master
                  WHERE type = 'table' AND name LIKE 'configuration_%'
-                   AND name NOT IN (
-                        'configuration_semantic_accepted_profiles_v1',
-                        'configuration_semantic_retrieval_inventory_v1',
-                        'configuration_semantic_retrieval_pending_v1',
-                        'configuration_semantic_retrieval_state_v1'
-                   )
                  ORDER BY name",
                 (),
             )
@@ -731,24 +691,26 @@ mod tests {
         drop(rows);
         assert!(!tables.is_empty());
         for table in tables {
+            let update = connection
+                .execute(&format!("UPDATE {table} SET rowid = rowid"), ())
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(
-                connection
-                    .execute(&format!("UPDATE {table} SET rowid = rowid"), ())
-                    .await
-                    .is_err(),
-                "{table} accepted an update"
+                update.starts_with("SQLite execute failed: configuration ")
+                    && update.ends_with(" immutable"),
+                "{table} update was not refused by its immutability trigger: {update}"
             );
-            assert!(
-                connection
-                    .execute(&format!("DELETE FROM {table}"), ())
-                    .await
-                    .is_err(),
-                "{table} accepted a delete"
-            );
+            let delete = connection
+                .execute(&format!("DELETE FROM {table}"), ())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert_eq!(delete, update, "{table} delete refusal");
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn legacy_configuration_shape_requires_reset_without_interpretation_or_repair() {
         let directory = tempfile::tempdir().unwrap();
         let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
@@ -788,7 +750,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn malformed_final_configuration_shape_is_not_silently_repaired() {
         let (_directory, connection) = connection().await;
         connection
@@ -815,7 +777,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn foreign_configuration_format_marker_requires_reset() {
         let directory = tempfile::tempdir().unwrap();
         let connection = tracedecay_runtime_core::db::engine::TestConnection::open(

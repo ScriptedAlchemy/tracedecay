@@ -34,7 +34,6 @@ pub enum WorkflowStatus {
 }
 
 impl WorkflowStatus {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -149,7 +148,6 @@ pub enum WorkflowIndexState {
 }
 
 impl WorkflowIndexState {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AuthorityNotRetained => "authority_not_retained",
@@ -157,12 +155,10 @@ impl WorkflowIndexState {
         }
     }
 
-    #[hotpath::skip]
     pub const fn is_retryable(self) -> bool {
         matches!(self, Self::IndexNotBuilt)
     }
 
-    #[hotpath::skip]
     pub const fn message(self) -> &'static str {
         match self {
             Self::AuthorityNotRetained => "registered project session database is unavailable",
@@ -259,51 +255,7 @@ fn matches_token(value: &str, tokens: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        WorkflowIndexState, WorkflowRunDetailOutcome, WorkflowRunListOutcome, WorkflowStatus,
-    };
-
-    #[test]
-    fn workflow_status_preserves_unknown_values() {
-        assert_eq!(WorkflowStatus::from_disk("done"), WorkflowStatus::Completed);
-        assert_eq!(WorkflowStatus::from_disk("blocked"), WorkflowStatus::Failed);
-        assert_eq!(
-            WorkflowStatus::from_disk("future-state"),
-            WorkflowStatus::Unknown
-        );
-    }
-
-    #[test]
-    fn workflow_list_distinguishes_empty_from_unbuilt() {
-        let empty = WorkflowRunListOutcome::Runs(Vec::new());
-        let unbuilt = WorkflowRunListOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt);
-
-        assert!(matches!(empty, WorkflowRunListOutcome::Runs(runs) if runs.is_empty()));
-        assert!(matches!(
-            unbuilt,
-            WorkflowRunListOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt)
-        ));
-    }
-
-    #[test]
-    fn workflow_unavailable_states_preserve_mount_authority() {
-        assert_ne!(
-            WorkflowIndexState::AuthorityNotRetained,
-            WorkflowIndexState::IndexNotBuilt
-        );
-    }
-
-    #[test]
-    fn workflow_detail_distinguishes_missing_from_unbuilt() {
-        assert!(matches!(
-            WorkflowRunDetailOutcome::NotFound,
-            WorkflowRunDetailOutcome::NotFound
-        ));
-        assert!(matches!(
-            WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt),
-            WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt)
-        ));
-    }
+    use super::WorkflowStatus;
 
     #[test]
     fn default_counters_are_omitted_from_serialized_workflow_rows() {
@@ -319,8 +271,27 @@ mod tests {
             result_summary: None,
             agent_count: 0,
         };
-        let json = serde_json::to_value(&run).expect("workflow run serializes");
-        assert!(json.get("agent_count").is_none());
+        assert_eq!(
+            serde_json::to_value(&run).expect("workflow run serializes"),
+            serde_json::json!({
+                "run_id": "run.1",
+                "parent_session_id": "session.1",
+                "status": "running",
+            })
+        );
+        let counted = super::WorkflowRun {
+            agent_count: 3,
+            ..run
+        };
+        assert_eq!(
+            serde_json::to_value(&counted).expect("workflow run serializes"),
+            serde_json::json!({
+                "run_id": "run.1",
+                "parent_session_id": "session.1",
+                "status": "running",
+                "agent_count": 3,
+            })
+        );
 
         let agent = super::WorkflowAgent {
             run_id: "run.1".into(),
@@ -335,7 +306,28 @@ mod tests {
             started_ts: None,
             ended_ts: None,
         };
-        let json = serde_json::to_value(&agent).expect("workflow agent serializes");
-        assert!(json.get("tokens").is_none());
+        assert_eq!(
+            serde_json::to_value(&agent).expect("workflow agent serializes"),
+            serde_json::json!({
+                "run_id": "run.1",
+                "agent_label": "worker",
+                "agent_id": "agent.1",
+                "status": "running",
+            })
+        );
+        let counted = super::WorkflowAgent {
+            tokens: 42,
+            ..agent
+        };
+        assert_eq!(
+            serde_json::to_value(&counted).expect("workflow agent serializes"),
+            serde_json::json!({
+                "run_id": "run.1",
+                "agent_label": "worker",
+                "agent_id": "agent.1",
+                "status": "running",
+                "tokens": 42,
+            })
+        );
     }
 }

@@ -17,14 +17,14 @@ use tracedecay_store::runtime::{
 };
 
 use crate::generation::physical_namespace;
+use crate::read_meter::{GraphReadMeter, GraphReadStore, property_bytes};
 use crate::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
     GraphGenerationDependency, GraphGenerationId, GraphGenerationManifestIdentity,
     GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
     GraphProjectionPage, GraphProjectionReadRequest, GraphProjectionTelemetry,
     GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationRef,
-    GraphVectorIndexRequest, GraphVectorIndexStatus, TraversalRequest, VectorSearchRequest,
-    VectorSearchResult,
+    TraversalRequest,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -73,6 +73,7 @@ pub(crate) struct VerifiedGenerationState {
     pub(crate) known: BTreeMap<GenerationLocator, std::sync::Weak<VerifiedGenerationLease>>,
     pub(crate) quarantined: BTreeSet<GenerationLocator>,
     pub(crate) stored: BTreeMap<GenerationLocator, Vec<GenerationLocator>>,
+    pub(crate) sealed_only: BTreeSet<GenerationLocator>,
     pub(crate) retiring: BTreeSet<GenerationLocator>,
     pub(crate) collected: BTreeSet<GenerationLocator>,
 }
@@ -126,19 +127,24 @@ impl VerifiedGenerationState {
         self.quarantined.remove(&lease.locator);
         self.known
             .insert(lease.locator.clone(), Arc::downgrade(lease));
-        self.stored.insert(
-            lease.locator.clone(),
-            lease
-                .dependency_identities
-                .iter()
-                .map(|dependency| {
-                    GenerationLocator::new(
-                        dependency.projection.clone(),
-                        dependency.generation.clone(),
-                    )
-                })
-                .collect(),
-        );
+        // `stored` is the durable-row ledger. A sealed-only generation has
+        // no staging rows, they were released, or it was sealed straight
+        // from its manifest, so remembering its lease must not claim any.
+        if !self.sealed_only.contains(&lease.locator) {
+            self.stored.insert(
+                lease.locator.clone(),
+                lease
+                    .dependency_identities
+                    .iter()
+                    .map(|dependency| {
+                        GenerationLocator::new(
+                            dependency.projection.clone(),
+                            dependency.generation.clone(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         self.sweep_dead_known();
         Ok(())
     }
@@ -176,6 +182,9 @@ pub struct VerifiedGraphSnapshot {
     head: Arc<VerifiedGenerationLease>,
     closure: BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>,
     direct_sealed: bool,
+    /// A direct-sealed layered head's store; `database` is its delta.
+    direct_store: Option<Arc<crate::sealed_store::SealedGenerationStore>>,
+    meter: Option<Arc<GraphReadMeter>>,
 }
 
 impl fmt::Debug for VerifiedGraphSnapshot {
@@ -264,12 +273,15 @@ impl VerifiedGraphSnapshot {
             head,
             closure,
             direct_sealed: false,
+            direct_store: None,
+            meter: None,
         }
     }
 
     pub(crate) fn new_direct_sealed(
         database: crate::GraphDbLeaseV1,
         head: Arc<VerifiedGenerationLease>,
+        direct_store: Option<Arc<crate::sealed_store::SealedGenerationStore>>,
     ) -> Self {
         let projection = head.locator.projection.clone();
         Self {
@@ -277,12 +289,62 @@ impl VerifiedGraphSnapshot {
             head: Arc::clone(&head),
             closure: BTreeMap::from([(projection, head)]),
             direct_sealed: true,
+            direct_store,
+            meter: None,
+        }
+    }
+
+    /// This snapshot with every read it serves counted on `meter`. The copy
+    /// shares the lease; only the accounting is per request.
+    #[must_use]
+    pub fn metered(&self, meter: Arc<GraphReadMeter>) -> Self {
+        Self {
+            meter: Some(meter),
+            ..self.clone()
         }
     }
 
     #[must_use]
     pub fn projection(&self) -> &GraphProjectionIdentity {
         &self.head.locator.projection
+    }
+
+    /// Opens the engine that serves this snapshot's head reads, a sealed
+    /// generation's own store when it has one, and keeps it resident while
+    /// the returned pin lives. Blocking and corpus-sized on a cold engine.
+    pub fn pin_serving_engine(&self) -> Result<crate::GraphServingEnginePin, GraphDbError> {
+        match self.sealed_head() {
+            Some(sealed) => sealed.pin_serving_engine(),
+            None => self.database.pin_serving_engine(),
+        }
+    }
+
+    /// Whether head reads would be served by an already resident engine, so a
+    /// latency-bounded caller can refuse instead of paying a cold open.
+    pub fn serving_engine_resident(&self) -> Result<bool, GraphDbError> {
+        match self.sealed_head() {
+            Some(sealed) => sealed.native_engine_open(),
+            None => self.database.native_engine_open(),
+        }
+    }
+
+    /// Bytes the resident serving engine reports holding, or `None` when no
+    /// engine is resident. Never opens one.
+    pub fn resident_serving_engine_bytes(&self) -> Result<Option<u64>, GraphDbError> {
+        match self.sealed_head() {
+            Some(sealed) => sealed.resident_engine_bytes(),
+            None => self.database.resident_engine_bytes(),
+        }
+    }
+
+    /// Release the serving engine if no reader holds it and no pin keeps it,
+    /// keeping the registry identity to reopen it. `Ok(false)` leaves it
+    /// resident and serving.
+    pub fn release_serving_engine_when_idle(&self) -> Result<bool, GraphDbError> {
+        match self.sealed_head() {
+            Some(sealed) => sealed.hibernate_if_lazy_when_idle(),
+            None => self.database.hibernate_if_lazy_when_idle(),
+        }
     }
 
     #[must_use]
@@ -296,31 +358,46 @@ impl VerifiedGraphSnapshot {
         &self.head.head
     }
 
-    #[hotpath::measure(label = "graph_db.lease.entity", impl_type = "VerifiedGraphSnapshot")]
+    #[tracing::instrument(name = "graph_db.lease.entity", level = "trace", skip_all)]
     pub fn entity(
         &self,
         reference: &GraphEntityRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
-        self.with_operation(|| {
-            let lease = self.lease_for_projection(&reference.projection)?;
-            let namespace = lease.locator.physical_namespace()?;
-            if self.direct_sealed {
-                return self
-                    .database
-                    .entity(&namespace, &reference.identity, cancellation);
-            }
-            // A sealed generation's point reads serve from its compacted
-            // per-generation store; the digest proved the exact row set, so
-            // a miss there is authoritative and never re-read from staging.
-            if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
-                return sealed
-                    .database()
-                    .entity(&namespace, &reference.identity, cancellation);
-            }
-            self.database
-                .entity(&namespace, &reference.identity, cancellation)
-        })
+        let (store, entity) = if let Some(served) =
+            self.sealed_entity_without_staging_gate(reference, Arc::clone(&cancellation))?
+        {
+            served
+        } else {
+            self.with_operation(|| {
+                // Publication installs the sealed store before it releases
+                // the staging rows, and the release itself commits under
+                // this gate. Either may have landed while this read waited,
+                // so the sealed probe repeats under the gate before the
+                // staging answer is trusted as absent.
+                if let Some(served) =
+                    self.sealed_entity_without_staging_gate(reference, Arc::clone(&cancellation))?
+                {
+                    return Ok(served);
+                }
+                let lease = self.lease_for_projection(&reference.projection)?;
+                let namespace = lease.locator.physical_namespace()?;
+                Ok((
+                    GraphReadStore::Staging,
+                    self.database
+                        .entity(&namespace, &reference.identity, cancellation)?,
+                ))
+            })?
+        };
+        if let Some(meter) = &self.meter {
+            meter.record_point_read(
+                store,
+                entity
+                    .as_ref()
+                    .map_or(0, |entity| property_bytes(&entity.properties)),
+            );
+        }
+        Ok(entity)
     }
 
     pub fn relation(
@@ -328,37 +405,106 @@ impl VerifiedGraphSnapshot {
         reference: &GraphRelationRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
-        self.with_operation(|| {
-            let lease = self.lease_for_projection(&reference.projection)?;
-            // The owning generation's sealed store holds the relation, its
-            // edge, and full copies of any dependency-generation endpoints,
-            // so the endpoint decode below stays inside one store.
-            if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
-                return sealed
-                    .database()
-                    .generation_relation(self, reference, cancellation);
-            }
-            self.database
-                .generation_relation(self, reference, cancellation)
+        let (store, relation) = if let Some(served) =
+            self.sealed_relation_without_staging_gate(reference, Arc::clone(&cancellation))?
+        {
+            served
+        } else {
+            self.with_operation(|| {
+                // Same mid-wait transition as `entity`: a sealed store
+                // installed while this read queued on the gate is
+                // authoritative over staging rows that may already be gone.
+                if let Some(served) =
+                    self.sealed_relation_without_staging_gate(reference, Arc::clone(&cancellation))?
+                {
+                    return Ok(served);
+                }
+                Ok((
+                    GraphReadStore::Staging,
+                    self.database
+                        .generation_relation(self, reference, cancellation)?,
+                ))
+            })?
+        };
+        if let Some(meter) = &self.meter {
+            meter.record_point_read(
+                store,
+                relation
+                    .as_ref()
+                    .map_or(0, |relation| property_bytes(&relation.properties)),
+            );
+        }
+        Ok(relation)
+    }
+
+    /// What this head serves differently from the sealed base it layers
+    /// over, or `None` when the head is a cold generation with no base.
+    pub fn layered_rows(&self) -> Option<crate::GraphLayeredRowsV1> {
+        let sealed = self.sealed_head()?;
+        let reads = sealed.layered_reads()?;
+        Some(reads.layer.layered_rows())
+    }
+
+    /// The row the sealed base this head layers over holds for `reference`,
+    /// whether or not the head hides or shadows it. `Ok(None)` when the head
+    /// is cold or the base never held the row.
+    pub fn base_entity(
+        &self,
+        reference: &GraphEntityRef,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
+        let Some(sealed) = self.sealed_head() else {
+            return Ok(None);
+        };
+        self.with_operation(|| match sealed.layered_reads() {
+            Some(reads) => reads.layer.base_entity(&reference.identity, cancellation),
+            None => Ok(None),
         })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.read_projection",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
+    /// The relation the sealed base this head layers over holds for
+    /// `reference`, whether or not the head hides or shadows it. `Ok(None)`
+    /// when the head is cold or the base never held the row.
+    pub fn base_relation(
+        &self,
+        reference: &GraphRelationRef,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
+        let Some(sealed) = self.sealed_head() else {
+            return Ok(None);
+        };
+        self.with_operation(|| match sealed.layered_reads() {
+            Some(reads) => reads.layer.base_relation(
+                reads.projection,
+                &reference.identity,
+                cancellation.as_ref(),
+            ),
+            None => Ok(None),
+        })
+    }
+
+    #[tracing::instrument(name = "graph_db.lease.read_projection", level = "trace", skip_all)]
     pub fn read_projection(
         &self,
         mut request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| self.database.read_projection(request))
+        self.with_operation(|| {
+            if let Some(sealed) = self.sealed_head() {
+                if let Some(layered) = sealed.layered_reads() {
+                    return layered.read_projection(request);
+                }
+                return sealed.database().read_projection(request);
+            }
+            self.database.read_projection(request)
+        })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.projection_telemetry",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.projection_telemetry",
+        level = "trace",
+        skip_all
     )]
     pub fn projection_telemetry(
         &self,
@@ -366,7 +512,15 @@ impl VerifiedGraphSnapshot {
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| self.database.projection_telemetry(request))
+        self.with_operation(|| {
+            if let Some(sealed) = self.sealed_head() {
+                if let Some(layered) = sealed.layered_reads() {
+                    return layered.projection_telemetry(request, sealed.row_counts());
+                }
+                return sealed.database().projection_telemetry(request);
+            }
+            self.database.projection_telemetry(request)
+        })
     }
 
     pub fn traverse(
@@ -376,53 +530,30 @@ impl VerifiedGraphSnapshot {
         if request.namespace != self.head.locator.projection.namespace {
             return Err(GraphDbError::conflict("lease.traverse"));
         }
-        self.with_operation(|| {
+        let result = self.with_operation(|| {
             // A dependency-free snapshot's whole closure is one generation,
             // so its sealed store holds every node and edge a traversal can
             // reach and the walk runs on the compacted CSR adjacency. A
             // closure that spans generations keeps the staging database,
             // whose native edges cross physical namespaces.
-            if self.head.dependency_identities.is_empty()
-                && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
-            {
+            if let Some(sealed) = self.sealed_head() {
+                if let Some(layered) = sealed.layered_reads() {
+                    return layered.traverse(request);
+                }
                 return sealed.database().traverse_generation(self, request);
             }
             self.database.traverse_generation(self, request)
-        })
+        })?;
+        if let Some(meter) = &self.meter {
+            meter.record_fanout(result.visits.len() as u64, 0);
+        }
+        Ok(result)
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.vector_search",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
-    pub fn vector_search(
-        &self,
-        mut request: VectorSearchRequest,
-    ) -> Result<VectorSearchResult, GraphDbError> {
-        self.require_head_projection(&request.namespace, &request.projection)?;
-        request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| self.database.vector_search(request))
-    }
-
-    /// Typed coverage of the vector index serving this snapshot's head
-    /// generation. Callers that require the index to cover a complete row
-    /// set compare the reported vector count before trusting searches.
-    #[hotpath::measure(
-        label = "graph_db.lease.vector_index_status",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
-    pub fn vector_index_status(
-        &self,
-        mut request: GraphVectorIndexRequest,
-    ) -> Result<GraphVectorIndexStatus, GraphDbError> {
-        self.require_head_projection(&request.namespace, &request.projection)?;
-        request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| self.database.vector_index_status(request))
-    }
-
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relation_ids",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.outgoing_relation_ids",
+        level = "trace",
+        skip_all
     )]
     pub fn outgoing_relation_ids(
         &self,
@@ -431,9 +562,20 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        self.with_operation(|| {
-            self.database.outgoing_relation_ids(
-                &self.head.locator.physical_namespace()?,
+        if let Some(ids) = self.layered_fanout(|reads| {
+            reads.relation_ids(
+                starts,
+                relation_kinds,
+                max_relations,
+                true,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(ids);
+        }
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relation_ids(
+                &namespace,
                 starts,
                 relation_kinds,
                 max_relations,
@@ -446,12 +588,13 @@ impl VerifiedGraphSnapshot {
     ///
     /// Plan 39 G7b: `VerifiedGraphSnapshot` is the sole production read
     /// boundary, and reverse adjacency (callers, impact, reverse
-    /// reachability) previously had no bulk form here — only
+    /// reachability) previously had no bulk form here, only
     /// [`Self::outgoing_relation_ids`]. Exposing it lets those reads leave
     /// SQL `edges` joins without dropping their budgets.
-    #[hotpath::measure(
-        label = "graph_db.lease.incoming_relation_ids",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.incoming_relation_ids",
+        level = "trace",
+        skip_all
     )]
     pub fn incoming_relation_ids(
         &self,
@@ -460,9 +603,20 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        self.with_operation(|| {
-            self.database.incoming_relation_ids(
-                &self.head.locator.physical_namespace()?,
+        if let Some(ids) = self.layered_fanout(|reads| {
+            reads.relation_ids(
+                starts,
+                relation_kinds,
+                max_relations,
+                false,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(ids);
+        }
+        self.head_fanout(|database, namespace| {
+            database.incoming_relation_ids(
+                &namespace,
                 starts,
                 relation_kinds,
                 max_relations,
@@ -471,9 +625,10 @@ impl VerifiedGraphSnapshot {
         })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relation_ids_page",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.outgoing_relation_ids_page",
+        level = "trace",
+        skip_all
     )]
     pub fn outgoing_relation_ids_page(
         &self,
@@ -483,9 +638,21 @@ impl VerifiedGraphSnapshot {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        self.with_operation(|| {
-            self.database.outgoing_relation_ids_page(
-                &self.head.locator.physical_namespace()?,
+        if let Some(ids) = self.layered_fanout(|reads| {
+            reads.relation_ids_page(
+                starts,
+                relation_kinds,
+                after,
+                limit,
+                true,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(ids);
+        }
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relation_ids_page(
+                &namespace,
                 starts,
                 relation_kinds,
                 after,
@@ -495,9 +662,10 @@ impl VerifiedGraphSnapshot {
         })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.incoming_relation_ids_page",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.incoming_relation_ids_page",
+        level = "trace",
+        skip_all
     )]
     pub fn incoming_relation_ids_page(
         &self,
@@ -507,9 +675,21 @@ impl VerifiedGraphSnapshot {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        self.with_operation(|| {
-            self.database.incoming_relation_ids_page(
-                &self.head.locator.physical_namespace()?,
+        if let Some(ids) = self.layered_fanout(|reads| {
+            reads.relation_ids_page(
+                starts,
+                relation_kinds,
+                after,
+                limit,
+                false,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(ids);
+        }
+        self.head_fanout(|database, namespace| {
+            database.incoming_relation_ids_page(
+                &namespace,
                 starts,
                 relation_kinds,
                 after,
@@ -523,10 +703,7 @@ impl VerifiedGraphSnapshot {
     /// the traversal's already-decoded rows in hand for callers that need the
     /// relation payload, instead of reducing them to identities and issuing a
     /// point read for every edge.
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relations",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
+    #[tracing::instrument(name = "graph_db.lease.outgoing_relations", level = "trace", skip_all)]
     pub fn outgoing_relations(
         &self,
         starts: &[GraphEntityId],
@@ -534,9 +711,21 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        self.with_operation(|| {
-            self.database.outgoing_relations(
-                &self.head.locator.physical_namespace()?,
+        if let Some(rows) = self.layered_fanout(|reads| {
+            reads.relations(
+                starts,
+                relation_kinds,
+                max_relations,
+                true,
+                crate::sealed_layer::LayeredOverflow::Refuse,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(rows);
+        }
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relations(
+                &namespace,
                 starts,
                 relation_kinds,
                 max_relations,
@@ -547,9 +736,10 @@ impl VerifiedGraphSnapshot {
 
     /// Page-shaped outgoing fan-out: stops at `max_relations` instead of
     /// refusing the batch.
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relations_truncated",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.outgoing_relations_truncated",
+        level = "trace",
+        skip_all
     )]
     pub fn outgoing_relations_truncated(
         &self,
@@ -558,9 +748,21 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        self.with_operation(|| {
-            self.database.outgoing_relations_truncated(
-                &self.head.locator.physical_namespace()?,
+        if let Some(rows) = self.layered_fanout(|reads| {
+            reads.relations(
+                starts,
+                relation_kinds,
+                max_relations,
+                true,
+                crate::sealed_layer::LayeredOverflow::Truncate,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(rows);
+        }
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relations_truncated(
+                &namespace,
                 starts,
                 relation_kinds,
                 max_relations,
@@ -569,9 +771,10 @@ impl VerifiedGraphSnapshot {
         })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relation_targets",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.outgoing_relation_targets",
+        level = "trace",
+        skip_all
     )]
     pub fn outgoing_relation_targets(
         &self,
@@ -580,9 +783,19 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<crate::GraphRelationTarget>>, GraphDbError> {
-        self.with_operation(|| {
-            self.database.outgoing_relation_targets(
-                &self.head.locator.physical_namespace()?,
+        if let Some(targets) = self.layered_fanout(|reads| {
+            reads.relation_targets(
+                starts,
+                relation_kinds,
+                max_relations,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(targets);
+        }
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relation_targets(
+                &namespace,
                 starts,
                 relation_kinds,
                 max_relations,
@@ -591,6 +804,9 @@ impl VerifiedGraphSnapshot {
         })
     }
 
+    /// Streams each outgoing target to `visitor` while the snapshot gate and
+    /// database read locks are held, so the visitor must not call back into
+    /// this graph.
     pub fn visit_outgoing_relation_targets(
         &self,
         start: &GraphEntityId,
@@ -598,22 +814,40 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
         visitor: &mut dyn FnMut(crate::GraphRelationTarget),
     ) -> Result<usize, GraphDbError> {
-        self.with_operation(|| {
-            self.database.visit_outgoing_relation_targets(
-                &self.head.locator.physical_namespace()?,
-                start,
-                relation_kinds,
-                cancellation,
-                visitor,
-            )
-        })
+        let mut bytes = 0_u64;
+        let mut counted = |target: crate::GraphRelationTarget| {
+            bytes += target.rows_and_bytes().1;
+            visitor(target);
+        };
+        let visited = self.with_operation(|| {
+            if let Some(sealed) = self.sealed_head()
+                && let Some(layered) = sealed.layered_reads()
+            {
+                return layered.visit_relation_targets(
+                    start,
+                    relation_kinds,
+                    Arc::clone(&cancellation),
+                    &mut counted,
+                );
+            }
+            self.with_head_database(|database| {
+                database.visit_outgoing_relation_targets(
+                    &self.head.locator.physical_namespace()?,
+                    start,
+                    relation_kinds,
+                    cancellation,
+                    &mut counted,
+                )
+            })
+        })?;
+        if let Some(meter) = &self.meter {
+            meter.record_fanout(visited as u64, bytes);
+        }
+        Ok(visited)
     }
 
     /// Bulk incoming relation rows over this verified generation.
-    #[hotpath::measure(
-        label = "graph_db.lease.incoming_relations",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
+    #[tracing::instrument(name = "graph_db.lease.incoming_relations", level = "trace", skip_all)]
     pub fn incoming_relations(
         &self,
         starts: &[GraphEntityId],
@@ -621,9 +855,21 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        self.with_operation(|| {
-            self.database.incoming_relations(
-                &self.head.locator.physical_namespace()?,
+        if let Some(rows) = self.layered_fanout(|reads| {
+            reads.relations(
+                starts,
+                relation_kinds,
+                max_relations,
+                false,
+                crate::sealed_layer::LayeredOverflow::Refuse,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(rows);
+        }
+        self.head_fanout(|database, namespace| {
+            database.incoming_relations(
+                &namespace,
                 starts,
                 relation_kinds,
                 max_relations,
@@ -634,9 +880,10 @@ impl VerifiedGraphSnapshot {
 
     /// Page-shaped incoming fan-out: stops at `max_relations` instead of
     /// refusing the batch.
-    #[hotpath::measure(
-        label = "graph_db.lease.incoming_relations_truncated",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.incoming_relations_truncated",
+        level = "trace",
+        skip_all
     )]
     pub fn incoming_relations_truncated(
         &self,
@@ -645,9 +892,21 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        self.with_operation(|| {
-            self.database.incoming_relations_truncated(
-                &self.head.locator.physical_namespace()?,
+        if let Some(rows) = self.layered_fanout(|reads| {
+            reads.relations(
+                starts,
+                relation_kinds,
+                max_relations,
+                false,
+                crate::sealed_layer::LayeredOverflow::Truncate,
+                Arc::clone(&cancellation),
+            )
+        })? {
+            return Ok(rows);
+        }
+        self.head_fanout(|database, namespace| {
+            database.incoming_relations_truncated(
+                &namespace,
                 starts,
                 relation_kinds,
                 max_relations,
@@ -666,6 +925,83 @@ impl VerifiedGraphSnapshot {
                 .database
                 .sealed_generation_reader(&self.head.locator)
                 .is_some()
+    }
+
+    /// Holds the staging snapshot gate exclusively while `while_held` runs.
+    ///
+    /// Publication page apply takes this same exclusive claim. A sealed
+    /// point read must finish inside `while_held` instead of waiting for it.
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn hold_staging_snapshot_gate_for_test<R>(&self, while_held: impl FnOnce() -> R) -> R {
+        let _hold = self.database.inner.snapshot_gate.write();
+        while_held()
+    }
+
+    /// Serves one sealed-store entity without taking the staging snapshot
+    /// gate. Publication page apply holds that gate exclusively; ordinary
+    /// source-body point reads must not wait on it.
+    fn sealed_entity_without_staging_gate(
+        &self,
+        reference: &GraphEntityRef,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<(GraphReadStore, Option<GraphEntity>)>, GraphDbError> {
+        let lease = self.lease_for_projection(&reference.projection)?;
+        let namespace = lease.locator.physical_namespace()?;
+        if let Some(layered) = self
+            .sealed_store(&lease.locator)
+            .as_deref()
+            .and_then(crate::sealed_store::SealedGenerationStore::layered_reads)
+        {
+            return Ok(Some((
+                GraphReadStore::Sealed,
+                layered.entity(&reference.identity, cancellation)?,
+            )));
+        }
+        if self.direct_sealed {
+            return Ok(Some((
+                GraphReadStore::Sealed,
+                self.database
+                    .entity(&namespace, &reference.identity, cancellation)?,
+            )));
+        }
+        // A sealed generation's point reads serve from its compacted
+        // per-generation store; the digest proved the exact row set, so
+        // a miss there is authoritative and never re-read from staging.
+        if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
+            return Ok(Some((
+                GraphReadStore::Sealed,
+                sealed
+                    .database()
+                    .entity(&namespace, &reference.identity, cancellation)?,
+            )));
+        }
+        Ok(None)
+    }
+
+    fn sealed_relation_without_staging_gate(
+        &self,
+        reference: &GraphRelationRef,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<(GraphReadStore, Option<GraphGenerationRelation>)>, GraphDbError> {
+        let lease = self.lease_for_projection(&reference.projection)?;
+        // The owning generation's sealed store holds the relation, its
+        // edge, and full copies of any dependency-generation endpoints,
+        // so the endpoint decode below stays inside one store.
+        let Some(sealed) = self.sealed_store(&lease.locator) else {
+            return Ok(None);
+        };
+        if let Some(layered) = sealed.layered_reads() {
+            return Ok(Some((
+                GraphReadStore::Sealed,
+                layered.relation(&reference.identity, cancellation.as_ref())?,
+            )));
+        }
+        Ok(Some((
+            GraphReadStore::Sealed,
+            sealed
+                .database()
+                .generation_relation(self, reference, cancellation)?,
+        )))
     }
 
     pub(crate) fn lease_for_projection(
@@ -690,15 +1026,84 @@ impl VerifiedGraphSnapshot {
         Ok(())
     }
 
+    fn head_fanout<T: FanoutRows>(
+        &self,
+        operation: impl FnOnce(&crate::GraphDb, GraphNamespace) -> Result<T, GraphDbError>,
+    ) -> Result<T, GraphDbError> {
+        let rows = self.with_operation(|| {
+            self.with_head_database(|database| {
+                operation(database, self.head.locator.physical_namespace()?)
+            })
+        })?;
+        if let Some(meter) = &self.meter {
+            let (count, bytes) = rows.rows_and_bytes();
+            meter.record_fanout(count, bytes);
+        }
+        Ok(rows)
+    }
+
     fn with_operation<T>(
         &self,
         operation: impl FnOnce() -> Result<T, GraphDbError>,
     ) -> Result<T, GraphDbError> {
-        let _lease: ArcRwLockReadGuard<RawRwLock, ()> = crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_READ,
-            || self.database.inner.snapshot_gate.read_arc(),
-        );
+        let _lease: ArcRwLockReadGuard<RawRwLock, ()> =
+            crate::observe::wait_lock(crate::observe::LOCK_WAIT_SNAPSHOT_GATE_READ, || {
+                self.database.inner.snapshot_gate.read_arc()
+            });
         operation()
+    }
+
+    fn with_head_database<T>(
+        &self,
+        operation: impl FnOnce(&crate::GraphDb) -> Result<T, GraphDbError>,
+    ) -> Result<T, GraphDbError> {
+        if let Some(sealed) = self.sealed_head() {
+            return operation(sealed.database());
+        }
+        operation(&self.database)
+    }
+
+    /// The sealed store serving a dependency-free head, whose closure is one
+    /// generation.
+    fn sealed_head(&self) -> Option<Arc<crate::sealed_store::SealedGenerationStore>> {
+        if !self.head.dependency_identities.is_empty() {
+            return None;
+        }
+        self.sealed_store(&self.head.locator)
+    }
+
+    /// The sealed store serving `locator`: a direct-sealed layered head's
+    /// own, or whichever the database has installed.
+    fn sealed_store(
+        &self,
+        locator: &GenerationLocator,
+    ) -> Option<Arc<crate::sealed_store::SealedGenerationStore>> {
+        if *locator == self.head.locator
+            && let Some(store) = &self.direct_store
+        {
+            return Some(Arc::clone(store));
+        }
+        self.database.sealed_generation_reader(locator)
+    }
+
+    /// A head fan-out served by the head's layered store, metered like any
+    /// other; `None` when the head is not layered.
+    fn layered_fanout<T: FanoutRows>(
+        &self,
+        operation: impl FnOnce(&crate::sealed_layer::LayeredReads<'_>) -> Result<T, GraphDbError>,
+    ) -> Result<Option<T>, GraphDbError> {
+        let rows = self.with_operation(|| match self.sealed_head() {
+            Some(sealed) => match sealed.layered_reads() {
+                Some(layered) => operation(&layered).map(Some),
+                None => Ok(None),
+            },
+            None => Ok(None),
+        })?;
+        if let (Some(rows), Some(meter)) = (&rows, &self.meter) {
+            let (count, bytes) = rows.rows_and_bytes();
+            meter.record_fanout(count, bytes);
+        }
+        Ok(rows)
     }
 
     pub(crate) fn namespace_projection_map(
@@ -713,6 +1118,43 @@ impl VerifiedGraphSnapshot {
                 ))
             })
             .collect()
+    }
+}
+
+/// Rows and decoded payload bytes one fan-out returned.
+trait FanoutRows {
+    fn rows_and_bytes(&self) -> (u64, u64);
+}
+
+impl FanoutRows for GraphRelationId {
+    fn rows_and_bytes(&self) -> (u64, u64) {
+        (1, 0)
+    }
+}
+
+impl FanoutRows for GraphRelation {
+    fn rows_and_bytes(&self) -> (u64, u64) {
+        (1, property_bytes(&self.properties))
+    }
+}
+
+impl FanoutRows for crate::GraphRelationTarget {
+    fn rows_and_bytes(&self) -> (u64, u64) {
+        (
+            1,
+            property_bytes(&self.relation.properties) + property_bytes(&self.target.properties),
+        )
+    }
+}
+
+impl<T: FanoutRows> FanoutRows for Vec<Vec<T>> {
+    fn rows_and_bytes(&self) -> (u64, u64) {
+        self.iter()
+            .flatten()
+            .map(FanoutRows::rows_and_bytes)
+            .fold((0, 0), |(rows, bytes), (row, row_bytes)| {
+                (rows + row, bytes + row_bytes)
+            })
     }
 }
 
@@ -830,6 +1272,24 @@ mod tests {
         assert!(
             !state.known.contains_key(&locator),
             "remembering another generation must sweep the dead predecessor Weak"
+        );
+    }
+
+    #[test]
+    fn sealed_only_installed_head_remains_retained_by_its_lease() {
+        let (locator, lease) = test_lease("generation.sealed-only-head");
+        let mut state = VerifiedGenerationState::default();
+        state.install(lease).expect("install verified head");
+        state.stored.remove(&locator);
+        state.sealed_only.insert(locator.clone());
+
+        assert!(
+            state.retains(&locator),
+            "an installed head retains its generation after staging rows are released"
+        );
+        assert!(
+            !state.stored.contains_key(&locator),
+            "sealed-only retention must not depend on the durable-row ledger"
         );
     }
 }

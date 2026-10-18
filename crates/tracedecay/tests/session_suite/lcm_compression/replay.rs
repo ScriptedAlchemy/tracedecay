@@ -168,13 +168,9 @@ async fn replay_assembly_terminates_when_existing_summary_sources_contain_cycle(
 
 #[tokio::test]
 async fn threshold_pressure_summarizes_short_huge_active_context() {
-    // Pin the cursor-agent adapter to a nonexistent binary so the daemon's
-    // registered summarizer refuses deterministically instead of invoking a
-    // live cursor-agent from the operator's PATH.
-    let _cursor_agent = common::EnvVarGuard::set(
-        "TRACEDECAY_CURSOR_AGENT_BIN",
-        "/nonexistent/tracedecay-test-cursor-agent",
-    );
+    // No `lcm.summarizer_executables.v1` binding is published for this
+    // profile shard, so the registered cursor-agent summarizer refuses with
+    // its typed unconfigured state instead of resolving a binary from PATH.
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "short-huge").await;
@@ -229,10 +225,11 @@ async fn threshold_pressure_summarizes_short_huge_active_context() {
         "response reason: {}",
         response.reason
     );
-    // The daemon authority resolves auxiliary summaries itself; when the
-    // registered cursor-agent summarizer cannot run, the pending summary
-    // stays typed unavailable instead of asking the host to fill it.
-    assert_eq!(response.reason, "cursor_agent_unavailable");
+    // The daemon authority resolves auxiliary summaries itself; while the
+    // registered cursor-agent summarizer has no configured executable, the
+    // pending summary stays typed unconfigured instead of asking the host to
+    // fill it.
+    assert_eq!(response.reason, "cursor_agent_unconfigured");
     let summary_request = response
         .summary_request
         .expect("threshold pressure should select source messages to summarize");
@@ -317,6 +314,20 @@ async fn idless_compression_replay_does_not_reingest_existing_raw_messages() {
         4
     );
 
+    let raw_request = LcmLoadSessionRequest {
+        provider: "cursor".into(),
+        session_id: "session-idless-replay".into(),
+        after_store_id: None,
+        limit: 10,
+        roles: Vec::new(),
+        start_time: None,
+        end_time: None,
+        content_slice: None,
+    };
+    let original_raw = db.lcm_load_session(raw_request.clone()).await.unwrap();
+    assert_eq!(original_raw.messages.len(), 4);
+    assert!(original_raw.next_cursor.is_none());
+
     let mut request = compress_request(
         "cursor",
         "session-idless-replay",
@@ -327,7 +338,11 @@ async fn idless_compression_replay_does_not_reingest_existing_raw_messages() {
     request.messages = initial.replay_messages;
     let compressed = db.lcm_compress(request).await.unwrap();
     assert_eq!(compressed.summary_nodes_created, 1);
-    assert!(compressed.replay_messages[0]["lcm_summary_node_id"].is_string());
+    assert!(
+        compressed.replay_messages[0]["lcm_summary_node_id"].is_string(),
+        "newly published summary must remain available after replay ingest: {:?}",
+        compressed.replay_messages,
+    );
     assert!(
         compressed
             .replay_messages
@@ -336,21 +351,28 @@ async fn idless_compression_replay_does_not_reingest_existing_raw_messages() {
             .all(|message| message["store_id"].is_number())
     );
 
-    ingest_active_messages(
-        &db,
-        "cursor",
-        "session-idless-replay",
-        compressed.replay_messages,
-    )
-    .await;
-    assert_eq!(
-        db.lcm_status("cursor", Some("session-idless-replay"))
-            .await
-            .unwrap()
-            .raw_message_count,
-        4,
-        "replaying TraceDecay's own summary/tail must not duplicate raw history"
-    );
+    for _ in 0..2 {
+        ingest_active_messages(
+            &db,
+            "cursor",
+            "session-idless-replay",
+            compressed.replay_messages.clone(),
+        )
+        .await;
+        assert_eq!(
+            db.lcm_status("cursor", Some("session-idless-replay"))
+                .await
+                .unwrap()
+                .raw_message_count,
+            4,
+            "replaying TraceDecay's own summary/tail must not duplicate raw history"
+        );
+        assert_eq!(
+            db.lcm_load_session(raw_request.clone()).await.unwrap(),
+            original_raw,
+            "replay must preserve canonical raw identities, content, and protected metadata"
+        );
+    }
 }
 
 #[tokio::test]
@@ -709,7 +731,7 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
 }
 
 #[tokio::test]
-async fn structured_active_content_replay_preserves_shape_while_grep_snippet_stays_bounded() {
+async fn structured_active_content_replay_preserves_shape_while_stored_snippet_stays_bounded() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-bounded").await;
@@ -735,27 +757,14 @@ async fn structured_active_content_replay_preserves_shape_while_grep_snippet_sta
     .await;
     assert_eq!(response.replay_messages[0]["content"], content);
 
-    let hits = db
-        .lcm_grep(LcmGrepRequest {
-            provider: "cursor".into(),
-            query: "bounded-structured-canary".into(),
-            scope: LcmScope::Session,
-            session_id: Some("session-bounded".into()),
-            include_summaries: false,
-            limit: 10,
-            sort: LcmGrepSort::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-            git_filter: Default::default(),
-        })
+    let (snippet, _) = db
+        .lcm_raw_message_search_fields("cursor", "structured-bounded")
         .await
         .unwrap()
-        .hits;
-    assert_eq!(hits.len(), 1);
-    assert!(hits[0].snippet.chars().count() <= MAX_DERIVED_SNIPPET_CHARS);
-    assert!(!hits[0].snippet.contains("::structured-tail"));
+        .expect("structured message should store a derived snippet");
+    assert!(snippet.contains("bounded-structured-canary"));
+    assert!(snippet.chars().count() <= MAX_DERIVED_SNIPPET_CHARS);
+    assert!(!snippet.contains("::structured-tail"));
 }
 
 // Mirrors hermes-lcm `_assemble_context` loading all uncondensed DAG nodes:

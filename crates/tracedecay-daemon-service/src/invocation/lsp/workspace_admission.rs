@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, Deadline,
     RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
 };
@@ -20,7 +20,11 @@ pub(super) enum CurrentLspWorkspaceAuthorityV1 {
 }
 
 impl DaemonInvocationService {
-    #[hotpath::measure(label = "daemon.service.lsp.workspace_authority", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.lsp.workspace_authority",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn current_lsp_workspace_authority(
         &self,
         workspace: &AuthorizedLspWorkspace,
@@ -56,41 +60,57 @@ impl DaemonInvocationService {
         {
             return None;
         }
-        if expected_owner.is_some_and(|expected| {
-            !authorized
-                .factories
-                .iter()
-                .zip(authorized.scope_set.roots())
-                .any(|((_, factory), root)| {
-                    root.locator().is_some_and(|locator| {
-                        expected.project_identity.matches_locator(locator)
-                            && std::sync::Arc::ptr_eq(factory, &expected.factory)
-                    })
-                })
-        }) {
-            return None;
-        }
         if authorized.scope_set.roots().len() != authorized.factories.len() {
             return None;
         }
-        for ((root, factory), authorized_root) in authorized
-            .factories
-            .iter()
-            .zip(authorized.scope_set.roots())
-        {
+        let mut expected_owner_matched = expected_owner.is_none();
+        let mut factories = Vec::with_capacity(authorized.factories.len());
+        for (root, _) in &authorized.factories {
+            // LSP roots are ordered by scope digest; the application scope set
+            // orders exact project identities. Bind authorities by identity,
+            // since their positions need not agree.
+            let authorized_root =
+                authorized.scope_set.roots().iter().find(|candidate| {
+                    Some(&candidate.scope().scope_digest) == root.scope_digest()
+                })?;
             let locator = authorized_root.locator()?;
             let path = url::Url::parse(root.uri()).ok()?.to_file_path().ok()?;
             let current_owner = self.lsp_owner(Some(&path)).await?;
+            // A root's owner is republished under the same authority once its
+            // first generation seals, so authorization binds the owner's
+            // identity and scope, and the session opens on the live factory.
             if !current_owner.project_identity.matches_locator(locator)
-                || !std::sync::Arc::ptr_eq(&current_owner.factory, factory)
+                || current_owner
+                    .scope_grant
+                    .as_ref()
+                    .is_none_or(|grant| grant.scope != *authorized_root.scope())
             {
                 return None;
             }
+            if expected_owner.is_some_and(|expected| {
+                expected.project_identity.matches_locator(locator)
+                    && std::sync::Arc::ptr_eq(&current_owner.factory, &expected.factory)
+            }) {
+                expected_owner_matched = true;
+            }
+            factories.push((root.clone(), current_owner.factory));
         }
-        Some(CurrentLspWorkspaceAuthorityV1::Federated(authorized))
+        if !expected_owner_matched {
+            return None;
+        }
+        Some(CurrentLspWorkspaceAuthorityV1::Federated(
+            AuthorizedDaemonLspWorkspace {
+                scope_set: authorized.scope_set,
+                factories,
+            },
+        ))
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.authorize_workspace", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.lsp.authorize_workspace",
+        level = "trace",
+        skip_all
+    )]
     pub async fn authorize_lsp_workspace(
         &self,
         mut roots: Vec<(PathBuf, String, ResolvedScope, RegisteredRootLocatorV1)>,
@@ -121,7 +141,11 @@ impl DaemonInvocationService {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.authorize_federated", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.lsp.authorize_federated",
+        level = "trace",
+        skip_all
+    )]
     async fn authorize_federated_lsp_workspace(
         &self,
         roots: &[(PathBuf, String, ResolvedScope, RegisteredRootLocatorV1)],
@@ -147,7 +171,7 @@ impl DaemonInvocationService {
         let mut admitted = Vec::with_capacity(roots.len());
         for (ordinal, (project_root, uri, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
-            let grant = owner.scope_grant?;
+            let grant = owner.scope_grant_at(observed_at)?;
             if grant.scope != *scope {
                 return None;
             }

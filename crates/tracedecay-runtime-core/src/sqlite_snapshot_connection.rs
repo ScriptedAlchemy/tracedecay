@@ -1,34 +1,29 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, params_from_iter, types::ValueRef};
 
 use crate::db::engine::{
     Error as EngineError, Executor, IntoParams, QueryExecutor, Row, Rows, Value,
 };
-use crate::profiled_lock::ProfiledMutex;
 
 pub struct SnapshotConnection {
-    pub(super) connection: Arc<ProfiledMutex<Connection>>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    interrupt: rusqlite::InterruptHandle,
+    pub(super) connection: Arc<std::sync::Mutex<Connection>>,
 }
 
 impl SnapshotConnection {
     pub(super) fn open(path: &Path, flags: OpenFlags) -> crate::db::engine::Result<Self> {
         let connection = Connection::open_with_flags(path, flags)
             .map_err(|error| snapshot_sqlite_error("open snapshot", error))?;
-        let interrupt = connection.get_interrupt_handle();
+        apply_snapshot_read_policy(&connection)
+            .map_err(|error| snapshot_sqlite_error("apply snapshot read policy", error))?;
         Ok(Self {
-            connection: Arc::new(hotpath::mutex!(
-                Mutex::new(connection),
-                label = "runtime_core.db.snapshot.connection"
-            )),
-            interrupt,
+            connection: Arc::new(Mutex::new(connection)),
         })
     }
 
-    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: IntoParams,
@@ -36,7 +31,6 @@ impl SnapshotConnection {
         Executor::execute(self, sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,
@@ -44,27 +38,21 @@ impl SnapshotConnection {
         QueryExecutor::query(self, sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         Executor::execute_batch(self, sql).await
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn interrupt(&self) {
-        self.interrupt.interrupt();
     }
 }
 
 impl QueryExecutor for SnapshotConnection {
-    #[hotpath::skip]
     async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
+        let cx = crate::native_runtime::cx().ok_or(EngineError::RuntimeContextUnavailable)?;
         let params = params.into_params()?;
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
+        cx.spawn_blocking(move |_| {
             let connection = connection
                 .lock()
                 .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?;
@@ -92,21 +80,23 @@ impl QueryExecutor for SnapshotConnection {
             }
             Ok(Rows::from_rows(collected))
         })
+        .map_err(|error| EngineError::Runtime(format!("snapshot task admission failed: {error}")))?
+        .join(&cx)
         .await
         .map_err(|error| EngineError::Runtime(format!("snapshot query task failed: {error}")))?
     }
 }
 
 impl Executor for SnapshotConnection {
-    #[hotpath::skip]
     async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: IntoParams,
     {
+        let cx = crate::native_runtime::cx().ok_or(EngineError::RuntimeContextUnavailable)?;
         let params = params.into_params()?;
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
+        cx.spawn_blocking(move |_| {
             let connection = connection
                 .lock()
                 .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?;
@@ -119,21 +109,25 @@ impl Executor for SnapshotConnection {
             u64::try_from(changed)
                 .map_err(|_| EngineError::Runtime("snapshot row count overflow".into()))
         })
+        .map_err(|error| EngineError::Runtime(format!("snapshot task admission failed: {error}")))?
+        .join(&cx)
         .await
         .map_err(|error| EngineError::Runtime(format!("snapshot execute task failed: {error}")))?
     }
 
-    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        let cx = crate::native_runtime::cx().ok_or(EngineError::RuntimeContextUnavailable)?;
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
+        cx.spawn_blocking(move |_| {
             connection
                 .lock()
                 .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?
                 .execute_batch(&sql)
                 .map_err(|error| snapshot_sqlite_error("execute snapshot batch", error))
         })
+        .map_err(|error| EngineError::Runtime(format!("snapshot task admission failed: {error}")))?
+        .join(&cx)
         .await
         .map_err(|error| EngineError::Runtime(format!("snapshot batch task failed: {error}")))?
     }
@@ -161,6 +155,22 @@ fn snapshot_value(value: ValueRef<'_>) -> crate::db::engine::Result<Value> {
         ),
         ValueRef::Blob(value) => Value::Blob(value.to_vec()),
     })
+}
+
+/// Snapshot connections are query-only and must never park in SQLite's busy
+/// handler or checkpoint the family they opened. A live source may already
+/// have a long-lived reader or writer; waiting or folding WAL on close is a
+/// write-side lock.
+fn apply_snapshot_read_policy(connection: &Connection) -> rusqlite::Result<()> {
+    connection.busy_timeout(Duration::ZERO)?;
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+    connection.pragma_update(None, "query_only", true)?;
+    if !connection.db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)? {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE=false, expected true".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn snapshot_sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {

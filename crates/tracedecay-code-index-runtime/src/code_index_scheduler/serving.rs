@@ -1,0 +1,4020 @@
+//! Serving handles for the latest complete generation: query owners, the
+//! durable lexical text artifact, and graph activation state.
+mod family_report;
+
+use std::{
+    collections::{BTreeSet, VecDeque},
+    io::Read,
+    num::NonZeroU64,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use same_file::Handle;
+use sha2::{Digest, Sha256};
+use tracedecay_application::code_index::DaemonCodeIndexControlV1;
+use tracedecay_code_extraction::{
+    CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1, MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+    RENAME_CLONE_NORMALIZATION_REVISION_V1,
+};
+use tracedecay_code_index_retention::code_index_generations::{
+    CodeGenerationStoreLockV1, DurableCodeTextArtifactDescriptorV1, DurablePublicationPointerV1,
+    DurableSealedCodeGenerationIdentityV1, acquire_generation_segments_publication_lock,
+    attach_verified_text_artifact_under_lock, code_text_artifact_path,
+    code_text_artifact_staging_root, code_text_artifacts_root, find_shared_text_artifact,
+    try_acquire_code_generation_store_lock, withdraw_verified_text_artifact_under_lock,
+};
+use tracedecay_contracts::{
+    code_index_freshness::{
+        CodeCloneIndexBudgetsV1, CodeCloneIndexCoverageV1, CodeCloneIndexObservationV1,
+        CodeCloneIndexResourcesV1, CodeCloneIndexStatusV1, CodeGraphServingReadinessV1,
+        CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
+        CodeIndexRestoreProgressV1,
+    },
+    now_micros,
+};
+use tracedecay_domain::{
+    CodeGenerationId, CodeGenerationSourceCommitmentsV1, ComponentRevision,
+    ExactAdmissionRuleRevision, ManifestDigest, ProjectId, RetrievalBudget, RetrievalFailure,
+    RetrieverBatch, RetrieverOutcome, ScoreDomainId, WorktreeId,
+    canonical_text::encode_lowercase_hex, sha256_hex_suffix,
+};
+use tracedecay_private_fs::{RewriteWitness, open_private_file, validate_private_directory};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
+    ResidentMemoryReservationV1, ResidentOwnersV1, log_resident_owner_release_v1,
+    release_process_allocator_memory_v1,
+};
+
+use tracedecay_code_index::{
+    graph_projection::{
+        CodeGraphEvidenceReader, CodeGraphProjectionStore, CodeGraphServingWarmthV1,
+    },
+    production::{
+        CodeIndexExecutionControlV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
+        VerifiedSealedLexicalCursorRestoreErrorV1, VerifiedSealedLexicalPageBatchBoundsV1,
+        VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
+        VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
+    },
+};
+use tracedecay_query::retrieval::{
+    exact::{CentralExactAdmissionAuthorityV1, ExactLane, ExactLaneEvidence, ExactLaneRequest},
+    graph::{GraphLane, production_code_index_freshness},
+    lexical::{
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
+        CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+        CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
+        CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
+        CodeLexicalArtifactRestoreWitnessV1, CodeLexicalCloneIndexCensusV1,
+        CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence,
+        LexicalLaneRequest, PreparedCodeLexicalArtifactPageV1,
+        code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
+    },
+    ports::{
+        RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, TEXT_ARTIFACT_BASE_BATCH_BYTES_V1,
+        TEXT_ARTIFACT_BASE_BATCH_PAGES_V1, TEXT_ARTIFACT_PAGE_BYTES_V1,
+        TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+    },
+};
+
+use super::{CodeIndexSchedulerErrorV1, DaemonCodeIndexPublicationStoreV1, queries};
+
+const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
+const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_BYTES_V1: usize = 4 * 1024;
+const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_FILES_V1: usize = 64;
+/// One synchronous activation advances only this many page/finalization
+/// operations. Larger caller hints are clamped so work accounting cannot
+/// overflow and every expensive loop retains cancellation checkpoints. The
+/// runtime narrows this ceiling to two host-sized batches, preserving 128
+/// operations at the 1.5 GiB floor.
+pub(super) const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize =
+    2 * TEXT_ARTIFACT_BASE_BATCH_PAGES_V1 * TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1;
+
+pub(super) fn text_artifact_source_batch_limits(
+    build_memory_budget: usize,
+) -> (usize, usize, usize) {
+    let scale = (build_memory_budget / CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+        .clamp(1, TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1);
+    let pages = TEXT_ARTIFACT_BASE_BATCH_PAGES_V1 * scale;
+    let bytes = TEXT_ARTIFACT_BASE_BATCH_BYTES_V1 * scale;
+    (pages, bytes, pages * 2)
+}
+
+/// Cancellation-checkpoint cadence for a wake parked behind another wake's
+/// corpus-sized verified head open. The parked wake re-checks its typed
+/// cancellation state at this interval, so shutdown or supersession surfaces
+/// as `Cancelled` even while the owning open is inside one long read or
+/// digest call that has not yet reached its own checkpoint.
+const TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1: Duration = Duration::from_millis(100);
+const TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1: usize = 10_000;
+/// Rows digested by one scheduler finalization operation. The builder persists
+/// its exact section/row cursor after this bounded slice, avoiding both a
+/// corpus-sized wake and one scheduler wake per individual `SQLite` row.
+const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
+
+pub(super) type GenerationServingCachesV1 = (
+    CodeGenerationId,
+    Arc<RwLock<Option<Arc<ProductionCodeIndexQueryOwnersV1>>>>,
+    Arc<OnceLock<queries::GenerationRecordIndexV1>>,
+    Arc<CodeTextProjectionStateV1>,
+    Arc<AtomicBool>,
+    GenerationTextControlV1,
+    Arc<std::sync::Mutex<CodeIndexBuildProgressStateV1>>,
+    u64,
+    Arc<RwLock<CodeGraphActivationStateV1>>,
+);
+
+pub type CodeIndexBuildProgressSlotV1 = Arc<RwLock<CodeIndexBuildProgressSlotStateV1>>;
+
+/// Cancellation authority for derivations of one immutable sealed generation.
+///
+/// Worktree freshness epochs deliberately do not participate: a hook wake can
+/// make the source worktree newer, but it cannot invalidate bytes already
+/// sealed under a content-addressed generation. Only daemon shutdown, owner
+/// retirement, or replacement by another serving generation retires this
+/// control.
+#[derive(Clone)]
+pub(super) struct GenerationTextControlV1 {
+    execution: DaemonCodeIndexControlV1,
+    retirement_epoch: Arc<AtomicU64>,
+}
+
+impl GenerationTextControlV1 {
+    pub(super) fn new(shutting_down: Arc<AtomicBool>) -> Self {
+        let retirement_epoch = Arc::new(AtomicU64::new(0));
+        let execution = DaemonCodeIndexControlV1::new(Arc::clone(&retirement_epoch), shutting_down);
+        Self {
+            execution,
+            retirement_epoch,
+        }
+    }
+
+    pub(super) fn retire(&self) {
+        DaemonCodeIndexControlV1::advance(&self.retirement_epoch);
+    }
+}
+
+impl CodeIndexExecutionControlV1 for GenerationTextControlV1 {
+    fn is_cancelled(&self) -> bool {
+        self.execution.is_cancelled()
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        self.execution.is_deadline_exceeded()
+    }
+}
+
+struct GenerationTextRequestControlV1<'a> {
+    generation: &'a GenerationTextControlV1,
+    request: &'a dyn CodeIndexExecutionControlV1,
+}
+
+impl CodeIndexExecutionControlV1 for GenerationTextRequestControlV1<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.generation.is_cancelled() || self.request.is_cancelled()
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        self.generation.is_deadline_exceeded() || self.request.is_deadline_exceeded()
+    }
+}
+
+#[derive(Default)]
+pub struct CodeIndexBuildProgressSlotStateV1 {
+    generation_id: Option<CodeGenerationId>,
+    pub(super) owner_epoch: u64,
+    progress_epoch: u64,
+    snapshot: Option<Arc<CodeIndexBuildProgressV1>>,
+}
+
+impl CodeIndexBuildProgressSlotStateV1 {
+    pub(super) fn replace_generation(&mut self, generation_id: CodeGenerationId) -> u64 {
+        self.owner_epoch = self.owner_epoch.saturating_add(1).max(1);
+        self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
+        self.generation_id = Some(generation_id);
+        self.snapshot = None;
+        self.owner_epoch
+    }
+
+    pub(super) fn publish(
+        &mut self,
+        generation_id: &CodeGenerationId,
+        owner_epoch: u64,
+        mut snapshot: CodeIndexBuildProgressV1,
+    ) -> bool {
+        if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
+            return false;
+        }
+        self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
+        snapshot.progress_epoch = self.progress_epoch;
+
+        self.snapshot = Some(Arc::new(snapshot));
+
+        true
+    }
+
+    pub(super) fn block_current(&mut self, reason: CodeIndexBuildBlockedReasonV1) {
+        let (Some(generation_id), Some(snapshot)) =
+            (self.generation_id.clone(), self.snapshot.clone())
+        else {
+            return;
+        };
+        let mut snapshot = snapshot.as_ref().clone();
+        snapshot.blocked_reason = Some(reason);
+        let _ = self.publish(&generation_id, self.owner_epoch, snapshot);
+    }
+
+    pub fn snapshot(&self) -> Option<Arc<CodeIndexBuildProgressV1>> {
+        self.snapshot.as_ref().map(Arc::clone)
+    }
+}
+
+/// Whether the committed-file rate can estimate what `phase` has left. Index
+/// build, verification, and graph publication run after the last file
+/// committed, so the file rate would claim zero seconds of work they have not
+/// done (#2470).
+const fn phase_has_file_rate_estimate(phase: CodeIndexBuildPhaseV1) -> bool {
+    matches!(
+        phase,
+        CodeIndexBuildPhaseV1::SourceScan
+            | CodeIndexBuildPhaseV1::RelationalPreparation
+            | CodeIndexBuildPhaseV1::BulkCommit
+    )
+}
+
+/// Publishes an observational scan sample without delaying sealed-byte authentication.
+/// Generation ownership and durable phase transitions continue to use blocking writes.
+pub(super) fn try_publish_build_progress(
+    slot: &CodeIndexBuildProgressSlotV1,
+    generation_id: &CodeGenerationId,
+    owner_epoch: u64,
+    snapshot: CodeIndexBuildProgressV1,
+) -> bool {
+    match slot.try_write() {
+        Ok(mut slot) => slot.publish(generation_id, owner_epoch, snapshot),
+        Err(std::sync::TryLockError::WouldBlock) => false,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            poisoned
+                .into_inner()
+                .publish(generation_id, owner_epoch, snapshot)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct CodeIndexCommittedProgressSampleV1 {
+    pub(super) observed_at: Instant,
+    pub(super) completed_files: u64,
+    pub(super) completed_lexical_units: u64,
+    pub(super) clone_peak_scratch_memory_bytes: Option<u64>,
+}
+
+pub(super) struct CodeIndexBuildProgressStateV1 {
+    started_at: Instant,
+    committed_samples: VecDeque<CodeIndexCommittedProgressSampleV1>,
+}
+
+impl CodeIndexBuildProgressStateV1 {
+    pub(super) fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            committed_samples: VecDeque::with_capacity(2),
+        }
+    }
+
+    fn observe_clone_scratch(&mut self, bytes: u64) {
+        if let Some(sample) = self.committed_samples.back_mut() {
+            sample.clone_peak_scratch_memory_bytes = Some(
+                sample
+                    .clone_peak_scratch_memory_bytes
+                    .map_or(bytes, |peak| peak.max(bytes)),
+            );
+        }
+    }
+
+    pub(super) fn observe_committed(&mut self, sample: CodeIndexCommittedProgressSampleV1) {
+        if self.committed_samples.back().is_some_and(|previous| {
+            previous.completed_files == sample.completed_files
+                && previous.completed_lexical_units == sample.completed_lexical_units
+        }) {
+            return;
+        }
+        if self.committed_samples.len() == 2 {
+            self.committed_samples.pop_front();
+        }
+        self.committed_samples.push_back(sample);
+    }
+
+    pub(super) fn elapsed_micros(&self) -> u64 {
+        u64::try_from(self.started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    pub(super) fn rates_and_eta(
+        &self,
+        total_lexical_units: u64,
+    ) -> (Option<f64>, Option<f64>, Option<u64>) {
+        let Some(previous) = self.committed_samples.front() else {
+            return (None, None, None);
+        };
+        let Some(current) = self.committed_samples.back() else {
+            return (None, None, None);
+        };
+        if self.committed_samples.len() < 2 || current.observed_at <= previous.observed_at {
+            return (None, None, None);
+        }
+        let elapsed_seconds = current
+            .observed_at
+            .duration_since(previous.observed_at)
+            .as_secs_f64();
+        if elapsed_seconds <= 0.0 {
+            return (None, None, None);
+        }
+        let files_per_second = current
+            .completed_files
+            .checked_sub(previous.completed_files)
+            .filter(|delta| *delta > 0)
+            .map(|delta| delta as f64 / elapsed_seconds);
+        let lexical_units_per_second = current
+            .completed_lexical_units
+            .checked_sub(previous.completed_lexical_units)
+            .filter(|delta| *delta > 0)
+            .map(|delta| delta as f64 / elapsed_seconds);
+        let estimated_remaining_seconds = lexical_units_per_second.and_then(|lexical_rate| {
+            let remaining = total_lexical_units.saturating_sub(current.completed_lexical_units);
+            let estimate = (remaining as f64 / lexical_rate).ceil();
+            (estimate.is_finite() && estimate >= 0.0 && estimate <= u64::MAX as f64)
+                .then_some(estimate as u64)
+        });
+        (
+            files_per_second,
+            lexical_units_per_second,
+            estimated_remaining_seconds,
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct LatestCompleteCodeIndexV1 {
+    pub(super) generation: Arc<CodeIndexPublishedGenerationV1>,
+    pub(super) text: LatestCodeTextGenerationV1,
+    pub(super) record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
+}
+
+pub(super) type ParkedGraphReleaseCallback = Arc<dyn Fn() + Send + Sync>;
+
+pub struct CodeTextGenerationSharedV1 {
+    pub(super) metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
+    pub(super) sealed_format_revision: u32,
+    pub(super) query_owners: Arc<RwLock<Option<Arc<ProductionCodeIndexQueryOwnersV1>>>>,
+    /// Native-graph readiness for this exact sealed text generation. Status
+    /// reads this authority even while an older generation still owns the
+    /// graph-serving slot, so old Ready state cannot mask current Pending or
+    /// terminal Unavailable state.
+    pub(super) graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
+    pub(super) text_projection_build: Arc<CodeTextProjectionStateV1>,
+    pub(super) text_projection_failed: Arc<AtomicBool>,
+    pub(super) text_control: GenerationTextControlV1,
+    pub(super) text_progress_state: Arc<std::sync::Mutex<CodeIndexBuildProgressStateV1>>,
+    pub(super) text_progress_slot: CodeIndexBuildProgressSlotV1,
+    /// Bounded authentication work for a cold immutable-artifact open. It is
+    /// intentionally separate from durable build progress.
+    pub(super) restore_progress: Arc<RwLock<Option<CodeIndexRestoreProgressV1>>>,
+    pub(super) text_progress_owner_epoch: u64,
+    /// Durable daemon-authority epoch, shared by all scheduler owners created
+    /// during one daemon invocation.
+    pub(super) text_progress_daemon_incarnation: u64,
+    /// Registry-minted scheduler-owner epoch. It orders progress across
+    /// scheduler owner replacements within one daemon incarnation.
+    pub(super) text_progress_producer_incarnation: u64,
+    /// The durable text-artifact store for this generation's store root.
+    pub(super) text_artifact_store: DaemonCodeTextArtifactStoreV1,
+    /// A cold graph-off bind authenticates the sealed source once and hands
+    /// that same reader to the artifact build. The full generation is never
+    /// decoded merely to discover text metadata or source layout.
+    pub(super) preopened_source: Arc<std::sync::Mutex<Option<VerifiedSealedLexicalPageSourceV1>>>,
+    pub(super) publication_binding: Option<Arc<DurableActiveSealedGenerationBindingV1>>,
+    /// The first catalog warm finishes on a blocking task that does not
+    /// wake the parked worker. One permit lets that worker retry park-release
+    /// without posting a cadence arrival.
+    pub(super) catalog_warm_settled: Arc<tokio::sync::Notify>,
+    /// Arm the first-warm park-release waiter once per text owner so a park
+    /// loop cannot spawn a waiter per skip.
+    pub(super) park_release_after_catalog_warm_armed: Arc<AtomicBool>,
+    /// Bound by the parked worktree so the first catalog warm can retry
+    /// park-release on this owner without a cadence arrival.
+    pub(super) parked_graph_release: Arc<RwLock<Option<ParkedGraphReleaseCallback>>>,
+}
+
+#[derive(Clone)]
+pub struct LatestCodeTextGenerationV1 {
+    shared: Arc<CodeTextGenerationSharedV1>,
+    /// Nearest predecessor first. The chain is shared generation state, not
+    /// `Self`: a field of type `Self` makes `Send`/`Sync` recurse with no base
+    /// case (rust-lang/rust#159228).
+    predecessors: Arc<RwLock<Vec<Arc<CodeTextGenerationSharedV1>>>>,
+}
+
+impl std::ops::Deref for LatestCodeTextGenerationV1 {
+    type Target = CodeTextGenerationSharedV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    pub(super) fn from_shared(shared: CodeTextGenerationSharedV1) -> Self {
+        Self {
+            shared: Arc::new(shared),
+            predecessors: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DurableActiveSealedGenerationBindingV1 {
+    pub(super) generation_id: CodeGenerationId,
+    pub(super) generation_file: String,
+    pub(super) state_digest: ManifestDigest,
+}
+
+impl DurableActiveSealedGenerationBindingV1 {
+    pub(super) fn matches(&self, pointer: Option<&DurablePublicationPointerV1>) -> bool {
+        pointer.is_some_and(|pointer| {
+            pointer.generation_id == self.generation_id.as_str()
+                && pointer.generation_file == self.generation_file
+                && pointer.state_digest == self.state_digest.as_str()
+        })
+    }
+}
+
+impl std::ops::Deref for LatestCompleteCodeIndexV1 {
+    type Target = LatestCodeTextGenerationV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
+}
+
+/// Production exact/lexical owners bound to one immutable published generation.
+#[derive(Clone)]
+pub struct ProductionCodeIndexQueryOwnersV1 {
+    exact: ExactLane<
+        CentralExactAdmissionAuthorityV1,
+        CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
+    >,
+    lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
+    hydration: CodeLexicalArtifactReaderV1,
+}
+
+struct CloneIndexArtifactSnapshotV1 {
+    census: CodeLexicalCloneIndexCensusV1,
+    format_revision: u32,
+    bytes_on_disk: u64,
+}
+
+impl ProductionCodeIndexQueryOwnersV1 {
+    pub fn retrieve_exact(
+        &self,
+        request: &ExactLaneRequest<'_>,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
+        self.exact.retrieve_exact(request)
+    }
+
+    fn artifact(
+        exact: ExactLane<
+            CentralExactAdmissionAuthorityV1,
+            CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
+        >,
+        lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
+        hydration: CodeLexicalArtifactReaderV1,
+    ) -> Self {
+        Self {
+            exact,
+            lexical,
+            hydration,
+        }
+    }
+
+    fn clone_index_artifact(&self) -> CloneIndexArtifactSnapshotV1 {
+        let artifact = self.hydration.verified_artifact();
+        CloneIndexArtifactSnapshotV1 {
+            census: artifact.clone_index_census().clone(),
+            format_revision: artifact.format_revision(),
+            bytes_on_disk: artifact.file_size_bytes(),
+        }
+    }
+
+    pub(super) fn occurrence_by_binding(
+        &self,
+        binding: &tracedecay_query::retrieval::ports::CodeCandidateBindingV1,
+    ) -> Result<
+        tracedecay_query::retrieval::NativeCodeOccurrenceV1,
+        tracedecay_query::retrieval::QueryExecutionContractErrorV1,
+    > {
+        self.hydration
+            .occurrence_by_binding(binding)
+            .map_err(|_| {
+                tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable
+            })?
+            .map(
+                |occurrence| tracedecay_query::retrieval::NativeCodeOccurrenceV1 {
+                    file: occurrence.file,
+                    symbol: occurrence.symbol,
+                    chunk: Some(occurrence.chunk),
+                    path: occurrence.logical_path,
+                    span: occurrence.source_span,
+                },
+            )
+            .ok_or(tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable)
+    }
+
+    fn artifact_occurrence_by_chunk(
+        &self,
+        chunk: &tracedecay_domain::CodeSearchChunkId,
+    ) -> Result<CodeLexicalArtifactOccurrenceV1, RetrievalPortError> {
+        self.hydration
+            .occurrence_by_chunk(chunk)
+            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    "lexical artifact row is unavailable".to_owned(),
+                )
+            })
+    }
+
+    pub fn retrieve_lexical(
+        &self,
+        request: &LexicalLaneRequest<'_>,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
+        self.lexical.retrieve_lexical(request)
+    }
+
+    pub(crate) fn similar(
+        &self,
+        request: &tracedecay_query::code_search::CodeIndexSimilarRequestV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<
+        Option<tracedecay_query::code_search::CodeIndexSimilarCompletedV1>,
+        RetrievalPortError,
+    > {
+        checkpoint_text_artifact_control(control)?;
+        let source = match &request.target {
+            tracedecay_query::code_search::CodeIndexSimilarTargetV1::SymbolOccurrence(
+                occurrence,
+            ) => self.hydration.clone_body(occurrence),
+            tracedecay_query::code_search::CodeIndexSimilarTargetV1::SourceRange { path, span } => {
+                self.hydration.clone_body_by_source_range(path, *span)
+            }
+        }
+        .map_err(family_report::clone_artifact_error)?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        // Request-wide budgets: share result_limit and work_limit across match
+        // classes instead of resetting a per-family page size on each key.
+        let mut remaining_results = request.result_limit;
+        let mut remaining_work = request.work_limit.saturating_sub(1);
+        let mut exact_groups = Vec::new();
+        for key in source
+            .payload
+            .exact_keys(source.occurrence.eligibility)
+            .into_iter()
+            .filter(|key| request.match_classes.contains(&key.class))
+        {
+            checkpoint_text_artifact_control(control)?;
+            if remaining_results == 0 || remaining_work == 0 {
+                break;
+            }
+            let page_limit = remaining_results.min(remaining_work);
+            let (members, complete, next_cursor) = self.verified_exact_clone_page(
+                &source,
+                &key,
+                request.cursor.as_ref(),
+                page_limit,
+                control,
+            )?;
+            remaining_results = remaining_results.saturating_sub(members.len());
+            // Count verified members plus one lookahead slot consumed by the
+            // last exact-page fetch when the postings continue.
+            let work_spent = members.len() + usize::from(next_cursor.is_some());
+            remaining_work = remaining_work.saturating_sub(work_spent.max(1));
+            if !members.is_empty() || !complete {
+                exact_groups.push(
+                    tracedecay_query::code_search::CodeIndexSimilarExactGroupV1 {
+                        key,
+                        members,
+                        complete,
+                        next_cursor,
+                    },
+                );
+            }
+        }
+        checkpoint_text_artifact_control(control)?;
+        Ok(Some(
+            tracedecay_query::code_search::CodeIndexSimilarCompletedV1 {
+                source,
+                exact_groups,
+            },
+        ))
+    }
+
+    /// Continue paging past filter rejects until `limit` verified members exist.
+    fn verified_exact_clone_page(
+        &self,
+        source: &tracedecay_code_index::clones::CodeIndexCloneBodyV1,
+        key: &tracedecay_code_index::clones::CloneExactKeyV1,
+        start_cursor: Option<&tracedecay_query::retrieval::lexical::CloneArtifactCursorV1>,
+        limit: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<
+        (
+            Vec<tracedecay_query::retrieval::lexical::CloneExactArtifactMemberV1>,
+            bool,
+            Option<tracedecay_query::retrieval::lexical::CloneArtifactCursorV1>,
+        ),
+        RetrievalPortError,
+    > {
+        let mut members = Vec::new();
+        let mut cursor = start_cursor.cloned();
+        let mut complete = false;
+        while members.len() < limit {
+            checkpoint_text_artifact_control(control)?;
+            let page = self
+                .hydration
+                .clone_exact_page(&source.occurrence, key, cursor.as_ref(), limit, control)
+                .map_err(family_report::clone_artifact_error)?;
+            for (ordinal, member) in page.members.into_iter().enumerate() {
+                if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                    checkpoint_text_artifact_control(control)?;
+                }
+                if member.occurrence.symbol_occurrence_id == source.occurrence.symbol_occurrence_id
+                {
+                    continue;
+                }
+                if !tracedecay_code_index::clones::verify_exact_clone_payload(
+                    &source.payload,
+                    &member.payload,
+                    key,
+                ) {
+                    continue;
+                }
+                members.push(member);
+                if members.len() >= limit {
+                    break;
+                }
+            }
+            checkpoint_text_artifact_control(control)?;
+            match page.next_cursor {
+                Some(next) if members.len() < limit => cursor = Some(next),
+                Some(next) => return Ok((members, false, Some(next))),
+                None => {
+                    complete = true;
+                    break;
+                }
+            }
+        }
+        Ok((members, complete, None))
+    }
+
+    #[cfg(test)]
+    pub fn is_artifact_backed(&self) -> bool {
+        true
+    }
+}
+
+pub(super) enum CodeTextQueryOwnerReadinessV1 {
+    Ready(Arc<ProductionCodeIndexQueryOwnersV1>),
+    Pending,
+    Invalid,
+}
+
+/// Partial durable-artifact build: the staging `SQLite` builder plus the
+/// verified page source over this generation's durable sealed file.
+pub(super) struct CodeTextArtifactBuildV1 {
+    pub(super) builder: CodeLexicalArtifactBuilderV1,
+    pub(super) source: VerifiedSealedLexicalPageSourceV1,
+    sealed_identity: DurableSealedCodeGenerationIdentityV1,
+    /// The key the artifact is published under, derived before the build.
+    content_key: ManifestDigest,
+    source_receipt: Option<VerifiedSealedLexicalSourceReceiptV1>,
+    /// Finalization has begun (a carried parent, a resumed staging file, or
+    /// a first finalization step): no further page is read from the source
+    /// and the staged pages' totals are the progress authority.
+    finalizing: bool,
+    pub(super) staging_path: PathBuf,
+    /// Holds the builder's advertised memory ceiling reserved in the
+    /// process resident-memory authority for the lifetime of the build.
+    _build_reservation: ResidentMemoryReservationV1,
+}
+
+/// Singleflight authority for one generation's durable text projection.
+///
+/// The slot is the generation-owned partial-state authority; the condvar
+/// wakes arrivals parked behind a `HeadOpening` claim. A bounded authenticated
+/// reopen normally runs with the slot lock released; missing or invalid
+/// rebuildable witness state falls back to corpus-wide verification under the
+/// same claim. Concurrent wakes therefore park with typed cancellation instead
+/// of blocking on the mutex for either path.
+pub(super) struct CodeTextProjectionStateV1 {
+    slot: Mutex<CodeTextProjectionSlotV1>,
+    ready: Condvar,
+    /// Whether the slot holds `Idle`, written with every slot transition so
+    /// a read probe never has to take the slot lock.
+    slot_idle: AtomicBool,
+}
+
+pub(super) enum CodeTextProjectionSlotV1 {
+    /// No partial build exists and no wake owns an authenticated open: the
+    /// next wake claims the work.
+    Idle,
+    /// One wake owns an authenticated open with the slot lock released.
+    /// Concurrent wakes park on the condvar until the claim is resolved.
+    HeadOpening,
+    /// The resumable staging build; each wake advances one bounded slice
+    /// under the slot lock.
+    Building(Box<CodeTextArtifactBuildV1>),
+}
+
+impl CodeTextProjectionStateV1 {
+    pub(super) fn new() -> Self {
+        Self {
+            slot: Mutex::new(CodeTextProjectionSlotV1::Idle),
+            ready: Condvar::new(),
+            slot_idle: AtomicBool::new(true),
+        }
+    }
+
+    fn replace_slot(
+        &self,
+        slot: &mut CodeTextProjectionSlotV1,
+        next: CodeTextProjectionSlotV1,
+    ) -> CodeTextProjectionSlotV1 {
+        let previous = std::mem::replace(slot, next);
+        self.slot_idle.store(
+            matches!(slot, CodeTextProjectionSlotV1::Idle),
+            Ordering::Release,
+        );
+        previous
+    }
+
+    fn slot_is_idle(&self) -> bool {
+        self.slot_idle.load(Ordering::Acquire)
+    }
+
+    pub(super) fn lock_slot(&self) -> MutexGuard<'_, CodeTextProjectionSlotV1> {
+        {
+            let _span = tracing::trace_span!("query.artifact.head_open.lock_wait").entered();
+            self.slot.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+}
+
+/// One wake's exclusive claim on an authenticated head open.
+///
+/// Restores the slot to `Idle` and wakes every parked arrival on all exit
+/// paths, success, typed failure, and unwind, so a failed open can never
+/// strand concurrent wakes behind a stale `HeadOpening` marker.
+struct TextHeadOpenClaimV1<'a> {
+    state: &'a CodeTextProjectionStateV1,
+    armed: bool,
+}
+
+impl<'a> TextHeadOpenClaimV1<'a> {
+    /// The caller must already have transitioned the slot to `HeadOpening`
+    /// and released the lock; this guard owns restoring it.
+    fn new(state: &'a CodeTextProjectionStateV1) -> Self {
+        Self { state, armed: true }
+    }
+
+    fn install(
+        &mut self,
+        build: Box<CodeTextArtifactBuildV1>,
+    ) -> MutexGuard<'a, CodeTextProjectionSlotV1> {
+        self.armed = false;
+        let mut slot = self.state.lock_slot();
+        self.state
+            .replace_slot(&mut slot, CodeTextProjectionSlotV1::Building(build));
+        self.state.ready.notify_all();
+        slot
+    }
+}
+
+impl Drop for TextHeadOpenClaimV1<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut slot = self.state.lock_slot();
+        if matches!(&*slot, CodeTextProjectionSlotV1::HeadOpening) {
+            self.state
+                .replace_slot(&mut slot, CodeTextProjectionSlotV1::Idle);
+        }
+        drop(slot);
+        self.state.ready.notify_all();
+    }
+}
+
+/// Result of one claimed head-open pass performed with the slot lock
+/// released.
+pub(super) enum TextHeadOpenOutcomeV1 {
+    /// The published durable head reopened and verified; the immutable query
+    /// owners are installed.
+    Served,
+    /// No published head was servable; the resumable staging build begins
+    /// (or resumes) from its durable staging file.
+    Build(Box<CodeTextArtifactBuildV1>),
+}
+
+fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
+    match error {
+        CodeLexicalArtifactErrorV1::Interrupted(
+            tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
+        ) => RetrievalPortError::Cancelled,
+        CodeLexicalArtifactErrorV1::Interrupted(
+            tracedecay_code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+        ) => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
+        CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
+        CodeLexicalArtifactErrorV1::StaleCloneFamilyCursor => RetrievalPortError::StaleEvidence,
+        CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
+        CodeLexicalArtifactErrorV1::Unreserved(detail) => RetrievalPortError::AuthorityUnavailable(
+            format!("lexical artifact reservation is unavailable: {detail}"),
+        ),
+        error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => {
+            // The builder has already tightened the source to one record
+            // before this mapping. The same record and fixed budget reproduce
+            // this refusal forever; calling it a request budget timeout made
+            // the background worker retry it as transient work and discarded
+            // the required/maximum evidence.
+            RetrievalPortError::Contract(error.to_string())
+        }
+        CodeLexicalArtifactErrorV1::Io(detail) | CodeLexicalArtifactErrorV1::Missing(detail) => {
+            RetrievalPortError::AuthorityUnavailable(detail)
+        }
+    }
+}
+
+pub(super) fn map_sealed_page_source_error(
+    error: CodeIndexProductionErrorV1,
+) -> RetrievalPortError {
+    match error {
+        CodeIndexProductionErrorV1::Interrupted(
+            tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
+        ) => RetrievalPortError::Cancelled,
+        CodeIndexProductionErrorV1::Interrupted(
+            tracedecay_code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+        ) => RetrievalPortError::BudgetExceeded,
+        CodeIndexProductionErrorV1::Contract(detail)
+        | CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(detail),
+        ) => RetrievalPortError::Contract(detail),
+        error => RetrievalPortError::AuthorityUnavailable(error.to_string()),
+    }
+}
+
+/// A changed file the carry decodes fails the way the sealed source does.
+fn carried_source_error(error: CodeIndexProductionErrorV1) -> CodeLexicalArtifactErrorV1 {
+    match error {
+        CodeIndexProductionErrorV1::Interrupted(interruption) => {
+            CodeLexicalArtifactErrorV1::Interrupted(interruption)
+        }
+        CodeIndexProductionErrorV1::Contract(detail) => {
+            CodeLexicalArtifactErrorV1::Contract(detail)
+        }
+        error => CodeLexicalArtifactErrorV1::Io(error.to_string()),
+    }
+}
+
+fn text_artifact_unavailable(error: impl std::fmt::Display) -> RetrievalPortError {
+    RetrievalPortError::AuthorityUnavailable(error.to_string())
+}
+
+/// Name a held publication charge as the reader and shrink it to the reader
+/// budget. The bytes never leave the ledger, so the handoff is not a new
+/// admission and measured RSS cannot refuse a charge that was already held.
+fn reader_charge_from_held_reservation(
+    mut held: ResidentMemoryReservationV1,
+) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
+    let reader_budget =
+        u64::try_from(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1).map_err(|_| {
+            RetrievalPortError::Contract("text-artifact reader budget exceeds u64".to_owned())
+        })?;
+    if held.reserved_bytes() < reader_budget {
+        return Err(RetrievalPortError::Contract(format!(
+            "text-artifact publication charge {} is below the reader budget {reader_budget}",
+            held.reserved_bytes()
+        )));
+    }
+    let component = ResidentMemoryComponentIdV1::new("code-text-artifact-reader")
+        .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    held.transfer_component(component, reader_budget)
+        .map_err(|error| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact reader charge could not take over its held reservation: reserved \
+                 {} measured {}",
+                error.reserved_bytes, error.measured_bytes
+            ))
+        })?;
+    Ok(held)
+}
+
+/// Durable text-artifact store bound to one worktree's generation store root.
+///
+/// Publishes finalized staging artifacts under `code-text-artifacts-v1/` and
+/// attaches them to the sealed generation's durable index entry, so a restart
+/// reopens the artifact head instead of rebuilding it.
+#[derive(Clone)]
+pub struct DaemonCodeTextArtifactStoreV1 {
+    store_root: PathBuf,
+    publication: DaemonCodeIndexPublicationStoreV1,
+    /// Process-wide resident-memory authority: the artifact build and reader
+    /// ceilings are reserved here before they are allocated, so the
+    /// advertised budgets are admission-controlled, not just documented.
+    resident_memory: Arc<ProcessResidentMemoryV1>,
+    /// Retained state other worktrees and generations hold. A build sheds it
+    /// before refusing, so a stale decode never outranks a fresh index.
+    resident_owners: Arc<ResidentOwnersV1>,
+    /// The owning scheduler's worker runtime; text serving fans out under it.
+    worker_runtime: super::reconcile::SchedulerWorkerRuntimeV1,
+    project_id: ProjectId,
+    worktree_id: WorktreeId,
+}
+
+/// The bytes one artifact admission reserves: its ceiling plus the band above
+/// the admission watermark, so the reserve call enforces that watermark
+/// against both the ledger and the measured resident set. The band is not
+/// memory the artifact owns and is released right after the reserve;
+/// retaining it in every overlapping build would charge the same
+/// process-wide margin repeatedly. The process's live set is not charged:
+/// the reserve already compares the request with the measured resident set,
+/// which contains it.
+pub(super) fn text_artifact_resident_memory_charge(
+    requested: NonZeroU64,
+    watermark_headroom: u64,
+) -> Result<NonZeroU64, RetrievalPortError> {
+    requested
+        .get()
+        .checked_add(watermark_headroom)
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact resident-memory accounting overflowed".to_owned(),
+            )
+        })
+}
+
+pub(super) fn text_artifact_admitted_build_budget(
+    preferred_bytes: u64,
+    minimum_bytes: u64,
+    available_bytes: u64,
+) -> Result<u64, RetrievalPortError> {
+    if minimum_bytes == 0 || preferred_bytes < minimum_bytes {
+        return Err(RetrievalPortError::Contract(
+            "text-artifact build budget bounds are invalid".to_owned(),
+        ));
+    }
+    let admitted_bytes = preferred_bytes.min(available_bytes);
+    if admitted_bytes < minimum_bytes {
+        return Err(RetrievalPortError::ResidentMemoryRefused(format!(
+            "text-artifact build needs at least {minimum_bytes} bytes; \
+             {available_bytes} bytes are available below the resident-memory watermark"
+        )));
+    }
+    Ok(admitted_bytes)
+}
+
+impl DaemonCodeTextArtifactStoreV1 {
+    pub(super) fn bind(
+        store_root: &Path,
+        publication: &DaemonCodeIndexPublicationStoreV1,
+        resident_memory: &Arc<ProcessResidentMemoryV1>,
+        resident_owners: &Arc<ResidentOwnersV1>,
+        worker_runtime: &super::reconcile::SchedulerWorkerRuntimeV1,
+        project_id: &ProjectId,
+        worktree_id: &WorktreeId,
+    ) -> Self {
+        Self {
+            store_root: store_root.to_path_buf(),
+            publication: publication.clone(),
+            resident_memory: Arc::clone(resident_memory),
+            resident_owners: Arc::clone(resident_owners),
+            worker_runtime: worker_runtime.clone(),
+            project_id: project_id.clone(),
+            worktree_id: worktree_id.clone(),
+        }
+    }
+
+    fn store_root(&self) -> &Path {
+        &self.store_root
+    }
+
+    fn restore_witness_path(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+    ) -> Result<PathBuf, RetrievalPortError> {
+        let digest = sha256_hex_suffix(descriptor.artifact_digest.as_str()).ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact descriptor digest is not canonical SHA-256".to_owned(),
+            )
+        })?;
+        Ok(self
+            .store_root
+            .join("code-text-artifact-restore-witnesses-v1")
+            .join(format!("text-artifact-{digest}.json")))
+    }
+
+    fn load_restore_witness(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+    ) -> Result<CodeLexicalArtifactRestoreWitnessV1, CodeLexicalArtifactErrorV1> {
+        let path = self
+            .restore_witness_path(descriptor)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let bytes = tracedecay_private_fs::framed_log::read_bounded(
+            &path,
+            TEXT_ARTIFACT_RESTORE_WITNESS_MAX_BYTES_V1,
+        )
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Corrupt(format!(
+                "lexical artifact restore witness is unavailable: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Missing(
+                "lexical artifact restore witness is absent".to_owned(),
+            )
+        })?;
+        CodeLexicalArtifactRestoreWitnessV1::decode(&bytes)
+    }
+
+    fn publish_restore_witness(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+        witness: &CodeLexicalArtifactRestoreWitnessV1,
+    ) -> Result<(), RetrievalPortError> {
+        let bytes = witness.encode().map_err(map_text_artifact_error)?;
+        let path = self.restore_witness_path(descriptor)?;
+        let parent = path.parent().ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact restore witness path has no parent".to_owned(),
+            )
+        })?;
+        match parent.symlink_metadata() {
+            Ok(_) => tracedecay_private_fs::validate_private_directory(parent)
+                .map_err(text_artifact_unavailable)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tracedecay_private_fs::create_private_directory(parent)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Err(error) => return Err(text_artifact_unavailable(error)),
+        }
+        tracedecay_private_fs::framed_log::atomic_write_accelerator(
+            &path,
+            "artifact-restore-witness",
+            &bytes,
+        )
+        .map_err(text_artifact_unavailable)?;
+        self.collect_unreferenced_restore_witnesses(parent, Some(&path))
+    }
+
+    fn collect_unreferenced_restore_witnesses(
+        &self,
+        witness_root: &Path,
+        pending_publication: Option<&Path>,
+    ) -> Result<(), RetrievalPortError> {
+        let pointer = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?;
+        let retained = pointer
+            .iter()
+            .flat_map(|pointer| pointer.generation_index.iter())
+            .filter_map(|entry| entry.text_artifact())
+            .map(|descriptor| self.restore_witness_path(descriptor))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut retained = retained;
+        retained.extend(pending_publication.map(Path::to_path_buf));
+        let mut entries = std::fs::read_dir(witness_root).map_err(text_artifact_unavailable)?;
+        let mut removed = false;
+        for ordinal in 0..=TEXT_ARTIFACT_RESTORE_WITNESS_MAX_FILES_V1 {
+            let Some(entry) = entries.next() else {
+                break;
+            };
+            if ordinal == TEXT_ARTIFACT_RESTORE_WITNESS_MAX_FILES_V1 {
+                return Err(RetrievalPortError::AuthorityUnavailable(
+                    "text-artifact restore witness inventory exceeds its bounded capacity"
+                        .to_owned(),
+                ));
+            }
+            let entry = entry.map_err(text_artifact_unavailable)?;
+            let path = entry.path();
+            let metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
+            if !metadata.file_type().is_file() {
+                return Err(RetrievalPortError::AuthorityUnavailable(
+                    "text-artifact restore witness inventory contains a non-file".to_owned(),
+                ));
+            }
+            if !retained.contains(&path) {
+                std::fs::remove_file(path).map_err(text_artifact_unavailable)?;
+                removed = true;
+            }
+        }
+        if removed {
+            DaemonCodeIndexPublicationStoreV1::sync_directory(witness_root)
+                .map_err(text_artifact_unavailable)?;
+        }
+        Ok(())
+    }
+
+    fn remove_restore_witness(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+    ) -> Result<(), RetrievalPortError> {
+        let path = self.restore_witness_path(descriptor)?;
+        let pointer = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?;
+        let still_referenced = pointer
+            .iter()
+            .flat_map(|pointer| pointer.generation_index.iter())
+            .filter_map(|entry| entry.text_artifact())
+            .any(|retained| {
+                self.restore_witness_path(retained)
+                    .is_ok_and(|retained_path| retained_path == path)
+            });
+        if still_referenced {
+            return Ok(());
+        }
+        match path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                std::fs::remove_file(&path).map_err(text_artifact_unavailable)?;
+                if let Some(parent) = path.parent() {
+                    DaemonCodeIndexPublicationStoreV1::sync_directory(parent)
+                        .map_err(text_artifact_unavailable)?;
+                }
+                Ok(())
+            }
+            Ok(_) => Err(RetrievalPortError::AuthorityUnavailable(
+                "text-artifact restore witness is not a regular file".to_owned(),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(text_artifact_unavailable(error)),
+        }
+    }
+
+    /// Reserve one artifact memory ceiling. The atomic reserve also includes
+    /// the process-wide high-watermark headroom, then releases that
+    /// check-only margin before returning while the component ceiling stays
+    /// charged.
+    fn reserve_resident_memory(
+        &self,
+        generation_id: &CodeGenerationId,
+        component: &'static str,
+        bytes: usize,
+    ) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
+        self.reserve_resident_memory_up_to(generation_id, component, bytes, bytes)
+            .map(|(reservation, _)| reservation)
+    }
+
+    /// Measure headroom and size the build: `(observed, watermark headroom,
+    /// admitted)` bytes.
+    fn text_artifact_admission(
+        &self,
+        preferred: NonZeroU64,
+        minimum: NonZeroU64,
+    ) -> Result<(u64, u64), RetrievalPortError> {
+        let admission_watermark = self.resident_memory.admission_watermark_bytes();
+        let headroom = self.resident_memory.headroom_below(admission_watermark);
+        let watermark_headroom = self
+            .resident_memory
+            .snapshot()
+            .limit_bytes
+            .saturating_sub(admission_watermark);
+        let admitted_bytes = text_artifact_admitted_build_budget(
+            preferred.get(),
+            minimum.get(),
+            headroom.available_bytes,
+        )
+        .inspect_err(|_| {
+            self.resident_memory
+                .wait_for_headroom(minimum.get(), admission_watermark);
+        })?;
+        Ok((watermark_headroom, admitted_bytes))
+    }
+
+    fn reserve_resident_memory_up_to(
+        &self,
+        generation_id: &CodeGenerationId,
+        component: &'static str,
+        preferred_bytes: usize,
+        minimum_bytes: usize,
+    ) -> Result<(ResidentMemoryReservationV1, usize), RetrievalPortError> {
+        let component = ResidentMemoryComponentIdV1::new(component)
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        let preferred = u64::try_from(preferred_bytes)
+            .ok()
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "text-artifact resident-memory reservation must be nonzero".to_owned(),
+                )
+            })?;
+        let minimum = u64::try_from(minimum_bytes)
+            .ok()
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
+                )
+            })?;
+        let (watermark_headroom, admitted_bytes) =
+            match self.text_artifact_admission(preferred, minimum) {
+                Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
+                    let released = self
+                        .resident_owners
+                        .shed(minimum.get(), std::time::Instant::now());
+                    for release in &released {
+                        log_resident_owner_release_v1(release);
+                    }
+                    // Freed pages sit in the pool workers' allocator heaps
+                    // whether or not an owner was shed.
+                    let trim = release_process_allocator_memory_v1();
+                    tracing::info!(
+                        event = "code_text_artifact_build_shed_retained_state",
+                        released_owners = released.len(),
+                        trimmed_bytes = trim.released_bytes(),
+                        refused = %detail,
+                        "text-artifact build shed retained state before re-measuring headroom"
+                    );
+                    self.text_artifact_admission(preferred, minimum)
+                }
+                admission => admission,
+            }?;
+        let admitted = NonZeroU64::new(admitted_bytes).ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact admitted resident-memory reservation must be nonzero".to_owned(),
+            )
+        })?;
+        let accounted = text_artifact_resident_memory_charge(admitted, watermark_headroom)?;
+        let mut reservation = self
+            .resident_memory
+            .reserve(
+                ResidentMemoryKeyV1 {
+                    project_id: self.project_id.clone(),
+                    worktree_id: self.worktree_id.clone(),
+                    generation_id: generation_id.clone(),
+                    component,
+                },
+                accounted,
+            )
+            .map_err(|error| {
+                RetrievalPortError::ResidentMemoryRefused(format!(
+                    "text-artifact resident-memory admission was refused: {error}"
+                ))
+            })?;
+        reservation.shrink_to(admitted.get()).map_err(|error| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact resident-memory headroom release failed: {error}"
+            ))
+        })?;
+        let admitted = usize::try_from(admitted.get()).map_err(|error| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact admitted reservation exceeds the platform limit: {error}"
+            ))
+        })?;
+        Ok((reservation, admitted))
+    }
+
+    fn acquire_store_write_lock(&self) -> Result<CodeGenerationStoreLockV1, RetrievalPortError> {
+        try_acquire_code_generation_store_lock(&self.store_root)
+            .map_err(text_artifact_unavailable)?
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    tracedecay_query::retrieval::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1
+                        .to_owned(),
+                )
+            })
+    }
+
+    /// The durably attached artifact descriptor for one retained generation,
+    /// or `None` when the generation has no published text artifact yet.
+    pub(super) fn published_descriptor(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<DurableCodeTextArtifactDescriptorV1>, RetrievalPortError> {
+        let Some(pointer) = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?
+        else {
+            return Ok(None);
+        };
+        Ok(pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == generation_id.as_str())
+            .and_then(|entry| entry.text_artifact().cloned()))
+    }
+
+    /// Withdraw one exact missing/corrupt derived artifact so the immutable
+    /// sealed generation can rebuild it. A corrupt regular file is deleted
+    /// before the durable pointer is cleared; non-regular objects are
+    /// preserved and refused fail-closed.
+    fn withdraw_unavailable_descriptor(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+        delete_corrupt_file: bool,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), RetrievalPortError> {
+        checkpoint_text_artifact_control(control)?;
+        let lock = self.acquire_store_write_lock()?;
+        let pointer = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    "durable publication pointer disappeared during artifact repair".to_owned(),
+                )
+            })?;
+        let current = pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
+            .and_then(|entry| entry.text_artifact());
+        if current != Some(descriptor) {
+            return Err(RetrievalPortError::AuthorityUnavailable(
+                "durable text-artifact attachment changed during repair".to_owned(),
+            ));
+        }
+
+        // A corrupt file is deleted before its descriptor is withdrawn: a crash
+        // between the two leaves a descriptor naming a missing file, which the
+        // next open withdraws, and never a second copy of damaged bytes.
+        if delete_corrupt_file {
+            let path = code_text_artifact_path(&self.store_root, descriptor)
+                .map_err(text_artifact_unavailable)?;
+            let metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
+            if !metadata.file_type().is_file() {
+                return Err(RetrievalPortError::Contract(
+                    "corrupt code text artifact is not a regular file".to_owned(),
+                ));
+            }
+            std::fs::remove_file(&path).map_err(text_artifact_unavailable)?;
+            DaemonCodeIndexPublicationStoreV1::sync_directory(path.parent().ok_or_else(|| {
+                RetrievalPortError::Contract("code text artifact path has no parent".to_owned())
+            })?)
+            .map_err(text_artifact_unavailable)?;
+        }
+        withdraw_verified_text_artifact_under_lock(&lock, &pointer, descriptor)
+            .map_err(text_artifact_unavailable)?;
+        if let Err(error) = self.remove_restore_witness(descriptor) {
+            tracing::warn!(
+                event = "code_text_artifact_restore_witness_cleanup_failed",
+                artifact = %descriptor.artifact_file,
+                error = %error,
+                "derived restore witness cleanup failed after descriptor withdrawal"
+            );
+        }
+        Ok(())
+    }
+
+    /// Remove one incompatible resumable staging database before rebuilding
+    /// it with the current artifact format. The path is daemon-derived and the
+    /// canonical store lock serializes this replacement with generation and
+    /// artifact publication; non-regular collisions fail closed.
+    fn discard_incompatible_staging(
+        &self,
+        staging_path: &Path,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), RetrievalPortError> {
+        checkpoint_text_artifact_control(control)?;
+        let artifacts_root = code_text_artifact_staging_root(&self.store_root);
+        if staging_path.parent() != Some(artifacts_root.as_path()) {
+            return Err(RetrievalPortError::Contract(
+                "text-artifact staging path is outside its canonical root".to_owned(),
+            ));
+        }
+        let _lock = self.acquire_store_write_lock()?;
+        checkpoint_text_artifact_control(control)?;
+        match staging_path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                retire_text_artifact_staging_family(staging_path)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Ok(_) => {
+                return Err(RetrievalPortError::Contract(
+                    "incompatible text-artifact staging path is not a regular file".to_owned(),
+                ));
+            }
+            // A concurrent build may retire this staging file first. Discard
+            // wants it gone, so finding it already gone is the end state, not
+            // an unavailable authority: reporting one aborts the caller's
+            // reopen and the clone lane answers a non-retryable failure for a
+            // state that has already resolved. Sidecars can outlive the
+            // database after a crash, so sweep them the way
+            // `prepare_absent_text_artifact_staging` does.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                clear_text_artifact_staging_sidecars(staging_path)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Err(error) => return Err(text_artifact_unavailable(error)),
+        }
+        DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
+            .map_err(text_artifact_unavailable)
+    }
+
+    /// Resolve the immutable, content-addressed sealed file for one retained
+    /// generation without re-encoding its decoded in-memory representation.
+    pub(super) fn sealed_identity(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<DurableSealedCodeGenerationIdentityV1, RetrievalPortError> {
+        let pointer = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    "durable code-generation index is missing".to_owned(),
+                )
+            })?;
+        let entry = pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == generation_id.as_str())
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(format!(
+                    "durable code-generation index does not retain generation {generation_id}"
+                ))
+            })?;
+        Ok(DurableSealedCodeGenerationIdentityV1 {
+            locator: entry.generation_file.clone(),
+            digest: ManifestDigest::new(entry.state_digest.clone())
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            size_bytes: entry.size_bytes,
+        })
+    }
+
+    /// Open the exact durable sealed file after the caller has admitted the
+    /// build's resident-memory ceiling. The manifest is verified against its
+    /// content address here; each segment authenticates as the source reads it.
+    pub(super) fn open_sealed_source(
+        &self,
+        identity: &DurableSealedCodeGenerationIdentityV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<VerifiedSealedLexicalPageSourceV1, RetrievalPortError> {
+        self.open_sealed_source_with_progress(identity, control, |_, _| {})
+    }
+
+    pub(super) fn open_sealed_source_with_progress<F>(
+        &self,
+        identity: &DurableSealedCodeGenerationIdentityV1,
+        control: &dyn CodeIndexExecutionControlV1,
+        mut progress: F,
+    ) -> Result<VerifiedSealedLexicalPageSourceV1, RetrievalPortError>
+    where
+        F: FnMut(u64, u64),
+    {
+        DaemonCodeIndexPublicationStoreV1::validate_generation_file(&identity.locator)
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        let path = self.publication.generations_root.join(&identity.locator);
+        let metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
+        if !metadata.file_type().is_file() || metadata.len() != identity.size_bytes {
+            return Err(RetrievalPortError::Contract(
+                "durable sealed lexical source identity is corrupt".to_owned(),
+            ));
+        }
+        checkpoint_text_artifact_control(control)?;
+        progress(0, identity.size_bytes);
+        let manifest_bytes = std::fs::read(&path).map_err(text_artifact_unavailable)?;
+        checkpoint_text_artifact_control(control)?;
+        if DaemonCodeIndexPublicationStoreV1::state_digest(&manifest_bytes)
+            != identity.digest.as_str()
+        {
+            return Err(RetrievalPortError::Contract(
+                "partitioned sealed lexical manifest digest does not verify".to_owned(),
+            ));
+        }
+        progress(identity.size_bytes, identity.size_bytes);
+        let publication = self.publication.clone();
+        let source_identity = identity.clone();
+        VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+            &manifest_bytes,
+            identity.digest.clone(),
+            move |digest, expected_size, buffer, control| {
+                publication.read_retained_partitioned_segment(
+                    &source_identity,
+                    SealedGenerationSegmentReadV1::Whole {
+                        digest,
+                        size_bytes: expected_size,
+                    },
+                    buffer,
+                    control,
+                )
+            },
+            TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+            TEXT_ARTIFACT_PAGE_BYTES_V1,
+        )
+        .map_err(map_sealed_page_source_error)
+    }
+
+    /// Durably publish one finalized staging artifact: content-address it,
+    /// move it into the artifacts root, fsync the directory, and attach the
+    /// descriptor to the sealed generation entry under the store lock.
+    pub(super) fn publish(
+        &self,
+        staging_path: &Path,
+        generation_id: &CodeGenerationId,
+        sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+        content_key: &ManifestDigest,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<DurableCodeTextArtifactDescriptorV1, RetrievalPortError> {
+        {
+            let _span = tracing::trace_span!("query.artifact.store.publish").entered();
+            {
+                let artifacts_root = code_text_artifacts_root(&self.store_root);
+                ensure_private_text_artifacts_root(&artifacts_root)?;
+                // Publication and artifact retention share this canonical store lock.
+                // Hold it from the first staging observation until pointer attachment
+                // is durable so retention cannot unlink a newly visible artifact from
+                // a plan made before the descriptor was attached.
+                checkpoint_text_artifact_control(control)?;
+                let lock = self.acquire_store_write_lock()?;
+                // The completed artifact is the project's: from the moment this
+                // publication finds or places it until its descriptor is durable,
+                // no scope's retention may collect it.
+                let _project_lock =
+                    acquire_generation_segments_publication_lock(&self.store_root, &|| {
+                        checkpoint_text_artifact_control(control).is_err()
+                    })
+                    .map_err(text_artifact_unavailable)?;
+                let (artifact_sha256, artifact_size_bytes) = {
+                    let _span = tracing::trace_span!("query.artifact.store.state_digest").entered();
+                    sha256_private_file_and_size(staging_path, control)
+                }?;
+
+                let descriptor = DurableCodeTextArtifactDescriptorV1 {
+                    generation_id: generation_id.clone(),
+                    artifact_file: format!(
+                        "text-artifact-{}.bin",
+                        encode_lowercase_hex(&artifact_sha256)
+                    ),
+                    artifact_digest: ManifestDigest::from_sha256_bytes(&artifact_sha256)
+                        .map_err(text_artifact_unavailable)?,
+                    artifact_size_bytes,
+                    content_key: content_key.clone(),
+                };
+                let final_path = artifacts_root.join(&descriptor.artifact_file);
+                // A digest-derived name is not proof that an existing filesystem
+                // object contains the named bytes. A regular file that does not
+                // hash to its name is a damaged copy some worktree published: the
+                // verified staging file replaces it and its bytes are gone. A
+                // symlink or other non-regular object fails closed.
+                let existing = match final_path.symlink_metadata() {
+                    Ok(_) => Some({
+                        let _span =
+                            tracing::trace_span!("query.artifact.store.dedupe_compare").entered();
+                        sha256_private_file_and_size(&final_path, control)
+                    }?),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(text_artifact_unavailable(error)),
+                };
+                if existing == Some((artifact_sha256, artifact_size_bytes)) {
+                    retire_text_artifact_staging_family(staging_path)
+                        .map_err(text_artifact_unavailable)?;
+                } else {
+                    // Renaming over the damaged file unlinks it atomically.
+                    if existing.is_some() {
+                        tracing::warn!(
+                            event = "code_index_shared_text_artifact_replaced",
+                            artifact = %descriptor.artifact_file,
+                            "a text artifact that did not match its content address was replaced"
+                        );
+                    }
+                    std::fs::rename(staging_path, &final_path)
+                        .map_err(text_artifact_unavailable)?;
+                    clear_text_artifact_staging_sidecars(staging_path)
+                        .map_err(text_artifact_unavailable)?;
+                    if let Some(staging_root) = staging_path.parent() {
+                        DaemonCodeIndexPublicationStoreV1::sync_directory(staging_root)
+                            .map_err(text_artifact_unavailable)?;
+                    }
+                }
+                {
+                    let _span = tracing::trace_span!("query.artifact.store.seal_fsync").entered();
+                    DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
+                        .map_err(text_artifact_unavailable)
+                }?;
+                let pointer = self
+                    .publication
+                    .read_publication_pointer()
+                    .map_err(text_artifact_unavailable)?
+                    .ok_or_else(|| {
+                        RetrievalPortError::AuthorityUnavailable(
+                            "no durable publication pointer exists for text-artifact attachment"
+                                .to_owned(),
+                        )
+                    })?;
+                {
+                    let _span =
+                        tracing::trace_span!("query.artifact.store.pointer_commit").entered();
+                    {
+                        attach_verified_text_artifact_under_lock(
+                            &lock,
+                            &pointer,
+                            sealed_identity,
+                            descriptor.clone(),
+                        )
+                        .map_err(text_artifact_unavailable)
+                    }
+                }?;
+                Ok(descriptor)
+            }
+        }
+    }
+}
+
+pub(super) struct ProductionCodeGraphServingV1 {
+    pub graph: GraphLane<CodeGraphEvidenceReader>,
+    store: Option<Arc<CodeGraphProjectionStore>>,
+    _graph_authority: CodeGraphServingAuthorityV1,
+}
+
+// The serving graph's fields are `Send + Sync`, but proving that walks the
+// canonical graph lease and the evidence lane past the recursion limit
+// (rust-lang/rust#159228). The const check below is the field proof; these
+// impls stop that walk from repeating inside every owner that holds this graph.
+unsafe impl Send for ProductionCodeGraphServingV1 {}
+unsafe impl Sync for ProductionCodeGraphServingV1 {}
+
+const _: fn(&ProductionCodeGraphServingV1) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let ProductionCodeGraphServingV1 {
+        graph,
+        store,
+        _graph_authority,
+    } = value;
+    assert_send_sync(graph);
+    assert_send_sync(store);
+    assert_send_sync(_graph_authority);
+};
+
+pub(super) enum CodeGraphActivationStateV1 {
+    Pending,
+    Refused(&'static str),
+    Unavailable(String),
+    Ready(Arc<ProductionCodeGraphServingV1>),
+}
+
+#[derive(Clone)]
+pub(super) enum CodeGraphServingAuthorityV1 {
+    Persistent {
+        /// Retained solely to keep the canonical graph store lease alive for
+        /// the lifetime of the serving owners; never read.
+        _lease:
+            Arc<tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1>,
+    },
+    #[cfg(any(test, feature = "test-helpers"))]
+    Memory,
+}
+
+impl LatestCompleteCodeIndexV1 {
+    pub fn text_generation_handle(&self) -> LatestCodeTextGenerationV1 {
+        self.text.clone()
+    }
+
+    /// Install exact and lexical owners without waiting for clone backfill.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn production_query_owners(
+        &self,
+    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
+        self.text.production_query_owners()
+    }
+
+    pub fn generation(&self) -> &CodeIndexPublishedGenerationV1 {
+        self.generation.as_ref()
+    }
+
+    /// The decoded generation as a shared handle.
+    ///
+    /// Graph activation offers this to the code-graph manifest provider so the
+    /// publication and recovery branches reuse this decode instead of reading
+    /// and parsing the identical sealed payload a second time.
+    pub fn generation_handle(&self) -> Arc<CodeIndexPublishedGenerationV1> {
+        Arc::clone(&self.generation)
+    }
+
+    /// Point-lookup indices over this sealed generation's record vectors.
+    ///
+    /// Built at most once per generation and shared by every clone of this
+    /// handle (and therefore by every concurrent query), the same way
+    /// `Self::production_query_owners` shares its lane owners. Serving a
+    /// query never rebuilds the indices; only loading a new generation does.
+    pub fn record_index(&self) -> &queries::GenerationRecordIndexV1 {
+        self.record_index
+            .get_or_init(|| queries::GenerationRecordIndexV1::build(self.generation.as_ref()))
+    }
+
+    /// Best-effort prewarm of the generation's query and graph derivations.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn prewarm_serving_derivations(&self) {
+        let _ = self.production_query_owners();
+        let _ = self.record_index();
+        let generation_id = self.generation.manifest().generation_id.clone();
+        let Ok(freshness) = self.source_freshness() else {
+            return;
+        };
+        let Ok(reader) = CodeGraphEvidenceReader::new(
+            generation_id,
+            Some(self.generation.snapshot().repository.clone()),
+            freshness,
+            self.generation.edges(),
+            self.generation.chunks().chunks(),
+        ) else {
+            return;
+        };
+        let _ = self.install_graph_serving(reader, None, CodeGraphServingAuthorityV1::Memory);
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    fn restore_publisher(&self, artifact_digest: &ManifestDigest) -> impl FnMut(u64, u64) + '_ {
+        let generation_id = self.metadata.manifest().generation_id.as_str().to_owned();
+        let artifact_digest = artifact_digest.as_str().to_owned();
+        move |completed, total| {
+            let completed = completed.min(total);
+            *self
+                .restore_progress
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(CodeIndexRestoreProgressV1 {
+                    generation_id: generation_id.clone(),
+                    artifact_digest: artifact_digest.clone(),
+                    authenticated_completed: completed,
+                    authenticated_total: total,
+                    authenticated_remaining: total.saturating_sub(completed),
+                });
+        }
+    }
+
+    fn clear_restore_progress(&self) {
+        *self
+            .restore_progress
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    fn open_content_addressed_reader(
+        &self,
+        path: impl AsRef<Path>,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+        authority: &CodeLexicalProjectionMetadataV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CodeLexicalArtifactReaderV1, CodeLexicalArtifactErrorV1> {
+        let path = path.as_ref();
+        let restored = self
+            .text_artifact_store
+            .load_restore_witness(descriptor)
+            .and_then(|witness| {
+                CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
+                    path,
+                    &descriptor.artifact_digest,
+                    descriptor.artifact_size_bytes,
+                    &witness,
+                    authority,
+                    control,
+                    self.restore_publisher(&descriptor.artifact_digest),
+                )
+            });
+        let result = match restored {
+            Ok(reader) => Ok(reader),
+            Err(error @ CodeLexicalArtifactErrorV1::Interrupted(_)) => Err(error),
+            Err(_) => {
+                // A rejected witness ends the bounded restore attempt. Do not
+                // keep reporting its fixed authentication steps while the
+                // corpus-wide verification fallback is running.
+                self.clear_restore_progress();
+                CodeLexicalArtifactReaderV1::open_content_addressed_fully_verified_with_witness(
+                    path,
+                    &descriptor.artifact_digest,
+                    descriptor.artifact_size_bytes,
+                    authority,
+                    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                    RewriteWitness::NATIVE,
+                    control,
+                )
+                .map(|(reader, witness)| {
+                    if let Some(witness) = witness
+                        && let Err(error) = self
+                            .text_artifact_store
+                            .publish_restore_witness(descriptor, &witness)
+                    {
+                        tracing::warn!(
+                            event = "code_text_artifact_restore_witness_publish_failed",
+                            artifact = %descriptor.artifact_file,
+                            error = %error,
+                            "fully verified artifact remains servable without its restore accelerator"
+                        );
+                    }
+                    reader
+                })
+            }
+        };
+        self.clear_restore_progress();
+        result
+    }
+
+    pub(super) fn restore_progress(&self) -> Option<CodeIndexRestoreProgressV1> {
+        self.restore_progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
+        &self.metadata
+    }
+
+    pub fn source_commitments(
+        &self,
+    ) -> Result<&CodeGenerationSourceCommitmentsV1, CodeIndexProductionErrorV1> {
+        self.metadata.source_commitments()
+    }
+
+    pub fn uses_partitioned_manifest(&self) -> bool {
+        self.sealed_format_revision
+            == tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1
+    }
+
+    pub fn artifact_occurrence_by_chunk(
+        &self,
+        chunk: &tracedecay_domain::CodeSearchChunkId,
+    ) -> Result<CodeLexicalArtifactOccurrenceV1, RetrievalPortError> {
+        self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())?
+            .artifact_occurrence_by_chunk(chunk)
+    }
+}
+
+impl LatestCompleteCodeIndexV1 {
+    /// Whether the record lookup indices are already built for this generation.
+    #[cfg(test)]
+    pub(super) fn record_index_is_warm(&self) -> bool {
+        self.record_index.get().is_some()
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    /// Exact and lexical query owners are installed for this generation.
+    ///
+    /// This is the sole readiness predicate for a publication's graph seat
+    /// gate and for admitting a full sealed-generation graph replay. The
+    /// artifact seals its clone index with its lexical rows, so ready owners
+    /// serve clone lookups too.
+    pub fn query_owners_are_ready(&self) -> bool {
+        matches!(
+            self.query_owner_readiness(),
+            CodeTextQueryOwnerReadinessV1::Ready(_)
+        )
+    }
+
+    pub(super) fn query_owner_readiness(&self) -> CodeTextQueryOwnerReadinessV1 {
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return CodeTextQueryOwnerReadinessV1::Invalid;
+        }
+        self.query_owners
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone)
+            .map_or(
+                CodeTextQueryOwnerReadinessV1::Pending,
+                CodeTextQueryOwnerReadinessV1::Ready,
+            )
+    }
+
+    pub(super) fn text_projection_needs_work(&self) -> bool {
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return false;
+        }
+        if !self.query_owners_are_ready() {
+            return true;
+        }
+        // A read probe must not queue behind an advance, which holds the
+        // slot lock for its whole bounded slice. Nor may it read a held lock
+        // as work: another probe or an already-ready advance holds it too.
+        !self.text_projection_build.slot_is_idle()
+    }
+
+    pub(super) fn clone_index_status(
+        &self,
+        source_is_stale: bool,
+        update: Option<super::cadence::CodeIndexCloneUpdateV1>,
+    ) -> CodeCloneIndexStatusV1 {
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return CodeCloneIndexStatusV1::Unavailable {
+                reason: "the sealed lexical artifact could not be opened".to_owned(),
+            };
+        }
+        let owners = match self.query_owner_readiness() {
+            CodeTextQueryOwnerReadinessV1::Ready(owners) => owners,
+            CodeTextQueryOwnerReadinessV1::Pending => {
+                return CodeCloneIndexStatusV1::Unavailable {
+                    reason: "the sealed lexical artifact is still building".to_owned(),
+                };
+            }
+            CodeTextQueryOwnerReadinessV1::Invalid => {
+                return CodeCloneIndexStatusV1::Unavailable {
+                    reason: "the sealed lexical artifact is unreadable".to_owned(),
+                };
+            }
+        };
+        let artifact = owners.clone_index_artifact();
+        let observation = clone_index_observation(self, &artifact, update);
+        if source_is_stale {
+            return CodeCloneIndexStatusV1::Stale {
+                observation,
+                reason: "the clone artifact belongs to the last sealed source generation"
+                    .to_owned(),
+            };
+        }
+        let omission_reasons = clone_index_omission_reasons(&artifact.census);
+        if omission_reasons.is_empty() {
+            CodeCloneIndexStatusV1::Ready { observation }
+        } else {
+            CodeCloneIndexStatusV1::Partial {
+                observation,
+                omission_reasons,
+            }
+        }
+    }
+
+    pub(super) fn same_text_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.text_projection_build, &other.text_projection_build)
+    }
+
+    pub(super) fn mark_text_serving_failed(&self) {
+        self.text_projection_failed.store(true, Ordering::Release);
+    }
+}
+
+fn clone_index_observation(
+    text: &LatestCodeTextGenerationV1,
+    artifact: &CloneIndexArtifactSnapshotV1,
+    update: Option<super::cadence::CodeIndexCloneUpdateV1>,
+) -> CodeCloneIndexObservationV1 {
+    let census = &artifact.census;
+    let peak_scratch_memory_bytes = text
+        .text_progress_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .committed_samples
+        .iter()
+        .filter_map(|sample| sample.clone_peak_scratch_memory_bytes)
+        .max();
+    CodeCloneIndexObservationV1 {
+        generation_id: text.metadata.manifest().generation_id.as_str().to_owned(),
+        source_revision: text
+            .metadata
+            .snapshot()
+            .source_revision
+            .as_ref()
+            .map(|revision| revision.as_str().to_owned()),
+        artifact_format_revision: Some(artifact.format_revision),
+        conservative_normalization_revision: CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1,
+        rename_normalization_revision: RENAME_CLONE_NORMALIZATION_REVISION_V1,
+        coverage: CodeCloneIndexCoverageV1 {
+            source_bodies: Some(census.source_bodies),
+            eligible_source_bodies: Some(census.eligible_source_bodies),
+            conservative_normalized_bodies: Some(census.conservative_normalized_bodies),
+            rename_normalized_bodies: Some(census.rename_normalized_bodies),
+            unique_payloads: Some(census.unique_payloads),
+            payloads_reused: update.and_then(|update| update.payloads_reused),
+            exact_postings: Some(census.exact_postings),
+            excluded_too_small_bodies: Some(census.excluded_too_small_bodies),
+            excluded_too_large_bodies: Some(census.excluded_too_large_bodies),
+            excluded_incomplete_tokenization_bodies: Some(
+                census.excluded_incomplete_tokenization_bodies,
+            ),
+            rename_partial_bodies: Some(census.rename_partial_bodies),
+            rename_unsupported_bodies: Some(census.rename_unsupported_bodies),
+        },
+        budgets: CodeCloneIndexBudgetsV1 {
+            minimum_body_tokens: u64::from(MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1),
+        },
+        resources: CodeCloneIndexResourcesV1 {
+            bytes_on_disk: Some(artifact.bytes_on_disk),
+            peak_scratch_memory_bytes,
+            changed_symbol_update_micros: update
+                .and_then(|update| update.changed_symbol_update_micros),
+            stale_invalidations: update.and_then(|update| update.stale_invalidations),
+        },
+    }
+}
+
+fn clone_index_omission_reasons(census: &CodeLexicalCloneIndexCensusV1) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if census.conservative_normalized_bodies != census.eligible_source_bodies {
+        reasons.push(
+            "conservative normalization postings do not cover every eligible body".to_owned(),
+        );
+    }
+    reasons
+}
+
+impl LatestCompleteCodeIndexV1 {
+    #[cfg(test)]
+    pub fn exact(
+        &self,
+    ) -> Result<
+        Arc<Vec<tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1>>,
+        tracedecay_code_index::chunks::ChunkingFailureV1,
+    > {
+        self.generation.admitted_chunks()
+    }
+
+    #[cfg(test)]
+    pub fn lexical(&self) -> &[Arc<tracedecay_domain::CodeSearchChunkV1>] {
+        self.generation.chunks().chunks()
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    /// Warm and return the exact, lexical, and clone query owners.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn production_query_owners(
+        &self,
+    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
+        let mut advances = 0_usize;
+        while !self.query_owners_are_ready() {
+            self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)?;
+            advances += 1;
+            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
+                return Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving owners are warming".to_owned(),
+                ));
+            }
+        }
+        self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())
+    }
+
+    pub(crate) fn finish_query_owner_warmup_for_request(
+        &self,
+        request_control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let mut advances = 0_usize;
+        while !self.query_owners_are_ready() {
+            self.advance_text_serving_for_request(
+                TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1,
+                request_control,
+            )?;
+            advances += 1;
+            if advances >= TEXT_ARTIFACT_MAXIMUM_OWNER_WARMUP_ADVANCES_V1 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn production_query_owners_with_budget(
+        &self,
+        _build_budget: &RetrievalBudget,
+    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
+        match self.query_owner_readiness() {
+            CodeTextQueryOwnerReadinessV1::Ready(owners) => Ok(owners),
+            CodeTextQueryOwnerReadinessV1::Pending => {
+                Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving owners are warming".to_owned(),
+                ))
+            }
+            CodeTextQueryOwnerReadinessV1::Invalid => {
+                Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving projection failed".to_owned(),
+                ))
+            }
+        }
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    pub(super) fn production_graph_serving(
+        &self,
+    ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
+        Self::graph_serving_in(
+            &self
+                .graph_activation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn graph_serving_in(
+        activation: &CodeGraphActivationStateV1,
+    ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
+        match activation {
+            CodeGraphActivationStateV1::Ready(serving) => Ok(Arc::clone(serving)),
+            CodeGraphActivationStateV1::Refused(reason) => {
+                Err(RetrievalPortError::Contract((*reason).to_owned()))
+            }
+            CodeGraphActivationStateV1::Unavailable(reason) => {
+                Err(RetrievalPortError::AuthorityUnavailable(reason.clone()))
+            }
+            CodeGraphActivationStateV1::Pending => Err(RetrievalPortError::Contract(
+                "code graph projection has not completed activation".to_owned(),
+            )),
+        }
+    }
+
+    /// The graph a search lane expands through, or the typed reason it
+    /// cannot, from one activation read. A pending activation on a
+    /// graph-enabled worktree is warming; on a graph-disabled one it never
+    /// activates.
+    pub(super) fn search_graph_serving(
+        &self,
+        graph_activation_enabled: bool,
+    ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalFailure> {
+        match &*self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Pending if graph_activation_enabled => {
+                Err(RetrievalFailure::GraphWarming)
+            }
+            CodeGraphActivationStateV1::Pending => Err(RetrievalFailure::AuthorityUnavailable {
+                detail: "graph_activation_disabled".to_owned(),
+            }),
+            activation => Self::graph_serving_in(activation).map_err(|error| {
+                RetrievalFailure::AuthorityUnavailable {
+                    detail: error.to_string(),
+                }
+            }),
+        }
+    }
+}
+
+impl LatestCompleteCodeIndexV1 {
+    /// Whether this generation's native graph has neither activated nor been
+    /// refused.
+    ///
+    /// The activation state is shared by every handle bound to one sealed
+    /// generation, so this answers for the handle already seated in the serving
+    /// slot as much as for this one: a generation that reached serving through
+    /// the exact route but has not attempted graph activation yet reports
+    /// pending here while it serves text under the same generation id.
+    pub fn graph_activation_is_pending(&self) -> bool {
+        matches!(
+            &*self
+                .text
+                .graph_activation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            CodeGraphActivationStateV1::Pending
+        )
+    }
+
+    /// Snapshot graph-serving activation with one lock acquisition so status
+    /// cannot combine states from opposite sides of an activation transition.
+    pub fn code_graph_serving_readiness(&self) -> CodeGraphServingReadinessV1 {
+        self.text.code_graph_serving_readiness()
+    }
+
+    pub(super) fn refuse_graph_activation(&self, reason: &'static str) {
+        self.text.refuse_graph_activation(reason);
+    }
+
+    pub(super) fn mark_graph_activation_unavailable(&self, reason: String) {
+        self.text.mark_graph_activation_unavailable(reason);
+    }
+
+    pub(super) fn graph_publication_budget_spent(&self) -> bool {
+        self.text.graph_publication_budget_spent()
+    }
+
+    pub fn generation_graph_refusal(&self) -> Option<&'static str> {
+        self.text.generation_graph_refusal()
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    /// The retained verified-snapshot projection store for graph reads,
+    /// present once persistent graph publication has completed.
+    ///
+    /// Occurrence-seeded adjacency reads are immediately available from the
+    /// verified snapshot. Name, file, and import lookups may still report the
+    /// typed catalog-warming state while their derived catalog builds in the
+    /// background. Unlike the retrieval lanes there is no in-memory fallback,
+    /// so an absent store is the typed not-activated state, never an empty
+    /// serve.
+    pub fn interactive_graph_store(
+        &self,
+    ) -> Result<Arc<CodeGraphProjectionStore>, RetrievalPortError> {
+        let store = self
+            .production_graph_serving()?
+            .store
+            .clone()
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "code graph projection has no persistent interactive store".to_owned(),
+                )
+            })?;
+        Ok(store)
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    /// The first catalog warm finished (success or failure). A parked worker
+    /// that skipped catalog/engine release while this owner was warming
+    /// retries that release without a cadence arrival.
+    pub(super) fn note_catalog_warm_settled(&self) {
+        self.catalog_warm_settled.notify_one();
+        let hook = self
+            .parked_graph_release
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(super) fn bind_parked_graph_release(&self, hook: ParkedGraphReleaseCallback) {
+        *self
+            .parked_graph_release
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Arm the one-shot waiter that retries park-release after the first
+    /// catalog warm. `true` when this owner has not armed it yet.
+    pub(super) fn arm_park_release_after_catalog_warm(&self) -> bool {
+        self.park_release_after_catalog_warm_armed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Shared settle signal for the first-warm park-release waiter.
+    pub(super) fn catalog_warm_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.catalog_warm_settled)
+    }
+
+    /// An activated graph reports what its reads would find: `ready` only
+    /// while the engine and catalog they need are resident.
+    pub fn code_graph_serving_readiness(&self) -> CodeGraphServingReadinessV1 {
+        let store = match &*self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Pending => return CodeGraphServingReadinessV1::Pending,
+            CodeGraphActivationStateV1::Refused(reason) => {
+                return CodeGraphServingReadinessV1::Refused {
+                    reason: (*reason).to_owned(),
+                };
+            }
+            CodeGraphActivationStateV1::Unavailable(reason) => {
+                return CodeGraphServingReadinessV1::Unavailable {
+                    reason: reason.clone(),
+                };
+            }
+            CodeGraphActivationStateV1::Ready(serving) => serving.store.clone(),
+        };
+        match store
+            .as_deref()
+            .map(CodeGraphProjectionStore::serving_warmth)
+        {
+            None | Some(Ok(CodeGraphServingWarmthV1::Warm)) => CodeGraphServingReadinessV1::Ready,
+            Some(Ok(CodeGraphServingWarmthV1::Warming(reason))) => {
+                CodeGraphServingReadinessV1::Warming { reason }
+            }
+            Some(Ok(CodeGraphServingWarmthV1::Failed(reason))) => {
+                CodeGraphServingReadinessV1::Unavailable { reason }
+            }
+            Some(Err(error)) => CodeGraphServingReadinessV1::Unavailable {
+                reason: error.to_string(),
+            },
+        }
+    }
+
+    /// Replacing the serving owner would otherwise refuse every graph read
+    /// while the successor's graph publishes and its catalog warms, though
+    /// the outgoing graph is still resident. A cold outgoing owner passes on
+    /// the warm graph it was itself holding.
+    pub(super) fn hold_outgoing_graph(&self, outgoing: Option<&Self>) {
+        let Some(outgoing) = outgoing.filter(|outgoing| !outgoing.same_text_owner(self)) else {
+            return;
+        };
+        let inherited = outgoing.take_predecessors();
+        // An activated outgoing still serves: a released engine or catalog
+        // reports `warming` but a read re-warms it, while a cold store passes
+        // the hold down to the graph it was itself holding.
+        let serves_warm_graph = outgoing.interactive_graph_store().is_ok()
+            && outgoing.code_graph_serving_readiness().is_activated();
+        let mut held = if serves_warm_graph {
+            vec![Arc::clone(&outgoing.shared)]
+        } else {
+            inherited
+        };
+        if held.first().is_some_and(|head| {
+            head.metadata.manifest().generation_id == self.metadata.manifest().generation_id
+        }) {
+            held.clear();
+        }
+        *self
+            .predecessors
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = held;
+    }
+
+    /// The held predecessor serves only until this generation's graph first
+    /// warms or settles, and only while graphs stay enabled; past that it is
+    /// dropped. A graph turned off by configuration leaves this generation
+    /// `Pending` for good, so readiness alone would hold it forever.
+    pub fn graph_predecessor(&self, graph_activation_enabled: bool) -> Option<Self> {
+        if graph_activation_enabled
+            && matches!(
+                self.code_graph_serving_readiness(),
+                CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
+            )
+        {
+            return self.held_graph_predecessor();
+        }
+        self.release_graph_predecessor();
+        None
+    }
+
+    /// The held predecessor whatever this generation's readiness, as the
+    /// resident-memory inventory must see it: it holds its graph until
+    /// released or dropped, not until a read next checks readiness.
+    pub(super) fn held_graph_predecessor(&self) -> Option<Self> {
+        let chain = self
+            .predecessors
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let (head, tail) = chain.split_first()?;
+        Some(Self {
+            shared: Arc::clone(head),
+            predecessors: Arc::new(RwLock::new(tail.to_vec())),
+        })
+    }
+
+    pub(super) fn release_graph_predecessor(&self) {
+        self.predecessors
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    fn take_predecessors(&self) -> Vec<Arc<CodeTextGenerationSharedV1>> {
+        std::mem::take(
+            &mut *self
+                .predecessors
+                .write()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+
+    /// Return a graph refused for resident memory to `Pending`, so the next
+    /// pass activates it again. Other refusals are configuration or terminal
+    /// verdicts and stay.
+    pub(super) fn retry_resident_memory_graph_refusal(&self) -> bool {
+        let mut state = self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let refused_for_memory = matches!(
+            *state,
+            CodeGraphActivationStateV1::Refused(reason)
+                if reason == super::graph_activation::RESIDENT_MEMORY_GRAPH_REFUSAL_REASON
+        );
+        if refused_for_memory {
+            *state = CodeGraphActivationStateV1::Pending;
+        }
+        refused_for_memory
+    }
+
+    /// This generation's native graph publication already ran out its
+    /// background budget; building it again replays the identical work.
+    pub(super) fn graph_publication_budget_spent(&self) -> bool {
+        matches!(
+            *self
+                .graph_activation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            CodeGraphActivationStateV1::Refused(reason)
+                if reason == super::graph_activation::GRAPH_PUBLICATION_DEADLINE_REASON
+        )
+    }
+
+    /// The refusal that holds this generation's graph for its lifetime: a
+    /// spent publication budget or a configuration refusal. A resident-memory
+    /// refusal is retried once memory is given back, so it is not one.
+    pub fn generation_graph_refusal(&self) -> Option<&'static str> {
+        match *self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Refused(reason)
+                if reason != super::graph_activation::RESIDENT_MEMORY_GRAPH_REFUSAL_REASON =>
+            {
+                Some(reason)
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn refuse_graph_activation(&self, reason: &'static str) {
+        {
+            let mut state = self
+                .graph_activation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+                return;
+            }
+            *state = CodeGraphActivationStateV1::Refused(reason);
+        }
+        // A refused graph never serves its predecessor, and a memory refusal
+        // needs the headroom the predecessor's resident graph holds.
+        self.release_graph_predecessor();
+    }
+
+    fn mark_graph_activation_unavailable(&self, reason: String) {
+        let mut state = self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+            *state = CodeGraphActivationStateV1::Unavailable(reason);
+        }
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    pub(super) fn source_freshness(
+        &self,
+    ) -> Result<tracedecay_domain::SourceFreshness, RetrievalPortError> {
+        production_code_index_freshness(
+            self.metadata.manifest().seal.sealed_at,
+            ComponentRevision::new("policy.daemon.v1")
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+        )
+    }
+
+    pub(super) fn text_projection_metadata(
+        &self,
+    ) -> Result<CodeLexicalProjectionMetadataV1, RetrievalPortError> {
+        let generation_id = self.metadata.manifest().generation_id.clone();
+        let freshness = self.source_freshness()?;
+        Ok(CodeLexicalProjectionMetadataV1 {
+            generation: generation_id,
+            repository_id: Some(self.metadata.snapshot().repository.clone()),
+            logical_paths: self
+                .metadata
+                .snapshot()
+                .files
+                .iter()
+                .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
+                .collect(),
+            freshness,
+            exact_retriever_revision: ComponentRevision::new(
+                tracedecay_query::retrieval::QUERY_EXACT_RETRIEVER_REVISION_V1,
+            )
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            lexical_retriever_revision: ComponentRevision::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
+            )
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            exact_score_domain: ScoreDomainId::new(
+                tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
+            )
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            clone_route: Some(CodeLexicalCloneRouteV1 {
+                project_id: self.metadata.manifest().project_id.clone(),
+                worktree_id: self.metadata.snapshot().worktree.clone(),
+                snapshot_digest: self.metadata.manifest().snapshot_digest.clone(),
+            }),
+        })
+    }
+
+    fn publish_text_progress_boundary(
+        &self,
+        build: &CodeTextArtifactBuildV1,
+        progress: &tracedecay_query::retrieval::lexical::CodeLexicalArtifactBuildProgressV1,
+        phase: CodeIndexBuildPhaseV1,
+        current_batch_pages: u64,
+        current_batch_payload_bytes: u64,
+        last_commit_latency_micros: Option<u64>,
+        observe_committed: bool,
+    ) -> Result<(), RetrievalPortError> {
+        let source_cursor = build.source.cursor();
+        let finalizing = build.finalizing;
+        match build.source_receipt.as_ref() {
+            // A finalizing build reads no more source pages; its counters
+            // are the staged pages' own totals.
+            _ if finalizing => {}
+            // A completed source mints one terminal read that emits no record
+            // and only normalizes the exhausted file position, so its live
+            // cursor sits one file rollover beyond the last durably accepted
+            // page whenever that page filled exactly at a file's last record.
+            // The completion receipt is the accepted-source authority from
+            // here on, the same one the builder seals the artifact against,
+            // and it binds the source state digest, the page count, every
+            // emitted counter, and both digest chains.
+            Some(receipt) => receipt
+                .verify_completion(progress.next_cursor.as_ref())
+                .map_err(map_sealed_page_source_error)?,
+            None => match progress.next_cursor.as_ref() {
+                Some(cursor) if cursor == source_cursor => {}
+                None if progress.next_page_ordinal == 0
+                    && progress.completed_chunks == 0
+                    && progress.completed_payload_bytes == 0
+                    && progress.completed_imports == 0
+                    && source_cursor.next_page_ordinal() == 0 => {}
+                _ => {
+                    return Err(RetrievalPortError::Contract(
+                        "text-artifact progress does not match the accepted sealed-source cursor"
+                            .to_owned(),
+                    ));
+                }
+            },
+        }
+        if !finalizing
+            && (progress.next_page_ordinal != source_cursor.next_page_ordinal()
+                || progress.completed_chunks != source_cursor.emitted_chunks()
+                || progress.completed_payload_bytes != source_cursor.emitted_payload_bytes()
+                || progress.completed_imports != source_cursor.emitted_imports())
+        {
+            return Err(RetrievalPortError::Contract(
+                "text-artifact progress counters do not match the sealed-source cursor".to_owned(),
+            ));
+        }
+        let total_lexical_units = build.source.total_lexical_units();
+        let (completed_files, completed_lexical_units) = if finalizing {
+            (build.source.total_files(), total_lexical_units)
+        } else {
+            (
+                build.source.completed_files(),
+                build
+                    .source
+                    .completed_lexical_units()
+                    .map_err(map_sealed_page_source_error)?,
+            )
+        };
+        let observed_at = Instant::now();
+        let observed_micros = now_micros().0;
+        let last_commit_latency_micros = last_commit_latency_micros.or_else(|| {
+            self.text_progress_slot
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .snapshot()
+                .filter(|snapshot| {
+                    snapshot.generation_id == self.metadata.manifest().generation_id.as_str()
+                })
+                .and_then(|snapshot| snapshot.last_commit_latency_micros)
+        });
+        let mut state = self
+            .text_progress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if observe_committed && progress.next_page_ordinal > 0 {
+            state.observe_committed(CodeIndexCommittedProgressSampleV1 {
+                observed_at,
+                completed_files,
+                completed_lexical_units,
+                clone_peak_scratch_memory_bytes: None,
+            });
+        }
+        let (files_per_second, lexical_units_per_second, estimated_remaining_seconds) =
+            state.rates_and_eta(total_lexical_units);
+        let estimated_remaining_seconds =
+            estimated_remaining_seconds.filter(|_| phase_has_file_rate_estimate(phase));
+        let snapshot = CodeIndexBuildProgressV1 {
+            generation_id: self.metadata.manifest().generation_id.as_str().to_owned(),
+            daemon_incarnation: self.text_progress_daemon_incarnation,
+            producer_incarnation: self.text_progress_producer_incarnation,
+            progress_epoch: 0,
+            sealed_source_digest: build.sealed_identity.digest.as_str().to_owned(),
+            phase,
+            committed_pages: progress.next_page_ordinal,
+            committed_chunks: progress.completed_chunks,
+            committed_imports: progress.completed_imports,
+            committed_payload_bytes: progress.completed_payload_bytes,
+            completed_files,
+            total_files: build.source.total_files(),
+            completed_lexical_units,
+            total_lexical_units,
+            current_batch_pages,
+            current_batch_payload_bytes,
+            elapsed_micros: state.elapsed_micros(),
+            last_commit_latency_micros,
+            files_per_second,
+            lexical_units_per_second,
+            estimated_remaining_seconds,
+            last_progress_micros: observed_micros,
+            blocked_reason: None,
+        };
+        drop(state);
+        self.publish_text_progress_snapshot(snapshot);
+        Ok(())
+    }
+
+    fn ready_text_progress_snapshot(
+        &self,
+        reader: &CodeLexicalArtifactReaderV1,
+        sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+        source: &VerifiedSealedLexicalPageSourceV1,
+    ) -> Result<CodeIndexBuildProgressV1, RetrievalPortError> {
+        let artifact = reader.verified_artifact();
+        let generation_id = &self.metadata.manifest().generation_id;
+        if &reader.metadata().generation != generation_id {
+            return Err(RetrievalPortError::GenerationMismatch);
+        }
+        let elapsed_micros = self
+            .text_progress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed_micros();
+        Ok(CodeIndexBuildProgressV1 {
+            generation_id: generation_id.as_str().to_owned(),
+            daemon_incarnation: self.text_progress_daemon_incarnation,
+            producer_incarnation: self.text_progress_producer_incarnation,
+            progress_epoch: 0,
+            sealed_source_digest: sealed_identity.digest.as_str().to_owned(),
+            phase: CodeIndexBuildPhaseV1::Ready,
+            committed_pages: artifact.page_count(),
+            committed_chunks: artifact.total_chunks(),
+            committed_imports: artifact.total_imports(),
+            committed_payload_bytes: artifact.total_payload_bytes(),
+            completed_files: source.total_files(),
+            total_files: source.total_files(),
+            completed_lexical_units: source.total_lexical_units(),
+            total_lexical_units: source.total_lexical_units(),
+            current_batch_pages: 0,
+            current_batch_payload_bytes: 0,
+            elapsed_micros,
+            last_commit_latency_micros: None,
+            files_per_second: None,
+            lexical_units_per_second: None,
+            estimated_remaining_seconds: None,
+            last_progress_micros: now_micros().0,
+            blocked_reason: None,
+        })
+    }
+
+    fn publish_text_progress_snapshot(&self, snapshot: CodeIndexBuildProgressV1) {
+        let generation_id = &self.metadata.manifest().generation_id;
+        {
+            let _span = tracing::trace_span!("query.artifact.progress.publish").entered();
+            {
+                let _ = self
+                    .text_progress_slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .publish(generation_id, self.text_progress_owner_epoch, snapshot);
+            }
+        };
+    }
+
+    pub(super) fn publish_text_progress_phase(
+        &self,
+        phase: CodeIndexBuildPhaseV1,
+        current_batch_pages: u64,
+        current_batch_payload_bytes: u64,
+    ) {
+        let generation_id = &self.metadata.manifest().generation_id;
+        let elapsed_micros = self
+            .text_progress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed_micros();
+        {
+            let _span = tracing::trace_span!("query.artifact.progress.publish").entered();
+            {
+                let mut slot = self
+                    .text_progress_slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(current) = slot.snapshot() else {
+                    return;
+                };
+                let mut snapshot = current.as_ref().clone();
+                snapshot.phase = phase;
+                if !phase_has_file_rate_estimate(phase) {
+                    snapshot.estimated_remaining_seconds = None;
+                }
+                snapshot.current_batch_pages = current_batch_pages;
+                snapshot.current_batch_payload_bytes = current_batch_payload_bytes;
+                snapshot.elapsed_micros = elapsed_micros;
+                // Entering a phase is not progress: every retry wake re-publishes
+                // its phase before it re-attempts the work that was refused, so
+                // clearing here erased the reason between two identical refusals
+                // and status reported `blocked_reason: null` throughout a stall.
+                // A committed boundary is the honest clear -- it builds a fresh
+                // snapshot with no blocked reason -- and only that runs after work
+                // actually landed.
+                let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
+            }
+        };
+    }
+
+    /// Publish the typed reason a text-artifact wake could not advance.
+    ///
+    /// One classifier for both halves of the build: an under-reported refusal
+    /// in either the batch loop or finalization leaves status showing a phase
+    /// that never changes and `blocked_reason: null`, which reads as slow
+    /// progress rather than a refusal. Anything not classified here is a
+    /// deterministic contract or corruption failure, which the caller
+    /// surfaces as a hard error rather than a stalled phase.
+    fn publish_text_artifact_block(&self, error: &CodeLexicalArtifactErrorV1) {
+        match error {
+            CodeLexicalArtifactErrorV1::Unreserved(_) => {
+                self.publish_text_progress_blocked(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+            }
+            CodeLexicalArtifactErrorV1::Io(_) | CodeLexicalArtifactErrorV1::Missing(_) => {
+                self.publish_text_progress_blocked(
+                    CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn publish_text_progress_blocked(&self, reason: CodeIndexBuildBlockedReasonV1) {
+        let generation_id = &self.metadata.manifest().generation_id;
+        {
+            let _span = tracing::trace_span!("query.artifact.progress.publish").entered();
+            {
+                let mut slot = self
+                    .text_progress_slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(current) = slot.snapshot() else {
+                    return;
+                };
+                let mut snapshot = current.as_ref().clone();
+                snapshot.blocked_reason = Some(reason);
+                let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
+            }
+        };
+    }
+
+    fn text_progress_phase(&self) -> Option<CodeIndexBuildPhaseV1> {
+        self.text_progress_slot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot()
+            .map(|snapshot| snapshot.phase)
+    }
+
+    /// Advance at most `maximum_work` bounded page/finalization operations on
+    /// this sealed generation's durable text artifact. The projection slot is
+    /// both the generation-owned partial-state authority and the singleflight
+    /// gate for concurrent scheduler wakes; authenticated opens run under a
+    /// claimed slot with the lock released.
+    pub(super) fn advance_text_serving(
+        &self,
+        maximum_work: usize,
+    ) -> Result<bool, RetrievalPortError> {
+        let control = self.text_execution_control();
+        self.advance_text_serving_with_control(maximum_work, &control)
+    }
+
+    fn advance_text_serving_for_request(
+        &self,
+        maximum_work: usize,
+        request_control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let generation = self.text_execution_control();
+        let control = GenerationTextRequestControlV1 {
+            generation: &generation,
+            request: request_control,
+        };
+        self.advance_text_serving_with_control(maximum_work, &control)
+    }
+
+    fn advance_text_serving_with_control(
+        &self,
+        maximum_work: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let _workers = self
+            .text_artifact_store
+            .worker_runtime
+            .enter(&self.text_artifact_store.resident_memory)
+            .map_err(|error| match error {
+                CodeIndexSchedulerErrorV1::WorkerPlan(
+                    tracedecay_code_index::parallelism::CodeIndexWorkerPlanInstallErrorV1::Invalid(
+                        tracedecay_code_index::parallelism::CodeIndexWorkerPlanErrorV1::NoMemorySafeWorker {
+                            ..
+                        },
+                    ),
+                ) => RetrievalPortError::ResidentMemoryRefused(error.to_string()),
+                other => RetrievalPortError::AuthorityUnavailable(other.to_string()),
+            })?;
+        let result = self.advance_text_serving_inner(maximum_work, control);
+        if result.as_ref().is_err_and(|error| {
+            matches!(
+                error,
+                RetrievalPortError::CapabilityManifestRejected
+                    | RetrievalPortError::GenerationMismatch
+                    | RetrievalPortError::IncompatibleProjection
+                    | RetrievalPortError::Contract(_)
+            )
+        }) {
+            self.mark_text_serving_failed();
+        }
+        result
+    }
+
+    fn advance_text_serving_inner(
+        &self,
+        maximum_work: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        if let Some(binding) = self.publication_binding.as_ref() {
+            let current = self
+                .text_artifact_store
+                .publication
+                .read_publication_pointer()
+                .map_err(text_artifact_unavailable)?;
+            if !binding.matches(current.as_ref()) {
+                self.text_control.retire();
+                return Err(RetrievalPortError::Cancelled);
+            }
+        }
+        self.advance_artifact_text_serving(maximum_work, control)
+    }
+
+    pub(super) fn text_execution_control(&self) -> GenerationTextControlV1 {
+        self.text_control.clone()
+    }
+
+    pub(super) fn take_preopened_source_or_open(
+        &self,
+        sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<VerifiedSealedLexicalPageSourceV1, RetrievalPortError> {
+        if let Some(source) = self
+            .preopened_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            return Ok(source);
+        }
+        self.text_artifact_store
+            .open_sealed_source(sealed_identity, control)
+    }
+
+    fn open_published_text_artifact(
+        &self,
+        generation_id: &CodeGenerationId,
+        descriptor: DurableCodeTextArtifactDescriptorV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<TextHeadOpenOutcomeV1>, RetrievalPortError> {
+        let store = &self.text_artifact_store;
+        let reader_reservation = store.reserve_resident_memory(
+            generation_id,
+            "code-text-artifact-reader",
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        )?;
+        let path = code_text_artifact_path(store.store_root(), &descriptor)
+            .map_err(text_artifact_unavailable)?;
+        let reader = self.open_content_addressed_reader(
+            path,
+            &descriptor,
+            &self.text_projection_metadata()?,
+            control,
+        );
+        match reader {
+            Ok(reader) => {
+                let sealed_identity = store.sealed_identity(generation_id)?;
+                let source = self.take_preopened_source_or_open(&sealed_identity, control)?;
+                let ready_progress =
+                    self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
+                self.install_artifact_owners(reader, reader_reservation)?;
+                self.publish_text_progress_snapshot(ready_progress);
+                drop(source);
+                Ok(Some(TextHeadOpenOutcomeV1::Served))
+            }
+            Err(CodeLexicalArtifactErrorV1::Missing(_)) => {
+                drop(reader_reservation);
+                store.withdraw_unavailable_descriptor(&descriptor, false, control)?;
+                Ok(None)
+            }
+            Err(CodeLexicalArtifactErrorV1::Corrupt(_)) => {
+                drop(reader_reservation);
+                store.withdraw_unavailable_descriptor(&descriptor, true, control)?;
+                Ok(None)
+            }
+            Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
+                drop(reader_reservation);
+                store.withdraw_unavailable_descriptor(&descriptor, false, control)?;
+                Ok(None)
+            }
+            Err(error) => Err(map_text_artifact_error(error)),
+        }
+    }
+
+    /// Serve an artifact a sibling worktree published for the same content
+    /// instead of building one. The content key is derived before any build
+    /// from the sealed source and the projection; a descriptor under that key
+    /// is adopted only after its file opens against its content address and
+    /// this generation's projection, and anything else falls through to the
+    /// build. The project lock is held shared from the lookup until the
+    /// descriptor is durable, so no retention collects the file meanwhile.
+    fn adopt_shared_text_artifact(
+        &self,
+        generation_id: &CodeGenerationId,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<TextHeadOpenOutcomeV1>, RetrievalPortError> {
+        let store = &self.text_artifact_store;
+        let sealed_identity = store.sealed_identity(generation_id)?;
+        let reader_reservation = store.reserve_resident_memory(
+            generation_id,
+            "code-text-artifact-reader",
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        )?;
+        let source = self.take_preopened_source_or_open(&sealed_identity, control)?;
+        let metadata = self.text_projection_metadata()?;
+        let content_key = text_artifact_content_key(&source, &metadata)?;
+        let adopted = (|| {
+            let lock = store.acquire_store_write_lock()?;
+            let _project_lock =
+                acquire_generation_segments_publication_lock(store.store_root(), &|| {
+                    checkpoint_text_artifact_control(control).is_err()
+                })
+                .map_err(text_artifact_unavailable)?;
+            let Some(shared) = find_shared_text_artifact(store.store_root(), &content_key)
+                .map_err(text_artifact_unavailable)?
+            else {
+                return Ok(None);
+            };
+            let path = code_text_artifact_path(store.store_root(), &shared)
+                .map_err(text_artifact_unavailable)?;
+            let reader = match self.open_content_addressed_reader(path, &shared, &metadata, control)
+            {
+                Ok(reader) => reader,
+                Err(error @ CodeLexicalArtifactErrorV1::Interrupted(_)) => {
+                    return Err(map_text_artifact_error(error));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "code_index_shared_text_artifact_refused",
+                        artifact = %shared.artifact_file,
+                        %error,
+                        "a shared text artifact under this content key failed verification; building one"
+                    );
+                    return Ok(None);
+                }
+            };
+            let descriptor = DurableCodeTextArtifactDescriptorV1 {
+                generation_id: generation_id.clone(),
+                artifact_file: shared.artifact_file,
+                artifact_digest: shared.artifact_digest,
+                artifact_size_bytes: shared.artifact_size_bytes,
+                content_key: content_key.clone(),
+            };
+            let pointer = store
+                .publication
+                .read_publication_pointer()
+                .map_err(text_artifact_unavailable)?
+                .ok_or_else(|| {
+                    RetrievalPortError::AuthorityUnavailable(
+                        "no durable publication pointer exists for text-artifact attachment"
+                            .to_owned(),
+                    )
+                })?;
+            attach_verified_text_artifact_under_lock(&lock, &pointer, &sealed_identity, descriptor)
+                .map_err(text_artifact_unavailable)?;
+            Ok(Some(reader))
+        })();
+        let Some(reader) = adopted? else {
+            // The build reads the same source; hand it over rather than
+            // reopen it.
+            *self
+                .preopened_source
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
+            return Ok(None);
+        };
+        let ready_progress =
+            self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
+        self.install_artifact_owners(reader, reader_reservation)?;
+        self.publish_text_progress_snapshot(ready_progress);
+        Ok(Some(TextHeadOpenOutcomeV1::Served))
+    }
+
+    /// Stage this generation's artifact over an ancestor's published one when
+    /// both sealed sources cut the same files and at most an eighth of them
+    /// changed: only the changed files are decoded and re-encoded. `None`
+    /// means a cold build: no retained ancestor with a published artifact, a
+    /// different file roster, a larger change, or an ancestor that cannot be
+    /// carried. The carry is only an optimisation over the child's own
+    /// source, so any failure but an interruption builds cold: a damaged,
+    /// missing, or foreign ancestor artifact must not fail the child's build
+    /// on every retry while that ancestor stays retained.
+    fn carry_parent_text_artifact(
+        &self,
+        staging_path: &Path,
+        source: &mut VerifiedSealedLexicalPageSourceV1,
+        metadata: &CodeLexicalProjectionMetadataV1,
+        builder_budget: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<CodeLexicalArtifactBuilderV1>, RetrievalPortError> {
+        match self.carry_nearest_ancestor_text_artifact(
+            staging_path,
+            source,
+            metadata,
+            builder_budget,
+            control,
+        ) {
+            Ok(carried) => Ok(carried),
+            Err(error @ (RetrievalPortError::Cancelled | RetrievalPortError::BudgetExceeded)) => {
+                Err(error)
+            }
+            Err(error) => {
+                tracing::info!(
+                    event = "code_text_artifact_parent_not_carried",
+                    generation = %self.metadata.manifest().generation_id,
+                    %error,
+                    "the parent text artifact cannot be carried; building cold"
+                );
+                self.text_artifact_store
+                    .discard_incompatible_staging(staging_path, control)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn carry_nearest_ancestor_text_artifact(
+        &self,
+        staging_path: &Path,
+        source: &mut VerifiedSealedLexicalPageSourceV1,
+        metadata: &CodeLexicalProjectionMetadataV1,
+        builder_budget: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<CodeLexicalArtifactBuilderV1>, RetrievalPortError> {
+        let store = &self.text_artifact_store;
+        // The nearest retained ancestor with a published artifact: an edit
+        // that superseded its parent before the parent's text sealed carries
+        // from the generation before.
+        let mut ancestor = self.metadata.manifest().parent_generation.clone();
+        let (descriptor, parent_source) = loop {
+            let Some(ancestor_id) = ancestor.take() else {
+                return Ok(None);
+            };
+            let identity = match store.sealed_identity(&ancestor_id) {
+                Ok(identity) => identity,
+                Err(RetrievalPortError::AuthorityUnavailable(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let ancestor_source = store.open_sealed_source(&identity, control)?;
+            if let Some(descriptor) = store.published_descriptor(&ancestor_id)? {
+                break (descriptor, ancestor_source);
+            }
+            ancestor.clone_from(&ancestor_source.metadata().manifest().parent_generation);
+        };
+        let replacements = source.file_replacements_since(&parent_source);
+        drop(parent_source);
+        let Some(replacements) = replacements else {
+            return Ok(None);
+        };
+        let replaced_files = replacements
+            .iter()
+            .map(|run| {
+                (run.files.end - run.files.start).max(run.parent_files.end - run.parent_files.start)
+            })
+            .fold(0u64, u64::saturating_add);
+        if replaced_files.saturating_mul(8) > source.total_files() {
+            return Ok(None);
+        }
+        let parent_path = code_text_artifact_path(store.store_root(), &descriptor)
+            .map_err(text_artifact_unavailable)?;
+        let source_state_digest = source.source_state_digest().clone();
+        let source_format_revision = source.format_revision();
+        let mut stage_file_pages = |file: u64, first_page: u64, first_chunk: u64| {
+            source
+                .stage_file_pages(file, first_page, first_chunk, control)
+                .map_err(carried_source_error)
+        };
+        // Opened under the store lock, so retention cannot collect the file
+        // first; the open handle keeps its bytes readable for the copy.
+        let parent_file = {
+            let _lock = store.acquire_store_write_lock()?;
+            std::fs::File::open(&parent_path).map_err(text_artifact_unavailable)?
+        };
+        CodeLexicalArtifactBuilderV1::carry_parent_with_memory_budget(
+            staging_path,
+            parent_file,
+            &descriptor.artifact_digest,
+            descriptor.artifact_size_bytes,
+            metadata.clone(),
+            builder_budget,
+            source_state_digest,
+            source_format_revision,
+            &replacements,
+            &mut stage_file_pages,
+            control,
+        )
+        .map(Some)
+        .map_err(map_text_artifact_error)
+    }
+
+    /// One claimed head-open pass, run with the slot lock released: reopen
+    /// the published durable head when one exists, otherwise authenticate the
+    /// sealed source and begin (or resume) the staging build. Fail-closed:
+    /// owners are installed only from a digest-verified reader, and a
+    /// withdrawn head falls through to the resumable build rather than an
+    /// empty success.
+    pub(super) fn open_published_head_or_begin_build(
+        &self,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<TextHeadOpenOutcomeV1, RetrievalPortError> {
+        let store = &self.text_artifact_store;
+        let preferred_build_memory_budget = code_lexical_artifact_build_memory_budget_for(
+            store.resident_memory.snapshot().limit_bytes,
+        );
+        let generation_id = self.metadata.manifest().generation_id.clone();
+        if let Some(descriptor) = store.published_descriptor(&generation_id)?
+            && let Some(outcome) =
+                self.open_published_text_artifact(&generation_id, descriptor, control)?
+        {
+            return Ok(outcome);
+        }
+        if let Some(outcome) = self.adopt_shared_text_artifact(&generation_id, control)? {
+            return Ok(outcome);
+        }
+        // The builder's advertised memory ceiling is reserved through the
+        // process resident-memory authority before the build allocates. The
+        // host-scaled figure is a preferred ceiling, not a minimum: under a
+        // large stale serving graph, admit any supported budget down to the
+        // builder's established 1.5 GiB floor so the replacement can finish
+        // and release that graph.
+        let (build_reservation, build_memory_budget) = store.reserve_resident_memory_up_to(
+            &generation_id,
+            "code-text-artifact-build",
+            preferred_build_memory_budget,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )?;
+        let sealed_identity = store.sealed_identity(&generation_id)?;
+        let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "durable sealed lexical source digest is not SHA-256".to_owned(),
+            )
+        })?;
+        let staging_root = code_text_artifact_staging_root(store.store_root());
+        ensure_private_text_artifacts_root(&staging_root)?;
+        let staging_path = staging_root.join(format!(".text-artifact-{sealed_hex}.staging"));
+        prepare_absent_text_artifact_staging(&staging_path).map_err(text_artifact_unavailable)?;
+        let mut source = self.take_preopened_source_or_open(&sealed_identity, control)?;
+        let builder_budget =
+            text_artifact_builder_budget(build_memory_budget, source.staging_window_bytes())?;
+        let metadata = self.text_projection_metadata()?;
+        let content_key = text_artifact_content_key(&source, &metadata)?;
+        let resumed = if staging_path.exists() {
+            match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &staging_path,
+                metadata.clone(),
+                builder_budget,
+                control,
+            ) {
+                Ok(builder) => Some(builder),
+                // Includes a carry interrupted before it committed, which
+                // leaves the parent's metadata behind.
+                Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
+                    store.discard_incompatible_staging(&staging_path, control)?;
+                    None
+                }
+                Err(error) => return Err(map_text_artifact_error(error)),
+            }
+        } else {
+            None
+        };
+        let mut builder = match resumed {
+            Some(builder) => builder,
+            None => match self.carry_parent_text_artifact(
+                &staging_path,
+                &mut source,
+                &metadata,
+                builder_budget,
+                control,
+            )? {
+                Some(carried) => carried,
+                None => CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                    &staging_path,
+                    metadata.clone(),
+                    builder_budget,
+                )
+                .map_err(map_text_artifact_error)?,
+            },
+        };
+        // A staging file sealed before its publication was interrupted keeps
+        // no source cursor; it is complete and is published as it stands.
+        if builder
+            .sealed_receipt(control)
+            .map_err(map_text_artifact_error)?
+            .is_some()
+        {
+            drop(builder);
+            drop(source);
+            return self.publish_sealed_text_artifact(
+                &staging_path,
+                &sealed_identity,
+                &content_key,
+                build_reservation,
+                control,
+            );
+        }
+        let mut progress = builder.progress(control).map_err(map_text_artifact_error)?;
+        if let Some(cursor) = progress.next_cursor.as_ref() {
+            match source.restore_cursor_classified(cursor, control) {
+                Ok(()) => {}
+                Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition) => {
+                    drop(builder);
+                    store.discard_incompatible_staging(&staging_path, control)?;
+                    builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                        &staging_path,
+                        metadata,
+                        builder_budget,
+                    )
+                    .map_err(map_text_artifact_error)?;
+                    progress = builder.progress(control).map_err(map_text_artifact_error)?;
+                }
+                Err(VerifiedSealedLexicalCursorRestoreErrorV1::Production(error)) => {
+                    return Err(map_sealed_page_source_error(error));
+                }
+            }
+        }
+        let finalizing = builder
+            .finalization_started(control)
+            .map_err(map_text_artifact_error)?;
+        let initialized = CodeTextArtifactBuildV1 {
+            builder,
+            source,
+            sealed_identity,
+            content_key,
+            source_receipt: None,
+            finalizing,
+            staging_path,
+            _build_reservation: build_reservation,
+        };
+        self.publish_text_progress_boundary(
+            &initialized,
+            &progress,
+            if finalizing {
+                CodeIndexBuildPhaseV1::Verification
+            } else {
+                CodeIndexBuildPhaseV1::SourceScan
+            },
+            0,
+            0,
+            None,
+            true,
+        )?;
+        Ok(TextHeadOpenOutcomeV1::Build(Box::new(initialized)))
+    }
+
+    /// Corpus-sized verified opens (the published-head reopen and the
+    /// publication tail's reopen) run under a `HeadOpening` claim with the
+    /// slot lock released, so a concurrent wake parks with typed cancellation
+    /// instead of blocking on the mutex for the whole open.
+    #[tracing::instrument(
+        name = "query.artifact.batch.scheduler_wake",
+        level = "trace",
+        skip_all
+    )]
+    pub(super) fn advance_artifact_text_serving(
+        &self,
+        maximum_work: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, RetrievalPortError> {
+        let store = &self.text_artifact_store;
+        let mut parked = false;
+        let mut slot = loop {
+            // A first arrival lets the batch/open work itself observe the
+            // control (its cancellation checkpoints are the historical
+            // authority); a parked arrival owns no work, so it must
+            // checkpoint here for its cancellation to stay typed and prompt.
+            if parked {
+                checkpoint_text_artifact_control(control)?;
+            }
+            let guard = self.text_projection_build.lock_slot();
+            match &*guard {
+                CodeTextProjectionSlotV1::Idle | CodeTextProjectionSlotV1::Building(_) => {
+                    break guard;
+                }
+                CodeTextProjectionSlotV1::HeadOpening => {
+                    // Another wake owns the authenticated open. Park until the
+                    // claim resolves; the bounded interval keeps this wake's
+                    // own cancellation typed and prompt throughout.
+                    let (waited, _timed_out) = {
+                        let _span =
+                            tracing::trace_span!("query.artifact.head_open.singleflight_wait")
+                                .entered();
+                        self.text_projection_build
+                            .ready
+                            .wait_timeout(guard, TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1)
+                            .unwrap_or_else(PoisonError::into_inner)
+                    };
+                    drop(waited);
+                    parked = true;
+                }
+            }
+        };
+        if matches!(&*slot, CodeTextProjectionSlotV1::Idle) {
+            if self.query_owners_are_ready() {
+                return Ok(true);
+            }
+            self.text_projection_build
+                .replace_slot(&mut slot, CodeTextProjectionSlotV1::HeadOpening);
+            drop(slot);
+            let mut claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
+            let outcome = {
+                let _span = tracing::trace_span!("query.artifact.head_open").entered();
+                self.open_published_head_or_begin_build(control)
+            }?;
+            match outcome {
+                TextHeadOpenOutcomeV1::Served => return Ok(true),
+                TextHeadOpenOutcomeV1::Build(initialized) => {
+                    slot = claim.install(initialized);
+                }
+            }
+        }
+        let CodeTextProjectionSlotV1::Building(artifact_build) = &mut *slot else {
+            return Err(RetrievalPortError::Contract(
+                "code-index text artifact build state is missing".to_owned(),
+            ));
+        };
+        let build_memory_budget = code_lexical_artifact_build_memory_budget_for(
+            store.resident_memory.snapshot().limit_bytes,
+        );
+        let (source_batch_pages, source_batch_bytes, source_work_limit) =
+            text_artifact_source_batch_limits(build_memory_budget);
+        let mut remaining = maximum_work.min(source_work_limit);
+        while remaining > 0 && !artifact_build.finalizing && artifact_build.source_receipt.is_none()
+        {
+            let maximum_batch_pages = remaining.clamp(1, source_batch_pages);
+            let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(
+                maximum_batch_pages,
+                source_batch_bytes,
+            )
+            .map_err(map_sealed_page_source_error)?;
+
+            self.publish_text_progress_phase(CodeIndexBuildPhaseV1::SourceScan, 0, 0);
+            let mut durable_progress = None;
+            let mut commit_latency_micros = None;
+            let mut clone_scratch_bytes = 0_usize;
+            let admitted = {
+                let (source, builder) = (&mut artifact_build.source, &mut artifact_build.builder);
+                source.next_page_batch_if(control, bounds, |pages| {
+                    let offered_batch_pages = u64::try_from(pages.len()).map_err(|_| {
+                        CodeLexicalArtifactErrorV1::Contract(
+                            "text-artifact batch page count exceeds u64".to_owned(),
+                        )
+                    })?;
+                    let offered_payload_bytes = pages.iter().try_fold(0_u64, |total, page| {
+                        total.checked_add(page.payload_bytes()).ok_or_else(|| {
+                            CodeLexicalArtifactErrorV1::Contract(
+                                "text-artifact batch payload bytes overflowed".to_owned(),
+                            )
+                        })
+                    })?;
+                    self.publish_text_progress_phase(
+                        CodeIndexBuildPhaseV1::RelationalPreparation,
+                        offered_batch_pages,
+                        offered_payload_bytes,
+                    );
+                    let (progress, accepted) = {
+                        let _span = tracing::trace_span!("query.artifact.batch.builder").entered();
+                        {
+                            let prepared =
+                                builder.prepare_admissible_page_prefix(pages, control)?;
+                            let accepted = prepared.accepted_prefix();
+                            let accepted_pages = &pages[..accepted.get()];
+
+                            let batch_pages =
+                                u64::try_from(accepted_pages.len()).map_err(|_| {
+                                    CodeLexicalArtifactErrorV1::Contract(
+                                        "text-artifact accepted page count exceeds u64".to_owned(),
+                                    )
+                                })?;
+                            let batch_payload_bytes =
+                                accepted_pages.iter().try_fold(0_u64, |total, page| {
+                                    total.checked_add(page.payload_bytes()).ok_or_else(|| {
+                                        CodeLexicalArtifactErrorV1::Contract(
+                                            "text-artifact accepted payload bytes overflowed"
+                                                .to_owned(),
+                                        )
+                                    })
+                                })?;
+                            self.publish_text_progress_phase(
+                                CodeIndexBuildPhaseV1::BulkCommit,
+                                batch_pages,
+                                batch_payload_bytes,
+                            );
+                            clone_scratch_bytes = prepared
+                                .prepared_pages()
+                                .iter()
+                                .map(PreparedCodeLexicalArtifactPageV1::clone_body_peak_bytes)
+                                .max()
+                                .unwrap_or(0);
+                            let commit_started = Instant::now();
+                            let progress = builder
+                                .append_prepared_pages(prepared.prepared_pages(), control)?;
+                            commit_latency_micros = Some(
+                                u64::try_from(commit_started.elapsed().as_micros())
+                                    .unwrap_or(u64::MAX),
+                            );
+                            Ok::<_, CodeLexicalArtifactErrorV1>((progress, accepted))
+                        }
+                    }?;
+                    durable_progress = Some(progress);
+                    Ok(accepted)
+                })
+            };
+            let admitted = match admitted {
+                Ok(Ok(admitted)) => admitted,
+                Ok(Err(error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. })) => {
+                    checkpoint_text_artifact_control(control)?;
+                    if let Some((previous_page_records, tightened_page_records)) =
+                        artifact_build.source.tighten_page_record_bound()
+                    {
+                        tracing::debug!(
+                            previous_page_records,
+                            tightened_page_records,
+                            error = %error,
+                            "subdividing refused lexical page at the unchanged source cursor"
+                        );
+                        return Ok(false);
+                    }
+                    return Err(map_text_artifact_error(error));
+                }
+                Ok(Err(error)) => {
+                    self.publish_text_artifact_block(&error);
+                    return Err(map_text_artifact_error(error));
+                }
+                Err(error) => return Err(map_sealed_page_source_error(error)),
+            };
+            match admitted {
+                VerifiedSealedLexicalPageBatchReadV1::Pages(pages) => {
+                    let page_count = pages.len();
+                    let progress = durable_progress.as_ref().ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "accepted text-artifact batch has no durable builder progress"
+                                .to_owned(),
+                        )
+                    })?;
+                    let batch_payload_bytes = pages.iter().try_fold(0_u64, |total, page| {
+                        total.checked_add(page.payload_bytes()).ok_or_else(|| {
+                            RetrievalPortError::Contract(
+                                "accepted text-artifact batch payload bytes overflowed".to_owned(),
+                            )
+                        })
+                    })?;
+                    {
+                        let _span =
+                            tracing::trace_span!("query.artifact.batch.progress_publish").entered();
+                        self.publish_text_progress_boundary(
+                            artifact_build,
+                            progress,
+                            CodeIndexBuildPhaseV1::BulkCommit,
+                            u64::try_from(page_count).unwrap_or(u64::MAX),
+                            batch_payload_bytes,
+                            commit_latency_micros,
+                            true,
+                        )
+                    }?;
+                    self.text_progress_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .observe_clone_scratch(
+                            u64::try_from(clone_scratch_bytes).unwrap_or(u64::MAX),
+                        );
+
+                    remaining = remaining.checked_sub(page_count).ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "accepted text-artifact batch exceeded its work budget".to_owned(),
+                        )
+                    })?;
+                }
+                VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => {
+                    artifact_build.source_receipt = Some(receipt);
+                    self.publish_text_progress_phase(CodeIndexBuildPhaseV1::IndexBuild, 0, 0);
+                }
+            }
+        }
+        if !artifact_build.finalizing && artifact_build.source_receipt.is_none() {
+            return Ok(false);
+        }
+        if remaining == 0 {
+            return Ok(false);
+        }
+        let finalization_rows = remaining
+            .checked_mul(TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1)
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "code text artifact finalization work budget overflowed".to_owned(),
+                )
+            })?;
+        let advance = |build: &mut CodeTextArtifactBuildV1| match build.source_receipt.as_ref() {
+            Some(source_receipt) => {
+                build
+                    .builder
+                    .advance_finalization(source_receipt, finalization_rows, control)
+            }
+            None => build
+                .builder
+                .advance_started_finalization(finalization_rows, control),
+        };
+        let finalized = if matches!(
+            self.text_progress_phase(),
+            Some(CodeIndexBuildPhaseV1::Verification)
+        ) {
+            let _span =
+                tracing::trace_span!("query.artifact.finalization.digest_verify_wake").entered();
+            advance(artifact_build)
+        } else {
+            let _span = tracing::trace_span!("query.artifact.index.build").entered();
+            advance(artifact_build)
+        };
+        // A finalization wake is what status reports as `index_build` and
+        // `verification`. Returning its refusal bare left those phases
+        // indistinguishable from progress: a build stalled on resident-memory
+        // admission published `phase=verification` with `blocked_reason=null`
+        // forever, which is exactly how the PR-dogfood readiness timeout
+        // presented. Classify the refusal the way the batch path already does
+        // so the phase says why it cannot advance.
+        let finalized = match finalized {
+            Ok(step) => step,
+            Err(error) => {
+                self.publish_text_artifact_block(&error);
+                return Err(map_text_artifact_error(error));
+            }
+        };
+        // The first finalization step verified the staged pages against the
+        // source receipt; from here the builder's staged totals are the
+        // progress authority.
+        artifact_build.finalizing = true;
+        let finalization_phase = match finalized {
+            CodeLexicalArtifactFinalizationStepV1::Pending { phase, .. } => {
+                let phase = match phase {
+                    CodeLexicalArtifactFinalizationPhaseV1::IndexBuild => {
+                        CodeIndexBuildPhaseV1::IndexBuild
+                    }
+                    CodeLexicalArtifactFinalizationPhaseV1::Verification => {
+                        CodeIndexBuildPhaseV1::Verification
+                    }
+                };
+                let progress = artifact_build
+                    .builder
+                    .progress(control)
+                    .map_err(map_text_artifact_error)?;
+                self.publish_text_progress_boundary(
+                    artifact_build,
+                    &progress,
+                    phase,
+                    0,
+                    0,
+                    None,
+                    false,
+                )?;
+                return Ok(false);
+            }
+            CodeLexicalArtifactFinalizationStepV1::Ready(_) => CodeIndexBuildPhaseV1::Verification,
+        };
+        // The sealed file keeps no source cursor, so the phase is published
+        // over the last boundary's counters.
+        self.publish_text_progress_phase(finalization_phase, 0, 0);
+        // The publication tail content-addresses the finalized staging file
+        // and reopens it verified, corpus-sized digest work, so it runs
+        // under a fresh `HeadOpening` claim with the slot lock released, the
+        // same discipline as the durable-head reopen. On failure the claim
+        // restores `Idle` and the durable staging file resumes on a later
+        // wake.
+        let CodeTextProjectionSlotV1::Building(finished) = self
+            .text_projection_build
+            .replace_slot(&mut slot, CodeTextProjectionSlotV1::HeadOpening)
+        else {
+            self.text_projection_build
+                .replace_slot(&mut slot, CodeTextProjectionSlotV1::Idle);
+            return Err(RetrievalPortError::Contract(
+                "code-index text artifact build state vanished during publication".to_owned(),
+            ));
+        };
+        drop(slot);
+        let _publish_claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
+        let CodeTextArtifactBuildV1 {
+            builder,
+            source,
+            sealed_identity,
+            content_key,
+            source_receipt: _,
+            finalizing: _,
+            staging_path,
+            _build_reservation: build_reservation,
+        } = *finished;
+        // Close the builder's SQLite connection before content-addressing the
+        // finalized staging file.
+        drop(builder);
+        drop(source);
+        self.publish_sealed_text_artifact(
+            &staging_path,
+            &sealed_identity,
+            &content_key,
+            build_reservation,
+            control,
+        )?;
+        Ok(true)
+    }
+
+    /// Publish one sealed staging file, open it verified, and install its
+    /// owners.
+    fn publish_sealed_text_artifact(
+        &self,
+        staging_path: &Path,
+        sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+        content_key: &ManifestDigest,
+        build_reservation: ResidentMemoryReservationV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<TextHeadOpenOutcomeV1, RetrievalPortError> {
+        let store = &self.text_artifact_store;
+        let descriptor = store.publish(
+            staging_path,
+            &self.metadata.manifest().generation_id,
+            sealed_identity,
+            content_key,
+            control,
+        )?;
+        // The reader is a smaller charge of the bytes this build already
+        // holds. Dropping the build reservation and reserving the reader
+        // again is a gap: an overlapping graph replay can sit on the process
+        // RSS watermark, and the new admission is then refused forever.
+        let reader_reservation = reader_charge_from_held_reservation(build_reservation)?;
+        let final_path = code_text_artifact_path(store.store_root(), &descriptor)
+            .map_err(text_artifact_unavailable)?;
+        let reader = self
+            .open_content_addressed_reader(
+                final_path,
+                &descriptor,
+                &self.text_projection_metadata()?,
+                control,
+            )
+            .map_err(map_text_artifact_error)?;
+        // Match the cold-open path: install owners first, then publish Ready.
+        // Publishing Ready before a failed install (admission ceiling / shrink)
+        // would leave dashboard/MCP progress claiming a ready generation that
+        // cannot serve queries.
+        self.install_artifact_owners(reader, reader_reservation)?;
+        self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
+        Ok(TextHeadOpenOutcomeV1::Served)
+    }
+
+    fn install_artifact_owners(
+        &self,
+        reader: CodeLexicalArtifactReaderV1,
+        mut reader_reservation: ResidentMemoryReservationV1,
+    ) -> Result<(), RetrievalPortError> {
+        if reader.retained_owned_bytes() > CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 {
+            return Err(RetrievalPortError::Contract(
+                "text-artifact reader exceeded its admitted resident-memory ceiling".to_owned(),
+            ));
+        }
+        reader_reservation
+            .shrink_to(
+                u64::try_from(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1).map_err(
+                    |error| {
+                        RetrievalPortError::Contract(format!(
+                            "text-artifact reader ceiling exceeds u64: {error}"
+                        ))
+                    },
+                )?,
+            )
+            .map_err(|error| {
+                RetrievalPortError::Contract(format!(
+                    "text-artifact reader reservation could not release its admission baseline: \
+                     {error}"
+                ))
+            })?;
+        let reader = reader.with_resident_memory_reservation(reader_reservation);
+        let authority = exact_serving_authority()?;
+        let exact = ExactLane::new(authority.clone(), reader.exact_adapter(authority));
+        let hydration = reader.clone();
+        let lexical = LexicalLane::new(reader);
+        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1::artifact(
+            exact, lexical, hydration,
+        ));
+        *self
+            .query_owners
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(owners);
+        Ok(())
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    pub(super) fn install_graph_serving(
+        &self,
+        graph_reader: CodeGraphEvidenceReader,
+        store: Option<Arc<CodeGraphProjectionStore>>,
+        graph_authority: CodeGraphServingAuthorityV1,
+    ) -> Result<(), RetrievalPortError> {
+        if graph_reader.generation() != &self.metadata.manifest().generation_id {
+            return Err(RetrievalPortError::Contract(
+                "code graph reader generation does not match sealed generation".to_owned(),
+            ));
+        }
+        let serving = Arc::new(ProductionCodeGraphServingV1 {
+            graph: GraphLane::new(graph_reader),
+            store,
+            _graph_authority: graph_authority,
+        });
+        *self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            CodeGraphActivationStateV1::Ready(serving);
+        Ok(())
+    }
+}
+
+/// The one central exact-admission authority every serving owner installs.
+fn exact_serving_authority() -> Result<CentralExactAdmissionAuthorityV1, RetrievalPortError> {
+    Ok(CentralExactAdmissionAuthorityV1::new(
+        ExactAdmissionRuleRevision::new(tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1)
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+    ))
+}
+
+/// Streaming SHA-256 of one file's bytes, as 64 lowercase hex characters.
+/// Cancellation is checked before opening and after every bounded read, so a
+/// shutdown or superseding generation cannot strand publication in a
+/// corpus-sized uninterruptible hash.
+pub(super) fn sha256_private_file_and_size(
+    path: &Path,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<([u8; 32], u64), RetrievalPortError> {
+    checkpoint_text_artifact_control(control)?;
+    let named_metadata = path.symlink_metadata().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RetrievalPortError::AuthorityUnavailable(
+                "code text artifact file is missing".to_owned(),
+            )
+        } else {
+            text_artifact_unavailable(error)
+        }
+    })?;
+    if !named_metadata.file_type().is_file() {
+        return Err(RetrievalPortError::Contract(
+            "code text artifact path is not a regular file".to_owned(),
+        ));
+    }
+    let mut file = open_private_file(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RetrievalPortError::AuthorityUnavailable(
+                "code text artifact file disappeared before open".to_owned(),
+            )
+        } else {
+            RetrievalPortError::Contract(format!(
+                "code text artifact file is not owner-private: {error}"
+            ))
+        }
+    })?;
+    let file_metadata = file.metadata().map_err(text_artifact_unavailable)?;
+    if !file_metadata.is_file() || file_metadata.len() != named_metadata.len() {
+        return Err(RetrievalPortError::Contract(
+            "code text artifact file identity changed before hashing".to_owned(),
+        ));
+    }
+    let identity = Handle::from_file(file.try_clone().map_err(text_artifact_unavailable)?)
+        .map_err(text_artifact_unavailable)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(text_artifact_unavailable)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        checkpoint_text_artifact_control(control)?;
+    }
+    let current_metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
+    let current_identity = Handle::from_path(path).map_err(text_artifact_unavailable)?;
+    if !current_metadata.file_type().is_file()
+        || current_metadata.len() != file_metadata.len()
+        || current_identity != identity
+    {
+        return Err(RetrievalPortError::Contract(
+            "code text artifact named file changed while hashing".to_owned(),
+        ));
+    }
+    Ok((hasher.finalize().into(), file_metadata.len()))
+}
+
+/// The content key the text artifact of `source` under `metadata` is
+/// published with.
+fn text_artifact_content_key(
+    source: &VerifiedSealedLexicalPageSourceV1,
+    metadata: &CodeLexicalProjectionMetadataV1,
+) -> Result<ManifestDigest, RetrievalPortError> {
+    code_lexical_artifact_content_key(
+        &source.content_key().map_err(map_sealed_page_source_error)?,
+        metadata,
+    )
+    .map_err(map_text_artifact_error)
+}
+
+fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortError> {
+    match tracedecay_private_fs::create_private_directory(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            validate_private_directory(path).map_err(|validation_error| {
+                RetrievalPortError::Contract(format!(
+                    "code text artifacts root '{}' is not owner-private{}: {validation_error}; \
+                     restore owner-only access (chmod 700 and chown to the daemon user) or \
+                     re-enroll the store",
+                    path.display(),
+                    observed_unix_mode(path)
+                        .map_or_default(|mode| format!(" (mode {mode:o}, need 700)")),
+                ))
+            })
+        }
+        Err(error) => Err(text_artifact_unavailable(error)),
+    }
+}
+
+/// Unix permission bits currently on `path`, for typed contract messages.
+#[cfg(unix)]
+fn observed_unix_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    path.symlink_metadata()
+        .ok()
+        .map(|metadata| metadata.permissions().mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn observed_unix_mode(_path: &Path) -> Option<u32> {
+    None
+}
+
+fn checkpoint_text_artifact_control(
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), RetrievalPortError> {
+    if control.is_cancelled() {
+        Err(RetrievalPortError::Cancelled)
+    } else if control.is_deadline_exceeded() {
+        Err(RetrievalPortError::BudgetExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+/// Drop a leftover `SQLite` journal before a fresh staging file is created.
+///
+/// DELETE-mode recovery applies `path-journal` into whatever file is later
+/// opened at `path`. A crash that unlinked the database and left the journal
+/// would otherwise roll that journal into the next staging database.
+fn prepare_absent_text_artifact_staging(staging_path: &Path) -> std::io::Result<()> {
+    match staging_path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "text-artifact staging path is not a regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            clear_text_artifact_staging_sidecars(staging_path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Retire a staging database and its hot journal together.
+///
+/// Sidecars go first. A crash after that leaves a database with no journal,
+/// which the next discard can unlink. The reverse order leaves a journal that
+/// the next create applies into a new file.
+fn retire_text_artifact_staging_family(staging_path: &Path) -> std::io::Result<()> {
+    clear_text_artifact_staging_sidecars(staging_path)?;
+    match staging_path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() => std::fs::remove_file(staging_path),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "text-artifact staging path is not a regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn clear_text_artifact_staging_sidecars(staging_path: &Path) -> std::io::Result<()> {
+    let Some(name) = staging_path.file_name() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "text-artifact staging path has no file name",
+        ));
+    };
+    // The compacted rewrite's own rollback journal goes before the rewrite,
+    // for the same reason the staging journal goes before the staging file.
+    for suffix in [
+        "-journal",
+        "-wal",
+        "-shm",
+        "-compacting-journal",
+        "-compacting",
+        "-carrying-journal",
+        "-carrying",
+    ] {
+        let mut sidecar_name = name.to_os_string();
+        sidecar_name.push(suffix);
+        let sidecar = staging_path.with_file_name(sidecar_name);
+        match sidecar.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => std::fs::remove_file(sidecar)?,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "text-artifact staging sidecar is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Divide the single process reservation between the source's concurrently
+/// retained decode window and the `SQLite` builder. Each component fitting the
+/// ceiling independently is insufficient because both remain live while a
+/// page is admitted.
+pub(super) fn text_artifact_builder_budget(
+    build_memory_budget: usize,
+    source_window_bytes: usize,
+) -> Result<usize, RetrievalPortError> {
+    build_memory_budget
+        .checked_sub(source_window_bytes)
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact source window needs {source_window_bytes} bytes, exhausting its \
+                 {build_memory_budget}-byte build reservation"
+            ))
+        })
+}
+
+#[cfg(test)]
+mod staging_sidecar_tests {
+    use super::{
+        clear_text_artifact_staging_sidecars, prepare_absent_text_artifact_staging,
+        retire_text_artifact_staging_family,
+    };
+
+    #[test]
+    fn absent_staging_database_does_not_keep_a_hot_journal_for_the_next_create() {
+        let root = tempfile::tempdir().expect("staging root");
+        let staging = root.path().join(".text-artifact-ab.staging");
+        let journal = root.path().join(".text-artifact-ab.staging-journal");
+        std::fs::write(&journal, b"rollback").expect("plant hot journal");
+
+        prepare_absent_text_artifact_staging(&staging).expect("clear orphan journal");
+        assert!(!journal.exists());
+
+        std::fs::write(&staging, b"staged").expect("fresh staging database");
+        std::fs::write(&journal, b"rollback").expect("replant journal");
+        let compacting = root.path().join(".text-artifact-ab.staging-compacting");
+        std::fs::write(&compacting, b"compacted").expect("plant compacted rewrite");
+        let compacting_journal = root
+            .path()
+            .join(".text-artifact-ab.staging-compacting-journal");
+        std::fs::write(&compacting_journal, b"rewrite rollback")
+            .expect("plant compacted rewrite journal");
+        retire_text_artifact_staging_family(&staging).expect("retire family");
+        assert!(!staging.exists());
+        assert!(!journal.exists());
+        assert!(!compacting.exists());
+        assert!(!compacting_journal.exists());
+
+        let carrying = root.path().join(".text-artifact-ab.staging-carrying");
+        std::fs::write(&carrying, b"obsolete parent carry").expect("plant carry");
+        prepare_absent_text_artifact_staging(&staging).expect("clear obsolete carry");
+        assert!(!carrying.exists());
+
+        std::fs::write(root.path().join(".text-artifact-ab.staging-wal"), b"wal")
+            .expect("plant wal");
+        clear_text_artifact_staging_sidecars(&staging).expect("clear wal");
+        assert!(!root.path().join(".text-artifact-ab.staging-wal").exists());
+    }
+}

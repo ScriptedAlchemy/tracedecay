@@ -9,8 +9,8 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
-use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
-use tracedecay_application::{
+use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
+use tracedecay_contracts::{
     APPLICATION_REQUEST_ID_HEADER, CancellationContext, CancellationObservation, CancellationStage,
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationBudgetUsage,
     OperationReceipt, OperationTermination, RemoteListenerReadV1, RequestContext, RequestId,
@@ -23,10 +23,10 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::http_application::{DaemonHttpApplicationRegistry, DaemonHttpApplicationService};
-use tracedecay_daemon_service::DaemonInvocationService;
-use tracedecay_usecases::operation_stream::{
+use tracedecay_application::operation_stream::{
     OperationEventAuthority, OperationId, OperationKind, OperationStreamConfig,
 };
+use tracedecay_daemon_service::DaemonInvocationService;
 
 const AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const PROJECT_ID: &str = "project.http-lifecycle";
@@ -166,14 +166,12 @@ async fn request_path_with_headers_at(
         request.push_str("\r\n");
     }
     request.push_str("\r\n");
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .expect("write HTTP request");
-    stream
-        .write_all(body)
-        .await
-        .expect("write HTTP request body");
+    // Send head and body in one write. A handler that answers before reading
+    // the body closes with the body segment still unread, and macOS then
+    // resets the connection and discards the response the test reads.
+    let mut bytes = request.into_bytes();
+    bytes.extend_from_slice(body);
+    stream.write_all(&bytes).await.expect("write HTTP request");
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
@@ -263,7 +261,7 @@ async fn service_with_canonical_application(
     // The canonical handshake reports the client's build version from the
     // product runtime; this composition never passes through the binary's
     // registration.
-    crate::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
     let project = tempfile::tempdir().expect("canonical application project");
     let broker = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -277,6 +275,7 @@ async fn service_with_canonical_application(
         }
     });
     let handshake = crate::daemon::handshake_for_current_client(
+        &tracedecay_runtime_core::config::ProfileRoot::new(project.path().join("profile")),
         Some(project.path().to_path_buf()),
         None,
         false,
@@ -284,12 +283,18 @@ async fn service_with_canonical_application(
     )
     .expect("canonical application handshake");
     let client = tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_protocol::DaemonConnection::new(broker_endpoint, None),
+        tracedecay_daemon_protocol::DaemonConnection::new(
+            broker_endpoint,
+            "http-application-test-token".to_owned(),
+        ),
         handshake,
     );
-    let canonical =
-        crate::application_surface::http_application_router(client, authority, project_id.clone())
-            .expect("canonical HTTP application router");
+    let canonical = tracedecay_daemon_service::application_surface::http_application_router(
+        client,
+        authority,
+        project_id.clone(),
+    )
+    .expect("canonical HTTP application router");
     let registry = DaemonHttpApplicationRegistry::default();
     registry
         .mount(project_id.as_str(), canonical)
@@ -985,9 +990,11 @@ async fn daemon_http_saturated_cold_resolution_preserves_curate_request_identity
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity() {
-    let registry = DaemonHttpApplicationRegistry::default();
+    const COLD_RESOLUTION_DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
+    let registry = DaemonHttpApplicationRegistry::default()
+        .with_cold_resolution_deadline(COLD_RESOLUTION_DEADLINE);
     let resolver_calls = Arc::new(AtomicUsize::new(0));
     let observed_resolver_calls = Arc::clone(&resolver_calls);
     registry
@@ -1006,7 +1013,9 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
     let authorization = format!("Bearer {AUTH_TOKEN}");
     let origin = service.origin().to_owned();
     let supplied = "request.sdk.curate.cold-timed-out";
-    let request = tokio::spawn(async move {
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
         request_path_with_headers_at(
             endpoint,
             "POST",
@@ -1016,15 +1025,17 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
             Some("application/json"),
             &[(APPLICATION_REQUEST_ID_HEADER, supplied)],
             b"{}",
-        )
-        .await
-    });
-    while resolver_calls.load(Ordering::Relaxed) < 1 {
-        tokio::task::yield_now().await;
-    }
-    tokio::time::advance(std::time::Duration::from_secs(6)).await;
-    let response = request.await.expect("timed-out cold-resolution request");
+        ),
+    )
+    .await
+    .expect("timed-out cold-resolution request");
+    let waited = started.elapsed();
 
+    assert_eq!(resolver_calls.load(Ordering::Relaxed), 1);
+    assert!(
+        waited >= COLD_RESOLUTION_DEADLINE,
+        "the cold resolution must spend its deadline, waited {waited:?}"
+    );
     assert_eq!(status(&response), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(json_body(&response)["value"]["request_id"], supplied);
     assert_eq!(
@@ -1034,19 +1045,141 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
+/// A Tokio runtime with neither the IO nor the time driver panics on any
+/// Tokio socket or timer, so this proves the loopback path uses neither.
+#[test]
+fn daemon_http_serves_loopback_without_tokio_io_or_time_drivers() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .build()
+        .expect("Tokio runtime without drivers");
+    runtime.block_on(async {
+        let (service, calls) = service_with_probe().await;
+        let endpoint = service.endpoint();
+        let origin = service.origin().to_owned();
+        let response = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut stream =
+                std::net::TcpStream::connect(endpoint).expect("connect daemon HTTP loopback");
+            write!(
+                stream,
+                "POST /projects/{PROJECT_ID}/application/tests/results HTTP/1.1\r\n\
+                 Host: {endpoint}\r\n\
+                 Authorization: Bearer {AUTH_TOKEN}\r\n\
+                 Origin: {origin}\r\n\
+                 Content-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
+            )
+            .expect("write HTTP request");
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .expect("read HTTP response");
+            response
+        })
+        .await
+        .expect("blocking HTTP client");
+
+        assert_eq!(status(&response), StatusCode::NO_CONTENT);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        service.shutdown().await.expect("shutdown HTTP service");
+    });
+}
+
 #[tokio::test]
 async fn daemon_http_shutdown_releases_loopback_listener() {
     let (service, _) = service_with_probe().await;
     let endpoint = service.endpoint();
+    #[cfg(target_os = "linux")]
+    let listener = match listening_socket_inodes(endpoint).as_slice() {
+        [inode] => *inode,
+        inodes => panic!("the service must hold one listener at {endpoint}: {inodes:?}"),
+    };
+    #[cfg(target_os = "linux")]
+    let held = descriptors_of_socket(listener);
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        held.len(),
+        1,
+        "the daemon must hold its listener at {endpoint} through one descriptor: {held:?}"
+    );
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    assert_ne!(
+        held[0].1 & u32::try_from(libc::O_CLOEXEC).expect("O_CLOEXEC is a flag bit"),
+        0,
+        "the daemon HTTP listener must be close-on-exec so no spawned child keeps it listening"
+    );
     service.shutdown().await.expect("shutdown HTTP service");
 
-    // Rebinding the exact address proves the listener was released. A raw
-    // connect probe can false-positive on a freed ephemeral port when the
-    // kernel self-connects (source port == destination port) or when a
-    // parallel test rebinds the port first.
+    // A freed ephemeral port goes back to the kernel pool, where any process
+    // may bind it, so neither rebinding nor connecting to it proves release.
+    // The kernel socket table is no proof either: a child that sibling tests
+    // fork holds a copy of every descriptor until its exec closes the
+    // close-on-exec ones, so it can list this listener after the daemon closed
+    // it. Release is the daemon process no longer referencing the socket.
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        descriptors_of_socket(listener),
+        Vec::<(u32, u32)>::new(),
+        "the daemon HTTP listener at {endpoint} must be closed on shutdown"
+    );
+    #[cfg(not(target_os = "linux"))]
     tokio::net::TcpListener::bind(endpoint)
         .await
         .expect("released daemon HTTP loopback address must be rebindable");
+}
+
+/// Inodes of the IPv4 sockets listening at `endpoint`, read from the kernel
+/// socket table of this network namespace.
+#[cfg(target_os = "linux")]
+fn listening_socket_inodes(endpoint: SocketAddr) -> Vec<u64> {
+    const TCP_LISTEN: &str = "0A";
+    let SocketAddr::V4(endpoint) = endpoint else {
+        panic!("the daemon HTTP listener binds IPv4 loopback, not {endpoint}");
+    };
+    // The kernel prints the network-order address as a native-endian word.
+    let local = format!(
+        "{:08X}:{:04X}",
+        u32::from_ne_bytes(endpoint.ip().octets()),
+        endpoint.port()
+    );
+    std::fs::read_to_string("/proc/net/tcp")
+        .expect("kernel TCP socket table")
+        .lines()
+        .skip(1)
+        .filter_map(|row| {
+            let fields = row.split_whitespace().collect::<Vec<_>>();
+            (fields[1] == local && fields[3] == TCP_LISTEN)
+                .then(|| fields[9].parse().expect("socket inode"))
+        })
+        .collect()
+}
+
+/// `(descriptor, open flags)` of every descriptor this process holds on the
+/// socket with `inode`.
+#[cfg(target_os = "linux")]
+fn descriptors_of_socket(inode: u64) -> Vec<(u32, u32)> {
+    let socket = format!("socket:[{inode}]");
+    std::fs::read_dir("/proc/self/fd")
+        .expect("own descriptor table")
+        .map(|entry| entry.expect("descriptor entry"))
+        .filter(|entry| {
+            // Descriptors other test threads close mid-scan are not this socket.
+            std::fs::read_link(entry.path())
+                .is_ok_and(|target| target.as_os_str() == socket.as_str())
+        })
+        .map(|entry| {
+            let descriptor = entry.file_name().to_string_lossy().into_owned();
+            let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{descriptor}"))
+                .expect("descriptor info");
+            let flags = info
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .map(|flags| u32::from_str_radix(flags.trim(), 8).expect("octal descriptor flags"))
+                .expect("descriptor flags");
+            (descriptor.parse().expect("numeric descriptor"), flags)
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -1101,7 +1234,7 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     })
     .to_string();
     let credentials = runtime.remote_credential_authority();
-    let remote = super::remote_protocol::build_daemon_remote_protocol_router(
+    let remote = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
         DaemonInvocationService::default(),
@@ -1127,6 +1260,47 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     .await;
     assert_eq!(status(&unauthenticated), StatusCode::UNAUTHORIZED);
     assert!(runtime.remote_recovery_authority(&node_id).await.is_none());
+    let unauthenticated_publication = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/writer-authority",
+        None,
+        Some(&origin),
+        "{}",
+    )
+    .await;
+    assert_eq!(
+        status(&unauthenticated_publication),
+        StatusCode::UNAUTHORIZED
+    );
+    let revocation = serde_json::json!({ "node_id": node_id }).to_string();
+    let unauthenticated_revocation = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/revoke",
+        None,
+        Some(&origin),
+        &revocation,
+    )
+    .await;
+    assert_eq!(
+        status(&unauthenticated_revocation),
+        StatusCode::UNAUTHORIZED
+    );
+    let unregistered_revocation = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/revoke",
+        Some(&format!("Bearer {AUTH_TOKEN}")),
+        Some(&origin),
+        &revocation,
+    )
+    .await;
+    assert_eq!(status(&unregistered_revocation), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_body(&unregistered_revocation),
+        serde_json::json!({ "code": "node_not_registered" })
+    );
 
     let authenticated = request_path_body(
         &service,
@@ -1139,6 +1313,20 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     .await;
     assert_eq!(status(&authenticated), StatusCode::NO_CONTENT);
     assert!(runtime.remote_recovery_authority(&node_id).await.is_some());
+    let unenrolled_revocation = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/revoke",
+        Some(&format!("Bearer {AUTH_TOKEN}")),
+        Some(&origin),
+        &revocation,
+    )
+    .await;
+    assert_eq!(status(&unenrolled_revocation), StatusCode::OK);
+    assert_eq!(
+        json_body(&unenrolled_revocation),
+        serde_json::json!({ "revocations": [], "revoked_grants": [grant.grant_id] })
+    );
 
     service.shutdown().await.expect("shutdown HTTP service");
 }
@@ -1152,13 +1340,9 @@ async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admis
             UserProfileId::new("profile.remote-http").expect("remote profile identity"),
         ),
     );
-    let transaction = Arc::new(
-        tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new(
-            tokio::runtime::Handle::current(),
-        )
-        .expect("remote replay transaction authority"),
-    );
-    let router = super::remote_protocol::build_daemon_remote_protocol_router(
+    let transaction =
+        Arc::new(tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new());
+    let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         transaction,
         DaemonInvocationService::default(),
@@ -1233,7 +1417,7 @@ async fn local_remote_status_reads_the_mounted_runtime() {
     );
     let credentials = runtime.remote_credential_authority();
     credentials.publish_listener_serving();
-    let remote = super::remote_protocol::build_daemon_remote_protocol_router(
+    let remote = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
         DaemonInvocationService::default(),

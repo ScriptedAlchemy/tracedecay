@@ -5,7 +5,7 @@
 //! covers, read each node twice (once to confirm the record label, once for
 //! the identity property), and threw away all but one page. Warming a large
 //! catalog therefore ran in O(N^2 / page) and was measured at 47 back-to-back
-//! `graph_db.projection.read` calls of ~21.7s each — 76% of a daemon lifetime.
+//! `graph_db.projection.read` calls of ~21.7s each, 76% of a daemon lifetime.
 //!
 //! This module builds the sorted identity list *once* per store epoch and
 //! answers each page from it with a binary search plus a `limit`-sized copy, so
@@ -14,27 +14,23 @@
 //!
 //! # Validity
 //!
-//! A cached index is reused only while both of these still hold:
-//!
-//! * the store epoch is unchanged — [`IdentityIndexCache::invalidate`] is
-//!   called from every site that takes the `GraphDb` database write lock, which
-//!   is the choke point every mutation, projection replacement, and recovery
-//!   database swap passes through; and
-//! * the owner label still covers the same number of nodes — a cheap label-table
-//!   count that catches any cardinality change an epoch bump might have missed.
-//!
-//! Both are read while the caller holds the database *read* guard, so no writer
-//! can interleave between the check and the page.
+//! A cached index is reused only while the store epoch is unchanged.
+//! [`IdentityIndexCache::invalidate`] is called from every site that takes the
+//! `GraphDb` database write lock, including projection replacement and recovery
+//! database swaps. The caller holds the database read guard through the page
+//! read, so a writer cannot interleave between the epoch check and its use.
 
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
-use grafeo_common::types::Value;
+use grafeo_common::memory::heap::{arc_slice_bytes, std_hash_map_bytes, string_bytes};
 use grafeo_engine::GrafeoDB;
 
+use crate::projection::check_cancelled;
 use crate::projection_read::IdentityScope;
-use crate::schema::{has_native_label, nodes_with_label, nodes_with_label_count};
+use crate::schema::{decode_identity, has_native_label, nodes_with_label};
 use crate::{GraphCancellation, GraphDbError};
 
 /// Identity bytes one cached index may retain. A projection whose identities
@@ -63,12 +59,6 @@ pub(crate) struct ProjectionIdentityIndex {
     /// [`Self::node_count`] keeps reporting node cardinality even if a corrupt
     /// projection were to repeat an identity.
     node_count: usize,
-    /// Owner-label cardinality this index was built from.
-    /// Owner-label cardinality this index was built from. Retained for
-    /// diagnostics: the epoch authorizes cache hits, so this is no longer
-    /// re-checked per read.
-    #[allow(dead_code)]
-    owner_node_count: usize,
 }
 
 impl ProjectionIdentityIndex {
@@ -108,10 +98,34 @@ struct CacheEntries {
 }
 
 impl IdentityIndexCache {
-    /// Marks every cached index stale. Called from each site that takes the
-    /// database write lock.
+    /// Marks every cached index stale and drops them. Called from each site
+    /// that takes the database write lock and when the engine hibernates; a
+    /// stale index is never served again, so keeping it only holds memory.
     pub(crate) fn invalidate(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        entries.indexes = HashMap::new();
+    }
+
+    /// Heap bytes the cached indexes hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        entries.indexes.iter().fold(
+            std_hash_map_bytes(&entries.indexes),
+            |bytes, (key, index)| {
+                bytes
+                    + string_bytes(&key.owner_label)
+                    + string_bytes(&key.record_label)
+                    + string_bytes(&key.identity_property)
+                    + arc_slice_bytes::<ProjectionIdentityIndex>(1)
+                    + index.identities.len() * size_of::<Box<str>>()
+                    + index
+                        .identities
+                        .iter()
+                        .map(|identity| identity.len())
+                        .sum::<usize>()
+            },
+        )
     }
 
     /// The ordered index for one (owner label, record label) pair, building and
@@ -143,20 +157,16 @@ impl IdentityIndexCache {
         // to run here walked `all_labels()` and split every key on the
         // composite separator - O(label universe) per page, which made the
         // catalog warm quadratic again once paging itself was O(page): 1079
-        // counts x 633ms measured against a 430k-chunk generation. The count
-        // is still computed on the miss path below and retained on the entry,
-        // so a rebuilt index reports the cardinality it was built from.
+        // counts x 633ms measured against a 430k-chunk generation. The count is
+        // no longer computed or retained: the epoch alone authorizes cache hits.
         if let Some(index) = self.cached(&key, epoch)? {
             return Ok(Some(index));
         }
 
-        let owner_node_count =
-            nodes_with_label_count(database.graph_store().as_ref(), scope.owner_label);
-
-        let Some(index) = build_identity_index(database, scope, owner_node_count, cancellation)?
-        else {
+        let Some(index) = build_identity_index(database, scope, cancellation)? else {
             return Ok(None);
         };
+        crate::runtime::ensure_intact(database)?;
         let index = Arc::new(index);
 
         let mut entries = self
@@ -193,11 +203,14 @@ impl IdentityIndexCache {
     }
 }
 
-#[hotpath::measure(label = "graph_db.projection.identity_index.build")]
+#[tracing::instrument(
+    name = "graph_db.projection.identity_index.build",
+    level = "trace",
+    skip_all
+)]
 fn build_identity_index(
     database: &GrafeoDB,
     scope: IdentityScope<'_>,
-    owner_node_count: usize,
     cancellation: &dyn GraphCancellation,
 ) -> Result<Option<ProjectionIdentityIndex>, GraphDbError> {
     check_cancelled(cancellation)?;
@@ -217,12 +230,7 @@ fn build_identity_index(
         if !has_native_label(&record, record_label) {
             continue;
         }
-        let identity = record
-            .get_property(identity_property)
-            .and_then(Value::as_str)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: format!("projection query returned a non-string `{identity_property}`"),
-            })?;
+        let identity = decode_identity(record.get_property(identity_property), identity_property)?;
         identity_bytes = identity_bytes.saturating_add(identity.len());
         if identity_bytes > MAX_IDENTITY_INDEX_BYTES {
             return Ok(None);
@@ -236,69 +244,5 @@ fn build_identity_index(
     Ok(Some(ProjectionIdentityIndex {
         identities: identities.into_boxed_slice(),
         node_count,
-        owner_node_count,
     }))
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
-    if cancellation.is_cancelled() {
-        Err(GraphDbError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ProjectionIdentityIndex;
-
-    fn index(identities: &[&str]) -> ProjectionIdentityIndex {
-        let mut sorted: Vec<Box<str>> = identities.iter().map(|value| (*value).into()).collect();
-        sorted.sort_unstable();
-        let node_count = sorted.len();
-        ProjectionIdentityIndex {
-            identities: sorted.into_boxed_slice(),
-            node_count,
-            owner_node_count: node_count,
-        }
-    }
-
-    #[test]
-    fn page_orders_lexicographically_and_bounds_by_limit() {
-        let index = index(&["c", "a", "b", "d"]);
-
-        assert_eq!(index.page(None, 2), vec!["a".to_owned(), "b".to_owned()]);
-        assert_eq!(
-            index.page(None, 10),
-            vec![
-                "a".to_owned(),
-                "b".to_owned(),
-                "c".to_owned(),
-                "d".to_owned()
-            ]
-        );
-    }
-
-    #[test]
-    fn cursor_is_exclusive_and_admits_absent_cursors() {
-        let index = index(&["a", "b", "c"]);
-
-        assert_eq!(
-            index.page(Some("a"), 10),
-            vec!["b".to_owned(), "c".to_owned()]
-        );
-        // A cursor that is not itself an identity still bounds the page.
-        assert_eq!(
-            index.page(Some("aa"), 10),
-            vec!["b".to_owned(), "c".to_owned()]
-        );
-        assert!(index.page(Some("c"), 10).is_empty());
-        assert!(index.page(Some("z"), 10).is_empty());
-    }
-
-    #[test]
-    fn zero_limit_and_empty_index_page_empty() {
-        assert!(index(&["a"]).page(None, 0).is_empty());
-        assert!(index(&[]).page(None, 10).is_empty());
-    }
 }

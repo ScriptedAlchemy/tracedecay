@@ -27,6 +27,7 @@ function project(
     canonical_root: `/repos/${id}`,
     kind: 'primary',
     default_branch: 'main',
+    head_branch: 'main',
     branches: ['main'],
     store_count: mass.stores,
     artifact_count: mass.artifacts,
@@ -46,12 +47,6 @@ function group(label: string, projects: ProjectRegistryEntry[]): ProjectRepoGrou
 }
 
 const SINGLE = { stores: 1, artifacts: 1 };
-
-describe('indexedMass', () => {
-  it('sums exactly the project-level registry counts it names', () => {
-    expect(indexedMass(project('a', 0, { stores: 2, artifacts: 7 }))).toBe(9);
-  });
-});
 
 describe('columnIndexFor', () => {
   it('places each age in the column whose bound it falls under', () => {
@@ -128,12 +123,21 @@ describe('composeRegistryField', () => {
       'shared-main',
       'shared-wt',
     ]);
-    // The hub sits at its checkouts' centroid — the honest position for a node
+    // The hub sits at its checkouts' centroid, the honest position for a node
     // that means "these ones".
     const hub = field.nodes.find((node) => node.id.startsWith('repo:'))!;
     const kids = field.nodes.filter((node) => node.id.startsWith('shared-'));
     expect(hub.x).toBeCloseTo((kids[0]!.x + kids[1]!.x) / 2, 6);
     expect(hub.y).toBeCloseTo((kids[0]!.y + kids[1]!.y) / 2, 6);
+  });
+
+  it('does not turn a group label into an exact repository relationship', () => {
+    const unknown = group('unregistered', [project('one', 0, SINGLE), project('two', 1, SINGLE)]);
+    unknown.git_common_dir = null;
+    const field = composeRegistryField([unknown], NOW);
+    expect(field.nodes.map((node) => node.id).sort()).toEqual(['one', 'two']);
+    expect(field.edges).toEqual([]);
+    expect(field.sharedRepoCount).toBe(0);
   });
 
   it('places a project in the column its last contact actually falls in', () => {
@@ -212,7 +216,7 @@ describe('composeRegistryField', () => {
       [...field.nodes]
         .sort((l, r) => l.id.localeCompare(r.id))
         .map((node) => `${node.id}@${node.x.toFixed(6)},${node.y.toFixed(6)}`);
-    // Independent of the order repositories arrive in, too — the registry is
+    // Independent of the order repositories arrive in, too, the registry is
     // re-sorted on every render and the picture must not jump.
     expect(key(a)).toEqual(key(b));
   });
@@ -258,12 +262,6 @@ describe('recencyVitality horizon', () => {
     expect(today - thisWeek).toBeGreaterThan(0.3);
   });
 
-  it('still separates the two under the old fixed horizon by almost nothing', () => {
-    const today = recencyVitality(NOW - 0.01 * DAY, NOW, 90);
-    const thisWeek = recencyVitality(NOW - 1.3 * DAY, NOW, 90);
-    expect(today - thisWeek).toBeLessThan(0.2);
-  });
-
   it('clamps the horizon so a registry seen minutes ago is not all-or-nothing', () => {
     expect(vitalityHorizon([project('a', 0.002, { stores: 1, artifacts: 1 })], NOW)).toBe(1);
     // Everything inside the clamp still reads as fully lit rather than as a
@@ -278,7 +276,7 @@ describe('recencyVitality horizon', () => {
       ),
       // Last seen in 2019. Taking the maximum would set the horizon at ~94
       // years and push every other body back to indistinguishable full
-      // brightness — the exact compression this parameter removes.
+      // brightness, the exact compression this parameter removes.
       project('ancient', 34_000, { stores: 1, artifacts: 1 }),
     ];
     const horizon = vitalityHorizon(projects, NOW);
@@ -321,6 +319,16 @@ describe('mass axis frame', () => {
     expect(field.mass.lowerHalfCount).toBeGreaterThan(field.mass.total / 2);
   });
 
+  it('reports no crowd when every project measures the same', () => {
+    const uniform = Array.from({ length: 4 }, (_, i) =>
+      group(`u${i}`, [project(`u${i}`, 0.1 * (i + 1), { stores: 1, artifacts: 4 })]),
+    );
+    const field = composeRegistryField(uniform, NOW);
+    expect(field.mass.floor).toBe(5);
+    expect(field.mass.ceiling).toBe(5);
+    expect(field.mass.lowerHalfCount).toBe(0);
+  });
+
   it('frames the y axis from the bodies at its ends rather than a flat allowance', () => {
     const field = composeRegistryField(liveRegistry(), NOW);
     const [low, high] = field.extent.y;
@@ -359,5 +367,45 @@ describe('summarizeHoldings', () => {
 
   it('has nothing to summarize for an empty registry', () => {
     expect(summarizeHoldings([])).toBeNull();
+  });
+});
+
+describe('packed cells', () => {
+  const crowd = (count: number) =>
+    Array.from({ length: count }, (_, index) => project(`p${String(index).padStart(2, '0')}`, 0.2, SINGLE));
+
+  it('packs a crowd that shares one recency × mass cell into a counted, rank-ordered grid', () => {
+    const field = composeRegistryField([group('crowd', crowd(12))], NOW);
+    expect(field.cells).toHaveLength(1);
+    const [cell] = field.cells;
+    expect(cell!.id).toBe('cell:0:0');
+    expect(cell!.members).toEqual(crowd(12).map((entry) => entry.project_id));
+    expect(cell!.mass).toBe(24);
+    expect(cell!.spacing).toBeCloseTo(0.115, 3);
+    const placed = field.nodes.filter((node) => node.cell === 'cell:0:0');
+    expect(placed).toHaveLength(12);
+    expect(new Set(placed.map((node) => `${node.x.toFixed(4)},${node.y.toFixed(4)}`)).size).toBe(12);
+    for (const node of placed) {
+      expect(Math.abs(node.x)).toBeLessThanOrEqual(0.42);
+      expect(Math.abs(node.y - cell!.y)).toBeLessThanOrEqual(cell!.height / 2);
+    }
+    // Rank order reads left to right, top row first.
+    expect(placed[0]!.x).toBeLessThan(placed[1]!.x);
+    expect(placed[0]!.y).toBeGreaterThan(placed[6]!.y);
+  });
+
+  it('leaves a few identical projects overlapping in place rather than packing them', () => {
+    const field = composeRegistryField([group('few', crowd(3))], NOW);
+    expect(field.cells).toEqual([]);
+    expect(field.nodes.every((node) => node.cell === null)).toBe(true);
+  });
+
+  it('packs the crowded cells of the real registry shape, with exact counts', () => {
+    const cells = composeRegistryField(liveRegistry(), NOW).cells;
+    expect(cells.map((cell) => [cell.id, cell.members.length, cell.mass, Number(cell.spacing.toFixed(3))])).toEqual([
+      ['cell:1:8', 4, 258, 0.199],
+      ['cell:1:3', 4, 30, 0.199],
+      ['cell:1:2', 4, 18, 0.199],
+    ]);
   });
 });

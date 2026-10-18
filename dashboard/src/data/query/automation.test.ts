@@ -2,26 +2,12 @@ import { createHash } from "node:crypto";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AutomationCommittedReceiptV1 } from "../../contracts/generated.ts";
 import {
   AutomationOutcomesPayloadSchema,
   AutomationSchedulerStatusV1Schema,
   runAutomaticCurator,
   setSchedulerPaused,
 } from "./automation.ts";
-
-type CurationReceipt = Extract<
-  AutomationCommittedReceiptV1,
-  { kind: "curation" }
->;
-type LinkCurationEffect = Extract<
-  CurationReceipt["receipt"]["receipt"]["operation_effects"][number],
-  { kind: "link_facts" }
->;
-type NormalizeCurationEffect = Extract<
-  CurationReceipt["receipt"]["receipt"]["operation_effects"][number],
-  { kind: "normalize_tags" }
->;
 
 function scheduler(overrides: Record<string, unknown> = {}) {
   return {
@@ -81,11 +67,19 @@ describe("setSchedulerPaused", () => {
 });
 
 describe("runAutomaticCurator", () => {
-  it("decodes the retained application terminal with explicit caller bounds", async () => {
-    respond({ run: automaticRun("run-dashboard") });
+  it("returns the started receipt of the run the request admitted", async () => {
+    respond({ run: startedReceipt("request.dashboard.success") });
 
     const result = await runAutomaticCurator();
-    expect(result.outcome).toBe("ok");
+    expect(result).toEqual({
+      outcome: "started",
+      receipt: {
+        run_id: "request.dashboard.success",
+        task: "memory_curator",
+        request_digest: automaticRequestDigest(),
+        state: "started",
+      },
+    });
     const call = vi.mocked(fetch).mock.calls[0];
     expect(call?.[0]).toBe("/api/application/retained/fact_store_curate");
     expect(JSON.parse(String((call?.[1] as RequestInit).body))).toEqual({
@@ -94,8 +88,38 @@ describe("runAutomaticCurator", () => {
     });
   });
 
+  it("rejects a receipt for another run, request bounds, or state", async () => {
+    respond({ run: startedReceipt("request.dashboard.other") });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    respond({
+      run: { ...startedReceipt("request.dashboard.success"), request_digest: sha("f") },
+    });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    respond({
+      run: { ...startedReceipt("request.dashboard.success"), state: "completed" },
+    });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("rejects the retired run terminal in place of the receipt", async () => {
+    const { state: _state, ...identity } = startedReceipt("request.dashboard.success");
+    respond({
+      run: {
+        ...identity,
+        terminal: {
+          status: "completed",
+          summary: { reviewed_count: 0, accepted_count: 0, rejected_count: 0, skipped_count: 0 },
+        },
+        committed_receipts: [],
+      },
+    });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
   it("rejects success and admitted-problem envelopes from another HTTP binding", async () => {
-    const success = curatorSuccess(automaticRun("run-dashboard"));
+    const success = curatorSuccess(startedReceipt("request.dashboard.success"));
     success.value.binding_id = "binding.http.fact_store_get.v1";
     respond(success);
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
@@ -107,7 +131,7 @@ describe("runAutomaticCurator", () => {
   });
 
   it("rejects success and admitted-problem envelopes from another result contract", async () => {
-    const success = curatorSuccess(automaticRun("run-dashboard"));
+    const success = curatorSuccess(startedReceipt("request.dashboard.success"));
     success.value.contract.schema_id =
       "schema.application.retained.fact-store-get.result";
     respond(success);
@@ -119,308 +143,87 @@ describe("runAutomaticCurator", () => {
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
+  it("recognizes a concealed 404 without disclosing a binding", async () => {
+    respond(automaticProblem("not_found_or_not_authorized"), {
+      ok: false,
+      statusCode: 404,
+    });
+    expect(await runAutomaticCurator()).toEqual({
+      outcome: "denied",
+      detail: "the automatic run was not found or not authorized",
+    });
+  });
+
+  it("rejects a concealed problem that discloses any binding", async () => {
+    for (const bindingId of [
+      "binding.http.fact_store_curate.v1",
+      "binding.http.fact_store_get.v1",
+    ]) {
+      const problem = automaticProblem("not_found_or_not_authorized");
+      problem.value.binding_id = bindingId;
+      respond(problem, { ok: false, statusCode: 404 });
+      expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+    }
+  });
+
+  it("requires binding identity for ordinary problems", async () => {
+    const problem = automaticProblem("conflict");
+    delete problem.value.binding_id;
+    respond(problem, { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("still validates the status and result contract of concealed problems", async () => {
+    respond(automaticProblem("not_found_or_not_authorized"), {
+      ok: false,
+      statusCode: 503,
+    });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const wrongContract = automaticProblem("not_found_or_not_authorized");
+    wrongContract.value.contract.schema_revision = 2;
+    respond(wrongContract, { ok: false, statusCode: 404 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
   it("rejects malformed success request identity and scope digest", async () => {
-    const wrongRequest = curatorSuccess(automaticRun("run-dashboard"));
+    const wrongRequest = curatorSuccess(startedReceipt("request.dashboard.success"));
     wrongRequest.value.request_id = " request.dashboard.success";
     respond(wrongRequest);
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
 
-    const success = curatorSuccess(automaticRun("run-dashboard"));
+    const success = curatorSuccess(startedReceipt("request.dashboard.success"));
     success.value.scope.scope_digest = sha("9");
     respond(success);
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
   it("rejects a run for another automatic-memory task", async () => {
-    const run = automaticRun("run-dashboard");
+    const run = startedReceipt("request.dashboard.success");
     run.task = "session_reflector";
     respond({ run });
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
-  it("binds zero-effect terminals to the exact admitted curator bounds", async () => {
-    const completed = automaticRun("run-dashboard");
-    completed.request_digest = sha("f");
-    respond({ run: completed });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-
+  it("requires the application effect execution receipt", async () => {
+    const body = curatorSuccess(startedReceipt("request.dashboard.success"));
+    const { execution: _execution, ...effect } = body.value.outcome.value;
     respond({
-      run: {
-        ...automaticRun("run-dashboard"),
-        request_digest: sha("f"),
-        terminal: {
-          status: "skipped",
-          reason: "nothing_to_review",
-          summary: {
-            reviewed_count: 0,
-            accepted_count: 0,
-            rejected_count: 0,
-            skipped_count: 1,
-          },
-        },
-      },
+      ...body,
+      value: { ...body.value, outcome: { outcome: "effect", value: effect } },
     });
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
-  it("binds a curation receipt to the run and summary", async () => {
-    const accepted = automaticRun("run-dashboard");
-    accepted.terminal.summary.reviewed_count = 1;
-    accepted.terminal.summary.accepted_count = 1;
-    accepted.committed_receipts = [curationReceipt("run-dashboard")];
-    respond({ run: accepted });
-    expect((await runAutomaticCurator()).outcome).toBe("ok");
-
-    const run = automaticRun("run-dashboard");
-    run.terminal.summary.reviewed_count = 1;
-    run.terminal.summary.accepted_count = 1;
-    run.committed_receipts = [curationReceipt("run-other")];
-    respond({ run });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("accepts the Rust curation digest domain and rejects the retired legacy domain", async () => {
-    const canonical = curationReceipt("run-dashboard");
-    expect(canonical.receipt.receipt.operation_effects).not.toHaveLength(0);
-    respond({ run: automaticRunWithReceipt("run-dashboard", canonical) });
-    expect((await runAutomaticCurator()).outcome).toBe("ok");
-
-    const legacy = curationReceipt("run-dashboard");
-    legacy.receipt.canonical_digest = canonicalSha([
-      "tracedecay.memory-automation-run.curation-receipt.v1",
-      legacy.receipt.receipt,
-    ]);
-    respond({ run: automaticRunWithReceipt("run-dashboard", legacy) });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("rejects curation effects whose canonical commit ledger is inconsistent", async () => {
-    const run = automaticRun("run-dashboard");
-    run.terminal.summary.reviewed_count = 1;
-    run.terminal.summary.accepted_count = 1;
-    const receipt = curationReceipt("run-dashboard");
-    firstNormalizeEffect(receipt).commit.last_event_id = "event.dashboard.not-the-tail";
-    refreshCurationDigest(receipt);
-    run.committed_receipts = [receipt];
-    respond({ run });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("rejects more than 256 otherwise canonical curation effects", async () => {
-    const receipt = curationReceipt("run-dashboard");
-    const template = firstNormalizeEffect(receipt);
-    receipt.receipt.receipt.operation_effects = Array.from(
-      { length: 257 },
-      (_, index) => {
-        const id = factId(index.toString(16).padStart(64, "0"));
-        return {
-          ...template,
-          fact_id: id,
-          commit: {
-            ...template.commit,
-            fact_id: id,
-            committed_event_ids: [
-              `event.dashboard.${index}.fact`,
-              `event.dashboard.${index}.assertion`,
-            ],
-            last_event_id: `event.dashboard.${index}.assertion`,
-          },
-        };
-      },
-    );
-    receipt.receipt.receipt.changed_fact_ids =
-      receipt.receipt.receipt.operation_effects.map((effect) => {
-        if (effect.kind !== "normalize_tags") throw new Error("normalize fixture drifted");
-        return effect.fact_id;
-      });
-    receipt.receipt.receipt.normalized_tags = 257;
-    receipt.receipt.receipt.accepted_operations = 257;
-    refreshCurationDigest(receipt);
-
-    respond({ run: automaticRunWithReceipt("run-dashboard", receipt) });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("rejects a duplicate operation identity even with fresh commit events", async () => {
-    const receipt = curationReceipt("run-dashboard");
-    const duplicate = structuredClone(firstNormalizeEffect(receipt));
-    duplicate.commit.committed_event_ids = [
-      "event.dashboard.duplicate.fact",
-      "event.dashboard.duplicate.assertion",
-    ];
-    duplicate.commit.last_event_id = "event.dashboard.duplicate.assertion";
-    receipt.receipt.receipt.operation_effects.push(duplicate);
-    receipt.receipt.receipt.normalized_tags = 2;
-    receipt.receipt.receipt.accepted_operations = 2;
-    refreshCurationDigest(receipt);
-
-    respond({ run: automaticRunWithReceipt("run-dashboard", receipt) });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("rejects mixed commit dispositions within one curation receipt", async () => {
-    const receipt = curationReceipt("run-dashboard");
-    const second = structuredClone(firstNormalizeEffect(receipt));
-    const secondFactId = factId("2");
-    second.fact_id = secondFactId;
-    second.commit = {
-      ...second.commit,
-      disposition: "idempotent_replay",
-      fact_id: secondFactId,
-      committed_event_ids: [
-        "event.dashboard.replay.fact",
-        "event.dashboard.replay.assertion",
-      ],
-      last_event_id: "event.dashboard.replay.assertion",
-    };
-    receipt.receipt.receipt.operation_effects.push(second);
-    receipt.receipt.receipt.changed_fact_ids.push(secondFactId);
-    receipt.receipt.receipt.normalized_tags = 2;
-    receipt.receipt.receipt.accepted_operations = 2;
-    refreshCurationDigest(receipt);
-
-    respond({ run: automaticRunWithReceipt("run-dashboard", receipt) });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("rejects link effects with foreign identities or non-durable provenance", async () => {
-    const invalidReceipts = [
-      mutateLinkReceipt((effect) => {
-        if (effect.commit === null) throw new Error("link fixture omitted its commit");
-        effect.commit.owner = { kind: "project", project_id: "project.other" };
-      }),
-      mutateLinkReceipt((effect) => {
-        effect.relation.evidence_fact_ids = [foreignFactId("4")];
-      }),
-      mutateLinkReceipt((effect, receipt) => {
-        if (effect.commit === null) throw new Error("link fixture omitted its commit");
-        const foreignSource = foreignFactId("1");
-        effect.source_fact_id = foreignSource;
-        effect.commit.fact_id = foreignSource;
-        receipt.receipt.receipt.replay_fact_id = foreignSource;
-        receipt.receipt.receipt.changed_fact_ids = [
-          foreignSource,
-          effect.target_fact_id,
-        ];
-      }),
-      mutateLinkReceipt((effect, receipt) => {
-        const foreignTarget = foreignFactId("2");
-        effect.target_fact_id = foreignTarget;
-        receipt.receipt.receipt.changed_fact_ids = [
-          effect.source_fact_id,
-          foreignTarget,
-        ];
-      }),
-      mutateLinkReceipt((effect) => {
-        effect.relation.evidence_fact_ids = [factId("3"), factId("3")];
-      }),
-      mutateLinkReceipt((effect) => {
-        effect.relation.evidence_fact_ids = Array.from(
-          { length: 257 },
-          (_, index) => factId(index.toString(16).padStart(64, "0")),
-        );
-      }),
-      mutateLinkReceipt((effect) => {
-        effect.relation.provenance.source_label = "automation:\u0085memory-curator";
-      }),
-      mutateLinkReceipt((effect) => {
-        effect.relation.provenance.source_label = "é".repeat(2_049);
-      }),
-      mutateLinkReceipt((effect) => {
-        effect.relation.provenance.sanitization_receipt.disposition = "rejected";
-      }),
-      mutateLinkReceipt((effect) => {
-        effect.relation.provenance.sanitization_receipt.payload = null;
-      }),
-    ];
-
-    for (const receipt of invalidReceipts) {
-      respond({ run: automaticRunWithReceipt("run-dashboard", receipt) });
-      expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-    }
-  });
-
-  it("accepts a semantic already-linked effect without fabricating a mutation", async () => {
-    const receipt = linkCurationReceipt("run-dashboard");
-    const effect = receipt.receipt.receipt.operation_effects[0];
-    if (effect?.kind !== "link_facts") throw new Error("link fixture drifted");
-    effect.disposition = "already_linked";
-    effect.commit = null;
-    receipt.receipt.receipt.replay_fact_id = null;
-    receipt.receipt.receipt.replay_event_id = null;
-    receipt.receipt.receipt.changed_fact_ids = [];
-    receipt.receipt.receipt.facts_linked = 0;
-    refreshCurationDigest(receipt);
-
-    respond({ run: automaticRunWithReceipt("run-dashboard", receipt) });
-    expect((await runAutomaticCurator()).outcome).toBe("ok");
-  });
-
-  it("rejects malformed raw input and canonical receipt digests", async () => {
-    const malformed = [
-      mutateCurationReceipt((receipt) => {
-        receipt.receipt.receipt.input_digest = sha("c");
-        refreshCurationDigest(receipt);
-      }),
-      mutateCurationReceipt((receipt) => {
-        receipt.receipt.receipt.input_digest = "C".repeat(64);
-        refreshCurationDigest(receipt);
-      }),
-      mutateCurationReceipt((receipt) => {
-        receipt.receipt.canonical_digest = "b".repeat(64);
-      }),
-      mutateCurationReceipt((receipt) => {
-        receipt.receipt.canonical_digest = sha("b");
-      }),
-    ];
-
-    for (const receipt of malformed) {
-      respond({ run: automaticRunWithReceipt("run-dashboard", receipt) });
-      expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-    }
-  });
-
-  it("rejects non-canonical curator skipped and rejected summaries", async () => {
-    respond({
-      run: {
-        ...automaticRun("run-dashboard"),
-        terminal: {
-          status: "skipped",
-          reason: "nothing_to_review",
-          summary: {
-            reviewed_count: 0,
-            accepted_count: 0,
-            rejected_count: 0,
-            skipped_count: 2,
-          },
-        },
-      },
+  it("refuses receipts when browser hashing is unavailable", async () => {
+    vi.stubGlobal("crypto", undefined);
+    respond({ run: startedReceipt("request.dashboard.success") });
+    expect(await runAutomaticCurator()).toEqual({
+      outcome: "unsupported_schema",
+      detail: "the automatic curator result does not match this build",
     });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
 
-    const run = automaticRun("run-dashboard");
-    run.terminal.summary.reviewed_count = 1;
-    run.terminal.summary.rejected_count = 1;
-    respond({ run });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("rejects a session-reflector-only skip reason for the curator", async () => {
-    respond({
-      run: {
-        ...automaticRun("run-dashboard"),
-        terminal: {
-          status: "skipped",
-          reason: "session_evidence_unavailable",
-          summary: {
-            reviewed_count: 0,
-            accepted_count: 0,
-            rejected_count: 0,
-            skipped_count: 1,
-          },
-        },
-      },
-    });
+    respond(automaticProblem("partial_effect"), { ok: false, statusCode: 409 });
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
@@ -476,6 +279,28 @@ describe("runAutomaticCurator", () => {
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
+  it("requires a committed curation state in a partial-effect receipt", async () => {
+    const body = automaticProblem("partial_effect");
+    const receipt = body.value.problem.committed_receipt;
+    if (receipt === null) throw new Error("partial fixture drifted");
+    Object.assign(receipt, { committed_state: null, external_proof: sha("8") });
+    respond(body, { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("rejects application problems with inconsistent HTTP status or retry scope", async () => {
+    respond(automaticProblem("partial_effect"), { ok: false, statusCode: 503 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    respond(automaticProblem("reset_required"), { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const conflict = automaticProblem("conflict");
+    conflict.value.problem.retry_scope = null;
+    respond(conflict, { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
   it("rejects non-canonical partial-effect receipt scopes", async () => {
     const invalidIdentity = automaticProblem("partial_effect");
     const invalidIdentityReceipt =
@@ -517,19 +342,9 @@ describe("runAutomaticCurator", () => {
     expect((await runScopedAutomaticCurator()).outcome).toBe("reset_required");
   });
 
-  it("accepts canonical partial and reset terminals from the active-project route", async () => {
-    respond(automaticProblem("partial_effect"), { ok: false, statusCode: 409 });
-    expect((await runAutomaticCurator()).outcome).toBe("partial_effect");
-
-    respond(automaticProblem("reset_required"), { ok: false, statusCode: 503 });
-    expect((await runAutomaticCurator()).outcome).toBe("reset_required");
-  });
-
 });
 
 const sha = (seed: string) => `sha256:${seed.repeat(64)}`;
-const PROJECT_OWNER_BINDING =
-  "cdab36393497f7ad3d6e0144484b711458ed01517e7108bc1dbf8cc0e3b33f88";
 const SCOPED_CURATOR_URL = "/api/application/retained/fact_store_curate";
 
 function runScopedAutomaticCurator() {
@@ -553,29 +368,12 @@ function canonicalSha(value: unknown): string {
   return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
 }
 
-function factId(seed: string): string {
-  return `fact.v1.${PROJECT_OWNER_BINDING}.${seed.padStart(64, "0")}`;
-}
-
-function foreignFactId(seed: string): string {
-  return `fact.v1.${"e".repeat(64)}.${seed.padStart(64, "0")}`;
-}
-
-function automaticRun(runId: string) {
+function startedReceipt(runId: string) {
   return {
     run_id: runId,
-    request_digest: automaticRequestDigest(),
     task: "memory_curator",
-    terminal: {
-      status: "completed",
-      summary: {
-        reviewed_count: 0,
-        accepted_count: 0,
-        rejected_count: 0,
-        skipped_count: 0,
-      },
-    },
-    committed_receipts: [] as CurationReceipt[],
+    request_digest: automaticRequestDigest(),
+    state: "started",
   };
 }
 
@@ -590,155 +388,6 @@ function automaticRequestDigest(): string {
       },
     },
   ]);
-}
-
-function curationReceipt(runId: string): CurationReceipt {
-  const normalizedFactId = factId("1");
-  const receipt: CurationReceipt = {
-    kind: "curation" as const,
-    receipt: {
-      canonical_digest: "",
-      receipt: {
-        owner: { kind: "project" as const, project_id: "project.dashboard" },
-        operation_id: "operation.dashboard",
-        input_digest: "c".repeat(64),
-        automation_run_id: runId,
-        operation_effects: [
-          {
-            kind: "normalize_tags" as const,
-            fact_id: normalizedFactId,
-            commit: {
-              disposition: "committed" as const,
-              fact_id: normalizedFactId,
-              owner: { kind: "project" as const, project_id: "project.dashboard" },
-              committed_event_ids: ["event.dashboard.fact", "event.dashboard.assertion"],
-              last_event_id: "event.dashboard.assertion",
-              active_assertion_id: "assertion.dashboard",
-            },
-          },
-        ],
-        replay_fact_id: normalizedFactId,
-        replay_event_id: "event.dashboard.assertion",
-        changed_fact_ids: [normalizedFactId],
-        accepted_operations: 1,
-        facts_added: 0,
-        facts_updated: 0,
-        facts_merged: 0,
-        facts_removed: 0,
-        normalized_tags: 1,
-        facts_linked: 0,
-      },
-    },
-  };
-  return refreshCurationDigest(receipt);
-}
-
-function linkCurationReceipt(runId: string): CurationReceipt {
-  const sourceFactId = factId("1");
-  const targetFactId = factId("2");
-  const receipt: CurationReceipt = {
-    kind: "curation" as const,
-    receipt: {
-      canonical_digest: "",
-      receipt: {
-        owner: { kind: "project" as const, project_id: "project.dashboard" },
-        operation_id: "operation.dashboard.link",
-        input_digest: "d".repeat(64),
-        automation_run_id: runId,
-        operation_effects: [
-          {
-            kind: "link_facts" as const,
-            source_fact_id: sourceFactId,
-            target_fact_id: targetFactId,
-            relation: {
-              kind: "supports" as const,
-              evidence_fact_ids: [factId("3")],
-              confidence_millionths: 800_000,
-              provenance: {
-                source_label: "automation:memory-curator",
-                sanitization_receipt: {
-                  receipt: {
-                    receipt_id: "receipt.dashboard.relation",
-                    sanitizer_version: "sanitizer.dashboard.v1",
-                  },
-                  disposition: "accepted" as const,
-                  sensitivity: "non_sensitive" as const,
-                  payload: { digest: sha("9"), byte_len: 128 },
-                },
-              },
-            },
-            disposition: "linked" as const,
-            commit: {
-              disposition: "committed" as const,
-              fact_id: sourceFactId,
-              owner: { kind: "project" as const, project_id: "project.dashboard" },
-              committed_event_ids: ["event.dashboard.link"],
-              last_event_id: "event.dashboard.link",
-              active_assertion_id: "assertion.dashboard.link",
-            },
-          },
-        ],
-        replay_fact_id: sourceFactId,
-        replay_event_id: "event.dashboard.link",
-        changed_fact_ids: [sourceFactId, targetFactId],
-        accepted_operations: 1,
-        facts_added: 0,
-        facts_updated: 0,
-        facts_merged: 0,
-        facts_removed: 0,
-        normalized_tags: 0,
-        facts_linked: 1,
-      },
-    },
-  };
-  return refreshCurationDigest(receipt);
-}
-
-function refreshCurationDigest(receipt: CurationReceipt): CurationReceipt {
-  receipt.receipt.canonical_digest = canonicalSha([
-    "tracedecay.automation-run.curation-receipt.v1",
-    receipt.receipt.receipt,
-  ]);
-  return receipt;
-}
-
-function firstNormalizeEffect(
-  receipt: CurationReceipt,
-): NormalizeCurationEffect {
-  const effect = receipt.receipt.receipt.operation_effects[0];
-  if (effect?.kind !== "normalize_tags") throw new Error("normalize fixture drifted");
-  return effect;
-}
-
-function mutateCurationReceipt(
-  mutate: (receipt: CurationReceipt) => void,
-) {
-  const receipt = curationReceipt("run-dashboard");
-  mutate(receipt);
-  return receipt;
-}
-
-function mutateLinkReceipt(
-  mutate: (effect: LinkCurationEffect, receipt: CurationReceipt) => void,
-) {
-  const receipt = linkCurationReceipt("run-dashboard");
-  const effect = receipt.receipt.receipt.operation_effects[0];
-  if (effect?.kind !== "link_facts") throw new Error("link fixture drifted");
-  mutate(effect, receipt);
-  refreshCurationDigest(receipt);
-  return receipt;
-}
-
-function automaticRunWithReceipt(
-  runId: string,
-  receipt: CurationReceipt,
-) {
-  const run = automaticRun(runId);
-  run.terminal.summary.reviewed_count =
-    receipt.receipt.receipt.accepted_operations;
-  run.terminal.summary.accepted_count = run.terminal.summary.reviewed_count;
-  run.committed_receipts = [receipt];
-  return run;
 }
 
 function curatorSuccess(run: unknown) {
@@ -766,14 +415,34 @@ function curatorSuccess(run: unknown) {
       },
       outcome: {
         outcome: "effect",
-        value: { payload: run },
+        value: {
+          effect_id: "effect.retained.fact_store_curate.request.dashboard.success",
+          effect_class: "administrative",
+          idempotency_key: "idempotency.dashboard.success",
+          authority: {},
+          expected_state: sha("0"),
+          reconciliation: "pending",
+          receipt: { outcome: "effect_unknown", committed_state: null },
+          execution: {
+            started_at: 10,
+            ended_at: 20,
+            effective_deadline: null,
+            cancellation: null,
+            budget: { units_consumed: 0, bytes_consumed: 0, elapsed_micros: 10 },
+            termination: "effect_unknown",
+          },
+          payload: run,
+        },
       },
     },
   };
 }
 
-function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required") {
+function automaticProblem(
+  kind: "conflict" | "partial_effect" | "reset_required" | "not_found_or_not_authorized",
+) {
   const requestId = `request.dashboard.${kind}`;
+  const concealed = kind === "not_found_or_not_authorized";
   const scope = {
     project_id: "project.dashboard",
     repository_id: "repository.dashboard",
@@ -809,7 +478,7 @@ function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required"
   return {
     kind: "problem",
     value: {
-      binding_id: "binding.http.fact_store_curate.v1",
+      ...(concealed ? {} : { binding_id: "binding.http.fact_store_curate.v1" }),
       contract: {
         schema_id: "schema.application.retained.fact-store-curate.result",
         schema_revision: 1,
@@ -818,31 +487,36 @@ function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required"
       problem: {
         revision: 1,
         kind,
-        code: `automation.memory-curator.${kind}`,
-        message: kind === "partial_effect"
+        code: concealed
+          ? "application.not_found_or_not_authorized"
+          : `automation.memory-curator.${kind}`,
+        message: concealed
+          ? "The operation was not found or not authorized."
+          : kind === "partial_effect"
           ? "curation committed before projection failed"
           : kind === "reset_required"
           ? "the retained memory store must be reset"
           : "the retained operation conflicts with current state",
-        diagnostic: kind === "conflict"
-          ? {
-              code: "application.retained.conflict",
-              message: "The retained operation conflicts with current state.",
-            }
-          : null,
+        diagnostic: concealed ? null : {
+          code: `application.retained.${kind}`,
+          message: "The retained operation could not complete.",
+        },
+        detail: null,
         committed_receipt: effectReceipt,
         owning_layer: "runtime",
-        terminality: kind === "conflict" ? "pre_admission" : "admitted_terminal",
+        terminality: kind === "partial_effect" || kind === "reset_required"
+          ? "admitted_terminal"
+          : "pre_admission",
         retryable: kind === "conflict",
         retry: kind === "conflict" ? "after_revalidate" : "never",
-        retry_scope: null,
+        retry_scope: kind === "conflict" ? "fresh_request" : null,
         retry_after_millis: null,
         cancellation_stage: null,
         execution_failure_classification: null,
         request_id: requestId,
         trace_id: requestId,
         details: [],
-        legal_actions: [
+        legal_actions: concealed ? [] : [
           kind === "partial_effect"
             ? "reconcile"
             : kind === "reset_required"

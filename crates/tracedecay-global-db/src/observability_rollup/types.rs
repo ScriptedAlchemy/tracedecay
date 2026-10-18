@@ -136,6 +136,7 @@ pub struct ObservabilityRollupRetentionReceiptV1 {
     pub expired_generations: u64,
     pub expired_journal_entries: u64,
     pub expired_dirty_days: u64,
+    pub advanced_frontiers: u64,
 }
 
 #[derive(Clone)]
@@ -165,8 +166,8 @@ pub(super) fn validate_day(day_start_seconds: i64) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn merge_coverage(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
-    #[hotpath::skip]
+/// The less trustworthy of two coverage claims.
+pub fn merge_coverage(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
     const fn rank(state: CoverageStateV1) -> u8 {
         match state {
             CoverageStateV1::Known => 0,

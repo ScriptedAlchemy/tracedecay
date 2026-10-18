@@ -6,7 +6,7 @@ import {
   WorkGraphReadV1Schema,
   type ExecutionTopologyMetricsV1,
   type WorkAttemptListV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { workAttempt as attempt, workAttemptList } from '../../test/workAttemptFixture.ts';
 import { workGraphRead, type WorkGraphVersionSpec } from '../../test/workGraphFixture.ts';
 import {
@@ -18,8 +18,8 @@ import type { WorkResult } from './workApi.ts';
 import type { WorkChannel } from './workChannel.ts';
 import { workGraphReading, type WorkGraphReading } from './workGraphModel.ts';
 import {
-  WORK_ACCOUNTING_DIMENSIONS,
-  WORK_ACCOUNTING_FACETS,
+  accountingCardCoverage,
+  unavailableCard,
   type WorkAccountingCard,
   type WorkAccountingDimension,
 } from './workAccountingModel.ts';
@@ -35,7 +35,7 @@ import { workTopologyAccounting } from './workTopologyAccounting.ts';
  * contract change.
  *
  * The assertions are organised around the plan's two testable invariants
- * rather than around the code's structure — every card exposes all seven
+ * rather than around the code's structure, every card exposes all seven
  * facets, and nothing unsupported or under-floor is ever rendered as a zero.
  * A card that lost a facet or grew a fabricated figure fails here first.
  */
@@ -107,121 +107,6 @@ function absence(channel: WorkChannel<unknown>): { state: string; detail: string
   return { state: channel.state, detail: channel.detail };
 }
 
-describe('the shape of the ledger', () => {
-  it('carries Plan 26’s twelve dimensions in the order the plan enumerates them', () => {
-    expect(WORK_ACCOUNTING_DIMENSIONS).toEqual([
-      'concurrency_and_fanout',
-      'duplicate_work',
-      'conflict_confusion',
-      'ready_to_integrated_latency',
-      'integration_outcomes',
-      'stale_stack_age',
-      'github_stack_capability',
-      'blocked_time',
-      'reruns',
-      'duplicate_effects',
-      'operational_leaks',
-      'delivery_fanout',
-    ]);
-
-    const reading = workTopologyAccounting(listed([]), graphOf());
-    expect(reading.cards.map((card) => card.dimension)).toEqual(WORK_ACCOUNTING_DIMENSIONS);
-  });
-
-  /**
-   * The plan's card contract, asserted as a contract rather than card by card.
-   * Every dimension, in every read state, exposes all seven facets — a facet
-   * that cannot be established is present and absent, never missing.
-   */
-  it('exposes all seven mandated facets on every card, in every read state', () => {
-    const states: readonly [string, ReturnType<typeof workTopologyAccounting>][] = [
-      ['unread', workTopologyAccounting(undefined, { state: 'pending' })],
-      [
-        'refused',
-        workTopologyAccounting(
-          { outcome: 'refused', state: 'unavailable', detail: 'the Work runtime is unavailable' },
-          { state: 'refused', chip: 'unavailable', detail: 'the Work runtime is unavailable' },
-        ),
-      ],
-      ['empty page', workTopologyAccounting(listed([]), graphOf())],
-      [
-        'read',
-        workTopologyAccounting(
-          listed([attempt({ taskId: 'alpha', runId: 'run-1', attemptId: 'a-1' })]),
-          graphOf(),
-        ),
-      ],
-    ];
-
-    for (const [label, reading] of states) {
-      expect(reading.cards, label).toHaveLength(12);
-      for (const card of reading.cards) {
-        for (const facet of WORK_ACCOUNTING_FACETS) {
-          const channel = card.provenance[facet];
-          expect(channel, `${label} · ${card.dimension} · ${facet}`).toBeDefined();
-          // A facet is a channel: proved with a value, or absent with a state
-          // and a sentence. There is no third shape and no empty default.
-          if (channel.available) expect(channel.value).toBeDefined();
-          else {
-            expect(channel.state.length).toBeGreaterThan(0);
-            expect(channel.detail.length).toBeGreaterThan(0);
-          }
-        }
-      }
-    }
-  });
-
-  /**
-   * The no-falsified-UI invariant, asserted over the whole ledger at once.
-   *
-   * The undecoded dimensions must render as absences that name the event kind
-   * that feeds them — not a zero, and not a silently omitted row — and the two
-   * metrics-fed cards must wear the metrics read's own state when that read
-   * has not answered.
-   */
-  it('renders every undecoded dimension as a stated absence rather than a zero', () => {
-    const reading = workTopologyAccounting(
-      listed([attempt({ taskId: 'alpha', runId: 'run-1', attemptId: 'a-1' })]),
-      graphOf(),
-    );
-
-    const undecoded: readonly WorkAccountingDimension[] = [
-      'duplicate_work',
-      'conflict_confusion',
-      'ready_to_integrated_latency',
-      'stale_stack_age',
-      'operational_leaks',
-      'delivery_fanout',
-    ];
-
-    for (const dimension of undecoded) {
-      const card = cardOf(reading, dimension);
-      const stated = absence(card.reading);
-      expect(stated.state, dimension).toBe('unsupported');
-      expect(stated.detail, dimension).toContain('ExecutionTopologyMetricsV1');
-      // The event kind a reviewer greps for, on the card itself.
-      expect(stated.detail, dimension).toMatch(/work\.[a-z_]+\.[a-z_.]*v1/);
-      for (const row of card.rows) {
-        expect(row.channel.available, `${dimension} · ${row.key}`).toBe(false);
-      }
-    }
-
-    // The metrics-fed cards carry the read's own state — here, unread — and
-    // never a zero.
-    for (const dimension of ['integration_outcomes', 'github_stack_capability'] as const) {
-      const card = cardOf(reading, dimension);
-      const stated = absence(card.reading);
-      expect(stated.state, dimension).toBe('loading');
-      expect(stated.detail, dimension).toContain('topology-metrics read has not answered');
-      for (const row of card.rows) {
-        expect(row.channel.available, `${dimension} · ${row.key}`).toBe(false);
-      }
-    }
-
-    expect(reading.measured).toBe(1);
-  });
-});
-
 describe('the concurrency ladder', () => {
   it('reads the two widths the workload projection carries and states the other three', () => {
     const card = cardOf(
@@ -248,7 +133,7 @@ describe('the concurrency ladder', () => {
   });
 
   /** The authority withholds both widths unless runtime coverage was complete.
-   * Withheld is `partial` with a sentence — a graph that could not be counted
+   * Withheld is `partial` with a sentence, a graph that could not be counted
    * is not a graph running nothing. */
   it('renders a withheld width as partial rather than as zero', () => {
     const card = cardOf(
@@ -307,7 +192,7 @@ describe('the concurrency ladder', () => {
     });
   });
 
-  it('states the graph read’s own reason when it has not answered', () => {
+  it('states the graph read\'s own reason when it has not answered', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), {
         state: 'refused',
@@ -319,8 +204,8 @@ describe('the concurrency ladder', () => {
     const stated = absence(card.reading);
     expect(stated.state).toBe('denied');
     expect(stated.detail).toContain('no authorized work-product scope');
-    for (const facet of WORK_ACCOUNTING_FACETS) {
-      expect(card.provenance[facet].available, facet).toBe(false);
+    for (const [facet, channel] of Object.entries(card.provenance)) {
+      expect(channel.available, facet).toBe(false);
     }
   });
 
@@ -404,6 +289,7 @@ describe('the rerun census', () => {
       attemptId: 'b-1',
       state: 'recovery_required',
       recovery: {
+        observed_at: 1_700_000_000_000_000,
         reason: 'provider_unavailable',
         source_attempt_id: null,
         state: 'recovery_required',
@@ -480,7 +366,7 @@ describe('the rerun census', () => {
     expect(figure(rows.get('runtime_recovery_required')!).value).toBe(0);
   });
 
-  it('carries the daemon’s refusal rather than a census of zero', () => {
+  it('carries the daemon\'s refusal rather than a census of zero', () => {
     const card = cardOf(
       workTopologyAccounting(
         { outcome: 'refused', state: 'unavailable', detail: 'the Work runtime is unavailable' },
@@ -496,7 +382,7 @@ describe('the rerun census', () => {
     }
   });
 
-  it('keeps a capped page’s eligible denominator partial instead of deriving a full set', () => {
+  it('keeps a capped page\'s eligible denominator partial instead of deriving a full set', () => {
     const capped: WorkResult<WorkAttemptListV1> = {
       outcome: 'value',
       value: WorkAttemptListV1Schema.parse(
@@ -504,10 +390,7 @@ describe('the rerun census', () => {
           coverage: 'capped',
           returned: 1,
           remaining: 41,
-          resume: {
-            generation: 'generation-7',
-            start_after: { attempt_id: 'a-1', run_id: 'run-1', task_id: 'alpha' },
-          },
+          resume: 'bc1.resume',
         }),
       ),
     };
@@ -613,12 +496,6 @@ describe('the conflict confusion matrices', () => {
     expect(card.rows).toHaveLength(0);
     expect(absence(card.reading).detail).toContain('no accuracy, precision, or recall scalar');
   });
-
-  it('is the only card that carries matrices', () => {
-    const reading = workTopologyAccounting(listed([]), graphOf());
-    const withMatrices = reading.cards.filter((card) => card.matrices !== null);
-    expect(withMatrices.map((card) => card.dimension)).toEqual(['conflict_confusion']);
-  });
 });
 
 describe('observed integration outcomes', () => {
@@ -658,7 +535,7 @@ describe('observed integration outcomes', () => {
     ],
   });
 
-  it('decodes the projector’s kind × outcome cells verbatim', () => {
+  it('decodes the projector\'s kind × outcome cells verbatim', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), graphOf(), undefined, MERGE_CELLS),
       'integration_outcomes',
@@ -686,7 +563,7 @@ describe('observed integration outcomes', () => {
   });
 
   it('propagates the typed absence when the support floor suppresses every cell', () => {
-    // A card over nothing but suppressed cells wears the projector's reason —
+    // A card over nothing but suppressed cells wears the projector's reason,
     // never an available "0 observed" headline read off a wiped envelope.
     const suppressed = metricsOf({
       measurements: [
@@ -737,7 +614,7 @@ describe('observed integration outcomes', () => {
     expect(figure(card.provenance.support).value).toBe(7);
   });
 
-  it('carries the projector’s typed absence for an empty horizon rather than zero cells', () => {
+  it('carries the projector\'s typed absence for an empty horizon rather than zero cells', () => {
     const empty = metricsOf({
       measurements: [
         topologyMeasurement({
@@ -760,7 +637,7 @@ describe('observed integration outcomes', () => {
     expect(stated.detail).toContain('no eligible evidence');
   });
 
-  it('carries the metrics read’s refusal rather than an empty ledger', () => {
+  it('carries the metrics read\'s refusal rather than an empty ledger', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), graphOf(), undefined, {
         outcome: 'refused',
@@ -772,14 +649,14 @@ describe('observed integration outcomes', () => {
     const stated = absence(card.reading);
     expect(stated.state).toBe('unavailable');
     expect(stated.detail).toContain('the observation store is unavailable');
-    for (const facet of WORK_ACCOUNTING_FACETS) {
-      expect(card.provenance[facet].available, facet).toBe(false);
+    for (const [facet, channel] of Object.entries(card.provenance)) {
+      expect(channel.available, facet).toBe(false);
     }
   });
 });
 
 describe('GitHub stack capability', () => {
-  it('reads the projection’s own capability state and fallback observations', () => {
+  it('reads the projection\'s own capability state and fallback observations', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), graphOf(), undefined, metricsOf({
         githubStackCapability: {
@@ -800,7 +677,7 @@ describe('GitHub stack capability', () => {
     expect(card.reading.value).toContain('other-forge fallback unobserved');
   });
 
-  it('states the projector’s typed reason when no trustworthy observation exists', () => {
+  it('states the projector\'s typed reason when no trustworthy observation exists', () => {
     const card = cardOf(
       workTopologyAccounting(listed([]), graphOf(), undefined, metricsOf()),
       'github_stack_capability',
@@ -811,9 +688,61 @@ describe('GitHub stack capability', () => {
   });
 });
 
-describe('the near misses', () => {
-  it('does not borrow the retry weave for adjudicated duplicate work', () => {
-    const card = cardOf(workTopologyAccounting(listed([]), graphOf()), 'duplicate_work');
-    expect(absence(card.reading).detail).toContain('retry chain and not duplicate work');
+describe('the coverage partition', () => {
+  const UNCOVERED: readonly WorkAccountingDimension[] = [
+    'duplicate_work',
+    'conflict_confusion',
+    'ready_to_integrated_latency',
+    'stale_stack_age',
+    'operational_leaks',
+    'delivery_fanout',
+  ];
+  const STATED: readonly WorkAccountingDimension[] = [
+    'concurrency_and_fanout',
+    'integration_outcomes',
+    'github_stack_capability',
+    'blocked_time',
+    'reruns',
+    'duplicate_effects',
+  ];
+  const dimensions = (cards: readonly WorkAccountingCard[]) => cards.map((card) => card.dimension);
+
+  it('sets apart exactly the dimensions this ledger decodes nothing for, in mandate order', () => {
+    const reading = workTopologyAccounting(
+      listed([attempt({ taskId: 'alpha', runId: 'run-1', attemptId: 'a-1' })]),
+      graphOf({ ...BASE_GRAPH, requestedConcurrency: 4, actualConcurrency: 2 }),
+      undefined,
+      metricsOf(),
+    );
+
+    expect(dimensions(reading.uncovered)).toEqual(UNCOVERED);
+    expect(dimensions(reading.stated)).toEqual(STATED);
+  });
+
+  it('keeps a card whose read refused or conflicts among the stated cards', () => {
+    const reading = workTopologyAccounting(
+      { outcome: 'refused', state: 'unavailable', detail: 'attempt list refused' },
+      graphWithRuntimeGeneration('generation-other'),
+      undefined,
+      { outcome: 'refused', state: 'unavailable', detail: 'metrics refused' },
+    );
+
+    expect(dimensions(reading.stated)).toEqual(STATED);
+    expect(dimensions(reading.uncovered)).toEqual(UNCOVERED);
+    expect(absence(cardOf(reading, 'reruns').reading).state).toBe('unavailable');
+    expect(absence(cardOf(reading, 'integration_outcomes').reading).state).toBe('unavailable');
+  });
+
+  it('never sets apart a card that carries a contradiction', () => {
+    const blank = unavailableCard('stale_stack_age', 'stale-stack age', [
+      { key: 'stack_age', label: 'Stack age distribution', measure: 'the stale-stack age distribution' },
+    ]);
+    expect(accountingCardCoverage(blank)).toBe('uncovered');
+    expect(
+      accountingCardCoverage({
+        ...blank,
+        contradictions: [{ key: 'age', state: 'conflicting', detail: 'two ages disagree' }],
+      }),
+    ).toBe('stated');
   });
 });

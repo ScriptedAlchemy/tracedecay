@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   WorkAttemptListV1Schema,
   type WorkAttemptListCoverageV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import {
   workAttempt as attempt,
   workAttemptList,
@@ -56,7 +56,7 @@ describe('the states the attempt list can be in', () => {
   /**
    * The stale-cursor refusal. A cursor minted under a superseded topology
    * generation is refused by the daemon rather than continued, and the reading
-   * has to carry that refusal rather than degrade into an empty page — an empty
+   * has to carry that refusal rather than degrade into an empty page, an empty
    * execution record would say "nothing ran", which is the opposite of "the
    * topology moved while you were paging".
    */
@@ -79,10 +79,7 @@ describe('the states the attempt list can be in', () => {
     const capped = page([attempt({ taskId: 'root', runId: 'run-1', attemptId: 'attempt-1' })], {
       coverage: 'capped',
       remaining: 41,
-      resume: {
-        generation: 'generation-7',
-        start_after: { attempt_id: 'attempt-1', run_id: 'run-1', task_id: 'root' },
-      },
+      resume: 'bc1.resume',
       returned: 1,
     });
 
@@ -113,7 +110,7 @@ describe('executor identity', () => {
   });
 
   /** An attempt whose actual route is unobserved is still attributed to the
-   * route that was asked for — and the row says how much of itself is request
+   * route that was asked for, and the row says how much of itself is request
    * rather than observation, so the two can never be read as one figure. */
   it('separates observed execution from attribution by request', () => {
     const reading = page([
@@ -291,7 +288,7 @@ describe('the observed terminal order', () => {
   });
 
   /** A running attempt has reached no terminal, so it has no instant to be
-   * ordered by. Giving it one — now, or the page's last instant — would be this
+   * ordered by. Giving it one, now, or the page's last instant, would be this
    * build inventing the measurement the order exists to report. */
   it('leaves an attempt that has not terminated out of the order entirely', () => {
     const reading = page([

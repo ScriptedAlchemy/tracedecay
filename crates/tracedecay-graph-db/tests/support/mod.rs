@@ -1,14 +1,15 @@
 #![allow(dead_code)] // shared test support: each contract target uses a subset
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use tracedecay_graph_db::GraphDbLeaseV1;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1, GraphDbRegistration,
-    GraphDbRegistry, GraphDbRegistryConfig,
+    GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1,
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphGenerationManifestProvider,
 };
 use tracedecay_store::{
     BrainId, ProjectId, RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
@@ -67,6 +68,11 @@ pub struct RegisteredGraph {
     pub registry: GraphDbRegistry,
     pub binding: StoreRuntimeBindingV1,
     root: PathBuf,
+    /// Kept alive only for lazy mounts. The last client lease / snapshot drop
+    /// hibernates the staging engine only while this attachment still lives;
+    /// dropping it leaves the engine resident because the registry still holds
+    /// the owner (neither hibernate nor close).
+    lazy_owner: Mutex<Option<GraphDbOwnerAttachmentV1>>,
 }
 
 #[derive(Debug)]
@@ -86,6 +92,7 @@ impl RegisteredGraph {
             registry,
             binding,
             root: root.to_path_buf(),
+            lazy_owner: Mutex::new(None),
         })
     }
 
@@ -95,12 +102,60 @@ impl RegisteredGraph {
         Ok(registered)
     }
 
+    /// Eager mount whose registry can hydrate a journaled sealed-code-generation
+    /// replay. Production remounts always have that provider; the default
+    /// test registry is inline-only and cannot recover a sealed-only head.
+    pub fn new_mounted_with_manifest_provider(
+        root: &Path,
+        provider: Arc<dyn GraphGenerationManifestProvider>,
+    ) -> Result<Self, GraphDbError> {
+        let registered = Self {
+            registry: GraphDbRegistry::new_with_manifest_provider(
+                GraphDbRegistryConfig { max_open: 1 },
+                provider,
+            )?,
+            binding: binding(),
+            root: root.to_path_buf(),
+            lazy_owner: Mutex::new(None),
+        };
+        registered.mount()?;
+        Ok(registered)
+    }
+
+    /// Lazy counterpart of [`Self::new_mounted`]: registers the owner without
+    /// opening the native staging engine.
+    ///
+    /// After the first publish / snapshot opens the engine, dropping every
+    /// [`GraphDbLeaseV1`], verified snapshot, and `VerifiedGraphCommit`
+    /// hibernates it. Confirm with `GraphDb::staging_engine_is_open` on a
+    /// freshly resolved lease, `resolve` does not reopen a hibernated lazy
+    /// engine; `snapshot`, publish, and `staging_generation_row_counts` do.
+    pub fn new_mounted_lazy(root: &Path) -> Result<Self, GraphDbError> {
+        let registered = Self::new(root)?;
+        registered.mount_lazy()?;
+        Ok(registered)
+    }
+
     pub fn mount(&self) -> Result<(), GraphDbError> {
         let registration = registration(self.binding.clone(), &self.root);
         let owner_attachment = self
             .registry
             .resolve_owner_attachment(owner_registration(registration))?;
         drop(owner_attachment);
+        Ok(())
+    }
+
+    /// Same shape as [`Self::mount`], through `resolve_lazy_owner_attachment`.
+    ///
+    /// Retains the owner attachment so a later last-lease drop hibernates
+    /// instead of leaving the engine resident. See [`Self::new_mounted_lazy`].
+    pub fn mount_lazy(&self) -> Result<(), GraphDbError> {
+        let registration = registration(self.binding.clone(), &self.root);
+        let owner_attachment = self
+            .registry
+            .resolve_lazy_owner_attachment(owner_registration(registration))?;
+        let mut lazy_owner = self.lazy_owner.lock().expect("lazy owner attachment lock");
+        *lazy_owner = Some(owner_attachment);
         Ok(())
     }
 
@@ -171,4 +226,127 @@ fn binding() -> StoreRuntimeBindingV1 {
         StoreIncarnationV1::new(1).unwrap(),
         StoreAuthorityEpochV1::new(1).unwrap(),
     )
+}
+
+/// No production graph or `SQLite` backend reads this variable. Crash children
+/// still drop it from their environment so a leftover export cannot be mistaken
+/// for a durability setting the fixture exercised.
+pub const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
+pub const GRAPH_CRASH_CHILD_ROOT_ENV: &str = "TRACEDECAY_GRAPH_CRASH_CHILD_ROOT";
+const GRAPH_CRASH_CHILD_READY: &str = "durable-phase.ready";
+const GRAPH_CRASH_CHILD_TIMEOUT: Duration = Duration::from_secs(45);
+
+pub fn crash_child_root() -> Option<PathBuf> {
+    std::env::var_os(GRAPH_CRASH_CHILD_ROOT_ENV).map(PathBuf::from)
+}
+
+pub fn mark_durable_phase(root: &Path) {
+    std::fs::write(root.join(GRAPH_CRASH_CHILD_READY), b"wal-synced").unwrap_or_else(|error| {
+        panic!("write durable-phase marker: {error}");
+    });
+}
+
+/// Runs this test in a child that reaches the durable WAL phase and exits
+/// without closing the store, then copies the abandoned container and sidecar.
+///
+/// This is subprocess unclean-exit proof, not machine power-loss durability.
+/// The child is bounded and reaped on every path: a hang or a missing
+/// durable-phase marker fails the fixture instead of leaving locks behind.
+/// The copy happens only after that process is gone, so Windows is not asked
+/// to `fs::copy` a live store.
+pub fn capture_unclean_crash_image(destination: &Path) {
+    let source = tempfile::TempDir::new().expect("crash source");
+    run_unclean_crash_child(source.path());
+    assert!(
+        source.path().join(GRAPH_CRASH_CHILD_READY).is_file(),
+        "crash child must reach the durable phase before the parent copies"
+    );
+    copy_crash_image(source.path(), destination);
+}
+
+fn current_test_name() -> String {
+    std::env::var("NEXTEST_TEST_NAME")
+        .ok()
+        .or_else(|| std::thread::current().name().map(str::to_owned))
+        .expect("crash child spawn needs the libtest/nextest test name")
+}
+
+fn run_unclean_crash_child(root: &Path) {
+    let test_name = current_test_name();
+    let mut child = Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", &test_name, "--nocapture"])
+        .env(GRAPH_CRASH_CHILD_ROOT_ENV, root)
+        .env_remove(SQLITE_UNSAFE_FAST_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn crash child for {test_name}: {error}"));
+    let status = wait_crash_child(&mut child, GRAPH_CRASH_CHILD_TIMEOUT).unwrap_or_else(|error| {
+        reap_crash_child(&mut child);
+        panic!("crash child {test_name}: {error}");
+    });
+    assert!(
+        status.success(),
+        "crash child {test_name} failed ({status:?})"
+    );
+}
+
+fn wait_crash_child(
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                return Err(format!(
+                    "exceeded {timeout:?} without exiting; reaped so locks cannot leak"
+                ));
+            }
+            Err(error) => return Err(format!("wait failed: {error}")),
+        }
+    }
+}
+
+fn reap_crash_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Recursively copies a *closed or abandoned* store's container and sidecar.
+/// Callers must not use this against a live Windows handle (lock violation 33).
+pub fn copy_crash_image(from_root: &Path, to_root: &Path) {
+    let from = graph_path(from_root);
+    let to = graph_path(to_root);
+    std::fs::copy(&from, &to).unwrap_or_else(|error| {
+        panic!(
+            "copy abandoned crash container {} -> {}: {error}",
+            from.display(),
+            to.display()
+        );
+    });
+    let from_sidecar = sidecar_wal_path(&from);
+    let to_sidecar = sidecar_wal_path(&to);
+    std::fs::create_dir_all(&to_sidecar).unwrap();
+    for entry in std::fs::read_dir(&from_sidecar).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), to_sidecar.join(entry.file_name())).unwrap_or_else(|error| {
+            panic!(
+                "copy abandoned crash WAL {} -> {}: {error}",
+                entry.path().display(),
+                to_sidecar.display()
+            );
+        });
+    }
+}
+
+pub fn sidecar_wal_path(path: &Path) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".wal");
+    PathBuf::from(sidecar)
 }

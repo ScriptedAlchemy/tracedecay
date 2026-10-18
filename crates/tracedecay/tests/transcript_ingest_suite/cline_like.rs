@@ -1,76 +1,86 @@
 use tempfile::TempDir;
-use tracedecay_global_db::ParseOffset;
-#[cfg(not(windows))]
+use tracedecay_domain::{
+    ClineTranscriptStream, ObservationScopeV1, ObservationSourceCursorV1, ProviderId, SessionId,
+};
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
-use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
+use tracedecay_sessions::runtime::hosts::cline_like::{
+    ClineLikeSource, capture_cline_like_snapshot_observations,
+};
+use tracedecay_sessions::runtime::source::TranscriptIngestError;
 #[cfg(not(windows))]
 use tracedecay_store::ObservationProjectionStore;
+use tracedecay_store::ObservationReplayRequest;
 
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
-#[cfg(not(windows))]
-use crate::restart_atomicity::durable_table_count;
 use crate::restart_atomicity::{
-    ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks,
-    ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
-    open_project_session_db, set_projection_failure, try_ingest_source,
+    ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, durable_table_count,
+    ingest_global_sources_for_provider, ingest_user_provider, mark_test_project,
+    open_project_session_db, set_projection_failure,
 };
 use crate::support::{
-    assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
+    assert_metadata_path_eq, assert_path_text_eq, create_git_repo_with_linked_worktree,
+    init_git_repo, setup,
 };
 
 pub(super) fn vscode_storage_root(
     home: &std::path::Path,
     extension_id: &str,
 ) -> std::path::PathBuf {
-    tracedecay::agents::vscode_data_dir(home)
-        .join("User/globalStorage")
+    // Joined per component to match the source's native spelling; the task
+    // paths derived from this root are compared against stored cursor keys.
+    tracedecay_agent_hosts::agents::vscode_data_dir(home)
+        .join("User")
+        .join("globalStorage")
         .join(extension_id)
         .join("tasks")
 }
 
-async fn parse_offset_for_path(
+async fn cline_stream_cursor(
     db: &ProjectSessionTestRuntime,
-    path: &std::path::Path,
-) -> Option<ParseOffset> {
-    let path = path.to_string_lossy();
-    if let Some(offset) = db.get_parse_offset(path.as_ref()).await {
-        return Some(offset);
-    }
-
-    #[cfg(windows)]
-    {
-        let alternate = if path.contains('/') {
-            path.replace('/', "\\")
-        } else {
-            path.replace('\\', "/")
-        };
-        if alternate != path {
-            return db.get_parse_offset(&alternate).await;
-        }
-    }
-
-    None
+    provider: &str,
+    session_id: &str,
+    stream: ClineTranscriptStream,
+) -> ObservationSourceCursorV1 {
+    let source = stream
+        .source_identity(
+            ProviderId::new(provider).unwrap(),
+            SessionId::new(session_id).unwrap(),
+        )
+        .unwrap();
+    db.runtime()
+        .project_observation_source_cursor_for_test(&source)
+        .await
+        .expect("read native Cline stream cursor")
+        .unwrap_or_else(|| panic!("{provider}: missing {stream:?} observation cursor"))
 }
 
-pub(super) async fn parse_offset_for_task_history(
+async fn cline_usage_observations(
     db: &ProjectSessionTestRuntime,
-    _project: &std::path::Path,
-    path: &std::path::Path,
-) -> Option<ParseOffset> {
-    if let Some(offset) = parse_offset_for_path(db, path).await {
-        return Some(offset);
-    }
-
-    let task_dir = path.parent()?.file_name()?.to_string_lossy();
-    let file_name = path.file_name()?.to_string_lossy();
-    let expected_suffix = format!("{task_dir}/{file_name}");
+) -> std::collections::BTreeMap<String, serde_json::Value> {
     db.runtime()
-        .project_parse_offset_by_suffix_for_test(&expected_suffix)
+        .replay_observations(
+            HostAdmissionScope::Project,
+            ObservationReplayRequest::new(0, 100).unwrap(),
+        )
         .await
-        .ok()
-        .flatten()
+        .unwrap()
+        .into_iter()
+        .filter_map(|row| {
+            let value = serde_json::to_value(row.observation()).unwrap();
+            value["payload"]["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|fact| fact["kind"] == "uncorrelated_usage")
+                .then(|| {
+                    (
+                        row.observation().observation_id().as_str().to_owned(),
+                        value,
+                    )
+                })
+        })
+        .collect()
 }
 
 pub(super) fn write_task(
@@ -123,21 +133,20 @@ pub(super) fn write_task_with_api_filename(
 }
 
 async fn assert_provider_ingests(
-    provider: &str,
-    source: ClineLikeSource,
+    kind: SessionProvider,
+    home: &std::path::Path,
     db: &ProjectSessionTestRuntime,
     ingest_project: &std::path::Path,
-    transcript_project: &std::path::Path,
 ) {
-    let stats = try_ingest_source(db, &source, ingest_project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 3);
+    ingest_global_sources_for_provider(home, db, ingest_project, Some(kind)).await;
+    // user + assistant + the UI sidecar's usage record
+    assert_eq!(durable_table_count(db, "observations").await, 3);
+    let provider = kind.id();
 
     let results = db
         .search_session_messages(
             provider,
-            Some(ingest_project.to_string_lossy().as_ref()),
+            Some(db.project_id().as_str()),
             "billing pipeline",
             10,
         )
@@ -163,33 +172,6 @@ async fn assert_provider_ingests(
         .iter()
         .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
         .expect("assistant tool-use message should be searchable");
-    let metadata: serde_json::Value =
-        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_metadata_path_eq(&metadata["cline_like_task_cwd"], transcript_project);
-    assert_metadata_path_eq(&metadata["cline_like_task_worktree"], transcript_project);
-    assert_eq!(
-        metadata["cline_like_task_location_provenance"].as_str(),
-        Some("task_metadata")
-    );
-    assert!(metadata.get("usage").is_none());
-    let usage_hits = db
-        .search_session_messages(provider, None, "input_tokens", 10)
-        .await;
-    assert_eq!(usage_hits.len(), 1);
-    assert_eq!(usage_hits[0].message.kind.as_deref(), Some("usage"));
-    let usage_metadata: serde_json::Value = serde_json::from_str(
-        usage_hits[0]
-            .message
-            .metadata_json
-            .as_deref()
-            .expect("usage metadata"),
-    )
-    .unwrap();
-    assert_eq!(usage_metadata["usage"]["input_tokens"], 1200);
-    assert_eq!(usage_metadata["usage"]["output_tokens"], 350);
-    assert_eq!(usage_metadata["usage"]["cache_read_input_tokens"], 8000);
-    assert_eq!(usage_metadata["usage"]["cache_creation_input_tokens"], 500);
-    assert_eq!(usage_metadata["correlation"], "unavailable");
     let expected_content = serde_json::json!([
         {"type": "text", "text": "The billing pipeline regression is fixed."},
         {"type": "tool_use", "name": "read_file"}
@@ -202,30 +184,9 @@ async fn assert_provider_ingests(
         raw.content,
         serde_json::to_string(&expected_content).unwrap()
     );
-    let session = db
-        .get_session(provider, &assistant.message.session_id)
-        .await
-        .expect("Cline-like session should be stored");
-    let session_metadata: serde_json::Value =
-        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
-    assert_metadata_path_eq(&session_metadata["cline_like_task_cwd"], transcript_project);
-    assert_metadata_path_eq(
-        &session_metadata["cline_like_task_worktree"],
-        transcript_project,
-    );
-    assert_eq!(
-        session_metadata["cline_like_task_location_provenance"].as_str(),
-        Some("task_metadata")
-    );
-
-    // ContentHash: unchanged full-rewrite file is a no-op.
-    assert_eq!(
-        try_ingest_source(db, &source, ingest_project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
+    // An unchanged snapshot re-admits as an exact duplicate.
+    ingest_global_sources_for_provider(home, db, ingest_project, Some(kind)).await;
+    assert_eq!(durable_table_count(db, "observations").await, 3);
 }
 
 #[tokio::test]
@@ -241,60 +202,73 @@ async fn cline_task_history_populates_searchable_messages() {
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    assert_provider_ingests(
-        "cline",
-        ClineLikeSource::cline_with_home(&home),
-        &db,
-        &project,
-        &linked_worktree,
-    )
-    .await;
+    assert_provider_ingests(SessionProvider::Cline, &home, &db, &project).await;
 }
 
 #[tokio::test]
-async fn roo_code_task_history_populates_searchable_messages() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let linked_worktree = tmp.path().join("linked-worktree");
-    create_git_repo_with_linked_worktree(&project, &linked_worktree);
-    write_task(
-        &vscode_storage_root(&home, "rooveterinaryinc.roo-cline"),
-        &linked_worktree,
-        "roo-task",
-    );
+async fn cline_like_task_location_projects_session_metadata() {
+    // Table-driven across the three Cline-like storage roots.
+    for (provider, extension_id, selected_provider) in [
+        ("cline", "saoudrizwan.claude-dev", SessionProvider::Cline),
+        (
+            "roo-code",
+            "rooveterinaryinc.roo-cline",
+            SessionProvider::RooCode,
+        ),
+        ("kilo", "kilocode.kilo-code", SessionProvider::Kilo),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let api_history = write_task(
+            &vscode_storage_root(&home, extension_id),
+            &project,
+            &format!("{provider}-location"),
+        );
 
-    let db = open_project_session_db(&project).await.unwrap();
-    assert_provider_ingests(
-        "roo-code",
-        ClineLikeSource::roo_code_with_home(&home),
-        &db,
-        &project,
-        &linked_worktree,
-    )
-    .await;
-}
+        let db = open_project_session_db(&project).await.unwrap();
+        ingest_global_sources_for_provider(&home, &db, &project, Some(selected_provider)).await;
 
-#[tokio::test]
-async fn kilo_task_history_populates_searchable_messages() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let linked_worktree = tmp.path().join("linked-worktree");
-    create_git_repo_with_linked_worktree(&project, &linked_worktree);
-    write_task(
-        &vscode_storage_root(&home, "kilocode.kilo-code"),
-        &linked_worktree,
-        "kilo-task",
-    );
+        let cwd_key = format!("{provider}_session_cwd");
+        let worktree_key = format!("{provider}_session_worktree");
+        let provenance_key = format!("{provider}_session_location_provenance");
 
-    let db = open_project_session_db(&project).await.unwrap();
-    assert_provider_ingests(
-        "kilo",
-        ClineLikeSource::kilo_with_home(&home),
-        &db,
-        &project,
-        &linked_worktree,
-    )
-    .await;
+        let session = db
+            .get_session(provider, &format!("{provider}-location"))
+            .await
+            .unwrap();
+        assert_path_text_eq(
+            session
+                .transcript_path
+                .as_deref()
+                .expect("session transcript path"),
+            &api_history,
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+        assert_metadata_path_eq(&metadata[cwd_key.as_str()], &project);
+        assert_metadata_path_eq(&metadata[worktree_key.as_str()], &project);
+        assert_eq!(
+            metadata[provenance_key.as_str()].as_str(),
+            Some("task_metadata"),
+            "{provider}: session location provenance"
+        );
+
+        let hit = db
+            .search_session_messages(provider, None, "billing pipeline", 10)
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{provider}: task message should be searchable"));
+        let message_metadata: serde_json::Value =
+            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+        assert_metadata_path_eq(&message_metadata[cwd_key.as_str()], &project);
+        assert_metadata_path_eq(&message_metadata[worktree_key.as_str()], &project);
+        assert_eq!(
+            message_metadata[provenance_key.as_str()].as_str(),
+            Some("task_metadata"),
+            "{provider}: message location provenance"
+        );
+    }
 }
 
 #[tokio::test]
@@ -308,38 +282,19 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        3
-    );
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    assert_eq!(durable_table_count(&db, "observations").await, 3);
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
 
     let ui_path = api.parent().unwrap().join("ui_messages.json");
-    let committed = parse_offset_for_task_history(&db, &project, &api)
-        .await
-        .expect("initial task generation cursor");
+    let committed = durable_table_count(&db, "observations").await;
+    assert_eq!(committed, 3, "an unchanged snapshot is an exact duplicate");
     std::fs::write(&ui_path, r#"[{"type":"say","say":"api_req_started""#).unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
     assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
-    assert_eq!(
-        parse_offset_for_task_history(&db, &project, &api).await,
-        Some(committed),
-        "incomplete companion snapshot must not replace the committed generation"
+        durable_table_count(&db, "observations").await,
+        committed,
+        "incomplete companion snapshot must not admit a new generation"
     );
 
     std::fs::write(
@@ -361,26 +316,12 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
     )
     .unwrap();
 
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    // The refreshed UI sidecar is a new source generation.
     assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        3
+        durable_table_count(&db, "observations").await,
+        committed + 1
     );
-    let usage = db
-        .search_session_messages("cline", None, "input_tokens", 10)
-        .await;
-    assert!(usage.iter().any(|hit| {
-        let metadata: serde_json::Value = serde_json::from_str(
-            hit.message
-                .metadata_json
-                .as_deref()
-                .expect("usage metadata"),
-        )
-        .unwrap();
-        metadata["usage"]["input_tokens"] == 2200
-    }));
 }
 
 #[tokio::test]
@@ -422,36 +363,13 @@ async fn cline_usage_index_skips_unemitted_assistant_entries() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        2
-    );
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    // the emitted assistant entry + the UI sidecar's usage record
+    assert_eq!(durable_table_count(&db, "observations").await, 2);
     let hits = db
         .search_session_messages("cline", None, "target", 10)
         .await;
     assert_eq!(hits.len(), 1);
-    let metadata: serde_json::Value =
-        serde_json::from_str(hits[0].message.metadata_json.as_deref().unwrap()).unwrap();
-    assert!(metadata.get("usage").is_none());
-    let usage = db
-        .search_session_messages("cline", None, "input_tokens", 10)
-        .await;
-    assert_eq!(
-        usage.len(),
-        1,
-        "usage hits: {:?}",
-        usage
-            .iter()
-            .map(|hit| (&hit.message.message_id, &hit.message.text))
-            .collect::<Vec<_>>()
-    );
-    let metadata: serde_json::Value =
-        serde_json::from_str(usage[0].message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["usage"]["input_tokens"], 777);
 }
 
 #[tokio::test]
@@ -489,10 +407,7 @@ async fn cline_unversioned_timestamp_free_identity_survives_insertion_and_reorde
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
     let before = db
         .search_session_messages("cline", None, "regression is fixed", 10)
         .await;
@@ -534,9 +449,7 @@ async fn cline_unversioned_timestamp_free_identity_survives_insertion_and_reorde
         .to_string(),
     )
     .unwrap();
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
 
     let after = db
         .search_session_messages("cline", None, "regression is fixed", 10)
@@ -551,8 +464,8 @@ async fn cline_unversioned_timestamp_free_identity_survives_insertion_and_reorde
     assert_eq!(reordered_ids, assistant_ids);
 }
 
-#[test]
-fn cline_complete_malformed_snapshot_is_typed_non_durable() {
+#[tokio::test]
+async fn cline_complete_malformed_snapshot_is_typed_non_durable() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
@@ -566,58 +479,26 @@ fn cline_complete_malformed_snapshot_is_typed_non_durable() {
     let api = dir.join("api_conversation_history.json");
     std::fs::write(&api, "{not-json]").unwrap();
 
-    let source = ClineLikeSource::cline_with_home(&home);
+    let db = open_project_session_db(&project).await.unwrap();
+    let captured = capture_cline_like_snapshot_observations(
+        &db.runtime().facade(),
+        &ClineLikeSource::cline_with_home(&home),
+        &project,
+        ObservationScopeV1::Project {
+            project_id: db.project_id().clone(),
+        },
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await;
     assert!(matches!(
-        source.try_parse_new(&api, StoredCursor::default(), &project, None),
+        captured,
         Err(TranscriptIngestError::NonDurableRecord {
             provider: "cline",
             reason: "malformed snapshot JSON",
             ..
         })
     ));
-}
-
-#[tokio::test]
-async fn cline_incomplete_snapshot_does_not_advance_content_hash_cursor() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
-    let dir = root.join("cline-invalid-json");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("task_metadata.json"),
-        serde_json::json!({"workspacePath": project}).to_string(),
-    )
-    .unwrap();
-    let api = dir.join("api_conversation_history.json");
-    std::fs::write(&api, r#"[{"role":"user","content":"still writing""#).unwrap();
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 0);
-
-    assert!(
-        parse_offset_for_task_history(&db, &project, &api)
-            .await
-            .is_none(),
-        "incomplete changed task history must not advance its cursor"
-    );
-
-    std::fs::write(
-        &api,
-        serde_json::json!([{"role":"user","content":"completed later"}]).to_string(),
-    )
-    .unwrap();
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        1
-    );
 }
 
 #[tokio::test]
@@ -638,17 +519,15 @@ async fn cline_missing_metadata_waits_for_later_metadata_before_advancing_cursor
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    let stats =
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline))
+            .await;
     assert_eq!(stats.messages_upserted, 0);
 
-    assert!(
-        parse_offset_for_task_history(&db, &project, &api)
-            .await
-            .is_none(),
-        "metadata-less task should not advance its cursor"
+    assert_eq!(
+        durable_table_count(&db, "observations").await,
+        0,
+        "metadata-less task must not admit observations"
     );
 
     std::fs::write(
@@ -661,15 +540,12 @@ async fn cline_missing_metadata_waits_for_later_metadata_before_advancing_cursor
     )
     .unwrap();
 
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    let stats =
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline))
+            .await;
     assert_eq!(stats.messages_upserted, 1);
 
-    let offset = parse_offset_for_task_history(&db, &project, &api)
-        .await
-        .expect("task should advance once metadata is available");
-    assert_ne!(offset.byte_offset, 0);
+    assert_eq!(durable_table_count(&db, "observations").await, 1);
 }
 
 #[tokio::test]
@@ -685,15 +561,8 @@ async fn cline_like_task_for_other_project_is_skipped() {
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = try_ingest_source(
-        &db,
-        &ClineLikeSource::cline_with_home(&home),
-        &project,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(stats.messages_upserted, 0);
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    assert_eq!(durable_table_count(&db, "observations").await, 0);
 }
 
 #[tokio::test]
@@ -717,24 +586,80 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home).for_user_scope(vec![project.clone()]);
-    let stats = try_ingest_source(&db, &source, tmp.path(), None)
+    ingest_user_provider(
+        db.runtime(),
+        &home,
+        SessionProvider::Cline,
+        vec![project.clone()],
+    )
+    .await;
+    // user + assistant; the UI usage record is accounted, not a message
+    assert_eq!(
+        db.runtime()
+            .session_message_count_for_test(HostAdmissionScope::Profile, None)
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(
+        db.runtime()
+            .session_for_test(HostAdmissionScope::Profile, "cline", "registered-task")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db.runtime()
+            .session_for_test(HostAdmissionScope::Profile, "cline", "mixed-task")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let session = db
+        .runtime()
+        .session_for_test(HostAdmissionScope::Profile, "cline", "user-task")
         .await
+        .unwrap()
         .unwrap();
-    assert_eq!(stats.messages_upserted, 3);
-    assert!(db.get_session("cline", "registered-task").await.is_none());
-    assert!(db.get_session("cline", "mixed-task").await.is_none());
-    let session = db.get_session("cline", "user-task").await.unwrap();
     assert_eq!(session.project_key, "user");
     assert_eq!(session.project_path, "user");
 }
 
+/// The daemon's session refresh worker runs the user pass on a native thread
+/// with no Tokio runtime entered, so a pass that writes sessions must not
+/// reach Tokio from the polling thread.
+#[test]
+fn user_pass_writes_sessions_without_an_entered_tokio_runtime() {
+    tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let projectless = tmp.path().join("general-chat");
+        std::fs::create_dir_all(&projectless).unwrap();
+        write_task(
+            &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
+            &projectless,
+            "user-task",
+        );
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let outcome = ingest_user_provider(
+            db.runtime(),
+            &home,
+            SessionProvider::Cline,
+            vec![project.clone()],
+        )
+        .await;
+        assert!(
+            outcome.stats.messages_upserted > 0,
+            "the pass must write sessions"
+        );
+    })
+    .expect("native runtime");
+}
+
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cline_family_secrets_are_sanitized_before_observation_and_projection() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for (provider, extension_id, selected_provider) in [
         ("cline", "saoudrizwan.claude-dev", SessionProvider::Cline),
         (
@@ -746,7 +671,6 @@ async fn cline_family_secrets_are_sanitized_before_observation_and_projection() 
     ] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
-        let _home = EnvVarGuard::set("HOME", &home);
         init_git_repo(&project);
         mark_test_project(&project);
         let history = write_task(
@@ -768,7 +692,7 @@ async fn cline_family_secrets_are_sanitized_before_observation_and_projection() 
         let db = open_project_session_db(&project).await.unwrap();
 
         assert!(
-            ingest_global_sources_for_provider(&db, &project, Some(selected_provider))
+            ingest_global_sources_for_provider(&home, &db, &project, Some(selected_provider))
                 .await
                 .messages_upserted
                 > 0,
@@ -786,11 +710,7 @@ async fn cline_family_secrets_are_sanitized_before_observation_and_projection() 
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cline_like_replacement_projection_replay_is_deterministic() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // Table-driven across the three Cline-like storage roots.
     for (provider, extension_id, selected_provider) in [
         ("cline", "saoudrizwan.claude-dev", SessionProvider::Cline),
@@ -803,7 +723,6 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
     ] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
-        let _home = EnvVarGuard::set("HOME", &home);
         init_git_repo(&project);
         mark_test_project(&project);
         let root = vscode_storage_root(&home, extension_id);
@@ -811,7 +730,8 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         let history = write_task(&root, &project, &session_id);
 
         let db = open_project_session_db(&project).await.unwrap();
-        let _ = ingest_global_sources_for_provider(&db, &project, Some(selected_provider)).await;
+        let _ =
+            ingest_global_sources_for_provider(&home, &db, &project, Some(selected_provider)).await;
         // Two conversational rows; the ui_messages api_req_started record is
         // uncorrelated usage evidence in the observation family, not a
         // message row (token accounting left conversational metadata).
@@ -820,69 +740,99 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             2,
             "{provider}: initial durable message cardinality"
         );
-        let prefix_cursor = observation_source_cursor(&db, provider, &session_id, &project)
-            .await
-            .unwrap_or_else(|| panic!("{provider}: committed observation cursor"));
-        assert_eq!(prefix_cursor.position(), 3, "{provider}: initial frontier");
+        let prefix_api = cline_stream_cursor(
+            &db,
+            provider,
+            &session_id,
+            ClineTranscriptStream::ApiHistory,
+        )
+        .await;
+        let prefix_ui = cline_stream_cursor(
+            &db,
+            provider,
+            &session_id,
+            ClineTranscriptStream::UiMessages,
+        )
+        .await;
+        assert_eq!(
+            (prefix_api.position(), prefix_ui.position()),
+            (2, 1),
+            "{provider}: initial native stream frontiers cover three observations"
+        );
+        assert_eq!(durable_table_count(&db, "observations").await, 3);
+        assert_eq!(cline_usage_observations(&db).await.len(), 1);
         drop(db);
 
         // Exact restart is a no-op.
         let replay = open_project_session_db(&project).await.unwrap();
         assert_eq!(
-            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider))
+            ingest_global_sources_for_provider(&home, &replay, &project, Some(selected_provider))
                 .await
                 .messages_upserted,
             0,
             "{provider}: restart no-op"
         );
-        assert_eq!(
-            observation_source_cursor(&replay, provider, &session_id, &project).await,
-            Some(prefix_cursor.clone()),
-            "{provider}: frontier unchanged on restart"
-        );
+        for (stream, expected) in [
+            (ClineTranscriptStream::ApiHistory, &prefix_api),
+            (ClineTranscriptStream::UiMessages, &prefix_ui),
+        ] {
+            assert_eq!(
+                cline_stream_cursor(&replay, provider, &session_id, stream).await,
+                *expected,
+                "{provider}: {stream:?} frontier unchanged on restart"
+            );
+        }
 
-        // Replacement with an extra durable turn, interrupted by projection failure.
+        // Replacing the snapshot adds a turn while preserving the exact native
+        // prefix. Reconstructing the assistant from text alone would remove its
+        // model/tool evidence and exercise identity-collision refusal instead.
+        let mut replacement: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&history).unwrap()).unwrap();
+        replacement.push(serde_json::json!({
+            "role": "user",
+            "content": format!("{provider} projection retry suffix"),
+            "ts": 1_800_000_020_i64
+        }));
         std::fs::write(
             &history,
-            serde_json::to_string_pretty(&serde_json::json!([
-                {
-                    "role": "user",
-                    "content": "Investigate the billing pipeline regression",
-                    "ts": 1_800_000_000_i64
-                },
-                {
-                    "role": "assistant",
-                    "content": "The billing pipeline regression is fixed.",
-                    "ts": 1_800_000_010_i64
-                },
-                {
-                    "role": "user",
-                    "content": format!("{provider} projection retry suffix"),
-                    "ts": 1_800_000_020_i64
-                }
-            ]))
-            .unwrap(),
+            serde_json::to_string_pretty(&replacement).unwrap(),
         )
         .unwrap();
         set_projection_failure(&replay, true).await;
         let _ =
-            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider)).await;
-        let committed_cursor = observation_source_cursor(&replay, provider, &session_id, &project)
-            .await
-            .unwrap_or_else(|| panic!("{provider}: committed observation cursor"));
+            ingest_global_sources_for_provider(&home, &replay, &project, Some(selected_provider))
+                .await;
+        let committed_api = cline_stream_cursor(
+            &replay,
+            provider,
+            &session_id,
+            ClineTranscriptStream::ApiHistory,
+        )
+        .await;
+        let committed_ui = cline_stream_cursor(
+            &replay,
+            provider,
+            &session_id,
+            ClineTranscriptStream::UiMessages,
+        )
+        .await;
         assert_ne!(
-            committed_cursor.generation(),
-            prefix_cursor.generation(),
-            "{provider}: replacement starts a new snapshot generation"
+            committed_api.generation(),
+            prefix_api.generation(),
+            "{provider}: API replacement starts a new API generation"
         );
-        // Full coverage of the replacement snapshot — three conversation rows
-        // plus the uncorrelated ui_messages usage record — commits before
+        assert_eq!(
+            committed_ui, prefix_ui,
+            "{provider}: API replacement leaves UI generation and frontier unchanged"
+        );
+        // Full coverage of the replacement snapshot, three conversation rows
+        // plus the uncorrelated ui_messages usage record, commits before
         // projection acknowledgement; the failed projection replays from the
         // durable queue rather than wedging the observation frontier.
         assert_eq!(
-            committed_cursor.position(),
-            4,
-            "{provider}: observation frontier commits before projection acknowledgement"
+            (committed_api.position(), committed_ui.position()),
+            (3, 1),
+            "{provider}: four observations covered before projection acknowledgement"
         );
         assert_eq!(
             replay.session_message_count().await.unwrap(),
@@ -904,8 +854,13 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         // the failure; the reopened mount re-arms the queue so this recovery
         // pass replays the committed suffix immediately.
         let recovered = open_project_session_db(&project).await.unwrap();
-        let _ =
-            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider)).await;
+        let _ = ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(selected_provider),
+        )
+        .await;
         assert_eq!(
             recovered
                 .search_session_messages(provider, None, "projection retry suffix", 10)
@@ -914,31 +869,142 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             1,
             "{provider}: recovered suffix searchable"
         );
+        for (stream, expected) in [
+            (ClineTranscriptStream::ApiHistory, &committed_api),
+            (ClineTranscriptStream::UiMessages, &committed_ui),
+        ] {
+            assert_eq!(
+                cline_stream_cursor(&recovered, provider, &session_id, stream).await,
+                *expected,
+                "{provider}: retry must not advance {stream:?} frontier"
+            );
+        }
         assert_eq!(
-            observation_source_cursor(&recovered, provider, &session_id, &project).await,
-            Some(committed_cursor),
-            "{provider}: retry must not advance the committed observation frontier"
-        );
-        assert_eq!(
-            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider),)
-                .await
-                .messages_upserted,
+            ingest_global_sources_for_provider(
+                &home,
+                &recovered,
+                &project,
+                Some(selected_provider),
+            )
+            .await
+            .messages_upserted,
             0,
             "{provider}: post-recovery replay"
         );
+        for (stream, expected) in [
+            (ClineTranscriptStream::ApiHistory, &committed_api),
+            (ClineTranscriptStream::UiMessages, &committed_ui),
+        ] {
+            assert_eq!(
+                cline_stream_cursor(&recovered, provider, &session_id, stream).await,
+                *expected,
+                "{provider}: post-recovery no-op preserves {stream:?} frontier"
+            );
+        }
+        assert_eq!(durable_table_count(&recovered, "observations").await, 4);
+        assert_eq!(recovered.session_message_count().await.unwrap(), 3);
+        let original_usage = cline_usage_observations(&recovered).await;
+        assert_eq!(original_usage.len(), 1);
+
+        // Append to the independent UI stream with its existing native prefix
+        // intact. The API file and its generation must remain unchanged.
+        let ui_path = history.parent().unwrap().join("ui_messages.json");
+        let mut ui_records: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&ui_path).unwrap()).unwrap();
+        let mut appended_usage = ui_records[0].clone();
+        appended_usage["ts"] = serde_json::json!(1_800_000_030_i64);
+        appended_usage["text"] =
+            serde_json::json!(serde_json::json!({"tokensIn": 2200, "tokensOut": 450}).to_string());
+        ui_records.push(appended_usage);
+        std::fs::write(&ui_path, serde_json::to_vec_pretty(&ui_records).unwrap()).unwrap();
+        let _ = ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(selected_provider),
+        )
+        .await;
+        let appended_ui = cline_stream_cursor(
+            &recovered,
+            provider,
+            &session_id,
+            ClineTranscriptStream::UiMessages,
+        )
+        .await;
+        assert_ne!(appended_ui.generation(), committed_ui.generation());
+        assert_eq!(appended_ui.position(), 2);
+        assert_eq!(
+            cline_stream_cursor(
+                &recovered,
+                provider,
+                &session_id,
+                ClineTranscriptStream::ApiHistory,
+            )
+            .await,
+            committed_api,
+            "{provider}: UI append preserves the exact API cursor"
+        );
+        assert_eq!(durable_table_count(&recovered, "observations").await, 5);
+        assert_eq!(recovered.session_message_count().await.unwrap(), 3);
+        let usage = cline_usage_observations(&recovered).await;
+        assert_eq!(usage.len(), 2);
+        for (native_id, original) in &original_usage {
+            assert_eq!(
+                usage.get(native_id),
+                Some(original),
+                "unchanged UI prefix retains its exact observation identity and payload"
+            );
+        }
+        let mut token_counts = usage
+            .values()
+            .flat_map(|observation| observation["payload"]["facts"].as_array().unwrap())
+            .filter(|fact| fact["kind"] == "uncorrelated_usage")
+            .map(|fact| fact["input_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        token_counts.sort_unstable();
+        assert_eq!(token_counts, vec![1200, 2200]);
+        drop(recovered);
+
+        let reopened = open_project_session_db(&project).await.unwrap();
+        // Reopen and a second replay both preserve independent source coverage
+        // and publish neither duplicate observations nor duplicate usage.
+        for _ in 0..2 {
+            assert_eq!(
+                ingest_global_sources_for_provider(
+                    &home,
+                    &reopened,
+                    &project,
+                    Some(selected_provider)
+                )
+                .await
+                .messages_upserted,
+                0
+            );
+            for (stream, expected) in [
+                (ClineTranscriptStream::ApiHistory, &committed_api),
+                (ClineTranscriptStream::UiMessages, &appended_ui),
+            ] {
+                assert_eq!(
+                    cline_stream_cursor(&reopened, provider, &session_id, stream).await,
+                    *expected
+                );
+            }
+            assert_eq!(durable_table_count(&reopened, "observations").await, 5);
+            assert_eq!(reopened.session_message_count().await.unwrap(), 3);
+            assert_eq!(
+                cline_usage_observations(&reopened).await,
+                usage,
+                "usage observation identities and complete payloads survive restart and replay"
+            );
+        }
     }
 }
 
 #[tokio::test]
 #[cfg(not(windows))]
-#[allow(clippy::await_holding_lock)]
 async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
@@ -968,7 +1034,8 @@ async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cline)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline))
+        .await;
     let hits = db
         .search_session_messages("cline", None, "delimiter collision fixture", 10)
         .await;
@@ -988,9 +1055,14 @@ async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
 
     let reopened = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_global_sources_for_provider(&reopened, &project, Some(SessionProvider::Cline))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &reopened,
+            &project,
+            Some(SessionProvider::Cline)
+        )
+        .await
+        .messages_upserted,
         0
     );
     let committed = durable_table_count(&reopened, "observations").await;
@@ -1016,11 +1088,7 @@ async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn golden_fixture_ingests_through_each_provider_discriminator() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let manifest: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/transcript_golden/cline_like/manifest.json"
     ))
@@ -1059,7 +1127,6 @@ async fn golden_fixture_ingests_through_each_provider_discriminator() {
     ] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
-        let _home = EnvVarGuard::set("HOME", &home);
         init_git_repo(&project);
         mark_test_project(&project);
         let root = vscode_storage_root(&home, extension_id);
@@ -1078,7 +1145,8 @@ async fn golden_fixture_ingests_through_each_provider_discriminator() {
         );
 
         let db = open_project_session_db(&project).await.unwrap();
-        let _ = ingest_global_sources_for_provider(&db, &project, Some(selected_provider)).await;
+        let _ =
+            ingest_global_sources_for_provider(&home, &db, &project, Some(selected_provider)).await;
         let hits = db
             .search_session_messages(provider, None, "billing pipeline", 10)
             .await;
@@ -1109,25 +1177,30 @@ async fn cline_like_unknown_project_membership_defers_persistence_and_offset() {
         let (home, project) = setup(&tmp);
         let nested = project.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
-        let api = write_task(
+        write_task(
             &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
             &nested,
             "unknown-cline",
         );
 
         let db = open_project_session_db(&project).await.unwrap();
-        let source = ClineLikeSource::cline_with_home(&home).for_user_scope(vec![project.clone()]);
         assert_eq!(
-            try_ingest_source(&db, &source, tmp.path(), None)
-                .await
-                .unwrap()
-                .messages_upserted,
+            ingest_user_provider(
+                db.runtime(),
+                &home,
+                SessionProvider::Cline,
+                vec![project.clone()]
+            )
+            .await
+            .stats
+            .messages_upserted,
             0
         );
-        assert!(db.get_session("cline", "unknown-cline").await.is_none());
         assert!(
-            parse_offset_for_task_history(&db, &project, &api)
+            db.runtime()
+                .session_for_test(HostAdmissionScope::Profile, "cline", "unknown-cline")
                 .await
+                .unwrap()
                 .is_none()
         );
         return;

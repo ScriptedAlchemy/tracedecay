@@ -1,61 +1,40 @@
 //! Daemon client side: restart-grace connects and one-shot JSON-RPC tool
-//! calls against the daemon. Connection discovery — resolving the profile's
-//! authority record into an endpoint plus credential — lives in
+//! calls against the daemon. Connection discovery, resolving the profile's
+//! authority record into an endpoint plus credential, lives in
 //! `tracedecay-daemon-identity`; this module only consumes the
-//! [`DaemonConnection`] it resolves.
+//! [`ResolvedDaemonConnection`] it resolves.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use asupersync::io::AsyncWriteExt;
+use asupersync::time::{sleep, timeout, wall_now};
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
-use tokio::time::{Duration, Instant, timeout};
-use tracedecay_daemon_control::default_socket_path;
-#[cfg(not(unix))]
-use tracedecay_daemon_identity::current_daemon_connection;
-use tracedecay_daemon_identity::{DaemonConnection, client_connection};
-use tracedecay_framing::{
-    WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
+use tracedecay_daemon_control::{default_socket_path, with_unavailable_daemon_advice};
+use tracedecay_daemon_identity::{
+    DAEMON_AUTHORITY_UNAVAILABLE, ResolvedDaemonConnection, client_connection,
+    current_daemon_connection,
 };
+pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
+pub(crate) use tracedecay_daemon_protocol::connection::{
+    DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
+    is_transient_daemon_connect_error,
+};
+use tracedecay_daemon_protocol::{
+    DaemonClientStream, daemon_tool_response_bound, tool_request_deadline,
+};
+use tracedecay_framing::BoundedLineReader;
+use tracedecay_mcp::server::attach_stateless_request_context;
+use tracedecay_mcp::tool_errors::tool_result_problem;
+use tracedecay_runtime_core::config::ProfileRoot;
 
-pub use tracedecay_daemon_protocol::{
-    DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
-    DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_TOOL_REQUEST_DEADLINE, MAX_TOOL_REQUEST_DEADLINE,
-    TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
-};
-pub(crate) use tracedecay_daemon_protocol::{
-    DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT, DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
-};
-
-#[cfg(unix)]
-use super::unavailable_error;
 use super::{
-    BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonHandshake, JsonRpcRequest,
-    JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
-    TraceDecayError, error_message_is_project_open_retryable,
+    DaemonClientDeadline, DaemonHandshake, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
+    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result, TraceDecayError,
+    error_is_project_open_retryable, tool_call_transport_error_is_retryable,
 };
-
-/// Bounded grace a client keeps reading for *after* the caller's request
-/// deadline has elapsed.
-///
-/// The request deadline belongs to the daemon: it is what admission measures
-/// and what the retained owners settle against, and its whole purpose is to
-/// produce a typed terminal — a `PartialEffect` carrying a committed receipt, a
-/// typed timeout — rather than silence. Bounding the client's *read* by that
-/// same instant made every one of those terminals unobservable through this
-/// transport: the client abandoned the connection moments before the envelope
-/// it had asked for arrived and reported "outcome may be unknown" while the
-/// outcome was already on the wire. The read bound must therefore outlive the
-/// request deadline; this is by how much. It bounds only a dead or wedged
-/// daemon, never the request.
-
-/// The local read bound for a request whose caller deadline is `request_deadline`.
-pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> {
-    request_deadline
-        .checked_add(DAEMON_TOOL_RESPONSE_GRACE)
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "daemon tool response bound exceeds the supported monotonic range".to_string(),
-        })
-}
+#[cfg(unix)]
+use tracedecay_daemon_service::logging::unavailable_error;
 
 /// The caller's request deadline as an absolute wall-clock instant, for the
 /// wire.
@@ -67,152 +46,190 @@ pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> 
 /// original one.
 fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain::UtcMicros {
     let remaining = request_deadline.saturating_duration_since(Instant::now());
-    let now = tracedecay_application::clock::now_micros();
+    let now = tracedecay_contracts::clock::now_micros();
     tracedecay_domain::UtcMicros(
         now.0
             .saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
     )
 }
 
-/// How long daemon clients keep retrying a failed connect before giving up.
-///
-/// `tracedecay update` restarts the daemon service (`systemctl --user restart`);
-/// between the old daemon unlinking its socket and the new one binding it,
-/// connects fail with `NotFound` or `ConnectionRefused`. Long-lived MCP
-/// sessions (Cursor's `tracedecay serve` stdio proxy) reconnect per request,
-/// so retrying inside this window lets a live session ride out a self-update
-/// instead of surfacing a hard JSON-RPC error.
-pub(crate) const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
-pub(crate) const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// The `tools/call` params a one-shot `tracedecay` client (CLI command, host
+/// hook, truncation recovery) sends on its own daemon connection.
+pub(crate) fn one_shot_tool_call_params(
+    tool_name: &str,
+    arguments: serde_json::Value,
+    request_deadline: Option<Instant>,
+) -> serde_json::Value {
+    let mut meta = request_deadline.map_or_else(
+        || json!({}),
+        |deadline| tracedecay_mcp::tool_call_deadline_meta(wire_request_deadline_micros(deadline)),
+    );
+    if let Some(meta) = meta.as_object_mut() {
+        tracedecay_mcp::ToolCallInvoker::mark_one_shot_client(meta);
+    }
+    json!({
+        "name": tool_name,
+        "arguments": arguments,
+        "_meta": meta,
+    })
+}
 
-#[hotpath::measure(label = "daemon.core.ensure_connection_live", future = true)]
+/// How long a liveness probe waits for the daemon endpoint to accept a
+/// connection before the in-flight request is declared unreachable.
+const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Liveness for a one-shot request that is already on the wire.
+///
+/// Two independent facts have to hold, and neither implies the other:
+///
+/// * the authority record that named this endpoint is still the current one,
+///   which catches a daemon that restarted under a rotated epoch while its
+///   old connection was never closed; and
+/// * the endpoint still accepts connections, which catches a daemon that
+///   stopped listening (socket unlinked, listener dropped) while holding this
+///   connection open. Nothing on the read half distinguishes that from a
+///   healthy daemon still computing a long answer, so without the probe the
+///   caller waits out its whole deadline on a daemon that can never answer.
+///
+/// The one-shot tool-call and stdio-proxy clients open exactly one connection
+/// per request, so a probe connection here costs one accept per poll interval
+/// and never competes with a pooled connection budget.
+#[tracing::instrument(name = "daemon.core.ensure_connection_live", level = "trace", skip_all)]
 pub(crate) async fn ensure_daemon_connection_live(
-    connection: &DaemonConnection,
+    connection: &ResolvedDaemonConnection,
     request_label: &str,
 ) -> Result<()> {
     connection.ensure_authority_current(request_label)?;
 
     timeout(
+        wall_now(),
         DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
-        BrokerStream::connect(&connection.endpoint),
+        DaemonClientStream::connect(connection.endpoint()),
     )
     .await
     .map_err(|_| TraceDecayError::Config {
         message: format!(
             "daemon health check timed out at '{}' while request '{request_label}' was awaiting a response; the request was already sent and was not retried",
-            connection.endpoint
+            connection.endpoint()
         ),
     })?
     .map(|_| ())
     .map_err(|error| TraceDecayError::Config {
         message: format!(
             "daemon became unreachable at '{}' while request '{request_label}' was awaiting a response: {error}; the request was already sent and was not retried",
-            connection.endpoint
+            connection.endpoint()
         ),
     })
 }
 
-#[hotpath::measure(label = "daemon.core.next_response", future = true)]
+#[tracing::instrument(name = "daemon.core.next_response", level = "trace", skip_all)]
 pub(crate) async fn next_daemon_response_line<R>(
-    reader: &mut R,
-    connection: &DaemonConnection,
+    reader: &mut BoundedLineReader<R>,
+    connection: &ResolvedDaemonConnection,
     request_label: &str,
     liveness_poll_interval: Duration,
 ) -> Result<Option<String>>
 where
-    R: tokio::io::AsyncBufRead + Unpin,
+    R: asupersync::io::AsyncBufRead + Unpin,
 {
-    // Pin one frame-read future for the whole wait. Liveness polls must not
-    // recreate `read_bounded_mcp_line`: that future owns the partial-frame
-    // accumulator after bytes have already been consumed from `reader`.
-    let read = read_bounded_mcp_line(reader);
-    tokio::pin!(read);
-    loop {
-        tokio::select! {
-            result = &mut read => {
-                return match result {
-                    Ok(line) => Ok(line),
-                    Err(error) if is_wire_oversized_io_error(&error) => {
-                        Err(TraceDecayError::Config {
-                            message: format!(
-                                "daemon {request_label} response exceeded wire message bound ({WIRE_RECORD_TOO_LARGE})"
-                            ),
-                        })
-                    }
-                    Err(error) => Err(error.into()),
-                };
-            }
-            () = tokio::time::sleep(liveness_poll_interval) => {
-                ensure_daemon_connection_live(connection, request_label).await?;
-            }
-        }
-    }
+    tracedecay_daemon_protocol::poll_daemon_response_line(
+        reader,
+        request_label,
+        liveness_poll_interval,
+        || ensure_daemon_connection_live(connection, request_label),
+    )
+    .await
 }
 
 pub(crate) async fn write_daemon_preamble(
-    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
-    connection: &DaemonConnection,
+    writer: &mut (impl asupersync::io::AsyncWrite + Unpin),
+    connection: &ResolvedDaemonConnection,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
-    if let Some(token) = connection.auth_token.as_deref() {
-        writer
-            .write_all(DaemonAuthPreface::new(token).to_line()?.as_bytes())
-            .await?;
-        writer.write_all(b"\n").await?;
-    }
-    writer.write_all(handshake.to_line()?.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    Ok(())
+    tracedecay_daemon_protocol::write_daemon_handshake_preamble(
+        writer,
+        connection.auth_token(),
+        handshake,
+    )
+    .await
 }
 
-pub(crate) fn default_available_socket_path() -> Result<PathBuf> {
-    let socket_path = default_socket_path()?;
+/// The socket of the daemon serving `profile`. An absent socket's advice reads
+/// the boundary profile's home and config home, so it can name an installed
+/// but held managed service.
+pub(crate) fn default_available_socket_path(profile: &ProfileRoot) -> Result<PathBuf> {
+    let socket_path = default_socket_path(profile.data_dir())?;
     #[cfg(unix)]
     {
         if socket_path.exists() {
             Ok(socket_path)
         } else {
-            Err(unavailable_error(&socket_path))
+            Err(unavailable_error(profile, &socket_path))
         }
     }
     #[cfg(not(unix))]
     {
-        current_daemon_connection()?;
+        current_profile_daemon_connection(profile)?;
         Ok(socket_path)
     }
 }
 
-pub(crate) fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
-    matches!(
-        kind,
-        std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::WouldBlock
-    )
-}
-
-pub(crate) fn is_saturated_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
-    kind == std::io::ErrorKind::WouldBlock
-}
-
-pub(crate) fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
-    if is_saturated_daemon_connect_error(kind) {
-        "The daemon is up but not accepting connections — likely overloaded. Retry shortly, or check `tracedecay daemon status`."
-    } else {
-        "The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`."
+/// The daemon authority recorded in `profile`, whichever socket it bound. An
+/// absent record carries the boundary profile's managed-service advice.
+pub(crate) fn current_profile_daemon_connection(
+    profile: &ProfileRoot,
+) -> Result<ResolvedDaemonConnection> {
+    match current_daemon_connection(profile.data_dir()) {
+        Ok(connection) => Ok(connection),
+        Err(error) => Err(with_unavailable_daemon_advice(
+            profile,
+            &default_socket_path(profile.data_dir())?,
+            error,
+        )),
     }
 }
 
+/// Authenticated invocation client for the daemon whose authority record
+/// `profile` holds, whichever socket it bound, so a daemon's own surfaces reach
+/// it under a custom `--socket`.
+pub fn invocation_client_for_current(
+    profile: &ProfileRoot,
+    handshake: DaemonHandshake,
+) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
+    Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        current_profile_daemon_connection(profile)?.into_protocol(),
+        handshake,
+    ))
+}
+
+/// Authenticated invocation client for the daemon serving this client: the
+/// socket `TRACEDECAY_DAEMON_SOCKET` names when set, else the profile's own.
+/// An absent socket is the typed daemon-unreachable refusal, as on the
+/// `tools/call` transport.
+pub fn invocation_client_for_current_client(
+    profile: &ProfileRoot,
+    handshake: DaemonHandshake,
+) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
+    let socket_path = default_available_socket_path(profile)?;
+    let connection = client_connection(&handshake.client_identity.profile_root, &socket_path)
+        .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))?;
+    Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        connection.into_protocol(),
+        handshake,
+    ))
+}
+
 pub(crate) async fn connect_to_current_daemon_within(
+    profile_root: &Path,
     socket_path: &Path,
     client_deadline: Option<DaemonClientDeadline>,
-) -> Result<(DaemonConnection, BrokerStream)> {
+) -> Result<(ResolvedDaemonConnection, DaemonClientStream)> {
     let grace = match client_deadline {
         Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
         None => DAEMON_RESTART_GRACE,
     };
     connect_with_restart_grace_resolving(
-        || client_connection(socket_path),
+        || client_connection(profile_root, socket_path),
         grace,
         DAEMON_RESTART_POLL_INTERVAL,
     )
@@ -225,54 +242,72 @@ pub(crate) async fn connect_to_current_daemon_within(
 /// duplicated. Non-transient errors (e.g. permission denied) fail immediately.
 #[cfg(unix)]
 pub(crate) async fn connect_with_restart_grace(
-    connection: &DaemonConnection,
+    profile_root: &Path,
+    socket_path: &Path,
     grace: Duration,
     poll_interval: Duration,
-) -> Result<BrokerStream> {
-    let (_, stream) =
-        connect_with_restart_grace_resolving(|| Ok(connection.clone()), grace, poll_interval)
-            .await?;
+) -> Result<DaemonClientStream> {
+    let (_, stream) = connect_with_restart_grace_resolving(
+        || client_connection(profile_root, socket_path),
+        grace,
+        poll_interval,
+    )
+    .await?;
     Ok(stream)
 }
 
 /// Resolves endpoint authority on every retry because a daemon restart rotates
-/// both its authority epoch and authentication token.
-#[hotpath::measure(label = "daemon.core.connect_restart_grace", future = true)]
-async fn connect_with_restart_grace_resolving(
-    mut resolve: impl FnMut() -> Result<DaemonConnection>,
+/// both its authority epoch and authentication token, and a daemon's first
+/// start writes its record only moments before it binds.
+#[tracing::instrument(name = "daemon.core.connect_restart_grace", level = "trace", skip_all)]
+pub(super) async fn connect_with_restart_grace_resolving(
+    mut resolve: impl FnMut() -> Result<ResolvedDaemonConnection>,
     grace: Duration,
     poll_interval: Duration,
-) -> Result<(DaemonConnection, BrokerStream)> {
+) -> Result<(ResolvedDaemonConnection, DaemonClientStream)> {
     let deadline = Instant::now() + grace;
     loop {
-        let connection = resolve()?;
-        match BrokerStream::connect(&connection.endpoint).await {
+        let connection = match resolve() {
+            Ok(connection) => connection,
+            Err(error) if authority_absent(&error) && Instant::now() < deadline => {
+                sleep(wall_now(), poll_interval).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match DaemonClientStream::connect(connection.endpoint()).await {
             Ok(stream) => return Ok((connection, stream)),
             Err(TraceDecayError::Io(err)) => {
                 if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
                     return Err(if is_transient_daemon_connect_error(err.kind()) {
                         tracedecay_daemon_protocol::daemon_connect_failure(
-                            &connection.endpoint,
+                            connection.endpoint(),
                             &err,
                         )
                     } else {
                         TraceDecayError::Config {
                             message: format!(
                                 "could not connect to TraceDecay daemon endpoint '{}': {err}. {}",
-                                connection.endpoint,
+                                connection.endpoint(),
                                 daemon_connect_failure_advice(err.kind())
                             ),
                         }
                     });
                 }
-                tokio::time::sleep(poll_interval).await;
+                sleep(wall_now(), poll_interval).await;
             }
             Err(error) => return Err(error),
         }
     }
 }
 
-#[hotpath::measure(label = "daemon.core.call_tool", future = true)]
+pub(super) fn authority_absent(error: &TraceDecayError) -> bool {
+    error
+        .project_route_context()
+        .is_some_and(|(code, retryable, _)| code == DAEMON_AUTHORITY_UNAVAILABLE && retryable)
+}
+
+#[tracing::instrument(name = "daemon.core.call_tool", level = "trace", skip_all)]
 pub(crate) async fn call_tool_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -291,37 +326,32 @@ pub(crate) async fn call_tool_with_liveness_poll(
         )?)?),
         None => None,
     };
-    let (connection, stream) = match client_deadline {
-        Some(deadline) => {
-            deadline
-                .run("connect", tool_name, async {
-                    connect_to_current_daemon_within(socket_path, Some(deadline)).await
-                })
-                .await?
-        }
-        None => connect_to_current_daemon_within(socket_path, None).await?,
-    };
-    let (reader, mut writer) = stream.into_owned_split();
+    let (connection, stream) = DaemonClientDeadline::run_optional(
+        client_deadline,
+        "connect",
+        tool_name,
+        connect_to_current_daemon_within(
+            &handshake.client_identity.profile_root,
+            socket_path,
+            client_deadline,
+        ),
+    )
+    .await?;
+    let (reader, mut writer) = stream.into_split();
     let id = json!(1);
-    let mut params = json!({
-        "name": tool_name,
-        "arguments": arguments,
-    });
-    if let Some(deadline) = request_deadline
-        && let Some(params) = params.as_object_mut()
-    {
-        params.insert(
-            "_meta".to_owned(),
-            tracedecay_mcp::tool_call_deadline_meta(wire_request_deadline_micros(deadline)),
-        );
-    }
-    let request = JsonRpcRequest {
+    let mut request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(id.clone()),
         method: "tools/call".to_string(),
-        params: Some(params),
+        params: Some(one_shot_tool_call_params(
+            tool_name,
+            arguments,
+            request_deadline,
+        )),
     };
+    attach_stateless_request_context(&mut request);
 
+    let mut reader = BoundedLineReader::new(asupersync::io::BufReader::new(reader));
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;
         writer
@@ -331,19 +361,15 @@ pub(crate) async fn call_tool_with_liveness_poll(
         writer.flush().await?;
         Ok(())
     };
-    match client_deadline {
-        Some(deadline) => deadline.run("write", tool_name, write).await?,
-        None => write.await?,
-    }
+    let written = DaemonClientDeadline::run_optional(client_deadline, "write", tool_name, write);
+    tracedecay_daemon_protocol::refusal_behind_failed_write(written.await, &mut reader, handshake)
+        .await?;
 
-    let mut reader = tokio::io::BufReader::new(reader);
     loop {
         let read =
             next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval);
-        let line = match client_deadline {
-            Some(deadline) => deadline.run("read", tool_name, read).await?,
-            None => read.await?,
-        };
+        let line =
+            DaemonClientDeadline::run_optional(client_deadline, "read", tool_name, read).await?;
         let Some(line) = line else {
             return Err(TraceDecayError::Config {
                 message: "daemon closed the connection after the tool request was sent but before returning a result; the outcome is unknown and the request was not retried"
@@ -360,47 +386,27 @@ pub(crate) async fn call_tool_with_liveness_poll(
                 &refusal, handshake,
             ));
         }
-        let response = if let Some(deadline) = client_deadline {
-            deadline
-                .run("decode", tool_name, async {
-                    let value: serde_json::Value =
-                        serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
-                            message: format!("daemon tool response JSON decode failed: {error}"),
-                        })?;
-                    if value.get("id") != Some(&id) {
-                        return Ok(None);
-                    }
-                    let response: JsonRpcResponse =
-                        serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
-                            message: format!(
-                                "daemon tool response JSON-RPC decode failed: {error}"
-                            ),
-                        })?;
-                    Ok(Some(response))
-                })
-                .await?
-        } else {
-            let value: serde_json::Value =
-                serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
-                    message: format!("daemon tool response JSON decode failed: {error}"),
-                })?;
-            if value.get("id") == Some(&id) {
-                Some(
+        let response =
+            DaemonClientDeadline::run_optional(client_deadline, "decode", tool_name, async {
+                let value: serde_json::Value =
+                    serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
+                        message: format!("daemon tool response JSON decode failed: {error}"),
+                    })?;
+                if value.get("id") != Some(&id) {
+                    return Ok(None);
+                }
+                let response: JsonRpcResponse =
                     serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
                         message: format!("daemon tool response JSON-RPC decode failed: {error}"),
-                    })?,
-                )
-            } else {
-                None
-            }
-        };
+                    })?;
+                Ok(Some(response))
+            })
+            .await?;
         let Some(response) = response else {
             continue;
         };
         if let Some(error) = response.error {
-            return Err(TraceDecayError::Config {
-                message: format!("daemon tool call failed: {}", error.message),
-            });
+            return Err(daemon_tool_call_error(error));
         }
         return response.result.ok_or_else(|| TraceDecayError::Config {
             message: "daemon tool call response did not include a result".to_string(),
@@ -431,7 +437,7 @@ pub async fn call_tool(
 /// Calls a daemon tool with `deadline` as the *caller's request deadline*.
 ///
 /// The deadline is sent to the daemon, which enforces it; the local read runs
-/// on that deadline plus [`DAEMON_TOOL_RESPONSE_GRACE`] so a deadline-elapsed
+/// on that deadline plus [`tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE`] so a deadline-elapsed
 /// typed terminal is read rather than raced.
 pub async fn call_tool_within(
     socket_path: &Path,
@@ -451,11 +457,106 @@ pub async fn call_tool_within(
     .await
 }
 
+/// Transport errors the one-shot client rides out on its own cadence: a
+/// project open that has not finished (warming, deferred discovery, a
+/// saturated open queue) and a retained project server retired mid-response
+/// during a composition upgrade. The daemon types every one of these
+/// `retryable: true`; a client that honours only the open subset reports the
+/// upgrade window as a hard failure.
 fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
-    error_message_is_project_open_retryable(&error.to_string())
+    error_is_project_open_retryable(error) || tool_call_transport_error_is_retryable(error)
 }
 
-#[hotpath::measure(label = "daemon.core.call_tool_retry", future = true)]
+/// Reconstruct a typed daemon tool refusal from the JSON-RPC error frame.
+///
+/// Warming, deferred discovery, capacity, and response-revoked refusals carry
+/// `data.reason_code`; those must round-trip as [`TraceDecayError::ProjectRoute`]
+/// so journey/client retry keys on the code rather than English detail.
+fn daemon_tool_call_error(error: JsonRpcError) -> TraceDecayError {
+    // A refused persisted shape stays the typed reset state across the wire:
+    // the CLI names the refused authority and the exact reset command from it.
+    if let Some(data) = error.data.as_ref()
+        && data.get("kind").and_then(serde_json::Value::as_str) == Some("reset_required")
+        && let Some(authority) = data.get("authority").and_then(serde_json::Value::as_str)
+    {
+        let reason = data
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(error.message.as_str());
+        return TraceDecayError::reset_required(authority, reason);
+    }
+    if let Some(data) = error.data.as_ref()
+        && let Some(reason_code) = data.get("reason_code").and_then(serde_json::Value::as_str)
+    {
+        let retryable = data
+            .get("retryable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let detail = data
+            .get("detail")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(error.message.as_str());
+        if let Some(typed_detail) = data
+            .get("detail")
+            .filter(|detail| detail.is_object())
+            .and_then(|detail| serde_json::from_value(detail.clone()).ok())
+        {
+            return TraceDecayError::project_route_with_detail(
+                reason_code,
+                retryable,
+                typed_detail,
+            );
+        }
+        return TraceDecayError::project_route(reason_code, retryable, detail);
+    }
+    TraceDecayError::Config {
+        message: format!("daemon tool call failed: {}", error.message),
+    }
+}
+
+/// The delay before re-sending a completed tool result, when that result is
+/// the publication-window mounting refusal.
+///
+/// A project-scoped owner that registers behind the core publication answers
+/// `application.runtime.mounting` while it is still mounting, on every route.
+/// An admitted terminal, and every other completed problem (a retained
+/// authority that is unavailable, a saturated owner, an observed diagnostic),
+/// is the answer: its `after_delay` directive is for the caller, not a
+/// transport loop.
+fn tool_result_retry_after_delay(result: &serde_json::Value) -> Option<Duration> {
+    let record: tracedecay_contracts::ApplicationProblemRecord =
+        serde_json::from_value(tool_result_problem(result)?.clone()).ok()?;
+    record.owner_mount_resend_delay()
+}
+
+/// How long to wait before re-sending the request whose outcome is `result`,
+/// or `None` when that outcome is the answer.
+///
+/// Two states are ridden out to `deadline`: the daemon's project-open refusal
+/// (a JSON-RPC error carrying the warming hint or a saturated open queue) on
+/// the client's own cadence, and a completed mounting refusal on the delay
+/// that result names. Every other completed result is returned on the first
+/// observation.
+fn project_open_retry_wait(
+    result: &Result<serde_json::Value>,
+    deadline: Instant,
+) -> Option<Duration> {
+    let remaining = DaemonClientDeadline::until(deadline)
+        .and_then(|client_deadline| client_deadline.remaining())
+        .ok()?;
+    match result {
+        Err(error) if is_project_open_retryable_error(error) => {
+            Some(remaining.min(PROJECT_OPEN_RETRY_INTERVAL))
+        }
+        Err(_) => None,
+        Ok(result) => {
+            let delay = tool_result_retry_after_delay(result)?;
+            (remaining > delay).then_some(delay)
+        }
+    }
+}
+
+#[tracing::instrument(name = "daemon.core.call_tool_retry", level = "trace", skip_all)]
 async fn call_tool_with_project_open_retry(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -464,30 +565,18 @@ async fn call_tool_with_project_open_retry(
     deadline: Instant,
 ) -> Result<serde_json::Value> {
     loop {
-        match call_tool_within(
+        let result = call_tool_within(
             socket_path,
             handshake,
             tool_name,
             arguments.clone(),
             deadline,
         )
-        .await
-        {
-            Err(error) if is_project_open_retryable_error(&error) => {
-                // When the budget is spent, the daemon's own typed state (a
-                // warming project, a still-mounting authority) is the truthful
-                // answer; the client's deadline bookkeeping error is not.
-                let remaining = DaemonClientDeadline::until(deadline)
-                    .and_then(|client_deadline| client_deadline.remaining());
-                match remaining {
-                    Ok(remaining) => {
-                        tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
-                    }
-                    Err(_) => return Err(error),
-                }
-            }
-            result => return result,
-        }
+        .await;
+        let Some(wait) = project_open_retry_wait(&result, deadline) else {
+            return result;
+        };
+        sleep(wall_now(), wait).await;
     }
 }
 
@@ -495,70 +584,80 @@ async fn call_tool_with_project_open_retry(
 ///
 /// Production one-shot clients must not read forever against a stalled-but
 /// accepting daemon. The request deadline travels on the wire; the local read
-/// waits that deadline plus the 30s response grace. A warming project still
-/// retries for at most the 15s open grace, never past this envelope. Callers
-/// that need a different budget use [`call_default_tool_within`] or
+/// waits that deadline plus the 30s response grace. A warming project, or an
+/// owner still mounting behind its core publication, still retries for at
+/// most the 15s open grace, never past this envelope. A completed result that
+/// is not that mounting refusal is returned on the first observation.
+/// Callers that need a different budget use [`call_default_tool_within`] or
 /// [`call_default_tool_awaiting_project_open`].
 pub async fn call_default_tool(
+    profile: &ProfileRoot,
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path()?;
+    let socket_path = default_available_socket_path(profile)?;
     let deadline = Instant::now() + tool_request_deadline()?;
-    match call_tool_within(
+    let result = call_tool_within(
         &socket_path,
         handshake,
         tool_name,
         arguments.clone(),
         deadline,
     )
+    .await;
+    let retry_deadline = (Instant::now() + PROJECT_OPEN_RETRY_GRACE).min(deadline);
+    let Some(wait) = project_open_retry_wait(&result, retry_deadline) else {
+        return result
+            .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error));
+    };
+    sleep(wall_now(), wait).await;
+    call_tool_with_project_open_retry(
+        &socket_path,
+        handshake,
+        tool_name,
+        arguments,
+        retry_deadline,
+    )
     .await
-    {
-        Err(error) if is_project_open_retryable_error(&error) => {
-            let retry_deadline = Instant::now() + PROJECT_OPEN_RETRY_GRACE;
-            call_tool_with_project_open_retry(
-                &socket_path,
-                handshake,
-                tool_name,
-                arguments,
-                retry_deadline.min(deadline),
-            )
-            .await
-        }
-        result => result,
-    }
+    .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))
 }
 
 pub async fn call_default_tool_within(
+    profile: &ProfileRoot,
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path()?;
+    let socket_path = default_available_socket_path(profile)?;
     // Deadline-aware application callers need the daemon's typed warming
     // response. Retrying that response until `deadline` turns a useful
     // temporary state into a client-side timeout with no response body.
-    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
+    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline)
+        .await
+        .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))
 }
 
-/// Calls a daemon tool, waiting out a warming project until `deadline`.
+/// Calls a daemon tool, waiting out a warming project, and the owners that
+/// mount behind its core publication, until `deadline`.
 ///
 /// Bootstrap callers deliberately trigger the cold open they are waiting for,
-/// so the warming hint is progress rather than an answer: `tracedecay init`
-/// asks for a status it can only get after the open completes. That is the
-/// opposite of [`call_default_tool_within`], whose callers want the typed
-/// warming state returned to them, and wider than [`call_default_tool`], whose
-/// grace is sized for an already-open project rather than a first index.
+/// so a transport-level warming hint is progress rather than an answer:
+/// `tracedecay init` asks for a status it can only get after the open completes.
+/// A completed mounting refusal is the same kind of progress and is re-sent
+/// until `deadline`. Every other completed result is returned immediately.
 pub async fn call_default_tool_awaiting_project_open(
+    profile: &ProfileRoot,
     handshake: &DaemonHandshake,
     tool_name: &str,
     arguments: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path()?;
-    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline).await
+    let socket_path = default_available_socket_path(profile)?;
+    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline)
+        .await
+        .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))
 }
 
 /// Extracts the single JSON payload from an MCP tool result while ignoring
@@ -590,4 +689,347 @@ pub fn tool_json_payload(
         });
     }
     Ok(payload)
+}
+
+/// The single JSON payload of a daemon tool reply, with a response-budget
+/// truncation envelope reassembled from its stored pages.
+///
+/// A JSON reply larger than one response frame arrives as a preview plus a
+/// retrieval handle; `tracedecay_retrieve` pages the stored body so every page
+/// fits the budget, and the pages are joined through `offset` / `next_offset`
+/// / `has_more` before parsing, exactly as an agent does. `deadline` bounds
+/// every page fetch when the caller owns one.
+pub async fn recover_truncated_tool_payload(
+    profile: &ProfileRoot,
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    result: serde_json::Value,
+    deadline: Option<Instant>,
+) -> Result<serde_json::Value> {
+    if let Some(refusal) =
+        tracedecay_mcp::application_output::tool_result::tool_result_refusal(&result)
+    {
+        return Err(refusal);
+    }
+    let payload = tool_json_payload(&result, tool_name)?;
+    if !is_truncation_envelope(&payload) {
+        return Ok(payload);
+    }
+    let handle = payload
+        .get("handle")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "daemon tool {tool_name} returned truncated JSON without a retrieval handle"
+            ),
+        })?;
+    let mut content = String::new();
+    let mut offset: u64 = 0;
+    loop {
+        let arguments = json!({ "handle": handle, "format": "json", "offset": offset });
+        let retrieved = match deadline {
+            Some(deadline) => {
+                tracing::Instrument::instrument(
+                    call_default_tool_awaiting_project_open(
+                        profile,
+                        handshake,
+                        "tracedecay_retrieve",
+                        arguments,
+                        deadline,
+                    ),
+                    tracing::trace_span!("cli.daemon.recovery_fetch"),
+                )
+                .await?
+            }
+            None => {
+                tracing::Instrument::instrument(
+                    call_default_tool(profile, handshake, "tracedecay_retrieve", arguments),
+                    tracing::trace_span!("cli.daemon.recovery_fetch"),
+                )
+                .await?
+            }
+        };
+        let page = tool_json_payload(&retrieved, "tracedecay_retrieve")?;
+        let page_content = page
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("daemon retrieval for {tool_name} omitted response content"),
+            })?;
+        content.push_str(page_content);
+        if page.get("has_more").and_then(serde_json::Value::as_bool) != Some(true) {
+            break;
+        }
+        let next_offset = page
+            .get("next_offset")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "daemon retrieval for {tool_name} reported more pages without a next offset"
+                ),
+            })?;
+        if next_offset <= offset {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon retrieval for {tool_name} did not advance past offset {offset}"
+                ),
+            });
+        }
+        offset = next_offset;
+    }
+    serde_json::from_str(&content).map_err(Into::into)
+}
+
+/// Whether a tool payload is the response-budget truncation envelope rather
+/// than the tool's own result.
+pub fn is_truncation_envelope(value: &serde_json::Value) -> bool {
+    value.get("truncated").and_then(serde_json::Value::as_bool) == Some(true)
+        && value
+            .get("original_chars")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+        && value
+            .get("preview")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use serde_json::json;
+    use tracedecay_contracts::{
+        ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef,
+        SafeDiagnostic,
+    };
+    use tracedecay_mcp::application_output::tool_result::ApplicationRefusal;
+    use tracedecay_mcp::tool_errors::mark_semantic_tool_error;
+    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
+
+    use super::super::{
+        JsonRpcError, PROJECT_SERVER_CAPACITY_REASON_CODE,
+        PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE,
+        error_is_project_open_retryable, tool_call_transport_error_is_retryable,
+    };
+    use super::daemon_tool_call_error;
+
+    #[test]
+    fn daemon_tool_call_error_round_trips_typed_warming_and_revoked() {
+        let warming = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "prose must not decide retry".to_owned(),
+            data: Some(json!({
+                "reason_code": PROJECT_WARMING_REASON_CODE,
+                "retryable": true,
+                "detail": "TraceDecay project '/tmp/fixture' is warming",
+            })),
+        });
+        assert_eq!(
+            warming.project_route_context(),
+            Some((
+                PROJECT_WARMING_REASON_CODE,
+                true,
+                "TraceDecay project '/tmp/fixture' is warming"
+            ))
+        );
+        assert!(tool_call_transport_error_is_retryable(&warming));
+
+        let revoked = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "the retained project server was retired before response completion"
+                .to_owned(),
+            data: Some(json!({
+                "reason_code": PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+                "retryable": true,
+                "detail": "the retained project server was retired before response completion",
+            })),
+        });
+        assert_eq!(
+            revoked.project_route_context(),
+            Some((
+                PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+                true,
+                "the retained project server was retired before response completion"
+            ))
+        );
+        assert!(tool_call_transport_error_is_retryable(&revoked));
+        assert!(
+            super::is_project_open_retryable_error(&revoked),
+            "the one-shot client rides out a mid-response retirement like a warming open"
+        );
+        assert!(
+            super::project_open_retry_wait(&Err(revoked), Instant::now() + Duration::from_secs(5))
+                .is_some(),
+            "a revoked response is re-sent, not returned"
+        );
+    }
+
+    /// A problem tool result as the daemon's projectless retained route
+    /// renders it.
+    fn projectless_problem_result(problem: ApplicationProblem) -> serde_json::Value {
+        let refusal = ApplicationRefusal {
+            operation: ApplicationSurfaceOperation::MessageSearch,
+            binding_id: BindingId::new("binding.mcp.message_search.v1").expect("binding id"),
+            problem: ApplicationProblemEnvelope::new(
+                ResultContractRef::new(
+                    SchemaId::new("schema.application.retained.message-search.result")
+                        .expect("schema id"),
+                    1,
+                )
+                .expect("result contract"),
+                RequestId::new("request.mcp.projectless-mounting").expect("request id"),
+                problem,
+            )
+            .expect("problem envelope"),
+        };
+        let mut result = refusal
+            .render(None, &json!({ "format": "json" }))
+            .expect("rendered refusal");
+        mark_semantic_tool_error(&mut result);
+        result.value
+    }
+
+    #[test]
+    fn projectless_mounting_refusal_is_re_sent_after_its_delay() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mounting = projectless_problem_result(ApplicationProblem::runtime_mounting());
+        assert_eq!(mounting.get("problem"), None);
+        assert_eq!(
+            (
+                &mounting["isError"],
+                &mounting["structuredContent"]["problem"]["diagnostic"]["code"],
+                &mounting["structuredContent"]["problem"]["retry"],
+                &mounting["structuredContent"]["problem"]["retry_after_millis"],
+            ),
+            (
+                &json!(true),
+                &json!("application.runtime.mounting"),
+                &json!("after_delay"),
+                &json!(250),
+            ),
+            "{mounting}"
+        );
+        assert_eq!(
+            super::project_open_retry_wait(&Ok(mounting), deadline),
+            Some(std::time::Duration::from_millis(250))
+        );
+
+        let answer = projectless_problem_result(ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.retained.authority-unavailable".to_owned(),
+            message: "no retained runtime is registered for this scope".to_owned(),
+        }));
+        assert_eq!(super::project_open_retry_wait(&Ok(answer), deadline), None);
+    }
+
+    #[test]
+    fn daemon_tool_call_error_round_trips_the_typed_reset_state() {
+        let refused = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "session temporal persisted shape requires reset: published v3 shape"
+                .to_owned(),
+            data: Some(json!({
+                "kind": "reset_required",
+                "retryable": false,
+                "authority": "session temporal",
+                "reason": "published v3 shape",
+            })),
+        });
+        assert_eq!(
+            refused.reset_required_context(),
+            Some(("session temporal", "published v3 shape"))
+        );
+        assert!(!error_is_project_open_retryable(&refused));
+        assert!(!tool_call_transport_error_is_retryable(&refused));
+
+        let unnamed = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "shape requires reset".to_owned(),
+            data: Some(json!({ "kind": "reset_required" })),
+        });
+        assert!(
+            unnamed.reset_required_context().is_none(),
+            "a reset state without its authority cannot name a reset command and stays untyped"
+        );
+    }
+
+    #[test]
+    fn daemon_tool_call_error_round_trips_a_parked_route_detail() {
+        let refused = daemon_tool_call_error(JsonRpcError {
+            code: -32602,
+            message: "the code index is parked".to_owned(),
+            data: Some(json!({
+                "reason_code": "code_index_publication_authority_corrupt",
+                "retryable": false,
+                "detail": {
+                    "kind": "parked",
+                    "cause": "source mode is not owner-private",
+                    "remedy": "restore mode 0600",
+                    "retries_on_wake": true,
+                },
+            })),
+        });
+
+        assert_eq!(
+            refused
+                .project_route_context()
+                .map(|context| (context.0, context.1)),
+            Some(("code_index_publication_authority_corrupt", false))
+        );
+        assert_eq!(
+            refused.project_route_typed_detail(),
+            Some(&tracedecay_domain::ApplicationProblemDetailV1::Parked {
+                cause: "source mode is not owner-private".to_owned(),
+                remedy: "restore mode 0600".to_owned(),
+                retries_on_wake: true,
+            })
+        );
+    }
+
+    #[test]
+    fn daemon_tool_call_error_without_reason_code_stays_untyped() {
+        let error = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "project is warming in the background; retry the same tool shortly".to_owned(),
+            data: None,
+        });
+        assert!(error.project_route_context().is_none());
+        assert!(!tool_call_transport_error_is_retryable(&error));
+        assert!(
+            !error_is_project_open_retryable(&error),
+            "warming prose without a reason code must not ride project-open retry"
+        );
+    }
+
+    #[test]
+    fn daemon_tool_call_error_round_trips_capacity_without_using_prose() {
+        let capacity = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "prose must not decide retry".to_owned(),
+            data: Some(json!({
+                "reason_code": PROJECT_SERVER_CAPACITY_REASON_CODE,
+                "retryable": true,
+                "detail": "daemon project server capacity reached (capacity=8); retry after active clients finish",
+                "kind": PROJECT_SERVER_CAPACITY_REASON_CODE,
+                "capacity": 8,
+            })),
+        });
+        assert!(error_is_project_open_retryable(&capacity));
+        assert!(
+            !tool_call_transport_error_is_retryable(&capacity),
+            "capacity is a project-open retry, not a journey-transport retry"
+        );
+
+        let prose_only = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "daemon project server capacity reached (capacity=8); retry after active clients finish"
+                .to_owned(),
+            data: Some(json!({
+                "kind": PROJECT_SERVER_CAPACITY_REASON_CODE,
+                "retryable": true,
+                "capacity": 8,
+            })),
+        });
+        assert!(!error_is_project_open_retryable(&prose_only));
+    }
 }

@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
@@ -13,13 +14,90 @@ use tracedecay_domain::{
     ProviderUsageScopeV1, SessionId,
 };
 
-use crate::{ObservationRecordParseErrorV1, parse_rfc3339_timestamp};
+use crate::{
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64,
+    parse_rfc3339_timestamp,
+};
 
 const PROVIDER: &str = "codex";
 
+/// Validated current Codex user-message fields shared by canonical capture and
+/// the session transcript projection.
+pub struct CodexCurrentUserMessage<'a> {
+    pub item_id: &'a str,
+    pub content: &'a Value,
+}
+
+/// Validated Codex goal context carried by a `response_item.message(user)`.
+pub struct CodexResponseGoalContext<'a> {
+    pub item_id: Option<&'a str>,
+    pub content: &'a Value,
+    pub visible_text: String,
+}
+
+/// Validate Codex's current `event_msg.item_completed/UserMessage` contract.
+/// Stable native identity and visible text are both required before the item
+/// can become a canonical or session message.
+pub fn codex_current_user_message(payload: &Value) -> Option<CodexCurrentUserMessage<'_>> {
+    if payload.get("type").and_then(Value::as_str) != Some("item_completed") {
+        return None;
+    }
+    let item = payload.get("item")?;
+    if item.get("type").and_then(Value::as_str) != Some("UserMessage") {
+        return None;
+    }
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|item_id| !item_id.is_empty())?;
+    ObservationId::new(item_id).ok()?;
+    let content = item.get("content")?;
+    let visible_text = tracedecay_store::codex_message_visible_text(content);
+    if visible_text.trim().is_empty() {
+        return None;
+    }
+    Some(CodexCurrentUserMessage { item_id, content })
+}
+
+/// Validate the legacy response-only goal-context shape. A response item may
+/// omit `id` in older rollouts; when present, it must still be a valid native
+/// observation identity. Pair replacement belongs to transactional projection,
+/// after the matching current item has committed successfully.
+pub fn codex_response_goal_context(payload: &Value) -> Option<CodexResponseGoalContext<'_>> {
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("user")
+    {
+        return None;
+    }
+    let item_id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|item_id| !item_id.is_empty());
+    if item_id.is_some_and(|item_id| ObservationId::new(item_id).is_err()) {
+        return None;
+    }
+    let content = payload.get("content")?;
+    let visible_text = tracedecay_store::codex_message_visible_text(content);
+    tracedecay_store::codex_goal_context_from_text(&visible_text)?;
+    Some(CodexResponseGoalContext {
+        item_id,
+        content,
+        visible_text,
+    })
+}
+
 pub fn codex_observation_record_supported(value: &Value) -> bool {
+    let native_kind = value.get("type").and_then(Value::as_str);
+    if native_kind == Some("event_msg") {
+        let payload = value.get("payload").unwrap_or(value);
+        if payload.get("type").and_then(Value::as_str) == Some("item_completed")
+            && payload.pointer("/item/type").and_then(Value::as_str) == Some("UserMessage")
+        {
+            return codex_current_user_message(payload).is_some();
+        }
+    }
     matches!(
-        value.get("type").and_then(Value::as_str),
+        native_kind,
         Some(
             "session_meta"
                 | "turn_context"
@@ -48,19 +126,23 @@ pub fn normalize_codex_observation(
     )
 }
 
+/// The rollout context in effect for one record: where the session projects,
+/// which file it was read from, and the model its turn runs under.
 #[derive(Clone, Copy)]
-pub struct CodexObservationLocation<'a> {
+pub struct CodexObservationContext<'a> {
     pub project_path: Option<&'a Path>,
     pub location_path: Option<&'a Path>,
+    pub transcript_path: Option<&'a Path>,
+    pub model: Option<&'a str>,
 }
 
-pub fn normalize_codex_observation_with_location(
+pub fn normalize_codex_observation_with_context(
     native: &Value,
     session_id: &str,
     native_thread_id: Option<&str>,
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
-    location: CodexObservationLocation<'_>,
+    context: CodexObservationContext<'_>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     normalize_codex_observation_inner(
         native,
@@ -68,7 +150,7 @@ pub fn normalize_codex_observation_with_location(
         native_thread_id,
         stable_record_id,
         range,
-        Some(location),
+        Some(context),
     )
 }
 
@@ -81,34 +163,27 @@ fn normalize_codex_observation_inner(
     native_thread_id: Option<&str>,
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
-    location: Option<CodexObservationLocation<'_>>,
+    context: Option<CodexObservationContext<'_>>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // Codex rollouts order by file bytes, so the range length is the source
-    // record's byte length. Failed normalizations are counted, never hidden.
-    hotpath::gauge!("capture.codex.record_bytes").inc(range.end() - range.start());
-    let envelope = normalize_codex_record(
+    normalize_codex_record(
         native,
         session_id,
         native_thread_id,
         stable_record_id,
         range,
-        location,
-    );
-    if envelope.is_err() {
-        hotpath::gauge!("capture.codex.normalize_failures").inc(1u64);
-    }
-    envelope
+        context,
+    )
 }
 
 /// One source-record canonicalization, not a per-item walk.
-#[hotpath::measure(label = "capture.codex.normalize")]
+#[tracing::instrument(name = "capture.codex.normalize", level = "trace", skip_all)]
 fn normalize_codex_record(
     native: &Value,
     session_id: &str,
     native_thread_id: Option<&str>,
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
-    location: Option<CodexObservationLocation<'_>>,
+    context: Option<CodexObservationContext<'_>>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     let native_kind = native
         .get("type")
@@ -133,22 +208,32 @@ fn normalize_codex_record(
         native_kind,
         "event_msg" | "response_item" | "compacted" | "inter_agent_communication"
     ) {
-        relations = relations.with_message_id(stable_record_id.clone());
+        let message_id = match native_kind {
+            "event_msg" => codex_current_user_message(payload)
+                .and_then(|message| observation_id_from_native(message.item_id)),
+            "response_item" => codex_response_goal_context(payload)
+                .and_then(|message| message.item_id)
+                .and_then(observation_id_from_native),
+            _ => None,
+        }
+        .unwrap_or_else(|| stable_record_id.clone());
+        relations = relations.with_message_id(message_id);
     }
     if native_kind == "session_meta" {
         relations = append_codex_session_meta_agent_relations(relations, payload, native_thread_id);
     }
-
     let mut facts = Vec::new();
-    if let Some(location) = location {
+    if let Some(context) = context {
         facts.push(CanonicalObservationFactV1::Session {
-            project_path: location
+            project_path: context
                 .project_path
                 .map(|path| path.to_string_lossy().into_owned()),
-            location_path: location
+            location_path: context
                 .location_path
                 .map(|path| path.to_string_lossy().into_owned()),
-            transcript_path: None,
+            transcript_path: context
+                .transcript_path
+                .map(|path| path.to_string_lossy().into_owned()),
             title: None,
             started_at: None,
             ended_at: None,
@@ -178,9 +263,19 @@ fn normalize_codex_record(
             native_kind: "turn_context".to_string(),
             state: CanonicalUnknownStateV1::Unsupported,
         }),
-        "event_msg" => append_codex_event_facts(payload, timestamp, &mut facts),
+        "event_msg" => append_codex_event_facts(
+            payload,
+            timestamp,
+            context.and_then(|context| context.model),
+            &mut facts,
+        ),
         "response_item" => {
-            append_codex_response_item_facts(payload, timestamp, &stable_record_id, &mut facts);
+            append_codex_response_item_facts(
+                payload,
+                timestamp,
+                context.and_then(|context| context.model),
+                &mut facts,
+            );
         }
         "compacted" => {
             facts.push(CanonicalObservationFactV1::Compaction {
@@ -249,7 +344,8 @@ fn append_codex_session_meta_agent_relations(
     native_thread_id: Option<&str>,
 ) -> CanonicalObservationRelationsV1 {
     let parent_session_id = string_field(payload, "forked_from_id")
-        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id"));
+        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id"))
+        .or_else(|| string_field(payload, "parent_thread_id"));
     let thread_source = string_field(payload, "thread_source");
     let is_subagent = thread_source.as_deref() == Some("subagent")
         || parent_session_id.is_some()
@@ -263,9 +359,16 @@ fn append_codex_session_meta_agent_relations(
     if let Some(agent_id) = native_thread_id.and_then(observation_id_from_native) {
         relations = relations.with_agent_id(agent_id);
     }
-    if let Some(parent_agent_id) = parent_session_id.and_then(|id| observation_id_from_native(&id))
-    {
-        relations = relations.with_parent_agent_id(parent_agent_id);
+    // The spawning `spawn_agent` call id is recorded only in the parent's
+    // rollout (`SubAgentActivity` `started` item), never in the child's; the
+    // parent's spawn rollup binds it once both sessions are projected.
+    if let Some(parent) = parent_session_id {
+        if let Some(parent_agent_id) = observation_id_from_native(&parent) {
+            relations = relations.with_parent_agent_id(parent_agent_id);
+        }
+        if let Ok(parent_session_id) = SessionId::new(parent) {
+            relations = relations.with_parent_session_id(parent_session_id);
+        }
     }
     relations
 }
@@ -273,6 +376,7 @@ fn append_codex_session_meta_agent_relations(
 fn append_codex_event_facts(
     payload: &Value,
     timestamp: Option<i64>,
+    context_model: Option<&str>,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     match payload.get("type").and_then(Value::as_str) {
@@ -289,10 +393,55 @@ fn append_codex_event_facts(
                     model: payload
                         .get("model")
                         .and_then(Value::as_str)
-                        .map(str::to_string),
+                        .map(str::to_string)
+                        .or_else(|| context_model.map(str::to_string)),
                     timestamp,
                 });
             }
+        }
+        Some("item_completed") => {
+            let Some(item) = payload.get("item") else {
+                facts.push(CanonicalObservationFactV1::Unknown {
+                    native_kind: "item_completed".to_string(),
+                    state: CanonicalUnknownStateV1::Malformed,
+                });
+                return;
+            };
+            if item.get("type").and_then(Value::as_str) == Some("FileChange") {
+                append_codex_file_change_facts(payload, item, timestamp, facts);
+                return;
+            }
+            if item.get("type").and_then(Value::as_str) == Some("SubAgentActivity")
+                && item.get("kind").and_then(Value::as_str) == Some("started")
+            {
+                append_codex_subagent_spawn_fact(item, facts);
+                return;
+            }
+            if item.get("type").and_then(Value::as_str) != Some("UserMessage") {
+                facts.push(CanonicalObservationFactV1::Unknown {
+                    native_kind: "item_completed".to_string(),
+                    state: CanonicalUnknownStateV1::Unsupported,
+                });
+                return;
+            }
+            let Some(message) = codex_current_user_message(payload) else {
+                facts.push(CanonicalObservationFactV1::Unknown {
+                    native_kind: "item_completed".to_string(),
+                    state: CanonicalUnknownStateV1::Malformed,
+                });
+                return;
+            };
+            facts.push(CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::User,
+                content: message.content.clone(),
+                model: item
+                    .get("model")
+                    .or_else(|| payload.get("model"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| context_model.map(str::to_string)),
+                timestamp,
+            });
         }
         Some("token_count") => {
             let info = payload.get("info").unwrap_or(payload);
@@ -337,6 +486,99 @@ fn append_codex_event_facts(
             native_kind: "event_msg".to_string(),
             state: CanonicalUnknownStateV1::Absent,
         }),
+    }
+}
+
+/// One `item_completed` `SubAgentActivity` `started` item: the parent
+/// rollout's only record binding a spawned thread (`agent_thread_id`) to the
+/// `spawn_agent` call that started it (`id`, the call's `call_id`). Either
+/// missing leaves the item typed malformed rather than a partial spawn.
+fn append_codex_subagent_spawn_fact(item: &Value, facts: &mut Vec<CanonicalObservationFactV1>) {
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let (Some(child), Some(call_id)) = (text("agent_thread_id"), text("id")) else {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "item_completed.SubAgentActivity".to_string(),
+            state: CanonicalUnknownStateV1::Malformed,
+        });
+        return;
+    };
+    let mut content = serde_json::Map::new();
+    content.insert(
+        "tool_use_id".to_string(),
+        Value::String(call_id.to_string()),
+    );
+    if let Some(agent_path) = text("agent_path") {
+        content.insert("text".to_string(), Value::String(agent_path.to_string()));
+    }
+    facts.push(CanonicalObservationFactV1::Workflow {
+        evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+        reference: Some(child.to_string()),
+        content: Some(Value::Object(content)),
+    });
+}
+
+/// One `item_completed` `FileChange` item: Codex's record of an applied patch.
+/// `changes` maps each path to `{type: add|update|delete, ...}`; `status`
+/// reports whether the apply succeeded. Only a completed apply becomes
+/// file-edit evidence, one fact per path, timed by the item's own
+/// `completed_at_ms` when present and the record timestamp otherwise. Diff
+/// bodies and file contents never leave the native record.
+fn append_codex_file_change_facts(
+    payload: &Value,
+    item: &Value,
+    timestamp: Option<i64>,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    let Some(changes) = item.get("changes").and_then(Value::as_object) else {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "item_completed.FileChange".to_string(),
+            state: CanonicalUnknownStateV1::Malformed,
+        });
+        return;
+    };
+    if item.get("status").and_then(Value::as_str) != Some("completed") {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "item_completed.FileChange".to_string(),
+            state: CanonicalUnknownStateV1::Unsupported,
+        });
+        return;
+    }
+    let edited_at_micros = payload
+        .get("completed_at_ms")
+        .and_then(Value::as_i64)
+        .and_then(|millis| millis.checked_mul(1_000))
+        .or_else(|| timestamp.and_then(|secs| secs.checked_mul(1_000_000)));
+    for (path, change) in changes.iter().filter(|(path, _)| !path.is_empty()) {
+        let mut content = serde_json::Map::new();
+        content.insert("type".to_string(), Value::String("FileChange".to_string()));
+        if let Some(id) = item.get("id").filter(|id| id.is_string()) {
+            content.insert("id".to_string(), id.clone());
+        }
+        if let Some(edited_at_micros) = edited_at_micros {
+            content.insert(
+                "edited_at_micros".to_string(),
+                Value::from(edited_at_micros),
+            );
+        }
+        if let Some(change_type) = change.get("type").and_then(Value::as_str) {
+            content.insert(
+                "change_type".to_string(),
+                Value::String(change_type.to_string()),
+            );
+        }
+        if let Some(diff) = change.get("unified_diff").and_then(Value::as_str) {
+            let hunks = diff.lines().filter(|line| line.starts_with("@@")).count();
+            content.insert("hunks".to_string(), Value::from(hunks));
+        }
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+            reference: Some(path.clone()),
+            content: Some(Value::Object(content)),
+        });
     }
 }
 
@@ -513,13 +755,13 @@ fn append_codex_turn_lifecycle_fact(
 ) {
     // Exact singular task_complete / task_started / turn_aborted only
     // (write_codex_rollout_with_structured_events, task_events_become_turn_boundary_rows).
-    // Do not index last_agent_message as content — classic turn rows exclude it.
+    // Do not index last_agent_message as content. Classic turn rows exclude it.
     let provider_reference = payload
         .get("turn_id")
         .and_then(Value::as_str)
         .filter(|turn_id| !turn_id.is_empty())
         .map(str::to_string);
-    // Keep native `reason` in content only — do not promote it to status
+    // Keep native `reason` in content only. Do not promote it to status
     // (no fixture evidence that abort reason is a workflow status vocabulary).
     let mut content = serde_json::Map::new();
     content.insert("type".to_string(), Value::String(event.to_string()));
@@ -587,7 +829,7 @@ fn append_codex_update_plan_lifecycle_fact(
 fn append_codex_response_item_facts(
     payload: &Value,
     timestamp: Option<i64>,
-    stable_record_id: &ObservationId,
+    context_model: Option<&str>,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     let Some(item_kind) = payload.get("type").and_then(Value::as_str) else {
@@ -599,20 +841,37 @@ fn append_codex_response_item_facts(
     };
     match item_kind {
         "message" => {
-            if let Some(content) = payload.get("content").cloned() {
-                facts.push(CanonicalObservationFactV1::Message {
-                    role: canonical_message_role(payload.get("role").and_then(Value::as_str)),
-                    content,
-                    model: payload
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    timestamp,
+            let role = match payload.get("role").and_then(Value::as_str) {
+                Some("user") => CanonicalMessageRoleV1::User,
+                Some("assistant") => CanonicalMessageRoleV1::Assistant,
+                other => {
+                    facts.push(CanonicalObservationFactV1::Unknown {
+                        native_kind: format!(
+                            "response_item.message.{}",
+                            other.unwrap_or("unknown")
+                        ),
+                        state: CanonicalUnknownStateV1::Unsupported,
+                    });
+                    return;
+                }
+            };
+            let Some(content) = payload.get("content").cloned() else {
+                facts.push(CanonicalObservationFactV1::Unknown {
+                    native_kind: "response_item.message".to_string(),
+                    state: CanonicalUnknownStateV1::Absent,
                 });
-                // Goal-context response_item messages stay Message-only.
-                // WorkflowLifecycle Goal is reserved for nested thread_goal_updated
-                // (write_codex_rollout_with_goal_events), not synthetic goal-context text.
-            }
+                return;
+            };
+            facts.push(CanonicalObservationFactV1::Message {
+                role,
+                content,
+                model: payload
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| context_model.map(str::to_string)),
+                timestamp,
+            });
         }
         "function_call" | "custom_tool_call" | "tool_search_call" | "web_search_call" => {
             let invocation_id = canonical_native_observation_id(
@@ -620,31 +879,28 @@ fn append_codex_response_item_facts(
                     .get("call_id")
                     .or_else(|| payload.get("id"))
                     .and_then(Value::as_str),
-                stable_record_id,
             );
             let name = response_item_tool_name(payload, item_kind)
                 .unwrap_or_else(|| item_kind.to_string());
             facts.push(CanonicalObservationFactV1::ToolInvocation {
                 invocation_id,
                 name: name.clone(),
-                arguments: Value::Null,
+                arguments: response_item_tool_arguments(payload, item_kind),
             });
             if item_kind == "function_call" && name == "update_plan" {
                 let _ = append_codex_update_plan_lifecycle_fact(payload, facts);
             }
         }
         "function_call_output" | "custom_tool_call_output" => {
-            facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: Some(canonical_native_observation_id(
-                    payload.get("call_id").and_then(Value::as_str),
-                    stable_record_id,
-                )),
-                content: Value::Null,
-                success: payload
+            facts.push(crate::accounted_tool_result_with_recorded_output(
+                canonical_native_observation_id(payload.get("call_id").and_then(Value::as_str)),
+                Value::Null,
+                payload
                     .get("status")
                     .and_then(Value::as_str)
                     .map(|status| matches!(status, "completed" | "success" | "succeeded")),
-            });
+                payload.get("output"),
+            ));
         }
         "reasoning" => {
             let summary = payload.get("summary").filter(|summary| !summary.is_null());
@@ -719,7 +975,7 @@ pub fn codex_native_record_id(
     );
     ObservationId::new(format!(
         "codex.native.sha256:{}",
-        hex::encode(hasher.finalize())
+        encode_lowercase_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
@@ -732,7 +988,21 @@ fn parse_arguments(arguments: Option<&Value>) -> Option<Value> {
     }
 }
 
-fn string_field(payload: &Value, key: &str) -> Option<String> {
+fn response_item_tool_arguments(payload: &Value, item_kind: &str) -> Value {
+    match item_kind {
+        "function_call" | "tool_search_call" => match payload.get("arguments") {
+            Some(Value::String(raw)) => parse_arguments(payload.get("arguments"))
+                .unwrap_or_else(|| Value::String(raw.clone())),
+            Some(value) if !value.is_null() => value.clone(),
+            _ => Value::Null,
+        },
+        "custom_tool_call" => payload.get("input").cloned().unwrap_or(Value::Null),
+        "web_search_call" => payload.get("action").cloned().unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+pub fn string_field(payload: &Value, key: &str) -> Option<String> {
     payload
         .get(key)
         .and_then(Value::as_str)
@@ -740,7 +1010,7 @@ fn string_field(payload: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
+pub fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
     payload
         .pointer(pointer)
         .and_then(Value::as_str)
@@ -755,31 +1025,8 @@ fn timestamp_from_record(record: &Value) -> Option<i64> {
         .and_then(parse_rfc3339_timestamp)
 }
 
-fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
-}
-
-fn canonical_native_observation_id(
-    native_id: Option<&str>,
-    fallback: &ObservationId,
-) -> ObservationId {
-    native_id
-        .and_then(|native_id| ObservationId::new(native_id).ok())
-        .unwrap_or_else(|| fallback.clone())
-}
-
-fn canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
+fn canonical_native_observation_id(native_id: Option<&str>) -> Option<ObservationId> {
+    native_id.and_then(|native_id| ObservationId::new(native_id).ok())
 }
 
 fn response_item_tool_name(payload: &Value, response_item_type: &str) -> Option<String> {
@@ -806,7 +1053,7 @@ mod provider_usage_tests {
         ProviderUsageModelV1, ProviderUsageScopeV1,
     };
 
-    use super::{CodexObservationLocation, normalize_codex_observation_with_location};
+    use super::{CodexObservationContext, normalize_codex_observation_with_context};
 
     #[test]
     fn canonical_payload_uses_only_bound_source_location() {
@@ -823,21 +1070,26 @@ mod provider_usage_tests {
                 }
             }
         });
-        let canonical = normalize_codex_observation_with_location(
+        let canonical = normalize_codex_observation_with_context(
             &native,
             "session.fixture",
             Some("thread.fixture"),
             ObservationId::new("record.fixture").unwrap(),
             ObservationSourceRangeV1::new(10, 20).unwrap(),
-            CodexObservationLocation {
+            CodexObservationContext {
                 project_path: Some(Path::new("/redacted/project")),
                 location_path: Some(Path::new("/redacted/project")),
+                transcript_path: Some(Path::new("/redacted/project/rollout.jsonl")),
+                model: Some("gpt-5.5"),
             },
         )
         .unwrap();
 
         let encoded = serde_json::to_value(canonical).unwrap();
-        assert!(encoded["facts"][0].get("transcript_path").is_none());
+        assert_eq!(
+            encoded["facts"][0]["transcript_path"].as_str(),
+            Some("/redacted/project/rollout.jsonl")
+        );
         assert!(encoded["relations"].get("turn_id").is_none());
         assert_eq!(encoded["facts"][1]["model"]["state"], "unknown");
     }
@@ -867,15 +1119,17 @@ mod provider_usage_tests {
                 }
             }
         });
-        let envelope = normalize_codex_observation_with_location(
+        let envelope = normalize_codex_observation_with_context(
             &native,
             "session.fixture",
             Some("thread.fixture"),
             ObservationId::new("record.fixture").unwrap(),
             ObservationSourceRangeV1::new(10, 20).unwrap(),
-            CodexObservationLocation {
+            CodexObservationContext {
                 project_path: None,
                 location_path: None,
+                transcript_path: None,
+                model: None,
             },
         )
         .unwrap();
@@ -929,15 +1183,17 @@ mod provider_usage_tests {
                 }
             }
         });
-        let envelope = normalize_codex_observation_with_location(
+        let envelope = normalize_codex_observation_with_context(
             &native,
             "session.fixture",
             Some("thread.fixture"),
             ObservationId::new("record.fixture").unwrap(),
             ObservationSourceRangeV1::new(10, 20).unwrap(),
-            CodexObservationLocation {
+            CodexObservationContext {
                 project_path: None,
                 location_path: None,
+                transcript_path: None,
+                model: None,
             },
         )
         .unwrap();
@@ -967,5 +1223,110 @@ mod provider_usage_tests {
                     ProviderUsageContractDimensionV1::Model,
                 ])
         )));
+    }
+
+    #[test]
+    fn current_item_completed_user_message_is_a_canonical_message() {
+        let native = json!({
+            "timestamp": "2026-09-04T12:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "user-item-1",
+                    "content": [{
+                        "type": "text",
+                        "text": "Find the callers of publish_generation.",
+                        "text_elements": []
+                    }]
+                }
+            }
+        });
+        let envelope = normalize_codex_observation_with_context(
+            &native,
+            "session.fixture",
+            Some("thread-1"),
+            ObservationId::new("record.fixture").unwrap(),
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+            CodexObservationContext {
+                project_path: None,
+                location_path: None,
+                transcript_path: None,
+                model: Some("gpt-ctx"),
+            },
+        )
+        .unwrap();
+
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Message {
+                role: tracedecay_domain::CanonicalMessageRoleV1::User,
+                content,
+                ..
+            } if content == &native["payload"]["item"]["content"]
+        )));
+        assert_eq!(
+            envelope.relations().message_id().map(ObservationId::as_str),
+            Some("user-item-1")
+        );
+    }
+
+    fn subagent_activity(item: serde_json::Value) -> Vec<CanonicalObservationFactV1> {
+        let native = json!({
+            "timestamp": "2026-09-02T00:39:03.193Z",
+            "type": "event_msg",
+            "payload": {"type": "item_completed", "thread_id": "parent-thread", "item": item}
+        });
+        super::normalize_codex_observation(
+            &native,
+            "parent-thread",
+            Some("parent-thread"),
+            ObservationId::new("record.fixture").unwrap(),
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+        )
+        .unwrap()
+        .facts()
+        .to_vec()
+    }
+
+    #[test]
+    fn subagent_activity_started_records_the_spawned_thread_and_its_call() {
+        let facts = subagent_activity(json!({
+            "type": "SubAgentActivity", "id": "call_oRAA9a98",
+            "kind": "started", "agent_thread_id": "child-thread", "agent_path": "/root/explorer"
+        }));
+        assert_eq!(
+            facts,
+            vec![CanonicalObservationFactV1::Workflow {
+                evidence_kind: tracedecay_domain::CanonicalWorkflowEvidenceKindV1::Subagent,
+                reference: Some("child-thread".to_owned()),
+                content: Some(json!({"tool_use_id": "call_oRAA9a98", "text": "/root/explorer"})),
+            }]
+        );
+
+        let interacted = subagent_activity(json!({
+            "type": "SubAgentActivity", "id": "call_later",
+            "kind": "interacted", "agent_thread_id": "child-thread"
+        }));
+        assert!(
+            interacted
+                .iter()
+                .all(|fact| !matches!(fact, CanonicalObservationFactV1::Workflow { .. })),
+            "only the started item names the spawning call: {interacted:?}"
+        );
+
+        let unnamed = subagent_activity(json!({
+            "type": "SubAgentActivity", "id": "call_x", "kind": "started"
+        }));
+        assert!(matches!(
+            unnamed.as_slice(),
+            [CanonicalObservationFactV1::Unknown {
+                state: tracedecay_domain::CanonicalUnknownStateV1::Malformed,
+                ..
+            }]
+        ));
     }
 }

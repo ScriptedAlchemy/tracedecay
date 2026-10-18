@@ -1,0 +1,946 @@
+//! A code-index search follows request settlement, not the blocking worker's
+//! natural completion.
+//!
+//! Independent searches on one project run together. A request the caller has
+//! already abandoned must stop at the candidate-scan checkpoint that observes
+//! the request control, instead of hydrating the rest of its corpus.
+
+use super::*;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread::ThreadId;
+
+use tracedecay_contracts::CancellationSignal;
+use tracedecay_query::code_search::{
+    CodeIndexSearchAuthorityV1, CodeIndexSearchExecutor, CodeIndexSearchOutcomeV1,
+    CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1, CodeIndexSimilarOutcomeV1,
+    CodeIndexSimilarRequestV1, CodeIndexSimilarTargetV1,
+};
+use tracedecay_runtime_core::native_runtime;
+
+use crate::code_index_executor::{code_index_search_executor, code_index_similar_executor};
+use crate::mcp_admission::{
+    CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
+    CodeIndexScopeResolverV1, CodeIndexScopeUnavailableV1,
+};
+
+#[derive(Clone)]
+struct FixedScopeResolver(ResolvedScope);
+
+impl CodeIndexScopeResolverV1 for FixedScopeResolver {
+    fn resolved_scope_for_project(
+        &self,
+        _project_root: &Path,
+        _project_id: &ProjectId,
+    ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Clone)]
+struct FixtureGrant(CodeIndexSearchAuthorityV1);
+
+impl CodeIndexMcpReadGrantV1 for FixtureGrant {
+    fn authorize(
+        &self,
+        _scope: &ResolvedScope,
+        _authority: Option<&CodeIndexSearchAuthorityV1>,
+    ) -> Result<CodeIndexSearchAuthorityV1, CodeIndexMcpAdmissionUnavailableV1> {
+        Ok(self.0.clone())
+    }
+
+    fn search_authority(&self) -> CodeIndexSearchAuthorityV1 {
+        self.0.clone()
+    }
+}
+
+/// Read admission whose route check is the test seam into the running scan.
+///
+/// The executor's request control consults `route_is_registered` on every
+/// `is_cancelled` check. Calls from the test's runtime thread (the admission
+/// check and the executor's settlement poll) answer immediately; calls from
+/// other threads are the scan itself, running under `spawn_blocking`. The
+/// selected checkpoint reports the pause to the test and blocks until the
+/// test resumes it, so the test can cancel the request at a point that is
+/// deterministic rather than timing-dependent.
+#[derive(Clone)]
+struct PausingAdmission {
+    authority: CodeIndexSearchAuthorityV1,
+    runtime_thread: ThreadId,
+    scan_checkpoints: Arc<AtomicUsize>,
+    pause_at: usize,
+    scan_paused: Arc<tokio::sync::Notify>,
+    resume: Arc<StdMutex<mpsc::Receiver<()>>>,
+}
+
+impl CodeIndexMcpReadAdmissionV1 for PausingAdmission {
+    type Grant = FixtureGrant;
+
+    fn route_is_registered(&self) -> bool {
+        if std::thread::current().id() == self.runtime_thread {
+            return true;
+        }
+        if self.scan_checkpoints.fetch_add(1, Ordering::SeqCst) == self.pause_at {
+            self.scan_paused.notify_one();
+            self.resume
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv()
+                .expect("the test resumes the paused scan");
+        }
+        true
+    }
+
+    fn admit_current(
+        &self,
+        _scope: &ResolvedScope,
+    ) -> Result<Self::Grant, CodeIndexMcpAdmissionUnavailableV1> {
+        Ok(FixtureGrant(self.authority.clone()))
+    }
+}
+
+/// Read admission that never pauses: the request this fixture drives is
+/// abandoned inside generation resolution, where no control checkpoint runs at
+/// all, so a checkpoint seam would never be reached.
+#[derive(Clone)]
+struct OpenAdmission(CodeIndexSearchAuthorityV1);
+
+impl CodeIndexMcpReadAdmissionV1 for OpenAdmission {
+    type Grant = FixtureGrant;
+
+    fn route_is_registered(&self) -> bool {
+        true
+    }
+
+    fn admit_current(
+        &self,
+        _scope: &ResolvedScope,
+    ) -> Result<Self::Grant, CodeIndexMcpAdmissionUnavailableV1> {
+        Ok(FixtureGrant(self.0.clone()))
+    }
+}
+
+/// Scope resolution reports when an admitted search has passed authority
+/// checks and is about to read the scheduler. The report lets the test observe
+/// that point without polling for it.
+#[derive(Clone)]
+struct AdmittingScopeResolver {
+    scope: ResolvedScope,
+    admitted: Arc<tokio::sync::Notify>,
+}
+
+impl CodeIndexScopeResolverV1 for AdmittingScopeResolver {
+    fn resolved_scope_for_project(
+        &self,
+        _project_root: &Path,
+        _project_id: &ProjectId,
+    ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1> {
+        self.admitted.notify_one();
+        Ok(self.scope.clone())
+    }
+}
+
+fn search_request(
+    project_root: &Path,
+    cancellation: Option<CancellationSignal>,
+) -> CodeIndexSearchRequestV1 {
+    CodeIndexSearchRequestV1 {
+        project_root: project_root.to_path_buf(),
+        query: "alpha".to_owned(),
+        source_revision: None,
+        source_tree: None,
+        source_reference: None,
+        limit: 8,
+        cursor: None,
+        lexical_routing: LexicalRoutingV1::default(),
+        authority: None,
+        deadline: None,
+        cancellation,
+    }
+}
+
+fn unavailable_reason(
+    outcome: &CodeIndexSearchOutcomeV1,
+) -> Option<CodeIndexSearchUnavailableReasonV1> {
+    match outcome {
+        CodeIndexSearchOutcomeV1::Unavailable(unavailable) => Some(unavailable.reason),
+        CodeIndexSearchOutcomeV1::Complete(_) => None,
+    }
+}
+
+/// Pause a candidate scan at its first control checkpoint, cancel the paused
+/// request, and prove that resuming it unwinds with the typed cancellation
+/// reason, performs no further row checkpoints, and the next request completes.
+#[tokio::test]
+async fn cancelled_scan_releases_the_search_permit_to_the_next_request() {
+    cancelled_scan_releases_permit("alpha", 0, 16).await;
+}
+
+#[tokio::test]
+async fn cancelled_exact_batch_releases_the_search_permit_to_the_next_request() {
+    // Entry into the exact lane and artifact reader, then the first batch.
+    // The fourth observation is the next batch boundary, after 128 candidates.
+    cancelled_scan_releases_permit(r#""return value""#, 3, 384).await;
+}
+
+async fn cancelled_scan_releases_permit(query: &str, pause_at: usize, source_count: usize) {
+    let sources = (0..source_count)
+        .map(|ordinal| {
+            (
+                format!("src/alpha_{ordinal:03}.rs"),
+                format!("pub fn alpha_{ordinal:03}() -> u32 {{ let value = {ordinal}; return value; }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let files = sources
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let admission = PausingAdmission {
+        authority: CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.search-permit.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.search-permit.fixture",
+            )
+            .expect("authorization revision"),
+        },
+        runtime_thread: std::thread::current().id(),
+        scan_checkpoints: Arc::new(AtomicUsize::new(0)),
+        pause_at,
+        scan_paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(StdMutex::new(resume_rx)),
+    };
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        admission.clone(),
+        FixedScopeResolver(scope),
+    );
+    let cancellation =
+        CancellationSignal::active("cancellation.search-permit.fixture").expect("cancellation");
+
+    let mut request = search_request(fixture.path(), Some(cancellation.clone()));
+    request.query = query.to_owned();
+    let abandoned = tokio::spawn(executor(request));
+    // Deterministic rendezvous: the scan itself reports when it reaches its
+    // selected checkpoint. The timeout only bounds a failure in which the scan
+    // never consults the control.
+    tokio::time::timeout(Duration::from_mins(1), admission.scan_paused.notified())
+        .await
+        .expect("the candidate scan must consult the request control while it is running");
+
+    assert!(
+        cancellation.cancel(tracedecay_contracts::clock::now_micros()),
+        "the request cancels exactly once"
+    );
+    resume_tx
+        .send(())
+        .expect("the paused scan is waiting to resume");
+    let outcome = abandoned.await.expect("executor task joins");
+    assert_eq!(
+        unavailable_reason(&outcome),
+        Some(CodeIndexSearchUnavailableReasonV1::Cancelled),
+        "a cancelled scan reports the typed cancellation state: {outcome:?}"
+    );
+    let checkpoints = admission.scan_checkpoints.load(Ordering::SeqCst);
+    assert_eq!(
+        checkpoints,
+        pause_at + 1,
+        "the resumed scan observes cancellation at the checkpoint it paused in and \
+         hydrates nothing further"
+    );
+
+    let admitted = executor(search_request(fixture.path(), None)).await;
+    assert!(
+        matches!(admitted, CodeIndexSearchOutcomeV1::Complete(_)),
+        "the next request completes after the cancelled scan stops: {admitted:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// Independent searches on one project run together.
+///
+/// One scan is held inside its candidate walk. A second search on the same
+/// executor must finish with a complete result before that walk is released.
+/// Linked-worktree and unrelated-repository agents must also finish while
+/// that walk is held, retaining their own result scope.
+#[tokio::test]
+async fn independent_search_completes_while_another_scan_is_in_progress() {
+    let sources = (0..48)
+        .map(|ordinal| {
+            (
+                format!("src/alpha_{ordinal:03}.rs"),
+                format!(
+                    "pub fn alpha_{ordinal:03}() -> u32 {{ let value = {ordinal}; return value; }}\n"
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let files = sources
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) =
+        mounted_core_query_worktree_in(CodeIndexSchedulerRegistryV1::new(3), &fixture, &store)
+            .await;
+    let linked_parent = TempDir::new().expect("linked parent");
+    let linked = linked_parent.path().join("linked");
+    git(
+        fixture.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "search-linked",
+            linked.to_str().expect("linked path"),
+            "main",
+        ],
+    );
+    let (registry, linked_scope) =
+        mounted_core_query_worktree_at(registry, &linked, store.path().join("linked")).await;
+    assert_eq!(scope.repository_id, linked_scope.repository_id);
+    assert_ne!(scope.worktree_id, linked_scope.worktree_id);
+
+    let other = GitFixture::new(&[("src/beta.rs", "pub fn beta() -> u32 { 42 }\n")]);
+    let other_project = ProjectId::new("project.concurrent-other").expect("other project");
+    registry
+        .mount_worktree(
+            other_project.clone(),
+            other.path(),
+            store.path().join("other"),
+        )
+        .await
+        .expect("mount another repository");
+    let latest = wait_for_live_complete_generation(&registry, other.path()).await;
+    let snapshot = latest.generation.snapshot();
+    let other_scope = ResolvedScope::new(
+        other_project.clone(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("other worktree"),
+        snapshot.reference.clone(),
+    )
+    .expect("other scope");
+    assert_ne!(scope.repository_id, other_scope.repository_id);
+    mount_core_query_authority(&registry, other.path(), &other_scope, &latest).await;
+
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let admission = PausingAdmission {
+        authority: CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.concurrent-search.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.concurrent-search.fixture",
+            )
+            .expect("authorization revision"),
+        },
+        runtime_thread: std::thread::current().id(),
+        scan_checkpoints: Arc::new(AtomicUsize::new(0)),
+        pause_at: 0,
+        scan_paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(StdMutex::new(resume_rx)),
+    };
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        admission.clone(),
+        FixedScopeResolver(scope),
+    );
+
+    let held = tokio::spawn(executor(search_request(fixture.path(), None)));
+    tokio::time::timeout(Duration::from_mins(1), admission.scan_paused.notified())
+        .await
+        .expect("the held scan reaches its first checkpoint");
+
+    let concurrent = tokio::time::timeout(
+        Duration::from_secs(30),
+        executor(search_request(fixture.path(), None)),
+    )
+    .await
+    .expect("an independent search finishes while another scan is still inside its walk");
+    assert!(
+        matches!(concurrent, CodeIndexSearchOutcomeV1::Complete(_)),
+        "an independent search completes while another scan is in progress: {concurrent:?}"
+    );
+    assert!(
+        !held.is_finished(),
+        "the first scan is still inside its walk"
+    );
+
+    let linked_executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(admission.authority.clone()),
+        FixedScopeResolver(linked_scope),
+    );
+    let other_executor = code_index_search_executor(
+        registry.clone(),
+        other_project,
+        OpenAdmission(admission.authority.clone()),
+        FixedScopeResolver(other_scope),
+    );
+    let mut searches = Vec::new();
+    for (executor, root, query, path_prefix) in [
+        (linked_executor, linked.as_path(), "alpha", "src/alpha_"),
+        (other_executor, other.path(), "beta", "src/beta.rs"),
+    ] {
+        for _ in 0..4 {
+            let mut request = search_request(root, None);
+            request.query = query.to_owned();
+            request.deadline = Some(
+                Deadline::new(UtcMicros(
+                    tracedecay_contracts::clock::now_micros().0 + 30_000_000,
+                ))
+                .expect("wave deadline"),
+            );
+            searches.push((tokio::spawn(executor(request)), path_prefix));
+        }
+    }
+    for (search, path_prefix) in searches {
+        let outcome = tokio::time::timeout(Duration::from_secs(30), search)
+            .await
+            .expect("other agents complete while primary scan is paused")
+            .expect("search joins");
+        let CodeIndexSearchOutcomeV1::Complete(result) = outcome else {
+            panic!("other worktree or repository failed: {outcome:?}");
+        };
+        assert_ne!(result.ordered_candidates.len(), 0);
+        assert!(!result.display_by_anchor.is_empty());
+        assert!(
+            result
+                .display_by_anchor
+                .values()
+                .all(|display| display.path.starts_with(path_prefix)),
+            "parallel agents must retain repository/worktree result isolation"
+        );
+    }
+    assert!(
+        !held.is_finished(),
+        "unrelated agents do not wait for the paused scan"
+    );
+
+    resume_tx.send(()).expect("release the held scan");
+    let held = tokio::time::timeout(Duration::from_secs(30), held)
+        .await
+        .expect("the held scan finishes once resumed")
+        .expect("held scan task joins");
+    assert!(
+        matches!(held, CodeIndexSearchOutcomeV1::Complete(_)),
+        "the held scan still completes: {held:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// Park one request on the scheduler's mounted map behind every waiter already
+/// queued for it, and hand back the signals that observe and end that hold.
+///
+/// `tokio::sync::Mutex` serves its waiters in the order they enter the queue,
+/// so "behind every current waiter" is a position, not a timing guess: the
+/// returned `queued` notification and the enqueue itself happen in one poll,
+/// so a task that observes `queued` cannot have run between them. From there
+/// the map belongs to this hold the moment the waiter ahead of it releases,
+/// and stays held until `release` is notified.
+fn park_mounted_map_behind_current_waiters(
+    registry: &CodeIndexSchedulerRegistryV1,
+) -> (
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+    tokio::task::JoinHandle<()>,
+) {
+    let queued = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mounted = Arc::clone(&registry.mounted);
+    let task = tokio::spawn({
+        let queued = Arc::clone(&queued);
+        let release = Arc::clone(&release);
+        async move {
+            let held = mounted.lock_owned();
+            queued.notify_one();
+            let held = held.await;
+            release.notified().await;
+            drop(held);
+        }
+    });
+    (queued, release, task)
+}
+
+/// One mounted worktree and a search executor over it whose scope resolution
+/// reports.
+///
+/// Scope resolution is the last thing a request does before the ranking
+/// authority read that takes the scheduler's mounted map, so the report is how
+/// a deadline test observes that a request is queued for that map rather than
+/// polling for it.
+async fn map_reporting_search_executor(
+    fixture: &GitFixture,
+    store: &TempDir,
+    authority: &str,
+) -> (
+    CodeIndexSchedulerRegistryV1,
+    CodeIndexSearchExecutor,
+    Arc<tokio::sync::Notify>,
+) {
+    let (registry, scope) = mounted_core_query_worktree(fixture, store).await;
+    let admitted = Arc::new(tokio::sync::Notify::new());
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new(format!("principal.search-permit.{authority}"))
+                .expect("principal"),
+            authorization_revision: AuthorizationRevision::new(format!(
+                "authorization.search-permit.{authority}"
+            ))
+            .expect("authorization revision"),
+        }),
+        AdmittingScopeResolver {
+            scope,
+            admitted: Arc::clone(&admitted),
+        },
+    );
+    (registry, executor, admitted)
+}
+
+/// A restart mounts its worktree and seats the retained generation before
+/// project open installs the query authority. A search in that window
+/// reports the typed `graph_warming` partial rather than an authority failure
+/// that reads as nothing indexed, and serves once the authority is installed.
+#[tokio::test]
+async fn search_before_the_query_authority_mounts_reports_graph_warming() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let snapshot = latest.generation.snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.search-permit.warming").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.search-permit.warming",
+            )
+            .expect("authorization revision"),
+        }),
+        FixedScopeResolver(scope.clone()),
+    );
+
+    let warming = executor(search_request(fixture.path(), None)).await;
+    assert_eq!(
+        unavailable_reason(&warming),
+        Some(CodeIndexSearchUnavailableReasonV1::GraphWarming),
+        "a seated generation without its query authority is warming: {warming:?}"
+    );
+
+    mount_core_query_authority(&registry, fixture.path(), &scope, &latest).await;
+    let CodeIndexSearchOutcomeV1::Complete(served) =
+        executor(search_request(fixture.path(), None)).await
+    else {
+        panic!("search serves once the query authority mounts");
+    };
+    assert_eq!(
+        served
+            .display_by_anchor
+            .values()
+            .map(|display| (display.name.as_str(), display.path.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("alpha", "src/alpha.rs")]
+    );
+    registry.shutdown().await;
+}
+
+/// A search whose dispatch deadline expires shortly after it is issued,
+/// long enough to reach the park each test stages, short enough that the test
+/// observes the settlement rather than the work.
+fn expiring_request(project_root: &Path) -> CodeIndexSearchRequestV1 {
+    let deadline = Deadline::new(UtcMicros(
+        tracedecay_contracts::clock::now_micros().0 + 300_000,
+    ))
+    .expect("deadline");
+    CodeIndexSearchRequestV1 {
+        deadline: Some(deadline),
+        ..search_request(project_root, None)
+    }
+}
+
+/// Join a request the test abandoned mid-park and assert it reports the
+/// deadline it was dispatched under.
+///
+/// The join is bounded an order of magnitude above that deadline, so the bound
+/// is not the assertion: a request that settles on its own deadline never
+/// reaches it, and one parked on `unbounded_await` names the await that
+/// regressed instead of hanging the suite.
+async fn abandoned_request_reports_its_deadline(
+    abandoned: tokio::task::JoinHandle<CodeIndexSearchOutcomeV1>,
+    unbounded_await: &str,
+) {
+    let outcome = tokio::time::timeout(Duration::from_secs(5), abandoned)
+        .await
+        .unwrap_or_else(|_| {
+            panic!("a request past its deadline must stop waiting on {unbounded_await}")
+        })
+        .expect("executor task joins");
+    assert_eq!(
+        unavailable_reason(&outcome),
+        Some(CodeIndexSearchUnavailableReasonV1::TimedOut),
+        "the expired request reports the typed deadline state: {outcome:?}"
+    );
+}
+
+/// The expired request left the mounted map: an ordinary request issued after
+/// the staged hold ends completes.
+async fn next_request_is_admitted(executor: &CodeIndexSearchExecutor, project_root: &Path) {
+    let admitted = executor(search_request(project_root, None)).await;
+    assert!(
+        matches!(admitted, CodeIndexSearchOutcomeV1::Complete(_)),
+        "the expired request released what the next request needs: {admitted:?}"
+    );
+}
+
+/// A request whose dispatch deadline expires while its search is parked in
+/// generation resolution reports that deadline, and the next request completes.
+///
+/// Generation resolution consults no control: it parks on the scheduler's
+/// mounted map and, when nothing is servable, on the in-flight decode. Holding
+/// that map is exactly the window a busy daemon spends there. The request's
+/// own deadline is what ends the wait.
+///
+/// The map cannot simply be held for the whole test: an admitted search reads
+/// its ranking authority off that same map before generation resolution, so a
+/// map held from the start parks the request short of that resolution. The
+/// hold is staged through the map's own queue, so the request passes the
+/// authority read and only then finds the map gone.
+#[tokio::test]
+async fn expired_request_parked_in_generation_resolution_releases_the_permit() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, executor, admitted) =
+        map_reporting_search_executor(&fixture, &store, "deadline").await;
+
+    let admission_resolution = Arc::clone(&registry.mounted).lock_owned().await;
+
+    // Observing the scope-resolution report proves the request is queued for
+    // the map behind this hold.
+    let abandoned = tokio::spawn(executor(expiring_request(fixture.path())));
+    admitted.notified().await;
+
+    // Queued behind the request, so the map is taken again the instant the
+    // request's authority read releases it: the control-free window.
+    let (map_queued, release_map, map_hold) = park_mounted_map_behind_current_waiters(&registry);
+    map_queued.notified().await;
+    drop(admission_resolution);
+
+    abandoned_request_reports_its_deadline(
+        abandoned,
+        "generation resolution, which consults no control",
+    )
+    .await;
+
+    release_map.notify_one();
+    map_hold.await.expect("the mounted-map hold joins");
+    next_request_is_admitted(&executor, fixture.path()).await;
+
+    registry.shutdown().await;
+}
+
+/// A request whose dispatch deadline expires before it is ever admitted must
+/// report that deadline, not wait out the daemon.
+///
+/// The ranking-authority read an admitted search takes parks on the mounted
+/// map, and it consults no control. A
+/// daemon holding that map across a mount, retire, or shutdown left a request
+/// whose caller had already given up waiting there with nothing to end it: the
+/// deadline it was dispatched under never became a bound on its own wait.
+#[tokio::test]
+async fn expired_request_parked_before_admission_reports_the_deadline() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, executor, admitted) =
+        map_reporting_search_executor(&fixture, &store, "admission").await;
+
+    // Held for the whole request: the authority read this request parks in
+    // runs before it is ever admitted, so nothing hands the map back.
+    let held_resolution = registry.mounted.lock().await;
+
+    let abandoned = tokio::spawn(executor(expiring_request(fixture.path())));
+    admitted.notified().await;
+
+    abandoned_request_reports_its_deadline(
+        abandoned,
+        "the mounted map, which authority resolution takes with no control",
+    )
+    .await;
+
+    drop(held_resolution);
+    next_request_is_admitted(&executor, fixture.path()).await;
+
+    registry.shutdown().await;
+}
+
+/// The settled shape of a clone-family read: which terminal state it reached,
+/// with the unavailability reason when it reached none.
+#[derive(Debug, PartialEq, Eq)]
+enum SimilarSettlementV1 {
+    Complete,
+    NotFound,
+    Unavailable(CodeIndexSearchUnavailableReasonV1),
+}
+
+fn similar_settlement(outcome: &CodeIndexSimilarOutcomeV1) -> SimilarSettlementV1 {
+    match outcome {
+        CodeIndexSimilarOutcomeV1::Complete(_) => SimilarSettlementV1::Complete,
+        CodeIndexSimilarOutcomeV1::NotFound => SimilarSettlementV1::NotFound,
+        CodeIndexSimilarOutcomeV1::Unavailable(reason) => SimilarSettlementV1::Unavailable(*reason),
+    }
+}
+
+/// One family read for `source`, dispatched under a deadline `expires_in` from
+/// now, the shape every dashboard family read has.
+fn family_request(
+    project_root: &Path,
+    source: &tracedecay_domain::SymbolOccurrenceId,
+    expires_in: Duration,
+) -> CodeIndexSimilarRequestV1 {
+    let deadline = Deadline::new(UtcMicros(
+        tracedecay_contracts::clock::now_micros().0
+            + i64::try_from(expires_in.as_micros()).expect("deadline fits"),
+    ))
+    .expect("deadline");
+    CodeIndexSimilarRequestV1 {
+        project_root: project_root.to_path_buf(),
+        target: CodeIndexSimilarTargetV1::SymbolOccurrence(source.clone()),
+        match_classes: vec![
+            tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative,
+            tracedecay_code_index::clones::CloneNormalizationClassV1::Rename,
+        ],
+        result_limit: 8,
+        work_limit: 9,
+        cursor: None,
+        authority: None,
+        deadline: Some(deadline),
+        cancellation: None,
+    }
+}
+
+const SHARED_BODY_SOURCE: &str = "pub fn shared_body(input: u32) -> u32 {\n    let doubled = input * 2;\n    let shifted = doubled + 7;\n    let folded = shifted ^ (input >> 1);\n    folded % 13\n}\n";
+
+/// Two clone-family reads dispatched together, the Shared Code page fires
+/// one per match class, must both settle the way either settles alone.
+///
+/// A read that carries a deadline and is parked on the scheduler's mounted
+/// map reports the typed `TimedOut` state when that deadline passes. The hold
+/// is deterministic: an admitted family read parks on the mounted map for its
+/// text-serving owner, so a map held before the reads are issued keeps them
+/// there until the test lets go.
+#[tokio::test]
+async fn a_family_read_that_loses_the_permit_race_waits_for_the_permit() {
+    let fixture = GitFixture::new(&[
+        ("src/first.rs", SHARED_BODY_SOURCE),
+        ("src/second.rs", SHARED_BODY_SOURCE),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    // Settle the mount's worker first so the reads below observe the map
+    // hold this test is about, not a warming generation.
+    settle_text_projection(&registry, fixture.path()).await;
+    let source = crate::code_index_branch_diff::generation_symbols(
+        latest.generation(),
+        Some("src/first.rs"),
+        None,
+        &crate::code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        },
+    )
+    .expect("fixture symbols")
+    .into_iter()
+    .find(|symbol| symbol.name == "shared_body")
+    .expect("the fixture's shared body is indexed")
+    .symbol_occurrence_id;
+    let admitted = Arc::new(tokio::sync::Notify::new());
+    let executor = code_index_similar_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.family-permit.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.family-permit.fixture",
+            )
+            .expect("authorization revision"),
+        }),
+        AdmittingScopeResolver {
+            scope,
+            admitted: Arc::clone(&admitted),
+        },
+    );
+    let far = Duration::from_secs(30);
+
+    let held_map = registry.mounted.lock().await;
+    // Once the report lands the read is parked on the map.
+    let first = tokio::spawn(executor(family_request(fixture.path(), &source, far)));
+    admitted.notified().await;
+    let second = tokio::spawn(executor(family_request(fixture.path(), &source, far)));
+    admitted.notified().await;
+
+    let expired = tokio::time::timeout(
+        Duration::from_secs(5),
+        executor(family_request(
+            fixture.path(),
+            &source,
+            Duration::from_millis(300),
+        )),
+    )
+    .await
+    .expect("a read whose deadline passes while the map is held must settle on it");
+    assert_eq!(
+        similar_settlement(&expired),
+        SimilarSettlementV1::Unavailable(CodeIndexSearchUnavailableReasonV1::TimedOut),
+        "a read that runs out of deadline while parked reports the deadline"
+    );
+    assert!(
+        !second.is_finished(),
+        "a read with deadline left stays parked until the map is released"
+    );
+
+    drop(held_map);
+    let first = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .expect("the first read completes once the map is released")
+        .expect("first read task joins");
+    let second = tokio::time::timeout(Duration::from_secs(30), second)
+        .await
+        .expect("the second read completes once the map is released")
+        .expect("second read task joins");
+    assert_eq!(
+        similar_settlement(&first),
+        SimilarSettlementV1::Complete,
+        "the fixture serves a verified family on its own: {first:?}"
+    );
+    assert_eq!(
+        similar_settlement(&second),
+        SimilarSettlementV1::Complete,
+        "the read parked with the first settles exactly as the first did: {second:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// The executor runs a search's scheduler work on the native runtime, so a
+/// caller with no Tokio runtime still gets a complete result.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_search_off_tokio_completes() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.native-search.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.native-search.fixture",
+            )
+            .expect("authorization revision"),
+        }),
+        FixedScopeResolver(scope),
+    );
+    let request = search_request(fixture.path(), None);
+    let search = std::thread::spawn(move || native_runtime::block_on(executor(request)));
+    let outcome = tokio::task::spawn_blocking(move || search.join())
+        .await
+        .expect("the joining thread finishes");
+    let outcome = outcome
+        .map_err(|panic| {
+            panic.downcast_ref::<String>().cloned().or_else(|| {
+                panic
+                    .downcast_ref::<&str>()
+                    .map(|message| (*message).to_owned())
+            })
+        })
+        .map(|outcome| outcome.expect("process runtime"));
+    assert!(
+        matches!(outcome, Ok(CodeIndexSearchOutcomeV1::Complete(_))),
+        "a search with no Tokio runtime must complete: {outcome:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// A cold search activates its route's index even when it is polled with no
+/// Tokio runtime entered, as the executor's native worker polls it.
+#[test]
+fn a_cold_search_off_tokio_activates_its_index() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let (mounted, mount_started) = mpsc::channel();
+    let activation = Arc::new(crate::code_index_scheduler::CodeIndexActivationV1::new(
+        fixture.path(),
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        Arc::new(move || {
+            let _ = mounted.send(());
+            Box::pin(std::future::ready(Ok(())))
+        }),
+        Arc::new(|_| {
+            Box::pin(std::future::ready(
+                crate::code_index_scheduler::CodeIndexDemandAdmissionV1::Queued,
+            ))
+        }),
+    ));
+    let identity = activation.identity().expect("repository identity");
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("resolved scope");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(registry.register_activation(&scope, &activation));
+    let executor = code_index_search_executor(
+        registry,
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.cold-search.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new("authorization.cold-search.fixture")
+                .expect("authorization revision"),
+        }),
+        FixedScopeResolver(scope),
+    );
+
+    let outcome = native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        executor(search_request(fixture.path(), None)).await
+    })
+    .expect("process runtime");
+
+    assert_eq!(
+        mount_started.recv_timeout(Duration::from_secs(30)),
+        Ok(()),
+        "a cold search must start its index mount; search answered {outcome:?}"
+    );
+}

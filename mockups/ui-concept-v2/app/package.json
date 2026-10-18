@@ -1,0 +1,27 @@
+{
+  "name": "tracedecay-concept-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "rsbuild dev --port 5195 --host 127.0.0.1",
+    "build": "rsbuild build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@types/three": "^0.186.0",
+    "3d-force-graph": "^1.80.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@rsbuild/core": "^2.0.0",
+    "@rsbuild/plugin-react": "^2.0.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "playwright": "^1.62.1",
+    "playwright-core": "^1.62.1",
+    "typescript": "^7.0.0"
+  }
+}

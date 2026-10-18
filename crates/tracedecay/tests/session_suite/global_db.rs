@@ -1,13 +1,18 @@
+use std::path::Path;
+
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay_lcm::LcmStorageKind;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     SessionSearchScope, SessionSearchTimeRange,
 };
+use tracedecay_store::TranscriptStoreError;
 
 use crate::common::{global_message as sample_message, global_session as sample_session};
 
@@ -15,6 +20,45 @@ async fn open_isolated_db(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
         .await
         .expect("registered profile runtime")
+}
+
+/// Opens a `ProjectSessions`-scoped runtime for the cases that publish or read
+/// derived Git evidence, which profile scope refuses by design.
+async fn open_isolated_project_db(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    let profile_root = tmp.path().join("profile");
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project_root,
+        tracedecay_domain::ProjectId::new("project.global-db-git-scope").expect("project id"),
+    )
+    .await
+    .expect("registered project session runtime")
+}
+
+/// Column list of the retired pre-marker `sessions` shape, used to prove a
+/// refused open migrated nothing.
+const LEGACY_SESSIONS_COLUMNS: &[&str] = &[
+    "provider",
+    "session_id",
+    "project_key",
+    "project_path",
+    "title",
+    "started_at",
+    "ended_at",
+    "transcript_path",
+    "metadata_json",
+];
+
+fn legacy_sessions_columns(database_path: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(database_path).unwrap();
+    conn.prepare("PRAGMA table_info(sessions)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 fn sha256_hex(content: &str) -> String {
@@ -60,20 +104,6 @@ trait RegisteredSessionTestExt {
         limit: usize,
         filters: SessionSearchFilters<'_>,
     ) -> Vec<SessionMessageSearchResult>;
-    async fn search_session_messages_git_scoped(
-        &self,
-        provider: Option<&str>,
-        project_key: Option<&str>,
-        query: &str,
-        limit: usize,
-        filters: SessionSearchFilters<'_>,
-        git_filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
-    ) -> Vec<SessionMessageSearchResult>;
-    async fn git_record_span_observation(
-        &self,
-        observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
-        merge_gap_secs: i64,
-    ) -> tracedecay_domain::errors::Result<i64>;
     async fn session_message_count(&self) -> tracedecay_domain::errors::Result<i64>;
     async fn session_message_count_for_project(
         &self,
@@ -127,7 +157,7 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
     async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
         self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
-            .unwrap_or(false)
+            .is_ok()
     }
 
     async fn lcm_load_raw_message(
@@ -175,37 +205,6 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
         )
         .await
         .expect("registered filtered session message search")
-    }
-
-    async fn search_session_messages_git_scoped(
-        &self,
-        provider: Option<&str>,
-        project_key: Option<&str>,
-        query: &str,
-        limit: usize,
-        filters: SessionSearchFilters<'_>,
-        git_filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
-    ) -> Vec<SessionMessageSearchResult> {
-        self.search_session_messages_git_scoped_for_test(
-            HostAdmissionScope::Profile,
-            provider,
-            project_key,
-            query,
-            limit,
-            filters,
-            git_filter,
-        )
-        .await
-        .expect("registered git-scoped session message search")
-    }
-
-    async fn git_record_span_observation(
-        &self,
-        observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
-        merge_gap_secs: i64,
-    ) -> tracedecay_domain::errors::Result<i64> {
-        self.record_session_span_for_test(HostAdmissionScope::Profile, observation, merge_gap_secs)
-            .await
     }
 
     async fn session_message_count(&self) -> tracedecay_domain::errors::Result<i64> {
@@ -288,19 +287,6 @@ async fn append_analytics_event(
     label: &str,
 ) -> i64 {
     db.append_analytics_event(event).await.expect(label)
-}
-
-#[tokio::test]
-async fn global_db_opens_with_session_schema() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_isolated_db(&tmp).await;
-
-    assert!(db.get_session("cursor", "missing").await.is_none());
-    assert!(
-        db.search_session_messages("cursor", None, "not-present", 10)
-            .await
-            .is_empty()
-    );
 }
 
 #[tokio::test]
@@ -457,13 +443,16 @@ async fn analytics_events_query_since_bounds_timestamp() {
     assert_eq!(events[0].timestamp, 1_715_000_200);
 }
 
+/// Refusing an incompatible store preserves its retired shape; a fresh
+/// admissible profile still supports durable analytics writes and reads.
 #[tokio::test]
-async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
+async fn incompatible_profile_refusal_preserves_fresh_analytics_behavior() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("global.db");
-    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let legacy_root = tmp.path().join("legacy").join(".tracedecay");
+    let legacy_db = legacy_root.join("global.db");
+    std::fs::create_dir_all(&legacy_root).unwrap();
 
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -481,9 +470,28 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
     .unwrap();
     drop(conn);
 
-    let db = HostAdmissionTestRuntimeV1::profile(db_path.parent().expect("profile root"))
-        .await
-        .expect("registered profile runtime");
+    let error = match HostAdmissionTestRuntimeV1::profile(&legacy_root).await {
+        Ok(_) => panic!("a pre-marker registered store must not be admitted"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("a pre-marker store returned the wrong error: {error}"));
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("final schema marker"),
+        "the refusal must name the missing final marker: {reason}"
+    );
+    // The refused open still opens the file (journal-mode pragmas are a
+    // connection concern), so the durable claim is the retired *shape*: no
+    // column was migrated onto it.
+    assert_eq!(
+        legacy_sessions_columns(&legacy_db),
+        LEGACY_SESSIONS_COLUMNS,
+        "a refused open must not migrate the retired store"
+    );
+
+    let db = open_isolated_db(&tmp).await;
     let event = AnalyticsEventInsert {
         hook_name: Some("post-tool-use".to_string()),
         tool_name: Some("shell".to_string()),
@@ -492,25 +500,16 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
         metadata_json: Some(r#"{"upgraded":true}"#.to_string()),
         ..analytics_event(None, 1_715_000_126, "hook")
     };
-    let id = append_analytics_event(&db, &event, "append analytics event after upgrade").await;
+    let id = append_analytics_event(&db, &event, "append analytics event after open").await;
 
     let events = db
         .query_analytics_events(&analytics_query(None, Some("hook"), 5))
         .await
-        .expect("query analytics events after upgrade");
+        .expect("query analytics events after open");
 
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].id, id);
     assert_eq!(events[0].hook_name.as_deref(), Some("post-tool-use"));
-
-    let index_count = db
-        .profile_analytics_indexes_present_for_test()
-        .await
-        .unwrap();
-    assert_eq!(
-        index_count, 2,
-        "analytics aggregate indexes must migrate on open"
-    );
 }
 
 #[tokio::test]
@@ -627,6 +626,168 @@ async fn upsert_session_round_trips_and_updates() {
 }
 
 #[tokio::test]
+async fn parse_offset_writes_canonicalize_only_proven_windows_paths() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let drive_offset = tracedecay_global_db::ParseOffset {
+        byte_offset: 17,
+        mtime: 23,
+        file_id: 29,
+    };
+    db.set_parse_offset(r"\\?\C:\Repo\Case\transcript.jsonl", drive_offset)
+        .await;
+    assert_eq!(
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            r"c:/Repo/Case/transcript.jsonl",
+        )
+        .await
+        .unwrap(),
+        Some(drive_offset)
+    );
+
+    let store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
+    let conflicting = tracedecay_global_db::ParseOffset {
+        byte_offset: 31,
+        mtime: 37,
+        file_id: 41,
+    };
+    let error = store
+        .replace_parse_offset(
+            Path::new(r"C:\Repo\Case\transcript.jsonl"),
+            tracedecay_global_db::ParseOffset::default(),
+            conflicting,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        TranscriptStoreError::Conflict {
+            expected,
+            actual,
+            ..
+        } if expected == tracedecay_global_db::ParseOffset::default()
+            && actual == drive_offset
+    ));
+
+    let unc_offset = tracedecay_global_db::ParseOffset {
+        byte_offset: 43,
+        mtime: 47,
+        file_id: 53,
+    };
+    db.set_parse_offset(r"\\?\UNC\server\Share\transcript.jsonl", unc_offset)
+        .await;
+    assert_eq!(
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            r"\\server\Share\transcript.jsonl",
+        )
+        .await
+        .unwrap(),
+        Some(unc_offset)
+    );
+
+    let unix_literal = tracedecay_global_db::ParseOffset {
+        byte_offset: 59,
+        mtime: 61,
+        file_id: 67,
+    };
+    db.set_parse_offset(r"/repo/a\b", unix_literal).await;
+    assert_eq!(
+        db.parse_offset_for_test(HostAdmissionScope::Profile, r"/repo/a\b")
+            .await
+            .unwrap(),
+        Some(unix_literal)
+    );
+    assert_eq!(
+        db.parse_offset_for_test(HostAdmissionScope::Profile, "/repo/a/b")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn project_scope_keeps_opaque_keys_and_distinct_path_case_isolated() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let mut selected = sample_session("cursor", "selected", r"opaque\project-key");
+    selected.project_path = r"\\?\C:\Repo\Case".to_owned();
+    let mut foreign = sample_session("cursor", "foreign", "foreign-project");
+    foreign.project_path = r"C:\Repo\case".to_owned();
+    assert!(db.upsert_session(&selected).await);
+    assert!(db.upsert_session(&foreign).await);
+    assert!(
+        db.upsert_session_message(&sample_message(
+            "cursor",
+            "selected-message",
+            "selected",
+            "Canonical project identity evidence.",
+        ))
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&sample_message(
+            "cursor",
+            "foreign-message",
+            "foreign",
+            "Canonical project identity evidence.",
+        ))
+        .await
+    );
+
+    let stored = db.get_session("cursor", "selected").await.unwrap();
+    assert_eq!(stored.project_key, r"opaque\project-key");
+    assert_eq!(stored.project_path, "c:/Repo/Case");
+
+    let selected_results = db
+        .search_session_messages(
+            "cursor",
+            Some(r"\\?\C:\Repo\Case"),
+            "canonical project identity",
+            10,
+        )
+        .await;
+    assert_eq!(selected_results.len(), 1);
+    assert_eq!(selected_results[0].session.session_id, "selected");
+
+    let foreign_results = db
+        .search_session_messages(
+            "cursor",
+            Some(r"c:/Repo/case"),
+            "canonical project identity",
+            10,
+        )
+        .await;
+    assert_eq!(foreign_results.len(), 1);
+    assert_eq!(foreign_results[0].session.session_id, "foreign");
+
+    assert_eq!(
+        db.search_session_messages(
+            "cursor",
+            Some(r"opaque\project-key"),
+            "canonical project identity",
+            10,
+        )
+        .await
+        .len(),
+        1
+    );
+    assert!(
+        db.search_session_messages(
+            "cursor",
+            Some("opaque/project-key"),
+            "canonical project identity",
+            10,
+        )
+        .await
+        .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn session_message_count_filters_by_project_key() {
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;
@@ -696,11 +857,9 @@ async fn upsert_session_message_round_trips_and_updates() {
             .text
             .starts_with("Updated answer about parsing transcripts.")
     );
-    assert!(fetched.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
-    assert!(
-        fetched
-            .text
-            .contains(tracedecay_lcm::DERIVED_TRUNCATION_MARKER)
+    assert_eq!(
+        fetched.text, updated,
+        "the message row is the one lossless copy"
     );
     assert_eq!(fetched.tool_names.as_deref(), Some("tracedecay_context"));
     assert_eq!(fetched.source_offset, Some(99));
@@ -778,15 +937,13 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
     let message = sample_message("cursor", "message-1", "session-1", &oversized);
     assert!(db.upsert_session_message(&message).await);
 
-    let compatibility = db
+    let stored = db
         .get_session_message("cursor", "message-1")
         .await
-        .expect("compatibility message should exist");
-    assert!(compatibility.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
-    assert!(
-        compatibility
-            .text
-            .contains(tracedecay_lcm::DERIVED_TRUNCATION_MARKER)
+        .expect("session message should exist");
+    assert_eq!(
+        stored.text, oversized,
+        "the message row is the one lossless copy"
     );
 
     let raw = db
@@ -795,8 +952,6 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
         .expect("raw message should exist");
     assert_eq!(raw.content, oversized);
     assert!(raw.content.ends_with("::lossless-tail"));
-    assert!(!raw.legacy_source);
-    assert!(!raw.legacy_truncated);
 }
 
 #[tokio::test]
@@ -820,7 +975,15 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
         .await
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::External);
-    assert!(raw.content.is_empty());
+    // An externalized raw row does not serve an empty body: it serves the
+    // non-secret inline placeholder that names the payload it owns, which the
+    // LCM payload suite pins directly (`lcm_payload.rs`). What this case owns
+    // is that neither secret reaches that projection.
+    assert!(
+        raw.content
+            .starts_with("[Externalized LCM ingest payload: kind=tool_result;")
+    );
+    assert!(raw.content.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(!raw.content.contains(body_secret));
     assert!(
         !raw.metadata_json
@@ -978,21 +1141,31 @@ async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
         SpanObservation, SpanSource, git_scope_filter_from_args,
     };
 
+    // Git evidence is only publishable under `ProjectSessions` authority, so
+    // this case has to run against a project-scoped runtime; recording a span
+    // in profile scope is refused by design.
     let tmp = TempDir::new().unwrap();
-    let db = open_isolated_db(&tmp).await;
+    let db = open_isolated_project_db(&tmp).await;
     let session = sample_session("cursor", "cursor-scoped", "project-a");
-    db.upsert_session(&session).await;
-    db.upsert_session_message(&sample_message(
-        "cursor",
-        "scoped-msg",
-        "cursor-scoped",
-        "the literal foo-bar marker on a scoped branch",
-    ))
-    .await;
+    db.upsert_session_for_test(HostAdmissionScope::Project, &session)
+        .await
+        .expect("registered project session upsert");
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &sample_message(
+            "cursor",
+            "scoped-msg",
+            "cursor-scoped",
+            "the literal foo-bar marker on a scoped branch",
+        ),
+    )
+    .await
+    .expect("registered project session message upsert");
 
     // The session was active on `feat/x`; record a span so the scoping EXISTS
     // subquery has a row to match against.
-    db.git_record_span_observation(
+    db.record_session_span_for_test(
+        HostAdmissionScope::Project,
         &SpanObservation {
             provider: "cursor".to_string(),
             session_id: "cursor-scoped".to_string(),
@@ -1017,7 +1190,8 @@ async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
     // A hyphenated query term appends a numbered placeholder *after* the git
     // EXISTS predicate's anonymous placeholders; the match must still resolve.
     let matched = db
-        .search_session_messages_git_scoped(
+        .search_session_messages_git_scoped_for_test(
+            HostAdmissionScope::Project,
             Some("cursor"),
             Some("project-a"),
             "foo-bar",
@@ -1025,13 +1199,15 @@ async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
             filters,
             &git_scope_filter_from_args(Some("feat/x"), None, None).unwrap(),
         )
-        .await;
+        .await
+        .expect("registered git-scoped session message search");
     assert_eq!(matched.len(), 1);
     assert_eq!(matched[0].message.message_id, "scoped-msg");
 
     // A branch the session was never on excludes the message.
     let excluded = db
-        .search_session_messages_git_scoped(
+        .search_session_messages_git_scoped_for_test(
+            HostAdmissionScope::Project,
             Some("cursor"),
             Some("project-a"),
             "foo-bar",
@@ -1039,7 +1215,8 @@ async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
             filters,
             &git_scope_filter_from_args(Some("other"), None, None).unwrap(),
         )
-        .await;
+        .await
+        .expect("registered git-scoped session message search");
     assert!(excluded.is_empty());
 }
 
@@ -1099,14 +1276,21 @@ async fn search_session_messages_filters_by_message_timestamp() {
     assert_eq!(results[0].message.message_id, "target-time-msg");
 }
 
+/// The retired pre-marker `sessions` shape carries no session rows forward.
+///
+/// Since `5eecf6f3a` a non-final registered schema is a terminal
+/// `ResetRequired`, so a legacy row cannot "survive a schema upgrade": the open
+/// refuses and leaves the retired file byte-identical. The parent/subagent
+/// columns are then proved where they are actually reachable, on an admitted
+/// store.
 #[tokio::test]
-async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
+async fn pre_marker_sessions_table_is_refused_and_parent_columns_round_trip() {
     let tmp = TempDir::new().unwrap();
-    let profile_root = tmp.path().join(".tracedecay");
-    let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
-    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let legacy_root = tmp.path().join("legacy").join(".tracedecay");
+    let legacy_db = tracedecay_sessions::runtime::user_sessions_db_path(&legacy_root);
+    std::fs::create_dir_all(legacy_db.parent().unwrap()).unwrap();
 
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -1131,22 +1315,64 @@ async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
     .unwrap();
     drop(conn);
 
-    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .expect("registered profile runtime");
-    let session = db
-        .get_session("cursor", "old-parent")
-        .await
-        .expect("old row should survive schema upgrade");
+    let error = match HostAdmissionTestRuntimeV1::profile(&legacy_root).await {
+        Ok(_) => panic!("a pre-marker sessions table must not be admitted"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("a pre-marker sessions table returned the wrong error: {error}"));
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("final schema marker"),
+        "the refusal must name the missing final marker: {reason}"
+    );
+    // A refused open leaves the retired shape and its rows exactly as found:
+    // the legacy row is neither migrated onto new columns nor dropped.
+    assert_eq!(
+        legacy_sessions_columns(&legacy_db),
+        LEGACY_SESSIONS_COLUMNS,
+        "a refused open must not migrate the retired sessions table"
+    );
+    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
+    let retained = conn
+        .query_row(
+            "SELECT session_id, title, metadata_json FROM sessions",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    drop(conn);
+    assert_eq!(
+        retained,
+        (
+            "old-parent".to_owned(),
+            "Old title".to_owned(),
+            r#"{"source":"old"}"#.to_owned()
+        )
+    );
 
-    assert_eq!(session.parent_session_id, None);
-    assert!(!session.is_subagent);
-    assert_eq!(session.agent_id, None);
-    assert_eq!(session.parent_tool_use_id, None);
+    let db = open_isolated_db(&tmp).await;
+    let parent = sample_session("cursor", "root-parent", "project-a");
+    assert!(db.upsert_session(&parent).await);
+    let stored_parent = db
+        .get_session("cursor", "root-parent")
+        .await
+        .expect("parent row should round-trip");
+    assert_eq!(stored_parent.parent_session_id, None);
+    assert!(!stored_parent.is_subagent);
+    assert_eq!(stored_parent.agent_id, None);
+    assert_eq!(stored_parent.parent_tool_use_id, None);
 
     let child = SessionRecord {
         session_id: "child-agent".to_string(),
-        parent_session_id: Some("old-parent".to_string()),
+        parent_session_id: Some("root-parent".to_string()),
         is_subagent: true,
         agent_id: Some("child-agent".to_string()),
         ..sample_session("cursor", "child-agent", "project-a")
@@ -1157,7 +1383,7 @@ async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
         .get_session("cursor", "child-agent")
         .await
         .expect("child row should round-trip");
-    assert_eq!(fetched.parent_session_id.as_deref(), Some("old-parent"));
+    assert_eq!(fetched.parent_session_id.as_deref(), Some("root-parent"));
     assert!(fetched.is_subagent);
     assert_eq!(fetched.agent_id.as_deref(), Some("child-agent"));
 }
@@ -1365,7 +1591,7 @@ async fn session_ingest_health_can_filter_by_provider() {
 
 #[tokio::test]
 async fn hook_analytics_import_is_incremental_and_idempotent() {
-    use tracedecay_usecases::analytics_bridge::HookImportSource;
+    use tracedecay_application::analytics_bridge::HookImportSource;
 
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;
@@ -1423,7 +1649,7 @@ async fn hook_analytics_import_is_incremental_and_idempotent() {
     assert!(providers.contains(&"hook_claude"));
     assert!(providers.contains(&"hook_codex"));
     assert!(providers.contains(&"hook_cursor"));
-    let expected_project = HostAdmissionTestRuntimeV1::canonical_project_key(tmp.path());
+    let expected_project = RegisteredGlobalDb::canonical_project_key(tmp.path());
     assert!(
         events
             .iter()

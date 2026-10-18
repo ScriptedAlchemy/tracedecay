@@ -1,12 +1,23 @@
+use std::future::Future;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::Duration;
+use tracedecay_maintenance::retention::orphan_stores::dir_size_bytes;
+use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
+use tracedecay_runtime_core::storage::{USER_MEMORY_DB_FILENAME, USER_SESSIONS_DB_FILENAME};
 
-use tracedecay::profile_registry_maintenance::{remove_store_directory, verify_store_path_absent};
+use tracedecay_global_db::profile_registry_maintenance::{
+    ProfileRegistryMaintenanceRuntime, remove_store_directory, verify_store_path_absent,
+};
 
 use crate::global;
 
-use super::daemon::daemon_tool_json;
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+};
+
+use super::daemon::{admin_cli_result, admin_cli_result_mismatch, registry_context};
 
 /// Bounds the wait for the profile lifecycle lease after the managed daemon
 /// service is stopped. The stop itself is separately bounded by the service
@@ -15,16 +26,27 @@ use super::daemon::daemon_tool_json;
 /// shared holders such as hooks and doctor runs.
 const PROFILE_OFFLINE_LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
-const PROFILE_SQLITE_DATABASES: [&str; 3] = ["global.db", "user-sessions.db", "user-memory.db"];
-const PROFILE_DATABASE_PATHS: [&str; 8] = [
+const PROFILE_SQLITE_DATABASES: [&str; 3] = [
+    GLOBAL_DB_FILENAME,
+    USER_SESSIONS_DB_FILENAME,
+    USER_MEMORY_DB_FILENAME,
+];
+const PROFILE_DATABASE_PATHS: [&str; 15] = [
     "projects",
     "stores",
     "remote",
+    "agent_managed",
     "user-sessions.grafeo",
     "user-sessions.grafeo.wal",
     "user-memory.grafeo",
     "user-memory.grafeo.wal",
     ".user-sessions.db.host-admission",
+    tracedecay_hooks::PROFILE_HOOK_ADMISSIONS_DIR,
+    tracedecay_runtime_core::storage::RESPONSE_HANDLES_DIRECTORY,
+    "lcm-payloads",
+    "hook_analytics.jsonl",
+    "hook_analytics.jsonl.lock",
+    "maintenance",
 ];
 
 fn sqlite_family_member(database: &Path, suffix: &str) -> PathBuf {
@@ -96,7 +118,7 @@ fn validate_complete_wipe_profile_root(
     Ok(())
 }
 
-fn remove_fixed_profile_path(
+pub(super) fn remove_fixed_profile_path(
     profile_root: &Path,
     name: &str,
 ) -> tracedecay_domain::errors::Result<bool> {
@@ -140,8 +162,8 @@ fn remove_fixed_profile_path(
 
 /// The exclusive maintenance window a destructive profile command runs in.
 ///
-/// The fast path is an uncontended lease. When the lease is busy — most often
-/// because the managed daemon retains a shared lease for its whole lifetime —
+/// The fast path is an uncontended lease. When the lease is busy, most often
+/// because the managed daemon retains a shared lease for its whole lifetime.
 /// the profile is taken offline by quiescing the installed service (bounded
 /// by the supervisor's stop timeout, which SIGKILLs a hung or wedged daemon),
 /// and [`Self::finish`] restores the captured service state afterward.
@@ -150,7 +172,7 @@ pub(crate) enum ProfileOfflineAuthority {
     Lease(tracedecay_runtime_core::lifecycle_lease::LifecycleLease),
     /// The managed daemon service was quiesced; dropping or finishing this
     /// restores its prior state.
-    QuiescedDaemon(tracedecay_daemon_control::QuiescedDaemonLifecycle),
+    QuiescedDaemon(Box<tracedecay_daemon_control::QuiescedDaemonLifecycle>),
 }
 
 impl ProfileOfflineAuthority {
@@ -178,18 +200,77 @@ impl ProfileOfflineAuthority {
     }
 }
 
+/// Opens an existing exact-final profile registry without creating one, then
+/// admits the lease into [`ProfileRegistryMaintenanceRuntime`].
+pub(crate) async fn try_admit_profile_registry(
+    profile_root: &Path,
+) -> tracedecay_domain::errors::Result<Option<ProfileRegistryMaintenanceRuntime>> {
+    if !profile_root.try_exists().map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Database {
+            operation: "inspect existing profile root".to_string(),
+            message: error.to_string(),
+        }
+    })? {
+        return Ok(None);
+    }
+    let profile_root = profile_root.canonicalize().map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Database {
+            operation: "resolve existing profile registry".to_string(),
+            message: error.to_string(),
+        }
+    })?;
+    if !profile_root
+        .join(GLOBAL_DB_FILENAME)
+        .try_exists()
+        .map_err(
+            |error| tracedecay_domain::errors::TraceDecayError::Database {
+                operation: "inspect existing profile registry".to_string(),
+                message: error.to_string(),
+            },
+        )?
+    {
+        return Ok(None);
+    }
+    let identity = tracedecay_daemon_identity::profile_identity::load_existing(&profile_root)?;
+    let registry: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
+                    >,
+                > + Send,
+        >,
+    > = Box::pin(tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity));
+    let registry = registry.await?;
+    let profile_database: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(registry.profile_database());
+    let profile_database = profile_database.await?;
+    Ok(Some(
+        ProfileRegistryMaintenanceRuntime::from_admitted_lease(profile_database),
+    ))
+}
+
 /// Takes the whole profile offline for a destructive maintenance command,
-/// within a bound, or refuses typed — never "retry after it finishes".
+/// within a bound, or refuses typed, never "retry after it finishes".
 ///
 /// The managed daemon holds a shared lifecycle lease for its entire lifetime,
 /// and a daemon wedged in a terminal retry loop (issue #765's unseatable
-/// sealed generation) never exits, so a bare lease attempt refuses forever —
+/// sealed generation) never exits, so a bare lease attempt refuses forever.
 /// exactly when the operator most needs the escape hatch. On contention this
 /// stops the installed service (the supervisor bounds the stop and SIGKILLs a
 /// hung daemon), waits a bounded interval for the lease, and restores the
 /// captured service state when the caller finishes.
-#[hotpath::measure(label = "cli.profile.offline_acquire")]
+#[tracing::instrument(name = "cli.profile.offline_acquire", level = "trace", skip_all)]
 pub(crate) fn take_profile_offline(
+    profile: &ProfileRoot,
     profile_root: &Path,
     operation: &'static str,
 ) -> tracedecay_domain::errors::Result<ProfileOfflineAuthority> {
@@ -210,13 +291,14 @@ pub(crate) fn take_profile_offline(
                  restored when {operation} finishes."
             );
             match tracedecay_daemon_control::QuiescedDaemonLifecycle::acquire_with_timeout(
+                profile,
                 operation,
                 PROFILE_OFFLINE_LEASE_TIMEOUT,
                 crate::product_runtime::PRODUCT_BUILD_VERSION,
             ) {
                 Ok(guard) => {
                     eprintln!("Profile is offline for {operation}.");
-                    Ok(ProfileOfflineAuthority::QuiescedDaemon(guard))
+                    Ok(ProfileOfflineAuthority::QuiescedDaemon(Box::new(guard)))
                 }
                 Err(error) => Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
@@ -263,10 +345,574 @@ fn wipe_complete_profile_database_state(
     Ok(removed)
 }
 
+/// Handles the `wipe` and `wipe --all` commands.
+///
+/// `assume_yes` carries the global `--yes` confirmation flag. It is the same
+/// non-interactive acceptance every other destructive first-party command
+/// takes, so a scripted caller no longer has to feed `go!` through a pipe on
+/// stdin to reach the wipe.
+#[tracing::instrument(name = "cli.wipe.run", level = "trace", skip_all)]
+pub(crate) async fn handle_wipe(
+    profile: &ProfileRoot,
+    all: bool,
+    assume_yes: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    handle_wipe_inner(profile, all, assume_yes).await
+}
+
+fn handle_wipe_inner(
+    profile: &ProfileRoot,
+    all: bool,
+    assume_yes: bool,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
+> {
+    // Erase the deeply nested wipe future before it reaches the measured
+    // wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
+    Box::pin(async move {
+        let profile = &profile;
+        let profile_root = profile.data_dir().to_path_buf();
+        let home_tracedecay = Some(profile_root.clone());
+        if all {
+            validate_complete_wipe_profile_root(
+                &profile_root,
+                profile.home().map(std::path::Path::to_path_buf).as_deref(),
+            )?;
+        }
+        if wipe_must_not_wait_for_stdin(assume_yes, io::stdin().is_terminal()) {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "wipe is irreversible and stdin is not a terminal; pass --yes to confirm. Nothing was wiped.".to_string(),
+            });
+        }
+        // A wedged daemon never exits on its own, so the lease is acquired
+        // through the bounded profile-offline sequence instead of a bare
+        // fail-fast attempt whose only advice was to wait for it.
+        let profile_offline = take_profile_offline(profile, &profile_root, "wipe")?;
+        let outcome = wipe_under_profile_offline(
+            profile,
+            all,
+            assume_yes,
+            &profile_root,
+            &home_tracedecay,
+            &profile_offline,
+        )
+        .await;
+        let restore = profile_offline.finish();
+        join_outcome_and_restore(RestoreWording::ManagedService, "wipe", outcome, restore)
+    })
+}
+
+/// Attaches the exact reset command to a typed reset refusal so the operator
+/// never has to translate the authority name into a recovery step.
+pub(crate) fn annotate_reset_required(
+    error: tracedecay_domain::errors::TraceDecayError,
+    project_root: Option<&Path>,
+) -> tracedecay_domain::errors::TraceDecayError {
+    let authority = match &error {
+        tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, .. } => {
+            authority.as_str()
+        }
+        tracedecay_domain::errors::TraceDecayError::ProfileResetRequired { component, .. } => {
+            component
+        }
+        _ => return error,
+    };
+    let remedy = tracedecay_mcp::reset_required_remedy(authority, project_root);
+    tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("{error}\n\n{remedy}"),
+    }
+}
+
+/// The text the process boundary prints after `Error: `. A route refusal
+/// with typed detail prints its reason code and one line per detail field, so
+/// a parked index shows its whole cause and remedy rather than the bounded
+/// sentence its message folds them into.
+pub(crate) fn process_error_text(error: tracedecay_domain::errors::TraceDecayError) -> String {
+    if let (Some((reason_code, _, _)), Some(detail)) = (
+        error.project_route_context(),
+        error.project_route_typed_detail(),
+    ) {
+        let mut text = format!("project route error ({reason_code})");
+        for (label, value) in detail.labelled_fields() {
+            text.push_str(&format!("\n{label}: {value}"));
+        }
+        return text;
+    }
+    annotate_reset_required(error, None).to_string()
+}
+
+/// How [`join_outcome_and_restore`] words a failed daemon restore.
+#[derive(Clone, Copy)]
+pub(crate) enum RestoreWording {
+    /// Destructive profile commands: always name the managed service state.
+    ManagedService,
+    /// Update and restart: a lone restore error passes through unchanged.
+    DaemonState,
+}
+
+/// Combines a command's outcome with the daemon-restore outcome so neither
+/// failure can shadow the other.
+pub(crate) fn join_outcome_and_restore<T>(
+    wording: RestoreWording,
+    operation: &str,
+    outcome: tracedecay_domain::errors::Result<T>,
+    restore: tracedecay_domain::errors::Result<()>,
+) -> tracedecay_domain::errors::Result<T> {
+    let Err(restore_error) = restore else {
+        return outcome;
+    };
+    let message = match (wording, outcome) {
+        (RestoreWording::ManagedService, Ok(_)) => format!(
+            "{operation} completed, but the managed daemon service state could not be \
+             restored: {restore_error}"
+        ),
+        (RestoreWording::ManagedService, Err(error)) => format!(
+            "{error}; additionally the managed daemon service state could not be \
+             restored: {restore_error}"
+        ),
+        (RestoreWording::DaemonState, Ok(_)) => return Err(restore_error),
+        (RestoreWording::DaemonState, Err(operation_error)) => format!(
+            "{operation} failed: {operation_error}; daemon state restoration also failed: {restore_error}"
+        ),
+    };
+    Err(tracedecay_domain::errors::TraceDecayError::Config { message })
+}
+
+/// Non-terminal wipe must not read stdin. Irreversible deletion still requires
+/// `--yes`; a hanging prompt would make the human the pipeline.
+pub(crate) fn wipe_must_not_wait_for_stdin(assume_yes: bool, stdin_is_terminal: bool) -> bool {
+    !assume_yes && !stdin_is_terminal
+}
+
+/// The destructive wipe body, run inside the profile-offline window. The
+/// maintenance scope and registry handles drop before the caller restores the
+/// daemon service.
+async fn wipe_under_profile_offline(
+    profile: &ProfileRoot,
+    all: bool,
+    assume_yes: bool,
+    profile_root: &Path,
+    home_tracedecay: &Option<PathBuf>,
+    profile_offline: &ProfileOfflineAuthority,
+) -> tracedecay_domain::errors::Result<()> {
+    {
+        let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
+            profile_offline.lease()?,
+            profile_root,
+            "wipe",
+        )?;
+        let registry = if all {
+            None
+        } else {
+            try_admit_profile_registry(profile_root).await?
+        };
+
+        // A complete wipe is deliberately schema-independent: the databases may
+        // be corrupt or newer than this binary, and opening the state we are about
+        // to destroy would make the recovery command unavailable. Local wipes keep
+        // their registry-backed target classification and ledger cleanup.
+        let project_paths = if all {
+            Vec::new()
+        } else {
+            global::gather_target_projects(profile, false).await?
+        };
+        let mut targets = Vec::new();
+        for path in &project_paths {
+            let location = global::classify_project_storage_with_registry(
+                profile,
+                path,
+                registry.as_ref(),
+                home_tracedecay.as_deref(),
+            )
+            .await?;
+            targets.push(location);
+        }
+
+        if !all && targets.is_empty() {
+            eprintln!("No tracedecay projects found in current folder, parents, or children.");
+            return Ok(());
+        }
+
+        global::print_flash_warning(all, &targets);
+
+        if assume_yes {
+            eprintln!("\x1b[33m--yes supplied, proceeding without the interactive prompt.\x1b[0m");
+        } else if wipe_must_not_wait_for_stdin(assume_yes, io::stdin().is_terminal()) {
+            // Wipe deletes stores. A non-terminal caller must pass `--yes`.
+            // Reading stdin here hangs an agent whose pipe stays open.
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "wipe is irreversible and stdin is not a terminal; pass --yes to confirm. Nothing was wiped.".to_string(),
+            });
+        } else {
+            eprint!("Type \x1b[1;32mgo!\x1b[0m to confirm (anything else aborts): ");
+            io::stderr().flush().ok();
+            let mut answer = String::new();
+            io::stdin().lock().read_line(&mut answer).map_err(|e| {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("failed to read stdin: {e}"),
+                }
+            })?;
+            if answer.trim() != "go!" {
+                eprintln!("\x1b[33mAborted. Nothing was wiped.\x1b[0m");
+                return Ok(());
+            }
+        }
+
+        if all {
+            let removed = wipe_complete_profile_database_state(profile_root)?;
+            eprintln!();
+            eprintln!(
+                "\x1b[32mWiped complete profile database state ({removed} filesystem entries).\x1b[0m"
+            );
+            return Ok(());
+        }
+
+        let mut failures = Vec::new();
+        let mut wiped_paths: Vec<PathBuf> = Vec::new();
+
+        for location in &targets {
+            match remove_store_directory(&location.data_root) {
+                Ok(_) => wiped_paths.push(location.project_root.clone()),
+                Err(error) => {
+                    eprintln!(
+                        "  \x1b[31m✗\x1b[0m {} ({error})",
+                        location.data_root.display()
+                    );
+                    failures.push(format!("{} ({error})", location.data_root.display()));
+                }
+            }
+        }
+
+        if !wiped_paths.is_empty()
+            && let Some(registry) = registry.as_ref()
+        {
+            registry.delete_project_paths(&wiped_paths).await?;
+        }
+        for path in &wiped_paths {
+            eprintln!("  \x1b[32m✔\x1b[0m wiped {}", path.display());
+        }
+        let removed = wiped_paths.len();
+
+        if !failures.is_empty() {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "local wipe failed for {} selected target(s): {}",
+                    failures.len(),
+                    failures.join("; ")
+                ),
+            });
+        }
+
+        eprintln!();
+        eprintln!("\x1b[32mWiped {removed} project(s).\x1b[0m");
+        Ok(())
+    }
+}
+
+/// Handles the `list` and `list --all` commands.
+#[tracing::instrument(name = "cli.list.run", level = "trace", skip_all)]
+pub(crate) async fn handle_list(
+    profile: &ProfileRoot,
+    all: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    handle_list_inner(profile, all).await
+}
+
+fn handle_list_inner(
+    profile: &ProfileRoot,
+    all: bool,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
+> {
+    // Erase the deeply nested list future before it reaches the measured
+    // wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
+    Box::pin(async move {
+        let profile = &profile;
+        use tracedecay_runtime_core::text::format_token_count;
+
+        let home_tracedecay = Some(profile.data_dir().to_path_buf());
+        let project_paths = if all {
+            global::gather_target_projects(profile, true).await?
+        } else {
+            global::gather_list_projects(profile).await?
+        };
+
+        if !all && project_paths.is_empty() {
+            println!("No tracedecay projects found in current folder, parents, or children.");
+            return Ok(());
+        }
+
+        let token_rows = match admin_cli_result(
+            profile,
+            None,
+            AdminCliSurfaceRequestV1::RegistryProjectTokens {
+                project_args: project_paths.clone(),
+            },
+        )
+        .await?
+        {
+            AdminCliResultV1::RegistryProjectTokens(tokens) => tokens.projects,
+            _ => return Err(admin_cli_result_mismatch("registry_project_tokens")),
+        };
+        let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
+        let mut token_errors: Vec<String> = Vec::new();
+
+        for path in &project_paths {
+            let mut location = global::classify_project_storage(profile, path)?;
+            if location.status == global::ProjectStorageStatus::Stale
+                && let Some(profile_root) = home_tracedecay.as_deref()
+            {
+                let stores = match registry_context(profile, path.clone()).await? {
+                    AdminCliRegistryContextV1::Ok { stores, .. } => stores,
+                    _ => Vec::new(),
+                };
+                if let Some(store) =
+                    stores
+                        .iter()
+                        .filter_map(|entry| entry.get("store"))
+                        .find(|store| {
+                            store.get("store_kind").and_then(serde_json::Value::as_str)
+                                == Some("code_project")
+                        })
+                    && let Some(registry_location) =
+                        tracedecay_runtime_core::storage::classify_registry_storage_value(
+                            path,
+                            profile_root,
+                            store,
+                        )
+                {
+                    location = registry_location;
+                }
+            }
+            let has_data = location.data_root.exists();
+            let size = list_store_size_bytes(all, has_data, &location.data_root);
+            let project_key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(path);
+            let token_row = token_rows.iter().find(|row| {
+                tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(&row.project)
+                    == project_key
+            });
+            // `None` is a total this run could not read, which is not the same
+            // answer as a project that has saved nothing.
+            let tokens = token_row.and_then(|row| row.tokens);
+            if tokens.is_none() {
+                let reason = token_row
+                    .and_then(|row| row.error.as_deref())
+                    .unwrap_or("no token total reported for this project");
+                token_errors.push(format!("{}: {reason}", path.display()));
+            }
+            rows.push(ListRow {
+                path: path.clone(),
+                status_label: location.status.label(),
+                has_data,
+                size,
+                tokens,
+            });
+        }
+
+        if all {
+            append_orphan_manifest_rows(&mut rows, &project_paths, home_tracedecay.as_deref());
+        }
+
+        if rows.is_empty() {
+            println!("No tracedecay projects tracked in the global DB.");
+            return Ok(());
+        }
+
+        let total_size = rows.iter().try_fold(0u64, |acc, row| {
+            row.size.map(|size| acc.saturating_add(size))
+        });
+        let total_tokens: u64 = rows.iter().filter_map(|row| row.tokens).sum();
+
+        rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.path.cmp(&b.path)));
+
+        let path_w = rows
+            .iter()
+            .map(|r| {
+                format!("{} [{}]", r.path.display(), r.status_label)
+                    .chars()
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+
+        println!("Found {} tracedecay project(s):", rows.len());
+        println!();
+        for r in &rows {
+            let path_str = format!("{} [{}]", r.path.display(), r.status_label);
+            let pad = path_w.saturating_sub(path_str.chars().count());
+            let size_str = match r.size {
+                Some(size) if r.has_data => tracedecay_runtime_core::text::format_bytes(size),
+                _ => "—".to_string(),
+            };
+            let tokens_str = match r.tokens {
+                None => "unavailable".to_string(),
+                Some(0) => "—".to_string(),
+                Some(tokens) => format_token_count(tokens),
+            };
+            println!(
+                "  {path_str}{pad}  {size:>10}  {tokens:>10} tokens",
+                pad = " ".repeat(pad),
+                size = size_str,
+                tokens = tokens_str
+            );
+        }
+        println!();
+        let total_tokens_str = if total_tokens == 0 {
+            "—".to_string()
+        } else {
+            format_token_count(total_tokens)
+        };
+        let unreadable = rows.iter().filter(|row| row.tokens.is_none()).count();
+        let total_suffix = if unreadable == 0 {
+            String::new()
+        } else {
+            format!(" (excludes {unreadable} project(s) with unavailable totals)")
+        };
+        println!(
+            "Total: {} on disk · {} tokens saved{}",
+            total_size.map_or_else(
+                || "—".to_string(),
+                tracedecay_runtime_core::text::format_bytes
+            ),
+            total_tokens_str,
+            total_suffix
+        );
+        if !token_errors.is_empty() {
+            eprintln!();
+            eprintln!(
+                "Token totals could not be read for {} project(s):",
+                token_errors.len()
+            );
+            for error in &token_errors {
+                eprintln!("  {error}");
+            }
+        }
+        Ok(())
+    })
+}
+
+fn list_store_size_bytes(all: bool, has_data: bool, data_root: &Path) -> Option<u64> {
+    if !all {
+        return None;
+    }
+    if !has_data {
+        return Some(0);
+    }
+    Some(dir_size_bytes(data_root))
+}
+
+#[derive(Debug)]
+struct ListRow {
+    path: std::path::PathBuf,
+    status_label: &'static str,
+    has_data: bool,
+    /// `None` when this run did not measure the store. Default `list`
+    /// skips the recursive size walk.
+    size: Option<u64>,
+    /// `None` when this run could not read the project's saved-token total.
+    tokens: Option<u64>,
+}
+
+fn append_orphan_manifest_rows(
+    rows: &mut Vec<ListRow>,
+    project_paths: &[std::path::PathBuf],
+    profile_root: Option<&Path>,
+) {
+    let Some(profile_root) = profile_root else {
+        return;
+    };
+    let registered: std::collections::HashSet<String> = project_paths
+        .iter()
+        .map(|path| tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(path))
+        .collect();
+    let report = tracedecay_global_db::registry_maintenance::inspect_profile_store_orphans(
+        profile_root,
+        tracedecay_runtime_core::tracedecay::current_timestamp(),
+    );
+    for plan in report.plans {
+        if plan.status
+            != tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkStatus::Eligible
+        {
+            continue;
+        }
+        let key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(
+            &plan.project.project_root,
+        );
+        if registered.contains(&key) {
+            continue;
+        }
+        let data_root = profile_root.join(&plan.store.store_relpath);
+        let has_data = data_root.exists();
+        let size = list_store_size_bytes(true, has_data, &data_root);
+        rows.push(ListRow {
+            path: plan.project.project_root,
+            status_label: "orphan manifest-reconstructable",
+            has_data,
+            size,
+            tokens: Some(0),
+        });
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod wipe_safety_tests {
     use super::*;
+
+    #[test]
+    fn reset_refusals_name_the_authority_and_the_exact_reset_command() {
+        let profile = annotate_reset_required(
+            tracedecay_domain::errors::TraceDecayError::reset_required(
+                "session temporal",
+                "persisted session temporal schema is the published v3 shape",
+            ),
+            None,
+        )
+        .to_string();
+        assert!(profile.contains("session temporal persisted shape requires reset"));
+        assert!(profile.contains("refused authority: session temporal"));
+        assert!(
+            profile.contains("\n  tracedecay wipe --stale --yes"),
+            "{profile}"
+        );
+
+        let project = annotate_reset_required(
+            tracedecay_domain::errors::TraceDecayError::reset_required(
+                "project store",
+                "schema v26 is incompatible",
+            ),
+            Some(Path::new("/repo/example")),
+        )
+        .to_string();
+        assert!(
+            project.contains("reset-project-store --project-root /repo/example --yes"),
+            "{project}"
+        );
+
+        let untouched = annotate_reset_required(
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: "unrelated".to_owned(),
+            },
+            None,
+        );
+        assert_eq!(untouched.to_string(), "config error: unrelated");
+    }
+
+    #[test]
+    fn nonterminal_wipe_without_yes_does_not_wait_on_stdin() {
+        assert!(wipe_must_not_wait_for_stdin(false, false));
+        assert!(!wipe_must_not_wait_for_stdin(true, false));
+        assert!(!wipe_must_not_wait_for_stdin(false, true));
+    }
+
+    #[test]
+    fn default_list_omits_recursive_store_size() {
+        let missing = Path::new("/definitely/missing-tracedecay-store");
+        assert_eq!(list_store_size_bytes(false, true, missing), None);
+        assert_eq!(list_store_size_bytes(true, false, missing), Some(0));
+    }
 
     #[test]
     fn complete_wipe_accepts_an_exact_canonical_profile_directory() {
@@ -296,21 +942,87 @@ mod wipe_safety_tests {
             .last()
             .expect("absolute path has a filesystem root");
 
-        for (candidate, home) in [
-            (Path::new("relative-profile"), None),
-            (profile.as_path(), Some(profile.as_path())),
+        let parent = profile.parent().expect("temporary profile has a parent");
+        for (candidate, home, expected) in [
             (
-                profile.parent().expect("temporary profile has a parent"),
-                Some(profile.as_path()),
+                Path::new("relative-profile"),
+                None,
+                "config error: complete profile wipe requires an absolute profile root, got \
+                 'relative-profile'"
+                    .to_owned(),
             ),
-            (filesystem_root, None),
+            (
+                profile.as_path(),
+                Some(profile.as_path()),
+                format!(
+                    "config error: complete profile wipe root '{}' must not be the user home or \
+                     one of its ancestors",
+                    profile.display()
+                ),
+            ),
+            (
+                parent,
+                Some(profile.as_path()),
+                format!(
+                    "config error: complete profile wipe root '{}' must not be the user home or \
+                     one of its ancestors",
+                    parent.display()
+                ),
+            ),
+            (
+                filesystem_root,
+                None,
+                format!(
+                    "config error: complete profile wipe root '{}' must be an exact canonical \
+                     non-filesystem-root directory",
+                    filesystem_root.display()
+                ),
+            ),
         ] {
-            assert!(
-                validate_complete_wipe_profile_root(candidate, home).is_err(),
-                "dangerous complete-wipe root was admitted: {}",
-                candidate.display()
-            );
+            let error = validate_complete_wipe_profile_root(candidate, home).unwrap_err();
+            assert_eq!(error.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn restore_failures_keep_each_wording() {
+        let failed = |message: &str| -> tracedecay_domain::errors::Result<()> {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: message.to_owned(),
+            })
+        };
+        let joined = |wording, outcome| {
+            join_outcome_and_restore(wording, "op", outcome, failed("restore"))
+                .unwrap_err()
+                .to_string()
+        };
+        for (wording, outcome, expected) in [
+            (
+                RestoreWording::ManagedService,
+                Ok(()),
+                "config error: op completed, but the managed daemon service state could not be \
+                 restored: config error: restore",
+            ),
+            (
+                RestoreWording::ManagedService,
+                failed("boom"),
+                "config error: config error: boom; additionally the managed daemon service state \
+                 could not be restored: config error: restore",
+            ),
+            (RestoreWording::DaemonState, Ok(()), "config error: restore"),
+            (
+                RestoreWording::DaemonState,
+                failed("boom"),
+                "config error: op failed: config error: boom; daemon state restoration also \
+                 failed: config error: restore",
+            ),
+        ] {
+            assert_eq!(joined(wording, outcome), expected);
+        }
+        assert_eq!(
+            join_outcome_and_restore(RestoreWording::DaemonState, "op", Ok(7), Ok(())).unwrap(),
+            7
+        );
     }
 
     #[cfg(unix)]
@@ -319,482 +1031,33 @@ mod wipe_safety_tests {
         use std::os::unix::fs::symlink;
 
         let parent = tempfile::TempDir::new().expect("create temporary parent");
-        let profile = parent.path().join("profile");
-        let profile_link = parent.path().join("profile-link");
-        let dangling = parent.path().join("dangling");
+        let parent_path = parent.path().canonicalize().expect("canonical parent");
+        let profile = parent_path.join("profile");
+        let profile_link = parent_path.join("profile-link");
+        let dangling = parent_path.join("dangling");
         std::fs::create_dir(&profile).expect("create real profile");
         symlink(&profile, &profile_link).expect("create profile symlink");
-        symlink(parent.path().join("missing"), &dangling).expect("create dangling symlink");
+        symlink(parent_path.join("missing"), &dangling).expect("create dangling symlink");
 
-        assert!(validate_complete_wipe_profile_root(&profile_link, None).is_err());
-        assert!(
-            verify_store_path_absent(&dangling).is_err(),
+        assert_eq!(
+            validate_complete_wipe_profile_root(&profile_link, None)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: complete profile wipe root '{}' must be a regular directory, not a \
+                 symlink",
+                profile_link.display()
+            )
+        );
+        validate_complete_wipe_profile_root(&profile, None)
+            .expect("the symlink target is a real root");
+        assert_eq!(
+            verify_store_path_absent(&dangling).unwrap_err().to_string(),
+            format!(
+                "config error: store removal did not remove expected namespace entry '{}'",
+                dangling.display()
+            ),
             "a dangling symlink remains a namespace entry"
         );
-    }
-}
-
-/// Handles the `wipe` and `wipe --all` commands.
-///
-/// `assume_yes` carries the global `--yes` confirmation flag. It is the same
-/// non-interactive acceptance every other destructive first-party command
-/// takes, so a scripted caller no longer has to feed `go!` through a pipe on
-/// stdin to reach the wipe.
-#[hotpath::measure(label = "cli.wipe.run", future = true)]
-pub(crate) async fn handle_wipe(
-    all: bool,
-    assume_yes: bool,
-) -> tracedecay_domain::errors::Result<()> {
-    handle_wipe_inner(all, assume_yes).await
-}
-
-fn handle_wipe_inner(
-    all: bool,
-    assume_yes: bool,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
-> {
-    // Erase the deeply nested wipe future before it reaches the measured
-    // wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-        let home_tracedecay = Some(profile_root.clone());
-        if all {
-            validate_complete_wipe_profile_root(
-                &profile_root,
-                tracedecay::agents::home_dir().as_deref(),
-            )?;
-        }
-        // A wedged daemon never exits on its own, so the lease is acquired
-        // through the bounded profile-offline sequence instead of a bare
-        // fail-fast attempt whose only advice was to wait for it.
-        let profile_offline = take_profile_offline(&profile_root, "wipe")?;
-        let outcome = wipe_under_profile_offline(
-            all,
-            assume_yes,
-            &profile_root,
-            &home_tracedecay,
-            &profile_offline,
-        )
-        .await;
-        let restore = profile_offline.finish();
-        join_outcome_and_restore("wipe", outcome, restore)
-    })
-}
-
-/// Combines a destructive command's outcome with the daemon-restore outcome
-/// so neither failure can shadow the other.
-pub(crate) fn join_outcome_and_restore(
-    operation: &str,
-    outcome: tracedecay_domain::errors::Result<()>,
-    restore: tracedecay_domain::errors::Result<()>,
-) -> tracedecay_domain::errors::Result<()> {
-    match (outcome, restore) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Ok(()), Err(restore_error)) => Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "{operation} completed, but the managed daemon service state could not be \
-                 restored: {restore_error}"
-            ),
-        }),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(restore_error)) => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "{error}; additionally the managed daemon service state could not be \
-                     restored: {restore_error}"
-                ),
-            })
-        }
-    }
-}
-
-/// The destructive wipe body, run inside the profile-offline window. The
-/// maintenance scope and registry handles drop before the caller restores the
-/// daemon service.
-async fn wipe_under_profile_offline(
-    all: bool,
-    assume_yes: bool,
-    profile_root: &Path,
-    home_tracedecay: &Option<PathBuf>,
-    profile_offline: &ProfileOfflineAuthority,
-) -> tracedecay_domain::errors::Result<()> {
-    {
-        let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
-            profile_offline.lease()?,
-            profile_root,
-            "wipe",
-        )?;
-        let registry = if all {
-            None
-        } else {
-            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::try_open_existing(profile_root)
-            .await?
-        };
-
-        // A complete wipe is deliberately schema-independent: the databases may
-        // be corrupt or newer than this binary, and opening the state we are about
-        // to destroy would make the recovery command unavailable. Local wipes keep
-        // their registry-backed target classification and ledger cleanup.
-        let project_paths = if all {
-            Vec::new()
-        } else {
-            global::gather_target_projects(false, home_tracedecay).await?
-        };
-        let mut targets = Vec::new();
-        for path in &project_paths {
-            let location = global::classify_project_storage_with_registry(
-                path,
-                registry.as_ref(),
-                home_tracedecay.as_deref(),
-            )
-            .await?;
-            // A prior partial wipe may have removed the profile shard while a
-            // marker deletion failed. Keep that marker-backed target selectable so
-            // the same command can finish the cleanup without deleting its registry
-            // retry authority on the failed attempt.
-            if location.status.is_live() || location.marker_root.is_some() {
-                targets.push(location);
-            }
-        }
-
-        if !all && targets.is_empty() {
-            eprintln!("No tracedecay projects found in current folder, parents, or children.");
-            return Ok(());
-        }
-
-        global::print_flash_warning(all, &targets);
-
-        if assume_yes {
-            eprintln!("\x1b[33m--yes supplied — proceeding without the interactive prompt.\x1b[0m");
-        } else {
-            eprint!("Type \x1b[1;32mgo!\x1b[0m to confirm (anything else aborts): ");
-            io::stderr().flush().ok();
-            let mut answer = String::new();
-            io::stdin().lock().read_line(&mut answer).map_err(|e| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("failed to read stdin: {e}"),
-                }
-            })?;
-            if answer.trim() != "go!" {
-                eprintln!("\x1b[33mAborted — nothing was wiped.\x1b[0m");
-                if !io::stdin().is_terminal() {
-                    eprintln!("(no terminal on stdin — pass --yes to confirm a scripted wipe)");
-                }
-                return Ok(());
-            }
-        }
-
-        if all {
-            let removed = wipe_complete_profile_database_state(profile_root)?;
-            eprintln!();
-            eprintln!(
-                "\x1b[32mWiped complete profile database state ({removed} filesystem entries).\x1b[0m"
-            );
-            return Ok(());
-        }
-
-        let mut removed = 0usize;
-        let mut failures = Vec::new();
-        let mut wiped_paths: Vec<PathBuf> = Vec::new();
-        let mut marker_cleanup = Vec::new();
-
-        for location in &targets {
-            match remove_store_directory(&location.data_root) {
-                Ok(_) => {
-                    wiped_paths.push(location.project_root.clone());
-                    marker_cleanup.push(location);
-                }
-                Err(error) => {
-                    eprintln!(
-                        "  \x1b[31m✗\x1b[0m {} ({error})",
-                        location.data_root.display()
-                    );
-                    failures.push(format!("{} ({error})", location.data_root.display()));
-                }
-            }
-        }
-
-        // Keep repository markers intact until the registry transaction succeeds.
-        // If it fails after a shard was removed, the marker remains the durable
-        // local discovery authority for a retry.
-        if !wiped_paths.is_empty() {
-            if let Some(registry) = registry.as_ref() {
-                registry.delete_project_paths(&wiped_paths).await?;
-            }
-        }
-
-        for location in marker_cleanup {
-            if let Some(marker_root) = &location.marker_root
-                && let Err(error) = remove_store_directory(marker_root)
-            {
-                eprintln!("  \x1b[31m✗\x1b[0m {} ({error})", marker_root.display());
-                failures.push(format!("{} ({error})", marker_root.display()));
-                continue;
-            }
-            removed += 1;
-            eprintln!(
-                "  \x1b[32m✔\x1b[0m wiped {}",
-                location.project_root.display()
-            );
-        }
-
-        if !failures.is_empty() {
-            return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "local wipe failed for {} selected target(s): {}",
-                    failures.len(),
-                    failures.join("; ")
-                ),
-            });
-        }
-
-        eprintln!();
-        eprintln!("\x1b[32mWiped {removed} project(s).\x1b[0m");
-        Ok(())
-    }
-}
-
-/// Handles the `list` and `list --all` commands.
-#[hotpath::measure(label = "cli.list.run", future = true)]
-pub(crate) async fn handle_list(all: bool) -> tracedecay_domain::errors::Result<()> {
-    handle_list_inner(all).await
-}
-
-fn handle_list_inner(
-    all: bool,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
-> {
-    // Erase the deeply nested list future before it reaches the measured
-    // wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        use tracedecay_runtime_core::text::format_token_count;
-
-        let home_tracedecay = tracedecay::config::user_data_dir();
-        let project_paths = global::gather_target_projects(all, &home_tracedecay).await?;
-
-        if !all && project_paths.is_empty() {
-            println!("No tracedecay projects found in current folder, parents, or children.");
-            return Ok(());
-        }
-
-        let token_result = daemon_tool_json(
-            None,
-            "tracedecay_admin_cli",
-            serde_json::json!({
-                "action": "registry_project_tokens",
-                "project_args": &project_paths,
-            }),
-        )
-        .await?;
-        let token_rows = token_result
-            .get("projects")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
-        let mut token_errors: Vec<String> = Vec::new();
-
-        for path in &project_paths {
-            let mut location = global::classify_project_storage(path);
-            if location.status == global::ProjectStorageStatus::Stale
-                && let Some(profile_root) = home_tracedecay.as_deref()
-            {
-                let context = daemon_tool_json(
-                    None,
-                    "tracedecay_admin_cli",
-                    serde_json::json!({
-                        "action": "registry_context",
-                        "project_arg": path,
-                    }),
-                )
-                .await?;
-                if let Some(store) = context
-                    .get("stores")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entry| entry.get("store"))
-                    .find(|store| {
-                        store.get("store_kind").and_then(serde_json::Value::as_str)
-                            == Some("code_project")
-                    })
-                    && let Some(registry_location) =
-                        global::classify_registry_storage_value(path, profile_root, store)
-                {
-                    location = registry_location;
-                }
-            }
-            let has_data = location.data_root.exists();
-            let size = if has_data {
-                global::tracedecay_dir_size(&location.data_root)
-            } else {
-                0
-            };
-            let project_key =
-            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(path);
-            let token_row = token_rows.iter().find(|row| {
-            row.get("project")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| {
-                    tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(
-                        Path::new(value),
-                    ) == project_key
-                })
-        });
-            // `None` is a total this run could not read, which is not the same
-            // answer as a project that has saved nothing.
-            let tokens = token_row
-                .and_then(|row| row.get("tokens"))
-                .and_then(serde_json::Value::as_u64);
-            if tokens.is_none() {
-                let reason = token_row
-                    .and_then(|row| row.get("error"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("no token total reported for this project");
-                token_errors.push(format!("{}: {reason}", path.display()));
-            }
-            rows.push(ListRow {
-                path: path.clone(),
-                status_label: location.status.label(),
-                has_data,
-                size,
-                tokens,
-            });
-        }
-
-        if all {
-            append_orphan_manifest_rows(&mut rows, &project_paths, home_tracedecay.as_deref());
-        }
-
-        if rows.is_empty() {
-            println!("No tracedecay projects tracked in the global DB.");
-            return Ok(());
-        }
-
-        let total_size: u64 = rows.iter().map(|row| row.size).sum();
-        let total_tokens: u64 = rows.iter().filter_map(|row| row.tokens).sum();
-
-        rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.path.cmp(&b.path)));
-
-        let path_w = rows
-            .iter()
-            .map(|r| {
-                format!("{} [{}]", r.path.display(), r.status_label)
-                    .chars()
-                    .count()
-            })
-            .max()
-            .unwrap_or(0);
-
-        println!("Found {} tracedecay project(s):", rows.len());
-        println!();
-        for r in &rows {
-            let path_str = format!("{} [{}]", r.path.display(), r.status_label);
-            let pad = path_w.saturating_sub(path_str.chars().count());
-            let size_str = if r.has_data {
-                tracedecay_runtime_core::text::format_bytes(r.size)
-            } else {
-                "—".to_string()
-            };
-            let tokens_str = match r.tokens {
-                None => "unavailable".to_string(),
-                Some(0) => "—".to_string(),
-                Some(tokens) => format_token_count(tokens),
-            };
-            println!(
-                "  {path_str}{pad}  {size:>10}  {tokens:>10} tokens",
-                pad = " ".repeat(pad),
-                size = size_str,
-                tokens = tokens_str
-            );
-        }
-        println!();
-        let total_tokens_str = if total_tokens == 0 {
-            "—".to_string()
-        } else {
-            format_token_count(total_tokens)
-        };
-        let unreadable = rows.iter().filter(|row| row.tokens.is_none()).count();
-        let total_suffix = if unreadable == 0 {
-            String::new()
-        } else {
-            format!(" (excludes {unreadable} project(s) with unavailable totals)")
-        };
-        println!(
-            "Total: {} on disk · {} tokens saved{}",
-            tracedecay_runtime_core::text::format_bytes(total_size),
-            total_tokens_str,
-            total_suffix
-        );
-        if !token_errors.is_empty() {
-            eprintln!();
-            eprintln!(
-                "Token totals could not be read for {} project(s):",
-                token_errors.len()
-            );
-            for error in &token_errors {
-                eprintln!("  {error}");
-            }
-        }
-        Ok(())
-    })
-}
-
-#[derive(Debug)]
-struct ListRow {
-    path: std::path::PathBuf,
-    status_label: &'static str,
-    has_data: bool,
-    size: u64,
-    /// `None` when this run could not read the project's saved-token total.
-    tokens: Option<u64>,
-}
-
-fn append_orphan_manifest_rows(
-    rows: &mut Vec<ListRow>,
-    project_paths: &[std::path::PathBuf],
-    profile_root: Option<&Path>,
-) {
-    let Some(profile_root) = profile_root else {
-        return;
-    };
-    let registered: std::collections::HashSet<String> = project_paths
-        .iter()
-        .map(|path| {
-            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(path)
-        })
-        .collect();
-    let report = tracedecay_global_db::registry_maintenance::inspect_profile_store_orphans(
-        profile_root,
-        tracedecay::tracedecay::current_timestamp(),
-    );
-    for plan in report.plans {
-        if plan.status
-            != tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkStatus::Eligible
-        {
-            continue;
-        }
-        let key = tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(
-            &plan.project.project_root,
-        );
-        if registered.contains(&key) {
-            continue;
-        }
-        let data_root = profile_root.join(&plan.store.store_relpath);
-        let has_data = data_root.exists();
-        let size = if has_data {
-            global::tracedecay_dir_size(&data_root)
-        } else {
-            0
-        };
-        rows.push(ListRow {
-            path: plan.project.project_root,
-            status_label: "orphan manifest-reconstructable",
-            has_data,
-            size,
-            tokens: Some(0),
-        });
     }
 }

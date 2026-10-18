@@ -1,23 +1,65 @@
 use std::collections::BTreeSet;
 
+use axum::http::StatusCode;
+
 use super::{
-    DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOwnerKind, HttpPageQuery,
-    http_application_full_route_path, http_application_owner_kind,
-    is_http_application_operation_exposed, parse_callable_code_operation,
-    parse_configuration_operation, parse_context_scout_operation, parse_feedback_read_operation,
-    parse_git_read_operation, parse_native_integration_operation,
+    HttpApplicationOwnerKind, application_problem_status, http_application_full_route_path,
+    http_application_owner_kind, is_http_application_operation_exposed,
+    parse_callable_code_operation, parse_configuration_operation, parse_context_scout_operation,
+    parse_feedback_read_operation, parse_git_read_operation, parse_native_integration_operation,
 };
-use tracedecay_application::{
-    configuration::CONFIGURATION_SURFACE_OPERATION_NAMES, configuration_executable_binding_registry,
+use tracedecay_contracts::{
+    ApplicationProblemKind, application_http_executable_binding_registry,
+    configuration::configuration_surface_operation_names,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OperationId, RouteExposureV1};
 
 #[test]
-fn omitted_http_page_query_uses_the_canonical_default() {
-    let query: HttpPageQuery = serde_json::from_value(serde_json::json!({}))
-        .expect("empty HTTP query uses adapter defaults");
-    assert_eq!(query.page_size, DEFAULT_HTTP_PAGE_SIZE);
-    assert!(query.cursor.is_none());
+fn application_problem_status_keeps_the_canonical_http_codes() {
+    let cases = [
+        (
+            ApplicationProblemKind::InvalidRequest,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            ApplicationProblemKind::NotFoundOrNotAuthorized,
+            StatusCode::NOT_FOUND,
+        ),
+        (ApplicationProblemKind::Conflict, StatusCode::CONFLICT),
+        (ApplicationProblemKind::PartialEffect, StatusCode::CONFLICT),
+        (ApplicationProblemKind::Stale, StatusCode::CONFLICT),
+        (
+            ApplicationProblemKind::Unsupported,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            ApplicationProblemKind::ResetRequired,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            ApplicationProblemKind::Unavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            ApplicationProblemKind::ExecutionFailed,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        (
+            ApplicationProblemKind::Saturated,
+            StatusCode::TOO_MANY_REQUESTS,
+        ),
+        (
+            ApplicationProblemKind::Cancelled,
+            StatusCode::REQUEST_TIMEOUT,
+        ),
+        (
+            ApplicationProblemKind::TimedOut,
+            StatusCode::GATEWAY_TIMEOUT,
+        ),
+    ];
+    for (kind, status) in cases {
+        assert_eq!(application_problem_status(kind), status, "{kind:?}");
+    }
 }
 
 #[test]
@@ -32,11 +74,18 @@ fn git_read_operation_parser_is_exact_and_read_only() {
         assert_eq!(parse_git_read_operation(route), Some(operation));
         assert_eq!(
             http_application_owner_kind(operation),
-            HttpApplicationOwnerKind::Git
+            Some(HttpApplicationOwnerKind::Git)
         );
         assert_eq!(operation.as_str(), format!("git_{route}"));
     }
-    for rejected in ["", "preview", "apply", "git_status", "status/"] {
+    for (route, operation) in [
+        ("preview", ApplicationSurfaceOperation::GitPreview),
+        ("apply", ApplicationSurfaceOperation::GitApply),
+    ] {
+        assert_eq!(parse_git_read_operation(route), Some(operation));
+        assert!(!is_http_application_operation_exposed(operation).unwrap());
+    }
+    for rejected in ["", "git_status", "status/"] {
         assert_eq!(parse_git_read_operation(rejected), None);
     }
 }
@@ -47,11 +96,12 @@ fn feedback_read_operation_parser_is_exact_and_separately_owned() {
         ("get", ApplicationSurfaceOperation::FeedbackGet),
         ("expand", ApplicationSurfaceOperation::FeedbackExpand),
         ("list", ApplicationSurfaceOperation::FeedbackList),
+        ("proximity", ApplicationSurfaceOperation::FeedbackProximity),
     ] {
         assert_eq!(parse_feedback_read_operation(route), Some(operation));
         assert_eq!(
             http_application_owner_kind(operation),
-            HttpApplicationOwnerKind::Feedback
+            Some(HttpApplicationOwnerKind::Feedback)
         );
         assert_eq!(operation.as_str(), format!("feedback_{route}"));
     }
@@ -119,11 +169,6 @@ fn callable_code_operation_parser_is_exact_and_separately_owned() {
             HttpApplicationOwnerKind::CallableCode,
         ),
         (
-            "code_definition",
-            ApplicationSurfaceOperation::CodeDefinition,
-            HttpApplicationOwnerKind::CallableCode,
-        ),
-        (
             "code_type_definition",
             ApplicationSurfaceOperation::CodeTypeDefinition,
             HttpApplicationOwnerKind::CallableCode,
@@ -136,7 +181,7 @@ fn callable_code_operation_parser_is_exact_and_separately_owned() {
     ] {
         assert_eq!(parse_callable_code_operation(name), Some(operation));
         assert_eq!(operation.as_str(), name);
-        assert_eq!(http_application_owner_kind(operation), owner);
+        assert_eq!(http_application_owner_kind(operation), Some(owner));
     }
     for rejected in [
         "",
@@ -158,10 +203,6 @@ fn configuration_operation_parser_is_exact_and_closed() {
             ApplicationSurfaceOperation::ConfigurationList,
         ),
         (
-            "configuration_explain",
-            ApplicationSurfaceOperation::ConfigurationExplain,
-        ),
-        (
             "configuration_get",
             ApplicationSurfaceOperation::ConfigurationGet,
         ),
@@ -176,10 +217,6 @@ fn configuration_operation_parser_is_exact_and_closed() {
         (
             "configuration_batch",
             ApplicationSurfaceOperation::ConfigurationBatch,
-        ),
-        (
-            "configuration_write_credential",
-            ApplicationSurfaceOperation::ConfigurationWriteCredential,
         ),
         (
             "configuration_observed_state",
@@ -216,7 +253,7 @@ fn configuration_operation_parser_is_exact_and_closed() {
         );
         assert_eq!(
             http_application_owner_kind(operation),
-            super::HttpApplicationOwnerKind::Configuration
+            Some(super::HttpApplicationOwnerKind::Configuration)
         );
     }
     for rejected in [
@@ -225,6 +262,7 @@ fn configuration_operation_parser_is_exact_and_closed() {
         "configuration",
         "configuration_LIST",
         "configuration_list/",
+        "configuration_explain",
         "configuration_unknown",
     ] {
         assert_eq!(parse_configuration_operation(rejected), None);
@@ -233,9 +271,10 @@ fn configuration_operation_parser_is_exact_and_closed() {
 
 #[test]
 fn configuration_http_routes_match_the_executable_sdk_catalog() {
-    let registry = configuration_executable_binding_registry().expect("configuration registry");
+    let registry =
+        application_http_executable_binding_registry().expect("application HTTP registry");
 
-    for name in CONFIGURATION_SURFACE_OPERATION_NAMES {
+    for name in configuration_surface_operation_names() {
         let operation =
             ApplicationSurfaceOperation::from_catalog_name(name).expect("HTTP operation");
         let operation_id =
@@ -273,7 +312,7 @@ fn context_scout_operation_parser_is_exact_and_backend_only() {
         );
         assert_eq!(
             http_application_owner_kind(operation),
-            HttpApplicationOwnerKind::ContextScout
+            Some(HttpApplicationOwnerKind::ContextScout)
         );
     }
     assert_eq!(parse_context_scout_operation("context_scout"), None);
@@ -289,10 +328,7 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
             "canonical operation names must be unique"
         );
         assert_eq!(
-            ApplicationSurfaceOperation::from_tool_name(&format!(
-                "tracedecay_{}",
-                operation.as_str()
-            )),
+            ApplicationSurfaceOperation::from_tool_name(operation.mcp_tool_name()),
             Some(operation),
             "{} must round-trip through the canonical tool name",
             operation.as_str()
@@ -302,30 +338,30 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
         ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics"),
         Some(ApplicationSurfaceOperation::DiagnosticsRead)
     );
-    assert!(!is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::GitPreview
-    ));
-    assert!(!is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::GitApply
-    ));
-    assert!(!is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::ObservatoryRead
-    ));
+    assert!(
+        !is_http_application_operation_exposed(ApplicationSurfaceOperation::GitPreview).unwrap()
+    );
+    assert!(!is_http_application_operation_exposed(ApplicationSurfaceOperation::GitApply).unwrap());
+    assert!(
+        !is_http_application_operation_exposed(ApplicationSurfaceOperation::ObservatoryRead)
+            .unwrap()
+    );
     assert_eq!(
         http_application_owner_kind(ApplicationSurfaceOperation::ObservatoryRead),
-        HttpApplicationOwnerKind::Observatory
+        Some(HttpApplicationOwnerKind::Observatory)
     );
     assert_eq!(
         http_application_owner_kind(ApplicationSurfaceOperation::GitPreview),
-        HttpApplicationOwnerKind::Git
+        Some(HttpApplicationOwnerKind::Git)
     );
     assert_eq!(
         http_application_owner_kind(ApplicationSurfaceOperation::GitApply),
-        HttpApplicationOwnerKind::Git
+        Some(HttpApplicationOwnerKind::Git)
     );
-    assert!(is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::GitHubStackSignalExpand
-    ));
+    assert!(
+        is_http_application_operation_exposed(ApplicationSurfaceOperation::GitHubStackSignalExpand)
+            .unwrap()
+    );
     assert_eq!(
         http_application_full_route_path(ApplicationSurfaceOperation::GitHubStackSignalExpand),
         "/application/github-stack/signal-expand"
@@ -333,7 +369,7 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
 }
 
 #[test]
-fn native_worktree_http_parser_admits_only_the_five_public_operations() {
+fn native_integration_parser_and_catalog_keep_exposure_distinct() {
     for operation in [
         ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory,
         ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect,
@@ -349,6 +385,7 @@ fn native_worktree_http_parser_admits_only_the_five_public_operations() {
             http_application_full_route_path(operation),
             format!("/application/native-integration/{}", operation.as_str())
         );
+        assert!(is_http_application_operation_exposed(operation).unwrap());
     }
     for operation in [
         ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
@@ -358,6 +395,10 @@ fn native_worktree_http_parser_admits_only_the_five_public_operations() {
         ApplicationSurfaceOperation::NativeIntegrationStatus,
         ApplicationSurfaceOperation::NativeIntegrationCancel,
     ] {
-        assert_eq!(parse_native_integration_operation(operation.as_str()), None);
+        assert_eq!(
+            parse_native_integration_operation(operation.as_str()),
+            Some(operation)
+        );
+        assert!(!is_http_application_operation_exposed(operation).unwrap());
     }
 }

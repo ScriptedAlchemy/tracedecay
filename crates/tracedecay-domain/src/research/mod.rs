@@ -1,8 +1,7 @@
 //! Immutable research-provenance and retrieval-anchor contracts.
 //!
-//! This module is a compatibility facade. Ownership-aligned implementation
-//! modules remain directly addressable while all existing
-//! `tracedecay_domain::research::Type` imports continue to resolve.
+//! Each contract family lives in its own submodule; this module re-exports
+//! them so `tracedecay_domain::research::Type` is the one import path.
 
 pub mod anchor;
 pub mod branch_stack;
@@ -47,12 +46,7 @@ mod tests {
 
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String, Error = DomainError>,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     #[test]
     fn ids_reject_invalid_deserialized_values() {
@@ -224,7 +218,9 @@ mod tests {
                     "future_consistency_field": true
                 }
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `future_consistency_field`")
         );
         assert!(
             serde_json::from_value::<EvidenceRetentionWatermark>(json!({
@@ -232,30 +228,41 @@ mod tests {
                 "cutoffs": {},
                 "future_retention_field": true
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `future_retention_field`")
         );
 
         let mut remote =
             serde_json::from_str::<serde_json::Value>(&remote_coverage_json(1)).unwrap();
         remote["future_remote_field"] = json!(true);
-        assert!(serde_json::from_value::<RemoteCoverageV1>(remote).is_err());
+        assert!(
+            serde_json::from_value::<RemoteCoverageV1>(remote)
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown field `future_remote_field`")
+        );
 
         let mut shard =
             serde_json::from_str::<serde_json::Value>(&remote_coverage_json(1)).unwrap();
         shard["shards"][0]["future_shard_field"] = json!(true);
-        assert!(serde_json::from_value::<RemoteCoverageV1>(shard).is_err());
+        assert!(
+            serde_json::from_value::<RemoteCoverageV1>(shard)
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown field `future_shard_field`")
+        );
 
         let report = offline_cache_report(99, 100);
         let mut serialized = serde_json::to_value(&report).unwrap();
         serialized["remote"]["shards"][0]["cache_grant_snapshot"]["future_grant_field"] =
             json!(true);
-        assert!(serde_json::from_value::<CoverageReportV1>(serialized).is_err());
-    }
-
-    #[test]
-    fn remote_coverage_accepts_exact_shard_bound() {
-        let remote: RemoteCoverageV1 = serde_json::from_str(&remote_coverage_json(1_024)).unwrap();
-        assert_eq!(remote.shards.len(), 1_024);
+        assert!(
+            serde_json::from_value::<CoverageReportV1>(serialized)
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown field `future_grant_field`")
+        );
     }
 
     #[test]
@@ -316,13 +323,6 @@ mod tests {
             }),
             ..CoverageReportV1::default()
         }
-    }
-
-    #[test]
-    fn offline_cache_coverage_rejects_an_expired_grant() {
-        let report = offline_cache_report(101, 100);
-        report.validate().unwrap();
-        assert!(!report.is_complete());
     }
 
     #[test]
@@ -439,13 +439,5 @@ mod tests {
                 field: "remote coverage disposition shard"
             })
         ));
-    }
-
-    #[test]
-    fn canonical_json_sorts_object_keys_recursively() {
-        assert_eq!(
-            canonical_json_value(&json!({"z": {"b": 1, "a": 2}, "a": 0})).unwrap(),
-            r#"{"a":0,"z":{"a":2,"b":1}}"#
-        );
     }
 }

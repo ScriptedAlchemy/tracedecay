@@ -1,0 +1,42 @@
+name: Upstream compatibility lanes
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/upstream-compat.yml
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# PR smoke runs stay informational; a fresh upstream breakage should not
+# red-light an unrelated PR. Scheduled and dispatched probes fail for real.
+concurrency:
+  group: upstream-compat-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'upstream' }}
+  cancel-in-progress: true
+
+jobs:
+  # Catch Bazel 10's default flag flips on the pinned 9.3.0 (they exist there
+  # precisely so workspaces can migrate early) before the next LTS lands.
+  bazel-10-readiness:
+    name: Bazel 10 readiness (flipped-flag build on 9.3.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: upstream-compat-bazel10
+      - name: Build the Rust workspace with Bazel 10 default flags
+        run: |
+          bazel build --config=ci \
+            --experimental_fetch_all_coverage_outputs \
+            --experimental_split_coverage_postprocessing \
+            --incompatible_check_testonly_for_output_files \
+            --incompatible_exclude_starlark_flags_from_exec_config \
+            --incompatible_no_implicit_file_export \
+            --rewind_lost_inputs \
+            //crates/...

@@ -1,10 +1,10 @@
 use serde_json::json;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
-    ComponentVersion, CoverageReportV1, EvidenceClass, NativeAliasKindV2, ObservationId,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGeneration, CapabilityId,
+    ComponentVersion, CoverageReportV1, EvidenceClass, ObservationId,
     ObservationIdentityMaterialV1, PayloadAccessState, PayloadReferenceV1,
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
-    ResolutionAuthorizationV1, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
+    ResolutionAuthorizationV1, RetrievalAnchorRecordParts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, SessionId,
     UtcMicros, VectorWatermark,
 };
@@ -81,15 +81,15 @@ fn authorization() -> ResolutionAuthorizationV1 {
 fn anchor(
     observation: &DurableObservationV1,
     owner: ObservationScopeV1,
-    aliases: Vec<NativeAliasV2>,
+    aliases: Vec<NativeAlias>,
     ingested_at: i64,
-) -> RetrievalAnchorRecordV2 {
+) -> RetrievalAnchorRecord {
     anchor_with_provenance(
         observation,
         owner,
         aliases,
         ingested_at,
-        AnchorSourceGenerationV2::Observation(observation.identity().generation()),
+        AnchorSourceGeneration::Observation(observation.identity().generation()),
         vec![observation.observation_id().clone()],
     )
 }
@@ -97,13 +97,13 @@ fn anchor(
 fn anchor_with_provenance(
     observation: &DurableObservationV1,
     owner: ObservationScopeV1,
-    aliases: Vec<NativeAliasV2>,
+    aliases: Vec<NativeAlias>,
     ingested_at: i64,
-    source_generation: AnchorSourceGenerationV2,
+    source_generation: AnchorSourceGeneration,
     source_observations: Vec<CanonicalObservationIdV1>,
-) -> RetrievalAnchorRecordV2 {
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::ExactObservation(observation.observation_id().clone()),
+) -> RetrievalAnchorRecord {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::ExactObservation(observation.observation_id().clone()),
         owner,
         aliases,
         occurred_at: None,
@@ -206,9 +206,7 @@ fn anchored_write_rejects_mismatched_source_generation_and_lineage() {
                 ObservationScopeV1::Profile,
                 vec![],
                 1,
-                AnchorSourceGenerationV2::Observation(
-                    ObservationSourceGenerationV1::new(8).unwrap()
-                ),
+                AnchorSourceGeneration::Observation(ObservationSourceGenerationV1::new(8).unwrap()),
                 vec![candidate.observation_id().clone()],
             ),
             projection_generation(),
@@ -223,7 +221,7 @@ fn anchored_write_rejects_mismatched_source_generation_and_lineage() {
                 ObservationScopeV1::Profile,
                 vec![],
                 1,
-                AnchorSourceGenerationV2::Observation(candidate.identity().generation()),
+                AnchorSourceGeneration::Observation(candidate.identity().generation()),
                 vec![
                     candidate.observation_id().clone(),
                     other.observation_id().clone(),
@@ -249,45 +247,6 @@ fn commit_receipt_rejects_a_partial_mismatched_aggregate() {
             projection_generation(),
         ),
         Err(ObservationStoreError::RetrievalAnchorObservationMismatch)
-    ));
-}
-
-#[test]
-fn alias_collision_is_typed_without_a_partial_commit_receipt() {
-    let alias = NativeAliasV2::new(
-        NativeAliasKindV2::ProviderRecord,
-        PrivacyDomainBoundLocatorDigest::new(DIGEST_A).unwrap(),
-    )
-    .unwrap();
-    let first_observation = observation("alias-first", ObservationScopeV1::Profile);
-    let second_observation = observation("alias-second", ObservationScopeV1::Profile);
-    let first = anchor(
-        &first_observation,
-        ObservationScopeV1::Profile,
-        vec![alias.clone()],
-        1,
-    );
-    let second = anchor(
-        &second_observation,
-        ObservationScopeV1::Profile,
-        vec![alias.clone()],
-        2,
-    );
-    let result: ObservationStoreResult<ObservationPersistOutcome> =
-        Err(ObservationStoreError::RetrievalAnchorAliasCollision {
-            alias: Box::new(alias.clone()),
-            existing_anchor_id: Box::new(first.anchor_id().clone()),
-            candidate_anchor_id: Box::new(second.anchor_id().clone()),
-        });
-    assert!(matches!(
-        result,
-        Err(ObservationStoreError::RetrievalAnchorAliasCollision {
-            alias: collided,
-            existing_anchor_id,
-            candidate_anchor_id,
-        }) if collided.as_ref() == &alias
-            && existing_anchor_id.as_ref() == first.anchor_id()
-            && candidate_anchor_id.as_ref() == second.anchor_id()
     ));
 }
 
@@ -317,4 +276,75 @@ fn memoized_access_policy_digest_equals_eager_derivation() {
             assert_eq!(authorization.access_policy_digest.as_str(), expected);
         }
     }
+}
+
+#[test]
+fn observation_identity_collision_is_a_receiptless_refusal_reason() {
+    let reason = ObservationCoverageReason::ObservationIdentityCollision;
+
+    assert_eq!(reason.as_str(), "observation_identity_collision");
+    assert!(reason.is_refusal());
+    assert!(reason.is_receiptless());
+    assert!(reason.disposition_matches(None));
+    assert_eq!(
+        "observation_identity_collision"
+            .parse::<ObservationCoverageReason>()
+            .unwrap(),
+        reason
+    );
+}
+
+#[test]
+fn unknown_coverage_reason_error_does_not_retain_private_wire_text() {
+    let short_secret = "provider-private-transcript-secret";
+    let long_secret = format!("provider-private-transcript-{}", "x".repeat(16 * 1024));
+
+    for secret in [short_secret, long_secret.as_str()] {
+        let error = secret
+            .parse::<ObservationCoverageReason>()
+            .expect_err("unknown reason");
+
+        assert!(
+            !error.to_string().contains(secret),
+            "display error must not retain unknown wire text"
+        );
+        assert!(
+            !format!("{error:?}").contains(secret),
+            "debug error must not retain unknown wire text"
+        );
+        let serialized = serde_json::to_string(&error).expect("serialize unknown reason error");
+        assert!(
+            !serialized.contains(secret),
+            "serialized error must not retain unknown wire text"
+        );
+        assert!(serialized.contains("sha256:"));
+    }
+}
+
+#[test]
+fn cursor_ledger_identity_keeps_canonical_values_typed() {
+    let receipt = observation("ledger", ObservationScopeV1::Profile)
+        .receipt()
+        .clone();
+    let receipt_id = receipt.receipt().receipt_id().clone();
+    let expected = CursorAdvanceLedgerIdentityV1::new(
+        ObservationCoverageReason::SanitizerRejected,
+        Some(receipt_id.clone()),
+    );
+    let stored = CursorAdvanceLedgerIdentityV1::from_stored_row_with_authority_receipt(
+        "sanitizer_rejected",
+        Some(receipt_id.as_str()),
+        Some(&receipt),
+    );
+
+    assert_eq!(stored, expected);
+    assert!(matches!(
+        stored.reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::SanitizerRejected)
+    ));
+    assert!(matches!(
+        stored.receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Known(receipt_id)
+            if receipt_id.as_str() == "receipt.ledger"
+    ));
 }

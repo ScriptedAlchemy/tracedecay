@@ -1,0 +1,929 @@
+use std::collections::BTreeSet;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tracedecay_domain::{
+    CursorBindingMismatchV1, CursorBindingV1, ProjectionGenerationId, UtcMicros,
+    WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductProjectionBundleV1,
+    WorkRuntimeProjectionV1, canonical_sha256, decode_bound_cursor, encode_bound_cursor,
+};
+
+use crate::{
+    OpaqueCursor, RequestAdmission, RequestContext, WorkAttemptTopologyBindingV1,
+    WorkAttemptTopologyStateV1, WorkProductAuthorizedRelationScopeV1,
+};
+
+use super::{
+    AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkProductApplicationErrorV1,
+    WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductSelectionScopeV1,
+};
+
+pub const MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1: usize = 512;
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum WorkGraphReadModeV1 {
+    Current,
+    AsOf {
+        valid_at: UtcMicros,
+    },
+    Evolution {
+        from_valid_at: UtcMicros,
+        through_valid_at: UtcMicros,
+    },
+    Forensic {
+        from_observed_at: UtcMicros,
+        through_observed_at: UtcMicros,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkGraphReadRequestV1 {
+    pub selection: WorkProductSelectionScopeV1,
+    pub mode: WorkGraphReadModeV1,
+    #[schemars(with = "Option<String>")]
+    pub continuation: Option<OpaqueCursor>,
+    pub observed_at: UtcMicros,
+}
+
+impl WorkGraphReadRequestV1 {
+    pub const fn current(selection: WorkProductSelectionScopeV1, observed_at: UtcMicros) -> Self {
+        Self {
+            selection,
+            mode: WorkGraphReadModeV1::Current,
+            continuation: None,
+            observed_at,
+        }
+    }
+
+    pub fn as_of(
+        selection: WorkProductSelectionScopeV1,
+        valid_at: UtcMicros,
+        observed_at: UtcMicros,
+    ) -> Result<Self, WorkProductApplicationErrorV1> {
+        let request = Self {
+            selection,
+            mode: WorkGraphReadModeV1::AsOf { valid_at },
+            continuation: None,
+            observed_at,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn evolution(
+        selection: WorkProductSelectionScopeV1,
+        from_valid_at: UtcMicros,
+        through_valid_at: UtcMicros,
+        observed_at: UtcMicros,
+    ) -> Result<Self, WorkProductApplicationErrorV1> {
+        let request = Self {
+            selection,
+            mode: WorkGraphReadModeV1::Evolution {
+                from_valid_at,
+                through_valid_at,
+            },
+            continuation: None,
+            observed_at,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn forensic(
+        selection: WorkProductSelectionScopeV1,
+        from_observed_at: UtcMicros,
+        through_observed_at: UtcMicros,
+        observed_at: UtcMicros,
+    ) -> Result<Self, WorkProductApplicationErrorV1> {
+        let request = Self {
+            selection,
+            mode: WorkGraphReadModeV1::Forensic {
+                from_observed_at,
+                through_observed_at,
+            },
+            continuation: None,
+            observed_at,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    fn validate(&self) -> Result<(), WorkProductApplicationErrorV1> {
+        self.selection
+            .validate()
+            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+        let valid = match self.mode {
+            WorkGraphReadModeV1::Current => self.continuation.is_none(),
+            WorkGraphReadModeV1::AsOf { valid_at } => {
+                self.continuation.is_none() && valid_at <= self.observed_at
+            }
+            WorkGraphReadModeV1::Evolution {
+                from_valid_at,
+                through_valid_at,
+            } => from_valid_at <= through_valid_at && through_valid_at <= self.observed_at,
+            WorkGraphReadModeV1::Forensic {
+                from_observed_at,
+                through_observed_at,
+            } => from_observed_at <= through_observed_at && through_observed_at <= self.observed_at,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(WorkProductApplicationErrorV1::InvalidRequest)
+        }
+    }
+}
+
+/// One immutable graph version and every Work projection derived from that
+/// same version at the caller's explicit observation time.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkGraphVersionEntryV1 {
+    valid_at: UtcMicros,
+    observed_at: UtcMicros,
+    projected_at: UtcMicros,
+    verified_version: VerifiedWorkGraphVersionV1,
+    graph: WorkProductGraphV1,
+    runtime: WorkRuntimeProjectionV1,
+    projections: WorkProductProjectionBundleV1,
+}
+
+impl WorkGraphVersionEntryV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        valid_at: UtcMicros,
+        observed_at: UtcMicros,
+        projected_at: UtcMicros,
+        verified_version: VerifiedWorkGraphVersionV1,
+        graph: WorkProductGraphV1,
+        runtime: WorkRuntimeProjectionV1,
+        projections: WorkProductProjectionBundleV1,
+    ) -> Result<Self, WorkProductApplicationErrorV1> {
+        if observed_at < valid_at
+            || verified_version.graph_version() != graph.version()
+            || runtime.graph_version() != graph.version()
+            || runtime.observed_at() != projected_at
+            || projections.graph_version() != graph.version()
+        {
+            return Err(WorkProductApplicationErrorV1::InvalidRequest);
+        }
+        graph
+            .validate()
+            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+        runtime
+            .validate(&graph, projected_at)
+            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+        let expected_projections =
+            WorkProductProjectionBundleV1::from_graph(&graph, &runtime, projected_at)
+                .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+        if projections != expected_projections {
+            return Err(WorkProductApplicationErrorV1::InvalidRequest);
+        }
+        Ok(Self {
+            valid_at,
+            observed_at,
+            projected_at,
+            verified_version,
+            graph,
+            runtime,
+            projections,
+        })
+    }
+
+    pub const fn valid_at(&self) -> UtcMicros {
+        self.valid_at
+    }
+
+    pub const fn observed_at(&self) -> UtcMicros {
+        self.observed_at
+    }
+
+    pub const fn projected_at(&self) -> UtcMicros {
+        self.projected_at
+    }
+
+    pub const fn verified_version(&self) -> &VerifiedWorkGraphVersionV1 {
+        &self.verified_version
+    }
+
+    pub const fn graph(&self) -> &WorkProductGraphV1 {
+        &self.graph
+    }
+
+    pub const fn runtime(&self) -> &WorkRuntimeProjectionV1 {
+        &self.runtime
+    }
+
+    pub const fn projections(&self) -> &WorkProductProjectionBundleV1 {
+        &self.projections
+    }
+}
+
+pub fn work_product_projection_generation(
+    snapshot: &WorkGraphVersionEntryV1,
+) -> Result<ProjectionGenerationId, WorkProductApplicationErrorV1> {
+    let digest = canonical_sha256(&(
+        "tracedecay.work-product-projection-generation.v1",
+        snapshot.verified_version(),
+    ))
+    .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
+    ProjectionGenerationId::new(format!("work-product-projection.{}", digest.as_str()))
+        .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
+}
+
+pub fn work_product_attempt_topology_binding(
+    snapshot: &WorkGraphVersionEntryV1,
+) -> Result<WorkAttemptTopologyBindingV1, WorkProductApplicationErrorV1> {
+    let generation = canonical_sha256(&(
+        "tracedecay.work-attempt-topology-generation.v1",
+        snapshot.verified_version(),
+    ))
+    .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
+    let task_count = u32::try_from(snapshot.graph().items().len())
+        .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
+    Ok(WorkAttemptTopologyBindingV1 {
+        generation: generation.as_str().to_owned(),
+        task_count,
+    })
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "coverage", rename_all = "snake_case")]
+pub enum WorkGraphTimelineCoverageV1 {
+    Complete {
+        returned: u32,
+    },
+    Partial {
+        returned: u32,
+        #[schemars(with = "String")]
+        continuation: OpaqueCursor,
+    },
+}
+
+/// How much of the owner's journal the read's selection actually covers.
+///
+/// A selection names a slice of the owner's work, not the whole journal: an
+/// event records the relation scopes it was admitted under, and a selection
+/// that does not name them puts that event *outside* the slice. The events
+/// outside a selection do not poison the ones inside it, but they must never be
+/// concealed either, a caller who is shown the covered slice with no way to
+/// learn that more exists is reading a silently incomplete graph.
+///
+/// So the read answers over the covered slice and says so, in the same
+/// `Complete`/`Partial` vocabulary [`WorkGraphTimelineCoverageV1`] and
+/// [`WorkHistoryCoverageV1`](crate::WorkHistoryCoverageV1) already use.
+///
+/// The covered slice is always a *prefix* of the journal, and that is a
+/// property of folding rather than a simplification. A graph version is folded
+/// from every event up to its own sequence, so the first event a selection does
+/// not cover ends the readable slice: every later version, whatever scopes its
+/// own event named, would have to be folded across that event to exist at all.
+/// `excluded_events` therefore counts every event from the first uncovered one
+/// onward.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "coverage", rename_all = "snake_case")]
+pub enum WorkGraphSelectionCoverageV1 {
+    /// The selection covers the owner's whole journal. Nothing was withheld.
+    Complete { covered_events: u32 },
+    /// The selection covers `covered_events` events and `excluded_events`
+    /// events lie outside it, starting at `first_excluded_sequence`. Every
+    /// entry this read returned was folded from covered events alone.
+    Partial {
+        covered_events: u32,
+        excluded_events: u32,
+        first_excluded_sequence: WorkProductEventSequenceV1,
+    },
+}
+
+impl WorkGraphSelectionCoverageV1 {
+    pub const fn is_partial(&self) -> bool {
+        matches!(self, Self::Partial { .. })
+    }
+
+    pub const fn covered_events(&self) -> u32 {
+        match self {
+            Self::Complete { covered_events } | Self::Partial { covered_events, .. } => {
+                *covered_events
+            }
+        }
+    }
+
+    /// The first journal sequence outside the selection, when one exists.
+    pub const fn first_excluded_sequence(&self) -> Option<WorkProductEventSequenceV1> {
+        match self {
+            Self::Complete { .. } => None,
+            Self::Partial {
+                first_excluded_sequence,
+                ..
+            } => Some(*first_excluded_sequence),
+        }
+    }
+
+    /// A `Partial` disclosure that excludes nothing is a false disclosure, and
+    /// a covered prefix cannot extend past the sequence it stops before. Both
+    /// are rejected rather than normalised, the same way
+    /// [`WorkTaskEvidenceCoverageV1`](tracedecay_domain::WorkTaskEvidenceCoverageV1)
+    /// refuses a `Partial` reading with nothing unknown.
+    pub fn validate(&self) -> Result<(), WorkProductApplicationErrorV1> {
+        let valid = match self {
+            Self::Complete { .. } => true,
+            Self::Partial {
+                covered_events,
+                excluded_events,
+                first_excluded_sequence,
+            } => {
+                // Sequences are monotonic, so the event after `covered_events`
+                // covered ones always carries a strictly greater sequence.
+                *excluded_events > 0 && u64::from(*covered_events) < first_excluded_sequence.get()
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(WorkProductApplicationErrorV1::InvalidRequest)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkGraphTimelineV1 {
+    entries: Vec<WorkGraphVersionEntryV1>,
+    coverage: WorkGraphTimelineCoverageV1,
+}
+
+impl WorkGraphTimelineV1 {
+    pub fn complete(
+        entries: Vec<WorkGraphVersionEntryV1>,
+    ) -> Result<Self, WorkProductApplicationErrorV1> {
+        if entries.len() > MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1
+            || entries
+                .windows(2)
+                .any(|pair| timeline_key(&pair[0]) >= timeline_key(&pair[1]))
+        {
+            return Err(WorkProductApplicationErrorV1::InvalidRequest);
+        }
+        let returned = u32::try_from(entries.len())
+            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+        Ok(Self {
+            entries,
+            coverage: WorkGraphTimelineCoverageV1::Complete { returned },
+        })
+    }
+
+    pub fn partial(
+        entries: Vec<WorkGraphVersionEntryV1>,
+        continuation: OpaqueCursor,
+    ) -> Result<Self, WorkProductApplicationErrorV1> {
+        let mut timeline = Self::complete(entries)?;
+        let returned = u32::try_from(timeline.entries.len())
+            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+        timeline.coverage = WorkGraphTimelineCoverageV1::Partial {
+            returned,
+            continuation,
+        };
+        Ok(timeline)
+    }
+
+    /// One bounded page of a timeline read, in timeline order.
+    ///
+    /// `window` is every entry the request's mode and window select. The
+    /// continuation names the timeline key of the last entry the previous page
+    /// returned, so resuming is exact in the order the page is sorted by, and
+    /// it is bound to the request's selection, mode, window, and observation
+    /// instant, so a continuation presented with any of them changed is
+    /// refused rather than paging a different timeline.
+    pub fn page(
+        request: &WorkGraphReadRequestV1,
+        mut window: Vec<WorkGraphVersionEntryV1>,
+    ) -> Result<Self, WorkGraphReadPortErrorV1> {
+        let binding = timeline_binding(request)?;
+        window.sort_by_key(timeline_key);
+        if let Some(continuation) = &request.continuation {
+            let after =
+                decode_bound_cursor::<WorkGraphTimelinePositionV1>(&binding, continuation.as_str())
+                    .map_err(WorkGraphReadPortErrorV1::CursorRefused)?
+                    .key();
+            window.retain(|entry| timeline_key(entry) > after);
+        }
+        if window.len() <= MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1 {
+            return Self::complete(window).map_err(|_| WorkGraphReadPortErrorV1::Unavailable);
+        }
+        window.truncate(MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1);
+        let (valid_at, observed_at, graph_version) = window
+            .last()
+            .map(timeline_key)
+            .ok_or(WorkGraphReadPortErrorV1::Unavailable)?;
+        let continuation = encode_bound_cursor(
+            &binding,
+            &WorkGraphTimelinePositionV1 {
+                valid_at,
+                observed_at,
+                graph_version,
+            },
+        )
+        .ok()
+        .and_then(|cursor| OpaqueCursor::new(cursor).ok())
+        .ok_or(WorkGraphReadPortErrorV1::Unavailable)?;
+        Self::partial(window, continuation).map_err(|_| WorkGraphReadPortErrorV1::Unavailable)
+    }
+
+    pub fn entries(&self) -> &[WorkGraphVersionEntryV1] {
+        &self.entries
+    }
+
+    pub const fn coverage(&self) -> &WorkGraphTimelineCoverageV1 {
+        &self.coverage
+    }
+
+    pub const fn continuation(&self) -> Option<&OpaqueCursor> {
+        match &self.coverage {
+            WorkGraphTimelineCoverageV1::Complete { .. } => None,
+            WorkGraphTimelineCoverageV1::Partial { continuation, .. } => Some(continuation),
+        }
+    }
+
+    fn validate(&self) -> Result<(), WorkProductApplicationErrorV1> {
+        let returned = match &self.coverage {
+            WorkGraphTimelineCoverageV1::Complete { returned }
+            | WorkGraphTimelineCoverageV1::Partial { returned, .. } => *returned,
+        };
+        if usize::try_from(returned).ok() != Some(self.entries.len())
+            || self.entries.len() > MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1
+            || self
+                .entries
+                .windows(2)
+                .any(|pair| timeline_key(&pair[0]) >= timeline_key(&pair[1]))
+        {
+            return Err(WorkProductApplicationErrorV1::InvalidRequest);
+        }
+        Ok(())
+    }
+}
+
+/// The order a timeline is answered in.
+fn timeline_key(entry: &WorkGraphVersionEntryV1) -> (UtcMicros, UtcMicros, u64) {
+    (
+        entry.valid_at(),
+        entry.observed_at(),
+        entry.verified_version().graph_version().get(),
+    )
+}
+
+const WORK_GRAPH_TIMELINE_OPERATION: &str = "work_views";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkGraphTimelinePositionV1 {
+    valid_at: UtcMicros,
+    observed_at: UtcMicros,
+    graph_version: u64,
+}
+
+impl WorkGraphTimelinePositionV1 {
+    const fn key(&self) -> (UtcMicros, UtcMicros, u64) {
+        (self.valid_at, self.observed_at, self.graph_version)
+    }
+}
+
+fn timeline_binding(
+    request: &WorkGraphReadRequestV1,
+) -> Result<CursorBindingV1, WorkGraphReadPortErrorV1> {
+    let (mode, (from_name, from), (through_name, through)) = match request.mode {
+        WorkGraphReadModeV1::Evolution {
+            from_valid_at,
+            through_valid_at,
+        } => (
+            "evolution",
+            ("from_valid_at", from_valid_at),
+            ("through_valid_at", through_valid_at),
+        ),
+        WorkGraphReadModeV1::Forensic {
+            from_observed_at,
+            through_observed_at,
+        } => (
+            "forensic",
+            ("from_observed_at", from_observed_at),
+            ("through_observed_at", through_observed_at),
+        ),
+        WorkGraphReadModeV1::Current | WorkGraphReadModeV1::AsOf { .. } => {
+            return Err(WorkGraphReadPortErrorV1::Unavailable);
+        }
+    };
+    CursorBindingV1::builder(WORK_GRAPH_TIMELINE_OPERATION)
+        .parameter("selection", &request.selection)
+        .parameter("mode", mode)
+        .parameter(from_name, &from)
+        .parameter(through_name, &through)
+        .parameter("observed_at", &request.observed_at)
+        .build()
+        .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum WorkGraphReadV1 {
+    Current {
+        authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
+        snapshot: WorkGraphVersionEntryV1,
+    },
+    AsOf {
+        authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
+        snapshot: WorkGraphVersionEntryV1,
+    },
+    Evolution {
+        authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
+        timeline: WorkGraphTimelineV1,
+    },
+    Forensic {
+        authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
+        timeline: WorkGraphTimelineV1,
+    },
+    /// A `Current` or `AsOf` point read under an authorized selection that has
+    /// no published graph version at that point: no task has been created yet.
+    /// The caller was authorized; the legal next action is creating a task.
+    Absent {
+        authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
+    },
+}
+
+impl WorkGraphReadV1 {
+    pub const fn authorized_scope(&self) -> &AuthorizedWorkProductScopeV1 {
+        match self {
+            Self::Current {
+                authorized_scope, ..
+            }
+            | Self::AsOf {
+                authorized_scope, ..
+            }
+            | Self::Evolution {
+                authorized_scope, ..
+            }
+            | Self::Forensic {
+                authorized_scope, ..
+            }
+            | Self::Absent {
+                authorized_scope, ..
+            } => authorized_scope,
+        }
+    }
+
+    /// How much of the owner's journal this selection covered. `Partial` means
+    /// the entries below are the covered slice and scoped events exist outside
+    /// it, never that the graph is broken.
+    pub const fn selection_coverage(&self) -> &WorkGraphSelectionCoverageV1 {
+        match self {
+            Self::Current {
+                selection_coverage, ..
+            }
+            | Self::AsOf {
+                selection_coverage, ..
+            }
+            | Self::Evolution {
+                selection_coverage, ..
+            }
+            | Self::Forensic {
+                selection_coverage, ..
+            }
+            | Self::Absent {
+                selection_coverage, ..
+            } => selection_coverage,
+        }
+    }
+
+    pub fn entries(&self) -> &[WorkGraphVersionEntryV1] {
+        match self {
+            Self::Current { snapshot, .. } | Self::AsOf { snapshot, .. } => {
+                std::slice::from_ref(snapshot)
+            }
+            Self::Evolution { timeline, .. } | Self::Forensic { timeline, .. } => {
+                timeline.entries()
+            }
+            Self::Absent { .. } => &[],
+        }
+    }
+
+    /// The snapshot of a `Current` read, for callers that act on a named task.
+    /// An absent graph holds no task, so it answers not-found; any other mode
+    /// was never requested and marks the graph authority unavailable.
+    pub fn into_current_snapshot(
+        self,
+    ) -> Result<WorkGraphVersionEntryV1, WorkProductApplicationErrorV1> {
+        match self {
+            Self::Current { snapshot, .. } => Ok(snapshot),
+            Self::Absent { .. } => Err(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized),
+            Self::AsOf { .. } | Self::Evolution { .. } | Self::Forensic { .. } => {
+                Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum WorkGraphReadPortErrorV1 {
+    #[error("Work graph was not found or is not authorized")]
+    NotFoundOrNotAuthorized,
+    #[error("Work graph selection is stale")]
+    Stale,
+    #[error("Verified Work graph is unavailable")]
+    Unavailable,
+    #[error("Work graph storage failed: {0}")]
+    Storage(crate::WorkStorageFailureV1),
+    #[error("Work graph read was cancelled")]
+    Cancelled,
+    #[error("Work graph read timed out")]
+    TimedOut,
+    #[error("Work graph continuation was refused: {0}")]
+    CursorRefused(CursorBindingMismatchV1),
+}
+
+impl From<WorkGraphReadPortErrorV1> for WorkProductApplicationErrorV1 {
+    fn from(error: WorkGraphReadPortErrorV1) -> Self {
+        match error {
+            WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized => Self::NotFoundOrNotAuthorized,
+            WorkGraphReadPortErrorV1::Stale => Self::VersionConflict,
+            WorkGraphReadPortErrorV1::Unavailable => Self::GraphAuthorityUnavailable,
+            WorkGraphReadPortErrorV1::Storage(failure) => Self::Storage(failure),
+            WorkGraphReadPortErrorV1::Cancelled => Self::Cancelled,
+            WorkGraphReadPortErrorV1::TimedOut => Self::TimedOut,
+            WorkGraphReadPortErrorV1::CursorRefused(mismatch) => Self::CursorRefused(mismatch),
+        }
+    }
+}
+
+/// It carries no `Send + Sync` bound so a storage scoped to one writer
+/// transaction can implement it.
+pub trait WorkGraphReadPortV1 {
+    fn read_graph(
+        &self,
+        context: &WorkProductPortContextV1,
+        request: &WorkGraphReadRequestV1,
+    ) -> Result<WorkGraphReadV1, WorkGraphReadPortErrorV1>;
+}
+
+impl<P> WorkGraphReadPortV1 for &P
+where
+    P: WorkGraphReadPortV1 + ?Sized,
+{
+    fn read_graph(
+        &self,
+        context: &WorkProductPortContextV1,
+        request: &WorkGraphReadRequestV1,
+    ) -> Result<WorkGraphReadV1, WorkGraphReadPortErrorV1> {
+        (**self).read_graph(context, request)
+    }
+}
+
+/// One current graph read made on a reader before a write job, answered to
+/// the job's service as an owned value, so the journal replay behind it never
+/// holds the writer. The job's event compare-and-swap on the graph version is
+/// its staleness fence.
+///
+/// It answers only the exact scope and request it was read for; any other
+/// read is refused as unavailable rather than answered from the wrong slice.
+#[derive(Clone, Debug, Default)]
+pub struct PrefetchedWorkGraphReadV1 {
+    read: Option<(
+        AuthorizedWorkProductScopeV1,
+        WorkGraphReadRequestV1,
+        Result<WorkGraphReadV1, WorkGraphReadPortErrorV1>,
+    )>,
+}
+
+impl PrefetchedWorkGraphReadV1 {
+    /// Reads the current graph under `selection` as `context` observed it at
+    /// `observed_at`. A selection the owner refuses prefetches nothing: the
+    /// service refuses it again inside the job.
+    pub fn current<S>(
+        storage: &S,
+        context: &RequestContext,
+        selection: &WorkProductSelectionScopeV1,
+        observed_at: UtcMicros,
+    ) -> Self
+    where
+        S: WorkGraphReadPortV1 + WorkProductOwnerAuthorizationPortV1,
+    {
+        let Ok(scope) = storage.authorize_scope(context, selection, observed_at) else {
+            return Self { read: None };
+        };
+        let port_context = WorkProductPortContextV1::from_request(context, scope, observed_at);
+        let request = WorkGraphReadRequestV1::current(selection.clone(), observed_at);
+        let read = storage.read_graph(&port_context, &request);
+        Self {
+            read: Some((port_context.authorized_scope().clone(), request, read)),
+        }
+    }
+}
+
+impl WorkGraphReadPortV1 for PrefetchedWorkGraphReadV1 {
+    fn read_graph(
+        &self,
+        context: &WorkProductPortContextV1,
+        request: &WorkGraphReadRequestV1,
+    ) -> Result<WorkGraphReadV1, WorkGraphReadPortErrorV1> {
+        match &self.read {
+            Some((scope, prefetched, read))
+                if scope == context.authorized_scope() && prefetched == request =>
+            {
+                read.clone()
+            }
+            _ => Err(WorkGraphReadPortErrorV1::Unavailable),
+        }
+    }
+}
+
+pub struct WorkProductReadServiceV1<G, A> {
+    graph: G,
+    owner_authority: A,
+    binding: WorkProductBindingV1,
+}
+
+impl<G, A> WorkProductReadServiceV1<G, A>
+where
+    G: WorkGraphReadPortV1,
+    A: WorkProductOwnerAuthorizationPortV1,
+{
+    pub const fn new(graph: G, owner_authority: A, binding: WorkProductBindingV1) -> Self {
+        Self {
+            graph,
+            owner_authority,
+            binding,
+        }
+    }
+
+    #[tracing::instrument(name = "application.work.graph.read", level = "trace", skip_all)]
+    pub fn read_graph(
+        &self,
+        context: &RequestContext,
+        request: WorkGraphReadRequestV1,
+    ) -> Result<WorkGraphReadV1, WorkProductApplicationErrorV1> {
+        if !context.allows(self.binding.capability_id(), self.binding.use_case_id()) {
+            return Err(WorkProductApplicationErrorV1::NotAuthorized);
+        }
+        match context.admission_at(request.observed_at) {
+            RequestAdmission::Admitted => {}
+            RequestAdmission::Cancelled => {
+                return Err(WorkProductApplicationErrorV1::Cancelled);
+            }
+            RequestAdmission::TimedOut => return Err(WorkProductApplicationErrorV1::TimedOut),
+            RequestAdmission::GrantExpired => {
+                return Err(WorkProductApplicationErrorV1::NotAuthorized);
+            }
+        }
+        request.validate()?;
+        let authorized_scope = self
+            .owner_authority
+            .authorize_scope(context, &request.selection, request.observed_at)
+            .map_err(|error| match error {
+                WorkProductOwnerAuthorizationErrorV1::NotAuthorized => {
+                    WorkProductApplicationErrorV1::NotAuthorized
+                }
+                WorkProductOwnerAuthorizationErrorV1::Unavailable => {
+                    WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+                }
+            })?;
+        if authorized_scope.selection() != &request.selection {
+            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+        }
+        let port_context = WorkProductPortContextV1::from_request(
+            context,
+            authorized_scope.clone(),
+            request.observed_at,
+        );
+        let result = self.graph.read_graph(&port_context, &request)?;
+        validate_result(&request, &authorized_scope, &result)?;
+        Ok(result)
+    }
+
+    /// Resolves the attempt-page cursor binding from the canonical Work
+    /// product graph selected by this request's exact repository scope.
+    pub fn read_attempt_topology(
+        &self,
+        context: &RequestContext,
+        observed_at: UtcMicros,
+    ) -> Result<WorkAttemptTopologyStateV1, WorkProductApplicationErrorV1> {
+        let selection = WorkProductSelectionScopeV1::relations(BTreeSet::from([
+            WorkProductAuthorizedRelationScopeV1::Repository {
+                project_id: context.scope().project_id.clone(),
+                repository_id: context.scope().repository_id.clone(),
+            },
+        ]))
+        .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+        match self.read_graph(
+            context,
+            WorkGraphReadRequestV1::current(selection, observed_at),
+        )? {
+            WorkGraphReadV1::Current { snapshot, .. } => Ok(WorkAttemptTopologyStateV1::Verified(
+                work_product_attempt_topology_binding(&snapshot)?,
+            )),
+            WorkGraphReadV1::Absent { .. } => Ok(WorkAttemptTopologyStateV1::Absent),
+            WorkGraphReadV1::AsOf { .. }
+            | WorkGraphReadV1::Evolution { .. }
+            | WorkGraphReadV1::Forensic { .. } => {
+                Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_result(
+    request: &WorkGraphReadRequestV1,
+    authorized_scope: &AuthorizedWorkProductScopeV1,
+    result: &WorkGraphReadV1,
+) -> Result<(), WorkProductApplicationErrorV1> {
+    if result.authorized_scope() != authorized_scope {
+        return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+    }
+    // A coverage disclosure that contradicts itself would make partial reads
+    // unfalsifiable, so it is re-checked here rather than trusted.
+    if result.selection_coverage().validate().is_err() {
+        return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+    }
+    // An entry folded across the exclusion boundary would be a graph that never
+    // existed under this selection. The disclosure names where the boundary is,
+    // so the answer can be checked against it here instead of taken on trust.
+    if let Some(first_excluded) = result.selection_coverage().first_excluded_sequence()
+        && result
+            .entries()
+            .iter()
+            .any(|entry| entry.verified_version().event_sequence() >= first_excluded)
+    {
+        return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+    }
+    let mode_matches = matches!(
+        (&request.mode, result),
+        (
+            WorkGraphReadModeV1::Current,
+            WorkGraphReadV1::Current { .. }
+        ) | (
+            WorkGraphReadModeV1::AsOf { .. },
+            WorkGraphReadV1::AsOf { .. }
+        ) | (
+            WorkGraphReadModeV1::Evolution { .. },
+            WorkGraphReadV1::Evolution { .. }
+        ) | (
+            WorkGraphReadModeV1::Forensic { .. },
+            WorkGraphReadV1::Forensic { .. }
+        ) | (
+            WorkGraphReadModeV1::Current | WorkGraphReadModeV1::AsOf { .. },
+            WorkGraphReadV1::Absent { .. }
+        )
+    );
+    if !mode_matches {
+        return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+    }
+    if let WorkGraphReadV1::Evolution { timeline, .. } | WorkGraphReadV1::Forensic { timeline, .. } =
+        result
+        && timeline.validate().is_err()
+    {
+        return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+    }
+    for entry in result.entries() {
+        if entry.projected_at() != request.observed_at
+            || entry.observed_at() < entry.valid_at()
+            || entry.observed_at() > request.observed_at
+            || entry.verified_version().graph_version() != entry.graph().version()
+            || entry.runtime().graph_version() != entry.graph().version()
+            || entry.runtime().observed_at() != entry.projected_at()
+            || entry
+                .runtime()
+                .validate(entry.graph(), entry.projected_at())
+                .is_err()
+            || entry.projections().graph_version() != entry.graph().version()
+            || entry.graph().validate().is_err()
+            || !WorkProductProjectionBundleV1::from_graph(
+                entry.graph(),
+                entry.runtime(),
+                entry.projected_at(),
+            )
+            .is_ok_and(|expected| expected == *entry.projections())
+        {
+            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+        }
+        let within_selection = match request.mode {
+            WorkGraphReadModeV1::Current => true,
+            WorkGraphReadModeV1::AsOf { valid_at } => entry.valid_at() <= valid_at,
+            WorkGraphReadModeV1::Evolution {
+                from_valid_at,
+                through_valid_at,
+            } => (from_valid_at..=through_valid_at).contains(&entry.valid_at()),
+            WorkGraphReadModeV1::Forensic {
+                from_observed_at,
+                through_observed_at,
+            } => (from_observed_at..=through_observed_at).contains(&entry.observed_at()),
+        };
+        if !within_selection {
+            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+        }
+    }
+    Ok(())
+}

@@ -2,28 +2,48 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
+import shutil
+import sys
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from embed_proxy import (
     DASHBOARD_EMBED_PATH,
     EMBED_MOUNT,
     dashboard_bridge_script,
+    dashboard_upstream,
     embed_upstream_path,
     is_event_stream,
     is_html_content_type,
     rewrite_dashboard_html,
 )
 
+WRAPPER_DIR = Path(__file__).resolve().parent
+
+
+class DashboardUpstreamTests(unittest.TestCase):
+    def test_launch_token_becomes_the_basic_credential(self) -> None:
+        self.assertEqual(
+            dashboard_upstream("http://127.0.0.1:7341/?token=ab12"),
+            (
+                "http://127.0.0.1:7341",
+                {"Authorization": "Basic dHJhY2VkZWNheTphYjEy"},
+            ),
+        )
+
+    def test_tokenless_url_carries_no_credential(self) -> None:
+        self.assertEqual(
+            dashboard_upstream("http://127.0.0.1:7341/"),
+            ("http://127.0.0.1:7341", {}),
+        )
+
 
 class EmbedPathTests(unittest.TestCase):
-    def test_iframe_url_is_the_hermes_mount_not_loopback(self) -> None:
-        self.assertEqual(DASHBOARD_EMBED_PATH, "/api/plugins/tracedecay/embed/")
-        self.assertFalse(DASHBOARD_EMBED_PATH.startswith("http://"))
-        self.assertNotIn("127.0.0.1", DASHBOARD_EMBED_PATH)
-        self.assertNotIn("localhost", DASHBOARD_EMBED_PATH)
-
     def test_upstream_path_strips_the_embed_prefix_only(self) -> None:
         self.assertEqual(embed_upstream_path(""), "/")
         self.assertEqual(embed_upstream_path("/"), "/")
@@ -62,30 +82,46 @@ class HtmlRewriteTests(unittest.TestCase):
         self.assertIn('src="//cdn.example/app.js"', rewritten)
         self.assertIn('href="https://example.test/app.css"', rewritten)
 
-    def test_bridge_rewrites_api_fetch_and_eventsource(self) -> None:
-        script = dashboard_bridge_script()
-        self.assertIn(EMBED_MOUNT, script)
-        self.assertIn("window.fetch", script)
-        self.assertIn("window.EventSource", script)
-        self.assertIn("/api/", script)
-        self.assertIn("__webpack_public_path__", script)
-
-
+@unittest.skipIf(
+    importlib.util.find_spec("fastapi") is None,
+    "fastapi is not installed in this environment",
+)
 class PluginApiContractTests(unittest.TestCase):
-    def test_dashboard_url_handler_returns_the_embed_path(self) -> None:
-        source = Path(__file__).with_name("plugin_api.py").read_text()
-        self.assertIn('return JSONResponse({"url": DASHBOARD_EMBED_PATH})', source)
-        self.assertNotIn('{"url": f"{base}/"}', source)
-        self.assertIn('@router.api_route("/embed"', source)
-        self.assertIn('@router.api_route("/embed/{path:path}"', source)
+    def setUp(self) -> None:
+        """Load a deployed copy the way Hermes does: by file path under its
+        plugin module name, with the plugin directory off ``sys.path``."""
+        deployed = tempfile.TemporaryDirectory()
+        self.addCleanup(deployed.cleanup)
+        self.dashboard_dir = Path(deployed.name)
+        for name in ("plugin_api.py", "embed_proxy.py"):
+            shutil.copy(WRAPPER_DIR / name, self.dashboard_dir / name)
+        module_name = "hermes_dashboard_plugin_tracedecay"
+        spec = importlib.util.spec_from_file_location(
+            module_name, self.dashboard_dir / "plugin_api.py"
+        )
+        assert spec is not None and spec.loader is not None
+        self.plugin = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = self.plugin
+        self.addCleanup(sys.modules.pop, module_name, None)
+        spec.loader.exec_module(self.plugin)
+
+    def test_embed_helpers_come_from_the_deployed_sibling(self) -> None:
+        self.assertEqual(
+            self.plugin.dashboard_upstream.__code__.co_filename,
+            str(self.dashboard_dir / "embed_proxy.py"),
+        )
+        self.assertEqual(
+            self.plugin.dashboard_upstream("http://127.0.0.1:7341/?token=ab12"),
+            (
+                "http://127.0.0.1:7341",
+                {"Authorization": "Basic dHJhY2VkZWNheTphYjEy"},
+            ),
+        )
 
     def test_get_dashboard_url_never_returns_loopback(self) -> None:
-        try:
-            import plugin_api
-        except ImportError:
-            self.skipTest("fastapi is not installed in this environment")
-        plugin_api._upstream_base = lambda: "http://127.0.0.1:59999"  # type: ignore[method-assign]
-        response = plugin_api.get_dashboard_url()
+        external = {"TRACEDECAY_DASHBOARD_URL": "http://127.0.0.1:59999/?token=t"}
+        with unittest.mock.patch.dict(os.environ, external):
+            response = self.plugin.get_dashboard_url()
         payload = json.loads(bytes(response.body).decode("utf-8"))
         self.assertEqual(payload["url"], DASHBOARD_EMBED_PATH)
         self.assertNotIn("127.0.0.1", payload["url"])

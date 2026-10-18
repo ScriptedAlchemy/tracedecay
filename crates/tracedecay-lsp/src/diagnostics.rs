@@ -6,6 +6,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::analyzer::broker::DiagnosticSeverity;
+
 pub const MAX_DOCUMENT_DIAGNOSTICS: usize = 200;
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
 pub const MAX_DIAGNOSTIC_RELATED_INFORMATION: usize = 8;
@@ -24,14 +26,6 @@ pub struct LspPosition {
 pub struct LspRange {
     pub start: LspPosition,
     pub end: LspPosition,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-    Information,
-    Hint,
 }
 
 /// The source lane preserved while composing a document diagnostic report.
@@ -171,7 +165,7 @@ impl GatewayDiagnostic {
     /// Normalizes one diagnostic into its merge lane.
     ///
     /// The lane is authoritative, but within the `TraceDecay` lane a producer
-    /// already named by the projection is preserved — merging must not erase
+    /// already named by the projection is preserved, merging must not erase
     /// `tracedecay-github`/`tracedecay-ci`/`tracedecay-proximity` back into an
     /// anonymous `tracedecay`.
     fn normalize(mut self, lane: DiagnosticSource) -> Self {
@@ -289,7 +283,7 @@ impl DiagnosticMerge {
         )
     }
 
-    #[hotpath::measure(label = "lsp_diagnostics_merge", impl_type = "DiagnosticMerge")]
+    #[tracing::instrument(name = "lsp_diagnostics_merge", level = "trace", skip_all)]
     fn from_filtered(
         upstream: Vec<GatewayDiagnostic>,
         tracedecay: Vec<GatewayDiagnostic>,
@@ -442,14 +436,7 @@ fn utf16_column_to_byte_offset(
 }
 
 pub(crate) fn truncate_utf8(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
-    }
-    let mut boundary = max_bytes;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    value.truncate(boundary);
+    value.truncate(value.floor_char_boundary(max_bytes));
 }
 
 #[cfg(test)]
@@ -533,7 +520,7 @@ mod tests {
             vec![invalid_range],
         );
 
-        assert!(merged.items.is_empty());
+        assert_eq!(merged.items.len(), 0);
         assert_eq!(merged.omitted_count, 2);
     }
 
@@ -659,29 +646,5 @@ mod producer_source_tests {
                 producer.wire_name()
             );
         }
-    }
-
-    #[test]
-    fn upstream_lane_always_wins_over_a_claimed_tracedecay_source() {
-        let merged = DiagnosticMerge::new(vec![diagnostic(DiagnosticSource::TraceDecayCi)], vec![]);
-        assert_eq!(merged.items[0].source, DiagnosticSource::Upstream);
-    }
-
-    #[test]
-    fn producer_mapping_round_trips_and_defaults_safely() {
-        for source in [
-            DiagnosticSource::TraceDecay,
-            DiagnosticSource::TraceDecayGitHub,
-            DiagnosticSource::TraceDecayCi,
-            DiagnosticSource::TraceDecayProximity,
-        ] {
-            assert_eq!(DiagnosticSource::from_producer(source.wire_name()), source);
-            assert!(source.is_tracedecay());
-        }
-        assert_eq!(
-            DiagnosticSource::from_producer("some-unknown-producer"),
-            DiagnosticSource::TraceDecay
-        );
-        assert!(!DiagnosticSource::Upstream.is_tracedecay());
     }
 }

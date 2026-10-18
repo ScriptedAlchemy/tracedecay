@@ -1,0 +1,2624 @@
+//! Doctor source ports and per-source finding producers.
+//!
+//! The one Doctor use case composes findings from several owning authorities.
+//! Each authority is reached through a narrow, transport-neutral *source port*
+//! defined here: the same seam pattern as
+//! [`StoreSizeTelemetryPort`](crate::storage::StoreSizeTelemetryPort): the trait
+//! and its typed read model live in this crate, and the implementation is owned
+//! by the runtime/host/configuration component that actually reads the source.
+//! This crate holds only the trait, the typed read, and the pure producer that
+//! maps a read into a [`DoctorFindingV1`].
+//!
+//! Every read model is *total*: it never fails silently into a healthy or empty
+//! result. An unsupported platform reports `Unsupported`, a denied read reports
+//! `Denied`, an undetermined read reports `Unknown`, and a supported-but-empty
+//! source reports `Absent`. Each maps to a distinct, honest
+//! [`DoctorEvidenceStateV1`]; only a genuinely clean, fully covered observation
+//! becomes [`DoctorEvidenceStateV1::HealthyCompleteCoverage`].
+//!
+//! Family mapping (the finding-family enum is fixed; a source never widens it):
+//! - configuration authority (resolve/pin health) → [`DoctorFindingFamilyV1::Configuration`]
+//! - daemon/runtime health snapshot → [`DoctorFindingFamilyV1::StorageRuntime`]
+//! - host/agent integration conformance → [`DoctorFindingFamilyV1::Advisory`] (advisory
+//!   host-capability/conformance evidence)
+//! - mounted canonical feedback owner → [`DoctorFindingFamilyV1::Advisory`]
+//!   (finding/scope/generation/provider/evidence/coverage identity)
+//! - code-index mount state → [`DoctorFindingFamilyV1::CodeIndex`]
+//! - live language-server/analyzer state → [`DoctorFindingFamilyV1::LanguageServer`]
+//! - durable feedback observations → [`DoctorFindingFamilyV1::Observability`]
+//! - storage retention/size → [`DoctorFindingFamilyV1::Storage`] (producers in
+//!   [`crate::storage::findings`]; this port collects their typed findings)
+
+use std::borrow::Cow;
+use std::future::Future;
+use std::pin::Pin;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::configuration::SettingKey;
+use tracedecay_domain::{
+    CodeGenerationId, FeedbackCycleId, FeedbackCycleTerminationV1, FeedbackFindingId,
+    FeedbackFindingLifecycleV1, FeedbackResultId, FeedbackScopeV1, ProviderEvaluationStateV1,
+    RetrievalAnchorId,
+};
+
+use crate::RequestContext;
+use crate::configuration::ConfigurationSettingFindingV1;
+use crate::error::ApplicationContractError;
+use crate::storage::findings::truncate_at_char_boundary;
+
+use super::types::{
+    DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
+    DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
+    DoctorStorageFindingV1,
+};
+
+/// Boxed future returned by a Doctor source port, mirroring the storage and
+/// diagnostic-provider port convention (std `Future`, no runtime dependency).
+pub type DoctorSourceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+fn source_finding(
+    family: DoctorFindingFamilyV1,
+    state: DoctorEvidenceStateV1,
+    reference: &str,
+    completeness: DoctorCoverageCompletenessV1,
+    statement: &str,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let evidence = DoctorEvidenceRefV1::new(family, DoctorEvidenceReferenceV1::new(reference)?);
+    DoctorFindingV1::new(
+        family,
+        state,
+        vec![evidence],
+        DoctorCoverageStatementV1::new(completeness, statement)?,
+    )
+}
+
+/// Fit a source-provided statement into the coverage-statement contract:
+/// bounded at 512 bytes on a character boundary, control characters replaced,
+/// surrounding whitespace trimmed. Truncation is marked so a shortened reason
+/// is never mistaken for the complete one.
+fn bounded_statement(statement: &str) -> String {
+    const STATEMENT_LIMIT_BYTES: usize = 512;
+    const TRUNCATION_MARK: &str = "…";
+    let sanitized = tracedecay_domain::fold_control_characters(statement);
+    let sanitized = sanitized.trim();
+    if sanitized.len() <= STATEMENT_LIMIT_BYTES {
+        return sanitized.to_owned();
+    }
+    let budget = STATEMENT_LIMIT_BYTES - TRUNCATION_MARK.len();
+    let cut = tracedecay_domain::utf8_prefix_at_or_before(sanitized, budget);
+    format!("{}{TRUNCATION_MARK}", cut.trim_end())
+}
+
+/// Build an honest non-healthy finding for an unobservable source read.
+fn unobservable_finding(
+    family: DoctorFindingFamilyV1,
+    state: DoctorEvidenceStateV1,
+    reference: &str,
+    statement: &str,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    source_finding(
+        family,
+        state,
+        reference,
+        DoctorCoverageCompletenessV1::Unknown,
+        statement,
+    )
+}
+
+/// Map a clean observation into a healthy finding (complete coverage) or an
+/// honest `Partial` finding (incomplete coverage).
+fn clean_finding(
+    family: DoctorFindingFamilyV1,
+    reference: &str,
+    completeness: DoctorCoverageCompletenessV1,
+    statement: &str,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let state = match completeness {
+        DoctorCoverageCompletenessV1::Complete => DoctorEvidenceStateV1::HealthyCompleteCoverage,
+        DoctorCoverageCompletenessV1::Partial | DoctorCoverageCompletenessV1::Unknown => {
+            DoctorEvidenceStateV1::Partial
+        }
+    };
+    source_finding(family, state, reference, completeness, statement)
+}
+
+/// The observed drift between desired and effective configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationDriftV1 {
+    /// Desired and effective configuration agree.
+    InSync,
+    /// Effective configuration diverges from the desired/resolved authority.
+    Drifted,
+    /// A requested pin could not be honored by the authority.
+    PinUnavailable,
+    /// The resolved configuration stores values the effective configuration
+    /// leaves unapplied.
+    Unapplied(Vec<UnappliedConfigurationSettingV1>),
+}
+
+/// One stored setting value the effective configuration does not apply.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnappliedConfigurationSettingV1 {
+    pub key: SettingKey,
+    pub finding: ConfigurationSettingFindingV1,
+}
+
+fn unapplied_statement(settings: &[UnappliedConfigurationSettingV1]) -> String {
+    let statements = settings.iter().map(|setting| {
+        let key = setting.key.as_str();
+        match &setting.finding {
+            ConfigurationSettingFindingV1::InvalidIndexPathPattern {
+                pattern, message, ..
+            } => format!(
+                "{key} stores pattern {pattern:?} that does not compile ({message}); indexing \
+                 runs without it. Set {key} to patterns that compile or unset it \
+                 (tracedecay_configuration_set / tracedecay_configuration_unset)"
+            ),
+        }
+    });
+    bounded_statement(&statements.collect::<Vec<_>>().join("; "))
+}
+
+/// One configuration-authority resolve/pin health read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ConfigurationAuthorityReadV1 {
+    /// The authority resolved and reported its drift with the given coverage.
+    Resolved {
+        drift: ConfigurationDriftV1,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    /// Configuration resolution is not supported on this build/platform.
+    Unsupported,
+    /// The authority is reachable but has produced no resolution yet.
+    Absent,
+    /// Authorization to read the configuration authority was denied.
+    Denied,
+    /// The configuration state could not be determined.
+    Unknown,
+}
+
+/// Map a configuration-authority read into its `Configuration`-family finding.
+#[tracing::instrument(
+    name = "application.doctor_sources.configuration",
+    level = "trace",
+    skip_all
+)]
+pub fn configuration_finding(
+    read: &ConfigurationAuthorityReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::Configuration;
+    match read {
+        ConfigurationAuthorityReadV1::Resolved { drift, coverage } => {
+            let (reference, statement) = match drift {
+                ConfigurationDriftV1::InSync => {
+                    return clean_finding(
+                        family,
+                        "configuration.resolved.in-sync",
+                        *coverage,
+                        "effective configuration matches the resolved authority",
+                    );
+                }
+                ConfigurationDriftV1::Drifted => (
+                    "configuration.resolved.drifted",
+                    Cow::Borrowed("effective configuration diverges from the desired authority"),
+                ),
+                ConfigurationDriftV1::PinUnavailable => (
+                    "configuration.resolved.pin-unavailable",
+                    Cow::Borrowed("a requested configuration pin could not be honored"),
+                ),
+                ConfigurationDriftV1::Unapplied(settings) => (
+                    "configuration.resolved.unapplied",
+                    Cow::Owned(unapplied_statement(settings)),
+                ),
+            };
+            let state = DoctorEvidenceStateV1::Degraded;
+            source_finding(family, state, reference, *coverage, &statement)
+        }
+        ConfigurationAuthorityReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "configuration.unsupported",
+            "configuration resolution unsupported on this platform",
+        ),
+        ConfigurationAuthorityReadV1::Absent => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "configuration.absent",
+            "configuration authority produced no resolution",
+        ),
+        ConfigurationAuthorityReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "configuration.denied",
+            "configuration authority read denied",
+        ),
+        ConfigurationAuthorityReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "configuration.unknown",
+            "configuration state undetermined",
+        ),
+    }
+}
+
+/// Narrow source port for configuration resolve/pin health.
+pub trait ConfigurationAuthorityDoctorPort: Send + Sync {
+    /// Read the current configuration authority resolve/pin health.
+    fn configuration_health<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, ConfigurationAuthorityReadV1>;
+}
+
+/// The observed liveness of the daemon/runtime.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLivenessV1 {
+    /// The runtime is live and serving.
+    Healthy,
+    /// The runtime is serving but degraded (for example a lease under pressure).
+    Degraded,
+    /// The runtime is stuck (for example an unresolvable reader lease).
+    Stuck,
+    /// The runtime is unreachable.
+    Unreachable,
+}
+
+/// One daemon/runtime health snapshot read (store, graph, temporal, migration).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum RuntimeHealthReadV1 {
+    /// The runtime reported liveness with the given coverage.
+    Observed {
+        liveness: RuntimeLivenessV1,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    /// Runtime health telemetry is unsupported on this build/platform.
+    Unsupported,
+    /// The runtime is reachable but reported no health snapshot.
+    Absent,
+    /// Authorization to read the runtime health was denied.
+    Denied,
+    /// The runtime health could not be determined.
+    Unknown,
+}
+
+/// Map a runtime-health read into its `StorageRuntime`-family finding.
+#[tracing::instrument(name = "application.doctor_sources.runtime", level = "trace", skip_all)]
+pub fn runtime_health_finding(
+    read: &RuntimeHealthReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::StorageRuntime;
+    match read {
+        RuntimeHealthReadV1::Observed { liveness, coverage } => match liveness {
+            RuntimeLivenessV1::Healthy => clean_finding(
+                family,
+                "runtime.health.healthy",
+                *coverage,
+                "daemon runtime is live and serving",
+            ),
+            RuntimeLivenessV1::Degraded => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "runtime.health.degraded",
+                *coverage,
+                "daemon runtime is serving but degraded",
+            ),
+            RuntimeLivenessV1::Stuck => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "runtime.health.stuck",
+                *coverage,
+                "daemon runtime is stuck and awaiting recovery",
+            ),
+            RuntimeLivenessV1::Unreachable => {
+                // Unreachable is genuinely undetermined health, not a proven
+                // degraded condition, but recovery is still the owning action.
+                source_finding(
+                    family,
+                    DoctorEvidenceStateV1::Unknown,
+                    "runtime.health.unreachable",
+                    DoctorCoverageCompletenessV1::Unknown,
+                    "daemon runtime is unreachable",
+                )
+            }
+        },
+        RuntimeHealthReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "runtime.unsupported",
+            "runtime health telemetry unsupported on this platform",
+        ),
+        RuntimeHealthReadV1::Absent => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "runtime.absent",
+            "runtime reported no health snapshot",
+        ),
+        RuntimeHealthReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "runtime.denied",
+            "runtime health read denied",
+        ),
+        RuntimeHealthReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "runtime.unknown",
+            "runtime health undetermined",
+        ),
+    }
+}
+
+/// Narrow source port for a daemon/runtime health snapshot.
+pub trait RuntimeHealthDoctorPort: Send + Sync {
+    /// Read the current daemon/runtime health snapshot.
+    fn runtime_health<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, RuntimeHealthReadV1>;
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteListenerReadV1 {
+    Serving,
+    Disabled,
+    Degraded,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAuthorityReadV1 {
+    Available,
+    Partial,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum RemoteOperationalReadV1 {
+    Observed {
+        listener: RemoteListenerReadV1,
+        authority: RemoteAuthorityReadV1,
+        pending_spool_items: u64,
+        quarantined_spool_items: u64,
+        replay_coverage_complete: bool,
+        failover_in_progress: bool,
+        recovery_required: bool,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    Unconfigured,
+    Unsupported,
+    Denied,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ProfileAuthorityReadV1 {
+    Observed {
+        registry_attached: bool,
+        profile_sessions_attached: bool,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    /// The profile session store is held in its typed reset-required state:
+    /// session features are off until the operator resets it, which the
+    /// daemon's reset census names as a pending operator action.
+    ProfileSessionsResetRequired {
+        registry_attached: bool,
+    },
+    Denied,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperationalAuditReadV1 {
+    pub remote: RemoteOperationalReadV1,
+    pub profile_authority: ProfileAuthorityReadV1,
+}
+
+#[tracing::instrument(
+    name = "application.doctor_sources.operational_audit",
+    level = "trace",
+    skip_all
+)]
+pub fn operational_audit_findings(
+    read: &OperationalAuditReadV1,
+) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
+    Ok(vec![
+        remote_operational_finding(&read.remote)?,
+        profile_authority_finding(&read.profile_authority)?,
+    ])
+}
+
+fn remote_operational_finding(
+    read: &RemoteOperationalReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::StorageRuntime;
+    match read {
+        RemoteOperationalReadV1::Observed {
+            listener,
+            authority,
+            quarantined_spool_items,
+            replay_coverage_complete,
+            failover_in_progress,
+            recovery_required,
+            coverage,
+            ..
+        } if *recovery_required || *quarantined_spool_items > 0 => source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "remote.operational.recovery-required",
+            *coverage,
+            "remote HTTPS authority or spool requires recovery",
+        ),
+        RemoteOperationalReadV1::Observed {
+            listener: RemoteListenerReadV1::Serving,
+            authority: RemoteAuthorityReadV1::Available,
+            replay_coverage_complete: true,
+            failover_in_progress: false,
+            coverage,
+            ..
+        } => clean_finding(
+            family,
+            "remote.operational.ready",
+            *coverage,
+            "remote HTTPS listener, authority, spool, and replay are ready",
+        ),
+        RemoteOperationalReadV1::Observed { coverage, .. } => source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "remote.operational.partial",
+            *coverage,
+            "remote HTTPS listener, authority, spool, or replay is incomplete",
+        ),
+        RemoteOperationalReadV1::Unconfigured => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "remote.operational.unconfigured",
+            "optional remote HTTPS capability is unconfigured",
+        ),
+        RemoteOperationalReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "remote.operational.unsupported",
+            "remote HTTPS capability is unsupported on this platform",
+        ),
+        RemoteOperationalReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "remote.operational.denied",
+            "remote operational authority read was denied",
+        ),
+        RemoteOperationalReadV1::Unavailable => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "remote.operational.unavailable",
+            "remote operational authority is unavailable",
+        ),
+    }
+}
+
+fn profile_authority_finding(
+    read: &ProfileAuthorityReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::StorageRuntime;
+    let incomplete = |coverage| {
+        source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "profile.authority.incomplete",
+            coverage,
+            "the exact registered profile authority is only partially attached",
+        )
+    };
+    match read {
+        ProfileAuthorityReadV1::Observed {
+            registry_attached: true,
+            profile_sessions_attached: true,
+            coverage,
+        } => clean_finding(
+            family,
+            "profile.authority.registered",
+            *coverage,
+            "the exact registered profile and profile-session authorities are attached",
+        ),
+        ProfileAuthorityReadV1::Observed { coverage, .. } => incomplete(*coverage),
+        ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+            registry_attached: false,
+        } => incomplete(DoctorCoverageCompletenessV1::Complete),
+        ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+            registry_attached: true,
+        } => source_finding(
+            family,
+            DoctorEvidenceStateV1::Stale,
+            "profile.authority.sessions-reset-required",
+            DoctorCoverageCompletenessV1::Complete,
+            "the registered profile authority is attached; the profile session store requires \
+             reset, so session features are off until `tracedecay wipe --stale --yes`",
+        ),
+        ProfileAuthorityReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "profile.authority.denied",
+            "the exact registered profile authority read was denied",
+        ),
+        ProfileAuthorityReadV1::Unavailable => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "profile.authority.unavailable",
+            "the exact registered profile authority is unavailable",
+        ),
+    }
+}
+
+pub trait OperationalAuditDoctorPort: Send + Sync {
+    fn operational_audit<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, OperationalAuditReadV1>;
+}
+
+/// One installed host component that does not match its expected shape, and
+/// the operator command that converges it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostComponentDriftV1 {
+    /// `host/component`, for example `codex/context-mcp`.
+    pub component: String,
+    pub remedy: String,
+}
+
+/// The observed conformance of a host/agent integration.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostConformanceV1 {
+    /// The integration matches the expected installed shape.
+    Conformant,
+    /// These installed components drifted from the expected shape.
+    Drifted(Vec<HostComponentDriftV1>),
+    /// The integration's executable is absent.
+    ExecutableAbsent,
+    /// These installed components are corrupt or contested.
+    ProtocolDrift(Vec<HostComponentDriftV1>),
+    /// A configured fallback is invalid.
+    InvalidFallback,
+}
+
+/// One host/agent integration conformance read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum HostIntegrationReadV1 {
+    /// The host reported conformance with the given coverage.
+    Observed {
+        conformance: HostConformanceV1,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    /// Host conformance probing is unsupported on this build/platform.
+    Unsupported,
+    /// No host integration is present to probe.
+    Absent,
+    /// Authorization to probe the host integration was denied.
+    Denied,
+    /// The host conformance could not be determined.
+    Unknown,
+}
+
+fn host_drift_statement(drifted: &[HostComponentDriftV1], shape: &str) -> String {
+    let statements = drifted
+        .iter()
+        .map(|drift| format!("{} {shape}; {}", drift.component, drift.remedy));
+    bounded_statement(&statements.collect::<Vec<_>>().join("; "))
+}
+
+/// Map a host-integration conformance read into its `Advisory`-family finding.
+#[tracing::instrument(name = "application.doctor_sources.host", level = "trace", skip_all)]
+pub fn host_integration_finding(
+    read: &HostIntegrationReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::Advisory;
+    match read {
+        HostIntegrationReadV1::Observed {
+            conformance,
+            coverage,
+        } => match conformance {
+            HostConformanceV1::Conformant => clean_finding(
+                family,
+                "host.conformance.conformant",
+                *coverage,
+                "host integration matches the expected installed shape",
+            ),
+            HostConformanceV1::Drifted(drifted) => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "host.conformance.drifted",
+                *coverage,
+                &host_drift_statement(drifted, "has drifted from its installed shape"),
+            ),
+            HostConformanceV1::ExecutableAbsent => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "host.conformance.executable-absent",
+                *coverage,
+                "host integration executable is absent",
+            ),
+            HostConformanceV1::ProtocolDrift(drifted) => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "host.conformance.protocol-drift",
+                *coverage,
+                &host_drift_statement(drifted, "is corrupt or contested"),
+            ),
+            HostConformanceV1::InvalidFallback => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "host.conformance.invalid-fallback",
+                *coverage,
+                "host integration fallback is invalid",
+            ),
+        },
+        HostIntegrationReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "host.unsupported",
+            "host conformance probing unsupported on this platform",
+        ),
+        HostIntegrationReadV1::Absent => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "host.absent",
+            "no host integration present to probe",
+        ),
+        HostIntegrationReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "host.denied",
+            "host integration probe denied",
+        ),
+        HostIntegrationReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "host.unknown",
+            "host conformance undetermined",
+        ),
+    }
+}
+
+/// Narrow source port for host/agent integration conformance.
+pub trait HostIntegrationDoctorPort: Send + Sync {
+    /// Read the current host/agent integration conformance.
+    fn host_conformance<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, HostIntegrationReadV1>;
+}
+
+/// One canonical advisory finding projected from the mounted feedback read
+/// model. Identity and scope remain typed until Doctor converts them into
+/// durable evidence references.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvisoryFeedbackFindingReadV1 {
+    pub result_id: FeedbackResultId,
+    pub cycle_id: FeedbackCycleId,
+    pub finding_id: FeedbackFindingId,
+    pub scope: FeedbackScopeV1,
+    pub generation_id: CodeGenerationId,
+    pub generation_current: bool,
+    pub lifecycle: FeedbackFindingLifecycleV1,
+    pub provider_state: ProviderEvaluationStateV1,
+    pub evidence_anchors: Vec<RetrievalAnchorId>,
+    pub total_findings: u64,
+    pub returned_findings: u64,
+    pub omitted_findings: u64,
+}
+
+/// Result-level identity and denominator state retained even when a bounded
+/// canonical publication returns no finding rows.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvisoryFeedbackSummaryReadV1 {
+    pub result_id: FeedbackResultId,
+    pub cycle_id: FeedbackCycleId,
+    pub scope: FeedbackScopeV1,
+    pub generation_id: CodeGenerationId,
+    pub generation_current: bool,
+    pub termination: FeedbackCycleTerminationV1,
+    pub provider_states: Vec<ProviderEvaluationStateV1>,
+    pub total_findings: u64,
+    pub returned_findings: u64,
+    pub omitted_findings: u64,
+}
+
+/// Canonical feedback-owner read for Doctor's advisory source.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum AdvisoryFeedbackReadV1 {
+    Observed {
+        summary: Box<AdvisoryFeedbackSummaryReadV1>,
+        findings: Vec<AdvisoryFeedbackFindingReadV1>,
+    },
+    Unsupported,
+    Absent,
+    Denied,
+    Unknown,
+}
+
+const fn feedback_lifecycle_slug(lifecycle: FeedbackFindingLifecycleV1) -> &'static str {
+    match lifecycle {
+        FeedbackFindingLifecycleV1::Active => "active",
+        FeedbackFindingLifecycleV1::Superseded => "superseded",
+        FeedbackFindingLifecycleV1::Resolved => "resolved",
+        FeedbackFindingLifecycleV1::Cleared => "cleared",
+    }
+}
+
+const fn feedback_provider_state_slug(state: ProviderEvaluationStateV1) -> &'static str {
+    match state {
+        ProviderEvaluationStateV1::SupportedCompletedComplete => "supported_completed_complete",
+        ProviderEvaluationStateV1::Unsupported => "unsupported",
+        ProviderEvaluationStateV1::Absent => "absent",
+        ProviderEvaluationStateV1::Indexing => "indexing",
+        ProviderEvaluationStateV1::Stale => "stale",
+        ProviderEvaluationStateV1::Cancelled => "cancelled",
+        ProviderEvaluationStateV1::TimedOut => "timed_out",
+        ProviderEvaluationStateV1::Failed => "failed",
+        ProviderEvaluationStateV1::Partial => "partial",
+        ProviderEvaluationStateV1::Unavailable => "unavailable",
+    }
+}
+
+fn feedback_counts_coverage(
+    total: u64,
+    returned: u64,
+    omitted: u64,
+) -> DoctorCoverageCompletenessV1 {
+    if returned > total || omitted != total - returned {
+        DoctorCoverageCompletenessV1::Unknown
+    } else if omitted == 0 {
+        DoctorCoverageCompletenessV1::Complete
+    } else {
+        DoctorCoverageCompletenessV1::Partial
+    }
+}
+
+fn feedback_evidence(
+    reference: impl Into<String>,
+) -> Result<DoctorEvidenceRefV1, ApplicationContractError> {
+    Ok(DoctorEvidenceRefV1::new(
+        DoctorFindingFamilyV1::Advisory,
+        DoctorEvidenceReferenceV1::new(reference)?,
+    ))
+}
+
+fn feedback_identity_evidence(
+    result_id: &FeedbackResultId,
+    cycle_id: &FeedbackCycleId,
+    scope: &FeedbackScopeV1,
+    generation_id: &CodeGenerationId,
+) -> Result<Vec<DoctorEvidenceRefV1>, ApplicationContractError> {
+    Ok(vec![
+        feedback_evidence(format!("feedback.result:{}", result_id.as_str()))?,
+        feedback_evidence(format!("feedback.cycle:{}", cycle_id.as_str()))?,
+        feedback_evidence(format!(
+            "feedback.scope.project:{}",
+            scope.project_id.as_str()
+        ))?,
+        feedback_evidence(format!(
+            "feedback.scope.repository:{}",
+            scope.repository_id.as_str()
+        ))?,
+        feedback_evidence(format!(
+            "feedback.scope.worktree:{}",
+            scope.worktree_id.as_str()
+        ))?,
+        feedback_evidence(format!("feedback.scope.branch:{}", scope.branch_ref))?,
+        feedback_evidence(format!(
+            "feedback.scope.head:{}",
+            scope.head_commit_id.as_str()
+        ))?,
+        feedback_evidence(format!("feedback.generation:{}", generation_id.as_str()))?,
+    ])
+}
+
+fn advisory_feedback_finding(
+    read: &AdvisoryFeedbackFindingReadV1,
+    summary: &AdvisoryFeedbackSummaryReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let count_coverage = feedback_counts_coverage(
+        read.total_findings,
+        read.returned_findings,
+        read.omitted_findings,
+    );
+    let providers_complete = !summary.provider_states.is_empty()
+        && summary
+            .provider_states
+            .iter()
+            .all(|state| *state == ProviderEvaluationStateV1::SupportedCompletedComplete);
+    let coverage_complete = read.generation_current
+        && count_coverage == DoctorCoverageCompletenessV1::Complete
+        && providers_complete;
+    let completeness = if count_coverage == DoctorCoverageCompletenessV1::Unknown
+        || summary.provider_states.is_empty()
+    {
+        DoctorCoverageCompletenessV1::Unknown
+    } else if coverage_complete {
+        DoctorCoverageCompletenessV1::Complete
+    } else {
+        DoctorCoverageCompletenessV1::Partial
+    };
+    let state = if !read.generation_current
+        || summary.termination == FeedbackCycleTerminationV1::StaleReplanRequired
+        || summary
+            .provider_states
+            .contains(&ProviderEvaluationStateV1::Stale)
+    {
+        DoctorEvidenceStateV1::Stale
+    } else if completeness == DoctorCoverageCompletenessV1::Unknown {
+        DoctorEvidenceStateV1::Unknown
+    } else {
+        match read.provider_state {
+            ProviderEvaluationStateV1::SupportedCompletedComplete => {
+                if matches!(
+                    read.lifecycle,
+                    FeedbackFindingLifecycleV1::Resolved
+                        | FeedbackFindingLifecycleV1::Cleared
+                        | FeedbackFindingLifecycleV1::Superseded
+                ) {
+                    if coverage_complete {
+                        DoctorEvidenceStateV1::HealthyCompleteCoverage
+                    } else {
+                        DoctorEvidenceStateV1::Partial
+                    }
+                } else {
+                    DoctorEvidenceStateV1::Degraded
+                }
+            }
+            ProviderEvaluationStateV1::Unsupported => DoctorEvidenceStateV1::Unsupported,
+            ProviderEvaluationStateV1::Absent => DoctorEvidenceStateV1::Absent,
+            ProviderEvaluationStateV1::Indexing | ProviderEvaluationStateV1::Stale => {
+                DoctorEvidenceStateV1::Stale
+            }
+            ProviderEvaluationStateV1::Partial => DoctorEvidenceStateV1::Partial,
+            ProviderEvaluationStateV1::Cancelled
+            | ProviderEvaluationStateV1::TimedOut
+            | ProviderEvaluationStateV1::Failed
+            | ProviderEvaluationStateV1::Unavailable => DoctorEvidenceStateV1::Unknown,
+        }
+    };
+    let mut evidence = feedback_identity_evidence(
+        &read.result_id,
+        &read.cycle_id,
+        &read.scope,
+        &read.generation_id,
+    )?;
+    evidence.extend([
+        feedback_evidence(format!("feedback.finding:{}", read.finding_id.as_str()))?,
+        feedback_evidence(format!(
+            "feedback.generation_state:{}",
+            if read.generation_current {
+                "current"
+            } else {
+                "stale"
+            }
+        ))?,
+        feedback_evidence(format!(
+            "feedback.lifecycle:{}",
+            feedback_lifecycle_slug(read.lifecycle)
+        ))?,
+        feedback_evidence(format!(
+            "feedback.provider_state:{}",
+            feedback_provider_state_slug(read.provider_state)
+        ))?,
+    ]);
+    for anchor in &read.evidence_anchors {
+        evidence.push(feedback_evidence(format!(
+            "feedback.anchor:{}",
+            anchor.as_str()
+        ))?);
+    }
+    let statement = format!(
+        "feedback coverage returned {}/{} findings; omitted {}",
+        read.returned_findings, read.total_findings, read.omitted_findings
+    );
+    DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Advisory,
+        state,
+        evidence,
+        DoctorCoverageStatementV1::new(completeness, statement)?,
+    )
+}
+
+fn advisory_feedback_summary_finding(
+    read: &AdvisoryFeedbackSummaryReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let count_completeness = feedback_counts_coverage(
+        read.total_findings,
+        read.returned_findings,
+        read.omitted_findings,
+    );
+    let completeness = if read.generation_current {
+        count_completeness
+    } else {
+        DoctorCoverageCompletenessV1::Partial
+    };
+    let coverage_complete =
+        read.generation_current && count_completeness == DoctorCoverageCompletenessV1::Complete;
+    let providers_complete = !read.provider_states.is_empty()
+        && read
+            .provider_states
+            .iter()
+            .all(|state| *state == ProviderEvaluationStateV1::SupportedCompletedComplete);
+    let state = if !read.generation_current {
+        DoctorEvidenceStateV1::Stale
+    } else if completeness == DoctorCoverageCompletenessV1::Unknown {
+        DoctorEvidenceStateV1::Unknown
+    } else if read.termination == FeedbackCycleTerminationV1::Clean
+        && coverage_complete
+        && providers_complete
+    {
+        DoctorEvidenceStateV1::HealthyCompleteCoverage
+    } else if read.termination == FeedbackCycleTerminationV1::StaleReplanRequired
+        || read
+            .provider_states
+            .contains(&ProviderEvaluationStateV1::Stale)
+    {
+        DoctorEvidenceStateV1::Stale
+    } else if !coverage_complete
+        || read
+            .provider_states
+            .contains(&ProviderEvaluationStateV1::Partial)
+    {
+        DoctorEvidenceStateV1::Partial
+    } else {
+        DoctorEvidenceStateV1::Unknown
+    };
+    let mut evidence = feedback_identity_evidence(
+        &read.result_id,
+        &read.cycle_id,
+        &read.scope,
+        &read.generation_id,
+    )?;
+    evidence.push(feedback_evidence(format!(
+        "feedback.generation_state:{}",
+        if read.generation_current {
+            "current"
+        } else {
+            "stale"
+        }
+    ))?);
+    let statement = format!(
+        "feedback coverage returned {}/{} findings; omitted {}",
+        read.returned_findings, read.total_findings, read.omitted_findings
+    );
+    DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Advisory,
+        state,
+        evidence,
+        DoctorCoverageStatementV1::new(completeness, statement)?,
+    )
+}
+
+fn advisory_feedback_observation_is_consistent(
+    summary: &AdvisoryFeedbackSummaryReadV1,
+    findings: &[AdvisoryFeedbackFindingReadV1],
+) -> bool {
+    feedback_counts_coverage(
+        summary.total_findings,
+        summary.returned_findings,
+        summary.omitted_findings,
+    ) != DoctorCoverageCompletenessV1::Unknown
+        && summary.returned_findings == findings.len() as u64
+        && summary
+            .termination
+            .is_consistent_with_provider_states(&summary.provider_states)
+        && findings.iter().all(|finding| {
+            finding.result_id == summary.result_id
+                && finding.cycle_id == summary.cycle_id
+                && finding.scope == summary.scope
+                && finding.generation_id == summary.generation_id
+                && finding.generation_current == summary.generation_current
+                && finding.total_findings == summary.total_findings
+                && finding.returned_findings == summary.returned_findings
+                && finding.omitted_findings == summary.omitted_findings
+                && summary.provider_states.contains(&finding.provider_state)
+        })
+}
+
+/// Map the mounted canonical feedback-owner read into distinct Advisory
+/// findings. Host conformance is deliberately not part of this producer.
+#[tracing::instrument(
+    name = "application.doctor_sources.advisory",
+    level = "trace",
+    skip_all
+)]
+pub fn advisory_feedback_findings(
+    read: &AdvisoryFeedbackReadV1,
+) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
+    match read {
+        AdvisoryFeedbackReadV1::Observed { summary, findings } => {
+            if !advisory_feedback_observation_is_consistent(summary, findings) {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "Doctor advisory feedback read",
+                });
+            }
+            if findings.is_empty() {
+                Ok(vec![advisory_feedback_summary_finding(summary)?])
+            } else {
+                findings
+                    .iter()
+                    .map(|finding| advisory_feedback_finding(finding, summary))
+                    .collect()
+            }
+        }
+        AdvisoryFeedbackReadV1::Absent => Ok(vec![unobservable_finding(
+            DoctorFindingFamilyV1::Advisory,
+            DoctorEvidenceStateV1::Absent,
+            "feedback.absent",
+            "canonical advisory feedback produced no findings",
+        )?]),
+        AdvisoryFeedbackReadV1::Unsupported => Ok(vec![unobservable_finding(
+            DoctorFindingFamilyV1::Advisory,
+            DoctorEvidenceStateV1::Unsupported,
+            "feedback.unsupported",
+            "canonical advisory feedback unsupported",
+        )?]),
+        AdvisoryFeedbackReadV1::Denied => Ok(vec![unobservable_finding(
+            DoctorFindingFamilyV1::Advisory,
+            DoctorEvidenceStateV1::Denied,
+            "feedback.denied",
+            "canonical advisory feedback read denied",
+        )?]),
+        AdvisoryFeedbackReadV1::Unknown => Ok(vec![unobservable_finding(
+            DoctorFindingFamilyV1::Advisory,
+            DoctorEvidenceStateV1::Unknown,
+            "feedback.unknown",
+            "canonical advisory feedback undetermined",
+        )?]),
+    }
+}
+
+/// Narrow Doctor port owned by the mounted canonical feedback read model.
+/// How a project's GitHub source is read. Status and Doctor both render this
+/// state with its [`Self::remedy`], the one authority for that text.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubSourceStateV1 {
+    /// A credential authorizes the reads.
+    Bound,
+    /// No credential is available; the repository is read anonymously as a
+    /// public repository.
+    UnauthenticatedPublic,
+    /// No credential is available and GitHub refused the anonymous read, so
+    /// the repository is private or absent.
+    DeniedNoCredential,
+}
+
+impl GitHubSourceStateV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bound => "bound",
+            Self::UnauthenticatedPublic => "unauthenticated_public",
+            Self::DeniedNoCredential => "denied_no_credential",
+        }
+    }
+
+    /// What the operator does to reach [`Self::Bound`], if anything.
+    pub const fn remedy(self) -> Option<&'static str> {
+        match self {
+            Self::Bound => None,
+            Self::UnauthenticatedPublic => Some(
+                "reads are anonymous (60 requests/hour); run `gh auth login` or set GH_TOKEN to read with a credential",
+            ),
+            Self::DeniedNoCredential => Some(
+                "GitHub refused an anonymous read of this repository; run `gh auth login` or set GH_TOKEN with read access, then reopen the project",
+            ),
+        }
+    }
+}
+
+/// The GitHub source the daemon observed for this project.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum GitHubSourceReadV1 {
+    Observed {
+        /// `owner/name` of the checkout's `origin` remote.
+        repository: String,
+        state: GitHubSourceStateV1,
+    },
+    /// No GitHub source was observed: the checkout has no GitHub `origin`,
+    /// or its advisory owner has not mounted in this daemon.
+    Absent,
+}
+
+/// The Advisory-family finding for an observed GitHub source; `None` when
+/// the project has none, which is not a Doctor concern.
+#[tracing::instrument(
+    name = "application.doctor_sources.github_source",
+    level = "trace",
+    skip_all
+)]
+pub fn github_source_finding(
+    read: &GitHubSourceReadV1,
+) -> Result<Option<DoctorFindingV1>, ApplicationContractError> {
+    let GitHubSourceReadV1::Observed { repository, state } = read else {
+        return Ok(None);
+    };
+    let family = DoctorFindingFamilyV1::Advisory;
+    let statement = match state.remedy() {
+        Some(remedy) => format!("GitHub source {repository}: {}; {remedy}", state.as_str()),
+        None => format!("GitHub source {repository}: {}", state.as_str()),
+    };
+    let finding = match state {
+        GitHubSourceStateV1::Bound => clean_finding(
+            family,
+            "github.source.bound",
+            DoctorCoverageCompletenessV1::Complete,
+            &statement,
+        ),
+        GitHubSourceStateV1::UnauthenticatedPublic => source_finding(
+            family,
+            DoctorEvidenceStateV1::Partial,
+            "github.source.unauthenticated-public",
+            DoctorCoverageCompletenessV1::Partial,
+            &statement,
+        ),
+        GitHubSourceStateV1::DeniedNoCredential => source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "github.source.denied-no-credential",
+            DoctorCoverageCompletenessV1::Complete,
+            &statement,
+        ),
+    }?;
+    Ok(Some(finding))
+}
+
+/// Narrow source port for the observed GitHub source.
+pub trait GitHubSourceDoctorPort: Send + Sync {
+    fn github_source<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, GitHubSourceReadV1>;
+}
+
+pub trait AdvisoryFeedbackDoctorPort: Send + Sync {
+    fn advisory_feedback<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, AdvisoryFeedbackReadV1>;
+}
+
+/// The observed mount state of the code index.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexMountStateV1 {
+    /// The index is mounted and current.
+    Mounted,
+    /// The index is mounting/indexing and not yet complete.
+    Indexing,
+    /// The index is mounted but behind the current generation.
+    Stale,
+    /// The index is not mounted.
+    Unmounted,
+    /// The mounted index is incompatible with the current schema/generation.
+    Incompatible,
+}
+
+/// One code-index mount read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CodeIndexMountReadV1 {
+    /// The index reported its mount state with the given coverage.
+    Observed {
+        state: CodeIndexMountStateV1,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    /// Background convergence is parked on a deterministic contract violation
+    /// that unchanged input reproduces (for example a store path that is not
+    /// owner-private). The reason names the exact violation and remediation;
+    /// convergence re-checks on every wake once the violation is removed.
+    Parked {
+        reason: String,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    /// Index mount inspection is unsupported on this build/platform.
+    Unsupported,
+    /// No index is present to inspect.
+    Absent,
+    /// Authorization to inspect the index was denied.
+    Denied,
+    /// The index mount state could not be determined.
+    Unknown,
+}
+
+/// Map a code-index mount read into its `CodeIndex`-family finding.
+#[tracing::instrument(
+    name = "application.doctor_sources.code_index",
+    level = "trace",
+    skip_all
+)]
+pub fn code_index_finding(
+    read: &CodeIndexMountReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::CodeIndex;
+    match read {
+        CodeIndexMountReadV1::Observed { state, coverage } => match state {
+            CodeIndexMountStateV1::Mounted => clean_finding(
+                family,
+                "code-index.mount.mounted",
+                *coverage,
+                "code index is mounted and current",
+            ),
+            CodeIndexMountStateV1::Indexing => source_finding(
+                family,
+                DoctorEvidenceStateV1::Partial,
+                "code-index.mount.indexing",
+                DoctorCoverageCompletenessV1::Partial,
+                "code index is still indexing",
+            ),
+            CodeIndexMountStateV1::Stale => source_finding(
+                family,
+                DoctorEvidenceStateV1::Stale,
+                "code-index.mount.stale",
+                *coverage,
+                "code index is behind the current generation",
+            ),
+            CodeIndexMountStateV1::Unmounted => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "code-index.mount.unmounted",
+                *coverage,
+                "code index is not mounted",
+            ),
+            CodeIndexMountStateV1::Incompatible => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "code-index.mount.incompatible",
+                *coverage,
+                "mounted code index is incompatible with the current schema",
+            ),
+        },
+        CodeIndexMountReadV1::Parked { reason, coverage } => source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "code-index.mount.parked",
+            *coverage,
+            &bounded_statement(&format!(
+                "code index background convergence is parked: {reason}"
+            )),
+        ),
+        CodeIndexMountReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "code-index.unsupported",
+            "code index inspection unsupported on this platform",
+        ),
+        CodeIndexMountReadV1::Absent => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "code-index.absent",
+            "no code index present to inspect",
+        ),
+        CodeIndexMountReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "code-index.denied",
+            "code index inspection denied",
+        ),
+        CodeIndexMountReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "code-index.unknown",
+            "code index mount state undetermined",
+        ),
+    }
+}
+
+/// Narrow source port for code-index mount state.
+pub trait CodeIndexMountDoctorPort: Send + Sync {
+    /// Read the current code index mount state.
+    fn code_index_mount<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, CodeIndexMountReadV1>;
+}
+
+/// Aggregate state of the project-active language-server analyzers.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LanguageServerStateV1 {
+    /// Every active analyzer is ready.
+    Ready,
+    /// At least one analyzer is installed but has not produced a ready snapshot.
+    Available,
+    /// At least one analyzer is currently refreshing/indexing.
+    Refreshing,
+    /// At least one project analyzer is disabled.
+    Disabled,
+    /// At least one project analyzer executable is unavailable.
+    Unavailable,
+    /// At least one analyzer process crashed.
+    Crashed,
+}
+
+/// Live state of one analyzer the daemon resolved for the current project.
+///
+/// `LanguageServerStateV1` is the aggregate the finding is graded on; this is
+/// the per-analyzer evidence behind it, so an operator learns *which*
+/// executable is missing and how to install it, resolved by the daemon
+/// process (the only PATH that matters, since the daemon spawns analyzers)
+/// rather than by whichever shell ran the CLI.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct LanguageServerAnalyzerV1 {
+    /// Adapter language (`typescript`, `rust`, …).
+    pub language: String,
+    /// The configured executable, after any operator command override.
+    pub command: String,
+    pub state: LanguageServerAnalyzerStateV1,
+    /// Whether the daemon process finds `command` on its own PATH. For an
+    /// active analyzer `state` is the finer verdict (a rustup proxy whose
+    /// toolchain lacks the component is found yet `Unavailable`); for an
+    /// inactive one this is the only availability evidence.
+    pub executable_found: bool,
+    /// The first install command the adapter advertises, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<String>,
+    /// The owner's last recorded error for this analyzer, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// State of one analyzer as the daemon owner holds it.
+///
+/// `Inactive` is the one state the aggregate never takes: the language has no
+/// files in the project, so Doctor does not grade it, but `lsp servers` still
+/// lists it from this same read so both surfaces share one authority.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LanguageServerAnalyzerStateV1 {
+    Ready,
+    Available,
+    Refreshing,
+    Disabled,
+    Unavailable,
+    Crashed,
+    Inactive,
+}
+
+impl LanguageServerAnalyzerStateV1 {
+    /// The aggregate this analyzer contributes to, or `None` for an inactive
+    /// language that the aggregate must not grade.
+    #[must_use]
+    pub const fn aggregate(self) -> Option<LanguageServerStateV1> {
+        match self {
+            Self::Ready => Some(LanguageServerStateV1::Ready),
+            Self::Available => Some(LanguageServerStateV1::Available),
+            Self::Refreshing => Some(LanguageServerStateV1::Refreshing),
+            Self::Disabled => Some(LanguageServerStateV1::Disabled),
+            Self::Unavailable => Some(LanguageServerStateV1::Unavailable),
+            Self::Crashed => Some(LanguageServerStateV1::Crashed),
+            Self::Inactive => None,
+        }
+    }
+}
+
+impl LanguageServerReadV1 {
+    /// Grade the daemon owner's resolved analyzers. Inactive languages are
+    /// carried but never graded; with no active analyzer the read is `Absent`.
+    /// Severity order: crashed, unavailable, disabled, refreshing, then ready
+    /// only when every active analyzer is ready, otherwise available.
+    #[must_use]
+    pub fn observed(analyzers: Vec<LanguageServerAnalyzerV1>) -> Self {
+        let active: Vec<LanguageServerStateV1> = analyzers
+            .iter()
+            .filter_map(|analyzer| analyzer.state.aggregate())
+            .collect();
+        if active.is_empty() {
+            return Self::Absent { analyzers };
+        }
+        let state = [
+            LanguageServerStateV1::Crashed,
+            LanguageServerStateV1::Unavailable,
+            LanguageServerStateV1::Disabled,
+            LanguageServerStateV1::Refreshing,
+        ]
+        .into_iter()
+        .find(|state| active.contains(state))
+        .unwrap_or(
+            if active
+                .iter()
+                .all(|state| *state == LanguageServerStateV1::Ready)
+            {
+                LanguageServerStateV1::Ready
+            } else {
+                LanguageServerStateV1::Available
+            },
+        );
+        Self::Observed {
+            state,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+            analyzers,
+        }
+    }
+}
+
+/// One live read from the daemon language-server/analyzer owner.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum LanguageServerReadV1 {
+    /// The owner observed all project-active analyzer states.
+    Observed {
+        state: LanguageServerStateV1,
+        coverage: DoctorCoverageCompletenessV1,
+        /// Every analyzer the owner resolved, active or not; the aggregate
+        /// `state` covers the active ones only.
+        #[serde(default)]
+        analyzers: Vec<LanguageServerAnalyzerV1>,
+    },
+    /// Language-server inspection is unsupported on this build/platform.
+    Unsupported,
+    /// No project-active analyzer is configured. The owner's inactive
+    /// analyzers are still carried so `lsp servers` can list them.
+    Absent {
+        #[serde(default)]
+        analyzers: Vec<LanguageServerAnalyzerV1>,
+    },
+    /// Authorization to inspect analyzer state was denied.
+    Denied,
+    /// Analyzer state could not be determined.
+    Unknown,
+}
+
+/// Map a live analyzer read into its `LanguageServer`-family finding.
+#[tracing::instrument(
+    name = "application.doctor_sources.language_server",
+    level = "trace",
+    skip_all
+)]
+pub fn language_server_finding(
+    read: &LanguageServerReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::LanguageServer;
+    match read {
+        LanguageServerReadV1::Observed {
+            state,
+            coverage,
+            analyzers,
+        } => match state {
+            LanguageServerStateV1::Ready => clean_finding(
+                family,
+                "language-server.analyzer.ready",
+                *coverage,
+                "all project-active language-server analyzers are ready",
+            ),
+            LanguageServerStateV1::Available => source_finding(
+                family,
+                DoctorEvidenceStateV1::Partial,
+                "language-server.analyzer.available",
+                DoctorCoverageCompletenessV1::Partial,
+                "project analyzers are available but readiness is not yet observed",
+            ),
+            LanguageServerStateV1::Refreshing => source_finding(
+                family,
+                DoctorEvidenceStateV1::Partial,
+                "language-server.analyzer.refreshing",
+                DoctorCoverageCompletenessV1::Partial,
+                "at least one project analyzer is refreshing or indexing",
+            ),
+            LanguageServerStateV1::Disabled => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "language-server.analyzer.disabled",
+                *coverage,
+                &bounded_statement(&format!(
+                    "project analyzer disabled: {}",
+                    degraded_analyzers_statement(analyzers, *state)
+                )),
+            ),
+            // An analyzer that is not installed is absent, not broken:
+            // installing it is the operator's choice, named with its step.
+            LanguageServerStateV1::Unavailable => source_finding(
+                family,
+                DoctorEvidenceStateV1::Absent,
+                "language-server.analyzer.unavailable",
+                *coverage,
+                &bounded_statement(&format!(
+                    "project analyzer executable not found on the daemon PATH: {}",
+                    degraded_analyzers_statement(analyzers, *state)
+                )),
+            ),
+            LanguageServerStateV1::Crashed => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "language-server.analyzer.crashed",
+                *coverage,
+                &bounded_statement(&format!(
+                    "project analyzer process crashed: {}",
+                    degraded_analyzers_statement(analyzers, *state)
+                )),
+            ),
+        },
+        LanguageServerReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "language-server.unsupported",
+            "language-server inspection unsupported on this platform",
+        ),
+        LanguageServerReadV1::Absent { .. } => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "language-server.absent",
+            "no project-active language-server analyzer is configured",
+        ),
+        LanguageServerReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "language-server.denied",
+            "language-server analyzer inspection denied",
+        ),
+        LanguageServerReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "language-server.unknown",
+            "language-server analyzer state undetermined",
+        ),
+    }
+}
+
+/// Name every active analyzer in `state`, with its executable and install
+/// step, so a degraded finding is actionable. A read whose aggregate says
+/// `state` but lists no such analyzer is reported as exactly that gap rather
+/// than as a healthy-looking empty list.
+fn degraded_analyzers_statement(
+    analyzers: &[LanguageServerAnalyzerV1],
+    state: LanguageServerStateV1,
+) -> String {
+    let named: Vec<String> = analyzers
+        .iter()
+        .filter(|analyzer| analyzer.state.aggregate() == Some(state))
+        .map(|analyzer| {
+            let mut entry = format!("{} ({}", analyzer.language, analyzer.command);
+            if let Some(install) = &analyzer.install {
+                entry.push_str(&format!("; install: {install}"));
+            }
+            if let Some(detail) = &analyzer.detail {
+                entry.push_str(&format!("; {detail}"));
+            }
+            entry.push(')');
+            entry
+        })
+        .collect();
+    if named.is_empty() {
+        "analyzer identity not reported by the daemon owner".to_owned()
+    } else {
+        named.join(", ")
+    }
+}
+
+/// Narrow source port for live language-server/analyzer state.
+pub trait LanguageServerDoctorPort: Send + Sync {
+    /// Read current project-active analyzer state.
+    fn language_server_health<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, LanguageServerReadV1>;
+}
+
+/// Freshness state of the canonical durable observation projection.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservabilityStateV1 {
+    Current,
+    Stale,
+}
+
+/// One canonical durable feedback-observation read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ObservabilityReadV1 {
+    /// The durable read model contains observations through this watermark.
+    Observed {
+        state: ObservabilityStateV1,
+        total_count: u64,
+        last_observed_at_micros: Option<i64>,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    /// Durable observation projection is unsupported on this build/platform.
+    Unsupported,
+    /// The canonical projection contains no observations.
+    Absent,
+    /// Authorization to read the observation projection was denied.
+    Denied,
+    /// The observation state could not be determined.
+    Unknown,
+}
+
+/// Map the canonical durable read model into its `Observability` finding.
+#[tracing::instrument(
+    name = "application.doctor_sources.observability",
+    level = "trace",
+    skip_all
+)]
+pub fn observability_finding(
+    read: &ObservabilityReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::Observability;
+    match read {
+        ObservabilityReadV1::Observed {
+            state,
+            total_count,
+            last_observed_at_micros,
+            coverage,
+        } => match state {
+            ObservabilityStateV1::Stale => source_finding(
+                family,
+                DoctorEvidenceStateV1::Stale,
+                "observability.feedback-projection.stale",
+                *coverage,
+                "canonical feedback projection is stale at its retained watermark",
+            ),
+            ObservabilityStateV1::Current => {
+                let statement = if last_observed_at_micros.is_some() {
+                    format!(
+                        "canonical feedback projection contains {total_count} retained observations through its latest watermark"
+                    )
+                } else {
+                    format!(
+                        "canonical feedback projection contains {total_count} retained observations without a watermark"
+                    )
+                };
+                clean_finding(
+                    family,
+                    "observability.feedback-projection.current",
+                    *coverage,
+                    &statement,
+                )
+            }
+        },
+        ObservabilityReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "observability.unsupported",
+            "durable feedback observation projection unsupported on this platform",
+        ),
+        ObservabilityReadV1::Absent => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "observability.feedback-projection.absent",
+            "canonical feedback projection contains no observations",
+        ),
+        ObservabilityReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "observability.denied",
+            "durable feedback observation projection read denied",
+        ),
+        ObservabilityReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "observability.unknown",
+            "durable feedback observation state undetermined",
+        ),
+    }
+}
+
+/// One worktree holding a retained owner's memory, and what it holds: a
+/// generation id, or an LSP session id.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ResidentMemoryHolderReadV1 {
+    pub worktree_id: String,
+    pub holding: String,
+}
+
+/// One retained owner as the resident-memory inventory reports it; linked
+/// worktrees sharing one decoded content are one owner with several holders.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResidentMemoryOwnerReadV1 {
+    /// Owner kind label, one of the inventory's shed-order kinds.
+    pub kind: String,
+    pub project_id: String,
+    pub holders: Vec<ResidentMemoryHolderReadV1>,
+    /// Digest of the decoded content the holders share, when they share one.
+    pub content_digest: Option<String>,
+    /// Measured bytes, or `None` for an owner that cannot size itself.
+    pub bytes: Option<u64>,
+    pub idle_seconds: u64,
+    /// Pressure will not release this owner while it serves inside its
+    /// idle window.
+    pub protected: bool,
+}
+
+/// Retained daemon memory as the resident-memory inventory reports it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ResidentMemoryReadV1 {
+    Observed {
+        /// Last sampled process RSS, `None` before the first sample.
+        resident_bytes: Option<u64>,
+        limit_bytes: u64,
+        high_watermark_bytes: u64,
+        over_budget: bool,
+        retained_bytes: u64,
+        owners: Vec<ResidentMemoryOwnerReadV1>,
+    },
+    /// The process keeps no inventory (not a daemon).
+    Unobserved,
+}
+
+const MIB: u64 = 1024 * 1024;
+
+/// Map the inventory into its `Memory` findings: one for the process against
+/// its limit, then one per retained owner.
+#[tracing::instrument(
+    name = "application.doctor_sources.resident_memory",
+    level = "trace",
+    skip_all
+)]
+pub fn resident_memory_findings(
+    read: &ResidentMemoryReadV1,
+) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::Memory;
+    let ResidentMemoryReadV1::Observed {
+        resident_bytes,
+        limit_bytes,
+        high_watermark_bytes,
+        over_budget,
+        retained_bytes,
+        owners,
+    } = read
+    else {
+        return Ok(vec![unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "memory.inventory.unobserved",
+            "this process keeps no resident-memory inventory",
+        )?]);
+    };
+    let unmeasured = owners.iter().filter(|owner| owner.bytes.is_none()).count();
+    let resident = resident_bytes.map_or_else(
+        || "unsampled".to_owned(),
+        |bytes| format!("{} MiB", bytes / MIB),
+    );
+    let summary = format!(
+        "resident {resident} of a {} MiB limit (pressure line {} MiB); {} owners retain {} MiB measured, {unmeasured} unmeasured",
+        limit_bytes / MIB,
+        high_watermark_bytes / MIB,
+        owners.len(),
+        retained_bytes / MIB,
+    );
+    let mut findings = vec![if *over_budget {
+        source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "memory.process.over-budget",
+            DoctorCoverageCompletenessV1::Complete,
+            &summary,
+        )?
+    } else {
+        clean_finding(
+            family,
+            "memory.process.nominal",
+            if unmeasured == 0 {
+                DoctorCoverageCompletenessV1::Complete
+            } else {
+                DoctorCoverageCompletenessV1::Partial
+            },
+            &summary,
+        )?
+    }];
+    for owner in owners {
+        let bytes = owner.bytes.map_or_else(
+            || "unmeasured bytes".to_owned(),
+            |bytes| format!("{} MiB", bytes / MIB),
+        );
+        let statement = format!(
+            "{} of worktree{} {} holds {bytes}, idle {} s{}",
+            owner.kind,
+            if owner.holders.len() > 1 { "s" } else { "" },
+            owner
+                .holders
+                .iter()
+                .map(|holder| holder.worktree_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            owner.idle_seconds,
+            if owner.protected { ", serving" } else { "" },
+        );
+        findings.push(match owner.bytes {
+            Some(_) => clean_finding(
+                family,
+                "memory.owner.measured",
+                DoctorCoverageCompletenessV1::Complete,
+                &truncate_at_char_boundary(&statement, 512),
+            )?,
+            None => source_finding(
+                family,
+                DoctorEvidenceStateV1::Partial,
+                "memory.owner.unmeasured",
+                DoctorCoverageCompletenessV1::Partial,
+                &truncate_at_char_boundary(&statement, 512),
+            )?,
+        });
+    }
+    Ok(findings)
+}
+
+/// Narrow source port for the resident-memory inventory.
+pub trait ResidentMemoryDoctorPort: Send + Sync {
+    fn resident_memory<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, ResidentMemoryReadV1>;
+}
+
+/// One durably refused source record, read from a live observation store's
+/// cursor-advance ledger.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IngestRefusalV1 {
+    /// Session provider that produced the refused record (e.g. `cursor`).
+    pub provider: String,
+    /// Provider-native session whose transcript holds the record.
+    pub session_id: String,
+    /// Known durable coverage reason or an opaque SHA-256 fingerprint of an
+    /// unrecognized value. Doctor never formats arbitrary reason text.
+    pub reason: String,
+    /// Source range the refusal covered, in the source's ordering domain.
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Census of durable ingest-coverage refusals (Observability family).
+///
+/// Deterministic refusals advance coverage with a durable typed reason so the
+/// stream converges instead of re-reporting the same records; the plans treat
+/// those refusals as visible typed outcomes, never silent drops. This read
+/// names each recorded refusal truthfully. Re-admission of a deterministic
+/// refusal would deterministically fail again, so Doctor reports rather than
+/// retries.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum IngestRefusalCensusReadV1 {
+    /// The cursor-advance ledgers of the live stores were consulted; an empty
+    /// census means no source record there was durably refused.
+    Observed { refusals: Vec<IngestRefusalV1> },
+    /// The ledger could not be consulted.
+    Unknown,
+}
+
+/// Why a refusal with a known durable reason was skipped. Every known refusal
+/// is terminal by design: re-reading the record refuses it again and no
+/// operator command admits it, so each is informational. `None` is a reason
+/// this build does not recognize.
+fn known_refusal_cause(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "observation_identity_collision" => {
+            "a different record with the same identity is already retained"
+        }
+        "admission_refused" => "admission refused its content deterministically",
+        "sanitizer_rejected" => "the privacy sanitizer rejected it",
+        "sanitizer_quarantined" => "the privacy sanitizer quarantined it",
+        "malformed_frame" => "the host wrote a malformed record",
+        "oversized_frame" => "the record exceeds the admission size bound",
+        "unknown_version" => "the host wrote a record version this build does not read",
+        _ => return None,
+    })
+}
+
+/// Render only a known refusal reason code or a previously established
+/// opaque fingerprint. The Doctor port accepts strings across crate
+/// boundaries, so this last presentation boundary conservatively
+/// fingerprints unexpected input instead of formatting it into a public
+/// finding.
+fn doctor_visible_refusal_reason(reason: &str) -> Cow<'_, str> {
+    if known_refusal_cause(reason).is_some()
+        || tracedecay_domain::canonical_text::is_tagged_lowercase_hex(reason, "sha256:", 64)
+    {
+        return Cow::Borrowed(reason);
+    }
+    Cow::Owned(
+        tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
+            "sha256:",
+            &Sha256::digest(reason.as_bytes()),
+        ),
+    )
+}
+
+/// Name the first refusals and summarize the rest, so the bounded (512-byte)
+/// coverage statement always constructs.
+fn refusal_listing(refusals: &[IngestRefusalV1]) -> String {
+    const MAX_LISTED: usize = 2;
+    let mut listed: Vec<String> = refusals
+        .iter()
+        .take(MAX_LISTED)
+        .map(|refusal| {
+            format!(
+                "{} session {} range {}..{} {} ({})",
+                refusal.provider,
+                refusal.session_id,
+                refusal.start,
+                refusal.end,
+                doctor_visible_refusal_reason(&refusal.reason),
+                known_refusal_cause(&refusal.reason)
+                    .unwrap_or("reason not recognized by this build"),
+            )
+        })
+        .collect();
+    if refusals.len() > MAX_LISTED {
+        listed.push(format!("+{} more", refusals.len() - MAX_LISTED));
+    }
+    listed.join("; ")
+}
+
+/// Map the durable refusal census into its `Observability` finding.
+///
+/// A refusal with a known reason is informational and never an issue: it
+/// names its provider, session, covered range, typed cause, and why nothing
+/// needs doing. Only a reason this build cannot classify leaves the finding
+/// unknown.
+#[tracing::instrument(
+    name = "application.doctor_sources.ingest_refusal",
+    level = "trace",
+    skip_all
+)]
+pub fn ingest_refusal_finding(
+    read: &IngestRefusalCensusReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::Observability;
+    match read {
+        IngestRefusalCensusReadV1::Observed { refusals } if refusals.is_empty() => clean_finding(
+            family,
+            "observability.ingest-coverage.converged",
+            DoctorCoverageCompletenessV1::Complete,
+            "durable ingest coverage records no refused source records",
+        ),
+        IngestRefusalCensusReadV1::Observed { refusals } => {
+            let total = refusals.len();
+            let unrecognized = refusals
+                .iter()
+                .filter(|refusal| known_refusal_cause(&refusal.reason).is_none())
+                .count();
+            let (state, reference, verdict) = if unrecognized == 0 {
+                (
+                    DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                    "observability.ingest-coverage.refused-informational",
+                    format!(
+                        "durable ingest coverage converged past {total} refused source \
+                         record(s), informational, nothing needs doing: each was skipped by \
+                         design and re-reading it would refuse it again"
+                    ),
+                )
+            } else {
+                (
+                    DoctorEvidenceStateV1::Unknown,
+                    "observability.ingest-coverage.unrecognized-refusal",
+                    format!(
+                        "{unrecognized} of {total} refused source record(s) carry a coverage \
+                         reason this build does not recognize, so Doctor cannot say whether \
+                         they need action"
+                    ),
+                )
+            };
+            source_finding(
+                family,
+                state,
+                reference,
+                DoctorCoverageCompletenessV1::Complete,
+                &bounded_statement(&format!("{verdict}; {}", refusal_listing(refusals))),
+            )
+        }
+        IngestRefusalCensusReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "observability.ingest-coverage.unknown",
+            "durable ingest-coverage refusal census undetermined",
+        ),
+    }
+}
+
+/// Narrow source port for the canonical durable feedback read model.
+pub trait ObservabilityDoctorPort: Send + Sync {
+    /// Read current durable feedback-observation state.
+    fn observability_health<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, ObservabilityReadV1>;
+
+    /// Read the durable ingest-coverage refusal census.
+    fn ingest_refusal_census<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, IngestRefusalCensusReadV1>;
+}
+
+/// Why one of the independently consulted storage producers was unresolved.
+///
+/// A partially observed family retains every finding that other producers
+/// returned while carrying this reason to weaken report coverage. `Absent` is
+/// intentionally not a reason: an empty, successfully consulted producer does
+/// not make the observations from its peers incomplete.
+/// Variant order is the escalation order used when several producers are
+/// unresolved at once: the most specific, most severe reason wins, so a named
+/// degradation is never masked by a peer producer's bare `Unknown`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorStorageIncompleteReasonV1 {
+    /// The producer is unsupported on this build/platform.
+    Unsupported,
+    /// Authorization to read the producer was denied.
+    Denied,
+    /// The producer state could not be determined.
+    Unknown,
+    /// The producer's backing source could not be reached at all. Distinct from
+    /// `Unknown`: the source is named and its unreachability is observed, so the
+    /// observed reason is carried rather than discarded.
+    Unavailable { detail: String },
+    /// The producer's backing source must be rebuilt before it can be read
+    /// again. An observed, named degradation, not an undetermined state.
+    ResetRequired { detail: String },
+    /// The producer's backing source was read and found corrupt. The most
+    /// severe named degradation: it outranks every other reason in a merge.
+    Corrupt { detail: String },
+}
+
+/// One composed storage read: typed findings from resolved producers, their
+/// incomplete-coverage reason when a peer producer was unresolved, or an
+/// honest family-wide unavailability.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum DoctorStorageFamilyReadV1 {
+    /// The storage runtime produced these typed findings (may be empty when the
+    /// profile has no stores; the composer treats an empty observed read as an
+    /// absent family rather than a healthy claim).
+    Observed {
+        findings: Vec<DoctorStorageFindingV1>,
+    },
+    /// At least one producer returned findings, while another independent
+    /// producer could not be resolved. Findings remain observable, but the
+    /// family must not claim complete coverage.
+    ObservedIncomplete {
+        findings: Vec<DoctorStorageFindingV1>,
+        reason: DoctorStorageIncompleteReasonV1,
+    },
+    /// Storage retention/size telemetry is unsupported on this build/platform.
+    Unsupported,
+    /// The storage runtime is reachable but produced no findings.
+    Absent,
+    /// Authorization to read storage telemetry was denied.
+    Denied,
+    /// The storage state could not be determined.
+    Unknown,
+    /// The storage source could not be reached. The observed reason is carried
+    /// so the report names why, instead of collapsing into `Unknown`.
+    Unavailable { detail: String },
+    /// The storage source must be rebuilt before it can be read again.
+    ResetRequired { detail: String },
+    /// The storage source was read and found corrupt.
+    Corrupt { detail: String },
+}
+
+/// Narrow source port for storage retention/size Doctor findings.
+///
+/// Unlike the other source ports, storage has several heterogeneous read models
+/// (budget/telemetry, orphan, retired-generation, debris, backlog), each with its own
+/// landed producer in [`crate::storage::findings`]. Rather than re-derive those,
+/// the runtime adapter runs the producers and returns their typed
+/// [`DoctorStorageFindingV1`] values through this port.
+pub trait StorageDoctorPort: Send + Sync {
+    /// Read the current storage retention/size findings.
+    fn storage_findings<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, DoctorStorageFamilyReadV1>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_findings_report_the_process_and_each_owner_in_mib() {
+        let owner = |kind: &str, bytes: Option<u64>, protected: bool| ResidentMemoryOwnerReadV1 {
+            kind: kind.to_owned(),
+            project_id: "project.fixture".to_owned(),
+            holders: vec![ResidentMemoryHolderReadV1 {
+                worktree_id: "worktree.fixture".to_owned(),
+                holding: "generation.fixture".to_owned(),
+            }],
+            content_digest: None,
+            bytes,
+            idle_seconds: 42,
+            protected,
+        };
+        let read = ResidentMemoryReadV1::Observed {
+            resident_bytes: Some(3 * 1024 * MIB),
+            limit_bytes: 6 * 1024 * MIB,
+            high_watermark_bytes: 5 * 1024 * MIB,
+            over_budget: false,
+            retained_bytes: 300 * MIB,
+            owners: vec![
+                ResidentMemoryOwnerReadV1 {
+                    holders: vec![
+                        ResidentMemoryHolderReadV1 {
+                            worktree_id: "worktree.fixture".to_owned(),
+                            holding: "generation.fixture".to_owned(),
+                        },
+                        ResidentMemoryHolderReadV1 {
+                            worktree_id: "worktree.linked".to_owned(),
+                            holding: "generation.linked".to_owned(),
+                        },
+                    ],
+                    content_digest: Some(format!("sha256:{}", "a".repeat(64))),
+                    ..owner("decoded_generation", Some(300 * MIB), true)
+                },
+                owner("graph_engine", None, false),
+            ],
+        };
+
+        let findings = resident_memory_findings(&read).expect("memory findings");
+
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| (
+                    finding.state(),
+                    finding.coverage().statement().to_owned()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    DoctorEvidenceStateV1::Partial,
+                    "resident 3072 MiB of a 6144 MiB limit (pressure line 5120 MiB); 2 owners retain 300 MiB measured, 1 unmeasured".to_owned()
+                ),
+                (
+                    DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                    "decoded_generation of worktrees worktree.fixture, worktree.linked holds 300 MiB, idle 42 s, serving".to_owned()
+                ),
+                (
+                    DoctorEvidenceStateV1::Partial,
+                    "graph_engine of worktree worktree.fixture holds unmeasured bytes, idle 42 s".to_owned()
+                ),
+            ]
+        );
+
+        let over = ResidentMemoryReadV1::Observed {
+            resident_bytes: Some(5 * 1024 * MIB + 1),
+            limit_bytes: 6 * 1024 * MIB,
+            high_watermark_bytes: 5 * 1024 * MIB,
+            over_budget: true,
+            retained_bytes: 0,
+            owners: Vec::new(),
+        };
+        assert_eq!(
+            resident_memory_findings(&over).expect("memory findings")[0].state(),
+            DoctorEvidenceStateV1::Degraded
+        );
+    }
+
+    #[test]
+    fn configuration_in_sync_complete_is_healthy() {
+        let finding = configuration_finding(&ConfigurationAuthorityReadV1::Resolved {
+            drift: ConfigurationDriftV1::InSync,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert!(finding.state().is_healthy_complete());
+        assert_eq!(finding.family(), DoctorFindingFamilyV1::Configuration);
+    }
+
+    #[test]
+    fn configuration_drift_is_degraded_diagnostic_evidence() {
+        let finding = configuration_finding(&ConfigurationAuthorityReadV1::Resolved {
+            drift: ConfigurationDriftV1::Drifted,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "configuration.resolved.drifted"
+        );
+    }
+
+    #[test]
+    fn configuration_unavailable_states_map_honestly() {
+        for (read, expected) in [
+            (
+                ConfigurationAuthorityReadV1::Unsupported,
+                DoctorEvidenceStateV1::Unsupported,
+            ),
+            (
+                ConfigurationAuthorityReadV1::Absent,
+                DoctorEvidenceStateV1::Absent,
+            ),
+            (
+                ConfigurationAuthorityReadV1::Denied,
+                DoctorEvidenceStateV1::Denied,
+            ),
+            (
+                ConfigurationAuthorityReadV1::Unknown,
+                DoctorEvidenceStateV1::Unknown,
+            ),
+        ] {
+            let finding = configuration_finding(&read).expect("finding");
+            assert_eq!(finding.state(), expected);
+            assert!(!finding.state().is_healthy_complete());
+        }
+    }
+
+    #[test]
+    fn runtime_stuck_is_degraded_diagnostic_evidence() {
+        let finding = runtime_health_finding(&RuntimeHealthReadV1::Observed {
+            liveness: RuntimeLivenessV1::Stuck,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "runtime.health.stuck"
+        );
+    }
+
+    #[test]
+    fn host_drift_maps_to_advisory_diagnostic_evidence() {
+        let finding = host_integration_finding(&HostIntegrationReadV1::Observed {
+            conformance: HostConformanceV1::ProtocolDrift(vec![HostComponentDriftV1 {
+                component: "claude/core".to_owned(),
+                remedy: "run `tracedecay reinstall --component core`".to_owned(),
+            }]),
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.family(), DoctorFindingFamilyV1::Advisory);
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "host.conformance.protocol-drift"
+        );
+        assert_eq!(
+            finding.coverage().statement(),
+            "claude/core is corrupt or contested; run `tracedecay reinstall --component core`"
+        );
+    }
+
+    #[test]
+    fn host_drift_names_every_drifted_component_and_its_remedy() {
+        let finding = host_integration_finding(&HostIntegrationReadV1::Observed {
+            conformance: HostConformanceV1::Drifted(vec![
+                HostComponentDriftV1 {
+                    component: "codex/context-mcp".to_owned(),
+                    remedy: "run `tracedecay reinstall --component context-mcp`".to_owned(),
+                },
+                HostComponentDriftV1 {
+                    component: "pi/core".to_owned(),
+                    remedy: "run `tracedecay install --agent pi`".to_owned(),
+                },
+            ]),
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.coverage().statement(),
+            "codex/context-mcp has drifted from its installed shape; run `tracedecay reinstall \
+             --component context-mcp`; pi/core has drifted from its installed shape; run \
+             `tracedecay install --agent pi`"
+        );
+    }
+
+    #[test]
+    fn code_index_indexing_is_partial() {
+        let finding = code_index_finding(&CodeIndexMountReadV1::Observed {
+            state: CodeIndexMountStateV1::Indexing,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+    }
+
+    #[test]
+    fn code_index_parked_names_the_violation_typed() {
+        let finding = code_index_finding(&CodeIndexMountReadV1::Parked {
+            reason: "code text artifacts root is not owner-private (mode 775, need 700)".to_owned(),
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "code-index.mount.parked"
+        );
+        assert!(
+            finding
+                .coverage()
+                .statement()
+                .contains("not owner-private (mode 775, need 700)")
+        );
+    }
+
+    #[test]
+    fn code_index_parked_statement_is_bounded_for_oversized_reasons() {
+        let finding = code_index_finding(&CodeIndexMountReadV1::Parked {
+            reason: "x".repeat(1000),
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert!(finding.coverage().statement().len() <= 512);
+        assert!(finding.coverage().statement().ends_with('…'));
+    }
+
+    #[test]
+    fn code_index_stale_is_stale_diagnostic_evidence() {
+        let finding = code_index_finding(&CodeIndexMountReadV1::Observed {
+            state: CodeIndexMountStateV1::Stale,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Stale);
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "code-index.mount.stale"
+        );
+    }
+
+    #[test]
+    fn language_server_refreshing_is_partial() {
+        let finding = language_server_finding(&LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Refreshing,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+            analyzers: Vec::new(),
+        })
+        .expect("finding");
+        assert_eq!(finding.family(), DoctorFindingFamilyV1::LanguageServer);
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+    }
+
+    #[test]
+    fn language_server_unavailable_names_each_missing_analyzer_and_install_step() {
+        let analyzer = |language: &str, command: &str, state, install: Option<&str>| {
+            LanguageServerAnalyzerV1 {
+                language: language.to_owned(),
+                command: command.to_owned(),
+                state,
+                executable_found: state != LanguageServerAnalyzerStateV1::Unavailable,
+                install: install.map(str::to_owned),
+                detail: None,
+            }
+        };
+        let read = LanguageServerReadV1::observed(vec![
+            analyzer(
+                "rust",
+                "rust-analyzer",
+                LanguageServerAnalyzerStateV1::Ready,
+                None,
+            ),
+            analyzer(
+                "typescript",
+                "typescript-language-server",
+                LanguageServerAnalyzerStateV1::Unavailable,
+                Some("npm install -g typescript typescript-language-server"),
+            ),
+            analyzer(
+                "python",
+                "pyright-langserver",
+                LanguageServerAnalyzerStateV1::Unavailable,
+                Some("npm install -g pyright"),
+            ),
+            analyzer(
+                "go",
+                "gopls",
+                LanguageServerAnalyzerStateV1::Inactive,
+                Some("go install golang.org/x/tools/gopls@latest"),
+            ),
+        ]);
+        let finding = language_server_finding(&read).expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Absent);
+        assert_eq!(
+            finding.coverage().statement(),
+            "project analyzer executable not found on the daemon PATH: \
+             typescript (typescript-language-server; install: npm install -g typescript typescript-language-server), \
+             python (pyright-langserver; install: npm install -g pyright)"
+        );
+    }
+
+    #[test]
+    fn language_server_degraded_without_analyzer_identity_says_so() {
+        let finding = language_server_finding(&LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Crashed,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+            analyzers: Vec::new(),
+        })
+        .expect("finding");
+        assert_eq!(
+            finding.coverage().statement(),
+            "project analyzer process crashed: analyzer identity not reported by the daemon owner"
+        );
+    }
+
+    #[test]
+    fn language_server_observed_grades_only_active_analyzers() {
+        let inactive_only = LanguageServerReadV1::observed(vec![LanguageServerAnalyzerV1 {
+            language: "go".to_owned(),
+            command: "gopls".to_owned(),
+            state: LanguageServerAnalyzerStateV1::Inactive,
+            executable_found: false,
+            install: None,
+            detail: None,
+        }]);
+        assert!(matches!(
+            inactive_only,
+            LanguageServerReadV1::Absent { analyzers } if analyzers.len() == 1
+        ));
+    }
+
+    #[test]
+    fn observability_partial_projection_cannot_claim_health() {
+        let finding = observability_finding(&ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 17,
+            last_observed_at_micros: Some(42),
+            coverage: DoctorCoverageCompletenessV1::Partial,
+        })
+        .expect("finding");
+        assert_eq!(finding.family(), DoctorFindingFamilyV1::Observability);
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+    }
+
+    fn refusal(provider: &str, session_id: &str, reason: &str, start: u64) -> IngestRefusalV1 {
+        IngestRefusalV1 {
+            provider: provider.to_owned(),
+            session_id: session_id.to_owned(),
+            reason: reason.to_owned(),
+            start,
+            end: start + 848,
+        }
+    }
+
+    #[test]
+    fn a_live_identity_collision_is_informational_and_names_its_record() {
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
+            refusals: vec![refusal(
+                "cursor",
+                "445777ad-0c9a-4c0e-bb98-7e8f7fb500ce",
+                "observation_identity_collision",
+                364_052,
+            )],
+        })
+        .expect("finding");
+
+        assert_eq!(finding.family(), DoctorFindingFamilyV1::Observability);
+        assert_eq!(
+            finding.state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "observability.ingest-coverage.refused-informational"
+        );
+        assert_eq!(
+            finding.coverage().statement(),
+            "durable ingest coverage converged past 1 refused source record(s), \
+             informational, nothing needs doing: each was skipped by design and re-reading it \
+             would refuse it again; cursor session 445777ad-0c9a-4c0e-bb98-7e8f7fb500ce range \
+             364052..364900 observation_identity_collision (a different record with the same \
+             identity is already retained)"
+        );
+    }
+
+    #[test]
+    fn many_refusals_name_the_first_and_count_the_rest() {
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
+            refusals: vec![
+                refusal("codex", "c1", "admission_refused", 0),
+                refusal("cursor", "k1", "sanitizer_quarantined", 10),
+                refusal("cursor", "k2", "oversized_frame", 20),
+            ],
+        })
+        .expect("finding");
+
+        assert_eq!(
+            finding.state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
+        assert_eq!(
+            finding.coverage().statement(),
+            "durable ingest coverage converged past 3 refused source record(s), \
+             informational, nothing needs doing: each was skipped by design and re-reading it \
+             would refuse it again; codex session c1 range 0..848 admission_refused (admission \
+             refused its content deterministically); cursor session k1 range 10..858 \
+             sanitizer_quarantined (the privacy sanitizer quarantined it); +1 more"
+        );
+    }
+
+    #[test]
+    fn corrupt_refusal_reasons_never_reach_doctor_output() {
+        let short_secret = "provider-private-transcript-secret";
+        let long_secret = format!("provider-private-transcript-{}", "x".repeat(16 * 1024));
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
+            refusals: vec![
+                refusal("cursor", "s", short_secret, 0),
+                refusal("cursor", "s", &long_secret, 1),
+            ],
+        })
+        .expect("finding");
+
+        let serialized = serde_json::to_string(&finding).expect("serialize finding");
+        assert!(!serialized.contains(short_secret));
+        assert!(!serialized.contains(&long_secret));
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Unknown);
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "observability.ingest-coverage.unrecognized-refusal"
+        );
+        assert!(
+            finding
+                .coverage()
+                .statement()
+                .starts_with("2 of 2 refused source record(s) carry a coverage reason this build does not recognize"),
+            "{}",
+            finding.coverage().statement()
+        );
+        assert!(
+            finding.coverage().statement().contains("sha256:"),
+            "Doctor must retain an opaque corruption classification"
+        );
+    }
+
+    #[test]
+    fn a_reset_required_profile_session_store_is_a_pending_reset_not_a_degraded_authority() {
+        let findings = operational_audit_findings(&OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+                registry_attached: true,
+            },
+        })
+        .expect("findings");
+
+        assert_eq!(findings[1].state(), DoctorEvidenceStateV1::Stale);
+        assert_eq!(
+            findings[1].evidence()[0].reference().as_str(),
+            "profile.authority.sessions-reset-required"
+        );
+        assert_eq!(
+            findings[1].coverage().statement(),
+            "the registered profile authority is attached; the profile session store requires \
+             reset, so session features are off until `tracedecay wipe --stale --yes`"
+        );
+
+        let detached = operational_audit_findings(&OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+                registry_attached: false,
+            },
+        })
+        .expect("findings");
+        assert_eq!(detached[1].state(), DoctorEvidenceStateV1::Degraded);
+    }
+
+    #[test]
+    fn empty_ingest_refusal_census_is_healthy_converged_coverage() {
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
+            refusals: Vec::new(),
+        })
+        .expect("finding");
+        assert!(finding.state().is_healthy_complete());
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "observability.ingest-coverage.converged"
+        );
+    }
+
+    #[test]
+    fn unknown_ingest_refusal_census_cannot_claim_health() {
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Unknown).expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Unknown);
+        assert!(!finding.state().is_healthy_complete());
+    }
+}

@@ -11,14 +11,10 @@ Please do **not** open a public issue for security vulnerabilities. We aim to ac
 
 ## Supported Versions
 
-Only the current major release line is supported. All minor and patch versions within it receive security fixes.
-
-| Version | Supported |
-|---------|-----------|
-| 6.x (current) | Yes — all minor and patch releases |
-| < 6 | No |
-
-When a vulnerability is found, the fix is shipped as a new release — there are no backports to older major versions. Fixes are not applied in place to existing binaries. **If you run tracedecay in production automation (CI pipelines, scheduled agents, server-side MCP deployments), keep it updated to the latest release** so any future fix reaches you immediately via `tracedecay upgrade`.
+Security fixes ship in the latest published release. Pre-release builds are
+supported by updating to the latest pre-release; older prereleases and historical
+major versions do not receive backports. Consult the repository Releases page
+for the current version rather than assuming a pinned major line remains current.
 
 ## Security Model
 
@@ -31,11 +27,17 @@ tracedecay builds a **local** code graph stored in the active project store. Rep
 - Call relationships and dependency edges
 - FTS5 search index
 - Cross-session memory: durable facts, named entities, code-area notes, decisions, and feedback events in the holographic fact store. Those rows are local-only project data.
-- A response cache for `tracedecay_read` (`read_cache` table): the rendered output served to the agent, stored as a BLOB keyed by file path, mode, and arguments. For full/line-range reads this rendered output contains source text. Rows are freshness-gated by file mtime and swept after a period of inactivity.
+- A response cache for mode-aware source reads (`read_cache` table): the rendered output served to the agent, stored as a BLOB keyed by file path, mode, and arguments. For full/line-range reads this rendered output contains source text. Rows are freshness-gated by file mtime and swept after a period of inactivity.
 
-Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The active project store is local-only — there is no cloud sync, remote database, or server-side storage.
+Sealed code-index artifacts also persist sanitized source chunks for retrieval.
+Sanitization can remove detected secrets; it does not remove proprietary source
+or guarantee that all sensitive content is recognized. Treat index artifacts,
+source-read responses, session messages, and durable facts as private data.
+Local operation is the default. Explicitly configured remote sources and remote
+authorities can exchange policy-authorized content with authenticated peers;
+these deployments require reviewing their configuration and peer trust.
 
-The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-savings counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
+The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-savings counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. These stores are local by default; configured remote authority operations follow their explicit admission and disclosure policy.
 
 ### Network access
 
@@ -57,11 +59,12 @@ explicitly local listeners:
 These controls limit network reachability; they do not isolate TraceDecay from
 other processes running as the same operating-system user.
 
-Outbound connections are limited to:
+Outbound capabilities include:
 
 | Destination | Purpose | Auth | Failure mode |
 |-------------|---------|------|-------------|
-| `api.github.com` | Check for releases and, for explicitly configured review sources, verify and perform repository reads | Public requests by default; optional read-only credential from the OS keyring | Public checks are best effort; configured private access fails closed when credentials or permissions cannot be verified |
+| `api.github.com` | Check for releases, discover the pull request for a checkout whose `origin` is on GitHub, and read its reviews and checks | The local GitHub login (`GH_TOKEN`, `gh auth token`, or the git credential helper) when present, anonymous otherwise; optional read-only credential from the OS keyring for configured private sources | Public checks are best effort; an anonymous read GitHub refuses is reported as `denied_no_credential`; configured private access fails closed when credentials or permissions cannot be verified |
+| Configured remote sources and authorities | Policy-authorized retrieval and remote operations | Configured peer authentication and disclosure policy | Admission or authorization failures are reported; review each peer before enabling |
 | `github.com` | Download binary during `tracedecay upgrade` | None (public releases) | Error shown to user |
 | `huggingface.co` and Hugging Face artifact hosts | Download missing, revision-pinned semantic-model artifacts when semantic auto-download is enabled | None | Semantic retrieval reports model acquisition state or failure; exact, lexical, and graph retrieval remain available |
 | `tracedecay-counter.enzinol.workers.dev` | Aggregate token-savings counter | None | Silently ignored |
@@ -78,7 +81,11 @@ SHA-256 digests before publication, and can be disabled with `HF_HUB_OFFLINE`.
 ### Credentials and secrets
 
 TraceDecay does not require credentials for its default local and public
-repository behavior. A user may explicitly configure a private GitHub review
+repository behavior. When `GH_TOKEN`, a `gh` login, or a git credential helper
+login for `https://github.com` exists, GitHub reads for the checkout's `origin`
+use it; the token is read into zeroizing memory per use and never stored. The
+git credential helper is asked only for `protocol=https`/`host=github.com`, with
+terminal prompts disabled. A user may explicitly configure a private GitHub review
 source with `access = "os_keyring"` and keyring service/account locators. The
 secret remains in the operating-system keyring; configuration stores only its
 locator. The daemon reads it into zeroizing memory, sends it only to GitHub
@@ -88,18 +95,18 @@ fail closed.
 
 ### MCP server tools
 
-The MCP server exposes **more than 70 tools** (one fewer when the optional `ast-grep` binary is not on `PATH`). The large majority are **read-only** analysis and query operations marked `readOnlyHint: true`. A small set mutate local state and are marked `readOnlyHint: false`:
+The MCP server exposes **more than 70 tools**. The large majority are **read-only** analysis and query operations marked `readOnlyHint: true`. A small set mutate local state and are marked `readOnlyHint: false`:
 
 **File-editing tools** (modify source files in your project):
 
-- `tracedecay_str_replace`, `tracedecay_multi_str_replace` — anchored string replacement
-- `tracedecay_insert_at`, `tracedecay_insert_at_symbol` — anchored insertion
-- `tracedecay_replace_symbol` — replace a symbol's body
-- `tracedecay_ast_grep_rewrite` — structural rewrite via the external `ast-grep` binary
+- `tracedecay_str_replace`, `tracedecay_multi_str_replace`, anchored string replacement
+- `tracedecay_insert_at`, `tracedecay_insert_at_symbol`, anchored insertion
+- `tracedecay_replace_symbol`, replace a symbol's body
+- `tracedecay_ast_grep_rewrite`, structural rewrite via the in-process `ast-grep` engine
 
 **Local-state tools** (write only inside the active TraceDecay store, never your source):
 
-- `tracedecay_fact_store_add`, `tracedecay_fact_store_update`, `tracedecay_fact_store_remove`, and `tracedecay_fact_feedback` — store or remove fact text, entity names, feedback events, and trust-score inputs in the local project database. The other exact `tracedecay_fact_store_*` routes and `tracedecay_memory_status` are read-only; repair is daemon-owned background work.
+- `tracedecay_fact_store_add`, `tracedecay_fact_store_update`, `tracedecay_fact_store_remove`, `tracedecay_fact_store_supersede`, and `tracedecay_fact_feedback`, store, remove, or supersede fact text, entity names, feedback events, and trust-score inputs in the local project database. The other exact `tracedecay_fact_store_*` routes and `tracedecay_memory_status` are read-only; repair is daemon-owned background work.
 
 ### Support bundles and storage diagnostics
 
@@ -109,13 +116,13 @@ Also redact credential-bearing git remotes, database overrides such as `TRACEDEC
 
 **Test execution:**
 
-- `tracedecay_run_affected_tests` — compiles and runs the project's own test suite via a `cargo` subprocess (bounded by a configurable wall-clock timeout, default 300 s, and a per-invocation test cap)
+- `tracedecay_run_affected_tests`, compiles and runs the project's own test suite via a `cargo` subprocess (bounded by a configurable wall-clock timeout, default 300 s, and a per-invocation test cap)
 
 The edit tools target a single file with a unique anchor and re-index in place.
 They never run shell commands you did not supply. Network-capable operations
 are limited to the documented release, pricing, semantic-model, telemetry, and
 configured GitHub review paths above. Every editing and state-mutating tool is
-single-file or single-record scoped — there is no bulk-delete or
+single-file or single-record scoped. There is no bulk-delete or
 recursive-write primitive.
 
 > Note: file edits are applied by the agent on your behalf through your agent's own tool-approval flow. Treat tracedecay's edit tools with the same caution as your agent's built-in file-write tools.
@@ -128,7 +135,13 @@ recursive-write primitive.
 - Replaces the running binary in place via `self-replace`
 - Re-registers agent integrations on the next launch when the version bump is minor or major
 
-**macOS / Linux:** Release artifacts are not cryptographically signed. The integrity guarantee relies on HTTPS transport security and GitHub's release infrastructure.
+**Installer provenance:** `install.sh` checks same-release SHA-256 sums and uses
+`gh attestation verify` to verify build provenance against the configured release
+workflow. Missing verification fails installation unless the operator explicitly
+opts into the documented unattested install path. Checksums alone establish
+consistency, not independent publisher authenticity. Other distribution/update
+paths have their own verification; do not assume installer checks apply to all
+paths.
 
 **Windows:** Authenticode code signing via the [SignPath.io Foundation](https://signpath.io/foundation) program is being rolled out so Windows binaries are signed as part of the release workflow (addresses the Smart App Control block reported in #79). Until that lands in a published release, Windows binaries remain unsigned.
 
@@ -138,17 +151,17 @@ tracedecay installs **no background daemon, system service, or autostart process
 
 ### Unsafe code
 
-The codebase contains minimal `unsafe`, used in two cross-platform places:
-
-- **Memory-mapped monitor ring buffer** (`src/monitor.rs`) — `memmap2` maps `~/.tracedecay/monitor.mmap`, the shared buffer the `tracedecay monitor` TUI reads
-- **Tree-sitter FFI** (`crates/tracedecay-code-extraction/src/ts_provider.rs`) — constructing the bundled WGSL grammar from its raw C entry point
-
-The Windows-elevation `unsafe` documented in earlier versions was removed alongside the daemon in 6.0.0.
+Unsafe Rust and FFI exist in several owners, including private filesystem
+identity/platform primitives (`crates/tracedecay-private-fs`), tree-sitter grammar
+bindings (`crates/tracedecay-code-extraction/src/ts_provider.rs`), and platform
+runtime integrations. This is not an exhaustive inventory. Review the relevant
+platform implementation and its invariants when changing those boundaries;
+an old count of unsafe sites is not a security guarantee.
 
 ## Best Practices
 
 - Add `.tracedecay/` to your `.gitignore` to avoid committing local store markers or repo-local databases.
-- If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from `tracedecay_read` responses. Keeping repo-local store directories ignored and treating profile-sharded stores as private user data keeps both out of version control.
+- If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from source-read responses. Keeping repo-local store directories ignored and treating profile-sharded stores as private user data keeps both out of version control.
 - Keep tracedecay updated (`tracedecay upgrade`) to receive security fixes.
 - Review the [CHANGELOG](CHANGELOG.md) before upgrading to understand what changed.
 

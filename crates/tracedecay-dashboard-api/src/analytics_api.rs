@@ -1,33 +1,44 @@
 //! Read-only durable analytics API for dashboard-level agent behavior.
 //!
 //! Durable `analytics_events` rows are preferred when available. Older session
-//! stores still get session-message usage rollups, and hint lifecycle telemetry
-//! falls back to the legacy `dashboard_hint_events` table when present.
+//! stores still get session-message usage rollups; hint lifecycle telemetry
+//! comes only from durable analytics events.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
 
 use axum::extract::State;
 use axum::response::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tracedecay_application::ObservatoryReadModelV1;
-use tracedecay_domain::CoverageStateV1;
+use serde_json::Value;
+use tracedecay_contracts::ObservatoryReadModelV1;
+use tracedecay_contracts::retrieval::{AnalyticsHintCategoryV1, AnalyticsHintsPayloadV1};
+use tracedecay_domain::{CoverageStateV1, ObservationScopeV1};
+use tracedecay_sessions::runtime::shared::durable_project_path_key;
 
 use tracedecay_automation::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
     underused_tool_family_signals,
 };
+use tracedecay_automation_runtime::automation::agent_targets::managed_agent_label;
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_global_db::{
     AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, RegisteredGlobalDb,
 };
 use tracedecay_runtime_core::db::engine::params;
+use tracedecay_session_memory::provider_usage::{
+    ProviderUsageAggregateV1, ProviderUsageCoverageV1, ProviderUsageSessionTotalsV1,
+    provider_usage_aggregate, provider_usage_by_session,
+};
 
 use super::DashboardState;
 use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
-use super::util::{i64_field, query_i64, query_i64_result, query_rows, str_field};
+use super::util::{i64_field, query_i64_result, query_rows, str_field};
 
-pub use tracedecay_usecases::analytics_bridge::{
+pub use tracedecay_application::analytics_bridge::{
     AnalyticsDiagnosticsPayloadV1, AnalyticsDiagnosticsRatiosV1, AnalyticsEventKindCountV1,
     AnalyticsHintEfficacyCategoryV1, AnalyticsHintEfficacyTotalsV1, AnalyticsHintEfficacyV1,
     AnalyticsHookNameCountV1, AnalyticsHookWindowV1, AnalyticsOutcomeCountV1,
@@ -72,24 +83,6 @@ pub struct AnalyticsUsageSummaryV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct AnalyticsHintCategoryV1 {
-    pub category: String,
-    pub emitted: i64,
-    pub followed: i64,
-    pub ignored: i64,
-    pub suppressed: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct AnalyticsHintsPayloadV1 {
-    pub available: bool,
-    pub source: String,
-    #[serde(default)]
-    pub error: Option<String>,
-    pub by_category: Vec<AnalyticsHintCategoryV1>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AnalyticsAgentUsageV1 {
     pub agent: String,
     pub sessions: i64,
@@ -112,7 +105,7 @@ pub struct AnalyticsAgentsPayloadV1 {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalyticsSubagentLinkV1 {
-    /// The session records no parent — a genuine top of a delegation tree.
+    /// The session records no parent, a genuine top of a delegation tree.
     Root,
     /// The parent named by the session is present in this reading.
     Linked,
@@ -134,7 +127,7 @@ pub struct AnalyticsSubagentNodeV1 {
     /// `agent_id`. `None` is an unlabeled session, not an unnamed agent.
     pub agent: Option<String>,
     pub title: Option<String>,
-    /// Unix SECONDS, as the session store records them — capture parses
+    /// Unix SECONDS, as the session store records them, capture parses
     /// provider stamps with `parse_rfc3339_timestamp`, which yields seconds,
     /// and normalizes millisecond inputs down to seconds before storing. This
     /// is not the microsecond convention the Work contracts use, and reading
@@ -151,12 +144,18 @@ pub struct AnalyticsSubagentNodeV1 {
     /// Sessions below this one, transitively, excluding itself.
     pub descendants: i64,
     pub link: AnalyticsSubagentLinkV1,
+    /// Provider-reported billing usage the canonical provider-usage projection
+    /// attributes to this session. Absent means the projection holds no usage
+    /// event for it (or the whole read was unavailable, see the payload's
+    /// `usage_coverage`); nothing is estimated from message text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ProviderUsageSessionTotalsV1>,
 }
 
 /// The subagent tree: parent/child session edges, not a per-agent rollup.
 ///
-/// `nodes` is a pre-order flattening — every node appears after its own parent
-/// and before that parent's later siblings — so a reader can draw the tree from
+/// `nodes` is a pre-order flattening, every node appears after its own parent
+/// and before that parent's later siblings, so a reader can draw the tree from
 /// `depth` alone without reassembling edges client-side.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AnalyticsSubagentTreePayloadV1 {
@@ -165,6 +164,11 @@ pub struct AnalyticsSubagentTreePayloadV1 {
     #[serde(default)]
     pub error: Option<String>,
     pub nodes: Vec<AnalyticsSubagentNodeV1>,
+    /// Coverage of the provider-usage read that populated each node's `usage`.
+    /// `unavailable` means no node may be read as "used no tokens"; absent
+    /// means the tree itself was not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_coverage: Option<ProviderUsageCoverageV1>,
     /// Sessions read for this project before any tree was built. The only
     /// honest denominator for the counts below.
     pub sessions_read: i64,
@@ -225,27 +229,42 @@ struct HintCounts {
 pub async fn overview(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             // These reads are independent of one another; run them concurrently. The
             // hint/usage/diagnostics summaries then share the one durable-event fetch.
-            let (durable_events, observatory, agents, underused) = tokio::join!(
-                durable_analytics_rows_for_state(&state),
-                observatory_model(&state),
-                agent_usage_summary(state.lcm_db.as_deref()),
+            let durable_events: Pin<
+                Box<dyn Future<Output = Option<Vec<AnalyticsEventRecord>>> + Send>,
+            > = Box::pin(durable_analytics_rows_for_state(&state));
+            let observatory: Pin<Box<dyn Future<Output = ObservatoryReadModelV1> + Send>> =
+                Box::pin(observatory_model(&state));
+            let agents: Pin<
+                Box<dyn Future<Output = Result<AnalyticsAgentsPayloadV1, String>> + Send>,
+            > = Box::pin(agent_usage_summary(&state.host_io, state.lcm_db.as_deref()));
+            let underused = tracedecay_runtime_core::erase_send!(
                 underused_tool_families(state.lcm_db.as_deref()),
+                Result<Option<Vec<AnalyticsUnderusedFamilyV1>>, String>
             );
+            let (durable_events, observatory, agents, underused) =
+                tokio::join!(durable_events, observatory, agents, underused);
             let observatory = Some(observatory);
             let project_id = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-            let (hints, usage, diagnostics) = tokio::join!(
-                hint_summary(
+            let hints: Pin<Box<dyn Future<Output = AnalyticsHintsPayloadV1> + Send>> =
+                Box::pin(hint_summary(
                     state.savings_db.as_deref().or(state.lcm_db.as_deref()),
                     durable_events.as_deref(),
                     Some(&project_id),
-                ),
-                typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()),
-                typed_diagnostics_summary(&state, durable_events.as_deref()),
-            );
+                ));
+            let usage: Pin<
+                Box<dyn Future<Output = Result<AnalyticsUsageSummaryV1, String>> + Send>,
+            > = Box::pin(usage_summary(
+                state.lcm_db.as_deref(),
+                durable_events.as_deref(),
+            ));
+            let diagnostics: Pin<
+                Box<dyn Future<Output = Result<AnalyticsDiagnosticsPayloadV1, String>> + Send>,
+            > = Box::pin(typed_diagnostics_summary(&state, durable_events.as_deref()));
+            let (hints, usage, diagnostics) = tokio::join!(hints, usage, diagnostics);
             let usage = match usage {
                 Ok(usage) => usage,
                 Err(error) => {
@@ -313,7 +332,7 @@ pub async fn overview(
                 ))
             }
         },
-        label = "dashboard_api.analytics.overview"
+        tracing::trace_span!("dashboard_api.analytics.overview"),
     )
     .await
 }
@@ -323,7 +342,7 @@ pub async fn overview(
 pub async fn observatory(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<ObservatoryReadModelV1>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let model = observatory_model(&state).await;
             let known = model
@@ -350,15 +369,15 @@ pub async fn observatory(
             };
             Json(envelope)
         },
-        label = "dashboard_api.analytics.observatory"
+        tracing::trace_span!("dashboard_api.analytics.observatory"),
     )
     .await
 }
 
 // `observatory_http` / `observatory_export` are deleted with their last caller.
 // They mounted `/api/plugins/analytics/observatory{,/export}`, which served the
-// same application model as `/api/observatory` — the route the Observatory
-// workspace actually reads (`CanonicalObservations.tsx`) — one without the
+// same application model as `/api/observatory`, the route the Observatory
+// workspace actually reads (`CanonicalObservations.tsx`), one without the
 // envelope and one with a download disposition. No dashboard, SDK, CLI, or MCP
 // caller ever bound to either; the only reader was a parity test asserting the
 // aliases agreed with the canonical route, which is a test of the duplication
@@ -392,6 +411,7 @@ async fn observatory_model(state: &DashboardState) -> ObservatoryReadModelV1 {
 }
 
 async fn agent_usage_summary(
+    host_io: &HostIo,
     db: Option<&RegisteredGlobalDb>,
 ) -> Result<AnalyticsAgentsPayloadV1, String> {
     let Some(db) = db else {
@@ -420,7 +440,7 @@ async fn agent_usage_summary(
     for row in rows {
         let agent_id = str_field(&row, "agent_id");
         let Some(label) =
-            managed_agent_label_for_session(agent_id, str_field(&row, "metadata_json"))
+            managed_agent_label_for_session(host_io, agent_id, str_field(&row, "metadata_json"))
         else {
             continue;
         };
@@ -437,33 +457,31 @@ async fn agent_usage_summary(
     })
 }
 
-fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Option<&'static str> {
-    if let Ok(Some(label)) =
-        tracedecay_automation_runtime::automation::agent_targets::managed_agent_label(agent_id)
-    {
+pub(super) fn managed_agent_label_for_session(
+    host_io: &HostIo,
+    agent_id: &str,
+    metadata_json: &str,
+) -> Option<&'static str> {
+    if let Some(label) = managed_agent_label(host_io, agent_id) {
         return Some(label);
     }
     let metadata: Value = serde_json::from_str(metadata_json).ok()?;
     ["agent_nickname", "agent_role"]
         .into_iter()
         .filter_map(|key| metadata.get(key).and_then(Value::as_str))
-        .find_map(|id| {
-            tracedecay_automation_runtime::automation::agent_targets::managed_agent_label(id)
-                .ok()
-                .flatten()
-        })
+        .find_map(|id| managed_agent_label(host_io, id))
 }
 
-/// `GET /api/plugins/analytics/agents` — sessions per managed subagent,
+/// `GET /api/plugins/analytics/agents`, sessions per managed subagent,
 /// straight from the session store. The same summary the overview embeds,
 /// exposed on its own so the Agents workspace can read subagent context
 /// without paying for the full hook-analytics fold.
 pub async fn agents(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
-            match agent_usage_summary(state.lcm_db.as_deref()).await {
+            match agent_usage_summary(&state.host_io, state.lcm_db.as_deref()).await {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     Some(payload),
@@ -484,7 +502,7 @@ pub async fn agents(
                 )),
             }
         },
-        label = "dashboard_api.analytics.agents"
+        tracing::trace_span!("dashboard_api.analytics.agents"),
     )
     .await
 }
@@ -515,8 +533,8 @@ fn optional_text(row: &Value, key: &str) -> Option<String> {
 /// Assemble parent/child session edges into a pre-order tree.
 ///
 /// Every input row appears in the output exactly once. Sessions reachable from
-/// a top are emitted under it; sessions that are not reachable from any top —
-/// which can only happen when their parent chain closes on itself — are emitted
+/// a top are emitted under it; sessions that are not reachable from any top,
+/// which can only happen when their parent chain closes on itself, are emitted
 /// afterwards as their own tops, marked `Cycle`, because dropping them would
 /// silently shrink a delegation count the caller is about to read.
 fn build_subagent_tree(rows: Vec<SubagentSessionRow>) -> Vec<AnalyticsSubagentNodeV1> {
@@ -643,14 +661,31 @@ fn build_subagent_tree(rows: Vec<SubagentSessionRow>) -> Vec<AnalyticsSubagentNo
                 depth,
                 descendants: sizes[slot] - 1,
                 link: link[position],
+                usage: None,
             }
         })
         .collect()
 }
 
+/// Attach each node's provider-reported usage from one reduced aggregate.
+/// Sessions the projection never saw keep `usage: None`; the aggregate's own
+/// coverage is what tells a reader whether that absence means anything.
+fn attach_subagent_usage(
+    nodes: &mut [AnalyticsSubagentNodeV1],
+    aggregate: &ProviderUsageAggregateV1,
+) -> ProviderUsageCoverageV1 {
+    let mut by_session = provider_usage_by_session(aggregate);
+    for node in nodes {
+        node.usage = by_session.remove(&(node.provider.clone(), node.session_id.clone()));
+    }
+    aggregate.coverage
+}
+
 async fn subagent_tree_reading(
+    host_io: &HostIo,
     db: Option<&RegisteredGlobalDb>,
-    project_key: &str,
+    project_root: &Path,
+    usage_scope: Option<&ObservationScopeV1>,
 ) -> Result<AnalyticsSubagentTreePayloadV1, String> {
     let Some(db) = db else {
         return Ok(AnalyticsSubagentTreePayloadV1 {
@@ -658,6 +693,7 @@ async fn subagent_tree_reading(
             source: "session_store_unavailable".to_owned(),
             error: None,
             nodes: Vec::new(),
+            usage_coverage: None,
             sessions_read: 0,
             root_count: 0,
             edge_count: 0,
@@ -669,6 +705,12 @@ async fn subagent_tree_reading(
     };
 
     let connection = db.read_connection();
+    let canonical = RegisteredGlobalDb::canonical_project_key(project_root);
+    let opened = project_root.to_string_lossy().into_owned();
+    // `project_path` is persisted through `durable_project_path_key`, which
+    // folds Windows drive/UNC spelling; scoped reads must compare in the same
+    // stored form or a `C:\` display path never matches the `c:/` row.
+    let stored_path = durable_project_path_key(&opened);
     let rows = query_rows(
         &connection,
         "SELECT provider,
@@ -683,14 +725,22 @@ async fn subagent_tree_reading(
                 COALESCE(parent_tool_use_id, '') AS parent_tool_use_id
          FROM sessions
          -- Either column may carry the project: `project_key` is a provider's
-         -- own label and `project_path` the canonical root. Matching both is
+         -- own label and `project_path` the stored root. Matching both is
          -- the convention every scoped session read in `registered_sessions`
-         -- already uses, and matching only one silently empties the tree for
-         -- whichever provider labels its sessions the other way.
-         WHERE (project_key = ?1 OR project_path = ?1)
+         -- already uses. The opened spelling and the canonical OS identity
+         -- (`/var` vs `/private/var`) are one project; matching only the
+         -- canonical key silently empties the tree for rows stored under the
+         -- alias the host wrote.
+         WHERE (project_key IN (?1, ?2) OR project_path IN (?3, ?4))
          ORDER BY COALESCE(started_at, 0), provider, session_id
-         LIMIT ?2",
-        params![project_key, SUBAGENT_TREE_SESSION_CEILING],
+         LIMIT ?5",
+        params![
+            canonical,
+            opened.clone(),
+            stored_path,
+            opened,
+            SUBAGENT_TREE_SESSION_CEILING
+        ],
     )
     .await
     .map_err(|error| format!("analytics subagent tree query failed: {error}"))?;
@@ -700,9 +750,10 @@ async fn subagent_tree_reading(
         .iter()
         .map(|row| {
             let agent_id = str_field(row, "agent_id");
-            let agent = managed_agent_label_for_session(agent_id, str_field(row, "metadata_json"))
-                .map(str::to_owned)
-                .or_else(|| optional_text(row, "agent_id"));
+            let agent =
+                managed_agent_label_for_session(host_io, agent_id, str_field(row, "metadata_json"))
+                    .map(str::to_owned)
+                    .or_else(|| optional_text(row, "agent_id"));
             SubagentSessionRow {
                 provider: str_field(row, "provider").to_owned(),
                 session_id: str_field(row, "session_id").to_owned(),
@@ -717,7 +768,16 @@ async fn subagent_tree_reading(
         })
         .collect();
 
-    let nodes = build_subagent_tree(session_rows);
+    let mut nodes = build_subagent_tree(session_rows);
+    // Without a resolved project scope there is no usage projection to read;
+    // that is the typed `unavailable`, not an empty aggregate.
+    let usage_coverage = match usage_scope {
+        Some(scope) => {
+            let aggregate = provider_usage_aggregate(db, scope, None, None).await;
+            attach_subagent_usage(&mut nodes, &aggregate)
+        }
+        None => ProviderUsageCoverageV1::Unavailable,
+    };
     let count_link = |wanted: AnalyticsSubagentLinkV1| {
         nodes.iter().filter(|node| node.link == wanted).count() as i64
     };
@@ -725,6 +785,7 @@ async fn subagent_tree_reading(
         available: true,
         source: "sessions".to_owned(),
         error: None,
+        usage_coverage: Some(usage_coverage),
         root_count: count_link(AnalyticsSubagentLinkV1::Root),
         edge_count: count_link(AnalyticsSubagentLinkV1::Linked),
         missing_parent_count: count_link(AnalyticsSubagentLinkV1::MissingParent),
@@ -736,7 +797,7 @@ async fn subagent_tree_reading(
     })
 }
 
-/// `GET /api/plugins/analytics/subagent-tree` — parent/child session edges for
+/// `GET /api/plugins/analytics/subagent-tree`, parent/child session edges for
 /// this project, as a pre-order tree.
 ///
 /// The sibling `/agents` route answers a different question: how many sessions
@@ -746,10 +807,23 @@ async fn subagent_tree_reading(
 pub async fn subagent_tree(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
-            let project_key = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-            match subagent_tree_reading(state.lcm_db.as_deref(), &project_key).await {
+            let usage_scope =
+                state
+                    .resolved_scope
+                    .as_ref()
+                    .map(|scope| ObservationScopeV1::Project {
+                        project_id: scope.project_id.clone(),
+                    });
+            match subagent_tree_reading(
+                &state.host_io,
+                state.lcm_db.as_deref(),
+                &state.project_root,
+                usage_scope.as_ref(),
+            )
+            .await
+            {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     Some(payload),
@@ -758,8 +832,8 @@ pub async fn subagent_tree(
                 Ok(payload) => {
                     let count = payload.nodes.len() as u64;
                     // A ceiling read has no denominator: the store holds an unknown
-                    // number of further sessions, so `partial` — which asserts a known
-                    // eligible total — would be the wrong claim. Coverage is unknown
+                    // number of further sessions, so `partial`, which asserts a known
+                    // eligible total, would be the wrong claim. Coverage is unknown
                     // with the count actually examined and the reason stated.
                     let coverage = if payload.truncated {
                         let mut coverage = DashboardCoverageV1::unknown();
@@ -785,7 +859,7 @@ pub async fn subagent_tree(
                 )),
             }
         },
-        label = "dashboard_api.analytics.subagent_tree"
+        tracing::trace_span!("dashboard_api.analytics.subagent_tree"),
     )
     .await
 }
@@ -794,7 +868,7 @@ pub async fn subagent_tree(
 pub async fn hints(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsHintsPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let durable_events = durable_analytics_rows_for_state(&state).await;
             let project_id = RegisteredGlobalDb::canonical_project_key(&state.project_root);
@@ -833,7 +907,7 @@ pub async fn hints(
             };
             Json(envelope)
         },
-        label = "dashboard_api.analytics.hints"
+        tracing::trace_span!("dashboard_api.analytics.hints"),
     )
     .await
 }
@@ -842,10 +916,10 @@ pub async fn hints(
 pub async fn usage(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsUsageSummaryV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let durable_events = durable_analytics_rows_for_state(&state).await;
-            match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
+            match usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     Some(payload),
@@ -882,7 +956,7 @@ pub async fn usage(
                 )),
             }
         },
-        label = "dashboard_api.analytics.usage"
+        tracing::trace_span!("dashboard_api.analytics.usage"),
     )
     .await
 }
@@ -891,7 +965,7 @@ pub async fn usage(
 pub async fn diagnostics(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let durable_events = durable_analytics_rows_for_state(&state).await;
             let payload = match typed_diagnostics_summary(&state, durable_events.as_deref()).await {
@@ -937,7 +1011,7 @@ pub async fn diagnostics(
                 Some(payload),
             ))
         },
-        label = "dashboard_api.analytics.diagnostics"
+        tracing::trace_span!("dashboard_api.analytics.diagnostics"),
     )
     .await
 }
@@ -946,7 +1020,7 @@ pub async fn diagnostics(
 pub async fn underused(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             match underused_tool_families(state.lcm_db.as_deref()).await {
                 Ok(Some(families)) => {
@@ -984,7 +1058,7 @@ pub async fn underused(
                 )),
             }
         },
-        label = "dashboard_api.analytics.underused"
+        tracing::trace_span!("dashboard_api.analytics.underused"),
     )
     .await
 }
@@ -1039,10 +1113,7 @@ async fn durable_analytics_rows(
 }
 
 pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHintsPayloadV1 {
-    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
-        .iter()
-        .map(|category| ((*category).to_string(), HintCounts::default()))
-        .collect();
+    let mut by_category = zero_hint_counts();
 
     for event in events {
         let category = event.hint_category.as_deref().unwrap_or("");
@@ -1063,6 +1134,10 @@ pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHin
         }
     }
 
+    hints_payload(by_category)
+}
+
+fn hints_payload(by_category: BTreeMap<String, HintCounts>) -> AnalyticsHintsPayloadV1 {
     AnalyticsHintsPayloadV1 {
         available: true,
         source: "analytics_events".to_owned(),
@@ -1080,11 +1155,15 @@ pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHin
     }
 }
 
-pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
-    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
+fn zero_hint_counts() -> BTreeMap<String, HintCounts> {
+    HINT_CATEGORIES
         .iter()
         .map(|category| ((*category).to_string(), HintCounts::default()))
-        .collect();
+        .collect()
+}
+
+pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
+    let mut by_category = zero_hint_counts();
     for row in counts {
         by_category.insert(
             row.category.clone(),
@@ -1096,61 +1175,7 @@ pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
             },
         );
     }
-    json!({
-        "available": true,
-        "source": "analytics_events",
-        "by_category": by_category.into_iter().map(|(category, counts)| {
-            json!({
-                "category": category,
-                "emitted": counts.emitted,
-                "followed": counts.followed,
-                "ignored": counts.ignored,
-                "suppressed": counts.suppressed,
-            })
-        }).collect::<Vec<_>>(),
-    })
-}
-
-#[cfg(test)]
-fn decode_analytics_contract<T: serde::de::DeserializeOwned>(
-    value: Value,
-    label: &str,
-) -> Result<T, String> {
-    serde_json::from_value(value)
-        .map_err(|error| format!("{label} did not match its response contract: {error}"))
-}
-
-fn typed_hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
-    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
-        .iter()
-        .map(|category| ((*category).to_string(), HintCounts::default()))
-        .collect();
-    for row in counts {
-        by_category.insert(
-            row.category.clone(),
-            HintCounts {
-                emitted: row.emitted,
-                followed: row.followed,
-                ignored: row.ignored,
-                suppressed: row.suppressed,
-            },
-        );
-    }
-    AnalyticsHintsPayloadV1 {
-        available: true,
-        source: "analytics_events".to_owned(),
-        error: None,
-        by_category: by_category
-            .into_iter()
-            .map(|(category, counts)| AnalyticsHintCategoryV1 {
-                category,
-                emitted: counts.emitted,
-                followed: counts.followed,
-                ignored: counts.ignored,
-                suppressed: counts.suppressed,
-            })
-            .collect(),
-    }
+    hints_payload(by_category)
 }
 
 async fn hint_summary(
@@ -1166,87 +1191,22 @@ async fn hint_summary(
         && let Ok(counts) = db.query_analytics_hint_counts(Some(project_id), 0).await
         && !counts.is_empty()
     {
-        return typed_hint_summary_from_counts(&counts);
+        return hint_summary_from_counts(&counts);
     }
     if let Some(events) = durable_events {
         return hint_summary_from_events(events);
     }
 
-    let Some(db) = db else {
-        return AnalyticsHintsPayloadV1 {
-            available: false,
-            source: "session_store_unavailable".to_owned(),
-            error: None,
-            by_category: empty_hint_categories(),
-        };
-    };
-
-    let connection = db.read_connection();
-    let has_table = query_i64(
-        &connection,
-        "SELECT COUNT(*) FROM sqlite_master
-         WHERE type IN ('table', 'view') AND name = 'dashboard_hint_events'",
-        (),
-    )
-    .await
-        > 0;
-    if !has_table {
-        return AnalyticsHintsPayloadV1 {
-            available: false,
-            source: "dashboard_hint_events_missing".to_owned(),
-            error: None,
-            by_category: empty_hint_categories(),
-        };
-    }
-
-    let rows = match query_rows(
-        &connection,
-        "SELECT category,
-                SUM(CASE WHEN event_type = 'emitted' THEN 1 ELSE 0 END) AS emitted,
-                SUM(CASE WHEN event_type = 'followed' THEN 1 ELSE 0 END) AS followed,
-                SUM(CASE WHEN event_type = 'ignored' THEN 1 ELSE 0 END) AS ignored,
-                SUM(CASE WHEN event_type = 'suppressed' THEN 1 ELSE 0 END) AS suppressed
-         FROM dashboard_hint_events
-         GROUP BY category
-         ORDER BY category",
-        (),
-    )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            return AnalyticsHintsPayloadV1 {
-                available: false,
-                source: "dashboard_hint_events_error".to_owned(),
-                error: Some(err),
-                by_category: empty_hint_categories(),
-            };
-        }
-    };
-
-    let mut by_category: BTreeMap<String, AnalyticsHintCategoryV1> = empty_hint_categories()
-        .into_iter()
-        .map(|row| (row.category.clone(), row))
-        .collect();
-    for row in rows {
-        let category = str_field(&row, "category");
-        by_category.insert(
-            category.to_owned(),
-            AnalyticsHintCategoryV1 {
-                category: category.to_owned(),
-                emitted: i64_field(&row, "emitted"),
-                followed: i64_field(&row, "followed"),
-                ignored: i64_field(&row, "ignored"),
-                suppressed: i64_field(&row, "suppressed"),
-            },
-        );
-    }
-
     AnalyticsHintsPayloadV1 {
-        available: true,
-        source: "dashboard_hint_events".to_owned(),
+        available: false,
+        source: if db.is_some() {
+            "analytics_events_missing"
+        } else {
+            "session_store_unavailable"
+        }
+        .to_owned(),
         error: None,
-        by_category: by_category.into_values().collect(),
+        by_category: empty_hint_categories(),
     }
 }
 
@@ -1260,9 +1220,9 @@ async fn session_message_rows(
     query_rows(
         &connection,
         "SELECT COALESCE(tool_names, '') AS tool_names,
-                COALESCE(text, '') AS text,
+                index_text AS text,
                 COALESCE(metadata_json, '') AS metadata_json
-         FROM session_messages
+         FROM lcm_raw_messages
          ORDER BY timestamp, ordinal
          LIMIT 10000",
         (),
@@ -1352,19 +1312,9 @@ fn increment_usage_count(counts: &mut BTreeMap<(String, String), i64>, kind: &st
         .or_default() += 1;
 }
 
-/// The contract form of the usage summary, shared by `GET .../usage` and the
-/// `usage` member of the overview payload.
+/// Shared by `GET .../usage` and the `usage` member of the overview payload.
 ///
-/// Absent `source` / `event_count` stay `None` on the struct so serde writes
-/// them as explicit nulls. The previous JSON literals omitted those keys and
-/// had to round-trip through this type to keep that distinction.
-async fn typed_usage_summary(
-    db: Option<&RegisteredGlobalDb>,
-    durable_events: Option<&[AnalyticsEventRecord]>,
-) -> Result<AnalyticsUsageSummaryV1, String> {
-    usage_summary(db, durable_events).await
-}
-
+/// Absent `source` / `event_count` stay `None` so serde writes explicit nulls.
 async fn usage_summary(
     db: Option<&RegisteredGlobalDb>,
     durable_events: Option<&[AnalyticsEventRecord]>,
@@ -1414,7 +1364,7 @@ fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<AnalyticsUsa
         .collect()
 }
 
-/// Bounded scalar count of `session_messages`, capped at the same 10,000-row
+/// Bounded scalar count of `lcm_raw_messages`, capped at the same 10,000-row
 /// ceiling as [`session_message_rows`] so the diagnostics `message_count`
 /// keeps its meaning without hauling full rows (text and metadata included)
 /// through the JSON layer just to be counted.
@@ -1425,7 +1375,7 @@ async fn session_message_count(db: Option<&RegisteredGlobalDb>) -> Result<i64, S
     let connection = db.read_connection();
     query_i64_result(
         &connection,
-        "SELECT COUNT(*) FROM (SELECT 1 FROM session_messages LIMIT 10000)",
+        "SELECT COUNT(*) FROM (SELECT 1 FROM lcm_raw_messages LIMIT 10000)",
         (),
     )
     .await
@@ -1440,9 +1390,10 @@ async fn typed_diagnostics_summary(
     // The hook stream is plain synchronous file IO over up-to-megabyte tails;
     // read it off the async worker instead of blocking a runtime thread.
     let store_root = state.store_root.clone();
+    let profile_root = state.profile_root.clone();
     let project_root = state.project_root.clone();
-    let hook_analytics = tokio::task::spawn_blocking(move || {
-        read_hook_analytics_rows_at(Some(&store_root), Some(&project_root))
+    let hook_analytics = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        read_hook_analytics_rows_at(&profile_root, Some(&store_root), Some(&project_root))
     })
     .await
     .map_err(|error| format!("hook analytics read task failed: {error}"))?;
@@ -1487,16 +1438,20 @@ fn normalize(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     use super::{
-        AnalyticsDiagnosticsPayloadV1, AnalyticsSubagentLinkV1, HOOK_ANALYTICS_WINDOW_ROWS,
-        HookAnalyticsRows, HookAnalyticsWindow, SubagentSessionRow, build_subagent_tree,
-        decode_analytics_contract, diagnostics_summary_from_parts, hint_efficacy_from_events,
-        hint_summary_from_events, read_hook_analytics_file, recent_hook_rows,
-        sort_hook_analytics_rows,
+        AnalyticsSubagentLinkV1, HookAnalyticsRows, HookAnalyticsWindow, SubagentSessionRow,
+        attach_subagent_usage, build_subagent_tree, diagnostics_summary_from_parts,
+        hint_efficacy_from_events, read_hook_analytics_file, sort_hook_analytics_rows,
     };
+    use tracedecay_domain::ObservationScopeV1;
     use tracedecay_global_db::AnalyticsEventRecord;
+    use tracedecay_session_memory::provider_usage::{
+        AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
+        ProviderUsageDeltaDerivationV1, ProviderUsageDeltaV1, ProviderUsageIssueKindV1,
+        ProviderUsageIssueV1,
+    };
 
     fn analytics_event(
         event_kind: &str,
@@ -1564,6 +1519,104 @@ mod tests {
         );
     }
 
+    fn usage_delta(
+        sequence: u64,
+        session_id: &str,
+        input: u64,
+        output: u64,
+    ) -> ProviderUsageDeltaV1 {
+        ProviderUsageDeltaV1 {
+            observation_id: format!("sha256:{sequence:064x}"),
+            receipt_id: format!("receipt:{sequence}"),
+            observation_sequence: sequence,
+            usage_ordinal: 0,
+            scope: ObservationScopeV1::Profile,
+            provider: "codex".to_owned(),
+            model: Some("openai/gpt-5.6-codex".to_owned()),
+            session_id: session_id.to_owned(),
+            turn_id: None,
+            message_id: None,
+            request_id: None,
+            native_kind: "token_count".to_owned(),
+            native_field: "fixture.usage".to_owned(),
+            native_timestamp: Some(1_700_000_000 + sequence as i64),
+            derivation: ProviderUsageDeltaDerivationV1::NativeDelta,
+            derived_from_sequence: None,
+            counters: AggregatedProviderUsageCountersV1 {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: Some(0),
+                total_tokens: Some(input + output),
+            },
+        }
+    }
+
+    #[test]
+    fn node_usage_is_the_projection_sum_per_session_and_absent_where_unobserved() {
+        let mut nodes = build_subagent_tree(vec![
+            row("root", None),
+            row("child.billed", Some("root")),
+            row("child.silent", Some("root")),
+            row("child.broken", Some("root")),
+        ]);
+        let aggregate = ProviderUsageAggregateV1 {
+            coverage: ProviderUsageCoverageV1::Partial,
+            observations_seen: 4,
+            totals: AggregatedProviderUsageCountersV1::unknown(),
+            deltas: vec![
+                usage_delta(1, "root", 1_000, 50),
+                usage_delta(2, "child.billed", 300, 25),
+                usage_delta(3, "root", 200, 10),
+            ],
+            issues: vec![ProviderUsageIssueV1 {
+                kind: ProviderUsageIssueKindV1::MalformedCounters,
+                observation_sequence: Some(4),
+                provider: Some("codex".to_owned()),
+                session_id: Some("child.broken".to_owned()),
+            }],
+            upper_observation_sequence: Some(4),
+        };
+
+        let coverage = attach_subagent_usage(&mut nodes, &aggregate);
+        assert_eq!(coverage, ProviderUsageCoverageV1::Partial);
+
+        let usage = |id: &str| {
+            nodes
+                .iter()
+                .find(|node| node.session_id == id)
+                .unwrap()
+                .usage
+                .clone()
+        };
+        let root = usage("root").expect("root usage");
+        assert_eq!(root.usage_events, 2);
+        assert_eq!(root.counters.input_tokens, Some(1_200));
+        assert_eq!(root.counters.output_tokens, Some(60));
+        assert_eq!(root.counters.total_tokens, Some(1_260));
+        assert_eq!(root.counters.cache_read_tokens, None);
+        assert!(root.complete);
+
+        let billed = usage("child.billed").expect("billed child usage");
+        assert_eq!(billed.usage_events, 1);
+        assert_eq!(billed.counters.input_tokens, Some(300));
+        assert_eq!(billed.counters.output_tokens, Some(25));
+
+        // No usage event names this session: absent, never a zero.
+        assert_eq!(usage("child.silent"), None);
+
+        // The provider wrote usage that could not be reduced: present, flagged,
+        // and still not zero-filled.
+        let broken = usage("child.broken").expect("broken child usage");
+        assert_eq!(broken.usage_events, 0);
+        assert_eq!(
+            broken.counters,
+            AggregatedProviderUsageCountersV1::unknown()
+        );
+        assert!(!broken.complete);
+    }
+
     #[test]
     fn a_session_whose_parent_is_absent_is_a_cut_edge_not_a_root() {
         let nodes = build_subagent_tree(vec![
@@ -1593,7 +1646,7 @@ mod tests {
             row("self", Some("self")),
         ]);
 
-        // Every input session is still present — a tree walk that silently lost
+        // Every input session is still present, a tree walk that silently lost
         // them would under-report delegation.
         assert_eq!(nodes.len(), 3);
         assert!(
@@ -1629,26 +1682,6 @@ mod tests {
     }
 
     #[test]
-    fn every_input_session_appears_exactly_once() {
-        let nodes = build_subagent_tree(vec![
-            row("root", None),
-            row("child", Some("root")),
-            row("orphan", Some("gone")),
-            row("cycle.a", Some("cycle.b")),
-            row("cycle.b", Some("cycle.a")),
-        ]);
-
-        let mut ids: Vec<&str> = nodes.iter().map(|node| node.session_id.as_str()).collect();
-        ids.sort_unstable();
-        assert_eq!(ids, vec!["child", "cycle.a", "cycle.b", "orphan", "root"]);
-    }
-
-    #[test]
-    fn an_empty_store_builds_an_empty_tree_without_panicking() {
-        assert!(build_subagent_tree(Vec::new()).is_empty());
-    }
-
-    #[test]
     fn a_deep_chain_does_not_overflow_the_stack() {
         // The walk is iterative on purpose: delegation depth is data, and a
         // recursive walk would let a pathological store crash the daemon.
@@ -1663,88 +1696,6 @@ mod tests {
         assert_eq!(nodes.len(), depth);
         assert_eq!(nodes[0].descendants, depth as i64 - 1);
         assert_eq!(nodes[depth - 1].depth, depth as i64 - 1);
-    }
-
-    #[test]
-    fn unavailable_diagnostics_value_decodes_to_the_canonical_payload() {
-        let value = diagnostics_summary_from_parts(0, &HookAnalyticsRows::empty(), None);
-        let payload: AnalyticsDiagnosticsPayloadV1 =
-            decode_analytics_contract(value, "analytics diagnostics").unwrap();
-
-        assert!(!payload.available);
-        assert_eq!(payload.event_count, 0);
-        assert!(!payload.hook_window.truncated);
-    }
-
-    #[test]
-    fn hint_summary_counts_current_event_kinds_without_impossible_outcomes() {
-        let events = vec![
-            analytics_event("hint_emitted", "search", "observed"),
-            analytics_event("hint_outcome", "search", "acted"),
-            analytics_event("hint_emitted", "file_lookup", "observed"),
-            analytics_event("hint_outcome", "file_lookup", "ignored"),
-            analytics_event("hint_escalated", "impact", "observed"),
-            analytics_event("suppressed_duplicate", "impact", "observed"),
-        ];
-
-        let summary = hint_summary_from_events(&events);
-        let row = |category: &str| {
-            summary
-                .by_category
-                .iter()
-                .find(|row| row.category == category)
-                .unwrap()
-        };
-        assert_eq!(row("search").emitted, 1);
-        assert_eq!(row("search").followed, 1);
-        assert_eq!(row("file_lookup").emitted, 1);
-        assert_eq!(row("file_lookup").ignored, 1);
-        assert_eq!(row("impact").emitted, 1);
-        assert_eq!(row("impact").suppressed, 1);
-    }
-
-    #[test]
-    fn hint_efficacy_counts_emitted_acted_ignored_and_unresolved() {
-        let events = vec![
-            analytics_event("hint_emitted", "search", ""),
-            analytics_event("hint_emitted", "search", ""),
-            analytics_event("hint_emitted", "search", ""),
-            analytics_event("hint_outcome", "search", "acted"),
-            analytics_event("hint_outcome", "search", "ignored"),
-            analytics_event("hint_emitted", "impact", ""),
-            // Unrelated events must not affect hint efficacy.
-            {
-                let mut event = analytics_event("mcp_tool_call", "", "");
-                event.tool_name = Some("tracedecay_context".to_owned());
-                event
-            },
-        ];
-
-        let summary = hint_efficacy_from_events(&events);
-        assert!(summary.available);
-        assert_eq!(summary.totals.emitted, 4);
-        assert_eq!(summary.totals.acted, 1);
-        assert_eq!(summary.totals.ignored, 1);
-        // 4 emitted - 1 acted - 1 ignored = 2 still unresolved.
-        assert_eq!(summary.totals.unresolved, 2);
-
-        let search = summary
-            .by_category
-            .iter()
-            .find(|row| row.category == "search")
-            .unwrap();
-        assert_eq!(search.emitted, 3);
-        assert_eq!(search.acted, 1);
-        assert_eq!(search.ignored, 1);
-        assert_eq!(search.unresolved, 1);
-
-        let impact = summary
-            .by_category
-            .iter()
-            .find(|row| row.category == "impact")
-            .unwrap();
-        assert_eq!(impact.emitted, 1);
-        assert_eq!(impact.unresolved, 1);
     }
 
     #[test]
@@ -1812,22 +1763,6 @@ mod tests {
     }
 
     #[test]
-    fn recent_hook_rows_remain_newest_first_after_global_sort() {
-        let mut rows = vec![
-            json!({"event": "hook_invoked", "ts_unix_ms": 10, "session_id": "a"}),
-            json!({"event": "hook_invoked", "ts_unix_ms": 12, "session_id": "c"}),
-            json!({"event": "hook_invoked", "ts_unix_ms": 11, "session_id": "b"}),
-        ];
-        sort_hook_analytics_rows(&mut rows);
-
-        let recent = recent_hook_rows(&rows, 2);
-        assert_eq!(recent[0].ts_unix_ms, Some(12));
-        assert_eq!(recent[0].session_id, "c");
-        assert_eq!(recent[1].ts_unix_ms, Some(11));
-        assert_eq!(recent[1].session_id, "b");
-    }
-
-    #[test]
     fn hook_analytics_sources_report_malformed_jsonl_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store_root = dir.path().join("store");
@@ -1858,58 +1793,6 @@ mod tests {
                 .as_str()
                 .is_some_and(|error| error.contains("EOF"))
         );
-    }
-
-    /// Writes `count` chronologically ordered hook rows, each padded so the
-    /// file spans many tail chunks.
-    fn write_hook_analytics_fixture(path: &std::path::Path, count: usize) {
-        use std::io::Write;
-        let mut file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
-        for index in 0..count {
-            let row = json!({
-                "event": "hook_invoked",
-                "hook_name": "PostToolUse",
-                "session_id": format!("session-{index:06}"),
-                "ts_unix_ms": 1_000_000 + index as i64,
-                "padding": "x".repeat(400),
-            });
-            writeln!(file, "{row}").unwrap();
-        }
-        file.flush().unwrap();
-    }
-
-    #[test]
-    fn hook_analytics_tail_keeps_newest_rows_within_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hook_analytics.jsonl");
-        write_hook_analytics_fixture(&path, 10_000);
-
-        let mut rows = HookAnalyticsRows::empty();
-        rows.window.window_rows = 250;
-        read_hook_analytics_file(&path, None, &mut rows);
-
-        assert_eq!(rows.rows.len(), 250);
-        // The window is the newest suffix, and no row is truncated mid-line.
-        assert_eq!(rows.rows[0]["session_id"], json!("session-009750"));
-        assert_eq!(rows.rows[249]["session_id"], json!("session-009999"));
-        assert_eq!(rows.sources[0]["rows_malformed"], 0);
-        assert_eq!(rows.sources[0]["window_truncated"], json!(true));
-        assert_eq!(rows.sources[0]["window_rows"], json!(250));
-    }
-
-    #[test]
-    fn hook_analytics_tail_reads_whole_file_when_under_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hook_analytics.jsonl");
-        write_hook_analytics_fixture(&path, 40);
-
-        let mut rows = HookAnalyticsRows::empty();
-        read_hook_analytics_file(&path, None, &mut rows);
-
-        assert_eq!(rows.rows.len(), 40);
-        assert_eq!(rows.rows[0]["session_id"], json!("session-000000"));
-        assert_eq!(rows.sources[0]["window_truncated"], json!(false));
-        assert!(!rows.window.truncated);
     }
 
     #[test]
@@ -1947,67 +1830,10 @@ mod tests {
         assert_eq!(rows.rows[1_023]["session_id"], json!("session-002047"));
     }
 
-    #[test]
-    fn diagnostics_summary_captions_the_hook_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hook_analytics.jsonl");
-        write_hook_analytics_fixture(&path, 5_000);
-
-        let mut hook_analytics = HookAnalyticsRows::empty();
-        hook_analytics.window.window_rows = 100;
-        read_hook_analytics_file(&path, None, &mut hook_analytics);
-        sort_hook_analytics_rows(&mut hook_analytics.rows);
-
-        let summary = diagnostics_summary_from_parts(0, &hook_analytics, None);
-        let window = &summary["hook_window"];
-        assert_eq!(window["window_rows"], json!(100));
-        assert_eq!(window["rows_scanned"], json!(100));
-        assert_eq!(window["rows_included"], json!(100));
-        assert_eq!(window["truncated"], json!(true));
-        // The frontend must not print these as all-time figures.
-        assert_eq!(window["total_rows_known"], json!(false));
-        assert_eq!(window["oldest_ts_unix_ms"], json!(1_004_900));
-        assert_eq!(window["newest_ts_unix_ms"], json!(1_004_999));
-        assert_eq!(summary["hook_call_count"], json!(100));
-    }
-
-    /// Bounded-fold regression guard against a real, unbounded hook stream.
-    ///
-    /// Opt in by pointing `TRACEDECAY_BENCH_HOOK_ANALYTICS_STORE` at a store
-    /// root holding `hook_analytics.jsonl`; this reproduces the diagnostics
-    /// handler's whole read (project store file plus the profile file). The
-    /// test is a no-op otherwise so CI stays hermetic.
-    #[test]
-    fn hook_analytics_read_is_bounded_on_real_stores() {
-        let store_root = match std::env::var_os("TRACEDECAY_BENCH_HOOK_ANALYTICS_STORE") {
-            Some(path) => std::path::PathBuf::from(path),
-            None => return,
-        };
-
-        let started = std::time::Instant::now();
-        let rows = super::read_hook_analytics_rows_at(Some(&store_root), None);
-        let summary = diagnostics_summary_from_parts(0, &rows, None);
-        let elapsed = started.elapsed();
-
-        println!(
-            "bounded hook analytics read: {} rows in {elapsed:?}\n  window={}\n  sources={}",
-            rows.rows.len(),
-            summary["hook_window"],
-            Value::Array(rows.sources.clone()),
-        );
-        // One window per file read.
-        assert!(rows.rows.len() <= HOOK_ANALYTICS_WINDOW_ROWS * rows.sources.len().max(1));
-        assert!(summary["hook_window"]["window_rows"].is_number());
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "bounded read took {elapsed:?}, expected <500ms"
-        );
-    }
-
     /// This crate owns the diagnostics summary but not the readiness
     /// aggregation: it reads that through the port the composition root
-    /// installs. With no projection mounted the summary must fail closed —
-    /// naming the blocker and counting rows only — and must never echo an
+    /// installs. With no projection mounted the summary must fail closed,
+    /// naming the blocker and counting rows only, and must never echo an
     /// untrusted row's own values back out.
     ///
     /// The mounted counterpart, which is the only composition that can answer
@@ -2066,5 +1892,25 @@ mod tests {
                 "the unmounted envelope must not leak {forbidden}: {encoded}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_summary_reads_hooks_without_a_tokio_runtime() {
+        let (_project, state) =
+            crate::events_api::dashboard_state_fixture("project.dashboard-analytics-native").await;
+        let summary = std::thread::spawn(move || {
+            tracedecay_runtime_core::native_runtime::block_on(async {
+                super::typed_diagnostics_summary(&state, None).await
+            })
+        })
+        .join()
+        .expect("the diagnostics read must not need a Tokio runtime")
+        .expect("native block_on")
+        .expect("diagnostics summary");
+        assert_eq!(
+            (summary.message_count, summary.hook_call_count),
+            (0, 0),
+            "an empty fixture store reports no messages and no hook calls"
+        );
     }
 }

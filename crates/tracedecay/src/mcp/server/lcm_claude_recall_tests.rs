@@ -15,12 +15,11 @@ use tempfile::TempDir;
 use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId};
 
 use super::McpServer;
-use crate::host_admission::HostAdmissionTestRuntimeV1;
-use crate::tracedecay::TraceDecayOpenOptions;
 use tracedecay_mcp::transport::JsonRpcRequest;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::claude::ClaudeSource;
-use tracedecay_usecases::observation::ObservationCancellation;
+use tracedecay_sessions::observation::ObservationCancellation;
+use tracedecay_sessions::runtime::hosts::claude::ClaudeSource;
 
 const PROJECT_ID: &str = "project.claude-recall";
 const SESSION: &str = "claude-recall-session";
@@ -29,54 +28,17 @@ const SHARED_TERM: &str = "quicksilver";
 /// Present in exactly one record.
 const UNIQUE_TERM: &str = "pangolin";
 
-fn git(root: &std::path::Path, args: &[&str]) {
-    let status = std::process::Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(root)
-    .args(args)
-    .status()
-    .expect("git command should run");
-    assert!(status.success(), "git {args:?} failed");
-}
-
-async fn server_with_authorities() -> (Arc<McpServer>, TempDir, crate::config::PinnedUserDataDir) {
-    let pin = crate::config::PinnedUserDataDir::new();
-    let dir = TempDir::new().expect("temp project");
-    git(dir.path(), &["init", "-q", "-b", "main"]);
-    git(dir.path(), &["config", "user.email", "test@example.com"]);
-    git(dir.path(), &["config", "user.name", "Test"]);
-    std::fs::write(dir.path().join(".gitignore"), ".tracedecay/\n").expect("gitignore");
-    std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
-    std::fs::write(
-        dir.path().join("src/lib.rs"),
-        "pub fn value() -> u8 { 1 }\n",
-    )
-    .expect("source");
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-q", "-m", "initial"]);
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        crate::config::user_data_dir().expect("isolated profile root"),
-        dir.path(),
-        ProjectId::new(PROJECT_ID).expect("typed project identity"),
-    )
-    .await
-    .expect("registered Claude recall runtime");
-    let graph = runtime
-        .initialize_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
-        .await
-        .expect("daemon-owned project init");
-    let context = runtime
-        .into_mcp_server_context_for_test(graph, None)
-        .expect("registered MCP server context");
+async fn server_with_authorities() -> (Arc<McpServer>, TempDir, TempDir) {
+    let (context, dir, profile) =
+        crate::test_support::host_admission::registered_git_project_context_for_test(PROJECT_ID)
+            .await;
     let server =
         crate::daemon::retained_test_support::mcp_server_with_project_retained_owner_for_test(
             context,
         )
         .await
         .expect("retained-owner MCP test server");
-    (server, dir, pin)
+    (server, dir, profile)
 }
 
 /// Calls one retained MCP tool and returns its evidence value.
@@ -122,7 +84,7 @@ fn payload(evidence: &Value) -> &Value {
 }
 
 /// Four conversational Claude records (two user, two assistant) whose text all
-/// contains [`SHARED_TERM`]; the third additionally contains [`UNIQUE_TERM`].
+/// contains [`SHARED_TERM`]; the third also contains [`UNIQUE_TERM`].
 fn write_claude_transcript(home: &std::path::Path, project: &std::path::Path) {
     let dir = home.join(".claude/projects/-claude-recall");
     std::fs::create_dir_all(&dir).expect("transcript directory");
@@ -206,7 +168,7 @@ async fn ingest_and_project(
         project_id: ProjectId::new(PROJECT_ID).expect("typed project identity"),
     };
     let stats =
-        tracedecay_sessions::runtime::claude_observation::ingest_source_with_observations_with_admission(
+        tracedecay_sessions::runtime::hosts::claude_observation::ingest_source_with_observations_with_admission(
             &source,
             project,
             scope,
@@ -232,37 +194,31 @@ async fn ingest_and_project(
         .expect("materialize claude temporal projection");
 }
 
-async fn ingested_server() -> (
-    Arc<McpServer>,
-    TempDir,
-    TempDir,
-    crate::config::PinnedUserDataDir,
-) {
-    let (server, dir, pin) = server_with_authorities().await;
+async fn ingested_server() -> (Arc<McpServer>, TempDir, TempDir, TempDir) {
+    let (server, dir, profile) = server_with_authorities().await;
     let home = TempDir::new().expect("temp home");
     write_claude_transcript(home.path(), dir.path());
     let runtime = server
         .host_admission_test_runtime_for_test()
         .expect("retained host-admission test runtime");
     ingest_and_project(runtime, home.path(), dir.path()).await;
-    (server, dir, home, pin)
+    (server, dir, home, profile)
 }
 
 fn omission_reasons(evidence: &Value) -> Vec<String> {
     evidence["omissions"]
         .as_array()
-        .map(|omissions| {
+        .map_or_default(|omissions| {
             omissions
                 .iter()
                 .map(|omission| omission["reason"].as_str().unwrap_or("").to_string())
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 #[tokio::test]
 async fn lcm_grep_returns_every_matching_claude_message() {
-    let (server, _dir, _home, _pin) = ingested_server().await;
+    let (server, _dir, _home, _profile) = ingested_server().await;
 
     let evidence = call_tool(
         &server,
@@ -294,7 +250,7 @@ async fn lcm_grep_returns_every_matching_claude_message() {
 
 #[tokio::test]
 async fn lcm_grep_finds_a_term_stored_in_exactly_one_message() {
-    let (server, _dir, _home, _pin) = ingested_server().await;
+    let (server, _dir, _home, _profile) = ingested_server().await;
 
     let evidence = call_tool(
         &server,
@@ -332,7 +288,7 @@ async fn lcm_grep_finds_a_term_stored_in_exactly_one_message() {
 
 #[tokio::test]
 async fn lcm_expand_query_returns_every_matching_claude_message() {
-    let (server, _dir, _home, _pin) = ingested_server().await;
+    let (server, _dir, _home, _profile) = ingested_server().await;
 
     let evidence = call_tool(
         &server,
@@ -371,7 +327,7 @@ async fn lcm_expand_query_returns_every_matching_claude_message() {
 
 #[tokio::test]
 async fn lcm_expand_reads_every_live_raw_message_store_id() {
-    let (server, _dir, _home, _pin) = ingested_server().await;
+    let (server, _dir, _home, _profile) = ingested_server().await;
 
     let loaded = call_tool(
         &server,

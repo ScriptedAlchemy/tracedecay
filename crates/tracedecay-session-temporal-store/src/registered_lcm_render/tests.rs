@@ -111,7 +111,7 @@ fn summary_describe_request(node_id: &str) -> LcmDescribeRequest {
 /// lineage still names, so before this the registered render path aborted every
 /// summary older than the drop window with an ownership error. Rendering must
 /// survive and report the dropped source as retention-expired.
-#[tokio::test]
+#[asupersync::test]
 async fn registered_render_survives_retention_dropped_raw_sources() {
     let directory = tempdir().expect("temporary session store");
     let runtime = seeded_render_fixture(directory.path()).await;
@@ -191,7 +191,7 @@ async fn registered_render_survives_retention_dropped_raw_sources() {
 /// Absence is retention; presence under another session is still a disclosure
 /// boundary. A raw row that exists but belongs elsewhere must keep failing
 /// closed rather than riding the retention path.
-#[tokio::test]
+#[asupersync::test]
 async fn registered_render_still_refuses_a_foreign_session_summary_source() {
     let directory = tempdir().expect("temporary session store");
     let runtime = seeded_render_fixture(directory.path()).await;
@@ -235,7 +235,7 @@ async fn registered_render_still_refuses_a_foreign_session_summary_source() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn registered_metadata_rendering_matches_the_canonical_fixture() {
     let directory = tempdir().expect("temporary session store");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -352,7 +352,7 @@ async fn registered_metadata_rendering_matches_the_canonical_fixture() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
     let directory = tempdir().expect("temporary session store");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -391,5 +391,88 @@ async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
     assert!(
         matches!(error, LcmError::PayloadIntegrityMismatch),
         "expected a payload-integrity refusal, got: {error:?}"
+    );
+}
+
+#[asupersync::test]
+async fn session_describe_reports_the_message_not_an_empty_stub() {
+    let directory = tempdir().expect("temporary session store");
+    let runtime = seeded_render_fixture(directory.path()).await;
+    let content = format!(
+        "canonical raw {} hidden tail",
+        "x".repeat(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS)
+    );
+    runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered session database")
+        .writer_connection()
+        .expect("registered writer")
+        .execute_batch(&format!(
+            "UPDATE lcm_raw_messages
+                SET content = '{content}'
+              WHERE message_id = 'message-a';"
+        ))
+        .await
+        .expect("store a message longer than its derived preview");
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered session database")
+        .read_snapshot()
+        .await
+        .expect("registered read snapshot");
+
+    let description = describe(
+        &snapshot,
+        LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "session-a".to_string(),
+            target: LcmDescribeTarget::Session,
+        },
+        &canonical_fixture_relations(),
+    )
+    .await
+    .expect("session describe");
+
+    let overview = description
+        .raw_messages
+        .iter()
+        .find(|message| message.message_id == "message-a")
+        .expect("describe must list the captured message");
+    assert_eq!(
+        overview.content_preview,
+        tracedecay_lcm::retrieval_content::derived_text_for_snippet(&content)
+    );
+    assert!(!overview.content_preview.contains("hidden tail"));
+    assert_eq!(
+        overview.content_range.total_chars,
+        content.chars().count() as u64
+    );
+    assert!(overview.content_range.truncated);
+    let summary = description
+        .summary_nodes
+        .iter()
+        .find(|node| node.node_id == "summary-child")
+        .expect("describe must list the summary");
+    assert_eq!(summary.summary_preview, "canonical child summary");
+
+    let payload = describe(
+        &snapshot,
+        LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "session-a".to_string(),
+            target: LcmDescribeTarget::ExternalPayload {
+                payload_ref: "payload-a".to_string(),
+            },
+        },
+        &[],
+    )
+    .await
+    .expect("external payload describe");
+    assert_eq!(
+        payload
+            .external_payload
+            .expect("payload metadata")
+            .content_preview,
+        "canonical external payload"
     );
 }

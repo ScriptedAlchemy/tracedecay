@@ -8,7 +8,13 @@ Codex.
 
 - **MCP server** (`.mcp.json`): the `tracedecay` stdio server exposing the code
   graph, search, call-graph, impact, memory, and session-recall tools.
-- **Skills** (`skills/`): one skill per common workflow — searching for code,
+- **Code explorer** (`tracedecay-explorer`): a local MCP App for project
+  selection, code search, symbol inspection, and bounded graphs. It requires
+  Node.js 20 or later on PATH; invoke `tracedecay_workspace` to open it.
+  Both MCP servers use the resolved TraceDecay binary from installation.
+  The graph server runs `tracedecay serve --full-tool-list`; see
+  [Code mode](#code-mode).
+- **Skills** (`skills/`): one skill per common workflow, searching for code,
   reading code cheaply, mapping architecture, impact analysis, reviewing diffs,
   recalling project memory and session context, and more. Codex auto-discovers
   each `SKILL.md` by its `name`/`description` frontmatter and loads the body
@@ -18,7 +24,9 @@ Codex.
   `hooks` field): `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
   `PostToolUse`, `PostCompact`, and `Stop`. `SessionStart` and `PostToolUse`
   can return daemon-approved guidance through Codex's documented
-  `additionalContext` response. The other events are capture-only or bounded
+  `additionalContext` response. In a registered project, `SessionStart` leads
+  with the skill mandate from `plugin/hooks/session-start-context.md`, as on
+  Claude. The other events are capture-only or bounded
   pressure probes. The daemon owns capture, preflight, compaction, and any
   model work.
 
@@ -26,25 +34,28 @@ The source `hooks/hooks-codex.json` is an empty seed for repo-local bundles.
 Global Codex installs populate `hooks/hooks.json` from the managed hook table
 at install time.
 
-Codex skips newly installed or changed command hooks until they are trusted —
-run `/hooks` in Codex to review and trust the tracedecay hooks.
+Codex skips newly installed or changed command hooks until they are trusted.
+Run `/hooks` in Codex to review and trust the tracedecay hooks.
 
-Every MCP tool is also available from the shell as `tracedecay tool <name>`
+The graph server's tools are also available from the shell as `tracedecay tool <name>`
 (`tracedecay tool` lists tools; `tracedecay tool <name> --help` shows
 parameters). The bundled `using-the-cli` skill and injected steering use that
 CLI fallback when MCP transport errors or times out, instead of querying
 `.tracedecay` databases.
-
-For literal strings, regexes, and config keys inside indexed code, use
-`tracedecay_grep`; reserve `tracedecay_search` for symbol names and
-`tracedecay_context` for concept-level discovery.
+The CLI uses the same daemon authority and is not an availability guarantee;
+neither client starts a missing or stopped service. If the daemon is
+unavailable or intentionally held, report that state and use scoped native
+tools without retrying or changing daemon lifecycle.
 
 Before running `cargo check`/`tsc`/`clippy` in the shell, or when shell output
 shows compile errors, the injected steering routes the moment to tracedecay
-diagnostics: paste captured output into `tracedecay_diagnose`, or run
-`tracedecay_diagnostics` for fresh structured errors mapped to the enclosing
-symbols and callers. The bundled `fixing-build-and-type-errors` skill covers
-this workflow.
+diagnostics: paste captured output into `tracedecay_diagnose`, or read the
+published diagnostics with `tracedecay_diagnostics`, mapped to the enclosing
+symbols and callers. A TypeScript project with its own `node_modules/.bin/tsc`
+is checked by the daemon automatically after each complete index generation;
+other toolchains publish through `tracedecay_diagnose`, and a read with no
+publication is a typed problem naming the next step. The bundled
+`fixing-build-and-type-errors` skill covers this workflow.
 
 `PostCompact` is an admission-only request. The daemon schedules compaction
 against its canonical session data and owns model execution, retries, and
@@ -53,3 +64,36 @@ Codex does not expose an authenticated compacted payload through this hook,
 so pressure-only compaction stays read-only: the daemon reports
 native-summary publication as unavailable and does not mutate transcript
 state.
+
+## Code mode
+
+Codex can call tools from a model-written JavaScript program instead of one
+tool call per turn. The program runs in Codex's `exec` sandbox, calls each MCP
+tool as `await tools.mcp__graph__tracedecay_<name>(args)`, and returns only
+what it prints. Codex 0.163 with current GPT models already works this way
+with no feature flag: every TraceDecay call arrives from `exec`.
+
+TraceDecay adapts the graph server to that host:
+
+- The server lists every tool with its full input schema
+  (`--full-tool-list`). Codex finds tools through its own `ALL_TOOLS` and
+  `tools.tool_search`, and it builds each tool's TypeScript declaration from
+  the input schema.
+- The server's `initialize` instructions are three short sentences. Codex
+  prefixes them to every tool description it shows a program, so a program
+  that lists 20 tools pays for them 20 times.
+- Results keep the default Markdown rendering. Programs print results rather
+  than parse them, and `format: "json"` returns the full typed envelope,
+  which is several times larger. Ask for `format: "json"` only when the
+  program reads specific fields.
+- Repeat-read pointers are off, because the program that receives a pointer
+  cannot act on it.
+- `tracedecay_analytics` still counts each tool by name. The daemon records
+  every call the program makes; Codex reports only `exec` to hooks, and the
+  TraceDecay `PostToolUse` hook matches only `Bash` and `apply_patch`.
+
+The full tool list and the short instructions together cut input per task
+by 13% on gpt-5.6-sol and 9% on gpt-6.1-sol in the agent-adoption eval,
+without a measurable change in task success on its small fixture. The
+measurements and every decision behind this section are in
+[`docs/code-mode/decisions.tsv`](../docs/code-mode/decisions.tsv).

@@ -1,28 +1,31 @@
 use rusqlite::{Row, params};
+use tracedecay_domain::UtcMicros;
 use tracedecay_store::{
-    CommandDigestV1, DurabilityClassV1, IdempotencyIdentityV1, RuntimeTransactionScopeV1,
-    StoreCommitReceiptV1, StoreIdempotencyKeyV1, StoreOperationIdV1, StoreRuntimeBindingV1,
+    CommandDigestV1, CommitSequenceV1, DurabilityClassV1, IdempotencyIdentityV1,
+    OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeTransactionIdV1,
+    RuntimeTransactionScopeV1, StoreCommitReceiptV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
+    StoreRuntimeBindingV1,
 };
 
 use super::{
     LedgerError,
-    sqlite::{BindingKey, LedgerTransaction, Submission, decode_json, sqlite_u64},
+    sqlite::{BindingKey, LedgerTransaction, Submission, decode_json, encode_json, sqlite_u64},
 };
 
-const IDEMPOTENCY_TABLE: &str = "td_runtime_writer_idempotency_v1";
+const IDEMPOTENCY_TABLE: &str = "td_runtime_writer_idempotency_v2";
 const SELECT_IDEMPOTENCY: &str = r#"
-SELECT request_digest, original_receipt_json, transaction_scope_json,
-       operation_id, durability_json, committed_at_micros
-FROM td_runtime_writer_idempotency_v1
+SELECT request_digest, operation_id, transaction_id, commit_sequence,
+       durability_json, priority_json, opened_at_micros, committed_at_micros
+FROM td_runtime_writer_idempotency_v2
 WHERE shard_json = ?1 AND incarnation = ?2 AND authority_epoch = ?3
   AND idempotency_key = ?4
 "#;
 const INSERT_IDEMPOTENCY: &str = r#"
-INSERT OR IGNORE INTO td_runtime_writer_idempotency_v1 (
+INSERT OR IGNORE INTO td_runtime_writer_idempotency_v2 (
     shard_json, incarnation, authority_epoch, idempotency_key, request_digest,
-    original_receipt_json, transaction_scope_json, operation_id, durability_json,
-    committed_at_micros
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+    operation_id, transaction_id, commit_sequence, durability_json, priority_json,
+    opened_at_micros, committed_at_micros
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
 "#;
 
 #[derive(Debug)]
@@ -40,7 +43,7 @@ struct IdempotencyRecord {
     durability: DurabilityClassV1,
 }
 
-#[hotpath::measure(label = "rusqlite.ledger.idempotency_lookup")]
+#[tracing::instrument(name = "rusqlite.ledger.idempotency_lookup", level = "trace", skip_all)]
 pub(super) fn disposition(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
@@ -80,12 +83,11 @@ pub(crate) fn lookup_receipt(
     Ok(load(transaction, binding, &idempotency.key)?.map(|record| record.receipt))
 }
 
-#[hotpath::measure(label = "rusqlite.ledger.idempotency_insert")]
+#[tracing::instrument(name = "rusqlite.ledger.idempotency_insert", level = "trace", skip_all)]
 pub(super) fn insert(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
     receipt: &StoreCommitReceiptV1,
-    receipt_json: &str,
 ) -> Result<(), LedgerError> {
     let changed = transaction.execute(
         INSERT_IDEMPOTENCY,
@@ -95,10 +97,15 @@ pub(super) fn insert(
             submission.authority_epoch_sql,
             submission.metadata.idempotency.key.as_str(),
             submission.metadata.idempotency.command_digest.as_str(),
-            receipt_json,
-            &submission.transaction_scope_json,
             submission.metadata.operation_id.as_str(),
+            submission.transaction_scope.transaction_id.as_str(),
+            sqlite_u64(receipt.commit_sequence.0, "commit sequence")?,
             &submission.durability_json,
+            encode_json(
+                &submission.transaction_scope.compatibility.priority,
+                "priority_json"
+            )?,
+            submission.transaction_scope.opened_at.0,
             receipt.committed_at.0,
         ],
     )?;
@@ -125,14 +132,14 @@ fn load(
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
-    let record = decode_row(row, binding, key)?;
-    if rows.next()?.is_some() {
-        return Err(LedgerError::Corrupt {
-            table: IDEMPOTENCY_TABLE,
-            field: "duplicate idempotency identity",
-        });
+    decode_row(row, binding, key).map(Some)
+}
+
+fn corrupt(field: &'static str) -> LedgerError {
+    LedgerError::Corrupt {
+        table: IDEMPOTENCY_TABLE,
+        field,
     }
-    Ok(Some(record))
 }
 
 fn decode_row(
@@ -141,49 +148,46 @@ fn decode_row(
     key: &StoreIdempotencyKeyV1,
 ) -> Result<IdempotencyRecord, LedgerError> {
     let request_digest =
-        CommandDigestV1::new(row.get::<_, String>(0)?).map_err(|_| LedgerError::Corrupt {
-            table: IDEMPOTENCY_TABLE,
-            field: "request_digest",
-        })?;
-    let receipt: StoreCommitReceiptV1 = decode_json(
-        &row.get::<_, String>(1)?,
-        IDEMPOTENCY_TABLE,
-        "original_receipt_json",
-    )?;
-    let transaction_scope: RuntimeTransactionScopeV1 = decode_json(
-        &row.get::<_, String>(2)?,
-        IDEMPOTENCY_TABLE,
-        "transaction_scope_json",
-    )?;
+        CommandDigestV1::new(row.get::<_, String>(0)?).map_err(|_| corrupt("request_digest"))?;
     let operation_id =
-        StoreOperationIdV1::new(row.get::<_, String>(3)?).map_err(|_| LedgerError::Corrupt {
-            table: IDEMPOTENCY_TABLE,
-            field: "operation_id",
-        })?;
+        StoreOperationIdV1::new(row.get::<_, String>(1)?).map_err(|_| corrupt("operation_id"))?;
+    let transaction_id = RuntimeTransactionIdV1::new(row.get::<_, String>(2)?)
+        .map_err(|_| corrupt("transaction_id"))?;
+    let commit_sequence =
+        u64::try_from(row.get::<_, i64>(3)?).map_err(|_| corrupt("commit_sequence"))?;
     let durability: DurabilityClassV1 = decode_json(
         &row.get::<_, String>(4)?,
         IDEMPOTENCY_TABLE,
         "durability_json",
     )?;
-    let committed_at_micros: i64 = row.get(5)?;
-    let receipt_binding = StoreRuntimeBindingV1::new(
-        receipt.shard_id.clone(),
-        receipt.incarnation,
-        receipt.authority_epoch,
-    );
-    if receipt.validate().is_err()
-        || receipt_binding != *binding
-        || receipt.idempotency.key != *key
-        || receipt.idempotency.command_digest != request_digest
-        || receipt.operation_id != operation_id
-        || receipt.committed_at.0 != committed_at_micros
-        || transaction_scope.compatibility.binding != receipt_binding
-        || transaction_scope.compatibility.durability != durability
-    {
-        return Err(LedgerError::Corrupt {
-            table: IDEMPOTENCY_TABLE,
-            field: "original receipt binding",
-        });
+    let priority: OperationPriorityV1 = decode_json(
+        &row.get::<_, String>(5)?,
+        IDEMPOTENCY_TABLE,
+        "priority_json",
+    )?;
+    let receipt = StoreCommitReceiptV1 {
+        operation_id,
+        idempotency: IdempotencyIdentityV1 {
+            key: key.clone(),
+            command_digest: request_digest.clone(),
+        },
+        shard_id: binding.shard_id.clone(),
+        incarnation: binding.incarnation,
+        authority_epoch: binding.authority_epoch,
+        commit_sequence: CommitSequenceV1(commit_sequence),
+        committed_at: UtcMicros(row.get(7)?),
+    };
+    let transaction_scope = RuntimeTransactionScopeV1 {
+        transaction_id,
+        compatibility: RuntimeBatchCompatibilityV1 {
+            binding: binding.clone(),
+            durability,
+            priority,
+        },
+        opened_at: UtcMicros(row.get(6)?),
+    };
+    if receipt.validate().is_err() || transaction_scope.validate().is_err() {
+        return Err(corrupt("original receipt binding"));
     }
     Ok(IdempotencyRecord {
         request_digest,

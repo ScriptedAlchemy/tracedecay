@@ -8,14 +8,14 @@
 //! installed without a real Roo runtime fixture.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
-    install_mcp_server_entry, load_json_file, mcp_servers_registration_state,
-    uninstall_mcp_server_entry,
+    McpDoctorLabels, doctor_check_mcp_registration, install_mcp_server_entry, load_json_file,
+    mcp_servers_registration_state, uninstall_mcp_server_entry,
 };
 
 pub struct RooCodeIntegration;
@@ -38,55 +38,58 @@ impl AgentIntegration for RooCodeIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mRoo Code integration\x1b[0m");
+        dc.section("Roo Code integration");
         doctor_check_settings(dc, &ctx.home);
     }
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
-            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        if component != super::host_bundle::HostComponentV1::ContextMcp {
+            return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
-        mcp_servers_registration_state(&roo_settings_path(&ctx.home))
+        mcp_servers_registration_state(
+            &roo_settings_path(&ctx.home),
+            &ctx.catalog_profiles.serve_args(self.id()),
+        )
     }
 
     fn is_detected(&self, home: &Path) -> bool {
         roo_ext_dir(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(roo_settings_path(home))
     }
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
-            let path = roo_settings_path(home);
-            vec![path.clone(), config_backup_path(&path)]
+        if components == [super::host_bundle::HostComponentV1::ContextMcp] {
+            vec![roo_settings_path(home)]
         } else {
             Vec::new()
         }
     }
 
-    #[hotpath::measure(label = "roo_mcp_install")]
+    #[tracing::instrument(name = "roo_mcp_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             install_mcp_server_entry(
                 &roo_settings_path(&ctx.home),
                 "mcpServers",
                 serde_json::json!({
                     "command": ctx.tracedecay_bin.clone(),
-                    "args": ["serve"],
+                    "args": ctx.serve_args.json(&[]),
                     "env": {},
                     "alwaysAllow": [],
                     "disabled": false
@@ -100,28 +103,25 @@ impl AgentIntegration for RooCodeIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             uninstall_mcp_server_entry(
                 &roo_settings_path(&ctx.home),
                 "mcpServers",
                 JsonConfigDialect::Json,
-                McpUninstallPolicy::default(),
             )?;
         }
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(&roo_settings_path(home), "mcpServers", load_json_file)
     }
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = roo_settings_path(home);

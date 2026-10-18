@@ -1,45 +1,55 @@
-//! Opt-in hotpath probes for the blocking SDK HTTP client.
+//! Tracing spans for the blocking SDK HTTP client.
 //!
-//! `hotpath::http!` wraps async reqwest 0.12 (`ClientWithMiddleware`) and
-//! cannot sit on `reqwest::blocking::Client` without changing the public
-//! blocking type. Header/connection time and body/decode time are therefore
-//! split with `measure_block!` around `.send()` and `.json()` / decode.
+//! reqwest's `blocking::Client` has no middleware hook, so header/connection
+//! time and body/decode time are split with explicit spans around `.send()`
+//! and `.json()` / decode.
 //!
 //! Execute-boundary time is a separate static span: `sdk.mcp.execute` covers
 //! encode / tool-call / decode on the MCP path; `sdk.http.execute` covers the
 //! typed HTTP execute (encode, admission, request, contract checks). Nested
 //! `sdk.http.headers` / `sdk.http.body_decode` remain the send vs decode split.
-//! Span names are static — never a URL, tool name, operation id, or payload.
+//! Span names are static, never a URL, tool name, operation id, or payload.
 //!
 //! Error class is the typed [`ClientError`] / [`RemoteClientError`] variant,
-//! or a closed [`ApplicationProblemKind`] name — never an unbounded message.
+//! or a closed [`ApplicationProblemKind`] name, never an unbounded message.
 
 use crate::client::ClientError;
 use crate::remote_client::RemoteClientError;
 
 pub(crate) fn headers<T, E>(send: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
-    hotpath::measure_block!("sdk.http.headers", send())
+    {
+        let _span = tracing::trace_span!("sdk.http.headers").entered();
+        send()
+    }
 }
 
 pub(crate) fn body_decode<T, E>(decode: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
-    hotpath::measure_block!("sdk.http.body_decode", decode())
+    {
+        let _span = tracing::trace_span!("sdk.http.body_decode").entered();
+        decode()
+    }
 }
 
 pub(crate) fn mcp_execute<T>(
     run: impl FnOnce() -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
-    hotpath::measure_block!("sdk.mcp.execute", finish(run()))
+    {
+        let _span = tracing::trace_span!("sdk.mcp.execute").entered();
+        finish(run())
+    }
 }
 
 pub(crate) fn http_execute<T>(
     run: impl FnOnce() -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
-    hotpath::measure_block!("sdk.http.execute", finish(run()))
+    {
+        let _span = tracing::trace_span!("sdk.http.execute").entered();
+        finish(run())
+    }
 }
 
 #[inline(always)]
 pub(crate) fn finish<T>(result: Result<T, ClientError>) -> Result<T, ClientError> {
-    #[cfg(feature = "hotpath")]
     if let Err(error) = &result {
         record_client_error(error);
     }
@@ -50,16 +60,12 @@ pub(crate) fn finish<T>(result: Result<T, ClientError>) -> Result<T, ClientError
 pub(crate) fn finish_remote<T>(
     result: Result<T, RemoteClientError>,
 ) -> Result<T, RemoteClientError> {
-    #[cfg(feature = "hotpath")]
     if let Err(error) = &result {
         record_remote_error(error);
     }
     result
 }
 
-// Gated to match `finish` above, its only caller. `problem_kind_name` keeps the
-// wider gate because the unit test below exercises it directly.
-#[cfg(feature = "hotpath")]
 pub(crate) fn record_client_error(error: &ClientError) {
     let class = match error {
         ClientError::InvalidConfiguration(_) => "invalid_configuration",
@@ -69,23 +75,22 @@ pub(crate) fn record_client_error(error: &ClientError) {
         ClientError::UnsupportedTransport { .. } => "unsupported_transport",
         ClientError::Authentication(_) => "authentication",
         ClientError::Protocol { .. } => "protocol",
+        ClientError::StreamFrameTooLarge { .. } => "stream_frame_too_large",
         ClientError::Problem(problem) => problem_kind_name(&problem.kind),
     };
-    hotpath::val!("sdk.http.error_class").set(&class);
+    tracing::trace!(name: "sdk.http.error_class", value = ?class);
 }
 
-// Gated to match `finish_remote` above, its only caller.
-#[cfg(feature = "hotpath")]
 pub(crate) fn record_remote_error(error: &RemoteClientError) {
     let class = match error {
         RemoteClientError::Configuration(_) => "configuration",
         RemoteClientError::Transport(_) => "transport",
         RemoteClientError::Protocol(_) => "protocol",
+        RemoteClientError::Problem(problem) => problem_kind_name(&problem.kind),
     };
-    hotpath::val!("sdk.http.error_class").set(&class);
+    tracing::trace!(name: "sdk.http.error_class", value = ?class);
 }
 
-#[cfg(any(feature = "hotpath", test))]
 fn problem_kind_name(kind: &str) -> &'static str {
     match kind {
         "invalid_request" => "invalid_request",

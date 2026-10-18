@@ -1,0 +1,679 @@
+use std::future::Future;
+use std::pin::Pin;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::{
+    ApplicationProblemDetailV1, CursorBindingMismatchV1, EphemeralSanitizedQueryViewV1, UtcMicros,
+};
+
+use crate::context::RequestContext;
+use crate::error::ApplicationContractError;
+use crate::handlers::ApplicationOperation;
+use crate::result::{
+    ApplicationProblem, OmissionReason, OpaqueCursor, OperationBudgetUsage, RetryDirective,
+    SafeDiagnostic,
+};
+
+use super::{CodeQueryRow, RetrievalRequestMeta};
+
+pub const MAX_SYMBOL_GRAPH_DEPTH: u32 = 10;
+pub const MAX_SYMBOL_GRAPH_QUERY_BYTES: usize = 4_096;
+pub const MAX_SYMBOL_GRAPH_FILTERS: usize = 32;
+
+/// Freshness of the generation a verified graph read serves.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum CodeGraphReadFreshnessV1 {
+    Current,
+    LastCompleteStale {
+        sealed_at: UtcMicros,
+        rebuild_in_flight: bool,
+    },
+}
+
+impl CodeGraphReadFreshnessV1 {
+    pub fn is_stale(self) -> bool {
+        matches!(self, Self::LastCompleteStale { .. })
+    }
+}
+
+/// The code-graph generation an operation read and that generation's
+/// freshness. A stale seat answers soundly for its generation but may trail
+/// the live worktree.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServedCodeGraphGenerationV1 {
+    pub generation: String,
+    pub freshness: CodeGraphReadFreshnessV1,
+    /// The worktree scheduler's verdict on `generation`. A seat reads
+    /// `Current` once its generation seals, though the worktree may since
+    /// have moved on; only the scheduler can say so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<super::PrimitiveSearchFreshnessV1>,
+}
+
+/// Optional narrowing inside the immutable project/repository/worktree scope
+/// carried by [`RequestContext`]. A path prefix never establishes identity or
+/// authorization.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolGraphScope {
+    pub path_prefix: Option<String>,
+}
+
+impl SymbolGraphScope {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        if let Some(path_prefix) = &self.path_prefix {
+            validate_text(path_prefix, "symbol graph path prefix")?;
+            if path_prefix.starts_with('/') || path_prefix.split('/').any(|part| part == "..") {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "symbol graph path prefix",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolPrimitiveRecord {
+    pub node_id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: String,
+    pub file: String,
+    /// One-based user-facing line.
+    pub line: u32,
+    pub end_line: u32,
+    pub signature: Option<String>,
+    pub is_async: bool,
+    pub score: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolRelationRecord {
+    pub symbol: SymbolPrimitiveRecord,
+    pub edge_kind: String,
+    pub dispatch_via_trait: bool,
+    pub dispatch_from: Option<String>,
+    pub depth: Option<u32>,
+}
+
+/// One implementation match with its exact source: the implementing
+/// impl/class block (methods included) for a trait selector, or the function
+/// body for a method selector.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ImplementationRecord {
+    pub symbol: SymbolPrimitiveRecord,
+    pub edge_kind: String,
+    /// Trait or interface node a trait-selector match was reached through.
+    pub dispatch_from: Option<String>,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TypeHierarchyRecord {
+    pub symbol: SymbolPrimitiveRecord,
+    pub parent_node_id: String,
+    pub edge_kind: String,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveSupportGap {
+    pub provider: Option<String>,
+    pub language: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveFailureKind {
+    InvalidRequest,
+    /// A continuation cursor minted for another operation or request.
+    CursorRefused,
+    NotFoundOrNotAuthorized,
+    Stale,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveFailure {
+    pub kind: PrimitiveFailureKind,
+    pub code: String,
+    pub message: String,
+    /// Structured facts that decide the problem in place of `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Box<ApplicationProblemDetailV1>>,
+}
+
+impl PrimitiveFailure {
+    pub fn new(
+        kind: PrimitiveFailureKind,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<Self, ApplicationContractError> {
+        let code = code.into();
+        let message = message.into();
+        validate_query(&code, "symbol graph failure code")?;
+        validate_query(&message, "symbol graph failure message")?;
+        Ok(Self {
+            kind,
+            code,
+            message,
+            detail: None,
+        })
+    }
+
+    pub fn cursor_refused(mismatch: &CursorBindingMismatchV1) -> Self {
+        Self {
+            kind: PrimitiveFailureKind::CursorRefused,
+            code: mismatch.code().to_owned(),
+            message: mismatch.message(),
+            detail: None,
+        }
+    }
+
+    /// The application problem a caller receives for this failure.
+    pub fn into_problem(self) -> ApplicationProblem {
+        if let Some(detail) = self.detail {
+            return ApplicationProblem::from_detail(*detail);
+        }
+        let diagnostic = SafeDiagnostic {
+            code: self.code,
+            message: self.message,
+        };
+        match self.kind {
+            PrimitiveFailureKind::InvalidRequest => {
+                ApplicationProblem::invalid_request_without_action(
+                    diagnostic.code,
+                    diagnostic.message,
+                )
+            }
+            PrimitiveFailureKind::CursorRefused => ApplicationProblem::cursor_refusal(diagnostic),
+            PrimitiveFailureKind::NotFoundOrNotAuthorized => {
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+            }
+            PrimitiveFailureKind::Stale => ApplicationProblem::stale(diagnostic),
+            PrimitiveFailureKind::Unavailable => ApplicationProblem::unavailable(diagnostic),
+        }
+    }
+}
+
+const MACRO_BODY_UNPARSED: &str = "macro_body_unparsed";
+const IMPORT_UNMODELED: &str = "import_unmodeled";
+
+impl PrimitiveSupportGap {
+    /// A caller that is an item-position macro invocation whose body was not
+    /// expanded; `invocation` is its `name!` spelling.
+    pub fn macro_body_unparsed(invocation: &str) -> Self {
+        Self {
+            provider: Some("code_index".to_owned()),
+            language: None,
+            reason: format!("{MACRO_BODY_UNPARSED}: {invocation}"),
+        }
+    }
+
+    /// Unresolved callers that sit under an import of `shape` (its
+    /// `snake_case` name) the index could not model.
+    pub fn import_unmodeled(shape: &str) -> Self {
+        Self {
+            provider: Some("code_index".to_owned()),
+            language: None,
+            reason: format!("{IMPORT_UNMODELED}: {shape}"),
+        }
+    }
+
+    /// The typed omission this gap discloses in an evidence packet.
+    pub fn omission_reason(&self) -> OmissionReason {
+        match self.reason.split_once(':') {
+            Some((MACRO_BODY_UNPARSED, _)) => OmissionReason::MacroBodyUnparsed,
+            Some((IMPORT_UNMODELED, _)) => OmissionReason::ImportUnmodeled,
+            _ => OmissionReason::Unsupported,
+        }
+    }
+
+    pub fn unsupported(
+        provider: Option<String>,
+        language: Option<String>,
+        reason: impl Into<String>,
+    ) -> Result<Self, ApplicationContractError> {
+        let reason = reason.into();
+        validate_text(&reason, "symbol graph support reason")?;
+        if let Some(provider) = &provider {
+            validate_query(provider, "symbol graph provider")?;
+        }
+        if let Some(language) = &language {
+            validate_query(language, "symbol graph language")?;
+        }
+        Ok(Self {
+            provider,
+            language,
+            reason,
+        })
+    }
+}
+
+/// Bounded semantic result shared by the compatibility surfaces. Rendering,
+/// transport envelopes, and MCP content blocks remain outside this contract.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolGraphPage<T> {
+    pub generation: tracedecay_domain::CodeGenerationId,
+    pub freshness: CodeGraphReadFreshnessV1,
+    pub items: Vec<T>,
+    pub total: Option<u64>,
+    /// Opaque resume token; its bounded string is the public wire form.
+    #[schemars(with = "Option<String>")]
+    pub next_cursor: Option<OpaqueCursor>,
+    pub truncated: bool,
+    pub related_edge_count: Option<u64>,
+    pub support_gaps: Vec<PrimitiveSupportGap>,
+}
+
+impl<T> SymbolGraphPage<T> {
+    pub fn complete(
+        generation: tracedecay_domain::CodeGenerationId,
+        freshness: CodeGraphReadFreshnessV1,
+        items: Vec<T>,
+        total: Option<u64>,
+        next_cursor: Option<OpaqueCursor>,
+    ) -> Self {
+        let truncated = next_cursor.is_some();
+        Self {
+            generation,
+            freshness,
+            items,
+            total,
+            next_cursor,
+            truncated,
+            related_edge_count: None,
+            support_gaps: Vec::new(),
+        }
+    }
+}
+
+impl<T: SymbolGraphItem> SymbolGraphPage<T> {
+    /// Distinct project files the page's symbols live in, sorted by path so
+    /// the envelope does not depend on how rows from different files tie.
+    pub fn touched_files(&self) -> Vec<String> {
+        let mut files = self
+            .items
+            .iter()
+            .map(|item| item.symbol().file.as_str())
+            .filter(|file| !file.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        files.sort();
+        files.dedup();
+        files
+    }
+}
+
+/// A symbol-graph page item located by one symbol record.
+pub trait SymbolGraphItem {
+    fn symbol(&self) -> &SymbolPrimitiveRecord;
+}
+
+impl SymbolGraphItem for SymbolPrimitiveRecord {
+    fn symbol(&self) -> &SymbolPrimitiveRecord {
+        self
+    }
+}
+
+impl SymbolGraphItem for SymbolRelationRecord {
+    fn symbol(&self) -> &SymbolPrimitiveRecord {
+        &self.symbol
+    }
+}
+
+impl SymbolGraphItem for ImplementationRecord {
+    fn symbol(&self) -> &SymbolPrimitiveRecord {
+        &self.symbol
+    }
+}
+
+impl SymbolGraphItem for TypeHierarchyRecord {
+    fn symbol(&self) -> &SymbolPrimitiveRecord {
+        &self.symbol
+    }
+}
+
+#[derive(Debug)]
+pub struct SymbolSearchPrimitiveRequest {
+    pub query: EphemeralSanitizedQueryViewV1,
+    pub scope: SymbolGraphScope,
+    pub lazy_index_ignored_dependencies: bool,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl SymbolSearchPrimitiveRequest {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExactSymbolRequest {
+    pub name: String,
+    pub scope: SymbolGraphScope,
+    pub lazy_index_ignored_dependencies: bool,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl ExactSymbolRequest {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SignatureSearchRequest {
+    pub returns: Option<String>,
+    pub params: Vec<String>,
+    pub is_async: Option<bool>,
+    pub scope: SymbolGraphScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl SignatureSearchRequest {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "selector")]
+pub enum ImplementationSelector {
+    Trait { name: String },
+    Method { name: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImplementationsRequest {
+    pub selector: ImplementationSelector,
+    pub scope: SymbolGraphScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl ImplementationsRequest {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TypeHierarchyRequest {
+    pub node_id: String,
+    pub maximum_depth: u32,
+    pub scope: SymbolGraphScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl TypeHierarchyRequest {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphRelationRequest {
+    pub node_id: String,
+    pub maximum_depth: u32,
+    pub resolve_trait_dispatch: bool,
+    pub scope: SymbolGraphScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl GraphRelationRequest {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GraphImpactPrimitiveRequest {
+    pub node_id: String,
+    pub maximum_depth: u32,
+    pub scope: SymbolGraphScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+impl GraphImpactPrimitiveRequest {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
+trait ValidatedPrimitiveRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError>;
+}
+
+impl ValidatedPrimitiveRequest for SymbolSearchPrimitiveRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_query(self.query.as_str(), "symbol search query")?;
+        self.scope.validate()?;
+        validate_meta(&self.meta)
+    }
+}
+
+impl ValidatedPrimitiveRequest for ExactSymbolRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_query(&self.name, "exact symbol name")?;
+        self.scope.validate()?;
+        validate_meta(&self.meta)
+    }
+}
+
+impl ValidatedPrimitiveRequest for SignatureSearchRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        if self.returns.is_none() && self.params.is_empty() && self.is_async.is_none() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "signature search filters",
+            });
+        }
+        if self.params.len() > MAX_SYMBOL_GRAPH_FILTERS {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "signature search parameter filters",
+            });
+        }
+        if let Some(returns) = &self.returns {
+            validate_query(returns, "signature return filter")?;
+        }
+        for param in &self.params {
+            validate_query(param, "signature parameter filter")?;
+        }
+        self.scope.validate()?;
+        validate_meta(&self.meta)
+    }
+}
+
+impl ValidatedPrimitiveRequest for ImplementationsRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        match &self.selector {
+            ImplementationSelector::Trait { name } => {
+                validate_query(name, "implementation trait name")?
+            }
+            ImplementationSelector::Method { name } => {
+                validate_query(name, "implementation method name")?
+            }
+        }
+        self.scope.validate()?;
+        validate_meta(&self.meta)
+    }
+}
+
+impl ValidatedPrimitiveRequest for TypeHierarchyRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_node_depth(&self.node_id, self.maximum_depth)?;
+        self.scope.validate()?;
+        validate_meta(&self.meta)
+    }
+}
+
+impl ValidatedPrimitiveRequest for GraphRelationRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_node_depth(&self.node_id, self.maximum_depth)?;
+        self.scope.validate()?;
+        validate_meta(&self.meta)
+    }
+}
+
+impl ValidatedPrimitiveRequest for GraphImpactPrimitiveRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_node_depth(&self.node_id, self.maximum_depth)?;
+        self.scope.validate()?;
+        validate_meta(&self.meta)
+    }
+}
+
+fn validate_meta(meta: &RetrievalRequestMeta) -> Result<(), ApplicationContractError> {
+    super::validate_current_temporal_meta(meta, "symbol graph temporal mode")
+}
+
+/// Note: this previously validated `node_id` via the unbounded [`validate_text`]
+/// (empty/trim/control-character checks only, no length cap), while the
+/// `code graph node id` sibling in `callable_code.rs` was already bounded via
+/// `validate_query`. Routing through the shared `super::validate_node_depth`
+/// closes that gap: symbol graph node ids are now bounded by
+/// `MAX_SYMBOL_GRAPH_QUERY_BYTES`, matching callable code's existing bound.
+fn validate_node_depth(node_id: &str, maximum_depth: u32) -> Result<(), ApplicationContractError> {
+    super::validate_node_depth(
+        node_id,
+        "symbol graph node id",
+        MAX_SYMBOL_GRAPH_QUERY_BYTES,
+        maximum_depth,
+        "symbol graph maximum depth",
+        MAX_SYMBOL_GRAPH_DEPTH,
+    )
+}
+
+/// Note: over-long input previously returned `InvalidRange` from this
+/// function's own length check, distinct from the `InvalidIdentifier` the
+/// shared validator returns for the same violation. No caller, SDK, or test
+/// pins `InvalidRange` for query length on this surface, so the code is now
+/// unified on `InvalidIdentifier` via `super::validate_bounded_text`.
+fn validate_query(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
+    super::validate_bounded_text(value, field, MAX_SYMBOL_GRAPH_QUERY_BYTES)
+}
+
+/// Unbounded sibling of [`validate_query`], used for free-text fields (path
+/// prefix, support-gap reason) that have no length cap.
+fn validate_text(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
+    super::validate_bounded_text(value, field, usize::MAX)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SymbolGraphPortOutcome<T> {
+    Completed {
+        page: SymbolGraphPage<T>,
+        finished_at: UtcMicros,
+        budget: OperationBudgetUsage,
+        /// What the read cost its graph lease.
+        cost: Option<crate::RequestCostReceiptV1>,
+    },
+    Partial {
+        page: SymbolGraphPage<T>,
+        finished_at: UtcMicros,
+        budget: OperationBudgetUsage,
+        cost: Option<crate::RequestCostReceiptV1>,
+    },
+    Failed {
+        failure: PrimitiveFailure,
+        finished_at: UtcMicros,
+        budget: OperationBudgetUsage,
+    },
+}
+
+pub type SymbolGraphPortFuture<'a, T> =
+    Pin<Box<dyn Future<Output = SymbolGraphPortOutcome<T>> + Send + 'a>>;
+
+#[derive(Clone, Copy, Debug)]
+pub struct SymbolGraphPortContext<'a> {
+    pub request: &'a RequestContext,
+    pub operation: &'a ApplicationOperation,
+    pub observed_at: UtcMicros,
+}
+
+/// Production async port for the symbol and graph primitive family.
+/// Implementations delegate to the owning query/graph kernels.
+pub trait SymbolGraphPrimitivePort {
+    fn symbol_search<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a SymbolSearchPrimitiveRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord>;
+
+    fn exact_symbol<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a ExactSymbolRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord>;
+
+    fn signature_search<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a SignatureSearchRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord>;
+
+    fn implementations<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a ImplementationsRequest,
+    ) -> SymbolGraphPortFuture<'a, ImplementationRecord>;
+
+    fn type_hierarchy<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a TypeHierarchyRequest,
+    ) -> SymbolGraphPortFuture<'a, TypeHierarchyRecord>;
+
+    fn callers<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a GraphRelationRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord>;
+
+    fn callees<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a GraphRelationRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord>;
+
+    fn impact<'a>(
+        &'a self,
+        context: SymbolGraphPortContext<'a>,
+        request: &'a GraphImpactPrimitiveRequest,
+    ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord>;
+}
+
+impl CodeQueryRow for SymbolPrimitiveRecord {
+    fn source_path(&self) -> Option<&str> {
+        Some(&self.symbol().file)
+    }
+}
+
+impl CodeQueryRow for SymbolRelationRecord {
+    fn source_path(&self) -> Option<&str> {
+        Some(&self.symbol().file)
+    }
+}
+
+impl CodeQueryRow for TypeHierarchyRecord {
+    fn source_path(&self) -> Option<&str> {
+        Some(&self.symbol().file)
+    }
+}

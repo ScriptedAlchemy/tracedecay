@@ -5,13 +5,15 @@ import type {
   ExecutionTopologyViewV1,
   ResolvedScope,
   WorkAttemptListV1,
+  WorkExecutionHistoryV1,
   WorkGraphReadV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { workQueryKey } from '../../data/query/work.ts';
 import { callWork, type WorkResult } from './workApi.ts';
 import {
   WORK_LIST_ATTEMPTS_ROUTE,
+  WORK_EXECUTION_HISTORY_ROUTE,
   WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE,
   WORK_TOPOLOGY_ROUTE,
   WORK_VIEWS_ROUTE,
@@ -20,7 +22,7 @@ import {
 /**
  * The two reads behind the four Work projections.
  *
- * `useWorkAttempts` is the execution record — one page of `WorkAttemptV1`.
+ * `useWorkAttempts` is the execution record, one page of `WorkAttemptV1`.
  * `useWorkGraphViews` is the work-product graph and the projection bundle
  * derived from one version of it. Both are scoped through `scopedUrl`, both ask
  * once and state their coverage, and both are enabled per-projection so a
@@ -30,33 +32,33 @@ import {
 /**
  * The execution read behind the four Work projections.
  *
- * Scoped exactly like every other Work read — `scopedUrl` rewrites to the
- * project gateway when the scope bar names a project — so the attempts on the
+ * Scoped exactly like every other Work read, `scopedUrl` rewrites to the
+ * project gateway when the scope bar names a project, so the attempts on the
  * page belong to the same project as the snapshot drawn beside them.
  *
  * One page, deliberately. The projections state their coverage rather than
  * chasing it: an auto-paging loop would spend an unbounded number of round
  * trips to turn a `capped` reading into a `complete` one, and would have to
  * abandon the walk anyway the moment the topology generation moved underneath
- * it. Asking once and drawing what came back — with the cap said out loud —
+ * it. Asking once and drawing what came back, with the cap said out loud,
  * is the reading this build can defend.
  */
 
 /** How many attempts a page asks for. The contract admits 1..=1000; the daemon
  * decides what it can actually return and says so in `coverage`. */
-export const WORK_ATTEMPT_PAGE_SIZE = 250;
+const WORK_ATTEMPT_PAGE_SIZE = 250;
 
 /** The product-visible accounting window. It is finite so the backend can
  * prove the horizon, while still long enough to cover the normal RC operator
  * review. A capped result stays a typed capped result; this request never
  * chases it into an invented total. */
-export const WORK_TOPOLOGY_METRICS_WINDOW_MICROS = 30 * 24 * 60 * 60 * 1_000_000;
-export const WORK_TOPOLOGY_METRICS_MAX_EVENTS = 10_000;
+const WORK_TOPOLOGY_METRICS_WINDOW_MICROS = 30 * 24 * 60 * 60 * 1_000_000;
+const WORK_TOPOLOGY_METRICS_MAX_EVENTS = 10_000;
 
 /** Build the one canonical accounting request shared by Work, Observatory,
  * and Costs consumers. `untilMicros` is injectable for a stable test, but a
  * real read mints its upper bound at fetch time. */
-export function workTopologyMetricsRequest(
+function workTopologyMetricsRequest(
   untilMicros: number = Date.now() * 1_000,
 ): ExecutionTopologyMetricsRequestV1 {
   return {
@@ -72,7 +74,7 @@ export function workTopologyMetricsRequest(
  * @param enabled the execution record is drawn by one projection, so the read
  * is issued when that projection is on screen rather than on every visit to the
  * Work page. A disabled query has no data, which the reading reports as pending
- * — correct, because nothing has been asked.
+ *, correct, because nothing has been asked.
  */
 export function useWorkAttempts(enabled: boolean, pageSize: number = WORK_ATTEMPT_PAGE_SIZE) {
   const scope = useScope((state) => state.scope);
@@ -80,13 +82,33 @@ export function useWorkAttempts(enabled: boolean, pageSize: number = WORK_ATTEMP
   return useQuery<WorkResult<WorkAttemptListV1>>({
     queryKey: workQueryKey(key, 'list-attempts', pageSize),
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_LIST_ATTEMPTS_ROUTE,
         // No cursor: the first page is the only page this read asks for, and a
         // cursor invented here would name a generation the daemon never minted.
         { cursor: null, page_size: pageSize },
         scopedUrl(scope, WORK_LIST_ATTEMPTS_ROUTE.path),
+        signal,
+      ),
+  });
+}
+
+export function useWorkExecutionHistory(
+  enabled: boolean,
+  pageSize: number = WORK_ATTEMPT_PAGE_SIZE,
+) {
+  const scope = useScope((state) => state.scope);
+  const key = scopeKey(scope);
+  return useQuery<WorkResult<WorkExecutionHistoryV1>>({
+    queryKey: workQueryKey(key, 'list-attempts', 'execution-history', pageSize),
+    enabled,
+    queryFn: ({ signal }) =>
+      callWork(
+        WORK_EXECUTION_HISTORY_ROUTE,
+        { cursor: null, page_size: pageSize },
+        scopedUrl(scope, WORK_EXECUTION_HISTORY_ROUTE.path),
+        signal,
       ),
   });
 }
@@ -101,11 +123,12 @@ export function useWorkTopology(enabled: boolean, pageSize: number = WORK_ATTEMP
   return useQuery<WorkResult<ExecutionTopologyViewV1>>({
     queryKey: workQueryKey(key, 'topology', pageSize),
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_TOPOLOGY_ROUTE,
         { cursor: null, page_size: pageSize },
         scopedUrl(scope, WORK_TOPOLOGY_ROUTE.path),
+        signal,
       ),
   });
 }
@@ -121,11 +144,12 @@ export function useWorkTopologyMetrics(enabled: boolean) {
   return useQuery<WorkResult<ExecutionTopologyMetricsV1>>({
     queryKey: workQueryKey(key, 'topology-metrics', WORK_TOPOLOGY_METRICS_WINDOW_MICROS, WORK_TOPOLOGY_METRICS_MAX_EVENTS),
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE,
         workTopologyMetricsRequest(),
         scopedUrl(scope, WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE.path),
+        signal,
       ),
   });
 }
@@ -153,8 +177,8 @@ export function useWorkTopologyMetrics(enabled: boolean) {
  * because `UtcMicros` is microseconds and a millisecond value here would place
  * every read a thousand-fold too early and quietly turn every churn reading
  * into "nothing recent". It is sent rather than defaulted because the authority
- * derives the runtime-dependent halves of the bundle — the ready/running/
- * blocked effort split and both concurrency figures — against the instant the
+ * derives the runtime-dependent halves of the bundle, the ready/running/
+ * blocked effort split and both concurrency figures, against the instant the
  * caller names.
  */
 export function workGraphReadRequest(observedAt: number, scope?: ResolvedScope) {
@@ -189,11 +213,12 @@ export function useWorkGraphViews(enabled: boolean) {
   const bootstrap = useQuery<WorkResult<WorkGraphReadV1>>({
     queryKey: workQueryKey(key, 'views', 'profile-owned-no-git'),
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_VIEWS_ROUTE,
         workGraphReadRequest(Date.now() * 1_000),
         scopedUrl(scope, WORK_VIEWS_ROUTE.path),
+        signal,
       ),
   });
   const authority =
@@ -210,11 +235,12 @@ export function useWorkGraphViews(enabled: boolean) {
     // The observation instant is minted per fetch rather than per render: as a
     // query-key member it would mint a new cache entry on every render and turn
     // one read into an unbounded stream of them.
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_VIEWS_ROUTE,
         workGraphReadRequest(Date.now() * 1_000, authority),
         scopedUrl(scope, WORK_VIEWS_ROUTE.path),
+        signal,
       ),
   });
   return authority === undefined ? bootstrap : exact;

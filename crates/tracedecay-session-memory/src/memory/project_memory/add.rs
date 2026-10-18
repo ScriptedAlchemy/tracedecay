@@ -1,11 +1,12 @@
 //! Canonical project-memory add preflight and execution.
 
+use crate::memory::trust::DEFAULT_TRUST;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactOwnerV1, ProvenanceId, canonical_sha256,
 };
-use tracedecay_runtime_core::memory::trust::DEFAULT_TRUST;
 use tracedecay_store::{
     FactWriteControl, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddMaterialV1,
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactStore,
@@ -22,7 +23,7 @@ use super::validate_project_memory_add_outcome;
 /// Transport adapters own their wire DTOs. This single use-case request owns
 /// the boundary between unsanitized user intent and the canonical store
 /// command, so callers cannot accidentally bypass payload sanitization.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectMemoryFactAddRequest {
     pub content: String,
@@ -30,6 +31,7 @@ pub struct ProjectMemoryFactAddRequest {
     pub source_label: Option<String>,
     pub tags: Vec<String>,
     pub entities: Vec<String>,
+    #[schemars(with = "Option<f64>")]
     pub trust: Option<Confidence>,
     pub metadata: Value,
 }
@@ -137,7 +139,7 @@ impl ProjectMemoryFactAddPreflight {
 /// Converts an automation item without manufacturing a second identity. The
 /// deterministic operation identity makes repeated processing of the same
 /// run/apply identity idempotent at the authority boundary.
-#[hotpath::measure(label = "usecases.memory.automatic.command")]
+#[tracing::instrument(name = "usecases.memory.automatic.command", level = "trace", skip_all)]
 pub fn automatic_fact_add_command(
     owner: FactOwnerV1,
     request: ProjectMemoryFactAddRequest,
@@ -166,7 +168,7 @@ pub fn automatic_fact_add_command(
         Some(run_id.to_owned()),
     )?
     .into_command(context.operation_id().clone())
-    .map_err(MemoryApplicationError::Store)
+    .map_err(MemoryApplicationError::from)
 }
 
 fn fact_add_material(
@@ -196,7 +198,7 @@ fn fact_add_material(
         trust,
         actor,
     )
-    .map_err(MemoryApplicationError::Store)
+    .map_err(MemoryApplicationError::from)
 }
 
 fn rejected_add_effect_material(
@@ -215,7 +217,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Canonicalizes one retained add before any external effect identity is
     /// prepared. The accepted path and store command share the store-owned
     /// input digest; the refusal path contains no command or raw secret.
-    #[hotpath::measure(label = "usecases.memory.add.preflight")]
+    #[tracing::instrument(name = "usecases.memory.add.preflight", level = "trace", skip_all)]
     pub fn preflight_project_memory_fact_add(
         &self,
         request: ProjectMemoryFactAddRequest,
@@ -245,14 +247,14 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         )?;
         let command = material
             .into_command(context.operation_id().clone())
-            .map_err(MemoryApplicationError::Store)?;
+            .map_err(MemoryApplicationError::from)?;
         Ok(ProjectMemoryFactAddPreflight::Ready {
             effect_material,
             command: Box::new(command),
         })
     }
 
-    #[hotpath::measure(label = "usecases.memory.add", future = true)]
+    #[tracing::instrument(name = "usecases.memory.add", level = "trace", skip_all)]
     pub async fn add_project_memory_fact(
         &self,
         request: ProjectMemoryFactAddCommandV1,
@@ -273,7 +275,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Consumes a canonical add preflight. Privacy refusals are truthful
     /// no-write outcomes and committed authority failures retain their exact
     /// outcome for external partial-effect settlement.
-    #[hotpath::measure(label = "usecases.memory.add.preflighted", future = true)]
+    #[tracing::instrument(name = "usecases.memory.add.preflighted", level = "trace", skip_all)]
     pub async fn add_preflighted_project_memory_fact(
         &self,
         preflight: ProjectMemoryFactAddPreflight,

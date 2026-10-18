@@ -1,30 +1,28 @@
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::home_env_lock::HOME_ENV_LOCK;
 use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
-use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
-use tracedecay::config::{discover_project_root, get_config_path, load_config};
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_global_db::{ProjectObservationStoreError, StoreInstanceUpsert};
+use tracedecay_global_db::{ProjectObservationStoreError, RegisteredGlobalDb, StoreInstanceUpsert};
 use tracedecay_mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
+use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::path_safety::{
+    canonical_root_identity, plain_git_args, plain_host_path,
+};
 use tracedecay_runtime_core::storage::{
-    ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,
-    STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath,
-    StoreKind, StoreManifest, default_profile_project_id, default_profile_sharded_layout,
-    profile_sharded_layout, read_legacy_enrollment_marker, read_repository_identity_marker,
-    read_store_manifest, repository_identity_path, resolve_layout, resolve_lcm_payload_root,
-    resolve_project_session_db_path, resolve_response_handle_root,
-    write_repository_identity_marker, write_store_manifest, write_store_manifest_to_path,
+    PrivateStoreIo, ProjectPath, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
+    StorageMode, StoreArtifactPath, StoreKind, StoreManifest, default_profile_project_id,
+    profile_sharded_layout, read_repository_identity_marker, read_store_manifest,
+    repository_identity_path, resolve_layout, write_repository_identity_marker,
+    write_store_manifest, write_store_manifest_to_path,
 };
 
 mod artifact_routing;
@@ -37,54 +35,15 @@ mod markers;
 mod working_tree_guard;
 mod worktrees_clones;
 
-struct HomeGuard {
-    previous_home: Option<OsString>,
-    previous_userprofile: Option<OsString>,
-    previous_data_dir: Option<OsString>,
-}
-
-impl HomeGuard {
-    fn set(home: &Path) -> Self {
-        let previous_home = std::env::var_os("HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
-        fs::create_dir_all(home).unwrap();
-        let home = canonical_temp_path(home);
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("USERPROFILE", &home);
-            std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
-        }
-        Self {
-            previous_home,
-            previous_userprofile,
-            previous_data_dir,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous_home.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match self.previous_userprofile.take() {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match self.previous_data_dir.take() {
-                Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
-                None => std::env::remove_var(USER_DATA_DIR_ENV),
-            }
-        }
-    }
+/// The profile `<home>/.tracedecay` every storage fixture passes explicitly.
+fn test_profile(home: &Path) -> ProfileRoot {
+    crate::common::register_process_runtime_ports();
+    crate::common::isolated_profile_under_home(home)
 }
 
 /// Fabricates a retired legacy `<root>/.tracedecay/enrollment.json` exactly as
-/// a user leftover would look. Production never writes this; tests use it only
-/// to prove legacy adoption and legacy-ignoring behavior.
+/// a user leftover would look. Production never writes or reads this; tests
+/// use it only to prove the leftover is ignored.
 fn write_enrollment(root: &Path) {
     fs::create_dir_all(root.join(".tracedecay")).unwrap();
     fs::write(
@@ -95,14 +54,17 @@ fn write_enrollment(root: &Path) {
 }
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    canonical_root_identity(path)
 }
 
+/// Compares two host paths by separator, not by spelling.
+///
+/// The verbatim prefix is removed by [`plain_host_path`] before the path
+/// becomes a string: trimming `//?/` off the stringified form instead would
+/// leave any path this fixture cannot read as UTF-8 silently rewritten by the
+/// lossy conversion.
 fn normalize_test_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "/")
-        .trim_start_matches("//?/")
-        .to_string()
+    plain_host_path(path).to_string_lossy().replace('\\', "/")
 }
 
 fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
@@ -110,10 +72,6 @@ fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
         normalize_test_path(actual.as_ref()),
         normalize_test_path(expected.as_ref())
     );
-}
-
-fn maintenance_profile_root() -> PathBuf {
-    tracedecay::config::user_data_dir().expect("test profile root")
 }
 
 fn prepare_maintenance_profile(profile_root: &Path) {
@@ -126,9 +84,10 @@ fn prepare_maintenance_profile(profile_root: &Path) {
 }
 
 async fn init_with_maintenance(
+    profile: &ProfileRoot,
     project_root: &Path,
 ) -> tracedecay_domain::errors::Result<TraceDecay> {
-    let profile_root = maintenance_profile_root();
+    let profile_root = profile.data_dir().to_path_buf();
     prepare_maintenance_profile(&profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,
@@ -153,9 +112,10 @@ async fn init_with_maintenance(
 }
 
 async fn open_with_maintenance(
+    profile: &ProfileRoot,
     project_root: &Path,
 ) -> tracedecay_domain::errors::Result<TraceDecay> {
-    let profile_root = maintenance_profile_root();
+    let profile_root = profile.data_dir().to_path_buf();
     prepare_maintenance_profile(&profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,
@@ -187,8 +147,8 @@ fn test_home(dir: &TempDir) -> PathBuf {
 
 fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
+        .args(plain_git_args(args))
+        .current_dir(plain_host_path(cwd))
         .output()
         .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
     assert!(
@@ -245,6 +205,7 @@ async fn register_observation_store(
             graph_db_relpath: PathBuf::from("tracedecay.db"),
             sessions_db_relpath: PathBuf::from("sessions.db"),
             branch_meta_relpath: PathBuf::from("branch-meta.json"),
+            sessions_schema_digest: None,
         },
     )
     .unwrap();

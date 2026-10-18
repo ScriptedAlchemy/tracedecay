@@ -288,12 +288,7 @@ mod tests {
     };
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String, Error = DomainError>,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use crate::test_fixtures::id;
 
     fn fact_id(operation: &str) -> FactId {
         fact_id_for(&FactOwnerV1::Profile, operation)
@@ -330,7 +325,7 @@ mod tests {
     #[test]
     fn curation_rejects_self_supersession() {
         let fact_id = fact_id("operation.fixture");
-        assert!(
+        assert_eq!(
             FactLineageEventV1::new(
                 fact_id.clone(),
                 FactOwnerV1::Profile,
@@ -341,7 +336,9 @@ mod tests {
                 UtcMicros(20),
                 None,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "a manifest cannot supersede itself"
         );
     }
 
@@ -546,7 +543,12 @@ mod tests {
 
         let mut wire = serde_json::to_value(supports).unwrap();
         wire["kind"]["action"]["relation"]["kind"] = serde_json::json!("contradicts");
-        assert!(serde_json::from_value::<FactLineageEventV1>(wire).is_err());
+        assert_eq!(
+            serde_json::from_value::<FactLineageEventV1>(wire)
+                .unwrap_err()
+                .to_string(),
+            "manifest digest does not match its canonical domain-separated payload"
+        );
     }
 
     #[test]
@@ -563,7 +565,7 @@ mod tests {
             relation_evidence(&owner),
         )
         .unwrap();
-        assert!(
+        assert_eq!(
             FactLineageEventV1::new(
                 other_source_fact_id,
                 owner,
@@ -576,7 +578,9 @@ mod tests {
                 UtcMicros(24),
                 None,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "fact relation source references an unknown identity"
         );
 
         let event_owner = FactOwnerV1::Profile;
@@ -592,7 +596,7 @@ mod tests {
             relation_evidence(&relation_owner),
         )
         .unwrap();
-        assert!(
+        assert_eq!(
             FactLineageEventV1::new(
                 event_source,
                 event_owner,
@@ -605,7 +609,9 @@ mod tests {
                 UtcMicros(24),
                 None,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "fact relation owner references an unknown identity"
         );
     }
 
@@ -625,7 +631,12 @@ mod tests {
         let mut wire = serde_json::to_value(event).unwrap();
         wire["event_id"] = serde_json::json!("fact-event.v1.forged");
 
-        assert!(serde_json::from_value::<FactLineageEventV1>(wire).is_err());
+        assert_eq!(
+            serde_json::from_value::<FactLineageEventV1>(wire)
+                .unwrap_err()
+                .to_string(),
+            "manifest digest does not match its canonical domain-separated payload"
+        );
     }
 
     #[test]
@@ -641,7 +652,10 @@ mod tests {
             None,
         );
 
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "terminal fact payload deletion is not canonical"
+        );
     }
 
     #[test]

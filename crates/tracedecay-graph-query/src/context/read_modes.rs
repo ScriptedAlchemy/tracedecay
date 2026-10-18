@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use crate::{GraphQueryError, GraphQueryResult as Result};
 use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
-use tracedecay_domain::errors::Result;
 use tracedecay_graph_db::GraphCancellation;
 
 const MAX_CONTEXT_SYMBOLS: usize = 12;
@@ -60,24 +60,26 @@ impl LineRange {
     }
 }
 
-pub fn render_full(source: &str) -> String {
-    source.to_owned()
-}
-pub fn estimate_tokens(s: &str) -> u32 {
-    s.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
-}
 pub fn render_lines(source: &str, range: LineRange) -> String {
-    let lines = source.lines().collect::<Vec<_>>();
     let start = range.start.saturating_sub(1) as usize;
-    let end = (range.end as usize).min(lines.len());
-    if start >= end {
-        String::new()
-    } else {
-        lines[start..end].join("\n")
+    let end_inclusive = range.end as usize;
+    if start >= end_inclusive {
+        return String::new();
     }
+    let mut selected = source.lines().skip(start).take(end_inclusive - start);
+    let Some(first) = selected.next() else {
+        return String::new();
+    };
+    let mut body = String::with_capacity(first.len());
+    body.push_str(first);
+    for line in selected {
+        body.push('\n');
+        body.push_str(line);
+    }
+    body
 }
 
-#[hotpath::measure(label = "usecases.context.render_map")]
+#[tracing::instrument(name = "usecases.context.render_map", level = "trace", skip_all)]
 pub fn render_map(
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
@@ -95,7 +97,7 @@ pub fn render_map(
 /// and keeps the symbols that declare one. Symbols whose extractor publishes no
 /// signature are counted in `without_signature` rather than emitted with a null
 /// signature, so an empty `symbols` list is never mistaken for an empty file.
-#[hotpath::measure(label = "usecases.context.render_signatures")]
+#[tracing::instrument(name = "usecases.context.render_signatures", level = "trace", skip_all)]
 pub fn render_signatures(
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
@@ -113,7 +115,11 @@ pub fn render_signatures(
 /// overlapping that range and the range is echoed back. When no selected symbol
 /// carries a usable span the call degrades to the whole-file list with a null
 /// `range` and an explanatory `note` instead of erroring.
-#[hotpath::measure(label = "usecases.context.render_symbol_context")]
+#[tracing::instrument(
+    name = "usecases.context.render_symbol_context",
+    level = "trace",
+    skip_all
+)]
 pub fn render_symbol_context(
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
@@ -234,7 +240,7 @@ fn scope_to_range(
 ///
 /// `LineageSymbolRecordV1::start_line` is the extractor's 0-based row and
 /// `line_span` counts lines inclusively, so the display span is
-/// `start_line + 1 ..= start_line + line_span` — the same `+ 1` convention the
+/// `start_line + 1 ..= start_line + line_span`, the same `+ 1` convention the
 /// verified graph handlers use. A zero span or an overflowing sum is a
 /// degenerate record: this yields `None` rather than an error, because symbol
 /// enrichment must never fail the source read that carries it.
@@ -255,9 +261,7 @@ fn fetch_nodes(
 ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
     reader
         .symbols_in_logical_file(file_path, MAX_FILE_SYMBOLS, cancellation)
-        .map_err(|error| {
-            crate::map_code_graph_read_runtime_error(crate::map_projection_error(error))
-        })
+        .map_err(GraphQueryError::from)
 }
 
 /// One symbol row. `line`/`end_line` are 1-based inclusive and null when the
@@ -290,19 +294,13 @@ mod tests {
 
     use tracedecay_code_index::graph_projection::CodeGraphSymbolBindingV1;
     use tracedecay_code_index::lineage::LineageSymbolRecordV1;
-    use tracedecay_domain::SourceSpan;
+    use tracedecay_domain::{ComplexityAnalysisV1, SourceSpan};
 
     use super::*;
 
     const FILE: &str = "src/main.rs";
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn digest<T>(byte: char) -> T
     where
@@ -345,9 +343,13 @@ mod tests {
                 branches: 0,
                 loops: 0,
                 max_nesting: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
                 line_span,
                 start_line,
                 signature: signature.map(str::to_owned),
+                docstring: None,
+                is_async: false,
+                derives: Vec::new(),
                 skip_test_coverage: false,
                 file_identity: digest('e'),
                 content_digest: digest('d'),
@@ -388,20 +390,6 @@ mod tests {
         assert_eq!(symbols[0]["line"], 5);
         assert_eq!(symbols[0]["end_line"], 8);
         assert_eq!(symbols[0]["signature"], "fn main()");
-    }
-
-    #[test]
-    fn symbol_context_keeps_symbols_straddling_the_range_edges() {
-        // A one-line read inside `main`'s body still reports `main`.
-        let value = symbol_context_value(&fixture(), FILE, LineRange::parse("6"));
-        let names = value["symbols"]
-            .as_array()
-            .expect("symbol array")
-            .iter()
-            .map(|symbol| symbol["name"].as_str().unwrap_or_default().to_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(names, vec!["main".to_owned()]);
     }
 
     #[test]

@@ -10,23 +10,22 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationProblemKind, CancellationSignal, Deadline, OpaqueCursor, PageRequest,
-    ProblemOwningLayer, RequestId, ResultContractRef, RetainedSurfaceOperation, RetryDirective,
-    SafeDiagnostic,
+    ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+    application_operation_default_page_size,
 };
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId,
-    ProfileId, SchemaId, ScopeDimension,
+    OperationId, ProfileId, SchemaId, ScopeDimension,
 };
 
-use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
+use crate::{CanonicalInvocationResult, HttpAdapterError, HttpJsonEnvelope};
 mod application_operation_owner;
 pub use application_operation_owner::http_application_owner_kind;
 
 pub(crate) const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
-const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
 
 /// Define the handlers that name one fixed operation.
 ///
@@ -84,14 +83,10 @@ pub(crate) use constant_operation_handlers;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpPageQuery {
-    #[serde(default = "default_http_page_size")]
-    page_size: u32,
+    #[serde(default)]
+    page_size: Option<u32>,
     #[serde(default)]
     cursor: Option<OpaqueCursor>,
-}
-
-const fn default_http_page_size() -> u32 {
-    DEFAULT_HTTP_PAGE_SIZE
 }
 
 /// The canonical application owner family responsible for one HTTP binding.
@@ -105,6 +100,7 @@ pub enum HttpApplicationOwnerKind {
     Observatory,
     Configuration,
     ContextScout,
+    Retained,
 }
 
 /// Whether the operation is addressed under `/code/{operation}`.
@@ -125,123 +121,27 @@ const fn is_callable_code_route(operation: ApplicationSurfaceOperation) -> bool 
             | ApplicationSurfaceOperation::CodeFacets
             | ApplicationSurfaceOperation::CodeTimeline
             | ApplicationSurfaceOperation::CodeDeclaration
-            | ApplicationSurfaceOperation::CodeDefinition
             | ApplicationSurfaceOperation::CodeTypeDefinition
             | ApplicationSurfaceOperation::CodeReferences
     )
 }
 
 /// Whether this canonical operation has a public HTTP catalog binding.
-pub const fn is_http_application_operation_exposed(operation: ApplicationSurfaceOperation) -> bool {
-    !matches!(
-        operation,
-        ApplicationSurfaceOperation::GitPreview
-            | ApplicationSurfaceOperation::GitApply
-            | ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
-            | ApplicationSurfaceOperation::NativeIntegrationPreflight
-            | ApplicationSurfaceOperation::NativeIntegrationApprove
-            | ApplicationSurfaceOperation::NativeIntegrationApply
-            | ApplicationSurfaceOperation::NativeIntegrationStatus
-            | ApplicationSurfaceOperation::NativeIntegrationCancel
-            | ApplicationSurfaceOperation::ObservatoryRead
+pub fn is_http_application_operation_exposed(
+    operation: ApplicationSurfaceOperation,
+) -> Result<bool, ApplicationContractError> {
+    let operation_id = OperationId::new(format!("operation.application.{}", operation.as_str()))?;
+    Ok(
+        tracedecay_contracts::application_http_executable_binding_registry()?
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+            .is_some(),
     )
 }
 
 /// Relative Axum route for a canonical application operation.
 pub fn http_application_route_path(operation: ApplicationSurfaceOperation) -> String {
-    match operation {
-        ApplicationSurfaceOperation::GitStatus => "/git/status".to_owned(),
-        ApplicationSurfaceOperation::GitDiff => "/git/diff".to_owned(),
-        ApplicationSurfaceOperation::GitHistory => "/git/history".to_owned(),
-        ApplicationSurfaceOperation::GitBlame => "/git/blame".to_owned(),
-        ApplicationSurfaceOperation::GitHunks => "/git/hunks".to_owned(),
-        ApplicationSurfaceOperation::GitPreview => "/git/preview".to_owned(),
-        ApplicationSurfaceOperation::GitApply => "/git/apply".to_owned(),
-        ApplicationSurfaceOperation::GitHubStackSignalExpand => {
-            "/github-stack/signal-expand".to_owned()
-        }
-        operation @ (ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
-        | ApplicationSurfaceOperation::NativeIntegrationPreflight
-        | ApplicationSurfaceOperation::NativeIntegrationApprove
-        | ApplicationSurfaceOperation::NativeIntegrationApply
-        | ApplicationSurfaceOperation::NativeIntegrationStatus
-        | ApplicationSurfaceOperation::NativeIntegrationCancel
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile) => {
-            format!("/native-integration/{}", operation.as_str())
-        }
-        ApplicationSurfaceOperation::AffectedTests => "/tests/affected".to_owned(),
-        ApplicationSurfaceOperation::TestResults => "/tests/results".to_owned(),
-        ApplicationSurfaceOperation::FeedbackDiagnostics => "/feedback/diagnostics".to_owned(),
-        ApplicationSurfaceOperation::FeedbackGet => "/feedback/get".to_owned(),
-        ApplicationSurfaceOperation::FeedbackExpand => "/feedback/expand".to_owned(),
-        ApplicationSurfaceOperation::FeedbackList => "/feedback/list".to_owned(),
-        ApplicationSurfaceOperation::FeedbackImpact => "/feedback/impact".to_owned(),
-        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => "/feedback/advisory_cycle".to_owned(),
-        operation @ (ApplicationSurfaceOperation::CodeExactOccurrence
-        | ApplicationSurfaceOperation::CodePhraseSearch
-        | ApplicationSurfaceOperation::CodeSymbolSearch
-        | ApplicationSurfaceOperation::CodeSignatureSearch
-        | ApplicationSurfaceOperation::CodeImplementations
-        | ApplicationSurfaceOperation::CodeTypeHierarchy
-        | ApplicationSurfaceOperation::CodeCallers
-        | ApplicationSurfaceOperation::CodeCallees
-        | ApplicationSurfaceOperation::CodeFacets
-        | ApplicationSurfaceOperation::CodeTimeline
-        | ApplicationSurfaceOperation::CodeDeclaration
-        | ApplicationSurfaceOperation::CodeDefinition
-        | ApplicationSurfaceOperation::CodeTypeDefinition
-        | ApplicationSurfaceOperation::CodeReferences) => {
-            format!("/code/{}", operation.as_str())
-        }
-        operation @ (ApplicationSurfaceOperation::SessionLookup
-        | ApplicationSurfaceOperation::QualifiedName
-        | ApplicationSurfaceOperation::CallChain
-        | ApplicationSurfaceOperation::FileDependents
-        | ApplicationSurfaceOperation::SourceLines
-        | ApplicationSurfaceOperation::SourceBody
-        | ApplicationSurfaceOperation::SourceOutline
-        | ApplicationSurfaceOperation::ModuleApi
-        | ApplicationSurfaceOperation::FileMetadata
-        | ApplicationSurfaceOperation::HealthRead
-        | ApplicationSurfaceOperation::HealthDelta
-        | ApplicationSurfaceOperation::StorageStatus
-        | ApplicationSurfaceOperation::DiagnosticsRead) => {
-            format!("/primitives/{}", operation.as_str())
-        }
-        operation @ (ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
-        | ApplicationSurfaceOperation::ConfigurationGet
-        | ApplicationSurfaceOperation::ConfigurationSet
-        | ApplicationSurfaceOperation::ConfigurationUnset
-        | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
-        | ApplicationSurfaceOperation::ConfigurationObservedState
-        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
-        | ApplicationSurfaceOperation::ConfigurationProtectedApply
-        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
-        | ApplicationSurfaceOperation::ConfigurationRollbackApply
-        | ApplicationSurfaceOperation::ConfigurationAudit) => {
-            format!("/configuration/{}", operation.as_str())
-        }
-        ApplicationSurfaceOperation::ObservatoryRead => "/observatory/read".to_owned(),
-        operation @ (ApplicationSurfaceOperation::ContextScoutStatus
-        | ApplicationSurfaceOperation::ContextScoutRecent
-        | ApplicationSurfaceOperation::ContextScoutExplain
-        | ApplicationSurfaceOperation::ContextScoutCapability
-        | ApplicationSurfaceOperation::ContextScoutBudget
-        | ApplicationSurfaceOperation::ContextScoutPause
-        | ApplicationSurfaceOperation::ContextScoutResume
-        | ApplicationSurfaceOperation::ContextScoutCancel
-        | ApplicationSurfaceOperation::ContextScoutClaim
-        | ApplicationSurfaceOperation::ContextScoutDelivery
-        | ApplicationSurfaceOperation::ContextScoutFeedback) => {
-            format!("/context-scout/{}", operation.as_str())
-        }
-    }
+    tracedecay_contracts::application_http_route_path(operation)
 }
 
 /// Public route mounted beneath the per-project application prefix.
@@ -284,22 +184,12 @@ pub fn http_route_documents(
         authorized_capabilities,
         available_scope,
     ) {
-        let path =
-            match ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str()) {
-                Some(operation) if is_http_application_operation_exposed(operation) => {
-                    http_application_full_route_path(operation)
-                }
-                Some(_) => continue,
-                None => {
-                    let Some(operation) =
-                        RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
-                            .filter(|operation| operation.is_callable())
-                    else {
-                        continue;
-                    };
-                    crate::retained::retained_application_route_path(operation)
-                }
-            };
+        let Some(operation) =
+            ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str())
+        else {
+            continue;
+        };
+        let path = http_application_full_route_path(operation);
         documents.push(HttpRouteDocumentV1 {
             method: "POST",
             path,
@@ -340,41 +230,12 @@ pub type HttpApplicationInvocationFuture = Pin<
     >,
 >;
 
-/// Concrete application owners mounted behind the HTTP adapter.
+/// The application owner mounted behind the HTTP adapter.
 ///
-/// Each method delegates to the corresponding application owner family. The
-/// adapter performs only extraction, owner selection, and canonical encoding.
+/// The adapter performs only extraction, owner admission, and canonical
+/// encoding; every admitted operation is delegated through [`Self::invoke`].
 pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
-    fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
-    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
-    fn invoke_callable_code(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
-    fn invoke_observatory(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_configuration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_context_scout(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_native_integration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
+    fn invoke(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 }
 
 impl<F, Fut> HttpApplicationOwners for F
@@ -384,79 +245,14 @@ where
         + Send
         + 'static,
 {
-    fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_callable_code(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_observatory(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_configuration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_context_scout(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_native_integration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
+    fn invoke(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
         Box::pin((self)(request))
     }
 }
 
-fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
-    match kind {
-        ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-        ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-        ApplicationProblemKind::Conflict
-        | ApplicationProblemKind::PartialEffect
-        | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-        ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-        ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
-        ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-        ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
-        ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-    }
-}
-
-impl<T> CanonicalInvocationResult<T> {
-    fn http_status(&self) -> StatusCode {
-        match &self.result {
-            Ok(_) => StatusCode::OK,
-            Err(problem) => application_problem_status(problem.problem.kind()),
-        }
-    }
+/// Axum view of the canonical [`ApplicationProblemKind::http_status`] mapping.
+pub fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
+    StatusCode::from_u16(kind.http_status()).expect("canonical problem status is a valid code")
 }
 
 impl<T> CanonicalInvocationResult<T>
@@ -464,27 +260,35 @@ where
     T: Serialize,
 {
     pub fn into_http_response(self) -> Response {
-        let status = self.http_status();
-        if let Err(problem) = &self.result {
-            crate::observe::record_error_class(problem.problem.kind());
-        }
-        let envelope = self.into_http_json();
-        crate::observe::json_response(status, &envelope)
+        self.into_http_json().into_response()
+    }
+}
+
+impl<T: Serialize> IntoResponse for HttpJsonEnvelope<T> {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            Self::Success(_) => StatusCode::OK,
+            Self::Problem(problem) => {
+                crate::observe::record_error_class(problem.application.problem.kind());
+                application_problem_status(problem.application.problem.kind())
+            }
+        };
+        crate::observe::json_response(status, &self)
+    }
+}
+
+impl IntoResponse for HttpAdapterError {
+    fn into_response(self) -> Response {
+        tracing::error!(error = %self, "application response could not be presented");
+        crate::observe::record_contract_error_class();
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
     }
 }
 
 /// Encode a canonical problem for HTTP routes that do not have a catalog
 /// binding, such as operation-event subscription and cancellation.
 pub fn application_problem_response(application: ApplicationProblemEnvelope) -> Response {
-    crate::observe::record_error_class(application.problem.kind());
-    let status = application_problem_status(application.problem.kind());
-    crate::observe::json_response(
-        status,
-        &HttpJsonEnvelope::<Value>::Problem(Box::new(HttpProblemEnvelope {
-            binding_id: None,
-            application,
-        })),
-    )
+    HttpJsonEnvelope::<Value>::from(application).into_response()
 }
 
 /// Report an internal contract violation before a canonical problem envelope
@@ -514,15 +318,12 @@ pub(crate) fn invalid_request_problem(
     let diagnostic = SafeDiagnostic::new(code, message)?;
     adapter_problem(
         request_id,
-        ApplicationProblem::InvalidRequest {
-            diagnostic,
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(diagnostic.code, diagnostic.message),
     )
 }
 
-pub(crate) fn adapter_problem(
+/// A refusal no binding owns, under the adapter-owned problem contract.
+pub fn adapter_problem(
     request_id: RequestId,
     problem: ApplicationProblem,
 ) -> Result<ApplicationProblemEnvelope, ApplicationContractError> {
@@ -542,6 +343,48 @@ pub(crate) fn invalid_request_response(
     match invalid_request_problem(request_id, code, message) {
         Ok(problem) => application_problem_response(problem),
         Err(error) => application_contract_error_response(error),
+    }
+}
+
+/// Admission shared by the JSON operation families mounted beside the
+/// application router. An operation this build does not mount is concealed
+/// the same way an unauthorised one is, so probing a path cannot reveal what
+/// exists; an unreadable body is the family's `invalid_body` problem.
+pub(crate) async fn dispatch_json_operation<Operation, Request, Invocation>(
+    operation: Option<Operation>,
+    request_id: RequestId,
+    body: Result<Json<Value>, JsonRejection>,
+    invalid_body: (&'static str, &'static str),
+    admit: impl FnOnce(Operation, RequestId, Value) -> Request,
+    invoke: impl FnOnce(Request) -> Invocation,
+) -> Response
+where
+    Invocation: Future<Output = Response>,
+{
+    let admitted = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
+        match (operation, body) {
+            (None, _) => Err(adapter_problem_response(
+                request_id,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            )),
+            (Some(operation), Ok(Json(body))) => Ok(admit(operation, request_id, body)),
+            (Some(_), Err(_)) => Err(invalid_request_response(
+                request_id,
+                invalid_body.0,
+                invalid_body.1,
+            )),
+        }
+    };
+    match admitted {
+        Ok(request) => {
+            tracing::Instrument::instrument(
+                invoke(request),
+                tracing::trace_span!("api.http.handler"),
+            )
+            .await
+        }
+        Err(response) => response,
     }
 }
 
@@ -579,6 +422,7 @@ where
             "/native-integration/{operation}",
             post(native_integration_operation::<O>),
         )
+        .route("/retained/{operation}", post(retained_operation::<O>))
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
 }
@@ -619,23 +463,28 @@ where
 }
 
 fn parse_git_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_catalog_name(&format!("git_{operation}")).filter(
+        |operation| http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Git),
+    )
+}
+
+/// The closed set of feedback reads the dashboard binds through
+/// [`feedback_application_router`].
+fn parse_feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     match operation {
-        "status" => Some(ApplicationSurfaceOperation::GitStatus),
-        "diff" => Some(ApplicationSurfaceOperation::GitDiff),
-        "history" => Some(ApplicationSurfaceOperation::GitHistory),
-        "blame" => Some(ApplicationSurfaceOperation::GitBlame),
-        "hunks" => Some(ApplicationSurfaceOperation::GitHunks),
+        "get" => Some(ApplicationSurfaceOperation::FeedbackGet),
+        "expand" => Some(ApplicationSurfaceOperation::FeedbackExpand),
+        "list" => Some(ApplicationSurfaceOperation::FeedbackList),
+        "proximity" => Some(ApplicationSurfaceOperation::FeedbackProximity),
         _ => None,
     }
 }
 
-fn parse_feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
-    crate::feedback::feedback_read_operation(operation)
-}
-
 fn parse_public_feedback_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(&format!("feedback_{operation}")).filter(
-        |operation| http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Feedback,
+        |operation| {
+            http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Feedback)
+        },
     )
 }
 
@@ -656,7 +505,7 @@ constant_operation_handlers! {
 
 fn parse_primitive_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
-        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Primitive
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Primitive)
             && *operation != ApplicationSurfaceOperation::TestResults
             && !is_callable_code_route(*operation)
     })
@@ -669,13 +518,13 @@ fn parse_callable_code_operation(operation: &str) -> Option<ApplicationSurfaceOp
 
 fn parse_configuration_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
-        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Configuration
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Configuration)
     })
 }
 
 fn parse_context_scout_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
-        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::ContextScout
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::ContextScout)
     })
 }
 
@@ -720,14 +569,19 @@ parsed_operation_handlers! {
     configuration_operation => parse_configuration_operation;
     context_scout_operation => parse_context_scout_operation;
     native_integration_operation => parse_native_integration_operation;
+    retained_operation => parse_retained_operation;
+}
+
+fn parse_retained_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Retained)
+    })
 }
 
 fn parse_native_integration_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
-    ApplicationSurfaceOperation::from_catalog_name(operation)
-        .filter(|operation| {
-            http_application_owner_kind(*operation) == HttpApplicationOwnerKind::NativeIntegration
-        })
-        .filter(|operation| is_http_application_operation_exposed(*operation))
+    ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::NativeIntegration)
+    })
 }
 
 async fn invoke_route<O>(
@@ -741,24 +595,34 @@ async fn invoke_route<O>(
 where
     O: HttpApplicationOwners,
 {
-    let request = match hotpath::measure_block!("api.http.admission", {
+    match is_http_application_operation_exposed(operation) {
+        Ok(true) => {}
+        Ok(false) => {
+            return adapter_problem_response(
+                request_id,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            );
+        }
+        Err(error) => return application_contract_error_response(error),
+    }
+    let match_result = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
         admit_http_application_request(operation, request_id, controls, page, body)
-    }) {
+    };
+    let request = match match_result {
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let owner_kind = http_application_owner_kind(request.operation);
-    let invocation = match owner_kind {
-        HttpApplicationOwnerKind::Git => owners.invoke_git(request),
-        HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
-        HttpApplicationOwnerKind::CallableCode => owners.invoke_callable_code(request),
-        HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
-        HttpApplicationOwnerKind::Observatory => owners.invoke_observatory(request),
-        HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
-        HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
-        HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),
-    };
-    match hotpath::future!(invocation, label = "api.http.handler").await {
+    if http_application_owner_kind(request.operation).is_none() {
+        return adapter_problem_response(
+            request.request_id,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        );
+    }
+    let invocation = owners.invoke(request);
+    match tracing::Instrument::instrument(invocation, tracing::trace_span!("api.http.handler"))
+        .await
+    {
         Ok(result) => result.into_http_response(),
         Err(error) => application_contract_error_response(error),
     }
@@ -783,7 +647,11 @@ fn admit_http_application_request(
             )));
         }
     };
-    let page = match PageRequest::new(page.page_size, page.cursor) {
+    let page_size = match page.page_size {
+        Some(page_size) => page_size,
+        None => application_operation_default_page_size(operation),
+    };
+    let page = match PageRequest::new(page_size, page.cursor) {
         Ok(page) => page,
         Err(_) => {
             return Err(Box::new(invalid_request_response(

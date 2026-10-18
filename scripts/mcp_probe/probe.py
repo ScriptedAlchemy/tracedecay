@@ -13,7 +13,7 @@ The driver:
   * matches responses by JSON-RPC id (so a slow call cannot poison later ones),
   * times each call, classifies the response, logs.
 
-Exit code is 0 even if some tools fail — that is the matrix's whole point.
+Exit code is 0 even if some tools fail, that is the matrix's whole point.
 Use build_matrix.py to surface the bad cells.
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
-DEFAULT_BIN = REPO_ROOT / "target" / "release" / "tracedecay"
+DEFAULT_BIN = REPO_ROOT / "bazel-bin" / "crates" / "tracedecay-cli" / "tracedecay"
 DEFAULT_LOG = "/tmp/tracedecay_matrix.log"
 DEFAULT_REPOS = ROOT / "repos.toml"
 DEFAULT_STDERR_DIR = "/tmp/tracedecay_matrix_stderr"
@@ -67,7 +67,7 @@ class McpClient:
     def __init__(self, repo_path: str, repo_name: str = "unknown"):
         # Capture stderr per-repo. Earlier revisions piped to DEVNULL, which
         # made server crashes during init look like a BrokenPipeError from
-        # the probe driver — totally unactionable. Real causes (missing
+        # the probe driver, totally unactionable. Real causes (missing
         # .tracedecay/tracedecay.db, unreadable DB, OOM on large repos like
         # chromium) showed up on stderr but were silently discarded.
         STDERR_DIR.mkdir(parents=True, exist_ok=True)
@@ -85,7 +85,7 @@ class McpClient:
         self._buf = b""
         self._stale: set[int] = set()  # ids whose original caller already gave up
 
-        # Initialize handshake — fail loud, fail early. Earlier the code
+        # Initialize handshake, fail loud, fail early. Earlier the code
         # ignored a missing/error response and tried to push the
         # "initialized" notification regardless; if the server had already
         # exited, that second write blew up the whole probe with a bare
@@ -200,7 +200,7 @@ class McpClient:
         resp = self._recv_id(rid, timeout=timeout)
         dt = time.time() - t0
         if isinstance(resp, dict) and resp.get("_timeout"):
-            # Caller is giving up — mark id stale so a late reply is dropped.
+            # Caller is giving up, mark id stale so a late reply is dropped.
             self._stale.add(rid)
         return resp, dt
 
@@ -347,7 +347,7 @@ def load_probe_set(languages: list[str], discovered: dict) -> dict:
 def main() -> int:
     if not BIN.exists():
         print(f"error: tracedecay binary not found at {BIN}", file=sys.stderr)
-        print(f"hint: run `cargo build --release` first", file=sys.stderr)
+        print("hint: run `bazel build --config=release //crates/tracedecay-cli:tracedecay` first", file=sys.stderr)
         return 2
 
     sys.path.insert(0, str(ROOT))
@@ -369,7 +369,7 @@ def main() -> int:
         except McpInitError as exc:
             # Skip the repo but record the failure in the matrix so it
             # surfaces in build_matrix.py instead of just vanishing.
-            print(f"skip {name}: {exc.hint} — see {exc.stderr_path}", file=sys.stderr)
+            print(f"skip {name}: {exc.hint}, see {exc.stderr_path}", file=sys.stderr)
             log.write(f"{name}\t_init_\t{{}}\tBAD\t{exc.hint}\n")
             log.flush()
             continue

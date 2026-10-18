@@ -3,12 +3,12 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use tracedecay_application::{
-    ApplicationOperation, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot,
-    DisclosureClass, RequestContext, ResolvedScope,
-};
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
+};
+use tracedecay_contracts::{
+    ApplicationOperation, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot,
+    DisclosureClass, RequestContext, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
@@ -19,11 +19,11 @@ use tracedecay_graph_db::NeverCancelled;
 use super::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
-    VerifiedCodeGraphRead,
+    GraphQueryError, VerifiedCodeGraphRead,
 };
 
 pub(super) fn graph_operation() -> ApplicationOperation {
-    tracedecay_application::retrieval::catalog::primitive_read_operation("node")
+    tracedecay_contracts::retrieval::catalog::primitive_read_operation("node")
         .expect("graph operation catalog")
         .expect("registered node operation")
 }
@@ -94,7 +94,7 @@ impl CodeGraphProjectionReadPort for ImmediateProjection {
         let scope = self.scope.clone();
         let store = Arc::clone(&self.store);
         Box::pin(async move {
-            VerifiedCodeGraphRead::new(scope, store, super::CodeGraphReadFreshnessV1::Current)
+            VerifiedCodeGraphRead::new(scope, store, super::CodeGraphReadFreshnessV1::Current, None)
         })
     }
 }
@@ -111,18 +111,9 @@ pub(super) fn fixture_store(tag: &str) -> Arc<CodeGraphProjectionStore> {
     Arc::new(projection.verified_store(&generation).expect("store"))
 }
 
-pub(super) fn assert_route(error: tracedecay_domain::errors::TraceDecayError, reason_code: &str) {
-    let (code, _, detail) = error
-        .project_route_context()
-        .expect("typed graph project route");
-    assert_eq!(code, reason_code);
-    match reason_code {
-        "code-graph-timed-out" => {
-            assert_eq!(detail, CodeGraphReadError::TimedOut.to_string());
-        }
-        "code-graph-cancelled" => {
-            assert_eq!(detail, CodeGraphReadError::Cancelled.to_string());
-        }
-        other => panic!("unexpected graph reason {other}"),
-    }
+pub(super) fn assert_read_error(error: GraphQueryError, expected: CodeGraphReadError) {
+    let GraphQueryError::Read(error) = error else {
+        panic!("expected a graph read error, got {error}");
+    };
+    assert_eq!(error, expected);
 }

@@ -3,7 +3,7 @@ import type {
   ExecutionTopologyViewV1,
   WorkAttemptListV1,
   WorkAttemptTopologyBindingV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { WorkResult } from './workApi.ts';
 import { workAttemptReading } from './workAttemptModel.ts';
 import type { WorkGraphReading } from './workGraphModel.ts';
@@ -20,9 +20,9 @@ import {
   integrationOutcomesCard,
 } from './workAccountingMetrics.ts';
 import {
+  accountingCardCoverage,
   unavailableCard,
   type WorkAccountingCard,
-  type WorkAttemptPageV1,
   type WorkTopologyAccountingReading,
 } from './workAccountingModel.ts';
 
@@ -73,7 +73,7 @@ import {
  *                      test and CI reruns are a different population with no
  *                      read model, and the three are never summed.
  *   duplicate effects  the same page's `WorkEffectStateV1` census. The
- *                      adjudication itself — was one effect committed twice —
+ *                      adjudication itself, was one effect committed twice,
  *                      is unavailable, but `compound_non_repeatable` is a real
  *                      ELIGIBLE DENOMINATOR for it, so that card carries a
  *                      denominator under an unavailable reading. That
@@ -165,6 +165,8 @@ export function workTopologyAccounting(
 
   return {
     cards,
+    stated: cards.filter((card) => accountingCardCoverage(card) === 'stated'),
+    uncovered: cards.filter((card) => accountingCardCoverage(card) === 'uncovered'),
     measured: cards.filter((card) => card.reading.available).length,
   };
 }

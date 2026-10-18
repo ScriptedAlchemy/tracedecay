@@ -1,19 +1,36 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, atomic::Ordering};
+use std::time::Instant;
+
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 
 use super::{ProjectRuntime, ProjectRuntimeRegistryV1};
 use crate::invocation::UnavailableFeedbackCycleRuntimeV1;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// How the project runtimes' teardown ended. Only `DidNotStop` is a failed
+/// shutdown: lost work is a gap in best-effort output from owners that joined.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectRuntimesStop {
+    Stopped,
+    StoppedWithLostWork(Vec<String>),
+    DidNotStop,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub(super) enum ShutdownState {
     Pending,
-    Complete,
-    Failed,
+    Finished(ProjectRuntimesStop),
 }
 
 impl ProjectRuntimeRegistryV1 {
-    #[hotpath::measure(label = "daemon.service.project_runtime.retire_roots", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.retire_roots",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) async fn retire_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
         {
             let mut fences = self.lock_root_fences();
@@ -22,7 +39,11 @@ impl ProjectRuntimeRegistryV1 {
         self.drain_roots(roots).await
     }
 
-    #[hotpath::measure(label = "daemon.service.project_runtime.quiesce_roots", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.quiesce_roots",
+        level = "trace",
+        skip_all
+    )]
     pub async fn quiesce_roots(
         &self,
         roots: &BTreeSet<PathBuf>,
@@ -34,7 +55,9 @@ impl ProjectRuntimeRegistryV1 {
             }
             fences.quiesced.extend(roots.iter().cloned());
         }
-        if !self.drain_roots(roots).await {
+        let drained: Pin<Box<dyn Future<Output = bool> + Send + '_>> =
+            Box::pin(self.drain_roots(roots));
+        if !drained.await {
             self.release_quiesced_roots(roots);
             return None;
         }
@@ -44,53 +67,58 @@ impl ProjectRuntimeRegistryV1 {
         })
     }
 
-    #[hotpath::skip]
     async fn drain_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
-        let retired = tokio::time::timeout(crate::TASK_ABORT_DEADLINE, async {
-            loop {
-                let mut changed = self.reservation_changed.subscribe();
-                let retired = {
-                    let fences = self.lock_root_fences();
-                    let mut current = self.lock_runtimes();
-                    (fences.requests_drained(roots)
-                        && roots.iter().all(|root| {
-                            current
-                                .get(root)
-                                .is_none_or(|runtime| runtime.reservations.is_empty())
-                        }))
-                    .then(|| {
-                        roots
-                            .iter()
-                            .filter_map(|root| {
-                                current.remove(root).map(|runtime| (root.clone(), runtime))
-                            })
-                            .collect::<BTreeMap<_, _>>()
-                    })
-                };
-                if let Some(retired) = retired {
-                    break retired;
+        let retired = tracedecay_runtime_core::native_runtime::timeout(
+            tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE,
+            async {
+                loop {
+                    let mut changed = self.reservation_changed.subscribe();
+                    let retired = {
+                        let fences = self.lock_root_fences();
+                        let mut current = self.lock_runtimes();
+                        (fences.requests_drained(roots)
+                            && roots.iter().all(|root| {
+                                current
+                                    .get(root)
+                                    .is_none_or(|runtime| runtime.reservations.is_empty())
+                            }))
+                        .then(|| {
+                            roots
+                                .iter()
+                                .filter_map(|root| {
+                                    current.remove(root).map(|runtime| (root.clone(), runtime))
+                                })
+                                .collect::<BTreeMap<_, _>>()
+                        })
+                    };
+                    if let Some(retired) = retired {
+                        break retired;
+                    }
+                    if changed.changed().await.is_err() {
+                        break BTreeMap::new();
+                    }
                 }
-                if changed.changed().await.is_err() {
-                    break BTreeMap::new();
-                }
-            }
-        })
+            },
+        )
         .await;
-        match retired {
-            Ok(mut runtimes) => {
-                let mut clean = shut_down_advisory(&runtimes).await;
-                clean &= shut_down_feedback(&runtimes).await;
-                clean &= shut_down_semantic(
-                    &mut runtimes,
-                    tokio::time::Instant::now() + crate::TASK_ABORT_DEADLINE,
-                )
-                .await;
-                clean &= shut_down_observability(&mut runtimes).await;
-                shut_down_runtimes(runtimes);
-                clean
-            }
-            Err(_) => false,
+        let Ok(mut runtimes) = retired else {
+            return false;
+        };
+        // The roots are drained once their runtimes leave the registry. Lost
+        // work cannot be recovered by a retry and must not fail the
+        // retirement of roots already torn down.
+        let mut lost_work = shut_down_advisory(&runtimes).await;
+        lost_work.extend(shut_down_feedback(&runtimes).await);
+        lost_work.extend(shut_down_observability(&mut runtimes, None).await);
+        drop(shut_down_runtimes(runtimes));
+        if !lost_work.is_empty() {
+            tracing::warn!(
+                roots = ?roots,
+                ?lost_work,
+                "retired project runtimes lost work while shutting down"
+            );
         }
+        true
     }
 
     fn release_quiesced_roots(&self, roots: &BTreeSet<PathBuf>) {
@@ -106,7 +134,7 @@ impl ProjectRuntimeRegistryV1 {
     /// recovery owner, synchronously.
     ///
     /// Called from `DaemonInvocationService::cancel_admissions`, so both halves
-    /// run at shutdown *prepare* time — before any owner join is polled.
+    /// run at shutdown *prepare* time, before any owner join is polled.
     /// Previously this only set `closed`, and the recovery owners were left to
     /// be cancelled deep inside the async `shut_down_all` drain; blocked-interval
     /// and workflow-census cycles kept scanning for the whole of the phases in
@@ -116,7 +144,7 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// `shut_down_all` is retryable: a failed drain stores `shutdown_started =
     /// false` so a later attempt re-runs it. Cancelling owners at prepare time
-    /// would be wrong if such a retry could be expected to keep them running —
+    /// would be wrong if such a retry could be expected to keep them running,
     /// but it cannot. `closed` is one-way: it is set true here and nothing in
     /// the workspace ever stores false, and every admission path (`reserve`,
     /// `publish`, `register_or_reconcile`, request admission) refuses with
@@ -127,7 +155,7 @@ impl ProjectRuntimeRegistryV1 {
     /// idempotent, so the retry itself is a no-op against them.
     ///
     /// Targeted single-project retirement deliberately does not come through
-    /// here — `retire_roots`/`quiesce_roots` fence one root and join that
+    /// here, `retire_roots`/`quiesce_roots` fence one root and join that
     /// project's owners in `shut_down_observability`, leaving every other
     /// project's recovery running.
     pub(crate) fn begin_shutdown(&self) {
@@ -140,14 +168,14 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// Runs under the runtime map's `std` mutex and touches no async lock, so
     /// it stays callable from the synchronous `cancel_admissions` half of
-    /// shutdown. Cancelling a token only flags it and wakes its waiters — the
-    /// woken tasks are scheduled, never polled inline — so no cancelled owner
+    /// shutdown. Cancelling a token only flags it and wakes its waiters, the
+    /// woken tasks are scheduled, never polled inline, so no cancelled owner
     /// can re-enter this lock while the guard is held.
     ///
-    /// No owner can slip past the sweep. `register_or_reconcile` tests
-    /// `closed` and mounts the component under one continuously-held guard on
-    /// this same map, so a concurrent registrar either takes the lock first
-    /// and is swept here, or takes it after and is refused.
+    /// No owner can slip past the sweep. `register_or_reconcile` rechecks
+    /// `closed` while committing its exact reservation under this same map
+    /// lock, so a concurrent registrar either commits first and is swept here,
+    /// or observes closed admission and rolls its reservation back.
     fn cancel_retained_background_recovery(&self) {
         for runtime in self.lock_runtimes().values() {
             runtime.cancel_background_recovery();
@@ -156,60 +184,72 @@ impl ProjectRuntimeRegistryV1 {
 
     /// Shut every project runtime down and leave the registry empty.
     ///
-    /// Routers become unavailable before feedback owners drop, Work providers
-    /// are joined, and process-wide semantic handles are unregistered.
-    #[hotpath::measure(label = "daemon.service.project_runtime.shutdown", future = true)]
-    pub(crate) async fn shut_down_all(&self) -> bool {
+    /// Routers become unavailable before feedback owners drop and Work
+    /// providers are joined. The drain is single-flight, so the first
+    /// caller's `deadline` bounds the producer drains for every caller.
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.shutdown",
+        level = "trace",
+        skip_all
+    )]
+    pub(crate) async fn shut_down_all(&self, deadline: Option<Instant>) -> ProjectRuntimesStop {
         self.begin_shutdown();
         let mut shutdown_complete = self.shutdown_complete.subscribe();
         let mut shutdown_task = self.shutdown_task.lock().await;
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let registry = self.clone();
             self.shutdown_complete.send_replace(ShutdownState::Pending);
-            let task = tokio::spawn(async move {
+            let task = NativeTask::spawn(async move {
                 let drain_registry = registry.clone();
-                let drained = tokio::task::spawn_blocking(move || {
+                let drained = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         drain_registry.take_all_blocking()
                     }))
                 })
                 .await;
-                let state = match drained {
-                    Ok(Ok(runtimes)) => {
-                        if registry.finish_drained_runtimes(runtimes).await {
-                            ShutdownState::Complete
-                        } else {
-                            registry.shutdown_started.store(false, Ordering::Release);
-                            ShutdownState::Failed
-                        }
-                    }
+                tracedecay_runtime_core::logging::log_daemon_event(
+                    "daemon_shutdown",
+                    &[("outcome", "project_runtimes_drained".to_string())],
+                );
+                let stop = match drained {
+                    Ok(Ok(runtimes)) => registry.finish_drained_runtimes(runtimes, deadline).await,
                     _ => {
                         registry.shutdown_started.store(false, Ordering::Release);
-                        ShutdownState::Failed
+                        ProjectRuntimesStop::DidNotStop
                     }
                 };
-                registry.shutdown_complete.send_replace(state);
+                registry
+                    .shutdown_complete
+                    .send_replace(ShutdownState::Finished(stop));
             });
-            *shutdown_task = Some(task);
+            match task {
+                Ok(task) => *shutdown_task = Some(task),
+                Err(error) => {
+                    tracing::error!(%error, "project runtime shutdown drain was not started");
+                    self.shutdown_started.store(false, Ordering::Release);
+                    self.shutdown_complete
+                        .send_replace(ShutdownState::Finished(ProjectRuntimesStop::DidNotStop));
+                }
+            }
         }
         drop(shutdown_task);
         loop {
-            let state = *shutdown_complete.borrow_and_update();
+            let state = shutdown_complete.borrow_and_update().clone();
             match state {
-                ShutdownState::Complete | ShutdownState::Failed => {
+                ShutdownState::Finished(stop) => {
                     self.join_shutdown_task().await;
-                    if state == ShutdownState::Complete {
-                        return true;
+                    if stop == ProjectRuntimesStop::DidNotStop {
+                        self.force_drop_failed_shutdown_runtimes();
                     }
-                    self.force_drop_failed_shutdown_runtimes();
-                    return false;
+                    return stop;
                 }
                 ShutdownState::Pending => {
                     if shutdown_complete.changed().await.is_err() {
-                        self.shutdown_complete.send_replace(ShutdownState::Failed);
+                        self.shutdown_complete
+                            .send_replace(ShutdownState::Finished(ProjectRuntimesStop::DidNotStop));
                         self.join_shutdown_task().await;
                         self.force_drop_failed_shutdown_runtimes();
-                        return false;
+                        return ProjectRuntimesStop::DidNotStop;
                     }
                 }
             }
@@ -218,24 +258,24 @@ impl ProjectRuntimeRegistryV1 {
 
     fn force_drop_failed_shutdown_runtimes(&self) {
         let runtimes = std::mem::take(&mut *self.lock_runtimes());
-        shut_down_runtimes(runtimes);
+        drop(shut_down_runtimes(runtimes));
     }
 
-    #[hotpath::skip]
     async fn join_shutdown_task(&self) {
         let result = {
             let mut retained = self.shutdown_task.lock().await;
             let Some(task) = retained.as_mut() else {
                 return;
             };
-            let result = task.await;
+            let result = task.wait().await;
             retained.take();
             result
         };
-        if let Err(error) = result {
+        if !matches!(result, NativeTaskOutcome::Completed(())) {
             self.shutdown_started.store(false, Ordering::Release);
-            self.shutdown_complete.send_replace(ShutdownState::Failed);
-            tracing::error!(%error, "project runtime shutdown drain task failed");
+            self.shutdown_complete
+                .send_replace(ShutdownState::Finished(ProjectRuntimesStop::DidNotStop));
+            tracing::error!(outcome = ?result, "project runtime shutdown drain task failed");
         }
     }
 
@@ -263,7 +303,7 @@ impl ProjectRuntimeRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take()
             {
-                drain_waiting.send(()).expect("drain-waiting receiver");
+                let _ = drain_waiting.send(());
             }
             let mut current_version = version
                 .lock()
@@ -276,76 +316,71 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
-    #[hotpath::skip]
+    /// Every teardown here joins its owner before returning, so the drained
+    /// runtimes always stop; a teardown can only add lost work.
     async fn finish_drained_runtimes(
         &self,
         mut runtimes: BTreeMap<PathBuf, ProjectRuntime>,
-    ) -> bool {
-        let deadline =
-            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
-        let mut clean = shut_down_advisory(&runtimes).await;
-        clean &= shut_down_feedback(&runtimes).await;
-        clean &= shut_down_semantic(&mut runtimes, deadline).await;
-        clean &= shut_down_observability(&mut runtimes).await;
-        shut_down_runtimes(runtimes);
-        clean
+        deadline: Option<Instant>,
+    ) -> ProjectRuntimesStop {
+        let started = std::time::Instant::now();
+        let step = |outcome: &str| {
+            tracedecay_runtime_core::logging::log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", outcome.to_string()),
+                    ("owner", "project_runtimes".to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+        };
+        let mut lost_work = shut_down_advisory(&runtimes).await;
+        step("advisory_shut_down");
+        lost_work.extend(shut_down_feedback(&runtimes).await);
+        step("feedback_shut_down");
+        lost_work.extend(shut_down_observability(&mut runtimes, deadline).await);
+        step("observability_shut_down");
+        release_drained_runtimes(shut_down_runtimes(runtimes));
+        step("runtimes_release_detached");
+        if lost_work.is_empty() {
+            ProjectRuntimesStop::Stopped
+        } else {
+            ProjectRuntimesStop::StoppedWithLostWork(lost_work)
+        }
     }
 }
 
-/// Cancel and join every semantic owner before its project database can enter
-/// retirement. Targeted project retirement and whole-daemon shutdown share
-/// this exact sequence so neither path can leave a worker holding a counted
-/// database client after the runtime map entry has been removed.
-async fn shut_down_semantic(
-    runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>,
-    deadline: tokio::time::Instant,
-) -> bool {
-    let mut clean = true;
-    for runtime in runtimes.values_mut() {
-        if let Some(reconciler) = runtime.semantic_activation_reconciler.take() {
-            reconciler.cancel_and_join().await;
-        }
-        if let Some(configuration) = runtime.configuration.as_ref() {
-            let receipt = tracedecay_code_index_runtime::collect_semantic_evaluation_shutdown(
-                configuration.semantic_evaluation_workers().as_ref(),
-                deadline,
-            )
-            .await;
-            clean &= receipt.is_clean();
-        }
-        if let Some(semantic) = runtime.semantic.as_ref() {
-            clean &= semantic.cancel_and_join_until(deadline).await.is_clean();
+/// The advisory hook tasks each project lost: a failed task, or one aborted
+/// at the abort deadline and then joined.
+async fn shut_down_advisory(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> Vec<String> {
+    let mut lost_work = Vec::new();
+    for (project_root, runtime) in runtimes {
+        if let Some(advisory) = runtime.advisory.as_ref()
+            && !advisory.shutdown().await
+        {
+            lost_work.push(format!(
+                "{}: advisory hook work failed or was aborted",
+                project_root.display()
+            ));
         }
     }
-    clean
+    lost_work
 }
 
-async fn shut_down_advisory(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> bool {
-    let mut clean = true;
-    for runtime in runtimes.values() {
-        if let Some(advisory) = runtime.advisory.as_ref() {
-            clean &= advisory.shutdown().await;
-        }
-    }
-    clean
-}
-
-async fn shut_down_feedback(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> bool {
-    let mut clean = true;
+async fn shut_down_feedback(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> Vec<String> {
+    let mut lost_work = Vec::new();
     for (project_root, runtime) in runtimes {
         let Some(feedback) = runtime.feedback.as_ref() else {
             continue;
         };
         if let Err(error) = feedback.runtime().close_and_drain_observations().await {
-            tracing::warn!(
-                project = %project_root.display(),
-                %error,
-                "project feedback observation shutdown was incomplete"
-            );
-            clean = false;
+            lost_work.push(format!(
+                "{}: feedback observations: {error}",
+                project_root.display()
+            ));
         }
     }
-    clean
+    lost_work
 }
 
 pub struct ProjectRuntimeRootQuiescenceV1 {
@@ -362,9 +397,14 @@ impl Drop for ProjectRuntimeRootQuiescenceV1 {
 /// Stop Work recovery producers, then close and flush each project producer
 /// before its registered database and dependent runtime owners are dropped. A
 /// failed flush is terminal: the producer has entered shutdown and is removed
-/// rather than being republished as a live component on a retry.
-async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>) -> bool {
-    let mut clean = true;
+/// rather than being republished as a live component on a retry. A daemon
+/// shutdown passes its phase `deadline`; without one each producer drain
+/// keeps its own budget.
+async fn shut_down_observability(
+    runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>,
+    deadline: Option<Instant>,
+) -> Vec<String> {
+    let mut lost_work = Vec::new();
     for (project_root, runtime) in runtimes.iter_mut() {
         if let Some(work) = runtime.work.as_ref() {
             work.shut_down_background_recovery().await;
@@ -372,22 +412,43 @@ async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime
         let Some(observability) = runtime.observability.take() else {
             continue;
         };
-        if let Err(error) = observability.shutdown().await {
-            tracing::warn!(
-                project = %project_root.display(),
-                %error,
-                "project observability shutdown was incomplete"
-            );
-            clean = false;
+        let shutdown: Pin<
+            Box<
+                dyn Future<Output = Result<(), tracedecay_contracts::ApplicationContractError>>
+                    + Send,
+            >,
+        > = Box::pin(observability.shutdown_until(deadline));
+        if let Err(error) = shutdown.await {
+            lost_work.push(format!(
+                "{}: observability: {error}",
+                project_root.display()
+            ));
         }
     }
-    clean
+    lost_work
 }
 
 /// Terminal teardown for a set of drained runtimes. Shared by full daemon
 /// shutdown and by targeted retirement (`retire_roots`), so a deletion cleanup
 /// tears a project's runtimes down exactly the way shutdown does.
-fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
+///
+/// Returns the torn-down runtimes instead of dropping them: the caller decides
+/// whether their deallocation may run inline (targeted retirement, where the
+/// next mount must observe every handle released) or off the shutdown path.
+fn shut_down_runtimes(
+    runtimes: BTreeMap<PathBuf, ProjectRuntime>,
+) -> BTreeMap<PathBuf, ProjectRuntime> {
+    let started = std::time::Instant::now();
+    let step = |outcome: &str| {
+        tracedecay_runtime_core::logging::log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", outcome.to_string()),
+                ("owner", "project_runtimes".to_string()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
+    };
     for runtime in runtimes.values() {
         let (Some(router), Some(feedback)) = (&runtime.feedback_cycle_input, &runtime.feedback)
         else {
@@ -398,13 +459,67 @@ fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
             feedback.source_observation_port(),
         )));
     }
+    step("feedback_routers_replaced");
+    runtimes
+}
 
-    for (project_root, runtime) in runtimes {
-        if let Some(semantic) = runtime.semantic {
-            tracedecay_usecases::semantic_runtime::unregister_project_semantic_runtime(
-                &project_root,
-            );
-            semantic.cancel();
+/// Free the drained runtimes off the daemon shutdown path.
+///
+/// A project runtime holds the last references to generation-sized owners
+/// (the retained decoded code-index generation, feedback and evidence
+/// readers). Dropping them frees millions of small allocations and on a
+/// repository-sized corpus that took several seconds, inside the invocation
+/// owner's join, after its bounded code-index sweep had already spent its
+/// abort deadline, which is exactly what outlived the supervisor's TERM
+/// grace. Every owner was already cancelled and joined by the shutdown phases
+/// ahead of `shut_down_runtimes`; the blocking pool releases the memory while
+/// shutdown proceeds, and process exit reclaims whatever is still being freed.
+fn release_drained_runtimes<R: Send + 'static>(runtimes: BTreeMap<PathBuf, R>) {
+    let count = runtimes.len();
+    let started = std::time::Instant::now();
+    let release = move || {
+        drop(runtimes);
+        tracedecay_runtime_core::logging::log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "project_runtimes_released".to_string()),
+                ("runtimes", count.to_string()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
+    };
+    // Queued here rather than through the awaitable helper, which would only
+    // start the release once polled. Without a pool the runtimes drop inline.
+    let _ = tracedecay_runtime_core::native_runtime::handle()
+        .and_then(|runtime| runtime.spawn_blocking(release));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread::{self, ThreadId};
+    use std::time::Duration;
+
+    use super::*;
+
+    struct ReleaseProbe(mpsc::Sender<ThreadId>);
+
+    impl Drop for ReleaseProbe {
+        fn drop(&mut self) {
+            let _ = self.0.send(thread::current().id());
         }
+    }
+
+    #[test]
+    fn drained_runtimes_are_released_off_the_shutdown_thread() {
+        let (released, released_on) = mpsc::channel();
+        release_drained_runtimes(BTreeMap::from([(
+            PathBuf::from("/project"),
+            ReleaseProbe(released),
+        )]));
+        let released_on = released_on
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the drained runtimes are released");
+        assert_ne!(released_on, thread::current().id());
     }
 }

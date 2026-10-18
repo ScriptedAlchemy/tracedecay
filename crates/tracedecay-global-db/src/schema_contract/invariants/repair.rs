@@ -6,11 +6,14 @@ use tracedecay_domain::{
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 use tracedecay_store::observation::ObservationCoverageV1;
 
-use crate::global_db_operation_error;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL;
 
-use super::rows::{authority_violation, decode_authority_json, encode_authority_json};
-use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS, OPERATION};
+use super::rows::{
+    audit_read_error, authority_violation, decode_authority_json, decode_authority_observation,
+    encode_authority_json,
+};
+use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS};
 
 struct CommittedCursorCandidate {
     source_json: String,
@@ -21,7 +24,7 @@ struct CommittedCursorCandidate {
 
 /// Reads the current observation frontier: `COALESCE(MAX(sequence), 0)` over
 /// `observations`. The row cursor lives only inside this function, so it is
-/// fully consumed and dropped before returning — see
+/// fully consumed and dropped before returning, see
 /// `observation_projection::rebuild::read_observation_frontier` for why a
 /// caller doing further reads or writes on the same connection depends on
 /// that.
@@ -31,15 +34,20 @@ async fn read_observation_frontier(
     let mut rows = conn
         .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     rows.next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("observation frontier query returned no row"))?
         .get::<i64>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))
+        .map_err(audit_read_error)
 }
 
+#[tracing::instrument(
+    name = "global_db.schema_contract.repair.projection_frontier",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn repair_projection_frontier(
     conn: &impl Executor,
     trusted_checkpoint: i64,
@@ -51,14 +59,14 @@ pub(super) async fn repair_projection_frontier(
             params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let stored_checkpoint = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .map(|row| row.get::<i64>(0))
         .transpose()
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .unwrap_or(0);
     drop(rows);
 
@@ -100,21 +108,13 @@ pub(super) async fn repair_projection_frontier(
                 ],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let mut page_rows = 0_i64;
         let mut reached_gap = false;
-        while let Some(row) = coverage
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
+        while let Some(row) = coverage.next().await.map_err(audit_read_error)? {
             page_rows += 1;
-            let sequence = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let disposition_count = row
-                .get::<i64>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let sequence = row.get::<i64>(0).map_err(audit_read_error)?;
+            let disposition_count = row.get::<i64>(1).map_err(audit_read_error)?;
             scan_cursor = sequence;
             if disposition_count != 1 {
                 reached_gap = true;
@@ -135,7 +135,7 @@ pub(super) async fn repair_projection_frontier(
             params![SESSION_MESSAGE_PROJECTOR_VERSION, repaired_checkpoint],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     }
 
     conn.execute(
@@ -148,23 +148,28 @@ pub(super) async fn repair_projection_frontier(
         (),
     )
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    .map_err(audit_read_error)?;
     conn.execute(
         "DELETE FROM projection_queue WHERE observation_sequence <= ?1",
         params![repaired_checkpoint],
     )
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    .map_err(audit_read_error)?;
     conn.execute(
         "INSERT OR IGNORE INTO projection_queue (observation_id, observation_sequence)
          SELECT observation_id, sequence FROM observations WHERE sequence > ?1",
         params![repaired_checkpoint],
     )
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    .map_err(audit_read_error)?;
     Ok(repaired_checkpoint)
 }
 
+#[tracing::instrument(
+    name = "global_db.schema_contract.repair.source_cursors",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn repair_committed_source_cursors(
     conn: &impl Executor,
     after_sequence: i64,
@@ -216,6 +221,11 @@ pub(super) async fn repair_committed_source_cursors(
     Ok(())
 }
 
+#[tracing::instrument(
+    name = "global_db.schema_contract.repair.scan_committed",
+    level = "trace",
+    skip_all
+)]
 async fn latest_committed_source_cursors(
     conn: &impl QueryExecutor,
     after_sequence: i64,
@@ -234,25 +244,15 @@ async fn latest_committed_source_cursors(
                 params![after_sequence, scan_cursor, OBSERVATION_AUDIT_PAGE_ROWS],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let mut page_rows = 0_i64;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
+        while let Some(row) = rows.next().await.map_err(audit_read_error)? {
             page_rows += 1;
-            scan_cursor = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let observation_json = row
-                .get::<String>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let cursor_json = row
-                .get::<String>(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            scan_cursor = row.get::<i64>(0).map_err(audit_read_error)?;
+            let observation_json = row.get::<String>(1).map_err(audit_read_error)?;
+            let cursor_json = row.get::<String>(2).map_err(audit_read_error)?;
             let observation: DurableObservationV1 =
-                decode_authority_json(&observation_json, "committed observation authority JSON")?;
+                decode_authority_observation(conn, &observation_json).await?;
             let cursor: ObservationSourceCursorV1 =
                 decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
             let source_json =
@@ -284,6 +284,11 @@ fn is_new_generation_frontier(
         && stored.position() == 0
 }
 
+#[tracing::instrument(
+    name = "global_db.schema_contract.repair.read_cursor",
+    level = "trace",
+    skip_all
+)]
 async fn read_source_cursor(
     conn: &impl QueryExecutor,
     source_json: &str,
@@ -296,19 +301,24 @@ async fn read_source_cursor(
             params![source_json, scope_json],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let cursor_json = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .map(|row| row.get::<String>(0))
         .transpose()
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     cursor_json
         .map(|json| decode_authority_json(&json, "source cursor authority JSON"))
         .transpose()
 }
 
+#[tracing::instrument(
+    name = "global_db.schema_contract.repair.write_cursor",
+    level = "trace",
+    skip_all
+)]
 async fn write_source_cursor(
     conn: &impl Executor,
     candidate: &CommittedCursorCandidate,
@@ -325,10 +335,26 @@ async fn write_source_cursor(
         ],
     )
     .await
+    .map_err(audit_read_error)?;
+    // Like every cursor commit, a repaired cursor drops the advances it now
+    // strictly supersedes; no other pass reclaims them.
+    conn.execute(
+        PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
+        params![
+            candidate.source_json.as_str(),
+            candidate.scope_json.as_str()
+        ],
+    )
+    .await
     .map(|_| ())
-    .map_err(|error| global_db_operation_error(OPERATION, error))
+    .map_err(audit_read_error)
 }
 
+#[tracing::instrument(
+    name = "global_db.schema_contract.repair.check_advance_receipt",
+    level = "trace",
+    skip_all
+)]
 async fn cursor_has_exact_advance_receipt(
     conn: &impl QueryExecutor,
     source_json: &str,
@@ -342,15 +368,9 @@ async fn cursor_has_exact_advance_receipt(
             params![source_json, scope_json],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        let coverage_json = row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+        let coverage_json = row.get::<String>(0).map_err(audit_read_error)?;
         let coverage: ObservationCoverageV1 =
             decode_authority_json(&coverage_json, "source cursor advance coverage JSON")?;
         if coverage.generation() == cursor.generation()
@@ -363,6 +383,11 @@ async fn cursor_has_exact_advance_receipt(
     Ok(false)
 }
 
+#[tracing::instrument(
+    name = "global_db.schema_contract.repair.cursor_coverage",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn validate_observation_cursor_coverage(
     conn: &impl QueryExecutor,
     after_sequence: i64,

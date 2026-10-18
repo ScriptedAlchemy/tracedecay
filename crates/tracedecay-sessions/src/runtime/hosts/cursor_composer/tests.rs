@@ -2,7 +2,13 @@ use super::capture::*;
 #[cfg(windows)]
 use super::ingest::snapshot_generation;
 #[cfg(unix)]
-use super::ingest::{directory_entry_is_real_dir, path_is_regular_file_no_follow};
+use super::ingest::{
+    COMPOSER_RETRY_KEY_PREFIX, directory_entry_is_real_dir, path_is_regular_file_no_follow,
+};
+use super::ingest::{
+    ComposerIngestContext, complete_composer_retry, composer_retry_key, composer_retry_key_prefix,
+    ensure_composer_retry,
+};
 use super::sqlite::*;
 use super::store::*;
 use super::*;
@@ -10,17 +16,27 @@ use super::*;
 use serde_json::{Value, json};
 use tracedecay_capture::cursor_composer::normalize_cursor_composer_envelope_observation;
 use tracedecay_domain::{CanonicalObservationFactV1, CanonicalWorkflowSemanticKindV1};
-use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
+use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, ProjectId};
 
+use crate::admission::HostAdmission;
 use crate::admission::test_support::MemoryHostAdmission;
+use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 mod projection;
 
-/// A failed `has_session_message` lookup is store *unavailability*, not proof
-/// the bubble is already durable. The sweep must defer it and ingest it on a
-/// later pass instead of skipping it — and it must not let a later header in
-/// the same composer advance the source cursor past the unverified bubble,
-/// which is what made the old `unwrap_or(true)` a permanent silent drop.
+/// A state database name carrying URI-special characters, so the opener is
+/// proven to take it as a path and never as a `file:` URI. `?` is not a legal
+/// Windows filename character; `#` and `%` still cover the URI grammar there.
+#[cfg(not(windows))]
+const URI_SPECIAL_STATE_DB: &str = "state #?%.vscdb";
+#[cfg(windows)]
+const URI_SPECIAL_STATE_DB: &str = "state #%.vscdb";
+
+/// A failed durable message-id lookup is store *unavailability*, not proof the
+/// bubble is already durable. The sweep must defer it and ingest it on a later
+/// pass instead of skipping it, and it must not let a later header in the
+/// same composer advance the source cursor past the unverified bubble, which
+/// is what made the old `unwrap_or(true)` a permanent silent drop.
 #[tokio::test]
 async fn store_error_during_message_lookup_defers_instead_of_dropping_the_bubble() {
     let project = tempfile::tempdir().unwrap();
@@ -127,6 +143,91 @@ async fn store_error_during_message_lookup_defers_instead_of_dropping_the_bubble
     }
 }
 
+/// Replacing the bounded durable-id batch with one
+/// `has_session_message` call per header makes this second sweep perform 64
+/// scalar store reads.
+#[tokio::test]
+async fn covered_composer_headers_use_batched_durable_identity_lookup() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let connection = rusqlite::Connection::open(state_dir.join("state.vscdb")).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    let headers = (0..64)
+        .map(|index| json!({ "bubbleId": format!("bubble-{index:03}") }))
+        .collect::<Vec<_>>();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "composerData:comp-batch",
+                json!({
+                    "composerId": "comp-batch",
+                    "workspaceIdentifier": {
+                        "uri": { "fsPath": project.path().to_string_lossy() }
+                    },
+                    "fullConversationHeadersOnly": headers
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    for index in 0..64 {
+        connection
+            .execute(
+                "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+                rusqlite::params![
+                    format!("bubbleId:comp-batch:bubble-{index:03}"),
+                    json!({ "type": 1, "text": format!("message {index}") }).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-batch").unwrap();
+    let source = CursorComposerSource::with_home(home.path());
+    source
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    let scalar_reads_before = admission.session_message_read_count();
+    source
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    let scalar_reads_after = admission.session_message_read_count();
+
+    assert_eq!(
+        scalar_reads_after, scalar_reads_before,
+        "one bounded durable-id batch must replace per-header scalar reads"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_snapshot_generation_is_stable_across_appends() {
@@ -144,115 +245,6 @@ fn windows_snapshot_generation_is_stable_across_appends() {
         .unwrap();
 
     assert_eq!(snapshot_generation(&path), Some(before));
-}
-
-#[test]
-fn composer_capture_request_uses_snapshot_order_and_native_bubble_identity() {
-    let bubble = json!({
-        "type": 2,
-        "text": "redacted fixture",
-    });
-    let request = build_cursor_composer_capture_request(
-        "composer-redacted",
-        "bubble-redacted",
-        &bubble,
-        ObservationScopeV1::Profile,
-        ObservationSourceGenerationV1::new(1).unwrap(),
-        7,
-        None,
-    );
-    assert!(request.is_ok());
-    assert_eq!(
-        cursor_composer_native_record_id("composer-redacted", "bubble-redacted")
-            .unwrap()
-            .as_str(),
-        cursor_composer_native_record_id("composer-redacted", "bubble-redacted")
-            .unwrap()
-            .as_str()
-    );
-}
-
-#[test]
-fn canonical_composer_bubble_is_snapshot_typed_and_redacted() {
-    let native = json!({
-        "type": 2,
-        "text": "redacted response",
-        "createdAt": 1_783_500_600_000_i64,
-        "workspaceIdentifier": {"uri": {"fsPath": "/secret/workspace"}},
-        "toolFormerData": {
-            "name": "Read",
-            "toolCallId": "tool-redacted",
-            "params": {"path": "/secret/workspace/file.rs", "token": "credential-redacted"},
-            "result": {"body": "secret result"},
-            "status": "completed"
-        },
-        "thinking": {"text": "provider-visible summary"},
-        "tokenCount": {"inputTokens": 11, "outputTokens": 7},
-        "commits": [{"sha": "abc123"}],
-        "pullRequests": [{"url": "https://example.invalid/pr/1"}],
-        "todos": [{"content": "redacted plan item"}]
-    });
-    let range = tracedecay_domain::ObservationSourceRangeV1::new(7, 8).unwrap();
-    let record_id =
-        cursor_composer_native_record_id("composer-redacted", "bubble-redacted").unwrap();
-    let envelope = normalize_cursor_composer_observation(
-        &native,
-        "composer-redacted",
-        record_id.clone(),
-        range,
-        7,
-    )
-    .unwrap();
-    let rendered = format!("{envelope:?}");
-    for fact in [
-        "Message",
-        "ToolInvocation",
-        "ToolResult",
-        "Reasoning",
-        "Usage",
-        "Git",
-        "Workflow",
-    ] {
-        assert!(rendered.contains(fact), "missing canonical fact {fact}");
-    }
-    assert!(!rendered.contains("TodoList") && !rendered.contains("todo_list"));
-    assert!(rendered.contains("SnapshotOrder"));
-    assert!(rendered.contains(record_id.as_str()));
-    assert!(!rendered.contains("/secret/workspace"));
-    assert!(!rendered.contains("credential-redacted"));
-    assert!(!rendered.contains("secret result"));
-    let relations = serde_json::to_value(envelope.relations()).unwrap();
-    assert_eq!(relations["thread_id"], "composer-redacted");
-    assert_eq!(relations["message_id"], record_id.as_str());
-    assert!(relations.get("turn_id").is_none());
-    assert!(relations.get("agent_id").is_none());
-    assert!(relations.get("parent_agent_id").is_none());
-}
-
-#[test]
-fn composer_bubble_without_turn_field_leaves_turn_unset() {
-    let native = json!({
-        "bubbleId": "bubble-1",
-        "type": 1,
-        "text": "hello from composer"
-    });
-    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-    let record_id = cursor_composer_native_record_id("composer-native", "bubble-1").unwrap();
-    let envelope = normalize_cursor_composer_observation(
-        &native,
-        "composer-native",
-        record_id.clone(),
-        range,
-        0,
-    )
-    .unwrap();
-    let relations = serde_json::to_value(envelope.relations()).unwrap();
-    assert_eq!(relations["session_id"], "composer-native");
-    assert_eq!(relations["thread_id"], "composer-native");
-    assert_eq!(relations["message_id"], record_id.as_str());
-    assert!(relations.get("turn_id").is_none());
-    assert!(relations.get("agent_id").is_none());
-    assert!(relations.get("parent_agent_id").is_none());
 }
 
 /// Exact assistant bubble fields from
@@ -309,12 +301,12 @@ fn fixture_backed_composer_assistant_bubble_reaches_canonical_envelope() {
         assert!(relations.get(absent.as_str().unwrap()).is_none());
     }
     let rendered = actual.to_string();
-    for required in expected["encoded_must_contain"].as_array().unwrap() {
-        assert!(rendered.contains(required.as_str().unwrap()));
-    }
-    for rejected in expected["encoded_must_not_contain"].as_array().unwrap() {
-        assert!(!rendered.contains(rejected.as_str().unwrap()));
-    }
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_sequence":1,"ordering_domain":"snapshot_order","range":{"end":2,"start":1}},"facts":[{"content":"Done refactoring the widget module.","kind":"message","role":"assistant"},{"arguments":null,"invocation_id":"call-1","kind":"tool_invocation","name":"edit_file"},{"content":null,"invocation_id":"call-1","kind":"tool_result","success":true,"token_count":5},{"content":"Considering the widget invariants carefully.","kind":"reasoning","visibility":"visible"},{"counter_semantics":"delta","counters":{"input_tokens":1200,"output_tokens":340,"state":"known"},"kind":"provider_usage","model":{"reason":"absent","state":"unknown"},"native_field":"tokenCount","native_kind":"bubble","native_scope":"message"},{"evidence_kind":"pull_request","kind":"git","reference":"https://example.invalid/pr/7"},{"evidence_kind":"pull_request","kind":"workflow","reference":"https://example.invalid/pr/7"}],"native_record_kind":"bubble","provider":"cursor","relations":{"message_id":"cursor.composer.sha256:f58e56808b4eb7782841b192954e9c4a96d02af5700f5f87d68376d0a4b6b650","session_id":"comp-1","thread_id":"comp-1"},"stable_record_id":"cursor.composer.sha256:f58e56808b4eb7782841b192954e9c4a96d02af5700f5f87d68376d0a4b6b650","version":1}"#
+    );
+    assert!(!rendered.contains("widget.rs"));
+    assert!(rendered.contains("Done refactoring the widget module."));
 }
 
 /// Checked-in `composerData` envelope `todos[{id,content,status}]` map to
@@ -330,7 +322,7 @@ fn fixture_backed_composer_envelope_todos_reach_workflow_lifecycle() {
     ))
     .expect("Cursor composer envelope todos expected envelope");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-    // Fixture lastUpdatedAt is null — checkpoint is the content fingerprint.
+    // Fixture lastUpdatedAt is null, checkpoint is the content fingerprint.
     assert!(native.get("lastUpdatedAt").is_some_and(Value::is_null));
     let checkpoint = composer_envelope_todo_checkpoint(&native)
         .expect("fixture todos must yield a content fingerprint checkpoint");
@@ -404,12 +396,12 @@ fn fixture_backed_composer_envelope_todos_reach_workflow_lifecycle() {
         assert!(relations.get(absent.as_str().unwrap()).is_none());
     }
     let rendered = actual.to_string();
-    for required in expected["encoded_must_contain"].as_array().unwrap() {
-        assert!(rendered.contains(required.as_str().unwrap()));
-    }
-    for rejected in expected["encoded_must_not_contain"].as_array().unwrap() {
-        assert!(!rendered.contains(rejected.as_str().unwrap()));
-    }
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_sequence":0,"native_timestamp":1700000000,"ordering_domain":"snapshot_order","range":{"end":1,"start":0}},"facts":[{"kind":"workflow_lifecycle","provider_reference":"comp-1","semantic_kind":"todo_list"},{"content":"First todo","item_id":"t1","item_order":0,"kind":"workflow_lifecycle","list_reference":"comp-1","provider_reference":"t1","semantic_kind":"todo_item","status":"completed"},{"content":"Second todo","item_id":"t2","item_order":1,"kind":"workflow_lifecycle","list_reference":"comp-1","provider_reference":"t2","semantic_kind":"todo_item","status":"pending"}],"native_record_kind":"envelope","provider":"cursor","relations":{"session_id":"comp-1","thread_id":"comp-1"},"stable_record_id":"cursor.composer.envelope.sha256:6eac909995cde9a0c8210a98d075f246144c7c58f829f666c2bff3cd0c0ff6eb","version":1}"#
+    );
+    assert!(!rendered.contains("\"revision\""));
+    assert!(rendered.contains("First todo"));
 }
 
 #[test]
@@ -528,10 +520,12 @@ fn fixture_backed_composer_bubble_colocates_message_and_todo_lifecycle() {
     );
     assert_eq!(items[1].4.as_deref(), Some("comp-1"));
     let rendered = actual.to_string();
-    for required in expected["encoded_must_contain"].as_array().unwrap() {
-        assert!(rendered.contains(required.as_str().unwrap()));
-    }
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_sequence":1,"ordering_domain":"snapshot_order","range":{"end":2,"start":1}},"facts":[{"content":"Working the checklist.","kind":"message","role":"assistant"},{"kind":"workflow_lifecycle","provider_reference":"comp-1","semantic_kind":"todo_list"},{"content":"First todo","item_id":"t1","item_order":0,"kind":"workflow_lifecycle","list_reference":"comp-1","provider_reference":"t1","semantic_kind":"todo_item","status":"completed"},{"content":"Second todo","item_id":"t2","item_order":1,"kind":"workflow_lifecycle","list_reference":"comp-1","provider_reference":"t2","semantic_kind":"todo_item","status":"pending"}],"native_record_kind":"bubble","provider":"cursor","relations":{"message_id":"cursor.composer.sha256:b9e26e522f0ee2f234cf4afe967177a413fcc6e01afcffa3ec007fb282d5b72c","session_id":"comp-1","thread_id":"comp-1"},"stable_record_id":"cursor.composer.sha256:b9e26e522f0ee2f234cf4afe967177a413fcc6e01afcffa3ec007fb282d5b72c","version":1}"#
+    );
     assert!(!rendered.contains("\"revision\""));
+    assert!(rendered.contains("Working the checklist."));
 }
 
 #[test]
@@ -725,26 +719,6 @@ fn restore_file_permissions(path: &std::path::Path) {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn present_unreadable_composer_store_is_a_typed_open_failure() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let path = tmp.path().join("state.vscdb");
-    write_unreadable_file(&path);
-    let error = match open_readonly_immutable(&path).await {
-        Ok(_) => {
-            restore_file_permissions(&path);
-            panic!("present unreadable store must not open as success")
-        }
-        Err(error) => error,
-    };
-    restore_file_permissions(&path);
-    assert!(
-        error.contains("read-only"),
-        "open failure must stay typed, got {error}"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn present_unreadable_state_db_defers_the_composer_sweep() {
     let project = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -781,82 +755,941 @@ async fn present_unreadable_state_db_defers_the_composer_sweep() {
     );
 }
 
+#[test]
+fn composer_discovery_and_durable_id_batch_use_indexed_bounds() {
+    fn plan_details(
+        connection: &rusqlite::Connection,
+        sql: &str,
+        parameters: impl rusqlite::Params,
+    ) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        statement
+            .query_map(parameters, |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE lcm_raw_messages (
+                 provider TEXT NOT NULL,
+                 message_id TEXT NOT NULL,
+                 UNIQUE(provider, message_id)
+             );",
+        )
+        .unwrap();
+
+    let composer_plan = plan_details(
+        &connection,
+        COMPOSER_KEY_SCAN_AFTER_SQL,
+        rusqlite::params!["composerData:000001", 512_i64, 1024_i64],
+    );
+    assert!(
+        composer_plan
+            .iter()
+            .any(|detail| detail.contains("SEARCH cursorDiskKV") && detail.contains("key>?")),
+        "composer discovery must stay an indexed key range: {composer_plan:?}"
+    );
+
+    let message_plan = plan_details(
+        &connection,
+        crate::runtime::store_access::EXISTING_SESSION_MESSAGE_IDS_SQL,
+        rusqlite::params!["cursor", r#"["comp:b1","comp:b2"]"#],
+    );
+    assert!(
+        message_plan.iter().any(|detail| {
+            detail.contains("SEARCH messages")
+                && detail.contains("provider=?")
+                && detail.contains("message_id=?")
+        }),
+        "durable message ids must probe the canonical primary key: {message_plan:?}"
+    );
+    assert!(
+        message_plan
+            .iter()
+            .all(|detail| !detail.contains("SCAN messages")),
+        "durable message-id batches must not scan lcm_raw_messages: {message_plan:?}"
+    );
+    connection
+        .execute_batch(
+            "INSERT INTO lcm_raw_messages(provider, message_id)
+                 VALUES ('cursor', 'comp:b2'), ('codex', 'comp:b1');",
+        )
+        .unwrap();
+    let existing = connection
+        .prepare(crate::runtime::store_access::EXISTING_SESSION_MESSAGE_IDS_SQL)
+        .unwrap()
+        .query_map(
+            rusqlite::params!["cursor", r#"["comp:b1","comp:b2","comp:b3"]"#],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert_eq!(existing, vec!["comp:b2"]);
+}
+
+fn insert_composer_fixture(
+    connection: &rusqlite::Connection,
+    composer_id: &str,
+    project_path: &std::path::Path,
+) {
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                format!("composerData:{composer_id}"),
+                json!({
+                    "composerId": composer_id,
+                    "workspaceIdentifier": {
+                        "uri": { "fsPath": project_path.to_string_lossy() }
+                    },
+                    "fullConversationHeadersOnly": [
+                        { "bubbleId": "bubble" }
+                    ]
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                format!("bubbleId:{composer_id}:bubble"),
+                json!({ "type": 1, "text": format!("message from {composer_id}") }).to_string()
+            ],
+        )
+        .unwrap();
+}
+
+/// Removing the durable composer-key frontier makes every fresh source replay
+/// the first 4,096 keys, so the tail message and a later pre-frontier insertion
+/// never both become durable.
 #[tokio::test]
-async fn rusqlite_composer_key_scan_pages_without_gaps_or_duplicates() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let path = tmp.path().join("state.vscdb");
-    {
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "PRAGMA page_size=65536;
-             VACUUM;
-             PRAGMA journal_mode=DELETE;
+async fn composer_key_frontier_converges_tail_then_wraps_for_pre_frontier_insert() {
+    let project = tempfile::tempdir().unwrap();
+    let unrelated = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    let mut connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
              CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
         )
         .unwrap();
-        let transaction = conn.unchecked_transaction().unwrap();
-        {
-            let mut insert = transaction
-                .prepare("INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)")
-                .unwrap();
-            for index in 0..(COMPOSER_KEY_SCAN_PAGE + 7) {
-                insert
-                    .execute(rusqlite::params![
-                        format!("composerData:{index:06}"),
-                        format!("value-{index}")
-                    ])
-                    .unwrap();
-            }
-            insert
-                .execute(rusqlite::params!["outside-prefix", "ignored"])
-                .unwrap();
-            insert
-                .execute(rusqlite::params![
-                    "composerData:000100-null",
-                    rusqlite::types::Null
-                ])
-                .unwrap();
-        }
-        transaction.commit().unwrap();
+    let transaction = connection.transaction().unwrap();
+    for index in 0..=MAX_COMPOSER_STORE_BLOB_VISITS {
+        let composer_id = format!("{index:06}");
+        let owner = if index == MAX_COMPOSER_STORE_BLOB_VISITS {
+            project.path()
+        } else {
+            unrelated.path()
+        };
+        insert_composer_fixture(&transaction, &composer_id, owner);
+    }
+    transaction.commit().unwrap();
+
+    let project_id = ProjectId::new("project.cursor-composer-frontier").unwrap();
+    let admission = MemoryHostAdmission::default();
+    let first = CursorComposerSource::with_home(home.path())
+        .ingest_capped(&admission, project.path(), project_id.clone(), 1, None)
+        .await
+        .unwrap();
+    assert_eq!(first.messages_upserted, 0);
+
+    insert_composer_fixture(&connection, "000000a", project.path());
+    drop(connection);
+
+    for _ in 0..3 {
+        CursorComposerSource::with_home(home.path())
+            .ingest_capped(&admission, project.path(), project_id.clone(), 1, None)
+            .await
+            .unwrap();
     }
 
-    let ro = open_readonly_immutable(&path)
-        .await
-        .expect("open foreign DB");
-    let page_size = ro
-        .conn
-        .with(|conn| conn.pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0)))
-        .await
-        .expect("blocking page-size read completed")
-        .expect("read page size");
-    assert_eq!(page_size, 65_536);
-    let first = scan_composer_keys_page(&ro.conn, None, COMPOSER_KEY_SCAN_PAGE)
-        .await
-        .expect("first key page");
-    assert_eq!(first.len(), COMPOSER_KEY_SCAN_PAGE);
-    let first_last = first.last().unwrap().0.clone();
-    let second = scan_composer_keys_page(&ro.conn, Some(&first_last), COMPOSER_KEY_SCAN_PAGE)
-        .await
-        .expect("second key page");
-    assert_eq!(second.len(), 7);
-
-    let keys = first
-        .into_iter()
-        .chain(second)
-        .map(|(key, _)| key)
+    let payloads = admission
+        .observations()
+        .iter()
+        .map(|stored| stored.observation().payload().to_string())
         .collect::<Vec<_>>();
-    assert_eq!(keys.len(), COMPOSER_KEY_SCAN_PAGE + 7);
-    assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+    for composer_id in ["004096", "000000a"] {
+        let message_id = format!("{composer_id}:bubble");
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|payload| payload.contains(&message_id))
+                .count(),
+            1,
+            "{message_id} must be discovered and admitted exactly once"
+        );
+    }
+}
+
+fn seed_large_frontier_fixture(
+    state_db: &std::path::Path,
+    project: &std::path::Path,
+    unrelated: &std::path::Path,
+    owned_indices: &[usize],
+) {
+    let mut connection = rusqlite::Connection::open(state_db).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    for index in 0..=MAX_COMPOSER_STORE_BLOB_VISITS {
+        let composer_id = format!("{index:06}");
+        let owner = if owned_indices.contains(&index) {
+            project
+        } else {
+            unrelated
+        };
+        insert_composer_fixture(&transaction, &composer_id, owner);
+    }
+    transaction.commit().unwrap();
+}
+
+fn append_frontier_tail(state_db: &std::path::Path, unrelated: &std::path::Path) {
+    let connection = rusqlite::Connection::open(state_db).unwrap();
+    insert_composer_fixture(&connection, "999999", unrelated);
+}
+
+fn observation_count(admission: &MemoryHostAdmission, message_id: &str) -> usize {
+    admission
+        .observations()
+        .iter()
+        .filter(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains(message_id)
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn composer_frontier_retries_capture_error_before_growing_tail() {
+    let project = tempfile::tempdir().unwrap();
+    let unrelated = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    seed_large_frontier_fixture(&state_db, project.path(), unrelated.path(), &[0]);
+
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-capture-retry").unwrap();
+    admission.fail_next_capture();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:bubble"), 0);
+    append_frontier_tail(&state_db, unrelated.path());
+
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:bubble"), 1);
+}
+
+#[tokio::test]
+async fn malformed_overlength_bubble_reference_does_not_block_valid_tail() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "composerData:000000",
+                json!({
+                    "composerId": "000000",
+                    "workspaceIdentifier": {
+                        "uri": { "fsPath": project.path().to_string_lossy() }
+                    },
+                    "fullConversationHeadersOnly": [{ "bubbleId": "x".repeat(600) }]
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    insert_composer_fixture(&connection, "000001", project.path());
+    drop(connection);
+
+    let admission = MemoryHostAdmission::default();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            ProjectId::new("project.cursor-composer-malformed-key").unwrap(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(observation_count(&admission, "000001:bubble"), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replacement_generation_adopts_retry_and_fences_stale_reader() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    insert_composer_fixture(&connection, "replace", project.path());
+    connection
+        .execute(
+            "DELETE FROM cursorDiskKV WHERE key = 'bubbleId:replace:bubble'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let replacement = state_dir.join("state.next.vscdb");
+    let connection = rusqlite::Connection::open(&replacement).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    insert_composer_fixture(&connection, "replace", project.path());
+    drop(connection);
+
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-replacement-retry").unwrap();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "replace:bubble"), 0);
     assert_eq!(
-        keys.iter().collect::<std::collections::BTreeSet<_>>().len(),
-        keys.len()
+        admission
+            .session_backfill_state_entries(COMPOSER_RETRY_KEY_PREFIX)
+            .len(),
+        1
+    );
+
+    let entered = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    admission.pause_next_session_backfill_page(entered.clone(), release.clone());
+    let stale_admission = admission.clone();
+    let stale_home = home.path().to_path_buf();
+    let stale_project = project.path().to_path_buf();
+    let stale_project_id = project_id.clone();
+    let stale = tokio::spawn(async move {
+        CursorComposerSource::with_home(&stale_home)
+            .ingest_capped(
+                &stale_admission,
+                &stale_project,
+                stale_project_id,
+                DEFAULT_COMPOSER_ENVELOPE_CAP,
+                None,
+            )
+            .await
+    });
+    entered.wait().await;
+
+    std::fs::rename(&replacement, &state_db).unwrap();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    release.wait().await;
+    stale.await.unwrap().unwrap();
+
+    assert_eq!(observation_count(&admission, "replace:bubble"), 1);
+    assert!(
+        admission
+            .session_backfill_state_entries(COMPOSER_RETRY_KEY_PREFIX)
+            .is_empty(),
+        "the replacement generation must reclaim the adopted retry"
+    );
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "replace:bubble"), 1);
+}
+
+#[tokio::test]
+async fn malformed_retry_rows_are_reclaimed_before_a_valid_retry() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    let canonical_state_db = state_db.canonicalize().unwrap();
+    let retry_prefix = composer_retry_key_prefix(&canonical_state_db);
+    let composer_id = (0..1024)
+        .map(|index| format!("valid-{index:04}"))
+        .find(|composer_id| {
+            composer_retry_key(&retry_prefix, &format!("composerData:{composer_id}"))
+                .strip_prefix(&retry_prefix)
+                .is_some_and(|suffix| suffix.as_bytes()[0] >= b'2')
+        })
+        .unwrap();
+    insert_composer_fixture(&connection, &composer_id, project.path());
+    connection
+        .execute(
+            "DELETE FROM cursorDiskKV WHERE key = ?1",
+            [format!("bubbleId:{composer_id}:bubble")],
+        )
+        .unwrap();
+    drop(connection);
+
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-malformed-retry").unwrap();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let generation =
+        tracedecay_runtime_core::db::sqlite_generation_identity(&canonical_state_db).unwrap();
+    for (suffix, value) in [
+        ("0".repeat(64), "not-json".to_string()),
+        (
+            "1".repeat(64),
+            json!({
+                "composer_key": "composerData:not-the-key-owner",
+                "owner_generation": generation,
+                "nonce": "0".repeat(32),
+            })
+            .to_string(),
+        ),
+    ] {
+        assert!(
+            admission
+                .compare_and_swap_session_backfill_state(
+                    &scope,
+                    &format!("{retry_prefix}{suffix}"),
+                    None,
+                    &value,
+                )
+                .await
+                .unwrap()
+        );
+    }
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                format!("bubbleId:{composer_id}:bubble"),
+                json!({ "type": 1, "text": "visible" }).to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        observation_count(&admission, &format!("{composer_id}:bubble")),
+        1
+    );
+    assert!(
+        admission
+            .session_backfill_state_entries(&retry_prefix)
+            .is_empty(),
+        "malformed, mismatched, and completed retry rows must all be reclaimed"
+    );
+}
+
+#[tokio::test]
+async fn unresolved_retry_and_continuous_discovery_alternate_under_one_byte_budget() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    let missing_envelope = json!({
+        "composerId": "000000",
+        "workspaceIdentifier": {
+            "uri": { "fsPath": project.path().to_string_lossy() }
+        },
+        "padding": "x".repeat(700),
+        "fullConversationHeadersOnly": [{ "bubbleId": "late" }]
+    })
+    .to_string();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params!["composerData:000000", &missing_envelope],
+        )
+        .unwrap();
+    insert_composer_fixture(&connection, "000001", project.path());
+    drop(connection);
+
+    let late_bubble = json!({ "type": 1, "text": "visible later" }).to_string();
+    let budget = u64::try_from(missing_envelope.len() + late_bubble.len() + 8).unwrap();
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-fair-retry").unwrap();
+    for _ in 0..2 {
+        CursorComposerSource::with_home(home.path())
+            .ingest_capped(
+                &admission,
+                project.path(),
+                project_id.clone(),
+                DEFAULT_COMPOSER_ENVELOPE_CAP,
+                Some(budget),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(observation_count(&admission, "000000:late"), 0);
+    assert_eq!(observation_count(&admission, "000001:bubble"), 0);
+
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            Some(budget),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        observation_count(&admission, "000001:bubble"),
+        1,
+        "discovery must get the pass after a retry-first pass exhausts the budget"
+    );
+
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params!["bubbleId:000000:late", late_bubble],
+        )
+        .unwrap();
+    drop(connection);
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            Some(budget),
+        )
+        .await
+        .unwrap();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            Some(budget),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        observation_count(&admission, "000000:late"),
+        1,
+        "retry must get a bounded pass and remain exactly-once"
+    );
+}
+
+#[tokio::test]
+async fn more_than_one_scan_window_of_missing_bubbles_does_not_block_tail() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    seed_large_frontier_fixture(&state_db, project.path(), project.path(), &[]);
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute("DELETE FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'", [])
+        .unwrap();
+    insert_composer_fixture(&connection, "999999", project.path());
+    drop(connection);
+
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-retry-saturation").unwrap();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "999999:bubble"), 0);
+
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        observation_count(&admission, "999999:bubble"),
+        1,
+        "the 4,097th unresolved composer must not backpressure later discovery"
+    );
+}
+
+#[tokio::test]
+async fn refreshed_missing_intent_rejects_stale_completion_and_reclaims_exact_row() {
+    let project = tempfile::tempdir().unwrap();
+    let state_db = project.path().join("state.vscdb");
+    drop(rusqlite::Connection::open(&state_db).unwrap());
+    let canonical_state_db = state_db.canonicalize().unwrap();
+    let generation = ObservationSourceGenerationV1::new(
+        tracedecay_runtime_core::db::sqlite_generation_identity(&canonical_state_db).unwrap(),
+    )
+    .unwrap();
+    let admission = MemoryHostAdmission::default();
+    let cancellation = ObservationCancellation::default();
+    let matchers = crate::runtime::shared::ProjectRootMatcherCache::default();
+    let context = ComposerIngestContext {
+        facade: &admission,
+        scope: ObservationScopeV1::Project {
+            project_id: ProjectId::new("project.cursor-composer-retry-cas").unwrap(),
+        },
+        project_root: Some(project.path()),
+        registered_roots: &[],
+        cancellation: &cancellation,
+        matchers: &matchers,
+    };
+    let retry_prefix = "cursor-composer.scan.fixture.retry.";
+    let composer_key = "composerData:000000";
+
+    ensure_composer_retry(
+        &context,
+        retry_prefix,
+        composer_key,
+        &canonical_state_db,
+        generation,
+    )
+    .await
+    .unwrap();
+    let first = admission.session_backfill_state_entries(retry_prefix);
+    assert_eq!(first.len(), 1);
+    let (retry_key, stale_value) = (first[0].1.clone(), first[0].2.clone());
+
+    // A newer immutable snapshot observes the composer missing again before
+    // the old snapshot finishes. Refreshing the exact row must invalidate the
+    // old sweep's completion authority.
+    ensure_composer_retry(
+        &context,
+        retry_prefix,
+        composer_key,
+        &canonical_state_db,
+        generation,
+    )
+    .await
+    .unwrap();
+    let refreshed = admission.session_backfill_state_entries(retry_prefix);
+    assert_eq!(refreshed.len(), 1);
+    assert_ne!(refreshed[0].2, stale_value);
+    assert!(
+        complete_composer_retry(
+            &context,
+            &retry_key,
+            &stale_value,
+            &canonical_state_db,
+            generation,
+        )
+        .await
+        .is_err(),
+        "the stale snapshot must not delete the refreshed missing intent"
+    );
+    assert_eq!(
+        admission.session_backfill_state_entries(retry_prefix),
+        refreshed
+    );
+
+    complete_composer_retry(
+        &context,
+        &retry_key,
+        &refreshed[0].2,
+        &canonical_state_db,
+        generation,
+    )
+    .await
+    .unwrap();
+    assert!(
+        admission
+            .session_backfill_state_entries(retry_prefix)
+            .is_empty(),
+        "terminal retry completion must reclaim the exact durable row"
+    );
+
+    ensure_composer_retry(
+        &context,
+        retry_prefix,
+        composer_key,
+        &canonical_state_db,
+        generation,
+    )
+    .await
+    .unwrap();
+    let reinserted = admission.session_backfill_state_entries(retry_prefix);
+    assert_ne!(reinserted[0].2, refreshed[0].2);
+    assert!(
+        complete_composer_retry(
+            &context,
+            &retry_key,
+            &refreshed[0].2,
+            &canonical_state_db,
+            generation,
+        )
+        .await
+        .is_err(),
+        "a delete-and-reinsert cycle must not recreate the stale CAS value"
+    );
+}
+
+#[tokio::test]
+async fn retry_cycle_high_water_wraps_despite_continuous_higher_insertions() {
+    let project = tempfile::tempdir().unwrap();
+    let state_db = project.path().join("state.vscdb");
+    drop(rusqlite::Connection::open(&state_db).unwrap());
+    let canonical_state_db = state_db.canonicalize().unwrap();
+    let generation = ObservationSourceGenerationV1::new(
+        tracedecay_runtime_core::db::sqlite_generation_identity(&canonical_state_db).unwrap(),
+    )
+    .unwrap();
+    let admission = MemoryHostAdmission::default();
+    let cancellation = ObservationCancellation::default();
+    let matchers = crate::runtime::shared::ProjectRootMatcherCache::default();
+    let scope = ObservationScopeV1::Project {
+        project_id: ProjectId::new("project.cursor-composer-retry-high-water").unwrap(),
+    };
+    let context = ComposerIngestContext {
+        facade: &admission,
+        scope: scope.clone(),
+        project_root: Some(project.path()),
+        registered_roots: &[],
+        cancellation: &cancellation,
+        matchers: &matchers,
+    };
+    let retry_prefix = "cursor-composer.scan.fixture.retry.";
+    let mut candidates = (0..256)
+        .map(|index| {
+            let composer_key = format!("composerData:{index:06}");
+            (
+                composer_retry_key(retry_prefix, &composer_key),
+                composer_key,
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let target = candidates[0].clone();
+    let initial_cursor = candidates[8].0.clone();
+    let initial_cycle = &candidates[9..26];
+    for (retry_key, composer_key) in std::iter::once(&target).chain(initial_cycle.iter()) {
+        ensure_composer_retry(
+            &context,
+            retry_prefix,
+            composer_key,
+            &canonical_state_db,
+            generation,
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry_key, &composer_retry_key(retry_prefix, composer_key));
+    }
+    let captured_high_water = admission
+        .session_backfill_state_high_water(&scope, retry_prefix)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(captured_high_water, initial_cycle.last().unwrap().0);
+
+    let mut after = Some(initial_cursor);
+    let mut inserted = 26usize;
+    let mut pages = 0usize;
+    loop {
+        let page = admission
+            .list_session_backfill_state_page(
+                &scope,
+                retry_prefix,
+                after.as_deref(),
+                &captured_high_water,
+            )
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().map(|(key, _)| key.clone());
+        pages += 1;
+        for (retry_key, composer_key) in &candidates[inserted..inserted + 16] {
+            assert!(retry_key.as_str() > captured_high_water.as_str());
+            ensure_composer_retry(
+                &context,
+                retry_prefix,
+                composer_key,
+                &canonical_state_db,
+                generation,
+            )
+            .await
+            .unwrap();
+        }
+        inserted += 16;
+    }
+    assert_eq!(pages, 3, "the captured cycle must terminate independently");
+
+    let next_high_water = admission
+        .session_backfill_state_high_water(&scope, retry_prefix)
+        .await
+        .unwrap()
+        .unwrap();
+    let wrapped = admission
+        .list_session_backfill_state_page(&scope, retry_prefix, None, &next_high_water)
+        .await
+        .unwrap();
+    assert_eq!(
+        wrapped.first().map(|(key, _)| key),
+        Some(&target.0),
+        "wrapping at the captured high water must expose a behind-cursor retry"
     );
 }
 
 #[tokio::test]
 async fn composer_key_scan_reports_corrupt_or_incompatible_schema() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let path = tmp.path().join("state #?%.vscdb");
+    let path = tmp.path().join(URI_SPECIAL_STATE_DB);
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
@@ -883,8 +1716,11 @@ fn protobuf_child_refs_rejects_overflowing_or_truncated_lengths() {
     let truncated_length = [0x0a, 0xff, 0xff, 0xff, 0xff, 0x0f];
     assert!(protobuf_child_refs(&truncated_length).is_none());
 
-    let mut valid_then_truncated = vec![0x0a, 32];
-    valid_then_truncated.extend([0x42; 32]);
+    let mut valid = vec![0x0a, 32];
+    valid.extend([0x42; 32]);
+    assert_eq!(protobuf_child_refs(&valid), Some(vec!["42".repeat(32)]));
+
+    let mut valid_then_truncated = valid;
     valid_then_truncated.extend([0x09, 0x01]);
     assert!(
         protobuf_child_refs(&valid_then_truncated).is_none(),
@@ -921,29 +1757,6 @@ fn composer_chat_discovery_does_not_follow_symlinks() {
 }
 
 #[tokio::test]
-async fn sql_length_gate_rejects_oversized_bubble_built_in_sql() {
-    // Hostile TEXT is constructed entirely in SQL (hex(zeroblob)) so the
-    // product fetch never receives a pre-built Rust String of that value.
-    let setup = "INSERT INTO cursorDiskKV(key, value) \
-         SELECT 'bubbleId:comp:hostile', hex(zeroblob(33));";
-    let (tmp, ro) = open_temp_kv_db_with_sql(setup).await;
-    let _keep = tmp;
-
-    match fetch_kv_text_bounded(&ro.conn, "bubbleId:comp:hostile", 64, None).await {
-        BoundedSqliteValue::Oversized { byte_len } => {
-            assert_eq!(byte_len, 66);
-        }
-        other => panic!("expected Oversized, got {other:?}"),
-    }
-    match fetch_bubble_bounded(&ro.conn, "comp", "hostile", None).await {
-        // 66 bytes is under the real 1 MiB record ceiling; complete non-JSON
-        // text receives typed malformed coverage rather than disappearing.
-        BoundedSqliteValue::Malformed { byte_len } => assert_eq!(byte_len, 66),
-        other => panic!("unexpected bubble outcome {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn sql_length_gate_counts_utf8_bytes_not_characters() {
     // SQLite length(TEXT) would report 40 characters and incorrectly admit
     // this 80-byte value under a 64-byte ceiling. Construct it in SQL so no
@@ -957,6 +1770,33 @@ async fn sql_length_gate_counts_utf8_bytes_not_characters() {
     match fetch_kv_text_bounded(&ro.conn, "bubbleId:comp:multibyte", 64, None).await {
         BoundedSqliteValue::Oversized { byte_len } => assert_eq!(byte_len, 80),
         other => panic!("expected UTF-8 byte Oversized, got {other:?}"),
+    }
+}
+
+/// Replacing `octet_length(value)` with `length(CAST(value AS BLOB))`
+/// materializes the retained value and trips this deliberately lowered limit.
+#[tokio::test]
+async fn composer_value_length_stays_readable_below_sqlite_materialization_limit() {
+    let setup = "INSERT INTO cursorDiskKV(key, value) \
+         SELECT 'composerData:oversized', hex(zeroblob(4096));";
+    let (tmp, ro) = open_temp_kv_db_with_sql(setup).await;
+    let _keep = tmp;
+    ro.conn
+        .with(|conn| {
+            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1024)
+                .map(|_| ())
+        })
+        .await
+        .expect("blocking SQLite limit update completed")
+        .expect("lower SQLite length limit");
+
+    let rows = scan_composer_keys_page(&ro.conn, None, 1)
+        .await
+        .expect("length-only composer scan must not materialize the oversized value");
+    assert_eq!(rows, vec![("composerData:oversized".to_string(), 8192)]);
+    match fetch_kv_text_bounded(&ro.conn, "composerData:oversized", 64, None).await {
+        BoundedSqliteValue::Oversized { byte_len } => assert_eq!(byte_len, 8192),
+        other => panic!("expected length-only Oversized classification, got {other:?}"),
     }
 }
 
@@ -1029,15 +1869,4 @@ async fn store_blob_zeroblob_is_skipped_without_full_table_select() {
         }
         StoreWalkOutcome::DeferredEmpty => panic!("default sweep budget should reach leaf"),
     }
-}
-
-#[test]
-fn configured_composer_sqlite_bounds_match_shared_host_ceilings() {
-    assert_eq!(max_composer_record_bytes(), 1_048_576);
-    assert_eq!(MAX_COMPOSER_ENVELOPE_BYTES, 16 * 1024 * 1024);
-    assert_eq!(DEFAULT_COMPOSER_SWEEP_BYTES, 16 * 1024 * 1024 + 1);
-    assert_eq!(MAX_COMPOSER_STORE_META_BYTES, 256 * 1024);
-    assert_eq!(MAX_COMPOSER_STORE_META_HEX_BYTES, 512 * 1024);
-    assert_eq!(MAX_COMPOSER_STORE_BLOB_VISITS, 4096);
-    assert_eq!(MAX_COMPOSER_SQLITE_KEY_BYTES, 512);
 }

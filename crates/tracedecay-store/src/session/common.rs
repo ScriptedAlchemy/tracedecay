@@ -14,8 +14,6 @@ use tracedecay_domain::{
 pub enum SessionTemporalCapabilityV1 {
     /// Freeze and consume immutable watermarks for retrieval.
     FrozenWatermarks,
-    /// Begin, persist, and activate candidate projection generations.
-    GenerationRebuild,
     /// Publish or exactly replay immutable summaries.
     ImmutableSummaryPublication,
     RefreshJoin,
@@ -69,7 +67,6 @@ pub struct SessionFrozenWatermarksV1 {
 }
 
 impl SessionFrozenWatermarksV1 {
-    #[hotpath::skip]
     pub const fn new(
         active_generation: SessionProjectionGenerationV1,
         source_frontier: u64,
@@ -90,22 +87,18 @@ impl SessionFrozenWatermarksV1 {
         self
     }
 
-    #[hotpath::skip]
     pub const fn active_generation(&self) -> SessionProjectionGenerationV1 {
         self.active_generation
     }
 
-    #[hotpath::skip]
     pub const fn source_frontier(&self) -> u64 {
         self.source_frontier
     }
 
-    #[hotpath::skip]
     pub const fn projection_frontier(&self) -> u64 {
         self.projection_frontier
     }
 
-    #[hotpath::skip]
     pub const fn summary_frontier(&self) -> u64 {
         self.summary_frontier
     }
@@ -150,7 +143,6 @@ impl SessionTemporalSnapshotV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frozen_at(&self) -> UtcMicros {
         self.frozen_at
     }
@@ -269,6 +261,17 @@ pub enum SessionStoreError {
     },
     #[error("session temporal receipt identity mismatch in {context}")]
     ReceiptIdentityMismatch { context: &'static str },
+    /// The refresh window no longer contains the session's committed
+    /// projection frontier: the store already moved past its target, or the
+    /// request claims more than was committed.
+    #[error(
+        "session refresh frontier {committed_through}..{observed_through} is stale: the active projection frontier is {active_projection_frontier}"
+    )]
+    StaleRefreshFrontier {
+        observed_through: u64,
+        committed_through: u64,
+        active_projection_frontier: u64,
+    },
     #[error("session temporal idempotency conflict in {context}")]
     IdempotencyConflict { context: &'static str },
     #[error("invalid session temporal state transition in {context}")]
@@ -283,14 +286,16 @@ pub enum SessionStoreError {
     DeadlineExceeded,
     #[error("session temporal operation exceeded its {resource} budget")]
     BudgetExceeded { resource: &'static str },
+    /// A session resolves each message id to one occurrence; a refresh whose
+    /// projection would give one message two occurrences is refused.
+    #[error("session-scoped message id {message_id} resolves to {occurrences} occurrences")]
+    AmbiguousMessageOccurrence {
+        message_id: String,
+        occurrences: usize,
+    },
     #[error("session temporal generation {generation:?} is missing")]
     MissingGeneration {
         generation: SessionProjectionGenerationV1,
-    },
-    #[error("session temporal generation is stale: expected {expected:?}, actual {actual:?}")]
-    StaleGeneration {
-        expected: SessionProjectionGenerationV1,
-        actual: SessionProjectionGenerationV1,
     },
     #[error("refresh operation {operation_id:?} cannot transition from state {state:?}")]
     InvalidRefreshState {
@@ -325,7 +330,6 @@ impl SessionStoreError {
         }
     }
 
-    #[hotpath::skip]
     pub const fn is_storage(&self) -> bool {
         matches!(self, Self::Storage { .. })
     }
@@ -430,21 +434,6 @@ declare_session_temporal_operation!(
     SessionTemporalCapabilityV1::FrozenWatermarks
 );
 declare_session_temporal_operation!(
-    SessionGenerationRebuildBeginOperation,
-    SessionGenerationRebuildBeginPermit,
-    SessionTemporalCapabilityV1::GenerationRebuild
-);
-declare_session_temporal_operation!(
-    SessionProjectionBatchPersistOperation,
-    SessionProjectionBatchPersistPermit,
-    SessionTemporalCapabilityV1::GenerationRebuild
-);
-declare_session_temporal_operation!(
-    SessionGenerationActivateOperation,
-    SessionGenerationActivatePermit,
-    SessionTemporalCapabilityV1::GenerationRebuild
-);
-declare_session_temporal_operation!(
     SessionRefreshBeginOrJoinOperation,
     SessionRefreshBeginOrJoinPermit,
     SessionTemporalCapabilityV1::RefreshJoin
@@ -503,19 +492,6 @@ pub(super) fn require_declared_capability(
 ) -> SessionStoreResult<()> {
     if !capabilities.supports(capability) {
         return Err(SessionStoreError::UnsupportedCapability { capability });
-    }
-    Ok(())
-}
-
-pub(super) fn require_newer_generation(
-    candidate: SessionProjectionGenerationV1,
-    active: SessionProjectionGenerationV1,
-) -> SessionStoreResult<()> {
-    if candidate <= active {
-        return Err(SessionStoreError::StaleGeneration {
-            expected: candidate,
-            actual: active,
-        });
     }
     Ok(())
 }

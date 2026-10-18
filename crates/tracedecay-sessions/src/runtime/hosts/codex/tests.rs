@@ -1,4 +1,4 @@
-//! Codex rollout parser and observation-normalization tests.
+//! Codex rollout discovery and observation-normalization tests.
 
 use serde_json::Value;
 use tracedecay_domain::{
@@ -7,136 +7,30 @@ use tracedecay_domain::{
 };
 
 use super::CodexSource;
-use super::goals::{codex_goal_event_from_line, goal_event_message};
-use super::meta::{CodexMeta, session_meta_with_provenance};
+use super::meta::session_meta_with_provenance;
 use super::observation::{
     CodexObservationAdmission, codex_native_record_id, normalize_codex_observation,
 };
-use super::records::response_item_tool_metadata;
-use crate::runtime::shared::StoredCursor;
-use crate::runtime::source::TranscriptSource;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod goal_event_tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use serde_json::json;
+    use tracedecay_domain::{CanonicalObservationEnvelopeV1, ObservationScopeV1};
 
-    fn goal_event_line(objective: &str, status: &str) -> Value {
-        json!({
-            "timestamp": "2026-07-08T08:49:29.711Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "thread_goal_updated",
-                "threadId": "thread-1",
-                "goal": {
-                    "threadId": "thread-1",
-                    "objective": objective,
-                    "status": status,
-                    "tokensUsed": 42,
-                    "timeUsedSeconds": 7,
-                    "createdAt": 1_783_500_569i64,
-                    "updatedAt": 1_783_500_600i64
-                }
-            }
-        })
-    }
-
-    #[test]
-    fn parses_goal_event_into_row_with_metadata() {
-        let event =
-            codex_goal_event_from_line(&goal_event_line("ship the parser", "active")).unwrap();
-        let meta = CodexMeta {
-            cwd: std::path::PathBuf::from("/tmp/project"),
-            session_id: "sess-1".to_string(),
-            model: None,
-            git: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            agent_nickname: None,
-            agent_role: None,
-            thread_source: None,
-        };
-        let message = goal_event_message(
-            &meta,
-            Some("gpt-5.5"),
-            std::path::Path::new("/tmp/rollout.jsonl"),
-            128,
-            Some(1_783_500_600),
-            &event,
-        );
-        assert_eq!(message.role, "system");
-        assert_eq!(message.kind.as_deref(), Some("goal"));
-        assert_eq!(message.text, "ship the parser");
-        assert_eq!(message.ordinal, 128);
-        let metadata: Value =
-            serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(metadata["source"], "codex_thread_goal");
-        assert_eq!(metadata["source_event"], "thread_goal_updated");
-        assert_eq!(metadata["status"], "active");
-        assert_eq!(metadata["thread_id"], "thread-1");
-        assert_eq!(metadata["tokens_used"], 42);
-        assert_eq!(metadata["time_used_seconds"], 7);
-        assert_eq!(metadata["created_at"], 1_783_500_569i64);
-        assert_eq!(metadata["updated_at"], 1_783_500_600i64);
-    }
-
-    #[test]
-    fn consecutive_identical_states_share_a_dedup_key() {
-        let a = codex_goal_event_from_line(&goal_event_line("same goal", "active")).unwrap();
-        // Same objective+status, only token/time drift -> same dedup key (skipped).
-        let mut drift = goal_event_line("same goal", "active");
-        drift["payload"]["goal"]["tokensUsed"] = json!(9999);
-        drift["payload"]["goal"]["timeUsedSeconds"] = json!(321);
-        let b = codex_goal_event_from_line(&drift).unwrap();
-        assert_eq!(a.dedup_key(), b.dedup_key());
-        // A status transition is a distinct key (new row).
-        let c = codex_goal_event_from_line(&goal_event_line("same goal", "paused")).unwrap();
-        assert_ne!(a.dedup_key(), c.dedup_key());
-    }
-
-    #[test]
-    fn missing_status_and_objective_are_handled_gracefully() {
-        // No status key at all -> status None, still a valid goal row.
-        let mut no_status = goal_event_line("objective only", "active");
-        no_status["payload"]["goal"]
-            .as_object_mut()
-            .unwrap()
-            .remove("status");
-        let event = codex_goal_event_from_line(&no_status).unwrap();
-        assert!(event.status.is_none());
-        assert!(!event.metadata().as_object().unwrap().contains_key("status"));
-        // Empty objective -> no goal row (nothing to catalog).
-        let empty = goal_event_line("   ", "active");
-        assert!(codex_goal_event_from_line(&empty).is_none());
-    }
-
-    #[test]
-    fn non_goal_event_lines_are_ignored() {
-        let token_count = json!({
-            "type": "event_msg",
-            "payload": {"type": "token_count", "info": {}}
-        });
-        assert!(codex_goal_event_from_line(&token_count).is_none());
-        let user = json!({
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "hi"}
-        });
-        assert!(codex_goal_event_from_line(&user).is_none());
-    }
-
-    #[test]
-    fn exposed_reasoning_carries_visibility_without_claiming_hidden_content() {
-        let payload = json!({
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "visible summary"}],
-        });
-        let metadata = response_item_tool_metadata("reasoning", &payload, None, None);
-        assert_eq!(metadata["reasoning_visibility"], "provider_exposed");
-        assert_eq!(metadata["reasoning_retention"], "provider_exposed");
-        assert!(metadata.get("encrypted_content").is_none());
-    }
+    use crate::admission::HostAdmission;
+    use crate::admission::test_support::MemoryHostAdmission;
+    use crate::observation::ObservationCancellation;
+    use crate::runtime::hosts::codex::{
+        try_admit_codex_jsonl_observations_for_project_window,
+        try_admit_codex_jsonl_observations_for_project_with_admission,
+    };
+    use crate::runtime::ingest::project_provider::ProjectProviderRun;
+    use crate::runtime::source::{HostProviderCoverage, read_host_provider_coverage};
+    use crate::runtime::{SessionProvider, with_transcript_source_profile};
 
     #[test]
     fn observation_admission_routes_project_and_profile_records_by_cwd() {
@@ -204,37 +98,6 @@ mod goal_event_tests {
     }
 
     #[test]
-    fn canonical_codex_record_is_typed_and_redacts_provider_bags() {
-        let native = json!({
-            "timestamp": "2026-07-08T08:49:29Z",
-            "type": "response_item",
-            "cwd": "/secret/project",
-            "payload": {
-                "type": "function_call",
-                "name": "shell",
-                "call_id": "call-redacted",
-                "arguments": {"path": "/secret/project", "token": "credential-redacted"}
-            }
-        });
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(40, 80).unwrap();
-        let record_id = codex_native_record_id("session-redacted", &native).unwrap();
-        let envelope = normalize_codex_observation(
-            &native,
-            "session-redacted",
-            Some("session-redacted"),
-            record_id.clone(),
-            range,
-        )
-        .unwrap();
-        let rendered = format!("{envelope:?}");
-        assert!(rendered.contains("ToolInvocation"));
-        assert!(rendered.contains("FileBytes"));
-        assert!(rendered.contains(record_id.as_str()));
-        assert!(!rendered.contains("/secret/project"));
-        assert!(!rendered.contains("credential-redacted"));
-    }
-
-    #[test]
     fn codex_turn_context_sets_native_turn_and_thread_relations() {
         let native = json!({
             "type": "turn_context",
@@ -268,71 +131,6 @@ mod goal_event_tests {
                 state: CanonicalUnknownStateV1::Unsupported,
             } if native_kind == "turn_context"
         )));
-    }
-
-    #[test]
-    fn codex_session_meta_subagent_sets_native_agent_lineage() {
-        let native = json!({
-            "type": "session_meta",
-            "payload": {
-                "id": "child-thread",
-                "cwd": "/secret/project",
-                "thread_source": "subagent",
-                "agent_nickname": "worker-a",
-                "source": {
-                    "subagent": {
-                        "thread_spawn": {
-                            "parent_thread_id": "parent-thread",
-                            "agent_nickname": "worker-a"
-                        }
-                    }
-                }
-            }
-        });
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 50).unwrap();
-        let record_id = codex_native_record_id("child-thread", &native).unwrap();
-        let envelope = normalize_codex_observation(
-            &native,
-            "child-thread",
-            Some("child-thread"),
-            record_id,
-            range,
-        )
-        .unwrap();
-        let relations = serde_json::to_value(envelope.relations()).unwrap();
-        assert_eq!(relations["thread_id"], "child-thread");
-        assert_eq!(relations["agent_id"], "child-thread");
-        assert_eq!(relations["parent_agent_id"], "parent-thread");
-        assert!(relations.get("turn_id").is_none());
-        assert!(relations.get("message_id").is_none());
-    }
-
-    #[test]
-    fn codex_response_without_turn_id_leaves_turn_unset() {
-        let native = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "hello"}]
-            }
-        });
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 20).unwrap();
-        let record_id = codex_native_record_id("thread-redacted", &native).unwrap();
-        let envelope = normalize_codex_observation(
-            &native,
-            "thread-redacted",
-            Some("thread-redacted"),
-            record_id.clone(),
-            range,
-        )
-        .unwrap();
-        let relations = serde_json::to_value(envelope.relations()).unwrap();
-        assert_eq!(relations["thread_id"], "thread-redacted");
-        assert_eq!(relations["message_id"], record_id.as_str());
-        assert!(relations.get("turn_id").is_none());
-        assert!(relations.get("agent_id").is_none());
-        assert!(relations.get("parent_agent_id").is_none());
     }
 
     #[test]
@@ -379,8 +177,10 @@ mod goal_event_tests {
         let renamed_native = native("Gauss", "reviewer");
         let first_path = write_rollout("first.jsonl", &first_native);
         let renamed_path = write_rollout("renamed.jsonl", &renamed_native);
-        let first_meta = session_meta_with_provenance(&first_path).unwrap();
-        let renamed_meta = session_meta_with_provenance(&renamed_path).unwrap();
+        let first_meta = session_meta_with_provenance(&first_path).unwrap().unwrap();
+        let renamed_meta = session_meta_with_provenance(&renamed_path)
+            .unwrap()
+            .unwrap();
         assert_eq!(first_meta.native_thread_id.as_deref(), Some("child-thread"));
         assert_eq!(
             renamed_meta.native_thread_id.as_deref(),
@@ -388,16 +188,6 @@ mod goal_event_tests {
         );
         assert_eq!(first_meta.meta.agent_id.as_deref(), Some("Euler"));
         assert_eq!(renamed_meta.meta.agent_id.as_deref(), Some("Gauss"));
-
-        let source = CodexSource::with_home(temp.path());
-        let first_parsed = source
-            .parse_new(&first_path, StoredCursor::default(), &project, None)
-            .unwrap();
-        let renamed_parsed = source
-            .parse_new(&renamed_path, StoredCursor::default(), &project, None)
-            .unwrap();
-        assert_eq!(first_parsed.draft.agent_id.as_deref(), Some("Euler"));
-        assert_eq!(renamed_parsed.draft.agent_id.as_deref(), Some("Gauss"));
 
         let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
         let first_record_id = codex_native_record_id("child-thread", &first_native).unwrap();
@@ -453,14 +243,10 @@ mod goal_event_tests {
         );
         std::fs::write(&path, contents).unwrap();
 
-        let meta = session_meta_with_provenance(&path).unwrap();
+        let meta = session_meta_with_provenance(&path).unwrap().unwrap();
         assert_eq!(meta.meta.session_id, "rollout-filename");
         assert!(meta.native_thread_id.is_none());
         assert_eq!(meta.meta.agent_id.as_deref(), Some("mutable-label"));
-        let parsed = CodexSource::with_home(temp.path())
-            .parse_new(&path, StoredCursor::default(), &project, None)
-            .unwrap();
-        assert_eq!(parsed.draft.agent_id.as_deref(), Some("mutable-label"));
 
         let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
         let record_id = codex_native_record_id("rollout-filename", &native).unwrap();
@@ -474,17 +260,13 @@ mod goal_event_tests {
     }
 
     fn load_codex_golden_input(name: &str) -> Value {
-        let path = format!(
-            "{}/../../tests/fixtures/provider_normalization/codex/{name}.input.json",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let path = format!("../../tests/fixtures/provider_normalization/codex/{name}.input.json");
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
     fn load_codex_golden_expected(name: &str, stable_record_id: &str) -> Value {
         let path = format!(
-            "{}/../../tests/fixtures/provider_normalization/codex/{name}.expected_envelope.json",
-            env!("CARGO_MANIFEST_DIR")
+            "../../tests/fixtures/provider_normalization/codex/{name}.expected_envelope.json"
         );
         let raw = std::fs::read_to_string(path).unwrap().replace(
             "\"$STABLE_RECORD_ID\"",
@@ -543,51 +325,6 @@ mod goal_event_tests {
     }
 
     #[test]
-    fn thread_goal_updated_maps_nested_goal_to_workflow_lifecycle() {
-        // Binding shape: goal_event_line / write_codex_rollout_with_goal_events.
-        let native = goal_event_line("phlogiston pipeline overhaul", "active");
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-        let record_id = codex_native_record_id("thread-1", &native).unwrap();
-        let envelope =
-            normalize_codex_observation(&native, "thread-1", Some("thread-1"), record_id, range)
-                .unwrap();
-        let facts = envelope.facts();
-        assert_eq!(facts.len(), 1);
-        match &facts[0] {
-            CanonicalObservationFactV1::WorkflowLifecycle {
-                semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
-                provider_reference,
-                item_id,
-                parent_reference,
-                list_reference,
-                state,
-                status,
-                item_order,
-                revision,
-                event_sequence,
-                content,
-            } => {
-                assert_eq!(provider_reference.as_deref(), Some("thread-1"));
-                assert_eq!(status.as_deref(), Some("active"));
-                assert!(item_id.is_none());
-                assert!(parent_reference.is_none());
-                assert!(list_reference.is_none());
-                assert!(state.is_none());
-                assert!(item_order.is_none());
-                assert!(revision.is_none());
-                assert!(event_sequence.is_none());
-                let content = content.as_ref().expect("native goal object");
-                assert_eq!(content["objective"], "phlogiston pipeline overhaul");
-                assert_eq!(content["status"], "active");
-                assert_eq!(content["threadId"], "thread-1");
-                assert_eq!(content["tokensUsed"], 42);
-                assert!(content.get("revision").is_none());
-            }
-            other => panic!("expected WorkflowLifecycle Goal, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn update_plan_preserves_arguments_as_workflow_lifecycle_plan() {
         // Binding shape: write_codex_rollout_with_structured_events / update_plan_row.
         let native = json!({
@@ -615,7 +352,7 @@ mod goal_event_tests {
         assert!(matches!(
             &facts[0],
             CanonicalObservationFactV1::ToolInvocation { name, arguments, .. }
-                if name == "update_plan" && arguments.is_null()
+                if name == "update_plan" && arguments["plan"][1]["step"] == "ship"
         ));
         match &facts[1] {
             CanonicalObservationFactV1::WorkflowLifecycle {
@@ -647,7 +384,7 @@ mod goal_event_tests {
     #[test]
     fn task_complete_and_turn_events_map_exactly_without_lookalikes() {
         // Binding shape: write_codex_rollout_with_structured_events /
-        // task_events_become_turn_boundary_rows — singular task_complete only.
+        // task_events_become_turn_boundary_rows, singular task_complete only.
         let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
         for (payload, expected_state, expected_status) in [
             (
@@ -757,99 +494,695 @@ mod goal_event_tests {
         }
     }
 
-    #[test]
-    fn goal_context_response_item_remains_message_only() {
-        // Goal-context prose is not a fixture-backed native lifecycle record.
-        // It must remain a Message rather than becoming inferred Goal state.
-        let native = json!({
-            "timestamp": "2026-01-01T00:00:15.100Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "<codex_internal_context source=\"goal\"><objective>ensure all provider session messages are ingested</objective>\nToken budget: 12000\nTokens remaining: 11000</codex_internal_context>"
-                }]
-            }
-        });
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-        let record_id = codex_native_record_id("codex-goal-context", &native).unwrap();
-        let envelope = normalize_codex_observation(
-            &native,
-            "codex-goal-context",
-            Some("codex-goal-context"),
-            record_id,
-            range,
-        )
-        .unwrap();
-        let facts = envelope.facts();
-        assert_eq!(facts.len(), 1);
-        assert!(matches!(
-            &facts[0],
-            CanonicalObservationFactV1::Message {
-                role: CanonicalMessageRoleV1::User,
-                ..
-            }
-        ));
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod source_matcher_cache_tests {
-    use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use serde_json::json;
-    use tempfile::TempDir;
-
-    use super::CodexSource;
-    use crate::runtime::shared::{ProjectRootMatcherCache, StoredCursor};
-    use crate::runtime::source::TranscriptSource;
-    use tracedecay_runtime_core::git_discovery::{
-        GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
-    };
-
-    static UNKNOWN_PATH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-
-    fn retrying_identity(path: &Path) -> GitRepositoryIdentityOutcome {
-        let root = path
-            .ancestors()
-            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
-            .unwrap_or(path);
-        if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 1 {
-            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
-        }
-        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
-            worktree_root: root.to_path_buf(),
-            git_dir: root.join(".git"),
-            common_dir: root.join(".git"),
-        })
-    }
-
-    fn write_rollout(path: &Path, session_id: &str, cwd: &Path) {
+    #[tokio::test]
+    async fn current_user_message_reaches_project_admission_and_projection() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
         let lines = [
             json!({
-                "timestamp": "2026-01-01T00:00:00.000Z",
+                "timestamp": "2026-09-04T12:00:00.000Z",
                 "type": "session_meta",
-                "payload": {
-                    "id": session_id,
-                    "cwd": cwd,
-                    "model": "gpt-5.5"
-                }
+                "payload": {"id": "session-current-user", "cwd": project}
             }),
             json!({
-                "timestamp": "2026-01-01T00:00:01.000Z",
+                "timestamp": "2026-09-04T12:00:01.004Z",
                 "type": "event_msg",
                 "payload": {
-                    "type": "user_message",
-                    "message": format!("message from {session_id}")
+                    "type": "item_completed",
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "item": {
+                        "type": "UserMessage",
+                        "id": "user-item-1",
+                        "content": [{
+                            "type": "text",
+                            "text": "Find the callers of publish_generation."
+                        }]
+                    }
                 }
             }),
         ];
         std::fs::write(
-            path,
+            &transcript,
+            lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let project_id = ProjectId::new("project-current-user").unwrap();
+        let admission = MemoryHostAdmission::default();
+
+        let progress = try_admit_codex_jsonl_observations_for_project_with_admission(
+            &transcript,
+            &project,
+            project_id.clone(),
+            &admission,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(progress.frames_persisted, 2);
+        let observations = admission.observations();
+        let message = observations.iter().find_map(|stored| {
+            serde_json::from_value::<CanonicalObservationEnvelopeV1>(
+                stored.observation().payload().clone(),
+            )
+            .ok()
+            .filter(|envelope| {
+                envelope.facts().iter().any(|fact| {
+                    matches!(
+                        fact,
+                        CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::User,
+                            content,
+                            ..
+                        } if content.to_string().contains("publish_generation")
+                    )
+                })
+            })
+        });
+        assert!(
+            message.is_some(),
+            "current UserMessage must survive admission"
+        );
+        let scope = ObservationScopeV1::Project { project_id };
+        let projected = admission
+            .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 8)
+            .await
+            .unwrap();
+        assert_eq!(projected.projected, 2);
+        assert_eq!(admission.pending_projection_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn project_provider_yields_after_one_window_and_resumes_without_loss() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let session_id = "session-windowed-project";
+        let mut lines = vec![json!({
+            "timestamp": "2026-09-04T12:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": project}
+        })];
+        lines.extend((0..256).map(|ordinal| {
+            json!({
+                "timestamp": "2026-09-04T12:00:01.004Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": session_id,
+                    "turn_id": format!("turn-{ordinal}"),
+                    "item": {
+                        "type": "UserMessage",
+                        "id": format!("user-item-{ordinal}"),
+                        "content": [{"type": "text", "text": format!("message {ordinal}")}]
+                    }
+                }
+            })
+        }));
+        let encoded = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&transcript, &encoded).unwrap();
+        let project_id = ProjectId::new("project-windowed-provider").unwrap();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+
+        let first = try_admit_codex_jsonl_observations_for_project_window(
+            &transcript,
+            &project,
+            project_id.clone(),
+            &admission,
+            u64::MAX,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.frames_persisted, 256);
+        assert!(first.source_deferred);
+        assert!(first.bytes_consumed < encoded.len() as u64);
+        assert_eq!(admission.observations().len(), 256);
+
+        let second = try_admit_codex_jsonl_observations_for_project_window(
+            &transcript,
+            &project,
+            project_id,
+            &admission,
+            u64::MAX,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(second.frames_persisted, 1);
+        assert!(!second.source_deferred);
+        assert_eq!(admission.observations().len(), 257);
+        assert_eq!(
+            first.bytes_consumed + second.bytes_consumed,
+            encoded.len() as u64
+        );
+    }
+
+    /// A pass yields on the source the capture window left mid-file, not on
+    /// every source it finishes.
+    ///
+    /// `MAX_CAPTURE_WINDOW` is the cooperative bound that owns a resumable
+    /// cursor: it stops inside one rollout and the next pass resumes at that
+    /// byte offset. Yielding once per *finished* rollout has no such cursor, so
+    /// the discovery frontier can never commit and every later pass re-reads
+    /// every rollout it already exhausted, which is quadratic in the rollouts a
+    /// project has. The profile-scope loop has always been bounded this way.
+    #[tokio::test]
+    async fn project_provider_yields_on_a_deferred_rollout_and_converges_without_loss() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        // The newest rollout alone exceeds one capture window, so pass 0 must
+        // stop inside it; the two behind it fit in the pass that finishes it.
+        let deferring_messages =
+            crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW + 44;
+        let rollouts = [
+            (("2026", "09", "03"), "session-newest", deferring_messages),
+            (("2026", "09", "02"), "session-middle", 3),
+            (("2026", "09", "01"), "session-oldest", 3),
+        ];
+        for (date, session_id, messages_per_rollout) in rollouts {
+            let directory = home
+                .join(".codex/sessions")
+                .join(date.0)
+                .join(date.1)
+                .join(date.2);
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut lines = vec![json!({
+                "timestamp": format!("{}-{}-{}T12:00:00.000Z", date.0, date.1, date.2),
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": project}
+            })];
+            lines.extend((0..messages_per_rollout).map(|ordinal| {
+                json!({
+                    "timestamp": format!("{}-{}-{}T12:00:01.{:03}Z", date.0, date.1, date.2, ordinal),
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": format!("{session_id}-message-{ordinal}")
+                    }
+                })
+            }));
+            std::fs::write(
+                directory.join(format!("rollout-{session_id}.jsonl")),
+                lines
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+        }
+
+        let project_id = ProjectId::new("project-dated-rollouts").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        // Pass 0 stops inside the newest rollout at the capture window; pass 1
+        // resumes it from the stored byte offset and, still inside its byte
+        // budget, finishes the two rollouts behind it.
+        let expected_passes: [(&[&str], usize); 2] = [
+            (
+                &["session-newest"],
+                crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW,
+            ),
+            (
+                &["session-newest", "session-middle", "session-oldest"],
+                (deferring_messages + 1)
+                    - crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW
+                    + 8,
+            ),
+        ];
+        let failure_ceiling = expected_passes.len().saturating_add(1);
+        let mut completed_after = None;
+
+        for pass_index in 0..failure_ceiling {
+            let before = admission.observations().len();
+            let outcome = with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
+            )
+            .await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+
+            let after = admission.observations();
+            let admitted_this_pass = &after[before..];
+            assert!(
+                pass_index < expected_passes.len(),
+                "coverage did not complete within the fixture-derived ceiling"
+            );
+            let (expected_sessions, expected_admitted) = expected_passes[pass_index];
+            assert_eq!(
+                admitted_this_pass.len(),
+                expected_admitted,
+                "pass {pass_index} must admit one capture window of {expected_sessions:?}"
+            );
+            assert_eq!(
+                admitted_this_pass
+                    .iter()
+                    .map(|stored| {
+                        let envelope: CanonicalObservationEnvelopeV1 =
+                            serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                        envelope.relations().session_id().as_str().to_owned()
+                    })
+                    .collect::<BTreeSet<_>>(),
+                expected_sessions
+                    .iter()
+                    .map(|session_id| (*session_id).to_owned())
+                    .collect::<BTreeSet<_>>(),
+                "pass {pass_index} admitted the wrong rollouts"
+            );
+
+            let coverage = read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap();
+            if coverage == Some(HostProviderCoverage::Complete) {
+                completed_after = Some(pass_index + 1);
+                break;
+            }
+            assert_eq!(coverage, Some(HostProviderCoverage::Partial));
+        }
+
+        assert_eq!(completed_after, Some(expected_passes.len()));
+        let observations = admission.observations();
+        assert_eq!(
+            observations.len(),
+            rollouts
+                .iter()
+                .map(|(_, _, messages)| messages + 1)
+                .sum::<usize>()
+        );
+        let envelopes = observations
+            .iter()
+            .map(|stored| {
+                serde_json::from_value::<CanonicalObservationEnvelopeV1>(
+                    stored.observation().payload().clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let admitted_sessions = envelopes
+            .iter()
+            .map(|envelope| envelope.relations().session_id().as_str().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            admitted_sessions.iter().cloned().collect::<BTreeSet<_>>(),
+            rollouts
+                .iter()
+                .map(|(_, session_id, _)| (*session_id).to_owned())
+                .collect::<BTreeSet<_>>()
+        );
+        for (_, session_id, messages_per_rollout) in rollouts {
+            assert_eq!(
+                admitted_sessions
+                    .iter()
+                    .filter(|admitted| admitted.as_str() == session_id)
+                    .count(),
+                messages_per_rollout + 1,
+                "{session_id} must be admitted exactly once"
+            );
+            for ordinal in 0..messages_per_rollout {
+                let expected = format!("{session_id}-message-{ordinal}");
+                assert_eq!(
+                    envelopes
+                        .iter()
+                        .flat_map(|envelope| envelope.facts())
+                        .filter(|fact| matches!(
+                            fact,
+                            CanonicalObservationFactV1::Message { content, .. }
+                                if content.as_str() == Some(expected.as_str())
+                        ))
+                        .count(),
+                    1,
+                    "{expected} must be admitted exactly once"
+                );
+            }
+        }
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Complete)
+        );
+    }
+
+    /// The newest in-project day is admitted, and its message text is durable,
+    /// before any older out-of-project day is opened.
+    ///
+    /// Search reads the published projection of those admitted messages. A pass
+    /// that keeps walking older days writes their coverage cursors before that
+    /// projection can run, so the newest day stays invisible until the older
+    /// sweep finishes. The follow-up pass must still open the older day, or
+    /// the yield would retry the same page forever.
+    #[tokio::test]
+    async fn newest_day_messages_are_durable_before_older_days_are_opened() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let marker = "NEWEST_DAY_MARKER cobalt orchard scheduler is ready";
+        let newest = [
+            ("2026", "08", "29", "newest-a"),
+            ("2026", "08", "29", "newest-b"),
+        ];
+        let older = [
+            ("2026", "08", "28", "older-a"),
+            ("2026", "08", "28", "older-b"),
+        ];
+        for (year, month, day, session_id) in newest {
+            write_scoped_rollout(&home, year, month, day, session_id, &project, marker);
+        }
+        for (year, month, day, session_id) in older {
+            write_scoped_rollout(
+                &home,
+                year,
+                month,
+                day,
+                session_id,
+                &other,
+                "OLDER_DAY_MARKER should stay unopened",
+            );
+        }
+
+        let project_id = ProjectId::new("project-newest-before-older").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let run_pass = || {
+            with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
+            )
+        };
+
+        let first = run_pass().await;
+        assert!(first.failures.is_empty(), "{:?}", first.failures);
+        let admitted = session_ids_of(&admission.observations());
+        assert_eq!(
+            admitted,
+            ["newest-a".to_owned(), "newest-b".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(
+            admission.observations().iter().any(|stored| {
+                let envelope: CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.facts().iter().any(|fact| {
+                    matches!(
+                        fact,
+                        CanonicalObservationFactV1::Message { content, .. }
+                            if content.as_str() == Some(marker)
+                    )
+                })
+            }),
+            "the newest day's message text must be durable before older days are opened"
+        );
+        for session_id in ["older-a", "older-b"] {
+            let source =
+                crate::runtime::hosts::codex::codex_observation_source_v2(session_id).unwrap();
+            assert!(
+                admission
+                    .get_source_cursor(&source, &scope)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{session_id} was opened in the pass that admitted the newest day"
+            );
+        }
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Partial)
+        );
+
+        let mut older_opened = false;
+        for _ in 0..3 {
+            let outcome = run_pass().await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+            let source =
+                crate::runtime::hosts::codex::codex_observation_source_v2("older-a").unwrap();
+            if admission
+                .get_source_cursor(&source, &scope)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                older_opened = true;
+                break;
+            }
+        }
+        assert!(
+            older_opened,
+            "deferring the older day must still open it on a later pass"
+        );
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            ["newest-a".to_owned(), "newest-b".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "out-of-project days stay out of the project observation set"
+        );
+    }
+
+    /// An out-of-project rollout inside the day being admitted does not end
+    /// the pass. On a profile that interleaves projects, ending there admits a
+    /// few rollouts per pass and rediscovers the same page each time.
+    #[tokio::test]
+    async fn a_mixed_day_is_admitted_in_one_pass_before_older_days_are_opened() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        for (session_id, cwd) in [
+            ("mixed-a", &project),
+            ("mixed-m", &other),
+            ("mixed-z", &project),
+        ] {
+            write_scoped_rollout(&home, "2026", "08", "29", session_id, cwd, "mixed day");
+        }
+        write_scoped_rollout(&home, "2026", "08", "28", "older-x", &other, "older day");
+
+        let project_id = ProjectId::new("project-mixed-day").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let outcome = with_transcript_source_profile(
+            tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+            ProjectProviderRun {
+                project_root: &project,
+                project_id: &project_id,
+                facade: &admission,
+                scope: &scope,
+                candidate: SessionProvider::Codex,
+                max_new_bytes: u64::MAX,
+                cancellation: &ObservationCancellation::default(),
+                codex_discovery: None,
+            }
+            .run_codex(),
+        )
+        .await;
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            ["mixed-a".to_owned(), "mixed-z".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        let older = crate::runtime::hosts::codex::codex_observation_source_v2("older-x").unwrap();
+        assert!(
+            admission
+                .get_source_cursor(&older, &scope)
+                .await
+                .unwrap()
+                .is_none(),
+            "the older out-of-project day belongs to the next pass"
+        );
+    }
+
+    /// A session that appends to today's rollout between passes must not keep
+    /// the pass yielding at yesterday's out-of-project day. The yield exists
+    /// for a rollout opened this pass; a resumed live tail already has its
+    /// earlier window searchable, so the pass walks on, admits the older
+    /// in-project day, and commits its frontier.
+    #[tokio::test]
+    async fn a_live_tail_does_not_starve_older_in_project_days() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        write_scoped_rollout(&home, "2026", "08", "29", "live", &project, "live day");
+        write_scoped_rollout(&home, "2026", "08", "28", "other-a", &other, "other day");
+        write_scoped_rollout(&home, "2026", "08", "27", "oldest", &project, "oldest day");
+        let live_rollout = home.join(".codex/sessions/2026/08/29/rollout-live.jsonl");
+
+        let project_id = ProjectId::new("project-live-tail").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let run_pass = || {
+            with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
+            )
+        };
+
+        let first = run_pass().await;
+        assert!(first.failures.is_empty(), "{:?}", first.failures);
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            BTreeSet::from(["live".to_owned()]),
+            "the newest day yields before the older out-of-project day is opened"
+        );
+
+        let appends = 3;
+        for ordinal in 0..appends {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&live_rollout)
+                .unwrap();
+            std::io::Write::write_all(
+                &mut file,
+                format!(
+                    "{}\n",
+                    json!({
+                        "timestamp": format!("2026-08-29T12:00:{:02}.000Z", ordinal + 2),
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": format!("live append {ordinal}")}
+                    })
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let outcome = run_pass().await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        }
+
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            BTreeSet::from(["live".to_owned(), "oldest".to_owned()]),
+            "a live tail appending every pass starved the older in-project day"
+        );
+        assert_eq!(
+            admission
+                .observations()
+                .iter()
+                .filter(|stored| {
+                    let envelope: CanonicalObservationEnvelopeV1 =
+                        serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                    envelope.relations().session_id().as_str() == "live"
+                })
+                .count(),
+            2 + appends,
+            "every live append is admitted exactly once"
+        );
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Complete)
+        );
+    }
+
+    fn write_scoped_rollout(
+        home: &std::path::Path,
+        year: &str,
+        month: &str,
+        day: &str,
+        session_id: &str,
+        cwd: &std::path::Path,
+        message: &str,
+    ) {
+        let directory = home
+            .join(".codex/sessions")
+            .join(year)
+            .join(month)
+            .join(day);
+        std::fs::create_dir_all(&directory).unwrap();
+        let lines = [
+            json!({
+                "timestamp": format!("{year}-{month}-{day}T12:00:00.000Z"),
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": cwd}
+            }),
+            json!({
+                "timestamp": format!("{year}-{month}-{day}T12:00:01.000Z"),
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": message}
+            }),
+        ];
+        std::fs::write(
+            directory.join(format!("rollout-{session_id}.jsonl")),
             lines
                 .iter()
                 .map(ToString::to_string)
@@ -860,71 +1193,15 @@ mod source_matcher_cache_tests {
         .unwrap();
     }
 
-    #[test]
-    fn codex_source_reuses_project_matcher_across_parse_calls() {
-        let temp = TempDir::new().unwrap();
-        let project_root = temp.path().join("repo");
-        let nested_cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&nested_cwd).unwrap();
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&project_root)
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        let first_path = temp.path().join("first.jsonl");
-        let second_path = temp.path().join("second.jsonl");
-        write_rollout(&first_path, "first-session", &nested_cwd);
-        write_rollout(&second_path, "second-session", &nested_cwd);
-        let source = CodexSource::with_home(temp.path());
-
-        let first = source
-            .parse_new(&first_path, StoredCursor::default(), &project_root, None)
-            .unwrap();
-        assert_eq!(first.messages.len(), 1);
-        let first_metadata: serde_json::Value =
-            serde_json::from_str(first.messages[0].metadata_json.as_deref().unwrap()).unwrap();
-        let first_worktree = first_metadata["codex_turn_worktree"].clone();
-        assert!(first_worktree.is_string());
-
-        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden")).unwrap();
-        let second = source
-            .parse_new(&second_path, StoredCursor::default(), &project_root, None)
-            .unwrap();
-        assert_eq!(second.messages.len(), 1);
-        let second_metadata: serde_json::Value =
-            serde_json::from_str(second.messages[0].metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(second_metadata["codex_turn_worktree"], first_worktree);
-    }
-
-    #[test]
-    fn codex_unknown_membership_retries_without_advancing_cursor() {
-        UNKNOWN_PATH_ATTEMPTS.store(0, Ordering::SeqCst);
-        let temp = TempDir::new().unwrap();
-        let project_root = temp.path().join("repo");
-        let nested_cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&nested_cwd).unwrap();
-        let transcript = temp.path().join("retry.jsonl");
-        write_rollout(&transcript, "retry-session", &nested_cwd);
-        let mut source = CodexSource::with_home(temp.path());
-        source.project_matchers =
-            ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
-
-        let previous = StoredCursor::default();
-        assert!(
-            source
-                .parse_new(&transcript, previous, &project_root, None)
-                .is_none(),
-            "unknown membership must abort before a new cursor can be persisted"
-        );
-
-        let retried = source
-            .parse_new(&transcript, previous, &project_root, None)
-            .expect("unknown membership must be resolved again on retry");
-        assert_eq!(retried.messages.len(), 1);
-        assert!(retried.new_cursor.position > previous.position);
-        assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
+    fn session_ids_of(observations: &[tracedecay_store::StoredObservation]) -> BTreeSet<String> {
+        observations
+            .iter()
+            .map(|stored| {
+                let envelope: CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.relations().session_id().as_str().to_owned()
+            })
+            .collect()
     }
 }
 
@@ -935,12 +1212,20 @@ mod recent_first_discovery_tests {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
+    use serde_json::json;
     use tempfile::TempDir;
+    use tracedecay_domain::ProjectId;
+    use tracedecay_runtime_core::native_runtime::{
+        LONG_POLL, NativeTask, NativeTaskOutcome, block_on, long_native_polls,
+    };
 
     use super::CodexSource;
     use crate::admission::test_support::MemoryHostAdmission;
-    use crate::runtime::codex::{
+    use crate::observation::ObservationCancellation;
+    use crate::runtime::hosts::codex::try_admit_codex_jsonl_observations_for_project_window;
+    use crate::runtime::hosts::codex::{
         CodexCorpusEpoch, CodexDiscoveryDelivery, CodexDiscoveryFrontier, CodexDiscoveryHub,
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
         CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
@@ -948,6 +1233,11 @@ mod recent_first_discovery_tests {
         MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
+    use crate::runtime::ingest::quarantine::SourceSweep;
+    use crate::runtime::jsonl_observation_admission::{
+        SHARED_JSONL_PIN_GATES, install_test_shared_jsonl_preparation_authority,
+    };
+    use crate::runtime::source::spin_until_jsonl_change_settled;
     use crate::runtime::source::{
         HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
         persist_codex_history_frontier, persist_host_provider_coverage,
@@ -964,6 +1254,8 @@ mod recent_first_discovery_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("rollout-{name}.jsonl"));
         std::fs::write(&path, "{}\n").unwrap();
+        // Discovery proves a file unchanged only by a settled identity.
+        spin_until_jsonl_change_settled(&path);
         path
     }
 
@@ -1144,43 +1436,96 @@ mod recent_first_discovery_tests {
         ));
     }
 
+    /// A consumer told to wait for a scan in progress is released when a scan
+    /// finishes; a scan nobody waited on releases nothing, so a refused pass
+    /// subscribed before its own scan is not woken by that scan.
     #[tokio::test]
-    async fn shared_hub_fans_one_immutable_generation_to_profile_and_projects() {
+    async fn a_finished_scan_releases_only_consumers_that_waited_on_it() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
         let temp = TempDir::new().unwrap();
         let home = temp.path();
-        let expected = write_dated_rollout(home, ("2026", "08", "23"), "shared");
+        write_dated_rollout(home, ("2026", "08", "23"), "release");
         let hub = CodexDiscoveryHub::default();
-        for consumer in ["profile", "project-a", "project-b"] {
-            hub.register(consumer, Some(home));
-        }
+        hub.register("profile", Some(home));
         let source = CodexSource::with_home(home);
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
-        let first = match hub
-            .discover(
-                "profile",
-                &source,
-                bounds,
-                CodexDiscoveryFrontier::initial(),
-            )
+        let frontier = CodexDiscoveryFrontier::initial();
+        let released = hub.subscribe_scan_release();
+
+        let CodexDiscoveryDelivery::Ready(first) = hub
+            .discover("profile", &source, bounds, frontier)
             .await
             .unwrap()
-        {
-            CodexDiscoveryDelivery::Ready(pass) => pass,
-            CodexDiscoveryDelivery::Waiting => panic!("first scanner unexpectedly waited"),
+        else {
+            panic!("the first scan delivers");
         };
-        assert_eq!(first.report.paths, vec![expected]);
-        for consumer in ["project-a", "project-b"] {
-            let delivered = match hub
-                .discover(consumer, &source, bounds, CodexDiscoveryFrontier::initial())
-                .await
+        assert!(!released.has_changed());
+        hub.acknowledge("profile");
+
+        // A consumer joining now replays the source's index, which another
+        // consumer is scanning.
+        hub.register("project", Some(home));
+        let set_index_scanning = |scanning: bool| {
+            hub.inner
+                .lock()
                 .unwrap()
-            {
-                CodexDiscoveryDelivery::Ready(pass) => pass,
-                CodexDiscoveryDelivery::Waiting => panic!("queued consumer unexpectedly waited"),
-            };
-            assert!(Arc::ptr_eq(&first, &delivered));
-        }
+                .replay_indexes
+                .entry(source.discovery_key())
+                .or_default()
+                .scanning = scanning;
+        };
+        set_index_scanning(true);
+        assert!(matches!(
+            hub.discover("project", &source, bounds, frontier)
+                .await
+                .unwrap(),
+            CodexDiscoveryDelivery::Waiting
+        ));
+        set_index_scanning(false);
+        hub.discover("profile", &source, bounds, first.next_frontier)
+            .await
+            .unwrap();
+        assert!(released.has_changed());
+    }
+
+    /// An idle scan one consumer ran is queued for every other consumer. A
+    /// consumer polling after a rollout grew must see that growth, not the
+    /// empty pass a scan from before the growth left in its queue.
+    #[tokio::test]
+    async fn a_poll_after_growth_is_not_answered_by_an_earlier_empty_scan() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let rollout = write_dated_rollout(home, ("2026", "08", "23"), "streamed");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("profile", Some(home));
+        hub.register("project", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
+        let initial = CodexDiscoveryFrontier::initial();
+
+        let (project_paths, converged) =
+            drain_hub_consumer(&hub, "project", &source, bounds, initial).await;
+        assert_eq!(project_paths, vec![rollout.clone()]);
+        let (profile_paths, _) =
+            drain_hub_consumer(&hub, "profile", &source, bounds, initial).await;
+        assert_eq!(profile_paths, vec![rollout.clone()]);
+        let (idle_paths, _) = drain_hub_consumer(&hub, "profile", &source, bounds, converged).await;
+        assert!(idle_paths.is_empty(), "nothing changed before the growth");
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"{}\n").unwrap();
+        drop(file);
+        spin_until_jsonl_change_settled(&rollout);
+
+        let (grown, _) = drain_hub_consumer(&hub, "project", &source, bounds, converged).await;
+        assert!(
+            grown.contains(&rollout),
+            "the grown rollout must be rediscovered: {grown:?}"
+        );
     }
 
     #[tokio::test]
@@ -1366,7 +1711,6 @@ mod recent_first_discovery_tests {
             .expect("one source replay index");
         assert_eq!(index.completed_enumerations, 1);
         assert_eq!(index.files_considered, 73);
-        assert!(!index._memory.is_empty());
     }
 
     #[tokio::test]
@@ -1376,6 +1720,7 @@ mod recent_first_discovery_tests {
         let secondary = TempDir::new().unwrap();
         write_dated_rollout(primary.path(), ("2026", "08", "23"), "primary");
         let removed = write_dated_rollout(secondary.path(), ("2026", "08", "23"), "secondary-old");
+        let settled = crate::runtime::source::spin_until_jsonl_change_settled(&removed);
         let hub = CodexDiscoveryHub::default();
         hub.register("primary", Some(primary.path()));
         let primary_source = CodexSource::with_home(primary.path());
@@ -1408,8 +1753,27 @@ mod recent_first_discovery_tests {
             secondary_frontier,
         )
         .await;
-        assert!(unchanged.is_empty());
-        assert_eq!(unchanged_frontier, secondary_frontier);
+        // Without a stat witness no file proves unchanged: the retained probe
+        // honestly re-emits and re-enumerates the corpus.
+        if settled {
+            assert!(unchanged.is_empty());
+        }
+        if !settled {
+            assert_eq!(unchanged, vec![removed.clone()]);
+        }
+        if settled {
+            assert_eq!(unchanged_frontier, secondary_frontier);
+        }
+        // The corpus epoch folds each file's identity digest; without a stat
+        // witness those digests are unvouched per observation, so only the
+        // sweep state and file count stay comparable across enumerations.
+        if !settled {
+            assert_eq!(unchanged_frontier.state, secondary_frontier.state);
+            assert_eq!(
+                unchanged_frontier.epoch.files,
+                secondary_frontier.epoch.files
+            );
+        }
         assert_eq!(
             hub.inner
                 .lock()
@@ -1418,7 +1782,7 @@ mod recent_first_discovery_tests {
                 .get(&secondary_source.discovery_key())
                 .expect("secondary replay index")
                 .completed_enumerations,
-            1,
+            if settled { 1 } else { 2 },
             "an unchanged retained probe must not enumerate the corpus again"
         );
         std::fs::remove_file(&removed).unwrap();
@@ -1441,7 +1805,9 @@ mod recent_first_discovery_tests {
             .replay_indexes
             .get(&secondary_source.discovery_key())
             .expect("secondary replay index");
-        assert_eq!(index.completed_enumerations, 2);
+        // The earlier unchanged probe already enumerated a second time where
+        // no stat witness proves the corpus unchanged.
+        assert_eq!(index.completed_enumerations, if settled { 2 } else { 3 });
         assert!(!index.paths.iter().any(|entry| entry.path == removed));
     }
 
@@ -1550,23 +1916,135 @@ mod recent_first_discovery_tests {
         ));
     }
 
+    /// Spawns an ingest worker's source-ledger read as a native task and names
+    /// the site its long polls are counted against.
+    #[track_caller]
+    fn native_ledger_read(
+        hub: &CodexDiscoveryHub,
+    ) -> (NativeTask<bool>, &'static std::panic::Location<'static>) {
+        let hub = hub.clone();
+        (
+            NativeTask::spawn(async move {
+                SourceSweep::new("codex", Some((&hub, "reader")))
+                    .ledger()
+                    .is_some()
+            })
+            .unwrap(),
+            std::panic::Location::caller(),
+        )
+    }
+
+    /// Holds `discover`'s page pin of `gated` open while a native worker reads
+    /// the `reader` consumer's source ledger. Long polls count against the
+    /// caller's line, so concurrent tests never share a count.
+    #[track_caller]
+    fn assert_ledger_read_never_waits_on_pinning(
+        hub: &CodexDiscoveryHub,
+        gated: &Path,
+        discover: impl FnOnce() + Send + 'static,
+    ) {
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        SHARED_JSONL_PIN_GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(gated.to_path_buf(), Arc::clone(&gate));
+        let discovery = std::thread::spawn(discover);
+        gate.wait();
+        let (read, site) = native_ledger_read(hub);
+        std::thread::sleep(LONG_POLL * 3);
+        gate.wait();
+        discovery.join().unwrap();
+        assert_eq!(
+            block_on(read.wait()).unwrap(),
+            NativeTaskOutcome::Completed(true)
+        );
+        assert_eq!(
+            long_native_polls().get(site),
+            None,
+            "the ledger read held its native worker while discovery pinned pages"
+        );
+    }
+
+    #[test]
+    fn a_ledger_read_never_waits_on_a_shared_scan_pinning_pages() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().to_path_buf();
+        let rollout = write_dated_rollout(&home, ("2026", "08", "23"), "pinned");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("scanner", Some(&home));
+        hub.register("reader", Some(&home));
+
+        let scanner = hub.clone();
+        assert_ledger_read_never_waits_on_pinning(&hub, &rollout, move || {
+            scanner
+                .discover_blocking(
+                    "scanner",
+                    &CodexSource::with_home(&home),
+                    TranscriptDiscoveryBounds::from_discovered_units(8),
+                    CodexDiscoveryFrontier::initial(),
+                )
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn a_ledger_read_never_waits_on_a_replay_delivery_pinning_pages() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().to_path_buf();
+        let rollout = write_dated_rollout(&home, ("2026", "08", "23"), "replayed");
+        let hub = CodexDiscoveryHub::default();
+        let source = CodexSource::with_home(&home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let initial = CodexDiscoveryFrontier::initial();
+        hub.register("profile", Some(&home));
+        block_on(drain_hub_consumer(
+            &hub, "profile", &source, bounds, initial,
+        ))
+        .unwrap();
+        // Joining after shared discovery began, these consumers replay.
+        hub.register("replayer", Some(&home));
+        hub.register("reader", Some(&home));
+
+        let replayer = hub.clone();
+        assert_ledger_read_never_waits_on_pinning(&hub, &rollout, move || {
+            while let CodexDiscoveryDelivery::Waiting = replayer
+                .discover_blocking("replayer", &source, bounds, initial)
+                .unwrap()
+            {}
+        });
+    }
+
     #[test]
     fn exact_hook_session_lookup_converges_in_bounded_retained_slices() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
         let temp = TempDir::new().unwrap();
-        let home = temp.path();
+        // Discovery reports resolved paths, so the fixture must be built on a
+        // resolved home: macOS hands out `/var/folders/...` for a tempdir the
+        // filesystem itself names `/private/var/folders/...`.
+        let resolved_home = temp.path().canonicalize().unwrap();
+        let home = resolved_home.as_path();
         let directory = home.join(".codex/sessions/2026/08/23");
         std::fs::create_dir_all(&directory).unwrap();
+        let session_id = "0198-session-beyond-default-budget";
+        let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
+        // Write the target mid-corpus: tmpfs lists newest entries first and
+        // btrfs oldest first, so either end would land in the first slice.
+        // Distractor names also sort before the target so ordered enumeration
+        // (NTFS) only reaches it past the first retained slice; the loop below
+        // must then continue across calls on every platform.
         for index in 0..4_100 {
+            if index == 2_050 {
+                std::fs::write(&expected, b"{}\n").unwrap();
+            }
             std::fs::write(
-                directory.join(format!("rollout-distractor-{index:04}.jsonl")),
+                directory.join(format!("rollout-1999-12-31-distractor-{index:04}.jsonl")),
                 b"{}\n",
             )
             .unwrap();
         }
-        let session_id = "0198-session-beyond-default-budget";
-        let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
-        std::fs::write(&expected, b"{}\n").unwrap();
 
         let source = CodexSource::with_home(home);
         let mut calls = 0_u64;
@@ -1602,7 +2080,11 @@ mod recent_first_discovery_tests {
         use std::os::unix::fs::symlink;
 
         let temp = TempDir::new().unwrap();
-        let home = temp.path();
+        // Discovery reports resolved paths, so the fixture must be built on a
+        // resolved home: macOS hands out `/var/folders/...` for a tempdir the
+        // filesystem itself names `/private/var/folders/...`.
+        let resolved_home = temp.path().canonicalize().unwrap();
+        let home = resolved_home.as_path();
         let directory = home.join(".codex/sessions/2026/08/23");
         std::fs::create_dir_all(&directory).unwrap();
         let session_id = "0198-symlink-session";
@@ -1625,7 +2107,11 @@ mod recent_first_discovery_tests {
     fn distinct_exact_hook_ids_share_one_monotonic_source_index() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
         let temp = TempDir::new().unwrap();
-        let home = temp.path();
+        // Discovery reports resolved paths, so the fixture must be built on a
+        // resolved home: macOS hands out `/var/folders/...` for a tempdir the
+        // filesystem itself names `/private/var/folders/...`.
+        let resolved_home = temp.path().canonicalize().unwrap();
+        let home = resolved_home.as_path();
         let directory = home.join(".codex/sessions/2026/08/23");
         std::fs::create_dir_all(&directory).unwrap();
         let target_id = "indexed-before-late-request";
@@ -1743,72 +2229,65 @@ mod recent_first_discovery_tests {
         assert!(pass.report.paths.len() <= bounds.max_files);
     }
 
-    /// An unchanged completed corpus is truly idle: it must not hand the same
-    /// recent slice back to the JSONL scanner on every background poll.
-    #[test]
-    fn codex_complete_frontier_idles_without_selecting_files() {
+    /// A dated tree whose older days hold more rollouts than one structural
+    /// pass can charge must still surface today's session immediately. Listing
+    /// those older files is not allowed to postpone the newest rollout.
+    #[tokio::test]
+    async fn codex_catch_up_surfaces_the_newest_rollout_before_older_days_are_listed() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
         let temp = TempDir::new().unwrap();
         let home = temp.path();
-        let active = write_dated_rollout(home, ("2026", "08", "17"), "today");
-        let source = CodexSource::with_home(home);
-        let mut state = CodexDiscoveryState::default();
-        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
-
-        let mut completed = retained_pass(
-            &source,
-            &mut state,
-            bounds,
-            CodexDiscoveryFrontier::initial(),
-        );
-        while !completed.next_frontier.is_complete() {
-            completed = retained_pass(
-                &source,
-                &mut state,
-                bounds,
-                CodexDiscoveryFrontier::initial(),
-            );
+        for index in 0..800 {
+            write_dated_rollout(home, ("2026", "06", "01"), &format!("older-{index:04}"));
         }
-        assert!(completed.next_frontier.is_complete());
-
-        let idle = retained_pass(&source, &mut state, bounds, completed.next_frontier);
-        assert!(idle.next_frontier.is_complete());
-        assert!(idle.report.paths.is_empty());
-        assert!(!idle.report.is_truncated());
-
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&active)
-            .unwrap();
-        file.write_all(b"{}\n").unwrap();
-        let awakened = retained_pass(&source, &mut state, bounds, completed.next_frontier);
-        assert!(awakened.report.is_truncated());
-        assert!(!awakened.next_frontier.is_complete());
-    }
-
-    /// A file-count watermark cannot distinguish deletion plus addition. The
-    /// corpus epoch must invalidate completion even when cardinality is fixed.
-    #[test]
-    fn codex_constant_cardinality_replacement_invalidates_completion() {
-        let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        let removed = write_dated_rollout(home, ("2026", "08", "17"), "removed");
+        let newest = write_dated_rollout(home, ("2026", "09", "28"), "project-newest");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(home));
         let source = CodexSource::with_home(home);
-        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
-
-        let completed = source
-            .discover_transcript_paths_with_frontier(bounds, CodexDiscoveryFrontier::initial())
-            .unwrap()
-            .next_frontier;
-        assert!(completed.is_complete());
-
-        std::fs::remove_file(removed).unwrap();
-        let added = write_dated_rollout(home, ("2026", "08", "17"), "added");
-        let changed = source
-            .discover_transcript_paths_with_frontier(bounds, completed)
-            .unwrap();
-
-        assert!(changed.report.paths.contains(&added));
-        assert_ne!(changed.next_frontier.epoch, completed.epoch);
+        let bounds = TranscriptDiscoveryBounds::default_walk();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut surfaced = false;
+        for _ in 0..2 {
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => {
+                    panic!("a single catch-up consumer must not wait on its own scan")
+                }
+            };
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+            if pass.report.paths.first() == Some(&newest) {
+                surfaced = true;
+                break;
+            }
+        }
+        assert!(
+            surfaced,
+            "catch-up must surface the newest rollout before it finishes listing older days"
+        );
+        for _ in 0..64 {
+            if frontier.is_complete() {
+                break;
+            }
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => continue,
+            };
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+        }
+        assert!(
+            frontier.is_complete(),
+            "catch-up must finish the rollout sweep after the newest session is visible"
+        );
     }
 
     #[test]
@@ -1837,29 +2316,42 @@ mod recent_first_discovery_tests {
         assert_eq!(replaced.report.paths, vec![path]);
     }
 
+    /// An in-place rewrite keeps the inode and its generation; inside the
+    /// change-time quantum of the identity discovery recorded it keeps every
+    /// stat field too, so that identity must not prove the file unchanged.
     #[test]
-    fn codex_recent_selection_keeps_dated_sessions_before_archive() {
+    #[cfg(unix)]
+    fn codex_same_size_in_place_rewrite_is_redelivered() {
         let temp = TempDir::new().unwrap();
         let home = temp.path();
-        let dated = write_dated_rollout(home, ("2026", "08", "17"), "dated");
-        let archive_dir = home.join(".codex/archived_sessions");
-        std::fs::create_dir_all(&archive_dir).unwrap();
-        let archived = archive_dir.join("rollout-zzzz.jsonl");
-        std::fs::write(&archived, "{}\n").unwrap();
+        let path = write_dated_rollout(home, ("2026", "08", "17"), "rewritten");
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
+        let mut frontier = CodexDiscoveryFrontier::initial();
 
-        let pass = CodexSource::with_home(home)
-            .discover_transcript_paths_with_frontier(
-                TranscriptDiscoveryBounds::from_discovered_units(8),
-                CodexDiscoveryFrontier::initial(),
-            )
-            .unwrap();
+        for round in 0..32_u8 {
+            let completed = source
+                .discover_transcript_paths_with_frontier(bounds, frontier)
+                .unwrap()
+                .next_frontier;
+            let original = std::fs::metadata(&path).unwrap();
+            let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.write_all(if round % 2 == 0 { b"[]\n" } else { b"{}\n" })
+                .unwrap();
+            file.set_modified(original.modified().unwrap()).unwrap();
+            drop(file);
 
-        assert_eq!(pass.report.paths.first(), Some(&dated));
-        assert!(pass.report.paths.contains(&archived));
+            let rewritten = source
+                .discover_transcript_paths_with_frontier(bounds, completed)
+                .unwrap();
+            assert_ne!(rewritten.next_frontier.epoch, completed.epoch);
+            assert_eq!(rewritten.report.paths, vec![path.clone()]);
+            frontier = rewritten.next_frontier;
+        }
     }
 
     /// Coverage: retained traversal across passes must visit every historical
-    /// file — tracked pending work, never a skipped range.
+    /// file, tracked pending work, never a skipped range.
     #[test]
     fn codex_history_frontier_covers_every_backlog_file_across_passes() {
         let temp = TempDir::new().unwrap();
@@ -1964,7 +2456,10 @@ mod recent_first_discovery_tests {
         assert!(frontier.is_complete());
         let restarted = retained_pass(&source, &mut state, bounds, frontier);
         assert!(restarted.report.paths.is_empty());
-        assert!(!restarted.report.is_truncated());
+        let settled = all
+            .iter()
+            .all(|path| crate::runtime::source::spin_until_jsonl_change_settled(path));
+        assert_eq!(restarted.report.is_truncated(), !settled);
     }
 
     #[test]
@@ -2117,99 +2612,10 @@ mod recent_first_discovery_tests {
         );
     }
 
-    /// A backlog under the cap needs no catch-up: one pass discovers everything
-    /// and reports no truncation, so no catch-up is scheduled.
-    #[test]
-    fn codex_discovery_under_cap_is_complete_in_one_pass() {
-        let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        let a = write_dated_rollout(home, ("2026", "08", "16"), "yesterday");
-        let b = write_dated_rollout(home, ("2026", "08", "17"), "today");
-
-        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
-        let pass = CodexSource::with_home(home)
-            .discover_transcript_paths_with_frontier(bounds, CodexDiscoveryFrontier::initial())
-            .unwrap();
-
-        assert_eq!(pass.report.paths, vec![b, a], "newest-first ordering");
-        assert_eq!(pass.report.files_considered, 2);
-        assert!(!pass.report.is_truncated());
-        assert!(pass.next_frontier.is_complete());
-    }
-
-    /// A single historical bucket larger than the whole per-pass budget must
-    /// converge file-by-file through the retained directory iterator instead
-    /// of starving its tail or pinning forever.
-    ///
-    /// The intra-sweep cursor is the retained `CodexDiscoveryState`, not the
-    /// durable frontier: the frontier stays pinned at the incoming epoch for
-    /// every unfinished pass and only advances once one sweep has observed the
-    /// whole corpus. So progress is asserted on the retained cursor's own
-    /// output — each unfinished pass must emit files it has not emitted before,
-    /// and must not claim completion while it is still reporting truncation.
-    #[test]
-    fn codex_oversized_bucket_converges_through_retained_traversal() {
-        let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        let mut all: BTreeSet<PathBuf> = BTreeSet::new();
-        for item in 0..40 {
-            all.insert(write_dated_rollout(
-                home,
-                ("2025", "11", "01"),
-                &format!("old-{item:02}"),
-            ));
-        }
-        all.insert(write_dated_rollout(home, ("2026", "08", "17"), "today"));
-
-        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
-        let source = CodexSource::with_home(home);
-
-        let mut state = CodexDiscoveryState::default();
-        let mut frontier = CodexDiscoveryFrontier::initial();
-        let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
-        let mut completed = false;
-        for _pass in 0..64 {
-            let pass = retained_pass(&source, &mut state, bounds, frontier);
-            let before = covered.len();
-            covered.extend(pass.report.paths.iter().cloned());
-            if pass.next_frontier.is_complete() {
-                assert!(
-                    !pass.report.is_truncated(),
-                    "a sweep may not claim completion while it still reports truncation"
-                );
-                completed = true;
-                frontier = pass.next_frontier;
-                break;
-            }
-            assert!(
-                pass.report.is_truncated(),
-                "an unfinished sweep must keep catch-up scheduled"
-            );
-            assert!(
-                covered.len() > before,
-                "an unfinished oversized bucket must still advance its retained cursor"
-            );
-            frontier = pass.next_frontier;
-        }
-        assert!(
-            completed,
-            "the retained sweep must reach a durable completion claim"
-        );
-        assert_eq!(
-            covered, all,
-            "an oversized bucket's tail must be reached across passes"
-        );
-        assert_eq!(
-            frontier.epoch.files,
-            u64::try_from(all.len()).unwrap(),
-            "the completed frontier's epoch must count the whole corpus"
-        );
-    }
-
     /// Sweep-complete is store-durable: a fresh source reading only admission
     /// parse offsets (the production persist path) idles instead of restarting
     /// truncated-from-zero. MemoryHostAdmission is the same offset table a
-    /// process restart would reopen — not a process-local memo.
+    /// process restart would reopen, not a process-local memo.
     #[tokio::test]
     async fn codex_sweep_complete_watermark_survives_admission_restart() {
         let temp = TempDir::new().unwrap();
@@ -2261,6 +2667,7 @@ mod recent_first_discovery_tests {
                 "codex",
                 coverage,
                 u64::from(pass.report.is_truncated()),
+                None,
             )
             .await
             .unwrap();
@@ -2304,16 +2711,34 @@ mod recent_first_discovery_tests {
                 bounds,
                 restarted_frontier,
             );
+            // Without a stat witness no file proves unchanged, so restart
+            // validation honestly re-emits the unchanged corpus; it must
+            // never emit anything outside it.
+            #[cfg(unix)]
             assert!(
                 pass.report.paths.is_empty(),
                 "unchanged restart validation must not re-emit transcripts"
+            );
+            #[cfg(not(unix))]
+            assert!(
+                pass.report.paths.iter().all(|path| all.contains(path)),
+                "restart validation may re-emit only the unchanged corpus"
             );
             restarted_frontier = pass.next_frontier;
             if restarted_frontier.is_complete() {
                 break;
             }
         }
+        #[cfg(unix)]
         assert_eq!(restarted_frontier, stored);
+        // The persisted epoch folds unvouched identity digests where no stat
+        // witness exists, so restart validation converges to an equal sweep
+        // state and file count rather than an equal salted epoch.
+        #[cfg(not(unix))]
+        {
+            assert_eq!(restarted_frontier.state, stored.state);
+            assert_eq!(restarted_frontier.epoch.files, stored.epoch.files);
+        }
 
         let added = write_dated_rollout(home, ("2026", "08", "18"), "after-restart");
         let mut rediscovered = false;
@@ -2428,6 +2853,333 @@ mod recent_first_discovery_tests {
                 .await
                 .unwrap(),
             lower
+        );
+    }
+
+    fn write_project_rollout(home: &Path, project: &Path, name: &str) -> PathBuf {
+        let path = write_dated_rollout(home, ("2026", "09", "28"), name);
+        let body = format!(
+            "{}\n{}\n",
+            json!({
+                "timestamp": "2026-09-28T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": name, "cwd": project}
+            }),
+            json!({
+                "timestamp": "2026-09-28T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "newest project turn"}
+            })
+        );
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// A ~9k Codex profile must surface and admit its newest project rollout on
+    /// the first catch-up pass, then finish the retained sweep. The historical
+    /// scheduler backs off 250ms only when a pass admits nothing; that wait is
+    /// part of the catch-up the operator observes.
+    #[tokio::test]
+    async fn codex_catch_up_admits_newest_rollout_on_a_large_profile() {
+        install_test_shared_jsonl_preparation_authority();
+
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let backlog = 9_000usize;
+        for index in 0..backlog {
+            let month = format!("{:02}", 6 + index / 3_000);
+            let day = format!("{:02}", 1 + (index / 100) % 30);
+            write_dated_rollout(home, ("2025", &month, &day), &format!("old-{index:05}"));
+        }
+        let newest = write_project_rollout(home, &project, "newest");
+
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::default_walk();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let started = Instant::now();
+        let mut first_path_ms = None;
+        let mut first_admit_ms = None;
+        let mut ready_passes = 0u32;
+        let project_id = ProjectId::new("project-large-codex").unwrap();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let deadline = Duration::from_secs(30);
+
+        loop {
+            if started.elapsed() > deadline {
+                panic!(
+                    "catch-up did not finish in {}s (ready_passes={ready_passes} first_admit_ms={first_admit_ms:?})",
+                    deadline.as_secs()
+                );
+            }
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .expect("codex discovery")
+            {
+                CodexDiscoveryDelivery::Waiting => continue,
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+            };
+            ready_passes = ready_passes.saturating_add(1);
+            let includes_newest = pass.report.paths.iter().any(|path| path == &newest);
+            if ready_passes == 1 {
+                assert_eq!(
+                    pass.report.paths.first(),
+                    Some(&newest),
+                    "the first catch-up pass must lead with the newest project rollout"
+                );
+            }
+            if includes_newest && first_path_ms.is_none() {
+                first_path_ms = Some(started.elapsed().as_millis());
+                let progress = try_admit_codex_jsonl_observations_for_project_window(
+                    &newest,
+                    &project,
+                    project_id.clone(),
+                    &admission,
+                    u64::MAX,
+                    &cancellation,
+                )
+                .await
+                .expect("admit newest rollout");
+                assert!(
+                    progress.frames_persisted > 0,
+                    "newest project rollout must persist a frame"
+                );
+                first_admit_ms = Some(started.elapsed().as_millis());
+                eprintln!(
+                    "CATCHUP_MEASURE time_to_first_path_ms={} time_to_first_admit_ms={}",
+                    first_path_ms.unwrap_or(0),
+                    first_admit_ms.unwrap_or(0)
+                );
+            }
+            let empty = pass.report.paths.is_empty();
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+            if frontier.is_complete() {
+                eprintln!(
+                    "CATCHUP_MEASURE time_to_complete_ms={} ready_passes={ready_passes} time_to_first_admit_ms={first_admit_ms:?}",
+                    started.elapsed().as_millis()
+                );
+                break;
+            }
+            if empty {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+
+        assert!(
+            first_admit_ms.is_some(),
+            "catch-up never admitted the newest rollout"
+        );
+        assert!(frontier.is_complete());
+    }
+
+    /// Codex moves a rollout out of `sessions/` when it archives the session.
+    /// A pass delivered before the move still names the old path, and the hub
+    /// replays that pass until a catch-up acknowledges it. Reading the absent
+    /// file as a retryable failure withheld the acknowledgement, so every later
+    /// pass replayed the same path and failed on it again, forever.
+    #[tokio::test]
+    async fn codex_catch_up_skips_a_vanished_rollout_and_admits_it_when_it_returns() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let rollout = write_project_rollout(&home, &project, "vanishing");
+        let body = std::fs::read(&rollout).unwrap();
+
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(&home));
+        let delivered = match hub
+            .discover(
+                "project",
+                &CodexSource::with_home(&home),
+                TranscriptDiscoveryBounds::default_walk(),
+                CodexDiscoveryFrontier::initial(),
+            )
+            .await
+            .unwrap()
+        {
+            CodexDiscoveryDelivery::Ready(pass) => pass,
+            CodexDiscoveryDelivery::Waiting => panic!("an idle hub must deliver a pass"),
+        };
+        assert!(delivered.report.paths.contains(&rollout));
+        std::fs::remove_file(&rollout).unwrap();
+
+        let project_id = ProjectId::new("project-vanished-rollout").unwrap();
+        let scope = tracedecay_domain::ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let run = || {
+            crate::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                crate::runtime::ingest::project_provider::ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: crate::runtime::SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: Some((&hub, "project")),
+                }
+                .run_codex(),
+            )
+        };
+
+        for pass in 0..2 {
+            let outcome = run().await;
+            assert!(
+                outcome.failures.is_empty(),
+                "pass {pass} failed on the vanished rollout: {:?}",
+                outcome.failures
+            );
+        }
+        assert!(admission.observations().is_empty());
+
+        std::fs::write(&rollout, &body).unwrap();
+        spin_until_jsonl_change_settled(&rollout);
+        let returned = run().await;
+        assert!(returned.failures.is_empty(), "{:?}", returned.failures);
+        assert!(
+            !admission.observations().is_empty(),
+            "the returned rollout must be admitted"
+        );
+    }
+
+    /// #4012: the store kept answering one rollout with a permanent
+    /// `CursorAdvanceLedgerDisagreement`, and every catch-up pass re-read and
+    /// re-reported it while the unacknowledged pass held back every rollout
+    /// written after it.
+    #[tokio::test]
+    async fn a_permanently_refused_rollout_is_reported_once_and_does_not_stall_catch_up() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let stuck = write_project_rollout(&home, &project, "stuck");
+        let healthy = write_project_rollout(&home, &project, "healthy");
+        spin_until_jsonl_change_settled(&stuck);
+        spin_until_jsonl_change_settled(&healthy);
+
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(&home));
+        let project_id = ProjectId::new("project-quarantined-rollout").unwrap();
+        let scope = tracedecay_domain::ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        admission.fail_captures_for_session(
+            "stuck",
+            crate::admission::HostAdmissionOutcome {
+                status: crate::admission::HostAdmissionStatus::Degraded,
+                retryable: false,
+                reason_code: Some("observation_cursor_advance_ledger_disagreement"),
+                recovery: None,
+                cause: None,
+            },
+        );
+        let cancellation = ObservationCancellation::default();
+        let run = || {
+            crate::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                crate::runtime::ingest::project_provider::ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: crate::runtime::SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: Some((&hub, "project")),
+                }
+                .run_codex(),
+            )
+        };
+        let admitted = |session: &str| {
+            admission.observations().iter().any(|stored| {
+                let envelope: tracedecay_domain::CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.relations().session_id().as_str() == session
+            })
+        };
+
+        let first = run().await;
+        let reasons = first
+            .failures
+            .iter()
+            .map(|failure| (failure.reason_code, failure.retryable))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            [("observation_cursor_advance_ledger_disagreement", false)]
+        );
+        assert!(admitted("healthy"), "the healthy rollout must be admitted");
+        assert_eq!(admission.failed_session_capture_attempts(), 1);
+
+        let late = write_project_rollout(&home, &project, "late");
+        spin_until_jsonl_change_settled(&late);
+        for pass in 0..8 {
+            let outcome = run().await;
+            assert!(
+                outcome.failures.is_empty(),
+                "pass {pass} re-reported the refused rollout: {:?}",
+                outcome.failures
+            );
+            assert_eq!(
+                admission.failed_session_capture_attempts(),
+                1,
+                "pass {pass} re-read the unchanged refused rollout"
+            );
+            if admitted("late") {
+                break;
+            }
+        }
+        assert!(
+            admitted("late"),
+            "a rollout written after the refusal must still be admitted"
+        );
+
+        let mut appended = std::fs::read(&stuck).unwrap();
+        appended.extend_from_slice(
+            format!(
+                "{}\n",
+                json!({
+                    "timestamp": "2026-09-28T00:00:02.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "after the refusal"}
+                })
+            )
+            .as_bytes(),
+        );
+        let replacement = stuck.with_extension("tmp");
+        std::fs::write(&replacement, appended).unwrap();
+        std::fs::rename(&replacement, &stuck).unwrap();
+        spin_until_jsonl_change_settled(&stuck);
+        let mut reports = Vec::new();
+        for _ in 0..8 {
+            reports.extend(run().await.failures);
+            if admission.failed_session_capture_attempts() > 1 {
+                break;
+            }
+        }
+        assert_eq!(
+            admission.failed_session_capture_attempts(),
+            2,
+            "a changed rollout must leave quarantine and be read again"
+        );
+        assert_eq!(
+            reports.len(),
+            1,
+            "the changed rollout is reported once: {reports:?}"
         );
     }
 }

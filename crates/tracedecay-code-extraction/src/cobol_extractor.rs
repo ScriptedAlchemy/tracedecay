@@ -4,75 +4,21 @@
 /// COBOL programs have a fixed structure: IDENTIFICATION, ENVIRONMENT, DATA,
 /// and PROCEDURE divisions. Paragraphs in the PROCEDURE DIVISION act as
 /// subroutines, and PERFORM statements are the primary call mechanism.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{ExtractionState, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from COBOL source files using tree-sitter.
 pub struct CobolExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-
+impl<'s> ExtractionState<'s> {
     /// Extracts the full source line at a given byte offset.
     ///
     /// COBOL comment nodes in tree-sitter-cobol have zero-width byte ranges,
@@ -91,27 +37,6 @@ impl ExtractionState {
 }
 
 impl CobolExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_cobol(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -129,7 +54,7 @@ impl CobolExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -143,6 +68,7 @@ impl CobolExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -157,15 +83,10 @@ impl CobolExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("cobol", "COBOL", source)
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -203,7 +124,13 @@ impl CobolExtractor {
             let start_column = node.start_position().column as u32;
             let end_column = node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+            let id = local_node_id(
+                &state.file_path,
+                state.source,
+                &NodeKind::Module,
+                name,
+                node,
+            );
 
             let text = state.node_text(node);
             let signature = text
@@ -215,7 +142,7 @@ impl CobolExtractor {
             let graph_node = Node {
                 id: id.clone(),
                 kind: NodeKind::Module,
-                name: name.clone(),
+                name: name.to_string(),
                 qualified_name,
                 file_path: state.file_path.clone(),
                 start_line,
@@ -234,6 +161,7 @@ impl CobolExtractor {
                 unsafe_blocks: 0,
                 unchecked_calls: 0,
                 assertions: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
                 updated_at: state.timestamp,
                 parent_id: None,
             };
@@ -250,7 +178,7 @@ impl CobolExtractor {
             }
 
             // Push module onto stack for qualified names.
-            state.node_stack.push((name, id));
+            state.node_stack.push((name.to_string(), id));
         }
     }
 
@@ -343,12 +271,12 @@ impl CobolExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, name, node);
 
         let graph_node = Node {
             id: id.clone(),
             kind,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -367,6 +295,7 @@ impl CobolExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -390,10 +319,10 @@ impl CobolExtractor {
     /// into logical "function" bodies.
     fn visit_procedure_division(state: &mut ExtractionState, node: TsNode<'_>) {
         // Collect all children for multi-pass grouping. Walks via cursor
-        // (O(N)) instead of `node.child(i)` in a loop — `child(i)` is O(i),
+        // (O(N)) instead of `node.child(i)` in a loop. `child(i)` is O(i),
         // turning the seed into O(N²) on PROCEDURE DIVISIONs with hundreds
         // of paragraphs.
-        let mut children: Vec<TsNode<'_>> = Vec::with_capacity(node.child_count());
+        let mut children: Vec<TsNode<'_>> = Vec::with_capacity(node.child_count() as usize);
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -491,7 +420,13 @@ impl CobolExtractor {
         let start_column = header.start_position().column as u32;
         let end_column = last_child.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            header,
+        );
 
         // Count complexity by walking the body statements.
         let mut branches: u32 = 0;
@@ -528,6 +463,7 @@ impl CobolExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -567,6 +503,8 @@ impl CobolExtractor {
                             line: node.start_position().row as u32,
                             column: node.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                 }
@@ -593,6 +531,8 @@ impl CobolExtractor {
                                     line: node.start_position().row as u32,
                                     column: node.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -628,18 +568,7 @@ impl CobolExtractor {
         let label = find_direct_child_by_kind(node, "label")?;
         let qw = find_direct_child_by_kind(label, "qualified_word")?;
         let word = find_direct_child_by_kind(qw, "WORD")?;
-        Some(state.node_text(word))
-    }
-
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
+        Some(state.node_text(word).to_string())
     }
 }
 
@@ -652,17 +581,16 @@ impl crate::LanguageExtractor for CobolExtractor {
         "COBOL"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_cobol(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

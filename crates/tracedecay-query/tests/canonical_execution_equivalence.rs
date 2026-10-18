@@ -4,42 +4,30 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_domain::{
-    CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CompactCandidate,
-    ComponentRevision, DiversityPolicy, EdgeAuthorityV1, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-    EmbeddingTruncationSideV1, EvidenceRole, ExactAdmissionProof, ExactAdmissionRuleRevision,
-    ExactFieldV1, ExactTechnicalTermKindV1, FileOccurrenceId, FixedPointScore,
-    FreshnessCompatibilityV1, FusionProfile, ManifestDigest, PrincipalId, RelationEdgeKindV1,
-    RetrievalAnchorId, RetrievalBudget, RetrievalBudgetUsage, RetrievalCursorKeyId,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId,
-    SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness, SourceOccurrenceId,
-    SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1,
-    VectorWatermark,
+    CalibrationProfileId, CodeGenerationId, CompactCandidate, ComponentRevision, CursorBindingV1,
+    DiversityPolicy, EdgeAuthorityV1, EvidenceRole, ExactAdmissionProof,
+    ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1, FileOccurrenceId,
+    FixedPointScore, FreshnessCompatibilityV1, FusionProfile, ManifestDigest, PrincipalId,
+    RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget, RetrievalBudgetUsage,
+    RetrievalCursorKeyId, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrievalSourceRoleV1, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SourceFreshness,
+    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{ExactLaneEvidence, ExactLiteralV1};
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::graph::{GraphLaneEvidence, GraphPathSegmentV1};
 use tracedecay_query::retrieval::lexical::{LexicalFieldV1, LexicalLaneEvidence};
 use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
-use tracedecay_query::retrieval::semantic::{
-    CanonicalSemanticDistanceV1, CodeSemanticEvidenceV1, SemanticSearchKindV1,
-};
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
-    NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSemanticRecordV1, NativeSymbolRecordV1, PreparedQueryBindingsV1,
-    PreparedQueryRoutingBindingsV1, PreparedQueryV1, QUERY_RANKING_REVISION_V1, QueryAuthorityV1,
-    authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
+    NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1, NativeSymbolRecordV1,
+    PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
+    QUERY_RANKING_REVISION_V1, QueryAuthorityV1, authenticate_prepared_query_cursor_for_routing,
+    route_authenticated_prepared_query_cursor,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn digest<T>(byte: char) -> T
 where
@@ -47,6 +35,24 @@ where
     <T as TryFrom<String>>::Error: fmt::Debug,
 {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))
+}
+
+fn query_binding(projection: &str) -> CursorBindingV1 {
+    query_binding_for("code_canonical_query", projection)
+}
+
+fn query_binding_for(operation: &str, projection: &str) -> CursorBindingV1 {
+    CursorBindingV1::new(
+        operation,
+        vec![
+            ("node_id", digest::<ManifestDigest>('9')),
+            (
+                "meta.projection",
+                tracedecay_domain::canonical_sha256(&projection).expect("projection digest"),
+            ),
+        ],
+    )
+    .expect("query binding")
 }
 
 fn generation() -> CodeGenerationId {
@@ -104,6 +110,7 @@ fn candidate(kind: RetrieverKind, raw_score: u64) -> CompactCandidate {
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: RetrievalSourceRoleV1::default(),
         retriever: kind,
         retriever_revision: id(&format!(
             "retriever.{}.canonical-equivalence.v1",
@@ -152,6 +159,8 @@ fn exact_evidence() -> ExactLaneEvidence {
             canonical_bytes: b"run_query".to_vec(),
         }],
         admission_proof: exact_proof(),
+        source_role: RetrievalSourceRoleV1::default(),
+        specificity_micros: 1_000_000,
     }
 }
 
@@ -162,8 +171,11 @@ fn lexical_evidence() -> LexicalLaneEvidence {
         matched_whole_terms: vec!["canonical".to_owned(), "execution".to_owned()],
         matched_subtokens: vec!["query".to_owned()],
         matched_phrases: vec!["canonical execution".to_owned()],
+        matched_proximities: Vec::new(),
+        spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
+        source_role: RetrievalSourceRoleV1::default(),
     }
 }
 
@@ -181,47 +193,6 @@ fn graph_evidence() -> GraphLaneEvidence {
             },
         }],
         weakest_authority: EdgeAuthorityV1::SyntaxExact,
-    }
-}
-
-fn semantic_evidence() -> CodeSemanticEvidenceV1 {
-    let projection = EmbeddingProjectionKeyV1 {
-        model_artifact_digest: digest('1'),
-        tokenizer_digest: digest('2'),
-        config_digest: digest('3'),
-        query_instruction_digest: Some(digest('4')),
-        document_instruction_digest: Some(digest('5')),
-        pooling: EmbeddingPoolingV1::Mean,
-        truncation_side: EmbeddingTruncationSideV1::Right,
-        truncation_length: 128,
-        inference_batch_size: 8,
-        inference_batch_bytes: 4 * 1024,
-        runtime_backend: "onnx.cpu".to_owned(),
-        runtime_build_revision: "runtime.canonical-equivalence.v1".to_owned(),
-        device_class: EmbeddingDeviceClassV1::Cpu,
-        dimensions: 2,
-        metric: EmbeddingMetricV1::Cosine,
-        normalization: EmbeddingNormalizationV1::L2,
-        precision: EmbeddingPrecisionV1::Fp32,
-        chunk_schema_revision: "chunk.canonical-equivalence.v1".to_owned(),
-        chunker_revision: id::<ChunkerRevision>("chunker.canonical-equivalence.v1"),
-        privacy_domain: id("privacy.canonical-equivalence"),
-        privacy_key_epoch: 7,
-    }
-    .admit()
-    .expect("valid semantic projection");
-    let distance: CanonicalSemanticDistanceV1 =
-        serde_json::from_str("125000000").expect("public canonical distance wire");
-
-    CodeSemanticEvidenceV1 {
-        projection_key: projection.embedding_key().clone(),
-        search_index_key: SemanticSearchIndexProfileV1::exact_flat_v1()
-            .and_then(|profile| profile.index_key())
-            .expect("exact-flat semantic index"),
-        vector_generation: VectorGenerationIdV1::new(digest('6')),
-        chunk_id: id("chunk.canonical-equivalence"),
-        distance,
-        search_kind: SemanticSearchKindV1::ExactFlat,
     }
 }
 
@@ -254,6 +225,8 @@ impl FixtureRecords {
                 start_byte: 21,
                 end_byte: 89,
             },
+            line: 7,
+            end_line: 9,
             signature: Some("pub async fn run_query()".to_owned()),
             is_async: true,
         }
@@ -268,14 +241,6 @@ impl NativeRecordReadPortV1 for FixtureRecords {
     fn occurrence(
         &self,
         _: &CodeCandidateBindingV1,
-    ) -> Result<NativeCodeOccurrenceV1, tracedecay_query::retrieval::QueryExecutionContractErrorV1>
-    {
-        Ok(Self::occurrence())
-    }
-
-    fn occurrence_by_chunk(
-        &self,
-        _: &CodeSearchChunkId,
     ) -> Result<NativeCodeOccurrenceV1, tracedecay_query::retrieval::QueryExecutionContractErrorV1>
     {
         Ok(Self::occurrence())
@@ -307,15 +272,15 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
     exact_candidate.exact_admission_proof = Some(exact_proof());
     let exact = context
         .exact(
-            RetrieverOutcome::Complete(batch(exact_candidate, exact_evidence())),
-            "run_query",
+            RetrieverOutcome::Complete(batch(exact_candidate.clone(), exact_evidence())),
+            &exact_evidence().matched_literals,
             Some(ExactTechnicalTermKindV1::WholeSymbol),
             |path| path.starts_with("src/query/"),
         )
         .expect("exact translation");
     assert_eq!(
         exact,
-        NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
+        RetrieverOutcome::Complete(NativeLanePageV1 {
             generation: generation(),
             items: vec![NativeExactRecordV1 {
                 occurrence: FixtureRecords::occurrence(),
@@ -325,6 +290,26 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
             total_eligible: 1,
             coverage: coverage(),
         })
+    );
+
+    let other_field = ExactLiteralV1 {
+        field: ExactFieldV1::ToolName,
+        ..exact_evidence().matched_literals[0].clone()
+    };
+    let RetrieverOutcome::Complete(page) = context
+        .exact(
+            RetrieverOutcome::Complete(batch(exact_candidate, exact_evidence())),
+            &[other_field],
+            None,
+            |_| true,
+        )
+        .expect("exact translation")
+    else {
+        panic!("a complete batch stays complete");
+    };
+    assert!(
+        page.items.is_empty(),
+        "identical bytes admitted under another field must not match: {page:?}"
     );
 
     let lexical = context
@@ -338,7 +323,7 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
         .expect("lexical translation");
     assert_eq!(
         lexical,
-        NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
+        RetrieverOutcome::Complete(NativeLanePageV1 {
             generation: generation(),
             items: vec![NativeLexicalRecordV1 {
                 occurrence: FixtureRecords::occurrence(),
@@ -366,7 +351,7 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
         .expect("graph translation");
     assert_eq!(
         graph,
-        NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
+        RetrieverOutcome::Complete(NativeLanePageV1 {
             generation: generation(),
             items: vec![NativeGraphRecordV1 {
                 symbol: FixtureRecords::symbol(&id("symbol.canonical-equivalence")),
@@ -377,33 +362,109 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
             coverage: coverage(),
         })
     );
+}
 
-    let semantic = context
-        .semantic(
-            RetrieverOutcome::Complete(batch(
-                candidate(RetrieverKind::Semantic, 700_000),
-                semantic_evidence(),
-            )),
-            |path| path.starts_with("src/query/"),
+#[test]
+fn a_kind_filtered_exact_hit_reports_the_literal_that_matched_that_kind() {
+    let records = FixtureRecords {
+        generation: generation(),
+    };
+    let literal = |field, bytes: &[u8]| ExactLiteralV1 {
+        field,
+        original_bytes: bytes.to_vec(),
+        canonical_bytes: bytes.to_vec(),
+    };
+    let requested = vec![
+        literal(ExactFieldV1::Identifier, b"foo"),
+        literal(ExactFieldV1::Path, b"src/foo.rs"),
+    ];
+    let mut evidence = exact_evidence();
+    evidence.binding.matched_term_kinds = vec![
+        ExactTechnicalTermKindV1::WholeSymbol,
+        ExactTechnicalTermKindV1::Path,
+    ];
+    evidence.matched_literals = requested.clone();
+    let mut exact_candidate = candidate(RetrieverKind::ExactLiteral, 1_000_000);
+    exact_candidate.exact_admission_proof = Some(exact_proof());
+
+    let exact = context(&records)
+        .exact(
+            RetrieverOutcome::Complete(batch(exact_candidate, evidence)),
+            &requested,
+            Some(ExactTechnicalTermKindV1::Path),
+            |_| true,
         )
-        .expect("semantic translation");
+        .expect("exact translation");
+
+    let RetrieverOutcome::Complete(page) = exact else {
+        panic!("complete page expected: {exact:?}");
+    };
+    let matched: Vec<_> = page
+        .items
+        .iter()
+        .map(|item| (item.matched_kind, item.matched_literal.as_str()))
+        .collect();
     assert_eq!(
-        semantic,
-        NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
-            generation: generation(),
-            items: vec![NativeSemanticRecordV1 {
-                occurrence: FixtureRecords::occurrence(),
-                distance_micros: 125_000_000,
-                score: FixedPointScore(700_000),
-            }],
-            total_eligible: 1,
-            coverage: coverage(),
-        })
+        matched,
+        vec![(ExactTechnicalTermKindV1::Path, "src/foo.rs")]
     );
 }
 
 #[test]
-fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
+fn public_execution_preserves_partial_reason_and_validates_filtered_evidence() {
+    let records = FixtureRecords {
+        generation: generation(),
+    };
+    let context = context(&records);
+    let reason = RetrievalFailure::CandidateSourcesPruned {
+        term_sources: vec![("common".to_owned(), 200)],
+        document_frequency_budget: 100,
+    };
+    let mut partial_batch = batch(
+        candidate(RetrieverKind::Lexical, 875_000),
+        lexical_evidence(),
+    );
+
+    assert_eq!(
+        context
+            .lexical(
+                RetrieverOutcome::Partial {
+                    value: partial_batch.clone(),
+                    reason: reason.clone(),
+                },
+                |path| path.starts_with("src/other/"),
+            )
+            .expect("partial translation"),
+        RetrieverOutcome::Partial {
+            value: NativeLanePageV1 {
+                generation: generation(),
+                items: Vec::new(),
+                total_eligible: 0,
+                coverage: RetrieverCoverage {
+                    eligible: 0,
+                    excluded: 1,
+                    ..coverage()
+                },
+            },
+            reason: reason.clone(),
+        }
+    );
+
+    partial_batch.evidence_by_occurrence.clear();
+    assert_eq!(
+        context.lexical(
+            RetrieverOutcome::Partial {
+                value: partial_batch,
+                reason,
+            },
+            |_| true,
+        ),
+        Err(tracedecay_query::retrieval::QueryExecutionContractErrorV1::InvalidLaneEvidence)
+    );
+}
+
+#[test]
+fn public_execution_preserves_terminal_outcomes() {
     let records = FixtureRecords {
         generation: generation(),
     };
@@ -421,30 +482,45 @@ fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
         context
             .lexical(RetrieverOutcome::Denied, |_| true)
             .expect("denied decision"),
-        NativeLaneOutcomeV1::Denied
+        RetrieverOutcome::Denied
     );
     assert_eq!(
         context
             .exact(
                 RetrieverOutcome::Stale(stale.clone()),
-                "run_query",
+                &exact_evidence().matched_literals,
                 None,
                 |_| true,
             )
             .expect("stale decision"),
-        NativeLaneOutcomeV1::Stale(stale)
+        RetrieverOutcome::Stale(stale)
     );
     assert_eq!(
         context
             .graph(RetrieverOutcome::BudgetExceeded(budget), |_| true)
             .expect("budget decision"),
-        NativeLaneOutcomeV1::BudgetExceeded(budget)
+        RetrieverOutcome::BudgetExceeded(budget)
     );
     assert_eq!(
         context
-            .semantic(RetrieverOutcome::Cancelled, |_| true)
+            .lexical(RetrieverOutcome::Cancelled, |_| true)
             .expect("cancelled decision"),
-        NativeLaneOutcomeV1::Cancelled
+        RetrieverOutcome::Cancelled
+    );
+    assert_eq!(
+        context
+            .lexical(RetrieverOutcome::TimedOut(budget), |_| true)
+            .expect("timeout decision"),
+        RetrieverOutcome::TimedOut(budget)
+    );
+    let unavailable = RetrievalFailure::AuthorityUnavailable {
+        detail: "native records are unavailable".to_owned(),
+    };
+    assert_eq!(
+        context
+            .lexical(RetrieverOutcome::Unavailable(unavailable.clone()), |_| true)
+            .expect("unavailable decision"),
+        RetrieverOutcome::Unavailable(unavailable)
     );
 }
 
@@ -506,6 +582,10 @@ fn query_authority() -> Arc<QueryAuthorityV1> {
 }
 
 fn query_authority_with_secret(secret: u8) -> Arc<QueryAuthorityV1> {
+    query_authority_with_key("cursor-key.canonical-equivalence.v1", secret)
+}
+
+fn query_authority_with_key(key_id: &str, secret: u8) -> Arc<QueryAuthorityV1> {
     let evaluation = RetrievalAnchorId::new("evaluation.canonical-equivalence")
         .expect("valid evaluation anchor");
     let calibrations = RetrieverKind::QUERY_FALLBACK_LANES
@@ -553,7 +633,6 @@ fn query_authority_with_secret(secret: u8) -> Arc<QueryAuthorityV1> {
         .into_iter()
         .collect(),
         diversity_policy_id: id("diversity.canonical-equivalence.v1"),
-        rerank_policy_id: None,
         retrieval_budget: retrieval_budget(),
     };
     let diversity = DiversityPolicy {
@@ -569,7 +648,7 @@ fn query_authority_with_secret(secret: u8) -> Arc<QueryAuthorityV1> {
     };
     let keyring = RetrievalCursorKeyringV1::new(
         id("privacy.canonical-equivalence"),
-        id::<RetrievalCursorKeyId>("cursor-key.canonical-equivalence.v1"),
+        id::<RetrievalCursorKeyId>(key_id),
         7,
         vec![secret; 32],
         15 * 60 * 1_000_000,
@@ -592,10 +671,9 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     let authority = query_authority();
     let request = retrieval_request();
     let bindings = PreparedQueryBindingsV1::new(
-        "code_canonical_query",
         digest::<ManifestDigest>('8'),
         generation(),
-        digest::<ManifestDigest>('9'),
+        query_binding("evidence"),
     )
     .expect("valid prepared-query bindings");
     let items = vec!["first".to_owned(), "second".to_owned(), "third".to_owned()];
@@ -624,10 +702,10 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     let first_cursor = first.next_cursor.expect("first continuation cursor");
     let second_cursor = second.next_cursor.expect("second continuation cursor");
     let first_wire = first_cursor
-        .strip_prefix("ccq2.")
+        .strip_prefix("ccq3.")
         .expect("versioned prepared-query cursor");
     let second_wire = second_cursor
-        .strip_prefix("ccq2.")
+        .strip_prefix("ccq3.")
         .expect("versioned prepared-query cursor");
     assert_eq!(
         hex::decode(first_wire).expect("first cursor bytes"),
@@ -635,12 +713,11 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     );
 
     let routing_bindings = PreparedQueryRoutingBindingsV1 {
-        operation: "code_canonical_query".to_owned(),
         scope_digest: digest::<ManifestDigest>('8'),
         principal: request.principal.clone(),
         root: request.scope.root.clone(),
         temporal_mode: request.temporal_mode,
-        query_binding_digest: digest::<ManifestDigest>('9'),
+        query_binding: query_binding("evidence"),
         page_size: 1,
         authorization_revision: request.snapshot.authorization_revision.clone(),
     };
@@ -729,7 +806,9 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
         PreparedQueryV1::prepare(authority.clone(), request.clone(), Some(&first_cursor))
             .expect("authenticated prepared-query continuation")
             .paginate(&bindings, items.clone(), 2, UtcMicros(100)),
-        Err(tracedecay_query::retrieval::PreparedQueryErrorV1::Invalid)
+        Err(PreparedQueryErrorV1::ParameterChanged {
+            parameter: "meta.page_size"
+        })
     );
     let resumed = PreparedQueryV1::prepare(authority.clone(), request.clone(), Some(&first_cursor))
         .expect("authenticated prepared-query continuation")
@@ -754,5 +833,88 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
         .expect("authenticated resumed cursor routing")
         .expires_at,
         UtcMicros(900_000_010)
+    );
+}
+
+#[test]
+fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
+    let authority = query_authority();
+    let request = retrieval_request();
+    let bindings = PreparedQueryBindingsV1::new(
+        digest::<ManifestDigest>('8'),
+        generation(),
+        query_binding("evidence"),
+    )
+    .expect("valid prepared-query bindings");
+    let cursor = PreparedQueryV1::prepare(authority.clone(), request.clone(), None)
+        .expect("prepared query")
+        .paginate(&bindings, vec!["first", "second"], 1, UtcMicros(10))
+        .expect("first page")
+        .next_cursor
+        .expect("continuation cursor");
+    let routing = PreparedQueryRoutingBindingsV1 {
+        scope_digest: digest::<ManifestDigest>('8'),
+        principal: request.principal.clone(),
+        root: request.scope.root.clone(),
+        temporal_mode: request.temporal_mode,
+        query_binding: query_binding("evidence"),
+        page_size: 1,
+        authorization_revision: request.snapshot.authorization_revision.clone(),
+    };
+    let route = |authority: &QueryAuthorityV1, routing: &PreparedQueryRoutingBindingsV1, now| {
+        authenticate_prepared_query_cursor_for_routing(authority, routing, &cursor, now)
+            .map(|routed| routed.generation)
+    };
+
+    assert_eq!(
+        route(&authority, &routing, UtcMicros(100)),
+        Ok(generation())
+    );
+    let mut other_scope = routing.clone();
+    other_scope.scope_digest = digest::<ManifestDigest>('7');
+    assert_eq!(
+        route(&authority, &other_scope, UtcMicros(100)),
+        Err(PreparedQueryErrorV1::Foreign)
+    );
+    assert_eq!(
+        route(&authority, &routing, UtcMicros(900_000_010)),
+        Err(PreparedQueryErrorV1::Stale)
+    );
+    let mut other_projection = routing.clone();
+    other_projection.query_binding = query_binding("summary");
+    assert_eq!(
+        route(&authority, &other_projection, UtcMicros(100)),
+        Err(PreparedQueryErrorV1::ParameterChanged {
+            parameter: "meta.projection"
+        })
+    );
+    let mut other_operation = routing.clone();
+    other_operation.query_binding = query_binding_for("code_other_query", "evidence");
+    assert_eq!(
+        route(&authority, &other_operation, UtcMicros(100)),
+        Err(PreparedQueryErrorV1::Invalid)
+    );
+    let rekeyed = query_authority_with_key("cursor-key.canonical-equivalence.v2", 0x5a);
+    assert_eq!(
+        route(&rekeyed, &routing, UtcMicros(100)),
+        Err(PreparedQueryErrorV1::Stale)
+    );
+
+    let other_scope_bindings = PreparedQueryBindingsV1::new(
+        digest::<ManifestDigest>('7'),
+        generation(),
+        query_binding("evidence"),
+    )
+    .expect("valid prepared-query bindings");
+    assert_eq!(
+        PreparedQueryV1::prepare(authority, request, Some(&cursor))
+            .expect("authenticated continuation")
+            .paginate(
+                &other_scope_bindings,
+                vec!["first", "second"],
+                1,
+                UtcMicros(100)
+            ),
+        Err(PreparedQueryErrorV1::Foreign)
     );
 }

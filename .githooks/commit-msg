@@ -26,4 +26,4 @@ if [[ ! -d "$lint_root/node_modules" || ! -e "$lint_root/node_modules/.bin/commi
 fi
 
 cd "$lint_root"
-git stripspace --strip-comments < "$msg_file" | npm run --silent lint:commit --
+git stripspace --strip-comments < "$msg_file" | pnpm run --silent lint:commit --

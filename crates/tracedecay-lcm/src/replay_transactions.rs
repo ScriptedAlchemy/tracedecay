@@ -57,7 +57,7 @@ pub fn atomic_tail_start(messages: &[LcmRawMessage], requested_start: usize) -> 
 /// transactions are atomic. Legacy orphan results are omitted; an unmatched
 /// assistant call remains only when its visible content is useful, and the
 /// final value normalizer strips its invalid `tool_calls` field.
-#[hotpath::measure(label = "sessions.lcm.replay_units")]
+#[tracing::instrument(name = "sessions.lcm.replay_units", level = "trace", skip_all)]
 pub fn replay_units<'a>(messages: &[&'a LcmRawMessage]) -> Vec<ReplayUnit<'a>> {
     let transaction_ranges = transaction_ranges(messages.iter().copied());
     let mut transaction_by_start = transaction_ranges.into_iter().peekable();
@@ -167,7 +167,7 @@ fn replay_message_tokens(message: &LcmRawMessage) -> i64 {
     tokens
 }
 
-#[hotpath::measure(label = "sessions.lcm.normalize_pairs")]
+#[tracing::instrument(name = "sessions.lcm.normalize_pairs", level = "trace", skip_all)]
 pub fn normalize_replay_tool_pairs(messages: &[Value]) -> Vec<Value> {
     let mut normalized = Vec::with_capacity(messages.len());
     let mut index = 0;
@@ -300,8 +300,7 @@ fn active_replay_message_from_metadata(message: &LcmRawMessage) -> Option<Value>
     let mut replay = metadata
         .get(ACTIVE_REPLAY_MESSAGE_KEY)
         .and_then(Value::as_object)
-        .cloned()
-        .or_else(|| legacy_active_replay_message_from_metadata(&metadata))?;
+        .cloned()?;
     if !replay.contains_key("content") {
         replay.insert(
             "content".to_string(),
@@ -335,19 +334,6 @@ pub fn strip_disposable_assistant_replay_sidecars(
     }
 }
 
-fn legacy_active_replay_message_from_metadata(metadata: &Value) -> Option<Map<String, Value>> {
-    let mut replay = metadata.as_object()?.clone();
-    replay.remove(ACTIVE_REPLAY_METADATA_KEY);
-    replay.remove(ACTIVE_REPLAY_MESSAGE_KEY);
-    replay.remove("ingest_protection");
-    replay.remove("external_payload");
-    replay.remove("payload_ref");
-    replay.remove("byte_count");
-    replay.remove("char_count");
-    replay.remove("sha256");
-    Some(replay)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,8 +352,6 @@ mod tests {
             content_hash: "hash".to_string(),
             storage_kind: LcmStorageKind::Inline,
             payload_ref: None,
-            legacy_source: false,
-            legacy_truncated: false,
             metadata_json: Some(
                 json!({
                     ACTIVE_REPLAY_METADATA_KEY: true,

@@ -1,5 +1,5 @@
 use tracedecay_domain::{
-    EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, RetrievalAnchorRecordV2,
+    EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, RetrievalAnchorRecord,
 };
 use tracedecay_store::{
     ObservationStoreError, ObservationStoreResult, RepositoryProvenanceAttachmentV1,
@@ -46,7 +46,7 @@ pub(super) fn decode_repository_provenance_attachment(
     RepositoryProvenanceAttachmentV1::new(
         availability,
         anchor_json
-            .map(|anchor| decode::<RetrievalAnchorRecordV2>(anchor, operation))
+            .map(|anchor| decode::<RetrievalAnchorRecord>(anchor, operation))
             .transpose()?,
     )
 }

@@ -101,10 +101,7 @@ async fn status_reports_payload_gc_run_metadata_after_apply() {
         .await
         .expect("external payload should ingest");
 
-    let cfg = LcmGcConfig {
-        backup_before_reap: false,
-        ..LcmGcConfig::default()
-    };
+    let cfg = LcmGcConfig::default();
     let report = db
         .lcm_run_payload_gc_apply_for_test(
             HostAdmissionScope::Profile,
@@ -308,5 +305,4 @@ async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
         "only the canonically sanitized row counts as lossy"
     );
     assert!(status.redaction.enabled);
-    assert_eq!(status.redaction.legacy_truncated_count, 0);
 }

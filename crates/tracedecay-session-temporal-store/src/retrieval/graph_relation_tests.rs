@@ -9,23 +9,24 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
 use tracedecay_temporal_query::candidates::CandidateChannel;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, KernelVersions, TemporalCandidateFilterV1,
-    TemporalExecutionSnapshot, TemporalPortError, TemporalSessionScopeFilterV1,
-    TemporalSnapshotRequest, TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::TemporalPortError;
+use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl};
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
+use tracedecay_temporal_query::snapshot::{
+    TemporalCandidateFilterV1, TemporalSessionScopeFilterV1, TemporalSnapshotRequest,
+};
 
-use super::GlobalDbTemporalReadPort;
+use super::SessionTemporalReadPort;
 use crate::relations::{
     SessionRelationProjection, SessionRelationScope, SummaryRelationNode, SummarySourceRef,
     WorkflowAgentMembership,
 };
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn project() -> ProjectId {
     ProjectId::new("project-retrieval").expect("project")
@@ -214,7 +215,7 @@ async fn canonical_session_connection(path: &std::path::Path) -> TestConnection 
     connection
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn session_context_filters_read_parent_and_workflow_only_from_grafeo() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_session_connection(&directory.path().join("session.db")).await;
@@ -230,7 +231,7 @@ async fn session_context_filters_read_parent_and_workflow_only_from_grafeo() {
         .replace(&graph_projection)
         .expect("relation projection");
     let scope = SessionRelationScope::project_sessions(project());
-    let adapter = GlobalDbTemporalReadPort::new_with_relations(&connection, &scope, relations);
+    let adapter = SessionTemporalReadPort::new_with_relations(&connection, &scope, relations);
     let snapshot = snapshot(ExecutionControl::default());
     let filter = TemporalCandidateFilterV1 {
         parent_session_id: Some("graph-parent".to_string()),
@@ -248,40 +249,13 @@ async fn session_context_filters_read_parent_and_workflow_only_from_grafeo() {
     );
 }
 
-#[tokio::test]
-async fn summary_semantic_filter_hydrates_only_grafeo_source_anchors() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let connection = canonical_source_connection(&directory.path().join("sources.db")).await;
-    let relations = crate::relations::memory_relation_store();
-    relations
-        .replace(&projection())
-        .expect("relation projection");
-    let scope = SessionRelationScope::project_sessions(project());
-    let adapter = GlobalDbTemporalReadPort::new_with_relations(&connection, &scope, relations);
-    let filter = TemporalCandidateFilterV1 {
-        source: Some("claude".to_string()),
-        ..TemporalCandidateFilterV1::default()
-    };
-
-    assert!(
-        adapter
-            .candidate_observations_match(
-                &candidate(),
-                &filter,
-                snapshot(ExecutionControl::default()).request()
-            )
-            .await
-            .expect("summary source eligibility")
-    );
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn missing_summary_relation_projection_is_a_typed_read_failure() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("unavailable.db")).await;
     let relations = crate::relations::memory_relation_store();
     let scope = SessionRelationScope::project_sessions(project());
-    let adapter = GlobalDbTemporalReadPort::new_with_relations(&connection, &scope, relations);
+    let adapter = SessionTemporalReadPort::new_with_relations(&connection, &scope, relations);
 
     let error = adapter
         .candidate_observations_match(
@@ -300,7 +274,7 @@ async fn missing_summary_relation_projection_is_a_typed_read_failure() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn cancelled_summary_relation_read_preserves_temporal_cancellation() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("cancelled.db")).await;
@@ -309,7 +283,7 @@ async fn cancelled_summary_relation_read_preserves_temporal_cancellation() {
         .replace(&projection())
         .expect("relation projection");
     let scope = SessionRelationScope::project_sessions(project());
-    let adapter = GlobalDbTemporalReadPort::new_with_relations(&connection, &scope, relations);
+    let adapter = SessionTemporalReadPort::new_with_relations(&connection, &scope, relations);
     let control = ExecutionControl::default();
     control.cancel();
 

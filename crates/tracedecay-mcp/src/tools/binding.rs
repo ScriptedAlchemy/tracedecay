@@ -1,0 +1,1374 @@
+//! Canonical binding between an MCP tool name and how the server treats it.
+//!
+//! This table answers both questions the dispatcher and schema layer used to
+//! answer from separate name lists: which dispatch group owns a tool,
+//! and whether it accepts a registered-project selector. Work is intentionally
+//! projected from its executable registry instead, because that registry owns
+//! its complete mounted operation set and lifecycle contracts.
+//!
+//! Canonical application tools are projected from their executable registry.
+//! Their rows here carry only registered-project selector access, with `group`
+//! `None`; dispatch derives from the operation identity.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+
+use tracedecay_contracts::RetainedSurfaceOperation;
+use tracedecay_contracts::multi_root::multi_root_capability_manifest;
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, BindingSurface, CancellationContract, CancellationPoint,
+    EffectClass, ExecutableBindingRegistryV1, ExecutableBindingV1, McpDeadlineContractV1,
+    McpDispatchAvailability, McpDispatchCatalogV1, McpDispatchContractInputV1,
+    McpDispatchContractV1, McpDispatchUnavailableReason, McpIdempotencyContract,
+    McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
+};
+
+mod work;
+mod workflow;
+
+use crate::handlers::multi_root_operation_for_tool;
+use work::work_executable_binding_for_tool;
+pub use work::work_operation_for_tool;
+use workflow::workflow_executable_binding_for_tool;
+pub use workflow::workflow_operation_for_tool;
+
+/// Tools the daemon serves itself; they carry no application-catalog
+/// contract and never enter the advertised dispatch catalog.
+pub const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &["tracedecay_admin_branch_add"];
+
+/// Which dispatch family owns a tool once the surface predicates decline it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum McpToolDispatchGroup {
+    ApplicationSurface,
+    MultiRoot,
+    Git,
+    Work,
+    Workflow,
+}
+
+/// Whether a tool's authority depends on the live checked-out branch.
+///
+/// Kept internal: the `tracedecay/dispatch` contract has no field family for
+/// this policy, and advertising it would freeze a request-routing concern
+/// into the wire catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchSensitivity {
+    /// Reads the code graph, project files, or git. Must detect a checkout
+    /// on the next request (today's `reopen_if_branch_drifted_memoized` path).
+    Sensitive,
+    /// Retained memory, configuration, work, and workflow authority. The
+    /// serving snapshot is enough; a live HEAD probe cannot change the answer.
+    Independent,
+}
+
+/// Classifies a dispatched tool's dependence on the live git branch.
+///
+/// Unknown and unlisted names are [`BranchSensitivity::Sensitive`] so a newly
+/// advertised tool keeps today's drift detection until it is classified.
+pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
+    if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
+        return application_surface_branch_sensitivity(operation);
+    }
+    match dispatch_group_for_tool(tool_name) {
+        Some(
+            McpToolDispatchGroup::Git
+            | McpToolDispatchGroup::MultiRoot
+            | McpToolDispatchGroup::ApplicationSurface,
+        ) => BranchSensitivity::Sensitive,
+        Some(McpToolDispatchGroup::Work | McpToolDispatchGroup::Workflow) => {
+            BranchSensitivity::Independent
+        }
+        None => {
+            if RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
+                BranchSensitivity::Independent
+            } else {
+                BranchSensitivity::Sensitive
+            }
+        }
+    }
+}
+
+fn application_surface_branch_sensitivity(
+    operation: ApplicationSurfaceOperation,
+) -> BranchSensitivity {
+    use ApplicationSurfaceOperation::{
+        AffectedTests, CallChain, CodeCallees, CodeCallers, CodeDeclaration, CodeExactOccurrence,
+        CodeFacets, CodeImplementations, CodePhraseSearch, CodeReferences, CodeSignatureSearch,
+        CodeSymbolSearch, CodeTimeline, CodeTypeDefinition, CodeTypeHierarchy, ConfigurationAudit,
+        ConfigurationBatch, ConfigurationGet, ConfigurationList, ConfigurationObservedState,
+        ConfigurationProtectedApply, ConfigurationProtectedPreview, ConfigurationRollbackApply,
+        ConfigurationRollbackPreview, ConfigurationSet, ConfigurationUnset, ContextScoutBudget,
+        ContextScoutCancel, ContextScoutCapability, ContextScoutClaim, ContextScoutDelivery,
+        ContextScoutExplain, ContextScoutFeedback, ContextScoutPause, ContextScoutRecent,
+        ContextScoutResume, ContextScoutStatus, DiagnosticsRead, FeedbackAdvisoryCycle,
+        FeedbackDiagnostics, FeedbackExpand, FeedbackGet, FeedbackImpact, FeedbackList,
+        FeedbackProximity, FileDependents, GitApply, GitBlame, GitDiff, GitHistory,
+        GitHubStackSignalExpand, GitHunks, GitPreview, GitStatus, HealthDelta, HealthRead,
+        ModuleApi, NativeIntegrationApply, NativeIntegrationApprove, NativeIntegrationCancel,
+        NativeIntegrationPreflight, NativeIntegrationStackSnapshot, NativeIntegrationStatus,
+        NativeIntegrationWorktreeConfirm, NativeIntegrationWorktreeInspect,
+        NativeIntegrationWorktreeInventory, NativeIntegrationWorktreeReconcile,
+        NativeIntegrationWorktreeRemove, ObservatoryRead, QualifiedName, SessionLookup, SourceBody,
+        SourceLines, SourceOutline, StorageStatus, TestResults,
+    };
+    use ApplicationSurfaceOperation::{
+        AstGrepRewrite, InsertAt, InsertAtSymbol, MoveSymbol, MultiStrReplace, RenameSymbol,
+        ReplaceSymbol, SourceEditReconcile, SourceEditRollback, StrReplace,
+    };
+    match operation {
+        // Mixed ApplicationSurface group: these operations read configuration,
+        // host-integration lifecycle, session identity, store identity, or
+        // process observability, never the checkout, code graph, or files.
+        ConfigurationList
+        | ConfigurationGet
+        | ConfigurationSet
+        | ConfigurationUnset
+        | ConfigurationBatch
+        | ConfigurationObservedState
+        | ConfigurationProtectedPreview
+        | ConfigurationProtectedApply
+        | ConfigurationRollbackPreview
+        | ConfigurationRollbackApply
+        | ConfigurationAudit
+        | ContextScoutStatus
+        | ContextScoutRecent
+        | ContextScoutExplain
+        | ContextScoutCapability
+        | ContextScoutBudget
+        | ContextScoutPause
+        | ContextScoutResume
+        | ContextScoutCancel
+        | ContextScoutClaim
+        | ContextScoutDelivery
+        | ContextScoutFeedback
+        | SessionLookup
+        | StorageStatus
+        | ObservatoryRead
+        | NativeIntegrationPreflight
+        | NativeIntegrationApprove
+        | NativeIntegrationApply
+        | NativeIntegrationStatus
+        | NativeIntegrationCancel
+        // Retained memory, session, and workflow authority.
+        | ApplicationSurfaceOperation::FactStoreCurate
+        | ApplicationSurfaceOperation::FactStoreAdd
+        | ApplicationSurfaceOperation::FactStoreSearch
+        | ApplicationSurfaceOperation::FactStoreProbe
+        | ApplicationSurfaceOperation::FactStoreRelated
+        | ApplicationSurfaceOperation::FactStoreReason
+        | ApplicationSurfaceOperation::FactStoreContradict
+        | ApplicationSurfaceOperation::FactStoreGet
+        | ApplicationSurfaceOperation::FactStoreUpdate
+        | ApplicationSurfaceOperation::FactStoreRemove
+        | ApplicationSurfaceOperation::FactStoreSupersede
+        | ApplicationSurfaceOperation::FactStoreList
+        | ApplicationSurfaceOperation::FactFeedback
+        | ApplicationSurfaceOperation::MemoryStatus
+        | ApplicationSurfaceOperation::SessionRefreshStatus
+        | ApplicationSurfaceOperation::SessionRefreshCancel
+        | ApplicationSurfaceOperation::SessionRefreshBegin
+        | ApplicationSurfaceOperation::MessageSearch
+        | ApplicationSurfaceOperation::SessionsFor
+        | ApplicationSurfaceOperation::Workflows
+        | ApplicationSurfaceOperation::LcmStatus
+        | ApplicationSurfaceOperation::LcmDoctor
+        | ApplicationSurfaceOperation::LcmLoadSession
+        | ApplicationSurfaceOperation::LcmGrep
+        | ApplicationSurfaceOperation::LcmDescribe
+        | ApplicationSurfaceOperation::LcmExpand
+        | ApplicationSurfaceOperation::LcmExpandQuery
+        // Ledger, skill and analytics reads use the project root, store
+        // layout and memory identity, never the code graph.
+        | ApplicationSurfaceOperation::AutomationRunList
+        | ApplicationSurfaceOperation::AutomationRunView
+        | ApplicationSurfaceOperation::AutomationRunArtifactView
+        | ApplicationSurfaceOperation::SkillList
+        | ApplicationSurfaceOperation::SkillView
+        | ApplicationSurfaceOperation::HermesSkillBridge
+        | ApplicationSurfaceOperation::Analytics => BranchSensitivity::Independent,
+        // Mixed ApplicationSurface group: git walks, worktree inventory, stack
+        // snapshots, code-graph reads, source-file bodies, health, diagnostics,
+        // and post-edit feedback all depend on the current checkout or graph.
+        GitStatus
+        | GitDiff
+        | GitHistory
+        | GitBlame
+        | GitHunks
+        | GitPreview
+        | GitApply
+        | GitHubStackSignalExpand
+        | NativeIntegrationStackSnapshot
+        | NativeIntegrationWorktreeInventory
+        | NativeIntegrationWorktreeInspect
+        | NativeIntegrationWorktreeConfirm
+        | NativeIntegrationWorktreeRemove
+        | NativeIntegrationWorktreeReconcile
+        | FeedbackDiagnostics
+        | FeedbackGet
+        | FeedbackExpand
+        | FeedbackList
+        | FeedbackImpact
+        | FeedbackAdvisoryCycle
+        | FeedbackProximity
+        | AffectedTests
+        | TestResults
+        | CodeExactOccurrence
+        | CodePhraseSearch
+        | CodeSymbolSearch
+        | CodeSignatureSearch
+        | CodeImplementations
+        | CodeTypeHierarchy
+        | CodeCallers
+        | CodeCallees
+        | CodeFacets
+        | CodeTimeline
+        | CodeDeclaration
+        | CodeTypeDefinition
+        | CodeReferences
+        | QualifiedName
+        | CallChain
+        | FileDependents
+        | SourceLines
+        | SourceBody
+        | SourceOutline
+        | ModuleApi
+        | ApplicationSurfaceOperation::Context
+        | ApplicationSurfaceOperation::Node
+        | ApplicationSurfaceOperation::Impact
+        | ApplicationSurfaceOperation::Similar
+        | ApplicationSurfaceOperation::Redundancy
+        | ApplicationSurfaceOperation::RenamePreview
+        | ApplicationSurfaceOperation::PortStatus
+        | ApplicationSurfaceOperation::PortOrder
+        | ApplicationSurfaceOperation::Todos
+        | ApplicationSurfaceOperation::TestMap
+        | ApplicationSurfaceOperation::TestRisk
+        | ApplicationSurfaceOperation::Gini
+        | ApplicationSurfaceOperation::DependencyDepth
+        | ApplicationSurfaceOperation::Health
+        | ApplicationSurfaceOperation::Dsm
+        | ApplicationSurfaceOperation::Diagnose
+        | ApplicationSurfaceOperation::DeadCode
+        | ApplicationSurfaceOperation::Circular
+        | ApplicationSurfaceOperation::Hotspots
+        | ApplicationSurfaceOperation::UnmountedFiles
+        | ApplicationSurfaceOperation::Rank
+        | ApplicationSurfaceOperation::Largest
+        | ApplicationSurfaceOperation::Coupling
+        | ApplicationSurfaceOperation::InheritanceDepth
+        | ApplicationSurfaceOperation::Distribution
+        | ApplicationSurfaceOperation::Recursion
+        | ApplicationSurfaceOperation::Complexity
+        | ApplicationSurfaceOperation::DocCoverage
+        | ApplicationSurfaceOperation::GodClass
+        | ApplicationSurfaceOperation::UnsafePatterns
+        | ApplicationSurfaceOperation::Constructors
+        | ApplicationSurfaceOperation::FieldSites
+        | ApplicationSurfaceOperation::FindExactSymbol
+        | ApplicationSurfaceOperation::ByQualifiedName
+        | ApplicationSurfaceOperation::Signature
+        | ApplicationSurfaceOperation::Derives
+        | ApplicationSurfaceOperation::Grep
+        | ApplicationSurfaceOperation::AstGrepSearch
+        | ApplicationSurfaceOperation::Affected
+        | ApplicationSurfaceOperation::DiffContext
+        | ApplicationSurfaceOperation::Changelog
+        | ApplicationSurfaceOperation::CommitContext
+        | ApplicationSurfaceOperation::PrContext
+        | ApplicationSurfaceOperation::BranchSearch
+        | ApplicationSurfaceOperation::BranchDiff
+        | ApplicationSurfaceOperation::BranchList
+        | ApplicationSurfaceOperation::Files
+        | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::Retrieve
+        | ApplicationSurfaceOperation::Search
+        | ApplicationSurfaceOperation::RunAffectedTests
+        | ApplicationSurfaceOperation::Dashboard
+        | ApplicationSurfaceOperation::Status
+        | ApplicationSurfaceOperation::ActiveProject
+        | ApplicationSurfaceOperation::RemoteStatus
+        | ApplicationSurfaceOperation::Runtime
+        | ApplicationSurfaceOperation::ProjectList
+        | ApplicationSurfaceOperation::ProjectSearch
+        | ApplicationSurfaceOperation::ProjectContext
+        | ApplicationSurfaceOperation::AdminSync
+        | ApplicationSurfaceOperation::AdminCli
+        | ApplicationSurfaceOperation::AdminProject
+        | ApplicationSurfaceOperation::HookRuntime
+        | HealthRead
+        | HealthDelta
+        | DiagnosticsRead
+        | StrReplace
+        | MultiStrReplace
+        | InsertAt
+        | AstGrepRewrite
+        | ReplaceSymbol
+        | InsertAtSymbol
+        | MoveSymbol
+        | RenameSymbol
+        | SourceEditReconcile
+        | SourceEditRollback => BranchSensitivity::Sensitive,
+    }
+}
+
+/// How a tool may be pointed at a project other than the active one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegisteredProjectAccess {
+    /// Reads bind to whichever project is active; a selector is rejected.
+    ActiveProjectOnly,
+    /// Accepts a selector but does not dispatch a registered-project reader.
+    SelectorOnly,
+    /// Accepts a selector and dispatches against the selected project's store.
+    Reader,
+}
+
+pub struct McpToolBinding {
+    pub name: &'static str,
+    pub group: Option<McpToolDispatchGroup>,
+    pub project: RegisteredProjectAccess,
+}
+
+struct BindingGroup {
+    group: Option<McpToolDispatchGroup>,
+    project: RegisteredProjectAccess,
+    names: &'static [&'static str],
+}
+
+macro_rules! binding_groups {
+    ($([$group:expr, $project:expr, $($name:literal),+ $(,)?]),+ $(,)?) => {
+        &[$(BindingGroup { group: $group, project: $project, names: &[$($name),+] },)+]
+    };
+}
+
+/// Dispatch-catalog order. Consecutive tools that share a group and project
+/// access are one slice; a different access starts a new slice.
+#[rustfmt::skip]
+const BINDING_GROUPS: &[BindingGroup] = binding_groups![
+    [Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_admin_branch_add"],
+    [Some(McpToolDispatchGroup::MultiRoot), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_multi_root_scope_set_read", "tracedecay_multi_root_scope_set_compare_and_swap",
+        "tracedecay_multi_root_execute"],
+    [None, RegisteredProjectAccess::SelectorOnly, "tracedecay_fact_feedback"],
+    [None, RegisteredProjectAccess::SelectorOnly, "tracedecay_project_context"],
+    [None, RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_lcm_describe", "tracedecay_lcm_doctor", "tracedecay_lcm_expand", "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_grep", "tracedecay_lcm_load_session", "tracedecay_lcm_status",
+        "tracedecay_session_refresh_begin", "tracedecay_session_refresh_status", "tracedecay_session_refresh_cancel",
+        "tracedecay_sessions_for", "tracedecay_workflows", "tracedecay_fact_store_curate"],
+    [None, RegisteredProjectAccess::SelectorOnly,
+        "tracedecay_fact_store_add", "tracedecay_fact_store_search", "tracedecay_fact_store_probe",
+        "tracedecay_fact_store_related", "tracedecay_fact_store_reason", "tracedecay_fact_store_contradict",
+        "tracedecay_fact_store_get", "tracedecay_fact_store_update", "tracedecay_fact_store_remove",
+        "tracedecay_fact_store_supersede", "tracedecay_fact_store_list", "tracedecay_memory_status",
+        "tracedecay_message_search"],
+];
+
+fn binding_specs() -> impl Iterator<Item = McpToolBinding> {
+    BINDING_GROUPS.iter().flat_map(|group| {
+        group.names.iter().copied().map(|name| McpToolBinding {
+            name,
+            group: group.group,
+            project: group.project,
+        })
+    })
+}
+
+pub static MCP_TOOL_BINDINGS: LazyLock<Vec<McpToolBinding>> =
+    LazyLock::new(assemble_mcp_tool_bindings);
+
+fn registered_project_readers() -> &'static HashSet<&'static str> {
+    static READERS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+        crate::registered_project_reader_tool_names()
+            .into_iter()
+            .collect()
+    });
+    &READERS
+}
+
+fn assemble_mcp_tool_bindings() -> Vec<McpToolBinding> {
+    let readers = registered_project_readers();
+    let mut assigned = HashSet::new();
+    let bindings = binding_specs()
+        .map(|spec| {
+            assert!(
+                spec.project != RegisteredProjectAccess::Reader,
+                "binding specs must not encode Reader for '{}'; list it in tracedecay-mcp::project_access",
+                spec.name
+            );
+            let project = if readers.contains(spec.name) {
+                assigned.insert(spec.name);
+                RegisteredProjectAccess::Reader
+            } else {
+                spec.project
+            };
+            McpToolBinding {
+                name: spec.name,
+                group: spec.group,
+                project,
+            }
+        })
+        .collect();
+    let missing: Vec<&str> = readers
+        .iter()
+        .copied()
+        .filter(|name| {
+            !assigned.contains(name) && ApplicationSurfaceOperation::from_tool_name(name).is_none()
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "tracedecay-mcp reader tools have no binding spec row: {missing:?}"
+    );
+    bindings
+}
+
+/// Resolves a static MCP tool name against [`MCP_TOOL_BINDINGS`].
+///
+/// Every dispatched tool call asks this two or three times, so the table is
+/// indexed by name once per process rather than scanned each time.
+/// `MCP_TOOL_BINDINGS` stays the authority for static rows: a duplicate name
+/// would collapse in the index, which `every_tool_is_bound_once` forbids.
+fn binding(tool_name: &str) -> Option<&'static McpToolBinding> {
+    static BY_NAME: LazyLock<HashMap<&'static str, &'static McpToolBinding>> =
+        LazyLock::new(|| {
+            MCP_TOOL_BINDINGS
+                .iter()
+                .map(|binding| (binding.name, binding))
+                .collect()
+        });
+    BY_NAME.get(tool_name).copied()
+}
+
+fn registered_project_access(tool_name: &str) -> Option<RegisteredProjectAccess> {
+    binding(tool_name)
+        .map(|binding| binding.project)
+        .or_else(|| {
+            ApplicationSurfaceOperation::from_tool_name(tool_name).map(|_| {
+                if registered_project_readers().contains(tool_name) {
+                    RegisteredProjectAccess::Reader
+                } else {
+                    RegisteredProjectAccess::ActiveProjectOnly
+                }
+            })
+        })
+}
+
+/// The canonical dispatch group, deriving application tools from their
+/// operation identity instead of restoring manual binding rows.
+pub fn dispatch_group_for_tool(tool_name: &str) -> Option<McpToolDispatchGroup> {
+    ApplicationSurfaceOperation::from_tool_name(tool_name)
+        .map(|_| McpToolDispatchGroup::ApplicationSurface)
+        .or_else(|| binding(tool_name).and_then(|binding| binding.group))
+        .or_else(|| work_operation_for_tool(tool_name).map(|_| McpToolDispatchGroup::Work))
+        .or_else(|| workflow_operation_for_tool(tool_name).map(|_| McpToolDispatchGroup::Workflow))
+}
+
+pub fn tool_accepts_registered_project_selector(tool_name: &str) -> bool {
+    matches!(
+        registered_project_access(tool_name),
+        Some(RegisteredProjectAccess::SelectorOnly | RegisteredProjectAccess::Reader)
+    )
+}
+
+pub fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
+    matches!(
+        registered_project_access(tool_name),
+        Some(RegisteredProjectAccess::Reader)
+    )
+}
+
+fn direct_effect(tool_name: &str) -> EffectClass {
+    match tool_name {
+        "tracedecay_multi_root_scope_set_compare_and_swap"
+        | "tracedecay_fact_store_curate"
+        | "tracedecay_fact_store_add"
+        | "tracedecay_fact_store_update"
+        | "tracedecay_fact_store_remove"
+        | "tracedecay_fact_store_supersede"
+        | "tracedecay_fact_feedback"
+        | "tracedecay_session_refresh_begin"
+        | "tracedecay_session_refresh_cancel" => EffectClass::Administrative,
+        _ => EffectClass::Read,
+    }
+}
+
+fn multi_root_capability_for_tool(
+    tool_name: &str,
+) -> Result<
+    Option<tracedecay_tool_catalog::CapabilityManifestV1>,
+    super::dispatch::McpDispatchMetadataError,
+> {
+    multi_root_operation_for_tool(tool_name)
+        .map(multi_root_capability_manifest)
+        .transpose()
+        .map_err(super::dispatch::McpDispatchMetadataError::CatalogValidation)
+}
+
+/// One MCP dispatch entry normalized from a transport-specific root binding or
+/// a canonical executable operation.
+pub(super) struct DispatchCatalogBinding {
+    pub(super) name: String,
+    pub(super) group: Option<McpToolDispatchGroup>,
+    pub(super) executable_binding: Option<&'static ExecutableBindingV1>,
+}
+
+pub(super) fn project_family_dispatch(
+    group: McpToolDispatchGroup,
+    registry: &'static ExecutableBindingRegistryV1,
+    operations: impl IntoIterator<Item = (String, String)>,
+    identity: (&'static str, &'static str),
+    missing: (&'static str, &'static str),
+) -> Result<Vec<DispatchCatalogBinding>, super::dispatch::McpDispatchMetadataError> {
+    operations
+        .into_iter()
+        .map(|(name, operation_id)| {
+            let operation_id = tracedecay_tool_catalog::OperationId::new(operation_id)
+                .map_err(|_| dispatch_invalid(identity.0, identity.1))?;
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .ok_or_else(|| dispatch_invalid(missing.0, missing.1))?;
+            Ok(DispatchCatalogBinding {
+                name,
+                group: Some(group),
+                executable_binding: Some(binding),
+            })
+        })
+        .collect()
+}
+
+fn dispatch_invalid(
+    field: &'static str,
+    reason: &'static str,
+) -> super::dispatch::McpDispatchMetadataError {
+    super::dispatch::McpDispatchMetadataError::CatalogValidation(
+        tracedecay_tool_catalog::CatalogValidationError::InvalidValue { field, reason },
+    )
+}
+
+fn dispatch_catalog_bindings()
+-> Result<Vec<DispatchCatalogBinding>, super::dispatch::McpDispatchMetadataError> {
+    let mut bindings = MCP_TOOL_BINDINGS
+        .iter()
+        .filter(|binding| !INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name))
+        .map(|binding| DispatchCatalogBinding {
+            name: binding.name.to_owned(),
+            group: binding.group,
+            executable_binding: None,
+        })
+        .collect::<Vec<_>>();
+    let application_registry =
+        tracedecay_contracts::mcp_executable_binding_registry().map_err(|error| {
+            super::dispatch::McpDispatchMetadataError::Initialization(error.to_string())
+        })?;
+    for executable in application_registry
+        .iter()
+        .filter_map(|availability| availability.binding())
+    {
+        let Some(operation_name) = executable
+            .operation_id()
+            .as_str()
+            .strip_prefix("operation.application.")
+        else {
+            continue;
+        };
+        let Some(operation) = ApplicationSurfaceOperation::from_catalog_name(operation_name) else {
+            continue;
+        };
+        let tool_name = operation.mcp_tool_name();
+        if let Some(existing) = bindings
+            .iter_mut()
+            .find(|binding| binding.name == tool_name)
+        {
+            existing.executable_binding = Some(executable);
+        } else {
+            bindings.push(DispatchCatalogBinding {
+                name: tool_name.to_owned(),
+                group: None,
+                executable_binding: Some(executable),
+            });
+        }
+    }
+    bindings.extend(work::dispatch_catalog_bindings()?);
+    bindings.extend(workflow::dispatch_catalog_bindings()?);
+    Ok(bindings)
+}
+
+fn application_capability_for_tool(
+    tool_name: &str,
+) -> Result<
+    Option<&'static tracedecay_tool_catalog::CapabilityManifestV1>,
+    super::dispatch::McpDispatchMetadataError,
+> {
+    let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_catalog_ref()?;
+    Ok(catalog.capabilities().find(|capability| {
+        capability.binding_ids().iter().any(|binding_id| {
+            catalog.binding(binding_id).is_some_and(|binding| {
+                binding.surface() == BindingSurface::Mcp
+                    && binding.operation().as_str() == operation
+            })
+        })
+    }))
+}
+
+pub fn canonical_tool_dispatch_ceiling(
+    tool_name: &str,
+) -> Result<std::time::Duration, super::dispatch::McpDispatchMetadataError> {
+    let catalog = mcp_dispatch_catalog()?;
+    if let Some(contract) = catalog.contract(tool_name) {
+        return Ok(std::time::Duration::from_millis(
+            contract.deadline().maximum_millis(),
+        ));
+    }
+    if let Some(capability) = multi_root_capability_for_tool(tool_name)? {
+        return Ok(std::time::Duration::from_millis(
+            capability.deadline().maximum_millis(),
+        ));
+    }
+    if let Some(binding) = work_executable_binding_for_tool(tool_name)? {
+        return Ok(std::time::Duration::from_millis(
+            binding.deadline().maximum_millis(),
+        ));
+    }
+    if let Some(binding) = workflow_executable_binding_for_tool(tool_name)? {
+        return Ok(std::time::Duration::from_millis(
+            binding.deadline().maximum_millis(),
+        ));
+    }
+    Ok(application_capability_for_tool(tool_name)?.map_or_else(
+        || super::dispatch_ceiling::tool_dispatch_ceiling(tool_name),
+        |capability| std::time::Duration::from_millis(capability.deadline().maximum_millis()),
+    ))
+}
+
+/// Per-tool dispatch predicate answers, resolved once per process.
+///
+/// The three predicates below run several times per dispatched request
+/// (connection loop, routing, dispatch controls), and each uncached
+/// evaluation linearly scans the application catalog
+/// (`application_capability_for_tool`). Their inputs, the static binding
+/// table, the application-surface catalog, and the Work/Workflow executable
+/// registries, are process-stable, so the answers are precomputed for every
+/// cataloged name. The dispatch-contract cancellation/effect metadata is not
+/// a substitute: it folds in workflow bindings and per-capability contracts
+/// that deliberately diverge from these predicates.
+#[derive(Clone, Copy)]
+struct ToolDispatchPredicateFlags {
+    source_edit_effect: bool,
+    live_cancellation: bool,
+    canonical_effect_settlement: bool,
+}
+
+fn compute_tool_dispatch_predicate_flags(tool_name: &str) -> ToolDispatchPredicateFlags {
+    ToolDispatchPredicateFlags {
+        source_edit_effect: compute_tool_dispatches_source_edit_effect(tool_name),
+        live_cancellation: compute_tool_supports_live_cancellation(tool_name),
+        canonical_effect_settlement: compute_tool_requires_canonical_effect_settlement(tool_name),
+    }
+}
+
+fn tool_dispatch_predicate_flags(tool_name: &str) -> ToolDispatchPredicateFlags {
+    static FLAGS: LazyLock<HashMap<String, ToolDispatchPredicateFlags>> = LazyLock::new(|| {
+        let mut flags = HashMap::new();
+        // A catalog enumeration failure leaves the map empty; every lookup
+        // then falls back to the direct computation below, which answers
+        // exactly as the uncached predicates did.
+        if let Ok(bindings) = dispatch_catalog_bindings() {
+            for binding in bindings {
+                let per_tool = compute_tool_dispatch_predicate_flags(&binding.name);
+                flags.insert(binding.name, per_tool);
+            }
+        }
+        // Internal daemon tools are filtered out of the dispatch catalog but
+        // still reach these predicates through ordinary dispatch.
+        for binding in MCP_TOOL_BINDINGS.iter() {
+            flags
+                .entry(binding.name.to_owned())
+                .or_insert_with(|| compute_tool_dispatch_predicate_flags(binding.name));
+        }
+        flags
+    });
+    FLAGS
+        .get(tool_name)
+        .copied()
+        .unwrap_or_else(|| compute_tool_dispatch_predicate_flags(tool_name))
+}
+
+pub fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
+    tool_dispatch_predicate_flags(tool_name).source_edit_effect
+}
+
+fn compute_tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
+    application_capability_for_tool(tool_name)
+        .ok()
+        .flatten()
+        .is_some_and(|capability| capability.effect() == EffectClass::SourceEdit)
+}
+
+pub fn tool_supports_live_cancellation(tool_name: &str) -> bool {
+    tool_dispatch_predicate_flags(tool_name).live_cancellation
+}
+
+fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
+    work_executable_binding_for_tool(tool_name)
+        .ok()
+        .flatten()
+        .is_some_and(|binding| {
+            matches!(
+                binding.cancellation(),
+                CancellationContract::Cooperative { .. }
+            )
+        })
+        || application_capability_for_tool(tool_name)
+            .ok()
+            .flatten()
+            .is_some_and(|capability| {
+                matches!(
+                    capability.cancellation(),
+                    CancellationContract::Cooperative { .. }
+                )
+            })
+        || multi_root_operation_for_tool(tool_name).is_some()
+        || compute_tool_dispatches_source_edit_effect(tool_name)
+        || tool_name == "tracedecay_search"
+}
+
+pub fn tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
+    tool_dispatch_predicate_flags(tool_name).canonical_effect_settlement
+}
+
+fn compute_tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
+    work_executable_binding_for_tool(tool_name)
+        .ok()
+        .flatten()
+        .is_some_and(|binding| {
+            binding.effect() != EffectClass::Read
+                && *binding.cancellation() == CancellationContract::NotCancellable
+        })
+        || application_capability_for_tool(tool_name)
+            .ok()
+            .flatten()
+            .is_some_and(|capability| {
+                capability.effect() != EffectClass::Read
+                    && *capability.cancellation() == CancellationContract::NotCancellable
+            })
+}
+
+fn verified_effect_journey(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_fact_store_curate"
+            | "tracedecay_fact_store_add"
+            | "tracedecay_fact_store_update"
+            | "tracedecay_fact_store_remove"
+            | "tracedecay_fact_store_supersede"
+            | "tracedecay_fact_feedback"
+            | "tracedecay_session_refresh_begin"
+            | "tracedecay_session_refresh_cancel"
+            | "tracedecay_configuration_set"
+            | "tracedecay_configuration_unset"
+            | "tracedecay_configuration_batch"
+            | "tracedecay_configuration_protected_apply"
+            | "tracedecay_configuration_rollback_apply"
+            | "tracedecay_context_scout_pause"
+            | "tracedecay_context_scout_resume"
+            | "tracedecay_str_replace"
+            | "tracedecay_multi_str_replace"
+            | "tracedecay_insert_at"
+            | "tracedecay_ast_grep_rewrite"
+            | "tracedecay_replace_symbol"
+            | "tracedecay_insert_at_symbol"
+            | "tracedecay_move_symbol"
+            | "tracedecay_rename_symbol"
+    )
+}
+
+fn executable_handler_is_available(
+    tool_name: &str,
+    group: Option<McpToolDispatchGroup>,
+    effect: EffectClass,
+    application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+) -> bool {
+    matches!(
+        group,
+        Some(
+            McpToolDispatchGroup::MultiRoot
+                | McpToolDispatchGroup::Work
+                | McpToolDispatchGroup::Workflow
+        )
+    ) || effect.is_read_only()
+        || verified_effect_journey(tool_name)
+        || matches!(group, Some(McpToolDispatchGroup::ApplicationSurface))
+            && application_capability
+                .is_some_and(|capability| capability.availability().is_callable())
+}
+
+fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract {
+    if effect.is_read_only() {
+        McpInverseContract::NotApplicable
+    } else {
+        match tool_name {
+            "tracedecay_dashboard" => McpInverseContract::SameTool {
+                action: "stop".to_owned(),
+            },
+            _ => McpInverseContract::Unavailable {
+                reason: McpInverseUnavailableReason::NoVerifiedInverse,
+            },
+        }
+    }
+}
+
+fn idempotency_for_tool(
+    tool_name: &str,
+    idempotency: Option<tracedecay_tool_catalog::IdempotencyContract>,
+) -> McpIdempotencyContract {
+    // These effect requests already name their replay target in the public
+    // schema: approval is bound to an exact preview, while apply and cancel
+    // are bound to one durable transaction. `key_required` would advertise a
+    // caller field that the transport deliberately does not accept.
+    if matches!(
+        tool_name,
+        "tracedecay_approve_native_integration"
+            | "tracedecay_apply_native_integration"
+            | "tracedecay_cancel_native_integration"
+    ) {
+        return McpIdempotencyContract::Idempotent;
+    }
+    match idempotency {
+        Some(tracedecay_tool_catalog::IdempotencyContract::Required) => {
+            McpIdempotencyContract::KeyRequired
+        }
+        _ if matches!(
+            tool_name,
+            "tracedecay_dashboard" | "tracedecay_lcm_compress" | "tracedecay_lcm_session_boundary"
+        ) =>
+        {
+            McpIdempotencyContract::Idempotent
+        }
+        _ => McpIdempotencyContract::NotProvided,
+    }
+}
+
+fn cancellation_for_tool(
+    tool_name: &str,
+    application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+) -> Result<CancellationContract, tracedecay_tool_catalog::CatalogValidationError> {
+    if let Some(capability) = application_capability
+        && tool_supports_live_cancellation(tool_name)
+    {
+        return Ok(capability.cancellation().clone());
+    }
+    let points = match direct_effect(tool_name) {
+        EffectClass::SourceEdit => vec![
+            CancellationPoint::BeforeEffect,
+            CancellationPoint::EffectInFlight,
+        ],
+        _ if tool_name == "tracedecay_search" => vec![CancellationPoint::DuringRead],
+        _ => return Ok(CancellationContract::NotCancellable),
+    };
+    CancellationContract::cooperative(points)
+}
+
+fn build_mcp_dispatch_catalog()
+-> Result<McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
+    let mut contracts = Vec::new();
+    for binding in dispatch_catalog_bindings()? {
+        let application_capability = application_capability_for_tool(&binding.name)?;
+        let multi_root_capability = multi_root_capability_for_tool(&binding.name)?;
+        let executable_binding = binding.executable_binding;
+        // The multi-root catalog is the sole contract authority for its own
+        // tools; every field below prefers it and falls back to the
+        // application-surface capability for everything else.
+        let contract_capability = multi_root_capability.as_ref().or(application_capability);
+        let direct_effect = direct_effect(&binding.name);
+        let effect = if direct_effect.is_effect() {
+            direct_effect
+        } else {
+            executable_binding.map_or_else(
+                || {
+                    contract_capability.map_or(
+                        EffectClass::Read,
+                        tracedecay_tool_catalog::CapabilityManifestV1::effect,
+                    )
+                },
+                ExecutableBindingV1::effect,
+            )
+        };
+        let available = multi_root_capability
+            .as_ref()
+            .is_some_and(|capability| capability.availability().is_callable())
+            || executable_binding.is_some()
+            || executable_handler_is_available(
+                &binding.name,
+                binding.group,
+                effect,
+                application_capability,
+            );
+        let cancellation = match (multi_root_capability.as_ref(), executable_binding) {
+            (Some(capability), _) => capability.cancellation().clone(),
+            (None, Some(binding)) => binding.cancellation().clone(),
+            (None, None) => cancellation_for_tool(&binding.name, application_capability)?,
+        };
+        let mut terminal_states = vec![
+            McpTerminalState::Completed,
+            McpTerminalState::DeadlineExceeded,
+            McpTerminalState::Denied,
+            McpTerminalState::Failed,
+            McpTerminalState::Unavailable,
+        ];
+        if matches!(cancellation, CancellationContract::Cooperative { .. }) {
+            terminal_states.push(McpTerminalState::Cancelled);
+        }
+        let streaming = contract_capability
+            .map(tracedecay_tool_catalog::CapabilityManifestV1::streaming)
+            .filter(|streaming| streaming.is_supported())
+            .cloned();
+        contracts.push(McpDispatchContractV1::new(McpDispatchContractInputV1 {
+            tool_name: binding.name.clone(),
+            availability: if available {
+                McpDispatchAvailability::Available
+            } else {
+                McpDispatchAvailability::Unavailable {
+                    reason: McpDispatchUnavailableReason::EffectJourneyUnverified,
+                    retryable: false,
+                }
+            },
+            effect,
+            deadline: McpDeadlineContractV1::new(executable_binding.map_or_else(
+                || {
+                    contract_capability.map_or_else(
+                        || {
+                            super::dispatch_ceiling::tool_dispatch_ceiling(&binding.name)
+                                .as_millis() as u64
+                        },
+                        |capability| capability.deadline().maximum_millis(),
+                    )
+                },
+                |binding| binding.deadline().maximum_millis(),
+            ))?,
+            idempotency: multi_root_capability.as_ref().map_or_else(
+                || {
+                    executable_binding.map_or_else(
+                        || {
+                            idempotency_for_tool(
+                                &binding.name,
+                                application_capability.map(
+                                    tracedecay_tool_catalog::CapabilityManifestV1::idempotency,
+                                ),
+                            )
+                        },
+                        |executable| {
+                            idempotency_for_tool(&binding.name, Some(executable.idempotency()))
+                        },
+                    )
+                },
+                |capability| idempotency_for_tool(&binding.name, Some(capability.idempotency())),
+            ),
+            inverse: inverse_for_tool(&binding.name, effect),
+            cancellation,
+            terminal_states,
+            pagination: contract_capability
+                .and_then(tracedecay_tool_catalog::CapabilityManifestV1::pagination)
+                .cloned(),
+            streaming,
+        })?);
+    }
+    Ok(McpDispatchCatalogV1::new(contracts)?)
+}
+
+pub fn mcp_dispatch_catalog()
+-> Result<&'static McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
+    static CATALOG: LazyLock<Result<McpDispatchCatalogV1, String>> =
+        LazyLock::new(|| build_mcp_dispatch_catalog().map_err(|error| error.to_string()));
+    match &*CATALOG {
+        Ok(catalog) => Ok(catalog),
+        Err(error) => Err(super::dispatch::McpDispatchMetadataError::Initialization(
+            error.clone(),
+        )),
+    }
+}
+
+pub fn mcp_dispatch_contract(
+    tool_name: &str,
+) -> Result<&'static McpDispatchContractV1, super::dispatch::McpDispatchMetadataError> {
+    mcp_dispatch_catalog()?.contract(tool_name).ok_or_else(|| {
+        super::dispatch::McpDispatchMetadataError::MissingContract(tool_name.to_owned())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_contracts::RetainedSurfaceOperation;
+    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, ProfileId};
+
+    use super::*;
+
+    #[test]
+    fn every_tool_is_bound_once() {
+        let mut names = dispatch_catalog_bindings()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        // One tool per binding source: a root binding, a root binding merged
+        // with its application operation, an application-only operation, and
+        // the Work and Workflow families.
+        for tool in [
+            "tracedecay_search",
+            "tracedecay_callers",
+            "tracedecay_code_exact_occurrence",
+            "tracedecay_work_create",
+            "tracedecay_workflow_start_run",
+        ] {
+            assert_eq!(
+                names.iter().filter(|name| *name == tool).count(),
+                1,
+                "{tool} must be bound exactly once"
+            );
+        }
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "a tool name is bound twice");
+    }
+
+    #[test]
+    fn dispatch_catalog_covers_every_advertised_binding_with_canonical_deadline() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        for contract in catalog.contracts() {
+            let application_capability =
+                application_capability_for_tool(contract.tool_name()).unwrap();
+            assert_eq!(
+                contract.deadline().maximum_millis(),
+                canonical_tool_dispatch_ceiling(contract.tool_name())
+                    .unwrap()
+                    .as_millis() as u64,
+                "{} must use one canonical dispatch ceiling",
+                contract.tool_name(),
+            );
+            assert_eq!(
+                contract.availability().is_available(),
+                executable_handler_is_available(
+                    contract.tool_name(),
+                    dispatch_group_for_tool(contract.tool_name()),
+                    contract.effect(),
+                    application_capability,
+                ),
+                "{} availability must match its executable handler",
+                contract.tool_name()
+            );
+        }
+    }
+
+    /// CLI and MCP handlers clamp application calls with the capability
+    /// deadline read from the schema-free dispatch catalog; it must be the
+    /// ceiling the MCP dispatch contract advertises for the same tool.
+    #[test]
+    fn application_operation_ceiling_is_the_advertised_dispatch_ceiling() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        let mut compared = 0;
+        for operation in ApplicationSurfaceOperation::ALL {
+            let Some(contract) = catalog.contract(operation.mcp_tool_name()) else {
+                continue;
+            };
+            assert_eq!(
+                tracedecay_daemon_service::application_surface::application_operation_deadline_ceiling(
+                    operation
+                )
+                .unwrap(),
+                std::time::Duration::from_millis(contract.deadline().maximum_millis()),
+                "{} ceiling differs from its dispatch contract",
+                operation.mcp_tool_name()
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, ApplicationSurfaceOperation::ALL.len());
+    }
+
+    /// The budget that cut `tracedecay_context` at ten seconds in the #1203
+    /// dogfood run is this capability's own deadline contract, the retrieval
+    /// primitive declares `DeadlineContract::new(10_000, ..)`, and not
+    /// `TOOL_DISPATCH_CEILING`, the CLI request deadline, or any settlement or
+    /// ledger budget. `prepare_dispatch_control` hands this ceiling straight to
+    /// `DispatchControl`, and a caller deadline can only shorten it, so this
+    /// value alone decides when an interactive context read is refused.
+    #[test]
+    fn context_dispatches_under_its_own_ten_second_deadline_contract() {
+        let ceiling = canonical_tool_dispatch_ceiling("tracedecay_context").unwrap();
+        assert_eq!(ceiling, std::time::Duration::from_secs(10));
+        assert!(
+            ceiling < crate::tools::dispatch_ceiling::tool_dispatch_ceiling("tracedecay_context"),
+            "the capability contract, not the generic dispatch ceiling, bounds context"
+        );
+        assert!(
+            ceiling < tracedecay_daemon_protocol::DEFAULT_TOOL_REQUEST_DEADLINE,
+            "the CLI request deadline cannot be what refuses a context read"
+        );
+    }
+
+    #[test]
+    fn exact_fact_tools_dispatch_to_their_registered_project() {
+        for tool_name in [
+            "tracedecay_fact_store_search",
+            "tracedecay_fact_store_probe",
+            "tracedecay_fact_store_related",
+            "tracedecay_fact_store_reason",
+            "tracedecay_fact_store_contradict",
+            "tracedecay_fact_store_get",
+            "tracedecay_fact_store_list",
+            "tracedecay_memory_status",
+            "tracedecay_message_search",
+            "tracedecay_fact_store_add",
+            "tracedecay_fact_store_update",
+            "tracedecay_fact_store_remove",
+            "tracedecay_fact_store_supersede",
+            "tracedecay_fact_feedback",
+        ] {
+            assert!(tool_accepts_registered_project_selector(tool_name));
+            assert!(
+                tool_dispatches_registered_project_reader(tool_name),
+                "{tool_name} must open the selected project's store"
+            );
+        }
+    }
+
+    /// A row without a group must be claimed by one of the surface predicates,
+    /// otherwise the tool would reach dispatch with no owner at all.
+    #[test]
+    fn group_less_rows_are_owned_by_a_surface_predicate() {
+        for entry in MCP_TOOL_BINDINGS
+            .iter()
+            .filter(|entry| entry.group.is_none())
+        {
+            let claimed = ApplicationSurfaceOperation::from_tool_name(entry.name).is_some()
+                || RetainedSurfaceOperation::from_tool_name(entry.name).is_some();
+            assert!(claimed, "{} has no group and no surface owner", entry.name);
+        }
+    }
+
+    /// Every Independent catalog tool, plus one Sensitive representative per
+    /// dispatch family that still reopens on branch drift. An advertised tool
+    /// missing from this table must stay Sensitive (fail-safe).
+    #[rustfmt::skip]
+    const PINNED_BRANCH_SENSITIVITY: &[(&str, BranchSensitivity)] = &[
+        // Ledger / skill / analytics reads use project_root, store_layout,
+        // and memory identity, never the code graph.
+        ("tracedecay_automation_run_list", BranchSensitivity::Independent),
+        ("tracedecay_automation_run_view", BranchSensitivity::Independent),
+        ("tracedecay_automation_run_artifact_view", BranchSensitivity::Independent),
+        ("tracedecay_analytics", BranchSensitivity::Independent),
+        ("tracedecay_skill_list", BranchSensitivity::Independent),
+        ("tracedecay_skill_view", BranchSensitivity::Independent),
+        ("tracedecay_hermes_skill_bridge", BranchSensitivity::Independent),
+        // Work: product-graph / attempt lifecycle via the Work daemon owner.
+        // `handle_work` does not take `cg`; MutateGraph writes the Work
+        // product graph, not the code index.
+        ("tracedecay_work_generate_proposal", BranchSensitivity::Independent),
+        ("tracedecay_work_create", BranchSensitivity::Independent),
+        ("tracedecay_work_review_proposal", BranchSensitivity::Independent),
+        ("tracedecay_work_accept_proposal", BranchSensitivity::Independent),
+        ("tracedecay_work_admit_execution", BranchSensitivity::Independent),
+        ("tracedecay_work_start_attempt", BranchSensitivity::Independent),
+        ("tracedecay_work_synthesize", BranchSensitivity::Independent),
+        ("tracedecay_work_attempt_status", BranchSensitivity::Independent),
+        ("tracedecay_work_cancel_attempt", BranchSensitivity::Independent),
+        ("tracedecay_work_resume_attempts", BranchSensitivity::Independent),
+        ("tracedecay_work_retry_attempt", BranchSensitivity::Independent),
+        ("tracedecay_work_list_attempts", BranchSensitivity::Independent),
+        ("tracedecay_work_execution_history", BranchSensitivity::Independent),
+        ("tracedecay_work_hydrate_artifacts", BranchSensitivity::Independent),
+        ("tracedecay_work_retrieve_evidence", BranchSensitivity::Independent),
+        ("tracedecay_work_views", BranchSensitivity::Independent),
+        ("tracedecay_work_experience", BranchSensitivity::Independent),
+        ("tracedecay_work_compare_proposal", BranchSensitivity::Independent),
+        ("tracedecay_work_prepare_graph_mutation", BranchSensitivity::Independent),
+        ("tracedecay_work_mutate_graph", BranchSensitivity::Independent),
+        ("tracedecay_work_topology", BranchSensitivity::Independent),
+        ("tracedecay_work_topology_metrics", BranchSensitivity::Independent),
+        ("tracedecay_work_prepare_duplicate_adjudication", BranchSensitivity::Independent),
+        ("tracedecay_work_adjudicate_duplicate", BranchSensitivity::Independent),
+        ("tracedecay_work_adjudicate_leak", BranchSensitivity::Independent),
+        ("tracedecay_work_pause_run", BranchSensitivity::Independent),
+        ("tracedecay_work_resume_run", BranchSensitivity::Independent),
+        ("tracedecay_work_run_control", BranchSensitivity::Independent),
+        ("tracedecay_work_placement_preflight", BranchSensitivity::Independent),
+        ("tracedecay_work_admit_placement", BranchSensitivity::Independent),
+        ("tracedecay_work_placement_status", BranchSensitivity::Independent),
+        ("tracedecay_work_release_placement", BranchSensitivity::Independent),
+        ("tracedecay_work_advance_job", BranchSensitivity::Independent),
+        // Workflow: definition and run lifecycle via the Workflow daemon owner.
+        // `handle_workflow` does not take `cg`.
+        ("tracedecay_workflow_register_definition", BranchSensitivity::Independent),
+        ("tracedecay_workflow_activate_definition", BranchSensitivity::Independent),
+        ("tracedecay_workflow_retire_definition", BranchSensitivity::Independent),
+        ("tracedecay_workflow_reject_definition", BranchSensitivity::Independent),
+        ("tracedecay_workflow_validate_definition", BranchSensitivity::Independent),
+        ("tracedecay_workflow_get_definition", BranchSensitivity::Independent),
+        ("tracedecay_workflow_list_definitions", BranchSensitivity::Independent),
+        ("tracedecay_workflow_definition_history", BranchSensitivity::Independent),
+        ("tracedecay_workflow_diff_definition", BranchSensitivity::Independent),
+        ("tracedecay_workflow_handoff_issue", BranchSensitivity::Independent),
+        ("tracedecay_workflow_handoff_redeem", BranchSensitivity::Independent),
+        ("tracedecay_workflow_start_run", BranchSensitivity::Independent),
+        ("tracedecay_workflow_pause_run", BranchSensitivity::Independent),
+        ("tracedecay_workflow_resume_run", BranchSensitivity::Independent),
+        ("tracedecay_workflow_cancel_run", BranchSensitivity::Independent),
+        ("tracedecay_workflow_get_run", BranchSensitivity::Independent),
+        // Retained surface: fact-store, LCM, and session memory. Dispatch
+        // renders with `cg.project_root()` only.
+        ("tracedecay_fact_store_curate", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_add", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_search", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_probe", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_related", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_reason", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_contradict", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_get", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_update", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_remove", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_list", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_supersede", BranchSensitivity::Independent),
+        ("tracedecay_fact_feedback", BranchSensitivity::Independent),
+        ("tracedecay_memory_status", BranchSensitivity::Independent),
+        ("tracedecay_session_refresh_status", BranchSensitivity::Independent),
+        ("tracedecay_session_refresh_cancel", BranchSensitivity::Independent),
+        ("tracedecay_session_refresh_begin", BranchSensitivity::Independent),
+        ("tracedecay_message_search", BranchSensitivity::Independent),
+        ("tracedecay_sessions_for", BranchSensitivity::Independent),
+        ("tracedecay_workflows", BranchSensitivity::Independent),
+        ("tracedecay_lcm_status", BranchSensitivity::Independent),
+        ("tracedecay_lcm_doctor", BranchSensitivity::Independent),
+        ("tracedecay_lcm_load_session", BranchSensitivity::Independent),
+        ("tracedecay_lcm_grep", BranchSensitivity::Independent),
+        ("tracedecay_lcm_describe", BranchSensitivity::Independent),
+        ("tracedecay_lcm_expand", BranchSensitivity::Independent),
+        ("tracedecay_lcm_expand_query", BranchSensitivity::Independent),
+        // ApplicationSurface Independent: configuration, scout lifecycle,
+        // session identity, store status, observatory, host-integration
+        // apply. MCP render uses `cg.project_root()` only; owners do not
+        // read the code graph.
+        ("tracedecay_configuration_list", BranchSensitivity::Independent),
+        ("tracedecay_configuration_get", BranchSensitivity::Independent),
+        ("tracedecay_configuration_set", BranchSensitivity::Independent),
+        ("tracedecay_configuration_unset", BranchSensitivity::Independent),
+        ("tracedecay_configuration_batch", BranchSensitivity::Independent),
+        ("tracedecay_configuration_observed_state", BranchSensitivity::Independent),
+        ("tracedecay_configuration_protected_preview", BranchSensitivity::Independent),
+        ("tracedecay_configuration_protected_apply", BranchSensitivity::Independent),
+        ("tracedecay_configuration_rollback_preview", BranchSensitivity::Independent),
+        ("tracedecay_configuration_rollback_apply", BranchSensitivity::Independent),
+        ("tracedecay_configuration_audit", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_status", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_recent", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_explain", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_capability", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_budget", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_pause", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_resume", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_cancel", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_claim", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_delivery", BranchSensitivity::Independent),
+        ("tracedecay_context_scout_feedback", BranchSensitivity::Independent),
+        ("tracedecay_session_lookup", BranchSensitivity::Independent),
+        ("tracedecay_storage_status", BranchSensitivity::Independent),
+        ("tracedecay_observatory_read", BranchSensitivity::Independent),
+        ("tracedecay_preflight_native_integration", BranchSensitivity::Independent),
+        ("tracedecay_approve_native_integration", BranchSensitivity::Independent),
+        ("tracedecay_apply_native_integration", BranchSensitivity::Independent),
+        ("tracedecay_native_integration_status", BranchSensitivity::Independent),
+        ("tracedecay_cancel_native_integration", BranchSensitivity::Independent),
+        // One Sensitive representative per remaining dispatch family.
+        ("tracedecay_search", BranchSensitivity::Sensitive),
+        ("tracedecay_status", BranchSensitivity::Sensitive),
+        ("tracedecay_dead_code", BranchSensitivity::Sensitive),
+        ("tracedecay_affected", BranchSensitivity::Sensitive),
+        ("tracedecay_str_replace", BranchSensitivity::Sensitive),
+        ("tracedecay_ast_grep_rewrite", BranchSensitivity::Sensitive),
+        ("tracedecay_health", BranchSensitivity::Sensitive),
+        ("tracedecay_multi_root_execute", BranchSensitivity::Sensitive),
+        ("tracedecay_code_symbol_search", BranchSensitivity::Sensitive),
+        ("tracedecay_diagnose", BranchSensitivity::Sensitive),
+        ("tracedecay_run_affected_tests", BranchSensitivity::Sensitive),
+        ("tracedecay_dashboard", BranchSensitivity::Sensitive),
+    ];
+
+    fn advertised_tool_names() -> Vec<String> {
+        use crate::tools::catalog_discovery::{
+            default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
+        };
+        use crate::{explore_call_budget, project_catalog_discovery_scope};
+
+        let profile_id = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
+            .expect("default profile");
+        get_catalog_filtered_tool_definitions_with_budget(
+            0,
+            explore_call_budget(0),
+            &profile_id,
+            &default_catalog_discovery_authority().expect("default discovery authority"),
+            &project_catalog_discovery_scope(),
+        )
+        .expect("advertised tools")
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect()
+    }
+
+    /// Every advertised tool resolves to one policy without panicking. The
+    /// pinned table is the Independent allowlist plus one Sensitive
+    /// representative per remaining family; an unlisted advertised Independent
+    /// classification is a failed audit, not a silent pass.
+    #[test]
+    fn advertised_tools_have_exactly_one_branch_sensitivity_policy() {
+        use std::collections::HashMap;
+
+        let pinned: HashMap<&str, BranchSensitivity> =
+            PINNED_BRANCH_SENSITIVITY.iter().copied().collect();
+        for (name, expected) in PINNED_BRANCH_SENSITIVITY {
+            assert_eq!(
+                tool_branch_sensitivity(name),
+                *expected,
+                "{name} must keep its pinned branch-sensitivity"
+            );
+        }
+        let mut policies = HashMap::new();
+        for name in advertised_tool_names() {
+            let policy = tool_branch_sensitivity(&name);
+            assert!(
+                matches!(
+                    policy,
+                    BranchSensitivity::Sensitive | BranchSensitivity::Independent
+                ),
+                "{name} must resolve to exactly one sensitivity policy"
+            );
+            if let Some(expected) = pinned.get(name.as_str()) {
+                assert_eq!(
+                    policy, *expected,
+                    "{name} must keep its pinned branch-sensitivity"
+                );
+            } else {
+                assert_eq!(
+                    policy,
+                    BranchSensitivity::Sensitive,
+                    "{name} is not in the Independent pin and must stay Sensitive"
+                );
+            }
+            policies.insert(name, policy);
+        }
+        assert!(!policies.is_empty(), "tools/list must advertise tools");
+        assert!(
+            policies
+                .values()
+                .any(|policy| *policy == BranchSensitivity::Independent),
+            "the advertised set must include the pinned Independent tools"
+        );
+        assert!(
+            policies
+                .values()
+                .any(|policy| *policy == BranchSensitivity::Sensitive),
+            "the advertised set must include branch-sensitive graph/git/edit tools"
+        );
+    }
+}

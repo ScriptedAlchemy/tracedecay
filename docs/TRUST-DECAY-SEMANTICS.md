@@ -1,4 +1,4 @@
-# Trust & Temporal-Decay Semantics — Current Behavior
+# Trust & Temporal-Decay semantics. Current behavior
 
 This document describes how a project-memory fact's persisted trust score
 changes, and how temporal decay affects search ranking, against the current
@@ -6,12 +6,12 @@ changes, and how temporal decay affects search ranking, against the current
 
 An earlier version of this document was written against a single-crate
 `src/memory/{retrieval,store,trust}.rs` layout, a `src/db/migrations.rs`
-schema, and MCP/dashboard modules under `src/mcp` / `src/dashboard` — none of
+schema, and MCP/dashboard modules under `src/mcp` / `src/dashboard`, none of
 which exist anymore. The relevant logic is now split across
-`crates/tracedecay-runtime-core/src/memory/trust.rs` (trust constants and
-bucketing), `crates/tracedecay-runtime-core/src/store/memory/scoring.rs`
-(the ranking-time decay formula), `crates/tracedecay-runtime-core/src/store/
-memory/crud/{commands.rs,feedback.rs,lineage.rs}` (the writers of trust),
+`crates/tracedecay-session-memory/src/memory/trust.rs` (trust constants and
+bucketing), `crates/tracedecay-session-memory/src/fact_store/scoring.rs`
+(the ranking-time decay formula), `crates/tracedecay-session-memory/src/
+fact_store/crud/{commands.rs,feedback.rs,lineage.rs}` (the writers of trust),
 and the `memory_v2_*` tables in
 `crates/tracedecay-runtime-core/src/db/memory_v2/schema/`. The policy
 conclusion this document previously reached still holds, and is restated
@@ -26,7 +26,7 @@ below against the current code.
   sweep, and no retrieval-time write that ages the stored value.
 - Temporal decay of *ranking* is applied **only at retrieval time**, computed
   dynamically from a fact's `updated_at` by `project_memory_temporal_decay`
-  in `scoring.rs` — a 365-day half-life, floored at 0.10. It is **never
+  in `scoring.rs`, a 365-day half-life, floored at 0.10. It is **never
   persisted** back to the fact.
 - Trust changes are event-sourced: every mutation to `trust_score` is
   recorded as a `FactLineageEventKindV1::TrustChanged` event in the fact's
@@ -51,8 +51,8 @@ by `(fact_id, owner_kind, project_id)`:
 | column | meaning | who writes it |
 |---|---|---|
 | `trust_score` | persisted per-fact trust, `CHECK`-constrained to `[0, 1]` (or `NULL`) | replayed from lineage events on every commit (see §2) |
-| `updated_at` | last mutation time — the input to the ranking decay factor | every commit that touches this fact (create, edit, feedback, curation) |
-| `retrieval_count` / `access_count` | scan count vs. returned-count | `project_memory_update_retrieval_projection_tx`, on every search/probe/reason/related hit |
+| `updated_at` | last mutation time, the input to the ranking decay factor | every commit that touches this fact (create, edit, feedback, curation) |
+| `retrieval_count` / `access_count` | scan count vs. returned-count | `project_memory_update_retrieval_projection_tx`, on search hits via `track_explicit_search` |
 | `last_retrieved_at` / `last_recalled_at` | last scan / last time a search actually returned the fact | the same retrieval-projection update |
 | `helpful_count` / `unhelpful_count` / `last_feedback_at` | feedback tallies | `project_memory_update_feedback_projection_tx`, on every feedback event |
 
@@ -75,24 +75,24 @@ from trust; trust is represented by the shared `Confidence` domain type
 
 The complete, current set of writers:
 
-1. **Create** (`fact_store_add`) — a fact is always created at
+1. **Create** (`fact_store_add`), a fact is always created at
    `DEFAULT_TRUST = 0.5` first; if the caller supplied a different explicit
    trust value, an immediate `TrustChanged { previous: 0.5, current: <requested> }`
    event is appended in the same commit (`store/memory/crud/project.rs`).
-2. **Update** (`fact_store_update`) — the update patch
+2. **Update** (`fact_store_update`), the update patch
    (`ProjectMemoryFactUpdatePatchV1`) can carry an absolute `trust: Option<Confidence>`
    alongside content/category/tags/entities/metadata; when present, it emits
    a `TrustChanged` event with the new absolute value (not a delta).
-3. **Feedback** (`fact_feedback`) — `project_memory_feedback_delta` maps
+3. **Feedback** (`fact_feedback`), `project_memory_feedback_delta` maps
    `Helpful → +0.05` / `Unhelpful → −0.10`; the new trust is
    `(old_trust + delta).clamp(0.0, 1.0)`, recorded as a `TrustChanged` event,
    and also bumps `helpful_count`/`unhelpful_count`/`last_feedback_at` via
    `project_memory_update_feedback_projection_tx` and appends a row to
    `memory_v2_feedback_history`. These deltas match the constants in
-   `crates/tracedecay-runtime-core/src/memory/trust.rs`
+   `crates/tracedecay-session-memory/src/memory/trust.rs`
    (`HELPFUL_DELTA = 0.05`, `UNHELPFUL_DELTA = -0.10`).
 
-That is the complete set — there is no separate "manual trust bump" tool with
+That is the complete set, there is no separate "manual trust bump" tool with
 its own delta argument anymore; an absolute trust set now goes through the
 same update patch as any other field edit. None of the above is time-driven;
 none runs on a schedule.
@@ -100,7 +100,7 @@ none runs on a schedule.
 ## 3. Where temporal decay is actually applied: retrieval, dynamically
 
 The only live decay is in recall ranking, in
-`crates/tracedecay-runtime-core/src/store/memory/scoring.rs`:
+`crates/tracedecay-session-memory/src/fact_store/scoring.rs`:
 
 ```rust
 pub(super) fn project_memory_temporal_decay(updated_at: UtcMicros, now: UtcMicros) -> f64 {
@@ -133,7 +133,7 @@ Properties (unchanged from the pre-rewrite formula):
 - **Persistent?** No. Nothing writes the decayed value back; `trust_score` on
   disk is always the raw, never-aged value.
 
-There is only one decay function in the current codebase — no second,
+There is only one decay function in the current codebase, no second,
 persisted-trust-aging routine exists alongside it.
 
 ## 4. Semantic model (condensed)
@@ -156,7 +156,7 @@ retrieval / not at all"):
   (`store/memory/curation/{review.rs,apply.rs}`) can record `Curated` lineage
   events (contradiction/merge dispositions) but does not itself age or reset
   trust; only add/update/feedback move `trust_score`.
-- **At retrieval time:** yes, ranking only — `project_memory_temporal_decay`,
+- **At retrieval time:** yes, ranking only, `project_memory_temporal_decay`,
   dynamic, never persisted.
 - **Persisted trust decay:** no. No writer in the current codebase ages a
   fact's stored `trust_score` based on elapsed time.

@@ -5,35 +5,47 @@
 //! states, and head-bound evidence is stale-wrapped without discarding rows.
 
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use axum::Json;
 use axum::extract::State;
-use axum::{Extension, Json};
+use futures_util::stream::{self, StreamExt};
 use schemars::JsonSchema;
 use serde::Serialize;
-use tracedecay_application::git::GitReadRequestV1;
-use tracedecay_domain::CommitId;
-use tracedecay_domain::feedback::{
-    CiFailureKindV1, GitHubReviewAuthorClassV1, GitHubReviewCoverageV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewLifecycleV1, GitHubReviewReadOperationV1,
-    GitHubReviewStateV1,
-};
-use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1, GitOperationStateV1};
-use tracedecay_usecases::advisory::GitHubReleaseV1;
-use tracedecay_usecases::delivery::{
+use tracedecay_application::advisory::{GitHubReleaseV1, ProjectGitHubReleasePageV1};
+use tracedecay_application::delivery::{
     MAX_PROJECT_DELIVERY_CI_CHECKS_V1, MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1,
     MAX_PROJECT_DELIVERY_RELEASES_V1, MAX_PROJECT_DELIVERY_REVIEW_ITEMS_V1,
+    ProjectDeliveryAttentionEvidenceV1, ProjectDeliveryAttentionItemV1,
+    ProjectDeliveryAttentionSourceV1, ProjectDeliveryAttentionStateV1,
     ProjectDeliveryCiAnnotationLevelV1, ProjectDeliveryCiAnnotationV1, ProjectDeliveryCiCheckV1,
     ProjectDeliveryCiConclusionV1, ProjectDeliveryCiSourceV1, ProjectDeliveryCiStatusV1,
     ProjectDeliveryCiTimelineV1, ProjectDeliveryFailureLocalizationSourceV1,
     ProjectDeliveryGitHubOperationSnapshotV1, ProjectDeliveryGitHubSourceV1,
-    ProjectDeliveryGitHubTimelineV1, ProjectDeliveryProviderMountGateV1,
+    ProjectDeliveryGitHubTimelineV1, ProjectDeliveryInboxAggregationV1,
+    ProjectDeliveryInboxCoverageV1, ProjectDeliveryInboxPullRequestStateV1,
+    ProjectDeliveryInboxSourceV1, ProjectDeliveryIndexedHeadV1, ProjectDeliveryMembershipBasisV1,
+    ProjectDeliveryProviderMountGateV1, ProjectDeliveryProviderStateV1,
+    ProjectDeliveryProximityAttentionSourceV1, ProjectDeliveryProximityRelationV1,
     ProjectDeliveryPullRequestIdentityV1, ProjectDeliveryPullRequestOperationV1,
-    ProjectDeliveryPullRequestStateV1, ProjectDeliveryPullRequestV1, ProjectDeliveryReadOutcomeV1,
-    ProjectDeliveryReadRequestV1, ProjectDeliveryReleaseSourceV1,
-    ProjectDeliveryReviewBodyPreviewV1, ProjectDeliveryReviewItemV1,
-    ProjectDeliveryReviewObservationKindV1, ProjectDeliveryReviewObservationV1,
-    ProjectDeliverySnapshotV1,
+    ProjectDeliveryPullRequestStateV1, ProjectDeliveryPullRequestV1, ProjectDeliveryReadKindV1,
+    ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1, ProjectDeliveryRegistrySourceV1,
+    ProjectDeliveryReleaseSourceV1, ProjectDeliveryReviewBodyPreviewV1,
+    ProjectDeliveryReviewItemV1, ProjectDeliveryReviewObservationKindV1,
+    ProjectDeliveryReviewObservationV1, ProjectDeliverySnapshotV1,
+    aggregate_project_delivery_inbox_v1,
+};
+use tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1;
+use tracedecay_contracts::git::GitReadRequestV1;
+use tracedecay_domain::feedback::{
+    CiFailureKindV1, GitHubReviewAuthorClassV1, GitHubReviewCoverageV1,
+    GitHubReviewIngressProviderOutcomeV1, GitHubReviewLifecycleV1, GitHubReviewQuarantineReasonV1,
+    GitHubReviewRateLimitCheckpointV1, GitHubReviewReadOperationV1, GitHubReviewStateV1,
+};
+use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1, GitOperationStateV1};
+use tracedecay_domain::{
+    CodeGenerationId, CommitId, ProjectId, RepositoryId, UtcMicros, WorktreeId,
 };
 
 use crate::application::git_reads::{
@@ -41,14 +53,17 @@ use crate::application::git_reads::{
 };
 use crate::git_query::{GitQueryBounds, GitStatusSummaryV1};
 
+use super::delivery_agent_usage::{DeliveryAgentUsageV1, agent_usage_projection};
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardVersionV1,
     DashboardWatermarkV1, scope_from_state,
 };
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 
-const DELIVERY_SOURCE_COUNT: u64 = 8;
+const DELIVERY_SOURCE_COUNT: u64 = 9;
+const MAX_DELIVERY_INBOX_PROJECTS_V1: usize = 64;
+const MAX_DELIVERY_INBOX_PULL_REQUESTS_V1: usize = 64;
 const DELIVERY_AUTHORITY: &str = "daemon-owned ProjectDeliveryReadPortV1 authority";
 const CI_LOCALIZATION_AUTHORITY: &str =
     "retained CI localization state and exact-evidence authority";
@@ -95,7 +110,7 @@ impl<T> DeliveryProjectionV1<T> {
         Self::Ready { value }
     }
 
-    fn unavailable(authority: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub(super) fn unavailable(authority: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::Unavailable {
             required_authority: authority.into(),
             reason: reason.into(),
@@ -265,6 +280,8 @@ pub struct DeliveryPullRequestV1 {
     pub id: String,
     pub label: String,
     pub provider: String,
+    /// The provider's internal id. Display names a pull request by its
+    /// identity `number`.
     pub pull_request_id: String,
     /// Retained PR identity from the allowlisted `RestGetPullRequest` read;
     /// absent when no identity generation is retained yet.
@@ -274,6 +291,8 @@ pub struct DeliveryPullRequestV1 {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct DeliveryPullRequestIdentityV1 {
+    /// The pull request's number in its repository (`#741`).
+    pub number: u64,
     pub title: String,
     pub state: DeliveryPullRequestStateV1,
     pub draft: bool,
@@ -304,7 +323,22 @@ pub struct DeliveryGitHubOperationSnapshotV1 {
     pub merge_base_commit_id: String,
     pub outcome: DeliveryGitHubOutcomeV1,
     pub coverage: DeliveryGitHubCoverageV1,
+    /// Comments the read observed but withheld from ingest, each with why.
+    pub quarantined: Vec<DeliveryGitHubQuarantinedCommentV1>,
     pub fetched_at_micros: i64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryGitHubQuarantinedCommentV1 {
+    pub comment_id: String,
+    pub reason: DeliveryGitHubQuarantineReasonV1,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryGitHubQuarantineReasonV1 {
+    PrivacySanitizer,
+    BodyOutOfBounds,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -577,48 +611,299 @@ pub struct DeliveryOverviewV1 {
     pub failure_localization: DeliveryProjectionV1<DeliveryFailureLocalizationTimelineV1>,
     pub releases: DeliveryProjectionV1<DeliveryReleaseTimelineV1>,
     pub generation_freshness: DeliveryProjectionV1<DeliveryGenerationFreshnessV1>,
+    pub agent_usage: DeliveryProjectionV1<DeliveryAgentUsageV1>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryRegistryStateV1 {
+    Ready,
+    Partial,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryInboxCoverageV1 {
+    Complete,
+    Partial,
+    Stale,
+    Denied,
+    Unavailable,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryProviderStateV1 {
+    Ready,
+    Partial,
+    Stale,
+    RateLimited,
+    Failed,
+    Denied,
+    NotPublished,
+    NotConfigured,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryInboxPullRequestStateV1 {
+    Current,
+    Partial,
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryAttentionSourceV1 {
+    CiFailure,
+    UnresolvedReview,
+    NewReviewComment,
+    Contradiction,
+    UnsafePattern,
+    TestRisk,
+    UnreviewedChangedCode,
+    WeakEvidence,
+    EvidenceGap,
+    OverlappingEdit,
+    ConfirmedConflict,
+    DivergentSharedImplementation,
+    StaleProviderState,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryAttentionStateV1 {
+    Active,
+    Clear,
+    Unavailable,
+    Denied,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryProximityRelationV1 {
+    CodeNeighborhoodCandidate,
+    SharedCodeCandidate,
+    OverlappingEdit,
+    ConfirmedConflict,
+}
+
+impl From<ProjectDeliveryProximityRelationV1> for DeliveryProximityRelationV1 {
+    fn from(relation: ProjectDeliveryProximityRelationV1) -> Self {
+        match relation {
+            ProjectDeliveryProximityRelationV1::CodeNeighborhoodCandidate => {
+                Self::CodeNeighborhoodCandidate
+            }
+            ProjectDeliveryProximityRelationV1::SharedCodeCandidate => Self::SharedCodeCandidate,
+            ProjectDeliveryProximityRelationV1::OverlappingEdit => Self::OverlappingEdit,
+            ProjectDeliveryProximityRelationV1::ConfirmedConflict => Self::ConfirmedConflict,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeliveryAttentionEvidenceV1 {
+    ProviderOperation {
+        operation: DeliveryGitHubReadOperationV1,
+        fetched_at_micros: i64,
+    },
+    ReviewComment {
+        comment_id: String,
+        path: String,
+    },
+    CiFailure {
+        failure_anchor: String,
+    },
+    IndexedGeneration {
+        generation: String,
+    },
+    ProximityEncounter {
+        encounter_id: String,
+        relation: DeliveryProximityRelationV1,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryAttentionItemV1 {
+    pub id: String,
+    pub project_id: String,
+    pub pull_request_id: String,
+    pub source: DeliveryAttentionSourceV1,
+    pub state: DeliveryAttentionStateV1,
+    pub evidence: Vec<DeliveryAttentionEvidenceV1>,
+    pub coverage: DeliveryInboxCoverageV1,
+    pub observed_at_micros: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeliveryMembershipBasisV1 {
+    SharedWorkObjective {
+        work_item_id: String,
+    },
+    SessionGitRelation {
+        session_id: String,
+        commit_id: String,
+    },
+    ExplicitHandoff {
+        handoff_id: String,
+    },
+    SharedAgent {
+        agent_id: String,
+    },
+    BranchPullRequestReference {
+        branch_ref: String,
+        head_commit_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryMembershipEdgeV1 {
+    pub id: String,
+    pub project_id: String,
+    pub pull_request_id: String,
+    pub basis: DeliveryMembershipBasisV1,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverySharedCodeRefKindV1 {
+    SharedCode,
+    Compare,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverySharedCodeRefStateV1 {
+    RequiresSelection,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliverySharedCodeRefV1 {
+    pub kind: DeliverySharedCodeRefKindV1,
+    pub state: DeliverySharedCodeRefStateV1,
+    pub href: String,
+    pub source_generation: String,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryInboxProjectV1 {
+    pub project_id: String,
+    pub label: String,
+    pub project_root: String,
+    pub git_common_dir: String,
+    pub repository_id: String,
+    pub worktree_id: String,
+    pub branch_ref: String,
+    pub indexed_head_commit_id: String,
+    pub indexed_generation: String,
+    pub provider_state: DeliveryProviderStateV1,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryInboxPullRequestV1 {
+    pub id: String,
+    pub project_id: String,
+    pub repository_id: String,
+    pub worktree_id: String,
+    pub branch_ref: String,
+    pub indexed_head_commit_id: String,
+    pub indexed_generation: String,
+    pub state: DeliveryInboxPullRequestStateV1,
+    pub pull_request: DeliveryPullRequestV1,
+    pub attention: Vec<DeliveryAttentionItemV1>,
+    pub shared_code: Vec<DeliverySharedCodeRefV1>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryInboxV1 {
+    pub registry_state: DeliveryRegistryStateV1,
+    pub projects: Vec<DeliveryInboxProjectV1>,
+    pub pull_requests: Vec<DeliveryInboxPullRequestV1>,
+    pub membership_edges: Vec<DeliveryMembershipEdgeV1>,
+    pub omitted_projects: u64,
+    pub excluded_pull_requests: u64,
 }
 
 pub type DashboardDeliveryReadFutureV1<'a> =
     Pin<Box<dyn Future<Output = ProjectDeliveryReadOutcomeV1> + Send + 'a>>;
 
-/// The daemon adapter owns application admission and re-resolves the exact
-/// live head. The HTTP handler supplies its observed head only as a bounded
-/// consistency watermark; it never constructs a `RequestContext`.
+#[derive(Clone, Debug)]
+pub struct DashboardDeliveryProjectV1 {
+    pub project_id: String,
+    pub project_root: PathBuf,
+}
+
+/// The daemon adapter owns application admission and re-resolves each exact
+/// registered project's live head. HTTP supplies the registered target and an
+/// observed head only as bounded consistency inputs; it never constructs a
+/// `RequestContext`.
+///
+/// Proximity is a read on this same port. Inbox HTTP must not thread a second
+/// authority for a join the delivery adapter already owns.
 pub trait DashboardDeliveryReadPortV1: Send + Sync {
     fn read(
         &self,
         control: DashboardHttpRequestControlV1,
-        project_id: Option<&str>,
+        project: DashboardDeliveryProjectV1,
         request: ProjectDeliveryReadRequestV1,
     ) -> DashboardDeliveryReadFutureV1<'_>;
+
+    /// Canonical proximity folded into Delivery's join input.
+    ///
+    /// The default is `Unsupported`: a port that does not read proximity must
+    /// not invent Clear. Production adapters override this and keep denied,
+    /// unavailable, and partial coverage distinct.
+    fn read_proximity_attention(
+        &self,
+        _control: DashboardHttpRequestControlV1,
+        _project: DashboardDeliveryProjectV1,
+    ) -> DashboardProximityAttentionReadFutureV1<'_> {
+        Box::pin(async { ProjectDeliveryProximityAttentionSourceV1::Unsupported })
+    }
 }
 
-#[hotpath::measure(label = "dashboard_api.delivery.overview", future = true)]
+pub type DashboardProximityAttentionReadFutureV1<'a> =
+    Pin<Box<dyn Future<Output = ProjectDeliveryProximityAttentionSourceV1> + Send + 'a>>;
+
+#[tracing::instrument(name = "dashboard_api.delivery.overview", level = "trace", skip_all)]
 pub async fn overview(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Json<DashboardEnvelopeV1<DeliveryOverviewV1>> {
     let (changes, commits) = read_git_projections(&state).await;
     let indexed_commit = match &state.code_index_freshness_reader {
-        Some(reader) => reader(state.project_root.clone())
-            .await
-            .and_then(|freshness| freshness.source_revision),
+        Some(reader) => match reader(state.project_root.clone()).await {
+            Ok(Some(freshness)) => freshness.source_revision,
+            _ => None,
+        },
         None => None,
     };
-    let generation_freshness = hotpath::measure_block!(
-        "dashboard_api.freshness.projection",
+    let generation_freshness = {
+        let _span = tracing::trace_span!("dashboard_api.freshness.projection").entered();
         generation_projection(&changes, indexed_commit)
-    );
+    };
     let live_head = live_head_commit(&changes).and_then(|head| CommitId::new(head).ok());
 
-    let delivery = match (state.delivery_read_authority.as_ref(), control, live_head) {
-        (Some(authority), Some(Extension(control)), Some(expected_head_commit_id)) => {
+    let delivery = match (
+        state.delivery_read_authority.as_ref(),
+        live_head,
+        state.project_id.as_ref(),
+    ) {
+        (Some(authority), Some(expected_head_commit_id), Some(project_id)) => {
             authority
                 .read(
                     control,
-                    state.project_id.as_deref(),
+                    DashboardDeliveryProjectV1 {
+                        project_id: project_id.clone(),
+                        project_root: state.project_root.clone(),
+                    },
                     ProjectDeliveryReadRequestV1 {
+                        kind: ProjectDeliveryReadKindV1::Overview,
                         expected_head_commit_id,
                         max_pull_requests: MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1,
                         max_review_items: MAX_PROJECT_DELIVERY_REVIEW_ITEMS_V1,
@@ -632,6 +917,7 @@ pub async fn overview(
     };
     let delivery_denied = matches!(&delivery, ProjectDeliveryReadOutcomeV1::Denied);
     let projections = delivery_projections(delivery);
+    let agent_usage = agent_usage_projection(&state, &changes).await;
     let payload = DeliveryOverviewV1 {
         changes,
         commits,
@@ -641,6 +927,7 @@ pub async fn overview(
         failure_localization: projections.failure_localization,
         releases: projections.releases,
         generation_freshness,
+        agent_usage,
     };
 
     let scope = scope_from_state(&state);
@@ -656,6 +943,7 @@ pub async fn overview(
             ("failure localization", &payload.failure_localization),
             ("releases", &payload.releases),
             ("generation freshness", &payload.generation_freshness),
+            ("agent usage", &payload.agent_usage),
         ];
         let (coverage, domain_state, freshness) = delivery_envelope_axes(&sources);
         DashboardEnvelopeV1::new(scope, domain_state, coverage, freshness, payload)
@@ -683,6 +971,567 @@ pub async fn overview(
             });
     }
     Json(envelope)
+}
+
+#[tracing::instrument(name = "dashboard_api.delivery.inbox", level = "trace", skip_all)]
+pub async fn inbox(
+    State(state): State<DashboardState>,
+    RequestControl(control): RequestControl,
+) -> Json<DashboardEnvelopeV1<DeliveryInboxV1>> {
+    let unavailable = || DeliveryInboxV1 {
+        registry_state: DeliveryRegistryStateV1::Unavailable,
+        projects: Vec::new(),
+        pull_requests: Vec::new(),
+        membership_edges: Vec::new(),
+        omitted_projects: 0,
+        excluded_pull_requests: 0,
+    };
+    let Some(registry) = state.savings_db.as_ref() else {
+        return Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            unavailable(),
+            "project_registry_not_mounted",
+        ));
+    };
+    let mut registered = match registry
+        .list_code_projects(MAX_DELIVERY_INBOX_PROJECTS_V1.saturating_add(1))
+        .await
+    {
+        Ok(registered) => registered,
+        Err(error) => {
+            return Json(DashboardEnvelopeV1::unavailable(
+                scope_from_state(&state),
+                unavailable(),
+                error.to_string(),
+            ));
+        }
+    };
+    let registry_truncated = registered.len() > MAX_DELIVERY_INBOX_PROJECTS_V1;
+    registered.truncate(MAX_DELIVERY_INBOX_PROJECTS_V1);
+    let reads = stream::iter(registered.into_iter().map(|project| {
+        let state = state.clone();
+        let control = control.clone();
+        async move {
+            let project_id = ProjectId::new(project.project_id.clone())
+                .map_err(|error| format!("registered project identity is invalid: {error}"))?;
+            let label = Path::new(&project.display_root)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map_or_else(|| project.display_root.clone(), str::to_owned);
+            let project_root = PathBuf::from(&project.canonical_root);
+            let freshness = match state.code_index_freshness_reader.as_ref() {
+                Some(reader) => reader(project_root.clone()).await,
+                None => Ok(None),
+            };
+            let project_root_for_proximity = project_root.clone();
+            let indexed = match freshness.as_ref() {
+                Ok(Some(freshness)) => indexed_delivery_head(freshness.clone()),
+                _ => None,
+            };
+            let delivery_read = async {
+                match (state.delivery_read_authority.as_ref(), indexed.as_ref()) {
+                    (Some(authority), Some(indexed)) => {
+                        authority
+                            .read(
+                                control.clone(),
+                                DashboardDeliveryProjectV1 {
+                                    project_id: project.project_id.clone(),
+                                    project_root: project_root.clone(),
+                                },
+                                ProjectDeliveryReadRequestV1 {
+                                    kind: ProjectDeliveryReadKindV1::Inbox,
+                                    expected_head_commit_id: indexed.head_commit_id.clone(),
+                                    max_pull_requests: MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1,
+                                    max_review_items: MAX_PROJECT_DELIVERY_REVIEW_ITEMS_V1,
+                                    max_ci_checks: MAX_PROJECT_DELIVERY_CI_CHECKS_V1,
+                                    max_releases: 1,
+                                },
+                            )
+                            .await
+                    }
+                    _ => ProjectDeliveryReadOutcomeV1::Unavailable,
+                }
+            };
+            let proximity_read = async {
+                match (
+                    state.delivery_read_authority.as_ref(),
+                    &freshness,
+                    indexed.as_ref(),
+                ) {
+                    (Some(authority), Ok(Some(_)), Some(_)) => {
+                        authority
+                            .read_proximity_attention(
+                                control.clone(),
+                                DashboardDeliveryProjectV1 {
+                                    project_id: project.project_id.clone(),
+                                    project_root: project_root_for_proximity,
+                                },
+                            )
+                            .await
+                    }
+                    // No proximity authority and a successful read: the feature
+                    // is not mounted. A failed or missing index is unavailable,
+                    // not an invented unsupported claim.
+                    (None, Ok(_), _) | (Some(_), Ok(_), None) => {
+                        ProjectDeliveryProximityAttentionSourceV1::Unsupported
+                    }
+                    _ => ProjectDeliveryProximityAttentionSourceV1::Unavailable,
+                }
+            };
+            let (delivery, proximity) = tokio::join!(delivery_read, proximity_read);
+            Ok::<_, String>(ProjectDeliveryInboxSourceV1 {
+                registry: ProjectDeliveryRegistrySourceV1 {
+                    project_id,
+                    label,
+                    project_root: project.display_root,
+                    git_common_dir: project.git_common_dir,
+                    repository_id: indexed
+                        .as_ref()
+                        .map(|indexed| indexed.repository_id.clone()),
+                    worktree_id: indexed.as_ref().map(|indexed| indexed.worktree_id.clone()),
+                    branch_ref: indexed.as_ref().map(|indexed| indexed.branch_ref.clone()),
+                },
+                indexed,
+                delivery,
+                memberships: Vec::new(),
+                proximity,
+            })
+        }
+    }))
+    .buffer_unordered(MAX_DELIVERY_INBOX_PROJECTS_V1)
+    .collect::<Vec<_>>()
+    .await;
+    let mut sources = Vec::with_capacity(reads.len());
+    for read in reads {
+        match read {
+            Ok(source) => sources.push(source),
+            Err(error) => {
+                return Json(DashboardEnvelopeV1::unavailable(
+                    scope_from_state(&state),
+                    unavailable(),
+                    error,
+                ));
+            }
+        }
+    }
+    let mut aggregation =
+        aggregate_project_delivery_inbox_v1(sources, MAX_DELIVERY_INBOX_PULL_REQUESTS_V1);
+    if registry_truncated {
+        aggregation.coverage = ProjectDeliveryInboxCoverageV1::Partial;
+        aggregation.omitted_projects = aggregation.omitted_projects.saturating_add(1);
+    }
+    let payload = map_delivery_inbox(
+        aggregation,
+        if registry_truncated {
+            DeliveryRegistryStateV1::Partial
+        } else {
+            DeliveryRegistryStateV1::Ready
+        },
+    );
+    let scope = scope_from_state(&state);
+    let coverage = if payload.omitted_projects == 0 {
+        DashboardCoverageV1::complete(payload.projects.len() as u64, "registered projects")
+    } else {
+        DashboardCoverageV1::partial(
+            payload
+                .projects
+                .len()
+                .saturating_add(payload.omitted_projects as usize) as u64,
+            payload.projects.len() as u64,
+            "registered projects",
+            vec!["delivery inbox omitted unindexed or unmounted projects".to_owned()],
+        )
+    };
+    let all_providers_denied = !payload.projects.is_empty()
+        && payload
+            .projects
+            .iter()
+            .all(|project| project.provider_state == DeliveryProviderStateV1::Denied);
+    let envelope = if all_providers_denied && payload.pull_requests.is_empty() {
+        DashboardEnvelopeV1::new(
+            scope,
+            DashboardDomainStateV1::Denied,
+            coverage,
+            DashboardFreshnessV1::unknown(),
+            payload,
+        )
+    } else if payload.registry_state == DeliveryRegistryStateV1::Ready
+        && payload.omitted_projects == 0
+        && payload.pull_requests.is_empty()
+    {
+        DashboardEnvelopeV1::complete_zero_findings(scope, coverage, payload)
+    } else if payload.registry_state == DeliveryRegistryStateV1::Partial
+        || payload.omitted_projects > 0
+    {
+        DashboardEnvelopeV1::new(
+            scope,
+            DashboardDomainStateV1::Partial,
+            coverage,
+            DashboardFreshnessV1::unknown(),
+            payload,
+        )
+    } else {
+        DashboardEnvelopeV1::ready(scope, coverage, payload)
+    }
+    .with_legal_actions(vec![DashboardLegalActionRefV1::new(
+        DashboardLegalActionKindV1::Refresh,
+        "use-case.dashboard.delivery.inbox.refresh",
+    )]);
+    Json(envelope)
+}
+
+fn indexed_delivery_head(
+    freshness: CodeIndexWorktreeFreshnessV1,
+) -> Option<ProjectDeliveryIndexedHeadV1> {
+    Some(ProjectDeliveryIndexedHeadV1 {
+        repository_id: RepositoryId::new(freshness.repository_id?).ok()?,
+        worktree_id: WorktreeId::new(freshness.worktree_id?).ok()?,
+        branch_ref: freshness.source_reference?,
+        head_commit_id: CommitId::new(freshness.source_revision?).ok()?,
+        generation: CodeGenerationId::new(freshness.latest_generation_id?).ok()?,
+        coverage: if !freshness.coverage.covers_indexable_sources() {
+            ProjectDeliveryInboxCoverageV1::Partial
+        } else if freshness.staleness_state
+            == Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
+        {
+            ProjectDeliveryInboxCoverageV1::Complete
+        } else {
+            ProjectDeliveryInboxCoverageV1::Stale
+        },
+        observed_at: UtcMicros(
+            freshness
+                .sealed_at_micros
+                .or(freshness.last_reconcile_micros)?,
+        ),
+    })
+}
+
+fn map_delivery_inbox(
+    aggregation: ProjectDeliveryInboxAggregationV1,
+    registry_state: DeliveryRegistryStateV1,
+) -> DeliveryInboxV1 {
+    let projects = aggregation
+        .projects
+        .into_iter()
+        .map(|project| DeliveryInboxProjectV1 {
+            project_id: project.project_id.as_str().to_owned(),
+            label: project.label,
+            project_root: project.project_root,
+            git_common_dir: project.git_common_dir,
+            repository_id: project.repository_id.as_str().to_owned(),
+            worktree_id: project.worktree_id.as_str().to_owned(),
+            branch_ref: project.branch_ref,
+            indexed_head_commit_id: project.indexed_head_commit_id.as_str().to_owned(),
+            indexed_generation: project.indexed_generation.as_str().to_owned(),
+            provider_state: map_provider_state(project.provider_state),
+        })
+        .collect();
+    let pull_requests = aggregation
+        .pull_requests
+        .into_iter()
+        .map(|pull_request| {
+            let project_id = pull_request.project_id.as_str().to_owned();
+            let pull_request_id = pull_request
+                .pull_request
+                .pull_request_id
+                .as_str()
+                .to_owned();
+            let indexed_generation = pull_request.indexed_generation.as_str().to_owned();
+            let indexed_head_commit_id = pull_request.indexed_head_commit_id.as_str().to_owned();
+            let shared_code = code_navigation_refs(
+                &pull_request.branch_ref,
+                &indexed_head_commit_id,
+                indexed_generation.clone(),
+            );
+            DeliveryInboxPullRequestV1 {
+                id: format!(
+                    "{project_id}:{}:{pull_request_id}",
+                    pull_request.pull_request.provider
+                ),
+                project_id: project_id.clone(),
+                repository_id: pull_request.repository_id.as_str().to_owned(),
+                worktree_id: pull_request.worktree_id.as_str().to_owned(),
+                branch_ref: pull_request.branch_ref,
+                indexed_head_commit_id,
+                indexed_generation,
+                state: map_inbox_pull_request_state(pull_request.state),
+                attention: pull_request
+                    .attention
+                    .into_iter()
+                    .map(|item| {
+                        map_attention_item(item, project_id.as_str(), pull_request_id.as_str())
+                    })
+                    .collect(),
+                shared_code,
+                pull_request: map_pull_request(pull_request.pull_request),
+            }
+        })
+        .collect();
+    let membership_edges = aggregation
+        .memberships
+        .into_iter()
+        .enumerate()
+        .map(|(index, edge)| {
+            let project_id = edge.project_id.as_str().to_owned();
+            let pull_request_id = edge.pull_request_id.as_str().to_owned();
+            let basis = map_membership_basis(edge.basis);
+            DeliveryMembershipEdgeV1 {
+                id: format!(
+                    "{project_id}:{pull_request_id}:{}:{index}",
+                    membership_basis_name(&basis),
+                ),
+                project_id,
+                pull_request_id,
+                basis,
+            }
+        })
+        .collect();
+    DeliveryInboxV1 {
+        registry_state,
+        projects,
+        pull_requests,
+        membership_edges,
+        omitted_projects: aggregation.omitted_projects as u64,
+        excluded_pull_requests: aggregation.excluded_pull_requests as u64,
+    }
+}
+
+fn map_provider_state(state: ProjectDeliveryProviderStateV1) -> DeliveryProviderStateV1 {
+    match state {
+        ProjectDeliveryProviderStateV1::Ready => DeliveryProviderStateV1::Ready,
+        ProjectDeliveryProviderStateV1::Partial => DeliveryProviderStateV1::Partial,
+        ProjectDeliveryProviderStateV1::Stale => DeliveryProviderStateV1::Stale,
+        ProjectDeliveryProviderStateV1::RateLimited => DeliveryProviderStateV1::RateLimited,
+        ProjectDeliveryProviderStateV1::Failed => DeliveryProviderStateV1::Failed,
+        ProjectDeliveryProviderStateV1::Denied => DeliveryProviderStateV1::Denied,
+        ProjectDeliveryProviderStateV1::NotPublished => DeliveryProviderStateV1::NotPublished,
+        ProjectDeliveryProviderStateV1::NotConfigured => DeliveryProviderStateV1::NotConfigured,
+        ProjectDeliveryProviderStateV1::Unavailable => DeliveryProviderStateV1::Unavailable,
+    }
+}
+
+/// Next steps, not completed Code readings.
+///
+/// `RequiresSelection` means this row does not name a symbol or a base
+/// revision. Shared Code must link to `/code`, where selection starts, not
+/// `/code?view=shared-code`, which blocks with no symbol. Compare carries the
+/// indexed head so the operator only names the base.
+fn code_navigation_refs(
+    branch_ref: &str,
+    indexed_head_commit_id: &str,
+    indexed_generation: String,
+) -> Vec<DeliverySharedCodeRefV1> {
+    let branch = branch_ref.strip_prefix("refs/heads/").unwrap_or(branch_ref);
+    let compare_href = format!(
+        "/code?view=compare&head={}&head_revision={}",
+        encode_query_component(branch),
+        encode_query_component(indexed_head_commit_id),
+    );
+    vec![
+        DeliverySharedCodeRefV1 {
+            kind: DeliverySharedCodeRefKindV1::SharedCode,
+            state: DeliverySharedCodeRefStateV1::RequiresSelection,
+            href: "/code".to_owned(),
+            source_generation: indexed_generation.clone(),
+        },
+        DeliverySharedCodeRefV1 {
+            kind: DeliverySharedCodeRefKindV1::Compare,
+            state: DeliverySharedCodeRefStateV1::RequiresSelection,
+            href: compare_href,
+            source_generation: indexed_generation,
+        },
+    ]
+}
+
+/// Match `URLSearchParams` application/x-www-form-urlencoded encoding so a
+/// client that follows this href and the dashboard that builds the same
+/// params agree on slashes in branch names.
+fn encode_query_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                encoded.push(byte as char);
+            }
+            b' ' => encoded.push('+'),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn map_inbox_pull_request_state(
+    state: ProjectDeliveryInboxPullRequestStateV1,
+) -> DeliveryInboxPullRequestStateV1 {
+    match state {
+        ProjectDeliveryInboxPullRequestStateV1::Current => DeliveryInboxPullRequestStateV1::Current,
+        ProjectDeliveryInboxPullRequestStateV1::Partial => DeliveryInboxPullRequestStateV1::Partial,
+        ProjectDeliveryInboxPullRequestStateV1::Stale => DeliveryInboxPullRequestStateV1::Stale,
+    }
+}
+
+fn map_attention_item(
+    item: ProjectDeliveryAttentionItemV1,
+    project_id: &str,
+    pull_request_id: &str,
+) -> DeliveryAttentionItemV1 {
+    let source = map_attention_source(item.source);
+    DeliveryAttentionItemV1 {
+        id: format!(
+            "{project_id}:{pull_request_id}:{}",
+            attention_source_name(source)
+        ),
+        project_id: project_id.to_owned(),
+        pull_request_id: pull_request_id.to_owned(),
+        source,
+        state: match item.state {
+            ProjectDeliveryAttentionStateV1::Active => DeliveryAttentionStateV1::Active,
+            ProjectDeliveryAttentionStateV1::Clear => DeliveryAttentionStateV1::Clear,
+            ProjectDeliveryAttentionStateV1::Unavailable => DeliveryAttentionStateV1::Unavailable,
+            ProjectDeliveryAttentionStateV1::Denied => DeliveryAttentionStateV1::Denied,
+        },
+        evidence: item
+            .evidence
+            .into_iter()
+            .map(|evidence| match evidence {
+                ProjectDeliveryAttentionEvidenceV1::ProviderOperation {
+                    operation,
+                    fetched_at,
+                } => DeliveryAttentionEvidenceV1::ProviderOperation {
+                    operation: map_github_operation(operation),
+                    fetched_at_micros: fetched_at.0,
+                },
+                ProjectDeliveryAttentionEvidenceV1::ReviewComment { comment_id, path } => {
+                    DeliveryAttentionEvidenceV1::ReviewComment {
+                        comment_id: comment_id.as_str().to_owned(),
+                        path,
+                    }
+                }
+                ProjectDeliveryAttentionEvidenceV1::CiFailure { failure_anchor } => {
+                    DeliveryAttentionEvidenceV1::CiFailure {
+                        failure_anchor: failure_anchor.as_str().to_owned(),
+                    }
+                }
+                ProjectDeliveryAttentionEvidenceV1::IndexedGeneration { generation } => {
+                    DeliveryAttentionEvidenceV1::IndexedGeneration {
+                        generation: generation.as_str().to_owned(),
+                    }
+                }
+                ProjectDeliveryAttentionEvidenceV1::ProximityEncounter {
+                    encounter_id,
+                    relation,
+                } => DeliveryAttentionEvidenceV1::ProximityEncounter {
+                    encounter_id: encounter_id.to_string(),
+                    relation: DeliveryProximityRelationV1::from(relation),
+                },
+            })
+            .collect(),
+        coverage: map_inbox_coverage(item.coverage),
+        observed_at_micros: item.observed_at.map(|observed| observed.0),
+    }
+}
+
+fn map_attention_source(source: ProjectDeliveryAttentionSourceV1) -> DeliveryAttentionSourceV1 {
+    match source {
+        ProjectDeliveryAttentionSourceV1::CiFailure => DeliveryAttentionSourceV1::CiFailure,
+        ProjectDeliveryAttentionSourceV1::UnresolvedReview => {
+            DeliveryAttentionSourceV1::UnresolvedReview
+        }
+        ProjectDeliveryAttentionSourceV1::NewReviewComment => {
+            DeliveryAttentionSourceV1::NewReviewComment
+        }
+        ProjectDeliveryAttentionSourceV1::Contradiction => DeliveryAttentionSourceV1::Contradiction,
+        ProjectDeliveryAttentionSourceV1::UnsafePattern => DeliveryAttentionSourceV1::UnsafePattern,
+        ProjectDeliveryAttentionSourceV1::TestRisk => DeliveryAttentionSourceV1::TestRisk,
+        ProjectDeliveryAttentionSourceV1::UnreviewedChangedCode => {
+            DeliveryAttentionSourceV1::UnreviewedChangedCode
+        }
+        ProjectDeliveryAttentionSourceV1::WeakEvidence => DeliveryAttentionSourceV1::WeakEvidence,
+        ProjectDeliveryAttentionSourceV1::EvidenceGap => DeliveryAttentionSourceV1::EvidenceGap,
+        ProjectDeliveryAttentionSourceV1::OverlappingEdit => {
+            DeliveryAttentionSourceV1::OverlappingEdit
+        }
+        ProjectDeliveryAttentionSourceV1::ConfirmedConflict => {
+            DeliveryAttentionSourceV1::ConfirmedConflict
+        }
+        ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation => {
+            DeliveryAttentionSourceV1::DivergentSharedImplementation
+        }
+        ProjectDeliveryAttentionSourceV1::StaleProviderState => {
+            DeliveryAttentionSourceV1::StaleProviderState
+        }
+    }
+}
+
+fn attention_source_name(source: DeliveryAttentionSourceV1) -> &'static str {
+    match source {
+        DeliveryAttentionSourceV1::CiFailure => "ci_failure",
+        DeliveryAttentionSourceV1::UnresolvedReview => "unresolved_review",
+        DeliveryAttentionSourceV1::NewReviewComment => "new_review_comment",
+        DeliveryAttentionSourceV1::Contradiction => "contradiction",
+        DeliveryAttentionSourceV1::UnsafePattern => "unsafe_pattern",
+        DeliveryAttentionSourceV1::TestRisk => "test_risk",
+        DeliveryAttentionSourceV1::UnreviewedChangedCode => "unreviewed_changed_code",
+        DeliveryAttentionSourceV1::WeakEvidence => "weak_evidence",
+        DeliveryAttentionSourceV1::EvidenceGap => "evidence_gap",
+        DeliveryAttentionSourceV1::OverlappingEdit => "overlapping_edit",
+        DeliveryAttentionSourceV1::ConfirmedConflict => "confirmed_conflict",
+        DeliveryAttentionSourceV1::DivergentSharedImplementation => {
+            "divergent_shared_implementation"
+        }
+        DeliveryAttentionSourceV1::StaleProviderState => "stale_provider_state",
+    }
+}
+
+fn map_inbox_coverage(coverage: ProjectDeliveryInboxCoverageV1) -> DeliveryInboxCoverageV1 {
+    match coverage {
+        ProjectDeliveryInboxCoverageV1::Complete => DeliveryInboxCoverageV1::Complete,
+        ProjectDeliveryInboxCoverageV1::Partial => DeliveryInboxCoverageV1::Partial,
+        ProjectDeliveryInboxCoverageV1::Stale => DeliveryInboxCoverageV1::Stale,
+        ProjectDeliveryInboxCoverageV1::Denied => DeliveryInboxCoverageV1::Denied,
+        ProjectDeliveryInboxCoverageV1::Unavailable => DeliveryInboxCoverageV1::Unavailable,
+        ProjectDeliveryInboxCoverageV1::Unsupported => DeliveryInboxCoverageV1::Unsupported,
+    }
+}
+
+fn map_membership_basis(basis: ProjectDeliveryMembershipBasisV1) -> DeliveryMembershipBasisV1 {
+    match basis {
+        ProjectDeliveryMembershipBasisV1::SharedWorkObjective { work_item_id } => {
+            DeliveryMembershipBasisV1::SharedWorkObjective { work_item_id }
+        }
+        ProjectDeliveryMembershipBasisV1::SessionGitRelation {
+            session_id,
+            commit_id,
+        } => DeliveryMembershipBasisV1::SessionGitRelation {
+            session_id,
+            commit_id: commit_id.as_str().to_owned(),
+        },
+        ProjectDeliveryMembershipBasisV1::ExplicitHandoff { handoff_id } => {
+            DeliveryMembershipBasisV1::ExplicitHandoff { handoff_id }
+        }
+        ProjectDeliveryMembershipBasisV1::SharedAgent { agent_id } => {
+            DeliveryMembershipBasisV1::SharedAgent { agent_id }
+        }
+        ProjectDeliveryMembershipBasisV1::BranchPullRequestReference {
+            branch_ref,
+            head_commit_id,
+        } => DeliveryMembershipBasisV1::BranchPullRequestReference {
+            branch_ref,
+            head_commit_id: head_commit_id.as_str().to_owned(),
+        },
+    }
+}
+
+fn membership_basis_name(basis: &DeliveryMembershipBasisV1) -> &'static str {
+    match basis {
+        DeliveryMembershipBasisV1::SharedWorkObjective { .. } => "shared_work_objective",
+        DeliveryMembershipBasisV1::SessionGitRelation { .. } => "session_git_relation",
+        DeliveryMembershipBasisV1::ExplicitHandoff { .. } => "explicit_handoff",
+        DeliveryMembershipBasisV1::SharedAgent { .. } => "shared_agent",
+        DeliveryMembershipBasisV1::BranchPullRequestReference { .. } => {
+            "branch_pull_request_reference"
+        }
+    }
 }
 
 trait ProjectionState {
@@ -776,15 +1625,12 @@ fn delivery_projections(outcome: ProjectDeliveryReadOutcomeV1) -> DeliverySource
     }
 }
 
-/// The exact project-open gate, rendered so a reader can tell "configure a
-/// token" apart from "broken".
+/// The exact project-open gate, rendered so a reader can tell an
+/// unmountable provider apart from a broken one.
 fn provider_mount_gate_reason(gate: ProjectDeliveryProviderMountGateV1) -> &'static str {
     match gate {
         ProjectDeliveryProviderMountGateV1::NoGitRemote => {
             "the admitted checkout has no recognizable GitHub remote, so no provider read can be mounted"
-        }
-        ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured => {
-            "no GitHub read-only credential is configured for this profile and repository — configure a token (or register the repository as public) to mount provider reads"
         }
         ProjectDeliveryProviderMountGateV1::GitHubAccessRefused => {
             "the configured GitHub credential was refused for this repository (missing, rejected, or write-capable), so provider reads stay unmounted"
@@ -989,8 +1835,8 @@ fn map_pull_request(item: ProjectDeliveryPullRequestV1) -> DeliveryPullRequestV1
     DeliveryPullRequestV1 {
         id: format!("{provider}:{pull_request_id}"),
         label: match item.identity.as_ref() {
-            Some(identity) => format!("Pull request #{pull_request_id} — {}", identity.title),
-            None => format!("Pull request #{pull_request_id}"),
+            Some(identity) => format!("Pull request #{}, {}", identity.number, identity.title),
+            None => "Pull request, number not served".to_owned(),
         },
         provider,
         pull_request_id,
@@ -1007,6 +1853,7 @@ fn map_pull_request_identity(
     identity: ProjectDeliveryPullRequestIdentityV1,
 ) -> DeliveryPullRequestIdentityV1 {
     DeliveryPullRequestIdentityV1 {
+        number: identity.number,
         title: identity.title,
         state: match identity.state {
             ProjectDeliveryPullRequestStateV1::Open => DeliveryPullRequestStateV1::Open,
@@ -1039,6 +1886,21 @@ fn map_github_snapshot(
         merge_base_commit_id: snapshot.merge_base_commit_id.as_str().to_owned(),
         outcome: map_github_outcome(snapshot.outcome),
         coverage: map_github_coverage(snapshot.coverage),
+        quarantined: snapshot
+            .quarantined
+            .into_iter()
+            .map(|item| DeliveryGitHubQuarantinedCommentV1 {
+                comment_id: item.comment_id.as_str().to_owned(),
+                reason: match item.reason {
+                    GitHubReviewQuarantineReasonV1::PrivacySanitizer => {
+                        DeliveryGitHubQuarantineReasonV1::PrivacySanitizer
+                    }
+                    GitHubReviewQuarantineReasonV1::BodyOutOfBounds => {
+                        DeliveryGitHubQuarantineReasonV1::BodyOutOfBounds
+                    }
+                },
+            })
+            .collect(),
         fetched_at_micros: snapshot.fetched_at.0,
     }
 }
@@ -1238,9 +2100,7 @@ fn release_projection(
     }
 }
 
-fn map_release_page(
-    page: tracedecay_usecases::advisory::ProjectGitHubReleasePageV1,
-) -> DeliveryReleaseTimelineV1 {
+fn map_release_page(page: ProjectGitHubReleasePageV1) -> DeliveryReleaseTimelineV1 {
     DeliveryReleaseTimelineV1 {
         items: page.releases.into_iter().map(map_release).collect(),
         truncated: page.truncated,
@@ -1280,7 +2140,7 @@ fn map_release(release: GitHubReleaseV1) -> DeliveryReleaseV1 {
 }
 
 fn rate_limit_checkpoint(
-    checkpoint: tracedecay_domain::feedback::GitHubReviewRateLimitCheckpointV1,
+    checkpoint: GitHubReviewRateLimitCheckpointV1,
 ) -> DeliveryRateLimitCheckpointV1 {
     DeliveryRateLimitCheckpointV1 {
         limit: checkpoint.limit,
@@ -1418,14 +2278,8 @@ async fn read_git_projections(
         );
     };
     let root = state.project_root.clone();
-    let project_sessions = state.lcm_db.clone();
-    tokio::task::spawn_blocking(move || {
-        let authority = match project_sessions {
-            Some(project_sessions) => {
-                GitReadAuthorityV1::new_with_project_sessions(root, scope.clone(), project_sessions)
-            }
-            None => GitReadAuthorityV1::new(root, scope.clone()),
-        };
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        let authority = GitReadAuthorityV1::new(root, scope.clone());
         let bounds = GitQueryBounds {
             max_entries: 100,
             ..GitQueryBounds::default()
@@ -1524,12 +2378,72 @@ fn generation_projection(
 #[cfg(test)]
 mod tests {
     use crate::read_model::{DashboardCoverageCompletenessV1, DashboardFreshnessStateV1};
-    use tracedecay_domain::feedback::{
-        FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadCheckpointV1,
+    use tracedecay_contracts::code_index_freshness::{
+        CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
     };
-    use tracedecay_domain::{ProjectId, ProviderId, RepositoryId, UtcMicros, WorktreeId};
+    use tracedecay_domain::feedback::FeedbackScopeV1;
+    use tracedecay_domain::feedback::github_review::GitHubPullRequestIdV1;
+    use tracedecay_domain::{ProjectId, ProviderId, RepositoryId, WorktreeId};
 
     use super::*;
+
+    #[test]
+    fn code_navigation_refs_start_selection_instead_of_opening_blocked_views() {
+        let refs = code_navigation_refs(
+            "refs/heads/feature/delivery",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "generation.alpha.1".to_owned(),
+        );
+        let shared = refs
+            .iter()
+            .find(|item| item.kind == DeliverySharedCodeRefKindV1::SharedCode)
+            .expect("shared code ref");
+        let compare = refs
+            .iter()
+            .find(|item| item.kind == DeliverySharedCodeRefKindV1::Compare)
+            .expect("compare ref");
+        assert_eq!(
+            shared.state,
+            DeliverySharedCodeRefStateV1::RequiresSelection
+        );
+        assert_eq!(shared.href, "/code");
+        assert!(!shared.href.contains("view=shared-code"));
+        assert_eq!(
+            compare.href,
+            "/code?view=compare&head=feature%2Fdelivery&head_revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_ne!(compare.href, "/code?view=compare");
+    }
+
+    #[test]
+    fn pull_request_label_names_the_repository_number_not_the_provider_id() {
+        let pull_request = |identity| ProjectDeliveryPullRequestV1 {
+            provider: ProviderId::new("github").unwrap(),
+            pull_request_id: GitHubPullRequestIdV1::new("4596824491").unwrap(),
+            identity,
+            operations: Vec::new(),
+        };
+        let identified =
+            map_pull_request(pull_request(Some(ProjectDeliveryPullRequestIdentityV1 {
+                number: 741,
+                title: "Fix kv docs".to_owned(),
+                state: ProjectDeliveryPullRequestStateV1::Open,
+                draft: false,
+                additions: 1,
+                deletions: 1,
+                changed_files: 1,
+            })));
+        assert_eq!(identified.label, "Pull request #741, Fix kv docs");
+        assert_eq!(
+            identified.identity.map(|identity| identity.number),
+            Some(741)
+        );
+        assert_eq!(identified.pull_request_id, "4596824491");
+        assert_eq!(
+            map_pull_request(pull_request(None)).label,
+            "Pull request, number not served"
+        );
+    }
 
     fn snapshot(retained_head: &str, expected_head: &str) -> ProjectDeliverySnapshotV1 {
         ProjectDeliverySnapshotV1 {
@@ -1597,7 +2511,8 @@ mod tests {
             ("five", &ready),
             ("six", &ready),
             ("seven", &ready),
-            ("eight", &stale),
+            ("eight", &ready),
+            ("nine", &stale),
         ];
 
         let (coverage, domain_state, freshness) = delivery_envelope_axes(&sources);
@@ -1616,14 +2531,14 @@ mod tests {
     #[test]
     fn provider_mount_gate_serves_an_actionable_reason_distinct_from_broken() {
         let gated = delivery_projections(ProjectDeliveryReadOutcomeV1::NotMounted {
-            gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+            gate: ProjectDeliveryProviderMountGateV1::NoGitRemote,
         });
         let DeliveryProjectionV1::Unavailable { reason, .. } = gated.pull_requests else {
             panic!("a gated mount must project as typed unavailable");
         };
         assert!(
-            reason.contains("configure a token"),
-            "the credential gate must tell the reader what to do: {reason}"
+            reason.contains("no recognizable GitHub remote"),
+            "the gate must name why no provider read mounted: {reason}"
         );
 
         let generic = delivery_projections(ProjectDeliveryReadOutcomeV1::Unavailable);
@@ -1636,7 +2551,7 @@ mod tests {
         };
         assert_ne!(
             reason, generic_reason,
-            "a missing credential must be distinguishable from a broken authority"
+            "a missing remote must be distinguishable from a broken authority"
         );
 
         let refused = delivery_projections(ProjectDeliveryReadOutcomeV1::NotMounted {
@@ -1652,35 +2567,59 @@ mod tests {
         assert!(refused_reason.contains("refused"));
     }
 
+    /// Sources no generation can index are a property of the tree, so a fresh
+    /// head that omits them still covers the delivery inbox completely.
     #[test]
-    fn provider_qualified_pull_request_preserves_optional_generations() {
-        let complete = ProjectDeliveryGitHubOperationSnapshotV1 {
-            provider_base_commit_id: CommitId::new("commit.base").unwrap(),
-            provider_head_commit_id: CommitId::new("commit.head").unwrap(),
-            merge_base_commit_id: CommitId::new("commit.merge-base").unwrap(),
-            outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
-            coverage: GitHubReviewCoverageV1::Complete,
-            fetched_at: UtcMicros(7),
-            checkpoint: GitHubReviewReadCheckpointV1 {
-                etag: None,
-                next_cursor: None,
-                rate_limit: None,
-            },
+    fn indexed_head_with_omitted_sources_is_complete_while_partial_reads_are_not() {
+        let head = |coverage| {
+            indexed_delivery_head(CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/project".to_owned(),
+                repository_id: Some("repository.delivery-api".to_owned()),
+                worktree_id: Some("worktree.delivery-api".to_owned()),
+                source_reference: Some("refs/heads/main".to_owned()),
+                source_revision: Some("a".repeat(40)),
+                latest_generation_id: Some("generation.alpha.1".to_owned()),
+                sealed_at_micros: Some(1),
+                staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+                coverage,
+                ..Default::default()
+            })
+            .expect("indexed head")
+            .coverage
         };
-        let mapped = map_pull_request(ProjectDeliveryPullRequestV1 {
-            provider: ProviderId::new("provider.github").unwrap(),
-            pull_request_id: GitHubPullRequestIdV1::new("42").unwrap(),
-            identity: None,
-            operations: vec![ProjectDeliveryPullRequestOperationV1 {
-                operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
-                latest_attempt: None,
-                last_complete: Some(complete),
-            }],
-        });
+        assert_eq!(
+            head(CodeIndexFreshnessCoverageV1::PartialOmittedSources),
+            ProjectDeliveryInboxCoverageV1::Complete
+        );
+        assert_eq!(
+            head(CodeIndexFreshnessCoverageV1::PartialHookHintOverflow),
+            ProjectDeliveryInboxCoverageV1::Partial
+        );
+    }
 
-        assert_eq!(mapped.id, "provider.github:42");
-        assert_eq!(mapped.operations.len(), 1);
-        assert!(mapped.operations[0].latest_attempt.is_none());
-        assert!(mapped.operations[0].last_complete.is_some());
+    #[tokio::test]
+    async fn inbox_without_a_registry_is_typed_unavailable() {
+        let (_project, state) =
+            crate::events_api::dashboard_state_fixture("project.delivery-inbox-unavailable").await;
+
+        let Json(envelope) = inbox(
+            State(state),
+            RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                "delivery-inbox-test",
+            )),
+        )
+        .await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
+        assert_eq!(
+            envelope.coverage.completeness,
+            DashboardCoverageCompletenessV1::Unknown
+        );
+        assert!(envelope.payload.projects.is_empty());
+        assert!(envelope.payload.pull_requests.is_empty());
+        assert_eq!(
+            envelope.payload.registry_state,
+            DeliveryRegistryStateV1::Unavailable
+        );
     }
 }

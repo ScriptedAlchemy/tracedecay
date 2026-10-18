@@ -1,21 +1,28 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::{
     Args,
     builder::{PossibleValuesParser, TypedValueParser},
 };
-use tracedecay_api::WorkOperation;
+use tracedecay_api::{WorkOperation, WorkflowOperation};
 
-fn work_operation_parser() -> impl TypedValueParser<Value = WorkOperation> {
-    PossibleValuesParser::new(WorkOperation::ALL.map(WorkOperation::route_segment))
-        .try_map(|segment| segment.parse::<WorkOperation>())
+pub(crate) trait ApplicationOperation:
+    Clone + Send + Sync + 'static + FromStr<Err = String>
+{
+    const HELP: &'static str;
+
+    fn values() -> PossibleValuesParser;
+}
+
+fn operation_parser<O: ApplicationOperation>() -> impl TypedValueParser<Value = O> {
+    O::values().try_map(|segment| segment.parse::<O>())
 }
 
 #[derive(Args)]
-pub struct WorkInvocationArgs {
-    /// Closed Work operation to invoke.
-    #[arg(value_parser = work_operation_parser())]
-    pub operation: WorkOperation,
+pub struct ApplicationInvocationArgs<O: ApplicationOperation> {
+    #[arg(value_parser = operation_parser::<O>(), help = O::HELP)]
+    pub operation: O,
     /// Strict typed request JSON file, or `-` to read it from stdin.
     #[arg(long, value_name = "FILE")]
     pub request_file: PathBuf,
@@ -25,4 +32,29 @@ pub struct WorkInvocationArgs {
     /// Emit one canonical JSON object and newline.
     #[arg(long)]
     pub json: bool,
+}
+
+impl ApplicationOperation for WorkOperation {
+    const HELP: &'static str = "Closed Work operation to invoke";
+
+    fn values() -> PossibleValuesParser {
+        PossibleValuesParser::new(WorkOperation::ALL.map(WorkOperation::route_segment))
+    }
+}
+
+impl ApplicationOperation for WorkflowOperation {
+    const HELP: &'static str = "Closed Workflow operation to invoke";
+
+    fn values() -> PossibleValuesParser {
+        PossibleValuesParser::new(WorkflowOperation::ALL.map(WorkflowOperation::route_segment))
+    }
+}
+
+#[derive(Args)]
+pub struct WorkInvocationArgs {
+    #[command(flatten)]
+    pub invocation: ApplicationInvocationArgs<WorkOperation>,
+    /// With `advance-job`, call again until the job completes or is refused.
+    #[arg(long)]
+    pub until_settled: bool,
 }

@@ -48,49 +48,23 @@ The harness does not run Cargo benchmarks. Build or Cargo benchmarking is a
 separate activity and is performed only when separately requested.
 
 Stable and beta release archives compile only the `production` feature profile.
-They do not contain Hotpath collectors, listeners, sampling, or allocator
-instrumentation. Hotpath 0.24 treats Cargo feature selection as its process-wide
-activation authority: feature-enabled gauges, futures, and instrumented locks
-can initialize collectors without a `HotpathGuard`, so an environment-only
-runtime gate cannot make one compiled binary dormant. Build a separate profiling
-binary with the required Hotpath feature lane when collecting performance
-evidence.
 
-When activated, Hotpath's metrics HTTP server defaults to port 6770 and its
-separate MCP server defaults to `http://127.0.0.1:6771/mcp`; override them with
-`HOTPATH_METRICS_PORT` and `HOTPATH_MCP_PORT`. These are profiler endpoints,
-not TraceDecay's product MCP transport.
+Instrumentation is unconditional. `tracing` spans ship in every binary. There
+is no profiler feature lane and no profiler HTTP or MCP surface.
 
-Coding agents attach to that MCP endpoint for live interrogation
-(`profiler_status`, `functions_timing`, lock/channel/I/O lanes). Claude Code
-picks it up automatically from the repo's `.mcp.json`. Codex needs a one-time
-global registration:
+Span timings come from the shipped `tracedecay` binary. Enable spans with
+`RUST_LOG` and set `TRACEDECAY_SPAN_TIMINGS=1`. Each enabled span then logs a
+`close` line to stderr with `time.busy` and `time.idle`. Most spans are
+`trace` level.
 
 ```sh
-codex mcp add hotpath --url http://127.0.0.1:6771/mcp
+RUST_LOG=tracedecay=trace TRACEDECAY_SPAN_TIMINGS=1 tracedecay <command>
 ```
 
-Both agents then talk to whichever Hotpath-enabled process currently owns the
-port; the first process wins the bind, and a second profiled process must take
-an alternate `HOTPATH_MCP_PORT` and be queried directly.
-
-The CPU feature is not a self-contained sampling executable. On Linux or
-macOS, install both `hotpath-samply` and `samply` on `PATH` before requesting
-CPU profiling. `HOTPATH_SAMPLY_WRAPPER_BIN` and `HOTPATH_SAMPLY_BIN` may point
-to explicit executable paths. The `tracedecay` CLI never starts the CPU
-sampler implicitly: the samply attach SIGSTOPs the profiled process until the
-attach completes, and a sampler failure inside that window would leave a
-headless hook or CLI invocation stopped forever. Request CPU sampling
-explicitly with `HOTPATH_REPORT` (for example `HOTPATH_REPORT=functions-cpu`),
-which overrides the CLI's default exclusion. Release archives do not bundle either external
-tool, so their absence must be reported as an unavailable CPU profiler rather
-than treated as CPU evidence.
-
-```sh
-cargo install hotpath --version 0.24.0 --locked \
-  --features hotpath-cpu --bin hotpath-samply
-cargo install samply --locked
-```
+CPU attribution is external tooling, not a shipped feature: attach `perf
+record -g -p <daemon pid>` while a lane runs, or attach `samply` when a
+flamegraph is wanted. Release archives bundle no sampler, so their absence is
+reported as an unavailable CPU profiler rather than treated as CPU evidence.
 
 `prepare` only validates and copies deterministic fixtures. It must not launch
 a daemon. Prepared data includes the checked-in project history and native
@@ -213,7 +187,7 @@ include serial and concurrent throughput cases. Hook and host cases measure
 their full external boundary rather than reporting only an internal handler
 timer.
 
-The final incident catalog additionally covers missing-daemon after-shell
+The final incident catalog also covers missing-daemon after-shell
 failure and descendant reaping, sustained edit/commit indexing coalescence,
 foreground work under maintenance, diagnostic deduplication/batching, daemon
 steady-state CPU/memory/WAL/I/O/queue/generation, and renderer-consumer event
@@ -341,3 +315,112 @@ Current shutdown observations are historical `n=1` regression samples:
 The abort values are offsets from trace start, not total durations and not time
 remaining after abort. These four observations are evidence for targeted
 regression checks only; they are not percentiles, baselines, SLOs, or gates.
+
+## Real-repository hot-path observation
+
+`scripts/bench-hot-paths.py` measures a prebuilt binary against a real
+repository. The paired harness uses fixtures, so it cannot show indexing,
+edit-reconcile, or graph memory cost at production scale. This script records
+those observations. It does not gate anything.
+
+```sh
+cargo build --package tracedecay-cli --bin tracedecay --release \
+  --no-default-features --features production --locked
+scripts/bench-hot-paths.py --bin target/release/tracedecay --out target/bench-hot-paths/base
+```
+
+The script never builds. It clones `--target-repo` (by default, this checkout)
+into a run directory that is private to the current user. It points HOME, XDG,
+the profile, and the daemon socket into that directory, starts a private
+daemon, and deletes the directory on exit. The edit lane appends one line to the
+disposable clone only. The target must be clean before output is created; the
+harness records its `HEAD` and verifies the clone has the same revision.
+
+`--seed-symbol NAME` is repeatable and defaults to `DaemonHandshake`,
+`default_socket_path`, `call_default_tool`, and `TraceDecay`. All supplied seeds
+are tried for callers-node discovery. The first seed drives `search_symbol`;
+the second drives `search_identifier` and `grep`, or the first is reused when
+only one seed is supplied.
+
+| Lane | What is measured |
+| --- | --- |
+| `cli_startup` | `--version` and `--help`: wall time, client CPU, and client max RSS from `wait4` |
+| `daemon_start` | Spawn until the socket binds, and until the daemon answers a status request. Before enrollment, the answer is a typed refusal. |
+| `index` | `init` until the status reports a current generation with a `ready` graph. A fast return from `init` does not mean the index is done. |
+| `request` | Sequential warm `status`, `search`, `grep`, `callers`, `context`, and plan `context` requests. Each sample records wall time and the daemon's CPU delta from `/proc`. |
+| `memory` | Daemon RSS split into anonymous and file memory, the thread count, profile size on disk, and the graph-engine owner bytes that `status` reports |
+| `edit_reconcile` | One appended line and `sync`, until a new generation is current and ready. A background sampler polls daemon RSS every ~100 ms from just before `sync` through readiness; RSS is typed unsupported where `/proc` is unavailable. |
+
+Session capture and read keep their fixture-backed harness,
+`scripts/run-session-temporal-benchmark.sh --run`. This script records that lane
+as delegated.
+
+The script writes three files to `--out`: `samples.jsonl` (raw samples, the
+measurement authority), `summary.json`, and `summary.md`. A p90 needs at least
+20 samples. With fewer samples it stays null. Daemon counters come from
+`/proc`; on other systems they are recorded as `unsupported`, not zero. A failed
+request records its typed problem code. The exit status is 0 when the run
+finishes, whatever the numbers. It is 2 for a preflight or harness error,
+including a daemon that died during the run.
+
+To compare two builds, run each binary against the same `--target-repo`
+revision on the same machine. Compare the `samples.jsonl` files, not single
+runs. For CPU attribution of a lane, attach `perf record -g -p <daemon pid>`
+while the lane runs. For OS-level counters, read
+`/proc/<pid>/status` and `perf stat` against the daemon pid.
+
+## Bounded MCP catalog audit
+
+The existing `large_repos` benchmark also provides a finite audit through the
+production composition. Build it with
+`cargo bench -p tracedecay --profile perf --features test-helpers,test-transport --bench large_repos --no-run`,
+then pass the executable printed by Cargo explicitly to the wrapper.
+
+```sh
+TRACEDECAY_BENCH_PROFILE=perf scripts/run-tool-performance.sh \
+  --bin /absolute/path/to/large_repos-executable \
+  --samples 1 \
+  --report /absolute/path/to/tool-audit.json
+```
+
+The wrapper stages the checked-in runtime fixture in a disposable Git repository
+and isolates home, profile, and host transcript inputs. It removes staging after
+confirming that the owned process group has stopped. A cleanup failure exits
+nonzero and reports the staging path while the child may still be alive.
+It never selects a binary from `PATH` or builds one.
+
+The report compares exercised query groups with the live maximal MCP catalog.
+The catalog snapshot includes canonical application surface bindings across
+MCP, CLI, HTTP, LSP, and dashboard surfaces. This audit measures
+the MCP binding projection only; `measured_surface` identifies that scope, and
+the other bindings require their own transport measurements. The catalog
+is an authority and provenance value, not a claim that this benchmark
+executed every binding.
+It retains first arguments and responses, direct dispatch timings, optional
+server duration telemetry, typed failures, setup omissions, and cleanup errors.
+The report lists catalog entries without a timed sample and entries without a
+passing behavioral assertion separately from missing query groups. Each gap
+or failed call makes the run fail. Asynchronous effects retain their admission
+timing and a separate completion measurement with the actual terminal record;
+an admission receipt alone does not count as completed functionality.
+Truncated results are verified after fetching the complete stored response
+through public MCP retrieval pages. The original timed response remains in the
+report; retrieval timing and the completed body are recorded separately.
+Setup, file-content assertions,
+and cleanup are outside the measured dispatch interval. Generation-dependent
+reads obtain a current symbol claim during setup.
+Work fixtures exercise admission, execution, cancellation, and evidence hydration
+with a configured local executable. Model and host execution require their own
+production journeys and measurements.
+Nonrepeatable effects, such as removing an owned linked worktree, receive one
+sample and record that limit in `samples_target`. Criterion omits these groups
+before warmup because later iterations would lack their real precondition.
+
+One sample is a coverage diagnostic. Dispatch success does not prove semantic
+correctness, and samples from different query variants or first/repeat states
+must not be pooled into a tail-latency claim. Pair the audit with the functional
+MCP and production transport journeys before claiming that tools work. Set
+`TRACEDECAY_SPAN_TIMINGS=1` and `RUST_LOG=large_repos=trace` for setup and dispatch
+span diagnostics; retain a separate run without diagnostic logging for latency
+comparison. The supplied profile label and checkout identity are report metadata;
+the executable SHA-256 identifies the measured artifact.

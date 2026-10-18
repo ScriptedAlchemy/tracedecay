@@ -1,6 +1,6 @@
 {
   "name": "@tracedecay/sdk",
-  "version": "0.1.0",
+  "version": "0.15.0",
   "type": "module",
   "description": "Generated TraceDecay API contracts with a strict lifecycle client.",
   "author": "ScriptedAlchemy",
@@ -45,17 +45,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --exclude test/installed-package.test.ts",
     "test:installed": "vitest run test/installed-package.test.ts",
-    "prepack": "npm run build",
-    "prepublishOnly": "npm run typecheck && npm test && npm run test:installed",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "pnpm run typecheck && pnpm test && pnpm run test:installed",
     "pack": "npm pack --dry-run --ignore-scripts"
   },
   "devDependencies": {
-    "@rslib/core": "^0.23.2",
+    "@rslib/core": "^1.0.0",
     "@types/node": "^26.1.2",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.10"
-  },
-  "overrides": {
-    "esbuild": "^0.28.1"
+    "typescript": "^7.0.0",
+    "vitest": "^5.0.0"
   }
 }

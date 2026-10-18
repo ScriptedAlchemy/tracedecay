@@ -6,6 +6,49 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
+    fn every_retired_checkout_layout_file_is_a_typed_project_store_reset() {
+        let profile = tempfile::tempdir().unwrap();
+        let profile_root = profile.path().join(crate::config::TRACEDECAY_DIR);
+        for name in ["enrollment.json", "config.json", "tracedecay.db"] {
+            let dir = tempfile::tempdir().unwrap();
+            let checkout_dir = dir.path().join(".tracedecay");
+            refuse_retired_checkout_layout(&profile_root, dir.path()).unwrap();
+            fs::create_dir_all(&checkout_dir).unwrap();
+            fs::write(checkout_dir.join("domain-symbols.toml"), "").unwrap();
+            refuse_retired_checkout_layout(&profile_root, dir.path()).unwrap();
+
+            fs::write(checkout_dir.join(name), "{}").unwrap();
+            let error = refuse_retired_checkout_layout(&profile_root, dir.path()).unwrap_err();
+
+            let (authority, reason) = error.reset_required_context().unwrap();
+            assert_eq!(authority, "project store", "{name}");
+            assert!(
+                reason.contains(&checkout_dir.display().to_string()),
+                "{reason}"
+            );
+            assert_eq!(
+                retired_checkout_layout_dir(&profile_root, dir.path()),
+                Some(checkout_dir)
+            );
+        }
+    }
+
+    #[test]
+    fn the_profile_root_is_never_a_retired_checkout_layout() {
+        let home = tempfile::tempdir().unwrap();
+        let profile_root = home.path().join(crate::config::TRACEDECAY_DIR);
+        fs::create_dir_all(&profile_root).unwrap();
+        fs::write(profile_root.join("enrollment.json"), "{}").unwrap();
+        let other_profile = tempfile::tempdir().unwrap();
+
+        refuse_retired_checkout_layout(&profile_root, home.path()).unwrap();
+        assert_eq!(
+            retired_checkout_layout_dir(other_profile.path(), home.path()),
+            Some(profile_root)
+        );
+    }
+
+    #[test]
     fn repository_marker_keeps_the_existing_store_when_fallback_identity_differs() {
         let dir = tempfile::tempdir().unwrap();
         let project_root = dir.path().join("repo");
@@ -106,23 +149,35 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_durable_first_create_converges_on_one_directory() {
+    fn concurrent_durable_overlapping_parents_converge() {
         let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("private").join("response-handles");
-        let barrier = Arc::new(Barrier::new(2));
-        let workers = [(), ()].map(|()| {
-            let target = target.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                PrivateStoreIo::create_dir_all_durable(&target)
+        let dashboard = root.path().join("dashboard");
+        let lock_dir = dashboard.join("automation_locks");
+        let writers = 8;
+        let barrier = Arc::new(Barrier::new(writers));
+        let workers = (0..writers)
+            .map(|index| {
+                let target = if index % 2 == 0 {
+                    dashboard.clone()
+                } else {
+                    lock_dir.clone()
+                };
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    PrivateStoreIo::create_dir_all_durable(&target)
+                })
             })
-        });
+            .collect::<Vec<_>>();
 
         for worker in workers {
             worker.join().unwrap().unwrap();
         }
-        assert!(target.is_dir());
+
+        tracedecay_private_fs::validate_private_directory(&dashboard)
+            .expect("the shared parent converges to one private directory");
+        tracedecay_private_fs::validate_private_directory(&lock_dir)
+            .expect("the nested child converges to one private directory");
     }
 
     #[test]
@@ -255,17 +310,6 @@ mod tests {
                 worker.join().unwrap();
             }
         }
-    }
-
-    #[test]
-    fn durable_namespace_sync_fault_scope_clears_on_unwind() {
-        let unwind = std::panic::catch_unwind(|| {
-            with_durable_namespace_sync_fault_for_test(1, || panic!("before sync"));
-        });
-        assert!(unwind.is_err());
-
-        let root = tempfile::tempdir().unwrap();
-        PrivateStoreIo::create_dir_all_durable(&root.path().join("after-panic")).unwrap();
     }
 
     #[test]

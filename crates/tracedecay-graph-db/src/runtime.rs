@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{
@@ -24,11 +23,9 @@ use crate::verified_marker::{ContainerIdentity, GenerationMarkers};
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability,
     GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
-    GraphProperty, GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest,
-    GraphPublicationReceipt, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphRelationTarget, GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
-    GraphWriteBatch, ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
-    VectorSearchResult, mutation, traversal, vector,
+    GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest, GraphPublicationReceipt,
+    GraphRelation, GraphRelationId, GraphRelationKind, GraphRelationTarget, GraphWatermark,
+    GraphWriteBatch, ProjectionReplacement, TraversalRequest, TraversalResult, mutation, traversal,
 };
 
 enum ReplacementPrecondition<'a> {
@@ -42,7 +39,6 @@ pub(crate) struct PreparedGraphBatch {
     pub(crate) batch: GraphWriteBatch,
     pub(crate) metadata: mutation::CommitMetadata,
     pub(crate) endpoint_namespaces: mutation::RelationEndpointNamespaces,
-    pub(crate) ensure_page_vector_indexes: bool,
 }
 
 /// Outcome of deriving a gated batch: apply it, or adopt an already-stored
@@ -58,9 +54,10 @@ pub struct GraphDb {
 
 pub(crate) struct Inner {
     pub(crate) database: RwLock<Option<GrafeoDB>>,
-    state: RwLock<FormatState>,
+    state: RwLock<Option<FormatState>>,
     pub(crate) durability: GraphDurability,
     pub(crate) reopen: Option<ValidatedOpen>,
+    lazy_store_state: Mutex<Option<PersistentGraphStoreState>>,
     pub(crate) snapshot_gate: Arc<ParkingRwLock<()>>,
     pub(crate) verified_generations: RwLock<VerifiedGenerationState>,
     pub(crate) quarantined_projections: RwLock<BTreeSet<(GraphNamespace, GraphProjectionId)>>,
@@ -86,8 +83,113 @@ pub(crate) struct Inner {
     pub(crate) label_keys: crate::epoch_cache::LabelKeyCache,
     pub(crate) adjacency_ids: crate::adjacency_id_index::AdjacencyIdIndexCache,
     pub(crate) projection_approvals: crate::epoch_cache::ProjectionApprovalCache,
+    /// Live [`GraphServingEnginePin`]s. While any exists, no hibernation path
+    /// releases the native engine, so a serving generation opens once and
+    /// every reader shares it instead of reopening on the request path.
+    serving_pins: AtomicUsize,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
+    engine_usage_bytes: Mutex<Option<u64>>,
+}
+
+/// Keeps one graph database's native engine resident for as long as the
+/// serving owner that took it holds it.
+///
+/// Taking the pin materializes the engine (the corpus-sized open) on the
+/// caller's thread, which is why serving owners take it during background
+/// activation, never on a request path.
+pub struct GraphServingEnginePin {
+    inner: Arc<Inner>,
+    /// A layered store's base engine, pinned for as long as this one.
+    companion: Option<Box<GraphServingEnginePin>>,
+}
+
+impl GraphServingEnginePin {
+    pub(crate) fn with_companion(mut self, companion: GraphServingEnginePin) -> Self {
+        self.companion = Some(Box::new(companion));
+        self
+    }
+}
+
+impl Drop for GraphServingEnginePin {
+    fn drop(&mut self) {
+        self.inner.serving_pins.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl std::fmt::Debug for GraphServingEnginePin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GraphServingEnginePin")
+            .finish_non_exhaustive()
+    }
+}
+
+struct OpenedGraphState {
+    database: GrafeoDB,
+    state: FormatState,
+    quarantined_projections: BTreeSet<(GraphNamespace, GraphProjectionId)>,
+    /// The container the engine loaded, as its own handle reported it the
+    /// moment the open returned -- before this crate collapses a replayed WAL
+    /// or initializes the format, either of which may checkpoint and move the
+    /// header away from the one the marker was written against.
+    identity: Option<ContainerIdentity>,
+}
+
+/// Open a lazily mounted engine, recovering a deterministically corrupt or
+/// superseded existing container by the same rules as an eager open.
+fn open_lazy_engine(
+    validated: &ValidatedOpen,
+    persistent_store_state: PersistentGraphStoreState,
+) -> Result<OpenedGraphState, GraphDbError> {
+    let opened = match open_validated_graph(validated, GraphEngineOpenSite::LazyFirstUse) {
+        Ok(opened) => opened,
+        Err(GraphDbError::Corrupt { message })
+            if persistent_store_state == PersistentGraphStoreState::Existing =>
+        {
+            let path = validated.config.path.as_deref().ok_or_else(|| {
+                GraphDbError::unavailable("persistent graph database has no container path")
+            })?;
+            match crate::corrupt_store::recover_deterministically_corrupt_container_with(
+                path,
+                &message,
+                &|| open_validated_graph(validated, GraphEngineOpenSite::LazyFirstUse),
+            )? {
+                crate::corrupt_store::CorruptStoreRecovery::Reopened(opened) => opened,
+                crate::corrupt_store::CorruptStoreRecovery::Deleted => {
+                    let mut fresh = validated.clone();
+                    fresh.preexisting_store = false;
+                    let opened = open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?;
+                    tracing::info!(
+                        event = "store_rebuilt_after_corruption",
+                        container = %path.display(),
+                        "fresh graph store opened after deleting a corrupt container; \
+                         canonical replay authorities re-project its generations"
+                    );
+                    opened
+                }
+            }
+        }
+        Err(GraphDbError::FormatSuperseded { .. })
+            if persistent_store_state == PersistentGraphStoreState::Existing =>
+        {
+            let path = validated.config.path.as_deref().ok_or_else(|| {
+                GraphDbError::unavailable("persistent graph database has no container path")
+            })?;
+            match crate::corrupt_store::replace_superseded_container(path, &|| {
+                open_validated_graph(validated, GraphEngineOpenSite::LazyFirstUse)
+            })? {
+                crate::corrupt_store::CorruptStoreRecovery::Reopened(opened) => opened,
+                crate::corrupt_store::CorruptStoreRecovery::Deleted => {
+                    let mut fresh = validated.clone();
+                    fresh.preexisting_store = false;
+                    open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?
+                }
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(opened)
 }
 
 impl Inner {
@@ -96,6 +198,19 @@ impl Inner {
         self.label_keys.invalidate();
         self.adjacency_ids.invalidate();
         self.projection_approvals.invalidate();
+        *self
+            .engine_usage_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Heap bytes the store-epoch caches hold. They are derived from the open
+    /// engine and dropped when it hibernates, so they are the engine's.
+    fn store_epoch_cache_bytes(&self) -> usize {
+        self.identity_indexes.heap_bytes()
+            + self.label_keys.heap_bytes()
+            + self.adjacency_ids.heap_bytes()
+            + self.projection_approvals.heap_bytes()
     }
 }
 
@@ -111,6 +226,14 @@ pub enum GraphDbRuntimeState {
     Closed,
     DurabilityUncertain,
 }
+
+/// Least uncheckpointed WAL history at which a commit checkpoints.
+///
+/// A checkpoint rewrites the whole container, so the trigger is the larger of
+/// this floor and the container's size: the WAL stays within one container's
+/// worth of history and rewrites cost at most one container per container of
+/// writes.
+const GRAFEO_WAL_CHECKPOINT_BYTES: u64 = 128 * 1024 * 1024;
 
 impl std::fmt::Debug for GraphDb {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -142,54 +265,33 @@ impl GraphDb {
         Self::open_with_store_state(options, None)
     }
 
-    #[hotpath::measure(label = "graph_db.generation.open", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.generation.open", level = "trace", skip_all)]
     pub(crate) fn open_with_store_state(
         options: GraphDbOpenOptions,
         persistent_store_state: Option<PersistentGraphStoreState>,
     ) -> Result<Arc<Self>, GraphDbError> {
         let validated = options.validate(persistent_store_state)?;
-        // The container's identity has to be read *before* grafeo opens it: an
-        // open may replay and checkpoint the WAL, which moves the modification
-        // time and length before any later caller could observe the identity
-        // the marker was written against.
-        let markers = match validated.config.path.as_deref() {
-            Some(container) => {
-                GenerationMarkers::open(container, ContainerIdentity::read(container))
-            }
-            None => GenerationMarkers::detached(),
-        };
-        // The engine call is where a persistent open pays for corpus size:
-        // grafeo replays the whole serialized LPG block log through the live
-        // mutation path, rebuilds every catalog-listed property index with a
-        // full node scan each, and replays any sidecar WAL an unclean
-        // shutdown left behind. The phases after it are O(labels), not
-        // O(rows), so this span is what a slow open decomposes into first.
-        let database = hotpath::measure_block!(
-            "graph_db.generation.open.engine",
-            GrafeoDB::with_config(validated.config.clone())
-                .map_err(|error| map_open_error(error, validated.preexisting_store))
-        )?;
-        crate::recovery::record_open_corpus_gauges(&database);
-        validate_or_initialize_format(&database, &validated)?;
-        let state = hotpath::measure_block!(
-            "graph_db.generation.open.state",
-            FormatState::load(&database)
-        )?;
-        let quarantined_projections = load_quarantined_projections(&database)?;
-        crate::recovery::collapse_replayed_wal(&database);
+        let markers = GenerationMarkers::new(validated.config.path.as_deref());
+        let opened = open_validated_graph(&validated, GraphEngineOpenSite::Eager)?;
+        if let Some(path) = validated.config.path.as_deref() {
+            crate::sealed_store::sweep_abandoned_sealed_staging(path);
+            crate::sealed_store::sweep_abandoned_row_spills(path);
+        }
+        markers.bind(opened.identity);
         let graph = Arc::new(Self {
             inner: Arc::new(Inner {
-                database: RwLock::new(Some(database)),
-                state: RwLock::new(state),
+                database: RwLock::new(Some(opened.database)),
+                state: RwLock::new(Some(opened.state)),
                 durability: validated.durability,
                 reopen: validated.config.path.as_ref().map(|_| {
                     let mut reopen = validated.clone();
                     reopen.preexisting_store = true;
                     reopen
                 }),
+                lazy_store_state: Mutex::new(None),
                 snapshot_gate: Arc::new(ParkingRwLock::new(())),
                 verified_generations: RwLock::new(VerifiedGenerationState::default()),
-                quarantined_projections: RwLock::new(quarantined_projections),
+                quarantined_projections: RwLock::new(opened.quarantined_projections),
                 sealed_generations: RwLock::new(BTreeMap::new()),
                 sealed_read_only: AtomicBool::new(false),
                 markers,
@@ -197,13 +299,47 @@ impl GraphDb {
                 label_keys: crate::epoch_cache::LabelKeyCache::default(),
                 adjacency_ids: crate::adjacency_id_index::AdjacencyIdIndexCache::default(),
                 projection_approvals: crate::epoch_cache::ProjectionApprovalCache::default(),
+                serving_pins: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
+                engine_usage_bytes: Mutex::new(None),
             }),
         });
-        graph.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Open);
-        graph.record_vector_index_census(VectorIndexCensusPhase::Restore);
+        graph.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::Open);
         Ok(graph)
+    }
+
+    pub(crate) fn open_lazy_with_store_state(
+        options: GraphDbOpenOptions,
+        persistent_store_state: PersistentGraphStoreState,
+    ) -> Result<Arc<Self>, GraphDbError> {
+        let validated = options.validate(Some(persistent_store_state))?;
+        // No engine is resident yet, so no marker is admitted: `ensure_opened`
+        // binds the proofs to the container the engine actually opens.
+        let markers = GenerationMarkers::new(validated.config.path.as_deref());
+        Ok(Arc::new(Self {
+            inner: Arc::new(Inner {
+                database: RwLock::new(None),
+                state: RwLock::new(None),
+                durability: validated.durability,
+                reopen: Some(validated),
+                lazy_store_state: Mutex::new(Some(persistent_store_state)),
+                snapshot_gate: Arc::new(ParkingRwLock::new(())),
+                verified_generations: RwLock::new(VerifiedGenerationState::default()),
+                quarantined_projections: RwLock::new(BTreeSet::new()),
+                sealed_generations: RwLock::new(BTreeMap::new()),
+                sealed_read_only: AtomicBool::new(false),
+                markers,
+                identity_indexes: crate::projection_identity_index::IdentityIndexCache::default(),
+                label_keys: crate::epoch_cache::LabelKeyCache::default(),
+                adjacency_ids: crate::adjacency_id_index::AdjacencyIdIndexCache::default(),
+                projection_approvals: crate::epoch_cache::ProjectionApprovalCache::default(),
+                serving_pins: AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+                poisoned: AtomicBool::new(false),
+                engine_usage_bytes: Mutex::new(None),
+            }),
+        }))
     }
 
     #[must_use]
@@ -217,18 +353,15 @@ impl GraphDb {
         }
     }
 
-    #[hotpath::measure(label = "graph_db.snapshot.acquire", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.snapshot.acquire", level = "trace", skip_all)]
     pub fn snapshot(self: &Arc<Self>) -> Result<GraphSnapshot, GraphDbError> {
-        let lease = crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_READ,
-            || self.inner.snapshot_gate.read_arc(),
-        );
+        let lease = crate::observe::wait_lock(crate::observe::LOCK_WAIT_SNAPSHOT_GATE_READ, || {
+            self.inner.snapshot_gate.read_arc()
+        });
         let guard = self.read_guard()?;
         guard.as_ref().ok_or(GraphDbError::Closed)?;
         drop(guard);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Snapshot,
-        );
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Snapshot);
         Ok(GraphSnapshot {
             database: Arc::clone(self),
             _lease: lease,
@@ -240,7 +373,7 @@ impl GraphDb {
     ///
     /// The result identifies this handle's native state only; callers keep
     /// canonical projection inputs independently and can rebuild the index.
-    #[hotpath::measure(label = "graph_db.write.apply", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.write.apply", level = "trace", skip_all)]
     pub fn apply_unverified(
         &self,
         mut batch: GraphWriteBatch,
@@ -253,9 +386,12 @@ impl GraphDb {
             return Err(GraphDbError::Cancelled);
         }
         let mut state = self.state_write_guard()?;
+        let state = state
+            .as_mut()
+            .ok_or_else(|| GraphDbError::unavailable("graph format state is unavailable"))?;
         self.apply_locked(
             database,
-            &mut state,
+            state,
             batch,
             mutation::CommitMetadata::for_digest(digest),
             &mutation::RelationEndpointNamespaces::new(),
@@ -288,7 +424,7 @@ impl GraphDb {
         )
     }
 
-    #[hotpath::measure(label = "graph_db.write.replace", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.write.replace", level = "trace", skip_all)]
     fn replace_projection_unverified_inner(
         &self,
         replacement: ProjectionReplacement,
@@ -363,7 +499,6 @@ impl GraphDb {
                         batch,
                         metadata: mutation::CommitMetadata::for_digest(digest),
                         endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
-                        ensure_page_vector_indexes: false,
                     },
                     (),
                 ))
@@ -376,7 +511,7 @@ impl GraphDb {
     ///
     /// This is local replay metadata for a rebuildable graph projection, not
     /// publication to a durable source-of-truth authority.
-    #[hotpath::measure(label = "graph_db.write.publish", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.write.publish", level = "trace", skip_all)]
     pub fn publish_unverified(
         &self,
         mut publication_request: GraphPublication,
@@ -416,9 +551,12 @@ impl GraphDb {
             publication_request.input_digest.as_str().to_owned(),
         );
         let mut state = self.state_write_guard()?;
+        let state = state
+            .as_mut()
+            .ok_or_else(|| GraphDbError::unavailable("graph format state is unavailable"))?;
         self.apply_locked(
             database,
-            &mut state,
+            state,
             publication_request.batch,
             mutation::CommitMetadata {
                 digest: digests.batch,
@@ -436,53 +574,100 @@ impl GraphDb {
         idempotency_key: &GraphIdempotencyKey,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphPublicationReceipt>, GraphDbError> {
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        publication(database, namespace, idempotency_key)?
-            .map(|stored| {
-                Ok(GraphPublicationReceipt {
-                    digest: GraphPublicationDigest::from_persisted(stored.digest)?,
-                    input_digest: GraphPublicationInputDigest::from_persisted(stored.input_digest)?,
-                    commit: stored.commit,
-                })
+        self.read_intact(cancellation.as_ref(), |database| {
+            publication(database, namespace, idempotency_key)
+        })?
+        .map(|stored| {
+            Ok(GraphPublicationReceipt {
+                digest: GraphPublicationDigest::from_persisted(stored.digest)?,
+                input_digest: GraphPublicationInputDigest::from_persisted(stored.input_digest)?,
+                commit: stored.commit,
             })
-            .transpose()
+        })
+        .transpose()
     }
 
-    #[hotpath::measure(label = "graph_db.traversal", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.traversal", level = "trace", skip_all)]
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(
-            database,
-            &request.namespace,
-            std::slice::from_ref(&request.start),
-        )?;
-        let result = traversal::traverse(database, request, &|namespace, projection| {
-            self.approve_projection(namespace, projection)
+        let result = self.read_intact(&crate::NeverCancelled, |database| {
+            self.ensure_start_projections_readable(
+                database,
+                &request.namespace,
+                std::slice::from_ref(&request.start),
+            )?;
+            traversal::traverse(database, request, &|namespace, projection| {
+                self.approve_projection(namespace, projection)
+            })
         })?;
-        #[cfg(feature = "hotpath")]
+
         {
             let edges = result
                 .visits
                 .iter()
                 .filter(|visit| visit.via_relation.is_some())
                 .count();
-            crate::hotpath_observe::record_counts(result.visits.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
+            crate::observe::record_counts(result.visits.len(), edges, 0, 0);
+            crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         }
         Ok(result)
     }
 
-    #[hotpath::measure(label = "graph_db.traversal.outgoing_ids", impl_type = "GraphDb")]
+    #[allow(clippy::too_many_arguments)]
+    fn fanout_relation_rows(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+        direction: grafeo_core::graph::Direction,
+        overflow: traversal::RelationFanoutOverflow,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        self.fanout_batches(namespace, starts, |database, approve, _, _| {
+            traversal::directed_relations(
+                database,
+                namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                direction,
+                cancellation.as_ref(),
+                approve,
+                overflow,
+            )
+        })
+    }
+
+    fn fanout_batches<T>(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        read: impl FnOnce(
+            &GrafeoDB,
+            &dyn Fn(&GraphNamespace, &GraphProjectionId) -> Result<(), GraphDbError>,
+            &crate::epoch_cache::LabelKeyCache,
+            &crate::adjacency_id_index::AdjacencyIdIndexCache,
+        ) -> Result<Vec<Vec<T>>, GraphDbError>,
+    ) -> Result<Vec<Vec<T>>, GraphDbError> {
+        let batches = self.read_intact(&crate::NeverCancelled, |database| {
+            self.ensure_start_projections_readable(database, namespace, starts)?;
+            read(
+                database,
+                &|namespace, projection| self.approve_projection(namespace, projection),
+                &self.inner.label_keys,
+                &self.inner.adjacency_ids,
+            )
+        })?;
+
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::observe::record_counts(starts.len(), edges, 0, 0);
+            crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
+        }
+        Ok(batches)
+    }
+
+    #[tracing::instrument(name = "graph_db.traversal.outgoing_ids", level = "trace", skip_all)]
     pub fn outgoing_relation_ids(
         &self,
         namespace: &GraphNamespace,
@@ -491,35 +676,32 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::outgoing_relation_ids(
-            database,
+        self.fanout_batches(
             namespace,
             starts,
-            relation_kinds,
-            max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            &self.inner.label_keys,
-            &self.inner.adjacency_ids,
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            |database, approve, label_keys, adjacency_ids| {
+                traversal::directed_relation_ids(
+                    database,
+                    namespace,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    false,
+                    cancellation.as_ref(),
+                    approve,
+                    label_keys,
+                    adjacency_ids,
+                    traversal::RelationFanoutOverflow::Refuse,
+                    None,
+                )
+            },
+        )
     }
 
     /// Bulk kind-filtered incoming fan-out: the counterpart of
     /// [`Self::outgoing_relation_ids`], with identical budget and
     /// cancellation semantics.
-    #[hotpath::measure(label = "graph_db.traversal.incoming_ids", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.traversal.incoming_ids", level = "trace", skip_all)]
     pub fn incoming_relation_ids(
         &self,
         namespace: &GraphNamespace,
@@ -528,36 +710,37 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::incoming_relation_ids(
-            database,
+        self.fanout_batches(
             namespace,
             starts,
-            relation_kinds,
-            max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            &self.inner.label_keys,
-            &self.inner.adjacency_ids,
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            |database, approve, label_keys, adjacency_ids| {
+                traversal::directed_relation_ids(
+                    database,
+                    namespace,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    true,
+                    cancellation.as_ref(),
+                    approve,
+                    label_keys,
+                    adjacency_ids,
+                    traversal::RelationFanoutOverflow::Refuse,
+                    None,
+                )
+            },
+        )
     }
 
     /// Cursor-exclusive ID page over outgoing adjacency.
     ///
     /// `after` is the last identity of the previous page. The page is ordered
     /// by relation identity and bounded by `limit` per start.
-    #[hotpath::measure(label = "graph_db.traversal.outgoing_ids_page", impl_type = "GraphDb")]
+    #[tracing::instrument(
+        name = "graph_db.traversal.outgoing_ids_page",
+        level = "trace",
+        skip_all
+    )]
     pub fn outgoing_relation_ids_page(
         &self,
         namespace: &GraphNamespace,
@@ -567,35 +750,35 @@ impl GraphDb {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::outgoing_relation_ids_page(
-            database,
+        self.fanout_batches(
             namespace,
             starts,
-            relation_kinds,
-            after,
-            limit,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            &self.inner.label_keys,
-            &self.inner.adjacency_ids,
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            |database, approve, label_keys, adjacency_ids| {
+                traversal::directed_relation_ids(
+                    database,
+                    namespace,
+                    starts,
+                    relation_kinds,
+                    limit,
+                    false,
+                    cancellation.as_ref(),
+                    approve,
+                    label_keys,
+                    adjacency_ids,
+                    traversal::RelationFanoutOverflow::Truncate,
+                    after,
+                )
+            },
+        )
     }
 
     /// Cursor-exclusive ID page over incoming adjacency. See
     /// [`Self::outgoing_relation_ids_page`].
-    #[hotpath::measure(label = "graph_db.traversal.incoming_ids_page", impl_type = "GraphDb")]
+    #[tracing::instrument(
+        name = "graph_db.traversal.incoming_ids_page",
+        level = "trace",
+        skip_all
+    )]
     pub fn incoming_relation_ids_page(
         &self,
         namespace: &GraphNamespace,
@@ -605,33 +788,29 @@ impl GraphDb {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::incoming_relation_ids_page(
-            database,
+        self.fanout_batches(
             namespace,
             starts,
-            relation_kinds,
-            after,
-            limit,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            &self.inner.label_keys,
-            &self.inner.adjacency_ids,
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            |database, approve, label_keys, adjacency_ids| {
+                traversal::directed_relation_ids(
+                    database,
+                    namespace,
+                    starts,
+                    relation_kinds,
+                    limit,
+                    true,
+                    cancellation.as_ref(),
+                    approve,
+                    label_keys,
+                    adjacency_ids,
+                    traversal::RelationFanoutOverflow::Truncate,
+                    after,
+                )
+            },
+        )
     }
 
-    #[hotpath::measure(label = "graph_db.traversal.outgoing", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.traversal.outgoing", level = "trace", skip_all)]
     pub fn outgoing_relations(
         &self,
         namespace: &GraphNamespace,
@@ -640,32 +819,24 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::outgoing_relations(
-            database,
+        self.fanout_relation_rows(
             namespace,
             starts,
             relation_kinds,
             max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            cancellation,
+            grafeo_core::graph::Direction::Outgoing,
+            traversal::RelationFanoutOverflow::Refuse,
+        )
     }
 
     /// Same shape as [`Self::outgoing_relations`], but stops at `max_relations`
     /// and returns the prefix instead of refusing the whole batch.
-    #[hotpath::measure(label = "graph_db.traversal.outgoing_truncated", impl_type = "GraphDb")]
+    #[tracing::instrument(
+        name = "graph_db.traversal.outgoing_truncated",
+        level = "trace",
+        skip_all
+    )]
     pub fn outgoing_relations_truncated(
         &self,
         namespace: &GraphNamespace,
@@ -674,30 +845,22 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::outgoing_relations_truncated(
-            database,
+        self.fanout_relation_rows(
             namespace,
             starts,
             relation_kinds,
             max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            cancellation,
+            grafeo_core::graph::Direction::Outgoing,
+            traversal::RelationFanoutOverflow::Truncate,
+        )
     }
 
-    #[hotpath::measure(label = "graph_db.traversal.outgoing_targets", impl_type = "GraphDb")]
+    #[tracing::instrument(
+        name = "graph_db.traversal.outgoing_targets",
+        level = "trace",
+        skip_all
+    )]
     pub fn outgoing_relation_targets(
         &self,
         namespace: &GraphNamespace,
@@ -706,32 +869,25 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationTarget>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::outgoing_relation_targets(
-            database,
-            namespace,
-            starts,
-            relation_kinds,
-            max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+        self.fanout_batches(namespace, starts, |database, approve, _, _| {
+            traversal::outgoing_relation_targets(
+                database,
+                namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation.as_ref(),
+                approve,
+            )
+        })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.traversal.outgoing_targets.visit",
-        impl_type = "GraphDb"
+    /// Streams each outgoing target to `visitor` while the database read lock
+    /// is held, so the visitor must not call back into this graph.
+    #[tracing::instrument(
+        name = "graph_db.traversal.outgoing_targets.visit",
+        level = "trace",
+        skip_all
     )]
     pub fn visit_outgoing_relation_targets(
         &self,
@@ -741,31 +897,33 @@ impl GraphDb {
         cancellation: Arc<dyn GraphCancellation>,
         visitor: &mut dyn FnMut(GraphRelationTarget),
     ) -> Result<usize, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, std::slice::from_ref(start))?;
-        let edges = traversal::visit_outgoing_relation_targets(
-            database,
-            namespace,
-            start,
-            relation_kinds,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            visitor,
-        )?;
-        #[cfg(feature = "hotpath")]
+        let edges = self.read_intact(&crate::NeverCancelled, |database| {
+            self.ensure_start_projections_readable(
+                database,
+                namespace,
+                std::slice::from_ref(start),
+            )?;
+            traversal::visit_outgoing_relation_targets(
+                database,
+                namespace,
+                start,
+                relation_kinds,
+                cancellation.as_ref(),
+                &|namespace, projection| self.approve_projection(namespace, projection),
+                visitor,
+            )
+        })?;
+
         {
-            crate::hotpath_observe::record_counts(1, edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
+            crate::observe::record_counts(1, edges, 0, 0);
+            crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         }
         Ok(edges)
     }
 
     /// Bulk kind-filtered incoming fan-out with the same shape, cancellation,
     /// and aggregate relation budget as [`Self::outgoing_relations`].
-    #[hotpath::measure(label = "graph_db.traversal.incoming", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.traversal.incoming", level = "trace", skip_all)]
     pub fn incoming_relations(
         &self,
         namespace: &GraphNamespace,
@@ -774,32 +932,24 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::incoming_relations(
-            database,
+        self.fanout_relation_rows(
             namespace,
             starts,
             relation_kinds,
             max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            cancellation,
+            grafeo_core::graph::Direction::Incoming,
+            traversal::RelationFanoutOverflow::Refuse,
+        )
     }
 
     /// Same shape as [`Self::incoming_relations`], but stops at `max_relations`
     /// and returns the prefix instead of refusing the whole batch.
-    #[hotpath::measure(label = "graph_db.traversal.incoming_truncated", impl_type = "GraphDb")]
+    #[tracing::instrument(
+        name = "graph_db.traversal.incoming_truncated",
+        level = "trace",
+        skip_all
+    )]
     pub fn incoming_relations_truncated(
         &self,
         namespace: &GraphNamespace,
@@ -808,31 +958,19 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::incoming_relations_truncated(
-            database,
+        self.fanout_relation_rows(
             namespace,
             starts,
             relation_kinds,
             max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            cancellation,
+            grafeo_core::graph::Direction::Incoming,
+            traversal::RelationFanoutOverflow::Truncate,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "graph_db.traversal.reachable", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.traversal.reachable", level = "trace", skip_all)]
     pub fn reachable_entities(
         &self,
         namespace: &GraphNamespace,
@@ -843,110 +981,28 @@ impl GraphDb {
         max_visits: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<BTreeSet<GraphEntityId>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(namespace, projection)?;
-        self.ensure_outgoing_start_relations_readable(database, namespace, starts)?;
-        let results = traversal::reachable_entities(
-            database,
-            namespace,
-            projection,
-            starts,
-            relation_kinds,
-            outgoing_overrides,
-            max_visits,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
+        let results = self.read_intact(&crate::NeverCancelled, |database| {
+            self.ensure_projection_readable(namespace, projection)?;
+            self.ensure_outgoing_start_relations_readable(database, namespace, starts)?;
+            traversal::reachable_entities(
+                database,
+                namespace,
+                projection,
+                starts,
+                relation_kinds,
+                outgoing_overrides,
+                max_visits,
+                cancellation.as_ref(),
+                &|namespace, projection| self.approve_projection(namespace, projection),
+            )
+        })?;
+
         {
             let entities: usize = results.iter().map(BTreeSet::len).sum();
-            crate::hotpath_observe::record_counts(entities, 0, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
+            crate::observe::record_counts(entities, 0, 0, 0);
+            crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         }
         Ok(results)
-    }
-
-    #[hotpath::measure(label = "graph_db.search.vector", impl_type = "GraphDb")]
-    pub fn vector_search(
-        &self,
-        request: VectorSearchRequest,
-    ) -> Result<VectorSearchResult, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        vector::vector_search(database, request)
-    }
-
-    pub fn vector_index_status(
-        &self,
-        request: GraphVectorIndexRequest,
-    ) -> Result<GraphVectorIndexStatus, GraphDbError> {
-        request.validate()?;
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        let label = vector::native_vector_label(&request.namespace, &request.projection);
-        let property = vector_property_key(&request.property, request.dimension, request.metric);
-        Ok(vector::classify_vector_index(database, &label, &property))
-    }
-
-    /// Rebuilds one missing exact-projection HNSW index outside admission.
-    #[hotpath::measure(label = "graph_db.vector.index.ensure", impl_type = "GraphDb")]
-    pub fn ensure_vector_index(
-        &self,
-        request: GraphVectorIndexRequest,
-    ) -> Result<GraphVectorIndexStatus, GraphDbError> {
-        request.validate()?;
-        let _snapshot_gate = self.wait_snapshot_gate_write();
-        let guard = self.write_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        if request.cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        let label = vector::native_vector_label(&request.namespace, &request.projection);
-        let property = vector_property_key(&request.property, request.dimension, request.metric);
-        match vector::classify_vector_index(database, &label, &property) {
-            status @ GraphVectorIndexStatus::Available { .. } => {
-                if request.cancellation.is_cancelled() {
-                    return Err(GraphDbError::Cancelled);
-                }
-                return Ok(status);
-            }
-            GraphVectorIndexStatus::Stale => {
-                // A registered index covering nothing answers every
-                // search with no matches while reporting that it exists,
-                // so leaving it in place would be worse than having
-                // none. Drop it and build again, and say so: a rebuild
-                // that happens silently every open is the shape of this
-                // bug, and the log line is what makes it visible.
-                tracing::warn!(
-                    projection = %request.projection,
-                    dimension = request.dimension,
-                    "vector index exists but covers no vectors; rebuilding"
-                );
-                database.drop_vector_index(&label, &property);
-            }
-            GraphVectorIndexStatus::Missing => {}
-        }
-        database
-            .create_vector_index(
-                &label,
-                &property,
-                Some(request.dimension),
-                Some(request.metric.engine_name()),
-                None,
-                None,
-                None,
-            )
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        if request.cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        Ok(vector::classify_vector_index(database, &label, &property))
     }
 
     /// Physically close the underlying graph database.
@@ -955,29 +1011,44 @@ impl GraphDb {
     /// is already current (empty WAL, no replay at open, no WAL-bypassing
     /// mutation, header watermarks matching the live store), so closing a
     /// store that was only read costs teardown, not a full container rewrite.
-    /// Any change — WAL records, sidecar replay, index builds, named-graph
-    /// management — still checkpoints in full before this returns.
-    #[hotpath::measure(label = "graph_db.runtime.close", impl_type = "GraphDb")]
+    /// Any change, WAL records, sidecar replay, index builds, named-graph
+    /// management, still checkpoints in full before this returns.
+    #[tracing::instrument(name = "graph_db.runtime.close", level = "trace", skip_all)]
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
-        // Before the write lock, while a read guard is still available:
-        // the census needs the database, and `close` is about to take it.
-        self.record_vector_index_census(VectorIndexCensusPhase::Persist);
-        let _snapshot_gate = self.wait_snapshot_gate_write();
-        let mut guard = match crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
-            || self.inner.database.write(),
-        ) {
-            Ok(guard) => guard,
+        let engine_is_open = match self.inner.database.read() {
+            Ok(database) => database.is_some(),
             Err(_) => {
                 self.inner.closed.store(true, Ordering::Release);
                 self.inner.poisoned.store(true, Ordering::Release);
                 return Err(GraphDbError::DurabilityUncertain {
                     message:
-                        "graph database write lock is poisoned; physical close cannot be confirmed"
+                        "graph database read lock is poisoned; physical close cannot be confirmed"
                             .to_owned(),
                 });
             }
         };
+        if !engine_is_open {
+            if self.inner.closed.swap(true, Ordering::AcqRel) {
+                return Err(GraphDbError::Closed);
+            }
+            return Ok(());
+        }
+        let _snapshot_gate = self.wait_snapshot_gate_write();
+        let mut guard =
+            match crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
+                self.inner.database.write()
+            }) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.inner.closed.store(true, Ordering::Release);
+                    self.inner.poisoned.store(true, Ordering::Release);
+                    return Err(GraphDbError::DurabilityUncertain {
+                    message:
+                        "graph database write lock is poisoned; physical close cannot be confirmed"
+                            .to_owned(),
+                });
+                }
+            };
         self.inner.invalidate_store_epoch_caches();
         let was_uncertain = self.inner.poisoned.load(Ordering::Acquire);
         if self.inner.closed.swap(true, Ordering::AcqRel) {
@@ -994,24 +1065,37 @@ impl GraphDb {
                     .to_owned(),
             });
         };
-        if let Err(error) =
-            hotpath::measure_block!("graph_db.runtime.close.engine", database.close())
-        {
+        if let Err(error) = {
+            let _span = tracing::trace_span!("graph_db.runtime.close.engine").entered();
+            database.close()
+        } {
             self.inner.poisoned.store(true, Ordering::Release);
             return Err(GraphDbError::DurabilityUncertain {
                 message: error.to_string(),
             });
         }
-        // The container is closed and synced, so its identity is now the one
-        // the next open will observe. Publishing the marker here -- and only
-        // here -- is what makes the record bind the final bytes rather than
-        // some intermediate state a later write would have invalidated.
+        self.log_engine_released("close");
+        #[cfg(test)]
+        test_seams::fire(test_seams::Seam::MarkerPublish);
+        // The container is closed and synced, so the identity the engine's own
+        // handle reports now is the one the next open will read from the same
+        // bytes. Publishing the marker here -- and only here, under that
+        // identity -- is what makes the record bind the final bytes rather
+        // than some intermediate state a later write would have invalidated,
+        // and bind them to this container rather than to whatever file the
+        // path names by the time a stat could run.
         //
         // A failure to publish is not a failure to close. The marker is a
         // cache of completed proofs; losing it costs the next open a full
         // re-derivation and nothing else, so it must never turn a durable
         // close into a reported durability fault.
-        if !was_uncertain && let Err(error) = self.inner.markers.publish() {
+        let closed = if was_uncertain {
+            None
+        } else {
+            ContainerIdentity::from_engine(&database)
+        };
+        drop(database);
+        if let Err(error) = self.inner.markers.release(closed) {
             let _ = error;
         }
         // Sealed per-generation readers are separate databases with their own
@@ -1026,10 +1110,9 @@ impl GraphDb {
             .inner
             .sealed_generations
             .write()
-            .map(|mut sealed| std::mem::take(&mut *sealed))
-            .unwrap_or_default();
+            .map_or_default(|mut sealed| std::mem::take(&mut *sealed));
         for store in sealed.into_values() {
-            let _ = store.database().close();
+            let _ = store.close();
         }
         if was_uncertain {
             Err(durability_uncertain())
@@ -1038,10 +1121,159 @@ impl GraphDb {
         }
     }
 
+    fn container_label(&self) -> String {
+        container_label(
+            self.inner
+                .reopen
+                .as_ref()
+                .and_then(|reopen| reopen.config.path.as_deref()),
+        )
+    }
+
+    fn log_engine_released(&self, reason: &'static str) {
+        tracing::info!(
+            event = "graph_engine_released",
+            reason,
+            container = %self.container_label(),
+            "native graph engine released"
+        );
+    }
+
+    /// Releases a lazily mounted native engine while retaining its exact
+    /// registry identity and reopen authority.
+    ///
+    /// The owner calls this only after its final operation lease disappears.
+    /// A later lease reopens and revalidates the same container on first use.
+    #[tracing::instrument(name = "graph_db.runtime.hibernate", level = "trace", skip_all)]
+    pub(crate) fn hibernate_if_lazy(&self) -> Result<(), GraphDbError> {
+        self.hibernate_if_lazy_with(SnapshotGateClaim::Blocking)
+            .map(|_| ())
+    }
+
+    /// Hibernates only when no reader currently holds this database.
+    ///
+    /// The blocking variant waits on the exclusive snapshot claim, which is
+    /// exactly what a live serving lease holds; waiting there would stall the
+    /// caller behind whatever that reader is doing and would evict an engine
+    /// a query is reading from the moment it finished. Bounding the retained
+    /// engine set must never do either, so this variant declines instead:
+    /// `Ok(false)` means "still resident, still serving", and the next sweep
+    /// (or the reader's own lease drop) releases it.
+    pub(crate) fn hibernate_if_lazy_when_idle(&self) -> Result<bool, GraphDbError> {
+        self.hibernate_if_lazy_with(SnapshotGateClaim::WhenIdle)
+    }
+
+    fn hibernate_if_lazy_with(&self, claim: SnapshotGateClaim) -> Result<bool, GraphDbError> {
+        if self
+            .inner
+            .lazy_store_state
+            .lock()
+            .map_err(|_| GraphDbError::unavailable("lazy graph state lock is poisoned"))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        // Checked before the gate so a pinned engine's admitted proofs are not
+        // retired, and again under the database write lock below, which a
+        // pin's own open also takes.
+        if self.serving_pinned() {
+            return Ok(false);
+        }
+        let when_idle = claim == SnapshotGateClaim::WhenIdle;
+        let _snapshot_gate = match claim {
+            SnapshotGateClaim::Blocking => self.wait_snapshot_gate_write(),
+            SnapshotGateClaim::WhenIdle => {
+                // The marker retirement `wait_snapshot_gate_write` performs is
+                // deliberate there and would be wrong here: a declined attempt
+                // must leave the admitted proofs exactly as it found them.
+                let Some(gate) = self.inner.snapshot_gate.try_write() else {
+                    return Ok(false);
+                };
+                gate
+            }
+        };
+        let mut database = if when_idle {
+            match self.inner.database.try_write() {
+                Ok(database) => database,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(GraphDbError::unavailable(
+                        "graph database write lock is poisoned",
+                    ));
+                }
+            }
+        } else {
+            crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
+                self.inner.database.write()
+            })
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?
+        };
+        if self.serving_pinned() {
+            return Ok(false);
+        }
+        if when_idle {
+            // A declined attempt leaves markers untouched. Once both the
+            // snapshot and database gates are exclusively held, hibernation
+            // has the same marker consequence as the blocking path.
+            self.inner.markers.mark_container_mutated();
+        }
+        let Some(database_to_close) = database.take() else {
+            return Ok(false);
+        };
+        self.inner.invalidate_store_epoch_caches();
+        if let Err(error) = {
+            let _span = tracing::trace_span!("graph_db.runtime.hibernate.engine").entered();
+            database_to_close.close()
+        } {
+            self.inner.poisoned.store(true, Ordering::Release);
+            return Err(GraphDbError::DurabilityUncertain {
+                message: error.to_string(),
+            });
+        }
+        self.log_engine_released("hibernate");
+        #[cfg(test)]
+        test_seams::fire(test_seams::Seam::MarkerPublish);
+        let closed = ContainerIdentity::from_engine(&database_to_close);
+        drop(database_to_close);
+        if let Err(error) = self.inner.markers.release(closed) {
+            let _ = error;
+        }
+        *self
+            .inner
+            .state
+            .write()
+            .map_err(|_| GraphDbError::unavailable("graph state lock is poisoned"))? = None;
+        self.inner
+            .quarantined_projections
+            .write()
+            .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?
+            .clear();
+        *self.inner.verified_generations.write().map_err(|_| {
+            GraphDbError::unavailable("verified graph generation state lock is poisoned")
+        })? = VerifiedGenerationState::default();
+        // Sealed per-generation readers are separate containers with their own
+        // reopen authority; nothing about them depends on this staging engine
+        // being resident. Uninstalling them here (which is what closing them
+        // amounted to) meant the next release sweep found no sealed store for
+        // any generation and retained every one of them, and a later read had
+        // to re-adopt the artifact from disk under a fresh digest proof. They
+        // hibernate alongside this engine instead: identity retained, nothing
+        // resident, first read reopens.
+        let sealed = self
+            .inner
+            .sealed_generations
+            .read()
+            .map_or_default(|sealed| sealed.values().cloned().collect::<Vec<_>>());
+        for store in sealed {
+            let _ = store.hibernate_if_lazy();
+        }
+        Ok(true)
+    }
+
     /// One shared snapshot-gate choreography for every batch that is derived
     /// from (or validated against) currently stored rows:
     ///
-    /// 1. `derive` runs behind an upgradable claim — snapshot readers proceed
+    /// 1. `derive` runs behind an upgradable claim, snapshot readers proceed
     ///    while writers queue, so the rows it reads and the bytes it hashes
     ///    stay exact without stalling reads.
     /// 2. An `Apply` plan upgrades atomically to the exclusive claim for the
@@ -1070,12 +1302,12 @@ impl GraphDb {
                     let guard = self.write_guard()?;
                     let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
                     let mut state = self.state_write_guard()?;
-                    if prepared.ensure_page_vector_indexes {
-                        ensure_vector_indexes_for_batch(database, &prepared.batch)?;
-                    }
+                    let state = state.as_mut().ok_or_else(|| {
+                        GraphDbError::unavailable("graph format state is unavailable")
+                    })?;
                     self.apply_locked(
                         database,
-                        &mut state,
+                        state,
                         prepared.batch,
                         prepared.metadata,
                         &prepared.endpoint_namespaces,
@@ -1104,32 +1336,6 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         check()?;
-        hotpath::measure_block!(
-            "graph_db.vector_index.ensure_initial",
-            ensure_initial_vector_indexes(database, &batch)
-        )?;
-        let vector_updates = hotpath::measure_block!("graph_db.vector_index.collect_updates", {
-            let mut vector_updates = Vec::new();
-            for mutation in &batch.mutations {
-                check()?;
-                let GraphMutation::UpsertEntity(entity) = mutation else {
-                    continue;
-                };
-                for (name, property) in &entity.properties {
-                    check()?;
-                    let GraphProperty::Vector(vector) = property else {
-                        continue;
-                    };
-                    vector_updates.push((
-                        entity.identity.clone(),
-                        vector_property_key(name, vector.dimension, vector.metric),
-                        Value::Vector(vector.values.clone().into()),
-                    ));
-                }
-            }
-            Ok::<_, GraphDbError>(vector_updates)
-        })?;
-        let namespace = batch.namespace.clone();
         let commit = mutation::apply(
             database,
             state,
@@ -1141,97 +1347,80 @@ impl GraphDb {
         )?;
         // The Grafeo transaction (including any publication record) is durably
         // committed from this point. Cancellation is deliberately not observed
-        // in the commit->refresh window: reporting Cancelled here would mistype
-        // a committed write, skip HNSW refresh and WAL settlement on a Ready
-        // handle, and retry would short-circuit as exact publication replay
-        // without ever repairing them. Settlement failures instead poison the
-        // handle and surface as typed DurabilityUncertain.
-        hotpath::measure_block!("graph_db.vector_index.refresh", {
-            for (identity, property, value) in vector_updates {
-                let stored = match crate::state::load_entity(database, &namespace, &identity) {
-                    Ok(Some(stored)) => stored,
-                    Ok(None) => {
-                        self.inner.poisoned.store(true, Ordering::Release);
-                        return Err(GraphDbError::DurabilityUncertain {
-                            message: format!(
-                                "committed vector entity `{identity}` is missing from native identity index; commit settlement is incomplete"
-                            ),
-                        });
-                    }
-                    Err(error) => {
-                        self.inner.poisoned.store(true, Ordering::Release);
-                        return Err(GraphDbError::DurabilityUncertain {
-                            message: format!(
-                                "committed vector entity `{identity}` could not be read for native index refresh; commit settlement is incomplete: {error}"
-                            ),
-                        });
-                    }
-                };
-                require_committed_vector_scalar(database, stored.node, &property, &value)
-                    .inspect_err(|_| {
-                        self.inner.poisoned.store(true, Ordering::Release);
-                    })?;
-                // `mutation::apply` has already committed this exact scalar. Grafeo
-                // Session mutations do not maintain HNSW, so this identical direct
-                // write is index refresh only. The outer database write guard keeps
-                // readers excluded. The pinned grafeo persists the refreshed index
-                // at checkpoint and restores it on open; a store whose index is
-                // still Missing after reopen (written before index maintenance, or
-                // torn before its first checkpoint) needs an explicit retained
-                // owner to call `ensure_vector_index`.
-                if database.graph_store().has_vector_index(
-                    &vector::native_vector_label(&namespace, &stored.projection),
-                    &property,
-                ) {
-                    database.set_node_property(stored.node, &property, value);
-                }
+        // in the commit->sync window: reporting Cancelled here would mistype
+        // a committed write, skip WAL settlement on a Ready handle, and retry
+        // would short-circuit as exact publication replay without ever
+        // repairing it. Settlement failures instead poison the handle and
+        // surface as typed DurabilityUncertain.
+        if self.inner.durability == GraphDurability::WalSync {
+            if let Err(error) = {
+                let _span = tracing::trace_span!("graph_db.wal.sync").entered();
+                sync_wal(database)
+            } {
+                self.inner.poisoned.store(true, Ordering::Release);
+                return Err(error);
             }
-            Ok::<_, GraphDbError>(())
-        })?;
-        if self.inner.durability == GraphDurability::WalSync
-            && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
-        {
-            self.inner.poisoned.store(true, Ordering::Release);
-            return Err(error);
+            self.checkpoint_wal_past_container(database)?;
         }
         Ok(commit)
     }
 
-    /// Commits a persistence-only batch without creating or refreshing any
-    /// HNSW index. Callers that serve vector search from the written rows
-    /// use [`Self::apply_locked`] instead, which keeps the persisted index
-    /// aligned with every committed vector row.
-    pub(crate) fn apply_locked_without_vector_index_maintenance(
-        &self,
-        database: &GrafeoDB,
-        state: &mut FormatState,
-        batch: GraphWriteBatch,
-        metadata: mutation::CommitMetadata,
-        endpoint_namespaces: &mutation::RelationEndpointNamespaces,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphCommit, GraphDbError> {
-        let commit = mutation::apply(
-            database,
-            state,
-            batch,
-            metadata,
-            endpoint_namespaces,
-            &self.inner.poisoned,
-            check,
-        )?;
-        if self.inner.durability == GraphDurability::WalSync
-            && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
-        {
-            self.inner.poisoned.store(true, Ordering::Release);
-            return Err(error);
+    /// Checkpoints the WAL once its uncheckpointed history passes the larger
+    /// of [`GRAFEO_WAL_CHECKPOINT_BYTES`] and the container's size. The
+    /// caller holds the exclusive snapshot claim and the database lock, as
+    /// every commit does.
+    fn checkpoint_wal_past_container(&self, database: &GrafeoDB) -> Result<(), GraphDbError> {
+        let status = database.wal_status();
+        let Some(file_manager) = database.file_manager().filter(|_| status.enabled) else {
+            return Ok(());
+        };
+        let wal_bytes = u64::try_from(status.size_bytes).unwrap_or(u64::MAX);
+        if wal_bytes <= GRAFEO_WAL_CHECKPOINT_BYTES {
+            return Ok(());
         }
-        Ok(commit)
+        let sidecar = file_manager.sidecar_wal_path();
+        let threshold = file_manager
+            .file_size()
+            .map_or(GRAFEO_WAL_CHECKPOINT_BYTES, |container| {
+                container.max(GRAFEO_WAL_CHECKPOINT_BYTES)
+            });
+        if crate::recovery::uncheckpointed_wal_bytes(&sidecar) <= threshold {
+            return Ok(());
+        }
+        self.inner.markers.mark_container_mutated();
+        self.inner.invalidate_store_epoch_caches();
+        if let Err(error) = {
+            let _span = tracing::trace_span!("graph_db.wal.checkpoint").entered();
+            database.wal_checkpoint()
+        } {
+            // Grafeo persists the checkpoint record before it rewrites the
+            // container, so a failed rewrite can leave recovery skipping WAL
+            // history the container never received.
+            self.inner.poisoned.store(true, Ordering::Release);
+            return Err(GraphDbError::DurabilityUncertain {
+                message: format!(
+                    "Grafeo WAL checkpoint failed; durable outcome cannot be established: {error}"
+                ),
+            });
+        }
+        tracing::info!(
+            event = "graph_wal_checkpoint",
+            phase = "commit",
+            container = %self.container_label(),
+            wal_bytes,
+            wal_bytes_after = database.wal_status().size_bytes,
+            "checkpointed WAL history into the graph container"
+        );
+        Ok(())
     }
 
-    pub(crate) fn read_database(
+    /// Runs `read` against the open database and refuses its answer as
+    /// corrupt when the read touched a sealed page that failed verification.
+    pub(crate) fn read_intact<T>(
         &self,
         cancellation: &dyn GraphCancellation,
-    ) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
+        read: impl FnOnce(&GrafeoDB) -> Result<T, GraphDbError>,
+    ) -> Result<T, GraphDbError> {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
@@ -1239,7 +1428,10 @@ impl GraphDb {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        Ok(guard)
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let answer = read(database);
+        ensure_intact(database)?;
+        answer
     }
 
     pub(crate) fn approve_projection(
@@ -1259,7 +1451,7 @@ impl GraphDb {
         namespace: &GraphNamespace,
         projection: &GraphProjectionId,
     ) -> Result<(), GraphDbError> {
-        crate::hotpath_observe::record_quarantine_lock();
+        crate::observe::record_quarantine_lock();
         let quarantined = self
             .inner
             .quarantined_projections
@@ -1316,84 +1508,107 @@ impl GraphDb {
         Ok(())
     }
 
+    /// The open database, refused once a sealed page has failed. The read
+    /// that first touches a corrupt page still answers without it, so a read
+    /// whose answer leaves the guard goes through [`Self::read_intact`].
     pub(crate) fn read_guard(&self) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
-        self.ensure_available()?;
-        let guard = crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_DATABASE_READ,
-            || self.inner.database.read(),
-        )
-        .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
-        self.ensure_available()?;
-        Ok(guard)
+        loop {
+            self.ensure_available()?;
+            self.ensure_opened()?;
+            let guard = crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_READ, || {
+                self.inner.database.read()
+            })
+            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
+            self.ensure_available()?;
+            if let Some(database) = guard.as_ref() {
+                ensure_intact(database)?;
+                return Ok(guard);
+            }
+            // A non-blocking hibernation pass can win after `ensure_opened`
+            // drops the database write lock but before this reader acquires
+            // its read lock. The retained reopen authority is unchanged, so
+            // retry that narrow transition instead of surfacing a fabricated
+            // `Closed` state to a valid sealed-store reader.
+            drop(guard);
+        }
     }
 
-    /// Reports how much vector index the store is holding right now.
-    ///
-    /// Taken twice per database lifetime, at open and just before close,
-    /// because the pair is what makes a durability leak legible: bytes
-    /// reported at `persist` that do not come back at the next `restore`
-    /// are bytes the daemon is about to spend re-indexing, and a
-    /// `restore` of zero on a store that had an index means vector
-    /// search is unavailable until a rebuild finishes.
-    ///
-    /// Like [`Self::record_memory_checkpoint`], the census walks internal
-    /// store structures and feeds gauges that are feature-off no-ops, so it
-    /// runs only in opt-in Hotpath builds: a production open or close must
-    /// not pay for a full memory walk it then discards.
-    #[inline(always)]
-    pub(crate) fn record_vector_index_census(&self, phase: VectorIndexCensusPhase) {
-        #[cfg(feature = "hotpath")]
-        {
-            let Ok(guard) = self.read_guard() else {
-                return;
-            };
-            let Some(database) = guard.as_ref() else {
-                return;
-            };
-            let indexes = database.memory_usage().indexes.vector_indexes;
-            let vectors = indexes.iter().map(|entry| entry.item_count).sum();
-            let bytes = indexes.iter().map(|entry| entry.bytes).sum();
-            match phase {
-                VectorIndexCensusPhase::Restore => {
-                    crate::hotpath_observe::record_vector_index_restore(
-                        indexes.len(),
-                        vectors,
-                        bytes,
-                    );
-                }
-                VectorIndexCensusPhase::Persist => {
-                    crate::hotpath_observe::record_vector_index_persist(
-                        indexes.len(),
-                        vectors,
-                        bytes,
-                    );
-                }
-            }
+    /// Resident engine heap bytes, or `None` when the engine is not resident.
+    /// The engine figure is measured once per store epoch because row writes
+    /// hold the database write lock and invalidate the memo. Derived cache
+    /// bytes are added fresh on every call.
+    pub(crate) fn resident_engine_bytes(&self) -> Result<Option<u64>, GraphDbError> {
+        self.inner
+            .database
+            .read()
+            .map(|database| {
+                database.as_ref().map(|database| {
+                    let mut usage = self
+                        .inner
+                        .engine_usage_bytes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let usage = *usage.get_or_insert_with(|| {
+                        u64::try_from(database.memory_usage().total_bytes).unwrap_or(u64::MAX)
+                    });
+                    usage.saturating_add(
+                        u64::try_from(self.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX),
+                    )
+                })
+            })
+            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))
+    }
+
+    /// Reports whether the native staging engine is already resident without
+    /// exercising lazy-open authority.
+    pub(crate) fn native_engine_open(&self) -> Result<bool, GraphDbError> {
+        self.inner
+            .database
+            .read()
+            .map(|database| database.is_some())
+            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))
+    }
+
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    #[must_use]
+    pub fn staging_engine_is_open(&self) -> bool {
+        matches!(self.native_engine_open(), Ok(true))
+    }
+
+    /// Read the resident engine without exercising lazy-open authority.
+    pub(crate) fn try_read_open_engine(
+        &self,
+    ) -> Result<Option<RwLockReadGuard<'_, Option<GrafeoDB>>>, GraphDbError> {
+        if !self.native_engine_open()? {
+            return Ok(None);
         }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = phase;
+        let guard = crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_READ, || {
+            self.inner.database.read()
+        })
+        .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
+        if guard.is_none() {
+            return Ok(None);
+        }
+        self.ensure_available()?;
+        Ok(Some(guard))
     }
 
     /// Best-effort profiler observation that cannot change graph authority or
     /// operation outcomes. A closed or poisoned database simply has no
     /// trustworthy memory census to report.
     #[inline(always)]
-    pub(crate) fn record_memory_checkpoint(
-        &self,
-        phase: crate::hotpath_observe::GrafeoMemoryPhase,
-    ) {
-        #[cfg(feature = "hotpath")]
-        {
-            let Ok(guard) = self.read_guard() else {
-                return;
-            };
-            let Some(database) = guard.as_ref() else {
-                return;
-            };
-            crate::hotpath_observe::record_grafeo_memory(database, phase);
+    pub(crate) fn record_memory_checkpoint(&self, phase: crate::observe::GrafeoMemoryPhase) {
+        if !crate::observe::grafeo_memory_census_enabled() {
+            return;
         }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = phase;
+        let Ok(guard) = self.read_guard() else {
+            return;
+        };
+        let Some(database) = guard.as_ref() else {
+            return;
+        };
+        let container = self.container_label();
+        crate::observe::record_grafeo_memory(database, phase, &container);
     }
 
     pub(crate) fn write_guard(
@@ -1406,10 +1621,10 @@ impl GraphDb {
             });
         }
         self.ensure_available()?;
-        let guard = crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
-            || self.inner.database.write(),
-        )
+        self.ensure_opened()?;
+        let guard = crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
+            self.inner.database.write()
+        })
         .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         // Anything holding this guard may rewrite the rows a cached ordered
         // identity index was built from, so the index is stale from here on.
@@ -1437,37 +1652,13 @@ impl GraphDb {
     /// Returns [`GraphDbError::Closed`] when the database is already closed and
     /// [`GraphDbError::Unavailable`] when grafeo refuses the conversion (for
     /// example more than 32,767 distinct labels or edge types).
-    #[cfg(all(feature = "test-helpers", feature = "graph-disk-tier"))]
+    #[cfg(feature = "test-helpers")]
     pub fn compact_snapshot_for_bench(&self) -> Result<(), GraphDbError> {
         let mut guard = self.write_guard()?;
         let database = guard.as_mut().ok_or(GraphDbError::Closed)?;
         database
             .compact()
             .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
-    }
-
-    /// Freezes this database's live store into a columnar `CompactStore` base
-    /// plus a fresh overlay. Production path for a **single-generation sealed
-    /// store only** — the whole-database scope of `GrafeoDB::compact()` then
-    /// coincides exactly with the one immutable generation the store holds.
-    /// The multi-generation staging database is never compacted.
-    #[cfg(feature = "graph-sealed-store")]
-    #[hotpath::measure(label = "graph_db.sealed_store.compact", impl_type = "GraphDb")]
-    pub(crate) fn compact_for_seal(&self) -> Result<(), GraphDbError> {
-        let mut guard = self.write_guard()?;
-        let database = guard.as_mut().ok_or(GraphDbError::Closed)?;
-        database
-            .compact()
-            .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
-    }
-
-    /// Feature-off stub: the sealed-store lane is compiled out, so nothing
-    /// can reach a compaction request; a call is a wiring bug, not a state.
-    #[cfg(not(feature = "graph-sealed-store"))]
-    pub(crate) fn compact_for_seal(&self) -> Result<(), GraphDbError> {
-        Err(GraphDbError::unavailable(
-            "sealed generation compaction requires the graph-sealed-store feature",
-        ))
     }
 
     /// Marks this handle as a reopened sealed store: every later write
@@ -1479,11 +1670,103 @@ impl GraphDb {
 
     pub(crate) fn state_write_guard(
         &self,
-    ) -> Result<RwLockWriteGuard<'_, FormatState>, GraphDbError> {
-        crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_STATE_WRITE, || {
+    ) -> Result<RwLockWriteGuard<'_, Option<FormatState>>, GraphDbError> {
+        crate::observe::wait_lock(crate::observe::LOCK_WAIT_STATE_WRITE, || {
             self.inner.state.write()
         })
         .map_err(|_| GraphDbError::unavailable("graph state lock is poisoned"))
+    }
+
+    /// Materializes the native engine once and keeps it resident until the
+    /// returned pin drops. The pin is counted before the open, so a
+    /// concurrent hibernation either observes it or finishes first and this
+    /// open reopens; the engine is resident whenever this returns `Ok`.
+    #[tracing::instrument(
+        name = "graph_db.runtime.pin_serving_engine",
+        level = "trace",
+        skip_all
+    )]
+    pub(crate) fn pin_serving_engine(&self) -> Result<GraphServingEnginePin, GraphDbError> {
+        self.inner.serving_pins.fetch_add(1, Ordering::AcqRel);
+        let pin = GraphServingEnginePin {
+            inner: Arc::clone(&self.inner),
+            companion: None,
+        };
+        self.ensure_available()?;
+        self.ensure_opened()?;
+        Ok(pin)
+    }
+
+    fn serving_pinned(&self) -> bool {
+        self.inner.serving_pins.load(Ordering::Acquire) > 0
+    }
+
+    #[tracing::instrument(name = "graph_db.runtime.ensure_opened", level = "trace", skip_all)]
+    pub(crate) fn ensure_opened(&self) -> Result<(), GraphDbError> {
+        if self
+            .inner
+            .database
+            .read()
+            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.ensure_available()?;
+        let mut database =
+            crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
+                self.inner.database.write()
+            })
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        if database.is_some() {
+            return Ok(());
+        }
+        let mut validated =
+            self.inner.reopen.clone().ok_or_else(|| {
+                GraphDbError::unavailable("lazy graph database has no reopen state")
+            })?;
+        let persistent_store_state = self
+            .inner
+            .lazy_store_state
+            .lock()
+            .map_err(|_| GraphDbError::unavailable("lazy graph state lock is poisoned"))?
+            .ok_or_else(|| {
+                GraphDbError::unavailable(
+                    "graph database closed after its native engine was opened",
+                )
+            })?;
+        validated.preexisting_store = persistent_store_state == PersistentGraphStoreState::Existing;
+        let opened = open_lazy_engine(&validated, persistent_store_state)?;
+        if let Some(path) = validated.config.path.as_deref() {
+            crate::sealed_store::sweep_abandoned_sealed_staging(path);
+        }
+        *self
+            .inner
+            .state
+            .write()
+            .map_err(|_| GraphDbError::unavailable("graph state lock is poisoned"))? =
+            Some(opened.state);
+        *self
+            .inner
+            .quarantined_projections
+            .write()
+            .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))? =
+            opened.quarantined_projections;
+        // Bound while the database write lock is still held, so no reader can
+        // consult a proof before it is tied to the container this engine
+        // opened.
+        self.inner.markers.bind(opened.identity);
+        self.inner.invalidate_store_epoch_caches();
+        *database = Some(opened.database);
+        *self
+            .inner
+            .lazy_store_state
+            .lock()
+            .map_err(|_| GraphDbError::unavailable("lazy graph state lock is poisoned"))? =
+            Some(PersistentGraphStoreState::Existing);
+        drop(database);
+        self.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::Open);
+        Ok(())
     }
 
     /// Takes the exclusive claim, which is this crate's gate for every write
@@ -1497,10 +1780,9 @@ impl GraphDb {
     /// physical namespace cannot touch.
     pub(crate) fn wait_snapshot_gate_write(&self) -> ParkingRwLockWriteGuard<'_, ()> {
         self.inner.markers.mark_container_mutated();
-        crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_WRITE,
-            || self.inner.snapshot_gate.write(),
-        )
+        crate::observe::wait_lock(crate::observe::LOCK_WAIT_SNAPSHOT_GATE_WRITE, || {
+            self.inner.snapshot_gate.write()
+        })
     }
 
     /// Upgrades an upgradable claim to the exclusive one, with the same marker
@@ -1510,26 +1792,23 @@ impl GraphDb {
         gate: RwLockUpgradableReadGuard<'a, ()>,
     ) -> ParkingRwLockWriteGuard<'a, ()> {
         self.inner.markers.mark_container_mutated();
-        crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
-            || RwLockUpgradableReadGuard::upgrade(gate),
-        )
+        crate::observe::wait_lock(crate::observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE, || {
+            RwLockUpgradableReadGuard::upgrade(gate)
+        })
     }
 
     pub(crate) fn wait_snapshot_gate_upgradable(&self) -> RwLockUpgradableReadGuard<'_, ()> {
-        crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADABLE,
-            || self.inner.snapshot_gate.upgradable_read(),
-        )
+        crate::observe::wait_lock(crate::observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADABLE, || {
+            self.inner.snapshot_gate.upgradable_read()
+        })
     }
 
     pub(crate) fn wait_verified_generations_write(
         &self,
     ) -> Result<RwLockWriteGuard<'_, crate::lease::VerifiedGenerationState>, GraphDbError> {
-        crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_VERIFIED_GENERATIONS,
-            || self.inner.verified_generations.write(),
-        )
+        crate::observe::wait_lock(crate::observe::LOCK_WAIT_VERIFIED_GENERATIONS, || {
+            self.inner.verified_generations.write()
+        })
         .map_err(|_| GraphDbError::unavailable("verified graph generation state lock is poisoned"))
     }
 
@@ -1544,80 +1823,103 @@ impl GraphDb {
     }
 }
 
-/// Which side of a database lifetime a vector index census describes.
+/// How a hibernation attempt claims the exclusive snapshot gate.
+///
+/// A retirement-driven hibernation must land, so it waits. A retained-set
+/// sweep must never wait on, or evict, a generation a reader is serving
+/// from, so it declines when the gate is busy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum VectorIndexCensusPhase {
-    /// Taken at open: what came back from the file.
-    Restore,
-    /// Taken before close: what is about to be written out.
-    Persist,
+pub(crate) enum SnapshotGateClaim {
+    Blocking,
+    WhenIdle,
 }
 
-fn ensure_initial_vector_indexes(
-    database: &GrafeoDB,
-    batch: &GraphWriteBatch,
-) -> Result<(), GraphDbError> {
-    if latest_projection(database, &batch.namespace, &batch.projection)?.is_some() {
-        return Ok(());
-    }
-    ensure_vector_indexes_for_batch(database, batch)
+/// Which runtime path materialized a native engine. Operator-visible on the
+/// `graph_engine_opened` event so a resident-memory investigation can tell an
+/// eager owner open from a lazy first-use open of the same container.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GraphEngineOpenSite {
+    Eager,
+    LazyFirstUse,
 }
 
-fn ensure_vector_indexes_for_batch(
-    database: &GrafeoDB,
-    batch: &GraphWriteBatch,
-) -> Result<(), GraphDbError> {
-    let store = database.graph_store();
-    let label = vector::native_vector_label(&batch.namespace, &batch.projection);
-    for entity in batch
-        .mutations
-        .iter()
-        .filter_map(|mutation| match mutation {
-            GraphMutation::UpsertEntity(entity) => Some(entity),
-            _ => None,
-        })
-    {
-        for (name, property) in &entity.properties {
-            let GraphProperty::Vector(vector) = property else {
-                continue;
-            };
-            let property = vector_property_key(name, vector.dimension, vector.metric);
-            if !store.has_vector_index(&label, &property) {
-                database
-                    .create_vector_index(
-                        &label,
-                        &property,
-                        Some(vector.dimension),
-                        Some(vector.metric.engine_name()),
-                        None,
-                        None,
-                        None,
-                    )
-                    .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-            }
+/// In-memory engines have no container path; the label keeps the operator log
+/// field present so open/release events pair up per engine.
+fn container_label(path: Option<&std::path::Path>) -> String {
+    path.map_or_else(|| "memory".to_owned(), |path| path.display().to_string())
+}
+
+impl GraphEngineOpenSite {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eager => "eager",
+            Self::LazyFirstUse => "lazy_first_use",
         }
     }
-    Ok(())
 }
 
-fn require_committed_vector_scalar(
-    database: &GrafeoDB,
-    node: grafeo_common::types::NodeId,
-    property: &str,
-    expected: &Value,
-) -> Result<(), GraphDbError> {
-    let committed = database
-        .graph_store()
-        .get_node(node)
-        .and_then(|node| node.get_property(property).cloned());
-    if committed.as_ref() == Some(expected) {
-        Ok(())
-    } else {
-        Err(GraphDbError::DurabilityUncertain {
-            message: format!(
-                "committed vector scalar `{property}` differs before native index refresh"
-            ),
-        })
+fn open_validated_graph(
+    validated: &ValidatedOpen,
+    site: GraphEngineOpenSite,
+) -> Result<OpenedGraphState, GraphDbError> {
+    // The engine call is where a persistent open pays for corpus size:
+    // grafeo replays the whole serialized LPG block log through the live
+    // mutation path and any sidecar WAL an unclean shutdown left behind.
+    // A sealed compact container is the exception: its rows, id maps, and
+    // property-index orders are served in place and verified page by page
+    // as reads touch them, so its open reads metadata and adjacency only.
+    // The phases after it are O(labels), not O(rows), so this span is what
+    // a slow open decomposes into first.
+    let container_bytes = validated
+        .config
+        .path
+        .as_deref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len());
+    #[cfg(test)]
+    test_seams::fire(test_seams::Seam::EngineOpen(site));
+    let engine_started = std::time::Instant::now();
+    let database = {
+        let _span = tracing::trace_span!("graph_db.generation.open.engine").entered();
+        GrafeoDB::with_config(validated.config.clone())
+            .map_err(|error| map_open_error(error, validated.preexisting_store))
+    }?;
+    let engine_elapsed_ms = engine_started.elapsed().as_millis();
+    let identity = ContainerIdentity::from_engine(&database);
+    tracing::info!(
+        event = "graph_engine_opened",
+        site = site.as_str(),
+        container = %container_label(validated.config.path.as_deref()),
+        container_bytes,
+        preexisting = validated.preexisting_store,
+        engine_elapsed_ms = engine_elapsed_ms as u64,
+        "native graph engine opened"
+    );
+    validate_or_initialize_format(&database, validated)?;
+    let state = {
+        let _span = tracing::trace_span!("graph_db.generation.open.state").entered();
+        FormatState::load(&database)
+    }?;
+    let quarantined_projections = load_quarantined_projections(&database)?;
+    crate::recovery::collapse_replayed_wal(&database);
+    Ok(OpenedGraphState {
+        database,
+        state,
+        quarantined_projections,
+        identity,
+    })
+}
+
+/// A sealed compact base is read in place and verifies each page the first
+/// time a read touches it, so a corrupt page surfaces at a read, not at open.
+/// The engine latches the first failure; from then on every read of this
+/// open is refused as corrupt rather than answered without the page.
+pub(crate) fn ensure_intact(database: &GrafeoDB) -> Result<(), GraphDbError> {
+    match database.compact_base_integrity_fault() {
+        Some(fault) => Err(GraphDbError::Corrupt {
+            message: format!("sealed graph page failed verification: {fault}"),
+        }),
+        None => Ok(()),
     }
 }
 
@@ -1647,7 +1949,63 @@ pub(crate) fn sync_wal(database: &GrafeoDB) -> Result<(), GraphDbError> {
         })
 }
 
-pub(crate) use crate::schema::vector_property_key;
+/// Deterministic barriers on the engine lifecycle, for tests that must act
+/// between two runtime steps -- replace the container between marker admission
+/// and the engine open, or between the engine close and the marker publish --
+/// without sleeping or racing a second thread.
+///
+/// Hooks are thread-local, like the verification counters: every engine open
+/// and close runs synchronously on the calling thread, so a hook sees exactly
+/// the lifecycle steps its own test drives.
+#[cfg(test)]
+pub(crate) mod test_seams {
+    use std::cell::RefCell;
 
+    use super::GraphEngineOpenSite;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum Seam {
+        /// Immediately before grafeo opens the container at `site`.
+        EngineOpen(GraphEngineOpenSite),
+        /// After the engine has closed and synced the container, immediately
+        /// before the verified-generation marker is published.
+        MarkerPublish,
+    }
+
+    type Hook = Box<dyn FnMut(Seam)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Clears the hook when dropped, so a test that returns early or panics
+    /// never leaves its barrier installed for a later test on this thread.
+    pub(crate) struct Installed;
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            HOOK.with(|hook| hook.borrow_mut().take());
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn install(hook: impl FnMut(Seam) + 'static) -> Installed {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Installed
+    }
+
+    /// Runs the installed hook, if any. The hook is taken out for the call so
+    /// a runtime step it triggers cannot re-enter it.
+    pub(crate) fn fire(seam: Seam) {
+        let Some(mut hook) = HOOK.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        hook(seam);
+        HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
+#[cfg(test)]
+mod marker_binding_tests;
 #[cfg(test)]
 mod tests;

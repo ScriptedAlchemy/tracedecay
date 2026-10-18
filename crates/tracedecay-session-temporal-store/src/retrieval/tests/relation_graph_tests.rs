@@ -1,12 +1,15 @@
 use tracedecay_domain::{
     CopyProofV1, MessageOccurrenceIdV1, ObservationId, ProjectId, UserProfileId,
 };
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_temporal_query::candidates::CandidateClause;
 
 use super::*;
 use crate::relations::{
     LogicalCopyRelation, SessionRelationProjection, SessionRelationScope, SummaryRelationNode,
     SummarySourceRef,
 };
+use crate::sql::TemporalSqlRead;
 
 fn profile_scope() -> SessionRelationScope {
     SessionRelationScope::profile_sessions(UserProfileId::new("profile.fixture").expect("profile"))
@@ -83,7 +86,209 @@ async fn records_from_projection(
     Ok(records)
 }
 
-#[tokio::test]
+async fn summary_search_ids(
+    read: &RegisteredTemporalRead,
+    session_id: &str,
+    provider: &str,
+    generation: u64,
+    mode: TemporalModeV1,
+    channel: CandidateChannel,
+    value: &str,
+) -> Vec<String> {
+    let snapshot = scoped_snapshot_for_session(session_id, generation, Some(provider), mode);
+    let request = record_request();
+    let mut rows = query_candidate_clause(
+        &TemporalSqlRead::registered(&read.read),
+        snapshot.retrieval_scope(),
+        snapshot.request(),
+        generation,
+        &CandidateClause {
+            channel,
+            value: value.to_string(),
+            exact: channel == CandidateChannel::Anchor,
+        },
+        &CandidateCursor {
+            clause: 0,
+            knowledge_at: i64::MAX,
+            session_id: String::new(),
+            stable_id: String::new(),
+            strict_lexical_matched: false,
+        },
+        8,
+        &request,
+        None,
+    )
+    .await
+    .expect("summary candidate query");
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await.expect("summary candidate row") {
+        ids.push(row.get(0).expect("summary candidate id"));
+    }
+    ids
+}
+
+async fn summary_expansion_ids(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &str,
+    mode: TemporalModeV1,
+) -> Vec<String> {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let access = crate::SessionTemporalAccess::new(database);
+    let session_id = SessionId::new(session_id).expect("session");
+    let snapshot = access
+        .freeze_session_temporal_snapshot_result(
+            tracedecay_store::SessionTemporalSnapshotRequestV1::new(session_id.clone()),
+        )
+        .await
+        .expect("frozen temporal snapshot");
+    access
+        .retrieve_session_temporal_page_result(
+            tracedecay_store::SessionTemporalRetrievalRequestV1::new(
+                session_id,
+                mode,
+                RetrievalGrainV1::Summary,
+                snapshot,
+                8,
+                None,
+                ExecutionControl::default(),
+            )
+            .expect("summary retrieval request"),
+        )
+        .await
+        .expect("summary expansion")
+        .summaries()
+        .iter()
+        .map(|summary| summary.summary_id().as_str().to_string())
+        .collect()
+}
+
+/// Materializes one published summary's records in `Current` mode. The read
+/// is provider-unscoped: a provider scope also demands retained
+/// source occurrences the raw-only production seed never projects, which
+/// would leave the summary predicate under test unexercised.
+async fn current_summary_records(
+    read: &RegisteredTemporalRead,
+    session_id: &str,
+    generation: u64,
+    summary_id: &str,
+    anchor_id: &str,
+    projection: SessionRelationProjection,
+) -> Vec<TemporalRecord> {
+    let mut candidate = candidate_for_anchor(anchor_id);
+    candidate.channel = CandidateChannel::Summary;
+    candidate.retriever_record_id = summary_id.to_string();
+    candidate.session = Some(session_id.to_string());
+    candidate.source = None;
+    candidate.participant_generation = generation;
+    records_from_projection(
+        read,
+        &scoped_snapshot_for_session(session_id, generation, None, TemporalModeV1::Current),
+        candidate,
+        &record_request(),
+        projection,
+    )
+    .await
+    .expect("current summary records")
+}
+
+async fn seed_production_summary(
+    runtime: &HostAdmissionTestRuntimeV1,
+    provider: &str,
+    session_id: &str,
+) -> tracedecay_lcm::LcmSummaryNode {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    assert!(
+        database
+            .upsert_session(&tracedecay_store::SessionRecord {
+                provider: provider.to_string(),
+                session_id: session_id.to_string(),
+                project_key: "user".to_string(),
+                project_path: "/dirty-summary".to_string(),
+                title: Some("dirty summary retrieval fixture".to_string()),
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
+    );
+    let storage_root = database.db_path().parent().expect("session storage root");
+    for ordinal in 1..=4 {
+        database
+            .lcm_ingest_raw_message(
+                storage_root,
+                &tracedecay_store::SessionMessageRecord {
+                    provider: provider.to_string(),
+                    message_id: format!("dirty-summary-message-{ordinal}"),
+                    session_id: session_id.to_string(),
+                    role: "assistant".to_string(),
+                    timestamp: Some(ordinal),
+                    ordinal,
+                    text: format!("retained summary source {ordinal}"),
+                    kind: Some("message".to_string()),
+                    model: None,
+                    tool_names: None,
+                    source_path: None,
+                    source_offset: None,
+                    metadata_json: None,
+                },
+            )
+            .await
+            .expect("production raw message ingest");
+    }
+    database
+        .lcm_protect_session_raw_messages(provider, session_id)
+        .await
+        .expect("production raw protection");
+    let response = database
+        .lcm_compress_guarded(
+            &tracedecay_lcm::LcmCompressionRequest {
+                provider: provider.to_string(),
+                session_id: session_id.to_string(),
+                messages: Vec::new(),
+                current_tokens: Some(1_000),
+                focus_topic: None,
+                ignore_session_patterns: Vec::new(),
+                stateless_session_patterns: Vec::new(),
+                ignore_message_patterns: Vec::new(),
+                expected_current_frontier_store_id: None,
+                threshold_tokens: None,
+                max_assembly_tokens: None,
+                leaf_chunk_tokens: Some(1),
+                max_source_messages: Some(8),
+                summary_fan_in: None,
+                incremental_max_depth: None,
+                fresh_tail_count: Some(1),
+                dynamic_leaf_chunk_enabled: None,
+                dynamic_leaf_chunk_max: None,
+                context_length: None,
+                reserve_tokens_floor: None,
+                summarizer: tracedecay_lcm::LcmSummarizerMode::Fake {
+                    summary_text: "production dirty summary sentinel".to_string(),
+                },
+            },
+            &ExecutionControl::default(),
+            || Ok(()),
+        )
+        .await
+        .expect("production summary publication");
+    assert_eq!(response.summary_nodes.len(), 1);
+    response
+        .summary_nodes
+        .into_iter()
+        .next()
+        .expect("published summary")
+}
+
+#[asupersync::test]
 async fn copy_lineage_comes_from_grafeo_without_a_sql_relation_table() {
     let directory = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -108,29 +313,29 @@ async fn copy_lineage_comes_from_grafeo_without_a_sql_relation_table() {
                  ('graph-source-anchor', '{{}}', '{{}}', 'fixture');
              INSERT INTO session_occurrences (
                  session_id, generation, occurrence_id, source_observation_id,
-                 source_provider, projection_output_ordinal, retrieval_anchor_id,
-                 role, knowledge_at, valid_time_json, evidence_json,
-                 sanitized_content_digest, sanitized_content_bytes,
-                 snippet_text, index_text
+                 source_sequence, source_provider, projection_output_ordinal,
+                 retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                 valid_time_json, evidence_json, sanitized_content_digest,
+                 sanitized_content_bytes, index_text
              ) VALUES
-                 ('session-b', 1, '{target_value}', 'observation-shared',
-                  'fixture-provider', 2, 'graph-target-anchor', 'user', 6,
+                 ('session-b', 1, '{target_value}', 'observation-shared', 1,
+                  'fixture-provider', 2, 'graph-target-anchor', '[]', 'user', 6,
                   '{{\"kind\":\"unknown\"}}',
                   '{{\"authority\":\"canonical_observation\",\"evidence_class\":\"observed\",
                     \"source_anchor_id\":\"graph-target-anchor\",
                     \"sanitization_receipt\":{{
                       \"receipt_id\":\"receipt-1\",\"sanitizer_version\":\"fixture\"
                     }}}}',
-                  '{content_digest}', 6, 'target', 'target'),
-                 ('session-b', 1, '{graph_source_value}', 'observation-shared',
-                  'fixture-provider', 3, 'graph-source-anchor', 'user', 5,
+                  '{content_digest}', 6, 'target'),
+                 ('session-b', 1, '{graph_source_value}', 'observation-shared', 1,
+                  'fixture-provider', 3, 'graph-source-anchor', '[]', 'user', 5,
                   '{{\"kind\":\"unknown\"}}',
                   '{{\"authority\":\"canonical_observation\",\"evidence_class\":\"observed\",
                     \"source_anchor_id\":\"graph-source-anchor\",
                     \"sanitization_receipt\":{{
                       \"receipt_id\":\"receipt-1\",\"sanitizer_version\":\"fixture\"
                     }}}}',
-                  '{content_digest}', 5, 'graph', 'graph');"
+                  '{content_digest}', 5, 'graph');"
         ),
     )
     .await
@@ -175,7 +380,7 @@ async fn copy_lineage_comes_from_grafeo_without_a_sql_relation_table() {
     assert_eq!(copy.copied_from_occurrence_id, graph_source);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn summary_sources_and_predecessor_come_from_grafeo() {
     let directory = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -253,7 +458,7 @@ async fn summary_sources_and_predecessor_come_from_grafeo() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn provider_filter_uses_grafeo_retained_summary_anchors() {
     let directory = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -311,7 +516,357 @@ async fn provider_filter_uses_grafeo_retained_summary_anchors() {
     );
 }
 
-#[tokio::test]
+/// Records the session's first raw message as a revised (dirty) source. The
+/// schema trigger seeds the matching pending `raw_message` invalidation work,
+/// which is the durable state every protection revision leaves behind until
+/// the convergence worker starts its walk.
+async fn mark_first_raw_message_dirty(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    provider: &str,
+    session_id: &str,
+) {
+    Executor::execute(
+        &database
+            .writer_connection()
+            .expect("registered profile writer"),
+        "INSERT INTO lcm_summary_convergence_dirty_raw(
+             provider, session_id, store_id, rewind_frontier_store_id
+         )
+         SELECT ?1, ?2, MIN(store_id), MAX(0, MIN(store_id) - 1)
+         FROM lcm_raw_messages
+         WHERE provider = ?1 AND session_id = ?2",
+        params![provider, session_id],
+    )
+    .await
+    .expect("durable dirty raw revision");
+}
+
+/// Leaves the walk's partial-closure marker: it enqueues `summary_node` work
+/// only once it has staled at least one summary and still has more to visit.
+async fn enqueue_partial_summary_invalidation(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    provider: &str,
+    session_id: &str,
+    summary_id: &str,
+) {
+    Executor::execute(
+        &database
+            .writer_connection()
+            .expect("registered profile writer"),
+        "INSERT INTO lcm_summary_convergence_invalidation_work(
+             provider, session_id, raw_store_id,
+             source_kind, source_id, depth, after_node_id
+         )
+         SELECT provider, session_id, store_id, 'summary_node', ?3, 1, ''
+         FROM lcm_summary_convergence_dirty_raw
+         WHERE provider = ?1 AND session_id = ?2",
+        params![provider, session_id, summary_id],
+    )
+    .await
+    .expect("durable partial invalidation marker");
+}
+
+async fn active_generation(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    session_id: &str,
+) -> u64 {
+    crate::SessionTemporalAccess::new(database)
+        .freeze_session_temporal_snapshot_result(
+            tracedecay_store::SessionTemporalSnapshotRequestV1::new(
+                SessionId::new(session_id).expect("session"),
+            ),
+        )
+        .await
+        .expect("published summary generation")
+        .watermarks()
+        .active_generation()
+        .value()
+}
+
+#[asupersync::test]
+async fn current_temporal_reads_serve_summaries_while_raw_revision_work_is_only_queued() {
+    const PROVIDER: &str = "cursor";
+    const SESSION_ID: &str = "queued-revision-session";
+    const SUMMARY_TEXT: &str = "production dirty summary sentinel";
+
+    let directory = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .expect("registered profile runtime");
+    let summary = seed_production_summary(&runtime, PROVIDER, SESSION_ID).await;
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let generation = active_generation(database, SESSION_ID).await;
+    mark_first_raw_message_dirty(database, PROVIDER, SESSION_ID).await;
+
+    let read = runtime.retrieval_read_for_test().await;
+    let pending_work = read
+        .text_column(
+            "SELECT source_kind FROM lcm_summary_convergence_invalidation_work
+             WHERE provider = ?1 AND session_id = ?2 AND state = 'pending'",
+            vec![
+                SqlValue::Text(PROVIDER.to_string()),
+                SqlValue::Text(SESSION_ID.to_string()),
+            ],
+            0,
+        )
+        .await;
+    assert_eq!(
+        pending_work,
+        ["raw_message"],
+        "a queued revision seeds only raw_message work before the walk starts"
+    );
+    let anchor_id = read
+        .text_column(
+            "SELECT summary_anchor_id FROM session_summary_nodes WHERE summary_id = ?1",
+            vec![SqlValue::Text(summary.node_id.clone())],
+            0,
+        )
+        .await
+        .into_iter()
+        .next()
+        .expect("published summary anchor");
+    let (scope, relation_store) =
+        crate::SessionTemporalRegisteredDb::session_relation_store(database)
+            .expect("registered relation authority");
+    let projection = relation_store
+        .load_projection(
+            &scope,
+            &SessionId::new(SESSION_ID).expect("session"),
+            generation,
+            256,
+            256,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("published relation projection");
+    assert_eq!(
+        summary_search_ids(
+            &read,
+            SESSION_ID,
+            PROVIDER,
+            generation,
+            TemporalModeV1::Current,
+            CandidateChannel::Summary,
+            SUMMARY_TEXT,
+        )
+        .await,
+        [summary.node_id.as_str()],
+        "queued-but-unstarted revision work must not hide current summary search"
+    );
+    assert_eq!(
+        summary_search_ids(
+            &read,
+            SESSION_ID,
+            PROVIDER,
+            generation,
+            TemporalModeV1::Current,
+            CandidateChannel::Anchor,
+            &anchor_id,
+        )
+        .await,
+        [summary.node_id.as_str()],
+        "queued-but-unstarted revision work must not hide current anchor search"
+    );
+    let records = current_summary_records(
+        &read,
+        SESSION_ID,
+        generation,
+        &summary.node_id,
+        &anchor_id,
+        projection,
+    )
+    .await;
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record, TemporalRecord::Summary(_))),
+        "queued-but-unstarted revision work must not block summary materialization: {records:?}"
+    );
+    assert_eq!(
+        summary_expansion_ids(&runtime, SESSION_ID, TemporalModeV1::Current).await,
+        [summary.node_id.as_str()],
+        "queued-but-unstarted revision work must not hide current summary expansion"
+    );
+}
+
+#[asupersync::test]
+async fn current_temporal_reads_hide_a_partially_invalidated_summary_across_restart() {
+    const PROVIDER: &str = "cursor";
+    const SESSION_ID: &str = "dirty-summary-session";
+    const SUMMARY_TEXT: &str = "production dirty summary sentinel";
+
+    let directory = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .expect("registered profile runtime");
+    let summary = seed_production_summary(&runtime, PROVIDER, SESSION_ID).await;
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let generation = active_generation(database, SESSION_ID).await;
+    mark_first_raw_message_dirty(database, PROVIDER, SESSION_ID).await;
+    enqueue_partial_summary_invalidation(database, PROVIDER, SESSION_ID, &summary.node_id).await;
+
+    let read = runtime.retrieval_read_for_test().await;
+    let anchor_id = read
+        .text_column(
+            "SELECT summary_anchor_id FROM session_summary_nodes WHERE summary_id = ?1",
+            vec![SqlValue::Text(summary.node_id.clone())],
+            0,
+        )
+        .await
+        .into_iter()
+        .next()
+        .expect("published summary anchor");
+    let (scope, relation_store) =
+        crate::SessionTemporalRegisteredDb::session_relation_store(database)
+            .expect("registered relation authority");
+    let projection = relation_store
+        .load_projection(
+            &scope,
+            &SessionId::new(SESSION_ID).expect("session"),
+            generation,
+            256,
+            256,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("published relation projection");
+    assert_eq!(
+        summary_search_ids(
+            &read,
+            SESSION_ID,
+            PROVIDER,
+            generation,
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(i64::MAX),
+            },
+            CandidateChannel::Summary,
+            SUMMARY_TEXT,
+        )
+        .await,
+        [summary.node_id.as_str()],
+        "historical search remains available while current convergence is incomplete"
+    );
+    assert!(
+        summary_search_ids(
+            &read,
+            SESSION_ID,
+            PROVIDER,
+            generation,
+            TemporalModeV1::Current,
+            CandidateChannel::Summary,
+            SUMMARY_TEXT,
+        )
+        .await
+        .is_empty(),
+        "current summary search must fail closed during partial invalidation"
+    );
+    assert!(
+        summary_search_ids(
+            &read,
+            SESSION_ID,
+            PROVIDER,
+            generation,
+            TemporalModeV1::Current,
+            CandidateChannel::Anchor,
+            &anchor_id,
+        )
+        .await
+        .is_empty(),
+        "current anchor search must not bypass summary invalidation"
+    );
+    assert!(
+        current_summary_records(
+            &read,
+            SESSION_ID,
+            generation,
+            &summary.node_id,
+            &anchor_id,
+            projection,
+        )
+        .await
+        .is_empty(),
+        "a retained candidate must not materialize the dirty summary"
+    );
+    assert_eq!(
+        summary_expansion_ids(
+            &runtime,
+            SESSION_ID,
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(i64::MAX),
+            },
+        )
+        .await,
+        [summary.node_id.as_str()],
+        "historical expansion remains available while current convergence is incomplete"
+    );
+    assert!(
+        summary_expansion_ids(&runtime, SESSION_ID, TemporalModeV1::Current)
+            .await
+            .is_empty(),
+        "current summary expansion must fail closed during partial invalidation"
+    );
+    drop(read);
+    drop(relation_store);
+    drop(runtime);
+
+    let restarted = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .expect("restarted registered profile runtime");
+    let restarted_read = restarted.retrieval_read_for_test().await;
+    assert!(
+        summary_search_ids(
+            &restarted_read,
+            SESSION_ID,
+            PROVIDER,
+            generation,
+            TemporalModeV1::Current,
+            CandidateChannel::Summary,
+            SUMMARY_TEXT,
+        )
+        .await
+        .is_empty(),
+        "the durable marker must keep current search fail closed after restart"
+    );
+    let restarted_database = restarted
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("restarted registered profile database");
+    let (restarted_scope, restarted_relations) =
+        crate::SessionTemporalRegisteredDb::session_relation_store(restarted_database)
+            .expect("restarted relation authority");
+    let restarted_projection = restarted_relations
+        .load_projection(
+            &restarted_scope,
+            &SessionId::new(SESSION_ID).expect("session"),
+            generation,
+            256,
+            256,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("restarted relation projection");
+    assert!(
+        current_summary_records(
+            &restarted_read,
+            SESSION_ID,
+            generation,
+            &summary.node_id,
+            &anchor_id,
+            restarted_projection,
+        )
+        .await
+        .is_empty(),
+        "the durable marker must keep current materialization fail closed after restart"
+    );
+    assert!(
+        summary_expansion_ids(&restarted, SESSION_ID, TemporalModeV1::Current)
+            .await
+            .is_empty(),
+        "the durable marker must keep current expansion fail closed after restart"
+    );
+}
+
+#[asupersync::test]
 async fn anchor_lookups_that_resolve_a_summary_read_its_summary_relations() {
     let directory = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -321,7 +876,7 @@ async fn anchor_lookups_that_resolve_a_summary_read_its_summary_relations() {
     let read = runtime.retrieval_read_for_test().await;
     // A summary describe hydrates over the summary's own anchor, so its
     // candidate arrives on the anchor channel carrying the summary's evidence
-    // role and summary identity — never an occurrence identity.
+    // role and summary identity, never an occurrence identity.
     let mut candidate = candidate_for_anchor("anchor-summary-provider");
     candidate.channel = CandidateChannel::Anchor;
     candidate.evidence_role = Some("summary".to_string());

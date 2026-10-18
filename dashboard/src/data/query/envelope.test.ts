@@ -4,8 +4,8 @@
  * `EnvelopeResult` is keyed by domain state rather than by a transport outcome,
  * so the gateway's read-only refusal is reported in that vocabulary: `locked`,
  * the taxonomy's word for a surface that will not accept a change. The failure
- * this file guards against is that refusal arriving as `error` — a state whose
- * only implied next action is retry, which will be refused again — or as a
+ * this file guards against is that refusal arriving as `error`, a state whose
+ * only implied next action is retry, which will be refused again, or as a
  * decodable-but-absent envelope.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { fetchEnvelope } from './envelope.ts';
 import { READ_ONLY_SCOPE_STATUS } from '../scope/store.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
+import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
 
 const PayloadSchema = z.object({ note: z.string() });
 
@@ -101,9 +102,9 @@ describe('fetchEnvelope', () => {
   it('carries the daemon reason when an unavailable read returns no payload', async () => {
     // `DashboardEnvelopeV1::unavailable` is how every failed graph read reaches
     // the client: domain_state `unknown`, payload null, and the cause pushed
-    // onto `coverage.omission_reasons`. The state alone is not actionable —
+    // onto `coverage.omission_reasons`. The state alone is not actionable,
     // "unknown" does not tell a reader whether the index is still sealing or
-    // the generation is gone — so the reason has to survive the decode. Without
+    // the generation is gone, so the reason has to survive the decode. Without
     // this the Code workspace renders a blocked panel with no explanation,
     // which is indistinguishable from an empty project.
     const envelope = fixtureEnvelope(null, 'unknown');
@@ -146,4 +147,23 @@ describe('fetchEnvelope', () => {
       fetchEnvelope('/api/x', PayloadSchema, { signal: controller.signal }),
     ).rejects.toBe(abort);
   });
+
+  // The 2xx, 405, and generic non-2xx branches each read a body; an abort
+  // during that read must stay an abort rather than becoming
+  // `unsupported_schema` or an `HTTP <status>` transport state.
+  it.each([200, 405, 500])(
+    'preserves an abort that lands while a %i body is still being read',
+    async (status) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, init?: RequestInit) =>
+          responseWithBodyPendingUntilAbort(status, init?.signal),
+        ),
+      );
+      const controller = new AbortController();
+      const pending = fetchEnvelope('/api/x', PayloadSchema, { signal: controller.signal });
+      controller.abort();
+      await expect(pending).rejects.toThrow(/abort/i);
+    },
+  );
 });

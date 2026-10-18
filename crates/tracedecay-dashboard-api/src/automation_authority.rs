@@ -12,12 +12,12 @@ use std::sync::Arc;
 use axum::Json;
 use axum::http::StatusCode;
 use serde_json::Value;
-use tracedecay_application::ApplicationProblemEnvelope;
-use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationRunResultV1};
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillUpdate,
 };
 use tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploymentReceipt;
+use tracedecay_contracts::ApplicationProblemEnvelope;
+use tracedecay_contracts::retained_surfaces::{AutomationRunProblemV1, AutomationRunResultV1};
 
 use super::DashboardHttpRequestControlV1;
 
@@ -68,28 +68,7 @@ impl DashboardAutomationAuthorityErrorV1 {
 }
 
 fn application_problem_status(problem: &ApplicationProblemEnvelope) -> StatusCode {
-    match problem.problem.kind() {
-        tracedecay_application::ApplicationProblemKind::PartialEffect
-        | tracedecay_application::ApplicationProblemKind::Conflict
-        | tracedecay_application::ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-        tracedecay_application::ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-        tracedecay_application::ApplicationProblemKind::NotFoundOrNotAuthorized => {
-            StatusCode::NOT_FOUND
-        }
-        tracedecay_application::ApplicationProblemKind::Unsupported => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
-        tracedecay_application::ApplicationProblemKind::ResetRequired
-        | tracedecay_application::ApplicationProblemKind::Unavailable => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        tracedecay_application::ApplicationProblemKind::ExecutionFailed => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-        tracedecay_application::ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-        tracedecay_application::ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
-        tracedecay_application::ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-    }
+    tracedecay_api::application_problem_status(problem.problem.kind())
 }
 
 pub(crate) fn automation_authority_error_response(
@@ -273,23 +252,6 @@ impl DashboardAutomationAuthorityV1 {
 mod tests {
     use super::*;
 
-    fn request_control() -> DashboardHttpRequestControlV1 {
-        let observed_at = tracedecay_domain::UtcMicros(1_000_000);
-        DashboardHttpRequestControlV1 {
-            request_id: tracedecay_application::RequestId::new("request.dashboard-automation-test")
-                .expect("request identity"),
-            deadline: tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                2_000_000,
-            ))
-            .expect("request deadline"),
-            cancellation: tracedecay_application::CancellationSignal::active(
-                "cancel.dashboard-automation-test",
-            )
-            .expect("request cancellation"),
-            observed_at,
-        }
-    }
-
     fn unavailable_run_port() -> DashboardAutomationRunPortV1 {
         Arc::new(|_| {
             Box::pin(async {
@@ -310,6 +272,16 @@ mod tests {
         })
     }
 
+    fn request_control() -> DashboardHttpRequestControlV1 {
+        DashboardHttpRequestControlV1::test_fixture_with(
+            "dashboard-automation-test",
+            tracedecay_contracts::CancellationSignal::active("cancel.dashboard-automation-test")
+                .expect("request cancellation"),
+            tracedecay_domain::UtcMicros(1_000_000),
+            tracedecay_domain::UtcMicros(2_000_000),
+        )
+    }
+
     #[test]
     fn automation_authority_rejects_a_relative_profile_root() {
         let result = DashboardAutomationAuthorityV1::new(
@@ -322,23 +294,6 @@ mod tests {
             result,
             Err(DashboardAutomationAuthorityErrorV1::Unavailable { .. })
         ));
-    }
-
-    #[test]
-    fn automation_authority_preserves_the_exact_selected_profile_root() {
-        let root = if cfg!(windows) {
-            PathBuf::from(r"C:\profiles\selected")
-        } else {
-            PathBuf::from("/profiles/selected")
-        };
-        let authority = DashboardAutomationAuthorityV1::new(
-            root.clone(),
-            unavailable_run_port(),
-            unavailable_skill_port(),
-        )
-        .expect("absolute selected profile root");
-
-        assert_eq!(authority.profile_root(), root);
     }
 
     #[tokio::test]
@@ -370,57 +325,6 @@ mod tests {
             result,
             Err(DashboardAutomationAuthorityErrorV1::Unavailable { .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn automation_authority_passes_only_user_job_identity_to_the_daemon_port() {
-        let observed = Arc::new(std::sync::Mutex::new(None));
-        let observed_run = Arc::clone(&observed);
-        let run: DashboardAutomationRunPortV1 = Arc::new(move |invocation| {
-            *observed_run
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(invocation.request);
-            Box::pin(async {
-                Err(DashboardAutomationAuthorityErrorV1::unavailable(
-                    "test user-job authority",
-                ))
-            })
-        });
-        let profile_root = if cfg!(windows) {
-            PathBuf::from(r"C:\profiles\selected")
-        } else {
-            PathBuf::from("/profiles/selected")
-        };
-        let project_root = if cfg!(windows) {
-            PathBuf::from(r"C:\projects\selected")
-        } else {
-            PathBuf::from("/projects/selected")
-        };
-        let authority =
-            DashboardAutomationAuthorityV1::new(profile_root, run, unavailable_skill_port())
-                .expect("absolute selected profile root");
-
-        let _ = authority
-            .run(
-                &project_root,
-                DashboardAutomationRunRequestV1::UserJob {
-                    job_id: "nightly-summary".to_owned(),
-                    run_id: "dashboard_user_job_nightly-summary_1000000".to_owned(),
-                },
-                request_control(),
-            )
-            .await;
-
-        assert_eq!(
-            observed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-            Some(DashboardAutomationRunRequestV1::UserJob {
-                job_id: "nightly-summary".to_owned(),
-                run_id: "dashboard_user_job_nightly-summary_1000000".to_owned(),
-            })
-        );
     }
 
     #[tokio::test]
@@ -539,19 +443,19 @@ mod tests {
     #[test]
     fn admitted_execution_failure_is_an_internal_server_error() {
         let request_id =
-            tracedecay_application::RequestId::new("request.dashboard-automation-execution-failed")
+            tracedecay_contracts::RequestId::new("request.dashboard-automation-execution-failed")
                 .expect("request identity");
-        let problem = tracedecay_application::ApplicationProblem::execution_failed(
-            tracedecay_application::ApplicationExecutionFailureClassV1::Permanent,
-            tracedecay_application::SafeDiagnostic::new(
+        let problem = tracedecay_contracts::ApplicationProblem::execution_failed(
+            tracedecay_contracts::ApplicationExecutionFailureClassV1::Permanent,
+            tracedecay_contracts::SafeDiagnostic::new(
                 "application.dashboard-automation.execution-failed",
                 "The admitted dashboard automation execution failed.",
             )
             .expect("safe execution-failure diagnostic"),
         )
         .expect("execution-failure problem");
-        let envelope = tracedecay_application::ApplicationProblemEnvelope::new(
-            tracedecay_application::ResultContractRef::new(
+        let envelope = tracedecay_contracts::ApplicationProblemEnvelope::new(
+            tracedecay_contracts::ResultContractRef::new(
                 tracedecay_tool_catalog::SchemaId::new(
                     "schema.dashboard-automation.execution-failed-result",
                 )

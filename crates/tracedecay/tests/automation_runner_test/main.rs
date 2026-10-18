@@ -7,12 +7,9 @@
 //! automation_skill_writer_runner_test binaries into one integration-test
 //! binary so Windows CI links one executable instead of eight. The binary
 //! keeps the automation_runner_test name because automation artifacts embed
-//! `cargo test --test automation_runner_test ...` replay commands.
+//! `bazel test //crates/tracedecay:automation_runner_test ...` harness commands.
 
-// Full-journey Hotpath builds compose several measured automation futures in
-// each test body; keep the expanded query budget local to this test crate.
-#![recursion_limit = "256"]
-
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 

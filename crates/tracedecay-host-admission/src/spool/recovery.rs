@@ -53,9 +53,18 @@ pub(crate) fn recover_pending(
     let recovered_next_seq = if matches!(meta.integrity, SpoolIntegrity::Corrupted { .. }) {
         None
     } else {
+        // Frames of a published append intent may reach past `next_seq`;
+        // the intent's range bounds how far.
+        let named_by_intent = |highest: u64| {
+            meta.append_intent
+                .as_ref()
+                .is_some_and(|intent| highest >= intent.seq && highest < intent.end_seq())
+        };
         match highest_unresolved {
-            Some(highest) if highest == meta.next_seq => {
-                if quarantine.contains(highest)
+            Some(highest) if highest == meta.next_seq || named_by_intent(highest) => {
+                // A batch frame may already be quarantined; its active frame
+                // stays until metadata that no longer names it is published.
+                if (quarantine.contains(highest) && !named_by_intent(highest))
                     || records.last().map(|record| record.seq) != Some(highest)
                 {
                     return Err(SpoolError::MetadataCorrupted);

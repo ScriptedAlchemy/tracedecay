@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "source_commit": "dc08fbeb7",
+  "profile": "bench",
+  "features": [
+    "hotpath",
+    "hotpath-alloc"
+  ],
+  "fixture": {
+    "corpus": "benchmark_data/index-bench/corpus",
+    "replicas": 10,
+    "files": 2600,
+    "source_bytes": 9284370,
+    "manifest_bytes": 5177470,
+    "segments": 2601,
+    "segment_bytes": 281183513,
+    "segment_bytes_per_file": 108147.505
+  },
+  "measured_iterations": 5,
+  "exclusive_allocations": {
+    "encode": {
+      "total_bytes": "15.0 GB",
+      "total_count": 114474195
+    },
+    "decode_and_open": {
+      "total_bytes": "17.8 GB",
+      "total_count": 142764040
+    }
+  },
+  "bytes_lane": {
+    "vm_hwm_bytes": 2233081856,
+    "encode_p50_ns": 6181452608,
+    "encode_p95_ns": 6852838370,
+    "decode_and_open_p50_ns": 10823019486,
+    "decode_and_open_p95_ns": 11461173509
+  },
+  "count_lane": {
+    "vm_hwm_bytes": 2272997376,
+    "encode_p50_ns": 7192525102,
+    "encode_p95_ns": 7633859511,
+    "decode_and_open_p50_ns": 11520921273,
+    "decode_and_open_p95_ns": 13516635235
+  }
+}

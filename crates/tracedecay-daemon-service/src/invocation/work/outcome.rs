@@ -1,17 +1,18 @@
 //! Work invocation response, evidence, and effect construction.
 
 use serde::Serialize;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblem, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantSnapshot,
     Deadline, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
     EvidenceDomain, EvidenceIdentity, EvidencePacket, OperationBudgetUsage, OperationReceipt,
     PageState, PolicyDecisionRef, ReconciliationState, RequestAdmission, RequestContext, RequestId,
     RetryDirective, SafeDiagnostic, TemporalState, WorkProductApplicationErrorV1,
-    WorkProjectionApplicationError, WorkflowEffectTerminalV1,
+    WorkflowEffectTerminalV1,
 };
-use tracedecay_domain::{ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
-use tracedecay_runtime_core::work_topology::WorkTopologyError;
+use tracedecay_domain::{
+    ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
+};
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use tracedecay_daemon_protocol::{
@@ -20,19 +21,29 @@ use tracedecay_daemon_protocol::{
 };
 
 use super::super::administrative_effect::administrative_command_effect;
-use super::super::current_micros;
 use super::{RegisteredWorkRuntime, application_problem};
+use tracedecay_contracts::now_micros;
 
 pub(super) fn offer_work_blocked_interval_receipts(
-    producer: Option<&tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+    durable_write_signal: &super::WorkDurableWriteSignalV1,
+    producer: Option<&tracedecay_application::observability::BoundedObservabilityProducerV1>,
     canonical_project_scope: &str,
     receipts: &[tracedecay_domain::WorkBlockedIntervalReceiptV1],
 ) {
+    // PauseRun/ResumeRun call this only after run control has committed the
+    // receipt. Settled receipts can now be recovered even if direct
+    // observability enqueue below is unavailable.
+    if receipts
+        .iter()
+        .any(tracedecay_domain::WorkBlockedIntervalReceiptV1::is_settled)
+    {
+        durable_write_signal.bump();
+    }
     let Some(producer) = producer else {
         return;
     };
     for receipt in receipts {
-        let _ = tracedecay_usecases::observability::record_work_blocked_interval_observation(
+        let _ = tracedecay_application::observability::record_work_blocked_interval_observation(
             Some(producer),
             canonical_project_scope,
             receipt,
@@ -58,32 +69,23 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
             ApplicationProblem::cancelled_before_admission()
         }
         WorkProductApplicationErrorV1::TimedOut => ApplicationProblem::timed_out_before_admission(),
-        WorkProductApplicationErrorV1::InvalidRequest => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "work.invalid_graph_operation".to_owned(),
-                message: "The Work graph request is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
-        },
+        WorkProductApplicationErrorV1::InvalidRequest => ApplicationProblem::invalid_request(
+            "work.invalid_graph_operation",
+            "The Work graph request is invalid",
+        ),
         // A read under this selection succeeds and discloses what it left out;
         // a mutation cannot, because the head it would pin is the covered
         // slice's, not the journal's. The refusal therefore names the cause and
         // the remedy instead of hiding behind the concealed not-found answer
         // the old fail-closed refusal produced.
         WorkProductApplicationErrorV1::SelectionCoverageIncomplete => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
-                    code: "work.selection_coverage_incomplete".to_owned(),
-                    message: "The Work selection covers only part of the owner's journal, so no \
+            ApplicationProblem::invalid_request(
+                "work.selection_coverage_incomplete",
+                "The Work selection covers only part of the owner's journal, so no \
                               graph mutation can be prepared or submitted against it; widen the \
                               selection to the relation scopes the excluded events were admitted \
-                              under"
-                        .to_owned(),
-                },
-                retry: RetryDirective::Never,
-                legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
-            }
+                              under",
+            )
         }
         WorkProductApplicationErrorV1::VersionConflict => {
             ApplicationProblem::stale(SafeDiagnostic {
@@ -104,14 +106,21 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
                     .to_owned(),
             })
         }
+        WorkProductApplicationErrorV1::CursorRefused(mismatch) => {
+            ApplicationProblem::cursor_refused(&mismatch)
+        }
         WorkProductApplicationErrorV1::IdempotencyConflict => ApplicationProblem::Conflict {
             diagnostic: SafeDiagnostic {
                 code: "work.graph_idempotency_conflict".to_owned(),
                 message: "The Work graph request key was reused with different input".to_owned(),
             },
             retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
+            detail: None,
         },
+        // The cause survives to the caller: busy retries, an exceeded result
+        // limit and invalid stored data do not, and none reads as a stale graph.
+        WorkProductApplicationErrorV1::Storage(failure) => failure.application_problem(),
         WorkProductApplicationErrorV1::GraphAuthorityUnavailable
         | WorkProductApplicationErrorV1::EventAuthorityUnavailable
         | WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
@@ -140,9 +149,7 @@ pub(crate) fn work_background_context(
         identity.attempt_id().as_str()
     ))?;
     let deadline = Deadline::new(UtcMicros(
-        current_micros()
-            .0
-            .saturating_add(BACKGROUND_DEADLINE_MICROS),
+        now_micros().0.saturating_add(BACKGROUND_DEADLINE_MICROS),
     ))?;
     let cancellation = CancellationContext::active(format!(
         "work-attempt-exec-{}",
@@ -151,7 +158,7 @@ pub(crate) fn work_background_context(
     RequestContext::new(
         registered.actor.clone(),
         registered.grant.scope.clone(),
-        registered.grant.clone(),
+        registered.grant_at(now_micros()),
         request_id,
         deadline,
         cancellation,
@@ -168,91 +175,17 @@ pub(crate) fn work_blocked_interval_recovery_context(
     const BACKGROUND_DEADLINE_MICROS: i64 = 86_400_000_000;
     let request_id = RequestId::new("work-blocked-interval-recovery")?;
     let deadline = Deadline::new(UtcMicros(
-        current_micros()
-            .0
-            .saturating_add(BACKGROUND_DEADLINE_MICROS),
+        now_micros().0.saturating_add(BACKGROUND_DEADLINE_MICROS),
     ))?;
     let cancellation = CancellationContext::active("cancel.work-blocked-interval-recovery")?;
     RequestContext::new(
         actor.clone(),
         grant.scope.clone(),
-        grant.clone(),
+        crate::callable_code_authorization::mounted_grant_at(grant, now_micros()),
         request_id,
         deadline,
         cancellation,
     )
-}
-
-/// Maps a verified Work topology failure to the typed application problem the
-/// attempt-list read reports. Absence of any Work events is the only
-/// non-error state: it names an empty scope, not a failing authority.
-pub(super) fn work_topology_problem(
-    error: WorkTopologyError,
-) -> Result<tracedecay_application::WorkAttemptTopologyStateV1, ApplicationProblem> {
-    match error {
-        WorkTopologyError::EmptyEvents => {
-            Ok(tracedecay_application::WorkAttemptTopologyStateV1::Absent)
-        }
-        WorkTopologyError::Cancelled => Err(ApplicationProblem::Cancelled {
-            stage: tracedecay_application::CancellationStage::DuringRead,
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        }),
-        WorkTopologyError::BudgetExhausted => Err(ApplicationProblem::TimedOut {
-            stage: tracedecay_application::CancellationStage::DuringRead,
-            retry: RetryDirective::AfterDelay,
-            legal_actions: Vec::new(),
-        }),
-        WorkTopologyError::GenerationMismatch => Err(ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.topology_generation_superseded".to_owned(),
-            message: "The verified Work topology generation was superseded during the read"
-                .to_owned(),
-        })),
-        WorkTopologyError::MixedAuthority
-        | WorkTopologyError::NonCanonicalTasks
-        | WorkTopologyError::DependencyCycle(_)
-        | WorkTopologyError::Contract(_)
-        | WorkTopologyError::Corrupt(_)
-        | WorkTopologyError::Unavailable(_) => Err(work_topology_unavailable_problem(
-            "the verified Work topology could not be served",
-        )),
-    }
-}
-
-pub(super) fn work_topology_unavailable_problem(message: &str) -> ApplicationProblem {
-    ApplicationProblem::unavailable(SafeDiagnostic {
-        code: "work.topology_unavailable".to_owned(),
-        message: message.to_owned(),
-    })
-}
-
-pub(super) fn work_projection_problem(error: WorkProjectionApplicationError) -> ApplicationProblem {
-    match error {
-        WorkProjectionApplicationError::Admission(problem) => problem,
-        WorkProjectionApplicationError::InvalidPageSize => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "work.invalid_page_size".to_owned(),
-                message: "The Work projection page size is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
-        },
-        WorkProjectionApplicationError::Port(
-            tracedecay_application::WorkProjectionPortError::StaleCursor,
-        ) => ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.stale_cursor".to_owned(),
-            message: "The Work projection cursor is stale".to_owned(),
-        }),
-        WorkProjectionApplicationError::Port(
-            tracedecay_application::WorkProjectionPortError::Unavailable,
-        ) => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work.projection_unavailable".to_owned(),
-            message: "The Work projection authority is unavailable".to_owned(),
-        }),
-        WorkProjectionApplicationError::Port(
-            tracedecay_application::WorkProjectionPortError::NotFoundOrNotAuthorized,
-        ) => ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -401,7 +334,7 @@ pub(crate) fn work_request_context(
     let context = RequestContext::new(
         registered.actor.clone(),
         registered.grant.scope.clone(),
-        registered.grant.clone(),
+        registered.grant_at(observed_at),
         canonical_request_id.clone(),
         deadline,
         cancellation,
@@ -448,14 +381,13 @@ where
         })?,
     )?;
     let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
-    let suffix = input_digest.as_str().strip_prefix("sha256:").ok_or(
-        ApplicationContractError::Inconsistent {
+    let suffix =
+        sha256_hex_suffix(input_digest.as_str()).ok_or(ApplicationContractError::Inconsistent {
             field: "Work read input digest",
-        },
-    )?;
+        })?;
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )?;
@@ -559,7 +491,7 @@ fn workflow_effect_terminal_observation(
 
 #[cfg(test)]
 mod workflow_effect_receipt_tests {
-    use tracedecay_application::{CancellationObservation, CancellationStage, EffectTermination};
+    use tracedecay_contracts::{CancellationObservation, CancellationStage, EffectTermination};
     use tracedecay_domain::UtcMicros;
 
     use super::workflow_effect_terminal_observation;
@@ -583,12 +515,53 @@ mod workflow_effect_receipt_tests {
 
 #[cfg(test)]
 mod work_product_problem_tests {
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic,
-        WorkProductApplicationErrorV1,
+        WorkProductApplicationErrorV1, WorkStorageFailureV1,
     };
 
     use super::work_product_problem;
+
+    /// A storage failure keeps its cause at the daemon boundary. None of the
+    /// three reads as the stale-graph answer a real revision conflict gets, and
+    /// they stay distinct from each other and from plain unavailability.
+    #[test]
+    fn storage_failures_keep_distinct_non_stale_answers() {
+        let conflict = work_product_problem(WorkProductApplicationErrorV1::VersionConflict);
+        assert!(matches!(conflict, ApplicationProblem::Stale { .. }));
+        assert_eq!(conflict.reason_code(), "work.graph_version_conflict");
+
+        let unavailable =
+            work_product_problem(WorkProductApplicationErrorV1::EventAuthorityUnavailable);
+        assert!(matches!(
+            unavailable,
+            ApplicationProblem::Unavailable { .. }
+        ));
+
+        let busy = work_product_problem(WorkProductApplicationErrorV1::Storage(
+            WorkStorageFailureV1::Busy,
+        ));
+        assert!(matches!(busy, ApplicationProblem::Saturated { .. }));
+        assert_eq!(busy.reason_code(), "work.storage_busy");
+        assert_eq!(busy.retry(), RetryDirective::AfterDelay);
+
+        let limit = work_product_problem(WorkProductApplicationErrorV1::Storage(
+            WorkStorageFailureV1::ResultLimitExceeded,
+        ));
+        assert_eq!(limit.reason_code(), "work.storage_result_limit_exceeded");
+        assert_eq!(limit.retry(), RetryDirective::Never);
+
+        let invalid = work_product_problem(WorkProductApplicationErrorV1::Storage(
+            WorkStorageFailureV1::StoredDataInvalid,
+        ));
+        assert_eq!(invalid.reason_code(), "work.storage_data_invalid");
+        assert_eq!(invalid.retry(), RetryDirective::Never);
+        assert_eq!(invalid.legal_actions(), [LegalAction::ContactAdministrator]);
+        for problem in [&busy, &limit, &invalid] {
+            problem.validate().expect("storage problems are valid");
+            assert!(!matches!(problem, ApplicationProblem::Stale { .. }));
+        }
+    }
 
     #[test]
     fn stale_evidence_continuation_requires_a_refresh() {
@@ -602,6 +575,7 @@ mod work_product_problem_tests {
                 },
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
+                detail: None,
             }
         );
     }

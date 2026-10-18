@@ -10,9 +10,17 @@ use std::collections::HashSet;
 use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
 #[cfg(unix)]
 use tracedecay_daemon_identity::profile_identity;
+#[cfg(unix)]
+use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
+#[cfg(unix)]
+use tracedecay_daemon_service::shutdown::{DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle};
+use tracedecay_hooks::core_events::HOOK_EVENT_METHOD;
 
 #[cfg(unix)]
-fn git_watch_sync_config(config: &crate::config::SyncConfig) -> GitWatchSyncConfigV1 {
+use tracedecay_runtime_core::logging::log_daemon_event;
+
+#[cfg(unix)]
+fn git_watch_sync_config(config: &tracedecay_configuration::SyncConfig) -> GitWatchSyncConfigV1 {
     GitWatchSyncConfigV1 {
         auto_watch: config.auto_watch,
         watch_linked_worktrees: config.watch_linked_worktrees,
@@ -96,88 +104,33 @@ pub(super) struct DaemonEngine {
         Arc<tokio::sync::Mutex<Option<crate::daemon::pr_autotrack::PrAutotrackTask>>>,
 }
 
-/// Retain one daemon-owned Git index transaction service for the project store
-/// and reconcile any durable records before mutation owners become available.
-/// Read-only core tools and edit previews do not depend on this service. The
-/// service owns the store actor; constructing a second service for the same
-/// database is rejected by the registry.
-#[hotpath::measure(label = "daemon.engine.git_index_transactions", future = true)]
-pub(super) async fn ensure_git_index_transactions_for_mutation_owners(
-    store_administration: &StoreAdministration,
-    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    project_root: &Path,
-    project_id: Option<&str>,
-) -> Result<()> {
-    ensure_git_index_transactions_for_mutation_owners_inner(
-        store_administration,
-        session_db,
-        project_root,
-        project_id,
-    )
-    .await
-}
-
-fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
-    store_administration: &'a StoreAdministration,
-    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    project_root: &'a Path,
-    project_id: Option<&'a str>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-    // Erase the deeply nested future before it reaches the measured wrapper
-    // so every profiling feature can compute its layout.
-    Box::pin(async move {
-        let Some(project_id) = project_id else {
-            // Linked/anonymous project opens without a durable project id cannot
-            // own index-mutation authority; skip rather than invent an identity.
-            return Ok(());
-        };
-        let project_id =
-            tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("git index transaction project identity is invalid: {error}"),
-                }
-            })?;
-        let Some(repository_root) =
-            tracedecay_runtime_core::worktree::git_worktree_root(project_root)
-        else {
-            // Non-Git projects remain valid TraceDecay projects. They advertise no
-            // Git mutation authority and must not fail project-open admission.
-            return Ok(());
-        };
-        let observed_at = tracedecay_domain::UtcMicros(
-            i64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |duration| duration.as_micros()),
-            )
-            .unwrap_or(i64::MAX),
-        );
-        store_administration
-            .git_index_transaction_services()
-            .ensure(session_db, repository_root, project_id, observed_at)
-            .await
-            .map(|_| ())
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("git index transaction startup did not complete: {error}"),
-            })
-    })
-}
-
-#[hotpath::measure(label = "daemon.engine.context_scout.ensure_owner")]
+#[tracing::instrument(
+    name = "daemon.engine.context_scout.ensure_owner",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn ensure_context_scout_owner_before_advertising(
-    project: &crate::tracedecay::TraceDecay,
+    project: &tracedecay_project::project::TraceDecay,
 ) -> Result<()> {
     if project.store_layout().identity.project_id.is_none() {
         return Ok(());
     }
-    let owner = project
-        .context_scout_owner()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project Context Scout owner did not start".to_owned(),
-        })?;
+    let owner = match project.context_scout_owner_lookup() {
+        tracedecay_project::project::ContextScoutOwnerLookupV1::Ready(owner) => owner,
+        tracedecay_project::project::ContextScoutOwnerLookupV1::ReadOnly => {
+            return Err(TraceDecayError::Config {
+                message: "read-only project has no Context Scout owner".to_owned(),
+            });
+        }
+        tracedecay_project::project::ContextScoutOwnerLookupV1::Unregistered => {
+            return Err(TraceDecayError::Config {
+                message: "project Context Scout owner did not start".to_owned(),
+            });
+        }
+    };
     if matches!(
         owner.startup_outcome(),
-        crate::agents::context_scout_v2::ContextScoutDurableStartupOutcomeV1::Unavailable
+        tracedecay_agent_hosts::agents::context_scout::ContextScoutDurableStartupOutcomeV1::Unavailable
     ) {
         return Err(TraceDecayError::Config {
             message: "project Context Scout durable owner is unavailable".to_owned(),
@@ -188,9 +141,23 @@ pub(super) fn ensure_context_scout_owner_before_advertising(
 
 #[cfg(unix)]
 impl DaemonEngine {
-    pub(super) fn with_progress_producer_incarnation(mut self, producer_incarnation: u64) -> Self {
-        self.invocation =
-            DaemonInvocationState::with_progress_producer_incarnation(producer_incarnation);
+    pub(super) fn with_progress_producer_incarnation(
+        mut self,
+        producer_incarnation: u64,
+        owner_home: Option<&std::path::Path>,
+    ) -> Self {
+        self.invocation = DaemonInvocationState::with_progress_producer_incarnation(
+            producer_incarnation,
+            owner_home,
+        );
+        self
+    }
+
+    pub(super) fn with_owner_profile(
+        mut self,
+        owner_profile: tracedecay_runtime_core::config::ProfileRoot,
+    ) -> Self {
+        self.store_administration = self.store_administration.with_owner_profile(owner_profile);
         self
     }
 
@@ -216,7 +183,7 @@ impl DaemonEngine {
 
     /// A doctor-facing read of one project's watch coverage; `git_watcher` is
     /// module-private, so the core Doctor route reads through this accessor.
-    #[hotpath::skip]
+    #[tracing::instrument(name = "daemon.engine.git_watcher_health", level = "trace", skip_all)]
     pub(super) async fn git_watcher_health(
         &self,
         project_root: Option<&std::path::Path>,
@@ -239,16 +206,14 @@ impl DaemonEngine {
         self
     }
 
-    #[hotpath::skip]
     pub(super) async fn with_pr_autotrack_task(
         self,
-        task: crate::daemon::pr_autotrack::PrAutotrackTask,
+        task: Option<crate::daemon::pr_autotrack::PrAutotrackTask>,
     ) -> Self {
-        *self.pr_autotrack_task.lock().await = Some(task);
+        *self.pr_autotrack_task.lock().await = task;
         self
     }
 
-    #[hotpath::skip]
     pub(super) async fn maintenance_transition_gate(
         &self,
         key: &ProjectServerKey,
@@ -258,7 +223,7 @@ impl DaemonEngine {
 
     /// Runs destructive branch administration before any project server is
     /// opened for the request, under the daemon-wide store administration gate.
-    #[hotpath::measure(label = "daemon.engine.execute_branch_admin", future = true)]
+    #[tracing::instrument(name = "daemon.engine.execute_branch_admin", level = "trace", skip_all)]
     pub(super) async fn execute_branch_admin(
         &self,
         handshake: &DaemonHandshake,
@@ -294,7 +259,6 @@ impl DaemonEngine {
 
     /// Returns the client version to log for this handshake, once per distinct
     /// skewed version; repeat connections from the same client return `None`.
-    #[hotpath::skip]
     pub(super) async fn client_version_skew_to_log(
         &self,
         handshake: &DaemonHandshake,
@@ -308,7 +272,7 @@ impl DaemonEngine {
 
     /// Logs a `daemon_version_skew` event when this handshake's client runs a
     /// different binary version, deduped per distinct client version.
-    #[hotpath::skip]
+    #[tracing::instrument(name = "daemon.engine.log_version_skew", level = "trace", skip_all)]
     pub(super) async fn log_client_version_skew(&self, handshake: &DaemonHandshake) -> Result<()> {
         let Some(client_version) = self.client_version_skew_to_log(handshake).await? else {
             return Ok(());
@@ -334,23 +298,27 @@ impl DaemonEngine {
     ///
     /// `catalog_is_provisional` marks a discovery answer served from the
     /// warming bootstrap route, before the project graph is open. That catalog
-    /// is not the published one — its `tracedecay_context` budget is the
-    /// conservative warming budget rather than the node-count budget — so it
+    /// is not the published one, its `tracedecay_context` budget is the
+    /// conservative warming budget rather than the node-count budget, so it
     /// must not mark the client current. Leaving such a client unmarked is
     /// exactly what arms its notification for the first request after warm-up
     /// completes; marking it would strand the provisional catalog for the rest
     /// of the daemon's life, because this set is never otherwise cleared.
-    #[hotpath::skip]
+    #[tracing::instrument(
+        name = "daemon.engine.claim_catalog_refresh",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn claim_catalog_refresh(
         &self,
         handshake: &DaemonHandshake,
-        request_line: &str,
+        request: Option<&JsonRpcRequest>,
         catalog_is_provisional: bool,
     ) -> Option<CatalogRefreshClientKey> {
         if !valid_client_instance_id(&handshake.client_instance_id) {
             return None;
         }
-        let request = serde_json::from_str::<JsonRpcRequest>(request_line).ok()?;
+        let request = request?;
         if request.method == HOOK_EVENT_METHOD {
             return None;
         }
@@ -396,7 +364,6 @@ impl DaemonEngine {
         Some(key)
     }
 
-    #[hotpath::skip]
     pub(super) async fn release_catalog_refresh(&self, key: CatalogRefreshClientKey) {
         self.catalog_refresh_notified_clients
             .lock()
@@ -405,7 +372,6 @@ impl DaemonEngine {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) async fn project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -415,7 +381,11 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.engine.project_server_until_cancelled", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.project_server_until_cancelled",
+        level = "trace",
+        skip_all
+    )]
     async fn project_server_until_cancelled(
         &self,
         handshake: &DaemonHandshake,
@@ -448,7 +418,6 @@ impl DaemonEngine {
         })
     }
 
-    #[hotpath::skip]
     pub(super) async fn cached_project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -457,7 +426,11 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.engine.cached_project_server", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.cached_project_server",
+        level = "trace",
+        skip_all
+    )]
     async fn cached_project_server_for_requirement(
         &self,
         handshake: &DaemonHandshake,
@@ -475,7 +448,7 @@ impl DaemonEngine {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
         Box::pin(async move {
-            let (project_path, route) = Self::project_route(handshake)?;
+            let (project_path, route) = self.project_route(handshake)?;
             // A route-alias hit returns the mounted server without re-running
             // registry admission: enrollment was proven when this route was
             // bound, and a mounted server's continued validity is owned by the
@@ -524,13 +497,17 @@ impl DaemonEngine {
     /// resolution (`ensure_registered_project_route` +
     /// `resolved_project_server_key`) on every wait iteration re-derived
     /// registry and repository identity dozens of times per warming request.
-    #[hotpath::measure(label = "daemon.engine.route_bound_project_server", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.route_bound_project_server",
+        level = "trace",
+        skip_all
+    )]
     async fn route_bound_project_server(
         &self,
         handshake: &DaemonHandshake,
         requirement: ProjectServerRequirement,
     ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
-        let (project_path, route) = Self::project_route(handshake)?;
+        let (project_path, route) = self.project_route(handshake)?;
         let bound = {
             let mut servers = self.store_administration.project_servers().lock().await;
             servers
@@ -545,7 +522,7 @@ impl DaemonEngine {
         }
     }
 
-    #[hotpath::measure(label = "daemon.engine.begin_project_open", future = true)]
+    #[tracing::instrument(name = "daemon.engine.begin_project_open", level = "trace", skip_all)]
     pub(super) async fn begin_project_open(
         &self,
         handshake: DaemonHandshake,
@@ -565,7 +542,7 @@ impl DaemonEngine {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
         Box::pin(async move {
-            let (project_path, route) = Self::project_route(&handshake)?;
+            let (project_path, route) = self.project_route(&handshake)?;
             // Admission before warm-up: an ambient, unenrolled directory must be
             // rejected here, before any project-open task is minted, so no graph
             // or index work ever starts for a path without durable enrollment.
@@ -597,7 +574,6 @@ impl DaemonEngine {
     /// work before session-store resolution eventually notices the missing
     /// enrollment. Registry alias and repository-identity lookups preserve
     /// linked-worktree routing without manufacturing path-derived authority.
-    #[hotpath::skip]
     pub(super) async fn ensure_registered_project_route(
         &self,
         project_path: &Path,
@@ -606,11 +582,11 @@ impl DaemonEngine {
         ensure_registered_project_route(&self.store_administration, project_path, allow_init).await
     }
 
-    #[hotpath::measure(label = "daemon.engine.schedule_warmup", future = true)]
+    #[tracing::instrument(name = "daemon.engine.schedule_warmup", level = "trace", skip_all)]
     pub(super) async fn schedule_project_server_warmup(
         &self,
         handshake: DaemonHandshake,
-        initialize_request: JsonRpcRequest,
+        initialize_request: Option<JsonRpcRequest>,
     ) -> Result<()> {
         self.schedule_project_server_warmup_inner(handshake, initialize_request)
             .await
@@ -619,7 +595,7 @@ impl DaemonEngine {
     fn schedule_project_server_warmup_inner(
         &self,
         handshake: DaemonHandshake,
-        initialize_request: JsonRpcRequest,
+        initialize_request: Option<JsonRpcRequest>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
@@ -627,7 +603,7 @@ impl DaemonEngine {
             if self.cached_project_server(&handshake).await?.is_some() {
                 return Ok(());
             }
-            match Box::pin(self.begin_project_open(handshake, Some(initialize_request))).await? {
+            match Box::pin(self.begin_project_open(handshake, initialize_request)).await? {
                 ProjectOpenTaskClaim::InFlight(_) => Ok(()),
                 ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
                 ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
@@ -635,7 +611,11 @@ impl DaemonEngine {
         })
     }
 
-    #[hotpath::measure(label = "daemon.engine.project_server_for_request", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.project_server_for_request",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn project_server_for_request(
         &self,
         handshake: &DaemonHandshake,
@@ -661,94 +641,54 @@ impl DaemonEngine {
             {
                 return Ok(server);
             }
-            let (project_path, _) = Self::project_route(handshake)?;
+            let (project_path, route) = self.project_route(handshake)?;
             // Foreground requests must never pin a connection while a cold project
             // warm-up runs. The open task remains tracked and continues in the
             // background after this bounded wait expires.
-            let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
-            match claim {
-                ProjectOpenTaskClaim::InFlight(mut state) => {
-                    let publication = async {
-                        loop {
-                            // The claim proves an open for this exact route is
-                            // in flight, so each iteration only needs to see
-                            // its publication land on the already-bound route
-                            // alias — never a fresh identity resolution.
-                            if let Some(server) = self
-                                .route_bound_project_server(handshake, requirement)
-                                .await?
-                            {
-                                return Ok(server);
-                            }
-                            let current = state.borrow().clone();
-                            match current {
-                                ProjectOpenTaskState::Opening => {
-                                    tokio::select! {
-                                        changed = state.changed() => {
-                                            changed.map_err(|_| TraceDecayError::Config {
-                                                message: "project open task ended before reporting an outcome"
-                                                    .to_string(),
-                                            })?;
-                                        }
-                                        () = tokio::time::sleep(Duration::from_millis(25)) => {}
-                                    }
-                                }
-                                ProjectOpenTaskState::Ready => {
-                                    // The open task publishes the server before it
-                                    // flips to Ready, but this waiter read the
-                                    // cache before it read the state, so a
-                                    // publication that raced this iteration must
-                                    // be honored with one final cache check
-                                    // instead of a spurious failure.
-                                    if let Some(server) = self
-                                        .cached_project_server_for_requirement(
-                                            handshake,
-                                            requirement,
-                                        )
-                                        .await?
-                                    {
-                                        return Ok(server);
-                                    }
-                                    return Err(TraceDecayError::Config {
-                                        message:
-                                            "project open completed without publishing a server"
-                                                .to_string(),
-                                    });
-                                }
-                                ProjectOpenTaskState::Failed(failure) => {
-                                    return Err(failure.to_error());
-                                }
-                            }
-                        }
-                    };
-                    // Riding out an open is a park, not work: the admission slot is
-                    // released for the wait's duration so a tool that needs no project
-                    // owner is never shed by a queue of warming clients. The wait stays
-                    // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
-                    park_admission(wait_for_project_open_publication(
-                        &project_path,
-                        publication,
-                    ))
+            let mut retry_init = handshake.allow_init;
+            loop {
+                let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
+                let publication_deadline = project_open_publication_deadline(Instant::now());
+                let result = await_claimed_project_open(
+                    claim,
+                    &project_path,
+                    publication_deadline,
+                    // The claim proves an open for this exact route is in
+                    // flight, so each iteration only needs to see its
+                    // publication land on the already-bound route alias,
+                    // never a fresh identity resolution.
+                    || self.route_bound_project_server(handshake, requirement),
+                    || self.cached_project_server_for_requirement(handshake, requirement),
+                )
+                .await;
+                if project_open_tasks(&self.project_open_gates)
                     .await
+                    .admit_explicit_init_retry(
+                        &route,
+                        &mut retry_init,
+                        result.as_ref().err(),
+                        publication_deadline,
+                    )
+                    .await?
+                {
+                    continue;
                 }
-                ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
-                ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+                return result;
             }
         })
     }
 
-    #[hotpath::skip]
+    #[tracing::instrument(name = "daemon.engine.cached_open_failure", level = "trace", skip_all)]
     pub(super) async fn cached_project_open_failure(
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Option<ProjectOpenFailure>> {
-        let (_, route) = Self::project_route(handshake)?;
+        let (_, route) = self.project_route(handshake)?;
         let tasks = project_open_tasks(&self.project_open_gates).await;
-        Ok(tasks.cached_failure(&route).await)
+        Ok(tasks.cached_failure(&route))
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) async fn shutdown_project_open_tasks(&self) {
         project_open_tasks(&self.project_open_gates)
             .await
@@ -760,7 +700,6 @@ impl DaemonEngine {
     /// Watcher and scheduler activation happen only after this returns so those
     /// components can acquire the same coordinator without recursive locking.
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) async fn open_project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -770,7 +709,7 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.engine.open_project_server", future = true)]
+    #[tracing::instrument(name = "daemon.engine.open_project_server", level = "trace", skip_all)]
     pub(super) async fn open_project_server_until_cancelled(
         &self,
         handshake: &DaemonHandshake,
@@ -793,9 +732,8 @@ impl DaemonEngine {
                     message: "project server requested without project_path".to_string(),
                 });
             };
-            let canonical_project_path = project_path
-                .canonicalize()
-                .unwrap_or_else(|_| project_path.clone());
+            let canonical_project_path =
+                tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
             Box::pin(
                 self.ensure_registered_project_route(&canonical_project_path, handshake.allow_init),
             )
@@ -830,11 +768,18 @@ impl DaemonEngine {
         })
     }
 
-    pub(super) fn project_route(handshake: &DaemonHandshake) -> Result<(PathBuf, ProjectRouteKey)> {
-        project_route_for_handshake(handshake)
+    pub(super) fn project_route(
+        &self,
+        handshake: &DaemonHandshake,
+    ) -> Result<(PathBuf, ProjectRouteKey)> {
+        project_route_for_handshake(handshake, self.store_administration.owner_home()?)
     }
 
-    #[hotpath::measure(label = "daemon.engine.activate_project_server", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.activate_project_server",
+        level = "trace",
+        skip_all
+    )]
     async fn activate_project_server(
         &self,
         project_path: PathBuf,
@@ -895,6 +840,12 @@ impl DaemonEngine {
                         &[("reason", "identity_unavailable".to_string())],
                     );
                 }
+                git_watch::GitWatcherAdmission::RuntimeUnavailable => {
+                    log_daemon_event(
+                        "git_watch_admission_rejected",
+                        &[("reason", "runtime_unavailable".to_string())],
+                    );
+                }
             }
             server
         })
@@ -911,17 +862,17 @@ impl DaemonEngine {
         let recovery_server = Arc::clone(&server);
         spawn_lifecycle_automation_scheduler_activation(
             self.lifecycle.clone(),
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async move {
                     let cg = recovery_server.cg().await;
                     project_open_owners::reconcile_project_open_automation_effects(cg).await;
                 },
-                label = "daemon.engine.reconcile_automation_effects"
+                tracing::trace_span!("daemon.engine.reconcile_automation_effects"),
             ),
         );
         spawn_lifecycle_automation_scheduler_activation(
             self.lifecycle.clone(),
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async move {
                     let cg = server.cg().await;
                     engine
@@ -933,12 +884,12 @@ impl DaemonEngine {
                         )
                         .await;
                 },
-                label = "daemon.engine.activate_automation_scheduler"
+                tracing::trace_span!("daemon.engine.activate_automation_scheduler"),
             ),
         );
     }
 
-    #[hotpath::measure(label = "daemon.engine.rekey_maintenance", future = true)]
+    #[tracing::instrument(name = "daemon.engine.rekey_maintenance", level = "trace", skip_all)]
     pub(super) async fn rekey_project_maintenance(
         &self,
         old_key: &ProjectServerKey,
@@ -966,11 +917,14 @@ impl DaemonEngine {
             let transition = self.maintenance_transition_gate(old_key).await;
             let _transition = transition.lock().await;
             let automation_retirement = self.retire_automation_scheduler_locked(old_key).await;
-            let retired = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-                if let Some(retirement) = automation_retirement {
-                    retirement.wait().await;
-                }
-            })
+            let retired = tracedecay_runtime_core::native_runtime::timeout(
+                DAEMON_TASK_ABORT_DEADLINE,
+                async {
+                    if let Some(retirement) = automation_retirement {
+                        retirement.wait().await;
+                    }
+                },
+            )
             .await
             .is_ok();
             if !retired {
@@ -991,7 +945,7 @@ impl DaemonEngine {
                 .await;
             if matches!(
                 automation_outcome,
-                tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Retiring
+                tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Retiring
             ) {
                 MaintenanceRekeyOutcome::Retiring
             } else {
@@ -1000,11 +954,16 @@ impl DaemonEngine {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Owner reconciliation is one compare-and-swap pass over mounted databases."
+    )]
     pub(super) fn database_owner_reconciler(
         &self,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
         current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         route_registered: Arc<AtomicBool>,
+        route_cancellation: CancellationToken,
         handshake: DaemonHandshake,
     ) -> crate::mcp::DatabaseOwnerReconciler {
         let engine = self.clone();
@@ -1013,8 +972,9 @@ impl DaemonEngine {
             let current_key = Arc::clone(&current_key);
             let current_project_path = Arc::clone(&current_project_path);
             let route_registered = Arc::clone(&route_registered);
+            let route_cancellation = route_cancellation.clone();
             let handshake = handshake.clone();
-            Box::pin(hotpath::future!(
+            Box::pin(tracing::Instrument::instrument(
                 async move {
                     let scope = crate::daemon::branch_admin::graph_writer_scope(
                         &fresh,
@@ -1048,7 +1008,11 @@ impl DaemonEngine {
                             .await
                             .rekey(&old_key, &new_key);
                         if !rekeyed {
+                            // Terminal revocation: this route can never serve
+                            // again, so drop its fence and end everything that
+                            // waits on its lifetime.
                             route_registered.store(false, Ordering::Release);
+                            route_cancellation.cancel();
                         }
                         let project_path = fresh.project_root().to_path_buf();
                         let new_session_db = match new_key.owner.project_id.as_deref() {
@@ -1107,7 +1071,7 @@ impl DaemonEngine {
                         }
                     }
                 },
-                label = "daemon.engine.database_owner_reconcile"
+                tracing::trace_span!("daemon.engine.database_owner_reconcile"),
             ))
         })
     }

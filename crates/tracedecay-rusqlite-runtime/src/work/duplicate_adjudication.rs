@@ -1,10 +1,10 @@
 //! Revision-CAS persistence for explicit duplicate-Work adjudications.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     MAX_WORK_DUPLICATE_CLASSIFICATION_ATTEMPTS_V1, WorkDuplicateAdjudicationAppendOutcomeV1,
-    WorkDuplicateAdjudicationPortV1, WorkDuplicateAdjudicationStorageErrorV1,
-    WorkDuplicateAdjudicationWriteV1, WorkOwnerObservationReceiptV1,
-    work_duplicate_adjudication_input_digest,
+    WorkDuplicateAdjudicationPortV1, WorkDuplicateAdjudicationRecordPortV1,
+    WorkDuplicateAdjudicationStorageErrorV1, WorkDuplicateAdjudicationWriteV1,
+    WorkOwnerObservationReceiptV1, work_duplicate_adjudication_input_digest,
 };
 use tracedecay_domain::{
     ProjectionGenerationId, WorkAttemptIdentityV1, WorkAuthority,
@@ -12,59 +12,49 @@ use tracedecay_domain::{
     WorkDuplicateAdjudicationRevisionV1, WorkTopologyGenerationRefV1,
 };
 
-use crate::exact_sql::{ExactSqlTransaction, ExactSqlValue};
+use crate::exact_sql::ExactSqlValue;
 use crate::work::{
-    RegisteredWorkQuery, WorkSqliteStorage, authority_params_owned, exact_sql_statement,
-    exact_sql_text, registered_work_query,
+    RegisteredWorkQuery, RegisteredWorkWrite, WorkSqliteStorage, authority_params_owned,
+    exact_sql_statement, exact_sql_text, registered_work_query,
 };
+use crate::work_run_control::WorkSqliteJobStorage;
 
 type StorageError = WorkDuplicateAdjudicationStorageErrorV1;
 
-impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
+/// The job's transaction commits the append, and rolls back every refusal.
+impl WorkDuplicateAdjudicationRecordPortV1 for WorkSqliteJobStorage<'_> {
     fn compare_and_record_duplicate_adjudication(
         &self,
         authority: &WorkAuthority,
         write: &WorkDuplicateAdjudicationWriteV1,
     ) -> Result<WorkDuplicateAdjudicationAppendOutcomeV1, StorageError> {
-        if &write.actor_id != authority.actor_id()
-            || write.command.validate().is_err()
-            || write.command.clone().canonicalized() != write.command
-        {
-            return Err(StorageError::NotFoundOrNotAuthorized);
-        }
-        let canonical_input_digest = work_duplicate_adjudication_input_digest(&write.command)
-            .map_err(|_| StorageError::Unavailable)?;
-        if canonical_input_digest != write.canonical_input_digest {
-            return Err(StorageError::IdempotencyConflict);
-        }
+        admit_write(authority, write)?;
         let relation_digest = write
             .command
             .relation_ref(authority)
             .map_err(|_| StorageError::Unavailable)?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| StorageError::Unavailable)?;
+        let transaction = self.transaction;
 
         if let Some((stored_digest, receipt)) =
-            replay_by_command(&transaction, authority, write.command.command_id.as_str())?
+            replay_by_command(transaction, authority, write.command.command_id.as_str())?
         {
-            let _ = transaction.rollback();
             return if stored_digest == write.canonical_input_digest.as_str() {
                 Ok(WorkDuplicateAdjudicationAppendOutcomeV1::Replayed(receipt))
             } else {
                 Err(StorageError::IdempotencyConflict)
             };
         }
+        if write.command.evidence != write.current_evidence {
+            return Err(StorageError::EvidenceStale);
+        }
 
-        require_attempt(&transaction, authority, &write.command.first_attempt)?;
-        require_attempt(&transaction, authority, &write.command.second_attempt)?;
+        require_attempt(transaction, authority, &write.command.first_attempt)?;
+        require_attempt(transaction, authority, &write.command.second_attempt)?;
 
         let current_receipt =
-            current_adjudication(&transaction, authority, relation_digest.as_str())?;
+            current_adjudication(transaction, authority, relation_digest.as_str())?;
         let current = current_receipt.as_ref().map(|receipt| receipt.revision());
         if current != write.command.expected_revision {
-            let _ = transaction.rollback();
             return Err(StorageError::RevisionConflict);
         }
         let revision = match current {
@@ -78,13 +68,12 @@ impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
             write.canonical_input_digest.clone(),
         )
         .map_err(|_| StorageError::Unavailable)?;
-        insert_receipt(&transaction, authority, &receipt)?;
-        transaction
-            .commit()
-            .map_err(|_| StorageError::Unavailable)?;
+        insert_receipt(transaction, authority, &receipt)?;
         Ok(WorkDuplicateAdjudicationAppendOutcomeV1::Appended(receipt))
     }
+}
 
+impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
     fn latest_duplicate_adjudications_for_attempts(
         &self,
         authority: &WorkAuthority,
@@ -171,8 +160,26 @@ impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
     }
 }
 
+fn admit_write(
+    authority: &WorkAuthority,
+    write: &WorkDuplicateAdjudicationWriteV1,
+) -> Result<(), StorageError> {
+    if &write.actor_id != authority.actor_id()
+        || write.command.validate().is_err()
+        || write.command.clone().canonicalized() != write.command
+    {
+        return Err(StorageError::NotFoundOrNotAuthorized);
+    }
+    let canonical_input_digest = work_duplicate_adjudication_input_digest(&write.command)
+        .map_err(|_| StorageError::Unavailable)?;
+    if canonical_input_digest != write.canonical_input_digest {
+        return Err(StorageError::IdempotencyConflict);
+    }
+    Ok(())
+}
+
 fn replay_by_command(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
     command_id: &str,
 ) -> Result<Option<(String, WorkDuplicateAdjudicationReceiptV1)>, StorageError> {
@@ -230,7 +237,7 @@ fn current_adjudication(
 }
 
 fn require_attempt(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
     identity: &WorkAttemptIdentityV1,
 ) -> Result<(), StorageError> {
@@ -258,7 +265,7 @@ fn require_attempt(
 }
 
 fn insert_receipt(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     receipt: &WorkDuplicateAdjudicationReceiptV1,
 ) -> Result<(), StorageError> {
@@ -268,7 +275,7 @@ fn insert_receipt(
     )
     .map_err(|_| StorageError::Unavailable)?;
     transaction
-        .execute(
+        .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_duplicate_adjudications_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,

@@ -1,4 +1,5 @@
 use tracedecay_runtime_core::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::schema_version::{self, SESSION_TEMPORAL_COMPONENT};
 
 use crate::schema_contract::validate_session_graph_publication_schema_contract;
 use crate::{global_db_operation_error, global_db_operation_message};
@@ -9,37 +10,46 @@ mod admission;
 pub(crate) use admission::{
     SessionTemporalSchemaAdmission, require_admissible_session_temporal_schema,
 };
-use admission::{validate_temporal_fts_contracts, validate_temporal_fts_match};
+use admission::{
+    authority_holds_no_rows, validate_temporal_fts_contracts, validate_temporal_fts_match,
+};
 
 const OPERATION: &str = "initialize session temporal schema";
-const MIGRATION_NAME: &str = "session-temporal";
 const SESSION_TEMPORAL_AUTHORITY: &str = "session temporal";
-const RELEASED_SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 3;
 pub(crate) use tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION;
 
 const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
     (
         "session_occurrences_fts",
-        "createvirtualtablesession_occurrences_ftsusingfts5(index_text,snippet_text,content='session_occurrences',content_rowid='rowid')",
+        "createvirtualtablesession_occurrences_ftsusingfts5(index_text,content='session_occurrences',content_rowid='rowid')",
     ),
     (
         "session_summary_nodes_fts",
-        "createvirtualtablesession_summary_nodes_ftsusingfts5(summary_text,index_text,content='session_summary_nodes',content_rowid='rowid')",
+        "createvirtualtablesession_summary_nodes_ftsusingfts5(summary_text,content='session_summary_nodes',content_rowid='rowid')",
     ),
 ];
 
 const TEMPORAL_SCHEMA_DDL: &str = r"
-    CREATE TABLE IF NOT EXISTS session_temporal_schema_migrations (
-        name TEXT PRIMARY KEY,
-        version INTEGER NOT NULL CHECK(version > 0),
-        applied_at INTEGER NOT NULL
-    );
+    -- The one summary authority. LCM reads (grep, describe, expand, replay,
+    -- status, DAG) and temporal retrieval share these rows; a summary is
+    -- visible to LCM reads only while its availability in the session's
+    -- active generation is 'available'. Rows are immutable; retirement is an
+    -- availability state, never a delete.
     CREATE TABLE IF NOT EXISTS session_summary_nodes (
         summary_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        depth INTEGER NOT NULL,
         summary_anchor_id TEXT NOT NULL,
         summary_text TEXT NOT NULL,
-        index_text TEXT NOT NULL,
+        summary_hash TEXT NOT NULL,
+        summary_token_count INTEGER NOT NULL,
+        source_token_count INTEGER NOT NULL,
+        source_time_start INTEGER,
+        source_time_end INTEGER,
+        expand_hint TEXT,
+        metadata_json TEXT,
         source_horizon_json TEXT NOT NULL CHECK(json_valid(source_horizon_json)),
         publication_json TEXT CHECK(publication_json IS NULL OR json_valid(publication_json)),
         created_at INTEGER NOT NULL,
@@ -49,6 +59,31 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         ON session_summary_nodes(session_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_session_summary_nodes_root_created_order
         ON session_summary_nodes(created_at, session_id, summary_id);
+    CREATE INDEX IF NOT EXISTS idx_session_summary_nodes_session_depth_time
+        ON session_summary_nodes(
+            provider, session_id, depth, source_time_start, source_time_end, created_at
+        );
+    -- Covers the lcm_status depth rollup (COUNT + SUM per depth) so status
+    -- never reads summary_text records.
+    CREATE INDEX IF NOT EXISTS idx_session_summary_nodes_depth_tokens
+        ON session_summary_nodes(
+            provider, session_id, depth, summary_token_count, source_token_count
+        );
+
+    -- Ordered lineage of one summary: `source_id` is the raw `store_id`
+    -- rendered as text for 'raw_message' sources and the child `summary_id`
+    -- for 'summary_node' sources. Retention treats a raw row as
+    -- projection-durable once a row here covers it.
+    CREATE TABLE IF NOT EXISTS session_summary_sources (
+        summary_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        source_kind TEXT NOT NULL CHECK(source_kind IN ('raw_message', 'summary_node')),
+        source_id TEXT NOT NULL,
+        PRIMARY KEY(summary_id, ordinal),
+        FOREIGN KEY(summary_id) REFERENCES session_summary_nodes(summary_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_summary_sources_source
+        ON session_summary_sources(source_kind, source_id, summary_id);
 
     CREATE TABLE IF NOT EXISTS session_relation_receipts (
         session_id TEXT NOT NULL,
@@ -61,6 +96,12 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         graph_watermark TEXT,
         created_at INTEGER NOT NULL,
         applied_at INTEGER,
+        recovery_state TEXT NOT NULL DEFAULT 'pending'
+            CHECK(recovery_state IN ('pending', 'retryable', 'permanent')),
+        recovery_failure_code TEXT,
+        recovery_failure_count INTEGER NOT NULL DEFAULT 0
+            CHECK(recovery_failure_count >= 0),
+        recovery_next_attempt_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(session_id, generation),
         CHECK(
             (state = 'pending' AND graph_watermark IS NULL AND applied_at IS NULL)
@@ -72,6 +113,11 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     );
     CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_pending
         ON session_relation_receipts(state, created_at, session_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_recovery_due
+        ON session_relation_receipts(
+            state, recovery_state, recovery_next_attempt_at,
+            created_at, session_id, generation
+        );
 
     CREATE TABLE IF NOT EXISTS session_relation_effect_journal (
         session_id TEXT NOT NULL,
@@ -273,6 +319,31 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_session_temporal_observation_effects_session
         ON session_temporal_observation_effects(session_id, observation_sequence);
 
+    -- A session whose materialized occurrences lost their canonical
+    -- observation (a source rewrite retired it, or a newer observation took
+    -- over its message) cannot be extended: `requested_at` asks the next
+    -- refresh to rebuild it from the first effect. `reset_generation` is the
+    -- empty generation that rebuild started from; receipts at or below it
+    -- describe rows the reset deleted.
+    CREATE TABLE IF NOT EXISTS session_temporal_resets (
+        session_id TEXT NOT NULL PRIMARY KEY,
+        requested_at INTEGER,
+        reset_generation INTEGER CHECK(reset_generation IS NULL OR reset_generation > 0),
+        CHECK(requested_at IS NOT NULL OR reset_generation IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_temporal_resets_requested
+        ON session_temporal_resets(requested_at);
+
+    -- Generation-shared projection tables. A row's `generation` is the
+    -- generation that introduced it; generation G reads every row with
+    -- `generation <= G`. A candidate extends the active generation by adding
+    -- rows under its own number, so the settled prefix is never copied, and a
+    -- terminated candidate deletes every row it introduced. Occurrences, turn
+    -- members, assertions, and supersession edges are append-only and keyed
+    -- without `generation`. Turns, threads, agents, current entities, and
+    -- derived evidence and members are versioned: their keys end in
+    -- `generation`, and activation deletes the version a candidate
+    -- superseded. Every table carries an introduced-row index.
     CREATE TABLE IF NOT EXISTS session_turns (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
@@ -280,10 +351,12 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
         grouping_provenance TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY(session_id, generation, turn_id),
+        PRIMARY KEY(session_id, turn_id, generation),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
+    CREATE INDEX IF NOT EXISTS idx_session_turns_introduced
+        ON session_turns(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_threads (
         session_id TEXT NOT NULL,
@@ -291,10 +364,12 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         thread_id TEXT NOT NULL,
         grouping_provenance TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY(session_id, generation, thread_id),
+        PRIMARY KEY(session_id, thread_id, generation),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
+    CREATE INDEX IF NOT EXISTS idx_session_threads_introduced
+        ON session_threads(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_agents (
         session_id TEXT NOT NULL,
@@ -302,16 +377,23 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         agent_id TEXT NOT NULL,
         agent_json TEXT NOT NULL CHECK(json_valid(agent_json)),
         created_at INTEGER NOT NULL,
-        PRIMARY KEY(session_id, generation, agent_id),
+        PRIMARY KEY(session_id, agent_id, generation),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
+    CREATE INDEX IF NOT EXISTS idx_session_agents_introduced
+        ON session_agents(session_id, generation);
 
+    -- `source_sequence` is the owning observation's effect sequence (the
+    -- derived-evidence order). The parent and copied-from columns carry the
+    -- relation facts of the canonical observation and anchor, so relations
+    -- derive from occurrence rows instead of rereading their JSON.
     CREATE TABLE IF NOT EXISTS session_occurrences (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         occurrence_id TEXT NOT NULL,
         source_observation_id TEXT NOT NULL,
+        source_sequence INTEGER NOT NULL CHECK(source_sequence > 0),
         source_provider TEXT NOT NULL CHECK(
             source_provider <> ''
             AND length(source_provider) <= 512
@@ -325,6 +407,13 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         turn_grouping_json TEXT CHECK(turn_grouping_json IS NULL OR json_valid(turn_grouping_json)),
         message_id TEXT,
         agent_id TEXT,
+        parent_message_id TEXT,
+        parent_agent_id TEXT,
+        parent_session_id TEXT,
+        copied_from_anchor_ids_json TEXT NOT NULL CHECK(
+            json_valid(copied_from_anchor_ids_json)
+            AND json_type(copied_from_anchor_ids_json) = 'array'
+        ),
         role TEXT NOT NULL,
         knowledge_at INTEGER NOT NULL,
         valid_time_json TEXT NOT NULL CHECK(
@@ -347,38 +436,38 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
             AND sanitized_content_digest NOT GLOB '*[^0-9a-f]*'
         ),
         sanitized_content_bytes INTEGER NOT NULL CHECK(sanitized_content_bytes >= 0),
-        snippet_text TEXT NOT NULL,
+        snippet_text TEXT NOT NULL GENERATED ALWAYS AS (index_text) VIRTUAL,
         index_text TEXT NOT NULL,
-        PRIMARY KEY(session_id, generation, occurrence_id),
+        PRIMARY KEY(session_id, occurrence_id),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE,
         FOREIGN KEY(source_observation_id) REFERENCES observations(observation_id),
-        FOREIGN KEY(retrieval_anchor_id) REFERENCES retrieval_anchors(anchor_id),
-        FOREIGN KEY(session_id, generation, thread_id)
-            REFERENCES session_threads(session_id, generation, thread_id),
-        FOREIGN KEY(session_id, generation, turn_id)
-            REFERENCES session_turns(session_id, generation, turn_id),
-        FOREIGN KEY(session_id, generation, agent_id)
-            REFERENCES session_agents(session_id, generation, agent_id)
+        FOREIGN KEY(retrieval_anchor_id) REFERENCES retrieval_anchors(anchor_id)
     );
+    CREATE INDEX IF NOT EXISTS idx_session_occurrences_introduced
+        ON session_occurrences(session_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_generation_order
-        ON session_occurrences(session_id, generation, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, knowledge_at, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_root_generation_order
         ON session_occurrences(knowledge_at, session_id, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_session_time
         ON session_occurrences(session_id, knowledge_at);
+    CREATE INDEX IF NOT EXISTS idx_session_occurrences_source_order
+        ON session_occurrences(
+            session_id, source_sequence, projection_output_ordinal, occurrence_id, generation
+        );
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_anchor_order
         ON session_occurrences(
-            session_id, generation, retrieval_anchor_id, knowledge_at, occurrence_id
+            session_id, retrieval_anchor_id, knowledge_at, occurrence_id, generation
         );
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_message
-        ON session_occurrences(session_id, generation, message_id, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, message_id, knowledge_at, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_thread
-        ON session_occurrences(session_id, generation, thread_id, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, thread_id, knowledge_at, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_turn
-        ON session_occurrences(session_id, generation, turn_id, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, turn_id, knowledge_at, occurrence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_agent
-        ON session_occurrences(session_id, generation, agent_id, knowledge_at, occurrence_id);
+        ON session_occurrences(session_id, agent_id, knowledge_at, occurrence_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_turn_members (
         session_id TEXT NOT NULL,
@@ -386,14 +475,14 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         turn_id TEXT NOT NULL,
         occurrence_id TEXT NOT NULL,
         ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
-        PRIMARY KEY(session_id, generation, turn_id, occurrence_id),
-        FOREIGN KEY(session_id, generation, turn_id)
-            REFERENCES session_turns(session_id, generation, turn_id) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id) ON DELETE CASCADE
+        PRIMARY KEY(session_id, turn_id, occurrence_id),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_session_turn_members_occurrence
-        ON session_turn_members(session_id, generation, occurrence_id);
+        ON session_turn_members(session_id, occurrence_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_turn_members_introduced
+        ON session_turn_members(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_assertions (
         session_id TEXT NOT NULL,
@@ -420,7 +509,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
             )
         ),
         evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
-        PRIMARY KEY(session_id, generation, assertion_id),
+        PRIMARY KEY(session_id, assertion_id),
         CHECK(subject_anchor_id <> object_anchor_id),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE,
@@ -428,15 +517,17 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         FOREIGN KEY(object_anchor_id) REFERENCES retrieval_anchors(anchor_id)
     );
     CREATE INDEX IF NOT EXISTS idx_session_assertions_subject
-        ON session_assertions(session_id, generation, subject_anchor_id);
+        ON session_assertions(session_id, subject_anchor_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_assertions_object_order
         ON session_assertions(
-            session_id, generation, object_anchor_id, knowledge_at, assertion_id
+            session_id, object_anchor_id, knowledge_at, assertion_id, generation
         );
     CREATE INDEX IF NOT EXISTS idx_session_assertions_kind_order
-        ON session_assertions(session_id, generation, assertion_kind, knowledge_at, assertion_id);
+        ON session_assertions(session_id, assertion_kind, knowledge_at, assertion_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_assertions_generation_order
-        ON session_assertions(session_id, generation, knowledge_at, assertion_id);
+        ON session_assertions(session_id, knowledge_at, assertion_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_assertions_introduced
+        ON session_assertions(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_assertion_supersession (
         session_id TEXT NOT NULL,
@@ -444,17 +535,15 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         superseded_assertion_id TEXT NOT NULL,
         superseding_assertion_id TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY(
-            session_id, generation, superseded_assertion_id, superseding_assertion_id
-        ),
+        PRIMARY KEY(session_id, superseded_assertion_id, superseding_assertion_id),
         CHECK(superseded_assertion_id <> superseding_assertion_id),
-        FOREIGN KEY(session_id, generation, superseded_assertion_id)
-            REFERENCES session_assertions(session_id, generation, assertion_id) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, superseding_assertion_id)
-            REFERENCES session_assertions(session_id, generation, assertion_id) ON DELETE CASCADE
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_session_assertion_supersession_successor
-        ON session_assertion_supersession(session_id, generation, superseding_assertion_id);
+        ON session_assertion_supersession(session_id, superseding_assertion_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_assertion_supersession_introduced
+        ON session_assertion_supersession(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_current_entities (
         session_id TEXT NOT NULL,
@@ -464,7 +553,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         current_assertion_id TEXT,
         current_occurrence_id TEXT,
         coverage_json TEXT NOT NULL CHECK(json_valid(coverage_json)),
-        PRIMARY KEY(session_id, generation, entity_kind, entity_id),
+        PRIMARY KEY(session_id, entity_kind, entity_id, generation),
         CHECK(entity_kind IN ('assertion_anchor', 'occurrence_anchor')),
         CHECK((current_assertion_id IS NULL) <> (current_occurrence_id IS NULL)),
         CHECK(
@@ -472,74 +561,71 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
             OR (entity_kind = 'occurrence_anchor' AND current_occurrence_id IS NOT NULL)
         ),
         FOREIGN KEY(session_id, generation)
-            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, current_assertion_id)
-            REFERENCES session_assertions(session_id, generation, assertion_id),
-        FOREIGN KEY(session_id, generation, current_occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_session_current_entities_assertion
-        ON session_current_entities(session_id, generation, current_assertion_id);
+        ON session_current_entities(session_id, current_assertion_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_current_entities_occurrence
-        ON session_current_entities(session_id, generation, current_occurrence_id);
+        ON session_current_entities(session_id, current_occurrence_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_current_entities_introduced
+        ON session_current_entities(session_id, generation);
 
+    -- A span or burst keeps its identity key (kind, first member) while a
+    -- live run extends it; each extension is a new version with a new
+    -- `evidence_id`, and members are keyed by that stable key so an
+    -- extension appends members instead of rewriting them.
     CREATE TABLE IF NOT EXISTS session_derived_evidence (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         evidence_kind TEXT NOT NULL CHECK(evidence_kind IN ('span', 'burst')),
+        first_occurrence_id TEXT NOT NULL,
         evidence_id TEXT NOT NULL,
         retrieval_anchor_id TEXT NOT NULL,
         thread_id TEXT,
-        first_occurrence_id TEXT NOT NULL,
         last_occurrence_id TEXT NOT NULL,
         algorithm_version TEXT NOT NULL,
         configuration_digest TEXT NOT NULL,
         member_count INTEGER NOT NULL CHECK(member_count > 0),
         member_digest TEXT NOT NULL,
         evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
-        PRIMARY KEY(session_id, generation, evidence_kind, evidence_id),
+        PRIMARY KEY(session_id, evidence_kind, first_occurrence_id, generation),
         FOREIGN KEY(session_id, generation)
             REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE,
-        FOREIGN KEY(retrieval_anchor_id) REFERENCES retrieval_anchors(anchor_id),
-        FOREIGN KEY(session_id, generation, first_occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id),
-        FOREIGN KEY(session_id, generation, last_occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id)
+        FOREIGN KEY(retrieval_anchor_id) REFERENCES retrieval_anchors(anchor_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_scope_order
-        ON session_derived_evidence(
-            session_id, generation, evidence_kind, first_occurrence_id, evidence_id
-        );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_identity
+        ON session_derived_evidence(session_id, evidence_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_anchor
         ON session_derived_evidence(
-            session_id, generation, retrieval_anchor_id, evidence_kind, evidence_id
+            session_id, retrieval_anchor_id, evidence_kind, evidence_id, generation
         );
     CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_thread_order
         ON session_derived_evidence(
-            session_id, generation, thread_id, evidence_kind, first_occurrence_id, evidence_id
+            session_id, thread_id, evidence_kind, first_occurrence_id, generation
         );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_tail
+        ON session_derived_evidence(session_id, evidence_kind, last_occurrence_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_introduced
+        ON session_derived_evidence(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_derived_evidence_members (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         evidence_kind TEXT NOT NULL CHECK(evidence_kind IN ('span', 'burst')),
-        evidence_id TEXT NOT NULL,
+        first_occurrence_id TEXT NOT NULL,
         ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
         occurrence_id TEXT NOT NULL,
         member_role TEXT NOT NULL CHECK(member_role IN ('member', 'first', 'last')),
-        PRIMARY KEY(session_id, generation, evidence_kind, evidence_id, ordinal),
-        UNIQUE(session_id, generation, evidence_kind, evidence_id, occurrence_id),
-        FOREIGN KEY(session_id, generation, evidence_kind, evidence_id)
-            REFERENCES session_derived_evidence(
-                session_id, generation, evidence_kind, evidence_id
-            ) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id)
+        PRIMARY KEY(session_id, evidence_kind, first_occurrence_id, ordinal, generation),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_members_occurrence
         ON session_derived_evidence_members(
-            session_id, generation, occurrence_id, evidence_kind, evidence_id, ordinal
+            session_id, occurrence_id, evidence_kind, first_occurrence_id, ordinal, generation
         );
+    CREATE INDEX IF NOT EXISTS idx_session_derived_evidence_members_introduced
+        ON session_derived_evidence_members(session_id, generation);
 
     CREATE TABLE IF NOT EXISTS session_summary_availability (
         session_id TEXT NOT NULL,
@@ -559,13 +645,11 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
 
     CREATE VIRTUAL TABLE IF NOT EXISTS session_occurrences_fts USING fts5(
         index_text,
-        snippet_text,
         content='session_occurrences',
         content_rowid='rowid'
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS session_summary_nodes_fts USING fts5(
         summary_text,
-        index_text,
         content='session_summary_nodes',
         content_rowid='rowid'
     );
@@ -573,194 +657,33 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
 
 pub(crate) use tracedecay_session_temporal_store::TEMPORAL_TABLE_COLUMNS;
 
-#[hotpath::measure(future = true, label = "session_temporal.schema.migrate")]
-pub(crate) async fn migrate_released_v3_session_temporal_schema(
+/// Drops an earlier-version authority admission proved to hold no rows, so
+/// [`install_session_temporal_schema`] can install the final contract. Its
+/// triggers and indexes go with their tables.
+pub(crate) async fn drop_empty_session_temporal_schema(
     conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
-    admission::validate_released_v3_session_temporal_schema(conn).await?;
-    conn.execute_batch(
-        "DROP TRIGGER session_temporal_projection_receipts_immutable_update_v1;
-         ALTER TABLE session_temporal_projection_receipts
-             ADD COLUMN batch_item_count INTEGER NOT NULL DEFAULT 0
-             CHECK(batch_item_count >= 0);
-         ALTER TABLE session_temporal_projection_receipts
-             ADD COLUMN committed_item_count INTEGER NOT NULL DEFAULT 0
-             CHECK(committed_item_count >= 0);
-         ALTER TABLE session_temporal_projection_receipts
-             ADD COLUMN committed_copy_count INTEGER NOT NULL DEFAULT 0
-             CHECK(committed_copy_count >= 0);",
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-
-    let mut ambiguous = conn
-        .query(
-            "SELECT receipt.session_id, receipt.generation, receipt.batch_ordinal
-             FROM session_temporal_projection_receipts AS receipt
-             LEFT JOIN session_refresh_batch_bindings AS batch_binding
-               ON batch_binding.session_id = receipt.session_id
-              AND batch_binding.generation = receipt.generation
-              AND batch_binding.batch_ordinal = receipt.batch_ordinal
-             LEFT JOIN session_refresh_progress AS progress
-               ON progress.session_id = batch_binding.session_id
-              AND progress.operation_id = batch_binding.operation_id
-              AND progress.progress_ordinal = batch_binding.progress_ordinal
-             LEFT JOIN session_refresh_bindings AS refresh_binding
-               ON refresh_binding.session_id = batch_binding.session_id
-              AND refresh_binding.operation_id = batch_binding.operation_id
-              AND refresh_binding.generation = batch_binding.generation
-             WHERE json_type(receipt.frozen_watermarks_json, '$.active_generation')
-                       IS NOT 'integer'
-                OR json_extract(receipt.frozen_watermarks_json, '$.active_generation') <= 0
-                OR json_extract(receipt.frozen_watermarks_json, '$.active_generation')
-                       > receipt.generation
-                OR batch_binding.session_id IS NULL
-                OR (
-                    batch_binding.session_id IS NOT NULL
-                    AND (
-                        batch_binding.progress_ordinal <> receipt.batch_ordinal
-                        OR progress.session_id IS NULL
-                        OR refresh_binding.session_id IS NULL
-                        OR refresh_binding.frozen_watermarks_json
-                            <> receipt.frozen_watermarks_json
-                        OR progress.committed_batches <> receipt.batch_ordinal + 1
-                        OR progress.committed_records <>
-                            receipt.occurrence_count + receipt.copy_count
-                                + receipt.assertion_count
-                        OR json_extract(progress.frontier_json, '$.committed_through')
-                            <> receipt.projection_through
-                    )
-                )
-             LIMIT 1",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    if ambiguous
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .is_some()
-    {
+    if !authority_holds_no_rows(conn).await? {
         return Err(admission::session_temporal_reset_required(
-            "released v3 projection receipt batch accounting is unbound or ambiguous",
+            "an earlier schema version gained rows before its empty authority was replaced",
         ));
     }
-    drop(ambiguous);
-
-    let mut invalid = conn
-        .query(
-            "SELECT current.session_id, current.generation, current.batch_ordinal
-             FROM session_temporal_projection_receipts AS current
-             LEFT JOIN session_temporal_projection_receipts AS previous
-               ON previous.session_id = current.session_id
-              AND previous.generation = current.generation
-              AND previous.batch_ordinal = current.batch_ordinal - 1
-             WHERE (
-                 current.batch_ordinal > 0
-                 AND (
-                   previous.batch_ordinal IS NULL
-                   OR current.occurrence_count + current.copy_count + current.assertion_count
-                      < previous.occurrence_count + previous.copy_count
-                        + previous.assertion_count
-                 )
-               )
-               OR (
-                 current.batch_ordinal = 0
-                 AND json_extract(
-                       current.frozen_watermarks_json, '$.active_generation'
-                     ) <> current.generation
-                 AND current.occurrence_count + current.copy_count + current.assertion_count
-                     < COALESCE((
-                         SELECT baseline.occurrence_count + baseline.copy_count
-                                + baseline.assertion_count
-                         FROM session_temporal_projection_receipts AS baseline
-                         WHERE baseline.session_id = current.session_id
-                           AND baseline.generation = json_extract(
-                               current.frozen_watermarks_json, '$.active_generation'
-                           )
-                         ORDER BY baseline.batch_ordinal DESC
-                         LIMIT 1
-                       ), 0)
-               )
-             LIMIT 1",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    if invalid
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .is_some()
-    {
-        return Err(admission::session_temporal_reset_required(
-            "released v3 projection receipt progress is non-monotonic or noncontiguous",
-        ));
+    let (fts, tables): (Vec<_>, Vec<_>) = TEMPORAL_TABLE_COLUMNS
+        .iter()
+        .map(|(table, _)| *table)
+        .partition(|table| table.ends_with("_fts"));
+    for table in fts.into_iter().chain(tables.into_iter().rev()) {
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
     }
-    drop(invalid);
-
-    conn.execute(
-        "UPDATE session_temporal_projection_receipts AS current
-         SET batch_item_count =
-               current.occurrence_count + current.copy_count + current.assertion_count
-               - CASE
-                   WHEN current.batch_ordinal > 0 THEN COALESCE((
-                     SELECT previous.occurrence_count + previous.copy_count
-                            + previous.assertion_count
-                     FROM session_temporal_projection_receipts AS previous
-                     WHERE previous.session_id = current.session_id
-                       AND previous.generation = current.generation
-                       AND previous.batch_ordinal = current.batch_ordinal - 1
-                   ), 0)
-                   WHEN json_extract(
-                          current.frozen_watermarks_json, '$.active_generation'
-                        ) <> current.generation THEN COALESCE((
-                     SELECT baseline.occurrence_count + baseline.copy_count
-                            + baseline.assertion_count
-                     FROM session_temporal_projection_receipts AS baseline
-                     WHERE baseline.session_id = current.session_id
-                       AND baseline.generation = json_extract(
-                           current.frozen_watermarks_json, '$.active_generation'
-                       )
-                     ORDER BY baseline.batch_ordinal DESC
-                     LIMIT 1
-                   ), 0)
-                   ELSE 0
-                 END,
-             committed_item_count =
-               current.occurrence_count + current.copy_count + current.assertion_count,
-             committed_copy_count = current.copy_count",
-        (),
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let updated = conn
-        .execute(
-            "UPDATE session_temporal_schema_migrations
-             SET version = ?1, applied_at = unixepoch()
-             WHERE name = ?2 AND version = ?3",
-            params![
-                SESSION_TEMPORAL_SCHEMA_VERSION,
-                MIGRATION_NAME,
-                RELEASED_SESSION_TEMPORAL_SCHEMA_VERSION,
-            ],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    if updated != 1 {
-        return Err(admission::session_temporal_reset_required(
-            "released v3 temporal schema marker changed during migration",
-        ));
-    }
-    validate_temporal_table_shapes(conn).await?;
-    admission::validate_current_session_temporal_schema(conn).await
+    Ok(())
 }
 
 /// Installs the final schema into a store already proven fresh by admission.
-#[hotpath::measure(future = true, label = "session_temporal.schema.install")]
+#[tracing::instrument(name = "session_temporal.schema.install", level = "trace", skip_all)]
 pub(crate) async fn install_session_temporal_schema(
-    conn: &impl Executor,
+    conn: &(impl Executor + Sync),
 ) -> tracedecay_domain::errors::Result<()> {
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
         .await
@@ -772,13 +695,13 @@ pub(crate) async fn install_session_temporal_schema(
     validate_temporal_table_shapes(conn).await?;
     validate_temporal_fts_contracts(conn).await?;
     validate_temporal_fts_match(conn).await?;
-    conn.execute(
-        "INSERT INTO session_temporal_schema_migrations(name, version, applied_at)
-         VALUES (?1, ?2, unixepoch())",
-        params![MIGRATION_NAME, SESSION_TEMPORAL_SCHEMA_VERSION],
+    schema_version::record_version(
+        conn,
+        SESSION_TEMPORAL_COMPONENT,
+        SESSION_TEMPORAL_SCHEMA_VERSION,
     )
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    .map_err(|error| global_db_operation_message(OPERATION, error.to_string()))?;
     Ok(())
 }
 

@@ -24,7 +24,7 @@ export const OUTCOME_TALLY_NOT_TERMINAL =
   'results from every provider with no column to separate them, so it is not read as an adoption ' +
   'terminal count';
 
-export type OutcomeBand = PlanDimensionBand;
+type OutcomeBand = PlanDimensionBand;
 
 /** Which recording family would carry each funnel stage, and the field name on
  * it. Named per stage so a card's reason points at one field rather than at a
@@ -59,11 +59,11 @@ const STAGE_METRIC: Record<(typeof ADOPTION_FUNNEL_STAGES)[number], string> = {
   RepeatUseful: 'adoption_repeat_useful',
 };
 
-export function funnelDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function funnelDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   return ADOPTION_FUNNEL_STAGES.map((stage, index) => ({
     id: `funnel_${stage.toLowerCase()}`,
     label: `${index + 1}. ${stage}`,
-    requirement: `${stage} count with its explicit denominator, unknown/censored counts, and interval — from ${STAGE_SOURCE[stage].field}`,
+    requirement: `${stage} count with its explicit denominator, unknown/censored counts, and interval, from ${STAGE_SOURCE[stage].field}`,
     reading: readMetric(model.metrics, STAGE_METRIC[stage], STAGE_SOURCE[stage].reason),
   }));
 }
@@ -84,7 +84,7 @@ export function funnelStageCounts(model: ObservatoryReadModelV1): FunnelStageCou
  * and a funnel that reported six stages and no censoring would let a reader
  * assume there was none.
  */
-export function outcomeQualityDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function outcomeQualityDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   return [
     {
       id: 'correct_abstention',
@@ -97,7 +97,7 @@ export function outcomeQualityDimensions(model: ObservatoryReadModelV1): PlanDim
       id: 'independently_useful',
       label: 'independently useful',
       requirement:
-        'use whose usefulness was observed independently of the surface that produced it — never acceptance or a self-report',
+        'use whose usefulness was observed independently of the surface that produced it, never acceptance or a self-report',
       reading: readMetric(model.metrics, 'adoption_independently_useful', NO_OUTCOME_PROJECTION),
     },
     {

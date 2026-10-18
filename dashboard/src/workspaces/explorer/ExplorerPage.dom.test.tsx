@@ -1,13 +1,16 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { FIXTURES } from '../../../stories/fixtures/data.ts';
+import { useScope } from '../../data/scope/store.ts';
 import { ExplorerPage } from './ExplorerPage.tsx';
 
 type Route = { status: number; body: unknown };
 
 function serve(routes: Record<string, Route>) {
-  return vi.fn(async (input: RequestInfo | URL) => {
+  return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
     const hit = Object.entries(routes).find(([path]) => url.includes(path));
     const response = hit?.[1] ?? { status: 404, body: { error: 'not found' } };
@@ -19,33 +22,39 @@ function serve(routes: Record<string, Route>) {
   });
 }
 
-function mount(fetchImpl: unknown) {
+/** Prints the router's current search string so a test can read the URL the
+ * page writes without reaching into history. */
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.search}</output>;
+}
+
+function mount(fetchImpl: unknown, initialEntry = '/explorer') {
   vi.stubGlobal('fetch', fetchImpl);
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <ExplorerPage />
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <Routes>
+          <Route
+            path="/explorer"
+            element={
+              <>
+                <ExplorerPage />
+                <LocationProbe />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
-function renderExplorer(routes: Record<string, Route>) {
-  return mount(serve(routes));
-}
-
-/** A daemon the browser cannot reach on one route: `fetch` rejects, which is
- * the client-side connectivity condition — not anything a source said about
- * itself. */
-function renderExplorerUnreachable(routes: Record<string, Route>, path: string) {
-  const reachable = serve(routes);
-  return mount(
-    vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input).includes(path)) throw new TypeError('Failed to fetch');
-      return reachable(input);
-    }),
-  );
+function renderExplorer(routes: Record<string, Route>, initialEntry?: string) {
+  return mount(serve(routes), initialEntry);
 }
 
 const CODE_ROW = {
@@ -81,7 +90,6 @@ const SOURCE_LABELS = {
   code_graph: 'Code graph',
   sessions: 'Sessions',
   knowledge: 'Knowledge',
-  semantic: 'Semantic',
 } as const;
 
 type SourceId = keyof typeof SOURCE_LABELS;
@@ -122,63 +130,31 @@ function source(sourceId: SourceId, rows: Record<string, unknown>[], total: numb
   };
 }
 
-/** The live semantic source today: not activated, a typed absence carrying
- * the complete accounting of an empty domain. */
-function semanticAbsent() {
-  const base = source('semantic', [], 0);
+/** A source the coordinator is still reading. */
+function reading(sourceId: SourceId) {
+  const base = source(sourceId, [], null);
   return {
     ...base,
-    outcome: 'absent',
-    completed_units: 0,
-    total_units: 0,
-    coverage: {
-      ...base.coverage,
-      eligible: 0,
-      examined: 0,
-      matched: 0,
-      denominator: 0,
-      unit: 'indexed vectors',
-    },
-    error_code: 'semantic_not_activated',
-    message: 'semantic search is not activated for this project',
+    phase: 'reading',
+    outcome: 'pending',
+    completed_units: null,
+    total_units: null,
     page: null,
   };
 }
 
-/** An activated semantic provider mid-projection. */
-function semanticIndexing() {
-  const base = source('semantic', [], 0);
-  return {
-    ...base,
-    outcome: 'indexing',
-    completed_units: 3,
-    total_units: 10,
-    coverage: {
-      ...base.coverage,
-      completeness: 'partial',
-      eligible: 10,
-      examined: 3,
-      matched: null,
-      denominator: 10,
-      unit: 'semantic units',
-      omission_reasons: ['semantic vector projection is in progress'],
-    },
-    error_code: 'semantic_indexing',
-    message: 'semantic vector projection is in progress',
-    page: null,
-  };
-}
+type RunState = 'pending' | 'partial' | 'completed';
 
 function plannerEnvelope(
   sources: unknown[] = [
     source('code_graph', [CODE_ROW], 1),
     source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
     source('knowledge', [FACT_ROW], null),
-    semanticAbsent(),
   ],
-  state: 'partial' | 'completed' = 'partial',
+  state: RunState = 'partial',
   query = 'graph',
 ) {
+  const domainState = state === 'completed' ? 'ready' : state === 'pending' ? 'loading' : 'partial';
   return {
     schema_revision: 1,
     scope: {
@@ -203,7 +179,7 @@ function plannerEnvelope(
       omission_reasons: state === 'completed' ? [] : ['knowledge coverage is unknown'],
     },
     freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
-    domain_state: state === 'completed' ? 'ready' : 'partial',
+    domain_state: domainState,
     legal_actions: [],
     payload: {
       run_id: 'explorer-run-fixture',
@@ -211,15 +187,15 @@ function plannerEnvelope(
       request_revision: 'explorer-query-request-v1',
       plan_revision: 'explorer-query-plan-v1',
       merge_revision: 'source-local-no-merge-v1',
-      required_source_ids: ['code_graph', 'sessions', 'knowledge', 'semantic'],
+      required_source_ids: ['code_graph', 'sessions', 'knowledge'],
       ordering_policy: 'source_local_no_cross_source_merge',
       explanation:
         'Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source own order and coverage.',
       submitted_at_micros: 1,
-      completed_at_micros: 10,
+      completed_at_micros: state === 'pending' ? null : 10,
       elapsed_micros: 9,
       state,
-      finality: state === 'completed' ? 'complete' : 'partial',
+      finality: state === 'completed' ? 'complete' : state === 'pending' ? 'pending' : 'partial',
       sources,
     },
   };
@@ -259,52 +235,25 @@ const SEARCH_ROUTES = {
     status: 200,
     body: plannerEnvelope(),
   },
+  // Browse reads are the same canonical overview envelopes the visual-audit
+  // fixtures serve, so a browse row here is one the daemon's contract admits.
   '/api/plugins/graph/overview': {
     status: 200,
-    body: { top_connected: [CODE_ROW] },
+    body: FIXTURES['/api/plugins/graph/overview'],
   },
   '/api/plugins/hermes-lcm/overview': {
     status: 200,
-    body: { latest_summary_nodes: [SUMMARY_ROW], overview: { messages_total: 1 } },
+    body: FIXTURES['/api/plugins/hermes-lcm/overview'],
   },
-  '/api/plugins/graph/search': {
+  '/api/plugins/holographic': {
     status: 200,
-    body: {
-      total: 1,
-      results: [CODE_ROW],
-    },
-  },
-  '/api/plugins/hermes-lcm/search': {
-    status: 200,
-    body: {
-      path: '/data/sessions.db',
-      storage_scope: 'global',
-      exists: true,
-      engine: 'like',
-      engine_detail: { messages: 'fts', summary_nodes: 'like' },
-      total: { messages: 1, summary_nodes: 1 },
-      matches: {
-        messages: [MESSAGE_ROW],
-        summary_nodes: [SUMMARY_ROW],
-      },
-    },
-  },
-  '/api/plugins/holographic/': {
-    status: 200,
-    body: {
-      limit: 25,
-      holographic: {
-        path: '/data/memory.db',
-        exists: true,
-        error: '',
-        facts: [FACT_ROW],
-      },
-    },
+    body: FIXTURES['/api/plugins/holographic'],
   },
 };
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  useScope.getState().selectAllProjects();
 });
 
 /** A source that reached a terminal outcome without returning a page. */
@@ -337,16 +286,19 @@ function unavailable(sourceId: SourceId, code: string, message: string) {
   return withoutAnswer(sourceId, 'unavailable', code, message);
 }
 
-/** The domain state a lane readout is actually drawing, taken off the chip
- * rather than off its wording: two conditions that read differently in prose
- * while lighting the same indicator are still one fact to anyone scanning the
- * indicators. */
-function laneChipState(lane: HTMLElement): string | null {
-  return lane.querySelector('[data-state]')?.getAttribute('data-state') ?? null;
+function lane(name: 'Code' | 'Sessions' | 'Knowledge' | 'Semantic') {
+  return screen.getByRole('region', { name: `${name} lane` });
 }
 
-describe('ExplorerPage no-falsified-UI invariant', () => {
-  it('never counts a source that did not answer in the result caption', async () => {
+async function search(query = 'graph') {
+  const user = userEvent.setup();
+  await user.type(screen.getByRole('searchbox'), query);
+  await user.keyboard('{Enter}');
+  return user;
+}
+
+describe('ExplorerPage independent lane lifecycle', () => {
+  it('draws four lanes, and a ready lane never makes an unavailable neighbour look ready', async () => {
     renderExplorer({
       ...SEARCH_ROUTES,
       '/api/explorer/queries': {
@@ -356,383 +308,210 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
             source('code_graph', [CODE_ROW], 1),
             source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
             unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
-            semanticAbsent(),
           ],
           'partial',
         ),
       },
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
+    await search();
     await screen.findByRole('button', { name: /graph_search/ });
 
-    // Three rows arrived, but only two of the four memories answered with
-    // rows. The caption must not present the result set as spanning them all.
-    expect(screen.queryByText(/across four memories/)).toBeNull();
-    expect(screen.getByText(/across 2 of 4 memories/)).toBeTruthy();
+    expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
+    expect(lane('Sessions').getAttribute('data-lane-state')).toBe('ready');
+    expect(lane('Knowledge').getAttribute('data-lane-state')).toBe('unavailable');
+    expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
+
+    // The unavailable lane prints the source's own reason and no count , 
+    // a dash, never a zero, because zero is what a source that looked says.
+    const knowledge = within(lane('Knowledge'));
+    expect(knowledge.getAllByText(/the fact authority is not mounted/).length).toBeGreaterThan(0);
+    expect(knowledge.getByText('—', { selector: '[data-cell="numeric"]' })).toBeTruthy();
+    expect(knowledge.queryByText('0')).toBeNull();
+    expect(knowledge.getByText('UNAVAILABLE')).toBeTruthy();
+
+    // The ready lanes carry their own counts, grade and freshness, untouched.
+    expect(within(lane('Code')).getByText('1')).toBeTruthy();
+    expect(within(lane('Code')).getByText('EXACT')).toBeTruthy();
+    expect(lane('Code').querySelector('[data-lane-freshness="unknown"]')).toBeTruthy();
+    expect(within(lane('Sessions')).getByText('2')).toBeTruthy();
+
+    // The summary counts only lanes that answered.
+    expect(screen.getByText(/2 of 4 lanes answered · 2 not served/)).toBeTruthy();
   });
 
-  it('refuses a confirmed-absence claim when a source reports unknown coverage', async () => {
-    const knowledgeUnknownCoverage = {
-      ...source('knowledge', [], null),
-      coverage: {
-        ...source('knowledge', [], null).coverage,
-        completeness: 'unknown',
-        denominator: null,
-      },
-    };
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: {
-          ...plannerEnvelope(
-            [
-              source('code_graph', [], 0),
-              source('sessions', [], 0),
-              knowledgeUnknownCoverage,
-              semanticAbsent(),
-            ],
-            'completed',
-            'missing',
-          ),
-          // A coordinator that over-claims canonical finality while one of its
-          // own sources reports unknown coverage. The client carries the
-          // contradicting evidence in the same payload, so it must not print a
-          // global-absence claim on the strength of the scalar alone.
-          payload: {
-            ...plannerEnvelope(
-              [
-                source('code_graph', [], 0),
-                source('sessions', [], 0),
-                knowledgeUnknownCoverage,
-                semanticAbsent(),
-              ],
-              'completed',
-              'missing',
-            ).payload,
-            finality: 'complete',
-            state: 'completed',
-          },
-        },
-      },
-    });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
+  it('renders the semantic lane as a standing typed absence in browse and in search', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    // Browse mode: the three source lanes hold their overview rows.
+    await screen.findByRole('button', { name: /graph_api\.rs/ });
+    expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
+    expect(within(lane('Code')).getByText('shown from the overview endpoint')).toBeTruthy();
 
-    expect(await screen.findByText(/No rows loaded for/)).toBeTruthy();
-    expect(screen.queryByText(/No source matched/)).toBeNull();
-    expect(screen.queryByText(/completed with known coverage/)).toBeNull();
+    const browse = within(lane('Semantic'));
+    expect(browse.getByText('No production authority')).toBeTruthy();
+    // Named in the header chip and again in the body, so the reason survives
+    // whichever of the two a narrow layout keeps in view.
+    expect(browse.getAllByText(/no semantic retrieval source is registered/).length).toBe(2);
+    expect(browse.getAllByText('Source unavailable').length).toBeGreaterThan(0);
+    expect(browse.queryByRole('button')).toBeNull();
+
+    await search();
+    await screen.findByText(/hits for/);
+    // Three sources answered; the fourth lane still says exactly why it has
+    // no rows, and nothing about the ready lanes leaked into it.
+    expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
+    expect(within(lane('Semantic')).getByText('No production authority')).toBeTruthy();
+    expect(within(lane('Semantic')).queryByText('EXACT')).toBeNull();
   });
 
-  /**
-   * These two shapes both declared `completeness: 'complete'` over a real
-   * denominator, which was everything the absence gate inspected — so both
-   * earned "Every required source completed with known coverage" while the
-   * source's own numbers on the same object said it knew the status of nothing,
-   * or had examined nothing. They are separate cases because they are separate
-   * facts, and the copy has to be able to tell a reader which one happened.
-   */
-  it('refuses absence when every unit a source counted is unknown', async () => {
-    const allUnitsUnknown = {
-      ...source('knowledge', [], 5),
-      coverage: {
-        ...source('knowledge', [], 5).coverage,
-        completeness: 'complete',
-        eligible: 5,
-        examined: 5,
-        matched: 0,
-        excluded: 0,
-        omitted: 0,
-        unknown: 5,
-        denominator: 5,
-        unit: 'facts',
-        omission_reasons: ['every unit resolved to unknown status'],
-      },
-      page: { offset: 0, limit: 50, total: 0, next_offset: null, rows: [], metadata: {} },
-    };
+  it('keeps a lane the coordinator is still reading distinct from lanes that answered', async () => {
     renderExplorer({
       ...SEARCH_ROUTES,
       '/api/explorer/queries': {
         status: 200,
         body: plannerEnvelope(
-          [
-            source('code_graph', [], 0),
-            source('sessions', [], 0),
-            allUnitsUnknown,
-            semanticAbsent(),
-          ],
-          'completed',
-          'missing',
+          [source('code_graph', [CODE_ROW], 1), reading('sessions'), reading('knowledge')],
+          'pending',
         ),
       },
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
+    await search();
+    await screen.findByRole('button', { name: /graph_search/ });
 
-    expect(await screen.findByText(/No rows loaded for/)).toBeTruthy();
-    expect(screen.queryByText(/No source matched/)).toBeNull();
-    expect(screen.queryByText(/completed with known coverage/)).toBeNull();
+    expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
+    expect(lane('Sessions').getAttribute('data-lane-state')).toBe('pending');
+    expect(within(lane('Sessions')).getByText('Reading')).toBeTruthy();
+    // Progress is counted in sources concluded, the only figure with a real
+    // denominator, and the explicit cancel is offered while the run is live.
+    expect(screen.getByRole('img', { name: '1 of 3 sources concluded' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+  });
+
+  it('cancels only through the explicit control, never through Escape', async () => {
+    const fetchImpl = serve({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [source('code_graph', [CODE_ROW], 1), reading('sessions'), reading('knowledge')],
+          'pending',
+        ),
+      },
+    });
+    mount(fetchImpl);
+    const user = await search();
+    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+
+    // Escape from anywhere but the dirty search field (whose own Escape clears
+    // the search) does nothing to a live run.
+    cancel.focus();
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBe(cancel);
+    expect(fetchImpl.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+
+    await user.click(cancel);
+    await waitFor(() => {
+      expect(
+        fetchImpl.mock.calls.some(
+          ([input, init]) =>
+            String(input).includes('/api/explorer/queries/explorer-run-fixture') &&
+            init?.method === 'DELETE',
+        ),
+      ).toBe(true);
+    });
+  });
+});
+
+describe('ExplorerPage scope truth', () => {
+  it('refuses to run a query under a selected non-active project and dispatches nothing', async () => {
+    useScope.getState().selectProject('proj_other', 'Other project', 'selected');
+    const fetchImpl = serve(SEARCH_ROUTES);
+    mount(fetchImpl);
+    await search();
+
+    // Every source lane carries the scope authority's own refusal; nothing
+    // was asked of the gateway that would have refused it.
+    await waitFor(() => {
+      expect(lane('Code').getAttribute('data-lane-state')).toBe('locked');
+    });
+    expect(lane('Sessions').getAttribute('data-lane-state')).toBe('locked');
+    expect(lane('Knowledge').getAttribute('data-lane-state')).toBe('locked');
+    expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
     expect(
-      screen.getByText(/could not determine the status of any of its 5 facts/),
-    ).toBeTruthy();
+      within(lane('Code')).getAllByText(/Other project is not the active project/).length,
+    ).toBeGreaterThan(0);
+    expect(within(lane('Code')).getByText('Read-only scope')).toBeTruthy();
+    // The run register carries the same refusal rather than a pending admission.
+    const register = document.querySelector('[data-run-register]');
+    expect(register?.getAttribute('data-run-state')).toBe('locked');
+    expect(within(register as HTMLElement).getByText(/no run created/)).toBeTruthy();
+    expect(
+      fetchImpl.mock.calls.some(([input]) => String(input).includes('/api/explorer/queries')),
+    ).toBe(false);
   });
 
-  it('refuses absence when a source examined none of its units', async () => {
-    const examinedNothing = {
-      ...source('code_graph', [], 400),
-      coverage: {
-        ...source('code_graph', [], 400).coverage,
-        completeness: 'complete',
-        eligible: 400,
-        examined: 0,
-        matched: 0,
-        excluded: 0,
-        omitted: 400,
-        unknown: 0,
-        denominator: 400,
-        unit: 'symbols',
-        omission_reasons: ['result cap reached before any unit was examined'],
-      },
-      page: { offset: 0, limit: 50, total: 0, next_offset: null, rows: [], metadata: {} },
-    };
-    renderExplorer({
+  it('routes the run through the project gateway for an active selected project', async () => {
+    useScope.getState().selectProject('proj_active', 'Active project', 'active');
+    const fetchImpl = serve({
       ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [examinedNothing, source('sessions', [], 0), source('knowledge', [], 0), semanticAbsent()],
-          'completed',
-          'missing',
-        ),
-      },
+      '/api/projects/proj_active/explorer/queries': { status: 200, body: plannerEnvelope() },
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
-
-    expect(await screen.findByText(/No rows loaded for/)).toBeTruthy();
-    expect(screen.queryByText(/completed with known coverage/)).toBeNull();
-    expect(screen.getByText(/examined none of its 400 symbols/)).toBeTruthy();
-  });
-
-  it('still confirms absence when every source examined its full denominator', async () => {
-    // The counterweight to the two refusals above: the claim must remain
-    // reachable, or the fix would have replaced a false statement with no
-    // statement at all. The typed-absent semantic source rides along, as in
-    // the live default install, and must not block the claim.
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [
-            source('code_graph', [], 0),
-            source('sessions', [], 0),
-            source('knowledge', [], 0),
-            semanticAbsent(),
-          ],
-          'completed',
-          'missing',
-        ),
-      },
-    });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
-
-    expect(await screen.findByText(/No source matched/)).toBeTruthy();
-    expect(screen.getByText(/examined its full denominator/)).toBeTruthy();
-  });
-
-  it('never renders a count for a source that did not answer', async () => {
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [
-            source('code_graph', [CODE_ROW], 1),
-            source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
-            unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
-            semanticAbsent(),
-          ],
-          'partial',
-        ),
-      },
-    });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
+    mount(fetchImpl);
+    await search();
     await screen.findByRole('button', { name: /graph_search/ });
 
-    const knowledge = screen.getByRole('button', { name: /^Knowledge/ });
-    expect(knowledge.textContent).not.toMatch(/\b0\b/);
-    expect(knowledge.textContent).toMatch(/no count reported/);
+    const created = fetchImpl.mock.calls.find(([, init]) => init?.method === 'POST');
+    expect(String(created?.[0])).toBe('/api/projects/proj_active/explorer/queries');
   });
+});
 
-  it('tells a cancelled read, an unavailable source, and an empty answer apart', async () => {
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [
-            source('code_graph', [], 0),
-            withoutAnswer('sessions', 'cancelled', 'session_read_cancelled', 'the read was cancelled'),
-            withoutAnswer(
-              'knowledge',
-              'unavailable',
-              'fact_store_unavailable',
-              'the fact authority is not mounted',
-            ),
-            semanticAbsent(),
-          ],
-          'partial',
-          'missing',
-        ),
-      },
+describe('ExplorerPage inspection', () => {
+  it('hover inspects without selecting, and click selects', async () => {
+    const fetchImpl = serve(SEARCH_ROUTES);
+    mount(fetchImpl);
+    const user = await search();
+    const row = await screen.findByRole('button', { name: /Using graph search/ });
+
+    await user.hover(row);
+    const peek = await screen.findByRole('complementary', { name: 'Inspector' });
+    expect(peek.querySelector('[data-inspect-mode="peek"]')).toBeTruthy();
+    expect(row.getAttribute('aria-pressed')).toBe('false');
+    // A peek shows what is already on screen and opens no reads.
+    expect(within(peek).getByText(/Select this row to read its size and context/)).toBeTruthy();
+    expect(within(peek).queryByRole('button', { name: 'Close inspector' })).toBeNull();
+    expect(fetchImpl.mock.calls.some(([input]) => String(input).includes('/size'))).toBe(false);
+
+    await user.unhover(row);
+    expect(screen.queryByRole('complementary', { name: 'Inspector' })).toBeNull();
+
+    await user.click(row);
+    const selected = await screen.findByRole('complementary', { name: 'Inspector' });
+    expect(row.getAttribute('aria-pressed')).toBe('true');
+    expect(selected.querySelector('[data-inspect-mode="selected"]')).toBeTruthy();
+    expect(within(selected).getByRole('button', { name: 'Close inspector' })).toBeTruthy();
+    await waitFor(() => {
+      expect(fetchImpl.mock.calls.some(([input]) => String(input).includes('/size'))).toBe(true);
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
-    await screen.findByText('Some sources did not answer');
-
-    // The source that answered may show its zero — it counted, and the count
-    // was nought. The two that never answered may not, and each has to say
-    // which of the two things happened to it.
-    const code = screen.getByRole('button', { name: /^Code graph/ });
-    expect(code.textContent).toMatch(/Code graph\s*0\s*loaded/);
-    expect(code.textContent).toContain('loaded of 0 matching rows reported');
-
-    const sessions = screen.getByRole('button', { name: /^Sessions/ });
-    expect(laneChipState(sessions)).toBe('cancelled');
-    expect(sessions.textContent).toMatch(/read cancelled/);
-    expect(sessions.textContent).toMatch(/no count reported/);
-    expect(sessions.textContent).not.toMatch(/\b0\b/);
-
-    const knowledge = screen.getByRole('button', { name: /^Knowledge/ });
-    // The chip itself carries the condition, and the clause beside it carries
-    // the reason the source gave rather than a second copy of the state.
-    expect(laneChipState(knowledge)).toBe('unavailable');
-    expect(knowledge.textContent).toMatch(/Source unavailable/);
-    expect(knowledge.textContent).toMatch(/fact_store_unavailable/);
-    expect(knowledge.textContent).toMatch(/no count reported/);
-    expect(knowledge.textContent).not.toMatch(/\b0\b/);
   });
 
-  it('never reads a daemon the browser cannot reach as a source that failed', async () => {
-    renderExplorerUnreachable(SEARCH_ROUTES, '/api/explorer/queries');
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-    await screen.findByText('Some sources did not answer');
+  it('grades a result: exact identity, explicit transcript text, exact code text', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
 
-    // No source said anything about itself — the browser never got a reply —
-    // so no lane may be shown as an unavailable or broken source. Held at the
-    // chip as well as in the prose: source-level unavailability is now its own
-    // chip, so a lane that merely worded the difference while drawing the same
-    // indicator would still be lying to anyone reading the indicator.
-    for (const name of [/^Code graph/, /^Sessions/, /^Knowledge/, /^Semantic/]) {
-      const lane = screen.getByRole('button', { name });
-      expect(laneChipState(lane)).toBe('offline');
-      expect(lane.textContent).toMatch(/Offline/);
-      expect(lane.textContent).toMatch(/daemon unreachable/);
-      expect(lane.textContent).toMatch(/no count reported/);
-      expect(lane.textContent).not.toMatch(/Source unavailable/);
-    }
-  });
+    await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
+    let inspector = within(await screen.findByRole('complementary', { name: 'Inspector' }));
+    expect(inspector.getByText('TRANSCRIPT')).toBeTruthy();
+    expect(inspector.getAllByText('EXACT').length).toBeGreaterThan(0);
+    expect(inspector.getByText('EXPLICIT')).toBeTruthy();
+    // The identity key is printed beside its grade as well as in the payload.
+    expect(inspector.getAllByText('message-1').length).toBeGreaterThan(1);
 
-  it('does not leave a source the run never named looking like it is still reading', async () => {
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope([source('code_graph', [], 0)], 'completed', 'missing'),
-      },
-    });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
-    await screen.findByText('Some sources did not answer');
-
-    expect(screen.getByRole('button', { name: /^Code graph/ }).textContent).toContain(
-      'loaded of 0 matching rows reported',
-    );
-    for (const name of [/^Sessions/, /^Knowledge/, /^Semantic/]) {
-      const lane = screen.getByRole('button', { name });
-      expect(lane.textContent).toMatch(/the run never named this source/);
-      expect(lane.textContent).not.toMatch(/\b0\b/);
-    }
-    // The coordinator declared canonical finality while omitting two of its own
-    // required sources, so the absence claim stays unearned.
-    expect(screen.queryByText(/No source matched/)).toBeNull();
-  });
-
-  it('renders an indexing semantic source as work in progress, never as unavailable', async () => {
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [
-            source('code_graph', [CODE_ROW], 1),
-            source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
-            unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
-            semanticIndexing(),
-          ],
-          'partial',
-        ),
-      },
-    });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-    await screen.findByRole('button', { name: /graph_search/ });
-
-    // The same run carries a genuinely unavailable source and an indexing
-    // one: they must light different indicators, not merely different prose.
-    const semantic = screen.getByRole('button', { name: /^Semantic/ });
-    const knowledge = screen.getByRole('button', { name: /^Knowledge/ });
-    expect(laneChipState(semantic)).toBe('loading');
-    expect(laneChipState(knowledge)).toBe('unavailable');
-    expect(laneChipState(semantic)).not.toBe(laneChipState(knowledge));
-    // The clause names the stage and the provider's own progress accounting.
-    expect(semantic.textContent).toMatch(/semantic_indexing · 3\/10/);
-    expect(semantic.textContent).not.toMatch(/Source unavailable/);
-  });
-
-  it('blocks a complete-zero absence claim while the semantic provider is indexing', async () => {
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [
-            source('code_graph', [], 0),
-            source('sessions', [], 0),
-            source('knowledge', [], 0),
-            semanticIndexing(),
-          ],
-          'completed',
-          'missing',
-        ),
-      },
-    });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
-
-    // Three sources examined their full denominators, but the semantic index
-    // is still being built: a global-absence claim is unearned until the
-    // provider can actually be consulted.
-    expect(await screen.findByText('Some sources did not answer')).toBeTruthy();
-    expect(screen.getByText(/A zero-result claim would be unsafe/)).toBeTruthy();
-    expect(screen.queryByText(/No source matched/)).toBeNull();
-    expect(screen.queryByText(/examined its full denominator/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: /graph_search/ }));
+    inspector = within(await screen.findByRole('complementary', { name: 'Inspector' }));
+    expect(inspector.getByText('GRAPH')).toBeTruthy();
+    expect(inspector.queryByText('EXPLICIT')).toBeNull();
+    // The one real pivot: the graph node id is the identity Code focuses on.
+    const pivot = inspector.getByRole('link', { name: /Open symbol in Code/ });
+    expect(pivot.getAttribute('href')).toBe('/code?symbol=node-1');
   });
 
   it('renders a field the row omitted as absent rather than as a zero', async () => {
@@ -750,13 +529,10 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
           source('code_graph', [rowWithoutDegree], 1),
           source('sessions', [], 0),
           source('knowledge', [], 0),
-          semanticAbsent(),
         ]),
       },
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
+    const user = await search();
 
     const row = await screen.findByRole('button', { name: /graph_without_degree/ });
     expect(screen.queryByRole('img', { name: /^degree/ })).toBeNull();
@@ -770,90 +546,10 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     expect(screen.queryByRole('img', { name: /^degree/ })).toBeNull();
     const provenance = screen.getByText('Payload provenance').closest('details');
     expect(within(provenance as HTMLElement).queryByText('degree')).toBeNull();
-  });
-});
 
-describe('ExplorerPage', () => {
-  it('keeps every definition term and description in a valid definition-list group', async () => {
-    const { container } = renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-    // Drive to the inspector so the session-context and payload-provenance
-    // lists are mounted too: the axe `dlitem` / `definition-list` failures this
-    // locks down were reachable in every one of those states, so scanning only
-    // the browse state would let two thirds of them back in.
-    await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
-    expect(await screen.findByText('Session context')).toBeTruthy();
-    expect(screen.getByText('What each lane searches')).toBeTruthy();
-
-    // Deliberately unscoped: a `dl dt` selector can only ever see terms that
-    // are already inside a list, which is precisely the defect it is supposed
-    // to detect. Every `dt`/`dd` in the tree has to be accounted for.
-    const items = [...container.querySelectorAll('dt, dd')];
-    expect(items.length).toBeGreaterThan(0);
-    for (const item of items) {
-      const parent = item.parentElement;
-      const grouped =
-        parent?.tagName === 'DL' ||
-        (parent?.tagName === 'DIV' && parent.parentElement?.tagName === 'DL');
-      expect(grouped, `${item.tagName} outside a dl: ${item.outerHTML.slice(0, 120)}`).toBe(true);
-    }
-
-    // axe `definition-list`: a dl may directly contain only dt, dd, div,
-    // script and template.
-    const lists = [...container.querySelectorAll('dl')];
-    expect(lists.length).toBeGreaterThan(0);
-    for (const list of lists) {
-      for (const child of [...list.children]) {
-        expect(
-          ['DT', 'DD', 'DIV', 'SCRIPT', 'TEMPLATE'].includes(child.tagName),
-          `<dl> directly contains <${child.tagName.toLowerCase()}>`,
-        ).toBe(true);
-      }
-    }
-  });
-
-  it('derives lane readout names from visible text rather than an aria-label', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-
-    const sessions = await screen.findByRole('button', {
-      name: /Sessions\s*2\s*loaded\s*of 2 matching rows reported/,
-    });
-    // An `aria-label` here would silently replace the computed name, letting
-    // the visible label drift out of the accessible name (WCAG 2.5.3). The
-    // readout has to say the same sentence to both readers.
-    expect(sessions.getAttribute('aria-label')).toBeNull();
-    expect(sessions.textContent).toContain('loaded of 2 matching rows reported');
-  });
-
-  it('renders every result family from the real graph, LCM, and memory shapes', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-
-    expect(await screen.findByRole('button', { name: /graph_search/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Using graph search/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Graph route investigation/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Graph search is bounded/ })).toBeTruthy();
-    expect(
-      screen.getByRole('button', {
-        name: /Code graph\s*1\s*loaded\s*of 1 matching rows reported/,
-      }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole('button', {
-        name: /Sessions\s*2\s*loaded\s*of 2 matching rows reported/,
-      }),
-    ).toBeTruthy();
-    expect(screen.getByText('Coordinator run')).toBeTruthy();
-    expect(screen.getByText('explorer-run-fixture')).toBeTruthy();
-    expect(screen.getByText('source_local_no_cross_source_merge')).toBeTruthy();
-    expect(screen.getByText(/active-project session store/)).toBeTruthy();
+    // And the lanes that answered empty say so, as their own answer.
+    expect(within(lane('Sessions')).getByText('Served empty')).toBeTruthy();
+    expect(within(lane('Sessions')).getByText('0')).toBeTruthy();
   });
 
   it('does not draw a measured signal bar without a denominator', async () => {
@@ -865,210 +561,20 @@ describe('ExplorerPage', () => {
           source('code_graph', [{ ...CODE_ROW, degree: 0 }], 1),
           source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
           source('knowledge', [FACT_ROW], null),
-          semanticAbsent(),
         ]),
       },
     });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
+    await search();
 
     const meter = await screen.findByRole('img', { name: 'degree 0' });
     expect(meter.querySelector('.td-meter-fill')).toBeNull();
   });
 
-  it('never turns a failed lane plus zero successful hits into complete-zero copy', async () => {
-    const unavailableSessions = {
-      ...source('sessions', [], 0),
-      outcome: 'unavailable',
-      total_units: null,
-      coverage: {
-        ...source('sessions', [], 0).coverage,
-        completeness: 'unknown',
-        eligible: null,
-        examined: null,
-        denominator: null,
-      },
-      error_code: 'session_query_failed',
-      message: 'LCM unavailable',
-      page: null,
-    };
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [
-            source('code_graph', [], 0),
-            unavailableSessions,
-            source('knowledge', [], null),
-            semanticAbsent(),
-          ],
-          'partial',
-          'missing',
-        ),
-      },
-    });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
-
-    expect(await screen.findByText('Some sources did not answer')).toBeTruthy();
-    expect(screen.getByText(/A zero-result claim would be unsafe/)).toBeTruthy();
-    expect(screen.queryByText(/genuinely absent from/)).toBeNull();
-  });
-
-  it('treats an HTTP-200 LCM response with no mounted store as unavailable', async () => {
-    const unavailableSessions = {
-      ...source('sessions', [], 0),
-      outcome: 'unavailable',
-      total_units: null,
-      coverage: {
-        ...source('sessions', [], 0).coverage,
-        completeness: 'unknown',
-        eligible: null,
-        examined: null,
-        denominator: null,
-      },
-      error_code: 'session_store_unavailable',
-      message: 'the active-project session store is not mounted',
-      page: null,
-    };
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [
-            source('code_graph', [], 0),
-            unavailableSessions,
-            source('knowledge', [], null),
-            semanticAbsent(),
-          ],
-          'partial',
-          'missing',
-        ),
-      },
-    });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
-
-    expect(await screen.findByText('Some sources did not answer')).toBeTruthy();
-    // Scoped to the coordinator's own source list, which is where the code and
-    // the message it reported are printed verbatim. Unscoped `getByText` for
-    // the code now has a second, legitimate match — the lane chip's clause
-    // carries the reported reason — and would fail on multiplicity rather than
-    // on the thing under test.
-    const progress = within(screen.getByRole('list', { name: 'Source progress' }));
-    expect(progress.getByText(/session_store_unavailable/)).toBeTruthy();
-    expect(progress.getByText(/session store is not mounted/)).toBeTruthy();
-    // The source said it could not serve; the browser reached the daemon fine.
-    expect(laneChipState(screen.getByRole('button', { name: /^Sessions/ }))).toBe('unavailable');
-    expect(screen.queryByText(/genuinely absent from/)).toBeNull();
-  });
-
-  it('does not claim complete absence when every compatibility endpoint returns zero rows', async () => {
-    renderExplorer({
-      ...SEARCH_ROUTES,
-      '/api/explorer/queries': {
-        status: 200,
-        body: plannerEnvelope(
-          [
-            source('code_graph', [], 0),
-            source('sessions', [], 0),
-            source('knowledge', [], null),
-            semanticAbsent(),
-          ],
-          'partial',
-          'missing',
-        ),
-      },
-    });
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'missing');
-    await user.keyboard('{Enter}');
-
-    expect(await screen.findByText('No rows loaded for “missing”')).toBeTruthy();
-    // Names the source and the coverage it declared, rather than a generic
-    // sentence about incomplete coverage that applies to every refusal alike.
-    expect(screen.getByText(/Knowledge reports unknown coverage/)).toBeTruthy();
-    expect(screen.getByText(/cannot establish global absence/)).toBeTruthy();
-    expect(screen.queryByText(/genuinely absent from/)).toBeNull();
-  });
-
-  it('reports unavailable temporal retrieval in the session inspector', async () => {
+  it('shows the exact payload fields behind a selected row', async () => {
     renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-    await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
-
-    expect(await screen.findByText('Session context')).toBeTruthy();
-    expect(await screen.findByText(/lcm_temporal_retrieval_not_mounted/)).toBeTruthy();
-    expect(screen.queryByText('Raw token estimate')).toBeNull();
-    expect(screen.queryByText('Session read context returned by the daemon')).toBeNull();
-  });
-
-  it('closes the inspector on Escape and returns focus to the invoking row', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-
-    // Open with the keyboard: the row is a native button, Enter activates it.
-    const row = await screen.findByRole('button', { name: /graph_search/ });
-    row.focus();
-    await user.keyboard('{Enter}');
-    expect(await screen.findByText('Payload provenance')).toBeTruthy();
-
-    // Focus moves into the inspector, as a reader tabbing into the panel
-    // does. Escape must close it AND return focus to the row that opened it —
-    // otherwise focus dies on a removed node and the reader is dropped at the
-    // top of the document.
-    screen.getByRole('button', { name: 'Close inspector' }).focus();
-    await user.keyboard('{Escape}');
-
-    expect(screen.queryByText('Payload provenance')).toBeNull();
-    expect(document.activeElement).toBe(row);
-  });
-
-  it('leaves focus in a dirty search field when its Escape clears the search', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
-
-    const row = await screen.findByRole('button', { name: /graph_search/ });
-    row.focus();
-    await user.keyboard('{Enter}');
-    expect(await screen.findByText('Payload provenance')).toBeTruthy();
-
-    // Escape inside the dirty search field is the field's own action: it
-    // clears back to the browse state (which withdraws the selection with the
-    // search it belonged to). The inspector's document-level Escape must not
-    // also fire, or focus would be yanked out of the field to the row.
-    const searchbox = screen.getByRole('searchbox');
-    searchbox.focus();
-    await user.keyboard('{Escape}');
-    expect(searchbox).toHaveProperty('value', '');
-    expect(screen.queryByText('Payload provenance')).toBeNull();
-    expect(document.activeElement).toBe(searchbox);
-  });
-
-  it('shows the exact payload fields behind an inspected row', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    const user = userEvent.setup();
-    await user.type(screen.getByRole('searchbox'), 'graph');
-    await user.keyboard('{Enter}');
+    const user = await search();
     await user.click(await screen.findByRole('button', { name: /graph_search/ }));
 
-    // `name` and `degree` each appear twice on purpose: once as the label of
-    // the section that names the field a value was read from, and once as a key
-    // in the raw payload table. Asserting `getAllByText(...).length > 0` would
-    // pass on either one alone and on any number of accidental extras, so the
-    // payload keys are pinned inside the provenance region instead — one match
-    // each, in the region that is actually under test.
     const provenance = screen.getByText('Payload provenance').closest('details');
     expect(provenance).toBeTruthy();
     const payload = within(provenance as HTMLElement);
@@ -1078,5 +584,127 @@ describe('ExplorerPage', () => {
     expect(payload.getByText('graph_search')).toBeTruthy();
     expect(payload.getByText('7')).toBeTruthy();
     expect(screen.getByText(/Position 1 in graph endpoint rows/)).toBeTruthy();
+  });
+
+  it('keeps every definition term and description in a valid definition-list group', async () => {
+    const { container } = renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+    await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
+    expect(await screen.findByText('Session context')).toBeTruthy();
+
+    const items = [...container.querySelectorAll('dt, dd')];
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      const parent = item.parentElement;
+      const grouped =
+        parent?.tagName === 'DL' ||
+        (parent?.tagName === 'DIV' && parent.parentElement?.tagName === 'DL');
+      expect(grouped, `${item.tagName} outside a dl: ${item.outerHTML.slice(0, 120)}`).toBe(true);
+    }
+    const lists = [...container.querySelectorAll('dl')];
+    expect(lists.length).toBeGreaterThan(0);
+    for (const list of lists) {
+      for (const child of [...list.children]) {
+        expect(
+          ['DT', 'DD', 'DIV', 'SCRIPT', 'TEMPLATE'].includes(child.tagName),
+          `<dl> directly contains <${child.tagName.toLowerCase()}>`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+describe('ExplorerPage keyboard', () => {
+  it('closes the selection on Escape and returns focus to the invoking row without reopening', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+
+    const row = await screen.findByRole('button', { name: /graph_search/ });
+    row.focus();
+    await user.keyboard('{Enter}');
+    const inspector = await screen.findByRole('complementary', { name: 'Inspector' });
+    // Focus rests on the row it just selected: that is the selection, not a
+    // peek, so the panel offers its close control.
+    expect(inspector.querySelector('[data-inspect-mode="selected"]')).toBeTruthy();
+
+    screen.getByRole('button', { name: 'Close inspector' }).focus();
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('complementary', { name: 'Inspector' })).toBeNull();
+    expect(document.activeElement).toBe(row);
+  });
+
+  it('inspects the focused row as the arrows move, and crosses lanes horizontally', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+    const first = await screen.findByRole('button', { name: /graph_search/ });
+    first.focus();
+    const inspector = await screen.findByRole('complementary', { name: 'Inspector' });
+    expect(inspector.querySelector('[data-inspect-mode="peek"]')).toBeTruthy();
+
+    await user.keyboard('{ArrowRight}');
+    const sessionRow = screen.getByRole('button', { name: /Using graph search/ });
+    expect(document.activeElement).toBe(sessionRow);
+    expect(within(screen.getByRole('complementary', { name: 'Inspector' })).getByText('TRANSCRIPT')).toBeTruthy();
+
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /Graph route investigation/ }));
+
+    await user.keyboard('{ArrowLeft}');
+    expect(document.activeElement).toBe(first);
+  });
+
+  it('leaves focus in a dirty search field when its Escape clears the search', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+
+    const row = await screen.findByRole('button', { name: /graph_search/ });
+    row.focus();
+    await user.keyboard('{Enter}');
+    expect(await screen.findByText('Payload provenance')).toBeTruthy();
+
+    const searchbox = screen.getByRole('searchbox');
+    searchbox.focus();
+    await user.keyboard('{Escape}');
+    expect(searchbox).toHaveProperty('value', '');
+    expect(screen.queryByText('Payload provenance')).toBeNull();
+    expect(document.activeElement).toBe(searchbox);
+  });
+});
+
+describe('ExplorerPage filters and address', () => {
+  it('narrows to one lane and pivots on loaded rows without touching the query', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = await search();
+    await screen.findByRole('button', { name: /graph_search/ });
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Lanes' }), 'sessions');
+    expect(screen.queryByRole('region', { name: 'Code lane' })).toBeNull();
+    expect(lane('Sessions')).toBeTruthy();
+    expect(screen.getByTestId('location').textContent).toContain('lane=sessions');
+    expect(screen.getByTestId('location').textContent).toContain('q=graph');
+
+    // The pivot is over loaded rows: two session rows, one carrying a role.
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Sessions Role' }), 'assistant');
+    expect(screen.getByRole('button', { name: /Using graph search/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Graph route investigation/ })).toBeNull();
+    expect(within(lane('Sessions')).getByText('1 shown')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(lane('Code')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Graph route investigation/ })).toBeTruthy();
+    expect(screen.getByTestId('location').textContent).not.toContain('lane=');
+  });
+
+  it('restores a query from the address by running it against the current scope', async () => {
+    const fetchImpl = serve(SEARCH_ROUTES);
+    mount(fetchImpl, '/explorer?q=graph&lane=code');
+
+    await screen.findByRole('button', { name: /graph_search/ });
+    expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('graph');
+    expect(screen.queryByRole('region', { name: 'Sessions lane' })).toBeNull();
+    const created = fetchImpl.mock.calls.find(([, init]) => init?.method === 'POST');
+    expect(JSON.parse(String(created?.[1]?.body))).toMatchObject({ query: 'graph' });
+    expect(screen.getByTestId('location').textContent).toContain('q=graph');
   });
 });

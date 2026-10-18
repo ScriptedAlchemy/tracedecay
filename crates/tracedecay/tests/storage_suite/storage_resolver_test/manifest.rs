@@ -9,11 +9,7 @@ fn store_manifest_roundtrips_from_profile_sharded_layout() {
     let project = temp_root.join("repo");
     let profile = temp_root.join("profile");
     fs::create_dir_all(&project).unwrap();
-    let marker = EnrollmentMarker {
-        project_id: "proj_123".to_string(),
-        storage_mode: StorageMode::ProfileSharded,
-    };
-    let layout = profile_sharded_layout(&project, &profile, &marker).unwrap();
+    let layout = profile_sharded_layout(&project, &profile, "proj_123").unwrap();
     fs::create_dir_all(&layout.data_root).unwrap();
 
     let written = write_store_manifest(&layout).unwrap();
@@ -38,11 +34,7 @@ fn store_manifest_write_rejects_symlinked_atomic_temp_path() {
     let outside = temp_root.join("outside.tmp");
     fs::create_dir_all(&project).unwrap();
     fs::write(&outside, b"outside").unwrap();
-    let marker = EnrollmentMarker {
-        project_id: "proj_123".to_string(),
-        storage_mode: StorageMode::ProfileSharded,
-    };
-    let layout = profile_sharded_layout(&project, &profile, &marker).unwrap();
+    let layout = profile_sharded_layout(&project, &profile, "proj_123").unwrap();
     let manifest_path = layout.manifest_path.as_ref().unwrap();
     PrivateStoreIo::create_dir_all(manifest_path.parent().unwrap()).unwrap();
     symlink(&outside, manifest_path.with_extension("json.tmp")).unwrap();
@@ -66,11 +58,7 @@ fn store_manifest_write_rejects_symlinked_parent_components() {
     fs::create_dir_all(&outside).unwrap();
     fs::create_dir_all(&profile).unwrap();
     symlink(&outside, &projects_link).unwrap();
-    let marker = EnrollmentMarker {
-        project_id: "proj_123".to_string(),
-        storage_mode: StorageMode::ProfileSharded,
-    };
-    let layout = profile_sharded_layout(&project, &profile, &marker).unwrap();
+    let layout = profile_sharded_layout(&project, &profile, "proj_123").unwrap();
 
     let err = write_store_manifest(&layout).unwrap_err();
 

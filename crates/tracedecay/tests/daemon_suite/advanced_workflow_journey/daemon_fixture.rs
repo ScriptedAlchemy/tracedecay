@@ -6,13 +6,16 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay_application::WorkAttemptListRequestV1;
-use tracedecay_application::configuration::{
+use tracedecay_contracts::configuration::{
     ComponentConfigurationState, ConfigurationObservedStateRequestV1,
 };
+use tracedecay_contracts::{WorkAttemptListRequestV1, WorkflowRunGetRequest};
+use tracedecay_domain::RunId;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
-use tracedecay_sdk::operations::{ApplicationConfigurationObservedState, WorkListAttempts};
+use tracedecay_sdk::operations::{
+    ApplicationConfigurationObservedState, WorkListAttempts, WorkflowGetRun,
+};
 
 use super::{common, wait_until};
 
@@ -30,44 +33,95 @@ pub(super) fn sdk_client(home: &Path, project_id: &str) -> Client {
         .expect("canonical SDK client")
 }
 
-pub(super) fn wait_for_application_mount(client: &Client) -> Vec<ComponentConfigurationState> {
-    wait_until("project application mount", || match client
-        .execute::<ApplicationConfigurationObservedState>(&ConfigurationObservedStateRequestV1 {})
-    {
-        Ok(response) => Some(response.result),
-        Err(ClientError::Problem(problem))
-            if problem.kind == "not_found_or_not_authorized" || problem.kind == "unavailable" =>
-        {
-            None
-        }
-        Err(error) => panic!("project application mount failed: {error}"),
-    })
-}
-
-pub(super) fn wait_for_work_mount(client: &Client) {
-    wait_until("project Work runtime mount", || {
-        match client.execute::<WorkListAttempts>(&WorkAttemptListRequestV1 {
-            page_size: 100,
-            cursor: None,
-        }) {
-            Ok(_) => Some(()),
+pub(super) fn wait_for_application_mount(
+    home: &Path,
+    client: &Client,
+) -> Vec<ComponentConfigurationState> {
+    wait_while_opening(home, "project application mount", || {
+        match client.execute::<ApplicationConfigurationObservedState>(
+            &ConfigurationObservedStateRequestV1 {},
+        ) {
+            Ok(response) => Some(response.result),
             Err(ClientError::Problem(problem))
                 if problem.kind == "not_found_or_not_authorized"
                     || problem.kind == "unavailable" =>
             {
                 None
             }
-            Err(error) => panic!("project Work runtime mount failed: {error}"),
+            Err(error) => panic!("project application mount failed: {error}"),
         }
+    })
+}
+
+pub(super) fn wait_for_work_mount(home: &Path, client: &Client) {
+    wait_while_opening(home, "project Work runtime mount", || match client
+        .execute::<WorkListAttempts>(&WorkAttemptListRequestV1 {
+            page_size: 100,
+            cursor: None,
+        }) {
+        Ok(_) => Some(()),
+        Err(ClientError::Problem(problem))
+            if problem.kind == "not_found_or_not_authorized" || problem.kind == "unavailable" =>
+        {
+            None
+        }
+        Err(error) => panic!("project Work runtime mount failed: {error}"),
     });
+}
+
+pub(super) fn wait_for_workflow_mount(home: &Path, client: &Client, run_id: &RunId) {
+    wait_while_opening(home, "project Workflow runtime mount", || match client
+        .execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
+            run_id: run_id.clone(),
+        }) {
+        Ok(_) => Some(()),
+        Err(ClientError::Problem(problem))
+            if problem.kind == "not_found_or_not_authorized" || problem.kind == "unavailable" =>
+        {
+            None
+        }
+        Err(error) => panic!("project Workflow runtime mount failed: {error}"),
+    });
+}
+
+fn daemon_log_path(home: &Path) -> PathBuf {
+    std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG").map_or_else(
+        || home.join(".tracedecay/advanced-workflow-daemon.log"),
+        PathBuf::from,
+    )
+}
+
+/// How long the daemon may log nothing before a mount wait gives up on it.
+const OPEN_STALL_WINDOW: Duration = Duration::from_secs(20);
+
+/// Polls `observe` until it answers. A starved daemon boots and opens the
+/// project slowly but keeps logging, so the wait fails only after
+/// [`OPEN_STALL_WINDOW`] passes with an unchanged log.
+fn wait_while_opening<T>(home: &Path, label: &str, mut observe: impl FnMut() -> Option<T>) -> T {
+    let log_path = daemon_log_path(home);
+    let mut logged_seen = 0;
+    let mut changed_at = Instant::now();
+    loop {
+        if let Some(value) = observe() {
+            return value;
+        }
+        let logged = std::fs::metadata(&log_path).map_or(0, |metadata| metadata.len());
+        if logged != logged_seen {
+            logged_seen = logged;
+            changed_at = Instant::now();
+        }
+        assert!(
+            changed_at.elapsed() < OPEN_STALL_WINDOW,
+            "timed out waiting for {label}: the daemon logged nothing for {OPEN_STALL_WINDOW:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 pub(super) fn spawn_project_daemon(home: &Path, project: &Path) -> common::DaemonProcess {
     let profile = home.join(".tracedecay");
     PrivateStoreIo::create_dir_all(&profile).expect("advanced workflow daemon profile");
-    let log_path = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| profile.join("advanced-workflow-daemon.log"));
+    let log_path = daemon_log_path(home);
     let stderr = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -85,6 +139,8 @@ pub(super) fn spawn_project_daemon(home: &Path, project: &Path) -> common::Daemo
         .spawn()
         .expect("advanced workflow daemon should start");
     let mut daemon = common::DaemonProcess::new(child);
+    #[cfg(unix)]
+    daemon.release_socket_on_stop(common::daemon_socket_path(home));
     let daemon_pid = u64::from(daemon.id());
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {

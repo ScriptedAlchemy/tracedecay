@@ -7,7 +7,7 @@ use tracedecay_domain::ObservationSourceRangeV1;
 
 use crate::admission::HostAdmissionStatus;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::{claude_observation, source};
+use crate::runtime::{hosts::claude_observation, source};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClaudeObservationFailureClass {
@@ -32,7 +32,6 @@ pub struct TranscriptCatchUpFailure {
 }
 
 impl TranscriptCatchUpFailure {
-    #[hotpath::skip]
     pub(super) const fn new(
         provider: &'static str,
         source: &'static str,
@@ -48,7 +47,6 @@ impl TranscriptCatchUpFailure {
         }
     }
 
-    #[hotpath::skip]
     const fn with_source_locator(
         mut self,
         source_locator: Option<ObservationSourceRangeV1>,
@@ -58,44 +56,25 @@ impl TranscriptCatchUpFailure {
     }
 
     /// Typed overload when the bounded multi-source pass cannot admit more work.
-    #[hotpath::skip]
     pub(super) const fn pass_backpressured() -> Self {
         Self::new("scheduler", "pass", "ingest_pass_backpressured", true)
     }
 
     /// Typed cancellation before the pass finished covering admitted work.
-    #[hotpath::skip]
     pub(super) const fn pass_cancelled() -> Self {
         Self::new("scheduler", "pass", "ingest_pass_cancelled", true)
     }
 
-    #[hotpath::skip]
     pub(super) const fn pass_frontier_unavailable() -> Self {
         Self::new("scheduler", "frontier", "ingest_frontier_unavailable", true)
     }
 
-    #[hotpath::skip]
     pub(super) const fn source_discovery_partial(provider: &'static str) -> Self {
         Self::new(provider, "discovery", "source_discovery_partial", true)
     }
 
-    #[hotpath::skip]
     pub(super) const fn source_scan_partial(provider: &'static str, retryable: bool) -> Self {
         Self::new(provider, "scan", "source_scan_partial", retryable)
-    }
-
-    /// Mutable session ingestion requires a retained daemon registry mount.
-    /// Compatibility callers without that mount must fail before touching the
-    /// legacy database or any provider source.
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
-    pub(super) const fn registered_authority_unavailable(provider: &'static str) -> Self {
-        Self::new(
-            provider,
-            "host_admission",
-            "registered_authority_unavailable",
-            true,
-        )
     }
 }
 
@@ -105,7 +84,8 @@ impl ProviderRunFailure for TranscriptCatchUpFailure {
     }
 }
 
-pub(super) type ProviderRunOutcome = GenericProviderRunOutcome<TranscriptCatchUpFailure>;
+pub(in crate::runtime) type ProviderRunOutcome =
+    GenericProviderRunOutcome<TranscriptCatchUpFailure>;
 pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailure>;
 
 /// Converts operation cancellation into provider-loop control termination.
@@ -116,6 +96,22 @@ pub(super) fn cancelled_provider_outcome(
     error: &source::TranscriptIngestError,
 ) -> Option<ProviderRunOutcome> {
     error.is_cancelled().then(ProviderRunOutcome::skipped)
+}
+
+/// A provider run whose observation capture failed: cancellation skips the
+/// provider, any other failure is warned once and charges `charged_bytes`.
+pub(super) fn failed_observation_run(
+    provider: &'static str,
+    error: &source::TranscriptIngestError,
+    message: &'static str,
+    charged_bytes: u64,
+) -> ProviderRunOutcome {
+    cancelled_provider_outcome(error).unwrap_or_else(|| {
+        ProviderRunOutcome::failed(
+            warn_transcript_catch_up_failure(provider, "observation", error, message),
+            charged_bytes,
+        )
+    })
 }
 
 pub(super) fn cancelled_claude_provider_outcome(
@@ -160,7 +156,6 @@ pub enum IngestPassCoverage {
 }
 
 impl IngestPassCoverage {
-    #[hotpath::skip]
     pub const fn is_complete(self) -> bool {
         matches!(self, Self::Complete)
     }
@@ -180,6 +175,8 @@ pub struct IngestPassOutcome {
     /// False when an admitted provider API performs an internally unbounded
     /// sweep and therefore cannot honor the pass byte budget end-to-end.
     pub byte_bounds_enforced: bool,
+    /// The pass durably advanced source coverage beyond its upserts.
+    pub coverage_advanced: bool,
 }
 
 impl IngestPassOutcome {
@@ -193,6 +190,7 @@ impl IngestPassOutcome {
             units_completed: 0,
             units_failed: 0,
             byte_bounds_enforced: true,
+            coverage_advanced: false,
         }
     }
 
@@ -280,8 +278,8 @@ pub(super) fn scheduling_write_required(
 /// Reason code, retryability, and admission status of one transcript ingest
 /// failure.
 ///
-/// A single match owns all three so every consumer — provider folds, catch-up
-/// telemetry, and the MCP hook boundary alike — reads the same declared
+/// A single match owns all three so every consumer, provider folds, catch-up
+/// telemetry, and the MCP hook boundary alike, reads the same declared
 /// disposition instead of recovering one from the reason-code string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TranscriptIngestDisposition {
@@ -289,6 +287,14 @@ pub struct TranscriptIngestDisposition {
     pub retryable: bool,
     pub status: HostAdmissionStatus,
     pub source_locator: Option<ObservationSourceRangeV1>,
+}
+
+impl TranscriptIngestDisposition {
+    /// A permanent refusal of the source's own records by a healthy
+    /// authority: reading the same bytes again fails the same way.
+    pub const fn quarantines_source(&self) -> bool {
+        !self.retryable && matches!(self.status, HostAdmissionStatus::Degraded)
+    }
 }
 
 pub fn classify_transcript_ingest_disposition(
@@ -306,7 +312,7 @@ pub fn classify_transcript_ingest_disposition(
     {
         // The record itself is rejected: nothing about the authority is
         // degraded beyond this one non-durable record. Transient admission
-        // failures never take this shape — the ingest wrappers route them
+        // failures never take this shape, the ingest wrappers route them
         // through `HostAdmission`, which carries the authority's own
         // retryability verdict.
         return TranscriptIngestDisposition {
@@ -322,8 +328,11 @@ pub fn classify_transcript_ingest_disposition(
         // retryability verdict; hard-coding either answer here launders a
         // transient still-mounting authority into a terminal Blocked state.
         source::TranscriptIngestError::HostAdmission {
-            reason, retryable, ..
-        } => (*reason, *retryable, Unavailable),
+            reason,
+            retryable,
+            status,
+            ..
+        } => (*reason, *retryable, *status),
         source::TranscriptIngestError::Cancelled { .. } => {
             ("ingest_pass_cancelled", true, Backpressured)
         }
@@ -335,18 +344,6 @@ pub fn classify_transcript_ingest_disposition(
         }
         source::TranscriptIngestError::Store(TranscriptStoreError::InvalidCursorPath) => {
             ("transcript_cursor_path_invalid", false, Degraded)
-        }
-        source::TranscriptIngestError::Store(TranscriptStoreError::InvalidTranscriptPath) => {
-            ("transcript_path_invalid", false, Degraded)
-        }
-        source::TranscriptIngestError::Store(TranscriptStoreError::MissingTranscriptPath {
-            ..
-        }) => ("transcript_path_missing", false, Degraded),
-        source::TranscriptIngestError::Store(TranscriptStoreError::MessageIdentityMismatch {
-            ..
-        }) => ("transcript_message_identity_mismatch", false, Degraded),
-        source::TranscriptIngestError::CursorKeyMismatch { .. } => {
-            ("transcript_cursor_key_mismatch", false, Degraded)
         }
         source::TranscriptIngestError::ScanIo { .. } => {
             ("transcript_source_io_failed", true, Unavailable)
@@ -365,6 +362,12 @@ pub fn classify_transcript_ingest_disposition(
         source::TranscriptIngestError::InvalidCodexDiscoveryFrontier { .. } => {
             ("codex_discovery_frontier_invalid", false, Degraded)
         }
+        // A policy or detector fault rejects every record alike until the
+        // sanitizer is repaired; only the remaining refusals name the record.
+        source::TranscriptIngestError::Privacy(
+            tracedecay_privacy::PrivacySanitizerError::InvalidPolicy
+            | tracedecay_privacy::PrivacySanitizerError::DetectorUnavailable,
+        ) => ("transcript_privacy_rejected", false, Unavailable),
         source::TranscriptIngestError::Privacy(_) => {
             ("transcript_privacy_rejected", false, Degraded)
         }
@@ -484,6 +487,9 @@ pub fn classify_claude_observation_failure(
     let store = |error: &Store| match error {
         Store::CursorConflict { .. } => contended("observation_cursor_conflict"),
         Store::CursorAdvanceCollision => permanent("observation_cursor_advance_collision"),
+        Store::CursorAdvanceLedgerDisagreement { .. } => {
+            permanent("observation_cursor_advance_ledger_disagreement")
+        }
         Store::ObservationCollision { .. } => permanent("observation_identity_collision"),
         Store::SanitizationReceiptCollision => permanent("sanitization_receipt_collision"),
         Store::CursorObservationMismatch => permanent("observation_cursor_mismatch"),
@@ -492,26 +498,62 @@ pub fn classify_claude_observation_failure(
         Store::Contract(_) => permanent("observation_contract_invalid"),
         _ => unavailable("observation_storage_failed"),
     };
-    let projection = |error: &Projection| match error {
-        Projection::Storage { .. } => unavailable("observation_projection_storage_failed"),
-        Projection::SanitizationRefused { .. } => {
-            permanent("observation_projection_sanitization_refused")
+    let projection = |error: &Projection| {
+        if error.is_sqlite_disk_image_corrupt() {
+            return ClaudeObservationFailureClass {
+                reason_code: "projection_store_corrupt",
+                retryable: false,
+                status: Unavailable,
+            };
         }
-        Projection::RetryDeferred { .. } => contended("observation_projection_retry_deferred"),
-        Projection::Gap { .. } => permanent("observation_projection_checkpoint_gap"),
-        Projection::OutputCollision { .. } => permanent("observation_projection_output_collision"),
-        Projection::ProvenanceCollision => permanent("observation_projection_provenance_collision"),
-        Projection::Contract(_) => permanent("observation_projection_contract_invalid"),
-        Projection::Anchor(_) => permanent("observation_projection_anchor_invalid"),
-        Projection::SequenceOverflow(_) => permanent("observation_projection_sequence_overflow"),
-        Projection::NotQueued => permanent("observation_projection_not_queued"),
-        Projection::ObservationNotFound => permanent("observation_projection_source_missing"),
-        Projection::UnsupportedProvider(_) => {
-            permanent("observation_projection_provider_unsupported")
+        match error {
+            Projection::Corrupt { .. } => ClaudeObservationFailureClass {
+                reason_code: "projection_store_corrupt",
+                retryable: false,
+                status: Unavailable,
+            },
+            Projection::Storage { .. } => unavailable("observation_projection_storage_failed"),
+            Projection::SanitizationRefused { .. } => {
+                permanent("observation_projection_sanitization_refused")
+            }
+            Projection::RetryDeferred { .. } => contended("observation_projection_retry_deferred"),
+            Projection::Gap { .. } => permanent("observation_projection_checkpoint_gap"),
+            Projection::OutputCollision { .. } => {
+                permanent("observation_projection_output_collision")
+            }
+            Projection::SessionOutputCollision { .. } => {
+                permanent("observation_projection_session_collision")
+            }
+            Projection::ProvenanceCollision => {
+                permanent("observation_projection_provenance_collision")
+            }
+            Projection::Contract(_) => permanent("observation_projection_contract_invalid"),
+            Projection::Anchor(_) => permanent("observation_projection_anchor_invalid"),
+            Projection::SequenceOverflow(_) => {
+                permanent("observation_projection_sequence_overflow")
+            }
+            Projection::NotQueued => permanent("observation_projection_not_queued"),
+            Projection::ObservationNotFound => permanent("observation_projection_source_missing"),
+            Projection::UnsupportedProvider(_) => {
+                permanent("observation_projection_provider_unsupported")
+            }
+            Projection::InvalidRebuildFrontier { .. } => {
+                permanent("observation_projection_frontier_invalid")
+            }
         }
-        Projection::InvalidRebuildFrontier { .. } => {
-            permanent("observation_projection_frontier_invalid")
+    };
+    // A policy or detector fault rejects every record alike until the
+    // sanitizer is repaired; only the remaining refusals name the record.
+    let privacy = |error: &tracedecay_privacy::PrivacySanitizerError| match error {
+        tracedecay_privacy::PrivacySanitizerError::InvalidPolicy
+        | tracedecay_privacy::PrivacySanitizerError::DetectorUnavailable => {
+            ClaudeObservationFailureClass {
+                reason_code: "observation_privacy_rejected",
+                retryable: false,
+                status: Unavailable,
+            }
         }
+        _ => permanent("observation_privacy_rejected"),
     };
     let transcript = |error: &source::TranscriptIngestError| {
         let disposition = classify_transcript_ingest_disposition(error);
@@ -526,7 +568,7 @@ pub fn classify_claude_observation_failure(
         Ingest::Domain(_) => permanent("observation_domain_invalid"),
         Ingest::Contract(_) => permanent("observation_contract_invalid"),
         Ingest::Request(_) => permanent("observation_request_invalid"),
-        Ingest::Privacy(_) => permanent("observation_privacy_rejected"),
+        Ingest::Privacy(error) => privacy(error),
         Ingest::Store(error) => store(error),
         Ingest::Projection(error) => projection(error),
         Ingest::Transcript(error) => transcript(error),
@@ -539,9 +581,7 @@ pub fn classify_claude_observation_failure(
             crate::observation::ObservationApplicationError::Contract(_) => {
                 permanent("observation_contract_invalid")
             }
-            crate::observation::ObservationApplicationError::Privacy(_) => {
-                permanent("observation_privacy_rejected")
-            }
+            crate::observation::ObservationApplicationError::Privacy(error) => privacy(error),
             // A batch reached the durable persist path carrying a rejected or
             // quarantined outcome. That is an admission invariant break, not a
             // transient source or authority fault, so re-running cannot fix it.
@@ -550,8 +590,8 @@ pub fn classify_claude_observation_failure(
             }
             // The worker went away before reaching a verdict, so nothing was
             // decided about the payload. Re-running the same input can succeed.
-            crate::observation::ObservationApplicationError::BatchWorkerStopped => {
-                unavailable("observation_batch_worker_stopped")
+            crate::observation::ObservationApplicationError::PreparationWorkerStopped => {
+                unavailable("observation_preparation_worker_stopped")
             }
         },
         Ingest::MissingParsedRecord => permanent("observation_parsed_record_missing"),
@@ -581,22 +621,10 @@ pub fn classify_claude_observation_failure(
 mod cancellation_tests {
     use tracedecay_store::TranscriptStoreError;
 
+    use crate::admission::HostAdmissionStatus;
     use crate::observation::ObservationCancellation;
 
     use super::*;
-
-    #[test]
-    fn typed_cancellation_is_control_termination_without_source_failure() {
-        let error = source::TranscriptIngestError::Cancelled { provider: "test" };
-
-        let outcome = cancelled_provider_outcome(&error)
-            .expect("typed cancellation must terminate provider control flow");
-
-        assert!(outcome.failures.is_empty());
-        assert_eq!(outcome.stats, TranscriptIngestStats::default());
-        assert_eq!(outcome.bytes_consumed, 0);
-        assert_eq!(outcome.deferred_units, 0);
-    }
 
     #[test]
     fn typed_claude_cancellation_is_control_termination_without_source_failure() {
@@ -628,13 +656,17 @@ mod cancellation_tests {
     }
 
     #[test]
-    fn storage_failure_without_cancellation_remains_a_source_failure() {
-        let error = source::TranscriptIngestError::Store(TranscriptStoreError::Storage {
-            operation: "test",
-            source: Box::new(std::io::Error::other("test storage failure")),
-        });
-
-        assert!(cancelled_provider_outcome(&error).is_none());
+    fn sqlite_corrupt_projection_is_blocked_not_retryable() {
+        let error = claude_observation::ClaudeObservationIngestError::Projection(
+            tracedecay_store::ProjectionStoreError::storage(
+                "update projection output state",
+                std::io::Error::other("SQLite execute failed: database disk image is malformed"),
+            ),
+        );
+        let failure = classify_claude_observation_failure(&error);
+        assert_eq!(failure.reason_code, "projection_store_corrupt");
+        assert!(!failure.retryable);
+        assert_eq!(failure.status, HostAdmissionStatus::Unavailable);
     }
 
     #[test]
@@ -646,6 +678,8 @@ mod cancellation_tests {
             provider: "cursor",
             reason: "cursor_conflict",
             retryable: true,
+            status: HostAdmissionStatus::Backpressured,
+            detail: None,
         };
         let disposition = classify_transcript_ingest_disposition(&conflict);
         assert_eq!(disposition.reason_code, "cursor_conflict");
@@ -653,6 +687,7 @@ mod cancellation_tests {
             disposition.retryable,
             "a cursor CAS lost to a peer ingestor is converging, not terminal"
         );
+        assert_eq!(disposition.status, HostAdmissionStatus::Backpressured);
 
         let malformed = source::TranscriptIngestError::NonDurableRecord {
             provider: "cursor",

@@ -9,40 +9,24 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::chunks::{
-    CodeChunker, CodeFileChunksV1, DeterministicCodeChunker, content_digest,
-};
-use tracedecay_code_index::extract::ExtractionBatchV1;
+use tracedecay_code_index::chunks::{CodeFileChunksV1, DeterministicCodeChunker, content_digest};
 use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
 use tracedecay_code_index::incremental::{GenerationChunkManifestV1, plan_chunk_increment};
 use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1, expected_request_digest,
-    project_for_publication,
-};
+use tracedecay_code_index::projection::{expected_request_digest, project_for_publication};
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, FileOccurrenceId,
     LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    UtcMicros, ValidatedCodeFileV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionReplayReasonV1,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
+    ValidatedCodeFileV1,
 };
 
-const WORKLOAD_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/query-code-index/workload-v1.json"
-);
-const EXPECTED_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/query-code-index/expected-v1.json"
-);
-const DEFAULT_RESULT_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/query-code-index/result-provisional.json"
-);
+const WORKLOAD_PATH: &str = "benchmark_data/query-code-index/workload-v1.json";
+const EXPECTED_PATH: &str = "benchmark_data/query-code-index/expected-v1.json";
+const RESULT_FILE: &str = "result-provisional.json";
 const CHUNKER_V1: &str = "chunker.query-benchmark.v1";
 const CHUNKER_REPLAY: &str = "chunker.query-benchmark.replay";
 const CHUNKER_INCOMPATIBLE: &str = "chunker.query-benchmark.incompatible";
@@ -175,7 +159,6 @@ struct ExpectedCase {
     chunks_added_or_changed: u64,
     chunks_deleted: u64,
     chunks_reused: u64,
-    projection_calls: u64,
     changed_ranges: u64,
     invalidated_chunks: u64,
     projection_operations: u64,
@@ -193,7 +176,6 @@ struct WorkloadFile {
 #[derive(Clone)]
 struct FileArtifact {
     source: WorkloadFile,
-    extraction: ExtractionBatchV1,
     chunks: CodeFileChunksV1,
 }
 
@@ -230,7 +212,6 @@ struct RawSample {
     chunks_added_or_changed: u64,
     chunks_deleted: u64,
     chunks_reused: u64,
-    projection_calls: u64,
     corpus_files: u64,
     corpus_bytes: u64,
     input_bytes: u64,
@@ -240,8 +221,6 @@ struct RawSample {
     queue_delay_ns: u64,
     changed_ranges: u64,
     invalidated_chunks: u64,
-    embedding_batches: Option<u64>,
-    embedding_chunks: Option<u64>,
     projection_operations: u64,
     invalidation_amplification_per_changed_range: Option<f64>,
     projection_amplification_per_changed_range: Option<f64>,
@@ -263,7 +242,6 @@ impl RawSample {
             chunks_added_or_changed: self.chunks_added_or_changed,
             chunks_deleted: self.chunks_deleted,
             chunks_reused: self.chunks_reused,
-            projection_calls: self.projection_calls,
             changed_ranges: self.changed_ranges,
             invalidated_chunks: self.invalidated_chunks,
             projection_operations: self.projection_operations,
@@ -328,11 +306,8 @@ struct CaseResult {
     chunks_added_or_changed: u64,
     chunks_deleted: u64,
     chunks_reused: u64,
-    projection_calls: u64,
     changed_ranges: u64,
     invalidated_chunks: u64,
-    embedding_batches: Option<u64>,
-    embedding_chunks: Option<u64>,
     projection_operations: u64,
     invalidation_amplification_per_changed_range: Option<f64>,
     projection_amplification_per_changed_range: Option<f64>,
@@ -393,62 +368,12 @@ struct ProcessCounters {
     write_bytes: u64,
 }
 
-struct CountingSink {
-    calls: u64,
-}
-
-impl CodeChunkProjectionSink for CountingSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        self.calls += 1;
-        let decisions = projection_decisions(&request.changes);
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
-}
-
 fn main() -> std::process::ExitCode {
-    configure_hotpath();
-    // Declared before the workload and dropped on return (never skipped by
-    // `process::exit`), so a requested profile observes every measured span.
-    let _hotpath = hotpath::HotpathGuardBuilder::new("code-index-chunks-bench").build();
     if let Err(error) = run_cli() {
         eprintln!("query code-index benchmark: {error}");
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
-}
-
-/// Mirrors `tracedecay-index-bench`'s guard defaults: stdout here carries the
-/// machine-read benchmark output, so the hotpath report goes to
-/// `HOTPATH_OUTPUT_PATH` when one is named and nowhere otherwise, and the
-/// localhost metrics server stays off. A named report cannot be shared with
-/// `--sample` children: each child `main` would write its own process-local
-/// file to that path, and the parent never runs `execute_case` itself.
-/// Profiled `--run` therefore measures in-process. This runs as the first
-/// statement of `main`, before any other thread exists, which makes
-/// `set_var` sound.
-fn configure_hotpath() {
-    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
-        unsafe {
-            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        }
-    }
-    if !named_hotpath_report() {
-        unsafe {
-            std::env::set_var("HOTPATH_OUTPUT_FORMAT", "none");
-            std::env::remove_var("HOTPATH_OUTPUT_PATH");
-        }
-    }
-}
-
-fn named_hotpath_report() -> bool {
-    std::env::var_os("HOTPATH_OUTPUT_PATH")
-        .is_some_and(|path| path.to_str().is_some_and(|path| !path.is_empty()))
 }
 
 fn run_cli() -> Result<(), String> {
@@ -460,7 +385,7 @@ fn run_cli() -> Result<(), String> {
         [] => validate_only(),
         [argument] if argument == "--validate-only" => validate_only(),
         [argument] if argument == "--describe" => describe(),
-        [argument] if argument == "--run" => run_measurement(Path::new(DEFAULT_RESULT_PATH)),
+        [argument] if argument == "--run" => run_measurement(&default_result_path()?),
         [run, output, path] if run == "--run" && output == "--output" => {
             run_measurement(Path::new(path))
         }
@@ -520,6 +445,17 @@ fn run_sample_cli(scale_name: &str, case_name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn default_result_path() -> Result<PathBuf, String> {
+    if let Some(workspace) = env::var_os("BUILD_WORKSPACE_DIRECTORY") {
+        return Ok(PathBuf::from(workspace)
+            .join("benchmark_data/query-code-index")
+            .join(RESULT_FILE));
+    }
+    let outputs = env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
+        .ok_or_else(|| "pass --output PATH when running outside Bazel".to_owned())?;
+    Ok(PathBuf::from(outputs).join(RESULT_FILE))
+}
+
 fn run_measurement(output_path: &Path) -> Result<(), String> {
     let workload_bytes = read_repository_file(WORKLOAD_PATH)?;
     let expected_bytes = read_repository_file(EXPECTED_PATH)?;
@@ -529,17 +465,15 @@ fn run_measurement(output_path: &Path) -> Result<(), String> {
 
     let executable =
         env::current_exe().map_err(|error| format!("resolve benchmark executable: {error}"))?;
-    let profile_in_process = named_hotpath_report();
     let mut results = Vec::new();
     for scale in &workload.scales {
         for case in &workload.cases {
             for _ in 0..workload.repetitions.warmups {
-                measure_sample(&workload, &executable, scale, case.name, profile_in_process)?;
+                run_child_sample(&executable, scale, case.name)?;
             }
             let mut samples = Vec::with_capacity(workload.repetitions.measured as usize);
             for repetition in 0..workload.repetitions.measured {
-                let mut sample =
-                    measure_sample(&workload, &executable, scale, case.name, profile_in_process)?;
+                let mut sample = run_child_sample(&executable, scale, case.name)?;
                 sample.repetition = repetition;
                 validate_sample(&expected, &sample)?;
                 samples.push(sample);
@@ -574,24 +508,6 @@ fn run_measurement(output_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Isolated child samples keep process counters honest. A named
-/// `HOTPATH_OUTPUT_PATH` cannot ride along: every child `main` would also
-/// emit a process-local report to that path. Profile those runs in-process
-/// so the named file is one report of the measured `execute_case` spans.
-fn measure_sample(
-    workload: &WorkloadManifest,
-    executable: &Path,
-    scale: &ScaleManifest,
-    case: CaseName,
-    profile_in_process: bool,
-) -> Result<RawSample, String> {
-    if profile_in_process {
-        execute_case(workload, scale, case, 0)
-    } else {
-        run_child_sample(executable, scale, case)
-    }
-}
-
 fn run_child_sample(
     executable: &Path,
     scale: &ScaleManifest,
@@ -599,8 +515,6 @@ fn run_child_sample(
 ) -> Result<RawSample, String> {
     let output = Command::new(executable)
         .args(["--sample", &scale.name, case.as_str()])
-        .env_remove("HOTPATH_OUTPUT_PATH")
-        .env("HOTPATH_OUTPUT_FORMAT", "none")
         .output()
         .map_err(|error| format!("run {} {} sample: {error}", scale.name, case.as_str()))?;
     if !output.status.success() {
@@ -699,11 +613,12 @@ fn execute_case(
             ProjectionReplayReasonV1::VerificationReplay,
         ),
         CaseName::ChunkerReplay => (
-            rechunk(
-                prior.as_ref().expect("prior generation"),
+            build_fresh(
+                &sources,
                 generation(2)?,
                 chunker_revision(CHUNKER_REPLAY)?,
                 &descriptor,
+                &extractor,
             )?,
             sources.len() as u64,
             corpus_bytes,
@@ -728,8 +643,7 @@ fn execute_case(
     )
     .map_err(|error| format!("plan {} increment: {error}", case.as_str()))?;
     let request = projection_request(&changes, case, replay_reason)?;
-    let mut sink = CountingSink { calls: 0 };
-    let handoff = project_for_publication(&mut sink, request)
+    let handoff = project_for_publication(request)
         .map_err(|error| format!("project {} changes: {error}", case.as_str()))?;
     // Stop the clock before evidence accounting: serializing the full manifest
     // is measurement bookkeeping, not part of the measured sync journey.
@@ -772,8 +686,7 @@ fn execute_case(
         files_parsed,
         chunks_added_or_changed: changes.added_or_changed.len() as u64,
         chunks_deleted: changes.deleted.len() as u64,
-        chunks_reused: changes.reused.len() as u64,
-        projection_calls: sink.calls,
+        chunks_reused: changes.reused_count,
         corpus_files: current.artifacts.len() as u64,
         corpus_bytes,
         input_bytes,
@@ -783,8 +696,6 @@ fn execute_case(
         queue_delay_ns: 0,
         changed_ranges,
         invalidated_chunks,
-        embedding_batches: None,
-        embedding_chunks: None,
         projection_operations,
         invalidation_amplification_per_changed_range,
         projection_amplification_per_changed_range,
@@ -829,14 +740,18 @@ fn build_artifact(
     let extraction = extractor
         .extract(&file, descriptor, &NeverCancelled)
         .map_err(|error| format!("extract {}: {error:?}", source.logical_path))?;
-    let chunks = chunker
-        .chunk_file(&file, extraction.batch(), descriptor, &NeverCancelled)
+    let (artifacts, _) = chunker
+        .index_file_with_authority_from_extraction(
+            &file,
+            &extraction,
+            descriptor,
+            SensitivityLevelV1::Public,
+            &NeverCancelled,
+        )
         .map_err(|error| format!("chunk {}: {error}", source.logical_path))?;
-    let extraction = extraction.batch().clone();
     Ok(FileArtifact {
         source: source.clone(),
-        extraction,
-        chunks,
+        chunks: artifacts.chunks,
     })
 }
 
@@ -882,8 +797,6 @@ fn rebind_artifact(
     generation_id: &CodeGenerationId,
 ) -> Result<(), String> {
     let occurrence = file_occurrence(&artifact.source.logical_path, generation_id)?;
-    artifact.extraction.generation_id = generation_id.clone();
-    artifact.extraction.file_occurrence_id = occurrence.clone();
     artifact.chunks.document.generation_id = generation_id.clone();
     artifact.chunks.document.file_occurrence_id = occurrence.clone();
     for chunk in &mut artifact.chunks.chunks {
@@ -897,34 +810,6 @@ fn rebind_artifact(
         .map_err(|error| format!("validate carried {}: {error}", artifact.source.logical_path))
 }
 
-fn rechunk(
-    prior: &BuiltCorpus,
-    generation_id: CodeGenerationId,
-    chunker_revision: ChunkerRevision,
-    descriptor: &LanguageDescriptorV1,
-) -> Result<BuiltCorpus, String> {
-    let chunker = chunker(generation_id.clone(), chunker_revision)?;
-    let mut artifacts = BTreeMap::new();
-    for artifact in prior.artifacts.values() {
-        let mut extraction = artifact.extraction.clone();
-        let file = receipt_bound_file(&artifact.source, &generation_id)?;
-        extraction.generation_id = generation_id.clone();
-        extraction.file_occurrence_id = file.file.file_occurrence_id.clone();
-        let chunks = chunker
-            .chunk_file(&file, &extraction, descriptor, &NeverCancelled)
-            .map_err(|error| format!("rechunk {}: {error}", artifact.source.logical_path))?;
-        artifacts.insert(
-            artifact.source.logical_path.clone(),
-            FileArtifact {
-                source: artifact.source.clone(),
-                extraction,
-                chunks,
-            },
-        );
-    }
-    BuiltCorpus::from_artifacts(generation_id, artifacts)
-}
-
 fn chunker(
     generation_id: CodeGenerationId,
     chunker_revision: ChunkerRevision,
@@ -935,7 +820,6 @@ fn chunker(
         id::<SanitizerRevision>("sanitizer.query-benchmark.v1")?,
         id::<PolicyRevisionId>("policy.query-benchmark.v1")?,
         chunker_revision,
-        tracedecay_code_extraction::LanguageRegistry::new(),
     ))
 }
 
@@ -969,6 +853,7 @@ fn receipt_bound_file(
             content_identity: content_digest(&source.bytes),
             captured_at: UtcMicros(1_000_000),
             files: vec![file.clone()],
+            omitted_sources: Vec::new(),
         })
         .map_err(|error| format!("admit {}: {error:?}", source.logical_path))?;
     intake
@@ -1036,51 +921,6 @@ fn projection_key(profile: &[u8]) -> Result<ProjectionKeyV1, String> {
     })
 }
 
-fn projection_decisions(changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectionDecisionV1> {
-    changes
-        .added_or_changed
-        .iter()
-        .map(|change| ChunkProjectionDecisionV1 {
-            chunk_id: change.chunk_id.clone(),
-            prior_chunk_digest: change.prior_digest.clone(),
-            current_chunk_digest: change.current_digest.clone(),
-            operation: if change.prior_digest.is_some() {
-                ProjectionOperationV1::Updated
-            } else {
-                ProjectionOperationV1::Added
-            },
-            outcome: ProjectionOutcomeV1::Applied,
-            output_digest: change.current_digest.clone(),
-        })
-        .chain(
-            changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        )
-        .chain(
-            changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
-                    output_digest: None,
-                }),
-        )
-        .collect()
-}
-
 fn load_workload() -> Result<WorkloadManifest, String> {
     let bytes = read_repository_file(WORKLOAD_PATH)?;
     parse_json(&bytes, WORKLOAD_PATH)
@@ -1100,7 +940,7 @@ fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8], path: &str) -> Result<
 }
 
 fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from("../..")
 }
 
 fn load_base_sources(paths: &[String]) -> Result<Vec<WorkloadFile>, String> {
@@ -1304,8 +1144,6 @@ fn summarize_case(
     if samples.iter().any(|sample| {
         sample.changed_ranges != first.changed_ranges
             || sample.invalidated_chunks != first.invalidated_chunks
-            || sample.embedding_batches != first.embedding_batches
-            || sample.embedding_chunks != first.embedding_chunks
             || sample.projection_operations != first.projection_operations
             || sample.invalidation_amplification_per_changed_range
                 != first.invalidation_amplification_per_changed_range
@@ -1360,11 +1198,8 @@ fn summarize_case(
         chunks_added_or_changed: expected.chunks_added_or_changed,
         chunks_deleted: expected.chunks_deleted,
         chunks_reused: expected.chunks_reused,
-        projection_calls: expected.projection_calls,
         changed_ranges: first.changed_ranges,
         invalidated_chunks: first.invalidated_chunks,
-        embedding_batches: first.embedding_batches,
-        embedding_chunks: first.embedding_chunks,
         projection_operations: first.projection_operations,
         invalidation_amplification_per_changed_range: first
             .invalidation_amplification_per_changed_range,

@@ -1,0 +1,482 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt::Debug,
+    hint::black_box,
+    path::PathBuf,
+    sync::Arc,
+    time::Instant,
+};
+
+use ignore::WalkBuilder;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tracedecay_code_index::{
+    chunks::content_digest,
+    production::{
+        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
+        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
+        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+        MemorySealedPublicationStoreV1, SealedGenerationSegmentPublicationV1,
+        SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
+        VerifiedSealedLexicalPageSourceV1,
+    },
+};
+use tracedecay_domain::{
+    ChunkerRevision, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1, RepositoryDirtyStateV1,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
+};
+
+const CORPUS_ROOT: &str = "../../benchmark_data/index-bench/corpus";
+const REPLICAS: usize = 10;
+const WARMUPS: usize = 2;
+const MEASURED: usize = 5;
+/// Env overrides so one build can also measure a frozen `git archive` of a
+/// real tree: `PARTITIONED_CODEC_BENCH_CORPUS`, `_REPLICAS`, `_WARMUPS`,
+/// `_MEASURED`.
+const CORPUS_ENV: &str = "PARTITIONED_CODEC_BENCH_CORPUS";
+const REPLICAS_ENV: &str = "PARTITIONED_CODEC_BENCH_REPLICAS";
+const WARMUPS_ENV: &str = "PARTITIONED_CODEC_BENCH_WARMUPS";
+const MEASURED_ENV: &str = "PARTITIONED_CODEC_BENCH_MEASURED";
+
+fn env_usize(key: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+    match std::env::var(key) {
+        Ok(value) => Ok(value.trim().parse::<usize>()?.max(1)),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error.into()),
+    }
+}
+#[derive(Clone)]
+struct SourceFile {
+    logical_path: String,
+    language: LanguageId,
+    bytes: Arc<[u8]>,
+}
+
+struct ActiveControl;
+
+impl CodeIndexExecutionControlV1 for ActiveControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
+struct EncodedFixture {
+    manifest: Vec<u8>,
+    segments: Arc<BTreeMap<String, Vec<u8>>>,
+}
+
+#[derive(Serialize)]
+struct Distribution {
+    samples: usize,
+    p50_ns: u64,
+    p95_ns: u64,
+}
+
+#[derive(Serialize)]
+struct Measurement {
+    schema_version: u32,
+    corpus_files: usize,
+    corpus_bytes: usize,
+    replicas: usize,
+    measured_iterations: usize,
+    manifest_size_bytes: usize,
+    /// SHA-256 of the manifest bytes: the same input must seal to the same
+    /// digest across codec changes and worker widths.
+    manifest_digest: String,
+    /// SHA-256 over every segment's content address and bytes in digest
+    /// order.
+    segments_digest: String,
+    segment_count: usize,
+    segment_bytes: usize,
+    bytes_per_file: f64,
+    vm_hwm_bytes: u64,
+    encode_wall: Distribution,
+    decode_and_open_wall: Distribution,
+    lexical_drain_wall: Distribution,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let replicas = env_usize(REPLICAS_ENV, REPLICAS)?;
+    let warmups = env_usize(WARMUPS_ENV, WARMUPS)?;
+    let measured = env_usize(MEASURED_ENV, MEASURED)?;
+    let sources = replicated_sources(replicas)?;
+    let corpus_bytes = sources.iter().map(|source| source.bytes.len()).sum();
+    let generation = build_generation(&sources)?;
+    let fixture = encode_once(&generation)?;
+    for _ in 0..warmups {
+        black_box(encode_once(&generation)?);
+        decode_and_open(&fixture)?;
+        drain_lexical(&fixture)?;
+    }
+
+    reset_peak_rss()?;
+    let mut encode_wall = Vec::with_capacity(measured);
+    let mut decode_wall = Vec::with_capacity(measured);
+    let mut lexical_drain_wall = Vec::with_capacity(measured);
+    for _ in 0..measured {
+        let started = Instant::now();
+        let encoded = {
+            let _span =
+                tracing::trace_span!("code_index.generation.publish.segment_encode").entered();
+            encode_once(&generation)?
+        };
+        encode_wall.push(duration_ns(started.elapsed())?);
+        assert_fixture_identity(&fixture, &encoded)?;
+
+        let started = Instant::now();
+        {
+            let _span = tracing::trace_span!("code_index.generation.decode.bundle").entered();
+            decode_and_open(&fixture)?
+        };
+        decode_wall.push(duration_ns(started.elapsed())?);
+        let started = Instant::now();
+        {
+            let _span = tracing::trace_span!("code_index.lexical.drain").entered();
+            drain_lexical(&fixture)?
+        };
+        lexical_drain_wall.push(duration_ns(started.elapsed())?);
+    }
+
+    let segment_bytes = fixture.segments.values().map(Vec::len).sum::<usize>();
+    let mut segments_digest = Sha256::new();
+    for (digest, bytes) in fixture.segments.iter() {
+        segments_digest.update(digest.as_bytes());
+        segments_digest.update(bytes);
+    }
+    let measurement = Measurement {
+        schema_version: 3,
+        corpus_files: sources.len(),
+        corpus_bytes,
+        replicas,
+        measured_iterations: measured,
+        manifest_size_bytes: fixture.manifest.len(),
+        manifest_digest: format!("sha256:{}", hex::encode(Sha256::digest(&fixture.manifest))),
+        segments_digest: format!("sha256:{}", hex::encode(segments_digest.finalize())),
+        segment_count: fixture.segments.len(),
+        segment_bytes,
+        bytes_per_file: segment_bytes as f64 / sources.len() as f64,
+        vm_hwm_bytes: proc_value("/proc/self/status", "VmHWM:")?.saturating_mul(1024),
+        encode_wall: distribution(encode_wall),
+        decode_and_open_wall: distribution(decode_wall),
+        lexical_drain_wall: distribution(lexical_drain_wall),
+    };
+    println!("{}", serde_json::to_string_pretty(&measurement)?);
+    Ok(())
+}
+
+fn replicated_sources(replicas: usize) -> Result<Vec<SourceFile>, Box<dyn Error>> {
+    let root =
+        std::env::var_os(CORPUS_ENV).map_or_else(|| PathBuf::from(CORPUS_ROOT), PathBuf::from);
+    let root = root.as_path();
+    let mut base = WalkBuilder::new(root)
+        .hidden(false)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            // A frozen real tree carries manifests, docs, and fixtures the
+            // benchmark languages do not cover; admit only the files the
+            // production pipeline would parse.
+            let Some(language) = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .and_then(|extension| language_for_extension(extension).ok())
+            else {
+                return Ok::<_, Box<dyn Error>>(None);
+            };
+            let bytes: Arc<[u8]> = std::fs::read(path)?.into();
+            Ok(Some(SourceFile {
+                logical_path: relative,
+                language,
+                bytes,
+            }))
+        })
+        .filter_map(Result::transpose)
+        .collect::<Result<Vec<_>, _>>()?;
+    base.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+    let mut sources = Vec::with_capacity(base.len() * replicas);
+    for replica in 0..replicas {
+        sources.extend(base.iter().map(|source| SourceFile {
+            logical_path: format!("replica/{replica:02}/{}", source.logical_path),
+            language: source.language.clone(),
+            bytes: Arc::clone(&source.bytes),
+        }));
+    }
+    Ok(sources)
+}
+
+fn language_for_extension(extension: &str) -> Result<LanguageId, Box<dyn Error>> {
+    let language = match extension {
+        "go" => "go",
+        "java" => "java",
+        "py" => "python",
+        "rs" => "rust",
+        "ts" => "typescript",
+        other => return Err(format!("unsupported benchmark extension {other}").into()),
+    };
+    Ok(id(language)?)
+}
+
+fn build_generation(
+    sources: &[SourceFile],
+) -> Result<Arc<CodeIndexPublishedGenerationV1>, Box<dyn Error>> {
+    let mut files = Vec::with_capacity(sources.len());
+    let mut captured_files = Vec::with_capacity(sources.len());
+    let mut receipts = Vec::with_capacity(sources.len());
+    let mut identity = Sha256::new();
+    for (index, source) in sources.iter().enumerate() {
+        let occurrence = id::<FileOccurrenceId>(&format!(
+            "file.partitioned-codec.{}",
+            &hex::encode(Sha256::digest(source.logical_path.as_bytes()))[..32]
+        ))?;
+        let digest = content_digest(&source.bytes);
+        identity.update(source.logical_path.as_bytes());
+        identity.update([0]);
+        identity.update(digest.as_str().as_bytes());
+        files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: occurrence.clone(),
+            logical_path: source.logical_path.clone(),
+            language: Some(source.language.clone()),
+            content_digest: digest,
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id: occurrence,
+            sanitized_bytes: Arc::clone(&source.bytes),
+            sensitivity_level: SensitivityLevelV1::Public,
+        });
+        receipts.push(id::<SanitizationReceiptId>(&format!(
+            "receipt.partitioned-codec.{index:04}"
+        ))?);
+    }
+    let content_identity = content_digest(&identity.finalize());
+    let request = CodeIndexBuildRequestV1 {
+        snapshot: SanitizedCodeSnapshotV1 {
+            repository: id("repository.partitioned-codec")?,
+            worktree: None,
+            reference: None,
+            source_revision: None,
+            sanitizer_revision: id("sanitizer.partitioned-codec.v1")?,
+            sanitization_receipts: receipts,
+            content_identity,
+            captured_at: UtcMicros(1_000_000),
+            files,
+            omitted_sources: Vec::new(),
+        },
+        captured_files,
+        changed_files: BTreeSet::new(),
+        invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
+        sealed_at: UtcMicros(2_000_000),
+        target_projection_key: ProjectionKeyV1 {
+            kind: ProjectionKindV1::Lexical,
+            schema_revision: "lexical.partitioned-codec.v1".to_owned(),
+            profile_digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(
+                b"partitioned-codec-bench",
+            ))?,
+        },
+    };
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        production_config()?,
+        MemorySealedPublicationStoreV1::default(),
+    )?;
+    let published = owner.build_and_publish(request, &ActiveControl)?;
+    let generation = published
+        .decoded()
+        .ok_or("a build without a parent runs cold")?;
+    Ok(Arc::clone(generation))
+}
+
+fn production_config() -> Result<CodeIndexProductionConfigV1, Box<dyn Error>> {
+    Ok(CodeIndexProductionConfigV1 {
+        project_id: id::<ProjectId>("project.partitioned-codec")?,
+        repository: id::<RepositoryId>("repository.partitioned-codec")?,
+        sanitizer_revision: id::<SanitizerRevision>("sanitizer.partitioned-codec.v1")?,
+        policy_revision: id::<PolicyRevisionId>("policy.partitioned-codec.v1")?,
+        chunker_revision: id::<ChunkerRevision>("chunker.partitioned-codec.v1")?,
+        privacy_domain: id::<PrivacyDomainId>("privacy.partitioned-codec")?,
+        privacy_key_epoch: 1,
+        max_snapshot_age_micros: None,
+    })
+}
+
+fn encode_once(
+    generation: &CodeIndexPublishedGenerationV1,
+) -> Result<EncodedFixture, CodeIndexProductionErrorV1> {
+    let mut segments = BTreeMap::new();
+    let mut evidence_pack = Vec::new();
+    let manifest = generation.encode_partitioned_sealed(|publication| {
+        match publication {
+            SealedGenerationSegmentPublicationV1::File { digest, bytes }
+            | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+            | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+                segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                page_digest, bytes, ..
+            } => {
+                segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                evidence_pack.extend_from_slice(bytes);
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                segment_digest,
+                ..
+            } => {
+                segments.insert(
+                    segment_digest.as_str().to_owned(),
+                    std::mem::take(&mut evidence_pack),
+                );
+            }
+        }
+        Ok(())
+    })?;
+    Ok(EncodedFixture {
+        manifest,
+        segments: Arc::new(segments),
+    })
+}
+
+fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {
+    let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &fixture.manifest,
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| {
+            let (digest, offset, length) = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                    (digest, 0, size_bytes)
+                }
+                SealedGenerationSegmentReadV1::Range {
+                    digest,
+                    offset,
+                    length,
+                    ..
+                } => (digest, offset, length),
+            };
+            let bytes = fixture.segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
+            })?;
+            let start = usize::try_from(offset)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+            let end = start
+                + usize::try_from(length)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+            buffer.clear();
+            buffer.extend_from_slice(&bytes[start..end]);
+            Ok(())
+        },
+    )?;
+    black_box(decoded);
+    black_box(open_lexical(fixture)?);
+    Ok(())
+}
+
+#[tracing::instrument(name = "code_index.lexical.open", level = "trace", skip_all)]
+fn open_lexical(
+    fixture: &EncodedFixture,
+) -> Result<VerifiedSealedLexicalPageSourceV1, CodeIndexProductionErrorV1> {
+    let source_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&fixture.manifest))
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    let segments = Arc::clone(&fixture.segments);
+    VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        &fixture.manifest,
+        source_digest,
+        move |digest, _, buffer, _control| {
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
+        },
+        256,
+        1024 * 1024,
+    )
+}
+
+fn drain_lexical(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {
+    let mut source = open_lexical(fixture)?;
+    loop {
+        match source.next_page(&ActiveControl)? {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                black_box(page);
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
+                receipt.verify_completion(Some(source.cursor()))?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn assert_fixture_identity(
+    expected: &EncodedFixture,
+    actual: &EncodedFixture,
+) -> Result<(), Box<dyn Error>> {
+    if expected.manifest != actual.manifest || expected.segments != actual.segments {
+        return Err("partitioned codec produced nondeterministic bytes".into());
+    }
+    Ok(())
+}
+
+fn distribution(mut values: Vec<u64>) -> Distribution {
+    values.sort_unstable();
+    Distribution {
+        samples: values.len(),
+        p50_ns: percentile(&values, 50),
+        p95_ns: percentile(&values, 95),
+    }
+}
+
+fn percentile(values: &[u64], percentile: usize) -> u64 {
+    let index = ((values.len() - 1) * percentile).div_ceil(100);
+    values[index]
+}
+
+fn duration_ns(duration: std::time::Duration) -> Result<u64, Box<dyn Error>> {
+    Ok(u64::try_from(duration.as_nanos())?)
+}
+
+fn reset_peak_rss() -> Result<(), Box<dyn Error>> {
+    std::fs::write("/proc/self/clear_refs", b"5\n")?;
+    Ok(())
+}
+
+fn proc_value(path: &str, key: &str) -> Result<u64, Box<dyn Error>> {
+    let contents = std::fs::read_to_string(path)?;
+    contents
+        .lines()
+        .find_map(|line| {
+            let (candidate, value) = line.split_once(':')?;
+            if candidate != key.trim_end_matches(':') {
+                return None;
+            }
+            value.split_whitespace().next()?.parse::<u64>().ok()
+        })
+        .ok_or_else(|| format!("missing {key} in {path}").into())
+}
+
+fn id<T>(value: &str) -> Result<T, T::Error>
+where
+    T: TryFrom<String>,
+    T::Error: Debug,
+{
+    T::try_from(value.to_owned())
+}

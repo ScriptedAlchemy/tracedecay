@@ -11,8 +11,11 @@ Claude Code.
   It is one plugin, not one plugin per language, and forwards to the
   daemon-owned gateway rather than embedding analyzer logic.
 - **MCP server** (`.mcp.json`): the `graph` stdio server exposing the code
-  graph, search, call-graph, impact, memory, and session-recall tools.
-- **Skills** (`skills/`): one skill per common workflow — searching for code,
+  graph, search, call-graph, impact, memory, and session-recall tools. It runs
+  `tracedecay serve --full-tool-list`: every tool keeps its full schema, the
+  most-used tools carry `_meta["anthropic/alwaysLoad"]`, and Claude Code's tool
+  search defers the rest.
+- **Skills** (`skills/`): one skill per common workflow, searching for code,
   reading code cheaply, mapping architecture, impact analysis, reviewing diffs,
   recalling project memory and session context, and more. Claude Code
   auto-discovers each `SKILL.md` by its `name`/`description` frontmatter and
@@ -21,7 +24,10 @@ Claude Code.
   `PostCompact`, `SubagentStart`, and saved-edit `PostToolUse` events. Each
   handler submits one bounded native envelope to the daemon and may return
   daemon-approved guidance through Claude Code's
-  documented `additionalContext` response. The daemon owns follow-up capture,
+  documented `additionalContext` response. In a registered project,
+  `SessionStart` leads that context with the skill mandate from
+  `plugin/hooks/session-start-context.md`: which tasks load a skill first, the
+  entry skill, and the direct-entry skills. The daemon owns follow-up capture,
   indexing, staleness work, and any advisory delivery; hooks never read stores,
   route tools, or run a model.
 
@@ -39,7 +45,7 @@ path with spaces.
 
 The LSP bridge, hooks, skills, and CLI bindings form the MCP-free core. The MCP
 registration is an independently installable companion in the signed host
-bundle lifecycle; the compatibility installer composes both.
+bundle lifecycle; `tracedecay install` without `--component` installs both.
 
 ## CLI fallback
 
@@ -47,3 +53,7 @@ Every MCP tool is also available from the shell as `tracedecay tool <name>`
 (`tracedecay tool` lists tools; `tracedecay tool <name> --help` shows
 parameters). Bundled skills and steering use that CLI fallback when MCP
 transport errors or times out, instead of querying `.tracedecay` databases.
+The CLI uses the same daemon authority and is not an availability guarantee;
+neither client starts a missing or stopped service. If the daemon is
+unavailable or intentionally held, report that state and use scoped native
+tools without retrying or changing daemon lifecycle.

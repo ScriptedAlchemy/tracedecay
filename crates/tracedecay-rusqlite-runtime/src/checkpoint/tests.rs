@@ -1,76 +1,43 @@
-use std::{collections::VecDeque, fmt::Debug, time::Duration};
+use std::time::{Duration, Instant};
 
-use tracedecay_store::{
-    BrainId, ProjectId, RuntimePublicationIdV1, SnapshotLeaseIdV1, StoreAuthorityEpochV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1, StoreShardIdV1,
-    UserProfileId,
-};
+use tracedecay_store::SnapshotLeaseIdV1;
 
-use crate::maintenance::{
-    DrainBlockers, DrainedStateProof, ExclusiveMaintenancePermit, MaintenanceOwnerId,
-};
-
+use super::controller::Drain;
+use super::types::{EXPIRED_RETRY_MIN, FENCE_LIMIT};
 use super::*;
 
-#[derive(Debug, Eq, PartialEq)]
-enum FakeError {
-    Configure,
-    Sample,
-    Checkpoint,
-}
-
-impl std::fmt::Display for FakeError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
+fn inventory(id: &str) -> CheckpointBlockers {
+    CheckpointBlockers {
+        blockers: vec![CheckpointBlocker::SnapshotLease {
+            lease_id: SnapshotLeaseIdV1::try_from(id.to_owned()).unwrap(),
+            age: Duration::from_secs(3),
+        }],
+        omitted: 0,
     }
 }
 
-impl std::error::Error for FakeError {}
-
-#[derive(Default)]
-struct FakeDriver {
-    configure_error: bool,
-    samples: VecDeque<Result<WalSample, FakeError>>,
-    reports: VecDeque<Result<CheckpointReport, FakeError>>,
+struct CheckpointFixture {
+    _directory: tempfile::TempDir,
+    controller: WriterCheckpointController,
 }
 
-impl FakeDriver {
-    fn with_reports(reports: impl IntoIterator<Item = CheckpointReport>) -> Self {
+impl CheckpointFixture {
+    fn open(config: CheckpointConfig) -> Self {
+        let directory = tempfile::tempdir().expect("checkpoint directory");
+        let path = directory.path().join("checkpoint.db");
+        std::fs::File::create(&path).expect("checkpoint file");
+        let connection = crate::connection::open(&path, crate::connection::ConnectionMode::Writer)
+            .expect("writer connection");
+        connection
+            .execute_batch("CREATE TABLE item (value INTEGER); INSERT INTO item VALUES (1);")
+            .expect("seed checkpoint database");
+        let controller =
+            WriterCheckpointController::new(RusqliteCheckpointDriver::new(connection), config)
+                .expect("writer disables automatic checkpointing");
         Self {
-            reports: reports.into_iter().map(Ok).collect(),
-            ..Self::default()
+            _directory: directory,
+            controller,
         }
-    }
-
-    fn with_sample_and_reports(
-        sample: WalSample,
-        reports: impl IntoIterator<Item = CheckpointReport>,
-    ) -> Self {
-        Self {
-            samples: [Ok(sample)].into(),
-            reports: reports.into_iter().map(Ok).collect(),
-            ..Self::default()
-        }
-    }
-}
-
-impl CheckpointDriver for FakeDriver {
-    type Error = FakeError;
-
-    fn disable_auto_checkpoint(&mut self) -> Result<(), Self::Error> {
-        (!self.configure_error)
-            .then_some(())
-            .ok_or(FakeError::Configure)
-    }
-
-    fn sample_wal(&mut self) -> Result<WalSample, Self::Error> {
-        self.samples.pop_front().unwrap_or(Err(FakeError::Sample))
-    }
-
-    fn checkpoint(&mut self, _mode: CheckpointMode) -> Result<CheckpointReport, Self::Error> {
-        self.reports
-            .pop_front()
-            .unwrap_or(Err(FakeError::Checkpoint))
     }
 }
 
@@ -82,82 +49,57 @@ fn report(busy: bool, log_frames: u64, checkpointed_frames: u64) -> CheckpointRe
     }
 }
 
-fn inventory(id: &str) -> CheckpointBlockers {
-    CheckpointBlockers {
-        blockers: vec![CheckpointBlocker {
-            lease_id: SnapshotLeaseIdV1::try_from(id.to_owned()).unwrap(),
-            age: Duration::from_secs(3),
-        }],
-        omitted: 0,
-    }
-}
-
-fn controller(
-    reports: impl IntoIterator<Item = CheckpointReport>,
-) -> WriterCheckpointController<FakeDriver> {
-    WriterCheckpointController::new(
-        FakeDriver::with_reports(reports),
-        CheckpointConfig::default(),
+/// One RESTART attempt through the drain policy the controller applies.
+fn decide(
+    report: CheckpointReport,
+    pressure: WalPressure,
+    wal_bytes: u64,
+    snapshot_blockers: CheckpointBlockers,
+    drain: Drain,
+    now: Instant,
+) -> (CheckpointDecision, Drain) {
+    super::controller::checkpoint_decision(
+        super::controller::CheckpointAttempt {
+            report,
+            mode: CheckpointMode::Restart,
+            pressure,
+            wal_bytes,
+            snapshot_blockers,
+            elapsed: Duration::ZERO,
+        },
+        drain,
+        CheckpointConfig::default().hard_wal_bytes,
+        now,
     )
-    .expect("fake driver configures")
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
-
-/// Test authority that admits one externally canonical publication and issues
-/// a permit only from an observed clear drain. It never derives an identity
-/// from a path or allocates a replacement fence.
-struct FakeCanonicalAuthority {
-    publication: StoreRuntimeRegistryPublicationV1,
-}
-
-impl FakeCanonicalAuthority {
-    fn new() -> Self {
-        let binding = StoreRuntimeBindingV1::new(
-            StoreShardIdV1::project(
-                id::<BrainId>("brain.checkpoint"),
-                id::<UserProfileId>("profile.checkpoint"),
-                id::<ProjectId>("project.checkpoint"),
-            ),
-            StoreIncarnationV1::new(1).unwrap(),
-            StoreAuthorityEpochV1::new(1).unwrap(),
-        );
-        Self {
-            publication: serde_json::from_value(serde_json::json!({
-                "publication_id": RuntimePublicationIdV1::new(
-                    "publication.checkpoint".to_owned()
-                ).unwrap(),
-                "binding": binding,
-                "published_at": 1,
-            }))
-            .unwrap(),
+fn blocks_writes(decision: &CheckpointDecision) -> bool {
+    matches!(
+        decision,
+        CheckpointDecision::Pending {
+            hard_drain_required: true,
+            ..
         }
-    }
+    )
+}
 
-    fn permit_after_drain(&self) -> ExclusiveMaintenancePermit {
-        let proof =
-            DrainedStateProof::observe(self.publication.clone(), DrainBlockers::default()).unwrap();
-        ExclusiveMaintenancePermit::issue_after_drain(
-            MaintenanceOwnerId::new(1).unwrap(),
-            self.publication.clone(),
-            proof,
-        )
-        .unwrap()
-    }
+fn fence_expired(decision: &CheckpointDecision) -> bool {
+    matches!(
+        decision,
+        CheckpointDecision::Pending {
+            fence_expired: true,
+            ..
+        }
+    )
 }
 
 #[test]
-fn below_soft_is_a_noop_and_soft_pressure_is_passive() {
+fn below_soft_is_a_noop_and_soft_pressure_restarts() {
     let config = CheckpointConfig::default();
-    let mut controller = controller([report(false, 100, 100)]);
+    let mut fixture = CheckpointFixture::open(config);
     assert_eq!(
-        controller
+        fixture
+            .controller
             .evaluate(config.soft_wal_bytes - 1, CheckpointBlockers::default())
             .unwrap(),
         CheckpointDecision::BelowSoftLimit {
@@ -165,11 +107,12 @@ fn below_soft_is_a_noop_and_soft_pressure_is_passive() {
         }
     );
     assert!(matches!(
-        controller
+        fixture
+            .controller
             .evaluate(config.soft_wal_bytes, CheckpointBlockers::default())
             .unwrap(),
         CheckpointDecision::Complete {
-            mode: CheckpointMode::Passive,
+            mode: CheckpointMode::Restart,
             pressure: WalPressure::Soft,
             ..
         }
@@ -188,23 +131,20 @@ fn a_configured_wal_budget_moves_the_controller_thresholds() {
     };
     budget.validate().expect("tightened budget is well formed");
     let config = CheckpointConfig::from(&budget);
-    let mut controller = WriterCheckpointController::new(
-        FakeDriver::with_reports([report(false, 100, 100), report(true, 100, 40)]),
-        config,
-    )
-    .expect("fake driver configures");
+    let mut fixture = CheckpointFixture::open(config);
 
     assert_eq!(
-        controller
+        fixture
+            .controller
             .evaluate(budget.soft_limit_bytes - 1, CheckpointBlockers::default())
             .unwrap(),
         CheckpointDecision::BelowSoftLimit {
             wal_bytes: budget.soft_limit_bytes - 1,
         }
     );
-    // Idle under the 32 MiB contract default; soft pressure under this budget.
     assert!(matches!(
-        controller
+        fixture
+            .controller
             .evaluate(budget.soft_limit_bytes, CheckpointBlockers::default())
             .unwrap(),
         CheckpointDecision::Complete {
@@ -212,26 +152,42 @@ fn a_configured_wal_budget_moves_the_controller_thresholds() {
             ..
         }
     ));
+    // A live RESTART checkpoint of this small WAL finishes completely, so the
+    // partial report is applied through the decision function the controller
+    // uses after the driver returns.
+    let (decision, drain) = decide(
+        report(true, 100, 40),
+        WalPressure::Hard,
+        budget.hard_limit_bytes,
+        CheckpointBlockers::default(),
+        Drain::Open,
+        Instant::now(),
+    );
     assert!(matches!(
-        controller
-            .evaluate(budget.hard_limit_bytes, CheckpointBlockers::default())
-            .unwrap(),
+        decision,
         CheckpointDecision::Pending {
             pressure: WalPressure::Hard,
             hard_drain_required: true,
             ..
         }
     ));
+    assert!(matches!(drain, Drain::Fenced { .. }));
 }
 
 #[test]
 fn controller_reports_inventory_without_owning_snapshot_state() {
     let blockers = inventory("lease.soft");
-    let mut controller = controller([report(true, 100, 40)]);
+    let (decision, drain) = decide(
+        report(true, 100, 40),
+        WalPressure::Soft,
+        CheckpointConfig::default().soft_wal_bytes,
+        blockers.clone(),
+        Drain::Open,
+        Instant::now(),
+    );
+    assert_eq!(drain, Drain::Open);
     assert!(matches!(
-        controller
-            .evaluate(CheckpointConfig::default().soft_wal_bytes, blockers.clone())
-            .unwrap(),
+        decision,
         CheckpointDecision::Pending {
             snapshot_blockers,
             hard_drain_required: false,
@@ -241,42 +197,47 @@ fn controller_reports_inventory_without_owning_snapshot_state() {
 }
 
 #[test]
-fn scheduled_checkpoint_samples_frames_and_bytes_before_passive() {
-    let config = CheckpointConfig::default();
-    let sample = WalSample {
-        frames: 17,
-        bytes: config.soft_wal_bytes,
-    };
-    let driver = FakeDriver::with_sample_and_reports(sample, [report(false, 17, 17)]);
-    let mut controller =
-        WriterCheckpointController::new(driver, config).expect("fake driver configures");
-
+fn scheduled_checkpoint_samples_frames_and_bytes_before_restart() {
+    let mut idle = CheckpointFixture::open(CheckpointConfig::default());
     assert!(matches!(
-        controller
+        idle.controller
             .evaluate_scheduled(CheckpointBlockers::default())
             .unwrap(),
         CheckpointResult::Decision {
-            sample: actual,
+            sample,
+            decision: CheckpointDecision::BelowSoftLimit { wal_bytes },
+        } if sample.frames >= 1 && sample.bytes >= 1 && wal_bytes == sample.bytes
+    ));
+
+    let config = CheckpointConfig {
+        soft_wal_bytes: 1,
+        hard_wal_bytes: 1024 * 1024 * 1024,
+    };
+    let mut fixture = CheckpointFixture::open(config);
+    assert!(matches!(
+        fixture
+            .controller
+            .evaluate_scheduled(CheckpointBlockers::default())
+            .unwrap(),
+        CheckpointResult::Decision {
+            sample,
             decision: CheckpointDecision::Complete {
-                mode: CheckpointMode::Passive,
+                mode: CheckpointMode::Restart,
+                pressure: WalPressure::Soft,
+                wal_bytes,
                 ..
             },
-        } if actual == sample
+        } if sample.frames >= 1 && sample.bytes >= 1 && wal_bytes == sample.bytes
     ));
 }
 
 #[test]
 fn scheduled_checkpoint_surfaces_typed_cancellation_before_driver_work() {
-    let sample = WalSample {
-        frames: 1,
-        bytes: CheckpointConfig::default().soft_wal_bytes,
-    };
-    let driver = FakeDriver::with_sample_and_reports(sample, [report(false, 1, 1)]);
-    let mut controller =
-        WriterCheckpointController::new(driver, CheckpointConfig::default()).unwrap();
+    let mut fixture = CheckpointFixture::open(CheckpointConfig::default());
 
     assert_eq!(
-        controller
+        fixture
+            .controller
             .evaluate_interruptible(CheckpointBlockers::default(), || Some(
                 CheckpointInterruption::DeadlineExceeded
             ),)
@@ -290,37 +251,159 @@ fn scheduled_checkpoint_surfaces_typed_cancellation_before_driver_work() {
 }
 
 #[test]
-fn incomplete_hard_checkpoint_requires_drain_until_passive_completes() {
+fn incomplete_hard_checkpoint_requires_drain_until_restart_completes() {
     let config = CheckpointConfig::default();
-    let mut controller = controller([report(false, 1_000, 500), report(false, 500, 500)]);
+    let now = Instant::now();
+    let (pending, drain) = decide(
+        report(false, 1_000, 500),
+        WalPressure::Hard,
+        config.hard_wal_bytes,
+        inventory("lease.hard"),
+        Drain::Open,
+        now,
+    );
     assert!(matches!(
-        controller
-            .evaluate(config.hard_wal_bytes, inventory("lease.hard"))
-            .unwrap(),
+        pending,
         CheckpointDecision::Pending {
             pressure: WalPressure::Hard,
             hard_drain_required: true,
             ..
         }
     ));
-    assert!(controller.hard_drain_required());
+    assert_eq!(drain, Drain::Fenced { since: now });
+    let (complete, drain) = decide(
+        report(false, 500, 500),
+        WalPressure::BelowSoft,
+        config.soft_wal_bytes - 1,
+        CheckpointBlockers::default(),
+        drain,
+        now,
+    );
     assert!(matches!(
-        controller
-            .evaluate(config.soft_wal_bytes - 1, CheckpointBlockers::default())
-            .unwrap(),
+        complete,
         CheckpointDecision::Complete {
-            mode: CheckpointMode::Passive,
+            mode: CheckpointMode::Restart,
             pressure: WalPressure::BelowSoft,
             ..
         }
     ));
-    assert!(!controller.hard_drain_required());
+    assert_eq!(drain, Drain::Open);
+}
+
+/// #4097: a drain behind a reader that never lets go used to block writes and
+/// retry every 100 ms forever. The fence now expires after its limit, writes
+/// resume, retries back off to a minute, and only a WAL past twice the hard
+/// limit blocks writes again.
+#[test]
+fn a_hard_drain_fence_expires_backs_off_and_blocks_only_past_the_write_ceiling() {
+    let hard = CheckpointConfig::default().hard_wal_bytes;
+    let start = Instant::now();
+    let pinned = || report(true, 1_000, 500);
+    let (fenced, drain) = decide(
+        pinned(),
+        WalPressure::Hard,
+        hard,
+        CheckpointBlockers::default(),
+        Drain::Open,
+        start,
+    );
+    assert!(blocks_writes(&fenced));
+
+    let just_inside = start + FENCE_LIMIT - Duration::from_millis(1);
+    let (still_fenced, drain) = decide(
+        pinned(),
+        WalPressure::Hard,
+        hard,
+        CheckpointBlockers::default(),
+        drain,
+        just_inside,
+    );
+    assert!(blocks_writes(&still_fenced));
+    assert!(!fence_expired(&still_fenced));
+
+    let expiry = start + FENCE_LIMIT;
+    let (expired, mut drain) = decide(
+        pinned(),
+        WalPressure::Hard,
+        hard,
+        inventory("lease.wedged"),
+        drain,
+        expiry,
+    );
+    assert!(
+        !blocks_writes(&expired),
+        "writes resume once the fence expires"
+    );
+    assert!(fence_expired(&expired));
+    assert!(matches!(
+        &expired,
+        CheckpointDecision::Pending { snapshot_blockers, .. }
+            if *snapshot_blockers == inventory("lease.wedged")
+    ));
+    assert_eq!(
+        drain,
+        Drain::Expired {
+            retry_at: expiry + EXPIRED_RETRY_MIN,
+            backoff: EXPIRED_RETRY_MIN,
+            wal_bytes: hard,
+        }
+    );
+
+    let mut now = expiry;
+    let mut backoffs = Vec::new();
+    for _ in 0..8 {
+        now += Duration::from_secs(1);
+        let (_, next) = decide(
+            pinned(),
+            WalPressure::Hard,
+            hard,
+            CheckpointBlockers::default(),
+            drain,
+            now,
+        );
+        let Drain::Expired { backoff, .. } = next else {
+            panic!("an incomplete retry keeps the expired fence: {next:?}");
+        };
+        backoffs.push(backoff.as_secs());
+        drain = next;
+    }
+    assert_eq!(backoffs, [2, 4, 8, 16, 32, 60, 60, 60]);
+
+    let (ceiling, drain) = decide(
+        pinned(),
+        WalPressure::Hard,
+        hard * 2,
+        CheckpointBlockers::default(),
+        drain,
+        now,
+    );
+    assert!(
+        blocks_writes(&ceiling),
+        "past twice the hard limit writes block"
+    );
+    assert!(fence_expired(&ceiling));
+
+    let (complete, drain) = decide(
+        report(false, 1_000, 1_000),
+        WalPressure::Hard,
+        hard * 2,
+        CheckpointBlockers::default(),
+        drain,
+        now,
+    );
+    assert!(matches!(complete, CheckpointDecision::Complete { .. }));
+    assert_eq!(drain, Drain::Open);
 }
 
 #[test]
 fn invalid_config_and_driver_configuration_fail_closed() {
+    let directory = tempfile::tempdir().expect("checkpoint directory");
+    let path = directory.path().join("checkpoint.db");
+    std::fs::File::create(&path).expect("checkpoint file");
+    let connection = crate::connection::open(&path, crate::connection::ConnectionMode::Writer)
+        .expect("writer connection");
     let result = WriterCheckpointController::new(
-        FakeDriver::default(),
+        RusqliteCheckpointDriver::new(connection),
         CheckpointConfig {
             soft_wal_bytes: 10,
             hard_wal_bytes: 10,
@@ -332,60 +415,16 @@ fn invalid_config_and_driver_configuration_fail_closed() {
             CheckpointConfigError::HardLimitNotAboveSoftLimit
         ))
     ));
+
+    let reader = crate::connection::open(&path, crate::connection::ConnectionMode::Reader)
+        .expect("reader connection");
     let result = WriterCheckpointController::new(
-        FakeDriver {
-            configure_error: true,
-            ..FakeDriver::default()
-        },
+        RusqliteCheckpointDriver::new(reader),
         CheckpointConfig::default(),
     );
     assert!(matches!(
         result,
-        Err(CheckpointError::Driver(FakeError::Configure))
-    ));
-}
-
-#[test]
-fn exclusive_modes_borrow_one_canonical_linear_permit() {
-    let authority = FakeCanonicalAuthority::new();
-    let permit = authority.permit_after_drain();
-    let config = CheckpointConfig::default();
-    let mut controller = controller([report(false, 2, 2), report(false, 0, 0)]);
-
-    assert!(matches!(
-        controller
-            .restart(
-                config.soft_wal_bytes,
-                &permit,
-                CheckpointBlockers::default(),
-            )
-            .unwrap(),
-        CheckpointDecision::Complete {
-            mode: CheckpointMode::Restart,
-            ..
-        }
-    ));
-    assert!(matches!(
-        controller
-            .truncate(0, &permit, CheckpointBlockers::default())
-            .unwrap(),
-        CheckpointDecision::Complete {
-            mode: CheckpointMode::Truncate,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn exclusive_checkpoint_rejects_a_nonempty_drain_inventory() {
-    let authority = FakeCanonicalAuthority::new();
-    let permit = authority.permit_after_drain();
-    let blockers = inventory("lease.exclusive");
-    let mut controller = controller([]);
-
-    assert!(matches!(
-        controller.restart(0, &permit, blockers.clone()),
-        Err(CheckpointError::MaintenanceStillDraining(actual)) if actual == blockers
+        Err(CheckpointError::Driver(RusqliteCheckpointError::Sqlite(_)))
     ));
 }
 
@@ -403,9 +442,96 @@ fn rusqlite_driver_samples_and_checkpoints_its_owned_writer_connection() {
 
     driver.disable_auto_checkpoint().unwrap();
     let sample = driver.sample_wal().unwrap();
-    let report = driver.checkpoint(CheckpointMode::Passive).unwrap();
+    let report = driver.checkpoint(CheckpointMode::Restart).unwrap();
 
-    assert!(sample.frames > 0);
-    assert!(sample.bytes > 0);
+    assert!(sample.frames >= 1);
+    assert!(sample.bytes >= 1);
     assert!(report.checkpointed_frames <= report.log_frames);
+    assert!(report.complete());
+}
+
+static FOREIGN_CHECKPOINTER_WAITING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static FOREIGN_CHECKPOINTER_RELEASED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn park_foreign_checkpointer(_attempt: i32) -> bool {
+    use std::sync::atomic::Ordering;
+    FOREIGN_CHECKPOINTER_WAITING.store(true, Ordering::Release);
+    while !FOREIGN_CHECKPOINTER_RELEASED.load(Ordering::Acquire) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+/// `SQLite` answers a checkpoint that cannot take the checkpoint lock with the
+/// row `(1, -1, -1)`. Another connection checkpointing the same file is an
+/// ordinary deferral, so the scheduled checkpoint must report it pending
+/// rather than fault the writer (#4007).
+#[test]
+fn scheduled_checkpoint_defers_while_another_connection_checkpoints() {
+    use std::sync::atomic::Ordering;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checkpoint.db");
+    std::fs::File::create(&path).unwrap();
+    let connection =
+        crate::connection::open(&path, crate::connection::ConnectionMode::Writer).unwrap();
+    connection
+        .execute_batch("CREATE TABLE item (value INTEGER); INSERT INTO item VALUES (1);")
+        .unwrap();
+    let mut controller = WriterCheckpointController::new(
+        RusqliteCheckpointDriver::new(connection),
+        CheckpointConfig {
+            soft_wal_bytes: 1,
+            hard_wal_bytes: 1024 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+
+    // A FULL checkpoint holds the checkpoint lock while its busy handler waits
+    // out the open write transaction.
+    let lock_holder = rusqlite::Connection::open(&path).unwrap();
+    lock_holder
+        .execute_batch("BEGIN IMMEDIATE; INSERT INTO item VALUES (2);")
+        .unwrap();
+    let checkpointer_path = path.clone();
+    let checkpointer = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(checkpointer_path).unwrap();
+        connection
+            .busy_handler(Some(park_foreign_checkpointer))
+            .unwrap();
+        connection
+            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    });
+    while !FOREIGN_CHECKPOINTER_WAITING.load(Ordering::Acquire) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let result = controller.evaluate_scheduled(CheckpointBlockers::default());
+
+    FOREIGN_CHECKPOINTER_RELEASED.store(true, Ordering::Release);
+    assert_eq!(
+        checkpointer.join().unwrap(),
+        1,
+        "the foreign FULL gave up busy"
+    );
+    lock_holder.execute_batch("ROLLBACK").unwrap();
+    assert!(
+        matches!(
+            result,
+            Ok(CheckpointResult::Decision {
+                decision: CheckpointDecision::Pending {
+                    mode: CheckpointMode::Restart,
+                    report: CheckpointReport { busy: true, .. },
+                    ..
+                },
+                ..
+            })
+        ),
+        "a busy checkpoint lock is a pending checkpoint, not a driver fault: {result:?}"
+    );
 }

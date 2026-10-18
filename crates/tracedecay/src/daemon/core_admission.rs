@@ -5,19 +5,22 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracedecay_runtime_core::path_safety::{canonical_existing_identity, same_canonical_path};
 
 use serde::{Deserialize, Serialize};
-use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use super::{
-    BrokerStream, BrokerStreamTransport, DaemonAuthPreface, DaemonHandshake, JsonRpcRequest,
-    JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError, classify_mcp_method,
-    log_daemon_event, parse_daemon_invocation_request, read_line_handling_wire_oversized,
-    write_json_rpc_response,
+    AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
+    DaemonHandshake, JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError,
+    binary_version, classify_mcp_method, parse_daemon_invocation_request,
+    read_line_handling_wire_oversized, write_daemon_response,
 };
-use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
+use tracedecay_contracts::ApplicationProblem;
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
 use tracedecay_mcp::ErrorCode;
+use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
 pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
@@ -56,7 +59,6 @@ impl DaemonClientDeadline {
             })
     }
 
-    #[hotpath::skip]
     pub(crate) async fn run<F, T>(
         &self,
         stage: &'static str,
@@ -66,13 +68,30 @@ impl DaemonClientDeadline {
     where
         F: std::future::Future<Output = Result<T>>,
     {
-        match timeout_at(self.deadline, fut).await {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        match asupersync::time::timeout(asupersync::time::wall_now(), remaining, fut).await {
             Ok(result) => result,
             Err(_) => Err(tracedecay_daemon_protocol::daemon_response_stalled_during(
                 stage,
                 request_label,
                 self.started.elapsed(),
             )),
+        }
+    }
+
+    /// Run one client stage under `deadline` when the caller carries one.
+    pub(crate) async fn run_optional<F, T>(
+        deadline: Option<Self>,
+        stage: &'static str,
+        request_label: &str,
+        fut: F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        match deadline {
+            Some(deadline) => deadline.run(stage, request_label, fut).await,
+            None => fut.await,
         }
     }
 }
@@ -90,20 +109,12 @@ pub(crate) enum DaemonClientAdmissionClass {
     ReservedControl,
 }
 
-/// How long a park may keep its admission permit before surrendering it.
-///
-/// A request that finishes inside this grace never touches the semaphore, so
-/// the hot path costs one timer registration and nothing else. Only a request
-/// that is genuinely parked — waiting on a project open, on the writer gate, or
-/// on a single-flight generation decode — gives its slot back.
-pub(crate) const ADMISSION_PARK_GRACE: Duration = Duration::from_millis(50);
-
 /// The admission slot one accepted connection currently holds.
 ///
 /// Live defect this exists for: the 60 general admission slots were held by
 /// requests *parked* on warm-up, on the writer gate, or on a generation decode
-/// while the reader pool sat completely idle. Every arriving request — including
-/// tools that need no generation at all — was then shed with the retryable
+/// while the reader pool sat completely idle. Every arriving request, including
+/// tools that need no generation at all, was then shed with the retryable
 /// `bulk_capacity_reached`. Admission must bound concurrent *work*, and a
 /// request asleep on a barrier is not work.
 ///
@@ -149,13 +160,12 @@ impl ParkableConnectionAdmission {
     /// Re-take a slot after the park ended.
     ///
     /// The wait is fair and unbounded on purpose. It cannot deadlock: no park in
-    /// this daemon completes by way of another *admitted* request — project opens
-    /// and generation rebuilds run on their own background tasks — so the permits
+    /// this daemon completes by way of another *admitted* request, project opens
+    /// and generation rebuilds run on their own background tasks, so the permits
     /// this caller waits on are held only by requests that are actively finishing.
     /// Tokio hands a released permit to a queued waiter before any newly arriving
     /// `try_acquire`, so a request resuming from a park is served ahead of a fresh
     /// connection rather than being starved by the load that made it park.
-    #[hotpath::skip]
     async fn reacquire(&self) {
         let Ok(permit) = Arc::clone(&self.permits).acquire_owned().await else {
             return;
@@ -192,59 +202,19 @@ where
 
 /// Run `future` without holding a general admission slot across a long park.
 ///
-/// Wrap the wait, never the work: the returned future keeps its slot for
-/// [`ADMISSION_PARK_GRACE`], and only surrenders it if the wait outlives that
-/// grace. Nesting is safe — the innermost park that still finds a held permit is
-/// the one that releases and re-acquires it.
+/// Wrap the wait, never the work. The grace, release, and reacquire live in
+/// [`tracedecay_code_index_runtime::park_admission`], which reads the runtime
+/// task-local [`with_dual_connection_admission_scope`] installs beside this
+/// module's lease. Nesting is safe, the innermost park that still finds a
+/// held permit releases and re-acquires it.
 ///
 /// Outside a connection scope (tests, background tasks, reserved-control
 /// clients) this is a transparent passthrough.
-#[hotpath::measure(label = "daemon.engine.admission.park", future = true)]
 pub(crate) async fn park_admission<F>(future: F) -> F::Output
 where
     F: std::future::Future,
 {
-    // The same pinned future is resumed after the grace expires, so the grace is
-    // an observation of the wait, never a cancellation of it.
-    let mut future = std::pin::pin!(future);
-    if let Ok(output) = timeout(ADMISSION_PARK_GRACE, &mut future).await {
-        return output;
-    }
-    let Ok(lease) = CONNECTION_ADMISSION.try_with(Arc::clone) else {
-        return future.await;
-    };
-    if !lease.release() {
-        return future.await;
-    }
-    let output = future.await;
-    lease.reacquire().await;
-    output
-}
-
-/// Capture the calling connection's admission lease, if it has one.
-///
-/// Needed because `rmcp` serves each connection from a task it spawns itself.
-/// A task-local does not cross that spawn, so the adapter captures the lease
-/// while it is still constructed on the connection task and re-enters the scope
-/// per request with [`in_connection_admission`]. Without that, every MCP
-/// `tools/call` — the daemon's main serving path — would park on a generation
-/// decode while still holding its admission slot.
-pub(crate) fn current_connection_admission() -> Option<Arc<ParkableConnectionAdmission>> {
-    CONNECTION_ADMISSION.try_with(Arc::clone).ok()
-}
-
-/// Re-enter a captured connection's admission scope on another task.
-pub(crate) async fn in_connection_admission<F>(
-    lease: Option<Arc<ParkableConnectionAdmission>>,
-    future: F,
-) -> F::Output
-where
-    F: std::future::Future,
-{
-    match lease {
-        Some(lease) => with_dual_connection_admission_scope(lease, future).await,
-        None => future.await,
-    }
+    tracedecay_code_index_runtime::park_admission(future).await
 }
 
 /// Serve one accepted connection under its admission permit.
@@ -367,9 +337,9 @@ impl DaemonPerClientAdmission {
     pub(crate) fn try_admit_request(
         &self,
         handshake: &DaemonHandshake,
-        request_line: &str,
+        request: &AuthenticatedFirstRequest,
     ) -> std::result::Result<DaemonPerClientPermit, DaemonClientSaturationResponse> {
-        if is_reserved_control_request(request_line) {
+        if is_reserved_control_request(request) {
             return Ok(DaemonPerClientPermit { _permit: None });
         }
         self.try_admit(handshake)
@@ -480,14 +450,7 @@ fn invocation_saturation_response(
     };
     Some(super::DaemonInvocationResponse::application_problem(
         request.request_id,
-        ApplicationProblem::Saturated {
-            diagnostic: SafeDiagnostic {
-                code: code.to_owned(),
-                message: "The owning TraceDecay daemon has no request capacity".to_owned(),
-            },
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        ApplicationProblem::saturated(code, "The owning TraceDecay daemon has no request capacity"),
     ))
 }
 
@@ -514,17 +477,17 @@ pub(crate) fn is_mcp_discovery_method(method: &str) -> bool {
     )
 }
 
-pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
-    if tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(request_line)
+pub(crate) fn is_reserved_control_request(request: &AuthenticatedFirstRequest) -> bool {
+    if tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(request.raw())
         .is_some()
     {
         return true;
     }
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
+    let Some(request) = request.parsed() else {
         return false;
     };
     if request.method == DAEMON_SHUTDOWN_METHOD {
-        return request.id.is_some_and(|id| !id.is_null());
+        return request.id.as_ref().is_some_and(|id| !id.is_null());
     }
     // MCP discovery and handshake are reserved, never bulk. They render the
     // immutable tool catalog and touch no store, so they cost O(catalog) and
@@ -556,21 +519,23 @@ pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
 }
 
 #[cfg(any(not(unix), test))]
-pub(crate) fn daemon_shutdown_response(request_line: &str) -> Option<JsonRpcResponse> {
-    let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
-    let id = request.id.filter(|id| !id.is_null())?;
+pub(crate) fn daemon_shutdown_response(
+    request: &AuthenticatedFirstRequest,
+) -> Option<JsonRpcResponse> {
+    let request = request.parsed()?;
+    let id = request.id.clone().filter(|id| !id.is_null())?;
     (request.method == DAEMON_SHUTDOWN_METHOD)
         .then(|| JsonRpcResponse::success(id, serde_json::json!({"accepted": true})))
 }
 
 pub(crate) async fn reject_reserved_bulk_request(
     transport: &mut impl tracedecay_mcp::McpTransport,
-    request_line: &str,
+    request: &AuthenticatedFirstRequest,
     capacity: usize,
 ) -> Result<()> {
     reject_admitted_request(
         transport,
-        request_line,
+        request,
         DaemonClientSaturationResponse {
             kind: DaemonClientSaturationKind::BulkCapacityReached,
             retryable: true,
@@ -580,10 +545,14 @@ pub(crate) async fn reject_reserved_bulk_request(
     .await
 }
 
-#[hotpath::measure(label = "daemon.engine.admission.reject_request", future = true)]
+#[tracing::instrument(
+    name = "daemon.engine.admission.reject_request",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn reject_admitted_request(
     transport: &mut impl tracedecay_mcp::McpTransport,
-    request_line: &str,
+    request: &AuthenticatedFirstRequest,
     saturation: DaemonClientSaturationResponse,
 ) -> Result<()> {
     let outcome = match saturation.kind {
@@ -591,28 +560,30 @@ pub(crate) async fn reject_admitted_request(
         DaemonClientSaturationKind::PerClientCapacityReached => "per_client_capacity_reached",
         DaemonClientSaturationKind::BulkCapacityReached => "bulk_capacity_reached",
     };
-    if let Some(response) = invocation_saturation_response(request_line, &saturation) {
+    if let Some(response) = invocation_saturation_response(request.raw(), &saturation) {
         write_invocation_response(transport, &response).await?;
     } else {
-        let parsed = serde_json::from_str::<JsonRpcRequest>(request_line).ok();
         // A notification (a well-formed request carrying no id) must never be
         // answered: JSON-RPC 2.0 forbids it, and a stray null-id error frame
         // desynchronizes strict MCP clients mid-handshake. Only an
         // unparseable line falls back to a null-id error, which is the
         // correct reply for a malformed request.
-        let notification = parsed.as_ref().is_some_and(|request| request.id.is_none());
+        let notification = request.parsed().is_some_and(|request| request.id.is_none());
         if !notification {
-            let request_id = parsed
-                .and_then(|request| request.id)
+            let request_id = request
+                .parsed()
+                .and_then(|request| request.id.clone())
                 .unwrap_or(serde_json::Value::Null);
             let response = saturation.into_json_rpc_with_id(request_id);
-            write_json_rpc_response(transport, &response).await?;
+            write_daemon_response(transport, &response).await?;
         }
     }
     log_daemon_event("daemon_client", &[("outcome", outcome.to_string())]);
     Ok(())
 }
 
+/// The request line a saturation rejection should answer, or `None` when this
+/// connection has already been answered or closed without one.
 async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result<Option<String>> {
     // A broker client sends a handshake before its JSON-RPC request, optionally
     // preceded by an auth preface. Consume those frames so the rejection uses
@@ -628,32 +599,50 @@ async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result
     } else {
         first_line
     };
-    DaemonHandshake::from_line(&handshake_line)?;
+    if DaemonHandshake::from_line(&handshake_line).is_err() {
+        // Saturation is not a reason to hide wire skew. Propagating the parse
+        // failure here dropped the socket with the client's pipelined request
+        // still unread, which the kernel reports as `Connection reset by peer`
+        //, indistinguishable from a daemon crash. Answer with the same typed
+        // refusal frame the served path uses (#753).
+        super::connection_serving::refuse_unparseable_handshake(
+            transport,
+            &handshake_line,
+            binary_version()?,
+        )
+        .await;
+        return Ok(None);
+    }
     read_line_handling_wire_oversized(transport).await
 }
 
-#[hotpath::measure(label = "daemon.engine.admission.reject_saturated", future = true)]
+#[tracing::instrument(
+    name = "daemon.engine.admission.reject_saturated",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn reject_saturated_daemon_client(
     stream: BrokerStream,
     response: DaemonClientSaturationResponse,
 ) {
     let mut transport = BrokerStreamTransport::new(stream);
     let response = async {
-        let request_line = saturated_request_line(&mut transport)
-            .await?
-            .unwrap_or_default();
+        // `None` means the connection was already answered with a typed
+        // handshake refusal, or closed before it sent a request.
+        let Some(request_line) = saturated_request_line(&mut transport).await? else {
+            return Ok(());
+        };
         if let Some(invocation) = invocation_saturation_response(&request_line, &response) {
             write_invocation_response(&mut transport, &invocation).await
         } else {
-            let request_id = serde_json::from_str::<JsonRpcRequest>(&request_line)
+            let request_id = serde_json::from_str::<serde_json::Value>(&request_line)
                 .ok()
-                .and_then(|request| request.id)
+                .and_then(|request| request.get("id").cloned())
                 .unwrap_or(serde_json::Value::Null);
-            write_json_rpc_response(&mut transport, &response.into_json_rpc_with_id(request_id))
-                .await
+            write_daemon_response(&mut transport, &response.into_json_rpc_with_id(request_id)).await
         }
     };
-    match timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, response).await {
+    match native_runtime::timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, response).await {
         Ok(Ok(())) => log_daemon_event(
             "daemon_client",
             &[("outcome", "client_capacity_reached".to_string())],
@@ -665,9 +654,12 @@ pub(crate) async fn reject_saturated_daemon_client(
                 ("error", error.to_string()),
             ],
         ),
-        Err(_) => log_daemon_event(
+        Err(error) => log_daemon_event(
             "daemon_client",
-            &[("outcome", "saturation_response_timeout".to_string())],
+            &[
+                ("outcome", "saturation_response_timeout".to_string()),
+                ("error", error.to_string()),
+            ],
         ),
     }
 }
@@ -687,9 +679,7 @@ pub(super) fn coordinated_background_refresh_writer(
     Arc::new(move |mut request| {
         let administration = administration.clone();
         Box::pin(async move {
-            let canonical_root = request
-                .project_root
-                .canonicalize()
+            let canonical_root = canonical_existing_identity(&request.project_root)
                 .unwrap_or_else(|_| request.project_root.clone());
             let active_branch = tracedecay_runtime_core::branch::current_branch(&canonical_root);
             let graph = administration
@@ -697,7 +687,7 @@ pub(super) fn coordinated_background_refresh_writer(
                 .await
                 .into_iter()
                 .find(|graph| {
-                    graph.project_root() == canonical_root
+                    same_canonical_path(graph.project_root(), &canonical_root)
                         && graph.active_branch() == active_branch.as_deref()
                 })
                 .ok_or_else(|| TraceDecayError::Config {

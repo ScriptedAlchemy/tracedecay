@@ -1,0 +1,203 @@
+import { ResourceTemplate, type CallToolResult, type McpServer } from "@modelcontextprotocol/server";
+import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
+import { OpenAIExtensions, type OpenAIMentionItem } from "@openai/mcp-extensions/server";
+import { z } from "zod";
+import { deepLinkPath, type ViewState } from "../shared/view.js";
+import type { DaemonBridge } from "./bridge.js";
+import { relayedHints, toFailure } from "./serve-client.js";
+import { failureView, projectsView, searchView, symbolView, viewText } from "./view-model.js";
+
+export const UI_RESOURCE_URI = "ui://tracedecay/code-explorer";
+export const SYMBOL_RESOURCE_TEMPLATE = "tracedecay://projects/{project_id}/symbols/{node_id}";
+
+const MENTION_PROJECT_LIMIT = 4;
+const MENTION_ITEM_LIMIT = 8;
+
+const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true };
+
+export type RegisterOptions = {
+  readonly server: McpServer;
+  readonly bridge: DaemonBridge;
+  readonly html: string;
+};
+
+function toolResult(view: ViewState, hints: readonly string[] = []): CallToolResult {
+  return {
+    content: [{ type: "text", text: viewText(view) }, ...hints.map((text) => ({ type: "text" as const, text }))],
+    structuredContent: view,
+  };
+}
+
+async function hintedResult(load: () => Promise<ViewState>): Promise<CallToolResult> {
+  const hints: string[] = [];
+  const view = await relayedHints.run(hints, load);
+  return toolResult(view, hints);
+}
+
+export function registerTraceDecayExtension({ server, bridge, html }: RegisterOptions): void {
+  const ui = (entrypoints: readonly unknown[] = []) => ({
+    ui: { resourceUri: UI_RESOURCE_URI },
+    "openai/ui": { entrypoints },
+    "openai/iconStyle": "monochrome",
+  });
+  const appOnly = { ui: { visibility: ["app"] } };
+
+  const projectId = z.string().min(1).describe("Registered TraceDecay project id");
+
+  registerAppTool(server,
+    "tracedecay_workspace",
+    {
+      title: "TraceDecay",
+      description: "Open the TraceDecay code explorer: pick an authorized project, search code, inspect symbols and their graph.",
+      inputSchema: z.object({}),
+      annotations: readOnly,
+      _meta: ui([{ type: "global" }]),
+    },
+    async (_args, extra) => toolResult(await projectsView(bridge, extra.mcpReq.signal)),
+  );
+
+  registerAppTool(server,
+    "tracedecay_thread_panel",
+    {
+      title: "TraceDecay",
+      description: "Open the TraceDecay code explorer beside this conversation.",
+      inputSchema: z.object({}),
+      annotations: readOnly,
+      _meta: ui([{ type: "thread" }]),
+    },
+    async (_args, extra) => toolResult(await projectsView(bridge, extra.mcpReq.signal)),
+  );
+
+  registerAppTool(server,
+    "tracedecay_list_projects",
+    {
+      title: "List TraceDecay projects",
+      description: "List up to ten recent projects registered in the local TraceDecay profile.",
+      inputSchema: z.object({}),
+      annotations: readOnly,
+      _meta: appOnly,
+    },
+    async (_args, extra) => toolResult(await projectsView(bridge, extra.mcpReq.signal)),
+  );
+
+  registerAppTool(server,
+    "tracedecay_search_code",
+    {
+      title: "Search TraceDecay code",
+      description:
+        "Search symbols in a registered TraceDecay project. Returns node ids usable with tracedecay_inspect_symbol plus the served code generation and freshness.",
+      inputSchema: z.object({ project_id: projectId, query: z.string().describe("Symbol or free-text query") }),
+      annotations: readOnly,
+      _meta: ui(),
+    },
+    async ({ project_id, query }, extra) =>
+      hintedResult(async () => {
+        try {
+          return await searchView(bridge, project_id, query, extra.mcpReq.signal);
+        } catch (error) {
+          return await failureView(bridge, project_id, error);
+        }
+      }),
+  );
+
+  registerAppTool(server,
+    "tracedecay_inspect_symbol",
+    {
+      title: "Inspect TraceDecay symbol",
+      description:
+        "Inspect one symbol by node id: definition, direct callers and callees, dependent impact, and separately reported project status. Relations carry their served generation; symbol and impact reads do not report snapshot identity.",
+      inputSchema: z.object({ project_id: projectId, node_id: z.string().min(1).describe("Symbol node id from a search result") }),
+      annotations: readOnly,
+      _meta: ui(),
+    },
+    async ({ project_id, node_id }, extra) =>
+      hintedResult(async () => {
+        try {
+          return await symbolView(bridge, project_id, node_id, extra.mcpReq.signal);
+        } catch (error) {
+          return await failureView(bridge, project_id, error);
+        }
+      }),
+  );
+
+  const extensions = new OpenAIExtensions(server);
+  extensions.mentions.setHandler(async ({ query }, extra) => {
+    if (query.trim().length === 0) return { items: [] };
+    const projects = (await bridge.listProjects(extra.mcpReq.signal)).slice(0, MENTION_PROJECT_LIMIT);
+    const perProject = await Promise.allSettled(
+      projects.map(async (project) => {
+        const result = await bridge.symbolSearch(project.project_id, query, extra.mcpReq.signal);
+        return result.items.slice(0, MENTION_ITEM_LIMIT).map(
+          (item): OpenAIMentionItem => ({
+            type: "resource_link",
+            uri: symbolResourceUri(project.project_id, item.node_id),
+            name: item.qualified_name,
+            title: `${item.kind} ${item.name}`,
+            description: `${project.label} · ${item.file}:${item.line}`,
+            mimeType: "text/markdown",
+          }),
+        );
+      }),
+    );
+    const items: OpenAIMentionItem[] = [];
+    const failures: string[] = [];
+    perProject.forEach((outcome, index) => {
+      if (outcome.status === "fulfilled") items.push(...outcome.value);
+      else failures.push(`${projects[index]?.label}: ${toFailure(outcome.reason).message}`);
+    });
+    // The mention result schema is a bare item list, so a tool error is the
+    // only way to say a lookup failed. Partial matches still win.
+    if (items.length === 0 && failures.length > 0) throw new Error(`symbol lookup failed for ${failures.join("; ")}`);
+    return { items };
+  });
+
+  server.registerResource(
+    "tracedecay-symbol",
+    new ResourceTemplate(SYMBOL_RESOURCE_TEMPLATE, { list: undefined }),
+    { title: "TraceDecay symbol evidence", mimeType: "text/markdown" },
+    async (uri, variables, extra) => {
+      const project_id = single(variables.project_id);
+      const node_id = single(variables.node_id);
+      const view = await symbolView(bridge, project_id, node_id, extra.mcpReq.signal);
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "text/markdown",
+            text: viewText(view),
+            _meta: { "openai/deepLink": deepLinkPath({ kind: "symbol", project_id, node_id }) },
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerResource(
+    "tracedecay-code-explorer",
+    UI_RESOURCE_URI,
+    { title: "TraceDecay code explorer", mimeType: "text/html;profile=mcp-app" },
+    async () => ({
+      contents: [
+        {
+          uri: UI_RESOURCE_URI,
+          mimeType: "text/html;profile=mcp-app",
+          text: html,
+          _meta: {
+            "openai/ui": { preferredDisplayMode: "inline", availableDisplayModes: ["inline", "fullscreen"] },
+            ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } },
+          },
+        },
+      ],
+    }),
+  );
+}
+
+export function symbolResourceUri(projectId: string, nodeId: string): string {
+  return `tracedecay://projects/${encodeURIComponent(projectId)}/symbols/${encodeURIComponent(nodeId)}`;
+}
+
+function single(value: string | string[] | undefined): string {
+  const first = Array.isArray(value) ? value[0] : value;
+  if (first === undefined || first.length === 0) throw new Error("resource URI is missing a template variable");
+  return decodeURIComponent(first);
+}

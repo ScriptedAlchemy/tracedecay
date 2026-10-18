@@ -1,23 +1,18 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
-use std::time::{Duration, Instant, SystemTime};
 
 use crate::common::host_sources;
 use tempfile::TempDir;
-use tracedecay::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
-use tracedecay::agents::host_bundle_v2::{HostBundleComponentV1, HostKindV1};
-use tracedecay_mcp::host_cli::ast_grep_command;
+use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
+use tracedecay_agent_hosts::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 // Compiles the generated plugin sources with py_compile (argv[1] is the
 // plugin dir). Only `generated_python_sources_compile` runs this: loading the
 // plugin via `PLUGIN_LOAD_PRELUDE` already compiles every module, so a
 // per-test compile pass would just re-parse ~150KB of generated Python in
-// each of the ~50 checks — measurable on Windows CI where these tests are a
+// each of the ~50 checks, measurable on Windows CI where these tests are a
 // runtime hotspot.
 const PYTHON_COMPILE_CHECK: &str = r#"
 import pathlib as _compile_pathlib
@@ -62,63 +57,28 @@ sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 "#;
 
-/// Binary path baked into the generated `tools.py` for the shared install.
-/// Part of the bundle fingerprint: changing it changes the rendered plugin.
+/// Binary path baked into the generated `tools.py` of each rendered install.
 const FIXTURE_TRACEDECAY_BIN: &str = "/usr/local/bin/tracedecay";
 
-/// Generator commit baked into the rendered bundle's provenance header. A
-/// fixed 40-hex fixture value keeps the shared cross-process install
-/// byte-stable regardless of the checkout that runs the suite.
+/// Generator commit baked into the rendered bundle's provenance header.
 const GENERATOR_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-/// One unpinned Hermes install shared by every check.
-///
-/// The embedded host catalog regenerates the full plugin from embedded
-/// templates, so the output is identical for every unpinned install — there
-/// is no reason to redo it per test. Each check writes its own uniquely
-/// named script into the shared plugin dir and only mutates state inside its
-/// own python interpreter, so tests stay independent.
-///
-/// The bundle is also shared across *processes* (see [`cached_install_home`]):
-/// nextest runs one process per test, so a `LazyLock` alone re-renders the
-/// bundle 70+ times per suite. Rendering is not cheap — `get_tool_definitions`
-/// probes the host `ast-grep` with `--version` and `outline --help`, two real
-/// subprocess spawns, and Windows CI resolves `ast-grep` through an npm shim.
-struct SharedInstall {
-    home: PathBuf,
-    plugin_dir: PathBuf,
-    fake_tools_dir: PathBuf,
-    /// Set only on the fallback path, where the bundle could not be shared
-    /// and this process rendered a private copy that it must clean up.
-    _tempdir: Option<TempDir>,
+/// A Hermes install rendered for one check; dropping it removes the install.
+struct RenderedInstall {
+    home: TempDir,
 }
 
-/// Written last, so its presence means the bundle beside it is complete.
-const INSTALL_READY_MARKER: &str = ".tracedecay-hermes-install-ready";
-/// How long a process waits for a peer that is already rendering the bundle
-/// before giving up and rendering a private copy.
-const INSTALL_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
-/// A lock older than this outlived the run that took it, so it is stale.
-const INSTALL_LOCK_STALE_AFTER: Duration = Duration::from_secs(300);
-
-static SHARED_INSTALL: LazyLock<SharedInstall> = LazyLock::new(|| match cached_install_home() {
-    Some(home) => SharedInstall {
-        plugin_dir: plugin_dir_for(&home),
-        fake_tools_dir: fake_tools_dir_for(&home),
-        home,
-        _tempdir: None,
-    },
-    None => {
-        let tempdir = TempDir::new().unwrap();
-        render_install(tempdir.path()).unwrap();
-        SharedInstall {
-            home: tempdir.path().to_path_buf(),
-            plugin_dir: plugin_dir_for(tempdir.path()),
-            fake_tools_dir: fake_tools_dir_for(tempdir.path()),
-            _tempdir: Some(tempdir),
-        }
+impl RenderedInstall {
+    fn new() -> Self {
+        let home = TempDir::new().unwrap();
+        render_install(home.path()).unwrap();
+        Self { home }
     }
-});
+
+    fn plugin_dir(&self) -> PathBuf {
+        plugin_dir_for(self.home.path())
+    }
+}
 
 fn plugin_dir_for(home: &Path) -> PathBuf {
     home.join(".hermes/plugins/tracedecay")
@@ -128,7 +88,7 @@ fn fake_tools_dir_for(home: &Path) -> PathBuf {
     home.join("fake-tools")
 }
 
-/// Renders everything the checks read out of a shared install: the generated
+/// Renders everything the checks read out of an install: the generated
 /// Hermes plugin plus the immutable fake `tracedecay` binaries the subprocess
 /// failure-mode check executes.
 fn render_install(home: &Path) -> std::io::Result<()> {
@@ -141,10 +101,11 @@ fn render_install(home: &Path) -> std::io::Result<()> {
     });
     let component_set = verified_embedded_host_component_set_with_tracedecay_bin(
         HostKindV1::Hermes,
-        &[HostBundleComponentV1::Core],
+        &[HostComponentV1::Core],
         0,
         FIXTURE_TRACEDECAY_BIN,
         GENERATOR_COMMIT,
+        &tracedecay_agent_hosts::agents::serve_args::ServeArgs::default(),
     )
     .map_err(std::io::Error::other)?;
     for component in component_set.component_set.components {
@@ -159,103 +120,12 @@ fn render_install(home: &Path) -> std::io::Result<()> {
     write_fake_tracedecay_binaries(&fake_tools_dir_for(home))
 }
 
-/// Path of the machine-shared bundle for the current inputs, rendering it
-/// first if no complete bundle exists yet.
-///
-/// Returns `None` when the bundle cannot be shared (unwritable temp dir, a
-/// peer still rendering after [`INSTALL_WAIT_TIMEOUT`]); the caller then
-/// renders a private copy, which is exactly the old per-process behaviour.
-fn cached_install_home() -> Option<PathBuf> {
-    let root = std::env::temp_dir().join(format!("tracedecay-hermes-suite-{}", install_key()));
-    let ready = root.join(INSTALL_READY_MARKER);
-    if ready.is_file() {
-        return Some(root);
-    }
-
-    let lock = root.with_extension("lock");
-    if lock_is_stale(&lock) {
-        let _ = std::fs::remove_file(&lock);
-    }
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock)
-    {
-        Ok(_) => {
-            // A leftover directory here is a partial render from a run that
-            // died before publishing the marker; nobody can be reading it,
-            // because readers only ever follow the marker.
-            let _ = std::fs::remove_dir_all(&root);
-            let rendered =
-                render_install(&root).and_then(|()| std::fs::write(&ready, install_key()));
-            let _ = std::fs::remove_file(&lock);
-            rendered.ok()?;
-            Some(root)
-        }
-        Err(_) => wait_for_ready(&ready, &lock).then_some(root),
-    }
-}
-
-/// Every input that can change the rendered bundle: the generator build (this
-/// executable embeds the plugin templates), the binary path baked into
-/// `tools.py`, and the `ast-grep` image whose presence decides which tool
-/// definitions are rendered. Metadata only — resolving the key must not spawn
-/// the subprocesses the shared bundle exists to avoid.
-fn install_key() -> String {
-    let mut hasher = DefaultHasher::new();
-    FIXTURE_TRACEDECAY_BIN.hash(&mut hasher);
-    let ast_grep = PathBuf::from(ast_grep_command().get_program());
-    for path in [std::env::current_exe().ok(), Some(ast_grep)]
-        .into_iter()
-        .flatten()
-    {
-        path.hash(&mut hasher);
-        file_identity(&path).hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
-}
-
-fn file_identity(path: &Path) -> Option<(u64, Duration)> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let modified = metadata
-        .modified()
-        .ok()?
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?;
-    Some((metadata.len(), modified))
-}
-
-fn lock_is_stale(lock: &Path) -> bool {
-    file_identity(lock)
-        .and_then(|(_, modified)| SystemTime::UNIX_EPOCH.checked_add(modified)?.elapsed().ok())
-        .is_some_and(|age| age > INSTALL_LOCK_STALE_AFTER)
-}
-
-/// Blocks until the peer holding `lock` publishes the ready marker.
-///
-/// The holder writes the marker before releasing the lock, so a lock that
-/// disappears with no marker means the render failed and waiting longer is
-/// pointless. The timeout only covers a holder killed outright.
-fn wait_for_ready(ready: &Path, lock: &Path) -> bool {
-    let deadline = Instant::now() + INSTALL_WAIT_TIMEOUT;
-    while Instant::now() < deadline {
-        if ready.is_file() {
-            return true;
-        }
-        if !lock.exists() {
-            return ready.is_file();
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
 /// Fake `tracedecay` binaries for the subprocess failure-mode check, written
-/// once as part of the shared bundle.
+/// as part of each rendered install.
 ///
 /// `(file stem, POSIX body, Windows body)`. cmd.exe `echo` always appends a
 /// newline that POSIX `printf` does not, and a plain `echo text 1>&2` would
-/// emit a trailing space before the redirect — hence the redirect-first form
+/// emit a trailing space before the redirect, hence the redirect-first form
 /// (`>&2 echo`).
 const FAKE_TRACEDECAY_BINARIES: &[(&str, &str, &str)] = &[
     (
@@ -288,13 +158,7 @@ fn write_fake_tracedecay_binaries(dir: &Path) -> std::io::Result<()> {
             continue;
         }
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{posix_body}"))?;
-        #[cfg(unix)]
-        {
-            let mut permissions = std::fs::metadata(&path)?.permissions();
-            permissions.set_mode(permissions.mode() | 0o111);
-            std::fs::set_permissions(&path, permissions)?;
-        }
+        write_executable_script(&path, format!("#!/bin/sh\n{posix_body}"))?;
     }
     Ok(())
 }
@@ -316,34 +180,52 @@ fn python_command() -> Command {
                     }
                 }
             }
+            if let Some(paths) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&paths) {
+                    for name in ["python.exe", "python3.exe"] {
+                        let exe = dir.join(name);
+                        if exe.is_file() {
+                            return exe;
+                        }
+                    }
+                }
+            }
+            // The pylauncher ships with every python.org install and lives
+            // on PATH as `py`; resolve it once so every spawn skips lookup.
+            if let Ok(out) = Command::new("py")
+                .args(["-3", "-c", "import sys; print(sys.executable)"])
+                .output()
+            {
+                let exe = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if out.status.success() && !exe.is_empty() {
+                    return PathBuf::from(exe);
+                }
+            }
         }
         PathBuf::from("python3")
     });
     Command::new(&*PYTHON)
 }
 
-/// Writes `script` into the shared plugin dir and runs it with a hermetic
-/// environment (isolated HOME, no HERMES_HOME/HERMES_PROFILE, no ambient
-/// LCM_* knobs), passing the plugin dir as argv[1].
+/// Writes `script` into a freshly rendered plugin dir and runs it with a
+/// hermetic environment (isolated HOME, no HERMES_HOME/HERMES_PROFILE, no
+/// ambient LCM_* knobs), passing the plugin dir as argv[1].
 fn run_python_check(script_name: &str, script: &str, failure_message: &str) {
-    let install = &*SHARED_INSTALL;
-    let script_path = install.plugin_dir.join(script_name);
-    // Script names are unique per check and their bodies are constants, so a
-    // matching file in a reused bundle is already this exact script. Skipping
-    // the rewrite keeps the shared plugin dir immutable across processes.
-    let already_written =
-        std::fs::read(&script_path).is_ok_and(|existing| existing == script.as_bytes());
-    if !already_written {
-        std::fs::write(&script_path, script).unwrap();
-    }
+    let install = RenderedInstall::new();
+    let plugin_dir = install.plugin_dir();
+    let script_path = plugin_dir.join(script_name);
+    std::fs::write(&script_path, script).unwrap();
 
     let mut command = python_command();
     command
         .arg(&script_path)
-        .arg(&install.plugin_dir)
+        .arg(&plugin_dir)
         // Isolate from the developer's real ~/.hermes.
-        .env("HOME", &install.home)
-        .env("TRACEDECAY_TEST_FAKE_TOOLS", &install.fake_tools_dir)
+        .env("HOME", install.home.path())
+        .env(
+            "TRACEDECAY_TEST_FAKE_TOOLS",
+            fake_tools_dir_for(install.home.path()),
+        )
         .env_remove("HERMES_HOME")
         .env_remove("HERMES_PROFILE");
     // Ambient LCM_* vars from the worker shell must not leak into the
@@ -376,7 +258,7 @@ fn run_generated_plugin_script(script_name: &str, script: &str, failure_message:
 
 /// Every generated Python module must compile standalone. Loading the plugin
 /// package (as all other checks do) exercises the same parse, but a syntax
-/// error in a lazily imported module would slip through — this is the one
+/// error in a lazily imported module would slip through. This is the one
 /// place that still runs an explicit `py_compile` pass.
 #[test]
 fn generated_python_sources_compile() {
@@ -929,41 +811,6 @@ assert calls[-1][2] == {}
 }
 
 #[test]
-fn generated_context_engine_home_default_uses_installed_profile() {
-    run_generated_plugin_script(
-        "check_context_engine_default_home.py",
-        r#"
-import os
-import pathlib
-import tempfile
-
-os.environ.pop("HERMES_HOME", None)
-with tempfile.TemporaryDirectory() as tmp:
-    home = pathlib.Path(tmp) / "isolated-home"
-    home.mkdir()
-    # expanduser reads HOME on POSIX and USERPROFILE on Windows.
-    os.environ["HOME"] = str(home)
-    os.environ["USERPROFILE"] = str(home)
-    expected = str(plugin_dir.parent.parent)
-
-    engine = plugin.TraceDecayContextEngine()
-    engine.initialize(session_id="session-1")
-
-    def normalized(path):
-        return os.path.normcase(os.path.realpath(path))
-
-    assert normalized(engine.hermes_home) == normalized(expected), engine.hermes_home
-    status = engine.get_status()
-    assert "storage_scope" not in status
-    assert "hermes_home" not in status
-    assert "lcm_project_root" not in status
-    assert status["project_root"] is None, status
-"#,
-        "Hermes home defaults to the installed profile but never TraceDecay storage",
-    );
-}
-
-#[test]
 fn generated_tools_bridge_preserves_message_kwargs_in_json_args() {
     run_generated_plugin_script(
         "check_tools_message_kwargs.py",
@@ -1003,7 +850,9 @@ assert args["messages"] == [{"role": "user", "content": "current turn"}]
 
 tools.call_tracedecay_tool("tracedecay_status", {})
 args = json.loads(calls[1][calls[1].index("--args") + 1])
-assert args == {}
+# `tracedecay_status` is format-capable, so the bridge defaults `format`;
+# nothing else (notably no `messages`) may leak into a call without kwargs.
+assert args == {"format": "json"}
 "#,
         "generated subprocess bridge should preserve messages kwargs in JSON args",
     );
@@ -1340,11 +1189,12 @@ for index in range(0, len(calls), 2):
     user_call, project_call = calls[index:index + 2]
     assert user_call[0] == "tracedecay_hook_runtime"
     assert user_call[1]["action"] == "ingest_transcript"
-    assert user_call[1]["storage_scope"] == "user"
+    assert user_call[1]["user_scope"] is True
+    assert "storage_scope" not in user_call[1]
     assert user_call[2] == {}
     assert project_call[0] == "tracedecay_hook_runtime"
     assert project_call[1]["action"] == "ingest_transcript"
-    assert "storage_scope" not in project_call[1]
+    assert project_call[1]["user_scope"] is False
     assert project_call[2]["project_root"] == "/tmp/project"
     assert user_call[1]["messages"] == project_call[1]["messages"]
 
@@ -1371,7 +1221,8 @@ fallback.initialize(session_id="session-2", hermes_home="/tmp/hermes")
 fallback.sync_turn("user", "assistant", session_id="session-2")
 assert fallback.project_root is None
 assert "project_root" not in calls[-1][1]
-assert calls[-1][1]["storage_scope"] == "user"
+assert calls[-1][1]["user_scope"] is True
+assert "storage_scope" not in calls[-1][1]
 assert "project_root" not in calls[-1][2]
 "#,
         "sync_turn fallback messages should not collapse repeated identical turns",
@@ -1416,7 +1267,7 @@ messages = [
 ]
 
 provider = plugin.TracedecayMemoryProvider()
-provider.initialize(session_id="telegram-dm")
+provider.initialize(session_id="telegram-dm", cwd=plugin.tools.hermes_home_dir())
 provider.sync_turn(
     "compare both repositories",
     "done",
@@ -1426,8 +1277,11 @@ provider.sync_turn(
 
 assert len(calls) == 3, calls
 user_call, alpha_call, beta_call = calls
-assert user_call[1]["storage_scope"] == "user"
+assert user_call[1]["user_scope"] is True
+assert "storage_scope" not in user_call[1]
 assert user_call[2] == {}
+assert alpha_call[1]["user_scope"] is False
+assert beta_call[1]["user_scope"] is False
 assert alpha_call[2] == {"project_root": "/repos/alpha"}
 assert beta_call[2] == {"project_root": "/repos/beta"}
 assert "storage_scope" not in alpha_call[1]
@@ -1680,16 +1534,23 @@ assert llm_call["timeout"] == 9.0
     );
 }
 
+/// The bridge decodes exactly the shapes `tracedecay tool --json` prints: the
+/// MCP result with one JSON content block holding either the tool's own result
+/// or a retained `ApplicationEnvelope`. Truncation recovery belongs to the CLI
+/// (`recover_truncated_mcp_result`), so the bridge never issues a retrieve of
+/// its own, and every other shape is an explicit error.
 #[test]
-fn call_tracedecay_json_normalizes_and_decodes_mcp_envelopes() {
+fn call_tracedecay_json_decodes_the_cli_result_contract() {
     run_generated_plugin_script(
         "check_bridge_envelope_decoding.py",
         r#"
 import json
 
 responses = []
+calls = []
 
 def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append(name)
     return responses.pop(0)
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
@@ -1697,6 +1558,17 @@ plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 def call_with_outer(outer):
     responses.append(json.dumps(outer))
     return plugin.call_tracedecay_json("tracedecay_lcm_status", {})
+
+def mcp_result(*texts):
+    return {"content": [{"type": "text", "text": text} for text in texts]}
+
+def envelope(payload, outcome="evidence"):
+    return {
+        "contract": {"schema_id": "schema.application.retained.lcm-status.result", "schema_revision": 1},
+        "request_id": "request.check",
+        "scope": {"project_id": "project.check"},
+        "outcome": {"outcome": outcome, "value": {"page": {}, "payload": payload}},
+    }
 
 missing_content = call_with_outer({})
 assert missing_content["error"] == "tracedecay tool response missing text content"
@@ -1707,90 +1579,57 @@ assert empty_content["error"] == "tracedecay tool response missing text content"
 non_text_content = call_with_outer({"content": [{"type": "text", "text": 123}]})
 assert non_text_content["error"] == "tracedecay tool response missing text content"
 
-responses.append(json.dumps({"content": [{"type": "text", "text": "{not json"}]}))
-invalid_nested_json = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
+invalid_nested_json = call_with_outer(mcp_result("{not json"))
 assert invalid_nested_json["error"] == "tracedecay tool returned invalid nested JSON"
 
 outer_error = {"error": "tool failed", "code": "boom", "content": []}
 assert call_with_outer(outer_error) == outer_error
 
-calls = []
+# A bare envelope with no MCP content block is not something the CLI prints.
+bare = call_with_outer(envelope({"status": "ok"}))
+assert bare["error"] == "tracedecay tool response missing text content", bare
 
-def envelope(payload):
-    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+# Compatibility tools: the block is the result itself, returned untouched even
+# when it carries keys that look like envelope or LCM vocabulary.
+plain = {
+    "status": "ok",
+    "answer": "42",
+    "content": json.dumps({"nested": True}),
+    "outcome": "evidence",
+    "truncated": False,
+}
+assert call_with_outer(mcp_result(json.dumps(plain))) == plain
 
-def fake_retrieve_call(name, args, **kwargs):
-    calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_status":
-        return envelope({"truncated": True, "handle": "payload-1"})
-    if name == "tracedecay_retrieve":
-        if args == {"handle": "payload-1"}:
-            assert kwargs == {"project_root": "/tmp/project"}
-            return envelope({"content": json.dumps({"should_compress": True, "source": "retrieved"})})
-        assert args == {"handle": "payload-ignored"}
-        assert kwargs == {}
-        return envelope({"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]})
-    if name == "tracedecay_fact_store":
-        return envelope({"truncated": True, "handle": "payload-ignored"})
-    raise AssertionError(f"unexpected tool call: {name}")
+# Retained surfaces: the block is an ApplicationEnvelope; the result is its
+# outcome payload for every outcome family.
+for outcome in ("evidence", "preview", "effect"):
+    decoded = call_with_outer(mcp_result(json.dumps(envelope({"status": "ok", "kind": outcome}, outcome))))
+    assert decoded == {"status": "ok", "kind": outcome}, decoded
 
-plugin.tools.call_tracedecay_tool = fake_retrieve_call
-retrieved = plugin.call_tracedecay_json("tracedecay_lcm_status", {}, project_root="/tmp/project")
-assert retrieved == {"should_compress": True, "source": "retrieved"}
-assert [call[0] for call in calls] == ["tracedecay_lcm_status", "tracedecay_retrieve"]
+# Prose trailer blocks (stale-graph freshness) ride beside the JSON block.
+with_trailer = call_with_outer(mcp_result(json.dumps(plain), "\ncode_graph_freshness: stale"))
+assert with_trailer == plain, with_trailer
 
-retrieved_fact = plugin.call_tracedecay_json("tracedecay_fact_store", {})
-assert retrieved_fact == {"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]}
-assert [call[0] for call in calls] == [
-    "tracedecay_lcm_status",
-    "tracedecay_retrieve",
-    "tracedecay_fact_store",
-    "tracedecay_retrieve",
-]
+# Malformed envelopes are refused, never returned as an empty success.
+no_payload = call_with_outer(mcp_result(json.dumps(envelope(None))))
+assert "omitted its result payload" in no_payload["error"], no_payload
+two_payloads = call_with_outer(mcp_result(json.dumps(plain), json.dumps(plain)))
+assert "returned 2 JSON payloads" in two_payloads["error"], two_payloads
+list_payload = call_with_outer(mcp_result(json.dumps([1, 2])))
+assert "expected one object" in list_payload["error"], list_payload
 
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-split_payload = json.dumps({"status": "ok", "source": "split-content"})
-responses.append(json.dumps({
-    "content": [
-        {"type": "text", "text": split_payload[:12]},
-        {"type": "text", "text": split_payload[12:]},
-    ]
-}))
-split_content = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
-assert split_content == {"status": "ok", "source": "split-content"}
-
-nested_payload = {"content": json.dumps({"status": "ok", "source": "nested-content"})}
-responses.append(envelope(nested_payload))
-nested_content = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
-assert nested_content == {"status": "ok", "source": "nested-content"}
-
-response_handle_calls = []
-
-def fake_response_handle_call(name, args, **kwargs):
-    response_handle_calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_status":
-        return envelope({"truncated": True, "response_handle": "payload-2"})
-    if name == "tracedecay_retrieve":
-        assert args == {"handle": "payload-2"}
-        return envelope({
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps({"status": "ok", "source": "response-handle"}),
-                }
-            ]
-        })
-    raise AssertionError(f"unexpected tool call: {name}")
-
-plugin.tools.call_tracedecay_tool = fake_response_handle_call
-response_handle_payload = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
-assert response_handle_payload == {"status": "ok", "source": "response-handle"}
-assert [call[0] for call in response_handle_calls] == [
-    "tracedecay_lcm_status",
-    "tracedecay_retrieve",
-]
+# The CLI owns truncation recovery; a handle envelope that somehow arrives is
+# refused as a preview, never dereferenced here, and triggers no second call.
+calls.clear()
+handle_envelope = {"truncated": True, "original_chars": 99, "preview": "{", "handle": "h1"}
+preview = call_with_outer(mcp_result(json.dumps(handle_envelope)))
+assert "truncated preview" in preview["error"], preview
+assert calls == ["tracedecay_lcm_status"], calls
+# grep-style `truncated: bool` result flags are not envelopes.
+flagged = {"truncated": True, "matches": []}
+assert call_with_outer(mcp_result(json.dumps(flagged))) == flagged
 "#,
-        "generated JSON bridge should normalize malformed envelopes and decode LCM payloads",
+        "generated JSON bridge should decode the CLI result contract and refuse other shapes",
     );
 }
 
@@ -1830,9 +1669,7 @@ spec.loader.exec_module(plugin)
 
 tools = plugin.tools
 
-# The fake binaries are part of the shared immutable fixture, generated once
-# per machine by the Rust harness rather than rewritten (and re-chmodded, and
-# on Windows rescanned and re-imaged) on every run of this check.
+# The fake binaries are rendered with the install by the Rust harness.
 def fake_binary(name):
     path = fake_tools / (f"{name}.cmd" if os.name == "nt" else name)
     assert path.is_file(), f"missing fake tracedecay fixture: {path}"
@@ -1982,48 +1819,79 @@ assert ctx.skills[0][1].name == "SKILL.md"
     );
 }
 
+/// The shared skill and the Hermes skill teach the same retrieval ladder, but
+/// they carry different depth by design: the repository skill names the
+/// operations and the wire fields an agent must preserve and leaves argument
+/// defaults to the live tool schemas, while the Hermes template is the full
+/// manual its host installs.
 #[test]
 fn generated_skill_mirrors_session_context_retrieval_contract() {
     let template = host_sources::HERMES_SKILL_MD;
+    let install = RenderedInstall::new();
     let installed =
-        std::fs::read_to_string(SHARED_INSTALL.plugin_dir.join("skills/tracedecay/SKILL.md"))
-            .unwrap();
-    let required_markers = [
+        std::fs::read_to_string(install.plugin_dir().join("skills/tracedecay/SKILL.md")).unwrap();
+    // Every host skill must route to these operations and preserve these
+    // response fields: they are the retrieval contract, not tool manual text.
+    let shared_markers = [
         "tracedecay_message_search",
-        "`provider=all`",
-        "`catch_up=false`",
-        "`limit=10`",
         "lcm_grep",
         "lcm_load_session",
         "lcm_describe",
         "lcm_expand",
         "lcm_expand_query",
-        "`temporal_mode=current`",
-        "`temporal_mode=forensic`",
         "`next_cursor`",
-        "same target, source limit, and content slice",
         "`coverage`",
         "`anchors`",
-        "needs_synthesis=true",
-        "host must synthesize",
+        "needs_synthesis",
         "tracedecay_sessions_for",
         "tracedecay_workflows",
+        "tracedecay_session_refresh_begin",
+        "tracedecay_session_refresh_status",
+        "tracedecay_session_refresh_cancel",
+    ];
+    // Argument defaults and worked guidance belong to the Hermes manual only;
+    // the repository skill defers them to the registered tool schemas.
+    let hermes_manual_markers = [
+        "`provider=all`",
+        "`require_fresh=false`",
+        "`limit=10`",
+        "`temporal_mode={\"kind\":\"current\"}`",
+        "`temporal_mode={\"kind\":\"forensic\"}`",
+        "same target, source limit, and content slice",
+        "needs_synthesis=true",
+        "host must synthesize",
         "`limit=20`",
-        "tracedecay_session_refresh",
         "`begin`",
         "`status`",
         "`cancel`",
     ];
 
-    for (label, skill) in [
+    let hermes_markers: Vec<&str> = shared_markers
+        .iter()
+        .chain(hermes_manual_markers.iter())
+        .copied()
+        .collect();
+    let repository_skill = format!(
+        "{}\n{}",
+        include_str!("../../../../plugin/skills/managing-session-context/SKILL.md"),
+        include_str!(
+            "../../../../plugin/skills/managing-session-context/references/refresh-and-health.md"
+        )
+    );
+    for (label, skill, markers) in [
         (
             "repository managing-session-context skill",
-            include_str!("../../../../plugin/skills/managing-session-context/SKILL.md"),
+            repository_skill.as_str(),
+            &shared_markers[..],
         ),
-        ("Hermes template", template),
-        ("installed Hermes skill snapshot", installed.as_str()),
+        ("Hermes template", template, &hermes_markers[..]),
+        (
+            "installed Hermes skill snapshot",
+            installed.as_str(),
+            &hermes_markers[..],
+        ),
     ] {
-        for marker in required_markers {
+        for marker in markers {
             assert!(
                 skill.contains(marker),
                 "{label} should document session retrieval marker {marker:?}",

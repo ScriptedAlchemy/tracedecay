@@ -1,12 +1,9 @@
-use tracedecay_daemon_protocol::{FramePoll, FrameSend};
-
 use super::super::*;
 use super::{initialize, session};
 use crate::PublicationDelivery;
-use crate::bridge::DaemonLspSessionTransport;
+use crate::analyzer::broker::DiagnosticSeverity;
 use crate::diagnostics::{
-    DiagnosticSeverity, DiagnosticSource, GatewayDiagnosticRelatedInformation, LspPosition,
-    LspRange,
+    DiagnosticSource, GatewayDiagnosticRelatedInformation, LspPosition, LspRange,
 };
 use crate::overlay::{MAX_OVERLAY_BYTES, OVERLAY_DIAGNOSTIC_DEBOUNCE_MS};
 
@@ -307,7 +304,7 @@ fn exit_releases_session_local_overlays_and_queued_frames() {
 
     assert_eq!(session.lifecycle(), SessionLifecycle::Exited);
     assert!(session.overlays().snapshot("file:///root/a.rs").is_none());
-    assert!(session.drain_outbound().is_empty());
+    assert_eq!(session.drain_outbound().len(), 0);
 }
 
 #[test]
@@ -404,7 +401,7 @@ fn server_refresh_responses_do_not_create_json_rpc_response_loops() {
         "result": null,
     });
     session.handle_payload(&serde_json::to_vec(&response).unwrap(), 61);
-    assert!(session.drain_outbound().is_empty());
+    assert_eq!(session.drain_outbound().len(), 0);
 }
 
 #[test]
@@ -448,23 +445,28 @@ fn pull_diagnostics_are_generation_bound_and_return_unchanged_for_same_result_id
 }
 
 #[test]
-fn bridge_transport_parses_typed_session_frames_and_acks_delivery() {
-    let mut transport = DaemonLspProtocolTransport::new(session());
-    transport.set_now_ms(0);
-    assert_eq!(
-            transport
-                .try_send_client_frame(
-                    br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///root","capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#,
-                )
-                .unwrap(),
-            FrameSend::Sent
-        );
+fn client_frame_is_parsed_and_its_response_released_only_on_acknowledgement() {
+    let mut session = session();
     assert!(matches!(
-        transport.poll_daemon_frame().unwrap(),
-        FramePoll::Frame(frame) if serde_json::from_slice::<Value>(&frame).unwrap()["id"] == 1
+        session.try_handle_client_payload(
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///root","capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#,
+            0,
+        ),
+        ClientFrameAdmission::Consumed(ProtocolDispatch { closed: false, .. })
     ));
-    transport.acknowledge_daemon_frame().unwrap();
-    assert_eq!(transport.poll_daemon_frame().unwrap(), FramePoll::Pending);
+    let response = session
+        .poll_outbound()
+        .expect("initialize response")
+        .to_vec();
+    assert_eq!(serde_json::from_slice::<Value>(&response).unwrap()["id"], 1);
+    assert_eq!(
+        session.poll_outbound(),
+        Some(response.as_slice()),
+        "an unacknowledged frame is redelivered, not dropped"
+    );
+    assert!(session.acknowledge_outbound());
+    assert!(session.poll_outbound().is_none());
+    assert!(!session.acknowledge_outbound());
 }
 
 #[test]
@@ -516,16 +518,8 @@ fn in_flight_publication_is_not_replaced_or_used_to_ack_a_newer_version() {
 
 #[test]
 fn oversized_overlay_closes_before_the_bridge_acknowledges_the_notification() {
-    let mut transport = DaemonLspProtocolTransport::new(session());
-    transport.session_mut().handle_payload(
-            br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///root","capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#,
-            0,
-        );
-    transport.session_mut().drain_outbound();
-    transport.session_mut().handle_payload(
-        br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
-        1,
-    );
+    let mut session = session();
+    initialize(&mut session);
 
     let notification = json!({
         "jsonrpc": "2.0",
@@ -541,14 +535,13 @@ fn oversized_overlay_closes_before_the_bridge_acknowledges_the_notification() {
     });
     let notification = serde_json::to_vec(&notification).unwrap();
 
-    assert_eq!(
-        transport.try_send_client_frame(&notification).unwrap(),
-        FrameSend::Closed
-    );
-    assert_eq!(transport.session().lifecycle(), SessionLifecycle::Expired);
+    assert!(matches!(
+        session.try_handle_client_payload(&notification, 2),
+        ClientFrameAdmission::Consumed(ProtocolDispatch { closed: true, .. })
+    ));
+    assert_eq!(session.lifecycle(), SessionLifecycle::Expired);
     assert!(
-        transport
-            .session()
+        session
             .overlays()
             .snapshot("file:///root/oversized.rs")
             .is_none()

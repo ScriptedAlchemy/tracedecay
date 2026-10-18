@@ -26,7 +26,7 @@ Route: `/settings`.
 | Remote Brain operational state | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | Remote authority reports connected, idle, unavailable, unconfigured, denied, or stale. |
 | Search/filter and exact fallback | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | Search by key/value/source or switch to the accessible configuration table. |
 
-“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
+"Depicted" means visible in the plate (including a labelled state legend), not executed by the still. "No current plate" is reserved for required behavior or result that no current plate pictures.
 
 ## Historical provenance
 

@@ -3,18 +3,21 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use tracedecay_configuration::{DirectConfigurationMutation, configuration_layer_scope_digest};
 use tracedecay_daemon_service::*;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
 };
+use tracedecay_global_db::configuration::contracts::types::{
+    DirectConfigurationMutation, configuration_layer_scope_digest,
+};
 
 #[tokio::test]
 async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile = tempfile::tempdir().expect("profile root");
     let project = tempfile::tempdir().expect("project root");
     let (graph, runtime) =
-        crate::tracedecay::TraceDecay::init_test_fixture_with_registered_runtime(
+        tracedecay_project::project::TraceDecay::init_test_fixture_with_registered_runtime(
+            profile.path(),
             project.path(),
             "project.configuration.read-only-worker-plan",
         )
@@ -24,11 +27,8 @@ async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
     let read_only = runtime
         .open_project_graph_read_only_for_test(
             project.path(),
-            crate::tracedecay::TraceDecayOpenOptions {
-                profile_root: Some(
-                    tracedecay_runtime_core::storage::default_profile_root()
-                        .expect("default profile root"),
-                ),
+            tracedecay_project::project::TraceDecayOpenOptions {
+                profile_root: Some(profile.path().to_path_buf()),
                 global_db_path: None,
             },
         )
@@ -37,10 +37,8 @@ async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
     assert!(!read_only.db().is_writable());
 
     let invocation = crate::daemon::invocation_state::DaemonInvocationState::default();
-    let profile_root =
-        tracedecay_runtime_core::storage::default_profile_root().expect("default profile root");
     let profile_identity =
-        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        tracedecay_daemon_identity::profile_identity::load_or_create(profile.path())
             .expect("profile identity");
     let profile_sessions = runtime
         .session_registry_for_test()
@@ -48,7 +46,7 @@ async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
         .await
         .expect("profile sessions authority");
     invocation
-        .install_profile_worker_plan(profile_sessions, profile_identity.profile_id())
+        .install_profile_worker_plan_for_test(profile_identity, profile_sessions)
         .await
         .expect("daemon bootstrap worker plan");
     invocation
@@ -72,14 +70,12 @@ fn direct_configuration_grants_reject_foreign_caller_selected_layers() {
         collection_id: tracedecay_domain::QueryCollectionId::new("collection.configuration.exact")
             .expect("collection"),
     };
-    let authority = DaemonConfigurationGrantAuthority::for_test(
-        [
-            exact_project.clone(),
-            exact_profile.clone(),
-            exact_collection.clone(),
-        ],
-        UtcMicros(100),
-    );
+    let authority = DaemonConfigurationGrantAuthority::for_test([
+        exact_project.clone(),
+        exact_profile.clone(),
+        exact_collection.clone(),
+    ])
+    .expect("test configuration grant authority");
     let expected_revision =
         ConfigurationRevisionId::new("configuration.revision.exact").expect("revision");
 

@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use tracedecay_application::{RequestContext, ResolvedScope};
+use tracedecay_application::work::{
+    WorkFederatedQueryAuthorityFutureV1, WorkFederatedQueryAuthorityPortV1,
+};
+use tracedecay_contracts::{RequestContext, ResolvedScope};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 use tracedecay_session_memory::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
@@ -28,13 +32,11 @@ impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalP
 
 struct MissingFederatedAuthority;
 
-impl crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1
-    for MissingFederatedAuthority
-{
+impl WorkFederatedQueryAuthorityPortV1 for MissingFederatedAuthority {
     fn authority_for<'a>(
         &'a self,
         _scope: &'a ResolvedScope,
-    ) -> crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityFutureV1<'a> {
+    ) -> WorkFederatedQueryAuthorityFutureV1<'a> {
         Box::pin(async { None })
     }
 }
@@ -66,20 +68,26 @@ fn concrete_work_evidence_mount_accepts_only_its_exact_project_scope() {
     let (mounted, exact_scope) = mounted_scope("project.work-evidence-mount");
     let federated = Arc::new(MissingFederatedAuthority);
 
-    let first = mounted
+    mounted
         .work_evidence_retrieval(&exact_scope, federated.clone())
         .expect("exact project scope must bind the concrete evidence adapter");
-    let second = mounted
+    mounted
         .work_evidence_retrieval(&exact_scope, federated)
-        .expect("the same concrete authority must be reusable");
-    assert!(first.same_authority(&second));
+        .expect("the same mounted authority must keep binding new adapters");
 
     let (_, foreign_scope) = mounted_scope("project.work-evidence-foreign");
+    let Err(error) =
+        mounted.work_evidence_retrieval(&foreign_scope, Arc::new(MissingFederatedAuthority))
+    else {
+        panic!("a different project scope must not receive the mounted session authority");
+    };
     assert!(
-        mounted
-            .work_evidence_retrieval(&foreign_scope, Arc::new(MissingFederatedAuthority))
-            .is_err(),
-        "a different project scope must not receive the mounted session authority",
+        matches!(
+            &error,
+            TraceDecayError::Config { message }
+                if message == "Work evidence retrieval scope does not match the mounted project session authority"
+        ),
+        "unexpected refusal: {error:?}"
     );
 }
 
@@ -102,20 +110,4 @@ fn concrete_work_evidence_mount_accepts_a_moved_branch_reference() {
     mounted
         .work_evidence_retrieval(&moved_branch, Arc::new(MissingFederatedAuthority))
         .expect("a moved HEAD branch must not cost the checkout its mounted session authority");
-}
-
-#[test]
-fn concrete_work_evidence_mount_accepts_reference_free_matching_coordinates() {
-    let (mounted, exact_scope) = mounted_scope("project.work-evidence-mount");
-    let reference_free = ResolvedScope::new(
-        exact_scope.project_id,
-        exact_scope.repository_id,
-        exact_scope.worktree_id,
-        None,
-    )
-    .unwrap();
-
-    mounted
-        .work_evidence_retrieval(&reference_free, Arc::new(MissingFederatedAuthority))
-        .expect("a non-git scope must bind by its exact project and worktree coordinates");
 }

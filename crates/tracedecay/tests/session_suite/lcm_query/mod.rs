@@ -1,12 +1,11 @@
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_global_db::ParseOffset;
 use tracedecay_lcm::{
     LCM_SCHEMA_VERSION, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError,
-    LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
-    LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope,
-    LcmSessionReplayRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
-    MAX_DERIVED_SNIPPET_CHARS,
+    LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmLifecycleUpdate, LcmLoadSessionRequest,
+    LcmMaintenanceDebt, LcmSessionReplayRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
+};
+use tracedecay_project::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
 };
 use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -21,16 +20,12 @@ async fn registered_lcm_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
 }
 
 trait ProfileLcmFixture {
-    async fn upsert_session(&self, session: &SessionRecord) -> bool;
-
     async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool;
 
-    async fn upsert_transcript_batch(
+    async fn seed_session_messages(
         &self,
         session: &SessionRecord,
         messages: &[SessionMessageRecord],
-        source: &str,
-        offset: ParseOffset,
     ) -> bool;
 
     async fn lcm_insert_summary_node(
@@ -47,34 +42,20 @@ trait ProfileLcmFixture {
 }
 
 impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
-    async fn upsert_session(&self, session: &SessionRecord) -> bool {
-        self.upsert_session_for_test(HostAdmissionScope::Profile, session)
-            .await
-            .unwrap_or(false)
-    }
-
     async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
         self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
-            .unwrap_or(false)
+            .is_ok()
     }
 
-    async fn upsert_transcript_batch(
+    async fn seed_session_messages(
         &self,
         session: &SessionRecord,
         messages: &[SessionMessageRecord],
-        source: &str,
-        offset: ParseOffset,
     ) -> bool {
-        self.upsert_transcript_batch_for_test(
-            HostAdmissionScope::Profile,
-            session,
-            messages,
-            source,
-            offset,
-        )
-        .await
-        .is_ok()
+        self.seed_session_messages_for_test(HostAdmissionScope::Profile, session, messages)
+            .await
+            .is_ok()
     }
 
     async fn lcm_insert_summary_node(
@@ -157,15 +138,9 @@ async fn insert_raw_messages(
             raw_message(provider, &message_id, session_id, (idx + 1) as i64, content)
         })
         .collect();
-    db.upsert_transcript_batch_for_test(
-        HostAdmissionScope::Profile,
-        &session,
-        &messages,
-        &format!("session-lcm-query-{provider}-{session_id}.jsonl"),
-        ParseOffset::default(),
-    )
-    .await
-    .expect("registered transcript fixture should write")
+    db.seed_session_messages_for_test(HostAdmissionScope::Profile, &session, &messages)
+        .await
+        .expect("registered transcript fixture should write")
 }
 
 async fn replace_inline_content_without_updating_hash(
@@ -193,17 +168,10 @@ async fn replace_summary_content_without_updating_hash(
     node_id: &str,
     replacement: &str,
 ) {
-    let database = db
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("registered profile database");
-    let writer = database
-        .writer_connection()
-        .expect("registered profile writer");
-    Executor::execute(
-        &writer,
-        "UPDATE lcm_summary_nodes SET summary_text = ?1 WHERE node_id = ?2",
-        params![replacement, node_id],
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::CorruptSummaryText {
+        node_id: node_id.to_string(),
+        text: replacement.to_string(),
+    })
     .await
     .expect("summary fixture should be tampered");
 }
@@ -232,9 +200,8 @@ fn summary_draft(
 
 mod describe;
 mod expand;
-mod expand_query;
-mod grep;
-mod grep_ranking;
 mod load_session;
 mod sessions;
 mod status;
+mod stored_body;
+mod visibility;

@@ -7,8 +7,7 @@
     "name": "shell",
     "call_id": "call-redacted",
     "arguments": {
-      "path": "/secret/project",
-      "token": "credential-redacted"
+      "cmd": "cargo sweep quarkonium --locked"
     }
   }
 }

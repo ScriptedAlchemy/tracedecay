@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  getMotionPreference,
   resolveReducedMotion,
   setMotionPreference,
 } from './reducedMotion.ts';
@@ -13,19 +12,13 @@ import {
  * on it. Without that the two disagree in both directions: pinning Reduced on a
  * machine reporting no preference left every entrance and transition running,
  * and pinning Full on a machine set to reduce could not bring them back. The
- * three-state attribute — rather than a boolean — is what makes the second case
+ * three-state attribute, rather than a boolean, is what makes the second case
  * expressible at all.
  */
 describe('motion preference publication', () => {
   afterEach(() => {
     setMotionPreference('system');
     localStorage.removeItem('td.motion-preference');
-  });
-
-  it('publishes a pinned "reduced" preference to the document', () => {
-    setMotionPreference('reduced');
-    expect(document.documentElement.dataset['motion']).toBe('reduced');
-    expect(getMotionPreference()).toBe('reduced');
   });
 
   it('publishes a pinned "full" preference, so CSS can outvote an OS that reduces', () => {

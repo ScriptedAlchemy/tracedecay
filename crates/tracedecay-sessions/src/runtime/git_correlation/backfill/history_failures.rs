@@ -6,9 +6,8 @@ use super::bounded::{
 };
 use super::history_progress::{self, GitHistoryProgressRow};
 use super::{
-    AUTO_BACKFILL_WATERMARK_KEY, GIT_HISTORY_ROWID_FRONTIER_KEY, GitCorrelationError,
-    GitCorrelationSessionStore, GitCorrelationWriteTxn, GitHistoryIndexFrontier,
-    SessionActivityRow,
+    GitCorrelationError, GitCorrelationSessionStore, GitCorrelationWriteTxn,
+    GitHistoryIndexFrontier, SessionActivityRow,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,7 +17,6 @@ pub(super) enum GitHistoryFailureReason {
 }
 
 impl GitHistoryFailureReason {
-    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::UnsupportedSourceFraming => "unsupported_source_framing",
@@ -47,7 +45,7 @@ pub(in super::super) async fn install_final_schema(
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS git_history_index_failures (
             source_rowid INTEGER NOT NULL PRIMARY KEY,
-            activity_timestamp INTEGER NOT NULL,
+            change_sequence INTEGER NOT NULL,
             provider TEXT NOT NULL,
             session_id TEXT NOT NULL,
             project_path TEXT NOT NULL,
@@ -80,7 +78,7 @@ pub(in super::super) async fn install_final_schema(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct GitHistoryFailureRow {
     pub source_rowid: i64,
-    pub activity_timestamp: i64,
+    pub change_sequence: i64,
     pub provider: String,
     pub session_id: String,
     pub project_path: String,
@@ -100,7 +98,7 @@ impl GitHistoryFailureRow {
     ) -> Self {
         Self {
             source_rowid: frontier.source_rowid,
-            activity_timestamp: frontier.activity_timestamp,
+            change_sequence: frontier.change_sequence,
             provider: row.provider.clone(),
             session_id: row.session_id.clone(),
             project_path: row.project_path.clone(),
@@ -118,7 +116,7 @@ impl GitHistoryFailureRow {
     ) -> Self {
         Self {
             source_rowid: progress.key.source_rowid,
-            activity_timestamp: progress.activity_timestamp,
+            change_sequence: progress.change_sequence,
             provider: progress.provider.clone(),
             session_id: progress.session_id.clone(),
             project_path: progress.project_path.clone(),
@@ -130,10 +128,9 @@ impl GitHistoryFailureRow {
         }
     }
 
-    #[hotpath::skip]
     pub(super) const fn frontier(&self) -> GitHistoryIndexFrontier {
         GitHistoryIndexFrontier {
-            activity_timestamp: self.activity_timestamp,
+            change_sequence: self.change_sequence,
             source_rowid: self.source_rowid,
         }
     }
@@ -212,22 +209,12 @@ pub(super) async fn persist_unresolved<S: GitCorrelationSessionStore>(
         .open_write_transaction()
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    let current_frontier = GitHistoryIndexFrontier {
-        activity_timestamp: super::super::read_meta_value(
-            &transaction,
-            AUTO_BACKFILL_WATERMARK_KEY,
-        )
+    let current_frontier = super::super::read_history_frontier(&transaction)
         .await
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
-        .unwrap_or(0),
-        source_rowid: super::super::read_meta_value(&transaction, GIT_HISTORY_ROWID_FRONTIER_KEY)
-            .await
-            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
-            .unwrap_or(0),
-    };
-    if (failure.activity_timestamp, failure.source_rowid)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    if (failure.change_sequence, failure.source_rowid)
         <= (
-            current_frontier.activity_timestamp,
+            current_frontier.change_sequence,
             current_frontier.source_rowid,
         )
     {
@@ -282,13 +269,13 @@ async fn upsert_unresolved(
 ) -> Result<(), GitCorrelationError> {
     conn.execute(
         "INSERT INTO git_history_index_failures (
-            source_rowid, activity_timestamp, provider, session_id,
+            source_rowid, change_sequence, provider, session_id,
             project_path, window_start, window_end, reason,
             source_generation, reflog_digest
          )
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(source_rowid) DO UPDATE SET
-            activity_timestamp = excluded.activity_timestamp,
+            change_sequence = excluded.change_sequence,
             provider = excluded.provider,
             session_id = excluded.session_id,
             project_path = excluded.project_path,
@@ -297,9 +284,9 @@ async fn upsert_unresolved(
             reason = excluded.reason,
             source_generation = excluded.source_generation,
             reflog_digest = excluded.reflog_digest
-         WHERE excluded.activity_timestamp > git_history_index_failures.activity_timestamp
+         WHERE excluded.change_sequence > git_history_index_failures.change_sequence
             OR (
-                excluded.activity_timestamp = git_history_index_failures.activity_timestamp
+                excluded.change_sequence = git_history_index_failures.change_sequence
                 AND excluded.provider = git_history_index_failures.provider
                 AND excluded.session_id = git_history_index_failures.session_id
                 AND excluded.project_path = git_history_index_failures.project_path
@@ -310,7 +297,7 @@ async fn upsert_unresolved(
             )",
         params![
             failure.source_rowid,
-            failure.activity_timestamp,
+            failure.change_sequence,
             &failure.provider,
             &failure.session_id,
             &failure.project_path,

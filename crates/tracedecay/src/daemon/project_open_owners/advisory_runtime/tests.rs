@@ -14,7 +14,7 @@ fn feedback_scope() -> FeedbackScopeV1 {
 #[test]
 fn hook_notice_registration_is_released_with_the_published_owner() {
     let scope = feedback_scope();
-    let resolved = tracedecay_application::ResolvedScope::new(
+    let resolved = tracedecay_contracts::ResolvedScope::new(
         scope.project_id.clone(),
         scope.repository_id.clone(),
         scope.worktree_id.clone(),
@@ -52,7 +52,9 @@ fn hook_notice_registration_is_released_with_the_published_owner() {
     ));
 }
 
-fn hook_binding(host: tracedecay_hooks::HookHostV1) -> tracedecay_hooks::HookScopeBindingV1 {
+fn hook_binding(
+    host: tracedecay_domain::NativeHostIdentityV1,
+) -> tracedecay_hooks::HookScopeBindingV1 {
     let capabilities = [
         tracedecay_hooks::HookEventFamily::SessionBoundary,
         tracedecay_hooks::HookEventFamily::PromptBoundary,
@@ -82,15 +84,16 @@ fn hook_notice_dispatch_requires_a_live_daemon_binding() {
     let root = tempfile::tempdir().expect("hook config root");
     let published_at = UtcMicros(1_000_000);
     assert!(
-        advisory_hook_notice_dispatch(root.path(), published_at).is_none(),
+        advisory_hook_notice_dispatch(root.path(), [3; 16], published_at).is_none(),
         "an unpublished binding set must stay typed unbound"
     );
 
-    let host = tracedecay_hooks::HookHostV1::ClaudeCode;
+    let host = tracedecay_domain::NativeHostIdentityV1::ClaudeCode;
     let expires_at = UtcMicros(published_at.0 + 60_000_000);
     tracedecay_hooks::HookConfigurationPublisherV1::new(
         tracedecay_hooks::HookConfigurationFileWriterV1::new(hook_configuration_path(
             root.path(),
+            [3; 16],
             host,
         )),
     )
@@ -104,14 +107,13 @@ fn hook_notice_dispatch_requires_a_live_daemon_binding() {
     .expect("published hook binding");
 
     let (kind, rollback) =
-        advisory_hook_notice_dispatch(root.path(), UtcMicros(published_at.0 + 1))
+        advisory_hook_notice_dispatch(root.path(), [3; 16], UtcMicros(published_at.0 + 1))
             .expect("live binding authorizes hook notice dispatch");
     assert_eq!(kind, HostKindV1::ClaudeCode);
     assert_eq!(rollback.configuration_revision, 7);
-    assert_eq!(rollback.route, HookFeedbackDeliveryRouteV1::HookV2);
 
     assert!(
-        advisory_hook_notice_dispatch(root.path(), expires_at).is_none(),
+        advisory_hook_notice_dispatch(root.path(), [3; 16], expires_at).is_none(),
         "an expired binding is not a live delivery authority"
     );
 }
@@ -131,4 +133,33 @@ fn advisory_deadline_outside_monotonic_horizon_is_typed() {
             ..
         } if code == "feedback.advisory-cycle.deadline"
     ));
+}
+
+#[test]
+fn stop_boundary_runs_over_the_first_analyzable_document() {
+    let file = |path: &str, language: Option<&str>| tracedecay_domain::SanitizedCodeFileV1 {
+        file_occurrence_id: tracedecay_domain::FileOccurrenceId::new("file.fixture")
+            .expect("file occurrence id"),
+        logical_path: path.to_owned(),
+        language: language
+            .map(|language| tracedecay_domain::LanguageId::new(language).expect("language id")),
+        content_digest: tracedecay_domain::ContentDigest::new(
+            tracedecay_domain::test_fixtures::repeated_sha256_text('a'),
+        )
+        .expect("content digest"),
+        disposition: if language.is_some() {
+            tracedecay_domain::SnapshotFileDispositionV1::Present
+        } else {
+            tracedecay_domain::SnapshotFileDispositionV1::UnsupportedLanguage
+        },
+    };
+    let files = [
+        file("src/main.rs", Some("rust")),
+        file(".gitignore", None),
+        file("deploy.conf", None),
+        file("src/lib.rs", Some("rust")),
+    ];
+
+    assert_eq!(stop_boundary_document(&files), Some("src/lib.rs"));
+    assert_eq!(stop_boundary_document(&files[1..3]), None);
 }

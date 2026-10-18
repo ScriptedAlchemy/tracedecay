@@ -1,42 +1,61 @@
 //! Composition-root integration tests for the store-runtime crate.
 //!
-//! These tests reach `remote_protocol_tests` and `crate::config`, which compose
+//! These tests reach `remote_protocol_tests` and `tracedecay_project::config`, which compose
 //! root daemon fixtures and therefore cannot live in
 //! `tracedecay-store-runtime` itself.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
-
-use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
+use tracedecay_contracts::RequestId;
+use tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1;
+use tracedecay_contracts::remote::protocol::RemoteProtocolRequestV1;
+use tracedecay_contracts::remote::recovery::{
+    PromotionConfirmationV1, RemoteRecoveryCallerV1, RemoteRecoveryControlPortV1,
+    RemoteRecoveryInterruptionV1, RemoteRecoveryOperationErrorV1, RemoteRecoveryOperationPortV1,
+};
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
-    BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactLineageEventKindV1,
-    FactOwnerV1, FactRelationKindV1,
+    BrainNodeId, Confidence, CurrentRemoteAuthorityStateV1, EntityId, FactCategoryV1,
+    FactCurationActionV1, FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros,
 };
+use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
 };
-use tracedecay_runtime_core::db::engine::TestConnection;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, TestConnection};
 use tracedecay_runtime_core::db::{DatabaseAccessMode, DatabaseAuthority};
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
+use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
+    RemoteWriterPublicationErrorV1,
 };
 use tracedecay_session_memory::memory::{
     MemoryOperationContext, ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
     ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome, memory_application_for_db,
 };
 use tracedecay_store::{
-    FactReadControl, FactWriteControl, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
+    FactReadControl, FactWriteControl, ProjectId, ProjectMemoryFactHistoryQueryV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
+    StoreShardIdV1,
 };
-use tracedecay_store::{ProjectId, StoreShardIdV1};
 use tracedecay_store_runtime::{
-    DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
-    register_registered_schema_installer, registry_open_error,
+    DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, RemoteRecoveryAdmission,
+    RemoteRecoveryProjectLifecycle, process_runtime_generation, registry_open_error,
 };
+
+/// Bound for the assertions in this file that read "must not wait for
+/// background recovery" or "must settle".
+///
+/// The regression each one catches is an operation that never returns, and no
+/// finite bound reaches that, so the value only has to exceed the honest
+/// latency of the operation itself. At two seconds it did not: a machine
+/// running the whole lib suite across its cores opens a session database
+/// slower than that, and the bound reported a loaded host as a blocked one.
+const MUST_NOT_BLOCK: std::time::Duration = std::time::Duration::from_mins(1);
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
 
@@ -64,19 +83,6 @@ async fn project_sessions_pending_convergence(
     tracedecay_runtime_core::db::DaemonDatabaseScope,
 ) {
     project_sessions_convergence_fixture(project_name, true).await
-}
-
-async fn project_sessions_current_convergence(
-    project_name: &str,
-) -> (
-    tempfile::TempDir,
-    LocalProfileIdentityAuthorityV1,
-    ProjectId,
-    PathBuf,
-    PathBuf,
-    tracedecay_runtime_core::db::DaemonDatabaseScope,
-) {
-    project_sessions_convergence_fixture(project_name, false).await
 }
 
 async fn project_sessions_convergence_fixture(
@@ -126,7 +132,7 @@ async fn project_sessions_convergence_fixture(
         "seed project sessions registered schema fixture",
     )
     .expect("project sessions fixture database authority");
-    let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_for_profile_identity(
+    let fixture = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control_for_profile_identity(
         &sessions_path,
         &authority,
         tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
@@ -140,6 +146,10 @@ async fn project_sessions_convergence_fixture(
     )
     .await
     .expect("seed complete registered schema");
+    let (owner, runtime, retirement) = fixture.into_parts();
+    let database = owner
+        .issue_lease()
+        .expect("seed project sessions fixture lease");
     if remove_checkpoint {
         database
             .execute_write_batch(
@@ -149,7 +159,17 @@ async fn project_sessions_convergence_fixture(
             .await
             .expect("remove durable convergence checkpoint");
     }
-    drop(database);
+    // Dropping the last lease does not always close the store before this
+    // returns: another holder of the fixture registry can outlive it, and its
+    // later close checkpoints the WAL while the caller already writes with a
+    // zero busy timeout. Close it through its registry and await the close.
+    drop((database, owner, runtime));
+    retirement
+        .registry()
+        .close_path(&sessions_path)
+        .await
+        .expect("close the seeded project sessions runtime")
+        .expect("the seeded project sessions runtime is registered");
     (
         temporary,
         identity,
@@ -167,7 +187,11 @@ async fn wait_for_schema_convergence(
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if let Some(status) = registry.registered_schema_convergence_status(shard_id)
-                && !matches!(status, RegisteredSchemaConvergenceStatus::Pending)
+                && !matches!(
+                    status,
+                    RegisteredSchemaConvergenceStatus::Pending
+                        | RegisteredSchemaConvergenceStatus::Running
+                )
             {
                 return status;
             }
@@ -176,6 +200,75 @@ async fn wait_for_schema_convergence(
     })
     .await
     .expect("registered schema convergence must reach a terminal state")
+}
+
+const LCM_STATUS_PERFORMANCE_INDEX_NAMES: [&str; 2] = [
+    "idx_lcm_raw_lossy_ingest",
+    "idx_lcm_external_payloads_owner_bytes",
+];
+const SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX: &str = "idx_lcm_external_payloads_owner";
+
+/// The `SQLite` scalar one query returns, for the fixtures that assert on a
+/// single count or marker.
+async fn scalar_i64(connection: &(impl QueryExecutor + ?Sized), sql: &str) -> i64 {
+    let mut rows = connection.query(sql, ()).await.expect("read scalar");
+    rows.next()
+        .await
+        .expect("step scalar")
+        .expect("scalar row")
+        .get::<i64>(0)
+        .expect("decode scalar")
+}
+
+/// Which of `candidates` the store currently carries, in name order. A
+/// migration that replaces an index is observable here as the set changing.
+async fn installed_index_names(
+    connection: &(impl QueryExecutor + ?Sized),
+    candidates: &[&str],
+) -> Vec<String> {
+    let quoted = candidates
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rows = connection
+        .query(
+            &format!(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name IN ({quoted})
+                 ORDER BY name"
+            ),
+            (),
+        )
+        .await
+        .expect("read installed index names");
+    let mut names = Vec::new();
+    while let Some(row) = rows.next().await.expect("step installed index name") {
+        names.push(row.get::<String>(0).expect("decode installed index name"));
+    }
+    names
+}
+
+async fn installed_lcm_status_index_names(
+    connection: &(impl QueryExecutor + ?Sized),
+) -> Vec<String> {
+    let mut candidates = LCM_STATUS_PERFORMANCE_INDEX_NAMES.to_vec();
+    candidates.push(SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX);
+    installed_index_names(connection, &candidates).await
+}
+
+async fn deferred_lcm_fixture_row_count(connection: &(impl QueryExecutor + ?Sized)) -> i64 {
+    scalar_i64(
+        connection,
+        "SELECT COUNT(*)
+         FROM sessions AS session
+         JOIN lcm_raw_messages AS message
+           ON message.provider = session.provider
+          AND message.session_id = session.session_id
+         WHERE session.session_id = 'deferred-index-session'
+           AND message.message_id = 'deferred-index-message'",
+    )
+    .await
 }
 
 fn accepting_memory_write_control() -> FactWriteControl {
@@ -311,7 +404,7 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     assert!(current.incarnation > stale.incarnation);
     assert!(matches!(
         second_registry.lookup_store_runtime(&stale),
-        tracedecay_runtime_core::store_runtime::registry::StoreRuntimeLookup::WrongIncarnation {
+        tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeLookup::WrongIncarnation {
             expected,
             actual,
         } if *expected == stale && actual.as_ref() == &current
@@ -331,7 +424,7 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
     )
     .expect("daemon database scope");
     let memory_path =
-        tracedecay_runtime_core::memory::user::user_memory_db_path(identity.profile_root());
+        tracedecay_session_memory::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
     tracedecay_runtime_core::db::migrations::create_schema_connection(&seed)
         .await
@@ -466,6 +559,7 @@ async fn concurrent_profile_sessions_mounts_singleflight_schema_admission() {
     let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
         .await
         .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
 
     let (first, second, third, fourth) = tokio::join!(
         registry.profile_sessions(),
@@ -479,11 +573,18 @@ async fn concurrent_profile_sessions_mounts_singleflight_schema_admission() {
         assert!(!first.shares_client_with(&mounted));
         assert_eq!(first.binding(), mounted.binding());
     }
+    convergence_gate.wait_until_blocked().await;
     assert_eq!(
         registry.registered_schema_convergence_schedule_count_for_test(),
         1,
         "one retained mount must schedule schema convergence exactly once"
     );
+    assert_eq!(
+        registry.registered_schema_convergence_execution_count_for_test(),
+        1,
+        "concurrent equivalent requests must execute convergence exactly once"
+    );
+    convergence_gate.release();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -571,6 +672,373 @@ async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
             .await
             .is_some(),
         "daemon startup must remount the persisted RemoteNode recovery authority"
+    );
+}
+
+struct AdmitRemoteRecovery;
+
+impl RemoteRecoveryProjectLifecycle for AdmitRemoteRecovery {
+    fn authorize_project_recovery<'a>(
+        &'a self,
+        _project_id: &'a ProjectId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = tracedecay_domain::errors::Result<RemoteRecoveryAdmission>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(RemoteRecoveryAdmission::hold(())) })
+    }
+}
+
+struct PromotionControl(Option<RemoteRecoveryInterruptionV1>);
+
+impl RemoteRecoveryControlPortV1 for PromotionControl {
+    fn interruption(&self, _request_id: &RequestId) -> Option<RemoteRecoveryInterruptionV1> {
+        self.0
+    }
+}
+
+struct ProvisionedWriterFixture {
+    caller: RemoteRecoveryCallerV1,
+    authority_key: tracedecay_domain::ManifestDigest,
+    recovery: Arc<tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1>,
+    writer: RemoteWriterAuthorityV1,
+    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    node_id: BrainNodeId,
+    registry: DaemonSessionRuntimeRegistryV1,
+    identity: LocalProfileIdentityAuthorityV1,
+    _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
+    _daemon_authority: tracedecay_daemon_identity::authority::DaemonAuthority,
+    _temporary: tempfile::TempDir,
+}
+
+impl ProvisionedWriterFixture {
+    async fn publish(&self) -> Result<(), RemoteWriterPublicationErrorV1> {
+        self.registry
+            .publish_remote_writer_authority(
+                &self.node_id,
+                self.writer.clone(),
+                crate::daemon::remote_protocol_tests::replay_policy(&self.writer.scope),
+                crate::daemon::remote_protocol_tests::query_policy(&self.writer.scope),
+            )
+            .await
+    }
+
+    fn promotion(&self, request_id: &str) -> RemoteProtocolRequestV1<PromotionConfirmationV1> {
+        RemoteProtocolRequestV1::new(
+            RequestId::new(request_id).expect("request identity"),
+            self.identity.brain_id().clone(),
+            self.node_id.clone(),
+            1,
+            Some(self.writer.authority.fence.clone()),
+            UtcMicros(2),
+            PromotionConfirmationV1 {
+                preview_id: format!("promotion.{request_id}"),
+                expected_authority_epoch: 1,
+                expected_placement_revision: 1,
+                expires_at_micros: i64::MAX,
+            },
+        )
+        .expect("promotion request")
+    }
+}
+
+/// Mounts one project and provisions one `RemoteNode` for its writer scope,
+/// without publishing the writer.
+async fn provisioned_writer_fixture() -> ProvisionedWriterFixture {
+    let temporary = tempfile::tempdir().expect("temporary profile parent");
+    let profile_root = temporary.path().join("profile");
+    #[cfg(unix)]
+    let endpoint =
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-runtime.sock"));
+    #[cfg(not(unix))]
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        daemon_authority.record().epoch,
+        "remote failover classification",
+    )
+    .expect("daemon database scope");
+    let identity = daemon_authority.profile_identity().clone();
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("session runtime registry");
+    registry
+        .install_remote_recovery_project_lifecycle(Arc::new(AdmitRemoteRecovery))
+        .expect("install recovery project lifecycle");
+    let node_id = BrainNodeId::new("node.remote.cancel-test").expect("remote node identity");
+    let project_id = ProjectId::new("project.cancel-test").expect("project identity");
+    let project_root = temporary.path().join("cancel-test");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let project_sessions = registry
+        .project_sessions(project_id.clone(), [project_root])
+        .await
+        .expect("project sessions mount registers the replay target");
+
+    let writer: RemoteWriterAuthorityV1 = serde_json::from_value(serde_json::json!({
+        "project_id": project_id.as_str(),
+        "scope": {
+            "project_id": project_id.as_str(),
+            "repository_id": "repository.cancel-test",
+            "worktree_id": "worktree.cancel-test",
+            "reference": "refs/heads/main",
+            "snapshot_id": "snapshot.cancel-test"
+        },
+        "authority": {
+            "fence": {
+                "brain_id": identity.brain_id().as_str(),
+                "shard_id": "shard.cancel-test",
+                "generation_id": "generation.cancel-test",
+                "placement_revision": 1,
+                "authority_epoch": 1,
+                "authority_node_id": "node.remote.previous-writer"
+            },
+            "credential_revision": 1,
+            "observed_at": 1
+        }
+    }))
+    .expect("remote writer authority");
+    let mut grant = crate::daemon::remote_protocol_tests::grant(
+        identity.brain_id().clone(),
+        node_id.clone(),
+        &[5_u8; 32],
+    );
+    grant.scope = writer.scope.clone();
+    registry
+        .provision_remote_node(
+            grant.clone(),
+            crate::daemon::remote_protocol_tests::admission(&grant),
+        )
+        .await
+        .expect("provision RemoteNode");
+    let recovery = registry
+        .remote_recovery_authority(&node_id)
+        .await
+        .expect("mounted remote recovery authority");
+    let authority_key = writer
+        .authority
+        .fence
+        .recovery_authority_key()
+        .expect("recovery authority key");
+    let caller = RemoteRecoveryCallerV1 {
+        node_id: node_id.clone(),
+        enrollment_id: EntityId::new("enrollment.cancel-test").expect("enrollment identity"),
+        enrollment_revision: 1,
+        scope: writer.scope.clone(),
+    };
+    ProvisionedWriterFixture {
+        caller,
+        authority_key,
+        recovery,
+        writer,
+        project_sessions,
+        node_id,
+        registry,
+        identity,
+        _database_scope,
+        _daemon_authority: daemon_authority,
+        _temporary: temporary,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_not_cancellation() {
+    let fixture = provisioned_writer_fixture().await;
+    let corrupt = fixture.promotion("request.cancel-test.corrupt");
+    let interrupted = fixture.promotion("request.cancel-test.interrupted");
+    fixture
+        .publish()
+        .await
+        .expect("publish the current writer at every sink");
+
+    // The fence row is valid JSON of the wrong shape; its decode error quotes
+    // the text "cancel-test".
+    fixture
+        .project_sessions
+        .writer_connection()
+        .expect("project sessions writer")
+        .execute_batch(&format!(
+            "UPDATE remote_writer_fences SET writer_fence_json = '\"cancel-test\"'
+             WHERE authority_key = '{}';",
+            fixture.authority_key.as_str()
+        ))
+        .await
+        .expect("corrupt the published writer fence");
+    let promote_recovery = Arc::clone(&fixture.recovery);
+    let promote_caller = fixture.caller.clone();
+    let corrupt_outcome = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
+        promote_recovery
+            .promote(&corrupt, &promote_caller, Arc::new(PromotionControl(None)))
+            .await
+            .err()
+    })
+    .await
+    .expect("corrupt failover thread");
+
+    fixture
+        .project_sessions
+        .writer_connection()
+        .expect("project sessions writer")
+        .execute_batch(&format!(
+            "UPDATE remote_writer_fences SET writer_fence_json = '{}'
+             WHERE authority_key = '{}';",
+            serde_json::to_string(&fixture.writer.authority.fence).expect("encode writer fence"),
+            fixture.authority_key.as_str()
+        ))
+        .await
+        .expect("repair writer fence");
+    let promote_recovery = Arc::clone(&fixture.recovery);
+    let promote_caller = fixture.caller.clone();
+    let interrupted_outcome =
+        tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
+            promote_recovery
+                .promote(
+                    &interrupted,
+                    &promote_caller,
+                    Arc::new(PromotionControl(Some(
+                        RemoteRecoveryInterruptionV1::Cancelled,
+                    ))),
+                )
+                .await
+                .err()
+        })
+        .await
+        .expect("cancelled failover thread");
+
+    assert_eq!(
+        (corrupt_outcome, interrupted_outcome),
+        (
+            Some(RemoteRecoveryOperationErrorV1::Corruption),
+            Some(RemoteRecoveryOperationErrorV1::Cancelled),
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn republishing_a_writer_restores_a_lost_project_writer_fence_before_failover() {
+    let fixture = provisioned_writer_fixture().await;
+    let promotion = fixture.promotion("request.cancel-test.restored-fence");
+    fixture.publish().await.expect("publish the first writer");
+    fixture
+        .project_sessions
+        .writer_connection()
+        .expect("project sessions writer")
+        .execute_batch("DELETE FROM remote_writer_fences;")
+        .await
+        .expect("lose the ProjectSessions writer fence");
+
+    let republished = fixture.publish().await;
+    let promote_recovery = Arc::clone(&fixture.recovery);
+    let promote_caller = fixture.caller.clone();
+    let failover = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
+        promote_recovery
+            .promote(
+                &promotion,
+                &promote_caller,
+                Arc::new(PromotionControl(None)),
+            )
+            .await
+            .map(|committed| {
+                (
+                    committed.output.previous_epoch,
+                    committed.output.installed_epoch,
+                    committed.output.old_authority_fenced,
+                )
+            })
+    })
+    .await
+    .expect("failover thread");
+
+    assert_eq!((republished, failover), (Ok(()), Ok((1, 2, true))));
+}
+
+/// The remote HTTP routes run writer publication and failover on the native
+/// blocking pool, so neither may reach Tokio from there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_writer_publication_and_failover_settle_without_an_entered_tokio_runtime() {
+    let fixture = provisioned_writer_fixture().await;
+    let promotion = fixture.promotion("request.cancel-test.native-failover");
+    let outcome = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tracedecay_runtime_core::native_runtime::block_on(async {
+                    assert!(tokio::runtime::Handle::try_current().is_err());
+                    let published = fixture.publish().await;
+                    let promote_recovery = Arc::clone(&fixture.recovery);
+                    let promote_caller = fixture.caller.clone();
+                    let failover =
+                        tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
+                            assert!(tokio::runtime::Handle::try_current().is_err());
+                            promote_recovery
+                                .promote(
+                                    &promotion,
+                                    &promote_caller,
+                                    Arc::new(PromotionControl(None)),
+                                )
+                                .await
+                                .map(|committed| {
+                                    (
+                                        committed.output.previous_epoch,
+                                        committed.output.installed_epoch,
+                                    )
+                                })
+                        })
+                        .await
+                        .expect("native failover thread");
+                    (published, failover)
+                })
+                .expect("native runtime")
+            })
+            .join()
+            .expect("native caller thread")
+    });
+
+    assert_eq!(outcome, (Ok(()), Ok((1, 2))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failover_names_the_promoted_node_credential_as_the_authority_credential() {
+    let fixture = provisioned_writer_fixture().await;
+    let promotion = fixture.promotion("request.cancel-test.promoted-credential");
+    fixture.publish().await.expect("publish the first writer");
+    let mut caller = fixture.caller.clone();
+    caller.enrollment_revision = fixture.writer.authority.credential_revision + 1;
+    let expected = (fixture.node_id.clone(), caller.enrollment_revision);
+
+    let promote_recovery = Arc::clone(&fixture.recovery);
+    let authority = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
+        promote_recovery
+            .promote(&promotion, &caller, Arc::new(PromotionControl(None)))
+            .await
+            .map(|committed| committed.authority)
+    })
+    .await
+    .expect("failover thread")
+    .expect("failover commits");
+
+    let CurrentRemoteAuthorityStateV1::Available(authority) = authority else {
+        panic!("failover reports an available authority, got {authority:?}");
+    };
+    assert_eq!(
+        (
+            authority.fence.authority_node_id,
+            authority.credential_revision
+        ),
+        expected,
+        "replay authenticates the promoted node's own enrollment revision"
     );
 }
 
@@ -676,9 +1144,28 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn daemon_admission_returns_while_historical_convergence_is_blocked() {
-    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
+async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-admission").await;
+    let seed = TestConnection::open(&sessions_path);
+    seed.execute_batch(
+        r"INSERT INTO sessions(provider, session_id, project_key, project_path)
+           VALUES ('cursor', 'deferred-index-session', 'project.schema-admission', '/deferred');
+           INSERT INTO lcm_raw_messages (
+               provider, message_id, session_id, role, ordinal, content,
+               content_hash, storage_kind, metadata_json
+           ) VALUES (
+               'cursor', 'deferred-index-message', 'deferred-index-session', 'assistant', 1,
+               'deferred body', 'deferred-hash', 'inline', NULL
+           );
+           DROP INDEX idx_lcm_raw_lossy_ingest;
+           DROP INDEX idx_lcm_external_payloads_owner_bytes;
+           CREATE INDEX idx_lcm_external_payloads_owner
+               ON lcm_external_payloads(provider, session_id);",
+    )
+    .await
+    .expect("seed an already-current store without the LCM status indexes");
+    drop(seed);
     let shard_id = StoreShardIdV1::project_sessions(
         identity.brain_id().clone(),
         identity.profile_id().clone(),
@@ -689,46 +1176,182 @@ async fn daemon_admission_returns_while_historical_convergence_is_blocked() {
         .expect("session runtime registry");
     let convergence_gate = registry.block_registered_schema_convergence_for_test();
 
-    let admission = registry.project_sessions(project_id, [project_root]);
-    tokio::pin!(admission);
-    let convergence_blocked = convergence_gate.wait_until_blocked();
-    tokio::pin!(convergence_blocked);
-    let database = tokio::select! {
-        result = &mut admission => {
-            let database = result.expect("registered project sessions");
-            convergence_blocked.await;
-            database
-        }
-        () = &mut convergence_blocked => {
-            tokio::time::timeout(std::time::Duration::from_secs(1), admission)
-                .await
-                .expect("daemon admission must not wait for blocked historical convergence")
-                .expect("registered project sessions")
-        }
-    };
+    // The gate holds convergence until the assertions below, so an admission
+    // that waited on convergence never returns.
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions");
+    convergence_gate.wait_until_blocked().await;
 
     assert_eq!(
         registry.registered_schema_convergence_status(&shard_id),
-        Some(RegisteredSchemaConvergenceStatus::Pending)
+        Some(RegisteredSchemaConvergenceStatus::Running)
+    );
+    {
+        let snapshot = database
+            .read_snapshot()
+            .await
+            .expect("ordinary read snapshot while convergence is pending");
+        let indexes = installed_lcm_status_index_names(&snapshot).await;
+        for index in LCM_STATUS_PERFORMANCE_INDEX_NAMES {
+            assert!(
+                !indexes.iter().any(|installed| installed == index),
+                "daemon admission synchronously built {index}: {indexes:?}"
+            );
+        }
+        assert!(
+            indexes
+                .iter()
+                .any(|index| index == SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX),
+            "daemon admission retired the old payload index before convergence: {indexes:?}"
+        );
+        assert_eq!(
+            deferred_lcm_fixture_row_count(&snapshot).await,
+            1,
+            "ordinary session and LCM reads must remain available while convergence is pending"
+        );
+    }
+    convergence_gate.release();
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
     );
     let snapshot = database
         .read_snapshot()
         .await
-        .expect("ordinary read snapshot while convergence is pending");
-    let mut rows = snapshot
-        .query("SELECT COUNT(*) FROM sessions", ())
-        .await
-        .expect("ordinary read while convergence is pending");
-    assert_eq!(
-        rows.next()
-            .await
-            .expect("read session count")
-            .expect("session count row")
-            .get::<i64>(0)
-            .expect("decode session count"),
-        0
+        .expect("ordinary read snapshot after convergence");
+    let indexes = installed_lcm_status_index_names(&snapshot).await;
+    for index in LCM_STATUS_PERFORMANCE_INDEX_NAMES {
+        assert!(
+            indexes.iter().any(|installed| installed == index),
+            "background convergence did not build {index}: {indexes:?}"
+        );
+    }
+    assert!(
+        !indexes
+            .iter()
+            .any(|index| index == SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX),
+        "background convergence left the superseded payload index in place: {indexes:?}"
     );
+    assert_eq!(
+        deferred_lcm_fixture_row_count(&snapshot).await,
+        1,
+        "background convergence must preserve seeded session and LCM rows"
+    );
+}
+
+async fn migrating_session_row_count(connection: &(impl QueryExecutor + ?Sized)) -> i64 {
+    scalar_i64(
+        connection,
+        "SELECT COUNT(*) FROM sessions WHERE session_id = 'migrating-session'",
+    )
+    .await
+}
+
+/// Store-sized convergence runs after admission, never inside the open's
+/// leased schema transaction, where a large store outran its execution
+/// deadline and the daemon restarted into the same failure forever.
+///
+/// Admission must therefore complete, the store must serve while
+/// convergence is outstanding, Doctor must report which store is converging
+/// rather than claiming health, and background convergence must settle it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn schema_convergence_is_reported_and_completes_after_admission() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_pending_convergence("project.schema-store-sized").await;
+    let seed = TestConnection::open(&sessions_path);
+    seed.execute_batch(
+        r"INSERT INTO sessions(provider, session_id, project_key, project_path)
+           VALUES ('cursor', 'migrating-session', 'project.schema-store-sized', '/migrating');",
+    )
+    .await
+    .expect("seed a store row");
+    drop(seed);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("admission must complete on a store with migrations outstanding");
+    convergence_gate.wait_until_blocked().await;
+
+    {
+        let snapshot = database
+            .read_snapshot()
+            .await
+            .expect("ordinary read snapshot while migrations are outstanding");
+        assert_eq!(
+            migrating_session_row_count(&snapshot).await,
+            1,
+            "the store must serve ordinary reads while its migrations are outstanding"
+        );
+    }
+
+    let unconverged = registry.unconverged_registered_schemas();
+    assert_eq!(
+        unconverged,
+        vec![(shard_id.clone(), RegisteredSchemaConvergenceStatus::Running)],
+        "the shard still migrating must be the one reported"
+    );
+    let convergence_observations = registry.registered_schema_convergence_observations();
+    let [convergence] = convergence_observations.as_slice() else {
+        panic!("one running store must publish one typed convergence finding");
+    };
+    assert_eq!(
+        convergence.state,
+        tracedecay_contracts::storage::SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+    );
+    assert!(convergence.started_at_micros > 0);
+    let report =
+        tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(&unconverged);
+    let tracedecay_contracts::doctor::DoctorStorageFamilyReadV1::Observed { findings } = report
+    else {
+        panic!("a store mid-migration must be reported, not omitted: {report:?}");
+    };
+    let [finding] = findings.as_slice() else {
+        panic!("one outstanding shard is one finding: {findings:?}");
+    };
+    assert_eq!(
+        finding.kind(),
+        tracedecay_contracts::doctor::DoctorStorageFindingKindV1::PendingSchemaMigration
+    );
+    assert_eq!(
+        finding.finding().state(),
+        tracedecay_contracts::doctor::DoctorEvidenceStateV1::Stale,
+        "a readable store behind its schema is stale, never healthy"
+    );
+
     convergence_gate.release();
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    assert!(
+        registry.unconverged_registered_schemas().is_empty(),
+        "a converged shard must stop being reported"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_observations()[0].state,
+        tracedecay_contracts::storage::SchemaConvergenceStateV1::Completed
+    );
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .expect("ordinary read snapshot after convergence");
+    assert_eq!(
+        migrating_session_row_count(&snapshot).await,
+        1,
+        "convergence must preserve the seeded rows"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -765,12 +1388,9 @@ async fn foreground_project_open_defers_historical_convergence_until_full_public
         .expect("foreground project-open writer probe rolls back");
 
     drop(foreground);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        convergence_gate.wait_until_blocked(),
-    )
-    .await
-    .expect("historical convergence starts after full publication");
+    tokio::time::timeout(MUST_NOT_BLOCK, convergence_gate.wait_until_blocked())
+        .await
+        .expect("historical convergence starts after full publication");
     convergence_gate.release();
 }
 
@@ -800,7 +1420,66 @@ async fn duplicate_project_attaches_schedule_one_historical_convergence() {
         1,
         "the retained registry must deduplicate convergence tasks"
     );
+    assert_eq!(
+        registry.registered_schema_convergence_execution_count_for_test(),
+        1,
+        "the retained registry must execute the coalesced convergence once"
+    );
     convergence_gate.release();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn schema_convergence_runs_one_shard_while_other_shards_remain_pending() {
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
+        project_sessions_pending_convergence("project.schema-concurrency").await;
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+
+    let profile = registry
+        .profile_sessions()
+        .await
+        .expect("registered profile sessions");
+    convergence_gate.wait_until_blocked().await;
+    let project = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions");
+    let profile_shard = profile.binding().shard_id.clone();
+    let project_shard = project.binding().shard_id.clone();
+
+    assert_eq!(
+        registry.registered_schema_convergence_status(&profile_shard),
+        Some(RegisteredSchemaConvergenceStatus::Running),
+        "the permit holder must be distinguishable from deferred work"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_status(&project_shard),
+        Some(RegisteredSchemaConvergenceStatus::Pending),
+        "a second shard must wait without starting convergence"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_schedule_count_for_test(),
+        2,
+        "both distinct shards must retain one scheduled task"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_execution_count_for_test(),
+        1,
+        "only the permit holder may enter convergence"
+    );
+
+    convergence_gate.release();
+    convergence_gate.release();
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &profile_shard).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &project_shard).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -824,8 +1503,8 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
 
     registry.cancel_terminal_tasks();
     tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        registry.shutdown_terminal_tasks(),
+        MUST_NOT_BLOCK,
+        registry.shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap()),
     )
     .await
     .expect("terminal shutdown must not wait for cancelled convergence work")
@@ -835,60 +1514,16 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
 
     assert_eq!(
         registry.registered_schema_convergence_status(&shard_id),
-        Some(RegisteredSchemaConvergenceStatus::Pending),
+        Some(RegisteredSchemaConvergenceStatus::Running),
         "a cancelled convergence task must not publish a fabricated completion"
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn background_convergence_commits_the_durable_authority_checkpoint() {
+/// Runs background schema convergence on a fresh project-sessions shard and
+/// returns its durable authority checkpoint's bounded-pass count.
+async fn converged_authority_checkpoint_passes(project_name: &str, pending: bool) -> i64 {
     let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
-        project_sessions_pending_convergence("project.schema-checkpoint").await;
-    let shard_id = StoreShardIdV1::project_sessions(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-    );
-    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
-        .await
-        .expect("session runtime registry");
-    let database = registry
-        .project_sessions(project_id, [project_root])
-        .await
-        .expect("registered project sessions");
-
-    assert_eq!(
-        wait_for_schema_convergence(&registry, &shard_id).await,
-        RegisteredSchemaConvergenceStatus::Complete
-    );
-    let snapshot = database
-        .read_snapshot()
-        .await
-        .expect("checkpoint read snapshot");
-    let mut rows = snapshot
-        .query(
-            "SELECT bounded_passes_since_exhaustive
-                 FROM authority_audit_checkpoints
-                 WHERE audit_name = 'observation-authority'",
-            (),
-        )
-        .await
-        .expect("read durable authority checkpoint");
-    assert_eq!(
-        rows.next()
-            .await
-            .expect("read checkpoint")
-            .expect("durable checkpoint row")
-            .get::<i64>(0)
-            .expect("decode checkpoint"),
-        0
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn daemon_reopen_resumes_from_the_trusted_authority_checkpoint() {
-    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
-        project_sessions_current_convergence("project.schema-trusted-checkpoint").await;
+        project_sessions_convergence_fixture(project_name, pending).await;
     let shard_id = StoreShardIdV1::project_sessions(
         identity.brain_id().clone(),
         identity.profile_id().clone(),
@@ -919,13 +1554,26 @@ async fn daemon_reopen_resumes_from_the_trusted_authority_checkpoint() {
         )
         .await
         .expect("read durable authority checkpoint");
+    rows.next()
+        .await
+        .expect("read checkpoint")
+        .expect("durable checkpoint row")
+        .get::<i64>(0)
+        .expect("decode checkpoint")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_convergence_commits_the_durable_authority_checkpoint() {
     assert_eq!(
-        rows.next()
-            .await
-            .expect("read checkpoint")
-            .expect("durable checkpoint row")
-            .get::<i64>(0)
-            .expect("decode checkpoint"),
+        converged_authority_checkpoint_passes("project.schema-checkpoint", true).await,
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_reopen_resumes_from_the_trusted_authority_checkpoint() {
+    assert_eq!(
+        converged_authority_checkpoint_passes("project.schema-trusted-checkpoint", false).await,
         1,
         "daemon reopen must audit only the suffix after a trusted checkpoint"
     );
@@ -1060,7 +1708,7 @@ async fn worktree_graph_mount_does_not_require_git() {
         .await
         .expect("register non-git project authority");
     let project_store_root = profile_root.join("projects/project.non-git-worktree");
-    let database_path = project_store_root.join(crate::config::db_filename(&project_store_root));
+    let database_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     std::fs::create_dir_all(database_path.parent().expect("database parent"))
         .expect("database directory");
     let authority = DatabaseAuthority::for_runtime(&database_path, "non-git project graph mount")
@@ -1124,7 +1772,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     .expect("manifest");
     let idempotency = GraphIdempotencyKey::new("idempotency.generic-test.1").expect("idempotency");
 
-    let publication_operation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let publication_operation = tokio::time::timeout(MUST_NOT_BLOCK, async {
         loop {
             match project_database.issue_memory_graph_runtime_operation() {
                 Ok(operation) => break operation,
@@ -1284,7 +1932,6 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
                 .expect("primary generation"),
             Arc::clone(&project_database),
             replay_binding(),
-            None,
         )
         .await
         .expect("primary graph runtime");
@@ -1299,7 +1946,6 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
                 .expect("linked generation"),
             Arc::clone(&project_database),
             replay_binding(),
-            None,
         )
         .await
         .expect("linked graph runtime");
@@ -1340,7 +1986,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     )
     .expect("daemon database scope");
     let project_store_root = profile_root.join("projects/project.derived-graph-corrupt");
-    let database_path = project_store_root.join(crate::config::db_filename(&project_store_root));
+    let database_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     std::fs::create_dir_all(database_path.parent().expect("database parent"))
         .expect("database directory");
 
@@ -1370,7 +2016,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     drop(first_database);
     first_registry.cancel_terminal_tasks();
     first_registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("first terminal tasks shut down");
     first_registry.cancel_memory_graph_reconciliation_tasks();
@@ -1379,7 +2025,9 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
         .await
         .expect("first reconciliation shuts down");
     first_registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("first graph runtime closes");
     drop(first_registry);
@@ -1399,7 +2047,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     )
     .expect("reopened project database authority");
     let reopened = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        MUST_NOT_BLOCK,
         reopened_registry.project_graph(
             &project_root,
             project_id.clone(),
@@ -1412,16 +2060,33 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     .expect("relational project open must not wait for derived graph recovery")
     .expect("relational project open remains available");
     assert_eq!(reopened.database_path(), database_path);
-    assert!(matches!(
-        reopened.issue_memory_graph_runtime_operation(),
-        Err(
-            tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound
-                | tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable
-        )
-    ));
+    // The relational open never waits for the derived graph: the memory-graph
+    // attachment is a retained background task, so the operation reads
+    // `Unbound` until that task settles. Recovery then rebuilds the corrupt
+    // derived graph and binds it -- on Linux roughly one tick after the mount
+    // returns, on macOS before the first read -- so asserting the warm-up
+    // window is asserting a race. Wait for the settled outcome instead, and
+    // keep refusing the one result that would mean the relational owner was
+    // damaged.
+    tokio::time::timeout(MUST_NOT_BLOCK, async {
+        loop {
+            match reopened.issue_memory_graph_runtime_operation() {
+                Ok(_) => return,
+                Err(
+                    tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound
+                    | tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable,
+                ) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                Err(error) => {
+                    panic!("corrupt derived graph must not fault the relational owner: {error:?}")
+                }
+            }
+        }
+    })
+    .await
+    .expect("derived graph recovery rebinds the memory graph to its relational owner");
     drop(reopened);
     tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        MUST_NOT_BLOCK,
         reopened_registry.retire_project_memory_graph(&project_id),
     )
     .await
@@ -1451,15 +2116,18 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
         .project_sessions(project_id.clone(), [project_root.clone()])
         .await
         .expect("initial project session database");
-    let graph_path = first_database.db_path().with_extension("grafeo");
+    let database_path = first_database.db_path().to_path_buf();
+    let graph_path = database_path.with_extension("grafeo");
     drop(first_database);
     first_registry.cancel_terminal_tasks();
     first_registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("first terminal tasks shut down");
     first_registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("first session relation graph closes");
     drop(first_registry);
@@ -1471,24 +2139,43 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
         .await
         .expect("reopened session runtime registry");
     let reopened = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        MUST_NOT_BLOCK,
         reopened_registry.project_sessions(project_id.clone(), [project_root]),
     )
     .await
     .expect("relational session open must not wait for relation graph recovery")
     .expect("relational session database remains available");
+    assert_eq!(
+        reopened.db_path(),
+        database_path.as_path(),
+        "the corrupt relation graph must not displace the relational session owner"
+    );
+    // The relational open never waits for the relation graph: the attachment
+    // is a retained background task, so a lease issued the instant the mount
+    // returns reads the warming window and reports the graph unavailable.
+    // Recovery then rebuilds the corrupt graph and binds it into the same
+    // registered owner every lease shares -- on Linux a tick after the mount
+    // returns, on macOS before this first read -- so asserting the warming
+    // window is asserting a race. Settle the task through the typed signal
+    // that exists for exactly this fixture, then assert the terminal outcome.
+    reopened_registry
+        .settle_project_session_graph(&project_id)
+        .await
+        .expect("session relation graph settles after corrupt-file recovery");
     assert!(
-        reopened.session_relation_graph_identity().is_err(),
-        "corrupt relation graph must remain unavailable rather than fabricating readiness"
+        reopened.session_relation_graph_identity().is_ok(),
+        "recovery must rebind a rebuilt relation graph to the intact relational owner"
     );
     drop(reopened);
     reopened_registry.cancel_terminal_tasks();
     reopened_registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("detached session relation graph task shuts down");
     reopened_registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("detached relational session owner shuts down cleanly");
 }
@@ -1593,7 +2280,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
         .expect("register project authority");
     let project_store_root = profile_root.join("projects/project.graph-publication");
     std::fs::create_dir_all(&project_store_root).expect("project store directory");
-    let main_path = project_store_root.join(crate::config::db_filename(&project_store_root));
+    let main_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     let unpublished_path = project_store_root.join("unpublished.db");
     rusqlite::Connection::open(&unpublished_path)
         .expect("seed unpublished branch database")
@@ -1644,24 +2331,45 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
         Ok(_) => panic!("read-only project graph facade unexpectedly admitted a write"),
         Err(error) => error,
     };
-    assert!(
-        write_error.to_string().contains("read-only"),
-        "unexpected read-only denial: {write_error}"
-    );
+    match write_error {
+        TraceDecayError::Database { operation, message } => {
+            assert_eq!(operation, "write through read-only project graph facade");
+            assert_eq!(
+                message,
+                format!(
+                    "cannot upgrade the daemon's shared read-only connection at '{}' to writable; acquire writable ownership before opening read handles",
+                    main_path.display()
+                )
+            );
+        }
+        other => panic!("read-only write denial must be a database error: {other}"),
+    }
 
     let unpublished_error = match registry
-        .project_graph_registered(project_id, unpublished_path, DatabaseAccessMode::ReadOnly)
+        .project_graph_registered(
+            project_id,
+            unpublished_path.clone(),
+            DatabaseAccessMode::ReadOnly,
+        )
         .await
     {
         Ok(_) => panic!("unpublished project store inherited synthetic write authority"),
         Err(error) => error,
     };
-    assert!(
-        unpublished_error
-            .to_string()
-            .contains("differs from retained canonical locator"),
-        "unexpected unpublished project store denial: {unpublished_error}"
-    );
+    match unpublished_error {
+        TraceDecayError::Database { operation, message } => {
+            assert_eq!(operation, "reuse project graph runtime");
+            assert_eq!(
+                message,
+                format!(
+                    "project graph locator {} differs from retained canonical locator {}",
+                    unpublished_path.display(),
+                    main.canonical_database_path().display()
+                )
+            );
+        }
+        other => panic!("unpublished project store denial must be a database error: {other}"),
+    }
     drop(unpublished_authority);
 }
 
@@ -1709,10 +2417,16 @@ async fn read_only_worktree_mount_never_recreates_a_deleted_database() {
         )
         .await;
 
-    assert!(
-        result.is_err(),
-        "read-only mount must fail for a deleted DB"
-    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("read-only mount of a deleted DB must refuse"),
+    };
+    match error {
+        TraceDecayError::Database { operation, .. } => {
+            assert_eq!(operation, "mount project graph store read-only");
+        }
+        other => panic!("read-only mount of a deleted DB must refuse as a database error: {other}"),
+    }
     assert!(
         !database_path.exists(),
         "read-only mount recreated the deleted worktree DB"

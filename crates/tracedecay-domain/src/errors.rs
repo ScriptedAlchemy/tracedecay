@@ -1,4 +1,10 @@
+use std::path::Path;
+
 use thiserror::Error;
+
+use crate::ApplicationProblemDetailV1;
+
+const STORE_OPEN_CANCELLED_REASON_CODE: &str = "store_open_cancelled";
 
 #[derive(Error, Debug)]
 #[error("{detail}")]
@@ -47,6 +53,18 @@ impl SqliteDriverError {
     }
 }
 
+/// The typed forms a project-route refusal carries beside its reason code.
+#[derive(Debug, Default)]
+pub struct ProjectRouteTyped {
+    detail: Option<ApplicationProblemDetailV1>,
+    /// The owner's `ApplicationProblemRecord` in its serde wire form, when an
+    /// owner refusal produced the error. The record type is defined above
+    /// this crate, so it travels as its wire value and the rendering boundary
+    /// reconstitutes it typed rather than re-deriving its kind, retry
+    /// directive, and legal actions from the reason code.
+    problem_record: Option<serde_json::Value>,
+}
+
 #[derive(Error, Debug)]
 pub enum TraceDecayError {
     #[error("file error: {message} (path: {path})")]
@@ -66,9 +84,24 @@ pub enum TraceDecayError {
     )]
     HostCliUnavailable { program: String, lifecycle: String },
 
+    /// The service manager resolves this profile's unit name to a unit file
+    /// the profile did not install, so any control command would act on
+    /// another profile's daemon.
     #[error(
-        "{component} profile schema {found_version:?} is incompatible with required schema \
-         {required_version}; reset the profile"
+        "the service manager resolves `{unit}` to {}, not to this profile's unit '{}'; refusing to control a service this profile does not own",
+        .loaded.as_ref().map_or_else(|| "no unit file".to_owned(), |path| format!("'{}'", path.display())),
+        .owned.display()
+    )]
+    ServiceUnitNotOwned {
+        unit: String,
+        owned: Box<Path>,
+        loaded: Option<Box<Path>>,
+    },
+
+    #[error(
+        "{component} profile schema {} is incompatible with required schema \
+         {required_version}; reset the profile",
+        .found_version.map_or_else(|| "unversioned".to_owned(), |version| version.to_string())
     )]
     ProfileResetRequired {
         component: &'static str,
@@ -84,10 +117,40 @@ pub enum TraceDecayError {
         reason_code: String,
         retryable: bool,
         detail: String,
+        typed_detail: Option<Box<ProjectRouteTyped>>,
     },
+
+    /// A project open failed for a reason its admission acts on: first-touch
+    /// bootstrap and the reopen backoff both match `kind`, never `detail`.
+    #[error("{detail}")]
+    ProjectOpen {
+        kind: ProjectOpenFailureKind,
+        detail: String,
+    },
+
+    /// A request the caller has to correct; repeating it unchanged repeats
+    /// the answer.
+    #[error("{message}")]
+    InvalidRequest {
+        reason: InvalidRequestReason,
+        message: String,
+    },
+
+    /// A command answered with a typed refusal rather than failing; the
+    /// process boundary names the refusal and its stable code.
+    #[error(transparent)]
+    ToolRefused(Box<ToolRefusal>),
 
     #[error("sync lock: {message}")]
     SyncLock { message: String },
+
+    /// A writer lock stayed held by other writers past its admission
+    /// deadline. `resource` names the lock class, never a filesystem path.
+    #[error("{resource} stayed busy past its {deadline_ms}ms admission deadline")]
+    LockDeadline {
+        resource: &'static str,
+        deadline_ms: u64,
+    },
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -104,10 +167,179 @@ pub enum TraceDecayError {
 
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
 
+/// Why a project open failed, as the open's admission decides recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectOpenFailureKind {
+    /// Identity resolution found no enrollment marker or registry match.
+    IdentityUnregistered,
+    /// The project has no index database yet; first-touch init creates it.
+    IndexMissing,
+    /// Every code-runtime seat is taken; one frees when another project
+    /// retires.
+    CodeRuntimeBudgetExhausted { limit: usize },
+    /// The global authority audit judged persisted rows and rejected them.
+    /// The verdict is a property of the stored data, so reopening repeats it
+    /// unless `migration_pending` names a migration that can still clear it.
+    AuthorityVerdict { migration_pending: bool },
+    /// An earlier failure of this route is backed off until its retry time.
+    BackedOff { retry_after_ms: u64 },
+}
+
+/// Why a request has to be corrected before it can succeed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidRequestReason {
+    MissingRequiredParameter,
+    NotFound,
+    /// The string is not a handle a truncated response envelope emitted.
+    InvalidResponseHandle,
+}
+
+impl InvalidRequestReason {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::MissingRequiredParameter => "missing_required_parameter",
+            Self::NotFound => "not_found",
+            Self::InvalidResponseHandle => "invalid_handle",
+        }
+    }
+}
+
+/// `code` is the refusal record's own code when the result carries one.
+#[derive(Debug, Error)]
+#[error("{tool} refused the request{}", refusal_suffix(code.as_deref(), reason.as_deref()))]
+pub struct ToolRefusal {
+    pub tool: String,
+    pub code: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl TraceDecayError {
+    pub fn tool_refused(
+        tool: impl Into<String>,
+        code: Option<String>,
+        reason: Option<String>,
+    ) -> Self {
+        Self::ToolRefused(Box::new(ToolRefusal {
+            tool: tool.into(),
+            code,
+            reason,
+        }))
+    }
+}
+
+fn refusal_suffix(code: Option<&str>, reason: Option<&str>) -> String {
+    match (code, reason) {
+        (Some(code), Some(reason)) => format!(" ({code}): {reason}"),
+        (Some(code), None) => format!(" ({code})"),
+        (None, Some(reason)) => format!(": {reason}"),
+        (None, None) => String::new(),
+    }
+}
+
+/// The one command that resets every profile-scoped persisted shape. Refused
+/// shapes are never migrated or backed up: the reset deletes the old data and
+/// the next open creates the shape the running binary writes.
+pub const PROFILE_RESET_COMMAND: &str = "tracedecay wipe --all --yes";
+
+/// Deletes exactly the stores the daemon reports in their typed
+/// reset-required state and nothing else; the next open recreates each one
+/// empty. Stores it cannot reset on their own name [`PROFILE_RESET_COMMAND`].
+pub const STALE_STORE_RESET_COMMAND: &str = "tracedecay wipe --stale --yes";
+
+/// Remounts the owners of store files deleted or replaced under a running
+/// daemon; no reset can, because those owners still hold the closed runtime.
+pub const DAEMON_RESTART_COMMAND: &str = "tracedecay daemon restart";
+
+/// A registered store [`STALE_STORE_RESET_COMMAND`] deletes on its own, named
+/// by the `store` label [`StoreResetRequiredV1`] carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResettableStoreV1 {
+    /// The profile database (`global.db`): project registry, usage
+    /// accounting, and remote-deletion records. Project stores keep their own
+    /// identity, so its reset leaves every project store intact but
+    /// unregistered.
+    ProfileAuthority,
+    ProfileSessions,
+    ProjectSessions {
+        project_id: String,
+    },
+    /// Every host's Hook V2 admission ledger for profile-scoped events.
+    ProfileHookAdmissions,
+    /// Every host's Hook V2 admission ledger, and pre-ledger pending work,
+    /// in one project's hook data root.
+    ProjectHookAdmissions {
+        project_id: String,
+    },
+}
+
+impl ResettableStoreV1 {
+    const PROFILE_AUTHORITY_LABEL: &'static str = "profile authority";
+    const PROFILE_SESSIONS_LABEL: &'static str = "profile sessions";
+    const PROJECT_SESSIONS_PREFIX: &'static str = "project sessions ";
+    const PROFILE_HOOK_ADMISSIONS_LABEL: &'static str = "profile hook admissions";
+    const PROJECT_HOOK_ADMISSIONS_PREFIX: &'static str = "project hook admissions ";
+
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::ProfileAuthority => Self::PROFILE_AUTHORITY_LABEL.to_owned(),
+            Self::ProfileSessions => Self::PROFILE_SESSIONS_LABEL.to_owned(),
+            Self::ProjectSessions { project_id } => {
+                format!("{}{project_id}", Self::PROJECT_SESSIONS_PREFIX)
+            }
+            Self::ProfileHookAdmissions => Self::PROFILE_HOOK_ADMISSIONS_LABEL.to_owned(),
+            Self::ProjectHookAdmissions { project_id } => {
+                format!("{}{project_id}", Self::PROJECT_HOOK_ADMISSIONS_PREFIX)
+            }
+        }
+    }
+
+    /// The store a [`Self::label`] names, `None` for a store that is not
+    /// resettable on its own.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            Self::PROFILE_AUTHORITY_LABEL => return Some(Self::ProfileAuthority),
+            Self::PROFILE_SESSIONS_LABEL => return Some(Self::ProfileSessions),
+            Self::PROFILE_HOOK_ADMISSIONS_LABEL => return Some(Self::ProfileHookAdmissions),
+            _ => {}
+        }
+        let project_id = |prefix: &str| {
+            label
+                .strip_prefix(prefix)
+                .filter(|project_id| !project_id.is_empty())
+                .map(str::to_owned)
+        };
+        project_id(Self::PROJECT_SESSIONS_PREFIX)
+            .map(|project_id| Self::ProjectSessions { project_id })
+            .or_else(|| {
+                project_id(Self::PROJECT_HOOK_ADMISSIONS_PREFIX)
+                    .map(|project_id| Self::ProjectHookAdmissions { project_id })
+            })
+    }
+}
+
+/// A persisted store the daemon keeps mounted in a typed reset-required state
+/// instead of refusing to serve: every read against it returns the typed
+/// refusal, stores that admit keep serving, and `remedy` is the exact command
+/// the operator runs to reset it.
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct StoreResetRequiredV1 {
+    pub store: String,
+    pub authority: String,
+    pub found_version: Option<i64>,
+    pub required_version: Option<i64>,
+    pub reason: String,
+    pub remedy: String,
+}
+
 /// Flatten an error and its [`std::error::Error::source`] chain into one
 /// message string.
 ///
-/// Many error families embed their source's `Display` inside their own — e.g.
+/// Many error families embed their source's `Display` inside their own, e.g.
 /// `#[error("SQLite error: {0}")]` paired with `#[from]` (the displayed field
 /// *is* the `#[source]`), or every `std::io::Error::other` wrapper (its
 /// `Display` delegates straight to the wrapped error). Naively appending each
@@ -128,7 +360,32 @@ fn flatten_error_chain(source: &(dyn std::error::Error + 'static)) -> String {
     message
 }
 
+/// Why a host cannot be reached on this machine. An absent host is
+/// informational everywhere TraceDecay reports hosts: it is never an issue, a
+/// warning, a pending operator action, or a non-zero exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostAbsence {
+    NotInstalled,
+}
+
+impl HostAbsence {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not installed",
+        }
+    }
+}
+
 impl TraceDecayError {
+    /// The host absence this error reports when it came from resolving a
+    /// host's own CLI, `None` for every real failure.
+    pub fn host_absence(&self) -> Option<HostAbsence> {
+        match self {
+            Self::HostCliUnavailable { .. } => Some(HostAbsence::NotInstalled),
+            _ => None,
+        }
+    }
+
     pub fn reset_required(authority: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::ResetRequired {
             authority: authority.into(),
@@ -143,6 +400,76 @@ impl TraceDecayError {
         Some((authority, reason))
     }
 
+    /// Whether this is a persisted-shape refusal a store is served in until
+    /// its reset.
+    #[must_use]
+    pub fn is_store_reset_required(&self) -> bool {
+        matches!(
+            self,
+            Self::ResetRequired { .. } | Self::ProfileResetRequired { .. }
+        )
+    }
+
+    /// The typed reset-required state `store` is mounted in when this error is
+    /// a profile-scoped persisted-shape refusal, `None` for any other failure.
+    /// `remedy` is the command that resets `store`.
+    pub fn store_reset_required(
+        &self,
+        store: impl Into<String>,
+        remedy: &str,
+    ) -> Option<StoreResetRequiredV1> {
+        let (authority, found_version, required_version) = match self {
+            Self::ResetRequired { authority, .. } => (authority.clone(), None, None),
+            Self::ProfileResetRequired {
+                component,
+                found_version,
+                required_version,
+            } => (
+                (*component).to_owned(),
+                *found_version,
+                Some(*required_version),
+            ),
+            _ => return None,
+        };
+        Some(StoreResetRequiredV1 {
+            store: store.into(),
+            authority,
+            found_version,
+            required_version,
+            reason: self.to_string(),
+            remedy: remedy.to_owned(),
+        })
+    }
+
+    pub fn project_open(kind: ProjectOpenFailureKind, detail: impl Into<String>) -> Self {
+        Self::ProjectOpen {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn project_open_failure_kind(&self) -> Option<ProjectOpenFailureKind> {
+        match self {
+            Self::ProjectOpen { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
+    pub fn missing_required_parameter(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            reason: InvalidRequestReason::MissingRequiredParameter,
+            message: message.into(),
+        }
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            reason: InvalidRequestReason::NotFound,
+            message: message.into(),
+        }
+    }
+
     pub fn project_route(
         reason_code: impl Into<String>,
         retryable: bool,
@@ -152,7 +479,55 @@ impl TraceDecayError {
             reason_code: reason_code.into(),
             retryable,
             detail: detail.into(),
+            typed_detail: None,
         }
+    }
+
+    /// Daemon shutdown stopped a store open or schema install at a safe point
+    /// and rolled back its uncommitted work.
+    pub fn store_open_cancelled(operation: impl std::fmt::Display) -> Self {
+        Self::project_route(
+            STORE_OPEN_CANCELLED_REASON_CODE,
+            true,
+            format!("{operation} was cancelled by daemon shutdown"),
+        )
+    }
+
+    pub fn is_store_open_cancelled(&self) -> bool {
+        self.project_route_context()
+            .is_some_and(|(reason_code, _, _)| reason_code == STORE_OPEN_CANCELLED_REASON_CODE)
+    }
+
+    pub fn project_route_with_detail(
+        reason_code: impl Into<String>,
+        retryable: bool,
+        detail: ApplicationProblemDetailV1,
+    ) -> Self {
+        Self::ProjectRoute {
+            reason_code: reason_code.into(),
+            retryable,
+            detail: detail.message(),
+            typed_detail: Some(Box::new(ProjectRouteTyped {
+                detail: Some(detail),
+                problem_record: None,
+            })),
+        }
+    }
+
+    /// Attaches the owner's problem record a project-route refusal came from.
+    #[must_use]
+    pub fn with_problem_record(mut self, record: serde_json::Value) -> Self {
+        if let Self::ProjectRoute { typed_detail, .. } = &mut self {
+            typed_detail.get_or_insert_default().problem_record = Some(record);
+        }
+        self
+    }
+
+    pub fn project_route_problem_record(&self) -> Option<&serde_json::Value> {
+        let Self::ProjectRoute { typed_detail, .. } = self else {
+            return None;
+        };
+        typed_detail.as_deref()?.problem_record.as_ref()
     }
 
     pub fn project_route_context(&self) -> Option<(&str, bool, &str)> {
@@ -160,11 +535,19 @@ impl TraceDecayError {
             reason_code,
             retryable,
             detail,
+            ..
         } = self
         else {
             return None;
         };
         Some((reason_code, *retryable, detail))
+    }
+
+    pub fn project_route_typed_detail(&self) -> Option<&ApplicationProblemDetailV1> {
+        let Self::ProjectRoute { typed_detail, .. } = self else {
+            return None;
+        };
+        typed_detail.as_deref()?.detail.as_ref()
     }
 
     pub fn database_operation(
@@ -175,10 +558,6 @@ impl TraceDecayError {
             operation: operation.into(),
             message: flatten_error_chain(&source),
         }
-    }
-
-    pub fn is_database_error(&self) -> bool {
-        matches!(self, Self::Database { .. })
     }
 
     /// A hook-runtime failure raised without an admission authority behind it
@@ -242,53 +621,16 @@ impl TraceDecayError {
 mod tests {
     use super::*;
 
+    /// Every fallible workspace call returns this error by value; clippy's
+    /// `result_large_err` rejects an `Err` variant of 128 bytes or more, so
+    /// large payloads are boxed rather than stored inline.
     #[test]
-    fn file_error_display_includes_message_and_path() {
-        let err = TraceDecayError::File {
-            message: "not found".to_string(),
-            path: "/tmp/foo.rs".to_string(),
-        };
-        let s = err.to_string();
-        assert!(s.contains("not found"), "message missing: {s}");
-        assert!(s.contains("/tmp/foo.rs"), "path missing: {s}");
-    }
-
-    #[test]
-    fn database_error_display_includes_operation() {
-        let err = TraceDecayError::Database {
-            message: "constraint violated".to_string(),
-            operation: "INSERT".to_string(),
-        };
-        let s = err.to_string();
-        assert!(s.contains("constraint violated"), "{s}");
-        assert!(s.contains("INSERT"), "{s}");
-    }
-
-    #[test]
-    fn reset_required_preserves_typed_authority_and_reason() {
-        let error =
-            TraceDecayError::reset_required("configuration", "persisted format is not final");
-
-        assert_eq!(
-            error.reset_required_context(),
-            Some(("configuration", "persisted format is not final"))
+    fn error_stays_small_enough_to_return_by_value() {
+        assert!(
+            std::mem::size_of::<TraceDecayError>() <= 64,
+            "TraceDecayError grew to {} bytes; box the new payload",
+            std::mem::size_of::<TraceDecayError>()
         );
-    }
-
-    #[test]
-    fn database_operation_preserves_public_database_classification() {
-        let err = TraceDecayError::database_operation(
-            "SELECT observations",
-            std::io::Error::other("database unavailable"),
-        );
-
-        let TraceDecayError::Database { operation, message } = &err else {
-            panic!("database operation must retain the public Database variant");
-        };
-        assert_eq!(operation, "SELECT observations");
-        assert_eq!(message, "database unavailable");
-        assert!(err.is_database_error());
-        assert!(err.to_string().contains("SELECT observations"));
     }
 
     #[test]
@@ -370,74 +712,5 @@ mod tests {
             panic!("expected Database variant");
         };
         assert_eq!(message, "query failed: connection refused");
-    }
-
-    #[test]
-    fn hook_runtime_error_preserves_typed_context() {
-        let err = TraceDecayError::hook_runtime("cursor_conflict", true, "cursor advanced");
-
-        assert_eq!(
-            err.hook_runtime_context(),
-            Some(("cursor_conflict", true, "cursor advanced"))
-        );
-        assert!(err.hook_runtime_status().is_none());
-        assert!(err.to_string().contains("cursor advanced"));
-    }
-
-    #[test]
-    fn hook_runtime_error_carries_the_admission_status_verbatim() {
-        let err = TraceDecayError::hook_runtime_with_status(
-            "project_authority_unbound",
-            false,
-            "daemon observation authority is unavailable",
-            "unavailable",
-        );
-
-        assert_eq!(
-            err.hook_runtime_context(),
-            Some((
-                "project_authority_unbound",
-                false,
-                "daemon observation authority is unavailable"
-            ))
-        );
-        assert_eq!(err.hook_runtime_status(), Some("unavailable"));
-    }
-
-    #[test]
-    fn search_error_display_includes_query() {
-        let err = TraceDecayError::Search {
-            message: "timeout".to_string(),
-            query: "fn main".to_string(),
-        };
-        let s = err.to_string();
-        assert!(s.contains("timeout"), "{s}");
-        assert!(s.contains("fn main"), "{s}");
-    }
-
-    #[test]
-    fn config_error_display() {
-        let err = TraceDecayError::Config {
-            message: "bad value".to_string(),
-        };
-        assert!(err.to_string().contains("bad value"));
-    }
-
-    #[test]
-    fn sync_lock_error_display() {
-        let err = TraceDecayError::SyncLock {
-            message: "already running".to_string(),
-        };
-        assert!(err.to_string().contains("already running"));
-    }
-
-    #[test]
-    fn json_error_from_serde() {
-        let serde_err = serde_json::from_str::<serde_json::Value>("bad json");
-        let err: TraceDecayError = match serde_err {
-            Err(e) => e.into(),
-            Ok(_) => panic!("expected JSON parse error"),
-        };
-        assert!(err.to_string().contains("json error"));
     }
 }

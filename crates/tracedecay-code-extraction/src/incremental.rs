@@ -15,7 +15,7 @@ use tracedecay_domain::{
     CommitId, ContentDigest, ManifestDigest, ProjectId, RefId, RepositoryDirtyStateV1,
     RepositoryId, TreeId, WorktreeId,
 };
-use tree_sitter::{InputEdit, ParseOptions, Parser, Point, Tree};
+use tree_sitter::{InputEdit, Language, ParseOptions, Parser, Point, Tree};
 
 use crate::ts_provider;
 
@@ -25,11 +25,11 @@ mod extraction;
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 /// A malformed edit stream cannot make range reporting itself unbounded.
 pub const DEFAULT_MAX_CHANGED_RANGES: usize = 256;
-/// Parsing is synchronous, but every invocation has a cooperative deadline.
+/// Default synchronous parse quantum. An admitted enclosing operation may resume
+/// an expired quantum; standalone parsing stops at its cooperative deadline.
+/// Cooperative means tree-sitter polls it between parse actions; a grammar
+/// scanner that never returns from one call is outside its reach (#1104).
 pub const DEFAULT_MAX_PARSE_TIME: Duration = Duration::from_millis(250);
-
-#[cfg(test)]
-static MINIMAL_EDIT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Exact authority for source retained by one parser.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -285,7 +285,10 @@ pub struct RetainedParseDocument {
     /// grammar). Retaining only the divergent case avoids storing two
     /// identical full-source copies per document.
     parsed_source: Option<String>,
-    parser: Parser,
+    /// Each parse takes a fresh parser: a retained parser keeps its parse
+    /// stacks, which outweigh the tree (12.2 MB across 38 retained
+    /// documents), and the retained tree alone carries incremental reuse.
+    language: Language,
     tree: Tree,
     limits: ParseLimits,
     state_epoch: u64,
@@ -307,7 +310,15 @@ impl RetainedParseDocument {
         let language_id = language_id.into();
         let source = source.into();
         let grammar_key = grammar_key(&language_id, identity.logical_path()).to_owned();
-        Self::open_normalized(identity, language_id, grammar_key, source, None, limits)
+        Self::open_normalized(
+            identity,
+            language_id,
+            grammar_key,
+            source,
+            None,
+            limits,
+            None,
+        )
     }
 
     pub fn open_prepared(
@@ -318,6 +329,28 @@ impl RetainedParseDocument {
         parsed_source: impl Into<String>,
         limits: ParseLimits,
     ) -> Result<(Self, ParseReport), ParseError> {
+        Self::open_prepared_with_control(
+            identity,
+            language_id,
+            grammar_key,
+            source,
+            parsed_source,
+            limits,
+            None,
+        )
+    }
+
+    /// Resume expired parse quanta while the enclosing operation remains admitted.
+    /// The control is checked by Tree-sitter between parse actions and is never retained.
+    pub fn open_prepared_with_control(
+        identity: ParseDocumentIdentity,
+        language_id: impl Into<String>,
+        grammar_key: impl Into<String>,
+        source: impl Into<String>,
+        parsed_source: impl Into<String>,
+        limits: ParseLimits,
+        control: Option<&dyn Fn() -> bool>,
+    ) -> Result<(Self, ParseReport), ParseError> {
         let source = source.into();
         let parsed_source = normalize_parsed_source(&source, parsed_source.into());
         Self::open_normalized(
@@ -327,6 +360,7 @@ impl RetainedParseDocument {
             source,
             parsed_source,
             limits,
+            control,
         )
     }
 
@@ -337,31 +371,23 @@ impl RetainedParseDocument {
         source: String,
         parsed_source: Option<String>,
         limits: ParseLimits,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<(Self, ParseReport), ParseError> {
         ensure_source_bound(&source, limits)?;
         if let Some(parsed) = parsed_source.as_deref() {
             validate_prepared_source(&source, parsed)?;
         }
-        let mut parser = crate::hotpath_observe::measure_language(|| {
+        let (language, mut parser) = crate::observe::measure_language(|| {
             let language = ts_provider::try_language(&grammar_key).map_err(|_| {
-                crate::hotpath_observe::record_grammar_lookup_miss();
                 ParseError::UnsupportedLanguage {
                     language_id: language_id.clone(),
                 }
             })?;
-            let mut parser = Parser::new();
-            parser.set_language(&language).map_err(|error| {
-                crate::hotpath_observe::record_grammar_rejected();
-                ParseError::GrammarRejected {
-                    language_id: language_id.clone(),
-                    detail: error.to_string(),
-                }
-            })?;
-            Ok::<_, ParseError>(parser)
+            let parser = parser_for(&language_id, &language)?;
+            Ok::<_, ParseError>((language, parser))
         })?;
         let parse_text = parsed_source.as_deref().unwrap_or(&source);
-        let (tree, elapsed) =
-            parse_with_deadline(&language_id, &mut parser, parse_text, None, limits)?;
+        let (tree, elapsed) = parse_with_deadline(&mut parser, parse_text, None, limits, control)?;
         let changed_ranges = if source.is_empty() {
             Vec::new()
         } else {
@@ -391,7 +417,7 @@ impl RetainedParseDocument {
                 language_id,
                 source,
                 parsed_source,
-                parser,
+                language,
                 tree,
                 limits,
                 state_epoch: 1,
@@ -428,7 +454,7 @@ impl RetainedParseDocument {
         edits: &[ParseInputEdit],
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        self.apply_edits_normalized(next_identity, edits, new_source.into(), None, None)
+        self.apply_edits_normalized(next_identity, edits, new_source.into(), None, None, None)
     }
 
     pub fn apply_edits_prepared(
@@ -440,7 +466,14 @@ impl RetainedParseDocument {
     ) -> Result<ParseReport, ParseError> {
         let new_source = new_source.into();
         let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
-        self.apply_edits_normalized(next_identity, edits, new_source, new_parsed_source, None)
+        self.apply_edits_normalized(
+            next_identity,
+            edits,
+            new_source,
+            new_parsed_source,
+            None,
+            None,
+        )
     }
 
     fn apply_edits_normalized(
@@ -450,34 +483,24 @@ impl RetainedParseDocument {
         new_source: String,
         new_parsed_source: Option<String>,
         source_edit: Option<ParseInputEdit>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
-            crate::hotpath_observe::record_retained_parse_abstention(
-                crate::hotpath_observe::RetainedParseAbstention::IdentityMismatch,
-            );
             return Err(ParseError::IdentityMismatch);
         }
         ensure_source_bound(&new_source, self.limits)?;
         if let Some(parsed) = new_parsed_source.as_deref() {
             validate_prepared_source(&new_source, parsed)?;
         }
-        validate_edits(self.source.len(), new_source.len(), edits).inspect_err(|_| {
-            crate::hotpath_observe::record_retained_parse_abstention(
-                crate::hotpath_observe::RetainedParseAbstention::InvalidEdit,
-            )
-        })?;
+        validate_edits(self.source.len(), new_source.len(), edits)?;
         if edits.is_empty() {
             if self.source != new_source || self.parsed_source != new_parsed_source {
-                crate::hotpath_observe::record_retained_parse_abstention(
-                    crate::hotpath_observe::RetainedParseAbstention::InvalidEdit,
-                );
                 return Err(ParseError::InvalidEdit {
                     detail: "an empty edit batch changed source bytes".to_owned(),
                 });
             }
             self.identity = next_identity;
             self.state_epoch = self.state_epoch.saturating_add(1);
-            crate::hotpath_observe::record_retained_parse_reuse(ParseReuse::Noop);
             return Ok(ParseReport {
                 reuse: ParseReuse::Noop,
                 completeness: completeness_for(&self.tree, None, None),
@@ -506,27 +529,26 @@ impl RetainedParseDocument {
         }
         let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
         let (new_tree, elapsed) = parse_with_deadline(
-            &self.language_id,
-            &mut self.parser,
+            &mut parser_for(&self.language_id, &self.language)?,
             parse_text,
             Some(&edited_tree),
             self.limits,
+            control,
         )?;
-        let (changed_ranges, extraction_ranges) =
-            crate::hotpath_observe::measure_change_ranges(|| {
-                let changed_ranges = edited_tree
-                    .changed_ranges(&new_tree)
-                    .map(|range| ParseChangedRange {
-                        start_byte: range.start_byte,
-                        end_byte: range.end_byte,
-                        start_position: range.start_point.into(),
-                        end_position: range.end_point.into(),
-                    })
-                    .collect::<Vec<_>>();
-                let extraction_ranges =
-                    extraction_ranges(&new_tree, &new_source, &source_edit, &changed_ranges);
-                (changed_ranges, extraction_ranges)
-            });
+        let (changed_ranges, extraction_ranges) = crate::observe::measure_change_ranges(|| {
+            let changed_ranges = edited_tree
+                .changed_ranges(&new_tree)
+                .map(|range| ParseChangedRange {
+                    start_byte: range.start_byte,
+                    end_byte: range.end_byte,
+                    start_position: range.start_point.into(),
+                    end_position: range.end_point.into(),
+                })
+                .collect::<Vec<_>>();
+            let extraction_ranges =
+                extraction_ranges(&new_tree, &new_source, &source_edit, &changed_ranges);
+            (changed_ranges, extraction_ranges)
+        });
         let next_epoch = self.state_epoch.saturating_add(1);
         let report = report_for(
             ParseReuse::Incremental,
@@ -555,18 +577,19 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        self.reparse_normalized(next_identity, new_source.into(), None)
+        self.reparse_normalized(next_identity, new_source.into(), None, None)
     }
 
-    pub fn reparse_prepared(
+    pub fn reparse_prepared_with_control(
         &mut self,
         next_identity: ParseDocumentIdentity,
         new_source: impl Into<String>,
         new_parsed_source: impl Into<String>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<ParseReport, ParseError> {
         let new_source = new_source.into();
         let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
-        self.reparse_normalized(next_identity, new_source, new_parsed_source)
+        self.reparse_normalized(next_identity, new_source, new_parsed_source, control)
     }
 
     fn reparse_normalized(
@@ -574,10 +597,16 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: String,
         new_parsed_source: Option<String>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<ParseReport, ParseError> {
         if self.source == new_source {
             if self.parsed_source != new_parsed_source {
-                return self.replace_normalized(next_identity, new_source, new_parsed_source);
+                return self.replace_normalized(
+                    next_identity,
+                    new_source,
+                    new_parsed_source,
+                    control,
+                );
             }
             return self.apply_edits_normalized(
                 next_identity,
@@ -585,6 +614,7 @@ impl RetainedParseDocument {
                 new_source,
                 new_parsed_source,
                 None,
+                control,
             );
         }
         let edit = minimal_edit(&self.source, &new_source);
@@ -594,6 +624,7 @@ impl RetainedParseDocument {
             new_source,
             new_parsed_source,
             Some(edit),
+            control,
         )
     }
 
@@ -603,7 +634,7 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        self.replace_normalized(next_identity, new_source.into(), None)
+        self.replace_normalized(next_identity, new_source.into(), None, None)
     }
 
     pub fn replace_prepared(
@@ -614,7 +645,7 @@ impl RetainedParseDocument {
     ) -> Result<ParseReport, ParseError> {
         let new_source = new_source.into();
         let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
-        self.replace_normalized(next_identity, new_source, new_parsed_source)
+        self.replace_normalized(next_identity, new_source, new_parsed_source, None)
     }
 
     fn replace_normalized(
@@ -622,11 +653,9 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: String,
         new_parsed_source: Option<String>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
-            crate::hotpath_observe::record_retained_parse_abstention(
-                crate::hotpath_observe::RetainedParseAbstention::IdentityMismatch,
-            );
             return Err(ParseError::IdentityMismatch);
         }
         ensure_source_bound(&new_source, self.limits)?;
@@ -635,11 +664,11 @@ impl RetainedParseDocument {
         }
         let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
         let (new_tree, elapsed) = parse_with_deadline(
-            &self.language_id,
-            &mut self.parser,
+            &mut parser_for(&self.language_id, &self.language)?,
             parse_text,
             None,
             self.limits,
+            control,
         )?;
         let ranges = if new_source.is_empty() {
             Vec::new()
@@ -675,11 +704,19 @@ impl RetainedParseDocument {
     }
 }
 
+fn parser_for(language_id: &str, language: &Language) -> Result<Parser, ParseError> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(language)
+        .map_err(|error| ParseError::GrammarRejected {
+            language_id: language_id.to_owned(),
+            detail: error.to_string(),
+        })?;
+    Ok(parser)
+}
+
 fn ensure_source_bound(source: &str, limits: ParseLimits) -> Result<(), ParseError> {
     if source.len() > limits.max_source_bytes {
-        crate::hotpath_observe::record_retained_parse_abstention(
-            crate::hotpath_observe::RetainedParseAbstention::SourceTooLarge,
-        );
         return Err(ParseError::SourceTooLarge {
             size: source.len(),
             limit: limits.max_source_bytes,
@@ -695,33 +732,21 @@ fn validate_prepared_source(source: &str, prepared: &str) -> Result<(), ParseErr
             .zip(prepared.bytes())
             .all(|(original, parsed)| (original == b'\n') == (parsed == b'\n'));
     if !same_shape {
-        crate::hotpath_observe::record_retained_parse_abstention(
-            crate::hotpath_observe::RetainedParseAbstention::PreparedSourceMismatch,
-        );
         return Err(ParseError::PreparedSourceShapeMismatch);
     }
     Ok(())
 }
 
 fn parse_with_deadline(
-    language_id: &str,
     parser: &mut Parser,
     source: &str,
     old_tree: Option<&Tree>,
     limits: ParseLimits,
+    control: Option<&dyn Fn() -> bool>,
 ) -> Result<(Tree, Duration), ParseError> {
-    crate::hotpath_observe::measure_parse_file(
-        language_id,
-        source.len(),
-        || parse_with_deadline_unmeasured(parser, source, old_tree, limits),
-        |result| match result {
-            Ok((tree, _)) => {
-                crate::hotpath_observe::ParseFileOutcome::from_parsed_root(tree.root_node())
-            }
-            Err(ParseError::TimedOut { .. }) => crate::hotpath_observe::ParseFileOutcome::TimedOut,
-            Err(_) => crate::hotpath_observe::ParseFileOutcome::NoTree,
-        },
-    )
+    crate::observe::measure_parse_file(|| {
+        parse_with_deadline_unmeasured(parser, source, old_tree, limits, control)
+    })
 }
 
 fn parse_with_deadline_unmeasured(
@@ -729,6 +754,7 @@ fn parse_with_deadline_unmeasured(
     source: &str,
     old_tree: Option<&Tree>,
     limits: ParseLimits,
+    control: Option<&dyn Fn() -> bool>,
 ) -> Result<(Tree, Duration), ParseError> {
     if limits.max_parse_time.is_zero() {
         return Err(ParseError::TimedOut {
@@ -736,38 +762,49 @@ fn parse_with_deadline_unmeasured(
         });
     }
     let started = Instant::now();
-    let mut timed_out = false;
-    let mut progress = |_: &tree_sitter::ParseState| {
-        if started.elapsed() >= limits.max_parse_time {
-            timed_out = true;
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    };
-    let options = ParseOptions::new().progress_callback(&mut progress);
     let bytes = source.as_bytes();
-    let tree = parser.parse_with_options(
-        &mut |offset, _| match bytes.get(offset..) {
-            Some(remaining) => remaining,
-            None => &[],
-        },
-        old_tree,
-        Some(options),
-    );
-    let elapsed = started.elapsed();
-    match tree {
-        Some(tree) => Ok((tree, elapsed)),
-        None if timed_out || elapsed >= limits.max_parse_time => {
+    loop {
+        if control.is_some_and(|admitted| !admitted()) {
             parser.reset();
+            return Err(ParseError::TimedOut {
+                limit: limits.max_parse_time,
+            });
+        }
+        let quantum_started = Instant::now();
+        let mut timed_out = false;
+        let mut interrupted = false;
+        let mut progress = |_: &tree_sitter::ParseState| {
+            interrupted = control.is_some_and(|admitted| !admitted());
+            timed_out = quantum_started.elapsed() >= limits.max_parse_time;
+            if interrupted || timed_out {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        let options = ParseOptions::new().progress_callback(&mut progress);
+        let tree = parser.parse_with_options(
+            &mut |offset, _| bytes.get(offset..).unwrap_or(&[]),
+            old_tree,
+            Some(options),
+        );
+        if let Some(tree) = tree {
+            return Ok((tree, started.elapsed()));
+        }
+        if timed_out && !interrupted && control.is_some_and(|admitted| admitted()) {
+            // Tree-sitter resumes its suspended parse with the same input and old
+            // tree. Reset only on terminal failure, not between admitted quanta.
+            std::thread::yield_now();
+            continue;
+        }
+        parser.reset();
+        return if timed_out || interrupted {
             Err(ParseError::TimedOut {
                 limit: limits.max_parse_time,
             })
-        }
-        None => {
-            parser.reset();
+        } else {
             Err(ParseError::ParseFailed)
-        }
+        };
     }
 }
 
@@ -806,9 +843,6 @@ fn validate_edits(
 }
 
 fn minimal_edit(before: &str, after: &str) -> ParseInputEdit {
-    #[cfg(test)]
-    MINIMAL_EDIT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
     let before_bytes = before.as_bytes();
     let after_bytes = after.as_bytes();
     let mut prefix = before_bytes
@@ -917,54 +951,6 @@ fn extraction_ranges(
     expanded
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::Ordering;
-
-    use super::*;
-
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid test identity")
-    }
-
-    fn identity(commit: &str, tree: &str) -> ParseDocumentIdentity {
-        ParseDocumentIdentity::Repository {
-            project_id: id("project.incremental-minimal-edit"),
-            repository_id: id("repository.incremental-minimal-edit"),
-            worktree_id: Some(id("worktree.incremental-minimal-edit")),
-            reference: Some(id("refs/heads/main")),
-            commit: Some(id(commit)),
-            tree: Some(id(tree)),
-            dirty: RepositoryDirtyStateV1::Dirty,
-            logical_path: "src/lib.rs".to_owned(),
-        }
-    }
-
-    #[test]
-    fn reparse_computes_the_minimal_edit_once() {
-        let before = "fn unchanged() {}\nfn edited() -> u32 { 1 }\n";
-        let after = "fn unchanged() {}\nfn edited() -> u32 { 123 }\n";
-        let (mut document, _) = RetainedParseDocument::open(
-            identity("commit-a", "tree-a"),
-            "rust",
-            before,
-            ParseLimits::default(),
-        )
-        .expect("initial parse");
-        MINIMAL_EDIT_CALLS.store(0, Ordering::Relaxed);
-
-        document
-            .reparse(identity("commit-b", "tree-b"), after)
-            .expect("incremental reparse");
-
-        assert_eq!(MINIMAL_EDIT_CALLS.load(Ordering::Relaxed), 1);
-    }
-}
-
 fn is_attached_leading_syntax(kind: &str) -> bool {
     matches!(
         kind,
@@ -993,7 +979,6 @@ fn report_for(
     max_changed_ranges: usize,
     state_epoch: u64,
 ) -> ParseReport {
-    crate::hotpath_observe::record_retained_parse_reuse(reuse);
     let total_ranges = changed_ranges.len();
     let total_extraction_ranges = extraction_ranges.len();
     let changed_truncated = (total_ranges > max_changed_ranges).then_some(total_ranges);
@@ -1068,5 +1053,23 @@ fn grammar_key<'a>(language_id: &'a str, logical_path: &str) -> &'a str {
         },
         "typescriptreact" => "tsx",
         _ => language_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimal_edit_is_confined_to_the_changed_token() {
+        let before = "fn unchanged() {}\nfn edited() -> u32 { 1 }\n";
+        let after = "fn unchanged() {}\nfn edited() -> u32 { 123 }\n";
+        let edit = minimal_edit(before, after);
+
+        assert_eq!(&before[edit.start_byte..edit.old_end_byte], "");
+        assert_eq!(&after[edit.start_byte..edit.new_end_byte], "23");
+        assert_eq!(edit.start_position, ParsePoint { row: 1, column: 22 });
+        assert_eq!(edit.old_end_position, ParsePoint { row: 1, column: 22 });
+        assert_eq!(edit.new_end_position, ParsePoint { row: 1, column: 24 });
     }
 }

@@ -1,1027 +1,285 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type {
-  DeliveryOverviewV1,
-  DeliveryPullRequestV1,
-} from '../../contracts/generated.ts';
-import { useScope } from '../../data/scope/store.ts';
-import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
-import { DeliveryPage } from './DeliveryPage.tsx';
+import type { DeliveryInboxV1 } from '../../contracts/generated.ts';
+import {
+  INBOX,
+  INBOX_BRANCH_ONLY,
+  OVERVIEW_ALPHA,
+  OVERVIEW_LOCAL_ONLY,
+} from '../../test/deliveryFixtures.ts';
+import { PR_42, renderDelivery } from '../../test/renderDelivery.tsx';
+import { LANE_FIELD_LABEL } from './LaneField.tsx';
 
-/**
- * Delivery's failure mode is not a crash, it is a plausible lie: a surface
- * about shipping code, showing a "recency" axis that a reader will take for
- * commit recency when it is really index recency, and showing "0 branches" for
- * directories that are not repositories at all.
- *
- * Every test below pins one of those distinctions to a sentence on the page.
- */
-
-const NOW = Math.floor(Date.now() / 1000);
-const DAY = 86_400;
-
-function checkout(over: Record<string, unknown> = {}) {
-  return {
-    project_id: 'p1',
-    label: 'repo',
-    project_root: '/src/repo',
-    canonical_root: '/src/repo',
-    kind: 'primary',
-    default_branch: 'main',
-    branches: [],
-    store_count: 1,
-    artifact_count: 2,
-    alias_count: 1,
-    last_seen_at: NOW - 3600,
-    ...over,
-  };
-}
-
-/** The flat `projects` list `projects.rs::list` returns beside the grouped
- * tree. It is a `PublicCodeProject`, a narrower record than a registry entry. */
-function publicProject(over: Record<string, unknown> = {}) {
-  return {
-    project_id: 'p1',
-    label: 'repo',
-    project_root: '/src/repo',
-    canonical_root: '/src/repo',
-    display_root: '/src/repo',
-    git_common_dir: '/src/repo/.git',
-    default_branch: 'main',
-    created_at: NOW - 90 * DAY,
-    last_seen_at: NOW - 3600,
-    ...over,
-  };
-}
-
-const PROJECT_TREE = [
+/** Inbox already joined by the server, overlapping_edit is Active with typed
+ * proximity evidence (no client `/api/feedback/proximity` re-join). */
+const INBOX_WITH_PROXIMITY_ATTENTION: DeliveryInboxV1 = {
+  ...INBOX,
+  pull_requests: [
     {
-      label: 'tracedecay',
-      git_common_dir: '/src/tracedecay/.git',
-      project_count: 2,
-      branches: ['main', 'feat/a', 'feat/b', 'fix/c'],
-      projects: [
-        checkout({ project_id: 'p1', label: 'tracedecay', is_active: true }),
-        checkout({
-          project_id: 'p2',
-          label: 'tracedecay (worktree)',
-          kind: 'worktree',
-          project_root: '/src/tracedecay-wt',
-          last_seen_at: NOW - 5 * DAY,
-        }),
+      ...INBOX.pull_requests[0]!,
+      attention: [
+        INBOX.pull_requests[0]!.attention[0]!,
+        {
+          id: 'project.alpha:42:overlapping_edit',
+          project_id: 'project.alpha',
+          pull_request_id: '42',
+          source: 'overlapping_edit',
+          state: 'active',
+          evidence: [
+            {
+              kind: 'proximity_encounter',
+              encounter_id: 'sha256:overlap',
+              relation: 'overlapping_edit',
+            },
+          ],
+          coverage: 'complete',
+          observed_at_micros: 1_700_000_100_000_000,
+        },
       ],
     },
-    {
-      label: 'lynx',
-      git_common_dir: '/src/lynx/.git',
-      project_count: 1,
-      branches: ['main'],
-      projects: [
-        checkout({ project_id: 'p3', label: 'lynx', last_seen_at: NOW - 40 * DAY }),
-      ],
-    },
-    {
-      label: 'notes',
-      git_common_dir: null,
-      project_count: 1,
-      branches: [],
-      projects: [
-        checkout({
-          project_id: 'p4',
-          label: 'notes',
-          kind: 'project',
-          default_branch: null,
-          last_seen_at: NOW - 2 * DAY,
-        }),
-      ],
-    },
-];
-
-/** `projects.rs::list` always answers with `limit`, `active_project_root` and
- * both views of the registry. The three nullable fields below come back null
- * together on the failure paths, never as empty collections. */
-function registry(over: Record<string, unknown> = {}) {
-  return {
-    status: 'ok',
-    limit: 100,
-    truncated: false,
-    active_project_id: 'p1',
-    active_project_root: '/src/tracedecay',
-    summary: { project_count: 4, repo_count: 3, truncated: false },
-    projects: [
-      publicProject({ project_id: 'p1', label: 'tracedecay', project_root: '/src/tracedecay' }),
-      publicProject({
-        project_id: 'p2',
-        label: 'tracedecay (worktree)',
-        project_root: '/src/tracedecay-wt',
-        last_seen_at: NOW - 5 * DAY,
-      }),
-      publicProject({ project_id: 'p3', label: 'lynx', project_root: '/src/lynx' }),
-      publicProject({
-        project_id: 'p4',
-        label: 'notes',
-        project_root: '/src/notes',
-        git_common_dir: null,
-        default_branch: null,
-      }),
-    ],
-    project_tree: PROJECT_TREE,
-    ...over,
-  };
-}
-
-const PROJECTS = registry();
-
-const INDEX_FRESHNESS = {
-  schema_revision: 1,
-  scope: {
-    project_id: 'p1',
-    storage_mode: 'profile_sharded',
-    store_root: '/data/projects/p1',
-  },
-  version: { entity_version: null, graph_version: null },
-  time: { valid_time_micros: null, observation_time_micros: 100 },
-  source_watermark: null,
-  authorization: { outcome: 'authorized' },
-  coverage: {
-    completeness: 'unsupported',
-    eligible: null,
-    examined: null,
-    matched: null,
-    excluded: null,
-    omitted: null,
-    unknown: null,
-    denominator: null,
-    unit: null,
-    omission_reasons: [],
-  },
-  freshness: {
-    state: 'unsupported',
-    observed_at_micros: null,
-    watermark: null,
-  },
-  domain_state: 'unsupported',
-  legal_actions: [
-    {
-      kind: 'refresh',
-      operation: 'use-case.dashboard.code-index.freshness.refresh',
-    },
+    ...INBOX.pull_requests.slice(1),
   ],
-  payload: {
-    worktrees: [],
-    required_source: 'CodeIndexSchedulerRegistry read port',
-    note: 'generation source is not wired',
-  },
 };
 
-const SNAPSHOT = {
-  coverage: 'complete' as const,
-  fetched_at_micros: 101,
-  merge_base_commit_id: 'd'.repeat(40),
-  outcome: 'complete' as const,
-  provider_base_commit_id: 'b'.repeat(40),
-  provider_head_commit_id: 'a'.repeat(40),
-};
-
-function pullRequest(provider: string, pullRequestId = '42'): DeliveryPullRequestV1 {
-  return {
-    id: `${provider}:${pullRequestId}`,
-    label: `${provider} PR ${pullRequestId}`,
-    provider,
-    pull_request_id: pullRequestId,
-    identity: null,
-    operations: [
-      {
-        operation: 'pull_request' as const,
-        latest_attempt: SNAPSHOT,
-        last_complete: { ...SNAPSHOT, fetched_at_micros: 99 },
-      },
-    ],
-  };
-}
-
-const RELEASE = {
-  assets: [
-    {
-      asset_id: 9007199254740001,
-      content_type: 'application/octet-stream',
-      created_at_micros: 104,
-      digest: 'sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
-      download_count: 7,
-      download_url: 'javascript:alert(2)',
-      label: null,
-      name: 'tracedecay-linux.tar.zst',
-      size_bytes: 2048,
-      updated_at_micros: 105,
-    },
-  ],
-  created_at_micros: 102,
-  draft: false,
-  id: 'github:release:9007199254740000',
-  label: 'v2.0.0',
-  name: null,
-  prerelease: false,
-  published_at_micros: null,
-  release_id: 9007199254740000,
-  source_url: 'javascript:alert(1)',
-  tag: 'v2.0.0',
-};
-
-function overviewWith(payload: Partial<DeliveryOverviewV1>) {
-  return {
-    ...DELIVERY_OVERVIEW,
-    payload: { ...DELIVERY_OVERVIEW.payload, ...payload },
-  };
-}
-
-const DELIVERY_OVERVIEW = {
-  ...INDEX_FRESHNESS,
-  coverage: {
-    ...INDEX_FRESHNESS.coverage,
-    completeness: 'partial',
-    eligible: 8,
-    examined: 3,
-    omitted: 5,
-    denominator: 8,
-    unit: 'delivery sources',
-    omission_reasons: ['external authorities are not mounted'],
-  },
-  freshness: {
-    state: 'unknown',
-    observed_at_micros: null,
-    watermark: null,
-  },
-  domain_state: 'partial',
-  payload: {
-    changes: {
-      state: 'ready',
-      value: {
-        schema_version: 'tracedecay.git-query.v1',
-        repository: '/src/tracedecay',
-        operation: 'none',
-        head: { state: 'attached', branch: 'main', commit: 'a'.repeat(40) },
-        staged: 0,
-        unstaged: 1,
-        conflicted: 0,
-        untracked: 0,
-        ignored: 0,
-        changed_paths: ['src/lib.rs'],
-      },
-    },
-    commits: {
-      state: 'ready',
-      value: {
-        items: [
-          {
-            commit: 'a'.repeat(40),
-            subject: 'bind delivery timeline',
-            author_name: 'TraceDecay',
-            author_email: 'dev@example.com',
-            author_at_micros: 100,
-            committer_at_micros: 100,
-          },
-          {
-            commit: 'b'.repeat(40),
-            subject: 'initial',
-            author_name: 'TraceDecay',
-            author_email: 'dev@example.com',
-            author_at_micros: 90,
-            committer_at_micros: 90,
-          },
-        ],
-        truncated: false,
-      },
-    },
-    pull_requests: {
-      state: 'unavailable',
-      required_authority: 'ProjectGitHubReviewStoreV1 in DashboardState',
-      reason: 'GitHub review authority is not mounted',
-      value: null,
-    },
-    review_comments: {
-      state: 'unavailable',
-      required_authority: 'ProjectGitHubReviewStoreV1 in DashboardState',
-      reason: 'GitHub review authority is not mounted',
-      value: null,
-    },
-    ci_checks: {
-      state: 'unavailable',
-      required_authority: 'CiReadOnlyProviderArchiveV1 in DashboardState',
-      reason: 'CI archive is not mounted',
-      value: null,
-    },
-    failure_localization: {
-      state: 'unavailable',
-      required_authority: 'CiExactEvidenceAuthorityV1 in DashboardState',
-      reason: 'failure localization is not configured',
-      value: null,
-    },
-    releases: {
-      state: 'not_published',
-      required_authority: 'read-only release authority in DashboardState',
-      reason: 'release history has not been published',
-    },
-    generation_freshness: {
-      state: 'ready',
-      value: {
-        comparison: 'current',
-        head_commit: 'a'.repeat(40),
-        indexed_commit: 'a'.repeat(40),
-      },
-    },
-  } satisfies DeliveryOverviewV1,
-};
-
-function serve(routes: Record<string, { status: number; body: unknown }>) {
-  return vi.fn(async (input: RequestInfo | URL) => {
-    const url = String(input);
-    // Project-scoped dashboard reads travel through the gateway prefix.
-    const canonicalUrl = url.replace(/\/api\/projects\/[^/]+\//, '/api/');
-    const hit = Object.entries(routes).find(([path]) => canonicalUrl.includes(path));
-    const { status, body } = hit?.[1] ?? { status: 404, body: { status: 'not_found' } };
-    return {
-      ok: status >= 200 && status < 300,
-      status,
-      json: async () => body,
-    } as Response;
-  });
-}
-
-function renderDelivery(
-  body: unknown = PROJECTS,
-  status = 200,
-  overview: unknown = DELIVERY_OVERVIEW,
-) {
-  const projectsBody =
-    status === 200 && body !== null && typeof body === 'object' && 'status' in body
-      ? fixtureEnvelope(body)
-      : body;
-  vi.stubGlobal(
-    'fetch',
-    serve({
-      '/api/projects': { status, body: projectsBody },
-      '/api/delivery/overview': { status: 200, body: overview },
-    }),
-  );
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  });
-  return render(
-    <QueryClientProvider client={client}>
-      <DeliveryPage />
-    </QueryClientProvider>,
-  );
-}
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  useScope.setState({ scope: { kind: 'all' } });
 });
 
-describe('DeliveryPage', () => {
-  it('scopes delivery overview to the selected project gateway', async () => {
-    const fetchMock = serve({
-      '/api/projects': { status: 200, body: fixtureEnvelope(PROJECTS) },
-      '/api/delivery/overview': { status: 200, body: DELIVERY_OVERVIEW },
-    });
-    useScope.setState({
-      scope: {
-        kind: 'project',
-        projectId: 'p1',
-        label: 'repo',
-        activation: 'selected',
-      },
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false, gcTime: 0 } },
-    });
-    render(
-      <QueryClientProvider client={client}>
-        <DeliveryPage />
-      </QueryClientProvider>,
+describe('DeliveryPage · inbox', () => {
+  it('renders only admitted pull requests, selects through the URL and explains membership', async () => {
+    const user = userEvent.setup();
+    renderDelivery(INBOX);
+
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getAllByRole('button', { pressed: false })).toHaveLength(3);
+    await user.click(within(queue).getByRole('button', { name: /Admit delivery inbox/ }));
+
+    expect(screen.getByTestId('location').textContent).toContain(`pr=${PR_42}`);
+    const detail = screen.getByRole('region', { name: 'Pull request detail' });
+    const correlation = within(detail).getByRole('region', { name: /Correlation · 3 edges/ });
+    expect(within(correlation).getByText('Branch and pull request reference')).toBeTruthy();
+    expect(within(correlation).getByText('Shared Work objective')).toBeTruthy();
+    expect(within(correlation).getByText('Session and Git relation')).toBeTruthy();
+    expect(within(detail).getAllByText(/refs\/heads\/feature\/delivery/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/1 unrelated provider pull request excluded/)).toBeTruthy();
+    expect(screen.queryByText('Unrelated provider PR')).toBeNull();
+  });
+
+  it('prints basis and grade on every correlation edge and never upgrades one', async () => {
+    renderDelivery(INBOX, { route: `/delivery?pr=${PR_42}` });
+    const detail = await screen.findByRole('region', { name: 'Pull request detail' });
+    const correlation = within(detail).getByRole('region', { name: /Correlation · 3 edges/ });
+    expect(within(correlation).getByText('COMMIT / EXACT')).toBeTruthy();
+    expect(within(correlation).getByText('WORK / EXPLICIT')).toBeTruthy();
+    expect(within(correlation).getByText('TRANSCRIPT / INFERRED')).toBeTruthy();
+    expect(within(correlation).getByRole('link', { name: /Open in Loom/ }).getAttribute('href')).toBe(
+      '/loom?loomSession=session.alpha.1',
     );
-    await screen.findByText('Changes & commits');
-    const requested = fetchMock.mock.calls.map(([input]) => String(input));
-    expect(requested.some((url) => url.includes('/api/projects/p1/delivery/overview'))).toBe(
-      true,
+  });
+
+  it('restores project, pull request, attention source, and evidence from the URL', async () => {
+    renderDelivery(INBOX, {
+      route: `/delivery?project=project.alpha&pr=${PR_42}&attention=ci_failure&evidence=anchor.ci.42`,
+    });
+
+    const detail = await screen.findByRole('region', { name: 'Pull request detail' });
+    expect(within(detail).getByText('CI failure')).toBeTruthy();
+    expect(within(detail).getByRole('button', { name: 'anchor.ci.42', pressed: true })).toBeTruthy();
+    expect(within(detail).getByText('Overlapping edit')).toBeTruthy();
+    expect((screen.getByRole('combobox', { name: 'Attention source' }) as HTMLSelectElement).value).toBe(
+      'ci_failure',
     );
-    expect(
-      requested.some(
-        (url) => url.includes('/api/delivery/overview') && !url.includes('/api/projects/'),
-      ),
-    ).toBe(false);
   });
 
-  it('says the recency axis is index time, not commit time', async () => {
-    renderDelivery();
-    await screen.findByText('last indexed across · branches up');
-    expect(
-      screen.getByText(
-        /not when it was last committed to; commit history is shown separately\s+for the active checkout/,
-      ),
-    ).toBeTruthy();
+  it('links to the existing verified Code views and a head-prefilled Compare', async () => {
+    renderDelivery(INBOX, { route: `/delivery?pr=${PR_42}` });
+
+    const shared = await screen.findByRole('link', { name: 'Open Shared Code' });
+    const compare = screen.getByRole('link', { name: 'Open Compare' });
+    expect(shared.getAttribute('href')).toBe('/code?view=shared-code');
+    expect(compare.getAttribute('href')).toBe('/code?view=compare');
+    const head = screen.getByRole('link', { name: 'Compare head revision' }).getAttribute('href')!;
+    const params = new URLSearchParams(head.slice('/code?'.length));
+    expect(params.get('head')).toBe('feature/delivery');
+    expect(params.get('head_revision')).toBe('a'.repeat(40));
+    expect(params.get('base')).toBeNull();
   });
 
-  it('draws non-git entries as unknown branches rather than zero', async () => {
-    renderDelivery();
-    await screen.findByText('last indexed across · branches up');
-    expect(
-      screen.getByText(
-        /they have no git directory, so their branch count is unknown rather than zero/,
-      ),
-    ).toBeTruthy();
-    // ...and the table agrees with the field.
-    expect(screen.getAllByText('unknown').length).toBeGreaterThan(0);
+  it('exposes no provider mutation: only read-only badges and links', async () => {
+    renderDelivery(INBOX, { route: `/delivery?pr=${PR_42}` });
+    await screen.findByRole('region', { name: 'Pull request detail' });
+    for (const verb of [/merge/i, /rerun/i, /re-run/i, /resolve/i, /post/i, /approve/i]) {
+      expect(screen.queryByRole('button', { name: verb })).toBeNull();
+    }
+    expect(screen.getAllByText(/read-only provider/i).length).toBeGreaterThan(0);
   });
 
-  it('renders real Git projections and typed external authority gaps', async () => {
-    renderDelivery();
-    await screen.findByText('Changes & commits');
-    expect(screen.getByText('Pull requests & review')).toBeTruthy();
-    expect(screen.getByText('Continuous integration')).toBeTruthy();
-    expect(screen.getByText('Releases')).toBeTruthy();
-    expect(screen.getByText('Index freshness')).toBeTruthy();
-    expect(screen.getByText('2 commits')).toBeTruthy();
-    expect(screen.getByText(/1 changed path/)).toBeTruthy();
-    expect(
-      screen.getAllByText(/unavailable · GitHub review authority is not mounted/),
-    ).toHaveLength(2);
-    expect(screen.getByText(/release history has not been published/)).toBeTruthy();
-    expect(screen.getByText('measured')).toBeTruthy();
+  it('filters by status, provider state and unresolved evidence from the URL', async () => {
+    renderDelivery(INBOX, { route: '/delivery?status=draft' });
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getAllByRole('button')).toHaveLength(1);
+    expect(within(queue).getByRole('button', { name: /Persist retry backoff/ })).toBeTruthy();
   });
 
-  it('keeps stale provider-qualified PR evidence visible at its retained head', async () => {
-    renderDelivery(PROJECTS, 200, overviewWith({
-      pull_requests: {
-        state: 'stale',
-        value: {
-          expected_head_commit: 'c'.repeat(40),
-          retained_head_commit: 'a'.repeat(40),
-          total_retained: 2,
-          truncated: false,
-          items: [pullRequest('github'), pullRequest('gitlab')],
-        },
-      },
-    }));
-
-    const projection = await screen.findByRole('region', { name: 'Pull requests' });
-    expect(projection.getAttribute('data-projection-state')).toBe('stale');
-    expect(within(projection).getByText('github · PR 42')).toBeTruthy();
-    expect(within(projection).getByText('gitlab · PR 42')).toBeTruthy();
-    expect(within(projection).getByText('cccccccc')).toBeTruthy();
-    expect(within(projection).getAllByText('aaaaaaaa').length).toBeGreaterThan(0);
-    expect(within(projection).getAllByLabelText('latest attempt')).toHaveLength(2);
-    expect(within(projection).getAllByLabelText('last complete')).toHaveLength(2);
-    // No identity generation is retained: the gap is typed on the row, never
-    // backfilled from thread evidence.
-    expect(
-      within(projection).getAllByText(/no retained PR identity read yet/),
-    ).toHaveLength(2);
+  it('narrows to unresolved pull requests only', async () => {
+    renderDelivery(INBOX, { route: '/delivery?unresolved=1' });
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getAllByRole('button')).toHaveLength(1);
+    expect(within(queue).getByRole('button', { name: /Admit delivery inbox/ })).toBeTruthy();
   });
 
-  it('renders retained PR identity as title, state, draftness and diff shape', async () => {
-    const item = pullRequest('github', '421');
-    item.identity = {
-      title: 'consolidate delivery reads',
-      state: 'open',
-      draft: true,
-      additions: 1204,
-      deletions: 88,
-      changed_files: 17,
-    };
-    renderDelivery(PROJECTS, 200, overviewWith({
-      pull_requests: {
-        state: 'ready',
-        value: {
-          expected_head_commit: 'a'.repeat(40),
-          retained_head_commit: 'a'.repeat(40),
-          total_retained: 6,
-          truncated: true,
-          items: [item],
-        },
-      },
-    }));
-
-    const projection = await screen.findByRole('region', { name: 'Pull requests' });
-    expect(
-      within(projection).getByText('github · PR 421 — consolidate delivery reads'),
-    ).toBeTruthy();
-    expect(
-      within(projection).getByText(/open · draft · \+1204 −88 · 17 files changed/),
-    ).toBeTruthy();
-    // Truncation honesty: the retained total stays beside the shown count.
-    expect(
-      within(projection).getByText(/1 of 6 pull requests shown · more evidence not shown/),
-    ).toBeTruthy();
+  it('narrows by provider state without erasing the other projects', async () => {
+    renderDelivery(INBOX, { route: '/delivery?provider=stale' });
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getByRole('button', { name: /Emit retry events/ })).toBeTruthy();
+    expect(within(queue).queryByRole('button', { name: /Admit delivery inbox/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /alpha/ , pressed: false })).toBeTruthy();
   });
 
-  it('renders review threads as review comments: path, state, author and body', async () => {
-    renderDelivery(PROJECTS, 200, overviewWith({
-      review_comments: {
-        state: 'partial',
-        value: {
-          expected_head_commit: 'a'.repeat(40),
-          retained_head_commit: 'a'.repeat(40),
-          total_retained: 5,
-          truncated: true,
-          items: [
-            {
-              comment_id: 'comment-7',
-              id: 'github:42:comment-7',
-              label: 'review comment 7',
-              provider: 'github',
-              pull_request_id: '42',
-              observations: [
-                {
-                  author_class: 'maintainer',
-                  body_preview: {
-                    text: 'Batch the shared source anchor lookup.',
-                    truncated: false,
-                  },
-                  kind: 'latest_attempt',
-                  lifecycle: 'resolved',
-                  line: 12,
-                  observed_at_micros: 108,
-                  operation: 'review_threads',
-                  original_line: 9,
-                  path: 'src/lib.rs',
-                  provider_outcome: 'partial',
-                  reply_to_comment_id: null,
-                  repository_id: 'repo-1',
-                  review_id: 'review-9',
-                  review_state: 'changes_requested',
-                  source_url: null,
-                  thread_id: 'thread-3',
-                  version_digest: 'sha256:latest-review-version',
-                },
-              ],
-            },
-            {
-              comment_id: 'comment-8',
-              id: 'github:42:comment-8',
-              label: 'review comment 8',
-              provider: 'github',
-              pull_request_id: '42',
-              observations: [
-                {
-                  author_class: 'bot',
-                  body_preview: null,
-                  kind: 'last_complete',
-                  lifecycle: 'resolved',
-                  line: 12,
-                  observed_at_micros: 100,
-                  operation: 'review_comments',
-                  original_line: 9,
-                  path: 'src/lib.rs',
-                  provider_outcome: 'complete',
-                  reply_to_comment_id: 'comment-7',
-                  repository_id: 'repo-1',
-                  review_id: null,
-                  review_state: 'approved',
-                  source_url: 'javascript:alert(1)',
-                  thread_id: 'thread-3',
-                  version_digest: 'sha256:complete-review-version',
-                },
-              ],
-            },
-          ],
-        },
-      },
-    }));
-
-    const projection = await screen.findByRole('region', { name: 'Review observations' });
-    expect(projection.getAttribute('data-projection-state')).toBe('partial');
-    // Both comments group under one thread located at path:line.
-    expect(within(projection).getByText('src/lib.rs:12')).toBeTruthy();
-    expect(within(projection).getByText('thread thread-3')).toBeTruthy();
-    // The thread carries its resolved lifecycle, and each comment carries its
-    // author class and review state.
-    expect(within(projection).getAllByText(/resolved/).length).toBeGreaterThan(0);
-    expect(within(projection).getByText(/maintainer · changes requested/)).toBeTruthy();
-    expect(within(projection).getByText(/bot · approved/)).toBeTruthy();
-    // The root comment renders its sanitized body preview; the reply's
-    // unexpanded body stays a typed gap with its digest, never empty prose.
-    expect(
-      within(projection).getByText('Batch the shared source anchor lookup.'),
-    ).toBeTruthy();
-    expect(
-      within(projection).getByText(/body retained but not expanded for this read/),
-    ).toBeTruthy();
-    expect(within(projection).getByText(/reply to comment-7/)).toBeTruthy();
-    // Truncation honesty: retained total beside shown count.
-    expect(
-      within(projection).getByText(/2 of 5 review comments shown · more evidence not shown/),
-    ).toBeTruthy();
-    expect(within(projection).queryByText('null')).toBeNull();
-    expect(within(projection).queryByText(/javascript:/)).toBeNull();
-    expect(within(projection).queryByRole('link')).toBeNull();
-  });
-
-  it('locates an outdated thread on its original diff line instead of faking a current one', async () => {
-    renderDelivery(PROJECTS, 200, overviewWith({
-      review_comments: {
-        state: 'ready',
-        value: {
-          expected_head_commit: 'a'.repeat(40),
-          retained_head_commit: 'a'.repeat(40),
-          total_retained: 1,
-          truncated: false,
-          items: [
-            {
-              comment_id: 'comment-9',
-              id: 'github:42:comment-9',
-              label: 'review comment 9',
-              provider: 'github',
-              pull_request_id: '42',
-              observations: [
-                {
-                  author_class: 'other_observed_role',
-                  body_preview: {
-                    text: 'This anchor moved.',
-                    truncated: true,
-                  },
-                  kind: 'latest_attempt',
-                  lifecycle: 'outdated',
-                  line: null,
-                  observed_at_micros: 108,
-                  operation: 'review_threads',
-                  original_line: 33,
-                  path: 'src/moved.rs',
-                  provider_outcome: 'complete',
-                  reply_to_comment_id: null,
-                  repository_id: 'repo-1',
-                  review_id: null,
-                  review_state: 'commented',
-                  source_url: null,
-                  thread_id: 'thread-4',
-                  version_digest: 'sha256:outdated-review-version',
-                },
-              ],
-            },
-          ],
-        },
-      },
-    }));
-
-    const projection = await screen.findByRole('region', { name: 'Review observations' });
-    expect(
-      within(projection).getByText('src/moved.rs:33 (original diff)'),
-    ).toBeTruthy();
-    expect(within(projection).getByText('This anchor moved.…')).toBeTruthy();
-  });
-
-  it('keeps opaque CI identities and nullable conclusions exact', async () => {
-    renderDelivery(PROJECTS, 200, overviewWith({
-      ci_checks: {
-        state: 'ready',
-        value: {
-          expected_head_commit: 'a'.repeat(40),
-          retained_head_commit: 'a'.repeat(40),
-          total_retained: 21,
-          truncated: true,
-          items: [
-            {
-              annotation_count: 3,
-              annotations: [
-                {
-                  end_line: 12,
-                  level: 'failure',
-                  path: 'crates/foo/src/lib.rs',
-                  start_line: 10,
-                  title: 'mismatched types',
-                },
-              ],
-              check_conclusion: 'failure',
-              check_status: 'completed',
-              failed_step: null,
-              failure_kind: 'test_failure',
-              id: 'ci-secondary-label',
-              job_conclusion: null,
-              job_status: 'in_progress',
-              label: 'unit tests',
-              observation_id: 'observation-ci-1',
-              observed_at_micros: 106,
-              provider_head_commit: 'a'.repeat(40),
-              run: {
-                attempt_id: 'attempt-001-alpha',
-                check_run_id: 'check-009-z',
-                check_suite_id: 'suite-007-x',
-                job_id: 'job-0004-y',
-                run_id: 'run-0002-beta',
-                workflow_id: 'workflow-0001-alpha',
-              },
-              workflow_conclusion: null,
-              workflow_path: '.github/workflows/ci.yml',
-              workflow_status: 'queued',
-            },
-          ],
-        },
-      },
-      failure_localization: {
-        state: 'unavailable',
-        required_authority: 'retained exact graph localization authority',
-        reason: 'failure localization is not configured',
-        value: null,
-      },
-    }));
-
-    const checks = await screen.findByRole('region', { name: 'CI checks' });
-    expect(within(checks).getByText('workflow-0001-alpha')).toBeTruthy();
-    expect(within(checks).getByText('run-0002-beta')).toBeTruthy();
-    expect(within(checks).getByText('attempt-001-alpha')).toBeTruthy();
-    expect(within(checks).getByText('suite-007-x')).toBeTruthy();
-    expect(within(checks).getByText('job-0004-y')).toBeTruthy();
-    expect(within(checks).getByText('check-009-z')).toBeTruthy();
-    expect(within(checks).getByText('queued')).toBeTruthy();
-    expect(within(checks).getByText('in progress')).toBeTruthy();
-    expect(within(checks).getByText('completed · failure')).toBeTruthy();
-    expect(within(checks).queryByText(/success/)).toBeNull();
-    // Truncation honesty: real failures no longer fall off silently — the
-    // retained total stays beside the shown count.
-    expect(
-      within(checks).getByText(/1 of 21 CI checks shown · more evidence not shown/),
-    ).toBeTruthy();
-    // Retained annotation summaries render beside the provider count.
-    expect(within(checks).getByText(/1 of 3 annotations shown/)).toBeTruthy();
-    expect(within(checks).getByText('crates/foo/src/lib.rs:10-12')).toBeTruthy();
-    expect(within(checks).getByText(/failure · mismatched types/)).toBeTruthy();
-
-    const localization = screen.getByRole('region', { name: 'Failure localization' });
-    expect(localization.getAttribute('data-projection-state')).toBe('unavailable');
-    expect(within(localization).getByText(/not configured/)).toBeTruthy();
-    expect(within(localization).queryByText('observation-ci-1')).toBeNull();
-  });
-
-  it.each([
-    ['ready', { state: 'ready', value: { items: [RELEASE], truncated: false } }, true],
-    ['partial', { state: 'partial', value: { items: [RELEASE], truncated: false } }, true],
-    ['stale', { state: 'stale', value: { items: [RELEASE], truncated: false } }, true],
-    ['failed', { state: 'failed', value: { items: [RELEASE], truncated: false } }, true],
-    [
-      'rate_limited',
-      {
-        state: 'rate_limited',
-        checkpoint: { limit: 60, remaining: 0, reset_at_micros: 111 },
-        retry_at_micros: 112,
-        value: { items: [RELEASE], truncated: false },
-      },
-      true,
-    ],
-    [
-      'unavailable',
-      {
-        state: 'unavailable',
-        reason: 'provider read interrupted',
-        required_authority: 'release read authority',
-        value: { items: [RELEASE], truncated: false },
-      },
-      true,
-    ],
-    ['denied', { state: 'denied', value: { items: [RELEASE], truncated: false } }, false],
-    [
-      'not_published',
-      {
-        state: 'not_published',
-        reason: 'no release page retained',
-        required_authority: 'release read authority',
-      },
-      false,
-    ],
-    ['empty_measured', { state: 'empty_measured', value: { items: [], truncated: false } }, false],
-  ] satisfies Array<[string, DeliveryOverviewV1['releases'], boolean]>)(
-    'renders the %s release projection without changing its state',
-    async (state, releases, showsRetainedValue) => {
-      renderDelivery(PROJECTS, 200, overviewWith({ releases }));
-      const projection = await screen.findByRole('region', { name: 'Release history' });
-      expect(projection.getAttribute('data-projection-state')).toBe(state);
-      if (showsRetainedValue) {
-        expect(within(projection).getByText('v2.0.0')).toBeTruthy();
-      } else {
-        expect(within(projection).queryByText('v2.0.0')).toBeNull();
-      }
-    },
-  );
-
-  it('draws rate-limited ingress as its own chip, never as an ordinary partial', async () => {
-    renderDelivery(PROJECTS, 200, overviewWith({
-      releases: {
-        state: 'rate_limited',
-        checkpoint: { limit: 60, remaining: 0, reset_at_micros: 111 },
-        retry_at_micros: 112,
-        value: { items: [RELEASE], truncated: false },
-      },
-    }));
-
-    const projection = await screen.findByRole('region', { name: 'Release history' });
-    // The condition is carried by the chip itself — label, glyph, data-state —
-    // not only by detail text a reader would have to parse out of a clause.
-    const chip = projection.querySelector('[data-state]');
-    expect(chip?.getAttribute('data-state')).toBe('rate_limited');
-    expect(within(projection).getByText('Rate limited')).toBeTruthy();
-    expect(within(projection).queryByText('Partial')).toBeNull();
-    // The quota evidence stays in the detail: what remains, when it resets,
-    // and when to retry.
-    expect(within(projection).getByText(/0\/60 remaining · reset 111 µs · retry 112 µs/)).toBeTruthy();
-    // Retained evidence still renders under the chip.
-    expect(within(projection).getByText('v2.0.0')).toBeTruthy();
-  });
-
-  it('renders release assets as inert evidence and suppresses null fields and URLs', async () => {
-    renderDelivery(PROJECTS, 200, overviewWith({
-      releases: { state: 'ready', value: { items: [RELEASE], truncated: true } },
-    }));
-
-    const projection = await screen.findByRole('region', { name: 'Release history' });
-    expect(within(projection).getByText('tracedecay-linux.tar.zst')).toBeTruthy();
-    expect(within(projection).getByText(/2048 bytes · 7 downloads/)).toBeTruthy();
-    expect(within(projection).getByText(/more evidence not shown/)).toBeTruthy();
-    expect(within(projection).queryByText('null')).toBeNull();
-    expect(within(projection).queryByText(/javascript:/)).toBeNull();
-    expect(within(projection).queryByRole('link')).toBeNull();
-  });
-
-  it('suppresses a non-authorized envelope even when it carries a payload', async () => {
-    renderDelivery(PROJECTS, 200, {
-      ...overviewWith({
-        releases: { state: 'ready', value: { items: [RELEASE], truncated: false } },
-      }),
-      authorization: { outcome: 'denied' },
-      domain_state: 'denied',
-    });
-
-    await screen.findByText(/delivery evidence was not disclosed/);
-    expect(screen.queryByRole('region', { name: 'Release history' })).toBeNull();
-    expect(screen.queryByText('v2.0.0')).toBeNull();
-  });
-
-  it('suppresses a null latest snapshot without backfilling it from last complete', async () => {
-    const item = pullRequest('github');
-    const operation = item.operations[0];
-    if (!operation) throw new Error('pull request fixture has no operation');
-    item.operations[0] = {
-      ...operation,
-      latest_attempt: null,
-    };
-    renderDelivery(PROJECTS, 200, overviewWith({
-      pull_requests: {
-        state: 'partial',
-        value: {
-          expected_head_commit: 'c'.repeat(40),
-          retained_head_commit: 'a'.repeat(40),
-          items: [item],
-          total_retained: 1,
-          truncated: true,
-        },
-      },
-    }));
-
-    const projection = await screen.findByRole('region', { name: 'Pull requests' });
-    expect(within(projection).queryByLabelText('latest attempt')).toBeNull();
-    expect(within(projection).getByLabelText('last complete')).toBeTruthy();
-    expect(within(projection).getByText(/more evidence not shown/)).toBeTruthy();
-  });
-
-  it('discloses when the commit timeline is truncated', async () => {
-    renderDelivery(PROJECTS, 200, {
-      ...DELIVERY_OVERVIEW,
-      payload: {
-        ...DELIVERY_OVERVIEW.payload,
-        commits: {
-          ...DELIVERY_OVERVIEW.payload.commits,
-          value: {
-            ...DELIVERY_OVERVIEW.payload.commits.value,
-            truncated: true,
-          },
-        },
-      },
-    });
-
-    expect(
-      await screen.findByText(/2 commits shown · more evidence not shown/),
-    ).toBeTruthy();
-  });
-
-  it('renders generation freshness from the reusable delivery projection', async () => {
-    renderDelivery(PROJECTS, 200, {
-      ...DELIVERY_OVERVIEW,
-      payload: {
-        ...DELIVERY_OVERVIEW.payload,
-        generation_freshness: {
-          state: 'ready',
-          value: {
-            comparison: 'mismatch',
-            head_commit: 'c'.repeat(40),
-            indexed_commit: 'a'.repeat(40),
-          },
-        },
-      },
-    });
-
-    await screen.findByText('Stale');
-    const staleRead = screen.getByText(/mismatch · HEAD cccccccc · indexed aaaaaaaa/);
-    expect(staleRead).toBeTruthy();
-    expect(
-      within(staleRead.parentElement?.parentElement ?? document.body).getByText('unknown'),
-    ).toBeTruthy();
-  });
-
-  it('uses the shared ordered freshness meter beside explicit index age', async () => {
-    renderDelivery();
-    expect((await screen.findAllByTitle('live — under a day')).length).toBeGreaterThan(0);
-    expect(screen.getAllByText('1h ago').length).toBeGreaterThan(0);
-  });
-
-  it('scans as one row per repository, not a header-plus-row pair', async () => {
-    renderDelivery();
-    await screen.findByRole('table');
-    const rows = screen.getAllByRole('row');
-    // One header row plus one row per repository — three repositories here.
+  it('renders the exact table fallback with basis, grade, scope and destinations', async () => {
+    renderDelivery(INBOX, { route: '/delivery?layout=table' });
+    const table = await screen.findByRole('table', { name: 'Admitted pull requests table' });
+    const rows = within(table).getAllByRole('row');
     expect(rows).toHaveLength(4);
+    expect(within(table).getAllByText('WORK / EXPLICIT')).toHaveLength(2);
+    expect(within(table).getAllByRole('button', { name: 'Journey' })).toHaveLength(3);
+    expect(screen.queryByRole('group', { name: LANE_FIELD_LABEL })).toBeNull();
   });
 
-  it('expands a selected repository to its checkouts and branch names', async () => {
-    renderDelivery();
-    const row = await screen.findByText('tracedecay');
-    await userEvent.click(row);
-    await screen.findByText('branch names');
-    expect(screen.getByText('/src/tracedecay-wt')).toBeTruthy();
-    expect(screen.getByText('feat/a')).toBeTruthy();
-    expect(
-      screen.getByText(/records no tip commit, author or time/),
-    ).toBeTruthy();
+  it('separates the scoped project queue from correlated cross-project pull requests', async () => {
+    renderDelivery(INBOX, { route: '/delivery?project=project.alpha' });
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    expect(within(queue).getAllByRole('button')).toHaveLength(2);
+    const related = screen.getByRole('region', { name: 'Related pull requests' });
+    expect(within(related).getByRole('button', { name: /Emit retry events/ })).toBeTruthy();
+    expect(within(related).getByText('WORK / EXPLICIT')).toBeTruthy();
+    expect(within(related).getByText(/1 qualified by a served basis/)).toBeTruthy();
   });
 
-  it('reports a non-git repository as unsupported rather than zero-findings', async () => {
-    renderDelivery();
-    const row = await screen.findByText('notes');
-    await userEvent.click(row);
-    await screen.findByText('branch names');
-    expect(screen.getByText(/not a git checkout/)).toBeTruthy();
+  it('reports correlation as unavailable when only branch references are served', async () => {
+    renderDelivery(INBOX_BRANCH_ONLY, { route: `/delivery?project=project.alpha&pr=${PR_42}` });
+    const related = await screen.findByRole('region', { name: 'Related pull requests' });
+    expect(within(related).getByText(/correlation unavailable · no cross-PR edge served/)).toBeTruthy();
+    const detail = screen.getByRole('region', { name: 'Pull request detail' });
+    expect(within(detail).getByText(/served no cross-PR correlation edge/)).toBeTruthy();
+    expect(screen.getByText('correlation unavailable')).toBeTruthy();
   });
 
-  it('separates a missing registry from an empty one', async () => {
-    renderDelivery(
-      registry({
-        status: 'missing_registry',
-        summary: null,
-        projects: null,
-        project_tree: null,
-        truncated: null,
-      }),
-    );
-    await screen.findByText(/registry reporting itself absent/);
-    expect(screen.queryByText(/holds no repositories/)).toBeNull();
+  it('selects a lane bar through the same URL the queue writes, and draws no umbrella node', async () => {
+    const user = userEvent.setup();
+    renderDelivery(INBOX);
+    const field = await screen.findByRole('group', { name: LANE_FIELD_LABEL });
+    await user.click(within(field).getByRole('button', { name: /Pull request #8/ }));
+    expect(screen.getByTestId('location').textContent).toBe('?pr=project.beta%3Agithub%3A8');
+    expect(within(field).queryByRole('button', { name: /Umbrella/ })).toBeNull();
   });
 
-  it('renders a failed registry read as a failure, never as an empty field', async () => {
-    // `registry_unavailable` used to fall through `project_tree ?? []` and
-    // draw the same "holds no repositories" pixels as a measured empty
-    // registry — a refused read wearing an empty success.
-    renderDelivery(
-      registry({
-        status: 'registry_unavailable',
-        error: 'registry database could not be opened',
-        summary: null,
-        projects: null,
-        project_tree: null,
-        truncated: null,
-      }),
-    );
-    await screen.findByText(/registry database could not be opened/);
-    expect(screen.queryByText(/holds no repositories/)).toBeNull();
-    expect(screen.queryByText(/Registry readings/)).toBeNull();
-  });
-
-  it('renders an empty registry as an answered question', async () => {
-    renderDelivery(
-      registry({
-        status: 'ok',
-        summary: { project_count: 0, repo_count: 0, truncated: false },
-        projects: [],
-        project_tree: [],
-      }),
-    );
-    await screen.findByText(/answered and holds no repositories in this workspace/);
-  });
-
-  it('renders a distinct error state when the read fails', async () => {
-    renderDelivery({ error: 'boom' }, 500);
-    await waitFor(() => {
-      expect(
-        screen.getByText(/shape this build does not understand/),
-      ).toBeTruthy();
+  it('renders provider-not-configured as a typed absence, not a transport failure or zero', async () => {
+    renderDelivery({
+      ...INBOX,
+      projects: INBOX.projects.map((project) => ({ ...project, provider_state: 'not_configured' })),
+      pull_requests: [],
+      membership_edges: [],
+      excluded_pull_requests: 0,
     });
+
+    expect(await screen.findByText('Provider not configured')).toBeTruthy();
+    expect(screen.getByText('No admitted pull requests')).toBeTruthy();
+    expect(screen.getByText(/No provider read authority is configured/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: /Open Settings · Provider authority/ }).getAttribute('href')).toBe(
+      '/settings',
+    );
+    expect(screen.queryByText(/transport/i)).toBeNull();
   });
 
-  it('gives the field an accessible description naming both axes and the gap', async () => {
-    renderDelivery();
-    const figure = await screen.findByRole('img', { name: /Delivery field:/ });
-    const label = figure.getAttribute('aria-label') ?? '';
-    expect(label).toContain('last indexed them');
-    expect(label).toContain('branch count');
-    expect(label).toContain('no git directory and no branch measurement');
+  it('renders every-project-omitted as partial, not as a complete zero inbox', async () => {
+    renderDelivery(
+      {
+        registry_state: 'ready',
+        projects: [],
+        pull_requests: [],
+        membership_edges: [],
+        omitted_projects: 1,
+        excluded_pull_requests: 0,
+      },
+      { domainState: 'partial' },
+    );
+
+    expect(await screen.findByText('Every registered project was omitted')).toBeTruthy();
+    expect(screen.getByText(/carry no indexed head yet/)).toBeTruthy();
+    expect(screen.queryByText('No admitted pull requests')).toBeNull();
+  });
+
+  it('renders an unavailable registry distinctly from a complete zero inbox', async () => {
+    renderDelivery(
+      {
+        registry_state: 'unavailable',
+        projects: [],
+        pull_requests: [],
+        membership_edges: [],
+        omitted_projects: 0,
+        excluded_pull_requests: 0,
+      },
+      { domainState: 'unknown' },
+    );
+
+    expect(await screen.findByText('Project registry unavailable')).toBeTruthy();
+    expect(screen.queryByText('No admitted pull requests')).toBeNull();
+  });
+
+  it('renders server-joined overlapping_edit proximity evidence from the inbox', async () => {
+    renderDelivery(INBOX_WITH_PROXIMITY_ATTENTION, { route: `/delivery?pr=${PR_42}` });
+
+    const detail = await screen.findByRole('region', { name: 'Pull request detail' });
+    expect(await within(detail).findByText('sha256:overlap:overlapping_edit')).toBeTruthy();
+    expect(within(detail).queryByText('This source has no mounted Delivery authority.')).toBeNull();
+  });
+
+  it('disables journey and review until a pull request is selected, then addresses them by URL', async () => {
+    const user = userEvent.setup();
+    renderDelivery(INBOX, { overview: OVERVIEW_ALPHA });
+    const modes = await screen.findByRole('navigation', { name: 'Delivery modes' });
+    const journey = () => within(modes).getByRole('button', { name: 'Journey' }) as HTMLButtonElement;
+    const review = () => within(modes).getByRole('button', { name: 'Review' }) as HTMLButtonElement;
+    expect(journey().disabled).toBe(true);
+    expect(review().disabled).toBe(true);
+    expect(journey().title).toMatch(/Select a pull request/);
+
+    const queue = await screen.findByRole('region', { name: 'Admitted pull requests' });
+    await user.click(within(queue).getByRole('button', { name: /Admit delivery inbox/ }));
+    expect(journey().disabled).toBe(false);
+    await user.click(within(modes).getByRole('button', { name: 'Journey' }));
+    expect(screen.getByTestId('location').textContent).toContain('mode=journey');
+    expect(screen.getByTestId('location').textContent).toContain(`pr=${PR_42}`);
+  });
+
+  it('tells a deep link to journey without a selection that it requires one', async () => {
+    renderDelivery(INBOX, { route: '/delivery?mode=journey' });
+    expect(await screen.findByText('Journey requires a pull request')).toBeTruthy();
+  });
+});
+
+describe('DeliveryPage · local-first wing', () => {
+  it('keeps local Git evidence and the daemon reason when the scoped provider cannot serve', async () => {
+    renderDelivery(
+      {
+        ...INBOX,
+        projects: [
+          { ...INBOX.projects[0]!, provider_state: 'not_published' },
+          INBOX.projects[1]!,
+        ],
+        pull_requests: INBOX.pull_requests.filter((row) => row.project_id !== 'project.alpha'),
+      },
+      { route: '/delivery?project=project.alpha', overview: OVERVIEW_LOCAL_ONLY },
+    );
+    const wing = await screen.findByRole('region', { name: /Local-first/i });
+    expect(within(wing).getByRole('link', { name: /Open Settings · Provider authority/ })).toBeTruthy();
+    expect(await within(wing).findByText(/feat\(ingest\): add retry backoff/)).toBeTruthy();
+    expect(within(wing).getByText(/feature\/delivery/)).toBeTruthy();
+    expect(within(wing).getAllByText(/requires github_read_authority/).length).toBeGreaterThan(0);
+    expect(within(wing).getByText(/not_published · requires github_read_authority/)).toBeTruthy();
+    expect(within(wing).queryByRole('button', { name: /merge|rerun|post|approve/i })).toBeNull();
   });
 });

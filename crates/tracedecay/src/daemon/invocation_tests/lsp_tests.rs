@@ -1,8 +1,11 @@
+use tracedecay_contracts::SharedProfileStoreLocatorV1;
+use tracedecay_domain::BrainId;
+
 use std::path::PathBuf;
 
 use super::*;
 use tokio::sync::Mutex;
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     ObservabilityQueryPort,
 };
@@ -22,9 +25,14 @@ fn bridge_lsp_cancellation() -> CancellationContext {
 #[tokio::test]
 async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
     let service = DaemonInvocationService::default();
-    let project_root = PathBuf::from("/bridge-backpressure");
+    let (project_root, root_uri) = admitted_root_fixture("bridge-backpressure");
     DaemonLspOwnerRegistrar::new(&service)
-        .register_factory(project_root.clone(), unavailable_lsp_session_factory())
+        .register_factory_for_project(
+            project_root.clone(),
+            tracedecay_domain::UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            tracedecay_domain::ProjectId::new("project.test.lsp").expect("test LSP project"),
+            unavailable_lsp_session_factory(),
+        )
         .await
         .expect("register LSP owner");
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
@@ -33,14 +41,14 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///bridge-backpressure",
+                root_uri.clone(),
             ))),
             None,
             None,
             DaemonInvocationRequest::lsp_open(
                 "request.bridge.open",
                 "client.bridge",
-                Some("file:///bridge-backpressure".to_owned()),
+                Some(root_uri.clone()),
                 Vec::new(),
                 bridge_lsp_deadline(),
                 bridge_lsp_cancellation(),
@@ -206,6 +214,8 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
 
 #[test]
 fn lsp_scope_roots_canonicalize_independent_of_folder_order() {
+    let (path_a, uri_a) = admitted_root_fixture("a");
+    let (path_b, uri_b) = admitted_root_fixture("b");
     let scope_a = ResolvedScope::new(
         ProjectId::new("project.a").unwrap(),
         tracedecay_domain::RepositoryId::new("repository.a").unwrap(),
@@ -220,47 +230,45 @@ fn lsp_scope_roots_canonicalize_independent_of_folder_order() {
         None,
     )
     .unwrap();
-    let locator_a = tracedecay_application::RegisteredRootLocatorV1::new(
+    let locator_a = tracedecay_contracts::RegisteredRootLocatorV1::new(
         ProjectId::new("project.a").unwrap(),
-        tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
-        "store.a",
-        "/a",
+        SharedProfileStoreLocatorV1::new(
+            BrainId::new("brain.fixture").unwrap(),
+            tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
+            "store.fixture",
+        )
+        .unwrap(),
+        &path_a,
     )
     .unwrap();
-    let locator_b = tracedecay_application::RegisteredRootLocatorV1::new(
+    let locator_b = tracedecay_contracts::RegisteredRootLocatorV1::new(
         ProjectId::new("project.b").unwrap(),
-        tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
-        "store.b",
-        "/b",
+        SharedProfileStoreLocatorV1::new(
+            BrainId::new("brain.fixture").unwrap(),
+            tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
+            "store.fixture",
+        )
+        .unwrap(),
+        &path_b,
     )
     .unwrap();
     let mut forward = vec![
         (
-            PathBuf::from("/a"),
-            "file:///a".to_owned(),
+            path_a.clone(),
+            uri_a.clone(),
             scope_a.clone(),
             locator_a.clone(),
         ),
         (
-            PathBuf::from("/b"),
-            "file:///b".to_owned(),
+            path_b.clone(),
+            uri_b.clone(),
             scope_b.clone(),
             locator_b.clone(),
         ),
     ];
     let mut reverse = vec![
-        (
-            PathBuf::from("/b"),
-            "file:///b".to_owned(),
-            scope_b,
-            locator_b,
-        ),
-        (
-            PathBuf::from("/a"),
-            "file:///a".to_owned(),
-            scope_a,
-            locator_a,
-        ),
+        (path_b, uri_b, scope_b, locator_b),
+        (path_a, uri_a, scope_a, locator_a),
     ];
 
     assert!(canonicalize_lsp_roots(&mut forward));
@@ -405,28 +413,33 @@ fn lsp_delivery_same_session_identical_frames_after_ack_have_distinct_events() {
 }
 
 struct LspDeliveryFixture {
-    _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
+    _profile: tempfile::TempDir,
+    /// The runtime owns the daemon database scope every durable settlement
+    /// write is admitted under. Dropping it leaves the lease without an active
+    /// write scope, so the recorder's replay would retain every receipt
+    /// instead of settling it.
+    _runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
     _project: tempfile::TempDir,
     project_id: ProjectId,
-    recorder: Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
-    authority: Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
-    producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+    recorder: Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>,
+    authority: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
+    producer: Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 }
 
 async fn lsp_delivery_fixture() -> LspDeliveryFixture {
-    let pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.lsp.delivery").expect("project id");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile.path(),
         project.path(),
         project_id.clone(),
     )
     .await
     .expect("registered runtime");
     let db = runtime.project_database_arc().expect("project database");
-    let identity = tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+    let identity = tracedecay_application::observability::ObservabilityProducerIdentityV1 {
         authorized_scope_ref: project_id.as_str().to_owned(),
         process_boot_id: "boot:lsp-delivery".to_owned(),
         producer_revision: "lsp-delivery-producer.v1".to_owned(),
@@ -434,7 +447,7 @@ async fn lsp_delivery_fixture() -> LspDeliveryFixture {
         policy_revision: "lsp-delivery-policy.v1".to_owned(),
     };
     let producer = Arc::new(
-        tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+        tracedecay_application::observability::BoundedObservabilityProducerV1::start(
             db.clone(),
             identity.clone(),
             8,
@@ -442,7 +455,7 @@ async fn lsp_delivery_fixture() -> LspDeliveryFixture {
         .expect("producer"),
     );
     let authority = Arc::new(
-        tracedecay_usecases::observability::DeliverySettlementAuthorityV1::new(
+        tracedecay_application::observability::DeliverySettlementAuthorityV1::new(
             db.clone(),
             Arc::clone(&producer),
             identity,
@@ -450,14 +463,15 @@ async fn lsp_delivery_fixture() -> LspDeliveryFixture {
         .expect("settlement authority"),
     );
     let recorder = Arc::new(
-        tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1::start(
+        tracedecay_application::observability::BoundedDeliverySettlementRecorderV1::start(
             Arc::clone(&authority),
             8,
         )
         .expect("settlement recorder"),
     );
     LspDeliveryFixture {
-        _pin: pin,
+        _profile: profile,
+        _runtime: runtime,
         _project: project,
         project_id,
         recorder,
@@ -565,28 +579,32 @@ async fn assert_one_lsp_delivery_drop(fixture: LspDeliveryFixture) {
         .shutdown()
         .await
         .expect("drain LSP delivery recorder");
-    assert_eq!(summary.settled, 1, "one outbound frame must settle");
-    assert_eq!(summary.failed, 0, "terminal LSP drop must persist");
+    assert_eq!(
+        (summary.settled, summary.failed, summary.retained),
+        (1, 0, 0),
+        "one outbound frame must settle durably with nothing refused or retained: {summary:?}"
+    );
     drop(fixture.recorder);
     drop(fixture.authority);
     let Ok(producer) = Arc::try_unwrap(fixture.producer) else {
         panic!("LSP delivery components must release the producer")
     };
     producer.shutdown().await.expect("flush LSP observability");
-    let page =
-        tracedecay_usecases::observability::RegisteredObservabilityPortV1::new(fixture.db.as_ref())
-            .query(tracedecay_application::ObservabilityQueryV1 {
-                authorized_scope_ref: fixture.project_id.as_str().to_owned(),
-                event_kinds: vec!["work.delivery_fanout.observed.v1".to_owned()],
-                horizon: tracedecay_application::ObservabilityHorizonV1 {
-                    since_micros: 0,
-                    until_micros: i64::MAX,
-                },
-                after_watermark: None,
-                limit: 8,
-            })
-            .await
-            .expect("read LSP delivery observation");
+    let page = tracedecay_application::observability::RegisteredObservabilityPortV1::new(
+        fixture.db.as_ref(),
+    )
+    .query(tracedecay_contracts::ObservabilityQueryV1 {
+        authorized_scope_ref: fixture.project_id.as_str().to_owned(),
+        event_kinds: vec!["work.delivery_fanout.observed.v1".to_owned()],
+        horizon: tracedecay_contracts::ObservabilityHorizonV1 {
+            since_micros: 0,
+            until_micros: i64::MAX,
+        },
+        after_watermark: None,
+        limit: 8,
+    })
+    .await
+    .expect("read LSP delivery observation");
     let [event] = page.events.as_slice() else {
         panic!("one terminal LSP delivery observation is required");
     };
@@ -629,7 +647,7 @@ async fn lsp_detach_after_unacknowledged_outbound_records_disconnected_drop() {
     assert_one_lsp_delivery_drop(fixture).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn lsp_disconnect_expiry_settles_unacknowledged_outbound_as_dropped() {
     let fixture = lsp_delivery_fixture().await;
     let service = DaemonInvocationService::default();
@@ -637,9 +655,10 @@ async fn lsp_disconnect_expiry_settles_unacknowledged_outbound_as_dropped() {
     let session = open_polled_lsp_delivery(&fixture, &service, &registry, "expiry").await;
 
     service.disconnect_lsp_session(&registry, session).await;
-    tokio::task::yield_now().await;
-    tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
-    tokio::task::yield_now().await;
+    service
+        .lsp_lease_tasks
+        .expire_leases_through(now_millis() + LSP_SESSION_TTL_MS);
+    service.lsp_lease_tasks.wait_until_idle().await;
 
     assert!(service.lsp_sessions.lock().await.is_empty());
     assert_eq!(registry.lock().await.active_sessions(), 0);

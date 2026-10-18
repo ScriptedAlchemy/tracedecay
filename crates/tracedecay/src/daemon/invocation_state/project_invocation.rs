@@ -2,13 +2,16 @@
 
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationPayload,
-    DaemonInvocationProblem, Lease, register,
+    DaemonInvocationProblem, Lease,
 };
 
 use super::*;
 
 impl DaemonInvocationState {
-    #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Per-project invocation is one payload match including direct multi-root routes."
+    )]
     pub(in crate::daemon) async fn invoke_for_project(
         &self,
         store_administration: &StoreAdministration,
@@ -24,9 +27,15 @@ impl DaemonInvocationState {
             DaemonInvocationPayload::MultiRootScopeSetRead { .. }
                 | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
                 | DaemonInvocationPayload::MultiRootExecute { .. }
+                | DaemonInvocationPayload::ProfileRetainedApplication { .. }
+                | DaemonInvocationPayload::ProfileGraphTool { .. }
         ) && request_cancellation.is_none()
         {
-            let Some(lease) = register(&request.request_id) else {
+            let Some(lease) = self
+                .service
+                .request_cancellations()
+                .register(&request.request_id)
+            else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -39,6 +48,65 @@ impl DaemonInvocationState {
         let direct_request_cancellation = request_cancellation
             .clone()
             .or_else(|| direct_request_cancellation_lease.as_ref().map(Lease::token));
+        if let DaemonInvocationPayload::ProfileRetainedApplication {
+            request: retained_request,
+            deadline,
+            cancellation,
+            ..
+        } = request.payload
+        {
+            return super::super::profile_retained::invoke_profile_retained(
+                store_administration,
+                request.request_id,
+                retained_request,
+                deadline,
+                cancellation,
+                direct_request_cancellation,
+            )
+            .await;
+        }
+        if let DaemonInvocationPayload::ProfileConfiguration {
+            surface_operation,
+            request: configuration_request,
+            observed_at,
+            deadline,
+            cancellation,
+        } = request.payload
+        {
+            return super::super::profile_configuration::invoke_profile_configuration(
+                store_administration,
+                request.request_id,
+                surface_operation,
+                configuration_request,
+                observed_at,
+                deadline,
+                cancellation,
+            )
+            .await;
+        }
+        // The caller's project, when it names one, only marks that project
+        // active in the profile's registry; the profile owner never opens it.
+        if let DaemonInvocationPayload::ProfileGraphTool {
+            surface_operation,
+            arguments,
+            deadline,
+            cancellation,
+            ..
+        } = request.payload
+        {
+            return super::super::profile_owner::invoke_profile_owner_operation(
+                store_administration,
+                Some(&self.code_index_schedulers),
+                project_path,
+                request.request_id,
+                surface_operation,
+                arguments,
+                deadline,
+                cancellation,
+                direct_request_cancellation,
+            )
+            .await;
+        }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
         if let DaemonInvocationPayload::MultiRootScopeSetRead {
             request: scope_set_request,
@@ -68,38 +136,44 @@ impl DaemonInvocationState {
             {
                 return DaemonInvocationResponse::application_problem(
                     request.request_id,
-                    tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
                 );
             }
             if deadline.is_elapsed_at(*observed_at)
-                || deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+                || deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
             {
                 return DaemonInvocationResponse::application_problem(
                     request.request_id,
-                    tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
                 );
             }
-            let scope_set = self
+            let Some(scope_set) = self
                 .service
                 .persisted_scope_set(active_project_root, &scope_set_request.scope_set_id)
-                .await;
+                .await
+            else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
             if direct_request_cancellation
                 .as_ref()
                 .is_some_and(CancellationToken::is_cancelled)
             {
                 return DaemonInvocationResponse::application_problem(
                     request.request_id,
-                    tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
                 );
             }
-            if deadline.is_elapsed_at(tracedecay_application::clock::now_micros()) {
+            if deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros()) {
                 return DaemonInvocationResponse::application_problem(
                     request.request_id,
-                    tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
                 );
             }
             let Ok(application_request_id) =
-                tracedecay_application::RequestId::new(request.request_id.clone())
+                tracedecay_contracts::RequestId::new(request.request_id.clone())
             else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
@@ -112,7 +186,7 @@ impl DaemonInvocationState {
                     active_project_root,
                     application_request_id,
                     "scope_set_read",
-                    scope_set,
+                    Some(scope_set),
                     *observed_at,
                     deadline.clone(),
                     cancellation.clone(),
@@ -157,15 +231,15 @@ impl DaemonInvocationState {
             {
                 return DaemonInvocationResponse::application_problem(
                     request.request_id,
-                    tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
                 );
             }
             if deadline.is_elapsed_at(*observed_at)
-                || deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+                || deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
             {
                 return DaemonInvocationResponse::application_problem(
                     request.request_id,
-                    tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
                 );
             }
             let mut _selected_project_request_leases =
@@ -192,7 +266,7 @@ impl DaemonInvocationState {
                 }
             };
             let Ok(application_request_id) =
-                tracedecay_application::RequestId::new(request.request_id.clone())
+                tracedecay_contracts::RequestId::new(request.request_id.clone())
             else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
@@ -241,13 +315,13 @@ impl DaemonInvocationState {
                 {
                     DaemonInvocationResponse::application_problem(
                         request.request_id,
-                        tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+                        tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
                     )
                 }
-                None if deadline.is_elapsed_at(tracedecay_application::clock::now_micros()) => {
+                None if deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros()) => {
                     DaemonInvocationResponse::application_problem(
                         request.request_id,
-                        tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+                        tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
                     )
                 }
                 None => DaemonInvocationResponse::problem(
@@ -284,15 +358,15 @@ impl DaemonInvocationState {
             {
                 return DaemonInvocationResponse::application_problem(
                     request.request_id,
-                    tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
                 );
             }
             if deadline.is_elapsed_at(*observed_at)
-                || deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+                || deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
             {
                 return DaemonInvocationResponse::application_problem(
                     request.request_id,
-                    tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+                    tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
                 );
             }
             return self

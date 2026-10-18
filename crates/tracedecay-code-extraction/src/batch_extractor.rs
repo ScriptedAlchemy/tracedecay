@@ -1,83 +1,27 @@
 /// Tree-sitter based Batch/CMD source code extractor.
 ///
 /// Parses Windows Batch (.bat/.cmd) source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{ExtractionState, local_node_id};
 use crate::complexity::ComplexityMetrics;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Batch/CMD source files using tree-sitter.
 pub struct BatchExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 /// Collects the direct children of `parent` into a `Vec` via cursor walk.
 ///
-/// Tree-sitter's `parent.child(i)` is O(i) — it walks sibling links — so a
+/// Tree-sitter's `parent.child(i)` is O(i), it walks sibling links, so a
 /// `for i in 0..N { parent.child(i) }` loop is O(N²). Materializing once
 /// up front gives O(N) build + O(1) lookups for the rest of the extraction.
 fn collect_children(parent: TsNode<'_>) -> Vec<TsNode<'_>> {
-    let mut out = Vec::with_capacity(parent.child_count());
+    let mut out = Vec::with_capacity(parent.child_count() as usize);
     let mut cursor = parent.walk();
     if cursor.goto_first_child() {
         loop {
@@ -91,27 +35,6 @@ fn collect_children(parent: TsNode<'_>) -> Vec<TsNode<'_>> {
 }
 
 impl BatchExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_batch(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -129,7 +52,7 @@ impl BatchExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -143,6 +66,7 @@ impl BatchExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -158,15 +82,10 @@ impl BatchExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("batch", "Batch", source)
     }
 
     ///
@@ -176,7 +95,7 @@ impl BatchExtractor {
     ///
     /// Children are materialized into a `Vec` once via a cursor (O(N)), and
     /// downstream helpers index into that slice instead of calling
-    /// `root.child(i)` repeatedly — tree-sitter's `child(i)` is O(i), so the
+    /// `root.child(i)` repeatedly. Tree-sitter's `child(i)` is O(i), so the
     /// previous index loops were O(N²) on large `.bat` files. See `complexity.rs`
     /// for the same fix on the universal hot path.
     fn visit_root_child(state: &mut ExtractionState, children: &[TsNode<'_>], child: TsNode<'_>) {
@@ -232,7 +151,7 @@ impl BatchExtractor {
         let signature = Some(label_text.trim().to_string());
         let docstring = Self::extract_docstring(state, children, label_index);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, label_node);
         let metrics = ComplexityMetrics::default();
 
         let graph_node = Node {
@@ -257,6 +176,7 @@ impl BatchExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -285,7 +205,7 @@ impl BatchExtractor {
             .strip_prefix("set ")
             .or_else(|| text.strip_prefix("SET "))
             .or_else(|| text.strip_prefix("Set "))
-            .unwrap_or(&text);
+            .unwrap_or(text);
 
         // Handle /a, /p options
         let after_opts = if after_set.starts_with("/a ")
@@ -309,7 +229,13 @@ impl BatchExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -333,6 +259,7 @@ impl BatchExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -415,7 +342,7 @@ impl BatchExtractor {
         if node.kind() == "call_stmt" {
             let text = state.node_text(node);
             // Parse the callee: "call :LabelName ..." → "LabelName"
-            if let Some(callee) = Self::parse_call_target(&text) {
+            if let Some(callee) = Self::parse_call_target(text) {
                 state.unresolved_refs.push(UnresolvedRef {
                     from_node_id: fn_node_id.to_string(),
                     reference_name: callee,
@@ -423,6 +350,8 @@ impl BatchExtractor {
                     line: node.start_position().row as u32,
                     column: node.start_position().column as u32,
                     file_path: state.file_path.clone(),
+                    unmodeled_import: None,
+                    argument_count: None,
                 });
             }
         }
@@ -458,17 +387,6 @@ impl BatchExtractor {
         }
         None
     }
-
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
-    }
 }
 
 impl crate::LanguageExtractor for BatchExtractor {
@@ -480,18 +398,15 @@ impl crate::LanguageExtractor for BatchExtractor {
         "Batch"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_batch(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        match scope {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(match scope {
             crate::parsed_extraction::ParsedExtractionScope::FullDocument => {
                 Self::extract_tree(file_path, source, tree, scope)
             }
@@ -508,6 +423,6 @@ impl crate::LanguageExtractor for BatchExtractor {
                     source.len(),
                 )
             }
-        }
+        })
     }
 }

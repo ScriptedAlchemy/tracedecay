@@ -1,20 +1,20 @@
 use serde::Serialize;
 
 use super::diagnostics_controller::refresh_pending_failure;
+use super::semantic_controller::admission_refusal;
 use super::{
-    Arc, BTreeMap, BTreeSet, CodeGenerationId, CommitId, CompletionDisposition, ContentDigest,
-    ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
-    ContextFreshness, ContextProducerState, ContextProjectionChange, ContextProjectionEnvelope,
-    ContextProjectionIdentity, ContextProjectionKind, ContextProjectionOutcome,
-    ContextProjectionPort, ContextProjectionRegistration, ContextProjectionRequest,
-    ContextSubscribeRequest, DaemonLspProtocolSession, DiagnosticSnapshotPort, FeedbackCyclePort,
-    LspRequestFailure, LspRequestId, MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_PROJECTION_BYTES,
-    MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES,
-    MAX_CONTEXT_SUMMARY_BYTES, ManifestDigest, MethodUnavailableReason, OverlayStore,
-    ProcessLocalRequestSequence, RpcFailure, SemanticProviderPort,
-    TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
-    TRACEDECAY_SUBSCRIBE_METHOD, Value, error_response, is_supported_context_projection, json,
-    request_id, success_response,
+    Arc, BTreeMap, BTreeSet, ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome,
+    ContextExpansionRequest, ContextFreshness, ContextProducerState, ContextProjectionChange,
+    ContextProjectionEnvelope, ContextProjectionIdentity, ContextProjectionKind,
+    ContextProjectionOutcome, ContextProjectionPort, ContextProjectionRegistration,
+    ContextProjectionRequest, ContextSubscribeRequest, DaemonLspProtocolSession,
+    DiagnosticSnapshotPort, FeedbackCyclePort, LspRequestFailure, LspRequestId,
+    MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_PROJECTION_BYTES, MAX_CONTEXT_PROJECTION_ITEMS,
+    MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
+    MethodUnavailableReason, OverlayStore, ProcessLocalRequestSequence, RpcFailure,
+    SemanticProviderPort, TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD,
+    TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD, Value, error_response,
+    is_supported_context_projection, json, request_id,
 };
 
 struct CountingSink {
@@ -59,18 +59,6 @@ fn context_envelope_value<T: Serialize>(
         message: "Internal error",
         data: Value::Null,
     })
-}
-
-fn valid_context_projection_identity(identity: &ContextProjectionIdentity) -> bool {
-    CommitId::new(identity.head_commit_id.clone()).is_ok()
-        && CodeGenerationId::new(identity.code_generation_id.clone()).is_ok()
-        && ManifestDigest::new(identity.snapshot_digest.clone()).is_ok()
-        && ManifestDigest::new(identity.invalidation_digest.clone()).is_ok()
-        && ContentDigest::new(identity.snapshot_content_digest.clone()).is_ok()
-        && identity
-            .document_content_digest
-            .as_ref()
-            .is_none_or(|digest| ContentDigest::new(digest.clone()).is_ok())
 }
 static NEXT_CONTEXT_OPERATION_ID: ProcessLocalRequestSequence =
     ProcessLocalRequestSequence::starting_at(1);
@@ -216,67 +204,41 @@ where
         now_ms: u64,
     ) {
         let deadline = now_ms.saturating_add(self.lifecycle.request_deadline_ms);
-        match self.lifecycle.control.admit_request_with_deadline(
+        let admission = self.lifecycle.control.admit_request_with_deadline(
             request_id.clone(),
             document,
             Some(deadline),
-        ) {
-            crate::session::RequestAdmission::Accepted => {
-                let Ok(operation_id) =
-                    NEXT_CONTEXT_OPERATION_ID.next_string("lsp-context-operation-")
-                else {
-                    self.complete_context_request(
-                        request_id,
-                        response_id,
-                        Err(RpcFailure::request_failure(
-                            LspRequestFailure::ServerCancelled {
-                                retrigger_request: true,
-                            },
-                        )),
-                    );
-                    return;
-                };
-                let operation_id = LspRequestId::String(operation_id);
-                match self.context_snapshot_value(&operation_id, &request) {
-                    Ok(None) => {
-                        self.context.pending_requests.insert(
-                            request_id,
-                            PendingContextRequest {
-                                response_id,
-                                operation_id,
-                                request,
-                            },
-                        );
-                    }
-                    result => self.complete_context_request(request_id, response_id, result),
-                }
-            }
-            crate::session::RequestAdmission::DuplicateId => {
-                let _ = self.enqueue_value(error_response(
-                    response_id,
-                    RpcFailure {
-                        code: -32600,
-                        message: "Invalid Request",
-                        data: json!({ "detail": "duplicate request id" }),
-                    },
-                ));
-            }
-            crate::session::RequestAdmission::SessionUnavailable => {
-                let _ = self.enqueue_value(error_response(
-                    response_id,
-                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
+        );
+        if let Some(failure) = admission_refusal(admission) {
+            let _ = self.enqueue_value(error_response(response_id, failure));
+            return;
+        }
+        let Ok(operation_id) = NEXT_CONTEXT_OPERATION_ID.next_string("lsp-context-operation-")
+        else {
+            self.finish_admitted_request(
+                request_id,
+                response_id,
+                Err(RpcFailure::request_failure(
+                    LspRequestFailure::ServerCancelled {
                         retrigger_request: true,
-                    }),
-                ));
+                    },
+                )),
+            );
+            return;
+        };
+        let operation_id = LspRequestId::String(operation_id);
+        match self.context_snapshot_value(&operation_id, &request) {
+            Ok(None) => {
+                self.context.pending_requests.insert(
+                    request_id,
+                    PendingContextRequest {
+                        response_id,
+                        operation_id,
+                        request,
+                    },
+                );
             }
-            crate::session::RequestAdmission::Saturated { retrigger_request } => {
-                let _ = self.enqueue_value(error_response(
-                    response_id,
-                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
-                        retrigger_request,
-                    }),
-                ));
-            }
+            result => self.finish_admitted_request(request_id, response_id, result),
         }
     }
 
@@ -288,91 +250,40 @@ where
         now_ms: u64,
     ) {
         let deadline = now_ms.saturating_add(self.lifecycle.request_deadline_ms);
-        match self.lifecycle.control.admit_request_with_deadline(
+        let admission = self.lifecycle.control.admit_request_with_deadline(
             request_id.clone(),
             None,
             Some(deadline),
-        ) {
-            crate::session::RequestAdmission::Accepted => {
-                let Ok(operation_id) =
-                    NEXT_CONTEXT_OPERATION_ID.next_string("lsp-context-expansion-")
-                else {
-                    self.complete_context_request(
-                        request_id,
-                        response_id,
-                        Err(RpcFailure::request_failure(
-                            LspRequestFailure::ServerCancelled {
-                                retrigger_request: true,
-                            },
-                        )),
-                    );
-                    return;
-                };
-                let operation_id = LspRequestId::String(operation_id);
-                match self.context_expansion_value(&operation_id, &request) {
-                    Ok(None) => {
-                        self.context.pending_expansions.insert(
-                            request_id,
-                            PendingContextExpansion {
-                                response_id,
-                                operation_id,
-                            },
-                        );
-                    }
-                    result => self.complete_context_request(request_id, response_id, result),
-                }
-            }
-            crate::session::RequestAdmission::DuplicateId => {
-                let _ = self.enqueue_value(error_response(
-                    response_id,
-                    RpcFailure {
-                        code: -32600,
-                        message: "Invalid Request",
-                        data: json!({ "detail": "duplicate request id" }),
-                    },
-                ));
-            }
-            crate::session::RequestAdmission::SessionUnavailable => {
-                let _ = self.enqueue_value(error_response(
-                    response_id,
-                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
-                        retrigger_request: true,
-                    }),
-                ));
-            }
-            crate::session::RequestAdmission::Saturated { retrigger_request } => {
-                let _ = self.enqueue_value(error_response(
-                    response_id,
-                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
-                        retrigger_request,
-                    }),
-                ));
-            }
+        );
+        if let Some(failure) = admission_refusal(admission) {
+            let _ = self.enqueue_value(error_response(response_id, failure));
+            return;
         }
-    }
-
-    pub(super) fn complete_context_request(
-        &mut self,
-        request_id: LspRequestId,
-        response_id: Value,
-        result: Result<Option<Value>, RpcFailure>,
-    ) {
-        let completion = self.lifecycle.control.complete_request(&request_id);
-        if let Some(failure) = completion.failure() {
-            let _ = self.enqueue_value(error_response(
+        let Ok(operation_id) = NEXT_CONTEXT_OPERATION_ID.next_string("lsp-context-expansion-")
+        else {
+            self.finish_admitted_request(
+                request_id,
                 response_id,
-                RpcFailure::request_failure(failure),
-            ));
-        } else if completion == CompletionDisposition::Publish {
-            match result {
-                Ok(Some(value)) => {
-                    let _ = self.enqueue_value(success_response(response_id, value));
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    let _ = self.enqueue_value(error_response(response_id, error));
-                }
+                Err(RpcFailure::request_failure(
+                    LspRequestFailure::ServerCancelled {
+                        retrigger_request: true,
+                    },
+                )),
+            );
+            return;
+        };
+        let operation_id = LspRequestId::String(operation_id);
+        match self.context_expansion_value(&operation_id, &request) {
+            Ok(None) => {
+                self.context.pending_expansions.insert(
+                    request_id,
+                    PendingContextExpansion {
+                        response_id,
+                        operation_id,
+                    },
+                );
             }
+            result => self.finish_admitted_request(request_id, response_id, result),
         }
     }
 
@@ -520,7 +431,7 @@ where
                 .get(&pending.request.kind)
                 .copied()
             else {
-                self.complete_context_request(
+                self.finish_admitted_request(
                     request_id,
                     pending.response_id,
                     Err(RpcFailure::unavailable(
@@ -531,7 +442,7 @@ where
                 continue;
             };
             let result = self.context_projection_value(&pending.request, revision, outcome);
-            self.complete_context_request(request_id, pending.response_id, result);
+            self.finish_admitted_request(request_id, pending.response_id, result);
         }
     }
 
@@ -619,7 +530,7 @@ where
                 continue;
             };
             let result = self.context_expansion_outcome_value(outcome);
-            self.complete_context_request(request_id, pending.response_id, result);
+            self.finish_admitted_request(request_id, pending.response_id, result);
         }
     }
 
@@ -653,7 +564,7 @@ where
                     .is_some_and(|root| root.contains_document(uri))
             })
             && !envelope.scope.scope_digest.is_empty()
-            && valid_context_projection_identity(&envelope.scope.identity)
+            && envelope.scope.identity.is_valid()
             && match (
                 envelope.document_uri.is_some(),
                 envelope.scope.identity.document_content_digest.as_deref(),
@@ -758,7 +669,7 @@ where
                     .as_ref()
                     .is_some_and(|root| root.contains_document(uri))
             })
-            && valid_context_projection_identity(&envelope.identity)
+            && envelope.identity.is_valid()
             && match (
                 envelope.document_uri.is_some(),
                 envelope.identity.document_content_digest.as_deref(),
@@ -918,7 +829,7 @@ where
                     .as_ref()
                     .is_some_and(|root| root.contains_document(uri))
             })
-            && valid_context_projection_identity(&change.identity)
+            && change.identity.is_valid()
             && match (
                 change.document_uri.is_some(),
                 change.identity.document_content_digest.as_deref(),

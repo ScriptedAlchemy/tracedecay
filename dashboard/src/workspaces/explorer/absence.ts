@@ -39,23 +39,15 @@ function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
   const unit = coverage.unit;
 
   switch (source.outcome) {
-    // `ready` earns absence through its coverage accounting below. `absent`
-    // is a typed statement that the store does not exist — legitimately a
-    // complete accounting of an empty domain — but it goes through the same
-    // checks, so an absence claim without complete-zero coverage still blocks.
+    // `ready` earns absence through its coverage accounting below.
     case 'ready':
-    case 'absent':
       break;
-    case 'indexing':
-      return `${label} is still building its index`;
     case 'partial':
       return `${label} answered with omitted records`;
     case 'stale':
       return `${label} answered from a stale store`;
     case 'timed_out':
       return `${label} timed out before answering`;
-    case 'unsupported':
-      return `${label} cannot be consulted from this surface`;
     case 'pending':
     case 'unavailable':
     case 'error':
@@ -106,7 +98,7 @@ function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
  *
  * Sources are checked before finality, because a source's own numbers are
  * evidence the surface can see, whereas finality is the coordinator's summary of
- * them — and when the two disagree the surface sides with the evidence.
+ * them, and when the two disagree the surface sides with the evidence.
  */
 export function absenceVerdict(run: ExplorerQueryRunV1 | undefined): AbsenceVerdict {
   if (run === undefined) {

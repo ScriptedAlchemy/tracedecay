@@ -9,7 +9,7 @@
     "status": "accepted_for_harness"
   },
   "implementation": {
-    "path": "crates/tracedecay/src/session_temporal_benchmark.rs"
+    "path": "crates/tracedecay/benches/session_temporal/harness.rs"
   },
   "measurement_contract": {
     "measured_repetitions": 30,
@@ -48,15 +48,6 @@
       "SessionRefreshService with GlobalDbSessionTemporalStore",
       "SessionRetrievalService with GlobalDbSessionTemporalExecution and AllSessionsInAuthorizedRoot hydration"
     ]
-  },
-  "profile": {
-    "cargo_profile": "bench",
-    "debug": false,
-    "debug_assertions": false,
-    "incremental": false,
-    "manifest_path": "Cargo.toml",
-    "opt_level": 3,
-    "overflow_checks": false
   },
   "runner": {
     "path": "scripts/run-session-temporal-benchmark.sh"

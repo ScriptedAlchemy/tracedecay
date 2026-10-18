@@ -2,37 +2,31 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tracedecay_application::multi_root::MultiRootApplicationOperation;
-use tracedecay_application::{
+use tracedecay_contracts::multi_root::MultiRootApplicationOperation;
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
-    CancellationSignal, Deadline, LegalAction, MultiRootExecuteRequestV1,
-    MultiRootScopeSetCasRequestV1, MultiRootScopeSetReadRequestV1, ProblemOwningLayer, RequestId,
-    ResultContractRef, RetryDirective, SafeDiagnostic,
+    CancellationSignal, Deadline, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetReadRequestV1, ProblemOwningLayer, RequestId, ResultContractRef,
+    RetryDirective, SafeDiagnostic,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
 use crate::ToolResult;
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_daemon_protocol::{
-    DaemonInvocationExecutor, InvocationCancellationPolicy, invocation_now_micros,
-};
+use crate::application_output::tool_result::problem_tool_result;
+use crate::handlers::support::{json_result, unknown_tool_error};
+use tracedecay_contracts::now_micros;
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_daemon_protocol::{DaemonInvocationExecutor, InvocationCancellationPolicy};
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
     DaemonInvocationResponse,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-fn json_result(value: &Value) -> ToolResult {
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
-        Vec::new(),
-    )
-}
-
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 
-#[hotpath::measure(future = true, label = "mcp.dispatch.multi_root")]
+#[tracing::instrument(name = "mcp.dispatch.multi_root", level = "trace", skip_all)]
 pub async fn handle_multi_root(
     tool_name: &str,
     body: Value,
@@ -41,9 +35,8 @@ pub async fn handle_multi_root(
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
 ) -> Result<ToolResult> {
-    let operation = operation_for_tool(tool_name).ok_or_else(|| TraceDecayError::Config {
-        message: format!("unknown tool: {tool_name}"),
-    })?;
+    let operation =
+        multi_root_operation_for_tool(tool_name).ok_or_else(|| unknown_tool_error(tool_name))?;
     let request_id = match protocol_request_id {
         Some(request_id) => request_id,
         None => mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| {
@@ -52,7 +45,7 @@ pub async fn handle_multi_root(
             }
         })?,
     };
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let deadline = match protocol_deadline {
         Some(deadline) => deadline,
         None => Deadline::new(UtcMicros(
@@ -69,15 +62,15 @@ pub async fn handle_multi_root(
                 message: error.to_string(),
             })?,
     };
-    // The MCP transport injects its protocol request id for cooperative
-    // cancellation; the typed multi-root requests deny unknown fields and
-    // never consume it (the protocol id already arrives as a parameter).
+    // MCP transport controls arrive outside the typed application request.
+    // Strip them before decoding the deny-unknown-fields contract.
     let mut body = body;
     if let Some(map) = body.as_object_mut() {
         map.remove("__mcp_request_id");
+        map.remove("format");
     }
-    let invocation = hotpath::measure_block!(
-        "mcp.multi_root.decode",
+    let invocation = {
+        let _span = tracing::trace_span!("mcp.multi_root.decode").entered();
         match operation {
             MultiRootApplicationOperation::ScopeSetRead => {
                 let Ok(request) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body)
@@ -118,7 +111,7 @@ pub async fn handle_multi_root(
                 )
             }
         }
-    );
+    };
     let policy = match operation {
         MultiRootApplicationOperation::ScopeSetCompareAndSwap => {
             InvocationCancellationPolicy::AuthoritativeEffect
@@ -137,26 +130,35 @@ pub async fn handle_multi_root(
             }),
         );
     };
-    let response = hotpath::future!(
+    let response = tracing::Instrument::instrument(
         executor.invoke_controlled(invocation, deadline, cancellation, policy),
-        label = "mcp.multi_root.invoke"
+        tracing::trace_span!("mcp.multi_root.invoke"),
     )
     .await;
-    hotpath::measure_block!(
-        "mcp.multi_root.render",
+    {
+        let _span = tracing::trace_span!("mcp.multi_root.render").entered();
         render_response(operation, request_id, response)
-    )
+    }
 }
 
-fn operation_for_tool(tool_name: &str) -> Option<MultiRootApplicationOperation> {
-    match tool_name {
-        "tracedecay_multi_root_scope_set_read" => Some(MultiRootApplicationOperation::ScopeSetRead),
-        "tracedecay_multi_root_scope_set_compare_and_swap" => {
-            Some(MultiRootApplicationOperation::ScopeSetCompareAndSwap)
-        }
-        "tracedecay_multi_root_execute" => Some(MultiRootApplicationOperation::Execute),
-        _ => None,
-    }
+/// The multi-root operation a tool name resolves to, if any.
+///
+/// The three multi-root tools are daemon-owned: they carry no application
+/// surface binding, so the binding table takes their contract from the
+/// multi-root capability catalog through this lookup.
+const MULTI_ROOT_TOOL_PREFIX: &str = "tracedecay_multi_root_";
+
+pub(crate) fn multi_root_tool_name(operation: MultiRootApplicationOperation) -> String {
+    format!("{MULTI_ROOT_TOOL_PREFIX}{}", operation.operation_key())
+}
+
+pub(crate) fn multi_root_operation_for_tool(
+    tool_name: &str,
+) -> Option<MultiRootApplicationOperation> {
+    let key = tool_name.strip_prefix(MULTI_ROOT_TOOL_PREFIX)?;
+    MultiRootApplicationOperation::ALL
+        .into_iter()
+        .find(|operation| operation.operation_key() == key)
 }
 
 fn render_response(
@@ -203,7 +205,7 @@ fn render_response(
 fn success_result<T>(
     operation: MultiRootApplicationOperation,
     request_id: RequestId,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     outcome: ApplicationOutcome<T>,
 ) -> Result<ToolResult>
 where
@@ -214,6 +216,10 @@ where
         request_id,
         scope,
         outcome,
+        touched_files: Vec::new(),
+        code_graph: None,
+        analytics: None,
+        cost: None,
     };
     let payload = json!({
         "binding_id": binding_id(operation)?,
@@ -229,14 +235,10 @@ fn invalid_request(
     problem_result(
         operation,
         request_id,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "multi_root.invalid_request".to_owned(),
-                message: "The multi-root application request is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+        ApplicationProblem::invalid_request(
+            "multi_root.invalid_request",
+            "The multi-root application request is invalid",
+        ),
     )
 }
 
@@ -245,9 +247,6 @@ fn problem_result(
     request_id: RequestId,
     problem: ApplicationProblem,
 ) -> Result<ToolResult> {
-    // Denied and failed multi-root requests are part of the serving story;
-    // success-only timing would hide invalid requests and daemon refusals.
-    hotpath::gauge!("mcp.multi_root.problems_total").inc(1_u64);
     let application =
         ApplicationProblemEnvelope::new(result_contract(operation)?, request_id, problem)
             .map_err(|error| TraceDecayError::Config {
@@ -258,20 +257,16 @@ fn problem_result(
         "binding_id": binding_id(operation)?,
         "application": application,
     });
-    Ok(json_result(&payload).with_semantic_error(true))
+    problem_tool_result(&payload.to_string(), &application.problem)
 }
 
 fn daemon_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
     match problem {
         DaemonInvocationProblem::InvalidRequest | DaemonInvocationProblem::UnsupportedRevision => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
-                    code: "multi_root.invalid_request".to_owned(),
-                    message: "The multi-root application request is invalid".to_owned(),
-                },
-                retry: RetryDirective::Never,
-                legal_actions: vec![LegalAction::CorrectRequest],
-            }
+            ApplicationProblem::invalid_request(
+                "multi_root.invalid_request",
+                "The multi-root application request is invalid",
+            )
         }
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
@@ -327,7 +322,7 @@ fn result_contract(operation: MultiRootApplicationOperation) -> Result<ResultCon
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
-    use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective};
+    use tracedecay_contracts::{ApplicationProblem, LegalAction, RetryDirective};
     use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
     use super::{daemon_problem, handle_multi_root};
@@ -342,10 +337,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_request_id_is_stripped_before_typed_deserialization() {
+    async fn transport_controls_are_stripped_before_typed_deserialization() {
         let body = json!({
             "scope_set_id": "tool-sweep-scope-set.v1",
             "__mcp_request_id": "request.mcp.fixture",
+            "format": "json",
         });
 
         let result = handle_multi_root(
@@ -359,8 +355,8 @@ mod tests {
         .await
         .unwrap();
 
-        // The injected transport id must not fail typed deserialization; the
-        // request reaches the daemon-owner gate and reports its absence.
+        // Transport controls must not fail typed deserialization; the request
+        // reaches the daemon-owner gate and reports its absence.
         assert_eq!(problem_code(&result), "multi_root.daemon_unavailable");
     }
 
@@ -391,6 +387,7 @@ mod tests {
             diagnostic,
             retry,
             legal_actions,
+            ..
         } = daemon_problem(DaemonInvocationProblem::ResetRequired)
         else {
             panic!("multi-root reset must remain reset-required");

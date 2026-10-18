@@ -8,12 +8,12 @@
 //! `NativeIntegrationPort` / `NativeIntegrationStackResolutionPort`, composed
 //! per project by the daemon native-integration registry at project open.
 //!
-//! A project without a mounted owner — a non-Git project, or a request
-//! arriving before project-open admission finished — answers with the typed
+//! A project without a mounted owner answers with the typed
 //! `authority_unmounted` result rather than a guess, a partial apply, or a
-//! local mutation fallback: an unavailable daemon or capability leaves the
-//! operation explicitly preview-only or unavailable, and no transport falls
-//! back to local mutation.
+//! local mutation fallback. That includes a non-Git project, or a request
+//! arriving before project-open admission finished. An unavailable daemon or
+//! capability leaves the operation explicitly preview-only or unavailable, and
+//! no transport falls back to local mutation.
 //!
 //! Apply resolves its preview and one-use approval from the durable store by
 //! exact identity and digest; a missing or mismatched fact is denied without
@@ -21,14 +21,21 @@
 
 use super::*;
 
-use tracedecay_application::NATIVE_INTEGRATION_APPLY_OPERATION;
-use tracedecay_application::git::NativeIntegrationApprovalProjectionV1;
-use tracedecay_application::git::{
+use tracedecay_application::native_integration::NativeIntegrationStatusBroadcastV1;
+use tracedecay_application::observability::{
+    BoundedObservabilityProducerV1, WorkConflictObservationResultV1,
+    WorkConflictObservationUnavailableV1, record_native_integration_transition,
+    record_work_conflict_observation,
+};
+use tracedecay_application::stack_coordinator::StackCoordinatorErrorV1;
+use tracedecay_contracts::NATIVE_INTEGRATION_APPLY_OPERATION;
+use tracedecay_contracts::git::NativeIntegrationApprovalProjectionV1;
+use tracedecay_contracts::git::{
     NativeWorktreeSurfaceRequest, NativeWorktreeSurfaceResultV1, WorktreeCleanupReconciliationV1,
     WorktreeCleanupRemovalV1, WorktreeConfirmationOutcomeV1, WorktreeContractError,
     WorktreeInspectionOutcomeV1, WorktreeInventoryOutcomeV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, CancellationState, NativeIntegrationApplyRequestV1,
     NativeIntegrationCancelRequestV1, NativeIntegrationContractError, NativeIntegrationPortError,
     NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
@@ -39,21 +46,15 @@ use tracedecay_application::{
 use tracedecay_domain::{
     NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
+    NativeIntegrationTransactionId,
 };
 use tracedecay_store::NativeIntegrationStore;
-use tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1;
-use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, WorkConflictObservationResultV1,
-    WorkConflictObservationUnavailableV1, record_native_integration_transition,
-    record_work_conflict_observation,
-};
-use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 use tracedecay_agent_hosts::native_integration::stack_signals::{
     signal_from_preflight, signal_from_receipt,
 };
-use tracedecay_application::NativeIntegrationSurfaceRequest;
+use tracedecay_contracts::NativeIntegrationSurfaceRequest;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// How long a minted preview stays approvable. The preview must outlive its
@@ -106,7 +107,11 @@ const fn native_integration_operation(
 
 /// Executes one native-integration surface request.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.native_integration.execute", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.native_integration.execute",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_native_integration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
@@ -215,7 +220,7 @@ pub(super) async fn execute_native_integration(
         execution.owner_preview.as_ref(),
     );
     // Telemetry only: the preflight disposition and terminal apply receipt
-    // additionally prove one mechanical conflict prediction/outcome pair.
+    // also prove one mechanical conflict prediction/outcome pair.
     match record_work_conflict_observation(
         registered.scope.project_id.as_str(),
         observability_producer.as_deref(),
@@ -262,7 +267,6 @@ struct NativeIntegrationExecutionV1 {
 }
 
 impl NativeIntegrationExecutionV1 {
-    #[hotpath::skip]
     const fn without_preview(result: NativeIntegrationSurfaceResultV1) -> Self {
         Self {
             result,
@@ -270,7 +274,6 @@ impl NativeIntegrationExecutionV1 {
         }
     }
 
-    #[hotpath::skip]
     const fn with_preview(
         result: NativeIntegrationSurfaceResultV1,
         owner_preview: tracedecay_domain::NativeIntegrationPreviewV1,
@@ -294,9 +297,8 @@ fn publish_transaction_status(
     }
 }
 
-/// Reads and publishes the durable status a mutation just advanced, from the
-/// same blocking context that ran the mutation.
-fn publish_current_transaction_status(
+/// Reads and publishes the durable status a mutation just advanced.
+async fn publish_current_transaction_status(
     broadcast: Option<&Arc<NativeIntegrationStatusBroadcastV1>>,
     owner: &DaemonNativeIntegrationOwner,
     transaction_id: &tracedecay_domain::NativeIntegrationTransactionId,
@@ -304,23 +306,28 @@ fn publish_current_transaction_status(
     if broadcast.is_none() {
         return;
     }
-    if let Ok(Some(status)) = owner.service().status(NativeIntegrationStatusRequestV1 {
-        transaction_id: transaction_id.clone(),
-    }) {
+    if let Ok(Some(status)) = owner
+        .service()
+        .status(NativeIntegrationStatusRequestV1 {
+            transaction_id: transaction_id.clone(),
+        })
+        .await
+    {
         publish_transaction_status(broadcast, &status);
     }
 }
 
 /// Runs one operation against the mounted per-project owner.
 ///
-/// The kernel and its store bridge are synchronous (native Git plus a bounded
-/// store actor), so every owner call crosses to a blocking thread; the
-/// coordinator's own cancellation map keeps a running apply cancellable
-/// through the separate cancel operation.
+/// Store-only operations await the async store in place. Operations that
+/// interleave store awaits with synchronous native Git run on the blocking
+/// pool; the coordinator's own cancellation map keeps a running apply
+/// cancellable through the separate cancel operation.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(
-    label = "daemon.service.native_integration.owner_execute",
-    future = true
+#[tracing::instrument(
+    name = "daemon.service.native_integration.owner_execute",
+    level = "trace",
+    skip_all
 )]
 async fn execute_with_owner(
     wire_request_id: &str,
@@ -334,19 +341,30 @@ async fn execute_with_owner(
     let invalid = invalid_native_integration_request;
     match request {
         NativeIntegrationSurfaceRequest::StackSnapshot(snapshot) => {
-            let outcome = hotpath::future!(
-                tokio::task::spawn_blocking(move || {
-                    let resolution = registered_topology_request(&owner, *snapshot, observed_at)?;
-                    owner.stack_snapshot(resolution, &signal)
+            let outcome = tracing::Instrument::instrument(
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                    let sealed_snapshot = (*snapshot)
+                        .seal()
+                        .map_err(NativeIntegrationContractError::from)?;
+                    let resolution =
+                        registered_topology_request(&owner, sealed_snapshot.clone(), observed_at)?;
+                    owner
+                        .stack_snapshot(resolution, &signal)
+                        .map(|outcome| (outcome, sealed_snapshot))
                 }),
-                label = "daemon.service.native_integration.stack_snapshot"
+                tracing::trace_span!("daemon.service.native_integration.stack_snapshot"),
             )
             .await
             .map_err(|_| unavailable_native_integration())?;
             match outcome {
-                Ok(outcome) => NativeIntegrationSurfaceResultV1::from_stack_resolution(&outcome)
+                Ok((outcome, sealed_snapshot)) => {
+                    NativeIntegrationSurfaceResultV1::from_stack_resolution(
+                        &outcome,
+                        sealed_snapshot,
+                    )
                     .map(NativeIntegrationExecutionV1::without_preview)
-                    .map_err(|_| invalid()),
+                    .map_err(|_| invalid())
+                }
                 Err(error) => surface_result_from_contract_error(error)
                     .map(NativeIntegrationExecutionV1::without_preview),
             }
@@ -363,15 +381,14 @@ async fn execute_with_owner(
             );
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
-            let outcome = hotpath::future!(
-                tokio::task::spawn_blocking(move || {
+            let outcome = tracing::Instrument::instrument(
+                tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
                     let stack_runtime = owner.github_stack_runtime(context.scope())?;
                     let topology =
                         registered_topology_request(&owner, preflight.snapshot, observed_at)?;
                     let application_request = NativeIntegrationPreflightRequestV1 {
                         context,
                         topology,
-                        evidence: preflight.evidence.into(),
                         preview_id,
                         preferred_mode: preflight.preferred_mode,
                         preview_expires_at,
@@ -380,8 +397,14 @@ async fn execute_with_owner(
                     let outcome = match stack_runtime.as_ref() {
                         Some(runtime) => runtime
                             .preflight(&application_request, &signal)
+                            .await
                             .map_err(stack_coordinator_contract_error),
-                        None => owner.service().preflight(application_request, &signal),
+                        None => {
+                            owner
+                                .service()
+                                .preflight(application_request, &signal)
+                                .await
+                        }
                     };
                     if let (
                         Some(runtime),
@@ -392,11 +415,12 @@ async fn execute_with_owner(
                     {
                         runtime
                             .enqueue_from_preflight(stack_signal, &signal_context)
+                            .await
                             .map_err(stack_coordinator_contract_error)?;
                     }
                     outcome
                 }),
-                label = "daemon.service.native_integration.preflight"
+                tracing::trace_span!("daemon.service.native_integration.preflight"),
             )
             .await
             .map_err(|_| unavailable_native_integration())?;
@@ -429,6 +453,10 @@ async fn execute_with_owner(
                 "approval.native-integration.{wire_request_id}"
             ))
             .map_err(|_| invalid())?;
+            let transaction_id = NativeIntegrationTransactionId::new(format!(
+                "transaction.native-integration.{wire_request_id}"
+            ))
+            .map_err(|_| invalid())?;
             let apply_operation =
                 native_integration_surface_operation(NATIVE_INTEGRATION_APPLY_OPERATION)
                     .map_err(|_| invalid())?
@@ -437,10 +465,10 @@ async fn execute_with_owner(
                 apply_operation.capability_id().as_str().to_owned(),
             )
             .map_err(|_| invalid())?;
-            hotpath::future!(
-                tokio::task::spawn_blocking(move || {
+            tracing::Instrument::instrument(
+                async move {
                     let store = owner.store();
-                    let preview = match store.read_preview(&approve.preview_id) {
+                    let preview = match store.read_preview(&approve.preview_id).await {
                         Ok(Some(preview)) if preview.preview_digest == approve.preview_digest => {
                             preview
                         }
@@ -491,9 +519,12 @@ async fn execute_with_owner(
                     }
                     .seal()
                     .map_err(|_| invalid_native_integration_request())?;
-                    match store.save_approval(approval.clone()) {
+                    match store.save_approval(approval.clone()).await {
                         Ok(()) => Ok(NativeIntegrationSurfaceResultV1::Approval(
-                            NativeIntegrationApprovalProjectionV1::project(&approval),
+                            NativeIntegrationApprovalProjectionV1::project(
+                                &approval,
+                                transaction_id,
+                            ),
                         )),
                         Err(tracedecay_store::NativeIntegrationStoreError::ApprovalConflict) => {
                             Ok(NativeIntegrationSurfaceResultV1::unavailable(
@@ -502,11 +533,10 @@ async fn execute_with_owner(
                         }
                         Err(_) => Err(unavailable_native_integration()),
                     }
-                }),
-                label = "daemon.service.native_integration.approve"
+                },
+                tracing::trace_span!("daemon.service.native_integration.approve"),
             )
             .await
-            .map_err(|_| unavailable_native_integration())?
             .map(NativeIntegrationExecutionV1::without_preview)
         }
         NativeIntegrationSurfaceRequest::Apply(apply) => {
@@ -515,14 +545,14 @@ async fn execute_with_owner(
                 .map_err(|_| unavailable_native_integration())?;
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
-            hotpath::future!(
-                tokio::task::spawn_blocking(move || {
+            tracing::Instrument::instrument(
+                tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
                     // The caller names its preview and one-use approval by exact
                     // identity and digest; both must already be durable. A
                     // missing or mismatched fact is denied without disclosing
                     // whether the target was absent or denied.
                     let store = owner.store();
-                    let preview = match store.read_preview(&apply.preview_id) {
+                    let preview = match store.read_preview(&apply.preview_id).await {
                         Ok(Some(preview)) if preview.preview_digest == apply.preview_digest => {
                             preview
                         }
@@ -535,7 +565,7 @@ async fn execute_with_owner(
                         }
                         Err(_) => return Err(unavailable_native_integration()),
                     };
-                    let approval = match store.read_approval(&apply.approval_id) {
+                    let approval = match store.read_approval(&apply.approval_id).await {
                         Ok(Some(approval)) if approval.approval_digest == apply.approval_digest => {
                             approval
                         }
@@ -558,12 +588,13 @@ async fn execute_with_owner(
                         approval,
                         observed_at,
                     };
-                    let apply_outcome = owner.service().apply(application_request, &signal);
+                    let apply_outcome = owner.service().apply(application_request, &signal).await;
                     publish_current_transaction_status(
                         status_broadcast.as_ref(),
                         &owner,
                         &applied_transaction_id,
-                    );
+                    )
+                    .await;
                     match apply_outcome {
                         Ok(receipt) => {
                             if let Some(runtime) = stack_runtime.as_ref()
@@ -577,6 +608,7 @@ async fn execute_with_owner(
                                         &signal_approval,
                                         &signal_context,
                                     )
+                                    .await
                                     .map_err(|_| unavailable_native_integration())?;
                             }
                             NativeIntegrationReceiptProjectionV1::project(&receipt)
@@ -593,7 +625,7 @@ async fn execute_with_owner(
                             .map(NativeIntegrationExecutionV1::without_preview),
                     }
                 }),
-                label = "daemon.service.native_integration.apply"
+                tracing::trace_span!("daemon.service.native_integration.apply"),
             )
             .await
             .map_err(|_| unavailable_native_integration())?
@@ -602,12 +634,11 @@ async fn execute_with_owner(
             let application_request = NativeIntegrationStatusRequestV1 {
                 transaction_id: status.transaction_id,
             };
-            let outcome = hotpath::future!(
-                tokio::task::spawn_blocking(move || owner.service().status(application_request)),
-                label = "daemon.service.native_integration.status"
+            let outcome = tracing::Instrument::instrument(
+                async move { owner.service().status(application_request).await },
+                tracing::trace_span!("daemon.service.native_integration.status"),
             )
-            .await
-            .map_err(|_| unavailable_native_integration())?;
+            .await;
             match outcome {
                 Ok(Some(status)) => {
                     publish_transaction_status(status_broadcast.as_ref(), &status);
@@ -632,20 +663,20 @@ async fn execute_with_owner(
                 transaction_id: cancel.transaction_id,
                 requested_at: observed_at,
             };
-            let outcome = hotpath::future!(
-                tokio::task::spawn_blocking(move || {
-                    let disposition = owner.service().cancel(application_request);
+            let outcome = tracing::Instrument::instrument(
+                async move {
+                    let disposition = owner.service().cancel(application_request).await;
                     publish_current_transaction_status(
                         status_broadcast.as_ref(),
                         &owner,
                         &cancelled_transaction_id,
-                    );
+                    )
+                    .await;
                     disposition
-                }),
-                label = "daemon.service.native_integration.cancel"
+                },
+                tracing::trace_span!("daemon.service.native_integration.cancel"),
             )
-            .await
-            .map_err(|_| unavailable_native_integration())?;
+            .await;
             match outcome {
                 Ok(disposition) => Ok(NativeIntegrationExecutionV1::without_preview(
                     NativeIntegrationSurfaceResultV1::from_cancel(disposition),
@@ -675,7 +706,11 @@ enum WorktreeUnavailableReasonV1 {
     Unavailable,
 }
 
-#[hotpath::measure(label = "daemon.service.native_integration.worktree", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.native_integration.worktree",
+    level = "trace",
+    skip_all
+)]
 async fn execute_worktree_with_owner(
     owner: DaemonNativeIntegrationOwner,
     request: NativeWorktreeSurfaceRequest,
@@ -696,7 +731,7 @@ async fn execute_worktree_with_owner(
             WorktreeUnavailableReasonV1::Unavailable,
         ));
     };
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
         let outcome = match request {
             NativeWorktreeSurfaceRequest::Inventory(request) => service
                 .inventory(&request, &signal)
@@ -709,9 +744,11 @@ async fn execute_worktree_with_owner(
                 .map(NativeWorktreeSurfaceResultV1::Confirmation),
             NativeWorktreeSurfaceRequest::Remove(request) => service
                 .remove(&request, &signal)
+                .await
                 .map(NativeWorktreeSurfaceResultV1::Removal),
             NativeWorktreeSurfaceRequest::Reconcile(request) => service
                 .reconcile(&request, &signal)
+                .await
                 .map(NativeWorktreeSurfaceResultV1::Reconciliation),
         };
         outcome.or_else(|error| worktree_result_from_error(operation, error))
@@ -812,10 +849,10 @@ fn worktree_unavailable_for_operation(
 
 fn registered_topology_request(
     owner: &DaemonNativeIntegrationOwner,
-    snapshot: tracedecay_application::NativeIntegrationStackSnapshotSurfaceRequest,
+    snapshot: tracedecay_contracts::NativeIntegrationSealedStackSnapshotV1,
     observed_at: UtcMicros,
 ) -> Result<
-    tracedecay_application::NativeIntegrationStackResolutionRequestV1,
+    tracedecay_contracts::NativeIntegrationStackResolutionRequestV1,
     NativeIntegrationPortError,
 > {
     let scope_set = owner.authorized_scope_set(
@@ -864,13 +901,14 @@ pub(super) fn live_cancellation_signal(
 
 fn unavailable_native_integration() -> ApplicationProblem {
     ApplicationProblem::Unavailable {
-        classification: tracedecay_application::ApplicationUnavailableClassV1::Authority,
+        classification: tracedecay_contracts::ApplicationUnavailableClassV1::Authority,
         diagnostic: SafeDiagnostic {
             code: "native_integration_runtime_unavailable".to_owned(),
             message: "The native-integration runtime did not complete the request".to_owned(),
         },
         retry: RetryDirective::AfterDelay,
-        legal_actions: vec![tracedecay_application::LegalAction::Retry],
+        legal_actions: vec![tracedecay_contracts::LegalAction::Retry],
+        detail: None,
     }
 }
 
@@ -893,15 +931,10 @@ fn stack_coordinator_contract_error(
 /// its operation contract, or whose bounded authority receipt cannot be
 /// minted from the values the request supplied.
 fn invalid_native_integration_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "invalid_native_integration_request".to_owned(),
-            message: "The native-integration request does not match its operation contract"
-                .to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "invalid_native_integration_request",
+        "The native-integration request does not match its operation contract",
+    )
 }
 
 /// Mint the request context and authority for exactly one native-integration
@@ -918,22 +951,22 @@ fn native_integration_authority(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> Result<(RequestContext, AuthorityReceipt), ApplicationProblem> {
-    if observed_at >= registered.grants.expires_at {
-        return Err(ApplicationProblem::not_found_or_not_authorized(
-            RetryDirective::Never,
-        ));
-    }
     let invalid = invalid_native_integration_request;
     let application_operation = native_integration_surface_operation(operation.as_str())
         .map_err(|_| invalid())?
         .ok_or_else(invalid)?;
-    let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
+    let expires_at = UtcMicros(
+        deadline
+            .expires_at
+            .0
+            .min(mounted_grant_expires_at(observed_at).0),
+    );
     // The grant digest is the grant *lineage* identity, deliberately stable
     // per (scope, policy revision) rather than per request or per operation:
     // the authorization port and the apply validator bind previews and
     // approvals to "the grant now in hand" by this digest across the
     // stack-snapshot -> preflight -> approval -> apply journey. Per-operation
-    // enforcement stays in the grant's capability/use-case set below — a
+    // enforcement stays in the grant's capability/use-case set below, a
     // preflight grant still can never satisfy apply.
     let grant_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.daemon.native-integration-route-grant.v1",
@@ -992,7 +1025,7 @@ fn native_integration_evidence(
     let invalid = invalid_native_integration_request;
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )

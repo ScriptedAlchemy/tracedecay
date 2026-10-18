@@ -7,7 +7,7 @@
 //! discoverable but never *natively loaded*: the host does not treat a managed
 //! skill as one of its own skills.
 //!
-//! This module closes that gap the way Hermes does — by writing each active
+//! This module closes that gap the way Hermes does, by writing each active
 //! managed skill as a real, host-loadable `SKILL.md` into the host's own skills
 //! directory (`<base>/.claude/skills/<slug>/SKILL.md` for Claude Code, the
 //! `.codex` twin for Codex), so the agent loads it like any other skill.
@@ -34,13 +34,21 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, sha256_hex};
 
+use super::artifact_refs::sha256_bytes;
 use super::config_error;
+use super::host_io::{HostIo, uses_default_user_profile};
 pub use crate::automation::managed_skills::managed_skill_root;
-use crate::automation::managed_skills::{ManagedSkill, ManagedSkillState};
-use crate::automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
-use crate::errors::Result;
+use crate::automation::managed_skills::{ManagedSkill, ManagedSkillExt, ManagedSkillState};
+use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_private_fs::FileLease;
+use tracedecay_runtime_core::config::ProfileRoot;
 
-pub use crate::automation::managed_skill_model::MATERIALIZED_SKILL_MANAGED_BY;
+/// Typed reset authority for a host-side materialized skill package; its reset
+/// deletes the refused package directory.
+const MATERIALIZED_SKILL_PACKAGE_AUTHORITY: &str = "materialized skill package";
+
+pub use tracedecay_automation::managed_skills::MATERIALIZED_SKILL_MANAGED_BY;
 
 const SKILL_FILE: &str = "SKILL.md";
 const MATERIALIZATION_MANIFEST_FILE: &str = ".tracedecay-materialization.json";
@@ -210,17 +218,13 @@ impl ReconcileReport {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Provenance parsing / fork detection
-// ---------------------------------------------------------------------------
 
-/// The provenance a materialized file carries, plus the body markdown as it
-/// currently sits on disk (for fork detection).
+/// The provenance a materialized file carries in its frontmatter.
 struct FileProvenance {
     managed_by: Option<String>,
     skill_id: Option<String>,
     content_hash: Option<String>,
-    body_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,7 +235,7 @@ struct MaterializationManifest {
     /// Stable id of the profile/installation that materialized this package.
     /// Absent on manifests written before this field existed (and on packages
     /// re-derived from disk without a known installation); such packages are
-    /// never auto-removed from a *project* scope — they may be another user's
+    /// never auto-removed from a *project* scope, they may be another user's
     /// committed files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     materialized_by: Option<String>,
@@ -270,19 +274,6 @@ enum ArtifactState {
 impl FileProvenance {
     fn is_managed(&self) -> bool {
         self.managed_by.as_deref() == Some(MATERIALIZED_SKILL_MANAGED_BY)
-    }
-
-    /// Legacy (pre-package-hash) fork check: the recorded `content-hash` was
-    /// the body-only hash, so a file is a fork when the body on disk no longer
-    /// hashes to it. Only meaningful for the body-hash domain; callers first
-    /// try [`recompute_on_disk_package`] for the package-hash domain. A managed
-    /// file missing a content-hash is treated as forked so we never silently
-    /// overwrite something we cannot verify.
-    fn is_legacy_forked(&self) -> bool {
-        match (&self.content_hash, &self.body_hash) {
-            (Some(recorded), Some(actual)) => recorded != actual,
-            _ => true,
-        }
     }
 }
 
@@ -344,7 +335,7 @@ fn collect_on_disk_support_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> 
 /// disk (package-hash domain). Reconstructs the render placeholder by
 /// swapping the recorded `content-hash` back to `<package-hash>`, folds in the
 /// on-disk support files exactly as [`ManagedSkill::materialized_package_hash`]
-/// does, and — when the result matches the recorded hash — returns a re-derived
+/// does. When the result matches the recorded hash, it returns a re-derived
 /// manifest proving the package is pristine (safe to treat as owned). Returns
 /// `Ok(None)` when the file is missing, has no content-hash, or has drifted.
 fn recompute_on_disk_package(
@@ -373,18 +364,18 @@ fn recompute_on_disk_package(
     let mut hasher = Sha256::new();
     hasher.update(reconstructed.as_bytes());
     let mut files = BTreeMap::new();
-    files.insert(SKILL_FILE.to_string(), hash_bytes(&skill_bytes));
+    files.insert(SKILL_FILE.to_string(), sha256_bytes(&skill_bytes));
     for (relative, bytes) in &supports {
         // Hash the slash-normalized key, not Path display form. On Windows,
         // `strip_prefix` relatives stringify with `\`, while authoring hashes
-        // use forward-slash support paths — a mismatch would make every
+        // use forward-slash support paths, a mismatch would make every
         // pristine lost-manifest package look forked.
         let key = support_relative_key(relative)?;
         hasher.update(b"\0file:");
         hasher.update(key.as_bytes());
         hasher.update(b"\0");
         hasher.update(bytes);
-        files.insert(key, hash_bytes(bytes));
+        files.insert(key, sha256_bytes(bytes));
     }
     let recomputed = encode_tagged_lowercase_hex("sha256:", &hasher.finalize());
     if recomputed != recorded {
@@ -401,6 +392,36 @@ fn recompute_on_disk_package(
     }))
 }
 
+/// The released pre-package-hash shape recorded the body-only hash as its
+/// `content-hash`. A pristine one is refused rather than adopted as owned or
+/// misreported as a user fork.
+fn refuse_released_body_hash_package(dir: &Path, provenance: &FileProvenance) -> Result<()> {
+    let Some(recorded) = provenance.content_hash.as_deref() else {
+        return Ok(());
+    };
+    let contents = match fs::read_to_string(artifact_path(dir, SKILL_FILE)?) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    let body = contents.strip_prefix("---\n").and_then(|after_open| {
+        let close_at = after_open.find("\n---\n")?;
+        let region = &after_open[close_at + "\n---\n".len()..];
+        let region = region.strip_prefix('\n').unwrap_or(region);
+        Some(region.strip_suffix('\n').unwrap_or(region))
+    });
+    if body.is_some_and(|body| sha256_bytes(body.as_bytes()) == recorded) {
+        return Err(TraceDecayError::reset_required(
+            MATERIALIZED_SKILL_PACKAGE_AUTHORITY,
+            format!(
+                "'{}' is the released body-hash package shape without a manifest",
+                dir.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn frontmatter_scalar<'a>(
     fields: &'a std::collections::BTreeMap<String, SkillFrontmatterValue>,
     key: &str,
@@ -408,28 +429,12 @@ fn frontmatter_scalar<'a>(
     fields.get(key).and_then(SkillFrontmatterValue::as_scalar)
 }
 
-/// Extracts the raw body region after the leading frontmatter block, then
-/// strips exactly one leading and one trailing newline to recover the original
-/// `body_markdown` we wrote. Returns `None` when the file has no frontmatter.
-fn on_disk_body_markdown(contents: &str) -> Option<String> {
-    let after_open = contents.strip_prefix("---\n")?;
-    let close_at = after_open.find("\n---\n")?;
-    let region = &after_open[close_at + "\n---\n".len()..];
-    let region = region.strip_prefix('\n').unwrap_or(region);
-    let region = region.strip_suffix('\n').unwrap_or(region);
-    Some(region.to_string())
-}
-
-fn hash_body(body: &str) -> String {
-    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(body.as_bytes()))
-}
-
 const INSTALLATION_ID_FILE: &str = ".materialization-installation-id";
 
 /// Returns a stable id for the local profile/installation, persisting a random
 /// token in the profile root on first use. Stamped into every manifest this
 /// installation writes so orphan cleanup in *project* scopes only removes files
-/// this installation authored — never another user's committed materialization.
+/// this installation authored, never another user's committed materialization.
 ///
 /// Best-effort: if the token cannot be read or written (read-only profile), a
 /// per-process fallback is returned. A fallback id never matches a persisted
@@ -443,7 +448,7 @@ pub fn installation_id(profile_root: &Path) -> String {
         }
     }
     let mut token = [0u8; 16];
-    let generated = match getrandom::getrandom(&mut token) {
+    let generated = match getrandom::fill(&mut token) {
         Ok(()) => hex::encode(token),
         Err(_) => format!(
             "pid-{}-{}",
@@ -477,13 +482,16 @@ fn read_file_provenance(path: &Path) -> Result<Option<FileProvenance>> {
         ),
         None => (None, None, None),
     };
-    let body_hash = on_disk_body_markdown(&contents).map(|body| hash_body(&body));
     Ok(Some(FileProvenance {
         managed_by,
         skill_id,
         content_hash,
-        body_hash,
     }))
+}
+
+fn package_lock_path(package_dir: &Path) -> PathBuf {
+    let key = sha256_hex(package_dir.to_string_lossy().as_bytes());
+    std::env::temp_dir().join(format!("tracedecay-materialization-{key}.lock"))
 }
 
 /// Inter-process lock held for the duration of a single package's
@@ -494,22 +502,12 @@ fn read_file_provenance(path: &Path) -> Result<Option<FileProvenance>> {
 /// the tracked skills tree (OS temp dir, keyed by the package path) so it never
 /// pollutes a repo; flock semantics only need to hold within one machine, which
 /// is exactly where the race occurs.
-struct PackageLock(fs::File);
-
-impl Drop for PackageLock {
-    fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.0);
-    }
-}
-
-fn package_lock_path(package_dir: &Path) -> PathBuf {
-    let key = sha256_hex(package_dir.to_string_lossy().as_bytes());
-    std::env::temp_dir().join(format!("tracedecay-materialization-{key}.lock"))
-}
-
-#[hotpath::measure(label = "hosts.automation.skill_materialization.lock")]
-fn lock_package(package_dir: &Path) -> Result<PackageLock> {
-    use fs2::FileExt;
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.lock",
+    level = "trace",
+    skip_all
+)]
+fn lock_package(package_dir: &Path) -> Result<FileLease> {
     let path = package_lock_path(package_dir);
     let file = fs::OpenOptions::new()
         .read(true)
@@ -517,8 +515,11 @@ fn lock_package(package_dir: &Path) -> Result<PackageLock> {
         .create(true)
         .truncate(false)
         .open(&path)?;
-    crate::storage::retry_transient_file_op(|| file.lock_exclusive())?;
-    Ok(PackageLock(file))
+    tracedecay_runtime_core::storage::retry_transient_file_op(|| file.lock())?;
+    Ok(FileLease::held(
+        file,
+        "automation.skill_materialization.package",
+    ))
 }
 
 fn relative_artifact_path(relative: &str) -> Result<&Path> {
@@ -547,7 +548,7 @@ fn ensure_not_symlink(path: &Path) -> Result<()> {
     }
 }
 
-/// Rejects a symlink at any component the reconciler itself creates — i.e. only
+/// Rejects a symlink at any component the reconciler itself creates, i.e. only
 /// the `relative` components under `base`. `base` (the host skills directory and
 /// everything above it) may legitimately traverse symlinks: dotfile managers
 /// (stow, chezmoi, nix-home-manager) routinely symlink `~/.claude`, `.codex`, or
@@ -624,10 +625,6 @@ fn read_materialization_manifest(dir: &Path, skill_id: &str) -> Result<ManifestS
     Ok(ManifestState::Owned(manifest))
 }
 
-fn hash_bytes(bytes: &[u8]) -> String {
-    super::artifact_refs::sha256_bytes(bytes)
-}
-
 fn current_artifact_hash(path: &Path) -> Result<Option<String>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -637,7 +634,7 @@ fn current_artifact_hash(path: &Path) -> Result<Option<String>> {
     if !metadata.file_type().is_file() {
         return Ok(None);
     }
-    Ok(Some(hash_bytes(&fs::read(path)?)))
+    Ok(Some(sha256_bytes(&fs::read(path)?)))
 }
 
 fn artifact_state(dir: &Path, relative: &str, expected_hash: &str) -> Result<ArtifactState> {
@@ -687,7 +684,7 @@ fn write_artifact_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let staging = PathBuf::from(format!("{}.new", path.display()));
     ensure_not_symlink(&staging)?;
     if path_exists_without_following_links(&staging)? {
-        if current_artifact_hash(&staging)?.as_deref() != Some(hash_bytes(bytes).as_str()) {
+        if current_artifact_hash(&staging)?.as_deref() != Some(sha256_bytes(bytes).as_str()) {
             return Err(config_error(format!(
                 "refusing to overwrite foreign materialization staging file '{}'",
                 staging.display()
@@ -721,12 +718,16 @@ fn build_materialization_manifest(
         materialized_by: Some(installation_id.to_string()),
         files: artifacts
             .iter()
-            .map(|(relative, bytes)| (relative.clone(), hash_bytes(bytes)))
+            .map(|(relative, bytes)| (relative.clone(), sha256_bytes(bytes)))
             .collect(),
     }
 }
 
-fn write_materialization_manifest(dir: &Path, manifest: &MaterializationManifest) -> Result<()> {
+fn write_materialization_manifest(
+    host_io: &HostIo,
+    dir: &Path,
+    manifest: &MaterializationManifest,
+) -> Result<()> {
     let value = serde_json::to_value(manifest).map_err(|err| {
         config_error(format!(
             "failed to serialize materialization manifest: {err}"
@@ -734,10 +735,14 @@ fn write_materialization_manifest(dir: &Path, manifest: &MaterializationManifest
     })?;
     let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_MANIFEST_FILE))?;
     ensure_not_symlink(&PathBuf::from(format!("{}.new", path.display())))?;
-    crate::agents::safe_write_json_file(&path, &value, None)
+    host_io.safe_write_json_file(&path, &value)
 }
 
-fn write_pending_materialization(dir: &Path, pending: &PendingMaterialization) -> Result<()> {
+fn write_pending_materialization(
+    host_io: &HostIo,
+    dir: &Path,
+    pending: &PendingMaterialization,
+) -> Result<()> {
     let value = serde_json::to_value(pending).map_err(|err| {
         config_error(format!(
             "failed to serialize pending materialization: {err}"
@@ -745,7 +750,7 @@ fn write_pending_materialization(dir: &Path, pending: &PendingMaterialization) -
     })?;
     let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_PENDING_FILE))?;
     ensure_not_symlink(&PathBuf::from(format!("{}.new", path.display())))?;
-    crate::agents::safe_write_json_file(&path, &value, None)
+    host_io.safe_write_json_file(&path, &value)
 }
 
 fn decode_pending_artifacts(pending: &PendingMaterialization) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -757,7 +762,7 @@ fn decode_pending_artifacts(pending: &PendingMaterialization) -> Result<BTreeMap
                 "invalid pending materialization artifact '{relative}': {err}"
             ))
         })?;
-        if pending.next_manifest.files.get(relative) != Some(&hash_bytes(&bytes)) {
+        if pending.next_manifest.files.get(relative) != Some(&sha256_bytes(&bytes)) {
             return Err(config_error(format!(
                 "pending materialization hash mismatch for '{relative}'"
             )));
@@ -867,6 +872,7 @@ fn validate_transaction_paths(
 }
 
 fn apply_pending_materialization(
+    host_io: &HostIo,
     dir: &Path,
     pending: &PendingMaterialization,
 ) -> Result<MaterializeAction> {
@@ -894,7 +900,7 @@ fn apply_pending_materialization(
     for (relative, expected_hash) in &pending.remove_files {
         remove_clean_artifact(dir, relative, expected_hash)?;
     }
-    write_materialization_manifest(dir, &pending.next_manifest)?;
+    write_materialization_manifest(host_io, dir, &pending.next_manifest)?;
 
     let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_PENDING_FILE))?;
     match fs::remove_file(path) {
@@ -905,8 +911,13 @@ fn apply_pending_materialization(
     Ok(MaterializeAction::Written)
 }
 
-#[hotpath::measure(label = "hosts.automation.skill_materialization.commit")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.commit",
+    level = "trace",
+    skip_all
+)]
 fn commit_materialization_transaction(
+    host_io: &HostIo,
     dir: &Path,
     skill: &ManagedSkill,
     package_hash: String,
@@ -938,22 +949,26 @@ fn commit_materialization_transaction(
             .map(|(relative, bytes)| (relative.clone(), hex::encode(bytes)))
             .collect(),
     };
-    write_pending_materialization(dir, &pending)?;
-    apply_pending_materialization(dir, &pending)
+    write_pending_materialization(host_io, dir, &pending)?;
+    apply_pending_materialization(host_io, dir, &pending)
 }
 
 fn recover_pending_materialization(
+    host_io: &HostIo,
     dir: &Path,
     skill_id: Option<&str>,
 ) -> Result<Option<MaterializeAction>> {
     match read_pending_materialization(dir, skill_id)? {
         PendingState::Missing => Ok(None),
         PendingState::Foreign => Ok(Some(MaterializeAction::SkippedForeign)),
-        PendingState::Owned(pending) => Ok(Some(apply_pending_materialization(dir, &pending)?)),
+        PendingState::Owned(pending) => {
+            Ok(Some(apply_pending_materialization(host_io, dir, &pending)?))
+        }
     }
 }
 
 fn reconcile_owned_package(
+    host_io: &HostIo,
     dir: &Path,
     skill: &ManagedSkill,
     manifest: &MaterializationManifest,
@@ -998,6 +1013,7 @@ fn reconcile_owned_package(
         }
     }
     commit_materialization_transaction(
+        host_io,
         dir,
         skill,
         package_hash,
@@ -1006,26 +1022,6 @@ fn reconcile_owned_package(
         manifest.files.clone(),
         remove_files,
     )
-}
-
-fn legacy_support_files_are_forked(
-    dir: &Path,
-    artifacts: &BTreeMap<String, Vec<u8>>,
-) -> Result<bool> {
-    for (relative, desired) in artifacts {
-        if relative == SKILL_FILE {
-            continue;
-        }
-        let path = artifact_path(dir, relative)?;
-        if !path_exists_without_following_links(&path)? {
-            continue;
-        }
-        let desired_hash = hash_bytes(desired);
-        if current_artifact_hash(&path)?.as_deref() != Some(desired_hash.as_str()) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn initial_support_path_conflicts(
@@ -1040,27 +1036,31 @@ fn initial_support_path_conflicts(
     Ok(false)
 }
 
-// ---------------------------------------------------------------------------
 // Single-skill operations
-// ---------------------------------------------------------------------------
 
 /// Materializes one active skill into one scope. Never clobbers a foreign or
 /// user-forked file. Idempotent: an already-current managed file is left as
 /// [`MaterializeAction::Unchanged`].
 pub fn materialize_skill(
+    host_io: &HostIo,
     scope: &MaterializationScope,
     skill: &ManagedSkill,
     installation_id: &str,
 ) -> Result<MaterializeEntry> {
     let slug = skill.host_skill_slug();
-    materialize_skill_into(scope, skill, &slug, installation_id)
+    materialize_skill_into(host_io, scope, skill, &slug, installation_id)
 }
 
 /// Materializes one skill into an explicit host slug. `reconcile_scope` passes a
 /// collision-disambiguated slug here; the public entry point uses the skill's
 /// own base slug.
-#[hotpath::measure(label = "hosts.automation.skill_materialization.materialize")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.materialize",
+    level = "trace",
+    skip_all
+)]
 fn materialize_skill_into(
+    host_io: &HostIo,
     scope: &MaterializationScope,
     skill: &ManagedSkill,
     slug: &str,
@@ -1072,10 +1072,10 @@ fn materialize_skill_into(
     let package_hash = skill.materialized_package_hash()?;
     let artifacts = desired_artifacts(skill)?;
     // Hold the per-package lock across the whole read-decide-commit window so a
-    // concurrent transaction cannot interleave (see [`PackageLock`]).
+    // concurrent transaction cannot interleave (see [`lock_package`]).
     let _lock = lock_package(&dir)?;
     if let Some(action @ (MaterializeAction::SkippedForeign | MaterializeAction::SkippedForked)) =
-        recover_pending_materialization(&dir, Some(&skill.metadata.id))?
+        recover_pending_materialization(host_io, &dir, Some(&skill.metadata.id))?
     {
         return Ok(MaterializeEntry {
             skill_id: skill.metadata.id.clone(),
@@ -1093,6 +1093,7 @@ fn materialize_skill_into(
         (_, ManifestState::Owned(manifest)) => {
             fs::create_dir_all(&dir)?;
             reconcile_owned_package(
+                host_io,
                 &dir,
                 skill,
                 &manifest,
@@ -1104,12 +1105,12 @@ fn materialize_skill_into(
         (Some(existing), ManifestState::Missing) => {
             // Manifest lost (e.g. gitignored/uncommitted sidecar on a fresh
             // clone) but a managed file is on disk. Re-derive from disk: a
-            // pristine package-hash (#366+) package is treated as owned and
-            // reconciled (re-writing the manifest); otherwise fall back to the
-            // legacy body-hash (#362) domain before declaring a user fork.
+            // pristine package is treated as owned and reconciled (re-writing
+            // the manifest); anything else is a user fork.
             if let Some(rederived) = recompute_on_disk_package(&dir, existing)? {
                 fs::create_dir_all(&dir)?;
                 reconcile_owned_package(
+                    host_io,
                     &dir,
                     skill,
                     &rederived,
@@ -1117,22 +1118,9 @@ fn materialize_skill_into(
                     installation_id,
                     &artifacts,
                 )?
-            } else if existing.is_legacy_forked()
-                || legacy_support_files_are_forked(&dir, &artifacts)?
-            {
-                MaterializeAction::SkippedForked
             } else {
-                fs::create_dir_all(&dir)?;
-                let previous_files = current_artifact_hashes(&dir, &artifacts)?;
-                commit_materialization_transaction(
-                    &dir,
-                    skill,
-                    package_hash,
-                    installation_id,
-                    &artifacts,
-                    previous_files,
-                    BTreeMap::new(),
-                )?
+                refuse_released_body_hash_package(&dir, existing)?;
+                MaterializeAction::SkippedForked
             }
         }
         (None, ManifestState::Missing) if initial_support_conflict => {
@@ -1142,6 +1130,7 @@ fn materialize_skill_into(
             fs::create_dir_all(&dir)?;
             let previous_files = current_artifact_hashes(&dir, &artifacts)?;
             commit_materialization_transaction(
+                host_io,
                 &dir,
                 skill,
                 package_hash,
@@ -1185,9 +1174,9 @@ fn safe_support_relative(path: &Path) -> Result<&Path> {
 /// Whether this installation may auto-remove an owned package. Global (home)
 /// packages are the local user's own and are always removable. Project-scope
 /// packages live inside a repo working tree and are routinely committed and
-/// shared, so they are removed only when this installation authored them —
-/// never another developer's committed materialization (or a manifest-less
-/// package whose author is unknown).
+/// shared, so they are removed only when this installation authored them,
+/// never another developer's committed materialization or a manifest-less
+/// package whose author is unknown.
 fn may_remove_owned(
     scope: &MaterializationScope,
     manifest: &MaterializationManifest,
@@ -1217,8 +1206,13 @@ fn package_is_foreign_to_installation(
 /// user-edited managed file is preserved; a foreign file is never touched; a
 /// committed project-scope package authored by a different installation is
 /// left in place.
-#[hotpath::measure(label = "hosts.automation.skill_materialization.remove")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.remove",
+    level = "trace",
+    skip_all
+)]
 pub fn remove_materialized_skill(
+    host_io: &HostIo,
     scope: &MaterializationScope,
     slug: &str,
     installation_id: &str,
@@ -1227,7 +1221,7 @@ pub fn remove_materialized_skill(
     let dir = scope.skill_dir(slug);
     let path = artifact_path(&dir, SKILL_FILE)?;
     let _lock = lock_package(&dir)?;
-    if let Some(action) = recover_pending_materialization(&dir, None)? {
+    if let Some(action) = recover_pending_materialization(host_io, &dir, None)? {
         match action {
             MaterializeAction::SkippedForeign => return Ok(RemoveAction::SkippedForeign),
             MaterializeAction::SkippedForked => return Ok(RemoveAction::SkippedForked),
@@ -1243,31 +1237,14 @@ pub fn remove_materialized_skill(
         match read_materialization_manifest(&dir, existing.skill_id.as_deref().unwrap_or(slug))? {
             ManifestState::Foreign => return Ok(RemoveAction::SkippedForked),
             ManifestState::Owned(manifest) => manifest,
-            ManifestState::Missing => {
-                if let Some(rederived) = recompute_on_disk_package(&dir, &existing)? {
-                    // Pristine package-hash (#366+) package with a lost manifest.
-                    rederived
-                } else if existing.is_legacy_forked() {
+            ManifestState::Missing => match recompute_on_disk_package(&dir, &existing)? {
+                // Pristine package with a lost manifest.
+                Some(rederived) => rederived,
+                None => {
+                    refuse_released_body_hash_package(&dir, &existing)?;
                     return Ok(RemoveAction::SkippedForked);
-                } else {
-                    // Pristine legacy (#362) single-file package: synthesize a
-                    // manifest so the profile gate and owned-removal path apply.
-                    let mut files = BTreeMap::new();
-                    if let Some(hash) = current_artifact_hash(&path)? {
-                        files.insert(SKILL_FILE.to_string(), hash);
-                    }
-                    MaterializationManifest {
-                        managed_by: MATERIALIZED_SKILL_MANAGED_BY.to_string(),
-                        skill_id: existing
-                            .skill_id
-                            .clone()
-                            .unwrap_or_else(|| slug.to_string()),
-                        package_hash: existing.content_hash.clone().unwrap_or_default(),
-                        materialized_by: None,
-                        files,
-                    }
                 }
-            }
+            },
         };
 
     if !may_remove_owned(scope, &manifest, installation_id) {
@@ -1302,9 +1279,7 @@ fn prune_skill_dir(scope: &MaterializationScope, slug: &str) {
     let _ = fs::remove_dir(dir);
 }
 
-// ---------------------------------------------------------------------------
 // Scope reconciliation
-// ---------------------------------------------------------------------------
 
 /// Short, stable disambiguator derived from a full skill id, used to suffix a
 /// host slug when two distinct ids collide on the same base slug.
@@ -1347,8 +1322,13 @@ fn assign_host_slugs(active_skills: &[ManagedSkill]) -> Vec<String> {
 /// every active skill and removes managed files whose skill is no longer
 /// active. Fork- and foreign-safe throughout. A single failing package is
 /// recorded in `report.errors` and never aborts the rest of the sweep.
-#[hotpath::measure(label = "hosts.automation.skill_materialization.reconcile")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.reconcile",
+    level = "trace",
+    skip_all
+)]
 pub fn reconcile_scope(
+    host_io: &HostIo,
     scope: &MaterializationScope,
     active_skills: &[ManagedSkill],
     installation_id: &str,
@@ -1359,7 +1339,7 @@ pub fn reconcile_scope(
     let slugs = assign_host_slugs(active_skills);
     for (skill, slug) in active_skills.iter().zip(slugs.iter()) {
         active_slugs.insert(slug.clone());
-        match materialize_skill_into(scope, skill, slug, installation_id) {
+        match materialize_skill_into(host_io, scope, skill, slug, installation_id) {
             Ok(entry) => report.materialized.push(entry),
             Err(err) => report
                 .errors
@@ -1371,7 +1351,7 @@ pub fn reconcile_scope(
         if active_slugs.contains(&slug) {
             continue;
         }
-        match remove_materialized_skill(scope, &slug, installation_id) {
+        match remove_materialized_skill(host_io, scope, &slug, installation_id) {
             Ok(action) => report.removed.push(RemoveEntry {
                 skill_id,
                 path: scope.skill_md(&slug),
@@ -1417,12 +1397,10 @@ fn managed_slugs_in_scope(scope: &MaterializationScope) -> Result<Vec<(String, S
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
 // Scope detection + profile-driven reconcile
-// ---------------------------------------------------------------------------
 
 /// Loads the active managed skills for materialization. Only `Active` skills
-/// that target Claude are materialized to Claude scopes, Codex to Codex — the
+/// that target Claude are materialized to Claude scopes, Codex to Codex, the
 /// same target filtering the overlay/prompt-index export applies.
 fn load_active_managed_skills(profile_root: &Path) -> Result<Vec<ManagedSkill>> {
     crate::automation::skill_targets::load_active_managed_skills(profile_root)
@@ -1492,13 +1470,18 @@ pub struct ScopeReconcileResult {
 /// Reconciles every detected scope against the profile's active managed skills.
 /// Returns one result per scope. Errors from a single scope are surfaced in
 /// `errors` rather than aborting the whole sweep.
-#[hotpath::measure(label = "hosts.automation.skill_materialization.reconcile_detected")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.reconcile_detected",
+    level = "trace",
+    skip_all
+)]
 pub fn reconcile_detected_scopes(
+    host_io: &HostIo,
     profile_root: &Path,
     home: &Path,
     project_root: &Path,
 ) -> (Vec<ScopeReconcileResult>, Vec<String>) {
-    if !crate::agents::uses_default_user_profile(home, profile_root) {
+    if !uses_default_user_profile(home, profile_root) {
         return (Vec::new(), Vec::new());
     }
     let mut results = Vec::new();
@@ -1513,7 +1496,7 @@ pub fn reconcile_detected_scopes(
     let installation = installation_id(profile_root);
     for scope in detect_scopes(home, project_root) {
         let scope_skills = skills_for_scope(&skills, &scope);
-        match reconcile_scope(&scope, &scope_skills, &installation) {
+        match reconcile_scope(host_io, &scope, &scope_skills, &installation) {
             Ok(report) => {
                 for error in &report.errors {
                     errors.push(format!("{}: {error}", scope.describe()));
@@ -1531,24 +1514,11 @@ pub fn reconcile_detected_scopes(
 /// materializes and reconciles against the repo root rather than the subdir.
 /// Prefers the tracedecay-registered project root, then the git worktree/repo
 /// checkout root, then falls back to the starting directory.
-pub fn resolve_project_root(start: &Path) -> PathBuf {
-    crate::config::discover_project_root(start)
-        .or_else(|| crate::worktree::git_worktree_root(start))
+pub fn resolve_project_root(profile: &ProfileRoot, start: &Path) -> PathBuf {
+    profile
+        .discover_project_root(start)
+        .or_else(|| tracedecay_runtime_core::worktree::git_worktree_root(start))
         .unwrap_or_else(|| start.to_path_buf())
-}
-
-/// Non-fatal reconcile for lifecycle call sites (activate, install,
-/// update): resolves the profile root from the process environment, reconciles
-/// every detected host+scope, and logs (rather than propagates) failures so a
-/// materialization problem never breaks an activation or install.
-pub fn reconcile_after_activation(profile_root: &Path, project_root: &Path) {
-    let Some(home) = crate::agents::home_dir() else {
-        return;
-    };
-    let (_results, errors) = reconcile_detected_scopes(profile_root, &home, project_root);
-    for error in errors {
-        tracing::warn!(%error, "managed skill materialization failed");
-    }
 }
 
 #[cfg(test)]

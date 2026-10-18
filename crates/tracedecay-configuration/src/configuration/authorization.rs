@@ -12,17 +12,15 @@ use tracedecay_domain::configuration::{
     ConfigurationGrantId, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
 };
-use tracedecay_policy::configuration::{
-    ConfigurationMutationGrantSnapshotV1, ConfigurationMutationPolicyEvaluator,
-    ConfigurationMutationPolicyEvaluatorV1, ConfigurationMutationRecheckDispositionV1,
-    ConfigurationMutationRecheckInputV1,
-};
-
-use super::ports::{
+use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
     CurrentConfigurationMutationAuthorizationV1,
 };
-use super::types::ConfigurationError;
+use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
+use tracedecay_policy::configuration::{
+    ConfigurationMutationGrantSnapshotV1, ConfigurationMutationPolicyEvaluatorV1,
+    ConfigurationMutationRecheckDispositionV1, ConfigurationMutationRecheckInputV1,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigurationMutationGrantAuthorityError {
@@ -53,30 +51,20 @@ pub trait ConfigurationMutationGrantAuthority: Send + Sync {
     ) -> ConfigurationMutationGrantAuthorityFuture<'a>;
 }
 
-pub struct PolicyBackedConfigurationMutationAuthorization<Authority, Evaluator> {
+pub struct PolicyBackedConfigurationMutationAuthorization<Authority> {
     authority: Authority,
-    evaluator: Evaluator,
 }
 
-impl<Authority>
-    PolicyBackedConfigurationMutationAuthorization<
-        Authority,
-        ConfigurationMutationPolicyEvaluatorV1,
-    >
-{
+impl<Authority> PolicyBackedConfigurationMutationAuthorization<Authority> {
     pub fn new(authority: Authority) -> Self {
-        Self {
-            authority,
-            evaluator: ConfigurationMutationPolicyEvaluatorV1,
-        }
+        Self { authority }
     }
 }
 
-impl<Authority, Evaluator> ConfigurationMutationAuthorizationPort
-    for PolicyBackedConfigurationMutationAuthorization<Authority, Evaluator>
+impl<Authority> ConfigurationMutationAuthorizationPort
+    for PolicyBackedConfigurationMutationAuthorization<Authority>
 where
     Authority: ConfigurationMutationGrantAuthority + Sync,
-    Evaluator: ConfigurationMutationPolicyEvaluator + Sync,
 {
     fn recheck<'a>(
         &'a self,
@@ -103,7 +91,7 @@ where
                         ConfigurationError::Unavailable
                     }
                 })?;
-            let disposition = self.evaluator.evaluate(
+            let disposition = ConfigurationMutationPolicyEvaluatorV1.evaluate(
                 &current,
                 ConfigurationMutationRecheckInputV1 {
                     receipt,
@@ -136,7 +124,7 @@ mod tests {
     use tracedecay_domain::configuration::{
         ConfigurationGrantReceiptId, ConfigurationMutationGrantReceiptV1,
     };
-    use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest};
+    use tracedecay_domain::{AccessPolicyDigest, ActorId};
     use tracedecay_policy::configuration::{
         ConfigurationMutationGrantStateV1, ConfigurationMutationPermissionV1,
     };
@@ -156,17 +144,9 @@ mod tests {
         }
     }
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn policy_digest(byte: char) -> AccessPolicyDigest {
         AccessPolicyDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
@@ -219,7 +199,7 @@ mod tests {
         (snapshot, receipt)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn current_policy_grant_authorizes_exact_internal_effect() {
         let (snapshot, receipt) = fixture();
         let service =
@@ -242,7 +222,7 @@ mod tests {
         assert_eq!(current.policy_digest, snapshot.policy_digest);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn hidden_and_revoked_grants_share_one_rejection() {
         let (mut snapshot, receipt) = fixture();
         let hidden = PolicyBackedConfigurationMutationAuthorization::new(Authority(Err(

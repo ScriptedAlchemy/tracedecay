@@ -12,9 +12,10 @@ use tracedecay_domain::{
     ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId,
     RetentionClass, RetrievalAnchorRecord, SanitizationReceiptId, SanitizationReceiptRefV1,
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+    sha256_hex_suffix,
 };
 use tracedecay_store::{
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -23,7 +24,7 @@ use tracedecay_lcm::payload::{upsert_payload_metadata, write_external_payload};
 use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 pub(super) const PROJECT_ID: &str = "project.tracedecay";
 pub(super) const INLINE_PAYLOAD: &str = "non-empty inline occurrence payload";
@@ -241,14 +242,13 @@ impl RegisteredTemporalHarness {
                  INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
                     content, content_hash, storage_kind, payload_ref,
-                    snippet_text, index_text, metadata_json, legacy_source, legacy_truncated
+                    placeholder_text, metadata_json
                  ) VALUES (
                     'claude', 'message.temporal.legacy', 'session.temporal.legacy',
-                    'user', 1, 1, 'sk-proj-private-canary',
+                    'user', 1, 1, NULL,
                     'sha256:quarantined', 'inline', NULL,
-                    'quarantined legacy record', 'quarantined legacy record',
-                    '{\"payload_access\":\"quarantined\",\"migration\":\"legacy-unsanitized\"}',
-                    1, 0
+                    'quarantined legacy record',
+                    '{\"payload_access\":\"quarantined\",\"migration\":\"legacy-unsanitized\",\"legacy_preview\":\"sk-proj-private-canary\"}'
                  );",
             )
             .await
@@ -444,7 +444,7 @@ impl RegisteredTemporalHarness {
         let authorization =
             build_observation_resolution_authorization_v1(observation, "application-fixture")
                 .unwrap();
-        let anchor = build_observation_retrieval_anchor_v2(
+        let anchor = build_observation_retrieval_anchor(
             observation,
             projection,
             UtcMicros(1),
@@ -554,7 +554,7 @@ impl RegisteredTemporalHarness {
             }
         })
         .to_string();
-        let sanitization = tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(payload)
+        let sanitization = tracedecay_privacy::sanitize_lcm_payload_text(payload)
             .expect("sanitize fixture LCM payload");
         let raw_metadata = json!({
             "ingest_protection": {
@@ -570,13 +570,15 @@ impl RegisteredTemporalHarness {
             .execute(
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    source_provider, projection_output_ordinal, retrieval_anchor_id,
-                    message_id, role, knowledge_at, valid_time_json, evidence_json,
-                    sanitized_content_digest, sanitized_content_bytes,
-                    snippet_text, index_text
+                    source_sequence, source_provider, projection_output_ordinal,
+                    retrieval_anchor_id, message_id, copied_from_anchor_ids_json,
+                    role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes, index_text
                  ) VALUES (
-                    ?1, 1, ?2, ?3, ?4, 0, ?5, ?6, 'assistant', ?7, ?8, ?9,
-                    ?10, ?11, ?12, ?12
+                    ?1, 1, ?2, ?3,
+                    (SELECT sequence FROM observations WHERE observation_id = ?3),
+                    ?4, 0, ?5, ?6, '[]', 'assistant', ?7, ?8, ?9,
+                    ?10, ?11, ?12
                  )",
                 params![
                     observation.source().session_id().as_str(),
@@ -615,11 +617,9 @@ impl RegisteredTemporalHarness {
                 .execute(
                     "INSERT INTO lcm_raw_messages (
                         provider, message_id, session_id, role, ordinal, timestamp,
-                        content, content_hash, storage_kind, payload_ref,
-                        snippet_text, index_text, legacy_source, legacy_truncated, metadata_json
+                        content, content_hash, storage_kind, payload_ref, metadata_json
                      ) VALUES (
-                        ?1, ?2, ?3, 'assistant', ?4, ?4, ?5, ?6,
-                        'inline', NULL, ?5, ?5, 0, 0, ?7
+                        ?1, ?2, ?3, 'assistant', ?4, ?4, ?5, ?6, 'inline', NULL, ?7
                      )",
                     params![
                         observation.source().provider().as_str(),
@@ -648,9 +648,8 @@ impl RegisteredTemporalHarness {
             None,
         )
         .expect("write external payload through production filesystem authority");
-        let sanitization =
-            tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(EXTERNAL_PAYLOAD)
-                .expect("sanitize external fixture LCM payload");
+        let sanitization = tracedecay_privacy::sanitize_lcm_payload_text(EXTERNAL_PAYLOAD)
+            .expect("sanitize external fixture LCM payload");
         let raw_metadata = json!({
             "ingest_protection": {
                 "sanitization_receipt": sanitization.receipt()
@@ -667,10 +666,10 @@ impl RegisteredTemporalHarness {
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
                     content, content_hash, storage_kind, payload_ref,
-                    snippet_text, index_text, legacy_source, legacy_truncated, metadata_json
+                    placeholder_text, metadata_json
                  ) VALUES (
                     'provider.application', 'message-2', 'session.temporal.application',
-                    'assistant', 2, 2, NULL, ?1, 'external', ?2, ?3, ?3, 0, 0, ?4
+                    'assistant', 2, 2, NULL, ?1, 'external', ?2, ?3, ?4
                  )",
                 params![
                     payload.content_hash.as_str(),
@@ -806,12 +805,7 @@ fn fixture_observation(
 }
 
 fn policy_digest_bytes(anchor: &RetrievalAnchorRecord) -> [u8; 32] {
-    let encoded = anchor
-        .authorization()
-        .access_policy_digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .unwrap();
+    let encoded = sha256_hex_suffix(anchor.authorization().access_policy_digest.as_str()).unwrap();
     hex::decode(encoded).unwrap().try_into().unwrap()
 }
 

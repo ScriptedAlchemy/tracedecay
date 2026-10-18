@@ -1,10 +1,14 @@
 //! Application-admitted retrieval over one exact mounted session root.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::{CancellationSignal, RequestContext, ResolvedScope};
+use tracedecay_application::work::{
+    WorkTaskSessionAdmittedRetrievalFutureV1, WorkTaskSessionAdmittedRetrievalPortV1,
+};
+use tracedecay_contracts::{CancellationSignal, RequestContext, ResolvedScope};
 use tracedecay_domain::{
     ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
 };
@@ -14,10 +18,14 @@ use tracedecay_session_memory::context::{
     CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets, ResolvedSessionIdentity,
 };
 use tracedecay_session_memory::session::{
-    SessionRequestBinding, SessionRetrievalConfiguration, SessionTemporalQuery,
-    TaskSessionRetrievalOutcomeV1,
+    SessionDataFreshness, SessionRequestBinding, SessionRetrievalConfiguration,
+    SessionTemporalQuery, TaskSessionRetrievalOutcomeV1,
 };
 use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
+use tracedecay_sessions::serving::{
+    RefreshWorkerMissing, SessionProjectionServingState, SessionProjectionServingStatus,
+    SessionProjectionServingStatusPort,
+};
 use tracedecay_store::StoreShardScopeV1;
 
 use super::contract::{
@@ -39,10 +47,13 @@ const APPLICATION_RETRIEVAL_MAX_WORK_UNITS: u64 = 100_000;
 impl DaemonSessionRetrievalService {
     /// Mount the canonical profile-session retrieval service over the exact
     /// registered profile shard and retained session identity supplied by the
-    /// daemon composition root.
+    /// daemon composition root. `refresh_status` is the profile refresh
+    /// worker's serving-status port when one is mounted; absent means
+    /// [`RefreshWorkerMissing`].
     pub fn new_admitted_profile(
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         identity: ResolvedSessionIdentity,
+        refresh_status: Option<std::sync::Arc<dyn SessionProjectionServingStatusPort>>,
     ) -> Option<Self> {
         if identity.project_id().is_some()
             || database.binding().shard_id.profile_id.as_str() != identity.profile_id().as_str()
@@ -54,7 +65,7 @@ impl DaemonSessionRetrievalService {
             return None;
         }
         let expected_runtime_shard = database.binding().shard_id.clone();
-        Self::new(
+        Self::new_with_serving_port(
             database,
             DaemonSessionRetrievalRoot {
                 store_scope: SessionRetrievalStoreScope::Profile,
@@ -63,13 +74,36 @@ impl DaemonSessionRetrievalService {
                 authorized_root: None,
                 expected_runtime_shard: Some(expected_runtime_shard),
             },
-            None,
+            refresh_status.unwrap_or_else(|| std::sync::Arc::new(RefreshWorkerMissing)),
         )
     }
 }
 
 pub type SessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = SessionRetrievalServiceOutcome> + Send + 'a>>;
+pub type LcmRawStoreIdsFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    BTreeMap<(String, String), i64>,
+                    tracedecay_domain::errors::TraceDecayError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+pub type LcmSessionRawStatsFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    Vec<tracedecay_lcm::types::LcmSessionRawStats>,
+                    SessionRetrievalUnavailable,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
 
 pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = TaskSessionRetrievalOutcomeV1> + Send + 'a>>;
@@ -108,7 +142,7 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
         cancellation: &'a CancellationSignal,
         query: SessionTemporalQuery,
     ) -> SessionApplicationRetrievalFutureV1<'a> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if cancellation.context().token_id != context.cancellation().token_id {
                     return SessionRetrievalServiceOutcome::Denied;
@@ -119,13 +153,12 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
                 tokio::select! {
                     biased;
                     () = cancellation.cancelled() => {
-                        hotpath::gauge!("daemon.session_retrieval.cancelled").inc(1.0);
                         SessionRetrievalServiceOutcome::Cancelled
                     }
                     outcome = self.retrieve_admitted(context, query) => outcome,
                 }
             },
-            label = "daemon.session_retrieval.retrieve"
+            tracing::trace_span!("daemon.session_retrieval.retrieve"),
         ))
     }
 
@@ -153,6 +186,33 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
                 SessionRetrievalUnavailable::service_not_configured(),
             )
         })
+    }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        _identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        Box::pin(async { Ok(BTreeMap::new()) })
+    }
+
+    /// Session-scoped raw-store authority: per-provider transcript counts
+    /// for the session id, most recently active first. A session whose
+    /// stored messages are all unpublished serves no occurrence to measure
+    /// a provider from and no anchor a describe can hydrate, so the raw
+    /// store must name both the provider and the counts.
+    fn lcm_session_raw_stats_admitted<'a>(
+        &'a self,
+        _session_id: &'a str,
+    ) -> LcmSessionRawStatsFutureV1<'a> {
+        Box::pin(async { Err(SessionRetrievalUnavailable::service_not_configured()) })
+    }
+
+    /// The refresh worker's serving state for this root, current, still
+    /// converging history, or without a worker, so diagnostics can name the
+    /// state a pending projection is in. `None` when no worker serves the
+    /// root at all.
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        None
     }
 }
 
@@ -191,31 +251,17 @@ impl SessionApplicationRetrievalPortV1 for UnavailableSessionApplicationRetrieva
     }
 }
 
-/// RAII count of admitted retrievals currently executing, so cancellation,
-/// deadline, and panic exits can never leak the in-flight gauge.
-struct SessionRetrievalInFlightObservation;
-
-impl SessionRetrievalInFlightObservation {
-    fn begin() -> Self {
-        hotpath::gauge!("daemon.session_retrieval.in_flight").inc(1.0);
-        Self
-    }
-}
-
-impl Drop for SessionRetrievalInFlightObservation {
-    fn drop(&mut self) {
-        hotpath::gauge!("daemon.session_retrieval.in_flight").inc(-1.0);
-    }
-}
-
 impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        Some(self.refresh_status.serving_status())
+    }
+
     fn retrieve_admitted<'a>(
         &'a self,
         context: &'a RequestContext,
         query: SessionTemporalQuery,
     ) -> SessionApplicationRetrievalFutureV1<'a> {
         Box::pin(async move {
-            let _in_flight = SessionRetrievalInFlightObservation::begin();
             if requires_refresh_worker(query.freshness_policy())
                 && let Some(unavailable) = self.refresh_not_current()
             {
@@ -225,6 +271,10 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                 Ok(binding) => binding,
                 Err(outcome) => return *outcome,
             };
+            let history_pending = matches!(
+                self.refresh_status.serving_status().state,
+                SessionProjectionServingState::Stale { .. }
+            );
             let outcome = self
                 .execute_temporal_query_with_context(
                     context,
@@ -233,7 +283,38 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                     "grant.application.session-retrieval",
                 )
                 .await;
-            self.public_outcome(outcome).await
+            match self.public_outcome(outcome).await {
+                SessionRetrievalServiceOutcome::CompleteZero {
+                    temporal,
+                    freshness,
+                } if history_pending
+                    || matches!(
+                        self.refresh_status.serving_status().state,
+                        SessionProjectionServingState::Stale { .. }
+                    ) =>
+                {
+                    SessionRetrievalServiceOutcome::Stale {
+                        temporal,
+                        freshness: match freshness {
+                            SessionDataFreshness::Fresh => {
+                                SessionDataFreshness::Stored { generation_lag: 0 }
+                            }
+                            other => other,
+                        },
+                    }
+                }
+                SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+                    // Same remap describe/expand already apply: a pending
+                    // historical generation is the worker's state, not an
+                    // absent temporal store.
+                    if let Some(converging) = self.converging_projection_unavailable(&unavailable) {
+                        SessionRetrievalServiceOutcome::Unavailable(converging)
+                    } else {
+                        SessionRetrievalServiceOutcome::Unavailable(unavailable)
+                    }
+                }
+                outcome => outcome,
+            }
         })
     }
 
@@ -301,7 +382,6 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
         command: LcmDescribeServiceCommand,
     ) -> LcmDescribeServiceFuture<'a> {
         Box::pin(async move {
-            let _in_flight = SessionRetrievalInFlightObservation::begin();
             if cancellation.context().token_id != context.cancellation().token_id {
                 return LcmDescribeServiceOutcome::Denied;
             }
@@ -313,13 +393,14 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                     Ok(binding) => binding,
                     Err(outcome) => return describe_binding_outcome(*outcome),
                 };
+            let described: Pin<Box<dyn Future<Output = LcmDescribeServiceOutcome> + Send + '_>> =
+                Box::pin(self.execute_lcm_describe_admitted(context, &binding, command));
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
-                    hotpath::gauge!("daemon.session_retrieval.cancelled").inc(1.0);
                     LcmDescribeServiceOutcome::Cancelled
                 }
-                outcome = self.execute_lcm_describe_admitted(context, &binding, command) => outcome,
+                outcome = described => outcome,
             }
         })
     }
@@ -331,7 +412,6 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
         command: LcmExpandServiceCommand,
     ) -> LcmExpandServiceFuture<'a> {
         Box::pin(async move {
-            let _in_flight = SessionRetrievalInFlightObservation::begin();
             if cancellation.context().token_id != context.cancellation().token_id {
                 return LcmExpandServiceOutcome::Denied;
             }
@@ -343,14 +423,58 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                     Ok(binding) => binding,
                     Err(outcome) => return expand_binding_outcome(*outcome),
                 };
+            let expanded: Pin<Box<dyn Future<Output = LcmExpandServiceOutcome> + Send + '_>> =
+                Box::pin(self.execute_lcm_expand_admitted(context, &binding, command));
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
-                    hotpath::gauge!("daemon.session_retrieval.cancelled").inc(1.0);
                     LcmExpandServiceOutcome::Cancelled
                 }
-                outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
+                outcome = expanded => outcome,
             }
+        })
+    }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        Box::pin(async move {
+            let snapshot = self.database.read_snapshot().await?;
+            tracedecay_lcm::raw::load_raw_message_store_ids_by_identity(&snapshot, &identities)
+                .await
+                .map_err(
+                    |error| tracedecay_domain::errors::TraceDecayError::Database {
+                        message: error.to_string(),
+                        operation: "resolve LCM raw-message store ids".to_owned(),
+                    },
+                )
+        })
+    }
+
+    fn lcm_session_raw_stats_admitted<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> LcmSessionRawStatsFutureV1<'a> {
+        Box::pin(async move {
+            let result = async {
+                let snapshot = self.database.read_snapshot().await?;
+                tracedecay_lcm::query::session_raw_stats(&snapshot, session_id)
+                    .await
+                    .map_err(
+                        |error| tracedecay_domain::errors::TraceDecayError::Database {
+                            message: error.to_string(),
+                            operation: "resolve LCM session raw stats".to_owned(),
+                        },
+                    )
+            }
+            .await;
+            result.map_err(|error| {
+                tracing::warn!(%error, "LCM session raw statistics read failed");
+                SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
+                )
+            })
         })
     }
 }
@@ -365,9 +489,12 @@ fn task_session_binding_outcome(
             TaskSessionRetrievalOutcomeV1::ResetRequired
         }
         SessionRetrievalServiceOutcome::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
-        SessionRetrievalServiceOutcome::CursorStale => TaskSessionRetrievalOutcomeV1::Unavailable,
+        SessionRetrievalServiceOutcome::CursorStale => TaskSessionRetrievalOutcomeV1::CursorStale,
+        SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+            TaskSessionRetrievalOutcomeV1::CursorRefused(mismatch)
+        }
         SessionRetrievalServiceOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
-        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, .. } => {
             TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
@@ -393,8 +520,11 @@ fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescr
             LcmDescribeServiceOutcome::ResetRequired { store_scope }
         }
         SessionRetrievalServiceOutcome::CursorStale => LcmDescribeServiceOutcome::CursorStale,
-        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-            LcmDescribeServiceOutcome::BudgetExhausted
+        SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+            LcmDescribeServiceOutcome::CursorRefused(mismatch)
+        }
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
+            LcmDescribeServiceOutcome::BudgetExhausted { stage, accounting }
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
             kind,
@@ -422,8 +552,11 @@ fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandS
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
         SessionRetrievalServiceOutcome::CursorStale => LcmExpandServiceOutcome::CursorStale,
-        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-            LcmExpandServiceOutcome::BudgetExhausted
+        SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+            LcmExpandServiceOutcome::CursorRefused(mismatch)
+        }
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
+            LcmExpandServiceOutcome::BudgetExhausted { stage, accounting }
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
             kind,
@@ -456,12 +589,12 @@ fn admitted_session_binding(
         APPLICATION_RETRIEVAL_MAX_WORK_UNITS,
     )
     .map_err(|_| Box::new(temporal_store_unavailable()))?;
-    counted_admitted_session_binding(root, retrieval_configuration, context, budgets)
+    build_admitted_session_binding(root, retrieval_configuration, context, budgets)
 }
 
 /// As [`admitted_session_binding`], but carrying the canonical daemon LCM
 /// budgets. LCM describe and expand verify content hashes over whole payloads
-/// before slicing, so their read budget is the LCM authority's — the response
+/// before slicing, so their read budget is the LCM authority's, the response
 /// stays bounded by the query's context budget and the MCP response cap.
 fn admitted_lcm_session_binding(
     root: &DaemonSessionRetrievalRoot,
@@ -474,30 +607,7 @@ fn admitted_lcm_session_binding(
         crate::lcm_authority::LCM_MAX_WORK_UNITS,
     )
     .map_err(|_| Box::new(temporal_store_unavailable()))?;
-    counted_admitted_session_binding(root, retrieval_configuration, context, budgets)
-}
-
-fn counted_admitted_session_binding(
-    root: &DaemonSessionRetrievalRoot,
-    retrieval_configuration: SessionRetrievalConfiguration,
-    context: &RequestContext,
-    budgets: RequestBudgets,
-) -> Result<SessionRequestBinding, Box<SessionRetrievalServiceOutcome>> {
-    let binding = build_admitted_session_binding(root, retrieval_configuration, context, budgets);
-    match &binding {
-        Ok(_) => {
-            hotpath::gauge!("daemon.session_retrieval.admitted").inc(1.0);
-        }
-        Err(outcome) => match outcome.as_ref() {
-            SessionRetrievalServiceOutcome::WrongScope => {
-                hotpath::gauge!("daemon.session_retrieval.refused.wrong_scope").inc(1.0);
-            }
-            _ => {
-                hotpath::gauge!("daemon.session_retrieval.refused.unavailable").inc(1.0);
-            }
-        },
-    }
-    binding
+    build_admitted_session_binding(root, retrieval_configuration, context, budgets)
 }
 
 fn build_admitted_session_binding(
@@ -586,11 +696,67 @@ const fn temporal_store_unavailable_value() -> SessionRetrievalUnavailable {
     )
 }
 
+impl WorkTaskSessionAdmittedRetrievalPortV1 for DaemonSessionRetrievalService {
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        temporal_query: SessionTemporalQuery,
+        task_binding: TaskSessionBindingV1,
+        retrieval_request: RetrievalRequest,
+        query: EphemeralSanitizedQueryViewV1,
+        retriever_revision: ComponentRevision,
+        score_domain: ScoreDomainId,
+        policy_revision: ComponentRevision,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> WorkTaskSessionAdmittedRetrievalFutureV1<'a> {
+        SessionApplicationRetrievalPortV1::retrieve_task_session_admitted(
+            self,
+            context,
+            temporal_query,
+            task_binding,
+            retrieval_request,
+            query,
+            retriever_revision,
+            score_domain,
+            policy_revision,
+            selector,
+        )
+    }
+}
+
+impl WorkTaskSessionAdmittedRetrievalPortV1 for dyn SessionApplicationRetrievalPortV1 {
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        temporal_query: SessionTemporalQuery,
+        task_binding: TaskSessionBindingV1,
+        retrieval_request: RetrievalRequest,
+        query: EphemeralSanitizedQueryViewV1,
+        retriever_revision: ComponentRevision,
+        score_domain: ScoreDomainId,
+        policy_revision: ComponentRevision,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> WorkTaskSessionAdmittedRetrievalFutureV1<'a> {
+        SessionApplicationRetrievalPortV1::retrieve_task_session_admitted(
+            self,
+            context,
+            temporal_query,
+            task_binding,
+            retrieval_request,
+            query,
+            retriever_revision,
+            score_domain,
+            policy_revision,
+            selector,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestContext, RequestId,
     };
@@ -727,7 +893,7 @@ mod tests {
         )
     }
 
-    fn request_context_for(scope: tracedecay_application::ResolvedScope) -> RequestContext {
+    fn request_context_for(scope: tracedecay_contracts::ResolvedScope) -> RequestContext {
         let actor = ActorId::new("actor.message-search").expect("actor");
         let grant_digest =
             ManifestDigest::new(format!("sha256:{}", "5".repeat(64))).expect("grant digest");
@@ -772,7 +938,7 @@ mod tests {
             .identity
             .session_request_scope()
             .expect("application scope");
-        let head_scope = tracedecay_application::ResolvedScope::new(
+        let head_scope = tracedecay_contracts::ResolvedScope::new(
             serving_scope.project_id.clone(),
             serving_scope.repository_id.clone(),
             serving_scope.worktree_id.clone(),
@@ -802,7 +968,7 @@ mod tests {
             .identity
             .session_request_scope()
             .expect("application scope");
-        let foreign_scope = tracedecay_application::ResolvedScope::new(
+        let foreign_scope = tracedecay_contracts::ResolvedScope::new(
             serving_scope.project_id.clone(),
             serving_scope.repository_id.clone(),
             WorktreeId::new("worktree.project.other").expect("worktree identity"),

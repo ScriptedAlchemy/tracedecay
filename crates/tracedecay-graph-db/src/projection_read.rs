@@ -2,21 +2,21 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
-use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
+use crate::projection::check_cancelled;
 use crate::schema::{
-    ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL,
-    entity_projection_domain_label, entity_projection_label, relation_projection_label,
+    ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL, decode_identity,
+    entity_projection_label, relation_projection_label,
 };
 use crate::state::{labeled_projection_nodes, latest_projection, load_entity, load_relation};
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId,
-    GraphLabel, GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphSnapshot,
+    GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphSnapshot,
     GraphWatermark, SourceGeneration,
 };
 
-const MAX_PROJECTION_PAGE_ITEMS: usize = 100_000;
+pub(crate) const MAX_PROJECTION_PAGE_ITEMS: usize = 100_000;
 
 /// The label pair and identity property that name one ordered identity domain:
 /// the projection-scoped owner label, the record label that separates entities
@@ -88,102 +88,42 @@ pub struct GraphProjectionTelemetry {
     pub relation_count: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct GraphProjectionLabelPage {
-    pub entities: Vec<GraphEntity>,
-    pub total_entities: u64,
-}
-
 impl GraphDb {
-    #[hotpath::measure(label = "graph_db.projection.read", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.projection.read", level = "trace", skip_all)]
     pub fn read_projection(
         &self,
         request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
-        let guard = self.read_database(request.cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        let page = read_projection(self, database, request)?;
-        crate::hotpath_observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
+        let cancellation = Arc::clone(&request.cancellation);
+        let page = self.read_intact(cancellation.as_ref(), |database| {
+            self.ensure_projection_readable(&request.namespace, &request.projection)?;
+            read_projection(self, database, request)
+        })?;
+        crate::observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         Ok(page)
     }
 
-    #[hotpath::measure(label = "graph_db.projection.telemetry", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.projection.telemetry", level = "trace", skip_all)]
     pub fn projection_telemetry(
         &self,
         request: GraphProjectionTelemetryRequest,
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
-        let guard = self.read_database(request.cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        let telemetry = projection_telemetry(self, database, request)?;
+        let cancellation = Arc::clone(&request.cancellation);
+        let telemetry = self.read_intact(cancellation.as_ref(), |database| {
+            self.ensure_projection_readable(&request.namespace, &request.projection)?;
+            projection_telemetry(self, database, request)
+        })?;
         if let Some(telemetry) = &telemetry {
-            crate::hotpath_observe::record_counts(
+            crate::observe::record_counts(
                 usize::try_from(telemetry.entity_count).unwrap_or(usize::MAX),
                 usize::try_from(telemetry.relation_count).unwrap_or(usize::MAX),
                 0,
                 0,
             );
         }
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         Ok(telemetry)
-    }
-
-    /// Reads one bounded exact-label page from a projection-scoped native
-    /// label index. The total counts only entities carrying this exact label;
-    /// reference-only nodes in the same projection are excluded.
-    #[hotpath::measure(label = "graph_db.search.label", impl_type = "GraphDb")]
-    pub fn projection_entities_by_label(
-        &self,
-        namespace: &GraphNamespace,
-        projection: &GraphProjectionId,
-        label: &GraphLabel,
-        limit: usize,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<GraphProjectionLabelPage, GraphDbError> {
-        validate_page_limit(limit)?;
-        let guard = self.read_database(cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(namespace, projection)?;
-        let owner_label = entity_projection_domain_label(namespace, projection, label);
-        let scope = IdentityScope {
-            owner_label: &owner_label,
-            record_label: ENTITY_LABEL,
-            identity_property: ENTITY_ID_PROPERTY,
-        };
-        let total_entities = count_labeled_nodes(self, database, scope, cancellation.as_ref())?;
-        let identities =
-            query_identity_page(self, database, scope, None, limit, cancellation.as_ref())?;
-        let mut entities = Vec::with_capacity(identities.len());
-        for identity in identities {
-            let identity = GraphEntityId::new(identity)
-                .map_err(|error| persisted_identity_error("entity", error))?;
-            let stored = load_entity(database, namespace, &identity)?.ok_or_else(|| {
-                GraphDbError::Corrupt {
-                    message: "projection label query returned an unindexed entity".to_owned(),
-                }
-            })?;
-            if stored.projection != *projection || !stored.entity.labels.contains(label) {
-                return Err(GraphDbError::Corrupt {
-                    message: "projection label index does not match entity ownership".to_owned(),
-                });
-            }
-            entities.push(stored.entity);
-        }
-        check_cancelled(cancellation.as_ref())?;
-        crate::hotpath_observe::record_counts(entities.len(), 0, 0, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
-        Ok(GraphProjectionLabelPage {
-            entities,
-            total_entities,
-        })
     }
 }
 
@@ -193,9 +133,7 @@ impl GraphSnapshot {
         request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
         let page = self.database.read_projection(request)?;
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Snapshot,
-        );
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Snapshot);
         Ok(page)
     }
 
@@ -204,9 +142,7 @@ impl GraphSnapshot {
         request: GraphProjectionTelemetryRequest,
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
         let telemetry = self.database.projection_telemetry(request)?;
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Snapshot,
-        );
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Snapshot);
         Ok(telemetry)
     }
 }
@@ -415,12 +351,16 @@ fn authenticate_relation_cursor(
 ///
 /// Pages are answered from a cached ordered identity index rather than by
 /// rescanning the projection, so paging N identities costs one O(N log N) build
-/// plus O(log N + limit) per page instead of the O(N) scan *per page* — an
-/// O(N^2) catalog warm — this used to run. See
+/// plus O(log N + limit) per page instead of the O(N) scan *per page*, an
+/// O(N^2) catalog warm, this used to run. See
 /// [`crate::projection_identity_index`]. A projection too large to index falls
 /// back to the bounded streaming scan below.
-#[hotpath::measure(label = "graph_db.projection.identity_index.seek")]
-fn query_identity_page(
+#[tracing::instrument(
+    name = "graph_db.projection.identity_index.seek",
+    level = "trace",
+    skip_all
+)]
+pub(crate) fn query_identity_page(
     handle: &GraphDb,
     database: &GrafeoDB,
     scope: IdentityScope<'_>,
@@ -468,25 +408,17 @@ fn streaming_identity_page(
         let Some(record) = store.get_node(node) else {
             continue;
         };
-        let identity = record
-            .get_property(identity_property)
-            .and_then(Value::as_str)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: format!("projection query returned a non-string `{identity_property}`"),
-            })?;
-        if after.is_some_and(|after| identity <= after) {
+        let identity = decode_identity(record.get_property(identity_property), identity_property)?;
+        if after.is_some_and(|after| identity.as_str() <= after) {
             continue;
         }
         if page.len() == limit {
-            if page
-                .last()
-                .is_some_and(|widest| identity >= widest.as_str())
-            {
+            if page.last().is_some_and(|widest| identity >= *widest) {
                 continue;
             }
             page.pop_last();
         }
-        page.insert(identity.to_owned());
+        page.insert(identity);
     }
     Ok(page.into_iter().collect())
 }
@@ -520,31 +452,12 @@ fn count_labeled_nodes(
     Ok(count)
 }
 
-fn validate_page_limit(limit: usize) -> Result<(), GraphDbError> {
-    if limit == 0 || limit > MAX_PROJECTION_PAGE_ITEMS {
-        Err(GraphDbError::budget_exhausted_count(
-            GraphBudgetKind::Read,
-            MAX_PROJECTION_PAGE_ITEMS,
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 fn validate_optional_page_limit(limit: usize) -> Result<(), GraphDbError> {
     if limit > MAX_PROJECTION_PAGE_ITEMS {
         Err(GraphDbError::budget_exhausted_count(
             GraphBudgetKind::Read,
             MAX_PROJECTION_PAGE_ITEMS,
         ))
-    } else {
-        Ok(())
-    }
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
-    if cancellation.is_cancelled() {
-        Err(GraphDbError::Cancelled)
     } else {
         Ok(())
     }
@@ -560,7 +473,6 @@ fn persisted_identity_error(description: &str, error: GraphDbError) -> GraphDbEr
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     use super::{IdentityScope, query_identity_page, streaming_identity_page};
     use crate::schema::{ENTITY_ID_PROPERTY, ENTITY_LABEL, entity_projection_label};
@@ -569,8 +481,6 @@ mod tests {
         GraphEntity, GraphEntityId, GraphFormatVersion, GraphMutation, GraphNamespace,
         GraphProjectionId, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
     };
-
-    const PAGE: usize = 1_024;
 
     fn scope(owner_label: &str) -> IdentityScope<'_> {
         IdentityScope {
@@ -623,56 +533,6 @@ mod tests {
             )
             .unwrap();
         }
-    }
-
-    /// Pages the whole projection through one identity path and returns the
-    /// per-page wall times in order.
-    fn page_through(db: &GraphDbLeaseV1, projection: &str, indexed: bool) -> Vec<Duration> {
-        let guard = db.read_guard().unwrap();
-        let database = guard.as_ref().unwrap();
-        let owner_label = entity_projection_label(
-            &GraphNamespace::new("project").unwrap(),
-            &GraphProjectionId::new(projection).unwrap(),
-        );
-        let cancellation = NeverCancelled;
-        let mut after: Option<String> = None;
-        let mut timings = Vec::new();
-        loop {
-            let started = Instant::now();
-            let page = if indexed {
-                query_identity_page(
-                    db,
-                    database,
-                    scope(&owner_label),
-                    after.as_deref(),
-                    PAGE,
-                    &cancellation,
-                )
-                .unwrap()
-            } else {
-                streaming_identity_page(
-                    database,
-                    scope(&owner_label),
-                    after.as_deref(),
-                    PAGE,
-                    &cancellation,
-                )
-                .unwrap()
-            };
-            timings.push(started.elapsed());
-            let Some(last) = page.last().cloned() else {
-                break;
-            };
-            after = Some(last);
-            if page.len() < PAGE {
-                break;
-            }
-        }
-        timings
-    }
-
-    fn total(timings: &[Duration]) -> Duration {
-        timings.iter().sum()
     }
 
     /// Both identity paths must return byte-identical pages: same ordering,
@@ -762,61 +622,5 @@ mod tests {
         .unwrap();
 
         assert_eq!(after.len(), 16, "stale index served a pre-write page");
-    }
-
-    /// Page-read cost probe at production width.
-    ///
-    /// The streaming path rescans the whole projection per page, so its total
-    /// grows with pages^2; the indexed path pays one build and then seeks, so
-    /// its total is linear in pages. Prints both so the catalog-warm
-    /// projection can be read off a measurement instead of an extrapolation.
-    #[test]
-    #[ignore = "diagnostic probe, run explicitly"]
-    fn projection_page_read_cost_scaling_probe() {
-        const ENTITIES: usize = 100_000;
-
-        let db = memory_db();
-        let build_started = Instant::now();
-        publish_entities(&db, "probe", ENTITIES, 10_000);
-        let publish_elapsed = build_started.elapsed();
-
-        let streaming = page_through(&db, "probe", false);
-        let indexed = page_through(&db, "probe", true);
-        // Second pass: the index is already warm, so this isolates seek cost.
-        let indexed_warm = page_through(&db, "probe", true);
-
-        println!("entities={ENTITIES} page={PAGE} publish={publish_elapsed:?}");
-        println!(
-            "streaming: pages={} total={:?} first={:?} last={:?}",
-            streaming.len(),
-            total(&streaming),
-            streaming.first().unwrap(),
-            streaming.last().unwrap(),
-        );
-        println!(
-            "indexed:   pages={} total={:?} first(build)={:?} last={:?}",
-            indexed.len(),
-            total(&indexed),
-            indexed.first().unwrap(),
-            indexed.last().unwrap(),
-        );
-        println!(
-            "indexed warm: pages={} total={:?} first={:?} last={:?}",
-            indexed_warm.len(),
-            total(&indexed_warm),
-            indexed_warm.first().unwrap(),
-            indexed_warm.last().unwrap(),
-        );
-        println!(
-            "speedup: {:.1}x total, {:.1}x steady-state page",
-            total(&streaming).as_secs_f64() / total(&indexed).as_secs_f64(),
-            streaming.last().unwrap().as_secs_f64() / indexed_warm.last().unwrap().as_secs_f64(),
-        );
-
-        assert_eq!(streaming.len(), indexed.len());
-        assert!(
-            total(&indexed) < total(&streaming),
-            "indexed paging must beat the rescan it replaced"
-        );
     }
 }

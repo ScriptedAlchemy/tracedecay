@@ -292,7 +292,6 @@ pub enum RemoteDeletionTombstoneTransitionOutcome {
 }
 
 impl RegisteredGlobalDb {
-    #[hotpath::skip]
     pub async fn remote_deletion_tombstone(
         &self,
         profile_id: &str,
@@ -314,7 +313,11 @@ impl RegisteredGlobalDb {
         read_tombstone(&snapshot, profile_id, target, project_key).await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.remote_deletion.persist.record")]
+    #[tracing::instrument(
+        name = "global_db.remote_deletion.persist.record",
+        level = "trace",
+        skip_all
+    )]
     pub async fn record_remote_deletion_tombstone(
         &self,
         tombstone: RemoteDeletionTombstone,
@@ -361,7 +364,11 @@ impl RegisteredGlobalDb {
         Ok(RemoteDeletionTombstoneRecordOutcome::Recorded(tombstone))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.remote_deletion.persist.transition")]
+    #[tracing::instrument(
+        name = "global_db.remote_deletion.persist.transition",
+        level = "trace",
+        skip_all
+    )]
     pub async fn transition_remote_deletion_tombstone(
         &self,
         tombstone: &RemoteDeletionTombstone,
@@ -435,7 +442,6 @@ impl RegisteredGlobalDb {
         Ok(RemoteDeletionTombstoneTransitionOutcome::Updated(updated))
     }
 
-    #[hotpath::skip]
     pub async fn remote_deletion_tombstone_for_project(
         &self,
         profile_id: &str,
@@ -458,7 +464,6 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn remote_account_deletion_tombstone(
         &self,
         profile_id: &str,
@@ -468,7 +473,6 @@ impl RegisteredGlobalDb {
         read_tombstone(&snapshot, profile_id, RemoteDeletionTarget::Account, "").await
     }
 
-    #[hotpath::skip]
     pub async fn delete_remote_deleted_project_registry_row(&self, project_id: &str) -> Result<()> {
         validate_identifier("remote deletion project id", project_id)?;
         let transaction = self.begin_write_transaction().await?;

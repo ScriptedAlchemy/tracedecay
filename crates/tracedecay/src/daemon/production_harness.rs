@@ -1,35 +1,45 @@
 //! In-process owner for the daemon's production project composition.
 //!
 //! Test and `test-transport` builds use this to drive the same composition the
-//! daemon runs, against one isolated profile-and-projects root.
+//! daemon runs, against one isolated profile-and-projects root. The parent
+//! module mounts it behind that gate, so a default or `production` build
+//! compiles none of it.
 
-#[cfg(any(test, feature = "test-transport"))]
 use std::future::Future;
-#[cfg(any(test, feature = "test-transport"))]
 use std::pin::Pin;
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
 
-#[cfg(all(unix, any(test, feature = "test-transport")))]
+#[cfg(unix)]
 use super::bootstrap::set_owner_only_permissions;
 // The parent `daemon` module imports this under `cfg(test)` only, so
-// `use super::*` cannot carry it into a `test-transport` build. Import it
-// directly under the same gate the harness itself is compiled behind.
-#[cfg(any(test, feature = "test-transport"))]
-use super::project_composition::daemon_transcript_source_home;
-#[cfg(any(test, feature = "test-transport"))]
+// `use super::*` cannot carry it into a `test-transport` build.
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
-#[cfg(any(test, feature = "test-transport"))]
 use super::*;
-#[cfg(any(test, feature = "test-transport"))]
-use tracedecay_code_index_runtime::code_index_scheduler;
+use tokio::time::timeout;
+#[cfg(unix)]
+use tracedecay_application::pr_tracking::acquire_manual_branch_lifecycle;
+use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;
+#[cfg(feature = "test-helpers")]
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexWorktreeSchedulerV1;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
-#[cfg(any(test, feature = "test-transport"))]
 use tracedecay_daemon_identity::profile_identity;
+
+#[cfg(unix)]
+use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Captures the daemon's exact native Git transaction precondition for
 /// transport-parity tests. This is not compiled into production builds.
 #[cfg(all(unix, feature = "test-transport"))]
-#[hotpath::measure(label = "daemon.harness.capture_git_snapshot")]
+#[tracing::instrument(
+    name = "daemon.harness.capture_git_snapshot",
+    level = "trace",
+    skip_all
+)]
 #[doc(hidden)]
 pub fn capture_exact_git_snapshot_for_test(
     repository_root: &Path,
@@ -47,7 +57,6 @@ pub fn capture_exact_git_snapshot_for_test(
     )
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 struct ProductionProjectHarnessResourcesV1 {
     store_administration: StoreAdministration,
     invocation: DaemonInvocationState,
@@ -64,39 +73,194 @@ struct ProductionProjectHarnessResourcesV1 {
 /// In-process owner for the same production project composition used by the
 /// daemon. The caller supplies one isolated root containing both the profile
 /// and every project; live profile paths are rejected before any store opens.
-#[cfg(any(test, feature = "test-transport"))]
 #[doc(hidden)]
 pub struct ProductionProjectCompositionHarnessV1 {
     isolation_root: PathBuf,
     profile_root: PathBuf,
-    semantic_auto_download_enabled: bool,
     resources: Option<ProductionProjectHarnessResourcesV1>,
 }
 
 /// The isolated profile the composition owns inside one isolation root.
 ///
 /// Resolvable before `open` so a caller can predict the composed layout.
-#[cfg(any(test, feature = "test-transport"))]
 fn composed_profile_root(isolation_root: &Path) -> PathBuf {
     isolation_root.join("profile")
+}
+
+/// The owner the composition serves: its isolated profile, with the isolation
+/// root as the home its host transcripts live under.
+fn composed_owner_profile(profile_root: &Path) -> tracedecay_runtime_core::config::ProfileRoot {
+    let owner = tracedecay_runtime_core::config::ProfileRoot::new(profile_root);
+    match profile_root.parent() {
+        Some(home) => owner.with_home(home),
+        None => owner,
+    }
+}
+
+/// The operator's real profile, which an isolation root must never overlap.
+fn live_profile_root() -> Option<PathBuf> {
+    tracedecay_runtime_core::config::ProfileRoot::from_env()
+        .ok()
+        .map(|profile| profile.data_dir().to_path_buf())
+        .filter(|path| path.exists())
 }
 
 /// Type-erased open future so a caller async body stores only a fat pointer.
 ///
 /// A generic `async fn` open inlined the whole composition into every test
 /// future; rustc then overflowed the layout-query depth budget.
-#[cfg(any(test, feature = "test-transport"))]
 type ProductionHarnessOpenFuture =
     Pin<Box<dyn Future<Output = Result<ProductionProjectCompositionHarnessV1>> + Send>>;
 
-#[cfg(any(test, feature = "test-transport"))]
+/// Harness compositions share one process-wide Rayon pool and FIFO background
+/// CPU budget. On the loaded 96-core integration host, four concurrent wide
+/// fixtures published at p95 1.436 s (9.83 s for the complete group), while
+/// the five-fixture N=8/N=16 runs published at p95 2.302/1.997 s. Dividing the
+/// available or installed worker width by 24 therefore admits only the
+/// measured four-wide load before worker-plan installation and preserves more
+/// than 2x headroom under the unchanged 20 s per-composition wait.
+///
+/// Narrower hosts still admit four. One admitted composition keeps only about
+/// one core busy: pinned to 8 CPUs, the `mcp_suite` `graph_analysis_test` used
+/// 1.1 to 1.3 cores on average and took 80 to 106 s when admitted one at a
+/// time, and 29 to 34 s when admitted four at a time, with the same
+/// instruction count.
+const PRODUCTION_COMPOSITION_CPU_DIVISOR: usize = 24;
+
+struct ProductionCompositionAdmissionGateV1 {
+    semaphore: tokio::sync::Semaphore,
+    capacity: usize,
+    admitted: AtomicUsize,
+    waiting: AtomicUsize,
+    #[cfg(test)]
+    high_water_mark: AtomicUsize,
+}
+
+impl ProductionCompositionAdmissionGateV1 {
+    fn new(capacity: usize) -> Self {
+        Self {
+            semaphore: tokio::sync::Semaphore::new(capacity),
+            capacity,
+            admitted: AtomicUsize::new(0),
+            waiting: AtomicUsize::new(0),
+            #[cfg(test)]
+            high_water_mark: AtomicUsize::new(0),
+        }
+    }
+
+    async fn acquire(&'static self) -> Result<ProductionCompositionAdmissionPermitV1> {
+        let waiting = ProductionCompositionWaitingV1::new(self);
+        let semaphore =
+            self.semaphore
+                .acquire()
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "production-composition admission gate is unavailable: {error}"
+                    ),
+                })?;
+        drop(waiting);
+        let admitted = ProductionCompositionAdmittedV1::new(self);
+        Ok(ProductionCompositionAdmissionPermitV1 {
+            _admitted: admitted,
+            _semaphore: semaphore,
+        })
+    }
+
+    fn snapshot(&self) -> ProductionCompositionAdmissionSnapshotV1 {
+        ProductionCompositionAdmissionSnapshotV1 {
+            capacity: self.capacity,
+            admitted: self.admitted.load(Ordering::Acquire),
+            waiting: self.waiting.load(Ordering::Acquire),
+        }
+    }
+
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    #[cfg(test)]
+    fn high_water_mark(&self) -> usize {
+        self.high_water_mark.load(Ordering::Acquire)
+    }
+}
+
+struct ProductionCompositionWaitingV1 {
+    gate: &'static ProductionCompositionAdmissionGateV1,
+}
+
+impl ProductionCompositionWaitingV1 {
+    fn new(gate: &'static ProductionCompositionAdmissionGateV1) -> Self {
+        gate.waiting.fetch_add(1, Ordering::AcqRel);
+        Self { gate }
+    }
+}
+
+impl Drop for ProductionCompositionWaitingV1 {
+    fn drop(&mut self) {
+        self.gate.waiting.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct ProductionCompositionAdmittedV1 {
+    gate: &'static ProductionCompositionAdmissionGateV1,
+}
+
+impl ProductionCompositionAdmittedV1 {
+    fn new(gate: &'static ProductionCompositionAdmissionGateV1) -> Self {
+        let admitted = gate.admitted.fetch_add(1, Ordering::AcqRel) + 1;
+        #[cfg(test)]
+        gate.high_water_mark.fetch_max(admitted, Ordering::AcqRel);
+        #[cfg(not(test))]
+        let _ = admitted;
+        Self { gate }
+    }
+}
+
+impl Drop for ProductionCompositionAdmittedV1 {
+    fn drop(&mut self) {
+        self.gate.admitted.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Field order is the drop order: the admitted counter must retire before
+/// the semaphore permit is returned, or a waiter can be admitted while the
+/// previous composition is still counted and the high-water mark overshoots
+/// the capacity by one.
+struct ProductionCompositionAdmissionPermitV1 {
+    _admitted: ProductionCompositionAdmittedV1,
+    _semaphore: tokio::sync::SemaphorePermit<'static>,
+}
+
+#[derive(Clone, Copy)]
+struct ProductionCompositionAdmissionSnapshotV1 {
+    capacity: usize,
+    admitted: usize,
+    waiting: usize,
+}
+
+fn production_composition_admission_capacity() -> usize {
+    let worker_width = tracedecay_code_index::parallelism::installed_worker_status().map_or_else(
+        || std::thread::available_parallelism().map_or(1, usize::from),
+        |status| usize::from(status.effective_workers),
+    );
+    (worker_width / PRODUCTION_COMPOSITION_CPU_DIVISOR).max(4)
+}
+
+fn production_composition_admission_gate() -> &'static ProductionCompositionAdmissionGateV1 {
+    static GATE: OnceLock<ProductionCompositionAdmissionGateV1> = OnceLock::new();
+    GATE.get_or_init(|| {
+        ProductionCompositionAdmissionGateV1::new(production_composition_admission_capacity())
+    })
+}
+
 struct IsolatedProductionCompositionRoots {
     isolation_root: PathBuf,
     profile_root: PathBuf,
     project_roots: Vec<PathBuf>,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 struct ProductionCompositionStoreHandles {
     store_administration: StoreAdministration,
     invocation: DaemonInvocationState,
@@ -104,90 +268,99 @@ struct ProductionCompositionStoreHandles {
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 fn isolate_production_composition_roots(
     isolation_root: PathBuf,
     project_roots: Vec<PathBuf>,
     live_profile_root: Option<PathBuf>,
 ) -> Result<IsolatedProductionCompositionRoots> {
-    hotpath::measure_block!("daemon.harness.isolate", {
-        std::fs::create_dir_all(&isolation_root).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to create production-composition isolation root '{}': {error}",
-                isolation_root.display()
-            ),
-        })?;
-        let isolation_root =
-            std::fs::canonicalize(&isolation_root).map_err(|error| TraceDecayError::Config {
+    {
+        let _span = tracing::trace_span!("daemon.harness.isolate").entered();
+        {
+            std::fs::create_dir_all(&isolation_root).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to create production-composition isolation root '{}': {error}",
+                    isolation_root.display()
+                ),
+            })?;
+            // The plain spelling, not raw `canonicalize`'s Windows `\\?\` form: the
+            // shipped daemon roots `%USERPROFILE%\.tracedecay` plainly, and a
+            // verbatim root would hide every open that cannot reach a long path.
+            let isolation_root = canonical_existing_identity(&isolation_root).map_err(|error| {
+            TraceDecayError::Config {
                 message: format!(
                     "failed to canonicalize production-composition isolation root '{}': {error}",
                     isolation_root.display()
                 ),
-            })?;
-        if let Some(live_profile_root) =
-            live_profile_root.and_then(|path| std::fs::canonicalize(path).ok())
-        {
-            let overlaps_live_profile = isolation_root == live_profile_root
-                || isolation_root.starts_with(&live_profile_root)
-                || live_profile_root.starts_with(&isolation_root);
-            if overlaps_live_profile {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "production-composition isolation root '{}' overlaps live profile '{}'",
-                        isolation_root.display(),
-                        live_profile_root.display()
-                    ),
-                });
             }
-        }
-
-        let profile_root = composed_profile_root(&isolation_root);
-        std::fs::create_dir_all(&profile_root).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to create isolated production-composition profile '{}': {error}",
-                profile_root.display()
-            ),
         })?;
-        #[cfg(unix)]
-        set_owner_only_permissions(&profile_root, 0o700)?;
-
-        let project_roots = project_roots
-            .into_iter()
-            .map(|project_root| {
-                std::fs::canonicalize(&project_root).map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize production-composition project '{}': {error}",
-                        project_root.display()
-                    ),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if project_roots.is_empty() {
-            return Err(TraceDecayError::Config {
-                message: "production-composition harness requires at least one project".to_owned(),
-            });
-        }
-        for project_root in &project_roots {
-            if !project_root.starts_with(&isolation_root) || project_root.starts_with(&profile_root)
+            if let Some(live_profile_root) =
+                live_profile_root.and_then(|path| canonical_existing_identity(&path).ok())
             {
+                let overlaps_live_profile = isolation_root == live_profile_root
+                    || isolation_root.starts_with(&live_profile_root)
+                    || live_profile_root.starts_with(&isolation_root);
+                if overlaps_live_profile {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "production-composition isolation root '{}' overlaps live profile '{}'",
+                            isolation_root.display(),
+                            live_profile_root.display()
+                        ),
+                    });
+                }
+            }
+
+            let profile_root = composed_profile_root(&isolation_root);
+            std::fs::create_dir_all(&profile_root).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to create isolated production-composition profile '{}': {error}",
+                    profile_root.display()
+                ),
+            })?;
+            #[cfg(unix)]
+            set_owner_only_permissions(&profile_root, 0o700)?;
+
+            let project_roots = project_roots
+                .into_iter()
+                .map(|project_root| {
+                    canonical_existing_identity(&project_root).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "failed to canonicalize production-composition project '{}': {error}",
+                            project_root.display()
+                        ),
+                    }
+                })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if project_roots.is_empty() {
                 return Err(TraceDecayError::Config {
-                    message: format!(
-                        "production-composition project '{}' must be inside isolation root '{}' and outside its profile",
-                        project_root.display(),
-                        isolation_root.display()
-                    ),
+                    message: "production-composition harness requires at least one project"
+                        .to_owned(),
                 });
             }
+            for project_root in &project_roots {
+                if !project_root.starts_with(&isolation_root)
+                    || project_root.starts_with(&profile_root)
+                {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "production-composition project '{}' must be inside isolation root '{}' and outside its profile",
+                            project_root.display(),
+                            isolation_root.display()
+                        ),
+                    });
+                }
+            }
+            Ok(IsolatedProductionCompositionRoots {
+                isolation_root,
+                profile_root,
+                project_roots,
+            })
         }
-        Ok(IsolatedProductionCompositionRoots {
-            isolation_root,
-            profile_root,
-            project_roots,
-        })
-    })
+    }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 fn acquire_production_composition_identity(
     profile_root: &Path,
 ) -> Result<(
@@ -195,28 +368,33 @@ fn acquire_production_composition_identity(
     tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
     tracedecay_runtime_core::db::DaemonDatabaseScope,
 )> {
-    hotpath::measure_block!("daemon.harness.identity", {
-        let profile_identity = profile_identity::load_or_create(profile_root)?;
-        let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
-            profile_root,
-            "in-process production composition",
-        )?;
-        let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-            profile_root,
-            1,
-            "in-process-production-composition",
-        )?;
-        Ok((profile_identity, lifecycle_lease, database_scope))
-    })
+    {
+        let _span = tracing::trace_span!("daemon.harness.identity").entered();
+        {
+            let profile_identity = profile_identity::load_or_create(profile_root)?;
+            let lifecycle_lease =
+                tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+                    profile_root,
+                    "in-process production composition",
+                )?;
+            let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+                profile_root,
+                1,
+                "in-process-production-composition",
+            )?;
+            Ok((profile_identity, lifecycle_lease, database_scope))
+        }
+    }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn install_production_composition_stores(
     profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
     long_lived_session_maintenance_for_test: bool,
 ) -> Result<ProductionCompositionStoreHandles> {
-    let store_administration =
-        StoreAdministration::default().with_profile_identity(profile_identity.clone());
+    let owner = composed_owner_profile(profile_identity.profile_root());
+    let store_administration = StoreAdministration::default()
+        .with_profile_identity(profile_identity.clone())
+        .with_owner_profile(owner.clone());
     #[cfg(test)]
     if long_lived_session_maintenance_for_test {
         Box::pin(store_administration.install_long_lived_session_runtime_registry_for_test())
@@ -224,25 +402,7 @@ async fn install_production_composition_stores(
     }
     #[cfg(not(test))]
     let _ = long_lived_session_maintenance_for_test;
-    let invocation = DaemonInvocationState::default();
-    // The daemon bootstrap installs the Codex shared-JSONL preparation
-    // authority right after creating the invocation state; without it every
-    // transcript ingest refuses as background-resource unavailable. The
-    // authority is a process singleton (a daemon restart is a new process),
-    // so an in-process harness reopen must rejoin the memory authority the
-    // first open installed rather than install a fresh one.
-    static HARNESS_CODEX_PREPARATION_MEMORY: std::sync::OnceLock<
-        Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
-    > = std::sync::OnceLock::new();
-    let preparation_memory = Arc::clone(
-        HARNESS_CODEX_PREPARATION_MEMORY
-            .get_or_init(|| invocation.code_index_schedulers.process_resident_memory()),
-    );
-    store_administration
-        .configure_codex_preparation_resources(preparation_memory)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to configure Codex preparation resources: {error}"),
-        })?;
+    let invocation = DaemonInvocationState::with_progress_producer_incarnation(1, owner.home());
     invocation.configure_github_read_only_credentials(&profile_identity);
     let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
@@ -262,7 +422,6 @@ async fn install_production_composition_stores(
     })
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn install_production_composition_profile_workers(
     store_administration: &StoreAdministration,
     invocation: &DaemonInvocationState,
@@ -270,18 +429,26 @@ async fn install_production_composition_profile_workers(
     project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     profile_identity: &profile_identity::LocalProfileIdentityAuthorityV1,
 ) -> Result<()> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async {
             let profile_sessions = store_administration
                 .registered_profile_session_database()
                 .await?;
+            // Installing the worker plan also mounts the Codex shared-JSONL
+            // preparation resources; without them every transcript ingest
+            // refuses as background-resource unavailable. The process-wide
+            // preparation authority keeps the first resources mounted (a
+            // daemon restart is a new process), so an in-process harness
+            // reopen rejoins them while its own store administration retains
+            // the same one process CPU authority.
             invocation
-                .install_profile_worker_plan(profile_sessions, profile_identity.profile_id())
+                .install_profile_worker_plan(
+                    store_administration,
+                    profile_sessions,
+                    profile_identity.profile_id(),
+                )
                 .await?;
-            store_administration.install_remote_recovery_project_lifecycle(
-                invocation.clone(),
-                Arc::clone(project_open_gates),
-            )?;
+            store_administration.install_remote_recovery_project_lifecycle()?;
             install_http_application_cold_resolver(
                 http_application_registry,
                 store_administration.clone(),
@@ -290,43 +457,38 @@ async fn install_production_composition_profile_workers(
             )?;
             Ok::<(), TraceDecayError>(())
         },
-        label = "daemon.harness.stores"
+        tracing::trace_span!("daemon.harness.stores"),
     )
     .await
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn mount_production_composition_projects(
     stores: &ProductionCompositionStoreHandles,
     project_roots: Vec<PathBuf>,
     profile_root: &Path,
     scope_prefix: Option<String>,
     wait_for_code_index: bool,
-) -> Result<(HashMap<PathBuf, Arc<crate::mcp::McpServer>>, bool)> {
+) -> Result<HashMap<PathBuf, Arc<crate::mcp::McpServer>>> {
     let client_identity = DaemonClientIdentity {
         profile_root: profile_root.to_path_buf(),
         global_db_path: profile_root.join("global.db"),
     };
     let mut servers = HashMap::new();
-    let mut semantic_auto_download_enabled = false;
     for (index, project_root) in project_roots.into_iter().enumerate() {
-        let (canonical_project_path, server, project_semantic) =
-            Box::pin(mount_one_production_composition_project(
-                stores,
-                project_root,
-                &client_identity,
-                scope_prefix.as_deref(),
-                index,
-                wait_for_code_index,
-            ))
-            .await?;
-        semantic_auto_download_enabled |= project_semantic;
+        let (canonical_project_path, server) = Box::pin(mount_one_production_composition_project(
+            stores,
+            project_root,
+            &client_identity,
+            scope_prefix.as_deref(),
+            index,
+            wait_for_code_index,
+        ))
+        .await?;
         servers.insert(canonical_project_path, server);
     }
-    Ok((servers, semantic_auto_download_enabled))
+    Ok(servers)
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn mount_one_production_composition_project(
     stores: &ProductionCompositionStoreHandles,
     project_root: PathBuf,
@@ -334,7 +496,7 @@ async fn mount_one_production_composition_project(
     scope_prefix: Option<&str>,
     index: usize,
     wait_for_code_index: bool,
-) -> Result<(PathBuf, Arc<crate::mcp::McpServer>, bool)> {
+) -> Result<(PathBuf, Arc<crate::mcp::McpServer>)> {
     let handshake = DaemonHandshake {
         client_version: binary_version()?.to_owned(),
         client_instance_id: format!("production-composition-harness-{index}"),
@@ -346,9 +508,10 @@ async fn mount_one_production_composition_project(
         allow_initialize_root_routing: false,
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
-    let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
+    let (canonical_project_path, _) =
+        project_route_for_handshake(&handshake, stores.store_administration.owner_home()?)?;
     let composition = stores
         .store_administration
         .with_writer(|| {
@@ -368,7 +531,6 @@ async fn mount_one_production_composition_project(
                     canonical_project_path,
                     handshake,
                     ProductionProjectCompositionRuntime::Portable {
-                        semantic_auto_download: false,
                         startup_catch_up: false,
                     },
                     &cancellation,
@@ -391,46 +553,43 @@ async fn mount_one_production_composition_project(
                 message: format!("production-composition code-index scope is invalid: {error:?}"),
             })?
         };
-        Box::pin(wait_for_production_composition_code_index(
+        if let Err(error) = Box::pin(wait_for_production_composition_code_index(
             &stores.invocation,
             &composition.canonical_project_path,
             &code_search_scope,
         ))
-        .await?;
+        .await
+        {
+            // An aborted mount must retire the server's background owners:
+            // file-locked workers like the delivery recorder outlive a dropped
+            // composition and wedge every later open on their lock.
+            composition.server.shutdown().await;
+            return Err(error);
+        }
     }
-    let semantic_auto_download_enabled =
-        composition
-            .semantic_auto_download_enabled
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "production-composition harness reused an unobserved semantic runtime"
-                    .to_owned(),
-            })?;
-    Ok((
-        composition.canonical_project_path,
-        composition.server,
-        semantic_auto_download_enabled,
-    ))
+    Ok((composition.canonical_project_path, composition.server))
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 impl ProductionProjectCompositionHarnessV1 {
     /// Where the composed daemon reads host transcripts from, resolvable
     /// before `open`.
     ///
     /// The composition pins its transcript source home to its own isolated
     /// layout rather than reading the ambient process `HOME`, so a journey
-    /// that seeds a real transcript must write it here — a transcript written
+    /// that seeds a real transcript must write it here, a transcript written
     /// under `$HOME` is invisible to the composition and the session lane
     /// stays empty forever.
     pub fn transcript_source_home(isolation_root: impl AsRef<Path>) -> Option<PathBuf> {
-        daemon_transcript_source_home(&composed_profile_root(isolation_root.as_ref()))
+        composed_owner_profile(&composed_profile_root(isolation_root.as_ref()))
+            .home()
+            .map(Path::to_path_buf)
     }
 
     pub fn open(
         isolation_root: impl AsRef<Path>,
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
-        let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
+        let live_profile_root = live_profile_root();
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -448,7 +607,7 @@ impl ProductionProjectCompositionHarnessV1 {
         isolation_root: impl AsRef<Path>,
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
-        let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
+        let live_profile_root = live_profile_root();
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -464,7 +623,7 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
         scope_prefix: impl Into<String>,
     ) -> ProductionHarnessOpenFuture {
-        let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
+        let live_profile_root = live_profile_root();
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -483,12 +642,18 @@ impl ProductionProjectCompositionHarnessV1 {
         long_lived_session_maintenance_for_test: bool,
         wait_for_code_index: bool,
     ) -> ProductionHarnessOpenFuture {
-        // Embedded test compositions never pass through the binary's
-        // product-runtime registration, so the canonical fixture is this
-        // composition's provider; without it daemon bootstrap and version
-        // reporting answer the typed missing-provider state.
-        crate::product_runtime::register_fixture_product_runtime();
+        // Embedded compositions skip the binary logging bootstrap; surface
+        // activation retry/refusal diagnostics in the product journey.
+        tracedecay_daemon_service::logging::install_stderr_tracing(
+            tracedecay_daemon_service::logging::StderrTracingDefault::Warn,
+        );
         Box::pin(async move {
+            let _composition_admission = production_composition_admission_gate().acquire().await?;
+            // Embedded test compositions never pass through the binary's
+            // product-runtime registration, so the canonical fixture is this
+            // composition's provider; without it daemon bootstrap and version
+            // reporting answer the typed missing-provider state.
+            tracedecay_project::product_runtime::register_fixture_product_runtime();
             let isolated = isolate_production_composition_roots(
                 isolation_root,
                 project_roots,
@@ -501,19 +666,17 @@ impl ProductionProjectCompositionHarnessV1 {
                 long_lived_session_maintenance_for_test,
             ))
             .await?;
-            let (servers, semantic_auto_download_enabled) =
-                Box::pin(mount_production_composition_projects(
-                    &stores,
-                    isolated.project_roots,
-                    &isolated.profile_root,
-                    scope_prefix,
-                    wait_for_code_index,
-                ))
-                .await?;
+            let servers = Box::pin(mount_production_composition_projects(
+                &stores,
+                isolated.project_roots,
+                &isolated.profile_root,
+                scope_prefix,
+                wait_for_code_index,
+            ))
+            .await?;
             Ok(Self {
                 isolation_root: isolated.isolation_root,
                 profile_root: isolated.profile_root,
-                semantic_auto_download_enabled,
                 resources: Some(ProductionProjectHarnessResourcesV1 {
                     store_administration: stores.store_administration,
                     invocation: stores.invocation,
@@ -566,11 +729,11 @@ impl ProductionProjectCompositionHarnessV1 {
         &self.profile_root
     }
 
-    pub fn semantic_auto_download_enabled(&self) -> bool {
-        self.semantic_auto_download_enabled
-    }
-
-    #[hotpath::measure(label = "daemon.harness.read_profile_analytics", future = true)]
+    #[tracing::instrument(
+        name = "daemon.harness.read_profile_analytics",
+        level = "trace",
+        skip_all
+    )]
     pub async fn read_profile_analytics_events(
         &self,
         query: &tracedecay_global_db::AnalyticsEventQuery,
@@ -595,7 +758,11 @@ impl ProductionProjectCompositionHarnessV1 {
 
     /// Seeds exact retained analytics rows through the mounted profile
     /// database authority for production-composition transport tests.
-    #[hotpath::measure(label = "daemon.harness.append_profile_analytics", future = true)]
+    #[tracing::instrument(
+        name = "daemon.harness.append_profile_analytics",
+        level = "trace",
+        skip_all
+    )]
     pub async fn append_profile_analytics_events_for_test(
         &self,
         events: &[tracedecay_global_db::AnalyticsEventInsert],
@@ -619,9 +786,9 @@ impl ProductionProjectCompositionHarnessV1 {
     }
 
     /// Sums the retained profile's settled savings-ledger rows, optionally
-    /// scoped to one project path — the production accounting authority the
+    /// scoped to one project path, the production accounting authority the
     /// MCP analytics journeys assert against.
-    #[hotpath::measure(label = "daemon.harness.sum_profile_savings", future = true)]
+    #[tracing::instrument(name = "daemon.harness.sum_profile_savings", level = "trace", skip_all)]
     pub async fn sum_profile_savings(
         &self,
         project: Option<&str>,
@@ -647,7 +814,11 @@ impl ProductionProjectCompositionHarnessV1 {
 
     /// Reads one project's lifetime saved-token counter from the retained
     /// profile authority.
-    #[hotpath::measure(label = "daemon.harness.project_lifetime_saved_tokens", future = true)]
+    #[tracing::instrument(
+        name = "daemon.harness.project_lifetime_saved_tokens",
+        level = "trace",
+        skip_all
+    )]
     pub async fn project_lifetime_saved_tokens(&self, project_root: &Path) -> Result<u64> {
         let resources = self
             .resources
@@ -669,13 +840,14 @@ impl ProductionProjectCompositionHarnessV1 {
 
     pub fn server(&self, project_root: impl AsRef<Path>) -> Result<Arc<crate::mcp::McpServer>> {
         let canonical_project_path =
-            std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize production-composition project '{}': {error}",
-                        project_root.as_ref().display()
-                    ),
-                }
+            tracedecay_runtime_core::path_safety::canonical_existing_identity(
+                project_root.as_ref(),
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to canonicalize production-composition project '{}': {error}",
+                    project_root.as_ref().display()
+                ),
             })?;
         self.resources
             .as_ref()
@@ -689,7 +861,65 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
-    #[hotpath::skip]
+    /// Await optional attribution for the exact current publication without
+    /// making it a prerequisite for ordinary composition or graph readiness.
+    pub async fn await_test_attribution(
+        &self,
+        project_root: impl AsRef<Path>,
+        cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+    ) -> Result<tracedecay_domain::ProviderEvaluationStateV1> {
+        let graph = self.server(project_root)?.cg().await;
+        let target = graph.configuration_runtime().configuration_target();
+        let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+            graph.project_root(),
+            &target.project_id,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("production-composition code-index scope is invalid: {error:?}"),
+        })?;
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        let schedulers = &resources.invocation.code_index_schedulers;
+        let Some(current) = schedulers.latest_text_serving_for_scope(&scope).await else {
+            return Ok(tracedecay_domain::ProviderEvaluationStateV1::Unavailable);
+        };
+        Ok(schedulers
+            .await_test_attribution_for_scope(
+                graph.project_root(),
+                &scope,
+                &current.metadata().manifest().generation_id,
+                cancellation,
+            )
+            .await)
+    }
+
+    /// Uses the registry's existing test handle to fence source-proof renewal
+    /// while a production read observes the previous publication.
+    #[cfg(feature = "test-helpers")]
+    pub async fn project_scheduler_handle(
+        &self,
+        project_root: &Path,
+    ) -> Result<Arc<std::sync::Mutex<CodeIndexWorktreeSchedulerV1>>> {
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        resources
+            .invocation
+            .code_index_schedulers
+            .scheduler_handle(project_root)
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition project scheduler is not mounted".to_owned(),
+            })
+    }
+
     pub async fn project_data_root(&self, project_root: impl AsRef<Path>) -> Result<PathBuf> {
         Ok(self
             .server(project_root)?
@@ -704,7 +934,6 @@ impl ProductionProjectCompositionHarnessV1 {
     /// cross-project selector: tools reject a top-level `project_path`, so a
     /// caller routing to a second mounted project must pass
     /// `project_selector.project_id`.
-    #[hotpath::skip]
     pub async fn project_id(&self, project_root: impl AsRef<Path>) -> Result<String> {
         let project_root = project_root.as_ref().to_path_buf();
         self.server(&project_root)?
@@ -722,7 +951,50 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
-    #[hotpath::measure(label = "daemon.harness.track_worktree_branch", future = true)]
+    /// The mounted project's current configuration revision: the CAS token
+    /// every configuration mutation tool requires, so a journey can write a
+    /// project setting through the production `tracedecay_configuration_*`
+    /// surface instead of a private store path.
+    pub async fn configuration_revision(&self, project_root: impl AsRef<Path>) -> Result<String> {
+        let project_root = project_root.as_ref().to_path_buf();
+        let graph = self.server(&project_root)?.cg().await;
+        let current = graph
+            .configuration_runtime()
+            .client()
+            .current()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "production-composition project '{}' has no current configuration: {error}",
+                    project_root.display()
+                ),
+            })?;
+        Ok(current.revision_id().as_str().to_owned())
+    }
+
+    /// Manual branch publication is unix-only in production (`branch_add`
+    /// answers with the same typed refusal elsewhere), so the harness mirrors
+    /// that boundary instead of reaching the unix-only administration path.
+    #[cfg(not(unix))]
+    pub async fn track_worktree_branch(
+        &self,
+        _project_root: impl AsRef<Path>,
+        _worktree_root: impl AsRef<Path>,
+        _branch: &str,
+    ) -> Result<tracedecay_runtime_core::branch::BranchAddOutcome> {
+        Err(TraceDecayError::project_route(
+            "code_index_scheduler_unavailable",
+            true,
+            "code-index scheduler authority is unavailable for branch activation",
+        ))
+    }
+
+    #[cfg(unix)]
+    #[tracing::instrument(
+        name = "daemon.harness.track_worktree_branch",
+        level = "trace",
+        skip_all
+    )]
     pub async fn track_worktree_branch(
         &self,
         project_root: impl AsRef<Path>,
@@ -745,94 +1017,76 @@ impl ProductionProjectCompositionHarnessV1 {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "production-composition harness is shut down".to_owned(),
             })?;
-        super::branch_add::track_exact_worktree_branch(
-            &graph,
-            &resources.invocation.code_index_schedulers,
-            &canonical_project_root,
-            worktree_root.as_ref(),
-            branch,
-        )
-        .await
+        let administration = resources.store_administration.clone();
+        let schedulers = resources.invocation.code_index_schedulers.clone();
+        let worktree_root = worktree_root.as_ref().to_path_buf();
+        let branch = branch.to_owned();
+        administration
+            .run_manual_branch_publication(|cancellation| async move {
+                let _lifecycle =
+                    acquire_manual_branch_lifecycle(&graph.store_layout().data_root, &branch)
+                        .await
+                        .map_err(super::branch_add::lifecycle_route_error)?;
+                super::branch_add::branch_publication_context(&graph)?
+                    .track_exact_worktree_branch(
+                        &schedulers,
+                        &canonical_project_root,
+                        &worktree_root,
+                        &branch,
+                        &cancellation,
+                    )
+                    .await
+            })
+            .await
     }
 
-    #[hotpath::measure(label = "daemon.harness.sync_worktree_branch", future = true)]
-    pub async fn sync_tracked_worktree_branch(
-        &self,
-        project_root: impl AsRef<Path>,
-        worktree_root: impl AsRef<Path>,
-        branch: &str,
-        query: &str,
-    ) -> Result<(Option<String>, Option<String>, bool, bool)> {
-        self.track_worktree_branch(project_root.as_ref(), worktree_root.as_ref(), branch)
-            .await?;
-        let canonical_project_root =
-            std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize production-composition project '{}': {error}",
-                        project_root.as_ref().display()
-                    ),
-                }
-            })?;
-        let canonical_worktree_root =
-            std::fs::canonicalize(worktree_root.as_ref()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize branch worktree '{}': {error}",
-                        worktree_root.as_ref().display()
-                    ),
-                }
-            })?;
-        let graph = self.server(&canonical_project_root)?.cg().await;
-        let resources = self
-            .resources
-            .as_ref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "production-composition harness is shut down".to_owned(),
-            })?;
-        let source = super::branch_add::capture_exact_branch_source(
-            &graph,
-            &resources.invocation.code_index_schedulers,
-            &canonical_project_root,
-            &canonical_worktree_root,
-            branch,
-        )
-        .await?;
-        let generation = super::branch_add::await_exact_branch_generation(
-            &resources.invocation.code_index_schedulers,
-            &canonical_worktree_root,
-            &source,
-        )
-        .await?;
-        let contains_query = generation.symbols().symbols.iter().any(|symbol| {
-            symbol.simple_name.contains(query) || symbol.qualified_name.contains(query)
-        });
-        Ok((
-            tracedecay_runtime_core::branch::current_branch(&canonical_worktree_root),
-            source
-                .reference
-                .strip_prefix("refs/heads/")
-                .map(str::to_owned),
-            false,
-            contains_query,
-        ))
-    }
-
-    #[hotpath::measure(label = "daemon.harness.call_tool", future = true)]
+    #[tracing::instrument(name = "daemon.harness.call_tool", level = "trace", skip_all)]
     pub async fn call_tool(
         &self,
         project_root: impl AsRef<Path>,
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<JsonRpcResponse> {
+        self.call_tool_with_params(
+            project_root,
+            tool_name,
+            json!({"name": tool_name, "arguments": arguments}),
+        )
+        .await
+    }
+
+    /// [`Self::call_tool`] under a caller deadline, as an MCP client that
+    /// bounds its own call declares it in `_meta`.
+    pub async fn call_tool_with_deadline(
+        &self,
+        project_root: impl AsRef<Path>,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        expires_at: tracedecay_domain::UtcMicros,
+    ) -> Result<JsonRpcResponse> {
+        self.call_tool_with_params(
+            project_root,
+            tool_name,
+            json!({
+                "name": tool_name,
+                "arguments": arguments,
+                "_meta": tracedecay_mcp::tool_call_deadline_meta(expires_at),
+            }),
+        )
+        .await
+    }
+
+    pub(crate) async fn call_tool_with_params(
+        &self,
+        project_root: impl AsRef<Path>,
+        tool_name: &str,
+        params: serde_json::Value,
+    ) -> Result<JsonRpcResponse> {
         let request = serde_json::from_value::<JsonRpcRequest>(json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments,
-            },
+            "params": params,
         }))
         .map_err(|error| TraceDecayError::Config {
             message: format!("failed to construct production-composition tool request: {error}"),
@@ -847,36 +1101,119 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(mut self) {
         if let Some(resources) = self.resources.take() {
-            hotpath::future!(
-                shutdown_production_project_harness(resources),
-                label = "daemon.harness.shutdown"
+            tracing::Instrument::instrument(
+                Box::pin(shutdown_production_project_harness(resources)),
+                tracing::trace_span!("daemon.harness.shutdown"),
             )
             .await;
         }
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
-#[hotpath::measure(label = "daemon.harness.wait_code_index", future = true)]
+/// Liveness floor for the readiness probe above.
+///
+/// Every seat install and every source revalidation that keeps an unchanged
+/// generation seated signals the serving watch, so the common case wakes on
+/// the publication itself. This bound only covers the terminal answers that
+/// install no seat — a route that has not mounted yet, and a verified source
+/// that publishes no generation at all.
+const CODE_INDEX_READINESS_BACKSTOP: Duration = Duration::from_millis(100);
+
+/// Park until the mounted route seats a generation, or until the backstop.
+///
+/// The probe this paces canonicalizes the root, takes the scheduler registry's
+/// mounted mutex several times, offloads a Git-metadata freshness capture to
+/// the blocking pool, and emits a decline event. Re-running it on a fixed
+/// millisecond cadence spends that on the same cores as the reconcile it is
+/// waiting for, so the wait is driven by the serving watch instead.
+async fn await_serving_generation_change(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    serving_changed: &mut Option<tokio::sync::watch::Receiver<()>>,
+) {
+    if serving_changed.is_none() {
+        *serving_changed = schedulers
+            .subscribe_serving_generation_changes(project_root)
+            .await;
+    }
+    let Some(changed) = serving_changed.as_mut() else {
+        tokio::time::sleep(CODE_INDEX_READINESS_BACKSTOP).await;
+        return;
+    };
+    match timeout(CODE_INDEX_READINESS_BACKSTOP, changed.changed()).await {
+        Ok(Ok(())) | Err(_) => {}
+        // The route retired its watch. Drop it and let the next probe report
+        // whatever typed state replaced the mount.
+        Ok(Err(_)) => {
+            *serving_changed = None;
+            tokio::time::sleep(CODE_INDEX_READINESS_BACKSTOP).await;
+        }
+    }
+}
+
+#[tracing::instrument(name = "daemon.harness.wait_code_index", level = "trace", skip_all)]
 async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    scope: &tracedecay_application::ResolvedScope,
-) -> Result<Option<code_index_scheduler::LatestCompleteCodeIndexV1>> {
-    timeout(Duration::from_secs(20), async {
+    scope: &tracedecay_contracts::ResolvedScope,
+) -> Result<()> {
+    // A linked worktree without the `sync.watch_linked_worktrees` opt-in
+    // serves but never indexes: no publication can satisfy this wait, and the
+    // daemon's own deferred owners answer that admission at spawn time rather
+    // than parking on it. Mount the composition the same way; reads then report
+    // the typed `linked_worktree_disabled` state.
+    if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
+        &invocation.code_index_schedulers,
+        scope,
+    ) {
+        return Ok(());
+    }
+    let wait_started = Instant::now();
+    // Subscribe before the first probe so a seat installed between the probe
+    // and the wait still wakes this loop.
+    let mut serving_changed = invocation
+        .code_index_schedulers
+        .subscribe_serving_generation_changes(project_root)
+        .await;
+    let publication = timeout(Duration::from_secs(20), async {
         loop {
-            // Scope-aware readiness is the authenticated demand boundary that
-            // starts the registered route-local activation owner. The root-only
-            // probe cannot mount an idle on-demand scheduler.
-            if let Some(latest) = invocation
+            // Demand the exact registered route without decoding a generation
+            // solely to discover a native graph already held by the text owner.
+            let query_authority_ready = invocation
                 .code_index_schedulers
-                .latest_complete_ready_for_scope(scope)
+                .query_authority_for_scope(scope)
                 .await
-            {
-                return Some(latest);
+                .is_some();
+            // A publication and a clean restart both seat the graph head on
+            // the text owner and leave the decoded seat empty until a reader
+            // demands it, so a text owner serving the native graph is ready.
+            // Graph serving installs before its interactive catalog finishes
+            // warming in the background; the composition is handed over once
+            // that catalog has completed a warm. A later park may release it
+            // for memory (`warming`); that is still a completed publication,
+            // and the next graph read reseats it.
+            let text_graph_catalog_ready = invocation
+                .code_index_schedulers
+                .latest_text_serving_for_scope(scope)
+                .await
+                .and_then(|text| text.interactive_graph_store().ok())
+                .map(|store| store.interactive_catalog_has_completed_a_warm());
+            // A first-time warming catalog cannot be made ready by decoding
+            // the same generation. Other mounts can use an already-decoded
+            // serving owner; this publication wait must not create a second
+            // owner.
+            let generation_ready = match text_graph_catalog_ready {
+                Some(ready) => ready,
+                None => invocation
+                    .code_index_schedulers
+                    .latest_complete_ready_decoded_for_scope(scope)
+                    .await
+                    .is_some(),
+            };
+            if generation_ready && query_authority_ready {
+                return;
             }
             // A project whose verified source publishes no generation at all
             // (every file unsupported or unextractable) is a typed state, not
@@ -888,57 +1225,146 @@ async fn wait_for_production_composition_code_index(
                 .reconciled_without_generation_for_scope(scope)
                 .await
             {
-                return None;
+                return;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            await_serving_generation_change(
+                &invocation.code_index_schedulers,
+                project_root,
+                &mut serving_changed,
+            )
+            .await;
         }
     })
-    .await
-    .map_err(|_| TraceDecayError::Config {
-        message: format!(
-            "production-composition code index did not publish for '{}'",
-            project_root.display()
-        ),
-    })
+    .await;
+    match publication {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let elapsed_wait = wait_started.elapsed();
+            let admission = production_composition_admission_gate().snapshot();
+            let scheduler_state = invocation
+                .code_index_schedulers
+                .dashboard_freshness(project_root)
+                .await;
+            // The scope gate is the usual reason a Ready generation is never
+            // admitted: report both sides of the identity comparison so a
+            // mismatch is diagnosable from the failure message alone.
+            let mounted_identity = invocation
+                .code_index_schedulers
+                .latest_complete_ready(project_root)
+                .await
+                .map(|latest| {
+                    let generation = latest.generation();
+                    format!(
+                        "project_id={:?}, repository={:?}, worktree={:?}",
+                        generation.manifest().project_id,
+                        generation.snapshot().repository,
+                        generation.snapshot().worktree,
+                    )
+                });
+            Err(TraceDecayError::Config {
+                message: format!(
+                    "production-composition code index did not publish for '{}' \
+                     after {} ms; composition gate capacity={}, admitted={}, waiting={}; \
+                     scheduler_state={scheduler_state:?}; \
+                     awaited_scope=project_id={:?}, repository={:?}, worktree={:?}; \
+                     mounted_generation={mounted_identity:?}",
+                    project_root.display(),
+                    elapsed_wait.as_millis(),
+                    admission.capacity,
+                    admission.admitted,
+                    admission.waiting,
+                    scope.project_id,
+                    scope.repository_id,
+                    scope.worktree_id,
+                ),
+            })
+        }
+    }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 impl Drop for ProductionProjectCompositionHarnessV1 {
     fn drop(&mut self) {
         let Some(resources) = self.resources.take() else {
             return;
         };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(hotpath::future!(
-                shutdown_production_project_harness(resources),
-                label = "daemon.harness.shutdown"
-            ));
+        // A test drops its harness as its runtime stops, and that runtime
+        // cancels anything spawned on it. Unshut, the composition's native
+        // tasks keep every store and its threads alive for the whole process,
+        // so the shutdown runs to completion on a thread of its own.
+        let shutdown = move || match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(tracing::Instrument::instrument(
+                Box::pin(shutdown_production_project_harness(resources)),
+                tracing::trace_span!("daemon.harness.shutdown"),
+            )),
+            Err(error) => tracing::warn!(
+                event = "production_harness_drop_shutdown_unavailable",
+                %error,
+                "production-composition harness dropped without a shutdown runtime"
+            ),
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("tracedecay-harness-shutdown".to_owned())
+            .spawn(shutdown)
+        {
+            tracing::warn!(
+                event = "production_harness_drop_shutdown_unavailable",
+                %error,
+                "production-composition harness dropped without a shutdown thread"
+            );
         }
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
+    #[cfg(unix)]
+    if let Err(reason) = resources
+        .store_administration
+        .shutdown_manual_branch_publications()
+        .await
+    {
+        log_daemon_event(
+            "manual_branch_publication",
+            &[
+                ("outcome", "harness_shutdown_failed".to_owned()),
+                ("reason", reason),
+            ],
+        );
+    }
     resources
         .store_administration
         .join_project_server_retirements()
         .await;
-    let servers = hotpath::future!(
+    resources
+        .http_application_registry
+        .drain_project_routes_for_shutdown()
+        .await;
+    let servers = tracing::Instrument::instrument(
         detach_project_servers(&resources.store_administration),
-        label = "daemon.harness.detach"
+        tracing::trace_span!("daemon.harness.detach"),
     )
     .await;
-    resources.servers.clear();
+    let handed_out = resources
+        .servers
+        .drain()
+        .map(|(_, server)| Arc::downgrade(&server))
+        .collect::<Vec<_>>();
     for server in &servers {
         server.ledger_writes_settled().await;
         server.shutdown_background_tasks().await;
     }
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async {
             resources
                 .store_administration
                 .session_temporal_refresh_schedulers()
                 .shutdown()
+                .await;
+            resources
+                .store_administration
+                .release_profile_session_refresh_services()
                 .await;
             resources.store_administration.shutdown_session_sync().await;
             resources
@@ -946,59 +1372,72 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
                 .shutdown_host_admission_replay()
                 .await;
         },
-        label = "daemon.harness.shutdown_sessions"
+        tracing::trace_span!("daemon.harness.shutdown_sessions"),
     )
     .await;
-    hotpath::future!(
-        resources.invocation.shutdown(),
-        label = "daemon.harness.shutdown_invocation"
+    tracing::Instrument::instrument(
+        resources.invocation.shutdown(None),
+        tracing::trace_span!("daemon.harness.shutdown_invocation"),
     )
     .await;
-    hotpath::future!(
+    tracing::Instrument::instrument(
         shutdown_detached_project_servers(
             tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
             servers,
         ),
-        label = "daemon.harness.shutdown_detached"
+        tracing::trace_span!("daemon.harness.shutdown_detached"),
     )
     .await;
-    match resources
+    if let Err(error) = resources
         .store_administration
-        .prepare_memory_graph_reconciliation_shutdown()
+        .git_index_transaction_services()
+        .shutdown()
         .await
     {
-        Ok(owner) => {
-            owner.cancel();
-            hotpath::future!(
-                async {
-                    if let Err(error) = owner.shutdown().await {
-                        tracing::warn!(
-                            event = "production_harness_graph_shutdown_failed",
-                            error = %error,
-                            "production-composition graph reconciliation tasks did not stop cleanly"
-                        );
-                    }
-                    if let Err(error) = resources
-                        .store_administration
-                        .close_retained_graph_runtimes_for_shutdown()
-                        .await
-                    {
-                        tracing::warn!(
-                            event = "production_harness_graph_shutdown_failed",
-                            error = %error,
-                            "production-composition graph runtimes did not close cleanly"
-                        );
-                    }
-                },
-                label = "daemon.harness.shutdown_graph"
-            )
-            .await;
-        }
-        Err(error) => tracing::warn!(
+        tracing::warn!(
+            event = "production_harness_git_transactions_shutdown_failed",
+            error = ?error,
+            "production-composition Git transaction actors did not stop cleanly"
+        );
+    }
+    if let Err(error) = resources
+        .store_administration
+        .native_integration_services()
+        .shutdown()
+        .await
+    {
+        tracing::warn!(
+            event = "production_harness_native_integration_shutdown_failed",
+            error = ?error,
+            "production-composition native integration actors did not stop cleanly"
+        );
+    }
+    #[cfg(unix)]
+    resources
+        .store_administration
+        .shutdown_retirement_reapers()
+        .await;
+    // A server its caller still holds keeps its stores leased, and the caller
+    // cannot drop it while it awaits this shutdown, so waiting would only
+    // spend the budget. Close what is idle in one pass instead.
+    let store_close_deadline = if handed_out.iter().any(|server| server.strong_count() != 0) {
+        std::time::Instant::now()
+    } else {
+        std::time::Instant::now() + tracedecay_daemon_service::shutdown::DAEMON_STORE_CLOSE_RESERVE
+    };
+    if let Err(error) = tracing::Instrument::instrument(
+        resources
+            .store_administration
+            .close_stores_for_shutdown(store_close_deadline),
+        tracing::trace_span!("daemon.harness.shutdown_graph"),
+    )
+    .await
+    {
+        tracing::warn!(
             event = "production_harness_graph_shutdown_failed",
             error = %error,
-            "production-composition graph shutdown owner was unavailable"
-        ),
+            "production-composition stores did not close cleanly"
+        );
     }
     drop(resources);
 }
@@ -1006,13 +1445,71 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
 #[cfg(test)]
 mod code_index_activation_test {
     use std::process::Command;
+    use std::sync::Arc;
 
     use tempfile::TempDir;
+    use tracedecay_runtime_core::cancellation::CancellationToken;
 
     use super::*;
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_composition_opens_fill_but_never_exceed_admission_capacity() {
+        let gate = production_composition_admission_gate();
+        let open_count = gate.capacity().saturating_add(2);
+        let start = Arc::new(tokio::sync::Barrier::new(open_count.saturating_add(1)));
+        let mut openings = tokio::task::JoinSet::new();
+
+        for ordinal in 0..open_count {
+            let isolation = TempDir::new().expect("production harness isolation");
+            let project = isolation.path().join(format!("project-{ordinal}"));
+            std::fs::create_dir_all(&project).expect("project root");
+            std::fs::write(project.join("lib.rs"), "pub fn indexed_symbol() {}\n")
+                .expect("project source");
+            for arguments in [
+                vec!["init", "-q"],
+                vec!["add", "."],
+                vec![
+                    "-c",
+                    "user.name=TraceDecay Test",
+                    "-c",
+                    "user.email=tracedecay@example.invalid",
+                    "commit",
+                    "-qm",
+                    "seed project",
+                ],
+            ] {
+                let status = Command::new(
+                    tracedecay_runtime_core::git::try_git_program()
+                        .expect("absolute git executable should resolve"),
+                )
+                .args(&arguments)
+                .current_dir(&project)
+                .status()
+                .expect("git fixture command");
+                assert!(status.success(), "git {arguments:?}");
+            }
+
+            let start = Arc::clone(&start);
+            openings.spawn(async move {
+                start.wait().await;
+                let harness =
+                    ProductionProjectCompositionHarnessV1::open(isolation.path(), [project])
+                        .await
+                        .expect("admitted production composition opens");
+                harness.shutdown().await;
+                isolation
+            });
+        }
+
+        start.wait().await;
+        while let Some(opened) = openings.join_next().await {
+            opened.expect("production composition task");
+        }
+
+        assert_eq!(gate.high_water_mark(), gate.capacity());
+    }
+
     #[tokio::test]
-    #[hotpath::skip]
     async fn fresh_profile_first_reconcile_makes_query_authority_ready_within_existing_bound() {
         let isolation = TempDir::new().expect("production harness isolation");
         let project = isolation.path().join("project");
@@ -1054,11 +1551,181 @@ mod code_index_activation_test {
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
             "a fresh harness must install the profile-scoped default selection"
         );
-        let query = timeout(Duration::from_secs(20), async {
+        let query = search_until_indexed_symbol_serves(&harness, &project).await;
+        assert!(
+            query["results"].as_array().is_some_and(|results| {
+                results
+                    .iter()
+                    .any(|result| result["display"]["name"] == json!("indexed_symbol"))
+            }),
+            "fresh-profile production search did not serve the indexed symbol: {query}"
+        );
+        harness.shutdown().await;
+    }
+
+    /// A linked worktree mounted without the `sync.watch_linked_worktrees`
+    /// opt-in is the typed `linked_worktree_disabled` route: the composition
+    /// must open on it (the daemon does), not exhaust the publication wait
+    /// for a generation that admission forbids. Until an operator indexes it,
+    /// status and readiness waits name the same policy refusal search does;
+    /// once `tracedecay_admin_sync` seats a generation, status and search
+    /// both serve it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn linked_worktree_without_opt_in_mounts_as_the_typed_disabled_route() {
+        let isolation = TempDir::new().expect("production harness isolation");
+        let primary = isolation.path().join("primary");
+        std::fs::create_dir_all(&primary).expect("primary root");
+        std::fs::write(primary.join("lib.rs"), "pub fn indexed_symbol() {}\n")
+            .expect("primary source");
+        let linked = isolation.path().join("linked");
+        let linked_arg = linked.to_string_lossy().into_owned();
+        for arguments in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=TraceDecay Test",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "-qm",
+                "seed project",
+            ],
+            vec!["worktree", "add", "-q", "-b", "linked", &linked_arg],
+        ] {
+            let status = Command::new(
+                tracedecay_runtime_core::git::try_git_program()
+                    .expect("absolute git executable should resolve"),
+            )
+            .args(&arguments)
+            .current_dir(&primary)
+            .status()
+            .expect("git fixture command");
+            assert!(status.success(), "git {arguments:?}");
+        }
+
+        let harness = ProductionProjectCompositionHarnessV1::open(
+            isolation.path(),
+            [primary.clone(), linked.clone()],
+        )
+        .await
+        .expect("a disabled linked route mounts without a publication");
+        let schedulers = &harness
+            .resources
+            .as_ref()
+            .expect("live harness")
+            .invocation
+            .code_index_schedulers;
+        let project_id = tracedecay_domain::ProjectId::new(
+            harness
+                .project_id(&linked)
+                .await
+                .expect("linked project identity"),
+        )
+        .expect("typed project identity");
+        let linked_scope =
+            tracedecay_code_index_runtime::resolved_scope_for_project(&linked, &project_id)
+                .expect("linked route scope");
+        assert_eq!(
+            schedulers.automatic_admission_for_scope(&linked_scope),
+            Some(
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+            )
+        );
+        assert!(schedulers.latest_generation_id(&primary).await.is_some());
+        assert!(schedulers.latest_generation_id(&linked).await.is_none());
+        let payload = super::journey_test_support::tool_payload(
+            &harness
+                .call_tool(
+                    &linked,
+                    "tracedecay_search",
+                    json!({ "query": "indexed_symbol", "limit": 1, "format": "json" }),
+                )
+                .await
+                .expect("linked-route search response"),
+        );
+        assert_eq!(payload["status"], json!("unavailable"), "{payload}");
+        assert_eq!(
+            payload["reason"],
+            json!("linked_worktree_disabled"),
+            "{payload}"
+        );
+
+        let status = super::journey_test_support::tool_payload(
+            &harness
+                .call_tool(&linked, "tracedecay_status", json!({ "format": "json" }))
+                .await
+                .expect("linked-route status response"),
+        );
+        assert_eq!(
+            status["retrieval_serving"],
+            json!({ "status": "unavailable", "reason": "linked_worktree_disabled" }),
+            "{status}"
+        );
+        let warning = status["code_index_freshness_warning"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the policy refusal names its remediation: {status}"));
+        assert!(warning.contains("tracedecay sync"), "{warning}");
+        assert!(warning.contains("sync.watch_linked_worktrees"), "{warning}");
+        let waited = super::journey_test_support::tool_payload(
+            &harness
+                .call_tool(
+                    &linked,
+                    "tracedecay_status",
+                    json!({ "wait_for": { "state": "fresh", "timeout_ms": 20_000 }, "format": "json" }),
+                )
+                .await
+                .expect("linked-route readiness wait response"),
+        );
+        assert_eq!(
+            waited["wait"],
+            json!({ "outcome": "unavailable", "reason": "linked_worktree_disabled" }),
+            "{waited}"
+        );
+
+        let receipt = super::journey_test_support::tool_payload(
+            &harness
+                .call_tool(
+                    &linked,
+                    "tracedecay_admin_sync",
+                    json!({ "format": "json" }),
+                )
+                .await
+                .expect("linked-route operator sync response"),
+        );
+        assert_eq!(receipt["status"], json!("queued"), "{receipt}");
+        let seated = super::journey_test_support::tool_payload(
+            &harness
+                .call_tool(
+                    &linked,
+                    "tracedecay_status",
+                    json!({ "wait_for": { "state": "fresh", "timeout_ms": 20_000 }, "format": "json" }),
+                )
+                .await
+                .expect("linked-route seat wait response"),
+        );
+        assert_eq!(seated["wait"]["outcome"], json!("reached"), "{seated}");
+        assert_eq!(
+            seated["retrieval_serving"]["status"],
+            json!("serving"),
+            "{seated}"
+        );
+        search_until_indexed_symbol_serves(&harness, &linked).await;
+        harness.shutdown().await;
+    }
+
+    /// Search `project` for `indexed_symbol` until a result names it, retrying
+    /// only the transient refusals a route reports while its query authority
+    /// installs; any other refusal fails the test with its payload.
+    async fn search_until_indexed_symbol_serves(
+        harness: &ProductionProjectCompositionHarnessV1,
+        project: &Path,
+    ) -> serde_json::Value {
+        timeout(Duration::from_secs(20), async {
             loop {
                 let response = harness
                     .call_tool(
-                        &project,
+                        project,
                         "tracedecay_search",
                         json!({
                             "query": "indexed_symbol",
@@ -1067,7 +1734,7 @@ mod code_index_activation_test {
                         }),
                     )
                     .await
-                    .expect("fresh-profile production search response");
+                    .expect("production search response");
                 let payload = super::journey_test_support::tool_payload(&response);
                 let served_symbol = payload["results"].as_array().is_some_and(|results| {
                     results
@@ -1087,28 +1754,85 @@ mod code_index_activation_test {
                                 | "search_capacity_unavailable"
                         )
                     );
-                    assert!(
-                        retryable,
-                        "fresh-profile production search failed terminally: {payload}"
-                    );
+                    assert!(retryable, "production search failed terminally: {payload}");
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 }
-                panic!(
-                    "fresh-profile production search completed without indexed_symbol: {payload}"
-                );
+                panic!("production search completed without indexed_symbol: {payload}");
             }
         })
         .await
-        .expect("fresh-profile query authority becomes ready within the existing bound");
-        assert!(
-            query["results"].as_array().is_some_and(|results| {
-                results
-                    .iter()
-                    .any(|result| result["display"]["name"] == json!("indexed_symbol"))
-            }),
-            "fresh-profile production search did not serve the indexed symbol: {query}"
-        );
+        .expect("query authority becomes ready within the existing bound")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branch_publication_respects_lifecycle_contention_until_owner_cancellation() {
+        let isolation = TempDir::new().expect("production harness isolation");
+        let project = isolation.path().join("project");
+        std::fs::create_dir_all(&project).expect("project root");
+        std::fs::write(project.join("lib.rs"), "pub fn indexed_symbol() {}\n")
+            .expect("project source");
+        for arguments in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=TraceDecay Test",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "-qm",
+                "seed project",
+            ],
+        ] {
+            let status = Command::new(
+                tracedecay_runtime_core::git::try_git_program()
+                    .expect("absolute git executable should resolve"),
+            )
+            .args(&arguments)
+            .current_dir(&project)
+            .status()
+            .expect("git fixture command");
+            assert!(status.success(), "git {arguments:?}");
+        }
+
+        let harness =
+            ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+                .await
+                .expect("production harness");
+        let data_root = harness
+            .project_data_root(&project)
+            .await
+            .expect("project data root");
+        let cancellation = CancellationToken::new();
+        let owner_cancellation = cancellation.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn(async move {
+            let _lease = acquire_manual_branch_lifecycle(&data_root, "main")
+                .await
+                .expect("lifecycle owner");
+            ready_tx.send(()).expect("publish owner readiness");
+            owner_cancellation.cancelled().await;
+        });
+        ready_rx.await.expect("lifecycle owner started");
+
+        {
+            let publication = harness.track_worktree_branch(&project, &project, "main");
+            tokio::pin!(publication);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), &mut publication)
+                    .await
+                    .is_err(),
+                "harness publication must queue behind the lifecycle owner, not bypass it"
+            );
+
+            cancellation.cancel();
+            owner.await.expect("cancelled lifecycle owner");
+            publication
+                .await
+                .expect("queued publication proceeds once the lifecycle owner releases");
+        }
         harness.shutdown().await;
     }
 }
@@ -1123,16 +1847,31 @@ mod journey_test_support;
 mod delivery_read_gate_journey_test;
 
 #[cfg(test)]
+mod advisory_cycle_language_journey_test;
+
+#[cfg(test)]
 mod generation_retention_test;
 
 #[cfg(test)]
 mod configuration_idempotency_journey_test;
 
 #[cfg(test)]
-mod semantic_activation_journey_test;
+mod configuration_protected_preview_journey_test;
 
 #[cfg(test)]
-mod semantic_availability_journey_test;
+mod configuration_set_behavior_test;
 
 #[cfg(test)]
-mod semantic_index_fixture_check_test;
+mod read_only_project_open_journey_test;
+
+#[cfg(test)]
+mod lcm_preserved_profile_journey_test;
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod idle_history_reads_journey_test;
+
+#[cfg(test)]
+mod source_body_readiness_journey_test;
+
+#[cfg(test)]
+mod drop_shutdown_journey_test;

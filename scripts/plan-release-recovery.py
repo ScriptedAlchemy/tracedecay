@@ -43,7 +43,12 @@ def plan(
         for target in targets
         for asset in target_assets(target, tag, profile)
     }
-    fixed = {"SHA256SUMS", "install.sh"} if profile == "stable" else {"SHA256SUMS"}
+    # Both profiles publish the installer beside the archives, so `install.sh`
+    # is immutable release metadata on a prerelease exactly as it is on a
+    # stable release. While it counted as unexpected under `beta`, uploading
+    # it to a prerelease would have made every later recovery run for that tag
+    # abort.
+    fixed = {"SHA256SUMS", "install.sh"}
     unexpected = sorted(existing - expected_mutable - fixed)
     if unexpected:
         raise SystemExit(

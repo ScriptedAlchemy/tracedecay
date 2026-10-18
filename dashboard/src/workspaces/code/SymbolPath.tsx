@@ -1,7 +1,7 @@
 /**
- * CONNECTION — `GET /api/plugins/graph/path?from=&to=&max_depth=`.
+ * CONNECTION. `GET /api/plugins/graph/path?from=&to=&max_depth=`.
  *
- * "Are these two symbols connected at all, and through what?" — over the WHOLE
+ * "Are these two symbols connected at all, and through what?", over the WHOLE
  * indexed graph, in either direction, along every edge kind the index holds.
  *
  * This is deliberately not the question `CallChain` asks, and the two must not
@@ -10,22 +10,22 @@
  * BFS that follows outgoing `calls` edges only, from a focus, among the symbols
  * already drawn on the trace field. This route's producer is `find_path`, a
  * bidirectional walk over all edge kinds between any two node IDs in the index.
- * So a symbol pair with no call chain can still be connected here — through an
- * import, a containment, a type reference — and that difference is the whole
+ * So a symbol pair with no call chain can still be connected here, through an
+ * import, a containment, or a type reference, and that difference is the whole
  * reason both exist. Nothing below describes a result from this route as a call
  * path.
  *
  * Because the endpoints are not restricted to a drawn neighbourhood, they
  * cannot come from a dropdown of what is on screen; each is chosen by searching
  * the index through `/api/plugins/graph/search`, the same route the workspace's
- * own symbol search uses. Searches run on submit rather than per keystroke —
+ * own symbol search uses. Searches run on submit rather than per keystroke,
  * the graph store is heavy and a read per keypress would be a read nobody waits
  * for.
  *
  * Honesty. Three separate absences reach this surface and each keeps its own
  * words:
  *
- *   - `found: false` is a MEASUREMENT — the producer searched to `max_depth`
+ *   - `found: false` is a MEASUREMENT, the producer searched to `max_depth`
  *     and no route existed within it. It is not an error, and it is not proof
  *     that no route exists, because the search is depth-bounded. So a negative
  *     prints the depth it searched to, and never says "not connected".
@@ -60,7 +60,7 @@ const BASE = '/api/plugins/graph';
 const CANDIDATES = 6;
 
 /** One end of the query: what was typed, what was searched for, and what was
- * chosen. The three are separate because they can legitimately disagree — a
+ * chosen. The three are separate because they can legitimately disagree, a
  * chosen symbol stays chosen while the reader types a new search. */
 interface Endpoint {
   readonly term: string;
@@ -98,7 +98,7 @@ export function SymbolPath() {
       </div>
       <p className="text-3xs leading-snug text-text-muted">
         any route between two symbols anywhere in the index, in either direction and along
-        every edge kind — not only calls
+        every edge kind, not only calls
       </p>
       <EndpointPicker label="from" endpoint={from} onChange={setFrom} />
       <EndpointPicker label="to" endpoint={to} onChange={setTo} />
@@ -196,7 +196,7 @@ function EndpointPicker({
           </p>
         ) : results.length === 0 ? (
           <p className="pl-[2.375rem] text-2xs leading-relaxed text-text-muted">
-            no indexed symbol matches “{endpoint.submitted}”
+            no indexed symbol matches "{endpoint.submitted}"
           </p>
         ) : (
           <ul
@@ -239,7 +239,7 @@ function PathReading({ payload }: { payload: GraphPathPayloadV1 }) {
     return (
       <p className="py-1 text-2xs leading-relaxed text-state-unknown">
         no route within {payload.max_depth} hops, searched in either direction along every
-        edge kind. A longer route is not excluded — the search is depth-bounded, so this is
+        edge kind. A longer route is not excluded, the search is depth-bounded, so this is
         a measurement at that depth and not a statement that the two are unconnected.
       </p>
     );

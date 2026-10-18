@@ -12,9 +12,9 @@
     "required_first": [
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body",
-      "tracedecay_outline",
-      "tracedecay_read",
+      "tracedecay_find_exact_symbol",
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
       "tracedecay_grep"
     ],
     "acceptable": [
@@ -37,11 +37,25 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "id",
-    "customer",
-    "items"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states id",
+          "pattern": "\\bid\\b"
+        },
+        {
+          "id": "states customer",
+          "pattern": "\\bcustomer\\b"
+        },
+        {
+          "id": "states items",
+          "pattern": "\\bitems\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
   "notes": "Order has id, customer, items."
 }

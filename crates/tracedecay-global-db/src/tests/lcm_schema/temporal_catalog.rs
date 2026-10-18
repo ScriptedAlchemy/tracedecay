@@ -1,7 +1,7 @@
 use super::*;
 
-#[tokio::test]
-async fn temporal_schema_complete_object_catalog() {
+#[asupersync::test]
+async fn fresh_temporal_schema_stores_and_searches_a_summary_node() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
 
@@ -9,20 +9,57 @@ async fn temporal_schema_complete_object_catalog() {
         .await
         .expect("temporal schema initialization should not error");
     drop(db);
-
-    let mut expected = TEMPORAL_SCHEMA_OBJECTS
-        .iter()
-        .map(|(object_type, object_name)| ((*object_type).to_string(), (*object_name).to_string()))
-        .collect::<Vec<_>>();
-    expected.sort();
-    assert_eq!(temporal_schema_object_catalog(&db_path).await, expected);
     assert!(
         table_exists(&db_path, "lcm_raw_messages").await,
         "fresh initialization must compose the final temporal and LCM schemas"
     );
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "INSERT INTO retrieval_anchors (
+            anchor_id, anchor_json, owner_json, projection_generation
+         ) VALUES ('fresh-anchor', '{}', '{}', 'test');
+         INSERT INTO session_summary_nodes (
+            summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+            summary_text, summary_hash, summary_token_count, source_token_count,
+            source_horizon_json, created_at
+         ) VALUES (
+            'fresh-summary', 'fresh-session', 'test', 'fresh-session', 0, 'fresh-anchor',
+            'fresh summary text quokka migration notes', 'hash', 1, 1, '{}', 100
+         );",
+    )
+    .await
+    .unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT n.summary_id, n.session_id, n.summary_text, n.created_at
+             FROM session_summary_nodes_fts
+             JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid
+             WHERE session_summary_nodes_fts MATCH 'quokka'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("FTS finds the summary");
+    assert_eq!(
+        (
+            row.get::<String>(0).unwrap(),
+            row.get::<String>(1).unwrap(),
+            row.get::<String>(2).unwrap(),
+            row.get::<i64>(3).unwrap(),
+        ),
+        (
+            "fresh-summary".to_string(),
+            "fresh-session".to_string(),
+            "fresh summary text quokka migration notes".to_string(),
+            100,
+        )
+    );
+    assert!(rows.next().await.unwrap().is_none());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_payload_manifest_schema_is_payload_global() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -134,7 +171,7 @@ async fn temporal_payload_manifest_schema_is_payload_global() {
 
 mod admission;
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -150,7 +187,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND retrieval_anchor_id = 'anchor-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -160,7 +197,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND message_id = 'message-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -169,13 +206,11 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
         (
             "SELECT occurrence.occurrence_id
              FROM session_occurrences AS occurrence
-             JOIN session_temporal_observation_effects AS effect
-               ON effect.observation_id = occurrence.source_observation_id
-              AND effect.session_id = occurrence.session_id
+                  INDEXED BY idx_session_occurrences_message
              WHERE occurrence.session_id = 'session-one'
-               AND occurrence.generation = 1
                AND occurrence.message_id = 'message-one'
-             ORDER BY effect.observation_sequence,
+               AND +occurrence.generation <= 1
+             ORDER BY occurrence.source_sequence,
                       occurrence.projection_output_ordinal,
                       occurrence.occurrence_id
              LIMIT 1",
@@ -185,7 +220,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND thread_id = 'thread-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -195,7 +230,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND turn_id = 'turn-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -205,7 +240,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND agent_id = 'agent-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -215,7 +250,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT entity_id
              FROM session_current_entities
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND current_occurrence_id = 'occurrence-one'",
             "idx_session_current_entities_occurrence",
         ),
@@ -223,7 +258,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT assertion_id
              FROM session_assertions
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND object_anchor_id = 'anchor-object'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, assertion_id",
@@ -233,7 +268,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT assertion_id
              FROM session_assertions
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND assertion_kind = 'corrects'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, assertion_id",
@@ -243,7 +278,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT assertion_id
              FROM session_assertions
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND knowledge_at >= 0
              ORDER BY knowledge_at, assertion_id",
             "idx_session_assertions_generation_order",
@@ -263,7 +298,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_shapes() {
     const OCCURRENCE_ROOT_INDEX: &str = "idx_session_occurrences_root_generation_order";
     const SUMMARY_ROOT_INDEX: &str = "idx_session_summary_nodes_root_created_order";
@@ -380,26 +415,27 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
              )
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id,
-                role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, index_text
              )
              SELECT
                 printf('root-session-%02d', value % 8),
                 1,
                 printf('root-occurrence-%06d', value),
                 'root-observation',
+                1,
                 'test',
                 value,
                 'root-anchor',
+                '[]',
                 'assistant',
                 value / 8,
                 json_object('kind', 'unknown'),
                 '{{}}',
                 '0000000000000000000000000000000000000000000000000000000000000000',
                 15,
-                'root occurrence',
                 'root occurrence'
              FROM sequence;"
         ))
@@ -415,15 +451,21 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                 SELECT value + 1 FROM sequence WHERE value < {end}
              )
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, created_at
              )
              SELECT
                 printf('root-summary-%06d', value),
                 printf('root-session-%02d', value % 8),
+                'test',
+                printf('root-session-%02d', value % 8),
+                0,
                 'root-anchor',
                 'root summary',
-                'root summary',
+                'hash',
+                1,
+                1,
                 '{{}}',
                 value / 8
              FROM sequence;"
@@ -562,7 +604,7 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rejects_unexpected_indexes_without_dropping_them() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -615,7 +657,7 @@ async fn temporal_schema_rejects_unexpected_indexes_without_dropping_them() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_refuses_markerless_malformed_fts_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -650,7 +692,7 @@ async fn temporal_schema_refuses_markerless_malformed_fts_without_mutation() {
         "unexpected reason: {reason}"
     );
     assert!(
-        !table_exists(&db_path, "session_temporal_schema_migrations").await,
+        !table_exists(&db_path, "tracedecay_schema_version").await,
         "typed refusal must not install the temporal marker"
     );
     assert!(
@@ -673,7 +715,7 @@ async fn temporal_schema_refuses_markerless_malformed_fts_without_mutation() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -693,11 +735,12 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
             anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES ('fts-anchor', '{}', '{}', 'test');
          INSERT INTO session_summary_nodes (
-            summary_id, session_id, summary_anchor_id, summary_text, index_text,
+            summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+            summary_text, summary_hash, summary_token_count, source_token_count,
             source_horizon_json, created_at
          ) VALUES (
-            'fts-summary', 'fts-session', 'fts-anchor',
-            'existing summary', 'migration-search summary', '{}', 100
+            'fts-summary', 'fts-session', 'test', 'fts-session', 0, 'fts-anchor',
+            'existing summary', 'hash', 1, 1, '{}', 100
          );",
     )
     .await
@@ -744,7 +787,7 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rejects_missing_graph_publication_authority_without_rebuilding_it() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");

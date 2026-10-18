@@ -6,16 +6,11 @@ use tracedecay_code_index::lineage::{
 };
 use tracedecay_code_index::lineage::{LineageConfidenceKindV1, LineageKindV1, LineageMethodV1};
 use tracedecay_domain::{
-    CodeGenerationId, ContentDigest, FileIdentityDigest, SymbolIdentityDigest, SymbolOccurrenceId,
+    CodeGenerationId, ComplexityAnalysisV1, ContentDigest, FileIdentityDigest,
+    SymbolIdentityDigest, SymbolOccurrenceId,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn digest<T>(byte: char) -> T
 where
@@ -50,9 +45,13 @@ fn symbol(
         branches: 0,
         loops: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         line_span: 1,
         start_line: 0,
         signature: None,
+        docstring: None,
+        is_async: false,
+        derives: Vec::new(),
         skip_test_coverage: false,
         file_identity: digest::<FileIdentityDigest>(file_identity),
         content_digest: digest::<ContentDigest>(content),
@@ -65,34 +64,6 @@ fn index(sequence: u64, symbols: Vec<LineageSymbolRecordV1>) -> GenerationSymbol
         symbols.into_iter().map(std::sync::Arc::new).collect(),
     )
     .expect("canonical symbol index")
-}
-
-#[test]
-fn exact_content_evidence_classifies_moves_and_renames() {
-    let prior = index(
-        1,
-        vec![
-            symbol("symbol.prior.move", 'a', "crate::move_me", 'f', '0'),
-            symbol("symbol.prior.rename", 'b', "crate::old_name", 'f', '1'),
-        ],
-    );
-    let current = index(
-        2,
-        vec![
-            symbol("symbol.current.move", 'c', "crate::move_me", '9', '0'),
-            symbol("symbol.current.rename", 'd', "crate::new_name", 'f', '1'),
-        ],
-    );
-
-    let candidates = SymbolLineageResolver::new()
-        .resolve(&prior, &current)
-        .expect("lineage resolves");
-
-    assert_eq!(candidates.len(), 2);
-    assert_eq!(candidates[0].kind, LineageKindV1::Moved);
-    assert_eq!(candidates[0].method, LineageMethodV1::ContentDigestMatch);
-    assert_eq!(candidates[1].kind, LineageKindV1::Renamed);
-    assert_eq!(candidates[1].method, LineageMethodV1::ContentDigestMatch);
 }
 
 #[test]

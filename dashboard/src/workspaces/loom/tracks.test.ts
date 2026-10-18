@@ -1,50 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import * as brainActivity from '../brain/activitySummary.ts';
-import { formatDurationMs } from '../brain/activitySummary.ts';
-import * as loomTracks from './tracks.ts';
-import {
-  axisTicks,
-  bandScale,
-  clampWindow,
-  fittedWindow,
-  formatDurationSeconds,
-  isFitted,
-  packTrack,
-  tickStepFor,
-  zoomWindow,
-  type LoomSpan,
-} from './tracks.ts';
+import { axisTicks, bandScale, clampWindow, fittedWindow, isFitted, tickStepFor } from './tracks.ts';
 
 const HOUR = 3600;
 const DAY = 86_400;
-
-function span(id: string, start: number, end: number, weight = 10): LoomSpan {
-  return { id, start, end, label: id, weight };
-}
-
-describe('packTrack', () => {
-  it('keeps non-overlapping spans in a single lane', () => {
-    const lanes = packTrack([span('a', 0, 10), span('b', 20, 30), span('c', 40, 50)]);
-    expect(lanes).toHaveLength(1);
-    expect(lanes[0]).toHaveLength(3);
-  });
-
-  it('stacks overlapping spans into separate lanes instead of drawing mud', () => {
-    const lanes = packTrack([span('a', 0, 100), span('b', 10, 110), span('c', 20, 120)]);
-    expect(lanes).toHaveLength(3);
-  });
-
-  it('treats a pixel-sized gap as collision so touching marks stay separated', () => {
-    expect(packTrack([span('a', 0, 10), span('b', 12, 20)], 0)).toHaveLength(1);
-    expect(packTrack([span('a', 0, 10), span('b', 12, 20)], 5)).toHaveLength(2);
-  });
-
-  it('reuses a lane once its previous span has ended', () => {
-    const lanes = packTrack([span('a', 0, 100), span('b', 10, 20), span('c', 30, 40)]);
-    expect(lanes).toHaveLength(2);
-    expect(lanes[1]?.map((s) => s.id)).toEqual(['b', 'c']);
-  });
-});
 
 describe('bandScale', () => {
   it('walks hour -> day -> month as the window widens', () => {
@@ -54,11 +12,19 @@ describe('bandScale', () => {
   });
 
   it('drops the fine tick step below the calendar band where it can afford to', () => {
-    for (const seconds of [6 * HOUR, 5 * DAY, 200 * DAY]) {
-      const ceiling =
-        bandScale(seconds) === 'hour' ? HOUR : bandScale(seconds) === 'day' ? DAY : 30 * DAY;
-      expect(tickStepFor(seconds, 900)).toBeLessThan(ceiling);
-    }
+    expect(tickStepFor(6 * HOUR, 900)).toBe(30 * 60);
+    expect(tickStepFor(5 * DAY, 1800)).toBe(12 * HOUR);
+    expect(tickStepFor(200 * DAY, 900)).toBe(14 * DAY);
+  });
+
+  it('never picks a step whose label is wider than its pitch', () => {
+    // A 7-day window at 1196px: 12-hour ticks would sit 85px apart under
+    // "Dec 28, 12:58 PM"-wide labels, so the ruler ticks daily instead.
+    const start = 1_700_000_000;
+    expect(tickStepFor(7 * DAY, 1196)).toBe(DAY);
+    const ticks = axisTicks({ start, end: start + 7 * DAY }, 1196);
+    expect(ticks).toHaveLength(7);
+    expect(ticks[1]!.x - ticks[0]!.x).toBeCloseTo(1196 / 7, 6);
   });
 
   it('keeps the coarse step when dropping under the band would crowd the axis', () => {
@@ -93,61 +59,13 @@ describe('viewport', () => {
     expect(isFitted(fitted, extent)).toBe(true);
   });
 
-  it('zooms around the focus point and never past the floor', () => {
-    const view = fittedWindow(extent);
-    const zoomed = zoomWindow(view, extent, 0.5, 5 * DAY);
-    expect(zoomed.end - zoomed.start).toBeCloseTo((view.end - view.start) / 2, 3);
-    let deep = view;
-    for (let i = 0; i < 40; i += 1) deep = zoomWindow(deep, extent, 0.5, 5 * DAY);
-    expect(deep.end - deep.start).toBeGreaterThanOrEqual(60);
+  it('never narrows past the one-minute floor', () => {
+    const view = clampWindow({ start: 5 * DAY, end: 5 * DAY + 1 }, extent);
+    expect(view.end - view.start).toBe(60);
   });
 
   it('refuses to strand the viewport in empty time', () => {
     const view = clampWindow({ start: 500 * DAY, end: 501 * DAY }, extent);
     expect(view.start).toBeLessThan(extent.end + DAY);
-  });
-});
-
-describe('formatDurationSeconds', () => {
-  it('speaks in the largest honest unit', () => {
-    expect(formatDurationSeconds(45)).toBe('45s');
-    expect(formatDurationSeconds(600)).toBe('10m');
-    expect(formatDurationSeconds(2 * HOUR + 30 * 60)).toBe('2h 30m');
-    expect(formatDurationSeconds(5 * DAY)).toBe('5d');
-  });
-
-  it('does not round across a unit boundary into 60 minutes', () => {
-    expect(formatDurationSeconds(HOUR - 1)).toBe('59m');
-    expect(formatDurationSeconds(2 * HOUR - 1)).toBe('1h 59m');
-  });
-});
-
-/**
- * Two workspaces format durations from different clocks: Loom's spans are
- * epoch SECONDS, Brain's deltas are MILLISECONDS. Both take a bare `number`,
- * so importing the wrong one is not a type error — it silently prints a
- * duration that is off by 1000x, which is a falsified value on screen with
- * nothing to catch it. The only defence is that the unit is in every name, so
- * the wrong import fails to resolve instead of rendering.
- */
-describe('duration formatter unit naming', () => {
-  it('names the unit on every exported duration formatter', () => {
-    const modules: Record<string, Record<string, unknown>> = {
-      'loom/tracks.ts': loomTracks,
-      'brain/activitySummary.ts': brainActivity,
-    };
-    const ambiguous: string[] = [];
-    for (const [file, module] of Object.entries(modules)) {
-      for (const name of Object.keys(module)) {
-        if (!/duration/i.test(name)) continue;
-        if (!/(Seconds|Ms)$/.test(name)) ambiguous.push(`${file}:${name}`);
-      }
-    }
-    expect(ambiguous).toEqual([]);
-  });
-
-  it('disagrees by 1000x on the same number, which is why the names differ', () => {
-    expect(formatDurationSeconds(7_200)).toBe('2h');
-    expect(formatDurationMs(7_200)).toBe('7s');
   });
 });

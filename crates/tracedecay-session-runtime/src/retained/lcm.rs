@@ -1,0 +1,1105 @@
+//! Direct typed retained LCM reads over the mounted daemon authority.
+
+use std::sync::Arc;
+
+use tracedecay_contracts::retained_surfaces::{
+    LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmConvergenceStateV1, LcmConvergenceV1,
+    LcmDagDepthStatusV1, LcmDagStatusV1, LcmDescribeRequestV1, LcmDoctorFindingKindV1,
+    LcmDoctorFindingV1, LcmDoctorHealthStatusV1, LcmDoctorHealthV1, LcmDoctorProjectionStateV1,
+    LcmDoctorProjectionV1, LcmDoctorRequestV1, LcmDoctorResultV1, LcmExpandQueryRequestV1,
+    LcmExpandRequestV1, LcmGrepRequestV1, LcmLifecycleStatusV1, LcmLoadSessionRequestV1,
+    LcmPayloadCoverageStateV1, LcmPayloadCoverageV1, LcmPayloadGcStatusV1, LcmPayloadStatusV1,
+    LcmRedactionStatusV1, LcmStatusRequestV1, LcmStatusResultV1, LcmStatusV1, LcmStoreStatusV1,
+    LcmStoreTokenCoverageV1, LcmSummaryConvergenceReasonV1, LcmSummaryConvergenceStateV1,
+    LcmSummaryConvergenceStatusV1, MessageRelationshipScopeV1, MessageTypeFilterV1,
+    RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+    RetainedTimeFilterV1, RetrievalWorkerStatusV1,
+};
+use tracedecay_contracts::{
+    ApplicationOutcome, CancellationSignal, RequestContext, RetainedLcmExecutionPortV1,
+    RetainedLcmRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+    RetainedSurfaceExecutionFutureV1,
+};
+use tracedecay_domain::{DomainError, SessionId};
+use tracedecay_lcm::LcmStatus;
+use tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState;
+use tracedecay_lcm::types::LcmPayloadCoverageState;
+use tracedecay_session_memory::session::lcm::{
+    LcmAuthorityOperation, LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest,
+    LcmAuthorityResponse, LcmAuthorityUnavailableReason, LcmDoctorQuery, LcmStatusQuery,
+};
+use tracedecay_session_temporal_store::{
+    SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
+};
+use tracedecay_sessions::runtime::{SessionMessageType, SessionSearchScope};
+use tracedecay_sessions::serving::{
+    SessionConvergenceState, SessionConvergenceStatus, SessionProjectionServingState,
+    SessionProjectionServingStatus, SessionProjectionStaleReason,
+    SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
+    SessionProjectionWorkerRetryClass,
+};
+
+use super::ProfileSessionDatabaseSource;
+use crate::lcm_authority::MountedLcmAuthorityPort;
+use crate::session_retrieval::{
+    DaemonSessionRetrievalService, LcmDescribeServiceCommand, LcmDescribeServiceFuture,
+    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmRawStoreIdsFutureV1,
+    LcmSessionRawStatsFutureV1, SessionApplicationRetrievalFutureV1,
+    SessionApplicationRetrievalPortV1, SessionRetrievalStoreScope,
+};
+use tracedecay_contracts::retained_receipts::evidence_outcome;
+use tracedecay_runtime_core::timeutil::SearchTimeBound;
+use tracedecay_session_memory::context::ResolvedSessionIdentity;
+use tracedecay_session_memory::session::{SessionCursorRequest, SessionTemporalQuery};
+
+mod output;
+mod retrieval;
+
+enum DirectRetainedLcmAuthority<'a> {
+    /// Project-open mounts are already owned by the server and can be held
+    /// for the lifetime of the static retained-surface registration.  This
+    /// is the only project path; it never discovers or opens another store.
+    Project {
+        authority: Arc<dyn MountedLcmAuthorityPort>,
+        retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+    },
+    /// Profile retained calls use the selected profile session lease passed
+    /// upward by the root assembler.
+    Profile {
+        authority: Option<&'a dyn MountedLcmAuthorityPort>,
+        session_database: ProfileSessionDatabaseSource<'a>,
+        identity: ResolvedSessionIdentity,
+        refresh_status:
+            Option<Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
+    },
+}
+
+pub struct DirectRetainedLcmPortV1<'a> {
+    authority: DirectRetainedLcmAuthority<'a>,
+}
+
+enum ResolvedRetainedLcmAuthority<'a> {
+    Borrowed(&'a dyn MountedLcmAuthorityPort),
+    Owned(Arc<dyn MountedLcmAuthorityPort>),
+}
+
+impl ResolvedRetainedLcmAuthority<'_> {
+    fn as_ref(&self) -> &dyn MountedLcmAuthorityPort {
+        match self {
+            Self::Borrowed(authority) => *authority,
+            Self::Owned(authority) => authority.as_ref(),
+        }
+    }
+}
+
+/// The retained LCM projection helpers are shared by profile and project
+/// mounts.  They were originally written for the profile route, so this
+/// narrow adapter rewrites only the typed store-scope field before delegating
+/// to the already-admitted retrieval authority.  Query data, identity, and
+/// cancellation remain owned by that authority.
+struct ScopedRetrieval<'a> {
+    inner: &'a dyn SessionApplicationRetrievalPortV1,
+    scope: SessionRetrievalStoreScope,
+    cancellation: &'a CancellationSignal,
+}
+
+impl<'a> ScopedRetrieval<'a> {
+    fn new(
+        inner: &'a dyn SessionApplicationRetrievalPortV1,
+        scope: SessionRetrievalStoreScope,
+        cancellation: &'a CancellationSignal,
+    ) -> Self {
+        Self {
+            inner,
+            scope,
+            cancellation,
+        }
+    }
+}
+
+impl SessionApplicationRetrievalPortV1 for ScopedRetrieval<'_> {
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        self.inner.projection_serving_status()
+    }
+
+    fn retrieve_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        query: SessionTemporalQuery,
+    ) -> SessionApplicationRetrievalFutureV1<'a> {
+        self.inner
+            .retrieve_admitted_with_cancellation(context, self.cancellation, query)
+    }
+
+    fn describe_lcm_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        _cancellation: &'a CancellationSignal,
+        command: LcmDescribeServiceCommand,
+    ) -> LcmDescribeServiceFuture<'a> {
+        let command = LcmDescribeServiceCommand::new(
+            command.provider().to_owned(),
+            command.session_id().clone(),
+            command.target().clone(),
+            command.grain(),
+            self.scope,
+        );
+        self.inner
+            .describe_lcm_admitted(context, self.cancellation, command)
+    }
+
+    fn expand_lcm_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        _cancellation: &'a CancellationSignal,
+        command: LcmExpandServiceCommand,
+    ) -> LcmExpandServiceFuture<'a> {
+        let command = LcmExpandServiceCommand::new(
+            command.provider().to_owned(),
+            command.session_id().clone(),
+            command.target().clone(),
+            command.grain(),
+            command.content_slice(),
+            command.source_limit(),
+            command.cursor().map(str::to_owned),
+            self.scope,
+        )
+        .with_cursor_request(command.cursor_request().clone());
+        self.inner
+            .expand_lcm_admitted(context, self.cancellation, command)
+    }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        self.inner.lcm_raw_store_ids_admitted(identities)
+    }
+
+    fn lcm_session_raw_stats_admitted<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> LcmSessionRawStatsFutureV1<'a> {
+        self.inner.lcm_session_raw_stats_admitted(session_id)
+    }
+}
+
+enum RetainedLcmRetrieval<'a> {
+    Mounted(ScopedRetrieval<'a>),
+    Profile {
+        service: Box<DaemonSessionRetrievalService>,
+        cancellation: &'a CancellationSignal,
+    },
+}
+
+impl RetainedLcmRetrieval<'_> {
+    async fn load_session(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &LcmLoadSessionRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        match self {
+            Self::Mounted(service) => {
+                retrieval::execute_load_session(Some(service), context, request).await
+            }
+            Self::Profile {
+                service,
+                cancellation,
+            } => {
+                let service = ScopedRetrieval::new(
+                    service.as_ref(),
+                    SessionRetrievalStoreScope::Profile,
+                    cancellation,
+                );
+                retrieval::execute_load_session(Some(&service), context, request).await
+            }
+        }
+    }
+
+    async fn grep(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &LcmGrepRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        match self {
+            Self::Mounted(service) => {
+                retrieval::execute_grep(Some(service), context, request).await
+            }
+            Self::Profile {
+                service,
+                cancellation,
+            } => {
+                let service = ScopedRetrieval::new(
+                    service.as_ref(),
+                    SessionRetrievalStoreScope::Profile,
+                    cancellation,
+                );
+                retrieval::execute_grep(Some(&service), context, request).await
+            }
+        }
+    }
+
+    async fn describe(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &LcmDescribeRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        match self {
+            Self::Mounted(service) => {
+                retrieval::execute_describe(Some(service), context, request).await
+            }
+            Self::Profile {
+                service,
+                cancellation,
+            } => {
+                let service = ScopedRetrieval::new(
+                    service.as_ref(),
+                    SessionRetrievalStoreScope::Profile,
+                    cancellation,
+                );
+                retrieval::execute_describe(Some(&service), context, request).await
+            }
+        }
+    }
+
+    async fn expand(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &LcmExpandRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        match self {
+            Self::Mounted(service) => {
+                retrieval::execute_expand(Some(service), context, request).await
+            }
+            Self::Profile {
+                service,
+                cancellation,
+            } => {
+                let service = ScopedRetrieval::new(
+                    service.as_ref(),
+                    SessionRetrievalStoreScope::Profile,
+                    cancellation,
+                );
+                retrieval::execute_expand(Some(&service), context, request).await
+            }
+        }
+    }
+
+    async fn expand_query(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &LcmExpandQueryRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        match self {
+            Self::Mounted(service) => {
+                retrieval::execute_expand_query(Some(service), context, request).await
+            }
+            Self::Profile {
+                service,
+                cancellation,
+            } => {
+                let service = ScopedRetrieval::new(
+                    service.as_ref(),
+                    SessionRetrievalStoreScope::Profile,
+                    cancellation,
+                );
+                retrieval::execute_expand_query(Some(&service), context, request).await
+            }
+        }
+    }
+}
+
+impl<'a> DirectRetainedLcmPortV1<'a> {
+    pub fn profile(
+        session_database: ProfileSessionDatabaseSource<'a>,
+        identity: ResolvedSessionIdentity,
+        authority: Option<&'a dyn MountedLcmAuthorityPort>,
+        refresh_status: Option<
+            Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
+        >,
+    ) -> Self {
+        Self {
+            authority: DirectRetainedLcmAuthority::Profile {
+                authority,
+                session_database,
+                identity,
+                refresh_status,
+            },
+        }
+    }
+
+    /// Own the two independently mounted project authorities.  The factory
+    /// must pass the exact `project_lcm_authority` and
+    /// `project_session_application_retrieval_service` from the project
+    /// server; no path, registry, or database is accepted here.
+    pub fn project(
+        authority: Arc<dyn MountedLcmAuthorityPort>,
+        retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+    ) -> Self {
+        Self {
+            authority: DirectRetainedLcmAuthority::Project {
+                authority,
+                retrieval,
+            },
+        }
+    }
+
+    async fn lcm_authority<'b>(
+        &'b self,
+        context: &'b RetainedSurfaceExecutionContextV1<'b>,
+    ) -> Result<ResolvedRetainedLcmAuthority<'b>, RetainedSurfaceExecutionErrorV1> {
+        match &self.authority {
+            DirectRetainedLcmAuthority::Project { authority, .. } => {
+                Ok(ResolvedRetainedLcmAuthority::Borrowed(authority.as_ref()))
+            }
+            DirectRetainedLcmAuthority::Profile {
+                authority: Some(authority),
+                ..
+            } => Ok(ResolvedRetainedLcmAuthority::Borrowed(*authority)),
+            DirectRetainedLcmAuthority::Profile {
+                authority: None,
+                session_database,
+                identity,
+                ..
+            } => {
+                let database =
+                    super::bounded_execution(context, async { session_database().await }).await?;
+                let expected_shard = database.binding().shard_id.clone();
+                crate::lcm_authority::mount_registered_lcm_authority(
+                    database,
+                    identity.clone(),
+                    &expected_shard,
+                )
+                .map(ResolvedRetainedLcmAuthority::Owned)
+                .ok_or_else(|| {
+                    RetainedSurfaceExecutionErrorV1::unavailable(
+                        "the registered LCM authority could not be mounted for this profile shard",
+                    )
+                })
+            }
+        }
+    }
+
+    async fn retrieval_service<'b>(
+        &'b self,
+        context: &'b RetainedSurfaceExecutionContextV1<'b>,
+    ) -> Result<RetainedLcmRetrieval<'b>, RetainedSurfaceExecutionErrorV1> {
+        match &self.authority {
+            DirectRetainedLcmAuthority::Project { retrieval, .. } => {
+                Ok(RetainedLcmRetrieval::Mounted(ScopedRetrieval::new(
+                    retrieval.as_ref(),
+                    SessionRetrievalStoreScope::Project,
+                    context.cancellation_signal,
+                )))
+            }
+            DirectRetainedLcmAuthority::Profile {
+                session_database,
+                identity,
+                refresh_status,
+                ..
+            } => {
+                let database =
+                    super::bounded_execution(context, async { session_database().await }).await?;
+                let service = DaemonSessionRetrievalService::new_admitted_profile(
+                    database,
+                    identity.clone(),
+                    refresh_status.clone(),
+                )
+                .ok_or_else(|| {
+                    RetainedSurfaceExecutionErrorV1::unavailable(
+                        "the profile session retrieval service could not be admitted",
+                    )
+                })?;
+                Ok(RetainedLcmRetrieval::Profile {
+                    service: Box::new(service),
+                    cancellation: context.cancellation_signal,
+                })
+            }
+        }
+    }
+
+    #[tracing::instrument(name = "daemon.retained.lcm.status", level = "trace", skip_all)]
+    async fn execute_status(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &LcmStatusRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let provider = match request.provider.as_deref() {
+            Some(provider) if !provider.trim().is_empty() => provider.trim(),
+            Some(_) => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
+            None => "all",
+        };
+        let session_id = request
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty());
+        let authority = self.lcm_authority(context).await?;
+        let response = tracing::Instrument::instrument(
+            authority.as_ref().execute_admitted(
+                context.request_context,
+                context.cancellation_signal,
+                LcmAuthorityRequest::Status(LcmStatusQuery {
+                    provider: provider.to_owned(),
+                    session_id: session_id.map(str::to_owned),
+                    deep: request.deep.unwrap_or(false),
+                }),
+            ),
+            tracing::trace_span!("daemon.retained.lcm.status.execute"),
+        )
+        .await;
+        validate_receipt(context, &response, LcmAuthorityOperation::Status)?;
+        let authority_outcome = lcm_authority_outcome(response.outcome.clone());
+        let status = match (response.outcome, response.payload) {
+            (LcmAuthorityOutcome::Ready, Some(LcmAuthorityPayload::Status(status))) => status,
+            (outcome, _) => return Err(execution_error(outcome)),
+        };
+        evidence_outcome(
+            context,
+            RetainedSurfaceOperation::LcmStatus,
+            RetainedSurfaceResultV1::LcmStatus(LcmStatusResultV1 {
+                status: RetainedOutcomeStatusV1::Ok,
+                authority_outcome: Some(authority_outcome),
+                deep: Some(request.deep.unwrap_or(false)),
+                lcm: Some(lcm_status(status)),
+                projection: self.projection_serving_status().map(lcm_doctor_projection),
+                message: None,
+                provider: Some(provider.to_owned()),
+                reason: None,
+                session_id: session_id.map(str::to_owned),
+            }),
+        )
+    }
+
+    async fn execute_lcm_inner(
+        &self,
+        context: RetainedSurfaceExecutionContextV1<'_>,
+        request: RetainedLcmRequestV1<'_>,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        match request {
+            RetainedLcmRequestV1::Status(request) => self.execute_status(&context, request).await,
+            RetainedLcmRequestV1::Doctor(request) => self.execute_doctor(&context, request).await,
+            RetainedLcmRequestV1::LoadSession(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.load_session(&context, request).await
+            }
+            RetainedLcmRequestV1::Grep(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.grep(&context, request).await
+            }
+            RetainedLcmRequestV1::Describe(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.describe(&context, request).await
+            }
+            RetainedLcmRequestV1::Expand(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.expand(&context, request).await
+            }
+            RetainedLcmRequestV1::ExpandQuery(request) => {
+                let service = self.retrieval_service(&context).await?;
+                service.expand_query(&context, request).await
+            }
+        }
+    }
+
+    #[tracing::instrument(name = "daemon.retained.lcm.doctor", level = "trace", skip_all)]
+    async fn execute_doctor(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        _request: &LcmDoctorRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let authority = self.lcm_authority(context).await?;
+        let response = tracing::Instrument::instrument(
+            authority.as_ref().execute_admitted(
+                context.request_context,
+                context.cancellation_signal,
+                LcmAuthorityRequest::Doctor(LcmDoctorQuery),
+            ),
+            tracing::trace_span!("daemon.retained.lcm.doctor.execute"),
+        )
+        .await;
+        validate_receipt(context, &response, LcmAuthorityOperation::Doctor)?;
+        let authority_outcome = lcm_authority_outcome(response.outcome.clone());
+        let report = match (response.outcome, response.payload) {
+            (LcmAuthorityOutcome::Ready, Some(LcmAuthorityPayload::Doctor(report))) => report,
+            (outcome, _) => return Err(execution_error(outcome)),
+        };
+        let report = serde_json::from_value(report).map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the LCM doctor report could not be decoded: {error}"
+            ))
+        })?;
+        let health = lcm_doctor_health(report);
+        let projection = self.projection_serving_status().map(lcm_doctor_projection);
+        let status = lcm_doctor_outcome_status(&health, projection.as_ref());
+        // The health reason (a failed probe and its storage error, or a path
+        // API refusal) is the operator's only pointer to why diagnosis did
+        // not complete, so the result carries it at the top as well.
+        let reason = health.reason.clone();
+        evidence_outcome(
+            context,
+            RetainedSurfaceOperation::LcmDoctor,
+            RetainedSurfaceResultV1::LcmDoctor(LcmDoctorResultV1 {
+                status,
+                authority_outcome,
+                health: Some(health),
+                projection,
+                reason,
+            }),
+        )
+    }
+
+    /// The refresh worker's serving state for this store. A profile mount
+    /// assembled without its worker reports nothing rather than a fabricated
+    /// state.
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        match &self.authority {
+            DirectRetainedLcmAuthority::Project { retrieval, .. } => {
+                retrieval.projection_serving_status()
+            }
+            DirectRetainedLcmAuthority::Profile { refresh_status, .. } => refresh_status
+                .as_ref()
+                .map(|refresh_status| refresh_status.serving_status()),
+        }
+    }
+}
+
+fn lcm_doctor_outcome_status(
+    health: &LcmDoctorHealthV1,
+    projection: Option<&LcmDoctorProjectionV1>,
+) -> RetainedOutcomeStatusV1 {
+    match health.status {
+        // A healthy store whose projection is still converging (or has no
+        // serving worker) is partial evidence: nothing is wrong with the
+        // schema, but what it serves is not yet the preserved history.
+        LcmDoctorHealthStatusV1::Complete
+            if projection.is_some_and(|projection| {
+                projection.state != LcmDoctorProjectionStateV1::Current
+            }) =>
+        {
+            RetainedOutcomeStatusV1::Partial
+        }
+        LcmDoctorHealthStatusV1::Complete => RetainedOutcomeStatusV1::Complete,
+        LcmDoctorHealthStatusV1::Partial
+        | LcmDoctorHealthStatusV1::Unavailable
+        | LcmDoctorHealthStatusV1::Locked => {
+            // The doctor ran and observed this state. Projecting its diagnostic
+            // payload as an authority-unavailable pre-admission problem made
+            // the CLI reconnect every 250 ms until its 120 s deadline and
+            // discarded the only explanation (for example, the synchronous
+            // size budget). Preserve the exact health state/reason in the
+            // payload and mark the evidence itself partial.
+            RetainedOutcomeStatusV1::Partial
+        }
+    }
+}
+
+/// The wire reading of a projection's serving state, shared by
+/// `tracedecay_lcm_doctor` and `tracedecay_status`.
+pub fn lcm_doctor_projection(status: SessionProjectionServingStatus) -> LcmDoctorProjectionV1 {
+    let (state, reason) = match &status.state {
+        SessionProjectionServingState::Current => (LcmDoctorProjectionStateV1::Current, None),
+        SessionProjectionServingState::Stale { reason } => (
+            LcmDoctorProjectionStateV1::Stale,
+            Some(match reason {
+                SessionProjectionStaleReason::HistoricalConvergence => {
+                    "historical_convergence".to_owned()
+                }
+                SessionProjectionStaleReason::HistoricalRetry { reason_code } => {
+                    format!("historical_retry:{reason_code}")
+                }
+                SessionProjectionStaleReason::HistoricalBlocked { reason_code } => {
+                    format!("historical_blocked:{reason_code}")
+                }
+            }),
+        ),
+        SessionProjectionServingState::Unavailable { reason } => (
+            LcmDoctorProjectionStateV1::Unavailable,
+            Some(
+                match reason {
+                    SessionProjectionUnavailableReason::WorkerMissing => "worker_missing",
+                    SessionProjectionUnavailableReason::WorkerRecovering => "worker_recovering",
+                    SessionProjectionUnavailableReason::WorkerStalled => "worker_stalled",
+                    SessionProjectionUnavailableReason::WorkerStopped => "worker_stopped",
+                }
+                .to_owned(),
+            ),
+        ),
+    };
+    LcmDoctorProjectionV1 {
+        state,
+        reason,
+        worker: RetrievalWorkerStatusV1 {
+            last_progress_at_unix_micros: status.last_progress_at_unix_micros,
+            backlog: status.backlog,
+            blocker: status.blocker.map(|blocker| {
+                match blocker {
+                    SessionProjectionWorkerBlocker::WorkerMissing => "worker_missing",
+                    SessionProjectionWorkerBlocker::WorkerPanicked => "worker_panicked",
+                    SessionProjectionWorkerBlocker::WorkerStopped => "worker_stopped",
+                    SessionProjectionWorkerBlocker::Storage => "storage",
+                    SessionProjectionWorkerBlocker::Projector => "projector",
+                    SessionProjectionWorkerBlocker::Deadline => "deadline",
+                }
+                .to_owned()
+            }),
+            retry_class: status.retry_class.map(|retry_class| {
+                match retry_class {
+                    SessionProjectionWorkerRetryClass::Storage => "storage",
+                    SessionProjectionWorkerRetryClass::Projector => "projector",
+                    SessionProjectionWorkerRetryClass::Deadline => "deadline",
+                }
+                .to_owned()
+            }),
+        },
+        convergence: lcm_convergence(status.convergence),
+    }
+}
+
+fn lcm_convergence(value: SessionConvergenceStatus) -> LcmConvergenceV1 {
+    let (state, reason) = match value.state {
+        SessionConvergenceState::Converging => (LcmConvergenceStateV1::Converging, None),
+        SessionConvergenceState::Converged => (LcmConvergenceStateV1::Converged, None),
+        SessionConvergenceState::Blocked { reason_code } => {
+            (LcmConvergenceStateV1::Blocked, Some(reason_code))
+        }
+        SessionConvergenceState::Unavailable => (LcmConvergenceStateV1::Unavailable, None),
+    };
+    LcmConvergenceV1 {
+        state,
+        reason,
+        epoch: value.epoch,
+        converged_at_unix_micros: value.converged_at_unix_micros,
+    }
+}
+
+impl RetainedLcmExecutionPortV1 for DirectRetainedLcmPortV1<'_> {
+    fn execute_lcm<'a>(
+        &'a self,
+        context: RetainedSurfaceExecutionContextV1<'a>,
+        request: RetainedLcmRequestV1<'a>,
+    ) -> RetainedSurfaceExecutionFutureV1<'a> {
+        Box::pin(self.execute_lcm_inner(context, request))
+    }
+}
+
+fn validate_receipt(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    response: &LcmAuthorityResponse,
+    operation: LcmAuthorityOperation,
+) -> Result<(), RetainedSurfaceExecutionErrorV1> {
+    let receipt = &response.receipt;
+    let request = context.request_context;
+    if receipt.operation != operation
+        || receipt.request_id != *request.request_id()
+        || receipt.grant_id != request.grant().grant_id
+        || receipt.grant_revision != request.grant().revision
+        || receipt.grant_digest != request.grant().digest
+        || receipt.authorized_scope_digest != request.scope().scope_digest
+        || receipt.cancellation_token_id != request.cancellation().token_id
+        || receipt.execution.effective_deadline != *request.deadline()
+    {
+        return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+            "the LCM authority execution receipt did not match the admitted request",
+        ));
+    }
+    Ok(())
+}
+
+fn execution_error(outcome: LcmAuthorityOutcome) -> RetainedSurfaceExecutionErrorV1 {
+    match outcome {
+        LcmAuthorityOutcome::Denied => RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized,
+        LcmAuthorityOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_contracts::CancellationStage::DuringRead,
+        ),
+        LcmAuthorityOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_contracts::CancellationStage::DuringRead,
+        ),
+        LcmAuthorityOutcome::Ready => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the LCM authority reported ready without the expected payload",
+        ),
+        LcmAuthorityOutcome::Unavailable { reason } => {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the LCM authority is unavailable: {}",
+                lcm_unavailable_reason(reason)
+            ))
+        }
+        LcmAuthorityOutcome::Failed { diagnostic } => RetainedSurfaceExecutionErrorV1::unavailable(
+            format!("the LCM authority failed: {diagnostic}"),
+        ),
+    }
+}
+
+const fn lcm_unavailable_reason(reason: LcmAuthorityUnavailableReason) -> &'static str {
+    match reason {
+        LcmAuthorityUnavailableReason::StoreAuthorityUnavailable => "store_authority_unavailable",
+        LcmAuthorityUnavailableReason::HostProtocolUnavailable => "host_protocol_unavailable",
+    }
+}
+
+fn lcm_authority_outcome(value: LcmAuthorityOutcome) -> LcmAuthorityOutcomeV1 {
+    match value {
+        LcmAuthorityOutcome::Ready => LcmAuthorityOutcomeV1::Ready,
+        LcmAuthorityOutcome::Denied => LcmAuthorityOutcomeV1::Denied,
+        LcmAuthorityOutcome::Cancelled => LcmAuthorityOutcomeV1::Cancelled,
+        LcmAuthorityOutcome::TimedOut => LcmAuthorityOutcomeV1::TimedOut,
+        LcmAuthorityOutcome::Unavailable { reason } => LcmAuthorityOutcomeV1::Unavailable {
+            reason: lcm_unavailable_reason(reason).to_owned(),
+        },
+        LcmAuthorityOutcome::Failed { diagnostic } => LcmAuthorityOutcomeV1::Failed { diagnostic },
+    }
+}
+
+fn lcm_status(value: LcmStatus) -> LcmStatusV1 {
+    LcmStatusV1 {
+        schema_version: value.schema_version,
+        raw_message_count: value.raw_message_count,
+        summary_node_count: value.summary_node_count,
+        external_payload_count: value.external_payload_count,
+        missing_payload_count: value.missing_payload_count,
+        unreferenced_payload_count: value.unreferenced_payload_count,
+        maintenance_debt_count: value.maintenance_debt_count,
+        store: LcmStoreStatusV1 {
+            messages: value.store.messages,
+            estimated_tokens: value.store.estimated_tokens,
+            token_estimate: LcmStoreTokenCoverageV1 {
+                complete: value.store.token_estimate.complete,
+                scanned_messages: value.store.token_estimate.scanned_messages,
+                next_after_store_id: value.store.token_estimate.next_after_store_id,
+            },
+        },
+        dag: LcmDagStatusV1 {
+            total_nodes: value.dag.total_nodes,
+            total_tokens: value.dag.total_tokens,
+            total_source_tokens: value.dag.total_source_tokens,
+            compression_ratio: value.dag.compression_ratio,
+            depths: value
+                .dag
+                .depths
+                .into_iter()
+                .map(|(depth, status)| {
+                    (
+                        depth,
+                        LcmDagDepthStatusV1 {
+                            count: status.count,
+                            tokens: status.tokens,
+                            source_tokens: status.source_tokens,
+                        },
+                    )
+                })
+                .collect(),
+        },
+        config: LcmConfigStatusV1 {
+            fresh_tail_count: value.config.fresh_tail_count,
+            summary_fan_in: value.config.summary_fan_in,
+            compression_boundary_cooldown_seconds: value
+                .config
+                .compression_boundary_cooldown_seconds,
+        },
+        payload: LcmPayloadStatusV1 {
+            coverage: LcmPayloadCoverageV1 {
+                state: match value.payload.coverage.state {
+                    LcmPayloadCoverageState::Complete => LcmPayloadCoverageStateV1::Complete,
+                    LcmPayloadCoverageState::Partial => LcmPayloadCoverageStateV1::Partial,
+                },
+                scanned_metadata_refs: value.payload.coverage.scanned_metadata_refs,
+                scanned_files: value.payload.coverage.scanned_files,
+                reason: value.payload.coverage.reason,
+            },
+            externalized_count: value.payload.externalized_count,
+            missing_count: value.payload.missing_count,
+            unreferenced_count: value.payload.unreferenced_count,
+            placeholder_ref_count: value.payload.placeholder_ref_count,
+            missing_placeholder_metadata_count: value.payload.missing_placeholder_metadata_count,
+            missing_placeholder_file_count: value.payload.missing_placeholder_file_count,
+            gc_candidate_count: value.payload.gc_candidate_count,
+            root_contained: value.payload.root_contained,
+            orphan_file_count: value.payload.orphan_file_count,
+            tombstoned_count: value.payload.tombstoned_count,
+            referenced_count: value.payload.referenced_count,
+            total_bytes: value.payload.total_bytes,
+            referenced_bytes: value.payload.referenced_bytes,
+            orphan_file_bytes: value.payload.orphan_file_bytes,
+            reclaimable_bytes: value.payload.reclaimable_bytes,
+            reclaimable_bytes_after_grace: value.payload.reclaimable_bytes_after_grace,
+            integrity_mismatch_count: value.payload.integrity_mismatch_count,
+        },
+        payload_gc: LcmPayloadGcStatusV1 {
+            last_gc_at: value.payload_gc.last_gc_at,
+            last_gc_duration_ms: value.payload_gc.last_gc_duration_ms,
+            last_gc_status: value.payload_gc.last_gc_status,
+            last_gc_error: value.payload_gc.last_gc_error,
+            last_reaped_refs: value.payload_gc.last_reaped_refs,
+            last_reaped_bytes: value.payload_gc.last_reaped_bytes,
+            grace_seconds: value.payload_gc.grace_seconds,
+            reap_missing_metadata_after_seconds: value
+                .payload_gc
+                .reap_missing_metadata_after_seconds,
+            next_run_eligible_at: value.payload_gc.next_run_eligible_at,
+        },
+        lifecycle: LcmLifecycleStatusV1 {
+            lifecycle_state_count: value.lifecycle.lifecycle_state_count,
+            frontier_count: value.lifecycle.frontier_count,
+            maintenance_debt_count: value.lifecycle.maintenance_debt_count,
+            current_session_id: value.lifecycle.current_session_id,
+            current_frontier_store_id: value.lifecycle.current_frontier_store_id,
+            last_finalized_session_id: value.lifecycle.last_finalized_session_id,
+            last_finalized_frontier_store_id: value.lifecycle.last_finalized_frontier_store_id,
+        },
+        summary_convergence: LcmSummaryConvergenceStatusV1 {
+            pending_session_count: value.summary_convergence.pending_session_count,
+            retryable_session_count: value.summary_convergence.retryable_session_count,
+            current_session_count: value.summary_convergence.current_session_count,
+            unavailable_session_count: value.summary_convergence.unavailable_session_count,
+            permanent_session_count: value.summary_convergence.permanent_session_count,
+            reasons: value
+                .summary_convergence
+                .reasons
+                .into_iter()
+                .map(|reason| LcmSummaryConvergenceReasonV1 {
+                    state: match reason.state {
+                        LcmSummaryConvergenceQueueState::Pending => {
+                            LcmSummaryConvergenceStateV1::Pending
+                        }
+                        LcmSummaryConvergenceQueueState::Retryable => {
+                            LcmSummaryConvergenceStateV1::Retryable
+                        }
+                        LcmSummaryConvergenceQueueState::Current => {
+                            LcmSummaryConvergenceStateV1::Current
+                        }
+                        LcmSummaryConvergenceQueueState::Unavailable => {
+                            LcmSummaryConvergenceStateV1::Unavailable
+                        }
+                        LcmSummaryConvergenceQueueState::Permanent => {
+                            LcmSummaryConvergenceStateV1::Permanent
+                        }
+                    },
+                    reason: reason.reason,
+                    session_count: reason.session_count,
+                })
+                .collect(),
+        },
+        redaction: LcmRedactionStatusV1 {
+            enabled: value.redaction.enabled,
+            lossy_records: value.redaction.lossy_records,
+        },
+    }
+}
+
+fn lcm_doctor_health(value: SessionTemporalHealthReport) -> LcmDoctorHealthV1 {
+    LcmDoctorHealthV1 {
+        status: match value.status() {
+            SessionTemporalHealthStatus::Complete => LcmDoctorHealthStatusV1::Complete,
+            SessionTemporalHealthStatus::Partial => LcmDoctorHealthStatusV1::Partial,
+            SessionTemporalHealthStatus::Unavailable => LcmDoctorHealthStatusV1::Unavailable,
+            SessionTemporalHealthStatus::Locked => LcmDoctorHealthStatusV1::Locked,
+        },
+        findings: value
+            .findings()
+            .iter()
+            .map(|finding| LcmDoctorFindingV1 {
+                kind: lcm_doctor_finding_kind(finding.kind()),
+                count: finding.count(),
+            })
+            .collect(),
+        reason: value.reason().map(str::to_owned),
+    }
+}
+
+const fn lcm_doctor_finding_kind(
+    value: SessionTemporalHealthFindingKind,
+) -> LcmDoctorFindingKindV1 {
+    match value {
+        SessionTemporalHealthFindingKind::TriggerAuditDrift => {
+            LcmDoctorFindingKindV1::TriggerAuditDrift
+        }
+        SessionTemporalHealthFindingKind::OccurrenceFtsCorruption => {
+            LcmDoctorFindingKindV1::OccurrenceFtsCorruption
+        }
+        SessionTemporalHealthFindingKind::SummaryFtsCorruption => {
+            LcmDoctorFindingKindV1::SummaryFtsCorruption
+        }
+        SessionTemporalHealthFindingKind::MissingAnchor => LcmDoctorFindingKindV1::MissingAnchor,
+        SessionTemporalHealthFindingKind::MissingReceipt => LcmDoctorFindingKindV1::MissingReceipt,
+        SessionTemporalHealthFindingKind::InvalidGeneration => {
+            LcmDoctorFindingKindV1::InvalidGeneration
+        }
+        SessionTemporalHealthFindingKind::MultiActiveGeneration => {
+            LcmDoctorFindingKindV1::MultiActiveGeneration
+        }
+        SessionTemporalHealthFindingKind::CursorChainAbsent => {
+            LcmDoctorFindingKindV1::CursorChainAbsent
+        }
+        SessionTemporalHealthFindingKind::CursorKeyAbsent => {
+            LcmDoctorFindingKindV1::CursorKeyAbsent
+        }
+        SessionTemporalHealthFindingKind::OwnershipDrift => LcmDoctorFindingKindV1::OwnershipDrift,
+        SessionTemporalHealthFindingKind::StuckRefresh => LcmDoctorFindingKindV1::StuckRefresh,
+        SessionTemporalHealthFindingKind::StuckBinding => LcmDoctorFindingKindV1::StuckBinding,
+        SessionTemporalHealthFindingKind::StuckProgress => LcmDoctorFindingKindV1::StuckProgress,
+        SessionTemporalHealthFindingKind::StuckReceipt => LcmDoctorFindingKindV1::StuckReceipt,
+        SessionTemporalHealthFindingKind::MigrationGap => LcmDoctorFindingKindV1::MigrationGap,
+        SessionTemporalHealthFindingKind::CompatibilityDrift => {
+            LcmDoctorFindingKindV1::CompatibilityDrift
+        }
+        SessionTemporalHealthFindingKind::RelationGraphUnavailable => {
+            LcmDoctorFindingKindV1::RelationGraphUnavailable
+        }
+        SessionTemporalHealthFindingKind::RelationGraphCorruption => {
+            LcmDoctorFindingKindV1::RelationGraphCorruption
+        }
+        SessionTemporalHealthFindingKind::RelationGraphCycle => {
+            LcmDoctorFindingKindV1::RelationGraphCycle
+        }
+        SessionTemporalHealthFindingKind::StaleSummaryClosure => {
+            LcmDoctorFindingKindV1::StaleSummaryClosure
+        }
+    }
+}
+
+pub(super) fn required(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+    } else {
+        Ok(value)
+    }
+}
+
+pub(super) fn trimmed(
+    value: Option<&str>,
+) -> Result<Option<&str>, RetainedSurfaceExecutionErrorV1> {
+    value.map(required).transpose()
+}
+
+pub(super) fn specific_provider(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
+    let value = required(value)?;
+    if value == "all" {
+        Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+    } else {
+        Ok(value)
+    }
+}
+
+pub(super) fn optional_provider(
+    value: Option<&str>,
+) -> Result<Option<&str>, RetainedSurfaceExecutionErrorV1> {
+    Ok(match trimmed(value)? {
+        Some("all") | None => None,
+        value => value,
+    })
+}
+
+pub(super) fn session_id(value: &str) -> Result<SessionId, RetainedSurfaceExecutionErrorV1> {
+    SessionId::new(required(value)?).map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
+}
+
+pub(super) fn cursor(
+    value: Option<&str>,
+) -> Result<Option<String>, RetainedSurfaceExecutionErrorV1> {
+    Ok(trimmed(value)?.map(str::to_owned))
+}
+
+pub(super) fn optional_usize(
+    value: Option<u64>,
+) -> Result<Option<usize>, RetainedSurfaceExecutionErrorV1> {
+    value
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
+}
+
+pub(super) fn unsigned_i64(
+    value: Option<u64>,
+) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
+    value
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
+}
+
+pub(super) fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> SessionSearchScope {
+    SessionSearchScope::from(value.unwrap_or(MessageRelationshipScopeV1::All))
+}
+
+pub(super) fn message_type(value: Option<MessageTypeFilterV1>) -> SessionMessageType {
+    SessionMessageType::from(value.unwrap_or(MessageTypeFilterV1::All))
+}
+
+/// The continuation binding of `operation` over the request fields `bind`
+/// names; a relative time filter is bound as the instant it resolved to, so
+/// replaying its cursor after the window moved is refused naming that field.
+pub(super) fn cursor_request(
+    operation: &'static str,
+    bind: impl FnOnce(SessionCursorRequest) -> Result<SessionCursorRequest, DomainError>,
+) -> Result<SessionCursorRequest, RetainedSurfaceExecutionErrorV1> {
+    bind(SessionCursorRequest::new(operation))
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
+}
+
+pub(super) fn time_filter(
+    value: Option<&RetainedTimeFilterV1>,
+    bound: SearchTimeBound,
+) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let parsed = match value {
+        RetainedTimeFilterV1::Micros(value) => i64::try_from(*value).ok(),
+        RetainedTimeFilterV1::Expression(value) => {
+            let value = value.trim();
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value >= 0)
+                .or_else(|| {
+                    tracedecay_runtime_core::timeutil::parse_search_time_filter_bound(
+                        value,
+                        tracedecay_runtime_core::tracedecay::current_timestamp(),
+                        bound,
+                    )
+                })
+        }
+    };
+    parsed
+        .map(Some)
+        .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_contracts::retained_surfaces::{
+        LcmAuthorityOutcomeV1, LcmDoctorHealthStatusV1, LcmDoctorHealthV1, LcmDoctorResultV1,
+        RetainedOutcomeStatusV1, RetainedSurfaceResultV1,
+    };
+
+    use super::lcm_doctor_outcome_status;
+
+    #[test]
+    fn diagnosed_unavailable_health_remains_a_partial_doctor_result() {
+        for health_status in [
+            LcmDoctorHealthStatusV1::Unavailable,
+            LcmDoctorHealthStatusV1::Locked,
+        ] {
+            let health = LcmDoctorHealthV1 {
+                status: health_status,
+                findings: Vec::new(),
+                reason: Some("synchronous_diagnosis_size_budget_exceeded".to_owned()),
+            };
+            let status = lcm_doctor_outcome_status(&health, None);
+            let result = RetainedSurfaceResultV1::LcmDoctor(LcmDoctorResultV1 {
+                status,
+                authority_outcome: LcmAuthorityOutcomeV1::Ready,
+                health: Some(health),
+                projection: None,
+                reason: Some("synchronous_diagnosis_size_budget_exceeded".to_owned()),
+            });
+
+            assert_eq!(status, RetainedOutcomeStatusV1::Partial);
+            assert!(
+                result.evidence_facts().is_ok(),
+                "the observed health state is the doctor's diagnostic payload, not an unmounted authority"
+            );
+        }
+    }
+}

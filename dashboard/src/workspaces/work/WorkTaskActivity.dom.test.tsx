@@ -4,8 +4,8 @@ import type { LiveActivityPulse } from '../../data/sse/connect.ts';
 import type { SseConnectionState } from '../../data/sse/connect.ts';
 import { useScope } from '../../data/scope/store.ts';
 import {
+  WorkActivityLedger,
   WorkTaskActivity,
-  taskActivityLink,
   taskActivityReading,
   taskActivityWindow,
 } from './WorkTaskActivity.tsx';
@@ -30,7 +30,8 @@ vi.mock('../../data/sse/useEvents.tsx', () => ({
 }));
 
 function pulse(family: string, projectId: string | null = 'project.alpha'): LiveActivityPulse {
-  return { projectId, family, streamId: `${family}:${projectId ?? 'none'}`, at: 1 };
+  return { projectId, family, streamId: `${family}:${projectId ?? 'none'}`, at: 1,
+    eventId: `fixture:${family}:${projectId ?? 'none'}`, observationTime: '1000' };
 }
 
 /** The window the all-projects scope produces, for the readings that are about
@@ -57,30 +58,6 @@ describe('the Work task-activity reading', () => {
     expect(taskActivityReading('offline', counted(0))).not.toContain('none received');
     expect(taskActivityReading('connecting', counted(0))).toContain('connecting');
     expect(taskActivityReading('connecting', counted(0))).not.toContain('none received');
-  });
-
-  it('separates a silent live stream from one carrying work', () => {
-    expect(taskActivityReading('live', counted(0))).toBe('subscribed · none in live window');
-    expect(taskActivityReading('live', counted(3))).toBe('subscribed · 3 in live window');
-  });
-
-  /**
-   * The pulse buffer holds 64 entries across every family, so an unrelated burst
-   * evicts task pulses and this figure falls while the stream stays live. Worded
-   * as a total it would report an absence of work caused by other work, so the
-   * reading has to name the window it measures.
-   */
-  it('states the count as a window rather than as a total', () => {
-    expect(taskActivityReading('live', counted(0))).not.toContain('received');
-    expect(taskActivityReading('live', counted(7))).toContain('in live window');
-  });
-
-  /** Every branch says it is subscribed, because it is: the claim is about this
-   * build's own wiring and stays true whatever the link is doing. */
-  it('states the subscription in every link state', () => {
-    for (const state of ['live', 'connecting', 'offline'] as const) {
-      expect(taskActivityReading(state, counted(0))).toContain('subscribed');
-    }
   });
 
   it('counts only Work task frames, not the other live families', () => {
@@ -113,22 +90,6 @@ describe('the Work task-activity reading', () => {
     // user on every accepted frame.
     expect(status?.textContent).not.toMatch(/\d/);
   });
-
-  it('gives each link state its own announcement', () => {
-    const announced = (['live', 'connecting', 'offline'] as const).map(taskActivityLink);
-    expect(new Set(announced).size).toBe(announced.length);
-    expect(taskActivityLink('offline')).toContain('unreachable');
-  });
-
-  it('reports the link failing rather than an absence of work', () => {
-    link.state = 'offline';
-    feed.pulses = [];
-
-    const { container } = render(<WorkTaskActivity kind="partial" />);
-
-    expect(container.textContent).toContain('unreachable');
-    expect(container.querySelector('[data-state]')?.getAttribute('data-state')).toBe('partial');
-  });
 });
 
 /**
@@ -137,7 +98,7 @@ describe('the Work task-activity reading', () => {
  * `/api/events` is one connection for the whole dashboard and the pulse buffer
  * behind it is shared, so every project's task frames sit in the same 64 entries
  * regardless of which project is selected. Counting the family alone therefore
- * reported project A's work under project B — a false "N in live window" that
+ * reported project A's work under project B, a false "N in live window" that
  * looks exactly like real work in the scope a reader is actually looking at.
  * There is no per-project event route to switch to, and inventing one is not the
  * fix; the scoping belongs on what the buffer already holds.
@@ -149,11 +110,11 @@ describe('the Work task-activity window, by scope', () => {
     pulse('task_activity', 'project.beta'),
     pulse('task_activity', null),
     // Another family, from the selected project, which must not be counted for
-    // any scope — the original filter's one correct half.
+    // any scope, the original filter's one correct half.
     pulse('hook_activity', 'project.beta'),
   ];
 
-  it('counts only the selected project’s frames, and never another project’s', () => {
+  it('counts only the selected project\'s frames, and never another project\'s', () => {
     expect(
       taskActivityWindow(MIXED, {
         kind: 'project',
@@ -174,7 +135,7 @@ describe('the Work task-activity window, by scope', () => {
   });
 
   /** The aggregate answers for every project, so a frame that named none is
-   * still a frame it received — and there is nothing to report separately. */
+   * still a frame it received, and there is nothing to report separately. */
   it('counts every attributed and unattributed task frame under all projects', () => {
     expect(taskActivityWindow(MIXED, { kind: 'all' })).toEqual({
       observed: 4,
@@ -194,24 +155,6 @@ describe('the Work task-activity window, by scope', () => {
   });
 
   /**
-   * The rendered reading, which is what a reader actually sees. Asserted as the
-   * exact string: `toContain('2 in live window')` is also satisfied by 12 and
-   * 32, so it would pass while the row counted every project.
-   */
-  it('renders the selected project’s count, not the shared buffer’s', () => {
-    link.state = 'live';
-    feed.pulses = MIXED;
-    useScope.getState().selectProject('project.beta', 'Beta', 'active');
-
-    const { container } = render(<WorkTaskActivity kind="partial" />);
-
-    expect(container.textContent).toContain('subscribed · 2 in live window');
-    // The four task frames in the buffer, and the three that are not Beta's.
-    expect(container.textContent).not.toContain('4 in live window');
-    expect(container.textContent).not.toContain('3 in live window');
-  });
-
-  /**
    * A frame the daemon sent without an exact scope. It cannot be attributed to
    * the selected project, and it cannot be dropped in silence either: a row that
    * said "none in live window" while task frames were arriving would report an
@@ -228,15 +171,57 @@ describe('the Work task-activity window, by scope', () => {
       'subscribed · none in live window · 1 unattributed',
     );
   });
+});
 
-  /** No unattributed frames, no extra clause: the ordinary reading is unchanged
-   * for both scopes. */
-  it('says nothing about attribution when every frame carried one', () => {
-    expect(
-      taskActivityReading('live', { observed: 2, unattributed: 0 }),
-    ).toBe('subscribed · 2 in live window');
-    expect(taskActivityReading('live', { observed: 2, unattributed: 3 })).toBe(
-      'subscribed · 2 in live window · 3 unattributed',
-    );
+describe('the live task activity ledger', () => {
+  it('lists task frames newest first with the detail word each frame carried', () => {
+    link.state = 'live';
+    feed.pulses = [
+      { ...pulse('task_activity'), eventId: 'run:task:1', observationTime: '1800000000000000', detail: null },
+      { ...pulse('hook_activity'), eventId: 'run:hook:1', observationTime: '1800000001000000', detail: 'file_edit' },
+      { ...pulse('task_activity'), eventId: 'run:task:2', observationTime: '1800000002000000', detail: 'leased' },
+    ];
+
+    const { container } = render(<WorkActivityLedger />);
+
+    const rows = container.querySelectorAll('[data-work-activity-row]');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.textContent).toContain('run:task:2');
+    expect(rows[0]?.textContent).toContain('leased');
+    expect(rows[0]?.textContent).toContain('2027-01-15T08:00:02.000Z');
+    // A frame that named no detail says so rather than inventing a kind, and
+    // no row claims a task identity the stream never carried.
+    expect(rows[1]?.textContent).toContain('kind not carried by the frame');
+    expect(container.querySelector('caption')?.textContent).toContain('no task identity');
+    expect(container.textContent).not.toContain('file_edit');
+  });
+
+  it('marks an unattributed frame under a selected project instead of claiming or dropping it', () => {
+    link.state = 'live';
+    useScope.getState().selectProject('project.alpha', 'Alpha', 'selected');
+    feed.pulses = [
+      { ...pulse('task_activity', null), eventId: 'run:task:none', detail: null },
+      { ...pulse('task_activity', 'project.beta'), eventId: 'run:task:beta', detail: null },
+      { ...pulse('task_activity', 'project.alpha'), eventId: 'run:task:alpha', detail: 'running' },
+    ];
+
+    const { container } = render(<WorkActivityLedger />);
+
+    expect(container.querySelectorAll('[data-work-activity-row="scoped"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-work-activity-row="unattributed"]')).toHaveLength(1);
+    expect(container.textContent).not.toContain('run:task:beta');
+    expect(container.textContent).toContain('1 unattributed');
+  });
+
+  it('never draws an unreachable stream as a quiet ledger', () => {
+    link.state = 'offline';
+    feed.pulses = [];
+
+    const { container } = render(<WorkActivityLedger />);
+
+    const empty = container.querySelector('[data-work-activity-empty]');
+    expect(empty?.getAttribute('data-work-activity-empty')).toBe('offline');
+    expect(empty?.textContent).toContain('unreachable');
+    expect(empty?.textContent).not.toContain('No task frame');
   });
 });

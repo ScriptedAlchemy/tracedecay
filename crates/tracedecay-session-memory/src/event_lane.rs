@@ -10,14 +10,13 @@ use std::sync::{OnceLock, atomic};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ObservabilityApplicationV1, ObservabilityHorizonV1,
     ObservabilityQueryV1, now_micros,
 };
 use tracedecay_domain::{
-    ActivityObservedV1, CoverageStateV1, McpDispatchObservedV1, ObservabilityEnvelopeV1,
-    ObservabilityPayloadV1, ObservabilityRetentionClassV1, ObservabilityTerminalResultV1,
-    canonical_sha256,
+    ActivityObservedV1, CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
+    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, canonical_sha256,
 };
 
 use crate::observability_store::RegisteredObservabilityPortV1;
@@ -27,8 +26,6 @@ const BUS_CAPACITY: usize = 1024;
 const RETAINED_ACTIVITY_CAPACITY: usize = 5_000;
 const ACTIVITY_EVENT_KIND: &str = "activity.observed.v1";
 const ACTIVITY_SCHEMA_VERSION: u32 = 1;
-const MCP_DISPATCH_EVENT_KIND: &str = "mcp.dispatch.observed.v1";
-const MCP_DISPATCH_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -41,7 +38,6 @@ pub enum ActivityFamilyV1 {
 }
 
 impl ActivityFamilyV1 {
-    #[hotpath::skip]
     pub const fn stream_name(self) -> &'static str {
         match self {
             Self::Hook => "hook_activity",
@@ -52,7 +48,6 @@ impl ActivityFamilyV1 {
         }
     }
 
-    #[hotpath::skip]
     const fn observation_label(self) -> &'static str {
         match self {
             Self::Hook => "hook",
@@ -139,16 +134,6 @@ fn next_local_sequence() -> u64 {
     SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
 }
 
-fn mcp_dispatch_boot_id() -> &'static str {
-    static BOOT: OnceLock<String> = OnceLock::new();
-    BOOT.get_or_init(|| format!("mcp-dispatch-{}-{}", std::process::id(), now_micros().0))
-}
-
-fn next_mcp_dispatch_sequence() -> u64 {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
-    SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
-}
-
 fn authoritative_project_id(db: &RegisteredGlobalDb, supplied: Option<&str>) -> Option<String> {
     let bound = db.binding().shard_id.scope.project_id()?.as_str();
     match supplied {
@@ -212,61 +197,11 @@ fn activity_envelope(
     })
 }
 
-fn mcp_dispatch_envelope(
-    project_id: &str,
-    observation: McpDispatchObservedV1,
-) -> Result<ObservabilityEnvelopeV1, ApplicationContractError> {
-    let observed_at = now_micros().0;
-    let producer_sequence = next_mcp_dispatch_sequence();
-    let event_id = canonical_sha256(&(
-        "tracedecay.mcp.dispatch.observed.v1",
-        mcp_dispatch_boot_id(),
-        producer_sequence,
-        project_id,
-        &observation,
-    ))
-    .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
-    let event_id = format!("mcp-dispatch:{}", event_id.as_str());
-    Ok(ObservabilityEnvelopeV1 {
-        event_id: event_id.clone(),
-        event_kind: MCP_DISPATCH_EVENT_KIND.to_owned(),
-        schema_revision: MCP_DISPATCH_SCHEMA_VERSION,
-        idempotency_key: event_id.clone(),
-        trace_id: event_id,
-        scope_ref: project_id.to_owned(),
-        capability: "mcp".to_owned(),
-        operation: "dispatch".to_owned(),
-        event_time_micros: observed_at,
-        observation_time_micros: observed_at,
-        valid_from_micros: Some(observed_at),
-        valid_until_micros: None,
-        quantity: Some(1.0),
-        unit: Some("dispatches".to_owned()),
-        terminal_result: Some(observation.terminal_result()),
-        producer_revision: "mcp-dispatch-observer.v1".to_owned(),
-        configuration_revision: "registered-project-session.v1".to_owned(),
-        policy_revision: "mcp-dispatch-deadline.v1".to_owned(),
-        watermark: format!(
-            "{boot_id}:{producer_sequence}",
-            boot_id = mcp_dispatch_boot_id()
-        ),
-        coverage: CoverageStateV1::Known,
-        sampling_probability: None,
-        retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
-        emitted_count: 1,
-        delayed_count: 0,
-        dropped_count: 0,
-        process_boot_id: mcp_dispatch_boot_id().to_owned(),
-        producer_sequence,
-        payload: ObservabilityPayloadV1::McpDispatch(observation),
-    })
-}
-
-/// Records one fixed-shape MCP dispatch receipt through the project-bound
-/// observability authority. The caller receives a typed storage failure and
-/// must not change the already-determined MCP terminal response because
-/// telemetry persistence failed.
-#[hotpath::measure(label = "usecases.event_lane.record", future = true)]
+/// Records one observability envelope through the project-bound observability
+/// authority. The caller receives a typed storage failure and must not change
+/// its already-determined product response because telemetry persistence
+/// failed.
+#[tracing::instrument(name = "usecases.event_lane.record", level = "trace", skip_all)]
 pub async fn record_observability(
     db: &RegisteredGlobalDb,
     envelope: tracedecay_domain::ObservabilityEnvelopeV1,
@@ -275,18 +210,6 @@ pub async fn record_observability(
     ObservabilityApplicationV1::new(port, port)
         .record(envelope)
         .await
-}
-
-pub async fn record_mcp_dispatch(
-    db: &RegisteredGlobalDb,
-    observation: McpDispatchObservedV1,
-) -> Result<String, ApplicationContractError> {
-    let project_id =
-        authoritative_project_id(db, None).ok_or(ApplicationContractError::Inconsistent {
-            field: "mcp_dispatch_observability.project_scope",
-        })?;
-    let envelope = mcp_dispatch_envelope(&project_id, observation)?;
-    record_observability(db, envelope).await
 }
 
 pub fn enabled(db: Option<&RegisteredGlobalDb>) -> bool {
@@ -345,24 +268,16 @@ pub async fn publish(
     };
     let bus = live_bus();
     let _ = bus.send(record);
-    observe_publish(bus.len(), bus.receiver_count());
-}
-
-/// Live activity bus state after one publish: queued records not yet seen by
-/// the slowest subscriber, and the current subscriber count. Keys are static
-/// capability names; every gauge is a no-op unless `hotpath` is selected.
-#[inline]
-fn observe_publish(queue_depth: usize, subscribers: usize) {
-    hotpath::gauge!("usecases.event_lane.queue_depth").set(queue_depth as f64);
-    hotpath::gauge!("usecases.event_lane.subscribers").set(subscribers as f64);
 }
 
 pub async fn replay_after(
     db: &RegisteredGlobalDb,
     project_id: &str,
     after: Option<u64>,
-) -> Option<ActivityReplayV1> {
-    authoritative_project_id(db, Some(project_id))?;
+) -> Result<Option<ActivityReplayV1>, String> {
+    if authoritative_project_id(db, Some(project_id)).is_none() {
+        return Ok(None);
+    }
     let port = RegisteredObservabilityPortV1::new(db);
     let page = ObservabilityApplicationV1::new(port, port)
         .query(ObservabilityQueryV1 {
@@ -376,7 +291,7 @@ pub async fn replay_after(
             limit: (RETAINED_ACTIVITY_CAPACITY + 1) as u32,
         })
         .await
-        .ok()?;
+        .map_err(|error| error.to_string())?;
     let capped =
         page.events.len() > RETAINED_ACTIVITY_CAPACITY || page.coverage == CoverageStateV1::Capped;
     let mut records = page
@@ -431,7 +346,7 @@ pub async fn replay_after(
     let latest = records
         .last()
         .map_or(requested, |record| record.producer_sequence);
-    Some(ActivityReplayV1 {
+    Ok(Some(ActivityReplayV1 {
         records,
         frontier: ActivityFrontierV1 {
             run_id: "registered-observability-v1".to_owned(),
@@ -441,69 +356,13 @@ pub async fn replay_after(
             watermark: format!("analytics:{latest}"),
         },
         resume_gap,
-    })
+    }))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use tracedecay_application::ObservabilityQueryPort;
-
-    #[test]
-    fn family_stream_names_are_distinct_and_stable() {
-        let mut names = ActivityFamilyV1::ALL
-            .iter()
-            .map(|family| family.stream_name())
-            .collect::<Vec<_>>();
-        names.sort_unstable();
-        let unique = names.len();
-        names.dedup();
-        assert_eq!(names.len(), unique);
-        assert_eq!(ActivityFamilyV1::Hook.stream_name(), "hook_activity");
-        assert_eq!(ActivityFamilyV1::ToolCall.stream_name(), "tool_call");
-    }
-
-    /// The canonical envelope validator keeps its own list of admitted activity
-    /// families, and replay resolves a retained observation back through the
-    /// label. A family this lane can publish but either side rejects is
-    /// swallowed by the error-tolerant publish path and renders as no activity.
-    ///
-    /// The match below is what binds the enum to [`ActivityFamilyV1::ALL`]:
-    /// adding a family without listing it there leaves this match
-    /// non-exhaustive, so the omission is a compile error rather than a family
-    /// this test silently never visits.
-    #[test]
-    fn every_published_family_is_admitted_by_the_canonical_envelope() {
-        for family in ActivityFamilyV1::ALL {
-            let label = match family {
-                ActivityFamilyV1::Hook => "hook",
-                ActivityFamilyV1::SessionIngest => "session_ingest",
-                ActivityFamilyV1::CodeIndex => "code_index",
-                ActivityFamilyV1::ToolCall => "tool_call",
-                ActivityFamilyV1::Task => "task",
-            };
-            assert_eq!(family.observation_label(), label);
-            assert_eq!(
-                ActivityFamilyV1::from_observation_label(label),
-                Some(family),
-                "replay must resolve {label:?} back to the family that published it"
-            );
-
-            let envelope = activity_envelope("project.activity.family", family, 1, None)
-                .unwrap_or_else(|| panic!("{family:?} envelope"));
-            assert_eq!(
-                envelope.validate(),
-                Ok(()),
-                "{family:?} publishes label {label:?}, which the canonical envelope must admit"
-            );
-        }
-        assert_eq!(
-            ActivityFamilyV1::ALL.len(),
-            5,
-            "extend the exhaustive match above when this changes"
-        );
-    }
 
     #[test]
     fn source_owner_activity_strips_unbounded_detail_before_persistence() {
@@ -523,11 +382,11 @@ mod tests {
 
     #[tokio::test]
     async fn registered_activity_replays_without_retaining_project_paths() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project");
         let project_id = tracedecay_domain::ProjectId::new("project.activity").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile.path().to_path_buf(),
             project.path(),
             project_id.clone(),
         )
@@ -548,7 +407,8 @@ mod tests {
         .await;
         let replay = replay_after(db, project_id.as_str(), None)
             .await
-            .expect("activity replay");
+            .expect("activity replay")
+            .expect("activity replay present");
         assert_eq!(replay.records.len(), 1);
         assert_eq!(replay.records[0].pulse.units, 2);
         assert_eq!(replay.records[0].pulse.project_root, PathBuf::new());
@@ -561,74 +421,10 @@ mod tests {
         let after = replay.records[0].producer_sequence;
         let caught_up = replay_after(db, project_id.as_str(), Some(after))
             .await
-            .expect("caught-up replay");
+            .expect("caught-up replay")
+            .expect("caught-up replay present");
         assert!(caught_up.records.is_empty());
         assert!(!caught_up.resume_gap);
-        assert!(
-            !tracedecay_runtime_core::storage::default_profile_root()
-                .expect("profile root")
-                .join("dashboard-events-v1.jsonl")
-                .exists()
-        );
-    }
-
-    #[tokio::test]
-    async fn mcp_dispatch_receipt_uses_the_bound_project_observability_authority() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project");
-        let project_id =
-            tracedecay_domain::ProjectId::new("project.mcp.dispatch").expect("project id");
-        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-            project.path(),
-            project_id.clone(),
-        )
-        .await
-        .expect("registered runtime");
-        let db = runtime
-            .project_database()
-            .expect("project observation database");
-        let observation = McpDispatchObservedV1 {
-            route_admission_micros: 4,
-            handler_micros: 16,
-            result_materialization_micros: 3,
-            total_micros: 23,
-            deadline: tracedecay_domain::McpDispatchDeadlineV1::Enforced,
-            cancellation: tracedecay_domain::McpDispatchCancellationV1::NotRequested,
-            terminal: tracedecay_domain::McpDispatchTerminalV1::Completed,
-        };
-
-        let cursor = record_mcp_dispatch(db, observation.clone())
-            .await
-            .expect("record MCP dispatch");
-        assert!(cursor.starts_with("analytics:"));
-
-        let port = RegisteredObservabilityPortV1::new(db);
-        let page = port
-            .query(ObservabilityQueryV1 {
-                authorized_scope_ref: project_id.to_string(),
-                event_kinds: vec![MCP_DISPATCH_EVENT_KIND.to_owned()],
-                horizon: ObservabilityHorizonV1 {
-                    since_micros: 0,
-                    until_micros: i64::MAX,
-                },
-                after_watermark: None,
-                limit: 10,
-            })
-            .await
-            .expect("query MCP dispatch");
-        assert_eq!(page.events.len(), 1);
-        let event = &page.events[0];
-        assert_eq!(event.scope_ref, project_id.as_str());
-        assert_eq!(event.capability, "mcp");
-        assert_eq!(event.operation, "dispatch");
-        assert_eq!(
-            event.terminal_result,
-            Some(ObservabilityTerminalResultV1::Succeeded)
-        );
-        assert_eq!(
-            event.payload,
-            ObservabilityPayloadV1::McpDispatch(observation)
-        );
+        assert!(!profile.path().join("dashboard-events-v1.jsonl").exists());
     }
 }

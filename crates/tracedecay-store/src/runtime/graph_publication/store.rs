@@ -48,6 +48,24 @@ pub trait GraphPublicationStoreV1 {
         context: &GraphPublicationOperationContextV1<'_>,
     ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1>;
 
+    /// Retire the replay that is currently the projection's verified head.
+    ///
+    /// Used only for code generations the code index has already deleted:
+    /// under the per-generation code-graph namespace every code generation is
+    /// the permanent head of its own projection, so ordinary [`Self::retire_replay`]
+    /// (which protects the head) could never reclaim it. Compare-and-swap
+    /// shaped: `expected_head` must be the exact current head and must name the
+    /// same replay as `request.key`; a projection with a pending replay after
+    /// the head, a changed head, or active inbound dependencies is refused with
+    /// the same typed outcomes as [`Self::retire_replay`]. On success the head
+    /// row is removed and the replay is tombstoned in one transaction.
+    fn retire_verified_head_replay(
+        &mut self,
+        request: &GraphPublicationReplayRetirementV1,
+        expected_head: &GraphVerifiedHeadV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1>;
+
     /// Delete one exact pending journaled replay row that an interrupted
     /// publisher can never complete, so the journal position reopens for a
     /// fresh append of the same key. Compare-and-swap shaped: refuses when

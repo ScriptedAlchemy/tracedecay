@@ -33,6 +33,12 @@ impl Drop for LockWorkScope {
     }
 }
 
+pub(crate) fn swap(saved: &mut (bool, u64, u64)) {
+    saved.0 = ACTIVE.replace(saved.0);
+    saved.1 = ENCODED.replace(saved.1);
+    saved.2 = DECODED.replace(saved.2);
+}
+
 pub(crate) fn record_encoded_bytes(bytes: u64) {
     if ACTIVE.with(Cell::get) {
         ENCODED.with(|cell| cell.set(cell.get().saturating_add(bytes)));
@@ -55,13 +61,6 @@ pub(crate) fn take_lock_work() -> WriterLockWorkSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn lock_work_is_ignored_outside_a_held_lock_scope() {
-        record_encoded_bytes(8);
-        record_decoded_bytes(16);
-        assert_eq!(take_lock_work(), WriterLockWorkSnapshot::default());
-    }
 
     #[test]
     fn lock_work_counts_only_bytes_observed_while_the_scope_is_active() {

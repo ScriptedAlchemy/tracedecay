@@ -11,7 +11,8 @@ import type {
   MemoryOverviewSummaryV1,
 } from '../../contracts/generated.ts';
 import { useScope } from '../../data/scope/store.ts';
-import { FeedbackSplit, KnowledgePage } from './KnowledgePage.tsx';
+import { FeedbackSplit } from './FactInspector.tsx';
+import { KnowledgePage } from './KnowledgePage.tsx';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -101,7 +102,7 @@ function memoryGraph(facts: readonly MemoryFactRowV1[]): MemoryGraphPayloadV1 {
 }
 
 /** `memory_api::overview` seeds the whole holographic block before it reads
- * anything, so `reads` and `facts_coverage` are always present — a body without
+ * anything, so `reads` and `facts_coverage` are always present, a body without
  * them is one the route cannot produce. */
 function memoryOverview(
   holographic: Partial<MemoryHolographicPayloadV1>,
@@ -236,11 +237,12 @@ describe('KnowledgePage fact detail', () => {
       </QueryClientProvider>,
     );
 
-    await userEvent.click(await screen.findByText('list-truncated fact…'));
+    await userEvent.click(await screen.findByRole('button', { name: /list-truncated fact…/ }));
 
     expect(await screen.findByText('full authoritative fact detail')).toBeTruthy();
     expect(screen.getByText('amari_fhrr')).toBeTruthy();
     expect(screen.getByText(/2,048 dimensions/)).toBeTruthy();
+    expect(screen.queryByText(/capacity|354,304/)).toBeNull();
     expect(
       calls.some((url) => url.includes('/api/plugins/holographic/fact/fact-project-7')),
     ).toBe(true);
@@ -272,7 +274,7 @@ describe('KnowledgePage fact detail', () => {
     useScope.getState().selectProject('project-a', 'Project A', 'active');
     renderKnowledge();
 
-    await userEvent.click(await screen.findByText('project A summary'));
+    await userEvent.click(await screen.findByRole('button', { name: /project A summary/ }));
     expect(await screen.findByText('canonical project A detail')).toBeTruthy();
 
     act(() => {
@@ -532,7 +534,7 @@ describe('KnowledgePage fact detail', () => {
     await userEvent.type(input, 'needle');
     await userEvent.keyboard('{Enter}');
 
-    expect(await screen.findByText(/no loaded facts match “needle”/i)).toBeTruthy();
+    expect(await screen.findByText(/no loaded facts match "needle"/i)).toBeTruthy();
     expect(screen.getByText(/fact coverage is partial/i)).toBeTruthy();
     expect(screen.queryByText(/loaded top-100 slice/i)).toBeNull();
   });

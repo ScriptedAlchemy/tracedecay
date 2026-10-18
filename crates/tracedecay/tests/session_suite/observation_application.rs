@@ -1,32 +1,31 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_capture::claude::normalize as claude_normalize;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ClaudeByteRangeV1,
-    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
-    ClaudeSourceIdentityV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProviderId, RetentionClass, SessionId,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_runtime_core::privacy::{
-    ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1,
-    PrivacySanitizerError, RecordSanitizerV1, parse_claude_record_v1,
-    parse_normalized_observation_record_v1, parse_observation_record_v1,
+use tracedecay_privacy::{
+    ClaudeSanitizerPolicyV1, ObservationRecordParseErrorV1, PrivacySanitizerError,
+    RecordSanitizerV1, parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_store::observation::{NonDurableFrameReason, ObservationCursorAdvance};
+use tracedecay_sessions::observation::{
+    AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
+    GetObservationRequest, ObservationApplication, ObservationApplicationError,
+    ObservationCancellation, ReplayObservationsRequest,
+};
+use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
     ObservationStore, ProjectionPersistOutcome,
 };
-use tracedecay_usecases::observation::{
-    AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
-    CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,
-    GetObservationRequest, ObservationApplication, ObservationApplicationError,
-    ObservationCancellation, ReplayObservationsRequest,
-};
+
+use crate::claude_records;
 
 const GENERATION: u64 = 17;
 const OBSERVATION_TABLES: &[&str] = &[
@@ -38,33 +37,42 @@ const OBSERVATION_TABLES: &[&str] = &[
     "observation_projection_provenance",
     "observation_projection_checkpoints",
     "sessions",
-    "session_messages",
-    "session_messages_fts",
+    "lcm_raw_messages",
+    "lcm_raw_messages_fts",
 ];
 
-fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
+fn source(session_id: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
 }
 
+/// The capture request the Claude host builds for one transcript record: the
+/// frame is normalized into its canonical envelope while it is parsed, and the
+/// identity carries the host's stable record id.
 fn request(
     session_id: &str,
     record: Value,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
-) -> CaptureClaudeObservationRequest {
+    expected_cursor: Option<ObservationSourceCursorV1>,
+) -> CaptureObservationRequest {
     let encoded_frame = serde_json::to_vec(&record).unwrap();
     let frame_end = u64::try_from(encoded_frame.len()).unwrap();
-    let parsed_record = parse_claude_record_v1(
+    let range = ObservationSourceRangeV1::new(0, frame_end).unwrap();
+    let record_id = claude_records::record_id(&record, session_id, 0);
+    let parsed_record = parse_normalized_observation_record_v1(
         &encoded_frame,
-        ClaudeByteRangeV1::new(0, frame_end).unwrap(),
+        range,
+        ObservationOrderingDomainV1::FileBytes,
+        |native| claude_normalize(&native, session_id, None, record_id.clone(), range),
     )
     .unwrap();
-    CaptureClaudeObservationRequest::new(
+    CaptureObservationRequest::new(
         parsed_record,
-        ClaudeObservationIdentityMaterialV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
             source(session_id),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(GENERATION).unwrap(),
-            ClaudeByteRangeV1::new(0, frame_end).unwrap(),
+            ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            record_id,
         )
         .unwrap(),
         expected_cursor,
@@ -131,11 +139,12 @@ async fn durable_text(runtime: &HostAdmissionTestRuntimeV1) -> Vec<String> {
                  FROM projection_queue
              UNION ALL SELECT provider || session_id || project_key || project_path ||
                  COALESCE(title, '') || COALESCE(metadata_json, '') FROM sessions
-             UNION ALL SELECT provider || message_id || session_id || role || text ||
+             UNION ALL SELECT provider || message_id || session_id || role ||
+                 COALESCE(content, placeholder_text, '') ||
                  COALESCE(kind, '') || COALESCE(model, '') || COALESCE(tool_names, '') ||
-                 COALESCE(metadata_json, '') FROM session_messages
-             UNION ALL SELECT text || role || COALESCE(kind, '') || COALESCE(model, '') ||
-                 COALESCE(tool_names, '') FROM session_messages_fts",
+                 COALESCE(metadata_json, '') FROM lcm_raw_messages
+             UNION ALL SELECT index_text || role || COALESCE(kind, '') || COALESCE(model, '') ||
+                 COALESCE(tool_names, '') FROM lcm_raw_messages_fts",
         )
         .unwrap();
     statement
@@ -185,20 +194,20 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
         runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap(),
-        ClaudeRecordSanitizerV1::claude_v1().unwrap(),
+        RecordSanitizerV1::claude_v1().unwrap(),
     );
     let session_id = "session.observation-privacy";
     let secret = "sk-proj-observation-sink-canary-1234567890";
     let record = conversational_record("message-private", "safe projected content", secret);
 
     let committed = application
-        .capture_claude_observation(request(session_id, record.clone(), None))
+        .capture_observation(request(session_id, record.clone(), None))
         .await
         .unwrap();
     assert!(!format!("{committed:?}").contains(secret));
     let first_receipt = committed.sanitization_receipt().clone();
     let observation_id = match &committed {
-        CaptureClaudeObservationOutcome::Persisted { outcome, .. } => {
+        CaptureObservationOutcome::Persisted { outcome, .. } => {
             assert!(matches!(**outcome, ObservationPersistOutcome::Committed(_)));
             outcome.receipt().observation().observation_id().clone()
         }
@@ -208,11 +217,11 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
 
     // Simulate a lost acknowledgement: retry the exact request after commit.
     let retry = application
-        .capture_claude_observation(request(session_id, record.clone(), None))
+        .capture_observation(request(session_id, record.clone(), None))
         .await
         .unwrap();
     match &retry {
-        CaptureClaudeObservationOutcome::Persisted { outcome, .. } => {
+        CaptureObservationOutcome::Persisted { outcome, .. } => {
             assert!(matches!(
                 **outcome,
                 ObservationPersistOutcome::ExactDuplicate(_)
@@ -277,7 +286,7 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
         "collision fixture must preserve the source identity range"
     );
     let collision = application
-        .capture_claude_observation(request(session_id, collision_record, None))
+        .capture_observation(request(session_id, collision_record, None))
         .await
         .expect_err("same identity with different sanitized payload must collide");
     assert!(matches!(collision, ObservationApplicationError::Store(_)));
@@ -298,7 +307,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
         runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap(),
-        ClaudeRecordSanitizerV1::new(
+        RecordSanitizerV1::new(
             ClaudeSanitizerPolicyV1::claude_v1()
                 .unwrap()
                 .with_limits(1, usize::MAX, usize::MAX)
@@ -309,7 +318,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
         runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap(),
-        ClaudeRecordSanitizerV1::new(
+        RecordSanitizerV1::new(
             ClaudeSanitizerPolicyV1::claude_v1()
                 .unwrap()
                 .with_limits(usize::MAX, 2, usize::MAX)
@@ -322,7 +331,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     let before = table_counts(&runtime).await;
 
     let rejected = application
-        .capture_claude_observation(request(
+        .capture_observation(request(
             session_id,
             json!({"payload": rejected_secret}),
             None,
@@ -331,12 +340,12 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
         .unwrap();
     assert!(matches!(
         rejected,
-        CaptureClaudeObservationOutcome::Rejected { .. }
+        CaptureObservationOutcome::Rejected { .. }
     ));
     assert!(!format!("{rejected:?}").contains(rejected_secret));
 
     let quarantined = quarantine_application
-        .capture_claude_observation(request(
+        .capture_observation(request(
             session_id,
             nested_value(json!(quarantined_secret), 4),
             None,
@@ -345,7 +354,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
         .unwrap();
     assert!(matches!(
         quarantined,
-        CaptureClaudeObservationOutcome::Quarantined { .. }
+        CaptureObservationOutcome::Quarantined { .. }
     ));
     assert!(!format!("{quarantined:?}").contains(quarantined_secret));
 
@@ -421,7 +430,7 @@ async fn native_ordering_domain_survives_authoritative_capture() {
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     let request = CaptureObservationRequest::new(
@@ -540,7 +549,7 @@ fn provider_capture_request_with_canonical_provider(
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     CaptureObservationRequest::new(
@@ -751,14 +760,18 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             ))
             .await
             .expect_err("{provider}: conflicting identity must fail");
+        // The committed cursor already covers this range, so a conflicting
+        // re-submission is a covered replay: it is indistinguishable from a
+        // stale writer that lost a cursor race, and the typed verdict is the
+        // retryable cursor conflict rather than a terminal content refusal.
         assert!(
             matches!(
                 conflict,
                 ObservationApplicationError::Store(
-                    tracedecay_store::ObservationStoreError::ObservationCollision { .. }
+                    tracedecay_store::ObservationStoreError::CursorConflict { .. }
                 )
             ),
-            "{provider}: expected ObservationCollision, got {conflict:?}"
+            "{provider}: expected a retryable CursorConflict, got {conflict:?}"
         );
         assert_eq!(
             table_counts(&runtime).await,
@@ -781,7 +794,7 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             ObservationOrderingDomainV1::SqliteRowId,
             cursor_after_commit.clone(),
             ObservationSourceRangeV1::new(1, 2).unwrap(),
-            NonDurableFrameReason::MalformedFrame,
+            ObservationCoverageReason::MalformedFrame,
         )
         .unwrap();
         application

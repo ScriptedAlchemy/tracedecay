@@ -2,7 +2,7 @@
 
 Mirrors the shape of `tools/rust.py`: returns `{tool_name: [args_dict, ...]}`
 with exactly 5 query variants per tool. Tools that don't apply to C (impls,
-derives, inheritance — C has no method tables or trait edges) still get five
+derives, inheritance. C has no method tables or trait edges) still get five
 plausible inputs so the matrix surfaces them as EMPTY rather than skipping
 them silently.
 """
@@ -31,12 +31,11 @@ def probes_for(d):
         "tracedecay_node":              [{"node_id": i} for i in ids],
         "tracedecay_by_qualified_name": [{"qualified_name": q} for q in qns],
         "tracedecay_signature":         [{"node_id": i} for i in ids],
-        "tracedecay_body":              [{"symbol": n} for n in names],
+        "tracedecay_source_body":       [{"node_id": i} for i in ids],
         # traversal
         "tracedecay_callers":           [{"node_id": i} for i in ids],
         "tracedecay_callees":           [{"node_id": i} for i in ids],
-        "tracedecay_callers_for":       [{"node_ids": [i]} for i in ids],
-        "tracedecay_impls":             [{"name": n} for n in DEFAULT_TYPE_NAMES],
+        "tracedecay_implementations":   [{"trait": n} for n in DEFAULT_TYPE_NAMES],
         "tracedecay_derives":           [{"qualified_name": q} for q in qns],
         "tracedecay_type_hierarchy":    [{"node_id": i} for i in ids],
         "tracedecay_similar":           [{"symbol": n} for n in names],
@@ -61,8 +60,6 @@ def probes_for(d):
         "tracedecay_coupling":          [{}, {"path": "src"}, {"path": "include"}, {"path": "lib"}, {"path": files[0]}],
         "tracedecay_dsm":               [{}, {"path": "src"}, {"path": "include"}, {"path": "lib"}, {"path": "tests"}],
         "tracedecay_module_api":        [{"path": f} for f in files],
-        "tracedecay_simplify_scan":     [{"files": [f]} for f in files],
-        "tracedecay_unused_imports":    [{}, {"limit": 10}, {"path": "src"}, {"path": "include"}, {"path": "lib"}],
         "tracedecay_test_map":          [{"file": f} for f in files],
         "tracedecay_test_risk":         [{}, {"limit": 10}, {"path": "src"}, {"path": "lib"}, {"path": "tests"}],
         "tracedecay_todos":             [{}, {"limit": 10}, {"path": "src"}, {"path": "lib"}, {"path": "include"}],

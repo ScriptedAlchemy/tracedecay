@@ -10,17 +10,46 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[tokio::test]
+async fn background_refresh_preserves_watch_policy_refusal() {
+    let (cg, dir, _authority) = init_indexed_repo().await;
+    let graph = Arc::new(cg);
+    for mode in [
+        BackgroundRefreshModeV1::ForceReconcile,
+        BackgroundRefreshModeV1::FreshnessProbe,
+    ] {
+        let outcome =
+            super::hook_writes::execute_background_refresh_direct(BackgroundRefreshRequest {
+                graph: Arc::clone(&graph),
+                project_root: dir.path().to_path_buf(),
+                mode,
+                reconcile_sink: Some(Arc::new(|_, _| {
+                    Box::pin(async { super::CodeIndexDemandAdmissionV1::RefusedByPolicy })
+                })),
+                freshness_probe_sink: Some(Arc::new(|_| {
+                    Box::pin(async { super::CodeIndexDemandAdmissionV1::RefusedByPolicy })
+                })),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled
+        ));
+    }
+}
+
+#[tokio::test]
 async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() {
     let (cg, dir, _authority) = init_indexed_repo().await;
     let forced = Arc::new(AtomicUsize::new(0));
     let probed = Arc::new(AtomicUsize::new(0));
     let reconcile_sink: super::CodeIndexReconcileSink = {
         let forced = Arc::clone(&forced);
-        Arc::new(move |_root| {
+        Arc::new(move |_root, _demand| {
             let forced = Arc::clone(&forced);
             Box::pin(async move {
                 forced.fetch_add(1, Ordering::AcqRel);
-                true
+                super::CodeIndexDemandAdmissionV1::Queued
             })
         })
     };
@@ -30,7 +59,7 @@ async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() 
             let probed = Arc::clone(&probed);
             Box::pin(async move {
                 probed.fetch_add(1, Ordering::AcqRel);
-                true
+                super::CodeIndexDemandAdmissionV1::Queued
             })
         })
     };
@@ -75,7 +104,9 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
                     .lock()
                     .expect("recording lock")
                     .push(request.project_root);
-                Ok(Some(HashMap::from([("injected.rs".to_string(), 41)])))
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                    Some(HashMap::from([("injected.rs".to_string(), 41)])),
+                ))
             })
         })
     };
@@ -145,12 +176,16 @@ async fn lazy_stale_sync_is_detached_from_the_request() {
             let armed = Arc::clone(&armed);
             Box::pin(async move {
                 if !armed.load(Ordering::Acquire) {
-                    return Ok(Some(HashMap::new()));
+                    return Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                        Some(HashMap::new()),
+                    ));
                 }
                 entered.notify_one();
                 release.notified().await;
                 completed.fetch_add(1, Ordering::AcqRel);
-                Ok(Some(HashMap::from([("detached.rs".to_string(), 7)])))
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                    Some(HashMap::from([("detached.rs".to_string(), 7)])),
+                ))
             })
         })
     };
@@ -227,9 +262,15 @@ async fn concurrent_startup_catchups_use_injected_writer_authority() {
                 calls.fetch_add(1, Ordering::AcqRel);
                 let concurrent = active.fetch_add(1, Ordering::AcqRel) + 1;
                 max_active.fetch_max(concurrent, Ordering::AcqRel);
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tracedecay_runtime_core::native_runtime::sleep_until(
+                    std::time::Instant::now() + Duration::from_millis(50),
+                )
+                .await
+                .expect("native timer");
                 active.fetch_sub(1, Ordering::AcqRel);
-                Ok(Some(HashMap::new()))
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                    Some(HashMap::new()),
+                ))
             })
         })
     };
@@ -258,4 +299,161 @@ async fn concurrent_startup_catchups_use_injected_writer_authority() {
     );
     first.shutdown().await;
     second.shutdown().await;
+}
+
+/// A freshness probe refused by a parked worktree logs the park's cause and
+/// remedy as fields; the route message would cut a long cause at its bound.
+#[tokio::test]
+async fn parked_freshness_probe_logs_cause_and_remedy_as_fields() {
+    let (cg, _dir, _authority) = init_indexed_repo().await;
+    let capture = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
+    let cause = format!("publication manifest is corrupt: {}", "x".repeat(600));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let cause = cause.clone();
+        let armed = Arc::clone(&armed);
+        Arc::new(move |mut request: BackgroundRefreshRequest| {
+            let cause = cause.clone();
+            let armed = armed.load(Ordering::Acquire);
+            Box::pin(async move {
+                if !armed {
+                    return Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None));
+                }
+                request.freshness_probe_sink = Some(Arc::new(move |_root| {
+                    let cause = cause.clone();
+                    Box::pin(async move {
+                        super::CodeIndexDemandAdmissionV1::Terminal(
+                            tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+                                reason: cause,
+                                blocked_reason: None,
+                                remediation: "run `tracedecay daemon restart`".to_owned(),
+                                parked_at_micros: 1,
+                                observed_passes: 1,
+                                retries_on_wake: false,
+                            },
+                        )
+                    })
+                }));
+                super::hook_writes::execute_background_refresh_direct(request).await
+            })
+        })
+    };
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(cg, None)
+            .with_background_refresh_writer(refresh_writer),
+    )
+    .await;
+    assert!(
+        server
+            .wait_for_startup_catch_up(Duration::from_secs(5))
+            .await,
+        "startup catch-up settles before the probe"
+    );
+    armed.store(true, Ordering::Release);
+    let snapshot = server.cg_snapshot().await;
+    server
+        .background_refresh_running
+        .store(true, Ordering::Release);
+
+    server.spawn_read_refresh_task(&snapshot);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while server.background_refresh_running.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("refused probe settles");
+    server.shutdown().await;
+
+    let log = capture.text();
+    let line = log
+        .lines()
+        .find(|line| line.contains("background read reconciliation was not admitted"))
+        .unwrap_or_else(|| panic!("probe refusal must be logged: {log}"));
+    let (_, fields) = line
+        .split_once("was not admitted ")
+        .unwrap_or_else(|| panic!("structured fields follow the message: {line}"));
+    assert_eq!(
+        fields,
+        format!(
+            "reason_code=\"code_index_publication_authority_corrupt\" cause=\"{cause}\" \
+             remedy=\"run `tracedecay daemon restart`\" retries_on_wake=false"
+        )
+    );
+}
+
+fn native_server_catch_up(
+    refresh_writer: BackgroundRefreshWriter,
+    observe: impl AsyncFnOnce(&McpServer),
+) {
+    let hazards = crate::test_support::native_runtime_hazards();
+    tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let (cg, _dir, _authority) = init_indexed_repo().await;
+        let server = McpServer::new_with_context(
+            McpServerConstructionContext::direct(cg, None)
+                .with_background_refresh_writer(refresh_writer),
+        )
+        .await;
+        observe(&server).await;
+        server.shutdown_background_tasks().await;
+    })
+    .expect("native runtime");
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+}
+
+/// The catch-up a server dispatches at construction runs where no Tokio
+/// runtime exists and lands its token map.
+#[test]
+fn startup_catch_up_settles_without_a_tokio_runtime() {
+    let refresh_writer: BackgroundRefreshWriter = Arc::new(|_request| {
+        Box::pin(async {
+            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                Some(HashMap::from([("startup.rs".to_string(), 3)])),
+            ))
+        })
+    });
+    native_server_catch_up(refresh_writer, async |server| {
+        assert!(
+            server
+                .wait_for_startup_catch_up(Duration::from_secs(30))
+                .await,
+            "startup catch-up must settle off Tokio"
+        );
+        assert_eq!(
+            server.file_token_map_snapshot(),
+            HashMap::from([("startup.rs".to_string(), 3)])
+        );
+    });
+}
+
+/// Shutdown aborts a catch-up still waiting on its admission and joins it.
+#[test]
+fn shutdown_aborts_a_parked_startup_catch_up_without_a_tokio_runtime() {
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let entered = Arc::clone(&entered);
+        let dropped = Arc::clone(&dropped);
+        Arc::new(move |_request| {
+            let entered = Arc::clone(&entered);
+            let guard = Dropped(Arc::clone(&dropped));
+            Box::pin(async move {
+                let _guard = guard;
+                entered.notify_one();
+                std::future::pending().await
+            })
+        })
+    };
+    native_server_catch_up(refresh_writer, async |_server| entered.notified().await);
+    assert!(
+        dropped.load(Ordering::Acquire),
+        "shutdown must abort and join the parked catch-up"
+    );
 }

@@ -3,39 +3,24 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationResult, CancellationSignal, ConfigurationBatchRequestV1,
-    ConfigurationDirectMutationRequestV1, ConfigurationSetRequestV1,
-    ConfigurationWriteCredentialRequestV1, Deadline, PageRequest,
+    ConfigurationDirectMutationRequestV1, ConfigurationSetRequestV1, Deadline, PageRequest,
 };
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationValueV1, CredentialKindV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
+    ConfigurationValueV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
     USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
 };
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{ApplicationConfigurationSet, TypedOperation};
-use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, EffectClass, IdempotencyContract, ReceiptContract,
-    ReconciliationContract, TerminalState,
-};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use super::journey_test_support::tool_payload;
+use super::journey_test_support::{initialize_project, tool_payload};
 use super::*;
 use tracedecay_daemon_service::daemon_operation_event_authority;
 
 const HTTP_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-fn initialize_project(project: &Path) {
-    std::fs::create_dir_all(project.join("src")).expect("project source");
-    std::fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").expect("project source file");
-    let status = std::process::Command::new("git")
-        .current_dir(project)
-        .args(["init", "--quiet"])
-        .status()
-        .expect("initialize Git project");
-    assert!(status.success(), "Git project initialization failed");
-}
 
 async fn current_revision(
     harness: &ProductionProjectCompositionHarnessV1,
@@ -51,6 +36,30 @@ async fn current_revision(
         .current()
         .await
         .expect("current configuration")
+        .revision_id()
+        .clone()
+}
+
+async fn profile_revision(
+    harness: &ProductionProjectCompositionHarnessV1,
+) -> ConfigurationRevisionId {
+    let store_administration = &harness
+        .resources
+        .as_ref()
+        .expect("production composition resources")
+        .store_administration;
+    let profile_id = store_administration
+        .profile_identity()
+        .expect("profile identity")
+        .profile_id()
+        .clone();
+    let database = store_administration
+        .registered_profile_session_database()
+        .await
+        .expect("profile sessions store");
+    tracedecay_project::config::read_or_initialize_profile_configuration(database, &profile_id)
+        .await
+        .expect("profile configuration")
         .revision_id
 }
 
@@ -80,39 +89,35 @@ async fn cli_configuration_set(
     );
     let operation = ApplicationSurfaceOperation::ConfigurationSet;
     let application_operation =
-        tracedecay_application::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
         .deadline()
         .maximum_millis();
-    assert_eq!(
-        maximum_millis, 15_000,
-        "CLI configuration effects use the catalog-owned 15 second deadline"
-    );
-    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let deadline = Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
     .expect("configuration deadline");
-    let request_id = tracedecay_application::request_identity::mint_global_request_id(
-        tracedecay_application::request_identity::GlobalRequestSurface::Cli,
+    let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+        tracedecay_contracts::request_identity::GlobalRequestSurface::Cli,
     )
     .expect("CLI request id");
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .expect("CLI cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             tracedecay_tool_catalog::BindingSurface::Cli,
             operation,
             request_id,
-            crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                tracedecay_application::ConfigurationWireRequestV1::Set(request),
+            tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
+                tracedecay_contracts::ConfigurationWireRequestV1::Set(request),
             ),
             PageRequest::first(10).expect("CLI page"),
             Some(deadline),
@@ -120,10 +125,14 @@ async fn cli_configuration_set(
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("CLI configuration dispatch");
-    crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
-        .await
-        .expect("CLI application invocation")
-        .result
+    tracedecay_daemon_service::application_surface::execute_application_surface(
+        operation,
+        dispatched,
+        Some(&executor),
+    )
+    .await
+    .expect("CLI application invocation")
+    .result
 }
 
 async fn current_profile_id(
@@ -170,11 +179,11 @@ async fn configuration_batch_via_surface(
     );
     let operation = ApplicationSurfaceOperation::ConfigurationBatch;
     let application_operation =
-        tracedecay_application::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
@@ -184,29 +193,29 @@ async fn configuration_batch_via_surface(
         maximum_millis, 15_000,
         "user configuration effects use the catalog-owned 15 second deadline"
     );
-    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let deadline = Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
     .expect("configuration deadline");
     let request_surface = match surface {
         tracedecay_tool_catalog::BindingSurface::Cli => {
-            tracedecay_application::request_identity::GlobalRequestSurface::Cli
+            tracedecay_contracts::request_identity::GlobalRequestSurface::Cli
         }
         tracedecay_tool_catalog::BindingSurface::Dashboard => {
-            tracedecay_application::request_identity::GlobalRequestSurface::DashboardSettings
+            tracedecay_contracts::request_identity::GlobalRequestSurface::DashboardSettings
         }
         other => panic!("unsupported configuration batch test surface: {other:?}"),
     };
     let request_id =
-        tracedecay_application::request_identity::mint_global_request_id(request_surface)
+        tracedecay_contracts::request_identity::mint_global_request_id(request_surface)
             .expect("surface request id");
     if surface == tracedecay_tool_catalog::BindingSurface::Dashboard {
-        return crate::application_surface::resolve_dashboard_application_surface(
+        return tracedecay_daemon_service::application_surface::resolve_dashboard_application_surface(
             operation,
             request_id,
-            crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                tracedecay_application::ConfigurationWireRequestV1::Batch(request),
+            tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
+                tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
             Some(&executor),
@@ -219,12 +228,12 @@ async fn configuration_batch_via_surface(
         CancellationSignal::active(format!("cancellation.surface.{}", request_id.as_str()))
             .expect("surface cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             surface,
             operation,
             request_id,
-            crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                tracedecay_application::ConfigurationWireRequestV1::Batch(request),
+            tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
+                tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             PageRequest::first(10).expect("surface page"),
             Some(deadline),
@@ -232,10 +241,14 @@ async fn configuration_batch_via_surface(
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
-    crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
-        .await
-        .expect("configuration batch application invocation")
-        .result
+    tracedecay_daemon_service::application_surface::execute_application_surface(
+        operation,
+        dispatched,
+        Some(&executor),
+    )
+    .await
+    .expect("configuration batch application invocation")
+    .result
 }
 
 async fn configuration_http_sdk(
@@ -264,12 +277,13 @@ async fn configuration_http_sdk(
         project_root,
         scope,
     ));
-    let router = crate::application_surface::http_application_router_with_executor(
-        executor,
-        daemon_operation_event_authority(),
-        target.project_id.clone(),
-    )
-    .expect("canonical HTTP application router");
+    let router =
+        tracedecay_daemon_service::application_surface::http_application_router_with_executor(
+            executor,
+            daemon_operation_event_authority(),
+            target.project_id.clone(),
+        )
+        .expect("canonical HTTP application router");
     let registry = crate::daemon::http_application::DaemonHttpApplicationRegistry::default();
     registry
         .mount(target.project_id.as_str(), router)
@@ -308,7 +322,8 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("production composition");
-    let expected_revision = current_revision(&harness, &project).await;
+    let expected_revision = profile_revision(&harness).await;
+    let project_revision = current_revision(&harness, &project).await;
     let profile_id = current_profile_id(&harness, &project).await;
     let request = ConfigurationBatchRequestV1 {
         mutations: vec![ConfigurationDirectMutationRequestV1::Set {
@@ -335,8 +350,13 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
         .expect("first CLI user configuration effect"),
     )
     .expect("CLI application envelope");
-    let committed_revision = current_revision(&harness, &project).await;
+    let committed_revision = profile_revision(&harness).await;
     assert_ne!(committed_revision, expected_revision);
+    assert_eq!(
+        current_revision(&harness, &project).await,
+        project_revision,
+        "a user setting commits to the profile store, never the project's"
+    );
     harness.shutdown().await;
 
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
@@ -353,12 +373,16 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
         .expect("dashboard replay of CLI user configuration effect"),
     )
     .expect("dashboard replay envelope");
+    // The durable effect is the replayed artefact; the envelope's `request_id`
+    // is minted per request per surface (see `configuration_batch_via_surface`)
+    // and can never match across two calls. Compare what replay actually
+    // promises, exactly as the cross-surface set journey above does.
     assert_eq!(
-        replay, first_effect,
-        "dashboard must replay the CLI operation's exact durable user configuration envelope"
+        replay["outcome"]["value"], first_effect["outcome"]["value"],
+        "dashboard must replay the CLI operation's exact durable user configuration effect"
     );
     assert_eq!(
-        current_revision(&harness, &project).await,
+        profile_revision(&harness).await,
         committed_revision,
         "cross-surface replay must not advance user configuration again"
     );
@@ -381,7 +405,7 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
     .expect_err("same-key changed-input dashboard request must conflict");
     assert_eq!(conflict.problem.code, "configuration.conflict");
     assert_eq!(
-        current_revision(&harness, &project).await,
+        profile_revision(&harness).await,
         committed_revision,
         "user configuration idempotency conflict must not advance configuration"
     );
@@ -424,9 +448,30 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
     )
     .expect("CLI application envelope");
     let effect = &first_effect["outcome"]["value"];
+    assert_eq!(effect["effect_class"], "configuration_write");
+    assert_eq!(
+        effect["idempotency_key"],
+        "configuration.idempotency.restart-replay"
+    );
+    assert_eq!(effect["receipt"]["effect_class"], "configuration_write");
+    assert_eq!(effect["receipt"]["outcome"], "completed");
+    assert_eq!(effect["reconciliation"], "pending");
     assert_eq!(
         effect["execution"]["started_at"], effect["payload"]["created_at"],
         "effect execution must use the accepted durable commit time"
+    );
+    let created_at = effect["payload"]["created_at"]
+        .as_i64()
+        .expect("configuration receipt created_at");
+    let deadline_at = effect["payload"]["effective_deadline_at"]
+        .as_i64()
+        .expect("configuration receipt deadline");
+    // Dispatch stamps `created_at` after the client builds the catalog ceiling,
+    // so the stored span is that 15s ceiling minus a short stamp gap.
+    let deadline_span_micros = deadline_at - created_at;
+    assert!(
+        (14_000_000..=15_000_000).contains(&deadline_span_micros),
+        "this configuration set must commit the catalog's 15s effect deadline, span={deadline_span_micros}us"
     );
     assert_eq!(
         effect["execution"]["effective_deadline"]["expires_at"],
@@ -440,6 +485,35 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("restarted production composition");
+    // Source readiness precedes the deferred query-authority mount. Only its
+    // typed pre-admission refusal may retry; an admitted answer must be exact.
+    let payload = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let search = harness
+                .call_tool(
+                    &project,
+                    "tracedecay_search",
+                    serde_json::json!({ "query": "probe", "limit": 10, "format": "json" }),
+                )
+                .await
+                .expect("query restored project");
+            let payload = tool_payload(&search);
+            if payload["status"] != "unavailable" || payload["reason"] != "authority_unavailable" {
+                break payload;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("restored query authority must become ready within the existing bound");
+    assert!(
+        payload["results"]
+            .as_array()
+            .expect("restored search results")
+            .iter()
+            .any(|result| result["display"]["name"] == "probe"),
+        "restored readiness must serve the retained source symbol: {payload}"
+    );
     let mut replay_args = serde_json::to_value(&request).expect("replay request");
     replay_args
         .as_object_mut()
@@ -458,36 +532,6 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
         current_revision(&harness, &project).await,
         committed_revision,
         "exact replay must not advance configuration again"
-    );
-
-    assert_eq!(ApplicationConfigurationSet::MAXIMUM_DEADLINE_MILLIS, 15_000);
-    assert_eq!(
-        ApplicationConfigurationSet::EFFECT,
-        EffectClass::ConfigurationWrite
-    );
-    assert_eq!(
-        ApplicationConfigurationSet::IDEMPOTENCY,
-        IdempotencyContract::Required
-    );
-    const { assert!(!ApplicationConfigurationSet::CANCELLABLE) };
-    assert!(ApplicationConfigurationSet::CANCELLATION_POINTS.is_empty());
-    assert_eq!(
-        ApplicationConfigurationSet::RECONCILIATION,
-        ReconciliationContract::Required
-    );
-    assert_eq!(
-        ApplicationConfigurationSet::RECEIPT,
-        ReceiptContract::DurableEffect
-    );
-    assert_eq!(
-        ApplicationConfigurationSet::TERMINAL_STATES,
-        [
-            TerminalState::Completed,
-            TerminalState::TimedOut,
-            TerminalState::Failed,
-            TerminalState::EffectUnknown,
-            TerminalState::Partial,
-        ]
     );
 
     let (http_service, sdk) = configuration_http_sdk(&harness, &project).await;
@@ -556,52 +600,6 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
         current_revision(&harness, &project).await,
         committed_revision,
         "idempotency conflict must not advance configuration"
-    );
-    harness.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn credential_effect_uses_the_durable_request_operation_digest() {
-    let isolation = TempDir::new().expect("journey isolation");
-    let project = isolation.path().join("project");
-    initialize_project(&project);
-
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
-        .await
-        .expect("production composition");
-    let request = ConfigurationWriteCredentialRequestV1 {
-        expected_reference_id: None,
-        kind: CredentialKindV1::ApiToken,
-        write_handle: "credential-write-handle.production-journey".to_owned(),
-        expected_revision: current_revision(&harness, &project).await,
-        idempotency_key: ConfigurationIdempotencyKey::new(
-            "configuration.idempotency.credential-digest",
-        )
-        .expect("idempotency key"),
-    };
-    let response = harness
-        .call_tool(
-            &project,
-            "tracedecay_configuration_write_credential",
-            serde_json::to_value(&request).expect("credential request"),
-        )
-        .await
-        .expect("credential effect");
-    let envelope = tool_payload(&response);
-    let effect = &envelope["outcome"]["value"];
-    let operation_digest = &effect["payload"]["operation_digest"];
-    assert_eq!(
-        &effect["receipt"]["input_digest"], operation_digest,
-        "the effect must carry the canonical digest accepted by the credential store"
-    );
-    assert_ne!(
-        operation_digest, &effect["payload"]["reference_digest"],
-        "the durable request digest must not be replaced by the metadata digest"
-    );
-    assert_eq!(
-        effect["execution"]["effective_deadline"]["expires_at"],
-        effect["payload"]["effective_deadline_at"],
-        "effect execution must replay the accepted credential deadline"
     );
     harness.shutdown().await;
 }

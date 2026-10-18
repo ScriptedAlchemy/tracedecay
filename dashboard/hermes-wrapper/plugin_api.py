@@ -1,4 +1,4 @@
-"""TraceDecay dashboard plugin for Hermes — tracedecay-backed API routes.
+"""TraceDecay dashboard plugin for Hermes. Tracedecay-backed API routes.
 
 Mounted at /api/plugins/tracedecay/ by the Hermes dashboard plugin system.
 
@@ -25,7 +25,8 @@ only listens on loopback.
 
 Configuration (environment always wins, then deploy-time defaults below):
 
-- ``TRACEDECAY_DASHBOARD_URL``      use an existing server instead of spawning
+- ``TRACEDECAY_DASHBOARD_URL``      launch URL (with its ``token``) of an
+  existing server to use instead of spawning
 - ``TRACEDECAY_BIN``                path to the tracedecay binary
 - ``TRACEDECAY_DASHBOARD_PROJECT``  project root/store to serve. When unset,
   the wrapper uses the Hermes process cwd. Hermes homes and profiles never
@@ -39,6 +40,7 @@ from __future__ import annotations
 import atexit
 import concurrent.futures
 import ctypes
+import importlib.util
 import json
 import logging
 import os
@@ -60,79 +62,28 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-try:
-    from embed_proxy import (
-        DASHBOARD_EMBED_PATH,
-        embed_upstream_path,
-        is_event_stream,
-        is_html_content_type,
-        rewrite_dashboard_html,
-    )
-except ImportError:  # pragma: no cover - Hermes deploys this file alone
-    EMBED_MOUNT = "/api/plugins/tracedecay/embed"
-    DASHBOARD_EMBED_PATH = f"{EMBED_MOUNT}/"
-    _ATTR_URL_RE = re.compile(
-        r"""(?P<attr>\b(?:src|href))=(?P<quote>['"])/(?P<path>(?!/))""",
-        re.IGNORECASE,
-    )
 
-    def embed_upstream_path(subpath: str) -> str:
-        tail = subpath.strip("/")
-        return f"/{tail}" if tail else "/"
+def _load_embed_proxy():
+    """Load the sibling ``embed_proxy.py`` by path. Hermes imports this file
+    through ``spec_from_file_location``, so its directory is not on
+    ``sys.path``."""
+    path = Path(__file__).with_name("embed_proxy.py")
+    spec = importlib.util.spec_from_file_location(f"{__name__}_embed_proxy", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    def is_html_content_type(content_type: str | None) -> bool:
-        if content_type is None:
-            return False
-        media = content_type.split(";", 1)[0].strip().lower()
-        return media in {"text/html", "application/xhtml+xml"}
 
-    def is_event_stream(upstream_path: str, accept: str) -> bool:
-        if "text/event-stream" in accept.lower():
-            return True
-        return upstream_path.rstrip("/") == "/api/events"
+_embed_proxy_module = _load_embed_proxy()
+DASHBOARD_EMBED_PATH = _embed_proxy_module.DASHBOARD_EMBED_PATH
+dashboard_upstream = _embed_proxy_module.dashboard_upstream
+embed_upstream_path = _embed_proxy_module.embed_upstream_path
+is_event_stream = _embed_proxy_module.is_event_stream
+is_html_content_type = _embed_proxy_module.is_html_content_type
+rewrite_dashboard_html = _embed_proxy_module.rewrite_dashboard_html
 
-    def _dashboard_bridge_script() -> str:
-        return (
-            "<script>"
-            "(function(){"
-            f"var p={EMBED_MOUNT!r};"
-            "function rw(u){"
-            "if(typeof u!=='string')return u;"
-            "if(u.indexOf('/api/')===0)return p+u;"
-            "return u;"
-            "}"
-            "var f=window.fetch;"
-            "window.fetch=function(i,n){"
-            "if(typeof i==='string')i=rw(i);"
-            "else if(typeof Request!=='undefined'&&i instanceof Request)"
-            "i=new Request(rw(i.url),i);"
-            "return f.call(this,i,n);"
-            "};"
-            "var ES=window.EventSource;"
-            "function P(u,c){return new ES(rw(u),c)}"
-            "P.prototype=ES.prototype;"
-            "P.CONNECTING=ES.CONNECTING;P.OPEN=ES.OPEN;P.CLOSED=ES.CLOSED;"
-            "window.EventSource=P;"
-            "window.__webpack_public_path__=p+'/';"
-            "})();"
-            "</script>"
-        )
-
-    def rewrite_dashboard_html(html: str) -> str:
-        rewritten = _ATTR_URL_RE.sub(
-            lambda match: (
-                f"{match.group('attr')}={match.group('quote')}"
-                f"{EMBED_MOUNT}/{match.group('path')}"
-            ),
-            html,
-        )
-        script = _dashboard_bridge_script()
-        lower = rewritten.lower()
-        idx = lower.find("<head>")
-        if idx == -1:
-            return script + rewritten
-        insert_at = idx + len("<head>")
-        return rewritten[:insert_at] + script + rewritten[insert_at:]
 
 router = APIRouter()
 
@@ -181,7 +132,7 @@ _STDERR_TAIL_LINES = 20
 
 _lock = threading.Lock()
 _process: subprocess.Popen | None = None
-_base_url: str | None = None
+_upstream_origin: tuple[str, dict[str, str]] | None = None
 # (monotonic timestamp, detail) of the last failed spawn, for fast-fail.
 _last_spawn_failure: tuple[float, str] | None = None
 
@@ -199,7 +150,7 @@ except Exception:  # pragma: no cover - exotic libc
 # spawning from the request thread used to SIGTERM the child seconds later
 # (surfacing as random 502 "connection reset by peer" on the next request).
 # All Popen calls therefore run on this single long-lived worker thread,
-# which survives until interpreter shutdown — restoring the intended
+# which survives until interpreter shutdown. Restoring the intended
 # "die with the Hermes host process" semantics.
 _spawn_pool = concurrent.futures.ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="tracedecay-dashboard-spawn"
@@ -210,7 +161,7 @@ def _child_preexec() -> None:
     """Runs in the forked child: deliver SIGTERM when the parent dies.
 
     Best-effort, Linux-only (PR_SET_PDEATHSIG). Other platforms rely on
-    atexit plus the dead-instance reap in ``_upstream_base``.
+    atexit plus the dead-instance reap in ``_upstream``.
     """
     if _libc is not None:
         try:
@@ -263,7 +214,7 @@ def _dashboard_env() -> dict[str, str]:
     return os.environ.copy()
 
 
-def _spawn_dashboard() -> str:
+def _spawn_dashboard() -> tuple[str, dict[str, str]]:
     """Starts ``tracedecay dashboard`` and returns its base URL."""
     binary = _find_tracedecay_bin()
     if not binary:
@@ -294,7 +245,7 @@ def _spawn_dashboard() -> str:
         stderr=subprocess.PIPE,
         text=True,
         env=_dashboard_env(),
-        preexec_fn=_child_preexec if _libc is not None else None,  # noqa: PLW1509 — minimal prctl-only hook
+        preexec_fn=_child_preexec if _libc is not None else None,  # noqa: PLW1509, minimal prctl-only hook
     ).result(timeout=_SPAWN_TIMEOUT_SECONDS)
 
     # Single reader per pipe, for the child's whole lifetime: the stderr
@@ -341,18 +292,19 @@ def _spawn_dashboard() -> str:
             headers={"Retry-After": "5"},
         )
 
-    _wait_until_ready(process, url, project, stderr_tail)
+    base, headers = dashboard_upstream(url)
+    _wait_until_ready(process, base, headers, project, stderr_tail)
 
     global _process
     _process = process
-    logger.info("tracedecay dashboard started at %s (project %s)", url, project)
-    return url
+    logger.info("tracedecay dashboard started at %s (project %s)", base, project)
+    return base, headers
 
 
 def _terminate_process(process: subprocess.Popen) -> None:
     """Terminate-then-kill a spawned child without touching its pipes.
 
-    The drain threads own the pipes — never communicate() here (that would
+    The drain threads own the pipes, never communicate() here (that would
     race a second reader against them on the same fd).
     """
     try:
@@ -367,7 +319,11 @@ def _terminate_process(process: subprocess.Popen) -> None:
 
 
 def _wait_until_ready(
-    process: subprocess.Popen, url: str, project: str, stderr_tail: deque
+    process: subprocess.Popen,
+    base: str,
+    headers: dict[str, str],
+    project: str,
+    stderr_tail: deque,
 ) -> None:
     """Blocks until the spawned engine answers /api/capabilities.
 
@@ -389,7 +345,9 @@ def _wait_until_ready(
                 headers={"Retry-After": "5"},
             )
         try:
-            request = urllib.request.Request(f"{url}/api/capabilities", method="GET")
+            request = urllib.request.Request(
+                f"{base}/api/capabilities", method="GET", headers=headers
+            )
             with urllib.request.urlopen(request, timeout=2.0) as response:
                 if response.status < 500:
                     return
@@ -426,9 +384,10 @@ def _shutdown() -> None:
 atexit.register(_shutdown)
 
 
-def _upstream_base() -> str:
-    """Returns the base URL of the tracedecay dashboard server, starting it
-    on first use unless an external URL is configured.
+def _upstream() -> tuple[str, dict[str, str]]:
+    """Returns the tracedecay dashboard origin and the credential headers its
+    launch token grants, starting the server on first use unless an external
+    launch URL is configured.
 
     Spawn failures are cached for ``_SPAWN_RETRY_BACKOFF_SECONDS`` so a
     persistently failing spawn (e.g. project root not tracedecay-initialized)
@@ -437,11 +396,11 @@ def _upstream_base() -> str:
     """
     configured = _env("DASHBOARD_URL")
     if configured:
-        return configured.rstrip("/")
-    global _base_url, _last_spawn_failure
+        return dashboard_upstream(configured)
+    global _upstream_origin, _last_spawn_failure
     with _lock:
-        if _base_url is not None and _process is not None and _process.poll() is None:
-            return _base_url
+        if _upstream_origin is not None and _process is not None and _process.poll() is None:
+            return _upstream_origin
         if _last_spawn_failure is not None:
             failed_at, detail = _last_spawn_failure
             remaining = _SPAWN_RETRY_BACKOFF_SECONDS - (time.monotonic() - failed_at)
@@ -458,36 +417,39 @@ def _upstream_base() -> str:
         # spawning a replacement.
         _shutdown()
         try:
-            _base_url = _spawn_dashboard()
+            _upstream_origin = _spawn_dashboard()
         except HTTPException as exc:
             _last_spawn_failure = (time.monotonic(), str(exc.detail))
             raise
-        return _base_url
+        return _upstream_origin
 
 
 def _proxy(method: str, upstream_path: str, request: Request, body: bytes | None) -> JSONResponse:
     # Connection-level failures (reset/refused) on GETs are retried once
-    # after re-resolving the upstream: _upstream_base reaps a dead child and
+    # after re-resolving the upstream: _upstream reaps a dead child and
     # respawns it (then waits for readiness), so a mid-flight engine death
     # heals transparently instead of surfacing a one-off 502. POSTs are never
-    # retried — curation applies must not run twice.
+    # retried. Curation applies must not run twice.
     attempts = 2 if method == "GET" else 1
     last_exc: Exception | None = None
     for attempt in range(attempts):
-        base = _upstream_base()
+        base, credential = _upstream()
         query = request.url.query
         url = f"{base}{upstream_path}" + (f"?{query}" if query else "")
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in ("http", "https"):
             raise HTTPException(status_code=502, detail="invalid upstream URL scheme")
+        headers = dict(credential)
+        if body:
+            headers["Content-Type"] = "application/json"
         req = urllib.request.Request(
             url,
             data=body if method == "POST" else None,
             method=method,
-            headers={"Content-Type": "application/json"} if body else {},
+            headers=headers,
         )
         try:
-            with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT_SECONDS) as resp:  # noqa: S310 — loopback/configured upstream only
+            with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT_SECONDS) as resp:  # noqa: S310, loopback/configured upstream only
                 payload = json.loads(resp.read().decode("utf-8"))
                 return JSONResponse(payload, status_code=resp.status)
         except urllib.error.HTTPError as exc:
@@ -522,9 +484,9 @@ def get_dashboard_url() -> JSONResponse:
 
     The upstream loopback server is started here so a spawn failure is a typed
     503 rather than a later iframe 502. The URL itself is always the Hermes
-    proxy path — never ``http://127.0.0.1``.
+    proxy path, never ``http://127.0.0.1``.
     """
-    _upstream_base()
+    _upstream()
     return JSONResponse({"url": DASHBOARD_EMBED_PATH})
 
 
@@ -581,13 +543,13 @@ def _embed_once(
     accept: str,
     timeout: float | None,
 ) -> Response:
-    base = _upstream_base()
+    base, credential = _upstream()
     query = request.url.query
     url = f"{base}{upstream_path}" + (f"?{query}" if query else "")
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise HTTPException(status_code=502, detail="invalid upstream URL scheme")
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = dict(credential)
     content_type = request.headers.get("content-type")
     if content_type:
         headers["Content-Type"] = content_type
@@ -603,7 +565,7 @@ def _embed_once(
         headers=headers,
     )
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310 — loopback/configured upstream only
+        resp = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310, loopback/configured upstream only
     except urllib.error.HTTPError as exc:
         error_body = exc.read()
         media = "application/octet-stream"
@@ -669,11 +631,11 @@ def get_capabilities() -> JSONResponse:
 def get_holographic_root(request: Request) -> JSONResponse:
     """Holographic memory overview (proxied).
 
-    Forwards to upstream ``GET /api/plugins/holographic/`` — the dashboard
+    Forwards to upstream ``GET /api/plugins/holographic``. The dashboard
     overview payload (provider status, facts, entities, association graph).
     Query parameters (``q``, ``limit``, ``graph_limit``) pass through verbatim.
     """
-    return _proxy("GET", "/api/plugins/holographic/", request, None)
+    return _proxy("GET", "/api/plugins/holographic", request, None)
 
 
 @router.get("/holographic/{path:path}")

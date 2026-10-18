@@ -38,76 +38,14 @@ fn daemon_client_admission_reports_saturation_and_recovers() {
     ));
 }
 
-#[test]
-fn daemon_admission_preserves_reserved_health_capacity() {
-    let admission = super::super::DaemonClientAdmission::with_reserved_capacity(3, 1);
-    let first = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => panic!("first client rejected"),
-    };
-    let second = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("second client rejected")
-        }
-    };
-    assert_eq!(
-        first.class(),
-        super::super::DaemonClientAdmissionClass::General
-    );
-    assert_eq!(
-        second.class(),
-        super::super::DaemonClientAdmissionClass::General
-    );
-
-    let reserved = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("reserved health capacity unavailable")
-        }
-    };
-    assert_eq!(
-        reserved.class(),
-        super::super::DaemonClientAdmissionClass::ReservedControl
-    );
-    assert!(matches!(
-        admission.try_admit(),
-        super::super::DaemonClientAdmissionOutcome::Saturated(_)
-    ));
-
-    let status_request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": "tracedecay_status", "arguments": {}},
-    })
-    .to_string();
-    let bulk_request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {"name": "tracedecay_context", "arguments": {"task": "x"}},
-    })
-    .to_string();
-    let shutdown_request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD,
-    })
-    .to_string();
-    assert!(super::super::is_reserved_control_request(&status_request));
-    assert!(super::super::is_reserved_control_request(&shutdown_request));
-    assert!(!super::super::is_reserved_control_request(&bulk_request));
-}
-
 /// A request parked on a barrier must not occupy an admission slot.
 ///
 /// Observed live during a generation rebuild: 101 `bulk_capacity_reached` sheds
 /// in ten minutes against a cap of 64 while the reader pool was completely idle
 /// (0 leased, 0 waiting). The slots were held by requests asleep on project
 /// warm-up, on the writer gate, and on the single-flight generation decode, so
-/// calls that needed no generation at all — `tracedecay_diff_context`, session,
-/// memory, and git tools — were rejected by work that was doing nothing.
+/// calls that needed no generation at all, `tracedecay_diff_context`, session,
+/// memory, and git tools, were rejected by work that was doing nothing.
 ///
 /// The acceptance property: while every general slot is held by a parked
 /// request, a fresh call still admits as `General` and completes; the parked
@@ -213,6 +151,7 @@ fn mcp_discovery_requests_are_reserved_control_traffic() {
             "method": method,
         })
         .to_string();
+        let request = super::super::AuthenticatedFirstRequest::new(request);
         assert!(
             super::super::is_reserved_control_request(&request),
             "{method} must be admitted as reserved control traffic"
@@ -224,6 +163,7 @@ fn mcp_discovery_requests_are_reserved_control_traffic() {
             "method": method,
         })
         .to_string();
+        let notification = super::super::AuthenticatedFirstRequest::new(notification);
         assert!(
             super::super::is_reserved_control_request(&notification),
             "{method} must be admitted as reserved control traffic"
@@ -245,6 +185,8 @@ fn daemon_shutdown_requires_a_response_id() {
     })
     .to_string();
 
+    let notification = super::super::AuthenticatedFirstRequest::new(notification);
+    let request = super::super::AuthenticatedFirstRequest::new(request);
     assert!(super::super::daemon_shutdown_response(&notification).is_none());
     let response = super::super::daemon_shutdown_response(&request).expect("shutdown response");
     assert_eq!(response.id, serde_json::json!(17));
@@ -253,7 +195,6 @@ fn daemon_shutdown_requires_a_response_id() {
 
 #[tokio::test]
 async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
     let profile = TempDir::new().expect("profile");
     let mut client_identity = test_client_identity_for(profile.path().to_path_buf());
     client_identity.global_db_path = profile.path().join("mismatched.db");
@@ -269,7 +210,7 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
         let stream = listener.accept().await.expect("accept shutdown client");
         Box::pin(super::super::serve_windows_broker_client(
             stream,
-            TOKEN,
+            TEST_AUTH_TOKEN,
             &server_lifecycle,
             store_administration,
             Arc::new(tokio::sync::Mutex::new(
@@ -281,17 +222,8 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
         .expect("serve shutdown client");
     });
 
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect shutdown client");
-    let (reader, mut writer) = stream.into_split();
-    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
-        .to_line()
-        .expect("auth preface");
-    writer
-        .write_all(format!("{preface}\n").as_bytes())
-        .await
-        .expect("write auth preface");
+    let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
+    write_test_auth_preface(&mut writer).await;
     writer
         .write_all(
             format!(
@@ -407,6 +339,8 @@ fn daemon_per_client_fairness_never_blocks_reserved_health_requests() {
         "params": {"name": "tracedecay_context", "arguments": {"task": "x"}},
     })
     .to_string();
+    let status_request = super::super::AuthenticatedFirstRequest::new(status_request);
+    let context_request = super::super::AuthenticatedFirstRequest::new(context_request);
 
     assert!(
         admission
@@ -442,49 +376,46 @@ fn daemon_client_saturation_response_is_typed_json_rpc_data() {
 }
 
 #[test]
-fn daemon_per_client_saturation_response_is_typed_json_rpc_data() {
-    let response = super::super::DaemonClientSaturationResponse {
-        kind: super::super::DaemonClientSaturationKind::PerClientCapacityReached,
-        retryable: true,
-        capacity: 8,
-    }
-    .into_json_rpc_with_id(serde_json::Value::Null);
-    let data = response
-        .error
-        .expect("error response")
-        .data
-        .expect("typed data");
-
-    assert_eq!(data["kind"], "per_client_capacity_reached");
-    assert_eq!(data["retryable"], true);
-    assert_eq!(data["capacity"], 8);
-}
-
-#[test]
 fn project_server_capacity_response_is_typed_json_rpc_data() {
     let response = super::super::project_open_error_response(
         serde_json::Value::Null,
         &super::super::project_server_capacity_error(),
     );
-    let data = response
-        .error
-        .expect("error response")
-        .data
-        .expect("typed data");
+    let error = response.error.expect("error response");
+    let refusal = serde_json::to_value(&error).expect("serialize capacity refusal");
+    assert!(
+        super::super::json_rpc_error_is_project_open_retryable(&refusal),
+        "branch add and the proxy must retry this refusal: {refusal}"
+    );
+    let data = error.data.expect("typed data");
 
+    assert_eq!(data["reason_code"], "project_server_capacity_reached");
     assert_eq!(data["kind"], "project_server_capacity_reached");
     assert_eq!(data["retryable"], true);
     assert_eq!(data["capacity"], super::super::MAX_CACHED_PROJECT_SERVERS);
+    assert!(super::super::error_is_project_open_retryable(
+        &super::super::project_server_capacity_error()
+    ));
+    let prose = tracedecay_domain::errors::TraceDecayError::Config {
+        message: "daemon project server capacity reached".to_owned(),
+    };
+    assert!(
+        !super::super::error_is_project_open_retryable(&prose),
+        "capacity English prose must not decide project-open retry"
+    );
 }
 
-#[tokio::test]
-async fn reserved_doctor_request_answers_under_general_saturation() {
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+/// Serves `request` on the reserved-control slot of an admission whose general
+/// slot is held, and returns the daemon's first response.
+async fn reserved_response_under_general_saturation(
+    scope: &str,
+    request: serde_json::Value,
+) -> serde_json::Value {
     let profile = TempDir::new().expect("profile");
     let client_identity = test_client_identity_for(profile.path().join("client"));
     let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
-    let _database_scope =
-        enter_test_daemon_database_scope(&client_identity.profile_root, "reserved-doctor-test");
+    let _database_scope = enter_test_daemon_database_scope(&client_identity.profile_root, scope);
+    prewarm_test_profile_runtime(&store_administration).await;
 
     let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
     let general = match admission.try_admit() {
@@ -496,7 +427,7 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
     let reserved = match admission.try_admit() {
         super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
         super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("reserved Doctor client rejected")
+            panic!("reserved client rejected")
         }
     };
     assert_eq!(
@@ -514,11 +445,11 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
     .await
     .expect("loopback listener");
     let server = tokio::spawn(async move {
-        let stream = listener.accept().await.expect("accept Doctor client");
+        let stream = listener.accept().await.expect("accept reserved client");
         let lifecycle = DaemonLifecycle::default();
         Box::pin(super::super::serve_windows_broker_client_with_class(
             stream,
-            TOKEN,
+            TEST_AUTH_TOKEN,
             &lifecycle,
             store_administration,
             Arc::new(tokio::sync::Mutex::new(
@@ -529,21 +460,11 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
             None,
         ))
         .await
-        .expect("serve Doctor client");
+        .expect("serve reserved client");
     });
 
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect Doctor client");
-    let (reader, mut writer) = stream.into_split();
-    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
-        .to_line()
-        .expect("auth preface");
-    writer
-        .write_all(preface.as_bytes())
-        .await
-        .expect("write preface");
-    writer.write_all(b"\n").await.expect("preface newline");
+    let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
+    write_test_auth_preface(&mut writer).await;
     writer
         .write_all(
             DaemonHandshake {
@@ -557,38 +478,43 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
         .await
         .expect("write handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 19,
-        "method": "tools/call",
-        "params": {
-            "name": "tracedecay_runtime",
-            "arguments": {
-                "authority_audit": true,
-                "session_ingest_health": true,
-                "format": "json"
-            }
-        }
-    });
     writer
         .write_all(request.to_string().as_bytes())
         .await
-        .expect("write Doctor request");
-    writer
-        .write_all(b"\n")
-        .await
-        .expect("Doctor request newline");
+        .expect("write request");
+    writer.write_all(b"\n").await.expect("request newline");
     let mut reader = tokio::io::BufReader::new(reader);
     let mut response = String::new();
     tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response)
         .await
-        .expect("read Doctor response");
-    let response: serde_json::Value =
-        serde_json::from_str(&response).expect("Doctor JSON-RPC response");
+        .expect("read response");
+    let response = serde_json::from_str(&response).expect("JSON-RPC response");
+    drop(general);
+    server.await.expect("reserved server task");
+    response
+}
+
+#[tokio::test]
+async fn reserved_doctor_request_answers_under_general_saturation() {
+    let response = reserved_response_under_general_saturation(
+        "reserved-doctor-test",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 19,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_runtime",
+                "arguments": {
+                    "authority_audit": true,
+                    "session_ingest_health": true,
+                    "format": "json"
+                }
+            }
+        }),
+    )
+    .await;
     assert_eq!(response["id"], 19);
     assert!(response.get("result").is_some());
-    drop(general);
-    server.await.expect("Doctor server task");
 }
 
 /// A saturated daemon must still hand out its tool catalog.
@@ -599,97 +525,15 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
 /// tracedecay tool at all for as long as the load lasted.
 #[tokio::test]
 async fn tools_list_answers_under_general_saturation() {
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
-    let profile = TempDir::new().expect("profile");
-    let client_identity = test_client_identity_for(profile.path().join("client"));
-    let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
-    let _database_scope =
-        enter_test_daemon_database_scope(&client_identity.profile_root, "tools-list-saturation");
-
-    let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
-    let general = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("general client rejected")
-        }
-    };
-    let reserved = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("discovery client rejected")
-        }
-    };
-    assert_eq!(
-        reserved.class(),
-        super::super::DaemonClientAdmissionClass::ReservedControl
-    );
-
-    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
-        &tracedecay_daemon_protocol::default_loopback_endpoint(),
+    let response = reserved_response_under_general_saturation(
+        "tools-list-saturation",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/list",
+        }),
     )
-    .await
-    .expect("loopback listener");
-    let server = tokio::spawn(async move {
-        let stream = listener.accept().await.expect("accept discovery client");
-        let lifecycle = DaemonLifecycle::default();
-        Box::pin(super::super::serve_windows_broker_client_with_class(
-            stream,
-            TOKEN,
-            &lifecycle,
-            store_administration,
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            super::super::DaemonPerClientAdmission::default(),
-            reserved.class(),
-            None,
-        ))
-        .await
-        .expect("serve discovery client");
-    });
-
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect discovery client");
-    let (reader, mut writer) = stream.into_split();
-    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
-        .to_line()
-        .expect("auth preface");
-    writer
-        .write_all(preface.as_bytes())
-        .await
-        .expect("write preface");
-    writer.write_all(b"\n").await.expect("preface newline");
-    writer
-        .write_all(
-            DaemonHandshake {
-                client_identity,
-                ..test_handshake_defaults()
-            }
-            .to_line()
-            .expect("handshake")
-            .as_bytes(),
-        )
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 21,
-        "method": "tools/list",
-    });
-    writer
-        .write_all(request.to_string().as_bytes())
-        .await
-        .expect("write tools/list");
-    writer.write_all(b"\n").await.expect("tools/list newline");
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut response = String::new();
-    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response)
-        .await
-        .expect("read tools/list response");
-    let response: serde_json::Value =
-        serde_json::from_str(&response).expect("tools/list JSON-RPC response");
+    .await;
 
     assert_eq!(response["id"], 21);
     assert!(
@@ -704,8 +548,6 @@ async fn tools_list_answers_under_general_saturation() {
         "saturated daemon served a degraded catalog of {} tools",
         tools.len()
     );
-    drop(general);
-    server.await.expect("discovery server task");
 }
 
 #[cfg(unix)]
@@ -713,11 +555,14 @@ async fn tools_list_answers_under_general_saturation() {
 async fn one_shot_tool_call_receives_a_matching_saturation_response() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let (client_done, client_done_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         super::super::reject_saturated_daemon_client(
-            tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+            tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+                .expect("daemon end of the test socket"),
             super::super::DaemonClientSaturationResponse {
                 kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
                 retryable: true,
@@ -725,6 +570,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
             },
         )
         .await;
+        accept_liveness_probes_until(&listener, client_done_rx).await;
     });
 
     let error = tokio::time::timeout(
@@ -746,6 +592,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
         message.contains("daemon client capacity reached"),
         "expected a matching saturation response, got: {message}"
     );
+    client_done.send(()).expect("fake daemon awaits the client");
     server.await.expect("saturation server task");
 }
 
@@ -775,8 +622,6 @@ async fn cancelling_daemon_client_releases_admission_capacity() {
 
 #[tokio::test]
 async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
-
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
@@ -805,6 +650,9 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
         tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
             .expect("load test profile identity");
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
+        .with_owner_profile(tracedecay_runtime_core::config::ProfileRoot::new(
+            &profile_root,
+        ))
         .with_profile_identity(profile_identity);
     // Daemon bootstrap installs the profile-scoped code-index worker plan
     // before it binds and publishes any transport endpoint
@@ -819,6 +667,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     // the process-wide worker-plan `OnceLock` first.
     super::super::DaemonInvocationState::default()
         .install_worker_selection(
+            &store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install portable broker profile worker plan");
@@ -849,7 +698,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
                 clients.spawn(async move {
                     Box::pin(super::super::serve_windows_broker_client(
                         stream,
-                        TOKEN,
+                        TEST_AUTH_TOKEN,
                         &lifecycle,
                         store_administration,
                         gates,
@@ -868,15 +717,9 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
         let endpoint = endpoint.clone();
         let handshake = handshake.clone();
         async move {
-            let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-                .await
-                .expect("connect client");
-            let (reader, mut writer) = stream.into_split();
-            let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
-                .to_line()
-                .expect("auth preface");
-            writer.write_all(preface.as_bytes()).await.expect("preface");
-            writer.write_all(b"\n").await.expect("preface newline");
+            let (reader, mut writer) =
+                tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
+            write_test_auth_preface(&mut writer).await;
             writer
                 .write_all(handshake.to_line().expect("handshake").as_bytes())
                 .await
@@ -918,7 +761,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
                 return Ok(());
             }
             if let Some(failure) =
-                super::super::portable_cached_project_open_failure(gates.as_ref(), &handshake)
+                super::super::portable_cached_project_open_failure(gates.as_ref(), &handshake, None)
                     .await?
             {
                 return Err(failure.to_error());
@@ -948,6 +791,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
 async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let server = tokio::spawn(async move {
         let (_stream, _) = listener.accept().await.expect("accept tool call");
@@ -985,6 +829,7 @@ async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
 async fn proxied_request_uses_shared_liveness_boundary_after_write() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let server = tokio::spawn(async move {
         let (_stream, _) = listener.accept().await.expect("accept proxied request");
@@ -1026,16 +871,14 @@ async fn proxied_request_uses_shared_liveness_boundary_after_write() {
 async fn post_write_disconnect_reports_ambiguous_outcome_without_retry() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept proxied request");
         let (reader, _writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake line");
+        read_authenticated_handshake(&mut lines, &token).await;
         lines
             .next_line()
             .await
@@ -1074,16 +917,15 @@ async fn post_write_disconnect_reports_ambiguous_outcome_without_retry() {
 async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let (client_done, client_done_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         let (reader, mut writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake line");
+        read_authenticated_handshake(&mut lines, &token).await;
         let request_line = lines
             .next_line()
             .await
@@ -1111,6 +953,7 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
             .await
             .expect("write response");
         writer.write_all(b"\n").await.expect("write newline");
+        accept_liveness_probes_until(&listener, client_done_rx).await;
     });
 
     let result = tokio::time::timeout(
@@ -1128,6 +971,7 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
     .expect("healthy long-running request timed out")
     .expect("healthy long-running request must complete");
     assert_eq!(result["status"], json!("ok"));
+    client_done.send(()).expect("fake daemon awaits the client");
     server.await.expect("fake daemon task");
 }
 
@@ -1136,16 +980,15 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
 async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let (client_done, client_done_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         let (reader, mut writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake line");
+        read_authenticated_handshake(&mut lines, &token).await;
         let request_line = lines
             .next_line()
             .await
@@ -1174,6 +1017,7 @@ async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
             .write_all(&response[split..])
             .await
             .expect("write response suffix");
+        accept_liveness_probes_until(&listener, client_done_rx).await;
     });
 
     let result = tokio::time::timeout(
@@ -1191,7 +1035,23 @@ async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
     .expect("split-frame response timed out")
     .expect("split-frame response must reassemble across liveness polls");
     assert_eq!(result["status"], json!("split-across-poll"));
+    client_done.send(()).expect("fake daemon awaits the client");
     server.await.expect("fake daemon task");
+}
+
+/// A live daemon keeps accepting after it answers, so the client's liveness
+/// probes keep connecting until the client has read the whole response.
+#[cfg(unix)]
+async fn accept_liveness_probes_until(
+    listener: &tokio::net::UnixListener,
+    mut client_done: tokio::sync::oneshot::Receiver<()>,
+) {
+    loop {
+        tokio::select! {
+            _ = &mut client_done => return,
+            probe = listener.accept() => drop(probe.expect("accept liveness probe")),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1199,27 +1059,100 @@ async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
 async fn persistent_idle_client_closes_on_draining_without_timeout() {
     let lifecycle = DaemonLifecycle::default();
     let idle_lifecycle = lifecycle.clone();
-    let mut clients = tokio::task::JoinSet::new();
-    clients.spawn(async move {
-        idle_lifecycle.wait_for_draining().await;
-        Ok(())
-    });
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
+    clients
+        .spawn(async move {
+            idle_lifecycle.wait_for_draining().await;
+            Ok(())
+        })
+        .expect("native client task");
 
-    let receipt = super::super::shutdown_orchestration::coordinate_daemon_shutdown(
-        &lifecycle,
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(5),
+    let receipt = shutdown_with_clients(&lifecycle, clients).await;
+
+    assert_eq!(
+        receipt.clients,
+        tracedecay_daemon_service::shutdown::ShutdownStatus::Clean
+    );
+    assert!(lifecycle.try_enter().is_none());
+}
+
+#[tokio::test]
+async fn client_errors_and_panics_are_named_while_aborted_clients_are_clean() {
+    let lifecycle = DaemonLifecycle::default();
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
+    let (failed, failure_settled) = tokio::sync::oneshot::channel::<()>();
+    let (panicking, panic_started) = tokio::sync::oneshot::channel();
+    clients
+        .spawn(async move {
+            let _settled = failed;
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "client failed during shutdown".to_owned(),
+            }
+            .to_string())
+        })
+        .expect("failing client task");
+    clients
+        .spawn(async move {
+            let _ = panicking.send(());
+            panicking_client()
+        })
+        .expect("panicking client task");
+    clients
+        .spawn(async {
+            let _unwind = SlowUnwind;
+            std::future::pending().await
+        })
+        .expect("pending client task");
+    // Both have run before the shutdown aborts the set.
+    let _ = failure_settled.await;
+    let _ = panic_started.await;
+
+    let receipt = shutdown_with_clients(&lifecycle, clients).await;
+
+    let tracedecay_daemon_service::shutdown::ShutdownStatus::Failed(error) = &receipt.clients
+    else {
+        panic!("client failures must be reported: {:?}", receipt.clients);
+    };
+    assert!(
+        error.contains("config error: client failed during shutdown")
+            && error.contains("client panicked during shutdown")
+            && !error.contains("cancelled"),
+        "{error}"
+    );
+}
+
+fn panicking_client() -> std::result::Result<(), String> {
+    panic!("client panicked during shutdown")
+}
+
+/// An aborted client whose unwind holds its native worker for 50 ms, as a
+/// worker busy under load does, well inside `DAEMON_TASK_ABORT_DEADLINE`.
+struct SlowUnwind;
+
+impl Drop for SlowUnwind {
+    fn drop(&mut self) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+async fn shutdown_with_clients(
+    lifecycle: &DaemonLifecycle,
+    clients: crate::daemon::bootstrap::ClientTasks,
+) -> Arc<tracedecay_daemon_service::shutdown::DaemonShutdownReceipt> {
+    // The daemon's own deadline. A shorter one leaves nothing for the client
+    // phase once the later phases' reserves are set aside, so any unwind at
+    // all would read as TimedOut.
+    tracedecay_daemon_service::shutdown::coordinate_daemon_shutdown(
+        lifecycle,
+        std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
         async move {
-            super::super::shutdown_orchestration::DaemonShutdownPlan::new(
-                clients,
-                Vec::new(),
-                |_| async { super::super::store_shutdown::ShutdownTaskReceipt::default() },
-            )
+            tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(Vec::new(), |_| async {
+                tracedecay_store_runtime::ShutdownTaskReceipt::default()
+            })
+            .with_clients(crate::daemon::bootstrap::client_shutdown_owner(clients))
         },
     )
-    .await;
-
-    assert_eq!(receipt.clients, super::super::ShutdownStatus::Clean);
-    assert!(lifecycle.try_enter().is_none());
+    .await
 }
 
 #[tokio::test]
@@ -1241,13 +1174,13 @@ async fn draining_waits_for_one_bounded_in_flight_request() {
 /// A panicking connection must not take down the daemon, wedge its peers, or
 /// strand the admission slot it was holding.
 ///
-/// Both accept loops serve every client from a `JoinSet` and keep draining
-/// `join_next`, so one connection unwinding has to be contained at that task
-/// boundary. Two failure shapes are covered, because they unwind through
+/// Both accept loops serve every client as a native task in `ClientTasks` and
+/// keep draining `join_next`, so one connection unwinding has to be contained
+/// at that task boundary. Two failure shapes are covered, because they unwind through
 /// different admission states:
 ///
 /// * a connection that panics while it still holds its slot, and
-/// * a connection that panics *while parked* — `park_admission` has already
+/// * a connection that panics *while parked*, `park_admission` has already
 ///   surrendered the slot and will never reach its re-acquire, so the unwind
 ///   must not double-release it or leave it unaccounted.
 ///
@@ -1266,7 +1199,7 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
     assert_eq!(baseline, GENERAL_CAPACITY);
 
     let (barrier, _) = tokio::sync::watch::channel(false);
-    let mut clients: tokio::task::JoinSet<&'static str> = tokio::task::JoinSet::new();
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
 
     for index in 0..GENERAL_CAPACITY {
         let permit = match admission.try_admit() {
@@ -1277,7 +1210,7 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
         };
         assert_eq!(permit.class(), DaemonClientAdmissionClass::General);
         let mut lifted = barrier.subscribe();
-        clients.spawn(super::super::with_connection_admission(
+        let spawned = clients.spawn(super::super::with_connection_admission(
             permit,
             async move {
                 // Client 0 unwinds immediately, still holding its slot.
@@ -1291,9 +1224,10 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
                     assert!(index != 1, "connection task panicked while parked");
                 })
                 .await;
-                "connection completed"
+                Ok(())
             },
         ));
+        spawned.expect("native connection task");
     }
 
     // Every slot comes back while the peers are still parked: the panicking
@@ -1316,16 +1250,14 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
     let mut panicked = 0usize;
     while let Some(joined) = clients.join_next().await {
         match joined {
-            Ok(outcome) => {
-                assert_eq!(outcome, "connection completed");
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(Ok(())) => {
                 completed += 1;
             }
-            Err(error) => {
-                assert!(
-                    error.is_panic(),
-                    "a connection task ended for a reason other than its own panic: {error}"
-                );
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Panicked(_) => {
                 panicked += 1;
+            }
+            other => {
+                panic!("a connection task ended for a reason other than its own panic: {other:?}")
             }
         }
     }
@@ -1334,7 +1266,7 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
     // peers of a panicking connection still ran to completion.
     assert_eq!(
         panicked, PANICKING_CLIENTS,
-        "the JoinSet must surface every panic as a contained task result"
+        "the client set must surface every panic as a contained task result"
     );
     assert_eq!(
         completed,
@@ -1359,4 +1291,77 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
         DaemonClientAdmissionClass::General,
         "recovered capacity must be general, not the reserved control lane"
     );
+}
+
+/// A client dropped mid-hop drops the hop's work with it, so the admission
+/// slot and anything the hop holds are free when the clients owner reports.
+#[tokio::test]
+async fn a_client_dropped_mid_tokio_hop_releases_the_hop_before_the_drain_receipt() {
+    use super::super::{DaemonClientAdmission, DaemonClientAdmissionOutcome};
+
+    struct HopResource(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for HopResource {
+        fn drop(&mut self) {
+            drop(SlowUnwind);
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let hop_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_time()
+        .build()
+        .expect("hop runtime");
+    let hop_handle = hop_runtime.handle().clone();
+    let lifecycle = DaemonLifecycle::default();
+    let admission = DaemonClientAdmission::with_reserved_capacity(2, 1);
+    let DaemonClientAdmissionOutcome::Admitted(permit) = admission.try_admit() else {
+        panic!("client rejected below capacity");
+    };
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let resource = HopResource(Arc::clone(&released));
+    let (started, hop_started) = tokio::sync::oneshot::channel();
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
+    clients
+        .spawn(super::super::with_connection_admission(
+            permit,
+            async move {
+                tracedecay_runtime_core::native_runtime::in_tokio_context(hop_handle, async move {
+                    let _resource = resource;
+                    let _ = started.send(());
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                })
+                .await;
+                Ok(())
+            },
+        ))
+        .expect("native client task");
+    hop_started.await.expect("the hop started");
+    assert_eq!(admission.available_general_permits(), 0);
+    // Tokio's only worker is busy, as under load, when the client is dropped.
+    let (unblock, blocked) = std::sync::mpsc::channel::<()>();
+    let (busy, worker_busy) = std::sync::mpsc::channel();
+    hop_runtime.spawn(async move {
+        let _ = busy.send(());
+        let _ = blocked.recv();
+    });
+    worker_busy.recv().expect("the Tokio worker is busy");
+
+    let receipt = shutdown_with_clients(&lifecycle, clients).await;
+
+    assert_eq!(
+        receipt.clients,
+        tracedecay_daemon_service::shutdown::ShutdownStatus::Clean
+    );
+    assert!(
+        released.load(std::sync::atomic::Ordering::SeqCst),
+        "the hop's work outlived the clients owner's receipt"
+    );
+    assert_eq!(
+        admission.available_general_permits(),
+        1,
+        "the hop kept the client's admission slot past the drain receipt"
+    );
+    drop(unblock);
+    hop_runtime.shutdown_background();
 }

@@ -3,45 +3,47 @@
 //! The coordinator composes existing graph, session, and memory authorities.
 //! It preserves source-local ordering and coverage instead of manufacturing a
 //! cross-source rank. Query cancellation is bound to the opaque run identity
-//! stored here and reaches the live Tokio work through `CancellationToken`.
+//! stored here and reaches the live work through `CancellationToken`.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
+use futures_util::FutureExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
-use tokio::task::JoinSet;
 
 mod knowledge;
 mod lifecycle;
-mod semantic;
 
 use lifecycle::{admitted_deadline_elapsed, mark_cancelled, mark_timed_out};
-pub use semantic::{ExplorerSemanticReadFuture, ExplorerSemanticReadV1, ExplorerSemanticReader};
 
 use super::lcm_api::{
     DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
     DashboardLcmCanonicalSummaryV1, DashboardLcmReadOutcomeV1, DashboardLcmReadRequestV1,
     DashboardLcmReadStateV1, LcmMessageV1, LcmSummaryNodeV1, LcmTokenCountProvenanceV1,
+    message_tool_use_id,
 };
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
-use super::{DashboardHttpRequestControlV1, DashboardState, graph_service};
+use super::util::json_error;
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl, graph_service};
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
-use tracedecay_session_memory::context::CancellationToken;
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::native_runtime;
 
-const SOURCE_IDS: [ExplorerSourceIdV1; 4] = [
+const SOURCE_IDS: [ExplorerSourceIdV1; 3] = [
     ExplorerSourceIdV1::CodeGraph,
     ExplorerSourceIdV1::Sessions,
     ExplorerSourceIdV1::Knowledge,
-    ExplorerSourceIdV1::Semantic,
 ];
 const MAX_QUERY_RUNS: usize = 256;
 const QUERY_LIMIT_DEFAULT: i64 = 25;
@@ -67,7 +69,6 @@ pub(super) enum ExplorerSourceIdV1 {
     CodeGraph,
     Sessions,
     Knowledge,
-    Semantic,
 }
 
 impl ExplorerSourceIdV1 {
@@ -76,7 +77,6 @@ impl ExplorerSourceIdV1 {
             Self::CodeGraph => "Code graph",
             Self::Sessions => "Sessions",
             Self::Knowledge => "Knowledge",
-            Self::Semantic => "Semantic",
         }
     }
 }
@@ -116,29 +116,18 @@ pub(super) enum ExplorerSourcePhaseV1 {
 /// producer; none is speculative:
 /// - `Partial`: the source answered with rows but its own read reported
 ///   omitted records (LCM temporal reads).
-/// - `Indexing`: the provider is acquiring its model or projecting vectors
-///   (semantic runtime acquisition/indexing states).
 /// - `Stale`: the source's store exists but does not match the current
-///   generation (verified graph stale reads, LCM stale projections, semantic
-///   generation staleness).
+///   generation (verified graph stale reads, LCM stale projections).
 /// - `TimedOut`: the source's own read exceeded the admitted deadline.
-/// - `Unsupported`: this dashboard surface cannot consult the source at all
-///   (no daemon authority attached, or the provider state cannot be consumed
-///   on this surface yet).
-/// - `Absent`: the source's store does not exist for this project — a typed
-///   absence, not a failure (semantic search not activated).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ExplorerSourceOutcomeV1 {
     Pending,
     Ready,
     Partial,
-    Indexing,
     Stale,
     TimedOut,
     Unavailable,
-    Unsupported,
-    Absent,
     Error,
     Cancelled,
 }
@@ -240,47 +229,6 @@ impl ExplorerSourceProgressV1 {
             ..Self::unavailable(source_id, error_code, message)
         }
     }
-
-    fn unsupported(
-        source_id: ExplorerSourceIdV1,
-        error_code: &'static str,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            outcome: ExplorerSourceOutcomeV1::Unsupported,
-            ..Self::unavailable(source_id, error_code, message)
-        }
-    }
-
-    fn indexing(
-        source_id: ExplorerSourceIdV1,
-        error_code: &'static str,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            outcome: ExplorerSourceOutcomeV1::Indexing,
-            ..Self::unavailable(source_id, error_code, message)
-        }
-    }
-
-    /// A typed absence: the source's store does not exist for this project.
-    /// Coverage is the complete accounting of an empty domain, so absence
-    /// claims over the run stay checkable instead of being blocked forever by
-    /// a source that holds nothing.
-    fn absent(
-        source_id: ExplorerSourceIdV1,
-        error_code: &'static str,
-        message: impl Into<String>,
-        unit: &'static str,
-    ) -> Self {
-        Self {
-            outcome: ExplorerSourceOutcomeV1::Absent,
-            completed_units: Some(0),
-            total_units: Some(0),
-            coverage: DashboardCoverageV1::complete(0, unit),
-            ..Self::unavailable(source_id, error_code, message)
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -290,7 +238,7 @@ pub(super) struct ExplorerQueryRunV1 {
     request_revision: &'static str,
     plan_revision: &'static str,
     merge_revision: &'static str,
-    required_source_ids: [ExplorerSourceIdV1; 4],
+    required_source_ids: [ExplorerSourceIdV1; 3],
     ordering_policy: &'static str,
     explanation: &'static str,
     submitted_at_micros: i64,
@@ -326,27 +274,19 @@ fn new_run_id() -> Option<String> {
 }
 
 fn bad_request(message: impl Into<String>) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({"detail": message.into()})),
-    )
-        .into_response()
+    json_error(StatusCode::BAD_REQUEST, message).into_response()
 }
 
 fn not_found(run_id: &str) -> Response {
-    (
+    json_error(
         StatusCode::NOT_FOUND,
-        Json(json!({"detail": format!("explorer query run not found: {run_id}")})),
+        format!("explorer query run not found: {run_id}"),
     )
-        .into_response()
+    .into_response()
 }
 
 fn internal_error(message: impl Into<String>) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"detail": message.into()})),
-    )
-        .into_response()
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
 }
 
 fn validate_query(request: &mut ExplorerQueryRequestV1) -> Result<(), &'static str> {
@@ -372,7 +312,7 @@ fn initial_run(run_id: String, request: ExplorerQueryRequestV1) -> ExplorerQuery
         merge_revision: "source-local-no-merge-v1",
         required_source_ids: SOURCE_IDS,
         ordering_policy: "source_local_no_cross_source_merge",
-        explanation: "Search the code graph, active-project session store, and bounded project fact authority in parallel, and consult the semantic provider's typed state; preserve each source's own order and coverage.",
+        explanation: "Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source's own order and coverage.",
         submitted_at_micros: now_micros(),
         completed_at_micros: None,
         elapsed_micros: 0,
@@ -471,27 +411,20 @@ fn find_run(state: &DashboardState, run_id: &str) -> Option<StoredExplorerRun> {
 
 pub async fn create_query(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     Json(mut request): Json<ExplorerQueryRequestV1>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             if let Err(message) = validate_query(&mut request) {
                 return bad_request(message);
             }
             let Some(owner) = run_owner(&state) else {
-                return (
+                return json_error(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"detail": "exact registered project scope is unavailable"})),
+                    "exact registered project scope is unavailable",
                 )
-                    .into_response();
-            };
-            let Some(Extension(control)) = control else {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"detail": "dashboard HTTP request admission is unavailable"})),
-                )
-                    .into_response();
+                .into_response();
             };
             let Some(run_id) = new_run_id() else {
                 return internal_error("could not allocate explorer query run identity");
@@ -504,22 +437,32 @@ pub async fn create_query(
                     cancellation: cancellation.clone(),
                     run: Arc::clone(&run),
                 },
-                run_id,
+                run_id.clone(),
             ) {
                 return internal_error(message);
             }
             let initial = run.read().await.clone();
             let response = envelope_for_run(&state, initial);
-            tokio::spawn(execute_query(
+            if let Err(error) = native_runtime::NativeTask::spawn(execute_query(
                 state,
                 request,
                 Arc::clone(&run),
                 cancellation,
                 control,
-            ));
+            )) {
+                query_runs()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&run_id);
+                return json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("explorer query could not start: {error}"),
+                )
+                .into_response();
+            }
             (StatusCode::ACCEPTED, Json(response)).into_response()
         },
-        label = "dashboard_api.query.create"
+        tracing::trace_span!("dashboard_api.query.create"),
     )
     .await
 }
@@ -528,7 +471,7 @@ pub async fn query_status(
     State(state): State<DashboardState>,
     Path(run_id): Path<String>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let Some(stored) = find_run(&state, &run_id) else {
                 return not_found(&run_id);
@@ -540,12 +483,12 @@ pub async fn query_status(
                 .saturating_sub(run.submitted_at_micros);
             Json(envelope_for_run(&state, run)).into_response()
         },
-        label = "dashboard_api.query.status"
+        tracing::trace_span!("dashboard_api.query.status"),
     )
     .await
 }
 
-#[hotpath::measure(label = "dashboard_api.query.cancel", future = true)]
+#[tracing::instrument(name = "dashboard_api.query.cancel", level = "trace", skip_all)]
 pub async fn cancel_query(
     State(state): State<DashboardState>,
     Path(run_id): Path<String>,
@@ -555,18 +498,18 @@ pub async fn cancel_query(
     };
     let mut run = stored.run.write().await;
     if run.state != ExplorerRunStateV1::Pending {
-        return (
+        return json_error(
             StatusCode::CONFLICT,
-            Json(json!({"detail": format!("explorer query run is already terminal: {run_id}")})),
+            format!("explorer query run is already terminal: {run_id}"),
         )
-            .into_response();
+        .into_response();
     }
     stored.cancellation.cancel();
     mark_cancelled(&mut run);
     Json(envelope_for_run(&state, run.clone())).into_response()
 }
 
-#[hotpath::measure(label = "dashboard_api.query.execute", future = true)]
+#[tracing::instrument(name = "dashboard_api.query.execute", level = "trace", skip_all)]
 async fn execute_query(
     state: DashboardState,
     request: ExplorerQueryRequestV1,
@@ -585,26 +528,35 @@ async fn execute_query(
         }
     }
 
-    let mut tasks = JoinSet::new();
-    for source_id in SOURCE_IDS {
-        let state = state.clone();
-        let request = request.clone();
-        let control = control.clone();
-        let source_cancellation = cancellation.clone();
-        tasks.spawn(async move {
-            (
+    // Polled in place, so dropping `tasks` on any exit cancels the
+    // unfinished reads.
+    let mut tasks: FuturesUnordered<_> = SOURCE_IDS
+        .into_iter()
+        .map(|source_id| {
+            let source = execute_source(
+                state.clone(),
+                request.clone(),
                 source_id,
-                execute_source(state, request, source_id, control, source_cancellation).await,
-            )
-        });
-    }
+                control.clone(),
+                cancellation.clone(),
+            );
+            AssertUnwindSafe(source).catch_unwind().map(move |outcome| {
+                outcome.unwrap_or_else(|_| {
+                    ExplorerSourceProgressV1::error(
+                        source_id,
+                        "source_task_failed",
+                        "explorer source read panicked",
+                    )
+                })
+            })
+        })
+        .collect();
 
     let mut completed = 0;
     while completed < SOURCE_IDS.len() {
         tokio::select! {
             biased;
             () = &mut deadline_wait => {
-                tasks.abort_all();
                 let mut current = run.write().await;
                 if current.state == ExplorerRunStateV1::Pending {
                     mark_timed_out(&mut current);
@@ -612,7 +564,6 @@ async fn execute_query(
                 return;
             }
             () = cancellation.cancelled() => {
-                tasks.abort_all();
                 let mut current = run.write().await;
                 if current.state == ExplorerRunStateV1::Pending {
                     mark_cancelled(&mut current);
@@ -620,35 +571,19 @@ async fn execute_query(
                 return;
             }
             () = request_cancellation.cancelled() => {
-                tasks.abort_all();
                 let mut current = run.write().await;
                 if current.state == ExplorerRunStateV1::Pending {
                     mark_cancelled(&mut current);
                 }
                 return;
             }
-            result = tasks.join_next() => {
-                let source = match result {
-                    Some(Ok((_, source))) => source,
-                    Some(Err(error)) => {
-                        let current = run.read().await;
-                        let source_id = current
-                            .sources
-                            .iter()
-                            .find(|source| source.outcome == ExplorerSourceOutcomeV1::Pending)
-                            .map_or(ExplorerSourceIdV1::CodeGraph, |source| source.source_id);
-                        ExplorerSourceProgressV1::error(
-                            source_id,
-                            "source_task_failed",
-                            error.to_string(),
-                        )
-                    }
-                    None => break,
+            source = tasks.next() => {
+                let Some(source) = source else {
+                    break;
                 };
                 completed += 1;
                 let mut current = run.write().await;
                 if current.state != ExplorerRunStateV1::Pending {
-                    tasks.abort_all();
                     return;
                 }
                 if let Some(slot) = current
@@ -675,15 +610,10 @@ async fn execute_query(
         mark_cancelled(&mut current);
         return;
     }
-    // `Absent` is a truthful terminal answer ("this store does not exist"),
-    // so it counts toward completion alongside `Ready` — its constructor
-    // carries the complete accounting of an empty domain.
-    let every_concluded = current.sources.iter().all(|source| {
-        matches!(
-            source.outcome,
-            ExplorerSourceOutcomeV1::Ready | ExplorerSourceOutcomeV1::Absent
-        )
-    });
+    let every_concluded = current
+        .sources
+        .iter()
+        .all(|source| matches!(source.outcome, ExplorerSourceOutcomeV1::Ready));
     let complete = every_concluded
         && current
             .sources
@@ -700,9 +630,7 @@ async fn execute_query(
     } else if current.sources.iter().any(|source| {
         matches!(
             source.outcome,
-            ExplorerSourceOutcomeV1::Ready
-                | ExplorerSourceOutcomeV1::Partial
-                | ExplorerSourceOutcomeV1::Absent
+            ExplorerSourceOutcomeV1::Ready | ExplorerSourceOutcomeV1::Partial
         )
     }) {
         current.state = ExplorerRunStateV1::Partial;
@@ -726,7 +654,6 @@ async fn execute_source(
         ExplorerSourceIdV1::Knowledge => {
             knowledge::knowledge_source(&state, &request, &control, cancellation).await
         }
-        ExplorerSourceIdV1::Semantic => semantic::semantic_source(&state).await,
     }
 }
 
@@ -750,12 +677,11 @@ async fn code_source(
         }
     };
     let payload = read.payload;
-    let Ok(total) = u64::try_from(payload.total) else {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::CodeGraph,
-            "code_graph_contract_invalid",
-            "code graph search returned a negative total",
-        );
+    let total = payload.total;
+    let omission_reasons = if payload.has_more && total.is_none() {
+        vec!["query page limit".to_owned()]
+    } else {
+        Vec::new()
     };
     let rows = match payload
         .results
@@ -776,10 +702,10 @@ async fn code_source(
         ExplorerSourceIdV1::CodeGraph,
         request,
         rows,
-        Some(total),
+        total,
         json!({"query": request.query}),
         "symbols",
-        Vec::new(),
+        omission_reasons,
     );
     source.freshness = "fresh";
     source.watermark = Some(read.generation);
@@ -795,11 +721,13 @@ fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourcePr
             "missing_registry",
             "the exact project graph registry is missing",
         ),
-        CodeGraphReadError::Unavailable { detail } => ExplorerSourceProgressV1::unavailable(
-            ExplorerSourceIdV1::CodeGraph,
-            "graph_authority_unavailable",
-            detail,
-        ),
+        CodeGraphReadError::Unavailable { detail } | CodeGraphReadError::Refused { detail } => {
+            ExplorerSourceProgressV1::unavailable(
+                ExplorerSourceIdV1::CodeGraph,
+                "graph_authority_unavailable",
+                detail,
+            )
+        }
         CodeGraphReadError::Stale { detail } => ExplorerSourceProgressV1::stale(
             ExplorerSourceIdV1::CodeGraph,
             "graph_generation_stale",
@@ -844,6 +772,16 @@ fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourcePr
             ExplorerSourceIdV1::CodeGraph,
             "graph_budget_exhausted",
             detail,
+        ),
+        parked @ CodeGraphReadError::Parked { .. } => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "code_index_parked",
+            parked.to_string(),
+        ),
+        rewarming @ CodeGraphReadError::Rewarming { .. } => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_authority_unavailable",
+            rewarming.to_string(),
         ),
     }
 }
@@ -989,6 +927,7 @@ pub struct ReadContextParams {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub(super) struct ExplorerSessionCountsV1 {
     message_count: i64,
+    unpublished_message_count: i64,
     summary_node_count: i64,
     summary_token_count: Option<i64>,
     source_token_count: Option<i64>,
@@ -1021,18 +960,11 @@ pub(super) struct ExplorerReadContextV1 {
 
 pub async fn session_size(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     Path(session_id): Path<String>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
-            let Some(Extension(control)) = control else {
-                return explorer_session_not_ready::<ExplorerSessionSizeV1>(
-                    &state,
-                    DashboardLcmReadStateV1::Unavailable,
-                    "dashboard_request_admission_unavailable".to_owned(),
-                );
-            };
             let outcome = read_session_page(&state, control, &session_id, 500, None).await;
             match outcome {
                 DashboardLcmReadOutcomeV1::Ready(page) => {
@@ -1073,27 +1005,20 @@ pub async fn session_size(
                 }
             }
         },
-        label = "dashboard_api.query.session_size"
+        tracing::trace_span!("dashboard_api.query.session_size"),
     )
     .await
 }
 
 pub async fn read_context(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     Path(session_id): Path<String>,
     Query(params): Query<ReadContextParams>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let limit = params.limit.unwrap_or(100).clamp(1, 500);
-            let Some(Extension(control)) = control else {
-                return explorer_session_not_ready::<ExplorerReadContextV1>(
-                    &state,
-                    DashboardLcmReadStateV1::Unavailable,
-                    "dashboard_request_admission_unavailable".to_owned(),
-                );
-            };
             let offset = params.offset.unwrap_or(0).max(0);
             let order = if params.order.as_deref() == Some("desc") {
                 "desc"
@@ -1155,7 +1080,8 @@ pub async fn read_context(
             let counts = explorer_session_counts(&stats);
             let returned_messages = i64::try_from(messages.len()).unwrap_or(i64::MAX);
             let returned_summary_nodes = i64::try_from(summary_nodes.len()).unwrap_or(i64::MAX);
-            let has_more_messages = stats.message_count > returned_messages;
+            let has_more_messages =
+                stats.message_count - stats.unpublished_message_count > returned_messages;
             let has_more_summary_nodes = stats.summary_node_count > returned_summary_nodes;
             let examined = u64::try_from(messages.len()).unwrap_or(u64::MAX);
             let has_more = has_more_messages || has_more_summary_nodes;
@@ -1194,7 +1120,7 @@ pub async fn read_context(
                 .into_response()
             }
         },
-        label = "dashboard_api.query.read_context"
+        tracing::trace_span!("dashboard_api.query.read_context"),
     )
     .await
 }
@@ -1287,6 +1213,7 @@ fn explorer_lcm_message(message: DashboardLcmCanonicalMessageV1) -> LcmMessageV1
         message_id: message.message_id,
         ordinal: Some(message.ordinal),
         storage_kind: Some("canonical_temporal".to_owned()),
+        tool_use_id: message_tool_use_id(message.metadata_json.as_deref()),
         metadata_json: message.metadata_json,
         tool_name: message.tool_names,
         pinned: None,
@@ -1316,6 +1243,7 @@ fn explorer_lcm_summary(summary: DashboardLcmCanonicalSummaryV1) -> LcmSummaryNo
 fn explorer_session_counts(stats: &DashboardLcmCanonicalStatsV1) -> ExplorerSessionCountsV1 {
     ExplorerSessionCountsV1 {
         message_count: stats.message_count,
+        unpublished_message_count: stats.unpublished_message_count,
         summary_node_count: stats.summary_node_count,
         summary_token_count: stats.summary_token_count,
         source_token_count: stats.source_token_count,
@@ -1348,6 +1276,9 @@ where
         DashboardLcmReadStateV1::Redacted => {
             DashboardEnvelopeV1::redacted(scope, None::<T>, reason)
         }
+        DashboardLcmReadStateV1::CursorRefused => {
+            DashboardEnvelopeV1::error(scope, None::<T>, reason)
+        }
         DashboardLcmReadStateV1::Unavailable
         | DashboardLcmReadStateV1::CursorManifestLimitExceeded
         | DashboardLcmReadStateV1::BudgetExhausted
@@ -1370,8 +1301,70 @@ const fn explorer_lcm_error_code(state: DashboardLcmReadStateV1) -> &'static str
         DashboardLcmReadStateV1::CursorManifestLimitExceeded => {
             "lcm_temporal_cursor_manifest_limit_exceeded"
         }
+        DashboardLcmReadStateV1::CursorRefused => "lcm_temporal_cursor_refused",
         DashboardLcmReadStateV1::BudgetExhausted => "lcm_temporal_budget_exhausted",
         DashboardLcmReadStateV1::TimedOut => "lcm_temporal_read_timed_out",
         DashboardLcmReadStateV1::Cancelled => "lcm_temporal_read_cancelled",
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod native_tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn explorer_query_settles_without_a_tokio_runtime() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-explorer-native",
+        ));
+        let writer_waits = native_runtime::native_thread_writer_waits();
+        let state = native_runtime::block_on(async move {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let response = create_query(
+                State(dash.clone()),
+                RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                    "dashboard-explorer-native",
+                )),
+                Json(ExplorerQueryRequestV1 {
+                    query: "fixture".to_owned(),
+                    limit: 1,
+                    offset: 0,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("accepted body");
+            let accepted: Value = serde_json::from_slice(&body).expect("accepted json");
+            let run_id = accepted["payload"]["run_id"]
+                .as_str()
+                .expect("accepted run id")
+                .to_owned();
+            let run = find_run(&dash, &run_id).expect("remembered run").run;
+            native_runtime::timeout(Duration::from_secs(60), async {
+                loop {
+                    let state = run.read().await.state;
+                    if state != ExplorerRunStateV1::Pending {
+                        return state;
+                    }
+                    let _ = native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
+                        .await;
+                }
+            })
+            .await
+            .expect("the explorer run settles")
+        })
+        .expect("native block_on");
+        assert_eq!(state, ExplorerRunStateV1::Partial);
+        assert_eq!(
+            native_runtime::native_thread_writer_waits(),
+            writer_waits,
+            "the explorer run parked no native thread on a writer"
+        );
     }
 }

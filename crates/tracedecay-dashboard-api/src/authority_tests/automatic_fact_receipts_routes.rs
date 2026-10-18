@@ -16,7 +16,10 @@ use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAd
 
 use crate::tracedecay::facts::memory_application_for_db;
 
-use super::*;
+use axum::http::StatusCode;
+use axum::response::Response;
+
+use super::{DashboardStateFixture, admitted_request, admitted_router};
 
 fn admitted_fact(content: &str, metadata: Value) -> Value {
     json!({
@@ -158,12 +161,7 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
             quarantined.receipt().apply_id().as_str().to_owned(),
         )
     };
-    let app = with_dashboard_http_admission(
-        router_with_active_application(fixture.state, None, Router::new()),
-        TEST_DASHBOARD_AUTHORITY
-            .parse()
-            .expect("loopback dashboard authority"),
-    );
+    let app = admitted_router(fixture.state);
 
     let list = app
         .clone()

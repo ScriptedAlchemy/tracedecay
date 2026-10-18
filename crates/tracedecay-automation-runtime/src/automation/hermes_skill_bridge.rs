@@ -9,12 +9,15 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use tracedecay_contracts::automation::{
+    HermesPendingSkillWrite, HermesSkillBridgeContracts, HermesSkillBridgeSnapshot,
+    HermesSkillSummary,
+};
 
 use super::config_error;
-use super::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
-use crate::errors::Result;
+use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
+use tracedecay_domain::errors::Result;
 
 const MAX_SKILL_BODY_CHARS: usize = 100_000;
 const MAX_SKILL_DEPTH: usize = 4;
@@ -30,80 +33,21 @@ pub struct HermesSkillBridgeOptions {
     pub include_pending_payloads: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HermesSkillBridgeSnapshot {
-    pub agent_home: PathBuf,
-    pub skills_dir: PathBuf,
-    pub skill_count: usize,
-    pub pending_skill_count: usize,
-    pub pending_skill_corrupt_count: usize,
-    pub usage_record_count: usize,
-    pub archive_count: usize,
-    pub skills: Vec<HermesSkillSummary>,
-    pub pending_skills: Vec<HermesPendingSkillWrite>,
-    pub usage_records: BTreeMap<String, Value>,
-    pub contracts: HermesSkillBridgeContracts,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HermesSkillSummary {
-    pub name: String,
-    pub path: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body_markdown: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Value>,
-    pub pending_write_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HermesPendingSkillWrite {
-    pub id: String,
-    pub source_path: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub origin: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HermesSkillBridgeContracts {
-    pub lifecycle_owner: String,
-    pub mutation_policy: String,
-    pub discovery_policy: String,
-}
-
-impl Default for HermesSkillBridgeContracts {
-    fn default() -> Self {
-        Self {
-            lifecycle_owner: "hermes".to_string(),
-            mutation_policy: "read_only; use Hermes to mutate Hermes-owned skills".to_string(),
-            discovery_policy: "standard_user_install_only".to_string(),
-        }
-    }
-}
-
 /// Loads Hermes-owned skill state from the one supported user install.
-#[hotpath::measure(label = "automation.hermes.inventory")]
+#[tracing::instrument(name = "automation.hermes.inventory", level = "trace", skip_all)]
 pub fn load_standard_hermes_skill_bridge(
+    user_home: Option<&Path>,
     options: HermesSkillBridgeOptions,
 ) -> Result<HermesSkillBridgeSnapshot> {
-    let user_home = crate::agents::home_dir().ok_or_else(|| {
+    let user_home = user_home.ok_or_else(|| {
         config_error("could not determine the user home for Hermes skill inventory")
     })?;
-    load_standard_hermes_skill_bridge_from_user_home(&user_home, options)
+    // Reported paths spell plainly; a verbatim home leaks `\\?\` into every
+    // serialized skill and usage path.
+    load_standard_hermes_skill_bridge_from_user_home(
+        &tracedecay_runtime_core::path_safety::plain_host_path(user_home),
+        options,
+    )
 }
 
 fn load_standard_hermes_skill_bridge_from_user_home(
@@ -270,7 +214,7 @@ fn load_pending_skill_writes(
     agent_home: &Path,
     include_payloads: bool,
 ) -> Result<(Vec<HermesPendingSkillWrite>, usize)> {
-    let pending_dir = agent_home.join("pending/skills");
+    let pending_dir = agent_home.join("pending").join("skills");
     let Some(entries) = safe_read_dir(&pending_dir, agent_home, "Hermes pending skills")? else {
         return Ok((Vec::new(), 0));
     };
@@ -504,17 +448,15 @@ fn read_bounded_regular_utf8(
 }
 
 fn parse_scalar_frontmatter(contents: &str) -> BTreeMap<String, String> {
-    parse_skill_frontmatter(contents)
-        .map(|fields| {
-            fields
-                .into_iter()
-                .filter_map(|(key, value)| match value {
-                    SkillFrontmatterValue::Scalar(value) => Some((key.to_ascii_lowercase(), value)),
-                    SkillFrontmatterValue::Block(_) => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    parse_skill_frontmatter(contents).map_or_default(|fields| {
+        fields
+            .into_iter()
+            .filter_map(|(key, value)| match value {
+                SkillFrontmatterValue::Scalar(value) => Some((key.to_ascii_lowercase(), value)),
+                SkillFrontmatterValue::Block(_) => None,
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -577,7 +519,8 @@ mod tests {
         )
         .unwrap();
         let skills = temp.path().join(".hermes/skills");
-        fs::create_dir_all(&skills).unwrap();
+        fs::create_dir_all(skills.join("owned")).unwrap();
+        fs::write(skills.join("owned/SKILL.md"), "---\nname: owned\n---\n").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path().join("escaped"), skills.join("escaped")).unwrap();
 
@@ -586,7 +529,14 @@ mod tests {
             HermesSkillBridgeOptions::default(),
         )
         .unwrap();
-        assert!(snapshot.skills.is_empty());
+        assert_eq!(
+            snapshot
+                .skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            ["owned"]
+        );
     }
 
     #[cfg(unix)]

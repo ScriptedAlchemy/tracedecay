@@ -1,44 +1,40 @@
-//! Immutable session/Git evidence projected into verified graph generations.
+//! Session/Git evidence: branch and worktree activity spans and commit
+//! attributions, recorded per session.
 //!
-//! Commit/session evidence and branch/worktree spans are not relational rows.
-//! A complete [`GitEvidenceProjectionV1`] is published atomically through the
-//! project graph runtime and every query is evaluated from its verified
-//! snapshot. SQLite retains only resumable-history receipts and watermarks.
+//! Every span and commit attribution is a durable row keyed by its session in
+//! the project sessions store ([`rows`]), written in the transaction that
+//! observed it and read through indexed lookups. The projection generation is
+//! metadata over those rows, so neither writes nor reads scale with the
+//! number of sessions a project has accumulated.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::{
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
+};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-
-use super::SessionMessageRecord;
+use tracedecay_runtime_core::db::schema_version::{self, GIT_CORRELATION_COMPONENT};
 
 mod error;
 pub use error::GitCorrelationError;
+mod history_changes;
+pub use history_changes::install_history_change_schema;
 
-const MIGRATION_NAME: &str = "git_correlation";
-const MESSAGE_WORKTREE_KEYS: [&str; 9] = [
-    "codex_turn_worktree",
-    "claude_message_worktree",
-    "cursor_session_worktree",
-    "kiro_workspace_worktree",
-    "cline_like_task_worktree",
-    "vibe_session_worktree",
-    "codex_session_worktree",
-    "claude_session_worktree",
-    "hermes_session_worktree",
-];
-
-/// Receipt schema version. This schema owns no Git evidence rows.
-pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 4;
-pub const GIT_EVIDENCE_PROJECTOR_REVISION_V1: &str = "session-git-evidence-projector.v1";
+/// Schema version of the Git evidence rows, convergence receipts and
+/// watermarks. A store recorded at any other version is refused with a typed
+/// reset; nothing converts an older shape.
+pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 9;
 pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 // The scope value type and session cap are owned by the LCM engine crate so
 // its grep filters and this correlation engine narrow by the same rules.
 pub use tracedecay_lcm::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
-pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+pub const GIT_HISTORY_SEQUENCE_FRONTIER_KEY: &str = "git_history_change_sequence_frontier";
 pub const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
+const LEGACY_ACTIVITY_FRONTIER_KEY: &str = "auto_backfill_activity_watermark";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +42,15 @@ pub enum SpanSource {
     HookRoute,
     Ingest,
     Backfill,
+}
+
+/// Who asserted a span's `branch`: the host that captured the activity, or
+/// the reflog inference that a session revisit replaces wholesale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchProvenance {
+    Captured,
+    Inferred,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +99,6 @@ impl CommitRelationFilter {
         }
     }
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Produced => "produced",
@@ -103,7 +107,6 @@ impl CommitRelationFilter {
         }
     }
 
-    #[hotpath::skip]
     const fn matches(self, relation: CommitRelation) -> bool {
         matches!(
             (self, relation),
@@ -129,9 +132,39 @@ pub struct SessionGitSpan {
     pub last_ts: i64,
     pub event_count: i64,
     pub source: SpanSource,
+    pub branch_provenance: BranchProvenance,
+    /// Capture-only bounds held before an inference fold unioned a reflog
+    /// segment's window into this span. `replace_backfill_session` restores
+    /// them when the inference is retracted, so segment-covered time never
+    /// outlives the evidence it came from. `None` while no inference is
+    /// folded in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_window: Option<CaptureWindow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The `first_ts`/`last_ts`/`event_count` a captured span had before an
+/// inference unioned its segment window in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureWindow {
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub event_count: i64,
+}
+
+impl SessionGitSpan {
+    /// The branch the capturing host observed; an inferred branch is never
+    /// reported as captured.
+    pub fn captured_branch(&self) -> Option<&str> {
+        match self.branch_provenance {
+            BranchProvenance::Captured => self.branch.as_deref(),
+            BranchProvenance::Inferred => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpanObservation {
     pub provider: String,
     pub session_id: String,
@@ -160,7 +193,9 @@ pub struct CommitSessionRecord {
     pub evidence_message_id: Option<String>,
 }
 
-/// Canonical, complete input to one immutable graph generation.
+/// Every stored span and commit attribution at once: the complete-scan oracle
+/// the bounded row reads must answer identically.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitEvidenceProjectionV1 {
@@ -169,8 +204,13 @@ pub struct GitEvidenceProjectionV1 {
     commit_sessions: Vec<CommitSessionRecord>,
 }
 
+#[cfg(test)]
 impl GitEvidenceProjectionV1 {
-    #[hotpath::measure(label = "sessions.git_correlation.projection_new")]
+    #[tracing::instrument(
+        name = "sessions.git_correlation.projection_new",
+        level = "trace",
+        skip_all
+    )]
     pub fn new(
         source_watermark: impl Into<String>,
         mut spans: Vec<SessionGitSpan>,
@@ -211,7 +251,7 @@ impl GitEvidenceProjectionV1 {
         let span_ids = spans
             .iter()
             .map(|span| span.span_id.as_str())
-            .collect::<HashSet<_>>();
+            .collect::<std::collections::HashSet<_>>();
         if commit_sessions.iter().any(|record| {
             record
                 .span_id
@@ -242,25 +282,41 @@ impl GitEvidenceProjectionV1 {
         &self.commit_sessions
     }
 
-    #[hotpath::measure(label = "sessions.git_correlation.sessions_for")]
+    /// Evaluates the query over every row. Bounded production reads go
+    /// through [`rows::GitEvidenceView`], which feeds the same aggregation
+    /// helpers only the rows that can contribute to the result.
+    #[tracing::instrument(
+        name = "sessions.git_correlation.sessions_for",
+        level = "trace",
+        skip_all
+    )]
     pub fn sessions_for(
         &self,
         query: &SessionsForQuery,
         relation: CommitRelationFilter,
     ) -> Vec<SessionGitCorrelationHit> {
-        let limit = query.limit.clamp(1, MAX_SESSIONS_FOR_LIMIT);
+        let limit = sessions_for_limit(query);
         match &query.git_ref {
-            GitRefFilter::Branch(branch) => {
-                self.span_hits(|span| span.branch.as_deref() == Some(branch), query, limit)
-            }
-            GitRefFilter::Worktree(worktree) => {
-                self.span_hits(|span| &span.worktree == worktree, query, limit)
-            }
-            GitRefFilter::Commit(commit) => self.commit_hits(commit, query, relation, limit),
+            GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => span_hits(
+                self.spans
+                    .iter()
+                    .filter(|span| span_matches_query(span, query)),
+                limit,
+            ),
+            GitRefFilter::Commit(commit) => commit_hits(
+                self.commit_sessions
+                    .iter()
+                    .filter(|record| commit_record_matches_query(record, commit, relation, query)),
+                limit,
+            ),
         }
     }
 
-    #[hotpath::measure(label = "sessions.git_correlation.session_ids_for_scope")]
+    #[tracing::instrument(
+        name = "sessions.git_correlation.session_ids_for_scope",
+        level = "trace",
+        skip_all
+    )]
     pub fn session_ids_for_scope(&self, filter: &GitScopeFilter) -> Option<Vec<(String, String)>> {
         if filter.is_empty() {
             return None;
@@ -269,138 +325,184 @@ impl GitEvidenceProjectionV1 {
         if let Some(branch) = &filter.branch {
             selected = Some(intersect_id_maps(
                 selected,
-                self.span_identities(|span| span.branch.as_deref() == Some(branch)),
+                span_identities(
+                    self.spans
+                        .iter()
+                        .filter(|span| span.branch.as_deref() == Some(branch.as_str())),
+                ),
             ));
         }
         if let Some(worktree) = &filter.worktree {
             selected = Some(intersect_id_maps(
                 selected,
-                self.span_identities(|span| &span.worktree == worktree),
+                span_identities(self.spans.iter().filter(|span| &span.worktree == worktree)),
             ));
         }
         if let Some(commit) = &filter.commit {
             selected = Some(intersect_id_maps(
                 selected,
-                self.commit_identities_with_producer_fallback(commit),
+                commit_identities_with_producer_fallback(
+                    self.commit_sessions
+                        .iter()
+                        .filter(|record| record.commit_sha.starts_with(commit.as_str())),
+                ),
             ));
         }
-        Some(
-            selected
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(session_id, provider)| (provider, session_id))
-                .collect(),
-        )
+        Some(scope_session_ids(selected))
     }
+}
 
-    fn span_hits(
-        &self,
-        predicate: impl Fn(&SessionGitSpan) -> bool,
-        query: &SessionsForQuery,
-        limit: usize,
-    ) -> Vec<SessionGitCorrelationHit> {
-        let mut grouped = BTreeMap::<String, Vec<&SessionGitSpan>>::new();
-        for span in self.spans.iter().filter(|span| {
-            predicate(span)
-                && query.since.is_none_or(|since| span.last_ts >= since)
-                && query.until.is_none_or(|until| span.first_ts <= until)
-        }) {
-            grouped
-                .entry(span.session_id.clone())
-                .or_default()
-                .push(span);
-        }
-        let mut hits = grouped
-            .into_values()
-            .map(|spans| span_hit(&spans))
-            .collect::<Vec<_>>();
-        hits.sort_by(|left, right| {
-            right
-                .last_ts
-                .cmp(&left.last_ts)
-                .then_with(|| left.session_id.cmp(&right.session_id))
-        });
-        hits.truncate(limit);
-        hits
+fn sessions_for_limit(query: &SessionsForQuery) -> usize {
+    query.limit.clamp(1, MAX_SESSIONS_FOR_LIMIT)
+}
+
+/// Whether `span` carries the queried branch or worktree. A commit query never
+/// matches a span.
+fn span_matches_ref(span: &SessionGitSpan, git_ref: &GitRefFilter) -> bool {
+    match git_ref {
+        GitRefFilter::Branch(branch) => span.branch.as_deref() == Some(branch.as_str()),
+        GitRefFilter::Worktree(worktree) => &span.worktree == worktree,
+        GitRefFilter::Commit(_) => false,
     }
+}
 
-    fn commit_hits(
-        &self,
-        sha: &str,
-        query: &SessionsForQuery,
-        relation: CommitRelationFilter,
-        limit: usize,
-    ) -> Vec<SessionGitCorrelationHit> {
-        let mut by_session = HashMap::<String, SessionGitCorrelationHit>::new();
-        for record in self.commit_sessions.iter().filter(|record| {
-            record.commit_sha.starts_with(sha)
-                && relation.matches(record.relation)
-                && query.since.is_none_or(|since| record.committed_at >= since)
-                && query.until.is_none_or(|until| record.committed_at <= until)
-        }) {
-            let candidate = commit_hit(record);
-            match by_session.get_mut(&record.session_id) {
-                Some(existing)
-                    if commit_hit_strength(&candidate) > commit_hit_strength(existing) =>
-                {
-                    *existing = candidate;
-                }
-                Some(existing)
-                    if existing.provider.is_empty() && !candidate.provider.is_empty() =>
-                {
-                    existing.provider = candidate.provider;
-                }
-                Some(_) => {}
-                None => {
-                    by_session.insert(record.session_id.clone(), candidate);
-                }
+/// Whether `span` overlaps the query's activity window: it must end at or
+/// after `since` and start at or before `until`.
+fn span_in_query_window(span: &SessionGitSpan, query: &SessionsForQuery) -> bool {
+    query.since.is_none_or(|since| span.last_ts >= since)
+        && query.until.is_none_or(|until| span.first_ts <= until)
+}
+
+fn span_matches_query(span: &SessionGitSpan, query: &SessionsForQuery) -> bool {
+    span_matches_ref(span, &query.git_ref) && span_in_query_window(span, query)
+}
+
+fn commit_record_matches_query(
+    record: &CommitSessionRecord,
+    sha: &str,
+    relation: CommitRelationFilter,
+    query: &SessionsForQuery,
+) -> bool {
+    record.commit_sha.starts_with(sha)
+        && relation.matches(record.relation)
+        && query.since.is_none_or(|since| record.committed_at >= since)
+        && query.until.is_none_or(|until| record.committed_at <= until)
+}
+
+/// Groups already-matching spans per session, orders the sessions by their
+/// latest activity, and keeps the first `limit`.
+fn span_hits<'a>(
+    spans: impl IntoIterator<Item = &'a SessionGitSpan>,
+    limit: usize,
+) -> Vec<SessionGitCorrelationHit> {
+    let mut grouped = BTreeMap::<&str, Vec<&SessionGitSpan>>::new();
+    for span in spans {
+        grouped
+            .entry(span.session_id.as_str())
+            .or_default()
+            .push(span);
+    }
+    let mut hits = grouped
+        .into_values()
+        .map(|spans| span_hit(&spans))
+        .collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .last_ts
+            .cmp(&left.last_ts)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    hits.truncate(limit);
+    hits
+}
+
+/// Keeps the strongest already-matching record per session. Records must
+/// arrive in canonical projection order ([`commit_record_order`]) so equal
+/// strengths resolve to the same record on every read path.
+fn commit_hits<'a>(
+    records: impl IntoIterator<Item = &'a CommitSessionRecord>,
+    limit: usize,
+) -> Vec<SessionGitCorrelationHit> {
+    let mut by_session = HashMap::<&str, SessionGitCorrelationHit>::new();
+    for record in records {
+        let candidate = commit_hit(record);
+        match by_session.get_mut(record.session_id.as_str()) {
+            Some(existing) if commit_hit_strength(&candidate) > commit_hit_strength(existing) => {
+                *existing = candidate;
+            }
+            Some(existing) if existing.provider.is_empty() && !candidate.provider.is_empty() => {
+                existing.provider = candidate.provider;
+            }
+            Some(_) => {}
+            None => {
+                by_session.insert(record.session_id.as_str(), candidate);
             }
         }
-        let mut hits = by_session.into_values().collect::<Vec<_>>();
-        hits.sort_by(|left, right| {
-            right
-                .committed_at
-                .cmp(&left.committed_at)
-                .then_with(|| left.session_id.cmp(&right.session_id))
-        });
-        hits.truncate(limit);
-        hits
     }
+    let mut hits = by_session.into_values().collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .committed_at
+            .cmp(&left.committed_at)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    hits.truncate(limit);
+    hits
+}
 
-    fn span_identities(
-        &self,
-        predicate: impl Fn(&SessionGitSpan) -> bool,
-    ) -> BTreeMap<String, String> {
-        self.spans
-            .iter()
-            .filter(|span| predicate(span))
-            .fold(BTreeMap::new(), |mut ids, span| {
-                ids.entry(span.session_id.clone())
-                    .and_modify(|provider| {
-                        if provider.is_empty() {
-                            provider.clone_from(&span.provider);
-                        }
-                    })
-                    .or_insert_with(|| span.provider.clone());
-                ids
-            })
-    }
-
-    fn commit_identities_with_producer_fallback(&self, sha: &str) -> BTreeMap<String, String> {
-        let matching = self
-            .commit_sessions
-            .iter()
-            .filter(|record| record.commit_sha.starts_with(sha))
-            .collect::<Vec<_>>();
-        let has_producer = matching
-            .iter()
-            .any(|record| record.relation == CommitRelation::Produced);
-        matching
+/// Session identities named by already-matching spans, keyed by session and
+/// carrying the first non-empty provider.
+fn span_identities<'a>(
+    spans: impl IntoIterator<Item = &'a SessionGitSpan>,
+) -> BTreeMap<String, String> {
+    session_provider_identities(
+        spans
             .into_iter()
-            .filter(|record| !has_producer || record.relation == CommitRelation::Produced)
-            .map(|record| (record.session_id.clone(), record.provider.clone()))
-            .collect()
-    }
+            .map(|span| (span.session_id.as_str(), span.provider.as_str())),
+    )
+}
+
+/// The `span_identities` fold over dedicated `(session_id, provider)` pairs,
+/// for callers that never materialized a full span record.
+fn session_provider_identities<'a>(
+    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> BTreeMap<String, String> {
+    pairs
+        .into_iter()
+        .fold(BTreeMap::new(), |mut ids, (session_id, provider)| {
+            ids.entry(session_id.to_owned())
+                .and_modify(|existing| {
+                    if existing.is_empty() {
+                        provider.clone_into(existing);
+                    }
+                })
+                .or_insert_with(|| provider.to_owned());
+            ids
+        })
+}
+
+/// Session identities named by already prefix-matching commit records. When
+/// any producer relation exists only producers count; otherwise observers do.
+fn commit_identities_with_producer_fallback<'a>(
+    records: impl IntoIterator<Item = &'a CommitSessionRecord>,
+) -> BTreeMap<String, String> {
+    let matching = records.into_iter().collect::<Vec<_>>();
+    let has_producer = matching
+        .iter()
+        .any(|record| record.relation == CommitRelation::Produced);
+    matching
+        .into_iter()
+        .filter(|record| !has_producer || record.relation == CommitRelation::Produced)
+        .map(|record| (record.session_id.clone(), record.provider.clone()))
+        .collect()
+}
+
+fn scope_session_ids(selected: Option<BTreeMap<String, String>>) -> Vec<(String, String)> {
+    selected
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(session_id, provider)| (provider, session_id))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,7 +522,7 @@ impl GitRefFilter {
         }
         match kind {
             "branch" => Ok(Self::Branch(value.to_owned())),
-            "worktree" => Ok(Self::Worktree(normalize_worktree(value))),
+            "worktree" => Ok(Self::Worktree(canonical_worktree_key(value)?)),
             "commit" => parse_commit_sha(value).map(Self::Commit),
             other => Err(GitCorrelationError::InvalidArgument(format!(
                 "git_ref must be one of branch, worktree, commit (got `{other}`)"
@@ -428,7 +530,6 @@ impl GitRefFilter {
         }
     }
 
-    #[hotpath::skip]
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Branch(_) => "branch",
@@ -456,7 +557,7 @@ pub fn git_scope_filter_from_args(
 ) -> Result<GitScopeFilter, GitCorrelationError> {
     Ok(GitScopeFilter {
         branch: nonempty(branch).map(str::to_owned),
-        worktree: nonempty(worktree).map(normalize_worktree),
+        worktree: nonempty(worktree).map(canonical_worktree_key).transpose()?,
         commit: nonempty(commit).map(parse_commit_sha).transpose()?,
     })
 }
@@ -500,16 +601,38 @@ pub struct CorrelationIndexHealth {
 }
 
 impl CorrelationIndexHealth {
-    #[hotpath::skip]
     pub const fn is_empty(&self) -> bool {
         self.span_count == 0
     }
 
-    #[hotpath::skip]
     pub const fn is_empty_for(&self, git_ref: &GitRefFilter) -> bool {
         match git_ref {
             GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => self.span_count == 0,
             GitRefFilter::Commit(_) => self.commit_count == 0,
+        }
+    }
+}
+
+/// Bounded row-family presence for the session/Git evidence projection.
+///
+/// Query paths need only distinguish a projection with no applicable evidence
+/// from a populated projection that produced no matches. They must not pay for
+/// exact health counts, which remain a diagnostics concern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CorrelationIndexPresence {
+    pub projection_available: bool,
+    pub generation: Option<String>,
+    pub source_watermark: Option<String>,
+    pub spans_present: bool,
+    pub commits_present: bool,
+    pub backfill_watermark: Option<i64>,
+}
+
+impl CorrelationIndexPresence {
+    pub const fn is_empty_for(&self, git_ref: &GitRefFilter) -> bool {
+        match git_ref {
+            GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => !self.spans_present,
+            GitRefFilter::Commit(_) => !self.commits_present,
         }
     }
 }
@@ -528,6 +651,43 @@ pub fn normalize_worktree(path: &str) -> String {
         normalized.pop();
     }
     normalized
+}
+
+/// Resolves one worktree spelling to the identity the store keys on: the
+/// canonical name when the path exists (8.3 short names, shell aliases and
+/// symlinked roots collapse), else the lexical cleanup above so a missing
+/// historical path keeps its recorded spelling. Callers hold one resolve
+/// per distinct spelling inside the current operation only: a path created
+/// after an earlier miss, or a retargeted link, must resolve to its new
+/// identity on the next operation.
+pub(crate) fn canonical_worktree_key(path: &str) -> Result<String, error::GitCorrelationError> {
+    let normalized = normalize_worktree(path);
+    let candidate = Path::new(&normalized);
+    // A relative string is left alone: `canonicalize` would resolve it
+    // against the current drive, rekeying a missing path it never named.
+    if !candidate.is_absolute() {
+        return Ok(normalized);
+    }
+    match tracedecay_runtime_core::path_safety::canonical_existing_identity(candidate) {
+        Ok(canonical) => worktree_key_for_canonical_identity(&canonical, &normalized),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(normalized),
+        Err(error) => Err(error::GitCorrelationError::Unavailable(format!(
+            "cannot resolve worktree identity for {normalized}: {error}"
+        ))),
+    }
+}
+
+fn worktree_key_for_canonical_identity(
+    identity: &Path,
+    recorded: &str,
+) -> Result<String, error::GitCorrelationError> {
+    // Keeping the alias when UTF-8 conversion fails would store a different identity.
+    let exact = identity.to_str().ok_or_else(|| {
+        error::GitCorrelationError::Unavailable(format!(
+            "worktree identity for {recorded} resolves outside UTF-8"
+        ))
+    })?;
+    Ok(normalize_worktree(exact))
 }
 
 pub fn observation_extends_span(first_ts: i64, last_ts: i64, ts: i64, gap_secs: i64) -> bool {
@@ -575,196 +735,330 @@ pub fn span_debounce_key(
     )
 }
 
-/// Parses each message's `metadata_json` once for both commit evidence and
-/// ingest span observations. The repository is discovered only after a
-/// message actually carries commit candidates.
-#[hotpath::measure(label = "sessions.git_correlation.transcript_evidence")]
-pub fn transcript_git_evidence(
-    messages: &[SessionMessageRecord],
-    project_root: &std::path::Path,
-) -> (Vec<CommitSessionRecord>, Vec<SpanObservation>) {
-    let mut repo: Option<gix::Repository> = None;
-    let mut repo_unavailable = false;
-    let mut records = BTreeMap::<(String, String), CommitSessionRecord>::new();
-    let mut spans = Vec::new();
-    for message in messages {
-        let Some(parsed) = parsed_message_metadata(message) else {
-            continue;
-        };
-        let Some(metadata) = parsed.as_object() else {
-            continue;
-        };
-        if let Some(span) = span_observation_from_metadata(message, metadata) {
-            spans.push(span);
-        }
-        if repo_unavailable {
-            continue;
-        }
-        for (key, relation, default_evidence, confidence) in [
-            (
-                "produced_commit_candidates",
-                CommitRelation::Produced,
-                CommitEvidence::ToolResult,
-                100,
-            ),
-            (
-                "observed_commit_candidates",
-                CommitRelation::Observed,
-                CommitEvidence::HeadObservation,
-                60,
-            ),
-        ] {
-            let Some(candidates) = metadata.get(key).and_then(serde_json::Value::as_array) else {
-                continue;
-            };
-            let repo = match &mut repo {
-                Some(repo) => repo,
-                slot => match gix::discover(project_root) {
-                    Ok(discovered) => slot.insert(discovered),
-                    Err(_) => {
-                        // Keep spans already collected; later messages can
-                        // still contribute observations without commit rows.
-                        repo_unavailable = true;
-                        break;
-                    }
-                },
-            };
-            for candidate in candidates.iter().filter_map(serde_json::Value::as_str) {
-                let Ok(spec) = repo.rev_parse_single(candidate) else {
-                    continue;
-                };
-                let Ok(object) = spec.object() else {
-                    continue;
-                };
-                let Ok(commit) = object.try_into_commit() else {
-                    continue;
-                };
-                let sha = commit.id.to_string();
-                let evidence = if relation == CommitRelation::Produced
-                    && metadata
-                        .get("produced_commit_evidence")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("host_event")
-                {
-                    CommitEvidence::HostEvent
-                } else {
-                    default_evidence
-                };
-                let record = CommitSessionRecord {
-                    commit_sha: sha.clone(),
-                    provider: message.provider.clone(),
-                    session_id: message.session_id.clone(),
-                    branch: metadata
-                        .get("git_branch")
-                        .or_else(|| metadata.get("codex_git_branch"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned),
-                    worktree: metadata_worktree(metadata)
-                        .map(normalize_worktree)
-                        .or_else(|| Some(normalize_worktree(&project_root.to_string_lossy()))),
-                    committed_at: commit
-                        .time()
-                        .map_or(message.timestamp.unwrap_or_default(), |time| time.seconds),
-                    span_overlap_kind: SpanOverlapKind::Direct,
-                    span_id: None,
-                    relation,
-                    evidence,
-                    confidence,
-                    evidence_message_id: Some(message.message_id.clone()),
-                };
-                let slot = (sha, message.session_id.clone());
-                if records
-                    .get(&slot)
-                    .is_none_or(|existing| record_strength(&record) > record_strength(existing))
-                {
-                    records.insert(slot, record);
-                }
-            }
+/// The worktrees of one admitted repository that session locations resolve to.
+///
+/// Linked worktrees share the admitted project identity while each keeps its
+/// own worktree identity, so a session that ran in a linked worktree is
+/// evidence for that worktree, not for the primary checkout. A recorded
+/// location that does not resolve to a worktree of the admitted repository (a
+/// worktree removed since, a nested foreign repository, a non-Git project) is
+/// evidence for the admitted root: admission already proved the record belongs
+/// to this project, and the admitted root is the one worktree identity it has.
+///
+/// One resolver serves one capture batch; each distinct location is resolved
+/// once because discovery below a worktree root walks the filesystem.
+pub struct AdmittedWorktrees {
+    admitted_root: std::path::PathBuf,
+    admitted: String,
+    common_dir: Option<std::path::PathBuf>,
+    resolved: HashMap<std::path::PathBuf, String>,
+}
+
+impl AdmittedWorktrees {
+    pub fn new(admitted_project_root: &std::path::Path) -> Self {
+        Self {
+            admitted_root: admitted_project_root.to_path_buf(),
+            admitted: normalize_worktree(&admitted_project_root.to_string_lossy()),
+            common_dir: tracedecay_runtime_core::worktree::git_common_dir(admitted_project_root),
+            resolved: HashMap::new(),
         }
     }
-    (records.into_values().collect(), spans)
+
+    pub fn admitted_root(&self) -> &std::path::Path {
+        &self.admitted_root
+    }
+
+    /// Normalized worktree key for a session recorded at `location`.
+    pub fn worktree_for(&mut self, location: Option<&str>) -> String {
+        let Some(location) = location
+            .map(std::path::Path::new)
+            .filter(|location| location.is_absolute())
+        else {
+            return self.admitted.clone();
+        };
+        if let Some(known) = self.resolved.get(location) {
+            return known.clone();
+        }
+        let worktree = self
+            .common_dir
+            .as_deref()
+            .and_then(|common_dir| {
+                let topology = tracedecay_runtime_core::git_repository::repository_topology(
+                    crate::runtime::shared::nearest_existing_ancestor(location),
+                )
+                .ok()?;
+                if topology.common_dir != common_dir {
+                    return None;
+                }
+                topology.worktree_root.clone()
+            })
+            .map_or_else(
+                || self.admitted.clone(),
+                |root| normalize_worktree(&root.to_string_lossy()),
+            );
+        self.resolved
+            .insert(location.to_path_buf(), worktree.clone());
+        worktree
+    }
 }
 
-pub fn direct_commit_records(
-    messages: &[SessionMessageRecord],
-    project_root: &std::path::Path,
-) -> Vec<CommitSessionRecord> {
-    transcript_git_evidence(messages, project_root).0
-}
-
-#[hotpath::measure(label = "sessions.git_correlation.ingest_spans")]
-pub fn ingest_span_observations(messages: &[SessionMessageRecord]) -> Vec<SpanObservation> {
-    messages
-        .iter()
-        .filter_map(|message| {
-            let parsed = parsed_message_metadata(message)?;
-            span_observation_from_metadata(message, parsed.as_object()?)
-        })
-        .collect()
-}
-
-fn parsed_message_metadata(message: &SessionMessageRecord) -> Option<serde_json::Value> {
-    message
-        .metadata_json
-        .as_deref()
-        .and_then(|json| serde_json::from_str(json).ok())
-}
-
-fn span_observation_from_metadata(
-    message: &SessionMessageRecord,
-    metadata: &serde_json::Map<String, serde_json::Value>,
-) -> Option<SpanObservation> {
-    let timestamp = message.timestamp?;
-    let worktree = metadata_worktree(metadata).filter(|path| !path.is_empty())?;
-    Some(SpanObservation {
-        provider: message.provider.clone(),
-        session_id: message.session_id.clone(),
-        thread_id: metadata
-            .get("turn_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        branch: metadata
-            .get("git_branch")
-            .or_else(|| metadata.get("codex_git_branch"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        worktree: normalize_worktree(worktree),
-        ts: timestamp,
-        source: SpanSource::Ingest,
+/// The session location a canonical record carries, if any.
+fn canonical_session_location(envelope: &CanonicalObservationEnvelopeV1) -> Option<&str> {
+    envelope.facts().iter().find_map(|fact| match fact {
+        CanonicalObservationFactV1::Session {
+            location_path: Some(location),
+            ..
+        } if !location.trim().is_empty() => Some(location.as_str()),
+        _ => None,
     })
 }
 
-/// Installs only relational receipts used by bounded history convergence.
-#[hotpath::measure(label = "sessions.git_correlation.ensure_schema", future = true)]
+/// Derives Git evidence from one privacy-approved canonical observation.
+///
+/// The envelope contributes typed Git facts, its session location and native
+/// identity/time. A timestamped message or Git fact is activity in the
+/// worktree its location resolves to under [`AdmittedWorktrees`]; the branch
+/// is attached only when the host recorded one. Commit facts become relations
+/// only when the referenced object resolves independently to a commit in the
+/// admitted repository.
+#[tracing::instrument(
+    name = "sessions.git_correlation.canonical_observation_evidence",
+    level = "trace",
+    skip_all
+)]
+pub fn canonical_observation_git_evidence(
+    sanitized_payload: &serde_json::Value,
+    worktrees: &mut AdmittedWorktrees,
+) -> Result<(Vec<CommitSessionRecord>, Vec<SpanObservation>), GitCorrelationError> {
+    let envelope: CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(sanitized_payload.clone()).map_err(|error| {
+            GitCorrelationError::Contract(format!(
+                "sanitized canonical observation is invalid: {error}"
+            ))
+        })?;
+    let mut branch = None;
+    let mut commit_references = BTreeSet::new();
+    let mut conversational = false;
+    for fact in envelope.facts() {
+        let CanonicalObservationFactV1::Git {
+            evidence_kind,
+            reference: Some(reference),
+            ..
+        } = fact
+        else {
+            conversational |= matches!(fact, CanonicalObservationFactV1::Message { .. });
+            continue;
+        };
+        match evidence_kind {
+            CanonicalGitEvidenceKindV1::Branch if !reference.trim().is_empty() => {
+                branch.get_or_insert_with(|| reference.clone());
+            }
+            CanonicalGitEvidenceKindV1::Commit if !reference.trim().is_empty() => {
+                commit_references.insert(reference.clone());
+            }
+            _ => {}
+        }
+    }
+    if !conversational && branch.is_none() && commit_references.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let provider = envelope.provider().as_str().to_owned();
+    let session_id = envelope.relations().session_id().as_str().to_owned();
+    let timestamp = envelope.evidence().native_timestamp();
+    let worktree = worktrees.worktree_for(canonical_session_location(&envelope));
+    let spans = timestamp.map_or_default(|ts| {
+        vec![SpanObservation {
+            provider: provider.clone(),
+            session_id: session_id.clone(),
+            thread_id: envelope
+                .relations()
+                .thread_id()
+                .map(|thread_id| thread_id.as_str().to_owned()),
+            branch: branch.clone(),
+            worktree: worktree.clone(),
+            ts,
+            source: SpanSource::Ingest,
+        }]
+    });
+    if commit_references.is_empty() {
+        return Ok((Vec::new(), spans));
+    }
+
+    let repo = tracedecay_runtime_core::git_open::discover(worktrees.admitted_root()).map_err(
+        |error| {
+            GitCorrelationError::Unavailable(format!(
+                "admitted repository could not be opened for canonical commit evidence: {error}"
+            ))
+        },
+    )?;
+    let mut commits = Vec::new();
+    for reference in commit_references {
+        let Ok(prefix) = gix::hash::Prefix::from_hex(reference.as_str()) else {
+            // A non-hex historical value is not independently verifiable
+            // commit evidence.
+            continue;
+        };
+        let object_id = match repo.objects.lookup_prefix(prefix, None) {
+            Ok(Some(Ok(object_id))) => object_id,
+            // Missing and ambiguous historical prefixes are unresolved, so
+            // neither is evidence for a particular commit.
+            Ok(None | Some(Err(()))) => continue,
+            Err(error) => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "canonical commit prefix `{reference}` could not be read: {error}"
+                )));
+            }
+        };
+        let object = match repo.try_find_object(object_id) {
+            Ok(Some(object)) => object,
+            Ok(None) => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "canonical commit `{reference}` disappeared after prefix resolution"
+                )));
+            }
+            Err(error) => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "canonical commit object `{reference}` could not be read: {error}"
+                )));
+            }
+        };
+        let commit = match object.try_into_commit() {
+            Ok(commit) => commit,
+            // A provider may retain another Git object identifier. It is not
+            // independently verified commit evidence.
+            Err(_) => continue,
+        };
+        let commit_time = commit.time().map_err(|error| {
+            GitCorrelationError::Corrupt(format!(
+                "canonical commit `{reference}` timestamp could not be decoded: {error}"
+            ))
+        })?;
+        let commit_sha = commit.id.to_string();
+        commits.push(CommitSessionRecord {
+            commit_sha,
+            provider: provider.clone(),
+            session_id: session_id.clone(),
+            branch: branch.clone(),
+            worktree: Some(worktree.clone()),
+            committed_at: commit_time.seconds,
+            span_overlap_kind: SpanOverlapKind::Direct,
+            span_id: None,
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::HeadObservation,
+            confidence: 60,
+            evidence_message_id: envelope
+                .relations()
+                .message_id()
+                .map(|message_id| message_id.as_str().to_owned()),
+        });
+    }
+    Ok((commits, spans))
+}
+
+/// Installs the Git evidence rows, convergence receipts and watermarks.
+#[tracing::instrument(
+    name = "sessions.git_correlation.ensure_schema",
+    level = "trace",
+    skip_all
+)]
 pub async fn ensure_git_correlation_receipt_schema_in_transaction(
-    conn: &(impl Executor + ?Sized),
+    conn: &(impl Executor + Sync),
 ) -> Result<(), GitCorrelationError> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS session_schema_migrations (
-            name TEXT PRIMARY KEY,
-            version INTEGER NOT NULL,
-            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE TABLE IF NOT EXISTS git_correlation_meta (
+        "CREATE TABLE IF NOT EXISTS git_correlation_meta (
             key TEXT PRIMARY KEY,
             value INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );",
     )
     .await?;
+    conn.execute_batch(rows::GIT_EVIDENCE_ROWS_SCHEMA).await?;
     backfill::history_progress::install_final_schema(conn).await?;
     backfill::history_failures::install_final_schema(conn).await?;
-    conn.execute(
-        "INSERT INTO session_schema_migrations(name, version)
-         VALUES (?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET version = excluded.version",
-        params![MIGRATION_NAME, GIT_CORRELATION_SCHEMA_VERSION],
+    migrate_activity_frontier(conn).await?;
+    schema_version::record_version(
+        conn,
+        GIT_CORRELATION_COMPONENT,
+        GIT_CORRELATION_SCHEMA_VERSION,
     )
-    .await?;
+    .await
+    .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
     Ok(())
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.read_meta", future = true)]
+/// The history pass once walked sessions by activity time, so a session
+/// imported behind that cursor was never visited. Positions recorded on that
+/// axis mean nothing on the change-sequence axis; rescanning from the start
+/// is the only safe conversion. That rescan re-derives every failure it can
+/// still reach, so legacy failure receipts are dropped rather than kept for
+/// sessions the change-sequence axis never revisits.
+async fn migrate_activity_frontier(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), GitCorrelationError> {
+    for (table, reset) in [
+        (
+            "git_history_index_progress",
+            "UPDATE git_history_index_progress SET change_sequence = 0;",
+        ),
+        (
+            "git_history_index_failures",
+            "DELETE FROM git_history_index_failures;",
+        ),
+    ] {
+        let mut legacy = conn
+            .query(
+                "SELECT 1 FROM pragma_table_info(?1) WHERE name = 'activity_timestamp'",
+                params![table],
+            )
+            .await?;
+        if legacy.next().await?.is_some() {
+            drop(legacy);
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} RENAME COLUMN activity_timestamp TO change_sequence;
+                 {reset}"
+            ))
+            .await?;
+        }
+    }
+    if read_meta_value(conn, LEGACY_ACTIVITY_FRONTIER_KEY)
+        .await?
+        .is_some()
+    {
+        conn.execute(
+            "DELETE FROM git_correlation_meta WHERE key IN (?1, ?2)",
+            params![LEGACY_ACTIVITY_FRONTIER_KEY, GIT_HISTORY_ROWID_FRONTIER_KEY],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Reads the durable `(change_sequence, rowid)` history frontier.
+pub async fn read_history_frontier(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<GitHistoryIndexFrontier, GitCorrelationError> {
+    Ok(GitHistoryIndexFrontier {
+        change_sequence: read_meta_value(conn, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await?
+            .unwrap_or(0),
+        source_rowid: read_meta_value(conn, GIT_HISTORY_ROWID_FRONTIER_KEY)
+            .await?
+            .unwrap_or(0),
+    })
+}
+
+/// The Git correlation schema version an existing store recorded, `None` for
+/// a store that never installed it.
+pub async fn recorded_git_correlation_schema_version(
+    conn: &(impl QueryExecutor + Sync),
+) -> Result<Option<i64>, GitCorrelationError> {
+    schema_version::read_version(conn, GIT_CORRELATION_COMPONENT)
+        .await
+        .map_err(|error| GitCorrelationError::Db(error.to_string()))
+}
+
+#[tracing::instrument(name = "sessions.git_correlation.read_meta", level = "trace", skip_all)]
 pub async fn read_meta_value(
     conn: &(impl QueryExecutor + ?Sized),
     key: &str,
@@ -781,7 +1075,11 @@ pub async fn read_meta_value(
         .transpose()
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.write_meta", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.write_meta",
+    level = "trace",
+    skip_all
+)]
 pub async fn write_meta_value(
     conn: &(impl Executor + ?Sized),
     key: &str,
@@ -801,7 +1099,7 @@ pub async fn write_meta_value(
 /// An empty provider is an unattributed observation (hook routes cannot
 /// always name the provider); it matches any canonical provider, and the
 /// canonical map in [`GitEvidenceProjectionV1::new`] settles the final
-/// label. Two distinct non-empty providers never match — one session
+/// label. Two distinct non-empty providers never match, one session
 /// carrying both is rejected by `canonical_provider_map`.
 pub fn providers_compatible(left: &str, right: &str) -> bool {
     left.is_empty() || right.is_empty() || left == right
@@ -890,12 +1188,6 @@ fn digest_bytes(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
 
-fn metadata_worktree(metadata: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
-    MESSAGE_WORKTREE_KEYS
-        .into_iter()
-        .find_map(|key| metadata.get(key).and_then(serde_json::Value::as_str))
-}
-
 fn parse_commit_sha(value: &str) -> Result<String, GitCorrelationError> {
     if !(6..=64).contains(&value.len()) || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Err(GitCorrelationError::InvalidArgument(
@@ -937,7 +1229,12 @@ fn span_hit(spans: &[&SessionGitSpan]) -> SessionGitCorrelationHit {
         .collect::<BTreeSet<_>>();
     let sources = spans
         .iter()
-        .map(|span| format!("{:?}", span.source).to_ascii_lowercase())
+        .flat_map(|span| {
+            let inferred = (span.branch_provenance == BranchProvenance::Inferred)
+                .then_some(SpanSource::Backfill);
+            std::iter::once(span.source).chain(inferred)
+        })
+        .map(|source| format!("{source:?}").to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
     SessionGitCorrelationHit {
         provider: providers
@@ -991,13 +1288,6 @@ fn commit_hit(record: &CommitSessionRecord) -> SessionGitCorrelationHit {
     }
 }
 
-fn record_strength(record: &CommitSessionRecord) -> (u8, i64) {
-    (
-        u8::from(record.relation == CommitRelation::Produced),
-        record.confidence,
-    )
-}
-
 fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
     (
         u8::from(hit.relation == Some(CommitRelation::Produced)),
@@ -1007,31 +1297,34 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 
 mod attribution;
 mod backfill;
+mod convergence;
+pub mod rows;
 mod store;
-#[cfg(test)]
-pub(crate) use attribution::publish_graph_evidence_controlled;
 pub use attribution::{
     ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
-    graph_evidence_publication_key, match_commit_to_spans, publish_graph_evidence,
-    publish_transcript_graph_evidence, run_commit_attribution_sweep,
+    match_commit_to_spans, stable_backfill_span,
 };
+pub use backfill::run_backfill;
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
-    BoundedBackfillOutcome, BoundedGitControl, BranchTimelineEntry,
-    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitHistoryIndexFrontier, GitReflogSource,
-    SessionActivityRow, SystemGit, WindowBranchSegment, branch_timeline_from_reflog,
-    parse_commit_log, run_bounded_history_index_page, window_branch_segments,
+    BoundedBackfillOutcome, BoundedGitControl, BranchTimelineEntry, GitHistoryIndexFrontier,
+    GitReflogSource, SessionActivityRow, SystemGit, WindowBranchSegment,
+    branch_timeline_from_reflog, git_commit_reference_exists, parse_commit_log,
+    run_bounded_history_index_page, window_branch_segments,
 };
-pub use backfill::{run_backfill, run_incremental_backfill};
+pub use convergence::{GitEvidencePass, GitEvidencePassOutcome, converge_git_evidence_pass};
+pub use rows::{
+    GitEvidenceBatch, GitEvidenceGeneration, GitEvidenceView, GitEvidenceWrite, GitEvidenceWriter,
+    open_git_evidence_view,
+};
 pub use store::{
     AnalyticsSessionTimestamp, AnalyticsSessionTimestampSource, GitCorrelationSessionStore,
-    GitCorrelationWriteTxn, GitEvidenceProjectionStore, build_git_evidence_manifest_checked,
-    git_evidence_generation_id, git_evidence_projection_identity, publish_git_evidence_projection,
-    recover_git_evidence_projection,
+    GitCorrelationWriteTxn,
 };
 
 #[cfg(test)]
-pub(crate) mod test_support;
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod rows_view_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

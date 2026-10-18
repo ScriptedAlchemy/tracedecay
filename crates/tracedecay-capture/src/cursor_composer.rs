@@ -1,16 +1,20 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    CanonicalWorkflowSemanticKindV1, ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceIdentityV1, ProviderId, ProviderUsageCounterSemanticsV1,
-    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, SessionId,
+    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowSemanticKindV1,
+    ObservationId, ObservationOrderingDomainV1, ObservationSourceIdentityV1, ProviderId,
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1, SessionId,
 };
 use tracedecay_store::cursor_dispatch::cursor_model_string;
 
-use crate::ObservationRecordParseErrorV1;
+use crate::git_facts::append_diff_and_pull_request_facts;
+use crate::{
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64, parse_rfc3339_timestamp_micros,
+};
 
 const PROVIDER: &str = "cursor";
 
@@ -31,24 +35,6 @@ pub fn normalize_cursor_composer_observation(
     )
 }
 
-pub fn normalize_cursor_composer_observation_with_projected_message_id(
-    native: &Value,
-    composer_id: &str,
-    stable_record_id: ObservationId,
-    projected_message_id: ObservationId,
-    range: tracedecay_domain::ObservationSourceRangeV1,
-    position: u64,
-) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    normalize_cursor_composer_observation_with_message_id(
-        native,
-        composer_id,
-        stable_record_id,
-        projected_message_id,
-        range,
-        position,
-    )
-}
-
 pub fn normalize_cursor_composer_observation_with_message_id(
     native: &Value,
     composer_id: &str,
@@ -57,25 +43,18 @@ pub fn normalize_cursor_composer_observation_with_message_id(
     range: tracedecay_domain::ObservationSourceRangeV1,
     position: u64,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // Composer bubbles order by snapshot position, not file bytes, so there is
-    // no truthful record-bytes gauge here; entries are the normalize span's
-    // call count. Failures are counted, never hidden.
-    let envelope = normalize_composer_bubble_record(
+    normalize_composer_bubble_record(
         native,
         composer_id,
         stable_record_id,
         projected_message_id,
         range,
         position,
-    );
-    if envelope.is_err() {
-        hotpath::gauge!("capture.cursor_composer.normalize_failures").inc(1u64);
-    }
-    envelope
+    )
 }
 
 /// Cursor composer composition for one source bubble, not a per-token walk.
-#[hotpath::measure(label = "capture.cursor_composer.normalize")]
+#[tracing::instrument(name = "capture.cursor_composer.normalize", level = "trace", skip_all)]
 fn normalize_composer_bubble_record(
     native: &Value,
     composer_id: &str,
@@ -84,7 +63,7 @@ fn normalize_composer_bubble_record(
     range: tracedecay_domain::ObservationSourceRangeV1,
     position: u64,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let timestamp = bubble_epoch(native, "createdAt");
+    let timestamp = composer_created_at_secs(native.get("createdAt"));
     let mut relations = CanonicalObservationRelationsV1::new(
         SessionId::new(composer_id)
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
@@ -93,6 +72,20 @@ fn normalize_composer_bubble_record(
     // Cursor composerId is the native chat/thread identity for store.db / vscdb.
     if let Ok(thread_id) = ObservationId::new(composer_id) {
         relations = relations.with_thread_id(thread_id);
+    }
+    if let Some(parent) = native
+        .get("tracedecayParentComposerId")
+        .and_then(Value::as_str)
+        .and_then(|parent| SessionId::new(parent).ok())
+    {
+        relations = relations.with_parent_session_id(parent);
+        if let Some(tool_call_id) = native
+            .get("tracedecayParentToolCallId")
+            .and_then(Value::as_str)
+            .and_then(|id| ObservationId::new(id).ok())
+        {
+            relations = relations.with_parent_tool_use_id(tool_call_id);
+        }
     }
     let mut facts = Vec::new();
     if let Some(project_path) = native
@@ -154,27 +147,47 @@ fn normalize_composer_bubble_record(
             tool.get("toolCallId")
                 .or_else(|| tool.get("id"))
                 .and_then(Value::as_str),
-            &stable_record_id,
         );
-        let name = tool
+        if let Some(name) = tool
             .get("name")
             .and_then(Value::as_str)
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or("tool")
-            .to_string();
-        facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: invocation_id.clone(),
-            name,
-            arguments: Value::Null,
-        });
+        {
+            facts.push(CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: invocation_id.clone(),
+                name: name.to_owned(),
+                arguments: Value::Null,
+            });
+        }
         if tool.get("result").is_some_and(|result| !result.is_null()) {
-            facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: Some(invocation_id),
-                content: Value::Null,
-                success: tool
-                    .get("status")
+            facts.push(crate::accounted_tool_result_with_recorded_output(
+                invocation_id,
+                Value::Null,
+                tool.get("status")
                     .and_then(Value::as_str)
                     .and_then(composer_tool_result_success),
+                tool.get("result"),
+            ));
+        }
+        if let Some(path) = composer_edit_tool_path(tool) {
+            let mut content = serde_json::Map::new();
+            content.insert(
+                "type".to_string(),
+                Value::String("toolFormerData".to_string()),
+            );
+            if let Some(name) = tool.get("name").filter(|name| name.is_string()) {
+                content.insert("name".to_string(), name.clone());
+            }
+            if let Some(edited_at_micros) = composer_created_at_micros(native.get("createdAt")) {
+                content.insert(
+                    "edited_at_micros".to_string(),
+                    Value::from(edited_at_micros),
+                );
+            }
+            facts.push(CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+                reference: Some(path),
+                content: Some(Value::Object(content)),
             });
         }
     }
@@ -191,9 +204,9 @@ fn normalize_composer_bubble_record(
     }
 
     if let Some(token_count) = native.get("tokenCount") {
-        let input_tokens = composer_canonical_u64(token_count.get("inputTokens"));
-        let output_tokens = composer_canonical_u64(token_count.get("outputTokens"));
-        let total_tokens = composer_canonical_u64(
+        let input_tokens = canonical_u64_i64(token_count.get("inputTokens"));
+        let output_tokens = canonical_u64_i64(token_count.get("outputTokens"));
+        let total_tokens = canonical_u64_i64(
             token_count
                 .get("totalTokens")
                 .or_else(|| token_count.get("total_tokens")),
@@ -202,7 +215,7 @@ fn normalize_composer_bubble_record(
             // A bubble's tokenCount is that bubble's own token spend, and the
             // envelope relations already carry the composer session and bubble
             // message identity: message scope, delta semantics. Only the
-            // bubble's own model spellings name the model — the session-level
+            // bubble's own model spellings name the model, the session-level
             // `modelConfig` (`tracedecaySessionModel`) is not per-message
             // evidence and mid-session model switches would misattribute it.
             facts.push(CanonicalObservationFactV1::ProviderUsage {
@@ -281,35 +294,22 @@ fn append_composer_git_facts(native: &Value, facts: &mut Vec<CanonicalObservatio
             });
         }
     }
-    if native
+    let has_diffs = native
         .get("gitDiffs")
         .and_then(Value::as_array)
-        .is_some_and(|diffs| !diffs.is_empty())
-    {
-        facts.push(CanonicalObservationFactV1::Git {
-            evidence_kind: CanonicalGitEvidenceKindV1::Diff,
-            reference: None,
-            content: None,
-        });
-    }
-    if let Some(pull_requests) = native.get("pullRequests").and_then(Value::as_array) {
-        for pull_request in pull_requests {
-            let reference = ["url", "htmlUrl", "html_url", "id"]
+        .is_some_and(|diffs| !diffs.is_empty());
+    let pull_request_references = native
+        .get("pullRequests")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|pull_request| {
+            ["url", "htmlUrl", "html_url", "id"]
                 .into_iter()
                 .find_map(|key| pull_request.get(key).and_then(Value::as_str))
-                .map(str::to_string);
-            facts.push(CanonicalObservationFactV1::Git {
-                evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
-                reference: reference.clone(),
-                content: None,
-            });
-            facts.push(CanonicalObservationFactV1::Workflow {
-                evidence_kind: CanonicalWorkflowEvidenceKindV1::PullRequest,
-                reference,
-                content: None,
-            });
-        }
-    }
+                .map(str::to_string)
+        });
+    append_diff_and_pull_request_facts(facts, has_diffs, pull_request_references);
 }
 
 /// Map native Composer `todos[{id,content,status}]` into `WorkflowLifecycle`
@@ -380,23 +380,6 @@ fn append_composer_todo_lifecycle_facts(
     }
 }
 
-pub fn composer_todos_have_admittable_items(native: &Value) -> bool {
-    native
-        .get("todos")
-        .and_then(Value::as_array)
-        .is_some_and(|todos| {
-            todos.iter().any(|todo| {
-                todo.get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| !id.trim().is_empty())
-                    && todo
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .is_some_and(|content| !content.trim().is_empty())
-            })
-        })
-}
-
 pub fn normalize_cursor_composer_envelope_observation(
     native: &Value,
     composer_id: &str,
@@ -407,22 +390,23 @@ pub fn normalize_cursor_composer_envelope_observation(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Same snapshot-ordered source as composer bubbles: no byte-backed range.
     // Bubble and envelope failures share the one composer failure key.
-    let envelope = normalize_composer_envelope_record(
+
+    normalize_composer_envelope_record(
         native,
         composer_id,
         project_path,
         stable_record_id,
         range,
         position,
-    );
-    if envelope.is_err() {
-        hotpath::gauge!("capture.cursor_composer.normalize_failures").inc(1u64);
-    }
-    envelope
+    )
 }
 
 /// Cursor composer composition for one source envelope, not a per-token walk.
-#[hotpath::measure(label = "capture.cursor_composer.normalize_envelope")]
+#[tracing::instrument(
+    name = "capture.cursor_composer.normalize_envelope",
+    level = "trace",
+    skip_all
+)]
 fn normalize_composer_envelope_record(
     native: &Value,
     composer_id: &str,
@@ -431,7 +415,7 @@ fn normalize_composer_envelope_record(
     range: tracedecay_domain::ObservationSourceRangeV1,
     position: u64,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let timestamp = bubble_epoch(native, "createdAt");
+    let timestamp = composer_created_at_secs(native.get("createdAt"));
     let mut relations = CanonicalObservationRelationsV1::new(
         SessionId::new(composer_id)
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
@@ -455,8 +439,8 @@ fn normalize_composer_envelope_record(
                     .get("name")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                started_at: epoch_ms_to_secs(native.get("createdAt").and_then(Value::as_i64)),
-                ended_at: epoch_ms_to_secs(native.get("lastUpdatedAt").and_then(Value::as_i64)),
+                started_at: composer_created_at_secs(native.get("createdAt")),
+                ended_at: composer_created_at_secs(native.get("lastUpdatedAt")),
                 source: Some("cursor_composer".to_string()),
                 native_source: Some("cursor".to_string()),
                 profile: None,
@@ -482,18 +466,8 @@ fn normalize_composer_envelope_record(
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
-fn composer_observation_id(native_id: Option<&str>, fallback: &ObservationId) -> ObservationId {
-    native_id
-        .and_then(|native_id| ObservationId::new(native_id).ok())
-        .unwrap_or_else(|| fallback.clone())
-}
-
-fn composer_canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
+fn composer_observation_id(native_id: Option<&str>) -> Option<ObservationId> {
+    native_id.and_then(|native_id| ObservationId::new(native_id).ok())
 }
 
 /// Exact allowlist for `toolFormerData.status` → `ToolResult.success`.
@@ -532,6 +506,23 @@ pub fn composer_observation_with_session(
                     object.insert(key.to_string(), value.clone());
                 }
             }
+            // A subagent composer's `subagentInfo` names the composer that
+            // spawned it and the spawning `task_v2` calls in order; the first
+            // is the spawn, later ones resumed it.
+            if let Some(spawn) = envelope.get("subagentInfo")
+                && let Some(parent) = spawn
+                    .get("parentComposerId")
+                    .filter(|parent| parent.as_str().is_some_and(|parent| !parent.is_empty()))
+            {
+                object.insert("tracedecayParentComposerId".to_string(), parent.clone());
+                if let Some(call) = spawn
+                    .pointer("/toolCallIdHistory/0")
+                    .or_else(|| spawn.get("toolCallId"))
+                    .filter(|call| call.is_string())
+                {
+                    object.insert("tracedecayParentToolCallId".to_string(), call.clone());
+                }
+            }
         }
     }
     native
@@ -548,7 +539,7 @@ pub fn cursor_composer_native_record_id(
     hasher.update(bubble_id.as_bytes());
     ObservationId::new(format!(
         "cursor.composer.sha256:{}",
-        hex::encode(hasher.finalize())
+        encode_lowercase_hex(&hasher.finalize())
     ))
     .map_err(|error| format!("invalid Cursor composer native identity: {error}"))
 }
@@ -626,15 +617,55 @@ pub fn cursor_composer_envelope_native_record_id(
     hasher.update(checkpoint.to_le_bytes());
     ObservationId::new(format!(
         "cursor.composer.envelope.sha256:{}",
-        hex::encode(hasher.finalize())
+        encode_lowercase_hex(&hasher.finalize())
     ))
     .map_err(|error| format!("invalid Cursor composer envelope native identity: {error}"))
 }
 
-fn bubble_epoch(bubble: &Value, key: &str) -> Option<i64> {
-    epoch_ms_to_secs(bubble.get(key).and_then(Value::as_i64))
-}
-
 fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {
     ms.filter(|value| *value > 0).map(|value| value / 1_000)
+}
+
+/// Bubble and envelope `createdAt` / `lastUpdatedAt`: epoch milliseconds in
+/// older snapshots, RFC3339 text in current ones.
+fn composer_created_at_micros(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(millis) => millis
+            .as_i64()
+            .filter(|millis| *millis > 0)?
+            .checked_mul(1_000),
+        Value::String(text) => parse_rfc3339_timestamp_micros(text),
+        _ => None,
+    }
+}
+
+fn composer_created_at_secs(value: Option<&Value>) -> Option<i64> {
+    composer_created_at_micros(value).map(|micros| micros / 1_000_000)
+}
+
+/// Composer tools whose completed `toolFormerData.params.relativeWorkspacePath`
+/// names the file they changed (`edit_file_v2`, `delete_file`, and the other
+/// edit/write/patch/replace tools). Read-only tools name their target under
+/// other keys and never match.
+fn composer_edit_tool_path(tool: &Value) -> Option<String> {
+    let name = tool
+        .get("name")
+        .and_then(Value::as_str)?
+        .to_ascii_lowercase();
+    if !["edit", "write", "patch", "replace", "delete"]
+        .iter()
+        .any(|needle| name.contains(needle))
+        || tool.get("status").and_then(Value::as_str) != Some("completed")
+    {
+        return None;
+    }
+    let params = match tool.get("params")? {
+        Value::String(raw) => serde_json::from_str::<Value>(raw).ok()?,
+        params => params.clone(),
+    };
+    params
+        .get("relativeWorkspacePath")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string)
 }

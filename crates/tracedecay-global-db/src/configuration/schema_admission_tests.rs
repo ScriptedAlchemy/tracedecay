@@ -29,7 +29,7 @@ fn assert_reset_required(result: Result<(), ConfigurationSchemaError>) {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn same_named_table_with_extra_column_requires_reset() {
     let (_directory, connection) = final_connection().await;
     connection
@@ -40,7 +40,7 @@ async fn same_named_table_with_extra_column_requires_reset() {
     assert_reset_required(ensure_configuration_schema(&*connection, None).await);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn same_named_index_with_wrong_columns_requires_reset() {
     let (_directory, connection) = final_connection().await;
     connection
@@ -55,23 +55,7 @@ async fn same_named_index_with_wrong_columns_requires_reset() {
     assert_reset_required(ensure_configuration_schema(&*connection, None).await);
 }
 
-#[tokio::test]
-async fn same_named_immutable_trigger_with_wrong_definition_requires_reset() {
-    let (_directory, connection) = final_connection().await;
-    connection
-        .execute_batch(
-            "DROP TRIGGER configuration_entries_immutable_update;
-             CREATE TRIGGER configuration_entries_immutable_update
-             BEFORE UPDATE ON configuration_entries
-             BEGIN SELECT 1; END;",
-        )
-        .await
-        .unwrap();
-
-    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn trigger_string_literal_case_is_part_of_the_exact_definition() {
     let (_directory, connection) = final_connection().await;
     connection
@@ -89,7 +73,7 @@ async fn trigger_string_literal_case_is_part_of_the_exact_definition() {
     assert_reset_required(ensure_configuration_schema(&*connection, None).await);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn arbitrary_named_index_attached_to_configuration_table_requires_reset() {
     let (_directory, connection) = final_connection().await;
     connection
@@ -103,22 +87,7 @@ async fn arbitrary_named_index_attached_to_configuration_table_requires_reset() 
     assert_reset_required(ensure_configuration_schema(&*connection, None).await);
 }
 
-#[tokio::test]
-async fn arbitrary_named_trigger_attached_to_configuration_table_requires_reset() {
-    let (_directory, connection) = final_connection().await;
-    connection
-        .execute_batch(
-            "CREATE TRIGGER extra_entry_guard
-             BEFORE DELETE ON configuration_entries
-             BEGIN SELECT RAISE(ABORT, 'extra'); END;",
-        )
-        .await
-        .unwrap();
-
-    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn stale_fresh_evidence_cannot_create_configuration_schema() {
     let directory = tempfile::tempdir().unwrap();
     let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
@@ -152,7 +121,73 @@ async fn stale_fresh_evidence_cannot_create_configuration_schema() {
     );
 }
 
-#[tokio::test]
+/// The writer installs its ledger objects when the connection opens, before
+/// admission inspects the store. Empty ledger tables must not count against
+/// freshness.
+#[asupersync::test]
+async fn empty_writer_ledger_keeps_the_store_fresh() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("fresh-ledger.db"),
+    );
+    connection
+        .execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)
+        .await
+        .unwrap();
+
+    let fresh = fresh_configuration_store_evidence(&*connection)
+        .await
+        .unwrap()
+        .expect("an empty writer ledger is not application schema");
+    ensure_configuration_schema(&*connection, Some(&fresh))
+        .await
+        .unwrap();
+}
+
+/// A store whose application tables are gone but whose writer ledger still
+/// holds commit receipts is not fresh: fresh admission would reinstall the
+/// schema while retaining a commit history that predates it.
+#[asupersync::test]
+async fn retained_writer_receipts_keep_the_store_non_fresh() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("receipts.db"),
+    );
+    connection
+        .execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)
+        .await
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO td_runtime_writer_checkpoint_v1 (
+                shard_json, incarnation, authority_epoch, commit_sequence,
+                watermark_json, transaction_scope_json, original_receipt_json,
+                operation_id, durability_json, committed_at_micros
+             ) VALUES ('{}', 1, 1, 1, '{}', '{}', '{}', 'operation.1', '{}', 1);",
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        fresh_configuration_store_evidence(&*connection)
+            .await
+            .unwrap()
+            .is_none(),
+        "retained commit receipts are an existing store, not a fresh one"
+    );
+    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM td_runtime_writer_checkpoint_v1"
+        )
+        .await,
+        1,
+        "refusal must not discard the retained receipt"
+    );
+}
+
+#[asupersync::test]
 async fn non_fresh_store_missing_configuration_schema_is_unchanged() {
     let directory = tempfile::tempdir().unwrap();
     let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
@@ -212,4 +247,231 @@ async fn sqlite_objects(
         ));
     }
     objects
+}
+
+/// Every release from beta.25 through beta.37 published the fixture's exact
+/// shape. The writer removes its retired tables, retains supported rows, and
+/// refuses credential rows that no shipped binary wrote.
+const RELEASED_BETA37_CONFIGURATION_SQL: &str =
+    include_str!("../../tests/fixtures/configuration-released-beta37.sql");
+
+async fn released_connection() -> (
+    tempfile::TempDir,
+    tracedecay_runtime_core::db::engine::TestConnection,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("configuration-released.db"),
+    );
+    connection
+        .execute_batch(RELEASED_BETA37_CONFIGURATION_SQL)
+        .await
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO configuration_revisions VALUES
+                ('revision.1', NULL, 'snapshot.1',
+                 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 'actor.1', 'canonical_initialization', 1);
+             INSERT INTO configuration_entries VALUES
+                ('revision.1', 'analyzer.settings.v1', 'project', 'project.1', 1, '{\"kept\":true}');",
+        )
+        .await
+        .unwrap();
+    (directory, connection)
+}
+
+async fn prior_final_connection() -> (
+    tempfile::TempDir,
+    tracedecay_runtime_core::db::engine::TestConnection,
+) {
+    let (directory, connection) = released_connection().await;
+    connection
+        .execute_batch(
+            "DROP TABLE configuration_credential_references;
+             DROP TABLE configuration_semantic_retrieval_state_v1;
+             DROP TABLE configuration_semantic_retrieval_pending_v1;
+             DROP TABLE configuration_semantic_retrieval_inventory_v1;
+             INSERT INTO configuration_semantic_accepted_profiles_v1 VALUES
+                ('sha256:accepted', '{\"retired\":true}');",
+        )
+        .await
+        .unwrap();
+    (directory, connection)
+}
+
+async fn pre_residue_final_connection() -> (
+    tempfile::TempDir,
+    tracedecay_runtime_core::db::engine::TestConnection,
+) {
+    let (directory, connection) = released_connection().await;
+    connection
+        .execute_batch("DROP TABLE configuration_credential_references;")
+        .await
+        .unwrap();
+    (directory, connection)
+}
+
+async fn count(connection: &impl QueryExecutor, sql: &str) -> i64 {
+    let mut rows = connection.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+#[asupersync::test]
+async fn released_configuration_shape_is_admitted_and_converged_with_rows_intact() {
+    let (_directory, connection) = released_connection().await;
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'configuration_credential_references'"
+        )
+        .await,
+        1,
+        "fixture carries the shipped table"
+    );
+
+    super::admit_configuration_schema(&*connection, None)
+        .await
+        .expect("a shipped shape is admissible read-only");
+    ensure_configuration_schema(&*connection, None)
+        .await
+        .expect("a shipped shape converges instead of demanding a reset");
+
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE name LIKE 'configuration_credential_references%'
+                OR name LIKE 'configuration_semantic_%'"
+        )
+        .await,
+        0,
+        "retired schema objects are gone"
+    );
+    let mut rows = connection
+        .query(
+            "SELECT typed_value FROM configuration_entries WHERE revision_id = 'revision.1'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "{\"kept\":true}"
+    );
+    drop(rows);
+    ensure_configuration_schema(&*connection, None)
+        .await
+        .expect("the converged store is the exact final shape");
+}
+
+#[asupersync::test]
+async fn prior_final_configuration_shape_drops_accepted_profiles_and_preserves_configuration_rows()
+{
+    let (_directory, connection) = prior_final_connection().await;
+    super::admit_configuration_schema(&*connection, None)
+        .await
+        .expect("the prior tip shape is admissible read-only");
+    ensure_configuration_schema(&*connection, None)
+        .await
+        .expect("the prior tip shape converges");
+
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'configuration_semantic_%'"
+        )
+        .await,
+        0,
+        "retired semantic schema objects are gone"
+    );
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM configuration_entries WHERE revision_id = 'revision.1'"
+        )
+        .await,
+        1,
+        "supported configuration rows remain"
+    );
+}
+
+#[asupersync::test]
+async fn pre_residue_final_configuration_shape_drops_all_semantic_tables() {
+    let (_directory, connection) = pre_residue_final_connection().await;
+    super::admit_configuration_schema(&*connection, None)
+        .await
+        .expect("the pre-residue tip shape is admissible read-only");
+    ensure_configuration_schema(&*connection, None)
+        .await
+        .expect("the pre-residue tip shape converges");
+
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'configuration_semantic_%'"
+        )
+        .await,
+        0,
+        "retired semantic schema objects are gone"
+    );
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM configuration_entries WHERE revision_id = 'revision.1'"
+        )
+        .await,
+        1,
+        "supported configuration rows remain"
+    );
+}
+
+#[asupersync::test]
+async fn released_configuration_shape_with_credential_rows_stays_reset_required() {
+    let (_directory, connection) = released_connection().await;
+    connection
+        .execute_batch(
+            "INSERT INTO configuration_credential_references VALUES
+                ('credential.1', 'api_token', 'sha256:ac', 'sha256:ad', 1, 'sha256:ae', 1, 1, 2, 0);",
+        )
+        .await
+        .unwrap();
+    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM configuration_credential_references"
+        )
+        .await,
+        1,
+        "refusal must not discard the unknown row"
+    );
+}
+
+#[asupersync::test]
+async fn writer_ledger_tables_do_not_deny_fresh_store_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("configuration-admission.db"),
+    );
+    // The store writer installs its ledger tables when the connection opens,
+    // before registered admission classifies the store.
+    connection
+        .execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)
+        .await
+        .unwrap();
+
+    let fresh = fresh_configuration_store_evidence(&*connection)
+        .await
+        .unwrap()
+        .expect("a store holding only writer-ledger internals is fresh");
+    ensure_configuration_schema(&*connection, Some(&fresh))
+        .await
+        .unwrap();
 }

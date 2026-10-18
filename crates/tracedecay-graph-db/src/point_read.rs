@@ -7,7 +7,7 @@ use crate::{
 };
 
 impl GraphDb {
-    #[hotpath::measure(label = "graph_db.read.entity", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.read.entity", level = "trace", skip_all)]
     pub fn entity(
         &self,
         namespace: &GraphNamespace,
@@ -17,23 +17,21 @@ impl GraphDb {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let guard = self.read_database(cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let entity = load_entity(database, namespace, identity)?;
+        let entity = self.read_intact(cancellation.as_ref(), |database| {
+            load_entity(database, namespace, identity)
+        })?;
         if let Some(stored) = &entity {
             self.ensure_projection_readable(&stored.namespace, &stored.projection)?;
         }
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        crate::hotpath_observe::record_counts(usize::from(entity.is_some()), 0, 0, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
+        crate::observe::record_counts(usize::from(entity.is_some()), 0, 0, 0);
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         Ok(entity.map(|stored| stored.entity))
     }
 
-    #[hotpath::measure(label = "graph_db.read.relation", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.read.relation", level = "trace", skip_all)]
     pub fn relation(
         &self,
         namespace: &GraphNamespace,
@@ -43,19 +41,17 @@ impl GraphDb {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let guard = self.read_database(cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let relation = load_relation(database, namespace, identity)?;
+        let relation = self.read_intact(cancellation.as_ref(), |database| {
+            load_relation(database, namespace, identity)
+        })?;
         if let Some(stored) = &relation {
             self.ensure_projection_readable(namespace, &stored.projection)?;
         }
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        crate::hotpath_observe::record_counts(0, usize::from(relation.is_some()), 0, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
+        crate::observe::record_counts(0, usize::from(relation.is_some()), 0, 0);
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         Ok(relation.map(|stored| stored.relation))
     }
 }

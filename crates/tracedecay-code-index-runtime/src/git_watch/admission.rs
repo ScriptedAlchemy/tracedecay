@@ -4,13 +4,14 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tracedecay_runtime_core::git_discovery::GitRepositoryIdentity;
+use tracedecay_runtime_core::native_runtime::NativeTask;
 
 use super::identity::{IdentityDiscoveryDisposition, identity_discovery_disposition};
 use super::ownership::{join_retired_repository_state, retire_missing_repository_owners};
 use super::state::{WatchState, WorktreeRegistration};
 use super::{
     GitWatcher, GitWatcherAdmission, MAX_WORKTREES_PER_REPOSITORY, RESTART_BACKOFF_MAX,
-    log_daemon_event, resolve_watch_identity, supervise_repository,
+    log_daemon_event, park, resolve_watch_identity, supervise_repository,
 };
 use crate::ports::GitWatchSyncConfigV1 as SyncConfig;
 
@@ -25,19 +26,17 @@ impl GitWatcher {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.git.watch.ensure", future = true)]
+    #[tracing::instrument(name = "daemon.git.watch.ensure", level = "trace", skip_all)]
     pub async fn ensure_watching_with_config(
         &self,
         project_root: &Path,
         config: &SyncConfig,
     ) -> GitWatcherAdmission {
-        let admission = self.ensure_watching_admission(project_root, config).await;
-        record_admission_outcome(admission);
-        admission
+        self.ensure_watching_admission(project_root, config).await
     }
 
     /// Admission body behind [`Self::ensure_watching_with_config`], separated
-    /// so every typed outcome — refusals included — crosses one counter choke
+    /// so every typed outcome, refusals included, crosses one counter choke
     /// point instead of instrumenting each early return.
     async fn ensure_watching_admission(
         &self,
@@ -50,7 +49,8 @@ impl GitWatcher {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return GitWatcherAdmission::ShuttingDown;
         }
-        if crate::config::is_ambient_project_root(project_root) {
+        if crate::config::is_ambient_project_root(self.inner.ambient_home.as_deref(), project_root)
+        {
             log_daemon_event(
                 "git_watch_skipped",
                 &[
@@ -99,7 +99,7 @@ impl GitWatcher {
 
     /// Admission for a repository whose identity is already resolved: pure
     /// in-memory registration against the live capacity caps, no git IO.
-    #[hotpath::measure(label = "daemon.git.watch.admit", future = true)]
+    #[tracing::instrument(name = "daemon.git.watch.admit", level = "trace", skip_all)]
     pub async fn admit_resolved(
         &self,
         identity: GitRepositoryIdentity,
@@ -149,10 +149,8 @@ impl GitWatcher {
                     WorktreeRegistration::Capacity => return GitWatcherAdmission::Capacity,
                     WorktreeRegistration::Retired => {
                         projects.remove(&common_dir);
-                        hotpath::gauge!("daemon.git.watch.repositories.watched")
-                            .set(projects.len());
                         drop(admission);
-                        join_retired_repository_state(&state).await;
+                        join_retired_repository_state(&self.inner, &state).await;
                         drop(projects);
                         continue;
                     }
@@ -172,10 +170,21 @@ impl GitWatcher {
                 config.clone(),
             ));
             let inner = Arc::clone(&self.inner);
-            let handle = tokio::spawn(supervise_repository(inner, Arc::clone(&state)));
-            state.retain_task(handle);
+            let task = match NativeTask::spawn(supervise_repository(inner, Arc::clone(&state))) {
+                Ok(task) => task,
+                Err(error) => {
+                    log_daemon_event(
+                        "git_watch_start_failed",
+                        &[
+                            ("git_common_dir", common_dir.display().to_string()),
+                            ("error", error),
+                        ],
+                    );
+                    return GitWatcherAdmission::RuntimeUnavailable;
+                }
+            };
+            state.retain_task(task);
             projects.insert(common_dir.clone(), Arc::clone(&state));
-            hotpath::gauge!("daemon.git.watch.repositories.watched").set(projects.len());
             #[cfg(test)]
             self.inner.lifecycle_receipts.record_repository();
             log_daemon_event(
@@ -205,17 +214,27 @@ impl GitWatcher {
         }
         let watcher = self.clone();
         let root = project_root.clone();
-        let owner = tokio::spawn(hotpath::future!(
+        let owner = NativeTask::spawn(tracing::Instrument::instrument(
             async move {
                 watcher.retry_identity_discovery(root, config).await;
             },
-            label = "daemon.git.watch.identity_retry"
+            tracing::trace_span!("daemon.git.watch.identity_retry"),
         ));
-        retries.insert(project_root, owner);
+        match owner {
+            Ok(owner) => {
+                retries.insert(project_root, owner);
+            }
+            Err(error) => log_daemon_event(
+                "git_watch_discovery_retry_failed",
+                &[
+                    ("project", project_root.display().to_string()),
+                    ("error", error),
+                ],
+            ),
+        }
     }
 
     async fn retry_identity_discovery(&self, project_root: PathBuf, config: SyncConfig) {
-        let _retry_owner = IdentityRetryGaugeGuard::enter();
         let mut backoff = Duration::from_millis(500);
         loop {
             log_daemon_event(
@@ -225,16 +244,22 @@ impl GitWatcher {
                     ("backoff_ms", backoff.as_millis().to_string()),
                 ],
             );
-            tokio::select! {
-                biased;
-                () = self.inner.cancellation.cancelled() => break,
-                () = tokio::time::sleep(backoff) => {}
-            }
-            hotpath::gauge!("daemon.git.watch.identity_retry.attempts_total").inc(1_u64);
-            match self
-                .ensure_watching_with_config(&project_root, &config)
-                .await
+            if !park(
+                self.inner.cancellation.cancelled(),
+                backoff,
+                "identity_retry",
+            )
+            .await
             {
+                break;
+            }
+            // Erased so the retry task's `Send` proof does not nest the whole
+            // admission (rust-lang/rust#159228).
+            let admitted = tracedecay_runtime_core::erase_send!(
+                self.ensure_watching_with_config(&project_root, &config),
+                GitWatcherAdmission
+            );
+            match admitted.await {
                 GitWatcherAdmission::IdentityUnavailable => {
                     backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
                 }
@@ -249,51 +274,5 @@ impl GitWatcher {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         retries.remove(&project_root);
-    }
-}
-
-/// Bounded typed admission counters. Refusals are first-class evidence: a
-/// profile must separate capacity pressure from identity-discovery churn and
-/// shutdown races without recording repository paths.
-fn record_admission_outcome(admission: GitWatcherAdmission) {
-    match admission {
-        GitWatcherAdmission::Ready => {
-            hotpath::gauge!("daemon.git.watch.admission.ready_total").inc(1_u64);
-        }
-        GitWatcherAdmission::Disabled => {
-            hotpath::gauge!("daemon.git.watch.admission.disabled_total").inc(1_u64);
-        }
-        GitWatcherAdmission::LinkedWorktreeDisabled => {
-            hotpath::gauge!("daemon.git.watch.admission.linked_worktree_disabled_total").inc(1_u64);
-        }
-        GitWatcherAdmission::ShuttingDown => {
-            hotpath::gauge!("daemon.git.watch.admission.shutting_down_total").inc(1_u64);
-        }
-        GitWatcherAdmission::Capacity => {
-            hotpath::gauge!("daemon.git.watch.admission.capacity_total").inc(1_u64);
-        }
-        GitWatcherAdmission::NotRepository => {
-            hotpath::gauge!("daemon.git.watch.admission.not_repository_total").inc(1_u64);
-        }
-        GitWatcherAdmission::IdentityUnavailable => {
-            hotpath::gauge!("daemon.git.watch.admission.identity_unavailable_total").inc(1_u64);
-        }
-    }
-}
-
-/// RAII gauge for live single-flight identity-retry owners so cancellation,
-/// panic, or definitive admission can never leak the count.
-struct IdentityRetryGaugeGuard;
-
-impl IdentityRetryGaugeGuard {
-    fn enter() -> Self {
-        hotpath::gauge!("daemon.git.watch.identity_retry.active").inc(1_u64);
-        Self
-    }
-}
-
-impl Drop for IdentityRetryGaugeGuard {
-    fn drop(&mut self) {
-        hotpath::gauge!("daemon.git.watch.identity_retry.active").dec(1_u64);
     }
 }

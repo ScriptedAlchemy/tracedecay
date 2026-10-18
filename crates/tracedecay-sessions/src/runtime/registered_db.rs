@@ -6,8 +6,8 @@
 //! `Send` for a generic associated write transaction.
 //!
 //! These traits intentionally do not share
-//! `SessionTemporalQuery`/`SessionTemporalExec`/`SessionTemporalWriteTxn` —
-//! this crate cannot depend on `tracedecay-session-temporal-store`. Two ports
+//! `SessionTemporalQuery`/`SessionTemporalExec`/`SessionTemporalWriteTxn`.
+//! This crate cannot depend on `tracedecay-session-temporal-store`. Two ports
 //! at two layers, one implementor, is the same relationship
 //! `registered_lcm` already has with `SessionTemporalAccess`.
 
@@ -18,7 +18,7 @@ use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseEngineReadConnection;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, IntoParams, Rows};
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
 /// Read-only SQL the session store can issue on a snapshot, read connection, or txn.
@@ -48,6 +48,12 @@ pub trait SessionExec: SessionQuery {
 /// Write transaction the session store can query, mutate, and commit.
 pub trait SessionWriteTxn: SessionExec {
     fn commit(self) -> impl Future<Output = Result<(), EngineError>> + Send;
+    fn commit_with_on_commit<F>(
+        self,
+        on_commit: F,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send
+    where
+        F: FnOnce() + Send + 'static;
 }
 
 impl SessionQuery for DatabaseEngineReadSnapshot {
@@ -119,12 +125,10 @@ pub trait SessionRegisteredDb: Sync {
 pub struct SessionStoreAccess<'a, D: SessionRegisteredDb + ?Sized>(&'a D);
 
 impl<'a, D: SessionRegisteredDb + ?Sized> SessionStoreAccess<'a, D> {
-    #[hotpath::skip]
     pub const fn new(db: &'a D) -> Self {
         Self(db)
     }
 
-    #[hotpath::skip]
     pub const fn inner(&self) -> &'a D {
         self.0
     }

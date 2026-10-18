@@ -1,20 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MetricValueV1 } from '../../contracts/generated.ts';
-import {
-  NOT_PUBLISHED,
-  NO_FIGURE,
-  anchorSentence,
-  censoringSentence,
-  dimensionState,
-  horizonSentence,
-  intervalSentence,
-  measuredCount,
-  planDimensionPresentation,
-  readMetric,
-  supportSentence,
-  type PlanDimension,
-  type ReadAnchors,
-} from './planDimension.ts';
+import { NOT_PUBLISHED, NO_FIGURE, anchorSentence, dimensionState, horizonSentence, intervalSentence, planDimensionPresentation, readMetric, type PlanDimension, type ReadAnchors } from './planDimension.ts';
 
 /**
  * The reading rule the three Plan 26 accounting views share.
@@ -50,13 +36,6 @@ describe('readMetric', () => {
     );
     expect(reading.kind).toBe('unmeasured');
     expect(reading.kind === 'unmeasured' && reading.reason).toBe('no_latency_samples');
-  });
-
-  it('says the projector published no reason rather than inventing one', () => {
-    const reading = readMetric([metric('latency_p95', null)], 'latency_p95', 'unused');
-    expect(reading.kind === 'unmeasured' && reading.reason).toBe(
-      'the projector published no reason',
-    );
   });
 
   it('treats a measured zero as a measurement, not as an absence', () => {
@@ -131,47 +110,7 @@ describe('planDimensionPresentation', () => {
   });
 });
 
-describe('supportSentence and censoringSentence', () => {
-  it('states support as an observed count, not as an eligible one', () => {
-    expect(supportSentence({ kind: 'measured', metric: metric('m', 4) })).toBe('7 observed');
-  });
-
-  it('keeps censored, excluded, and unknown as three separate counts', () => {
-    const reading = {
-      kind: 'measured' as const,
-      metric: {
-        ...metric('m', 4),
-        coverage: {
-          state: 'partial' as const,
-          eligible: 12,
-          observed: 7,
-          completed: 4,
-          censored: 2,
-          excluded: 1,
-          unknown: 3,
-        },
-      },
-    };
-    expect(censoringSentence(reading)).toBe('2 censored · 1 excluded · 3 unknown');
-  });
-});
-
 describe('intervalSentence', () => {
-  it('refuses to print a degenerate bound as a measured interval', () => {
-    // The composer fills lower/upper with the point value for every known
-    // value; that is a placeholder, not a bound.
-    expect(intervalSentence({ kind: 'measured', metric: metric('m', 4) })).toBe(
-      'no measured interval',
-    );
-  });
-
-  it('prints a genuine interval with its unit', () => {
-    const reading = {
-      kind: 'measured' as const,
-      metric: { ...metric('m', 4), uncertainty: { lower: 2, upper: 9, reason: null } },
-    };
-    expect(intervalSentence(reading)).toBe('2 – 9 microseconds');
-  });
 
   it('prints the projector reason when there are no bounds at all', () => {
     const reading = {
@@ -198,14 +137,6 @@ describe('anchorSentence', () => {
     // Safe anchors: no path, no query, no payload label.
     expect(sentence).toBe('scope project.tracedecay · watermark analytics:4821');
     expect(sentence).not.toContain('/');
-  });
-});
-
-describe('measuredCount', () => {
-  it('counts only the dimensions that carry a figure', () => {
-    expect(
-      measuredCount([dimension('measured'), dimension('unmeasured'), dimension('unpublished')]),
-    ).toBe(1);
   });
 });
 

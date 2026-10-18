@@ -2,7 +2,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_application::{AuthorizedScopeSet, MultiRootQueryPageV1};
+use tracedecay_contracts::{AuthorizedScopeSet, MultiRootQueryPageV1};
 use tracedecay_domain::{ManifestDigest, ScopeSetId, ScopeSetRevision};
 
 /// Capability discovery never infers multi-root support from filesystem paths.

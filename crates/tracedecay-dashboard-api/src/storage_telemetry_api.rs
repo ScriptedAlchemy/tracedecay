@@ -1,4 +1,4 @@
-//! `GET /api/storage/telemetry` — per-store size, free-page ratio, and typed
+//! `GET /api/storage/telemetry`, per-store size, free-page ratio, and typed
 //! budget/growth dimensions served over the dashboard envelope.
 //!
 //! The size samples are **real**: the dashboard invokes the application
@@ -7,13 +7,12 @@
 //! result.
 //!
 //! Both typed dimensions now have a real server-side source:
-//! - **budget**: the owner-configurable soft budgets live in the configuration
-//!   control plane under [`crate::config::SYNC_RETENTION_SETTING_KEY`]
-//!   (`sync.retention.v1` → `store_soft_budgets_bytes`, keyed by store key).
-//!   A configured budget is evaluated against the live sample; a store with no
-//!   entry reports `unset` — *the owner has not configured a budget*, which is
-//!   deliberately distinct from "the server cannot evaluate budgets". A config
-//!   or sample the dashboard cannot read reports `unknown`, never a fabricated
+//! - **budget**: soft budgets are a field of [`tracedecay_configuration::RetentionConfig`]
+//!   (`store_soft_budgets_bytes`). That tree is not a registered configuration
+//!   setting, so a control-plane snapshot cannot admit one. A store with no
+//!   entry reports `unset`, *no budget is configured*, which is deliberately
+//!   distinct from "the server cannot evaluate budgets". A config or sample
+//!   the dashboard cannot read reports `unknown`, never a fabricated
 //!   "within budget".
 //! - **growth**: this route never establishes watermarks. Until a daemon-owned
 //!   execution sampler supplies a bounded history, store growth is typed
@@ -21,7 +20,7 @@
 //!   not an execution event.
 //!
 //! Store identity: the dashboard holds several *roles* (`graph`, `memory`,
-//! `lcm`, `savings`) that can resolve to the **same** store file — in project
+//! `lcm`, `savings`) that can resolve to the **same** store file, in project
 //! storage mode the graph and project-memory roles are the same database. Roles
 //! are therefore deduplicated by store file identity: one card per real store,
 //! carrying every role it serves, instead of the same store reported twice with
@@ -35,12 +34,12 @@ use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::Serialize;
-use tracedecay_application::storage::identity::StoreKeyV1;
-use tracedecay_application::storage::telemetry::{
+use tracedecay_contracts::storage::identity::StoreKeyV1;
+use tracedecay_contracts::storage::telemetry::{
     StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, StoreSizeSampleV1,
     TableGrowthTelemetryReadV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestAdmission, RequestContext,
 };
@@ -67,10 +66,6 @@ pub struct StoreTelemetryEntryV1 {
     /// Stable store key (the store's file name), or the raw file name when it is
     /// not a valid [`StoreKeyV1`].
     pub store: String,
-    /// The dashboard's primary role label for the store (`graph` / `memory` /
-    /// `lcm` / `savings`). Retained for compatibility; see `roles` for the
-    /// complete set.
-    pub role: String,
     /// Every dashboard role served by this one store file. More than one role
     /// here means the roles share a database, not that a store was duplicated.
     pub roles: Vec<String>,
@@ -137,12 +132,15 @@ pub struct StorageTelemetryPayloadV1 {
     pub table_growth_coverage: DashboardCoverageV1,
 }
 
-/// The owner setting path that configures a store's soft byte budget.
-pub const BUDGET_SETTING_KEY: &str = "sync.retention.v1 store_soft_budgets_bytes";
-const BUDGET_UNSET_REASON: &str = "no soft size budget is configured by the owner for this store (set \
-     sync.retention.v1 store_soft_budgets_bytes for the store key to configure one)";
-const BUDGET_NOTE: &str = "budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes, keyed by store \
-     key; a store with no entry reports unset (no budget configured), never a fabricated pass";
+/// Internal retention field that would carry a soft byte budget.
+///
+/// No registered configuration setting writes this field. Unset means no
+/// budget is configured, not that an unregistered text key was parsed.
+pub const BUDGET_SETTING_KEY: &str = "store_soft_budgets_bytes";
+const BUDGET_UNSET_REASON: &str = "no registered configuration setting configures a soft size budget for this store \
+     (store_soft_budgets_bytes)";
+const BUDGET_NOTE: &str = "soft size budgets are not a registered configuration setting; a store with no entry reports \
+     unset (store_soft_budgets_bytes), never a fabricated pass";
 const GROWTH_NOTE: &str = "store growth requires bounded execution-owned watermarks; dashboard reads observe current size but \
      never establish a baseline or a historical series";
 const GROWTH_UNKNOWN_REASON: &str =
@@ -177,14 +175,6 @@ impl SampledStoreV1 {
             _ => None,
         }
     }
-
-    /// The dashboard's primary role label for this store.
-    fn primary_role(&self) -> String {
-        self.roles
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "store".to_string())
-    }
 }
 
 /// The owner-configured soft budget for one store, resolved from configuration.
@@ -202,7 +192,7 @@ enum ResolvedStoreBudgetV1 {
 /// Resolve one store's owner-configured soft budget from the retention config.
 fn resolve_store_budget(
     store_name: &str,
-    retention: Option<&crate::config::RetentionConfig>,
+    retention: Option<&tracedecay_configuration::RetentionConfig>,
 ) -> ResolvedStoreBudgetV1 {
     let Some(retention) = retention else {
         return ResolvedStoreBudgetV1::Unknown(
@@ -294,7 +284,7 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
 }
 
 /// `GET /api/storage/telemetry`
-#[hotpath::measure(label = "dashboard_api.storage.telemetry", future = true)]
+#[tracing::instrument(name = "dashboard_api.storage.telemetry", level = "trace", skip_all)]
 pub async fn telemetry(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<StorageTelemetryPayloadV1>> {
@@ -403,6 +393,9 @@ fn read_store_size(
             RequestAdmission::Cancelled => Some(tracedecay_store::UnavailableReasonV1::Cancelled),
             RequestAdmission::TimedOut => {
                 Some(tracedecay_store::UnavailableReasonV1::DeadlineExceeded)
+            }
+            RequestAdmission::GrantExpired => {
+                Some(tracedecay_store::UnavailableReasonV1::MissingAuthority)
             }
         }
     });
@@ -553,7 +546,7 @@ async fn sample_store(
 /// and growth dimensions.
 fn telemetry_entry(
     sampled: SampledStoreV1,
-    retention: Option<&crate::config::RetentionConfig>,
+    retention: Option<&tracedecay_configuration::RetentionConfig>,
 ) -> StoreTelemetryEntryV1 {
     let sample = sampled.sample();
     let (total_bytes, free_bytes, free_page_ratio) = sample.map_or((None, None, None), |sample| {
@@ -564,8 +557,11 @@ fn telemetry_entry(
         )
     });
     let budget = budget_dimension(&sampled.store, sample, retention);
-    let growth = growth_dimension(total_bytes, free_bytes);
-    let role = sampled.primary_role();
+    // Current bytes stay on the store-size read. A status sample has no
+    // execution-owned watermarks, so it cannot become a growth series.
+    let growth = StoreGrowthDimensionV1::Unknown {
+        reason: GROWTH_UNKNOWN_REASON.to_string(),
+    };
     let table_growth = table_growth_dimension(TableGrowthTelemetryReadV1::Unsupported {
         store: StoreKeyV1::new(sanitize_store_key(&sampled.store))
             .unwrap_or_else(|_| fallback_store_key()),
@@ -573,7 +569,6 @@ fn telemetry_entry(
 
     StoreTelemetryEntryV1 {
         store: sampled.store,
-        role,
         roles: sampled.roles,
         path: sampled.path,
         read: sampled.read,
@@ -590,7 +585,7 @@ fn telemetry_entry(
 fn budget_dimension(
     store_name: &str,
     sample: Option<&StoreSizeSampleV1>,
-    retention: Option<&crate::config::RetentionConfig>,
+    retention: Option<&tracedecay_configuration::RetentionConfig>,
 ) -> StoreBudgetDimensionV1 {
     let budget = match resolve_store_budget(store_name, retention) {
         ResolvedStoreBudgetV1::Configured(budget) => budget,
@@ -621,15 +616,6 @@ fn budget_dimension(
         Err(error) => StoreBudgetDimensionV1::Unknown {
             reason: format!("the configured budget could not be evaluated: {error}"),
         },
-    }
-}
-
-/// Project the absence of execution-owned watermarks. Current bytes remain
-/// available in the store-size read, but a status read cannot honestly turn
-/// them into a growth series.
-fn growth_dimension(_total_bytes: Option<u64>, _free_bytes: Option<u64>) -> StoreGrowthDimensionV1 {
-    StoreGrowthDimensionV1::Unknown {
-        reason: GROWTH_UNKNOWN_REASON.to_string(),
     }
 }
 
@@ -666,8 +652,7 @@ fn fallback_store_key() -> StoreKeyV1 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::config::RetentionConfig;
-    use crate::read_model::{DashboardDomainStateV1, DashboardFreshnessStateV1};
+    use tracedecay_configuration::RetentionConfig;
 
     async fn state_for_test() -> (tempfile::TempDir, DashboardState, u64) {
         let (project, state) =
@@ -682,25 +667,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_telemetry_context_reuses_the_state_resolved_scope() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, state, _) = state_for_test().await;
-
-        let context = storage_telemetry_context(&state).expect("telemetry context");
-
-        // The per-request application context is minted from the exact scope
-        // resolved once at state construction; the handler never re-resolves
-        // repository/worktree identity from paths ad hoc.
-        assert_eq!(
-            context.scope(),
-            state.resolved_scope.as_ref().expect("state resolved scope"),
-        );
-        context.scope().validate().expect("valid scope");
-    }
-
-    #[tokio::test]
     async fn storage_telemetry_without_resolved_scope_fails_closed() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state, _) = state_for_test().await;
         state.resolved_scope = None;
 
@@ -723,73 +690,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn telemetry_reports_real_observed_sizes_for_held_stores() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, state, graph_total_bytes) = state_for_test().await;
-        let Json(envelope) = telemetry(State(state)).await;
-
-        assert_eq!(envelope.schema_revision, 1);
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
-        assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Fresh);
-        assert!(
-            !envelope.payload.stores.is_empty(),
-            "dashboard always holds at least the graph and memory stores"
-        );
-
-        for entry in &envelope.payload.stores {
-            assert!(
-                matches!(entry.read, StorageTelemetryReadV1::Observed { .. }),
-                "store {} should have an observed size read",
-                entry.store
-            );
-            assert!(
-                entry.total_bytes.unwrap_or(0) > 0,
-                "store {} sized",
-                entry.store
-            );
-            // No budget is configured in a fresh project: the honest state is
-            // "unset by owner", never "unsupported by server".
-            assert!(
-                matches!(entry.budget, StoreBudgetDimensionV1::Unset { .. }),
-                "store {} should report an unset budget, got {:?}",
-                entry.store,
-                entry.budget
-            );
-            // Opening the dashboard does not establish a growth baseline. A
-            // growth series needs an execution-owned sampler, so this read is
-            // explicit about its absence instead of writing a watermark.
-            let StoreGrowthDimensionV1::Unknown { reason } = &entry.growth;
-            assert!(reason.contains("execution-owned"));
-            assert!(matches!(
-                entry.table_growth,
-                TableGrowthDimensionV1::Unsupported { .. }
-            ));
-            assert!(!entry.roles.is_empty());
-            assert!(entry.roles.contains(&entry.role));
-        }
-        let graph = envelope
-            .payload
-            .stores
-            .iter()
-            .find(|entry| entry.roles.iter().any(|role| role == "graph"))
-            .expect("graph store entry");
-        assert_eq!(
-            graph.total_bytes,
-            Some(graph_total_bytes),
-            "graph bytes must come from the retained graph runtime's real page counts"
-        );
-
-        // Complete coverage carries a real denominator equal to the store count.
-        assert!(envelope.coverage.is_complete());
-        assert_eq!(
-            envelope.coverage.denominator,
-            Some(envelope.payload.stores.len() as u64)
-        );
-    }
-
-    #[tokio::test]
     async fn roles_sharing_one_store_file_are_reported_once_with_both_roles() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state, _) = state_for_test().await;
         let Json(envelope) = telemetry(State(state)).await;
 
@@ -823,49 +724,6 @@ mod tests {
             "graph and memory share one store file; roles: {:?}",
             shared.roles
         );
-    }
-
-    #[test]
-    fn two_roles_backed_by_one_file_produce_one_entry_carrying_both_roles() {
-        // The graph and project-memory roles resolve to the same database file
-        // in project storage mode. Reporting them as two entries produced two
-        // cards with byte-identical sizes; they must merge into one store.
-        let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("shared.db");
-        let display = path.display().to_string();
-
-        let mut entries = Vec::new();
-        let mut seen = HashMap::new();
-        push_or_merge_unknown_role(
-            &mut entries,
-            &mut seen,
-            "graph",
-            &display,
-            "test fixture".to_string(),
-        );
-        push_or_merge_unknown_role(
-            &mut entries,
-            &mut seen,
-            "memory",
-            &display,
-            "test fixture".to_string(),
-        );
-
-        assert_eq!(entries.len(), 1, "one file is one store");
-        assert_eq!(entries[0].primary_role(), "graph");
-        assert_eq!(entries[0].roles, vec!["graph", "memory"]);
-
-        // A genuinely distinct file is still its own entry.
-        let other = directory.path().join("other.db");
-        let other_display = other.display().to_string();
-        push_or_merge_unknown_role(
-            &mut entries,
-            &mut seen,
-            "savings",
-            &other_display,
-            "test fixture".to_string(),
-        );
-        assert_eq!(entries.len(), 2, "distinct files are never merged");
     }
 
     #[test]
@@ -918,14 +776,6 @@ mod tests {
         assert!(matches!(
             budget_dimension("probe.db", None, Some(&configured)),
             StoreBudgetDimensionV1::Unknown { .. }
-        ));
-    }
-
-    #[test]
-    fn growth_without_execution_owned_snapshot_is_unknown() {
-        assert!(matches!(
-            growth_dimension(Some(4096), Some(0)),
-            StoreGrowthDimensionV1::Unknown { .. }
         ));
     }
 

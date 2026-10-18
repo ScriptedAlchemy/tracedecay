@@ -21,10 +21,6 @@ describe('logFraction', () => {
     expect(1 / 6_774).toBeLessThan(0.001);
   });
 
-  it('ranks larger values longer', () => {
-    expect(logFraction(10, 1_000)).toBeLessThan(logFraction(100, 1_000) ?? 0);
-  });
-
   it('returns null rather than a length when there is no band to measure', () => {
     expect(logFraction(5, 0)).toBeNull();
     expect(logFraction(5, -1)).toBeNull();

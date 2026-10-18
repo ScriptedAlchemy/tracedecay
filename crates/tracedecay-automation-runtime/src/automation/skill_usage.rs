@@ -4,15 +4,18 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::config_error;
-use super::managed_skills::{ManagedSkill, ManagedSkillSource, ManagedSkillState};
-use crate::errors::{Result, TraceDecayError};
+use super::managed_skills::ManagedSkill;
+pub use tracedecay_contracts::automation::{
+    SkillImprovementRecommendation, SkillStaleRecommendation, SkillUsageRecord,
+};
+use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 mod analytics;
 mod overlap;
 mod recommendations;
+mod store;
 
-pub use crate::ports::session_store::AnalyticsEventRecord;
 pub use analytics::analytics_import_key_for_request;
 pub use analytics::ingest_analytics_events;
 pub use analytics::ingest_project_analytics_events;
@@ -22,8 +25,6 @@ pub use overlap::{
     skill_overlap_candidates,
 };
 pub use recommendations::{skill_improvement_recommendations, stale_skill_recommendations};
-
-const SKILL_USAGE_LEDGER_FILENAME: &str = "skill_usage.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,39 +43,6 @@ pub struct SkillUsageEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillUsageRecord {
-    pub schema_version: u32,
-    pub skill_id: String,
-    pub title: Option<String>,
-    pub category: Option<String>,
-    pub state: Option<ManagedSkillState>,
-    pub pinned: bool,
-    pub created_by: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance_source: Option<ManagedSkillSource>,
-    #[serde(default)]
-    pub targets: Vec<String>,
-    pub view_count: u64,
-    pub use_count: u64,
-    pub patch_count: u64,
-    pub first_seen_at: i64,
-    pub last_activity_at: i64,
-    pub last_viewed_at: Option<i64>,
-    pub last_used_at: Option<i64>,
-    pub last_patched_at: Option<i64>,
-    /// When the skill last transitioned into the active state; mirrors the
-    /// managed skill metadata so outcome scoring works from summaries alone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activated_at: Option<i64>,
-    /// View/use totals captured at activation time so activity since activation
-    /// is an exact delta rather than a heuristic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view_count_at_activation: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub use_count_at_activation: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillUsageLedger {
     pub schema_version: u32,
     #[serde(default)]
@@ -84,27 +52,6 @@ pub struct SkillUsageLedger {
 }
 
 pub type SkillUsageSummary = SkillUsageRecord;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillStaleRecommendation {
-    pub skill_id: String,
-    pub stale: bool,
-    pub recommendation: String,
-    pub reason: String,
-    #[serde(default)]
-    pub evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillImprovementRecommendation {
-    pub skill_id: String,
-    pub improvement: bool,
-    pub recommendation: String,
-    pub reason: String,
-    pub priority: String,
-    #[serde(default)]
-    pub evidence: Vec<String>,
-}
 
 impl Default for SkillUsageLedger {
     fn default() -> Self {
@@ -116,130 +63,88 @@ impl Default for SkillUsageLedger {
     }
 }
 
-impl SkillUsageRecord {
-    fn new(skill_id: String, timestamp: i64) -> Self {
-        Self {
-            schema_version: 2,
-            skill_id,
-            title: None,
-            category: None,
-            state: None,
-            pinned: false,
-            created_by: None,
-            provenance_source: None,
-            targets: Vec::new(),
-            view_count: 0,
-            use_count: 0,
-            patch_count: 0,
-            first_seen_at: timestamp,
-            last_activity_at: timestamp,
-            last_viewed_at: None,
-            last_used_at: None,
-            last_patched_at: None,
-            activated_at: None,
-            view_count_at_activation: None,
-            use_count_at_activation: None,
-        }
+pub(super) fn new_usage_record(skill_id: String, timestamp: i64) -> SkillUsageRecord {
+    SkillUsageRecord {
+        schema_version: 2,
+        skill_id,
+        title: None,
+        category: None,
+        state: None,
+        pinned: false,
+        created_by: None,
+        provenance_source: None,
+        targets: Vec::new(),
+        view_count: 0,
+        use_count: 0,
+        patch_count: 0,
+        first_seen_at: timestamp,
+        last_activity_at: timestamp,
+        last_viewed_at: None,
+        last_used_at: None,
+        last_patched_at: None,
+        activated_at: None,
+        view_count_at_activation: None,
+        use_count_at_activation: None,
+        imported_analytics_events: BTreeSet::new(),
     }
+}
 
-    fn merge_skill_metadata(&mut self, skill: &ManagedSkill) {
-        self.schema_version = 2;
-        self.title = Some(skill.metadata.title.clone());
-        self.category = Some(skill.metadata.category.clone());
-        self.state = Some(skill.metadata.state);
-        self.pinned = skill.metadata.pinned;
-        self.created_by = Some(skill.metadata.provenance.actor.clone());
-        self.provenance_source = Some(skill.metadata.provenance.source);
-        if self.activated_at != skill.metadata.activated_at {
-            self.activated_at = skill.metadata.activated_at;
-            if self.activated_at.is_some() {
-                self.view_count_at_activation = Some(self.view_count);
-                self.use_count_at_activation = Some(self.use_count);
-            }
-        }
-    }
-
-    fn record(&mut self, event: &SkillUsageEvent) {
-        self.first_seen_at = self.first_seen_at.min(event.timestamp);
-        self.last_activity_at = self.last_activity_at.max(event.timestamp);
-        if let Some(target) = event.target.as_deref().and_then(normalize_target) {
-            insert_sorted_unique(&mut self.targets, target);
-        }
-        match event.action {
-            SkillUsageAction::View => {
-                self.view_count = self.view_count.saturating_add(1);
-                self.last_viewed_at = Some(max_optional(self.last_viewed_at, event.timestamp));
-            }
-            SkillUsageAction::Use => {
-                self.use_count = self.use_count.saturating_add(1);
-                self.last_used_at = Some(max_optional(self.last_used_at, event.timestamp));
-            }
-            SkillUsageAction::Patch => {
-                self.patch_count = self.patch_count.saturating_add(1);
-                self.last_patched_at = Some(max_optional(self.last_patched_at, event.timestamp));
-            }
+fn merge_skill_metadata(record: &mut SkillUsageRecord, skill: &ManagedSkill) {
+    record.schema_version = 2;
+    record.title = Some(skill.metadata.title.clone());
+    record.category = Some(skill.metadata.category.clone());
+    record.state = Some(skill.metadata.state);
+    record.pinned = skill.metadata.pinned;
+    record.created_by = Some(skill.metadata.provenance.actor.clone());
+    record.provenance_source = Some(skill.metadata.provenance.source);
+    if record.activated_at != skill.metadata.activated_at {
+        record.activated_at = skill.metadata.activated_at;
+        if record.activated_at.is_some() {
+            record.view_count_at_activation = Some(record.view_count);
+            record.use_count_at_activation = Some(record.use_count);
         }
     }
 }
 
-pub fn skill_usage_ledger_path(profile_root: &Path) -> PathBuf {
-    profile_root
-        .join("agent_managed")
-        .join(SKILL_USAGE_LEDGER_FILENAME)
+pub(super) fn record_usage_event(record: &mut SkillUsageRecord, event: &SkillUsageEvent) {
+    record.first_seen_at = record.first_seen_at.min(event.timestamp);
+    record.last_activity_at = record.last_activity_at.max(event.timestamp);
+    if let Some(target) = event.target.as_deref().and_then(normalize_target) {
+        insert_sorted_unique(&mut record.targets, target);
+    }
+    match event.action {
+        SkillUsageAction::View => {
+            record.view_count = record.view_count.saturating_add(1);
+            record.last_viewed_at = Some(max_optional(record.last_viewed_at, event.timestamp));
+        }
+        SkillUsageAction::Use => {
+            record.use_count = record.use_count.saturating_add(1);
+            record.last_used_at = Some(max_optional(record.last_used_at, event.timestamp));
+        }
+        SkillUsageAction::Patch => {
+            record.patch_count = record.patch_count.saturating_add(1);
+            record.last_patched_at = Some(max_optional(record.last_patched_at, event.timestamp));
+        }
+    }
 }
 
-#[hotpath::measure(label = "automation.skill_usage.load", future = true)]
+pub fn skill_usage_record_path(profile_root: &Path, skill_id: &str) -> PathBuf {
+    store::skill_usage_record_path(profile_root, skill_id)
+}
+
+#[tracing::instrument(name = "automation.skill_usage.load", level = "trace", skip_all)]
 pub async fn load_skill_usage_ledger(profile_root: &Path) -> Result<SkillUsageLedger> {
-    let path = skill_usage_ledger_path(profile_root);
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SkillUsageLedger::default());
-        }
-        Err(e) => {
-            return Err(config_error(format!(
-                "failed to read skill usage ledger '{}': {e}",
-                path.display()
-            )));
-        }
-    };
-    serde_json::from_slice(&bytes).map_err(|e| {
-        config_error(format!(
-            "failed to parse skill usage ledger '{}': {e}",
-            path.display()
-        ))
-    })
-}
-
-#[hotpath::measure(label = "automation.skill_usage.save", future = true)]
-pub async fn save_skill_usage_ledger(profile_root: &Path, ledger: &SkillUsageLedger) -> Result<()> {
-    let path = skill_usage_ledger_path(profile_root);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            config_error(format!(
-                "failed to create skill usage ledger directory '{}': {e}",
-                parent.display()
-            ))
-        })?;
-    }
-    let bytes = serde_json::to_vec_pretty(ledger).map_err(TraceDecayError::from)?;
-    tokio::fs::write(&path, bytes).await.map_err(|e| {
-        config_error(format!(
-            "failed to write skill usage ledger '{}': {e}",
-            path.display()
-        ))
-    })
+    store::load_ledger(profile_root).await
 }
 
 pub async fn sync_skill_usage_metadata(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
-    let mut ledger = load_skill_usage_ledger(profile_root).await?;
+    let skill = skill.clone();
     let skill_id = skill.metadata.id.clone();
-    let record = ledger
-        .records
-        .entry(skill_id.clone())
-        .or_insert_with(|| SkillUsageRecord::new(skill_id, 0));
-    record.merge_skill_metadata(skill);
-    save_skill_usage_ledger(profile_root, &ledger).await
+    store::update_record(profile_root, &skill_id, 0, move |record| {
+        merge_skill_metadata(record, &skill);
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn record_skill_usage_event(
@@ -248,18 +153,14 @@ pub async fn record_skill_usage_event(
     skill: Option<&ManagedSkill>,
 ) -> Result<SkillUsageRecord> {
     let skill_id = ledger_skill_id(&event.skill_name)?;
-    let mut ledger = load_skill_usage_ledger(profile_root).await?;
-    let record = ledger
-        .records
-        .entry(skill_id.clone())
-        .or_insert_with(|| SkillUsageRecord::new(skill_id, event.timestamp));
-    if let Some(skill) = skill {
-        record.merge_skill_metadata(skill);
-    }
-    record.record(&event);
-    let updated = record.clone();
-    save_skill_usage_ledger(profile_root, &ledger).await?;
-    Ok(updated)
+    let skill = skill.cloned();
+    store::update_record(profile_root, &skill_id, event.timestamp, move |record| {
+        if let Some(skill) = skill.as_ref() {
+            merge_skill_metadata(record, skill);
+        }
+        record_usage_event(record, &event);
+    })
+    .await
 }
 
 pub async fn record_skill_usage(
@@ -273,50 +174,35 @@ pub async fn record_skill_usage(
 ) -> Result<SkillUsageRecord> {
     let skill_id = skill.metadata.id.clone();
     let timestamp = current_timestamp();
-    let mut ledger = load_skill_usage_ledger(profile_root).await?;
-    let updated = {
-        let record = ledger
-            .records
-            .entry(skill_id.clone())
-            .or_insert_with(|| SkillUsageRecord::new(skill_id, timestamp));
-        record.merge_skill_metadata(skill);
-        record.record(&SkillUsageEvent {
-            skill_name: skill.metadata.id.clone(),
-            action,
-            timestamp,
-            target,
-        });
-        for target in targets {
-            if let Some(target) = normalize_target(&target) {
-                insert_sorted_unique(&mut record.targets, target);
-            }
-        }
-        record.clone()
-    };
-    if let Some(import_key) = metadata
+    let skill = skill.clone();
+    let import_key = metadata
         .as_ref()
         .and_then(|metadata| metadata.get("imported_analytics_event_key"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|key| !key.is_empty())
-    {
-        ledger
-            .imported_analytics_events
-            .insert(import_key.to_string());
-    }
-    save_skill_usage_ledger(profile_root, &ledger).await?;
-    Ok(updated)
-}
-
-pub async fn load_skill_usage_records(
-    profile_root: &Path,
-    limit: Option<usize>,
-) -> Result<Vec<SkillUsageRecord>> {
-    let mut records = list_skill_usage_records(profile_root).await?;
-    if let Some(limit) = limit {
-        records.truncate(limit);
-    }
-    Ok(records)
+        .map(str::to_string);
+    store::update_record(profile_root, &skill_id, timestamp, move |record| {
+        merge_skill_metadata(record, &skill);
+        record_usage_event(
+            record,
+            &SkillUsageEvent {
+                skill_name: skill.metadata.id.clone(),
+                action,
+                timestamp,
+                target,
+            },
+        );
+        for target in targets {
+            if let Some(target) = normalize_target(&target) {
+                insert_sorted_unique(&mut record.targets, target);
+            }
+        }
+        if let Some(import_key) = import_key {
+            record.imported_analytics_events.insert(import_key);
+        }
+    })
+    .await
 }
 
 pub async fn list_skill_usage_records(profile_root: &Path) -> Result<Vec<SkillUsageRecord>> {
@@ -389,8 +275,8 @@ fn ledger_skill_id(raw: &str) -> Result<String> {
 }
 
 fn summarize_skill(skill: &ManagedSkill, record: Option<SkillUsageRecord>) -> SkillUsageSummary {
-    let mut record = record.unwrap_or_else(|| SkillUsageRecord::new(skill.metadata.id.clone(), 0));
-    record.merge_skill_metadata(skill);
+    let mut record = record.unwrap_or_else(|| new_usage_record(skill.metadata.id.clone(), 0));
+    merge_skill_metadata(&mut record, skill);
     record
 }
 
@@ -409,4 +295,63 @@ fn insert_sorted_unique(values: &mut Vec<String>, value: String) {
 
 fn max_optional(existing: Option<i64>, timestamp: i64) -> i64 {
     existing.map_or(timestamp, |current| current.max(timestamp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SkillUsageAction, SkillUsageEvent, record_skill_usage_event};
+
+    #[tokio::test]
+    async fn recording_one_skill_does_not_rewrite_another_skills_file() {
+        let root = tempfile::tempdir().unwrap();
+        record_skill_usage_event(
+            root.path(),
+            SkillUsageEvent {
+                skill_name: "skill-a".to_string(),
+                action: SkillUsageAction::Use,
+                timestamp: 10,
+                target: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        record_skill_usage_event(
+            root.path(),
+            SkillUsageEvent {
+                skill_name: "skill-b".to_string(),
+                action: SkillUsageAction::View,
+                timestamp: 11,
+                target: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let before = super::load_skill_usage_ledger(root.path()).await.unwrap();
+        assert_eq!(before.records["skill-b"].view_count, 1);
+
+        record_skill_usage_event(
+            root.path(),
+            SkillUsageEvent {
+                skill_name: "skill-a".to_string(),
+                action: SkillUsageAction::Use,
+                timestamp: 12,
+                target: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let after = super::load_skill_usage_ledger(root.path()).await.unwrap();
+        assert_eq!(after.records["skill-a"].use_count, 2);
+        assert_eq!(
+            after.records["skill-b"].view_count, 1,
+            "skill B's last-view must survive skill A's write"
+        );
+        for skill in ["skill-a", "skill-b"] {
+            assert!(super::skill_usage_record_path(root.path(), skill).is_file());
+        }
+    }
 }

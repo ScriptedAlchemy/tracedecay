@@ -1,6 +1,6 @@
 //! Generation-pinned verified code-graph queries over daemon-resolved
 //! projections, plus the code-index-backed source readers
-//! (`context::{read_modes, source_read, markdown_sections}`) that hydrate
+//! (`context::{read_modes, source_read}`) that hydrate
 //! source evidence for those queries.
 //!
 //! This crate sits below the transport adapters (`tracedecay-mcp`, the root
@@ -8,10 +8,12 @@
 //! (`tracedecay-code-index`, `tracedecay-graph-db`,
 //! `tracedecay-runtime-core`). It owns the [`VerifiedGraphQuery`] authority:
 //! admission, source binding, and every analytical read run through the one
-//! generation-pinned reader opened by [`open_verified_graph_query`].
+//! generation-pinned reader opened by [`open_verified_graph_query`], including
+//! the test-risk scan that consumes that admitted handle.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_runtime_core::db::Database;
 
 pub mod context;
@@ -20,47 +22,74 @@ mod projection;
 pub mod queries;
 pub mod scc;
 mod source_authority;
+mod test_classification;
+pub mod test_risk;
 mod verified_query;
-
-pub use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
-pub use tracedecay_code_index::graph_projection::{
-    CodeGraphImpactBatchV1, CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolSummaryV1,
-};
-pub use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 
 pub use projection::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFreshnessV1,
-    CodeGraphReadFuture, CodeGraphReadRequest, VerifiedCodeGraphRead,
-    application_graph_cancellation, map_code_graph_read_runtime_error, map_projection_error,
-    request_graph_cancellation,
+    CodeGraphReadFuture, CodeGraphReadRequest, GraphQueryError, GraphQueryResult,
+    VerifiedCodeGraphRead, application_graph_cancellation, map_code_graph_read_runtime_error,
+    map_projection_error, request_graph_cancellation,
 };
-pub use queries::{
-    FileAdjacencyScan, GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1,
-};
-pub use source_authority::{
-    CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
-};
+pub use queries::{FileDependentsV1, GraphQueryManager, VerifiedHealthFileAggregateV1};
 pub use verified_query::{
-    VerifiedGraphQuery, VerifiedGraphQueryFuture, VerifiedGraphQueryPort,
-    VerifiedGraphQueryRequest, open_verified_graph_query,
+    AdmittedVerifiedGraphQueryPort, VerifiedGraphQuery, VerifiedGraphQueryFuture,
+    VerifiedGraphQueryPort, VerifiedGraphQueryRequest,
+    admitted_verified_graph_query_port_with_source, open_verified_graph_query,
 };
 
-/// Narrow root-owned filesystem authority used by source retrieval.
-///
-/// Generation-pinned symbol evidence is supplied independently through the
-/// code-graph projection port. This boundary intentionally exposes only the
-/// source decoder's real filesystem and cache dependencies.
-pub trait SourceReadRuntimePort: Send + Sync {
-    fn project_root(&self) -> &Path;
-    fn db(&self) -> &Database;
-    fn is_read_only(&self) -> bool;
-    /// Exact registered project identity this runtime may read.
-    fn project_id(&self) -> &str;
+/// Immutable filesystem and cache values supplied for one admitted source
+/// binding.
+#[derive(Clone)]
+pub struct SourceReadContext {
+    project_root: PathBuf,
+    db: Database,
+    read_only: bool,
+    project_id: String,
+    path_policy: IndexPathPolicyV1,
 }
 
-pub type SourceReadRuntime = dyn SourceReadRuntimePort;
+impl SourceReadContext {
+    pub fn new(
+        project_root: PathBuf,
+        db: Database,
+        read_only: bool,
+        project_id: String,
+        path_policy: IndexPathPolicyV1,
+    ) -> Self {
+        Self {
+            project_root,
+            db,
+            read_only,
+            project_id,
+            path_policy,
+        }
+    }
+
+    /// The project's index path policy, which source walks share with the
+    /// code index.
+    pub fn path_policy(&self) -> &IndexPathPolicyV1 {
+        &self.path_policy
+    }
+
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    pub fn db(&self) -> &Database {
+        &self.db
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+}
 
 /// Installs the registered global/session schema into the kernel's
 /// fail-closed port for this crate's test process. The real schema is owned
@@ -68,7 +97,7 @@ pub type SourceReadRuntime = dyn SourceReadRuntimePort;
 /// fixture entry point can call this unconditionally.
 #[cfg(test)]
 pub(crate) fn register_test_schema_installer() {
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
 }
 
 #[cfg(test)]

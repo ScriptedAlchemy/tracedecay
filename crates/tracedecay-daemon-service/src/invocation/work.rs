@@ -1,10 +1,14 @@
 //! Work and workflow application daemon invocation handlers.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use super::*;
 
 mod attempt_operations;
 mod evidence_retrieval;
 mod intelligence;
+mod job;
 mod leak_adjudication;
 mod outcome;
 mod preparation;
@@ -18,8 +22,7 @@ mod workflow_run_control;
 use outcome::{
     complete_work_effect, complete_work_read, offer_work_blocked_interval_receipts,
     work_command_effect, work_effect, work_evidence_packet, work_product_problem,
-    work_projection_problem, work_request_context, work_topology_problem,
-    work_topology_unavailable_problem,
+    work_request_context,
 };
 pub(super) use outcome::{work_background_context, work_blocked_interval_recovery_context};
 use tracedecay_domain::git::{GitChangeKindV1, GitStatusEntryV1};
@@ -45,24 +48,56 @@ pub(super) fn concealed_application_problem(request_id: String) -> DaemonInvocat
 
 /// Retryable state for an admitted project whose runtime is still mounting.
 pub(super) fn runtime_mounting_problem(request_id: String) -> DaemonInvocationResponse {
-    application_problem(
-        request_id,
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "application.surface.unavailable".to_owned(),
-            message: "The project runtime for this operation is still mounting".to_owned(),
-        }),
-    )
+    application_problem(request_id, ApplicationProblem::runtime_mounting())
+}
+
+/// Permanent owner-publication failure. This is not warming: retrying the
+/// same request against this server cannot grow the missing owner.
+pub(super) fn runtime_publication_failed_problem(request_id: String) -> DaemonInvocationResponse {
+    let problem = ApplicationProblem::execution_failed(
+        tracedecay_contracts::ApplicationExecutionFailureClassV1::Permanent,
+        SafeDiagnostic {
+            code: "application.runtime.owner_failed".to_owned(),
+            message: "The project runtime for this operation failed to publish; reopen the project"
+                .to_owned(),
+        },
+    );
+    match problem {
+        Ok(problem) => application_problem(request_id, problem),
+        Err(_) => DaemonInvocationResponse::problem(
+            request_id,
+            DaemonInvocationProblem::ApplicationContractViolation,
+        ),
+    }
+}
+
+pub(super) fn missing_registered_owner_problem(
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
+    request_id: String,
+) -> DaemonInvocationResponse {
+    match publication {
+        Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Failed) => {
+            runtime_publication_failed_problem(request_id)
+        }
+        Some(crate::project_runtime::ProjectRuntimePublicationStateV1::ResetRequired(refusal)) => {
+            application_problem(
+                request_id,
+                ApplicationProblem::from_detail(refusal.as_ref().clone()),
+            )
+        }
+        _ => runtime_mounting_problem(request_id),
+    }
 }
 
 /// Dispatches one Work invocation through the product authority and publishes
 /// a Task-family activity pulse only after a mutation committed.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.work.execute", level = "trace", skip_all)]
 pub async fn execute_work_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
     project_root: Option<PathBuf>,
     request_id: String,
@@ -71,39 +106,65 @@ pub async fn execute_work_application(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
+    let refused_request_id = request_id.clone();
     let activity_database = registered.database.clone();
     let activity_root = project_root.clone();
     let mutates = work_invocation_mutates(&request);
-    let response = request_dispatch::dispatch_work_application(
-        registered,
-        attempt_processes,
-        observability_producer,
-        project_root,
-        request_id,
-        request,
-        observed_at,
-        deadline,
-        cancellation,
+    dispatch_outliving_caller(
+        refused_request_id,
+        Box::pin(async move {
+            let response = request_dispatch::dispatch_work_application(
+                registered,
+                attempt_processes,
+                observability_producer,
+                project_root,
+                request_id,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            )
+            .await;
+            if mutates
+                && matches!(
+                    response.outcome,
+                    DaemonInvocationOutcome::WorkApplication { .. }
+                )
+                && let Some(project_root) = activity_root.as_deref()
+            {
+                tracedecay_session_memory::event_lane::publish(
+                    &activity_database,
+                    tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
+                    project_root,
+                    None,
+                    1,
+                    work_activity_detail(&response.outcome),
+                )
+                .await;
+            }
+            response
+        }),
     )
-    .await;
-    if mutates
-        && matches!(
-            response.outcome,
-            DaemonInvocationOutcome::WorkApplication { .. }
-        )
-        && let Some(project_root) = activity_root.as_deref()
-    {
-        tracedecay_session_memory::event_lane::publish(
-            &activity_database,
-            tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
-            project_root,
-            None,
-            1,
-            work_activity_detail(&response.outcome),
-        )
-        .await;
+    .await
+}
+
+async fn dispatch_outliving_caller(
+    request_id: String,
+    dispatch: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>>,
+) -> DaemonInvocationResponse {
+    let refused = |error: &dyn std::fmt::Display| {
+        tracing::error!(%error, "Work dispatch did not run to completion");
+        DaemonInvocationResponse::problem(request_id.clone(), DaemonInvocationProblem::Unavailable)
+    };
+    match tracedecay_runtime_core::native_runtime::NativeTask::spawn(dispatch) {
+        Ok(task) => match task.await {
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(response) => {
+                response
+            }
+            outcome => refused(&format!("{outcome:?}")),
+        },
+        Err(error) => refused(&error),
     }
-    response
 }
 
 fn publish_committed_task_activity_in_background(
@@ -111,7 +172,7 @@ fn publish_committed_task_activity_in_background(
     project_root: PathBuf,
     detail: Option<String>,
 ) {
-    tokio::spawn(async move {
+    let published = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
         tracedecay_session_memory::event_lane::publish(
             &database,
             tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
@@ -122,6 +183,9 @@ fn publish_committed_task_activity_in_background(
         )
         .await;
     });
+    if let Err(error) = published {
+        tracing::warn!(%error, "committed Work task activity was not published");
+    }
 }
 
 const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool {
@@ -142,6 +206,9 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
         | WorkApplicationInvocationV1::RunControl(_)
         | WorkApplicationInvocationV1::PlacementPreflight(_)
         | WorkApplicationInvocationV1::PlacementStatus(_) => false,
+        // Each step a guided job runs is its own Work invocation and publishes
+        // its own activity pulse when it commits.
+        WorkApplicationInvocationV1::AdvanceJob(_) => false,
         WorkApplicationInvocationV1::Create(_)
         | WorkApplicationInvocationV1::ReviewProposal(_)
         | WorkApplicationInvocationV1::AcceptProposal(_)
@@ -182,14 +249,20 @@ fn observe_placement_target(
             None => return Ok(unreadable),
         },
     };
-    let Ok(repository) =
-        tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(&root)
-    else {
-        return Ok(unreadable);
+    let status = tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(&root)
+        .and_then(|repository| repository.status().map(|status| (repository, status)));
+    let (repository, status) = match status {
+        Ok(read) => read,
+        Err(error) => {
+            tracing::warn!(
+                root = %root.display(),
+                %error,
+                "work placement target is unreadable"
+            );
+            return Ok(unreadable);
+        }
     };
-    let Ok(status) = repository.status() else {
-        return Ok(unreadable);
-    };
+    let unique_commits = placement_unique_commits(&repository, &root);
     let mut dirty_tracked_paths = 0u32;
     let mut untracked_paths = 0u32;
     for entry in &status.entries {
@@ -210,9 +283,45 @@ fn observe_placement_target(
     Ok(tracedecay_domain::WorkPlacementObservationV1 {
         dirty_tracked_paths,
         untracked_paths,
+        unique_commits,
         readable: true,
         ..unreadable
     })
+}
+
+/// Count commits reachable only through this placement's checked-out branch.
+/// Snapshot object ids before traversal so a moving ref cannot turn an
+/// unmeasured state into a false zero; any failed read remains `None`.
+fn placement_unique_commits(
+    repository: &tracedecay_runtime_core::git_repository::GitRepositoryAuthority,
+    root: &std::path::Path,
+) -> Option<u32> {
+    let head = repository.head().ok()?;
+    let head_commit = head.commit()?.as_str().to_owned();
+    let current_reference = head.branch().map(|branch| format!("refs/heads/{branch}"));
+    let mut other_tips = repository
+        .references()
+        .ok()?
+        .into_iter()
+        .filter(|reference| Some(reference.name.as_str()) != current_reference.as_deref())
+        .filter_map(|reference| reference.target.map(|target| target.as_str().to_owned()))
+        .collect::<Vec<_>>();
+    other_tips.sort_unstable();
+    other_tips.dedup();
+
+    let mut owned_arguments = vec!["rev-list".to_owned(), "--count".to_owned(), head_commit];
+    if !other_tips.is_empty() {
+        owned_arguments.push("--not".to_owned());
+        owned_arguments.extend(other_tips);
+    }
+    let arguments = owned_arguments
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let repository_root = repository.worktree_root().unwrap_or(root);
+    tracedecay_runtime_core::git::git_capture(repository_root, &arguments)?
+        .parse()
+        .ok()
 }
 
 fn work_activity_detail(outcome: &DaemonInvocationOutcome) -> Option<&'static str> {
@@ -240,4 +349,232 @@ fn work_activity_detail(outcome: &DaemonInvocationOutcome) -> Option<&'static st
         tracedecay_domain::WorkAttemptStateV1::TimedOut => "timed_out",
         tracedecay_domain::WorkAttemptStateV1::Cancelled => "cancelled",
     })
+}
+
+#[cfg(test)]
+mod placement_observation_tests {
+    use super::*;
+    use tracedecay_domain::{
+        RunId, TaskId, WorkPlacementBlockerV1, WorkPlacementIdentityV1, WorkPlacementKindV1,
+        WorkPlacementPreflightV1, WorkPlacementStateV1, WorkPlacementTargetV1, WorkPlacementV1,
+    };
+
+    fn git(root: &std::path::Path, arguments: &[&str]) {
+        let output = std::process::Command::new(
+            tracedecay_runtime_core::git::try_git_program().expect("git is available"),
+        )
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn release(
+        target: WorkPlacementTargetV1,
+        observation: tracedecay_domain::WorkPlacementObservationV1,
+        run: &str,
+    ) -> WorkPlacementV1 {
+        let preflight = WorkPlacementPreflightV1::evaluate(
+            WorkPlacementIdentityV1::new(
+                TaskId::new("task.placement-observation").expect("task id"),
+                RunId::new(run).expect("run id"),
+            ),
+            target.clone(),
+            observation,
+        );
+        let admitted =
+            WorkPlacementV1::admit(&preflight, None, UtcMicros(200)).expect("placement admits");
+        admitted
+            .release(observation.removal_blockers(&target), UtcMicros(300))
+            .expect("placement releases or quarantines")
+    }
+
+    /// A linked worktree `placement` of a one-commit `main` repository, and
+    /// its placement target.
+    fn linked_placement(sandbox: &std::path::Path) -> (std::path::PathBuf, WorkPlacementTargetV1) {
+        let repository_root = sandbox.join("repository");
+        let placement_root = sandbox.join("placement");
+        std::fs::create_dir(&repository_root).expect("repository root");
+        git(
+            &repository_root,
+            &["init", "--initial-branch=main", "--quiet"],
+        );
+        git(
+            &repository_root,
+            &["config", "user.name", "TraceDecay Test"],
+        );
+        git(
+            &repository_root,
+            &["config", "user.email", "test@tracedecay.invalid"],
+        );
+        std::fs::write(repository_root.join("fixture"), "base\n").expect("base fixture");
+        git(&repository_root, &["add", "fixture"]);
+        git(&repository_root, &["commit", "--quiet", "-m", "base"]);
+        git(
+            &repository_root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "placement",
+                placement_root.to_str().expect("UTF-8 placement root"),
+                "main",
+            ],
+        );
+        let placement_root = placement_root.canonicalize().expect("canonical placement");
+        let target = WorkPlacementTargetV1::new(
+            WorkPlacementKindV1::LinkedWorktree,
+            Some(
+                placement_root
+                    .to_str()
+                    .expect("UTF-8 placement root")
+                    .to_owned(),
+            ),
+            false,
+            true,
+        )
+        .expect("linked target");
+        (placement_root, target)
+    }
+
+    /// A placement observed while another thread walks its checkout reports
+    /// the checkout's real state, not an unreadable target with no dirt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn placement_observation_shares_the_discovery_walk_another_thread_owns() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let (placement_root, target) = linked_placement(sandbox.path());
+        std::fs::write(placement_root.join("fixture"), "edited\n").expect("dirty fixture");
+        std::fs::write(placement_root.join("scratch"), "scratch\n").expect("untracked file");
+
+        let mut block =
+            tracedecay_runtime_core::git_repository::block_repository_discovery_for_test(
+                &placement_root,
+            );
+        let owner = tokio::task::spawn_blocking({
+            let target = target.clone();
+            move || observe_placement_target(None, &target, UtcMicros(100))
+        });
+        block.wait_entered().await;
+        let joined = tokio::task::spawn_blocking({
+            let target = target.clone();
+            move || observe_placement_target(None, &target, UtcMicros(100))
+        });
+        tracedecay_runtime_core::git_repository::wait_for_topology_callers_for_test(
+            &placement_root,
+            1,
+            || u64::from(joined.is_finished()),
+        )
+        .await;
+        block.release();
+
+        for observation in [owner.await.unwrap(), joined.await.unwrap()] {
+            let observation = observation.expect("observation");
+            assert!(observation.readable, "the placement checkout is readable");
+            assert_eq!(observation.dirty_tracked_paths, 1);
+            assert_eq!(observation.untracked_paths, 1);
+            assert_eq!(observation.unique_commits, Some(0));
+        }
+        assert_eq!(
+            tracedecay_runtime_core::git_repository::repository_discovery_count_for_test(
+                &placement_root
+            ),
+            1
+        );
+        tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(
+            &placement_root,
+        );
+    }
+
+    #[test]
+    fn release_keeps_only_commits_not_reachable_from_another_ref() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let (placement_root, target) = linked_placement(sandbox.path());
+
+        let clean = observe_placement_target(None, &target, UtcMicros(100)).expect("observation");
+        assert_eq!(clean.unique_commits, Some(0));
+        assert_eq!(
+            release(target.clone(), clean, "run.clean").state(),
+            WorkPlacementStateV1::Released
+        );
+
+        std::fs::write(placement_root.join("fixture"), "diverged\n").expect("changed fixture");
+        git(&placement_root, &["add", "fixture"]);
+        git(
+            &placement_root,
+            &["commit", "--quiet", "-m", "diverge placement"],
+        );
+        let diverged =
+            observe_placement_target(None, &target, UtcMicros(400)).expect("observation");
+        assert_eq!(diverged.unique_commits, Some(1));
+        let quarantined = release(target, diverged, "run.diverged");
+        assert_eq!(quarantined.state(), WorkPlacementStateV1::Quarantined);
+        assert_eq!(
+            quarantined.blockers(),
+            &std::collections::BTreeSet::from([WorkPlacementBlockerV1::UniqueCommits])
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_activity_tests {
+    use std::time::Duration;
+
+    use tracedecay_runtime_core::native_runtime;
+    use tracedecay_session_memory::event_lane::ActivityFamilyV1;
+
+    use super::publish_committed_task_activity_in_background;
+
+    /// The fan-out reconcile page publishes committed task activity from a
+    /// thread with no Tokio runtime; the pulse must still reach the bus.
+    #[test]
+    fn background_task_activity_publishes_without_a_tokio_runtime() {
+        let profile = tempfile::tempdir().expect("profile root");
+        let project = tempfile::tempdir().expect("project root");
+        let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let host = tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+                profile.path(),
+                project.path(),
+                tracedecay_domain::ProjectId::new("project.work.native-activity")
+                    .expect("project id"),
+            )
+            .await
+            .expect("registered project runtime");
+            let database = host
+                .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+                .expect("registered project database");
+            let mut pulses =
+                tracedecay_session_memory::event_lane::subscribe().expect("activity bus");
+            publish_committed_task_activity_in_background(
+                database,
+                project.path().to_path_buf(),
+                None,
+            );
+            let pulse = native_runtime::timeout(Duration::from_secs(30), async {
+                loop {
+                    let record = pulses.recv().await.expect("activity bus open");
+                    if record.pulse.project_root == project.path() {
+                        return record.pulse;
+                    }
+                }
+            })
+            .await
+            .expect("the background pulse must publish");
+            assert_eq!(pulse.family, ActivityFamilyV1::Task);
+            assert_eq!(pulse.units, 1);
+        })
+        .expect("native runtime");
+        assert_eq!(
+            tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits(),
+            writer_waits,
+            "publishing must not park a native thread on a synchronous writer wait"
+        );
+    }
 }

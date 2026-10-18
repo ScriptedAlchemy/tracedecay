@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 
 use super::super::managed_skills::{
-    ManagedSkill, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
+    ManagedSkill, ManagedSkillExt, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
     apply_managed_skill_overlap_archive, apply_managed_skill_overlap_consolidation,
     preview_managed_skill_update,
 };
@@ -14,7 +14,7 @@ use super::{
     SkillProposalAction, optional_proposal_string, optional_proposal_targets,
     required_proposal_string, support_files_from_proposal,
 };
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 #[derive(Debug, Clone)]
 pub(super) struct SkillArchiveProposal {
@@ -69,7 +69,11 @@ fn required_consolidation_reason(value: Option<&Value>) -> std::result::Result<S
     Ok(reason)
 }
 
-#[hotpath::measure(label = "hosts.automation.skill_consolidation.archive_proposal")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_consolidation.archive_proposal",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn skill_archive_from_proposal(
     proposal: &Value,
     existing_skills: &BTreeMap<String, ManagedSkill>,
@@ -96,7 +100,11 @@ pub(super) fn skill_archive_from_proposal(
     })
 }
 
-#[hotpath::measure(label = "hosts.automation.skill_consolidation.merge_proposal")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_consolidation.merge_proposal",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn skill_merge_from_proposal(
     proposal: &Value,
     existing_skills: &BTreeMap<String, ManagedSkill>,
@@ -127,15 +135,27 @@ pub(super) fn skill_merge_from_proposal(
         ));
     }
 
+    if object
+        .get("routing_description")
+        .is_some_and(|value| !value.is_null())
+    {
+        super::validate_routing_examples(proposal, &target.host_skill_slug())?;
+    }
     let update = ManagedSkillUpdate {
         title: optional_proposal_string(object.get("title"))?,
         summary: optional_proposal_string(object.get("summary"))?,
+        routing_description: object
+            .get("routing_description")
+            .filter(|value| !value.is_null())
+            .map(|value| super::required_routing_description(Some(value)))
+            .transpose()?,
         category: optional_proposal_string(object.get("category"))?,
         targets: optional_proposal_targets(object.get("targets"))?,
-        body_markdown: optional_proposal_string(
-            object.get("body_markdown").or_else(|| object.get("body")),
-        )?,
-        support_files: if object.contains_key("support_files") {
+        body_markdown: optional_proposal_string(object.get("body_markdown"))?,
+        support_files: if object
+            .get("support_files")
+            .is_some_and(|value| !value.is_null())
+        {
             Some(support_files_from_proposal(object.get("support_files"))?)
         } else {
             None
@@ -144,6 +164,7 @@ pub(super) fn skill_merge_from_proposal(
     };
     let has_update = update.title.is_some()
         || update.summary.is_some()
+        || update.routing_description.is_some()
         || update.category.is_some()
         || update.targets.is_some()
         || update.body_markdown.is_some()
@@ -163,9 +184,10 @@ pub(super) fn skill_merge_from_proposal(
 /// Applies an archive as one checksum-fenced, crash-recoverable lifecycle
 /// transaction whose committed revision durably carries the typed
 /// skill-overlap removal tombstone as its archived reason.
-#[hotpath::measure(
-    future = true,
-    label = "hosts.automation.skill_consolidation.apply_archive"
+#[tracing::instrument(
+    name = "hosts.automation.skill_consolidation.apply_archive",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn apply_skill_archive(
     profile_root: &Path,
@@ -184,9 +206,10 @@ pub(super) async fn apply_skill_archive(
 /// Applies a merge as one checksum-fenced, crash-recoverable lifecycle
 /// transaction. The source stays on disk in `Archived` state, preserving its
 /// provenance without leaving an intermediate revision behind.
-#[hotpath::measure(
-    future = true,
-    label = "hosts.automation.skill_consolidation.apply_merge"
+#[tracing::instrument(
+    name = "hosts.automation.skill_consolidation.apply_merge",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn apply_skill_merge(
     profile_root: &Path,
@@ -214,9 +237,7 @@ pub(super) fn applied_consolidation_record(
     let reason = proposal.get("reason").cloned().unwrap_or(Value::Null);
     let mut record = json!({
         "action": action.as_str(),
-        "proposal_action": action.as_str(),
-        "reason": reason.clone(),
-        "proposal_reason": reason,
+        "reason": reason,
         "application_status": "applied",
         "resulting_state": "archived",
         "archived_skill_id": applied_source.metadata.id,
@@ -251,13 +272,13 @@ pub(super) fn applied_consolidation_record(
 #[cfg(test)]
 mod tests {
     use super::super::super::managed_skills::{
-        ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, apply_managed_skill_update,
-        create_managed_skill, default_managed_skill_targets, load_managed_skill,
+        ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, ManagedSupportFileExt,
+        apply_managed_skill_update, create_managed_skill, default_managed_skill_targets,
+        load_managed_skill,
     };
     #[cfg(unix)]
-    use super::super::super::skill_usage::skill_usage_ledger_path;
+    use super::super::super::skill_usage::skill_usage_record_path;
     use super::super::super::skill_usage::{DEFAULT_SKILL_OVERLAP_LIMIT, skill_overlap_candidates};
-    use super::super::skill_proposal_action;
     use super::*;
 
     fn assert_err_eq<T>(result: std::result::Result<T, String>, expected: &str) {
@@ -279,6 +300,8 @@ mod tests {
             id: id.to_string(),
             title: format!("{id} guidance"),
             summary: format!("Guidance for {id}."),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "workflow".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: format!("Follow the {id} workflow before applying changes."),
@@ -443,8 +466,10 @@ mod tests {
     #[cfg(unix)]
     fn replace_usage_ledger_with_blocking_fifo(
         profile_root: &Path,
+        first_synced_skill_id: &str,
     ) -> (std::thread::JoinHandle<std::fs::File>, std::path::PathBuf) {
-        let ledger_path = skill_usage_ledger_path(profile_root);
+        let ledger_path = skill_usage_record_path(profile_root, first_synced_skill_id);
+        std::fs::create_dir_all(ledger_path.parent().unwrap()).unwrap();
         match std::fs::remove_file(&ledger_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -627,7 +652,13 @@ mod tests {
         ));
         assert_eq!(merge.target_skill_id, "workflow-a");
         assert_eq!(merge.source_skill_id, "workflow-b");
-        assert!(merge.update.is_some());
+        assert_eq!(
+            merge
+                .update
+                .as_ref()
+                .and_then(|update| update.body_markdown.as_deref()),
+            Some("Merged workflow guidance covering both variants.")
+        );
 
         let archive_only = assert_ok(skill_merge_from_proposal(
             &json!({
@@ -712,22 +743,6 @@ mod tests {
                 &skills,
             ),
             "config error: managed skill 'workflow-a' update does not change the active revision",
-        );
-    }
-
-    #[test]
-    fn consolidation_actions_parse_from_proposals() {
-        assert_eq!(
-            assert_ok(skill_proposal_action(&json!({"action": "merge"}))),
-            SkillProposalAction::Merge
-        );
-        assert_eq!(
-            assert_ok(skill_proposal_action(&json!({"action": "consolidate"}))),
-            SkillProposalAction::Merge
-        );
-        assert_eq!(
-            assert_ok(skill_proposal_action(&json!({"action": "archive"}))),
-            SkillProposalAction::Archive
         );
     }
 
@@ -1080,7 +1095,8 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let archive = skill_archive_from_proposal(&proposal, &skills).unwrap();
-        let (fifo_writer, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
+        let (fifo_writer, ledger_path) =
+            replace_usage_ledger_with_blocking_fifo(profile.path(), "workflow-b");
         let profile_root = profile.path().to_path_buf();
         let archive_for_task = archive.clone();
         let mut task =
@@ -1153,7 +1169,8 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let merge = skill_merge_from_proposal(&proposal, &skills).unwrap();
-        let (fifo_writer, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
+        let (fifo_writer, ledger_path) =
+            replace_usage_ledger_with_blocking_fifo(profile.path(), "workflow-a");
         let profile_root = profile.path().to_path_buf();
         let merge_for_task = merge.clone();
         let mut task =

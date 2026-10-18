@@ -1,9 +1,10 @@
 //! The composition-root authority one bounded transcript ingest pass runs on.
 //!
-//! Catch-up needs four things that only the composition root can build: the
+//! Catch-up needs five things that only the composition root can build: the
 //! registered shard identity it is bound to, an admission facade over that
 //! authority, the transcript/git/workflow store adapters that write through it,
-//! and the registry read that enumerates registered project roots.
+//! the registry read that enumerates registered project roots, and the
+//! post-ingest session review scheduler.
 //!
 //! Every one of those is produced from `RegisteredGlobalDb`, which sits above
 //! this crate. Rather than depend on it, ingest states what it needs as this
@@ -22,12 +23,13 @@ use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::workflow_index::WorkflowIngestSink;
 
 pub enum IngestAdmissionBinding<'a> {
-    /// Project-scoped admission, optionally carrying the repository
-    /// provenance read from the project's identity marker.
+    /// Project-scoped admission rooted at `project_root`, optionally carrying
+    /// the repository provenance read from the project's identity marker.
     Project {
         brain_id: &'a BrainId,
         profile_id: &'a UserProfileId,
         project_id: &'a ProjectId,
+        project_root: &'a std::path::Path,
         repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
     },
     /// Profile-scoped admission for user-global transcript sources.

@@ -12,7 +12,7 @@ export interface QueryActivityDescriptor {
   readonly cancelable: boolean;
 }
 
-export interface ActiveQueryActivity extends QueryActivityDescriptor {
+interface ActiveQueryActivity extends QueryActivityDescriptor {
   readonly queryHash: string;
   readonly queryKey: QueryKey;
 }

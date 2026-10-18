@@ -1,4 +1,4 @@
-# 11c — Work workspace design: core delivery and advanced controls
+# 11c. Work workspace design: core delivery and advanced controls
 
 Status: design contract for the Work workspace, allocated to the core Work delivery
 with residual advanced workflow controls in the advanced workflow delivery by the approved 2026-07-28
@@ -17,7 +17,7 @@ deep links, `task_activity` SSE, snapshot/delta reads, and seven command
 surfaces (verified: work_authority 8/8, dashboard-api routes 6/6, SDK facade
 8/8, dashboard 1149/1149). The DAG/critical-path, timeline/attempt-weave,
 causal, and workload-cortex projections are not yet built. They remain
-committed in-scope V2 deliverables of this plan — not descoped — whose data
+committed in-scope V2 deliverables of this plan, not descoped, whose data
 dependency is attempt/execution evidence owned by the
 [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) workflow runtime: the
 attempt family was deliberately deleted in the Work restore and returns with
@@ -76,7 +76,7 @@ are rejected.
 Specific hue, type, spacing, dark/light, motion, and easing choices inherited
 from Plans 11a/11b are design-owner/agent decisions, not user preferences.
 
-## Inheritance — one grammar, new nouns
+## Inheritance, one grammar, new nouns
 
 The core Work slice reuses the five visual grammars already proved on real data;
 the advanced controls do not invent a sixth.
@@ -85,13 +85,13 @@ shape of meaning:
 
 | Projection | Grammar it inherits | The mapping |
 | --- | --- | --- |
-| Kanban | Brain's measured columns (categorical x, spread inside, never across) | columns = REAL task states from Plan 24's state machine, never cosmetic lanes; card = body with area = measured cost (tokens/attempts/wall-time — pick one, caption it), brightness = recency of last attempt; WIP pressure printed per column, not implied |
+| Kanban | Brain's measured columns (categorical x, spread inside, never across) | columns = REAL task states from Plan 24's state machine, never cosmetic lanes; card = body with area = measured cost (tokens/attempts/wall-time, pick one, caption it), brightness = recency of last attempt; WIP pressure printed per column, not implied |
 | DAG / critical path | Transit map strata | strata = longest-path depth over the task DAG (same Tarjan condensation discipline as code); the critical path is the widest channel; a dependency that jumps backward wears the climb hue and the caption states it is an observation, not an error |
 | Timeline / attempts | Loom weave | agents/executors as warp threads (hue = executor identity, stable app-wide), tasks as landings, retries as repeated crossings of the same landing; stale/instant spans drawn hollow exactly as the PR-421 weave does |
-| Causal | Disagreement field | declared dependencies (plan edges) overlaid with OBSERVED execution order (attempt timestamps); "executed-before-but-undeclared" is the loud state — it is hidden coupling in the plan itself |
+| Causal | Disagreement field | declared dependencies (plan edges) overlaid with OBSERVED execution order (attempt timestamps); "executed-before-but-undeclared" is the loud state, it is hidden coupling in the plan itself |
 | Workload / executor / model | Cortex aggregation | executors/models as regions, area = task mass, contours = concurrency, heat = recent churn; aggregation ratio printed (N tasks ⟵ M regions) |
 
-## Navigation — zoom is a position, selection is one
+## Navigation, zoom is a position, selection is one
 
 Two rules, both already proven:
 
@@ -102,7 +102,7 @@ Two rules, both already proven:
 2. **Zoom is a position, not a transition** (the LENS model from 11b).
    Altitude runs portfolio → epic/plan → task → attempt on one continuum;
    crossing an aggregation boundary is a readable position on a printed ruler,
-   not a screen replacement. Drill-ins are in-page and Escape returns — the
+   not a screen replacement. Drill-ins are in-page and Escape returns, the
    TraceView pattern (focus trap, aria equivalence via the adjacent list,
    reduced-motion static twin).
 
@@ -115,7 +115,7 @@ A task is the hub noun that finally joins the app's three graphs, and every
 edge below already has (or has a named dependency for) a wire source:
 
 - task → sessions that executed it: the weave (needs the commit/session
-  correlation + span-refresh fix — filed, currently 0/12 commit links and
+  correlation + span-refresh fix, filed, currently 0/12 commit links and
   instant-collapsed spans; the advanced delivery hard-depends on it).
 - task → commits/PRs it produced: Delivery landings; the PR-421 weave sheet is
   the prototype of this join.
@@ -123,7 +123,7 @@ edge below already has (or has a named dependency for) a wire source:
   file-granular per 11b); the topography Trace drill-in from a task's touched
   area is the long-range payoff.
 - live motion: task state changes strike over SSE. Requires a `task_activity`
-  family on the activity bus — same coalescing contract as the four shipped
+  family on the activity bus, same coalescing contract as the four shipped
   families, and the same project-granularity caveat until ActivityPulseV1
   carries finer scope. Design against project-level strikes first.
 
@@ -133,20 +133,20 @@ three separate stable assignments; a hue never means two things on one screen.
 ## Sensory contract application
 
 Physics only where it encodes measurement: attempt-thread tension = retry
-count; card weight = measured cost (a heavy task drags slower in kanban —
+count; card weight = measured cost (a heavy task drags slower in kanban,
 same mass-response curve as Trace, same tuning table). Drag-to-reprioritize is
-INTERACTION, not measurement — it gets crisp motion, no fake physics, and a
+INTERACTION, not measurement, it gets crisp motion, no fake physics, and a
 reduced-motion static path that produces identical final order.
 
 ## Honesty beats specific to workflow data
 
-- Attempt counts, queue ages, and wall-times are real or absent — never
+- Attempt counts, queue ages, and wall-times are real or absent, never
   estimated. An unscheduled task is drawn in an explicit unscheduled band, not
   omitted.
 - Kanban columns that are empty stay visible at full width (an empty REVIEW
   column is a reading).
 - Every projection states its population cap and window ("50 most recent of
-  312 tasks · last 14d") — the Agents-page lesson.
+  312 tasks · last 14d"), the Agents-page lesson.
 - Delegation trees show unattributed work as hollow (the executor the store
   cannot name is not guessed).
 
@@ -154,7 +154,7 @@ reduced-motion static path that produces identical final order.
 
 The grammars this doc inherits are visual; read them as pictures, not prose.
 Historical reference sheets per grammar are indexed in
-[11b — Visual artifact index](11b-structure-visualization.md#visual-artifact-index-reference-images):
+[11b. Visual artifact index](11b-structure-visualization.md#visual-artifact-index-reference-images):
 measured columns → the shipped Brain baselines (`dashboard/audit-baselines/`),
 strata → the transit sheet, weave → the TRACE prototype + the PR-421 weave,
 disagreement → the disagreement-field sheet, cortex aggregation → the CORTEX
@@ -175,12 +175,12 @@ evidence manifest.
 
 ## Dependencies and sequencing
 
-1. Plan 24 task/plan stores + executor semantics (owner: Plan 24) — delivered
+1. Plan 24 task/plan stores + executor semantics (owner: Plan 24), delivered
    for the core read/command path.
-2. commit↔session correlation + span refresh fix — blocking for the weave
+2. commit↔session correlation + span refresh fix, blocking for the weave
    projection (chip filed 2026-07-25).
-3. `task_activity` SSE family — delivered.
-4. Plan 32 attempt/execution evidence — blocking for the DAG/critical-path,
+3. `task_activity` SSE family, delivered.
+4. Plan 32 attempt/execution evidence, blocking for the DAG/critical-path,
    timeline, causal, and workload projections; those views ship in full once
    the workflow runtime supplies attempt data.
 5. Build order for the remaining views: Kanban is shipped; DAG first (pure

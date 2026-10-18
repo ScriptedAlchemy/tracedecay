@@ -13,9 +13,9 @@
     "required_first": [
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body",
-      "tracedecay_outline",
-      "tracedecay_read",
+      "tracedecay_find_exact_symbol",
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
       "tracedecay_grep"
     ],
     "acceptable": [
@@ -36,9 +36,17 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "insufficient stock"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states insufficient stock",
+          "pattern": "\\binsufficient\\ stock\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
-  "notes": "find-string; ground truth is the literal format! string in reserve_stock."
+  "notes": "find-string; the answer must quote the literal format! string in reserve_stock."
 }

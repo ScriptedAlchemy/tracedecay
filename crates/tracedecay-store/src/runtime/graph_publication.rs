@@ -98,7 +98,11 @@ sha256_digest!(
 );
 
 impl GraphCanonicalReplaySourceDigestV1 {
-    #[hotpath::measure(label = "store.graph_publication.replay_source_digest")]
+    #[tracing::instrument(
+        name = "store.graph_publication.replay_source_digest",
+        level = "trace",
+        skip_all
+    )]
     pub fn for_source(source: &[u8]) -> Self {
         Self(
             tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
@@ -213,7 +217,11 @@ impl GraphPublicationReplayV1 {
         Ok(replay)
     }
 
-    #[hotpath::measure(label = "store.graph_publication.validate_replay")]
+    #[tracing::instrument(
+        name = "store.graph_publication.validate_replay",
+        level = "trace",
+        skip_all
+    )]
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         validate_graph_publication_shard(
             &self.key.projection.shard_id,
@@ -374,7 +382,6 @@ impl GraphPublicationSequenceV1 {
         Ok(Self(value))
     }
 
-    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -956,7 +963,7 @@ pub enum GraphReplayRetirementOutcomeV1 {
 /// Discard request for one exact pending journaled replay row: a publication
 /// journaled by an interrupted publisher that never advanced the verified
 /// head and deterministically refuses to complete. The row is named by both
-/// key and observed sequence so the discard is compare-and-swap shaped —
+/// key and observed sequence so the discard is compare-and-swap shaped,
 /// only the exact row the caller diagnosed is removed, never a row a
 /// concurrent publisher re-journaled since.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -3,11 +3,12 @@ use std::sync::{Arc, atomic::Ordering};
 
 use tempfile::TempDir;
 
+use super::tests::git;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
     SharedCodeIndexBytePoolV1,
 };
-use crate::code_index::production::{CodeIndexInterruptionV1, CodeIndexProductionErrorV1};
+use tracedecay_code_index::production::{CodeIndexInterruptionV1, CodeIndexProductionErrorV1};
 use tracedecay_lsp::{
     AdmittedRoot, ClientCapabilities, DaemonLspProtocolSession, FeedbackCyclePort,
     FeedbackCycleRequest, FeedbackCycleResponse, GatewayCapabilities, SemanticProviderPort,
@@ -292,13 +293,4 @@ fn storage_image(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files = Vec::new();
     collect(root, root, &mut files);
     files
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .status()
-        .expect("git fixture command");
-    assert!(status.success(), "git fixture command failed: {args:?}");
 }

@@ -8,13 +8,11 @@ use std::sync::Arc;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::{
-    ActorId, HydrationStateV1, ProjectId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
-    TemporalModeV1,
+    ActorId, ContextOmissionReasonV1, HydrationStateV1, ProjectId, RetrievalGrainV1, SessionId,
+    TemporalCoverageCountsV1, TemporalModeV1,
 };
-#[cfg(any(test, feature = "test-helpers"))]
-use tracedecay_domain::{RepositoryId, WorktreeId};
 use tracedecay_session_memory::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
@@ -22,25 +20,29 @@ use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
     SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-    SessionTemporalExecutionError, SessionTemporalQuery,
+    SessionRetrievalService, SessionRetrievalUnavailableCause, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalQuery,
 };
-use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
+use tracedecay_sessions::serving::{RefreshWorkerMissing, SessionProjectionServingStatusPort};
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 
 use crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
-use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{
+    ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, StoreInstanceRecord,
+};
 use tracedecay_session_temporal_store::{
     RegisteredGlobalDbSessionTemporalExecution, SessionPageReconstruction,
     SessionPageReconstructionRequest,
 };
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
 use tracedecay_temporal_query::context::{ContextError, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::execution::ExecutionLimits;
+use tracedecay_temporal_query::execution::TemporalPortError;
 use tracedecay_temporal_query::hydration::HydrationError;
-use tracedecay_temporal_query::ports::{
-    ExecutionLimits, TemporalExecutionSnapshot, TemporalPortError,
-};
 use tracedecay_temporal_query::ranking::RankedCandidate;
+use tracedecay_temporal_query::snapshot::{
+    TemporalCandidatePopulationCount, TemporalExecutionSnapshot,
+};
 use tracedecay_temporal_query::{
     TemporalHydratedResult, TemporalKernelError, TemporalKernelResult,
 };
@@ -51,23 +53,19 @@ const MESSAGE_SEARCH_RANKING_VERSION: u32 = 1;
 mod serving_status;
 const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Byte ceiling every admitted application retrieval request is bound by.
-///
-/// `SessionRetrievalService::retrieve` refuses — terminally, as
-/// `BudgetExhausted` — any query whose context budget or execution limits
-/// exceed the binding's budgets, so every query built for the admitted path
-/// must be sized against this constant rather than the multi-MiB
-/// `ExecutionLimits::default()` or [`MESSAGE_SEARCH_MAX_BYTES`].
+/// Byte ceiling for an admitted application's returned context and hydrated
+/// payload. Candidate and temporal-record workspaces retain their separate,
+/// finite kernel bounds.
 pub const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
 
 /// Execution limits an admitted application retrieval of `limit` items may ask
 /// for.
 ///
-/// The admitted binding checks exactly four things: the three *total* byte
-/// limits against [`APPLICATION_RETRIEVAL_MAX_BYTES`], and that the hydration
-/// item count covers the requested page. The defaults are multi-MiB and are
-/// rejected outright as a non-retryable structural refusal rather than a
-/// smaller answer, so those four are the ones this sizes.
+/// The admitted binding checks the response context and hydrated payload
+/// against [`APPLICATION_RETRIEVAL_MAX_BYTES`]. Candidate and temporal-record
+/// bytes are bounded kernel workspaces; charging them to the response budget
+/// makes a one-item request fail solely because its session has enough retained
+/// records to fill the ranker's input pages.
 ///
 /// Nothing else is narrowed. Candidate and record item counts are the pool the
 /// ranker draws from, not the page it returns: clamping them to `limit` would
@@ -77,11 +75,28 @@ pub fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
     let bytes = usize::try_from(APPLICATION_RETRIEVAL_MAX_BYTES).unwrap_or(usize::MAX);
     let defaults = ExecutionLimits::default();
     ExecutionLimits {
-        candidate_total_bytes: bytes.min(defaults.candidate_total_bytes),
-        record_total_bytes: bytes.min(defaults.record_total_bytes),
         hydration_total_bytes: bytes.min(defaults.hydration_total_bytes),
         hydration_limit: defaults.hydration_limit.max(limit),
         ..defaults
+    }
+}
+
+pub(crate) const fn unavailable_reason(
+    cause: SessionRetrievalUnavailableCause,
+) -> SessionRetrievalUnavailableReason {
+    match cause {
+        SessionRetrievalUnavailableCause::AuthorityAbsent => {
+            SessionRetrievalUnavailableReason::TemporalStoreUnavailable
+        }
+        SessionRetrievalUnavailableCause::ReadFailed => {
+            SessionRetrievalUnavailableReason::TemporalStoreReadFailed
+        }
+        SessionRetrievalUnavailableCause::HydrationUnavailable => {
+            SessionRetrievalUnavailableReason::HydrationUnavailable
+        }
+        SessionRetrievalUnavailableCause::KernelRefused => {
+            SessionRetrievalUnavailableReason::TemporalKernelRefused
+        }
     }
 }
 
@@ -103,17 +118,18 @@ mod admitted;
 mod contract;
 mod primitive;
 pub use admitted::{
-    SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
-    UnavailableSessionApplicationRetrievalV1,
+    LcmRawStoreIdsFutureV1, LcmSessionRawStatsFutureV1, SessionApplicationRetrievalFutureV1,
+    SessionApplicationRetrievalPortV1, UnavailableSessionApplicationRetrievalV1,
 };
 pub use contract::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalFilters,
-    SessionRetrievalOmissionView, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
-    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
-    SessionTemporalMetadataView, SessionTemporalWatermarksView,
+    SessionRetrievalCommand, SessionRetrievalCoverageOmissionView, SessionRetrievalExplanationView,
+    SessionRetrievalFilters, SessionRetrievalOmissionView, SessionRetrievalPageView,
+    SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
+    SessionRetrievalUnavailableReason, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
+pub(crate) use contract::{temporal_message_type, temporal_session_scope};
 pub use primitive::DaemonSessionLookupPrimitiveV1;
 
 /// Serving identity of the store the daemon currently serves, extracted
@@ -130,10 +146,10 @@ pub struct SessionRetrievalServingIdentityV1 {
 }
 
 impl SessionRetrievalServingIdentityV1 {
-    #[hotpath::skip]
     pub async fn resolve_project(
         project_id: &str,
         serving_db: &Path,
+        serving_branch: Option<&str>,
         project_root: &Path,
         profile_id: &tracedecay_domain::UserProfileId,
         expected_runtime_shard: &StoreShardIdV1,
@@ -141,7 +157,8 @@ impl SessionRetrievalServingIdentityV1 {
     ) -> Option<Self> {
         let project_id = ProjectId::new(project_id.to_owned()).ok()?;
         let profile_id = ProfileId::new(profile_id.as_str().to_owned()).ok()?;
-        let (store_id, root_id) = project_store_and_root(registry, &project_id, serving_db).await?;
+        let (store_id, root_id) =
+            project_store_and_root(registry, &project_id, serving_db, serving_branch).await?;
         let serving = Self {
             project_id: Some(project_id),
             profile_id,
@@ -259,7 +276,6 @@ impl DaemonSessionRetrievalRoot {
         }
     }
 
-    #[hotpath::skip]
     pub async fn project(
         serving: SessionRetrievalServingIdentityV1,
         registry: &RegisteredGlobalDb,
@@ -283,11 +299,15 @@ impl DaemonSessionRetrievalRoot {
         let profile_root = registry.db_path().parent()?;
         let mut selected = None;
         for store in &context.stores {
+            if !store_serves_graph(profile_root, &store.store, &serving.serving_db) {
+                continue;
+            }
             for scope in &store.graph_scopes {
                 if scope.writable
                     && scope.project_id == context.project.project_id
                     && scope.store_id == store.store.store_id
-                    && profile_root.join(&scope.db_relpath) == serving.serving_db
+                    && scope.store_id == serving.store_id.as_str()
+                    && scope.graph_scope_id == serving.root_id.as_str()
                 {
                     if selected.is_some() {
                         return None;
@@ -339,9 +359,7 @@ impl DaemonSessionRetrievalRoot {
         root_id: SessionRootId,
         expected_runtime_shard: StoreShardIdV1,
         project_id: ProjectId,
-        repository_id: RepositoryId,
-        worktree_id: WorktreeId,
-        branch_id: BranchId,
+        git_route: ResolvedGitRoute,
         authorized_root: String,
     ) -> Self {
         let identity = ResolvedSessionIdentity::for_project(
@@ -349,7 +367,7 @@ impl DaemonSessionRetrievalRoot {
             project_id.clone(),
             store_id,
             root_id,
-            ResolvedGitRoute::new(repository_id, worktree_id, branch_id),
+            git_route,
         );
         Self {
             store_scope: SessionRetrievalStoreScope::Project,
@@ -395,6 +413,7 @@ async fn project_store_and_root(
     registry: &RegisteredGlobalDb,
     project_id: &ProjectId,
     serving_db: &Path,
+    serving_branch: Option<&str>,
 ) -> Option<(SessionStoreId, SessionRootId)> {
     let context = registry
         .project_registry_context_by_id(project_id.as_str())
@@ -403,11 +422,15 @@ async fn project_store_and_root(
     let profile_root = registry.db_path().parent()?;
     let mut selected = None;
     for store in &context.stores {
+        if !store_serves_graph(profile_root, &store.store, serving_db) {
+            continue;
+        }
         for scope in &store.graph_scopes {
             if scope.writable
                 && scope.project_id == context.project.project_id
                 && scope.store_id == store.store.store_id
-                && profile_root.join(&scope.db_relpath) == serving_db
+                // Branches share a physical graph; the serving branch owns the root.
+                && serving_branch.is_none_or(|branch| scope.branch_name == branch)
             {
                 if selected.is_some() {
                     return None;
@@ -420,6 +443,19 @@ async fn project_store_and_root(
         }
     }
     selected
+}
+
+fn store_serves_graph(profile_root: &Path, store: &StoreInstanceRecord, serving_db: &Path) -> bool {
+    // The registry's profile root has been through `canonicalize` while the
+    // serving path is the one its caller built, so the two name one file in
+    // two spellings wherever an ancestor is an alias (macOS `/var` ->
+    // `/private/var`, Windows `\\?\`).
+    tracedecay_runtime_core::path_safety::same_canonical_path(
+        &profile_root
+            .join(&store.store_relpath)
+            .join(tracedecay_runtime_core::config::DB_FILENAME),
+        serving_db,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -487,27 +523,35 @@ pub struct DaemonSessionRetrievalService {
     database: RegisteredGlobalDbLeaseV1,
     root: DaemonSessionRetrievalRoot,
     configuration: SessionRetrievalConfiguration,
-    refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
+    /// Where the projection's currency is read from. A service mounted with no
+    /// refresh worker carries [`RefreshWorkerMissing`], so `RequireFresh` is
+    /// refused with that reason instead of being served as fresh.
+    refresh_status: Arc<dyn SessionProjectionServingStatusPort>,
 }
 
 impl DaemonSessionRetrievalService {
     pub fn new(
         database: RegisteredGlobalDbLeaseV1,
         root: DaemonSessionRetrievalRoot,
-        refresh_status: Option<SessionTemporalRefreshWake>,
+        refresh_status: SessionTemporalRefreshWake,
     ) -> Option<Self> {
-        Self::new_with_serving_port(
-            database,
-            root,
-            refresh_status
-                .map(|status| Arc::new(status) as Arc<dyn SessionProjectionServingStatusPort>),
-        )
+        Self::new_with_serving_port(database, root, Arc::new(refresh_status))
+    }
+
+    /// A service for a store that has no refresh worker mounted. Reads that
+    /// accept stored data are served; `RequireFresh` is refused as
+    /// `RefreshWorkerMissing`.
+    pub fn new_without_refresh_worker(
+        database: RegisteredGlobalDbLeaseV1,
+        root: DaemonSessionRetrievalRoot,
+    ) -> Option<Self> {
+        Self::new_with_serving_port(database, root, Arc::new(RefreshWorkerMissing))
     }
 
     pub fn new_with_serving_port(
         database: RegisteredGlobalDbLeaseV1,
         mut root: DaemonSessionRetrievalRoot,
-        refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
+        refresh_status: Arc<dyn SessionProjectionServingStatusPort>,
     ) -> Option<Self> {
         if !root.bind_runtime_shard(&database.binding().shard_id) {
             return None;
@@ -524,32 +568,8 @@ impl DaemonSessionRetrievalService {
         })
     }
 
-    pub fn new_registered_with_serving_port(
-        database: RegisteredGlobalDbLeaseV1,
-        registered_database: RegisteredGlobalDbLeaseV1,
-        mut root: DaemonSessionRetrievalRoot,
-        refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
-    ) -> Option<Self> {
-        if !root.bind_runtime_shard(&registered_database.binding().shard_id) {
-            return None;
-        }
-        if database.binding() != registered_database.binding() {
-            return None;
-        }
-        Some(Self {
-            database: registered_database,
-            root,
-            configuration: SessionRetrievalConfiguration::new(
-                MESSAGE_SEARCH_SCHEMA_VERSION,
-                MESSAGE_SEARCH_RANKING_VERSION,
-            )
-            .ok()?,
-            refresh_status,
-        })
-    }
-
     fn refresh_not_current(&self) -> Option<SessionRetrievalUnavailable> {
-        serving_status::not_current_unavailable(self.refresh_status.as_deref()?)
+        serving_status::not_current_unavailable(self.refresh_status.as_ref())
     }
 
     fn registered_execution(
@@ -563,7 +583,7 @@ impl DaemonSessionRetrievalService {
         ))
     }
 
-    #[hotpath::measure(label = "daemon.session_retrieval.search")]
+    #[tracing::instrument(name = "daemon.session_retrieval.search", level = "trace", skip_all)]
     async fn execute_temporal_query_with_context(
         &self,
         context: &RequestContext,
@@ -582,7 +602,9 @@ impl DaemonSessionRetrievalService {
             grant_id,
         };
         let Ok(execution) = self.registered_execution() else {
-            return SessionRetrievalOutcome::Unavailable;
+            return SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::AuthorityAbsent,
+            );
         };
         SessionRetrievalService::new(
             authorizer,
@@ -594,7 +616,6 @@ impl DaemonSessionRetrievalService {
         .await
     }
 
-    #[hotpath::skip]
     async fn public_outcome(
         &self,
         outcome: SessionRetrievalOutcome<TemporalKernelResult>,
@@ -617,15 +638,20 @@ impl DaemonSessionRetrievalService {
                 freshness,
             },
             SessionRetrievalOutcome::CursorStale => SessionRetrievalServiceOutcome::CursorStale,
+            SessionRetrievalOutcome::CursorRefused(mismatch) => {
+                SessionRetrievalServiceOutcome::CursorRefused(mismatch)
+            }
             SessionRetrievalOutcome::Partial {
                 items,
                 freshness,
                 omitted,
+                record_omitted,
             } => match self.page(items).await {
                 Ok((page, _, rendering_omitted)) => SessionRetrievalServiceOutcome::Partial {
                     page,
                     freshness,
                     omitted: omitted.saturating_add(rendering_omitted),
+                    record_omitted: record_omitted.saturating_add(rendering_omitted),
                 },
                 Err(error) => self.rendering_error(error),
             },
@@ -639,11 +665,11 @@ impl DaemonSessionRetrievalService {
                     store_scope: self.root.store_scope,
                 }
             }
-            SessionRetrievalOutcome::Unavailable => SessionRetrievalServiceOutcome::Unavailable(
-                SessionRetrievalUnavailable::without_worker(
-                    SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
-                ),
-            ),
+            SessionRetrievalOutcome::Unavailable(cause) => {
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(unavailable_reason(cause)),
+                )
+            }
             SessionRetrievalOutcome::CursorManifestLimitExceeded {
                 kind,
                 observed,
@@ -653,8 +679,8 @@ impl DaemonSessionRetrievalService {
                 observed,
                 maximum,
             },
-            SessionRetrievalOutcome::BudgetExhausted { stage } => {
-                SessionRetrievalServiceOutcome::BudgetExhausted { stage }
+            SessionRetrievalOutcome::BudgetExhausted { stage, accounting } => {
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting }
             }
             SessionRetrievalOutcome::TimedOut => SessionRetrievalServiceOutcome::TimedOut,
             SessionRetrievalOutcome::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
@@ -683,14 +709,22 @@ impl DaemonSessionRetrievalService {
                     store_scope: self.root.store_scope,
                 }
             }
-            SessionTemporalExecutionError::BudgetExhausted => {
-                SessionRetrievalServiceOutcome::BudgetExhausted {
-                    stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
-                }
+            SessionTemporalExecutionError::BudgetExhausted { stage, accounting } => {
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting }
             }
             SessionTemporalExecutionError::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
+            SessionTemporalExecutionError::DeadlineExceeded => {
+                SessionRetrievalServiceOutcome::TimedOut
+            }
             SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
                 SessionRetrievalServiceOutcome::TimedOut
+            }
+            SessionTemporalExecutionError::Storage { .. } => {
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
+                    ),
+                )
             }
             SessionTemporalExecutionError::Stale { generation_lag } => {
                 SessionRetrievalServiceOutcome::Stale {
@@ -704,18 +738,24 @@ impl DaemonSessionRetrievalService {
                     freshness,
                 }
             }
-            SessionTemporalExecutionError::Unavailable
-            | SessionTemporalExecutionError::Kernel(_) => {
+            SessionTemporalExecutionError::Unavailable => {
                 SessionRetrievalServiceOutcome::Unavailable(
                     SessionRetrievalUnavailable::without_worker(
                         SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
                     ),
                 )
             }
+            SessionTemporalExecutionError::Kernel(_) => {
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::TemporalKernelRefused,
+                    ),
+                )
+            }
         }
     }
 
-    #[hotpath::measure(label = "daemon.session_retrieval.hydrate")]
+    #[tracing::instrument(name = "daemon.session_retrieval.hydrate", level = "trace", skip_all)]
     async fn page(
         &self,
         items: Vec<TemporalKernelResult>,
@@ -724,6 +764,7 @@ impl DaemonSessionRetrievalService {
         let mut anchors = Vec::new();
         let mut explanations = Vec::new();
         let mut omissions = Vec::new();
+        let mut coverage_omissions = Vec::new();
         let mut coverage = TemporalCoverageCountsV1::default();
         let mut source_coverage = Vec::new();
         let mut watermarks = SessionTemporalWatermarksView::default();
@@ -743,6 +784,13 @@ impl DaemonSessionRetrievalService {
             coverage.hidden = coverage.hidden.saturating_add(item.coverage.hidden);
             coverage.unknown = coverage.unknown.saturating_add(item.coverage.unknown);
             coverage.redacted = coverage.redacted.saturating_add(item.coverage.redacted);
+            if let Some(strict_population) = root_continuation_population(item) {
+                coverage_omissions.push(
+                    SessionRetrievalCoverageOmissionView::RootContinuationUnavailable {
+                        strict_population,
+                    },
+                );
+            }
             if let Ok(receipt) = item.snapshot.source_coverage() {
                 source_coverage.extend(receipt.sources().iter().cloned());
             }
@@ -834,6 +882,7 @@ impl DaemonSessionRetrievalService {
                     cursor,
                     explanations,
                     omissions,
+                    coverage_omissions,
                     authorized_root: self.root.authorized_root.clone(),
                 },
             },
@@ -994,6 +1043,20 @@ impl<'a> SessionPageReconstructionInputs<'a> {
     }
 }
 
+fn root_continuation_population(
+    item: &TemporalKernelResult,
+) -> Option<TemporalCandidatePopulationCount> {
+    if !item.context.bundle.omissions.iter().any(|omission| {
+        omission.anchor_id.is_none()
+            && omission.reason == ContextOmissionReasonV1::RootContinuationUnavailable
+    }) {
+        return None;
+    }
+    item.snapshot
+        .prepared_candidate_cohort()
+        .and_then(|cohort| cohort.strict_population())
+}
+
 fn reconstruction_or_omission(
     reconstruction: Result<SessionPageReconstruction, SessionTemporalExecutionError>,
 ) -> Result<Result<SessionPageReconstruction, HydrationStateV1>, SessionTemporalExecutionError> {
@@ -1058,6 +1121,9 @@ fn complete_page_outcome(
             page,
             freshness,
             omitted,
+            // Every skipped hydration slot is a genuine missing record; the
+            // lag flag never folds into this path's count.
+            record_omitted: omitted,
         }
     }
 }

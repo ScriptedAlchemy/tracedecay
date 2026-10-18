@@ -10,13 +10,14 @@
 //! uninstalled until a real native fixture admits their protocol.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
-    install_mcp_server_entry, load_jsonc_file, uninstall_mcp_server_entry,
+    McpDoctorLabels, doctor_check_mcp_registration, install_mcp_server_entry, load_jsonc_file,
+    uninstall_mcp_server_entry,
 };
 
 pub struct KiloIntegration;
@@ -39,18 +40,18 @@ impl AgentIntegration for KiloIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mKilo CLI integration\x1b[0m");
+        dc.section("Kilo CLI integration");
         doctor_check_settings(dc, &ctx.home);
     }
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
-        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+        if component != super::host_bundle::HostComponentV1::ContextMcp {
             return State::Missing;
         }
 
@@ -59,16 +60,25 @@ impl AgentIntegration for KiloIntegration {
             return State::Missing;
         };
         let settings = super::parse_jsonc(&bytes);
-        if settings
+        let enabled = settings
             .pointer("/mcp/tracedecay/enabled")
             .and_then(serde_json::Value::as_bool)
-            == Some(true)
-            && settings
-                .pointer("/mcp/tracedecay/command")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+            == Some(true);
+        let command = settings.pointer("/mcp/tracedecay/command");
+        let launches_serve = command
+            .and_then(serde_json::Value::as_array)
+            .and_then(|argv| argv.get(1))
+            .and_then(serde_json::Value::as_str)
+            == Some("serve");
+        if enabled
+            && ctx
+                .catalog_profiles
+                .serve_args(self.id())
+                .matches_command_json(command)
         {
             State::Current
+        } else if enabled && launches_serve {
+            State::Repairable
         } else {
             State::Missing
         }
@@ -78,36 +88,40 @@ impl AgentIntegration for KiloIntegration {
         kilo_config_dir(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
+    fn primary_config_path(
+        &self,
+        home: &Path,
+        _profile: &ProfileRoot,
+    ) -> Option<std::path::PathBuf> {
         Some(kilo_config_path(home))
     }
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
-            let path = kilo_config_path(home);
-            vec![path.clone(), config_backup_path(&path)]
+        if components == [super::host_bundle::HostComponentV1::ContextMcp] {
+            vec![kilo_config_path(home)]
         } else {
             Vec::new()
         }
     }
 
-    #[hotpath::measure(label = "kilo_mcp_install")]
+    #[tracing::instrument(name = "kilo_mcp_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             install_mcp_server_entry(
                 &kilo_config_path(&ctx.home),
                 "mcp",
                 serde_json::json!({
                     "type": "local",
-                    "command": [ctx.tracedecay_bin.clone(), "serve"],
+                    "command": ctx.serve_args.command_json(&ctx.tracedecay_bin),
                     "enabled": true
                 }),
                 "Kilo",
@@ -119,28 +133,25 @@ impl AgentIntegration for KiloIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             uninstall_mcp_server_entry(
                 &kilo_config_path(&ctx.home),
                 "mcp",
                 JsonConfigDialect::Jsonc,
-                McpUninstallPolicy::default(),
             )?;
         }
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(&kilo_config_path(home), "mcp", load_jsonc_file)
     }
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     doctor_check_mcp_registration(

@@ -12,7 +12,7 @@ use tracedecay_store::{
 use crate::db::engine::{
     Connection, ReadConnection, ReadSnapshot, Transaction, TransactionBehavior,
 };
-use crate::store_runtime::registry::StoreRuntimeClientLease;
+use crate::shard_runtime::registry::StoreRuntimeClientLease;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{DatabaseAuthority, DatabaseAuthorityRole};
@@ -21,7 +21,6 @@ mod facade;
 mod graph_binding;
 mod integrity;
 mod memory_graph_reconciliation;
-mod pragmas;
 mod query_write;
 mod registry;
 mod retained_maintenance;
@@ -30,15 +29,14 @@ mod runtime_lifecycle;
 mod test_runtime;
 
 pub use graph_binding::{MemoryGraphRuntimeOperationErrorV1, MemoryGraphRuntimeOperationV1};
-pub(crate) use memory_graph_reconciliation::MemoryGraphReconciliationTaskScheduleV1;
+pub use memory_graph_reconciliation::MemoryGraphReconciliationTaskScheduleV1;
 pub use memory_graph_reconciliation::{
-    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationRetirementReservationV1,
+    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationInlinePassV1,
+    MemoryGraphReconciliationRetirementReservationV1,
     MemoryGraphReconciliationRetirementStartErrorV1, MemoryGraphReconciliationRetirementTerminalV1,
     MemoryGraphReconciliationTaskOwnerV1, ProjectMemoryReconciliationTelemetryObserverV1,
     ProjectMemoryReconciliationTelemetrySnapshotV1,
 };
-#[cfg(test)]
-pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
 pub use registry::{
     DatabaseClientGuardV1, DatabaseGraphOwnerRetirementCompositionRefusalV1, DatabaseOwnerErrorV1,
     DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1, DatabaseOwnerWeakLeaseIssuerErrorV1,
@@ -65,14 +63,26 @@ pub struct Database {
     client: Arc<DatabaseClientLeaseV1>,
 }
 
+// A combined `Send` proof of this client walks the registry attachment past
+// the recursion limit (rust-lang/rust#159228). Each field is checked alone.
+unsafe impl Send for Database {}
+unsafe impl Sync for Database {}
+
+const _: fn(&Database) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let Database { inner, client } = value;
+    assert_send_sync(inner);
+    assert_send_sync(client);
+};
+
 #[derive(Clone)]
-pub(crate) struct WeakDatabase {
+pub struct WeakDatabase {
     inner: Weak<DatabaseInner>,
     client: Weak<DatabaseClientLeaseV1>,
 }
 
 impl WeakDatabase {
-    pub(crate) fn upgrade(&self) -> Option<Database> {
+    pub fn upgrade(&self) -> Option<Database> {
         let inner = self.inner.upgrade()?;
         let client = self.client.upgrade()?;
         Some(Database { inner, client })
@@ -86,7 +96,6 @@ pub enum DatabaseAccessMode {
 }
 
 impl DatabaseAccessMode {
-    #[hotpath::skip]
     const fn is_writable(&self) -> bool {
         matches!(self, Self::ReadWrite)
     }
@@ -121,15 +130,16 @@ enum DatabaseHealth {
     Corrupt(String),
 }
 
-static DATABASE_HEALTH_GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static DATABASE_HEALTH_GATE: OnceLock<Arc<asupersync::sync::Mutex<()>>> = OnceLock::new();
 
 /// A writer connection that cannot outlive the canonical database's writer
 /// lane. It is another capability over the same physical attachment, never a
 /// second path-derived `SQLite` open.
 pub struct DatabaseWriterConnection<'a> {
-    _guard: tokio::sync::MutexGuard<'a, ()>,
+    _guard: asupersync::sync::OwnedMutexGuard<()>,
     conn: Connection,
     _client_guard: DatabaseClientGuardV1,
+    _database: std::marker::PhantomData<&'a Database>,
 }
 
 /// Driver-neutral writer facade held behind [`DatabaseWriterConnection`].
@@ -231,8 +241,9 @@ pub enum DatabaseMemoryTransaction<'a> {
 /// transaction commits, rolls back, or is dropped.
 pub struct DatabaseWriteTransaction<'a> {
     transaction: Transaction,
-    guard: tokio::sync::MutexGuard<'a, ()>,
+    guard: asupersync::sync::OwnedMutexGuard<()>,
     _client_guard: DatabaseClientGuardV1,
+    _database: std::marker::PhantomData<&'a Database>,
 }
 
 fn database_checkpoint_probe() -> Result<DatabaseCheckpointProbe> {

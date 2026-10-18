@@ -6,7 +6,7 @@ import type { LiveActivityPulse } from '../../data/sse/connect.ts';
  * print. Pure and framework-free, so it is testable without React or a live
  * stream.
  *
- * Every number here is counted straight off pulses that actually landed —
+ * Every number here is counted straight off pulses that actually landed , 
  * never smoothed, extrapolated, or defaulted to something friendlier than the
  * truth.
  */
@@ -18,20 +18,20 @@ import type { LiveActivityPulse } from '../../data/sse/connect.ts';
  * the present is what lets the figure fall to zero when activity stops. */
 export const RATE_WINDOW_MS = 60_000;
 
-export interface ActivityFamilyCount {
+interface ActivityFamilyCount {
   family: string;
   label: string;
   count: number;
 }
 
-export interface ActivitySummary {
+interface ActivitySummary {
   /** Pulses held in the ring right now. */
   total: number;
   /** Families ranked by count over the whole ring, busiest first; ties break
    * alphabetically so the ranking is stable across renders of one ring. */
   families: readonly ActivityFamilyCount[];
   /** Count of the busiest family, so a caller can rail the rest against it.
-   * `null` on an empty ring — there is no scale to rank against. */
+   * `null` on an empty ring, there is no scale to rank against. */
   peak: number | null;
   /** Wall-clock span the ring covers, or `null` when fewer than two pulses
    * give it no span at all. */
@@ -69,9 +69,9 @@ export function summarizeActivity(
 }
 
 /** Human label for an event family. Falls back to de-slugging an unknown
- * family rather than hiding it — a family the dashboard has never been taught
+ * family rather than hiding it, a family the dashboard has never been taught
  * to name is still real activity and must stay legible. */
-export function familyLabel(family: string): string {
+function familyLabel(family: string): string {
   if (family === 'heartbeat') return 'heartbeat';
   if (family === 'project_registry_changed') return 'project registry';
   if (family === 'storage_telemetry_invalidated') return 'storage telemetry';
@@ -86,7 +86,7 @@ export function familyLabel(family: string): string {
  *
  * The unit is in the name on purpose. Loom's `tracks.ts` formats the same
  * vocabulary from epoch SECONDS, so while both were called `formatDuration`
- * there were two functions of one name whose inputs differ by 1000x — and
+ * there were two functions of one name whose inputs differ by 1000x, and
  * reaching for the wrong one prints a wrong duration rather than failing,
  * which is a falsified value on screen. Loom's is now
  * `formatDurationSeconds`; callers of either have to name the unit they hold,
@@ -104,7 +104,7 @@ export function formatDurationMs(ms: number | null): string {
  * How often an age readout has to be recomputed to stay true, given the age it
  * is currently showing. A displayed age is the one figure on the panel that
  * goes stale by itself: nothing re-renders while the stream is silent, which
- * is exactly when the number is changing. So the panel re-reads the clock —
+ * is exactly when the number is changing. So the panel re-reads the clock , 
  * not to animate anything, but because "last event 4s ago" pinned on screen
  * ten minutes after the fact is a lie, and a silent stream is precisely the
  * case the viewer most needs told accurately.

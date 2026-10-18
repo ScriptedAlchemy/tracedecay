@@ -1,0 +1,1006 @@
+//! Production application primitive owners over admitted graph and store authorities.
+
+use std::path::Path;
+use std::sync::{Arc, LazyLock, Mutex};
+
+use tracedecay_contracts::retrieval::{
+    PrimitiveFailure, PrimitiveFailureKind, RetrievalPortOutcome, TemporalRetrievalPort,
+    TestPrimitivePortContext, TestPrimitivePortOutcome,
+};
+use tracedecay_contracts::{
+    ApplicationContractError, ApplicationProblem, CoverageCompleteness, CoverageDomainState,
+    EvidenceCoverage, EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor,
+    OperationBudgetUsage, PageCursor, PageState, RequestAdmission, RequestContext,
+    RetrievalEvidence, TemporalState, now_micros,
+};
+use tracedecay_domain::{
+    ApplicationProblemDetailV1, CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1,
+    ManifestDigest, RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros,
+    canonical_sha256,
+};
+use tracedecay_tool_catalog::SortContractId;
+use url::Url;
+
+use super::concrete::AuthenticatedSymbolGraphCursorAdapter;
+use super::runtime::{
+    CodeIndexConvergenceParkPortV1, DiagnosticPrimitiveRecord, DiagnosticsPrimitiveResult,
+    ManagedTestResultCursorPort, ManagedTestRunCurrentIdentity,
+    ManagedTestRunCurrentIdentityFuture, ManagedTestRunCurrentScopePort, PrimitiveProjectRuntime,
+    RetainedManagedTestRuns, open_primitive_project_runtime,
+};
+use super::symbol_graph::SymbolGraphCursorPort;
+use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
+use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use crate::diagnostics_query::DiagnosticQueryCursor;
+use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
+use crate::source_authorization::ProjectSourceAccessSnapshot;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_graph_query::SourceReadContext;
+use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
+use tracedecay_graph_query::{
+    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest, GraphQueryError,
+    GraphQueryResult,
+};
+use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
+use tracedecay_temporal_query::cursor::SessionCursorAuthenticator;
+use tracedecay_temporal_query::cursor::{
+    CURSOR_LIFETIME_MICROS, CursorError, StableSortKey, encode_cursor, verify_cursor,
+};
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
+
+mod affected_tests;
+#[cfg(test)]
+mod affected_tests_tests;
+mod extended_primitive;
+mod managed_test_scope;
+#[cfg(test)]
+#[path = "production/managed_test_scope_tests.rs"]
+mod managed_test_scope_tests;
+mod retrieval_ports;
+mod symbol_graph_snapshot;
+mod test_primitive;
+#[cfg(test)]
+mod unavailable_evidence_tests;
+
+pub use affected_tests::TraceDecayAffectedTestsPortV1;
+pub use extended_primitive::TraceDecayExtendedPrimitivePortV1;
+use managed_test_scope::ProductionManagedTestRunCurrentScope;
+pub use retrieval_ports::{TraceDecayHealthPortV1, TraceDecaySourceLinesPortV1};
+pub use symbol_graph_snapshot::ProjectSymbolGraphCursorSnapshotAuthority;
+pub use test_primitive::TraceDecayTestPrimitivePortV1;
+
+const PRIMITIVE_SORT: &str = "sort.application.primitive.v1";
+
+/// Validated once per process; every page in this module shares the same
+/// static sort contract, so the identifier check does not belong on the
+/// per-call path.
+static PRIMITIVE_SORT_CONTRACT: LazyLock<SortContractId> =
+    LazyLock::new(|| SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")));
+
+fn completed<T>(
+    payload: T,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    let Ok(coverage) = EvidenceCoverage::complete(vec![domain], 1, 1, 1) else {
+        return failed(domain, finished_at);
+    };
+    completed_with_coverage(payload, domain, finished_at, coverage, Vec::new())
+}
+
+/// A payload the graph could only partly witness: one unsupported omission
+/// names the capability gap, and coverage says `partial` so an empty payload
+/// never reads as a proven absence.
+fn completed_unsupported<T>(
+    payload: T,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    let coverage = EvidenceCoverage {
+        requested_domains: vec![domain],
+        visited: Some(1),
+        eligible: Some(1),
+        returned: 1,
+        completeness: CoverageCompleteness::Partial,
+        domains: vec![CoverageDomainState {
+            domain,
+            completeness: CoverageCompleteness::Partial,
+        }],
+    };
+    let omissions = vec![Omission {
+        domain,
+        count: 1,
+        reason: OmissionReason::Unsupported,
+    }];
+    completed_with_coverage(payload, domain, finished_at, coverage, omissions)
+}
+
+fn completed_with_coverage<T>(
+    payload: T,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+    coverage: EvidenceCoverage,
+    omissions: Vec<Omission>,
+) -> RetrievalPortOutcome<T> {
+    let Ok(page) = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(1), 1) else {
+        return failed(domain, finished_at);
+    };
+    RetrievalPortOutcome::Completed(RetrievalEvidence {
+        payload: Some(payload),
+        temporal: TemporalState::current(finished_at),
+        evidence_authorities: Vec::new(),
+        coverage,
+        omissions,
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page,
+        finished_at,
+        budget: OperationBudgetUsage::default(),
+        cancellation: None,
+        cost: None,
+    })
+}
+
+fn empty_primitive_page() -> PageState {
+    PageState {
+        sort_contract_id: PRIMITIVE_SORT_CONTRACT.clone(),
+        sort_revision: 1,
+        total: Some(0),
+        returned: 0,
+        cursor: None,
+        expires_at: None,
+    }
+}
+
+fn primitive_page(
+    total: Option<u64>,
+    returned: u64,
+) -> Result<PageState, ApplicationContractError> {
+    PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, total, returned)
+}
+
+fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOutcome<T> {
+    RetrievalPortOutcome::Failed(RetrievalEvidence {
+        payload: None,
+        temporal: TemporalState::current(finished_at),
+        evidence_authorities: Vec::new(),
+        coverage: EvidenceCoverage {
+            requested_domains: vec![domain],
+            visited: None,
+            eligible: None,
+            returned: 0,
+            completeness: CoverageCompleteness::Unknown,
+            domains: vec![CoverageDomainState {
+                domain,
+                completeness: CoverageCompleteness::Unknown,
+            }],
+        },
+        omissions: Vec::new(),
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page: empty_primitive_page(),
+        finished_at,
+        budget: OperationBudgetUsage::default(),
+        cancellation: None,
+        cost: None,
+    })
+}
+
+/// Reports a test primitive read that could not be served.
+///
+/// A graph read that fails leaves the port with no measurement at all. The
+/// empty default would be returned as `Completed`, so a store failure would
+/// claim a tested function has no tests, which is worse than reporting
+/// nothing. Whole-read failures land here; per-symbol failures keep the
+/// symbols that were read and report `Partial`.
+fn test_primitive_failed<T>(context: TestPrimitivePortContext<'_>) -> TestPrimitivePortOutcome<T> {
+    TestPrimitivePortOutcome::Failed {
+        finished_at: context.observed_at,
+        budget: OperationBudgetUsage::default(),
+    }
+}
+
+fn diagnostics_unavailable(
+    finished_at: UtcMicros,
+    reason: OmissionReason,
+) -> RetrievalPortOutcome<DiagnosticsPrimitiveResult> {
+    evidence_unavailable(EvidenceDomain::Diagnostic, finished_at, reason, 0)
+}
+
+pub(super) fn omitted_evidence<T>(
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+    reason: OmissionReason,
+    omitted: u64,
+) -> RetrievalEvidence<T> {
+    RetrievalEvidence {
+        payload: None,
+        temporal: TemporalState {
+            freshness: if reason == OmissionReason::Stale {
+                FreshnessState::Stale
+            } else {
+                FreshnessState::Unknown
+            },
+            ..TemporalState::current(finished_at)
+        },
+        evidence_authorities: Vec::new(),
+        coverage: EvidenceCoverage {
+            requested_domains: vec![domain],
+            visited: None,
+            eligible: None,
+            returned: 0,
+            completeness: CoverageCompleteness::Unknown,
+            domains: vec![CoverageDomainState {
+                domain,
+                completeness: CoverageCompleteness::Unknown,
+            }],
+        },
+        omissions: vec![Omission {
+            domain,
+            count: omitted,
+            reason,
+        }],
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page: empty_primitive_page(),
+        finished_at,
+        budget: OperationBudgetUsage::default(),
+        cancellation: None,
+        cost: None,
+    }
+}
+
+fn evidence_unavailable<T>(
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+    reason: OmissionReason,
+    omitted: u64,
+) -> RetrievalPortOutcome<T> {
+    RetrievalPortOutcome::Unavailable(omitted_evidence(domain, finished_at, reason, omitted))
+}
+
+fn graph_read_outcome<T>(
+    error: &CodeGraphReadError,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    let reason = match error {
+        CodeGraphReadError::Cancelled => OmissionReason::Cancelled,
+        CodeGraphReadError::TimedOut => OmissionReason::TimedOut,
+        CodeGraphReadError::Stale { .. } => OmissionReason::Stale,
+        _ => OmissionReason::Unavailable,
+    };
+    let evidence = omitted_evidence(domain, finished_at, reason, 0);
+    match error {
+        CodeGraphReadError::Cancelled => RetrievalPortOutcome::Cancelled(evidence),
+        CodeGraphReadError::TimedOut => RetrievalPortOutcome::TimedOut(evidence),
+        CodeGraphReadError::Parked {
+            cause,
+            remedy,
+            retries_on_wake,
+        } => RetrievalPortOutcome::Refused(
+            evidence,
+            Box::new(ApplicationProblem::from_detail(
+                ApplicationProblemDetailV1::Parked {
+                    cause: cause.clone(),
+                    remedy: remedy.clone(),
+                    retries_on_wake: *retries_on_wake,
+                },
+            )),
+        ),
+        _ => RetrievalPortOutcome::Refused(
+            evidence,
+            Box::new(code_graph_read_failure(error).into_problem()),
+        ),
+    }
+}
+
+/// A request the port refuses outright, such as a malformed or unknown id:
+/// the caller gets the typed problem instead of a failed read.
+fn refused<T>(
+    kind: PrimitiveFailureKind,
+    code: &'static str,
+    message: &'static str,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    let Ok(failure) = PrimitiveFailure::new(kind, code, message) else {
+        return failed(domain, finished_at);
+    };
+    RetrievalPortOutcome::Refused(
+        omitted_evidence(domain, finished_at, OmissionReason::Failed, 0),
+        Box::new(failure.into_problem()),
+    )
+}
+
+fn health_delta_outcome<T>(
+    error: &crate::graph_health_delta::HealthDeltaError,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    use crate::graph_health_delta::HealthDeltaError;
+    let domain = EvidenceDomain::Operational;
+    let (kind, code, message) = match error {
+        HealthDeltaError::InvalidPathPrefix => (
+            PrimitiveFailureKind::InvalidRequest,
+            "application.health-delta.invalid-path-prefix",
+            "path_prefix must be one canonical project-relative path.",
+        ),
+        HealthDeltaError::MalformedCursor => (
+            PrimitiveFailureKind::CursorRefused,
+            "application.health-delta.invalid-cursor",
+            "before_cursor is not a health-delta cursor.",
+        ),
+        HealthDeltaError::UnknownCursor => (
+            PrimitiveFailureKind::CursorRefused,
+            "application.health-delta.cursor-unknown",
+            "before_cursor names no retained point for this scope. Omit before_cursor to record a new baseline.",
+        ),
+        HealthDeltaError::DefinitionMismatch { .. } => (
+            PrimitiveFailureKind::CursorRefused,
+            "application.health-delta.definition-mismatch",
+            "before_cursor was measured under another health definition. Omit before_cursor to record a new baseline.",
+        ),
+        HealthDeltaError::DefinitionUnrecorded => (
+            PrimitiveFailureKind::CursorRefused,
+            "application.health-delta.definition-unrecorded",
+            "before_cursor predates recorded health definitions. Omit before_cursor to record a new baseline.",
+        ),
+        HealthDeltaError::CorruptPoint => (
+            PrimitiveFailureKind::Unavailable,
+            "application.health-delta.point-corrupt",
+            "A retained health-delta point failed identity validation.",
+        ),
+        HealthDeltaError::Graph(error) => return graph_query_outcome(error, domain, finished_at),
+        HealthDeltaError::Storage(_) => {
+            return evidence_unavailable(domain, finished_at, OmissionReason::Unavailable, 0);
+        }
+    };
+    refused(kind, code, message, domain, finished_at)
+}
+
+/// Refuses a file-scoped read of a path the admitted generation never
+/// published. `symbols_in_logical_file` answers such a path with an empty
+/// list, which would otherwise read as a complete account of a real file.
+fn unpublished_file_outcome<T>(
+    reader: &CodeGraphInteractiveReader,
+    path: &str,
+    domain: EvidenceDomain,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> Option<RetrievalPortOutcome<T>> {
+    match reader.file_by_logical_path(path, cancellation) {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(refused(
+            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+            "application.code-graph.file-not-found",
+            "file is not in the admitted graph",
+            domain,
+            now_observed(),
+        )),
+        Err(error) => Some(graph_read_outcome(
+            &tracedecay_graph_query::map_projection_error(error),
+            domain,
+            now_observed(),
+        )),
+    }
+}
+
+/// The outcome of a graph query that failed after its projection opened: the
+/// same typed state an open failure reports when the query surfaced a
+/// code-graph read error, and a failed read otherwise.
+fn graph_query_outcome<T>(
+    error: &GraphQueryError,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    match error {
+        GraphQueryError::Read(read_error) => graph_read_outcome(read_error, domain, finished_at),
+        GraphQueryError::EvidenceUnavailable { detail, .. } => graph_read_outcome(
+            &CodeGraphReadError::Unavailable {
+                detail: detail.clone(),
+            },
+            domain,
+            finished_at,
+        ),
+        GraphQueryError::Runtime(_) => failed(domain, finished_at),
+    }
+}
+
+/// The typed refusal for a code-graph read the projection could not serve.
+///
+/// Every graph read reports one state per cause, so a graph that is still
+/// building answers `application.code-graph.unavailable` from every tool
+/// instead of an empty answer that reads as "nothing depends on this".
+pub(super) fn code_graph_read_failure(error: &CodeGraphReadError) -> PrimitiveFailure {
+    let (kind, code, message) = match error {
+        CodeGraphReadError::MissingRegistry => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.registry-missing",
+            "The code index has not registered this project's code graph yet.",
+        ),
+        CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Rewarming { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.unavailable",
+            "The project's verified code graph is not serving yet; retry after the code index \
+             seals a generation.",
+        ),
+        CodeGraphReadError::Refused { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.refused",
+            "The project's code graph is refused for the serving generation; exact and lexical \
+             reads still serve, and graph reads return once another generation seals.",
+        ),
+        CodeGraphReadError::ResetRequired { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.reset-required",
+            "The project's code graph requires a reset before it can serve.",
+        ),
+        CodeGraphReadError::Stale { .. } => (
+            PrimitiveFailureKind::Stale,
+            "application.code-graph.stale",
+            "The code-graph generation this read was admitted against has been superseded.",
+        ),
+        CodeGraphReadError::Cancelled => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.cancelled",
+            "The code-graph read was cancelled.",
+        ),
+        CodeGraphReadError::TimedOut => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.timed-out",
+            "The code-graph read timed out.",
+        ),
+        CodeGraphReadError::BudgetExhausted { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.budget-exhausted",
+            "The code-graph read exceeded its budget.",
+        ),
+        CodeGraphReadError::Denied => (
+            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+            "application.code-graph.denied",
+            "The code-graph read is not authorized.",
+        ),
+        CodeGraphReadError::InvalidRequest { .. } => (
+            PrimitiveFailureKind::InvalidRequest,
+            "application.code-graph.invalid-request",
+            "The code-graph read request is invalid.",
+        ),
+        CodeGraphReadError::Corrupt { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.corrupt",
+            "The project's verified code-graph projection is corrupt.",
+        ),
+        CodeGraphReadError::Parked { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-index.parked",
+            "The code index for this worktree is parked until the operator applies its remedy.",
+        ),
+    };
+    PrimitiveFailure {
+        kind,
+        code: code.to_owned(),
+        message: message.to_owned(),
+        detail: match error {
+            CodeGraphReadError::Rewarming { retry_after_millis } => {
+                Some(Box::new(ApplicationProblemDetailV1::CodeGraphRewarming {
+                    retry_after_millis: *retry_after_millis,
+                }))
+            }
+            _ => None,
+        },
+    }
+}
+
+fn diagnostics_result(
+    generation_id: CodeGenerationId,
+    watermark_digest: ManifestDigest,
+    diagnostics: Vec<DiagnosticPrimitiveRecord>,
+    total: u64,
+    next_cursor: Option<OpaqueCursor>,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<DiagnosticsPrimitiveResult> {
+    let returned = diagnostics.len() as u64;
+    let next_cursor_text = next_cursor
+        .as_ref()
+        .map(|cursor| cursor.as_str().to_owned());
+    let mut page = match primitive_page(Some(total), returned) {
+        Ok(page) => page,
+        Err(_) => return failed(EvidenceDomain::Diagnostic, finished_at),
+    };
+    page.cursor = next_cursor.map(|cursor| PageCursor::Opaque { cursor });
+    page.expires_at = page.cursor.as_ref().and_then(|_| {
+        finished_at
+            .0
+            .checked_add(CURSOR_LIFETIME_MICROS)
+            .map(UtcMicros)
+    });
+    let evidence = RetrievalEvidence {
+        payload: Some(DiagnosticsPrimitiveResult {
+            generation_id: generation_id.clone(),
+            clean_generation: true,
+            findings_cleared: total == 0,
+            diagnostics,
+            next_cursor: next_cursor_text,
+        }),
+        temporal: TemporalState {
+            source_generation: Some(generation_id),
+            watermark_digest: Some(watermark_digest),
+            ..TemporalState::current(finished_at)
+        },
+        evidence_authorities: Vec::new(),
+        coverage: EvidenceCoverage {
+            requested_domains: vec![EvidenceDomain::Diagnostic],
+            visited: Some(total),
+            eligible: Some(total),
+            returned,
+            completeness: CoverageCompleteness::Complete,
+            domains: vec![CoverageDomainState {
+                domain: EvidenceDomain::Diagnostic,
+                completeness: CoverageCompleteness::Complete,
+            }],
+        },
+        omissions: Vec::new(),
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page,
+        finished_at,
+        budget: OperationBudgetUsage::default(),
+        cancellation: None,
+        cost: None,
+    };
+    RetrievalPortOutcome::Completed(evidence)
+}
+
+const DIAGNOSTIC_CURSOR_LANE_WORKSPACE: &str = "workspace";
+
+/// Authenticated cursors over the session store's active cursor key, bound
+/// to the request grant, a code generation, and a lane. Diagnostics pages and
+/// managed test-result pages continue under it.
+#[derive(Clone)]
+struct AuthenticatedDiagnosticCursorAuthorityV1 {
+    key: SignedCursorKeyRefV1,
+    configuration_digest: ManifestDigest,
+    authenticator: Arc<dyn SessionCursorAuthenticator>,
+}
+
+impl AuthenticatedDiagnosticCursorAuthorityV1 {
+    fn snapshot(
+        &self,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+    ) -> Result<TemporalExecutionSnapshot, ()> {
+        if context.validate().is_err()
+            || context.admission_at(now_observed()) != RequestAdmission::Admitted
+        {
+            return Err(());
+        }
+        let request_digest = canonical_sha256(&(
+            "tracedecay.diagnostics.cursor.v1",
+            context.actor(),
+            context.grant().revision,
+            &context.grant().digest,
+            &context.grant().issuer,
+            &context.grant().allowed_capabilities,
+            &context.grant().allowed_use_cases,
+            context.grant().disclosure,
+            generation.as_str(),
+            lane,
+        ))
+        .map_err(|_| ())?;
+        let request = TemporalSnapshotRequest::new(
+            SessionId::new("session.daemon.diagnostics").map_err(|_| ())?,
+            context.scope().scope_digest.as_str(),
+            request_digest.as_str(),
+            context.grant().digest.as_str(),
+            TemporalModeV1::Current,
+            RetrievalGrainV1::Occurrence,
+        )
+        .map_err(|_| ())?;
+        TemporalExecutionSnapshot::new_authorized(
+            request,
+            TemporalWatermarks {
+                generation: 1,
+                source: 1,
+                projection: 1,
+                index: 1,
+                summary: 1,
+            },
+            KernelVersions {
+                schema: 1,
+                ranking: 1,
+                configuration_digest: BindingDigest::new(
+                    "configuration_digest",
+                    self.configuration_digest.as_str(),
+                )
+                .map_err(|_| ())?,
+            },
+            Some(self.key.clone()),
+            ValidatedAuthorization::Authorized,
+        )
+        .map_err(|_| ())
+    }
+
+    /// The page position `encoded` names, or the refusal a cursor minted for
+    /// another request receives (`None` when the cursor is merely stale).
+    fn decode(
+        &self,
+        encoded: &str,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+        binding: &CursorBindingV1,
+    ) -> Result<DiagnosticQueryCursor, Option<CursorBindingMismatchV1>> {
+        let snapshot = self
+            .snapshot(context, generation, lane)
+            .map_err(|()| None)?;
+        let sort_key = verify_cursor(encoded, &snapshot, binding, self.authenticator.as_ref())
+            .map_err(|error| match error {
+                CursorError::Binding(mismatch) => Some(mismatch),
+                CursorError::Malformed | CursorError::Tampered => {
+                    Some(CursorBindingMismatchV1::Foreign)
+                }
+                _ => None,
+            })?;
+        if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
+            return Err(Some(CursorBindingMismatchV1::Foreign));
+        }
+        DiagnosticQueryCursor::decode(&format!("dq1:{}", sort_key.stable_id))
+            .map_err(|_| Some(CursorBindingMismatchV1::Foreign))
+    }
+
+    fn encode(
+        &self,
+        cursor: &DiagnosticQueryCursor,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+        binding: &CursorBindingV1,
+    ) -> Result<OpaqueCursor, ()> {
+        let snapshot = self.snapshot(context, generation, lane)?;
+        let encoded = encode_cursor(
+            &snapshot,
+            binding,
+            &StableSortKey {
+                normalized_score_micros: 0,
+                knowledge_at_micros: 0,
+                stable_id: cursor.anchor().to_owned(),
+            },
+            self.authenticator.as_ref(),
+        )
+        .map_err(|_| ())?;
+        OpaqueCursor::new(encoded).map_err(|_| ())
+    }
+}
+
+fn managed_test_result_lane(operation_id: &str) -> String {
+    format!("managed-test-results:{operation_id}")
+}
+
+/// The binding every managed test-result cursor carries: the same
+/// `test_results` shape the live operation stream binds its pages to.
+fn managed_test_result_binding(page_size: u32) -> Option<CursorBindingV1> {
+    CursorBindingV1::builder("test_results")
+        .parameter("page_size", &page_size)
+        .build()
+        .ok()
+}
+
+impl ManagedTestResultCursorPort for AuthenticatedDiagnosticCursorAuthorityV1 {
+    fn encode(
+        &self,
+        context: &RequestContext,
+        operation_id: &str,
+        generation: &CodeGenerationId,
+        page_size: u32,
+        offset: usize,
+    ) -> Option<OpaqueCursor> {
+        let lane = managed_test_result_lane(operation_id);
+        let snapshot = self.snapshot(context, generation, &lane).ok()?;
+        let encoded = encode_cursor(
+            &snapshot,
+            &managed_test_result_binding(page_size)?,
+            &StableSortKey {
+                normalized_score_micros: u64::try_from(offset).ok()?,
+                knowledge_at_micros: 0,
+                stable_id: operation_id.to_owned(),
+            },
+            self.authenticator.as_ref(),
+        )
+        .ok()?;
+        OpaqueCursor::new(encoded).ok()
+    }
+
+    fn decode(
+        &self,
+        cursor: &OpaqueCursor,
+        context: &RequestContext,
+        operation_id: &str,
+        generation: &CodeGenerationId,
+        page_size: u32,
+    ) -> Result<usize, Option<CursorBindingMismatchV1>> {
+        let lane = managed_test_result_lane(operation_id);
+        let snapshot = self
+            .snapshot(context, generation, &lane)
+            .map_err(|()| None)?;
+        let binding = managed_test_result_binding(page_size).ok_or(None)?;
+        let sort_key = verify_cursor(
+            cursor.as_str(),
+            &snapshot,
+            &binding,
+            self.authenticator.as_ref(),
+        )
+        .map_err(|error| match error {
+            CursorError::Binding(mismatch) => Some(mismatch),
+            CursorError::Malformed | CursorError::Tampered => {
+                Some(CursorBindingMismatchV1::Foreign)
+            }
+            _ => None,
+        })?;
+        if sort_key.knowledge_at_micros != 0 || sort_key.stable_id != operation_id {
+            return Err(Some(CursorBindingMismatchV1::Foreign));
+        }
+        usize::try_from(sort_key.normalized_score_micros)
+            .map_err(|_| Some(CursorBindingMismatchV1::Foreign))
+    }
+}
+
+fn now_observed() -> UtcMicros {
+    now_micros()
+}
+
+#[tracing::instrument(name = "usecases.primitives.open_graph", level = "trace", skip_all)]
+async fn open_code_graph(
+    port: &dyn CodeGraphProjectionReadPort,
+    context: &RequestContext,
+    observed_at: UtcMicros,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> Result<CodeGraphInteractiveReader, CodeGraphReadError> {
+    port.open(CodeGraphReadRequest::new(
+        context,
+        observed_at,
+        Arc::clone(&cancellation),
+    ))
+    .await?
+    .reader_with_cancellation(context, observed_at, cancellation)
+}
+
+#[tracing::instrument(name = "usecases.primitives.graph_census", level = "trace", skip_all)]
+fn all_code_graph_symbols(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> GraphQueryResult<Vec<CodeGraphSymbolSummaryV1>> {
+    const PAGE_SIZE: usize = 4_096;
+    GraphQueryManager::new(graph, cancellation).page_all_symbols(
+        PAGE_SIZE,
+        "verified symbol census exceeded its analytical budget",
+    )
+}
+
+fn test_annotation_evidence(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    cache: &Mutex<
+        Option<(
+            CodeGenerationId,
+            std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>,
+        )>,
+    >,
+) -> Result<std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>, ()> {
+    let generation = graph.generation().clone();
+    if let Ok(guard) = cache.lock()
+        && let Some((cached_generation, cached)) = &*guard
+        && cached_generation == &generation
+    {
+        return Ok(cached.clone());
+    }
+    let symbols = all_code_graph_symbols(graph, Arc::clone(&cancellation)).map_err(|_| ())?;
+    let occurrences = symbols
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    let markers = symbols
+        .iter()
+        .filter(|symbol| symbol.metadata.as_ref().is_some_and(is_test_marker))
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let edges = graph
+        .edges_among(
+            &occurrences,
+            &[tracedecay_domain::RelationEdgeKindV1::Annotates],
+            2_000_000,
+            cancellation,
+        )
+        .map_err(|_| ())?;
+    let evidence = edges
+        .into_iter()
+        .filter(|edge| markers.contains(&edge.from_occurrence))
+        .map(|edge| edge.to_occurrence)
+        .collect::<std::collections::HashSet<_>>();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((generation, evidence.clone()));
+    }
+    Ok(evidence)
+}
+
+fn files_for_occurrences(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    occurrences: &std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>,
+) -> Result<std::collections::HashSet<String>, ()> {
+    occurrences
+        .iter()
+        .map(|occurrence| {
+            graph
+                .symbol_summary(occurrence, Arc::clone(&cancellation))
+                .map_err(|_| ())?
+                .and_then(|symbol| symbol.binding?.logical_path)
+                .ok_or(())
+        })
+        .collect()
+}
+
+/// Owned authorities and admitted project state required to open the complete
+/// application primitive runtime.
+pub struct ProductionPrimitiveCodeAuthoritiesV1 {
+    pub code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
+    pub ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
+    pub code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    pub diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    pub convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
+}
+
+pub struct ProductionPrimitiveOpenRequestV1 {
+    source_runtime: Arc<SourceReadContext>,
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
+    ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
+    session_db: RegisteredGlobalDbLeaseV1,
+    temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
+    access: ProjectSourceAccessSnapshot,
+    admitted_root_uri: String,
+}
+
+impl ProductionPrimitiveOpenRequestV1 {
+    pub fn new(
+        source_runtime: Arc<SourceReadContext>,
+        code: ProductionPrimitiveCodeAuthoritiesV1,
+        session_db: RegisteredGlobalDbLeaseV1,
+        temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
+        access: ProjectSourceAccessSnapshot,
+        admitted_root_uri: String,
+    ) -> Self {
+        Self {
+            source_runtime,
+            code_graph: code.code_graph,
+            ignored_dependency_admission: code.ignored_dependency_admission,
+            session_db,
+            temporal,
+            code_index: code.code_index,
+            diagnostic_identity: code.diagnostic_identity,
+            convergence_park: code.convergence_park,
+            access,
+            admitted_root_uri,
+        }
+    }
+}
+
+/// Opens the complete owned application primitive runtime from production authorities.
+#[tracing::instrument(name = "usecases.primitives.open", level = "trace", skip_all)]
+pub async fn open_production_primitive_runtime(
+    request: ProductionPrimitiveOpenRequestV1,
+) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {
+    let ProductionPrimitiveOpenRequestV1 {
+        source_runtime,
+        code_graph,
+        ignored_dependency_admission,
+        session_db,
+        temporal,
+        code_index,
+        diagnostic_identity,
+        convergence_park,
+        access,
+        admitted_root_uri,
+    } = request;
+    let database = source_runtime.db().clone();
+    let project_root = source_runtime.project_root().to_path_buf();
+    let scope = access.scope.clone();
+    let configuration_digest = access.configuration_digest.clone();
+    let key = SessionTemporalAccess::new(session_db.as_ref())
+        .ensure_active_session_cursor_key_result()
+        .await
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "application primitive session cursor key",
+        })?;
+    let read = session_db.as_ref().read_snapshot().await.map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "application primitive session cursor snapshot",
+        }
+    })?;
+    let authenticator = Arc::new(
+        SessionTemporalCursorKeyProvider::from_registered_key_ref(&read, key.clone())
+            .await
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "application primitive session cursor authenticator",
+            })?,
+    );
+    let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
+        key: key.clone(),
+        configuration_digest: configuration_digest.clone(),
+        project_root: project_root.clone(),
+        scope: scope.clone(),
+        code_index: Arc::clone(&code_index),
+    });
+    let cursors: Arc<dyn SymbolGraphCursorPort> = Arc::new(
+        AuthenticatedSymbolGraphCursorAdapter::new(snapshots, Arc::clone(&authenticator)),
+    );
+    let test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort> =
+        Arc::new(ProductionManagedTestRunCurrentScope::new(
+            project_root,
+            scope.clone(),
+            Arc::clone(&code_index),
+        ));
+    let evidence_cursors = AuthenticatedDiagnosticCursorAuthorityV1 {
+        key,
+        configuration_digest,
+        authenticator,
+    };
+    let test_runs = RetainedManagedTestRuns {
+        store: session_db.clone(),
+        cursors: Arc::new(evidence_cursors.clone()),
+    };
+    let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
+        Arc::clone(&source_runtime),
+        Arc::clone(&code_graph),
+        database.clone(),
+        session_db,
+        code_index,
+        Arc::clone(&diagnostic_identity),
+        evidence_cursors,
+    ));
+    open_primitive_project_runtime(
+        database,
+        Arc::clone(&source_runtime),
+        Arc::clone(&code_graph),
+        cursors,
+        ignored_dependency_admission,
+        Arc::new(TraceDecayTestPrimitivePortV1::new(Arc::clone(&code_graph))),
+        temporal,
+        Arc::new(TraceDecaySourceLinesPortV1::new(
+            Arc::clone(&source_runtime),
+            Arc::clone(&diagnostic_identity),
+        )),
+        Arc::new(TraceDecayHealthPortV1::new(Arc::clone(&source_runtime))),
+        extended,
+        scope,
+        access,
+        admitted_root_uri,
+        test_runs,
+        test_run_scope,
+        convergence_park,
+    )
+}
+
+pub fn admitted_root_uri_for_project(
+    project_root: &Path,
+) -> Result<String, ApplicationContractError> {
+    // The admitted root is published to clients and compared against the
+    // spelling each one addresses it through, so it names the root's identity
+    // rather than whichever alias the daemon happened to be handed.
+    let identity = tracedecay_runtime_core::path_safety::canonical_root_identity(project_root);
+    let uri = Url::from_file_path(&identity)
+        .or_else(|()| Url::from_file_path(project_root))
+        .map_err(|()| ApplicationContractError::Inconsistent {
+            field: "application primitive admitted root URI",
+        })?;
+    Ok(uri.to_string())
+}

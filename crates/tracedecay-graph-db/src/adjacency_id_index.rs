@@ -5,12 +5,20 @@
 //! cursor seek plus a `limit`-sized copy.
 
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
+
+use grafeo_common::memory::heap::{arc_slice_bytes, std_hash_map_bytes, string_bytes};
 
 use crate::{GraphDbError, GraphEntityId, GraphNamespace, GraphRelationId, GraphRelationKind};
 
 const MAX_CACHED_ADJACENCY_INDEXES: usize = 32;
+/// Identity-count cap. Entry count alone is not a memory bound: 32 cached
+/// hubs of 100k ids would pin millions of relation identities for the rest
+/// of the epoch. Evict the map when an insert would push the retained
+/// identity total past this ceiling.
+const MAX_CACHED_ADJACENCY_IDS: usize = 1_000_000;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(crate) struct AdjacencyIndexKey {
@@ -50,11 +58,34 @@ pub(crate) struct AdjacencyIdIndexCache {
 struct AdjacencyEntries {
     epoch: u64,
     indexes: HashMap<AdjacencyIndexKey, Arc<[GraphRelationId]>>,
+    cached_ids: usize,
 }
 
 impl AdjacencyIdIndexCache {
+    /// Marks every cached list stale and drops them; see
+    /// [`crate::projection_identity_index::IdentityIndexCache::invalidate`].
     pub(crate) fn invalidate(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        entries.indexes = HashMap::new();
+        entries.cached_ids = 0;
+    }
+
+    /// Heap bytes the cached lists hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        entries
+            .indexes
+            .iter()
+            .fold(std_hash_map_bytes(&entries.indexes), |bytes, (key, ids)| {
+                bytes
+                    + string_bytes(&key.namespace)
+                    + string_bytes(&key.start)
+                    + key.kinds.len() * size_of::<String>()
+                    + key.kinds.iter().map(string_bytes).sum::<usize>()
+                    + arc_slice_bytes::<GraphRelationId>(ids.len())
+                    + ids.iter().map(|id| id.as_str().len()).sum::<usize>()
+            })
     }
 
     pub(crate) fn get(
@@ -84,12 +115,22 @@ impl AdjacencyIdIndexCache {
             .map_err(|_| GraphDbError::unavailable("graph adjacency id cache is poisoned"))?;
         if entries.epoch != epoch {
             entries.indexes.clear();
+            entries.cached_ids = 0;
             entries.epoch = epoch;
         }
-        if entries.indexes.len() >= MAX_CACHED_ADJACENCY_INDEXES {
+        let incoming_ids = ids.len();
+        if entries.indexes.len() >= MAX_CACHED_ADJACENCY_INDEXES
+            || entries.cached_ids.saturating_add(incoming_ids) > MAX_CACHED_ADJACENCY_IDS
+        {
             entries.indexes.clear();
+            entries.cached_ids = 0;
         }
-        entries.indexes.insert(key, Arc::clone(&ids));
+        if incoming_ids <= MAX_CACHED_ADJACENCY_IDS {
+            if let Some(previous) = entries.indexes.insert(key, Arc::clone(&ids)) {
+                entries.cached_ids = entries.cached_ids.saturating_sub(previous.len());
+            }
+            entries.cached_ids = entries.cached_ids.saturating_add(incoming_ids);
+        }
         Ok(ids)
     }
 }

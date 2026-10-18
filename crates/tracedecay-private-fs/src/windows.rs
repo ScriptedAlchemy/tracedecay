@@ -1,11 +1,11 @@
-use std::ffi::c_void;
+use std::ffi::{OsString, c_void};
 use std::fs::File;
 use std::io;
-use std::mem::{MaybeUninit, size_of};
-use std::os::windows::ffi::OsStrExt;
+use std::mem::{MaybeUninit, offset_of, size_of};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::{Path, PathBuf};
-use std::ptr::{addr_of, addr_of_mut, null, null_mut};
+use std::path::{Component, Path, PathBuf, Prefix};
+use std::ptr::{addr_of, addr_of_mut, copy_nonoverlapping, null, null_mut};
 
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, INVALID_HANDLE_VALUE, LocalFree,
@@ -26,12 +26,13 @@ use windows_sys::Win32::Security::{
     TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
+    CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileAttributeTagInfo, GetDiskFreeSpaceExW, GetFileInformationByHandleEx, OPEN_ALWAYS,
-    OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FileAttributeTagInfo, FileRenameInfoEx, GetDiskFreeSpaceExW,
+    GetFileInformationByHandleEx, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
+    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -42,6 +43,8 @@ const SECURITY_ACCESS: u32 = READ_CONTROL | FILE_READ_ATTRIBUTES;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const SHARE_READ_WRITE_DELETE: u32 = SHARE_READ_WRITE | FILE_SHARE_DELETE;
 const SECURE_OPEN_FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
+const FILE_RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
+const FILE_RENAME_POSIX_SEMANTICS: u32 = 0x2;
 
 #[derive(Clone, Copy, Debug)]
 enum PathKind {
@@ -50,7 +53,6 @@ enum PathKind {
 }
 
 impl PathKind {
-    #[hotpath::skip]
     const fn inheritance(self) -> u32 {
         match self {
             Self::Directory => SUB_CONTAINERS_AND_OBJECTS_INHERIT,
@@ -58,7 +60,6 @@ impl PathKind {
         }
     }
 
-    #[hotpath::skip]
     const fn description(self) -> &'static str {
         match self {
             Self::Directory => "directory",
@@ -138,7 +139,7 @@ pub fn current_user_sid_string() -> io::Result<String> {
 }
 
 /// Create one private directory without changing any existing ancestor ACL.
-#[hotpath::measure(label = "private_fs.create_directory")]
+#[tracing::instrument(name = "private_fs.create_directory", level = "trace", skip_all)]
 pub fn create_private_directory(path: &Path) -> io::Result<()> {
     with_private_security_attributes(path, PathKind::Directory, |attributes| {
         let absolute = absolute_security_path(path)?;
@@ -177,7 +178,7 @@ pub fn validate_private_directory(path: &Path) -> io::Result<()> {
 }
 
 /// Open an exact protected, inheritable current-user directory.
-#[hotpath::measure(label = "private_fs.open_directory")]
+#[tracing::instrument(name = "private_fs.open_directory", level = "trace", skip_all)]
 pub fn open_private_directory(path: &Path) -> io::Result<File> {
     open_and_validate(
         path,
@@ -201,7 +202,7 @@ pub fn validate_private_file(path: &Path) -> io::Result<()> {
 }
 
 /// Open an existing regular file only after validating its exact ACL.
-#[hotpath::measure(label = "private_fs.open_file")]
+#[tracing::instrument(name = "private_fs.open_file", level = "trace", skip_all)]
 pub fn open_private_file(path: &Path) -> io::Result<File> {
     open_and_validate(
         path,
@@ -213,15 +214,30 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
 }
 
 /// Protect an existing regular file through its exact opened handle.
-#[hotpath::measure(label = "private_fs.make_private_file")]
+///
+/// The open asks for data-write access so callers can still sync through
+/// the returned handle. A file carrying the read-only attribute gates
+/// `FILE_GENERIC_WRITE` but never the DACL rewrite this performs, so the
+/// denied open retries without it and that handle cannot write or sync.
+#[tracing::instrument(name = "private_fs.make_private_file", level = "trace", skip_all)]
 pub fn make_private_file(path: &Path) -> io::Result<File> {
-    let file = open_handle_with_share(
+    let file = match open_handle_with_share(
         path,
         OPEN_EXISTING,
         SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER,
         null(),
         SHARE_READ_WRITE_DELETE,
-    )?;
+    ) {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(5) => open_handle_with_share(
+            path,
+            OPEN_EXISTING,
+            SECURITY_ACCESS | FILE_GENERIC_READ | WRITE_DAC | WRITE_OWNER,
+            null(),
+            SHARE_READ_WRITE_DELETE,
+        )?,
+        Err(error) => return Err(error),
+    };
     validate_file_kind(&file, path, PathKind::File)?;
     protect_existing(&file, path, PathKind::File)?;
     validate_private_handle(&file, path, PathKind::File)?;
@@ -231,12 +247,12 @@ pub fn make_private_file(path: &Path) -> io::Result<File> {
 /// Protect an existing directory through its exact opened handle, when the
 /// current user may rewrite its owner and DACL.
 ///
-/// The directory analogue of [`make_private_file`]: it converges a legacy
-/// directory an older binary created without the protected private ACL. The
-/// `WRITE_DAC | WRITE_OWNER` open is the authorization proof — a caller that
+/// The directory analogue of [`make_private_file`]: it protects a directory
+/// the caller created through an ordinary path. The
+/// `WRITE_DAC | WRITE_OWNER` open is the authorization proof, a caller that
 /// cannot take ownership of the object is refused by the open itself.
-#[hotpath::measure(label = "private_fs.make_private_directory")]
-pub fn make_private_directory(path: &Path) -> io::Result<crate::MadePrivateDirectory> {
+#[tracing::instrument(name = "private_fs.make_private_directory", level = "trace", skip_all)]
+pub fn make_private_directory(path: &Path) -> io::Result<()> {
     let file = open_handle_with_share(
         path,
         OPEN_EXISTING,
@@ -246,10 +262,7 @@ pub fn make_private_directory(path: &Path) -> io::Result<crate::MadePrivateDirec
     )?;
     validate_file_kind(&file, path, PathKind::Directory)?;
     protect_existing(&file, path, PathKind::Directory)?;
-    validate_private_handle(&file, path, PathKind::Directory)?;
-    Ok(crate::MadePrivateDirectory {
-        previous_unix_mode: None,
-    })
+    validate_private_handle(&file, path, PathKind::Directory)
 }
 
 /// Open or create a private lock file with concurrent read-write sharing.
@@ -272,7 +285,7 @@ pub fn create_private_file(path: &Path) -> io::Result<File> {
 
 /// Create a new empty regular file while retaining its exact handle if
 /// post-creation ACL validation fails.
-#[hotpath::measure(label = "private_fs.create_file")]
+#[tracing::instrument(name = "private_fs.create_file", level = "trace", skip_all)]
 pub fn create_private_file_retained(
     path: &Path,
 ) -> Result<File, crate::PrivateFileCreationFailure> {
@@ -292,8 +305,161 @@ pub fn create_private_file_retained(
     Ok(file)
 }
 
+/// Atomically replace one sibling file with another, returning the exact
+/// published file handle.
+///
+/// The rename is issued on the opened source handle with a null
+/// `RootDirectory` and an absolute destination, see [`posix_rename_payload`]
+/// for why a parent handle in `RootDirectory` is not an option. No
+/// parent-directory handle therefore participates in the rename itself.
+///
+/// What still pins the directory the file is published into is the ancestor
+/// chain [`hold_directory_ancestors`] opens and validates: every ancestor of
+/// the source stays open, and reparse-point rejected, from before the payload
+/// is built until after `SetFileInformationByHandle` returns, so no ancestor
+/// can be swapped for a junction between validation and publication. The
+/// source and destination are required to be siblings, so that one chain
+/// covers both spellings.
+pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<File> {
+    let mut source = absolute_security_path(source)?;
+    let mut destination = absolute_security_path(destination)?;
+    if source.parent() != destination.parent()
+        && (is_verbatim_path(&source) || is_verbatim_path(&destination))
+    {
+        source = verbatim_security_path(&source)?;
+        destination = verbatim_security_path(&destination)?;
+    }
+    if source == destination {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement source and destination must differ",
+        ));
+    }
+    if source.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement source must have a basename",
+        ));
+    }
+    if destination.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement destination must have a basename",
+        ));
+    }
+    let source_parent = source.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement source has no parent",
+        )
+    })?;
+    let destination_parent = destination.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement destination has no parent",
+        )
+    })?;
+    if source_parent != destination_parent {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement paths must be siblings",
+        ));
+    }
+
+    let ancestor_handles = hold_directory_ancestors(&source)?;
+    let source_file = open_raw_handle(
+        &source,
+        OPEN_EXISTING,
+        DELETE | FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        null(),
+        SHARE_READ_WRITE_DELETE,
+    )?;
+    validate_file_kind(&source_file, &source, PathKind::File)?;
+    source_file.sync_all()?;
+
+    let (storage, buffer_size) = posix_rename_payload(&destination)?;
+
+    // SAFETY: the source handle stays live with DELETE access, the ancestor
+    // handles pin the destination directory, and `storage` is a complete
+    // FILE_RENAME_INFO_EX payload.
+    if unsafe {
+        SetFileInformationByHandle(
+            source_file.as_raw_handle(),
+            FileRenameInfoEx,
+            storage.as_ptr().cast(),
+            buffer_size,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop(ancestor_handles);
+    Ok(source_file)
+}
+
+/// `FileRenameInfoEx` payload for a same-volume POSIX replace.
+///
+/// `SetFileInformationByHandle` returns `ERROR_INVALID_PARAMETER` (87) when
+/// `RootDirectory` is a parent handle, even for a same-directory rename.
+/// The documented Win32 payload is a null root plus the absolute destination
+/// path, with `FileNameLength` excluding the terminating NUL.
+fn posix_rename_payload(destination: &Path) -> io::Result<(Vec<usize>, u32)> {
+    let destination_wide = encode_path(destination)?;
+    let filename_units = destination_wide.len().saturating_sub(1);
+    let filename_bytes = filename_units
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows destination path is too long",
+            )
+        })?;
+    let filename_offset = offset_of!(FILE_RENAME_INFO, FileName);
+    let payload_size = filename_offset
+        .checked_add(filename_bytes)
+        .and_then(|size| size.checked_add(size_of::<u16>()))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows destination path is too long",
+            )
+        })?;
+    let buffer_size: u32 = payload_size
+        .max(size_of::<FILE_RENAME_INFO>())
+        .try_into()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows destination path is too long",
+            )
+        })?;
+    let word_count = (buffer_size as usize).div_ceil(size_of::<usize>());
+    let mut storage = vec![0_usize; word_count];
+    let rename_info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let mut header = FILE_RENAME_INFO::default();
+    header.Anonymous.Flags = FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS;
+    header.RootDirectory = null_mut();
+    header.FileNameLength = filename_bytes as u32;
+    // SAFETY: `storage` is pointer-aligned and sized for the fixed header plus
+    // every UTF-16 code unit including the terminator `encode_path` appends.
+    // `FileNameLength` excludes that terminator.
+    unsafe {
+        rename_info.write(header);
+        copy_nonoverlapping(
+            destination_wide.as_ptr(),
+            storage
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(filename_offset)
+                .cast::<u16>(),
+            destination_wide.len(),
+        );
+    }
+    Ok((storage, buffer_size))
+}
+
 /// Returns bytes available to the current user at `path` (quota-aware).
-#[hotpath::measure(label = "private_fs.available_space")]
+#[tracing::instrument(name = "private_fs.available_space", level = "trace", skip_all)]
 pub fn available_space(path: &Path) -> io::Result<u64> {
     let encoded = encode_path(path)?;
     let mut available = 0_u64;
@@ -483,8 +649,115 @@ fn open_raw_handle(
 }
 
 fn absolute_security_path(path: &Path) -> io::Result<PathBuf> {
-    std::path::absolute(path)
-        .map_err(|error| wrap_error("resolve absolute Windows security path", path, error))
+    let long_plain_absolute = path.as_os_str().encode_wide().count() >= 260
+        && path.is_absolute()
+        && matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
+        );
+    let absolute = if long_plain_absolute {
+        path.to_path_buf()
+    } else {
+        std::path::absolute(path)
+            .map_err(|error| wrap_error("resolve absolute Windows security path", path, error))?
+    };
+    let wide = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
+    if wide.len() < 260 || is_verbatim_path(&absolute) {
+        return Ok(absolute);
+    }
+
+    verbatim_security_path(&absolute)
+}
+
+fn is_verbatim_path(path: &Path) -> bool {
+    const BACKSLASH: u16 = b'\\' as u16;
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.starts_with(&[BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH])
+        || wide.starts_with(&[BACKSLASH, BACKSLASH, b'.' as u16, BACKSLASH])
+}
+
+fn verbatim_security_path(path: &Path) -> io::Result<PathBuf> {
+    if is_verbatim_path(path) {
+        return Ok(path.to_path_buf());
+    }
+    require_exact_verbatim_path(path)?;
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    const BACKSLASH: u16 = b'\\' as u16;
+    if !path.is_absolute()
+        || !matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
+        )
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows verbatim security path must be fully qualified",
+        ));
+    }
+
+    // Raw Win32 opens need the extended spelling for long paths, and siblings
+    // must use the same spelling. Verbatim semantics must not reinterpret
+    // dots, separators, or reserved names after that conversion.
+    let mut extended = Vec::with_capacity(wide.len() + 8);
+    extended.extend([BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH]);
+    if wide.starts_with(&[BACKSLASH, BACKSLASH]) {
+        extended.extend("UNC\\".encode_utf16());
+        extended.extend_from_slice(&wide[2..]);
+    } else {
+        extended.extend(wide);
+    }
+    Ok(PathBuf::from(OsString::from_wide(&extended)))
+}
+
+fn require_exact_verbatim_path(path: &Path) -> io::Result<()> {
+    let spelling = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let normalized = path
+        .components()
+        .map(Component::as_os_str)
+        .collect::<PathBuf>();
+    let ambiguous_component = path.components().any(|component| {
+        if matches!(component, Component::CurDir | Component::ParentDir) {
+            return true;
+        }
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        let name_wide = name.encode_wide().collect::<Vec<_>>();
+        if name_wide
+            .last()
+            .is_some_and(|last| *last == b'.' as u16 || *last == b' ' as u16)
+            || name_wide.contains(&(b':' as u16))
+        {
+            return true;
+        }
+        let name = name.to_string_lossy();
+        let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+        let stem = stem.to_ascii_uppercase();
+        matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        })
+    });
+    if spelling.contains(&(b'/' as u16))
+        || spelling.contains(&0)
+        || normalized.as_os_str() != path.as_os_str()
+        || ambiguous_component
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "long Windows security path must have an exact absolute spelling",
+        ));
+    }
+    Ok(())
 }
 
 fn hold_directory_ancestors(path: &Path) -> io::Result<Vec<File>> {
@@ -872,17 +1145,147 @@ fn rejected(path: &Path, reason: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
     use std::io::{Read, Write};
+    use std::mem::{align_of, offset_of, size_of};
+    use std::os::windows::fs::OpenOptionsExt;
     use std::process::Command;
 
     #[test]
-    fn current_user_sid_string_is_canonical() {
-        let sid = current_user_sid_string().unwrap();
+    fn file_rename_info_layout_matches_windows_abi() {
+        let pointer_width = size_of::<usize>();
+        let expected_filename_offset = if pointer_width == 8 { 20 } else { 12 };
+        let expected_size = if pointer_width == 8 { 24 } else { 16 };
 
-        assert!(sid.starts_with("S-1-"));
+        assert_eq!(align_of::<FILE_RENAME_INFO>(), pointer_width);
+        assert_eq!(
+            offset_of!(FILE_RENAME_INFO, FileName),
+            expected_filename_offset
+        );
+        assert_eq!(size_of::<FILE_RENAME_INFO>(), expected_size);
+        assert_eq!(FileRenameInfoEx, 22);
+    }
+
+    #[test]
+    fn posix_rename_payload_uses_a_null_root_and_the_absolute_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = absolute_security_path(&temp.path().join("record")).unwrap();
+        let (storage, buffer_size) = posix_rename_payload(&destination).unwrap();
+        assert!(buffer_size as usize >= size_of::<FILE_RENAME_INFO>());
+        let info = unsafe { &*storage.as_ptr().cast::<FILE_RENAME_INFO>() };
         assert!(
-            sid.bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            info.RootDirectory.is_null(),
+            "FileRenameInfoEx rejects a parent RootDirectory with ERROR_INVALID_PARAMETER"
+        );
+        let flags = unsafe { info.Anonymous.Flags };
+        assert_eq!(
+            flags,
+            FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS
+        );
+        let expected = encode_path(&destination).unwrap();
+        assert_eq!(
+            info.FileNameLength as usize,
+            (expected.len() - 1) * size_of::<u16>()
+        );
+        let name = unsafe {
+            std::slice::from_raw_parts(
+                storage
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset_of!(FILE_RENAME_INFO, FileName))
+                    .cast::<u16>(),
+                expected.len(),
+            )
+        };
+        assert_eq!(name, expected.as_slice());
+    }
+
+    #[test]
+    fn private_atomic_replacement_accepts_a_long_windows_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut parent = temp.path().to_path_buf();
+        while parent.as_os_str().encode_wide().count() < 280 {
+            parent.push("nested-directory-with-a-stable-long-name");
+        }
+        assert_private_atomic_replacement(&parent, "source.tmp", "destination");
+    }
+
+    #[test]
+    fn private_atomic_replacement_normalizes_boundary_length_siblings_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut parent = temp.path().to_path_buf();
+        while parent.as_os_str().encode_wide().count() < 245 {
+            parent.push("x");
+        }
+        std::fs::create_dir_all(&parent).unwrap();
+        let source = parent.join("source-name-long-enough-to-cross-max-path.tmp");
+        let destination = parent.join("d");
+        assert!(source.as_os_str().encode_wide().count() >= 260);
+        assert!(destination.as_os_str().encode_wide().count() < 260);
+        assert_private_atomic_replacement(
+            &parent,
+            "source-name-long-enough-to-cross-max-path.tmp",
+            "d",
+        );
+    }
+
+    fn assert_private_atomic_replacement(parent: &Path, source_name: &str, destination_name: &str) {
+        std::fs::create_dir_all(absolute_security_path(parent).unwrap()).unwrap();
+        let source = parent.join(source_name);
+        let destination = parent.join(destination_name);
+        let mut source_file = create_private_file(&source).unwrap();
+        source_file.write_all(b"published bytes").unwrap();
+        drop(source_file);
+        let mut destination_file = create_private_file(&destination).unwrap();
+        destination_file.write_all(b"old bytes").unwrap();
+        drop(destination_file);
+        drop(replace_file_atomically(&source, &destination).unwrap());
+        assert_eq!(
+            std::fs::read(absolute_security_path(&destination).unwrap()).unwrap(),
+            b"published bytes"
+        );
+    }
+
+    #[test]
+    fn long_windows_path_fast_path_requires_exact_spelling() {
+        assert!(require_exact_verbatim_path(Path::new(r"C:\safe\regular")).is_ok());
+        for path in [
+            r"C:\safe\..\regular",
+            r"C:/safe/regular",
+            r"C:\safe\\regular",
+            r"C:\safe\NUL",
+            r"C:\safe\trailing.",
+            r"C:\safe\trailing ",
+        ] {
+            assert!(
+                require_exact_verbatim_path(Path::new(path)).is_err(),
+                "ambiguous path {path:?} must not bypass Windows normalization"
+            );
+        }
+        let short = Path::new(r"C:\safe\regular");
+        assert_eq!(
+            absolute_security_path(short).unwrap(),
+            std::path::absolute(short).unwrap()
+        );
+
+        let mut drive = PathBuf::from(r"C:\safe");
+        while drive.as_os_str().encode_wide().count() < 260 {
+            drive.push("safe-long-component");
+        }
+        assert!(
+            absolute_security_path(&drive)
+                .unwrap()
+                .starts_with(r"\\?\C:\safe")
+        );
+
+        let mut unc = PathBuf::from(r"\\server\share");
+        while unc.as_os_str().encode_wide().count() < 260 {
+            unc.push("safe-long-component");
+        }
+        assert!(
+            absolute_security_path(&unc)
+                .unwrap()
+                .starts_with(r"\\?\UNC\server\share")
         );
     }
 
@@ -913,24 +1316,6 @@ mod tests {
         assert_eq!(snapshot.ace_count, 1);
         assert!(snapshot.ace_is_allowed);
         assert_eq!(snapshot.ace_mask, FILE_ALL_ACCESS);
-        assert_eq!(
-            snapshot.ace_inheritance,
-            SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8
-        );
-        assert!(snapshot.trustee_is_current_user);
-    }
-
-    #[test]
-    fn private_directory_is_private_from_creation() {
-        let temp = tempfile::tempdir().unwrap();
-        let private = temp.path().join("private");
-
-        create_private_directory(&private).unwrap();
-
-        let snapshot = snapshot(&private, PathKind::Directory);
-        assert!(snapshot.owner_is_current_user);
-        assert!(snapshot.dacl_is_protected);
-        assert_eq!(snapshot.ace_count, 1);
         assert_eq!(
             snapshot.ace_inheritance,
             SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8
@@ -982,9 +1367,8 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         assert!(open_private_directory(&path).is_err());
 
-        let receipt = make_private_directory(&path).unwrap();
+        make_private_directory(&path).unwrap();
 
-        assert_eq!(receipt.previous_unix_mode, None);
         let snapshot = snapshot(&path, PathKind::Directory);
         assert!(snapshot.owner_is_current_user);
         assert!(snapshot.dacl_is_protected);
@@ -1037,15 +1421,99 @@ mod tests {
         replacement_file.write_all(b"new").unwrap();
         drop(replacement_file);
 
-        // Replace through the same primitive production uses. Rust's
-        // `std::fs::rename` requests POSIX rename semantics on Windows, which
-        // is what makes replacement succeed while a delete-sharing reader is
-        // still open; the legacy MoveFileExW replace is denied in that state.
-        std::fs::rename(&replacement, &path).unwrap();
+        let published = replace_file_atomically(&replacement, &path).unwrap();
+        drop(published);
         let mut old_contents = Vec::new();
         reader.read_to_end(&mut old_contents).unwrap();
         assert_eq!(old_contents, b"old");
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn atomic_publication_accepts_variable_length_unicode_names() {
+        let temp = tempfile::tempdir().unwrap();
+        for name in ["a", "record", "longer-record-name", "résumé-🦀"] {
+            let source = temp.path().join("staging");
+            let destination = temp.path().join(name);
+            let mut staging = create_private_file(&source).unwrap();
+            staging.write_all(b"published").unwrap();
+            drop(staging);
+
+            let mut published = replace_file_atomically(&source, &destination).unwrap();
+            let mut contents = Vec::new();
+            published.read_to_end(&mut contents).unwrap();
+            assert_eq!(contents, b"published");
+            assert_eq!(std::fs::read(&destination).unwrap(), contents);
+            assert!(!source.exists());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reader_without_delete_sharing_blocks_atomic_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("record");
+        let source = temp.path().join("replacement");
+        let mut destination_file = create_private_file(&destination).unwrap();
+        destination_file.write_all(b"old").unwrap();
+        drop(destination_file);
+        let mut source_file = create_private_file(&source).unwrap();
+        source_file.write_all(b"new").unwrap();
+        drop(source_file);
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        let mut held_reader = options.open(&destination).unwrap();
+
+        let error = replace_file_atomically(&source, &destination).unwrap_err();
+        assert!(
+            matches!(error.raw_os_error(), Some(5 | 32)),
+            "expected access denied or sharing violation, got {error:?}"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+        assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        let mut held_contents = Vec::new();
+        held_reader.read_to_end(&mut held_contents).unwrap();
+        assert_eq!(held_contents, b"old");
+
+        drop(held_reader);
+        let published = replace_file_atomically(&source, &destination).unwrap();
+        drop(published);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(&source).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    /// The sibling restriction is what lets one validated ancestor chain cover
+    /// both spellings, so an absolute destination in another directory has to
+    /// be refused rather than renamed across chains.
+    #[test]
+    fn replacement_refuses_an_absolute_destination_in_another_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_directory = temp.path().join("staging");
+        let destination_directory = temp.path().join("published");
+        create_private_directory(&source_directory).unwrap();
+        create_private_directory(&destination_directory).unwrap();
+        let source = source_directory.join("record");
+        let destination = destination_directory.join("record");
+        let mut staging = create_private_file(&source).unwrap();
+        staging.write_all(b"new").unwrap();
+        drop(staging);
+        assert!(destination.is_absolute());
+
+        let error = replace_file_atomically(&source, &destination).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("siblings"),
+            "expected the sibling refusal, got {error:?}"
+        );
+        assert!(source.exists());
+        assert!(!destination.exists());
     }
 
     #[test]

@@ -8,7 +8,7 @@ import type {
 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
-export interface AnalyticsModeDescription {
+interface AnalyticsModeDescription {
   mode: AnalyticsModeV1;
   label: string;
   exporter: 'none' | 'network';
@@ -52,7 +52,7 @@ export const ANALYTICS_MODE_LADDER: readonly AnalyticsModeDescription[] = [
   },
 ];
 
-export interface ModeReading {
+interface ModeReading {
   /** The published mode, or `null` when nothing publishes one. */
   mode: AnalyticsModeV1 | null;
   label: string;
@@ -86,7 +86,7 @@ export function analyticsModeReading(read: AnalyticsModeReadModelV1): ModeReadin
   };
 }
 
-export interface DeclaredRetentionLifecycle {
+interface DeclaredRetentionLifecycle {
   id: string;
   label: string;
   /** The declared lifetime, from Plan 26. Policy, never a measurement. */
@@ -95,7 +95,7 @@ export interface DeclaredRetentionLifecycle {
   observedAge: string | null;
 }
 
-/** The lifetimes Plan 26 declares for optional analytics. Declared policy — the
+/** The lifetimes Plan 26 declares for optional analytics. Declared policy, the
  * view labels them as such and never presents them as observed ages. */
 export const DECLARED_RETENTION_LIFECYCLES: readonly DeclaredRetentionLifecycle[] = [
   {
@@ -138,10 +138,10 @@ export interface RetentionBacklogReading {
 /**
  * The one retention signal with a real read route behind it.
  *
- * `/api/storage/findings` publishes a typed status per Doctor storage finding
+ * `/api/doctor/findings?family=storage` publishes a typed status per Doctor storage finding
  * kind. `retention_backlog` says whether retention work is falling behind, and
  * its `state` distinguishes a real reading from a partial one from a kind this
- * build does not support — three different things that a single count would
+ * build does not support, three different things that a single count would
  * flatten.
  */
 export function retentionBacklogReading(
@@ -165,7 +165,7 @@ export function retentionBacklogReading(
 }
 
 /** The findings source state, in the shared domain-state vocabulary. `real` is
- * `ready` only in the sense that the source answered — it says nothing about
+ * `ready` only in the sense that the source answered, it says nothing about
  * whether the backlog itself is healthy, and nothing here grades it. */
 function findingSourceState(state: StorageFindingKindStatusV1['state']): DomainStateKind {
   switch (state) {
@@ -178,7 +178,7 @@ function findingSourceState(state: StorageFindingKindStatusV1['state']): DomainS
   }
 }
 
-export interface EgressReading {
+interface EgressReading {
   /** Failures observed, or `null` when nothing publishes them. Never 0. */
   failures: number | null;
   state: DomainStateKind;
@@ -209,7 +209,7 @@ export function egressFailureReading(metrics: readonly MetricValueV1[]): EgressR
   };
 }
 
-export interface ShareStagingReading {
+interface ShareStagingReading {
   /** Age of the oldest staged share packet, or `null` when unpublished. */
   ageSeconds: number | null;
   state: DomainStateKind;

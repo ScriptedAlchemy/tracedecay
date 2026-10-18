@@ -63,8 +63,7 @@ pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
             "Context length exceeded and cannot compress further, find the prior session",
             Some(HintCategory::SessionRecall),
             &["tracedecay_message_search"],
-        )
-        .with_families(&[ScenarioFamily::CursorPrompt]),
+        ),
         prompt_eval(
             "prompt-type-error-capability",
             "can tracedecay see type errors etc?",
@@ -123,7 +122,7 @@ pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
             "prompt-type-orientation-impls",
             "find trait impls and field writes for ToolHintInput",
             Some(HintCategory::TypeOrientation),
-            &["tracedecay_field_sites", "tracedecay_impls"],
+            &["tracedecay_field_sites", "tracedecay_implementations"],
         ),
         input_eval(
             "subagent-context-handoff",
@@ -200,14 +199,14 @@ pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
             "sed -n '1,120p' src/hooks/tool_hints.rs",
             "read this source range",
             Some(HintCategory::FileRead),
-            &["tracedecay_outline", "tracedecay_read"],
+            &["tracedecay_source_outline"],
         ),
         shell_eval(
             "cat-config-file-read",
             "cat Cargo.toml",
             "read config file",
             Some(HintCategory::FileRead),
-            &["tracedecay_outline", "tracedecay_read"],
+            &["tracedecay_source_outline"],
         ),
         shell_eval(
             "cargo-nextest-behavioral-failure-silent",
@@ -299,63 +298,56 @@ pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
             None,
             Some(HintCategory::SemanticSearch),
             &["tracedecay_context"],
-        )
-        .with_families(&[ScenarioFamily::CursorPrompt]),
+        ),
         tool_eval(
             "cursor-codebase-search-alias",
             "codebase_search",
             None,
             Some(HintCategory::SemanticSearch),
             &["tracedecay_context"],
-        )
-        .with_families(&[ScenarioFamily::CursorPrompt]),
+        ),
         tool_eval(
             "cursor-glob-tool",
             "Glob",
             None,
             Some(HintCategory::FileLookup),
             &["tracedecay_files"],
-        )
-        .with_families(&[ScenarioFamily::CursorPrompt]),
+        ),
         tool_eval(
             "read-package-json",
             "Read",
             Some("package.json"),
             Some(HintCategory::FileRead),
-            &["tracedecay_outline"],
+            &["tracedecay_source_outline"],
         ),
         tool_eval(
             "cursor-read-file-alias",
             "read_file",
             Some("src/hooks/cursor.rs"),
             Some(HintCategory::FileRead),
-            &["tracedecay_outline"],
-        )
-        .with_families(&[ScenarioFamily::CursorPrompt]),
+            &["tracedecay_source_outline"],
+        ),
         tool_eval(
             "cursor-list-dir-alias",
             "list_dir",
             Some("src/hooks"),
             Some(HintCategory::FileLookup),
             &["tracedecay_files"],
-        )
-        .with_families(&[ScenarioFamily::CursorPrompt]),
+        ),
         tool_eval(
             "claude-memory-file-edit",
             "Write",
             Some("/home/zack/.claude/projects/foo/memory/notes.md"),
             Some(HintCategory::MemoryStore),
             &["tracedecay_fact_store_add"],
-        )
-        .with_families(&[ScenarioFamily::ClaudePrompt]),
+        ),
         tool_eval(
             "claude-source-file-write-stays-silent",
             "Write",
             Some("src/hooks/tool_hints.rs"),
             None,
             &[],
-        )
-        .with_families(&[ScenarioFamily::ClaudePrompt]),
+        ),
         tool_eval(
             "delete-tool-stays-silent",
             "Delete",

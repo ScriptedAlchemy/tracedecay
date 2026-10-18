@@ -3,14 +3,14 @@ use tempfile::TempDir;
 
 /// Helper: write an entry to a specific mmap dir.
 fn write(dir: &Path, project: &Path, prefix: &str, tool: &str, delta: u64, before: u64) {
-    tracedecay_runtime_core::monitor_ring::write_entry_to(
+    tracedecay_session_memory::monitor_ring::write_entry_to(
         dir, project, prefix, tool, delta, before,
     );
 }
 
 /// Helper: open reader at a specific mmap dir.
-fn reader(dir: &Path) -> tracedecay_runtime_core::monitor_ring::MmapReader {
-    tracedecay_runtime_core::monitor_ring::MmapReader::open_at(dir).unwrap()
+fn reader(dir: &Path) -> tracedecay_session_memory::monitor_ring::MmapReader {
+    tracedecay_session_memory::monitor_ring::MmapReader::open_at(dir).unwrap()
 }
 
 #[test]
@@ -68,57 +68,6 @@ fn test_ring_buffer_wraps() {
 }
 
 #[test]
-fn test_write_entry_accumulates() {
-    let dir = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-
-    write(
-        dir.path(),
-        project.path(),
-        "tracedecay",
-        "tracedecay_context",
-        100,
-        500,
-    );
-    write(
-        dir.path(),
-        project.path(),
-        "tracedecay",
-        "tracedecay_search",
-        50,
-        200,
-    );
-
-    let r = reader(dir.path());
-    assert_eq!(r.write_idx(), 2);
-
-    let e0 = r.entry(0).unwrap();
-    let e1 = r.entry(1).unwrap();
-    assert_eq!(e0.delta + e1.delta, 150);
-}
-
-#[test]
-fn test_entry_label_format() {
-    let dir = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-
-    write(
-        dir.path(),
-        project.path(),
-        "tracedecay",
-        "tracedecay_context",
-        42,
-        100,
-    );
-
-    let r = reader(dir.path());
-    let entry = r.entry(0).unwrap();
-    let label = entry.label();
-    assert!(label.starts_with("tracedecay - "), "got: {label}");
-    assert!(label.ends_with(" - tracedecay_context"), "got: {label}");
-}
-
-#[test]
 fn test_tool_name_truncation() {
     let dir = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -135,8 +84,9 @@ fn test_tool_name_truncation() {
 
     let r = reader(dir.path());
     let entry = r.entry(0).unwrap();
-    // Should be truncated to 31 chars (32 bytes with null)
-    assert_eq!(entry.tool_name.len(), 31);
+    // Truncated to 31 chars (32 bytes with the null terminator).
+    assert_eq!(entry.tool_name, "a".repeat(31));
+    assert_eq!(entry.delta, 42);
 }
 
 #[test]
@@ -168,33 +118,4 @@ fn test_multiple_projects() {
     let e0 = r.entry(0).unwrap();
     let e1 = r.entry(1).unwrap();
     assert_ne!(e0.project, e1.project);
-}
-
-#[test]
-fn test_different_prefixes() {
-    let dir = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-
-    write(
-        dir.path(),
-        project.path(),
-        "tracedecay",
-        "tracedecay_context",
-        100,
-        500,
-    );
-    write(
-        dir.path(),
-        project.path(),
-        "othertool",
-        "do_stuff",
-        200,
-        600,
-    );
-
-    let r = reader(dir.path());
-    let e0 = r.entry(0).unwrap();
-    let e1 = r.entry(1).unwrap();
-    assert_eq!(e0.prefix, "tracedecay");
-    assert_eq!(e1.prefix, "othertool");
 }

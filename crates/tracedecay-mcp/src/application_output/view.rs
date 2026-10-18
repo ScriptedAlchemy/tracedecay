@@ -1,13 +1,47 @@
+use std::fmt::Write as _;
+
 use serde::Serialize;
 use serde_json::Value;
-use tracedecay_application::{
-    ApplicationOutcome, ApplicationProblemRecord, ApplicationResult, EvidenceCoverage, Omission,
-    OperationReceipt, ResolvedScope,
+use tracedecay_contracts::{
+    ApplicationOutcome, ApplicationProblemRecord, ApplicationResult, EvidenceCoverage,
+    OperationReceipt, OperationTermination, ResolvedScope,
 };
 use tracedecay_tool_catalog::BindingId;
 
+use crate::tools::render::{Md, whole_markdown_prefix};
+
+pub(crate) const PROVENANCE_FIELD: &str = "Provenance";
+pub(crate) const RECEIPT_FIELD: &str = "Receipt";
+pub(crate) const REQUEST_FIELD: &str = "Request";
+pub(crate) const TRACE_FIELD: &str = "Trace";
+/// The per-call values of a canonical answer, which differ on every call for
+/// the same answer: request and trace ids, timestamps, elapsed time, and cost.
+/// A human view renders the ones it shows as these fields.
+pub(crate) const PER_CALL_FIELDS: [&str; 4] =
+    [PROVENANCE_FIELD, RECEIPT_FIELD, REQUEST_FIELD, TRACE_FIELD];
+/// Where the canonical JSON envelope carries the same per-call values, as
+/// JSON pointers. Paths under `/outcome/value/` name an evidence, preview, or
+/// effect packet; a plain result's value is its payload and keeps them.
+pub(crate) const PER_CALL_POINTERS: [&str; 13] = [
+    "/request_id",
+    "/cost",
+    "/analytics",
+    "/problem/request_id",
+    "/problem/trace_id",
+    "/outcome/value/authority/revalidated_at",
+    "/outcome/value/temporal/requested_at",
+    "/outcome/value/temporal/resolved_at",
+    "/outcome/value/execution/started_at",
+    "/outcome/value/execution/ended_at",
+    "/outcome/value/execution/effective_deadline",
+    "/outcome/value/execution/budget",
+    "/outcome/value/execution/cancellation/observed_at",
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HumanFieldValue {
+    Block(String),
+    Markdown(String),
     Code(String),
     Text(String),
 }
@@ -34,72 +68,81 @@ impl CanonicalHumanView {
             heading: operation.to_owned(),
             fields: Vec::new(),
         };
-        view.code("Operation", operation);
-        view.code("Binding", binding_id.as_str());
 
         match result {
-            Ok(envelope) => {
-                view.code("Status", "success");
-                view.code(
-                    "Contract",
-                    format!(
-                        "{}@{}",
-                        envelope.contract.schema_id().as_str(),
-                        envelope.contract.schema_revision()
-                    ),
-                );
-                view.code("Request", envelope.request_id.as_str());
-                view.push_scope(&envelope.scope)?;
-                match &envelope.outcome {
-                    ApplicationOutcome::Evidence(packet) => {
-                        view.code("Outcome", "evidence");
-                        view.code("Freshness", scalar(&packet.temporal.freshness)?);
-                        view.push_coverage(&packet.coverage)?;
-                        view.push_omissions(&packet.omissions)?;
-                        let cursor = packet
-                            .page
-                            .cursor
-                            .as_ref()
-                            .map(scalar)
-                            .transpose()?
-                            .unwrap_or_else(|| "none".to_owned());
-                        view.code("Cursor", cursor);
-                        view.code("Page returned", packet.page.returned.to_string());
-                        view.code(
-                            "Page total",
-                            packet
-                                .page
-                                .total
-                                .map_or_else(|| "unknown".to_owned(), |total| total.to_string()),
-                        );
-                        view.push_receipt(&packet.execution)?;
-                        view.text("Payload", payload_summary(packet.payload.as_ref())?);
-                    }
-                    ApplicationOutcome::Preview(preview) => {
-                        view.code("Outcome", "preview");
-                        view.code("Preview", preview.preview_id.as_str());
-                        view.code("Preview digest", scalar(&preview.preview_digest)?);
-                        view.code("Effect class", scalar(&preview.effect_class)?);
-                        view.code("Expected state", scalar(&preview.expected_state)?);
-                        view.push_receipt(&preview.execution)?;
-                        view.text("Payload", payload_summary(preview.payload.as_ref())?);
-                    }
-                    ApplicationOutcome::Effect(effect) => {
-                        view.code("Outcome", "effect");
-                        view.code("Effect", effect.effect_id.as_str());
-                        view.code("Effect class", scalar(&effect.effect_class)?);
-                        view.code("Idempotency key", effect.idempotency_key.as_str());
-                        view.code("Expected state", scalar(&effect.expected_state)?);
-                        view.code("Reconciliation", scalar(&effect.reconciliation)?);
-                        view.push_receipt(&effect.execution)?;
-                        view.code("Receipt operation", scalar(&effect.receipt.operation)?);
-                        view.code("Receipt outcome", scalar(&effect.receipt.outcome)?);
-                        view.code("Receipt actor", scalar(&effect.receipt.actor)?);
-                        view.text("Payload", payload_summary(effect.payload.as_ref())?);
-                    }
+            Ok(envelope) => match &envelope.outcome {
+                ApplicationOutcome::Evidence(packet) => {
+                    view.payload(operation, packet.payload.as_ref())?;
+                    view.code("Status", evidence_status(packet.execution.termination)?);
+                    view.push_evidence_summary(packet)?;
+                    view.push_provenance(
+                        binding_id,
+                        envelope.request_id.as_str(),
+                        &envelope.scope,
+                        packet.execution.budget.elapsed_micros,
+                    )?;
                 }
-            }
+                ApplicationOutcome::Preview(preview) => {
+                    view.payload(operation, preview.payload.as_ref())?;
+                    view.code("Status", "success");
+                    view.code("Operation", operation);
+                    view.code("Binding", binding_id.as_str());
+                    view.code(
+                        "Contract",
+                        format!(
+                            "{}@{}",
+                            envelope.contract.schema_id().as_str(),
+                            envelope.contract.schema_revision()
+                        ),
+                    );
+                    view.code(REQUEST_FIELD, envelope.request_id.as_str());
+                    view.push_scope(&envelope.scope)?;
+                    view.code("Outcome", "preview");
+                    view.code("Preview", preview.preview_id.as_str());
+                    view.code("Preview digest", scalar(&preview.preview_digest)?);
+                    view.code("Effect class", scalar(&preview.effect_class)?);
+                    view.code("Expected state", scalar(&preview.expected_state)?);
+                    view.push_receipt(&preview.execution)?;
+                }
+                ApplicationOutcome::Effect(effect) => {
+                    view.payload(operation, effect.payload.as_ref())?;
+                    view.code("Status", "success");
+                    view.code("Operation", operation);
+                    view.code("Binding", binding_id.as_str());
+                    view.code(
+                        "Contract",
+                        format!(
+                            "{}@{}",
+                            envelope.contract.schema_id().as_str(),
+                            envelope.contract.schema_revision()
+                        ),
+                    );
+                    view.code(REQUEST_FIELD, envelope.request_id.as_str());
+                    view.push_scope(&envelope.scope)?;
+                    view.code("Outcome", "effect");
+                    view.code("Effect", effect.effect_id.as_str());
+                    view.code("Effect class", scalar(&effect.effect_class)?);
+                    view.code("Idempotency key", effect.idempotency_key.as_str());
+                    view.code("Expected state", scalar(&effect.expected_state)?);
+                    view.code("Reconciliation", scalar(&effect.reconciliation)?);
+                    view.push_receipt(&effect.execution)?;
+                    view.code("Receipt operation", scalar(&effect.receipt.operation)?);
+                    view.code("Receipt outcome", scalar(&effect.receipt.outcome)?);
+                    view.code("Receipt actor", scalar(&effect.receipt.actor)?);
+                }
+                ApplicationOutcome::Result(payload) => {
+                    view.payload(operation, Some(payload))?;
+                    view.code("Status", "success");
+                    view.code("Operation", operation);
+                    view.code("Binding", binding_id.as_str());
+                    view.code(REQUEST_FIELD, envelope.request_id.as_str());
+                    view.push_scope(&envelope.scope)?;
+                    view.code("Outcome", "result");
+                }
+            },
             Err(envelope) => {
+                view.code("Operation", operation);
+                view.code("Binding", binding_id.as_str());
                 view.code("Status", "problem");
                 view.code(
                     "Contract",
@@ -113,6 +156,91 @@ impl CanonicalHumanView {
             }
         }
         Ok(view)
+    }
+
+    fn push_evidence_summary(
+        &mut self,
+        packet: &tracedecay_contracts::EvidencePacket<Value>,
+    ) -> serde_json::Result<()> {
+        let coverage = &packet.coverage;
+        let domains = coverage
+            .domains
+            .iter()
+            .map(|domain| {
+                Ok(format!(
+                    "{}:{}",
+                    scalar(&domain.domain)?,
+                    scalar(&domain.completeness)?
+                ))
+            })
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let omissions = packet
+            .omissions
+            .iter()
+            .map(|omission| {
+                Ok(format!(
+                    "{}:{}={}",
+                    scalar(&omission.domain)?,
+                    scalar(&omission.reason)?,
+                    omission.count
+                ))
+            })
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let cursor = packet
+            .page
+            .cursor
+            .as_ref()
+            .map(scalar)
+            .transpose()?
+            .unwrap_or_else(|| "none".to_owned());
+        let cancellation = packet
+            .execution
+            .cancellation
+            .as_ref()
+            .map(|observation| scalar(&observation.stage))
+            .transpose()?
+            .unwrap_or_else(|| "none".to_owned());
+        self.code(
+            "Evidence",
+            format!(
+                "freshness={}; coverage={}; visited={}; eligible={}; returned={}; total={}; domains={}; omissions={}; cursor={}; termination={}; cancellation={}",
+                scalar(&packet.temporal.freshness)?,
+                scalar(&coverage.completeness)?,
+                optional_count(coverage.visited),
+                optional_count(coverage.eligible),
+                coverage.returned,
+                packet
+                    .page
+                    .total
+                    .map_or_else(|| "unknown".to_owned(), |total| total.to_string()),
+                list_or_none(&domains),
+                list_or_none(&omissions),
+                cursor,
+                scalar(&packet.execution.termination)?,
+                cancellation,
+            ),
+        );
+        Ok(())
+    }
+
+    fn push_provenance(
+        &mut self,
+        binding_id: &BindingId,
+        request_id: &str,
+        scope: &ResolvedScope,
+        elapsed_micros: u64,
+    ) -> serde_json::Result<()> {
+        self.code(
+            PROVENANCE_FIELD,
+            format!(
+                "binding={}; request={}; project={}; worktree={}; elapsed_us={elapsed_micros}",
+                binding_id.as_str(),
+                request_id,
+                scalar(&scope.project_id)?,
+                scalar(&scope.worktree_id)?,
+            ),
+        );
+        Ok(())
     }
 
     fn push_scope(&mut self, scope: &ResolvedScope) -> serde_json::Result<()> {
@@ -154,30 +282,14 @@ impl CanonicalHumanView {
                 ))
             })
             .collect::<serde_json::Result<Vec<_>>>()?;
-        self.code("Coverage domains", list_or_none(domains));
-        Ok(())
-    }
-
-    fn push_omissions(&mut self, omissions: &[Omission]) -> serde_json::Result<()> {
-        let omissions = omissions
-            .iter()
-            .map(|omission| {
-                Ok(format!(
-                    "{}:{}={}",
-                    scalar(&omission.domain)?,
-                    scalar(&omission.reason)?,
-                    omission.count
-                ))
-            })
-            .collect::<serde_json::Result<Vec<_>>>()?;
-        self.code("Omissions", list_or_none(omissions));
+        self.code("Coverage domains", list_or_none(&domains));
         Ok(())
     }
 
     fn push_receipt(&mut self, receipt: &OperationReceipt) -> serde_json::Result<()> {
         self.code("Termination", scalar(&receipt.termination)?);
         self.code(
-            "Receipt",
+            RECEIPT_FIELD,
             format!(
                 "started={}, ended={}, deadline={}, units={}, bytes={}, elapsed_us={}",
                 receipt.started_at.0,
@@ -206,9 +318,14 @@ impl CanonicalHumanView {
         self.code("Problem revision", problem.revision.to_string());
         self.code("Owning layer", scalar(&problem.owning_layer)?);
         self.code("Terminality", scalar(&problem.terminality)?);
-        self.code("Request", problem.request_id.as_str());
-        self.code("Trace", problem.trace_id.as_str());
+        self.code(REQUEST_FIELD, problem.request_id.as_str());
+        self.code(TRACE_FIELD, problem.trace_id.as_str());
         self.text("Message", problem.message.clone());
+        if let Some(detail) = &problem.detail {
+            for (label, value) in detail.labelled_fields() {
+                self.text(label, value);
+            }
+        }
         self.code("Retryable", problem.retryable.to_string());
         self.code("Retry", scalar(&problem.retry)?);
         self.code(
@@ -240,13 +357,13 @@ impl CanonicalHumanView {
             .iter()
             .map(|detail| format!("{}: {}", detail.code, detail.message))
             .collect::<Vec<_>>();
-        self.text("Details", list_or_none(details));
+        self.text("Details", list_or_none(&details));
         let legal_actions = problem
             .legal_actions
             .iter()
             .map(scalar)
             .collect::<serde_json::Result<Vec<_>>>()?;
-        self.code("Legal actions", list_or_none(legal_actions));
+        self.code("Legal actions", list_or_none(&legal_actions));
         if let Some(coverage) = &problem.coverage {
             self.push_coverage(coverage)?;
         } else {
@@ -260,6 +377,14 @@ impl CanonicalHumanView {
             label,
             value: HumanFieldValue::Code(value.into()),
         });
+    }
+
+    fn payload(&mut self, operation: &str, payload: Option<&Value>) -> serde_json::Result<()> {
+        self.fields.push(HumanField {
+            label: "Payload",
+            value: payload_preview(operation, payload)?,
+        });
+        Ok(())
     }
 
     fn text(&mut self, label: &'static str, value: impl Into<String>) {
@@ -277,11 +402,26 @@ fn scalar<T: Serialize>(value: &T) -> serde_json::Result<String> {
     })
 }
 
+/// `success` only for evidence the read completed; a read that ended any other
+/// way is named by its termination, so an unavailable read with no payload
+/// never reads as a successful empty answer.
+fn evidence_status(termination: OperationTermination) -> serde_json::Result<String> {
+    match termination {
+        OperationTermination::Completed => Ok("success".to_owned()),
+        OperationTermination::Partial
+        | OperationTermination::Cancelled
+        | OperationTermination::TimedOut
+        | OperationTermination::Failed
+        | OperationTermination::Unavailable
+        | OperationTermination::EffectUnknown => scalar(&termination),
+    }
+}
+
 fn optional_count(value: Option<u64>) -> String {
     value.map_or_else(|| "unknown".to_owned(), |count| count.to_string())
 }
 
-fn list_or_none(values: Vec<String>) -> String {
+fn list_or_none(values: &[String]) -> String {
     if values.is_empty() {
         "none".to_owned()
     } else {
@@ -289,61 +429,239 @@ fn list_or_none(values: Vec<String>) -> String {
     }
 }
 
-fn payload_summary(payload: Option<&Value>) -> serde_json::Result<String> {
+const MAX_HUMAN_PAYLOAD_CHARS: usize = 6_000;
+
+fn payload_preview(
+    operation: &str,
+    payload: Option<&Value>,
+) -> serde_json::Result<HumanFieldValue> {
     let Some(payload) = payload else {
-        return Ok("none".to_owned());
+        return Ok(HumanFieldValue::Block("none".to_owned()));
     };
-    let bytes = serde_json::to_vec(payload)?.len();
-    Ok(match payload {
-        Value::Null => "null".to_owned(),
-        Value::Bool(_) | Value::Number(_) => payload.to_string(),
-        Value::String(value) => {
-            format!(
-                "string(chars={}, json_bytes={bytes}); complete: --json",
-                value.chars().count()
-            )
-        }
-        Value::Array(values) => {
-            format!(
-                "array(items={}, json_bytes={bytes}); complete: --json",
-                values.len()
-            )
-        }
-        Value::Object(values) => {
-            let mut keys = values.keys().map(String::as_str).collect::<Vec<_>>();
-            keys.sort_unstable();
-            let visible = keys.into_iter().take(8).collect::<Vec<_>>();
-            let suffix = if values.len() > visible.len() {
-                ", …"
-            } else {
-                ""
-            };
-            format!(
-                "object(keys={}{}; json_bytes={bytes}); complete: --json",
-                visible.join(","),
-                suffix
-            )
-        }
+    let (rendered, markdown) = if operation == "source_body"
+        && let Value::Object(fields) = payload
+        && let (Some(file), Some(start_line), Some(end_line), Some(body)) = (
+            fields.get("file").and_then(Value::as_str),
+            fields.get("start_line").and_then(Value::as_u64),
+            fields.get("end_line").and_then(Value::as_u64),
+            fields.get("body").and_then(Value::as_str),
+        ) {
+        let mut rendered = Md::new();
+        rendered
+            .code("text", &format!("{file}:{start_line}-{end_line}"))
+            .blank()
+            .code("text", body);
+        (rendered.render(), true)
+    } else if let Some(rendered) = code_graph_page_preview(operation, payload) {
+        (rendered, operation == "code_implementations")
+    } else {
+        let rendered = match payload {
+            Value::String(value) => value.clone(),
+            _ => serde_json::to_string_pretty(payload)?,
+        };
+        (rendered, false)
+    };
+    let rendered = bounded_payload(rendered, markdown);
+    Ok(if markdown {
+        HumanFieldValue::Markdown(rendered)
+    } else {
+        HumanFieldValue::Block(rendered)
     })
+}
+
+/// One line per symbol for the code-graph navigation pages, with the type
+/// hierarchy drawn as its implements/extends tree. `None` falls back to the
+/// JSON payload, so an unexpected shape is never hidden.
+fn code_graph_page_preview(operation: &str, payload: &Value) -> Option<String> {
+    if !matches!(
+        operation,
+        "code_callers"
+            | "code_callees"
+            | "code_implementations"
+            | "code_type_hierarchy"
+            | "code_signature_search"
+    ) {
+        return None;
+    }
+    let items = payload.get("items")?.as_array()?;
+    let mut rendered = String::new();
+    if items.is_empty() {
+        rendered.push_str("no matches\n");
+    } else if operation == "code_type_hierarchy" {
+        push_hierarchy_roots(items, &mut rendered)?;
+    } else {
+        for item in items {
+            if operation == "code_implementations" {
+                push_implementation_entry(item, &mut rendered)?;
+            } else {
+                push_symbol_entry(item, &mut rendered)?;
+            }
+        }
+    }
+    if operation == "code_implementations" {
+        let mut trailer = String::new();
+        push_page_trailer(payload, &mut trailer)?;
+        if !trailer.is_empty() {
+            let mut markdown = Md::new();
+            markdown.code("text", trailer.trim_end());
+            rendered.push_str(&markdown.render());
+        }
+    } else {
+        push_page_trailer(payload, &mut rendered)?;
+    }
+    Some(rendered.trim_end().to_owned())
+}
+
+/// Starts a subtree at every entry whose parent is itself (the root) or is not
+/// on this page, so a continuation page still renders every entry.
+fn push_hierarchy_roots(items: &[Value], rendered: &mut String) -> Option<()> {
+    let page_ids = items.iter().filter_map(item_node_id).collect::<Vec<_>>();
+    for item in items {
+        let parent = item.get("parent_node_id").and_then(Value::as_str);
+        if parent == item_node_id(item) || parent.is_none_or(|parent| !page_ids.contains(&parent)) {
+            push_hierarchy_subtree(items, item, 0, rendered)?;
+        }
+    }
+    Some(())
+}
+
+/// One relation, implementation, or signature match: its symbol line, the
+/// traversal annotations, then its signature when present.
+fn push_symbol_entry(item: &Value, rendered: &mut String) -> Option<()> {
+    let symbol = item.get("symbol").unwrap_or(item);
+    rendered.push_str(&symbol_line(symbol)?);
+    if let Some(depth) = item.get("depth").and_then(Value::as_u64) {
+        write!(rendered, " depth={depth}").ok()?;
+    }
+    if item.get("dispatch_via_trait").and_then(Value::as_bool) == Some(true)
+        && let Some(from) = item.get("dispatch_from").and_then(Value::as_str)
+    {
+        write!(rendered, " via trait {from}").ok()?;
+    }
+    rendered.push('\n');
+    if let Some(signature) = symbol.get("signature").and_then(Value::as_str) {
+        writeln!(rendered, "  {signature}").ok()?;
+    }
+    Some(())
+}
+
+fn push_implementation_entry(item: &Value, rendered: &mut String) -> Option<()> {
+    let mut symbol = String::new();
+    push_symbol_entry(item, &mut symbol)?;
+    let mut markdown = Md::new();
+    markdown.code("text", symbol.trim_end()).blank();
+    if let Some(body) = item.get("body").and_then(Value::as_str) {
+        markdown.code("text", body).blank();
+    }
+    rendered.push_str(&markdown.render());
+    Some(())
+}
+
+fn push_page_trailer(payload: &Value, rendered: &mut String) -> Option<()> {
+    for gap in payload
+        .get("support_gaps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let reason = gap.get("reason").and_then(Value::as_str)?;
+        writeln!(rendered, "support gap: {reason}").ok()?;
+    }
+    Some(())
+}
+
+fn push_hierarchy_subtree(
+    items: &[Value],
+    item: &Value,
+    depth: usize,
+    rendered: &mut String,
+) -> Option<()> {
+    let symbol = item.get("symbol")?;
+    let node_id = symbol.get("node_id").and_then(Value::as_str)?;
+    let line = symbol_line(symbol)?;
+    if depth == 0 {
+        writeln!(rendered, "{line}").ok()?;
+    } else {
+        let relation = item.get("edge_kind").and_then(Value::as_str)?;
+        let pad = "  ".repeat(depth - 1);
+        writeln!(rendered, "{pad}|- {relation} {line}").ok()?;
+    }
+    for child in items.iter().filter(|child| {
+        child.get("parent_node_id").and_then(Value::as_str) == Some(node_id)
+            && item_node_id(child) != Some(node_id)
+    }) {
+        push_hierarchy_subtree(items, child, depth + 1, rendered)?;
+    }
+    Some(())
+}
+
+fn item_node_id(item: &Value) -> Option<&str> {
+    item.pointer("/symbol/node_id").and_then(Value::as_str)
+}
+
+fn symbol_line(symbol: &Value) -> Option<String> {
+    Some(format!(
+        "{} ({}) {}:{} node_id={}",
+        symbol.get("qualified_name").and_then(Value::as_str)?,
+        symbol.get("kind").and_then(Value::as_str)?,
+        symbol.get("file").and_then(Value::as_str)?,
+        symbol.get("line").and_then(Value::as_u64)?,
+        symbol.get("node_id").and_then(Value::as_str)?,
+    ))
+}
+
+fn bounded_payload(rendered: String, markdown: bool) -> String {
+    let Some((end, _)) = rendered.char_indices().nth(MAX_HUMAN_PAYLOAD_CHARS) else {
+        return rendered;
+    };
+    let preview = if markdown {
+        whole_markdown_prefix(&rendered, end)
+    } else {
+        &rendered[..end]
+    };
+    format!(
+        "{preview}\n… payload truncated after {} characters; use --json for the complete typed result",
+        preview.chars().count()
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
-        Deadline, EvidenceCoverage, EvidenceDomain, Omission, OmissionReason, OperationBudgetUsage,
-        OperationReceipt, OperationTermination,
+        Deadline, EvidenceCoverage, EvidenceDomain, OperationBudgetUsage, OperationReceipt,
+        OperationTermination,
     };
+    use tracedecay_daemon_protocol::RequestedOutputFormat;
     use tracedecay_domain::UtcMicros;
 
-    use super::{CanonicalHumanView, HumanField, HumanFieldValue, payload_summary};
-    use serde_json::Value;
-    use tracedecay_application::{
-        ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
-        ResultContractRef, SafeDiagnostic,
+    use super::{
+        BindingId, CanonicalHumanView, HumanField, HumanFieldValue, evidence_status,
+        payload_preview as payload_field,
     };
-    use tracedecay_tool_catalog::{BindingId, SchemaId};
+
+    fn payload_preview(
+        operation: &str,
+        payload: Option<&serde_json::Value>,
+    ) -> serde_json::Result<String> {
+        match payload_field(operation, payload)? {
+            HumanFieldValue::Block(value) | HumanFieldValue::Markdown(value) => Ok(value),
+            field => panic!("unexpected payload field: {field:?}"),
+        }
+    }
+
+    fn visible_payload(operation: &str, payload: Option<&serde_json::Value>) -> String {
+        super::super::markdown::render(CanonicalHumanView {
+            heading: operation.to_owned(),
+            fields: vec![HumanField {
+                label: "Payload",
+                value: payload_field(operation, payload).expect("payload field"),
+            }],
+        })
+        .as_str()
+        .to_owned()
+    }
 
     fn code(label: &'static str, value: &str) -> HumanField {
         HumanField {
@@ -352,16 +670,16 @@ mod tests {
         }
     }
 
-    fn text(label: &'static str, value: &str) -> HumanField {
+    fn block(label: &'static str, value: &str) -> HumanField {
         HumanField {
             label,
-            value: HumanFieldValue::Text(value.to_owned()),
+            value: HumanFieldValue::Block(value.to_owned()),
         }
     }
 
     /// Partial evidence must be projected into the typed human fields that name
-    /// what was and was not covered — coverage, per-domain state, omissions,
-    /// paging cursor, receipt, and cancellation. Markdown rendering and
+    /// what was covered, coverage, per-domain state, paging cursor, receipt,
+    /// and cancellation. Markdown rendering and
     /// escaping belong to `cli::output::markdown`, so a display-label rename
     /// must not land here.
     #[test]
@@ -388,12 +706,6 @@ mod tests {
             ],
         })
         .unwrap();
-        view.push_omissions(&[Omission {
-            domain: EvidenceDomain::Source,
-            count: 2,
-            reason: OmissionReason::Budget,
-        }])
-        .unwrap();
         view.code("Cursor", "cursor.opaque");
         view.push_receipt(&OperationReceipt {
             started_at: UtcMicros(10),
@@ -411,10 +723,8 @@ mod tests {
             termination: OperationTermination::Partial,
         })
         .unwrap();
-        view.text(
-            "Payload",
-            payload_summary(Some(&json!({"items": [1, 2]}))).unwrap(),
-        );
+        view.payload("feedback_list", Some(&json!({"items": [1, 2]})))
+            .unwrap();
 
         assert_eq!(view.heading, "feedback_list");
         assert_eq!(
@@ -423,7 +733,6 @@ mod tests {
                 code("Coverage", "partial"),
                 code("Coverage counts", "visited=5, eligible=4, returned=2"),
                 code("Coverage domains", "source:partial, test:unknown"),
-                code("Omissions", "source:budget=2"),
                 code("Cursor", "cursor.opaque"),
                 code("Termination", "partial"),
                 code(
@@ -431,65 +740,357 @@ mod tests {
                     "started=10, ended=20, deadline=30, units=3, bytes=40, elapsed_us=10",
                 ),
                 code("Cancellation stage", "during_read"),
-                text(
-                    "Payload",
-                    "object(keys=items; json_bytes=15); complete: --json"
-                ),
+                block("Payload", "{\n  \"items\": [\n    1,\n    2\n  ]\n}"),
             ]
         );
     }
 
-    /// A canonical problem envelope must be projected into the full, ordered set of
-    /// typed human fields — every field the CLI promises about a problem, in order,
-    /// with the right `Code`/`Text` presentation. Markdown rendering and escaping
-    /// are the contract of `cli::output::markdown`, not of this extraction, so a
-    /// display-label rename must not land here.
     #[test]
-    fn canonical_problem_view_extracts_the_typed_problem_fields() {
-        let result: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
-            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 3).unwrap(),
-            RequestId::new("request.cli.golden").unwrap(),
-            ApplicationProblem::unavailable(
-                SafeDiagnostic::new(
-                    "daemon_unavailable",
-                    "The owning TraceDecay daemon is unavailable",
-                )
-                .unwrap(),
-            ),
+    fn evidence_status_says_success_only_for_a_completed_read() {
+        assert_eq!(
+            [
+                OperationTermination::Completed,
+                OperationTermination::Partial,
+                OperationTermination::Failed,
+                OperationTermination::Unavailable,
+            ]
+            .map(|termination| evidence_status(termination).unwrap()),
+            ["success", "partial", "failed", "unavailable"]
+        );
+    }
+
+    #[test]
+    fn source_body_preview_leads_with_location_and_bounded_source() {
+        let preview = visible_payload(
+            "source_body",
+            Some(&json!({
+                "node_id": "symbol.example",
+                "file": "src/lib.rs",
+                "start_line": 7,
+                "end_line": 9,
+                "body": "pub fn answer() {\n    42\n}",
+            })),
+        );
+
+        assert_eq!(
+            preview,
+            "## source\\_body\n\n### Payload\n\n\
+             ```text\nsrc/lib.rs:7-9\n```\n\n\
+             ```text\npub fn answer() {\n    42\n}\n```\n"
+        );
+    }
+
+    #[test]
+    fn source_body_preview_omits_an_oversized_body_whole() {
+        let body = format!("fn oversized() {{\n{}\n}}", "    do_work();\n".repeat(600));
+        let preview = visible_payload(
+            "source_body",
+            Some(&json!({
+                "node_id": "symbol.oversized",
+                "file": "src/lib.rs",
+                "start_line": 7,
+                "end_line": 608,
+                "body": body,
+            })),
+        );
+
+        assert_eq!(
+            preview,
+            "## source\\_body\n\n### Payload\n\n\
+             ```text\nsrc/lib.rs:7-608\n```\n\n\n\
+             … payload truncated after 30 characters; use --json for the complete typed result\n"
+        );
+    }
+
+    #[test]
+    fn source_body_preview_keeps_embedded_fences_inside_the_whole_body() {
+        let body = "fn markdown() {\n    let text = r#\"\n```rust\nfn example() {}\n```\n\"#;\n}";
+        let preview = visible_payload(
+            "source_body",
+            Some(&json!({
+                "file": "src/lib.rs",
+                "start_line": 1,
+                "end_line": 8,
+                "body": body,
+            })),
+        );
+
+        assert_eq!(
+            preview,
+            "## source\\_body\n\n### Payload\n\n\
+             ```text\nsrc/lib.rs:1-8\n```\n\n\
+             ````text\nfn markdown() {\n    let text = r#\"\n```rust\nfn example() {}\n```\n\"#;\n}\n````\n"
+        );
+    }
+
+    #[test]
+    fn final_response_omits_a_large_unicode_body_and_preserves_the_typed_result() {
+        let body = format!("fn unicode() {{\n    \"{}\";\n}}", "💻".repeat(4_000));
+        let payload = json!({
+            "node_id": "symbol.unicode",
+            "file": "src/lib.rs",
+            "start_line": 1,
+            "end_line": 3,
+            "body": body,
+        });
+        let envelope = serde_json::from_value(json!({
+            "contract": {
+                "schema_id": "schema.application.primitive.source-body.result",
+                "schema_revision": 1,
+            },
+            "request_id": "request.cli.source_body.0",
+            "scope": {
+                "project_id": "proj_a5b3d7e3ebe14ca7",
+                "reference": "refs/heads/master",
+                "repository_id": "repository.daemon.source",
+                "scope_digest": format!("sha256:{}", "8".repeat(64)),
+                "worktree_id": "worktree.daemon.source",
+            },
+            "outcome": {"outcome": "result", "value": payload},
+        }))
+        .unwrap();
+        let result = super::super::tool_result::render_application_result(
+            None,
+            "source_body",
+            &BindingId::new("binding.cli.source_body.v1").unwrap(),
+            &Ok(envelope),
+            RequestedOutputFormat::Markdown,
         )
-        .expect("construct canonical CLI golden problem"));
-        let view = CanonicalHumanView::from_application_result(
-            "feedback_list",
-            &BindingId::new("binding.cli.feedback-list.v1").unwrap(),
-            &result,
+        .unwrap();
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+
+        assert!(
+            text.contains("## source\\_body\n\n### Payload\n\n```text\nsrc/lib.rs:1-3\n```"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("fn unicode()") && !text.contains('💻'),
+            "a partial Unicode body was shown: {text}"
+        );
+        assert!(text.len() <= tracedecay_mcp_catalog::MAX_RESPONSE_CHARS);
+        assert_eq!(
+            result.structured_result().unwrap()["outcome"]["value"],
+            payload
+        );
+    }
+
+    #[test]
+    fn implementation_preview_omits_an_oversized_body_whole() {
+        let body = format!("fn oversized() {{\n{}\n}}", "    do_work();\n".repeat(600));
+        let preview = visible_payload(
+            "code_implementations",
+            Some(&json!({
+                "items": [{
+                    "symbol": symbol("m", "oversized", "method", 3),
+                    "body": body,
+                }],
+                "support_gaps": [],
+            })),
+        );
+
+        assert_eq!(
+            preview,
+            "## code\\_implementations\n\n### Payload\n\n\
+             ```text\nsrc/lib.rs::oversized (method) src/lib.rs:3 node_id=m\n```\n\n\n\
+             … payload truncated after 67 characters; use --json for the complete typed result\n"
+        );
+    }
+
+    #[test]
+    fn implementation_preview_keeps_complete_bodies_before_an_oversized_one() {
+        let first = "fn small() {\n    1\n}";
+        let oversized = format!("fn oversized() {{\n{}\n}}", "    do_work();\n".repeat(600));
+        let preview = visible_payload(
+            "code_implementations",
+            Some(&json!({
+                "items": [
+                    {"symbol": symbol("small", "small", "method", 3), "body": first},
+                    {"symbol": symbol("large", "oversized", "method", 7), "body": oversized},
+                ],
+                "support_gaps": [],
+            })),
+        );
+
+        assert_eq!(
+            preview,
+            "## code\\_implementations\n\n### Payload\n\n\
+             ```text\nsrc/lib.rs::small (method) src/lib.rs:3 node_id=small\n```\n\n\
+             ```text\nfn small() {\n    1\n}\n```\n\n\
+             ```text\nsrc/lib.rs::oversized (method) src/lib.rs:7 node_id=large\n```\n\n\n\
+             … payload truncated after 172 characters; use --json for the complete typed result\n"
+        );
+    }
+
+    fn symbol(node_id: &str, name: &str, kind: &str, line: u32) -> serde_json::Value {
+        json!({
+            "node_id": node_id,
+            "name": name,
+            "qualified_name": format!("src/lib.rs::{name}"),
+            "kind": kind,
+            "file": "src/lib.rs",
+            "line": line,
+            "end_line": line,
+            "signature": null,
+            "is_async": false,
+            "score": null,
+        })
+    }
+
+    #[test]
+    fn type_hierarchy_preview_draws_the_implements_tree() {
+        let preview = payload_preview(
+            "code_type_hierarchy",
+            Some(&json!({
+                "items": [
+                    {"symbol": symbol("t", "Shape", "trait", 1), "parent_node_id": "t", "edge_kind": "root", "depth": 0},
+                    {"symbol": symbol("b", "Base", "struct", 5), "parent_node_id": "t", "edge_kind": "implements", "depth": 1},
+                    {"symbol": symbol("d", "Derived", "class", 9), "parent_node_id": "b", "edge_kind": "extends", "depth": 2},
+                ],
+                "support_gaps": [],
+                "next_cursor": null,
+            })),
         )
         .unwrap();
 
-        assert_eq!(view.heading, "feedback_list");
         assert_eq!(
-            view.fields,
-            vec![
-                code("Operation", "feedback_list"),
-                code("Binding", "binding.cli.feedback-list.v1"),
-                code("Status", "problem"),
-                code("Contract", "schema.test.result@3"),
-                code("Problem", "daemon_unavailable"),
-                code("Problem kind", "unavailable"),
-                code("Problem revision", "1"),
-                code("Owning layer", "application"),
-                code("Terminality", "pre_admission"),
-                code("Request", "request.cli.golden"),
-                code("Trace", "request.cli.golden"),
-                text("Message", "The owning TraceDecay daemon is unavailable"),
-                code("Retryable", "true"),
-                code("Retry", "after_delay"),
-                code("Retry scope", "same_request"),
-                code("Retry after", "250ms"),
-                code("Cancellation stage", "none"),
-                text("Details", "none"),
-                code("Legal actions", "retry"),
-                code("Coverage", "not_available"),
-            ]
+            preview,
+            "src/lib.rs::Shape (trait) src/lib.rs:1 node_id=t\n\
+             |- implements src/lib.rs::Base (struct) src/lib.rs:5 node_id=b\n  \
+             |- extends src/lib.rs::Derived (class) src/lib.rs:9 node_id=d"
+        );
+    }
+
+    #[test]
+    fn implementation_preview_carries_each_body_and_its_support_gaps() {
+        let preview = visible_payload(
+            "code_implementations",
+            Some(&json!({
+                "items": [{
+                    "symbol": symbol("m", "area", "method", 3),
+                    "edge_kind": "implementation",
+                    "dispatch_from": null,
+                    "body": "fn area() {\n    1\n}",
+                }],
+                "support_gaps": [{"provider": null, "language": null, "reason": "partial"}],
+                "next_cursor": "cursor.next",
+            })),
+        );
+
+        assert_eq!(
+            preview,
+            "## code\\_implementations\n\n### Payload\n\n\
+             ```text\nsrc/lib.rs::area (method) src/lib.rs:3 node_id=m\n```\n\n\
+             ```text\nfn area() {\n    1\n}\n```\n\n\
+             ```text\nsupport gap: partial\n```\n"
+        );
+    }
+
+    /// A callers page carries its continuation twice in the typed result,
+    /// as `payload.next_cursor` and as the evidence page cursor. The human
+    /// view prints it once, so a long cursor does not double the answer.
+    #[test]
+    fn partial_callers_page_prints_its_continuation_once() {
+        let cursor = "cursor.callers-page-2";
+        let envelope: tracedecay_contracts::ApplicationEnvelope<serde_json::Value> =
+            serde_json::from_value(json!({
+                "contract": {
+                    "schema_id": "schema.application.primitive.code-callers.result",
+                    "schema_revision": 1
+                },
+                "request_id": "request.cli.callers.0",
+                "scope": {
+                    "project_id": "proj_a5b3d7e3ebe14ca7",
+                    "reference": "refs/heads/master",
+                    "repository_id": "repository.daemon.callers",
+                    "scope_digest": format!("sha256:{}", "8".repeat(64)),
+                    "worktree_id": "worktree.daemon.callers"
+                },
+                "outcome": {
+                    "outcome": "evidence",
+                    "value": {
+                        "authority": {
+                            "authorized_scope_digest": format!("sha256:{}", "8".repeat(64)),
+                            "disclosure": "evidence",
+                            "grant_digest": format!("sha256:{}", "5".repeat(64)),
+                            "grant_id": "grant.daemon.callable-code.callers",
+                            "grant_revision": 1,
+                            "policy": {
+                                "decision_id": "route.callable-code.binding.tracedecay-daemon.project-open",
+                                "digest": format!("sha256:{}", "a".repeat(64)),
+                                "evaluator_revision": "project-source-access.v1",
+                                "revision": 1
+                            },
+                            "revalidated_at": 100
+                        },
+                        "contributions": [],
+                        "coverage": {
+                            "completeness": "partial",
+                            "domains": [{"completeness": "partial", "domain": "graph"}],
+                            "eligible": 2,
+                            "requested_domains": ["graph"],
+                            "returned": 1,
+                            "visited": 2
+                        },
+                        "evidence_authorities": [],
+                        "execution": {
+                            "budget": {"bytes_consumed": 0, "elapsed_micros": 10, "units_consumed": 0},
+                            "cancellation": null,
+                            "effective_deadline": {"expires_at": 500},
+                            "ended_at": 110,
+                            "started_at": 100,
+                            "termination": "partial"
+                        },
+                        "omissions": [],
+                        "page": {
+                            "cursor": {"cursor": cursor, "kind": "opaque"},
+                            "expires_at": 400,
+                            "returned": 1,
+                            "sort_contract_id": "sort.application.retrieval.stable",
+                            "sort_revision": 1,
+                            "total": 2
+                        },
+                        "payload": {
+                            "items": [{
+                                "depth": 1,
+                                "edge_kind": "calls",
+                                "symbol": symbol("c", "caller", "function", 4),
+                            }],
+                            "support_gaps": [],
+                            "next_cursor": cursor,
+                            "total": 2,
+                            "truncated": true
+                        },
+                        "scores": [],
+                        "temporal": {
+                            "freshness": "current",
+                            "requested_at": 110,
+                            "requested_mode": {"kind": "current"},
+                            "resolved_at": 110,
+                            "source_generation": null,
+                            "watermark_digest": null
+                        }
+                    }
+                }
+            }))
+            .expect("callers envelope");
+        let view = CanonicalHumanView::from_application_result(
+            "code_callers",
+            &BindingId::new("binding.cli.code_callers.v1").unwrap(),
+            &Ok(envelope),
+        )
+        .unwrap();
+
+        let text = super::super::markdown::render(view).as_str().to_owned();
+        let Some((payload, rest)) = text.split_once("\n- Status:") else {
+            panic!("human view must name status: {text}");
+        };
+        assert!(
+            rest.contains(cursor),
+            "the continuation must remain visible: {text}"
+        );
+        assert!(
+            !payload.contains(cursor),
+            "the payload must not repeat the continuation: {text}"
         );
     }
 }

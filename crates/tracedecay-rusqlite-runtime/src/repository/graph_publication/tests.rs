@@ -4,7 +4,6 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{
@@ -19,47 +18,21 @@ use tracedecay_store::{
     GraphPublicationSequenceV1, GraphPublicationStoreErrorV1, GraphPublicationStoreV1,
     GraphRecoveredGenerationDigestV1, GraphReplayAppendOutcomeV1, GraphReplayRetirementOutcomeV1,
     GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
-    GraphVerifiedHeadCompareAndSwapV1, RepositoryWritePayloadV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    GraphVerifiedHeadCompareAndSwapV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use crate::exact_sql::{ExactSqlHandle, ExactSqlStatement, ExactSqlValue};
-use crate::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
-use crate::{ExistingWriterLocator, PersistentWriter, StorageOperationExecutor};
+use crate::reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool};
+use crate::{ExactSqlOnlyStorageOperationV1, ExistingWriterLocator, PersistentWriter};
 
 use super::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};
-
-struct NoWrites;
-
-impl StorageOperationExecutor for NoWrites {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct NoReads;
-
-impl ReaderQueryExecutor for NoReads {
-    fn execute_read(
-        &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
-        _request: &RuntimeReadRequestV1,
-    ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
-        unreachable!("exact SQL queries bypass the closed product read executor")
-    }
-}
 
 struct Fixture {
     _directory: TempDir,
     _writer: PersistentWriter,
-    readers: ReaderPool<NoReads>,
+    readers: ReaderPool<ExactSqlOnlyReaderV1>,
     handle: ExactSqlHandle,
 }
 
@@ -88,15 +61,16 @@ impl Fixture {
             LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
         );
         let writer = PersistentWriter::start(
+            &crate::native_runtime::handle().expect("native runtime"),
             ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
             AdmissionConfigV1::default(),
-            NoWrites,
+            ExactSqlOnlyStorageOperationV1,
         )
         .unwrap();
         let readers = ReaderPool::start(
             ExistingReaderLocator::new(binding, locator, path).unwrap(),
             AdmissionConfigV1::default().readers,
-            NoReads,
+            ExactSqlOnlyReaderV1,
         )
         .unwrap();
         let handle = ExactSqlHandle::attach(&writer, &readers).unwrap();
@@ -232,9 +206,7 @@ fn control_and_probe(
     )
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn projection(name: &str) -> GraphProjectionIdentityV1 {
     projection_for_project("project.fixture", name)
@@ -491,7 +463,7 @@ fn replay_append_requires_the_atomic_commit_gate() {
 
     assert_eq!(
         fixture.storage().append_replay(&publication, &context),
-        Err(GraphPublicationStoreErrorV1::Infrastructure)
+        Err(GraphPublicationStoreErrorV1::CommitRefused)
     );
     assert_eq!(fixture.replay_count(), 0);
 }
@@ -950,6 +922,143 @@ fn historical_retirement_refuses_current_and_pending_then_tombstones_exactly() {
             .retire_replay(&retirement(&first), &context)
             .unwrap(),
         GraphReplayRetirementOutcomeV1::ExactReplay(tombstone)
+    );
+}
+
+#[test]
+fn verified_head_retirement_tombstones_and_finalizes_exactly() {
+    let fixture = Fixture::new();
+    let projection = projection("code-head-retirement");
+    let publication = replay(
+        projection.clone(),
+        "generation.1",
+        "publish.1",
+        'a',
+        'b',
+        None,
+        b"one",
+    );
+    let mut storage = fixture.storage();
+    append_with_fresh_context(&mut storage, &publication, "head-retire.append").unwrap();
+    let head = advance_head(&mut storage, &publication);
+    let request = retirement(&publication);
+
+    let (control, probe) = control_and_probe("head-retire", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let tombstone = match storage
+        .retire_verified_head_replay(&request, &head, &context)
+        .unwrap()
+    {
+        GraphReplayRetirementOutcomeV1::Retired(tombstone) => tombstone,
+        outcome => panic!("unexpected verified-head retirement outcome: {outcome:?}"),
+    };
+    assert_eq!(storage.verified_head(&projection, &context).unwrap(), None);
+    assert_eq!(
+        storage.replay(&publication.key, &context).unwrap(),
+        GraphPublicationReplayLookupV1::Retired(tombstone.clone())
+    );
+    assert!(matches!(
+        append_with_fresh_context(&mut storage, &publication, "head-retire.reappend").unwrap(),
+        GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. }
+    ));
+
+    let (control, probe) = control_and_probe("head-retire.repeat", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        storage
+            .retire_verified_head_replay(&request, &head, &context)
+            .unwrap(),
+        GraphReplayRetirementOutcomeV1::ExactReplay(tombstone)
+    );
+    let (control, probe) = control_and_probe("head-retire.finalize", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        storage
+            .finalize_retired_replay_cleanup(&request, &context)
+            .unwrap(),
+        GraphRetiredReplayCleanupFinalizeOutcomeV1::Finalized(_)
+    ));
+}
+
+#[test]
+fn verified_head_retirement_refuses_changed_expected_head() {
+    let fixture = Fixture::new();
+    let projection = projection("code-head-conflict");
+    let publication = replay(
+        projection.clone(),
+        "generation.1",
+        "publish.1",
+        'a',
+        'b',
+        None,
+        b"one",
+    );
+    let mut storage = fixture.storage();
+    append_with_fresh_context(&mut storage, &publication, "head-conflict.append").unwrap();
+    let head = advance_head(&mut storage, &publication);
+    let mut wrong_head = head.clone();
+    wrong_head.recovered_digest = GraphRecoveredGenerationDigestV1::new(digest('c')).unwrap();
+    let (control, probe) = control_and_probe("head-conflict", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+
+    assert_eq!(
+        storage
+            .retire_verified_head_replay(&retirement(&publication), &wrong_head, &context)
+            .unwrap(),
+        GraphReplayRetirementOutcomeV1::Conflict
+    );
+    assert_eq!(
+        storage.verified_head(&projection, &context).unwrap(),
+        Some(head)
+    );
+}
+
+#[test]
+fn verified_head_retirement_refuses_projection_with_pending_replay() {
+    let fixture = Fixture::new();
+    let projection = projection("code-head-pending");
+    let publication = replay(
+        projection.clone(),
+        "generation.1",
+        "publish.1",
+        'a',
+        'b',
+        None,
+        b"one",
+    );
+    let mut storage = fixture.storage();
+    append_with_fresh_context(&mut storage, &publication, "head-pending.append").unwrap();
+    let head = advance_head(&mut storage, &publication);
+    let pending = replay(
+        projection,
+        "generation.2",
+        "publish.2",
+        'c',
+        'd',
+        Some(head.clone()),
+        b"two",
+    );
+    let pending_record =
+        match append_with_fresh_context(&mut storage, &pending, "head-pending.pending").unwrap() {
+            GraphReplayAppendOutcomeV1::Appended(record) => record,
+            outcome => panic!("unexpected pending append outcome: {outcome:?}"),
+        };
+    let (control, probe) = control_and_probe("head-pending.retire", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+
+    assert_eq!(
+        storage
+            .retire_verified_head_replay(&retirement(&publication), &head, &context)
+            .unwrap(),
+        GraphReplayRetirementOutcomeV1::PendingReplay {
+            pending: pending_record
+        }
+    );
+    assert_eq!(
+        storage
+            .verified_head(&publication.key.projection, &context)
+            .unwrap(),
+        Some(head)
     );
 }
 

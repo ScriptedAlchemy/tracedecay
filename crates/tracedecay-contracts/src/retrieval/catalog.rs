@@ -1,0 +1,1496 @@
+use crate::retrieval::admin_cli_surface::{AdminCliResultV1, AdminCliSurfaceRequestV1};
+use crate::retrieval::admin_project_surface::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
+use crate::retrieval::hook_runtime_surface::{HookRuntimeResultV1, HookRuntimeSurfaceRequestV1};
+use crate::retrieval::owner_effect_surface::{
+    AdminSyncResultV1, AdminSyncSurfaceRequestV1, DashboardResultV1, DashboardSurfaceRequestV1,
+    RunAffectedTestsResultV1, RunAffectedTestsSurfaceRequestV1,
+};
+use schemars::JsonSchema;
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionContractRef, ContributionId, CoverageContractRef,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableSchemaAuthority, LifecycleClass, OmissionContractRef, OwnerSideEffectEntryV1,
+    PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange, RetrievalFamily,
+    RetrievalPrimitiveManifestInputV1, RetrievalPrimitiveManifestV1, RetrieverId,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, ScoringContractRef, SortContract, SortContractId,
+    StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TemporalMode,
+    TerminalState, TerminalStateContract,
+};
+
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
+use crate::error::ApplicationContractError;
+use crate::handlers::{
+    ApplicationHandlerDescriptor, ApplicationOperation, capability_executable_schema,
+};
+use crate::remote::status::RemoteOperationalStatusReadV1;
+use crate::result::ResultContractRef;
+use crate::retrieval::DependencyDepthResultV1;
+use crate::retrieval::analysis_report_surface::{
+    CircularResultV1, CircularSurfaceRequestV1, ComplexityReportV1, ComplexitySurfaceRequestV1,
+    ConstructorsResultV1, ConstructorsSurfaceRequestV1, CouplingResultV1, CouplingSurfaceRequestV1,
+    DeadCodeResultV1, DeadCodeSurfaceRequestV1, DistributionResultV1, DistributionSurfaceRequestV1,
+    DocCoverageResultV1, DocCoverageSurfaceRequestV1, FieldSitesResultV1,
+    FieldSitesSurfaceRequestV1, GodClassResultV1, GodClassSurfaceRequestV1, HotspotsResultV1,
+    HotspotsSurfaceRequestV1, InheritanceDepthResultV1, InheritanceDepthSurfaceRequestV1,
+    LargestResultV1, LargestSurfaceRequestV1, RankResultV1, RankSurfaceRequestV1,
+    RecursionResultV1, RecursionSurfaceRequestV1, UnmountedFilesResultV1,
+    UnmountedFilesSurfaceRequestV1, UnsafePatternsResultV1, UnsafePatternsSurfaceRequestV1,
+};
+use crate::retrieval::callable_code_catalog::CALLABLE_CODE_DEFAULT_PAGE_SIZE;
+use crate::retrieval::git_context_surface::{
+    AffectedResultV1, AffectedSurfaceRequestV1, BranchDiffResultV1, BranchDiffSurfaceRequestV1,
+    BranchListResultV1, BranchListSurfaceRequestV1, BranchSearchResultV1,
+    BranchSearchSurfaceRequestV1, ChangelogResultV1, ChangelogSurfaceRequestV1,
+    CommitContextResultV1, CommitContextSurfaceRequestV1, DiffContextResultV1,
+    DiffContextSurfaceRequestV1, PrContextResultV1, PrContextSurfaceRequestV1,
+};
+use crate::retrieval::graph_lookup_surface::{
+    AstGrepSearchResultV1, AstGrepSearchSurfaceRequestV1, ByQualifiedNameResultV1,
+    ByQualifiedNameSurfaceRequestV1, DerivesResultV1, FindExactSymbolResultV1,
+    FindExactSymbolSurfaceRequestV1, GrepSearchResultV1, GrepSurfaceRequestV1, SignatureResultV1,
+    SymbolSelectorSurfaceRequestV1,
+};
+use crate::retrieval::graph_report_surface::{
+    DependencyDepthSurfaceRequestV1, DiagnoseResultV1, DiagnoseSurfaceRequestV1, DsmResultV1,
+    DsmSurfaceRequestV1, GiniResultV1, GiniSurfaceRequestV1, HealthResultV1,
+    HealthSurfaceRequestV1, TestMapResultV1, TestMapSurfaceRequestV1, TestRiskResultV1,
+    TestRiskSurfaceRequestV1,
+};
+use crate::retrieval::primitive_surface::{
+    ContextResultV1, ContextSurfaceRequestV1, ImpactResultV1, NodeDepthSurfaceRequestV1,
+    NodeResultV1, NodeSurfaceRequestV1, PortOrderResultV1, PortOrderSurfaceRequestV1,
+    PortStatusResultV1, PortStatusSurfaceRequestV1, RedundancyResultV1, RedundancySurfaceRequestV1,
+    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1, SimilarResultV1,
+    SimilarSurfaceRequestV1, TodosResultV1, TodosSurfaceRequestV1,
+};
+use crate::retrieval::project_file_surface::{
+    ConfigResultV1, ConfigSurfaceRequestV1, FilesResultV1, FilesSurfaceRequestV1,
+};
+use crate::retrieval::project_info_surface::{
+    ActiveProjectResultV1, ActiveProjectSurfaceRequestV1, ProjectContextResultV1,
+    ProjectContextSurfaceRequestV1, ProjectListSurfaceRequestV1, ProjectRegistryListingResultV1,
+    ProjectSearchSurfaceRequestV1, RemoteStatusSurfaceRequestV1, RuntimeResultV1,
+    RuntimeSurfaceRequestV1, StatusResultV1, StatusSurfaceRequestV1,
+};
+use crate::retrieval::requests::{
+    CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
+    DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
+    HealthDeltaRequest, HealthDeltaResult, HealthReadRequest, HealthReadResult,
+    ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest,
+    QualifiedNamePrimitiveResult, SessionLookupRequest, SessionLookupResult,
+    SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceLinesRequest, SourceLinesResult,
+    SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusPrimitiveRequest,
+    StorageStatusPrimitiveResult,
+};
+use crate::retrieval::response_handle_surface::{RetrieveResultV1, RetrieveSurfaceRequestV1};
+use crate::retrieval::search_surface::{SearchResultV1, SearchSurfaceRequestV1};
+use crate::retrieval::symbol_graph::{
+    ImplementationRecord, SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord,
+    TypeHierarchyRecord,
+};
+use crate::retrieval::{
+    AnalyticsResultV1, AnalyticsSurfaceRequestV1, AutomationRunArtifactViewResultV1,
+    AutomationRunArtifactViewSurfaceRequestV1, AutomationRunListResultV1,
+    AutomationRunListSurfaceRequestV1, AutomationRunViewResultV1,
+    AutomationRunViewSurfaceRequestV1, HermesSkillBridgeResultV1,
+    HermesSkillBridgeSurfaceRequestV1, SkillListResultV1, SkillListSurfaceRequestV1,
+    SkillViewResultV1, SkillViewSurfaceRequestV1,
+};
+use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
+use crate::surface_contracts::{
+    CodeCallersSurfaceRequest, CodeImplementationsSurfaceRequest,
+    CodeSignatureSearchSurfaceRequest, CodeSymbolSearchSurfaceRequest,
+    CodeTypeHierarchySurfaceRequest,
+};
+use crate::{current_application_bindings, current_bindings};
+
+const SYMBOL_SEARCH_CAPABILITY: &str = "capability.application.symbol-search";
+const SYMBOL_SEARCH_USE_CASE: &str = "use-case.application.symbol-search";
+pub const APPLICATION_DEFAULT_PROFILE_ID: &str = "profile.default";
+pub const APPLICATION_COMPACT_PROFILE_ID: &str = "profile.compact";
+pub const APPLICATION_ADMINISTRATIVE_PROFILE_ID: &str = "profile.administrative";
+pub const APPLICATION_HOST_LIMITED_PROFILE_ID: &str = "profile.host-limited";
+
+pub(crate) fn application_profile_ids(
+    profile_ids: &[&str],
+) -> Result<Vec<ProfileId>, ApplicationContractError> {
+    profile_ids
+        .iter()
+        .map(|profile_id| ProfileId::new(*profile_id).map_err(Into::into))
+        .collect()
+}
+
+/// Closed set of catalog contributions for declared application use cases.
+/// Adding metadata here requires adding its typed handler descriptor to
+/// [`crate::application_handler_descriptors`].
+pub fn application_catalog_contributions()
+-> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
+    application_catalog_contributions_with(SchemaBodyMaterialization::Materialize)
+}
+
+/// [`application_catalog_contributions`], optionally without JSON Schema
+/// bodies. Dispatch resolves from the body-free projection; SDK generation and
+/// MCP discovery need the bodies.
+pub(crate) fn application_catalog_contributions_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
+    Ok(vec![
+        symbol_search_contribution_with(materialize)?,
+        primitive_read_contribution_with(materialize)?,
+        super::callable_code_catalog_contribution_with(materialize)?,
+        crate::git::git_index_catalog_contribution()?,
+        crate::git::git_surface_catalog_contribution_with(materialize)?,
+        crate::git::native_integration_surface_catalog_contribution_with(materialize)?,
+        crate::configuration::configuration_surface_catalog_contribution_with(materialize)?,
+        crate::context_scout::context_scout_surface_catalog_contribution_with(materialize)?,
+        crate::feedback::feedback_surface_catalog_contribution_with(materialize)?,
+        crate::lsp_context_catalog::lsp_context_catalog_contribution()?,
+        crate::observatory_surface::observatory_read_catalog_contribution_with(materialize)?,
+        crate::retained_surfaces::retained_surface_catalog_contribution_with(materialize)?,
+        crate::source_edit::source_edit_catalog_contribution_with(materialize)?,
+    ])
+}
+
+/// Resolves the page size an omitted transport control receives from the
+/// canonical primitive descriptor.
+///
+/// Operations outside this primitive family, the callable-code queries
+/// included, retain the inert page envelope's established value of
+/// [`CALLABLE_CODE_DEFAULT_PAGE_SIZE`].
+pub fn application_operation_default_page_size(operation: ApplicationSurfaceOperation) -> u32 {
+    PRIMITIVE_READ_SPECS
+        .iter()
+        .find(|spec| spec.operation == operation.as_str())
+        .map_or(CALLABLE_CODE_DEFAULT_PAGE_SIZE, |spec| {
+            spec.default_page_size
+        })
+}
+
+struct PrimitiveReadSpec {
+    operation: &'static str,
+    capability: &'static str,
+    use_case: &'static str,
+    default_page_size: u32,
+    /// Bounded reads continue through `meta.cursor`; whole-project reports
+    /// answer in one response and advertise no pagination.
+    paginated: bool,
+    deadline_millis: u64,
+    /// The tool-catalog entry of an operation that acts beyond reading; its
+    /// effect class and ceiling replace the read defaults.
+    side_effect: Option<OwnerSideEffectEntryV1>,
+}
+
+fn primitive_profile_ids(operation: &str) -> &'static [&'static str] {
+    match operation {
+        "source_lines" => &[
+            APPLICATION_DEFAULT_PROFILE_ID,
+            APPLICATION_COMPACT_PROFILE_ID,
+            APPLICATION_HOST_LIMITED_PROFILE_ID,
+        ],
+        "source_outline" | "diagnostics_read" => &[
+            APPLICATION_DEFAULT_PROFILE_ID,
+            APPLICATION_COMPACT_PROFILE_ID,
+            APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+            APPLICATION_HOST_LIMITED_PROFILE_ID,
+        ],
+        "health_read" | "health_delta" | "storage_status" => &[
+            APPLICATION_DEFAULT_PROFILE_ID,
+            APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+        ],
+        _ => &[APPLICATION_DEFAULT_PROFILE_ID],
+    }
+}
+
+fn primitive_lsp_methods(operation: &str) -> &'static [&'static str] {
+    match operation {
+        "code_signature_search" => &["textDocument/signatureHelp"],
+        "code_implementations" => &["textDocument/implementation"],
+        "code_type_hierarchy" => &[
+            "textDocument/typeDefinition",
+            "textDocument/prepareTypeHierarchy",
+            "typeHierarchy/supertypes",
+            "typeHierarchy/subtypes",
+        ],
+        "code_callers" => &[
+            "textDocument/prepareCallHierarchy",
+            "callHierarchy/incomingCalls",
+        ],
+        "qualified_name" => &["textDocument/declaration"],
+        "source_body" => &["textDocument/hover"],
+        "source_outline" => &["textDocument/documentSymbol"],
+        "diagnostics_read" => &["textDocument/diagnostic"],
+        _ => &[],
+    }
+}
+
+const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
+    // MCP and CLI callers cannot choose a page size, so these navigation reads
+    // default to a page that holds a typical answer; `meta.cursor` continues.
+    primitive_spec_with_default_page_size("code_signature_search", 50),
+    primitive_spec_with_default_page_size("code_implementations", 20),
+    primitive_spec_with_default_page_size("code_type_hierarchy", 100),
+    primitive_spec_with_default_page_size("code_callers", 100),
+    primitive_spec("context"),
+    primitive_spec("node"),
+    primitive_spec("impact"),
+    primitive_spec("similar"),
+    primitive_spec("redundancy"),
+    primitive_spec("rename_preview"),
+    primitive_spec("port_status"),
+    primitive_spec("port_order"),
+    primitive_spec("todos"),
+    graph_report_spec("test_map"),
+    graph_report_spec("test_risk"),
+    graph_report_spec("gini"),
+    graph_report_spec("dependency_depth"),
+    graph_report_spec("health"),
+    graph_report_spec("dsm"),
+    graph_report_spec("diagnose"),
+    graph_report_spec("dead_code"),
+    graph_report_spec("circular"),
+    graph_report_spec("hotspots"),
+    graph_report_spec("unmounted_files"),
+    graph_report_spec("rank"),
+    graph_report_spec("largest"),
+    graph_report_spec("coupling"),
+    graph_report_spec("inheritance_depth"),
+    graph_report_spec("distribution"),
+    graph_report_spec("recursion"),
+    graph_report_spec("complexity"),
+    graph_report_spec("doc_coverage"),
+    graph_report_spec("god_class"),
+    graph_report_spec("unsafe_patterns"),
+    graph_report_spec("constructors"),
+    graph_report_spec("field_sites"),
+    graph_report_spec("find_exact_symbol"),
+    graph_report_spec("by_qualified_name"),
+    graph_report_spec("signature"),
+    graph_report_spec("derives"),
+    graph_report_spec("grep"),
+    graph_report_spec("ast_grep_search"),
+    graph_report_spec("files"),
+    graph_report_spec("config"),
+    graph_report_spec("retrieve"),
+    graph_report_spec("automation_run_list"),
+    graph_report_spec("automation_run_view"),
+    graph_report_spec("automation_run_artifact_view"),
+    graph_report_spec("skill_list"),
+    graph_report_spec("skill_view"),
+    graph_report_spec("hermes_skill_bridge"),
+    graph_report_spec("analytics"),
+    graph_report_spec("search"),
+    owner_side_effect_spec(ApplicationSurfaceOperation::RunAffectedTests),
+    owner_side_effect_spec(ApplicationSurfaceOperation::Dashboard),
+    graph_report_spec("status"),
+    graph_report_spec("active_project"),
+    graph_report_spec("remote_status"),
+    graph_report_spec("runtime"),
+    graph_report_spec("project_list"),
+    graph_report_spec("project_search"),
+    graph_report_spec("project_context"),
+    owner_side_effect_spec(ApplicationSurfaceOperation::AdminSync),
+    owner_side_effect_spec(ApplicationSurfaceOperation::AdminCli),
+    owner_side_effect_spec(ApplicationSurfaceOperation::AdminProject),
+    owner_side_effect_spec(ApplicationSurfaceOperation::HookRuntime),
+    git_context_spec("affected"),
+    git_context_spec("diff_context"),
+    git_context_spec("changelog"),
+    git_context_spec("commit_context"),
+    git_context_spec("pr_context"),
+    git_context_spec("branch_search"),
+    git_context_spec("branch_diff"),
+    git_context_spec("branch_list"),
+    primitive_spec("session_lookup"),
+    primitive_spec("qualified_name"),
+    primitive_spec("call_chain"),
+    primitive_spec("file_dependents"),
+    primitive_spec("source_lines"),
+    primitive_spec("source_body"),
+    primitive_spec("source_outline"),
+    primitive_spec("module_api"),
+    primitive_spec("health_read"),
+    primitive_spec("health_delta"),
+    primitive_spec("storage_status"),
+    primitive_spec_with_default_page_size("diagnostics_read", 1_000),
+];
+
+const PRE_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 3] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+];
+
+const CLI_MCP_PRIMITIVE_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
+
+fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface] {
+    match spec.operation {
+        // The project's graph-tool owner answers these for the tool surfaces
+        // only; their typed results render as the established tool output.
+        "context"
+        | "node"
+        | "impact"
+        | "similar"
+        | "redundancy"
+        | "rename_preview"
+        | "port_status"
+        | "port_order"
+        | "todos"
+        | "test_map"
+        | "test_risk"
+        | "gini"
+        | "dependency_depth"
+        | "health"
+        | "dsm"
+        | "diagnose"
+        | "dead_code"
+        | "circular"
+        | "hotspots"
+        | "unmounted_files"
+        | "rank"
+        | "largest"
+        | "coupling"
+        | "inheritance_depth"
+        | "distribution"
+        | "recursion"
+        | "complexity"
+        | "doc_coverage"
+        | "god_class"
+        | "unsafe_patterns"
+        | "constructors"
+        | "field_sites"
+        | "find_exact_symbol"
+        | "by_qualified_name"
+        | "signature"
+        | "derives"
+        | "grep"
+        | "ast_grep_search"
+        | "affected"
+        | "diff_context"
+        | "changelog"
+        | "commit_context"
+        | "pr_context"
+        | "branch_search"
+        | "branch_diff"
+        | "branch_list"
+        | "files"
+        | "config"
+        | "retrieve"
+        | "automation_run_list"
+        | "automation_run_view"
+        | "automation_run_artifact_view"
+        | "skill_list"
+        | "skill_view"
+        | "hermes_skill_bridge"
+        | "analytics"
+        | "search"
+        | "run_affected_tests"
+        | "dashboard"
+        | "status"
+        | "active_project"
+        | "remote_status"
+        | "runtime"
+        | "project_list"
+        | "project_search"
+        | "project_context"
+        | "admin_sync"
+        | "admin_cli"
+        | "admin_project"
+        | "hook_runtime" => &CLI_MCP_PRIMITIVE_SURFACES,
+        _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
+    }
+}
+
+/// Similar and redundancy expose one current family schema. Callers already
+/// use that schema, so the binding is the current protocol revision only,
+/// not a revision window for a retired request shape. Do not mint a second
+/// binding for the same spelling; `index_bindings` rejects duplicate
+/// surface-operation keys.
+fn clone_family_surface_bindings(
+    capability_id: &CapabilityId,
+    operation: &str,
+    surfaces: &[BindingSurface],
+) -> Result<(Vec<SurfaceBindingV1>, Vec<BindingId>), ApplicationContractError> {
+    use crate::surface_binding::surface_name;
+
+    let mut bindings = Vec::with_capacity(surfaces.len());
+    let mut binding_ids = Vec::with_capacity(surfaces.len());
+    for surface in surfaces.iter().copied() {
+        let binding_id = BindingId::new(format!(
+            "binding.{}.{}.v1",
+            surface_name(surface),
+            operation
+        ))?;
+        bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+            binding_id: binding_id.clone(),
+            capability_id: capability_id.clone(),
+            surface,
+            operation: SurfaceOperationName::new(operation)?,
+            protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+            required_features: Vec::new(),
+        })?);
+        binding_ids.push(binding_id);
+    }
+    Ok((bindings, binding_ids))
+}
+
+fn primitive_read_description(operation: &str) -> &'static str {
+    match operation {
+        "code_signature_search" => {
+            "Find functions and methods by signature shape: return-type substring `returns`, parameter substrings `params` (all must appear), or `is_async`, narrowed by `scope.path_prefix`. At least one filter is required. Use signature to read one known symbol's signature, and code_symbol_search for name or concept searches."
+        }
+        "code_implementations" => {
+            "Find every type implementing a trait (`selector: {\"selector\": \"trait\", \"name\": ...}`) or every function or method with a name (`selector: {\"selector\": \"method\", \"name\": ...}`). Each match carries its exact source body. Use type_hierarchy to traverse extends and implements relationships from a known node ID."
+        }
+        "code_type_hierarchy" => {
+            "Use for trait, interface, or class hierarchy questions before grepping `impl X for` or `extends X`: traverses the implementors and extenders of a type node ID up to `maximum_depth` (default 5). Use implementations when starting from a trait or method name."
+        }
+        "code_callers" => {
+            "Who calls this: find references, usages, and call sites of a known symbol node ID up to `maximum_depth` (default 3). Coverage is partial when a call target cannot be resolved exactly. Use call_chain for the shortest call path between two known node IDs."
+        }
+        "redundancy" => {
+            "Report bounded, token-verified exact and rename-normalized implementation families in the admitted repository. Results rank review candidates by repeated source bytes."
+        }
+        "session_lookup" => {
+            "Return retrieval anchors for one exact session ID from the mounted session store. Use message_search when you need to find session content rather than look up a known session."
+        }
+        "qualified_name" => {
+            "Resolve one exact, case-sensitive qualified name to every matching symbol record and node ID, up to 10000, including ambiguous matches. The required `page` never splits the result. Use by_qualified_name for locations only, find_exact_symbol for a bare name, and code_symbol_search for partial names or concepts."
+        }
+        "call_chain" => {
+            "Find the shortest Calls path between two symbol node IDs, bounded by maximum depth. Obtain node IDs from code_symbol_search, qualified_name, or another graph read; use callers for an inbound neighborhood."
+        }
+        "file_dependents" => {
+            "Find files containing callers of symbols in one project-relative file. Use callers when you need the dependent symbols and call edges instead of file paths."
+        }
+        "source_lines" => {
+            "Read an exact byte span from the current indexed file and return a stable source anchor. Supply the file occurrence ID and span from code_exact_occurrence; use source_body when you already have a symbol node ID."
+        }
+        "source_body" => {
+            "Read the current source body and line range for a symbol node ID returned by code_symbol_search, qualified_name, or another graph read. Use source_lines for an exact occurrence span."
+        }
+        "source_outline" => {
+            "List indexed symbols in one project-relative file without reading their bodies. Use source_body with a returned node ID to inspect one symbol, or module_api for public symbols across a path."
+        }
+        "module_api" => {
+            "List public indexed symbols in a project-relative file or directory tree. Use source_outline when you need every indexed symbol from one file, including non-public symbols."
+        }
+        "health_read" => {
+            "Read the admitted project's serving status: ok, read_only, or degraded. Use storage_status for database size and page telemetry, or health_delta for generation-bound code-health changes."
+        }
+        "health_delta" => {
+            "Compare the current generation's code-health score and dimensions with a prior after_cursor, optionally within a path prefix. Save the returned after_cursor for a later comparison; omit before_cursor to establish a baseline. pass needs files in both points; a dimension whose scope gave it nothing to measure reads no_evidence. A before_cursor from another health definition is refused; omit it to re-baseline."
+        }
+        "storage_status" => {
+            "Inspect the admitted project's graph-store status, read-only state, database size, page telemetry, and bounded size history. Use health_read when only serving availability matters."
+        }
+        "diagnostics_read" => {
+            "Read retained diagnostics for the current indexed generation, scoped to the workspace or one file. This does not run a compiler or refresh diagnostics; use the project's build or typecheck when fresh post-edit results are required."
+        }
+        "test_map" => {
+            "Map a source file's or symbol's callables to the tests that reach them within three call-graph hops. Coverage is static attribution, not executed coverage."
+        }
+        "test_risk" => {
+            "Rank source symbols with weak or no static test attribution by complexity, fan-in, and churn."
+        }
+        "gini" => {
+            "Measure how unevenly a metric (complexity, lines, fan-in, fan-out, or members) is distributed across files or symbols, with the top outliers."
+        }
+        "dependency_depth" => {
+            "Report the longest file-level dependency chains and how far the deepest exceeds the ideal depth."
+        }
+        "health" => {
+            "Score code health (0-10000) as the geometric mean of acyclicity, depth, equality, redundancy, modularity, and coverage discipline."
+        }
+        "dsm" => {
+            "Summarize the file dependency design-structure matrix: density, directory clusters, and optionally the matrix itself."
+        }
+        "diagnose" => {
+            "Map raw cargo, clippy, or rustc diagnostics to the smallest containing graph symbol and its callers, and publish them to the managed diagnostics store."
+        }
+        "dead_code" => {
+            "List functions and methods with no indexed incoming reference, excluding entry points, tests, and (by default) public items."
+        }
+        "circular" => {
+            "Report file-level dependency cycles, largest first, each bounded to its listed members with its true size stated."
+        }
+        "hotspots" => "Rank symbols by graph relations weighted by file churn.",
+        "unmounted_files" => {
+            "Find source files on disk that no compiler, bundler, or test runner reaches from its entry points, per ecosystem, with each ecosystem's verdict and blind spots."
+        }
+        "rank" => "Rank symbols by how many relations of one edge kind they receive or originate.",
+        "largest" => "Rank symbols by their line span.",
+        "coupling" => {
+            "Rank files by how many other files depend on them (fan-in) or they depend on (fan-out)."
+        }
+        "inheritance_depth" => "Rank classes and interfaces by the depth of their extends chain.",
+        "distribution" => "Count symbols by kind per file, or across every matching file.",
+        "recursion" => "Report self-recursive and mutually recursive call cycles, shortest first.",
+        "complexity" => {
+            "Rank symbols by lines plus weighted fan-out and fan-in, with their extraction-time branch, loop, and nesting counters."
+        }
+        "doc_coverage" => {
+            "List public symbols without documentation, grouped by file, after verifying the indexed sources still match the files on disk."
+        }
+        "god_class" => "Rank classes and structs by their contained methods plus fields.",
+        "unsafe_patterns" => {
+            "Find unwrap, expect, panic, todo, unimplemented, and unsafe sites in indexed source, with each site's enclosing symbol and test scope."
+        }
+        "constructors" => {
+            "Find struct-literal construction sites of a named struct and the fields each site sets, updates, or omits."
+        }
+        "field_sites" => {
+            "Find read and write sites of a named field, optionally narrowed to one owner's field."
+        }
+        "find_exact_symbol" => {
+            "Find indexed symbols whose bare name equals `name` (case-insensitive, unranked, default 20 and at most 200), with near-miss name suggestions when none match. Use by_qualified_name when you have the full qualified path."
+        }
+        "by_qualified_name" => {
+            "List the locations of up to 1000 symbols whose qualified name equals the input exactly and case-sensitively, covering overloads, generics, and separate impl blocks. Use find_exact_symbol for a bare name."
+        }
+        "signature" => {
+            "Return signatures without bodies for the symbol at `node_id`, or for every symbol whose qualified name equals `qualified_name` exactly; `node_id` wins when both are set. Each row carries visibility, signature, docstring, async flag, kind, and location."
+        }
+        "derives" => {
+            "List the exact derive macro names attached to a type addressed by node ID or qualified name. Generated implementations are reported unavailable."
+        }
+        "grep" => {
+            "Literal or regex content search over UTF-8 text sources in the working tree, each hit enriched with its enclosing graph symbol. Bounded omissions are reported as partial coverage."
+        }
+        "ast_grep_search" => {
+            "Structural (AST) pattern search over the working tree with the bundled tree-sitter grammars."
+        }
+        "affected" => {
+            "Find the test files that depend on changed files, ranked by file-dependency distance, with the nearest ones recommended to run."
+        }
+        "diff_context" => {
+            "Report the symbols in changed files, the callers within the impact depth, and the tests they reach."
+        }
+        "changelog" => {
+            "Diff two git refs and, for exact local branches with sealed generations, name the symbols added, removed, and modified."
+        }
+        "commit_context" => {
+            "Summarize uncommitted or staged changes by file role and symbol, with a suggested commit category and recent commit subjects."
+        }
+        "pr_context" => {
+            "Summarize the commits, file changes, symbol changes, affected tests, and impacted modules between a base and head ref, one authenticated symbol page at a time."
+        }
+        "branch_search" => {
+            "Search the code-index generation sealed for one local branch's exact current commit."
+        }
+        "branch_diff" => {
+            "Compare the code-index generations sealed for two local branches' exact commits, symbol by symbol."
+        }
+        "branch_list" => {
+            "List a bounded page of exact local branch refs and their current commit and tree identities."
+        }
+        "files" => {
+            "List indexed project files with their symbol counts and sizes, filtered by directory or glob."
+        }
+        "config" => {
+            "Query TOML or JSON config files by dotted key path, reporting each file's value and defining line."
+        }
+        "retrieve" => {
+            "Read one bounded page of a truncated tool response cached in the project's store."
+        }
+        "automation_run_list" => {
+            "List the newest durable automation run ledger records for the active project."
+        }
+        "automation_run_view" => {
+            "Read one exact durable automation run ledger record from the active project by run id."
+        }
+        "automation_run_artifact_view" => {
+            "Read and hash-verify one durable automation run artifact payload from the active project."
+        }
+        "skill_list" => {
+            "List agent-managed profile skills with their usage summaries and recommendations."
+        }
+        "skill_view" => {
+            "Read one agent-managed profile skill package and record the view in its usage summary."
+        }
+        "hermes_skill_bridge" => {
+            "Read skills, pending approvals, usage telemetry and archive counts owned by the standard Hermes install."
+        }
+        "analytics" => {
+            "Roll up tool, hint, fact-funnel and automation-run analytics for the resolved project."
+        }
+        "search" => {
+            "Rank symbols by name, identifier fragment, signature, path, or phrase through exact and lexical routes."
+        }
+        "run_affected_tests" => {
+            "Run the libtest tests that cover a changed-path manifest and report each observed outcome."
+        }
+        "dashboard" => {
+            "Start or stop this project's loopback dashboard server and report its bound address."
+        }
+        "status" => {
+            "Report the served project's graph census, code-index freshness, retrieval serving, and resident memory, with opt-in branch, storage, and session diagnostics."
+        }
+        "active_project" => {
+            "Report the active project's identity, store paths, and branch identity for this session."
+        }
+        "remote_status" => {
+            "Read the Remote Brain operational plane: listener, enrollment, spool, replay coverage, and failover/recovery state."
+        }
+        "runtime" => {
+            "Capture the daemon's process and database telemetry, with the opt-in authority audit, session health, and Doctor report."
+        }
+        "project_list" => "List a bounded page of the profile's registered projects.",
+        "project_search" => {
+            "Search the profile's registered projects by id, root path, alias, or default branch."
+        }
+        "project_context" => {
+            "Read one registered project's metadata, aliases, and store instances."
+        }
+        "admin_sync" => {
+            "Queue the operator's code-index reconcile of the served project and report the scheduler's admission."
+        }
+        "admin_cli" => {
+            "Run one first-party CLI profile action: registry, accounting, storage, analytics, or session-sync maintenance."
+        }
+        "admin_project" => {
+            "Maintain the served project's daemon bookkeeping: its usage counter, registry token accounting, automatic-fact receipts, and automation scheduler reconcile."
+        }
+        "hook_runtime" => {
+            "Record one agent-host hook's session evidence (a transcript, a hook admission, or a receipt) in the daemon-owned session stores."
+        }
+        _ => "Read bounded data from the admitted project's current retained state.",
+    }
+}
+
+const fn primitive_spec(operation: &'static str) -> PrimitiveReadSpec {
+    primitive_spec_with_default_page_size(operation, 10)
+}
+
+const fn primitive_spec_with_default_page_size(
+    operation: &'static str,
+    default_page_size: u32,
+) -> PrimitiveReadSpec {
+    PrimitiveReadSpec {
+        operation,
+        capability: operation,
+        use_case: operation,
+        default_page_size,
+        paginated: true,
+        deadline_millis: 10_000,
+        side_effect: None,
+    }
+}
+
+/// A git-context read. It keeps the two-minute interactive ceiling these reads
+/// have always dispatched under. The ones that page continue through their own
+/// authenticated `cursor` argument, not `meta.cursor`, so none advertises the
+/// primitive pagination contract.
+const fn git_context_spec(operation: &'static str) -> PrimitiveReadSpec {
+    graph_report_spec(operation)
+}
+
+/// A whole-project graph report or tree scan. It keeps the two-minute
+/// interactive ceiling these tools have always dispatched under: a report over
+/// every file, or a scan of every source, in a large repository is not a
+/// ten-second primitive read.
+const fn graph_report_spec(operation: &'static str) -> PrimitiveReadSpec {
+    PrimitiveReadSpec {
+        operation,
+        capability: operation,
+        use_case: operation,
+        default_page_size: CALLABLE_CODE_DEFAULT_PAGE_SIZE,
+        paginated: false,
+        deadline_millis: 120_000,
+        side_effect: None,
+    }
+}
+
+/// A read observes cancellation until it answers. A spawned process is killed
+/// and profile maintenance (a session import) stops when its call is
+/// cancelled; binding a server or queueing scheduler work is not
+/// interruptible.
+fn primitive_cancellation(
+    spec: &PrimitiveReadSpec,
+) -> Result<CancellationContract, ApplicationContractError> {
+    let points = match spec.side_effect.map(|entry| entry.effect) {
+        None => vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::BeforeRead,
+            CancellationPoint::DuringRead,
+        ],
+        Some(EffectClass::SpawnsProcess | EffectClass::MaintainsProfileState) => vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::EffectInFlight,
+        ],
+        Some(_) => return Ok(CancellationContract::NotCancellable),
+    };
+    Ok(CancellationContract::cooperative(points)?)
+}
+
+fn primitive_terminal_states(spec: &PrimitiveReadSpec) -> Vec<TerminalState> {
+    let mut states = vec![TerminalState::Completed];
+    if matches!(
+        spec.side_effect.map(|entry| entry.effect),
+        None | Some(EffectClass::SpawnsProcess | EffectClass::MaintainsProfileState)
+    ) {
+        states.push(TerminalState::Cancelled);
+    }
+    states.extend([
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial,
+    ]);
+    states
+}
+
+/// An owner-served operation that acts beyond reading. Its tool-catalog side
+/// effect entry is the authority for its effect class and ceiling; an
+/// operation without one yields a zero deadline the catalog refuses.
+const fn owner_side_effect_spec(operation: ApplicationSurfaceOperation) -> PrimitiveReadSpec {
+    let side_effect = operation.owner_side_effect();
+    PrimitiveReadSpec {
+        operation: operation.as_str(),
+        capability: operation.as_str(),
+        use_case: operation.as_str(),
+        default_page_size: CALLABLE_CODE_DEFAULT_PAGE_SIZE,
+        paginated: false,
+        deadline_millis: match side_effect {
+            Some(entry) => entry.ceiling_millis,
+            None => 0,
+        },
+        side_effect,
+    }
+}
+
+fn primitive_schema(operation: &str, suffix: &str) -> Result<SchemaRef, ApplicationContractError> {
+    let operation = operation.replace('_', "-");
+    Ok(SchemaRef::new(
+        SchemaId::new(format!("schema.application.primitive.{operation}.{suffix}"))?,
+        1,
+    )?)
+}
+
+fn primitive_operation(
+    spec: &PrimitiveReadSpec,
+) -> Result<ApplicationOperation, ApplicationContractError> {
+    Ok(ApplicationOperation::new(
+        CapabilityId::new(format!(
+            "capability.application.primitive.{}",
+            spec.capability.replace('_', "-")
+        ))?,
+        tracedecay_tool_catalog::UseCaseId::new(format!(
+            "use-case.application.primitive.{}",
+            spec.use_case.replace('_', "-")
+        ))?,
+        ResultContractRef::from_schema(&primitive_schema(spec.operation, "result")?),
+        true,
+    ))
+}
+
+pub fn primitive_read_operation(
+    operation: &str,
+) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
+    if operation == "code_symbol_search" {
+        return symbol_search_operation().map(Some);
+    }
+    PRIMITIVE_READ_SPECS
+        .iter()
+        .find(|spec| spec.operation == operation)
+        .map(primitive_operation)
+        .transpose()
+}
+
+pub fn primitive_read_handler_descriptors()
+-> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
+    PRIMITIVE_READ_SPECS
+        .iter()
+        .map(|spec| {
+            ApplicationHandlerDescriptor::for_catalog_operation(
+                spec.operation,
+                "service.application.primitive",
+                primitive_operation(spec)?,
+                primitive_schema(spec.operation, "request")?,
+                primitive_schema(spec.operation, "result")?,
+            )
+        })
+        .collect()
+}
+
+pub fn primitive_read_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
+    primitive_read_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn primitive_read_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
+    let mut capabilities = Vec::with_capacity(PRIMITIVE_READ_SPECS.len());
+    let mut bindings = Vec::with_capacity(
+        PRIMITIVE_READ_SPECS
+            .iter()
+            .map(|spec| {
+                primitive_read_surfaces(spec).len() + primitive_lsp_methods(spec.operation).len()
+            })
+            .sum(),
+    );
+    for spec in PRIMITIVE_READ_SPECS {
+        let capability_id = CapabilityId::new(format!(
+            "capability.application.primitive.{}",
+            spec.capability.replace('_', "-")
+        ))?;
+        let surfaces = primitive_read_surfaces(spec);
+        let (surface_bindings, mut binding_ids) =
+            if matches!(spec.operation, "similar" | "redundancy") {
+                clone_family_surface_bindings(&capability_id, spec.operation, surfaces)?
+            } else {
+                match ApplicationSurfaceOperation::from_catalog_name(spec.operation) {
+                    Some(operation) => current_application_bindings(
+                        &capability_id,
+                        operation,
+                        surfaces.iter().copied(),
+                    )?,
+                    None => {
+                        current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?
+                    }
+                }
+            };
+        bindings.extend(surface_bindings);
+        binding_ids.reserve(primitive_lsp_methods(spec.operation).len());
+        for method in primitive_lsp_methods(spec.operation) {
+            let method_id = method.to_ascii_lowercase().replace('/', "-");
+            let binding_id =
+                BindingId::new(format!("binding.lsp.{}.{}.v1", spec.operation, method_id))?;
+            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+                binding_id: binding_id.clone(),
+                capability_id: capability_id.clone(),
+                surface: BindingSurface::Lsp,
+                operation: SurfaceOperationName::new(*method)?,
+                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+                required_features: Vec::new(),
+            })?);
+            binding_ids.push(binding_id);
+        }
+        let verb = if spec.side_effect.is_some() {
+            "Run"
+        } else {
+            "Read"
+        };
+        capabilities.push(application_capability_manifest(
+            ApplicationCapabilityManifestInput {
+                capability_id,
+                use_case_id: tracedecay_tool_catalog::UseCaseId::new(format!(
+                    "use-case.application.primitive.{}",
+                    spec.use_case.replace('_', "-")
+                ))?,
+                routing: RoutingContractV1::new(
+                    1,
+                    format!("{verb} {}", spec.operation.replace('_', " ")),
+                    primitive_read_description(spec.operation),
+                    vec![format!("{verb} {}", spec.operation.replace('_', " "))],
+                )?,
+                request_schema: primitive_schema(spec.operation, "request")?,
+                result_schema: primitive_schema(spec.operation, "result")?,
+                effect: spec
+                    .side_effect
+                    .map_or(EffectClass::Read, |entry| entry.effect),
+                scope: symbol_search_scope()?,
+                denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+                privacy: PrivacyClass::ScopedMetadata,
+                lifecycle: if spec.side_effect.is_some() {
+                    LifecycleClass::Stateless
+                } else {
+                    LifecycleClass::Resumable
+                },
+                streaming: StreamingContract::Unsupported,
+                cancellation: primitive_cancellation(spec)?,
+                deadline: DeadlineContract::new(
+                    spec.deadline_millis,
+                    DeadlineBehavior::ReturnOperationReceipt,
+                )?,
+                pagination: if spec.paginated {
+                    Some(PaginationContract::new(
+                        spec.default_page_size,
+                        1_000,
+                        60_000,
+                    )?)
+                } else {
+                    None
+                },
+                inverse: None,
+                authority_revalidation: RevalidationContract::required(vec![
+                    RevalidationPoint::Authority,
+                    RevalidationPoint::Scope,
+                    RevalidationPoint::Policy,
+                    RevalidationPoint::Configuration,
+                ])?,
+                terminal_states: TerminalStateContract::new(primitive_terminal_states(spec))?,
+                availability: AvailabilityContract::Available,
+                binding_ids,
+                profile_eligibility: application_profile_ids(primitive_profile_ids(
+                    spec.operation,
+                ))?,
+                required_features: Vec::new(),
+            },
+        )?);
+    }
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1::new(
+        ContributionId::new("contribution.application.primitive-reads")?,
+        Vec::new(),
+        capabilities,
+        bindings,
+    ))?;
+    attach_schema_bodies(contribution, materialize, primitive_executable_schemas)
+}
+
+/// Rust-owned request/result schema bodies for the primitive reads whose wire
+/// types live in this crate.
+///
+/// The registered pairs are exactly the types the daemon parses and returns
+/// for these operations: the retrieval reads bind their
+/// `crate::retrieval::requests` pairs, and the symbol-graph reads bind the
+/// transport DTOs against the [`SymbolGraphPage`] payloads they return, so the
+/// generated SDKs cannot describe a shape the surface does not speak.
+fn primitive_executable_schemas(
+    contribution: &CatalogContributionV1,
+) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
+    let mut schemas = Vec::new();
+    macro_rules! add {
+        ($operation:literal, $request:ty, SymbolGraphPage<$item:ident>) => {
+            schemas.push(primitive_executable_schema::<$request, SymbolGraphPage<$item>>(
+                contribution,
+                $operation,
+                concat!("tracedecay_contracts::surface_contracts::", stringify!($request)),
+                concat!(
+                    "tracedecay_contracts::retrieval::SymbolGraphPage<tracedecay_contracts::retrieval::",
+                    stringify!($item),
+                    ">"
+                ),
+            )?)
+        };
+        ($operation:literal, $request:ty, $result:ty) => {
+            schemas.push(primitive_executable_schema::<$request, $result>(
+                contribution,
+                $operation,
+                concat!("tracedecay_contracts::retrieval::", stringify!($request)),
+                concat!("tracedecay_contracts::retrieval::", stringify!($result)),
+            )?)
+        };
+    }
+    add!("session_lookup", SessionLookupRequest, SessionLookupResult);
+    add!("source_lines", SourceLinesRequest, SourceLinesResult);
+    add!("health_read", HealthReadRequest, HealthReadResult);
+    add!("health_delta", HealthDeltaRequest, HealthDeltaResult);
+    add!(
+        "qualified_name",
+        QualifiedNamePrimitiveRequest,
+        QualifiedNamePrimitiveResult
+    );
+    add!(
+        "call_chain",
+        CallChainPrimitiveRequest,
+        CallChainPrimitiveResult
+    );
+    add!(
+        "file_dependents",
+        FileDependentsPrimitiveRequest,
+        FileDependentsPrimitiveResult
+    );
+    add!(
+        "source_body",
+        SourceBodyPrimitiveRequest,
+        SourceBodyPrimitiveResult
+    );
+    add!(
+        "source_outline",
+        SourceOutlinePrimitiveRequest,
+        SourceOutlinePrimitiveResult
+    );
+    add!(
+        "module_api",
+        ModuleApiPrimitiveRequest,
+        ModuleApiPrimitiveResult
+    );
+    add!(
+        "storage_status",
+        StorageStatusPrimitiveRequest,
+        StorageStatusPrimitiveResult
+    );
+    add!(
+        "diagnostics_read",
+        DiagnosticsPrimitiveRequest,
+        DiagnosticsPrimitiveResult
+    );
+    add!(
+        "code_signature_search",
+        CodeSignatureSearchSurfaceRequest,
+        SymbolGraphPage<SymbolPrimitiveRecord>
+    );
+    add!(
+        "code_implementations",
+        CodeImplementationsSurfaceRequest,
+        SymbolGraphPage<ImplementationRecord>
+    );
+    add!(
+        "code_type_hierarchy",
+        CodeTypeHierarchySurfaceRequest,
+        SymbolGraphPage<TypeHierarchyRecord>
+    );
+    add!(
+        "code_callers",
+        CodeCallersSurfaceRequest,
+        SymbolGraphPage<SymbolRelationRecord>
+    );
+    add!("context", ContextSurfaceRequestV1, ContextResultV1);
+    add!("impact", NodeDepthSurfaceRequestV1, ImpactResultV1);
+    add!("node", NodeSurfaceRequestV1, NodeResultV1);
+    add!("similar", SimilarSurfaceRequestV1, SimilarResultV1);
+    add!("redundancy", RedundancySurfaceRequestV1, RedundancyResultV1);
+    add!(
+        "rename_preview",
+        RenamePreviewPrimitiveRequestV1,
+        RenamePreviewPrimitiveOutcomeV1
+    );
+    add!(
+        "port_status",
+        PortStatusSurfaceRequestV1,
+        PortStatusResultV1
+    );
+    add!("port_order", PortOrderSurfaceRequestV1, PortOrderResultV1);
+    add!("todos", TodosSurfaceRequestV1, TodosResultV1);
+    add!("test_map", TestMapSurfaceRequestV1, TestMapResultV1);
+    add!("test_risk", TestRiskSurfaceRequestV1, TestRiskResultV1);
+    add!("gini", GiniSurfaceRequestV1, GiniResultV1);
+    add!(
+        "dependency_depth",
+        DependencyDepthSurfaceRequestV1,
+        DependencyDepthResultV1
+    );
+    add!("health", HealthSurfaceRequestV1, HealthResultV1);
+    add!("dsm", DsmSurfaceRequestV1, DsmResultV1);
+    add!("diagnose", DiagnoseSurfaceRequestV1, DiagnoseResultV1);
+    add!("dead_code", DeadCodeSurfaceRequestV1, DeadCodeResultV1);
+    add!("circular", CircularSurfaceRequestV1, CircularResultV1);
+    add!("hotspots", HotspotsSurfaceRequestV1, HotspotsResultV1);
+    add!(
+        "unmounted_files",
+        UnmountedFilesSurfaceRequestV1,
+        UnmountedFilesResultV1
+    );
+    add!("rank", RankSurfaceRequestV1, RankResultV1);
+    add!("largest", LargestSurfaceRequestV1, LargestResultV1);
+    add!("coupling", CouplingSurfaceRequestV1, CouplingResultV1);
+    add!(
+        "inheritance_depth",
+        InheritanceDepthSurfaceRequestV1,
+        InheritanceDepthResultV1
+    );
+    add!(
+        "distribution",
+        DistributionSurfaceRequestV1,
+        DistributionResultV1
+    );
+    add!("recursion", RecursionSurfaceRequestV1, RecursionResultV1);
+    add!("complexity", ComplexitySurfaceRequestV1, ComplexityReportV1);
+    add!(
+        "doc_coverage",
+        DocCoverageSurfaceRequestV1,
+        DocCoverageResultV1
+    );
+    add!("god_class", GodClassSurfaceRequestV1, GodClassResultV1);
+    add!(
+        "unsafe_patterns",
+        UnsafePatternsSurfaceRequestV1,
+        UnsafePatternsResultV1
+    );
+    add!(
+        "constructors",
+        ConstructorsSurfaceRequestV1,
+        ConstructorsResultV1
+    );
+    add!(
+        "field_sites",
+        FieldSitesSurfaceRequestV1,
+        FieldSitesResultV1
+    );
+    add!(
+        "find_exact_symbol",
+        FindExactSymbolSurfaceRequestV1,
+        FindExactSymbolResultV1
+    );
+    add!(
+        "by_qualified_name",
+        ByQualifiedNameSurfaceRequestV1,
+        ByQualifiedNameResultV1
+    );
+    add!(
+        "signature",
+        SymbolSelectorSurfaceRequestV1,
+        SignatureResultV1
+    );
+    add!("derives", SymbolSelectorSurfaceRequestV1, DerivesResultV1);
+    add!("grep", GrepSurfaceRequestV1, GrepSearchResultV1);
+    add!(
+        "ast_grep_search",
+        AstGrepSearchSurfaceRequestV1,
+        AstGrepSearchResultV1
+    );
+    add!("affected", AffectedSurfaceRequestV1, AffectedResultV1);
+    add!(
+        "diff_context",
+        DiffContextSurfaceRequestV1,
+        DiffContextResultV1
+    );
+    add!("changelog", ChangelogSurfaceRequestV1, ChangelogResultV1);
+    add!(
+        "commit_context",
+        CommitContextSurfaceRequestV1,
+        CommitContextResultV1
+    );
+    add!("pr_context", PrContextSurfaceRequestV1, PrContextResultV1);
+    add!(
+        "branch_search",
+        BranchSearchSurfaceRequestV1,
+        BranchSearchResultV1
+    );
+    add!(
+        "branch_diff",
+        BranchDiffSurfaceRequestV1,
+        BranchDiffResultV1
+    );
+    add!(
+        "branch_list",
+        BranchListSurfaceRequestV1,
+        BranchListResultV1
+    );
+    add!("files", FilesSurfaceRequestV1, FilesResultV1);
+    add!("config", ConfigSurfaceRequestV1, ConfigResultV1);
+    add!("retrieve", RetrieveSurfaceRequestV1, RetrieveResultV1);
+    add!(
+        "automation_run_list",
+        AutomationRunListSurfaceRequestV1,
+        AutomationRunListResultV1
+    );
+    add!(
+        "automation_run_view",
+        AutomationRunViewSurfaceRequestV1,
+        AutomationRunViewResultV1
+    );
+    add!(
+        "automation_run_artifact_view",
+        AutomationRunArtifactViewSurfaceRequestV1,
+        AutomationRunArtifactViewResultV1
+    );
+    add!("skill_list", SkillListSurfaceRequestV1, SkillListResultV1);
+    add!("skill_view", SkillViewSurfaceRequestV1, SkillViewResultV1);
+    add!(
+        "hermes_skill_bridge",
+        HermesSkillBridgeSurfaceRequestV1,
+        HermesSkillBridgeResultV1
+    );
+    add!("analytics", AnalyticsSurfaceRequestV1, AnalyticsResultV1);
+    add!("search", SearchSurfaceRequestV1, SearchResultV1);
+    add!(
+        "run_affected_tests",
+        RunAffectedTestsSurfaceRequestV1,
+        RunAffectedTestsResultV1
+    );
+    add!("dashboard", DashboardSurfaceRequestV1, DashboardResultV1);
+    add!("status", StatusSurfaceRequestV1, StatusResultV1);
+    add!(
+        "active_project",
+        ActiveProjectSurfaceRequestV1,
+        ActiveProjectResultV1
+    );
+    add!(
+        "remote_status",
+        RemoteStatusSurfaceRequestV1,
+        RemoteOperationalStatusReadV1
+    );
+    add!("runtime", RuntimeSurfaceRequestV1, RuntimeResultV1);
+    add!(
+        "project_list",
+        ProjectListSurfaceRequestV1,
+        ProjectRegistryListingResultV1
+    );
+    add!(
+        "project_search",
+        ProjectSearchSurfaceRequestV1,
+        ProjectRegistryListingResultV1
+    );
+    add!(
+        "project_context",
+        ProjectContextSurfaceRequestV1,
+        ProjectContextResultV1
+    );
+    add!("admin_sync", AdminSyncSurfaceRequestV1, AdminSyncResultV1);
+    add!("admin_cli", AdminCliSurfaceRequestV1, AdminCliResultV1);
+    add!(
+        "admin_project",
+        AdminProjectSurfaceRequestV1,
+        AdminProjectResultV1
+    );
+    add!(
+        "hook_runtime",
+        HookRuntimeSurfaceRequestV1,
+        HookRuntimeResultV1
+    );
+    Ok(schemas)
+}
+
+fn primitive_executable_schema<Request, Response>(
+    contribution: &CatalogContributionV1,
+    operation: &str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
+) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
+where
+    Request: JsonSchema,
+    Response: JsonSchema,
+{
+    let capability_id = CapabilityId::new(format!(
+        "capability.application.primitive.{}",
+        operation.replace('_', "-")
+    ))?;
+    capability_executable_schema::<Request, Response>(
+        contribution,
+        &capability_id,
+        "primitive schema capability",
+        request_rust_type_path,
+        result_rust_type_path,
+    )
+}
+
+pub fn symbol_search_request_schema() -> Result<SchemaRef, ApplicationContractError> {
+    Ok(SchemaRef::new(
+        SchemaId::new("schema.application.symbol-search.request")?,
+        1,
+    )?)
+}
+
+pub fn symbol_search_result_schema() -> Result<SchemaRef, ApplicationContractError> {
+    Ok(SchemaRef::new(
+        SchemaId::new("schema.application.symbol-search.result")?,
+        1,
+    )?)
+}
+
+pub fn symbol_search_operation() -> Result<ApplicationOperation, ApplicationContractError> {
+    let result_schema = symbol_search_result_schema()?;
+    Ok(ApplicationOperation::new(
+        CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?,
+        tracedecay_tool_catalog::UseCaseId::new(SYMBOL_SEARCH_USE_CASE)?,
+        ResultContractRef::from_schema(&result_schema),
+        true,
+    ))
+}
+
+pub fn symbol_search_handler_descriptor()
+-> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
+    ApplicationHandlerDescriptor::for_catalog_operation(
+        "code_symbol_search",
+        "service.application.primitive",
+        symbol_search_operation()?,
+        symbol_search_request_schema()?,
+        symbol_search_result_schema()?,
+    )
+}
+
+/// Catalog contribution for the declared symbol-search use case.
+///
+/// The contribution declares transport bindings but has no dispatch, storage,
+/// or transport side effect; binding them to the canonical dispatcher stays in
+/// `tracedecay-daemon-service`.
+pub fn symbol_search_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
+    symbol_search_contribution_with(SchemaBodyMaterialization::Materialize)
+}
+
+pub(crate) fn symbol_search_contribution_with(
+    materialize: SchemaBodyMaterialization,
+) -> Result<CatalogContributionV1, ApplicationContractError> {
+    let capability_id = CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?;
+    let request_schema = symbol_search_request_schema()?;
+    let result_schema = symbol_search_result_schema()?;
+    let (mut bindings, mut binding_ids) = current_application_bindings(
+        &capability_id,
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        [
+            BindingSurface::Cli,
+            BindingSurface::Mcp,
+            BindingSurface::Http,
+        ],
+    )?;
+    let lsp_binding_id = BindingId::new("binding.lsp.symbol-search.workspace-symbol.v1")?;
+    bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+        binding_id: lsp_binding_id.clone(),
+        capability_id: capability_id.clone(),
+        surface: BindingSurface::Lsp,
+        operation: SurfaceOperationName::new("workspace/symbol")?,
+        protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+        required_features: Vec::new(),
+    })?);
+    binding_ids.push(lsp_binding_id);
+    let capability = application_capability_manifest(ApplicationCapabilityManifestInput {
+        capability_id: capability_id.clone(),
+        use_case_id: tracedecay_tool_catalog::UseCaseId::new(SYMBOL_SEARCH_USE_CASE)?,
+        routing: RoutingContractV1::new(
+            1,
+            "Search symbols",
+            "Find indexed symbols whose simple or qualified name contains `query` (case-insensitive), exact simple-name hits first and then source order, with node IDs for graph reads. Use search for ranked discovery over bodies, signatures, paths, and docs.",
+            vec!["Find this symbol".to_owned()],
+        )?,
+        request_schema: request_schema.clone(),
+        result_schema: result_schema.clone(),
+        effect: EffectClass::Read,
+        scope: symbol_search_scope()?,
+        denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+        privacy: PrivacyClass::ScopedMetadata,
+        lifecycle: LifecycleClass::Resumable,
+        streaming: StreamingContract::Unsupported,
+        cancellation: CancellationContract::cooperative(vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::BeforeRead,
+            CancellationPoint::DuringRead,
+        ])?,
+        deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
+        pagination: Some(PaginationContract::new(10, 100, 60_000)?),
+        inverse: None,
+        authority_revalidation: RevalidationContract::required(vec![
+            RevalidationPoint::Authority,
+            RevalidationPoint::Scope,
+            RevalidationPoint::Policy,
+            RevalidationPoint::Configuration,
+        ])?,
+        terminal_states: TerminalStateContract::new(vec![
+            TerminalState::Completed,
+            TerminalState::Cancelled,
+            TerminalState::TimedOut,
+            TerminalState::Failed,
+            TerminalState::Unavailable,
+            TerminalState::Partial,
+        ])?,
+        availability: AvailabilityContract::Available,
+        binding_ids,
+        profile_eligibility: application_profile_ids(&[
+            APPLICATION_DEFAULT_PROFILE_ID,
+            APPLICATION_COMPACT_PROFILE_ID,
+            APPLICATION_HOST_LIMITED_PROFILE_ID,
+        ])?,
+        required_features: Vec::new(),
+    })?;
+    let primitive = RetrievalPrimitiveManifestV1::new(RetrievalPrimitiveManifestInputV1 {
+        capability_id,
+        family: RetrievalFamily::Symbol,
+        retriever_id: RetrieverId::new("retriever.application.symbol-search")?,
+        request_schema,
+        evidence_packet_schema: result_schema,
+        coverage_contract: CoverageContractRef::new(SchemaRef::new(
+            SchemaId::new("schema.application.evidence-coverage")?,
+            1,
+        )?),
+        omission_contract: OmissionContractRef::new(SchemaRef::new(
+            SchemaId::new("schema.application.evidence-omission")?,
+            1,
+        )?),
+        scoring_contract: ScoringContractRef::new(SchemaRef::new(
+            SchemaId::new("schema.application.evidence-score")?,
+            1,
+        )?),
+        contribution_contract: ContributionContractRef::new(SchemaRef::new(
+            SchemaId::new("schema.application.retriever-contribution")?,
+            1,
+        )?),
+        deterministic_order: SortContract::new(
+            SortContractId::new("sort.application.symbol-search.v1")?,
+            1,
+        )?,
+        default_page_size: 10,
+        maximum_page_size: 100,
+        temporal_modes: vec![TemporalMode::Current],
+        cancellation_points: vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::BeforeRead,
+            CancellationPoint::DuringRead,
+        ],
+        deadline_behavior: DeadlineBehavior::ReturnOperationReceipt,
+    })?;
+    let contribution = CatalogContributionV1::new(
+        CatalogContributionInputV1::new(
+            ContributionId::new("contribution.application.symbol-search")?,
+            Vec::new(),
+            vec![capability],
+            bindings,
+        )
+        .with_retrieval_primitives(vec![primitive]),
+    )?;
+    attach_schema_bodies(contribution, materialize, |contribution| {
+        let manifest = contribution.capabilities().first().cloned().ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "symbol-search capability",
+            },
+        )?;
+        Ok(vec![ExecutableSchemaAuthority::for_types_at_paths::<
+            CodeSymbolSearchSurfaceRequest,
+            SymbolGraphPage<SymbolPrimitiveRecord>,
+        >(
+            &manifest,
+            "tracedecay_contracts::surface_contracts::CodeSymbolSearchSurfaceRequest",
+            "tracedecay_contracts::retrieval::SymbolGraphPage<tracedecay_contracts::retrieval::SymbolPrimitiveRecord>",
+        )?])
+    })
+}
+
+fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {
+    Ok(ScopeRequirement::new(vec![
+        ScopeDimension::Project,
+        ScopeDimension::Repository,
+        ScopeDimension::Worktree,
+        ScopeDimension::Resource,
+    ])?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ESTABLISHED_TOOL_PRIMITIVES: [&str; 9] = [
+        "context",
+        "node",
+        "impact",
+        "similar",
+        "redundancy",
+        "rename_preview",
+        "port_status",
+        "port_order",
+        "todos",
+    ];
+
+    #[test]
+    fn symbol_search_advertises_only_supported_temporal_modes() {
+        let contribution = symbol_search_contribution().expect("symbol-search contribution");
+        let primitive = contribution
+            .retrieval_primitives()
+            .first()
+            .expect("symbol-search retrieval primitive");
+
+        assert_eq!(primitive.temporal_modes(), &[TemporalMode::Current]);
+    }
+
+    #[test]
+    fn established_tool_primitives_pair_cli_and_mcp_bindings() {
+        let contribution = primitive_read_contribution().expect("primitive contribution");
+
+        for operation in ESTABLISHED_TOOL_PRIMITIVES {
+            let surfaces = contribution
+                .bindings()
+                .iter()
+                .filter(|binding| binding.operation().as_str() == operation)
+                .map(|binding| binding.surface())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                surfaces,
+                vec![BindingSurface::Cli, BindingSurface::Mcp],
+                "{operation} must remain callable from the paired default profile"
+            );
+        }
+    }
+}

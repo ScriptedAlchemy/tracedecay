@@ -3,22 +3,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::{
-    CandidateDispositionV1, ConfigurationAuditEventKindV1, ConfigurationCandidateV1,
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
+    ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationCandidateV1,
+    ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1, ProtectedChangePlan,
     SettingKey,
 };
 use tracedecay_domain::{ActorId, UtcMicros};
 use tracedecay_store::{
-    ConfigurationCommitV1, ConfigurationRevisionRecordV1, ProfileReadOperationV1,
-    ProfileReadResultV1,
+    ConfigurationCommitV1, ConfigurationMutationReceiptV1, ConfigurationRevisionRecordV1,
+    ProfileReadOperationV1, ProfileReadResultV1,
 };
 
+use crate::exact_sql::ExactSqlValue;
+
+use super::configuration_projection::configuration_projection_statements;
+use super::configuration_receipt::{
+    CONFIGURATION_ACTIVATION_DESIRED_RECORDED, STORED_CHANGE_PLAN_SQL, StoredChangePlanColumns,
+    advance_component_desired_state, configuration_entry_layer, decode_stored_change_plan_rows,
+    insert_mutation_receipt,
+};
 use super::support::{conversion, encode, invalid};
 
 const SNAPSHOT_ENTRY_SCHEMA_VERSION: u16 = 1;
 const AUDIT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
-const AUTHORIZATION_NOT_RECORDED: &str = "not_recorded_by_configuration_store_v1";
-const ACTIVATION_NOT_RECORDED: &str = "not_recorded_by_configuration_store_v1";
 
 #[derive(Clone, Default)]
 pub struct ConfigurationExecutor;
@@ -30,20 +36,32 @@ impl ConfigurationExecutor {
         commit: &ConfigurationCommitV1,
     ) -> rusqlite::Result<()> {
         commit.validate().map_err(invalid)?;
-        if commit.next_revision.parent_revision_id.as_ref()
-            != Some(&commit.expected_base_revision_id)
-        {
-            return Err(invalid(
-                "configuration revision does not name the expected base revision",
-            ));
+        match receipt_replay(savepoint, commit)? {
+            ReceiptReplay::Exact => return Ok(()),
+            ReceiptReplay::Conflict => {
+                return Err(invalid(
+                    "configuration idempotency key conflicts with prior input",
+                ));
+            }
+            ReceiptReplay::Absent => {}
         }
         let current = current_revision_id(savepoint)?;
         if current.as_deref() != Some(commit.expected_base_revision_id.as_str()) {
             return Err(invalid("configuration revision conflict"));
         }
+        if let Some(plan) = &commit.change_plan
+            && !stored_plan_matches(savepoint, plan)?
+        {
+            return Err(invalid("configuration change plan is stale"));
+        }
 
         insert_revision(savepoint, &commit.next_revision)?;
-        insert_receipt(savepoint, commit)?;
+        insert_mutation_receipt(savepoint, commit)?;
+        advance_component_desired_state(
+            savepoint,
+            &commit.next_revision.revision_id,
+            commit.receipt.created_at,
+        )?;
         if let Some(plan) = &commit.change_plan {
             let event_kind = match commit.audit_event.event_kind {
                 ConfigurationAuditEventKindV1::Applied => "applied",
@@ -54,13 +72,7 @@ impl ConfigurationExecutor {
                     ));
                 }
             };
-            let next_sequence: i64 = savepoint.query_row(
-                "SELECT COALESCE(MAX(sequence), -1) + 1
-                 FROM configuration_change_plan_events
-                 WHERE plan_id = ?1",
-                [plan.plan_id.as_str()],
-                |row| row.get(0),
-            )?;
+            let next_sequence = next_plan_event_sequence(savepoint, plan)?;
             savepoint.execute(
                 "INSERT INTO configuration_change_plan_events (
                     plan_id, sequence, event_kind, safe_reason_code, occurred_at
@@ -113,7 +125,14 @@ struct StoredSnapshotEntryV1 {
 #[serde(deny_unknown_fields)]
 struct StoredAuditPayloadV1<'a> {
     schema_version: u16,
-    event: &'a tracedecay_domain::configuration::ConfigurationAuditEvent,
+    event: &'a ConfigurationAuditEvent,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredAuditPayloadOwned {
+    schema_version: u16,
+    event: ConfigurationAuditEvent,
 }
 
 fn current_revision_id(connection: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
@@ -178,7 +197,7 @@ fn insert_revision(
             .get(key)
             .cloned()
             .unwrap_or_default();
-        let (layer_kind, layer_id) = snapshot_layer(&provenance);
+        let (layer_kind, layer_id) = configuration_entry_layer(&provenance);
         let payload = encode(&StoredSnapshotEntryV1 {
             schema_version: SNAPSHOT_ENTRY_SCHEMA_VERSION,
             value,
@@ -192,73 +211,274 @@ fn insert_revision(
                 revision.revision_id.as_str(),
                 key.as_str(),
                 layer_kind,
-                layer_id.as_deref(),
+                layer_id,
                 i64::from(SNAPSHOT_ENTRY_SCHEMA_VERSION),
                 payload,
             ],
         )?;
     }
+    for statement in configuration_projection_statements(&revision.revision_id, &revision.snapshot)
+        .map_err(invalid)?
+    {
+        savepoint.execute(
+            &statement.sql,
+            rusqlite::params_from_iter(
+                statement
+                    .params
+                    .into_iter()
+                    .map(ExactSqlValue::into_rusqlite),
+            ),
+        )?;
+    }
     Ok(())
 }
 
-fn snapshot_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Option<String>) {
-    let layer = provenance
-        .iter()
-        .find(|candidate| {
-            matches!(
-                candidate.disposition,
-                CandidateDispositionV1::Winning | CandidateDispositionV1::Defaulted
-            )
-        })
-        .or_else(|| provenance.first())
-        .map(|candidate| &candidate.layer);
-    match layer {
-        Some(ConfigurationLayerIdV1::UserProfile { profile_id }) => {
-            ("user_profile", Some(profile_id.as_str().to_owned()))
-        }
-        Some(ConfigurationLayerIdV1::Project { project_id }) => {
-            ("project", Some(project_id.as_str().to_owned()))
-        }
-        Some(ConfigurationLayerIdV1::Collection { collection_id }) => {
-            ("collection", Some(collection_id.as_str().to_owned()))
-        }
-        Some(ConfigurationLayerIdV1::Default) | None => ("default", None),
-    }
+enum ReceiptReplay {
+    Absent,
+    Exact,
+    Conflict,
 }
 
-fn insert_receipt(
-    savepoint: &Savepoint<'_>,
+fn receipt_replay(
+    connection: &rusqlite::Connection,
     commit: &ConfigurationCommitV1,
-) -> rusqlite::Result<()> {
-    let authorization = commit
+) -> rusqlite::Result<ReceiptReplay> {
+    let stored = connection
+        .query_row(
+            "SELECT receipt_id, plan_id, actor_id, idempotency_key,
+                    base_revision_id, result_revision_id, operation_digest,
+                    authorization_policy_epoch, authorization_policy_digest,
+                    authority_revalidated_at, activation_status, receipt_digest, created_at,
+                    effective_deadline_at
+             FROM configuration_mutation_receipts
+             WHERE actor_id = ?1 AND idempotency_key = ?2",
+            params![
+                commit.receipt.actor_id.as_str(),
+                commit.receipt.idempotency_key.as_str()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, i64>(13)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        receipt_id,
+        plan_id,
+        actor_id,
+        idempotency_key,
+        base_revision_id,
+        result_revision_id,
+        operation_digest,
+        authorization_policy_epoch,
+        authorization_policy_digest,
+        authority_revalidated_at,
+        activation_status,
+        receipt_digest,
+        created_at,
+        effective_deadline_at,
+    )) = stored
+    else {
+        return Ok(ReceiptReplay::Absent);
+    };
+    let authorization_policy_epoch =
+        u64::try_from(authorization_policy_epoch).map_err(conversion)?;
+    let stored_receipt = ConfigurationMutationReceiptV1 {
+        receipt_id: id_from(receipt_id)?,
+        actor_id: id_from(actor_id)?,
+        idempotency_key: id_from(idempotency_key)?,
+        base_revision_id: id_from(base_revision_id)?,
+        result_revision_id: id_from(result_revision_id)?,
+        operation_digest: digest_from(operation_digest)?,
+        authorization_policy_epoch,
+        authorization_policy_digest: id_from(authorization_policy_digest)?,
+        authority_revalidated_at: UtcMicros(authority_revalidated_at),
+        receipt_digest: digest_from(receipt_digest)?,
+        created_at: UtcMicros(created_at),
+        effective_deadline_at: UtcMicros(effective_deadline_at),
+    };
+    let expected_plan_id = commit
         .change_plan
         .as_ref()
-        .map(|plan| plan.authorization_policy_digest.as_str())
-        .unwrap_or(AUTHORIZATION_NOT_RECORDED);
-    savepoint.execute(
-        "INSERT INTO configuration_mutation_receipts (
-            receipt_id, plan_id, actor_id, idempotency_key,
-            base_revision_id, result_revision_id, operation_digest,
-            authorization_policy_digest, activation_status, receipt_digest, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![
-            commit.receipt.receipt_id.as_str(),
-            commit
-                .change_plan
-                .as_ref()
-                .map(|plan| plan.plan_id.as_str()),
-            commit.receipt.actor_id.as_str(),
-            commit.receipt.idempotency_key.as_str(),
-            commit.receipt.base_revision_id.as_str(),
-            commit.receipt.result_revision_id.as_str(),
-            commit.receipt.operation_digest.as_str(),
-            authorization,
-            ACTIVATION_NOT_RECORDED,
-            commit.receipt.receipt_digest.as_str(),
-            commit.receipt.created_at.0,
-        ],
+        .map(|plan| plan.plan_id.as_str());
+    if stored_receipt != commit.receipt
+        || activation_status != CONFIGURATION_ACTIVATION_DESIRED_RECORDED
+        || plan_id.as_deref() != expected_plan_id
+    {
+        return Ok(ReceiptReplay::Conflict);
+    }
+    let stored_revision = read_revision(connection, &commit.next_revision.revision_id)?;
+    if stored_revision.as_ref() != Some(&commit.next_revision) {
+        return Ok(ReceiptReplay::Conflict);
+    }
+    if read_audit_event(connection, &commit.audit_event.event_id)?.as_ref()
+        != Some(&commit.audit_event)
+    {
+        return Ok(ReceiptReplay::Conflict);
+    }
+    if let Some(plan) = &commit.change_plan
+        && !plan_replay_matches(connection, plan, &commit.audit_event)?
+    {
+        return Ok(ReceiptReplay::Conflict);
+    }
+    Ok(ReceiptReplay::Exact)
+}
+
+fn stored_plan_matches(
+    connection: &rusqlite::Connection,
+    plan: &ProtectedChangePlan,
+) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare(STORED_CHANGE_PLAN_SQL)?;
+    let rows = statement
+        .query_map([plan.plan_id.as_str()], |row| {
+            Ok(StoredChangePlanColumns {
+                plan_id: row.get(0)?,
+                actor_id: row.get(1)?,
+                base_revision_id: row.get(2)?,
+                operation_digest: row.get(3)?,
+                resolved_scope_digest: row.get(4)?,
+                membership_digest: row.get(5)?,
+                authorization_policy_digest: row.get(6)?,
+                policy_epoch: row.get(7)?,
+                expires_at: row.get(8)?,
+                created_at: row.get(9)?,
+                operation_sequence: row.get(10)?,
+                payload_schema_revision: row.get(11)?,
+                sealed_typed_operation: row.get(12)?,
+                operation_row_digest: row.get(13)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some(record) = decode_stored_change_plan_rows(rows).map_err(invalid)? else {
+        return Ok(false);
+    };
+    Ok(record.plan == *plan)
+}
+
+fn plan_replay_matches(
+    connection: &rusqlite::Connection,
+    plan: &ProtectedChangePlan,
+    audit: &ConfigurationAuditEvent,
+) -> rusqlite::Result<bool> {
+    if !stored_plan_matches(connection, plan)? {
+        return Ok(false);
+    }
+    let expected_kind = match audit.event_kind {
+        ConfigurationAuditEventKindV1::Applied => "applied",
+        ConfigurationAuditEventKindV1::RollbackApplied => "rollback_applied",
+        _ => return Ok(false),
+    };
+    let mut statement = connection
+        .prepare("SELECT event_kind FROM configuration_change_plan_events WHERE plan_id = ?1")?;
+    let kinds = statement
+        .query_map([plan.plan_id.as_str()], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let terminals = kinds
+        .iter()
+        .filter(|kind| *kind == "applied" || *kind == "rollback_applied")
+        .collect::<Vec<_>>();
+    Ok(terminals.len() == 1 && terminals[0] == expected_kind)
+}
+
+/// Next plan event sequence, enforcing the lifecycle the global-db writer
+/// enforces: a `dry_run_created` opener, strictly increasing sequences, and no
+/// earlier terminal event.
+fn next_plan_event_sequence(
+    connection: &rusqlite::Connection,
+    plan: &ProtectedChangePlan,
+) -> rusqlite::Result<i64> {
+    let mut statement = connection.prepare(
+        "SELECT sequence, event_kind
+         FROM configuration_change_plan_events
+         WHERE plan_id = ?1
+         ORDER BY sequence ASC",
     )?;
-    Ok(())
+    let rows = statement
+        .query_map([plan.plan_id.as_str()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut saw_dry_run = false;
+    let mut terminal_count = 0usize;
+    let mut last_sequence = None;
+    for (sequence, event_kind) in rows {
+        if sequence < 0 || last_sequence.is_some_and(|previous| sequence <= previous) {
+            return Err(invalid(
+                "configuration plan events are not strictly ordered",
+            ));
+        }
+        if sequence == 0 && event_kind == "dry_run_created" {
+            saw_dry_run = true;
+        }
+        if matches!(event_kind.as_str(), "applied" | "rollback_applied") {
+            terminal_count += 1;
+        }
+        last_sequence = Some(sequence);
+    }
+    if !saw_dry_run || terminal_count != 0 {
+        return Err(invalid("configuration change plan is stale"));
+    }
+    last_sequence
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| invalid("configuration plan event sequence overflow"))
+}
+
+fn read_audit_event(
+    connection: &rusqlite::Connection,
+    event_id: &tracedecay_domain::configuration::ConfigurationAuditEventId,
+) -> rusqlite::Result<Option<ConfigurationAuditEvent>> {
+    let stored = connection
+        .query_row(
+            "SELECT operation_kind, receipt_digest
+             FROM configuration_audit_events
+             WHERE event_id = ?1",
+            [event_id.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    let Some((payload, receipt_digest)) = stored else {
+        return Ok(None);
+    };
+    let decoded: StoredAuditPayloadOwned = serde_json::from_str(&payload).map_err(conversion)?;
+    if decoded.schema_version != AUDIT_PAYLOAD_SCHEMA_VERSION {
+        return Err(conversion("unsupported configuration audit payload schema"));
+    }
+    let event = decoded.event;
+    if event.event_id.as_str() != event_id.as_str()
+        || event.receipt_id.is_some() != receipt_digest.is_some()
+    {
+        return Err(conversion(
+            "configuration audit payload does not match immutable projections",
+        ));
+    }
+    Ok(Some(event))
+}
+
+fn id_from<T>(value: String) -> rusqlite::Result<T>
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Display,
+{
+    T::try_from(value).map_err(conversion)
+}
+
+fn digest_from(value: String) -> rusqlite::Result<tracedecay_domain::ManifestDigest> {
+    tracedecay_domain::ManifestDigest::new(value).map_err(conversion)
 }
 
 fn insert_audit_event(

@@ -1,22 +1,21 @@
 //! Agent host integrations (`agents`) for TraceDecay.
 //!
 //! Self-improvement automation lives in `tracedecay-automation-runtime`.
-//! Host installers call that crate for skill-target installation; automation
-//! calls back through `tracedecay_automation_runtime::automation::host_io`
-//! (registered by [`register_automation_host_io`]).
+//! Host installers call that crate for skill-target installation and hand it
+//! the [`host_io`] bundle it writes host-owned files through.
 //!
 //! ## Registered ports
 //!
-//! A handful of root-owned runtimes cannot become a dependency edge (the MCP
-//! tool catalog, Hook daemon/identity composition, the Codex app-server
-//! backend, and the registered database's canonical project key). Each is a
-//! [`crate::ports`] slot the root registers at startup
-//! (`src/agents.rs::register_mcp_tool_catalog_ports`,
-//! `src/runtime_ports.rs`); every port degrades to a documented inert answer
-//! (daemon reported unavailable, injection disabled, `u64::MAX`, …) when
-//! unregistered, so this crate's own unit tests stay runnable standalone. A
-//! crate-local `cargo check` passing is therefore not evidence the production
-//! composition root is wired — check the registration call sites too.
+//! A handful of root-owned runtimes cannot become a dependency edge (Hook
+//! daemon/identity composition, the Codex app-server backend, and the
+//! registered database's canonical project key). Those are
+//! [`crate::ports`] slots the root fills at startup (`src/runtime_ports.rs`).
+//! The MCP tool catalog is no longer among them: `tracedecay-mcp` owns it and
+//! sits below this crate, so installers read it directly and an unavailable
+//! catalog is a typed error rather than an empty allowlist.
+//!
+//! A crate-local `cargo check` passing is not evidence the production
+//! composition root is wired, check the registration call sites too.
 //!
 //! ## Packaging
 //!
@@ -35,7 +34,7 @@
 /// `Database::publish_test_runtime` materialises a profile-scoped sidecar shard
 /// that the kernel initialises through
 /// `tracedecay_runtime_core::ports::registered_schema`. That port fails closed
-/// until the real schema — owned by `tracedecay-global-db` — is registered.
+/// until the real schema, owned by `tracedecay-global-db`, is registered.
 /// Production wires it from the daemon composition root; this crate's test
 /// target reuses the identical installer through its `test-helpers`
 /// dev-dependency. Idempotent: the port keeps the first registration, so every
@@ -46,9 +45,10 @@
 /// directly need this call.
 #[cfg(test)]
 pub(crate) fn register_test_schema_installer() {
-    tracedecay_global_db::register_test_schema_installer();
-    register_automation_host_io();
+    tracedecay_global_db::register_registered_schema_installer();
 }
+
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 
 pub mod agents;
 pub mod hooks;
@@ -59,94 +59,23 @@ pub mod shell;
 pub mod task_classifier;
 pub mod tool_name;
 
-/// The automation runtime whose host-io ports [`register_automation_host_io`]
-/// binds. Exposed so downstream test processes (including the runtime crate's
-/// own unit tests, which compile as a separate crate copy) can reach the
-/// registered production surface instead of re-implementing it.
-pub use tracedecay_automation_runtime as automation_runtime;
-
 pub use product_version::PRODUCT_VERSION;
-pub(crate) use tracedecay_session_memory::user_config;
 
-// Kernel shims. `tracedecay-runtime-core` owns the substrate these two
-// subsystems were extracted alongside; aliasing the kernel modules into this
-// crate's root keeps every historical `crate::<module>::…` path in the moved
-// code resolving verbatim, exactly as the root crate's `src/<module>.rs` shims
-// do on the other side of the split.
-pub(crate) use tracedecay_domain::errors;
-pub(crate) use tracedecay_runtime_core::{branch, config, db, storage, worktree};
-
-/// Kernel-owned slice of the former root `tracedecay` façade module.
-pub(crate) mod tracedecay {
-    pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
-}
-
-/// Registers the host-install surface automation used to call on `agents`.
+/// The host-install surface automation borrows from this crate.
 ///
-/// Idempotent. The composition root and this crate's test installer both call
-/// it so managed-skill export, host-config writes, and plugin-bundle files
-/// keep working after the automation split.
-pub fn register_automation_host_io() {
-    use std::path::{Path, PathBuf};
-
-    use tracedecay_automation_runtime::automation::host_io::{
-        HostIoRegistration, ManagedSkillExportReport, PluginFile,
-    };
-
-    fn export_to_agents(home: &Path, profile_root: &Path) -> Vec<ManagedSkillExportReport> {
-        crate::agents::export_managed_skills_to_agents(home, profile_root)
-            .into_iter()
-            .map(|report| ManagedSkillExportReport {
-                agent: report.agent,
-                exports: report.exports,
-                error: report.error,
-            })
-            .collect()
-    }
-
-    fn export_to_agent_hosts(
-        home: &Path,
-        project_root: &Path,
-        profile_root: &Path,
-    ) -> Vec<ManagedSkillExportReport> {
-        crate::agents::export_managed_skills_to_agent_hosts(home, project_root, profile_root)
-            .into_iter()
-            .map(|report| ManagedSkillExportReport {
-                agent: report.agent,
-                exports: report.exports,
-                error: report.error,
-            })
-            .collect()
-    }
-
-    fn codex_agent_files() -> &'static [PluginFile] {
-        use std::sync::OnceLock;
-        static FILES: OnceLock<Vec<PluginFile>> = OnceLock::new();
-        FILES
-            .get_or_init(|| {
-                crate::agents::plugin_bundle::codex_agent_files()
-                    .iter()
-                    .map(|file| PluginFile {
-                        relative: file.relative,
-                        contents: file.contents,
-                    })
-                    .collect()
-            })
-            .as_slice()
-    }
-
-    fn with_write_intents(root: PathBuf, effect: &mut dyn FnMut()) {
-        crate::agents::with_host_config_write_intents(root, effect);
-    }
-
-    tracedecay_automation_runtime::automation::host_io::register(HostIoRegistration {
-        export_to_agents,
-        export_to_agent_hosts,
+/// One `Copy` bundle of the managed-skill export sweeps, host-config writes,
+/// and plugin-bundle files that `tracedecay-automation-runtime` cannot depend
+/// on directly. Installers pass it to every automation entry point that
+/// writes host-owned files; nothing is registered process-wide. The report
+/// and plugin-file types are the runtime's own, so the production functions
+/// are handed over directly.
+pub fn host_io() -> HostIo {
+    HostIo {
+        export_to_agents: crate::agents::export_managed_skills_to_agents,
+        export_to_agent_hosts: crate::agents::export_managed_skills_to_agent_hosts,
         write_text: crate::agents::safe_write_text_file,
         write_json: crate::agents::safe_write_json_file,
         remove_host_file: crate::agents::safe_remove_host_file,
-        resolve_on_path: crate::agents::host_cli::resolve_on_path,
-        codex_agent_files,
-        with_write_intents,
-    });
+        codex_agent_files: crate::agents::plugin_bundle::codex_agent_files,
+    }
 }

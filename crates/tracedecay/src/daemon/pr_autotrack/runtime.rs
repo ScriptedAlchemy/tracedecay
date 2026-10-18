@@ -1,19 +1,20 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::time::Instant;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::native_runtime;
 
 use crate::daemon::branch_admin::StoreAdministration;
-use crate::daemon::log_daemon_event;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 use super::{
     MAX_NEW_TRACKS_PER_CYCLE, PrCommandControl, PrDiscovery, PrStoreAdministration,
     discover_open_prs_with_control, load_state, reconcile_project_with_administration,
 };
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Base cadence of the poll loop; per-project intervals are honored on top of
 /// this floor via a last-run map.
@@ -22,43 +23,56 @@ const BASE_TICK: Duration = Duration::from_mins(1);
 /// Retained owner for the PR-autotrack loop and every bounded child process it
 /// starts. Shutdown signals the same token carried into Git/GitHub commands
 /// before joining the task.
-pub struct PrAutotrackTask {
+pub(crate) struct PrAutotrackTask {
     cancellation: CancellationToken,
-    task: tokio::task::JoinHandle<()>,
+    task: native_runtime::NativeTask<()>,
 }
 
 impl PrAutotrackTask {
-    #[hotpath::skip]
-    pub async fn shutdown(self) {
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub(crate) async fn shutdown(self) {
         self.cancellation.cancel();
-        if let Err(error) = self.task.await {
-            log_daemon_event(
-                "pr_autotrack",
-                &[
-                    ("action", "shutdown".to_string()),
-                    ("outcome", "task_join_failed".to_string()),
-                    ("reason", error.to_string()),
-                ],
-            );
-        }
+        let reason = match self.task.wait().await {
+            native_runtime::NativeTaskOutcome::Completed(()) => return,
+            native_runtime::NativeTaskOutcome::Cancelled => "task cancelled".to_string(),
+            native_runtime::NativeTaskOutcome::Panicked(panic) => panic.to_string(),
+        };
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("action", "shutdown".to_string()),
+                ("outcome", "task_join_failed".to_string()),
+                ("reason", reason),
+            ],
+        );
+    }
+}
+
+impl Drop for PrAutotrackTask {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
 /// Spawns the PR-autotrack poll loop with the daemon's shared store coordinator
 /// and the retained code-index scheduler used for PR-head worktree activation.
+/// The loop runs on the native runtime; the error is that runtime's refusal.
 pub(crate) fn spawn_with_administration(
     administration: StoreAdministration,
     schedulers: CodeIndexSchedulerRegistryV1,
-) -> PrAutotrackTask {
+) -> Result<PrAutotrackTask, String> {
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();
-    let task = tokio::spawn(hotpath::future!(
+    let task = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
         async move {
             run(administration, schedulers, task_cancellation).await;
         },
-        label = "daemon.pr_autotrack.loop"
-    ));
-    PrAutotrackTask { cancellation, task }
+        tracing::trace_span!("daemon.pr_autotrack.loop"),
+    ))?;
+    Ok(PrAutotrackTask { cancellation, task })
 }
 
 async fn run(
@@ -84,12 +98,18 @@ async fn run(
         .await;
         tokio::select! {
             () = cancellation.cancelled() => return,
-            () = tokio::time::sleep(BASE_TICK) => {}
+            slept = native_runtime::sleep_until(Instant::now() + BASE_TICK) => {
+                if let Err(error) = slept {
+                    // Without a timer every park would return at once and spin.
+                    tracing::error!(event = "pr_autotrack_timer_unavailable", %error);
+                    return;
+                }
+            }
         }
     }
 }
 
-#[hotpath::measure(label = "daemon.pr_autotrack.tick", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.tick", level = "trace", skip_all)]
 async fn tick(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     last_poll: &mut HashMap<PathBuf, Instant>,
@@ -99,7 +119,15 @@ async fn tick(
 ) {
     let window = 14 * 86_400;
     let cap = 64;
-    let cutoff = crate::tracedecay::current_timestamp().saturating_sub(window);
+    let cutoff = tracedecay_runtime_core::tracedecay::current_timestamp().saturating_sub(window);
+    let owner = match administration.owner_profile() {
+        Ok(owner) => owner.clone(),
+        Err(error) => {
+            tracing::warn!(%error, "PR auto-track tick skipped: daemon owner profile unavailable");
+            return;
+        }
+    };
+    let owner_home = owner.home().map(std::path::Path::to_path_buf);
     let Ok(records) = database.list_code_projects(cap).await else {
         return;
     };
@@ -111,16 +139,23 @@ async fn tick(
             return;
         }
         let root = PathBuf::from(&record.canonical_root);
-        if !root.is_dir() || crate::config::is_ambient_project_root(&root) {
+        if !root.is_dir()
+            || tracedecay_runtime_core::config::is_ambient_project_root(
+                owner_home.as_deref(),
+                &root,
+            )
+        {
             continue;
         }
         // A poll loop has no right to turn an arbitrary project path into
         // configuration authority. Missing/pending daemon snapshot means no
         // poll and, critically, no destructive disabled-state teardown.
-        let Ok(cfg) =
-            crate::config::cached_runtime_configuration_for_project_id(&root, &record.project_id)
-                .map(|configuration| configuration.config.sync)
-        else {
+        let Ok(cfg) = tracedecay_project::config::cached_runtime_configuration_for_project_id(
+            owner.data_dir(),
+            &root,
+            &record.project_id,
+        )
+        .map(|configuration| configuration.config().sync.clone()) else {
             continue;
         };
         let interval = Duration::from_secs(cfg.effective_auto_track_pr_poll_secs());
@@ -151,7 +186,7 @@ async fn tick(
 async fn retained_project_graph(
     administration: &StoreAdministration,
     project_root: &Path,
-) -> Option<Arc<crate::tracedecay::TraceDecay>> {
+) -> Option<Arc<tracedecay_project::project::TraceDecay>> {
     let canonical = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
@@ -162,7 +197,7 @@ async fn retained_project_graph(
         .find(|graph| graph.project_root() == canonical)
 }
 
-#[hotpath::measure(label = "daemon.pr_autotrack.poll", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.poll", level = "trace", skip_all)]
 async fn poll_project(
     repo_root: PathBuf,
     administration: &StoreAdministration,
@@ -173,28 +208,15 @@ async fn poll_project(
         return;
     };
     let data_root = graph.store_layout().data_root.clone();
-    let command_control = PrCommandControl {
-        cancellation: Some(cancellation.clone()),
-        ..PrCommandControl::default()
-    };
+    let command_control = PrCommandControl::with_cancellation(cancellation.clone());
     let repo_for_discovery = repo_root.clone();
     let discovery_control = command_control.clone();
-    let discovery = match tokio::task::spawn_blocking(move || {
+    let discovery = match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         discover_open_prs_with_control(&repo_for_discovery, &discovery_control)
     })
     .await
     {
-        Ok(Ok(discovery)) => {
-            // Sweep volume: every PR head this poll examined, including the
-            // fork heads it refused to track.
-            hotpath::gauge!("daemon.pr_autotrack.prs_examined").inc(
-                discovery
-                    .open
-                    .len()
-                    .saturating_add(discovery.skipped_forks.len()) as f64,
-            );
-            discovery
-        }
+        Ok(Ok(discovery)) => discovery,
         Ok(Err(reason)) => {
             log_daemon_event(
                 "pr_autotrack",
@@ -210,15 +232,28 @@ async fn poll_project(
         Err(_) => return,
     };
 
-    let report = reconcile_project_with_administration(
+    let report = match reconcile_project_with_administration(
         &repo_root,
         &data_root,
         &discovery,
         MAX_NEW_TRACKS_PER_CYCLE,
         PrStoreAdministration::with_control(schedulers, &graph, &command_control),
     )
-    .await;
-    let managed = load_state(&data_root).managed.len();
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            log_state_error(&repo_root, "poll", &error);
+            return;
+        }
+    };
+    let managed = match load_state(&data_root) {
+        Ok(state) => state.managed.len(),
+        Err(error) => {
+            log_state_error(&repo_root, "poll", &error);
+            return;
+        }
+    };
     log_daemon_event(
         "pr_autotrack",
         &[
@@ -234,7 +269,7 @@ async fn poll_project(
 
 /// Tears down all managed PR state for a project whose `auto_track_pr_branches`
 /// is now disabled.
-#[hotpath::measure(label = "daemon.pr_autotrack.teardown", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.teardown", level = "trace", skip_all)]
 async fn teardown_disabled_project_with_administration(
     repo_root: &Path,
     administration: &StoreAdministration,
@@ -245,27 +280,48 @@ async fn teardown_disabled_project_with_administration(
         return;
     };
     let data_root = graph.store_layout().data_root.clone();
-    if load_state(&data_root).managed.is_empty() {
-        return;
+    match load_state(&data_root) {
+        Ok(state) if state.managed.is_empty() => return,
+        Ok(_) => {}
+        Err(error) => {
+            log_state_error(repo_root, "teardown", &error);
+            return;
+        }
     }
-    let command_control = PrCommandControl {
-        cancellation: Some(cancellation.clone()),
-        ..PrCommandControl::default()
-    };
-    let report = reconcile_project_with_administration(
+    let command_control = PrCommandControl::with_cancellation(cancellation.clone());
+    let report = match reconcile_project_with_administration(
         repo_root,
         &data_root,
         &PrDiscovery::default(),
         MAX_NEW_TRACKS_PER_CYCLE,
         PrStoreAdministration::with_control(schedulers, &graph, &command_control),
     )
-    .await;
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            log_state_error(repo_root, "teardown", &error);
+            return;
+        }
+    };
     log_daemon_event(
         "pr_autotrack",
         &[
             ("project", repo_root.display().to_string()),
             ("action", "teardown".to_string()),
             ("untracked", report.untracked.len().to_string()),
+        ],
+    );
+}
+
+fn log_state_error(repo_root: &Path, action: &str, error: &TraceDecayError) {
+    log_daemon_event(
+        "pr_autotrack",
+        &[
+            ("project", repo_root.display().to_string()),
+            ("action", action.to_owned()),
+            ("outcome", "error".to_owned()),
+            ("reason", error.to_string()),
         ],
     );
 }

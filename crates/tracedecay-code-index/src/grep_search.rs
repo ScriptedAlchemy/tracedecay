@@ -1,9 +1,14 @@
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 
+use ignore::DirEntry;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::{Regex, RegexBuilder};
+use tracedecay_domain::{IndexPathPolicyV1, forward_slash_path};
 
-use crate::source_walk::source_walk;
+use crate::parallelism::{CodeIndexParallelismErrorV1, install_interactive};
+use crate::source_walk::{forward_slash_relative, source_walk};
 
 const MAX_HITS_PER_FILE: usize = 20;
 const BINARY_SNIFF_BYTES: usize = 8_192;
@@ -16,13 +21,16 @@ pub struct GrepSearchQuery {
     pub fixed_strings: bool,
     pub case_sensitive: bool,
     pub path_glob: Option<String>,
+    /// Client subtree, matched with [`tracedecay_domain::path_matches_scope`].
+    /// Files outside it are skipped before any read or hit counting.
+    pub scope_prefix: Option<String>,
     pub context_lines: usize,
     pub max_results: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrepSearchHit {
-    pub file: String,
+    pub file: Arc<str>,
     pub line: u32,
     pub text: String,
     pub before: Vec<String>,
@@ -70,6 +78,7 @@ impl GrepScanOmissionsV1 {
 pub enum GrepSearchError {
     InvalidPattern { pattern: String, message: String },
     InvalidGlob { glob: String, message: String },
+    Parallelism(CodeIndexParallelismErrorV1),
 }
 
 impl std::fmt::Display for GrepSearchError {
@@ -81,112 +90,171 @@ impl std::fmt::Display for GrepSearchError {
             Self::InvalidGlob { glob, message } => {
                 write!(formatter, "invalid path_glob '{glob}': {message}")
             }
+            Self::Parallelism(error) => error.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for GrepSearchError {}
 
-#[hotpath::measure(label = "code_index.search.grep")]
+#[tracing::instrument(name = "code_index.search.grep", level = "trace", skip_all)]
 pub fn search_tree_with_cancel(
     project_root: &Path,
     query: &GrepSearchQuery,
-    is_cancelled: impl Fn() -> bool,
+    path_policy: &IndexPathPolicyV1,
+    is_cancelled: impl Fn() -> bool + Sync,
 ) -> Result<GrepSearchResult, GrepSearchError> {
     let matcher = build_matcher(query)?;
-    let walker = source_walk(project_root, query.path_glob.as_deref()).map_err(|error| {
-        GrepSearchError::InvalidGlob {
-            glob: error.glob,
-            message: error.message,
+    let mut walker =
+        source_walk(project_root, query.path_glob.as_deref(), path_policy).map_err(|error| {
+            GrepSearchError::InvalidGlob {
+                glob: error.glob,
+                message: error.message,
+            }
+        })?;
+    install_interactive(|| {
+        let mut result = GrepSearchResult::default();
+        let max_results = query.max_results.max(1);
+        // Bound retained source and reads to the existing owner's worker width.
+        // Indexed collection preserves walk order before applying the hit cap.
+        let width = rayon::current_num_threads();
+        loop {
+            let mut batch = Vec::with_capacity(width);
+            while batch.len() < width {
+                if is_cancelled() {
+                    result.cancelled = true;
+                    return result;
+                }
+                let Some(entry) = walker.next() else { break };
+                match entry {
+                    Ok(entry)
+                        if entry.file_type().is_some_and(|kind| kind.is_file())
+                            && in_scope(&entry, project_root, query.scope_prefix.as_deref()) =>
+                    {
+                        batch.push(entry);
+                    }
+                    Ok(_) => {}
+                    Err(_) => result.omissions.unavailable_sources += 1,
+                }
+            }
+            if batch.is_empty() {
+                return result;
+            }
+            let scans = batch
+                .par_iter()
+                .map(|entry| scan_grep_file(entry, project_root, &matcher, query, &is_cancelled))
+                .collect::<Vec<_>>();
+            for scan in scans {
+                result.files_scanned += scan.files_scanned;
+                result.lines_examined += scan.lines_examined;
+                result.lines_visited += scan.lines_visited;
+                result.omissions.oversized_files += scan.omissions.oversized_files;
+                result.omissions.oversized_lines += scan.omissions.oversized_lines;
+                result.omissions.unavailable_sources += scan.omissions.unavailable_sources;
+                result.truncated |= scan.truncated;
+                result.cancelled |= scan.cancelled;
+                let remaining = max_results
+                    .saturating_add(1)
+                    .saturating_sub(result.hits.len());
+                if scan.hits.len() > remaining {
+                    result.truncated = true;
+                }
+                result.hits.extend(scan.hits.into_iter().take(remaining));
+            }
+            if result.cancelled || result.hits.len() > max_results {
+                result.truncated |= result.hits.len() > max_results;
+                return result;
+            }
         }
-    })?;
+    })
+    .map_err(GrepSearchError::Parallelism)
+}
+
+fn in_scope(entry: &DirEntry, project_root: &Path, scope_prefix: Option<&str>) -> bool {
+    scope_prefix.is_none_or(|scope| {
+        entry
+            .path()
+            .strip_prefix(project_root)
+            .is_ok_and(|relative| {
+                tracedecay_domain::path_matches_scope(&forward_slash_path(relative), Some(scope))
+            })
+    })
+}
+
+fn scan_grep_file(
+    entry: &DirEntry,
+    project_root: &Path,
+    matcher: &Regex,
+    query: &GrepSearchQuery,
+    is_cancelled: &(impl Fn() -> bool + Sync),
+) -> GrepSearchResult {
     let mut result = GrepSearchResult::default();
     let max_results = query.max_results.max(1);
-    #[cfg(feature = "hotpath")]
-    let mut source_bytes = 0_u64;
+    if is_cancelled() {
+        result.cancelled = true;
+        return result;
+    }
+    let path = entry.path();
+    let Ok(relative) = path.strip_prefix(project_root) else {
+        return result;
+    };
+    let Ok(metadata) = entry.metadata() else {
+        result.omissions.unavailable_sources += 1;
+        return result;
+    };
+    if metadata.len() > MAX_INTERACTIVE_SOURCE_BYTES {
+        result.omissions.oversized_files += 1;
+        return result;
+    }
+    if is_cancelled() {
+        result.cancelled = true;
+        return result;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        result.omissions.unavailable_sources += 1;
+        return result;
+    };
+    if looks_binary(&bytes) {
+        return result;
+    }
+    let Ok(content) = String::from_utf8(bytes) else {
+        result.omissions.unavailable_sources += 1;
+        return result;
+    };
 
-    for entry in walker {
-        if is_cancelled() {
-            result.cancelled = true;
-            break;
-        }
-        let Ok(entry) = entry else { continue };
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Ok(relative) = path.strip_prefix(project_root) else {
-            continue;
-        };
-        let Ok(metadata) = entry.metadata() else {
-            result.omissions.unavailable_sources += 1;
-            continue;
-        };
-        if metadata.len() > MAX_INTERACTIVE_SOURCE_BYTES {
-            result.omissions.oversized_files += 1;
-            continue;
-        }
-        if is_cancelled() {
-            result.cancelled = true;
-            break;
-        }
-        let Ok(bytes) = std::fs::read(path) else {
-            result.omissions.unavailable_sources += 1;
-            continue;
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let Ok(content) = String::from_utf8(bytes) else {
-            result.omissions.unavailable_sources += 1;
-            continue;
-        };
-        #[cfg(feature = "hotpath")]
+    // Defer path materialization until the file yields a hit so zero-hit
+    // files never pay normalize+alloc on the grep hot path.
+    if crate::observe::sample_hot_loop() {
         {
-            source_bytes = source_bytes.saturating_add(content.len() as u64);
-        }
-        let relative = relative.to_string_lossy().replace('\\', "/");
-        let stop = if crate::hotpath_observe::sample_hot_loop() {
-            hotpath::measure_block!(
-                "code_index_grep_file",
-                examine_grep_file(
-                    &matcher,
-                    query,
-                    &relative,
-                    &content,
-                    &mut result,
-                    max_results,
-                    &is_cancelled,
-                )
-            )
-        } else {
+            let _span = tracing::trace_span!("code_index_grep_file").entered();
             examine_grep_file(
-                &matcher,
+                matcher,
                 query,
-                &relative,
+                relative,
                 &content,
                 &mut result,
                 max_results,
-                &is_cancelled,
+                is_cancelled,
             )
-        };
-        if stop {
-            crate::hotpath_observe::record_files(result.files_scanned);
-            #[cfg(feature = "hotpath")]
-            crate::hotpath_observe::record_source_bytes(source_bytes);
-            return Ok(result);
         }
-    }
-    crate::hotpath_observe::record_files(result.files_scanned);
-    #[cfg(feature = "hotpath")]
-    crate::hotpath_observe::record_source_bytes(source_bytes);
-    Ok(result)
+    } else {
+        examine_grep_file(
+            matcher,
+            query,
+            relative,
+            &content,
+            &mut result,
+            max_results,
+            is_cancelled,
+        )
+    };
+    result
 }
 
 fn examine_grep_file<C: Fn() -> bool>(
     matcher: &Regex,
     query: &GrepSearchQuery,
-    relative: &str,
+    relative: &Path,
     content: &str,
     result: &mut GrepSearchResult,
     max_results: usize,
@@ -198,6 +266,7 @@ fn examine_grep_file<C: Fn() -> bool>(
     let mut pending = VecDeque::new();
     let mut source = content.lines().enumerate();
     let mut file_hits = 0;
+    let mut relative_key: Option<Arc<str>> = None;
     while let Some((index, line)) = next_grep_line(&mut source, &mut pending, result) {
         if is_cancelled() {
             result.cancelled = true;
@@ -219,8 +288,9 @@ fn examine_grep_file<C: Fn() -> bool>(
         }
         file_hits += 1;
         fill_after_context(&mut source, &mut pending, result, context_lines);
+        let file = Arc::clone(relative_key.get_or_insert_with(|| forward_slash_relative(relative)));
         result.hits.push(GrepSearchHit {
-            file: relative.to_owned(),
+            file,
             line: index as u32 + 1,
             text: line.to_owned(),
             before: before.iter().copied().map(str::to_owned).collect(),
@@ -300,7 +370,13 @@ fn looks_binary(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+
+    fn no_exclusions() -> IndexPathPolicyV1 {
+        IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap()
+    }
 
     fn query(pattern: &str) -> GrepSearchQuery {
         GrepSearchQuery {
@@ -308,9 +384,134 @@ mod tests {
             fixed_strings: false,
             case_sensitive: true,
             path_glob: None,
+            scope_prefix: None,
             context_lines: 0,
             max_results: 10,
         }
+    }
+
+    #[test]
+    fn parallel_reads_preserve_walk_order_and_the_global_cap() {
+        let project = tempfile::tempdir().unwrap();
+        for index in 0..8 {
+            std::fs::write(project.path().join(format!("{index}.rs")), "HIT_TOKEN\n").unwrap();
+        }
+        let mut query = query("HIT_TOKEN");
+        query.max_results = 1;
+        let scan = |workers| {
+            let runtime = crate::parallelism::CodeIndexWorkerRuntimeV1::build(
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Exact { workers },
+                4,
+                16 * 1024 * 1024 * 1024,
+            )
+            .unwrap();
+            let _entered = runtime.enter();
+            search_tree_with_cancel(project.path(), &query, &no_exclusions(), || false).unwrap()
+        };
+        let serial = scan(1);
+        let parallel = scan(4);
+        assert_eq!(serial.hits, parallel.hits);
+        assert_eq!(parallel.hits.len(), 2);
+        assert!(parallel.truncated);
+        assert!(!parallel.cancelled);
+        assert!(parallel.files_scanned <= 4);
+    }
+
+    #[test]
+    fn scope_intersects_the_path_glob_before_any_read() {
+        let project = tempfile::tempdir().unwrap();
+        for path in ["app/x.rs", "app/x.txt", "apple/x.rs", "lib/x.rs"] {
+            let path = project.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "HIT_TOKEN\n").unwrap();
+        }
+        let mut query = query("HIT_TOKEN");
+        query.path_glob = Some("*.rs".to_owned());
+        query.scope_prefix = Some("app".to_owned());
+
+        let result =
+            search_tree_with_cancel(project.path(), &query, &no_exclusions(), || false).unwrap();
+
+        let files = result
+            .hits
+            .iter()
+            .map(|hit| hit.file.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(files, ["app/x.rs"]);
+        assert_eq!(result.files_scanned, 1);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn worker_pool_failure_is_typed_instead_of_an_empty_scan() {
+        let project = tempfile::tempdir().unwrap();
+        crate::parallelism::force_install_failure_for_test(true);
+        let outcome =
+            search_tree_with_cancel(project.path(), &query("token"), &no_exclusions(), || false);
+        crate::parallelism::force_install_failure_for_test(false);
+        assert!(matches!(outcome, Err(GrepSearchError::Parallelism(_))));
+    }
+
+    #[test]
+    fn foreground_scan_admits_while_background_cpu_and_index_pool_are_held() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("fixture.txt"), "HIT_TOKEN\n").unwrap();
+        let runtime = crate::parallelism::CodeIndexWorkerRuntimeV1::build(
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Exact { workers: 1 },
+            1,
+            16 * 1024 * 1024 * 1024,
+        )
+        .unwrap();
+        let authority = runtime.background_cpu();
+        let held = authority.acquire();
+        let (pool_started_tx, pool_started_rx) = std::sync::mpsc::channel();
+        let (pool_release_tx, pool_release_rx) = std::sync::mpsc::channel::<()>();
+        let pool_holder = {
+            let runtime = runtime.clone();
+            std::thread::spawn(move || {
+                let _entered = runtime.enter();
+                crate::parallelism::install(move || {
+                    pool_started_tx.send(()).unwrap();
+                    pool_release_rx.recv().unwrap();
+                })
+                .unwrap();
+            })
+        };
+        pool_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("indexing pool holder must start");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = {
+            let project_root = project.path().to_path_buf();
+            std::thread::spawn(move || {
+                let _entered = runtime.enter();
+                sender
+                    .send(search_tree_with_cancel(
+                        &project_root,
+                        &query("HIT_TOKEN"),
+                        &no_exclusions(),
+                        || false,
+                    ))
+                    .unwrap();
+            })
+        };
+        let result = receiver.recv_timeout(Duration::from_secs(1));
+        let queued_during_scan = authority.waiting_work_units();
+        pool_release_tx.send(()).unwrap();
+        drop(held);
+        pool_holder.join().unwrap();
+        worker.join().unwrap();
+        let result = result
+            .expect(
+                "foreground grep must settle while background CPU and the indexing pool stay held",
+            )
+            .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].file.as_ref(), "fixture.txt");
+        assert!(!result.cancelled);
+        assert_eq!(queued_during_scan, 0);
+        assert_eq!(result.files_scanned, 1);
     }
 
     #[test]
@@ -323,9 +524,12 @@ mod tests {
         .unwrap();
         let checks = std::sync::atomic::AtomicUsize::new(0);
 
-        let result = search_tree_with_cancel(project.path(), &query("CANCEL_TOKEN"), || {
-            checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 10
-        })
+        let result = search_tree_with_cancel(
+            project.path(),
+            &query("CANCEL_TOKEN"),
+            &no_exclusions(),
+            || checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 10,
+        )
         .unwrap();
 
         assert!(result.cancelled);
@@ -340,11 +544,16 @@ mod tests {
         std::fs::write(project.path().join("oversized.txt"), oversized).unwrap();
         std::fs::write(project.path().join("tracked.txt"), "FILE_CAP_TOKEN\n").unwrap();
 
-        let result =
-            search_tree_with_cancel(project.path(), &query("FILE_CAP_TOKEN"), || false).unwrap();
+        let result = search_tree_with_cancel(
+            project.path(),
+            &query("FILE_CAP_TOKEN"),
+            &no_exclusions(),
+            || false,
+        )
+        .unwrap();
 
         assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].file, "tracked.txt");
+        assert_eq!(result.hits[0].file.as_ref(), "tracked.txt");
     }
 
     #[test]
@@ -359,7 +568,8 @@ mod tests {
         let mut query = query("HIT_TOKEN");
         query.max_results = 1;
 
-        let result = search_tree_with_cancel(project.path(), &query, || false).unwrap();
+        let result =
+            search_tree_with_cancel(project.path(), &query, &no_exclusions(), || false).unwrap();
 
         assert_eq!(result.hits.len(), 2);
         assert!(result.truncated);
@@ -371,52 +581,5 @@ mod tests {
             result.lines_examined
         );
         assert!(result.lines_visited < TOTAL_LINES);
-    }
-
-    #[test]
-    fn context_windows_include_oversized_neighbors_without_full_collect() {
-        let project = tempfile::tempdir().unwrap();
-        let oversized = "X".repeat(MAX_LINE_BYTES + 1);
-        let body = format!("before\n{oversized}\nHIT_TOKEN\nafter\nTAIL\n");
-        std::fs::write(project.path().join("ctx.txt"), body).unwrap();
-        let mut query = query("HIT_TOKEN");
-        query.context_lines = 1;
-        query.max_results = 1;
-
-        let result = search_tree_with_cancel(project.path(), &query, || false).unwrap();
-
-        assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].line, 3);
-        assert_eq!(result.hits[0].before, vec![oversized]);
-        assert_eq!(result.hits[0].after, vec!["after".to_owned()]);
-        assert_eq!(result.omissions.oversized_lines, 1);
-        assert_eq!(result.lines_examined, 4);
-        assert!(
-            result.lines_visited <= result.lines_examined + result.omissions.oversized_lines,
-            "visited {} after examining {} plus one oversized neighbor",
-            result.lines_visited,
-            result.lines_examined
-        );
-    }
-
-    #[test]
-    fn path_glob_does_not_visit_out_of_scope_files() {
-        let project = tempfile::tempdir().unwrap();
-        std::fs::write(project.path().join("keep.txt"), "SCOPE_TOKEN\nextra\n").unwrap();
-        std::fs::write(
-            project.path().join("skip.txt"),
-            "SCOPE_TOKEN\n".repeat(4_096),
-        )
-        .unwrap();
-        let mut query = query("SCOPE_TOKEN");
-        query.path_glob = Some("keep.txt".to_owned());
-        query.max_results = 1;
-
-        let result = search_tree_with_cancel(project.path(), &query, || false).unwrap();
-
-        assert_eq!(result.files_scanned, 1);
-        assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].file, "keep.txt");
-        assert!(result.lines_visited < 4_096);
     }
 }

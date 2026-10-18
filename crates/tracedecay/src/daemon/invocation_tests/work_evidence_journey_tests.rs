@@ -1,46 +1,39 @@
 use super::*;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tokio::sync::Mutex;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, PrepareWorkProductMutationRequestV1, StartWorkAttemptCommand,
     WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1, WorkAttemptStoragePort,
     WorkEvidenceExpansionSelectorV1, WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1,
-    WorkGraphReadRequestV1, WorkProductChangeDraftV1, WorkProductMutationRequestV1,
-    WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkGraphReadRequestV1, WorkProductAuthorizedRelationScopeV1, WorkProductChangeDraftV1,
+    WorkProductMutationRequestV1, WorkProductSelectionScopeV1, now_micros,
 };
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, InitiativeId,
-    MilestoneId, ObservationSourceIdentityV1, PrivacyDomainId, ProposalId, ProviderId, RefId,
-    RepositoryId, RunId, SessionId, TaskId, TemporalModeV1, WorkApprovalPolicy,
-    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
-    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
-    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
-    WorkFilesystemPolicy, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
-    WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProposalDispositionV1, WorkProposalV1,
-    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkRecoveryStateV1, WorkRouteDecisionV1, WorkSandboxPolicy, WorkScoreKindV1,
-    WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1, WorkflowOperationRef, WorktreeId,
+    ActorId, AttemptId, CommitId, InitiativeId, ManifestDigestHasher, MilestoneId,
+    ObservationSourceIdentityV1, PrivacyDomainId, ProposalId, ProviderId, RefId, RepositoryId,
+    RunId, SessionId, TaskId, TemporalModeV1, WorkApprovalPolicy, WorkAttemptIdentityV1,
+    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationStateV1,
+    WorkContentLocationClassV1, WorkEffectStateV1, WorkEffortClassV1, WorkEgressPolicy,
+    WorkExecutableReference, WorkExecutionLimits, WorkFallbackTopology, WorkFilesystemPolicy,
+    WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1,
+    WorkOrdinalBandV1, WorkPlanId, WorkPlanV1, WorkProposalDispositionV1, WorkProposalV1,
+    WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
+    WorkRouteCandidateV1, WorkRouteDecisionV1, WorkRouteExecutionProfileV1, WorkSandboxPolicy,
+    WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1,
+    WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_lsp::LspSessionRegistry;
+use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("Work evidence journey identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-        .expect("Work evidence journey digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn product_task(task_id: TaskId) -> (WorkInitiativeV1, WorkPlanV1, WorkMilestoneV1, WorkItemV1) {
     let created_at = UtcMicros(10);
@@ -85,7 +78,7 @@ fn product_task(task_id: TaskId) -> (WorkInitiativeV1, WorkPlanV1, WorkMilestone
     (initiative, plan, milestone, item)
 }
 
-fn provider_route() -> WorkProviderRouteV1 {
+pub(super) fn provider_route() -> WorkProviderRouteV1 {
     WorkProviderRouteV1::new(
         id::<ProviderId>("provider.work.codex-cli"),
         id::<WorkProviderRouteId>("route.work.evidence-codex.v1"),
@@ -93,35 +86,104 @@ fn provider_route() -> WorkProviderRouteV1 {
     .expect("provider route")
 }
 
-fn execution_snapshot() -> WorkExecutionSnapshot {
-    WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
-        configuration_revision_id: id::<ConfigurationRevisionId>(
-            "configuration-revision.work.evidence",
-        ),
-        configuration_snapshot_id: id::<ConfigurationSnapshotId>(
-            "configuration-snapshot.work.evidence",
-        ),
-        effective_behavior_digest: digest('1'),
-        resolution_provenance_digest: digest('2'),
-        route: provider_route(),
-        backend: WorkProviderBackendV1::CodexCli,
-        protocol: WorkProviderProtocol::CodexExecJson,
-        model: "gpt-5.6".to_owned(),
-        executable: WorkExecutableReference::new("executable.codex".to_owned(), digest('3'))
-            .expect("executable"),
-        sandbox: WorkSandboxPolicy::Required,
-        approval: WorkApprovalPolicy::Never,
-        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
-        egress: WorkEgressPolicy::Deny,
-        environment_allowlist: BTreeSet::new(),
-        credential_references: BTreeSet::new(),
-        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1)
-            .expect("execution limits"),
-        deadline: UtcMicros(1_000_000),
-        fallback: WorkFallbackTopology::Disabled,
-        topology: tracedecay_domain::safe_work_topology_policy_v1(),
-    })
-    .expect("execution snapshot")
+pub(super) fn configured_work_proposal_routing(
+    project: &std::path::Path,
+    scope: ResolvedScope,
+    grant: &CapabilityGrantSnapshot,
+) -> (DaemonWorkProposalRoutingAuthorityV1, ManifestDigest) {
+    use tracedecay_domain::configuration::{
+        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
+        WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
+    };
+
+    let executable_bytes = b"#!/bin/sh\nexit 0\n";
+    let executable_path = project.join("work-evidence-provider");
+    write_executable_script(&executable_path, executable_bytes).expect("write provider executable");
+    let executable_path = executable_path
+        .canonicalize()
+        .expect("canonical provider executable");
+    let mut hasher = ManifestDigestHasher::new();
+    hasher.update(executable_bytes);
+    let executable = WorkExecutableReference::new(
+        "executable.work.evidence-provider".to_owned(),
+        hasher.finalize().expect("provider executable digest"),
+    )
+    .expect("provider executable reference");
+    let route = WorkRouteCandidateV1 {
+        route_id: provider_route().route_id().as_str().to_owned(),
+        provider_capability_id: WorkProviderBackendV1::CodexCli
+            .provider_id()
+            .as_str()
+            .to_owned(),
+        model_id: "gpt-5.6".to_owned(),
+        effort: WorkEffortClassV1::Standard,
+        declared_budget_ceiling: 1,
+        content_location: WorkContentLocationClassV1::Local,
+        correctness: WorkOrdinalBandV1::High,
+        sensitive_data_fitness: WorkOrdinalBandV1::High,
+        latency: WorkOrdinalBandV1::Moderate,
+        cost: WorkOrdinalBandV1::Moderate,
+        autonomy: WorkOrdinalBandV1::High,
+        evidence_quality: WorkOrdinalBandV1::High,
+        execution: WorkRouteExecutionProfileV1 {
+            sandbox: WorkSandboxPolicy::Required,
+            approval: WorkApprovalPolicy::Never,
+            filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+            egress: WorkEgressPolicy::Deny,
+            environment_allowlist: BTreeSet::new(),
+            credential_references: BTreeSet::new(),
+            limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1)
+                .expect("execution limits"),
+            maximum_duration_micros: 60_000_000,
+            fallback: WorkFallbackTopology::Disabled,
+        },
+    };
+    let binding = WorkExecutableBindingV1::new(
+        executable,
+        executable_path,
+        vec![WorkExecutableCapabilityV1::CodexCliExecJson],
+        vec![route],
+    )
+    .expect("configured provider binding");
+    let revision = ConfigurationRevisionId::new("configuration.revision.work-evidence-routing")
+        .expect("configuration revision");
+    let key = SettingKey::new(WORK_EXECUTABLE_BINDINGS_SETTING_KEY)
+        .expect("work executable bindings key");
+    let snapshot = tracedecay_project::config::resolver::resolve_configuration(
+        &tracedecay_project::config::registry::ConfigurationRegistry::core()
+            .expect("configuration registry defaults"),
+        &[tracedecay_project::config::resolver::ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: scope.project_id.clone(),
+            },
+            revision_id: revision.clone(),
+            entries: BTreeMap::from([(
+                key,
+                ConfigurationValueV1::WorkExecutableBindings(vec![binding]),
+            )]),
+        }],
+    )
+    .expect("configured Work routing")
+    .snapshot;
+    let configuration_digest = snapshot.effective_behavior_digest.clone();
+    let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: project.join("profile"),
+            project_id: scope.project_id.clone(),
+            project_root: project.to_path_buf(),
+        },
+        revision,
+        snapshot,
+    )
+    .expect("pinned Work routing configuration");
+    let routing = DaemonWorkProposalRoutingAuthorityV1::mount(
+        scope,
+        &configuration,
+        &configuration_digest,
+        grant,
+    )
+    .expect("configured Work proposal routing");
+    (routing, configuration_digest)
 }
 
 fn seal_attempt(
@@ -130,7 +192,7 @@ fn seal_attempt(
     admitted: WorkAttemptV1,
     provider_session: ObservationSourceIdentityV1,
 ) {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     let running = admitted
         .transition(
             WorkAttemptStateV1::Running,
@@ -198,7 +260,7 @@ async fn invoke_work(
     request_id: &str,
     request: WorkApplicationInvocationV1,
 ) -> DaemonInvocationOutcome {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     service
         .invoke(
             registry,
@@ -225,7 +287,7 @@ async fn invoke_work_without_attempt_spawn(
     request_id: &str,
     request: WorkApplicationInvocationV1,
 ) -> DaemonInvocationOutcome {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     let canonical_root = project_root.canonicalize().expect("canonical project root");
     let runtimes = service
         .project_runtimes
@@ -256,13 +318,14 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     let project_id = id::<ProjectId>("project.work.evidence-journey");
     let repository_id = id::<RepositoryId>("repository.work.evidence-journey");
     let worktree_id = id::<WorktreeId>("worktree.work.evidence-journey");
-    let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
-        profile.path(),
-        &project,
-        project_id.clone(),
-    )
-    .await
-    .expect("registered project runtime");
+    let host =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            profile.path(),
+            &project,
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project runtime");
     let database = host
         .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project database");
@@ -281,19 +344,21 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         attempt.attempt_id().as_str(),
         session_id.as_str(),
     );
-    crate::dashboard::observation_seed::seed_session_message_observation_for_test(
+    crate::dashboard::observation_seed::seed_session_message_observations_for_test(
         database.as_ref(),
-        crate::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
-            project_id: project_id.as_str(),
-            provider: "codex",
-            session_id: session_id.as_str(),
-            message_id: "message.work.evidence-journey",
-            role: "assistant",
-            content: &format!("{query_text} completed through the registered Work authority"),
-            model: Some("gpt-5.6"),
-            timestamp: 101,
-            ordinal: 1,
-        },
+        &[
+            crate::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                project_id: project_id.as_str(),
+                provider: "codex",
+                session_id: session_id.as_str(),
+                message_id: "message.work.evidence-journey",
+                role: "assistant",
+                content: &format!("{query_text} completed through the registered Work authority"),
+                model: Some("gpt-5.6"),
+                timestamp: 101,
+                ordinal: 1,
+            },
+        ],
     )
     .await
     .expect("seed provider observation");
@@ -314,9 +379,11 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
                 .expect("session root identity"),
             database.binding().shard_id.clone(),
             project_id.clone(),
-            repository_id.clone(),
-            worktree_id.clone(),
-            BranchId::new("branch.work-evidence-journey").expect("branch identity"),
+            tracedecay_session_memory::context::ResolvedGitRoute::new(
+                repository_id.clone(),
+                worktree_id.clone(),
+                BranchId::new("branch.work-evidence-journey").expect("branch identity"),
+            ),
             project.display().to_string(),
         );
     let scope = retrieval_root
@@ -324,29 +391,24 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .session_request_scope()
         .expect("Work scope");
     let retrieval =
-        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
+        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new_without_refresh_worker(
             database.clone(),
             retrieval_root,
-            None,
         )
         .expect("mounted session retrieval");
     let evidence_retrieval =
-        crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::new(
-            retrieval,
-        ))
-        .with_federated_authority(Arc::new(
-            crate::daemon::work_evidence_retrieval::tests::StaticFederatedAuthority(Arc::new(
-                crate::daemon::work_evidence_retrieval::tests::federated_authority(id::<
-                    PrivacyDomainId,
-                >(
-                    "privacy.work.evidence-journey",
+        tracedecay_application::work::WorkTaskSessionEvidenceRetrievalV1::new(Arc::new(retrieval))
+            .with_federated_authority(Arc::new(
+                tracedecay_application::work::StaticFederatedAuthority(Arc::new(
+                    tracedecay_application::work::federated_authority(id::<PrivacyDomainId>(
+                        "privacy.work.evidence-journey",
+                    )),
                 )),
-            )),
-        ));
+            ));
 
     let actor = id::<ActorId>("actor.work.evidence-journey");
     let grant_digest = digest('d');
-    let journey_now = current_micros();
+    let journey_now = now_micros();
     let grant = CapabilityGrantSnapshot::new(
         id::<CapabilityGrantId>("grant.work.evidence-journey"),
         1,
@@ -355,11 +417,11 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         UtcMicros(journey_now.0.saturating_sub(60_000_000)),
         UtcMicros(journey_now.0.saturating_add(600_000_000)),
         scope.clone(),
-        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
             .iter()
             .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
             .collect(),
-        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
             .iter()
             .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
             .collect(),
@@ -375,7 +437,8 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     )
     .expect("Work authority");
     let service = DaemonInvocationService::default();
-    let (proposal_routing, configuration_digest) = empty_work_proposal_routing(scope.clone());
+    let (proposal_routing, configuration_digest) =
+        configured_work_proposal_routing(&project, scope.clone(), &grant);
     let policy_digest = mount_test_work_observability(
         &service,
         &project,
@@ -392,7 +455,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
             actor,
             grant,
             policy_digest,
-            configuration_digest,
+            configuration_digest.clone(),
             tracedecay_domain::configuration::safe_work_topology_policy_v1(),
             proposal_routing,
             evidence_retrieval,
@@ -400,12 +463,13 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .await
         .expect("registered Work runtime");
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
-    let selection =
-        WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
+    let selection = WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
             project_id: scope.project_id.clone(),
             repository_id: scope.repository_id.clone(),
-        }]))
-        .expect("repository Work selection");
+        },
+    ]))
+    .expect("repository Work selection");
     let (initiative, plan, milestone, item) = product_task(task_id.clone());
     let prepared = invoke_work(
         &service,
@@ -474,6 +538,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .expect("proposal route"),
         "Hydrate the exact provider session.".to_owned(),
         digest('4'),
+        configuration_digest.clone(),
     )
     .expect("Work proposal");
     let prepared_accept = invoke_work(
@@ -554,13 +619,17 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         WorkApplicationInvocationV1::AdmitExecution(admission),
     )
     .await;
-    assert!(matches!(
-        admitted,
-        DaemonInvocationOutcome::WorkApplication {
-            outcome: WorkApplicationOutcomeV1::AdmitExecution(ApplicationOutcome::Effect(_)),
-            ..
-        }
-    ));
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::AdmitExecution(ApplicationOutcome::Effect(effect)),
+        ..
+    } = admitted
+    else {
+        panic!("execution admission must commit: {admitted:?}");
+    };
+    let execution_snapshot = effect
+        .payload
+        .expect("admitted Work execution")
+        .execution_snapshot;
 
     let started = invoke_work_without_attempt_spawn(
         &service,
@@ -571,13 +640,13 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
             run_id: attempt.run_id().clone(),
             attempt_id: attempt.attempt_id().clone(),
             operation: id::<WorkflowOperationRef>("operation.work.evidence-provider"),
-            execution_snapshot: execution_snapshot(),
+            execution_snapshot,
             worktree_root: project.display().to_string(),
             reference: Some(id::<RefId>("refs/heads/work-evidence-journey")),
             commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
             instructions: "Hydrate the exact provider session.".to_owned(),
             effect_state: WorkEffectStateV1::Observational,
-            occurred_at: current_micros(),
+            occurred_at: now_micros(),
         }),
     )
     .await;
@@ -603,7 +672,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         "request.work.evidence-graph",
         WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
             selection.clone(),
-            current_micros(),
+            now_micros(),
         )),
     )
     .await;
@@ -637,7 +706,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
                 attempt: attempt.clone(),
             }),
             continuation: None,
-            observed_at: current_micros(),
+            observed_at: now_micros(),
         }),
     )
     .await;

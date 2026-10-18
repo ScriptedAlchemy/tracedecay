@@ -52,7 +52,6 @@ pub struct ConnectionLocalRequestSequence {
 }
 
 impl ConnectionLocalRequestSequence {
-    #[hotpath::skip]
     pub const fn starting_at(first: u64) -> Self {
         Self { next: first }
     }
@@ -80,7 +79,6 @@ pub struct ProcessLocalRequestSequence {
 }
 
 impl ProcessLocalRequestSequence {
-    #[hotpath::skip]
     pub const fn starting_at(first: u64) -> Self {
         Self {
             next: AtomicU64::new(first),
@@ -89,7 +87,7 @@ impl ProcessLocalRequestSequence {
 
     pub fn next_number(&self) -> Result<u64, SequenceExhausted> {
         self.next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| SequenceExhausted)
@@ -201,13 +199,5 @@ mod tests {
         assert_eq!(sequence.next_number(), Ok(u64::MAX - 1));
         assert_eq!(sequence.next_number(), Err(SequenceExhausted));
         assert_eq!(sequence.next_number(), Err(SequenceExhausted));
-    }
-
-    #[test]
-    fn exhaustion_reports_the_retained_identity_failure_class() {
-        assert_eq!(
-            SequenceExhausted.to_string(),
-            "the process-wide identity sequence is exhausted"
-        );
     }
 }

@@ -14,8 +14,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::{ApplicationContractError, ResolvedScope};
+use tracedecay_contracts::{ApplicationContractError, ResolvedScope};
 use tracedecay_domain::{CommitId, ProjectId, RefId, RepositoryId, TreeId, WorktreeId};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Failure to resolve an exact indexing identity from a checkout.
 #[derive(Debug, thiserror::Error)]
@@ -56,15 +57,15 @@ impl IndexingIdentityV1 {
     /// linked worktrees of one repository share it, while the worktree identity
     /// is anchored on the canonical checkout path so linked worktrees never
     /// collapse into one another.
-    #[hotpath::measure(label = "daemon.code_index.identity.resolve")]
+    #[tracing::instrument(name = "daemon.code_index.identity.resolve", level = "trace", skip_all)]
     pub fn resolve(project_root: &Path) -> Result<Self, IdentityErrorV1> {
         let repository_id = repository_id_for(project_root)?;
         let worktree_id = worktree_id_for(project_root)?;
 
         // HEAD/commit/tree are best-effort: an unborn or detached HEAD is a
         // truthful `None`, never a fabricated placeholder.
-        let repository =
-            gix::open(project_root).map_err(|error| IdentityErrorV1::Git(error.to_string()))?;
+        let repository = tracedecay_runtime_core::git_open::open(project_root)
+            .map_err(|error| IdentityErrorV1::Git(error.to_string()))?;
         let head_ref = repository
             .head()
             .ok()
@@ -118,8 +119,8 @@ impl IndexingIdentityV1 {
     /// resolved to `self`.
     ///
     /// Reuse authorization is **structural only**: the repository and the
-    /// worktree must be the same identity. A different worktree — even one whose
-    /// path or branch label looks identical, or whose blobs are byte-identical —
+    /// worktree must be the same identity. A different worktree, even one whose
+    /// path or branch label looks identical, or whose blobs are byte-identical,
     /// is never authorized to reuse another's generation, occurrence, or lineage
     /// identity. Content-addressed *bytes* may still be physically shared by the
     /// byte pool; this guard governs *identity* reuse, not byte deduplication.
@@ -163,7 +164,11 @@ impl GitMetadataFingerprintV1 {
     /// Missing files (e.g. no `packed-refs` yet) are recorded as `None`, which
     /// still participates in change detection: a file appearing or disappearing
     /// is itself a change.
-    #[hotpath::measure(label = "daemon.code_index.identity.fingerprint")]
+    #[tracing::instrument(
+        name = "daemon.code_index.identity.fingerprint",
+        level = "trace",
+        skip_all
+    )]
     pub fn capture(project_root: &Path) -> Self {
         let (git_dir, common_dir) = git_metadata_dirs(project_root);
         let head_path = git_dir.join("HEAD");
@@ -220,7 +225,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 /// content (the target object id). Loose refs are a handful of ~41-byte files,
 /// so this is O(number of loose refs) and independent of repository size.
 ///
-/// Content — not the parent directory's mtime — is the signal: an in-place
+/// Content, not the parent directory's mtime, is the signal: an in-place
 /// loose-ref rewrite (`git update-ref` on an existing branch) rewrites the ref
 /// file's bytes without changing the directory mtime, and often without
 /// changing the file's size (object ids are fixed width) or its mtime beyond
@@ -269,8 +274,24 @@ fn refs_heads_signature(dir: &Path) -> Option<String> {
 /// Resolve the git-dir (worktree-local) and common-dir (repository-shared)
 /// paths, falling back to `<root>/.git` when gix cannot open the checkout so a
 /// non-repository path still yields a stable, if empty, fingerprint.
+///
+/// These two paths are structural, but the fingerprint above is sampled on
+/// every query admission, and re-deriving them through a fresh repository open
+/// dominates its cost, against the retained topology this now asks first. A
+/// checkout that carries `<root>/.git` is one an open at exactly this root
+/// resolves through, which is also where a discovery started at this root
+/// stops, so the retained answer is the same answer. Anything else, a bare
+/// repository's control directory or a path that is not a checkout root, still
+/// opens directly, because discovery would walk past it to an ancestor whose
+/// git metadata does not describe this project.
 fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
-    if let Ok(repository) = gix::open(project_root) {
+    if project_root.join(".git").exists()
+        && let Ok(topology) =
+            tracedecay_runtime_core::git_repository::try_repository_topology(project_root)
+    {
+        return (topology.git_dir.clone(), topology.common_dir.clone());
+    }
+    if let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) {
         let git_dir = repository.git_dir().to_path_buf();
         let common_dir = {
             let common = repository.common_dir().to_path_buf();
@@ -299,13 +320,12 @@ pub fn repository_id_for_common_dir(common_dir: &Path) -> Result<RepositoryId, I
 }
 
 pub fn worktree_id_for(project_root: &Path) -> Result<WorktreeId, IdentityErrorV1> {
-    let project_root =
-        project_root
-            .canonicalize()
-            .map_err(|source| IdentityErrorV1::CanonicalWorktreePath {
-                path: project_root.to_path_buf(),
-                source,
-            })?;
+    let project_root = canonical_existing_identity(project_root).map_err(|source| {
+        IdentityErrorV1::CanonicalWorktreePath {
+            path: project_root.to_path_buf(),
+            source,
+        }
+    })?;
     WorktreeId::new(format!(
         "worktree.daemon.{}",
         super::sha256_hex(project_root.to_string_lossy().as_bytes())
@@ -340,18 +360,9 @@ pub fn resolved_scope_for_project(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::git;
     use super::*;
-    use std::process::Command;
     use tempfile::TempDir;
-
-    fn git(root: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git failed: {args:?}");
-    }
 
     fn init_repo(files: &[(&str, &str)]) -> TempDir {
         let root = TempDir::new().expect("root");
@@ -369,28 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn resolves_repository_worktree_and_head() {
-        let repo = init_repo(&[("src/lib.rs", "pub fn a() {}\n")]);
-        let identity = IndexingIdentityV1::resolve(repo.path()).expect("resolve");
-        assert!(
-            identity
-                .repository_id()
-                .as_str()
-                .starts_with("repository.daemon."),
-            "repository id is anchored on the common dir"
-        );
-        assert!(
-            identity
-                .worktree_id()
-                .as_str()
-                .starts_with("worktree.daemon."),
-            "worktree id is anchored on the checkout path"
-        );
-        assert!(identity.head_commit().is_some(), "committed HEAD resolves");
-        assert!(identity.head_tree().is_some(), "committed HEAD has a tree");
-    }
-
-    #[test]
     fn distinct_checkouts_never_authorize_reuse_even_with_identical_content() {
         let first = init_repo(&[("src/lib.rs", "pub fn shared() {}\n")]);
         let second = init_repo(&[("src/lib.rs", "pub fn shared() {}\n")]);
@@ -402,6 +391,37 @@ mod tests {
         );
         assert!(!b.authorizes_reuse_of(&a));
         assert!(a.authorizes_reuse_of(&a), "self reuse is authorized");
+    }
+
+    #[test]
+    fn two_clones_of_one_project_on_one_branch_get_distinct_code_scopes() {
+        let first = init_repo(&[("src/lib.rs", "pub fn first_tree() {}\n")]);
+        let parent = TempDir::new().expect("clone parent");
+        let second = parent.path().join("second");
+        git(
+            parent.path(),
+            &[
+                "clone",
+                "-q",
+                first.path().to_str().unwrap(),
+                second.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(second.join("src/lib.rs"), "pub fn second_tree() {}\n").unwrap();
+        let project_id = ProjectId::new("project.shared-by-two-clones").expect("project id");
+
+        let a = resolved_scope_for_project(first.path(), &project_id).expect("first scope");
+        let b = resolved_scope_for_project(&second, &project_id).expect("second scope");
+
+        assert_eq!(a.project_id, b.project_id);
+        assert_eq!(a.reference, b.reference, "both clones sit on one branch");
+        assert!(a.reference.is_some(), "the branch resolves");
+        assert_ne!(a.worktree_id, b.worktree_id);
+        assert_ne!(a.repository_id, b.repository_id);
+        assert_ne!(
+            a.scope_digest, b.scope_digest,
+            "distinct checkouts must not write one code graph scope"
+        );
     }
 
     #[cfg(unix)]

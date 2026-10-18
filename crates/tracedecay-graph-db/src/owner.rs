@@ -57,7 +57,29 @@ struct GraphDbLeaseToken {
 
 impl Drop for GraphDbLeaseToken {
     fn drop(&mut self) {
-        self.source.state.lock().leases.remove(&self.lease_id);
+        let (hibernate, close) = {
+            let mut state = self.source.state.lock();
+            state.leases.remove(&self.lease_id);
+            let idle =
+                state.leases.is_empty() && matches!(state.lifecycle, GraphDbOwnerLifecycle::Ready);
+            (
+                idle && state.owner_attachment.is_some(),
+                idle && state.owner_attachment.is_none() && Arc::strong_count(&self.source) == 1,
+            )
+        };
+        if hibernate {
+            if let Err(error) = self.source.database.hibernate_if_lazy() {
+                tracing::warn!(
+                    %error,
+                    "lazy graph engine could not hibernate after its final operation lease"
+                );
+            }
+        } else if close && let Err(error) = self.source.database.close() {
+            tracing::warn!(
+                %error,
+                "derived graph engine could not close after its final operation lease"
+            );
+        }
     }
 }
 
@@ -98,25 +120,6 @@ impl GraphDbLeaseV1 {
 
     pub(crate) fn owner_id(&self) -> GraphDbOwnerId {
         self.token.source.owner_id
-    }
-
-    /// Demands that every sealed generation be proven again from its stored
-    /// rows, discarding the verified-generation markers admitted at open.
-    ///
-    /// Sealed-generation verification is normally proven once per set of
-    /// container bytes and then re-checked against the container's file
-    /// identity, which is an OS-integrity assumption rather than a
-    /// cryptographic one: it detects a container that was replaced, extended,
-    /// truncated, or rewritten, but not bytes edited in place under a
-    /// preserved timestamp. (Grafeo's per-section CRC-32, checked on every
-    /// section read, is what stands behind that for accidental corruption.)
-    ///
-    /// This is the hook that drops the assumption on demand -- a doctor
-    /// command, a scheduled audit, or an operator who has reason to distrust
-    /// the store's metadata. The next activation of each generation pays the
-    /// full row-streaming proof again.
-    pub fn demand_full_generation_reverification(&self) {
-        self.token.source.database.forget_verified_markers();
     }
 }
 
@@ -433,6 +436,16 @@ impl GraphDbOwner {
         self.source.database.runtime_state()
     }
 
+    pub(crate) fn engine_is_open(&self) -> Result<bool, GraphDbError> {
+        self.source
+            .database
+            .inner
+            .database
+            .read()
+            .map(|database| database.is_some())
+            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))
+    }
+
     pub fn close(&self) -> Result<(), GraphDbError> {
         let result = self.source.database.close();
         let mut state = self.source.state.lock();
@@ -704,12 +717,24 @@ impl GraphDbOwner {
         state.owner_attachment.is_none() && state.leases.is_empty()
     }
 
+    /// Lease evidence for a close refused on a leased owner: whether the
+    /// standing map attachment is still held and how many client leases
+    /// remain. Names the blocker class so a shutdown conflict is actionable.
+    pub(crate) fn lease_summary(&self) -> String {
+        let state = self.source.state.lock();
+        format!(
+            "owner_attachment={} leases={}",
+            state.owner_attachment.is_some(),
+            state.leases.len()
+        )
+    }
+
     fn from_database(
         database: Arc<GraphDb>,
         authority_attachment: Option<Box<dyn RetainedGraphStoreOwnerAttachmentV1>>,
     ) -> Result<Self, GraphDbError> {
         let owner_id = NEXT_GRAPH_DB_OWNER_ID
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             })
             .map(GraphDbOwnerId)

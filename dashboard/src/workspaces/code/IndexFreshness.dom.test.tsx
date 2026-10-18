@@ -59,6 +59,22 @@ describe('Code index freshness', () => {
     expect(screen.queryByText(/not attached/)).toBeNull();
   });
 
+  it('names a failed mount and its retry command instead of an empty mount list', async () => {
+    renderFreshness('error', {
+      worktrees: [],
+      note: 'the last code-index mount for this project failed',
+      mount_failure: {
+        message: 'the code-index scheduler could not mount for this project',
+        remediation: 'run `tracedecay sync` to retry the code-index mount',
+      },
+    });
+
+    expect(await screen.findByText('the code-index scheduler could not mount for this project')).toBeTruthy();
+    expect(screen.getByText('run `tracedecay sync` to retry the code-index mount')).toBeTruthy();
+    expect(document.querySelector('[data-index-freshness="error"]')).toBeTruthy();
+    expect(screen.queryByText('fresh')).toBeNull();
+  });
+
   it('shows a mount that is still indexing without inventing a generation', async () => {
     renderFreshness('loading', {
       worktrees: [
@@ -108,10 +124,37 @@ describe('Code index freshness', () => {
     expect(text).toContain('10k chunks committed');
     expect(text).toContain('480 imports committed');
     expect(text).toContain('16.0 MiB payload committed');
-    expect(text).toContain('250 files/s · 16.0 MiB lexical bytes/s');
+    expect(text).toContain('250 files/s · 16.8M lexical units/s');
     expect(text).toContain('ETA 2m');
     expect(text).toContain('last commit');
     expect(text).toContain('240ms');
+  });
+
+  it('renders bounded artifact restore progress separately from a rebuild', async () => {
+    renderFreshness('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          staleness_state: 'restoring',
+          coverage: 'partial_artifact_restore',
+          rebuild_in_flight: false,
+          restore_progress: {
+            generation_id: 'generation.4f21c9',
+            artifact_digest: `sha256:${'a'.repeat(64)}`,
+            authenticated_completed: 4,
+            authenticated_total: 6,
+            authenticated_remaining: 2,
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+
+    const reading = await screen.findByRole('progressbar', { name: 'Artifact restore progress' });
+    expect(reading.getAttribute('value')).toBe('4');
+    expect(reading.getAttribute('max')).toBe('6');
+    expect(screen.getByText('restoring')).toBeTruthy();
+    expect(screen.getByText('2 authentication checks remaining')).toBeTruthy();
   });
 
   it('does not render rate-dependent ETA without an established backend rate', async () => {
@@ -126,7 +169,7 @@ describe('Code index freshness', () => {
           progress: {
             ...progress(),
             files_per_second: null,
-            lexical_bytes_per_second: null,
+            lexical_units_per_second: null,
             estimated_remaining_seconds: 120,
             blocked_reason: 'retry_backoff',
           },
@@ -146,17 +189,6 @@ describe('Code index freshness', () => {
     expect(text).not.toContain('0 B/s');
   });
 
-  it('removes progress when the generation is ready and has no active build', async () => {
-    renderFreshness('ready', {
-      worktrees: [{ ...worktree(), progress: null }],
-      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
-    });
-
-    await screen.findByText('Ready');
-    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
-    expect(screen.queryByText(/throughput unavailable/)).toBeNull();
-  });
-
   it('accepts a later replacement generation after epoch restart and rejects its delayed predecessor', async () => {
     vi.useFakeTimers();
     const first = envelope('loading', {
@@ -167,6 +199,7 @@ describe('Code index freshness', () => {
           snapshot_content_identity: null,
           sealed_at_micros: null,
           staleness_state: 'indexing',
+          rebuild_in_flight: true,
           progress: progress(),
         },
       ],
@@ -180,6 +213,7 @@ describe('Code index freshness', () => {
           snapshot_content_identity: null,
           sealed_at_micros: null,
           staleness_state: 'indexing',
+          rebuild_in_flight: true,
           progress: {
             ...progress(),
             generation_id: 'generation.catchup.02',
@@ -224,6 +258,7 @@ describe('Code index freshness', () => {
           snapshot_content_identity: null,
           sealed_at_micros: null,
           staleness_state: 'indexing',
+          rebuild_in_flight: true,
           progress: { ...progress(), progress_epoch: 8 },
         },
       ],
@@ -237,6 +272,7 @@ describe('Code index freshness', () => {
           snapshot_content_identity: null,
           sealed_at_micros: null,
           staleness_state: 'indexing',
+          rebuild_in_flight: true,
           progress: {
             ...progress(),
             daemon_incarnation: 2,
@@ -277,6 +313,7 @@ describe('Code index freshness', () => {
           snapshot_content_identity: null,
           sealed_at_micros: null,
           staleness_state: 'indexing',
+          rebuild_in_flight: true,
           progress: { ...progress(), progress_epoch: 100 },
         },
       ],
@@ -290,6 +327,7 @@ describe('Code index freshness', () => {
           snapshot_content_identity: null,
           sealed_at_micros: null,
           staleness_state: 'indexing',
+          rebuild_in_flight: true,
           progress: {
             ...progress(),
             producer_incarnation: 2,
@@ -328,6 +366,7 @@ describe('Code index freshness', () => {
           snapshot_content_identity: null,
           sealed_at_micros: null,
           staleness_state: 'indexing',
+          rebuild_in_flight: true,
           progress: progress(),
         },
       ],
@@ -364,32 +403,185 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it('keeps polling ready progress until the freshness envelope is ready', async () => {
+  it('keeps polling moving worktrees when another active worktree is quiet', async () => {
+    vi.useFakeTimers();
+    const reading = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          rebuild_in_flight: true,
+          progress: { ...progress(), last_progress_micros: NOW_MICROS - 60_000_000 },
+        },
+        {
+          ...worktree(),
+          worktree_root: '/repo/moving',
+          rebuild_in_flight: true,
+          progress: progress(),
+        },
+      ],
+      note: 'mixed active worktrees',
+    });
+    const fetch = vi.fn(async () => new Response(JSON.stringify(reading), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('backs a quiet active build to 4s and keeps stall age visible without claiming SSE resume', async () => {
+    vi.useFakeTimers();
+    const stalled = {
+      ...envelope('loading', {
+        worktrees: [
+          {
+            ...worktree(),
+            latest_generation_id: null,
+            snapshot_content_identity: null,
+            sealed_at_micros: null,
+            staleness_state: 'indexing',
+            rebuild_in_flight: true,
+            progress: { ...progress(), phase: 'source_scan', completed_files: 0 },
+          },
+        ],
+        note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const fetch = vi.fn(async () => new Response(JSON.stringify(stalled), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('0 / 500 files')).toBeTruthy();
+    expect(screen.getByText('no progress for')).toBeTruthy();
+    expect(screen.getByText('10m')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(2_998);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('no progress for')).toBeTruthy();
+    expect(screen.getByText('10m')).toBeTruthy();
+    await advanceTimers(4_000);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await advanceTimers(999);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps polling each second when a moving worktree shares a query with a quiet one', async () => {
+    vi.useFakeTimers();
+    const result = {
+      ...envelope('loading', {
+        worktrees: [
+          { ...worktree(), rebuild_in_flight: true, progress: progress() },
+          {
+            ...worktree(),
+            worktree_root: '/workspace/moving',
+            rebuild_in_flight: true,
+            progress: { ...progress(), last_progress_micros: NOW_MICROS + 600_000_000 },
+          },
+        ],
+        note: 'live daemon scheduler state',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const fetch = vi.fn(async () => new Response(JSON.stringify(result), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_000);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns to the 1s cadence when a quiet build publishes a new progress stamp', async () => {
+    vi.useFakeTimers();
+    const quiet = {
+      ...envelope('loading', {
+        worktrees: [
+          {
+            ...worktree(),
+            latest_generation_id: null,
+            snapshot_content_identity: null,
+            sealed_at_micros: null,
+            staleness_state: 'indexing',
+            rebuild_in_flight: true,
+            progress: { ...progress(), phase: 'source_scan', completed_files: 0 },
+          },
+        ],
+        note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const moving = {
+      ...envelope('loading', {
+        worktrees: [
+          {
+            ...worktree(),
+            latest_generation_id: null,
+            snapshot_content_identity: null,
+            sealed_at_micros: null,
+            staleness_state: 'indexing',
+            rebuild_in_flight: true,
+            progress: {
+              ...progress(),
+              phase: 'source_scan',
+              progress_epoch: 2,
+              completed_files: 12,
+              last_progress_micros: NOW_MICROS + 604_000_000,
+            },
+          },
+        ],
+        note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 604_000_000 },
+    };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(quiet), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(moving), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(moving), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('0 / 500 files')).toBeTruthy();
+    await advanceTimers(4_001);
+    await advanceTimers(0);
+    expect(screen.getByText('12 / 500 files')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not treat a non-building partial envelope as an active 1s poll', async () => {
     vi.useFakeTimers();
     const readyProgress = {
       ...progress(),
       phase: 'ready',
       completed_files: 500,
-      completed_lexical_bytes: 64 * 1024 * 1024,
+      completed_lexical_units: 64 * 1024 * 1024,
       estimated_remaining_seconds: 0,
     };
-    const transitioning = envelope('partial', {
+    const partial = envelope('partial', {
       worktrees: [
         {
           ...worktree(),
           latest_generation_id: readyProgress.generation_id,
           staleness_state: 'stale',
-          coverage: 'partial',
-          progress: readyProgress,
-        },
-      ],
-      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
-    });
-    const ready = envelope('ready', {
-      worktrees: [
-        {
-          ...worktree(),
-          latest_generation_id: readyProgress.generation_id,
+          coverage: 'partial_unverified_restore',
+          rebuild_in_flight: false,
           progress: readyProgress,
         },
       ],
@@ -397,9 +589,8 @@ describe('Code index freshness', () => {
     });
     const fetch = vi
       .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify(transitioning), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(ready), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(ready), { status: 200 }));
+      .mockResolvedValueOnce(new Response(JSON.stringify(partial), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(partial), { status: 200 }));
     vi.stubGlobal('fetch', fetch);
     renderWith();
 
@@ -409,14 +600,212 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     await advanceTimers(1_001);
     await advanceTimers(0);
-    expect(screen.getByText('Ready')).toBeTruthy();
-    expect(screen.getByText('ready · 100.0%')).toBeTruthy();
-    expect(fetch).toHaveBeenCalledTimes(2);
-    await advanceTimers(29_998);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(28_998);
+    expect(fetch).toHaveBeenCalledTimes(1);
     await advanceTimers(1);
     await advanceTimers(0);
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('polls an active source verification even without a rebuild', async () => {
+    vi.useFakeTimers();
+    const verifying = envelope('partial', {
+      worktrees: [
+        {
+          ...worktree(),
+          staleness_state: 'verifying',
+          coverage: 'partial_source_verification',
+          rebuild_in_flight: false,
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(verifying), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(verifying), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('polls an initial indexing mount before a rebuild flag is available', async () => {
+    vi.useFakeTimers();
+    const indexing = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          rebuild_in_flight: false,
+          progress: null,
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(indexing), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(indexing), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a non-building loading envelope on the idle cadence', async () => {
+    vi.useFakeTimers();
+    const parked = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'parked',
+          rebuild_in_flight: false,
+          progress: null,
+          parked: terminalPark(),
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(parked), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(parked), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('Loading')).toBeTruthy();
+    expect(screen.getByText(/parked: publication authority is corrupt/)).toBeTruthy();
+    expect(screen.getByText(/does not retry on wake/)).toBeTruthy();
+    expect(screen.getByText(/restore the owner-private publication store/)).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(28_998);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats terminal parked plus rebuild_in_flight as idle and shows remediation', async () => {
+    vi.useFakeTimers();
+    const impossibleOnWire = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'parked',
+          rebuild_in_flight: true,
+          progress: {
+            ...progress(),
+            blocked_reason: 'publication_authority_corrupt',
+          },
+          parked: terminalPark(),
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(impossibleOnWire), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(impossibleOnWire), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText(/parked: publication authority is corrupt/)).toBeTruthy();
+    expect(screen.getByText(/does not retry on wake/)).toBeTruthy();
+    expect(screen.getByText('blocked: publication authority corrupt')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(28_998);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('idles a rebuild whose only terminal mark is publication_authority_corrupt', async () => {
+    vi.useFakeTimers();
+    const corrupt = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          rebuild_in_flight: true,
+          progress: {
+            ...progress(),
+            blocked_reason: 'publication_authority_corrupt',
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(corrupt), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(corrupt), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('blocked: publication authority corrupt')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(28_998);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps unsupported and unknown envelopes on the idle cadence', async () => {
+    vi.useFakeTimers();
+    const unsupported = envelope('unsupported', {
+      worktrees: [],
+      note: 'the dashboard is not attached to a daemon-owned code-index scheduler registry',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(unsupported), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(unsupported), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('Unsupported')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(28_998);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('keeps a mounted ready worktree without progress on the 30-second cadence', async () => {
@@ -443,7 +832,9 @@ describe('Code index freshness', () => {
 
   it('reports a stale generation as stale against the reference it was sealed on', async () => {
     renderFreshness('partial', {
-      worktrees: [{ ...worktree(), staleness_state: 'stale', coverage: 'partial' }],
+      worktrees: [
+        { ...worktree(), staleness_state: 'stale', coverage: 'partial_unverified_restore' },
+      ],
       note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
     });
 
@@ -451,7 +842,7 @@ describe('Code index freshness', () => {
     const mount = document.querySelector('[data-worktree-staleness="stale"]');
     expect(mount).toBeTruthy();
     expect(mount?.textContent).toContain('refs/heads/codex/tracedecay-total-redesign-plan');
-    expect(mount?.textContent).toContain('partial');
+    expect(mount?.textContent).toContain('partial_unverified_restore');
   });
 
   it('reports an unreachable daemon as offline', async () => {
@@ -487,6 +878,16 @@ function worktree() {
   };
 }
 
+function terminalPark() {
+  return {
+    observed_passes: 3,
+    parked_at_micros: NOW_MICROS - 60_000_000,
+    reason: 'publication authority is corrupt',
+    remediation: 'restore the owner-private publication store',
+    retries_on_wake: false,
+  };
+}
+
 function progress() {
   return {
     generation_id: 'generation.catchup.01',
@@ -501,14 +902,14 @@ function progress() {
     committed_payload_bytes: 16 * 1024 * 1024,
     completed_files: 250,
     total_files: 500,
-    completed_lexical_bytes: 32 * 1024 * 1024,
-    total_lexical_bytes: 64 * 1024 * 1024,
+    completed_lexical_units: 32 * 1024 * 1024,
+    total_lexical_units: 64 * 1024 * 1024,
     current_batch_pages: 4,
     current_batch_payload_bytes: 4 * 1024 * 1024,
     elapsed_micros: 120_000_000,
     last_commit_latency_micros: 240_000,
     files_per_second: 250,
-    lexical_bytes_per_second: 16 * 1024 * 1024,
+    lexical_units_per_second: 16 * 1024 * 1024,
     estimated_remaining_seconds: 120,
     last_progress_micros: NOW_MICROS,
     blocked_reason: null,

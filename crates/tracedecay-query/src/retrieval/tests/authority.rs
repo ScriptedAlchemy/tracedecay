@@ -1,17 +1,20 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, CodeSourceCursorBindingV1, ComponentRevision,
-    EphemeralSanitizedQueryViewV1, GitOidV1, PrincipalId, PublicRetrieverStatus, QueryMac,
-    QueryNormalizationRevision, RefId, RepositoryId, RetrievalCursorKeyId, RetrievalFailure,
-    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
-    ScoreDomainCalibrationV1, ScoreDomainId, TemporalModeV1,
+    EphemeralSanitizedQueryViewV1, FixedPointScore, GitOidV1, PrincipalId, PublicRetrieverStatus,
+    QueryMac, QueryNormalizationRevision, RefId, RepositoryId, RetrievalCursorKeyId,
+    RetrievalFailure, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId, TemporalModeV1,
 };
 
 use super::{batch, candidate, composition_lanes, id, no_caps, profile, request};
 use crate::retrieval::evidence_lanes::TaskSessionLaneEvidenceV1;
-use crate::retrieval::fusion::{QueryDigestAuthenticationError, RetrievalCursorKeyringV1};
+use crate::retrieval::fusion::{
+    CompositionKernel, FusionStageInput, QueryDigestAuthenticationError, RetrievalCursorKeyringV1,
+};
 use crate::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
 use crate::retrieval::{QueryAuthorityErrorV1, QueryAuthorityV1};
 
@@ -49,13 +52,82 @@ fn authority_with_keyring(keyring: RetrievalCursorKeyringV1) -> QueryAuthorityV1
 }
 
 #[test]
+fn fallback_cursor_serves_disjoint_canonical_pages() {
+    let authority = authority();
+    let request = request();
+    let query = query_view();
+    let lanes = || {
+        composition_lanes(vec![
+            (
+                RetrieverKind::ExactLiteral,
+                RetrieverOutcome::Complete(batch(Vec::new(), "exact")),
+            ),
+            (
+                RetrieverKind::Lexical,
+                RetrieverOutcome::Complete(batch(
+                    vec![
+                        candidate(RetrieverKind::Lexical, "first", 900_000, 0),
+                        candidate(RetrieverKind::Lexical, "second", 800_000, 1),
+                    ],
+                    "lexical",
+                )),
+            ),
+            (
+                RetrieverKind::Graph,
+                RetrieverOutcome::Complete(batch(Vec::new(), "graph")),
+            ),
+        ])
+    };
+
+    let first = authority
+        .compose(&request, &query, lanes(), &BTreeMap::new(), 1, None)
+        .expect("first page");
+    let cursor = first.fallback.cursor.clone().expect("continuation");
+    assert_eq!(cursor.next_ordinal, 1);
+    let second = authority
+        .compose(
+            &request,
+            &query,
+            lanes(),
+            &BTreeMap::new(),
+            1,
+            Some(&cursor),
+        )
+        .expect("second page");
+    assert_eq!(
+        second
+            .composition
+            .ranked_candidates
+            .iter()
+            .map(|candidate| candidate.final_ordinal)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+
+    let anchors = [first, second].map(|page| {
+        assert_eq!(page.fallback.ordered_candidates[0].final_ordinal, 0);
+        page.fallback.ordered_candidates[0]
+            .candidate
+            .anchor_id
+            .clone()
+    });
+    assert_eq!(anchors, [id("anchor.first"), id("anchor.second")]);
+}
+
+#[test]
 fn prepared_query_cursor_resumes_only_the_authenticated_generation_and_candidate_set() {
     let generation = CodeGenerationId::new("generation.prepared-query.v1").expect("generation");
     let bindings = PreparedQueryBindingsV1::new(
-        "code_index_branch_diff.v1",
         tracedecay_domain::canonical_sha256(&"scope.prepared-query").expect("scope digest"),
         generation.clone(),
-        tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
+        tracedecay_domain::CursorBindingV1::new(
+            "code_index_branch_diff.v1",
+            vec![(
+                "query",
+                tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
+            )],
+        )
+        .expect("query binding"),
     )
     .expect("bindings");
     let items = vec!["first".to_owned(), "second".to_owned(), "third".to_owned()];
@@ -81,10 +153,16 @@ fn prepared_query_cursor_resumes_only_the_authenticated_generation_and_candidate
     assert_eq!(resumed.items, ["second"]);
 
     let changed_generation = PreparedQueryBindingsV1::new(
-        "code_index_branch_diff.v1",
         tracedecay_domain::canonical_sha256(&"scope.prepared-query").expect("scope digest"),
         CodeGenerationId::new("generation.prepared-query.v2").expect("changed generation"),
-        tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
+        tracedecay_domain::CursorBindingV1::new(
+            "code_index_branch_diff.v1",
+            vec![(
+                "query",
+                tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
+            )],
+        )
+        .expect("query binding"),
     )
     .expect("changed generation bindings");
     assert_eq!(
@@ -216,7 +294,14 @@ fn federated_authority_composes_every_lane_without_fallback_projection() {
     assert!(authorized.page.ranked_candidates.is_empty());
     assert!(authorized.page.cursor.is_none());
     assert_eq!(
-        authority.compose(&request, &query_view(), empty_foreground_lanes(), 8, None,),
+        authority.compose(
+            &request,
+            &query_view(),
+            empty_foreground_lanes(),
+            &BTreeMap::new(),
+            8,
+            None,
+        ),
         Err(QueryAuthorityErrorV1::AuthorityModeMismatch)
     );
 }
@@ -242,6 +327,119 @@ fn task_session_selection_uses_the_accepted_federated_profile_without_fake_lanes
         authority.task_session_score_domain().expect("score domain"),
         id::<ScoreDomainId>("score.task_session.v1"),
     );
+}
+
+#[test]
+fn core_fallback_authority_ranks_task_session_without_changing_search_lanes() {
+    let authority = authority();
+    let request = request();
+    let outcome = RetrieverOutcome::Complete(RetrieverBatch::<TaskSessionLaneEvidenceV1> {
+        candidates: Vec::new(),
+        evidence_by_occurrence: BTreeMap::new(),
+        coverage: RetrieverCoverage::default(),
+        continuation: None,
+    });
+
+    let selected = authority
+        .select_task_session(&request, &query_view(), outcome, 8, None)
+        .expect("core fallback authority ranks the TaskSession lane");
+    assert!(selected.ranked_candidates().is_empty());
+    assert_eq!(
+        authority.task_session_score_domain().expect("score domain"),
+        id::<ScoreDomainId>(crate::retrieval::QUERY_TASK_SESSION_SCORE_DOMAIN_V1),
+    );
+    authority
+        .compose(
+            &request,
+            &query_view(),
+            empty_foreground_lanes(),
+            &BTreeMap::new(),
+            8,
+            None,
+        )
+        .expect("search lanes stay the checked-in fallback set");
+}
+
+/// TaskSession raw scores are temporal ranking's encoded `tier * 1_000_000 +
+/// within_tier` values, not a `[0, 1_000_000]` feature. A calibration capped
+/// at one tier span saturates every ranked anchor to the same calibrated
+/// feature, flattening utility and handing the order to the source-validity
+/// tie-break.
+#[test]
+fn core_fallback_task_session_calibration_spans_the_temporal_score_range() {
+    let profile = authority()
+        .task_session_ranking_profile()
+        .expect("core fallback projects a TaskSession ranking profile");
+    let calibration = profile
+        .score_domain_calibrations
+        .get(&id::<ScoreDomainId>(
+            crate::retrieval::QUERY_TASK_SESSION_SCORE_DOMAIN_V1,
+        ))
+        .expect("projected TaskSession score domain calibration");
+
+    let corroborating = calibration
+        .calibrate(FixedPointScore(0))
+        .expect("corroborating occurrence exports zero");
+    let approximate = calibration
+        .calibrate(FixedPointScore(1_100_000))
+        .expect("approximate tier");
+    let exact_message = calibration
+        .calibrate(FixedPointScore(3_500_000))
+        .expect("exact-message tier");
+
+    assert_eq!(corroborating, 0);
+    assert!(
+        approximate < exact_message,
+        "distinct temporal tiers must not collapse onto one calibrated feature: \
+         {approximate} vs {exact_message}"
+    );
+    assert!(
+        exact_message < 1_000_000,
+        "the encoded ceiling must stay inside the calibration range: {exact_message}"
+    );
+}
+
+/// A ranked TaskSession anchor names the policy that ordered it, and under the
+/// core authority that policy is the checked-in fallback, not a search lane.
+///
+/// This is the consumer's only signal that the order came from the fallback:
+/// `WorkTaskSessionRankContributionV1` publishes the score domain and
+/// calibration profile per anchor, and a projection that reused a search
+/// lane's identity would report the fallback ranking as that lane's.
+#[test]
+fn core_fallback_task_session_ranking_names_its_own_policy() {
+    let profile = authority()
+        .task_session_ranking_profile()
+        .expect("core fallback projects a TaskSession ranking profile");
+    let score_domain = id::<ScoreDomainId>(crate::retrieval::QUERY_TASK_SESSION_SCORE_DOMAIN_V1);
+    let calibration =
+        id::<CalibrationProfileId>(crate::retrieval::QUERY_TASK_SESSION_CALIBRATION_V1);
+
+    assert_eq!(
+        profile.calibrations.get(&RetrieverKind::TaskSession),
+        Some(&calibration),
+        "the ranked contribution must name the fallback calibration profile"
+    );
+    assert_eq!(
+        profile
+            .score_domain_calibrations
+            .get(&score_domain)
+            .map(|domain| &domain.calibration_profile_id),
+        Some(&calibration),
+        "the fallback score domain must resolve to the fallback calibration"
+    );
+    for search_lane in [
+        crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
+        crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+        crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
+    ] {
+        assert!(
+            !profile
+                .score_domain_calibrations
+                .contains_key(&id::<ScoreDomainId>(search_lane)),
+            "a TaskSession ranking must not be reported under the {search_lane} search lane"
+        );
+    }
 }
 
 #[test]
@@ -392,12 +590,95 @@ fn paged_foreground_lanes() -> Vec<crate::retrieval::fusion::CompositionLaneInpu
 }
 
 #[test]
+fn query_cursor_ttl_uses_wall_clock_instead_of_snapshot_time() {
+    let request = request();
+    let query = query_view();
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_micros() as i64;
+    let current = authority()
+        .compose(
+            &request,
+            &query,
+            paged_foreground_lanes(),
+            &BTreeMap::new(),
+            1,
+            None,
+        )
+        .expect("compose current cursor")
+        .fallback
+        .cursor
+        .clone()
+        .expect("current cursor");
+    let after = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_micros() as i64;
+    assert!(current.expiry.0 >= before + 1_000_000);
+    assert!(current.expiry.0 <= after + 1_000_000);
+
+    let keyring = RetrievalCursorKeyringV1::new(
+        request.scope.privacy_domain.clone(),
+        id::<RetrievalCursorKeyId>("retrieval-key.authority.v1"),
+        1,
+        vec![7_u8; 32],
+        1_000_000,
+    )
+    .expect("keyring");
+    let kernel = CompositionKernel::new(id("ranking.authority.v1"));
+    let composition = kernel
+        .compose(
+            &FusionStageInput {
+                profile: profile(),
+                lanes: paged_foreground_lanes(),
+            },
+            &no_caps(),
+        )
+        .expect("composition");
+    let expired = kernel
+        .paginate_at(
+            &request,
+            &query,
+            &keyring,
+            &composition,
+            1,
+            None,
+            tracedecay_domain::UtcMicros(0),
+        )
+        .expect("old cursor")
+        .cursor
+        .expect("old cursor");
+
+    assert!(matches!(
+        authority().compose(
+            &request,
+            &query,
+            paged_foreground_lanes(),
+            &BTreeMap::new(),
+            1,
+            Some(&expired)
+        ),
+        Err(QueryAuthorityErrorV1::Retrieval(
+            tracedecay_domain::RetrievalError::CursorExpired
+        ))
+    ));
+}
+
+#[test]
 fn exact_code_source_binding_is_authenticated_with_the_query_cursor() {
     let authority = authority();
     let request = request();
     let query = query_view();
     let mut cursor = authority
-        .compose(&request, &query, paged_foreground_lanes(), 1, None)
+        .compose(
+            &request,
+            &query,
+            paged_foreground_lanes(),
+            &BTreeMap::new(),
+            1,
+            None,
+        )
         .expect("compose first page")
         .fallback
         .cursor
@@ -446,10 +727,24 @@ fn authenticated_foreground_fallback_is_byte_stable_and_lane_bounded() {
     let request = request();
     let query = query_view();
     let first = authority
-        .compose(&request, &query, empty_foreground_lanes(), 8, None)
+        .compose(
+            &request,
+            &query,
+            empty_foreground_lanes(),
+            &BTreeMap::new(),
+            8,
+            None,
+        )
         .expect("compose");
     let second = authority
-        .compose(&request, &query, empty_foreground_lanes(), 8, None)
+        .compose(
+            &request,
+            &query,
+            empty_foreground_lanes(),
+            &BTreeMap::new(),
+            8,
+            None,
+        )
         .expect("repeat compose");
 
     assert_eq!(first, second);
@@ -476,23 +771,6 @@ fn authenticated_foreground_fallback_is_byte_stable_and_lane_bounded() {
         serde_json::to_vec(first.fallback.as_ref()).expect("first bytes"),
         serde_json::to_vec(second.fallback.as_ref()).expect("second bytes"),
     );
-}
-
-#[test]
-fn semantic_handoff_reuses_the_authenticated_query_and_fallback() {
-    let authority = authority();
-    let request = request();
-    let authorized = authority
-        .compose(&request, &query_view(), empty_foreground_lanes(), 8, None)
-        .expect("compose");
-
-    assert_eq!(
-        authority
-            .authenticate_query(&request, &query_view())
-            .expect("digest"),
-        authorized.query_digest
-    );
-    assert!(Arc::strong_count(&authorized.fallback) >= 1);
 }
 
 #[test]

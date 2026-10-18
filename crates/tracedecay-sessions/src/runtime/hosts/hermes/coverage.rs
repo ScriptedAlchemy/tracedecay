@@ -15,8 +15,11 @@ use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursor
 
 use crate::admission::{HostAdmission, HostAdmissionOutcome};
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceSweep};
+use crate::runtime::jsonl_observation_admission::is_deterministic_content_refusal;
 use crate::runtime::shared::TranscriptIngestStats;
-use tracedecay_runtime_core::db::{SqliteFileIdentityError, sqlite_generation_identity};
+use crate::runtime::snapshot_observation::host_admission_error as admission_error;
+use tracedecay_runtime_core::db::{SqliteFileIdentityOperation, sqlite_generation_identity};
 
 use super::observation::{
     HermesAdmission, HermesAdmissionAction, HermesProjectionMetadata, observation_source,
@@ -29,15 +32,15 @@ pub(super) fn sqlite_incarnation(
     path: &Path,
 ) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
     let file_identity = sqlite_generation_identity(path).map_err(|error| {
-        match error {
-            SqliteFileIdentityError::Open => "could not open Hermes SQLite authority",
-            SqliteFileIdentityError::Inspect => "could not inspect Hermes SQLite authority",
-            SqliteFileIdentityError::Identify => "could not identify Hermes SQLite authority",
-            SqliteFileIdentityError::Unavailable => {
+        let operation = match error.operation() {
+            SqliteFileIdentityOperation::Open => "could not open Hermes SQLite authority",
+            SqliteFileIdentityOperation::Inspect => "could not inspect Hermes SQLite authority",
+            SqliteFileIdentityOperation::Identify => "could not identify Hermes SQLite authority",
+            SqliteFileIdentityOperation::PlatformSupport => {
                 "Hermes SQLite physical identity is unavailable"
             }
-        }
-        .to_string()
+        };
+        format!("{operation} ({})", error.category().as_str())
     })?;
     let resume_fingerprint = sqlite_resume_fingerprint(path, file_identity)?;
     let generation = ObservationSourceGenerationV1::new(file_identity)
@@ -89,20 +92,29 @@ async fn advance_coverage(
         .map_err(host_admission_error)
 }
 
+/// The admission's own verdict, verbatim.
+///
+/// The status alone names a family ("degraded"), not a cause: every
+/// deterministic refusal, cursor mismatch and contract violation collapsed
+/// into one indistinguishable sentence, so a sweep that skipped the same
+/// `state.db` every five seconds forever gave an operator nothing to act on.
+/// Carry the reason code, retryability and storage cause the outcome already
+/// holds.
 fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
-    crate::runtime::snapshot_observation::host_admission_status_message("Hermes", outcome.status)
-}
-
-pub(super) async fn drain_hermes_projections_with_admission(
-    facade: &dyn HostAdmission,
-    scope: &ObservationScopeV1,
-) -> Result<(), String> {
-    drain_hermes_projections_with_admission_and_cancellation(
-        facade,
-        scope,
-        &ObservationCancellation::default(),
-    )
-    .await
+    let mut message = crate::runtime::snapshot_observation::host_admission_status_message(
+        "Hermes",
+        outcome.status,
+    );
+    if let Some(reason) = outcome.reason_code {
+        message.push_str(&format!(
+            " (reason_code={reason}, retryable={})",
+            outcome.retryable
+        ));
+    }
+    if let Some(cause) = outcome.cause {
+        message.push_str(&format!(": {cause}"));
+    }
+    message
 }
 
 pub(super) async fn drain_hermes_projections_with_admission_and_cancellation(
@@ -133,31 +145,37 @@ pub(super) async fn drain_hermes_projections_with_admission_and_cancellation(
     }
 }
 
-pub(super) async fn admit_rows_with_admission(
-    facade: &dyn HostAdmission,
-    rows: &[HermesRow],
-    scope: ObservationScopeV1,
-    generation: ObservationSourceGenerationV1,
-    file_identity: u64,
-    resume_fingerprint: u64,
-    route: impl Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
-) -> Result<TranscriptIngestStats, String> {
-    admit_rows_with_admission_and_cancellation(
-        facade,
-        rows,
-        scope,
-        generation,
-        file_identity,
-        resume_fingerprint,
-        route,
-        &ObservationCancellation::default(),
+/// Claims the row's session stream at this row, its first one the cursor does
+/// not cover. `None` when the session is quarantined at this exact row or was
+/// refused earlier in the pass.
+fn observe_row(sweep: &mut SourceSweep, state_db: &Path, row: &HermesRow) -> Option<SourceClaim> {
+    fn text(value: &Option<String>) -> &[u8] {
+        value.as_deref().unwrap_or_default().as_bytes()
+    }
+    let timestamp = row
+        .timestamp
+        .map_or([0; 8], |value| value.to_bits().to_le_bytes());
+    sweep.observe_stream(
+        state_db,
+        &row.session_id,
+        &[
+            &row.id.to_le_bytes(),
+            &row.active.to_le_bytes(),
+            &timestamp,
+            row.role.as_bytes(),
+            text(&row.content),
+            text(&row.reasoning),
+            text(&row.tool_name),
+            text(&row.tool_calls),
+        ],
     )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn admit_rows_with_admission_and_cancellation(
     facade: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
+    state_db: &Path,
     rows: &[HermesRow],
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
@@ -187,6 +205,9 @@ pub(super) async fn admit_rows_with_admission_and_cancellation(
         {
             continue;
         }
+        let Some(claim) = observe_row(sweep, state_db, row) else {
+            continue;
+        };
         let admission = prepare_observation_row_with_cancellation(
             row,
             route(row).as_ref(),
@@ -221,11 +242,51 @@ pub(super) async fn admit_rows_with_admission_and_cancellation(
                 .await?;
             }
             HermesAdmissionAction::Capture(request) => {
-                match facade
-                    .capture_observation(*request)
-                    .await
-                    .map_err(host_admission_error)?
-                {
+                let captured = match facade.capture_observation(*request).await {
+                    Ok(captured) => captured,
+                    // A deterministic content refusal re-fails identically on
+                    // every pass. Without a durable skip the source's cursor
+                    // never clears the offending row, so the whole `state.db`
+                    // is abandoned every sweep, forever, with one WARN each
+                    // time. Cover past it with a typed reason exactly as the
+                    // shared JSONL path does so the stream converges.
+                    Err(outcome) if is_deterministic_content_refusal(&outcome) => {
+                        tracing::warn!(
+                            provider = PROVIDER,
+                            row = row.id,
+                            reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                            cause = outcome.cause.as_deref().unwrap_or("unspecified"),
+                            "admission refused a Hermes row; covering past it"
+                        );
+                        advance_coverage(
+                            facade,
+                            source,
+                            range,
+                            expected_cursor,
+                            scope.clone(),
+                            generation,
+                            if outcome.reason_code == Some("observation_identity_collision") {
+                                ObservationCoverageReason::ObservationIdentityCollision
+                            } else {
+                                ObservationCoverageReason::AdmissionRefused
+                            },
+                            None,
+                            file_identity,
+                            resume_fingerprint,
+                            cancellation,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    Err(outcome) => {
+                        let message = host_admission_error(outcome.clone());
+                        match sweep.refused(claim, admission_error(PROVIDER, outcome)) {
+                            Ok(()) => continue,
+                            Err(_) => return Err(message),
+                        }
+                    }
+                };
+                match captured {
                     CaptureObservationOutcome::Persisted { outcome, .. }
                     | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
                         if matches!(*outcome, ObservationPersistOutcome::Committed(_)) {

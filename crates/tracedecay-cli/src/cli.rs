@@ -1,17 +1,17 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::PossibleValuesParser};
+use tracedecay_contracts::retained_surfaces::{MessageRelationshipScopeV1, MessageTypeFilterV1};
 
 mod automation;
 pub mod dispatch;
 mod help;
-pub(crate) mod output;
 mod package_hook;
 mod work;
 mod workflow;
 pub use automation::{
-    AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationFactsAction,
-    AutomationRunsAction, AutomationSkillsAction,
+    AutomationAction, AutomationConfigAction, AutomationFactsAction, AutomationRunsAction,
+    AutomationSkillsAction,
 };
 use help::*;
 pub use package_hook::{PackageHookAction, ScoopPackageHookAction};
@@ -20,9 +20,11 @@ pub use workflow::WorkflowInvocationArgs;
 
 const WORK_LONG_ABOUT: &str = "\
 Invokes exactly one typed, daemon-owned Work application operation from the \
-closed catalog (proposal generation and review, work creation, dependency \
-replanning, attempt start/status/cancel/resume, run pause/resume/control, and \
-projection snapshot/delta/views reads). The strict typed request is read as \
+closed catalog (proposal generation, review, and comparison; work creation and \
+prepared graph mutations; execution admission and placement; attempt \
+start/status/cancel/resume/retry and history; duplicate and leak adjudication; \
+run pause/resume/control; and current, as-of, evolution, and forensic views). \
+The strict typed request is read as \
 JSON from --request-file (`-` reads stdin); the daemon admits the selected \
 project and answers through the same catalogued application surface used by \
 agent hosts. Use it when driving or inspecting work items and attempts from \
@@ -30,8 +32,10 @@ scripts or hooks; `--json` emits the one canonical application envelope.";
 
 const WORK_AFTER_HELP: &str = "\
 Examples:
-  tracedecay work snapshot --request-file request.json      Read the work projection
-  tracedecay work delta --request-file - --json             Typed delta read from stdin
+  tracedecay work advance-job --request-file job.json --until-settled
+                                                           Run a parallel job with synthesis
+  tracedecay work views --request-file views.json --json    Read the current Work projection
+  tracedecay work prepare-graph-mutation --request-file - --json
   tracedecay work create --request-file create.json --json  Create work items
   tracedecay work start-attempt --request-file attempt.json --project /path/to/project
   tracedecay work attempt-status --request-file status.json --json
@@ -44,7 +48,8 @@ const WORKFLOW_LONG_ABOUT: &str = "\
 Invokes exactly one typed, daemon-owned Workflow application operation from \
 the closed catalog: registering, validating, activating, rejecting, or \
 retiring workflow definitions, reading a definition or its history, listing \
-and diffing definitions, and issuing or redeeming workflow handoffs. The \
+and diffing definitions, issuing or redeeming workflow handoffs, and starting, \
+pausing, resuming, cancelling, or reading workflow runs. The \
 strict typed request is read as JSON from --request-file (`-` reads stdin); \
 the daemon admits the selected project and answers through the same \
 catalogued application surface used by agent hosts. `--json` emits the one \
@@ -62,36 +67,8 @@ Examples:
 Related: tracedecay work (typed work-item and attempt operations), tracedecay
 tool (the MCP tool surface for retrieval and editing).";
 
-const SEMANTIC_LONG_ABOUT: &str = "\
-Operates semantic retrieval for the selected project through the daemon. \
-`activate` runs the full activation journey as one typed daemon operation: \
-it evaluates the named profile with the native FastEmbed evaluator (the \
-current+10x workload; typically minutes), publishes the accepted evaluation, \
-and compare-and-swaps the result into `active_profile` of the project's \
-`semantic.runtime.v1` configuration. The daemon composes the installed-model \
-material and the configuration revision itself. Requires the selected \
-semantic model to be installed (`tracedecay tool runtime` shows the model \
-lifecycle state); strict-semantic search reports `unavailable` until a \
-profile is active.";
-
-const SEMANTIC_AFTER_HELP: &str = "\
-Examples:
-  tracedecay semantic activate                         Evaluate + activate hybrid-conservative
-  tracedecay semantic activate --profile hybrid-conservative --project /path/to/project
-  tracedecay semantic activate --json                  One canonical JSON receipt line
-  tracedecay semantic activate --no-rollback           Do not record the prior profile
-
-Failure states are typed: an uninstalled model refuses fast with the
-lifecycle state that blocks activation, an evaluation failure names the
-evaluator's rejection, and a lost configuration compare-and-swap reports a
-retryable conflict. Watch progress in another terminal with
-`tracedecay tool runtime` (semantic_runtime.state).
-
-Related: tracedecay tool runtime (semantic runtime state), tracedecay tool
-configuration_get (the semantic.runtime.v1 setting).";
-
 fn agent_value_parser() -> PossibleValuesParser {
-    PossibleValuesParser::new(tracedecay::agents::available_integrations())
+    PossibleValuesParser::new(tracedecay_agent_hosts::agents::available_integrations())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -99,6 +76,9 @@ pub enum HostBundleComponentArg {
     Core,
     Agent,
     ContextMcp,
+    /// Retired name of `context-mcp`, still accepted on the hosts that
+    /// offered it.
+    #[value(hide = true)]
     OperatorMcp,
 }
 
@@ -141,69 +121,34 @@ pub enum FeedbackRollbackAction {
     },
 }
 
-#[derive(Clone, Debug, Subcommand)]
-pub enum HostBundleAction {
-    /// List every host whose component-set lifecycle journal is awaiting recovery
-    Status,
-    /// Roll an interrupted host component transaction back to its pre-transaction state
-    ///
-    /// Recovery converges automatically when a second writer left the deployed
-    /// bytes equal to the pre-transaction backup or to the transaction's own
-    /// cataloged output. Genuinely foreign bytes stay fail-closed; pass
-    /// `--quarantine` to set the journal aside (backups are preserved) and
-    /// unblock the host.
-    Recover {
-        /// Recover only this agent's host journal (default: every pending host)
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: Option<String>,
-        /// Set aside a journal that convergent recovery cannot resolve
-        #[arg(long)]
-        quarantine: bool,
-    },
-    /// Snapshot one installed component's managed artifact files
-    ArtifactBackup {
-        /// Agent whose selected component owns the managed artifacts
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: String,
-    },
-    /// Restore managed artifact files without changing host registration
-    ArtifactRestore {
-        /// Agent whose selected component owns the managed artifacts
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: String,
-        /// Lowercase 32-character hexadecimal artifact-backup receipt id
-        #[arg(long)]
-        backup_id: String,
-    },
-}
-
 /// Code intelligence for Rust codebases.
 #[derive(Parser)]
 #[command(
     name = "tracedecay",
-    about = "Code intelligence for 34 languages — semantic graph queries instead of file reads",
+    about = "Code intelligence for 34 languages, semantic graph queries instead of file reads",
     after_help = TOP_LEVEL_AFTER_HELP,
     version = crate::product_runtime::PRODUCT_BUILD_VERSION
 )]
 pub struct Cli {
-    /// Select one compiled first-party host component; without it, lifecycle commands apply
-    /// the host's canonical component set atomically
+    /// Select one compiled first-party host component; without it, lifecycle commands run
+    /// the same receipt-backed lifecycle over the host's whole canonical component set
     #[arg(long, global = true, value_enum)]
     pub component: Option<HostBundleComponentArg>,
-    /// Verify and print the exact signed lifecycle plan without mutating.
-    /// Valid only alongside the agent-lifecycle commands; dispatch enforces the
-    /// `--component` pairing so this global flag never demands `--component`
-    /// from unrelated subcommands (e.g. `branch gc`, `storage report`).
+    /// Preview without mutating: the exact signed lifecycle plan for the
+    /// agent-lifecycle commands, the rows `projects forget` would remove, or
+    /// the counts `sessions git-sync` would write. Dispatch enforces that
+    /// scope so this global flag never leaks onto unrelated subcommands
+    /// (e.g. `branch gc`, `storage report`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
-    /// Confirm a first-party component mutation, or a `wipe`. Scope is enforced
+    /// Confirm a host lifecycle mutation, or a `wipe`. Scope is enforced
     /// in dispatch, not by a global clap `requires`, so it does not leak onto
     /// other commands.
     #[arg(long, global = true)]
     pub yes: bool,
-    /// Additionally confirm taking ownership of an existing file that no
-    /// TraceDecay receipt records. Required alongside `--yes` for
-    /// `reinstall --component`; the previous bytes are always backed up first,
+    /// Confirm taking ownership of an existing file that no
+    /// TraceDecay receipt records. Required alongside `--yes` for install,
+    /// update-plugin, or reinstall; the previous bytes are replaced and not kept,
     /// and a file another owner claims is refused regardless of this flag.
     #[arg(long, global = true)]
     pub adopt: bool,
@@ -214,16 +159,16 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new TraceDecay project (full index)
+    /// Enroll a project and request background indexing
     #[command(long_about = INIT_LONG_ABOUT, after_help = INIT_AFTER_HELP)]
     Init {
         /// Project path (default: current directory)
         path: Option<String>,
         /// Project path, as an explicit flag. Equivalent to the positional
         /// PATH argument above; accepted for consistency with `-p`/`--path`
-        /// on other project-scoped commands (e.g. `dashboard`, `gitignore`,
-        /// `bench`). Conflicts with the positional PATH — pass one or the
-        /// other, not both.
+        /// on other project-scoped commands (e.g. `dashboard`).
+        /// Conflicts with the positional PATH, pass one or the other, not
+        /// both.
         #[arg(
             short = 'p',
             long = "path",
@@ -231,12 +176,6 @@ pub enum Commands {
             conflicts_with = "path"
         )]
         path_flag: Option<String>,
-        /// Folders to skip during indexing (can be repeated)
-        #[arg(long = "skip-folder", num_args = 1..)]
-        skip_folders: Vec<String>,
-        /// Folders to include even when ignored by default skips or .gitignore (can be repeated)
-        #[arg(long = "include-folder", num_args = 1..)]
-        include_folders: Vec<String>,
         /// Adopt this registered project id onto the new path when its moved
         /// non-git store no longer resolves at its recorded root. Adoption
         /// never happens without this flag or `--yes`; a root that already
@@ -247,25 +186,18 @@ pub enum Commands {
         /// could be adopted at this root.
         #[arg(long)]
         fresh: bool,
+        /// Hold until the first code generation is ready. Without this flag,
+        /// init returns a typed not-ready receipt once reconciliation is
+        /// requested and the index continues in the background.
+        #[arg(long)]
+        wait: bool,
     },
     /// Incremental sync (project must already be initialized with `tracedecay init`)
     #[command(long_about = SYNC_LONG_ABOUT, after_help = SYNC_AFTER_HELP)]
     Sync {
         /// Project path (default: current directory)
         path: Option<String>,
-        /// Compatibility flag that queues the same authoritative reconciliation
-        #[arg(short, long)]
-        force: bool,
-        /// Folders to skip during indexing (can be repeated)
-        #[arg(long = "skip-folder", num_args = 1..)]
-        skip_folders: Vec<String>,
-        /// Folders to include even when ignored by default skips or .gitignore (can be repeated)
-        #[arg(long = "include-folder", num_args = 1..)]
-        include_folders: Vec<String>,
-        /// List added, modified, and removed files after sync
-        #[arg(long)]
-        doctor: bool,
-        /// Print per-phase diagnostics (file counts, timings) to help debug slow syncs
+        /// Print the daemon's sync admission receipt as JSON
         #[arg(short, long)]
         verbose: bool,
     },
@@ -287,7 +219,7 @@ pub enum Commands {
         #[arg(short, long)]
         short: bool,
         /// Capture a runtime telemetry snapshot (PID, RSS, CPU%, DB / WAL
-        /// sizes) — useful when reporting unexpected resource use (#80).
+        /// sizes), useful when reporting unexpected resource use (#80).
         #[arg(long)]
         runtime: bool,
     },
@@ -328,12 +260,6 @@ pub enum Commands {
     Workflow {
         #[command(flatten)]
         invocation: WorkflowInvocationArgs,
-    },
-    /// Activate semantic retrieval: evaluate a profile and set it active.
-    #[command(long_about = SEMANTIC_LONG_ABOUT, after_help = SEMANTIC_AFTER_HELP)]
-    Semantic {
-        #[command(subcommand)]
-        action: SemanticAction,
     },
     /// Read bounded Git intelligence through the catalogued application surface.
     #[command(long_about = GIT_LONG_ABOUT, after_help = GIT_AFTER_HELP)]
@@ -376,6 +302,23 @@ pub enum Commands {
         /// (only used with --agent codex).
         #[arg(long)]
         automation: bool,
+        /// Install the global git post-commit hook that runs `tracedecay sync`.
+        /// Explicit because setting `core.hooksPath` can redirect every
+        /// repository away from `.git/hooks`. Never prompts.
+        #[arg(long)]
+        git_hook: bool,
+        /// List only this catalog profile's tools in the agent's MCP server
+        /// (`default`, `compact`, `administrative`, `host-limited`). Saved for the
+        /// agent; later installs, reinstalls, and updates keep it until
+        /// `--catalog-profile default` resets it.
+        #[arg(
+            long,
+            value_name = "NAME",
+            requires = "agent",
+            conflicts_with = "local",
+            value_parser = crate::serve_cmd::parse_catalog_profile
+        )]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Refresh settings for all already-installed agents
     #[command(long_about = REINSTALL_LONG_ABOUT, after_help = REINSTALL_AFTER_HELP)]
@@ -387,16 +330,12 @@ pub enum Commands {
         #[arg(long, value_parser = agent_value_parser(), requires = "local")]
         agent: Option<String>,
     },
-    /// Refresh generated plugin code/assets for detected installs without
-    /// touching agent config files.
+    /// Update every installed agent's component set to this binary
     ///
-    /// Rewrites only tracedecay-generated artifacts — the Hermes plugin
-    /// (.py files, schemas.json, dashboard page) for the user integration,
-    /// the Cursor plugin bundle, the Codex plugin bundle/cache, and the Kiro
-    /// managed agent — re-baking the current binary path and version. Config
-    /// files (Hermes config.yaml, mcp.json, settings,
-    /// prompt rules) are left byte-for-byte intact; use `tracedecay reinstall`
-    /// to refresh those.
+    /// Runs the receipt-backed update lifecycle over each tracked agent's
+    /// canonical component set (or the one `--component` names), re-baking
+    /// the current binary path and version into its artifacts and host
+    /// registration.
     #[command(name = "update-plugin", after_help = UPDATE_PLUGIN_AFTER_HELP)]
     UpdatePlugin {
         /// Update one project-local integration in the current directory
@@ -429,16 +368,6 @@ pub enum Commands {
     FeedbackRollback {
         #[command(subcommand)]
         action: FeedbackRollbackAction,
-    },
-    /// Inspect or recover an interrupted first-party host component transaction
-    #[command(
-        name = "host-bundle",
-        long_about = HOST_BUNDLE_LONG_ABOUT,
-        after_help = HOST_BUNDLE_AFTER_HELP
-    )]
-    HostBundle {
-        #[command(subcommand)]
-        action: HostBundleAction,
     },
     /// PreToolUse hook handler (called by Claude Code, not by users directly)
     #[command(name = "hook-pre-tool-use", hide = true)]
@@ -530,6 +459,12 @@ pub enum Commands {
     /// OpenCode direct tool.execute.after Hook V2 handler.
     #[command(name = "hook-opencode-tool-after", hide = true)]
     HookOpenCodeToolAfter,
+    /// Pi extension lifecycle (`session_start`, `agent_end`) Hook V2 handler.
+    #[command(name = "hook-pi-event", hide = true)]
+    HookPiEvent,
+    /// Factory Droid lifecycle (`SessionStart`, `Stop`) Hook V2 handler.
+    #[command(name = "hook-droid-event", hide = true)]
+    HookDroidEvent,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
     #[command(long_about = DASHBOARD_LONG_ABOUT, after_help = DASHBOARD_AFTER_HELP)]
     Dashboard {
@@ -557,6 +492,18 @@ pub enum Commands {
         /// Useful for profiling index work vs. JSON-RPC / stdio overhead.
         #[arg(long)]
         timings: bool,
+        /// List every tool with its full schema instead of stubbing the tools
+        /// outside the always-loaded set. For hosts that defer tool schemas
+        /// themselves, such as Claude Code.
+        // The Claude plugin deployed by 1.0.0-beta.83 passes
+        // `--claude-code-tool-search`, which served the same full list.
+        #[arg(long, alias = "claude-code-tool-search")]
+        full_tool_list: bool,
+        /// List only the tools in this catalog profile (`default`, `compact`,
+        /// `administrative`, `host-limited`). Unlisted tools stay callable by
+        /// name and join the list once called.
+        #[arg(long, value_name = "NAME", value_parser = crate::serve_cmd::parse_catalog_profile)]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Manage the long-running TraceDecay daemon used by MCP clients
     #[command(long_about = DAEMON_LONG_ABOUT, after_help = DAEMON_AFTER_HELP)]
@@ -569,7 +516,7 @@ pub enum Commands {
     /// Downloads and installs the newest release. When a new binary was
     /// installed, also refreshes generated plugins, configured agent
     /// integrations, and the daemon service. When already up to date it stops
-    /// there — use `tracedecay update` to refresh regardless.
+    /// there, use `tracedecay update` to refresh regardless.
     #[command(after_help = UPGRADE_AFTER_HELP)]
     Upgrade {
         /// Skip refreshing already-configured agent integrations
@@ -580,7 +527,7 @@ pub enum Commands {
     ///
     /// Upgrades the binary first when a newer release exists, then always
     /// refreshes generated plugins, configured agent integrations, and the
-    /// daemon service — even when the binary was already current.
+    /// daemon service, even when the binary was already current.
     #[command(after_help = UPDATE_AFTER_HELP)]
     Update {
         /// Skip refreshing already-configured agent integrations
@@ -645,22 +592,14 @@ pub enum Commands {
         after_help = ENABLE_UPLOAD_COUNTER_AFTER_HELP
     )]
     EnableUploadCounter,
-    /// Show or change whether .gitignore rules are respected during indexing
-    #[command(
-        name = "gitignore",
-        long_about = GITIGNORE_LONG_ABOUT,
-        after_help = GITIGNORE_AFTER_HELP
-    )]
-    Gitignore {
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-        /// "on" to enable, "off" to disable, omit to show current setting
-        action: Option<String>,
-    },
     /// Check tracedecay installation, configuration, and agent integration
     #[command(long_about = DOCTOR_LONG_ABOUT, after_help = DOCTOR_AFTER_HELP)]
-    Doctor,
+    Doctor {
+        /// Also print one JSON document on stdout: every check line plus the
+        /// daemon's canonical findings in the `/api/doctor/findings` shape
+        #[arg(long)]
+        json: bool,
+    },
     /// Token cost summary from Claude Code sessions
     #[command(long_about = COST_LONG_ABOUT, after_help = COST_AFTER_HELP)]
     Cost {
@@ -670,28 +609,9 @@ pub enum Commands {
         /// Group by model
         #[arg(long)]
         by_model: bool,
-        /// Group by task category
-        #[arg(long)]
-        by_task: bool,
         /// Export format: csv or json
         #[arg(long)]
         export: Option<String>,
-    },
-    /// Run a reproducible retrieval benchmark against the current project.
-    #[command(long_about = BENCH_LONG_ABOUT, after_help = BENCH_AFTER_HELP)]
-    Bench {
-        /// Path to a TOML query file (defaults to the shipped default set).
-        #[arg(long)]
-        queries: Option<String>,
-        /// Output as JSON instead of the colored console table.
-        #[arg(long)]
-        json: bool,
-        /// Project path (default: current directory).
-        #[arg(short, long)]
-        path: Option<String>,
-        /// Max nodes per query (default: 20).
-        #[arg(long, default_value = "20")]
-        max_nodes: usize,
     },
     /// Show token savings (and dollar estimates) recorded in the global ledger.
     #[command(long_about = GAIN_LONG_ABOUT, after_help = GAIN_AFTER_HELP)]
@@ -748,7 +668,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: AutomationAction,
     },
-    /// Inspect and preserve exact-final profile storage
+    /// Inspect exact-final profile storage
     #[command(long_about = STORAGE_LONG_ABOUT, after_help = STORAGE_AFTER_HELP)]
     Storage {
         #[command(subcommand)]
@@ -758,8 +678,11 @@ pub enum Commands {
     #[command(long_about = WIPE_LONG_ABOUT, after_help = WIPE_AFTER_HELP)]
     Wipe {
         /// Wipe ALL profile database state while preserving identity and config
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "stale")]
         all: bool,
+        /// Delete only the stores the running daemon reports as requiring reset
+        #[arg(long)]
+        stale: bool,
     },
     /// List tracedecay projects (current folder, parents, and children)
     #[command(long_about = LIST_LONG_ABOUT, after_help = LIST_AFTER_HELP)]
@@ -839,19 +762,6 @@ pub struct RemoteAuthorityArgs {
     pub json: bool,
 }
 
-impl From<RemoteAuthorityArgs> for crate::remote_command::RemoteProtocolArgs {
-    fn from(args: RemoteAuthorityArgs) -> Self {
-        Self {
-            endpoint: args.endpoint,
-            credential_file: args.credential_file,
-            trust_root_file: args.trust_root_file,
-            timeout_secs: args.timeout_secs,
-            request_file: args.request_file,
-            json: args.json,
-        }
-    }
-}
-
 #[derive(Subcommand)]
 pub enum RemoteAction {
     /// Read the running daemon's mounted Remote Brain operational state
@@ -867,6 +777,21 @@ pub enum RemoteAction {
         /// File containing the new enrollment credential bytes
         #[arg(long, value_name = "FILE")]
         enrollment_credential_file: PathBuf,
+    },
+    /// Make this profile the enrolled node of another profile's Brain. The
+    /// running daemon discovers the authority with the enrollment credential
+    /// (`--credential-file`) and adopts the enrollment the authority holds.
+    /// `--request-file` holds a `CurrentAuthorityRequestV1` protocol request.
+    Join {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Send this joined node's pending offline-capture frames, in sequence
+    /// order, to the owning authority. Takes the same arguments as `join`;
+    /// each frame is released only after the authority's receipt.
+    Drain {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
     },
     /// Capture one observation into a node's offline spool while the
     /// authority is unreachable
@@ -884,18 +809,16 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-    /// Replay pending offline-capture frames through the current authority
+    /// Replay one transferred frame, named by event id, through the current
+    /// authority
     Replay {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-    /// Create a verified Remote Brain backup
-    Backup {
-        #[command(flatten)]
-        authority: RemoteAuthorityArgs,
-    },
-    /// Restore a verified backup into isolated staging
-    Restore {
+    /// Replay every frame the authority holds for the caller's enrollment,
+    /// lowest sequence first, stopping at the first refusal. A resend reports
+    /// the same receipts and commits nothing.
+    ReplayPending {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
@@ -904,59 +827,14 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-}
-
-impl From<RemoteAction> for crate::remote_command::RemoteCommand {
-    fn from(action: RemoteAction) -> Self {
-        match action {
-            RemoteAction::Status { json } => Self::Status { json },
-            RemoteAction::Enroll {
-                authority,
-                enrollment_credential_file,
-            } => Self::Enroll {
-                args: authority.into(),
-                enrollment_credential_file,
-            },
-            RemoteAction::Capture { authority } => Self::Capture {
-                args: authority.into(),
-            },
-            RemoteAction::Query { authority } => Self::Query {
-                args: authority.into(),
-            },
-            RemoteAction::TransferFrame { authority } => Self::TransferFrame {
-                args: authority.into(),
-            },
-            RemoteAction::Replay { authority } => Self::Replay {
-                args: authority.into(),
-            },
-            RemoteAction::Backup { authority } => Self::Backup {
-                args: authority.into(),
-            },
-            RemoteAction::Restore { authority } => Self::Restore {
-                args: authority.into(),
-            },
-            RemoteAction::Failover { authority } => Self::Failover {
-                args: authority.into(),
-            },
-        }
-    }
-}
-
-#[derive(Subcommand)]
-pub enum SemanticAction {
-    /// Evaluate a semantic profile natively, publish it, and set it active.
-    Activate {
-        /// Evaluated profile to activate (the standard native profile is
-        /// `hybrid-conservative`; the daemon rejects unknown profiles).
-        #[arg(long, default_value = "hybrid-conservative")]
-        profile: String,
-        /// Do not record the previously active profile as the rollback target.
-        #[arg(long)]
-        no_rollback: bool,
-        /// Project root (defaults to discovery from the current directory).
-        #[arg(long)]
-        project: Option<String>,
-        /// Emit one canonical JSON receipt line instead of staged text.
+    /// Revoke every enrollment and unredeemed grant of a node this daemon
+    /// provisioned, such as a lost machine; its enrollment, capture, transfer
+    /// and replay are refused afterward
+    Revoke {
+        /// Node identity the node was provisioned with
+        #[arg(long, value_name = "NODE")]
+        node_id: String,
+        /// Emit one canonical JSON object and newline
         #[arg(long)]
         json: bool,
     },
@@ -964,7 +842,7 @@ pub enum SemanticAction {
 
 #[derive(Subcommand)]
 pub enum LspAction {
-    /// List supported language servers, availability, and install hints
+    /// List the project's analyzers as the daemon resolved them, with install hints
     Servers {
         /// Output as JSON
         #[arg(long)]
@@ -983,7 +861,7 @@ pub enum LspAction {
 
 #[derive(Subcommand)]
 pub enum DaemonAction {
-    /// Run the foreground daemon process
+    /// Run the foreground daemon process (the no-systemd path)
     Run {
         /// Unix socket path for MCP clients
         #[arg(long)]
@@ -1033,7 +911,7 @@ pub enum DaemonAction {
     Stop,
     /// Restart the installed daemon service (e.g. after a version mismatch)
     Restart,
-    /// Print daemon service/socket status
+    /// Print daemon readiness; exit 0 only when this build is serving
     Status,
 }
 
@@ -1048,9 +926,6 @@ pub enum AnalyticsAction {
         /// Skip the hook-JSONL import pass before summarizing
         #[arg(long)]
         no_sync: bool,
-        /// Keep compatibility with JSON-capable diagnostics commands.
-        #[arg(long)]
-        json: bool,
     },
     /// Import hook_analytics.jsonl rows into the durable analytics_events table
     Sync,
@@ -1153,10 +1028,18 @@ pub(crate) struct SessionsSearchArgs {
     #[arg(long)]
     pub(crate) provider: Option<String>,
     /// Relationship scope: all, parents_only, or subagents_only
-    #[arg(long, default_value = "all", value_parser = ["all", "parents_only", "subagents_only"])]
+    #[arg(
+        long,
+        default_value = "all",
+        value_parser = PossibleValuesParser::new(MessageRelationshipScopeV1::WIRE)
+    )]
     pub(crate) scope: String,
     /// Semantic message type: all, direct_user, or tool_result
-    #[arg(long, default_value = "all", value_parser = ["all", "direct_user", "tool_result"])]
+    #[arg(
+        long,
+        default_value = "all",
+        value_parser = PossibleValuesParser::new(MessageTypeFilterV1::WIRE)
+    )]
     pub(crate) message_type: String,
     /// Only child sessions belonging to this parent session
     #[arg(long)]
@@ -1165,10 +1048,10 @@ pub(crate) struct SessionsSearchArgs {
     #[arg(long, default_value_t = 10)]
     pub(crate) limit: usize,
     /// Inclusive minimum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
-    #[arg(long, alias = "time-from", alias = "start-time")]
+    #[arg(long)]
     pub(crate) since: Option<String>,
     /// Inclusive maximum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
-    #[arg(long, alias = "time-to", alias = "end-time")]
+    #[arg(long)]
     pub(crate) until: Option<String>,
     /// Registered project id whose session store should be searched
     #[arg(long)]
@@ -1185,22 +1068,19 @@ pub(crate) struct SessionsSearchArgs {
     /// Only sessions that produced this commit (full or >=6-char prefix)
     #[arg(long)]
     pub(crate) commit: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 #[derive(Subcommand)]
 pub enum SessionsRefreshAction {
-    /// Start or join the durable refresh and return an opaque handle
-    Start(SessionRefreshBeginArgs),
-    /// Report read-only progress or a terminal receipt using a refresh handle
-    Status(SessionRefreshOperationArgs),
-    /// Join or start the durable refresh and return an opaque handle
-    Join(SessionRefreshBeginArgs),
-    /// Resume, join, or start the durable refresh and return an opaque handle
-    Resume(SessionRefreshBeginArgs),
-    /// Durably cancel using a handle from start, join, resume, or begin
-    Cancel(SessionRefreshOperationArgs),
-    /// Compatibility spelling for start; returns an opaque handle
+    /// Begin or join the durable refresh and return an opaque handle
     Begin(SessionRefreshBeginArgs),
+    /// Report read-only progress or a terminal receipt using the handle from begin
+    Status(SessionRefreshOperationArgs),
+    /// Durably cancel using the handle from begin; success is receipt-backed
+    Cancel(SessionRefreshOperationArgs),
 }
 
 #[derive(Args)]
@@ -1208,24 +1088,24 @@ pub(crate) struct SessionRefreshSelectors {
     /// Registered project id that owns the refresh operation
     #[arg(
         long,
-        conflicts_with_all = ["project_path", "profile_id"],
-        required_unless_present_any = ["project_path", "profile_id"]
+        conflicts_with_all = ["project_path", "profile"],
+        required_unless_present_any = ["project_path", "profile"]
     )]
     pub(crate) project_id: Option<String>,
     /// Registered project root path or alias that owns the refresh operation
     #[arg(
         long,
-        conflicts_with_all = ["project_id", "profile_id"],
-        required_unless_present_any = ["project_id", "profile_id"]
+        conflicts_with_all = ["project_id", "profile"],
+        required_unless_present_any = ["project_id", "profile"]
     )]
     pub(crate) project_path: Option<String>,
-    /// Typed profile id that owns a profile-scoped refresh operation
+    /// Use the authenticated profile's user-scope session store
     #[arg(
         long,
         conflicts_with_all = ["project_id", "project_path"],
         required_unless_present_any = ["project_id", "project_path"]
     )]
-    pub(crate) profile_id: Option<String>,
+    pub(crate) profile: bool,
     /// Exact session id to refresh
     #[arg(long)]
     pub(crate) session_id: String,
@@ -1253,8 +1133,8 @@ pub(crate) struct SessionRefreshBeginArgs {
 pub(crate) struct SessionRefreshOperationArgs {
     #[command(flatten)]
     pub(crate) selectors: SessionRefreshSelectors,
-    /// Opaque daemon-local handle returned by start, join, resume, or begin; --operation-id is deprecated
-    #[arg(long, visible_alias = "operation-id")]
+    /// Opaque daemon-local handle returned by begin
+    #[arg(long)]
     pub(crate) handle: String,
     /// Output the typed refresh outcome as JSON
     #[arg(long)]
@@ -1271,6 +1151,21 @@ pub enum SessionsAction {
         /// Registered project root path or alias whose session store should receive ingested messages
         #[arg(long, conflicts_with = "project_id")]
         project_path: Option<String>,
+    },
+    /// Check one previously scheduled session import or Git sync
+    SyncStatus {
+        /// Idempotency key returned when the sync was scheduled
+        #[arg(long)]
+        idempotency_key: String,
+        /// Registered project id whose session sync should be inspected
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Registered project root path or alias whose session sync should be inspected
+        #[arg(long, conflicts_with = "project_id")]
+        project_path: Option<String>,
+        /// Output the daemon's sync record as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Search previously ingested session messages
     Search(Box<SessionsSearchArgs>),
@@ -1294,9 +1189,6 @@ pub enum SessionsAction {
         /// Maximum number of sessions to scan
         #[arg(long, default_value_t = 500)]
         limit_sessions: usize,
-        /// Derive and report counts without writing to the session store
-        #[arg(long)]
-        dry_run: bool,
     },
     /// List unfinished workflow/task evidence from ingested session messages
     Unfinished {
@@ -1354,57 +1246,23 @@ pub enum ProfileStorageAction {
         #[arg(long)]
         json: bool,
     },
-    /// Create a complete checksummed profile backup under a quiesced exclusive lease.
-    #[command(name = "backup")]
-    BackupProfile {
-        /// Backup parent outside the TraceDecay profile.
-        #[arg(long)]
-        to: String,
-        /// Stable backup directory name.
-        #[arg(long = "backup-id")]
-        backup_id: String,
-    },
-    /// Restore and verify a complete backup in an isolated destination.
-    #[command(name = "rehearse-backup")]
-    RehearseProfileBackup {
-        /// Complete backup directory containing `backup-manifest.json`.
-        #[arg(long)]
-        backup: String,
-        /// New isolated restore directory.
-        #[arg(long)]
-        restore: String,
-    },
-    /// Reset exactly one refused authority so the next open recreates it at
-    /// the canonical schema. Applies only to a store whose open failed with
-    /// the typed ResetRequired state naming that authority; healthy
-    /// authorities are refused and nothing else in the store is touched.
-    /// Requires the global `--yes` confirmation and an exclusive maintenance
-    /// lease (the daemon cannot open a refused store, so recovery runs
-    /// offline).
-    #[command(name = "reset-authority")]
-    ResetAuthority {
-        /// Authority named by the ResetRequired state ("observations").
-        authority: String,
-        /// Sessions store carrying the refused authority (defaults to the
-        /// profile-scope user sessions store).
-        #[arg(long = "db")]
-        db: Option<String>,
-    },
-    /// Reset a project graph store whose open failed with the typed
-    /// ResetRequired state (an incompatible schema this binary cannot upgrade
-    /// in place). Only the refused graph database is deleted; the store
-    /// directory, session archive, and transcripts are preserved, and the
-    /// next open recreates the graph at the canonical schema and re-ingests
-    /// from those transcripts. A store already at the canonical schema is
-    /// refused untouched. Requires the global `--yes` confirmation and an
-    /// exclusive maintenance lease (the daemon cannot open a refused store,
-    /// so recovery runs offline).
+    /// Reset a project store refused with ResetRequired. An incompatible graph
+    /// database is deleted while its canonical store directory, session archive,
+    /// and transcripts are preserved; the next open rebuilds from those transcripts.
+    /// With --project-root, a refused retired checkout-local .tracedecay directory
+    /// is deleted in full, including any data inside it. A canonical graph already
+    /// at the current schema is preserved. Requires --yes and an exclusive
+    /// maintenance lease; stop the daemon before resetting and restart it afterwards.
     #[command(name = "reset-project-store")]
     ResetProjectStore {
         /// Project root whose refused store should be reset; identity
         /// resolves through the same durable enrollment and repository
         /// markers the daemon consults.
-        #[arg(long = "project-root", conflicts_with = "project_id")]
+        #[arg(
+            long = "project-root",
+            conflicts_with = "project_id",
+            required_unless_present = "project_id"
+        )]
         project_root: Option<String>,
         /// Exact registered project id (proj_...) whose refused store should
         /// be reset, for a root that is no longer reachable.
@@ -1415,13 +1273,16 @@ pub enum ProfileStorageAction {
 
 #[derive(Subcommand)]
 pub enum BranchAction {
-    /// List tracked branches and their DB sizes
+    /// List tracked branches and their readiness
     List {
         /// Project path (default: current directory)
         #[arg(short, long)]
         path: Option<String>,
+        /// Output the daemon's branch diagnostics as JSON
+        #[arg(long)]
+        json: bool,
     },
-    /// Track a new branch (copies nearest ancestor DB + incremental sync)
+    /// Track a new branch as a scope of the project graph
     Add {
         /// Branch name to track (default: current branch)
         name: Option<String>,
@@ -1429,7 +1290,7 @@ pub enum BranchAction {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Remove a tracked branch and delete its DB
+    /// Stop tracking a branch and drop its graph scope
     Remove {
         /// Branch name to remove
         name: String,
@@ -1443,7 +1304,7 @@ pub enum BranchAction {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Remove DBs for branches that no longer exist in git
+    /// Stop tracking branches that no longer exist in git
     Gc {
         /// Project path (default: current directory)
         #[arg(short, long)]

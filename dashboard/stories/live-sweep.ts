@@ -9,7 +9,7 @@
  *
  * Point it at a dev server proxying a daemon, or at the daemon itself:
  *   TRACEDECAY_DASHBOARD_API=http://127.0.0.1:8397 npx rsbuild dev --port 5199
- *   SWEEP_BASE_URL=http://127.0.0.1:5199 npm run live:sweep
+ *   SWEEP_BASE_URL=http://127.0.0.1:5199 pnpm run live:sweep
  */
 import { chromium } from '@playwright/test';
 

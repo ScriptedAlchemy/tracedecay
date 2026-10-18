@@ -5,17 +5,24 @@ use tree_sitter::Node as TsNode;
 use super::{CppExtractor, ExtractionState};
 use crate::{
     common::{
-        clean_c_doc_comment, docstring_from_preceding_comments, extract_call_expression_sites,
+        clean_c_comment, docstring_from_preceding_comments, extract_call_expression_sites,
+        local_node_id,
     },
     traversal::{find_descendant_by_kind, find_direct_child_by_kind},
     types::{
-        Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
-        generate_node_id,
+        ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+        Visibility,
     },
 };
 
 impl CppExtractor {
-    pub(super) fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Extract a preprocessor #define (`PreprocessorDef`) or a single enumerator
+    /// (`EnumVariant`), named by its `identifier` child.
+    pub(super) fn visit_identifier_leaf(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        kind: NodeKind,
+    ) {
         let name = find_direct_child_by_kind(node, "identifier").map_or_else(
             || "<anonymous>".to_string(),
             |child| state.node_str(child).to_string(),
@@ -26,15 +33,10 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
-            &state.file_path,
-            &NodeKind::PreprocessorDef,
-            &name,
-            start_line,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         state.nodes.push(Node {
             id: id.clone(),
-            kind: NodeKind::PreprocessorDef,
+            kind,
             name,
             qualified_name,
             file_path: state.file_path.clone(),
@@ -54,6 +56,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         });
@@ -87,7 +90,13 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &NodeKind::Include, &path, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Include,
+            &path,
+            node,
+        );
         state.nodes.push(Node {
             id: id.clone(),
             kind: NodeKind::Include,
@@ -110,6 +119,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         });
@@ -130,60 +140,13 @@ impl CppExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "enumerator" {
-                        Self::extract_single_enumerator(state, child);
+                        Self::visit_identifier_leaf(state, child, NodeKind::EnumVariant);
                     }
                     if !cursor.goto_next_sibling() {
                         break;
                     }
                 }
             }
-        }
-    }
-
-    fn extract_single_enumerator(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
-            || "<anonymous>".to_string(),
-            |child| state.node_str(child).to_string(),
-        );
-        let text = state.node_str(node);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
-        state.nodes.push(Node {
-            id: id.clone(),
-            kind: NodeKind::EnumVariant,
-            name,
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(text.trim().to_string()),
-            docstring: None,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        });
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
         }
     }
 
@@ -205,6 +168,8 @@ impl CppExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -221,7 +186,7 @@ impl CppExtractor {
         fn_node_id: &str,
     ) {
         extract_call_expression_sites(
-            &state.source,
+            state.source,
             &state.file_path,
             &mut state.unresolved_refs,
             node,
@@ -230,7 +195,7 @@ impl CppExtractor {
     }
 
     pub(super) fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, clean_c_doc_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     pub(super) fn has_storage_class(
@@ -315,11 +280,12 @@ impl CppExtractor {
                     let start_column = child.start_position().column as u32;
                     let end_column = child.end_position().column as u32;
                     let qualified_name = format!("{}::@{}", state.qualified_prefix(), name);
-                    let id = generate_node_id(
+                    let id = local_node_id(
                         &state.file_path,
+                        state.source,
                         &NodeKind::AnnotationUsage,
                         &name,
-                        start_line,
+                        child,
                     );
                     state.nodes.push(Node {
                         id: id.clone(),
@@ -343,6 +309,7 @@ impl CppExtractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     });
@@ -353,6 +320,8 @@ impl CppExtractor {
                         line: start_line,
                         column: start_column,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                        argument_count: None,
                     });
                     state.edges.push(Edge {
                         source: id,
@@ -420,7 +389,7 @@ fn tail_has_pure_virtual_token(
 
 /// True when `tail` contains a C++ pure-specifier `= 0`.
 ///
-/// The `0` must be a lone token — `= 00`, `= 0x`, and `= 0UL` are not
+/// The `0` must be a lone token. `= 00`, `= 0x`, and `= 0UL` are not
 /// pure-specifiers. `= 0 override` / `= 0;` remain valid.
 fn is_pure_specifier(tail: &[u8]) -> bool {
     let mut index = 0;

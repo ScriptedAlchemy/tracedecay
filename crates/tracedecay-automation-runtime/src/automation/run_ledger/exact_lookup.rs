@@ -5,17 +5,18 @@ use std::path::Path;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
+use super::lifecycle_index::{RunLifecycle, fold_selected_row, with_run_ledger_index};
 use super::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path,
     validate_run_id_component,
 };
 use crate::automation::backend::AgentTaskKind;
-use crate::automation::backend::task_key as canonical_task_key;
 use crate::automation::config_error;
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 const JSON_SCAN_BUFFER_BYTES: usize = 64 * 1024;
 const JSON_MAX_DEPTH: usize = 128;
@@ -61,6 +62,7 @@ const RECORD_KEYS: &[&str] = &[
     "rejected_count",
     "skipped_count",
     "error",
+    "session_evidence_budget_stage",
     "error_classification",
     "error_retryable",
     "backend_attempt_count",
@@ -96,10 +98,11 @@ pub(super) struct RunLedgerRowProjection {
     pub(super) trigger: AutomationTrigger,
     pub(super) task: AgentTaskKind,
     pub(super) task_key: Option<String>,
-    /// True when the row's `error` field equals the session-evidence
-    /// budget-exhausted label. The projection compares while streaming
-    /// instead of capturing the field: failed runs carry arbitrarily long
-    /// backend error messages that must not be bounded or allocated here.
+    /// True when the row's `error` field is exactly the session-evidence
+    /// budget-exhausted token. The projection compares while
+    /// streaming instead of capturing the field: failed runs carry
+    /// arbitrarily long backend error messages that must not be bounded or
+    /// allocated here.
     pub(super) session_evidence_budget_exhausted_error: bool,
     pub(super) started_at: String,
     pub(super) completed_at: String,
@@ -109,6 +112,51 @@ pub(super) struct RunLedgerRowProjection {
 
 pub(super) struct LogicalRunLifecycle {
     pub(super) newest: RunLedgerRowProjection,
+}
+
+/// Test-only receipts for how much ledger work a read performed. Thread-local
+/// so parallel tests observe only their own reads; see the summary memo's
+/// `RUN_LEDGER_SUMMARY_MEMO_HITS` for the same pattern.
+#[cfg(test)]
+pub(in crate::automation::run_ledger) mod scan_receipt {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ROWS_DECODED: Cell<u64> = const { Cell::new(0) };
+        static SYNCS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::automation::run_ledger) struct ScanReceipt {
+        /// Ledger rows projected or fully deserialized.
+        pub(in crate::automation::run_ledger) rows_decoded: u64,
+        /// Ledger file plus parent-directory syncs.
+        pub(in crate::automation::run_ledger) syncs: u64,
+    }
+
+    impl ScanReceipt {
+        pub(in crate::automation::run_ledger) fn since(self, earlier: Self) -> Self {
+            Self {
+                rows_decoded: self.rows_decoded - earlier.rows_decoded,
+                syncs: self.syncs - earlier.syncs,
+            }
+        }
+    }
+
+    pub(in crate::automation::run_ledger) fn record_row_decoded() {
+        ROWS_DECODED.with(|rows| rows.set(rows.get().saturating_add(1)));
+    }
+
+    pub(in crate::automation::run_ledger) fn record_sync() {
+        SYNCS.with(|syncs| syncs.set(syncs.get().saturating_add(1)));
+    }
+
+    pub(in crate::automation::run_ledger) fn snapshot() -> ScanReceipt {
+        ScanReceipt {
+            rows_decoded: ROWS_DECODED.with(Cell::get),
+            syncs: SYNCS.with(Cell::get),
+        }
+    }
 }
 
 pub(super) fn canonical_completion_key(row: &RunLedgerRowProjection) -> Result<(i64, i64, &str)> {
@@ -134,122 +182,98 @@ pub(super) fn validate_ledger_row_semantics(row: &RunLedgerRowProjection) -> Res
     .map(|_| ())
 }
 
-struct LogicalRunAccumulator {
-    identity: Option<(AgentTaskKind, String, AutomationTrigger)>,
-    status_spans: [Option<Range<u64>>; 5],
-    newest: Option<RunLedgerRowProjection>,
-    newest_completion: Option<(i64, i64)>,
-}
-
-impl Default for LogicalRunAccumulator {
-    fn default() -> Self {
-        Self {
-            identity: None,
-            status_spans: std::array::from_fn(|_| None),
-            newest: None,
-            newest_completion: None,
-        }
-    }
-}
-
+/// Logical newest lifecycle of one run from the committed index.
 pub(super) fn read_logical_run_lifecycle(
     file: &std::fs::File,
     path: &Path,
     run_id: &str,
 ) -> Result<Option<LogicalRunLifecycle>> {
-    let selected = std::collections::HashSet::from([run_id.to_owned()]);
-    read_logical_run_lifecycles(file, path, &selected, true).map(|mut rows| rows.remove(run_id))
+    with_run_ledger_index(file, path, |index| {
+        index
+            .lifecycle(run_id)
+            .map(|lifecycle| project_newest_row(file, path, run_id, lifecycle))
+            .transpose()
+    })
 }
 
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.logical_lifecycles")]
-pub(super) fn read_logical_run_lifecycles(
+/// Logical newest lifecycles of the selected runs from the committed index.
+/// Any malformed or lifecycle-violating row in the ledger fails the read.
+pub(super) fn read_committed_run_lifecycles(
     file: &std::fs::File,
     path: &Path,
     selected_run_ids: &std::collections::HashSet<String>,
-    fail_on_malformed: bool,
+) -> Result<std::collections::HashMap<String, LogicalRunLifecycle>> {
+    with_run_ledger_index(file, path, |index| {
+        selected_run_ids
+            .iter()
+            .filter_map(|run_id| {
+                index.lifecycle(run_id).map(|lifecycle| {
+                    project_newest_row(file, path, run_id, lifecycle)
+                        .map(|newest| (run_id.clone(), newest))
+                })
+            })
+            .collect()
+    })
+}
+
+/// Logical newest lifecycles of the selected runs for operator pages that
+/// tolerate malformed rows. Unreadable rows are skipped; failed reads and
+/// lifecycle violations still fail the read.
+#[tracing::instrument(
+    name = "hosts.automation.run_ledger_lookup.lenient_lifecycles",
+    level = "trace",
+    skip_all
+)]
+pub(super) fn read_lenient_run_lifecycles(
+    file: &std::fs::File,
+    path: &Path,
+    selected_run_ids: &std::collections::HashSet<String>,
 ) -> Result<std::collections::HashMap<String, LogicalRunLifecycle>> {
     let mut rows = ForwardJsonlScanner::new(file, path)?;
-    let mut states = selected_run_ids
-        .iter()
-        .map(|run_id| (run_id.clone(), LogicalRunAccumulator::default()))
-        .collect::<std::collections::HashMap<_, _>>();
+    let mut lifecycles = std::collections::HashMap::with_capacity(selected_run_ids.len());
     while let Some(line) = rows.next_span()? {
         let row = match scan_jsonl_row(file, path, line) {
             Ok(Some(row)) => row,
             Ok(None) => continue,
-            Err(error) if fail_on_malformed => return Err(error),
+            Err(error @ tracedecay_domain::errors::TraceDecayError::File { .. }) => {
+                return Err(error);
+            }
             Err(_) => continue,
         };
-        let Some(state) = states.get_mut(row.run_id.as_str()) else {
-            continue;
-        };
-        let task_key = row
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| canonical_task_key(row.task));
-        if let Some((task, expected_task_key, trigger)) = state.identity.as_ref() {
-            if row.task != *task || task_key != expected_task_key || row.trigger != *trigger {
-                return Err(config_error(format!(
-                    "automation run ledger '{}' mutates immutable identity for run '{}'",
-                    path.display(),
-                    row.run_id
-                )));
-            }
-        } else {
-            state.identity = Some((row.task, task_key.to_owned(), row.trigger));
-        }
-        let status_index = super::run_status_index(row.status);
-        if let Some(canonical_span) = state.status_spans[status_index].as_ref() {
-            if !spans_match(file, path, canonical_span, &row.span)? {
-                return Err(config_error(format!(
-                    "automation run ledger '{}' repeats a conflicting lifecycle state for run '{}'",
-                    path.display(),
-                    row.run_id
-                )));
-            }
+        if !selected_run_ids.contains(row.run_id.as_str()) {
             continue;
         }
-        let previous_status = state
-            .newest
-            .as_ref()
-            .map(|row: &RunLedgerRowProjection| row.status);
-        if !super::valid_run_status_transition(previous_status, row.status) {
-            return Err(config_error(format!(
-                "automation run ledger '{}' contains an invalid lifecycle for run '{}'",
-                path.display(),
-                row.run_id
-            )));
-        }
-        let completion = canonical_completion_key(&row)?;
-        let completion = (completion.0, completion.1);
-        if state
-            .newest_completion
-            .is_some_and(|previous| completion < previous)
-        {
-            return Err(config_error(format!(
-                "automation run ledger '{}' regresses completion time for run '{}'",
-                path.display(),
-                row.run_id
-            )));
-        }
-        state.status_spans[status_index] = Some(row.span.clone());
-        state.newest = Some(row);
-        state.newest_completion = Some(completion);
+        fold_selected_row(&mut lifecycles, file, path, &row)?;
     }
-    Ok(states
+    lifecycles
         .into_iter()
-        .filter_map(|(run_id, state)| {
-            state
-                .newest
-                .map(|newest| (run_id, LogicalRunLifecycle { newest }))
+        .map(|(run_id, lifecycle)| {
+            project_newest_row(file, path, &run_id, &lifecycle).map(|newest| (run_id, newest))
         })
-        .collect())
+        .collect()
 }
 
-#[derive(Debug)]
-struct ExactRunMatch {
-    span: Range<u64>,
-    digest: ManifestDigest,
+/// Re-projects a run's newest committed row and verifies it still carries the
+/// indexed identity.
+fn project_newest_row(
+    file: &std::fs::File,
+    path: &Path,
+    run_id: &str,
+    lifecycle: &RunLifecycle,
+) -> Result<LogicalRunLifecycle> {
+    let span = lifecycle.newest_span()?;
+    let newest = scan_jsonl_row(file, path, span)?.ok_or_else(|| {
+        config_error(format!(
+            "automation run ledger '{}' newest row for run '{run_id}' is blank",
+            path.display()
+        ))
+    })?;
+    if newest.run_id != run_id || newest.status != lifecycle.newest_status() {
+        return Err(config_error(
+            "automation exact-run identity changed between index and decode",
+        ));
+    }
+    Ok(LogicalRunLifecycle { newest })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,9 +282,10 @@ pub(super) struct ExactRunIdentity {
     pub(super) payload_len: u64,
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "hosts.automation.run_ledger_lookup.exact_bounded"
+#[tracing::instrument(
+    name = "hosts.automation.run_ledger_lookup.exact_bounded",
+    level = "trace",
+    skip_all
 )]
 pub async fn find_run_record_exact_bounded(
     dashboard_root: &Path,
@@ -268,7 +293,7 @@ pub async fn find_run_record_exact_bounded(
 ) -> Result<Option<AutomationRunLedgerRecord>> {
     let root = dashboard_root.to_path_buf();
     let requested_run_id = run_id.to_owned();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         find_run_record_exact_bounded_blocking(&root, &requested_run_id)
     })
     .await
@@ -279,7 +304,11 @@ pub async fn find_run_record_exact_bounded(
     })?
 }
 
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.exact_bounded_blocking")]
+#[tracing::instrument(
+    name = "hosts.automation.run_ledger_lookup.exact_bounded_blocking",
+    level = "trace",
+    skip_all
+)]
 pub fn find_run_record_exact_bounded_blocking(
     dashboard_root: &Path,
     run_id: &str,
@@ -287,13 +316,15 @@ pub fn find_run_record_exact_bounded_blocking(
     validate_run_id_component(run_id)?;
     let path = run_ledger_path(dashboard_root);
     let lock = super::exact_publication::acquire_run_ledger_lock(&path)
-        .map_err(crate::errors::TraceDecayError::from)?;
+        .map_err(tracedecay_domain::errors::TraceDecayError::from)?;
     let result = (|| {
         super::exact_publication::ensure_no_exact_append_intent(dashboard_root)
-            .map_err(crate::errors::TraceDecayError::from)?;
+            .map_err(tracedecay_domain::errors::TraceDecayError::from)?;
         read_exact_run_record_bounded(&path, run_id)
     })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(crate::errors::TraceDecayError::from);
+    let unlock = lock
+        .unlock()
+        .map_err(tracedecay_domain::errors::TraceDecayError::from);
     result.and_then(|record| unlock.map(|()| record))
 }
 
@@ -301,84 +332,81 @@ fn read_exact_run_record_bounded(
     path: &Path,
     run_id: &str,
 ) -> Result<Option<AutomationRunLedgerRecord>> {
-    let Some(file) = open_exact_ledger(path)? else {
+    let Some(file) = open_committed_run_ledger(path, false)? else {
         return Ok(None);
     };
-    let Some(found) = read_exact_run_match(&file, path, run_id)? else {
-        return Ok(None);
-    };
-    let row_len = found
-        .span
-        .end
-        .checked_sub(found.span.start)
-        .ok_or_else(|| config_error("automation exact-run row span is invalid"))?;
-    let record = {
-        let mut handle = &file;
-        handle
-            .seek(SeekFrom::Start(found.span.start))
-            .map_err(|error| ledger_io_error(path, "seek exact row", error))?;
-        let mut row = handle.take(row_len);
-        let record =
-            serde_json::from_reader::<_, AutomationRunLedgerRecord>(&mut row).map_err(|error| {
-                config_error(format!(
-                    "automation run ledger '{}' exact row is malformed: {error}",
-                    path.display()
-                ))
-            })?;
-        if row.limit() != 0 {
+    with_run_ledger_index(&file, path, |index| {
+        let Some(lifecycle) = index.lifecycle(run_id) else {
+            return Ok(None);
+        };
+        let record = decode_jsonl_row(&file, path, &lifecycle.newest_span()?)?;
+        if record.run_id != run_id || record.status != lifecycle.newest_status() {
             return Err(config_error(
-                "automation exact-run decode ended before its scanned row boundary",
+                "automation exact-run identity changed between index and decode",
             ));
         }
-        record
-    };
-    if record.run_id != run_id {
-        return Err(config_error(
-            "automation exact-run identity changed between scan and decode",
-        ));
-    }
-    let decoded_digest = digest_span(&file, path, &found.span)?;
-    if decoded_digest != found.digest {
-        return Err(config_error(
-            "automation exact-run bytes changed between scan and decode",
-        ));
-    }
-    Ok(Some(record))
+        Ok(Some(record))
+    })
 }
 
 #[cfg(test)]
 pub(super) fn read_exact_run_digest(path: &Path, run_id: &str) -> Result<Option<ManifestDigest>> {
-    let Some(file) = open_exact_ledger(path)? else {
+    let Some(file) = open_committed_run_ledger(path, false)? else {
         return Ok(None);
     };
-    read_exact_run_match(&file, path, run_id).map(|found| found.map(|found| found.digest))
+    read_exact_run_identity_from_file(&file, path, run_id)
+        .map(|identity| identity.map(|identity| identity.digest))
 }
 
+/// Byte-exact identity of a run's newest committed row: the span is located
+/// through the index and its bytes are digested from the ledger.
 pub(super) fn read_exact_run_identity_from_file(
     file: &std::fs::File,
     path: &Path,
     run_id: &str,
 ) -> Result<Option<ExactRunIdentity>> {
-    read_exact_run_match(file, path, run_id)?
-        .map(|found| {
-            let payload_len = found
-                .span
-                .end
-                .checked_sub(found.span.start)
-                .ok_or_else(|| config_error("automation exact-run row span is invalid"))?;
-            Ok(ExactRunIdentity {
-                digest: found.digest,
-                payload_len,
+    with_run_ledger_index(file, path, |index| {
+        index
+            .lifecycle(run_id)
+            .map(|lifecycle| {
+                let span = lifecycle.newest_span()?;
+                let payload_len = span
+                    .end
+                    .checked_sub(span.start)
+                    .ok_or_else(|| config_error("automation exact-run row span is invalid"))?;
+                Ok(ExactRunIdentity {
+                    digest: digest_span(file, path, &span)?,
+                    payload_len,
+                })
             })
-        })
-        .transpose()
+            .transpose()
+    })
 }
 
-fn open_exact_ledger(path: &Path) -> Result<Option<std::fs::File>> {
-    open_stabilized_run_ledger(path, false)
+/// Opens the ledger for readers that stabilize visible bytes through the
+/// committed lifecycle index rather than on every open. Write access is
+/// required because the index syncs the handle when it folds foreign rows.
+#[tracing::instrument(
+    name = "hosts.automation.run_ledger_lookup.open",
+    level = "trace",
+    skip_all
+)]
+pub(super) fn open_committed_run_ledger(
+    path: &Path,
+    create: bool,
+) -> Result<Option<std::fs::File>> {
+    super::exact_publication::open_run_ledger_nofollow(path, true, true, false, create).map_err(
+        |error| {
+            config_error(format!(
+                "failed to open automation run ledger '{}' for committed read: {error}",
+                path.display()
+            ))
+        },
+    )
 }
 
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.open")]
+/// Opens the ledger and syncs the file plus its parent so visible bytes are
+/// durable before a reader that bypasses the lifecycle index trusts them.
 pub(super) fn open_stabilized_run_ledger(
     path: &Path,
     create: bool,
@@ -395,76 +423,6 @@ pub(super) fn open_stabilized_run_ledger(
     };
     super::sync_run_ledger_file_and_parent(path, &file)?;
     Ok(Some(file))
-}
-
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.scan")]
-fn read_exact_run_match(
-    file: &std::fs::File,
-    path: &Path,
-    run_id: &str,
-) -> Result<Option<ExactRunMatch>> {
-    let mut rows = ForwardJsonlScanner::new(file, path)?;
-    let mut newest = None;
-    let mut identity = None;
-    let mut previous_status = None;
-    let mut previous_completion = None;
-    let mut status_spans: [Option<Range<u64>>; 5] = std::array::from_fn(|_| None);
-    while let Some(line) = rows.next_span()? {
-        let Some(row) = scan_jsonl_row(file, path, line)? else {
-            continue;
-        };
-        if row.run_id != run_id {
-            continue;
-        }
-        let task_key = row
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| canonical_task_key(row.task));
-        if let Some((task, expected_task_key, trigger)) = identity.as_ref() {
-            if row.task != *task || task_key != expected_task_key || row.trigger != *trigger {
-                return Err(config_error(format!(
-                    "automation run ledger '{}' mutates immutable identity for run '{run_id}'",
-                    path.display()
-                )));
-            }
-        } else {
-            identity = Some((row.task, task_key.to_owned(), row.trigger));
-        }
-        let status_index = super::run_status_index(row.status);
-        if let Some(canonical_span) = status_spans[status_index].as_ref() {
-            let same_state = spans_match(file, path, canonical_span, &row.span)?;
-            if !same_state {
-                return Err(config_error(format!(
-                    "automation run ledger '{}' repeats a conflicting lifecycle state for run '{run_id}'",
-                    path.display()
-                )));
-            }
-            continue;
-        }
-        if !super::valid_run_status_transition(previous_status, row.status) {
-            return Err(config_error(format!(
-                "automation run ledger '{}' contains an invalid lifecycle for run '{run_id}'",
-                path.display()
-            )));
-        }
-        let completion = canonical_completion_key(&row)?;
-        let completion = (completion.0, completion.1);
-        if previous_completion.is_some_and(|previous| completion < previous) {
-            return Err(config_error(format!(
-                "automation run ledger '{}' regresses completion time for run '{run_id}'",
-                path.display()
-            )));
-        }
-        status_spans[status_index] = Some(row.span.clone());
-        previous_status = Some(row.status);
-        previous_completion = Some(completion);
-        let digest = digest_span(file, path, &row.span)?;
-        newest = Some(ExactRunMatch {
-            span: row.span,
-            digest,
-        });
-    }
-    Ok(newest)
 }
 
 pub(super) fn scan_jsonl_row(
@@ -496,6 +454,8 @@ pub(super) fn scan_jsonl_row_projection(
     let Some(row) = JsonRangeReader::new(file, path, line).parse_ledger_row()? else {
         return Ok(None);
     };
+    #[cfg(test)]
+    scan_receipt::record_row_decoded();
     validate_jsonl_row_schema(file, path, &row.span)?;
     Ok(Some(row))
 }
@@ -517,6 +477,8 @@ pub(super) fn decode_jsonl_row(
         .end
         .checked_sub(span.start)
         .ok_or_else(|| config_error("automation ledger row span is invalid"))?;
+    #[cfg(test)]
+    scan_receipt::record_row_decoded();
     let mut handle = file;
     handle
         .seek(SeekFrom::Start(span.start))
@@ -725,8 +687,6 @@ pub(super) struct ForwardJsonlScanner<'a> {
     buffer_start: u64,
     buffer_len: usize,
     buffer: Vec<u8>,
-    #[cfg(test)]
-    chunks_read: usize,
 }
 
 impl<'a> ForwardJsonlScanner<'a> {
@@ -762,9 +722,36 @@ impl<'a> ForwardJsonlScanner<'a> {
             buffer_start: 0,
             buffer_len: 0,
             buffer: vec![0_u8; JSON_SCAN_BUFFER_BYTES],
-            #[cfg(test)]
-            chunks_read: 0,
         })
+    }
+
+    /// Scans the committed rows in `[start, file_len)`. `start` must sit on a
+    /// row boundary, which every previously committed frontier does.
+    pub(super) fn new_from(
+        file: &'a std::fs::File,
+        path: &'a Path,
+        start: u64,
+        file_len: u64,
+    ) -> Result<Self> {
+        let mut scanner = Self::new_bounded(file, path, file_len)?;
+        if start > file_len {
+            return Err(config_error(
+                "automation forward scan start exceeds the ledger length",
+            ));
+        }
+        if start != 0 {
+            let mut delimiter = [0_u8; 1];
+            read_exact_span(file, path, start - 1, &mut delimiter)?;
+            if delimiter[0] != b'\n' {
+                return Err(config_error(format!(
+                    "automation run ledger '{}' forward scan resumes inside a row",
+                    path.display()
+                )));
+            }
+        }
+        scanner.next_start = start;
+        scanner.search_offset = start;
+        Ok(scanner)
     }
 
     pub(super) fn next_span(&mut self) -> Result<Option<Range<u64>>> {
@@ -810,20 +797,15 @@ impl<'a> ForwardJsonlScanner<'a> {
         )?;
         self.buffer_start = chunk_start;
         self.buffer_len = chunk_len;
-        #[cfg(test)]
-        {
-            self.chunks_read = self.chunks_read.saturating_add(1);
-        }
         Ok(())
-    }
-
-    #[cfg(test)]
-    fn chunks_read(&self) -> usize {
-        self.chunks_read
     }
 }
 
-fn require_committed_jsonl_eof(file: &std::fs::File, path: &Path, file_len: u64) -> Result<()> {
+pub(super) fn require_committed_jsonl_eof(
+    file: &std::fs::File,
+    path: &Path,
+    file_len: u64,
+) -> Result<()> {
     if file_len == 0 {
         return Ok(());
     }
@@ -854,7 +836,12 @@ fn digest_span(file: &std::fs::File, path: &Path, span: &Range<u64>) -> Result<M
         .map_err(|error| config_error(format!("invalid automation run digest: {error}")))
 }
 
-fn read_exact_span(file: &std::fs::File, path: &Path, offset: u64, bytes: &mut [u8]) -> Result<()> {
+pub(super) fn read_exact_span(
+    file: &std::fs::File,
+    path: &Path,
+    offset: u64,
+    bytes: &mut [u8],
+) -> Result<()> {
     let mut handle = file;
     handle
         .seek(SeekFrom::Start(offset))
@@ -951,8 +938,8 @@ fn ledger_io_error(
     path: &Path,
     operation: &str,
     error: std::io::Error,
-) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::File {
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::File {
         message: format!("failed to {operation} automation run ledger: {error}"),
         path: path.display().to_string(),
     }
@@ -1057,6 +1044,7 @@ struct RecordFields {
     rejected_count: bool,
     skipped_count: bool,
     error: bool,
+    session_evidence_budget_stage: bool,
     error_classification: bool,
     error_retryable: bool,
     backend_attempt_count: bool,
@@ -1096,6 +1084,7 @@ impl RecordFields {
             "rejected_count" => &mut self.rejected_count,
             "skipped_count" => &mut self.skipped_count,
             "error" => &mut self.error,
+            "session_evidence_budget_stage" => &mut self.session_evidence_budget_stage,
             "error_classification" => &mut self.error_classification,
             "error_retryable" => &mut self.error_retryable,
             "backend_attempt_count" => &mut self.backend_attempt_count,
@@ -1184,11 +1173,9 @@ fn compare_decoded_bytes(
     matches: &mut bool,
     decoded: &[u8],
 ) {
-    if *matches {
-        let end = compared.saturating_add(decoded.len());
-        *matches = end <= expected.len() && expected.get(*compared..end) == Some(decoded);
-    }
-    *compared = compared.saturating_add(decoded.len());
+    let end = compared.saturating_add(decoded.len());
+    *matches = *matches && expected.get(*compared..end) == Some(decoded);
+    *compared = end;
 }
 
 impl ArtifactFields {
@@ -1442,6 +1429,8 @@ impl<'a> JsonRangeReader<'a> {
                     "automation failure classification",
                     parse_failure_class,
                 ),
+                "session_evidence_budget_stage" => reader
+                    .validate_optional_enum("session evidence budget stage", parse_budget_stage),
                 "backend_attempts" => reader.validate_retry_attempts(2),
                 "artifacts" => reader.validate_artifacts(2),
                 "completed_at_micros" => reader.validate_optional_i64("completion timestamp"),
@@ -2025,7 +2014,9 @@ impl<'a> JsonRangeReader<'a> {
                 .next_byte()?
                 .ok_or_else(|| config_error("unexpected EOF in JSON string"))?;
             match byte {
-                b'"' => return Ok(matches && compared == expected.len()),
+                b'"' => {
+                    return Ok(matches && compared == expected.len());
+                }
                 b'\\' => {
                     let escaped = self
                         .next_byte()?
@@ -2390,6 +2381,13 @@ fn parse_task(value: &str) -> Option<AgentTaskKind> {
     }
 }
 
+fn parse_budget_stage(value: &str) -> Option<SessionRetrievalBudgetStageV1> {
+    serde::Deserialize::deserialize(
+        serde::de::value::StrDeserializer::<serde::de::value::Error>::new(value),
+    )
+    .ok()
+}
+
 fn parse_failure_class(value: &str) -> Option<()> {
     matches!(
         value,
@@ -2434,54 +2432,79 @@ mod tests {
     }
 
     #[test]
-    fn returns_newest_exact_lifecycle_record_across_large_ledger() {
+    fn warm_exact_lookup_decodes_only_the_selected_run() {
         let mut lines = vec![ledger_line("target", "queued", 1)];
-        let padding = "x".repeat(1024);
-        for index in 0..9_000 {
-            lines.push(format!(
-                "{{\"schema_version\":2,\"run_id\":\"unrelated-{index}\",\"trigger\":\"scheduler\",\
-                 \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"running\",\
-                 \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"2\",\"completed_at\":\"2\",\
-                 \"error\":\"{padding}\"}}"
-            ));
-        }
+        lines.extend(
+            (0..5_000).map(|index| ledger_line(&format!("unrelated-{index}"), "succeeded", 2)),
+        );
         lines.push(ledger_line("target", "running", 3));
-        let (_temp, path) = write_ledger(&lines);
-        assert!(std::fs::metadata(&path).expect("metadata").len() > 8 * 1024 * 1024);
+        let (temp, _path) = write_ledger(&lines);
 
-        let record = read_exact_run_record_bounded(&path, "target")
-            .expect("bounded read")
-            .expect("exact record");
-
-        assert_eq!(record.run_id, "target");
+        let cold = scan_receipt::snapshot();
+        let record = find_run_record_exact_bounded_blocking(temp.path(), "target")
+            .expect("cold lookup")
+            .expect("target");
         assert_eq!(record.status, AutomationRunStatus::Running);
+        let cold = scan_receipt::snapshot().since(cold);
         assert!(
-            read_exact_run_record_bounded(&path, "missing")
-                .expect("bounded read")
+            cold.rows_decoded >= 5_002,
+            "the first lookup rebuilds the index from every committed row: {cold:?}"
+        );
+        assert_eq!(
+            cold.syncs, 1,
+            "a rebuild stabilizes the ledger exactly once"
+        );
+
+        let warm = scan_receipt::snapshot();
+        let record = find_run_record_exact_bounded_blocking(temp.path(), "target")
+            .expect("warm lookup")
+            .expect("target");
+        assert_eq!(record.status, AutomationRunStatus::Running);
+        let warm = scan_receipt::snapshot().since(warm);
+        assert_eq!(
+            warm.rows_decoded, 1,
+            "an unchanged ledger decodes only the selected run's newest row"
+        );
+        assert_eq!(warm.syncs, 0, "an unchanged ledger needs no read-side sync");
+
+        let missing = scan_receipt::snapshot();
+        assert!(
+            find_run_record_exact_bounded_blocking(temp.path(), "missing")
+                .expect("missing lookup")
                 .is_none()
         );
+        assert_eq!(scan_receipt::snapshot().since(missing).rows_decoded, 0);
     }
 
     #[test]
-    fn reads_legacy_row_without_fabricating_completion_precision() {
+    fn rejects_schema_v1_rfc3339_row() {
         let line = "{\"schema_version\":1,\"run_id\":\"target\",\"trigger\":\"manual_cli\",\
                     \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
                     \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"1970-01-01T00:00:01Z\",\
                     \"completed_at\":\"1970-01-01T00:00:02Z\"}";
         let (_temp, path) = write_ledger(&[line.to_owned()]);
 
-        let record = read_exact_run_record_bounded(&path, "target")
-            .expect("bounded read")
-            .expect("legacy record");
-
-        assert_eq!(record.completed_at_micros, None);
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            "automation run ledger persisted shape requires reset: a row predates schema v2 (the released v1 wrote RFC3339 timestamps)"
+        );
     }
 
     #[test]
     fn rejects_malformed_or_ambiguous_rows_without_unrelated_size_poisoning() {
         let malformed = vec![ledger_line("target", "succeeded", 1), "not json".to_owned()];
         let (_temp, malformed_path) = write_ledger(&malformed);
-        assert!(read_exact_run_record_bounded(&malformed_path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&malformed_path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 240: automation ledger row must be a JSON object",
+                malformed_path.display()
+            )
+        );
 
         let oversized = vec![
             ledger_line("target", "succeeded", 1),
@@ -2507,26 +2530,14 @@ mod tests {
             ledger_line("target", "failed", 2),
         ];
         let (_temp, ambiguous_path) = write_ledger(&duplicate_terminals);
-        assert!(read_exact_run_record_bounded(&ambiguous_path, "target").is_err());
-    }
-
-    #[test]
-    fn exact_lookup_streams_long_keys_inside_canonical_values() {
-        let line = ledger_line("target", "succeeded", 1).replace(
-            "\"completed_at\":\"1\"",
-            &format!(
-                "\"validation_report\":{{\"{}\":null}},\"completed_at\":\"1\"",
-                "κ".repeat(PROJECTED_TEXT_MAX_BYTES)
-            ),
-        );
-        let (_temp, path) = write_ledger(&[line]);
-
         assert_eq!(
-            read_exact_run_record_bounded(&path, "target")
-                .expect("streaming exact lookup")
-                .expect("target")
-                .run_id,
-            "target"
+            read_exact_run_record_bounded(&ambiguous_path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains an invalid lifecycle for run 'target'",
+                ambiguous_path.display()
+            )
         );
     }
 
@@ -2534,11 +2545,27 @@ mod tests {
     fn identity_tokens_fail_at_their_bounds_but_unknown_keys_stream() {
         let huge_run = ledger_line(&"x".repeat(PROJECTED_TEXT_MAX_BYTES + 1), "running", 1);
         let (_temp, huge_run_path) = write_ledger(&[huge_run]);
-        assert!(read_exact_run_record_bounded(&huge_run_path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&huge_run_path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 543: automation run identity exceeds its 512-byte bound",
+                huge_run_path.display()
+            )
+        );
 
         let huge_status = ledger_line("other", &"x".repeat(64 * 1024), 1);
         let (_temp, huge_status_path) = write_ledger(&[huge_status]);
-        assert!(read_exact_run_record_bounded(&huge_status_path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&huge_status_path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 155: automation run status exceeds its 32-byte bound",
+                huge_status_path.display()
+            )
+        );
 
         let huge_key = ledger_line("target", "running", 1).replace(
             "\"completed_at\":\"1\"",
@@ -2566,7 +2593,9 @@ mod tests {
         let digest = read_exact_run_digest(&path, "target")
             .expect("digest")
             .expect("target digest");
-        let file = std::fs::File::open(&path).expect("ledger");
+        let file = open_committed_run_ledger(&path, false)
+            .expect("open")
+            .expect("ledger");
         let identity = read_exact_run_identity_from_file(&file, &path, "target")
             .expect("identity")
             .expect("target identity");
@@ -2592,7 +2621,15 @@ mod tests {
         );
         let (_temp, path) = write_ledger(&[malformed]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 2097357: invalid JSON number",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -2613,50 +2650,62 @@ mod tests {
             .replace("\"accepted_count\":0", "\"accepted_count\":false");
         let (_temp, path) = write_ledger(&[ledger_line("target", "succeeded", 2), unrelated]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' contains malformed JSON at byte 393: invalid JSON number",
+                path.display()
+            )
+        );
     }
 
     #[test]
     fn exact_lookup_rejects_semantically_invalid_unrelated_rows() {
         let unrelated = ledger_line("unrelated", "succeeded", 1);
         let invalid_rows = [
-            unrelated
-                .clone()
-                .replace("\"schema_version\":2", "\"schema_version\":99"),
-            unrelated
-                .clone()
-                .replace("\"schema_version\":2", "\"schema_version\":1")
-                .replace(
-                    "\"started_at\":\"1\"",
-                    "\"started_at\":\"1970-01-01T00:00:01Z\"",
-                ),
-            unrelated.clone().replace(
-                "\"completed_at\":\"1\"",
-                "\"completed_at\":\"9223372036854775807\"",
+            (
+                unrelated
+                    .clone()
+                    .replace("\"schema_version\":2", "\"schema_version\":99"),
+                "config error: automation run ledger schema version 99 is unsupported",
             ),
-            unrelated.replace(
-                "\"completed_at_micros\":1000000",
-                "\"completed_at_micros\":2000000",
+            (
+                unrelated
+                    .clone()
+                    .replace("\"schema_version\":2", "\"schema_version\":1")
+                    .replace(
+                        "\"started_at\":\"1\"",
+                        "\"started_at\":\"1970-01-01T00:00:01Z\"",
+                    ),
+                "automation run ledger persisted shape requires reset: a row predates schema v2 (the released v1 wrote RFC3339 timestamps)",
+            ),
+            (
+                unrelated.clone().replace(
+                    "\"completed_at\":\"1\"",
+                    "\"completed_at\":\"9223372036854775807\"",
+                ),
+                "config error: automation completion timestamp overflows signed microseconds",
+            ),
+            (
+                unrelated.replace(
+                    "\"completed_at_micros\":1000000",
+                    "\"completed_at_micros\":2000000",
+                ),
+                "config error: automation completion timestamp seconds and microseconds disagree",
             ),
         ];
 
-        for invalid in invalid_rows {
+        for (invalid, expected) in invalid_rows {
             let (_temp, path) = write_ledger(&[ledger_line("target", "succeeded", 2), invalid]);
-            assert!(read_exact_run_record_bounded(&path, "target").is_err());
+            assert_eq!(
+                read_exact_run_record_bounded(&path, "target")
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
         }
-    }
-
-    #[test]
-    fn exact_lookup_skips_blank_committed_rows() {
-        // A blank committed row is benign (scan_jsonl_row treats it as a
-        // skip) and must not be treated as ledger corruption.
-        let (_temp, path) =
-            write_ledger(&[ledger_line("target", "succeeded", 1), "   ".to_owned()]);
-
-        let record = read_exact_run_record_bounded(&path, "target")
-            .expect("blank trailing row must not block exact lookup")
-            .expect("target row must still be found");
-        assert_eq!(record.run_id, "target");
     }
 
     #[test]
@@ -2664,10 +2713,21 @@ mod tests {
         let invalid = ledger_line("unrelated", "succeeded", 2)
             .replace("\"started_at\":\"2\"", "\"started_at\":\"-1\"");
         let (_temp, path) = write_ledger(&[ledger_line("selected", "succeeded", 1), invalid]);
-        let file = std::fs::File::open(&path).unwrap();
+        let file = open_committed_run_ledger(&path, false)
+            .expect("open")
+            .expect("ledger");
         let selected = std::collections::HashSet::from(["selected".to_owned()]);
 
-        assert!(read_logical_run_lifecycles(&file, &path, &selected, true).is_err());
+        assert_eq!(
+            read_committed_run_lifecycles(&file, &path, &selected)
+                .err()
+                .expect("rejected")
+                .to_string(),
+            "config error: automation ledger row started_at predates the UNIX epoch"
+        );
+        let lenient = read_lenient_run_lifecycles(&file, &path, &selected)
+            .expect("lenient readers skip the unselected malformed row");
+        assert_eq!(lenient["selected"].newest.run_id, "selected");
     }
 
     #[test]
@@ -2677,20 +2737,15 @@ mod tests {
             .replace("\"task\":\"memory_curator\"", "\"task\":\"skill_writer\"");
         let (_temp, path) = write_ledger(&[queued, terminal]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
-    }
-
-    #[test]
-    fn exact_lookup_ignores_historical_nonadjacent_retry_without_regression() {
-        let queued = ledger_line("target", "queued", 1);
-        let running = ledger_line("target", "running", 2);
-        let (_temp, path) = write_ledger(&[queued.clone(), running, queued]);
-
-        let record = read_exact_run_record_bounded(&path, "target")
-            .expect("compatible historical retry")
-            .expect("target");
-
-        assert_eq!(record.status, AutomationRunStatus::Running);
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' mutates immutable identity for run 'target'",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -2700,7 +2755,15 @@ mod tests {
         let conflicting_queued = ledger_line("target", "queued", 3);
         let (_temp, path) = write_ledger(&[queued, running, conflicting_queued]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' repeats a conflicting lifecycle state for run 'target'",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -2709,7 +2772,15 @@ mod tests {
         let running = ledger_line("target", "running", 100);
         let (_temp, path) = write_ledger(&[queued, running]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        assert_eq!(
+            read_exact_run_record_bounded(&path, "target")
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' regresses completion time for run 'target'",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -2764,28 +2835,6 @@ mod tests {
     }
 
     #[test]
-    fn forward_span_scan_reads_each_fixed_chunk_once() {
-        let lines = (0..20_000)
-            .map(|index| format!("{{\"row\":{index}}}"))
-            .collect::<Vec<_>>();
-        let (_temp, path) = write_ledger(&lines);
-        let file = std::fs::File::open(&path).expect("ledger");
-        let file_len = file.metadata().expect("metadata").len();
-        let mut scanner = ForwardJsonlScanner::new(&file, &path).expect("scanner");
-        let mut rows = 0;
-        while scanner.next_span().expect("span").is_some() {
-            rows += 1;
-        }
-        let expected_chunks = usize::try_from(
-            file_len.saturating_add(JSON_SCAN_BUFFER_BYTES as u64 - 1)
-                / JSON_SCAN_BUFFER_BYTES as u64,
-        )
-        .expect("chunk count");
-        assert_eq!(rows, lines.len());
-        assert_eq!(scanner.chunks_read(), expected_chunks);
-    }
-
-    #[test]
     fn ledger_stream_scanners_require_a_commit_newline() {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let path = temp.path().join(super::super::RUN_LEDGER_FILENAME);
@@ -2793,8 +2842,26 @@ mod tests {
         std::fs::write(&path, &row).expect("ledger");
         let file = std::fs::File::open(&path).expect("ledger");
 
-        assert!(ForwardJsonlScanner::new(&file, &path).is_err());
-        assert!(ReverseJsonlScanner::new(&file, &path).is_err());
+        assert_eq!(
+            ForwardJsonlScanner::new(&file, &path)
+                .err()
+                .expect("rejected")
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' has an incomplete durable tail",
+                path.display()
+            )
+        );
+        assert_eq!(
+            ReverseJsonlScanner::new(&file, &path)
+                .err()
+                .expect("rejected")
+                .to_string(),
+            format!(
+                "config error: automation run ledger '{}' has an incomplete durable tail",
+                path.display()
+            )
+        );
         assert!(
             scan_jsonl_row(&file, &path, 0..row.len() as u64)
                 .expect("raw staged payload scan")

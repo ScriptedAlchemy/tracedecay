@@ -14,8 +14,8 @@ use crate::canonical_text::validated_string_newtype;
 /// Reject values that are not an algorithm-tagged, lowercase-hex integrity
 /// digest: `sha256:`/`blake3:` over 64 hex characters, `sha512:` over 128.
 ///
-/// Every digest newtype in the domain — research, code-intelligence, and
-/// retrieval alike — accepts and rejects exactly this set.
+/// Every digest newtype in the domain, research, code-intelligence, and
+/// retrieval alike, accepts and rejects exactly this set.
 pub(crate) fn validate_integrity_digest(
     value: &str,
     field: &'static str,
@@ -59,6 +59,14 @@ macro_rules! digest_id_body {
 
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+
+            /// Hex body when this digest is `sha256:`-tagged.
+            ///
+            /// `None` for `blake3:` / `sha512:` values, which integrity
+            /// digests also accept.
+            pub fn hex_suffix(&self) -> Option<&str> {
+                $crate::canonical_text::sha256_hex_suffix(self.as_str())
             }
 
             pub fn validate(&self) -> Result<(), $error> {
@@ -174,10 +182,6 @@ validated_string_newtype!(
     FactEvidenceId,
     FactEventId,
     RetrievalAnchorId,
-    CanonicalSourceOccurrenceSetIdV1,
-    RetrieverContributionIdV1,
-    EvidenceSpanProjectionReceiptIdV1,
-    EvidenceAssemblyPublicationReceiptIdV1,
     PrivacyDomainId,
     ShardId,
     ActorId,
@@ -205,7 +209,18 @@ digest_id!(
 
 /// Monotonic epoch of the writer authority for a shard.
 #[derive(
-    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
 )]
 #[serde(transparent)]
 pub struct AuthorityEpoch(pub u64);
@@ -297,6 +312,24 @@ mod tests {
         assert!(AccessPolicyDigest::new(&sha256).is_ok());
         assert!(RegistryManifestDigest::new(&sha256).is_ok());
         assert!(DataVersionDigest::new(&sha256).is_ok());
+        assert_eq!(
+            ManifestDigest::new(&sha256)
+                .expect("sha256 digest")
+                .hex_suffix(),
+            Some(sha256.as_str().get(7..).expect("sha256 tag"))
+        );
+        assert!(
+            ManifestDigest::new(&sha512)
+                .expect("sha512 digest")
+                .hex_suffix()
+                .is_none()
+        );
+        assert!(
+            ManifestDigest::new(&blake3)
+                .expect("blake3 digest")
+                .hex_suffix()
+                .is_none()
+        );
         assert!(ManifestDigest::new(sha512).is_ok());
         assert!(ManifestDigest::new(blake3).is_ok());
     }
@@ -315,8 +348,9 @@ mod tests {
         ];
 
         for value in malformed {
-            assert!(
-                ManifestDigest::new(&value).is_err(),
+            assert_eq!(
+                ManifestDigest::new(&value).unwrap_err().to_string(),
+                "ManifestDigest is not canonical",
                 "accepted malformed digest {value}"
             );
         }
@@ -325,6 +359,11 @@ mod tests {
     #[test]
     fn integrity_digest_deserialization_is_checked() {
         let value = serde_json::json!("catalog-digest-synthetic-001");
-        assert!(serde_json::from_value::<ManifestDigest>(value).is_err());
+        assert_eq!(
+            serde_json::from_value::<ManifestDigest>(value)
+                .unwrap_err()
+                .to_string(),
+            "ManifestDigest is not canonical"
+        );
     }
 }

@@ -3,9 +3,9 @@
 //! Kiro persists chat history under VS Code-style globalStorage at
 //! `Kiro/User/globalStorage/kiro.kiroagent`. Two layouts are supported:
 //!
-//! * **Legacy** — `<workspace-hash>/<execution-id>.chat` JSON with a `chat`
+//! * **Legacy**, `<workspace-hash>/<execution-id>.chat` JSON with a `chat`
 //!   array (`human`/`bot` roles) and `metadata` (model, workflow id, times).
-//! * **Modern** — extensionless execution JSON under workspace hash dirs or
+//! * **Modern**, extensionless execution JSON under workspace hash dirs or
 //!   `workspace-sessions/<encoded-workspace-path>/<session-id>.json` with a
 //!   top-level `messages`/`conversation`/`chat` array.
 //!
@@ -29,33 +29,31 @@ use tracedecay_capture::kiro::{
 use tracedecay_capture::normalize_timestamp_secs;
 
 use crate::admission::HostAdmission;
-#[cfg(test)]
-use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::observation::ObservationCancellation;
 use crate::runtime::SessionMessageRecord;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::shared::{
-    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
-    TranscriptLocationMetadataKeys, TranscriptScopeMatcher, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    title_from_messages,
-};
-use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotCaptureOutcome,
-    bounded_snapshot_input_len, capture_snapshot_observations, non_durable_snapshot_record,
-    read_snapshot_text_bounded,
+    ProjectMembership, ProjectRootMatcherCache, TranscriptLocation, TranscriptLocationMetadataKeys,
+    TranscriptScopeMatcher, append_location_metadata, append_tool_calls_metadata,
+    append_usage_metadata, content_storage_text_and_tools,
 };
 #[cfg(test)]
-use crate::runtime::snapshot_observation::{canonical_snapshot_envelope, host_admission_error};
+use crate::runtime::snapshot_observation::canonical_snapshot_envelope;
+use crate::runtime::snapshot_observation::{
+    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionBatch,
+    SnapshotCaptureOutcome, bounded_snapshot_input_len, capture_snapshot_observations,
+    insert_snapshot_location, non_durable_snapshot_record, read_snapshot_text_bounded,
+};
 use crate::runtime::source::{
-    ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, read_changed_file,
+    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
+    collect_files_with_ext_bounded, content_hash64, read_snapshot_file_bounded,
 };
 use serde_json::{Map, Value};
 #[cfg(test)]
 use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 #[cfg(test)]
-use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+use tracedecay_privacy::parse_normalized_observation_record_v1;
 
 mod observation;
 pub use observation::KiroSnapshotObservationRecord;
@@ -74,6 +72,7 @@ const MAX_TRANSCRIPTS_PER_PASS: usize = 512;
 const MAX_TRANSCRIPTS_PER_WORKSPACE: usize = 128;
 const MAX_MESSAGES_PER_SNAPSHOT: usize = 4_096;
 
+#[derive(Clone)]
 pub struct KiroSource {
     agent_dir: PathBuf,
     workspace_storage_dir: PathBuf,
@@ -147,38 +146,18 @@ impl TranscriptSource for KiroSource {
         out.truncate(MAX_TRANSCRIPTS_PER_PASS);
         out
     }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        self.parse_snapshot(path, prev, project_root, max_new_bytes)
-            .ok()
-            .flatten()
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        self.parse_snapshot(path, prev, project_root, max_new_bytes)
-    }
 }
 
 impl KiroSource {
+    /// Reads one complete snapshot in scope of `project_root`. The generation
+    /// is the snapshot's content hash, so an unchanged rewrite re-admits as an
+    /// exact duplicate.
     fn parse_snapshot(
         &self,
         path: &Path,
-        prev: StoredCursor,
         project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+    ) -> TranscriptIngestResult<Option<(ObservationSourceGenerationV1, Vec<SessionMessageRecord>)>>
+    {
         let Some(location_cwd) = transcript_location_path(path, &self.workspace_storage_dir) else {
             return Ok(None);
         };
@@ -196,14 +175,11 @@ impl KiroSource {
             return Ok(None);
         }
 
-        let byte_cap = max_new_bytes
-            .unwrap_or(MAX_SNAPSHOT_FILE_BYTES)
-            .min(MAX_SNAPSHOT_FILE_BYTES);
-        ensure_bounded_snapshot(path, byte_cap)?;
-        let Some(changed) = read_changed_file(path, prev, byte_cap) else {
+        ensure_bounded_snapshot(path, MAX_SNAPSHOT_FILE_BYTES)?;
+        let Some(contents) = read_snapshot_file_bounded(path, MAX_SNAPSHOT_FILE_BYTES) else {
             return Ok(None);
         };
-        let value: Value = match serde_json::from_str(&changed.contents) {
+        let value: Value = match serde_json::from_str(&contents) {
             Ok(value) => value,
             Err(error) if error.is_eof() => return Ok(None),
             Err(_) => return Err(non_durable(path, "malformed snapshot JSON")),
@@ -219,36 +195,16 @@ impl KiroSource {
         if messages.is_empty() {
             return Err(non_durable(path, "snapshot contains no durable messages"));
         }
-
-        let project = self.user_registered_roots.as_ref().map_or_else(
-            || project_root.to_string_lossy().to_string(),
-            |_| "user".to_string(),
-        );
-        let draft = SessionDraft {
-            session_id: session_id.clone(),
-            project_key: project.clone(),
-            project_path: project,
-            title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&session_metadata(
-                Some(&location_cwd),
-                Some(&value),
-            ))
-            .ok(),
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        };
-
-        Ok(Some(ParsedTranscript {
-            draft,
-            messages,
-            new_cursor: changed.new_cursor,
-        }))
+        let generation = ObservationSourceGenerationV1::new(content_hash64(&contents).max(1))?;
+        Ok(Some((generation, messages)))
     }
 }
 
-#[hotpath::measure(label = "sessions.hosts.kiro.collect_user_workspace_sessions")]
+#[tracing::instrument(
+    name = "sessions.hosts.kiro.collect_user_workspace_sessions",
+    level = "trace",
+    skip_all
+)]
 fn collect_user_workspace_session_files(
     sessions_root: &Path,
     registered_roots: &[PathBuf],
@@ -304,7 +260,7 @@ fn collect_user_workspace_session_files(
 /// This deliberately re-reads complete snapshots and derives a new source generation
 /// from their content hash; it neither consults nor advances legacy parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
-#[hotpath::measure(label = "sessions.hosts.kiro.capture", future = true)]
+#[tracing::instrument(name = "sessions.hosts.kiro.capture", level = "trace", skip_all)]
 pub async fn capture_kiro_snapshot_observations(
     facade: &dyn HostAdmission,
     source: &KiroSource,
@@ -313,28 +269,67 @@ pub async fn capture_kiro_snapshot_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
+    capture_kiro_snapshot_observations_with_sweep(
+        facade,
+        source,
+        project_root,
+        scope,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new(PROVIDER, None),
+    )
+    .await
+}
+
+/// A snapshot the store permanently refuses is reported in `sweep` and
+/// skipped until it or its workspace metadata changes.
+pub(crate) async fn capture_kiro_snapshot_observations_with_sweep(
+    facade: &dyn HostAdmission,
+    source: &KiroSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
+) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
+    let source = source.clone();
+    let project_root = project_root.to_path_buf();
+    let workspace_storage_dir = source.workspace_storage_dir.clone();
     capture_snapshot_observations(
         facade,
         PROVIDER,
         scope,
         cancellation,
         max_new_bytes,
-        || {
-            source.discover_transcript_paths(
-                project_root,
-                TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
-            )
+        sweep,
+        {
+            let source = source.clone();
+            let project_root = project_root.clone();
+            move || {
+                source.discover_transcript_paths(
+                    &project_root,
+                    TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
+                )
+            }
         },
-        |path| source.snapshot_input_bytes(path),
-        |path| {
-            let Some(parsed) =
-                source.parse_snapshot(path, StoredCursor::default(), project_root, None)?
-            else {
+        move |path| {
+            let mut members = vec![path.to_path_buf()];
+            members.extend(
+                workspace_hash_from_path(path)
+                    .map(|hash| workspace_metadata_path(&workspace_storage_dir, &hash)),
+            );
+            (path.to_path_buf(), members)
+        },
+        {
+            let source = source.clone();
+            move |path| source.snapshot_input_bytes(path)
+        },
+        move |path| {
+            let Some((generation, messages)) = source.parse_snapshot(path, &project_root)? else {
                 return Ok(None);
             };
-            let generation = ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
-            let records = normalize_kiro_snapshot_observations(&parsed.messages)?;
-            Ok(Some((generation, records)))
+            let records = normalize_kiro_snapshot_observations(&messages)?;
+            Ok(Some(vec![SnapshotAdmissionBatch::new(generation, records)]))
         },
     )
     .await
@@ -364,7 +359,11 @@ fn non_durable(path: &Path, reason: &'static str) -> TranscriptIngestError {
     non_durable_snapshot_record(PROVIDER, path, reason)
 }
 
-#[hotpath::measure(label = "sessions.hosts.kiro.collect_workspace_sessions")]
+#[tracing::instrument(
+    name = "sessions.hosts.kiro.collect_workspace_sessions",
+    level = "trace",
+    skip_all
+)]
 fn collect_workspace_session_files(
     sessions_root: &Path,
     project_root: &Path,
@@ -408,7 +407,11 @@ fn collect_workspace_session_files(
     out
 }
 
-#[hotpath::measure(label = "sessions.hosts.kiro.collect_agent_storage")]
+#[tracing::instrument(
+    name = "sessions.hosts.kiro.collect_agent_storage",
+    level = "trace",
+    skip_all
+)]
 fn collect_agent_storage_files(
     agent_dir: &Path,
     workspace_storage_dir: &Path,
@@ -471,7 +474,11 @@ fn collect_agent_storage_files(
     out
 }
 
-#[hotpath::measure(label = "sessions.hosts.kiro.collect_user_agent_storage")]
+#[tracing::instrument(
+    name = "sessions.hosts.kiro.collect_user_agent_storage",
+    level = "trace",
+    skip_all
+)]
 fn collect_user_agent_storage_files(
     agent_dir: &Path,
     workspace_storage_dir: &Path,
@@ -588,7 +595,11 @@ fn workspace_hash_from_path(path: &Path) -> Option<String> {
     })
 }
 
-#[hotpath::measure(label = "sessions.hosts.kiro.workspace_path_from_hash")]
+#[tracing::instrument(
+    name = "sessions.hosts.kiro.workspace_path_from_hash",
+    level = "trace",
+    skip_all
+)]
 fn workspace_path_from_hash(workspace_storage_dir: &Path, hash: &str) -> Option<PathBuf> {
     let workspace_json = workspace_metadata_path(workspace_storage_dir, hash);
     let contents =
@@ -698,7 +709,11 @@ fn model_from_transcript(value: &Value) -> Option<String> {
     })
 }
 
-#[hotpath::measure(label = "sessions.hosts.kiro.messages_from_transcript")]
+#[tracing::instrument(
+    name = "sessions.hosts.kiro.messages_from_transcript",
+    level = "trace",
+    skip_all
+)]
 fn messages_from_transcript(
     value: &Value,
     session_id: &str,
@@ -890,7 +905,7 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
-#[hotpath::measure(label = "sessions.hosts.kiro.normalize")]
+#[tracing::instrument(name = "sessions.hosts.kiro.normalize", level = "trace", skip_all)]
 pub fn normalize_kiro_snapshot_observations(
     messages: &[SessionMessageRecord],
 ) -> TranscriptIngestResult<Vec<KiroSnapshotObservationRecord>> {
@@ -899,7 +914,11 @@ pub fn normalize_kiro_snapshot_observations(
         .map(|message| {
             let order = u64::try_from(message.ordinal)
                 .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
-            let payload = snapshot_native_payload(KiroSnapshotMessage {
+            let metadata = message
+                .metadata_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok());
+            let mut payload = snapshot_native_payload(KiroSnapshotMessage {
                 session_id: &message.session_id,
                 message_id: &message.message_id,
                 role: &message.role,
@@ -908,9 +927,12 @@ pub fn normalize_kiro_snapshot_observations(
                 text: &message.text,
                 kind: message.kind.as_deref(),
                 model: message.model.as_deref(),
-            })
-            .to_string()
-            .into_bytes();
+                transcript_path: message.source_path.as_deref(),
+            });
+            if let Some(map) = payload.as_object_mut() {
+                insert_snapshot_location(map, metadata.as_ref(), KIRO_LOCATION_KEYS);
+            }
+            let payload = payload.to_string().into_bytes();
             Ok(KiroSnapshotObservationRecord {
                 session_id: message.session_id.clone(),
                 native_record_id: message.message_id.clone(),
@@ -938,35 +960,6 @@ fn stable_message_id(
         occurrence,
         text,
     )
-}
-
-fn session_metadata(location_cwd: Option<&Path>, transcript: Option<&Value>) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("kiro_transcript".to_string()),
-    );
-    append_location_metadata(
-        &mut metadata,
-        KIRO_LOCATION_KEYS,
-        TranscriptLocation::new(location_cwd, "workspace_mapping"),
-    );
-    if let Some(transcript) = transcript {
-        for key in ["workflowId", "profileId", "projectId"] {
-            if let Some(value) = transcript
-                .get(key)
-                .or_else(|| {
-                    transcript
-                        .get("metadata")
-                        .and_then(|metadata| metadata.get(key))
-                })
-                .filter(|value| value.is_string() || value.is_number() || value.is_boolean())
-            {
-                metadata.insert(key.to_string(), value.clone());
-            }
-        }
-    }
-    Value::Object(metadata)
 }
 
 fn message_metadata(entry: &Value, location_cwd: Option<&Path>) -> Value {

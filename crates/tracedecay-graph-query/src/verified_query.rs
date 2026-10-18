@@ -6,34 +6,33 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use serde_json::Value;
-use tracedecay_application::{
-    ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestId,
-};
+use crate::{GraphQueryError, GraphQueryResult as Result};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
-    CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
+    CodeGraphCensusV1, CodeGraphImpactBatchV1, CodeGraphInteractiveReader,
+    CodeGraphRankedNeighborsV1, CodeGraphReadCostMeter, CodeGraphSemanticEdgeV1,
+    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_contracts::{
+    ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestCostReceiptV1,
+    RequestId,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
-use tracedecay_graph_db::GraphCancellation;
-
-use super::queries::{GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1};
-use super::source_authority::{
-    AdmittedSourceAuthority, CodeGraphSourceAuthorityPort, CodeGraphSourceBindRequest,
-    graph_source_scope_mismatch, graph_source_unbound,
+use tracedecay_domain::{
+    CanonicalRelationEdgeV1, CodeGenerationId, RelationEdgeKindV1, SanitizedCodeFileV1,
+    SymbolOccurrenceId,
 };
+use tracedecay_graph_db::GraphCancellation;
+use tracedecay_runtime_core::path_safety::plain_host_path;
+
+use super::queries::{FileDependentsV1, GraphQueryManager};
+use super::source_authority::AdmittedSourceAuthority;
 use super::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
-    CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
-    map_projection_error,
+    CodeGraphReadError, CodeGraphReadRequest, application_graph_cancellation,
 };
-#[cfg(any(test, feature = "test-helpers"))]
-use crate::SourceReadRuntimePort;
-use crate::context::read_modes;
-use crate::context::source_read::{self, SourceReadOutput, SourceReadRequest};
+use crate::SourceReadContext;
+use crate::context::source_read;
 use tracedecay_session_memory::context::{RequestInterruption, run_deadline_signal_interruptible};
 
 /// Inputs required to admit and open one verified graph query.
@@ -81,9 +80,55 @@ where
     }
 }
 
+/// Closes over admission, projection, and an optional admitted project source.
+/// `open` never names a composition-root type.
+pub struct AdmittedVerifiedGraphQueryPort {
+    admission: Arc<dyn CodeGraphReadAdmissionPort>,
+    projection: Arc<dyn CodeGraphProjectionReadPort>,
+    source: Option<SourceReadContext>,
+}
+
+impl AdmittedVerifiedGraphQueryPort {
+    pub fn new(
+        admission: Arc<dyn CodeGraphReadAdmissionPort>,
+        projection: Arc<dyn CodeGraphProjectionReadPort>,
+        source: Option<SourceReadContext>,
+    ) -> Self {
+        Self {
+            admission,
+            projection,
+            source,
+        }
+    }
+}
+
+impl VerifiedGraphQueryPort for AdmittedVerifiedGraphQueryPort {
+    fn open<'a>(&'a self, request: VerifiedGraphQueryRequest<'a>) -> VerifiedGraphQueryFuture<'a> {
+        Box::pin(open_verified_graph_query(
+            &*self.admission,
+            &*self.projection,
+            request,
+            self.source.as_ref(),
+        ))
+    }
+}
+
+#[must_use]
+pub fn admitted_verified_graph_query_port_with_source(
+    admission: Arc<dyn CodeGraphReadAdmissionPort>,
+    projection: Arc<dyn CodeGraphProjectionReadPort>,
+    source: Option<SourceReadContext>,
+) -> Arc<dyn VerifiedGraphQueryPort> {
+    Arc::new(AdmittedVerifiedGraphQueryPort::new(
+        admission, projection, source,
+    ))
+}
+
 /// Generation-pinned analytical queries over the verified Grafeo projection.
 pub struct VerifiedGraphQuery {
+    /// Counts every store read on [`Self::cost`].
     reader: CodeGraphInteractiveReader,
+    cost: CodeGraphReadCostMeter,
     cancellation: Arc<dyn GraphCancellation>,
     request_context: RequestContext,
     source: Option<AdmittedSourceAuthority>,
@@ -109,12 +154,12 @@ impl VerifiedGraphQuery {
         )
     }
 
-    /// Fixture-only source binding. It runs the same freeze as the admitted
-    /// open path, so even fixtures cannot retain a live runtime facade.
+    /// Fixture-only source binding. It runs the same validation and freeze as
+    /// the admitted open path.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn with_source(mut self, source: Arc<dyn SourceReadRuntimePort>) -> Self {
+    pub fn with_source(mut self, source: SourceReadContext) -> Self {
         self.source = Some(
-            AdmittedSourceAuthority::capture(&self.request_context, source.as_ref())
+            AdmittedSourceAuthority::capture(&self.request_context, source)
                 .expect("fixture source authority matches the fixture scope"),
         );
         self
@@ -128,8 +173,10 @@ impl VerifiedGraphQuery {
         live_cancellation: CancellationSignal,
         freshness: super::CodeGraphReadFreshnessV1,
     ) -> Self {
+        let cost = CodeGraphReadCostMeter::start();
         Self {
-            reader,
+            reader: reader.metered(&cost),
+            cost,
             cancellation,
             request_context,
             source,
@@ -140,6 +187,11 @@ impl VerifiedGraphQuery {
 
     pub fn request_context(&self) -> &RequestContext {
         &self.request_context
+    }
+
+    /// What this query has cost its stores since it was opened.
+    pub fn read_cost(&self) -> RequestCostReceiptV1 {
+        self.cost.receipt()
     }
 
     /// Freshness of the generation this query answers from, as proven by the
@@ -155,7 +207,9 @@ impl VerifiedGraphQuery {
 
     fn bound_source(&self) -> Result<&AdmittedSourceAuthority> {
         self.refuse_if_bound_closed()?;
-        self.source.as_ref().ok_or_else(graph_source_unbound)
+        self.source
+            .as_ref()
+            .ok_or_else(|| CodeGraphReadError::Denied.into())
     }
 
     fn refuse_if_bound_closed(&self) -> Result<()> {
@@ -166,27 +220,16 @@ impl VerifiedGraphQuery {
         )
     }
 
-    #[hotpath::skip]
     async fn await_bound<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
         self.refuse_if_bound_closed()?;
-        match run_deadline_signal_interruptible(
+        let result = await_graph_port_wait(
             self.request_context.deadline(),
             &self.live_cancellation,
             future,
         )
-        .await
-        {
-            Ok(result) => {
-                self.refuse_if_bound_closed()?;
-                result
-            }
-            Err(RequestInterruption::Cancelled) => Err(map_code_graph_read_runtime_error(
-                super::CodeGraphReadError::Cancelled,
-            )),
-            Err(RequestInterruption::DeadlineExceeded) => Err(map_code_graph_read_runtime_error(
-                super::CodeGraphReadError::TimedOut,
-            )),
-        }
+        .await?;
+        self.refuse_if_bound_closed()?;
+        result
     }
 
     pub fn project_root(&self) -> Result<&Path> {
@@ -197,36 +240,34 @@ impl VerifiedGraphQuery {
         Ok(self.bound_source()?.project_id())
     }
 
-    pub fn read_indexed_source_file(&self, file: &str) -> Result<String> {
-        let (absolute, _) = self.resolve_indexed_source_file(file)?;
-        tracedecay_runtime_core::sync::read_source_file(&absolute).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("cannot read indexed source file '{file}': {error}"),
-            }
-        })
-    }
-
-    #[hotpath::measure(label = "usecases.graph.verified.dead_code", future = true)]
+    #[tracing::instrument(name = "usecases.graph.verified.dead_code", level = "trace", skip_all)]
     pub async fn find_dead_code(
         &self,
         kinds: &[NodeKind],
         include_public: bool,
+        path_prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
-        self.await_bound(
-            self.manager()
-                .find_dead_code(kinds, include_public, Some(limit)),
-        )
+        self.await_bound(self.manager().find_dead_code(
+            kinds,
+            include_public,
+            path_prefix,
+            Some(limit),
+        ))
         .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.circular", future = true)]
+    #[tracing::instrument(name = "usecases.graph.verified.circular", level = "trace", skip_all)]
     pub async fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
         self.await_bound(self.manager().find_circular_dependencies())
             .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.file_adjacency", future = true)]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.file_adjacency",
+        level = "trace",
+        skip_all
+    )]
     pub async fn build_file_adjacency(
         &self,
         path_prefix: Option<&str>,
@@ -235,34 +276,21 @@ impl VerifiedGraphQuery {
             .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.file_dependents", future = true)]
-    pub async fn get_file_dependents(&self, file_path: &str) -> Result<Vec<String>> {
+    #[tracing::instrument(
+        name = "usecases.graph.verified.file_dependents",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn get_file_dependents(&self, file_path: &str) -> Result<FileDependentsV1> {
         self.await_bound(self.manager().get_file_dependents(file_path))
             .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.file_dependencies", future = true)]
-    pub async fn get_file_dependencies(&self, file_path: &str) -> Result<Vec<String>> {
-        self.await_bound(self.manager().get_file_dependencies(file_path))
-            .await
-    }
-
-    #[hotpath::measure(label = "usecases.graph.verified.node_metrics", future = true)]
-    pub async fn get_node_metrics(&self, node_id: &str) -> Result<NodeMetrics> {
-        self.await_bound(self.manager().get_node_metrics(node_id))
-            .await
-    }
-
-    #[hotpath::measure(label = "usecases.graph.verified.health_aggregates", future = true)]
-    pub async fn health_file_aggregates(
-        &self,
-        path_prefix: Option<&str>,
-    ) -> Result<Vec<VerifiedHealthFileAggregateV1>> {
-        self.await_bound(self.manager().health_file_aggregates(path_prefix))
-            .await
-    }
-
-    #[hotpath::measure(label = "usecases.graph.verified.health_snapshot", future = true)]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.health_snapshot",
+        level = "trace",
+        skip_all
+    )]
     pub async fn verified_health_snapshot(
         &self,
         path_prefix: Option<&str>,
@@ -270,23 +298,6 @@ impl VerifiedGraphQuery {
         self.await_bound(super::health::compute_verified_health_snapshot(
             &self.manager(),
             path_prefix,
-        ))
-        .await
-    }
-
-    #[hotpath::skip]
-    pub async fn read_source(&self, request: SourceReadRequest<'_>) -> Result<SourceReadOutput> {
-        let source = self.bound_source()?;
-        if request.project_id != source.project_id() {
-            return Err(graph_source_scope_mismatch());
-        }
-        self.await_bound(source_read::read_source(
-            source.project_root(),
-            source.db(),
-            source.read_only(),
-            &self.reader,
-            Arc::clone(&self.cancellation),
-            request,
         ))
         .await
     }
@@ -299,29 +310,23 @@ impl VerifiedGraphQuery {
             Arc::clone(&self.cancellation),
             file,
         )?;
-        if !absolute.starts_with(source.project_root()) {
-            return Err(graph_source_scope_mismatch());
+        // The resolved file is always `canonicalize`d, `\\?\`-prefixed on
+        // Windows, while the admitted root may carry the plain identity.
+        if !plain_host_path(&absolute).starts_with(plain_host_path(source.project_root())) {
+            return Err(CodeGraphReadError::Denied.into());
         }
         Ok((absolute, display))
     }
 
-    pub fn render_map(&self, file_path: &str, kinds: Option<&[String]>) -> Result<Value> {
-        self.refuse_if_bound_closed()?;
-        read_modes::render_map(
-            &self.reader,
-            Arc::clone(&self.cancellation),
-            file_path,
-            kinds,
-        )
-    }
-
-    pub fn render_signatures(&self, file_path: &str) -> Result<Value> {
-        self.refuse_if_bound_closed()?;
-        read_modes::render_signatures(&self.reader, Arc::clone(&self.cancellation), file_path)
-    }
-
     pub fn generation(&self) -> &CodeGenerationId {
         self.reader.generation()
+    }
+
+    pub fn has_unresolved_callers(&self, targets: &[SymbolOccurrenceId]) -> Result<bool> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .has_unresolved_callers(targets, None, Arc::clone(&self.cancellation))
+            .map_err(GraphQueryError::from)
     }
 
     pub fn symbol_summary(
@@ -331,7 +336,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .symbol_summary(occurrence, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn symbols_page(
@@ -342,20 +347,58 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .symbols_page(after, max_symbols, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
+    }
+
+    pub fn files(&self, max_files: usize) -> Result<Vec<SanitizedCodeFileV1>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .files(max_files, Arc::clone(&self.cancellation))
+            .map_err(GraphQueryError::from)
+    }
+
+    pub fn file_by_logical_path(&self, path: &str) -> Result<Option<SanitizedCodeFileV1>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .file_by_logical_path(path, Arc::clone(&self.cancellation))
+            .map_err(GraphQueryError::from)
+    }
+
+    /// Generation-wide counts with the `largest_files` most symbol-dense
+    /// files, from aggregates the catalog derived when it was built.
+    pub fn census(&self, largest_files: usize) -> Result<CodeGraphCensusV1> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .census(largest_files, Arc::clone(&self.cancellation))
+            .map_err(GraphQueryError::from)
+    }
+
+    pub fn find_symbols(
+        &self,
+        predicate: &CodeGraphSymbolPredicate<'_>,
+        limit: usize,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .find_symbols(predicate, limit, Arc::clone(&self.cancellation))
+            .map_err(GraphQueryError::from)
     }
 
     /// Returns one stable page restricted to the requested logical files.
     ///
     /// Resolution goes through the per-file catalog index rather than the
-    /// whole-corpus occurrence stream — a page for a handful of changed
+    /// whole-corpus occurrence stream, a page for a handful of changed
     /// files must never hydrate every symbol in the generation. The canonical
     /// stream orders by occurrence, so sorting the per-file union preserves
     /// the exact page identity the stream scan produced.
     /// `max_symbols_examined` bounds the requested files' combined symbol
     /// count; exhausting it is a typed budget refusal rather than a false
     /// end-of-page result.
-    #[hotpath::measure(label = "usecases.graph.verified.file_symbols_page")]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.file_symbols_page",
+        level = "trace",
+        skip_all
+    )]
     pub fn symbols_in_logical_files_page(
         &self,
         logical_paths: &HashSet<String>,
@@ -364,49 +407,12 @@ impl VerifiedGraphQuery {
         max_symbols_examined: usize,
     ) -> Result<CodeGraphSymbolPageV1> {
         self.refuse_if_bound_closed()?;
-        if limit == 0 || max_symbols_examined == 0 {
-            return Err(graph_invalid_request(
-                "verified graph file-symbol paging requires positive limits",
-            ));
-        }
-        if logical_paths.is_empty() {
-            return Ok(CodeGraphSymbolPageV1 {
-                symbols: Vec::new(),
-                has_more: false,
-            });
-        }
-        let mut matched = Vec::new();
-        for path in logical_paths {
-            let budget = max_symbols_examined
-                .checked_sub(matched.len())
-                .filter(|remaining| *remaining > 0)
-                .ok_or_else(|| {
-                    graph_budget_exhausted(
-                        "verified graph file-symbol paging exceeded its scan budget",
-                    )
-                })?;
-            let mut in_file = self.symbols_in_logical_file(path, budget.saturating_add(1))?;
-            if in_file.len() > budget {
-                return Err(graph_budget_exhausted(
-                    "verified graph file-symbol paging exceeded its scan budget",
-                ));
-            }
-            matched.append(&mut in_file);
-        }
-        matched.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
-        let mut symbols = Vec::with_capacity(limit.min(matched.len()));
-        let mut has_more = false;
-        for symbol in matched {
-            if after.is_some_and(|after| symbol.occurrence <= *after) {
-                continue;
-            }
-            if symbols.len() == limit {
-                has_more = true;
-                break;
-            }
-            symbols.push(symbol);
-        }
-        Ok(CodeGraphSymbolPageV1 { symbols, has_more })
+        self.manager().symbols_in_logical_files_page(
+            logical_paths,
+            after,
+            limit,
+            max_symbols_examined,
+        )
     }
 
     pub fn symbols_in_logical_file(
@@ -417,7 +423,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .symbols_in_logical_file(logical_path, limit, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn resolve_simple_name(
@@ -429,7 +435,14 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .resolve_simple_name(name, kind, limit, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
+    }
+
+    pub fn suggest_simple_names(&self, name: &str, limit: usize) -> Result<Vec<String>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .suggest_simple_names(name, limit, Arc::clone(&self.cancellation))
+            .map_err(GraphQueryError::from)
     }
 
     pub fn external_type_import_candidates(
@@ -446,7 +459,7 @@ impl VerifiedGraphQuery {
                 limit,
                 Arc::clone(&self.cancellation),
             )
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn resolve_qualified_name(
@@ -458,10 +471,10 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .resolve_qualified_name(qualified_name, kind, limit, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.callers")]
+    #[tracing::instrument(name = "usecases.graph.verified.callers", level = "trace", skip_all)]
     pub fn callers(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -471,10 +484,14 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callers(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.callers_truncated")]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.callers_truncated",
+        level = "trace",
+        skip_all
+    )]
     pub fn callers_truncated(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -484,10 +501,10 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callers_truncated(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.callees")]
+    #[tracing::instrument(name = "usecases.graph.verified.callees", level = "trace", skip_all)]
     pub fn callees(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -497,10 +514,14 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callees(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.callees_truncated")]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.callees_truncated",
+        level = "trace",
+        skip_all
+    )]
     pub fn callees_truncated(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -510,7 +531,31 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callees_truncated(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
+    }
+
+    #[tracing::instrument(
+        name = "usecases.graph.verified.ranked_neighbors",
+        level = "trace",
+        skip_all
+    )]
+    pub fn ranked_neighbors(
+        &self,
+        seeds: &[SymbolOccurrenceId],
+        kind_rank: fn(RelationEdgeKindV1) -> u8,
+        max_relations: usize,
+        limit: usize,
+    ) -> Result<CodeGraphRankedNeighborsV1> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .ranked_neighbors(
+                seeds,
+                kind_rank,
+                max_relations,
+                limit,
+                Arc::clone(&self.cancellation),
+            )
+            .map_err(GraphQueryError::from)
     }
 
     pub fn edges_among(
@@ -518,7 +563,7 @@ impl VerifiedGraphQuery {
         occurrences: &[SymbolOccurrenceId],
         kinds: &[RelationEdgeKindV1],
         max_relations: usize,
-    ) -> Result<Vec<CodeGraphSemanticEdgeV1>> {
+    ) -> Result<Vec<CanonicalRelationEdgeV1>> {
         self.refuse_if_bound_closed()?;
         self.reader
             .edges_among(
@@ -527,10 +572,10 @@ impl VerifiedGraphQuery {
                 max_relations,
                 Arc::clone(&self.cancellation),
             )
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.impact")]
+    #[tracing::instrument(name = "usecases.graph.verified.impact", level = "trace", skip_all)]
     pub fn impact(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -549,59 +594,47 @@ impl VerifiedGraphQuery {
                 max_relations_per_hop,
                 Arc::clone(&self.cancellation),
             )
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
-    /// Finds files containing functions targeted by canonical annotation
-    /// edges whose source is a recognized test annotation marker.
+    /// Finds the requested files that contain functions targeted by canonical
+    /// annotation edges whose source is a recognized test annotation marker.
     ///
-    /// A request scoped to specific files resolves through the per-file
-    /// catalog index instead of the whole-corpus symbol stream: the four
-    /// recognized markers are lexically attached attributes, so a marker
-    /// always occupies the same file as the function it annotates, and only
-    /// the requested files can contribute either endpoint. The unscoped
-    /// census keeps the corpus sweep — that is its job.
-    #[hotpath::measure(label = "usecases.graph.verified.test_annotated_files")]
+    /// The request resolves through the per-file catalog index instead of
+    /// the whole-corpus symbol stream: the four recognized markers are
+    /// lexically attached attributes, so a marker always occupies the same
+    /// file as the function it annotates, and only the requested files can
+    /// contribute either endpoint.
+    #[tracing::instrument(
+        name = "usecases.graph.verified.test_annotated_files",
+        level = "trace",
+        skip_all
+    )]
     pub fn test_annotated_logical_files(
         &self,
-        logical_paths: Option<&HashSet<String>>,
+        logical_paths: &HashSet<String>,
         max_symbols: usize,
         max_relations: usize,
     ) -> Result<HashSet<String>> {
         self.refuse_if_bound_closed()?;
-        let (symbols, scoped) = match logical_paths {
-            Some(requested) => {
-                let mut symbols = Vec::new();
-                for path in requested {
-                    let budget = max_symbols
-                        .checked_sub(symbols.len())
-                        .filter(|remaining| *remaining > 0)
-                        .ok_or_else(|| {
-                            graph_budget_exhausted(
-                                "verified test-attribution census exceeded its symbol budget",
-                            )
-                        })?;
-                    let mut in_file =
-                        self.symbols_in_logical_file(path, budget.saturating_add(1))?;
-                    if in_file.len() > budget {
-                        return Err(graph_budget_exhausted(
-                            "verified test-attribution census exceeded its symbol budget",
-                        ));
-                    }
-                    symbols.append(&mut in_file);
-                }
-                (symbols, true)
-            }
-            None => {
-                let page = self.symbols_page(None, max_symbols)?;
-                if page.has_more {
-                    return Err(graph_budget_exhausted(
+        let mut symbols = Vec::new();
+        for path in logical_paths {
+            let budget = max_symbols
+                .checked_sub(symbols.len())
+                .filter(|remaining| *remaining > 0)
+                .ok_or_else(|| {
+                    graph_budget_exhausted(
                         "verified test-attribution census exceeded its symbol budget",
-                    ));
-                }
-                (page.symbols, false)
+                    )
+                })?;
+            let mut in_file = self.symbols_in_logical_file(path, budget.saturating_add(1))?;
+            if in_file.len() > budget {
+                return Err(graph_budget_exhausted(
+                    "verified test-attribution census exceeded its symbol budget",
+                ));
             }
-        };
+            symbols.append(&mut in_file);
+        }
         let mut paths = HashMap::new();
         let mut test_markers = HashSet::new();
         for symbol in &symbols {
@@ -615,67 +648,42 @@ impl VerifiedGraphQuery {
                 graph_corrupt("verified graph symbol is missing lineage metadata")
             })?;
             paths.insert(symbol.occurrence.clone(), path.clone());
-            if metadata.kind == "annotation_usage"
-                && matches!(
-                    metadata.simple_name.as_str(),
-                    "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
-                )
-            {
+            if tracedecay_code_index::is_test_marker(metadata) {
                 test_markers.insert(symbol.occurrence.clone());
             }
         }
-        if scoped {
-            if test_markers.is_empty() {
-                return Ok(HashSet::new());
-            }
-            // Outgoing annotation edges from the scoped markers alone: the
-            // corpus-seeded `edges_among` variant below needs every endpoint
-            // in its seed set, which is exactly the full-corpus hydration a
-            // file-scoped request must not pay.
-            let markers = test_markers.iter().cloned().collect::<Vec<_>>();
-            return Ok(self
-                .callees(&markers, &[RelationEdgeKindV1::Annotates], max_relations)?
-                .into_iter()
-                .flatten()
-                .filter_map(|edge| paths.get(&edge.edge.to_occurrence).cloned())
-                .filter(|path| logical_paths.is_none_or(|requested| requested.contains(path)))
-                .collect());
+        if test_markers.is_empty() {
+            return Ok(HashSet::new());
         }
-        let occurrences = symbols
-            .iter()
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<Vec<_>>();
+        // Outgoing annotation edges from the scoped markers alone; an
+        // `edges_among` read would need every endpoint in its seed set.
+        let markers = test_markers.iter().cloned().collect::<Vec<_>>();
         Ok(self
-            .edges_among(
-                &occurrences,
-                &[RelationEdgeKindV1::Annotates],
-                max_relations,
-            )?
+            .callees(&markers, &[RelationEdgeKindV1::Annotates], max_relations)?
             .into_iter()
-            .filter(|edge| test_markers.contains(&edge.edge.from_occurrence))
+            .flatten()
             .filter_map(|edge| paths.get(&edge.edge.to_occurrence).cloned())
-            .filter(|path| logical_paths.is_none_or(|requested| requested.contains(path)))
             .collect())
     }
 }
 
 /// Admits the request and opens a verified query through the lower graph
-/// ports. Every port wait — admission, source bind, and projection open — is
-/// raced against the canonical deadline/cancellation pair, and fresh time is
-/// rechecked after each acquisition.
+/// ports. Every port wait, admission and projection open, is raced against
+/// the canonical deadline/cancellation pair, and fresh time is rechecked after
+/// each acquisition.
 ///
 /// The composition-root adapter closes over those ports; this function never
-/// names a root type, and the source authority is frozen from the bind
-/// result before the query exists — no later surface accepts a runtime,
+/// names a root type, and the source authority is frozen from the supplied
+/// context before the query exists, no later surface accepts a runtime,
 /// root, or database.
-#[hotpath::measure(label = "usecases.graph.open_verified", future = true)]
+#[tracing::instrument(name = "usecases.graph.open_verified", level = "trace", skip_all)]
 pub async fn open_verified_graph_query(
     admission: &dyn CodeGraphReadAdmissionPort,
     projection: &dyn CodeGraphProjectionReadPort,
     request: VerifiedGraphQueryRequest<'_>,
-    source: Option<&dyn CodeGraphSourceAuthorityPort>,
+    source: Option<&SourceReadContext>,
 ) -> Result<VerifiedGraphQuery> {
-    let observed_at = tracedecay_application::now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let context = await_graph_port_wait(
         &request.deadline,
         request.cancellation,
@@ -687,32 +695,13 @@ pub async fn open_verified_graph_query(
             observed_at,
         )),
     )
-    .await?
-    .map_err(map_code_graph_read_runtime_error)?;
+    .await??;
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
-    let source = match source {
-        None => None,
-        Some(port) => {
-            let observed_at = tracedecay_application::now_micros();
-            let runtime = await_graph_port_wait(
-                &request.deadline,
-                request.cancellation,
-                port.bind(CodeGraphSourceBindRequest {
-                    context: &context,
-                    observed_at,
-                }),
-            )
-            .await?
-            .map_err(map_code_graph_read_runtime_error)?;
-            refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
-            Some(AdmittedSourceAuthority::capture(
-                &context,
-                runtime.as_ref(),
-            )?)
-        }
-    };
+    let source = source
+        .map(|source| AdmittedSourceAuthority::capture(&context, source.clone()))
+        .transpose()?;
     let graph_cancellation = application_graph_cancellation(request.cancellation);
-    let observed_at = tracedecay_application::now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
     let verified = await_graph_port_wait(
         &request.deadline,
@@ -723,13 +712,14 @@ pub async fn open_verified_graph_query(
                 .with_live_cancellation(request.cancellation),
         ),
     )
-    .await?
-    .map_err(map_code_graph_read_runtime_error)?;
+    .await??;
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
-    let observed_at = tracedecay_application::now_micros();
-    let reader = verified
-        .reader_with_cancellation(&context, observed_at, Arc::clone(&graph_cancellation))
-        .map_err(map_code_graph_read_runtime_error)?;
+    let observed_at = tracedecay_contracts::now_micros();
+    let reader = verified.reader_with_cancellation(
+        &context,
+        observed_at,
+        Arc::clone(&graph_cancellation),
+    )?;
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
     Ok(VerifiedGraphQuery::from_admitted_parts(
         reader,
@@ -748,12 +738,8 @@ async fn await_graph_port_wait<T>(
 ) -> Result<T> {
     match run_deadline_signal_interruptible(deadline, cancellation, future).await {
         Ok(result) => Ok(result),
-        Err(RequestInterruption::Cancelled) => Err(map_code_graph_read_runtime_error(
-            super::CodeGraphReadError::Cancelled,
-        )),
-        Err(RequestInterruption::DeadlineExceeded) => Err(map_code_graph_read_runtime_error(
-            super::CodeGraphReadError::TimedOut,
-        )),
+        Err(RequestInterruption::Cancelled) => Err(CodeGraphReadError::Cancelled.into()),
+        Err(RequestInterruption::DeadlineExceeded) => Err(CodeGraphReadError::TimedOut.into()),
     }
 }
 
@@ -763,41 +749,36 @@ fn refuse_if_query_closed(
     cancellation: &CancellationSignal,
 ) -> Result<()> {
     if cancellation.is_cancelled() {
-        return Err(map_code_graph_read_runtime_error(
-            super::CodeGraphReadError::Cancelled,
-        ));
+        return Err(CodeGraphReadError::Cancelled.into());
     }
-    let observed_at = tracedecay_application::now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     if deadline.is_elapsed_at(observed_at) {
-        return Err(map_code_graph_read_runtime_error(
-            super::CodeGraphReadError::TimedOut,
-        ));
+        return Err(CodeGraphReadError::TimedOut.into());
     }
     match context.admission_at(observed_at) {
-        tracedecay_application::RequestAdmission::Admitted => Ok(()),
-        tracedecay_application::RequestAdmission::Cancelled => Err(
-            map_code_graph_read_runtime_error(super::CodeGraphReadError::Cancelled),
-        ),
-        tracedecay_application::RequestAdmission::TimedOut => Err(
-            map_code_graph_read_runtime_error(super::CodeGraphReadError::TimedOut),
-        ),
+        tracedecay_contracts::RequestAdmission::Admitted => Ok(()),
+        tracedecay_contracts::RequestAdmission::Cancelled => {
+            Err(CodeGraphReadError::Cancelled.into())
+        }
+        tracedecay_contracts::RequestAdmission::TimedOut => {
+            Err(CodeGraphReadError::TimedOut.into())
+        }
+        tracedecay_contracts::RequestAdmission::GrantExpired => {
+            Err(CodeGraphReadError::Denied.into())
+        }
     }
 }
 
-fn graph_projection_error(
-    error: tracedecay_code_index::graph_projection::CodeGraphProjectionError,
-) -> TraceDecayError {
-    map_code_graph_read_runtime_error(map_projection_error(error))
+fn graph_budget_exhausted(detail: &str) -> GraphQueryError {
+    CodeGraphReadError::BudgetExhausted {
+        detail: detail.to_owned(),
+    }
+    .into()
 }
 
-fn graph_invalid_request(detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route("code-graph-invalid-request", false, detail)
-}
-
-fn graph_budget_exhausted(detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route("code-graph-budget-exhausted", false, detail)
-}
-
-fn graph_corrupt(detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route("code-graph-corrupt", false, detail)
+fn graph_corrupt(detail: &str) -> GraphQueryError {
+    CodeGraphReadError::Corrupt {
+        detail: detail.to_owned(),
+    }
+    .into()
 }

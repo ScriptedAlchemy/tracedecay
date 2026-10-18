@@ -5,16 +5,17 @@ mod validation;
 use std::{error::Error, fmt};
 
 use rusqlite::Savepoint;
+use tracedecay_domain::ObservationSourceCursorV1;
 use tracedecay_store::{
-    OutboxEffectStateV1, RepositoryWritePayloadV1, RuntimeSubmitRequestV1,
-    StorageRuntimeContractErrorV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    CursorAdvanceLedgerDisagreementV1, RepositoryWritePayloadV1, RuntimeSubmitRequestV1,
+    StorageRuntimeContractErrorV1,
 };
 
 /// Executes one store-owned payload through the writer's request savepoint.
 ///
 /// The closed payload enum is the dispatch authority. Implementors do not echo
-/// receipt material, outbox data, byte estimates, or result digests back to the
-/// runtime; the validated request and ledger already own those values.
+/// receipt material, byte estimates, or result digests back to the runtime; the
+/// validated request and ledger already own those values.
 pub trait StorageOperationExecutor {
     fn execute(
         &mut self,
@@ -22,45 +23,43 @@ pub trait StorageOperationExecutor {
         payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()>;
 
-    fn enqueue_outbox(
+    fn execute_closed(
         &mut self,
         savepoint: &Savepoint<'_>,
-        entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
-        if entry.state == OutboxEffectStateV1::Pending {
-            self.execute(
-                savepoint,
-                &RepositoryWritePayloadV1::EnqueueOutbox(Box::new(entry.clone())),
-            )
-        } else {
-            Ok(())
-        }
+        payload: &RepositoryWritePayloadV1,
+    ) -> Result<(), StorageOperationError> {
+        self.execute(savepoint, payload)
+            .map_err(StorageOperationError::Native)
     }
+}
 
-    fn apply_inbox(
-        &mut self,
-        savepoint: &Savepoint<'_>,
-        entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
-        self.execute(
-            savepoint,
-            &RepositoryWritePayloadV1::ApplyInbox(Box::new(entry.clone())),
-        )
-    }
+/// Writer executor for isolated runtimes whose writes are performed through
+/// the bounded exact-SQL channel.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExactSqlOnlyStorageOperationV1;
 
-    fn acknowledge_outbox(
+impl StorageOperationExecutor for ExactSqlOnlyStorageOperationV1 {
+    fn execute(
         &mut self,
         _savepoint: &Savepoint<'_>,
-        _receipt: &TransactionalInboxReceiptV1,
+        _payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()> {
-        Ok(())
+        Err(rusqlite::Error::InvalidQuery)
     }
 }
 
 #[derive(Debug)]
-pub(crate) enum StorageOperationError {
+pub enum StorageOperationError {
     Contract(StorageRuntimeContractErrorV1),
     Native(rusqlite::Error),
+    ObservationSourceCursorConflict {
+        expected: Box<Option<ObservationSourceCursorV1>>,
+        actual: Box<Option<ObservationSourceCursorV1>>,
+    },
+    ObservationCursorAdvanceCollision,
+    CursorAdvanceLedgerDisagreement {
+        disagreement: Box<CursorAdvanceLedgerDisagreementV1>,
+    },
 }
 
 impl fmt::Display for StorageOperationError {
@@ -68,6 +67,14 @@ impl fmt::Display for StorageOperationError {
         match self {
             Self::Contract(error) => write!(formatter, "invalid native storage operation: {error}"),
             Self::Native(error) => write!(formatter, "native SQLite operation failed: {error}"),
+            Self::ObservationSourceCursorConflict { expected, actual } => write!(
+                formatter,
+                "observation source cursor conflict: expected {expected:?}, found {actual:?}"
+            ),
+            Self::ObservationCursorAdvanceCollision => formatter
+                .write_str("observation cursor advance receipt collided with different contents"),
+            Self::CursorAdvanceLedgerDisagreement { .. } => formatter
+                .write_str("observation cursor-advance ledger disagrees with immutable coverage"),
         }
     }
 }
@@ -77,7 +84,34 @@ impl Error for StorageOperationError {
         match self {
             Self::Contract(error) => Some(error),
             Self::Native(error) => Some(error),
+            Self::ObservationSourceCursorConflict { .. }
+            | Self::ObservationCursorAdvanceCollision
+            | Self::CursorAdvanceLedgerDisagreement { .. } => None,
         }
+    }
+}
+
+impl From<rusqlite::Error> for StorageOperationError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Native(error)
+    }
+}
+
+impl StorageOperationExecutor for Box<dyn StorageOperationExecutor + Send> {
+    fn execute(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        payload: &RepositoryWritePayloadV1,
+    ) -> rusqlite::Result<()> {
+        (**self).execute(savepoint, payload)
+    }
+
+    fn execute_closed(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        payload: &RepositoryWritePayloadV1,
+    ) -> Result<(), StorageOperationError> {
+        (**self).execute_closed(savepoint, payload)
     }
 }
 
@@ -87,13 +121,27 @@ pub(crate) fn execute<E: StorageOperationExecutor>(
     executor: &mut E,
 ) -> Result<(), StorageOperationError> {
     validation::validate(request).map_err(StorageOperationError::Contract)?;
-    match &request.envelope().payload {
-        RepositoryWritePayloadV1::EnqueueOutbox(entry) => executor.enqueue_outbox(savepoint, entry),
-        RepositoryWritePayloadV1::ApplyInbox(entry) => executor.apply_inbox(savepoint, entry),
-        RepositoryWritePayloadV1::AcknowledgeOutbox(receipt) => {
-            executor.acknowledge_outbox(savepoint, receipt)
-        }
-        payload => executor.execute(savepoint, payload),
+    executor.execute_closed(savepoint, &request.envelope().payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_sql_only_executor_rejects_product_domain_writes() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        let request = crate::test_support::request(crate::test_support::metadata(
+            "operation.exact-sql-only",
+            "idempotency.exact-sql-only",
+            'e',
+        ));
+
+        let result =
+            ExactSqlOnlyStorageOperationV1.execute(&savepoint, &request.envelope().payload);
+
+        assert!(matches!(result, Err(rusqlite::Error::InvalidQuery)));
     }
-    .map_err(StorageOperationError::Native)
 }

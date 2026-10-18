@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::{Stream, StreamExt, stream};
 use serde::Serialize;
-use tracedecay_application::{RequestId, StreamEvent, StreamFrontier};
+use tracedecay_contracts::{RequestId, StreamEvent, StreamFrontier};
 
 use crate::{HttpAdapterError, HttpSseEvent};
 
@@ -69,10 +69,10 @@ where
     if let Some(sequence) = sequence {
         encoded = encoded.id(sequence.to_string());
     }
-    let data = hotpath::measure_block!("api.http.serialize", {
+    let data = {
+        let _span = tracing::trace_span!("api.http.serialize").entered();
         serde_json::to_string(&event).map_err(|_| HttpAdapterError::EventEncoding)
-    })?;
-    crate::observe::record_response_bytes(data.len());
+    }?;
     Ok(encoded.data(data))
 }
 
@@ -83,7 +83,7 @@ mod tests {
     use futures_util::Stream;
     use futures_util::task::noop_waker_ref;
     use serde_json::json;
-    use tracedecay_application::{StreamEvent, StreamTermination};
+    use tracedecay_contracts::{StreamEvent, StreamTermination};
 
     use super::{encode_events, stream};
     use crate::HttpAdapterError;
@@ -108,7 +108,7 @@ mod tests {
         .expect("terminal fixture");
         let terminal = StreamEvent::<&str>::terminal(0, terminal).expect("terminal event");
         let stale = StreamEvent::item(1, "stale").expect("stale item");
-        let mut encoded = Box::pin(encode_events(stream::iter([terminal, stale])));
+        let mut encoded = std::pin::pin!(encode_events(stream::iter([terminal, stale])));
         let mut context = Context::from_waker(noop_waker_ref());
 
         assert!(matches!(
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn source_end_without_terminal_is_a_framing_error() {
         let item = StreamEvent::item(0, "item").expect("item");
-        let mut encoded = Box::pin(encode_events(stream::iter([item])));
+        let mut encoded = std::pin::pin!(encode_events(stream::iter([item])));
         let mut context = Context::from_waker(noop_waker_ref());
 
         assert!(matches!(

@@ -1,45 +1,16 @@
-//! Portable MCP tool types, catalog assembly, and response rendering.
+//! Portable MCP tool call results, CLI help rendering, and response rendering.
 
-pub mod definitions;
+pub mod binding;
+pub mod catalog_discovery;
+pub mod dispatch;
+pub mod dispatch_ceiling;
 pub mod render;
 pub mod renderers;
+pub mod response_trailers;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Write as _;
-
-pub use definitions::ast_grep::{
-    ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available,
-};
-pub use definitions::{
-    ToolRegistryMode, apply_context_warming_budget, context_description, explore_call_budget,
-    format_capable_tool_names, get_maximal_tool_definitions,
-    get_maximal_tool_definitions_with_budget, get_tool_definitions,
-    get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
-    internal_daemon_tool_definition, project_catalog_discovery_scope,
-    retain_host_available_tool_definitions, tool_defaults_to_markdown,
-};
-
-/// Maximum character length for a tool response before truncation.
-pub const MAX_RESPONSE_CHARS: usize = 15_000;
-
-/// A tool definition exposed by the MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    /// Unique tool name.
-    pub name: String,
-    /// Human-readable description of what the tool does.
-    pub description: String,
-    /// JSON Schema describing the tool's input parameters.
-    #[serde(rename = "inputSchema")]
-    pub input_schema: Value,
-    /// MCP tool annotations (readOnlyHint, title, etc.).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<Value>,
-    /// MCP tool metadata (e.g. anthropic/alwaysLoad).
-    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
-}
+use tracedecay_mcp_catalog::ToolDefinition;
 
 /// The result of a tool call, including the JSON response and the file
 /// paths that were touched (used to track saved tokens).
@@ -65,6 +36,16 @@ pub struct ToolResult {
     /// populate analytics `failure_reason` without re-deriving it from
     /// rendered response text.
     failure_message: Option<String>,
+    /// Set once the shared renderer accounted this result, so the transport
+    /// persists those figures instead of appending a second footer.
+    token_accounting: Option<response_trailers::ToolTokenAccounting>,
+    /// What the read cost its stores, recorded by
+    /// [`response_trailers::append_request_cost`] beside its trailer.
+    cost: Option<tracedecay_contracts::RequestCostReceiptV1>,
+    /// The whole typed result the rendered body describes, unbounded. The
+    /// MCP wire carries only the budgeted body; `tracedecay tool --json`
+    /// prints this as `structuredContent`.
+    structured_result: Option<Value>,
 }
 
 impl ToolResult {
@@ -75,7 +56,27 @@ impl ToolResult {
             internal_analytics: None,
             semantic_error: None,
             failure_message: None,
+            token_accounting: None,
+            cost: None,
+            structured_result: None,
         }
+    }
+
+    /// Record the whole typed result this body renders.
+    #[must_use]
+    pub fn with_structured_result(mut self, structured_result: Value) -> Self {
+        self.structured_result = Some(structured_result);
+        self
+    }
+
+    /// The whole typed result, when the renderer recorded it.
+    pub fn structured_result(&self) -> Option<&Value> {
+        self.structured_result.as_ref()
+    }
+
+    /// What the read cost its stores, when the call was metered.
+    pub fn cost(&self) -> Option<tracedecay_contracts::RequestCostReceiptV1> {
+        self.cost
     }
 
     #[must_use]
@@ -115,6 +116,18 @@ impl ToolResult {
     pub fn failure_message(&self) -> Option<&str> {
         self.failure_message.as_deref()
     }
+
+    pub(crate) fn set_token_accounting(
+        &mut self,
+        accounting: response_trailers::ToolTokenAccounting,
+    ) {
+        self.token_accounting = Some(accounting);
+    }
+
+    /// The figures the shared renderer accounted, if it did.
+    pub fn token_accounting(&self) -> Option<response_trailers::ToolTokenAccounting> {
+        self.token_accounting
+    }
 }
 
 /// Render the CLI help shown by `tracedecay tool <name> --help`.
@@ -138,8 +151,7 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
         .input_schema
         .get("required")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|arr| arr.iter().filter_map(Value::as_str).collect());
 
     let Some(props) = props else {
         let _ = writeln!(out, "(no parameters)");
@@ -205,7 +217,11 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
     if has_non_scalar {
         let _ = writeln!(out, "Example (whole MCP arguments object via stdin):");
         let _ = writeln!(out, "  tracedecay tool {short} --args - <<'JSON'");
-        let _ = writeln!(out, "  {}", example_args_object(props, &required));
+        let _ = writeln!(
+            out,
+            "  {}",
+            example_args_object(&def.input_schema, props, &required)
+        );
         let _ = writeln!(out, "  JSON");
         let _ = writeln!(out);
     }
@@ -326,8 +342,7 @@ fn variant_label(variant: &Value) -> Option<String> {
     let required: Vec<&str> = variant
         .get("required")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|arr| arr.iter().filter_map(Value::as_str).collect());
     (!required.is_empty()).then(|| format!("{{{}}}", required.join(", ")))
 }
 
@@ -358,13 +373,12 @@ fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
         let required: Vec<String> = schema
             .get("required")
             .and_then(Value::as_array)
-            .map(|arr| {
+            .map_or_default(|arr| {
                 arr.iter()
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         if !required.is_empty() {
             return Some(format!(
                 "object with required keys: {}",
@@ -376,7 +390,7 @@ fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
             .and_then(Value::as_object)
             .is_some()
         {
-            return Some("object — pass JSON via --args".to_string());
+            return Some("object, pass JSON via --args".to_string());
         }
         return None;
     }
@@ -386,8 +400,8 @@ fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
             .and_then(|items| items.get("type"))
             .and_then(Value::as_str)?;
         return Some(match items_type {
-            "array" => "array of arrays — pass JSON via --args".to_string(),
-            "object" => "array of objects — pass JSON via --args".to_string(),
+            "array" => "array of arrays, pass JSON via --args".to_string(),
+            "object" => "array of objects, pass JSON via --args".to_string(),
             other => format!("array of {other}s"),
         });
     }
@@ -401,15 +415,20 @@ const EXAMPLE_MAX_DEPTH: usize = 6;
 /// A mechanical `--args` example object: every required property plus the
 /// non-scalar optional ones, with placeholder values derived from the schema.
 ///
-/// Object-valued properties are expanded recursively. Emitting `{}` for them —
-/// as this did before — produced an example the daemon rejects outright
+/// Object-valued properties are expanded recursively. Emitting `{}` for them,
+/// as this did before, produced an example the daemon rejects outright
 /// whenever the nested schema has required keys of its own.
-fn example_args_object(props: &serde_json::Map<String, Value>, required: &[&str]) -> String {
-    serde_json::to_string(&example_object_value(props, required, 0))
+fn example_args_object(
+    root: &Value,
+    props: &serde_json::Map<String, Value>,
+    required: &[&str],
+) -> String {
+    serde_json::to_string(&example_object_value(root, props, required, 0))
         .unwrap_or_else(|_| "{}".to_string())
 }
 
 fn example_object_value(
+    root: &Value,
     props: &serde_json::Map<String, Value>,
     required: &[&str],
     depth: usize,
@@ -418,24 +437,25 @@ fn example_object_value(
     let mut entries: Vec<(&String, &Value)> = props.iter().collect();
     entries.sort_by_key(|(key, _)| (!required.contains(&key.as_str()), (*key).clone()));
     for (key, schema) in entries {
+        let schema = resolve_property_schema(root, schema);
         let ty = schema_type(schema);
         if !required.contains(&key.as_str()) && !matches!(ty, "array" | "object") {
             continue;
         }
-        example.insert(key.clone(), placeholder_value(key, schema, ty, depth));
+        example.insert(key.clone(), placeholder_value(root, key, schema, ty, depth));
     }
     Value::Object(example)
 }
 
 /// Expand an object schema into a skeleton containing its required keys.
-fn example_from_object_schema(schema: &Value, depth: usize) -> Value {
+fn example_from_object_schema(root: &Value, schema: &Value, depth: usize) -> Value {
     if depth >= EXAMPLE_MAX_DEPTH {
         return Value::Object(serde_json::Map::new());
     }
     // A closed variant union: show the first variant, which the accompanying
     // shape note lists alongside its alternatives.
     if let Some(variant) = one_of_variants(schema).and_then(|variants| variants.first()) {
-        return example_from_object_schema(variant, depth + 1);
+        return example_from_object_schema(root, variant, depth + 1);
     }
     let Some(props) = schema.get("properties").and_then(Value::as_object) else {
         return Value::Object(serde_json::Map::new());
@@ -443,12 +463,11 @@ fn example_from_object_schema(schema: &Value, depth: usize) -> Value {
     let required: Vec<&str> = schema
         .get("required")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    example_object_value(props, &required, depth + 1)
+        .map_or_default(|arr| arr.iter().filter_map(Value::as_str).collect());
+    example_object_value(root, props, &required, depth + 1)
 }
 
-fn placeholder_value(key: &str, schema: &Value, ty: &str, depth: usize) -> Value {
+fn placeholder_value(root: &Value, key: &str, schema: &Value, ty: &str, depth: usize) -> Value {
     match ty {
         "boolean" => Value::Bool(true),
         "integer" | "number" => Value::from(10),
@@ -463,16 +482,20 @@ fn placeholder_value(key: &str, schema: &Value, ty: &str, depth: usize) -> Value
                         .unwrap_or(Value::Null);
                     let inner_type = schema_type(&inner);
                     Value::Array(vec![
-                        placeholder_value(key, &inner, inner_type, depth + 1),
-                        placeholder_value(key, &inner, inner_type, depth + 1),
+                        placeholder_value(root, key, &inner, inner_type, depth + 1),
+                        placeholder_value(root, key, &inner, inner_type, depth + 1),
                     ])
                 }
-                "object" => example_from_object_schema(items.unwrap_or(&Value::Null), depth + 1),
-                other => placeholder_value(key, items.unwrap_or(&Value::Null), other, depth + 1),
+                "object" => {
+                    example_from_object_schema(root, items.unwrap_or(&Value::Null), depth + 1)
+                }
+                other => {
+                    placeholder_value(root, key, items.unwrap_or(&Value::Null), other, depth + 1)
+                }
             };
             Value::Array(vec![element])
         }
-        "object" => example_from_object_schema(schema, depth),
+        "object" => example_from_object_schema(root, schema, depth),
         _ => {
             if let Some(literal) = schema.get("const") {
                 return literal.clone();
@@ -575,119 +598,41 @@ mod tests {
         assert!(parsed["scope"].get("path_prefix").is_none());
     }
 
-    /// A bare `object required` with no description told the caller nothing
-    /// about the keys the daemon requires.
     #[test]
-    fn help_names_required_sub_keys_of_object_parameters() {
-        let help = help_for(nested_schema());
-        assert!(
-            help.contains("object with required keys: generation"),
-            "missing scope sub-key note in:\n{help}"
-        );
-        assert!(
-            help.contains("object with required keys: projection, temporal"),
-            "missing meta sub-key note in:\n{help}"
-        );
+    fn help_example_expands_referenced_object_schemas() {
+        let definition = tracedecay_mcp_catalog::get_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name == "tracedecay_implementations")
+            .expect("implementations is advertised");
+
+        let help = render_tool_cli_help(&definition);
+        let example = help
+            .lines()
+            .find(|line| line.trim_start().starts_with('{'))
+            .expect("example object")
+            .trim();
+        let parsed: Value = serde_json::from_str(example).expect("example parses as JSON");
+
+        assert!(parsed["meta"].is_object(), "{example}");
+        assert!(parsed["scope"].is_object(), "{example}");
+        assert!(parsed["selector"].is_object(), "{example}");
     }
 
-    /// A `oneOf` of object variants carries no `type`, so it used to fall
-    /// through to the `string` default and every caller sent a bare string.
+    /// The rename help must name every key the daemon requires in the accepted
+    /// preview, including the repository revision, and show it in the example.
     #[test]
-    fn help_reports_one_of_object_parameters_as_objects() {
-        let help = help_for(json!({
-            "type": "object",
-            "required": ["selector"],
-            "properties": {
-                "selector": {
-                    "oneOf": [
-                        {
-                            "type": "object",
-                            "required": ["selector", "name"],
-                            "properties": {
-                                "selector": {"const": "trait"},
-                                "name": {"type": "string"}
-                            }
-                        },
-                        {
-                            "type": "object",
-                            "required": ["selector", "name"],
-                            "properties": {
-                                "selector": {"const": "method"},
-                                "name": {"type": "string"}
-                            }
-                        }
-                    ]
-                }
-            }
-        }));
-        assert!(
-            help.contains("--selector") && help.contains("object"),
-            "selector not advertised as an object in:\n{help}"
-        );
-        assert!(
-            help.contains("selector=trait") && help.contains("selector=method"),
-            "variant labels missing in:\n{help}"
-        );
-    }
+    fn rename_help_requires_the_exact_preview_repository_revision() {
+        let definition = tracedecay_mcp_catalog::get_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name == "tracedecay_rename_symbol")
+            .expect("rename_symbol is advertised");
 
-    /// Optional typed fields arrive as `anyOf: [$ref, null]`; help must
-    /// resolve the local reference so the enum vocabulary renders.
-    #[test]
-    fn help_resolves_ref_enums_through_defs() {
-        let help = help_for(json!({
-            "type": "object",
-            "required": ["content"],
-            "$defs": {
-                "CategoryV1": {"type": "string", "enum": ["general", "decision", "code_area"]}
-            },
-            "properties": {
-                "content": {"type": "string"},
-                "category": {
-                    "anyOf": [
-                        {"$ref": "#/$defs/CategoryV1"},
-                        {"type": "null"}
-                    ]
-                }
-            }
-        }));
-        assert!(
-            help.contains("one of: general | decision | code_area"),
-            "referenced enum vocabulary missing in:\n{help}"
-        );
-        assert!(
-            help.contains("--category                   string"),
-            "referenced enum must render as its resolved scalar type:\n{help}"
-        );
-    }
-
-    /// Scalar parameters keep their existing rendering.
-    #[test]
-    fn help_keeps_scalar_parameter_rendering() {
-        let help = help_for(json!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "limit": {"type": "number", "description": "Max results"},
-                "mode": {"type": "string", "enum": ["fast", "exact"]}
-            }
-        }));
-        assert!(help.contains("--query"));
-        assert!(help.contains("Search query"));
-        assert!(help.contains("one of: fast | exact"));
-    }
-
-    #[test]
-    fn tool_result_constructors_keep_internal_analytics_explicit() {
-        let result = ToolResult::new(json!({"content": []}), vec!["src/lib.rs".to_string()]);
-        assert_eq!(result.value, json!({"content": []}));
-        assert_eq!(result.touched_files, vec!["src/lib.rs"]);
-        assert!(result.internal_analytics().is_none());
-
-        let result = result.with_internal_analytics(json!({"context_memory": {"match_count": 1}}));
-        assert_eq!(
-            result.internal_analytics(),
-            Some(&json!({"context_memory": {"match_count": 1}}))
-        );
+        let help = render_tool_cli_help(&definition);
+        assert!(help.contains(
+            "object with required keys: preview_id, preview_digest, plan_digest, repository_revision, graph_revision"
+        ));
+        assert!(help.contains("\"repository_revision\":"));
     }
 }

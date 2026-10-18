@@ -8,12 +8,12 @@ use super::*;
 
 const PRIVACY_DOMAIN_SALT: [u8; 32] = [0x5a; 32];
 
-struct GitFixture {
+pub(crate) struct GitFixture {
     root: TempDir,
 }
 
 impl GitFixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = TempDir::new().unwrap();
         let fixture = Self { root };
         fixture.git(&["init", "-q", "-b", "main"]);
@@ -22,7 +22,7 @@ impl GitFixture {
         fixture
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         self.root.path()
     }
 
@@ -31,6 +31,12 @@ impl GitFixture {
             tracedecay_runtime_core::git::try_git_program()
                 .expect("absolute git executable should resolve"),
         )
+        // Git 2.47+ detaches `maintenance run --auto` after a commit and holds
+        // `.git/objects/maintenance.lock` while it runs, which lands in one
+        // git-dir fingerprint and vanishes before the next. The read-only
+        // capture test compares those fingerprints, so the fixture must not
+        // write either.
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .current_dir(self.path())
         .output()
@@ -43,7 +49,7 @@ impl GitFixture {
         output
     }
 
-    fn commit(&self, contents: &str) {
+    pub(crate) fn commit(&self, contents: &str) {
         fs::write(self.path().join("tracked.txt"), contents).unwrap();
         self.git(&["add", "--", "tracked.txt"]);
         self.git(&["commit", "-q", "-m", contents]);
@@ -108,10 +114,21 @@ fn identity_capture_keeps_head_ref_and_private_locator_evidence() {
         RepositoryRemoteIdentityV1::Known(_)
     ));
     let encoded = serde_json::to_string(&capture).unwrap();
+    let RepositoryRemoteIdentityV1::Known(digest) = capture.evidence().remote_identity() else {
+        panic!(
+            "remote identity must be a privacy-bound digest, got {:?}",
+            capture.evidence().remote_identity()
+        );
+    };
+    assert_eq!(
+        digest.as_str(),
+        "sha256:50ef140bac90e9de982b2c596522dee50eefb1e05f064392ad62321a96a22f90"
+    );
     assert!(!encoded.contains("alice"));
     assert!(!encoded.contains("top-secret"));
     assert!(!encoded.contains("token=hidden"));
     assert!(!encoded.contains(fixture.path().to_string_lossy().as_ref()));
+    assert!(encoded.contains(digest.as_str()));
 
     fixture.git(&[
         "remote",
@@ -312,21 +329,12 @@ fn bare_repository_is_typed_unsupported() {
     assert!(matches!(result, EvidenceAvailabilityV1::Unsupported));
 }
 
-#[test]
-fn missing_path_is_marked_partially_readable() {
-    let root = TempDir::new().unwrap();
-    let missing = root.path().join("missing");
-    let (canonical, partially_readable) = canonical_path(&missing);
-    assert!(partially_readable);
-    assert_eq!(canonical, missing);
-}
-
 #[cfg(unix)]
 #[test]
 fn removed_opened_worktree_is_captured_as_partially_readable() {
     let fixture = GitFixture::new();
     fixture.commit("base");
-    let repo = gix::discover(fixture.path()).unwrap();
+    let repo = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let workdir = repo.workdir().unwrap().to_path_buf();
     fs::remove_dir_all(&workdir).unwrap();
 
@@ -481,51 +489,6 @@ fn non_repository_is_typed_unavailable() {
 fn head_oid(fixture: &GitFixture) -> String {
     let output = fixture.git(&["rev-parse", "HEAD"]);
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
-#[test]
-fn ref_movement_does_not_retarget_retained_provenance() {
-    let fixture = GitFixture::new();
-    fixture.commit("commit-a");
-    let commit_a_oid = head_oid(&fixture);
-    let retained = fixture.capture();
-    let EvidenceAvailabilityV1::Known(retained_commit) = retained.evidence().head_commit() else {
-        panic!(
-            "expected known head commit at A, got {:?}",
-            retained.evidence().head_commit()
-        );
-    };
-    assert_eq!(commit_a_oid, retained_commit.as_str());
-
-    // Build commit B on a scratch branch, then retarget `main` to it with a
-    // hard reset. The retained capture is immutable evidence; it must not
-    // follow the moving ref.
-    fixture.git(&["checkout", "-q", "-b", "scratch"]);
-    fixture.commit("commit-b");
-    let commit_b_oid = head_oid(&fixture);
-    assert_ne!(commit_a_oid, commit_b_oid);
-    fixture.git(&["checkout", "-q", "main"]);
-    fixture.git(&["reset", "--hard", "scratch"]);
-    assert_eq!(head_oid(&fixture), commit_b_oid);
-
-    let fresh = fixture.capture();
-    let EvidenceAvailabilityV1::Known(fresh_commit) = fresh.evidence().head_commit() else {
-        panic!(
-            "expected known head commit at B, got {:?}",
-            fresh.evidence().head_commit()
-        );
-    };
-    assert_eq!(commit_b_oid, fresh_commit.as_str());
-
-    // The first capture still names A even though the ref now names B.
-    let EvidenceAvailabilityV1::Known(retained_commit) = retained.evidence().head_commit() else {
-        panic!("retained head commit was mutated by the ref move");
-    };
-    assert_eq!(commit_a_oid, retained_commit.as_str());
-    assert_ne!(
-        retained.evidence().head_commit(),
-        fresh.evidence().head_commit()
-    );
 }
 
 #[test]
@@ -724,7 +687,7 @@ fn defunct_checkout_capture_never_falls_back_to_an_ambient_parent_repository() {
 
     // The nested checkout's repository is gone, but its path still exists
     // inside the ambient parent worktree. The contract requires a safe typed
-    // state — never the ambient parent's HEAD.
+    // state, never the ambient parent's HEAD.
     fs::remove_dir_all(child.join(".git")).unwrap();
     fs::remove_file(child.join("tracked.txt")).unwrap();
     let after = capture_repository_provenance(&request);

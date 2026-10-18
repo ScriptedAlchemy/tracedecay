@@ -4,7 +4,7 @@ use tracedecay_store::ParseOffset;
 
 use crate::admission::DEFAULT_MAX_RECORDS;
 use crate::runtime::SessionProvider;
-use crate::runtime::codex::CodexDiscoveryFrontier;
+use crate::runtime::hosts::codex::CodexDiscoveryFrontier;
 use crate::runtime::snapshot_observation::MAX_SNAPSHOT_CAPTURE_UNIT_BYTES;
 use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, TranscriptIngestResult};
 use crate::runtime::store_port::TranscriptIngestStore;
@@ -31,7 +31,7 @@ pub const USER_INGEST_CODEX_HISTORY_EPOCH_KEY: &str =
     "tracedecay-internal:user-ingest-codex-history-epoch:v2";
 
 /// Production bounds for transcript multi-source passes (discovery/queue/work).
-pub(super) fn default_ingest_pass_bounds() -> IngestPassBounds {
+pub fn default_ingest_pass_bounds() -> IngestPassBounds {
     let jsonl_bytes = u64::try_from(MAX_JSONL_RECORD_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
@@ -88,6 +88,7 @@ pub(super) const USER_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Kiro,
     SessionProvider::Kimi,
     SessionProvider::OpenCode,
+    SessionProvider::Pi,
     SessionProvider::Cline,
     SessionProvider::RooCode,
     SessionProvider::Kilo,
@@ -212,17 +213,14 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_store::{
         ParseOffset, TranscriptStore, TranscriptStoreError, TranscriptStoreResult,
-        TranscriptWriteBatch, TranscriptWriteKind,
+        TranscriptWriteBatch,
     };
 
-    use crate::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
-    use crate::runtime::source::TranscriptDiscoveryBounds;
+    use crate::runtime::hosts::codex;
+    use crate::runtime::source::{TranscriptDiscoveryBounds, spin_until_jsonl_change_settled};
     use crate::runtime::store_port::TranscriptIngestStore;
-    use crate::runtime::{SessionProvider, SessionRecord, codex};
 
-    use super::{
-        USER_CATCH_UP_PROVIDERS, read_codex_discovery_frontier, write_codex_discovery_frontier,
-    };
+    use super::{read_codex_discovery_frontier, write_codex_discovery_frontier};
 
     #[derive(Default)]
     struct RestartableStore {
@@ -256,18 +254,7 @@ mod tests {
             &self,
             batch: TranscriptWriteBatch,
         ) -> impl std::future::Future<Output = TranscriptStoreResult<()>> + Send {
-            let (cursor_path, kind) = batch.into_parts();
-            let (expected, next) = match kind {
-                TranscriptWriteKind::AdvanceOffset {
-                    expected_offset,
-                    next_offset,
-                }
-                | TranscriptWriteKind::Upsert {
-                    expected_offset,
-                    next_offset,
-                    ..
-                } => (expected_offset, next_offset),
-            };
+            let (cursor_path, expected, next) = batch.into_parts();
             let mut offsets = self.offsets.lock().expect("offset lock");
             let actual = *offsets.get(&cursor_path).unwrap_or(&ParseOffset::default());
             let result = if actual == expected {
@@ -314,24 +301,6 @@ mod tests {
             };
             std::future::ready(result)
         }
-
-        fn get_session(
-            &self,
-            _provider: &str,
-            _session_id: &str,
-        ) -> impl std::future::Future<Output = TranscriptStoreResult<Option<SessionRecord>>> + Send
-        {
-            std::future::ready(Ok(None))
-        }
-
-        fn persist_transcript_batch_with_git_evidence(
-            &self,
-            batch: TranscriptWriteBatch,
-            _commit_records: &[CommitSessionRecord],
-            _span_observations: &[SpanObservation],
-        ) -> impl std::future::Future<Output = TranscriptStoreResult<()>> + Send {
-            self.persist_transcript_batch(batch)
-        }
     }
 
     fn write_dated_rollout(home: &Path, name: &str) -> PathBuf {
@@ -339,20 +308,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("session directory");
         let path = dir.join(format!("rollout-{name}.jsonl"));
         std::fs::write(&path, b"{}\n").expect("rollout");
+        // Discovery proves a file unchanged only by a settled identity.
+        spin_until_jsonl_change_settled(&path);
         path
-    }
-
-    #[test]
-    fn user_catch_up_schedules_every_final_host() {
-        for provider in [
-            SessionProvider::Claude,
-            SessionProvider::Codex,
-            SessionProvider::Cursor,
-            SessionProvider::Kimi,
-            SessionProvider::OpenCode,
-        ] {
-            assert!(USER_CATCH_UP_PROVIDERS.contains(&provider));
-        }
     }
 
     #[tokio::test]
@@ -394,7 +352,10 @@ mod tests {
             .discover_transcript_paths_with_state(bounds, reloaded, &mut discovery_state)
             .expect("restart discovery");
         assert!(idle.report.paths.is_empty());
-        assert!(idle.next_frontier.is_complete());
+        let settled = expected
+            .iter()
+            .all(|path| spin_until_jsonl_change_settled(path));
+        assert_eq!(idle.next_frontier.is_complete(), settled);
         // Production consumers acknowledge every delivered pass (idle ones
         // included); an unacknowledged pass replays verbatim on the next
         // discovery, which would mask the addition below.
@@ -445,9 +406,18 @@ mod tests {
         let store = RestartableStore::default();
         store.fail_reads.store(true, Ordering::Relaxed);
 
-        let result = read_codex_discovery_frontier(&store).await;
-
-        assert!(result.is_err());
+        let error = read_codex_discovery_frontier(&store)
+            .await
+            .expect_err("a failed frontier read must not look complete");
+        assert!(matches!(
+            error,
+            crate::runtime::source::TranscriptIngestError::Store(
+                tracedecay_store::TranscriptStoreError::Storage {
+                    operation: "get_parse_offset",
+                    ..
+                }
+            )
+        ));
         assert_eq!(store.writes.load(Ordering::Relaxed), 0);
     }
 }

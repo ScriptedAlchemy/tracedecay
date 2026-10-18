@@ -10,21 +10,22 @@ use rusqlite::Connection;
 use serde_json::Value;
 use serde_json::json;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
-use tracedecay::daemon::{DaemonHandshake, call_tool};
+use tracedecay::daemon::call_tool;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
-use tracedecay_daemon_protocol::DaemonClientIdentity;
+use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationScopeV1, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId, UtcMicros,
+    ComponentVersion, DurableObservationV1, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadReferenceV1, ProjectionGenerationId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId, UtcMicros,
 };
 use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationReplayRequest,
     ObservationStore, ObservationStoreError, ObservationWrite,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
@@ -45,22 +46,25 @@ const OBSERVATION_PERSIST_BARRIER_DIR_ENV: &str = "TRACEDECAY_TEST_OBSERVATION_P
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 const DAEMON_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn source(stage: &str) -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new(format!("session.daemon-fault.{stage}")).unwrap())
-        .unwrap()
+fn source(stage: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(
+        SessionId::new(format!("session.daemon-fault.{stage}")).unwrap(),
+    )
+    .unwrap()
 }
 
-fn cursor(stage: &str, byte_offset: u64) -> ClaudeSourceCursorV1 {
-    ClaudeSourceCursorV1::new(
+fn cursor(stage: &str, byte_offset: u64) -> ObservationSourceCursorV1 {
+    ObservationSourceCursorV1::for_ordering(
         source(stage),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+        ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         byte_offset,
     )
     .unwrap()
 }
 
-fn observation(stage: &str) -> DurableClaudeObservationV1 {
+fn observation(stage: &str) -> DurableObservationV1 {
     let payload = json!({
         "kind": "assistant_message",
         "body": format!("sanitized daemon fault payload {stage}"),
@@ -76,15 +80,15 @@ fn observation(stage: &str) -> DurableClaudeObservationV1 {
         Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
     )
     .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::new(
         source(stage),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
-        ClaudeByteRangeV1::new(0, 100).unwrap(),
+        ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+        ObservationSourceRangeV1::new(0, 100).unwrap(),
     )
     .unwrap();
 
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         identity,
         receipt,
         RetentionClass::new("retention.daemon-fault").unwrap(),
@@ -93,12 +97,12 @@ fn observation(stage: &str) -> DurableClaudeObservationV1 {
     .unwrap()
 }
 
-fn write(stage: &str, observation: DurableClaudeObservationV1) -> AnchoredObservationWrite {
+fn write(stage: &str, observation: DurableObservationV1) -> AnchoredObservationWrite {
     let write = ObservationWrite::new(observation, None, cursor(stage, 100)).unwrap();
     let generation = ProjectionGenerationId::new("projection.daemon-fault.v4").unwrap();
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "daemon-fault").unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         generation.clone(),
         UtcMicros(1),
@@ -319,6 +323,75 @@ fn configured_daemon_can_be_killed_and_reaped() {
     }
 }
 
+/// A listen descriptor inherited across `fork` must not outlive its owner.
+///
+/// `branch_search_serves_a_committed_generation_behind_dirty_worktree_state`
+/// drops the init daemon and immediately spawns the next one. Killing only the
+/// leader leaves the inherited listener accepting on the same path, so the
+/// next spawn reports a live daemon. The owner is the group leader; retiring
+/// its socket with it makes that path refuse the moment the owner is reaped.
+#[cfg(unix)]
+#[test]
+fn reaped_owner_releases_an_inherited_listen_socket() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let home = tempdir_or_panic();
+    let socket_path = home.path().join("inherited-listen.sock");
+    let script = r#"
+import os, socket, sys, time
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.bind(sys.argv[1])
+sock.listen(1)
+if os.fork() == 0:
+    time.sleep(60)
+else:
+    time.sleep(60)
+"#;
+    let mut command = std::process::Command::new("python3");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let child = command.spawn().expect("python listener should start");
+    let mut owner = common::TestChildProcess::new(child);
+    owner.release_socket_on_stop(socket_path.clone());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+            break;
+        }
+        if let Some(status) = owner
+            .try_wait()
+            .expect("listener status should be readable")
+        {
+            panic!("listener exited before accepting: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "inherited listener never accepted on {}",
+            socket_path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    drop(owner);
+    assert!(
+        std::os::unix::net::UnixStream::connect(&socket_path).is_err(),
+        "an inherited listen descriptor must not keep the owner's path accepting"
+    );
+    assert!(
+        !socket_path.exists(),
+        "reaping the owner must unlink the socket it bound"
+    );
+}
+
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 async fn assert_daemon_crash_stage(
     barrier_stage: &str,
@@ -360,7 +433,7 @@ async fn assert_daemon_crash_stage(
         client_instance_id: "daemon-fault-harness".to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: tracedecay::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
     let ingest_args = |session_id: &str| {
         json!({
@@ -500,7 +573,7 @@ async fn assert_daemon_crash_stage(
             "provider": "claude",
             "session_id": session_id,
             "query": marker,
-            "catch_up": false,
+            "require_fresh": false,
             "format": "json",
         }),
         "user message search",

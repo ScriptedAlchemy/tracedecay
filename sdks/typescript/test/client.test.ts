@@ -6,23 +6,32 @@ import {
   type ServerResponse,
 } from "node:http";
 
-import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { OPERATIONS, UNAVAILABLE_OPERATIONS } from "../src/operations";
-import { factStoreCurateTerminalMatches } from "../src/automation-terminal";
 import {
+  OPERATIONS,
+  type NativeWorktreeSurfaceResultV1,
+  type OperationApplicationDistributionResult,
+  type PrimitiveSearchFreshnessV1,
+} from "../src/operations";
+import {
+  OPERATION_TERMINATIONS,
   decodeCanonicalSchema,
   decodeHttpSuccessEnvelope,
+  factStoreCurateReceiptMatches,
   type HttpSuccessEnvelope,
+  type PageState,
 } from "../src/types";
 
 import {
   TraceDecayAbortError,
   TraceDecayDisconnectedError,
+  TraceDecayDeniedError,
   TraceDecayMalformedResponseError,
-  TraceDecayPartialEffectError,
-  TraceDecayProtocolError,
   TraceDecayResetRequiredError,
+  TraceDecayStaleError,
+  TraceDecayUnavailableError,
+  TraceDecayUnsupportedError,
   createClient,
   type OperationRequestOptions,
 } from "../src/client";
@@ -67,106 +76,7 @@ async function canonicalDigest(value: unknown): Promise<string> {
     byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-async function curationEnvelope() {
-  const owner = { kind: "profile" };
-  const ownerDigest = await canonicalDigest(["fact-owner.v1", owner]);
-  const ownerBinding = ownerDigest.slice("sha256:".length);
-  const sourceFactId = `fact.v1.${ownerBinding}.${"a".repeat(64)}`;
-  const targetFactId = `fact.v1.${ownerBinding}.${"b".repeat(64)}`;
-  const receipt = {
-    owner,
-    operation_id: "operation.sdk.curate",
-    input_digest: "c".repeat(64),
-    automation_run_id: "request.sdk.curate",
-    operation_effects: [{
-      kind: "link_facts",
-      source_fact_id: sourceFactId,
-      target_fact_id: targetFactId,
-      relation: {
-        kind: "supports",
-        evidence_fact_ids: [sourceFactId],
-        confidence_millionths: 900_000,
-        provenance: {
-          source_label: "sdk fixture",
-          sanitization_receipt: {
-            receipt: {
-              receipt_id: "receipt.sdk",
-              sanitizer_version: "sanitizer.sdk",
-            },
-            disposition: "redacted",
-            sensitivity: "secret",
-            payload: { digest: `sha256:${"d".repeat(64)}`, byte_len: 1 },
-          },
-        },
-      },
-      disposition: "linked",
-      commit: {
-        disposition: "committed",
-        fact_id: sourceFactId,
-        owner,
-        committed_event_ids: ["event.sdk"],
-        last_event_id: "event.sdk",
-        active_assertion_id: "assertion.sdk",
-      },
-    }],
-    replay_fact_id: sourceFactId,
-    replay_event_id: "event.sdk",
-    changed_fact_ids: [sourceFactId, targetFactId],
-    accepted_operations: 1,
-    facts_added: 0,
-    facts_updated: 0,
-    facts_merged: 0,
-    facts_removed: 0,
-    normalized_tags: 0,
-    facts_linked: 1,
-  };
-  const requestDigest = await canonicalDigest([
-    "tracedecay.automation-run.request-identity.v1",
-    {
-      kind: "memory_curator",
-      options: { fact_review_limit: 24, min_confidence_millionths: 720_000 },
-    },
-  ]);
-  const result = {
-    run_id: "request.sdk.curate",
-    task: "memory_curator",
-    request_digest: requestDigest,
-    terminal: {
-      status: "completed",
-      summary: {
-        reviewed_count: 1,
-        accepted_count: 1,
-        rejected_count: 0,
-        skipped_count: 0,
-      },
-    },
-    committed_receipts: [{
-      kind: "curation",
-      receipt: {
-        receipt,
-        canonical_digest: await canonicalDigest([
-          "tracedecay.automation-run.curation-receipt.v1",
-          receipt,
-        ]),
-      },
-    }],
-  };
-  return {
-    request_id: "request.sdk.curate",
-    outcome: { outcome: "effect", value: { payload: result } },
-  };
-}
-
-async function resealCurationEnvelope(envelope: Awaited<ReturnType<typeof curationEnvelope>>) {
-  const settled = envelope.outcome.value.payload.committed_receipts[0]!.receipt;
-  settled.canonical_digest = await canonicalDigest([
-    "tracedecay.automation-run.curation-receipt.v1",
-    settled.receipt,
-  ]);
-  return envelope;
-}
-
-function successEnvelope(payload: unknown) {
+function successEnvelope(payload: unknown, cursor: unknown = null) {
   return {
     kind: "success",
     value: {
@@ -195,7 +105,7 @@ function successEnvelope(payload: unknown) {
             sort_revision: 1,
             total: 1,
             returned: 1,
-            cursor: null,
+            cursor,
             expires_at: null,
           },
           payload,
@@ -206,6 +116,70 @@ function successEnvelope(payload: unknown) {
       future_envelope_field: "preserved",
     },
   };
+}
+
+async function curatorScope() {
+  return {
+    project_id: "project.sdk",
+    repository_id: "repository.sdk",
+    worktree_id: "worktree.sdk",
+    reference: null,
+    scope_digest: await canonicalDigest([
+      "tracedecay.application.scope.v1", "project.sdk", "repository.sdk", "worktree.sdk", null,
+    ]),
+  };
+}
+
+/** The `fact_store_curate` answer at admission: a pending effect receipt. */
+async function curateSuccessEnvelope(payload: unknown) {
+  const envelope = successEnvelope(payload);
+  return {
+    ...envelope,
+    value: {
+      ...envelope.value,
+      binding_id: "binding.http.fact_store_curate.v1",
+      contract: {
+        schema_id: "schema.application.retained.fact-store-curate.result",
+        schema_revision: 1,
+      },
+      request_id: "request.sdk.curate",
+      scope: await curatorScope(),
+      outcome: {
+        outcome: "effect",
+        value: {
+          effect_id: "effect.retained.fact_store_curate.request.sdk.curate",
+          effect_class: "administrative",
+          idempotency_key: "idempotency.retained.fact_store_curate.sdk",
+          authority: {},
+          expected_state: "sha256:" + "0".repeat(64),
+          reconciliation: "pending",
+          receipt: { outcome: "effect_unknown", committed_state: null },
+          payload,
+          execution: { ...structuredClone(RECEIPT), termination: "effect_unknown" },
+        },
+      },
+    },
+  };
+}
+
+/** A retained fact-store evidence envelope for the named HTTP binding. */
+function factStoreEnvelope(
+  operation: "fact_store_search" | "fact_store_list",
+  payload: unknown,
+  cursor: unknown,
+) {
+  const envelope = successEnvelope(payload, cursor);
+  envelope.value.binding_id = `binding.http.${operation}.v1`;
+  envelope.value.contract.schema_id =
+    `schema.application.retained.${operation.replaceAll("_", "-")}.result`;
+  return envelope;
+}
+
+function evidencePage(envelope: HttpSuccessEnvelope<unknown>): PageState {
+  if (envelope.outcome.outcome !== "evidence") {
+    throw new Error(`expected evidence, received ${envelope.outcome.outcome}`);
+  }
+  return envelope.outcome.value.page;
 }
 
 function problemEnvelope(
@@ -222,6 +196,7 @@ function problemEnvelope(
     unavailableClassification?: string | null;
     executionFailureClassification?: string | null;
     diagnostic?: unknown;
+    detail?: unknown;
     terminality?: string;
   } = {},
 ) {
@@ -263,6 +238,7 @@ function problemEnvelope(
       code,
       message: code,
       diagnostic,
+      detail: options.detail ?? null,
       committed_receipt: options.committedReceipt ?? null,
       owning_layer: "application",
       terminality:
@@ -360,6 +336,29 @@ async function withServer(
   }
 }
 
+const OPEN_EVENT = {
+  event: "open",
+  data: {
+    correlation_id: "request.operation",
+    frontier: {
+      next_sequence: 0,
+      retained_from_sequence: 0,
+      resume_token: "resume",
+    },
+  },
+};
+const RESUME_URL =
+  "/projects/project.sdk/application/operations/request.operation/events?next_sequence=0&resume_token=resume";
+
+const openThenEof: RequestHandler = (_request, response) => {
+  response.writeHead(200, { "content-type": "text/event-stream" });
+  response.end(["event: open", `data: ${JSON.stringify(OPEN_EVENT)}`, "", ""].join("\n"));
+};
+
+const refuseConnection: RequestHandler = (request) => {
+  request.socket.destroy();
+};
+
 function json(
   response: ServerResponse,
   status: number,
@@ -382,14 +381,21 @@ describe("canonical JSON Schema decoding", () => {
     expect(decodeCanonicalSchema(Number.MIN_SAFE_INTEGER, int64)).toBe(
       Number.MIN_SAFE_INTEGER,
     );
-    expect(() => decodeCanonicalSchema(4_294_967_296, uint32)).toThrow(TypeError);
+    expect(() => decodeCanonicalSchema(4_294_967_296, uint32)).toThrow(
+      "value is outside uint32",
+    );
+    expect(() => decodeCanonicalSchema(-1, uint64)).toThrow(
+      "value is outside safely representable uint64",
+    );
     expect(() =>
       decodeCanonicalSchema(Number.MAX_SAFE_INTEGER + 1, uint64),
-    ).toThrow(TypeError);
-    expect(() => decodeCanonicalSchema(true, uint64)).toThrow(TypeError);
+    ).toThrow("value must be integer");
+    expect(() => decodeCanonicalSchema(true, uint64)).toThrow(
+      "value must be integer",
+    );
   });
 
-  it("canonicalizes unique object keys in one serialization per item", () => {
+  it("treats key order as insignificant when rejecting duplicate items", () => {
     const schema = {
       type: "array",
       uniqueItems: true,
@@ -403,50 +409,586 @@ describe("canonical JSON Schema decoding", () => {
         ],
         schema,
       ),
-    ).toThrow(TypeError);
+    ).toThrow("value contains duplicate items");
 
-    let serializations = 0;
-    const originalStringify = JSON.stringify.bind(JSON);
-    const stringify = vi.spyOn(JSON, "stringify").mockImplementation((value: unknown) => {
-      serializations += 1;
-      return originalStringify(value);
-    });
-    try {
+    expect(
       decodeCanonicalSchema(
-        Array.from({ length: 100 }, (_, index) => ({ index })),
+        [
+          { index: 0, label: "item" },
+          { index: 1, label: "item" },
+          { index: 2, label: "item" },
+        ],
         schema,
-      );
-    } finally {
-      stringify.mockRestore();
-    }
-    expect(serializations).toBe(100);
+      ),
+    ).toEqual([
+      { index: 0, label: "item" },
+      { index: 1, label: "item" },
+      { index: 2, label: "item" },
+    ]);
   });
 });
 
 describe("TraceDecayClient generated operation bindings", () => {
-  it("publishes typed methods from the canonical operation union", () => {
-    expectTypeOf<
-      Parameters<
-        ReturnType<typeof createClient>["operations"]["workflow_get_definition"]
-      >[0]
-    >().toEqualTypeOf<{
-      readonly definition_id: string;
-      readonly definition_version: number;
-    }>();
-
+  it("decodes the worktree freshness verdict a graph read opens with", async () => {
+    const possiblyStale = {
+      state: "possibly_stale",
+      indexing: { summary: "rebuilding generation.sdk.2", rebuild_in_flight: true },
+    };
+    const details = {
+      id: "occurrence.sdk.main",
+      name: "main",
+      kind: "function",
+      qualified_name: "crate::main",
+      file: "src/main.rs",
+      start_line: 1,
+      end_line: 3,
+      signature: null,
+      docstring: null,
+      is_async: false,
+      derives: [],
+      visibility: "public",
+      branches: 0,
+      loops: 0,
+      max_nesting: 0,
+      cyclomatic_complexity: 1,
+      complexity_analysis: "complete",
+      cost_to_expand: { body: 60, full_file: 10 },
+      unavailable_fields: [],
+      freshness: possiblyStale,
+    };
+    const notFound = {
+      status: "not_found",
+      reason_code: "node_not_found",
+      node_id: "occurrence.sdk.missing",
+      message: "Node not found: occurrence.sdk.missing",
+      freshness: { state: "fresh" },
+    };
+    const impact = {
+      node_count: 0,
+      complete: true,
+      unavailable_fields: ["edge_count"],
+      nodes: [],
+      freshness: { state: "fresh" },
+    };
+    const responses: unknown[] = [details, notFound, impact];
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
+      mcp: { callTool: async () => responses.shift() },
     });
 
-    expect(new Set(OPERATIONS.map((operation) => operation.operation)).size).toBe(
-      OPERATIONS.length,
-    );
-    expect(Object.keys(client.operations).sort()).toEqual(
-      OPERATIONS.map((operation) => operation.operation).sort(),
-    );
-    expect(UNAVAILABLE_OPERATIONS).toEqual([]);
+    await expect(client.operations.node({ node_id: details.id })).resolves.toEqual(details);
+    await expect(client.operations.node({ node_id: notFound.node_id })).resolves.toEqual(notFound);
+    await expect(client.operations.impact({ node_id: details.id, max_depth: 2 })).resolves.toEqual(impact);
+
+    const injectedReads: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+      [
+        "similar",
+        {
+          source: {
+            project_id: "x",
+            repository_id: "x",
+            source_generation: "x",
+            snapshot_digest: "x",
+            symbol_occurrence_id: "x",
+            path: "x",
+            body_span: { start_byte: 0, end_byte: 0 },
+          },
+          families: [],
+          source_generation: "x",
+          coverage: { status: "complete" },
+        },
+      ],
+      [
+        "redundancy",
+        {
+          source_generation: "x",
+          ranked_by: "reviewable_source_bytes",
+          families: [],
+          coverage: { status: "complete", examined_families: 0, examined_members: 0 },
+        },
+      ],
+      [
+        "rename_preview",
+        {
+          read_only: false,
+          note: "x",
+          symbol: "x",
+          node: { id: "x", name: "x", qualified_name: "x", kind: "x", file: "x", line: 0 },
+          reference_count: 0,
+          references: [],
+          text_only_matches: [],
+        },
+      ],
+      [
+        "port_status",
+        {
+          source_dir: "x",
+          target_dir: "x",
+          source_count: 0,
+          target_count: 0,
+          matched: 0,
+          unmatched: 0,
+          target_only: 0,
+          coverage_percent: 0,
+          unmatched_by_file: {},
+          matched_symbols: [],
+          target_only_symbols: [],
+        },
+      ],
+      ["port_order", { source_dir: "x", total_symbols: 0, returned: 0, levels: [], cycles: [] }],
+      ["todos", { match_count: 0, by_kind: {}, markers: [] }],
+      [
+        "test_map",
+        { covered_symbols: 0, uncovered_symbols: 0, test_files: [], coverage: [], uncovered: [] },
+      ],
+      [
+        "test_risk",
+        {
+          risks: [],
+          summary: {
+            total_functions: 0,
+            tested: 0,
+            skipped: 0,
+            coverage_pct: 0,
+            top_risk_untested: "x",
+            top_risk_unattributed: "x",
+            attribution: {
+              depth: 0,
+              direct_unit_attributed: 0,
+              closure_attributed: 0,
+              trait_resolved_attributed: 0,
+              public_api_attributed: 0,
+              cli_entry_attributed: 0,
+              total_attributed: 0,
+            },
+            buckets: { attributed: 0, reachable_unattributed: 0, orphan_entry: 0, excluded: 0 },
+            confidence: "static_lower_bound",
+            confidence_note: "x",
+          },
+        },
+      ],
+      [
+        "gini",
+        {
+          gini: 0,
+          interpretation: "x",
+          total_items: 0,
+          metric: "complexity",
+          scope: "file",
+          incomplete_complexity_symbols: 0,
+          outliers: [],
+        },
+      ],
+      ["dependency_depth", { max_depth: 0, ideal_depth: 0, depth_score: 0, chains: [] }],
+      ["health", { quality_signal: 0, files_analyzed: 0 }],
+      [
+        "dsm",
+        {
+          shape: "stats",
+          stats: { files: 0, edges: 0, density: 0, clusters: 0, largest_cluster: 0 },
+          clusters: [],
+        },
+      ],
+      [
+        "diagnose",
+        {
+          diagnostics_parsed: 0,
+          diagnostics_returned: 0,
+          mapped_to_node: 0,
+          unmapped: 0,
+          truncated: false,
+          published: { status: "skipped", reason: "x" },
+          diagnostics: [],
+        },
+      ],
+      ["dead_code", { dead_code_count: 0, symbols: [] }],
+      [
+        "circular",
+        {
+          cycle_count: 0,
+          reported_cycle_count: 0,
+          omitted_cycle_count: 0,
+          limit: 0,
+          member_limit: 0,
+          cycles: [],
+        },
+      ],
+      ["hotspots", { hotspot_count: 0, hotspots: [] }],
+      [
+        "unmounted_files",
+        {
+          unmounted_file_count: 0,
+          returned_count: 0,
+          omitted_count: 0,
+          complete: false,
+          ecosystems: [],
+          limit: 0,
+          unmounted: [],
+        },
+      ],
+      ["rank", { edge_kind: "implements", direction: "incoming", result_count: 0, ranking: [] }],
+      ["largest", { result_count: 0, ranking: [] }],
+      ["coupling", { direction: "fan_in", result_count: 0, ranking: [] }],
+      ["inheritance_depth", { result_count: 0, ranking: [] }],
+      ["recursion", { cycle_count: 0, cycles: [] }],
+      ["complexity", { formula: "x", note: "x", result_count: 0, ranking: [] }],
+      [
+        "doc_coverage",
+        {
+          total_undocumented: 0,
+          returned_count: 0,
+          omitted_count: 0,
+          complete: false,
+          limit: 0,
+          file_count: 0,
+          files: [],
+        },
+      ],
+      ["god_class", { result_count: 0, ranking: [] }],
+      [
+        "unsafe_patterns",
+        { match_count: 0, by_kind: {}, matches: [], coverage: "complete", omissions: [] },
+      ],
+      ["constructors", { found: false, struct: "x", message: "x", match_count: 0, sites: [] }],
+      [
+        "constructors",
+        {
+          struct: "x",
+          candidate_count: 0,
+          resolution_status: "unverified",
+          resolution_reason: "ambiguous_simple_name",
+          match_count: 0,
+          sites: [],
+        },
+      ],
+      ["field_sites", { field: "x", qualifier_applied: false, write_count: 0, write_sites: [] }],
+      ["find_exact_symbol", { name: "x", count: 0, matches: [] }],
+      [
+        "grep",
+        {
+          results: [],
+          match_count: 0,
+          files_scanned: 0,
+          truncated: false,
+          coverage: { requested_domains: [], returned: 0, completeness: "complete", domains: [] },
+          omissions: [],
+          graph_enrichment: { status: "complete", enriched: 0, returned: 0 },
+        },
+      ],
+      ["ast_grep_search", { results: [], match_count: 0, files_scanned: 0, truncated: false }],
+      [
+        "affected",
+        {
+          changed_files: [],
+          affected_tests: [],
+          count: 0,
+          ranked_tests: [],
+          recommended_tests: [],
+          ranking_metadata: {
+            strategy: "x",
+            distance: "x",
+            recommended_proximity: [],
+            compatibility_field: "x",
+          },
+        },
+      ],
+      [
+        "diff_context",
+        {
+          changed_files: [],
+          modified_symbols: [],
+          impacted_symbols_count: 0,
+          impacted_symbols: [],
+          impact_complete: false,
+          affected_tests: [],
+          test_gate: { verdict: "pass", exit_code: 0, untested: [] },
+          missing_co_change_partners: [],
+        },
+      ],
+      [
+        "changelog",
+        {
+          status: "complete",
+          from_ref: "x",
+          to_ref: "x",
+          changed_file_count: 0,
+          changed_files: [],
+          base_generation: "x",
+          head_generation: "x",
+          symbols_added: [],
+          symbols_removed: [],
+          symbols_modified: [],
+          symbol_changes_coverage: { status: "complete" },
+        },
+      ],
+      [
+        "changelog",
+        {
+          status: "partial",
+          from_ref: "x",
+          to_ref: "x",
+          changed_file_count: 0,
+          changed_files: [],
+          symbols_added: [],
+          symbols_removed: [],
+          symbols_modified: [],
+          symbol_changes_coverage: { status: "unavailable", reason: "x", retryable: false },
+        },
+      ],
+      [
+        "commit_context",
+        { changed_files: [], symbols_by_role: {}, recent_commits: [], summary: "x" },
+      ],
+      [
+        "pr_context",
+        {
+          status: "complete",
+          base: "x",
+          head: "x",
+          base_oid: "x",
+          head_oid: "x",
+          merge_base: "x",
+          graph_generation: "x",
+          commits: [],
+          files_changed: 0,
+          changes: [],
+          missing_co_change_partners: [],
+          symbols_added: 0,
+          symbols_removed: 0,
+          symbols_modified: 0,
+          added: [],
+          removed: [],
+          modified: [],
+          symbol_changes_coverage: {
+            status: "complete",
+            base_generation: "x",
+            head_generation: "x",
+          },
+          symbol_page: {
+            limit: 0,
+            returned: 0,
+            has_more: false,
+            complete: false,
+            selection: "unavailable",
+            continuation_available: false,
+          },
+          analysis_coverage: {
+            seed_symbols_analyzed: 0,
+            symbols_returned: 0,
+            symbols_complete: false,
+            impact_nodes_admitted: 0,
+            impact_nodes_returned: 0,
+            direct_call_edges_admitted: 0,
+            impact_bytes_admitted: 0,
+            impact_partial: false,
+            complete: false,
+          },
+          test_files_changed: [],
+          affected_tests: [],
+          affected_tests_coverage: { complete: false, selection: "unavailable" },
+          impacted_modules: [],
+          impacted_modules_coverage: { complete: false, selection: "unavailable" },
+        },
+      ],
+      [
+        "pr_context",
+        {
+          status: "partial",
+          message: "x",
+          base: "x",
+          head: "x",
+          base_oid: "x",
+          head_oid: "x",
+          merge_base: "x",
+          graph_generation: "x",
+          commits: [],
+          files_changed: 0,
+          changes: [],
+          missing_co_change_partners: [],
+          symbols_added: 0,
+          symbols_removed: 0,
+          symbols_modified: 0,
+          added: [],
+          removed: [],
+          modified: [],
+          symbol_changes_coverage: { status: "unavailable", reason: "x", retryable: false },
+        },
+      ],
+      [
+        "pr_context",
+        {
+          status: "partial",
+          message: "x",
+          base: "x",
+          head: "x",
+          base_oid: "x",
+          head_oid: "x",
+          merge_base: "x",
+          commits: [],
+          files_changed: 0,
+          changes: [],
+          missing_co_change_partners: [],
+          symbols_added: 0,
+          symbols_modified: 0,
+          added: [],
+          modified: [],
+          symbol_page: {
+            limit: 0,
+            returned: 0,
+            has_more: false,
+            complete: false,
+            selection: "unavailable",
+            continuation_available: false,
+          },
+          analysis_coverage: {
+            seed_symbols_analyzed: 0,
+            symbols_returned: 0,
+            symbols_complete: false,
+            impact_nodes_admitted: 0,
+            impact_nodes_returned: 0,
+            direct_call_edges_admitted: 0,
+            impact_bytes_admitted: 0,
+            impact_partial: false,
+            complete: false,
+          },
+          test_files_changed: [],
+          affected_tests: [],
+          affected_tests_coverage: { complete: false, selection: "unavailable" },
+          impacted_modules: [],
+          impacted_modules_coverage: { complete: false, selection: "unavailable" },
+          verified_graph_evidence: {
+            status: "unavailable",
+            reason_code: "x",
+            retryable: false,
+            detail: "x",
+          },
+        },
+      ],
+      [
+        "branch_search",
+        {
+          status: "complete",
+          branch: "x",
+          source_reference: "x",
+          source_revision: "x",
+          source_tree: "x",
+          code_generation: "x",
+          results: [],
+        },
+      ],
+      [
+        "branch_diff",
+        {
+          status: "complete",
+          base: "x",
+          head: "x",
+          base_revision: "x",
+          base_tree: "x",
+          head_revision: "x",
+          head_tree: "x",
+          base_generation: "x",
+          head_generation: "x",
+          total_changes: 0,
+          summary: { added: 0, removed: 0, changed: 0 },
+          changes: [],
+        },
+      ],
+      [
+        "branch_diff",
+        {
+          status: "partial",
+          reason: "result_limit",
+          base: "x",
+          head: "x",
+          base_revision: "x",
+          base_tree: "x",
+          head_revision: "x",
+          head_tree: "x",
+          base_generation: "x",
+          head_generation: "x",
+          total_changes: 0,
+          next_cursor: "x",
+          summary: { added: 0, removed: 0, changed: 0 },
+          changes: [],
+        },
+      ],
+      [
+        "branch_list",
+        { status: "complete", snapshot_count: 0, examined: 0, limit: 0, snapshots: [] },
+      ],
+      ["files", { count: 0, layout: "flat", files: [] }],
+      ["config", { match_count: 0, matches: [] }],
+      [
+        "retrieve",
+        {
+          handle: "x",
+          expired: false,
+          original_chars: 0,
+          total_chars: 0,
+          offset: 0,
+          has_more: false,
+          created_at: 0,
+          expires_at: 0,
+          content: "x",
+        },
+      ],
+      [
+        "retrieve",
+        { handle: "x", reason_code: "x", message: "x", retryable: false, retry_instruction: "x" },
+      ],
+      [
+        "retrieve",
+        {
+          handle: "x",
+          expired: false,
+          reason_code: "x",
+          message: "x",
+          retryable: false,
+          retry_instruction: "x",
+          created_at: 0,
+          expires_at: 0,
+        },
+      ],
+    ];
+    for (const [tool, body] of injectedReads) {
+      const descriptor = OPERATIONS.find(
+        (operation) =>
+          operation.transport.kind === "mcp_tool" &&
+          operation.transport.toolName === `tracedecay_${tool}`,
+      );
+      expect(descriptor, tool).toBeDefined();
+      const opened = { ...body, freshness: possiblyStale };
+      expect(descriptor!.decodeResult(opened), tool).toEqual(opened);
+      expect(descriptor!.decodeResult(body), `${tool} without a verdict`).toEqual(body);
+    }
+    const similar = OPERATIONS.find(
+      (operation) =>
+        operation.transport.kind === "mcp_tool" &&
+        operation.transport.toolName === "tracedecay_similar",
+    )!;
+    expect(() => similar.decodeResult({
+      ...injectedReads[0]![1], freshness: { state: "invented" },
+    })).toThrow();
+  });
+
+  it("validates freshness on both distribution views", () => {
+    const distribution = OPERATIONS.find(
+      (operation) => operation.transport.kind === "mcp_tool"
+        && operation.transport.toolName === "tracedecay_distribution",
+    )!;
+    for (const body of [
+      { mode: "summary", total_kinds: 0, distribution: [] },
+      { mode: "per_file", file_count: 0, total_file_count: 0, omitted_file_count: 0, files: [] },
+    ]) {
+      const result = { ...body, path_filter: "src", freshness: { state: "fresh" } };
+      const decoded = distribution.decodeResult(result) as OperationApplicationDistributionResult;
+      const freshness: PrimitiveSearchFreshnessV1 | null | undefined = decoded.freshness;
+      expect(decoded).toEqual(result);
+      expect(freshness).toEqual({ state: "fresh" });
+      expect(() => distribution.decodeResult({ ...result, freshness: { state: "invented" } })).toThrow();
+    }
   });
 
   it("preserves remote base paths and origin policy", async () => {
@@ -476,7 +1018,9 @@ describe("TraceDecayClient generated operation bindings", () => {
         {},
         { deadlineMicros: 1_800_000_000_000_003 },
       ),
-    ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    ).rejects.toThrow(
+      "the daemon returned an invalid workflow_list_definitions success envelope",
+    );
 
     expect(requestedUrl).toBe(
       "https://remote.example/api/v1/projects/project.sdk/application/workflow/list-definitions",
@@ -503,12 +1047,14 @@ describe("TraceDecayClient generated operation bindings", () => {
     });
 
     await expect(client.operations.application_fact_store_curate({}))
-      .rejects.toBeInstanceOf(TraceDecayProtocolError);
+      .rejects.toThrow(
+        "application_fact_store_curate requires a stable requestId replay handle",
+      );
     expect(fetchCalls).toBe(0);
     await expect(client.operations.application_fact_store_curate(
       {},
       { requestId: "request.sdk.curate" },
-    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    )).rejects.toThrow("the daemon returned an unknown HTTP envelope");
     expect(fetchCalls).toBe(1);
     expect(replayHeader).toBe("request.sdk.curate");
   });
@@ -535,157 +1081,95 @@ describe("TraceDecayClient generated operation bindings", () => {
     await expect(client.operations.application_fact_store_curate(
       {},
       { requestId: "request.sdk.curate" },
-    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    )).rejects.toThrow("the daemon returned a malformed problem envelope");
   });
 
-  it("accepts an automatic-curation terminal through the public client", async () => {
-    const terminal = await curationEnvelope();
-    const sourcePayload = terminal.outcome.value.payload;
-    const payload = {
-      ...sourcePayload,
+  it("accepts only the started receipt of the run the request admitted", async () => {
+    const requestDigest = await canonicalDigest([
+      "tracedecay.automation-run.request-identity.v1",
+      {
+        kind: "memory_curator",
+        options: { fact_review_limit: 24, min_confidence_millionths: 720_000 },
+      },
+    ]);
+    const receipt = {
+      run_id: "request.sdk.curate",
+      task: "memory_curator",
+      request_digest: requestDigest,
+      state: "started",
+    };
+    const scope = await curatorScope();
+    const envelope = (payload: unknown) => ({
+      request_id: "request.sdk.curate",
+      scope,
+      outcome: { outcome: "effect", value: { reconciliation: "pending", payload } },
+    });
+
+    await expect(factStoreCurateReceiptMatches({}, envelope(receipt))).resolves.toBe(true);
+    await expect(factStoreCurateReceiptMatches({}, envelope({
+      ...receipt,
+      run_id: "request.foreign",
+    }))).resolves.toBe(false);
+    await expect(factStoreCurateReceiptMatches(
+      { fact_review_limit: 25 },
+      envelope(receipt),
+    )).resolves.toBe(false);
+    await expect(factStoreCurateReceiptMatches({}, envelope({
+      ...receipt,
+      state: "completed",
+    }))).resolves.toBe(false);
+    const { state: _state, ...withoutState } = receipt;
+    await expect(factStoreCurateReceiptMatches({}, envelope({
+      ...withoutState,
       terminal: {
-        ...sourcePayload.terminal,
-        summary: {
-          ...sourcePayload.terminal.summary,
-          reviewed_count: 0,
-          accepted_count: 0,
-        },
+        status: "completed",
+        summary: { reviewed_count: 0, accepted_count: 0, rejected_count: 0, skipped_count: 0 },
       },
       committed_receipts: [],
+    }))).resolves.toBe(false);
+  });
+
+  it("returns the started receipt bound to the submitted bounds and scope", async () => {
+    const bounds = { fact_review_limit: 37, min_confidence_millionths: 812_345 };
+    const requestDigest = await canonicalDigest([
+      "tracedecay.automation-run.request-identity.v1",
+      { kind: "memory_curator", options: bounds },
+    ]);
+    const receipt = {
+      run_id: "request.sdk.curate",
+      task: "memory_curator",
+      request_digest: requestDigest,
+      state: "started",
     };
-    const envelope = {
-      kind: "success",
-      value: {
-        binding_id: "binding.http.fact_store_curate.v1",
-        contract: {
-          schema_id: "schema.application.retained.fact-store-curate.result",
-          schema_revision: 1,
-        },
-        request_id: "request.sdk.curate",
-        scope: {},
-        outcome: {
-          outcome: "effect",
-          value: {
-            effect_id: "effect.sdk.curate",
-            effect_class: "administrative",
-            idempotency_key: "request.sdk.curate",
-            authority: {},
-            expected_state: "state.sdk.curate",
-            reconciliation: "required",
-            receipt: {},
-            execution: structuredClone(RECEIPT),
-            payload,
-          },
-        },
-      },
-    };
+    const envelope = await curateSuccessEnvelope(receipt);
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
-      fetch: async () => new Response(JSON.stringify(envelope), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+      fetch: async (_url, init) => {
+        expect(JSON.parse(String(init?.body))).toEqual(bounds);
+        return new Response(JSON.stringify(envelope), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
     });
 
-    await expect(client.operations.application_fact_store_curate(
-      {},
+    const response = await client.operations.application_fact_store_curate(
+      bounds,
       { requestId: "request.sdk.curate" },
-    )).resolves.toMatchObject({ request_id: "request.sdk.curate" });
-  });
-
-  it("binds structurally valid automatic-curation terminals to the replay handle", async () => {
-    const digest = await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(JSON.stringify([
-        "tracedecay.automation-run.request-identity.v1",
-        {
-          kind: "memory_curator",
-          options: {
-            fact_review_limit: 24,
-            min_confidence_millionths: 720_000,
-          },
-        },
-      ])),
     );
-    const requestDigest = `sha256:${Array.from(new Uint8Array(digest), (byte) =>
-      byte.toString(16).padStart(2, "0")).join("")}`;
-    const result = {
-      run_id: "request.sdk.curate",
-      task: "memory_curator",
-      request_digest: requestDigest,
-      terminal: {
-        status: "completed",
-        summary: {
-          reviewed_count: 0,
-          accepted_count: 0,
-          rejected_count: 0,
-          skipped_count: 0,
-        },
-      },
-      committed_receipts: [],
-    };
-    const envelope = {
-      request_id: "request.sdk.curate",
-      outcome: { outcome: "effect", value: { payload: result } },
-    };
+    expect(response.request_id).toBe("request.sdk.curate");
+    expect(response.outcome.outcome).toBe("effect");
+    if (response.outcome.outcome !== "effect") throw new Error("expected an effect outcome");
+    expect(response.outcome.value.reconciliation).toBe("pending");
+    expect(response.outcome.value.payload).toEqual(receipt);
 
-    await expect(factStoreCurateTerminalMatches({}, envelope)).resolves.toBe(true);
-    await expect(factStoreCurateTerminalMatches({}, {
-      ...envelope,
-      outcome: {
-        outcome: "effect",
-        value: { payload: { ...result, run_id: "request.foreign" } },
-      },
-    })).resolves.toBe(false);
-  });
-
-  it("matches Rust nested curation identity and sanitization rejections", async () => {
-    const valid = await curationEnvelope();
-    await expect(factStoreCurateTerminalMatches({}, valid)).resolves.toBe(true);
-
-    const invalidAssertion = structuredClone(valid);
-    invalidAssertion.outcome.value.payload.committed_receipts[0]!.receipt.receipt
-      .operation_effects[0]!.commit!.active_assertion_id = "";
-    await expect(factStoreCurateTerminalMatches(
-      {},
-      await resealCurationEnvelope(invalidAssertion),
-    )).resolves.toBe(false);
-
-    const invalidOwner = structuredClone(valid);
-    const invalidOwnerReceipt = invalidOwner.outcome.value.payload.committed_receipts[0]!.receipt
-      .receipt as unknown as Record<string, unknown>;
-    invalidOwnerReceipt.owner = {
-      kind: "project",
-      project_id: "",
-    };
-    await expect(factStoreCurateTerminalMatches(
-      {},
-      await resealCurationEnvelope(invalidOwner),
-    )).resolves.toBe(false);
-
-    for (const mutate of [
-      (sanitization: Record<string, unknown>) => {
-        sanitization.disposition = "accepted";
-        sanitization.sensitivity = "secret";
-      },
-      (sanitization: Record<string, unknown>) => {
-        (sanitization.receipt as Record<string, unknown>).receipt_id = "";
-      },
-      (sanitization: Record<string, unknown>) => {
-        (sanitization.payload as Record<string, unknown>).digest = "d".repeat(64);
-      },
-    ]) {
-      const invalid = structuredClone(valid);
-      const sanitization = invalid.outcome.value.payload.committed_receipts[0]!.receipt.receipt
-        .operation_effects[0]!.relation!.provenance.sanitization_receipt;
-      mutate(sanitization);
-      await expect(factStoreCurateTerminalMatches(
-        {},
-        await resealCurationEnvelope(invalid),
-      )).resolves.toBe(false);
-    }
+    envelope.value.scope.scope_digest = "sha256:" + "9".repeat(64);
+    await expect(client.operations.application_fact_store_curate(
+      bounds,
+      { requestId: "request.sdk.curate" },
+    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
   });
 
   it("fails closed on malformed typed Workflow requests before transport", async () => {
@@ -705,167 +1189,55 @@ describe("TraceDecayClient generated operation bindings", () => {
         // @ts-expect-error Deliberately malformed at the package boundary.
         { definition_id: "workflow.sdk", definition_version: "1" },
       ),
-    ).rejects.toBeInstanceOf(TypeError);
+    ).rejects.toThrow("value.definition_version must be integer");
     expect(fetchCalls).toBe(0);
-    expect("invoke" in client).toBe(false);
-    expect("requestOperation" in client).toBe(false);
-    expect(Reflect.get(client, "requestOperation")).toBeUndefined();
   });
 
-  it("publishes all mounted Workflow routes as executable operations", () => {
-    const available: string[] = OPERATIONS.map((operation) => operation.operation);
-    expect(available.length).toBeGreaterThan(0);
-    expect(new Set(available).size).toBe(available.length);
-    expect(new Set(OPERATIONS.map((operation) => operation.operationId)).size).toBe(
-      available.length,
-    );
-    expect(new Set(OPERATIONS.map((operation) => operation.bindingId)).size).toBe(
-      available.length,
-    );
-    expect(available).toEqual(
-      expect.arrayContaining([
-        "workflow_definition_history",
-        "workflow_diff_definition",
-        "workflow_get_definition",
-        "workflow_handoff_issue",
-        "workflow_handoff_redeem",
-        "workflow_list_definitions",
-        "workflow_register_definition",
-        "workflow_validate_definition",
-      ]),
-    );
-    expect(
-      "workflow_list_definitions" in createClient({
-        baseUrl: "http://127.0.0.1:43123",
-        projectId: "project.sdk",
-        token: "sdk-secret",
-      }).operations,
-    ).toBe(true);
-    // Handoff and multi-root are mounted HTTP families and belong in the same
-    // canonical operation union as Work and Workflow.
-    const mountedFamilies = [
-      // The frontier read, alongside the two redemptions. It is the only
-      // handoff operation a caller can invoke without already holding a bearer.
-      "handoff_list_task_handoffs",
-      "handoff_open_investigation_handoff",
-      "handoff_open_task_handoff",
-      "multi_root_scope_set_read",
-      "multi_root_scope_set_compare_and_swap",
-      "multi_root_execute",
-    ];
-    const clientOperations = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-    }).operations;
-    for (const operation of mountedFamilies) {
-      expect(available).toContain(operation);
-      expect(operation in clientOperations).toBe(true);
-    }
-  });
-
-  it("publishes workflow_register_definition with the canonical descriptor identity", () => {
+  it("posts a workflow definition to the register-definition route", async () => {
+    let method = "";
+    let url = "";
+    let body = "";
+    const definition = {
+      definition_id: "workflow.sdk",
+      definition_version: 1,
+      project_id: "project.sdk",
+      pinned_catalog_digest: `sha256:${"a".repeat(64)}`,
+      pinned_configuration_digest: `sha256:${"a".repeat(64)}`,
+      pinned_policy_digest: `sha256:${"a".repeat(64)}`,
+      steps: [
+        {
+          step_id: "publish",
+          operation: "operation.work.publish",
+          predecessors: [],
+          inputs: [],
+          outputs: ["artifact"],
+          fan_out: null,
+        },
+      ],
+    };
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
-    });
-    expect("workflow_register_definition" in client.operations).toBe(true);
-
-    const descriptor = OPERATIONS.find(
-      (operation) => operation.operation === "workflow_register_definition",
-    );
-    expect(descriptor).toBeDefined();
-    expect(descriptor?.operationId).toBe("operation.workflow.register_definition");
-    expect(descriptor?.transport).toEqual({
-      kind: "http",
-      route: "/application/workflow/register-definition",
-      method: "POST",
-    });
-    expect(descriptor?.effect).toBe("administrative");
-    expect(descriptor?.idempotency).toBe("required");
-    expect(descriptor?.bindingId).toBe("binding.http.workflow.register_definition");
-    expect(descriptor?.requestSchema).toEqual({
-      schemaId: "schema.workflow.register_definition.request",
-      revision: 1,
-    });
-    expect(descriptor?.resultSchema).toEqual({
-      schemaId: "schema.workflow.register_definition.result",
-      revision: 1,
-    });
-    expect(descriptor?.deadline).toEqual({
-      maximum_millis: 30_000,
-      behavior: "return_effect_receipt",
-    });
-  });
-
-  it("publishes every configuration operation with its effect lifecycle", () => {
-    const expected = [
-      "configuration_list",
-      "configuration_explain",
-      "configuration_get",
-      "configuration_set",
-      "configuration_unset",
-      "configuration_batch",
-      "configuration_write_credential",
-      "configuration_observed_state",
-      "configuration_protected_preview",
-      "configuration_protected_apply",
-      "configuration_rollback_preview",
-      "configuration_rollback_apply",
-      "configuration_audit",
-    ]
-      .map((operation) => `application_${operation}`)
-      .sort();
-    const configuration = OPERATIONS.filter((operation) =>
-      operation.operation.startsWith("application_configuration_"),
-    );
-
-    expect(configuration.map((operation) => operation.operation)).toEqual(expected);
-    for (const operation of configuration) {
-      expect(operation.transport).toEqual({
-        kind: "http",
-        route: `/application/configuration/${operation.operation.replace(
-          /^application_/,
-          "",
-        )}`,
-        method: "POST",
-      });
-      expect(operation.bindingId).toBe(
-        `binding.http.${operation.operation.replace(/^application_/, "")}.v1`,
-      );
-      expect(operation.deadline.maximum_millis).toBe(15_000);
-      if (operation.effect === "configuration_write") {
-        expect(operation.idempotency).toBe("required");
-        expect(operation.cancellation).toEqual({ mode: "not_cancellable" });
-        expect(operation.deadline.behavior).toBe("return_effect_receipt");
-        expect(operation.reconciliation).toBe("required");
-        expect(operation.receipt).toBe("durable_effect");
-        expect(operation.terminalStates).toEqual([
-          "completed",
-          "timed_out",
-          "failed",
-          "effect_unknown",
-          "partial",
-        ]);
-      } else {
-        expect(operation.idempotency).toBe("not_required");
-        expect(operation.cancellation).toEqual({
-          mode: "cooperative",
-          points: ["before_admission", "before_read", "during_read"],
+      fetch: async (input, init) => {
+        method = init?.method ?? "";
+        url = String(input);
+        body = String(init?.body ?? "");
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
         });
-        expect(operation.deadline.behavior).toBe("return_operation_receipt");
-        expect(operation.reconciliation).toBe("not_required");
-        expect(operation.receipt).toBe("operation");
-        expect(operation.terminalStates).toEqual([
-          "completed",
-          "cancelled",
-          "timed_out",
-          "failed",
-          "partial",
-        ]);
-      }
-    }
+      },
+    });
+
+    await expect(
+      client.operations.workflow_register_definition({ definition }),
+    ).rejects.toThrow("the daemon returned an unknown HTTP envelope");
+    expect(method).toBe("POST");
+    expect(url).toBe(
+      "http://127.0.0.1:43123/projects/project.sdk/application/workflow/register-definition",
+    );
+    expect(JSON.parse(body)).toEqual({ definition });
   });
 
   it("rejects an operation-illegal terminal before decoding its payload", () => {
@@ -904,58 +1276,86 @@ describe("TraceDecayClient generated operation bindings", () => {
     );
   });
 
-  it("publishes mounted Git reads as application HTTP operations", () => {
-    for (const [operation, route] of [
-      ["git_status", "/application/git/status"],
-      ["git_diff", "/application/git/diff"],
-      ["git_history", "/application/git/history"],
-      ["git_blame", "/application/git/blame"],
-      ["git_hunks", "/application/git/hunks"],
-    ] as const) {
-      const descriptor = OPERATIONS.find(
-        (candidate) => candidate.operation === `application_${operation}`,
-      );
-      expect(descriptor).toBeDefined();
-      expect(descriptor?.operationId).toBe(
-        `operation.application.${operation}`,
-      );
-      expect(descriptor?.transport).toEqual({
-        kind: "http",
-        route,
-        method: "POST",
-      });
-      expect(descriptor?.bindingId).toBe(`binding.http.${operation}.v1`);
-      expect(OPERATIONS.map((candidate) => String(candidate.operation))).not.toContain(
-        operation,
-      );
-    }
-  });
+  it("accepts the deadline observation of a non-cancellable effect that timed out", () => {
+    const descriptor = OPERATIONS.find(
+      (operation) => operation.operation === "workflow_activate_definition",
+    );
+    expect(descriptor?.cancellation).toEqual({ mode: "not_cancellable" });
+    const response = successEnvelope({});
+    response.value.binding_id = "binding.http.workflow.activate_definition";
+    response.value.contract = {
+      schema_id: "schema.workflow.activate_definition.result",
+      schema_revision: 1,
+    };
+    const effect = (termination: string) =>
+      ({
+        outcome: "effect",
+        value: {
+          effect_id: "effect.workflow.sdk",
+          effect_class: "administrative",
+          idempotency_key: "workflow.idempotency.sdk",
+          authority: {},
+          expected_state: "workflow.revision.sdk",
+          reconciliation: "required",
+          receipt: {},
+          payload: null,
+          execution: {
+            ...structuredClone(RECEIPT),
+            cancellation: { stage: "before_effect", observed_at: 2 },
+            termination,
+          },
+        },
+      }) as unknown as typeof response.value.outcome;
 
-  it("routes application_git_status through its mounted HTTP binding", async () => {
-    let requestedUrl = "";
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      fetch: async (input) => {
-        requestedUrl = String(input);
-        return new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    });
+    response.value.outcome = effect("timed_out");
+    expect(descriptor?.decodeSuccess(response.value).outcome.value.execution.termination).toBe(
+      "timed_out",
+    );
 
-    await expect(
-      client.operations.application_git_status({}),
-    ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
-    expect(requestedUrl).toBe(
-      "http://127.0.0.1:43123/projects/project.sdk/application/git/status",
+    response.value.outcome = effect("failed");
+    expect(() => descriptor?.decodeSuccess(response.value)).toThrow(
+      /non-cancellable operation returned cancellation evidence/,
     );
   });
+
 });
 
 describe("TraceDecayClient transport envelopes", () => {
+  it("requires concealed problems to omit identity and ordinary problems to bind it", async () => {
+    const concealed = problemEnvelope("not_found_or_not_authorized", "concealed");
+    const disclosed = problemEnvelope("not_found_or_not_authorized", "concealed", {
+      bindingId: "binding.http.workflow.list_definitions",
+    });
+    const wrongBinding = problemEnvelope("not_found_or_not_authorized", "concealed", {
+      bindingId: "binding.http.different.v1",
+    });
+    const unbound = problemEnvelope("unavailable", "service_unavailable");
+
+    await withServer(
+      [
+        (_request, response) => json(response, 404, concealed),
+        (_request, response) => json(response, 404, disclosed),
+        (_request, response) => json(response, 404, wrongBinding),
+        (_request, response) => json(response, 503, unbound),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayDeniedError,
+        );
+        for (let response = 0; response < 3; response += 1) {
+          await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+            TraceDecayMalformedResponseError,
+          );
+        }
+      },
+    );
+  });
+
   it("classifies admitted terminal problems and requires committed_receipt", async () => {
     const bindingId = "binding.http.workflow.list_definitions";
     const reset = problemEnvelope("reset_required", "store_reset_required", {
@@ -1000,17 +1400,17 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayResetRequiredError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "reset_required/store_reset_required: store_reset_required",
         );
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayPartialEffectError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "partial_effect/effect_partially_committed: effect_partially_committed",
         );
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
       },
     );
@@ -1030,19 +1430,19 @@ describe("TraceDecayClient transport envelopes", () => {
 
     await expect(
       requestThroughTransport(client, { page: { size: 0 } }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("page size must be an integer between 1 and 1000");
     await expect(
       requestThroughTransport(client, { page: { size: 1_001 } }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("page size must be an integer between 1 and 1000");
     await expect(
       requestThroughTransport(client, { page: { cursor: " cursor " } }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("page cursor is not a canonical opaque cursor");
     await expect(
       requestThroughTransport(client, { deadlineMicros: 0 }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("deadlineMicros must be a positive safe integer");
     await expect(
       requestThroughTransport(client, { deadlineMicros: 1.5 }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("deadlineMicros must be a positive safe integer");
     expect(fetchCalls).toBe(0);
   });
 
@@ -1068,11 +1468,139 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned an invalid workflow_list_definitions success envelope",
         );
       },
     );
+  });
+
+  it("decodes the opaque page cursor and consumes its continuation", async () => {
+    const searchCursor = "bc1.search-page-2";
+    const listCursor = "bc1.list-page-2";
+    const searchPayload = {
+      graph_coverage: { kind: "not_applicable" },
+      hits: [],
+      next_after: searchCursor,
+      owner: { kind: "profile" },
+      retrieval_telemetry: { kind: "not_applicable" },
+    };
+    const listPayload = { facts: [], next_after: listCursor, owner: { kind: "profile" } };
+
+    await withServer(
+      [
+        (_request, response) =>
+          json(response, 200, successEnvelope([], { kind: "opaque", cursor: "cursor.page-2" })),
+        (request, response) => {
+          expect(request.url).toBe(
+            "/projects/project.sdk/application/workflow/list-definitions?cursor=cursor.page-2",
+          );
+          json(response, 200, successEnvelope([]));
+        },
+        (_request, response) =>
+          json(
+            response,
+            200,
+            factStoreEnvelope("fact_store_search", searchPayload, {
+              kind: "opaque",
+              cursor: searchCursor,
+            }),
+          ),
+        (request, response, body) => {
+          expect(request.url).toBe("/projects/project.sdk/application/retained/fact_store_search");
+          expect(JSON.parse(body)).toEqual({ query: "memory", after: searchCursor });
+          json(response, 200, factStoreEnvelope("fact_store_search", searchPayload, null));
+        },
+        (_request, response) =>
+          json(
+            response,
+            200,
+            factStoreEnvelope("fact_store_list", listPayload, {
+              kind: "opaque",
+              cursor: listCursor,
+            }),
+          ),
+        (request, response, body) => {
+          expect(request.url).toBe("/projects/project.sdk/application/retained/fact_store_list");
+          expect(JSON.parse(body)).toEqual({ after: listCursor });
+          json(response, 200, factStoreEnvelope("fact_store_list", listPayload, null));
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+
+        const opaque = evidencePage(await client.operations.workflow_list_definitions({})).cursor;
+        expect(opaque).toEqual({ kind: "opaque", cursor: "cursor.page-2" });
+        if (opaque?.kind !== "opaque") throw new Error("expected an opaque cursor");
+        expect(
+          evidencePage(
+            await client.operations.workflow_list_definitions(
+              {},
+              { page: { cursor: opaque.cursor } },
+            ),
+          ).cursor,
+        ).toBeNull();
+
+        const search = evidencePage(
+          await client.operations.application_fact_store_search({ query: "memory" }),
+        ).cursor;
+        expect(search).toEqual({ kind: "opaque", cursor: searchCursor });
+        if (search?.kind !== "opaque") throw new Error("expected an opaque cursor");
+        expect(
+          evidencePage(
+            await client.operations.application_fact_store_search({
+              query: "memory",
+              after: search.cursor,
+            }),
+          ).cursor,
+        ).toBeNull();
+
+        const list = evidencePage(await client.operations.application_fact_store_list({})).cursor;
+        expect(list).toEqual({ kind: "opaque", cursor: listCursor });
+        if (list?.kind !== "opaque") throw new Error("expected an opaque cursor");
+        expect(
+          evidencePage(await client.operations.application_fact_store_list({ after: list.cursor }))
+            .cursor,
+        ).toBeNull();
+      },
+    );
+  });
+
+  it("refuses non-canonical page cursors after decoding", async () => {
+    const cursors: unknown[] = [
+      "cursor.page-2",
+      { kind: "opaque", cursor: "a".repeat(4_097) },
+      { kind: "opaque", cursor: " padded " },
+      { kind: "opaque", cursor: "" },
+      { kind: "opaque", cursor: "tab\tseparated" },
+      { kind: "fact_search", cursor: { score_millionths: 1, updated_at: 2 } },
+      { kind: "fact_search", cursor: { score_millionths: 4_294_967_296, updated_at: 2, fact_id: "f" } },
+      { kind: "fact_list_after", fact_id: 7 },
+      { kind: "unknown_tag", cursor: "cursor.page-2" },
+    ];
+    let served: unknown = null;
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => new Response(JSON.stringify(served), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    served = successEnvelope([], { kind: "opaque", cursor: "a".repeat(4_096) });
+    expect(evidencePage(await requestThroughTransport(client)).cursor).toEqual({
+      kind: "opaque",
+      cursor: "a".repeat(4_096),
+    });
+    for (const cursor of cursors) {
+      served = successEnvelope([], cursor);
+      await expect(requestThroughTransport(client), JSON.stringify(cursor).slice(0, 80))
+        .rejects.toThrow(
+          "the daemon returned an invalid workflow_list_definitions success envelope",
+        );
+    }
   });
 
   it("fails closed when problem envelope identities disagree", async () => {
@@ -1095,9 +1623,206 @@ describe("TraceDecayClient transport envelopes", () => {
 
         await expect(
           client.cancelOperation("request.operation"),
-        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        ).rejects.toThrow("the daemon returned a malformed problem envelope");
       },
     );
+  });
+
+  it("surfaces a problem's typed detail and refuses one on a kind without detail", async () => {
+    const detail = {
+      kind: "parked",
+      cause: "source unreadable",
+      remedy: "restore the mode, then run `tracedecay sync`",
+      retries_on_wake: false,
+    };
+    const parked = problemEnvelope("unavailable", "application.code-index.parked", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["reconcile"],
+      detail,
+    });
+    const grafted = problemEnvelope("invalid_request", "request.invalid", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["correct_request"],
+      detail,
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 503, parked),
+        (_request, response) => json(response, 400, grafted),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(TraceDecayUnavailableError);
+        expect((refusal as TraceDecayUnavailableError).problem.detail).toEqual(detail);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("surfaces the measured delay of a re-warming code graph", async () => {
+    const detail = { kind: "code_graph_rewarming", retry_after_millis: 7_940 };
+    const rewarming = problemEnvelope("unavailable", "application.code-graph.rewarming", {
+      bindingId: "binding.http.workflow.list_definitions",
+      retry: "after_delay",
+      retryable: true,
+      retryAfterMillis: 7_940,
+      legalActions: ["retry"],
+      detail,
+    });
+    const malformed = problemEnvelope("unavailable", "application.code-graph.rewarming", {
+      bindingId: "binding.http.workflow.list_definitions",
+      retry: "after_delay",
+      retryable: true,
+      retryAfterMillis: 7_940,
+      legalActions: ["retry"],
+      detail: { ...detail, retry_after_millis: "7940" },
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 503, rewarming),
+        (_request, response) => json(response, 503, malformed),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(TraceDecayUnavailableError);
+        const problem = (refusal as TraceDecayUnavailableError).problem;
+        expect(problem.detail).toEqual(detail);
+        expect(problem.retry_after_millis).toBe(7_940);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("surfaces the diagnostics detail an unsupported problem carries", async () => {
+    const detail = {
+      kind: "diagnostics_unsupported",
+      file: "src/main.rs",
+      searched: [
+        { path: "src/tsconfig.json", present: false },
+        { path: "tsconfig.json", present: true },
+      ],
+    };
+    const unsupported = problemEnvelope("unsupported", "application.diagnostics.unsupported", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["correct_request"],
+      detail,
+    });
+    const malformed = problemEnvelope("unsupported", "application.diagnostics.unsupported", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["correct_request"],
+      detail: { ...detail, searched: [{ path: "tsconfig.json" }] },
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 422, unsupported),
+        (_request, response) => json(response, 422, malformed),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(TraceDecayUnsupportedError);
+        expect((refusal as TraceDecayUnsupportedError).problem.detail).toEqual(detail);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("surfaces the requested and current values of a stale precondition", async () => {
+    const detail = {
+      kind: "stale_precondition",
+      field: "expected_revision",
+      requested: 7,
+      current: 1,
+    };
+    const stale = problemEnvelope("stale", "application.precondition-stale", {
+      bindingId: "binding.http.workflow.list_definitions",
+      retry: "after_revalidate",
+      retryable: true,
+      legalActions: ["refresh"],
+      detail,
+    });
+    const malformed = problemEnvelope("stale", "application.precondition-stale", {
+      bindingId: "binding.http.workflow.list_definitions",
+      retry: "after_revalidate",
+      retryable: true,
+      legalActions: ["refresh"],
+      detail: { ...detail, current: "1" },
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 409, stale),
+        (_request, response) => json(response, 409, malformed),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(TraceDecayStaleError);
+        expect((refusal as TraceDecayStaleError).problem.detail).toEqual(detail);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
+  it("surfaces the reset-required store detail", async () => {
+    const detail = {
+      kind: "reset_required",
+      authority: "project store",
+      found_version: 3,
+      required_version: 4,
+      reason: "the store predates this binary",
+      remedy: "tracedecay reset --project",
+    };
+    const reset = problemEnvelope("reset_required", "application.reset-required", {
+      bindingId: "binding.http.workflow.list_definitions",
+      legalActions: ["reset"],
+      detail,
+    });
+
+    await withServer([(_request, response) => json(response, 503, reset)], async (baseUrl) => {
+      const client = createClient({
+        baseUrl,
+        projectId: "project.sdk",
+        token: "sdk-secret",
+      });
+
+      const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(TraceDecayResetRequiredError);
+      expect((refusal as TraceDecayResetRequiredError).problem.detail).toEqual(detail);
+    });
   });
 
   it("rejects classified admitted terminals that Rust would reject", async () => {
@@ -1129,11 +1854,11 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
       },
     );
@@ -1157,9 +1882,94 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
+      },
+    );
+  });
+});
+
+describe("TraceDecayClient operation stream disposal", () => {
+  const open = [
+    "event: open",
+    'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume"}}}',
+    "",
+    "",
+  ].join("\n");
+
+  it("cancels a live HTTP body and releases its reader on early iterator return", async () => {
+    let cancelled = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(open));
+      },
+      cancel() {
+        cancelled += 1;
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:4317",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => response,
+    });
+    const iterator = client.streamOperation("request.operation");
+
+    expect((await iterator.next()).value?.event).toBe("open");
+    await iterator.return(undefined);
+
+    expect(cancelled).toBe(1);
+    expect(response.body?.locked).toBe(false);
+    expect(await iterator.next()).toEqual({ done: true, value: undefined });
+  });
+
+  it("closes a rejected non-SSE response without suppressing the protocol error", async () => {
+    let cancelled = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(open));
+      },
+      cancel() {
+        cancelled += 1;
+      },
+    }), { headers: { "content-type": "text/plain" } });
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:4317",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => response,
+    });
+    await expect(client.streamOperation("request.operation").next()).rejects.toThrow(
+      "the daemon opened an operation stream with an invalid media type",
+    );
+    expect(cancelled).toBe(1);
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it("closes a live HTTP watcher without posting an operation cancellation", async () => {
+    let close: Promise<void> | undefined;
+    await withServer(
+      [
+        (_request, response) => {
+          close = new Promise<void>((resolve) => response.once("close", resolve));
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.write(open);
+        },
+      ],
+      async (baseUrl, requests) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        for await (const event of client.streamOperation("request.operation")) {
+          expect(event.event).toBe("open");
+          break;
+        }
+        expect(close).toBeDefined();
+        await Promise.race([
+          close,
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(() => reject(new Error("watcher HTTP connection never closed")), 2000)),
+        ]);
+        expect(requests.map(request => request.method)).toEqual(["GET"]);
       },
     );
   });
@@ -1279,6 +2089,186 @@ describe("TraceDecayClient operation lifecycle", () => {
     );
   });
 
+  it.each(OPERATION_TERMINATIONS)(
+    "ends the stream after a %s terminal without reconnecting",
+    async (termination) => {
+      await withServer(
+        [
+          (_request, response) => {
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            response.end(
+              [
+                "event: open",
+                `data: ${JSON.stringify(OPEN_EVENT)}`,
+                "",
+                `event: ${termination}`,
+                "id: 0",
+                `data: ${JSON.stringify({
+                  event: termination,
+                  data: {
+                    sequence: 0,
+                    terminal: {
+                      termination,
+                      receipt: {
+                        ...RECEIPT,
+                        termination,
+                        cancellation: { observed: true },
+                      },
+                    },
+                  },
+                })}`,
+                "",
+                "",
+              ].join("\n"),
+            );
+          },
+        ],
+        async (baseUrl, requests) => {
+          const client = createClient({
+            baseUrl,
+            projectId: "project.sdk",
+            token: "sdk-secret",
+          });
+          const events = [];
+          for await (const event of client.streamOperation("request.operation", {
+            maxReconnects: 3,
+          })) {
+            events.push(event.event);
+          }
+          expect(events).toEqual(["open", termination]);
+          expect(requests).toHaveLength(1);
+        },
+      );
+    },
+  );
+
+  it("rejects an unavailable terminal whose receipt disagrees", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: unavailable",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "unavailable",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "unavailable", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const consume = async () => {
+          for await (const _event of client.streamOperation("request.operation")) {
+            // Drain the stream.
+          }
+        };
+        await expect(consume()).rejects.toThrow(
+          "the SSE terminal event is inconsistent",
+        );
+      },
+    );
+  });
+
+  it("retries refused reconnects within the budget and keeps the frontier", async () => {
+    await withServer(
+      [
+        openThenEof,
+        refuseConnection,
+        refuseConnection,
+        (request, response) => {
+          expect(request.url).toBe(RESUME_URL);
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: completed",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "completed", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl, requests) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events = [];
+        for await (const event of client.streamOperation("request.operation", {
+          maxReconnects: 3,
+        })) {
+          events.push(event.event);
+        }
+        expect(events).toEqual(["open", "completed"]);
+        expect(requests).toHaveLength(4);
+      },
+    );
+  });
+
+  it("fails with a disconnect once refused reconnects exhaust the budget", async () => {
+    await withServer(
+      [openThenEof, refuseConnection, refuseConnection],
+      async (baseUrl, requests) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events: string[] = [];
+        const consume = async () => {
+          for await (const event of client.streamOperation("request.operation", {
+            maxReconnects: 2,
+          })) {
+            events.push(event.event);
+          }
+        };
+        await expect(consume()).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
+        expect(events).toEqual(["open"]);
+        expect(requests).toHaveLength(3);
+      },
+    );
+  });
+
+  it("does not retry a refused first connection", async () => {
+    await withServer([refuseConnection], async (baseUrl, requests) => {
+      const client = createClient({
+        baseUrl,
+        projectId: "project.sdk",
+        token: "sdk-secret",
+      });
+      const consume = async () => {
+        for await (const _event of client.streamOperation("request.operation", {
+          maxReconnects: 3,
+        })) {
+          // Drain the stream.
+        }
+      };
+      await expect(consume()).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
+      expect(requests).toHaveLength(1);
+    });
+  });
+
   it("rejects an open event for a different operation", async () => {
     await withServer(
       [
@@ -1305,8 +2295,8 @@ describe("TraceDecayClient operation lifecycle", () => {
             // Drain the stream.
           }
         };
-        await expect(consume()).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(consume()).rejects.toThrow(
+          "the daemon returned a malformed SSE open frontier",
         );
       },
     );
@@ -1346,8 +2336,8 @@ describe("TraceDecayClient operation lifecycle", () => {
           }
         };
 
-        await expect(consume()).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(consume()).rejects.toThrow(
+          "the daemon opened an operation stream with an invalid media type",
         );
       },
     );
@@ -1472,19 +2462,19 @@ describe("TraceDecayClient operation lifecycle", () => {
               ": heartbeat",
               "event: open",
               'data: {"event":"open","data":{"correlation_id":"request.operation",',
-              'data: "frontier":{"next_sequence":1,"retained_from_sequence":1,"resume_token":"resume"}}}',
+              'data: "frontier":{"next_sequence":6,"retained_from_sequence":5,"resume_token":"resume"}}}',
               "",
               "event: resume_gap",
-              "id: 1",
-              'data: {"event":"resume_gap","data":{"sequence":1,"gap":{"first_missing_sequence":0,',
-              'data: "last_missing_sequence":0,"frontier":{"next_sequence":2,"retained_from_sequence":1,"resume_token":"resume"}}}}',
+              "id: 0",
+              'data: {"event":"resume_gap","data":{"sequence":0,"gap":{"first_missing_sequence":0,',
+              'data: "last_missing_sequence":4,"frontier":{"next_sequence":6,"retained_from_sequence":5,"resume_token":"resume"}}}}',
               "",
               "event: partial",
-              "id: 2",
+              "id: 5",
               `data: ${JSON.stringify({
                 event: "partial",
                 data: {
-                  sequence: 2,
+                  sequence: 5,
                   terminal: {
                     termination: "partial",
                     receipt: { ...RECEIPT, termination: "partial" },
@@ -1517,7 +2507,7 @@ describe("TraceDecayClient operation lifecycle", () => {
           data: {
             gap: {
               first_missing_sequence: 0,
-              last_missing_sequence: 0,
+              last_missing_sequence: 4,
             },
           },
         });
@@ -1607,7 +2597,7 @@ describe("TraceDecayClient operation lifecycle", () => {
           for await (const _event of client.streamOperation("request.operation")) {
             // Drain the stream.
           }
-        }).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
+        }).rejects.toThrow("operation stream ended with an incomplete SSE event");
       },
     );
   });
@@ -1656,79 +2646,7 @@ describe("TraceDecayClient operation lifecycle", () => {
 
         await expect(
           client.cancelOperation("request.operation"),
-        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
-      },
-    );
-  });
-
-  it("preserves resume gaps and receipt-bearing partial termination", async () => {
-    await withServer(
-      [
-        (_request, response) => {
-          response.writeHead(200, {
-            "content-type": "text/event-stream",
-            connection: "close",
-          });
-          response.end(
-            [
-              "event: open",
-              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":5,"retained_from_sequence":5,"resume_token":"resume.gap"}}}',
-              "",
-              "event: resume_gap",
-              "id: 5",
-              'data: {"event":"resume_gap","data":{"sequence":5,"gap":{"first_missing_sequence":2,"last_missing_sequence":4,"frontier":{"next_sequence":5,"retained_from_sequence":5,"resume_token":"resume.gap"}}}}',
-              "",
-              "event: partial",
-              "id: 6",
-              `data: ${JSON.stringify({
-                event: "partial",
-                data: {
-                  sequence: 6,
-                  terminal: {
-                    termination: "partial",
-                    receipt: { ...RECEIPT, termination: "partial" },
-                  },
-                },
-              })}`,
-              "",
-              "",
-            ].join("\n"),
-          );
-        },
-      ],
-      async (baseUrl) => {
-        const client = createClient({
-          baseUrl,
-          projectId: "project.sdk",
-          token: "sdk-secret",
-        });
-        const events = [];
-        for await (const event of client.streamOperation("request.operation")) {
-          events.push(event);
-        }
-
-        expect(events.map((event) => event.event)).toEqual([
-          "open",
-          "resume_gap",
-          "partial",
-        ]);
-        expect(events[1]?.data).toMatchObject({
-          event: "resume_gap",
-          data: {
-            gap: {
-              first_missing_sequence: 2,
-              last_missing_sequence: 4,
-            },
-          },
-        });
-        expect(events[2]?.data).toMatchObject({
-          data: {
-            terminal: {
-              termination: "partial",
-              receipt: { termination: "partial" },
-            },
-          },
-        });
+        ).rejects.toThrow("the daemon returned a malformed cancellation response");
       },
     );
   });
@@ -1759,8 +2677,8 @@ describe("TraceDecayClient operation lifecycle", () => {
           }
         };
 
-        await expect(consume()).rejects.toBeInstanceOf(
-          TraceDecayDisconnectedError,
+        await expect(consume()).rejects.toThrow(
+          "operation stream ended before a terminal event after 0 reconnects",
         );
       },
     );
@@ -1792,8 +2710,42 @@ describe("TraceDecayClient operation lifecycle", () => {
 
         const aborted = await pending.catch((error: unknown) => error);
         expect(aborted).toBeInstanceOf(TraceDecayAbortError);
-        expect((aborted as Error).message).not.toMatch(/rollback|rolled back/i);
+        expect((aborted as Error).message).toBe("the caller aborted the request");
       },
     );
+  });
+});
+
+
+describe("native worktree inspection wire", () => {
+  it("keeps the surface tag separate from the active Git operation", () => {
+    const inspection = {
+      operation: "inspection",
+      state: "inspection",
+      target: {
+        kind: "worktree",
+        project_id: "project.worktree.clean",
+        repository_id: "repository.worktree.clean",
+        worktree_id: "worktree.clean",
+      },
+      presence: "present",
+      kind: "linked",
+      worktree_id: "worktree.clean",
+      clean: "yes",
+      locked: "no",
+      holder: "no",
+      unique_data: "no",
+      operation_state: "merge",
+      observed_at: 1,
+      inspection_digest: `sha256:${"0".repeat(64)}`,
+    } satisfies NativeWorktreeSurfaceResultV1;
+    const operation = OPERATIONS.find(
+      (entry) => entry.operation === "application_worktree_cleanup_inspect",
+    );
+    expect(operation).toBeDefined();
+    expect(operation?.decodeResult({ outcome: "worktree", ...inspection })).toEqual({
+      outcome: "worktree",
+      ...inspection,
+    });
   });
 });

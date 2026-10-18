@@ -1,0 +1,41 @@
+//! Production adapters for compatibility primitive families.
+
+pub mod concrete;
+pub mod production;
+pub mod runtime;
+mod support;
+pub mod symbol_graph;
+#[cfg(test)]
+mod symbol_graph_ignored_dependency_tests;
+#[cfg(test)]
+mod symbol_graph_implementation_tests;
+
+pub use concrete::{
+    AuthenticatedSymbolGraphCursorAdapter, SourceReadAdapter, SymbolGraphCursorSnapshot,
+    SymbolGraphCursorSnapshotAuthority, SymbolGraphCursorSnapshotFuture,
+};
+pub use production::{
+    ProductionPrimitiveCodeAuthoritiesV1, ProductionPrimitiveOpenRequestV1,
+    TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project,
+    open_production_primitive_runtime,
+};
+pub use runtime::{
+    CallChainPrimitiveRequest, CallChainPrimitiveResult, CodeIndexConvergenceParkFuture,
+    CodeIndexConvergenceParkPortV1, DiagnosticPrimitiveRecord, DiagnosticsPrimitiveRequest,
+    DiagnosticsPrimitiveResult, DiagnosticsPrimitiveScope, ExtendedPrimitiveFuture,
+    ExtendedPrimitivePort, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
+    ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
+    ManagedTestRunCurrentScopePort, ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult,
+    OwnedPrimitiveRuntime, PrimitiveDispatch, PrimitiveDispatchFuture, PrimitiveProjectRuntime,
+    QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult, SourceBodyPrimitiveRequest,
+    SourceBodyPrimitiveResult, SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult,
+    StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult,
+    open_primitive_project_runtime,
+};
+pub use support::{
+    AffectedTestTraversal, RankedAffectedTest, affected_test_proximity, rank_affected_tests,
+};
+pub use symbol_graph::{
+    CanonicalSymbolGraphAdapter, SymbolGraphCursorFuture, SymbolGraphCursorPort,
+    SymbolGraphPageClaim,
+};

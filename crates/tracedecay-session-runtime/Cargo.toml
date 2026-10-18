@@ -11,77 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "hotpath/tokio",
-    "tracedecay-application/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-code-index-runtime/hotpath",
-    "tracedecay-daemon-protocol/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-global-db/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-host-admission/hotpath",
-    "tracedecay-lcm/hotpath",
-    "tracedecay-query/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-session-memory/hotpath",
-    "tracedecay-session-temporal-store/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-store/hotpath",
-    "tracedecay-temporal-query/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-    "tracedecay-usecases/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-code-index-runtime/hotpath-alloc",
-    "tracedecay-daemon-protocol/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-global-db/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-host-admission/hotpath-alloc",
-    "tracedecay-lcm/hotpath-alloc",
-    "tracedecay-query/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
-    "tracedecay-session-temporal-store/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-    "tracedecay-temporal-query/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-    "tracedecay-usecases/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-code-index-runtime/hotpath-cpu",
-    "tracedecay-daemon-protocol/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-global-db/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-host-admission/hotpath-cpu",
-    "tracedecay-lcm/hotpath-cpu",
-    "tracedecay-query/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
-    "tracedecay-session-temporal-store/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-    "tracedecay-temporal-query/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-    "tracedecay-usecases/hotpath-cpu",
-]
 # Cross-crate fixture surface for composition-root session-runtime tests:
 # worker pass internals and scheduler test hooks exercised by the root
 # crate's host-admission integration tests. Production code is never gated
@@ -89,37 +18,94 @@ hotpath-cpu = [
 test-helpers = []
 
 [dependencies]
+asupersync.workspace = true
 futures-util = "0.3.33"
-hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
 tracing = "0.1"
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
-tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
-tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
-tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
-tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-global-db = { path = "../tracedecay-global-db" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db" }
+tracedecay-host-admission = { path = "../tracedecay-host-admission" }
+tracedecay-lcm = { path = "../tracedecay-lcm" }
+tracedecay-query = { path = "../tracedecay-query" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-store = { path = "../tracedecay-store" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
+tracedecay-application = { path = "../tracedecay-application" }
 
 [dev-dependencies]
 hex = "0.4"
-tempfile = "3"
+rusqlite = { version = "0.40.1", default-features = false }
+tracedecay-maintenance = { path = "../tracedecay-maintenance" }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
 tokio = { version = "1", features = ["full", "test-util"] }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-configuration = { path = "../tracedecay-configuration", features = ["test-helpers"] }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
+tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", features = ["test-helpers"] }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }
+
+[[test]]
+name = "session_drain_read_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_backlog_read_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_refresh_read_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_live_ingest_work"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_wal_streaming"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_ingest_commit_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_idle_history_commits"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_ingest_index_read_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_retention_write_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_retention_read_cost"
+required-features = ["test-helpers"]
+
+# Read-cost probes populate their stores through production ingest, so the
+# fixture sets their cost. CI runs a probe beside other actions on four vCPUs
+# at up to three times its cost pinned alone to four CPUs on tmpfs. The two
+# probes above 80 s pinned (index 97-101 s, refresh 89 s) reached 237-300 s
+# in CI. Drain (55 s), retention (60 s) and backlog (38 s) stay medium.
+[package.metadata.bazel.test_sizes]
+session_ingest_index_read_cost = "large"
+session_refresh_read_cost = "large"

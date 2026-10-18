@@ -4,11 +4,12 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::read_modes::{
-    self, LineRange, ReadMode, render_full, render_lines, render_map, render_signatures,
-    render_symbol_context,
+    LineRange, ReadMode, render_lines, render_map, render_signatures, render_symbol_context,
 };
+use crate::{GraphQueryError, GraphQueryResult as Result};
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::storage::ProjectPath;
@@ -34,7 +35,7 @@ pub struct SourceReadOutput {
     pub context: Option<Value>,
 }
 
-#[hotpath::measure(label = "usecases.context.read_source", future = true)]
+#[tracing::instrument(name = "usecases.context.read_source", level = "trace", skip_all)]
 pub async fn read_source(
     project_root: &Path,
     database: &Database,
@@ -65,6 +66,7 @@ pub async fn read_source(
     let args_hash = read_cache::args_hash(&json!({
         "lines": raw_lines,
         "last_sync_at": last_sync_at,
+        "token_count_encoding": "o200k_base",
     }))?;
 
     let cache_connection = database.read_connection();
@@ -98,16 +100,13 @@ pub async fn read_source(
         });
     }
 
-    let body = hotpath::measure_block!(
-        "usecases.context.source_read.render",
+    let body = {
+        let _span = tracing::trace_span!("usecases.context.source_read.render").entered();
         match mode {
-            ReadMode::Full => render_full(
-                &tracedecay_runtime_core::sync::read_source_file(&absolute_path).map_err(
-                    |error| TraceDecayError::Config {
-                        message: format!("cannot read '{file}': {error}"),
-                    },
-                )?,
-            ),
+            ReadMode::Full => tracedecay_runtime_core::sync::read_source_file(&absolute_path)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("cannot read '{file}': {error}"),
+                })?,
             ReadMode::Lines => render_lines(
                 &tracedecay_runtime_core::sync::read_source_file(&absolute_path).map_err(
                     |error| TraceDecayError::Config {
@@ -136,8 +135,7 @@ pub async fn read_source(
                 message: format!("cannot render signatures for '{file}': {error}"),
             })?,
         }
-    );
-    hotpath::gauge!("usecases.context.source_read.bytes").inc(body.len() as f64);
+    };
     let context = source_symbol_context(
         reader,
         cancellation,
@@ -146,8 +144,15 @@ pub async fn read_source(
         line_range,
         include_symbols,
     )?;
-    let token_count = read_modes::estimate_tokens(&body);
-    let digest = read_cache::digest_bytes(body.as_bytes());
+    let token_count = u32::try_from(tracedecay_tokenizer::count_ordinary_tokens(&body).map_err(
+        |error| TraceDecayError::Config {
+            message: format!("cannot count source-read tokens: {error}"),
+        },
+    )?)
+    .map_err(|_| TraceDecayError::Config {
+        message: "source-read token count exceeds u32".to_owned(),
+    })?;
+    let digest = sha256_hex(body.as_bytes());
     if !read_only {
         read_cache::put(
             database,
@@ -175,7 +180,11 @@ pub async fn read_source(
     })
 }
 
-#[hotpath::measure(label = "usecases.context.resolve_indexed_source")]
+#[tracing::instrument(
+    name = "usecases.context.resolve_indexed_source",
+    level = "trace",
+    skip_all
+)]
 pub fn resolve_indexed_source_file(
     project_root: &Path,
     reader: &CodeGraphInteractiveReader,
@@ -185,7 +194,8 @@ pub fn resolve_indexed_source_file(
     if file.contains('\0') {
         return Err(TraceDecayError::Config {
             message: "path contains NUL byte".to_owned(),
-        });
+        }
+        .into());
     }
 
     let input = Path::new(file);
@@ -208,13 +218,12 @@ pub fn resolve_indexed_source_file(
                 input.display(),
                 project_root.display()
             ),
-        });
+        }
+        .into());
     };
     if reader
         .symbols_in_logical_file(&display_file, 1, cancellation)
-        .map_err(|error| {
-            crate::map_code_graph_read_runtime_error(crate::map_projection_error(error))
-        })?
+        .map_err(GraphQueryError::from)?
         .is_empty()
     {
         return Err(TraceDecayError::Config {
@@ -223,7 +232,8 @@ pub fn resolve_indexed_source_file(
                 input.display(),
                 project_root.display()
             ),
-        });
+        }
+        .into());
     }
     let absolute_path = if input.is_absolute() {
         input.to_path_buf()
@@ -244,10 +254,10 @@ fn source_symbol_context(
     if !include_symbols || !matches!(mode, ReadMode::Full | ReadMode::Lines) {
         return Ok(None);
     }
-    hotpath::measure_block!(
-        "usecases.context.source_read.symbol_context",
+    {
+        let _span = tracing::trace_span!("usecases.context.source_read.symbol_context").entered();
         render_symbol_context(reader, cancellation, display_file, line_range).map(Some)
-    )
+    }
 }
 
 fn relative_source_key(path: &Path) -> Result<Option<String>> {
@@ -261,14 +271,16 @@ fn relative_source_key(path: &Path) -> Result<Option<String>> {
             _ => {
                 return Err(TraceDecayError::Config {
                     message: format!("path '{}' contains unsafe components", path.display()),
-                });
+                }
+                .into());
             }
         }
     }
     if parts.is_empty() {
         return Err(TraceDecayError::Config {
             message: "path must name a project file".to_owned(),
-        });
+        }
+        .into());
     }
     Ok(Some(parts.join("/")))
 }

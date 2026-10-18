@@ -46,7 +46,7 @@ fn settlement(
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn durable_delivery_settlement_replays_without_double_counting() {
     let harness = RegisteredGlobalDbHarness::open("delivery-settlement-replay").await;
     let first = attempt(DeliverySurfaceFamilyV1::Mcp, "mcp:connection-7:request-42");
@@ -109,7 +109,7 @@ async fn durable_delivery_settlement_replays_without_double_counting() {
     assert!(error.contains("settlement conflict"), "{error}");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn delivery_census_isolated_by_surface_and_refuses_denominator_drift() {
     let harness = RegisteredGlobalDbHarness::open("delivery-settlement-surface").await;
     let mcp = attempt(DeliverySurfaceFamilyV1::Mcp, "mcp:request-42");
@@ -148,7 +148,7 @@ async fn delivery_census_isolated_by_surface_and_refuses_denominator_drift() {
     assert!(error.contains("fanout identity conflict"), "{error}");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn typed_work_binding_is_immutable_and_returns_a_bounded_current_census() {
     let harness = RegisteredGlobalDbHarness::open("delivery-work-binding").await;
     let work_attempt = work_attempt();
@@ -204,7 +204,7 @@ async fn typed_work_binding_is_immutable_and_returns_a_bounded_current_census() 
     assert!(error.contains("fanout identity conflict"), "{error}");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn absent_typed_work_binding_stays_unbound_not_empty_delivery() {
     let harness = RegisteredGlobalDbHarness::open("delivery-work-unbound").await;
     let unbound = attempt(DeliverySurfaceFamilyV1::Mcp, "mcp:unbound");
@@ -223,7 +223,7 @@ async fn absent_typed_work_binding_stays_unbound_not_empty_delivery() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn opaque_source_receipt_reopens_exact_attempt_and_rejects_rebinding() {
     let harness = RegisteredGlobalDbHarness::open("delivery-source-receipt").await;
     let first = attempt(

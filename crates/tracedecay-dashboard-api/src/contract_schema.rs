@@ -3,23 +3,28 @@
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
-use tracedecay_application::retained_surfaces::{
-    AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
+use tracedecay_contracts::feedback::{
+    FeedbackProximityReadRequestV1, FeedbackProximityReadResultV1,
 };
-use tracedecay_application::{
-    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1,
-    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
-    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, ListTaskHandoffsRequestV1, ListTaskHandoffsResultV1,
-    MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
-    MultiRootScopeSetReadRequestV1, ObservatoryReadModelV1, PauseWorkRunCommand,
-    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
-    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
-    RetryWorkAttemptCommandV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
-    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+use tracedecay_contracts::retained_surfaces::{
+    AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
+    FactStoreCurateResultV1,
+};
+use tracedecay_contracts::retrieval::{AnalyticsHintsPayloadV1, SimilarResultV1};
+use tracedecay_contracts::{
+    AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
+    AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkTaskRequestV1,
+    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
+    GenerateProposalRequest, GeneratedWorkProposal, ListTaskHandoffsRequestV1,
+    ListTaskHandoffsResultV1, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, ObservatoryReadModelV1,
+    PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
+    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand,
+    ResumeWorkRunCommand, RetryWorkAttemptCommandV1, ReviewWorkProposalRequestV1,
+    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
     WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
@@ -36,13 +41,19 @@ use tracedecay_domain::{
 };
 
 use super::analytics_api::{
-    AnalyticsAgentsPayloadV1, AnalyticsDiagnosticsPayloadV1, AnalyticsHintsPayloadV1,
-    AnalyticsOverviewPayloadV1, AnalyticsSubagentTreePayloadV1, AnalyticsUnderusedPayloadV1,
-    AnalyticsUsageSummaryV1,
+    AnalyticsAgentsPayloadV1, AnalyticsDiagnosticsPayloadV1, AnalyticsOverviewPayloadV1,
+    AnalyticsSubagentTreePayloadV1, AnalyticsUnderusedPayloadV1, AnalyticsUsageSummaryV1,
+};
+use super::automation_fact_receipts_api::AutomaticFactReceiptsPayloadV1;
+use super::automation_jobs_api::AutomationJobsPayloadV1;
+use super::automation_outcomes_api::AutomationOutcomesPayloadV1;
+use super::automation_run_api::{
+    AutomationRunArtifactPayloadV1, AutomationRunArtifactsPayloadV1, AutomationRunsPayloadV1,
 };
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
-use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
-use super::delivery_api::DeliveryOverviewV1;
+use super::automation_skills_api::AutomationSkillsPayloadV1;
+use super::code_read_api::RevisionPairUnionLayoutV1;
+use super::delivery_api::{DeliveryInboxV1, DeliveryOverviewV1};
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
 use super::explorer_api::{ExplorerQueryRunV1, ExplorerReadContextV1, ExplorerSessionSizeV1};
 use super::graph_service::{
@@ -59,25 +70,28 @@ use super::lcm_api::{
 use super::loom_api::LoomTemporalPayloadV1;
 use super::memory_api::{
     MemoryFactDetailPayloadV1, MemoryOverviewPayloadV1, MemoryStatusPayloadV1,
+    MemoryTrustHistoryPayloadV1,
+};
+use super::memory_service::{
+    MemoryOplogPayloadV1, MemoryProjectionPayloadV1, MemorySimilarityPayloadV1,
 };
 use super::projects::{ProjectContextPayloadV1, ProjectsPayloadV1};
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
 use super::remote_status_api::RemoteOperationalStatusPayloadV1;
-use super::savings_api::{SavingsOverviewPayloadV1, SavingsSessionsPayloadV1};
+use super::savings_api::{SavingsModelsPayloadV1, SavingsOverviewPayloadV1};
 use super::settings_api::{
     CodeIndexWorkerSettingsPatch, ProjectSettingsPatch, SettingsPayloadV1, UserSettingsPatch,
 };
-use super::storage_findings_api::StorageFindingsPayloadV1;
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
 use super::work_api::registered_route_contracts as registered_work_route_contracts;
 use crate::application::feedback::observations::FeedbackObservationReadModelV1;
+use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1;
 
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 struct DashboardContractCatalogV1 {
     envelope: DashboardEnvelopeV1<DashboardPayloadMarkerV1>,
     storage_telemetry: StorageTelemetryPayloadV1,
-    storage_findings: StorageFindingsPayloadV1,
     doctor_findings: DoctorFindingsPayloadV1,
     remote_operational_status: RemoteOperationalStatusPayloadV1,
     explorer_query_run: ExplorerQueryRunV1,
@@ -91,9 +105,15 @@ struct DashboardContractCatalogV1 {
     graph_neighbors: DashboardEnvelopeV1<Option<GraphNeighborsPayloadV1>>,
     graph_subgraph: DashboardEnvelopeV1<Option<GraphSubgraphPayloadV1>>,
     graph_path: DashboardEnvelopeV1<Option<GraphPathPayloadV1>>,
+    shared_code_family: DashboardEnvelopeV1<Option<SimilarResultV1>>,
+    revision_pair_union_layout: DashboardEnvelopeV1<Option<RevisionPairUnionLayoutV1>>,
     memory_overview: DashboardEnvelopeV1<Option<MemoryOverviewPayloadV1>>,
     memory_status: DashboardEnvelopeV1<Option<MemoryStatusPayloadV1>>,
     memory_fact_detail: DashboardEnvelopeV1<Option<MemoryFactDetailPayloadV1>>,
+    memory_trust_history: MemoryTrustHistoryPayloadV1,
+    memory_projection: MemoryProjectionPayloadV1,
+    memory_similarity: MemorySimilarityPayloadV1,
+    memory_oplog: MemoryOplogPayloadV1,
     analytics_overview: DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>,
     analytics_usage: DashboardEnvelopeV1<Option<AnalyticsUsageSummaryV1>>,
     analytics_agents: DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>,
@@ -108,14 +128,17 @@ struct DashboardContractCatalogV1 {
     analytics_underused: DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>,
     analytics_diagnostics: DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>,
     savings_overview: DashboardEnvelopeV1<Option<SavingsOverviewPayloadV1>>,
-    savings_sessions: SavingsSessionsPayloadV1,
+    savings_models: SavingsModelsPayloadV1,
     lcm_session: DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>,
     lcm_timeline: DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>,
     lcm_overview: DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>,
     lcm_search: DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>,
     loom_temporal: LoomTemporalPayloadV1,
+    delivery_inbox: DeliveryInboxV1,
     delivery_overview: DeliveryOverviewV1,
     feedback_status: DashboardEnvelopeV1<FeedbackObservationReadModelV1>,
+    feedback_proximity_request: FeedbackProximityReadRequestV1,
+    feedback_proximity: FeedbackProximityReadResultV1,
     code_index_freshness: CodeIndexFreshnessPayloadV1,
     settings: SettingsPayloadV1,
     settings_project_patch: ProjectSettingsPatch,
@@ -131,8 +154,10 @@ struct DashboardContractCatalogV1 {
     work_generate_proposal_request: GenerateProposalRequest,
     work_generated_proposal: GeneratedWorkProposal,
     work_create_task_request: CreateWorkTaskRequestV1,
-    work_decide_proposal_request: DecideWorkProposalRequestV1,
+    work_review_proposal_request: ReviewWorkProposalRequestV1,
+    work_accept_proposal_request: AcceptWorkProposalRequestV1,
     work_admit_execution_request: AdmitWorkExecutionRequestV1,
+    work_admitted_execution: AdmittedWorkExecutionV1,
     work_start_attempt_command: StartWorkAttemptCommand,
     work_admit_synthesis_command: AdmitWorkSynthesisCommand,
     work_synthesis_attempt: WorkSynthesisAttemptV1,
@@ -203,13 +228,20 @@ struct DashboardContractCatalogV1 {
     /// Served identically by `GET /api/automation/scheduler/status` and by the
     /// `pause`/`resume` controls, which re-read rather than acknowledge.
     automation_scheduler_status: AutomationSchedulerStatusV1,
+    automation_jobs: AutomationJobsPayloadV1,
+    automation_skills: AutomationSkillsPayloadV1,
+    automation_fact_receipts: AutomaticFactReceiptsPayloadV1,
+    automation_runs: AutomationRunsPayloadV1,
+    automation_run_artifacts: AutomationRunArtifactsPayloadV1,
+    automation_run_artifact: AutomationRunArtifactPayloadV1,
+    automation_outcomes: AutomationOutcomesPayloadV1,
     fact_store_curate_request: FactStoreCurateRequestV1,
+    fact_store_curate_result: FactStoreCurateResultV1,
     automation_run: AutomationRunResultV1,
     automation_problem: AutomationRunProblemV1,
 }
 
 #[derive(JsonSchema)]
-#[allow(dead_code)]
 struct DashboardPayloadMarkerV1;
 
 /// Render the complete Rust dashboard wire schema as deterministic JSON.
@@ -260,17 +292,6 @@ fn assert_registered_work_route_payloads_are_contracted(schema: &serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::render_dashboard_contract_schema;
-
-    #[test]
-    #[ignore = "invoked by dashboard contracts:generate/check"]
-    fn writes_dashboard_contract_schema() {
-        let output = std::env::var_os("TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT")
-            .map(std::path::PathBuf::from)
-            .expect("contract codegen must provide an output path");
-        let schema =
-            render_dashboard_contract_schema().expect("serialize dashboard contract schema");
-        std::fs::write(output, schema).expect("write dashboard contract schema");
-    }
 
     #[test]
     fn registered_dashboard_route_responses_are_contracted() {
@@ -334,6 +355,7 @@ mod tests {
         );
         assert!(!definitions.contains_key("AutomationRunRequestV1"));
         assert!(definitions.contains_key("AutomationRunResultV1"));
+        assert!(definitions.contains_key("FactStoreCurateResultV1"));
         assert!(definitions.contains_key("AutomationRunProblemV1"));
     }
 
@@ -352,13 +374,18 @@ mod tests {
             ("work_generated_proposal", "GeneratedWorkProposal"),
             ("work_create_task_request", "CreateWorkTaskRequestV1"),
             (
-                "work_decide_proposal_request",
-                "DecideWorkProposalRequestV1",
+                "work_review_proposal_request",
+                "ReviewWorkProposalRequestV1",
+            ),
+            (
+                "work_accept_proposal_request",
+                "AcceptWorkProposalRequestV1",
             ),
             (
                 "work_admit_execution_request",
                 "AdmitWorkExecutionRequestV1",
             ),
+            ("work_admitted_execution", "AdmittedWorkExecutionV1"),
             ("work_start_attempt_command", "StartWorkAttemptCommand"),
             ("work_admit_synthesis_command", "AdmitWorkSynthesisCommand"),
             ("work_synthesis_attempt", "WorkSynthesisAttemptV1"),
@@ -562,15 +589,42 @@ mod tests {
             "MemoryEntityRowV1",
             "AnalyticsOverviewPayloadV1",
             "SavingsOverviewPayloadV1",
-            "SavingsSessionsPayloadV1",
+            "SavingsModelsPayloadV1",
+            "SavingsProviderSpendV1",
+            "SavingsProviderDayPointV1",
             "LcmSessionPayloadV1",
             "LcmTimelinePayloadV1",
             "LcmMessageV1",
             "LcmSummaryNodeV1",
             "LoomTemporalPayloadV1",
+            "DeliveryInboxV1",
             "DeliveryOverviewV1",
             "ExplorerSessionSizeV1",
             "ExplorerReadContextV1",
+        ] {
+            assert!(
+                definitions.contains_key(response),
+                "dashboard response {response} is absent from the contract catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn code_family_and_revision_pair_routes_are_contracted() {
+        let schema: serde_json::Value = serde_json::from_str(
+            &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
+        )
+        .expect("parse dashboard contract schema");
+        let definitions = schema["$defs"]
+            .as_object()
+            .expect("dashboard contracts expose schema definitions");
+
+        for response in [
+            "SimilarResultV1",
+            "SimilarFamilyV1",
+            "RevisionPairUnionLayoutV1",
+            "RevisionPairFileRegionV1",
+            "RevisionPairSymbolRegionV1",
         ] {
             assert!(
                 definitions.contains_key(response),

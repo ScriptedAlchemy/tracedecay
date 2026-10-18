@@ -9,7 +9,7 @@
  * claim than the others', which they are not.
  *
  * Nothing here derives a health grade, and nothing renders a missing metric as
- * zero — `MetricGroups` prints the composer's own reason where the figure would
+ * zero, `MetricGroups` prints the composer's own reason where the figure would
  * be. What varies between call sites is the projection, the window it names,
  * and what a reader is told when the payload is empty, so those are props.
  */
@@ -50,7 +50,7 @@ export function CanonicalReadModelSection<T>({
   loadingDetail: string;
   className?: string;
   metrics: (model: T) => MetricValueV1[];
-  /** Said when the payload carried no measurements — which is a payload with no
+  /** Said when the payload carried no measurements, which is a payload with no
    * metrics, never a set of zeroes. */
   emptyLabel: string;
   /** `data-*` markers the horizon line carries for this projection. */
@@ -87,7 +87,7 @@ export function CanonicalReadModelSection<T>({
             />
             <OmissionReasons coverage={envelope.coverage} />
             <dl
-              className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-3xs sm:grid-cols-2 xl:grid-cols-4"
+              className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-sm sm:grid-cols-2 xl:grid-cols-4"
               {...horizonAttributes(model)}
             >
               {horizonFields(model)}

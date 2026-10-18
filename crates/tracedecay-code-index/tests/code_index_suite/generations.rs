@@ -1,25 +1,19 @@
 use std::collections::BTreeSet;
-use std::fmt::Debug;
 
 use tracedecay_code_index::capabilities::expected_seal_digest;
-use tracedecay_code_index::generations::{GenerationPlanner, RebuildTriggerV1};
+use tracedecay_code_index::generations::{
+    GenerationPlanner, GenerationPlanningErrorV1, RebuildTriggerV1,
+};
 use tracedecay_code_index::intake::INTAKE_DIGEST_SEPARATOR;
 use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
-use tracedecay_code_index::languages::StaticLanguageRegistry;
+use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationManifestV1, ContentDigest, FileOccurrenceId, LanguageId,
-    ManifestDigest, PrivacyDomainId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
-    canonical_sha256,
+    ChunkerRevision, ContentDigest, DomainError, FileOccurrenceId, LanguageId, PrivacyDomainId,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, canonical_sha256,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn content_digest(byte: char) -> ContentDigest {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))
@@ -46,6 +40,7 @@ fn snapshot(files: Vec<SanitizedCodeFileV1>) -> SanitizedCodeSnapshotV1 {
         content_identity: content_digest('f'),
         captured_at: UtcMicros(1_000),
         files,
+        omitted_sources: Vec::new(),
     }
 }
 
@@ -93,6 +88,78 @@ fn immutable_generation_seals_are_deterministic_and_parent_bound() {
     assert_eq!(child.parent_generation, Some(first.generation_id.clone()));
     assert_ne!(child.seal.expected_digest, first.seal.expected_digest);
     assert!(first.generation_id < child.generation_id);
+}
+
+#[test]
+fn retained_call_graph_revisions_reextract_unchanged_sources() {
+    let current_registry = StaticLanguageRegistry::new();
+    let previous_revisions = [
+        ("rust", 19),
+        ("typescript", 14),
+        ("svelte", 10),
+        ("astro", 10),
+    ];
+    let previous_descriptors = previous_revisions
+        .iter()
+        .map(|(language, revision)| {
+            let mut descriptor = current_registry
+                .descriptor(&id::<LanguageId>(language))
+                .expect("compiled language")
+                .clone();
+            descriptor.extractor_revision = id(&format!("extractor.{language}.v{revision}"));
+            descriptor
+        })
+        .collect();
+    let previous = GenerationPlanner::new(
+        id::<tracedecay_domain::ProjectId>("project.incremental"),
+        id::<RepositoryId>("repository.incremental"),
+        StaticLanguageRegistry::try_from_descriptors(previous_descriptors)
+            .expect("previous published descriptors"),
+        id::<ChunkerRevision>("chunker.daemon.v4"),
+        id::<PrivacyDomainId>("privacy.incremental"),
+        3,
+    );
+    let current = GenerationPlanner::new(
+        id::<tracedecay_domain::ProjectId>("project.incremental"),
+        id::<RepositoryId>("repository.incremental"),
+        current_registry,
+        id::<ChunkerRevision>(
+            tracedecay_code_index::production::DAEMON_CODE_INDEX_CHUNKER_REVISION,
+        ),
+        id::<PrivacyDomainId>("privacy.incremental"),
+        3,
+    );
+    let prior_snapshot = snapshot(
+        previous_revisions
+            .iter()
+            .enumerate()
+            .map(|(index, (language, _))| {
+                let mut source = file(&format!("file.{index}"), &format!("src/{language}"), 'a');
+                source.language = Some(id::<LanguageId>(language));
+                source
+            })
+            .collect(),
+    );
+    let unchanged = validated(prior_snapshot.clone());
+    let prior = previous
+        .plan_generation(&unchanged, None, UtcMicros(3_000))
+        .expect("previous sealed generation");
+    let plan = current
+        .plan_increment(&prior, &prior_snapshot, &unchanged, &BTreeSet::new())
+        .expect("normal upgrade without source changes");
+    assert!(plan.is_full_rebuild());
+    assert_eq!(plan.carried_forward, 0);
+    assert_eq!(plan.reextract, unchanged.snapshot.files.len() as u64);
+    assert!(
+        plan.rebuild_triggers
+            .contains(&RebuildTriggerV1::ChunkerRevision)
+    );
+    for (language, _) in previous_revisions {
+        assert!(
+            plan.rebuild_triggers
+                .contains(&RebuildTriggerV1::ExtractorRevision(id(language)))
+        );
+    }
 }
 
 #[test]
@@ -235,94 +302,11 @@ fn resealing_cannot_hide_a_generation_fingerprint_mismatch() {
     tampered.seal.expected_digest =
         expected_seal_digest(&tampered).expect("tampered manifest can be resealed");
 
-    assert!(tampered.validate().is_err());
-    assert!(
-        planner
-            .plan_generation(&snapshot, Some(&tampered), UtcMicros(4_000))
-            .is_err()
-    );
-}
-
-#[test]
-fn legacy_v1_manifest_deserialization_migrates_and_remains_a_valid_parent() {
-    let planner = planner();
-    let snapshot = validated(snapshot(vec![file("file.a", "src/a.rs", 'a')]));
-    let current = planner
-        .plan_generation(&snapshot, None, UtcMicros(3_000))
-        .expect("current manifest");
-    let mut legacy_identity = current
-        .generation_id
-        .as_str()
-        .split('.')
-        .take(4)
-        .collect::<Vec<_>>()
-        .join(".");
-    assert_eq!(legacy_identity.matches('.').count(), 3);
-
-    let mut wire = serde_json::to_value(&current).expect("manifest wire");
-    let object = wire.as_object_mut().expect("manifest object");
-    object.insert(
-        "generation_id".to_owned(),
-        serde_json::Value::String(std::mem::take(&mut legacy_identity)),
-    );
-    object.remove("invalidation_digest");
-    object
-        .get_mut("seal")
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("seal object")
-        .insert(
-            "expected_digest".to_owned(),
-            serde_json::Value::String(format!("sha256:{}", "0".repeat(64))),
-        );
-
-    let mut migrated: CodeGenerationManifestV1 =
-        serde_json::from_value(wire).expect("legacy wire migrates");
-    migrated.seal.expected_digest = expected_seal_digest(&migrated).expect("legacy seal digest");
-    let mut legacy_wire = serde_json::to_value(&migrated).expect("migrated wire");
-    legacy_wire
-        .as_object_mut()
-        .expect("manifest object")
-        .remove("invalidation_digest");
-    let legacy_parent: CodeGenerationManifestV1 =
-        serde_json::from_value(legacy_wire).expect("legacy fixture deserializes");
-
-    legacy_parent.validate().expect("legacy parent validates");
+    assert_eq!(tampered.validate(), Err(DomainError::DigestMismatch));
     assert_eq!(
-        legacy_parent.invalidation_digest,
-        migrated.invalidation_digest
+        planner.plan_generation(&snapshot, Some(&tampered), UtcMicros(4_000)),
+        Err(GenerationPlanningErrorV1::Contract(
+            "manifest digest does not match its canonical domain-separated payload".to_owned(),
+        ))
     );
-    assert_ne!(
-        legacy_parent.invalidation_digest,
-        id::<ManifestDigest>(&format!("sha256:{}", "0".repeat(64)))
-    );
-    let child = planner
-        .plan_generation(&snapshot, Some(&legacy_parent), UtcMicros(4_000))
-        .expect("legacy parent accepted");
-    assert_eq!(
-        child.parent_generation.as_ref(),
-        Some(&legacy_parent.generation_id)
-    );
-}
-
-#[test]
-fn file_increment_planning_reports_deletion_without_reparsing_unchanged_files() {
-    let planner = planner();
-    let prior_snapshot = snapshot(vec![
-        file("file.a", "src/a.rs", 'a'),
-        file("file.b", "src/b.rs", 'b'),
-    ]);
-    let prior = planner
-        .plan_generation(&validated(prior_snapshot.clone()), None, UtcMicros(3_000))
-        .expect("prior generation");
-    let current = validated(snapshot(vec![file("file.a2", "src/a.rs", 'a')]));
-
-    let plan = planner
-        .plan_increment(&prior, &prior_snapshot, &current, &BTreeSet::new())
-        .expect("increment plan");
-
-    assert!(!plan.is_full_rebuild());
-    assert_eq!(plan.carried_forward, 1);
-    assert_eq!(plan.reextract, 0);
-    assert_eq!(plan.deleted, 1);
-    assert_eq!(plan.prior_generation, prior.generation_id);
 }

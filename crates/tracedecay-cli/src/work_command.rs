@@ -1,149 +1,241 @@
 //! CLI presentation for the closed Work application binding.
 
-use std::io::{Read, Write};
+use std::io::Write;
+use std::path::Path;
+use std::time::Duration;
 
 use serde_json::Value;
-use tracedecay_application::ApplicationResult;
+use tracedecay_api::WorkOperation;
+use tracedecay_contracts::ApplicationResult;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::cli::WorkInvocationArgs;
 
-#[hotpath::measure(label = "cli.work.invoke", future = true)]
-pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::errors::Result<()> {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
-    let body = read_request(&invocation.request_file)?;
-    let project_root = tracedecay::config::resolve_path_with_discovery(invocation.project);
+/// How long `--until-settled` lets providers progress before asking again.
+const SETTLE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+#[tracing::instrument(name = "cli.work.invoke", level = "trace", skip_all)]
+pub(crate) async fn run(profile: &ProfileRoot, args: WorkInvocationArgs) -> Result<()> {
+    let WorkInvocationArgs {
+        invocation,
+        until_settled,
+    } = args;
+    tracing::trace!(name: "cli.work.operation", value = ?invocation.operation.operation_key());
     let operation = invocation.operation;
+    if until_settled && operation != WorkOperation::AdvanceJob {
+        return Err(TraceDecayError::Config {
+            message: "--until-settled applies only to `tracedecay work advance-job`".to_owned(),
+        });
+    }
+    let body = crate::application_cli::read_request(
+        &invocation.request_file,
+        crate::application_cli::WORK,
+    )?;
+    let project_root =
+        tracedecay_configuration::resolve_path_with_discovery(profile, invocation.project);
+    loop {
+        let outcome = invoke_once(
+            profile,
+            &project_root,
+            operation,
+            body.clone(),
+            invocation.json,
+        )
+        .await?;
+        if !until_settled {
+            return Ok(());
+        }
+        match job_state(&outcome)? {
+            JobState::Advancing => {}
+            JobState::Waiting => tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + SETTLE_POLL_INTERVAL,
+            )
+            .await
+            .map_err(|message| TraceDecayError::Config { message })?,
+            JobState::Completed => return Ok(()),
+            JobState::Refused { code, message } => {
+                return Err(TraceDecayError::tool_refused(
+                    "work advance-job",
+                    Some(code),
+                    Some(message),
+                ));
+            }
+        }
+    }
+}
+
+enum JobState {
+    Advancing,
+    Waiting,
+    Completed,
+    Refused { code: String, message: String },
+}
+
+/// The settled-or-not reading of one successful `advance-job` result.
+fn job_state(outcome: &ApplicationResult<Value>) -> Result<JobState> {
+    let state = outcome
+        .as_ref()
+        .ok()
+        .and_then(|envelope| envelope.outcome.payload())
+        .map(|payload| &payload["state"]);
+    let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+    match state.and_then(|state| state["state"].as_str()) {
+        Some("advancing") => Ok(JobState::Advancing),
+        Some("waiting") => Ok(JobState::Waiting),
+        Some("completed") => Ok(JobState::Completed),
+        Some("refused") => {
+            let problem = state.map_or(&Value::Null, |state| &state["problem"]);
+            Ok(JobState::Refused {
+                code: text(&problem["code"]),
+                message: text(&problem["message"]),
+            })
+        }
+        _ => Err(TraceDecayError::Config {
+            message: "the daemon returned an advance-job result without a job state".to_owned(),
+        }),
+    }
+}
+
+/// One-line-per-step progress for a human reading `advance-job` output.
+fn render_job_progress(outcome: &ApplicationResult<Value>) -> Option<String> {
+    let payload = outcome.as_ref().ok()?.outcome.payload()?;
+    let step_name = |step: &Value| {
+        let name = step["step"].as_str().unwrap_or_default();
+        match step["task"].as_str() {
+            Some(task) => format!("{name} {task}"),
+            None => name.to_owned(),
+        }
+    };
+    let mut lines = payload["performed"]
+        .as_array()?
+        .iter()
+        .map(|record| {
+            format!(
+                "performed {}  {}  {}",
+                step_name(&record["step"]),
+                record["receipt"]["operation"].as_str().unwrap_or_default(),
+                record["request_id"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let state = &payload["state"];
+    lines.push(match state["state"].as_str()? {
+        "waiting" => format!(
+            "waiting   {}",
+            state["on"]
+                .as_array()?
+                .iter()
+                .map(|wait| match wait["wait"].as_str() {
+                    Some("attempt") => format!(
+                        "attempt {} {}",
+                        wait["identity"]["attempt_id"].as_str().unwrap_or_default(),
+                        wait["state"].as_str().unwrap_or_default()
+                    ),
+                    Some("capacity") =>
+                        format!("capacity for {}", wait["task"].as_str().unwrap_or_default()),
+                    _ => format!(
+                        "proposal route for {}",
+                        wait["task"].as_str().unwrap_or_default()
+                    ),
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        "refused" => format!(
+            "refused   {}  {}: {}",
+            step_name(&state["step"]),
+            state["problem"]["code"].as_str().unwrap_or_default(),
+            state["problem"]["message"].as_str().unwrap_or_default(),
+        ),
+        "completed" => format!(
+            "completed synthesis {}",
+            state["synthesis"]["identity"]["attempt_id"]
+                .as_str()
+                .unwrap_or_default()
+        ),
+        other => other.to_owned(),
+    });
+    Some(lines.join("\n") + "\n")
+}
+
+async fn invoke_once(
+    profile: &ProfileRoot,
+    project_root: &Path,
+    operation: WorkOperation,
+    body: Value,
+    json: bool,
+) -> Result<ApplicationResult<Value>> {
     // The application round-trip timed apart from `cli.work.invoke` so daemon
     // latency is separable from request parsing, render, and delivery
     // settlement.
-    let mut response = hotpath::future!(
-        crate::work_cli::invoke_work_cli_with_delivery(project_root.clone(), operation, body),
-        label = "cli.work.request"
+    let mut response = tracing::Instrument::instrument(
+        crate::application_cli::invoke(
+            profile,
+            project_root,
+            crate::application_cli::ApplicationOperation::Work(operation),
+            body,
+        ),
+        tracing::trace_span!("cli.work.request"),
     )
     .await?;
-    let rendered = if invocation.json {
-        work_json_line(&response.outcome)?
-    } else {
-        let outcome = response.outcome.as_ref().map_err(|problem| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("{}: {}", problem.problem.code, problem.problem.message),
-            }
-        })?;
-        format!(
-            "Work {}\nProject: {}\n{}\n",
-            operation.route_segment().replace('-', " "),
-            project_root.display(),
-            serde_json::to_string_pretty(outcome)?
-        )
+    let rendered = match (operation, json) {
+        (WorkOperation::AdvanceJob, false) => render_job_progress(&response.outcome),
+        _ => None,
+    };
+    let rendered = match rendered {
+        Some(rendered) => rendered,
+        None => crate::application_cli::render(
+            crate::application_cli::WORK,
+            operation.route_segment(),
+            project_root,
+            &response.outcome,
+            json,
+        )?,
     };
 
     let mut stdout = std::io::stdout().lock();
     let write_result = write_work_output(&mut stdout, rendered.as_bytes());
     drop(stdout);
-    let delivery_settlement = classify_work_output(&write_result);
     match write_result {
         Ok(()) => {
             if let Some(delivery) = response.take_delivery() {
-                match delivery_settlement {
-                    WorkOutputSettlement::Delivered => delivery.acknowledge_delivered().await?,
-                    WorkOutputSettlement::Dropped(reason) => {
-                        let _ = delivery.acknowledge_dropped(reason).await;
-                    }
-                }
+                delivery.acknowledge_delivered().await?;
             }
         }
         Err(error) => {
             if let Some(delivery) = response.take_delivery() {
-                let reason = match delivery_settlement {
-                    WorkOutputSettlement::Dropped(reason) => reason,
-                    WorkOutputSettlement::Delivered => {
-                        tracedecay_domain::DeliveryDropReasonV1::Disconnected
-                    }
-                };
-                let _ = delivery.acknowledge_dropped(reason).await;
+                let _ = delivery
+                    .acknowledge_dropped(tracedecay_domain::DeliveryDropReasonV1::Disconnected)
+                    .await;
             }
             return Err(error.into());
         }
     }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WorkOutputSettlement {
-    Delivered,
-    Dropped(tracedecay_domain::DeliveryDropReasonV1),
+    crate::application_cli::refused(
+        crate::application_cli::WORK,
+        operation.route_segment(),
+        &response.outcome,
+    )?;
+    Ok(response.outcome)
 }
 
 fn write_work_output<W: Write>(writer: &mut W, rendered: &[u8]) -> std::io::Result<()> {
     writer.write_all(rendered).and_then(|()| writer.flush())
 }
 
-fn classify_work_output(result: &std::io::Result<()>) -> WorkOutputSettlement {
-    if result.is_ok() {
-        WorkOutputSettlement::Delivered
-    } else {
-        WorkOutputSettlement::Dropped(tracedecay_domain::DeliveryDropReasonV1::Disconnected)
-    }
-}
-
-fn work_json_line(outcome: &ApplicationResult<Value>) -> serde_json::Result<String> {
-    crate::cli::output::json::json_line(outcome)
-}
-
-fn read_request(path: &std::path::Path) -> tracedecay_domain::errors::Result<Value> {
-    let payload = if path == std::path::Path::new("-") {
-        let mut payload = String::new();
-        std::io::stdin().read_to_string(&mut payload)?;
-        payload
-    } else {
-        std::fs::read_to_string(path)?
-    };
-    serde_json::from_str(&payload).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "Work request file {} is not valid JSON: {error}",
-                path.display()
-            ),
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::work_json_line;
-    use super::{WorkOutputSettlement, classify_work_output, write_work_output};
     use std::io::{self, Write};
-    use tracedecay_application::{
-        ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
-        ResultContractRef, RetryDirective,
-    };
-    use tracedecay_tool_catalog::SchemaId;
+
+    use super::write_work_output;
 
     #[test]
     fn work_json_line_preserves_the_canonical_typed_problem() {
-        let outcome: ApplicationResult<serde_json::Value> = Err(ApplicationProblemEnvelope::new(
-            ResultContractRef::new(
-                SchemaId::new("schema.work.start_attempt.result").unwrap(),
-                1,
-            )
-            .unwrap(),
-            RequestId::new("request.cli.work.7").unwrap(),
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        )
-        .expect("construct canonical work problem fixture"));
-
-        let rendered = work_json_line(&outcome).expect("work JSON line");
-        let problem: serde_json::Value =
-            serde_json::from_str(rendered.trim_end()).expect("typed work problem JSON");
-        assert_eq!(
-            problem["contract"]["schema_id"],
-            "schema.work.start_attempt.result"
+        crate::application_cli::tests::assert_json_problem(
+            "schema.work.start_attempt.result",
+            "request.cli.work.7",
         );
-        assert_eq!(problem["contract"]["schema_revision"], 1);
-        assert_eq!(problem["request_id"], "request.cli.work.7");
-        assert_eq!(problem["problem"]["kind"], "not_found_or_not_authorized");
-        assert_eq!(rendered.lines().count(), 1);
     }
 
     struct BrokenPipeWriter;
@@ -169,14 +261,6 @@ mod tests {
                 .expect_err("broken pipe should fail output")
                 .kind(),
             io::ErrorKind::BrokenPipe
-        );
-        assert_eq!(
-            classify_work_output(&write_result),
-            WorkOutputSettlement::Dropped(tracedecay_domain::DeliveryDropReasonV1::Disconnected)
-        );
-        assert_ne!(
-            classify_work_output(&write_result),
-            WorkOutputSettlement::Delivered
         );
     }
 }

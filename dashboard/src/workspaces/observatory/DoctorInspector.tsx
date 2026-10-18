@@ -17,6 +17,7 @@ import {
   type DoctorFindingsPayloadV1,
   type DoctorReportCoverageV1,
   type DoctorReportEntryV1,
+  type SchemaConvergenceFindingV1,
 } from '../../contracts/generated.ts';
 import { doctorFindingsQueryKey, fetchDoctorFindings } from '../../data/query/doctor.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -27,6 +28,7 @@ import { ReadModelState, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn.ts';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { doctorEvidencePresentation, doctorFamilyLabel } from './doctorModel.ts';
 
 /** Canonical, read-only Doctor diagnostics for the selected project scope. */
@@ -43,7 +45,7 @@ export function DoctorInspector() {
       <div className="flex flex-wrap items-center gap-2 px-4 pt-4">
         <Activity aria-hidden size={14} className="text-accent" />
         <h2 className="text-sm font-semibold tracking-tight">Doctor diagnosis</h2>
-        <span className="text-2xs text-text-muted">
+        <span className="text-body text-text-muted">
           canonical evidence and typed diagnostics
         </span>
       </div>
@@ -61,8 +63,8 @@ export function DoctorInspector() {
 /**
  * What this scope means for acting on the diagnosis.
  *
- * The Doctor route is read-only by design — corrective actions stay with the
- * owning daemon — so there is no control here to disable. But a reader on a
+ * The Doctor route is read-only by design, corrective actions stay with the
+ * owning daemon, so there is no control here to disable. But a reader on a
  * non-active project scope still needs to know that everything on this page is
  * an observation of a project the gateway will not let them change, and how to
  * reach the scope that would. A writable scope renders nothing: a sentence
@@ -76,12 +78,12 @@ function ScopeWritabilityNote() {
   return (
     <p
       data-scope-writability={writability.state}
-      className="min-w-0 px-4 pt-1.5 text-2xs leading-relaxed text-text-secondary"
+      className="min-w-0 px-4 pt-1.5 text-body leading-relaxed text-text-secondary"
     >
       {scopeWriteSentence(writability, {
         writable: (target) => `Writes apply to ${target}.`,
         refused: (reason) =>
-          `This diagnosis is read-only here — corrective actions stay with the owning daemon. ${reason}`,
+          `This diagnosis is read-only here, corrective actions stay with the owning daemon. ${reason}`,
       })}
     </p>
   );
@@ -111,6 +113,7 @@ function DoctorFindings({
     <>
       <EnvelopeTruth envelope={envelope} refreshing={refreshing} onRefresh={onRefresh} />
       <DoctorReportCoverageGaps coverage={envelope.payload.report_coverage} />
+      <SchemaConvergencePanel findings={envelope.payload.schema_convergences} />
       {envelope.payload.entries.length === 0 ? (
         <ReadModelState kind={envelope.domain_state} detail={envelope.payload.note} />
       ) : (
@@ -123,11 +126,61 @@ function DoctorFindings({
           ))}
         </OverviewGrid>
       )}
-      <p className="border-t border-edge-subtle px-4 py-2 text-2xs text-text-muted">
+      <p className="border-t border-edge-subtle px-4 py-2 text-body text-text-muted">
         {envelope.payload.note}
       </p>
     </>
   );
+}
+
+export function SchemaConvergencePanel({
+  findings,
+}: {
+  findings: SchemaConvergenceFindingV1[];
+}) {
+  if (findings.length === 0) return null;
+  return (
+    <section
+      aria-label="Schema convergence"
+      className="mx-4 mt-2 border border-edge-subtle bg-surface-1 p-3"
+    >
+      <h3 className="text-xs font-semibold">Schema convergence</h3>
+      <ul className="mt-2 space-y-2">
+        {findings.map((finding, index) => (
+          <li
+            key={`${finding.store}:${finding.stage}:${index}`}
+            data-convergence-state={finding.state}
+            className="text-body text-text-secondary"
+          >
+            <span className="font-medium text-text-primary">
+              {convergenceStateLabel(finding.state)}
+            </span>{' '}
+            · {finding.store} · {finding.stage.replaceAll('_', ' ')}
+            {finding.progress ? (
+              <>
+                {' '}
+                · {finding.progress.unit} {finding.progress.done} done /{' '}
+                {finding.progress.remaining} remaining
+              </>
+            ) : null}
+            {' · '}started {formatMicrosUtc(finding.started_at_micros)}
+            {finding.degraded_row ? <> · {finding.degraded_row}</> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function convergenceStateLabel(state: SchemaConvergenceFindingV1['state']): string {
+  return (
+    {
+      pending_schema_migration: 'Pending schema migration',
+      released_shape_convergence_in_progress: 'Released-shape convergence in progress',
+      degraded: 'Schema convergence degraded',
+      completed: 'Schema convergence completed',
+    } satisfies Record<SchemaConvergenceFindingV1['state'], string>
+  )[state];
 }
 
 function DoctorReportCoverageGaps({
@@ -181,7 +234,7 @@ function consultationState(
     // An unreachable source is a source-level refusal, not a lost dashboard.
     case 'unavailable':
       return 'unavailable';
-    // Observed degradations of the source itself — a stronger claim than
+    // Observed degradations of the source itself, a stronger claim than
     // "could not be determined", and rendered as the fault it is.
     case 'reset_required':
     case 'corrupt':
@@ -224,7 +277,7 @@ function EvidenceBadge({ state }: { state: DoctorEvidenceStateV1 }) {
   const Icon = EVIDENCE_ICON[state];
   return (
     <span
-      className="relative inline-flex w-fit items-center gap-1.5 border border-edge-subtle bg-surface-2 py-[3px] pl-2.5 pr-2 text-2xs font-medium"
+      className="relative inline-flex w-fit items-center gap-1.5 border border-edge-subtle bg-surface-2 py-[3px] pl-2.5 pr-2 text-body font-medium"
       data-evidence-state={state}
     >
       <span
@@ -249,7 +302,7 @@ function FindingEvidence({ entry }: { entry: DoctorReportEntryV1 }) {
             // Indexed like the entry cards above: references are
             // server-authored rows, not unique identities.
             key={`${evidence.family}:${evidence.reference}:${index}`}
-            className="flex items-start gap-1.5 text-2xs text-text-secondary"
+            className="flex items-start gap-1.5 text-body text-text-secondary"
           >
             <FileSearch aria-hidden size={11} className="mt-0.5 shrink-0 text-text-muted" />
             <span className="font-mono">{evidence.reference}</span>

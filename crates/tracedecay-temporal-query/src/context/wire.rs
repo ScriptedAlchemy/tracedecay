@@ -4,10 +4,11 @@ use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
 use tracedecay_domain::{CompactContextBundleV1, ContextOmissionReasonV1, HydrationStateV1};
 
-use super::super::ports::{ExecutionControl, TemporalPortError};
+use super::super::execution::ExecutionControl;
 use super::super::resolution::summary::SummaryOmission;
 use super::estimation::{TOKEN_SCAN_CHUNK_BYTES, TokenSummary};
 use super::{ContextError, ContextPayload, MAX_CONTEXT_OUTPUT_BYTES, TokenPolicy};
+use crate::execution::TemporalPortError;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireMeasure {
     pub bytes: u64,
@@ -152,11 +153,6 @@ impl<'a> StreamingWriter<'a> {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub fn output_capacity(&self) -> usize {
-        self.output.as_ref().map_or(0, String::capacity)
-    }
-
     pub fn finish(
         mut self,
         result: Result<(), serde_json::Error>,
@@ -274,6 +270,6 @@ pub const fn omission_reason(state: HydrationStateV1) -> ContextOmissionReasonV1
         HydrationStateV1::Locked => ContextOmissionReasonV1::Locked,
         HydrationStateV1::Available
         | HydrationStateV1::RetainedButUnavailable
-        | HydrationStateV1::UnverifiableLegacy => ContextOmissionReasonV1::Unavailable,
+        | HydrationStateV1::Unverifiable => ContextOmissionReasonV1::Unavailable,
     }
 }

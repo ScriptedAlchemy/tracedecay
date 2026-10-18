@@ -1,8 +1,122 @@
 use std::fs;
+use std::io::{Read, Write};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::{FixedGitIndexRunner, NativeGitIndexError};
 use tempfile::tempdir;
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git::GitCommandBounds;
+
+const PIPE_ECHO_HELPER_ENV: &str = "TRACEDECAY_GIT_INDEX_PIPE_ECHO_HELPER";
+const PIPE_EARLY_EXIT_HELPER_ENV: &str = "TRACEDECAY_GIT_INDEX_PIPE_EARLY_EXIT_HELPER";
+const PIPE_FAIL_HELPER_ENV: &str = "TRACEDECAY_GIT_INDEX_PIPE_FAIL_HELPER";
+
+#[test]
+fn pipe_echo_helper() {
+    if std::env::var_os(PIPE_EARLY_EXIT_HELPER_ENV).is_some() {
+        return;
+    }
+    if std::env::var_os(PIPE_ECHO_HELPER_ENV).is_none() {
+        return;
+    }
+    let mut input = std::io::stdin().lock();
+    let mut output = std::io::stdout().lock();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer).expect("read helper stdin");
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .expect("write helper stdout");
+        output.flush().expect("flush helper stdout");
+    }
+    assert!(
+        std::env::var_os(PIPE_FAIL_HELPER_ENV).is_none(),
+        "requested child failure"
+    );
+}
+
+#[test]
+fn command_with_large_bidirectional_pipes_drains_output_while_writing_input() {
+    let (_directory, runner) = committed_file("fixture.txt", b"fixture\n");
+    let input = vec![0xa5; 4 * 1024 * 1024];
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .args([
+            "--exact",
+            "git_index_transactions::tests::pipe_echo_helper",
+            "--nocapture",
+        ])
+        .env(PIPE_ECHO_HELPER_ENV, "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+
+    let output = runner
+        .run_bounded_git_stdin(command, "pipe-echo", &input)
+        .expect("large bidirectional subprocess completes");
+    assert_eq!(
+        output
+            .stdout
+            .iter()
+            .copied()
+            .filter(|byte| *byte == 0xa5)
+            .count(),
+        input.len(),
+        "the concurrent drain must retain every emitted byte"
+    );
+}
+
+#[test]
+fn command_child_failure_remains_typed_after_pipe_drain() {
+    let (_directory, runner) = committed_file("fixture.txt", b"fixture\n");
+    let input = vec![0xa5; 4 * 1024 * 1024];
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .args([
+            "--exact",
+            "git_index_transactions::tests::pipe_echo_helper",
+            "--nocapture",
+        ])
+        .env(PIPE_ECHO_HELPER_ENV, "1")
+        .env(PIPE_FAIL_HELPER_ENV, "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    assert!(matches!(
+        runner.run_bounded_git_stdin(command, "pipe-child-failure", &input),
+        Err(NativeGitIndexError::GitFailed {
+            operation: "pipe-child-failure",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn command_that_closes_stdin_early_returns_a_typed_io_failure() {
+    let (_directory, runner) = committed_file("fixture.txt", b"fixture\n");
+    let input = vec![0xa5; 4 * 1024 * 1024];
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .args([
+            "--exact",
+            "git_index_transactions::tests::pipe_echo_helper",
+            "--nocapture",
+        ])
+        .env(PIPE_EARLY_EXIT_HELPER_ENV, "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    assert!(matches!(
+        runner.run_bounded_git_stdin(command, "pipe-early-exit", &input),
+        Err(NativeGitIndexError::Io(_))
+    ));
+}
 
 #[test]
 fn existing_native_index_lock_blocks_mutation_before_git_runs() {
@@ -93,7 +207,34 @@ fn configured_merge_diff_and_filter_drivers_are_preview_only() {
             .expect("git init starts")
             .success()
     );
+    fs::write(directory.path().join("tracked.txt"), b"tracked\n").expect("tracked file");
+    fs::write(
+        directory.path().join(".gitattributes"),
+        b"tracked.txt diff=tracedecay merge=tracedecay filter=tracedecay\n",
+    )
+    .expect("bind every driver kind to a path");
     let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+
+    let set = |key: &str| {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(["config", "--local", key, "external-driver"])
+                .status()
+                .expect("git config starts")
+                .success()
+        );
+    };
+    let unset = |key: &str| {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(["config", "--local", "--unset-all", key])
+                .status()
+                .expect("git config unset starts")
+                .success()
+        );
+    };
 
     for key in [
         "diff.external",
@@ -104,29 +245,50 @@ fn configured_merge_diff_and_filter_drivers_are_preview_only() {
         "filter.tracedecay.smudge",
         "filter.tracedecay.process",
     ] {
-        assert!(
-            Command::new("git")
-                .current_dir(directory.path())
-                .args(["config", "--local", key, "external-driver"])
-                .status()
-                .expect("git config starts")
-                .success()
-        );
+        set(key);
         assert!(
             runner
                 .has_external_drivers()
-                .expect("driver classification")
+                .expect("driver classification"),
+            "{key} is bound to a path by gitattributes and must refuse a preview"
         );
-        assert!(
-            Command::new("git")
-                .current_dir(directory.path())
-                .args(["config", "--local", "--unset-all", key])
-                .status()
-                .expect("git config unset starts")
-                .success()
-        );
+        unset(key);
         assert!(!runner.has_external_drivers().expect("driver removed"));
     }
+
+    // A driver definition no attribute binds cannot rewrite this repository's
+    // content. `git lfs install --system` puts exactly such a definition in
+    // `/etc/gitconfig` on every GitHub-hosted runner and most developer
+    // machines; classifying it as applied refused every preview there.
+    for key in [
+        "filter.lfs.clean",
+        "filter.lfs.smudge",
+        "filter.lfs.process",
+        "merge.unbound.driver",
+        "diff.unbound.command",
+        "diff.unbound.textconv",
+    ] {
+        set(key);
+        assert!(
+            !runner
+                .has_external_drivers()
+                .expect("unbound driver classification"),
+            "{key} binds no path in this repository and must not refuse a preview"
+        );
+        unset(key);
+    }
+
+    // `diff.external` names no driver to bind: it replaces the diff machinery
+    // for every diff, so it refuses with no attribute at all.
+    fs::remove_file(directory.path().join(".gitattributes")).expect("drop attribute bindings");
+    set("merge.tracedecay.driver");
+    assert!(!runner.has_external_drivers().expect("unbound named driver"));
+    set("diff.external");
+    assert!(
+        runner
+            .has_external_drivers()
+            .expect("unconditional external diff driver")
+    );
 }
 
 #[test]
@@ -140,6 +302,31 @@ fn configuration_and_filesystem_capability_digests_are_distinct() {
             .expect("git init starts")
             .success()
     );
+    let set_filemode = |value: &str| {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(["config", "--local", "core.filemode", value])
+                .status()
+                .expect("git config starts")
+                .success()
+        );
+    };
+    let read_filemode = || {
+        let output = Command::new("git")
+            .current_dir(directory.path())
+            .args(["config", "--local", "--bool", "--get", "core.filemode"])
+            .output()
+            .expect("git config read starts");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .expect("core.filemode is UTF-8")
+            .trim()
+            .to_string()
+    };
+    set_filemode("true");
+    assert_eq!(read_filemode(), "true");
+
     let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
     let configuration_before = runner.configuration_digest().expect("configuration");
     let capabilities_before = runner
@@ -165,19 +352,49 @@ fn configuration_and_filesystem_capability_digests_are_distinct() {
             .filesystem_capabilities_digest()
             .expect("unchanged filesystem capabilities")
     );
-    assert!(
-        Command::new("git")
-            .current_dir(directory.path())
-            .args(["config", "--local", "core.filemode", "false"])
-            .status()
-            .expect("git config starts")
-            .success()
-    );
+    set_filemode("false");
+    assert_eq!(read_filemode(), "false");
     assert_ne!(
         capabilities_before,
         runner
             .filesystem_capabilities_digest()
             .expect("changed filesystem capabilities")
+    );
+}
+
+#[test]
+fn sparse_digest_tracks_sparse_checkout_authority() {
+    let directory = tempdir().expect("temporary repository");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts")
+            .success()
+    );
+    let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+    let initial = runner.sparse_digest().expect("initial sparse digest");
+
+    fs::write(
+        directory.path().join(".git/info/sparse-checkout"),
+        b"/src/\n",
+    )
+    .expect("sparse checkout patterns");
+    let with_patterns = runner.sparse_digest().expect("pattern sparse digest");
+    assert_ne!(initial, with_patterns);
+
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["config", "--local", "core.sparseCheckout", "true"])
+            .status()
+            .expect("git config starts")
+            .success()
+    );
+    assert_ne!(
+        with_patterns,
+        runner.sparse_digest().expect("enabled sparse digest")
     );
 }
 
@@ -411,5 +628,340 @@ fn untracked_and_ignored_name_digests_bind_namespace_collisions() {
     assert_ne!(
         ignored_a,
         runner.ignored_name_digest().expect("second ignored names")
+    );
+}
+
+fn committed_file(name: &str, contents: &[u8]) -> (tempfile::TempDir, FixedGitIndexRunner) {
+    let directory = tempdir().expect("temporary repository");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts")
+            .success()
+    );
+    fs::write(directory.path().join(name), contents).expect("tracked file");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["add", "--", name])
+            .status()
+            .expect("git add starts")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args([
+                "-c",
+                "user.name=TraceDecay",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ])
+            .status()
+            .expect("git commit starts")
+            .success()
+    );
+    let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+    (directory, runner)
+}
+
+#[test]
+fn tracked_worktree_digest_honors_cancellation_before_filesystem_walk() {
+    let (directory, _runner) = committed_file("tracked.txt", b"before\n");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let runner = FixedGitIndexRunner::new(directory.path())
+        .expect("runner")
+        .with_command_bounds(GitCommandBounds {
+            deadline: Instant::now() + Duration::from_secs(30),
+            cancel: Some(cancel),
+            ..GitCommandBounds::default()
+        });
+    assert!(
+        matches!(
+            runner.tracked_worktree_digest(),
+            Err(NativeGitIndexError::Cancelled)
+        ),
+        "a cancelled digest must fail closed instead of minting identity"
+    );
+    runner
+        .acquire_index_lock()
+        .expect("cancellation must not leave the real index lock held");
+}
+
+fn assert_git_diff_head_hides(repository: &std::path::Path, path: &str) {
+    let output = Command::new("git")
+        .current_dir(repository)
+        .args([
+            "diff",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "HEAD",
+        ])
+        .output()
+        .expect("git diff HEAD starts");
+    assert!(output.status.success(), "git diff HEAD");
+    assert!(
+        !output
+            .stdout
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == path.as_bytes()),
+        "git diff HEAD must omit {path} when a worktree check flag hides it"
+    );
+}
+
+#[test]
+fn tracked_worktree_digest_changes_when_assume_unchanged_bytes_change() {
+    let (directory, runner) = committed_file("source.rs", b"committed\n");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-index", "--assume-unchanged", "--", "source.rs"])
+            .status()
+            .expect("assume-unchanged starts")
+            .success()
+    );
+    let before = runner
+        .tracked_worktree_digest()
+        .expect("digest before hidden edit");
+    fs::write(
+        directory.path().join("source.rs"),
+        b"hidden worktree drift\n",
+    )
+    .expect("hidden edit");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    let after = runner
+        .tracked_worktree_digest()
+        .expect("digest after hidden edit");
+    assert_ne!(
+        before, after,
+        "assume-unchanged is not byte evidence; the digest must bind worktree bytes"
+    );
+}
+
+#[test]
+fn tracked_worktree_digest_changes_when_skip_worktree_bytes_change() {
+    let (directory, runner) = committed_file("source.rs", b"committed\n");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-index", "--skip-worktree", "--", "source.rs"])
+            .status()
+            .expect("skip-worktree starts")
+            .success()
+    );
+    let before = runner
+        .tracked_worktree_digest()
+        .expect("digest before hidden edit");
+    fs::write(
+        directory.path().join("source.rs"),
+        b"hidden skip-worktree drift\n",
+    )
+    .expect("hidden edit");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    let after = runner
+        .tracked_worktree_digest()
+        .expect("digest after hidden edit");
+    assert_ne!(
+        before, after,
+        "skip-worktree is not byte evidence; the digest must bind worktree bytes"
+    );
+}
+
+#[test]
+fn tracked_worktree_digest_hidden_content_with_untrusted_ctime() {
+    let (directory, runner) = committed_file("source.rs", b"original\n");
+    let path = directory.path().join("source.rs");
+    let mtime = std::time::SystemTime::now() - Duration::from_secs(30);
+    fs::set_times(&path, fs::FileTimes::new().set_modified(mtime)).expect("historical mtime");
+    for args in [
+        vec!["config", "--local", "core.trustctime", "false"],
+        vec!["add", "--", "source.rs"],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(args)
+                .status()
+                .expect("Git stat setup")
+                .success()
+        );
+    }
+    let before = runner.tracked_worktree_digest().expect("original identity");
+    assert_eq!(
+        before,
+        tracedecay_domain::canonical_sha256(&[("source.rs", "file", b"original\n".to_vec())],)
+            .expect("canonical raw-byte manifest")
+    );
+    fs::write(&path, b"modified\n").expect("same-size edit");
+    fs::set_times(&path, fs::FileTimes::new().set_modified(mtime)).expect("restored mtime");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    assert_ne!(
+        before,
+        runner.tracked_worktree_digest().expect("edited identity")
+    );
+}
+
+#[test]
+fn tracked_worktree_digest_hidden_content_with_text_normalization() {
+    let (directory, runner) = committed_file("source.rs", b"original\n");
+    fs::write(directory.path().join(".gitattributes"), b"*.rs text\n")
+        .expect("text normalization attribute");
+    for args in [
+        vec!["add", "--", ".gitattributes"],
+        vec![
+            "-c",
+            "user.name=TraceDecay",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "text normalization",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(args)
+                .status()
+                .expect("Git attribute setup")
+                .success()
+        );
+    }
+    let before = runner.tracked_worktree_digest().expect("LF identity");
+    fs::write(directory.path().join("source.rs"), b"original\r\n").expect("CRLF edit");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    assert_ne!(
+        before,
+        runner.tracked_worktree_digest().expect("CRLF identity")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tracked_worktree_digest_observes_executable_mode_when_filemode_is_false() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, runner) = committed_file("source.rs", b"committed\n");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["config", "--local", "core.filemode", "false"])
+            .status()
+            .expect("core.filemode=false starts")
+            .success()
+    );
+    let before = runner
+        .tracked_worktree_digest()
+        .expect("digest before hidden mode change");
+    let path = directory.path().join("source.rs");
+    let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("chmod +x");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    let after = runner
+        .tracked_worktree_digest()
+        .expect("digest after hidden mode change");
+    assert_ne!(
+        before, after,
+        "core.filemode=false is not mode evidence; the digest must bind worktree executable identity"
+    );
+    let mut restored = fs::metadata(&path).expect("metadata").permissions();
+    restored.set_mode(0o644);
+    fs::set_permissions(&path, restored).expect("chmod 0644");
+    assert_eq!(
+        before,
+        runner
+            .tracked_worktree_digest()
+            .expect("digest after restoring mode"),
+        "restoring the worktree mode must recover the prior identity"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tracked_worktree_digest_preserves_mode_symlink_and_absent_identity() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let (directory, runner) = committed_file("regular.txt", b"regular\n");
+    fs::write(directory.path().join("exec.sh"), b"#!/bin/sh\n").expect("executable");
+    let mut permissions = fs::metadata(directory.path().join("exec.sh"))
+        .expect("executable metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(directory.path().join("exec.sh"), permissions).expect("chmod +x");
+    symlink("regular.txt", directory.path().join("link.txt")).expect("symlink");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["add", "--", "exec.sh", "link.txt"])
+            .status()
+            .expect("git add starts")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args([
+                "-c",
+                "user.name=TraceDecay",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "mode and symlink",
+            ])
+            .status()
+            .expect("git commit starts")
+            .success()
+    );
+    let with_present = runner
+        .tracked_worktree_digest()
+        .expect("present mode and symlink digest");
+    fs::remove_file(directory.path().join("regular.txt")).expect("absent regular file");
+    let with_absent = runner
+        .tracked_worktree_digest()
+        .expect("absent file digest");
+    assert_ne!(
+        with_present, with_absent,
+        "an absent worktree file must change identity"
+    );
+    fs::write(directory.path().join("regular.txt"), b"regular\n").expect("restore regular");
+    assert_eq!(
+        with_present,
+        runner.tracked_worktree_digest().expect("restored digest"),
+        "restoring the absent file must recover the prior identity"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tracked_worktree_digest_still_reads_dirty_worktree_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, runner) = committed_file("secret.txt", b"before\n");
+    let path = directory.path().join("secret.txt");
+    fs::write(&path, b"after\n").expect("dirty worktree");
+    let original = fs::metadata(&path).expect("metadata").permissions();
+    let mut locked = original.clone();
+    locked.set_mode(0o000);
+    fs::set_permissions(&path, locked).expect("deny dirty reads");
+    let digest = runner.tracked_worktree_digest();
+    fs::set_permissions(&path, original).expect("restore dirty reads");
+    assert!(
+        matches!(digest, Err(NativeGitIndexError::Io(_))),
+        "a dirty path must still bind worktree bytes and fail closed when unreadable"
     );
 }

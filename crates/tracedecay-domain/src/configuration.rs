@@ -18,10 +18,14 @@ use crate::research::{
     ProjectId, UtcMicros, canonical_sha256,
 };
 
+mod context_scout_intent;
+mod lcm_summarizer_executables;
 pub mod topology;
 mod work_executable_bindings;
 mod work_expertise_consent;
 
+pub use context_scout_intent::*;
+pub use lcm_summarizer_executables::*;
 pub use topology::*;
 pub use work_executable_bindings::*;
 pub use work_expertise_consent::*;
@@ -38,13 +42,53 @@ pub const WORK_EXECUTABLE_BINDINGS_SETTING_KEY: &str = "work.executable_bindings
 pub const PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY: &str = "work.expertise_consent.v1";
 pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1";
 pub const AUTOMATION_SETTINGS_SETTING_KEY: &str = "automation.settings.v1";
+pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executables.v1";
+
+/// Core setting keys that shipped in published betas and were then retired.
+/// A persisted snapshot carrying one converges by dropping it; its value has
+/// no registered owner anymore. `semantic.runtime.v1` shipped through
+/// v0.1.0-beta.37 and left with the dense retrieval runtime;
+/// `sync.orphan_db_gc_days.v1` shipped through v0.1.0-beta.50 and left with
+/// the orphan branch-database sweep; `index.git_ignore.v1` shipped through
+/// v0.1.0-beta.50 and left because the code index is defined by Git's view
+/// of the worktree, which always honors `.gitignore`. The upload,
+/// watcher-debounce, and extraction-timeout user settings were stored in each
+/// project's snapshot through v1.0.0-beta.61 and now live only in the profile
+/// store ([`PROFILE_SETTING_KEYS_V1`]). `diagnostics.prewarm.v1` shipped
+/// through v1.0.0-beta.83 and left with the compile-on-read cargo prewarm.
+pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &[
+    "diagnostics.prewarm.v1",
+    "index.git_ignore.v1",
+    "semantic.runtime.v1",
+    "sync.orphan_db_gc_days.v1",
+    USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+];
 
 /// Canonical user-profile settings.
 pub const USER_UPLOAD_ENABLED_SETTING_KEY: &str = "user.upload_enabled.v1";
+pub const USER_REPEATED_QUERY_HINTS_SETTING_KEY: &str = "user.repeated_query_hints.v1";
 pub const USER_CODE_INDEX_WORKERS_SETTING_KEY: &str = "user.code_index_workers.v1";
 pub const USER_WATCHER_DEBOUNCE_MS_SETTING_KEY: &str = "user.watcher_debounce_ms.v1";
 pub const USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY: &str = "user.extraction_timeout_secs.v1";
 pub const USER_WORK_EXPERTISE_CONSENT_SETTING_KEY: &str = "user.work_expertise_consent.v1";
+
+/// User-profile settings persisted in the profile's own `ProfileSessions`
+/// store. They resolve from the profile alone, with or without a project.
+/// `user.work_expertise_consent.v1` stays in each project snapshot because a
+/// Work read pins it together with the project's consent in one revision.
+pub const PROFILE_SETTING_KEYS_V1: &[&str] = &[
+    USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+];
+
+pub fn is_profile_setting_key(key: &SettingKey) -> bool {
+    PROFILE_SETTING_KEYS_V1.contains(&key.as_str())
+}
 
 /// Canonical project-scoped runtime settings.
 pub const INDEX_EXCLUDE_SETTING_KEY: &str = "index.exclude.v1";
@@ -52,10 +96,7 @@ pub const INDEX_INCLUDE_SETTING_KEY: &str = "index.include.v1";
 pub const INDEX_MAX_FILE_SIZE_SETTING_KEY: &str = "index.max_file_size.v1";
 pub const INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY: &str = "index.extract_docstrings.v1";
 pub const INDEX_TRACK_CALL_SITES_SETTING_KEY: &str = "index.track_call_sites.v1";
-pub const INDEX_GIT_IGNORE_SETTING_KEY: &str = "index.git_ignore.v1";
 pub const INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY: &str = "index.native_graph_activation.v1";
-pub const DIAGNOSTICS_PREWARM_SETTING_KEY: &str = "diagnostics.prewarm.v1";
-pub const SEMANTIC_RUNTIME_SETTING_KEY: &str = "semantic.runtime.v1";
 pub const SYNC_AUTO_WATCH_SETTING_KEY: &str = "sync.auto_watch.v1";
 pub const SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY: &str = "sync.watch_linked_worktrees.v1";
 pub const SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY: &str = "sync.watch_debounce_ms.v1";
@@ -70,7 +111,6 @@ pub const SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY: &str = "sync.backstop_interva
 pub const SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY: &str = "sync.full_sync_escalation_files.v1";
 pub const SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY: &str = "sync.max_concurrent_syncs.v1";
 pub const SYNC_BRANCH_GC_DAYS_SETTING_KEY: &str = "sync.branch_gc_days.v1";
-pub const SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY: &str = "sync.orphan_db_gc_days.v1";
 pub const SYNC_AUTO_INIT_SETTING_KEY: &str = "sync.auto_init.v1";
 pub const SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY: &str = "sync.auto_track_pr_branches.v1";
 pub const SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY: &str = "sync.auto_track_pr_poll_secs.v1";
@@ -87,8 +127,10 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     AUTOMATION_SETTINGS_SETTING_KEY,
+    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     crate::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
     USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY,
     USER_CODE_INDEX_WORKERS_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
@@ -98,10 +140,7 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     INDEX_MAX_FILE_SIZE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    INDEX_GIT_IGNORE_SETTING_KEY,
     INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    DIAGNOSTICS_PREWARM_SETTING_KEY,
-    SEMANTIC_RUNTIME_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY,
     SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
@@ -115,7 +154,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
     SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
@@ -152,7 +190,6 @@ const CONFIGURATION_GRANT_RECEIPT_DIGEST_DOMAIN: &str = "tracedecay.configuratio
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationMutationOperationV1 {
     DirectMutation,
-    CredentialWrite,
     ProtectedDryRun,
     ProtectedApply,
     RollbackDryRun,
@@ -165,7 +202,6 @@ pub enum ConfigurationMutationOperationV1 {
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationMutationSinkV1 {
     ConfigurationStore,
-    CredentialStore,
     ConfigurationAudit,
 }
 
@@ -177,7 +213,6 @@ pub enum ConfigurationMutationEffectV1 {
     AppendAuditOnly,
     CreateProtectedChangePlan,
     CommitConfigurationRevision,
-    WriteCredentialReference,
 }
 
 /// Immutable current-policy/grant receipt minted by the policy/application
@@ -287,14 +322,12 @@ impl ConfigurationMutationGrantReceiptV1 {
         match (self.operation, self.idempotency_key.as_ref()) {
             (
                 ConfigurationMutationOperationV1::DirectMutation
-                | ConfigurationMutationOperationV1::CredentialWrite
                 | ConfigurationMutationOperationV1::ProtectedApply
                 | ConfigurationMutationOperationV1::RollbackApply,
                 Some(key),
             ) => key.validate()?,
             (
                 ConfigurationMutationOperationV1::DirectMutation
-                | ConfigurationMutationOperationV1::CredentialWrite
                 | ConfigurationMutationOperationV1::ProtectedApply
                 | ConfigurationMutationOperationV1::RollbackApply,
                 None,
@@ -471,7 +504,6 @@ impl ConfigurationLayerIdV1 {
 pub enum SettingSensitivityV1 {
     Public,
     Sensitive,
-    CredentialReference,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -528,7 +560,7 @@ pub enum ConfigurationValueKindV1 {
     WorkExpertiseConsent,
     ContextScoutSettings,
     AutomationSettings,
-    CredentialReference,
+    LcmSummarizerExecutables,
 }
 
 /// Profile-level worker-count intent for the process-wide code-index pool.
@@ -790,7 +822,7 @@ impl AutomationSettingsV1 {
                 && self
                     .model_id
                     .as_deref()
-                    .is_none_or(|model| model.trim().is_empty())
+                    .is_some_and(|model| model.trim().is_empty())
             || !matches!(self.backend, AutomationBackendV1::CodexAppServer)
                 && self.model_id.is_some()
         {
@@ -827,7 +859,7 @@ impl Default for AutomationSettingsV1 {
             enabled: true,
             backend: AutomationBackendV1::CodexAppServer,
             host_mode: AutomationHostModeV1::Standalone,
-            model_id: Some("gpt-5.6-mini".to_owned()),
+            model_id: Some("gpt-5.6-sol".to_owned()),
             timeout_secs: 60,
             scheduler_tick_secs: 60,
             combine_due_tasks: true,
@@ -842,53 +874,7 @@ impl Default for AutomationSettingsV1 {
 }
 
 #[cfg(test)]
-mod automation_settings_tests {
-    use super::{AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1};
-
-    #[test]
-    fn fresh_v2_settings_schedule_the_required_curation_loop() {
-        let settings = AutomationSettingsV1::default();
-
-        assert!(settings.enabled);
-        assert_eq!(settings.backend, AutomationBackendV1::CodexAppServer);
-        assert_eq!(settings.host_mode, AutomationHostModeV1::Standalone);
-        assert_eq!(settings.model_id.as_deref(), Some("gpt-5.6-mini"));
-        assert_eq!(settings.scheduler_tick_secs, 60);
-        assert!(settings.combine_due_tasks);
-
-        assert_eq!(
-            (
-                settings.tasks.memory_curator.enabled,
-                settings.tasks.memory_curator.schedule.as_deref(),
-                settings.tasks.memory_curator.interval_secs,
-                settings.tasks.memory_curator.cooldown_secs,
-                settings.tasks.memory_curator.min_idle_secs,
-            ),
-            (true, Some("interval"), Some(900), Some(300), None)
-        );
-        assert_eq!(
-            (
-                settings.tasks.session_reflector.enabled,
-                settings.tasks.session_reflector.schedule.as_deref(),
-                settings.tasks.session_reflector.interval_secs,
-                settings.tasks.session_reflector.cooldown_secs,
-                settings.tasks.session_reflector.min_idle_secs,
-            ),
-            (true, Some("interval"), Some(900), Some(300), None)
-        );
-        assert_eq!(
-            (
-                settings.tasks.skill_writer.enabled,
-                settings.tasks.skill_writer.schedule.as_deref(),
-                settings.tasks.skill_writer.interval_secs,
-                settings.tasks.skill_writer.cooldown_secs,
-                settings.tasks.skill_writer.min_idle_secs,
-            ),
-            (true, Some("interval"), Some(3_600), Some(300), Some(900))
-        );
-        settings.validate().expect("fresh V2 automation settings");
-    }
-}
+mod automation_settings_tests {}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -945,6 +931,11 @@ pub struct ContextScoutSettingsV1 {
     pub model_path: Option<ContextScoutConfiguredModelPathV1>,
     pub model_id: Option<String>,
     pub model_timeout_secs: Option<u64>,
+    /// Session intent pass. Absent means the Scout runs no intent pass; the
+    /// field is omitted from the canonical encoding so settings written before
+    /// it existed keep their behavior digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<ContextScoutIntentSettingsV1>,
 }
 
 impl ContextScoutSettingsV1 {
@@ -959,6 +950,7 @@ impl ContextScoutSettingsV1 {
             model_path: None,
             model_id: None,
             model_timeout_secs: None,
+            intent: None,
         }
     }
 
@@ -987,6 +979,9 @@ impl ContextScoutSettingsV1 {
         }
         if let Some(model_id) = self.model_id.as_deref() {
             validate_canonical_label(model_id, "context scout model id")?;
+        }
+        if let Some(intent) = &self.intent {
+            intent.validate()?;
         }
         self.limits.validate()
     }
@@ -1178,48 +1173,6 @@ impl AnalyzerSettingsV1 {
     }
 }
 
-/// Credential metadata contains only a reference and an integrity digest. No
-/// constructor, field, serializer, audit record, or error type accepts a
-/// plaintext credential.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialKindV1 {
-    ApiToken,
-    AccessToken,
-    SigningKeyReference,
-    Other,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialReferenceMetadataV1 {
-    pub reference_id: CredentialReferenceId,
-    pub kind: CredentialKindV1,
-    pub reference_digest: ManifestDigest,
-    pub operation_digest: ManifestDigest,
-    pub settlement_authority: ConfigurationSettlementAuthorityV1,
-    pub created_at: UtcMicros,
-    pub effective_deadline_at: UtcMicros,
-    pub rotation: u64,
-}
-
-impl CredentialReferenceMetadataV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.reference_id.validate()?;
-        self.reference_digest.validate()?;
-        self.operation_digest.validate()?;
-        self.settlement_authority.validate()?;
-        if self.settlement_authority.revalidated_at > self.created_at
-            || self.effective_deadline_at <= self.created_at
-        {
-            return Err(DomainError::NonCanonical {
-                field: "credential write receipt deadline",
-            });
-        }
-        Ok(())
-    }
-}
-
 /// Original authorization evidence pinned to a durable configuration effect.
 /// A retry reauthorizes access separately without replacing these fields.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1242,7 +1195,7 @@ impl ConfigurationSettlementAuthorityV1 {
     }
 }
 
-/// Values that the typed registry can accept. Credentials are references only.
+/// Values that the typed registry can accept.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum ConfigurationValueV1 {
@@ -1259,7 +1212,7 @@ pub enum ConfigurationValueV1 {
     WorkExpertiseConsent(WorkExpertiseConsentV1),
     ContextScoutSettings(ContextScoutSettingsV1),
     AutomationSettings(Box<AutomationSettingsV1>),
-    CredentialReference(CredentialReferenceMetadataV1),
+    LcmSummarizerExecutables(LcmSummarizerExecutablesV1),
 }
 
 impl ConfigurationValueV1 {
@@ -1278,7 +1231,7 @@ impl ConfigurationValueV1 {
             Self::WorkExpertiseConsent(_) => ConfigurationValueKindV1::WorkExpertiseConsent,
             Self::ContextScoutSettings(_) => ConfigurationValueKindV1::ContextScoutSettings,
             Self::AutomationSettings(_) => ConfigurationValueKindV1::AutomationSettings,
-            Self::CredentialReference(_) => ConfigurationValueKindV1::CredentialReference,
+            Self::LcmSummarizerExecutables(_) => ConfigurationValueKindV1::LcmSummarizerExecutables,
         }
     }
 
@@ -1316,7 +1269,7 @@ impl ConfigurationValueV1 {
             Self::WorkExpertiseConsent(consent) => consent.validate(),
             Self::ContextScoutSettings(settings) => settings.validate(),
             Self::AutomationSettings(settings) => settings.validate(),
-            Self::CredentialReference(metadata) => metadata.validate(),
+            Self::LcmSummarizerExecutables(executables) => executables.validate(),
         }
     }
 }
@@ -2033,7 +1986,9 @@ impl ConfigurationSnapshotV1 {
                 }) {
                     return Err(ProtectedChangeSnapshotError::Stale);
                 }
-                bindings.push(binding.clone());
+                let index =
+                    bindings.partition_point(|candidate| candidate.binding_id < binding.binding_id);
+                bindings.insert(index, binding.clone());
                 replace_protected_effective_value(
                     &mut effective_values,
                     &mut provenance,
@@ -2110,7 +2065,8 @@ impl ConfigurationSnapshotV1 {
                 {
                     rules[index] = rule.clone();
                 } else {
-                    rules.push(rule.clone());
+                    let index = rules.partition_point(|candidate| candidate.rule_id < rule.rule_id);
+                    rules.insert(index, rule.clone());
                 }
                 replace_protected_effective_value(
                     &mut effective_values,

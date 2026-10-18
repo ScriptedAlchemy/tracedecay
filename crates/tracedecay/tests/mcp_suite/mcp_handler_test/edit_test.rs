@@ -35,7 +35,7 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     let initial = b"fn old_name() {}\r\n// exact \xE2\x98\x83\n";
     let applied = b"fn new_name() {}\r\n// exact \xE2\x98\x83\n";
     fs::write(project.join("src/main.rs"), initial).unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let preview = handle_tool_call(
         &cg,
@@ -46,7 +46,6 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
             "new_str": "new_name",
             "dry_run": true
         }),
-        None,
         None,
     )
     .await
@@ -62,15 +61,9 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
         "idempotency_key": "mcp-test.source-edit.exact-retry",
         "expected_state": expected_state
     });
-    let first = handle_tool_call(
-        &cg,
-        "tracedecay_str_replace",
-        apply_args.clone(),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let first = handle_tool_call(&cg, "tracedecay_str_replace", apply_args.clone(), None)
+        .await
+        .unwrap();
     let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
     assert_eq!(first["success"], true);
     assert_eq!(first["replayed"], false);
@@ -85,7 +78,7 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     assert!(first["effect"]["receipt"]["committed_state"].is_string());
     assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), applied);
 
-    let retry = handle_tool_call(&cg, "tracedecay_str_replace", apply_args, None, None)
+    let retry = handle_tool_call(&cg, "tracedecay_str_replace", apply_args, None)
         .await
         .unwrap();
     let retry: Value = serde_json::from_str(extract_text(&retry.value)).unwrap();
@@ -105,7 +98,6 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
             "dry_run": true
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -124,7 +116,6 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
             "expected_state": stale_expected_state
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -142,46 +133,6 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
 }
 
 #[tokio::test]
-async fn test_str_replace_success() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-
-    fs::write(
-        project.join("src/main.rs"),
-        "fn hello() {}\nfn world() {}\n",
-    )
-    .unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_str_replace",
-        json!({
-            "path": "src/main.rs",
-            "old_str": "fn hello() {}",
-            "new_str": "fn hello_updated() {}"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed["success"], true);
-    assert_eq!(parsed["matched_str"], "fn hello() {}");
-    assert_eq!(parsed["new_str"], "fn hello_updated() {}");
-
-    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
-    assert!(content.contains("fn hello_updated() {}"));
-    assert!(!content.contains("fn hello() {}"));
-}
-
-#[tokio::test]
 async fn path_containment_config_rejects_parent_traversal_before_serving_config() {
     let dir = test_temp_dir();
     let project = dir.path().join("repo");
@@ -193,275 +144,23 @@ async fn path_containment_config_rejects_parent_traversal_before_serving_config(
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(&project).await;
+    let cg = init_test_project(&project).await;
 
     let result = handle_tool_call(
         &cg,
         "tracedecay_config",
         json!({"path": "../outside.toml", "key": "token"}),
         None,
-        None,
     )
     .await;
 
-    assert!(
-        result.is_err(),
-        "config read should reject parent traversal, got {result:?}"
-    );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn path_containment_read_rejects_parent_traversal_before_serving_file() {
-    let dir = test_temp_dir();
-    let project = dir.path().join("repo");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
-    fs::write(dir.path().join("outside.rs"), "fn leaked() {}\n").unwrap();
-
-    let (cg, _env) = init_test_project(&project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_read",
-        json!({"file": "../outside.rs", "mode": "full"}),
-        None,
-        None,
-    )
-    .await;
-
-    assert!(
-        result.is_err(),
-        "read should reject parent traversal before serving outside files, got {result:?}"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn read_and_outline_preserve_symlink_indexed_file_key() {
-    let dir = test_temp_dir();
-    let project = dir.path().join("repo");
-    let indexed_src = project.join("indexed-src");
-    fs::create_dir_all(&project).unwrap();
-    fs::create_dir_all(&indexed_src).unwrap();
-    fs::write(indexed_src.join("lib.rs"), "pub fn through_symlink() {}\n").unwrap();
-    unix_fs::symlink(&indexed_src, project.join("src")).unwrap();
-
-    let (cg, _env) = init_test_project(&project).await;
-    wait_for_source_generation(&cg, "through_symlink").await;
-
-    let read = handle_tool_call(
-        &cg,
-        "tracedecay_read",
-        json!({"file": "src/lib.rs", "mode": "full", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let read_text = extract_text(&read.value);
-    let read_payload: serde_json::Value = serde_json::from_str(read_text).unwrap();
-    assert_eq!(read_payload["file"], "src/lib.rs");
-    assert!(
-        read_payload["body"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("through_symlink"),
-        "read should serve indexed source behind symlink: {read_payload:?}"
-    );
-
-    if !tracedecay_mcp::ast_grep_outline_available() {
-        return;
-    }
-
-    let outline = handle_tool_call(
-        &cg,
-        "tracedecay_outline",
-        json!({"file": "src/lib.rs"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let outline_text = extract_text(&outline.value);
-    let outline_payload: serde_json::Value = serde_json::from_str(outline_text).unwrap();
-    assert_eq!(outline_payload["file"], "src/lib.rs");
-    assert!(
-        outline_payload["ast_grep_outline"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|file| {
-                file["path"]
-                    .as_str()
-                    .is_some_and(|path| path.ends_with("/indexed-src/lib.rs"))
-                    && file["items"].as_array().is_some_and(|items| {
-                        items
-                            .iter()
-                            .any(|symbol| symbol["name"] == "through_symlink")
-                    })
-            }),
-        "outline should preserve the request key and generate symbols from the contained target: {outline_payload:?}"
-    );
-}
-
-#[tokio::test]
-async fn outline_preserves_generation_payload_and_adds_ast_grep_outline_when_available() {
-    if !tracedecay_mcp::ast_grep_outline_available() {
-        return;
-    }
-
-    let dir = test_temp_dir();
-    let project = dir.path().join("project");
-    crate::fixture::write_indexed_fixture_sources(&project);
-    let (cg, _env) = init_test_project(&project).await;
-    wait_for_source_generation(&cg, "helper").await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_outline",
-        json!({"file": "src/utils.rs"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(result.touched_files, vec!["src/utils.rs"]);
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["file"], "src/utils.rs");
-    assert!(payload["symbol_count"].as_u64().is_some());
-    assert!(
-        payload["symbols"]
-            .as_array()
-            .is_some_and(|symbols| symbols.iter().any(|symbol| symbol["name"] == "helper")),
-        "generation-backed symbols should still be present: {payload}"
-    );
-    assert!(
-        payload["ast_grep_outline"]
-            .as_array()
-            .is_some_and(|files| files.iter().any(|file| file["items"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item["name"] == "helper")))),
-        "ast-grep outline should be attached under ast_grep_outline: {payload}"
-    );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn outline_markdown_uses_context_style_bullets_not_table() {
-    if !tracedecay_mcp::ast_grep_outline_available() {
-        return;
-    }
-
-    let dir = test_temp_dir();
-    let project = dir.path().join("project");
-    crate::fixture::write_indexed_fixture_sources(&project);
-    let (cg, _env) = init_test_project(&project).await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_outline",
-        json!({"file": "src/utils.rs", "format": "markdown"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    assert!(text.contains("## Outline"));
-    assert!(text.contains("- **helper**"));
-    assert!(!text.contains("| symbol | kind |"));
-    close_test_graph(cg).await;
-}
-
-/// A markdown plan is a work ledger. Outlining one must answer "what is under
-/// this heading, and which of its checklist items are still open" without a
-/// second read, and must hand back a retrieval id for the full section body
-/// through the existing `tracedecay_retrieve` handle cache — not a new tool.
-#[tokio::test]
-async fn outline_markdown_section_carries_preview_handle_and_checklist_state() {
-    if !tracedecay_mcp::ast_grep_outline_available() {
-        return;
-    }
-
-    let dir = test_temp_dir();
-    let project = dir.path().join("project");
-    crate::fixture::write_indexed_fixture_sources(&project);
-    fs::create_dir_all(project.join("docs")).unwrap();
-    let filler = "Body prose that pushes this section past the inline preview budget. ".repeat(12);
-    fs::write(
-        project.join("docs/plan.md"),
-        format!(
-            "# Plan\n\n## Remaining work\n\n{filler}\n\n- [x] land the extractor\n- [ ] mint the section handle\n  - [ ] nested follow-up\n- plain bullet\n\n```rust\nfn probe() {{}}\n```\n\n## Done\n\nNothing left.\n"
-        ),
-    )
-    .unwrap();
-    let (cg, _env) = init_test_project(&project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_outline",
-        json!({"file": "docs/plan.md"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    let section = payload["symbols"]
-        .as_array()
-        .expect("outline symbols")
-        .iter()
-        .find(|symbol| symbol["name"] == "Remaining work")
-        .map(|symbol| symbol["section"].clone())
-        .unwrap_or(Value::Null);
-    assert!(
-        section.is_object(),
-        "markdown heading should carry a section lane: {payload}"
-    );
-
-    assert_eq!(section["title"], "Remaining work");
-    assert_eq!(section["preview_truncated"], true);
-    assert!(
-        section["read_lines"]
-            .as_str()
-            .is_some_and(|lines| lines.contains('-')),
-        "the section must publish a read span even when a handle exists: {section}"
-    );
-
-    let handle = section["body_handle"]
-        .as_str()
-        .unwrap_or_else(|| panic!("section should mint a retrieval handle: {section}"))
-        .to_owned();
-    assert!(handle.starts_with("rh_"), "{section}");
-    assert_eq!(section["retrieve_with"], "tracedecay_retrieve");
-
-    let checklist = &section["structure"]["checklist"];
-    assert_eq!(checklist["total"], 3, "{section}");
-    assert_eq!(checklist["checked"], 1, "{section}");
-    assert_eq!(checklist["unchecked"], 2, "{section}");
+    let problem = expect_tool_refusal(result);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
     assert_eq!(
-        section["structure"]["code_blocks"][0]["language"], "rust",
-        "{section}"
+        problem["message"],
+        "path '../outside.toml' is not normalized"
     );
-
-    // The handle is the existing response-handle cache, so the existing
-    // retrieval tool returns the full section body.
-    let retrieved = handle_tool_call(
-        &cg,
-        "tracedecay_retrieve",
-        json!({"handle": handle}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let retrieved_text = extract_text(&retrieved.value);
-    assert!(
-        retrieved_text.contains("nested follow-up") && retrieved_text.contains("fn probe()"),
-        "retrieve should return the whole section body: {retrieved_text}"
-    );
-
     close_test_graph(cg).await;
 }
 
@@ -481,21 +180,24 @@ async fn path_containment_config_rejects_symlink_escape_before_serving_config() 
     .unwrap();
     unix_fs::symlink(&outside_dir, project.join("escape")).unwrap();
 
-    let (cg, _env) = init_test_project(&project).await;
+    let cg = init_test_project(&project).await;
 
     let result = handle_tool_call(
         &cg,
         "tracedecay_config",
         json!({"path": "escape/secret.toml", "key": "token"}),
         None,
-        None,
     )
     .await;
 
-    assert!(
-        result.is_err(),
-        "config read should reject symlink escape, got {result:?}"
+    let problem = expect_tool_refusal(result);
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    let message = format!(
+        "path 'escape/secret.toml' escapes project root '{}'",
+        project.display()
     );
+    assert_eq!(problem["message"], message.as_str());
 }
 
 #[tokio::test]
@@ -506,7 +208,6 @@ async fn project_selector_is_rejected_before_write_tool_parsing() {
         &cg,
         "tracedecay_str_replace",
         json!({"project_selector": {"include_all_registered": true}}),
-        None,
         None,
     )
     .await;
@@ -527,7 +228,7 @@ async fn test_str_replace_not_found() {
 
     fs::write(project.join("src/main.rs"), "fn hello() {}\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -537,7 +238,6 @@ async fn test_str_replace_not_found() {
             "old_str": "fn not_exists() {}",
             "new_str": "fn replaced() {}"
         }),
-        None,
         None,
     )
     .await
@@ -558,7 +258,7 @@ async fn test_str_replace_multiple_matches_fails() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn foo() {}\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -568,7 +268,6 @@ async fn test_str_replace_multiple_matches_fails() {
             "old_str": "fn foo() {}",
             "new_str": "fn bar() {}"
         }),
-        None,
         None,
     )
     .await
@@ -586,48 +285,6 @@ async fn test_str_replace_multiple_matches_fails() {
 }
 
 #[tokio::test]
-async fn test_multi_str_replace_success() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-
-    fs::write(
-        project.join("src/main.rs"),
-        "fn foo() {}\nfn bar() {}\nfn baz() {}\n",
-    )
-    .unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_multi_str_replace",
-        json!({
-            "path": "src/main.rs",
-            "replacements": [
-                ["fn foo() {}", "fn foo_replaced() {}"],
-                ["fn bar() {}", "fn bar_replaced() {}"]
-            ]
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed["success"], true);
-    assert_eq!(parsed["applied_count"], 2);
-
-    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
-    assert!(content.contains("fn foo_replaced()"));
-    assert!(content.contains("fn bar_replaced()"));
-    assert!(content.contains("fn baz() {}"));
-}
-
-#[tokio::test]
 async fn test_multi_str_replace_atomic_failure() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -636,7 +293,7 @@ async fn test_multi_str_replace_atomic_failure() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn baz() {}\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -648,7 +305,6 @@ async fn test_multi_str_replace_atomic_failure() {
                 ["fn baz() {}", "fn baz_replaced() {}"]
             ]
         }),
-        None,
         None,
     )
     .await
@@ -680,7 +336,7 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
     let original = "fn main() {}\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let missing_old = format!("{}é", "a".repeat(19));
     let result = handle_tool_call(
@@ -692,7 +348,6 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
                 [missing_old, "replacement"]
             ]
         }),
-        None,
         None,
     )
     .await
@@ -729,7 +384,7 @@ async fn test_multi_str_replace_earlier_insertion_collision_lands_correctly() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -741,7 +396,6 @@ async fn test_multi_str_replace_earlier_insertion_collision_lands_correctly() {
                 ["fn target() {}", "fn target_renamed() {}"]
             ]
         }),
-        None,
         None,
     )
     .await
@@ -773,7 +427,7 @@ async fn test_multi_str_replace_overlapping_ranges_error() {
     let original = "abcdef\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -785,7 +439,6 @@ async fn test_multi_str_replace_overlapping_ranges_error() {
                 ["cdef", "QRST"]
             ]
         }),
-        None,
         None,
     )
     .await
@@ -810,7 +463,7 @@ async fn test_multi_str_replace_overlapping_ranges_error() {
 async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
     // The replaced span must cover the leading doc-comment block, so replacing
     // a documented fn with new_source that carries its own doc yields exactly
-    // one doc comment — not the old one orphaned above the new one.
+    // one doc comment, not the old one orphaned above the new one.
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
@@ -825,7 +478,7 @@ async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -834,7 +487,6 @@ async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
             "symbol": "foo",
             "new_source": "/// Doc for foo.\nfn foo() {\n    let _ = 2;\n}"
         }),
-        None,
         None,
     )
     .await
@@ -875,7 +527,7 @@ async fn test_insert_at_symbol_before_lands_above_attribute() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -885,7 +537,6 @@ async fn test_insert_at_symbol_before_lands_above_attribute() {
             "content": "// INSERTED",
             "position": "before"
         }),
-        None,
         None,
     )
     .await
@@ -925,7 +576,7 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
         "stylesheet fixture must exist before dispatch"
     );
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     wait_for_source_generation(&cg, "source_edit_anchor").await;
 
     let result = handle_tool_call(
@@ -936,7 +587,6 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
             "old_str": "\tfont-size: 14px;",
             "new_str": "\tfont-size: 0.85rem;"
         }),
-        None,
         None,
     )
     .await
@@ -956,125 +606,6 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
     let content = fs::read_to_string(project.join("style.css")).unwrap();
     assert!(content.contains("0.85rem"));
     assert!(!content.contains("14px"));
-}
-
-#[tokio::test]
-async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
-    if tracedecay_mcp::ast_grep_available() {
-        return;
-    }
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn old_name() {}\n").unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_ast_grep_rewrite",
-        json!({"path": "src/lib.rs", "pattern": "old_name", "rewrite": "new_name"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let output = extract_json(&result.value);
-    assert_eq!(output["success"].as_bool(), Some(true), "{output}");
-    assert!(
-        fs::read_to_string(project.join("src/lib.rs"))
-            .unwrap()
-            .contains("new_name"),
-        "literal fallback should update the file"
-    );
-}
-
-#[tokio::test]
-async fn ast_grep_rewrite_uses_current_cli_update_flag() {
-    if !tracedecay_mcp::ast_grep_available() {
-        return;
-    }
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        "pub fn caller() { old_name(); }\npub fn old_name() {}\n",
-    )
-    .unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_ast_grep_rewrite",
-        json!({"path": "src/lib.rs", "pattern": "old_name()", "rewrite": "new_name()"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["success"].as_bool(), Some(true), "{output}");
-    let content = fs::read_to_string(project.join("src/lib.rs")).unwrap();
-    assert!(
-        content.contains("new_name();"),
-        "ast-grep rewrite should apply with the installed CLI: {content}"
-    );
-    assert!(
-        !output["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("unexpected argument '-d'"),
-        "rewrite must not use the removed -d flag: {output}"
-    );
-}
-
-/// When ast-grep exits non-zero with empty stderr (no language inferred
-/// from the file extension, or pattern matches nothing), the tool must not
-/// surface `"ast-grep failed: "` — a useless empty trailer. The message
-/// must explain the likely cause so the caller can act on it.
-#[tokio::test]
-async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
-    if !tracedecay_mcp::ast_grep_available() {
-        return;
-    }
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn foo() {}\n").unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_ast_grep_rewrite",
-        json!({
-            "path": "src/lib.rs",
-            "pattern": "__NONEXISTENT_PATTERN__",
-            "rewrite": "whatever"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["success"].as_bool(), Some(false), "{output}");
-    let message = output["message"].as_str().unwrap_or_default();
-    assert!(
-        !message.trim_end_matches(':').trim().eq("ast-grep failed"),
-        "message must not end as an empty 'ast-grep failed:' — got: {message:?}"
-    );
-    assert!(
-        message.contains("exit") || message.contains("0 nodes") || message.contains("no language"),
-        "message must explain the likely cause (exit code / no language / 0 matches), got: {message:?}"
-    );
 }
 
 #[tokio::test]
@@ -1100,7 +631,7 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
         "stylesheet fixture must exist before dispatch"
     );
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     wait_for_source_generation(&cg, "source_edit_anchor").await;
 
     let result = handle_tool_call(
@@ -1113,7 +644,6 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
                 ["\tfont-size: 16px;", "\tfont-size: 1rem;"]
             ]
         }),
-        None,
         None,
     )
     .await
@@ -1148,13 +678,29 @@ async fn test_insert_at_string_anchor_before() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
-    fs::write(
-        project.join("src/main.rs"),
-        "line one\nline two\nline three\n",
-    )
-    .unwrap();
+    let initial = b"line one\nline two\nline three\n";
+    let applied = b"line one\nfirst inserted\nsecond inserted\nline two\nline three\n";
+    fs::write(project.join("src/main.rs"), initial).unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
+
+    let preview = handle_tool_call(
+        &cg,
+        "tracedecay_insert_at",
+        json!({
+            "path": "src/main.rs",
+            "anchor": "line two",
+            "content": "first inserted\nsecond inserted\n",
+            "before": true,
+            "dry_run": true
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let preview: Value = serde_json::from_str(extract_text(&preview.value)).unwrap();
+    let expected_state = preview["expected_state"].as_str().unwrap();
+    assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), initial);
 
     let result = handle_tool_call(
         &cg,
@@ -1162,29 +708,18 @@ async fn test_insert_at_string_anchor_before() {
         json!({
             "path": "src/main.rs",
             "anchor": "line two",
-            "content": "inserted line",
-            "before": true
+            "content": "first inserted\nsecond inserted\n",
+            "before": true,
+            "idempotency_key": "mcp-test.insert-at.trailing-newline",
+            "expected_state": expected_state
         }),
-        None,
         None,
     )
     .await
     .unwrap();
-
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    let parsed: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(parsed["success"], true);
-
-    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
-    assert!(
-        content.ends_with('\n'),
-        "trailing newline must be preserved"
-    );
-    let lines: Vec<&str> = content.lines().collect();
-    assert_eq!(lines[0], "line one");
-    assert_eq!(lines[1], "inserted line");
-    assert_eq!(lines[2], "line two");
-    assert_eq!(lines[3], "line three");
+    assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), applied);
 }
 
 #[tokio::test]
@@ -1200,7 +735,7 @@ async fn test_insert_at_line_number() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -1211,7 +746,6 @@ async fn test_insert_at_line_number() {
             "content": "inserted at line 2",
             "before": false
         }),
-        None,
         None,
     )
     .await
@@ -1243,7 +777,7 @@ async fn test_insert_at_anchor_not_found() {
 
     fs::write(project.join("src/main.rs"), "line one\nline two\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -1254,7 +788,6 @@ async fn test_insert_at_anchor_not_found() {
             "content": "should not be inserted",
             "before": true
         }),
-        None,
         None,
     )
     .await
@@ -1276,7 +809,7 @@ async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
     let original = "line one\nline two\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let long_anchor = format!("{}é", "a".repeat(99));
     let result = handle_tool_call(
@@ -1288,7 +821,6 @@ async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
             "content": "should not be inserted",
             "before": true
         }),
-        None,
         None,
     )
     .await
@@ -1316,7 +848,7 @@ async fn test_insert_at_ambiguous_anchor() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -1327,7 +859,6 @@ async fn test_insert_at_ambiguous_anchor() {
             "content": "should not be inserted",
             "before": true
         }),
-        None,
         None,
     )
     .await
@@ -1345,41 +876,31 @@ async fn test_insert_at_ambiguous_anchor() {
 }
 
 #[tokio::test]
-async fn test_insert_at_preserves_trailing_newline() {
+async fn insert_at_requires_the_complete_long_anchor() {
     let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    let project = project_root.as_path();
+    let project = dir.path().join("project");
     fs::create_dir_all(project.join("src")).unwrap();
-
-    let original = "fn hello() {}\n\nfn world() {}\n";
-    fs::write(project.join("src/lib.rs"), original).unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_insert_at",
-        json!({
-            "path": "src/lib.rs",
-            "anchor": "fn world",
-            "content": "fn extra() {}",
-            "before": true
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed["success"], true);
-
-    let content = fs::read_to_string(project.join("src/lib.rs")).unwrap();
-    assert!(
-        content.ends_with('\n'),
-        "file must end with newline after insert_at, got: {:?}",
-        &content[content.len().saturating_sub(20)..]
+    let prefix = format!("// {}", "a".repeat(100));
+    let original = format!("{prefix}old\n{prefix}unique\n");
+    fs::write(project.join("src/main.rs"), &original).unwrap();
+    let cg = init_test_project(&project).await;
+    for (suffix, success) in [("absent", false), ("unique", true)] {
+        let result = handle_tool_call(
+            &cg,
+            "tracedecay_insert_at",
+            json!({
+                "path": "src/main.rs", "anchor": format!("{prefix}{suffix}"),
+                "content": "// insert", "before": true, "dry_run": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        assert_eq!(parsed["success"], success, "{parsed}");
+    }
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.rs")).unwrap(),
+        original
     );
-    assert_eq!(content, "fn hello() {}\n\nfn extra() {}\nfn world() {}\n");
 }

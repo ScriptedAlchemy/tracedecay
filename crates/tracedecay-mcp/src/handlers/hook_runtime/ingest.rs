@@ -1,0 +1,778 @@
+use serde_json::Value;
+use std::path::Path;
+use std::time::Duration;
+use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_contracts::retrieval::{
+    HookCompactionResultV1, HookIngestAdmissionV1, HookIngestTranscriptRequestV1,
+    HookIngestTranscriptResultV1,
+};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{ObservationScopeV1, ProjectId};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay_project::project::TraceDecay;
+use tracedecay_session_memory::session::lcm::{
+    LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmCompactionCommand,
+    LcmCompressionEvidence, LcmHostProtocol,
+};
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
+};
+use tracedecay_sessions::observation::ObservationCancellation;
+use tracedecay_sessions::runtime::source::TranscriptSource;
+
+use crate::handlers::SessionAuthorities;
+
+use super::required_field;
+use crate::{
+    hook_admission_error, map_claude_observation_ingest_error, map_transcript_ingest_error,
+};
+
+mod kernels;
+
+use kernels::{
+    TranscriptCaptureContext, TranscriptCaptureOutcome, TranscriptPayloadRouteV1,
+    transcript_capture_kernel,
+};
+
+/// Rejects an admission outcome that never reached a capture route.
+///
+/// One implementation for every ingest entry point, and the authority's own
+/// status, reason code, and retryability all survive verbatim: rewriting any
+/// of the three here launders the admission verdict that downstream retry
+/// policy reads back.
+fn reject_unadmitted(
+    admission: &HostAdmissionOutcome,
+    unavailable_detail: &'static str,
+    unsupported_detail: &'static str,
+) -> Option<TraceDecayError> {
+    match admission.status {
+        HostAdmissionStatus::Unavailable => Some(hook_admission_error(
+            admission.status,
+            admission.reason_code.unwrap_or("authority_unavailable"),
+            admission.retryable,
+            unavailable_detail,
+        )),
+        HostAdmissionStatus::Unknown => Some(hook_admission_error(
+            admission.status,
+            admission.reason_code.unwrap_or("unknown_provider"),
+            admission.retryable,
+            unsupported_detail,
+        )),
+        _ => None,
+    }
+}
+
+fn host_admission_facade<'a>(
+    cg: Option<&TraceDecay>,
+    scope: HostAdmissionScope,
+    authorities: SessionAuthorities<'a>,
+) -> Result<HostAdmissionFacade<'a>> {
+    let authority = match scope {
+        HostAdmissionScope::Project => match (authorities.project, authorities.profile_identity) {
+            (Some(registered), Some(identity)) => {
+                let project =
+                    cg.ok_or_else(|| config_error("project admission requires a project"))?;
+                HostAdmissionAuthorities::for_project(
+                    identity.brain_id().clone(),
+                    identity.profile_id().clone(),
+                    project_observation_id(project)?,
+                    registered,
+                )
+                .with_project_root(project.project_root().to_path_buf())
+            }
+            (Some(_), None) | (None, _) => HostAdmissionAuthorities::default(),
+        },
+        HostAdmissionScope::Profile => match (authorities.user, authorities.profile_identity) {
+            (Some(registered), Some(identity)) => HostAdmissionAuthorities::for_profile(
+                identity.brain_id().clone(),
+                identity.profile_id().clone(),
+                registered,
+            ),
+            (Some(_), None) | (None, _) => HostAdmissionAuthorities::default(),
+        },
+    };
+    let authority = match authorities.background_cpu {
+        Some(background_cpu) => authority.with_background_cpu(background_cpu),
+        None => authority,
+    };
+    Ok(HostAdmissionFacade::new(authority))
+}
+
+fn project_observation_id(cg: &TraceDecay) -> Result<ProjectId> {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .ok_or_else(|| config_error("project observation identity is unavailable"))?;
+    ProjectId::new(project_id.to_string())
+        .map_err(|_| config_error("project observation identity is invalid"))
+}
+
+/// Admits every Codex rollout that belongs to `project_root` under one shared
+/// byte budget, reporting whether any source was left unfinished.
+///
+/// `max_new_bytes` is a budget for the whole pass, not an allowance per
+/// rollout: spending it across sources is what keeps one large rollout from
+/// silently consuming the cap and reporting the pass as complete.
+async fn admit_codex_project_rollouts(
+    admission: &HostAdmissionFacade<'_>,
+    source: &tracedecay_sessions::runtime::hosts::codex::CodexSource,
+    project_root: &Path,
+    project_id: ProjectId,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> Result<CodexRolloutAdmission> {
+    let mut budget = max_new_bytes;
+    let mut deferred = false;
+    let mut observations_committed = 0_u64;
+    let mut scanned = 0_u64;
+    let mut replayed = 0_u64;
+    let mut paths = source.transcript_paths(project_root).into_iter().peekable();
+    while let Some(path) = paths.next() {
+        let progress =
+            tracedecay_sessions::runtime::hosts::codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
+                &path,
+                project_root,
+                project_id.clone(),
+                admission,
+                budget,
+                cancellation,
+            )
+            .await
+            .map_err(|error| map_transcript_ingest_error(&error))?;
+        deferred |= progress.source_deferred;
+        observations_committed = observations_committed.saturating_add(progress.frames_persisted);
+        scanned = scanned.saturating_add(1);
+        if progress.resumed && progress.frames_persisted == 0 {
+            replayed = replayed.saturating_add(1);
+        }
+        if let Some(remaining) = budget.as_mut() {
+            *remaining = remaining.saturating_sub(progress.bytes_consumed);
+            if *remaining == 0 {
+                deferred |= paths.peek().is_some();
+                break;
+            }
+        }
+    }
+    Ok(CodexRolloutAdmission {
+        deferred,
+        // Only when every scanned rollout was a pure replay. One rollout with
+        // new frames makes the pass a commit, not a duplicate, and a pass that
+        // scanned nothing has nothing to call durable.
+        exact_duplicate: scanned > 0 && scanned == replayed,
+        observations_committed,
+    })
+}
+
+/// What one Codex rollout admission pass committed, apart from what its own
+/// projection drain later catches. The projection queue is shared per scope
+/// with the project catch-up sweep, which can consume these rows first.
+pub(super) struct CodexRolloutAdmission {
+    pub(super) deferred: bool,
+    /// Every scanned rollout resumed at its stored cursor with nothing new to
+    /// persist, so the transcript was already durable when this pass ran.
+    /// `JsonlObservationAdmissionProgress::resumed` is what separates that from
+    /// an empty source, so a first-ever scan is never called a duplicate.
+    pub(super) exact_duplicate: bool,
+    pub(super) observations_committed: u64,
+}
+
+async fn drain_host_observation_projections(
+    admission: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
+    cancellation: &ObservationCancellation,
+) -> Result<u64> {
+    let stats = tracedecay_sessions::runtime::hosts::claude_observation::drain_projection_queue(
+        admission,
+        scope,
+        cancellation,
+    )
+    .await
+    .map_err(|error| map_claude_observation_ingest_error(&error))?;
+    Ok(stats.transcript.messages_upserted)
+}
+
+#[tracing::instrument(name = "mcp.hook_runtime.compact", level = "trace", skip_all)]
+pub(super) async fn codex_compact(
+    cg: &TraceDecay,
+    event_json: &str,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<HookCompactionResultV1> {
+    let event_json = required_field(Some(event_json), "event_json")?;
+    let Some(authority) = session_authorities.project_lcm else {
+        return Ok(compaction_authority_unavailable());
+    };
+    let parsed = serde_json::from_str::<Value>(event_json).ok();
+    let session_id = parsed.as_ref().and_then(|value| {
+        ["session_id", "conversation_id", "thread_id"]
+            .iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_str))
+            .map(str::to_string)
+    });
+    let Some(session_id) = session_id else {
+        return Ok(HookCompactionResultV1::NoSession {
+            status: "unavailable".to_owned(),
+            reason: "host_session_identity_unavailable".to_owned(),
+            messages_upserted: 0,
+        });
+    };
+    // The daemon compaction compresses the session's durable history, so the
+    // rollout must land in the owning store through the canonical ingest
+    // route before pressure evidence is evaluated; compacting an unfilled
+    // store would report an empty success.
+    let ingested = tracing::Instrument::instrument(
+        admit_codex_rollouts_for_compaction(cg, session_authorities),
+        tracing::trace_span!("mcp.hook_runtime.compact_ingest"),
+    )
+    .await?;
+    let current_tokens = parsed
+        .as_ref()
+        .and_then(|event| event_i64(event, &["context_tokens", "current_tokens", "tokens"]));
+    let context_length = parsed
+        .as_ref()
+        .and_then(|event| event_i64(event, &["context_window_size", "context_length"]));
+    let Some(response) = tracing::Instrument::instrument(
+        authority.execute(pressure_only_command(
+            "codex",
+            &session_id,
+            current_tokens,
+            context_length,
+            None,
+            None,
+            LcmHostProtocol::CodexContextCompacted {
+                protocol_revision: "codex.context-compacted.v1".to_owned(),
+                event_digest: tracedecay_domain::canonical_sha256(&event_json)
+                    .map_err(|error| config_error(format!("digest Codex event failed: {error}")))?,
+            },
+        )),
+        tracing::trace_span!("mcp.hook_runtime.compact_execute"),
+    )
+    .await
+    else {
+        return Ok(compaction_authority_unavailable());
+    };
+    let mut result = compaction_response(&response)?;
+    if let HookCompactionResultV1::Settled {
+        messages_upserted, ..
+    }
+    | HookCompactionResultV1::Refused {
+        messages_upserted, ..
+    } = &mut result
+    {
+        *messages_upserted = ingested;
+    }
+    Ok(result)
+}
+
+/// The project-open catch-up scans the same Codex sources concurrently, so a
+/// compaction-time pass tolerates a bounded window of cursor CAS losses and
+/// still-mounting write authorities before treating the ingest as failed.
+const COMPACTION_INGEST_ATTEMPTS: usize = 10;
+const COMPACTION_INGEST_RETRY_DELAY: Duration = Duration::from_millis(400);
+
+/// Typed reasons that mean a peer ingestor or the project-open sequence is
+/// advancing the same durable state: the source cursor CAS rejected this
+/// pass, the shared writer was saturated, or a write authority was still
+/// mounting. Each converges once the peer pass settles, so the bounded retry
+/// re-reads rather than surfacing a terminal failure.
+///
+/// `project_authority_unbound` is listed explicitly because the authority
+/// itself reports it as non-retryable: it means the project's write authority
+/// has not been bound *yet*, which the project-open sequence resolves. A
+/// mismatched authority is deliberately absent, that never converges by
+/// waiting.
+const COMPACTION_INGEST_CONVERGING_REASONS: &[&str] = &[
+    "cursor_conflict",
+    "authority_write_failed",
+    "authority_unavailable",
+    "project_authority_unbound",
+    "external_source_runtime_unavailable",
+    "external_source_commit_failed",
+    "batch_worker_stopped",
+    "reader_pool_saturated",
+];
+
+/// Lands the project's Codex rollouts in the owning store through the
+/// canonical ingest route ahead of a compaction, reporting the exact upserted
+/// message count. Admission failures stay typed instead of letting the
+/// compaction run against missing history.
+///
+/// Retries are bounded to typed retryable classifications: the project-open
+/// codex catch-up advances the same source cursors, so a CAS conflict (or the
+/// open sequence still mounting its write authorities) is peer progress this
+/// pass re-reads on the next attempt, never a terminal state.
+async fn admit_codex_rollouts_for_compaction(
+    cg: &TraceDecay,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<u64> {
+    let mut last_retryable = None;
+    for attempt in 0..COMPACTION_INGEST_ATTEMPTS {
+        if attempt > 0
+            && tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + COMPACTION_INGEST_RETRY_DELAY,
+            )
+            .await
+            .is_err()
+        {
+            break;
+        }
+        match admit_codex_rollouts_once(cg, session_authorities.clone()).await {
+            Ok(messages_upserted) => return Ok(messages_upserted),
+            Err(error) => {
+                let converging =
+                    error
+                        .hook_runtime_context()
+                        .is_some_and(|(reason, retryable, _)| {
+                            retryable || COMPACTION_INGEST_CONVERGING_REASONS.contains(&reason)
+                        });
+                if !converging {
+                    return Err(error);
+                }
+                last_retryable = Some(error);
+            }
+        }
+    }
+    Err(last_retryable.unwrap_or_else(|| {
+        config_error("codex compaction ingest kept racing past its retry budget")
+    }))
+}
+
+async fn admit_codex_rollouts_once(
+    cg: &TraceDecay,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<u64> {
+    let facade = host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
+    let admission = facade.accept_replay("codex", HostAdmissionScope::Project);
+    if let Some(rejection) = reject_unadmitted(
+        &admission,
+        "daemon observation authority is unavailable for compaction ingest",
+        "codex transcript provider is unsupported",
+    ) {
+        return Err(rejection);
+    }
+    let source = tracedecay_sessions::runtime::hosts::codex::CodexSource::new()
+        .ok_or_else(|| config_error("Codex transcript source is unavailable"))?;
+    let project_id = project_observation_id(cg)?;
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let cancellation = ObservationCancellation::default();
+    admit_codex_project_rollouts(
+        &facade,
+        &source,
+        cg.project_root(),
+        project_id,
+        None,
+        &cancellation,
+    )
+    .await?;
+    drain_host_observation_projections(&facade, &scope, &cancellation).await
+}
+
+/// Claude's `PostCompact` summaries carry no machine provenance, so the
+/// daemon records nothing for them.
+pub(super) fn claude_compact(event_json: &str) -> Result<HookCompactionResultV1> {
+    required_field(Some(event_json), "event_json")?;
+    Ok(HookCompactionResultV1::NotRun {
+        status: "unavailable".to_owned(),
+        reason: "claude_postcompact_provenance_unavailable".to_owned(),
+        summary_nodes_created: 0,
+        summary_node_ids: Vec::new(),
+        relation_projection_status: None,
+    })
+}
+
+#[tracing::instrument(name = "mcp.hook_runtime.compact", level = "trace", skip_all)]
+pub(super) async fn cursor_compact(
+    event_json: &str,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<HookCompactionResultV1> {
+    let event_json = required_field(Some(event_json), "event_json")?;
+    let Some(authority) = session_authorities.project_lcm else {
+        return Ok(compaction_authority_unavailable());
+    };
+    let parsed: Value = serde_json::from_str(event_json)?;
+    let session_id = ["session_id", "conversation_id", "chat_id"]
+        .iter()
+        .find_map(|key| parsed.get(*key).and_then(Value::as_str))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
+    let messages_to_compact = event_usize(&parsed, &["messages_to_compact", "compact_count"]);
+    if messages_to_compact == Some(0) {
+        return Ok(cursor_compact_skipped());
+    }
+    let message_count = event_usize(&parsed, &["message_count", "messages_count"]);
+    let fresh_tail_count = message_count
+        .zip(messages_to_compact)
+        .map(|(count, compact)| count.saturating_sub(compact));
+    let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
+    let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
+    let Some(response) = tracing::Instrument::instrument(
+        authority.execute(pressure_only_command(
+            "cursor",
+            session_id,
+            current_tokens,
+            context_length,
+            messages_to_compact,
+            fresh_tail_count,
+            LcmHostProtocol::CursorPreCompact {
+                protocol_revision: "cursor.precompact.v1".to_owned(),
+                event_digest: tracedecay_domain::canonical_sha256(&event_json).map_err(
+                    |error| config_error(format!("digest Cursor event failed: {error}")),
+                )?,
+            },
+        )),
+        tracing::trace_span!("mcp.hook_runtime.compact_execute"),
+    )
+    .await
+    else {
+        return Ok(compaction_authority_unavailable());
+    };
+    compaction_response(&response)
+}
+
+fn cursor_compact_skipped() -> HookCompactionResultV1 {
+    HookCompactionResultV1::NotRun {
+        status: "skipped".to_owned(),
+        reason: "no messages to compact".to_owned(),
+        summary_nodes_created: 0,
+        summary_node_ids: Vec::new(),
+        relation_projection_status: Some(Value::String("not_applicable".to_owned())),
+    }
+}
+
+fn compaction_authority_unavailable() -> HookCompactionResultV1 {
+    HookCompactionResultV1::NotRun {
+        status: "unavailable".to_owned(),
+        reason: "lcm_daemon_authority_unavailable".to_owned(),
+        summary_nodes_created: 0,
+        summary_node_ids: Vec::new(),
+        relation_projection_status: None,
+    }
+}
+
+fn compaction_response(
+    response: &tracedecay_session_memory::session::lcm::LcmAuthorityResponse,
+) -> Result<HookCompactionResultV1> {
+    let authority_outcome = serde_json::to_value(&response.outcome)?;
+    let committed_state = serde_json::to_value(&response.receipt.committed_state)?;
+    if let (LcmAuthorityOutcome::Ready, Some(LcmAuthorityPayload::Compaction(compression))) =
+        (&response.outcome, &response.payload)
+    {
+        return Ok(HookCompactionResultV1::Settled {
+            status: compression.status.clone(),
+            reason: compression.reason.clone(),
+            summary_nodes_created: compression.summary_nodes_created as u64,
+            summary_node_ids: compression
+                .summary_nodes
+                .iter()
+                .map(|node| node.node_id.clone())
+                .collect(),
+            relation_projection_status: serde_json::to_value(
+                compression.relation_projection_status,
+            )?,
+            retry_status: compression.retry_status.clone(),
+            authority_outcome,
+            committed_state,
+            messages_upserted: 0,
+        });
+    }
+    Ok(HookCompactionResultV1::Refused {
+        status: "unavailable".to_owned(),
+        reason: "lcm_daemon_authority_rejected".to_owned(),
+        authority_outcome,
+        committed_state,
+        summary_nodes_created: 0,
+        summary_node_ids: Vec::new(),
+        messages_upserted: 0,
+    })
+}
+
+fn event_i64(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        let value = value.get(*key)?;
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .or_else(|| value.as_str()?.parse().ok())
+    })
+}
+
+fn event_usize(value: &Value, keys: &[&str]) -> Option<usize> {
+    event_i64(value, keys).and_then(|value| usize::try_from(value).ok())
+}
+
+fn pressure_only_command(
+    provider: &str,
+    session_id: &str,
+    current_tokens: Option<i64>,
+    context_length: Option<i64>,
+    max_source_messages: Option<usize>,
+    fresh_tail_count: Option<usize>,
+    protocol: LcmHostProtocol,
+) -> LcmAuthorityRequest {
+    LcmAuthorityRequest::Compact(Box::new(LcmCompactionCommand {
+        preflight: tracedecay_lcm::LcmPreflightRequest {
+            provider: provider.to_owned(),
+            session_id: session_id.to_string(),
+            messages: Vec::new(),
+            current_tokens,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length,
+            reserve_tokens_floor: None,
+        },
+        evidence: LcmCompressionEvidence::PressureOnly { protocol },
+    }))
+}
+
+#[tracing::instrument(name = "mcp.hook_runtime.ingest", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Transcript ingest is one write through the capture authority."
+)]
+pub(super) async fn ingest_transcript(
+    cg: Option<&TraceDecay>,
+    request: &HookIngestTranscriptRequestV1,
+    profile_root: Option<&Path>,
+    global_db: Option<&RegisteredGlobalDb>,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<HookIngestTranscriptResultV1> {
+    let cancellation = ObservationCancellation::default();
+    let cancellation = &cancellation;
+    let provider = required_field(Some(&request.provider), "provider")?;
+    let user_scope = request.user_scope;
+    let payload_route = TranscriptPayloadRouteV1::from_request(request);
+    let max_new_bytes = request.max_new_bytes;
+    let admission_scope = if user_scope {
+        HostAdmissionScope::Profile
+    } else {
+        HostAdmissionScope::Project
+    };
+    let facade = host_admission_facade(cg, admission_scope, session_authorities.clone())?;
+    let admission = facade.accept_replay(provider, admission_scope);
+    if let Some(rejection) = reject_unadmitted(
+        &admission,
+        "daemon observation authority is unavailable",
+        "transcript provider is unsupported",
+    ) {
+        return Err(rejection);
+    }
+    // Unregistered routes are reported with the same typed `unknown_provider`
+    // admission status the probe uses, not a generic configuration error.
+    let kernel =
+        transcript_capture_kernel(provider, user_scope, payload_route).ok_or_else(|| {
+            hook_admission_error(
+                HostAdmissionStatus::Unknown,
+                "unknown_provider",
+                false,
+                "transcript provider is unsupported",
+            )
+        })?;
+    let capture = tracing::Instrument::instrument(
+        kernel.capture(TranscriptCaptureContext {
+            cg,
+            request,
+            user_scope,
+            profile_root,
+            global_db,
+            session_authorities: session_authorities.clone(),
+            facade: &facade,
+            max_new_bytes,
+            cancellation,
+        }),
+        tracing::trace_span!("mcp.hook_runtime.capture"),
+    )
+    .await?;
+    let TranscriptCaptureOutcome {
+        messages_upserted,
+        snapshot: snapshot_capture,
+        claude_observation: claude_observation_stats,
+        source_deferred,
+        observations_committed: route_observations_committed,
+        exact_duplicate: route_exact_duplicate,
+        admission_owns_commit,
+    } = capture;
+    let verdict = ingest_commit_verdict(&IngestCommitAccount {
+        admission_owns_commit,
+        observations_committed: route_observations_committed,
+        route_exact_duplicate,
+        messages_upserted,
+        snapshot_messages_upserted: snapshot_capture
+            .as_ref()
+            .map_or(0, |capture| capture.stats.messages_upserted),
+        claude_observations_committed: claude_observation_stats
+            .as_ref()
+            .map_or(0, |stats| stats.observations_committed),
+        claude_cursor_advances: claude_observation_stats
+            .as_ref()
+            .map_or(0, |stats| stats.cursor_advances),
+        claude_observation_duplicates: claude_observation_stats
+            .as_ref()
+            .map_or(0, |stats| stats.observation_duplicates),
+        claude_cursor_duplicates: claude_observation_stats
+            .as_ref()
+            .map_or(0, |stats| stats.cursor_duplicates),
+    });
+    let authority_changed = verdict.authority_changed;
+    let exact_duplicate = verdict.exact_duplicate;
+    let deferred_by_byte_cap = source_deferred
+        || snapshot_capture
+            .as_ref()
+            .is_some_and(|capture| capture.deferred_by_byte_cap);
+    let admission = complete_ingest_admission(
+        admission,
+        authority_changed,
+        exact_duplicate,
+        deferred_by_byte_cap,
+    );
+    let mut output = HookIngestTranscriptResultV1 {
+        provider: provider.to_owned(),
+        user_scope,
+        completed: !deferred_by_byte_cap,
+        status: admission.status.as_wire().to_owned(),
+        admission: HookIngestAdmissionV1 {
+            status: admission.status.as_wire().to_owned(),
+            retryable: admission.retryable,
+            reason_code: admission.reason_code.map(str::to_owned),
+        },
+        messages_upserted,
+        hint_outcomes: None,
+        observations_committed: None,
+        bytes_consumed: None,
+        deferred_by_byte_cap: None,
+        observation_duplicates: None,
+        cursor_advances: None,
+        cursor_duplicates: None,
+        records_rejected: None,
+        records_quarantined: None,
+        projections_completed: None,
+        projections_skipped: None,
+        projection_duplicates: None,
+        deferred_sources: None,
+        source_bytes_scanned: None,
+    };
+    // Project-scope ingest is the production moment new post-hint session
+    // activity becomes durable, so settle emitted hook hints into
+    // `hint_outcome` analytics events here. Best-effort: unavailable or
+    // failed settlement is a typed field on the output, never an ingest
+    // failure.
+    if let Some(cg) = cg
+        && !user_scope
+    {
+        output.hint_outcomes = Some(
+            super::hint_settlement::settle_hint_outcomes(
+                cg.project_root(),
+                profile_root,
+                global_db,
+                session_authorities.project.map(std::convert::AsRef::as_ref),
+            )
+            .await,
+        );
+    }
+    // Routes that admit observations directly report what they committed, so a
+    // `messages_upserted: 0` pass is readable without guessing which drainer
+    // won. The snapshot and Claude blocks below own the key for their routes.
+    if route_observations_committed > 0 {
+        output.observations_committed = Some(route_observations_committed);
+    }
+    if let Some(capture) = snapshot_capture {
+        output.observations_committed = Some(capture.stats.messages_upserted);
+        output.bytes_consumed = Some(capture.bytes_consumed);
+        output.deferred_by_byte_cap = Some(capture.deferred_by_byte_cap);
+    }
+    if let Some(stats) = claude_observation_stats {
+        output.observations_committed = Some(stats.observations_committed);
+        output.observation_duplicates = Some(stats.observation_duplicates);
+        output.cursor_advances = Some(stats.cursor_advances);
+        output.cursor_duplicates = Some(stats.cursor_duplicates);
+        output.records_rejected = Some(stats.records_rejected);
+        output.records_quarantined = Some(stats.records_quarantined);
+        output.projections_completed = Some(stats.projections_completed);
+        output.projections_skipped = Some(stats.projections_skipped);
+        output.projection_duplicates = Some(stats.projection_duplicates);
+        output.deferred_sources = Some(stats.deferred_sources);
+        output.source_bytes_scanned = Some(stats.source_bytes_scanned);
+    }
+    Ok(output)
+}
+
+/// The counters a capture route hands the terminal-status assembly.
+///
+/// `admission_owns_commit` routes (Cursor, Codex project) already know whether
+/// they persisted frames. Their projection drain reads a queue the project
+/// catch-up also empties, so `messages_upserted` on those routes is a residual
+/// of that queue, not a second copy of the commit.
+pub(super) struct IngestCommitAccount {
+    pub(super) admission_owns_commit: bool,
+    pub(super) observations_committed: u64,
+    pub(super) route_exact_duplicate: bool,
+    pub(super) messages_upserted: u64,
+    pub(super) snapshot_messages_upserted: u64,
+    pub(super) claude_observations_committed: u64,
+    pub(super) claude_cursor_advances: u64,
+    pub(super) claude_observation_duplicates: u64,
+    pub(super) claude_cursor_duplicates: u64,
+}
+
+pub(super) struct IngestCommitVerdict {
+    pub(super) authority_changed: bool,
+    pub(super) exact_duplicate: bool,
+}
+
+/// Commit status from the route that owns it.
+///
+/// When admission owns the commit, a non-zero drain residual cannot promote a
+/// pass that persisted nothing into `committed`, and a zero drain cannot hide
+/// frames this pass did persist. Routes without an admission tally still read
+/// their own message and duplicate counters.
+pub(super) fn ingest_commit_verdict(account: &IngestCommitAccount) -> IngestCommitVerdict {
+    if account.admission_owns_commit {
+        let authority_changed = account.observations_committed > 0;
+        return IngestCommitVerdict {
+            authority_changed,
+            exact_duplicate: !authority_changed && account.route_exact_duplicate,
+        };
+    }
+    let authority_changed = account.messages_upserted > 0
+        || account.observations_committed > 0
+        || account.snapshot_messages_upserted > 0
+        || account.claude_observations_committed > 0
+        || account.claude_cursor_advances > 0;
+    IngestCommitVerdict {
+        authority_changed,
+        exact_duplicate: !authority_changed
+            && (account.route_exact_duplicate
+                || account.claude_observation_duplicates > 0
+                || account.claude_cursor_duplicates > 0),
+    }
+}
+
+pub(super) fn complete_ingest_admission(
+    admission: HostAdmissionOutcome,
+    authority_changed: bool,
+    exact_duplicate: bool,
+    deferred_by_byte_cap: bool,
+) -> HostAdmissionOutcome {
+    if deferred_by_byte_cap {
+        HostAdmissionOutcome::retained_backpressured("ingest_pass_backpressured")
+    } else if admission.status == HostAdmissionStatus::AcceptedForReplay {
+        HostAdmissionOutcome::replay_completed(authority_changed, exact_duplicate)
+    } else {
+        admission
+    }
+}
+
+#[cfg(test)]
+mod tests;

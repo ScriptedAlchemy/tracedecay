@@ -26,6 +26,56 @@ anchors, then considers the older unsummarized backlog.
   than its source, the response records the fallback/rescue outcome instead of
   silently claiming a useful compaction.
 
+## On-demand summarizer executables
+
+When no host-native compaction summary exists, the daemon can ask a host CLI
+to write one. It runs `cursor-agent` for Cursor sessions and `codex`
+(app-server JSON-RPC) for Codex sessions. Those executables come only from the
+project setting `lcm.summarizer_executables.v1`, whose value has one entry per
+provider:
+
+```json
+{
+  "cursor_agent": {
+    "state": "configured",
+    "canonical_path": "/usr/local/bin/cursor-agent",
+    "model": "optional-model-id",
+    "timeout_secs": 90
+  },
+  "codex": { "state": "unconfigured" }
+}
+```
+
+Every provider defaults to `unconfigured`. The daemon never resolves a
+summarizer from `PATH` or from environment variables. An unconfigured provider
+leaves the pending page in the typed `cursor_agent_unconfigured` or
+`codex_app_server_unconfigured` state. A project shard whose configuration pin
+is not published reports `summarizer_configuration_unavailable`. Profile-wide
+session shards have no project configuration, so they stay unconfigured.
+
+A session that could not be summarized parks `unavailable` in the retained
+summary queue. Background convergence compares the shard's summarizer binding
+on every pass, so publishing a pin or changing this setting requeues the
+parked sessions without a daemon restart or new messages. `lcm_status` reports
+the queue under `summary_convergence`: per-state session counts plus
+`reasons`, the recorded reason for each parked or failed group.
+
+Configured paths must be absolute. Set the value on the project layer with
+`tracedecay_configuration_set` or `tracedecay tool configuration_set`. A
+configured entry may also set `model` (the provider default when absent) and
+`timeout_secs` (5 to 300; 90 when absent, never longer than the caller's
+budget). No environment variable tunes a summarizer. Each `cursor-agent` run
+gets a private temporary workspace holding only its prompt file, which is
+removed when the run ends.
+
+The same `codex` entry is the only executable the automation backend spawns
+for `codex_app_server`. That backend runs the memory curator, session
+reflector, skill writer, user jobs, and Context Scout. While the entry is
+unconfigured, `backend_availability` reports the backend unavailable, and every
+task settles as `Unavailable` without a spawn. The durable backend identity
+records the opened configured file, so replacing that binary in place
+re-admits a task whose deterministic failure had settled.
+
 ## Replay and recovery
 
 Replay is ordered by source/store position, with summary blocks preceding raw

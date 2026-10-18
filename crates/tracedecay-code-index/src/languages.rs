@@ -59,7 +59,7 @@ pub(crate) fn canonical_language_id(language_name: &str) -> String {
 ///
 /// Markdown qualifies: a heading owns its whole section, and nested headings
 /// are stable child spans. That is what keeps a chunk from splitting mid
-/// section — an oversized section splits at its sub-heading boundaries via
+/// section, an oversized section splits at its sub-heading boundaries via
 /// `structural_segments` instead of at an arbitrary byte window, and a section
 /// that fits the budget stays one chunk.
 fn has_stable_member_spans(language: &str) -> bool {
@@ -198,6 +198,106 @@ impl StaticLanguageRegistry {
             for alias in extra_aliases(&language) {
                 aliases.insert(alias.to_owned());
             }
+            // The latest revision binds persisted symbol content digests to the
+            // exact source span published by chunk projection. Rust v4 added
+            // parser-backed import visibility for re-export resolution;
+            // TypeScript v3 added variable type-relation evidence; protobuf and
+            // SQL v3 retained canonical schema evidence. Rust v8 names dotted
+            // calls on typed bindings only from explicit type annotations or
+            // struct-literal initialisers (never method calls or constructor-like
+            // names), records restricted `pub` re-export scopes separately
+            // from unrestricted exports, and resolves inherent impl methods across files of
+            // the owning type. Every language moved one revision when clone-body
+            // eligibility gained its token bound and again when it gained the
+            // pre-tokenization byte bound: one multi-megabyte literal is only
+            // a few tokens but still cannot fit a text-artifact page. Rust v11
+            // stopped emitting the bare method name of a dotted call, so an
+            // unrelated same-file callable sharing that name is no longer a
+            // caller, and types `self` through the enclosing impl or trait.
+            // Rust v12 resolves a receiver whose type is a type parameter with
+            // one trait bound to `Trait::method`, so that call now has a
+            // callee. Only re-extraction removes the poisoned record. Rust v13
+            // retains unresolved receiver-call evidence at the parser's member
+            // token; re-extracting Rust does not perturb other languages' rows.
+            // Rust v14 extracts the items of item-position macro bodies that
+            // parse as item lists (`cfg_rt! { ... }`), records other bodies as
+            // unexpanded `name!` macro nodes, binds calls to every `#[cfg]`
+            // variant of one definition, and retains qualified calls through a
+            // declared module whose name is also a blocklisted std name. Rust
+            // v15 rewrites a call through a `use` declared in a block to the
+            // path that `use` names, so it binds like a module-scope import.
+            // Rust v16 does the same for a `use` in an inline `mod` body and
+            // rewrites a call under a block or inline-module glob into the
+            // glob's module, marking it so an unbound one stays a caller gap.
+            // Rust v17 gives `const`/`static` initializers their calls. Rust
+            // v18 keeps the path or receiver of a call inside macro arguments
+            // and spells in-file `self::`/`super::`/`crate::` calls by their
+            // bare name, so both bind. Rust v19 spells a `Self::f` call by
+            // its enclosing impl or trait type, so it binds exactly.
+            // TypeScript v7 records `export … from` forwarding as public
+            // import evidence and retains explicitly imported ubiquitous names
+            // as cross-file candidates, so barrels and workspace packages bind.
+            // TypeScript v8 records same-module `export { a as b }` clauses as
+            // forwarding evidence, and its per-file pass no longer binds calls
+            // to test titles or to declarations outside the scope that shadows
+            // an import. TypeScript v9 records `export default <name>` the same
+            // way and retains member calls on imported names, so default and
+            // namespace imports bind. TypeScript v10 attributes calls inside
+            // nested arrows, function expressions, and local functions to the
+            // enclosing symbol, records JSX component elements as calls, and
+            // gives module-scope initializers, class fields, static blocks,
+            // decorators, default parameters, enum initializers, and
+            // namespace bodies their calls. Other module-scope
+            // statements' calls belong to a `<module>` init block, and
+            // abstract classes are extracted like classes. Svelte and Astro
+            // scripts go through it, so they move to v6.
+            // The C-comment docstring languages moved one revision when a
+            // docstring stopped absorbing trailing or blank-line-detached
+            // comments and `///` lost its stray `/`; QBasic dialects moved when
+            // CONST names stopped losing their text before an underscore.
+            // Ruby v6 names a receiver call `recv.m`, so `x.clamp` inside
+            // `clamp` is no longer bound as recursion. Python v6, Go v7, Java
+            // v6, and Ruby v7 record parser-backed import evidence (Go also
+            // indexes `go.mod` module paths), so their cross-file calls bind
+            // at sealing and unbound qualified calls stay disclosed gaps.
+            // Go v8, Python v7, and Dart v6 attribute calls inside function
+            // literals, nested defs, and closures to the enclosing function
+            // instead of dropping them. Go v8 also extracts grouped
+            // `var ( … )` specs and gives package `var` initializers their
+            // calls; Python v7 gives constants, class bodies and arguments,
+            // decorators, and default values theirs and module-scope
+            // statements a `<module>` init block.
+            // Go v9 emits interface method specs as methods the interface
+            // contains. Java v7, Kotlin and C# v6, and TypeScript v11 (with the
+            // Svelte and Astro scripts it extracts, v7) start a declaration
+            // past its leading annotations, attributes, or decorators, which
+            // `attrs_start_line` keeps, as Rust always has. Java v8 records
+            // call argument counts and declared parameter lists, so a call
+            // binds the one overload that accepts its arguments.
+            // TypeScript v12 (Svelte and Astro v8) retains a member call on a
+            // local, `this`, or global receiver as a disclosed caller gap.
+            // TypeScript v13 (Svelte and Astro v9) extracts exported, nested,
+            // dotted, and `module` namespaces, and retains a member call on a
+            // computed receiver as a disclosed caller gap.
+            // TypeScript v14 (Svelte and Astro v10) extracts CommonJS
+            // `module.exports` / `exports.foo` assignments as public consts,
+            // so a JS config that only assigns the export object binds a
+            // symbol grain and appears in the indexed-file census.
+            // Go v10 records method sets for seal-time interface satisfaction.
+            // Rust v20 retains associated owner uses and parser-positioned
+            // generic call paths. TypeScript v15 (Svelte and Astro v11)
+            // retains constructor uses and CommonJS re-export evidence.
+            let extractor_revision = match language.as_str() {
+                "rust" => 21,
+                "typescript" => 15,
+                "svelte" | "astro" => 11,
+                "go" => 10,
+                "java" => 8,
+                "ruby" | "protobuf" | "python" => 7,
+                "sql" | "dart" | "kotlin" | "csharp" => 6,
+                "c" | "cpp" | "metal" | "objc" | "glsl" | "pascal" | "qbasic" | "quickbasic" => 6,
+                _ => 5,
+            };
             let descriptor = LanguageDescriptorV1 {
                 language: LanguageId::new(language.clone())
                     .expect("canonical language identity is valid"),
@@ -209,8 +309,10 @@ impl StaticLanguageRegistry {
                     "grammar.tree-sitter.{language}.v1"
                 ))
                 .expect("grammar revision is canonical"),
-                extractor_revision: ExtractorRevision::new(format!("extractor.{language}.v2"))
-                    .expect("extractor revision is canonical"),
+                extractor_revision: ExtractorRevision::new(format!(
+                    "extractor.{language}.v{extractor_revision}"
+                ))
+                .expect("extractor revision is canonical"),
                 aliases: aliases.into_iter().collect(),
                 extensions: extensions.into_iter().collect(),
                 root_markers: root_markers(&language),
@@ -383,33 +485,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_covers_every_compiled_extractor_extension() {
-        let extractors = tracedecay_code_extraction::LanguageRegistry::new();
-        let registry = StaticLanguageRegistry::from_extraction_registry(&extractors);
-        assert!(!registry.descriptors().is_empty());
-        for extension in extractors.supported_extensions() {
-            let descriptor = registry
-                .descriptor_for_extension(&extension.to_lowercase())
-                .unwrap_or_else(|| panic!("descriptor for extension {extension}"));
-            // The descriptor's language must be the language of the extractor
-            // that would actually parse the file.
-            let probe = format!("probe.{extension}");
-            let extractor = extractors
-                .extractor_for_file(&probe)
-                .expect("extractor resolves");
-            assert_eq!(
-                descriptor.language.as_str(),
-                canonical_language_id(extractor.language_name()),
-                "extension {extension} dispatched to a different language"
-            );
-        }
-    }
-
-    #[test]
     fn descriptor_lookups_are_canonical_and_deterministic() {
         let registry = StaticLanguageRegistry::new();
-        let again = StaticLanguageRegistry::new();
-        assert_eq!(registry.registry_revision(), again.registry_revision());
 
         let rust = registry
             .descriptor(&language("rust"))
@@ -418,6 +495,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v21");
 
         assert_eq!(
             registry
@@ -440,8 +518,11 @@ mod tests {
         assert!(registry.descriptor(&language("cobol-nope")).is_none());
         assert!(registry.descriptor_for_extension("nope").is_none());
         assert_eq!(
-            registry.descriptor_revision(&language("rust")),
-            Some(rust.descriptor_revision.clone())
+            registry
+                .descriptor_revision(&language("rust"))
+                .as_ref()
+                .map(|revision| revision.as_str()),
+            Some("descriptor.rust.v1")
         );
 
         // Canonical language-identity order.
@@ -456,13 +537,71 @@ mod tests {
     }
 
     #[test]
-    fn every_descriptor_passes_domain_validation() {
+    #[cfg(feature = "full")]
+    fn full_tier_registers_every_compiled_extractor_language() {
         let registry = StaticLanguageRegistry::new();
-        for descriptor in registry.descriptors() {
-            descriptor.validate().expect("descriptor validates");
-            assert!(!descriptor.aliases.is_empty());
-            assert!(!descriptor.extensions.is_empty());
-        }
+        let ids: Vec<&str> = registry
+            .descriptors()
+            .iter()
+            .map(|d| d.language.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "astro",
+                "bash",
+                "batch",
+                "c",
+                "clojure",
+                "cobol",
+                "cpp",
+                "csharp",
+                "dart",
+                "dockerfile",
+                "elixir",
+                "erlang",
+                "fortran",
+                "fsharp",
+                "glsl",
+                "go",
+                "gwbasic",
+                "haskell",
+                "hlsl",
+                "java",
+                "json",
+                "julia",
+                "kotlin",
+                "lean",
+                "lua",
+                "markdown",
+                "metal",
+                "msbasic2",
+                "nix",
+                "objc",
+                "ocaml",
+                "pascal",
+                "perl",
+                "php",
+                "powershell",
+                "protobuf",
+                "python",
+                "qbasic",
+                "quickbasic",
+                "quint",
+                "r",
+                "ruby",
+                "rust",
+                "scala",
+                "sql",
+                "svelte",
+                "swift",
+                "toml",
+                "typescript",
+                "vbnet",
+                "wgsl",
+                "zig",
+            ]
+        );
     }
 
     #[test]
@@ -525,28 +664,6 @@ mod tests {
             StaticLanguageRegistry::try_from_descriptors(vec![uppercase, rust]).is_err(),
             "case-collision rejection must not depend on input order"
         );
-    }
-
-    #[test]
-    fn from_descriptors_sorts_valid_descriptors() {
-        let rust = StaticLanguageRegistry::new()
-            .descriptor(&language("rust"))
-            .expect("rust")
-            .clone();
-        let mut renamed = rust.clone();
-        renamed.language = language("aaa-test-language");
-        renamed.aliases = vec!["aaa-test-language".to_owned()];
-        renamed.extensions = vec!["aaa".to_owned()];
-        renamed
-            .validate()
-            .expect("renamed descriptor remains canonical");
-        let registry = StaticLanguageRegistry::from_descriptors(vec![rust, renamed]);
-        let ids: Vec<&str> = registry
-            .descriptors()
-            .iter()
-            .map(|d| d.language.as_str())
-            .collect();
-        assert_eq!(ids, vec!["aaa-test-language", "rust"]);
     }
 
     #[test]

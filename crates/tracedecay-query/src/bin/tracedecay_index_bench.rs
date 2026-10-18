@@ -1,6 +1,6 @@
 //! Daemon-free, deterministic indexing benchmark entrypoint.
 //!
-//! This is the profiled workload for `.github/workflows/hotpath-profile.yml`.
+//! This is the profiled indexing workload. It drives the real production
 //! It drives the real production indexing pipeline over a committed fixture
 //! corpus and nothing else:
 //!
@@ -15,18 +15,23 @@
 //! 3. build and seal an incremental generation over a deterministic edited
 //!    subset, which is where `code_index.build.plan_increment` and the
 //!    retained-parse reuse spans live;
-//! 4. drain the sealed generation through
-//!    [`VerifiedSealedLexicalPageSourceV1::next_page_batch_if`], which is
+//! 4. with `--clone-envelope`, build one more generation after a single
+//!    generated function changes, recording clone payload recomputation and
+//!    reuse;
+//! 5. drain the sealed generation through
+//!    `VerifiedSealedLexicalPageSourceV1::next_page_batch_if`, which is
 //!    `code_index.lexical_source.batch_stage`;
-//! 5. ingest those pages into an isolated SQLite lexical artifact in bounded
+//! 6. ingest those pages into an isolated SQLite lexical artifact in bounded
 //!    batches and finalize it, which is `query.artifact.append_pages` and
-//!    `query.artifact.finalization.advance_wake`.
+//!    `query.artifact.finalization.advance_wake`;
+//! 7. with `--clone-envelope`, reopen the artifact, time first-reader and warm
+//!    exact-clone reads, and reopen again.
 //!
 //! Hermeticity is a hard requirement, not a nicety: a profiling run that
 //! touches a socket, the network, or the operator profile measures the
 //! machine instead of the diff. Nothing here opens a socket, spawns a
 //! daemon, reads `~/.tracedecay`, or resolves a URL. The publication
-//! authority and the projection sink are in-memory; the only path written is
+//! authority is in-memory; the only path written is
 //! a self-created scratch directory under the system temp dir, removed
 //! before exit.
 //!
@@ -36,54 +41,55 @@
 //! wall time differs. The run asserts the sealed state digest is stable
 //! across the two paging strategies it exercises, so a nondeterminism
 //! regression fails the workload instead of quietly skewing the profile.
-//!
-//! With the `hotpath` feature off every macro is a no-op and the guard is
-//! not compiled: the binary runs the identical workload, prints the identical
-//! summary, and writes no report.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+#[path = "../bench_support.rs"]
+mod artifact_bench;
+
+use artifact_bench::{
+    ActiveControl, AdmittedFile, SealedDrainBounds, decoded_generation, default_corpus_root,
+    drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile, replicate,
+    seal_partitioned,
+};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracedecay_code_index::chunks::content_digest;
-use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
+use tracedecay_code_index::clones::{CloneBodyEligibilityV1, CloneNormalizationClassV1};
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageBatchBoundsV1,
-    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionConfigV1,
+    CodeIndexProductionOwnerV1, CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1,
+    CodeIndexRepositoryParseIdentityV1, MemorySealedPublicationStoreV1,
+    PhysicalCodeArtifactPoolStatsV1, UninterruptibleCodeIndexControlV1,
     VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
 };
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-};
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ComponentRevision, FileOccurrenceId,
-    FreshnessCompatibilityV1, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId,
-    ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
+    ChunkerRevision, ComponentRevision, ContentDigest, FileOccurrenceId, FreshnessCompatibilityV1,
+    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionKeyV1,
+    ProjectionKindV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
     SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId,
     SensitivityLevelV1, SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey,
-    SourceNamespace, TreeId, UtcMicros,
+    SourceNamespace, SymbolOccurrenceId, TreeId, UtcMicros,
 };
 use tracedecay_query::retrieval::lexical::{
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneExactArtifactMemberV1,
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
-    CodeLexicalProjectionMetadataV1,
+    CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1,
+    MAX_CLONE_EXACT_PAGE_MEMBERS_V1, VerifiedCodeLexicalArtifactV1,
+};
+use tracedecay_query::retrieval::ports::{
+    TEXT_ARTIFACT_BASE_BATCH_BYTES_V1, TEXT_ARTIFACT_BASE_BATCH_PAGES_V1,
+    TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
 };
 
 /// Bumped whenever the workload shape changes, so a profile comparison
 /// across a shape change is visibly not comparable.
-const WORKLOAD_REVISION: &str = "index-bench.v1";
-const DEFAULT_CORPUS_RELATIVE: &str = "benchmark_data/index-bench/corpus";
+const WORKLOAD_REVISION: &str = "index-bench.v2";
 const CORPUS_ENV: &str = "TRACEDECAY_INDEX_BENCH_CORPUS";
 const REPLICAS_ENV: &str = "TRACEDECAY_INDEX_BENCH_REPLICAS";
 
@@ -92,29 +98,21 @@ const REPLICAS_ENV: &str = "TRACEDECAY_INDEX_BENCH_REPLICAS";
 /// directory rather than clustering in whichever one sorts first.
 const EDIT_STRIDE: usize = 17;
 
-/// Sealed-source paging bounds. Chosen so the corpus yields many pages (the
-/// batch-stage span needs repetitions to be readable) while the retained
-/// window stays far below the 4 GB ceiling the profiling job budgets.
-const MAX_PAGE_CHUNKS: usize = 64;
-const MAX_PAGE_BYTES: usize = 512 * 1024;
-const BATCH_MAX_PAGES: usize = 16;
-const BATCH_MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
+/// Sealed-source paging bounds and the offered transaction width are the
+/// daemon's own (`TEXT_ARTIFACT_PAGE_*_V1`, the unscaled
+/// `TEXT_ARTIFACT_BASE_BATCH_*_V1`). A narrower page refuses real clone bodies
+/// the daemon admits, and a narrower window would profile a commit frequency
+/// no daemon produces. The builder's memory ledger narrows the offered window
+/// to the admissible prefix, exactly as it does for the scheduler. The
+/// scheduler scales the batch with host memory; a benchmark must not, or head
+/// and base measure different workloads on different runners.
 const FINALIZATION_WORK_BUDGET: usize = 4_096;
 
 const CLEAN_SEALED_AT: i64 = 1_700_000_000_000_000;
 const INCREMENT_SEALED_AT: i64 = 1_700_000_060_000_000;
+const REFRESH_SEALED_AT: i64 = 1_700_000_120_000_000;
 
 fn main() -> ExitCode {
-    #[cfg(feature = "hotpath")]
-    configure_hotpath();
-
-    // Declared first so it drops last: the exit report must observe every
-    // measured span, including the scratch-directory teardown below. Nothing
-    // in this binary may call `std::process::exit`, which would skip the drop
-    // and silently produce no report.
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("tracedecay-index-bench").build();
-
     let options = match Options::parse(std::env::args().skip(1)) {
         Ok(Some(options)) => options,
         Ok(None) => {
@@ -127,6 +125,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Err(error) = tracedecay_runtime_core::native_runtime::install(
+        tracedecay_runtime_core::native_runtime::default_builder(),
+    ) {
+        eprintln!("tracedecay-index-bench: {error}");
+        return ExitCode::FAILURE;
+    }
 
     match run(&options) {
         Ok(summary) => {
@@ -140,65 +144,28 @@ fn main() -> ExitCode {
     }
 }
 
-/// Two guard defaults this workload has to override, both set before the
-/// guard exists. Every `set_var` here is sound for the same reason: this runs
-/// as the first statement of `main`, before the guard, the rayon pool, or any
-/// other thread exists.
-#[cfg(feature = "hotpath")]
-fn configure_hotpath() {
-    // 1. Hotpath binds a localhost metrics server on guard construction.
-    //    This workload is specified to open no socket at all, and a bound
-    //    port also collides when the head and base profiles of one job
-    //    overlap, so the server is off unless an operator asked for it.
-    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
-        unsafe {
-            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        }
-    }
-
-    // 2. Without an output path the guard prints its report to stdout on
-    //    drop. Stdout here carries the machine-read workload summary, so an
-    //    appended table would corrupt it - the same rule `tracedecay`'s own
-    //    entrypoint applies to its protocol streams. Reports are therefore
-    //    off unless a usable destination file was named.
-    let has_output_path = std::env::var_os(HOTPATH_OUTPUT_PATH_ENV)
-        .is_some_and(|path| path.to_str().is_some_and(|path| !path.is_empty()));
-    if !has_output_path {
-        unsafe {
-            std::env::set_var(HOTPATH_OUTPUT_FORMAT_ENV, "none");
-            std::env::remove_var(HOTPATH_OUTPUT_PATH_ENV);
-        }
-    }
-}
-
-#[cfg(feature = "hotpath")]
-const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
-#[cfg(feature = "hotpath")]
-const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
-
 const USAGE: &str = "\
-usage: tracedecay-index-bench [--corpus DIR] [--replicas N]
+usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--clone-envelope]
 
   --corpus DIR   committed fixture corpus to index
                  (default: $TRACEDECAY_INDEX_BENCH_CORPUS, else
                  benchmark_data/index-bench/corpus beside this workspace)
   --replicas N   index the corpus N times under distinct logical path
                  prefixes (default: $TRACEDECAY_INDEX_BENCH_REPLICAS, else 1)
-  -h, --help     print this message
-
-Profiling: build with `--features hotpath` and set HOTPATH_OUTPUT_FORMAT and
-HOTPATH_OUTPUT_PATH. With the feature off the workload is identical and no
-report is written.";
+  --clone-envelope  measure one-body refresh and clone query behavior
+  -h, --help     print this message";
 
 struct Options {
     corpus_root: PathBuf,
     replicas: usize,
+    clone_envelope: bool,
 }
 
 impl Options {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
         let mut corpus_root: Option<PathBuf> = None;
         let mut replicas: Option<usize> = None;
+        let mut clone_envelope = false;
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -215,12 +182,15 @@ impl Options {
                         .ok_or_else(|| "--replicas needs a count".to_owned())?;
                     replicas = Some(parse_replicas(&value)?);
                 }
+                "--clone-envelope" => clone_envelope = true,
                 other => return Err(format!("unrecognized argument {other:?}")),
             }
         }
-        let corpus_root = corpus_root
-            .or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from))
-            .unwrap_or_else(default_corpus_root);
+        let corpus_root =
+            match corpus_root.or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from)) {
+                Some(root) => root,
+                None => default_corpus_root()?,
+            };
         let replicas = match replicas {
             Some(replicas) => replicas,
             None => match std::env::var(REPLICAS_ENV) {
@@ -231,6 +201,7 @@ impl Options {
         Ok(Some(Self {
             corpus_root,
             replicas,
+            clone_envelope,
         }))
     }
 }
@@ -243,118 +214,6 @@ fn parse_replicas(value: &str) -> Result<usize, String> {
         return Err("replica count must be at least 1".to_owned());
     }
     Ok(replicas)
-}
-
-/// The corpus lives beside the workspace this binary was compiled from, so
-/// the default resolves from `CARGO_MANIFEST_DIR` rather than the process
-/// working directory: the profiling job invokes the binary by path, not
-/// from the crate root.
-fn default_corpus_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(DEFAULT_CORPUS_RELATIVE)
-}
-
-// ---------------------------------------------------------------------------
-// Corpus admission
-// ---------------------------------------------------------------------------
-
-struct CorpusFile {
-    relative_path: String,
-    language: LanguageId,
-    bytes: Vec<u8>,
-}
-
-/// Ordered, `.gitignore`-blind directory walk. `ignore`-crate walking would
-/// consult repository and global ignore files, which makes the admitted file
-/// set depend on the machine - unacceptable for a head-vs-base comparison.
-fn load_corpus(root: &Path) -> Result<Vec<CorpusFile>, String> {
-    let registry = StaticLanguageRegistry::new();
-    let mut files = Vec::new();
-    collect_corpus(root, root, &registry, &mut files)?;
-    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    if files.is_empty() {
-        return Err(format!(
-            "corpus {} admitted no files with a known language extension",
-            root.display()
-        ));
-    }
-    Ok(files)
-}
-
-fn collect_corpus(
-    root: &Path,
-    directory: &Path,
-    registry: &StaticLanguageRegistry,
-    files: &mut Vec<CorpusFile>,
-) -> Result<(), String> {
-    let mut entries = std::fs::read_dir(directory)
-        .map_err(|error| format!("read {}: {error}", directory.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("read {}: {error}", directory.display()))?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("stat {}: {error}", path.display()))?;
-        if file_type.is_dir() {
-            collect_corpus(root, &path, registry, files)?;
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        let Some(extension) = path.extension().and_then(std::ffi::OsStr::to_str) else {
-            continue;
-        };
-        let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase()) else {
-            continue;
-        };
-        if !descriptor.capabilities.extraction {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| format!("relativize {}: {error}", path.display()))?;
-        let Some(relative_path) = relative.to_str() else {
-            return Err(format!("corpus path {} is not Unicode", relative.display()));
-        };
-        let bytes =
-            std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
-        files.push(CorpusFile {
-            relative_path: relative_path.replace('\\', "/"),
-            language: descriptor.language.clone(),
-            bytes,
-        });
-    }
-    Ok(())
-}
-
-/// One admitted source file, already replicated and identified.
-struct AdmittedFile {
-    logical_path: String,
-    language: LanguageId,
-    bytes: Arc<[u8]>,
-}
-
-fn replicate(corpus: &[CorpusFile], replicas: usize) -> Vec<AdmittedFile> {
-    let mut admitted = Vec::with_capacity(corpus.len().saturating_mul(replicas));
-    for replica in 0..replicas {
-        for file in corpus {
-            let logical_path = if replica == 0 {
-                file.relative_path.clone()
-            } else {
-                format!("replica{replica:02}/{}", file.relative_path)
-            };
-            admitted.push(AdmittedFile {
-                logical_path,
-                language: file.language.clone(),
-                bytes: Arc::from(file.bytes.clone()),
-            });
-        }
-    }
-    admitted
 }
 
 /// Deterministic incremental edit: append a distinguishing trailing comment
@@ -385,133 +244,302 @@ fn edit(files: &[AdmittedFile]) -> (Vec<AdmittedFile>, BTreeSet<String>) {
     (edited, edited_paths)
 }
 
-// ---------------------------------------------------------------------------
-// In-memory production authorities
-// ---------------------------------------------------------------------------
+/// Preferred committed-corpus names: an unchanged Rust type, an edited Go
+/// method-set type, and that type's constructor. A smaller `--corpus` falls
+/// back to the first distinct sealed names.
+const PREFERRED_SPOT_CHECKS: [&str; 3] = [
+    "ManifestState020",
+    "Aperture017State",
+    "NewAperture017State",
+];
 
-struct ActiveControl;
-
-impl CodeIndexExecutionControlV1 for ActiveControl {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-
-    fn is_deadline_exceeded(&self) -> bool {
-        false
-    }
+fn symbol_query(generation: &CodeIndexPublishedGenerationV1, name: &str) -> Vec<String> {
+    let mut hits = generation
+        .symbols()
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.simple_name == name)
+        .map(|symbol| symbol.qualified_name.clone())
+        .collect::<Vec<_>>();
+    hits.sort();
+    hits
 }
 
-/// In-memory compare-and-swap publication authority. The real daemon store
-/// is a database; the benchmark deliberately measures indexing rather than
-/// storage, so publication is a map behind a mutex.
-#[derive(Default)]
-struct MemoryPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
-}
-
-impl CodeIndexAtomicPublicationPort for MemoryPublicationStore {
-    fn load_active(
-        &self,
-        scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .map_err(|_| CodeIndexPublicationStoreErrorV1::CompareAndSwap)?
-            .get(scope)
-            .map(|generation| generation.as_ref().clone()))
+fn spot_check_names(generation: &CodeIndexPublishedGenerationV1) -> Vec<String> {
+    let available = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| symbol.simple_name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut names = PREFERRED_SPOT_CHECKS
+        .iter()
+        .filter(|name| available.contains(*name))
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    if names.len() >= 3 {
+        return names;
     }
-
-    fn publish_atomically(
-        &mut self,
-        scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self
-            .active
-            .lock()
-            .map_err(|_| CodeIndexPublicationStoreErrorV1::CompareAndSwap)?;
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+    for symbol in &generation.symbols().symbols {
+        if symbol.simple_name.is_empty() || names.iter().any(|name| name == &symbol.simple_name) {
+            continue;
         }
-        active.insert(scope.clone(), generation);
-        Ok(())
+        names.push(symbol.simple_name.clone());
+        if names.len() == 3 {
+            break;
+        }
     }
+    names
 }
 
-/// Applies every decision without a downstream model or store, so the
-/// profile attributes time to extraction and sealing rather than to a
-/// projection backend this workload does not mount.
-struct ApplyingProjectionSink;
-
-impl CodeChunkProjectionSink for ApplyingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions = Vec::with_capacity(
-            request.changes.added_or_changed.len()
-                + request.changes.deleted.len()
-                + request.changes.reused.len(),
-        );
-        decisions.extend(request.changes.added_or_changed.iter().map(|change| {
-            ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            }
-        }));
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        decisions.extend(
-            request
-                .changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
-                    output_digest: None,
-                }),
-        );
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
+/// After timings are recorded, seal the edited tree as a fresh full index
+/// and require the incremental generation to answer the same symbol queries.
+fn verify_increment_matches_fresh_full(
+    config: CodeIndexProductionConfigV1,
+    repository: &RepositoryId,
+    sanitizer_revision: &SanitizerRevision,
+    edited: &[AdmittedFile],
+    increment: &CodeIndexPublishedGenerationV1,
+    control: &ActiveControl,
+) -> Result<u64, String> {
+    let names = spot_check_names(increment);
+    if names.is_empty() {
+        return Err("incremental generation sealed no symbols to spot-check".to_owned());
     }
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
+        .map_err(|error| format!("open fresh-full owner: {error}"))?;
+    let published = owner
+        .build_and_publish(
+            build_request(
+                repository,
+                sanitizer_revision,
+                edited,
+                edited
+                    .iter()
+                    .map(|file| file.logical_path.clone())
+                    .collect(),
+                "tree.index-bench.fresh-full",
+                INCREMENT_SEALED_AT,
+            ),
+            control,
+        )
+        .map_err(|error| format!("build fresh full generation: {error}"))?;
+    let fresh = decoded_generation(&store, &published)?;
+    for name in &names {
+        let increment_hits = symbol_query(increment, name);
+        let fresh_hits = symbol_query(&fresh, name);
+        if increment_hits.is_empty() {
+            return Err(format!(
+                "spot-check {name} hit nothing on the incremental index"
+            ));
+        }
+        if increment_hits != fresh_hits {
+            return Err(format!(
+                "spot-check {name}: incremental {increment_hits:?} != fresh full {fresh_hits:?}"
+            ));
+        }
+    }
+    Ok(u64::try_from(names.len()).unwrap_or(u64::MAX))
 }
 
-// ---------------------------------------------------------------------------
+fn edit_one_body(files: &[AdmittedFile]) -> Option<(Vec<AdmittedFile>, BTreeSet<String>)> {
+    const BEFORE: &str = "long next = entries.getOrDefault(key, 0L) + weight + 0L;";
+    const AFTER: &str =
+        "long prior = entries.getOrDefault(key, 0L); long next = prior + weight + 0L;";
+
+    let mut changed_path = None;
+    let mut edited = Vec::with_capacity(files.len());
+    for file in files {
+        if changed_path.is_none()
+            && let Ok(source) = std::str::from_utf8(&file.bytes)
+            && source.contains(BEFORE)
+        {
+            changed_path = Some(file.logical_path.clone());
+            edited.push(AdmittedFile {
+                logical_path: file.logical_path.clone(),
+                language: file.language.clone(),
+                bytes: Arc::from(source.replacen(BEFORE, AFTER, 1).into_bytes()),
+            });
+        } else {
+            edited.push(AdmittedFile {
+                logical_path: file.logical_path.clone(),
+                language: file.language.clone(),
+                bytes: Arc::clone(&file.bytes),
+            });
+        }
+    }
+    changed_path.map(|path| (edited, BTreeSet::from([path])))
+}
+
+fn build_body_refresh(
+    owner: &mut CodeIndexProductionOwnerV1<MemorySealedPublicationStoreV1>,
+    repository: &RepositoryId,
+    sanitizer_revision: &SanitizerRevision,
+    edited_files: &[AdmittedFile],
+    increment: CodeIndexPublishedBuildV1,
+    increment_pool_stats: &PhysicalCodeArtifactPoolStatsV1,
+) -> Result<(CodeIndexPublishedBuildV1, BodyRefreshMetrics), String> {
+    let Some((refresh_files, refresh_paths)) = edit_one_body(edited_files) else {
+        return Ok((
+            increment,
+            BodyRefreshMetrics {
+                state: "unavailable",
+                changed_path: None,
+                changed_files: None,
+                payloads_computed: None,
+                payloads_reused: None,
+                wall: None,
+            },
+        ));
+    };
+    let changed_files = refresh_paths.len() as u64;
+    let changed_path = refresh_paths.iter().next().cloned();
+    let refresh_request = build_request(
+        repository,
+        sanitizer_revision,
+        &refresh_files,
+        refresh_paths,
+        "tree.index-bench.refresh",
+        REFRESH_SEALED_AT,
+    );
+    let refresh_started = Instant::now();
+    let refresh = owner
+        .build_and_publish(refresh_request, &ActiveControl)
+        .map_err(|error| format!("build one-body refresh generation: {error}"))?;
+    let wall = refresh_started.elapsed();
+    let refresh_pool_stats = owner.physical_artifact_pool_stats();
+    Ok((
+        refresh,
+        BodyRefreshMetrics {
+            state: "measured",
+            changed_path,
+            changed_files: Some(changed_files),
+            payloads_computed: Some(
+                refresh_pool_stats
+                    .clone_payloads_computed
+                    .saturating_sub(increment_pool_stats.clone_payloads_computed),
+            ),
+            payloads_reused: Some(
+                refresh_pool_stats
+                    .clone_payloads_reused
+                    .saturating_sub(increment_pool_stats.clone_payloads_reused),
+            ),
+            wall: Some(wall),
+        },
+    ))
+}
+
 // Workload
-// ---------------------------------------------------------------------------
+
+struct GenerationRun {
+    generation: Arc<CodeIndexPublishedGenerationV1>,
+    edited_files: u64,
+    clean_chunks: u64,
+    clean_wall: Duration,
+    increment_wall: Duration,
+    increment_clone_payloads_computed: u64,
+    increment_clone_payloads_reused: u64,
+    retained_parses: serde_json::Value,
+    body_refresh: BodyRefreshMetrics,
+}
+
+fn build_generations(
+    config: CodeIndexProductionConfigV1,
+    repository: &RepositoryId,
+    sanitizer_revision: &SanitizerRevision,
+    files: &[AdmittedFile],
+    clone_envelope: bool,
+    control: &ActiveControl,
+) -> Result<GenerationRun, String> {
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
+        .map_err(|error| format!("open production owner: {error}"))?;
+    let clean_request = build_request(
+        repository,
+        sanitizer_revision,
+        files,
+        files.iter().map(|file| file.logical_path.clone()).collect(),
+        "tree.index-bench.clean",
+        CLEAN_SEALED_AT,
+    );
+    let clean_started = Instant::now();
+    let clean = owner
+        .build_and_publish(clean_request, control)
+        .map_err(|error| format!("build clean generation: {error}"))?;
+    let clean_wall = clean_started.elapsed();
+    let clean_chunks = clean.publication().chunk_count();
+    let clean_pool_stats = owner.physical_artifact_pool_stats();
+    let clean_parse_stats = owner.retained_parse_stats();
+
+    let (edited, edited_paths) = edit(files);
+    let edited_files = edited_paths.len() as u64;
+    let increment_request = build_request(
+        repository,
+        sanitizer_revision,
+        &edited,
+        edited_paths,
+        "tree.index-bench.increment",
+        INCREMENT_SEALED_AT,
+    );
+    let increment_started = Instant::now();
+    let increment = owner
+        .build_and_publish(increment_request, control)
+        .map_err(|error| format!("build incremental generation: {error}"))?;
+    let increment_wall = increment_started.elapsed();
+    let increment_pool_stats = owner.physical_artifact_pool_stats();
+    let increment_parse_stats = owner.retained_parse_stats();
+    let retained_parses = serde_json::json!({
+        "clean_retained_documents": clean_parse_stats.retained_documents,
+        "increment_retained_reparses": (increment_parse_stats.incremental_parses
+            + increment_parse_stats.noop_parses)
+            .saturating_sub(clean_parse_stats.incremental_parses + clean_parse_stats.noop_parses),
+        "increment_initial_parses": increment_parse_stats
+            .initial_parses
+            .saturating_sub(clean_parse_stats.initial_parses),
+        "increment_reset_parses": increment_parse_stats
+            .reset_parses
+            .saturating_sub(clean_parse_stats.reset_parses),
+        "increment_retained_documents": increment_parse_stats.retained_documents,
+    });
+    let (generation, body_refresh) = if clone_envelope {
+        build_body_refresh(
+            &mut owner,
+            repository,
+            sanitizer_revision,
+            &edited,
+            increment,
+            &increment_pool_stats,
+        )?
+    } else {
+        (
+            increment,
+            BodyRefreshMetrics {
+                state: "disabled",
+                changed_path: None,
+                changed_files: None,
+                payloads_computed: None,
+                payloads_reused: None,
+                wall: None,
+            },
+        )
+    };
+    Ok(GenerationRun {
+        generation: decoded_generation(&store, &generation)?,
+        edited_files,
+        clean_chunks,
+        clean_wall,
+        increment_wall,
+        increment_clone_payloads_computed: increment_pool_stats
+            .clone_payloads_computed
+            .saturating_sub(clean_pool_stats.clone_payloads_computed),
+        increment_clone_payloads_reused: increment_pool_stats
+            .clone_payloads_reused
+            .saturating_sub(clean_pool_stats.clone_payloads_reused),
+        retained_parses,
+        body_refresh,
+    })
+}
 
 fn run(options: &Options) -> Result<String, String> {
     let started = Instant::now();
@@ -538,84 +566,82 @@ fn run(options: &Options) -> Result<String, String> {
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config,
-        MemoryPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .map_err(|error| format!("open production owner: {error}"))?;
-
-    // Pass 1 - clean generation over the whole corpus.
-    let clean_request = build_request(
+    let generations = build_generations(
+        config.clone(),
         &repository,
         &sanitizer_revision,
         &files,
-        files
-            .iter()
-            .map(|file| file.logical_path.clone())
-            .collect::<BTreeSet<_>>(),
-        "clean",
-        "tree.index-bench.clean",
-        CLEAN_SEALED_AT,
-    );
-    let clean_started = Instant::now();
-    let clean = owner
-        .build_and_publish(clean_request, &control)
-        .map_err(|error| format!("build clean generation: {error}"))?;
-    let clean_wall = clean_started.elapsed();
-    let clean_chunk_count = clean.chunks().chunks().len() as u64;
-
-    // Pass 2 - incremental generation over a deterministic edited subset.
-    let (edited_files, edited_paths) = edit(&files);
-    let edited_count = edited_paths.len() as u64;
-    let increment_request = build_request(
-        &repository,
-        &sanitizer_revision,
-        &edited_files,
-        edited_paths,
-        "increment",
-        "tree.index-bench.increment",
-        INCREMENT_SEALED_AT,
-    );
-    let increment_started = Instant::now();
-    let increment = owner
-        .build_and_publish(increment_request, &control)
-        .map_err(|error| format!("build incremental generation: {error}"))?;
-    let increment_wall = increment_started.elapsed();
+        options.clone_envelope,
+        &control,
+    )
+    .map_err(|error| format!("build benchmark generations: {error}"))?;
+    let generation_statistics = generations
+        .generation
+        .generation_statistics()
+        .map_err(|error| format!("read generation statistics: {error}"))?;
 
     let seal_started = Instant::now();
-    let sealed = increment
-        .encode_sealed()
-        .map_err(|error| format!("encode sealed generation: {error}"))?;
+    let sealed = seal_partitioned(&generations.generation)?;
     let seal_wall = seal_started.elapsed();
-    let sealed_len = sealed.len() as u64;
-    let state_digest = sealed_state_digest(&sealed)?;
+    let sealed_len = sealed.byte_len();
+    let state_digest = sealed.state_digest.clone();
 
     // Pass 3 - drain the sealed generation as bounded page batches.
     let drain_started = Instant::now();
-    let (pages, source_receipt) = drain_pages(&sealed, sealed_len, &state_digest, &control)?;
+    let (pages, source_receipt) = drain_pages(
+        &sealed,
+        &control,
+        SealedDrainBounds {
+            batch_pages: TEXT_ARTIFACT_BASE_BATCH_PAGES_V1,
+            batch_retained_bytes: TEXT_ARTIFACT_BASE_BATCH_BYTES_V1,
+            page_chunks: TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+            page_bytes: TEXT_ARTIFACT_PAGE_BYTES_V1,
+        },
+    )?;
     let drain_wall = drain_started.elapsed();
 
     // Pass 4 - ingest the pages into an isolated on-disk lexical artifact.
     let scratch = Scratch::create()?;
-    let metadata = projection_metadata(&increment, &repository);
+    let metadata = projection_metadata(&generations.generation, &repository);
     let ingest_started = Instant::now();
+    let artifact_path = scratch.path().join("lexical.sqlite");
     let artifact = ingest_artifact(
-        &scratch.path().join("lexical.sqlite"),
-        metadata,
+        &artifact_path,
+        metadata.clone(),
         &pages,
         &source_receipt,
         &control,
     )?;
     let ingest_wall = ingest_started.elapsed();
-
-    let committed_pages = artifact.0;
-    let committed_chunks = artifact.1;
-    let artifact_digest = artifact.2;
+    let clone_queries = if options.clone_envelope {
+        measure_clone_queries(
+            &artifact_path,
+            &artifact.receipt,
+            &metadata,
+            &pages,
+            generations.body_refresh.changed_path.as_deref(),
+            &control,
+        )?
+    } else {
+        serde_json::json!({
+            "state": "disabled",
+            "reason": "clone_envelope_not_requested",
+        })
+    };
+    let clone_census = clone_census(&pages);
     scratch.remove()?;
 
     let total_wall = started.elapsed();
     let peak_rss_bytes = peak_rss_bytes();
+    let (edited, _) = edit(&files);
+    let spot_checked_queries = verify_increment_matches_fresh_full(
+        config,
+        &repository,
+        &sanitizer_revision,
+        &edited,
+        &generations.generation,
+        &control,
+    )?;
 
     Ok(summary(SummaryFields {
         corpus_root: &options.corpus_root,
@@ -623,21 +649,32 @@ fn run(options: &Options) -> Result<String, String> {
         corpus_files: corpus.len() as u64,
         admitted_files: files.len() as u64,
         admitted_bytes,
-        edited_files: edited_count,
-        clean_chunks: clean_chunk_count,
+        language_files: language_counts(&files),
+        edited_files: generations.edited_files,
+        clean_chunks: generations.clean_chunks,
+        source_total_bytes: generation_statistics.source_total_bytes,
+        symbol_count: generation_statistics.symbol_count,
+        clone_census,
+        increment_clone_payloads_computed: generations.increment_clone_payloads_computed,
+        increment_clone_payloads_reused: generations.increment_clone_payloads_reused,
+        retained_parses: generations.retained_parses,
+        body_refresh: generations.body_refresh,
         sealed_bytes: sealed_len,
         sealed_state_digest: state_digest.as_str(),
         pages: pages.len() as u64,
-        committed_pages,
-        committed_chunks,
-        artifact_digest: &artifact_digest,
+        committed_pages: artifact.committed_pages,
+        committed_chunks: artifact.committed_chunks,
+        artifact: &artifact.receipt,
+        artifact_format_revision: artifact.receipt.format_revision(),
+        clone_queries,
         corpus_wall,
-        clean_wall,
-        increment_wall,
+        clean_wall: generations.clean_wall,
+        increment_wall: generations.increment_wall,
         seal_wall,
         drain_wall,
         ingest_wall,
         total_wall,
+        spot_checked_queries,
         peak_rss_bytes,
     }))
 }
@@ -648,18 +685,16 @@ fn build_request(
     sanitizer_revision: &SanitizerRevision,
     files: &[AdmittedFile],
     changed_files: BTreeSet<String>,
-    occurrence_generation: &str,
     tree: &str,
     sealed_at: i64,
 ) -> CodeIndexBuildRequestV1 {
     let mut snapshot_files = Vec::with_capacity(files.len());
-    let mut captured_files = Vec::with_capacity(files.len());
+    let mut captured_files = Vec::with_capacity(changed_files.len());
     let mut identity_hash = Vec::new();
-    for (ordinal, file) in files.iter().enumerate() {
+    for file in files {
         let digest = content_digest(&file.bytes);
         identity_hash.extend_from_slice(digest.as_str().as_bytes());
-        let file_occurrence_id =
-            identity::<FileOccurrenceId>(&format!("file.{occurrence_generation}.{ordinal:06}"));
+        let file_occurrence_id = benchmark_file_occurrence_id(file, &digest);
         snapshot_files.push(SanitizedCodeFileV1 {
             file_occurrence_id: file_occurrence_id.clone(),
             logical_path: file.logical_path.clone(),
@@ -667,11 +702,13 @@ fn build_request(
             content_digest: digest,
             disposition: SnapshotFileDispositionV1::Present,
         });
-        captured_files.push(CodeIndexCapturedFileV1 {
-            file_occurrence_id,
-            sanitized_bytes: Arc::clone(&file.bytes),
-            sensitivity_level: SensitivityLevelV1::Public,
-        });
+        if changed_files.contains(&file.logical_path) {
+            captured_files.push(CodeIndexCapturedFileV1 {
+                file_occurrence_id,
+                sanitized_bytes: Arc::clone(&file.bytes),
+                sensitivity_level: SensitivityLevelV1::Public,
+            });
+        }
     }
     let snapshot = SanitizedCodeSnapshotV1 {
         repository: repository.clone(),
@@ -683,6 +720,7 @@ fn build_request(
         content_identity: content_digest(&identity_hash),
         captured_at: UtcMicros(sealed_at - 1_000_000),
         files: snapshot_files,
+        omitted_sources: Vec::new(),
     };
     CodeIndexBuildRequestV1 {
         snapshot,
@@ -703,63 +741,14 @@ fn build_request(
     }
 }
 
-fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
-    let envelope: serde_json::Value = serde_json::from_slice(sealed)
-        .map_err(|error| format!("decode sealed generation envelope: {error}"))?;
-    let digest = envelope
-        .get("state_digest")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "sealed generation envelope has no state digest".to_owned())?;
-    ManifestDigest::try_from(digest.to_owned())
-        .map_err(|error| format!("sealed generation state digest: {error:?}"))
+fn benchmark_file_occurrence_id(file: &AdmittedFile, digest: &ContentDigest) -> FileOccurrenceId {
+    let occurrence =
+        content_digest(format!("{}\0{}", file.logical_path, digest.as_str()).as_bytes());
+    identity(&format!(
+        "file.index-bench.{}",
+        occurrence.as_str().trim_start_matches("sha256:")
+    ))
 }
-
-/// Drain the sealed generation through the bounded batch path, which is the
-/// shape the daemon's artifact ingestion uses. The single-page path is
-/// asserted to agree on the source receipt so a regression that desynchronizes
-/// the two cursors fails here instead of skewing the comparison.
-fn drain_pages(
-    sealed: &[u8],
-    sealed_len: u64,
-    state_digest: &ManifestDigest,
-    control: &ActiveControl,
-) -> Result<
-    (
-        Vec<VerifiedSealedLexicalPageV1>,
-        VerifiedSealedLexicalSourceReceiptV1,
-    ),
-    String,
-> {
-    let bounds =
-        VerifiedSealedLexicalPageBatchBoundsV1::new(BATCH_MAX_PAGES, BATCH_MAX_RETAINED_BYTES)
-            .map_err(|error| format!("sealed lexical batch bounds: {error}"))?;
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed.to_vec()),
-        sealed_len,
-        state_digest.clone(),
-        MAX_PAGE_CHUNKS,
-        MAX_PAGE_BYTES,
-        control,
-    )
-    .map_err(|error| format!("open sealed lexical page source: {error}"))?;
-    let mut pages = Vec::new();
-    loop {
-        let read = source
-            .next_page_batch_if(control, bounds, |staged| {
-                NonZeroUsize::new(staged.len())
-                    .ok_or_else(|| "sealed lexical batch staged no pages".to_owned())
-            })
-            .map_err(|error| format!("stage sealed lexical page batch: {error}"))?
-            .map_err(|error| format!("admit sealed lexical page batch: {error}"))?;
-        match read {
-            VerifiedSealedLexicalPageBatchReadV1::Pages(batch) => pages.extend(batch),
-            VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => {
-                return Ok((pages, receipt));
-            }
-        }
-    }
-}
-
 fn projection_metadata(
     generation: &CodeIndexPublishedGenerationV1,
     repository: &RepositoryId,
@@ -778,7 +767,7 @@ fn projection_metadata(
             source_instance: identity::<SourceInstanceKey>("instance.index-bench"),
             source_watermark: Some(1),
             projection_watermark: Some(1),
-            observed_at: UtcMicros(INCREMENT_SEALED_AT),
+            observed_at: generation.manifest().seal.sealed_at,
             source_generation: Some(1),
             generation_lag: Some(0),
             compatibility: FreshnessCompatibilityV1::Current,
@@ -789,7 +778,18 @@ fn projection_metadata(
             "retriever.lexical.index-bench.v1",
         ),
         exact_score_domain: identity::<ScoreDomainId>("score.exact.index-bench.v1"),
+        clone_route: Some(CodeLexicalCloneRouteV1 {
+            project_id: generation.manifest().project_id.clone(),
+            worktree_id: generation.snapshot().worktree.clone(),
+            snapshot_digest: generation.manifest().snapshot_digest.clone(),
+        }),
     }
+}
+
+struct ArtifactIngestResult {
+    committed_pages: u64,
+    committed_chunks: u64,
+    receipt: VerifiedCodeLexicalArtifactV1,
 }
 
 fn ingest_artifact(
@@ -798,16 +798,26 @@ fn ingest_artifact(
     pages: &[VerifiedSealedLexicalPageV1],
     source_receipt: &VerifiedSealedLexicalSourceReceiptV1,
     control: &ActiveControl,
-) -> Result<(u64, u64, String), String> {
+) -> Result<ArtifactIngestResult, String> {
     let mut builder = CodeLexicalArtifactBuilderV1::create(artifact_path, metadata)
         .map_err(|error| format!("create lexical artifact: {error}"))?;
     let mut progress = builder
-        .progress()
+        .progress(&UninterruptibleCodeIndexControlV1)
         .map_err(|error| format!("read artifact progress: {error}"))?;
-    for batch in pages.chunks(BATCH_MAX_PAGES) {
+    // The daemon offers a bounded window and lets the builder's own ledger
+    // pick the admissible prefix. Fixed chunking only happens to fit the
+    // committed fixture; a real-repository corpus offers pages whose prepared
+    // charge exceeds the batch budget, and the builder correctly refuses them.
+    let mut offered = 0usize;
+    while offered < pages.len() {
+        let window = &pages[offered..pages.len().min(offered + TEXT_ARTIFACT_BASE_BATCH_PAGES_V1)];
+        let prepared = builder
+            .prepare_admissible_page_prefix(window, control)
+            .map_err(|error| format!("prepare lexical artifact batch: {error}"))?;
         progress = builder
-            .append_pages(batch, control)
+            .append_prepared_pages(prepared.prepared_pages(), control)
             .map_err(|error| format!("append lexical artifact batch: {error}"))?;
+        offered += prepared.accepted_prefix().get();
     }
     let receipt = loop {
         match builder
@@ -818,16 +828,186 @@ fn ingest_artifact(
             CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => break *receipt,
         }
     };
-    Ok((
-        progress.next_page_ordinal,
-        progress.completed_chunks,
-        receipt.artifact_digest().as_str().to_owned(),
-    ))
+    Ok(ArtifactIngestResult {
+        committed_pages: progress.next_page_ordinal,
+        committed_chunks: progress.completed_chunks,
+        receipt,
+    })
 }
 
-// ---------------------------------------------------------------------------
+fn language_counts(files: &[AdmittedFile]) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for file in files {
+        *counts.entry(file.language.as_str().to_owned()).or_default() += 1;
+    }
+    counts
+}
+
+fn clone_census(pages: &[VerifiedSealedLexicalPageV1]) -> serde_json::Value {
+    let mut bodies = 0_u64;
+    let mut eligible_bodies = 0_u64;
+    let mut source_tokens = 0_u64;
+    let mut languages = BTreeMap::<String, u64>::new();
+    for body in pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+    {
+        bodies = bodies.saturating_add(1);
+        source_tokens = source_tokens.saturating_add(u64::from(body.payload.token_count));
+        if body.occurrence.eligibility == CloneBodyEligibilityV1::Eligible {
+            eligible_bodies = eligible_bodies.saturating_add(1);
+        }
+        *languages.entry(body.payload.language.clone()).or_default() += 1;
+    }
+    serde_json::json!({
+        "bodies": bodies,
+        "eligible_bodies": eligible_bodies,
+        "source_tokens": source_tokens,
+        "language_bodies": languages,
+    })
+}
+
+fn measure_clone_queries(
+    artifact_path: &Path,
+    receipt: &VerifiedCodeLexicalArtifactV1,
+    metadata: &CodeLexicalProjectionMetadataV1,
+    pages: &[VerifiedSealedLexicalPageV1],
+    excluded_path: Option<&str>,
+    control: &ActiveControl,
+) -> Result<serde_json::Value, String> {
+    let elapsed_micros =
+        |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+    let open_started = Instant::now();
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        artifact_path,
+        receipt,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        control,
+    )
+    .map_err(|error| format!("open clone artifact reader: {error}"))?;
+    let first_reader_open_micros = elapsed_micros(open_started.elapsed());
+    let Some(source) = pages
+        .iter()
+        .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
+        .find(|body| {
+            Some(body.occurrence.path.as_str()) != excluded_path
+                && body
+                    .payload
+                    .exact_keys(body.occurrence.eligibility)
+                    .iter()
+                    .any(|key| key.class == CloneNormalizationClassV1::Conservative)
+        })
+    else {
+        drop(reader);
+        return Ok(serde_json::json!({
+            "state": "unavailable",
+            "reason": "no_eligible_clone_body",
+            "first_reader_open_micros": first_reader_open_micros,
+        }));
+    };
+
+    let first_reader_started = Instant::now();
+    let first_reader =
+        exact_clone_lookup(&reader, &source.occurrence.symbol_occurrence_id, 1, control)?;
+    let first_reader_lookup_micros = elapsed_micros(first_reader_started.elapsed());
+    let mut warm_lookup_micros = Vec::with_capacity(100);
+    for _ in 0..100 {
+        let warm_started = Instant::now();
+        exact_clone_lookup(&reader, &source.occurrence.symbol_occurrence_id, 1, control)?;
+        warm_lookup_micros.push(elapsed_micros(warm_started.elapsed()));
+    }
+    let mut sorted = warm_lookup_micros.clone();
+    sorted.sort_unstable();
+    let warm_lookup_p95_micros = percentile(&sorted, 95);
+    let family = exact_clone_lookup(
+        &reader,
+        &source.occurrence.symbol_occurrence_id,
+        MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
+        control,
+    )?;
+    let family_sample_paths = family
+        .members
+        .iter()
+        .take(10)
+        .map(|member| member.occurrence.path.clone())
+        .collect::<Vec<_>>();
+
+    drop(reader);
+    let restart_started = Instant::now();
+    let restarted = CodeLexicalArtifactReaderV1::open_with_control(
+        artifact_path,
+        receipt,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        control,
+    )
+    .map_err(|error| format!("reopen clone artifact reader: {error}"))?;
+    let restart_open_micros = elapsed_micros(restart_started.elapsed());
+    let restart = exact_clone_lookup(
+        &restarted,
+        &source.occurrence.symbol_occurrence_id,
+        1,
+        control,
+    )?;
+
+    Ok(serde_json::json!({
+        "state": "available",
+        "source": {
+            "symbol_occurrence_id": source.occurrence.symbol_occurrence_id.as_str(),
+            "path": source.occurrence.path,
+            "language": source.payload.language,
+            "token_count": source.payload.token_count,
+        },
+        "exact": {
+            "first_reader_open_micros": first_reader_open_micros,
+            "first_reader_lookup_micros": first_reader_lookup_micros,
+            "first_reader_members": first_reader.members.len(),
+            "first_reader_cache_state": "same_process_after_artifact_write",
+            "warm_lookup_micros": warm_lookup_micros,
+            "warm_lookup_p95_micros": warm_lookup_p95_micros,
+            "family_members": family.members.len(),
+            "family_has_more": family.has_more,
+            "family_sample_paths": family_sample_paths,
+        },
+        "restart": {
+            "open_micros": restart_open_micros,
+            "members": restart.members.len(),
+        },
+    }))
+}
+
+struct ExactCloneLookup {
+    members: Vec<CloneExactArtifactMemberV1>,
+    has_more: bool,
+}
+
+fn exact_clone_lookup(
+    reader: &CodeLexicalArtifactReaderV1,
+    symbol: &SymbolOccurrenceId,
+    limit: usize,
+    control: &ActiveControl,
+) -> Result<ExactCloneLookup, String> {
+    let body = reader
+        .clone_body(symbol)
+        .map_err(|error| format!("read clone body: {error}"))?
+        .ok_or_else(|| format!("clone body {} is unavailable", symbol.as_str()))?;
+    let key = body
+        .payload
+        .exact_keys(body.occurrence.eligibility)
+        .into_iter()
+        .find(|key| key.class == CloneNormalizationClassV1::Conservative)
+        .ok_or_else(|| format!("clone body {} has no exact key", symbol.as_str()))?;
+    let page = reader
+        .clone_exact_page(&body.occurrence, &key, None, limit, control)
+        .map_err(|error| format!("read exact clone page: {error}"))?;
+    Ok(ExactCloneLookup {
+        members: page.members,
+        has_more: page.next_cursor.is_some(),
+    })
+}
+
 // Scratch directory
-// ---------------------------------------------------------------------------
 
 /// A self-created scratch directory. `tempfile` is a dev-dependency of this
 /// crate and a binary cannot use dev-dependencies, so the few lines are
@@ -860,25 +1040,16 @@ impl Scratch {
             .map_err(|error| format!("remove scratch {}: {error}", self.path.display()))
     }
 }
-
-/// Peak resident set size in bytes, or `None` off Linux. The profiling job
-/// budgets 4 GB; reporting the high-water mark makes a breach visible in the
-/// run log instead of only as an OOM kill.
-fn peak_rss_bytes() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        let Some(value) = line.strip_prefix("VmHWM:") else {
-            continue;
-        };
-        let kilobytes = value.split_whitespace().next()?.parse::<u64>().ok()?;
-        return kilobytes.checked_mul(1024);
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
 // Summary
-// ---------------------------------------------------------------------------
+
+struct BodyRefreshMetrics {
+    state: &'static str,
+    changed_path: Option<String>,
+    changed_files: Option<u64>,
+    payloads_computed: Option<u64>,
+    payloads_reused: Option<u64>,
+    wall: Option<Duration>,
+}
 
 struct SummaryFields<'a> {
     corpus_root: &'a Path,
@@ -886,14 +1057,24 @@ struct SummaryFields<'a> {
     corpus_files: u64,
     admitted_files: u64,
     admitted_bytes: u64,
+    language_files: BTreeMap<String, u64>,
     edited_files: u64,
     clean_chunks: u64,
+    source_total_bytes: u64,
+    symbol_count: u64,
+    clone_census: serde_json::Value,
+    increment_clone_payloads_computed: u64,
+    increment_clone_payloads_reused: u64,
+    retained_parses: serde_json::Value,
+    body_refresh: BodyRefreshMetrics,
     sealed_bytes: u64,
     sealed_state_digest: &'a str,
     pages: u64,
     committed_pages: u64,
     committed_chunks: u64,
-    artifact_digest: &'a str,
+    artifact: &'a VerifiedCodeLexicalArtifactV1,
+    artifact_format_revision: u32,
+    clone_queries: serde_json::Value,
     corpus_wall: Duration,
     clean_wall: Duration,
     increment_wall: Duration,
@@ -901,6 +1082,7 @@ struct SummaryFields<'a> {
     drain_wall: Duration,
     ingest_wall: Duration,
     total_wall: Duration,
+    spot_checked_queries: u64,
     peak_rss_bytes: Option<u64>,
 }
 
@@ -912,14 +1094,38 @@ fn summary(fields: SummaryFields<'_>) -> String {
         "corpus_files": fields.corpus_files,
         "admitted_files": fields.admitted_files,
         "admitted_bytes": fields.admitted_bytes,
+        "language_files": fields.language_files,
         "edited_files": fields.edited_files,
         "clean_chunks": fields.clean_chunks,
+        "retained_parses": fields.retained_parses,
+        "source_total_bytes": fields.source_total_bytes,
+        "symbol_count": fields.symbol_count,
+        "spot_checked_queries": fields.spot_checked_queries,
+        "clones": {
+            "census": fields.clone_census,
+            "increment_payloads_computed": fields.increment_clone_payloads_computed,
+            "increment_payloads_reused": fields.increment_clone_payloads_reused,
+            "body_refresh": {
+                "state": fields.body_refresh.state,
+                "changed_path": fields.body_refresh.changed_path,
+                "changed_files": fields.body_refresh.changed_files,
+                "payloads_computed": fields.body_refresh.payloads_computed,
+                "payloads_reused": fields.body_refresh.payloads_reused,
+                "wall_micros": fields.body_refresh.wall.map(|duration| {
+                    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+                }),
+            },
+            "queries": fields.clone_queries,
+        },
         "sealed_bytes": fields.sealed_bytes,
         "sealed_state_digest": fields.sealed_state_digest,
         "sealed_pages": fields.pages,
         "committed_pages": fields.committed_pages,
         "committed_chunks": fields.committed_chunks,
-        "artifact_digest": fields.artifact_digest,
+        "artifact_digest": fields.artifact.artifact_digest().as_str(),
+        "artifact_bytes": fields.artifact.file_size_bytes(),
+        "artifact_format_revision": fields.artifact_format_revision,
+        "host": host_facts(),
         "peak_rss_bytes": fields.peak_rss_bytes,
         "wall_ms": {
             "corpus_load": millis(fields.corpus_wall),
@@ -933,17 +1139,97 @@ fn summary(fields: SummaryFields<'_>) -> String {
     });
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
 }
-
-fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-fn identity<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap_or_else(|error| {
-        panic!("deterministic benchmark identity {value:?} must be valid: {error:?}")
+fn host_facts() -> serde_json::Value {
+    let cpu_model = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                line.strip_prefix("model name")
+                    .and_then(|value| value.split_once(':'))
+                    .map(|(_, value)| value.trim().to_owned())
+            })
+        });
+    let memory_bytes = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                line.strip_prefix("MemTotal:")
+                    .and_then(|value| value.split_whitespace().next())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .and_then(|kilobytes| kilobytes.checked_mul(1024))
+            })
+        });
+    serde_json::json!({
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "logical_cpus": std::thread::available_parallelism().ok().map(NonZeroUsize::get),
+        "cpu_model": cpu_model,
+        "memory_bytes": memory_bytes,
     })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incremental_request_captures_only_changed_files() {
+        let files = vec![
+            AdmittedFile {
+                logical_path: "src/changed.rs".to_owned(),
+                language: identity("rust"),
+                bytes: Arc::from(b"fn changed() {}".as_slice()),
+            },
+            AdmittedFile {
+                logical_path: "src/unchanged.rs".to_owned(),
+                language: identity("rust"),
+                bytes: Arc::from(b"fn unchanged() {}".as_slice()),
+            },
+        ];
+        let request = build_request(
+            &identity("repository.test"),
+            &identity("sanitizer.test"),
+            &files,
+            BTreeSet::from(["src/changed.rs".to_owned()]),
+            "tree.test",
+            INCREMENT_SEALED_AT,
+        );
+
+        assert_eq!(request.snapshot.files.len(), 2);
+        assert_eq!(request.captured_files.len(), 1);
+        assert_eq!(
+            request.captured_files[0].file_occurrence_id,
+            request.snapshot.files[0].file_occurrence_id
+        );
+    }
+
+    #[test]
+    fn file_occurrence_identity_changes_with_content_not_generation() {
+        let file = |source: &'static [u8]| AdmittedFile {
+            logical_path: "src/lib.rs".to_owned(),
+            language: identity("rust"),
+            bytes: Arc::from(source),
+        };
+        let request = |file, tree| {
+            build_request(
+                &identity("repository.test"),
+                &identity("sanitizer.test"),
+                &[file],
+                BTreeSet::from(["src/lib.rs".to_owned()]),
+                tree,
+                INCREMENT_SEALED_AT,
+            )
+        };
+        let first = request(file(b"fn value() -> u8 { 1 }"), "tree.first");
+        let next = request(file(b"fn value() -> u8 { 1 }"), "tree.next");
+        let changed = request(file(b"fn value() -> u8 { 2 }"), "tree.changed");
+
+        assert_eq!(
+            first.snapshot.files[0].file_occurrence_id,
+            next.snapshot.files[0].file_occurrence_id
+        );
+        assert_ne!(
+            first.snapshot.files[0].file_occurrence_id,
+            changed.snapshot.files[0].file_occurrence_id
+        );
+    }
 }

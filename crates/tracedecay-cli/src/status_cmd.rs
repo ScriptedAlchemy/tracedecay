@@ -1,14 +1,26 @@
+use std::fmt::Write as _;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
-use tokio::time::{Instant, timeout_at};
-use tracedecay_application::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
+use tracedecay_application::advisory::github_runtime::{
+    GitHubPullRequestDiscoveryKindV1, GitHubSourceStatusV1,
+};
+use tracedecay_contracts::project_open::{
+    ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+};
+use tracedecay_contracts::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
+use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
+use tracedecay_contracts::storage::{
+    SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
+};
+use tracedecay_runtime_core::native_runtime::{TimeoutError, timeout_at};
 
-use crate::commands::reject_truncation_envelope;
-use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
+use crate::commands::{reject_problem_envelope, reject_truncation_envelope};
+use crate::{commands, resolve_cli_project_root};
 
 /// Absolute wall-clock budget for one `tracedecay status` invocation, covering
 /// project resolution and every daemon RPC. Override with
@@ -57,21 +69,22 @@ async fn await_daemon_tool_result<T>(
     tool_name: &str,
     response: impl Future<Output = tracedecay_domain::errors::Result<T>>,
 ) -> tracedecay_domain::errors::Result<T> {
-    timeout_at(response_deadline, response).await.map_err(|_| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "timed out waiting for daemon tool {tool_name} before status deadline"
-            ),
-        }
-    })?
+    timeout_at(response_deadline, response)
+        .await
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: match error {
+                TimeoutError::Elapsed => {
+                    format!("timed out waiting for daemon tool {tool_name} before status deadline")
+                }
+                TimeoutError::TimerUnavailable(_) => {
+                    format!("could not bound daemon tool {tool_name}: {error}")
+                }
+            },
+        })?
 }
 
 fn should_print_status_logo(short: bool, stdout_is_terminal: bool) -> bool {
     !short && stdout_is_terminal
-}
-
-fn should_fetch_online_status_embellishments(stdout_is_terminal: bool) -> bool {
-    stdout_is_terminal
 }
 
 /// Compact CLI status args: keep graph identity fields while skipping the
@@ -87,7 +100,84 @@ fn compact_status_tool_args() -> Value {
     })
 }
 
+/// One status line naming how the project's GitHub source is read, followed
+/// by the operator remedy when it is not credential-bound.
+fn github_source_line(source: &GitHubSourceStatusV1) -> String {
+    let state = source.state.as_str();
+    let discovery = match (source.pull_request_discovery, source.pull_request) {
+        (GitHubPullRequestDiscoveryKindV1::Found, Some(number)) => format!(
+            "PR #{number} found (head {})",
+            source
+                .head_repository
+                .as_deref()
+                .unwrap_or(&source.repository)
+        ),
+        (kind, _) => format!("PR discovery {}", pull_request_discovery_label(kind)),
+    };
+    let mut line = format!("GitHub {}: {state} · {discovery}", source.repository);
+    if let Some(remedy) = &source.remedy {
+        let _ = write!(line, "\n  remedy: {remedy}");
+    }
+    line
+}
+
+const fn pull_request_discovery_label(kind: GitHubPullRequestDiscoveryKindV1) -> &'static str {
+    match kind {
+        GitHubPullRequestDiscoveryKindV1::Found => "found",
+        GitHubPullRequestDiscoveryKindV1::NotFound => "not_found",
+        GitHubPullRequestDiscoveryKindV1::Ambiguous => "ambiguous",
+        GitHubPullRequestDiscoveryKindV1::RateLimited => "rate_limited",
+        GitHubPullRequestDiscoveryKindV1::Denied => "denied",
+        GitHubPullRequestDiscoveryKindV1::Unavailable => "unavailable",
+        GitHubPullRequestDiscoveryKindV1::NotAttempted => "not_attempted",
+    }
+}
+
+fn schema_convergence_line(finding: &SchemaConvergenceFindingV1) -> String {
+    let progress = match &finding.progress {
+        Some(SchemaConvergenceProgressV1::Rows { done, remaining }) => {
+            format!(", rows {done} done / {remaining} remaining")
+        }
+        Some(SchemaConvergenceProgressV1::Pages { done, remaining }) => {
+            format!(", pages {done} done / {remaining} remaining")
+        }
+        None => String::new(),
+    };
+    let degraded = finding
+        .degraded_row
+        .as_deref()
+        .map_or_else(String::new, |row| format!(", row {row}"));
+    format!(
+        "schema convergence: {} {} {}{progress}, started_at={}{}",
+        finding.store.as_str(),
+        finding.stage.as_str(),
+        finding.state.as_str(),
+        finding.started_at_micros,
+        degraded,
+    )
+}
+
+fn project_open_line(status: &ProjectOpenStatusV1) -> String {
+    let reason = match status.reason {
+        ProjectOpenStatusReasonV1::Converging => "converging",
+        ProjectOpenStatusReasonV1::Ready => "ready",
+        ProjectOpenStatusReasonV1::UnrepairableVerdict => "unrepairable verdict",
+        ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => "deferred repository discovery",
+        ProjectOpenStatusReasonV1::RetryBackoff => "retry backoff",
+        ProjectOpenStatusReasonV1::Unavailable => "unavailable",
+    };
+    let retry = status
+        .retry_after_ms
+        .map_or_else(String::new, |delay| format!(", retry after {delay} ms"));
+    let detail = status
+        .detail
+        .as_deref()
+        .map_or_else(String::new, |detail| format!(": {detail}"));
+    format!("project open: {reason}{retry}{detail}")
+}
+
 async fn daemon_tool_json_within(
+    profile: &ProfileRoot,
     response_deadline: Instant,
     request_deadline: Instant,
     project_path: &Path,
@@ -100,6 +190,7 @@ async fn daemon_tool_json_within(
         response_deadline,
         tool_name,
         commands::daemon_tool_json_until(
+            profile,
             request_deadline,
             Some(project_path),
             tool_name,
@@ -121,8 +212,8 @@ pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
             "facts: {}\n",
             "entities: {}\n",
             "algebra: {}\n",
-            "hrr dim: {}\n",
-            "estimated capacity: {}\n",
+            "vector dim: {}\n",
+            "superposition estimate per vector: {} (not a fact limit or recall guarantee)\n",
             "below recall floor: {}\n",
             "helpful feedback: {}\n",
             "unhelpful feedback: {}\n",
@@ -154,8 +245,9 @@ pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
     )
 }
 
-#[hotpath::measure(label = "cli.status.dispatch", future = true)]
+#[tracing::instrument(name = "cli.status.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_status_command(
+    profile: &ProfileRoot,
     path: Option<String>,
     project_id: Option<String>,
     project_path: Option<String>,
@@ -178,6 +270,7 @@ pub(crate) async fn handle_status_command(
     timeout_at(
         deadline,
         handle_status_command_within(
+            profile,
             deadline,
             server_deadline,
             path,
@@ -189,18 +282,22 @@ pub(crate) async fn handle_status_command(
         ),
     )
     .await
-    .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-        message: format!(
-            "status did not complete within {}s; the daemon may still be \
-             starting or opening this project — retry, or raise \
-             {STATUS_DEADLINE_ENV}",
-            budget.as_secs()
-        ),
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: match error {
+            TimeoutError::Elapsed => format!(
+                "status did not complete within {}s; the daemon may still be \
+                 starting or opening this project, retry, or raise \
+                 {STATUS_DEADLINE_ENV}",
+                budget.as_secs()
+            ),
+            TimeoutError::TimerUnavailable(_) => format!("could not bound status: {error}"),
+        },
     })?
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_status_command_within(
+    profile: &ProfileRoot,
     deadline: Instant,
     server_deadline: Instant,
     path: Option<String>,
@@ -210,9 +307,10 @@ async fn handle_status_command_within(
     short: bool,
     runtime: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
+    let project_path = resolve_cli_project_root(profile, path, project_id, project_path).await?;
     if runtime {
         let result = daemon_tool_json_within(
+            profile,
             deadline,
             server_deadline,
             &project_path,
@@ -222,17 +320,20 @@ async fn handle_status_command_within(
         .await?;
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
+            reject_problem_envelope(&result, "tracedecay_runtime")?;
         } else {
-            let snapshot: tracedecay_session_memory::runtime_telemetry::RuntimeSnapshot =
+            reject_problem_envelope(&result, "tracedecay_runtime")?;
+            let snapshot: tracedecay_runtime_core::runtime_telemetry::RuntimeSnapshot =
                 serde_json::from_value(result)?;
             print!(
                 "{}",
-                tracedecay_session_memory::runtime_telemetry::to_text_report(&snapshot)
+                tracedecay_runtime_core::runtime_telemetry::to_text_report(&snapshot)
             );
         }
         return Ok(());
     }
     let daemon_status = daemon_tool_json_within(
+        profile,
         deadline,
         server_deadline,
         &project_path,
@@ -242,139 +343,98 @@ async fn handle_status_command_within(
     .await?;
     reject_truncation_envelope(&daemon_status, "tracedecay_status")?;
     if json {
+        reject_problem_envelope(&daemon_status, "tracedecay_status")?;
+        tracedecay::daemon::reject_stalled_project_open_status(&daemon_status)?;
         println!("{}", serde_json::to_string_pretty(&daemon_status)?);
+        return Ok(());
+    }
+    reject_problem_envelope(&daemon_status, "tracedecay_status")?;
+    tracedecay::daemon::reject_stalled_project_open_status(&daemon_status)?;
+    if let Some(project_open) = daemon_status
+        .get("project_open")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .map(serde_json::from_value::<ProjectOpenStatusV1>)
+        .transpose()?
+        && project_open.state != ProjectOpenStatusStateV1::Completed
+    {
+        println!("{}", project_open_line(&project_open));
         return Ok(());
     }
     // Decode the exact wire types the daemon route serialized. Both sides use
     // the same Rust contracts (`GenerationCensusSnapshot`,
     // `CodeIndexWorktreeFreshnessV1`), so absence or drift is a typed decode
     // failure rather than a silently defaulted table.
-    let census: tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot =
+    let census: tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot =
         serde_json::from_value(daemon_status.get("graph_statistics").cloned().ok_or_else(
             || tracedecay_domain::errors::TraceDecayError::Config {
                 message: "daemon status response omitted graph_statistics".to_string(),
             },
         )?)?;
     let freshness: Option<
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1,
+        tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1,
     > = daemon_status
         .get("code_index_freshness")
         .and_then(|freshness| freshness.get("worktree"))
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
-    let accounting = daemon_tool_json_within(
-        deadline,
-        server_deadline,
-        &project_path,
-        "tracedecay_admin_project",
-        serde_json::json!({ "action": "status_accounting" }),
-    )
-    .await?;
-    reject_truncation_envelope(&accounting, "tracedecay_admin_project")?;
-    let tokens_saved = accounting
-        .get("tokens_saved")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: "daemon status accounting omitted token count".to_string(),
-        })?;
-    let global_tokens_saved = accounting
-        .get("global_tokens_saved")
-        .and_then(Value::as_u64);
-    let upload_enabled = timeout_at(
-        deadline,
-        commands::canonical_upload_enabled(&project_path),
-    )
-    .await
-    .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-        message:
-            "timed out waiting for canonical worldwide-counter upload setting before status deadline"
-                .to_string(),
-    })??;
-    let mut config = tracedecay_session_memory::user_config::UserConfig::load();
-    let now = current_unix_timestamp();
+    let code_index_mount_failure = match daemon_status
+        .get("code_index_freshness")
+        .cloned()
+        .map(serde_json::from_value::<StatusCodeIndexFreshnessV1>)
+        .transpose()?
+    {
+        Some(StatusCodeIndexFreshnessV1::MountFailed {
+            message,
+            remediation,
+        }) => Some((message, remediation)),
+        _ => None,
+    };
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();
-    let fetch_online = should_fetch_online_status_embellishments(stdout_is_terminal);
-    // The worldwide-counter and country-flag embellishments are blocking
-    // network fetches; timed apart from the daemon round-trips so a slow
-    // `tracedecay status` can name which of the two it is waiting on.
-    let (worldwide, country_flags) = hotpath::measure_block!("cli.status.online", {
-        let worldwide = if !fetch_online || !upload_enabled {
-            None
-        } else if now - config.last_worldwide_fetch_at < 60 {
-            (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
-        } else if let Some(total) = tracedecay::cloud::fetch_worldwide_total() {
-            config.last_worldwide_total = total;
-            config.last_worldwide_fetch_at = now;
-            if let Err(err) = config.save_if_exists() {
-                eprintln!("warning: could not save tracedecay config: {err}");
+    let schema_convergences: Vec<SchemaConvergenceFindingV1> = daemon_status
+        .pointer("/schema_convergence/findings")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    let github_source: Option<GitHubSourceStatusV1> = daemon_status
+        .get("github_source")
+        .filter(|source| source.get("state") != Some(&Value::from("absent")))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
+    {
+        let _span = tracing::trace_span!("cli.status.render").entered();
+        {
+            if should_print_status_logo(short, stdout_is_terminal) {
+                // Tracked render of resources/logo.png; regenerate with
+                // scripts/render-logo-ansi.sh when the artwork changes.
+                print!("{}", include_str!("resources/logo.ansi"));
             }
-            Some(total)
-        } else {
-            (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
-        };
-        let country_flags = if !fetch_online || !upload_enabled {
-            Vec::new()
-        } else if now - config.last_flags_fetch_at < 1800 {
-            config.cached_country_flags.clone()
-        } else {
-            let fresh = tracedecay::cloud::fetch_country_flags();
-            if !fresh.is_empty() {
-                config.cached_country_flags = fresh.clone();
-                config.last_flags_fetch_at = now;
-                if let Err(err) = config.save_if_exists() {
-                    eprintln!("warning: could not save tracedecay config: {err}");
-                }
-            }
-            if fresh.is_empty() && !config.cached_country_flags.is_empty() {
-                config.cached_country_flags.clone()
-            } else {
-                fresh
-            }
-        };
-        (worldwide, country_flags)
-    });
-    hotpath::measure_block!("cli.status.render", {
-        if should_print_status_logo(short, stdout_is_terminal) {
-            print!("{}", include_str!("resources/logo.ansi"));
-        }
-        let branch_info = daemon_status
-            .get("serving_branch")
-            .and_then(Value::as_str)
-            .map(|branch| crate::display::BranchInfo {
-                branch: branch.to_string(),
-                parent: daemon_status
-                    .get("parent_branch")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                is_fallback: false,
-            });
-        let cost_info = None;
-        if short {
-            crate::display::print_status_header(
+            let branch_info = status_branch_info(&project_path, &daemon_status);
+            crate::display::print_status_table(
                 &census,
                 freshness.as_ref(),
-                tokens_saved,
-                global_tokens_saved,
-                worldwide,
-                &country_flags,
                 branch_info.as_ref(),
-                cost_info.as_ref(),
+                short,
             );
-        } else {
-            crate::display::print_status_table_with(crate::display::StatusTable {
-                census: &census,
-                freshness: freshness.as_ref(),
-                tokens_saved,
-                global_tokens_saved,
-                worldwide,
-                country_flags: &country_flags,
-                branch_info: branch_info.as_ref(),
-                cost_info: cost_info.as_ref(),
-            });
+            for finding in &schema_convergences {
+                match finding.state {
+                    SchemaConvergenceStateV1::PendingSchemaMigration
+                    | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+                    | SchemaConvergenceStateV1::Degraded
+                    | SchemaConvergenceStateV1::Completed => {
+                        println!("{}", schema_convergence_line(finding));
+                    }
+                }
+            }
+            if let Some(source) = &github_source {
+                println!("{}", github_source_line(source));
+            }
         }
-    });
+    };
 
     // A parked deterministic contract violation must be visible on the plain
     // status journey, not only inside the JSON payload: name the exact reason
@@ -396,44 +456,113 @@ async fn handle_status_command_within(
         }
     }
 
-    if !tracedecay::config::is_in_gitignore(&project_path) {
-        let dir_name = tracedecay::config::active_data_dir_name(&project_path);
+    if let Some((message, remediation)) = &code_index_mount_failure {
         if stderr_is_terminal {
-            eprintln!(
-                "\n\x1b[33mWarning: {dir_name} is not in .gitignore — \
-                 run `echo {dir_name} >> .gitignore` to exclude it from git.\x1b[0m"
-            );
+            eprintln!("\n\x1b[33mWarning: {message}\n{remediation}\x1b[0m");
         } else {
-            eprintln!(
-                "\nWarning: {dir_name} is not in .gitignore — \
-                 run `echo {dir_name} >> .gitignore` to exclude it from git."
-            );
+            eprintln!("\nWarning: {message}\n{remediation}");
         }
     }
-    if stdout_is_terminal {
-        global::check_for_update(&mut config, false, true);
-    }
     Ok(())
+}
+
+/// Branch row for the human status banner.
+///
+/// `serving_branch` is the branch the index is publishing. The banner names
+/// the checkout the operator is on, which moves on `git switch` before that
+/// publish does. A detached HEAD is reported as detached so the enrolled or
+/// serving name is not left in its place. When the checkout cannot be read,
+/// the serving branch remains the only name available.
+fn status_branch_info(
+    project_path: &Path,
+    daemon_status: &Value,
+) -> Option<crate::display::BranchInfo> {
+    let serving = daemon_status.get("serving_branch").and_then(Value::as_str);
+    let parent = daemon_status
+        .get("parent_branch")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    match tracedecay_runtime_core::branch::checkout_head(project_path) {
+        Some(tracedecay_runtime_core::branch::CheckoutHead::Branch(branch)) => {
+            let parent = parent.filter(|_| serving.is_some_and(|serving| serving == branch));
+            Some(crate::display::BranchInfo {
+                branch,
+                parent,
+                is_fallback: false,
+            })
+        }
+        Some(tracedecay_runtime_core::branch::CheckoutHead::Detached) => {
+            Some(crate::display::BranchInfo {
+                branch: "detached HEAD".to_owned(),
+                parent: None,
+                is_fallback: false,
+            })
+        }
+        None => serving.map(|branch| crate::display::BranchInfo {
+            branch: branch.to_owned(),
+            parent,
+            is_fallback: false,
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        await_daemon_tool_result, compact_status_tool_args, reject_truncation_envelope,
-        should_fetch_online_status_embellishments, should_print_status_logo,
-        status_command_deadline_from, status_server_request_budget,
+        await_daemon_tool_result, project_open_line, reject_truncation_envelope,
+        schema_convergence_line, status_branch_info, status_command_deadline_from,
+        status_server_request_budget,
     };
     use serde_json::json;
     use std::time::Duration;
-    use tokio::time::Instant;
+    use std::time::Instant;
+    use tracedecay_contracts::project_open::{
+        ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+    };
+    use tracedecay_contracts::storage::{
+        SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
+        SchemaConvergenceStateV1,
+    };
 
     #[test]
-    fn status_deadline_keeps_response_margin_beyond_server_budget() {
-        let default = status_command_deadline_from(None).expect("default status deadline");
-        assert_eq!(default, Duration::from_secs(45));
-        assert_eq!(
-            status_server_request_budget(default),
-            Duration::from_secs(30)
+    fn memory_status_report_never_presents_superposition_estimate_as_capacity() {
+        let released: super::MemoryStatusV1 = serde_json::from_value(json!({
+            "owner": {"kind": "profile"},
+            "fact_count": 5000,
+            "entity_count": 12,
+            "algebra": {"name": "amari_fhrr", "hrr_dim": 2048, "estimated_capacity": 268},
+            "trust_0_025_count": 0,
+            "trust_025_050_count": 0,
+            "trust_050_075_count": 0,
+            "trust_075_100_count": 5000,
+            "below_default_recall_threshold_count": 0,
+            "helpful_count": 0,
+            "unhelpful_count": 0,
+            "feedback_funnel": {
+                "retrieval_count_total": 0,
+                "access_count_total": 0,
+                "retrieved_fact_count": 0,
+                "rated_fact_count": 0,
+                "feedback_total": 0,
+                "seen_to_feedback_ratio": null
+            }
+        }))
+        .expect("a released daemon's memory status must still decode");
+
+        let report = super::format_memory_status_report(&released);
+
+        assert!(report.contains("facts: 5000\n"), "{report}");
+        assert!(report.contains("algebra: amari_fhrr\n"), "{report}");
+        assert!(report.contains("vector dim: 2048\n"), "{report}");
+        assert!(
+            report.contains(
+                "superposition estimate per vector: 268 (not a fact limit or recall guarantee)\n"
+            ),
+            "{report}"
+        );
+        assert!(
+            !report.lines().any(|line| line.contains("capacity")),
+            "a fact count above the estimate must not read as over capacity: {report}"
         );
     }
 
@@ -461,13 +590,13 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn typed_server_failure_beats_cli_response_timeout() {
         let started_at = Instant::now();
-        let server_deadline = started_at + Duration::from_secs(30);
-        let response_deadline = started_at + Duration::from_secs(45);
+        let server_deadline = started_at + Duration::from_millis(50);
+        let response_deadline = started_at + Duration::from_secs(30);
         let result = await_daemon_tool_result(response_deadline, "tracedecay_status", async move {
-            tokio::time::sleep_until(server_deadline).await;
+            tokio::time::sleep_until(server_deadline.into()).await;
             Err::<(), _>(tracedecay_domain::errors::TraceDecayError::project_route(
                 "status_deadline_exceeded",
                 true,
@@ -487,19 +616,6 @@ mod tests {
     }
 
     #[test]
-    fn status_logo_requires_interactive_stdout() {
-        assert!(should_print_status_logo(false, true));
-        assert!(!should_print_status_logo(true, true));
-        assert!(!should_print_status_logo(false, false));
-    }
-
-    #[test]
-    fn online_embellishments_require_interactive_stdout() {
-        assert!(should_fetch_online_status_embellishments(true));
-        assert!(!should_fetch_online_status_embellishments(false));
-    }
-
-    #[test]
     fn truncation_envelope_is_detected_and_rejected() {
         let envelope = json!({
             "truncated": true,
@@ -507,30 +623,133 @@ mod tests {
             "preview": "{}",
             "handle": "rh_test",
         });
-        let err = reject_truncation_envelope(&envelope, "tracedecay_status").unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("truncated JSON"));
-        assert!(message.contains("20000"));
-        assert!(message.contains("rh_test"));
-        assert!(
-            reject_truncation_envelope(&json!({ "node_count": 1 }), "tracedecay_status").is_ok()
-        );
-        assert!(
+        match reject_truncation_envelope(&envelope, "tracedecay_status") {
+            Err(tracedecay_domain::errors::TraceDecayError::Config { message }) => assert_eq!(
+                message,
+                "daemon tool tracedecay_status returned truncated JSON (20000 chars); recover with tracedecay_retrieve handle=rh_test"
+            ),
+            other => panic!("expected a truncation refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            reject_truncation_envelope(&json!({ "node_count": 1 }), "tracedecay_status"),
+            Ok(())
+        ));
+        assert!(matches!(
             reject_truncation_envelope(
                 &json!({ "truncated": true, "matches": [] }),
                 "tracedecay_status",
+            ),
+            Ok(())
+        ));
+    }
+
+    #[test]
+    fn stalled_project_open_snapshot_is_a_typed_backoff_error() {
+        let stalled = json!({
+            "project_open": {
+                "state": "stalled",
+                "reason": "retry_backoff",
+                "retry_after_ms": 1000,
+                "detail": "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases / ProjectSessions",
+            }
+        });
+        let error = tracedecay::daemon::reject_stalled_project_open_status(&stalled)
+            .expect_err("stalled must fail");
+        // The snapshot records retry_backoff, which does not identify its
+        // cause, so the fallback rejects with the honest typed backoff
+        // rather than a fabricated capacity verdict.
+        assert_eq!(
+            error.project_open_failure_kind(),
+            Some(
+                tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff {
+                    retry_after_ms: 1000
+                }
             )
-            .is_ok()
+        );
+        assert!(
+            tracedecay::daemon::reject_stalled_project_open_status(&json!({ "node_count": 1 }))
+                .is_ok()
         );
     }
 
     #[test]
-    fn compact_status_args_disable_expensive_diagnostics() {
-        let args = compact_status_tool_args();
-        assert_eq!(args["format"], "json");
-        assert_eq!(args["include_branch_diagnostics"], false);
-        assert_eq!(args["include_storage_health"], false);
-        assert_eq!(args["include_session_ingest"], false);
-        assert_eq!(args["include_staleness"], false);
+    fn compact_lines_preserve_convergence_progress_and_project_open_reason() {
+        let convergence = SchemaConvergenceFindingV1 {
+            store: "profile-sessions".to_owned(),
+            stage: SchemaConvergenceStageV1::RegisteredSchema,
+            state: SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
+            progress: Some(SchemaConvergenceProgressV1::Rows {
+                done: 12,
+                remaining: 3,
+            }),
+            started_at_micros: 42,
+            degraded_row: None,
+        };
+        assert_eq!(
+            schema_convergence_line(&convergence),
+            "schema convergence: profile-sessions registered_schema \
+             released_shape_convergence_in_progress, rows 12 done / 3 remaining, started_at=42"
+        );
+
+        let project_open = ProjectOpenStatusV1 {
+            state: ProjectOpenStatusStateV1::Stalled,
+            reason: ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery,
+            retry_after_ms: Some(250),
+            detail: Some("git probe exceeded its deadline".to_owned()),
+        };
+        assert_eq!(
+            project_open_line(&project_open),
+            "project open: deferred repository discovery, retry after 250 ms: \
+             git probe exceeded its deadline"
+        );
+    }
+
+    #[test]
+    fn status_banner_follows_the_checkout_after_a_branch_switch() {
+        let root = tempfile::tempdir().expect("checkout");
+        git_in(root.path(), &["init", "-q", "-b", "enrolled"]);
+        std::fs::write(root.path().join("README.md"), "hi").expect("readme");
+        git_in(root.path(), &["add", "README.md"]);
+        git_in(
+            root.path(),
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        );
+        git_in(root.path(), &["checkout", "-q", "-b", "switched-head"]);
+
+        let serving = json!({
+            "serving_branch": "enrolled",
+            "parent_branch": "enrolled-parent",
+        });
+        let attached = status_branch_info(root.path(), &serving).expect("attached checkout");
+        assert_eq!(attached.branch, "switched-head");
+        assert!(attached.parent.is_none());
+
+        git_in(root.path(), &["checkout", "-q", "--detach"]);
+        let detached = status_branch_info(root.path(), &serving).expect("detached checkout");
+        assert_eq!(detached.branch, "detached HEAD");
+        assert!(detached.parent.is_none());
+    }
+
+    fn git_in(cwd: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "core.hooksPath=.git/no-hooks"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|error| panic!("git {args:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

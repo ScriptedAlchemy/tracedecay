@@ -1,0 +1,889 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::{CursorBindingMismatchV1, UtcMicros};
+
+use super::{ApplicationProblemDetailV1, CancellationStage, EffectReceipt, EffectTermination};
+use crate::context::{RequestAdmission, RequestContext};
+use crate::error::ApplicationContractError;
+
+/// Diagnostic code for an admitted route whose owner is still registering
+/// behind the core publication.
+///
+/// The one-shot client re-sends the same request only while this code is the
+/// problem: the next observation can be the owner's answer. Every other
+/// completed problem, including a retryable authority unavailable, is already
+/// the daemon's answer and must not be reconnected.
+pub const RUNTIME_MOUNTING_REASON_CODE: &str = "application.runtime.mounting";
+
+/// Reason code for a request refused because its capability grant expired.
+pub const GRANT_EXPIRED_REASON_CODE: &str = "application.grant.expired";
+
+/// Safe adapter-independent retry instruction. Adapters preserve it verbatim.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryDirective {
+    Never,
+    SameRequest,
+    AfterDelay,
+    AfterRevalidate,
+    AfterReconcile,
+}
+
+/// Request identity boundary within which a retry remains valid.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryScope {
+    SameRequest,
+    SameOperation,
+    FreshRequest,
+}
+
+/// Layer that owns resolving the problem rather than merely presenting it.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemOwningLayer {
+    Adapter,
+    Application,
+    Runtime,
+    Port,
+}
+
+/// Whether the problem occurred before admission or is an admitted terminal.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemTerminality {
+    PreAdmission,
+    AdmittedTerminal,
+}
+
+/// Bounded action an adapter may offer without inferring executable authority.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LegalAction {
+    CorrectRequest,
+    Reauthorize,
+    Refresh,
+    Retry,
+    Reconcile,
+    Reset,
+    RestartWithoutCursor,
+    ContactAdministrator,
+}
+
+/// Sanitized detail that may cross the application boundary.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SafeDiagnostic {
+    pub code: String,
+    pub message: String,
+}
+
+impl SafeDiagnostic {
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<Self, ApplicationContractError> {
+        let diagnostic = Self {
+            code: code.into(),
+            message: message.into(),
+        };
+        diagnostic.validate()?;
+        Ok(diagnostic)
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        for (field, value, limit) in [
+            ("safe diagnostic code", self.code.as_str(), 128_usize),
+            ("safe diagnostic message", self.message.as_str(), 512_usize),
+        ] {
+            if value.is_empty()
+                || value.trim() != value
+                || value.len() > limit
+                || value.chars().any(char::is_control)
+            {
+                return Err(ApplicationContractError::InvalidIdentifier { field });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Stable problem-code taxonomy for request failures and admitted terminals.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationProblemKind {
+    InvalidRequest,
+    NotFoundOrNotAuthorized,
+    Conflict,
+    PartialEffect,
+    Stale,
+    Unsupported,
+    Unavailable,
+    ExecutionFailed,
+    ResetRequired,
+    Saturated,
+    Cancelled,
+    TimedOut,
+}
+
+impl ApplicationProblemKind {
+    /// Canonical HTTP status code for this problem kind. Servers and clients
+    /// share this one mapping; it is an integer so no HTTP framework is needed.
+    pub const fn http_status(self) -> u16 {
+        match self {
+            Self::InvalidRequest => 400,
+            Self::NotFoundOrNotAuthorized => 404,
+            Self::Conflict | Self::PartialEffect | Self::Stale => 409,
+            Self::Unsupported => 422,
+            Self::ResetRequired | Self::Unavailable => 503,
+            Self::ExecutionFailed => 500,
+            Self::Saturated => 429,
+            Self::Cancelled => 408,
+            Self::TimedOut => 504,
+        }
+    }
+}
+
+/// Stable reason an application authority is unavailable.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationUnavailableClassV1 {
+    Authority,
+    BackendUnavailable,
+    BackendDisconnected,
+    BackendRetryable,
+}
+
+/// Stable non-retryable class for an admitted execution failure.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationExecutionFailureClassV1 {
+    Denied,
+    MalformedOutput,
+    Permanent,
+}
+
+/// Application failure or admitted terminal. Resource-addressed denial
+/// intentionally shares one shape with absence and hidden policy outcomes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    remote = "Self",
+    rename_all = "snake_case",
+    tag = "kind",
+    deny_unknown_fields
+)]
+pub enum ApplicationProblem {
+    InvalidRequest {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    NotFoundOrNotAuthorized {
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    Conflict {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
+    },
+    /// The primary effect committed, but a required post-commit step failed.
+    /// The canonical receipt prevents callers from blindly replaying it.
+    PartialEffect {
+        diagnostic: SafeDiagnostic,
+        committed_receipt: Box<EffectReceipt>,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    Stale {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
+    },
+    Unsupported {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
+    },
+    Unavailable {
+        classification: ApplicationUnavailableClassV1,
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
+    },
+    ExecutionFailed {
+        classification: ApplicationExecutionFailureClassV1,
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    ResetRequired {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
+    },
+    Saturated {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
+    },
+    Cancelled {
+        stage: CancellationStage,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    TimedOut {
+        stage: CancellationStage,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+}
+
+// The derive above uses `remote = "Self"`, so it emits the unvalidated wire
+// codec as inherent `ApplicationProblem::{serialize, deserialize}`. These trait
+// impls are the only public codec and validate on both directions.
+impl Serialize for ApplicationProblem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ApplicationProblem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let problem = Self::deserialize(deserializer)?;
+        problem.validate().map_err(serde::de::Error::custom)?;
+        Ok(problem)
+    }
+}
+
+impl ApplicationProblem {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        if let Some(diagnostic) = self.diagnostic() {
+            diagnostic.validate()?;
+        }
+        if let Some(detail) = self.detail()
+            && *self != Self::from_detail(detail.clone())
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "application problem detail",
+            });
+        }
+
+        match self {
+            Self::PartialEffect {
+                committed_receipt,
+                retry,
+                legal_actions,
+                ..
+            } => {
+                if *retry != RetryDirective::Never
+                    || legal_actions.as_slice() != [LegalAction::Reconcile]
+                    || committed_receipt.outcome != EffectTermination::Partial
+                    || (committed_receipt.committed_state.is_none()
+                        && committed_receipt.external_proof.is_none())
+                {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "partial effect terminal",
+                    });
+                }
+                committed_receipt.validate()?;
+            }
+            Self::ResetRequired {
+                retry,
+                legal_actions,
+                ..
+            } => {
+                if *retry != RetryDirective::Never
+                    || legal_actions.as_slice() != [LegalAction::Reset]
+                {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "reset-required terminal",
+                    });
+                }
+            }
+            Self::Unavailable {
+                classification,
+                retry,
+                legal_actions,
+                ..
+            } if !matches!(classification, ApplicationUnavailableClassV1::Authority) => {
+                if *retry != RetryDirective::AfterRevalidate
+                    || legal_actions.as_slice() != [LegalAction::Retry]
+                {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "admitted unavailable terminal",
+                    });
+                }
+            }
+            Self::ExecutionFailed {
+                retry,
+                legal_actions,
+                ..
+            } => {
+                if *retry != RetryDirective::Never
+                    || legal_actions.as_slice() != [LegalAction::ContactAdministrator]
+                {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "execution-failed terminal",
+                    });
+                }
+            }
+            Self::Cancelled { stage, .. } | Self::TimedOut { stage, .. } => {
+                if matches!(
+                    stage,
+                    CancellationStage::Reconciling | CancellationStage::AfterCommit
+                ) {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "application problem cancellation stage",
+                    });
+                }
+            }
+            Self::InvalidRequest { .. }
+            | Self::NotFoundOrNotAuthorized { .. }
+            | Self::Conflict { .. }
+            | Self::Stale { .. }
+            | Self::Unsupported { .. }
+            | Self::Unavailable { .. }
+            | Self::Saturated { .. } => {}
+        }
+        Ok(())
+    }
+
+    pub const fn kind(&self) -> ApplicationProblemKind {
+        match self {
+            Self::InvalidRequest { .. } => ApplicationProblemKind::InvalidRequest,
+            Self::NotFoundOrNotAuthorized { .. } => ApplicationProblemKind::NotFoundOrNotAuthorized,
+            Self::Conflict { .. } => ApplicationProblemKind::Conflict,
+            Self::PartialEffect { .. } => ApplicationProblemKind::PartialEffect,
+            Self::Stale { .. } => ApplicationProblemKind::Stale,
+            Self::Unsupported { .. } => ApplicationProblemKind::Unsupported,
+            Self::Unavailable { .. } => ApplicationProblemKind::Unavailable,
+            Self::ExecutionFailed { .. } => ApplicationProblemKind::ExecutionFailed,
+            Self::ResetRequired { .. } => ApplicationProblemKind::ResetRequired,
+            Self::Saturated { .. } => ApplicationProblemKind::Saturated,
+            Self::Cancelled { .. } => ApplicationProblemKind::Cancelled,
+            Self::TimedOut { .. } => ApplicationProblemKind::TimedOut,
+        }
+    }
+
+    pub const fn terminality(&self) -> ProblemTerminality {
+        match self {
+            Self::PartialEffect { .. }
+            | Self::ResetRequired { .. }
+            | Self::ExecutionFailed { .. } => ProblemTerminality::AdmittedTerminal,
+            Self::Unavailable { classification, .. }
+                if !matches!(classification, ApplicationUnavailableClassV1::Authority) =>
+            {
+                ProblemTerminality::AdmittedTerminal
+            }
+            Self::Cancelled { stage, .. } | Self::TimedOut { stage, .. }
+                if !matches!(stage, CancellationStage::BeforeAdmission) =>
+            {
+                ProblemTerminality::AdmittedTerminal
+            }
+            _ => ProblemTerminality::PreAdmission,
+        }
+    }
+
+    pub const fn is_admitted_terminal(&self) -> bool {
+        matches!(self.terminality(), ProblemTerminality::AdmittedTerminal)
+    }
+
+    pub fn not_found_or_not_authorized(retry: RetryDirective) -> Self {
+        Self::NotFoundOrNotAuthorized {
+            retry,
+            legal_actions: Vec::new(),
+        }
+    }
+
+    /// Invalid request that offers no recovery action. Never retries.
+    ///
+    /// Empty legal actions are part of the refusal: adapters must not invent
+    /// `CorrectRequest` for these problems.
+    pub fn invalid_request_without_action(
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    }
+
+    pub fn cancelled_before_admission() -> Self {
+        Self::Cancelled {
+            stage: CancellationStage::BeforeAdmission,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    }
+
+    pub fn timed_out_before_admission() -> Self {
+        Self::TimedOut {
+            stage: CancellationStage::BeforeAdmission,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    }
+
+    /// The request's capability grant expired before admission. Grants are
+    /// minted per request, so the caller revalidates and sends a new request.
+    pub fn grant_expired_before_admission() -> Self {
+        Self::Unavailable {
+            classification: ApplicationUnavailableClassV1::Authority,
+            diagnostic: SafeDiagnostic {
+                code: GRANT_EXPIRED_REASON_CODE.to_owned(),
+                message: "The request's capability grant expired before admission".to_owned(),
+            },
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Retry],
+            detail: None,
+        }
+    }
+
+    /// Admitted requests continue. Cancellation and deadline expiry become
+    /// the matching pre-admission problems.
+    pub fn ensure_admitted(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Self> {
+        match context.admission_at(observed_at) {
+            RequestAdmission::Admitted => Ok(()),
+            RequestAdmission::Cancelled => Err(Self::cancelled_before_admission()),
+            RequestAdmission::TimedOut => Err(Self::timed_out_before_admission()),
+            RequestAdmission::GrantExpired => Err(Self::grant_expired_before_admission()),
+        }
+    }
+
+    /// Conflict that must be revalidated. Retry is `AfterRevalidate` and the
+    /// only legal action is `Refresh`.
+    pub fn conflict(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Conflict {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+            detail: None,
+        }
+    }
+
+    /// Invalid request that must not be retried unchanged. The only legal
+    /// action is `CorrectRequest`.
+    pub fn invalid_request(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
+        }
+    }
+
+    /// A continuation cursor this request cannot redeem as presented: the
+    /// caller corrects the request or restarts paging without the cursor.
+    pub fn cursor_refused(mismatch: &CursorBindingMismatchV1) -> Self {
+        Self::cursor_refusal(SafeDiagnostic {
+            code: mismatch.code().to_owned(),
+            message: mismatch.message(),
+        })
+    }
+
+    /// [`Self::cursor_refused`] for a refusal an adapter carried as its
+    /// diagnostic.
+    pub fn cursor_refusal(diagnostic: SafeDiagnostic) -> Self {
+        Self::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![
+                LegalAction::CorrectRequest,
+                LegalAction::RestartWithoutCursor,
+            ],
+        }
+    }
+
+    pub fn cancelled(stage: CancellationStage) -> Result<Self, ApplicationContractError> {
+        let problem = Self::Cancelled {
+            stage,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        };
+        problem.validate()?;
+        Ok(problem)
+    }
+
+    pub fn timed_out(stage: CancellationStage) -> Result<Self, ApplicationContractError> {
+        let problem = Self::TimedOut {
+            stage,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        };
+        problem.validate()?;
+        Ok(problem)
+    }
+
+    pub const fn cancellation_stage(&self) -> Option<CancellationStage> {
+        match self {
+            Self::Cancelled { stage, .. } | Self::TimedOut { stage, .. } => Some(*stage),
+            _ => None,
+        }
+    }
+
+    pub const fn unavailable_classification(&self) -> Option<ApplicationUnavailableClassV1> {
+        match self {
+            Self::Unavailable { classification, .. } => Some(*classification),
+            _ => None,
+        }
+    }
+
+    pub const fn execution_failure_classification(
+        &self,
+    ) -> Option<ApplicationExecutionFailureClassV1> {
+        match self {
+            Self::ExecutionFailed { classification, .. } => Some(*classification),
+            _ => None,
+        }
+    }
+
+    pub fn unavailable(diagnostic: SafeDiagnostic) -> Self {
+        Self::Unavailable {
+            classification: ApplicationUnavailableClassV1::Authority,
+            diagnostic,
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
+            detail: None,
+        }
+    }
+
+    /// The refusal for an admitted project whose runtime has not finished
+    /// mounting.
+    pub fn runtime_mounting() -> Self {
+        Self::unavailable(SafeDiagnostic {
+            code: RUNTIME_MOUNTING_REASON_CODE.to_owned(),
+            message: "The project runtime for this operation is still mounting".to_owned(),
+        })
+    }
+
+    /// The one problem a typed detail names: its kind, code, retry, legal
+    /// actions, and rendered message all follow from the detail.
+    ///
+    /// A parked code index cannot answer until the operator applies the
+    /// park's remedy, so it is never retried and names reconcile. A stale
+    /// refresh frontier or compare-and-swap precondition is revalidated from
+    /// the committed value; a stale placement digest is the same
+    /// compare-and-swap answered as a conflict over the run. A lock
+    /// deadline is capacity: the same request may succeed after a delay. A
+    /// diagnostics scope no compiler owns is routed to publishing the
+    /// project's own check; a pending producer, and a daemon that may be
+    /// restarting, answer after a delay.
+    pub fn from_detail(detail: ApplicationProblemDetailV1) -> Self {
+        let diagnostic = SafeDiagnostic {
+            code: detail.code().to_owned(),
+            message: detail.message(),
+        };
+        match detail {
+            ApplicationProblemDetailV1::Parked { .. } => Self::Unavailable {
+                classification: ApplicationUnavailableClassV1::Authority,
+                diagnostic,
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::Reconcile],
+                detail: Some(Box::new(detail)),
+            },
+            ApplicationProblemDetailV1::StaleRefreshFrontier { .. }
+            | ApplicationProblemDetailV1::StalePrecondition { .. } => Self::Stale {
+                diagnostic,
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+                detail: Some(Box::new(detail)),
+            },
+            ApplicationProblemDetailV1::WorkflowPlacementDigestStale { .. } => Self::Conflict {
+                diagnostic,
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+                detail: Some(Box::new(detail)),
+            },
+            ApplicationProblemDetailV1::LockDeadline { .. } => Self::Saturated {
+                diagnostic,
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![LegalAction::Retry],
+                detail: Some(Box::new(detail)),
+            },
+            ApplicationProblemDetailV1::ResetRequired { .. } => Self::ResetRequired {
+                diagnostic,
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::Reset],
+                detail: Some(Box::new(detail)),
+            },
+            ApplicationProblemDetailV1::DiagnosticsUnsupported { .. } => Self::Unsupported {
+                diagnostic,
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::CorrectRequest],
+                detail: Some(Box::new(detail)),
+            },
+            ApplicationProblemDetailV1::DiagnosticsPending { .. }
+            | ApplicationProblemDetailV1::CodeGraphRewarming { .. }
+            | ApplicationProblemDetailV1::DaemonUnreachable { .. } => Self::Unavailable {
+                classification: ApplicationUnavailableClassV1::Authority,
+                diagnostic,
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![LegalAction::Retry],
+                detail: Some(Box::new(detail)),
+            },
+        }
+    }
+
+    pub fn detail(&self) -> Option<&ApplicationProblemDetailV1> {
+        match self {
+            Self::Conflict { detail, .. }
+            | Self::Stale { detail, .. }
+            | Self::Unsupported { detail, .. }
+            | Self::Unavailable { detail, .. }
+            | Self::ResetRequired { detail, .. }
+            | Self::Saturated { detail, .. } => detail.as_deref(),
+            Self::InvalidRequest { .. }
+            | Self::NotFoundOrNotAuthorized { .. }
+            | Self::PartialEffect { .. }
+            | Self::ExecutionFailed { .. }
+            | Self::Cancelled { .. }
+            | Self::TimedOut { .. } => None,
+        }
+    }
+
+    pub fn admitted_unavailable(
+        classification: ApplicationUnavailableClassV1,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<Self, ApplicationContractError> {
+        if matches!(classification, ApplicationUnavailableClassV1::Authority) {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "admitted unavailable classification",
+            });
+        }
+        let problem = Self::Unavailable {
+            classification,
+            diagnostic,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Retry],
+            detail: None,
+        };
+        problem.validate()?;
+        Ok(problem)
+    }
+
+    pub fn execution_failed(
+        classification: ApplicationExecutionFailureClassV1,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<Self, ApplicationContractError> {
+        let problem = Self::ExecutionFailed {
+            classification,
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+        };
+        problem.validate()?;
+        Ok(problem)
+    }
+
+    pub fn stale(diagnostic: SafeDiagnostic) -> Self {
+        Self::Stale {
+            diagnostic,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+            detail: None,
+        }
+    }
+
+    /// Capacity refusal. Retry only after a delay.
+    pub fn saturated(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Saturated {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
+            detail: None,
+        }
+    }
+
+    pub fn reset_required(diagnostic: SafeDiagnostic) -> Self {
+        Self::ResetRequired {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::Reset],
+            detail: None,
+        }
+    }
+
+    pub const fn retry(&self) -> RetryDirective {
+        match self {
+            Self::InvalidRequest { retry, .. }
+            | Self::NotFoundOrNotAuthorized { retry, .. }
+            | Self::Conflict { retry, .. }
+            | Self::PartialEffect { retry, .. }
+            | Self::Stale { retry, .. }
+            | Self::Unsupported { retry, .. }
+            | Self::Unavailable { retry, .. }
+            | Self::ExecutionFailed { retry, .. }
+            | Self::ResetRequired { retry, .. }
+            | Self::Saturated { retry, .. }
+            | Self::Cancelled { retry, .. }
+            | Self::TimedOut { retry, .. } => *retry,
+        }
+    }
+
+    pub fn legal_actions(&self) -> &[LegalAction] {
+        match self {
+            Self::InvalidRequest { legal_actions, .. }
+            | Self::NotFoundOrNotAuthorized { legal_actions, .. }
+            | Self::Conflict { legal_actions, .. }
+            | Self::PartialEffect { legal_actions, .. }
+            | Self::Stale { legal_actions, .. }
+            | Self::Unsupported { legal_actions, .. }
+            | Self::Unavailable { legal_actions, .. }
+            | Self::ExecutionFailed { legal_actions, .. }
+            | Self::ResetRequired { legal_actions, .. }
+            | Self::Saturated { legal_actions, .. }
+            | Self::Cancelled { legal_actions, .. }
+            | Self::TimedOut { legal_actions, .. } => legal_actions,
+        }
+    }
+
+    pub fn diagnostic(&self) -> Option<&SafeDiagnostic> {
+        match self {
+            Self::InvalidRequest { diagnostic, .. }
+            | Self::Conflict { diagnostic, .. }
+            | Self::PartialEffect { diagnostic, .. }
+            | Self::Stale { diagnostic, .. }
+            | Self::Unsupported { diagnostic, .. }
+            | Self::Unavailable { diagnostic, .. }
+            | Self::ExecutionFailed { diagnostic, .. }
+            | Self::ResetRequired { diagnostic, .. }
+            | Self::Saturated { diagnostic, .. } => Some(diagnostic),
+            Self::NotFoundOrNotAuthorized { .. }
+            | Self::Cancelled { .. }
+            | Self::TimedOut { .. } => None,
+        }
+    }
+
+    pub const fn canonical_code(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest { .. } => "invalid_request",
+            Self::NotFoundOrNotAuthorized { .. } => "not_found_or_not_authorized",
+            Self::Conflict { .. } => "conflict",
+            Self::PartialEffect { .. } => "partial_effect",
+            Self::Stale { .. } => "stale",
+            Self::Unsupported { .. } => "unsupported",
+            Self::Unavailable { .. } => "unavailable",
+            Self::ExecutionFailed { .. } => "execution_failed",
+            Self::ResetRequired { .. } => "reset_required",
+            Self::Saturated { .. } => "saturated",
+            Self::Cancelled { .. } => "cancelled",
+            Self::TimedOut { .. } => "timed_out",
+        }
+    }
+
+    pub fn safe_message(&self) -> &str {
+        // One exhaustive match: a new variant must choose its safe message
+        // here at compile time instead of reaching a runtime fallback.
+        match self {
+            Self::InvalidRequest { diagnostic, .. }
+            | Self::Conflict { diagnostic, .. }
+            | Self::PartialEffect { diagnostic, .. }
+            | Self::Stale { diagnostic, .. }
+            | Self::Unsupported { diagnostic, .. }
+            | Self::Unavailable { diagnostic, .. }
+            | Self::ExecutionFailed { diagnostic, .. }
+            | Self::ResetRequired { diagnostic, .. }
+            | Self::Saturated { diagnostic, .. } => diagnostic.message.as_str(),
+            Self::NotFoundOrNotAuthorized { .. } => {
+                "The requested resource was not found or is not authorized"
+            }
+            Self::Cancelled { stage, .. } => match stage {
+                CancellationStage::BeforeAdmission => "The request was cancelled before admission",
+                _ => "The admitted request was cancelled",
+            },
+            Self::TimedOut { stage, .. } => match stage {
+                CancellationStage::BeforeAdmission => "The request timed out before admission",
+                _ => "The admitted request timed out",
+            },
+        }
+    }
+
+    pub fn committed_receipt(&self) -> Option<&EffectReceipt> {
+        match self {
+            Self::PartialEffect {
+                committed_receipt, ..
+            } => Some(committed_receipt),
+            _ => None,
+        }
+    }
+
+    /// Stable client-facing reason: the diagnostic code when one exists,
+    /// otherwise the problem kind's canonical code.
+    pub fn reason_code(&self) -> &str {
+        self.diagnostic().map_or_else(
+            || self.canonical_code(),
+            |diagnostic| diagnostic.code.as_str(),
+        )
+    }
+
+    /// Preserve reason code and retryability when a root caller must surface
+    /// this problem as [`TraceDecayError`].
+    pub fn into_trace_decay_error(self) -> TraceDecayError {
+        let retryable = !matches!(self.retry(), RetryDirective::Never);
+        TraceDecayError::project_route(
+            self.reason_code().to_owned(),
+            retryable,
+            self.safe_message().to_owned(),
+        )
+    }
+}
+
+impl From<ApplicationProblem> for TraceDecayError {
+    fn from(problem: ApplicationProblem) -> Self {
+        problem.into_trace_decay_error()
+    }
+}
+
+#[cfg(test)]
+#[path = "problem/tests.rs"]
+mod tests;

@@ -1,0 +1,353 @@
+//! Bounded orphan-store collection, unregistered-directory collection and
+//! incident-debris sweeping over profile-sharded stores. Code-generation retention of registered projects,
+//! mounted or not, is a unit of the maintenance tick's store window
+//! (`store_maintenance::run_registered_code_generation_retention`).
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+
+use super::{incident_debris, orphan_stores};
+use crate::clock::now_secs_i64;
+
+const COLD_STORE_PAGE_LIMIT: usize = 8;
+const CHECKPOINT_DIRECTORY: &str = "maintenance";
+const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+struct ColdStoreCursorV1 {
+    after_project_id: Option<String>,
+    /// Where the unregistered-directory sweep resumes. A cursor written before
+    /// this field existed reads as a fresh sweep.
+    #[serde(default)]
+    after_unregistered_directory: Option<String>,
+}
+
+/// Wall-clock bound on one unregistered-directory page, matching the bounded
+/// page `orphan_stores::sweep_unregistered_stores` runs.
+const UNREGISTERED_PAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColdStorePageOutcomeV1 {
+    Processed,
+    Missing,
+    Unreadable,
+    Cancelled,
+}
+
+impl ColdStorePageOutcomeV1 {
+    #[must_use]
+    pub const fn was_processed(self) -> bool {
+        matches!(self, Self::Processed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColdStorePageReportV1 {
+    pub processed_stores: u64,
+    pub unavailable_stores: u64,
+    pub reclaimed_bytes: u64,
+    pub outcome: ColdStorePageOutcomeV1,
+}
+
+impl Default for ColdStorePageReportV1 {
+    fn default() -> Self {
+        Self {
+            processed_stores: 0,
+            unavailable_stores: 0,
+            reclaimed_bytes: 0,
+            outcome: ColdStorePageOutcomeV1::Processed,
+        }
+    }
+}
+
+/// Applies one bounded orphan and debris page to profile stores. A store of
+/// any of `owner_roots` is live whether or not its root is still on disk.
+#[tracing::instrument(name = "maintenance.cold_store.page", level = "trace", skip_all)]
+pub async fn run_cold_store_page(
+    profile_root: &Path,
+    profile_database: &RegisteredGlobalDb,
+    orphan_store_gc_days: Option<u64>,
+    owner_roots: &BTreeSet<PathBuf>,
+    cancellation: &CancellationToken,
+) -> tracedecay_domain::errors::Result<ColdStorePageReportV1> {
+    let checkpoint_path = checkpoint_path(profile_root);
+    let cursor = load_cursor(&checkpoint_path).unwrap_or(ColdStoreCursorV1 {
+        after_project_id: None,
+        after_unregistered_directory: None,
+    });
+    let page = orphan_stores::build_store_census_page(
+        profile_database,
+        profile_root,
+        cursor.after_project_id.as_deref(),
+        COLD_STORE_PAGE_LIMIT,
+    )
+    .await?;
+    let mut report = ColdStorePageReportV1::default();
+    for entry in &page.entries {
+        let outcome = classify_cold_store_state(
+            cancellation.is_cancelled(),
+            entry.manifest_readable,
+            entry.data_root.is_dir(),
+        );
+        match outcome {
+            ColdStorePageOutcomeV1::Processed => {
+                report.processed_stores = report.processed_stores.saturating_add(1);
+            }
+            ColdStorePageOutcomeV1::Cancelled => {
+                report.outcome = outcome;
+                return Ok(report);
+            }
+            ColdStorePageOutcomeV1::Missing | ColdStorePageOutcomeV1::Unreadable => {
+                if report.outcome == ColdStorePageOutcomeV1::Processed {
+                    report.outcome = outcome;
+                }
+                report.unavailable_stores = report.unavailable_stores.saturating_add(1);
+            }
+        }
+    }
+    let mut collected_store_ids = BTreeSet::new();
+    let now =
+        now_secs_i64().map_err(
+            |message| tracedecay_domain::errors::TraceDecayError::Config {
+                message: message.to_owned(),
+            },
+        )?;
+    if let Some(days) = orphan_store_gc_days {
+        let findings = orphan_stores::classify_stores(&page.entries, now, owner_roots);
+        let plan = orphan_stores::plan_collection(findings, retention_window_secs(days));
+        let (outcome, _) =
+            orphan_stores::execute_registered_collection(profile_database, &plan, profile_root)
+                .await?;
+        report.reclaimed_bytes = report
+            .reclaimed_bytes
+            .saturating_add(outcome.reclaimed_bytes);
+        report.unavailable_stores = report
+            .unavailable_stores
+            .saturating_add(outcome.errors.len() as u64);
+        if !outcome.errors.is_empty() {
+            report.outcome = ColdStorePageOutcomeV1::Unreadable;
+        }
+        collected_store_ids.extend(outcome.collected.into_iter().map(|store| store.store_id));
+    }
+    // A store this page collected is gone, so it has no debris left to sweep.
+    let surviving: Vec<_> = page
+        .entries
+        .iter()
+        .filter(|entry| !collected_store_ids.contains(&entry.store_id))
+        .cloned()
+        .collect();
+    let sweep = incident_debris::sweep_incident_debris(&surviving, profile_root);
+    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(sweep.reclaimed_bytes);
+    report.unavailable_stores = report
+        .unavailable_stores
+        .saturating_add(sweep.errors.len() as u64);
+    if !sweep.errors.is_empty() {
+        report.outcome = ColdStorePageOutcomeV1::Unreadable;
+    }
+    // A project directory with no registry row has no other collector: the
+    // registered census above never sees it. One bounded page per tick, under
+    // the same window as orphaned stores; the sweep never removes a directory
+    // that holds durable memory or a payload it cannot inspect.
+    let mut after_unregistered_directory = cursor.after_unregistered_directory.clone();
+    if let Some(days) = orphan_store_gc_days {
+        let unregistered = orphan_stores::sweep_unregistered_store_page(
+            profile_database,
+            profile_root,
+            orphan_stores::UnregisteredStoreSweepRequestV1 {
+                cursor: cursor.after_unregistered_directory.clone(),
+                limit: COLD_STORE_PAGE_LIMIT,
+                retention_secs: retention_window_secs(days),
+                now,
+                apply: true,
+                cancellation,
+                deadline: MonotonicDeadline::at(Instant::now() + UNREGISTERED_PAGE_BUDGET),
+            },
+        )
+        .await?;
+        report.reclaimed_bytes = report
+            .reclaimed_bytes
+            .saturating_add(unregistered.outcome.reclaimed_bytes);
+        report.unavailable_stores = report
+            .unavailable_stores
+            .saturating_add(unregistered.outcome.errors.len() as u64);
+        if !unregistered.outcome.errors.is_empty() {
+            report.outcome = ColdStorePageOutcomeV1::Unreadable;
+        }
+        match unregistered.completion {
+            orphan_stores::UnregisteredSweepCompletionV1::Complete => {
+                after_unregistered_directory = unregistered.next_cursor;
+            }
+            orphan_stores::UnregisteredSweepCompletionV1::Cancelled => {
+                report.outcome = ColdStorePageOutcomeV1::Cancelled;
+            }
+            orphan_stores::UnregisteredSweepCompletionV1::DeadlineExceeded => {}
+        }
+    }
+    let project_ids = page
+        .entries
+        .iter()
+        .map(|entry| entry.project_id.clone())
+        .collect::<Vec<_>>();
+    let next_cursor = ColdStoreCursorV1 {
+        after_project_id: next_cold_store_cursor(
+            cursor.after_project_id.as_deref(),
+            &project_ids,
+            page.next_cursor.is_some(),
+        ),
+        after_unregistered_directory,
+    };
+    persist_cursor(&checkpoint_path, &next_cursor).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("persist maintenance cold-store cursor: {error}"),
+        }
+    })?;
+    Ok(report)
+}
+
+fn next_cold_store_cursor(
+    previous: Option<&str>,
+    project_ids: &[String],
+    has_more: bool,
+) -> Option<String> {
+    if !has_more {
+        return None;
+    }
+    project_ids
+        .last()
+        .cloned()
+        .or_else(|| previous.map(str::to_owned))
+}
+
+fn classify_cold_store_state(
+    cancelled: bool,
+    manifest_readable: bool,
+    data_root_exists: bool,
+) -> ColdStorePageOutcomeV1 {
+    if cancelled {
+        ColdStorePageOutcomeV1::Cancelled
+    } else if !data_root_exists {
+        ColdStorePageOutcomeV1::Missing
+    } else if !manifest_readable {
+        ColdStorePageOutcomeV1::Unreadable
+    } else {
+        ColdStorePageOutcomeV1::Processed
+    }
+}
+
+fn checkpoint_path(profile_root: &Path) -> PathBuf {
+    profile_root
+        .join(CHECKPOINT_DIRECTORY)
+        .join(CHECKPOINT_FILE)
+}
+
+#[tracing::instrument(name = "maintenance.cold_store.load_cursor", level = "trace", skip_all)]
+fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[tracing::instrument(
+    name = "maintenance.cold_store.persist_cursor",
+    level = "trace",
+    skip_all
+)]
+fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("maintenance cursor has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(cursor).map_err(std::io::Error::other)?;
+    let mut file = std::fs::File::create(&temporary)?;
+    std::io::Write::write_all(&mut file, &bytes)?;
+    file.sync_all()?;
+    std::fs::rename(temporary, path)
+}
+
+fn retention_window_secs(days: u64) -> i64 {
+    i64::try_from(days)
+        .ok()
+        .and_then(|days| days.checked_mul(24 * 60 * 60))
+        .unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_resumes_after_the_last_complete_project() {
+        let first = next_cold_store_cursor(
+            None,
+            &["project-a".to_owned(), "project-b".to_owned()],
+            true,
+        )
+        .expect("first page cursor");
+        assert_eq!(first, "project-b");
+        assert_eq!(
+            next_cold_store_cursor(Some(&first), &["project-c".to_owned()], false),
+            None
+        );
+    }
+
+    #[test]
+    fn checkpoint_survives_restart() {
+        let root = tempfile::tempdir().expect("checkpoint root");
+        let path = checkpoint_path(root.path());
+        let expected = ColdStoreCursorV1 {
+            after_project_id: Some("project-b".to_owned()),
+            after_unregistered_directory: Some("proj_0000000000000000".to_owned()),
+        };
+
+        persist_cursor(&path, &expected).expect("persist cursor");
+
+        assert_eq!(load_cursor(&path), Some(expected));
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn state_distinguishes_missing_unreadable_and_cancelled() {
+        assert_eq!(
+            classify_cold_store_state(false, true, true),
+            ColdStorePageOutcomeV1::Processed
+        );
+        assert_eq!(
+            classify_cold_store_state(false, true, false),
+            ColdStorePageOutcomeV1::Missing
+        );
+        assert_eq!(
+            classify_cold_store_state(false, false, true),
+            ColdStorePageOutcomeV1::Unreadable
+        );
+        assert_eq!(
+            classify_cold_store_state(true, true, true),
+            ColdStorePageOutcomeV1::Cancelled
+        );
+    }
+
+    #[test]
+    fn a_cursor_written_before_the_unregistered_sweep_still_loads() {
+        let root = tempfile::tempdir().expect("checkpoint root");
+        let path = checkpoint_path(root.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, br#"{"after_project_id":"project-b"}"#).unwrap();
+
+        assert_eq!(
+            load_cursor(&path),
+            Some(ColdStoreCursorV1 {
+                after_project_id: Some("project-b".to_owned()),
+                after_unregistered_directory: None,
+            })
+        );
+    }
+
+    #[test]
+    fn retention_window_conversion_never_wraps_negative() {
+        assert_eq!(retention_window_secs(u64::MAX), i64::MAX);
+    }
+}

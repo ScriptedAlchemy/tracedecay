@@ -3,11 +3,8 @@ use tracedecay_runtime_core::{
     ports::registered_schema::RegisteredSchemaInstallationV1,
 };
 
-/// Final V4 observation-projection DDL. Shared with the scoped observation
-/// reset in `crate::observation::reset`, which recreates these tables after
-/// dropping a refused authority, so the installer and the reset can never
-/// produce different shapes.
-pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
+/// Final V4 observation-projection DDL.
+const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
     "CREATE TABLE IF NOT EXISTS observation_projection_provenance (
             projector_version TEXT NOT NULL,
             observation_id TEXT NOT NULL,
@@ -220,8 +217,6 @@ pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             output_message_id TEXT NOT NULL,
             message_json TEXT NOT NULL CHECK(json_valid(message_json)),
             content_hash TEXT NOT NULL,
-            snippet_text TEXT NOT NULL,
-            index_text TEXT NOT NULL,
             PRIMARY KEY(projector_version, generation, output_provider, output_message_id),
             FOREIGN KEY(projector_version, generation)
                 REFERENCES observation_projection_rebuilds(projector_version, generation)
@@ -292,15 +287,31 @@ pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
                 ON DELETE CASCADE,
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+        );
+        -- Where each record of a file-byte source sits in the newest layout that
+        -- offered it. `observation_id` is the identity admission derived, so a
+        -- row may name a record the store refused and never holds.
+        CREATE TABLE IF NOT EXISTS observation_source_presence (
+            source_key TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
+            PRIMARY KEY(source_key, observation_id)
+        ) WITHOUT ROWID;
+        -- A rewrite of a source that has not yet been read to its end. Records
+        -- the new generation does not offer by then are retired.
+        CREATE TABLE IF NOT EXISTS observation_source_rewrites (
+            source_key TEXT PRIMARY KEY,
+            generation TEXT NOT NULL,
+            retained_through INTEGER NOT NULL CHECK(retained_through >= 0)
         );";
 
-/// V4 anchor-binding triggers, shared with the scoped observation reset like
-/// [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
-pub(crate) const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
-    include_str!("projection_v4_binding_triggers.sql");
+/// Anchor-binding triggers of [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
+const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
+    include_str!("projection_binding_triggers.sql");
 
 /// Historical-data indexes the schema contract requires on the projection
-/// authority, shared with the scoped observation reset.
+/// authority.
 pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
      ON observation_projection_provenance
@@ -326,6 +337,18 @@ pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
      ON observation_projection_rebuild_workflow_facts
         (projector_version, generation, provider, session_id, semantic_kind,
          provider_reference, observation_sequence);",
+    // Partial on json_valid: a malformed observation row must never make the
+    // index build (and with it the store's schema convergence) fail, and the
+    // lifecycle lookup restricts itself to valid rows so the index applies.
+    // The first cut of this index was not partial and refused any malformed
+    // observation_json row; stores that installed it under the old name drop
+    // it here (derived object, no data) before the partial replacement builds.
+    "DROP INDEX IF EXISTS idx_observations_session_sequence;
+     CREATE INDEX IF NOT EXISTS idx_observations_valid_session_sequence
+     ON observations (
+        json_extract(observation_json, '$.identity.source.session_id'),
+        sequence
+     ) WHERE json_valid(observation_json);",
     "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
      ON observations (observation_id, receipt_id);",
     "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
@@ -345,7 +368,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
     conn.execute_batch(OBSERVATION_PROJECTION_SCHEMA_SQL)
         .await?;
     verify_final_projection_shape(conn).await?;
-    ensure_v4_projection_binding_triggers(conn).await
+    ensure_projection_binding_triggers(conn).await
 }
 
 pub(in super::super) async fn ensure_observation_projection_performance_indexes(
@@ -379,7 +402,7 @@ async fn projection_table_column_exists(
     Ok(rows.next().await?.is_some())
 }
 
-async fn ensure_v4_projection_binding_triggers(conn: &impl Executor) -> Result<(), Error> {
+async fn ensure_projection_binding_triggers(conn: &impl Executor) -> Result<(), Error> {
     conn.execute_batch(OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL)
         .await
 }
@@ -401,8 +424,6 @@ const CURRENT_REBUILD_MESSAGE_COLUMNS: &[&str] = &[
     "output_message_id",
     "message_json",
     "content_hash",
-    "snippet_text",
-    "index_text",
 ];
 const CURRENT_REBUILD_PROVIDER_USAGE_COLUMNS: &[&str] = &[
     "projector_version",
@@ -570,7 +591,7 @@ mod tests {
     /// A store at a pre-final projection shape is refused with the
     /// fresh-start remedy. This binary creates stores at the final shape and
     /// no longer steps an older one forward.
-    #[tokio::test]
+    #[asupersync::test]
     async fn legacy_projection_shape_is_refused_with_a_fresh_start_remedy() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
@@ -606,16 +627,52 @@ mod tests {
         );
     }
 
-    /// A store this binary created passes the shape probe on every reopen.
-    #[tokio::test]
-    async fn a_freshly_created_store_reopens_at_the_final_shape() {
+    /// A store that installed the first, non-partial cut of the session index
+    /// under its old name must converge on reopen: the old index is a derived
+    /// object and is dropped, the partial replacement is built, and admission
+    /// no longer refuses the store as missing its required index.
+    #[asupersync::test]
+    async fn non_partial_session_index_predecessor_is_replaced_on_reopen() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
         drop(open_registered_schema(&path).await.unwrap());
+        let conn = TestConnection::open(&path);
+        conn.execute_batch(
+            "DROP INDEX idx_observations_valid_session_sequence;
+             CREATE INDEX idx_observations_session_sequence
+             ON observations (
+                json_extract(observation_json, '$.identity.source.session_id'),
+                sequence
+             );",
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
         drop(open_registered_schema(&path).await.unwrap());
+
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT name, partial FROM pragma_index_list('observations')
+                 WHERE name LIKE 'idx_observations_%session_sequence'
+                 ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut indexes = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            indexes.push((row.get::<String>(0).unwrap(), row.get::<i64>(1).unwrap()));
+        }
+        assert_eq!(
+            indexes,
+            [("idx_observations_valid_session_sequence".to_owned(), 1)],
+            "reopen must drop the non-partial predecessor and keep only the partial index"
+        );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn performance_indexes_install_outside_schema_transaction() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
@@ -628,6 +685,7 @@ mod tests {
              DROP INDEX idx_observation_workflow_facts_item;
              DROP INDEX idx_projection_rebuild_provenance_output;
              DROP INDEX idx_projection_rebuild_workflow_goal;
+             DROP INDEX idx_observations_valid_session_sequence;
              DROP INDEX idx_observations_identity_receipt;
              DROP INDEX idx_projection_dispositions_observation_receipt;",
         )
@@ -653,6 +711,7 @@ mod tests {
                     'idx_observation_workflow_facts_item',
                     'idx_projection_rebuild_provenance_output',
                     'idx_projection_rebuild_workflow_goal',
+                    'idx_observations_valid_session_sequence',
                     'idx_observations_identity_receipt',
                     'idx_projection_dispositions_observation_receipt'
                  )",

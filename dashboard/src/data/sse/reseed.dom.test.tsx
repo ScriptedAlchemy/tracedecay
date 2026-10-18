@@ -164,7 +164,7 @@ afterEach(() => {
   FakeEventSource.instances = [];
 });
 
-describe('SSE canonical refresh — events during the window', () => {
+describe('SSE canonical refresh, events during the window', () => {
   it('invalidates the targeted key of an event that lands mid-refresh', async () => {
     const client = newClient();
     const refresh = controlledInvalidation(client);
@@ -185,7 +185,7 @@ describe('SSE canonical refresh — events during the window', () => {
   });
 });
 
-describe('SSE canonical refresh — signals during the window', () => {
+describe('SSE canonical refresh, signals during the window', () => {
   it('serves a gap raised mid-refresh with exactly one follow-up', async () => {
     const client = newClient();
     const refresh = controlledInvalidation(client);
@@ -257,7 +257,7 @@ describe('SSE canonical refresh — signals during the window', () => {
   });
 });
 
-describe('SSE canonical refresh — failure is not success', () => {
+describe('SSE canonical refresh, failure is not success', () => {
   it('retains stale, the typed failure, and the watermarks when it rejects', async () => {
     const client = newClient();
     const refresh = controlledInvalidation(client);
@@ -291,7 +291,7 @@ describe('SSE canonical refresh — failure is not success', () => {
     });
     expect(refresh.spy).toHaveBeenCalledTimes(1);
 
-    // A genuinely newer signal is a new attempt, though — here a reconnect.
+    // A genuinely newer signal is a new attempt, though, here a reconnect.
     await tick(() => {
       source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, 1, RECONNECTED_RUN_ID));
     });

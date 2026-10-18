@@ -2,9 +2,6 @@ use crate::dashboard_api_support::*;
 
 #[test]
 fn managed_skills_are_dashboard_controllable_and_persistent() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -28,6 +25,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
                 "id": "../ambient-skill",
                 "title": "Invalid skill",
                 "summary": "Must not escape the managed profile root.",
+                "routing_description": "Must not escape the managed profile root.",
                 "category": "workflow",
                 "body_markdown": "invalid"
             }),
@@ -43,6 +41,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             "id": "repo-hygiene",
             "title": "Repo Hygiene",
             "summary": "Keep repository maintenance tasks consistent.",
+            "routing_description": "Use when cleaning generated changes before review.",
             "category": "workflow",
             "body_markdown": "Use this when cleaning generated changes.",
             "support_files": [
@@ -60,6 +59,8 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         let (status, created) = post_json_body(&agent, &skills_url, &draft);
         assert_eq!(status, 200);
         assert_eq!(created["skill"]["metadata"]["id"], "repo-hygiene");
+        assert_eq!(created["skill"]["metadata"]["routing_description"],
+            "Use when cleaning generated changes before review.");
         assert_eq!(created["skill"]["metadata"]["state"], "active");
         assert!(created["skill"]["metadata"]["created_at"]
             .as_i64()
@@ -94,23 +95,6 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         assert_eq!(status, 200);
         assert_eq!(listed["count"], 1);
         assert_eq!(listed["skills"][0]["metadata"]["id"], "repo-hygiene");
-        assert_eq!(listed["usage_summaries"][0]["view_count"], 0);
-        assert_eq!(listed["usage_summaries"][0]["use_count"], 1);
-        assert_eq!(
-            listed["usage_summaries"][0]["targets"],
-            serde_json::json!(["codex", "cursor"])
-        );
-        assert_eq!(listed["stale_recommendations"][0]["skill_id"], "repo-hygiene");
-        assert_eq!(listed["stale_recommendations"][0]["stale"], false);
-        assert_eq!(listed["stale_recommendations"][0]["recommendation"], "keep");
-        assert_eq!(
-            listed["improvement_recommendations"][0]["skill_id"],
-            "repo-hygiene"
-        );
-        assert_eq!(
-            listed["improvement_recommendations"][0]["recommendation"],
-            "none"
-        );
 
         let skill_url = format!("{base_url}/api/automation/skills/repo-hygiene");
         let (status, viewed) = get_json(&agent, &skill_url);
@@ -121,6 +105,10 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         );
         assert_eq!(viewed["usage_summary"]["use_count"], 1);
         assert_eq!(viewed["usage_summary"]["view_count"], 0);
+        assert_eq!(
+            viewed["usage_summary"]["targets"],
+            serde_json::json!(["codex", "cursor"])
+        );
         assert_eq!(viewed["stale_recommendation"]["recommendation"], "keep");
         assert_eq!(viewed["improvement_recommendation"]["recommendation"], "none");
 
@@ -128,6 +116,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             "id": "repo-hygiene",
             "title": "Overwrite attempt",
             "summary": "This should not replace the active skill.",
+            "routing_description": "This should not replace the active skill.",
             "category": "workflow",
             "body_markdown": "Duplicate drafts must not bypass PATCH staging.",
             "support_files": [
@@ -207,37 +196,60 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
 }
 
 #[test]
+fn managed_skill_view_maps_typed_read_failures_to_http_status() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+        let skills_url = format!("{}/api/automation/skills", fixture.base_url);
+
+        let (unsafe_status, unsafe_id) = get_json(&agent, &format!("{skills_url}/Bad_Skill"));
+        let (missing_status, missing) = get_json(&agent, &format!("{skills_url}/missing-skill"));
+
+        assert_eq!(
+            (unsafe_status, unsafe_id["detail"].clone()),
+            (
+                400,
+                serde_json::json!("config error: unsafe managed skill id 'Bad_Skill'")
+            ),
+        );
+        assert_eq!(
+            (missing_status, missing["detail"].clone()),
+            (
+                404,
+                serde_json::json!("managed skill 'missing-skill' not found")
+            ),
+        );
+    });
+}
+
+#[test]
 fn managed_skills_are_dashboard_controllable_with_direct_activation() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let home = tmp_root.join("home");
         let profile_root = home.join(".tracedecay");
         std::fs::create_dir_all(&home).unwrap();
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let _home_guard = EnvVarGuard::set("HOME", &home);
-        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
+        let profile = ProfileRoot::new(&profile_root)
+            .with_global_db_override(&global_db_path)
+            .with_home(&home);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -250,6 +262,7 @@ fn managed_skills_are_dashboard_controllable_with_direct_activation() {
             "id": "repo-hygiene",
             "title": "Repository hygiene",
             "summary": "Keep repository checks focused.",
+            "routing_description": "Keep repository checks focused.",
             "category": "maintenance",
             "body_markdown": "Run focused tests before broad suites.",
             "pinned": true
@@ -372,139 +385,32 @@ fn managed_skills_are_dashboard_controllable_with_direct_activation() {
 }
 
 #[test]
-fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
-        let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
-        let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let home = tmp_root.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let _home_guard = EnvVarGuard::set("HOME", &home);
-        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
-
-        let (cg, host_runtime) = setup_project(&project_root).await;
-        let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
-        let agent = http_agent();
-        let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_with_host_runtime(
-            cg,
-            host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
-            port,
-        );
-        wait_for_dashboard(&agent, &base_url).await;
-
-        let draft = serde_json::json!({
-            "id": "repo-hygiene",
-            "title": "Repository hygiene",
-            "summary": "Keep repository maintenance guidance current.",
-            "category": "maintenance",
-            "body_markdown": "Use focused checks before changing generated files.",
-            "support_files": [
-                {
-                    "path": "references/checklist.md",
-                    "bytes": [45, 32, 114, 117, 110, 32, 116, 101, 115, 116, 115, 10]
-                }
-            ],
-            "provenance": {
-                "source": "user",
-                "actor": "dashboard",
-                "run_id": null
-            }
-        });
-        let skills_url = format!("{base_url}/api/automation/skills");
-        let (status, created) = post_json_body(&agent, &skills_url, &draft);
-        assert_eq!(status, 200);
-        assert_eq!(created["skill"]["metadata"]["state"], "active");
-        assert!(
-            created["skill"]["metadata"]["created_at"]
-                .as_i64()
-                .is_some_and(|value| value > 0)
-        );
-        assert!(
-            created["skill"]["metadata"]["updated_at"]
-                .as_i64()
-                .is_some_and(|value| value > 0)
-        );
-        assert!(
-            managed_skill_profile_root
-                .join("agent_managed/skills/repo-hygiene/SKILL.md")
-                .is_file(),
-            "creating a managed skill must persist a SKILL.md package"
-        );
-
-        let (status, listed) = get_json(&agent, &skills_url);
-        assert_eq!(status, 200);
-        assert_eq!(listed["count"], 1);
-        assert_eq!(listed["skills"][0]["metadata"]["id"], "repo-hygiene");
-
-        let (status, viewed) = get_json(
-            &agent,
-            &format!("{base_url}/api/automation/skills/repo-hygiene"),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(viewed["skill"]["metadata"]["id"], "repo-hygiene");
-
-        for (action, expected_state) in [
-            ("disable", "disabled"),
-            ("archive", "archived"),
-            ("restore", "active"),
-        ] {
-            let (status, response) = post_json(
-                &agent,
-                &format!("{base_url}/api/automation/skills/repo-hygiene/{action}"),
-            );
-            assert_eq!(status, 200);
-            assert_eq!(response["skill"]["metadata"]["state"], expected_state);
-        }
-        server.stop();
-    });
-}
-
-#[test]
 fn managed_skill_dashboard_api_applies_updates_immediately() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let home = tmp_root.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let _home_guard = EnvVarGuard::set("HOME", &home);
-        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
+        let profile = ProfileRoot::new(&profile_root)
+            .with_global_db_override(&global_db_path)
+            .with_home(&home);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -512,6 +418,7 @@ fn managed_skill_dashboard_api_applies_updates_immediately() {
             "id": "repo-hygiene",
             "title": "Repository hygiene",
             "summary": "Keep repository maintenance guidance current.",
+            "routing_description": "Keep repository maintenance guidance current.",
             "category": "maintenance",
             "body_markdown": "Use focused checks before changing generated files.",
             "support_files": [

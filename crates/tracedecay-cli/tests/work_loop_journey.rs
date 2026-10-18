@@ -1,6 +1,8 @@
+// Its own test-transport binary, not a host_journeys_suite module: the journey
+// sets and restores process environment variables in-process.
 //! The production Work-loop journey, end to end, through the real daemon.
 //!
-//! Plans 09 and 24 both name one direct acceptance journey — seven steps that
+//! Plans 09 and 24 both name one direct acceptance journey, seven steps that
 //! have to hold together on a live surface rather than one at a time in unit
 //! isolation. Every leg of it already had a component test; nothing had ever
 //! run the whole loop through the daemon a client actually calls, so the
@@ -8,6 +10,18 @@
 //! admission gate that a start honours, a pinned configuration snapshot that a
 //! real process resolves, a terminal receipt that does not become task
 //! acceptance) were untested.
+//!
+//! The same daemon also runs the representative Work job: bounded parallel
+//! implementation with reviewed synthesis and restart recovery. A protected
+//! topology change raises the active-attempt caps to two; a second task is
+//! proposed, accepted, and admitted; each run is placed in its own linked
+//! worktree; one attempt per task runs at the same time; pausing one run
+//! fences a new attempt on it while its in-flight attempt still settles; the
+//! pause survives a daemon
+//! restart with its authority and both receipts unchanged; synthesis is
+//! refused until the run is resumed, then cites exactly the two source stdout
+//! digests and receives both on stdin; artifact hydration returns all three
+//! attempts' digests; and both placements are released.
 //!
 //! Surface. Everything below is a POST to the daemon's published HTTP
 //! application endpoint, authenticated with the token and origin from the
@@ -21,7 +35,7 @@
 //! accept a synthetic stand-in for an external provider's behaviour as
 //! acceptance evidence, and this test does not create one: it never parses,
 //! asserts on, or imitates provider semantics. What it does is exercise the
-//! spawn path — the thing the daemon owns — against a local executable pinned
+//! spawn path, the thing the daemon owns, against a local executable pinned
 //! through the production configuration control plane. That is the same
 //! mechanism the runtime uses for every provider (`PinnedWorkExecutable-
 //! BindingResolver`, `src/config/work_executable_binding.rs`): an executable id
@@ -38,33 +52,23 @@
 //! actually owns: the forwarded argv, the instructions on stdin, the sealed
 //! terminal state, and the requested-versus-actual route.
 
-use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::config::USER_DATA_DIR_ENV;
+use tracedecay_contracts::workflow_artifact_payload_digest;
 use tracedecay_domain::{
-    CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProposalId,
-    ProviderId, RefId, TaskId, UtcMicros, WorkApprovalPolicy, WorkEffectStateV1, WorkEgressPolicy,
-    WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
-    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy, WorkGraphVersionV1,
-    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkRelationReplanProposalV1, WorkSandboxPolicy, WorkflowOperationRef,
+    CommitId, ManifestDigest, ProposalId, RefId, TaskId, WorkEffectStateV1, WorkGraphVersionV1,
+    WorkRelationReplanProposalV1, WorkflowOperationRef,
 };
 use tracedecay_runtime_core::storage::PrivateStoreIo;
-
-/// Pins the global database away from the operator's profile. The production
-/// constant is crate-private, so the name is repeated here for the same reason
-/// the shared test harness repeats it.
-const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 /// The one Work task this journey drives from creation to acceptance.
 const TASK_ID: &str = "task.work-loop-journey";
@@ -75,10 +79,28 @@ const SETTLED_ATTEMPT_ID: &str = "attempt.work-loop-journey.settled";
 /// effect commit point.
 const CANCELLED_ATTEMPT_ID: &str = "attempt.work-loop-journey.cancelled";
 
+/// The second task, which runs beside the first one's parallel run.
+const PARALLEL_TASK_ID: &str = "task.work-loop-journey.parallel";
+/// Run A belongs to the journey task and is the one paused and synthesized.
+const PARALLEL_RUN_A: &str = "run.work-loop-journey.parallel-a";
+const PARALLEL_RUN_B: &str = "run.work-loop-journey.parallel-b";
+const ALPHA_ATTEMPT_ID: &str = "attempt.work-loop-journey.alpha";
+const BETA_ATTEMPT_ID: &str = "attempt.work-loop-journey.beta";
+const MISPLACED_ATTEMPT_ID: &str = "attempt.work-loop-journey.misplaced";
+const FENCED_ATTEMPT_ID: &str = "attempt.work-loop-journey.fenced";
+const SYNTHESIS_ATTEMPT_ID: &str = "attempt.work-loop-journey.synthesis";
+/// The stand-in derives each source's tag from the last word, so the two
+/// sources print different stdout and seal different artifact digests.
+const ALPHA_INSTRUCTIONS: &str = "Execute the admitted Work-loop parallel source alpha";
+const BETA_INSTRUCTIONS: &str = "Execute the admitted Work-loop parallel source beta";
+const SYNTHESIS_INSTRUCTIONS: &str = "Execute the admitted Work-loop synthesize step.";
+/// The two lines every stand-in invocation ends its stdout with.
+const STREAM_TAIL: &str = "{\"type\":\"system\",\"subtype\":\"init\"}\n\
+                           {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n";
+
 /// Executable ids pinned through the configuration control plane. They sort
 /// ascending, which the setting's own validator requires.
 const FAST_EXECUTABLE_ID: &str = "executable.work-loop-journey.fast";
-const SLOW_EXECUTABLE_ID: &str = "executable.work-loop-journey.slow";
 
 /// A symbol name the fixture defines exactly once, used as the source anchor
 /// step two retrieves and expands.
@@ -87,46 +109,15 @@ const ANCHOR_SYMBOL: &str = "work_loop_journey_anchor";
 /// Instructions written to the provider's stdin; asserted byte-exact on the
 /// other side.
 const INSTRUCTIONS: &str = "Execute the admitted Work-loop journey step.";
+const CANCELLATION_INSTRUCTIONS: &str = "Execute the admitted Work-loop cancellation step.";
 
 /// How long a poll may wait for an eventually consistent publication (project
 /// runtime mount, code index generation, background attempt settlement).
 const POLL_BUDGET: Duration = Duration::from_secs(180);
 
-/// Serializes the process-wide environment this binary pins. One test lives
-/// here today; the lock keeps that from being a latent assumption.
-fn lock_env() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Restores a process environment variable when the guard drops.
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        // The fixture holds the binary-wide environment lock for its whole
-        // life, so no other thread reads the environment while it is pinned.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
+#[path = "../../../tests/support/isolated_profile.rs"]
+mod isolated_profile;
+use isolated_profile::{apply_isolated_profile_env, run_ok};
 
 /// A live daemon over a registered project under a throwaway profile, plus the
 /// credentials it published for its own HTTP application endpoint.
@@ -139,14 +130,12 @@ struct ProductionDaemon {
     origin: String,
     authorization: String,
     agent: ureq::Agent,
+    retired_project: Option<PathBuf>,
     _home: TempDir,
-    _guards: Vec<EnvVarGuard>,
-    _env_lock: MutexGuard<'static, ()>,
 }
 
 impl ProductionDaemon {
     fn start() -> Self {
-        let env_lock = lock_env();
         let home = tempfile::tempdir().expect("isolated home");
         let root = home.path().to_path_buf();
         let profile = root.join(".tracedecay");
@@ -167,18 +156,10 @@ impl ProductionDaemon {
         )
         .expect("fixture source");
 
-        let guards = vec![
-            EnvVarGuard::set("HOME", &root),
-            EnvVarGuard::set("USERPROFILE", &root),
-            EnvVarGuard::set("XDG_CONFIG_HOME", root.join(".config")),
-            EnvVarGuard::set(USER_DATA_DIR_ENV, &profile),
-            EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-            EnvVarGuard::set("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1"),
-        ];
-
         run_ok(
             Command::new("git")
-                .args(["init", "--quiet"])
+                .args(["init", "--quiet", "--separate-git-dir"])
+                .arg(root.join("repository.git"))
                 .current_dir(&project),
             "git init",
         );
@@ -236,7 +217,6 @@ impl ProductionDaemon {
             "repository.daemon.{}",
             hex::encode(Sha256::digest(git_common_dir.to_string_lossy().as_bytes()))
         );
-
         let endpoint = authority["http_application_endpoint"]
             .as_str()
             .expect("published HTTP application endpoint")
@@ -254,15 +234,117 @@ impl ProductionDaemon {
             base_url: format!("http://{endpoint}"),
             origin: format!("http://{endpoint}"),
             authorization: format!("Bearer {token}"),
-            agent: ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .timeout_global(Some(Duration::from_secs(60)))
-                .build()
-                .into(),
+            agent: tracedecay_application::http_agent::http_agent(
+                ureq::Agent::config_builder()
+                    .http_status_as_error(false)
+                    .timeout_global(Some(Duration::from_secs(60)))
+                    .build(),
+            ),
+            retired_project: None,
             _home: home,
-            _guards: guards,
-            _env_lock: env_lock,
         }
+    }
+
+    fn restart(&mut self) {
+        if self
+            .daemon
+            .try_wait()
+            .expect("query daemon status")
+            .is_none()
+        {
+            self.daemon.kill().expect("stop daemon before restart");
+            self.daemon.wait().expect("reap daemon before restart");
+        }
+        let profile = self._home.path().join(".tracedecay");
+        let root = self._home.path();
+        let authority_path = daemon_authority_path(&profile);
+        if authority_path.exists() {
+            fs::remove_file(&authority_path).expect("remove stale daemon authority before restart");
+        }
+        let mut daemon = isolated(root, &profile)
+            .args(["daemon", "run"])
+            .current_dir(&self.project)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("daemon should restart");
+        let authority = wait_for_authority(&mut daemon, &authority_path);
+        let endpoint = authority["http_application_endpoint"]
+            .as_str()
+            .expect("restarted HTTP application endpoint");
+        let token = authority["auth_token"]
+            .as_str()
+            .expect("restarted auth token");
+        self.base_url = format!("http://{endpoint}");
+        self.origin = format!("http://{endpoint}");
+        self.authorization = format!("Bearer {token}");
+        self.daemon = daemon;
+    }
+
+    fn reopen_from_linked_worktree(&mut self) {
+        let linked = self._home.path().join("linked-project");
+        run_ok(
+            Command::new("git")
+                .args(["worktree", "add", "--detach", "--quiet"])
+                .arg(&linked)
+                .arg("HEAD")
+                .current_dir(&self.project),
+            "git worktree add",
+        );
+        self.daemon
+            .kill()
+            .expect("stop daemon before linked-worktree reopen");
+        self.daemon
+            .wait()
+            .expect("reap daemon before linked-worktree reopen");
+        let retired = self._home.path().join("retired-project");
+        fs::rename(&self.project, &retired).expect("retire primary fixture worktree");
+        self.retired_project = Some(retired);
+        self.project = linked;
+        self.restart();
+        run_ok(
+            isolated(self._home.path(), &self._home.path().join(".tracedecay"))
+                .arg("init")
+                .current_dir(&self.project),
+            "tracedecay init linked worktree",
+        );
+        let context = run_ok(
+            isolated(self._home.path(), &self._home.path().join(".tracedecay"))
+                .args(["projects", "context"])
+                .arg(&self.project)
+                .arg("--json")
+                .current_dir(&self.project),
+            "tracedecay projects context linked worktree",
+        );
+        let context: Value = serde_json::from_slice(&context).expect("linked project context JSON");
+        assert_eq!(
+            context["project"]["project_id"], self.project_id,
+            "linked worktree must retain the registered project identity: {context}"
+        );
+    }
+
+    fn restore_primary_worktree(&mut self) {
+        self.daemon
+            .kill()
+            .expect("stop daemon before primary-worktree restore");
+        self.daemon
+            .wait()
+            .expect("reap daemon before primary-worktree restore");
+        let primary = self._home.path().join("project");
+        let retired = self
+            .retired_project
+            .take()
+            .expect("retired primary fixture worktree");
+        fs::rename(retired, &primary).expect("restore primary fixture worktree");
+        self.project = primary;
+        self.restart();
+        run_ok(
+            isolated(self._home.path(), &self._home.path().join(".tracedecay"))
+                .arg("init")
+                .current_dir(&self.project),
+            "tracedecay init restored primary worktree",
+        );
     }
 
     /// External URL for a canonical route path, which already starts with
@@ -366,29 +448,9 @@ fn daemon_authority_path(profile_root: &Path) -> PathBuf {
 }
 
 fn isolated(home: &Path, profile: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(tracedecay_exe());
+    apply_isolated_profile_env(&mut command, home, profile);
     command
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env(USER_DATA_DIR_ENV, profile)
-        .env(GLOBAL_DB_ENV, profile.join("global.db"))
-        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
-    command
-}
-
-fn run_ok(command: &mut Command, label: &str) -> Vec<u8> {
-    let output = command
-        .output()
-        .unwrap_or_else(|error| panic!("{label} could not run: {error}"));
-    assert!(
-        output.status.success(),
-        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
 }
 
 fn wait_for_authority(daemon: &mut Child, path: &Path) -> Value {
@@ -495,36 +557,41 @@ fn product_task_create_draft(fixture: &ProductionDaemon) -> Value {
                 "title": "Work loop journey",
                 "created_at": occurred_at,
             },
-            "item": {
-                "input": {
-                    "task_id": TASK_ID,
-                    "hierarchy": {
-                        "initiative_id": "initiative.work-loop-journey",
-                        "plan_id": "plan.work-loop-journey",
-                        "milestone_id": "milestone.work-loop-journey",
-                    },
-                    "title": "Work loop journey",
-                    "dependencies": [],
-                    "informational_relations": [],
-                    "causal_candidates": [],
-                    "acceptance_criteria": [],
-                    "effort": 1,
-                    "scheduled_at": null,
-                    "deadline": null,
-                    "created_at": occurred_at,
-                    "updated_at": occurred_at,
-                },
-                "accepted_proposal": null,
-                "accepted_route": null,
-                "execution_admitted_at": null,
-                "evidence_links": [],
-                "accepted_criteria": {},
-                "accepted_attempts": [],
-                "handoffs": [],
-                "accepted_at": null,
-                "archived_at": null,
-            },
+            "item": work_item(TASK_ID, occurred_at),
         },
+    })
+}
+
+/// A fresh task under the journey's milestone.
+fn work_item(task_id: &str, occurred_at: i64) -> Value {
+    json!({
+        "input": {
+            "task_id": task_id,
+            "hierarchy": {
+                "initiative_id": "initiative.work-loop-journey",
+                "plan_id": "plan.work-loop-journey",
+                "milestone_id": "milestone.work-loop-journey",
+            },
+            "title": "Work loop journey",
+            "dependencies": [],
+            "informational_relations": [],
+            "causal_candidates": [],
+            "acceptance_criteria": [],
+            "effort": 1,
+            "scheduled_at": null,
+            "deadline": null,
+            "created_at": occurred_at,
+            "updated_at": occurred_at,
+        },
+        "accepted_proposal": null,
+        "accepted_route": null,
+        "execution_admitted_at": null,
+        "evidence_links": [],
+        "accepted_criteria": {},
+        "accepted_attempts": [],
+        "handoffs": [],
+        "accepted_at": null,
+        "archived_at": null,
     })
 }
 
@@ -572,15 +639,8 @@ where
 /// paths because the spawn path calls `env_clear()`.
 #[cfg(unix)]
 fn pinned_executable(directory: &Path, name: &str, body: &str) -> (PathBuf, ManifestDigest) {
-    use std::os::unix::fs::PermissionsExt;
-
     let path = directory.join(name);
-    fs::write(&path, body).expect("fixture executable");
-    let mut permissions = fs::metadata(&path)
-        .expect("executable metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&path, permissions).expect("executable mode");
+    write_executable_script(&path, body).expect("fixture executable");
     let digest = ManifestDigest::new(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(body.as_bytes()))
@@ -592,92 +652,67 @@ fn pinned_executable(directory: &Path, name: &str, body: &str) -> (PathBuf, Mani
     )
 }
 
-/// The execution snapshot a start-attempt command pins. Every configuration
-/// identity in it is read back out of the live control plane, so the attempt
-/// records the snapshot that actually governed it rather than a literal.
-struct PinnedConfiguration {
-    revision_id: String,
-    snapshot_id: String,
-    effective_behavior_digest: String,
-    resolution_provenance_digest: String,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execution_snapshot(
-    configuration: &PinnedConfiguration,
-    executable_id: &str,
-    artifact_digest: &ManifestDigest,
-    deadline: UtcMicros,
-) -> Value {
-    let snapshot = WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
-        configuration_revision_id: typed::<ConfigurationRevisionId>(&configuration.revision_id),
-        configuration_snapshot_id: typed::<ConfigurationSnapshotId>(&configuration.snapshot_id),
-        effective_behavior_digest: ManifestDigest::new(
-            configuration.effective_behavior_digest.clone(),
-        )
-        .expect("effective behavior digest"),
-        resolution_provenance_digest: ManifestDigest::new(
-            configuration.resolution_provenance_digest.clone(),
-        )
-        .expect("resolution provenance digest"),
-        route: requested_route(),
-        backend: WorkProviderBackendV1::ClaudeCodeCli,
-        protocol: WorkProviderProtocol::ClaudeStreamJson,
-        model: "model.work-loop-journey".to_owned(),
-        executable: WorkExecutableReference::new(executable_id.to_owned(), artifact_digest.clone())
-            .expect("pinned executable reference"),
-        sandbox: WorkSandboxPolicy::Required,
-        approval: WorkApprovalPolicy::Never,
-        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
-        egress: WorkEgressPolicy::Deny,
-        environment_allowlist: BTreeSet::new(),
-        credential_references: BTreeSet::new(),
-        limits: WorkExecutionLimits::new(128_000, 8_192, 65_536, 65_536, 65_536, 1)
-            .expect("execution limits"),
-        deadline,
-        fallback: WorkFallbackTopology::Disabled,
-        topology: tracedecay_domain::safe_work_topology_policy_v1(),
-    })
-    .expect("valid execution snapshot");
-    serde_json::to_value(snapshot).expect("execution snapshot encodes")
-}
-
-/// The route the attempt requests. `work_attempt_exec` reports the actual
-/// route alongside it on the receipt, which is what step six compares.
-fn requested_route() -> WorkProviderRouteV1 {
-    WorkProviderRouteV1::new(
-        typed::<ProviderId>("provider.work.claude-code-cli"),
-        typed::<WorkProviderRouteId>("route.work-loop-journey.v1"),
-    )
-    .expect("provider route")
-}
-
 fn start_attempt_body(
     project: &Path,
-    attempt_id: &str,
+    identity: &Value,
     execution_snapshot: Value,
+    instructions: &str,
     occurred_at: i64,
 ) -> Value {
     json!({
-        "task_id": TASK_ID,
-        "run_id": RUN_ID,
-        "attempt_id": attempt_id,
+        "task_id": identity["task_id"],
+        "run_id": identity["run_id"],
+        "attempt_id": identity["attempt_id"],
         "operation": typed::<WorkflowOperationRef>("operation.work-loop-journey"),
         "execution_snapshot": execution_snapshot,
         "worktree_root": project.to_string_lossy(),
         "reference": typed::<RefId>("refs/heads/work-loop-journey"),
         "commit": typed::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
-        "instructions": INSTRUCTIONS,
+        "instructions": instructions,
         "effect_state": WorkEffectStateV1::Observational,
         "occurred_at": occurred_at,
     })
+}
+
+fn attempt_identity(task_id: &str, run_id: &str, attempt_id: &str) -> Value {
+    json!({ "task_id": task_id, "run_id": run_id, "attempt_id": attempt_id })
+}
+
+/// Polls one attempt to its successful terminal receipt.
+fn settled_attempt(fixture: &ProductionDaemon, identity: &Value) -> Value {
+    poll_until("an attempt terminal receipt", || {
+        let attempt = fixture.payload(
+            "attempt status",
+            "/application/work/attempt-status",
+            identity,
+        );
+        match attempt["state"].as_str() {
+            Some("succeeded") => Ok(attempt),
+            Some("leased" | "running") => Err(format!("{attempt}")),
+            _ => panic!("{identity} reached an unexpected state: {attempt}"),
+        }
+    })
+}
+
+/// The stdout artifact the daemon must seal for exactly these stand-in bytes.
+fn stdout_artifact(stdout: &str) -> Value {
+    json!([{
+        "artifact_id": "artifact.provider.stdout",
+        "digest": workflow_artifact_payload_digest(stdout.as_bytes()).expect("stdout digest"),
+        "byte_length": stdout.len(),
+    }])
+}
+
+/// What a parallel source prints before the shared stream tail.
+fn source_stdout(tag: &str) -> String {
+    format!("{{\"type\":\"assistant\",\"source\":\"{tag}\"}}\n{STREAM_TAIL}")
 }
 
 /// The seven-step production Work loop, on the surface a client calls.
 #[cfg(unix)]
 #[test]
 fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
-    let fixture = ProductionDaemon::start();
+    let mut fixture = ProductionDaemon::start();
     let scripts = tempfile::tempdir().expect("provider script directory");
 
     // Warming. Mutation preparation is the first product-authority handoff.
@@ -728,19 +763,6 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     assert_eq!(
         replayed["event"], created["event"],
         "replaying a prepared command must return the same durable event"
-    );
-
-    // Hold one valid command at version one. A later committed proposal
-    // decision advances the graph; submitting this exact prepared command
-    // afterwards must prove the CAS rather than being silently re-anchored.
-    let stale_accept = prepare_product_mutation(
-        &fixture,
-        "prepare future stale acceptance",
-        json!({
-            "change": "accept_task",
-            "task_id": TASK_ID,
-            "evidence_by_criterion": {},
-        }),
     );
 
     // =====================================================================
@@ -797,14 +819,175 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "the expanded anchor must carry the fixture's own source: {expanded}"
     );
 
+    // Publish the provider route before proposal generation. The accepted
+    // proposal and later execution admission must therefore describe the same
+    // exact configured route rather than allowing start-attempt to invent one.
+    let argv_marker = scripts.path().join("argv");
+    let stdin_marker = scripts.path().join("stdin");
+    let started_marker = scripts.path().join("started");
+    let cwd_marker = scripts.path().join("cwd");
+    let synthesis_stdin_marker = scripts.path().join("synthesis-stdin");
+    let hold_marker = scripts.path().join("release-parallel-sources");
+    // The synthesize arm comes first because a synthesis stdin carries the
+    // sources' identities and stdout, which other arms would match. A
+    // parallel source holds until the test releases it, bounded so an
+    // orphan cannot outlive a failed run by more than five minutes.
+    let (provider_path, provider_digest) = pinned_executable(
+        scripts.path(),
+        "provider",
+        &format!(
+            r#"#!/bin/sh
+pwd -P > {cwd}
+printf '%s' "$*" > {argv}
+input=$(cat)
+printf '%s' "$input" > {stdin}
+case "$input" in
+  *synthesize*) printf '%s' "$input" > {synthesis_stdin};;
+  *cancellation*) printf x > {started}; i=0; while [ $i -lt 300 ]; do sleep 1; i=$((i+1)); done;;
+  *parallel*) tag=${{input##* }}; pwd -P > {scripts}/cwd-$tag; printf x > {scripts}/started-$tag; i=0; while [ ! -e {hold} ] && [ $i -lt 3000 ]; do sleep 0.1; i=$((i+1)); done; printf '{{"type":"assistant","source":"%s"}}\n' "$tag";;
+esac
+printf '%s' '{STREAM_TAIL}'
+exit 0
+"#,
+            cwd = cwd_marker.display(),
+            argv = argv_marker.display(),
+            stdin = stdin_marker.display(),
+            started = started_marker.display(),
+            synthesis_stdin = synthesis_stdin_marker.display(),
+            scripts = scripts.path().display(),
+            hold = hold_marker.display(),
+        ),
+    );
+    let observed = fixture.payload(
+        "configuration observed state",
+        "/application/configuration/configuration_observed_state",
+        &json!({}),
+    );
+    let base_revision = observed
+        .as_array()
+        .and_then(|components| components.first())
+        .and_then(|component| component["desired_revision_id"].as_str())
+        .unwrap_or_else(|| panic!("configuration observed state: {observed}"))
+        .to_owned();
+    let bindings_key = "work.executable_bindings.v1";
+    let set = fixture.payload(
+        "configuration set (work executable bindings)",
+        "/application/configuration/configuration_set",
+        &json!({
+            "layer": { "kind": "project", "project_id": fixture.project_id },
+            "key": bindings_key,
+            "value": {
+                "kind": "work_executable_bindings",
+                "value": [{
+                    "executable": {
+                        "executable_id": FAST_EXECUTABLE_ID,
+                        "artifact_digest": provider_digest,
+                    },
+                    "canonical_path": provider_path,
+                    "capabilities": ["claude_code_stream_json"],
+                    "routes": [{
+                        "route_id": "route.work-loop-journey.v1",
+                        "provider_capability_id": "provider.work.claude-code-cli",
+                        "model_id": "model.work-loop-journey",
+                        "effort": "standard",
+                        "declared_budget_ceiling": 128000,
+                        "content_location": "local",
+                        "correctness": "high",
+                        "sensitive_data_fitness": "high",
+                        "latency": "moderate",
+                        "cost": "moderate",
+                        "autonomy": "high",
+                        "evidence_quality": "high",
+                        "execution": {
+                            "sandbox": "required",
+                            "approval": "never",
+                            "filesystem": "workspace_write",
+                            "egress": "deny",
+                            "environment_allowlist": [],
+                            "credential_references": [],
+                            "limits": {
+                                "max_input_tokens": 128000,
+                                "max_output_tokens": 8192,
+                                "max_stdout_bytes": 65536,
+                                "max_stderr_bytes": 65536,
+                                "max_protocol_bytes": 65536,
+                                "max_concurrency": 2
+                            },
+                            "maximum_duration_micros": 600000000,
+                            "fallback": { "kind": "disabled" }
+                        }
+                    }],
+                }],
+            },
+            "expected_revision": base_revision,
+            "idempotency_key": "configuration.idempotency.work-loop-journey.bindings",
+        }),
+    );
+    assert_ne!(
+        set["result_revision_id"], set["base_revision_id"],
+        "a committed configuration write must advance the revision: {set}"
+    );
+
+    // The safe default topology admits one active attempt per repository and
+    // globally. The topology key is protected, so raising both caps to two
+    // goes through a redacted preview plan and its exact apply; the per-task
+    // cap stays at one because the parallel attempts belong to distinct tasks.
+    let topology = fixture.payload(
+        "configuration get (work topology policy)",
+        "/application/configuration/configuration_get",
+        &json!({ "key": "work.topology_policy.v1" }),
+    );
+    let mut policy = topology["effective_value"]["value"].clone();
+    assert_eq!(
+        policy["concurrency"]["maximum_active_per_repository"], 1,
+        "the default topology admits one active attempt: {topology}"
+    );
+    policy["concurrency"]["maximum_active_per_repository"] = json!(2);
+    policy["concurrency"]["maximum_global_active"] = json!(2);
+    let plan = fixture.payload(
+        "configuration protected preview (work topology policy)",
+        "/application/configuration/configuration_protected_preview",
+        &json!({
+            "change": { "kind": "replace_work_topology_policy", "value": policy },
+            "expected_revision": set["result_revision_id"],
+        }),
+    );
+    let topology_applied = fixture.payload(
+        "configuration protected apply (work topology policy)",
+        "/application/configuration/configuration_protected_apply",
+        &json!({
+            "plan_id": plan["plan_id"],
+            "expected_base_revision_id": plan["base_revision_id"],
+            "operation_digest": plan["operation_digest"],
+            "idempotency_key": "configuration.idempotency.work-loop-journey.topology",
+        }),
+    );
+    assert_eq!(
+        topology_applied["base_revision_id"], set["result_revision_id"],
+        "the protected apply must commit on the previewed revision: {topology_applied}"
+    );
+    fixture.restart();
+
+    // Hold one valid command at version one and at the newly mounted
+    // configuration revision. A later proposal decision advances only the
+    // graph, so submitting this command isolates the product graph CAS.
+    let stale_accept = prepare_product_mutation(
+        &fixture,
+        "prepare future stale acceptance",
+        json!({
+            "change": "accept_task",
+            "task_id": TASK_ID,
+            "evidence_by_criterion": {},
+        }),
+    );
+
     // =====================================================================
     // 3. The explained proposal, over the pinned redacted configuration.
     // =====================================================================
     // The control plane is the display authority for what governs the task.
     // A sensitive setting is readable as an effective value with its snapshot
-    // identity and provenance, and the plaintext of a credential never is —
+    // identity and provenance, and the plaintext of a credential never is.
     // this reads the setting the provider step will later be pinned to.
-    let bindings_key = "work.executable_bindings.v1";
     let resolved = fixture.payload(
         "configuration get (work executable bindings)",
         "/application/configuration/configuration_get",
@@ -818,17 +1001,26 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "a resolved setting must carry its snapshot identity and provenance: {resolved}"
     );
 
-    let proposal = fixture.payload(
-        "generate proposal",
-        "/application/work/generate-proposal",
-        &json!({
-            "selection": product_selection(&fixture),
-            "task_id": TASK_ID,
-            "proposal_id": "proposal.work-loop-journey.acceptance",
-            "live_git_evidence": Value::Null,
-            "occurred_at": now_micros(),
-        }),
-    );
+    let proposal_request = json!({
+        "selection": product_selection(&fixture),
+        "task_id": TASK_ID,
+        "proposal_id": "proposal.work-loop-journey.acceptance",
+        "live_git_evidence": Value::Null,
+        "occurred_at": now_micros(),
+    });
+    let proposal = poll_until("the configured Work route", || {
+        let (status, answer) =
+            fixture.post("/application/work/generate-proposal", &proposal_request);
+        if answer["kind"] != "success" {
+            return Err(format!("{status} {answer}"));
+        }
+        let payload = answer["value"]["outcome"]["value"]["payload"].clone();
+        if payload["proposal"]["route"]["decision"] == "selected" {
+            Ok(payload)
+        } else {
+            Err(format!("{payload}"))
+        }
+    });
     assert_eq!(proposal["proposal"]["based_on_version"], 1, "{proposal}");
     assert_eq!(
         proposal["decision"]["disposition"], "allow",
@@ -903,33 +1095,6 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     assert_eq!(stale["retry"], "after_revalidate", "{stale}");
     assert_eq!(stale["retry_scope"], "fresh_request", "{stale}");
 
-    // Acceptance is not admission: a start refuses until admission happens.
-    let unadmitted = fixture.problem(
-        "start before admission",
-        "/application/work/start-attempt",
-        &start_attempt_body(
-            &fixture.project,
-            SETTLED_ATTEMPT_ID,
-            execution_snapshot(
-                &PinnedConfiguration {
-                    revision_id: "configuration.work-loop-journey.probe".to_owned(),
-                    snapshot_id: "configuration-snapshot.work-loop-journey.probe".to_owned(),
-                    effective_behavior_digest: format!("sha256:{}", "1".repeat(64)),
-                    resolution_provenance_digest: format!("sha256:{}", "2".repeat(64)),
-                },
-                FAST_EXECUTABLE_ID,
-                &ManifestDigest::new(format!("sha256:{}", "3".repeat(64))).expect("probe digest"),
-                UtcMicros(now_micros().saturating_add(120 * 1_000_000)),
-            ),
-            now_micros(),
-        ),
-    );
-    assert_eq!(
-        unadmitted["code"], "application.work-attempt.execution-not-admitted",
-        "starting an attempt before execution admission must be refused by the \
-         admission gate, not by anything downstream of it: {unadmitted}"
-    );
-
     // The proposal recommendation now moves to admission, on its own evidence.
     let admission_proposal = fixture.payload(
         "generate proposal after acceptance",
@@ -955,8 +1120,35 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "prepare execution admission",
         json!({ "change": "admit_execution", "task_id": TASK_ID }),
     );
-    let admitted = commit_product_mutation(&fixture, "admit execution", &prepared_admission);
-    assert_eq!(admitted["verified_graph_version"]["graph_version"], 3);
+    let admitted = fixture.payload(
+        "admit execution",
+        "/application/work/admit-execution",
+        &prepared_admission["request"],
+    );
+    assert_eq!(
+        admitted["mutation"]["verified_graph_version"]["graph_version"],
+        3
+    );
+    assert_eq!(
+        admitted["execution_snapshot"]["effective_behavior_digest"],
+        resolved["effective_behavior_digest"],
+        "execution admission must pin the configuration read by the public control plane: {admitted}"
+    );
+    assert_eq!(
+        admitted["execution_snapshot"]["route"], proposal["proposal"]["route"]["recommended"],
+        "execution admission must pin the route the user accepted: {admitted}"
+    );
+    assert_eq!(admitted["mutation"]["replayed"], false);
+    let mut expected_replay = admitted.clone();
+    expected_replay["mutation"]["replayed"] = json!(true);
+    assert_eq!(
+        fixture.payload(
+            "replay execution admission",
+            "/application/work/admit-execution",
+            &prepared_admission["request"],
+        ),
+        expected_replay,
+    );
     let admitted_graph = product_graph(&fixture, "product graph after execution admission");
     let admitted_item = task_item(&admitted_graph);
     assert!(
@@ -969,117 +1161,40 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "admitting execution must not accept the task: {admitted_graph}"
     );
 
-    // Pin two provider executables through the production control plane. The
-    // resolver canonicalizes the path and re-digests the bytes at spawn time,
-    // so this is the same fail-closed admission a shipped provider goes
-    // through — the only fixture-shaped part is which bytes are pinned.
-    let argv_marker = scripts.path().join("argv");
-    let stdin_marker = scripts.path().join("stdin");
-    let (fast_path, fast_digest) = pinned_executable(
-        scripts.path(),
-        "fast-provider",
-        &format!(
-            "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ncat > {stdin}\n\
-             printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\"}}'\n\
-             printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}'\n\
-             exit 0\n",
-            argv = argv_marker.display(),
-            stdin = stdin_marker.display(),
-        ),
-    );
-    let started_marker = scripts.path().join("started");
-    let (slow_path, slow_digest) = pinned_executable(
-        scripts.path(),
-        "slow-provider",
-        &format!(
-            "#!/bin/sh\nprintf x > {started}\ncat > /dev/null\n\
-             i=0\nwhile [ $i -lt 300 ]; do sleep 1; i=$((i+1)); done\nexit 0\n",
-            started = started_marker.display(),
-        ),
-    );
-
-    let observed = fixture.payload(
-        "configuration observed state",
-        "/application/configuration/configuration_observed_state",
-        &json!({}),
-    );
-    let base_revision = observed
-        .as_array()
-        .and_then(|components| components.first())
-        .and_then(|component| component["desired_revision_id"].as_str())
-        .unwrap_or_else(|| panic!("configuration observed state: {observed}"))
-        .to_owned();
-
-    let set = fixture.payload(
-        "configuration set (work executable bindings)",
-        "/application/configuration/configuration_set",
+    // The fixture's Git directory lives outside the checkout, so a reader
+    // that opens it by itself sees a bare repository with no worktree.
+    let in_place_preflight = fixture.payload(
+        "clean in-place placement preflight",
+        "/application/work/placement-preflight",
         &json!({
-            "layer": { "kind": "project", "project_id": fixture.project_id },
-            "key": bindings_key,
-            "value": {
-                "kind": "work_executable_bindings",
-                "value": [
-                    {
-                        "executable": {
-                            "executable_id": FAST_EXECUTABLE_ID,
-                            "artifact_digest": fast_digest,
-                        },
-                        "canonical_path": fast_path,
-                        "capabilities": ["claude_code_stream_json"],
-                    },
-                    {
-                        "executable": {
-                            "executable_id": SLOW_EXECUTABLE_ID,
-                            "artifact_digest": slow_digest,
-                        },
-                        "canonical_path": slow_path,
-                        "capabilities": ["claude_code_stream_json"],
-                    },
-                ],
+            "task_id": TASK_ID,
+            "run_id": RUN_ID,
+            "target": {
+                "kind": "clean_in_place",
+                "root": null,
+                "network_free": true,
+                "in_place_acknowledged": true,
             },
-            "expected_revision": base_revision,
-            "idempotency_key": "configuration.idempotency.work-loop-journey.bindings",
+            "occurred_at": now_micros(),
         }),
     );
-    assert_ne!(
-        set["result_revision_id"], set["base_revision_id"],
-        "a committed configuration write must advance the revision: {set}"
+    assert_eq!(
+        in_place_preflight["observation"]["readable"], true,
+        "a --separate-git-dir checkout must read as its worktree: {in_place_preflight}"
+    );
+    assert!(
+        !in_place_preflight["blockers"]
+            .as_array()
+            .expect("preflight blockers")
+            .contains(&json!("target_unreadable")),
+        "{in_place_preflight}"
     );
 
-    // Read the pinned snapshot back and carry its exact identity into the
-    // attempt, so the attempt records the configuration that governed it.
-    let pinned_setting = fixture.payload(
-        "configuration get after pinning",
-        "/application/configuration/configuration_get",
-        &json!({ "key": bindings_key }),
-    );
-    let pinned = PinnedConfiguration {
-        revision_id: set["result_revision_id"]
-            .as_str()
-            .expect("result revision id")
-            .to_owned(),
-        snapshot_id: pinned_setting["snapshot_id"]
-            .as_str()
-            .expect("pinned snapshot id")
-            .to_owned(),
-        effective_behavior_digest: pinned_setting["effective_behavior_digest"]
-            .as_str()
-            .expect("effective behavior digest")
-            .to_owned(),
-        resolution_provenance_digest: pinned_setting["resolution_provenance_digest"]
-            .as_str()
-            .expect("resolution provenance digest")
-            .to_owned(),
-    };
-
-    // A run's first attempt seals its immutable deadline and topology. Every
-    // later attempt in the same run must carry that exact authority rather
-    // than silently extending the run by minting a fresh relative deadline.
-    let run_deadline = UtcMicros(now_micros().saturating_add(600 * 1_000_000));
     let start = start_attempt_body(
         &fixture.project,
-        SETTLED_ATTEMPT_ID,
-        execution_snapshot(&pinned, FAST_EXECUTABLE_ID, &fast_digest, run_deadline),
+        &attempt_identity(TASK_ID, RUN_ID, SETTLED_ATTEMPT_ID),
+        admitted["execution_snapshot"].clone(),
+        INSTRUCTIONS,
         now_micros(),
     );
     let leased = fixture.payload("start attempt", "/application/work/start-attempt", &start);
@@ -1136,6 +1251,11 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         INSTRUCTIONS,
         "the attempt instructions must reach the provider's stdin"
     );
+    assert_eq!(
+        fs::read_to_string(&cwd_marker).expect("provider cwd marker"),
+        format!("{}\n", fixture.project.canonicalize().unwrap().display()),
+        "a run without a placement runs in the worktree root its start named"
+    );
 
     // The receipt is truthful about the route: it reports what was requested
     // and what actually ran, as two separate facts.
@@ -1174,10 +1294,10 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         );
     }
     assert!(
-        components
-            .iter()
-            .any(|component| component["desired_revision_id"] == set["result_revision_id"]),
-        "the desired revision must be the one the write committed: {drift}"
+        components.iter().any(|component| {
+            component["desired_revision_id"] == topology_applied["result_revision_id"]
+        }),
+        "the desired revision must be the one the last write committed: {drift}"
     );
 
     // Resumption is idempotent over a settled attempt: a terminal receipt is
@@ -1239,8 +1359,9 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     // ladder and seal a cancelled receipt, not a fabricated success.
     let slow_start = start_attempt_body(
         &fixture.project,
-        CANCELLED_ATTEMPT_ID,
-        execution_snapshot(&pinned, SLOW_EXECUTABLE_ID, &slow_digest, run_deadline),
+        &attempt_identity(TASK_ID, RUN_ID, CANCELLED_ATTEMPT_ID),
+        admitted["execution_snapshot"].clone(),
+        CANCELLATION_INSTRUCTIONS,
         now_micros(),
     );
     fixture.payload(
@@ -1301,11 +1422,466 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "a cancelled attempt seals a cancelled receipt, never a success: {cancelled}"
     );
 
-    // A completed *runtime* is not an accepted *task*. The product graph read
-    // does not own a verified executor-topology join to the attempt rows, so it
-    // reports that runtime projection as unavailable instead of joining by a
-    // matching-looking identity. The exact attempt authority above remains the
-    // terminal-evidence source.
+    let prepared_parallel_task = prepare_product_mutation(
+        &fixture,
+        "prepare the parallel task",
+        json!({ "change": "add_task", "item": work_item(PARALLEL_TASK_ID, now_micros()) }),
+    );
+    commit_product_mutation(&fixture, "add the parallel task", &prepared_parallel_task);
+    let parallel_proposal = fixture.payload(
+        "generate the parallel task proposal",
+        "/application/work/generate-proposal",
+        &json!({
+            "selection": product_selection(&fixture),
+            "task_id": PARALLEL_TASK_ID,
+            "proposal_id": "proposal.work-loop-journey.parallel",
+            "live_git_evidence": Value::Null,
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(
+        parallel_proposal["decision"]["recommended_action"], "proceed_to_acceptance",
+        "{parallel_proposal}"
+    );
+    let prepared_parallel_accept = prepare_product_mutation(
+        &fixture,
+        "prepare the parallel proposal acceptance",
+        json!({
+            "change": "decide_proposal",
+            "proposal": parallel_proposal["proposal"].clone(),
+            "disposition": "accepted",
+        }),
+    );
+    commit_product_mutation(
+        &fixture,
+        "accept the parallel proposal",
+        &prepared_parallel_accept,
+    );
+    let prepared_parallel_admission = prepare_product_mutation(
+        &fixture,
+        "prepare the parallel execution admission",
+        json!({ "change": "admit_execution", "task_id": PARALLEL_TASK_ID }),
+    );
+    let parallel_admitted = fixture.payload(
+        "admit the parallel execution",
+        "/application/work/admit-execution",
+        &prepared_parallel_admission["request"],
+    );
+
+    // Each parallel run is placed in its own linked worktree, and an admitted
+    // placement binds where its run's attempts execute.
+    let runs = [
+        (TASK_ID, PARALLEL_RUN_A, "placement-a"),
+        (PARALLEL_TASK_ID, PARALLEL_RUN_B, "placement-b"),
+    ];
+    let placement_home = fixture._home.path().to_path_buf();
+    let placement_root = |name: &str| placement_home.join(name);
+    for (task_id, run_id, name) in runs {
+        run_ok(
+            Command::new("git")
+                .args(["worktree", "add", "--detach", "--quiet"])
+                .arg(placement_root(name))
+                .arg("HEAD")
+                .current_dir(&fixture.project),
+            "git worktree add placement",
+        );
+        let target = json!({
+            "task_id": task_id,
+            "run_id": run_id,
+            "target": {
+                "kind": "linked_worktree",
+                "root": placement_root(name).to_string_lossy(),
+                "network_free": true,
+                "in_place_acknowledged": false,
+            },
+            "occurred_at": now_micros(),
+        });
+        let preflight = fixture.payload(
+            "placement preflight",
+            "/application/work/placement-preflight",
+            &target,
+        );
+        assert_eq!(preflight["blockers"], json!([]), "{preflight}");
+        let placed = fixture.payload(
+            "admit placement",
+            "/application/work/admit-placement",
+            &target,
+        );
+        assert_eq!(placed["state"], "admitted", "{placed}");
+        assert_eq!(placed["authority_version"], 1, "{placed}");
+    }
+
+    let misplaced = fixture.problem(
+        "start a placed run outside its placement",
+        "/application/work/start-attempt",
+        &start_attempt_body(
+            &fixture.project,
+            &attempt_identity(TASK_ID, PARALLEL_RUN_A, MISPLACED_ATTEMPT_ID),
+            admitted["execution_snapshot"].clone(),
+            ALPHA_INSTRUCTIONS,
+            now_micros(),
+        ),
+    );
+    assert_eq!(
+        misplaced["code"], "application.work-attempt.placement-root-conflict",
+        "a start outside the admitted placement root must be refused: {misplaced}"
+    );
+
+    let alpha = attempt_identity(TASK_ID, PARALLEL_RUN_A, ALPHA_ATTEMPT_ID);
+    let beta = attempt_identity(PARALLEL_TASK_ID, PARALLEL_RUN_B, BETA_ATTEMPT_ID);
+    for (identity, snapshot, instructions, placement) in [
+        (&alpha, &admitted, ALPHA_INSTRUCTIONS, "placement-a"),
+        (&beta, &parallel_admitted, BETA_INSTRUCTIONS, "placement-b"),
+    ] {
+        let leased = fixture.payload(
+            "start a parallel source",
+            "/application/work/start-attempt",
+            &start_attempt_body(
+                &placement_root(placement),
+                identity,
+                snapshot["execution_snapshot"].clone(),
+                instructions,
+                now_micros(),
+            ),
+        );
+        assert_eq!(leased["state"], "leased", "{leased}");
+    }
+    // Neither source can exit before the hold is released, so one listing
+    // with both running, and both processes past their first instruction,
+    // is two attempts executing at the same time.
+    poll_until("both parallel sources running at once", || {
+        let listed = fixture.payload(
+            "list attempts",
+            "/application/work/list-attempts",
+            &json!({ "page_size": 50, "cursor": null }),
+        );
+        let running = |identity: &Value| {
+            listed["attempts"].as_array().is_some_and(|attempts| {
+                attempts.iter().any(|attempt| {
+                    &attempt["identity"] == identity && attempt["state"] == "running"
+                })
+            })
+        };
+        if running(&alpha)
+            && running(&beta)
+            && scripts.path().join("started-alpha").exists()
+            && scripts.path().join("started-beta").exists()
+        {
+            Ok(())
+        } else {
+            Err(format!("{listed}"))
+        }
+    });
+    for (tag, placement) in [("alpha", "placement-a"), ("beta", "placement-b")] {
+        assert_eq!(
+            fs::read_to_string(scripts.path().join(format!("cwd-{tag}")))
+                .expect("source cwd marker"),
+            format!(
+                "{}\n",
+                placement_root(placement).canonicalize().unwrap().display()
+            ),
+            "a placed run's provider must run in its placement root"
+        );
+    }
+
+    let run_a = json!({ "task_id": TASK_ID, "run_id": PARALLEL_RUN_A });
+    let paused = fixture.payload(
+        "pause run A",
+        "/application/work/pause-run",
+        &json!({
+            "task_id": TASK_ID,
+            "run_id": PARALLEL_RUN_A,
+            "reason": "operator_request",
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(paused["state"], "paused", "{paused}");
+    assert_eq!(
+        paused["fenced_attempts"],
+        json!([ALPHA_ATTEMPT_ID]),
+        "a pause must record exactly the in-flight attempt it fenced: {paused}"
+    );
+    let fenced = fixture.problem(
+        "start an attempt on the paused run",
+        "/application/work/start-attempt",
+        &start_attempt_body(
+            &placement_root("placement-a"),
+            &attempt_identity(TASK_ID, PARALLEL_RUN_A, FENCED_ATTEMPT_ID),
+            admitted["execution_snapshot"].clone(),
+            ALPHA_INSTRUCTIONS,
+            now_micros(),
+        ),
+    );
+    assert_eq!(
+        fenced["code"], "application.work-run-control.paused",
+        "{fenced}"
+    );
+
+    // A pause fences new reservations and never kills what is in flight, so
+    // the fenced source still settles once released.
+    fs::write(&hold_marker, b"").expect("release the parallel sources");
+    let alpha_settled = settled_attempt(&fixture, &alpha);
+    let beta_settled = settled_attempt(&fixture, &beta);
+    assert_eq!(
+        alpha_settled["artifacts"],
+        stdout_artifact(&source_stdout("alpha")),
+        "{alpha_settled}"
+    );
+    assert_eq!(
+        beta_settled["artifacts"],
+        stdout_artifact(&source_stdout("beta")),
+        "{beta_settled}"
+    );
+
+    fixture.restart();
+    let control = fixture.payload(
+        "run A control after restart",
+        "/application/work/run-control",
+        &run_a,
+    );
+    assert_eq!(control["state"], "controlled", "{control}");
+    assert_eq!(
+        control["control"], paused,
+        "the pause must survive a restart with the same authority: {control}"
+    );
+    assert_eq!(control["live_attempts"], json!([]), "{control}");
+    let run_b_control = fixture.payload(
+        "run B control after restart",
+        "/application/work/run-control",
+        &json!({ "task_id": PARALLEL_TASK_ID, "run_id": PARALLEL_RUN_B }),
+    );
+    assert_eq!(
+        run_b_control["state"], "uncontrolled",
+        "pausing run A must not control run B: {run_b_control}"
+    );
+    for (identity, settled) in [(&alpha, &alpha_settled), (&beta, &beta_settled)] {
+        assert_eq!(
+            &fixture.payload(
+                "parallel source after restart",
+                "/application/work/attempt-status",
+                identity,
+            ),
+            settled,
+            "a restart must not rewrite a settled source"
+        );
+    }
+
+    let synthesis_identity = attempt_identity(TASK_ID, PARALLEL_RUN_A, SYNTHESIS_ATTEMPT_ID);
+    let synthesis = json!({
+        "start": start_attempt_body(
+            &placement_root("placement-a"),
+            &synthesis_identity,
+            admitted["execution_snapshot"].clone(),
+            SYNTHESIS_INSTRUCTIONS,
+            now_micros(),
+        ),
+        "output_name": "output.work-loop-journey.synthesis",
+        "sources": [alpha, beta],
+    });
+    let refused_synthesis = fixture.problem(
+        "synthesize on the paused run",
+        "/application/work/synthesize",
+        &synthesis,
+    );
+    assert_eq!(
+        refused_synthesis["code"], "application.work-run-control.paused",
+        "{refused_synthesis}"
+    );
+    let resumed = fixture.payload(
+        "resume run A",
+        "/application/work/resume-run",
+        &json!({
+            "task_id": TASK_ID,
+            "run_id": PARALLEL_RUN_A,
+            "reason": "operator_request",
+            "expected_authority_version": paused["authority"],
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(resumed["state"], "running", "{resumed}");
+
+    let mut misplaced_synthesis = synthesis.clone();
+    misplaced_synthesis["start"] = start_attempt_body(
+        &fixture.project,
+        &attempt_identity(TASK_ID, PARALLEL_RUN_A, MISPLACED_ATTEMPT_ID),
+        admitted["execution_snapshot"].clone(),
+        SYNTHESIS_INSTRUCTIONS,
+        now_micros(),
+    );
+    let misplaced_synthesis = fixture.problem(
+        "synthesize a placed run outside its placement",
+        "/application/work/synthesize",
+        &misplaced_synthesis,
+    );
+    assert_eq!(
+        misplaced_synthesis["code"], "application.work-attempt.placement-root-conflict",
+        "a synthesis outside the admitted placement root must be refused: {misplaced_synthesis}"
+    );
+
+    let synthesized = fixture.payload(
+        "synthesize the parallel sources",
+        "/application/work/synthesize",
+        &synthesis,
+    );
+    let alpha_digest = &alpha_settled["artifacts"][0]["digest"];
+    let beta_digest = &beta_settled["artifacts"][0]["digest"];
+    assert_ne!(alpha_digest, beta_digest, "the sources must disagree");
+    let mut cited = vec![alpha_digest.clone(), beta_digest.clone()];
+    cited.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    assert_eq!(synthesized["synthesis"], "admitted", "{synthesized}");
+    assert_eq!(
+        synthesized["draft"]["cited_source_digests"],
+        json!(cited),
+        "synthesis must cite exactly the two source digests: {synthesized}"
+    );
+    assert_eq!(synthesized["uncited"], json!([]), "{synthesized}");
+    let synthesis_settled = settled_attempt(&fixture, &synthesis_identity);
+    let synthesis_stdin =
+        fs::read_to_string(&synthesis_stdin_marker).expect("synthesis stdin marker");
+    assert!(
+        synthesis_stdin.starts_with(SYNTHESIS_INSTRUCTIONS)
+            && [alpha_digest, beta_digest]
+                .iter()
+                .all(|digest| synthesis_stdin.contains(digest.as_str().expect("digest"))),
+        "the synthesis provider must receive both source digests: {synthesis_stdin}"
+    );
+
+    let hydrated = fixture.payload(
+        "hydrate attempt artifacts",
+        "/application/work/hydrate-artifacts",
+        &json!({ "page_size": 25, "cursor": null }),
+    );
+    assert_eq!(hydrated["state"], "hydrated", "{hydrated}");
+    for (identity, stdout) in [
+        (&alpha, source_stdout("alpha")),
+        (&beta, source_stdout("beta")),
+        (&synthesis_identity, STREAM_TAIL.to_owned()),
+    ] {
+        let row = hydrated["attempts"]
+            .as_array()
+            .and_then(|attempts| {
+                attempts
+                    .iter()
+                    .find(|attempt| &attempt["identity"] == identity)
+            })
+            .unwrap_or_else(|| panic!("hydration must return {identity}: {hydrated}"));
+        assert_eq!(row["artifacts"], stdout_artifact(&stdout), "{row}");
+    }
+    assert_eq!(
+        synthesis_settled["artifacts"],
+        stdout_artifact(STREAM_TAIL),
+        "{synthesis_settled}"
+    );
+
+    for (task_id, run_id, _) in runs {
+        let released = fixture.payload(
+            "release placement",
+            "/application/work/release-placement",
+            &json!({
+                "task_id": task_id,
+                "run_id": run_id,
+                "expected_authority_version": 1,
+                "occurred_at": now_micros(),
+            }),
+        );
+        assert_eq!(released["state"], "released", "{released}");
+        assert_eq!(released["authority_version"], 2, "{released}");
+        assert_eq!(
+            fixture.payload(
+                "placement status after release",
+                "/application/work/placement-status",
+                &json!({ "task_id": task_id, "run_id": run_id }),
+            ),
+            json!({ "state": "placed", "placement": released }),
+        );
+    }
+
+    let complete_runtime = product_graph(&fixture, "product graph with complete runtime coverage");
+    assert_eq!(
+        complete_runtime["snapshot"]["runtime"]["coverage"],
+        json!({ "coverage": "complete" }),
+        "the primary worktree authority must hydrate its exact attempts: {complete_runtime}"
+    );
+    assert_eq!(
+        complete_runtime["snapshot"]["runtime"]["attempts"]
+            .as_array()
+            .map(Vec::len),
+        Some(5),
+        "complete coverage must include the two serial, two parallel, and one synthesis \
+         attempt: {complete_runtime}"
+    );
+    let complete_replan = fixture.payload(
+        "generate a replan proposal with complete runtime coverage",
+        "/application/work/generate-proposal",
+        &json!({
+            "selection": product_selection(&fixture),
+            "task_id": TASK_ID,
+            "proposal_id": "proposal.work-loop-journey.replan.complete",
+            "live_git_evidence": Value::Null,
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(
+        complete_replan["decision"]["disposition"], "allow",
+        "complete terminal coverage must support a product decision: {complete_replan}"
+    );
+    assert_eq!(
+        complete_replan["decision"]["recommended_action"], "replan",
+        "complete terminal coverage must recommend replanning: {complete_replan}"
+    );
+
+    let version_before_applied_replan = graph_version(&complete_runtime);
+    let relation_proposal = WorkRelationReplanProposalV1::new(
+        typed::<ProposalId>("proposal.work-loop-journey.relation-replan"),
+        typed::<TaskId>(TASK_ID),
+        WorkGraphVersionV1::new(version_before_applied_replan).expect("current graph version"),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("valid relation replan proposal");
+    let prepared_replan_decision = prepare_product_mutation(
+        &fixture,
+        "prepare relation replan decision",
+        json!({
+            "change": "decide_relation_replan",
+            "proposal": serde_json::to_value(&relation_proposal).expect("relation proposal JSON"),
+            "disposition": "accepted",
+        }),
+    );
+    let decided_replan = commit_product_mutation(
+        &fixture,
+        "accept relation replan",
+        &prepared_replan_decision,
+    );
+    assert_eq!(
+        decided_replan["verified_graph_version"]["graph_version"],
+        version_before_applied_replan + 1,
+        "accepting the replan proposal advances one graph version: {decided_replan}"
+    );
+    let prepared_replan = prepare_product_mutation(
+        &fixture,
+        "prepare accepted relation replan",
+        json!({
+            "change": "apply_relation_replan",
+            "proposal_id": "proposal.work-loop-journey.relation-replan",
+        }),
+    );
+    let applied = commit_product_mutation(
+        &fixture,
+        "apply the accepted relation replan",
+        &prepared_replan,
+    );
+    assert_eq!(
+        applied["verified_graph_version"]["graph_version"],
+        version_before_applied_replan + 2,
+        "applying the accepted replan advances the next graph version: {applied}"
+    );
+
+    // The linked worktree shares the repository-scoped product graph but owns
+    // a distinct exact runtime authority. With the primary checkout absent,
+    // this route cannot read the primary worktree's accepted attempt receipts.
+    fixture.reopen_from_linked_worktree();
     let with_evidence = product_graph(&fixture, "product graph after terminal runtime evidence");
     assert_eq!(
         with_evidence["snapshot"]["runtime"]["coverage"],
@@ -1368,6 +1944,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         version_before_replan,
         "an indeterminate proposal must not be applied: {after_replan_proposal}"
     );
+    fixture.restore_primary_worktree();
     let attempts_after_replan = fixture.payload(
         "attempt status after the replan proposal",
         "/application/work/attempt-status",
@@ -1376,56 +1953,6 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     assert_eq!(
         attempts_after_replan["terminal"], settled["terminal"],
         "an indeterminate proposal must not disturb runtime receipts: {attempts_after_replan}"
-    );
-
-    // Applying it is a two-event, version-checked product mutation: first the
-    // relation proposal is explicitly accepted, then that accepted proposal is
-    // applied. No direct dependency command survives this authority boundary.
-    let relation_proposal = WorkRelationReplanProposalV1::new(
-        typed::<ProposalId>("proposal.work-loop-journey.relation-replan"),
-        typed::<TaskId>(TASK_ID),
-        WorkGraphVersionV1::new(version_before_replan).expect("current graph version"),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    )
-    .expect("valid relation replan proposal");
-    let prepared_replan_decision = prepare_product_mutation(
-        &fixture,
-        "prepare relation replan decision",
-        json!({
-            "change": "decide_relation_replan",
-            "proposal": serde_json::to_value(&relation_proposal).expect("relation proposal JSON"),
-            "disposition": "accepted",
-        }),
-    );
-    let decided_replan = commit_product_mutation(
-        &fixture,
-        "accept relation replan",
-        &prepared_replan_decision,
-    );
-    assert_eq!(
-        decided_replan["verified_graph_version"]["graph_version"],
-        version_before_replan + 1,
-        "accepting the replan proposal advances one graph version: {decided_replan}"
-    );
-    let prepared_replan = prepare_product_mutation(
-        &fixture,
-        "prepare accepted relation replan",
-        json!({
-            "change": "apply_relation_replan",
-            "proposal_id": "proposal.work-loop-journey.relation-replan",
-        }),
-    );
-    let applied = commit_product_mutation(
-        &fixture,
-        "apply the accepted relation replan",
-        &prepared_replan,
-    );
-    assert_eq!(
-        applied["verified_graph_version"]["graph_version"],
-        version_before_replan + 2,
-        "applying the accepted replan advances the next graph version: {applied}"
     );
 
     // Acceptance closes the loop, and only acceptance does.
@@ -1444,6 +1971,18 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     assert!(
         task_item(&accepted_task_graph)["accepted_at"].is_number(),
         "{accepted_task}"
+    );
+    assert_eq!(
+        fixture.payload(
+            "replay execution admission after task completion",
+            "/application/work/admit-execution",
+            &prepared_admission["request"],
+        ),
+        expected_replay,
+    );
+    assert_eq!(
+        product_graph(&fixture, "graph after completed admission replay")["snapshot"]["graph"],
+        accepted_task_graph["snapshot"]["graph"],
     );
     let closed = fixture.payload(
         "generate a proposal against the accepted task",
@@ -1465,6 +2004,332 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         Value::Null,
         "a denied proposal recommends nothing: {closed}"
     );
+
+    // =====================================================================
+    // 8. The same parallel job through the guided path.
+    // =====================================================================
+    // One request names both sources, their placements, and the synthesis.
+    // The provider holds each source again until released, and prints the
+    // same bytes for the same tag, so every digest must equal the
+    // step-by-step one.
+    fs::remove_file(&hold_marker).expect("hold the guided sources");
+    let home = fixture._home.path().to_path_buf();
+    let guided_root = |tag: &str| home.join(format!("guided-placement-{tag}"));
+    for tag in ["alpha", "beta"] {
+        fs::remove_file(scripts.path().join(format!("started-{tag}")))
+            .expect("clear the step-by-step start marker");
+        run_ok(
+            Command::new("git")
+                .args(["worktree", "add", "--detach", "--quiet"])
+                .arg(guided_root(tag))
+                .arg("HEAD")
+                .current_dir(&fixture.project),
+            "git worktree add guided placement",
+        );
+    }
+    let guided_source = |tag: &str| {
+        json!({
+            "key": tag,
+            "title": format!("Guided source {tag}"),
+            "instructions": format!("Execute the guided Work job parallel source {tag}"),
+            "placement": {
+                "kind": "linked_worktree",
+                "root": guided_root(tag).to_string_lossy(),
+                "network_free": true,
+                "in_place_acknowledged": false,
+            },
+        })
+    };
+    let job = json!({
+        "job": "guided-journey",
+        "title": "Guided Work journey",
+        "base": {
+            "reference": "refs/heads/work-loop-journey",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+        },
+        "effect_state": "observational",
+        "tasks": [guided_source("alpha"), guided_source("beta")],
+        "synthesis": {
+            "task": "alpha",
+            "output_name": "output.work-loop-journey.synthesis",
+            "instructions": SYNTHESIS_INSTRUCTIONS,
+        },
+    });
+    let guided_alpha = attempt_identity(
+        "task.guided-journey.alpha",
+        "run.guided-journey.alpha",
+        "attempt.guided-journey.alpha.source",
+    );
+    let guided_beta = attempt_identity(
+        "task.guided-journey.beta",
+        "run.guided-journey.beta",
+        "attempt.guided-journey.beta.source",
+    );
+    let guided_synthesis = attempt_identity(
+        "task.guided-journey.alpha",
+        "run.guided-journey.alpha",
+        "attempt.guided-journey.alpha.synthesis",
+    );
+
+    // The first call runs every per-task step stage by stage, then stops at
+    // the held sources. Each step is that operation's own effect receipt.
+    let (started, waiting) = advance_job(&fixture, &job);
+    let step = |step: &str, task: &str| json!({ "step": step, "task": task });
+    assert_eq!(
+        started
+            .iter()
+            .map(|record| record["step"].clone())
+            .collect::<Vec<_>>(),
+        [
+            "create_task",
+            "accept_proposal",
+            "admit_execution",
+            "admit_placement",
+            "start_source"
+        ]
+        .into_iter()
+        .flat_map(|name| [step(name, "alpha"), step(name, "beta")])
+        .collect::<Vec<_>>(),
+        "the guided path runs each existing operation once per task: {waiting}"
+    );
+    for record in &started {
+        assert_eq!(
+            record["request_id"],
+            format!(
+                "guided.guided-journey.{}.{}",
+                record["step"]["step"].as_str().expect("step name"),
+                record["step"]["task"].as_str().expect("step task"),
+            ),
+            "{record}"
+        );
+        let operation = match record["step"]["step"].as_str() {
+            Some("create_task" | "accept_proposal") => "use-case.work.mutate_graph",
+            Some("admit_execution") => "use-case.work.admit_execution",
+            Some("admit_placement") => "use-case.work.admit_placement",
+            _ => "use-case.work.start_attempt",
+        };
+        assert_eq!(record["receipt"]["operation"], operation, "{record}");
+        assert_eq!(record["receipt"]["outcome"], "completed", "{record}");
+        assert_eq!(
+            record["receipt"]["request_id"], record["request_id"],
+            "{record}"
+        );
+    }
+    let admitted_snapshot = |task: &str| {
+        started
+            .iter()
+            .find(|record| record["step"] == step("admit_execution", task))
+            .map(|record| record["result"]["value"]["execution_snapshot"].clone())
+            .expect("admission record")
+    };
+    for (task, identity) in [("alpha", &guided_alpha), ("beta", &guided_beta)] {
+        let leased = started
+            .iter()
+            .find(|record| record["step"] == step("start_source", task))
+            .map(|record| record["result"]["value"].clone())
+            .expect("start record");
+        assert_eq!(&leased["identity"], identity, "{leased}");
+        assert_eq!(
+            leased["execution"]["execution_snapshot"],
+            admitted_snapshot(task),
+            "a guided start carries the snapshot its admission returned: {leased}"
+        );
+        assert_eq!(
+            leased["execution"]["worktree_root"],
+            json!(guided_root(task).to_string_lossy()),
+            "a guided source runs in its own admitted placement root: {leased}"
+        );
+    }
+    poll_until("both guided sources running at once", || {
+        let running = [&guided_alpha, &guided_beta].iter().all(|identity| {
+            fixture.payload(
+                "guided source status",
+                "/application/work/attempt-status",
+                identity,
+            )["state"]
+                == "running"
+        });
+        if running
+            && scripts.path().join("started-alpha").exists()
+            && scripts.path().join("started-beta").exists()
+        {
+            Ok(())
+        } else {
+            Err("sources not yet running together".to_owned())
+        }
+    });
+
+    // Pause is an advanced operation on the guided run. The job keeps
+    // waiting on its in-flight sources, then survives a restart.
+    let guided_paused = fixture.payload(
+        "pause the guided run",
+        "/application/work/pause-run",
+        &json!({
+            "task_id": "task.guided-journey.alpha",
+            "run_id": "run.guided-journey.alpha",
+            "reason": "operator_request",
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(
+        guided_paused["fenced_attempts"],
+        json!(["attempt.guided-journey.alpha.source"]),
+        "{guided_paused}"
+    );
+    let (none, still_waiting) = advance_job(&fixture, &job);
+    assert_eq!(none, Vec::<Value>::new(), "{still_waiting}");
+    assert_eq!(still_waiting["state"], "waiting", "{still_waiting}");
+    fs::write(&hold_marker, b"").expect("release the guided sources");
+    let guided_alpha_settled = settled_attempt(&fixture, &guided_alpha);
+    let guided_beta_settled = settled_attempt(&fixture, &guided_beta);
+    assert_eq!(
+        guided_alpha_settled["artifacts"], alpha_settled["artifacts"],
+        "{guided_alpha_settled}"
+    );
+    assert_eq!(
+        guided_beta_settled["artifacts"], beta_settled["artifacts"],
+        "{guided_beta_settled}"
+    );
+    fixture.restart();
+
+    // The paused run refuses synthesis with the problem the step-by-step
+    // path got, and the job stops there.
+    let (none, refused) = advance_job(&fixture, &job);
+    assert_eq!(none, Vec::<Value>::new(), "{refused}");
+    assert_eq!(refused["state"], "refused", "{refused}");
+    assert_eq!(
+        refused["step"],
+        json!({ "step": "synthesize" }),
+        "{refused}"
+    );
+    for field in ["kind", "code", "message", "retry"] {
+        assert_eq!(
+            refused["problem"][field], refused_synthesis[field],
+            "the guided refusal must be the operation's own: {refused}"
+        );
+    }
+    fixture.payload(
+        "resume the guided run",
+        "/application/work/resume-run",
+        &json!({
+            "task_id": "task.guided-journey.alpha",
+            "run_id": "run.guided-journey.alpha",
+            "reason": "operator_request",
+            "expected_authority_version": guided_paused["authority"],
+            "occurred_at": now_micros(),
+        }),
+    );
+
+    // The CLI drives the rest to completion with one command.
+    let request_file = scripts.path().join("guided-job.json");
+    fs::write(&request_file, job.to_string()).expect("guided job request file");
+    let output = run_ok(
+        isolated(&home, &home.join(".tracedecay"))
+            .args([
+                "work",
+                "advance-job",
+                "--until-settled",
+                "--json",
+                "--request-file",
+            ])
+            .arg(&request_file)
+            .current_dir(&fixture.project),
+        "tracedecay work advance-job --until-settled",
+    );
+    let calls = String::from_utf8(output)
+        .expect("UTF-8 CLI output")
+        .lines()
+        .map(|line| {
+            let answer: Value = serde_json::from_str(line).expect("one JSON result per call");
+            assert_eq!(answer["outcome"]["outcome"], "effect", "{answer}");
+            answer["outcome"]["value"]["payload"].clone()
+        })
+        .collect::<Vec<_>>();
+    let finished = calls
+        .iter()
+        .flat_map(|call| call["performed"].as_array().cloned().unwrap_or_default());
+    let finished = finished.collect::<Vec<_>>();
+    assert_eq!(
+        finished
+            .iter()
+            .map(|record| record["step"].clone())
+            .collect::<Vec<_>>(),
+        [
+            json!({ "step": "synthesize" }),
+            step("release_placement", "alpha"),
+            step("release_placement", "beta"),
+        ],
+        "{calls:?}"
+    );
+    for (record, operation) in finished.iter().zip([
+        "use-case.work.synthesize",
+        "use-case.work.release_placement",
+        "use-case.work.release_placement",
+    ]) {
+        assert_eq!(record["receipt"]["operation"], operation, "{record}");
+        assert_eq!(record["receipt"]["outcome"], "completed", "{record}");
+    }
+    let synthesized = &finished[0]["result"]["value"];
+    assert_eq!(synthesized["synthesis"], "admitted", "{synthesized}");
+    assert_eq!(
+        synthesized["draft"]["cited_source_digests"],
+        json!(cited),
+        "guided synthesis must cite the step-by-step source digests: {synthesized}"
+    );
+    assert_eq!(synthesized["uncited"], json!([]), "{synthesized}");
+    for released in &finished[1..] {
+        assert_eq!(
+            released["result"]["value"]["state"], "released",
+            "{released}"
+        );
+        assert_eq!(
+            released["result"]["value"]["authority_version"], 2,
+            "{released}"
+        );
+    }
+    let completed = &calls.last().expect("a settled call")["state"];
+    assert_eq!(completed["state"], "completed", "{completed}");
+    assert_eq!(
+        completed["sources"],
+        json!([guided_alpha_settled, guided_beta_settled]),
+        "the guided sources are the attempts' own receipts: {completed}"
+    );
+    let guided_synthesis_settled = settled_attempt(&fixture, &guided_synthesis);
+    assert_eq!(
+        completed["synthesis"], guided_synthesis_settled,
+        "{completed}"
+    );
+    assert_eq!(
+        guided_synthesis_settled["execution"]["worktree_root"],
+        json!(guided_root("alpha").to_string_lossy()),
+        "the guided synthesis runs in its task's admitted placement root: {guided_synthesis_settled}"
+    );
+    assert_eq!(
+        guided_synthesis_settled["artifacts"], synthesis_settled["artifacts"],
+        "{guided_synthesis_settled}"
+    );
+
+    // A settled job converges: calling again performs nothing.
+    let (none, again) = advance_job(&fixture, &job);
+    assert_eq!(none, Vec::<Value>::new(), "{again}");
+    assert_eq!(&again, completed, "{again}");
+}
+
+/// Calls `advance-job` until it stops advancing, returning every performed
+/// step record and the final job state.
+fn advance_job(fixture: &ProductionDaemon, job: &Value) -> (Vec<Value>, Value) {
+    let mut performed = Vec::new();
+    loop {
+        let answer = fixture.payload(
+            "advance the guided job",
+            "/application/work/advance-job",
+            job,
+        );
+        performed.extend(answer["performed"].as_array().cloned().unwrap_or_default());
+        if answer["state"]["state"] != "advancing" {
+            return (performed, answer["state"].clone());
+        }
+    }
 }
 
 /// The journey's task, out of the current product graph payload.
@@ -1479,3 +2344,7 @@ fn task_item(graph: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| panic!("the journey task must be in the product graph: {graph}"))
 }
+
+#[path = "support/tracedecay_exe.rs"]
+mod tracedecay_exe;
+use tracedecay_exe::tracedecay_exe;

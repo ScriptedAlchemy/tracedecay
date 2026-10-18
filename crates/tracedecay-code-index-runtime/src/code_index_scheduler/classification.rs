@@ -15,8 +15,10 @@
 //! batch.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use gix::bstr::ByteSlice;
+use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
 /// Failure to classify worktree changes through gix.
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +67,17 @@ pub struct ClassifiedChangeV1 {
     pub class: WorktreeChangeClassV1,
 }
 
+/// One classified change whose Git path bytes are not UTF-8. No `String`
+/// names it, so it lives outside `changes`: a lossy decode could equal a
+/// real UTF-8 path and make the string-keyed candidate and changed sets
+/// treat this change as that file's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonUtf8ClassifiedChangeV1 {
+    /// The exact Git path bytes.
+    pub git_path: Vec<u8>,
+    pub class: WorktreeChangeClassV1,
+}
+
 /// A complete, truthful classification of one worktree snapshot.
 #[derive(Clone, Debug, Default)]
 pub struct WorktreeChangeClassificationV1 {
@@ -72,26 +85,37 @@ pub struct WorktreeChangeClassificationV1 {
     /// baseline present in the checkout).
     committed_baseline: BTreeSet<String>,
     changes: Vec<ClassifiedChangeV1>,
+    /// Changes whose Git path bytes are not UTF-8, kept byte-exact so the
+    /// worktree is still dirty on a non-UTF-8-only transition.
+    non_utf8_changes: Vec<NonUtf8ClassifiedChangeV1>,
+    /// Present paths whose Git bytes are not UTF-8, so no `String` above
+    /// names them.
+    non_utf8_paths: BTreeSet<Vec<u8>>,
 }
 
 impl WorktreeChangeClassificationV1 {
     /// Classify the current status of `repository` truthfully.
-    #[hotpath::measure(label = "daemon.code_index.capture.classify")]
+    #[tracing::instrument(name = "daemon.code_index.capture.classify", level = "trace", skip_all)]
     pub fn classify(repository: &gix::Repository) -> Result<Self, ClassificationErrorV1> {
         let index = repository
             .index_or_empty()
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
-        let committed_baseline = index
-            .entries()
-            .iter()
-            .filter_map(|entry| {
-                std::str::from_utf8(entry.path(&index).as_ref())
-                    .ok()
-                    .map(str::to_owned)
-            })
-            .collect::<BTreeSet<_>>();
+        let mut committed_baseline = BTreeSet::new();
+        let mut non_utf8_paths = BTreeSet::new();
+        for entry in index.entries() {
+            let path: &[u8] = entry.path(&index).as_ref();
+            match std::str::from_utf8(path) {
+                Ok(path) => {
+                    committed_baseline.insert(path.to_owned());
+                }
+                Err(_) => {
+                    non_utf8_paths.insert(path.to_vec());
+                }
+            }
+        }
 
         let mut changes = Vec::new();
+        let mut non_utf8_changes = Vec::new();
         let status = repository
             .status(gix::progress::Discard)
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?
@@ -107,27 +131,60 @@ impl WorktreeChangeClassificationV1 {
             // Submodule content belongs to its own repository identity and is
             // never indexed as part of this worktree.
             .index_worktree_submodules(None)
+            .index_worktree_options_mut(|options| {
+                options.thread_limit = Some(GIT_STATUS_MODIFICATION_CHECK_THREADS);
+            })
             .into_iter(Vec::<gix::bstr::BString>::new())
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
         for item in status {
             let item = item.map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
-            let path = item.location().to_str_lossy().into_owned();
-            // TraceDecay's own project-local private store is daemon-written
-            // state, never checkout content. Counting it as a worktree change
-            // would make every enrolled checkout permanently "dirty" — see
-            // [`is_tracedecay_owned_state_path`].
-            if is_tracedecay_owned_state_path(&path) {
-                continue;
-            }
+            let location: &[u8] = item.location().as_ref();
             if let Some(class) = classify_item(&item) {
-                changes.push(ClassifiedChangeV1 { path, class });
+                match location.to_str() {
+                    Ok(path) => changes.push(ClassifiedChangeV1 {
+                        path: path.to_owned(),
+                        class,
+                    }),
+                    Err(_) => {
+                        if class.presents_content() {
+                            non_utf8_paths.insert(location.to_vec());
+                        } else {
+                            non_utf8_paths.remove(location);
+                        }
+                        non_utf8_changes.push(NonUtf8ClassifiedChangeV1 {
+                            git_path: location.to_vec(),
+                            class,
+                        });
+                    }
+                }
             }
         }
 
         Ok(Self {
             committed_baseline,
             changes,
+            non_utf8_changes,
+            non_utf8_paths,
         })
+    }
+
+    /// Paths whose Git bytes are not UTF-8, present or not.
+    pub fn non_utf8_paths(&self) -> &BTreeSet<Vec<u8>> {
+        &self.non_utf8_paths
+    }
+
+    /// Paths no logical path can name because their Git bytes are not UTF-8,
+    /// limited to those naming a regular file (through links) under
+    /// `project_root`, the files capture would read.
+    pub fn non_utf8_files(&self, project_root: &Path) -> Vec<Vec<u8>> {
+        self.non_utf8_paths
+            .iter()
+            .filter(|path| {
+                gix::path::from_byte_slice(path)
+                    .is_ok_and(|relative| project_root.join(relative).is_file())
+            })
+            .cloned()
+            .collect()
     }
 
     /// Present files worth hashing and considering for (re)indexing: the
@@ -143,6 +200,21 @@ impl WorktreeChangeClassificationV1 {
             }
         }
         candidates
+    }
+
+    /// Whether the worktree carries any change relative to the committed
+    /// baseline, UTF-8-named or not.
+    pub fn has_changes(&self) -> bool {
+        !(self.changes().is_empty() && self.non_utf8_changes().is_empty())
+    }
+
+    /// Whether any classified change is a merge conflict.
+    pub fn has_conflicted(&self) -> bool {
+        self.changes()
+            .iter()
+            .map(|change| change.class)
+            .chain(self.non_utf8_changes().iter().map(|change| change.class))
+            .any(|class| class == WorktreeChangeClassV1::Conflicted)
     }
 
     /// Paths whose indexing evidence changed relative to the last generation:
@@ -166,9 +238,16 @@ impl WorktreeChangeClassificationV1 {
             .collect()
     }
 
-    /// All classified changes (for reporting and tests).
+    /// All classified changes a `String` can name (for reporting and tests).
+    /// Non-UTF-8 changes live under [`Self::non_utf8_changes`].
     pub fn changes(&self) -> &[ClassifiedChangeV1] {
         &self.changes
+    }
+
+    /// All classified changes whose Git path bytes are not UTF-8, kept
+    /// byte-exact (for reporting and tests).
+    pub fn non_utf8_changes(&self) -> &[NonUtf8ClassifiedChangeV1] {
+        &self.non_utf8_changes
     }
 
     /// The class recorded for `path`, if any change touched it.
@@ -179,33 +258,6 @@ impl WorktreeChangeClassificationV1 {
             .find(|change| change.path == path)
             .map(|change| change.class)
     }
-}
-
-/// Whether `path` (repository-relative, forward-slash) names a retired
-/// project-local `TraceDecay` state directory or something inside it.
-///
-/// `TraceDecay` no longer writes anything into a checkout, but projects enrolled
-/// before the working-tree cutover may still carry a legacy
-/// `.tracedecay/` directory (e.g. `enrollment.json`, see
-/// `tracedecay_runtime_core::storage::identity::legacy_enrollment_marker_path`).
-/// Those bytes were produced by `TraceDecay`, are never checkout content, and
-/// are not indexable source. Unless the user happens to ignore
-/// `.tracedecay/`, gix reports them as untracked, so treating them as a
-/// worktree change makes *every* legacy checkout look permanently dirty: no
-/// capture can then seal an exact HEAD tree, no published generation carries a
-/// `source_revision`, and exact-scope admission refuses forever with
-/// `lsp-code-index-source-revision-unavailable`.
-///
-/// The legacy indexing lane already applies this rule
-/// (`crate::tracedecay::indexing::is_tracedecay_state_path`); it is private to
-/// that module, so the code-index classifier states it independently rather
-/// than widening a legacy surface.
-fn is_tracedecay_owned_state_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    normalized == crate::config::TRACEDECAY_DIR
-        || normalized
-            .strip_prefix(crate::config::TRACEDECAY_DIR)
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// Map one gix status item to a truthful class, or `None` for items that carry
@@ -250,122 +302,4 @@ fn classify_item(item: &gix::status::Item) -> Option<WorktreeChangeClassV1> {
             IndexWorktreeItem::Rewrite { .. } => return None,
         },
     })
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-    use std::process::Command;
-    use tempfile::TempDir;
-
-    fn git(root: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git failed: {args:?}");
-    }
-
-    /// A committed checkout with no ambient ignore rules. The operator's global
-    /// excludes file is deliberately pointed at a path that does not exist, so
-    /// this test observes the same untracked set a user without a
-    /// `.tracedecay/` ignore entry would.
-    fn committed_repo() -> TempDir {
-        let root = TempDir::new().expect("root");
-        git(root.path(), &["init", "-q"]);
-        git(root.path(), &["config", "user.name", "T"]);
-        git(root.path(), &["config", "user.email", "t@example.invalid"]);
-        git(
-            root.path(),
-            &[
-                "config",
-                "core.excludesFile",
-                root.path().join("absent-global-excludes").to_str().unwrap(),
-            ],
-        );
-        std::fs::create_dir_all(root.path().join("src")).unwrap();
-        std::fs::write(root.path().join("src/lib.rs"), "pub fn a() {}\n").unwrap();
-        git(root.path(), &["add", "."]);
-        git(root.path(), &["commit", "-qm", "init"]);
-        root
-    }
-
-    #[test]
-    fn tracedecay_state_paths_are_recognised() {
-        assert!(is_tracedecay_owned_state_path(".tracedecay"));
-        assert!(is_tracedecay_owned_state_path(
-            ".tracedecay/enrollment.json"
-        ));
-        assert!(is_tracedecay_owned_state_path(
-            ".tracedecay/code-index/generation-0.json"
-        ));
-        assert!(!is_tracedecay_owned_state_path(".tracedecay-notes/a.rs"));
-        assert!(!is_tracedecay_owned_state_path("src/.tracedecay/a.rs"));
-        assert!(!is_tracedecay_owned_state_path("src/lib.rs"));
-    }
-
-    /// Enrolling a project writes `.tracedecay/enrollment.json` into the
-    /// checkout. That is `TraceDecay`'s own state, so a checkout that is
-    /// otherwise clean must stay classified clean — otherwise no capture can
-    /// seal an exact HEAD tree and exact-scope admission refuses forever with
-    /// `lsp-code-index-source-revision-unavailable`.
-    #[test]
-    fn enrollment_state_does_not_make_a_committed_checkout_dirty() {
-        let repo = committed_repo();
-        let repository = gix::open(repo.path()).expect("open repository");
-        assert!(
-            WorktreeChangeClassificationV1::classify(&repository)
-                .expect("classify committed checkout")
-                .changes()
-                .is_empty(),
-            "a committed checkout starts clean"
-        );
-
-        std::fs::create_dir_all(repo.path().join(".tracedecay")).unwrap();
-        std::fs::write(
-            repo.path().join(".tracedecay/enrollment.json"),
-            "{\"project_id\":\"project.test\",\"storage_mode\":\"profile_sharded\"}\n",
-        )
-        .unwrap();
-
-        let classification = WorktreeChangeClassificationV1::classify(&repository)
-            .expect("classify enrolled checkout");
-        assert!(
-            classification.changes().is_empty(),
-            "TraceDecay's own private store is not a worktree change: {:?}",
-            classification.changes()
-        );
-        assert!(
-            !classification
-                .candidate_paths()
-                .iter()
-                .any(|path| path.starts_with(".tracedecay/")),
-            "TraceDecay's own private store is never an indexing candidate"
-        );
-    }
-
-    /// The exclusion is scoped to `TraceDecay`'s own directory only; real
-    /// untracked source still classifies the worktree as dirty.
-    #[test]
-    fn untracked_source_still_classifies_as_a_change() {
-        let repo = committed_repo();
-        std::fs::create_dir_all(repo.path().join(".tracedecay")).unwrap();
-        std::fs::write(repo.path().join(".tracedecay/enrollment.json"), "{}\n").unwrap();
-        std::fs::write(repo.path().join("src/extra.rs"), "pub fn b() {}\n").unwrap();
-
-        let repository = gix::open(repo.path()).expect("open repository");
-        let classification =
-            WorktreeChangeClassificationV1::classify(&repository).expect("classify");
-        assert_eq!(
-            classification
-                .changed_paths()
-                .into_iter()
-                .collect::<Vec<_>>(),
-            vec!["src/extra.rs".to_owned()],
-            "only the untracked source file is a change"
-        );
-    }
 }

@@ -1,102 +1,50 @@
 //! Production activation and execution for authenticated query search.
 //!
-//! Exact/lexical/graph search starts from the checked-in fallback workload and
-//! durable query/cursor keys. Optional-stage upgrades additionally require an
-//! accepted profile/evaluation from the configured authority port.
+//! Exact/lexical/graph search mounts the checked-in fallback policy and the
+//! durable query/cursor keys of the published generation's privacy domain.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracedecay_application::ResolvedScope;
+use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, ComponentRevision, ConfigurationRevisionId,
-    DiversityPolicy, ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile,
-    FusionProfileId, PrincipalId, PrivacyDomainId, QueryNormalizationRevision, RelationEdgeKindV1,
-    RetrievalAnchorId, RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, VectorWatermark,
+    AuthorizationRevision, CalibrationProfileId, CodeGenerationId, ComponentRevision,
+    DiversityPolicy, ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile, PrincipalId,
+    QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget,
+    RetrievalCursor, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, VectorWatermark,
 };
 
-use super::CodeIndexSchedulerRegistryV1;
+use super::{
+    CodeIndexOwnerSignalsV1, CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1,
+    serving::CodeTextQueryOwnerReadinessV1,
+};
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
 };
-use tracedecay_query::retrieval::fusion::{CompositionLaneInput, RetrievalCursorKeyringV1};
-use tracedecay_query::retrieval::graph::{
-    GraphExecutionControl, GraphLaneRequest, GraphLaneRetriever,
-};
+use tracedecay_query::retrieval::fusion::CompositionLaneInput;
+use tracedecay_query::retrieval::graph::GraphLaneRequest;
 use tracedecay_query::retrieval::lexical::{
-    LexicalLaneEvidence, LexicalLaneRequest, lexical_query_parts,
+    LexicalLaneEvidence, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
+    LexicalRouteReceiptV1, LexicalRoutingV1, merge_lexical_routes,
 };
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::{
-    AuthorizedQueryFallbackV1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
-    RetrievalPortError, SanitizedRetrievalRequestV1,
+    AuthorizedQueryFallbackV1, QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_GRAPH_SCORE_DOMAIN_V1,
+    QUERY_LEXICAL_CALIBRATION_CEILING_MICROS_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1,
+    QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1, RetrievalPortError,
+    SanitizedRetrievalRequestV1,
 };
 
 const QUERY_FALLBACK_PROFILE_ID: &str = "query-fallback";
-const QUERY_FALLBACK_WORKLOAD_JSON: &str = include_str!(
-    "../../../../tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
-);
-
-/// Immutable evidence that a configured authority accepted one exact query
-/// profile for one exact admitted scope.
-pub struct AcceptedQueryEvaluationV1 {
-    pub status: crate::search_eval::DirectEvaluationStatusV1,
-    pub scope_digest: tracedecay_domain::ManifestDigest,
-    pub profile_id: FusionProfileId,
-    pub evaluation_result_anchor: RetrievalAnchorId,
-}
-
-/// Provider-owned activation material. The keyring is already constructed by
-/// the configured durable key authority, so raw key bytes never cross
-/// this daemon orchestration boundary.
-pub struct QueryAuthorityMaterialV1 {
-    pub scope: ResolvedScope,
-    pub evaluation: AcceptedQueryEvaluationV1,
-    pub profile: FusionProfile,
-    pub diversity: DiversityPolicy,
-    pub ranking_revision: ComponentRevision,
-    pub keyring: Option<RetrievalCursorKeyringV1>,
-}
-
-#[derive(Debug, Error)]
-pub enum QueryAuthorityProviderErrorV1 {
-    #[error("configured query authority is unavailable: {0}")]
-    Unavailable(String),
-}
-
-/// Daemon-facing port over an existing configuration/key authority.
-///
-/// Returning a list is intentional: the daemon rejects zero or multiple
-/// candidates rather than selecting an arbitrary profile or key owner.
-pub trait QueryAuthorityProviderV1: Send + Sync {
-    fn accepted_authorities(
-        &self,
-        scope: &ResolvedScope,
-        privacy_domain: &PrivacyDomainId,
-    ) -> Result<Vec<QueryAuthorityMaterialV1>, QueryAuthorityProviderErrorV1>;
-}
 
 #[derive(Debug, Error)]
 pub enum QueryRuntimeMountErrorV1 {
-    #[error(transparent)]
-    Provider(#[from] QueryAuthorityProviderErrorV1),
-    #[error("no accepted query authority exists for the exact admitted scope")]
-    AuthorityMissing,
-    #[error("multiple query authorities match the exact admitted scope")]
-    AuthorityAmbiguous,
-    #[error("query authority scope does not exactly match the admitted scope")]
-    ScopeMismatch,
-    #[error("query evaluation is not PASS")]
-    EvaluationNotPassed,
-    #[error("query evaluation no longer binds the supplied profile")]
-    EvaluationStale,
-    #[error("durable query cursor key is unavailable")]
-    KeyUnavailable,
-    #[error("query/cursor key privacy domain does not match the published generation")]
-    PrivacyDomainMismatch,
     #[error("no complete current code generation exists for the exact admitted scope")]
     GenerationUnavailable,
     #[error("checked-in query fallback policy is invalid: {0}")]
@@ -109,104 +57,116 @@ pub enum QueryRuntimeMountErrorV1 {
     Mount(String),
 }
 
-/// Mount the checked-in exact/lexical/graph policy without claiming that an
-/// optional-stage evaluation passed. This authority remains callable while no
-/// semantic profile has been genuinely evaluated and published.
+/// Mount the checked-in exact/lexical/graph policy for one exact admitted
+/// scope.
 pub async fn mount_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
-    let authority = prepare_core_query_authority_on_project_open(
-        registry,
-        project_root,
-        scope,
-        cursor_keys,
-    )
-    .await?;
+    let authority =
+        prepare_core_query_authority_on_project_open(registry, project_root, scope, cursor_keys)
+            .await?;
     registry
         .mount_query_authority(project_root, scope, authority)
         .await
         .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
 }
 
-/// Mount the core fallback without abandoning an in-progress committed
-/// semantic activation. The registry repeats the exact revision check under
-/// the same activation gate used by the final authority-pair publication.
-pub async fn mount_core_query_authority_for_committed_fallback_on_project_open(
+/// One deferred mount attempt, terminal unless the generation is still
+/// unpublished for this exact scope.
+#[derive(PartialEq, Eq)]
+pub enum DeferredMountAttemptV1 {
+    Terminal,
+    AwaitNextPublication,
+}
+
+/// Waits for the first retained generation of `project_root` and then
+/// retries the query-authority mount. Exits when the mount reaches any terminal
+/// outcome or the registry closes (daemon shutdown).
+///
+/// The open-time mount runs before code-index activation, so the first ready
+/// check usually misses. The root's owner signals wake each retry, including
+/// a restart `Noop` restore that publishes nothing and only flips the
+/// serving-generation watch; there is no standing ready poll.
+pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
     registry: &CodeIndexSchedulerRegistryV1,
-    project_root: &Path,
+    project_root: PathBuf,
+    mut attempt: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = DeferredMountAttemptV1>,
+{
+    // Subscribe before probing so a seat that lands between subscribe and the
+    // ready check still wakes the retry. The mount needs only the text owner,
+    // so it demands no decoded generation.
+    let mut signals = CodeIndexOwnerSignalsV1::subscribe(registry, &project_root).await;
+    loop {
+        if registry
+            .retained_text_owner_for_root(&project_root)
+            .await
+            .is_some()
+            && attempt().await != DeferredMountAttemptV1::AwaitNextPublication
+        {
+            return;
+        }
+        if signals.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Classify one deferred mount outcome. `GenerationUnavailable` keeps waiting;
+/// every other result is terminal.
+pub fn classify_deferred_query_authority_mount(
     scope: &ResolvedScope,
-    expected_revision: &ConfigurationRevisionId,
-    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
-) -> Result<(), QueryRuntimeMountErrorV1> {
-    let authority = prepare_core_query_authority_on_project_open(
-        registry,
-        project_root,
-        scope,
-        cursor_keys,
-    )
-    .await?;
-    registry
-        .mount_query_authority_for_committed_fallback(
-            project_root,
-            scope,
-            expected_revision,
-            authority,
-        )
-        .await
-        .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
+    outcome: Result<(), QueryRuntimeMountErrorV1>,
+) -> DeferredMountAttemptV1 {
+    match outcome {
+        Ok(()) => {
+            tracing::info!(
+                event = "query_authority_mount",
+                outcome = "mounted",
+                project_id = %scope.project_id,
+                deferred = true,
+            );
+            DeferredMountAttemptV1::Terminal
+        }
+        Err(QueryRuntimeMountErrorV1::GenerationUnavailable) => {
+            DeferredMountAttemptV1::AwaitNextPublication
+        }
+        Err(error) => {
+            tracing::warn!(
+                event = "query_authority_mount",
+                outcome = "deferred_failed",
+                project_id = %scope.project_id,
+                reason = %error,
+                "deferred query authority mount abandoned"
+            );
+            DeferredMountAttemptV1::Terminal
+        }
+    }
 }
 
 async fn prepare_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
 ) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
-    let root_text = registry.latest_text_serving_for_root(project_root).await;
-    let privacy_domain = if let Some(text) = registry
-        .latest_text_serving_for_scope(scope)
+    let root_text = registry.retained_text_owner_for_root(project_root).await;
+    let privacy_domain = registry
+        .retained_text_owner_freshness_for_scope(scope)
         .await
+        .map(|(text, _)| text)
         .or(root_text)
-    {
-        text.metadata().manifest().privacy_domain.clone()
-    } else {
-        registry
-            .latest_complete_fresh_for_scope(scope)
-            .await
-            .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?
-            .generation
-            .manifest()
-            .privacy_domain
-            .clone()
-    };
-    let workload: crate::search_eval::CandidateWorkloadV1 =
-        serde_json::from_str(QUERY_FALLBACK_WORKLOAD_JSON)
-            .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    let material =
-        crate::search_eval::direct_evaluated_profile_material(&workload, QUERY_FALLBACK_PROFILE_ID)
-            .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    if material.rerank.is_some() {
-        return Err(QueryRuntimeMountErrorV1::InvalidFallbackPolicy(
-            "query fallback unexpectedly enables reranking".to_owned(),
-        ));
-    }
-    let workload_digest = crate::search_eval::compute_workload_digest(&workload)
-        .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    let policy_anchor = RetrievalAnchorId::new(format!(
-        "policy.query-fallback.workload.v1.{workload_digest}"
-    ))
-    .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    let profile = FusionProfile {
-        evaluation_result_anchor: policy_anchor.clone(),
-        ..material.profile
-    };
-    let diversity = DiversityPolicy {
-        evaluation_result_anchor: Some(policy_anchor),
-        ..material.diversity
-    };
+        .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?
+        .metadata()
+        .manifest()
+        .privacy_domain
+        .clone();
+    let (profile, diversity) = core_query_policy()?;
     let ranking_revision =
         ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
             .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
@@ -222,88 +182,101 @@ async fn prepare_core_query_authority_on_project_open(
     Ok(authority)
 }
 
-/// Resolve and validate one exact accepted authority without mounting it.
-///
-/// Kept separate from the async registry mutation so project-open callers can
-/// report precise configuration failures before changing mounted state.
-pub fn prepare_query_authority(
-    scope: &ResolvedScope,
-    privacy_domain: &PrivacyDomainId,
-    provider: &dyn QueryAuthorityProviderV1,
-) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
-    scope
-        .validate()
-        .map_err(|_| QueryRuntimeMountErrorV1::ScopeMismatch)?;
-    privacy_domain
-        .validate()
-        .map_err(|_| QueryRuntimeMountErrorV1::PrivacyDomainMismatch)?;
-    let mut candidates = provider.accepted_authorities(scope, privacy_domain)?;
-    if candidates.is_empty() {
-        return Err(QueryRuntimeMountErrorV1::AuthorityMissing);
-    }
-    if candidates.len() != 1 {
-        return Err(QueryRuntimeMountErrorV1::AuthorityAmbiguous);
-    }
-    let material = candidates
-        .pop()
-        .ok_or(QueryRuntimeMountErrorV1::AuthorityMissing)?;
-    material
-        .scope
-        .validate()
-        .map_err(|_| QueryRuntimeMountErrorV1::ScopeMismatch)?;
-    if material.scope != *scope {
-        return Err(QueryRuntimeMountErrorV1::ScopeMismatch);
-    }
-    if material.evaluation.scope_digest != scope.scope_digest {
-        return Err(QueryRuntimeMountErrorV1::EvaluationStale);
-    }
-    if material.evaluation.status != crate::search_eval::DirectEvaluationStatusV1::Pass {
-        return Err(QueryRuntimeMountErrorV1::EvaluationNotPassed);
-    }
-    if material.evaluation.profile_id != material.profile.profile_id
-        || material.evaluation.evaluation_result_anchor != material.profile.evaluation_result_anchor
-    {
-        return Err(QueryRuntimeMountErrorV1::EvaluationStale);
-    }
-    let keyring = material
-        .keyring
-        .ok_or(QueryRuntimeMountErrorV1::KeyUnavailable)?;
-    if keyring.privacy_domain() != privacy_domain {
-        return Err(QueryRuntimeMountErrorV1::PrivacyDomainMismatch);
-    }
-    Ok(Arc::new(QueryAuthorityV1::new(
-        material.profile,
-        material.diversity,
-        material.ranking_revision,
-        keyring,
-    )?))
+fn fallback_policy_id<T>(value: &str) -> Result<T, QueryRuntimeMountErrorV1>
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Display,
+{
+    T::try_from(value.to_owned())
+        .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))
 }
 
-/// Callable project-open hook: resolve a configured accepted authority and
-/// mount it only for the same exact scope as the already-mounted worktree.
-pub async fn mount_query_authority_on_project_open(
-    registry: &CodeIndexSchedulerRegistryV1,
-    project_root: &Path,
-    scope: &ResolvedScope,
-    provider: &dyn QueryAuthorityProviderV1,
-) -> Result<(), QueryRuntimeMountErrorV1> {
-    let privacy_domain = if let Some(text) = registry.latest_text_serving_for_scope(scope).await {
-        text.metadata().manifest().privacy_domain.clone()
-    } else {
-        registry
-            .latest_complete_fresh_for_scope(scope)
-            .await
-            .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?
-            .generation
-            .manifest()
-            .privacy_domain
-            .clone()
+/// The checked-in exact/lexical/graph fusion policy.
+///
+/// Its evaluation anchor is content-addressed over the ranking material, so a
+/// changed weight, budget, calibration, or diversity cap invalidates cursors
+/// signed under the previous policy instead of resuming them with different
+/// ranking.
+fn core_query_policy() -> Result<(FusionProfile, DiversityPolicy), QueryRuntimeMountErrorV1> {
+    let lanes = [
+        (
+            RetrieverKind::ExactLiteral,
+            QUERY_EXACT_SCORE_DOMAIN_V1,
+            1_000_000,
+            1_000_000,
+        ),
+        (
+            RetrieverKind::Lexical,
+            QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            1_000_000,
+            QUERY_LEXICAL_CALIBRATION_CEILING_MICROS_V1,
+        ),
+        (
+            RetrieverKind::Graph,
+            QUERY_GRAPH_SCORE_DOMAIN_V1,
+            250_000,
+            1_000_000,
+        ),
+    ];
+    let mut calibrations = BTreeMap::new();
+    let mut score_domain_calibrations = BTreeMap::new();
+    let mut weights_micros = BTreeMap::new();
+    for (lane, score_domain, weight_micros, raw_max_micros) in lanes {
+        let calibration_profile_id: CalibrationProfileId = fallback_policy_id(&format!(
+            "calibration.{}.{QUERY_FALLBACK_PROFILE_ID}",
+            lane.as_str()
+        ))?;
+        let score_domain: ScoreDomainId = fallback_policy_id(score_domain)?;
+        calibrations.insert(lane, calibration_profile_id.clone());
+        score_domain_calibrations.insert(
+            score_domain.clone(),
+            ScoreDomainCalibrationV1 {
+                calibration_profile_id,
+                score_domain,
+                raw_min_micros: 0,
+                raw_max_micros,
+            },
+        );
+        weights_micros.insert(lane, weight_micros);
+    }
+    let material_anchor: RetrievalAnchorId =
+        fallback_policy_id(&format!("policy.{QUERY_FALLBACK_PROFILE_ID}.v1"))?;
+    let mut profile = FusionProfile {
+        profile_id: fallback_policy_id(&format!("profile.{QUERY_FALLBACK_PROFILE_ID}"))?,
+        evaluation_result_anchor: material_anchor.clone(),
+        calibrations,
+        score_domain_calibrations,
+        minimum_calibrated_feature_micros: BTreeMap::new(),
+        weights_micros,
+        diversity_policy_id: fallback_policy_id("diversity.candidate.v1")?,
+        retrieval_budget: RetrievalBudget {
+            max_candidates_per_lane: 32,
+            max_fused_candidates: 32,
+            max_hydrated_results: 16,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        },
     };
-    let authority = prepare_query_authority(scope, &privacy_domain, provider)?;
-    registry
-        .mount_query_authority(project_root, scope, authority)
-        .await
-        .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
+    let mut diversity = DiversityPolicy {
+        policy_id: profile.diversity_policy_id.clone(),
+        evaluation_result_anchor: Some(material_anchor),
+        per_source_namespace: None,
+        per_source_instance: None,
+        per_repository: None,
+        per_file: Some(2),
+        per_session_or_thread: None,
+        per_copy_cluster: None,
+        per_evidence_role: None,
+    };
+    let material = serde_json::to_vec(&(&profile, &diversity))
+        .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
+    let policy_anchor: RetrievalAnchorId = fallback_policy_id(&format!(
+        "policy.{QUERY_FALLBACK_PROFILE_ID}.v1.sha256:{}",
+        sha256_hex(&material)
+    ))?;
+    profile.evaluation_result_anchor = policy_anchor.clone();
+    diversity.evaluation_result_anchor = Some(policy_anchor);
+    Ok((profile, diversity))
 }
 
 /// Caller-owned, versioned lane policy for one raw query.
@@ -324,6 +297,7 @@ pub struct QuerySearchExecutionRequestV1 {
     pub graph_max_depth: u32,
     pub page_size: usize,
     pub cursor: Option<RetrievalCursor>,
+    pub lexical_routing: LexicalRoutingV1,
 }
 
 impl QuerySearchExecutionRequestV1 {
@@ -342,6 +316,7 @@ impl QuerySearchExecutionRequestV1 {
             graph_max_depth: policy.graph_max_depth,
             page_size: policy.page_size,
             cursor: policy.cursor,
+            lexical_routing: policy.lexical_routing,
         }
     }
 }
@@ -360,6 +335,8 @@ pub struct QuerySearchExecutionPolicyV1 {
     pub graph_max_depth: u32,
     pub page_size: usize,
     pub cursor: Option<RetrievalCursor>,
+    /// Additive lexical routes requested by the caller; query-only by default.
+    pub lexical_routing: LexicalRoutingV1,
 }
 
 pub struct ExecutedQuerySearchV1 {
@@ -371,6 +348,9 @@ pub struct ExecutedQuerySearchV1 {
     /// for `generation`; freshness is not. Callers must report the lanes as
     /// `CodeIndexLaneStatusV1::Stale` rather than complete.
     pub served_stale: bool,
+    /// The lexical routes that ran and the per-candidate route evidence when
+    /// additive routes were requested.
+    pub lexical_routes: LexicalRouteReceiptV1,
 }
 
 #[derive(Debug, Error)]
@@ -395,6 +375,20 @@ pub enum QuerySearchExecutionErrorV1 {
     Authority(#[from] QueryAuthorityErrorV1),
 }
 
+struct HistoricalTextRequestControlV1<'a> {
+    request: &'a dyn RetrievalExecutionControl,
+}
+
+impl CodeIndexExecutionControlV1 for HistoricalTextRequestControlV1<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.request.is_cancelled()
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
 impl CodeIndexSchedulerRegistryV1 {
     /// Execute exact, lexical, and graph independently against the newest
     /// complete generation for one exact scope, then pass their typed outcomes
@@ -406,7 +400,7 @@ impl CodeIndexSchedulerRegistryV1 {
         input: QuerySearchExecutionRequestV1,
     ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1> {
         struct TestGraphControlV1;
-        impl GraphExecutionControl for TestGraphControlV1 {
+        impl RetrievalExecutionControl for TestGraphControlV1 {
             fn is_cancelled(&self) -> bool {
                 false
             }
@@ -419,7 +413,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.code_index.query.execute", future = true)]
+    #[tracing::instrument(name = "daemon.code_index.query.execute", level = "trace", skip_all)]
     pub async fn execute_controlled_query<C>(
         &self,
         scope: &ResolvedScope,
@@ -427,7 +421,7 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_control: Arc<C>,
     ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
     where
-        C: GraphExecutionControl + 'static,
+        C: RetrievalExecutionControl + 'static,
     {
         scope
             .validate()
@@ -435,7 +429,7 @@ impl CodeIndexSchedulerRegistryV1 {
         validate_search_policy(&input)?;
         // Stale-while-revalidate, resolved serve-old first. The ready gate
         // admits only an *already current* generation, so it abstains for the
-        // whole window of any rebuild — freshness unknown, git metadata moved,
+        // whole window of any rebuild, freshness unknown, git metadata moved,
         // staleness threshold elapsed. Every other callable code query keeps
         // serving the last complete generation through that window, and search
         // must not be the one lane that collapses.
@@ -452,8 +446,47 @@ impl CodeIndexSchedulerRegistryV1 {
         // fail-fast rather than degrading into an empty answer.
         let (latest, served_stale) = match self.latest_complete_serving_for_scope(scope).await {
             Some(serving) => match self.latest_complete_ready_decoded_for_scope(scope).await {
-                // Warm path: the ready gate admits, byte-identical to before.
-                Some(ready) => (ready, false),
+                Some(ready) => {
+                    // The graph-bearing generation and the lightweight text
+                    // projection can be restored through distinct handles.
+                    // The mounted text slot is the canonical exact/lexical
+                    // owner, so use its ready owner when the graph ready gate
+                    // has proved the same generation current. Falling back to
+                    // the decoded generation's independent warming handle
+                    // would report `generation_unverified` forever even after
+                    // the background projection had finished.
+                    if let Some(text) = self.latest_text_serving_for_scope(scope).await {
+                        if text.metadata().manifest().generation_id
+                            == ready.generation().manifest().generation_id
+                        {
+                            return execute_query_search_on_text(
+                                self,
+                                scope,
+                                input,
+                                text,
+                                Some(ready),
+                                false,
+                                graph_control,
+                            )
+                            .await;
+                        }
+                        if let Some((text, true)) =
+                            self.latest_text_serving_freshness_for_scope(scope).await
+                        {
+                            return execute_query_search_on_text(
+                                self,
+                                scope,
+                                input,
+                                text,
+                                None,
+                                false,
+                                graph_control,
+                            )
+                            .await;
+                        }
+                    }
+                    (ready, false)
+                }
                 None => {
                     // Graph decode/activation is optional enrichment. Its
                     // readiness gate may abstain while the authenticated text
@@ -507,12 +540,22 @@ impl CodeIndexSchedulerRegistryV1 {
                         // Nothing servable and the ready gate refused. Search is the
                         // one lane whose resolution never runs the freshness ladder,
                         // so nothing else on this path will ever request the rebuild
-                        // that would remedy the failure — it would return this typed
+                        // that would remedy the failure, it would return this typed
                         // error forever. Ask for the remedy exactly once per
                         // admission (debounced on the pending wake), never inline and
                         // never parking, then still fail typed rather than degrade
                         // into an empty answer.
-                        self.request_query_background_reconcile(scope).await;
+                        match self.request_query_background_reconcile(scope).await {
+                            CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) => {
+                                return Err(
+                                    QuerySearchExecutionErrorV1::ExactGenerationUnavailable(
+                                        tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+                                    ),
+                                );
+                            }
+                            CodeIndexReconcileAdmissionV1::Accepted
+                            | CodeIndexReconcileAdmissionV1::Unavailable => {}
+                        }
                         let unverified = self.generation_is_unverified_for_scope(scope).await;
                         return Err(if unverified {
                             QuerySearchExecutionErrorV1::GenerationUnverified
@@ -535,7 +578,7 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_control: Arc<C>,
     ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
     where
-        C: GraphExecutionControl + 'static,
+        C: RetrievalExecutionControl + 'static,
     {
         scope
             .validate()
@@ -543,11 +586,18 @@ impl CodeIndexSchedulerRegistryV1 {
         validate_search_policy(&input)?;
         // Checkout-identity gate: the caller pinned this generation
         // explicitly, so a foreign project/repository/worktree is refused
-        // while a branch-label difference stays servable — the sealed
+        // while a branch-label difference stays servable, the sealed
         // reference is attribution, not identity (see
         // [`super::registry::latest_matches_scope_identity`]).
         if !super::registry::latest_matches_scope_identity(&latest, scope) {
             return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
+        }
+        let text = latest.text_generation_handle();
+        let request_control = HistoricalTextRequestControlV1 {
+            request: graph_control.as_ref(),
+        };
+        if !text.finish_query_owner_warmup_for_request(&request_control)? {
+            return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
         }
         execute_query_search_on_latest(self, scope, input, latest, false, graph_control).await
     }
@@ -562,7 +612,7 @@ async fn execute_query_search_on_latest<C>(
     graph_control: Arc<C>,
 ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
 where
-    C: GraphExecutionControl + 'static,
+    C: RetrievalExecutionControl + 'static,
 {
     let text = latest.text_generation_handle();
     execute_query_search_on_text(
@@ -587,7 +637,7 @@ async fn execute_query_search_on_text<C>(
     graph_control: Arc<C>,
 ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
 where
-    C: GraphExecutionControl + 'static,
+    C: RetrievalExecutionControl + 'static,
 {
     let authority = schedulers
         .query_authority_for_scope(scope)
@@ -622,83 +672,135 @@ where
     // lifetime: admission (sanitize + production owner resolution), one span per
     // retrieval lane, and composition/encode below. The lanes run sequentially,
     // so their spans are disjoint slices of the outer wall time.
-    let (sanitized, owners) = hotpath::measure_block!("daemon.code_index.query.admission", {
-        let sanitized = RawRetrievalRequestV1::new(input.query, request)
-            .sanitize(input.sanitizer_revision, input.normalization_revision)?;
-        let owners = text.production_query_owners_with_budget(&sanitized.request().budget)?;
-        (sanitized, owners)
-    });
+    let (sanitized, owners) = tracing::Instrument::instrument(
+        async {
+            let sanitized = RawRetrievalRequestV1::new(input.query, request)
+                .sanitize(input.sanitizer_revision, input.normalization_revision)?;
+            let readiness = text.query_owner_readiness();
+            // Only this search's own owners decide whether it needs the worker:
+            // stamping the pending-wake slot on a seat whose source proof is
+            // current makes the freshness ladder answer `verifying`.
+            if !matches!(&readiness, CodeTextQueryOwnerReadinessV1::Ready(_)) {
+                match schedulers.request_query_background_reconcile(scope).await {
+                    CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) => {
+                        return Err(QuerySearchExecutionErrorV1::ExactGenerationUnavailable(
+                        tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
+                    ));
+                    }
+                    CodeIndexReconcileAdmissionV1::Accepted
+                    | CodeIndexReconcileAdmissionV1::Unavailable => {}
+                }
+            }
+            let CodeTextQueryOwnerReadinessV1::Ready(owners) = readiness else {
+                return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
+            };
+            Ok::<_, QuerySearchExecutionErrorV1>((sanitized, owners))
+        },
+        tracing::trace_span!("daemon.code_index.query.admission"),
+    )
+    .await?;
     let request = sanitized.request();
     let query_view = sanitized.query_view();
     let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
-    let exact = hotpath::measure_block!("daemon.code_index.query.lane.exact", {
-        owners.retrieve_exact(&ExactLaneRequest {
-            base: request.clone(),
-            query_view,
-            generation: generation.clone(),
-            literals: parser.parse_literals(query_view, request),
-            budget: request.budget,
-        })
-    })?;
-    let lexical_parts = lexical_query_parts(query_view.as_str())?;
-    let lexical = hotpath::measure_block!("daemon.code_index.query.lane.lexical", {
-        owners.retrieve_lexical(&LexicalLaneRequest {
-            base: request.clone(),
-            query_view,
-            generation: generation.clone(),
-            whole_terms: lexical_parts.whole_terms,
-            subtokens: lexical_parts.subtokens,
-            phrases: lexical_parts.phrases,
-            field_filters: Vec::new(),
-            fuzzy_budget: input.fuzzy_budget,
-            lexical_profile_revision: input.lexical_profile_revision,
-            score_domain: input.lexical_score_domain,
-            budget: request.budget,
-        })
-    })?;
+    let exact = {
+        let _span = tracing::trace_span!("daemon.code_index.query.lane.exact").entered();
+        {
+            owners.retrieve_exact(&ExactLaneRequest {
+                base: request.clone(),
+                query_view,
+                generation: generation.clone(),
+                literals: parser.parse_literals(query_view, request),
+                path_prefix: None,
+                budget: request.budget,
+                control: graph_control.as_ref(),
+            })
+        }
+    }?;
+    let route_plan = LexicalRoutePlanV1::plan(query_view.as_str(), &input.lexical_routing)?;
+    let (lexical, lexical_routes) = {
+        let _span = tracing::trace_span!("daemon.code_index.query.lane.lexical").entered();
+        {
+            let mut route_outcomes = Vec::with_capacity(route_plan.routes().len());
+            for route in route_plan.routes() {
+                let outcome = owners.retrieve_lexical(&LexicalLaneRequest {
+                    base: request.clone(),
+                    query_view,
+                    generation: generation.clone(),
+                    whole_terms: std::borrow::Cow::Borrowed(route.parts.whole_terms.as_slice()),
+                    subtokens: std::borrow::Cow::Borrowed(route.parts.subtokens.as_slice()),
+                    phrases: std::borrow::Cow::Borrowed(route.parts.phrases.as_slice()),
+                    proximities: std::borrow::Cow::Borrowed(route.proximities.as_slice()),
+                    field_filters: std::borrow::Cow::Borrowed(route.field_filters.as_slice()),
+                    path_prefix: None,
+                    fuzzy_budget: input.fuzzy_budget,
+                    lexical_profile_revision: input.lexical_profile_revision.clone(),
+                    score_domain: input.lexical_score_domain.clone(),
+                    budget: request.budget,
+                    control: graph_control.as_ref(),
+                })?;
+                route_outcomes.push(LexicalRouteOutcomeV1 {
+                    kind: route.kind.clone(),
+                    outcome,
+                });
+            }
+            merge_lexical_routes(
+                &generation,
+                &request.budget,
+                &request.budget,
+                route_outcomes,
+            )
+        }
+    }?;
+    let lexical_routes = LexicalRouteReceiptV1 {
+        decision: route_plan.decision(),
+        ..lexical_routes
+    };
     let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
-    let graph = hotpath::measure_block!("daemon.code_index.query.lane.graph", {
-        // Graph retrieval requires at least one seed. An empty seed list is
-        // "the lane had nothing to expand", not "the retriever is missing",
-        // once a generation has seated native graph serving. Reporting
-        // Unavailable here made a terminal delete/miss search look like a
-        // seating failure (`retriever_unavailable`) after exact and lexical
-        // had already completed. Text-only or still-pending generations keep
-        // the typed unavailable receipt.
-        let graph_serving = graph_latest
-            .as_ref()
-            .and_then(|latest| latest.production_graph_serving().ok());
-        if graph_seeds.is_empty() {
-            if graph_serving.is_some() {
-                RetrieverOutcome::Complete(RetrieverBatch {
+    let graph_activation_enabled = schedulers.graph_activation_enabled_for_scope(scope).await;
+    let graph = {
+        let _span = tracing::trace_span!("daemon.code_index.query.lane.graph").entered();
+        {
+            // Graph retrieval requires at least one seed. An empty seed list is
+            // "the lane had nothing to expand", not "the retriever is missing",
+            // once a generation has seated native graph serving. Reporting
+            // Unavailable here made a terminal delete/miss search look like a
+            // seating failure (`retriever_unavailable`) after exact and lexical
+            // had already completed. Text-only or still-pending generations keep
+            // the typed unavailable receipt.
+            //
+            // Graph activation state is owned per sealed generation and shared by
+            // every handle bound to it, so the text owner answers for its own
+            // generation when no decoded complete generation accompanies it. A
+            // clean restart whose retained revision-7 head recovered serves graph
+            // reads from exactly that owner and deliberately leaves the sealed
+            // seat empty; resolving the lane only through the seat reported the
+            // recovered graph as `retriever_unavailable` until the next publish.
+            let graph_serving = graph_latest.as_ref().map_or_else(
+                || text.search_graph_serving(graph_activation_enabled),
+                |latest| latest.search_graph_serving(graph_activation_enabled),
+            );
+            match graph_serving {
+                Err(failure) => RetrieverOutcome::Unavailable(failure),
+                Ok(_) if graph_seeds.is_empty() => RetrieverOutcome::Complete(RetrieverBatch {
                     candidates: Vec::new(),
                     evidence_by_occurrence: BTreeMap::default(),
                     coverage: RetrieverCoverage::default(),
                     continuation: None,
-                })
-            } else {
-                RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                    detail: "exact and lexical lanes produced no graph seed".to_owned(),
-                })
+                }),
+                Ok(graph_serving) => graph_serving.graph.retrieve_graph(
+                    &GraphLaneRequest {
+                        base: request.clone(),
+                        generation: generation.clone(),
+                        seed_anchors: graph_seeds,
+                        edge_kinds: input.graph_edge_kinds,
+                        max_depth: input.graph_max_depth,
+                        budget: request.budget,
+                    },
+                    graph_control,
+                )?,
             }
-        } else if let Some(graph_serving) = graph_serving {
-            graph_serving.graph.retrieve_graph(
-                &GraphLaneRequest {
-                    base: request.clone(),
-                    generation: generation.clone(),
-                    seed_anchors: graph_seeds,
-                    edge_kinds: input.graph_edge_kinds,
-                    max_depth: input.graph_max_depth,
-                    budget: request.budget,
-                },
-                graph_control,
-            )?
-        } else {
-            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                detail: "persistent code graph is unavailable for this generation".to_owned(),
-            })
         }
-    });
+    };
     let lanes = vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)
             .map_err(QueryAuthorityErrorV1::from)?,
@@ -718,16 +820,17 @@ where
         .min(request.budget.max_fused_candidates as usize);
     // Encode phase: fusion, pagination, and cursor encoding under the
     // composition authority.
-    let authorized = hotpath::future!(
+    let authorized = tracing::Instrument::instrument(
         schedulers.compose_query_fallback(
             scope,
             request,
             query_view,
             lanes,
+            &lexical_routes.anchor_tiers(),
             page_size,
             input.cursor.as_ref(),
         ),
-        label = "daemon.code_index.query.compose"
+        tracing::trace_span!("daemon.code_index.query.compose"),
     )
     .await?;
     // Retrieval-pipeline observation from the composition this query actually
@@ -735,11 +838,31 @@ where
     if let Some(observability) = schedulers.index_observability_for_scope(scope).await {
         observability.record_retrieval_composition(&authorized, &request.budget);
     }
+    // Names what was served and why at the one site every search and context
+    // answer passes through: a lane that is partial from the current complete
+    // generation (for example lexical `candidate_sources_pruned`, with the
+    // pruned terms and their document frequencies) is a query policy bound,
+    // not an unconverged index (#917).
+    if authorized
+        .composition
+        .internal_lane_outcomes
+        .values()
+        .any(|outcome| !matches!(outcome, RetrieverOutcome::Complete(())))
+    {
+        tracing::info!(
+            event = "code_index_query_lane_coverage",
+            generation = generation.as_str(),
+            served_stale,
+            lane_outcomes = ?authorized.composition.internal_lane_outcomes,
+            "code-index query served with degraded lane coverage"
+        );
+    }
     Ok(ExecutedQuerySearchV1 {
         generation,
         authorized,
         sanitized,
         served_stale,
+        lexical_routes,
     })
 }
 
@@ -842,244 +965,47 @@ fn graph_seeds_from_outcomes(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use std::collections::BTreeSet;
 
-    use tracedecay_application::ResolvedScope;
     use tracedecay_domain::{
-        CalibrationProfileId, ComponentRevision, DiversityPolicy, FusionProfile, ManifestDigest,
-        PrivacyDomainId, RefId, RepositoryId, RetrievalAnchorId, RetrievalBudget,
-        RetrievalCursorKeyId, RetrieverKind, WorktreeId,
-    };
-
-    use super::{
-        AcceptedQueryEvaluationV1, QueryAuthorityMaterialV1, QueryAuthorityProviderErrorV1,
-        QueryAuthorityProviderV1, QueryRuntimeMountErrorV1, prepare_query_authority,
+        ComponentRevision, PrivacyDomainId, RetrievalCursorKeyId, RetrieverKind,
     };
     use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+    use tracedecay_query::retrieval::{QUERY_RANKING_REVISION_V1, QueryAuthorityV1};
 
-    struct OneShotProvider {
-        candidates: Mutex<Option<Vec<QueryAuthorityMaterialV1>>>,
-    }
+    #[test]
+    fn checked_in_fallback_policy_mounts_as_a_fallback_query_authority() {
+        let (profile, diversity) = super::core_query_policy().expect("checked-in core policy");
+        assert_eq!(profile.profile_id.as_str(), "profile.query-fallback");
+        assert_eq!(
+            profile
+                .weights_micros
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            RetrieverKind::QUERY_FALLBACK_LANES.into_iter().collect(),
+        );
+        assert_eq!(profile.weights_micros[&RetrieverKind::Graph], 250_000);
+        assert_eq!(diversity.per_file, Some(2));
+        assert!(
+            profile
+                .evaluation_result_anchor
+                .as_str()
+                .starts_with("policy.query-fallback.v1.sha256:")
+        );
 
-    impl QueryAuthorityProviderV1 for OneShotProvider {
-        fn accepted_authorities(
-            &self,
-            _scope: &ResolvedScope,
-            _privacy_domain: &PrivacyDomainId,
-        ) -> Result<Vec<QueryAuthorityMaterialV1>, QueryAuthorityProviderErrorV1> {
-            Ok(self
-                .candidates
-                .lock()
-                .expect("provider lock")
-                .take()
-                .expect("provider called once"))
-        }
-    }
-
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
-
-    fn scope(suffix: &str) -> ResolvedScope {
-        ResolvedScope::new(
-            id(&format!("project.{suffix}")),
-            id::<RepositoryId>(&format!("repository.{suffix}")),
-            id::<WorktreeId>(&format!("worktree.{suffix}")),
-            Some(id::<RefId>(&format!("refs/heads/{suffix}"))),
+        let privacy_domain = PrivacyDomainId::new("privacy.query.fixture").expect("privacy domain");
+        let keyring = RetrievalCursorKeyringV1::new(
+            privacy_domain,
+            RetrievalCursorKeyId::new("retrieval-key.query.fixture").expect("key id"),
+            1,
+            vec![7_u8; 32],
+            1_000_000,
         )
-        .expect("scope")
-    }
-
-    fn profile() -> FusionProfile {
-        FusionProfile {
-            profile_id: id("profile.query.accepted.v1"),
-            evaluation_result_anchor: id("evaluation.query.accepted.v1"),
-            calibrations: RetrieverKind::QUERY_FALLBACK_LANES
-                .into_iter()
-                .map(|lane| {
-                    (
-                        lane,
-                        id::<CalibrationProfileId>(&format!(
-                            "calibration.{}.accepted.v1",
-                            lane.as_str()
-                        )),
-                    )
-                })
-                .collect(),
-            score_domain_calibrations: BTreeMap::new(),
-            minimum_calibrated_feature_micros: BTreeMap::new(),
-            weights_micros: [
-                (RetrieverKind::ExactLiteral, 1_000_000),
-                (RetrieverKind::Lexical, 500_000),
-                (RetrieverKind::Graph, 250_000),
-            ]
-            .into_iter()
-            .collect(),
-            diversity_policy_id: id("diversity.query.accepted.v1"),
-            rerank_policy_id: None,
-            retrieval_budget: RetrievalBudget {
-                max_candidates_per_lane: 32,
-                max_fused_candidates: 16,
-                max_hydrated_results: 8,
-                max_hydration_bytes: 65_536,
-                deadline_micros: None,
-            },
-        }
-    }
-
-    fn privacy_domain() -> PrivacyDomainId {
-        id("privacy.query.fixture")
-    }
-
-    fn material(scope: ResolvedScope) -> QueryAuthorityMaterialV1 {
-        let profile = profile();
-        let evaluation = AcceptedQueryEvaluationV1 {
-            status: crate::search_eval::DirectEvaluationStatusV1::Pass,
-            scope_digest: scope.scope_digest.clone(),
-            profile_id: profile.profile_id.clone(),
-            evaluation_result_anchor: profile.evaluation_result_anchor.clone(),
-        };
-        QueryAuthorityMaterialV1 {
-            scope,
-            evaluation,
-            profile: profile.clone(),
-            diversity: DiversityPolicy {
-                policy_id: profile.diversity_policy_id,
-                evaluation_result_anchor: Some(profile.evaluation_result_anchor),
-                per_source_namespace: None,
-                per_source_instance: None,
-                per_repository: None,
-                per_file: None,
-                per_session_or_thread: None,
-                per_copy_cluster: None,
-                per_evidence_role: None,
-            },
-            ranking_revision: id::<ComponentRevision>("ranking.query.accepted.v1"),
-            keyring: Some(
-                RetrievalCursorKeyringV1::new(
-                    privacy_domain(),
-                    id::<RetrievalCursorKeyId>("retrieval-key.query.fixture"),
-                    1,
-                    vec![7_u8; 32],
-                    1_000_000,
-                )
-                .expect("keyring"),
-            ),
-        }
-    }
-
-    #[test]
-    fn exact_passed_authority_is_constructed_from_provider_material() {
-        let scope = scope("main");
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![material(scope.clone())])),
-        };
-
-        let authority = prepare_query_authority(&scope, &privacy_domain(), &provider)
-            .expect("accepted authority");
-
-        assert_eq!(authority.profile().profile_id, profile().profile_id);
-    }
-
-    #[test]
-    fn missing_or_ambiguous_authority_fails_closed() {
-        let scope = scope("main");
-        let missing = OneShotProvider {
-            candidates: Mutex::new(Some(Vec::new())),
-        };
-        assert!(matches!(
-            prepare_query_authority(&scope, &privacy_domain(), &missing),
-            Err(QueryRuntimeMountErrorV1::AuthorityMissing)
-        ));
-
-        let ambiguous = OneShotProvider {
-            candidates: Mutex::new(Some(vec![material(scope.clone()), material(scope.clone())])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&scope, &privacy_domain(), &ambiguous),
-            Err(QueryRuntimeMountErrorV1::AuthorityAmbiguous)
-        ));
-    }
-
-    #[test]
-    fn non_pass_stale_scope_and_missing_key_fail_closed() {
-        let active_scope = scope("main");
-
-        let mut pending = material(active_scope.clone());
-        pending.evaluation.status = crate::search_eval::DirectEvaluationStatusV1::Pending;
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![pending])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&active_scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::EvaluationNotPassed)
-        ));
-
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![material(scope("other"))])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&active_scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::ScopeMismatch)
-        ));
-
-        let mut missing_key = material(active_scope.clone());
-        missing_key.keyring = None;
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![missing_key])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&active_scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::KeyUnavailable)
-        ));
-    }
-
-    #[test]
-    fn profile_or_anchor_drift_is_rejected_as_stale() {
-        let scope = scope("main");
-        let mut stale = material(scope.clone());
-        stale.evaluation.evaluation_result_anchor =
-            id::<RetrievalAnchorId>("evaluation.query.superseded.v1");
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![stale])),
-        };
-
-        assert!(matches!(
-            prepare_query_authority(&scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::EvaluationStale)
-        ));
-
-        let mut stale_scope_evaluation = material(scope.clone());
-        stale_scope_evaluation.evaluation.scope_digest =
-            id::<ManifestDigest>(&format!("sha256:{}", "f".repeat(64)));
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![stale_scope_evaluation])),
-        };
-        assert!(matches!(
-            prepare_query_authority(&scope, &privacy_domain(), &provider),
-            Err(QueryRuntimeMountErrorV1::EvaluationStale)
-        ));
-    }
-
-    #[test]
-    fn cursor_key_privacy_domain_must_match_published_generation() {
-        let scope = scope("main");
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![material(scope.clone())])),
-        };
-
-        assert!(matches!(
-            prepare_query_authority(
-                &scope,
-                &id::<PrivacyDomainId>("privacy.query.other"),
-                &provider,
-            ),
-            Err(QueryRuntimeMountErrorV1::PrivacyDomainMismatch)
-        ));
+        .expect("keyring");
+        let ranking_revision =
+            ComponentRevision::new(QUERY_RANKING_REVISION_V1).expect("ranking revision");
+        QueryAuthorityV1::new(profile, diversity, ranking_revision, keyring)
+            .expect("fallback policy is accepted by the fallback authority mode");
     }
 }

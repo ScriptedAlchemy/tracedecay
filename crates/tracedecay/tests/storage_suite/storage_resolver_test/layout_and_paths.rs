@@ -1,6 +1,7 @@
 //! Store layout resolution, config path, and path-safety guard tests.
 
 use super::*;
+use tracedecay_domain::errors::TraceDecayError;
 
 #[test]
 fn resolve_layout_defaults_to_profile_shard_without_marker_or_local_db() {
@@ -28,82 +29,19 @@ fn resolve_layout_defaults_to_profile_shard_without_marker_or_local_db() {
 }
 
 #[tokio::test]
-async fn config_path_uses_profile_shard_when_enrolled() {
-    let _guard = HOME_ENV_LOCK.lock().await;
+async fn store_layout_uses_profile_shard_when_enrolled() {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
     let home = test_home(&dir);
     let shard_root = home.join(".tracedecay/projects/proj_123");
     fs::create_dir_all(project.join(".tracedecay")).unwrap();
     fs::create_dir_all(&shard_root).unwrap();
-    let _home_guard = HomeGuard::set(&home);
     fs::write(project.join("lib.rs"), "pub fn enrolled() {}\n").unwrap();
     init_repo_with_commit(&project);
     assert!(write_repository_identity_marker(&project, "proj_123").unwrap());
 
-    // A retired legacy config left in the working tree stays ignored.
-    let repo_local_config = TraceDecayConfig {
-        root_dir: "repo-local-config".to_string(),
-        ..TraceDecayConfig::default()
-    };
-    fs::write(
-        project.join(".tracedecay/config.json"),
-        serde_json::to_string_pretty(&repo_local_config).unwrap(),
-    )
-    .unwrap();
-    let shard_config = TraceDecayConfig {
-        root_dir: "profile-shard-config".to_string(),
-        ..TraceDecayConfig::default()
-    };
-    fs::write(
-        shard_root.join("config.json"),
-        serde_json::to_string_pretty(&shard_config).unwrap(),
-    )
-    .unwrap();
-
-    assert_path_eq(get_config_path(&project), shard_root.join("config.json"));
-    assert_eq!(
-        load_config(&project).unwrap().root_dir,
-        "profile-shard-config"
-    );
-}
-
-#[tokio::test]
-async fn config_path_defaults_to_profile_shard_without_enrollment() {
-    let _guard = HOME_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    let home = test_home(&dir);
-    let profile_root = home.join(".tracedecay");
-    fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeGuard::set(&home);
-    let project_id = default_profile_project_id(&project);
-
-    assert_path_eq(
-        get_config_path(&project),
-        profile_root.join(format!("projects/{project_id}/config.json")),
-    );
-}
-
-#[test]
-fn active_project_context_keeps_layout_and_scope_identity() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path().join("repo");
-    fs::create_dir_all(&root).unwrap();
-    let profile = dir.path().join("profile");
-    let layout = default_profile_sharded_layout(&root, &profile).unwrap();
-
-    let context = ActiveProjectContext::new(layout.clone(), GraphScopeId::Project);
-
-    assert_eq!(context.layout, layout);
-    assert_eq!(context.scope_id, GraphScopeId::Project);
-    assert_eq!(
-        context.query_target.graph_db_path,
-        profile.join(format!(
-            "projects/{}/tracedecay.db",
-            default_profile_project_id(&root)
-        ))
-    );
+    let layout = resolve_layout(&project, &home.join(".tracedecay")).unwrap();
+    assert_path_eq(&layout.data_root, &shard_root);
 }
 
 #[test]
@@ -133,16 +71,43 @@ fn project_path_rejects_parent_absolute_nul_non_normal_and_symlink_escapes() {
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("secret.txt"), "secret").unwrap();
 
-    assert!(ProjectPath::resolve(&root, Path::new("../secret.txt")).is_err());
-    assert!(ProjectPath::resolve(&root, &outside.join("secret.txt")).is_err());
-    assert!(ProjectPath::resolve(&root, Path::new("src/../lib.rs")).is_err());
-    assert!(ProjectPath::resolve(&root, Path::new("src/./lib.rs")).is_err());
-    assert!(ProjectPath::resolve(&root, Path::new("src/bad\0name.rs")).is_err());
+    let refusal = |path: &Path| match ProjectPath::resolve(&root, path) {
+        Err(TraceDecayError::Config { message }) => message,
+        Err(other) => panic!("unexpected refusal kind for {}: {other:?}", path.display()),
+        Ok(_) => panic!("{} must be refused", path.display()),
+    };
+    let escapes = |path: &Path| {
+        format!(
+            "path '{}' escapes project root '{}'",
+            path.display(),
+            root.display()
+        )
+    };
+
+    assert_eq!(
+        refusal(Path::new("../secret.txt")),
+        "path '../secret.txt' is not normalized"
+    );
+    let absolute_outside = outside.join("secret.txt");
+    assert_eq!(refusal(&absolute_outside), escapes(&absolute_outside));
+    assert_eq!(
+        refusal(Path::new("src/../lib.rs")),
+        "path 'src/../lib.rs' is not normalized"
+    );
+    assert_eq!(
+        refusal(Path::new("src/./lib.rs")),
+        "path 'src/./lib.rs' is not normalized"
+    );
+    assert_eq!(
+        refusal(Path::new("src/bad\0name.rs")),
+        "path 'src/bad\0name.rs' contains a NUL byte"
+    );
 
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
-        assert!(ProjectPath::resolve(&root, Path::new("escape/secret.txt")).is_err());
+        let through_symlink = Path::new("escape/secret.txt");
+        assert_eq!(refusal(through_symlink), escapes(through_symlink));
     }
 }
 

@@ -1,131 +1,32 @@
+use asupersync::Budget;
 use std::{sync::Arc, time::Duration};
 
 use tracedecay_store::{OperationPriorityV1, StoreRuntimeBindingV1};
 
 use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlBatchResult, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRows,
-    ExactSqlStatement, ExactSqlTransaction as RuntimeTransaction, MemoryReleaseOutcome,
+    ExactSqlHandle, ExactSqlStatement, JobPolicy, MemoryReleaseOutcome,
 };
 pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolState};
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Statement;
 use super::{
-    Error, IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, Value,
-    WriteStatement,
+    Error, IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior,
+    WriteStatement, WriteTx,
 };
 
 const READER_WAIT: Duration = Duration::from_secs(5);
-
-pub(super) trait Runtime: Send + Sync {
-    fn execute(&self, statement: ExactSqlStatement) -> Result<ExactSqlExecuteResult>;
-    fn execute_statements(
-        &self,
-        statements: Vec<ExactSqlStatement>,
-    ) -> Result<Vec<ExactSqlExecuteResult>> {
-        let mut results = Vec::with_capacity(statements.len());
-        for (index, statement) in statements.into_iter().enumerate() {
-            results.push(
-                self.execute(statement)
-                    .map_err(|error| Error::statement_batch(index, error))?,
-            );
-        }
-        Ok(results)
-    }
-    fn query(
-        &self,
-        statement: ExactSqlStatement,
-        priority: OperationPriorityV1,
-    ) -> Result<ExactSqlRows>;
-    fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows>;
-    fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult>;
-    fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome>;
-    fn repair_incremental_auto_vacuum(&self) -> Result<()>;
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn validate(&self, statement: ExactSqlStatement) -> Result<()>;
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn last_insert_rowid(&self) -> i64;
-    fn begin_read_snapshot(&self, priority: OperationPriorityV1) -> Result<ExactSqlReadSnapshot>;
-    fn begin_health_read_snapshot(&self) -> Result<ExactSqlReadSnapshot>;
-    fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot>;
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn begin_deferred(&self) -> Result<RuntimeTransaction>;
-    fn begin_immediate(&self) -> Result<RuntimeTransaction>;
-    fn begin_authorized_long_lease_immediate(&self) -> Result<RuntimeTransaction>;
-}
-
-impl Runtime for ExactSqlHandle {
-    fn execute(&self, statement: ExactSqlStatement) -> Result<ExactSqlExecuteResult> {
-        self.execute(statement).map_err(Into::into)
-    }
-
-    fn query(
-        &self,
-        statement: ExactSqlStatement,
-        priority: OperationPriorityV1,
-    ) -> Result<ExactSqlRows> {
-        self.query_with_priority(statement, priority, READER_WAIT)
-            .map_err(Into::into)
-    }
-
-    fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows> {
-        self.checkpoint_wal_truncate().map_err(Into::into)
-    }
-
-    fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult> {
-        self.execute_batch(sql).map_err(Into::into)
-    }
-
-    fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
-        self.release_connection_memory().map_err(Into::into)
-    }
-
-    fn repair_incremental_auto_vacuum(&self) -> Result<()> {
-        self.repair_incremental_auto_vacuum().map_err(Into::into)
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn validate(&self, statement: ExactSqlStatement) -> Result<()> {
-        self.validate(statement).map_err(Into::into)
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn last_insert_rowid(&self) -> i64 {
-        self.last_insert_rowid()
-    }
-
-    fn begin_read_snapshot(&self, priority: OperationPriorityV1) -> Result<ExactSqlReadSnapshot> {
-        self.begin_read_snapshot_with_priority(priority, READER_WAIT)
-            .map_err(Into::into)
-    }
-
-    fn begin_health_read_snapshot(&self) -> Result<ExactSqlReadSnapshot> {
-        self.begin_health_read_snapshot(READER_WAIT)
-            .map_err(Into::into)
-    }
-
-    fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
-        self.reader_pool_occupancy()
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn begin_deferred(&self) -> Result<RuntimeTransaction> {
-        self.begin_deferred().map_err(Into::into)
-    }
-
-    fn begin_immediate(&self) -> Result<RuntimeTransaction> {
-        self.begin_immediate().map_err(Into::into)
-    }
-
-    fn begin_authorized_long_lease_immediate(&self) -> Result<RuntimeTransaction> {
-        self.begin_authorized_long_lease_immediate()
-            .map_err(Into::into)
-    }
-}
+/// Health probes read through the reserved health lane, so they never queue
+/// behind a writer or a saturated general lane. That one-worker lane is shared
+/// with the store-size and table-growth telemetry Doctor samples concurrently,
+/// and each health snapshot retires its worker. A zero wait therefore loses to
+/// whichever bounded sibling probe or worker reopen got there first, and
+/// reports a healthy store as only partially observed.
+const HEALTH_READER_WAIT: Duration = READER_WAIT;
 
 #[derive(Clone)]
 pub struct Connection {
-    runtime: Arc<dyn Runtime>,
+    runtime: Arc<ExactSqlHandle>,
     binding: StoreRuntimeBindingV1,
     /// Priority every read issued through this handle is admitted under.
     ///
@@ -142,7 +43,6 @@ pub struct ReadConnection {
 }
 
 impl ReadConnection {
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -150,7 +50,6 @@ impl ReadConnection {
         self.connection.query(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         self.connection.read_snapshot().await
     }
@@ -210,7 +109,7 @@ impl Connection {
     /// Background maintenance that runs on a *write* connection needs this:
     /// [`Self::attach`] defaults to `Foreground`, so a bulk sweep driven from
     /// the writer would otherwise contend for the same reserved lane slice as
-    /// interactive queries — and, because reader leases are bounded, be the
+    /// interactive queries, and, because reader leases are bounded, be the
     /// first thing to fail once it has saturated that lane itself.
     #[must_use]
     pub fn background_reads(&self) -> Self {
@@ -221,38 +120,58 @@ impl Connection {
         }
     }
 
-    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
         let statement = statement(sql, params)?;
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.execute(statement))
+        runtime
+            .execute_async(statement)
             .await
-            .map_err(join_error)?
             .map(|result| result.changed_rows as u64)
+            .map_err(Into::into)
     }
 
-    #[hotpath::measure(label = "runtime_core.db.execute_statements", future = true)]
+    /// Executes one autocommit write and materializes its own RETURNING rows.
+    /// Once admitted to the writer, the statement completes if its waiter drops.
+    pub async fn execute_returning<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        let statement = statement(sql, params)?;
+        let runtime = Arc::clone(&self.runtime);
+        runtime
+            .execute_returning_async(statement)
+            .await
+            .map(Rows::from_exact)
+            .map_err(Into::into)
+    }
+
+    #[tracing::instrument(name = "runtime_core.db.execute_statements", level = "trace", skip_all)]
     pub async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
         let statements = statements
             .into_iter()
             .map(WriteStatement::into_exact)
-            .collect();
+            .collect::<Vec<_>>();
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.execute_statements(statements))
-            .await
-            .map_err(join_error)?
-            .map(|results| {
-                results
-                    .into_iter()
-                    .map(|result| result.changed_rows as u64)
-                    .collect()
-            })
+        // Once admitted, a batch continues through its first error even if its
+        // caller stops waiting. Separate dispatches preserve writer interleaving.
+        crate::native_runtime::settle(async move {
+            let mut results = Vec::with_capacity(statements.len());
+            for (index, statement) in statements.into_iter().enumerate() {
+                let result = runtime
+                    .execute_async(statement)
+                    .await
+                    .map_err(Error::from)
+                    .map_err(|error| Error::statement_batch(index, error))?;
+                results.push(result.changed_rows as u64);
+            }
+            Ok(results)
+        })
+        .await
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -260,115 +179,90 @@ impl Connection {
         let statement = statement(sql, params)?;
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
-        let rows = tokio::task::spawn_blocking(move || runtime.query(statement, priority))
-            .await
-            .map_err(join_error)??;
-        Ok(Rows::from_parts(
-            rows.columns,
-            rows.rows
-                .into_iter()
-                .map(|row| {
-                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
-                })
-                .collect(),
-        ))
+        let rows = run_blocking("SQL reader", join_error, move || {
+            runtime.query_with_priority(statement, priority, READER_WAIT)
+        })
+        .await??;
+        Ok(Rows::from_exact(rows))
     }
 
-    #[hotpath::skip]
     pub async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
         let runtime = Arc::clone(&self.runtime);
-        let rows = tokio::task::spawn_blocking(move || runtime.checkpoint_wal_truncate())
-            .await
-            .map_err(join_error)??;
-        Ok(Rows::from_parts(
-            rows.columns,
-            rows.rows
-                .into_iter()
-                .map(|row| {
-                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
-                })
-                .collect(),
-        ))
+        let rows = runtime.checkpoint_wal_truncate_async().await?;
+        Ok(Rows::from_exact(rows))
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || runtime.execute_batch(sql))
+        runtime
+            .execute_batch_async(sql)
             .await
-            .map_err(join_error)?
             .map(|_| ())
+            .map_err(Into::into)
     }
 
-    #[hotpath::skip]
     pub async fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.release_connection_memory())
+        let settlement = crate::native_runtime::handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit memory release: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move { runtime.release_connection_memory_async(&cx).await })
+            .map_err(|error| Error::Runtime(format!("failed to spawn memory release: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
             .await
             .map_err(join_error)?
-    }
-
-    #[hotpath::skip]
-    pub async fn repair_incremental_auto_vacuum(&self) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.repair_incremental_auto_vacuum())
-            .await
-            .map_err(join_error)?
+            .map_err(Into::into)
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
         let statement = statement(sql, ())?;
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.validate(statement))
-            .await
-            .map_err(join_error)??;
+        runtime.validate_async(statement).await?;
         Statement::for_connection(self, sql)
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.runtime.last_insert_rowid()
     }
 
     /// Live reader-pool occupancy for the store behind this connection.
     ///
     /// Lock-free and lease-free, so it still answers while the pool is
-    /// saturated — which is the only moment the numbers matter.
+    /// saturated, which is the only moment the numbers matter.
     #[must_use]
     pub fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
         self.runtime.reader_pool_occupancy()
     }
 
-    #[hotpath::measure(label = "runtime_core.db.snapshot.read")]
+    #[tracing::instrument(name = "runtime_core.db.snapshot.read", level = "trace", skip_all)]
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
-        tokio::task::spawn_blocking(move || runtime.begin_read_snapshot(priority))
-            .await
-            .map_err(join_error)?
-            .map(ReadSnapshot::from_runtime)
+        run_blocking("SQL snapshot", join_error, move || {
+            runtime.begin_read_snapshot_with_priority(priority, READER_WAIT)
+        })
+        .await?
+        .map(ReadSnapshot::from_runtime)
+        .map_err(Into::into)
     }
 
-    #[hotpath::skip]
     pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.begin_health_read_snapshot())
-            .await
-            .map_err(join_error)?
-            .map(ReadSnapshot::from_runtime)
+        run_blocking("SQL health snapshot", join_error, move || {
+            runtime.begin_health_read_snapshot(HEALTH_READER_WAIT)
+        })
+        .await?
+        .map(ReadSnapshot::from_runtime)
+        .map_err(Into::into)
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn transaction(&self) -> Result<Transaction> {
         self.transaction_with_behavior(TransactionBehavior::Deferred)
             .await
     }
 
-    #[hotpath::measure(label = "runtime_core.db.transaction.begin")]
+    #[tracing::instrument(name = "runtime_core.db.transaction.begin", level = "trace", skip_all)]
     pub async fn transaction_with_behavior(
         &self,
         behavior: TransactionBehavior,
@@ -377,46 +271,83 @@ impl Connection {
             #[cfg(any(test, feature = "test-helpers"))]
             TransactionBehavior::Deferred => {
                 let runtime = Arc::clone(&self.runtime);
-                tokio::task::spawn_blocking(move || runtime.begin_deferred())
+                runtime
+                    .begin_deferred_async()
                     .await
-                    .map_err(join_error)?
-                    .map(|transaction| {
-                        Transaction::from_runtime(transaction, Arc::clone(&self.runtime))
-                    })
+                    .map_err(Error::from)
+                    .map(Transaction::from_runtime)
             }
             TransactionBehavior::Immediate => {
                 let runtime = Arc::clone(&self.runtime);
-                tokio::task::spawn_blocking(move || runtime.begin_immediate())
+                runtime
+                    .begin_immediate_async()
                     .await
-                    .map_err(join_error)?
-                    .map(|transaction| {
-                        Transaction::from_runtime(transaction, Arc::clone(&self.runtime))
-                    })
+                    .map_err(Error::from)
+                    .map(Transaction::from_runtime)
             }
         }
+    }
+
+    /// Runs `body` as one write job on the writer: commit when it returns
+    /// `Ok`, rollback when it returns `Err` or awaits anything but its own
+    /// statements ([`Error::JobAwaitedForeignFuture`]).
+    pub(crate) async fn transact<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        body: F,
+    ) -> Result<std::result::Result<R, E>>
+    where
+        F: AsyncFn(&WriteTx<'_, '_>) -> std::result::Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.runtime
+            .transact_async(policy, async move |job| body(&WriteTx::new(job)).await)
+            .await
+            .map_err(Into::into)
     }
 
     /// Begins the authority-bound transaction whose lease renews on progress.
     ///
     /// Reserved for schema installation on a fresh or index-less store and for
-    /// full-index bulk replacement — writes that legitimately outlive one fixed
+    /// full-index bulk replacement, writes that legitimately outlive one fixed
     /// lease while continuously making progress. It steps no store forward from
     /// an older shape. Only its explicit authority-revalidated batch may bypass
     /// the ordinary per-statement deadline; all other operations retain
     /// ordinary bounds, and idleness, shutdown, and authority revocation still
     /// cancel.
-    #[hotpath::measure(label = "runtime_core.db.txn.long_lease")]
+    #[tracing::instrument(name = "runtime_core.db.txn.long_lease", level = "trace", skip_all)]
     pub async fn authorized_long_lease_transaction(&self) -> Result<Transaction> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.begin_authorized_long_lease_immediate())
+        runtime
+            .begin_authorized_long_lease_immediate_async()
             .await
-            .map_err(join_error)?
-            .map(|transaction| Transaction::from_runtime(transaction, Arc::clone(&self.runtime)))
+            .map_err(Error::from)
+            .map(Transaction::from_runtime)
     }
 }
 
-fn join_error(error: tokio::task::JoinError) -> super::Error {
+fn join_error(error: asupersync::runtime::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL worker task failed: {error}"))
+}
+
+/// Runs `work` on the native blocking pool and joins it through a request
+/// context. Boxed: a future that holds the context across the join sits
+/// dozens of levels deep, and every SQL caller would repeat that `Send` proof
+/// (rust-lang/rust#159228).
+pub(super) fn run_blocking<T: Send + 'static>(
+    admission: &'static str,
+    join_failure: fn(asupersync::runtime::JoinError) -> Error,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>> {
+    Box::pin(async move {
+        let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
+        cx.spawn_blocking(move |_cx| work())
+            .map_err(|error| Error::Runtime(format!("failed to admit {admission}: {error}")))?
+            .join(&cx)
+            .await
+            .map_err(join_failure)
+    })
 }
 
 pub(super) fn statement<P>(sql: &str, params: P) -> Result<ExactSqlStatement>
@@ -448,7 +379,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn long_lease_entrypoint_requires_attached_write_authority() {
         let directory = tempfile::TempDir::new().unwrap();
         let plain =

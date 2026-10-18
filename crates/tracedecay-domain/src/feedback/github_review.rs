@@ -81,6 +81,8 @@ pub const MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1: usize = 400;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubPullRequestSnapshotV1 {
+    /// The pull request's number in its repository, as discovery admitted it.
+    pub number: u64,
     pub title: String,
     pub state: GitHubPullRequestStateV1,
     pub draft: bool,
@@ -91,6 +93,11 @@ pub struct GitHubPullRequestSnapshotV1 {
 
 impl GitHubPullRequestSnapshotV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
+        if self.number == 0 {
+            return Err(DomainError::NonCanonical {
+                field: "github pull request number",
+            });
+        }
         if self.title.is_empty()
             || self.title.len() > MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1
             || self.title.chars().any(char::is_control)
@@ -445,6 +452,26 @@ fn safe_github_url(value: &str) -> bool {
         && url.query().is_none()
 }
 
+/// Why one provider comment was withheld from ingest while the rest of the
+/// read was retained.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewQuarantineReasonV1 {
+    /// The privacy sanitizer refused to retain the body.
+    PrivacySanitizer,
+    /// The body is empty or larger than the retained-body bound.
+    BodyOutOfBounds,
+}
+
+/// A provider comment the read observed but did not ingest. It carries no
+/// body, author, or anchor: only the identity coverage needs to count it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewQuarantinedItemV1 {
+    pub comment_id: GitHubReviewCommentIdV1,
+    pub reason: GitHubReviewQuarantineReasonV1,
+}
+
 /// Read-only connector output. Partial and stale outcomes may still include
 /// previously observed items, whose lifecycle remains independently typed.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -460,6 +487,10 @@ pub struct GitHubReviewIngressResultV1 {
     pub outcome: GitHubReviewIngressProviderOutcomeV1,
     pub coverage: GitHubReviewCoverageV1,
     pub items: Vec<GitHubReviewItemV1>,
+    /// Comments observed by this read but withheld from `items`, ordered by
+    /// comment id and disjoint from `items`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined: Vec<GitHubReviewQuarantinedItemV1>,
     /// Present exactly for every complete `RestGetPullRequest` read; every
     /// other operation observes review items only and never a PR identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -543,6 +574,23 @@ impl GitHubReviewIngressResultV1 {
                 });
             }
         }
+        for quarantined in &self.quarantined {
+            quarantined.comment_id.validate()?;
+        }
+        if self
+            .quarantined
+            .windows(2)
+            .any(|pair| pair[0].comment_id.as_str() >= pair[1].comment_id.as_str())
+            || self.quarantined.iter().any(|quarantined| {
+                self.items
+                    .iter()
+                    .any(|item| item.comment_id == quarantined.comment_id)
+            })
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github review ingress quarantined items",
+            });
+        }
         Ok(())
     }
 }
@@ -558,10 +606,12 @@ mod tests {
             next_cursor: None,
             rate_limit: None,
         };
-        assert!(
+        assert_eq!(
             missing
                 .validate_for(GitHubReviewIngressProviderOutcomeV1::RateLimited)
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "github review rate-limit checkpoint is not canonical"
         );
 
         let checkpoint = GitHubReviewReadCheckpointV1 {
@@ -577,10 +627,12 @@ mod tests {
             .validate_for(GitHubReviewIngressProviderOutcomeV1::RateLimited)
             .unwrap();
 
-        assert!(
+        assert_eq!(
             checkpoint
                 .validate_for(GitHubReviewIngressProviderOutcomeV1::Complete)
-                .is_err(),
+                .unwrap_err()
+                .to_string(),
+            "complete github review cursor is not canonical",
             "complete coverage cannot retain a next-page cursor"
         );
     }

@@ -1,0 +1,105 @@
+//! The daemon-free index bench runs the production indexing workload on a
+//! real-shaped corpus, not only on the committed fixture corpus.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// One function of 505 `let binding_N = b[N];` statements: 8 tokens each plus
+/// `{`, `0`, `}` is 4,043 tokens, inside the automatic clone-body token cap,
+/// and its two serialized token streams exceed 512 KiB.
+fn generated_bindings_source() -> String {
+    let statements: String = (0..505)
+        .map(|ordinal| format!("    let binding_{ordinal:06} = b[{ordinal}];\n"))
+        .collect();
+    format!("pub fn generated_bindings(b: &[u64]) -> u64 {{\n{statements}    0\n}}\n")
+}
+
+#[test]
+fn index_bench_drains_a_clone_body_the_daemon_page_admits() {
+    let scratch = tempfile::tempdir().unwrap();
+    let corpus = scratch.path().join("corpus");
+    std::fs::create_dir_all(corpus.join("src")).unwrap();
+    std::fs::write(corpus.join("src/lib.rs"), generated_bindings_source()).unwrap();
+
+    // Bazel and nextest pass the bench's path at run time.
+    let bench = std::env::var_os("CARGO_BIN_EXE_tracedecay-index-bench")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_tracedecay-index-bench").into());
+    let output = Command::new(bench)
+        .arg("--corpus")
+        .arg(&corpus)
+        .env("TMPDIR", scratch.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "index bench failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["admitted_files"], 1);
+    assert_eq!(
+        report["clones"]["census"],
+        serde_json::json!({
+            "bodies": 1,
+            "eligible_bodies": 1,
+            "language_bodies": {"rust": 1},
+            "source_tokens": 4043,
+        })
+    );
+}
+
+/// The committed index-bench corpus, located from the crate directory the
+/// test launcher starts in so a disk-cached binary cannot bake another
+/// output base's execroot.
+fn committed_index_bench_corpus() -> PathBuf {
+    PathBuf::from("../../benchmark_data/index-bench/corpus")
+}
+
+#[test]
+fn index_bench_runs_the_committed_corpus_end_to_end() {
+    let corpus = committed_index_bench_corpus();
+    assert!(
+        corpus.is_dir(),
+        "committed corpus {} must be in the test runfiles",
+        corpus.display()
+    );
+
+    let scratch = tempfile::tempdir().unwrap();
+    let bench = std::env::var_os("CARGO_BIN_EXE_tracedecay-index-bench")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_tracedecay-index-bench").into());
+    let output = Command::new(bench)
+        .current_dir(scratch.path())
+        .env_remove("BUILD_WORKSPACE_DIRECTORY")
+        .env_remove("TRACEDECAY_INDEX_BENCH_CORPUS")
+        .env("TMPDIR", scratch.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "committed corpus index bench failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["admitted_files"], 260);
+    assert_eq!(report["edited_files"], 16);
+    let clean_ms = report["wall_ms"]["clean_generation"]
+        .as_u64()
+        .expect("clean generation timing");
+    let increment_ms = report["wall_ms"]["incremental_generation"]
+        .as_u64()
+        .expect("incremental generation timing");
+    assert!(clean_ms > 0, "clean generation must report a duration");
+    assert!(
+        increment_ms > 0,
+        "incremental generation must report a duration"
+    );
+    let spot_checked = report["spot_checked_queries"]
+        .as_u64()
+        .expect("spot-checked query count");
+    assert!(
+        spot_checked >= 3,
+        "incremental index must match a fresh full index on 3 or more queries, got {spot_checked}"
+    );
+}

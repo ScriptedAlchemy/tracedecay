@@ -8,156 +8,37 @@
 //! mismatch when the daemon that answers is not the expected version.
 
 #[cfg(unix)]
-use std::ffi::{OsStr, OsString};
-#[cfg(unix)]
-use std::io::{BufRead, Write};
-#[cfg(unix)]
 use std::os::unix::net::UnixListener;
 
 #[cfg(unix)]
 use tempfile::TempDir;
-#[cfg(unix)]
-use tracedecay_runtime_core::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
+use tracedecay_runtime_core::config::ProfileRoot;
+#[cfg(target_os = "linux")]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use super::runner::ServiceRunner;
-use super::{DaemonServiceState, MaintenanceWindowOutcome, QuiescedDaemonLifecycle};
+use super::{
+    DaemonServiceState, MaintenanceWindowOutcome, QuiescedDaemonLifecycle, RestoreSettlement,
+};
 
 const QUIESCED_VERSION: &str = "0.1.0-test+quiesced";
 const INSTALLED_VERSION: &str = "0.2.0-test+installed";
 
 /// A guard as it exists inside the maintenance window right after the action
 /// ran: lease released or consumed elsewhere, restore not yet attempted.
-/// `restored: true` keeps `Drop` from touching the real service manager or
-/// lease file.
-fn quiesced_guard() -> QuiescedDaemonLifecycle {
+/// `RestoreSettlement::Complete` keeps `Drop` from touching the real service
+/// manager or lease file.
+fn quiesced_guard(profile: &ProfileRoot) -> QuiescedDaemonLifecycle {
     QuiescedDaemonLifecycle {
+        profile: profile.clone(),
         previous_state: DaemonServiceState::RunningEnabled,
         lifecycle_lease: None,
         expected_version: QUIESCED_VERSION.to_owned(),
-        runner: ServiceRunner::WindowsTask,
-        restored: true,
+        runner: ServiceRunner::WindowsTask {
+            profile: profile.clone(),
+        },
+        settlement: RestoreSettlement::Complete,
     }
-}
-
-#[test]
-fn maintenance_outcome_carries_installed_version_to_restore_validation() {
-    let mut guard = quiesced_guard();
-
-    let value = guard.adopt_maintenance_outcome(MaintenanceWindowOutcome {
-        value: 7_u32,
-        installed_version: Some(INSTALLED_VERSION.to_owned()),
-    });
-
-    assert_eq!(value, 7);
-    assert_eq!(
-        guard.expected_version, INSTALLED_VERSION,
-        "restore must validate the freshly installed binary, not the quiesced one"
-    );
-}
-
-#[test]
-fn maintenance_outcome_without_install_keeps_acquire_time_version() {
-    let mut guard = quiesced_guard();
-
-    guard.adopt_maintenance_outcome(MaintenanceWindowOutcome {
-        value: (),
-        installed_version: None,
-    });
-
-    assert_eq!(
-        guard.expected_version, QUIESCED_VERSION,
-        "no install restarts the same binary, so the acquire-time version stays authoritative"
-    );
-}
-
-#[cfg(unix)]
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-#[cfg(unix)]
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn serve_initialize_identity(
-    listener: UnixListener,
-    name: &'static str,
-    version: &'static str,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept readiness probe");
-        let mut reader =
-            std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("read handshake");
-        line.clear();
-        reader.read_line(&mut line).expect("read initialize");
-        let request: serde_json::Value =
-            serde_json::from_str(line.trim()).expect("initialize json");
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": request["id"],
-            "result": {
-                "serverInfo": {"name": name, "version": version}
-            }
-        });
-        writeln!(stream, "{response}").expect("write initialize response");
-    })
-}
-
-/// The upgrade success shape: old and new versions differ, the restarted
-/// daemon reports the NEW (installed) version, and readiness passes because
-/// the guard validates the version it adopted from the action's outcome.
-/// Before the outcome existed, restore kept the quiesced version and this
-/// exact situation timed out as an identity mismatch.
-#[cfg(unix)]
-#[test]
-fn restore_readiness_accepts_the_upgraded_daemon_reporting_the_installed_version() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
-
-    let mut guard = quiesced_guard();
-    guard.adopt_maintenance_outcome(MaintenanceWindowOutcome {
-        value: (),
-        installed_version: Some(INSTALLED_VERSION.to_owned()),
-    });
-
-    let socket_path = profile.path().join("upgraded.sock");
-    let listener = UnixListener::bind(&socket_path).expect("bind upgraded daemon socket");
-    let server = serve_initialize_identity(listener, "tracedecay", INSTALLED_VERSION);
-
-    assert_eq!(
-        super::probe::daemon_protocol_state_with_timeout(
-            &socket_path,
-            &guard.expected_version,
-            std::time::Duration::from_secs(5),
-        ),
-        super::probe::DaemonProtocolState::Ready
-    );
-    server.join().expect("join upgraded daemon");
 }
 
 /// Version skew must keep failing closed: when the daemon that answers after
@@ -167,22 +48,28 @@ fn restore_readiness_accepts_the_upgraded_daemon_reporting_the_installed_version
 #[cfg(unix)]
 #[test]
 fn restore_readiness_rejects_a_stale_daemon_after_an_upgrade() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
 
-    let mut guard = quiesced_guard();
+    let mut guard = quiesced_guard(&profile);
     guard.adopt_maintenance_outcome(MaintenanceWindowOutcome {
         value: (),
         installed_version: Some(INSTALLED_VERSION.to_owned()),
     });
 
-    let socket_path = profile.path().join("stale.sock");
+    let socket_path = profile_dir.path().join("stale.sock");
+    let authority = super::tests::seed_socket_authority(&socket_path);
     let listener = UnixListener::bind(&socket_path).expect("bind stale daemon socket");
-    let server = serve_initialize_identity(listener, "tracedecay", QUIESCED_VERSION);
+    let server = super::tests::serve_probe_response(
+        listener,
+        "tracedecay",
+        QUIESCED_VERSION,
+        authority.auth_token().to_owned(),
+    );
 
     assert_eq!(
         super::probe::daemon_protocol_state_with_timeout(
+            &profile,
             &socket_path,
             &guard.expected_version,
             std::time::Duration::from_secs(5),
@@ -194,4 +81,274 @@ fn restore_readiness_rejects_a_stale_daemon_after_an_upgrade() {
         }
     );
     server.join().expect("join stale daemon");
+}
+
+/// A managed daemon as the maintenance window sees it: `systemctl stop`
+/// returns while the process is still draining, so its shared lifecycle lease
+/// outlives the stop. The holder keeps the lease until `release_after_stop`
+/// past the observed stop, or forever when `None`, injecting exactly the
+/// contention `tracedecay update` met on a healthy launchd daemon.
+#[cfg(target_os = "linux")]
+struct DrainingDaemonFixture {
+    _dir: TempDir,
+    runner: ServiceRunner,
+    socket_path: std::path::PathBuf,
+    log: std::path::PathBuf,
+    stopped_marker: std::path::PathBuf,
+    profile: ProfileRoot,
+}
+
+/// The simulated daemon process; dropping it releases a lease held with
+/// `release_after_stop: None`.
+#[cfg(target_os = "linux")]
+struct LeaseHolder {
+    _release: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+#[cfg(target_os = "linux")]
+impl DrainingDaemonFixture {
+    fn new() -> Self {
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+        let profile = ProfileRoot::under_home(&home).with_xdg_config_home(&config_home);
+        std::fs::create_dir_all(profile.data_dir()).expect("profile dir");
+        let systemctl = fake_bin.join("systemctl");
+        let log = dir.path().join("systemctl.log");
+        let stopped_marker = dir.path().join("systemctl.stopped");
+        write_executable_script(
+            &systemctl,
+            super::tests::bake_script_paths(
+                super::tests::fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
+                &[
+                    ("TRACEDECAY_SYSTEMCTL_LOG", &log),
+                    ("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped_marker),
+                ],
+            ),
+        )
+        .expect("fake systemctl");
+        let runner = ServiceRunner::systemd(&systemctl, &profile).expect("fixture systemd runner");
+        let service_path = config_home.join("systemd/user").join("tracedecay.service");
+        std::fs::create_dir_all(service_path.parent().expect("service parent"))
+            .expect("service dir");
+        let socket_path = dir.path().join("tracedecay.sock");
+        std::fs::write(
+            &service_path,
+            format!(
+                "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+                socket_path.display()
+            ),
+        )
+        .expect("existing service unit");
+        Self {
+            _dir: dir,
+            runner,
+            socket_path,
+            log,
+            stopped_marker,
+            profile,
+        }
+    }
+
+    /// Holds the daemon's shared lease until `release_after_stop` past the
+    /// moment the fake supervisor records the stop; `None` holds it until the
+    /// returned holder is dropped.
+    fn hold_daemon_lease(&self, release_after_stop: Option<std::time::Duration>) -> LeaseHolder {
+        let profile = self.profile.data_dir().to_path_buf();
+        let stopped_marker = self.stopped_marker.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let lease = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+                &profile,
+                "managed daemon database ownership",
+            )
+            .expect("daemon shared lease");
+            held_tx.send(()).expect("report held lease");
+            match release_after_stop {
+                Some(release_after_stop) => {
+                    while !stopped_marker.exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    std::thread::sleep(release_after_stop);
+                }
+                // `recv` returns once the holder (and its sender) is dropped.
+                None => drop(release_rx.recv()),
+            }
+            drop(lease);
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("daemon lease held before the window opens");
+        LeaseHolder {
+            _release: release_tx,
+            thread,
+        }
+    }
+
+    /// Serves the restarted daemon's identity on the unit's socket so the
+    /// restore's readiness wait can prove `RunningEnabled`.
+    fn serve_restarted_daemon(&self) -> tracedecay_daemon_identity::authority::DaemonAuthority {
+        let authority = super::tests::seed_socket_authority(&self.socket_path);
+        let listener = UnixListener::bind(&self.socket_path).expect("bind restarted daemon");
+        super::tests::serve_identity_probes(
+            listener,
+            vec![super::tests::TEST_BUILD_VERSION],
+            authority.auth_token().to_owned(),
+        );
+        authority
+    }
+
+    fn assert_daemon_running_after(&self, phase: &str) {
+        assert_eq!(
+            self.runner.service_state().expect("service state"),
+            DaemonServiceState::RunningEnabled,
+            "the managed daemon must be running after {phase}"
+        );
+        let commands = std::fs::read_to_string(&self.log).expect("systemctl log");
+        assert!(
+            super::tests::systemctl_log_contains_sequence(
+                &commands,
+                &[
+                    "--user stop tracedecay.service",
+                    "--user start tracedecay.service",
+                ]
+            ),
+            "{phase} must stop, then start the daemon again, got:\n{commands}"
+        );
+    }
+}
+
+/// The window's own stop is not contention: the exclusive acquisition waits
+/// for the quiesced daemon to release its lease, then the window runs and
+/// restores a running daemon.
+#[cfg(target_os = "linux")]
+#[test]
+fn maintenance_window_waits_out_the_lease_of_the_daemon_it_just_stopped() {
+    let fixture = DrainingDaemonFixture::new();
+    let holder = fixture.hold_daemon_lease(Some(std::time::Duration::from_millis(400)));
+
+    let guard = QuiescedDaemonLifecycle::acquire_with_runner_and_timeout(
+        &fixture.profile,
+        "update",
+        super::tests::TEST_BUILD_VERSION,
+        fixture.runner.clone(),
+        super::QUIESCED_LEASE_RELEASE_TIMEOUT,
+    )
+    .expect("the draining daemon's lease must be waited out, not reported as contention");
+    holder.thread.join().expect("daemon holder");
+    assert_eq!(guard.previous_state(), DaemonServiceState::RunningEnabled);
+    assert!(
+        guard
+            .lifecycle_lease()
+            .expect("window lease")
+            .is_exclusive(),
+        "the window owns the exclusive lease once the daemon released its share"
+    );
+
+    let _authority = fixture.serve_restarted_daemon();
+    guard
+        .finish_after_update()
+        .expect("restore the previously running daemon");
+
+    fixture.assert_daemon_running_after("a completed maintenance window");
+}
+
+/// A restored daemon that serves a registered store in its typed
+/// reset-required state is restored: the restore check sees the unit
+/// `RunningEnabled`, a connectable socket and initialize from this build, and
+/// hands back the operator's pending reset instead of failing the update.
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_check_accepts_a_reset_required_daemon_and_returns_its_pending_reset() {
+    let fixture = DrainingDaemonFixture::new();
+    let authority = super::tests::seed_socket_authority(&fixture.socket_path);
+    let listener = UnixListener::bind(&fixture.socket_path).expect("bind restored daemon");
+    let server = super::tests::serve_probe_result(
+        listener,
+        serde_json::json!({
+            "serverInfo": {"name": "tracedecay", "version": super::tests::TEST_BUILD_VERSION},
+            "_meta": {
+                "tracedecay/reset_required_stores": [{
+                    "store": "profile sessions",
+                    "authority": "git correlation",
+                    "found_version": 5,
+                    "required_version": 6,
+                    "reason": "git correlation profile schema 5 is incompatible with required schema 6; reset the profile",
+                    "remedy": "tracedecay wipe --stale --yes",
+                }],
+            },
+        }),
+        authority.auth_token().to_owned(),
+    );
+
+    let (state, _, socket, protocol) = super::installed_service_status_snapshot(
+        &fixture.profile,
+        &fixture.runner,
+        super::tests::TEST_BUILD_VERSION,
+    )
+    .expect("restored service snapshot");
+    server.join().expect("join restored daemon");
+
+    assert!(
+        super::restored_service_matches(
+            DaemonServiceState::RunningEnabled,
+            state,
+            socket,
+            &protocol
+        ),
+        "a reset-required daemon is restored: service {state:?}, socket {socket}, protocol {protocol}"
+    );
+    assert_eq!(
+        protocol,
+        super::probe::DaemonProtocolState::Ready {
+            reset_required_stores: vec![tracedecay_domain::errors::StoreResetRequiredV1 {
+                store: "profile sessions".to_owned(),
+                authority: "git correlation".to_owned(),
+                found_version: Some(5),
+                required_version: Some(6),
+                reason: "git correlation profile schema 5 is incompatible with required schema 6; \
+                         reset the profile"
+                    .to_owned(),
+                remedy: "tracedecay wipe --stale --yes".to_owned(),
+            }],
+        }
+    );
+}
+
+/// A holder that outlives the bound is contention, reported typed, and the
+/// failure path still restores the daemon it stopped: contention must never
+/// leave a previously healthy daemon stopped.
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_lease_acquisition_restores_the_stopped_daemon_before_reporting() {
+    let fixture = DrainingDaemonFixture::new();
+    let _holder = fixture.hold_daemon_lease(None);
+    let _authority = fixture.serve_restarted_daemon();
+
+    let error = QuiescedDaemonLifecycle::acquire_with_runner_and_timeout(
+        &fixture.profile,
+        "update",
+        super::tests::TEST_BUILD_VERSION,
+        fixture.runner.clone(),
+        std::time::Duration::from_millis(300),
+    )
+    .err()
+    .expect("a lease held past the bound is contention");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("cannot start update")
+            && message.contains("another lifecycle operation is already active"),
+        "contention must stay a typed refusal naming the operation: {message}"
+    );
+    assert!(
+        !message.contains("restoration also failed"),
+        "the restore after a lost acquisition must succeed: {message}"
+    );
+    fixture.assert_daemon_running_after("a lost lease acquisition");
 }

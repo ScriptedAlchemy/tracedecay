@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     HintEmission, HintOutcomeCorrelationPort, HintOutcomeObservation, HintOutcomePortError,
     HintOutcomePortFuture, HintOutcomePortOperation, HintToolActivity,
 };

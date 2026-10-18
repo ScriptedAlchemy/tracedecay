@@ -9,7 +9,7 @@ interfaces, pricing, privacy policy, language support, and performance.
 TraceDecay is a local-first, daemon-owned code-intelligence and agent-memory
 product. Clients submit typed operations to one daemon authority; they do not
 open or modify TraceDecay stores directly. Grafeo owns admitted graph relations,
-traversals, and vectors. SQLite owns relational and content records, manifests,
+and traversals. SQLite owns relational and content records, manifests,
 journals, leases, receipts, and watermarks. Neither is a substitute or a shadow
 copy of the other.
 

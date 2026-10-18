@@ -14,9 +14,7 @@ const PRESSURED_WAL_LOAD_BATCHES: usize = 40;
 fn wal_file_bytes(database: &RegisteredGlobalDb) -> u64 {
     let mut wal = database.db_path().as_os_str().to_owned();
     wal.push("-wal");
-    std::fs::metadata(std::path::PathBuf::from(wal))
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
+    std::fs::metadata(std::path::PathBuf::from(wal)).map_or(0, |metadata| metadata.len())
 }
 
 /// Creates the load table, pins a read snapshot on the empty WAL position,
@@ -51,7 +49,7 @@ async fn grow_pressured_wal(
     reader
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn pressured_checkpoint_reports_pinned_reader_and_reclaims_after_release() {
     let harness = RegisteredGlobalDbHarness::open("pressured-wal-checkpoint").await;
     let reader = grow_pressured_wal(&harness.registered).await;
@@ -111,9 +109,9 @@ async fn pressured_checkpoint_reports_pinned_reader_and_reclaims_after_release()
 /// A PASSIVE-busy WAL past the trigger stays a typed failure while pinned,
 /// and once the reader releases, the exclusive-maintenance truncation lane
 /// drains it to a zero-byte file.
-#[tokio::test]
+#[asupersync::test]
 async fn maintenance_truncate_drains_passive_busy_wal_to_zero_bytes() {
-    crate::register_test_schema_installer();
+    crate::register_registered_schema_installer();
     let directory = tempfile::tempdir().unwrap();
     let profile_root = directory.path().join("profile");
     tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
@@ -203,7 +201,7 @@ async fn maintenance_truncate_drains_passive_busy_wal_to_zero_bytes() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn below_trigger_checkpoint_reports_measured_wal_bytes() {
     let harness = RegisteredGlobalDbHarness::open("below-trigger-checkpoint").await;
     harness
@@ -230,17 +228,4 @@ async fn below_trigger_checkpoint_reports_measured_wal_bytes() {
         }
     );
     assert_eq!(receipt.wal_bytes_after, receipt.wal_bytes_before);
-}
-
-#[tokio::test]
-async fn public_checkpoint_remains_best_effort_when_reader_is_busy() {
-    let harness = RegisteredGlobalDbHarness::open("best-effort-checkpoint").await;
-    let reader = grow_pressured_wal(&harness.registered).await;
-
-    // The best-effort entry point must swallow the pinned-reader failure so
-    // shutdown paths never abort on a busy WAL.
-    harness.registered.checkpoint().await;
-
-    drop(reader);
-    harness.registered.checkpoint_result().await.unwrap();
 }

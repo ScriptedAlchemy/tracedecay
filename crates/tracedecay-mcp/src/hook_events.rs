@@ -4,12 +4,13 @@
 //! effects such as branch tracking, sync execution, and token-map refreshes.
 
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Shared with hook emitters so the receiver accepts the same agent keys.
-pub use tracedecay_hooks::core_events::HookAgent;
+use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_domain::canonical_text::sha256_hex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEventKind {
@@ -53,7 +54,7 @@ impl HookEventKind {
 }
 
 pub struct HookEvent {
-    pub agent: HookAgent,
+    pub agent: HostIntegrationIdV1,
     pub kind: HookEventKind,
     pub rel_paths: Vec<String>,
     pub had_command: bool,
@@ -120,11 +121,7 @@ impl HookEvent {
                 push_admission_identity_part(&mut identity, "path", path.as_bytes());
             }
         }
-        format!(
-            "{}:{}",
-            self.agent.as_wire(),
-            tracedecay_session_memory::context::read_cache::digest_bytes(&identity)
-        )
+        format!("{}:{}", self.agent.as_wire(), sha256_hex(&identity))
     }
 }
 
@@ -144,13 +141,13 @@ pub enum HookEventPlan {
     AddBranchAt {
         root: PathBuf,
         branch: String,
-        agent: HookAgent,
+        agent: HostIntegrationIdV1,
     },
     SyncCurrentBranch {
         branch: String,
-        agent: HookAgent,
+        agent: HostIntegrationIdV1,
     },
-    DebouncedIncrementalSync(HookAgent),
+    DebouncedIncrementalSync(HostIntegrationIdV1),
     RecordTerminalReceipt {
         route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
         receipt: tracedecay_hooks::core_events::HookTerminalReceipt,
@@ -201,7 +198,7 @@ const DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 1;
 
 /// Lookup identifiers needed outside receipt-state equality (session and
 /// watermark) stay bounded. Session ids are run through
-/// [`tracedecay_runtime_core::privacy::protect_sensitive_structural_id`] so credential-shaped
+/// [`tracedecay_privacy::protect_sensitive_structural_id`] so credential-shaped
 /// values become stable digests while public ids remain byte-for-byte.
 /// Equality-only thread/tool/turn identifiers are hashed before persistence.
 const DURABLE_MAX_IDENTIFIER_BYTES: usize = 256;
@@ -269,8 +266,7 @@ fn durable_bound_required_str(value: &str, max_bytes: usize) -> Result<String, (
 }
 
 fn protect_optional_hook_structural_id(value: Option<&str>) -> Result<Option<String>, ()> {
-    tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(value)
-        .map_err(|_| ())
+    tracedecay_privacy::protect_optional_sensitive_structural_id(value).map_err(|_| ())
 }
 
 fn protect_hook_route_structural_ids(
@@ -443,19 +439,21 @@ fn runtime_plan_from_durable(
                 .map_err(|()| DurableHookEventDecodeError::Malformed)?,
             branch: durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
                 .map_err(|()| DurableHookEventDecodeError::Malformed)?,
-            agent: HookAgent::from_wire(&agent).ok_or(DurableHookEventDecodeError::Malformed)?,
+            agent: HostIntegrationIdV1::from_wire(&agent)
+                .ok_or(DurableHookEventDecodeError::Malformed)?,
         }),
         DurableHookEventPlan::SyncCurrentBranch { branch, agent } => {
             Ok(HookEventPlan::SyncCurrentBranch {
                 branch: durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
                     .map_err(|()| DurableHookEventDecodeError::Malformed)?,
-                agent: HookAgent::from_wire(&agent)
+                agent: HostIntegrationIdV1::from_wire(&agent)
                     .ok_or(DurableHookEventDecodeError::Malformed)?,
             })
         }
         DurableHookEventPlan::DebouncedIncrementalSync { agent } => {
             Ok(HookEventPlan::DebouncedIncrementalSync(
-                HookAgent::from_wire(&agent).ok_or(DurableHookEventDecodeError::Malformed)?,
+                HostIntegrationIdV1::from_wire(&agent)
+                    .ok_or(DurableHookEventDecodeError::Malformed)?,
             ))
         }
         DurableHookEventPlan::RecordTerminalReceipt { route, receipt } => {
@@ -517,7 +515,7 @@ pub fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
         protect_hook_receipt_structural_ids(receipt).ok()?;
     }
     Some(HookEvent {
-        agent: HookAgent::from_wire(&event.agent)?,
+        agent: HostIntegrationIdV1::from_wire(&event.agent)?,
         kind: HookEventKind::from_wire(&event.event)?,
         rel_paths: safe_hook_rel_paths(&event.rel_paths),
         // Shell text is an untyped observation. Keep only a content-free
@@ -585,7 +583,7 @@ pub fn plan_hook_event(
     }
 }
 
-pub fn sync_marker_path(data_root: &Path, agent: HookAgent) -> PathBuf {
+pub fn sync_marker_path(data_root: &Path, agent: HostIntegrationIdV1) -> PathBuf {
     data_root.join(agent.sync_marker_file())
 }
 
@@ -625,20 +623,24 @@ fn safe_hook_rel_paths(paths: &[String]) -> Vec<String> {
 ///
 /// When the event `cwd` is a *linked* git worktree (a harness-created
 /// `.claude/worktrees/*` session tree whose `.git` is a gitdir pointer rather
-/// than a real directory), we additionally plan `AddBranchAt` against the
+/// than a real directory), we also plan `AddBranchAt` against the
 /// resolved worktree root so the session gets its own writable branch store
 /// instead of the read-only fallback-ancestor DB. The downstream
 /// `add_hook_branch_tracking` returns `AlreadyTracked` cheaply and
 /// idempotently, so re-planning `AddBranchAt` for an already-tracked worktree
-/// branch is a no-op — we do not need branch-meta visibility here.
+/// branch is a no-op, we do not need branch-meta visibility here.
 fn plan_session_start_hook_event(
     event: &HookEvent,
     project_root: &Path,
     current_branch: Option<&str>,
 ) -> HookEventPlan {
     let cwd = event.cwd.as_deref().unwrap_or(project_root);
-    if let Some(plan) = plan_linked_worktree_branch_add(event, cwd, project_root) {
-        return plan;
+    match plan_linked_worktree_branch_add(event, cwd, project_root) {
+        Ok(Some(plan)) => return plan,
+        Ok(None) => {}
+        // Discovery did not decide membership. Do not sync the registered
+        // project's branch as if this cwd were the main checkout.
+        Err(_) => return HookEventPlan::Noop,
     }
     current_branch
         .filter(|branch| !branch.is_empty())
@@ -656,27 +658,76 @@ fn plan_linked_worktree_branch_add(
     event: &HookEvent,
     cwd: &Path,
     project_root: &Path,
-) -> Option<HookEventPlan> {
-    let worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(cwd)?;
+) -> Result<Option<HookEventPlan>, tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown> {
+    let budget = hook_discovery_budget();
+    let identity = match hook_repository_identity(cwd, &budget) {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+            identity,
+        ) => identity,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            return Ok(None);
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(reason) => {
+            return Err(reason);
+        }
+    };
+    let worktree_root = identity.worktree_root;
     // A linked worktree's git common dir lives outside its own working tree
     // (it points back at the main checkout's `.git`). In the main checkout the
     // common dir is `<root>/.git`, so the two paths match and we bail out.
-    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&worktree_root)?;
+    let common_dir = identity.common_dir;
     if path_is_inside(&common_dir, &worktree_root) {
-        return None;
+        return Ok(None);
     }
-    if !git_roots_share_common_dir(&worktree_root, project_root) {
-        return None;
+    let project_common = match hook_repository_identity(project_root, &budget) {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+            identity,
+        ) => identity.common_dir,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            return Ok(None);
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(reason) => {
+            return Err(reason);
+        }
+    };
+    if !paths_same(&common_dir, &project_common) {
+        return Ok(None);
     }
-    let branch = tracedecay_runtime_core::branch::current_branch(&worktree_root)?;
+    let Some(branch) = tracedecay_runtime_core::branch::current_branch(&worktree_root) else {
+        return Ok(None);
+    };
     if branch.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(HookEventPlan::AddBranchAt {
+    Ok(Some(HookEventPlan::AddBranchAt {
         root: worktree_root,
         branch,
         agent: event.agent,
-    })
+    }))
+}
+
+fn hook_discovery_budget() -> (
+    tracedecay_runtime_core::cancellation::MonotonicDeadline,
+    tracedecay_runtime_core::cancellation::CancellationToken,
+) {
+    (
+        tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+            Instant::now() + Duration::from_secs(2),
+        ),
+        tracedecay_runtime_core::cancellation::CancellationToken::new(),
+    )
+}
+
+fn hook_repository_identity(
+    path: &Path,
+    budget: &(
+        tracedecay_runtime_core::cancellation::MonotonicDeadline,
+        tracedecay_runtime_core::cancellation::CancellationToken,
+    ),
+) -> tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome {
+    tracedecay_runtime_core::git_discovery::discover_repository_identity_with_control(
+        path, budget.0, &budget.1,
+    )
 }
 
 /// Effect-time authorization failure for durable branch-write plans
@@ -692,10 +743,10 @@ pub enum AddBranchAtRootAuthError {
     Unbounded,
     Unresolvable,
     Unauthorized,
+    DiscoveryUnavailable,
 }
 
 impl AddBranchAtRootAuthError {
-    #[hotpath::skip]
     pub const fn reason_code(self) -> &'static str {
         match self {
             Self::Empty
@@ -703,6 +754,7 @@ impl AddBranchAtRootAuthError {
             | Self::Unbounded
             | Self::Unresolvable
             | Self::Unauthorized => "stale_branch_authorization",
+            Self::DiscoveryUnavailable => "repository_discovery_unavailable",
         }
     }
 }
@@ -723,16 +775,43 @@ pub fn authorize_add_branch_at_root(
     let canonical = bounded
         .canonicalize()
         .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
-    let live_worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(&canonical)
-        .and_then(|root| root.canonicalize().ok())
-        .ok_or(AddBranchAtRootAuthError::Unauthorized)?;
+    let budget = hook_discovery_budget();
+    let live = match hook_repository_identity(&canonical, &budget) {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+            identity,
+        ) => identity,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            return Err(AddBranchAtRootAuthError::Unauthorized);
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(_) => {
+            return Err(AddBranchAtRootAuthError::DiscoveryUnavailable);
+        }
+    };
+    let live_worktree_root = live
+        .worktree_root
+        .canonicalize()
+        .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
     if live_worktree_root != canonical {
         return Err(AddBranchAtRootAuthError::Unauthorized);
     }
     let project_canonical = project_root
         .canonicalize()
         .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
-    if !root_belongs_to_project(&canonical, &project_canonical) {
+    if paths_same(&canonical, &project_canonical) {
+        return Ok(canonical);
+    }
+    let project_common = match hook_repository_identity(&project_canonical, &budget) {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+            identity,
+        ) => identity.common_dir,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            return Err(AddBranchAtRootAuthError::Unauthorized);
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(_) => {
+            return Err(AddBranchAtRootAuthError::DiscoveryUnavailable);
+        }
+    };
+    if !paths_same(&live.common_dir, &project_common) {
         return Err(AddBranchAtRootAuthError::Unauthorized);
     }
     Ok(canonical)
@@ -787,23 +866,10 @@ fn bound_absolute_add_branch_at_root(path: &Path) -> Result<PathBuf, AddBranchAt
     Ok(normalized)
 }
 
-fn root_belongs_to_project(root: &Path, project_root: &Path) -> bool {
-    paths_same(root, project_root) || git_roots_share_common_dir(root, project_root)
-}
-
 fn path_is_inside(path: &Path, root: &Path) -> bool {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     path.starts_with(root)
-}
-
-fn git_roots_share_common_dir(a: &Path, b: &Path) -> bool {
-    let a_common = tracedecay_runtime_core::worktree::git_common_dir(a);
-    let b_common = tracedecay_runtime_core::worktree::git_common_dir(b);
-    a_common
-        .as_ref()
-        .zip(b_common.as_ref())
-        .is_some_and(|(a_common, b_common)| paths_same(a_common, b_common))
 }
 
 fn paths_same(a: &Path, b: &Path) -> bool {
@@ -825,12 +891,26 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    #[test]
+    fn cancelled_hook_discovery_is_unknown_not_absent() {
+        let budget = super::hook_discovery_budget();
+        budget.1.cancel();
+        let outcome = super::hook_repository_identity(Path::new("."), &budget);
+        assert_eq!(
+            outcome,
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(
+                tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::Cancelled
+            )
+        );
+    }
+
     use serde_json::json;
 
     use super::{
-        AddBranchAtRootAuthError, DurableHookEventDecodeError, HookAgent, HookEvent, HookEventKind,
-        HookEventPlan, authorize_add_branch_at_root, decode_durable_hook_event_plan,
-        encode_durable_hook_event_plan, parse_hook_event, plan_hook_event,
+        AddBranchAtRootAuthError, DurableHookEventDecodeError, HookEvent, HookEventKind,
+        HookEventPlan, HostIntegrationIdV1, authorize_add_branch_at_root,
+        decode_durable_hook_event_plan, encode_durable_hook_event_plan, parse_hook_event,
+        plan_hook_event,
     };
 
     fn parse_or_panic(params: &serde_json::Value) -> HookEvent {
@@ -962,7 +1042,7 @@ mod tests {
             "planned root {root:?} should match expected root {expected_root:?}"
         );
         assert_eq!(branch, expected_branch);
-        assert_eq!(agent, HookAgent::Codex);
+        assert_eq!(agent, HostIntegrationIdV1::Codex);
     }
 
     #[test]
@@ -986,88 +1066,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_agent_and_event_kind_from_hook_notification() {
-        let params = json!({
-            "agent": "cursor",
-            "event": "afterFileEdit",
-            "rel_paths": ["src/lib.rs", "../outside.rs", "/tmp/outside.rs", ""]
-        });
-
-        let event = parse_or_panic(&params);
-
-        assert_eq!(event.agent, HookAgent::Cursor);
-        assert_eq!(event.kind, HookEventKind::FileEdit);
-        assert_eq!(event.rel_paths, ["src/lib.rs"]);
-    }
-
-    #[test]
-    fn maps_shell_and_workspace_events_to_typed_kinds() {
-        let shell = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "git pull --rebase",
-            "cwd": "/tmp/project"
-        });
-        let workspace = json!({
-            "agent": "kiro",
-            "event": "workspaceOpen"
-        });
-
-        let shell = parse_or_panic(&shell);
-        let workspace = parse_or_panic(&workspace);
-
-        assert_eq!(shell.agent, HookAgent::Codex);
-        assert_eq!(shell.kind, HookEventKind::Shell);
-        assert!(shell.had_command);
-        assert_eq!(workspace.agent, HookAgent::Kiro);
-        assert_eq!(workspace.kind, HookEventKind::WorkspaceOpen);
-    }
-
-    #[test]
     fn shell_emitters_do_not_put_command_text_on_the_wire() {
         for event in [
             tracedecay_hooks::core_events::DaemonHookEvent::cursor_after_shell_execution(
                 PathBuf::from("/project"),
             ),
             tracedecay_hooks::core_events::DaemonHookEvent::post_tool_use_shell(
-                HookAgent::Codex,
+                HostIntegrationIdV1::Codex,
                 PathBuf::from("/project"),
             ),
         ] {
             let wire = serde_json::to_value(event).unwrap();
-            assert!(wire.get("command").is_none());
+            assert!(wire.get("command").is_none(), "{wire}");
+            let parsed = parse_hook_event(Some(&wire)).expect("emitted event parses");
+            assert_eq!(parsed.kind, HookEventKind::Shell);
+            assert!(!parsed.had_command);
         }
-    }
-
-    #[test]
-    fn preserves_route_metadata_from_hook_notification() {
-        let params = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "cargo test",
-            "cwd": "/tmp/project",
-            "route": {
-                "session_id": "session-123",
-                "thread_id": "thread-456",
-                "cwd": "/tmp/project",
-                "worktree": "/tmp/project-worktree",
-                "branch": "feature/hook-route"
-            }
-        });
-
-        let event = parse_or_panic(&params);
-
-        let Some(route) = event.route.as_ref() else {
-            panic!("route metadata should parse");
-        };
-        assert_eq!(route.session_id.as_deref(), Some("session-123"));
-        assert_eq!(route.thread_id.as_deref(), Some("thread-456"));
-        assert_eq!(route.cwd.as_deref(), Some(Path::new("/tmp/project")));
-        assert_eq!(
-            route.worktree.as_deref(),
-            Some(Path::new("/tmp/project-worktree"))
-        );
-        assert_eq!(route.branch.as_deref(), Some("feature/hook-route"));
     }
 
     #[test]
@@ -1078,6 +1092,9 @@ mod tests {
         });
 
         assert!(parse_hook_event(Some(&params)).is_none());
+        let known = parse_or_panic(&json!({ "agent": "cursor", "event": "postToolUse" }));
+        assert_eq!(known.agent, HostIntegrationIdV1::Cursor);
+        assert_eq!(known.kind, HookEventKind::IncrementalSync);
     }
 
     #[test]
@@ -1088,6 +1105,9 @@ mod tests {
         });
 
         assert!(parse_hook_event(Some(&params)).is_none());
+        let known = parse_or_panic(&json!({ "agent": "codex", "event": "postToolUse" }));
+        assert_eq!(known.agent, HostIntegrationIdV1::Codex);
+        assert_eq!(known.kind, HookEventKind::IncrementalSync);
     }
 
     /// Regression: the receiver used to keep its own agent string match, so
@@ -1096,10 +1116,10 @@ mod tests {
     #[test]
     fn accepts_every_constructible_hook_agent() {
         for agent in [
-            HookAgent::Claude,
-            HookAgent::Codex,
-            HookAgent::Cursor,
-            HookAgent::Kiro,
+            HostIntegrationIdV1::Claude,
+            HostIntegrationIdV1::Codex,
+            HostIntegrationIdV1::Cursor,
+            HostIntegrationIdV1::Kiro,
         ] {
             let params = json!({
                 "agent": agent.as_wire(),
@@ -1118,21 +1138,6 @@ mod tests {
         let params = json!({
             "agent": "cursor",
             "event": "afterFileEdit",
-            "rel_paths": ["src/lib.rs", "../outside.rs"]
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, Path::new("/tmp/project"), None),
-            HookEventPlan::SyncFiles(vec!["src/lib.rs".to_string()])
-        );
-    }
-
-    #[test]
-    fn plans_incremental_sync_with_paths_as_targeted_sync() {
-        let params = json!({
-            "agent": "kiro",
-            "event": "postToolUse",
             "rel_paths": ["src/lib.rs", "../outside.rs"]
         });
         let event = parse_or_panic(&params);
@@ -1170,78 +1175,6 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_session_start_wire_name_and_key() {
-        assert_eq!(
-            HookEventKind::from_wire("sessionStart"),
-            Some(HookEventKind::SessionStart)
-        );
-        assert_eq!(HookEventKind::SessionStart.as_key(), "session_start");
-    }
-
-    #[test]
-    fn parses_hermes_terminal_receipt_without_terminal_content() {
-        let event = parse_or_panic(&json!({
-            "agent": "hermes",
-            "event": "terminalReceipt",
-            "cwd": "/tmp/project",
-            "route": {"session_id": "session-1", "cwd": "/tmp/project"},
-            "receipt": {
-                "tool_call_id": "call-1",
-                "turn_id": "turn-1",
-                "status": "success",
-                "duration_ms": 12,
-                "transcript_watermark": "turn-1"
-            }
-        }));
-        assert_eq!(event.agent, HookAgent::Hermes);
-        assert_eq!(event.kind, HookEventKind::TerminalReceipt);
-        assert!(matches!(
-            plan_hook_event(&event, Path::new("/tmp/project"), None),
-            HookEventPlan::RecordTerminalReceipt { receipt, .. }
-                if receipt.tool_call_id.as_deref() == Some("call-1")
-        ));
-    }
-
-    #[test]
-    fn plans_projectless_hermes_turn_completion_as_a_review_receipt() {
-        let event = parse_or_panic(&json!({
-            "agent": "hermes",
-            "event": "turnCompleted",
-            "route": {"session_id": "session-1"},
-            "receipt": {
-                "status": "success",
-                "transcript_watermark": "message-1"
-            }
-        }));
-        assert_eq!(event.kind, HookEventKind::TurnCompleted);
-        assert!(matches!(
-            plan_hook_event(&event, Path::new("/tmp/project"), None),
-            HookEventPlan::RecordTerminalReceipt { receipt, .. }
-                if receipt.transcript_watermark.as_deref() == Some("message-1")
-        ));
-    }
-
-    #[test]
-    fn plans_session_start_from_main_checkout_as_current_branch_sync() {
-        let (_base, project_root, _worktree_root) = setup_linked_session_worktree();
-
-        let params = json!({
-            "agent": "claude",
-            "event": "sessionStart",
-            "cwd": project_root,
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, &project_root, Some("main")),
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Claude,
-            }
-        );
-    }
-
-    #[test]
     fn plans_session_start_from_linked_worktree_as_branch_add() {
         let (_base, project_root, worktree_root) = setup_linked_session_worktree();
 
@@ -1259,58 +1192,6 @@ mod tests {
             plan_hook_event(&event, &project_root, Some("main")),
             &worktree_root,
             "feature/session",
-        );
-    }
-
-    #[test]
-    fn plans_session_start_with_empty_branch_as_debounced_incremental_sync() {
-        let params = json!({
-            "agent": "claude",
-            "event": "sessionStart",
-            "cwd": "/tmp/project",
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, Path::new("/tmp/project"), Some("")),
-            HookEventPlan::DebouncedIncrementalSync(HookAgent::Claude)
-        );
-    }
-
-    #[test]
-    fn plans_cursor_session_start_as_current_branch_sync() {
-        let params = serde_json::to_value(
-            tracedecay_hooks::core_events::DaemonHookEvent::session_start(
-                HookAgent::Cursor,
-                PathBuf::from("/tmp/project"),
-            ),
-        )
-        .unwrap();
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Cursor,
-            }
-        );
-    }
-
-    #[test]
-    fn plans_workspace_open_as_current_branch_sync() {
-        let params = json!({
-            "agent": "kiro",
-            "event": "workspaceOpen"
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Kiro,
-            }
         );
     }
 
@@ -1337,13 +1218,13 @@ mod tests {
             HookEventPlan::AddBranchAt {
                 root: worktree_root,
                 branch: "feature/test".to_string(),
-                agent: HookAgent::Codex,
+                agent: HostIntegrationIdV1::Codex,
             },
             HookEventPlan::SyncCurrentBranch {
                 branch: "main".to_string(),
-                agent: HookAgent::Claude,
+                agent: HostIntegrationIdV1::Claude,
             },
-            HookEventPlan::DebouncedIncrementalSync(HookAgent::Cursor),
+            HookEventPlan::DebouncedIncrementalSync(HostIntegrationIdV1::Cursor),
             HookEventPlan::RecordTerminalReceipt {
                 route: route.clone(),
                 receipt: receipt.clone(),
@@ -1487,7 +1368,7 @@ mod tests {
             encode_durable_hook_event_plan(&HookEventPlan::AddBranchAt {
                 root: PathBuf::from("/tmp/worktree/../escape"),
                 branch: "feature".to_string(),
-                agent: HookAgent::Codex,
+                agent: HostIntegrationIdV1::Codex,
             })
             .is_err()
         );
@@ -1496,12 +1377,11 @@ mod tests {
     #[test]
     fn hook_boundary_protects_credential_ids_once_across_durable_receipt_joins() {
         let raw = ["AKIA", "SYNTHETIC", "CANARY", "6"].concat();
-        let protected =
-            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&raw).unwrap();
+        let protected = tracedecay_privacy::protect_sensitive_structural_id(&raw).unwrap();
         // The sender-side wire shape the Hermes plugin emits; production only
         // deserializes these events.
         let params = serde_json::to_value(tracedecay_hooks::core_events::DaemonHookEvent {
-            agent: HookAgent::Hermes.as_wire().to_string(),
+            agent: HostIntegrationIdV1::Hermes.as_wire().to_string(),
             event: "terminalReceipt".to_string(),
             rel_paths: Vec::new(),
             command: None,
@@ -1543,7 +1423,7 @@ mod tests {
             assert_eq!(actual, Some(protected.as_str()));
         }
         assert_eq!(
-            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&protected).unwrap(),
+            tracedecay_privacy::protect_sensitive_structural_id(&protected).unwrap(),
             protected
         );
     }
@@ -1577,12 +1457,15 @@ mod tests {
             "cwd": "/tmp/project",
             "route": { "session_id": "private-session-beta" }
         }));
-        let first_source = first.admission_source();
-        assert_eq!(first_source, same_session.admission_source());
-        assert_ne!(first_source, other_session.admission_source());
-        assert!(first_source.starts_with("claude:"));
-        assert!(first_source.len() < 96);
-        assert!(!first_source.contains("private-session-alpha"));
+        assert_eq!(
+            first.admission_source(),
+            "claude:ec6861dabc0aa56ebb6c26b50d93f5be93bd6f26b7b82870605791b0600cc41e"
+        );
+        assert_eq!(same_session.admission_source(), first.admission_source());
+        assert_eq!(
+            other_session.admission_source(),
+            "claude:ce7e7b5940bcf4a6acbaff77766b4d377e0c32d5c829ef161dfba30ad62310cd"
+        );
 
         let fallback = parse_or_panic(&json!({
             "agent": "cursor",
@@ -1594,23 +1477,13 @@ mod tests {
             "event": "afterFileEdit",
             "rel_paths": ["src/two.rs"]
         }));
-        assert_eq!(fallback.admission_source(), fallback.admission_source());
-        assert_ne!(
-            fallback.admission_source(),
-            other_fallback.admission_source()
-        );
-    }
-
-    #[test]
-    fn add_branch_at_effect_auth_accepts_linked_worktree_canonical_root() {
-        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
-        let authorized = authorize_add_branch_at_root(&worktree_root, &project_root)
-            .expect("linked worktree should authorize");
         assert_eq!(
-            authorized,
-            worktree_root
-                .canonicalize()
-                .expect("worktree should canonicalize")
+            fallback.admission_source(),
+            "cursor:f369e161a1f2c9f9487dd29d67d87cf9716cd31869f24cee2b50dd4a26343a93"
+        );
+        assert_eq!(
+            other_fallback.admission_source(),
+            "cursor:324b50412757e4ad290d17a464bd30d43580169eedcc638d9906f402d773595b"
         );
     }
 

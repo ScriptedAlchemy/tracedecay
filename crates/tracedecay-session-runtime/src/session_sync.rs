@@ -3,23 +3,25 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tracedecay_application::session_sync::{
+use tracedecay_contracts::session_sync::{
     SessionGitSyncV1, SessionSyncAdmissionErrorV1, SessionSyncCommandV1,
     SessionSyncCompletionReceiptV1, SessionSyncControlV1, SessionSyncCoverageV1, SessionSyncFuture,
     SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
     SessionSyncScopeV1, SessionSyncServicePort, SessionSyncShutdownFuture,
     SessionSyncSourceCoverageV1, SessionSyncSourceFrontierV1, SessionSyncStatsV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, now_micros,
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 
+use crate::session_temporal_refresh_scheduler::wake::HistoricalAdmissionView;
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
@@ -35,21 +37,21 @@ pub struct DaemonSessionSyncService {
     scan_slots: Arc<tokio::sync::Semaphore>,
     project_gates: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
-    completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
-    shutdown: tracedecay_usecases::observation::ObservationCancellation,
+    shutdown: tracedecay_sessions::observation::ObservationCancellation,
     shutdown_notify: Arc<tokio::sync::Notify>,
     journal_changed: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]
 struct ActiveSessionImport {
-    admission: tracedecay_application::session_sync::SessionSyncAdmissionReceiptV1,
+    admission: tracedecay_contracts::session_sync::SessionSyncAdmissionReceiptV1,
     journal_key: String,
 }
 
 /// Owns the handles while shutdown awaits them. If the daemon-wide deadline
-/// cancels that wait, unfinished handles return to the service so a retry can
-/// join them instead of detaching lease-owning tasks.
+/// cancels that wait, unfinished tasks are aborted and their handles return
+/// to the service, so a retry joins them instead of detaching lease-owning
+/// tasks. A retry only needs the join, not the task still running.
 struct SessionSyncTaskShutdownV1 {
     registry: Arc<Mutex<Vec<SessionSyncTaskV1>>>,
     tasks: Vec<SessionSyncTaskV1>,
@@ -74,6 +76,9 @@ impl Drop for SessionSyncTaskShutdownV1 {
         if self.tasks.is_empty() {
             return;
         }
+        for task in &self.tasks {
+            task.task.abort();
+        }
         self.registry
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -87,10 +92,15 @@ pub struct DaemonSessionSyncConfig {
     pub project_id: ProjectId,
     pub profile_root: std::path::PathBuf,
     pub project_root: std::path::PathBuf,
-    pub transcript_source_home: Option<std::path::PathBuf>,
+    /// The owner whose agent-host transcripts this sync ingests.
+    pub transcript_source_profile: tracedecay_runtime_core::config::ProfileRoot,
     pub project_sessions: RegisteredGlobalDbLeaseV1,
     pub user_sessions: RegisteredGlobalDbLeaseV1,
     pub registry: RegisteredGlobalDbLeaseV1,
+    /// The process background CPU authority transcript-ingest admissions
+    /// prepare captures under; the daemon injects the one its worker plan
+    /// installed.
+    pub background_cpu: Arc<ProcessBackgroundCpuV1>,
     pub startup_import: bool,
     pub project_refresh: crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub user_refresh: crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
@@ -108,6 +118,19 @@ pub enum SessionSyncWorkResult {
     Interrupted(work::SessionSyncInterruption),
 }
 
+struct ImportHistoryObservation {
+    coverage: Vec<SessionSyncSourceCoverageV1>,
+    failure_codes: Vec<String>,
+}
+
+struct SessionSyncTerminalMaterial {
+    termination: OperationTermination,
+    stats: SessionSyncStatsV1,
+    coverage: Vec<SessionSyncSourceCoverageV1>,
+    source_frontiers: Vec<SessionSyncSourceFrontierV1>,
+    failure_codes: Vec<String>,
+}
+
 impl Default for DaemonSessionSyncService {
     fn default() -> Self {
         Self {
@@ -117,8 +140,7 @@ impl Default for DaemonSessionSyncService {
             scan_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             project_gates: Arc::new(Mutex::new(BTreeMap::new())),
             active_imports: Arc::new(Mutex::new(BTreeMap::new())),
-            completed_profile_sweeps: Arc::new(Mutex::new(BTreeMap::new())),
-            shutdown: tracedecay_usecases::observation::ObservationCancellation::default(),
+            shutdown: tracedecay_sessions::observation::ObservationCancellation::default(),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             journal_changed: Arc::new(tokio::sync::Notify::new()),
         }
@@ -126,7 +148,6 @@ impl Default for DaemonSessionSyncService {
 }
 
 impl DaemonSessionSyncService {
-    #[hotpath::skip]
     async fn execute_request_admitted(
         &self,
         request: SessionSyncRequestV1,
@@ -144,9 +165,9 @@ impl DaemonSessionSyncService {
         }
         let observed_at = now_micros();
         let key = journal_key(request.scope(), request.idempotency_key());
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             context.registry.read_session_sync_journal(&key),
-            label = "daemon.session_sync.journal.admission_read"
+            tracing::trace_span!("daemon.session_sync.journal.admission_read"),
         )
         .await
         {
@@ -284,9 +305,9 @@ impl DaemonSessionSyncService {
                     };
                 }
             };
-            match hotpath::future!(
+            match tracing::Instrument::instrument(
                 context.registry.insert_session_sync_journal(&key, &encoded),
-                label = "daemon.session_sync.journal.coalesced_admission_write"
+                tracing::trace_span!("daemon.session_sync.journal.coalesced_admission_write"),
             )
             .await
             {
@@ -342,9 +363,9 @@ impl DaemonSessionSyncService {
                 };
             }
         };
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             context.registry.insert_session_sync_journal(&key, &encoded),
-            label = "daemon.session_sync.journal.admission_write"
+            tracing::trace_span!("daemon.session_sync.journal.admission_write"),
         )
         .await
         {
@@ -397,7 +418,7 @@ impl DaemonSessionSyncService {
         project_sessions: RegisteredGlobalDbLeaseV1,
         key: String,
         request: SessionSyncRequestV1,
-        admission: tracedecay_application::session_sync::SessionSyncAdmissionReceiptV1,
+        admission: tracedecay_contracts::session_sync::SessionSyncAdmissionReceiptV1,
     ) -> bool {
         let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         if active.contains_key(&key) {
@@ -429,23 +450,21 @@ impl DaemonSessionSyncService {
         let task_scope = request.scope().clone();
         let task_key = key.clone();
         let task_cancellation = request.cancellation().clone();
-        let task = tokio::spawn(async move {
+        let task_import_scope = import_scope.clone();
+        let task = NativeTask::spawn(async move {
             service
                 .run_operation(context, project_sessions, key.clone(), request)
                 .await;
-            service
-                .active
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&key);
-            if let Some(import_scope) = import_scope {
-                service
-                    .active_imports
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&import_scope);
-            }
+            service.release_active(&key, import_scope.as_ref());
         });
+        let task = match task {
+            Ok(task) => task,
+            Err(error) => {
+                tracing::warn!(%error, "session sync operation did not start");
+                self.release_active(&task_key, task_import_scope.as_ref());
+                return false;
+            }
+        };
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.task.is_finished());
         tasks.push(SessionSyncTaskV1 {
@@ -457,7 +476,19 @@ impl DaemonSessionSyncService {
         true
     }
 
-    #[hotpath::skip]
+    fn release_active(&self, key: &str, import_scope: Option<&String>) {
+        self.active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key);
+        if let Some(import_scope) = import_scope {
+            self.active_imports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(import_scope);
+        }
+    }
+
     async fn run_operation(
         &self,
         context: Arc<SessionSyncProjectContext>,
@@ -516,7 +547,7 @@ impl DaemonSessionSyncService {
                 .await;
             return;
         }
-        let running = match self.transition_running(&context, &key).await {
+        let _running = match self.transition_running(&context, &key).await {
             Ok(running) => running,
             Err(_) => {
                 drop(permit);
@@ -525,22 +556,16 @@ impl DaemonSessionSyncService {
         };
         let work = match request.command() {
             SessionSyncCommandV1::ImportTranscripts(_) => {
-                hotpath::future!(
-                    context.import_transcripts(
-                        self,
-                        &key,
-                        running.admission.accepted_at,
-                        &request,
-                        project_sessions.clone(),
-                    ),
-                    label = "daemon.session_sync.import_transcripts"
+                tracing::Instrument::instrument(
+                    context.import_transcripts(self, &key, &request, project_sessions.clone()),
+                    tracing::trace_span!("daemon.session_sync.import_transcripts"),
                 )
                 .await
             }
             SessionSyncCommandV1::SynchronizeGit(options) => {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     context.synchronize_git(self, &request, options, project_sessions.clone()),
-                    label = "daemon.session_sync.synchronize_git"
+                    tracing::trace_span!("daemon.session_sync.synchronize_git"),
                 )
                 .await
             }
@@ -568,24 +593,39 @@ impl DaemonSessionSyncService {
                 failure_codes,
             } => {
                 let interrupted = interruption.is_some();
+                let is_import = matches!(
+                    request.command(),
+                    SessionSyncCommandV1::ImportTranscripts(_)
+                );
                 let coverage_complete = !coverage.is_empty()
                     && coverage.iter().all(|entry| entry.coverage.is_complete());
-                let termination = completion_termination(
+                let mut termination = completion_termination(
                     interruption.and_then(work::SessionSyncInterruption::termination),
                     committed,
                     &stats,
                     coverage_complete,
                     failure_codes.is_empty(),
                 );
+                if import_reports_deferred_progress(
+                    is_import,
+                    interrupted,
+                    &failure_codes,
+                    coverage_complete,
+                    &coverage,
+                ) {
+                    termination = OperationTermination::Partial;
+                }
                 if self
                     .persist_terminal(
                         &context,
                         &key,
-                        termination,
-                        stats,
-                        coverage,
-                        source_frontiers,
-                        failure_codes,
+                        SessionSyncTerminalMaterial {
+                            termination,
+                            stats,
+                            coverage,
+                            source_frontiers,
+                            failure_codes,
+                        },
                     )
                     .await
                     .is_ok()
@@ -599,7 +639,34 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::skip]
+    /// Hands historical catch-up to both refresh workers. The import records
+    /// that hand-off, one deferred unit per store scope, and never waits for
+    /// the pass: only the workers' own serving state can later say it ran.
+    fn schedule_import_history(
+        &self,
+        context: &SessionSyncProjectContext,
+        request: &SessionSyncRequestV1,
+    ) -> Result<ImportHistoryObservation, work::SessionSyncInterruption> {
+        if let Some(interruption) =
+            self.observed_interruption(request.cancellation(), request.deadline())
+        {
+            return Err(interruption);
+        }
+        let mut failure_codes = Vec::new();
+        push_historical_admission_failure(
+            &context.project_refresh.schedule_historical_admission(),
+            &mut failure_codes,
+        );
+        push_historical_admission_failure(
+            &context.user_refresh.schedule_historical_admission(),
+            &mut failure_codes,
+        );
+        Ok(ImportHistoryObservation {
+            coverage: transcript_import_requested_coverage(),
+            failure_codes,
+        })
+    }
+
     async fn transition_running(
         &self,
         context: &SessionSyncProjectContext,
@@ -614,7 +681,6 @@ impl DaemonSessionSyncService {
         .await
     }
 
-    #[hotpath::skip]
     async fn persist_interruption_with_project_sessions(
         &self,
         context: &SessionSyncProjectContext,
@@ -628,29 +694,39 @@ impl DaemonSessionSyncService {
         self.persist_terminal(
             context,
             key,
-            termination,
-            journal.stats,
-            journal.coverage,
-            journal.source_frontiers,
-            Vec::new(),
+            SessionSyncTerminalMaterial {
+                termination,
+                stats: journal.stats,
+                coverage: journal.coverage,
+                source_frontiers: journal.source_frontiers,
+                failure_codes: Vec::new(),
+            },
         )
         .await
     }
 
-    #[hotpath::skip]
     async fn persist_terminal(
         &self,
         context: &SessionSyncProjectContext,
         key: &str,
-        termination: OperationTermination,
-        stats: SessionSyncStatsV1,
-        coverage: Vec<SessionSyncSourceCoverageV1>,
-        source_frontiers: Vec<SessionSyncSourceFrontierV1>,
-        failure_codes: Vec<String>,
+        material: SessionSyncTerminalMaterial,
     ) -> tracedecay_domain::errors::Result<SessionSyncJournalV1> {
+        let SessionSyncTerminalMaterial {
+            termination,
+            stats,
+            mut coverage,
+            source_frontiers,
+            failure_codes,
+        } = material;
         self.update_journal(context, key, |journal| {
             if journal.status == SessionSyncJournalStatusV1::Complete {
                 return;
+            }
+            if coverage.is_empty()
+                && termination != OperationTermination::Completed
+                && matches!(journal.source, SessionSyncCommandV1::ImportTranscripts(_))
+            {
+                coverage = transcript_import_requested_coverage();
             }
             let completed_at = now_micros();
             journal.status = SessionSyncJournalStatusV1::Complete;
@@ -672,7 +748,6 @@ impl DaemonSessionSyncService {
         .await
     }
 
-    #[hotpath::skip]
     async fn update_journal(
         &self,
         context: &SessionSyncProjectContext,
@@ -680,9 +755,9 @@ impl DaemonSessionSyncService {
         mut update: impl FnMut(&mut SessionSyncJournalV1),
     ) -> tracedecay_domain::errors::Result<SessionSyncJournalV1> {
         loop {
-            let current = hotpath::future!(
+            let current = tracing::Instrument::instrument(
                 context.registry.read_session_sync_journal(key),
-                label = "daemon.session_sync.journal.update_read"
+                tracing::trace_span!("daemon.session_sync.journal.update_read"),
             )
             .await
             .map_err(store_error)?
@@ -696,11 +771,11 @@ impl DaemonSessionSyncService {
             if replacement == current {
                 return Ok(journal);
             }
-            if hotpath::future!(
+            if tracing::Instrument::instrument(
                 context
                     .registry
                     .compare_and_swap_session_sync_journal(key, &current, &replacement),
-                label = "daemon.session_sync.journal.update_write"
+                tracing::trace_span!("daemon.session_sync.journal.update_write"),
             )
             .await
             .map_err(store_error)?
@@ -711,7 +786,6 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::skip]
     async fn persist_progress(
         &self,
         context: &SessionSyncProjectContext,
@@ -733,7 +807,6 @@ impl DaemonSessionSyncService {
         Ok(source_frontiers)
     }
 
-    #[hotpath::skip]
     async fn refresh_source_frontiers_with_project_sessions(
         &self,
         context: &SessionSyncProjectContext,
@@ -764,7 +837,6 @@ impl DaemonSessionSyncService {
         .await
     }
 
-    #[hotpath::skip]
     async fn status_request_admitted(
         &self,
         context: &SessionSyncProjectContext,
@@ -807,7 +879,6 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::skip]
     async fn status_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
         let project_gate = self.project_gate(control.scope());
         let _project = project_gate.lock().await;
@@ -823,9 +894,9 @@ impl DaemonSessionSyncService {
 impl SessionSyncServicePort for DaemonSessionSyncService {
     fn execute(&self, request: SessionSyncRequestV1) -> SessionSyncFuture<'_> {
         Box::pin(async move {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 self.execute_request(request),
-                label = "daemon.session_sync.execute"
+                tracing::trace_span!("daemon.session_sync.execute"),
             )
             .await
         })
@@ -833,9 +904,9 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
 
     fn status(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
         Box::pin(async move {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 self.status_request(control),
-                label = "daemon.session_sync.status"
+                tracing::trace_span!("daemon.session_sync.status"),
             )
             .await
         })
@@ -843,9 +914,9 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
 
     fn cancel(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
         Box::pin(async move {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 self.cancel_request(control),
-                label = "daemon.session_sync.cancel"
+                tracing::trace_span!("daemon.session_sync.cancel"),
             )
             .await
         })
@@ -855,11 +926,11 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
         Box::pin(async move {
             self.shutdown.cancel();
             self.shutdown_notify.notify_waiters();
-            let mut tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
-            let grace_deadline = tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
+            let tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
+            let grace_deadline = Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
             tokio::select! {
                 results = futures_util::future::join_all(
-                    tasks.tasks.iter_mut().map(|task| &mut task.task)
+                    tasks.tasks.iter().map(|task| task.task.wait())
                 ) => {
                     for result in results {
                         work::log_session_sync_join(result);
@@ -870,13 +941,17 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                         .clear();
                     return;
                 }
-                () = tokio::time::sleep_until(grace_deadline) => {}
+                fired = native_runtime::sleep_until(grace_deadline) => {
+                    if let Err(error) = fired {
+                        tracing::warn!(%error, "session sync shutdown aborts its tasks without a grace period");
+                    }
+                }
             }
             for task in &tasks.tasks {
                 task.task.abort();
             }
             for result in
-                futures_util::future::join_all(tasks.tasks.iter_mut().map(|task| &mut task.task))
+                futures_util::future::join_all(tasks.tasks.iter().map(|task| task.task.wait()))
                     .await
             {
                 work::log_session_sync_join(result);
@@ -893,21 +968,17 @@ pub mod git_topology;
 mod project_lifecycle;
 pub mod work;
 
+#[cfg(test)]
+mod import_admission_tests;
+#[cfg(test)]
+mod shutdown_tests;
+
 pub use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_harness {
     use std::sync::{Arc, PoisonError};
     use std::time::Duration;
-
-    use tokio::sync::Semaphore;
-    use tracedecay_application::session_sync::{
-        SessionSyncJournalV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncStatsV1,
-    };
-    use tracedecay_application::{
-        CancellationSignal, Deadline, IdempotencyKey, OperationTermination,
-    };
-    use tracedecay_domain::UtcMicros;
 
     use super::{DaemonSessionSyncService, SessionSyncTaskV1};
     use crate::session_temporal_refresh_scheduler::projector::{
@@ -919,6 +990,13 @@ pub mod test_harness {
     use crate::session_temporal_refresh_scheduler::wake::{
         RecoverySelectionGuard, SessionTemporalRefreshRetryClass,
     };
+    use tokio::sync::Semaphore;
+    use tracedecay_contracts::session_sync::{
+        SessionSyncJournalV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncStatsV1,
+    };
+    use tracedecay_contracts::{
+        CancellationSignal, Deadline, IdempotencyKey, OperationTermination,
+    };
 
     pub use crate::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshPassReport;
     pub use crate::session_temporal_refresh_scheduler::wake::SessionTemporalRefreshWakeState;
@@ -927,7 +1005,6 @@ pub mod test_harness {
         run_session_temporal_refresh_pass,
     };
 
-    #[hotpath::skip]
     pub async fn wait_for_interruption(
         service: &DaemonSessionSyncService,
         cancellation: &CancellationSignal,
@@ -979,13 +1056,6 @@ pub mod test_harness {
 
     pub fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
         super::journal_prefix(scope)
-    }
-
-    pub fn completed_profile_sweep_covers(
-        sweep_started_at: Option<&UtcMicros>,
-        admitted_at: UtcMicros,
-    ) -> bool {
-        super::completed_profile_sweep_covers(sweep_started_at, admitted_at)
     }
 
     pub fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
@@ -1061,7 +1131,6 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::skip]
     async fn wait_for_interruption(
         &self,
         request: &SessionSyncRequestV1,
@@ -1070,7 +1139,6 @@ impl DaemonSessionSyncService {
             .await
     }
 
-    #[hotpath::skip]
     async fn wait_for_interruption_parts(
         &self,
         cancellation: &CancellationSignal,
@@ -1086,15 +1154,37 @@ impl DaemonSessionSyncService {
             biased;
             () = &mut shutdown => work::SessionSyncInterruption::Shutdown,
             () = cancellation.cancelled() => work::SessionSyncInterruption::Cancelled,
-            () = sleep_until_deadline(deadline) => work::SessionSyncInterruption::TimedOut,
+            fired = sleep_until_deadline(deadline) => {
+                // Without a timer the deadline cannot be observed, so the
+                // operation ends rather than run unbounded.
+                if let Err(error) = fired {
+                    tracing::error!(%error, "session sync deadline has no native timer");
+                }
+                work::SessionSyncInterruption::TimedOut
+            }
         }
     }
 }
 
-fn sleep_until_deadline(deadline: &tracedecay_application::Deadline) -> impl Future<Output = ()> {
+fn transcript_import_requested_coverage() -> Vec<SessionSyncSourceCoverageV1> {
+    // One transcript import requests the complete provider set for each
+    // registered store scope. Before discovery starts, each aggregate scope
+    // is therefore one wholly deferred work unit.
+    ["project", "profile"]
+        .into_iter()
+        .map(|store_scope| SessionSyncSourceCoverageV1 {
+            store_scope: store_scope.to_owned(),
+            coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+        })
+        .collect()
+}
+
+fn sleep_until_deadline(
+    deadline: &tracedecay_contracts::Deadline,
+) -> impl Future<Output = Result<(), String>> {
     let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
     let remaining = u64::try_from(remaining_micros).unwrap_or(0);
-    tokio::time::sleep(Duration::from_micros(remaining))
+    native_runtime::sleep_until(Instant::now() + Duration::from_micros(remaining))
 }
 
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
@@ -1117,38 +1207,6 @@ fn import_scope_key(scope: &SessionSyncScopeV1) -> String {
     )
 }
 
-fn completed_profile_sweep_covers(
-    sweep_started_at: Option<&UtcMicros>,
-    admitted_at: UtcMicros,
-) -> bool {
-    sweep_started_at.is_some_and(|sweep_started_at| *sweep_started_at >= admitted_at)
-}
-
-fn source_coverage(
-    store_scope: &str,
-    coverage: tracedecay_sessions::runtime::IngestPassCoverage,
-) -> SessionSyncSourceCoverageV1 {
-    let coverage = match coverage {
-        tracedecay_sessions::runtime::IngestPassCoverage::Complete => {
-            SessionSyncCoverageV1::Complete
-        }
-        tracedecay_sessions::runtime::IngestPassCoverage::Partial { deferred_units } => {
-            SessionSyncCoverageV1::Partial { deferred_units }
-        }
-        tracedecay_sessions::runtime::IngestPassCoverage::Backpressured {
-            admitted_units,
-            rejected_units,
-        } => SessionSyncCoverageV1::Backpressured {
-            admitted_units,
-            rejected_units,
-        },
-    };
-    SessionSyncSourceCoverageV1 {
-        store_scope: store_scope.to_owned(),
-        coverage,
-    }
-}
-
 fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
     format!("{}{}", journal_prefix(scope), key.as_str())
 }
@@ -1166,6 +1224,41 @@ fn decode_matching_journal(
         return Err("session_sync_idempotency_conflict");
     }
     Ok(journal)
+}
+
+fn import_reports_deferred_progress(
+    is_import: bool,
+    interrupted: bool,
+    failure_codes: &[String],
+    coverage_complete: bool,
+    coverage: &[SessionSyncSourceCoverageV1],
+) -> bool {
+    is_import
+        && !interrupted
+        && failure_codes.is_empty()
+        && !coverage_complete
+        && !coverage.is_empty()
+        && coverage.iter().all(|entry| {
+            matches!(
+                entry.coverage,
+                SessionSyncCoverageV1::Complete | SessionSyncCoverageV1::Partial { .. }
+            )
+        })
+}
+
+fn push_historical_admission_failure(
+    view: &HistoricalAdmissionView,
+    failure_codes: &mut Vec<String>,
+) {
+    match view {
+        HistoricalAdmissionView::Scheduled => {}
+        HistoricalAdmissionView::Blocked { reason_code } => {
+            failure_codes.push(reason_code.clone());
+        }
+        HistoricalAdmissionView::Unavailable => {
+            failure_codes.push("session_history_not_current".to_owned());
+        }
+    }
 }
 
 fn completion_termination(

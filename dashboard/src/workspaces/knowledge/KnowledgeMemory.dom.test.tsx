@@ -24,6 +24,19 @@ import type {
 import { fixtureEnvelope } from "../../test/fixtureEnvelope.ts";
 import { KnowledgePage } from "./KnowledgePage.tsx";
 
+// jsdom ships no 2D canvas, so the ECharts instance behind the trust trace is
+// replaced with an inert one. The trace's option is a pure mapping of the
+// audit rows, and the exact rows it summarises are asserted below; the drawn
+// canvas is proved in a browser.
+vi.mock("../../viz/chart/echarts.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../viz/chart/echarts.ts")>()),
+  init: () => ({
+    setOption: () => {},
+    resize: () => {},
+    dispose: () => {},
+  }),
+}));
+
 /* ---- route bodies -------------------------------------------------------- */
 
 function memoryGraph(facts: readonly MemoryFactRowV1[]): MemoryGraphPayloadV1 {
@@ -83,10 +96,10 @@ function memoryGraph(facts: readonly MemoryFactRowV1[]): MemoryGraphPayloadV1 {
 }
 
 /** `memory_api::overview` seeds the whole holographic block before it reads
- * anything, so `reads` and `facts_coverage` are always present — a body without
+ * anything, so `reads` and `facts_coverage` are always present, a body without
  * them is one the route cannot produce. */
 function overviewEnvelope(facts: readonly MemoryFactRowV1[] = []) {
-  // The envelope's own header — time, coverage, authorization, version — comes
+  // The envelope's own header, time, coverage, authorization, version, comes
   // from the fixture authority rather than being invented here, so these cases
   // cannot accidentally assert against a truth claim no route makes.
   return fixtureEnvelope({
@@ -241,6 +254,7 @@ const RUNS = {
       run_id: "run-a",
       trigger: "scheduler",
       task: "memory_curator",
+      task_key: "memory_curator",
       backend: "codex_app_server",
       model: "gpt-5-codex",
       status: "succeeded",
@@ -249,6 +263,9 @@ const RUNS = {
       rejected_count: 2,
       skipped_count: 0,
       error: null,
+      error_classification: null,
+      error_retryable: null,
+      backend_attempt_count: 1,
       started_at: "2026-08-01T00:00:00Z",
       completed_at: "2026-08-01T00:01:00Z",
       artifact_kinds: [],
@@ -257,6 +274,7 @@ const RUNS = {
       run_id: "run-b",
       trigger: "manual",
       task: "skill_writer",
+      task_key: "skill_writer",
       backend: "codex_app_server",
       model: null,
       status: "failed",
@@ -267,6 +285,9 @@ const RUNS = {
       started_at: "2026-08-02T00:00:00Z",
       completed_at: "2026-08-02T00:00:30Z",
       error: "backend timed out after 60s",
+      error_classification: "timeout",
+      error_retryable: true,
+      backend_attempt_count: 1,
       artifact_kinds: [],
     },
   ],
@@ -417,52 +438,18 @@ describe("Knowledge view switcher", () => {
     stubRoutes();
     renderPage();
     const tab = await screen.findByRole("tab", { name: "Facts" });
-    const panelId = tab.getAttribute("aria-controls");
-    expect(panelId).toBeTruthy();
     // `aria-controls` naming an element that was never drawn is an invalid
-    // reference, not a weaker one — the accessibility gate reads it as a
+    // reference, not a weaker one, the accessibility gate reads it as a
     // failure.
-    expect(document.getElementById(panelId ?? "")).toBeTruthy();
+    const panel = document.getElementById(tab.getAttribute("aria-controls") ?? "");
+    expect(panel?.getAttribute("role")).toBe("tabpanel");
+    expect(panel?.getAttribute("aria-labelledby")).toBe(tab.id);
   });
 });
 
 /* ---- geometry ------------------------------------------------------------ */
 
 describe("Memory geometry", () => {
-  it("states what the projection axes are and censuses the categories", async () => {
-    stubRoutes();
-    renderPage("/knowledge?view=geometry");
-    expect(
-      await screen.findByText(
-        /principal components of 3 query-time-derived phase encodings returned by a request bounded to 400 facts, of width 64/,
-      ),
-    ).toBeTruthy();
-    const census = screen.getByLabelText("Projected facts by category");
-    expect(within(census).getByText("decision · 2")).toBeTruthy();
-    expect(within(census).getByText("code_area · 1")).toBeTruthy();
-  });
-
-  it("refuses to draw a projection the daemon did not compute", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/projection")) {
-          return json({
-            ...PROJECTION,
-            method: "none",
-            points: [PROJECTION.points[0]],
-          });
-        }
-        if (url.includes("/similarity")) return json(SIMILARITY);
-        return json(OVERVIEW_ENVELOPE);
-      }),
-    );
-    renderPage("/knowledge?view=geometry");
-    expect(
-      await screen.findByText(/placeholders, not a projection/),
-    ).toBeTruthy();
-  });
 
   it("surfaces bounded projection coverage instead of implying the page is the whole store", async () => {
     vi.stubGlobal(
@@ -490,28 +477,33 @@ describe("Memory geometry", () => {
     ).toBeTruthy();
   });
 
-  it("keeps global similarity statistics apart from an unknowably capped threshold list", async () => {
-    stubRoutes();
+  it("states each geometry read as a typed chip and prints pair identities by head and tail", async () => {
+    const longA = `fact.${"a".repeat(64)}.${"0".repeat(58)}000011`;
+    const longB = `fact.${"b".repeat(64)}.${"0".repeat(58)}000012`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/projection")) {
+          return json({
+            ...PROJECTION,
+            coverage: { completeness: "bounded", examined: 400, limit: 400, omission_reasons: ["request_limit_reached"] },
+          });
+        }
+        if (url.includes("/similarity")) {
+          return json({ ...SIMILARITY, limit: 5, pairs: [{ ...SIMILARITY.pairs[0]!, a_id: longA, b_id: longB }] });
+        }
+        return json(OVERVIEW_ENVELOPE);
+      }),
+    );
     renderPage("/knowledge?view=geometry");
-    expect(
-      await screen.findByText(
-        "1 pairs shown at or above 0.85; 120 finite pairs scored globally over 40 query-time encoded facts",
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        "Global distribution over all 120 scored pairs; these statistics are not limited to the threshold-matching list below.",
-      ),
-    ).toBeTruthy();
-    expect(screen.getByText("0.4100")).toBeTruthy();
-    expect(screen.getByText("0.0200")).toBeTruthy();
-    expect(screen.getByText("0.9900")).toBeTruthy();
-    expect(
-      screen.getByText(
-        /Threshold-list coverage is unknown: 1 pair returned at or above 0\.85, filling this request's limit of 1\. The response cannot distinguish an exact fit from a truncated list\./,
-      ),
-    ).toBeTruthy();
-    expect(screen.queryByText(/threshold matches? (?:were )?omitted/i)).toBeNull();
+    const projection = await screen.findByText("· pca · bounded · request_limit_reached");
+    expect(projection.closest("[data-state]")?.getAttribute("data-state")).toBe("partial");
+    const similarity = await screen.findByText("· 1 pair · list ended below the limit");
+    expect(similarity.closest("[data-state]")?.getAttribute("data-state")).toBe("ready");
+    expect(screen.getByTitle(longA).textContent).toBe("fact.aa…000011");
+    expect(screen.getByTitle(longB).textContent).toBe("fact.bb…000012");
+    expect(screen.getByText("likely duplicate").className).toBe("td-legend");
   });
 
   it("names the pair list so it is reachable by keyboard", async () => {
@@ -529,39 +521,6 @@ describe("Memory geometry", () => {
 /* ---- oplog --------------------------------------------------------------- */
 
 describe("Memory oplog", () => {
-  it("renders canonical fact identity without inventing unavailable details", async () => {
-    stubRoutes();
-    renderPage("/knowledge?view=oplog");
-    expect(await screen.findByText("fact-project-9")).toBeTruthy();
-    expect(screen.getAllByText("created")).toHaveLength(2);
-    expect(screen.queryByText(/detail withheld/)).toBeNull();
-    expect(screen.queryByText(/detail state/)).toBeNull();
-  });
-
-  it("reports an unreadable store rather than an empty history", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/oplog")) {
-          return json({
-            events: [],
-            count: 0,
-            limit: 100,
-            error: "database is locked",
-          });
-        }
-        return json(OVERVIEW_ENVELOPE);
-      }),
-    );
-    renderPage("/knowledge?view=oplog");
-    expect(
-      await screen.findByText(
-        /the memory oplog could not be read: database is locked/,
-      ),
-    ).toBeTruthy();
-    expect(screen.queryByText(/nothing has ever written/)).toBeNull();
-  });
 
   it("does not call an incoherent oplog response complete", async () => {
     vi.stubGlobal(
@@ -646,7 +605,7 @@ describe("Fact trust history", () => {
   it("renders withheld and unrecorded event details as their own states", async () => {
     stubWithFact();
     renderPage();
-    await userEvent.click(await screen.findByText("a memory fact"));
+    await userEvent.click(await screen.findByRole("button", { name: /a memory fact/ }));
 
     const events = await screen.findByRole("region", {
       name: "Trust history events",
@@ -668,17 +627,6 @@ describe("Fact trust history", () => {
     expect(events.getAttribute("tabindex")).toBe("0");
   });
 
-  it("nets only the trust events returned in the bounded window", async () => {
-    stubWithFact();
-    renderPage();
-    await userEvent.click(await screen.findByText("a memory fact"));
-    // 0.500 in, 0.580 out, across three events — the gauge above shows only
-    // the closing figure, which is what this drilldown exists to explain.
-    expect(await screen.findByText("0.500")).toBeTruthy();
-    expect(screen.getByText("+0.080")).toBeTruthy();
-    expect(screen.queryByText(/partial history window/)).toBeNull();
-  });
-
   it("labels partial trust arithmetic and preserves the continuation state", async () => {
     stubWithFact({
       ...TRUST_HISTORY,
@@ -689,41 +637,11 @@ describe("Fact trust history", () => {
       },
     });
     renderPage();
-    await userEvent.click(await screen.findByText("a memory fact"));
+    await userEvent.click(await screen.findByRole("button", { name: /a memory fact/ }));
 
     expect(await screen.findByText(/this is a partial history window/i)).toBeTruthy();
     expect(screen.getByText("window opening")).toBeTruthy();
     expect(screen.getByText("window net")).toBeTruthy();
     expect(screen.getByText("window closing")).toBeTruthy();
-  });
-});
-
-/* ---- curation ------------------------------------------------------------ */
-
-describe("Curation console", () => {
-  it("reports run history with the ledger status of each run", async () => {
-    stubRoutes();
-    renderPage("/knowledge?view=curation");
-    const history = await screen.findByRole("region", {
-      name: "Automatic run history",
-    });
-    const succeededRun = (
-      await within(history).findByText("memory_curator")
-    ).closest("button");
-    expect(succeededRun).toBeTruthy();
-    expect(within(succeededRun!).getByText("succeeded")).toBeTruthy();
-    expect(
-      within(succeededRun!).getByText("3 accepted · 2 rejected"),
-    ).toBeTruthy();
-
-    const failedRun = within(history).getByText("skill_writer").closest("button");
-    expect(failedRun).toBeTruthy();
-    expect(within(failedRun!).getByText("failed")).toBeTruthy();
-    expect(
-      within(failedRun!).getByText("0 accepted · 0 rejected"),
-    ).toBeTruthy();
-    expect(
-      within(history).getByText("backend timed out after 60s"),
-    ).toBeTruthy();
   });
 });

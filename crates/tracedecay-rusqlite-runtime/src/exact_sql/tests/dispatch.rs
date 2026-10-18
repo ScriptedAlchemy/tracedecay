@@ -110,7 +110,7 @@ fn validate_checks_syntax_and_schema_on_the_writer_actor() {
 }
 
 #[test]
-fn batch_reports_last_insert_rowid() {
+fn batch_reports_changed_rows() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
@@ -132,90 +132,220 @@ fn batch_reports_last_insert_rowid() {
         .unwrap();
 
     assert_eq!(result.changed_rows, 2);
-    assert_eq!(result.last_insert_rowid, 2);
-    assert_eq!(channel.last_insert_rowid(), 2);
 }
 
 #[test]
-fn rowid_is_handle_local_and_changes_only_after_applied_insert() {
+fn insert_returning_identifies_each_writer_result() {
     let fixture = fixture('a', 'a');
     let channel_a = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let channel_b = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel_a
         .execute_batch(
-            "CREATE TABLE rowids (
-                    id INTEGER PRIMARY KEY,
-                    value TEXT NOT NULL UNIQUE
-                )"
-            .to_owned(),
+            "CREATE TABLE rowids (id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE)".to_owned(),
         )
         .unwrap();
 
-    let a = channel_a
-        .execute(statement(
-            "INSERT INTO rowids(value) VALUES (?)",
+    let first = channel_a
+        .execute_returning(statement(
+            "INSERT INTO rowids(value) VALUES (?) RETURNING id",
             vec![ExactSqlValue::Text("a".to_owned())],
         ))
         .unwrap();
-    let b = channel_b
-        .execute(statement(
-            "INSERT INTO rowids(value) VALUES (?)",
+    let second = channel_b
+        .execute_returning(statement(
+            "INSERT INTO rowids(value) VALUES (?) RETURNING id",
             vec![ExactSqlValue::Text("b".to_owned())],
         ))
         .unwrap();
-    assert_eq!(a.last_insert_rowid, 1);
-    assert_eq!(b.last_insert_rowid, 2);
+    assert_eq!(first.rows[0].values, vec![ExactSqlValue::Integer(1)]);
+    assert_eq!(second.rows[0].values, vec![ExactSqlValue::Integer(2)]);
 
-    let update = channel_a
-        .execute(statement(
-            "UPDATE rowids SET value = ? WHERE id = 1",
-            vec![ExactSqlValue::Text("updated".to_owned())],
-        ))
-        .unwrap();
-    channel_a
-        .validate(statement("SELECT value FROM rowids", vec![]))
-        .unwrap();
-    channel_a
-        .query(
-            statement("SELECT value FROM rowids WHERE id = 1", vec![]),
-            Duration::from_secs(1),
-        )
-        .unwrap();
-    let ignored = channel_a
-        .execute(statement(
-            "INSERT OR IGNORE INTO rowids(value) VALUES (?)",
-            vec![ExactSqlValue::Text("b".to_owned())],
-        ))
-        .unwrap();
-    let upsert_update = channel_a
-        .execute(statement(
-            "INSERT INTO rowids(id, value) VALUES (2, 'b')
-                 ON CONFLICT(id) DO UPDATE SET value = excluded.value",
+    let a = channel_a.begin_immediate().unwrap();
+    let ignored = a
+        .query(statement(
+            "INSERT OR IGNORE INTO rowids(value) VALUES ('b') RETURNING id",
             vec![],
         ))
         .unwrap();
-
-    assert_eq!(update.last_insert_rowid, 1);
-    assert_eq!(ignored.last_insert_rowid, 1);
-    assert_eq!(upsert_update.last_insert_rowid, 1);
-    assert_eq!(channel_a.last_insert_rowid(), 1);
-    assert_eq!(channel_b.last_insert_rowid(), 2);
-
-    let explicit = channel_a
-        .execute(statement(
-            "INSERT INTO rowids(id, value) VALUES (?, ?)",
+    let upsert = a
+        .query(statement(
+            "INSERT INTO rowids(id, value) VALUES (2, 'updated')
+         ON CONFLICT(id) DO UPDATE SET value = excluded.value RETURNING id",
+            vec![],
+        ))
+        .unwrap();
+    let explicit = a
+        .query(statement(
+            "INSERT INTO rowids(id, value) VALUES (?, ?) RETURNING id",
             vec![
                 ExactSqlValue::Integer(41),
                 ExactSqlValue::Text("explicit".to_owned()),
             ],
         ))
         .unwrap();
-    assert_eq!(explicit.last_insert_rowid, 41);
-    assert_eq!(channel_a.last_insert_rowid(), 41);
+    a.commit().unwrap();
+    assert!(ignored.rows.is_empty());
+    assert_eq!(upsert.rows[0].values, vec![ExactSqlValue::Integer(2)]);
+    assert_eq!(explicit.rows[0].values, vec![ExactSqlValue::Integer(41)]);
+    let rows = channel_b
+        .query(
+            statement("SELECT id, value FROM rowids ORDER BY id", vec![]),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(
+        rows.rows,
+        vec![
+            ExactSqlRow {
+                values: vec![
+                    ExactSqlValue::Integer(1),
+                    ExactSqlValue::Text("a".to_owned())
+                ]
+            },
+            ExactSqlRow {
+                values: vec![
+                    ExactSqlValue::Integer(2),
+                    ExactSqlValue::Text("updated".to_owned())
+                ]
+            },
+            ExactSqlRow {
+                values: vec![
+                    ExactSqlValue::Integer(41),
+                    ExactSqlValue::Text("explicit".to_owned())
+                ]
+            },
+        ]
+    );
 }
 
 #[test]
-fn partial_batch_error_still_publishes_applied_insert_rowid() {
+fn execute_returning_row_limit_error_rolls_back_the_statement() {
+    assert_returning_limit_rolls_back(
+        "INSERT INTO returning_target(id) SELECT id FROM returning_source RETURNING id",
+    );
+}
+
+#[test]
+fn execute_returning_byte_limit_error_rolls_back_the_statement() {
+    assert_returning_limit_rolls_back(
+        "INSERT INTO returning_target(id) SELECT id FROM returning_source LIMIT 3
+         RETURNING id, zeroblob(25165824)",
+    );
+}
+
+#[test]
+fn execute_returning_commit_failure_rolls_back_and_releases_writer() {
+    let fixture = fixture('a', 'a');
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    channel
+        .execute_batch(
+            "CREATE TABLE returning_parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE returning_child(id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL,
+                 FOREIGN KEY(parent_id) REFERENCES returning_parent(id)
+                 DEFERRABLE INITIALLY DEFERRED)"
+                .to_owned(),
+        )
+        .unwrap();
+    let error = channel
+        .execute_returning(statement(
+            "INSERT INTO returning_child VALUES (1, 9) RETURNING id",
+            vec![],
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ExactSqlError::Sqlite {
+                code: Some(rusqlite::ffi::SQLITE_CONSTRAINT),
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let rows = channel
+        .query(
+            statement("SELECT count(*) FROM returning_child", vec![]),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
+    channel
+        .execute(statement("INSERT INTO returning_parent VALUES (9)", vec![]))
+        .unwrap();
+    let rows = channel
+        .execute_returning(statement(
+            "INSERT INTO returning_child VALUES (1, 9) RETURNING id",
+            vec![],
+        ))
+        .unwrap();
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(1)]);
+}
+
+fn assert_returning_limit_rolls_back(insert: &str) {
+    let fixture = fixture('a', 'a');
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    channel
+        .execute_batch(
+            "CREATE TABLE returning_source(id INTEGER PRIMARY KEY);
+             CREATE TABLE returning_target(id INTEGER PRIMARY KEY)"
+                .to_owned(),
+        )
+        .unwrap();
+    let source_values = (1..=MAX_QUERY_ROWS + 1)
+        .map(|id| format!("({id})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    channel
+        .execute(statement(
+            &format!("INSERT INTO returning_source(id) VALUES {source_values}"),
+            vec![],
+        ))
+        .unwrap();
+
+    let error = channel
+        .execute_returning(statement(insert, vec![]))
+        .unwrap_err();
+    assert!(
+        matches!(error, ExactSqlError::QueryLimitExceeded),
+        "{error:?}"
+    );
+    let rows = channel
+        .query(
+            statement("SELECT count(*) FROM returning_target", vec![]),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
+    let reopened =
+        rusqlite::Connection::open(fixture._directory.path().join("exact-sql.sqlite3")).unwrap();
+    assert_eq!(
+        reopened
+            .query_row("SELECT count(*) FROM returning_target", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+
+    let next = channel
+        .execute_returning(statement(
+            "INSERT INTO returning_target(id) VALUES (1) RETURNING id",
+            vec![],
+        ))
+        .unwrap();
+    assert_eq!(next.rows[0].values, vec![ExactSqlValue::Integer(1)]);
+    assert_eq!(
+        reopened
+            .query_row("SELECT count(*) FROM returning_target", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn partial_batch_error_preserves_autocommit_and_owned_rollback_state() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
@@ -237,7 +367,16 @@ fn partial_batch_error_still_publishes_applied_insert_rowid() {
         .unwrap_err();
 
     assert!(matches!(error, ExactSqlError::Sqlite { .. }));
-    assert_eq!(channel.last_insert_rowid(), 1);
+    let rows = channel
+        .query(
+            statement("SELECT value FROM partial_rowid ORDER BY id", vec![]),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(
+        rows.rows[0].values,
+        vec![ExactSqlValue::Text("autocommit".to_owned())]
+    );
 
     let transaction = channel.begin_immediate().unwrap();
     let error = transaction
@@ -248,13 +387,26 @@ fn partial_batch_error_still_publishes_applied_insert_rowid() {
         )
         .unwrap_err();
     assert!(matches!(error, ExactSqlError::Sqlite { .. }));
-    assert_eq!(channel.last_insert_rowid(), 2);
+    let rows = transaction
+        .query(statement("SELECT count(*) FROM partial_rowid", vec![]))
+        .unwrap();
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
     transaction.rollback().unwrap();
-    assert_eq!(channel.last_insert_rowid(), 2);
+    let rows = channel
+        .query(
+            statement("SELECT value FROM partial_rowid ORDER BY id", vec![]),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(
+        rows.rows[0].values,
+        vec![ExactSqlValue::Text("autocommit".to_owned())]
+    );
 }
 
 #[test]
-fn transaction_insert_returning_publishes_rowid() {
+fn transaction_insert_returning_preserves_rollback() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
@@ -276,6 +428,12 @@ fn transaction_insert_returning_publishes_rowid() {
         .unwrap();
 
     assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(1)]);
-    assert_eq!(channel.last_insert_rowid(), 1);
     transaction.rollback().unwrap();
+    let rows = channel
+        .query(
+            statement("SELECT count(*) FROM returning_rowid", vec![]),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
 }

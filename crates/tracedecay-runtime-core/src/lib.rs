@@ -1,27 +1,38 @@
 //! `TraceDecay` runtime kernel.
 //!
-//! This crate owns the load-bearing runtime substrate that every other
-//! `TraceDecay` subsystem sits on: shared value types, the storage layout
-//! resolver, the `SQLite` database facade and its
-//! migrations, the observation/memory/session stores, git and worktree
-//! topology reads, process-level leases, and the privacy detectors.
+//! This crate provides shared runtime services: cancellation and task ownership,
+//! process and profile leases, resource accounting (resident memory, background CPU),
+//! the storage layout and store-identity resolver with the repository and
+//! worktree reads it depends on, the `SQLite` database facade with its
+//! migrations and read snapshots, and the per-shard runtime registry.
 //!
-//! ## Outward seams that could not follow the kernel
+//! ## Dependent crates
 //!
-//! `daemon::store_runtime::session_registry` stayed in the root crate: it
-//! stores `RegisteredGlobalDbLeaseV1` in its public surface, and
-//! `tracedecay-global-db` depends on this kernel — so the kernel taking that
-//! edge back would be a Cargo cycle. `global_db`, sessions, and semantic
+//! Other crates own the product runtimes: the fact store
+//! and memory model in `tracedecay-session-memory`, privacy detection and
+//! sanitization in `tracedecay-privacy`, Work/Workflow topology projections in
+//! `tracedecay-application`, and the token-savings monitor ring in
+//! `tracedecay-session-memory`. Branch tracking (`branch`, `branch_meta`)
+//! remains here only because its consumers (`tracedecay-global-db`,
+//! `tracedecay-maintenance`, the CLI) sit below every crate that could own it,
+//! and [`worktree`] identity reads depend on [`branch::current_branch`].
+//!
+//! [`shard_runtime`] is the per-shard runtime and registry that `db::Database`
+//! is built on. The store runtime that decides which shards a daemon opens and
+//! how they converge, retire, and shut down is `tracedecay-store-runtime`; it
+//! stores `RegisteredGlobalDbLeaseV1` in its public API, and
+//! `tracedecay-global-db` depends on this kernel, so the kernel taking that
+//! dependency would create a Cargo cycle. `global_db`, sessions, and semantic
 //! projection are above this crate for the same reason.
 //!
 //! [`ports::registered_schema`] is the port a freshly opened profile- or
 //! session-scoped shard uses to install the registered global/session schema
 //! (owned by `tracedecay-global-db`, which this crate cannot name). It
 //! **fails closed**: an unregistered installer refuses the open rather than
-//! publishing an uninitialised store. The root registers it from
-//! `daemon::store_runtime::register_registered_schema_installer()`, called at
-//! the top of `DaemonSessionRuntimeRegistryV1::open()` — the sole constructor
-//! of the production registry.
+//! publishing an uninitialised store. `tracedecay-store-runtime` registers it
+//! from `register_registered_schema_installer()`, called at the top of
+//! `DaemonSessionRuntimeRegistryV1::open()`, the sole constructor of the
+//! production registry.
 //!
 //! `test-transport` forwards to `tracedecay-rusqlite-runtime/test-transport`.
 //! Platform cfgs travel with the code that needs them: `cfg(windows)`
@@ -71,47 +82,65 @@
 // The kernel was extracted from a single crate where every intra-crate item
 // was reachable through crate-restricted visibility. Crossing the crate
 // boundary promoted those to `pub`; the root shims re-export them, so this
-// public surface is an artifact of the split, not new API.
+// public API is an artifact of the split, not new API.
 #![allow(unreachable_pub)]
 #![allow(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]
+
+/// Coerce one concrete future to `dyn Future + Send` where this macro expands.
+/// A generic function proves `Send` in the caller, so the overflow stays put.
+#[macro_export]
+macro_rules! erase_send {
+    ($future:expr, $output:ty) => {{
+        let erased: ::std::pin::Pin<
+            ::std::boxed::Box<dyn ::std::future::Future<Output = $output> + Send + '_>,
+        > = ::std::boxed::Box::pin($future);
+        erased
+    }};
+}
 
 /// Upper bound for daemon-owned shutdown persistence work.
 pub const DAEMON_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
 /// Grace retained for forced task abort and join during daemon shutdown.
 pub const DAEMON_TASK_ABORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
+pub mod background_cpu;
 pub mod branch;
 pub mod branch_meta;
 pub mod cancellation;
+pub mod child_pipe;
 pub mod config;
 pub mod db;
 pub mod git;
 pub mod git_discovery;
+pub mod git_open;
 pub mod git_repository;
 pub mod lifecycle_lease;
-pub mod memory;
-pub mod monitor_ring;
+pub mod logging;
+pub use tracedecay_rusqlite_runtime::native_runtime;
+pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;
-pub mod path_scope;
-pub mod privacy;
-mod profiled_lock;
 pub mod resident_memory;
 pub mod runtime_identity;
+pub mod runtime_telemetry;
+pub mod shard_runtime;
 pub mod sqlite_read_snapshot;
 pub mod storage;
-pub mod store;
-pub mod store_runtime;
+pub mod store_telemetry;
 pub mod sync;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_executable;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_fs;
 pub mod text;
 pub mod timeutil;
 pub mod tracedecay;
 pub mod weak_registry;
+pub use asupersync::{Cx, signal};
+pub use operation_task_owner::RuntimeOperationTaskOwnerV1;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;
-pub mod work_topology;
-pub mod workflow_topology;
 pub mod worktree;
 
 /// Ports the kernel exposes so the root crate can inject subsystems that stay

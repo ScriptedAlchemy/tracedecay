@@ -2,39 +2,36 @@ use std::hash::BuildHasher;
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(unix)]
 use tracedecay_agent_hosts::hooks::cursor_pre_compact_via_daemon;
+use tracedecay_contracts::doctor::IngestRefusalCensusReadV1;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::cursor::{
+use tracedecay_sessions::runtime::hosts::cursor::{
     CursorSweepSource, CursorTranscriptIngestStats, cursor_project_slug,
-    ingest_cursor_transcript_event as ingest_cursor_transcript_event_for_project,
-    ingest_cursor_transcript_event_capped as ingest_cursor_transcript_event_capped_for_project,
-    ingest_cursor_user_transcript_event_capped,
-    ingest_cursor_user_transcript_event_capped_with_registered_roots,
     try_ingest_cursor_project_sweep_capped as try_ingest_cursor_project_sweep_capped_for_project,
+    try_ingest_cursor_transcript_event_capped_with_admission,
+    try_ingest_cursor_user_transcript_event_capped_with_admission,
 };
-use tracedecay_sessions::runtime::source::TranscriptIngestResult;
+use tracedecay_sessions::runtime::source::{TranscriptIngestResult, TranscriptSource};
+use tracedecay_sessions::runtime::with_transcript_source_profile;
 
 #[cfg(unix)]
-use crate::common::spawn_tracedecay_daemon;
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
+use crate::common::{spawn_tracedecay_daemon, tracedecay_command_with_home};
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, fixture_project_id,
-    mark_test_project, open_project_session_db, try_ingest_source,
+    mark_test_project, open_project_session_db,
 };
-use crate::support::{assert_metadata_path_eq, init_git_repo, init_project, init_project_at};
+use crate::support::{
+    assert_metadata_path_eq, assert_path_text_eq, init_git_repo, init_project, init_project_at,
+};
 
 async fn ingest_cursor_transcript_event(
     event_json: &str,
     db: &ProjectSessionTestRuntime,
 ) -> CursorTranscriptIngestStats {
-    ingest_cursor_transcript_event_for_project(
-        event_json,
-        &db.runtime().facade(),
-        db.project_id().clone(),
-    )
-    .await
+    ingest_cursor_transcript_event_capped(event_json, db, None).await
 }
 
 async fn ingest_cursor_transcript_event_capped(
@@ -42,13 +39,17 @@ async fn ingest_cursor_transcript_event_capped(
     db: &ProjectSessionTestRuntime,
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
-    ingest_cursor_transcript_event_capped_for_project(
-        event_json,
-        &db.runtime().facade(),
-        db.project_id().clone(),
-        max_new_bytes,
+    with_transcript_source_profile(
+        db.transcript_source_profile(),
+        try_ingest_cursor_transcript_event_capped_with_admission(
+            event_json,
+            db.project_id().clone(),
+            &db.runtime().facade(),
+            max_new_bytes,
+        ),
     )
     .await
+    .expect("cursor transcript ingest")
 }
 
 async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
@@ -57,12 +58,15 @@ async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_project_sweep_capped_for_project(
-        project_root,
-        &db.runtime().facade(),
-        db.project_id().clone(),
-        max_new_bytes,
-        skip_session_ids,
+    with_transcript_source_profile(
+        db.transcript_source_profile(),
+        try_ingest_cursor_project_sweep_capped_for_project(
+            project_root,
+            &db.runtime().facade(),
+            db.project_id().clone(),
+            max_new_bytes,
+            skip_session_ids,
+        ),
     )
     .await
 }
@@ -118,8 +122,14 @@ async fn projectless_cursor_hook_event_uses_user_session_identity() {
         .unwrap();
     let admission = runtime.facade();
 
-    let stats =
-        ingest_cursor_user_transcript_event_capped(&event.to_string(), &admission, None).await;
+    let stats = try_ingest_cursor_user_transcript_event_capped_with_admission(
+        &event.to_string(),
+        &admission,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(stats.messages_upserted, 1);
     let session = runtime
@@ -157,13 +167,14 @@ async fn user_cursor_hook_event_rejects_registered_project_transcript_slug() {
         .unwrap();
     let admission = runtime.facade();
 
-    let stats = ingest_cursor_user_transcript_event_capped_with_registered_roots(
+    let stats = try_ingest_cursor_user_transcript_event_capped_with_admission(
         &event.to_string(),
         &admission,
         None,
         &[registered],
     )
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(stats.messages_upserted, 0);
     assert!(
@@ -208,13 +219,14 @@ async fn user_cursor_hook_event_prefers_exact_workspace_over_colliding_slug() {
         .unwrap();
     let admission = runtime.facade();
 
-    let stats = ingest_cursor_user_transcript_event_capped_with_registered_roots(
+    let stats = try_ingest_cursor_user_transcript_event_capped_with_admission(
         &event.to_string(),
         &admission,
         None,
         &[registered],
     )
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(stats.messages_upserted, 1);
     let session = runtime
@@ -255,13 +267,14 @@ async fn user_cursor_hook_event_without_workspace_fails_closed_on_slug_collision
         .unwrap();
     let admission = runtime.facade();
 
-    let stats = ingest_cursor_user_transcript_event_capped_with_registered_roots(
+    let stats = try_ingest_cursor_user_transcript_event_capped_with_admission(
         &event.to_string(),
         &admission,
         None,
         &[registered],
     )
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(stats.messages_upserted, 0);
     assert!(
@@ -275,24 +288,19 @@ async fn user_cursor_hook_event_without_workspace_fails_closed_on_slug_collision
 
 #[cfg(unix)]
 #[tokio::test]
-// Intentional: this test pins process-wide HOME/TRACEDECAY_GLOBAL_DB while the
-// hook resolves its storage paths.
-#[allow(clippy::await_holding_lock)]
 async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_backlog() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let home = tmp.path().join("home");
     let profile = home.join(".tracedecay");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
-    let project = init_project(&tmp);
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
     let project_id = mark_test_project(&project);
+    // Since `c24e4a62a` the hook resolves its project root through the
+    // initialized-store gate, exactly like production installs: `init` creates
+    // the project store, and only then does the daemon mount a project LCM
+    // authority. Enrollment alone leaves the route reporting `unavailable`.
+    crate::common::initialize_tracedecay_cli_project(&home, &project);
+    crate::common::stop_managed_daemon(&home);
     let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();
@@ -310,6 +318,16 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     .unwrap();
 
     let _daemon = spawn_tracedecay_daemon(&home);
+    let hook_runtime = tracedecay::hook_runtime(crate::common::isolated_profile_under_home(&home));
+    // Native pressure needs the registered graph scope as well as the session
+    // shard. An empty graph-file marker bypasses init and never publishes that
+    // scope; exercise the same enrollment that precedes real host callbacks.
+    let init = tracedecay_command_with_home(&home)
+        .arg("init")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "project init failed: {init:?}");
 
     // In production a preCompact event only fires mid-session, after earlier
     // hook traffic has already admitted the project session store. A freshly
@@ -331,7 +349,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     .to_string();
     let warmup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
-        let warmup = cursor_pre_compact_via_daemon(&warmup_event).await;
+        let warmup = cursor_pre_compact_via_daemon(&hook_runtime, &warmup_event).await;
         let retryable = match (warmup.status.as_str(), warmup.reason.as_str()) {
             ("error", reason) => {
                 assert_eq!(reason, "timed out", "warmup hit a non-budget error");
@@ -349,7 +367,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
         }
         assert!(
             std::time::Instant::now() < warmup_deadline,
-            "daemon never acknowledged pressure within the warmup deadline"
+            "daemon never acknowledged pressure within the warmup deadline: {warmup:?}"
         );
     }
 
@@ -364,7 +382,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
         "context_tokens": 124000,
         "context_window_size": 128000
     });
-    let outcome = cursor_pre_compact_via_daemon(&event.to_string()).await;
+    let outcome = cursor_pre_compact_via_daemon(&hook_runtime, &event.to_string()).await;
     // Pressure-only preCompact never carries Cursor's own summary text. The
     // daemon still runs its owned compaction route against the (empty)
     // session store and reports no backlog instead of treating the missing
@@ -395,25 +413,11 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
 }
 
 #[tokio::test]
-// Intentional: this test asserts the resolved profile session DB path, so it
-// pins process-wide profile env while opening and checking that path.
-#[allow(clippy::await_holding_lock)]
 async fn cursor_transcript_ingest_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let profile = tmp.path().join("profile");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", tmp.path().join("home")),
-        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
-    ];
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     init_git_repo(&project);
     let project_id = mark_test_project(&project);
 
@@ -437,12 +441,14 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
         "model": "gpt-5.5"
     });
 
-    let stats = ingest_cursor_transcript_event_for_project(
+    let stats = try_ingest_cursor_transcript_event_capped_with_admission(
         &event.to_string(),
-        &runtime.facade(),
         project_id,
+        &runtime.facade(),
+        None,
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 2);
     assert!(
@@ -498,10 +504,13 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
     let project = init_project(&tmp);
     init_git_repo(&project);
 
+    // A record that is one dispatch renders as that dispatch, model and all; a
+    // record holding text beside dispatches stays one message carrying them.
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
         &transcript,
-        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Launching model-specific reviewers."},{"type":"tool_use","id":"call-a","name":"Subagent","input":{"model":"gpt-5.5-high","prompt":"Review the storage routing."}},{"type":"tool_use","id":"call-b","name":"Subagent","input":{"model":"claude-opus-4-8-thinking-max","prompt":"Review the memory routing."}}]}}
+        r#"{"role":"assistant","message":{"content":[{"type":"tool_use","id":"call-a","name":"Subagent","input":{"model":"gpt-5.5-high","prompt":"Review the storage routing."}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Launching the memory reviewer."},{"type":"tool_use","id":"call-b","name":"Subagent","input":{"model":"claude-opus-4-8-thinking-max","prompt":"Review the memory routing."}}]}}
 "#,
     )
     .unwrap();
@@ -514,30 +523,52 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
         "cwd": project
     });
 
-    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(stats.messages_upserted, 3);
+    ingest_cursor_transcript_event(&event.to_string(), &db).await;
 
     let results = db
         .search_session_messages("cursor", None, "routing", 10)
         .await;
-    let dispatch_models: std::collections::BTreeMap<_, _> = results
+    let mut rows = results
         .iter()
-        .filter(|hit| hit.message.kind.as_deref() == Some("tool_dispatch"))
         .map(|hit| {
             (
-                hit.message.message_id.clone(),
-                hit.message.model.clone().unwrap_or_default(),
+                hit.message.message_id.as_str(),
+                hit.message.kind.as_deref(),
+                hit.message.model.as_deref(),
             )
         })
-        .collect();
-    assert_eq!(dispatch_models.len(), 2);
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.1);
     assert_eq!(
-        dispatch_models.get("cursor-session:tool_dispatch:call-a"),
-        Some(&"gpt-5.5-high".to_string())
+        rows.iter()
+            .map(|(_, kind, model)| (*kind, *model))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some("message"), None),
+            (Some("tool_dispatch"), Some("gpt-5.5-high")),
+        ]
     );
-    assert_eq!(
-        dispatch_models.get("cursor-session:tool_dispatch:call-b"),
-        Some(&"claude-opus-4-8-thinking-max".to_string())
+    let dispatch = rows
+        .iter()
+        .find(|(_, kind, _)| *kind == Some("tool_dispatch"))
+        .expect("the dispatch-only observation is searchable");
+    assert_eq!(dispatch.0, "cursor-session:tool_dispatch:call-a");
+    let mixed = results
+        .iter()
+        .find(|hit| hit.message.kind.as_deref() == Some("message"))
+        .expect("the mixed observation remains one searchable message");
+    assert_eq!(mixed.message.tool_names.as_deref(), Some("Subagent"));
+    assert!(
+        mixed
+            .message
+            .text
+            .contains("Launching the memory reviewer.")
+    );
+    assert!(mixed.message.text.contains("Review the memory routing."));
+    assert!(
+        results
+            .iter()
+            .all(|hit| { hit.message.message_id != "cursor-session:tool_dispatch:call-b" })
     );
     for hit in results
         .iter()
@@ -589,7 +620,7 @@ async fn cursor_transcript_ingest_reads_display_model_fields() {
 }
 
 #[tokio::test]
-async fn cursor_transcript_ingest_preserves_structured_content_in_raw_lcm() {
+async fn cursor_transcript_ingest_stores_block_text_and_tool_calls_in_raw_lcm() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
 
@@ -639,11 +670,49 @@ async fn cursor_transcript_ingest_preserves_structured_content_in_raw_lcm() {
         .lcm_load_raw_message("cursor", "cursor-structured")
         .await
         .expect("raw structured message should exist");
-    assert_eq!(raw.content, serde_json::to_string(&content).unwrap());
+    assert_eq!(raw.content, "Inspect this image payload.");
 
     let metadata: serde_json::Value =
         serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["tool_calls"], tool_calls);
+}
+
+#[tokio::test]
+async fn cursor_text_blocks_are_stored_as_their_text() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"cursornow alpha: question"},{"type":"text","text":"second block"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"cursornow beta: reply"},{"type":"tool_use","id":"call_1","name":"Shell","input":{"command":"echo hi"}}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+    ingest_cursor_transcript_event(&event.to_string(), &db).await;
+
+    let mut texts = db
+        .search_session_messages("cursor", None, "cursornow", 10)
+        .await
+        .into_iter()
+        .map(|hit| hit.message.text)
+        .collect::<Vec<_>>();
+    texts.sort();
+    assert_eq!(
+        texts,
+        vec![
+            "cursornow alpha: question\n\nsecond block",
+            "cursornow beta: reply"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -677,7 +746,10 @@ async fn cursor_tool_use_blocks_populate_tool_event_metadata() {
     assert_eq!(results.len(), 1);
     let assistant = &results[0];
     assert_eq!(assistant.message.tool_names.as_deref(), Some("Shell"));
-    assert!(assistant.message.text.contains("tool_use"));
+    assert_eq!(
+        assistant.message.text,
+        "Running a shell command to list files."
+    );
 
     let metadata: serde_json::Value =
         serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
@@ -691,16 +763,24 @@ async fn cursor_tool_use_blocks_populate_tool_event_metadata() {
     assert!(tool_events[0]["input_bytes"].as_u64().unwrap() > 0);
 }
 
+/// Cursor's transcript JSONL writes `tool_use` blocks without ids. Those calls
+/// are served without one and the row names the gap, instead of every call on
+/// the record sharing the capture's record-rooted fallback id; a block that
+/// does carry an id keeps it.
 #[tokio::test]
-async fn cursor_transcript_ingest_is_idempotent() {
+async fn cursor_tool_calls_without_host_ids_are_served_without_ids() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
 
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
         &transcript,
-        r#"{"role":"user","message":{"content":[{"type":"text","text":"Remember the Cursor transcript parser decision."}]}}
-"#,
+        concat!(
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Reading the retry module."},{"type":"tool_use","name":"Read","input":{"path":"lib.rs"}},{"type":"tool_use","name":"Shell","input":{"command":"ls"}}]}}"#,
+            "\n",
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Listing the workspace."},{"type":"tool_use","id":"call_1","name":"Shell","input":{"command":"ls"}}]}}"#,
+            "\n",
+        ),
     )
     .unwrap();
 
@@ -710,37 +790,50 @@ async fn cursor_transcript_ingest_is_idempotent() {
         "transcript_path": transcript,
         "workspace_roots": [project]
     });
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 2);
 
-    // Ingestion is now incremental: the first call ingests the message and
-    // records a parse offset, so a second call over the *unchanged* file is a
-    // no-op rather than re-upserting the same row.
-    let first = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    let second = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(first.messages_upserted, 1);
-    assert_eq!(second.messages_upserted, 0);
+    let metadata = |query: &str| {
+        let db = &db;
+        let query = query.to_owned();
+        async move {
+            let results = db.search_session_messages("cursor", None, &query, 10).await;
+            assert_eq!(results.len(), 1, "{query}");
+            serde_json::from_str::<serde_json::Value>(
+                results[0].message.metadata_json.as_deref().unwrap(),
+            )
+            .unwrap()
+        }
+    };
 
-    let results = db
-        .search_session_messages("cursor", None, "parser decision", 10)
-        .await;
-    assert_eq!(results.len(), 1);
+    let unrecorded = metadata("retry").await;
+    assert_eq!(
+        unrecorded["tool_calls"],
+        serde_json::json!([
+            {"type": "function", "function": {"name": "Read", "arguments": {"path": "lib.rs"}}},
+            {"type": "function", "function": {"name": "Shell", "arguments": {"command": "ls"}}},
+        ])
+    );
+    assert_eq!(
+        unrecorded["tool_events"],
+        serde_json::json!([
+            {"type": "tool_use", "tool_name": "Read", "input_bytes": 17},
+            {"type": "tool_use", "tool_name": "Shell", "input_bytes": 16},
+        ])
+    );
+    assert_eq!(unrecorded["tool_call_id_coverage"], "host_unrecorded");
+    assert_eq!(unrecorded.get("tool_use_id"), None);
+
+    let recorded = metadata("workspace").await;
+    assert_eq!(recorded["tool_calls"][0]["id"], "call_1");
+    assert_eq!(recorded["tool_events"][0]["call_id"], "call_1");
+    assert_eq!(recorded.get("tool_call_id_coverage"), None);
 }
 
 #[tokio::test]
-// Intentional: this test retains and reopens the profile's registered project
-// session runtime, so it pins process-wide profile env under GLOBAL_DB_ENV_LOCK.
-#[allow(clippy::await_holding_lock)]
 async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let profile = tmp.path().join("profile");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", tmp.path().join("home")),
-        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
-    ];
     let project = init_project(&tmp);
     let project_id = mark_test_project(&project);
     let transcript = tmp.path().join("cursor-session.jsonl");
@@ -755,8 +848,8 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
         "transcript_path": transcript,
         "workspace_roots": [project]
     });
-    // Keep the registered authority alive, then deliberately break its fixture
-    // table so ingest exercises the exact retained runtime against the damage.
+    // Keep the registered authority alive, then deliberately fail its message
+    // writes so ingest exercises the exact retained runtime against the damage.
     let broken_db = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();
@@ -766,31 +859,43 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
         .to_path_buf();
     let broken_conn = rusqlite::Connection::open(&db_path).unwrap();
     broken_conn
-        .execute("DROP TABLE session_messages", [])
+        .execute_batch(
+            "CREATE TRIGGER fail_cursor_message_write BEFORE INSERT ON lcm_raw_messages
+             BEGIN SELECT RAISE(ABORT, 'injected message write failure'); END;",
+        )
+        .unwrap();
+
+    // The failed pass either surfaces the write failure or admits nothing.
+    if let Ok(first) = try_ingest_cursor_transcript_event_capped_with_admission(
+        &event.to_string(),
+        project_id.clone(),
+        &broken_db.facade(),
+        None,
+    )
+    .await
+    {
+        assert_eq!(first.sessions_upserted, 0);
+        assert_eq!(first.messages_upserted, 0);
+    }
+    drop(broken_db);
+    broken_conn
+        .execute_batch("DROP TRIGGER fail_cursor_message_write;")
         .unwrap();
     drop(broken_conn);
 
-    let first = ingest_cursor_transcript_event_for_project(
-        &event.to_string(),
-        &broken_db.facade(),
-        project_id.clone(),
-    )
-    .await;
-    assert_eq!(first.sessions_upserted, 0);
-    assert_eq!(first.messages_upserted, 0);
-    drop(broken_db);
-
-    // Re-opening with schema ensure repairs the dropped table; retry should
-    // ingest the same line because the failed pass did not advance the cursor.
+    // Once the failure clears, the retry ingests the same line because the
+    // failed pass did not advance the cursor.
     let repaired_db = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();
-    let second = ingest_cursor_transcript_event_for_project(
+    let second = try_ingest_cursor_transcript_event_capped_with_admission(
         &event.to_string(),
-        &repaired_db.facade(),
         project_id,
+        &repaired_db.facade(),
+        None,
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(second.sessions_upserted, 1);
     assert_eq!(second.messages_upserted, 1);
 
@@ -799,49 +904,6 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
-}
-
-#[tokio::test]
-async fn cursor_transcript_ingest_reads_only_appended_lines() {
-    let tmp = TempDir::new().unwrap();
-    let project = init_project(&tmp);
-
-    let transcript = tmp.path().join("cursor-session.jsonl");
-    std::fs::write(
-        &transcript,
-        r#"{"role":"user","message":{"content":[{"type":"text","text":"First message about incremental ingestion."}]}}
-"#,
-    )
-    .unwrap();
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let event = serde_json::json!({
-        "session_id": "cursor-session",
-        "transcript_path": transcript,
-        "workspace_roots": [project]
-    });
-
-    let first = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(first.messages_upserted, 1);
-
-    // Append a new line; only the appended line should be parsed/upserted.
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&transcript)
-        .unwrap();
-    file.write_all(
-        b"{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Second message about incremental ingestion.\"}]}}\n",
-    )
-    .unwrap();
-    drop(file);
-
-    let second = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(second.messages_upserted, 1);
-
-    let results = db
-        .search_session_messages("cursor", None, "incremental ingestion", 10)
-        .await;
-    assert_eq!(results.len(), 2);
 }
 
 #[tokio::test]
@@ -875,7 +937,7 @@ async fn cursor_transcript_ingest_uses_cwd_root_in_multi_root_workspace() {
         .get_session("cursor", "cursor-session")
         .await
         .expect("session should be stored under root B");
-    assert_eq!(session.project_path, root_b.to_string_lossy());
+    assert_path_text_eq(&session.project_path, &root_b);
     assert_eq!(session.project_key, db.project_id().as_str());
 }
 
@@ -906,46 +968,6 @@ async fn cursor_transcript_ingest_cap_defers_large_backlog() {
 
     let uncapped = ingest_cursor_transcript_event(&event.to_string(), &db).await;
     assert_eq!(uncapped.messages_upserted, 0);
-}
-
-#[tokio::test]
-async fn cursor_transcript_ingest_defers_partial_final_line() {
-    let tmp = TempDir::new().unwrap();
-    let project = init_project(&tmp);
-
-    let transcript = tmp.path().join("cursor-session.jsonl");
-    // A complete first line followed by a partial (un-terminated) second line,
-    // as can happen mid-flush while Cursor is still writing the transcript.
-    let complete = "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Complete line about partial handling.\"}]}}\n";
-    let partial = "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Partial line about partial handling.\"}]}}";
-    std::fs::write(&transcript, format!("{complete}{partial}")).unwrap();
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let event = serde_json::json!({
-        "session_id": "cursor-session",
-        "transcript_path": transcript,
-        "workspace_roots": [project]
-    });
-
-    // The partial final line is left unconsumed.
-    let first = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(first.messages_upserted, 1);
-
-    // Once the trailing newline arrives, the previously-partial line is ingested.
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&transcript)
-        .unwrap();
-    file.write_all(b"\n").unwrap();
-    drop(file);
-
-    let second = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(second.messages_upserted, 1);
-
-    let results = db
-        .search_session_messages("cursor", None, "partial handling", 10)
-        .await;
-    assert_eq!(results.len(), 2);
 }
 
 #[tokio::test]
@@ -1021,27 +1043,6 @@ async fn cursor_subagent_child_messages_inherit_parent_dispatch_model() {
 }
 
 #[tokio::test]
-async fn cursor_capped_ingest_discovers_subagents() {
-    let tmp = TempDir::new().unwrap();
-    let project = init_project(&tmp);
-    let (parent, _subagent) = write_cursor_parent_with_subagent(&tmp);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let event = cursor_hook_event(&project, &parent);
-
-    let stats = ingest_cursor_transcript_event_capped(&event.to_string(), &db, Some(4096)).await;
-    assert_eq!(stats.sessions_upserted, 2);
-    assert_eq!(stats.messages_upserted, 2);
-
-    let child = db
-        .get_session("cursor", "worker-1")
-        .await
-        .expect("subagent session should be stored");
-    assert_eq!(child.parent_session_id.as_deref(), Some("parent-session"));
-    assert!(child.is_subagent);
-}
-
-#[tokio::test]
 async fn cursor_subagent_ingestion_is_incremental_per_file() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
@@ -1081,6 +1082,59 @@ async fn cursor_subagent_ingestion_is_incremental_per_file() {
             .iter()
             .all(|hit| hit.session.session_id == "worker-1")
     );
+}
+
+/// Replace `path` the way editors and hosts do: write a sibling temp file and
+/// rename it over the original, so the transcript gets a new inode.
+fn atomically_replace(path: &std::path::Path, contents: &str) {
+    let staged = path.with_extension("jsonl.tmp");
+    std::fs::write(&staged, contents).unwrap();
+    std::fs::rename(&staged, path).unwrap();
+}
+
+#[tokio::test]
+async fn cursor_transcript_replaced_by_rename_ingests_only_new_records() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let transcripts_dir = tmp.path().join("agent-transcripts");
+    std::fs::create_dir_all(&transcripts_dir).unwrap();
+    let transcript = transcripts_dir.join("parent-session.jsonl");
+    let original = concat!(
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Plan the lantern migration."}]}}"#,
+        "\n",
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+        "\n",
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+        "\n",
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Now draft the lantern rollout."}]}}"#,
+        "\n",
+    );
+    std::fs::write(&transcript, original).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = cursor_hook_event(&project, &transcript).to_string();
+    let first = ingest_cursor_transcript_event(&event, &db).await;
+    assert_eq!(first.messages_upserted, 4);
+    assert_eq!(db.session_message_count().await.unwrap(), 4);
+
+    atomically_replace(&transcript, original);
+    let identical = ingest_cursor_transcript_event(&event, &db).await;
+    assert_eq!(identical.messages_upserted, 0);
+    assert_eq!(db.session_message_count().await.unwrap(), 4);
+
+    let appended = format!(
+        "{original}{}\n{}\n",
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Rollout drafted for the lantern fleet."}]}}"#,
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+    );
+    atomically_replace(&transcript, &appended);
+    let grown = ingest_cursor_transcript_event(&event, &db).await;
+    assert_eq!(grown.messages_upserted, 2);
+    assert_eq!(db.session_message_count().await.unwrap(), 6);
+
+    let replayed = ingest_cursor_transcript_event(&event, &db).await;
+    assert_eq!(replayed.messages_upserted, 0);
+    assert_eq!(db.session_message_count().await.unwrap(), 6);
 }
 
 #[tokio::test]
@@ -1250,18 +1304,10 @@ fn write_sweep_fixture(
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cursor_sweep_ingests_historical_transcripts() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let _env_guards = [
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
     write_sweep_fixture(&home, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -1280,7 +1326,7 @@ async fn cursor_sweep_ingests_historical_transcripts() {
         .get_session("cursor", "sweep-session")
         .await
         .expect("swept parent session should be stored");
-    assert_eq!(parent_session.project_path, project.to_string_lossy());
+    assert_path_text_eq(&parent_session.project_path, &project);
     assert!(!parent_session.is_subagent);
 
     let child_session = db
@@ -1300,51 +1346,6 @@ async fn cursor_sweep_ingests_historical_transcripts() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn cursor_sweep_after_hook_ingest_is_noop() {
-    let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    let project = init_project(&tmp);
-    let home = tmp.path().join("home");
-    let _env_guards = [
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
-    let (parent, _child) = write_sweep_fixture(&home, &project);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let event = serde_json::json!({
-        "session_id": "sweep-session",
-        "transcript_path": parent,
-        "workspace_roots": [project],
-        "cwd": project,
-    });
-    let hook = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(hook.sessions_upserted, 2);
-    assert_eq!(hook.messages_upserted, 2);
-
-    // The production sweep shares the hook path's observation frontier, so
-    // everything the hook already admitted is a no-op.
-    let stats = try_ingest_cursor_project_sweep_capped(
-        &project,
-        &db,
-        None,
-        std::collections::HashSet::new(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(stats.sessions_upserted, 0);
-    assert_eq!(stats.messages_upserted, 0);
-
-    let hits = db
-        .search_session_messages("cursor", None, "orchard catchup", 10)
-        .await;
-    assert_eq!(hits.len(), 2);
-}
-
-#[tokio::test]
 async fn cursor_hook_after_sweep_is_noop() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
@@ -1352,10 +1353,14 @@ async fn cursor_hook_after_sweep_is_noop() {
     let (parent, _child) = write_sweep_fixture(&home, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let sweep = CursorSweepSource::with_home(&home);
-    let swept = try_ingest_source(&db, &sweep, &project, None)
-        .await
-        .unwrap();
+    let swept = try_ingest_cursor_project_sweep_capped(
+        &project,
+        &db,
+        None,
+        std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(swept.messages_upserted, 2);
 
     // A live hook firing on a transcript the sweep already ingested resumes
@@ -1377,18 +1382,10 @@ async fn cursor_hook_after_sweep_is_noop() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cursor_sweep_picks_up_lines_appended_after_hook_ingest() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let _env_guards = [
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
     let (parent, _child) = write_sweep_fixture(&home, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -1458,10 +1455,14 @@ async fn cursor_sweep_prefers_subagent_copy_over_toplevel_duplicate() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let sweep = CursorSweepSource::with_home(&home);
-    let stats = try_ingest_source(&db, &sweep, &project, None)
-        .await
-        .unwrap();
+    let stats = try_ingest_cursor_project_sweep_capped(
+        &project,
+        &db,
+        None,
+        std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
     assert_eq!(stats.messages_upserted, 2);
 
@@ -1491,6 +1492,117 @@ async fn cursor_sweep_prefers_subagent_copy_over_toplevel_duplicate() {
 }
 
 #[tokio::test]
+async fn cursor_sweep_skips_toplevel_duplicate_whose_subagent_copy_is_past_the_walk_cap() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let transcripts_dir = home
+        .join(".cursor")
+        .join("projects")
+        .join(cursor_project_slug(&project).unwrap())
+        .join("agent-transcripts");
+    // More sessions than one sweep page holds, so the first page must stop
+    // before the last session in id order.
+    for index in 0..4100 {
+        let session = format!("filler-{index:04}");
+        let dir = transcripts_dir.join(&session);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{session}.jsonl")), b"").unwrap();
+    }
+    let mut session_order: Vec<String> = std::fs::read_dir(&transcripts_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    session_order.sort();
+    let worker = session_order.first().unwrap().clone();
+    let parent = session_order.last().unwrap().clone();
+
+    // The subagent copy repeats one byte-identical line (a repeated tool
+    // call), so its second occurrence takes the positional identity. The
+    // drifted top-level copy shares those offsets; admitting it under the
+    // same native session collides on that positional identity.
+    let repeated = r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"git status"}}]}}"#;
+    let between = r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Worker found orchard truncation evidence."}]}}"#;
+    let drifted = r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Drifted truncation tail line."}]}}"#;
+    let subagent_copy = format!("{repeated}\n{between}\n{repeated}\n");
+    let parent_dir = transcripts_dir.join(&parent);
+    std::fs::write(
+        parent_dir.join(format!("{parent}.jsonl")),
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Parent dispatches orchard truncation worker."}]}}
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(parent_dir.join("subagents")).unwrap();
+    std::fs::write(
+        parent_dir.join("subagents").join(format!("{worker}.jsonl")),
+        &subagent_copy,
+    )
+    .unwrap();
+    std::fs::write(
+        transcripts_dir
+            .join(&worker)
+            .join(format!("{worker}.jsonl")),
+        format!("{subagent_copy}{drifted}\n"),
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": parent,
+        "transcript_path": parent_dir.join(format!("{parent}.jsonl")),
+        "workspace_roots": [project],
+        "cwd": project,
+    });
+    let hook = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(hook.messages_upserted, 4);
+
+    let sweep = CursorSweepSource::with_home(&home);
+    let paths = sweep.transcript_paths(&project);
+    assert!(
+        paths.len() < session_order.len(),
+        "the fixture must span more than one sweep page"
+    );
+    assert!(
+        !paths.iter().any(|path| path.starts_with(&parent_dir)),
+        "the parent directory must fall past the first sweep page"
+    );
+    try_ingest_cursor_project_sweep_capped(&project, &db, None, std::collections::HashSet::new())
+        .await
+        .unwrap();
+
+    let census = db
+        .runtime()
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap()
+        .observation_refusal_census()
+        .await;
+    assert_eq!(
+        census,
+        IngestRefusalCensusReadV1::Observed {
+            refusals: Vec::new()
+        }
+    );
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.file_stem().and_then(std::ffi::OsStr::to_str) == Some(&worker)),
+        "the top-level copy of a subagent session is a duplicate even when its \
+         subagent copy is on a later sweep page"
+    );
+    let child = db
+        .get_session("cursor", &worker)
+        .await
+        .expect("subagent session should be stored");
+    assert!(child.is_subagent);
+    assert_eq!(child.parent_session_id.as_deref(), Some(parent.as_str()));
+    assert!(
+        db.search_session_messages("cursor", None, "Drifted", 10)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn cursor_sweep_skips_ambiguous_project_slug() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
@@ -1503,31 +1615,23 @@ async fn cursor_sweep_skips_ambiguous_project_slug() {
     write_sweep_fixture(&home, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let sweep = CursorSweepSource::with_home(&home);
-    let stats = try_ingest_source(&db, &sweep, &project, None)
-        .await
-        .unwrap();
+    let stats = try_ingest_cursor_project_sweep_capped(
+        &project,
+        &db,
+        None,
+        std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(stats.sessions_upserted, 0);
     assert_eq!(stats.messages_upserted, 0);
     assert!(db.get_session("cursor", "sweep-session").await.is_none());
 }
 
 #[tokio::test]
-// Intentional: this test pins process-wide profile storage while the Cursor
-// sweep resolves its project session DB.
-#[allow(clippy::await_holding_lock)]
 async fn cursor_sweep_ingests_profile_stored_project_without_legacy_local_database() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let profile = tmp.path().join("profile");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", tmp.path().join("home")),
-        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
-    ];
     let home = tmp.path().join("home");
     let project = tmp.path().join("unindexed");
     std::fs::create_dir_all(&project).unwrap();
@@ -1536,11 +1640,18 @@ async fn cursor_sweep_ingests_profile_stored_project_without_legacy_local_databa
     let runtime = HostAdmissionTestRuntimeV1::project(&profile, &project, fixture_project_id())
         .await
         .unwrap();
-    let sweep = CursorSweepSource::with_home(&home);
-    let indexed = runtime
-        .ingest_project_transcript_source_for_test(&sweep, &project, None)
-        .await
-        .unwrap();
+    let indexed = with_transcript_source_profile(
+        ProfileRoot::new(runtime.profile_root_for_test()).with_home(&home),
+        try_ingest_cursor_project_sweep_capped_for_project(
+            &project,
+            &runtime.facade(),
+            fixture_project_id(),
+            None,
+            std::collections::HashSet::new(),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(indexed.sessions_upserted, 2);
     assert_eq!(indexed.messages_upserted, 2);
     assert!(

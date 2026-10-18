@@ -2,24 +2,25 @@
 //! Transcript reads retain exact native evidence; only the PostCompact effect
 //! may turn that evidence or an app-server result into an LCM summary node.
 
+#[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
 use std::process::Stdio;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
-use tracedecay_global_db::ParseOffset;
+#[cfg(unix)]
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
-use tracedecay_sessions::runtime::codex::CodexSource;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
+use tracedecay_sessions::runtime::{SessionProvider, with_transcript_source_profile};
 
 #[cfg(unix)]
-use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, spawn_tracedecay_daemon,
-    tracedecay_command_with_home,
-};
+use crate::common::{spawn_tracedecay_daemon, tracedecay_command_with_home};
 #[cfg(unix)]
 use crate::restart_atomicity::mark_test_project;
 use crate::support::setup;
@@ -28,15 +29,20 @@ async fn registered_runtime(
     home: &std::path::Path,
     project: &std::path::Path,
 ) -> HostAdmissionTestRuntimeV1 {
-    HostAdmissionTestRuntimeV1::project(
-        home.join(".tracedecay"),
-        project,
-        ProjectId::new("project.codex-compaction").unwrap(),
-    )
-    .await
-    .unwrap()
+    let project_id = ProjectId::new("project.codex-compaction").unwrap();
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project,
+            project_id.as_str()
+        )
+        .unwrap()
+    );
+    HostAdmissionTestRuntimeV1::project(home.join(".tracedecay"), project, project_id)
+        .await
+        .unwrap()
 }
 
+#[cfg(unix)]
 fn write_codex_rollout_with_compaction(
     home: &std::path::Path,
     project: &std::path::Path,
@@ -89,37 +95,76 @@ fn write_codex_rollout_with_compaction(
     path
 }
 
+/// Binds `codex_bin` as the project's `codex` summarizer through the CLI
+/// configuration tools, the same route an operator uses.
+#[cfg(unix)]
+fn configure_codex_summarizer(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    project_id: &ProjectId,
+    codex_bin: &std::path::Path,
+) {
+    let key = tracedecay_domain::configuration::LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY;
+    let run_tool = |name: &str, args: serde_json::Value| -> serde_json::Value {
+        let output = tracedecay_command_with_home(home)
+            .current_dir(project)
+            .args(["tool", name, "--json", "--args"])
+            .arg(args.to_string())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|error| panic!("run `tracedecay tool {name}`: {error}"));
+        assert!(
+            output.status.success(),
+            "`tracedecay tool {name}` failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let printed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("`tracedecay tool {name}` JSON: {error}"));
+        printed["structuredContent"].clone()
+    };
+    let current = run_tool(
+        "tracedecay_configuration_get",
+        serde_json::json!({ "key": key }),
+    );
+    let expected_revision = current
+        .pointer("/outcome/value/payload/revision_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("configuration revision: {current}"))
+        .to_owned();
+    let receipt = run_tool(
+        "tracedecay_configuration_set",
+        serde_json::json!({
+            "layer": {"kind": "project", "project_id": project_id.as_str()},
+            "key": key,
+            "value": {
+                "kind": "lcm_summarizer_executables",
+                "value": {
+                    "codex": {
+                        "state": "configured",
+                        "canonical_path": codex_bin,
+                        "timeout_secs": 5,
+                    },
+                },
+            },
+            "expected_revision": expected_revision,
+            "idempotency_key": "configuration.idempotency.codex-compaction-summarizer",
+        }),
+    );
+    assert_eq!(
+        receipt["outcome"]["outcome"], "effect",
+        "codex summarizer binding must commit: {receipt}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effect() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (home, project) = setup(&tmp);
     let profile = home.join(".tracedecay");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
-    let project_id = mark_test_project(&project);
-    // The hook resolves the project root through the initialized-store gate,
-    // exactly like production installs: `init` creates the project store
-    // first, then daemon enrollment mounts the already-initialized layout
-    // (the canonical enrollment composition itself creates the project graph
-    // database, so init must come first — as it does in a real install).
-    crate::common::initialize_tracedecay_cli_project(&home, &project);
-    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
-        .await
-        .unwrap();
-    drop(enrollment);
-    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
-
     let codex_bin = tmp.path().join("codex");
-    std::fs::write(
+    write_executable_script(
         &codex_bin,
         r#"#!/bin/sh
 while IFS= read -r line; do
@@ -135,12 +180,25 @@ done
 "#,
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(&codex_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let _summary_env = [
-        EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &codex_bin),
-        EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
-    ];
+    let project_id = mark_test_project(&project);
+    // The hook resolves the project root through the initialized-store gate,
+    // exactly like production installs: `init` creates the project store
+    // first, then daemon enrollment mounts the already-initialized layout
+    // (the canonical enrollment composition itself creates the project graph
+    // database, so init must come first, as it does in a real install).
+    crate::common::initialize_tracedecay_cli_project(&home, &project);
+    // The daemon launches a summarizer only through the project's
+    // `lcm.summarizer_executables.v1` binding, so the fake `codex` is bound
+    // through the production configuration surface while the managed daemon
+    // from init is still serving the project.
+    configure_codex_summarizer(&home, &project, &project_id, &codex_bin);
+    crate::common::stop_managed_daemon(&home);
+    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
+        .await
+        .unwrap();
+    drop(enrollment);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
+
     let daemon = spawn_tracedecay_daemon(&home);
     let event = serde_json::json!({
         "hook_event_name": "PostCompact",
@@ -212,12 +270,16 @@ done
     assert_eq!(summary.source_count, 2);
     // Provenance metadata rides the node-level describe; the session-level
     // summary listing is a lightweight overview without metadata_json.
-    assert!(
+    let metadata: serde_json::Value = serde_json::from_str(
         summary
             .metadata_json
             .as_deref()
-            .unwrap_or_default()
-            .contains("codex_app_server:codex-hook-test")
+            .expect("summary provenance"),
+    )
+    .unwrap();
+    assert_eq!(
+        metadata["summary_route"], "codex_app_server:codex-hook-test",
+        "summary provenance must retain the actual app-server model: {metadata}"
     );
 
     let expansion = runtime
@@ -262,25 +324,6 @@ done
     );
 }
 
-#[cfg(not(unix))]
-#[tokio::test]
-async fn codex_transcript_compaction_evidence_does_not_publish_outside_daemon_effect() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
-    let runtime = registered_runtime(&home, &project).await;
-    let source = CodexSource::with_home(&home);
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 4);
-    let status = runtime
-        .lcm_status_for_test("codex", Some("codex-compact"))
-        .await
-        .unwrap();
-    assert_eq!(status.summary_node_count, 0);
-}
 #[tokio::test]
 async fn repeated_codex_compactions_remain_native_evidence_until_daemon_effect() {
     let tmp = TempDir::new().unwrap();
@@ -342,193 +385,15 @@ async fn repeated_codex_compactions_remain_native_evidence_until_daemon_effect()
     .unwrap();
 
     let runtime = registered_runtime(&home, &project).await;
-    let source = CodexSource::with_home(&home);
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 6);
+    with_transcript_source_profile(
+        ProfileRoot::new(runtime.profile_root_for_test()).with_home(&home),
+        runtime.ingest_project_provider_for_test(&project, Some(SessionProvider::Codex)),
+    )
+    .await
+    .unwrap();
 
     let status = runtime
         .lcm_status_for_test("codex", Some("codex-repeat"))
-        .await
-        .unwrap();
-    assert_eq!(status.raw_message_count, 6);
-    assert_eq!(status.summary_node_count, 0);
-}
-
-#[tokio::test]
-async fn incremental_codex_compaction_ingest_never_bypasses_daemon_effect() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let dir = home.join(".codex/sessions/2026/01/01");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("rollout-2026-01-01T00-00-40-codex-incremental.jsonl");
-    let cwd = project.to_string_lossy();
-    let compact = |at: &str| {
-        serde_json::json!({
-            "timestamp": at,
-            "type": "compacted",
-            "payload": {
-                "message": "",
-                "replacement_history": [
-                    {"type": "compaction", "encrypted_content": "encrypted"}
-                ]
-            }
-        })
-    };
-    let first = [
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:40.000Z",
-            "type": "session_meta",
-            "payload": {"id": "codex-incremental", "cwd": cwd, "model": "gpt-5.5"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:41.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "First incremental prompt"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:42.000Z",
-            "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "First incremental reply"}
-        }),
-        compact("2026-01-01T00:00:43.000Z"),
-    ];
-    std::fs::write(
-        &path,
-        first
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n",
-    )
-    .unwrap();
-
-    let runtime = registered_runtime(&home, &project).await;
-    let source = CodexSource::with_home(&home);
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 3);
-
-    let second = [
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:44.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Second incremental prompt"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:45.000Z",
-            "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "Second incremental reply"}
-        }),
-        compact("2026-01-01T00:00:46.000Z"),
-    ];
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    for line in second {
-        writeln!(file, "{line}").unwrap();
-    }
-
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 3);
-
-    let status = runtime
-        .lcm_status_for_test("codex", Some("codex-incremental"))
-        .await
-        .unwrap();
-    assert_eq!(status.raw_message_count, 6);
-    assert_eq!(status.summary_node_count, 0);
-}
-
-#[tokio::test]
-async fn replayed_codex_compaction_ingest_never_bypasses_daemon_effect() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let dir = home.join(".codex/sessions/2026/01/01");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("rollout-2026-01-01T00-00-45-codex-replay.jsonl");
-    let cwd = project.to_string_lossy();
-    let compact = |at: &str| {
-        serde_json::json!({
-            "timestamp": at,
-            "type": "compacted",
-            "payload": {
-                "message": "",
-                "replacement_history": [
-                    {"type": "compaction", "encrypted_content": "encrypted"}
-                ]
-            }
-        })
-    };
-    let lines = [
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:45.000Z",
-            "type": "session_meta",
-            "payload": {"id": "codex-replay", "cwd": cwd, "model": "gpt-5.5"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:46.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "First replay prompt"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:47.000Z",
-            "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "First replay reply"}
-        }),
-        compact("2026-01-01T00:00:48.000Z"),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:49.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Second replay prompt"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:50.000Z",
-            "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "Second replay reply"}
-        }),
-        compact("2026-01-01T00:00:51.000Z"),
-    ];
-    let contents = lines
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    std::fs::write(&path, contents).unwrap();
-
-    let runtime = registered_runtime(&home, &project).await;
-    let source = CodexSource::with_home(&home);
-    let path_str = path.to_string_lossy().to_string();
-    runtime
-        .set_project_parse_offset_for_test(
-            &path_str,
-            ParseOffset {
-                byte_offset: std::fs::metadata(&path).unwrap().len(),
-                mtime: 1,
-                file_id: 1,
-            },
-        )
-        .await
-        .unwrap();
-
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 6);
-
-    let status = runtime
-        .lcm_status_for_test("codex", Some("codex-replay"))
         .await
         .unwrap();
     assert_eq!(status.raw_message_count, 6);

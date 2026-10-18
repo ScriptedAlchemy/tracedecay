@@ -2,34 +2,33 @@
 
 use std::collections::BTreeMap;
 
-use tracedecay_application::retrieval::{
-    GitTopologyAnchorAuthorityErrorV2, GitTopologyAnchorAuthorityV2, GitTopologyAnchorFutureV2,
-    GitTopologyAnchorPublicationOutcomeV2, GitTopologyAnchorPublicationV2,
-    GitTopologyAnchorResolutionOutcomeV2, GitTopologyAnchorResolutionV2,
+use tracedecay_contracts::retrieval::{
+    GitTopologyAnchorAuthority, GitTopologyAnchorAuthorityError, GitTopologyAnchorFuture,
+    GitTopologyAnchorPublication, GitTopologyAnchorPublicationOutcome, GitTopologyAnchorResolution,
+    GitTopologyAnchorResolutionOutcome,
 };
-use tracedecay_domain::{ObservationScopeV1, RetrievalAnchorRecordV2, RetrievalAnchorTargetV2};
+use tracedecay_domain::{ObservationScopeV1, RetrievalAnchorRecord, RetrievalAnchorTarget};
 use tracedecay_runtime_core::db::engine::{params, params_from_iter};
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 #[derive(Clone)]
-pub struct RegisteredGitTopologyAnchorAuthorityV2 {
+pub struct RegisteredGitTopologyAnchorAuthority {
     database: RegisteredGlobalDbLeaseV1,
 }
 
-impl RegisteredGitTopologyAnchorAuthorityV2 {
+impl RegisteredGitTopologyAnchorAuthority {
     pub fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
     }
 
-    #[hotpath::skip]
     async fn publish_records(
         &self,
-        publication: GitTopologyAnchorPublicationV2,
-    ) -> Result<GitTopologyAnchorPublicationOutcomeV2, GitTopologyAnchorAuthorityErrorV2> {
+        publication: GitTopologyAnchorPublication,
+    ) -> Result<GitTopologyAnchorPublicationOutcome, GitTopologyAnchorAuthorityError> {
         if !binding_matches_owner(&self.database, publication.owner()) {
-            return Err(GitTopologyAnchorAuthorityErrorV2::Unavailable);
+            return Err(GitTopologyAnchorAuthorityError::Unavailable);
         }
         let transaction = self
             .database
@@ -51,15 +50,16 @@ impl RegisteredGitTopologyAnchorAuthorityV2 {
                     transaction
                         .rollback()
                         .await
-                        .map_err(|_| GitTopologyAnchorAuthorityErrorV2::Unavailable)?;
-                    return Err(GitTopologyAnchorAuthorityErrorV2::Conflict);
+                        .map_err(|_| GitTopologyAnchorAuthorityError::Unavailable)?;
+                    return Err(GitTopologyAnchorAuthorityError::Conflict);
                 }
                 None => {}
             }
             let anchor_json = serde_json::to_string(&candidate)
-                .map_err(|_| GitTopologyAnchorAuthorityErrorV2::Conflict)?;
-            let owner_json = serde_json::to_string(candidate.owner())
-                .map_err(|_| GitTopologyAnchorAuthorityErrorV2::Conflict)?;
+                .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
+            let owner_json = candidate
+                .owner_column_json()
+                .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
             transaction
                 .execute(
                     "INSERT INTO retrieval_anchors (
@@ -78,19 +78,18 @@ impl RegisteredGitTopologyAnchorAuthorityV2 {
         }
         transaction.commit().await.map_err(map_engine_error)?;
         Ok(if published {
-            GitTopologyAnchorPublicationOutcomeV2::Published
+            GitTopologyAnchorPublicationOutcome::Published
         } else {
-            GitTopologyAnchorPublicationOutcomeV2::Replayed
+            GitTopologyAnchorPublicationOutcome::Replayed
         })
     }
 
-    #[hotpath::skip]
     async fn resolve_record(
         &self,
-        resolution: GitTopologyAnchorResolutionV2,
-    ) -> Result<GitTopologyAnchorResolutionOutcomeV2, GitTopologyAnchorAuthorityErrorV2> {
+        resolution: GitTopologyAnchorResolution,
+    ) -> Result<GitTopologyAnchorResolutionOutcome, GitTopologyAnchorAuthorityError> {
         if !binding_matches_owner(&self.database, &resolution.owner) {
-            return Err(GitTopologyAnchorAuthorityErrorV2::Unavailable);
+            return Err(GitTopologyAnchorAuthorityError::Unavailable);
         }
         let snapshot = self
             .database
@@ -98,36 +97,36 @@ impl RegisteredGitTopologyAnchorAuthorityV2 {
             .await
             .map_err(map_database_error)?;
         let Some(record) = read_record(&snapshot, resolution.anchor_id.as_str()).await? else {
-            return Ok(GitTopologyAnchorResolutionOutcomeV2::Unavailable);
+            return Ok(GitTopologyAnchorResolutionOutcome::Unavailable);
         };
         if record.owner() != &resolution.owner {
-            return Ok(GitTopologyAnchorResolutionOutcomeV2::Unavailable);
+            return Ok(GitTopologyAnchorResolutionOutcome::Unavailable);
         }
         if !matches!(
             record.target(),
-            RetrievalAnchorTargetV2::GitTopology(_)
-                | RetrievalAnchorTargetV2::ExactRepositoryCommit { .. }
+            RetrievalAnchorTarget::GitTopology(_)
+                | RetrievalAnchorTarget::ExactRepositoryCommit { .. }
         ) {
-            return Ok(GitTopologyAnchorResolutionOutcomeV2::Unavailable);
+            return Ok(GitTopologyAnchorResolutionOutcome::Unavailable);
         }
-        Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(Box::new(
+        Ok(GitTopologyAnchorResolutionOutcome::Resolved(Box::new(
             record,
         )))
     }
 }
 
-impl GitTopologyAnchorAuthorityV2 for RegisteredGitTopologyAnchorAuthorityV2 {
+impl GitTopologyAnchorAuthority for RegisteredGitTopologyAnchorAuthority {
     fn publish<'a>(
         &'a self,
-        publication: GitTopologyAnchorPublicationV2,
-    ) -> GitTopologyAnchorFutureV2<'a, GitTopologyAnchorPublicationOutcomeV2> {
+        publication: GitTopologyAnchorPublication,
+    ) -> GitTopologyAnchorFuture<'a, GitTopologyAnchorPublicationOutcome> {
         Box::pin(async move { self.publish_records(publication).await })
     }
 
     fn resolve<'a>(
         &'a self,
-        resolution: GitTopologyAnchorResolutionV2,
-    ) -> GitTopologyAnchorFutureV2<'a, GitTopologyAnchorResolutionOutcomeV2> {
+        resolution: GitTopologyAnchorResolution,
+    ) -> GitTopologyAnchorFuture<'a, GitTopologyAnchorResolutionOutcome> {
         Box::pin(async move { self.resolve_record(resolution).await })
     }
 }
@@ -135,7 +134,7 @@ impl GitTopologyAnchorAuthorityV2 for RegisteredGitTopologyAnchorAuthorityV2 {
 async fn read_record(
     connection: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
     anchor_id: &str,
-) -> Result<Option<RetrievalAnchorRecordV2>, GitTopologyAnchorAuthorityErrorV2> {
+) -> Result<Option<RetrievalAnchorRecord>, GitTopologyAnchorAuthorityError> {
     let mut rows = connection
         .query(
             "SELECT anchor_json, owner_json, projection_generation
@@ -151,19 +150,20 @@ async fn read_record(
     let owner_json = row.get::<String>(1).map_err(map_engine_error)?;
     let projection_generation = row.get::<String>(2).map_err(map_engine_error)?;
     if rows.next().await.map_err(map_engine_error)?.is_some() {
-        return Err(GitTopologyAnchorAuthorityErrorV2::ResetRequired);
+        return Err(GitTopologyAnchorAuthorityError::ResetRequired);
     }
     decode_record(&anchor_json, &owner_json, &projection_generation).map(Some)
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.git_topology_anchor.query.publication_candidates"
+#[tracing::instrument(
+    name = "global_db.git_topology_anchor.query.publication_candidates",
+    level = "trace",
+    skip_all
 )]
 async fn read_records(
     connection: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
     anchor_ids: &[String],
-) -> Result<BTreeMap<String, RetrievalAnchorRecordV2>, GitTopologyAnchorAuthorityErrorV2> {
+) -> Result<BTreeMap<String, RetrievalAnchorRecord>, GitTopologyAnchorAuthorityError> {
     if anchor_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -193,7 +193,7 @@ async fn read_records(
         let projection_generation = row.get::<String>(3).map_err(map_engine_error)?;
         let record = decode_record(&anchor_json, &owner_json, &projection_generation)?;
         if record.anchor_id().as_str() != anchor_id || records.insert(anchor_id, record).is_some() {
-            return Err(GitTopologyAnchorAuthorityErrorV2::ResetRequired);
+            return Err(GitTopologyAnchorAuthorityError::ResetRequired);
         }
     }
     Ok(records)
@@ -203,16 +203,16 @@ fn decode_record(
     anchor_json: &str,
     owner_json: &str,
     projection_generation: &str,
-) -> Result<RetrievalAnchorRecordV2, GitTopologyAnchorAuthorityErrorV2> {
-    let record = serde_json::from_str::<RetrievalAnchorRecordV2>(&anchor_json)
-        .map_err(|_| GitTopologyAnchorAuthorityErrorV2::ResetRequired)?;
+) -> Result<RetrievalAnchorRecord, GitTopologyAnchorAuthorityError> {
+    let record = serde_json::from_str::<RetrievalAnchorRecord>(anchor_json)
+        .map_err(|_| GitTopologyAnchorAuthorityError::ResetRequired)?;
     record
         .validate()
-        .map_err(|_| GitTopologyAnchorAuthorityErrorV2::ResetRequired)?;
-    if serde_json::to_string(record.owner()).ok().as_deref() != Some(owner_json)
+        .map_err(|_| GitTopologyAnchorAuthorityError::ResetRequired)?;
+    if !record.owner_column_matches(owner_json)
         || record.projection_generation().as_str() != projection_generation
     {
-        return Err(GitTopologyAnchorAuthorityErrorV2::ResetRequired);
+        return Err(GitTopologyAnchorAuthorityError::ResetRequired);
     }
     Ok(record)
 }
@@ -232,22 +232,22 @@ fn binding_matches_owner(database: &RegisteredGlobalDb, owner: &ObservationScope
 
 fn map_database_error(
     error: tracedecay_domain::errors::TraceDecayError,
-) -> GitTopologyAnchorAuthorityErrorV2 {
+) -> GitTopologyAnchorAuthorityError {
     if error.reset_required_context().is_some() {
-        GitTopologyAnchorAuthorityErrorV2::ResetRequired
+        GitTopologyAnchorAuthorityError::ResetRequired
     } else {
-        GitTopologyAnchorAuthorityErrorV2::Unavailable
+        GitTopologyAnchorAuthorityError::Unavailable
     }
 }
 
 fn map_engine_error(
     error: tracedecay_runtime_core::db::engine::Error,
-) -> GitTopologyAnchorAuthorityErrorV2 {
+) -> GitTopologyAnchorAuthorityError {
     let detail = error.to_string();
     if detail.contains("no such table") || detail.contains("no such column") {
-        GitTopologyAnchorAuthorityErrorV2::ResetRequired
+        GitTopologyAnchorAuthorityError::ResetRequired
     } else {
-        GitTopologyAnchorAuthorityErrorV2::Unavailable
+        GitTopologyAnchorAuthorityError::Unavailable
     }
 }
 
@@ -282,7 +282,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn publication_candidate_lookup_is_batched() {
         let directory = tempfile::tempdir().unwrap();
         let (database, _owner) = open_registered_test_database_fixture(

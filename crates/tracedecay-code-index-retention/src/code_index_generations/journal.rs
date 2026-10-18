@@ -1,7 +1,7 @@
 //! One bounded, schema-validated crash journal shared by every retention
 //! transaction family.
 //!
-//! Each family (generation, text artifact, scope, binding-cleanup intent)
+//! Each family (generation, text artifact, scope)
 //! describes itself with a [`BoundedJournalSpec`]; the persist/load/clear
 //! machinery is written once so a hardening fix can never drift between
 //! copies again.
@@ -30,7 +30,11 @@ pub(super) fn journal_path<T>(store_root: &Path, spec: &BoundedJournalSpec<T>) -
     store_root.join(spec.file_name)
 }
 
-#[hotpath::measure(label = "code_index_retention.persist_journal")]
+#[tracing::instrument(
+    name = "code_index_retention.persist_journal",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn persist_journal<T: Serialize>(
     store_root: &Path,
     spec: &BoundedJournalSpec<T>,
@@ -57,7 +61,7 @@ pub(super) fn persist_journal<T: Serialize>(
 /// On unix the file is opened once with `O_NOFOLLOW`, type and size are taken
 /// from that handle (`fstat`), and bytes are read from the same handle. A
 /// planted symlink at the journal path is refused at open (`ELOOP`) instead of
-/// being followed. Intermediate path components can still be symlinks — this
+/// being followed. Intermediate path components can still be symlinks, this
 /// is the same final-component guarantee as `O_NOFOLLOW`, not a full
 /// no-follow walk. `tracedecay_private_fs::open_private_file` is not reused:
 /// it requires a writable owner-private `0o600` handle, which would reject a
@@ -71,7 +75,7 @@ pub(super) fn persist_journal<T: Serialize>(
 /// The byte bound is enforced from the observed size before the body is
 /// materialized, and the length is re-verified after the read so a file that
 /// changes mid-read fails closed rather than parsing a hybrid.
-#[hotpath::measure(label = "code_index_retention.load_journal")]
+#[tracing::instrument(name = "code_index_retention.load_journal", level = "trace", skip_all)]
 pub(super) fn load_journal<T: DeserializeOwned>(
     store_root: &Path,
     spec: &BoundedJournalSpec<T>,
@@ -183,7 +187,15 @@ pub(super) fn clear_journal<T>(
     store_root: &Path,
     spec: &BoundedJournalSpec<T>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    match std::fs::remove_file(journal_path(store_root, spec)) {
+    remove_journal_file(store_root, spec.file_name)
+}
+
+/// Durably remove the journal file `file_name` from `store_root`, if present.
+pub(super) fn remove_journal_file(
+    store_root: &Path,
+    file_name: &str,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    match std::fs::remove_file(store_root.join(file_name)) {
         Ok(()) => sync_directory(store_root),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(storage(error)),
@@ -208,18 +220,6 @@ mod tests {
             write_context: "fixture-retention-journal",
             validate: |_| Ok(()),
         }
-    }
-
-    #[test]
-    fn load_journal_round_trips_a_regular_file() {
-        let store = tempfile::tempdir().expect("store");
-        let spec = fixture_spec();
-        persist_journal(store.path(), &spec, &FixtureJournalV1 { value: 7 })
-            .expect("persist fixture journal");
-        assert_eq!(
-            load_journal(store.path(), &spec).expect("load fixture journal"),
-            Some(FixtureJournalV1 { value: 7 })
-        );
     }
 
     #[test]

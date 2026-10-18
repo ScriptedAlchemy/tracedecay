@@ -1,6 +1,6 @@
 //! Project-info handlers that still depend on composition-root authorities.
 //!
-//! Portable file-inspection and registry/config/remote-status/simplify tools
+//! Portable file-inspection and registry/config/remote-status tools
 //! live in `tracedecay_mcp::handlers::info`.
 
 #[cfg(test)]
@@ -14,20 +14,7 @@
 mod remote_status_dispatch_tests;
 mod status;
 
-pub(crate) use status::graph_statistics_value;
-pub(super) use status::{handle_active_project, handle_admin_sync, handle_status};
+pub(super) use status::admin_sync;
 
-pub(super) use serde_json::{Value, json};
-
-pub(super) use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 pub(super) use tracedecay_domain::errors::{Result, TraceDecayError};
-pub(super) use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
-pub(super) use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
-
-pub(super) use super::support::{generic_tool_result, rendered_tool_result};
-pub(super) use tracedecay_mcp::ToolResult;
-pub(super) use tracedecay_mcp::tools::render::Md;
-
-fn display_path(path: &std::path::Path) -> String {
-    path.display().to_string()
-}
+pub(super) use tracedecay_project::project::TraceDecay;

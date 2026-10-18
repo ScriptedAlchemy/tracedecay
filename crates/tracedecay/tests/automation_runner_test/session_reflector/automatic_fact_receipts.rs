@@ -17,7 +17,7 @@ async fn session_automatic_facts_keep_paraphrases_distinct() {
     let owner = project_memory_owner(&cg);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         owner,
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -44,7 +44,7 @@ async fn session_automatic_facts_keep_paraphrases_distinct() {
         ),
         fact(
             "Before merging a PR batch, require stable aggregate verification and a \
-             live PR-state recheck — a single flaky green pass is never enough to merge",
+             live PR-state recheck, a single flaky green pass is never enough to merge",
         ),
         fact(
             "A single flaky green pass is not enough: merging the PR batch needs \
@@ -128,7 +128,7 @@ async fn session_automatic_fact_receipts_remain_immutable_when_paraphrases_apply
     let cg = init_project(temp.path()).await;
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -167,7 +167,7 @@ async fn session_automatic_fact_receipts_remain_immutable_when_paraphrases_apply
     let paraphrase = json!({
         "add_fact_request": {
             "content": "Before merging a PR batch, require stable aggregate verification and a \
-                        live PR-state recheck — a single flaky green pass is never enough to merge",
+                        live PR-state recheck, a single flaky green pass is never enough to merge",
             "category": "project",
             "source_label": "session_reflector",
             "tags": ["session-reflector"],

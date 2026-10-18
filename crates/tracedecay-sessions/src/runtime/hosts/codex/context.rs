@@ -1,102 +1,152 @@
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufReader, Seek, SeekFrom};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
 use super::{CodexMeta, session_meta_from_record, turn_context_from_record};
-use crate::runtime::SessionMessageRecord;
-use crate::runtime::shared::{
-    ProjectRootMatcherCache, TranscriptLocation, TranscriptLocationMetadataKeys,
-    append_location_metadata_cached,
-};
-use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader};
+use crate::runtime::jsonl_observation_admission::jsonl_frame_hints;
+use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
 
-const CODEX_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
-    TranscriptLocationMetadataKeys::new(
-        "codex_session_cwd",
-        "codex_session_worktree",
-        "codex_session_location_provenance",
-    );
-const CODEX_TURN_LOCATION_KEYS: TranscriptLocationMetadataKeys =
-    TranscriptLocationMetadataKeys::new(
-        "codex_turn_cwd",
-        "codex_turn_worktree",
-        "codex_turn_location_provenance",
-    );
+/// Chunk the prior-context walk reads backwards from the resume offset.
+const PRIOR_CONTEXT_CHUNK_BYTES: u64 = 8 * 1024;
 
+/// The rollout context a resumed record inherits from the records before it.
+/// The model may be absent: real rollouts carry it on `turn_context` records,
+/// which not every rollout contains.
 #[derive(Clone)]
 pub(super) struct CodexContextState {
-    pub(super) turn_id: Option<String>,
+    pub(super) cwd: PathBuf,
     pub(super) model: Option<String>,
-    pub(super) cwd: Option<PathBuf>,
-    pub(super) git: Option<Value>,
-    pub(super) compaction_depth: i64,
+}
+
+/// What a context record updates; each field stays put when the record does
+/// not carry it.
+#[derive(Default)]
+struct ContextValues {
+    cwd: Option<PathBuf>,
+    model: Option<String>,
 }
 
 impl CodexContextState {
     pub(super) fn from_meta(meta: &CodexMeta) -> Self {
         Self {
-            turn_id: None,
+            cwd: meta.cwd.clone(),
             model: meta.model.clone(),
-            cwd: Some(meta.cwd.clone()),
-            git: meta.git.clone(),
-            compaction_depth: 0,
         }
     }
 
-    #[hotpath::measure(label = "sessions.hosts.codex.scan_prior")]
-    pub(super) fn scan_prior(path: &Path, before_offset: u64, meta: &CodexMeta) -> Self {
+    /// Context in effect at `before_offset`, with the bytes read to rebuild it.
+    ///
+    /// Each context field comes from the last record before the cursor that
+    /// sets it, normally the current turn's, so the walk runs backwards from
+    /// the cursor and stops once every field is found instead of replaying
+    /// the prefix. A cached context for an earlier offset of the same JSONL
+    /// `generation` also stops it at that offset: one generation is one byte
+    /// stream, so the bytes before that offset are the ones the cached
+    /// context was read from.
+    #[tracing::instrument(name = "sessions.hosts.codex.scan_prior", level = "trace", skip_all)]
+    pub(super) fn scan_prior(
+        path: &Path,
+        generation: u64,
+        before_offset: u64,
+        meta: &CodexMeta,
+    ) -> (Self, u64) {
         if before_offset == 0 {
-            return Self::from_meta(meta);
+            return (Self::from_meta(meta), 0);
         }
-        let Ok(mut file) = std::fs::File::open(path) else {
-            return Self::from_meta(meta);
+        let Ok(mut file) = File::open(path) else {
+            return (Self::from_meta(meta), 0);
         };
-        let generation = prior_context_generation(&file);
-        let (mut state, mut offset) = match generation
-            .and_then(|generation| cached_prior_context(path, generation, before_offset))
-        {
-            Some(resumed) => resumed,
-            None => (Self::from_meta(meta), 0),
-        };
-        if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
-            state = Self::from_meta(meta);
-            offset = 0;
-            if file.seek(SeekFrom::Start(0)).is_err() {
-                return state;
-            }
-        }
-        let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
-        while let Ok(frame) = frames.next_frame() {
-            if matches!(frame, RawJsonlFrame::Eof) || offset >= before_offset {
-                break;
-            }
-            let line_offset = offset;
-            let byte_len = match frame {
-                RawJsonlFrame::Complete { byte_len }
-                | RawJsonlFrame::Partial { byte_len }
-                | RawJsonlFrame::Oversized { byte_len, .. }
-                | RawJsonlFrame::BudgetExhausted { byte_len, .. } => byte_len,
-                RawJsonlFrame::Eof => 0,
+        let (floor, floor_state) = cached_prior_context(path, generation, before_offset)
+            .map_or_else(
+                || (0, Self::from_meta(meta)),
+                |(state, offset)| (offset, state),
+            );
+        let (state, read) =
+            match Self::last_context_values(&mut file, floor, before_offset, path, meta) {
+                Ok((values, read)) => (
+                    Self {
+                        cwd: values.cwd.unwrap_or(floor_state.cwd),
+                        model: values.model.or(floor_state.model),
+                    },
+                    read,
+                ),
+                Err(read) => return (Self::from_meta(meta), read),
             };
-            offset = offset.saturating_add(byte_len);
-            if line_offset >= before_offset {
-                break;
+        store_prior_context(path, generation, before_offset, state.clone());
+        (state, read)
+    }
+
+    /// The values the last context records of `[floor, before_offset)` set,
+    /// with the bytes read to find them. `floor` is a record boundary. The
+    /// walk stops once every field resolves; a field found nowhere before the
+    /// floor stays `None` for the caller to merge with the floor state.
+    fn last_context_values(
+        file: &mut File,
+        floor: u64,
+        before_offset: u64,
+        path: &Path,
+        meta: &CodexMeta,
+    ) -> Result<(ContextValues, u64), u64> {
+        let mut read = 0_u64;
+        let mut found = ContextValues::default();
+        let mut chunk = Vec::new();
+        // Pieces of the line whose start the walk has not reached, last first.
+        let mut pieces: Vec<Vec<u8>> = Vec::new();
+        let mut pieces_len = 0_usize;
+        // Bytes after the last newline belong to the record the cursor sits
+        // inside, which no prior context includes.
+        let mut in_cursor_record = true;
+        let mut end = before_offset;
+        while end > floor && (found.cwd.is_none() || found.model.is_none()) {
+            let start = end.saturating_sub(PRIOR_CONTEXT_CHUNK_BYTES).max(floor);
+            chunk.resize(usize::try_from(end - start).map_err(|_| read)?, 0);
+            file.seek(SeekFrom::Start(start)).map_err(|_| read)?;
+            file.read_exact(&mut chunk).map_err(|_| read)?;
+            read += end - start;
+            let mut rest = &chunk[..];
+            while let Some(newline) = rest.iter().rposition(|byte| *byte == b'\n') {
+                if !in_cursor_record {
+                    let values =
+                        line_context_values(&rest[newline + 1..], &pieces, pieces_len, path, meta);
+                    if found.cwd.is_none() {
+                        found.cwd = values.cwd;
+                    }
+                    if found.model.is_none() {
+                        found.model = values.model;
+                    }
+                    if found.cwd.is_some() && found.model.is_some() {
+                        return Ok((found, read));
+                    }
+                }
+                in_cursor_record = false;
+                pieces.clear();
+                pieces_len = 0;
+                rest = &rest[..newline];
             }
-            if !matches!(frame, RawJsonlFrame::Complete { .. }) {
-                continue;
+            pieces_len += rest.len();
+            // The forward reader skips a record this long, newline included.
+            if pieces_len < MAX_JSONL_RECORD_BYTES {
+                pieces.push(rest.to_vec());
+            } else {
+                pieces.clear();
             }
-            let Ok(value) = serde_json::from_slice::<Value>(frames.record()) else {
-                continue;
-            };
-            state.observe_prior_record(&value, path, meta);
+            end = start;
         }
-        if let Some(generation) = generation {
-            store_prior_context(path, generation, before_offset, state.clone());
+        if in_cursor_record {
+            return Ok((found, read));
         }
-        state
+        let first = line_context_values(&[], &pieces, pieces_len, path, meta);
+        if found.cwd.is_none() {
+            found.cwd = first.cwd;
+        }
+        if found.model.is_none() {
+            found.model = first.model;
+        }
+        Ok((found, read))
     }
 
     pub(super) fn observe_context_record(
@@ -105,44 +155,74 @@ impl CodexContextState {
         path: &Path,
         meta: &CodexMeta,
     ) -> bool {
-        if let Some(updated) = session_meta_from_record(record, path) {
-            if updated.session_id == meta.session_id {
-                self.cwd = Some(updated.cwd);
-                if updated.git.is_some() {
-                    self.git = updated.git;
+        match context_values(record, path, meta) {
+            Some(values) => {
+                if let Some(cwd) = values.cwd {
+                    self.cwd = cwd;
                 }
-                if updated.model.is_some() {
-                    self.model = updated.model;
+                if let Some(model) = values.model {
+                    self.model = Some(model);
                 }
+                true
             }
-            return true;
+            None => false,
         }
-        if let Some(context) = turn_context_from_record(record) {
-            // A turn context is a new native correlation boundary. Missing
-            // identity/model evidence must become unknown for that turn
-            // instead of inheriting a prior turn's values.
-            self.turn_id = context.turn_id;
-            self.model = context.model;
-            if context.cwd.is_some() {
-                self.cwd = context.cwd;
-            }
-            return true;
-        }
-        false
-    }
-
-    fn observe_prior_record(&mut self, record: &Value, path: &Path, meta: &CodexMeta) {
-        if record.get("type").and_then(Value::as_str) == Some("compacted") {
-            self.compaction_depth += 1;
-            return;
-        }
-        self.observe_context_record(record, path, meta);
     }
 }
 
-/// Bounded cache of resumed prior-context state keyed by rollout path so an
-/// incremental scan of an active session only parses the delta beyond its last
-/// resume offset instead of the whole prefix.
+/// What `record` does to the rollout context: `None` when it is no context
+/// record, `Some` of the fields it sets when it is one.
+fn context_values(record: &Value, path: &Path, meta: &CodexMeta) -> Option<ContextValues> {
+    if let Some(updated) = session_meta_from_record(record, path) {
+        let same_session = updated.session_id == meta.session_id;
+        return Some(ContextValues {
+            cwd: same_session.then_some(updated.cwd),
+            model: same_session.then_some(updated.model).flatten(),
+        });
+    }
+    turn_context_from_record(record).map(|context| ContextValues {
+        cwd: context.cwd,
+        model: context.model,
+    })
+}
+
+/// The values the line `head` + `pieces` (stored last first) sets, if it is a
+/// context record.
+fn line_context_values(
+    head: &[u8],
+    pieces: &[Vec<u8>],
+    pieces_len: usize,
+    path: &Path,
+    meta: &CodexMeta,
+) -> ContextValues {
+    if head.len() + pieces_len >= MAX_JSONL_RECORD_BYTES {
+        return ContextValues::default();
+    }
+    let assembled;
+    let line = if pieces.is_empty() {
+        head
+    } else {
+        let mut bytes = Vec::with_capacity(head.len() + pieces_len);
+        bytes.extend_from_slice(head);
+        pieces
+            .iter()
+            .rev()
+            .for_each(|piece| bytes.extend_from_slice(piece));
+        assembled = bytes;
+        &assembled[..]
+    };
+    if !jsonl_frame_hints(line).may_change_codex_context {
+        return ContextValues::default();
+    }
+    let Some(record) = serde_json::from_slice::<Value>(line).ok() else {
+        return ContextValues::default();
+    };
+    context_values(&record, path, meta).unwrap_or_default()
+}
+
+/// Bounded cache of resumed prior-context state keyed by rollout path, so the
+/// next window of the same JSONL generation walks back no further than its
+/// last resume offset.
 const PRIOR_CONTEXT_CACHE_CAPACITY: usize = 512;
 
 struct CachedPriorContext {
@@ -159,26 +239,17 @@ struct PriorContextCache {
 
 static PRIOR_CONTEXT_CACHE: OnceLock<Mutex<PriorContextCache>> = OnceLock::new();
 
-fn prior_context_generation(file: &std::fs::File) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
-    let meta = file.metadata().ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.dev().hash(&mut hasher);
-        meta.ino().hash(&mut hasher);
+/// Evicts `path`'s resumable context, as a full cache does for every rollout
+/// past its capacity.
+#[cfg(test)]
+pub(crate) fn evict_prior_context_for_test(path: &Path) {
+    if let Some(cache) = PRIOR_CONTEXT_CACHE.get() {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .remove(path);
     }
-    #[cfg(not(unix))]
-    {
-        meta.created()
-            .ok()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_nanos()
-            .hash(&mut hasher);
-    }
-    Some(hasher.finish())
 }
 
 fn cached_prior_context(
@@ -222,141 +293,5 @@ fn store_prior_context(path: &Path, generation: u64, offset: u64, state: CodexCo
     );
 }
 
-pub(super) fn session_metadata_json(
-    meta: &CodexMeta,
-    summary: Option<&super::events::CodexSessionSummary>,
-    location_cache: &ProjectRootMatcherCache,
-) -> Option<String> {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("codex_rollout".to_string()),
-    );
-    if let Some(thread_source) = &meta.thread_source {
-        metadata.insert(
-            "thread_source".to_string(),
-            Value::String(thread_source.clone()),
-        );
-    }
-    if let Some(agent_role) = &meta.agent_role {
-        metadata.insert("agent_role".to_string(), Value::String(agent_role.clone()));
-    }
-    if let Some(agent_nickname) = &meta.agent_nickname {
-        metadata.insert(
-            "agent_nickname".to_string(),
-            Value::String(agent_nickname.clone()),
-        );
-    }
-    append_location_metadata_cached(
-        &mut metadata,
-        CODEX_SESSION_LOCATION_KEYS,
-        TranscriptLocation::new(Some(&meta.cwd), "session_meta"),
-        location_cache,
-    );
-    insert_git_metadata(&mut metadata, meta.git.as_ref());
-    if let Some(summary) = summary {
-        summary.apply(&mut metadata);
-    }
-    serde_json::to_string(&Value::Object(metadata)).ok()
-}
-
-pub(super) fn annotate_message(
-    message: &mut SessionMessageRecord,
-    cwd: Option<&Path>,
-    git: Option<&Value>,
-    location_cache: &ProjectRootMatcherCache,
-) {
-    let mut metadata = message
-        .metadata_json
-        .as_deref()
-        .and_then(|json| serde_json::from_str::<Value>(json).ok())
-        .and_then(|value| match value {
-            Value::Object(map) => Some(map),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    append_location_metadata_cached(
-        &mut metadata,
-        CODEX_TURN_LOCATION_KEYS,
-        TranscriptLocation::new(cwd, "codex_context"),
-        location_cache,
-    );
-    insert_git_metadata(&mut metadata, git);
-    message.metadata_json = serde_json::to_string(&Value::Object(metadata)).ok();
-}
-
-fn insert_git_metadata(metadata: &mut serde_json::Map<String, Value>, git: Option<&Value>) {
-    let Some(git) = git.and_then(Value::as_object) else {
-        return;
-    };
-    if let Some(branch) = git.get("branch").and_then(Value::as_str) {
-        metadata.insert(
-            "codex_git_branch".to_string(),
-            Value::String(branch.to_string()),
-        );
-    }
-    if let Some(commit) = git.get("commit_hash").and_then(Value::as_str) {
-        metadata.insert(
-            "codex_git_commit_hash".to_string(),
-            Value::String(commit.to_string()),
-        );
-    }
-    if let Some(remote) = git.get("repository_url").and_then(Value::as_str) {
-        metadata.insert(
-            "codex_git_repository_url".to_string(),
-            Value::String(remote.to_string()),
-        );
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use std::path::{Path, PathBuf};
-
-    use serde_json::json;
-
-    use super::{CodexContextState, CodexMeta};
-
-    fn meta() -> CodexMeta {
-        CodexMeta {
-            cwd: PathBuf::from("/workspace"),
-            session_id: "session.fixture".to_owned(),
-            model: None,
-            git: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            agent_nickname: None,
-            agent_role: None,
-            thread_source: None,
-        }
-    }
-
-    #[test]
-    fn new_turn_context_clears_missing_turn_and_model_evidence() {
-        let meta = meta();
-        let mut state = CodexContextState::from_meta(&meta);
-        assert!(state.observe_context_record(
-            &json!({
-                "type": "turn_context",
-                "payload": {
-                    "turn_id": "turn.first",
-                    "model": "gpt-5.6-codex"
-                }
-            }),
-            Path::new("/tmp/rollout.jsonl"),
-            &meta,
-        ));
-        assert_eq!(state.turn_id.as_deref(), Some("turn.first"));
-        assert_eq!(state.model.as_deref(), Some("gpt-5.6-codex"));
-
-        assert!(state.observe_context_record(
-            &json!({"type": "turn_context", "payload": {}}),
-            Path::new("/tmp/rollout.jsonl"),
-            &meta,
-        ));
-        assert_eq!(state.turn_id, None);
-        assert_eq!(state.model, None);
-    }
-}
+mod tests;

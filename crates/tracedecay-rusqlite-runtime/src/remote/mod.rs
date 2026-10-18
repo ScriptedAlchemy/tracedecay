@@ -11,7 +11,7 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
 };
 use thiserror::Error;
-use tracedecay_application::remote::{
+use tracedecay_contracts::remote::{
     auth::{
         RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentAuthorityErrorV1,
         RemoteEnrollmentAuthorityPortV1, RemoteEnrollmentCommitReceiptV1,
@@ -37,22 +37,25 @@ use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlValue,
 };
 use crate::repository::RetainedExactSqlCapability;
-use tracedecay_application::{
+use tracedecay_contracts::{
     OperationBudgetUsage,
     remote::replay::{
-        RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1, RemoteReplayStateV1,
-        RemoteReplayTransitionReceiptV1, RemoteReplayTransitionV1,
+        RemoteReplayBacklogEntryV1, RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1,
+        RemoteReplayStateV1, RemoteReplayTransitionReceiptV1, RemoteReplayTransitionV1,
     },
 };
 
 const READ_WAIT: Duration = Duration::from_secs(5);
 mod credential_admission;
 mod crypto;
+mod drain;
 mod enrollment;
 mod enrollment_lifecycle;
 mod identity;
+mod membership;
 mod policy;
 mod promotion_gate;
+mod reachability;
 mod recovery_authority;
 mod replay_authority;
 mod replay_recovery;
@@ -60,6 +63,7 @@ mod rows;
 mod schema;
 mod spool_limits;
 mod status;
+mod writer_publication;
 
 pub use credential_admission::{RemoteCredentialInventoryErrorV1, RemoteCredentialRegistrationV1};
 pub use crypto::{CredentialDerivedSpoolKeyringV1, RemoteSpoolKeyV1, RemoteSpoolKeyringV1};
@@ -67,17 +71,19 @@ use enrollment::{
     enrollment_one_row, enrollment_row_text, load_authority_state, load_enrollment,
     map_enrollment_error,
 };
-use identity::{bind_node_identity, provision_node_identity};
+use identity::{adopt_runtime_binding, bind_node_identity, provision_node_identity};
 use promotion_gate::{promotion_pending, promotion_pending_in};
 pub use recovery_authority::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
-    RemoteRecoveryPhysicalEffectsV1, RemoteRecoverySqliteAuthorityV1,
+    RemoteRecoveryPhysicalEffectFutureV1, RemoteRecoveryPhysicalEffectsV1,
+    RemoteRecoverySqliteAuthorityV1,
 };
 pub use replay_authority::RemoteQueryAuthoritySnapshotV1;
 pub use replay_recovery::RemoteReplayStartupRecoveryV1;
 use rows::*;
 pub use schema::REMOTE_NODE_LOCAL_SCHEMA;
 pub use status::{RemoteRecoveryOperationalSnapshotV1, RemoteStorageStatusSnapshotV1};
+pub use writer_publication::{RemoteWriterPublicationErrorV1, RemoteWriterPublicationStateV1};
 
 #[derive(Debug, Error)]
 pub enum RemoteSqliteStorageErrorV1 {
@@ -95,6 +101,8 @@ pub enum RemoteSqliteStorageErrorV1 {
     Corruption,
     #[error("remote Brain storage is unavailable")]
     Unavailable,
+    #[error("no remote Brain writer authority has been published")]
+    WriterAuthorityUnpublished,
     #[error(transparent)]
     Sql(#[from] ExactSqlError),
 }
@@ -107,6 +115,9 @@ impl From<RemoteCapturePersistenceErrorV1> for RemoteSqliteStorageErrorV1 {
             RemoteCapturePersistenceErrorV1::AtRestEncryptionUnavailable
             | RemoteCapturePersistenceErrorV1::Overflow
             | RemoteCapturePersistenceErrorV1::Unavailable => Self::Unavailable,
+            RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished => {
+                Self::WriterAuthorityUnpublished
+            }
         }
     }
 }
@@ -145,6 +156,7 @@ impl Default for RemoteSpoolLimitsV1 {
 pub struct RemoteSqliteStorageV1 {
     retained: RetainedExactSqlCapability,
     binding: StoreRuntimeBindingV1,
+    member_brain: BrainId,
     keyring: Arc<dyn RemoteSpoolKeyringV1>,
     limits: RemoteSpoolLimitsV1,
 }
@@ -161,7 +173,7 @@ impl RemoteSqliteStorageV1 {
         Self::from_retained_exact_sql_with_limits(retained, keyring, RemoteSpoolLimitsV1::default())
     }
 
-    #[hotpath::measure(label = "rusqlite.remote.attach")]
+    #[tracing::instrument(name = "rusqlite.remote.attach", level = "trace", skip_all)]
     pub fn from_retained_exact_sql_with_limits(
         retained: RetainedExactSqlCapability,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
@@ -175,10 +187,12 @@ impl RemoteSqliteStorageV1 {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
         validate_final_schema(retained.handle())?;
-        bind_node_identity(retained.handle(), &binding)?;
+        let member_brain = bind_node_identity(retained.handle(), &binding)?;
+        adopt_runtime_binding(retained.handle(), &binding)?;
         Ok(Self {
             retained,
             binding,
+            member_brain,
             keyring,
             limits,
         })
@@ -191,17 +205,19 @@ impl RemoteSqliteStorageV1 {
         Self {
             retained: self.retained.clone(),
             binding: self.binding.clone(),
+            member_brain: self.member_brain.clone(),
             keyring,
             limits: self.limits,
         }
     }
 
     /// Attaches a newly mounted remote-node runtime and seeds its singleton
-    /// node identity after final-schema admission.
-    #[hotpath::measure(label = "rusqlite.remote.provision")]
+    /// node identity, serving `member_brain`, after final-schema admission.
+    #[tracing::instrument(name = "rusqlite.remote.provision", level = "trace", skip_all)]
     pub fn provision_retained_exact_sql(
         retained: RetainedExactSqlCapability,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
+        member_brain: &BrainId,
     ) -> Result<Self, RemoteSqliteStorageErrorV1> {
         let binding = retained.handle().binding().clone();
         if !matches!(
@@ -211,10 +227,11 @@ impl RemoteSqliteStorageV1 {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
         validate_final_schema(retained.handle())?;
-        provision_node_identity(retained.handle(), &binding)?;
+        let member_brain = provision_node_identity(retained.handle(), &binding, member_brain)?;
         Ok(Self {
             retained,
             binding,
+            member_brain,
             keyring,
             limits: RemoteSpoolLimitsV1::default(),
         })
@@ -224,58 +241,20 @@ impl RemoteSqliteStorageV1 {
         &self.binding
     }
 
-    fn handle(&self) -> &ExactSqlHandle {
-        self.retained.handle()
+    /// The Brain whose enrollments, writer, and policy this store holds. It
+    /// differs from the binding's profile Brain only for a joined store.
+    pub fn member_brain(&self) -> &BrainId {
+        &self.member_brain
     }
 
-    pub fn publish_authority(
-        &self,
-        state: &CurrentRemoteAuthorityStateV1,
-        writer: &RemoteWriterAuthorityV1,
-        updated_at: UtcMicros,
-    ) -> Result<(), RemoteSqliteStorageErrorV1> {
-        state
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        writer
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let brain_id = match state {
-            CurrentRemoteAuthorityStateV1::Available(authority)
-                if authority.fence == writer.authority.fence =>
-            {
-                authority.fence.brain_id.as_str()
-            }
-            _ => return Err(RemoteSqliteStorageErrorV1::Corruption),
-        };
-        let runtime_binding_json = serde_json::to_string(&self.binding)
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let authority_state_json =
-            serde_json::to_string(state).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let writer_json =
-            serde_json::to_string(writer).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        hotpath::measure_block!("rusqlite.remote.persist_authority", {
-            self.handle().execute(ExactSqlStatement::new(
-                "INSERT INTO remote_authorities (
-                    brain_id, runtime_binding_json, authority_state_json, writer_json, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(brain_id) DO UPDATE SET
-                    runtime_binding_json = excluded.runtime_binding_json,
-                    authority_state_json = excluded.authority_state_json,
-                    writer_json = excluded.writer_json,
-                    updated_at = excluded.updated_at
-                 WHERE excluded.updated_at >= remote_authorities.updated_at"
-                    .to_owned(),
-                vec![
-                    text(brain_id),
-                    text(&runtime_binding_json),
-                    text(&authority_state_json),
-                    text(&writer_json),
-                    ExactSqlValue::Integer(updated_at.0),
-                ],
-            )?)
-        })?;
-        Ok(())
+    /// Whether this store is a node's copy of another profile's Brain rather
+    /// than a store this daemon serves as the authority.
+    pub fn is_joined(&self) -> bool {
+        self.member_brain != self.binding.shard_id.brain_id
+    }
+
+    fn handle(&self) -> &ExactSqlHandle {
+        self.retained.handle()
     }
 
     pub fn store_enrollment_grant(
@@ -290,21 +269,24 @@ impl RemoteSqliteStorageV1 {
             serde_json::to_string(grant).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let admission_json =
             serde_json::to_string(admission).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let result = hotpath::measure_block!("rusqlite.remote.persist_enrollment_grant", {
-            self.handle().execute(ExactSqlStatement::new(
-                "INSERT INTO remote_enrollment_grants (
+        let result = {
+            let _span = tracing::trace_span!("rusqlite.remote.persist_enrollment_grant").entered();
+            {
+                self.handle().execute(ExactSqlStatement::new(
+                    "INSERT INTO remote_enrollment_grants (
                 grant_id, credential_fingerprint, grant_json, admission_json, consumed_at
              ) VALUES (?1, ?2, ?3, ?4, NULL)
              ON CONFLICT(grant_id) DO NOTHING"
-                    .to_owned(),
-                vec![
-                    text(grant.grant_id.as_str()),
-                    text(grant.fingerprint.digest().as_str()),
-                    text(&grant_json),
-                    text(&admission_json),
-                ],
-            )?)
-        })?;
+                        .to_owned(),
+                    vec![
+                        text(grant.grant_id.as_str()),
+                        text(grant.fingerprint.digest().as_str()),
+                        text(&grant_json),
+                        text(&admission_json),
+                    ],
+                )?)
+            }
+        }?;
         if result.changed_rows == 1 {
             return Ok(());
         }
@@ -416,110 +398,118 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         input_digest: &ManifestDigest,
         consumed_at: UtcMicros,
     ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentAuthorityErrorV1> {
-        hotpath::measure_block!("rusqlite.remote.txn.commit_enrollment", {
-            let transaction = self
-                .handle()
-                .begin_immediate()
-                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?;
-            let rows = transaction
-                .query(
-                    ExactSqlStatement::new(
-                        "SELECT grant_json, admission_json, consumed_at
+        {
+            let _span = tracing::trace_span!("rusqlite.remote.txn.commit_enrollment").entered();
+            {
+                let transaction = self
+                    .handle()
+                    .begin_immediate()
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?;
+                let rows = transaction
+                    .query(
+                        ExactSqlStatement::new(
+                            "SELECT grant_json, admission_json, consumed_at
                      FROM remote_enrollment_grants WHERE grant_id = ?1"
-                            .to_owned(),
-                        vec![text(grant.grant_id.as_str())],
-                    )
-                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?,
-                )
-                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?;
-            let row = enrollment_one_row(rows, RemoteEnrollmentAuthorityErrorV1::GrantNotFound)?;
-            if !matches!(row.values.get(2), Some(ExactSqlValue::Null)) {
-                return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
-            }
-            let stored_grant: EnrollmentGrantV1 =
-                serde_json::from_str(enrollment_row_text(&row, 0)?)
-                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
-            if stored_grant != *grant {
-                return Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict);
-            }
-            let admission: RemoteEnrollmentAdmissionEvidenceV1 =
-                serde_json::from_str(enrollment_row_text(&row, 1)?)
-                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
-            let prior_grant_digest = canonical_sha256(grant)
-                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
-            let committed_state_digest = canonical_sha256(enrollment)
-                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
-            let enrollment_json = serde_json::to_string(enrollment)
-                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
-            let budget_bytes = enrollment_json.len();
-            let receipt = RemoteEnrollmentCommitReceiptV1 {
-                admission,
-                prior_grant_digest,
-                input_digest: input_digest.clone(),
-                committed_state_digest,
-                consumed_at,
-                budget: OperationBudgetUsage {
-                    units_consumed: 2,
-                    bytes_consumed: u64::try_from(budget_bytes)
+                                .to_owned(),
+                            vec![text(grant.grant_id.as_str())],
+                        )
                         .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?,
-                    elapsed_micros: 0,
-                },
-                enrollment: enrollment.clone(),
-            };
-            receipt
-                .validate()
-                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
-            let receipt_json = serde_json::to_string(&receipt)
-                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
-            transaction
-                .execute(
-                    ExactSqlStatement::new(
-                        "INSERT INTO remote_enrollments (
-                        enrollment_id, brain_id, node_id, revision, credential_fingerprint,
-                        enrollment_json, commit_receipt_json
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-                            .to_owned(),
-                        vec![
-                            text(enrollment.enrollment_id.as_str()),
-                            text(enrollment.brain_id.as_str()),
-                            text(enrollment.node_id.as_str()),
-                            ExactSqlValue::Integer(
-                                i64::try_from(enrollment.revision).map_err(|_| {
-                                    RemoteEnrollmentAuthorityErrorV1::IdentityConflict
-                                })?,
-                            ),
-                            text(enrollment.fingerprint.digest().as_str()),
-                            text(&enrollment_json),
-                            text(&receipt_json),
-                        ],
                     )
-                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?,
-                )
-                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
-            let consumed = hotpath::measure_block!("rusqlite.remote.cas.commit_enrollment", {
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?;
+                let row =
+                    enrollment_one_row(rows, RemoteEnrollmentAuthorityErrorV1::GrantNotFound)?;
+                if !matches!(row.values.get(2), Some(ExactSqlValue::Null)) {
+                    return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
+                }
+                let stored_grant: EnrollmentGrantV1 =
+                    serde_json::from_str(enrollment_row_text(&row, 0)?)
+                        .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                if stored_grant != *grant {
+                    return Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict);
+                }
+                let admission: RemoteEnrollmentAdmissionEvidenceV1 =
+                    serde_json::from_str(enrollment_row_text(&row, 1)?)
+                        .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                let prior_grant_digest = canonical_sha256(grant)
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                let committed_state_digest = canonical_sha256(enrollment)
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                let enrollment_json = serde_json::to_string(enrollment)
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                let budget_bytes = enrollment_json.len();
+                let receipt = RemoteEnrollmentCommitReceiptV1 {
+                    admission,
+                    prior_grant_digest,
+                    input_digest: input_digest.clone(),
+                    committed_state_digest,
+                    consumed_at,
+                    budget: OperationBudgetUsage {
+                        units_consumed: 2,
+                        bytes_consumed: u64::try_from(budget_bytes)
+                            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?,
+                        elapsed_micros: 0,
+                    },
+                    enrollment: enrollment.clone(),
+                };
+                receipt
+                    .validate()
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                let receipt_json = serde_json::to_string(&receipt)
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
                 transaction
                     .execute(
                         ExactSqlStatement::new(
-                            "UPDATE remote_enrollment_grants SET consumed_at = ?1
-                     WHERE grant_id = ?2 AND consumed_at IS NULL"
+                            "INSERT INTO remote_enrollments (
+                        enrollment_id, brain_id, node_id, revision, credential_fingerprint,
+                        enrollment_json, commit_receipt_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
                                 .to_owned(),
                             vec![
-                                ExactSqlValue::Integer(consumed_at.0),
-                                text(grant.grant_id.as_str()),
+                                text(enrollment.enrollment_id.as_str()),
+                                text(enrollment.brain_id.as_str()),
+                                text(enrollment.node_id.as_str()),
+                                ExactSqlValue::Integer(
+                                    i64::try_from(enrollment.revision).map_err(|_| {
+                                        RemoteEnrollmentAuthorityErrorV1::IdentityConflict
+                                    })?,
+                                ),
+                                text(enrollment.fingerprint.digest().as_str()),
+                                text(&enrollment_json),
+                                text(&receipt_json),
                             ],
                         )
                         .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?,
                     )
-                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)
-            })?;
-            if consumed.changed_rows != 1 {
-                return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                let consumed = {
+                    let _span =
+                        tracing::trace_span!("rusqlite.remote.cas.commit_enrollment").entered();
+                    {
+                        transaction
+                            .execute(
+                                ExactSqlStatement::new(
+                                    "UPDATE remote_enrollment_grants SET consumed_at = ?1
+                     WHERE grant_id = ?2 AND consumed_at IS NULL"
+                                        .to_owned(),
+                                    vec![
+                                        ExactSqlValue::Integer(consumed_at.0),
+                                        text(grant.grant_id.as_str()),
+                                    ],
+                                )
+                                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?,
+                            )
+                            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)
+                    }
+                }?;
+                if consumed.changed_rows != 1 {
+                    return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
+                }
+                transaction
+                    .commit()
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?;
+                Ok(receipt)
             }
-            transaction
-                .commit()
-                .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?;
-            Ok(receipt)
-        })
+        }
     }
 }
 
@@ -581,23 +571,33 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         {
             return Err(RemoteCapturePersistenceErrorV1::Unavailable);
         }
-        let rows = query(
+        let row = authority_row(
             self.handle(),
-            "SELECT authority_state_json, runtime_binding_json
-             FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(writer.authority.fence.brain_id.as_str())],
+            "authority_state_json, runtime_binding_json, writer_json",
+            &writer.authority.fence.brain_id,
         )
-        .map_err(map_persistence_error)?;
-        let row = one_row(rows).map_err(map_persistence_error)?;
-        let authority_json = row_text(&row, 0).map_err(map_persistence_error)?;
-        let binding_json = row_text(&row, 1).map_err(map_persistence_error)?;
-        let stored_binding: StoreRuntimeBindingV1 = serde_json::from_str(binding_json)
-            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+        .map_err(map_authority_persistence_error)?;
+        let stored_binding: StoreRuntimeBindingV1 = decode_capture_column(&row, 1)?;
         if stored_binding != self.binding {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
-        serde_json::from_str(authority_json)
-            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)
+        let authority: CurrentRemoteAuthorityStateV1 = decode_capture_column(&row, 0)?;
+        if let CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+            observed_at,
+        } = authority
+        {
+            let stored_writer: RemoteWriterAuthorityV1 = decode_capture_column(&row, 2)?;
+            if stored_writer != *writer {
+                // Offline capture runs only under the writer the authority
+                // last published to this node.
+                return Ok(CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                    observed_at,
+                });
+            }
+        }
+        Ok(authority)
     }
 
     fn capture_pending(
@@ -611,70 +611,78 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         let enrollment_id = command.enrollment_id.as_str();
         let sequence = i64::try_from(command.sequence.sequence)
             .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?;
-        hotpath::measure_block!("rusqlite.remote.txn.capture_pending", {
-            let transaction = self
-                .handle()
-                .begin_immediate()
-                .map_err(map_persistence_error)?;
-            if promotion_pending_in(&transaction, &command.writer.authority.fence)
-                .map_err(map_persistence_error)?
+        {
+            let _span = tracing::trace_span!("rusqlite.remote.txn.capture_pending").entered();
             {
-                return Err(RemoteCapturePersistenceErrorV1::Unavailable);
-            }
-            let existing = transaction
-                .query(statement(
-                    "SELECT event_id, frame_digest FROM remote_spool_frames
-                 WHERE enrollment_id = ?1 AND sequence = ?2",
-                    vec![text(enrollment_id), ExactSqlValue::Integer(sequence)],
-                )?)
-                .map_err(map_persistence_error)?;
-            if let Some(row) = existing.rows.first() {
-                let existing_event = row_text(row, 0)?;
-                let existing_digest = row_text(row, 1)?;
-                if existing_event != event_id || existing_digest != digest.as_str() {
-                    return Err(RemoteCapturePersistenceErrorV1::Corruption);
+                let transaction = self
+                    .handle()
+                    .begin_immediate()
+                    .map_err(map_persistence_error)?;
+                if promotion_pending_in(&transaction, &command.writer.authority.fence)
+                    .map_err(map_persistence_error)?
+                {
+                    return Err(RemoteCapturePersistenceErrorV1::Unavailable);
                 }
-                transaction.commit().map_err(map_persistence_error)?;
-                return Ok(RemoteCaptureReceiptV1 {
-                    event_id,
-                    sequence: command.sequence.sequence,
-                    disposition: RemoteCaptureDispositionV1::AlreadyPending,
-                });
-            }
-            validate_previous_frame(&transaction, command)?;
-            let encrypted = self.encrypt_frame(&event_id, command)?;
-            spool_limits::enforce(&transaction, self.limits, encrypted.ciphertext.len())?;
-            hotpath::measure_block!("rusqlite.remote.cas.capture_pending", {
-                transaction
-                    .execute(statement(
-                        "INSERT INTO remote_spool_frames (
+                let existing = transaction
+                    .query(statement(
+                        "SELECT event_id, frame_digest FROM remote_spool_frames
+                 WHERE enrollment_id = ?1 AND sequence = ?2",
+                        vec![text(enrollment_id), ExactSqlValue::Integer(sequence)],
+                    )?)
+                    .map_err(map_persistence_error)?;
+                if let Some(row) = existing.rows.first() {
+                    let existing_event = row_text(row, 0)?;
+                    let existing_digest = row_text(row, 1)?;
+                    if existing_event != event_id || existing_digest != digest.as_str() {
+                        return Err(RemoteCapturePersistenceErrorV1::Corruption);
+                    }
+                    transaction.commit().map_err(map_persistence_error)?;
+                    return Ok(RemoteCaptureReceiptV1 {
+                        event_id,
+                        sequence: command.sequence.sequence,
+                        disposition: RemoteCaptureDispositionV1::AlreadyPending,
+                    });
+                }
+                validate_previous_frame(&transaction, command)?;
+                let encrypted = self.encrypt_frame(&event_id, command)?;
+                spool_limits::enforce(&transaction, self.limits, encrypted.ciphertext.len())?;
+                {
+                    let _span =
+                        tracing::trace_span!("rusqlite.remote.cas.capture_pending").entered();
+                    {
+                        transaction
+                            .execute(statement(
+                                "INSERT INTO remote_spool_frames (
                     event_id, enrollment_id, sequence, previous_event_id, frame_digest,
                     key_revision, nonce, ciphertext, state, captured_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
-                        vec![
-                            text(&event_id),
-                            text(enrollment_id),
-                            ExactSqlValue::Integer(sequence),
-                            optional_text(command.sequence.previous_event_id.as_deref()),
-                            text(digest.as_str()),
-                            ExactSqlValue::Integer(
-                                i64::try_from(encrypted.key_revision)
-                                    .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
-                            ),
-                            ExactSqlValue::Blob(encrypted.nonce.to_vec()),
-                            ExactSqlValue::Blob(encrypted.ciphertext),
-                            ExactSqlValue::Integer(command.captured_at.0),
-                        ],
-                    )?)
-                    .map_err(map_persistence_error)
-            })?;
-            transaction.commit().map_err(map_persistence_error)?;
-            Ok(RemoteCaptureReceiptV1 {
-                event_id,
-                sequence: command.sequence.sequence,
-                disposition: RemoteCaptureDispositionV1::CapturedPending,
-            })
-        })
+                                vec![
+                                    text(&event_id),
+                                    text(enrollment_id),
+                                    ExactSqlValue::Integer(sequence),
+                                    optional_text(command.sequence.previous_event_id.as_deref()),
+                                    text(digest.as_str()),
+                                    ExactSqlValue::Integer(
+                                        i64::try_from(encrypted.key_revision).map_err(|_| {
+                                            RemoteCapturePersistenceErrorV1::Overflow
+                                        })?,
+                                    ),
+                                    ExactSqlValue::Blob(encrypted.nonce.to_vec()),
+                                    ExactSqlValue::Blob(encrypted.ciphertext),
+                                    ExactSqlValue::Integer(command.captured_at.0),
+                                ],
+                            )?)
+                            .map_err(map_persistence_error)
+                    }
+                }?;
+                transaction.commit().map_err(map_persistence_error)?;
+                Ok(RemoteCaptureReceiptV1 {
+                    event_id,
+                    sequence: command.sequence.sequence,
+                    disposition: RemoteCaptureDispositionV1::CapturedPending,
+                })
+            }
+        }
     }
 }
 
@@ -766,92 +774,104 @@ impl RemoteSqliteStorageV1 {
         {
             return Err(RemoteFrameTransferErrorV1::InvalidFrame);
         }
-        hotpath::measure_block!("rusqlite.remote.txn.transfer_pending", {
-            let transaction = self
-                .handle()
-                .begin_immediate()
-                .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
-            let existing = transaction
-                .query(
-                    statement(
-                        "SELECT event_id, frame_digest FROM remote_spool_frames
-                     WHERE enrollment_id = ?1 AND sequence = ?2",
-                        vec![
-                            text(request.enrollment_id.as_str()),
-                            ExactSqlValue::Integer(
-                                i64::try_from(request.sequence.sequence)
-                                    .map_err(|_| RemoteFrameTransferErrorV1::Corruption)?,
-                            ),
-                        ],
-                    )
-                    .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?,
-                )
-                .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
-            if let Some(row) = existing.rows.first() {
-                let event_id = row_text(row, 0).map_err(map_transfer_persistence_error)?;
-                let frame_digest = row_text(row, 1).map_err(map_transfer_persistence_error)?;
-                if event_id != request.event_id || frame_digest != request.frame_digest.as_str() {
-                    transaction
-                        .rollback()
-                        .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
-                    return Err(RemoteFrameTransferErrorV1::Corruption);
-                }
-                transaction
-                    .commit()
+        {
+            let _span = tracing::trace_span!("rusqlite.remote.txn.transfer_pending").entered();
+            {
+                let transaction = self
+                    .handle()
+                    .begin_immediate()
                     .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
-                return Ok(RemoteFrameTransferReceiptV1 {
-                    event_id: request.event_id.clone(),
-                    sequence: request.sequence.sequence,
-                    disposition: RemoteFrameTransferDispositionV1::AlreadyTransferred,
-                });
-            }
-            validate_previous_frame(&transaction, &capture).map_err(|error| match error {
-                RemoteCapturePersistenceErrorV1::SequenceGap => {
-                    RemoteFrameTransferErrorV1::SequenceGap
-                }
-                _ => RemoteFrameTransferErrorV1::Corruption,
-            })?;
-            spool_limits::enforce(&transaction, self.limits, request.ciphertext.len())
-                .map_err(map_transfer_persistence_error)?;
-            hotpath::measure_block!("rusqlite.remote.cas.transfer_pending", {
-                transaction
-                    .execute(
+                let existing = transaction
+                    .query(
                         statement(
-                            "INSERT INTO remote_spool_frames (
-                        event_id, enrollment_id, sequence, previous_event_id, frame_digest,
-                        key_revision, nonce, ciphertext, state, captured_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
+                            "SELECT event_id, frame_digest FROM remote_spool_frames
+                     WHERE enrollment_id = ?1 AND sequence = ?2",
                             vec![
-                                text(&request.event_id),
                                 text(request.enrollment_id.as_str()),
                                 ExactSqlValue::Integer(
                                     i64::try_from(request.sequence.sequence)
                                         .map_err(|_| RemoteFrameTransferErrorV1::Corruption)?,
                                 ),
-                                optional_text(request.sequence.previous_event_id.as_deref()),
-                                text(request.frame_digest.as_str()),
-                                ExactSqlValue::Integer(
-                                    i64::try_from(request.key_revision)
-                                        .map_err(|_| RemoteFrameTransferErrorV1::Corruption)?,
-                                ),
-                                ExactSqlValue::Blob(request.nonce.to_vec()),
-                                ExactSqlValue::Blob(request.ciphertext.clone()),
-                                ExactSqlValue::Integer(capture.captured_at.0),
                             ],
                         )
                         .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?,
                     )
-                    .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)
-            })?;
-            transaction
-                .commit()
-                .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
-            Ok(RemoteFrameTransferReceiptV1 {
-                event_id: request.event_id.clone(),
-                sequence: request.sequence.sequence,
-                disposition: RemoteFrameTransferDispositionV1::TransferredPending,
-            })
-        })
+                    .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+                if let Some(row) = existing.rows.first() {
+                    let event_id = row_text(row, 0).map_err(map_transfer_persistence_error)?;
+                    let frame_digest = row_text(row, 1).map_err(map_transfer_persistence_error)?;
+                    if event_id != request.event_id || frame_digest != request.frame_digest.as_str()
+                    {
+                        transaction
+                            .rollback()
+                            .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+                        return Err(RemoteFrameTransferErrorV1::Corruption);
+                    }
+                    transaction
+                        .commit()
+                        .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+                    return Ok(RemoteFrameTransferReceiptV1 {
+                        event_id: request.event_id.clone(),
+                        sequence: request.sequence.sequence,
+                        disposition: RemoteFrameTransferDispositionV1::TransferredPending,
+                    });
+                }
+                validate_previous_frame(&transaction, &capture).map_err(|error| match error {
+                    RemoteCapturePersistenceErrorV1::SequenceGap => {
+                        RemoteFrameTransferErrorV1::SequenceGap
+                    }
+                    _ => RemoteFrameTransferErrorV1::Corruption,
+                })?;
+                spool_limits::enforce(&transaction, self.limits, request.ciphertext.len())
+                    .map_err(map_transfer_persistence_error)?;
+                {
+                    let _span =
+                        tracing::trace_span!("rusqlite.remote.cas.transfer_pending").entered();
+                    {
+                        transaction
+                            .execute(
+                                statement(
+                                    "INSERT INTO remote_spool_frames (
+                        event_id, enrollment_id, sequence, previous_event_id, frame_digest,
+                        key_revision, nonce, ciphertext, state, captured_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
+                                    vec![
+                                        text(&request.event_id),
+                                        text(request.enrollment_id.as_str()),
+                                        ExactSqlValue::Integer(
+                                            i64::try_from(request.sequence.sequence).map_err(
+                                                |_| RemoteFrameTransferErrorV1::Corruption,
+                                            )?,
+                                        ),
+                                        optional_text(
+                                            request.sequence.previous_event_id.as_deref(),
+                                        ),
+                                        text(request.frame_digest.as_str()),
+                                        ExactSqlValue::Integer(
+                                            i64::try_from(request.key_revision).map_err(|_| {
+                                                RemoteFrameTransferErrorV1::Corruption
+                                            })?,
+                                        ),
+                                        ExactSqlValue::Blob(request.nonce.to_vec()),
+                                        ExactSqlValue::Blob(request.ciphertext.clone()),
+                                        ExactSqlValue::Integer(capture.captured_at.0),
+                                    ],
+                                )
+                                .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?,
+                            )
+                            .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)
+                    }
+                }?;
+                transaction
+                    .commit()
+                    .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+                Ok(RemoteFrameTransferReceiptV1 {
+                    event_id: request.event_id.clone(),
+                    sequence: request.sequence.sequence,
+                    disposition: RemoteFrameTransferDispositionV1::TransferredPending,
+                })
+            }
+        }
     }
 }
 
@@ -871,6 +891,14 @@ impl RemoteFrameTransferPortV1 for RemoteSqliteStorageV1 {
     }
 }
 
+fn decode_capture_column<T: serde::de::DeserializeOwned>(
+    row: &crate::exact_sql::ExactSqlRow,
+    index: usize,
+) -> Result<T, RemoteCapturePersistenceErrorV1> {
+    let json = row_text(row, index)?;
+    serde_json::from_str(json).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)
+}
+
 fn map_transfer_persistence_error(
     error: RemoteCapturePersistenceErrorV1,
 ) -> RemoteFrameTransferErrorV1 {
@@ -883,14 +911,25 @@ fn map_transfer_persistence_error(
 }
 
 fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStorageErrorV1> {
+    // Scoped to the remote contract's own tables: a registered store also
+    // carries the runtime writer ledger, which this contract does not own.
+    let contract_tables = schema::REMOTE_NODE_LOCAL_TABLES
+        .iter()
+        .map(|name| text(*name))
+        .collect::<Vec<_>>();
+    let placeholders = (1..=schema::REMOTE_NODE_LOCAL_TABLES.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let rows = query(
         handle,
-        "SELECT name FROM sqlite_master
-         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-         ORDER BY name",
-        Vec::new(),
-    )
-    .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+        &format!(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name IN ({placeholders})
+             ORDER BY name"
+        ),
+        contract_tables.clone(),
+    )?;
     let names = rows
         .rows
         .iter()
@@ -904,14 +943,15 @@ fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStor
     }
     let columns = query(
         handle,
-        "SELECT tables.name, columns.name
-         FROM sqlite_master AS tables
-         JOIN pragma_table_info(tables.name) AS columns
-         WHERE tables.type = 'table' AND tables.name NOT LIKE 'sqlite_%'
-         ORDER BY tables.name, columns.cid",
-        Vec::new(),
-    )
-    .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+        &format!(
+            "SELECT tables.name, columns.name
+             FROM sqlite_master AS tables
+             JOIN pragma_table_info(tables.name) AS columns
+             WHERE tables.type = 'table' AND tables.name IN ({placeholders})
+             ORDER BY tables.name, columns.cid"
+        ),
+        contract_tables,
+    )?;
     let columns = columns
         .rows
         .iter()
@@ -929,8 +969,7 @@ fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStor
         handle,
         "SELECT contract_id FROM remote_store_contract WHERE singleton = 1",
         Vec::new(),
-    )
-    .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+    )?;
     match marker.rows.as_slice() {
         [row]
             if matches!(
@@ -987,7 +1026,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
     ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
         let rows = query(
             self.handle(),
-            "SELECT state, receipt_json, last_attempt
+            "SELECT state, receipt_json, last_attempt, finding
              FROM remote_spool_frames WHERE event_id = ?1",
             vec![text(event_id)],
         )
@@ -1002,100 +1041,103 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         transition
             .validate()
             .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
-        hotpath::measure_block!("rusqlite.remote.txn.replay_transition", {
-            let transaction = self
-                .handle()
-                .begin_immediate()
-                .map_err(map_persistence_error)?;
-            let rows = transaction
-                .query(statement(
-                    "SELECT state, receipt_json, last_attempt, attempt_started_at
-                 FROM remote_spool_frames WHERE event_id = ?1",
-                    vec![text(&transition.event_id)],
-                )?)
-                .map_err(map_persistence_error)?;
-            let row = persistence_one_row(rows)?;
-            let pre_state = decode_spool_state(row.clone())?;
-            if pre_state.state != transition.from
-                || pre_state.last_attempt != transition.replay_attempt
-                || !matches!(row.values.get(3), Some(ExactSqlValue::Integer(_)))
+        {
+            let _span = tracing::trace_span!("rusqlite.remote.txn.replay_transition").entered();
             {
-                return Err(RemoteCapturePersistenceErrorV1::Corruption);
-            }
-            let pre_state_digest = canonical_sha256(&pre_state)
-                .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
-            let terminal_state = RemoteReplaySpoolStateV1 {
-                state: transition.to,
-                receipt: transition.receipt.clone(),
-                last_attempt: transition.replay_attempt,
-            };
-            let terminal_state_digest = canonical_sha256(&terminal_state)
-                .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
-            let receipt_json = transition
-                .receipt
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
-            let finding_json = transition
-                .finding
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
-            let terminal = matches!(
-                transition.to,
-                RemoteReplayStateV1::Acknowledged
-                    | RemoteReplayStateV1::Rejected
-                    | RemoteReplayStateV1::Quarantined
-                    | RemoteReplayStateV1::GarbageCollectionEligible
-            );
-            let transition_bytes = canonical_json_bytes(&transition)
-                .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?
-                .len();
-            let result = hotpath::measure_block!("rusqlite.remote.cas.replay_transition", {
-                transaction
-                    .execute(statement(
-                        "UPDATE remote_spool_frames
+                let transaction = self
+                    .handle()
+                    .begin_immediate()
+                    .map_err(map_persistence_error)?;
+                let rows = transaction
+                    .query(statement(
+                        "SELECT state, receipt_json, last_attempt, finding, attempt_started_at
+                 FROM remote_spool_frames WHERE event_id = ?1",
+                        vec![text(&transition.event_id)],
+                    )?)
+                    .map_err(map_persistence_error)?;
+                let row = persistence_one_row(rows)?;
+                let pre_state = decode_spool_state(row.clone())?;
+                if pre_state.state != transition.from
+                    || pre_state.last_attempt != transition.replay_attempt
+                    || !matches!(row.values.get(4), Some(ExactSqlValue::Integer(_)))
+                {
+                    return Err(RemoteCapturePersistenceErrorV1::Corruption);
+                }
+                let pre_state_digest = canonical_sha256(&pre_state)
+                    .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+                let terminal_state = RemoteReplaySpoolStateV1 {
+                    state: transition.to,
+                    receipt: transition.receipt.clone(),
+                    last_attempt: transition.replay_attempt,
+                    finding: transition.finding,
+                };
+                let terminal_state_digest = canonical_sha256(&terminal_state)
+                    .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+                let receipt_json = transition
+                    .receipt
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+                let finding_json = transition
+                    .finding
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+                let terminal = transition.to.is_settled();
+                let transition_bytes = canonical_json_bytes(&transition)
+                    .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?
+                    .len();
+                let result = {
+                    let _span =
+                        tracing::trace_span!("rusqlite.remote.cas.replay_transition").entered();
+                    {
+                        transaction
+                            .execute(statement(
+                                "UPDATE remote_spool_frames
                  SET state = ?1, receipt_json = ?2, finding = ?3,
                      attempt_started_at = CASE WHEN ?4 = 1 THEN NULL ELSE attempt_started_at END
                  WHERE event_id = ?5 AND state = ?6 AND last_attempt = ?7
                    AND attempt_started_at IS NOT NULL",
-                        vec![
-                            text(replay_state_name(transition.to)),
-                            optional_text(receipt_json.as_deref()),
-                            optional_text(finding_json.as_deref()),
-                            ExactSqlValue::Integer(i64::from(terminal)),
-                            text(&transition.event_id),
-                            text(replay_state_name(transition.from)),
-                            ExactSqlValue::Integer(
-                                i64::try_from(transition.replay_attempt)
-                                    .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
-                            ),
-                        ],
-                    )?)
-                    .map_err(map_persistence_error)
-            })?;
-            if result.changed_rows != 1 {
-                return Err(RemoteCapturePersistenceErrorV1::Corruption);
+                                vec![
+                                    text(replay_state_name(transition.to)),
+                                    optional_text(receipt_json.as_deref()),
+                                    optional_text(finding_json.as_deref()),
+                                    ExactSqlValue::Integer(i64::from(terminal)),
+                                    text(&transition.event_id),
+                                    text(replay_state_name(transition.from)),
+                                    ExactSqlValue::Integer(
+                                        i64::try_from(transition.replay_attempt).map_err(|_| {
+                                            RemoteCapturePersistenceErrorV1::Overflow
+                                        })?,
+                                    ),
+                                ],
+                            )?)
+                            .map_err(map_persistence_error)
+                    }
+                }?;
+                if result.changed_rows != 1 {
+                    return Err(RemoteCapturePersistenceErrorV1::Corruption);
+                }
+                transaction.commit().map_err(map_persistence_error)?;
+                Ok(RemoteReplayTransitionReceiptV1 {
+                    event_id: transition.event_id,
+                    replay_attempt: transition.replay_attempt,
+                    from: transition.from,
+                    to: transition.to,
+                    pre_state_digest,
+                    terminal_state_digest,
+                    committed_at: transition.observed_at,
+                    budget: OperationBudgetUsage {
+                        units_consumed: 1,
+                        bytes_consumed: u64::try_from(transition_bytes)
+                            .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
+                        elapsed_micros: 0,
+                    },
+                })
             }
-            transaction.commit().map_err(map_persistence_error)?;
-            Ok(RemoteReplayTransitionReceiptV1 {
-                event_id: transition.event_id,
-                replay_attempt: transition.replay_attempt,
-                from: transition.from,
-                to: transition.to,
-                pre_state_digest,
-                terminal_state_digest,
-                committed_at: transition.observed_at,
-                budget: OperationBudgetUsage {
-                    units_consumed: 1,
-                    bytes_consumed: u64::try_from(transition_bytes)
-                        .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
-                    elapsed_micros: 0,
-                },
-            })
-        })
+        }
     }
 
     fn begin_replay_attempt(
@@ -1103,53 +1145,62 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         event_id: &str,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Result<u64, RemoteCapturePersistenceErrorV1> {
-        hotpath::measure_block!("rusqlite.remote.txn.begin_replay_attempt", {
-            let transaction = self
-                .handle()
-                .begin_immediate()
-                .map_err(map_persistence_error)?;
-            let rows = transaction
-                .query(statement(
-                    "SELECT last_attempt, attempt_started_at
+        {
+            let _span = tracing::trace_span!("rusqlite.remote.txn.begin_replay_attempt").entered();
+            {
+                let transaction = self
+                    .handle()
+                    .begin_immediate()
+                    .map_err(map_persistence_error)?;
+                let rows = transaction
+                    .query(statement(
+                        "SELECT last_attempt, attempt_started_at
                  FROM remote_spool_frames WHERE event_id = ?1",
-                    vec![text(event_id)],
-                )?)
-                .map_err(map_persistence_error)?;
-            let row = persistence_one_row(rows)?;
-            if !matches!(row.values.get(1), Some(ExactSqlValue::Null)) {
-                return Err(RemoteCapturePersistenceErrorV1::Corruption);
-            }
-            let last_attempt = row_u64(&row, 0)?;
-            let replay_attempt = last_attempt
-                .checked_add(1)
-                .ok_or(RemoteCapturePersistenceErrorV1::Overflow)?;
-            let result = hotpath::measure_block!("rusqlite.remote.cas.begin_replay_attempt", {
-                transaction
-                    .execute(statement(
-                        "UPDATE remote_spool_frames
+                        vec![text(event_id)],
+                    )?)
+                    .map_err(map_persistence_error)?;
+                let row = persistence_one_row(rows)?;
+                if !matches!(row.values.get(1), Some(ExactSqlValue::Null)) {
+                    return Err(RemoteCapturePersistenceErrorV1::Corruption);
+                }
+                let last_attempt = row_u64(&row, 0)?;
+                let replay_attempt = last_attempt
+                    .checked_add(1)
+                    .ok_or(RemoteCapturePersistenceErrorV1::Overflow)?;
+                let result = {
+                    let _span =
+                        tracing::trace_span!("rusqlite.remote.cas.begin_replay_attempt").entered();
+                    {
+                        transaction
+                            .execute(statement(
+                                "UPDATE remote_spool_frames
                  SET last_attempt = ?1, attempt_started_at = ?2
                  WHERE event_id = ?3 AND last_attempt = ?4 AND attempt_started_at IS NULL",
-                        vec![
-                            ExactSqlValue::Integer(
-                                i64::try_from(replay_attempt)
-                                    .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
-                            ),
-                            ExactSqlValue::Integer(observed_at.0),
-                            text(event_id),
-                            ExactSqlValue::Integer(
-                                i64::try_from(last_attempt)
-                                    .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
-                            ),
-                        ],
-                    )?)
-                    .map_err(map_persistence_error)
-            })?;
-            if result.changed_rows != 1 {
-                return Err(RemoteCapturePersistenceErrorV1::Corruption);
+                                vec![
+                                    ExactSqlValue::Integer(
+                                        i64::try_from(replay_attempt).map_err(|_| {
+                                            RemoteCapturePersistenceErrorV1::Overflow
+                                        })?,
+                                    ),
+                                    ExactSqlValue::Integer(observed_at.0),
+                                    text(event_id),
+                                    ExactSqlValue::Integer(
+                                        i64::try_from(last_attempt).map_err(|_| {
+                                            RemoteCapturePersistenceErrorV1::Overflow
+                                        })?,
+                                    ),
+                                ],
+                            )?)
+                            .map_err(map_persistence_error)
+                    }
+                }?;
+                if result.changed_rows != 1 {
+                    return Err(RemoteCapturePersistenceErrorV1::Corruption);
+                }
+                transaction.commit().map_err(map_persistence_error)?;
+                Ok(replay_attempt)
             }
-            transaction.commit().map_err(map_persistence_error)?;
-            Ok(replay_attempt)
-        })
+        }
     }
 
     fn abandon_replay_attempt(
@@ -1157,25 +1208,46 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         event_id: &str,
         replay_attempt: u64,
     ) -> Result<(), RemoteCapturePersistenceErrorV1> {
-        let result = hotpath::measure_block!("rusqlite.remote.cas.abandon_replay_attempt", {
-            self.handle()
-                .execute(statement(
-                    "UPDATE remote_spool_frames SET attempt_started_at = NULL
-                 WHERE event_id = ?1 AND last_attempt = ?2 AND attempt_started_at IS NOT NULL",
-                    vec![
-                        text(event_id),
-                        ExactSqlValue::Integer(
-                            i64::try_from(replay_attempt)
-                                .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
-                        ),
-                    ],
-                )?)
-                .map_err(map_persistence_error)
-        })?;
+        let result = {
+            let _span =
+                tracing::trace_span!("rusqlite.remote.cas.abandon_replay_attempt").entered();
+            {
+                self.handle()
+                    .execute(statement(
+                        "UPDATE remote_spool_frames SET attempt_started_at = NULL
+                 WHERE event_id = ?1 AND last_attempt = ?2",
+                        vec![
+                            text(event_id),
+                            ExactSqlValue::Integer(
+                                i64::try_from(replay_attempt)
+                                    .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?,
+                            ),
+                        ],
+                    )?)
+                    .map_err(map_persistence_error)
+            }
+        }?;
         if result.changed_rows != 1 {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
         Ok(())
+    }
+
+    fn replay_backlog(
+        &self,
+        enrollment_id: &EntityId,
+    ) -> Result<Vec<RemoteReplayBacklogEntryV1>, RemoteCapturePersistenceErrorV1> {
+        query(
+            self.handle(),
+            "SELECT event_id, sequence, state, receipt_json, finding
+             FROM remote_spool_frames WHERE enrollment_id = ?1 ORDER BY sequence",
+            vec![text(enrollment_id.as_str())],
+        )
+        .map_err(map_persistence_error)?
+        .rows
+        .iter()
+        .map(decode_backlog_entry)
+        .collect()
     }
 }
 

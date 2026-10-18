@@ -2,7 +2,7 @@
 //! contract. A revoked or missing authority fails closed with a typed error and
 //! no partial commit, ambiguous project scope never falls back to another
 //! store, linked worktrees resolve through canonical project identity, and
-//! concurrent clients commit exactly one fact/anchor — losers get the
+//! concurrent clients commit exactly one fact/anchor, losers get the
 //! idempotent replay or a typed conflict, never a second writer.
 
 use std::path::{Path, PathBuf};
@@ -10,20 +10,20 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGeneration, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass,
     FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactEventId, FactEvidenceRefV1,
     FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, ObservationScopeV1,
     PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
     ProjectId, ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     ScopeResolutionId, SensitivityV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_global_db::StoreInstanceUpsert;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority};
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::db::{
@@ -31,7 +31,7 @@ use tracedecay_runtime_core::db::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 #[cfg(feature = "test-transport")]
 use tracedecay_store::FactStoreError;
 use tracedecay_store::{
@@ -91,13 +91,13 @@ fn payload(content: &str, receipt_id: &str) -> FactPayloadV1 {
     .unwrap()
 }
 
-fn anchor(entity_id: &str, scope: ObservationScopeV1, ingested_at: i64) -> RetrievalAnchorRecordV2 {
+fn anchor(entity_id: &str, scope: ObservationScopeV1, ingested_at: i64) -> RetrievalAnchorRecord {
     const DIGEST_A: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::Entity(EntityRef {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::Entity(EntityRef {
             id: EntityId::new(entity_id).unwrap(),
             kind: EntityKind::Document,
         }),
@@ -106,7 +106,7 @@ fn anchor(entity_id: &str, scope: ObservationScopeV1, ingested_at: i64) -> Retri
         occurred_at: None,
         ingested_at: UtcMicros(ingested_at),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new("projection.fact-anchor-authority")
             .unwrap(),
         projection_watermark: VectorWatermark::default(),
@@ -402,34 +402,32 @@ async fn stale_fact_authority_cas_conflict_is_typed_and_leaves_lineage_untouched
     assert_eq!(current.payload().unwrap().content(), "base fact content");
 }
 
-/// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixture
-/// paths that must NOT be classified as an isolated-test path by
-/// `db::access::is_isolated_test_path`. `std::env::current_dir()` (the
-/// package root under `cargo test`) plus a `target/...` suffix used to serve
-/// this purpose, but that only holds when the checkout itself lives outside
-/// the OS temp directory; a repo cloned under `/tmp` (as some sandboxed
-/// CI/dev environments do) breaks that assumption. Deriving the base from
-/// the running test binary's own on-disk location is robust regardless of
-/// where the checkout lives, because cargo (or any build-cache shim in front
-/// of it) never places build output inside the volatile system temp
-/// directory.
-fn ephemeral_safe_fixture_base() -> PathBuf {
-    let exe = std::env::current_exe().expect("test binary has a current_exe path");
-    let profile_dir = exe
-        .parent() // .../target/<profile>/deps
-        .and_then(Path::parent) // .../target/<profile>
-        .expect("test binary sits under a cargo target profile directory")
-        .to_path_buf();
-    let base = profile_dir.join("tracedecay-fact-anchor-authority");
-    std::fs::create_dir_all(&base).expect("failed to create hermetic fixture base directory");
-    base
-}
-
 #[tokio::test]
 async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
-    // A path outside every isolated-test root keeps `for_runtime` on the
-    // production branch: no live daemon, no maintenance scope, no fallback.
-    let root = ephemeral_safe_fixture_base().join(format!("missing-daemon-{}", std::process::id()));
+    const ROOT_ENV: &str = "TRACEDECAY_MISSING_DAEMON_FIXTURE";
+    if !crate::common::in_child_test() {
+        let scratch = TempDir::new_in(
+            std::env::var_os("TEST_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from),
+        )
+        .unwrap();
+        let temporary = scratch.path().join("temporary");
+        std::fs::create_dir(&temporary).unwrap();
+        let root = scratch.path().join("missing-daemon");
+        // Keep the database outside both ambient test-authority roots without
+        // changing the environment observed by sibling tests.
+        crate::common::rerun_test_in_child(
+            "fact_anchor_authority::missing_daemon_authority_fails_closed_without_a_fallback_store",
+            &[
+                (ROOT_ENV, Some(root.as_os_str())),
+                ("TMPDIR", Some(temporary.as_os_str())),
+                ("TMP", Some(temporary.as_os_str())),
+                ("TEMP", Some(temporary.as_os_str())),
+                ("TRACEDECAY_DATA_DIR", None),
+            ],
+        );
+        return;
+    }
+    let root = PathBuf::from(std::env::var_os(ROOT_ENV).unwrap());
     let db_path = root.join("global.db");
 
     let error = match DatabaseAuthority::for_runtime(&db_path, "missing daemon fixture") {
@@ -452,9 +450,6 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
         "no fallback database file may be created without an authority"
     );
     assert!(!root.join(".tracedecay-database-locks").exists());
-
-    let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir(root.parent().unwrap());
 }
 
 async fn register_project(
@@ -860,8 +855,8 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
         "the second writer must fail with the authority error, got {error}"
     );
 
-    // A client re-resolving the same database rides the retained authority —
-    // one writer token, one owner — instead of opening another writer.
+    // A client re-resolving the same database rides the retained authority,
+    // one writer token, one owner, instead of opening another writer.
     let joined = DatabaseAuthority::for_runtime(&db_path, "joined client fixture")
         .expect("a client must re-join the retained authority");
     assert_eq!(joined.role(), authority.role());

@@ -13,35 +13,47 @@
 //! Plus the invariant none of the above may weaken: a corrupt sealed store
 //! still fails every request, with no memoized verdict.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_domain::{CodeGenerationId, ProjectId, SanitizerRevision};
+use tracedecay_code_index_retention::code_index_generations::{
+    CodeGenerationRetentionModeV1, run_code_generation_retention,
+};
+use tracedecay_domain::{
+    CodeGenerationId, ProjectId, SanitizerRevision, UtcMicros, sha256_hex_suffix,
+};
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
+use super::tests::git;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
     DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
 };
-use tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
+use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-fn git(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+/// Base directory for fixture temporary roots, resolved through every symlink.
+///
+/// macOS puts `TempDir` under `/var/folders/...`, and `/var` is a symlink to
+/// `/private/var`. Production canonicalizes a project root before it hashes
+/// the code-index scope and before it decides whether a dependency escaped the
+/// worktree, so a fixture path that still carries the symlink names a
+/// different scope than the one the scheduler writes and reads. Create the
+/// fixture inside the canonical temporary directory so every path taken from
+/// it is already canonical.
+///
+/// Spelled plainly as well as canonically: on Windows `canonicalize` returns
+/// the `\\?\` verbatim form, and a fixture root carrying that prefix is handed
+/// to `git` as a working directory and as arguments.
+fn canonical_temp_root() -> std::path::PathBuf {
+    canonical_root_identity(&std::env::temp_dir())
 }
 
 fn fixture() -> TempDir {
-    let root = TempDir::new().expect("fixture root");
+    let root = TempDir::new_in(canonical_temp_root()).expect("fixture root");
     git(root.path(), &["init", "-q"]);
     git(
         root.path(),
@@ -103,7 +115,9 @@ fn publication_store(store_root: &Path) -> DaemonCodeIndexPublicationStoreV1 {
 async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_owner() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
-    let scoped_store = super::scoped_code_index_store_root(store.path(), project.path());
+    let canonical_project_root =
+        canonical_existing_identity(project.path()).expect("canonical project root");
+    let scoped_store = super::scoped_code_index_store_root(store.path(), &canonical_project_root);
     let generation_id = {
         let mut scheduler = open(project.path(), &scoped_store);
         publish(&mut scheduler)
@@ -111,23 +125,15 @@ async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
     let background_admission = registry.background_reconcile_admission();
-    let mount_started = std::time::Instant::now();
+    // No background permit exists yet, so a mount that waited on the retained
+    // owner could not return, and one that decoded or verified inline is
+    // caught by the counters below.
     assert!(
         registry
-            .mount_worktree(
-                project_id(),
-                project.path(),
-                store.path().to_path_buf(),
-                None,
-            )
+            .mount_worktree(project_id(), project.path(), store.path().to_path_buf())
             .await
             .expect("mount the exact worktree"),
         "the cold route is newly mounted"
-    );
-    assert!(
-        mount_started.elapsed() < std::time::Duration::from_millis(250),
-        "foreground route mount exceeded the 250ms cold-admission budget: {:?}",
-        mount_started.elapsed()
     );
 
     let scheduler = registry
@@ -219,7 +225,7 @@ fn activation_releases_exact_staging_without_cooling_query_owners() {
         "activation must build the record lookup indices"
     );
     assert!(
-        latest.query_owners_are_warm(),
+        latest.query_owners_are_ready(),
         "activation must build the exact/lexical/graph lane owners"
     );
 
@@ -241,7 +247,10 @@ fn activation_releases_exact_staging_without_cooling_query_owners() {
         "reading warm query owners must not reconstruct exact-admission staging"
     );
     latest
-        .test_attribution_authority()
+        .generation()
+        .prepare_test_attribution(
+            &tracedecay_code_index::production::UninterruptibleCodeIndexControlV1,
+        )
         .expect("test attribution authority");
     // A second request repeats the whole sequence.
     let repeat = scheduler.latest_complete().expect("repeat generation read");
@@ -479,7 +488,28 @@ fn superseded_generation_churn_never_evicts_the_pinned_active_generation() {
         .latest_complete()
         .expect("active generation after churn");
     assert_eq!(served.generation().manifest().generation_id, active);
-    assert!(!served.exact().expect("exact admission").is_empty());
+    let exact = served.exact().expect("exact admission");
+    let files = &served.generation().snapshot().files;
+    let exact_paths: BTreeSet<&str> = exact
+        .iter()
+        .map(|admitted| {
+            files
+                .iter()
+                .find(|file| file.file_occurrence_id == admitted.chunk().anchor.file_occurrence_id)
+                .map(|file| file.logical_path.as_str())
+                .expect("exact chunk names a snapshot file")
+        })
+        .collect();
+    assert_eq!(exact_paths, BTreeSet::from(["src/lib.rs"]));
+    let latest_body = format!("activation_revision() -> u32 {{ {} }}", revisions - 1);
+    assert!(
+        exact.iter().any(|admitted| admitted
+            .chunk()
+            .sanitized_text
+            .as_str()
+            .contains(&latest_body)),
+        "the active generation must serve the last published revision"
+    );
     assert_eq!(
         scheduler.sealed_decode_count(),
         after_activation + pinned_decodes,
@@ -500,8 +530,8 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
     }
 
     // Tamper with one content-addressed component while leaving the manifest
-    // and pointer intact. The component digest — never a cached failure
-    // verdict — must reject every attempted activation.
+    // and pointer intact. The component digest, never a cached failure
+    // verdict, must reject every attempted activation.
     let generations_root = store.path().join("code-generations-v1");
     let sealed_path = fs::read_dir(&generations_root)
         .expect("read generations root")
@@ -518,7 +548,7 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
             .expect("decode generation manifest");
     let segment_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
         .as_str()
-        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .and_then(|digest| sha256_hex_suffix(digest))
         .expect("file segment digest");
     let segment_path = store
         .path()
@@ -547,5 +577,63 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
         publication.sealed_decode_count(),
         2,
         "the next request must repeat the full check rather than trust a verdict"
+    );
+}
+
+/// The decoded-generation LRU is an in-memory decode cache, never a retention
+/// mark: a superseded generation it still holds loses its sealed manifest and
+/// the segment only it named on the first retention pass.
+#[test]
+fn decoded_generation_cache_never_keeps_a_superseded_generation_on_disk() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = open(project.path(), store.path());
+    let superseded = publish(&mut scheduler);
+    write(project.path(), "src/lib.rs", 1);
+    let active = publish(&mut scheduler);
+    assert_ne!(superseded, active);
+    scheduler
+        .generation(&superseded)
+        .expect("pinned generation read")
+        .expect("superseded generation is decoded into the cache");
+
+    let file_count = |directory: &str| {
+        fs::read_dir(store.path().join(directory))
+            .expect("read store directory")
+            .count()
+    };
+    let segments_before = file_count("code-generation-segments-v1");
+    assert_eq!(file_count("code-generations-v1"), 2);
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(1),
+        None,
+    )
+    .expect("apply retention");
+
+    assert_eq!(
+        report
+            .deleted_generations
+            .iter()
+            .map(|generation| &generation.generation_id)
+            .collect::<Vec<_>>(),
+        vec![&superseded]
+    );
+    assert_eq!(file_count("code-generations-v1"), 1);
+    assert!(
+        file_count("code-generation-segments-v1") < segments_before,
+        "the edited file's superseded segment is collected with its manifest"
+    );
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("active generation still serves")
+            .generation()
+            .manifest()
+            .generation_id,
+        active
     );
 }

@@ -1,0 +1,350 @@
+//! Production MCP behavior for `tracedecay_find_exact_symbol`.
+//!
+//! Calls go through `tools/call` on the production server. Expectations are
+//! the symbol identity a caller reads, not the index that produced it.
+
+#![cfg(feature = "test-transport")]
+
+use crate::support::{
+    ProductionCompositionFixture, extract_real_server_text, handle_real_server_tool_call_raw,
+    production_composition_fixture_with_sources, refusal_problem, warm_code_index_search,
+};
+use serde_json::{Value, json};
+use std::fs;
+use std::sync::Arc;
+use tracedecay::mcp::McpServer;
+
+const SOLVERS_SOURCE: &str = "\
+pub struct Solvers {
+    pub gmres: u32,
+}
+
+pub fn gmres(x: u32) -> u32 {
+    x + 1
+}
+";
+
+const SHARED_TOKEN_SOURCE: &str = "\
+pub fn shared_token() -> u32 {
+    1
+}
+";
+
+fn symbol(
+    name: &str,
+    qualified_name: &str,
+    kind: &str,
+    file: &str,
+    line: u64,
+    signature: &str,
+) -> Value {
+    json!({
+        "name": name,
+        "qualified_name": qualified_name,
+        "kind": kind,
+        "file": file,
+        "line": line,
+        "signature": signature,
+    })
+}
+
+fn gmres_field() -> Value {
+    symbol(
+        "gmres",
+        "src/lib.rs::Solvers::gmres",
+        "field",
+        "src/lib.rs",
+        2,
+        "pub gmres: u32",
+    )
+}
+
+fn gmres_function() -> Value {
+    symbol(
+        "gmres",
+        "src/lib.rs::gmres",
+        "function",
+        "src/lib.rs",
+        5,
+        "pub fn gmres(x: u32) -> u32",
+    )
+}
+
+fn shared_token(file: &str) -> Value {
+    symbol(
+        "shared_token",
+        &format!("{file}::shared_token"),
+        "function",
+        file,
+        1,
+        "pub fn shared_token() -> u32",
+    )
+}
+
+async fn indexed_project() -> (ProductionCompositionFixture, Arc<McpServer>) {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("fixture src dir");
+        fs::write(project.join("src/lib.rs"), SOLVERS_SOURCE).expect("solvers source");
+        fs::write(project.join("src/billing.rs"), SHARED_TOKEN_SOURCE).expect("billing source");
+        fs::write(project.join("src/ledger.rs"), SHARED_TOKEN_SOURCE).expect("ledger source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    warm_code_index_search(&server, "gmres").await;
+    (fixture, server)
+}
+
+async fn exact_payload(server: &McpServer, arguments: Value) -> Value {
+    let response =
+        handle_real_server_tool_call_raw(server, "tracedecay_find_exact_symbol", arguments).await;
+    assert!(
+        response["error"].is_null(),
+        "exact-symbol call must succeed: {response}"
+    );
+    serde_json::from_str(extract_real_server_text(&response["result"]))
+        .expect("exact-symbol response JSON")
+}
+
+fn sorted_without_ids(mut payload: Value) -> Value {
+    let matches = payload["matches"]
+        .as_array_mut()
+        .expect("exact-symbol matches array");
+    for item in matches.iter_mut() {
+        item.as_object_mut()
+            .expect("exact-symbol match object")
+            .remove("id");
+    }
+    matches.sort_by(|left, right| {
+        (
+            left["file"].as_str(),
+            left["line"].as_u64(),
+            left["kind"].as_str(),
+        )
+            .cmp(&(
+                right["file"].as_str(),
+                right["line"].as_u64(),
+                right["kind"].as_str(),
+            ))
+    });
+    payload
+}
+
+fn occurrence_ids(payload: &Value) -> Vec<String> {
+    payload["matches"]
+        .as_array()
+        .expect("exact-symbol matches array")
+        .iter()
+        .map(|item| {
+            item["id"]
+                .as_str()
+                .expect("exact-symbol match occurrence id")
+                .to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn find_exact_symbol_returns_every_bare_name_hit() {
+    let (fixture, server) = indexed_project().await;
+
+    let gmres = exact_payload(
+        &server,
+        json!({"name": "gmres", "limit": 20, "format": "json"}),
+    )
+    .await;
+    let gmres_ids = occurrence_ids(&gmres);
+    assert_eq!(
+        sorted_without_ids(gmres),
+        json!({
+            "freshness": {"state": "fresh"},
+            "name": "gmres",
+            "count": 2,
+            "matches": [gmres_field(), gmres_function()],
+        })
+    );
+    assert_eq!(gmres_ids.len(), 2);
+    assert_ne!(gmres_ids[0], gmres_ids[1]);
+
+    let folded = exact_payload(&server, json!({"name": "Gmres", "format": "json"})).await;
+    assert_eq!(folded["name"], "Gmres");
+    assert_eq!(folded["count"], 2);
+    assert_eq!(
+        sorted_without_ids(folded)["matches"],
+        json!([gmres_field(), gmres_function()])
+    );
+
+    for (name, suggestions) in [
+        ("gmre", json!(["gmres"])),
+        ("src/lib.rs::gmres", json!([])),
+        ("Solvers::gmres", json!([])),
+        ("shared_tok", json!(["shared_token"])),
+        ("not_a_symbol", json!([])),
+    ] {
+        let payload = exact_payload(&server, json!({"name": name, "format": "json"})).await;
+        assert_eq!(
+            payload["count"], 0,
+            "{name} must not exact-match: {payload}"
+        );
+        assert_eq!(payload["matches"], json!([]), "{payload}");
+        let got = payload
+            .get("suggestions")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        assert_eq!(got, suggestions, "{name}: {payload}");
+    }
+
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn find_exact_symbol_applies_limit_and_rejects_bad_arguments() {
+    let (fixture, server) = indexed_project().await;
+    let billing = shared_token("src/billing.rs");
+    let ledger = shared_token("src/ledger.rs");
+
+    let all = exact_payload(&server, json!({"name": "shared_token", "format": "json"})).await;
+    assert_eq!(
+        sorted_without_ids(all),
+        json!({
+            "freshness": {"state": "fresh"},
+            "name": "shared_token",
+            "count": 2,
+            "matches": [billing.clone(), ledger.clone()],
+        })
+    );
+
+    let capped = exact_payload(
+        &server,
+        json!({"name": "shared_token", "limit": 1, "format": "json"}),
+    )
+    .await;
+    assert_eq!(capped["name"], "shared_token");
+    assert_eq!(capped["count"], 1);
+    let only = sorted_without_ids(capped)["matches"][0].clone();
+    assert!(
+        only == billing || only == ledger,
+        "limit 1 must return one indexed declaration, got {only}"
+    );
+
+    let missing = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_find_exact_symbol",
+        json!({"format": "json"}),
+    )
+    .await;
+    let missing_problem = refusal_problem(&missing["result"]);
+    assert_eq!(missing_problem["kind"], "invalid_request");
+    assert_eq!(
+        missing_problem["code"],
+        "application.surface.invalid_request"
+    );
+    assert_eq!(
+        missing_problem["message"],
+        "invalid arguments for tracedecay_find_exact_symbol: missing field `name`"
+    );
+
+    let zero = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "shared_token", "limit": 0, "format": "json"}),
+    )
+    .await;
+    let zero_problem = refusal_problem(&zero["result"]);
+    assert_eq!(zero_problem["kind"], "unavailable");
+    assert_eq!(zero_problem["code"], "code-graph-invalid-request");
+    assert_eq!(
+        zero_problem["message"],
+        "the code-graph read request is invalid: code graph name resolution limit must be positive"
+    );
+    assert_eq!(zero_problem["retryable"], false);
+
+    fixture.harness.shutdown().await;
+}
+
+const GO_SHAPES_SOURCE: &str = "package shapes
+
+type Shape interface {
+\tArea() float64
+}
+
+type Circle struct{ R float64 }
+
+func (c Circle) Area() float64 { return c.R * c.R }
+";
+
+const JAVA_SHAPES_SOURCE: &str = "package app;
+
+interface Shape {
+    double area();
+}
+
+class Circle implements Shape {
+    @Override
+    public double area() {
+        return 1.0;
+    }
+}
+";
+
+/// A Go interface's method spec is a symbol the interface contains, and a Java
+/// method is located at its declaration, not at the annotation above it.
+#[tokio::test]
+async fn find_exact_symbol_locates_interface_methods_at_their_declarations() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("shapes")).expect("go fixture dir");
+        fs::write(project.join("shapes/shapes.go"), GO_SHAPES_SOURCE).expect("go source");
+        fs::create_dir_all(project.join("src/app")).expect("java fixture dir");
+        fs::write(project.join("src/app/Shapes.java"), JAVA_SHAPES_SOURCE).expect("java source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    warm_code_index_search(&server, "Circle").await;
+
+    // The bare-name probe folds case, so one query names both languages.
+    let area = exact_payload(&server, json!({"name": "Area", "format": "json"})).await;
+    assert_eq!(
+        sorted_without_ids(area)["matches"],
+        json!([
+            symbol(
+                "Area",
+                "shapes/shapes.go::Shape::Area",
+                "abstract_method",
+                "shapes/shapes.go",
+                4,
+                "Area() float64",
+            ),
+            symbol(
+                "Area",
+                "shapes/shapes.go::Area",
+                "struct_method",
+                "shapes/shapes.go",
+                9,
+                "func (c Circle) Area() float64",
+            ),
+            symbol(
+                "area",
+                "src/app/Shapes.java::Shape::area",
+                "abstract_method",
+                "src/app/Shapes.java",
+                4,
+                "double area()",
+            ),
+            symbol(
+                "area",
+                "src/app/Shapes.java::Circle::area",
+                "method",
+                "src/app/Shapes.java",
+                9,
+                "@Override\n    public double area()",
+            ),
+        ])
+    );
+
+    fixture.harness.shutdown().await;
+}

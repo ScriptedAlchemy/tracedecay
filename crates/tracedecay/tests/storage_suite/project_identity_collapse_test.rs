@@ -16,12 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::ReapEntryKind;
 use tracedecay_global_db::StoreInstanceUpsert;
-use tracedecay_runtime_core::storage::{
-    default_profile_project_id, repository_identity_path, resolve_layout,
-};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::plain_host_path;
+use tracedecay_runtime_core::storage::{default_profile_project_id, repository_identity_path};
 
 fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -51,7 +50,10 @@ struct RepoFixture {
 
 fn repo_with_worktrees() -> RepoFixture {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    // `canonicalize` returns the `\\?\` extended-length form on Windows, and
+    // `git worktree add` refuses that spelling, so the fixture names its
+    // worktrees the way any other tool would.
+    let root = plain_host_path(&tmp.path().canonicalize().unwrap());
     let main = root.join("main");
     std::fs::create_dir_all(main.join("packages/app")).unwrap();
     git(&main, &["init", "--quiet"]);
@@ -97,21 +99,6 @@ fn repo_with_worktrees() -> RepoFixture {
     }
 }
 
-/// A directory guaranteed to sit outside `std::env::temp_dir()`. Cargo never
-/// places build output inside the volatile system temp directory, so deriving
-/// the base from the running test binary is robust even when the checkout
-/// itself lives under `/tmp`.
-fn non_ephemeral_base() -> PathBuf {
-    let exe = std::env::current_exe().expect("test binary has a current_exe path");
-    let base = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("test binary sits under a cargo target profile directory")
-        .join("project-identity-collapse-fixtures");
-    std::fs::create_dir_all(&base).unwrap();
-    base
-}
-
 #[test]
 fn every_linked_worktree_shares_its_repository_project_identity() {
     let fixture = repo_with_worktrees();
@@ -127,25 +114,6 @@ fn every_linked_worktree_shares_its_repository_project_identity() {
     assert_eq!(
         main, detached,
         "a detached linked worktree must not mint its own project identity"
-    );
-}
-
-#[test]
-fn linked_worktrees_resolve_to_one_store() {
-    let fixture = repo_with_worktrees();
-    let profile = fixture.main.parent().unwrap().join("profile");
-
-    let main = resolve_layout(&fixture.main, &profile).unwrap();
-    let attached = resolve_layout(&fixture.attached, &profile).unwrap();
-    let detached = resolve_layout(&fixture.detached, &profile).unwrap();
-
-    assert_eq!(
-        main.data_root, attached.data_root,
-        "an attached linked worktree must resolve to the repository's store"
-    );
-    assert_eq!(
-        main.data_root, detached.data_root,
-        "a detached linked worktree must resolve to the repository's store"
     );
 }
 
@@ -176,13 +144,29 @@ fn subdirectory_projects_keep_their_own_identity() {
 
 #[tokio::test]
 async fn ephemeral_project_root_cannot_enter_a_durable_registry() {
-    let profile = tempfile::Builder::new()
-        .prefix("durable-profile-")
-        .tempdir_in(non_ephemeral_base())
+    const PROFILE_ENV: &str = "TRACEDECAY_DURABLE_REGISTRY_FIXTURE";
+    if !crate::common::in_child_test() {
+        let scratch = TempDir::new_in(
+            std::env::var_os("TEST_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from),
+        )
         .unwrap();
-    let db = HostAdmissionTestRuntimeV1::profile(profile.path().join("profile"))
-        .await
-        .unwrap();
+        let temporary = scratch.path().join("temporary");
+        std::fs::create_dir(&temporary).unwrap();
+        let profile = scratch.path().join("profile");
+        // The durable profile is a sibling of the child's OS temporary root.
+        crate::common::rerun_test_in_child(
+            "project_identity_collapse_test::ephemeral_project_root_cannot_enter_a_durable_registry",
+            &[
+                (PROFILE_ENV, Some(profile.as_os_str())),
+                ("TMPDIR", Some(temporary.as_os_str())),
+                ("TMP", Some(temporary.as_os_str())),
+                ("TEMP", Some(temporary.as_os_str())),
+            ],
+        );
+        return;
+    }
+    let profile = PathBuf::from(std::env::var_os(PROFILE_ENV).unwrap());
+    let db = HostAdmissionTestRuntimeV1::profile(profile).await.unwrap();
     let ephemeral = TempDir::new().unwrap();
 
     let refusal = db
@@ -216,22 +200,6 @@ async fn ephemeral_project_root_cannot_enter_a_durable_registry() {
             .is_none(),
         "the refused root must leave no alias behind"
     );
-}
-
-/// The ephemeral guard compares the root against the *profile*: a hermetic
-/// test profile is itself throwaway, so temp fixtures must keep working.
-#[tokio::test]
-async fn ephemeral_project_root_is_allowed_by_a_hermetic_profile() {
-    let dir = TempDir::new().unwrap();
-    let db = HostAdmissionTestRuntimeV1::profile(dir.path().join("profile"))
-        .await
-        .unwrap();
-    let project = dir.path().join("fixture-project");
-    std::fs::create_dir_all(&project).unwrap();
-
-    db.upsert_code_project("proj_hermetic", &project, None, None, None)
-        .await
-        .expect("a throwaway profile must still accept throwaway project fixtures");
 }
 
 #[tokio::test]

@@ -1,25 +1,25 @@
 //! Registered-store composition for the hint-outcome correlation port.
 //!
-//! The production caller is the daemon-side transcript ingest
-//! (`tracedecay_hook_runtime` action `ingest_transcript`): freshly ingested
-//! session activity is exactly what resolves previously emitted hints, so
-//! every project-scope ingest ends with a best-effort
-//! [`settle_project_hint_outcomes`] pass. Settlement imports the hook
-//! JSONL tail (where hooks record `hint_emitted`) into the durable
-//! `analytics_events` authority and then correlates outcomes into the same
-//! table — the one the `tracedecay_analytics` hints section and the
+//! The production callers are the daemon's project-routed
+//! `tracedecay_hook_runtime` actions: project-scope `ingest_transcript`
+//! awaits a best-effort `settle_project_hint_outcomes` pass, and
+//! `reset_counter` plus session-boundary `hook_v2_admit` start one off the
+//! hook's response path, so every hint-producing host reaches it. Settlement
+//! imports the hook JSONL tail (where hooks record `hint_emitted`) into the
+//! durable `analytics_events` authority and then correlates outcomes into the same
+//! table, the one the `tracedecay_analytics` hints section and the
 //! dashboard analytics API already read.
 
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_application::{
+use tracedecay_application::analytics_bridge::HookImportSource;
+use tracedecay_application::observability::record_adoption_outcome;
+use tracedecay_contracts::{
     HintEmission, HintOutcomeCorrelationPort, HintOutcomeObservation, HintOutcomePortError,
     HintOutcomePortFuture, HintOutcomePortOperation, HintOutcomeResolution, HintToolActivity,
 };
 use tracedecay_domain::{AdoptionOutcomeLinkedV1, CoverageStateV1};
-use tracedecay_usecases::analytics_bridge::HookImportSource;
-use tracedecay_usecases::observability::record_adoption_outcome;
 
 use tracedecay_global_db::{
     AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb, SessionActivityRow,
@@ -152,7 +152,11 @@ impl HintOutcomeCorrelationPort for RegisteredHintOutcomeCorrelationPort<'_> {
     }
 }
 
-#[hotpath::measure(label = "hosts.hooks.hint_outcomes.correlate", future = true)]
+#[tracing::instrument(
+    name = "hosts.hooks.hint_outcomes.correlate",
+    level = "trace",
+    skip_all
+)]
 pub async fn correlate_registered_hint_outcomes(
     analytics: &RegisteredGlobalDb,
     sessions: &RegisteredGlobalDb,
@@ -191,7 +195,7 @@ pub enum HintOutcomeSettlement {
 
 impl HintOutcomeSettlement {
     /// Renders the settlement into the ingest output object. Every state is
-    /// visible — an unavailable authority or failed pass is reported, not
+    /// visible, an unavailable authority or failed pass is reported, not
     /// silently dropped.
     pub fn as_json(&self) -> Value {
         match self {
@@ -228,10 +232,10 @@ impl HintOutcomeSettlement {
 /// unresolved hints against the project session store. Callers resolve
 /// `sources` themselves (production: `analytics_bridge::hook_import_sources`;
 /// fixtures: isolated temp files) so this pass never touches ambient
-/// operator state on its own. Best-effort by contract — failures come back
+/// operator state on its own. Best-effort by contract, failures come back
 /// as typed [`HintOutcomeSettlement`] states and are logged here so every
 /// caller inherits the same observability.
-#[hotpath::measure(label = "hosts.hooks.hint_outcomes.settle", future = true)]
+#[tracing::instrument(name = "hosts.hooks.hint_outcomes.settle", level = "trace", skip_all)]
 pub async fn settle_project_hint_outcomes(
     analytics: Option<&RegisteredGlobalDb>,
     sessions: Option<&RegisteredGlobalDb>,
@@ -241,7 +245,7 @@ pub async fn settle_project_hint_outcomes(
 ) -> HintOutcomeSettlement {
     let Some(analytics) = analytics else {
         return HintOutcomeSettlement::Unavailable {
-            reason: "accounting_authority_unavailable",
+            reason: "analytics_authority_unavailable",
         };
     };
     let Some(sessions) = sessions else {
@@ -251,7 +255,7 @@ pub async fn settle_project_hint_outcomes(
     };
 
     let import =
-        tracedecay_usecases::analytics_bridge::import_hook_analytics(analytics, sources).await;
+        tracedecay_application::analytics_bridge::import_hook_analytics(analytics, sources).await;
     let import_errors: Vec<String> = import
         .sources
         .iter()
@@ -283,9 +287,9 @@ pub async fn settle_project_hint_outcomes(
                     "hint-outcome settlement pass completed"
                 );
             }
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 record_settled_adoption_outcomes(sessions, stats),
-                label = "hosts.hooks.hint_outcomes.record_adoption"
+                tracing::trace_span!("hosts.hooks.hint_outcomes.record_adoption"),
             )
             .await;
             HintOutcomeSettlement::Settled {
@@ -313,7 +317,7 @@ pub async fn settle_project_hint_outcomes(
 /// Every stage carries only what settlement proved: the idempotent
 /// `hint_outcome` write is the exactly-once terminal ledger, so
 /// `invoked`/`terminal` count only hints settled this pass and cross-pass
-/// sums never double-count. `independently_useful` = `acted` only — the
+/// sums never double-count. `independently_useful` = `acted` only, the
 /// correlator behaviorally verified a category-matching tool fired in the
 /// independently ingested session activity (never display/self-report).
 /// `repeat_useful` stays 0 (settlement never verifies repeat use), unresolved
@@ -381,7 +385,11 @@ fn activity_from_row(
     }))
 }
 
-#[hotpath::measure(label = "hosts.hooks.hint_outcomes.activity_parse")]
+#[tracing::instrument(
+    name = "hosts.hooks.hint_outcomes.activity_parse",
+    level = "trace",
+    skip_all
+)]
 fn activity_tool_names(row: &SessionActivityRow) -> Result<Vec<String>, HintOutcomePortError> {
     let mut tools = Vec::new();
     if let Some(names) = &row.tool_names {

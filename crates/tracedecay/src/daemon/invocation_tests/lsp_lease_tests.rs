@@ -5,14 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use tokio::sync::Mutex;
-use tracedecay_application::{CancellationContext, Deadline};
+use tracedecay_application::lsp_runtime::UpstreamCapabilityInitializationAuthority;
+use tracedecay_contracts::{CancellationContext, Deadline};
 use tracedecay_daemon_protocol::MAX_LSP_WORKSPACE_ROOTS;
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_lsp::{
     AuthorizedLspWorkspace, LSP_SESSION_TTL_MS, LspRuntimeFailure, LspRuntimeFuture,
     LspSessionRegistry, SessionLifecycle,
 };
-use tracedecay_usecases::lsp_runtime::UpstreamCapabilityInitializationAuthority;
 
 struct CountingUpstreamCapabilityInitializer(Arc<AtomicUsize>);
 
@@ -34,9 +34,14 @@ async fn open_session(
     registry: &Arc<Mutex<LspSessionRegistry>>,
     request_id: &str,
 ) -> DaemonLspSessionAccess {
-    let project_root = PathBuf::from("/authoritative");
+    let (project_root, root_uri) = admitted_root_fixture("authoritative");
     DaemonLspOwnerRegistrar::new(service)
-        .register_factory(project_root.clone(), unavailable_lsp_session_factory())
+        .register_factory_for_project(
+            project_root.clone(),
+            tracedecay_domain::UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            tracedecay_domain::ProjectId::new("project.test.lsp").expect("test LSP project"),
+            unavailable_lsp_session_factory(),
+        )
         .await
         .unwrap();
     let response = service
@@ -44,7 +49,7 @@ async fn open_session(
             registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                root_uri.clone(),
             ))),
             None,
             None,
@@ -142,7 +147,12 @@ async fn rejected_lsp_open_does_not_initialize_analyzer_or_mint_session_access()
             ))),
     );
     DaemonLspOwnerRegistrar::new(&service)
-        .register_factory(project_root.clone(), factory)
+        .register_factory_for_project(
+            project_root.clone(),
+            tracedecay_domain::UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            tracedecay_domain::ProjectId::new("project.test.lsp").expect("test LSP project"),
+            factory,
+        )
         .await
         .expect("register LSP owner");
 
@@ -151,7 +161,7 @@ async fn rejected_lsp_open_does_not_initialize_analyzer_or_mint_session_access()
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                admitted_root_fixture("authoritative").1,
             ))),
             None,
             None,
@@ -199,24 +209,29 @@ async fn disconnect_reclamation_does_not_outlive_daemon_service() {
 
     service.disconnect_lsp_session(&registry, session).await;
     drop(service);
-    tokio::task::yield_now().await;
 
-    assert!(
-        retained_runtime_state.upgrade().is_none(),
-        "lease reclamation must be cancelled with its daemon owner"
-    );
+    // The aborted lease task drops its future on the native runtime, so the
+    // release lands on another thread.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while retained_runtime_state.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("lease reclamation must be cancelled with its daemon owner");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn abrupt_disconnect_reclaims_session_at_its_bounded_lease() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
     let session = open_session(&service, &registry, "request.abrupt-drop").await;
 
     service.disconnect_lsp_session(&registry, session).await;
-    tokio::task::yield_now().await;
-    tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
-    tokio::task::yield_now().await;
+    service
+        .lsp_lease_tasks
+        .expire_leases_through(now_millis() + LSP_SESSION_TTL_MS);
+    service.lsp_lease_tasks.wait_until_idle().await;
 
     assert_eq!(registry.lock().await.active_sessions(), 0);
     assert!(service.lsp_sessions.lock().await.is_empty());
@@ -228,10 +243,13 @@ async fn abrupt_disconnect_reclaims_session_at_its_bounded_lease() {
 }
 
 #[tokio::test]
-async fn explicit_detach_reports_actor_failure_after_closing_session_state() {
+async fn explicit_detach_accepts_an_actor_the_daemon_already_detached() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
     let session = open_session(&service, &registry, "request.detach-failure").await;
+    // Exactly what `disconnect_lsp_session` leaves behind when a connection
+    // goes away: the actor is already detached, which is the state this
+    // request is asking for.
     detach_runtime_actor(&service, &session).await;
 
     let response = service
@@ -252,9 +270,7 @@ async fn explicit_detach_reports_actor_failure_after_closing_session_state() {
 
     assert!(matches!(
         response.outcome,
-        DaemonInvocationOutcome::Problem {
-            problem: DaemonInvocationProblem::Unavailable
-        }
+        DaemonInvocationOutcome::LspDetached
     ));
     assert_eq!(registry.lock().await.active_sessions(), 0);
     assert!(service.lsp_sessions.lock().await.is_empty());
@@ -274,7 +290,10 @@ async fn explicit_detach_accepts_an_actor_that_already_exited_gracefully() {
             .expect("runtime session")
             .actor;
         for frame in [
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///authoritative","capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"rootUri":"{}","capabilities":{{"general":{{"positionEncodings":["utf-16"]}}}}}}}}"#,
+                admitted_root_fixture("authoritative").1
+            ),
             r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"shutdown","params":{}}"#,
             r#"{"jsonrpc":"2.0","method":"exit","params":{}}"#,
@@ -399,14 +418,22 @@ async fn explicit_detach_racing_disconnect_leaves_no_unowned_lease_task() {
             .await;
         disconnect.await.expect("disconnect race task");
 
-        assert!(matches!(
-            response.outcome,
-            DaemonInvocationOutcome::LspDetached
-                | DaemonInvocationOutcome::Problem {
-                    problem: DaemonInvocationProblem::Unavailable
-                        | DaemonInvocationProblem::NotFoundOrNotAuthorized
-                }
-        ));
+        // Losing this race is either "already detached" or "already gone",
+        // never "authority unavailable": an explicit detach that arrives
+        // after the connection teardown detached the same session has its
+        // request satisfied, and a bridge exiting gracefully must not see a
+        // failure for it.
+        assert!(
+            matches!(
+                response.outcome,
+                DaemonInvocationOutcome::LspDetached
+                    | DaemonInvocationOutcome::Problem {
+                        problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+                    }
+            ),
+            "attempt {attempt} surfaced {:?}",
+            response.outcome
+        );
         assert_eq!(registry.lock().await.active_sessions(), 0);
         assert!(service.lsp_sessions.lock().await.is_empty());
         assert_eq!(
@@ -441,7 +468,7 @@ async fn repeated_disconnect_preserves_the_existing_bounded_lease() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn reconnect_at_lease_expiry_joins_reclamation_before_rotating_credentials() {
     let service = Arc::new(DaemonInvocationService::default());
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
@@ -465,7 +492,9 @@ async fn reconnect_at_lease_expiry_joins_reclamation_before_rotating_credentials
             .await
     });
     tokio::task::yield_now().await;
-    tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
+    service
+        .lsp_lease_tasks
+        .expire_leases_through(now_millis() + LSP_SESSION_TTL_MS);
     tokio::task::yield_now().await;
     drop(endpoint_guard);
 
@@ -553,15 +582,19 @@ async fn shutdown_fences_racing_lsp_open_before_it_can_publish_state() {
         .open_lsp_session(
             &registry,
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                admitted_root_fixture("authoritative").1,
             ))),
             "request.open-during-shutdown".to_owned(),
             env!("CARGO_PKG_VERSION").to_owned(),
             None,
             Vec::new(),
             now_millis(),
-            Some(DaemonLspInvocationOwner::new(
+            Some(DaemonLspInvocationOwner::for_test_project(
                 unavailable_lsp_session_factory(),
+                tracedecay_domain::UserProfileId::new("profile.test.lsp")
+                    .expect("test LSP profile"),
+                tracedecay_domain::ProjectId::new("project.test.lsp").expect("test LSP project"),
+                PathBuf::from("/test/lsp"),
             )),
         )
         .await;
@@ -584,11 +617,30 @@ async fn state_shutdown_fences_a_queued_open_before_the_endpoint_expiry_sweep() 
     let endpoint_guard = state.lsp_session_registry.lock().await;
     let shutdown_state = Arc::clone(&state);
     let shutdown = tokio::spawn(async move {
-        shutdown_state.shutdown().await;
+        shutdown_state.shutdown(None).await;
     });
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
+    // The fence the open below must be queued behind is the closed admission
+    // gate, so observe it directly: `begin_shutdown` closes the gate and then
+    // parks on the endpoint registry this test holds. Yielding a fixed number
+    // of times is not an ordering, on a two-worker runtime under load the
+    // shutdown task can still be unscheduled after eight yields, and an open
+    // that wins the gate first is a pre-shutdown admission the sweep retires,
+    // not a queued one the fence refuses.
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if state
+                .service
+                .lsp_admission_open
+                .try_lock()
+                .is_ok_and(|open| !*open)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown must close the LSP admission gate while the endpoint registry is held");
 
     let open_state = Arc::clone(&state);
     let (open_started, started) = tokio::sync::oneshot::channel();
@@ -599,15 +651,20 @@ async fn state_shutdown_fences_a_queued_open_before_the_endpoint_expiry_sweep() 
             .open_lsp_session(
                 &open_state.lsp_session_registry,
                 Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                    "file:///authoritative",
+                    admitted_root_fixture("authoritative").1,
                 ))),
                 "request.state-shutdown-race".to_owned(),
                 env!("CARGO_PKG_VERSION").to_owned(),
                 None,
                 Vec::new(),
                 now_millis(),
-                Some(DaemonLspInvocationOwner::new(
+                Some(DaemonLspInvocationOwner::for_test_project(
                     unavailable_lsp_session_factory(),
+                    tracedecay_domain::UserProfileId::new("profile.test.lsp")
+                        .expect("test LSP profile"),
+                    tracedecay_domain::ProjectId::new("project.test.lsp")
+                        .expect("test LSP project"),
+                    PathBuf::from("/test/lsp"),
                 )),
             )
             .await
@@ -671,7 +728,7 @@ async fn shutdown_fences_reconnect_before_lease_and_endpoint_expiry() {
     assert_eq!(service.active_lsp_runtime_count().await, 1);
     assert_eq!(service.lsp_lease_tasks.active_tasks(), 1);
 
-    service.expire_all().await;
+    service.expire_all(None).await;
     registry.lock().await.expire_at(u64::MAX);
     assert_eq!(registry.lock().await.active_sessions(), 0);
     assert_eq!(service.active_lsp_runtime_count().await, 0);
@@ -686,7 +743,7 @@ async fn shutdown_joins_pending_lease_reclamation() {
     let retained_runtime_state = Arc::downgrade(&service.lsp_sessions);
 
     service.disconnect_lsp_session(&registry, session).await;
-    service.expire_all().await;
+    service.expire_all(None).await;
     assert_eq!(
         service
             .lsp_lease_tasks

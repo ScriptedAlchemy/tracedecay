@@ -4,16 +4,13 @@ use super::types::{
     LcmExtractionRequest, LcmExtractionResult, LcmSummarySourceMessage, LcmSummarySourceRange,
 };
 
-const EXTRACTION_PROMPT: &str = r"Extract decisions, commitments, outcomes, and rules from this conversation segment.
+const EXTRACTION_PROMPT: &str = r"Extract durable decisions, commitments, outcomes, and constraints from this conversation segment.
 
-Format as a flat list of bullet points. Each bullet should be self-contained and understandable
-without the surrounding conversation. Include:
-- Decisions made (what was chosen, and why if stated)
-- Commitments (who will do what)
-- Outcomes (what happened as a result of an action)
-- Rules or constraints discovered
+Return a flat list of self-contained bullet points that can be understood without the
+surrounding conversation. Preserve exact paths, identifiers, citations, source references,
+and redaction markers. Do not infer omitted or redacted content.
 
-Skip: greetings, meta-discussion, reasoning that led nowhere, repeated information.
+Skip greetings, meta-discussion, abandoned reasoning, and repeated information.
 If there is nothing worth extracting, respond with exactly: NOTHING_TO_EXTRACT
 
 CONTENT:

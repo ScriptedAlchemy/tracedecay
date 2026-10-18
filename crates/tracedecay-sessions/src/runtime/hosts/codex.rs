@@ -6,50 +6,48 @@
 //! line is `{"timestamp": "<iso8601>", "type": "<kind>", "payload": {…}}`. The
 //! relevant kinds for conversation text are:
 //!
-//! * `session_meta` — first line; `payload.cwd`, session `id`. Real rollouts
+//! * `session_meta`, first line; `payload.cwd`, session `id`. Real rollouts
 //!   carry no `model` here (only `model_provider`); the active model is on
 //!   `turn_context` lines and can change mid-session.
-//! * `event_msg` with `payload.type == "user_message"` — a real user prompt
+//! * `event_msg` with `payload.type == "item_completed"` and
+//!   `payload.item.type == "UserMessage"`, a current Codex user prompt
+//!   (`payload.item.content`). The stable item id is retained as message
+//!   identity. Legacy `payload.type == "user_message"` records remain
+//!   supported through `payload.message`.
+//! * `event_msg` with `payload.type == "agent_message"`, a real assistant reply
 //!   (`payload.message`).
-//! * `event_msg` with `payload.type == "agent_message"` — a real assistant reply
-//!   (`payload.message`).
-//! * `event_msg` with `payload.type == "token_count"` — provider usage captured
+//! * `event_msg` with `payload.type == "token_count"`, provider usage captured
 //!   by the canonical observation path, not conversational message metadata.
-//! * `event_msg` with `payload.type == "thread_goal_updated"` — the structured
+//! * `event_msg` with `payload.type == "thread_goal_updated"`, the structured
 //!   session goal and its lifecycle (`payload.goal.{objective,status,tokensUsed,
 //!   timeUsedSeconds,createdAt,updatedAt}`). `TraceDecay` records each state as a
 //!   compact `goal` row (objective as text, the rest in `metadata_json`) so the
 //!   session's goal and whether it is still active is searchable. `status` is
-//!   stored verbatim — real rollouts emit `active`/`paused`, but any future
+//!   stored verbatim, real rollouts emit `active`/`paused`, but any future
 //!   value (e.g. `completed`) is carried through unchanged rather than mapped to
 //!   a fixed enum. Consecutive events that repeat the same `(objective, status)`
 //!   within one parse pass are deduped; each genuine transition keeps its row.
-//! * `compacted` — Codex context-compression boundary. The rollout stores the
+//! * `compacted`. Codex context-compression boundary. The rollout stores the
 //!   replacement history and an encrypted compaction body, so `TraceDecay` records
 //!   the boundary/provenance as a summary record without claiming plaintext
 //!   access to Codex's private summary.
-//! * `response_item` goal context — Codex replays active thread goals as
-//!   synthetic user context. `TraceDecay` indexes those as compact goal-context
-//!   records so LCM can catalog the objective and budget without treating the
-//!   instruction boilerplate as normal conversation.
-//! * subagent rollouts — separate `rollout-*.jsonl` files whose leading
+//! * `response_item` with `payload.type == "message"` and role `user` or
+//!   `assistant`, a conversational turn. When the `event_msg` written right
+//!   after it records the same message in the same turn, projection keeps the
+//!   event and retires this echo. Goal-context user messages are still
+//!   cataloged as compact goal-context rows from that message text, because
+//!   real rollouts often record the active goal only in this form. Other
+//!   roles stay unsupported injected context.
+//! * subagent rollouts, separate `rollout-*.jsonl` files whose leading
 //!   `session_meta` has `thread_source == "subagent"` and parent ids in
 //!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
 //!
-//! `response_item` entries are intentionally skipped except for Codex goal
-//! context blocks: they usually carry auto-injected synthetic context and
-//! duplicate the `agent_message`/`user_message` turns, so ingesting them would
-//! double-count the conversation. Goal context blocks are cataloged as compact
-//! `goal_context` rows because real rollouts often record them only in
-//! `response_item` form. This append-only JSONL is read with the shared
-//! byte-offset machinery and scoped per turn by the latest Codex cwd context.
+//! This append-only JSONL is admitted as canonical observations by
+//! [`observation`], scoped per turn by the latest Codex cwd context.
 
 mod context;
-mod events;
-mod goals;
 mod meta;
 mod observation;
-mod records;
 #[cfg(test)]
 mod tests;
 
@@ -57,52 +55,66 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::Bound;
 #[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use asupersync::channel::watch;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1,
 };
 use tracedecay_store::ParseOffset;
 
-use context::CodexContextState;
-use goals::{codex_goal_event_from_line, goal_context_from_line, goal_event_message};
 use meta::session_meta;
-use records::{
-    compacted_summary_from_line, message_from_line, response_item_goal_context_from_line,
-    response_item_tool_event_from_line, timestamp_from_record,
+
+use crate::runtime::ingest::quarantine::{SourceKey, SourceLedger, Witness, stat_if_present};
+use crate::runtime::jsonl_observation_admission::{
+    SharedJsonlPathPin, install_shared_jsonl_preparation_authority, pin_shared_jsonl_paths,
+    reserve_shared_jsonl_bytes,
+};
+use crate::runtime::shared::{ProjectMembership, TranscriptScopeMatcher};
+use crate::runtime::source::{
+    FileDiscoveryLimit, FileDiscoveryReport, TranscriptCursorKey, TranscriptDiscoveryBounds,
+    TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
 };
 
-use crate::runtime::jsonl_observation_admission::{
-    SharedJsonlPathPin, install_shared_jsonl_preparation_authority,
-    namespace_replacement_message_ids, pin_shared_jsonl_paths, preflight_and_parse_new,
-    reserve_shared_jsonl_bytes, shared_jsonl_preparation_capacity,
-};
-use crate::runtime::shared::{
-    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptScopeMatcher,
-    title_from_messages,
-};
-use crate::runtime::source::{
-    FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft,
-    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    stream_new_jsonl,
-};
+#[cfg(test)]
+pub(crate) use context::evict_prior_context_for_test;
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
+pub use observation::codex_observation_source_v2;
+pub(crate) use observation::try_admit_codex_jsonl_observations_for_project_window;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
-    try_admit_codex_jsonl_observations_for_profile,
     try_admit_codex_jsonl_observations_for_profile_with_admission,
     try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation,
-    try_admit_codex_jsonl_observations_for_project,
     try_admit_codex_jsonl_observations_for_project_with_admission,
     try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation,
 };
+
+/// Project membership from a rollout's leading `session_meta` cwd.
+///
+/// `None` means the header could not be read. Callers may leave a rollout for
+/// a later pass only on a definitive [`ProjectMembership::NoMatch`]; an
+/// `Unknown` git timeout stays in the current pass.
+pub(crate) fn codex_rollout_project_membership(
+    path: &Path,
+    project_root: &Path,
+) -> Option<ProjectMembership> {
+    let meta = session_meta(path)?;
+    Some(TranscriptScopeMatcher::project(project_root).membership(Some(&meta.cwd)))
+}
 
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
@@ -118,7 +130,7 @@ const IDLE_FULL_VALIDATION_CYCLES: u16 = 256;
 /// Retained directories revalidated on *every* idle poll, ahead of the
 /// round-robin rotation.
 ///
-/// Creating or removing a transcript changes exactly one directory identity —
+/// Creating or removing a transcript changes exactly one directory identity,
 /// its parent. A uniform rotation over the whole retained authority therefore
 /// hides a brand-new session behind an O(corpus) rotation, so recent-first
 /// discovery would only notice today's session after several scheduler ticks
@@ -140,15 +152,31 @@ pub struct CodexDiscoveryState {
     idle: Option<CodexIdleProbe>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CodexDiscoveryHub {
     inner: std::sync::Arc<Mutex<CodexDiscoveryHubState>>,
+    scan_released: std::sync::Arc<watch::Sender<u64>>,
+}
+
+impl Default for CodexDiscoveryHub {
+    fn default() -> Self {
+        Self {
+            inner: std::sync::Arc::default(),
+            scan_released: std::sync::Arc::new(watch::channel(0).0),
+        }
+    }
 }
 
 #[derive(Default)]
 struct CodexDiscoveryHubState {
     discovery: CodexDiscoveryState,
     discovery_scanning: bool,
+    /// Shared scans started so far. A queued pass carries the count of the
+    /// scan that produced it.
+    shared_scans: u64,
+    /// A consumer was told to wait for a scan in progress; the next scan to
+    /// finish releases it.
+    scan_waited: bool,
     source_key: Option<CodexDiscoverySourceKey>,
     frontier: Option<CodexDiscoveryFrontier>,
     consumers: HashMap<String, CodexDiscoveryConsumerState>,
@@ -161,11 +189,13 @@ struct CodexDiscoveryConsumerState {
     mode: CodexDiscoveryConsumerMode,
     awaiting_ack: Option<CodexQueuedDiscoveryPass>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
+    sources: SourceLedger,
 }
 
 enum CodexDiscoveryConsumerMode {
     Shared {
-        queue: VecDeque<CodexQueuedDiscoveryPass>,
+        /// Each pass with the shared scan that produced it.
+        queue: VecDeque<(u64, CodexQueuedDiscoveryPass)>,
     },
     Replay {
         generation: u128,
@@ -190,7 +220,6 @@ enum CodexDiscoveryWork {
         source_key: CodexDiscoverySourceKey,
         state: CodexDiscoveryState,
         frontier: CodexDiscoveryFrontier,
-        generation: u128,
     },
 }
 
@@ -260,17 +289,23 @@ impl Default for CodexReplayIndex {
 }
 
 #[cfg(test)]
-static CODEX_REPLAY_INDEX_ENTRIES_VISITED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// Per-thread, because `indexed_replay_pass` runs entirely on its caller's
+    /// thread and the one test that measures B-tree traversal shares the
+    /// process with every other test replaying an index in parallel. A global
+    /// counter measures the whole suite's traversal, not this pass's.
+    static CODEX_REPLAY_INDEX_ENTRIES_VISITED: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 fn reset_replay_index_entries_visited_for_test() {
-    CODEX_REPLAY_INDEX_ENTRIES_VISITED.store(0, std::sync::atomic::Ordering::Release);
+    CODEX_REPLAY_INDEX_ENTRIES_VISITED.with(|visited| visited.set(0));
 }
 
 #[cfg(test)]
 fn replay_index_entries_visited_for_test() -> u64 {
-    CODEX_REPLAY_INDEX_ENTRIES_VISITED.load(std::sync::atomic::Ordering::Acquire)
+    CODEX_REPLAY_INDEX_ENTRIES_VISITED.with(std::cell::Cell::get)
 }
 
 fn indexed_replay_pass(
@@ -286,7 +321,8 @@ fn indexed_replay_pass(
     let lower = position.map_or(Bound::Unbounded, Bound::Excluded);
     for indexed in index.paths.range((lower, Bound::Unbounded)) {
         #[cfg(test)]
-        CODEX_REPLAY_INDEX_ENTRIES_VISITED.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        CODEX_REPLAY_INDEX_ENTRIES_VISITED
+            .with(|visited| visited.set(visited.get().saturating_add(1)));
         let path_bytes =
             u64::try_from(crate::runtime::source::path_byte_len(&indexed.path)).unwrap_or(u64::MAX);
         if paths.len() >= bounds.max_files.max(1)
@@ -306,7 +342,6 @@ fn indexed_replay_pass(
     } else {
         frontier.for_coverage(false)
     };
-    let pin = std::sync::Arc::new(pin_shared_jsonl_paths(&paths));
     Ok((
         CodexDiscoveryPass {
             report: FileDiscoveryReport {
@@ -318,7 +353,7 @@ fn indexed_replay_pass(
             },
             next_frontier,
             selected_sources: Vec::new(),
-            _shared_page_pin: Some(pin),
+            _shared_page_pin: None,
         },
         next_position,
     ))
@@ -332,11 +367,22 @@ pub(crate) enum CodexDiscoveryDelivery {
 }
 
 impl CodexDiscoveryHub {
+    /// Mount the process resources shared JSONL preparation meters against:
+    /// the resident-memory authority page reservations charge and the
+    /// background CPU authority parse workers are admitted through. The
+    /// composition root calls this once the process worker plan exists.
     pub fn configure_preparation_resources(
         &self,
         memory: std::sync::Arc<ProcessResidentMemoryV1>,
+        background_cpu: std::sync::Arc<ProcessBackgroundCpuV1>,
     ) -> TranscriptIngestResult<()> {
-        install_shared_jsonl_preparation_authority(memory)
+        install_shared_jsonl_preparation_authority(memory, background_cpu)
+    }
+
+    /// Advances each time a discovery scan step ends, releasing the scanner a
+    /// consumer reported `Waiting` behind.
+    pub(crate) fn subscribe_scan_release(&self) -> watch::Receiver<u64> {
+        self.scan_released.subscribe()
     }
 
     pub fn register(&self, consumer: &str, source_home: Option<&Path>) {
@@ -376,9 +422,9 @@ impl CodexDiscoveryHub {
                 mode,
                 awaiting_ack: None,
                 _memory: None,
+                sources: SourceLedger::default(),
             },
         );
-        hotpath::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
     }
 
     pub fn deregister(&self, consumer: &str) {
@@ -417,10 +463,8 @@ impl CodexDiscoveryHub {
                 }
             }
         }
-        hotpath::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
     }
 
-    #[hotpath::skip]
     pub(crate) async fn discover(
         &self,
         consumer: &str,
@@ -431,17 +475,25 @@ impl CodexDiscoveryHub {
         let hub = self.clone();
         let consumer = consumer.to_owned();
         let source = source.clone();
-        let delivery = tokio::task::spawn_blocking(move || {
-            hub.discover_blocking(&consumer, &source, bounds, frontier)
-        })
-        .await
-        .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-            detail: "Codex discovery blocking task failed",
-        })??;
+        let (delivery, prefetch) =
+            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                let delivery = hub.discover_blocking(&consumer, &source, bounds, frontier)?;
+                let prefetch = match &delivery {
+                    CodexDiscoveryDelivery::Ready(pass) if pass._shared_page_pin.is_some() => {
+                        hub.paths_needing_source_read(&consumer, &pass.report.paths)?
+                    }
+                    _ => Vec::new(),
+                };
+                Ok::<_, TranscriptIngestError>((delivery, prefetch))
+            })
+            .await
+            .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "Codex discovery blocking task failed",
+            })??;
         if let CodexDiscoveryDelivery::Ready(pass) = &delivery
             && let Some(pin) = &pass._shared_page_pin
         {
-            pin.start_prefetches(&pass.report.paths);
+            pin.start_prefetches(&prefetch);
         }
         Ok(delivery)
     }
@@ -453,6 +505,7 @@ impl CodexDiscoveryHub {
         bounds: TranscriptDiscoveryBounds,
         frontier: CodexDiscoveryFrontier,
     ) -> TranscriptIngestResult<CodexDiscoveryDelivery> {
+        let mut scans_before_poll = None;
         loop {
             let work = {
                 let mut inner = self.inner.lock().map_err(|_| {
@@ -460,6 +513,7 @@ impl CodexDiscoveryHub {
                         detail: "Codex discovery hub lock is poisoned",
                     }
                 })?;
+                let scans_before_poll = *scans_before_poll.get_or_insert(inner.shared_scans);
                 let source_key = source.discovery_key();
                 let replay = {
                     let consumer_state = inner.consumers.get_mut(consumer).ok_or(
@@ -477,7 +531,6 @@ impl CodexDiscoveryHub {
                         None => consumer_state.source_key = Some(source_key.clone()),
                     }
                     if let Some(awaiting) = &consumer_state.awaiting_ack {
-                        hotpath::gauge!("codex_discovery_generation_retries").inc(1.0);
                         return Ok(CodexDiscoveryDelivery::Ready(std::sync::Arc::clone(
                             &awaiting.pass,
                         )));
@@ -501,7 +554,6 @@ impl CodexDiscoveryHub {
                         .replay_indexes
                         .get(&source_key)
                         .is_some_and(|index| index.complete && !index.rebuilding);
-                    let mut start_probe = false;
                     if ready {
                         let (consumer_generation, consumer_position, observed_probe_revision) =
                             inner
@@ -539,7 +591,7 @@ impl CodexDiscoveryHub {
                             .range((lower, Bound::Unbounded))
                             .next()
                             .is_some();
-                        start_probe = !has_remaining
+                        let start_probe = !has_remaining
                             && frontier.is_complete()
                             && observed_probe_revision == index.probe_revision;
                         if !start_probe {
@@ -550,11 +602,25 @@ impl CodexDiscoveryHub {
                                 frontier,
                                 effective_position.as_ref(),
                             )?;
+                            drop(inner);
+                            let pass = std::sync::Arc::new(pass.with_page_pin());
+                            let mut inner = self.inner.lock().map_err(|_| {
+                                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                    detail: "Codex discovery hub lock is poisoned",
+                                }
+                            })?;
                             let state = inner.consumers.get_mut(consumer).ok_or(
                                 TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                                     detail: "Codex replay consumer registration disappeared",
                                 },
                             )?;
+                            // Another poll may have delivered while the pages
+                            // were pinned; an unacknowledged pass is redelivered.
+                            if let Some(awaiting) = &state.awaiting_ack {
+                                return Ok(CodexDiscoveryDelivery::Ready(std::sync::Arc::clone(
+                                    &awaiting.pass,
+                                )));
+                            }
                             let CodexDiscoveryConsumerMode::Replay {
                                 generation,
                                 position,
@@ -567,7 +633,6 @@ impl CodexDiscoveryHub {
                                 *generation = index_generation;
                                 *position = None;
                             }
-                            let pass = std::sync::Arc::new(pass);
                             state.awaiting_ack = Some(CodexQueuedDiscoveryPass {
                                 base: frontier,
                                 pass: std::sync::Arc::clone(&pass),
@@ -582,7 +647,7 @@ impl CodexDiscoveryHub {
                     }
                     let index = inner.replay_indexes.entry(source_key.clone()).or_default();
                     if index.scanning {
-                        hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
+                        inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
                     if index._scanner_memory.is_none() {
@@ -598,14 +663,10 @@ impl CodexDiscoveryHub {
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     };
                     index.scanning = true;
-                    if start_probe {
-                        hotpath::gauge!("codex_discovery_validation_passes").inc(1.0);
-                    }
                     CodexDiscoveryWork::Replay {
                         source_key,
                         state,
                         frontier: index.frontier,
-                        generation: index.generation,
                     }
                 } else {
                     let consumer_state = inner.consumers.get_mut(consumer).ok_or(
@@ -617,7 +678,17 @@ impl CodexDiscoveryHub {
                         CodexDiscoveryConsumerMode::Shared { queue } => queue.pop_front(),
                         CodexDiscoveryConsumerMode::Replay { .. } => None,
                     };
-                    if let Some(queued) = queued {
+                    if let Some((scan, queued)) = queued {
+                        // An empty pass from a scan that began before this
+                        // poll proves nothing about changes since, so the
+                        // consumer scans again instead of converging on it.
+                        if scan <= scans_before_poll
+                            && queued.pass.report.paths.is_empty()
+                            && queued.pass.selected_sources.is_empty()
+                            && queued.pass.next_frontier == queued.base
+                        {
+                            continue;
+                        }
                         if queued.base == frontier {
                             consumer_state.awaiting_ack = Some(queued.clone());
                             return Ok(CodexDiscoveryDelivery::Ready(queued.pass));
@@ -645,10 +716,11 @@ impl CodexDiscoveryHub {
                         continue;
                     }
                     if inner.discovery_scanning {
-                        hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
+                        inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
                     inner.discovery_scanning = true;
+                    inner.shared_scans += 1;
                     CodexDiscoveryWork::Shared {
                         state: std::mem::take(&mut inner.discovery),
                         frontier: shared_frontier,
@@ -656,43 +728,41 @@ impl CodexDiscoveryHub {
                 }
             };
 
-            let (mut discovery, base, replay_generation, replay_source) = match work {
-                CodexDiscoveryWork::Shared { state, frontier } => (state, frontier, None, None),
+            let (mut discovery, base, replay_source) = match work {
+                CodexDiscoveryWork::Shared { state, frontier } => (state, frontier, None),
                 CodexDiscoveryWork::Replay {
                     source_key,
                     state,
                     frontier,
-                    generation,
-                } => (state, frontier, Some(generation), Some(source_key)),
+                } => (state, frontier, Some(source_key)),
             };
-            let shared = replay_generation.is_none();
-            let bounds = if shared {
-                TranscriptDiscoveryBounds {
-                    max_files: bounds.max_files.min(shared_jsonl_preparation_capacity()),
-                    ..bounds
-                }
-            } else {
-                bounds
-            };
-            let result = source.discover_transcript_paths_with_state(bounds, base, &mut discovery);
+            // Page preparation capacity bounds concurrent JSONL reservations
+            // and prefetch workers. It must not shrink this retained scan.
+            // Clamping `max_files` to that width spends the structural budget
+            // on directory entries, so a large Codex profile cannot emit any
+            // rollout until the dated tree has been re-walked in capacity-sized
+            // slices.
+            let mut result =
+                source.discover_transcript_paths_with_state(bounds, base, &mut discovery);
+            if replay_source.is_none() {
+                result = result.map(CodexDiscoveryPass::with_page_pin);
+            }
             let mut inner = self.inner.lock().map_err(|_| {
                 TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                     detail: "Codex discovery hub lock is poisoned",
                 }
             })?;
-            if shared {
+            if std::mem::take(&mut inner.scan_waited) {
+                let _ = self
+                    .scan_released
+                    .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+            }
+            let Some(source_key) = replay_source else {
                 inner.discovery_scanning = false;
                 inner.discovery = discovery;
-                let mut pass = result?;
+                let pass = result?;
                 inner.discovery.acknowledge();
                 inner.frontier = Some(pass.next_frontier);
-                pass._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
-                    &pass.report.paths,
-                )));
-                hotpath::gauge!("codex_discovery_pending_paths")
-                    .set(pass.report.paths.len() as f64);
-                hotpath::gauge!("codex_discovery_pending_bytes")
-                    .set(pass.report.bytes_charged as f64);
                 let pass = std::sync::Arc::new(pass);
                 let queued = CodexQueuedDiscoveryPass {
                     base,
@@ -700,6 +770,7 @@ impl CodexDiscoveryHub {
                     indexed_ack: None,
                 };
                 let shared_source_key = inner.source_key.clone();
+                let scan = inner.shared_scans;
                 for state in inner.consumers.values_mut() {
                     let CodexDiscoveryConsumerMode::Shared { queue } = &mut state.mode else {
                         continue;
@@ -715,21 +786,12 @@ impl CodexDiscoveryHub {
                         };
                         state.awaiting_ack = None;
                     } else {
-                        queue.push_back(queued.clone());
+                        queue.push_back((scan, queued.clone()));
                     }
                 }
                 drop(inner);
                 continue;
-            }
-
-            let source_key =
-                replay_source.ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                    detail: "Codex replay source authority is missing",
-                })?;
-            let generation =
-                replay_generation.ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                    detail: "Codex replay generation authority is missing",
-                })?;
+            };
             let retire_source = inner
                 .replay_indexes
                 .get(&source_key)
@@ -749,11 +811,9 @@ impl CodexDiscoveryHub {
                     detail: "Codex replay index disappeared while scanning",
                 },
             )?;
-            if index.generation != generation {
-                return Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                    detail: "Codex replay index generation changed while scanning",
-                });
-            }
+            // Only the scanner holding `scanning` advances the index
+            // generation, and a source deregistered mid-scan is retired above
+            // rather than removed, so the index is still the one it scanned.
             index.scanning = false;
             index.discovery = Some(discovery);
             let pass = result?;
@@ -854,6 +914,38 @@ impl CodexDiscoveryHub {
         }
     }
 
+    pub(crate) fn source_ledger(&self, consumer: &str) -> Option<SourceLedger> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .consumers
+            .get(consumer)
+            .map(|state| state.sources.clone())
+    }
+
+    /// The delivered paths `consumer` would still read, in delivery order, so
+    /// speculative page reads never open a rollout admission will skip.
+    fn paths_needing_source_read(
+        &self,
+        consumer: &str,
+        paths: &[PathBuf],
+    ) -> TranscriptIngestResult<Vec<PathBuf>> {
+        let Some(ledger) = self.source_ledger(consumer) else {
+            return Ok(paths.to_vec());
+        };
+        let mut needed = Vec::with_capacity(paths.len());
+        for path in paths {
+            let witness = match stat_if_present(path, "stat transcript for convergence")? {
+                Some(metadata) => Witness::settled_file(path, &metadata)?,
+                None => None,
+            };
+            if !witness.is_some_and(|witness| ledger.holds(&SourceKey::file(path), witness)) {
+                needed.push(path.clone());
+            }
+        }
+        Ok(needed)
+    }
+
     pub(crate) fn acknowledge(&self, consumer: &str) {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let shared_frontier = inner.frontier;
@@ -915,11 +1007,11 @@ struct CodexRetainedScan {
 enum CodexScanPhase {
     Directories {
         queued: VecDeque<(PathBuf, u8, u8, u64)>,
-        current: Option<(PathBuf, u8, u8, std::fs::ReadDir)>,
+        current: Option<Box<(PathBuf, u8, u8, std::fs::ReadDir)>>,
     },
     Files {
         next_directory: usize,
-        current: Option<(usize, std::fs::ReadDir)>,
+        current: Option<Box<(usize, std::fs::ReadDir)>>,
         deferred: Option<Box<(PathBuf, std::fs::Metadata)>>,
         resume_directories: Option<CodexDirectoryResume>,
     },
@@ -927,14 +1019,20 @@ enum CodexScanPhase {
 
 struct CodexDirectoryResume {
     queued: VecDeque<(PathBuf, u8, u8, u64)>,
-    current: Option<(PathBuf, u8, u8, std::fs::ReadDir)>,
+    current: Option<Box<(PathBuf, u8, u8, std::fs::ReadDir)>>,
+}
+
+#[derive(Clone, Copy)]
+struct CodexDirectoryWitness {
+    stat: [u8; 32],
+    entries: [u8; 32],
 }
 
 #[derive(Clone)]
 struct CodexDirectoryIdentity {
     path: PathBuf,
     root_order: u8,
-    identity: Option<[u8; 32]>,
+    identity: Option<CodexDirectoryWitness>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -997,11 +1095,6 @@ impl CodexRetainedScan {
 pub struct CodexSource {
     sessions_dir: PathBuf,
     archived_sessions_dir: PathBuf,
-    user_scope: Option<UserCodexScope>,
-    /// Source-lifetime cache of project-root matchers and cwd worktree
-    /// resolutions, so one scan pass runs git identity discovery once per
-    /// root/cwd instead of once per transcript record.
-    project_matchers: ProjectRootMatcherCache,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1191,12 +1284,6 @@ impl CodexExactSessionPathAuthority {
     }
 }
 
-#[derive(Clone)]
-struct UserCodexScope {
-    session_id: Option<String>,
-    registered_roots: Vec<PathBuf>,
-}
-
 impl CodexSource {
     fn discovery_key(&self) -> CodexDiscoverySourceKey {
         CodexDiscoverySourceKey {
@@ -1208,7 +1295,7 @@ impl CodexSource {
     /// Advances one bounded retained discovery slice and resolves the exact
     /// rollout filename used by a Codex hook event. Repeated calls continue the
     /// same iterator instead of rereading the corpus prefix.
-    #[hotpath::measure(label = "sessions.hosts.codex.find_session")]
+    #[tracing::instrument(name = "sessions.hosts.codex.find_session", level = "trace", skip_all)]
     pub(crate) fn find_session_transcript_paths_bounded(
         &self,
         session_id: &str,
@@ -1529,29 +1616,13 @@ impl CodexSource {
         Self {
             sessions_dir: codex_home.join("sessions"),
             archived_sessions_dir: codex_home.join("archived_sessions"),
-            user_scope: None,
-            project_matchers: ProjectRootMatcherCache::default(),
         }
-    }
-
-    /// Restricts ingestion to sessions that cannot be attributed to a registered project.
-    #[must_use]
-    pub fn for_user_scope(
-        mut self,
-        session_id: Option<String>,
-        registered_roots: Vec<PathBuf>,
-    ) -> Self {
-        self.user_scope = Some(UserCodexScope {
-            session_id,
-            registered_roots,
-        });
-        self
     }
 
     /// Bounded discovery for long-lived schedulers. The caller must
     /// acknowledge only after every returned path was dispositioned and any
     /// advanced durable frontier was persisted.
-    #[hotpath::measure(label = "sessions.hosts.codex.discover")]
+    #[tracing::instrument(name = "sessions.hosts.codex.discover", level = "trace", skip_all)]
     pub(crate) fn discover_transcript_paths_with_state(
         &self,
         bounds: TranscriptDiscoveryBounds,
@@ -1561,7 +1632,6 @@ impl CodexSource {
         if let Some(pending) = &state.pending {
             let mut valid = true;
             for source in &pending.sources {
-                hotpath::gauge!("codex_discovery_pending_revalidations").inc(1.0);
                 let metadata = match std::fs::metadata(&source.path) {
                     Ok(metadata) => metadata,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1577,7 +1647,11 @@ impl CodexSource {
                     }
                 };
                 if !metadata.is_file()
-                    || codex_corpus_identity(&source.path, &metadata)? != source.identity
+                    || codex_corpus_identity(
+                        &source.path,
+                        &metadata,
+                        change_stamp(&source.path, &metadata),
+                    )? != source.identity
                 {
                     valid = false;
                     break;
@@ -1590,7 +1664,6 @@ impl CodexSource {
                 }
                 return Ok(pass);
             }
-            hotpath::gauge!("codex_discovery_pending_revalidation_misses").inc(1.0);
             state.reset(self);
         }
         let work_limit = bounds.max_files.max(1);
@@ -1603,12 +1676,14 @@ impl CodexSource {
                 .len()
                 .saturating_add(idle.active_files.len());
             // Hot prefix first: the newest bucket and its ancestors are where a
-            // new session lands, and only the parent directory's identity moves
-            // when one appears. Rotation alone would defer that discovery by a
+            // new session lands. A settled directory timestamp proves no entry
+            // was added; inside the kernel's coarse timestamp quantum that
+            // timestamp can stay put across a create, so the entry names are
+            // the witness. Rotation alone would defer that discovery by a
             // whole cycle, so probe the hot prefix on every poll.
             let hot = idle.directories.len().min(IDLE_HOT_DIRECTORIES);
             for directory in idle.directories.iter().take(hot) {
-                if codex_directory_identity(&directory.path)? != directory.identity {
+                if codex_directory_changed(&directory.path, directory.identity)? {
                     changed = true;
                     break;
                 }
@@ -1630,7 +1705,7 @@ impl CodexSource {
                     index + 1
                 };
                 if let Some(directory) = idle.directories.get(index) {
-                    if codex_directory_identity(&directory.path)? != directory.identity {
+                    if codex_directory_changed(&directory.path, directory.identity)? {
                         changed = true;
                         break;
                     }
@@ -1651,7 +1726,11 @@ impl CodexSource {
                         }
                     };
                     if !metadata.is_file()
-                        || codex_corpus_identity(&file.path, &metadata)? != file.identity
+                        || codex_corpus_identity(
+                            &file.path,
+                            &metadata,
+                            change_stamp(&file.path, &metadata),
+                        )? != file.identity
                     {
                         changed = true;
                         break;
@@ -1721,11 +1800,6 @@ impl CodexSource {
         if state.scan.is_none() {
             state.reset_for(self, frontier.is_complete());
         }
-        if state.scan.as_ref().is_some_and(|scan| scan.validation) {
-            hotpath::gauge!("codex_discovery_validation_passes").inc(1.0);
-        } else {
-            hotpath::gauge!("codex_discovery_emit_passes").inc(1.0);
-        }
         let pass = retained_scan_step(self, state, bounds, frontier)?;
         let sources = pass.selected_sources.clone();
         state.pending = Some(CodexPendingPass {
@@ -1773,7 +1847,6 @@ enum CodexDiscoverySweep {
 }
 
 impl CodexDiscoveryFrontier {
-    #[hotpath::skip]
     pub(crate) const fn initial() -> Self {
         Self {
             epoch: CodexCorpusEpoch::initial(),
@@ -1781,7 +1854,6 @@ impl CodexDiscoveryFrontier {
         }
     }
 
-    #[hotpath::skip]
     const fn in_progress(epoch: CodexCorpusEpoch) -> Self {
         Self {
             epoch,
@@ -1789,7 +1861,6 @@ impl CodexDiscoveryFrontier {
         }
     }
 
-    #[hotpath::skip]
     const fn complete(epoch: CodexCorpusEpoch) -> Self {
         Self {
             epoch,
@@ -1797,12 +1868,10 @@ impl CodexDiscoveryFrontier {
         }
     }
 
-    #[hotpath::skip]
     pub(crate) const fn is_complete(self) -> bool {
         matches!(self.state, CodexDiscoverySweep::Complete)
     }
 
-    #[hotpath::skip]
     pub(crate) const fn for_coverage(self, coverage_complete: bool) -> Self {
         if self.is_complete() && !coverage_complete {
             Self::in_progress(self.epoch)
@@ -1831,7 +1900,6 @@ impl CodexDiscoveryFrontier {
         Ok(decoded)
     }
 
-    #[hotpath::skip]
     pub(crate) const fn into_parse_offsets(self) -> (ParseOffset, ParseOffset) {
         if self.epoch.is_initial() && matches!(self.state, CodexDiscoverySweep::InProgress) {
             return (
@@ -1870,7 +1938,6 @@ pub(crate) struct CodexCorpusEpoch {
 }
 
 impl CodexCorpusEpoch {
-    #[hotpath::skip]
     const fn initial() -> Self {
         Self {
             high: 0,
@@ -1879,12 +1946,10 @@ impl CodexCorpusEpoch {
         }
     }
 
-    #[hotpath::skip]
     const fn is_initial(self) -> bool {
         self.high == 0 && self.low == 0 && self.files == 0
     }
 
-    #[hotpath::skip]
     const fn from_parse_offset(offset: ParseOffset) -> Self {
         Self {
             high: offset.byte_offset,
@@ -1893,7 +1958,6 @@ impl CodexCorpusEpoch {
         }
     }
 
-    #[hotpath::skip]
     const fn into_parse_offset(self) -> ParseOffset {
         ParseOffset {
             byte_offset: self.high,
@@ -1927,6 +1991,17 @@ pub struct CodexDiscoveryPass {
     _shared_page_pin: Option<std::sync::Arc<SharedJsonlPathPin>>,
 }
 
+impl CodexDiscoveryPass {
+    /// Pinning canonicalizes every path. The hub pins outside its lock
+    /// because native ingest workers read their source ledgers under it.
+    fn with_page_pin(mut self) -> Self {
+        self._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
+            &self.report.paths,
+        )));
+        self
+    }
+}
+
 fn retained_scan_step(
     source: &CodexSource,
     state: &mut CodexDiscoveryState,
@@ -1943,7 +2018,7 @@ fn retained_scan_step(
     // The structural walk and the candidate walk are distinct bounded budgets.
     // Charging both against one counter lets a deep-but-small tree spend the
     // whole pass discovering its own bucket layout, leaving nothing to retain
-    // candidates with — a corpus far under `max_files` then reports truncation
+    // candidates with. A corpus far under `max_files` then reports truncation
     // forever. Each phase is bounded independently.
     // Reaching one candidate can require walking every component of its dated
     // bucket path. Scale structural work with the requested candidate slice
@@ -2058,7 +2133,7 @@ fn retained_scan_step(
                             },
                         )?;
                     }
-                    let identity = codex_directory_identity(&path)?;
+                    let identity = codex_directory_witness(&path)?;
                     scan.directories.push(CodexDirectoryIdentity {
                         path: path.clone(),
                         root_order,
@@ -2074,17 +2149,16 @@ fn retained_scan_step(
                             source,
                         }
                     })?;
-                    *current = Some((path, depth, root_order, listed));
+                    *current = Some(Box::new((path, depth, root_order, listed)));
                     continue;
                 }
-                let (dir, depth, root_order, listed) = current.as_mut().ok_or(
+                let (dir, depth, root_order, listed) = current.as_deref_mut().ok_or(
                     TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                         detail: "retained Codex directory iterator disappeared",
                     },
                 )?;
                 match listed.next() {
                     Some(entry) => {
-                        directory_work += 1;
                         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
                             operation: "read Codex transcript directory entry",
                             path: dir.clone(),
@@ -2098,7 +2172,12 @@ fn retained_scan_step(
                                     path: entry.path(),
                                     source,
                                 })?;
+                        // Rollout files are not structural work. Charging them
+                        // here spends the pass on names that are not child
+                        // directories, so the newest sessions are not emitted
+                        // until every older day has been listed.
                         if file_type.is_dir() && !file_type.is_symlink() {
+                            directory_work += 1;
                             if *depth >= MAX_SCAN_DEPTH {
                                 return Err(TranscriptIngestError::ScanIo {
                                     operation: "traverse Codex transcript directory depth",
@@ -2210,9 +2289,9 @@ fn retained_scan_step(
                                     source,
                                 }
                             })?;
-                            *current = Some((*next_directory - 1, listed));
+                            *current = Some(Box::new((*next_directory - 1, listed)));
                         }
-                        let (directory_index, listed) = current.as_mut().ok_or(
+                        let (directory_index, listed) = current.as_deref_mut().ok_or(
                             TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                                 detail: "retained Codex file iterator disappeared",
                             },
@@ -2381,7 +2460,8 @@ fn retained_scan_step(
                     discovery_limit = Some(FileDiscoveryLimit::DiscoveryBytes);
                     break;
                 }
-                let identity = codex_corpus_identity(&path, &metadata)?;
+                let identity =
+                    codex_corpus_identity(&path, &metadata, change_stamp(&path, &metadata))?;
                 scan.epoch.observe(identity)?;
                 retain_active_file(
                     &mut scan.active_files,
@@ -2439,17 +2519,41 @@ fn retain_active_file(
     }
 }
 
-fn codex_directory_identity(path: &Path) -> TranscriptIngestResult<Option<[u8; 32]>> {
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(TranscriptIngestError::ScanIo {
-                operation: "stat Codex transcript directory",
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+struct DirectoryStatWitness {
+    stat: [u8; 32],
+    settled: bool,
+}
+
+fn codex_directory_changed(
+    path: &Path,
+    stored: Option<CodexDirectoryWitness>,
+) -> TranscriptIngestResult<bool> {
+    let Some(current) = directory_stat_witness(path)? else {
+        return Ok(stored.is_some());
+    };
+    let Some(stored) = stored else {
+        return Ok(true);
+    };
+    // An unsettled stat proves nothing either way; the entry names do.
+    if current.settled {
+        return Ok(current.stat != stored.stat);
+    }
+    Ok(directory_entry_fingerprint(path)? != stored.entries)
+}
+
+fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDirectoryWitness>> {
+    let Some(current) = directory_stat_witness(path)? else {
+        return Ok(None);
+    };
+    Ok(Some(CodexDirectoryWitness {
+        stat: current.stat,
+        entries: directory_entry_fingerprint(path)?,
+    }))
+}
+
+fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryStatWitness>> {
+    let Some(metadata) = stat_if_present(path, "stat Codex transcript directory")? else {
+        return Ok(None);
     };
     if !metadata.is_dir() {
         return Err(TranscriptIngestError::ScanIo {
@@ -2461,10 +2565,67 @@ fn codex_directory_identity(path: &Path) -> TranscriptIngestResult<Option<[u8; 3
             ),
         });
     }
-    Ok(Some(codex_corpus_identity(path, &metadata)?))
+    let changed = change_stamp(path, &metadata);
+    Ok(Some(DirectoryStatWitness {
+        stat: codex_corpus_identity(path, &metadata, changed)?,
+        settled: changed.is_settled(),
+    }))
 }
 
-fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult<u64> {
+fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> {
+    let listed = std::fs::read_dir(path).map_err(|source| TranscriptIngestError::ScanIo {
+        operation: "fingerprint Codex transcript directory",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut names = Vec::new();
+    for entry in listed {
+        let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
+            operation: "fingerprint Codex transcript directory entry",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| TranscriptIngestError::ScanIo {
+                operation: "fingerprint Codex transcript entry type",
+                path: entry.path(),
+                source,
+            })?;
+        let tag = if file_type.is_symlink() {
+            2_u8
+        } else if file_type.is_dir() {
+            1
+        } else {
+            0
+        };
+        names.push((entry.file_name(), tag));
+    }
+    names.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay-codex-directory-entries-v1");
+    for (name, tag) in names {
+        hasher.update([tag]);
+        hash_directory_name(&mut hasher, &name);
+        hasher.update([0xff]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn hash_directory_name(hasher: &mut Sha256, name: &std::ffi::OsStr) {
+    #[cfg(unix)]
+    hasher.update(name.as_bytes());
+    #[cfg(windows)]
+    {
+        for unit in name.encode_wide() {
+            hasher.update(unit.to_le_bytes());
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    hasher.update(name.to_string_lossy().as_bytes());
+}
+
+pub(crate) fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult<u64> {
     u64::try_from(path_byte_len(path))
         .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
             detail: "candidate path size exceeds discovery accounting range",
@@ -2475,22 +2636,35 @@ fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult
         })
 }
 
-fn codex_corpus_identity(
+/// The change stamp a corpus identity carries, settled against the clock now:
+/// after the stat, before any read of the bytes the identity stands for.
+pub(crate) fn change_stamp(path: &Path, metadata: &std::fs::Metadata) -> ChangeStamp {
+    RewriteWitness::native_path_stamp(path, metadata, ChangeClockReading::now())
+}
+
+/// Discovery skips re-delivering a file whose identity is unchanged, so an
+/// identity carrying an unsettled stamp matches no later one.
+pub(crate) fn codex_corpus_identity(
     path: &Path,
     metadata: &std::fs::Metadata,
+    changed: ChangeStamp,
 ) -> TranscriptIngestResult<[u8; 32]> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay-codex-discovery-identity-v2");
+    hasher.update(b"tracedecay-codex-discovery-identity-v3");
     hash_path(&mut hasher, path);
     hasher.update(metadata.len().to_le_bytes());
+    hasher.update(changed.to_le_bytes());
     #[cfg(unix)]
     {
         hasher.update(metadata.dev().to_le_bytes());
         hasher.update(metadata.ino().to_le_bytes());
-        hasher.update(metadata.ctime().to_le_bytes());
-        hasher.update(metadata.ctime_nsec().to_le_bytes());
         hasher.update(metadata.mtime().to_le_bytes());
         hasher.update(metadata.mtime_nsec().to_le_bytes());
+        // Ext4 reuses the inode number inside one coarse timestamp quantum,
+        // and a caller can restore mtime. The generation is what the kernel
+        // keeps unique next to the inode number across such a reuse; alone it
+        // witnesses nothing (ZFS stamps it per transaction, not per file).
+        hash_linux_inode_generation(&mut hasher, path)?;
     }
     #[cfg(windows)]
     {
@@ -2514,6 +2688,37 @@ fn codex_corpus_identity(
         )?;
     }
     Ok(hasher.finalize().into())
+}
+
+#[cfg(unix)]
+fn hash_linux_inode_generation(hasher: &mut Sha256, path: &Path) -> TranscriptIngestResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let file = std::fs::File::open(path).map_err(|source| TranscriptIngestError::ScanIo {
+            operation: "open Codex transcript for inode generation",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let generation = tracedecay_private_fs::inode_generation(&file).map_err(|source| {
+            TranscriptIngestError::ScanIo {
+                operation: "read Codex transcript inode generation",
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        match generation {
+            Some(generation) => {
+                hasher.update([1]);
+                hasher.update(generation.to_le_bytes());
+            }
+            None => hasher.update([0]),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (hasher, path);
+    }
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2575,6 +2780,17 @@ fn hash_path(hasher: &mut Sha256, path: &Path) {
     hasher.update([0]);
 }
 
+/// The checkpoint identity is independent of the transcript's display location.
+pub(crate) fn codex_cursor_key(transcript_path: &Path) -> TranscriptCursorKey {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.codex.transcript-cursor.v2\0");
+    hash_path(&mut hasher, transcript_path);
+    TranscriptCursorKey::opaque(format!(
+        "codex-v2:{}",
+        encode_lowercase_hex(&hasher.finalize())
+    ))
+}
+
 impl TranscriptSource for CodexSource {
     fn provider(&self) -> &'static str {
         PROVIDER
@@ -2605,237 +2821,5 @@ impl TranscriptSource for CodexSource {
                 }
             }
         }
-    }
-
-    #[hotpath::measure(label = "sessions.hosts.codex.parse")]
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        // `session_meta` (line 1) is authoritative for session identity and the
-        // initial cwd. Later context records can move one rollout between scopes.
-        let meta = session_meta(path)?;
-        if self
-            .user_scope
-            .as_ref()
-            .and_then(|scope| scope.session_id.as_deref())
-            .is_some_and(|session_id| session_id != meta.session_id)
-        {
-            return None;
-        }
-
-        let new = stream_new_jsonl(path, prev, max_new_bytes)?;
-        let mut messages = Vec::new();
-        // Collapses identical consecutive goal states within this parse pass:
-        // `thread_goal_updated` fires on every token/time tick, so only an
-        // objective- or status-change opens a new `goal` row.
-        let mut last_goal_key: Option<(String, Option<String>)> = None;
-        let mut structured = events::CodexStructuredState::new();
-        // Namespacing follows the stored cursor generation, so every batch of a
-        // rewritten file is namespaced; prior-context recovery follows this
-        // batch's own resume point, which is zero only at the file head.
-        let namespace_replacement = new.replacement_generation;
-        let mut context_state = if new.start_offset > 0 {
-            CodexContextState::scan_prior(path, new.start_offset, &meta)
-        } else {
-            CodexContextState::from_meta(&meta)
-        };
-        let scope_matcher = TranscriptScopeMatcher::for_scope_cached(
-            project_root,
-            self.user_scope
-                .as_ref()
-                .map(|scope| scope.registered_roots.as_slice()),
-            &self.project_matchers,
-        );
-        let mut last_in_scope_cwd = None;
-        let mut last_in_scope_git = None;
-        let push_annotated = |messages: &mut Vec<_>,
-                              mut message,
-                              cwd: Option<&Path>,
-                              git: Option<&serde_json::Value>| {
-            context::annotate_message(&mut message, cwd, git, &self.project_matchers);
-            messages.push(message);
-        };
-        for line in &new.lines {
-            let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
-            // `Unknown` means a bounded git timeout left this record's scope
-            // undecided: abort before any cursor can be persisted so the same
-            // bytes are re-parsed (and re-resolved) on the next scan pass.
-            let in_scope = match scope_matcher.membership(context_state.cwd.as_deref()) {
-                ProjectMembership::Match => true,
-                ProjectMembership::NoMatch => false,
-                ProjectMembership::Unknown => return None,
-            };
-            if !in_scope {
-                if compacted_summary_from_line(
-                    &line.value,
-                    &meta,
-                    context_state.model.as_deref(),
-                    path,
-                    line.offset,
-                    context_state.compaction_depth + 1,
-                )
-                .is_some()
-                {
-                    context_state.compaction_depth += 1;
-                }
-                continue;
-            }
-            last_in_scope_cwd.clone_from(&context_state.cwd);
-            last_in_scope_git.clone_from(&context_state.git);
-            let cwd = context_state.cwd.as_deref();
-            let git = context_state.git.as_ref();
-            // Non-consuming: harvest session-level policy/effort/rate-limit
-            // summary before the line is routed to its owning handler below.
-            structured.observe_summary(&line.value);
-            if is_context_record {
-                continue;
-            }
-            if let Some(rows) = structured.event_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                for message in rows {
-                    push_annotated(&mut messages, message, cwd, git);
-                }
-                continue;
-            }
-            if let Some(event) = codex_goal_event_from_line(&line.value) {
-                let key = event.dedup_key();
-                if last_goal_key.as_ref() == Some(&key) {
-                    continue;
-                }
-                last_goal_key = Some(key);
-                push_annotated(
-                    &mut messages,
-                    goal_event_message(
-                        &meta,
-                        context_state.model.as_deref(),
-                        path,
-                        line.offset,
-                        timestamp_from_record(&line.value),
-                        &event,
-                    ),
-                    cwd,
-                    git,
-                );
-                continue;
-            }
-            if let Some(message) = response_item_goal_context_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                continue;
-            }
-            if let Some(message) = response_item_tool_event_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                continue;
-            }
-            if let Some(message) = compacted_summary_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-                context_state.compaction_depth + 1,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                context_state.compaction_depth += 1;
-                continue;
-            }
-            if let Some(message) = goal_context_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                continue;
-            }
-            if let Some(message) = message_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-            }
-        }
-        // Emit any `exec_command` calls whose paired output never arrived in
-        // this pass so the tool call is not silently dropped.
-        for message in structured.flush_pending(&meta, path) {
-            push_annotated(
-                &mut messages,
-                message,
-                last_in_scope_cwd.as_deref(),
-                last_in_scope_git.as_ref(),
-            );
-        }
-
-        // A truncate-and-rewrite can reuse every byte offset from the previous
-        // file generation. Legacy projection keys are offset-based, so keep
-        // replacement rows distinct instead of overwriting retained history.
-        if namespace_replacement {
-            namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
-        }
-
-        let project = self.user_scope.as_ref().map_or_else(
-            || project_root.to_string_lossy().to_string(),
-            |_| "user".to_string(),
-        );
-        let draft = SessionDraft {
-            session_id: meta.session_id.clone(),
-            project_key: project.clone(),
-            project_path: project,
-            title: title_from_messages(&messages),
-            // The summary is session-wide and may include evidence observed
-            // after Codex changed cwd into a registered project. User scope
-            // stores only the filtered message rows, never that mixed summary.
-            metadata_json: context::session_metadata_json(
-                &meta,
-                self.user_scope.is_none().then_some(&structured.summary),
-                &self.project_matchers,
-            ),
-            parent_session_id: meta.parent_session_id.clone(),
-            is_subagent: meta.is_subagent,
-            agent_id: meta.agent_id.clone(),
-            parent_tool_use_id: None,
-        };
-
-        Some(ParsedTranscript {
-            draft,
-            messages,
-            new_cursor: new.new_cursor,
-        })
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_and_parse_new(PROVIDER, path, prev, max_new_bytes, || {
-            self.parse_new(path, prev, project_root, max_new_bytes)
-        })
     }
 }

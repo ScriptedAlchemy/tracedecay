@@ -1,7 +1,7 @@
 /**
  * Screenshot harness for the code-topography mockups.
  *
- * Playwright is not a dependency of this folder — it is resolved out of the
+ * Playwright is not a dependency of this folder. It is resolved out of the
  * dashboard's node_modules, which is the only place in the repo that has it.
  * The location is read from an environment variable so no machine-local path
  * is ever committed:

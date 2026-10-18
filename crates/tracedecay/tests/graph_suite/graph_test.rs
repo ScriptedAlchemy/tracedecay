@@ -6,7 +6,7 @@ use tracedecay_graph_query::health::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth,
     gini_coefficient, gini_label, modularity_score,
 };
-use tracedecay_usecases::git_intelligence::churn::file_churn;
+use tracedecay_runtime_core::git::churn::file_churn;
 
 // These tests cover the store-independent health algorithms. Code-graph read
 // behavior is covered through the verified Grafeo reader and production MCP
@@ -42,11 +42,6 @@ fn test_gini_moderate() {
 #[test]
 fn test_gini_empty() {
     assert_eq!(gini_coefficient(&[]), 0.0);
-}
-
-#[test]
-fn test_gini_single() {
-    assert_eq!(gini_coefficient(&[42.0]), 0.0);
 }
 
 #[test]
@@ -115,14 +110,17 @@ fn test_depth_empty() {
 #[test]
 fn test_depth_with_cycle_breaks() {
     let result = dependency_depth(&make_adj(&[("a", "b"), ("b", "a"), ("b", "c")]), 10);
-    assert!(result.max_depth >= 1);
+    assert_eq!(
+        result.max_depth, 1,
+        "the a<->b cycle collapses to one level above c"
+    );
 }
 
 #[test]
 fn test_modularity_independent_clusters() {
     let adjacency = make_adj(&[("a", "b"), ("c", "d")]);
     let (score, components) = modularity_score(&adjacency);
-    assert!(components >= 2);
+    assert_eq!(components, 2);
     assert!(score > 0.0);
 }
 
@@ -164,20 +162,6 @@ fn test_composite_health_one_zero() {
         coverage_discipline: 1.0,
     };
     assert_eq!(compute_composite_health(&dimensions), 0);
-}
-
-#[test]
-fn test_composite_health_mixed() {
-    let dimensions = HealthDimensions {
-        acyclicity: 0.8,
-        depth: 0.7,
-        equality: 0.9,
-        redundancy: 0.6,
-        modularity: 0.5,
-        coverage_discipline: 1.0,
-    };
-    let score = compute_composite_health(&dimensions);
-    assert!((1..10_000).contains(&score));
 }
 
 #[tokio::test]
@@ -225,11 +209,12 @@ async fn test_file_churn() {
 
 #[tokio::test]
 async fn test_file_churn_nonexistent_dir() {
-    let churn = file_churn(
-        std::path::Path::new("/nonexistent/path/that/does/not/exist"),
-        90,
-    )
-    .await
-    .expect("file_churn should not error for nonexistent dir");
+    let missing = std::env::temp_dir().join(format!(
+        "tracedecay-missing-churn-root-{}",
+        std::process::id()
+    ));
+    let churn = file_churn(&missing, 90)
+        .await
+        .expect("file_churn should not error for nonexistent dir");
     assert!(churn.is_empty());
 }

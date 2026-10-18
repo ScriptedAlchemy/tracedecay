@@ -6,65 +6,52 @@ use super::{
     ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationCommitV1,
     ConfigurationMutationAuthority, ConfigurationMutationReceiptV1,
     ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId,
-    ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationSqlStore,
-    ConfigurationValueV1, Connection, GlobalDbConfigurationControlStore, ManifestDigest,
-    TestConnection, TransactionBehavior, WriteOnlyCredentialMutation, ensure_configuration_schema,
+    ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationValueV1,
+    GlobalDbConfigurationControlStore, TestConnection,
 };
 use crate::configuration::contracts::ScopeRevalidationEvidenceV1;
+use crate::configuration::contracts::ports::ConfigurationControlStore;
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
+use crate::registered::RegisteredGlobalDbWriteTransaction;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ConfigurationCandidateV1,
     ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
     ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
-    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
+    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, INDEX_EXCLUDE_SETTING_KEY,
     ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
-    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1, TELEMETRY_TIMINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, LocatorDigest, ProjectId, UtcMicros, canonical_sha256,
 };
 
-async fn setup() -> (tempfile::TempDir, TestConnection) {
-    let directory = tempfile::tempdir().unwrap();
-    let connection = TestConnection::open(&directory.path().join("configuration.db"));
-    connection
-        .execute_batch("PRAGMA foreign_keys = ON;")
-        .await
-        .unwrap();
-    let fresh = super::super::schema::fresh_configuration_store_evidence(&*connection)
-        .await
-        .unwrap()
-        .expect("test connection is fresh");
-    ensure_configuration_schema(&*connection, Some(&fresh))
-        .await
-        .unwrap();
-    (directory, connection)
-}
-
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 #[test]
 fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
     let registry = ConfigurationRegistry::core().unwrap();
     let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-    let missing_key = SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap();
+    let missing_key = SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap();
     let mut effective_values = current.effective_values;
     let mut provenance = current.provenance;
     effective_values.remove(&missing_key);
     provenance.remove(&missing_key);
     let incomplete = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
-    assert!(validate_snapshot_registry_completeness(&incomplete).is_err());
+    assert_eq!(
+        validate_snapshot_registry_completeness(&incomplete)
+            .unwrap_err()
+            .to_string(),
+        "configuration store data is invalid: configuration snapshot does not contain the complete registry"
+    );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn linked_worktree_default_converges_into_existing_snapshot() {
-    let (_directory, runtime, root) = global_setup().await;
+    let (_directory, runtime, root) = Box::pin(global_setup()).await;
     let key = SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).unwrap();
     let mut effective_values = root.snapshot.effective_values.clone();
     let mut provenance = root.snapshot.provenance.clone();
@@ -89,27 +76,12 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
         )
         .await
         .unwrap();
-    transaction
-        .execute(
-            "UPDATE configuration_revisions
-             SET snapshot_id = ?2,
-                 effective_behavior_digest = ?3,
-                 resolution_provenance_digest = ?4
-             WHERE revision_id = ?1",
-            tracedecay_runtime_core::db::engine::params![
-                root.revision_id.as_str(),
-                historical_snapshot.snapshot_id.as_str(),
-                historical_snapshot.effective_behavior_digest.as_str(),
-                historical_snapshot.resolution_provenance_digest.as_str()
-            ],
-        )
-        .await
-        .unwrap();
+    point_revision_at_snapshot(&transaction, &root.revision_id, &historical_snapshot).await;
     transaction.commit().await.unwrap();
     let store = GlobalDbConfigurationControlStore::new_registered(db);
 
     let converged = store
-        .converge_registered_additive_defaults(&root.revision_id, UtcMicros(2))
+        .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
         .await
         .unwrap();
 
@@ -122,7 +94,195 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
     validate_snapshot_registry_completeness(&converged.snapshot).unwrap();
 }
 
-async fn count(connection: &Connection, table: &str) -> i64 {
+/// Every release through v1.0.0-beta.61 persisted `bin/**` in the
+/// `index.exclude.v1` default. A store that never overrode the setting must
+/// follow the current default, otherwise the pattern would drop tracked
+/// `bin/` sources the first time the setting is honored.
+#[asupersync::test]
+async fn a_changed_default_converges_when_the_setting_was_never_overridden() {
+    let (_directory, runtime, root) = Box::pin(global_setup()).await;
+    let key = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap();
+    let current_default = root.snapshot.effective_values[&key].clone();
+    let ConfigurationValueV1::StringList(mut old_default) = current_default.clone() else {
+        panic!("index.exclude.v1 is a string list");
+    };
+    old_default.insert(2, "bin/**".to_owned());
+    let old_default = ConfigurationValueV1::StringList(old_default);
+    let mut effective_values = root.snapshot.effective_values.clone();
+    effective_values.insert(key.clone(), old_default.clone());
+    let historical_snapshot =
+        ConfigurationSnapshotV1::new(effective_values, root.snapshot.provenance.clone()).unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "DROP TRIGGER configuration_revisions_immutable_update;
+             DROP TRIGGER configuration_entries_immutable_update;",
+        )
+        .await
+        .unwrap();
+    let entry = serde_json::json!({
+        "schema_version": 1,
+        "value": old_default,
+        "provenance": root.snapshot.provenance[&key],
+    })
+    .to_string();
+    transaction
+        .execute(
+            "UPDATE configuration_entries SET typed_value = ?3
+             WHERE revision_id = ?1 AND key = ?2",
+            tracedecay_runtime_core::db::engine::params![
+                root.revision_id.as_str(),
+                key.as_str(),
+                entry
+            ],
+        )
+        .await
+        .unwrap();
+    point_revision_at_snapshot(&transaction, &root.revision_id, &historical_snapshot).await;
+    transaction.commit().await.unwrap();
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    assert_eq!(
+        store.current().await.unwrap().snapshot.effective_values[&key],
+        old_default
+    );
+
+    let converged = store
+        .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
+        .await
+        .unwrap();
+
+    assert_ne!(converged.revision_id, root.revision_id);
+    assert_eq!(converged.snapshot.effective_values[&key], current_default);
+    assert_eq!(
+        converged.snapshot.provenance[&key],
+        root.snapshot.provenance[&key]
+    );
+    let reconverged = store
+        .converge_registered_registry_shape(&converged.revision_id, UtcMicros(3))
+        .await
+        .unwrap();
+    assert_eq!(reconverged.revision_id, converged.revision_id);
+}
+
+/// A v0.1.0-beta.37 profile still carries `semantic.runtime.v1`. Opening it
+/// on the current registry must drop that retired key instead of stalling the
+/// project behind a reset verdict.
+#[asupersync::test]
+async fn retired_semantic_runtime_key_converges_out_of_a_beta37_snapshot() {
+    assert_retired_key_converges_out("semantic.runtime.v1", ConfigurationValueV1::Boolean(true))
+        .await;
+}
+
+/// Every release through v0.1.0-beta.50 persisted the
+/// `sync.orphan_db_gc_days.v1` default (7 days).
+#[asupersync::test]
+async fn retired_orphan_db_gc_days_key_converges_out_of_a_beta50_snapshot() {
+    assert_retired_key_converges_out(
+        "sync.orphan_db_gc_days.v1",
+        ConfigurationValueV1::Unsigned(7),
+    )
+    .await;
+}
+
+/// Persisted prewarm settings converge through the retired-key authority.
+#[asupersync::test]
+async fn retired_diagnostics_prewarm_key_converges_without_reset() {
+    assert_retired_key_converges_out(
+        "diagnostics.prewarm.v1",
+        ConfigurationValueV1::Boolean(true),
+    )
+    .await;
+}
+
+async fn assert_retired_key_converges_out(raw_key: &str, value: ConfigurationValueV1) {
+    let (_directory, runtime, root) = Box::pin(global_setup()).await;
+    let retired = SettingKey::new(raw_key).unwrap();
+    let mut effective_values = root.snapshot.effective_values.clone();
+    let mut provenance = root.snapshot.provenance.clone();
+    effective_values.insert(retired.clone(), value.clone());
+    provenance.insert(
+        retired.clone(),
+        root.snapshot.provenance.values().next().unwrap().clone(),
+    );
+    let historical_snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "DROP TRIGGER configuration_revisions_immutable_update;
+             DROP TRIGGER configuration_entries_immutable_delete;",
+        )
+        .await
+        .unwrap();
+    let entry = serde_json::json!({
+        "schema_version": 1,
+        "value": value,
+        "provenance": root.snapshot.provenance.values().next().unwrap(),
+    })
+    .to_string();
+    transaction
+        .execute(
+            "INSERT INTO configuration_entries (
+                revision_id, key, layer_kind, layer_id, schema_revision, typed_value
+             ) VALUES (?1, ?2, 'default', NULL, 1, ?3)",
+            tracedecay_runtime_core::db::engine::params![
+                root.revision_id.as_str(),
+                retired.as_str(),
+                entry
+            ],
+        )
+        .await
+        .unwrap();
+    point_revision_at_snapshot(&transaction, &root.revision_id, &historical_snapshot).await;
+    transaction.commit().await.unwrap();
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+
+    let converged = store
+        .converge_registered_registry_shape(&root.revision_id, UtcMicros(2))
+        .await
+        .unwrap();
+
+    assert_ne!(converged.revision_id, root.revision_id);
+    assert!(!converged.snapshot.effective_values.contains_key(&retired));
+    assert!(!converged.snapshot.provenance.contains_key(&retired));
+    validate_snapshot_registry_completeness(&converged.snapshot).unwrap();
+}
+
+/// Rewrites a committed revision to carry `snapshot`, the shape a store
+/// written by an older release holds. The caller drops the immutability
+/// trigger first.
+async fn point_revision_at_snapshot(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    revision_id: &ConfigurationRevisionId,
+    snapshot: &ConfigurationSnapshotV1,
+) {
+    transaction
+        .execute(
+            "UPDATE configuration_revisions
+             SET snapshot_id = ?2,
+                 effective_behavior_digest = ?3,
+                 resolution_provenance_digest = ?4
+             WHERE revision_id = ?1",
+            tracedecay_runtime_core::db::engine::params![
+                revision_id.as_str(),
+                snapshot.snapshot_id.as_str(),
+                snapshot.effective_behavior_digest.as_str(),
+                snapshot.resolution_provenance_digest.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+}
+
+async fn count(
+    connection: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
+    table: &str,
+) -> i64 {
     let mut rows = connection
         .query(&format!("SELECT COUNT(*) FROM {table}"), ())
         .await
@@ -130,13 +290,7 @@ async fn count(connection: &Connection, table: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn root_revision() -> ConfigurationRevisionRecordV1 {
     let snapshot = resolve_configuration(&ConfigurationRegistry::core().unwrap(), &[])
@@ -269,15 +423,6 @@ fn protected_commit(
     )
 }
 
-async fn seed_revision(connection: &Connection, revision: &ConfigurationRevisionRecordV1) {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .unwrap();
-    insert_revision(&transaction, revision).await.unwrap();
-    transaction.commit().await.unwrap();
-}
-
 async fn global_setup() -> (
     tempfile::TempDir,
     HostAdmissionTestRuntimeV1,
@@ -318,17 +463,13 @@ fn control_authority(
     operation: ConfigurationMutationOperationV1,
     expected_revision: &ConfigurationRevisionId,
 ) -> ConfigurationMutationAuthority {
-    let idempotency_key = matches!(
-        operation,
-        ConfigurationMutationOperationV1::DirectMutation
-            | ConfigurationMutationOperationV1::CredentialWrite
-    )
-    .then(|| {
-        id(&format!(
-            "configuration.idempotency.{}",
-            format!("{operation:?}").to_lowercase()
-        ))
-    });
+    let idempotency_key = matches!(operation, ConfigurationMutationOperationV1::DirectMutation)
+        .then(|| {
+            id(&format!(
+                "configuration.idempotency.{}",
+                format!("{operation:?}").to_lowercase()
+            ))
+        });
     control_authority_with_key(operation, expected_revision, idempotency_key)
 }
 
@@ -352,10 +493,6 @@ fn control_authority_with_key_for_layer(
     direct_layer: ConfigurationLayerIdV1,
 ) -> ConfigurationMutationAuthority {
     let (sink, effect) = match operation {
-        ConfigurationMutationOperationV1::CredentialWrite => (
-            ConfigurationMutationSinkV1::CredentialStore,
-            ConfigurationMutationEffectV1::WriteCredentialReference,
-        ),
         ConfigurationMutationOperationV1::ProtectedDryRun
         | ConfigurationMutationOperationV1::RollbackDryRun => (
             ConfigurationMutationSinkV1::ConfigurationStore,
@@ -448,3 +585,4 @@ fn evidence_for(plan: &ProtectedChangePlan) -> ScopeRevalidationEvidenceV1 {
 
 mod control;
 mod persistence;
+mod receipt_writer;

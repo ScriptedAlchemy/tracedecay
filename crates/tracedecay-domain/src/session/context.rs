@@ -22,7 +22,7 @@ pub enum HydrationStateV1 {
     RetentionExpired,
     Unauthorized,
     Locked,
-    UnverifiableLegacy,
+    Unverifiable,
 }
 
 impl HydrationStateV1 {
@@ -35,7 +35,7 @@ impl HydrationStateV1 {
             Self::RetentionExpired => "retention_expired",
             Self::Unauthorized => "unauthorized",
             Self::Locked => "locked",
-            Self::UnverifiableLegacy => "unverifiable_legacy",
+            Self::Unverifiable => "unverifiable",
         }
     }
 }
@@ -54,6 +54,7 @@ pub enum ContextOmissionReasonV1 {
     Unavailable,
     SummaryHorizonMismatch,
     DuplicateRepresentative,
+    RootContinuationUnavailable,
 }
 
 impl ContextOmissionReasonV1 {
@@ -69,6 +70,7 @@ impl ContextOmissionReasonV1 {
             Self::Unavailable => "unavailable",
             Self::SummaryHorizonMismatch => "summary_horizon_mismatch",
             Self::DuplicateRepresentative => "duplicate_representative",
+            Self::RootContinuationUnavailable => "root_continuation_unavailable",
         }
     }
 }
@@ -245,11 +247,8 @@ impl<'de> Deserialize<'de> for CompactContextBundleV1 {
             records: Vec<CompactContextRecordV1>,
             omissions: Vec<CompactContextOmissionV1>,
             continuation_anchors: Vec<RetrievalAnchorId>,
-            #[serde(default)]
             coverage: TemporalCoverageCountsV1,
-            #[serde(default)]
             conflicts: Vec<CompactContextConflictV1>,
-            #[serde(default)]
             lineage: Vec<CompactContextLineageEdgeV1>,
             encoded_bytes: u64,
         }

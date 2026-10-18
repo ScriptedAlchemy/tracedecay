@@ -3,13 +3,15 @@
 
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use tokio::time::{Duration, timeout};
+use std::time::Duration;
+use tracedecay_runtime_core::native_runtime::timeout;
 
-use super::core_lifecycle::DaemonActivity;
-use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
+use super::{DaemonHandshake, projectless_tool_call, write_daemon_response};
+use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenStatusV1};
+use tracedecay_daemon_service::shutdown::DaemonActivity;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
-use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 #[path = "core_doctor_schema.rs"]
 mod schema;
@@ -27,6 +29,14 @@ pub(crate) struct DoctorRuntimeRequest {
     doctor_report_requested: bool,
 }
 
+pub(super) struct CoreDoctorStatusV1 {
+    pub project_open: Option<ProjectOpenStatusV1>,
+    /// Exact open failure when `project_open` is stalled. Status and Doctor
+    /// must answer this as a typed JSON-RPC error, not a successful snapshot.
+    pub stalled_failure: Option<super::ProjectOpenFailure>,
+    pub git_watcher_health: Option<serde_json::Value>,
+}
+
 impl DoctorRuntimeRequest {
     pub(crate) fn doctor_report_requested(&self) -> bool {
         self.doctor_report_requested
@@ -37,8 +47,10 @@ impl DoctorRuntimeRequest {
     }
 }
 
-pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntimeRequest> {
-    let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
+pub(crate) fn doctor_runtime_request(
+    request: Option<&JsonRpcRequest>,
+) -> Option<DoctorRuntimeRequest> {
+    let request = request?;
     if request.method != "tools/call" {
         return None;
     }
@@ -68,15 +80,72 @@ pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntime
         return None;
     }
     Some(DoctorRuntimeRequest {
-        id: request.id.unwrap_or(serde_json::Value::Null),
+        id: request.id.clone().unwrap_or(serde_json::Value::Null),
         startup_health_only,
         doctor_report_requested,
     })
 }
 
-fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
+fn core_status_request_id(request: Option<&JsonRpcRequest>) -> Option<serde_json::Value> {
+    let request = request?;
+    if request.method != "tools/call" {
+        return None;
+    }
+    let (tool_name, arguments) = projectless_tool_call(request.params.as_ref()).ok()?;
+    // A `wait_for` read asks to be held until the index is ready, so it rides
+    // the project open instead of taking the core's converging snapshot.
+    (tool_name == "tracedecay_status"
+        && arguments
+            .get("include_branch_diagnostics")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        && arguments
+            .get("wait_for")
+            .is_none_or(serde_json::Value::is_null))
+    .then(|| request.id.clone().unwrap_or(serde_json::Value::Null))
+}
+
+fn project_open_status_value(
+    handshake: &DaemonHandshake,
+    project_open: &ProjectOpenStatusV1,
+    reset_required_stores: &[tracedecay_domain::errors::StoreResetRequiredV1],
+) -> serde_json::Value {
     json!({
-        "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
+        "project_root": handshake.project_path,
+        "graph_statistics": {
+            "state": "unavailable",
+            "reason": "exact_scope_generation_not_ready",
+        },
+        "project_open": project_open,
+        "schema_convergence": {
+            "status": "unavailable",
+            "findings": [],
+        },
+        "reset_required_stores": reset_required_stores,
+    })
+}
+
+/// A store authority the read-only doctor snapshot could not observe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorRuntimeUnavailableReason {
+    ProjectPathMissing,
+    ProjectStoreSchemaUnsupported,
+    ProjectStoreAuthorityUnavailable,
+    ProjectStoreMissing,
+    ProjectStoreUnavailable,
+    ProjectSchemaUnavailable,
+    SessionHealthSerializationFailed,
+    SessionHealthTimedOut,
+    SessionStoreUnavailable,
+    SessionStoreMissing,
+}
+
+fn doctor_runtime_temporal_unavailable(
+    reason: DoctorRuntimeUnavailableReason,
+) -> serde_json::Value {
+    json!({
+        "status": "unavailable",
         "reason": reason,
     })
 }
@@ -85,14 +154,16 @@ fn doctor_runtime_temporal_report(
     report: tracedecay_session_temporal_store::SessionTemporalHealthReport,
 ) -> serde_json::Value {
     serde_json::to_value(report).unwrap_or_else(|_| {
-        doctor_runtime_temporal_unavailable("session_health_serialization_failed")
+        doctor_runtime_temporal_unavailable(
+            DoctorRuntimeUnavailableReason::SessionHealthSerializationFailed,
+        )
     })
 }
 
 fn doctor_runtime_unavailable(
     build_version: &str,
     project_path: Option<&Path>,
-    reason: &'static str,
+    reason: DoctorRuntimeUnavailableReason,
 ) -> serde_json::Value {
     json!({
         "tracedecay_version": build_version,
@@ -105,7 +176,7 @@ fn doctor_runtime_unavailable(
             "authority_audit_error": "authority_audit_not_run",
         },
         "doctor_runtime": {
-            "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
+            "status": "unavailable",
             "reason": reason,
             "read_only": true,
         },
@@ -114,7 +185,6 @@ fn doctor_runtime_unavailable(
             "status": "unavailable",
             "reason": "session_store_unavailable",
         },
-        "semantic_runtime": doctor_semantic_runtime_status(project_path, None),
     })
 }
 
@@ -138,9 +208,9 @@ pub(crate) fn doctor_runtime_tool_result(value: serde_json::Value) -> serde_json
 fn doctor_runtime_store_layout(
     project_path: &Path,
     profile_root: &Path,
-) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
+) -> std::result::Result<(PathBuf, PathBuf), DoctorRuntimeUnavailableReason> {
     let layout = tracedecay_runtime_core::storage::resolve_layout(project_path, profile_root)
-        .map_err(|_| "project_store_schema_unsupported")?;
+        .map_err(|_| DoctorRuntimeUnavailableReason::ProjectStoreSchemaUnsupported)?;
     Ok((layout.graph_db_path, layout.sessions_db_path))
 }
 
@@ -188,6 +258,7 @@ fn doctor_runtime_coverage(startup_health_only: bool) -> Option<serde_json::Valu
 async fn doctor_runtime_value(
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
+    project_open: Option<ProjectOpenStatusV1>,
     startup_health_only: bool,
     git_watcher_health: Option<serde_json::Value>,
     build_version: &str,
@@ -199,6 +270,7 @@ async fn doctor_runtime_value(
         build_version,
     ))
     .await;
+    value["project_open"] = project_open.map_or(serde_json::Value::Null, |status| json!(status));
     value["git_watcher"] = git_watcher_health.unwrap_or_else(|| {
         json!({
             "status": "unavailable",
@@ -209,7 +281,11 @@ async fn doctor_runtime_value(
     value
 }
 
-#[hotpath::measure(label = "daemon.engine.doctor.runtime", future = true)]
+#[tracing::instrument(name = "daemon.engine.doctor.runtime", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "A missing graph, session, or observation authority is a named unavailable reason in one snapshot; Doctor never fabricates a healthy runtime."
+)]
 async fn doctor_runtime_value_inner(
     handshake: &DaemonHandshake,
     store_administration: Option<&super::StoreAdministration>,
@@ -217,7 +293,11 @@ async fn doctor_runtime_value_inner(
     build_version: &str,
 ) -> serde_json::Value {
     let Some(project_path) = handshake.project_path.as_deref() else {
-        return doctor_runtime_unavailable(build_version, None, "project_path_missing");
+        return doctor_runtime_unavailable(
+            build_version,
+            None,
+            DoctorRuntimeUnavailableReason::ProjectPathMissing,
+        );
     };
     let (expected_graph_path, session_path) =
         match doctor_runtime_store_layout(project_path, &handshake.client_identity.profile_root) {
@@ -228,9 +308,9 @@ async fn doctor_runtime_value_inner(
         };
     let Some(store_administration) = store_administration else {
         let reason = if expected_graph_path.is_file() {
-            "project_store_authority_unavailable"
+            DoctorRuntimeUnavailableReason::ProjectStoreAuthorityUnavailable
         } else {
-            "project_store_missing"
+            DoctorRuntimeUnavailableReason::ProjectStoreMissing
         };
         return doctor_runtime_unavailable(build_version, Some(project_path), reason);
     };
@@ -249,9 +329,9 @@ async fn doctor_runtime_value_inner(
         });
     let Some(graph) = graph else {
         let reason = if expected_graph_path.is_file() {
-            "project_store_authority_unavailable"
+            DoctorRuntimeUnavailableReason::ProjectStoreAuthorityUnavailable
         } else {
-            "project_store_missing"
+            DoctorRuntimeUnavailableReason::ProjectStoreMissing
         };
         return doctor_runtime_unavailable(build_version, Some(project_path), reason);
     };
@@ -259,17 +339,26 @@ async fn doctor_runtime_value_inner(
     let canonical_graph_path = graph_path
         .canonicalize()
         .unwrap_or_else(|_| graph_path.clone());
-    // A daemon-retained project route that passed post-open health validation
-    // and has not been revoked is live evidence on its own: the fast runtime
-    // snapshot projects that retained liveness instead of re-probing SQLite
-    // (`quick_check`, page counts, schema pragma) on every doctor read.
-    let route_live = {
+    // A retained admission bool is not a store observation. If the file the
+    // route was opened against is gone, say so, do not project "live".
+    let route_retained = {
         let servers = store_administration.project_servers().lock().await;
         servers.servers.iter().any(|(key, entry)| {
             key.project_root == canonical_project_path
                 && entry.server.project_route_live() == Some(true)
         })
     };
+    if route_retained && !graph_path.is_file() {
+        return doctor_runtime_unavailable(
+            build_version,
+            Some(project_path),
+            DoctorRuntimeUnavailableReason::ProjectStoreMissing,
+        );
+    }
+    // Skip the SQLite integrity probes on a retained route, but do not call
+    // that skip liveness. Status stays `retained` until quick_check and the
+    // schema pragma are actually read.
+    let route_live = route_retained;
     let (quick_check_ok, quick_check_error) = if route_live {
         (None, None)
     } else {
@@ -280,7 +369,7 @@ async fn doctor_runtime_value_inner(
                 return doctor_runtime_unavailable(
                     build_version,
                     Some(project_path),
-                    "project_store_unavailable",
+                    DoctorRuntimeUnavailableReason::ProjectStoreUnavailable,
                 );
             }
         }
@@ -300,23 +389,22 @@ async fn doctor_runtime_value_inner(
     let page_size = page_counts.map(|(page_size, _, _)| page_size);
     let expected_schema_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
     let schema_version = if route_live {
-        // Retained liveness proves that this route was admitted, but the fast
-        // Doctor snapshot deliberately does not re-read the schema pragma.
+        // Retained admission is not a schema observation. Leave the stamp
+        // unread rather than inventing the compiled version.
         None
     } else {
-        match Box::pin(
-            graph
-                .db()
-                .query_scalar_i64("Doctor project schema inspection", "PRAGMA user_version"),
-        )
+        match Box::pin(tracedecay_runtime_core::db::schema_version::read_version(
+            &graph.db().read_connection(),
+            tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT,
+        ))
         .await
         {
-            Ok(version) => Some(version),
+            Ok(version) => Some(version.unwrap_or(0)),
             Err(_) => {
                 return doctor_runtime_unavailable(
                     build_version,
                     Some(project_path),
-                    "project_schema_unavailable",
+                    DoctorRuntimeUnavailableReason::ProjectSchemaUnavailable,
                 );
             }
         }
@@ -342,8 +430,12 @@ async fn doctor_runtime_value_inner(
             "schema_drift": schema_drift,
         },
         "doctor_runtime": {
-            "status": if route_live { "live" } else { "complete" },
-            "reason": null,
+            "status": if route_live { "retained" } else { "complete" },
+            "reason": if route_live {
+                serde_json::Value::String("storage_integrity_not_reobserved".to_owned())
+            } else {
+                serde_json::Value::Null
+            },
             "read_only": true,
         },
     });
@@ -359,29 +451,10 @@ async fn doctor_runtime_value_inner(
     // A retained registry handle only proves the schema contract held at
     // publication; it is not evidence that the invariant pass ran now.
     let (authority_ok, authority_reason, authority_detail) = match registry.as_ref() {
-        Some(registry) => match Box::pin(registry.read_snapshot()).await {
-            Ok(snapshot) => {
-                match Box::pin(
-                    tracedecay_global_db::schema_stages::validate_observation_authority_connection(
-                        &snapshot,
-                    ),
-                )
-                .await
-                {
-                    Ok(()) => (Some(true), None, None),
-                    Err(error) => (
-                        Some(false),
-                        Some("authority_invariant_failed"),
-                        Some(error.to_string()),
-                    ),
-                }
-            }
-            Err(error) => (
-                None,
-                Some("authority_store_unavailable"),
-                Some(error.to_string()),
-            ),
-        },
+        Some(registry) => {
+            let audit = Box::pin(registry.observation_authority_audit()).await;
+            (audit.verdict(), audit.reason(), audit.detail())
+        }
         None if handshake.client_identity.global_db_path.is_file() => {
             (None, Some("authority_store_unavailable"), None)
         }
@@ -410,8 +483,12 @@ async fn doctor_runtime_value_inner(
         });
     if let Some(db) = session_db.as_ref() {
         let health_budget = Duration::from_secs(8);
+        let session_temporal = SessionTemporalAccess::new(&**db);
         let (temporal, cursor_ingest, placeholder_paths) = tokio::join!(
-            Box::pin(timeout(health_budget, db.session_temporal_doctor_health())),
+            Box::pin(timeout(
+                health_budget,
+                session_temporal.session_temporal_doctor_health()
+            )),
             Box::pin(timeout(health_budget, db.cursor_session_ingest_health())),
             Box::pin(timeout(
                 health_budget,
@@ -420,7 +497,9 @@ async fn doctor_runtime_value_inner(
         );
         value["session_temporal_health"] = match temporal {
             Ok(report) => doctor_runtime_temporal_report(report),
-            Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
+            Err(_) => doctor_runtime_temporal_unavailable(
+                DoctorRuntimeUnavailableReason::SessionHealthTimedOut,
+            ),
         };
         value["cursor_session_ingest"] = match cursor_ingest {
             Ok(Ok(health)) => serde_json::to_value(health).unwrap_or_else(|error| {
@@ -446,9 +525,11 @@ async fn doctor_runtime_value_inner(
         };
     } else {
         value["session_temporal_health"] = if session_path.is_file() {
-            doctor_runtime_temporal_unavailable("session_store_unavailable")
+            doctor_runtime_temporal_unavailable(
+                DoctorRuntimeUnavailableReason::SessionStoreUnavailable,
+            )
         } else {
-            doctor_runtime_temporal_unavailable("session_store_missing")
+            doctor_runtime_temporal_unavailable(DoctorRuntimeUnavailableReason::SessionStoreMissing)
         };
         value["cursor_session_ingest"] = json!({
             "status": "unavailable",
@@ -456,56 +537,32 @@ async fn doctor_runtime_value_inner(
         });
         value["cursor_session_placeholder_paths"] = json!([]);
     }
-    let semantic_configuration = Box::pin(graph.configuration_runtime().client().current())
-        .await
-        .ok()
-        .and_then(|pinned| {
-            SemanticConfigurationPinV1::from_current(
-                &tracedecay_configuration::ConfigurationCurrentStateV1 {
-                    revision_id: pinned.revision_id,
-                    snapshot: pinned.snapshot,
-                },
-            )
-            .ok()
-        });
-    value["semantic_runtime"] =
-        doctor_semantic_runtime_status(Some(project_path), semantic_configuration);
     value
-}
-
-fn doctor_semantic_runtime_status(
-    project_path: Option<&Path>,
-    configuration: Option<SemanticConfigurationPinV1>,
-) -> serde_json::Value {
-    serde_json::to_value(
-        tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
-            project_path,
-            configuration,
-        ),
-    )
-    .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
 
 #[cfg(test)]
 pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
     // Owned stores are never path-opened as a fallback. Without the daemon's
     // retained runtime authority Doctor reports explicit unavailability.
-    let build_version = crate::product_runtime::register_fixture_product_runtime().build_version();
+    let build_version =
+        tracedecay_project::product_runtime::register_fixture_product_runtime().build_version();
     doctor_runtime_value_inner(handshake, None, false, build_version).await
 }
 
-#[hotpath::measure(label = "daemon.engine.doctor.runtime_write", future = true)]
+#[tracing::instrument(name = "daemon.engine.doctor.runtime_write", level = "trace", skip_all)]
 pub(in crate::daemon) async fn write_doctor_runtime_response(
     transport: &mut impl McpTransport,
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
+    project_open: Option<ProjectOpenStatusV1>,
     request: DoctorRuntimeRequest,
     git_watcher_health: Option<serde_json::Value>,
 ) -> Result<()> {
-    let build_version = crate::version::build_version()?;
+    let build_version = tracedecay_project::version::build_version()?;
     let mut value = Box::pin(doctor_runtime_value(
         handshake,
         store_administration,
+        project_open,
         request.startup_health_only,
         git_watcher_health,
         build_version,
@@ -514,16 +571,43 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     if request.doctor_report_requested() && value.get("doctor_report").is_none() {
         value["doctor_report"] = json!({
             "kind": "unknown",
-            "reason": "doctor_report_owner_warming",
+            "reason": super::DOCTOR_REPORT_OWNER_WARMING_REASON,
             "table_growth_evidence": [],
         });
     }
     let result = doctor_runtime_tool_result(value);
-    Box::pin(write_json_rpc_response(
+    Box::pin(write_daemon_response(
         transport,
         &JsonRpcResponse::success(request.id, result),
     ))
     .await
+}
+
+async fn project_open_status_response(
+    handshake: &DaemonHandshake,
+    store_administration: &super::StoreAdministration,
+    project_open: &ProjectOpenStatusV1,
+    stalled_failure: Option<&super::ProjectOpenFailure>,
+    id: serde_json::Value,
+) -> Result<JsonRpcResponse> {
+    if project_open.state == ProjectOpenStatusStateV1::Stalled {
+        let error = stalled_failure.map_or_else(
+            || super::stalled_project_open_error(project_open),
+            super::ProjectOpenFailure::to_error,
+        );
+        return Ok(super::project_open_handshake::project_open_error_response(
+            id, &error,
+        ));
+    }
+    let reset_required_stores = Box::pin(store_administration.session_runtime_registry())
+        .await?
+        .reset_required_stores();
+    let result = doctor_runtime_tool_result(project_open_status_value(
+        handshake,
+        project_open,
+        &reset_required_stores,
+    ));
+    Ok(JsonRpcResponse::success(id, result))
 }
 
 /// Serve a Doctor runtime request from the daemon core while the routed
@@ -532,14 +616,14 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
 /// as a probe. Returns the activity guard when the request falls through to
 /// the broker's regular routing, or `None` once the core response has been
 /// written and the connection is complete.
-#[hotpath::measure(label = "daemon.engine.doctor.serve", future = true)]
+#[tracing::instrument(name = "daemon.engine.doctor.serve", level = "trace", skip_all)]
 pub(super) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
     transport: &mut T,
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
+    status: CoreDoctorStatusV1,
     setup_activity: DaemonActivity,
-    first_request_line: &str,
-    git_watcher_health: Option<serde_json::Value>,
+    first_request: &super::AuthenticatedFirstRequest,
     doctor_report_ready: Probe,
 ) -> Result<Option<DaemonActivity>>
 where
@@ -547,11 +631,82 @@ where
     Probe: FnOnce() -> ProbeFuture,
     ProbeFuture: std::future::Future<Output = Result<bool>>,
 {
-    let Some(request) = doctor_runtime_request(first_request_line) else {
+    if let Some(id) = core_status_request_id(first_request.parsed())
+        && let Some(project_open) = status.project_open.as_ref()
+        && project_open.state != ProjectOpenStatusStateV1::Completed
+    {
+        // Full host admission can still be opening after the graph core is
+        // published. Its owner, rather than the admission task, answers status.
+        if let Some(project_path) = handshake.project_path.as_deref() {
+            let route = super::ProjectRouteKey::from_handshake(project_path, handshake)?;
+            if store_administration
+                .project_servers()
+                .lock()
+                .await
+                .get_route(&route)
+                .is_some()
+            {
+                return Ok(Some(setup_activity));
+            }
+        }
+        drop(setup_activity);
+        let response = Box::pin(project_open_status_response(
+            handshake,
+            store_administration,
+            project_open,
+            status.stalled_failure.as_ref(),
+            id,
+        ))
+        .await?;
+        Box::pin(write_daemon_response(transport, &response)).await?;
+        return Ok(None);
+    }
+    let Some(request) = doctor_runtime_request(first_request.parsed()) else {
         return Ok(Some(setup_activity));
     };
+    if request.doctor_report_requested()
+        && let Some(project_open) = status.project_open.as_ref()
+        && project_open.state == ProjectOpenStatusStateV1::Stalled
+    {
+        drop(setup_activity);
+        let error = status.stalled_failure.as_ref().map_or_else(
+            || super::stalled_project_open_error(project_open),
+            super::ProjectOpenFailure::to_error,
+        );
+        Box::pin(write_daemon_response(
+            transport,
+            &super::project_open_handshake::project_open_error_response(request.id.clone(), &error),
+        ))
+        .await?;
+        return Ok(None);
+    }
     let report_ready = if request.doctor_report_requested() {
-        Box::pin(doctor_report_ready()).await?
+        match Box::pin(doctor_report_ready()).await {
+            Ok(ready) => ready,
+            // Enrollment, warming, a blocked repository walk, capacity, and a
+            // reset-required store are client or operator states. Dropping
+            // the socket before any frame made Doctor report a closed
+            // connection and then print store-recovery guidance.
+            Err(error)
+                if super::error_is_project_not_enrolled(&error)
+                    || super::error_is_project_warming(&error)
+                    || super::error_is_repository_discovery_deferred(&error)
+                    || super::error_is_project_open_retryable(&error)
+                    || tracedecay_mcp::reset_required_context(&error).is_some() =>
+            {
+                drop(setup_activity);
+                Box::pin(write_daemon_response(
+                    transport,
+                    &super::project_open_handshake::project_open_error_response(
+                        request.id.clone(),
+                        &error,
+                    ),
+                ))
+                .await?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         false
     };
@@ -563,8 +718,9 @@ where
         transport,
         handshake,
         store_administration,
+        status.project_open,
         request,
-        git_watcher_health,
+        status.git_watcher_health,
     ))
     .await?;
     Ok(None)
@@ -580,24 +736,29 @@ mod doctor_runtime_route_tests {
     use rusqlite::Connection;
 
     use super::{
-        cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
-        serve_core_doctor_runtime_request,
+        CoreDoctorStatusV1, cold_doctor_runtime_value, core_status_request_id,
+        doctor_runtime_coverage, doctor_runtime_request, serve_core_doctor_runtime_request,
     };
-    use crate::daemon::{DaemonHandshake, DaemonLifecycle, StoreAdministration};
+    use crate::daemon::{
+        AuthenticatedFirstRequest, DaemonHandshake, ProjectOpenFailure, StoreAdministration,
+    };
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
-    use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+    use tracedecay_contracts::project_open::{
+        ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+    };
     use tracedecay_daemon_protocol::DaemonClientIdentity;
+    use tracedecay_daemon_service::shutdown::DaemonLifecycle;
     use tracedecay_mcp::McpTransport;
-    use tracedecay_semantic_contracts::{
-        SemanticFallbackReasonV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
-        SemanticModelRemediationV1,
-    };
-    use tracedecay_usecases::semantic_runtime::{
-        SemanticConfigurationPinV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
-    };
+    use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+    use tracedecay_runtime_core::cancellation::CancellationToken;
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+
+    fn parse_doctor_runtime_request(line: &str) -> Option<super::DoctorRuntimeRequest> {
+        let request = AuthenticatedFirstRequest::new(line.to_owned());
+        doctor_runtime_request(request.parsed())
+    }
 
     struct DoctorRouteTransport {
         lifecycle: DaemonLifecycle,
@@ -606,8 +767,10 @@ mod doctor_runtime_route_tests {
     }
 
     impl McpTransport for DoctorRouteTransport {
-        async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-            Ok(None)
+        fn read_line(
+            &mut self,
+        ) -> impl std::future::Future<Output = std::io::Result<Option<String>>> {
+            std::future::ready(Ok(None))
         }
 
         async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -621,15 +784,16 @@ mod doctor_runtime_route_tests {
             Ok(())
         }
 
-        async fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+        fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> {
+            std::future::ready(Ok(()))
         }
     }
 
-    async fn initialize_test_project(
+    pub(super) async fn initialize_test_project(
         project_root: &Path,
         profile_root: &Path,
     ) -> tracedecay_runtime_core::storage::StoreLayout {
+        crate::register_runtime_ports().expect("runtime port registration");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -667,7 +831,7 @@ mod doctor_runtime_route_tests {
     ) -> DaemonHandshake {
         // The doctor route serves the daemon's version from the product
         // runtime; route tests never pass through the binary's registration.
-        crate::product_runtime::register_fixture_product_runtime();
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
         DaemonHandshake {
             project_path: Some(project_path),
             scope_prefix: None,
@@ -682,7 +846,7 @@ mod doctor_runtime_route_tests {
             client_instance_id: "doctor-runtime-test".to_string(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
-            moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+            moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
         }
     }
 
@@ -702,6 +866,67 @@ mod doctor_runtime_route_tests {
             },
         })
         .to_string()
+    }
+
+    fn status_request_line() -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_status",
+                "arguments": { "format": "json" },
+            },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn status_with_explicit_branch_diagnostics_waits_for_project_owner() {
+        let request = AuthenticatedFirstRequest::new(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_status",
+                    "arguments": { "include_branch_diagnostics": true },
+                },
+            })
+            .to_string(),
+        );
+        let plain_status = AuthenticatedFirstRequest::new(status_request_line());
+
+        assert_eq!(core_status_request_id(request.parsed()), None);
+        assert_eq!(
+            core_status_request_id(plain_status.parsed()),
+            Some(serde_json::json!(10))
+        );
+    }
+
+    #[test]
+    fn status_wait_for_rides_the_project_open_instead_of_the_core_snapshot() {
+        let status = |arguments: serde_json::Value| {
+            AuthenticatedFirstRequest::new(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "tools/call",
+                    "params": { "name": "tracedecay_status", "arguments": arguments },
+                })
+                .to_string(),
+            )
+        };
+        let plain = status(serde_json::json!({ "format": "json" }));
+        assert_eq!(
+            core_status_request_id(plain.parsed()),
+            Some(serde_json::json!(12))
+        );
+        let waiting = status(serde_json::json!({
+            "format": "json",
+            "wait_for": { "state": "fresh", "timeout_ms": 1000 },
+        }));
+        assert_eq!(core_status_request_id(waiting.parsed()), None);
     }
 
     fn filesystem_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
@@ -755,14 +980,14 @@ mod doctor_runtime_route_tests {
             },
         })
         .to_string();
-        let parsed = doctor_runtime_request(&request).expect("doctor runtime request");
+        let parsed = parse_doctor_runtime_request(&request).expect("doctor runtime request");
         assert_eq!(parsed.id, serde_json::json!(7));
         assert!(!parsed.startup_health_only);
         assert!(!parsed.doctor_report_requested());
         assert!(parsed.should_serve_from_core(true));
 
         let ordinary = request.replace("\"authority_audit\":true", "\"authority_audit\":false");
-        assert!(doctor_runtime_request(&ordinary).is_none());
+        assert!(parse_doctor_runtime_request(&ordinary).is_none());
 
         let startup = serde_json::json!({
             "jsonrpc": "2.0",
@@ -777,7 +1002,8 @@ mod doctor_runtime_route_tests {
             },
         })
         .to_string();
-        let parsed = doctor_runtime_request(&startup).expect("startup health runtime request");
+        let parsed =
+            parse_doctor_runtime_request(&startup).expect("startup health runtime request");
         assert_eq!(parsed.id, serde_json::json!(8));
         assert!(parsed.startup_health_only);
         assert!(!parsed.doctor_report_requested());
@@ -786,45 +1012,364 @@ mod doctor_runtime_route_tests {
     #[test]
     fn requested_doctor_report_uses_core_only_until_the_ready_owner_is_published() {
         let request = doctor_report_request_line();
-        let parsed = doctor_runtime_request(&request).expect("Doctor report request");
+        let parsed = parse_doctor_runtime_request(&request).expect("Doctor report request");
 
         assert!(parsed.doctor_report_requested());
         assert!(parsed.should_serve_from_core(false));
         assert!(!parsed.should_serve_from_core(true));
     }
 
-    /// The comprehensive Doctor request (`authority_audit` +
-    /// `session_ingest_health`, no `doctor_report`) is always served from the
-    /// core, even when a cached core-stage server has already published a ready
-    /// Doctor report. That makes the core route — not the routed project owner
-    /// — the producer Doctor reads its authority verdict from in the common
-    /// case, so the core route must run the real audit rather than infer one.
-    #[test]
-    fn comprehensive_request_is_served_from_core_even_with_a_ready_report() {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 11,
-            "method": "tools/call",
-            "params": {
-                "name": "tracedecay_runtime",
-                "arguments": {
-                    "format": "json",
-                    "authority_audit": true,
-                    "session_ingest_health": true,
-                },
-            },
-        })
-        .to_string();
-        let parsed = doctor_runtime_request(&request).expect("comprehensive Doctor request");
-
-        assert!(!parsed.doctor_report_requested());
-        for report_ready in [false, true] {
-            assert!(
-                parsed.should_serve_from_core(report_ready),
-                "comprehensive requests never fall through to the routed owner \
-                 (doctor_report_ready={report_ready})"
-            );
+    #[tokio::test]
+    async fn status_returns_typed_project_open_state_without_waiting_for_owner() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        std::fs::create_dir_all(&profile).expect("fixture profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))
+                .expect("secure fixture profile root");
         }
+        let store_administration = StoreAdministration::default().with_profile_identity(
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
+                .expect("load fixture profile identity"),
+        );
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile,
+            REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
+            "core-doctor-status-project-open",
+        )
+        .expect("enter daemon database scope");
+        let first_request = AuthenticatedFirstRequest::new(status_request_line());
+        let project_open = ProjectOpenStatusV1 {
+            state: ProjectOpenStatusStateV1::Converging,
+            reason: ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery,
+            retry_after_ms: Some(250),
+            detail: Some("repository discovery is deferred".to_owned()),
+        };
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: Some(project_open),
+                stalled_failure: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            || async { panic!("status must not probe the project owner") },
+        )
+        .await
+        .expect("serve core status response");
+
+        assert!(outcome.is_none());
+        assert!(
+            transport
+                .output
+                .contains(r#""reason":"deferred_repository_discovery""#)
+        );
+        assert!(transport.output.contains(r#""retry_after_ms":250"#));
+        assert!(
+            transport.output.contains(r#""reset_required_stores":[]"#),
+            "{}",
+            transport.output
+        );
+    }
+
+    #[tokio::test]
+    async fn status_uses_only_the_exact_published_core_during_full_admission() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).expect("fixture project");
+        std::fs::create_dir_all(&profile).expect("fixture profile");
+        initialize_test_project(&project, &profile).await;
+        let handshake = handshake(
+            project.clone(),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let administration = StoreAdministration::default().with_profile_identity(
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
+                .expect("fixture profile identity"),
+        );
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile,
+            REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
+            "status-published-core",
+        )
+        .expect("fixture daemon authority");
+        let graph = super::super::open_project_for_handshake(
+            &project,
+            &handshake,
+            &administration,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("fixture project graph");
+        let key = crate::daemon::ProjectServerKey::from_open_project(&graph, &handshake)
+            .expect("fixture server identity");
+        let route = crate::daemon::ProjectRouteKey::from_handshake(&project, &handshake)
+            .expect("fixture route identity");
+        let server =
+            McpServer::new_with_context(McpServerConstructionContext::direct(graph, None)).await;
+        administration
+            .project_servers()
+            .lock()
+            .await
+            .insert_pending_route(route, key.clone(), server);
+
+        for stage in ["pending", "published", "foreign_scope", "retired"] {
+            let mut selected = handshake.clone();
+            match stage {
+                "published" => {
+                    assert!(
+                        administration
+                            .project_servers()
+                            .lock()
+                            .await
+                            .mark_ready(&key)
+                    );
+                }
+                "foreign_scope" => selected.scope_prefix = Some("other".to_owned()),
+                "retired" => {
+                    assert_eq!(
+                        administration
+                            .project_servers()
+                            .lock()
+                            .await
+                            .remove_owner(&key.owner)
+                            .len(),
+                        1,
+                    );
+                }
+                _ => {}
+            }
+            let lifecycle = DaemonLifecycle::default();
+            let activity = lifecycle.try_enter().expect("status activity");
+            let mut transport = DoctorRouteTransport {
+                lifecycle,
+                output: String::new(),
+                idle_before_write: false,
+            };
+            let result = serve_core_doctor_runtime_request(
+                &mut transport,
+                &selected,
+                &administration,
+                CoreDoctorStatusV1 {
+                    project_open: Some(ProjectOpenStatusV1 {
+                        state: ProjectOpenStatusStateV1::Converging,
+                        reason: ProjectOpenStatusReasonV1::Converging,
+                        retry_after_ms: Some(50),
+                        detail: None,
+                    }),
+                    stalled_failure: None,
+                    git_watcher_health: None,
+                },
+                activity,
+                &AuthenticatedFirstRequest::new(status_request_line()),
+                || async { panic!("status must not open or audit the project") },
+            )
+            .await
+            .expect("typed status routing");
+            if stage == "published" {
+                assert!(
+                    result.is_some(),
+                    "published graph status must reach its owner"
+                );
+                assert!(
+                    transport.output.is_empty(),
+                    "core must not fabricate unavailable status"
+                );
+            } else {
+                assert!(
+                    result.is_none(),
+                    "{stage} must not borrow another serving route"
+                );
+                assert!(
+                    transport
+                        .output
+                        .contains("exact_scope_generation_not_ready")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_project_open_status_returns_typed_error_not_success() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        std::fs::create_dir_all(&profile).expect("fixture profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))
+                .expect("secure fixture profile root");
+        }
+        let store_administration = StoreAdministration::default().with_profile_identity(
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
+                .expect("load fixture profile identity"),
+        );
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile,
+            REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
+            "core-doctor-status-stalled-project-open",
+        )
+        .expect("enter daemon database scope");
+        let first_request = AuthenticatedFirstRequest::new(status_request_line());
+        let detail = "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases { count: 1 } / ProjectSessions";
+        let project_open = ProjectOpenStatusV1 {
+            state: ProjectOpenStatusStateV1::Stalled,
+            reason: ProjectOpenStatusReasonV1::RetryBackoff,
+            retry_after_ms: Some(1_000),
+            detail: Some(detail.to_owned()),
+        };
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: Some(project_open),
+                stalled_failure: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            || async { panic!("stalled status must not probe the project owner") },
+        )
+        .await
+        .expect("serve stalled status as a typed error");
+
+        assert!(outcome.is_none());
+        // `retry_backoff` is a coarse bucket: with no recorded failure the
+        // honest fallback is the typed backoff, not a fabricated capacity
+        // verdict.
+        assert!(
+            transport
+                .output
+                .contains(r#""kind":"project_route_open_backoff""#),
+            "stalled status must be a typed backoff error: {}",
+            transport.output
+        );
+        assert!(
+            !transport
+                .output
+                .contains(r#""reason_code":"project_server_capacity_reached""#),
+            "a retry_backoff stall must not fabricate a capacity verdict: {}",
+            transport.output
+        );
+        assert!(
+            transport.output.contains(r#""error""#),
+            "stalled status must be a JSON-RPC error, not a success snapshot: {}",
+            transport.output
+        );
+        assert!(
+            !transport.output.contains(r#""state":"stalled""#),
+            "stalled status must not exit as a successful project_open snapshot: {}",
+            transport.output
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_project_open_doctor_report_returns_typed_error_not_closed_connection() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        std::fs::create_dir_all(&profile).expect("fixture profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))
+                .expect("secure fixture profile root");
+        }
+        let store_administration = StoreAdministration::default().with_profile_identity(
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
+                .expect("load fixture profile identity"),
+        );
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile,
+            REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
+            "core-doctor-report-stalled-project-open",
+        )
+        .expect("enter daemon database scope");
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
+        let detail = "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases { count: 1 } / ProjectSessions";
+        let project_open = ProjectOpenStatusV1 {
+            state: ProjectOpenStatusStateV1::Stalled,
+            reason: ProjectOpenStatusReasonV1::RetryBackoff,
+            retry_after_ms: Some(1_000),
+            detail: Some(detail.to_owned()),
+        };
+        let stalled_failure = ProjectOpenFailure::from_error(
+            &tracedecay_domain::errors::TraceDecayError::project_route(
+                super::super::PROJECT_SERVER_CAPACITY_REASON_CODE,
+                true,
+                detail.to_owned(),
+            ),
+        );
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: Some(project_open),
+                stalled_failure: Some(stalled_failure),
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            || async { panic!("stalled doctor must not open the project owner") },
+        )
+        .await
+        .expect("stalled doctor must answer with a frame");
+
+        assert!(outcome.is_none());
+        assert!(
+            transport
+                .output
+                .contains(r#""reason_code":"project_server_capacity_reached""#),
+            "stalled doctor must be a typed capacity error, not a closed connection: {}",
+            transport.output
+        );
     }
 
     #[tokio::test]
@@ -847,17 +1392,22 @@ mod doctor_runtime_route_tests {
         };
         let store_administration = StoreAdministration::default();
 
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
         let outcome = serve_core_doctor_runtime_request(
             &mut transport,
             &handshake,
             &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                stalled_failure: None,
+                git_watcher_health: Some(serde_json::json!({
+                    "status": "degraded",
+                    "coverage": "degraded_poll",
+                    "reason": "watch_capacity_reached",
+                })),
+            },
             setup_activity,
-            &doctor_report_request_line(),
-            Some(serde_json::json!({
-                "status": "degraded",
-                "coverage": "degraded_poll",
-                "reason": "watch_capacity_reached",
-            })),
+            &first_request,
             || async { Ok(false) },
         )
         .await
@@ -865,7 +1415,7 @@ mod doctor_runtime_route_tests {
 
         assert!(outcome.is_none());
         assert!(transport.idle_before_write);
-        assert!(!transport.output.is_empty());
+        assert_ne!(transport.output, "");
         assert!(transport.output.contains(r#""kind":"unknown""#));
         assert!(
             transport
@@ -875,6 +1425,185 @@ mod doctor_runtime_route_tests {
         assert!(
             transport.output.contains("git_watcher") && transport.output.contains("degraded_poll"),
             "the production core Doctor response must expose watcher health"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_report_probe_answers_project_not_enrolled_without_closing() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        lifecycle.begin_draining();
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        let store_administration = StoreAdministration::default();
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
+        let detail = "no TraceDecay index found at '/tmp/unenrolled'; run 'tracedecay init'";
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                stalled_failure: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            || async {
+                Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                    super::super::PROJECT_NOT_ENROLLED_REASON_CODE,
+                    false,
+                    detail,
+                ))
+            },
+        )
+        .await
+        .expect("not-enrolled is a response, not a closed connection");
+
+        assert!(outcome.is_none());
+        assert!(
+            transport
+                .output
+                .contains(r#""reason_code":"project_not_enrolled""#),
+            "doctor probe response: {}",
+            transport.output
+        );
+        assert!(
+            transport.output.contains(r#""retryable":false"#),
+            "doctor probe response: {}",
+            transport.output
+        );
+        assert!(
+            !transport
+                .output
+                .contains(r#""reason":"doctor_report_owner_warming""#),
+            "not-enrolled must not be reported as a warming owner: {}",
+            transport.output
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_report_probe_answers_discovery_blocked_without_closing() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let project = root.path().join("blocked");
+        let handshake = handshake(
+            project.clone(),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        let store_administration = StoreAdministration::default();
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
+        let detail = format!("repository discovery blocked on {}", project.display());
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                stalled_failure: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            {
+                let detail = detail.clone();
+                move || async move {
+                    Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                        super::super::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                        true,
+                        detail,
+                    ))
+                }
+            },
+        )
+        .await
+        .expect("discovery-blocked is a response, not a closed connection");
+
+        assert!(outcome.is_none());
+        assert!(
+            transport
+                .output
+                .contains(r#""reason_code":"repository_discovery_deferred""#),
+            "doctor probe response: {}",
+            transport.output
+        );
+        assert!(
+            transport.output.contains("repository discovery blocked on"),
+            "doctor probe response: {}",
+            transport.output
+        );
+        assert!(
+            !transport.output.contains("daemon closed the connection"),
+            "discovery-blocked must not be reported as a closed connection: {}",
+            transport.output
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_report_probe_still_propagates_other_readiness_errors() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        let store_administration = StoreAdministration::default();
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                stalled_failure: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            || async {
+                Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "project route probe failed".to_string(),
+                })
+            },
+        )
+        .await;
+
+        let Err(error) = outcome else {
+            panic!("non-enrollment probe errors still close as typed failures");
+        };
+        assert!(error.to_string().contains("project route probe failed"));
+        assert!(
+            transport.output.is_empty(),
+            "an unrelated probe error must not be rewritten as a doctor report"
         );
     }
 
@@ -896,198 +1625,30 @@ mod doctor_runtime_route_tests {
         };
         let store_administration = StoreAdministration::default();
 
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
         let outcome = serve_core_doctor_runtime_request(
             &mut transport,
             &handshake,
             &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                stalled_failure: None,
+                git_watcher_health: None,
+            },
             setup_activity,
-            &doctor_report_request_line(),
-            None,
+            &first_request,
             || async { Ok(true) },
         )
         .await
         .expect("fall through to ready owner");
 
         assert!(outcome.is_some());
-        assert!(transport.output.is_empty());
+        assert_eq!(transport.output, "");
         drop(outcome);
         lifecycle.begin_draining();
         tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle.wait_for_idle())
             .await
             .expect("fallthrough activity drops with caller ownership");
-    }
-
-    #[test]
-    fn semantic_status_without_configuration_is_valid_unavailable() {
-        let value = super::doctor_semantic_runtime_status(None, None);
-        let status: tracedecay_usecases::semantic_runtime::SemanticRuntimeStatusV1 =
-            serde_json::from_value(value).expect("semantic runtime status");
-
-        assert_eq!(status.validate(), Ok(()));
-        assert!(status.configuration.is_none());
-        assert!(matches!(
-            status.state,
-            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
-                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
-            }
-        ));
-    }
-
-    fn semantic_status_pin() -> SemanticConfigurationPinV1 {
-        use std::collections::BTreeMap;
-        use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
-
-        SemanticConfigurationPinV1::from_current(
-            &tracedecay_configuration::ConfigurationCurrentStateV1 {
-                revision_id: ConfigurationRevisionId::try_from(
-                    "configuration.revision.doctor".to_owned(),
-                )
-                .expect("revision"),
-                snapshot: ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default())
-                    .expect("snapshot"),
-            },
-        )
-        .expect("pin")
-    }
-
-    fn lifecycle_status(
-        selected_model: Option<&str>,
-        state: Option<SemanticModelLifecycleStateV1>,
-    ) -> SemanticModelLifecycleStatusV1 {
-        SemanticModelLifecycleStatusV1 {
-            selected_model: selected_model.map(str::to_owned),
-            auto_download: false,
-            catalog_model_ids: Vec::new(),
-            state,
-            remediation: SemanticModelRemediationV1 {
-                retry: false,
-                remove: false,
-                rollback: false,
-            },
-            semantics_omitted: true,
-        }
-    }
-
-    fn seated_generic_unavailable() -> SemanticRuntimeStatusV1 {
-        SemanticRuntimeStatusV1::new(
-            Some(semantic_status_pin()),
-            SemanticRuntimeStateV1::Unavailable {
-                reason: SemanticFallbackReasonV1::RuntimeUnavailable,
-            },
-        )
-    }
-
-    #[test]
-    fn seated_generic_unavailable_yields_to_lifecycle_downloading() {
-        let digest = "b".repeat(64);
-        let lifecycle = lifecycle_status(
-            Some("JinaEmbeddingsV2BaseCode"),
-            Some(SemanticModelLifecycleStateV1::Downloading {
-                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                revision: "rev".to_owned(),
-                artifact_digest: digest,
-                bytes_received: 4,
-                bytes_total: 16,
-            }),
-        );
-        let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
-            Some(seated_generic_unavailable()),
-            Some(&lifecycle),
-            Some(semantic_status_pin()),
-        );
-
-        assert_eq!(status.validate(), Ok(()));
-        match status.state {
-            SemanticRuntimeStateV1::Downloading {
-                bytes_received,
-                bytes_total,
-                ..
-            } => {
-                assert_eq!(bytes_received, 4);
-                assert_eq!(bytes_total, 16);
-            }
-            other => panic!("expected downloading, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn seated_generic_unavailable_yields_to_lifecycle_failed() {
-        let digest = "c".repeat(64);
-        let lifecycle = lifecycle_status(
-            Some("JinaEmbeddingsV2BaseCode"),
-            Some(SemanticModelLifecycleStateV1::Failed {
-                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                revision: "rev".to_owned(),
-                artifact_digest: digest,
-                detail: "artifact verify failed".to_owned(),
-                retryable: false,
-            }),
-        );
-        let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
-            Some(seated_generic_unavailable()),
-            Some(&lifecycle),
-            Some(semantic_status_pin()),
-        );
-
-        assert_eq!(status.validate(), Ok(()));
-        match status.state {
-            SemanticRuntimeStateV1::Failed {
-                detail, retryable, ..
-            } => {
-                assert_eq!(detail, "artifact verify failed");
-                assert!(!retryable);
-            }
-            other => panic!("expected failed, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn seated_runtime_failure_is_not_replaced_by_lifecycle_downloading() {
-        let broken = SemanticRuntimeStatusV1::new(
-            Some(semantic_status_pin()),
-            SemanticRuntimeStateV1::Degraded {
-                active_generation: None,
-                reason: SemanticFallbackReasonV1::RuntimeFailure,
-            },
-        );
-        let lifecycle = lifecycle_status(
-            Some("JinaEmbeddingsV2BaseCode"),
-            Some(SemanticModelLifecycleStateV1::Downloading {
-                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                revision: "rev".to_owned(),
-                artifact_digest: "d".repeat(64),
-                bytes_received: 1,
-                bytes_total: 2,
-            }),
-        );
-        let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
-            Some(broken.clone()),
-            Some(&lifecycle),
-            Some(semantic_status_pin()),
-        );
-
-        assert_eq!(status, broken);
-    }
-
-    #[test]
-    fn disabled_selection_keeps_the_configuration_pin() {
-        let status = tracedecay_usecases::semantic_runtime::resolve_semantic_application_status(
-            Some(seated_generic_unavailable()),
-            Some(&lifecycle_status(None, None)),
-            Some(semantic_status_pin()),
-        );
-
-        assert_eq!(status.validate(), Ok(()));
-        assert!(
-            status.configuration.is_some(),
-            "deliberate selected_model: None keeps the pin so it is not a missing config"
-        );
-        assert!(matches!(
-            status.state,
-            SemanticRuntimeStateV1::Unavailable {
-                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
-            }
-        ));
     }
 
     #[cfg(unix)]
@@ -1114,10 +1675,14 @@ mod doctor_runtime_route_tests {
             "core-doctor-fast-runtime-health",
         )
         .expect("enter daemon database scope");
-        let graph =
-            super::super::open_project_for_handshake(&project, &handshake, &store_administration)
-                .await
-                .expect("open retained project graph");
+        let graph = super::super::open_project_for_handshake(
+            &project,
+            &handshake,
+            &store_administration,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("open retained project graph");
         let key = crate::daemon::ProjectServerKey::from_open_project(&graph, &handshake)
             .expect("project server key");
         let route_live = Arc::new(AtomicBool::new(true));
@@ -1132,10 +1697,11 @@ mod doctor_runtime_route_tests {
             .await
             .insert(key, server);
         let build_version =
-            crate::product_runtime::register_fixture_product_runtime().build_version();
+            tracedecay_project::product_runtime::register_fixture_product_runtime().build_version();
         let value = super::doctor_runtime_value(
             &handshake,
             &store_administration,
+            None,
             false,
             None,
             build_version,
@@ -1144,8 +1710,13 @@ mod doctor_runtime_route_tests {
 
         assert_eq!(
             value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("live")),
-            "fast runtime health must project retained liveness without probing SQLite"
+            Some(&serde_json::json!("retained")),
+            "a skipped integrity probe must not be reported as live"
+        );
+        assert_eq!(
+            value.pointer("/doctor_runtime/reason"),
+            Some(&serde_json::json!("storage_integrity_not_reobserved")),
+            "retained admission must name the observation it skipped"
         );
         assert_eq!(
             value.pointer("/database/quick_check_ok"),
@@ -1243,51 +1814,6 @@ mod doctor_runtime_route_tests {
         );
         assert!(!value.to_string().contains(&db_path.display().to_string()));
         connection.execute("ROLLBACK", ()).unwrap();
-    }
-
-    #[tokio::test]
-    async fn doctor_store_paths_ignore_an_active_branch_database() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "-b", "main"])
-                .current_dir(&project)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let layout = initialize_test_project(&project, &profile).await;
-        let default_graph = layout.graph_db_path.clone();
-
-        let branch_relpath = "branches/feature_doctor.db";
-        let branch_graph = layout.data_root.join(branch_relpath);
-        std::fs::create_dir_all(branch_graph.parent().unwrap()).unwrap();
-        std::fs::copy(&default_graph, &branch_graph).unwrap();
-        let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new_for_dir(
-            &layout.data_root,
-            "main",
-        );
-        meta.add_branch("feature/doctor", branch_relpath, "main");
-        tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["checkout", "-b", "feature/doctor"])
-                .current_dir(&project)
-                .status()
-                .unwrap()
-                .success()
-        );
-
-        assert_eq!(
-            super::doctor_runtime_store_layout(&project, &profile)
-                .expect("resolve canonical Doctor store paths"),
-            (default_graph, layout.sessions_db_path),
-            "Doctor must not follow branch-specific database paths"
-        );
     }
 
     #[tokio::test]

@@ -9,17 +9,25 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{UtcMicros, encode_lowercase_hex};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, read_bounded};
 
-use crate::{HookHostV1, HookScopeBindingV1};
+use crate::HookScopeBindingV1;
+use tracedecay_domain::NativeHostIdentityV1;
 
 pub const HOOK_CONFIGURATION_SCHEMA_VERSION: u16 = 1;
 pub const MAX_HOOK_CONFIGURATION_BYTES: usize = 64 * 1024;
 const DIRECTORY_SYNC_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
-pub fn hook_configuration_path(data_root: &Path, host: HookHostV1) -> PathBuf {
-    data_root.join(format!("hook-config-{}.json", host.hook_key()))
+pub fn hook_configuration_path(
+    data_root: &Path,
+    worktree_id: [u8; 16],
+    host: NativeHostIdentityV1,
+) -> PathBuf {
+    data_root
+        .join("hook-configurations")
+        .join(encode_lowercase_hex(&worktree_id))
+        .join(format!("{}.json", host.hook_key()))
 }
 
 /// Daemon-issued configuration that a hook process can consume. All identity
@@ -78,38 +86,17 @@ pub enum HookConfigurationPublicationError {
     Unavailable,
 }
 
-/// Daemon-only atomic publication seam.
-pub trait HookConfigurationPublicationStoreV1 {
-    fn publish(
-        &self,
-        snapshot: HookConfigurationSnapshotV1,
-    ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError>;
-}
-
-/// Hook-process read-only configuration seam.
-pub trait HookConfigurationReadStoreV1 {
-    fn load(
-        &self,
-        host: HookHostV1,
-    ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError>;
-}
-
 /// Daemon-side publisher. Structure and monotonic revision are checked before
 /// the atomic file store sees a record.
-pub struct HookConfigurationPublisherV1<S> {
-    store: S,
+pub struct HookConfigurationPublisherV1 {
+    store: HookConfigurationFileWriterV1,
 }
 
-impl<S> HookConfigurationPublisherV1<S> {
-    pub fn new(store: S) -> Self {
+impl HookConfigurationPublisherV1 {
+    pub fn new(store: HookConfigurationFileWriterV1) -> Self {
         Self { store }
     }
-}
 
-impl<S> HookConfigurationPublisherV1<S>
-where
-    S: HookConfigurationPublicationStoreV1,
-{
     pub fn publish(
         &self,
         snapshot: HookConfigurationSnapshotV1,
@@ -121,43 +108,21 @@ where
 
 /// Subscriber adapter for a separate hook process. It revalidates schema,
 /// revision, exact host/scope binding, and expiry on every bounded read.
-pub struct HookConfigurationSubscriberV1<S> {
-    store: S,
+pub struct HookConfigurationSubscriberV1 {
+    store: HookConfigurationFileReaderV1,
 }
 
-impl<S> HookConfigurationSubscriberV1<S> {
-    pub fn new(store: S) -> Self {
+impl HookConfigurationSubscriberV1 {
+    pub fn new(store: HookConfigurationFileReaderV1) -> Self {
         Self { store }
     }
-}
-
-impl<S> HookConfigurationSubscriberV1<S>
-where
-    S: HookConfigurationReadStoreV1,
-{
     /// Every native capture re-reads the published binding through this
     /// bounded read, so its cost and outcome mix are what separate "hook is
     /// unbound/stale" from a spool refusal when hooks fall silent.
-    #[hotpath::measure(label = "hooks.config.load")]
-    pub fn load_current(&self, host: HookHostV1, now: UtcMicros) -> HookConfigurationReadOutcomeV1 {
-        let outcome = self.load_current_inner(host, now);
-        #[cfg(feature = "hotpath")]
-        {
-            hotpath::gauge!(match &outcome {
-                HookConfigurationReadOutcomeV1::Bound(_) => "hooks.config.read.bound",
-                HookConfigurationReadOutcomeV1::Missing => "hooks.config.read.missing",
-                HookConfigurationReadOutcomeV1::Stale => "hooks.config.read.stale",
-                HookConfigurationReadOutcomeV1::Corrupted => "hooks.config.read.corrupted",
-                HookConfigurationReadOutcomeV1::Unavailable => "hooks.config.read.unavailable",
-            })
-            .inc(1);
-        }
-        outcome
-    }
-
-    fn load_current_inner(
+    #[tracing::instrument(name = "hooks.config.load", level = "trace", skip_all)]
+    pub fn load_current(
         &self,
-        host: HookHostV1,
+        host: NativeHostIdentityV1,
         now: UtcMicros,
     ) -> HookConfigurationReadOutcomeV1 {
         let snapshot = match self.store.load(host) {
@@ -195,14 +160,19 @@ impl HookConfigurationFileWriterV1 {
     pub fn reader(&self) -> HookConfigurationFileReaderV1 {
         HookConfigurationFileReaderV1::new(self.path.clone())
     }
-}
 
-impl HookConfigurationPublicationStoreV1 for HookConfigurationFileWriterV1 {
-    fn publish(
+    pub fn publish(
         &self,
         snapshot: HookConfigurationSnapshotV1,
     ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError> {
         snapshot.validate()?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or(HookConfigurationPublicationError::Unavailable)?;
+        std::fs::create_dir_all(parent)
+            .and_then(|_| tracedecay_private_fs::make_private_directory(parent))
+            .map_err(|_| HookConfigurationPublicationError::Unavailable)?;
         let current = match read_snapshot(&self.path) {
             Ok(current) => current,
             // This writer is the sole daemon-owned publication authority. A
@@ -242,12 +212,10 @@ impl HookConfigurationFileReaderV1 {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
-}
 
-impl HookConfigurationReadStoreV1 for HookConfigurationFileReaderV1 {
-    fn load(
+    pub fn load(
         &self,
-        _host: HookHostV1,
+        _host: NativeHostIdentityV1,
     ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError> {
         read_snapshot(&self.path)
     }
@@ -278,50 +246,10 @@ fn read_snapshot(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
     use crate::{HookCapabilityV1, HookEventFamily, HookEventSupportV1};
-
-    #[derive(Clone, Default)]
-    struct Store(Arc<Mutex<Option<HookConfigurationSnapshotV1>>>);
-
-    impl HookConfigurationPublicationStoreV1 for Store {
-        fn publish(
-            &self,
-            snapshot: HookConfigurationSnapshotV1,
-        ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError>
-        {
-            let mut current = self.0.lock().unwrap();
-            match current.as_ref() {
-                Some(existing) if existing.revision > snapshot.revision => {
-                    Ok(HookConfigurationPublicationOutcomeV1::StaleRejected)
-                }
-                Some(existing) if existing == &snapshot => {
-                    Ok(HookConfigurationPublicationOutcomeV1::Duplicate)
-                }
-                Some(existing) if existing.revision == snapshot.revision => {
-                    Ok(HookConfigurationPublicationOutcomeV1::StaleRejected)
-                }
-                _ => {
-                    *current = Some(snapshot);
-                    Ok(HookConfigurationPublicationOutcomeV1::Published)
-                }
-            }
-        }
-    }
-
-    impl HookConfigurationReadStoreV1 for Store {
-        fn load(
-            &self,
-            _host: HookHostV1,
-        ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError>
-        {
-            Ok(self.0.lock().unwrap().clone())
-        }
-    }
 
     struct TestDir {
         path: PathBuf,
@@ -353,7 +281,7 @@ mod tests {
             published_at: UtcMicros(1),
             expires_at: UtcMicros(expires_at),
             binding: HookScopeBindingV1 {
-                host: HookHostV1::ClaudeCode,
+                host: NativeHostIdentityV1::ClaudeCode,
                 project_id: [1; 16],
                 repository_id: [2; 16],
                 worktree_id: [3; 16],
@@ -369,8 +297,10 @@ mod tests {
 
     #[test]
     fn publication_replay_rejects_stale_revision_and_preserves_exact_scope() {
-        let store = Store::default();
-        let publisher = HookConfigurationPublisherV1::new(store.clone());
+        let directory = TestDir::new();
+        let path = directory.path.join("hook-config.json");
+        let publisher =
+            HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&path));
         let published = snapshot(2, 100);
         assert_eq!(
             publisher.publish(published.clone()).unwrap(),
@@ -388,39 +318,55 @@ mod tests {
             publisher.publish(snapshot(2, 101)).unwrap(),
             HookConfigurationPublicationOutcomeV1::StaleRejected
         );
-        let restarted_subscriber = HookConfigurationSubscriberV1::new(store);
+        let restarted_subscriber =
+            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(&path));
         assert_eq!(
-            restarted_subscriber.load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+            restarted_subscriber.load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Bound(published)
         );
     }
 
     #[test]
     fn schema_revision_expiry_and_scope_validation_fail_closed() {
-        let store = Store::default();
-        let publisher = HookConfigurationPublisherV1::new(store.clone());
+        let directory = TestDir::new();
+        let path = directory.path.join("hook-config.json");
+        let publisher =
+            HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&path));
         let mut invalid_schema = snapshot(1, 100);
         invalid_schema.schema_version += 1;
         assert_eq!(
             publisher.publish(invalid_schema),
             Err(HookConfigurationPublicationError::InvalidSnapshot)
         );
-        assert!(store.0.lock().unwrap().is_none());
+        assert!(!path.exists());
 
         assert_eq!(
             publisher.publish(snapshot(0, 100)),
             Err(HookConfigurationPublicationError::InvalidSnapshot)
         );
-        let subscriber = HookConfigurationSubscriberV1::new(store.clone());
-        *store.0.lock().unwrap() = Some(snapshot(1, 2));
+        assert!(!path.exists());
+
         assert_eq!(
-            subscriber.load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+            publisher.publish(snapshot(1, 2)).unwrap(),
+            HookConfigurationPublicationOutcomeV1::Published
+        );
+        let subscriber =
+            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(&path));
+        assert_eq!(
+            subscriber.load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Stale
         );
 
-        *store.0.lock().unwrap() = Some(snapshot(1, 100));
+        let live = directory.path.join("live.json");
+        let live_publisher =
+            HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(&live));
         assert_eq!(
-            subscriber.load_current(HookHostV1::Codex, UtcMicros(2)),
+            live_publisher.publish(snapshot(1, 100)).unwrap(),
+            HookConfigurationPublicationOutcomeV1::Published
+        );
+        assert_eq!(
+            HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(&live))
+                .load_current(NativeHostIdentityV1::Codex, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Corrupted
         );
     }
@@ -442,7 +388,7 @@ mod tests {
         assert_eq!(value["revision"], 2);
         assert_eq!(
             HookConfigurationSubscriberV1::new(reader.clone())
-                .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+                .load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Bound(published)
         );
         assert_eq!(
@@ -468,8 +414,46 @@ mod tests {
         fs::write(&path, vec![b'x'; MAX_HOOK_CONFIGURATION_BYTES + 1]).unwrap();
         assert_eq!(
             HookConfigurationSubscriberV1::new(reader)
-                .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+                .load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Corrupted
         );
+    }
+
+    /// Linked worktrees share their project's `data_root`, and each project
+    /// runtime publishes with `revision = now`, so the worktree opened later
+    /// always carries the higher revision. A publication authority keyed only
+    /// by host would let that later worktree replace the earlier one's binding
+    /// in place, and every hook in the earlier worktree would then read, and
+    /// stamp its envelopes with, a foreign worktree identity.
+    #[test]
+    fn a_later_worktree_publication_does_not_replace_an_earlier_worktree_binding() {
+        let data_root = TestDir::new();
+        let host = NativeHostIdentityV1::ClaudeCode;
+        let earlier = snapshot(10, 100);
+        let mut later = snapshot(11, 100);
+        later.binding.worktree_id = [7; 16];
+        assert_ne!(earlier.binding.worktree_id, later.binding.worktree_id);
+        assert!(earlier.revision < later.revision);
+
+        for snapshot in [earlier.clone(), later.clone()] {
+            let path = hook_configuration_path(&data_root.path, snapshot.binding.worktree_id, host);
+            assert_eq!(
+                HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(path))
+                    .publish(snapshot)
+                    .unwrap(),
+                HookConfigurationPublicationOutcomeV1::Published
+            );
+        }
+
+        for expected in [earlier, later] {
+            let path = hook_configuration_path(&data_root.path, expected.binding.worktree_id, host);
+            assert_eq!(
+                HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(path))
+                    .load_current(host, UtcMicros(2)),
+                HookConfigurationReadOutcomeV1::Bound(expected.clone()),
+                "worktree {:?} must keep its own live binding",
+                expected.binding.worktree_id
+            );
+        }
     }
 }

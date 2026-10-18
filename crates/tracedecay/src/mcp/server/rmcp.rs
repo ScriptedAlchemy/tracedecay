@@ -1,596 +1,796 @@
-//! `rmcp` 3.x adapter for the authenticated `TraceDecay` MCP surface.
-//!
-//! The daemon owns authentication, bounded framing, project selection, and
-//! replacement/retirement. Once that boundary selected a project server, this
-//! adapter delegates standard MCP requests to the existing catalog and handler
-//! authority through `rmcp`'s typed server callbacks.
+//! Root type aliases for the transport-owned MCP adapter. Production
+//! composes `tracedecay_mcp::server::RmcpConnectionAdapter` directly over
+//! `ProductionMcpConnectionContext` in `daemon::connection_serving`.
 
+#[cfg(test)]
 use std::sync::Arc;
 
-use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, CustomNotification, ErrorCode,
-    ErrorData, Implementation, InitializeRequestParams, InitializeResult, ListResourcesResult,
-    ListToolsResult, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
-    ServerCapabilities, ServerInfo,
-};
-use rmcp::service::{NotificationContext, RequestContext};
-use rmcp::{RoleServer, ServerHandler};
-use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
-use tokio::sync::{RwLock, Semaphore};
+#[cfg(test)]
+use tracedecay_mcp::server::RmcpConnectionAdapter;
+#[cfg(test)]
+use tracedecay_mcp::transport::JsonRpcResponse;
 
-use tracedecay_mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+#[cfg(test)]
+use super::McpServer;
+#[cfg(test)]
+use super::connection::ProductionMcpConnectionContext;
+#[cfg(test)]
+use super::routing::SelectedProjectResponseLease;
 
-use super::{ConnectionRouteState, McpServer};
-
-/// Per-RMCP-connection handoff from handler completion to the transport write.
-///
-/// A selected project response owns a read lease from its exact target server.
-/// `rmcp` separates handler completion from response serialization, so the
-/// lease must cross that gap keyed by the JSON-RPC request id. The transport
-/// removes it exactly once when it sends or suppresses the response.
-#[derive(Clone, Default)]
-pub(crate) struct RmcpSelectedProjectResponseAuthority {
-    leases: Arc<
-        std::sync::Mutex<
-            std::collections::HashMap<String, super::routing::SelectedProjectResponseLease>,
-        >,
-    >,
-}
-
-impl RmcpSelectedProjectResponseAuthority {
-    fn request_key(id: &Value) -> tracedecay_domain::errors::Result<String> {
-        if id.is_null() {
-            return Err(tracedecay_domain::errors::TraceDecayError::project_route(
-                "project_route_unavailable",
-                true,
-                "selected RMCP response has no request identity",
-            ));
-        }
-        serde_json::to_string(id).map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "project_route_unavailable",
-                true,
-                format!("selected RMCP response identity is invalid: {error}"),
-            )
-        })
-    }
-
-    pub(crate) fn retain(
-        &self,
-        id: &Value,
-        lease: super::routing::SelectedProjectResponseLease,
-    ) -> tracedecay_domain::errors::Result<()> {
-        let key = Self::request_key(id)?;
-        let mut leases = self.leases.lock().map_err(|_| {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                "project_route_unavailable",
-                true,
-                "selected RMCP response authority is poisoned during handler handoff",
-            )
-        })?;
-        if leases.contains_key(&key) {
-            return Err(tracedecay_domain::errors::TraceDecayError::project_route(
-                "project_route_unavailable",
-                true,
-                "selected RMCP response identity is already awaiting transport delivery",
-            ));
-        }
-        leases.insert(key, lease);
-        Ok(())
-    }
-
-    pub(crate) fn take(
-        &self,
-        id: Option<&Value>,
-    ) -> tracedecay_domain::errors::Result<Option<super::routing::SelectedProjectResponseLease>>
-    {
-        let Some(id) = id else {
-            return Ok(None);
-        };
-        // JSON-RPC error responses may legitimately carry `id: null` when no
-        // request identity could be recovered. They cannot correspond to a
-        // retained selected-project lease, so leave them deliverable through
-        // the ordinary connection lifecycle rather than fabricating a route
-        // authority failure.
-        if id.is_null() {
-            return Ok(None);
-        }
-        let key = Self::request_key(id)?;
-        self.leases
-            .lock()
-            .map_err(|_| {
-                tracedecay_domain::errors::TraceDecayError::project_route(
-                    "project_route_unavailable",
-                    true,
-                    "selected RMCP response authority is poisoned during transport delivery",
-                )
-            })
-            .map(|mut leases| leases.remove(&key))
-    }
-}
-
-/// Allows daemon routing to enrich the legacy `initialize` response without
-/// coupling this MCP module to daemon route types.
 pub(crate) type RmcpInitializeResponseDecorator =
-    Arc<dyn Fn(&mut JsonRpcResponse) + Send + Sync + 'static>;
+    tracedecay_mcp::server::RmcpInitializeResponseDecorator;
+#[cfg(test)]
+pub(crate) type RmcpSelectedProjectResponseAuthority =
+    tracedecay_mcp::server::RmcpSelectedProjectResponseAuthority<SelectedProjectResponseLease>;
+#[cfg(test)]
+pub(crate) type RmcpWorkDeliverySettlement = tracedecay_mcp::server::RmcpWorkDeliverySettlement;
 
-/// Connection-local Work-delivery ledger input for the RMCP transport.
-///
-/// The RMCP request handler finishes before the transport writes its response.
-/// Keeping the pending attempt with the transport makes the write-and-flush
-/// boundary the only place allowed to offer a delivery settlement.
-#[derive(Clone)]
-pub(crate) struct RmcpWorkDeliverySettlement {
-    recorder: Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
-    connection_scope: String,
-}
+#[cfg(test)]
+use tracedecay_mcp::server::{
+    await_dispatch_with_cancellation, project_server_retired_error, rmcp_response_result,
+};
 
-impl RmcpWorkDeliverySettlement {
-    pub(crate) fn new(
-        recorder: Option<
-            Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
-        >,
-        connection_scope: String,
-    ) -> Self {
-        Self {
-            recorder,
-            connection_scope,
-        }
-    }
-
-    pub(crate) fn attempt_for_request(
-        &self,
-        request: &Value,
-    ) -> Option<tracedecay_domain::DeliverySettlementAttemptV1> {
-        self.recorder.as_ref()?;
-        (request.get("method").and_then(Value::as_str) == Some("tools/call")).then_some(())?;
-        let request_id = request.get("id")?;
-        let tool_name = request
-            .get("params")
-            .and_then(|params| params.get("name"))
-            .and_then(Value::as_str)?;
-        crate::mcp::tools::binding::work_operation_for_tool(tool_name)?;
-        let identity = tracedecay_domain::canonical_sha256(&(
-            "tracedecay.mcp-work-delivery.v1",
-            &self.connection_scope,
-            tool_name,
-            request_id,
-        ))
-        .ok()?;
-        let channel = tracedecay_domain::canonical_sha256(&(
-            "tracedecay.mcp-delivery-channel.v1",
-            &self.connection_scope,
-        ))
-        .ok()?;
-        let identity = identity.as_str().trim_start_matches("sha256:");
-        let channel = channel.as_str().trim_start_matches("sha256:");
-        let observed_at = tracedecay_application::clock::now_micros();
-        Some(tracedecay_domain::DeliverySettlementAttemptV1 {
-            owner_event_id: format!("work:mcp-response:{identity}"),
-            event_class: tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
-            channel: tracedecay_domain::DeliveryChannelIdentityV1 {
-                surface: tracedecay_domain::DeliverySurfaceFamilyV1::Mcp,
-                channel_ref: format!("mcp:connection:{channel}"),
-            },
-            work_attempt: None,
-            eligible: 1,
-            valid_at: observed_at,
-            attempted_at: observed_at,
-        })
-    }
-
-    pub(crate) fn settle(
-        &self,
-        attempt: tracedecay_domain::DeliverySettlementAttemptV1,
-        outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
-        drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
-    ) {
-        let Some(recorder) = &self.recorder else {
-            return;
-        };
-        let settlement = tracedecay_domain::DeliverySettlementV1 {
-            settled_at: std::cmp::max(
-                attempt.attempted_at,
-                tracedecay_application::clock::now_micros(),
-            ),
-            attempt,
-            outcome,
-            drop_reason,
-        };
-        match recorder.try_record(settlement) {
-            Ok(tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::Enqueued) => {}
-            Ok(tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::DroppedAtCapacity) => {
-                tracing::warn!("RMCP Work delivery settlement was dropped at recorder capacity");
-            }
-            Err(error) => tracing::warn!(%error, "RMCP Work delivery settlement was refused"),
-        }
-    }
-}
-
-async fn await_dispatch_with_cancellation<F, C, N>(
-    handling: F,
-    cancellation: N,
-    mut cancel_registered_request: C,
-) -> Option<F::Output>
-where
-    F: std::future::Future,
-    C: FnMut() -> bool,
-    N: std::future::Future<Output = ()>,
-{
-    tokio::pin!(handling);
-    tokio::pin!(cancellation);
-    tokio::select! {
-        response = &mut handling => Some(response),
-        () = &mut cancellation => {
-            if cancel_registered_request() {
-                Some(handling.await)
-            } else {
-                None
-            }
-        }
-    }
-}
-
-/// Per-connection `rmcp` server facade over the existing `TraceDecay` request
-/// authority.
-pub(crate) struct RmcpConnectionAdapter {
-    server: Arc<McpServer>,
-    connection: RwLock<ConnectionRouteState>,
-    request_admission: Semaphore,
-    memory_request_scope: String,
-    timings_enabled: bool,
-    selected_project_responses: RmcpSelectedProjectResponseAuthority,
-    initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
-    /// The accepted connection's admission slot, captured on the connection task.
-    ///
-    /// `rmcp` runs the request loop on a task it spawns, which does not inherit
-    /// the connection's task-local, so each dispatch re-enters this scope. That
-    /// is what lets a tool call parked on a generation decode hand its admission
-    /// slot back instead of starving tools that need no generation at all.
-    admission: Option<Arc<crate::daemon::ParkableConnectionAdmission>>,
-    /// Resolved from the registered product runtime at construction, because
-    /// `ServerHandler::get_info` is infallible and must not fabricate one.
-    build_version: &'static str,
-}
-
-struct RmcpQueueDepthGuard;
-
-impl RmcpQueueDepthGuard {
-    fn enter() -> Self {
-        hotpath::gauge!("mcp.server.rmcp.queue_depth").inc(1_u64);
-        Self
-    }
-}
-
-impl Drop for RmcpQueueDepthGuard {
-    fn drop(&mut self) {
-        hotpath::gauge!("mcp.server.rmcp.queue_depth").dec(1_u64);
-    }
-}
-
-impl RmcpConnectionAdapter {
-    pub(crate) fn new(
-        server: Arc<McpServer>,
-        timings_enabled: bool,
-        initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
-    ) -> tracedecay_domain::errors::Result<Self> {
-        let connection = server.new_connection_route_state()?;
-        let memory_request_scope = connection.memory_request_scope().to_owned();
-        Ok(Self {
-            server,
-            connection: RwLock::new(connection),
-            request_admission: Semaphore::new(super::connection::MAX_CONCURRENT_CONNECTION_READS),
-            memory_request_scope,
-            timings_enabled,
-            selected_project_responses: RmcpSelectedProjectResponseAuthority::default(),
-            initialize_response_decorator,
-            admission: crate::daemon::current_connection_admission(),
-            build_version: crate::version::build_version()?,
-        })
-    }
-
-    pub(crate) fn work_delivery_settlement(&self) -> RmcpWorkDeliverySettlement {
-        RmcpWorkDeliverySettlement::new(
-            self.server.delivery_settlement_recorder.clone(),
-            self.memory_request_scope.clone(),
-        )
-    }
-
-    pub(crate) fn selected_project_responses(&self) -> RmcpSelectedProjectResponseAuthority {
-        self.selected_project_responses.clone()
-    }
-
-    #[hotpath::measure(label = "mcp.server.rmcp.dispatch_total", future = true)]
-    async fn dispatch(
-        &self,
-        context: RequestContext<RoleServer>,
-        method: &str,
-        params: Option<Value>,
-    ) -> Result<JsonRpcResponse, ErrorData> {
-        let queued_at = std::time::Instant::now();
-        let queued = RmcpQueueDepthGuard::enter();
-        let request_permit = self.acquire_request_permit().await?;
-        drop(queued);
-        hotpath::gauge!("mcp.server.rmcp.queue_wait_us")
-            .set(queued_at.elapsed().as_micros() as u64);
-        // Heap-allocate the admission + dispatch composition: rmcp's generated
-        // `handle_request` polls every handler-method future inline, and the
-        // combined resident frame overflows the worker stack in perf-profile
-        // layouts when this mega-future is embedded by value.
-        let result = Box::pin(crate::daemon::in_connection_admission(
-            self.admission.clone(),
-            self.dispatch_admitted(context, method, params),
-        ))
-        .await;
-        drop(request_permit);
-        result
-    }
-
-    #[hotpath::measure(label = "mcp.server.rmcp.queue_wait", future = true)]
-    async fn acquire_request_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, ErrorData> {
-        self.request_admission
-            .acquire()
-            .await
-            .map_err(|error| ErrorData::internal_error(error.to_string(), None))
-    }
-
-    #[hotpath::measure(label = "mcp.server.rmcp.dispatch", future = true)]
-    async fn dispatch_admitted(
-        &self,
-        context: RequestContext<RoleServer>,
-        method: &str,
-        params: Option<Value>,
-    ) -> Result<JsonRpcResponse, ErrorData> {
-        let request_id = context.id;
-        let request_cancellation = context.ct;
-        let id = serde_json::to_value(request_id)
-            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_owned(),
-            id: Some(id.clone()),
-            method: method.to_owned(),
-            params,
-        };
-        if super::connection::request_is_independent_read(&request) {
-            let ordering_guard = self.connection.read().await;
-            let mut request_connection = ordering_guard.fork_for_independent_read();
-            let result = self
-                .dispatch_request_with_connection(
-                    request,
-                    id,
-                    request_cancellation,
-                    &mut request_connection,
-                )
-                .await;
-            drop(ordering_guard);
-            return result;
-        }
-        let mut connection = self.connection.write().await;
-        self.dispatch_request_with_connection(request, id, request_cancellation, &mut connection)
-            .await
-    }
-
-    #[hotpath::measure(label = "mcp.server.rmcp.dispatch_request", future = true)]
-    async fn dispatch_request_with_connection(
-        &self,
-        request: JsonRpcRequest,
-        id: Value,
-        request_cancellation: tokio_util::sync::CancellationToken,
-        connection: &mut ConnectionRouteState,
-    ) -> Result<JsonRpcResponse, ErrorData> {
-        let pre_cancelled = request_cancellation.is_cancelled();
-        let response = if pre_cancelled {
-            Some(
-                self.server
-                    .handle_request_for_connection(&request, self.timings_enabled, connection, true)
-                    .await,
-            )
-        } else {
-            await_dispatch_with_cancellation(
-                self.server.handle_request_for_connection(
-                    &request,
-                    self.timings_enabled,
-                    connection,
-                    false,
-                ),
-                request_cancellation.cancelled(),
-                || {
-                    self.server
-                        .cancel_application_surface_request(&id, &self.memory_request_scope)
-                },
-            )
-            .await
-        }
-        .ok_or_else(|| {
-            ErrorData::new(
-                ErrorCode(-32800),
-                "MCP request cancelled",
-                Some(json!({"reason_code": "request_cancelled"})),
-            )
-        })?
-        .ok_or_else(|| ErrorData::internal_error("MCP request did not produce a response", None))?;
-        let selected_response_lease = connection.take_selected_response_lease();
-        if selected_response_lease
-            .as_ref()
-            .is_some_and(crate::mcp::server::routing::SelectedProjectResponseLease::is_revoked)
-        {
-            return Err(project_server_retired_error());
-        }
-        if let Some(selected_response_lease) = selected_response_lease {
-            self.selected_project_responses
-                .retain(&id, selected_response_lease)
-                .map_err(|error| {
-                    ErrorData::internal_error(
-                        error.to_string(),
-                        Some(json!({
-                            "reason_code": "project_route_unavailable",
-                            "retryable": true,
-                        })),
-                    )
-                })?;
-        }
-        Ok(response)
-    }
-
-    #[hotpath::measure(label = "mcp.server.rmcp.notification", future = true)]
-    async fn dispatch_notification(&self, method: String, params: Option<Value>) {
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_owned(),
-            id: None,
-            method,
-            params,
-        };
-        let mut connection = self.connection.write().await;
-        let _ = self
-            .server
-            .handle_request_for_connection(&request, self.timings_enabled, &mut connection, false)
-            .await;
-    }
-
-    fn cancel_request(&self, request_id: Option<rmcp::model::RequestId>) -> bool {
-        request_id
-            .and_then(|request_id| serde_json::to_value(request_id).ok())
-            .is_some_and(|request_id| {
-                self.server
-                    .cancel_application_surface_request(&request_id, &self.memory_request_scope)
-            })
-    }
-
-    fn response_result<T: DeserializeOwned>(response: JsonRpcResponse) -> Result<T, ErrorData> {
-        match (response.result, response.error) {
-            (Some(result), None) => serde_json::from_value(result)
-                .map_err(|error| ErrorData::internal_error(error.to_string(), None)),
-            (_, Some(error)) => Err(rmcp_error(error)),
-            _ => Err(ErrorData::internal_error(
-                "TraceDecay MCP handler returned neither result nor error",
-                None,
-            )),
-        }
-    }
-}
-
-impl ServerHandler for RmcpConnectionAdapter {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_resources()
-                .enable_tools()
-                .build(),
-        )
-        .with_server_info(Implementation::new("tracedecay", self.build_version))
-    }
-
-    #[hotpath::skip]
-    async fn initialize(
-        &self,
-        request: InitializeRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<InitializeResult, ErrorData> {
-        let params = serde_json::to_value(request)
-            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-        let mut response = self.dispatch(context, "initialize", Some(params)).await?;
-        if let Some(decorate) = &self.initialize_response_decorator {
-            decorate(&mut response);
-        }
-        Self::response_result(response)
-    }
-
-    #[hotpath::skip]
-    async fn list_tools(
-        &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, ErrorData> {
-        Self::response_result(self.dispatch(context, "tools/list", None).await?)
-    }
-
-    #[hotpath::skip]
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, ErrorData> {
-        let params = serde_json::to_value(request)
-            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-        Self::response_result::<CallToolResult>(
-            self.dispatch(context, "tools/call", Some(params)).await?,
-        )
-        .map(Into::into)
-    }
-
-    #[hotpath::skip]
-    async fn list_resources(
-        &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListResourcesResult, ErrorData> {
-        Self::response_result(self.dispatch(context, "resources/list", None).await?)
-    }
-
-    #[hotpath::skip]
-    async fn read_resource(
-        &self,
-        request: ReadResourceRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResponse, ErrorData> {
-        let params = serde_json::to_value(request)
-            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-        Self::response_result::<ReadResourceResult>(
-            self.dispatch(context, "resources/read", Some(params))
-                .await?,
-        )
-        .map(Into::into)
-    }
-
-    #[hotpath::skip]
-    async fn on_cancelled(
-        &self,
-        notification: rmcp::model::CancelledNotificationParam,
-        _context: NotificationContext<RoleServer>,
-    ) {
-        let _ = self.cancel_request(notification.request_id);
-    }
-
-    #[hotpath::skip]
-    async fn on_custom_notification(
-        &self,
-        notification: CustomNotification,
-        _context: NotificationContext<RoleServer>,
-    ) {
-        self.dispatch_notification(notification.method, notification.params)
-            .await;
-    }
-}
-
-fn rmcp_error(error: JsonRpcError) -> ErrorData {
-    ErrorData::new(ErrorCode(error.code), error.message, error.data)
-}
-
-fn project_server_retired_error() -> ErrorData {
-    ErrorData::internal_error(
-        "tool project route failed: project server was retired",
-        Some(json!({
-            "reason_code": "project_server_retired",
-            "retryable": true,
-            "detail": "the retained project server was replaced or revoked; retry against the current owner",
-        })),
-    )
-}
+#[cfg(test)]
+use rmcp::model::{ErrorCode, InitializeResult, ListToolsResult};
+#[cfg(test)]
+use serde_json::Value;
+#[cfg(test)]
+use tracedecay_mcp::transport::JsonRpcRequest;
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use rmcp::model::{CallToolResponse, CallToolResult};
+    use rmcp::model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ClientConfig, ProtocolVersion,
+        ReadResourceRequestParams,
+    };
+    use rmcp::transport::{IntoTransport, Transport};
+    use rmcp::{RoleClient, ServiceExt};
     use serde_json::json;
+    use tracedecay_daemon_protocol::{BrokerListener, DaemonEndpoint, default_loopback_endpoint};
+    use tracedecay_mcp::BrokerStreamTransport;
 
     use super::*;
+
+    /// The same composition `daemon::connection_serving` performs.
+    fn production_adapter(
+        server: &Arc<McpServer>,
+        initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
+    ) -> RmcpConnectionAdapter<ProductionMcpConnectionContext> {
+        RmcpConnectionAdapter::new(
+            ProductionMcpConnectionContext::with_activity(Arc::clone(server), None),
+            false,
+            initialize_response_decorator,
+            server.delivery_settlement_recorder.clone(),
+        )
+        .expect("RMCP adapter")
+    }
+
+    /// A daemon-side broker stream and its connected client stream.
+    async fn broker_pair() -> (BrokerStreamTransport, tokio::net::TcpStream) {
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind loopback broker");
+        let DaemonEndpoint::Loopback(address) = bound else {
+            panic!("loopback bind returned {bound}");
+        };
+        let client = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect broker client");
+        let server = listener.accept().await.expect("accept broker client");
+        (BrokerStreamTransport::new(server), client)
+    }
+
+    /// Serves `adapter` on the daemon side of a fresh broker pair.
+    async fn serve_session(
+        adapter: RmcpConnectionAdapter<ProductionMcpConnectionContext>,
+    ) -> (tokio::task::JoinHandle<()>, tokio::net::TcpStream) {
+        let (transport, client) = broker_pair().await;
+        let serving = tokio::spawn(async move {
+            adapter
+                .serve(transport, std::future::pending())
+                .await
+                .expect("serve MCP session");
+        });
+        (serving, client)
+    }
+
+    /// Records the client's wire traffic in both directions.
+    struct RecordingTransport<T> {
+        inner: T,
+        sent: Arc<std::sync::Mutex<Vec<Value>>>,
+        received: Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+
+    impl<T> Transport<RoleClient> for RecordingTransport<T>
+    where
+        T: Transport<RoleClient> + 'static,
+    {
+        type Error = T::Error;
+
+        fn name() -> Cow<'static, str> {
+            "rmcp-wire-recording".into()
+        }
+
+        fn send(
+            &mut self,
+            item: rmcp::model::ClientJsonRpcMessage,
+        ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send + 'static
+        {
+            let encoded = serde_json::to_value(&item).expect("record client wire message");
+            self.sent
+                .lock()
+                .expect("client wire recording lock")
+                .push(encoded);
+            self.inner.send(item)
+        }
+
+        fn receive(
+            &mut self,
+        ) -> impl std::future::Future<Output = Option<rmcp::model::ServerJsonRpcMessage>> + Send
+        {
+            let received = Arc::clone(&self.received);
+            let receive = self.inner.receive();
+            async move {
+                let message = receive.await;
+                if let Some(message) = &message {
+                    let encoded =
+                        serde_json::to_value(message).expect("record server wire message");
+                    received
+                        .lock()
+                        .expect("server wire recording lock")
+                        .push(encoded);
+                }
+                message
+            }
+        }
+
+        fn close(
+            &mut self,
+        ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send
+        {
+            self.inner.close()
+        }
+    }
+
+    struct RmcpWireFixture {
+        client: rmcp::service::RunningService<RoleClient, ClientConfig>,
+        server: Arc<McpServer>,
+        client_messages: Arc<std::sync::Mutex<Vec<Value>>>,
+        server_messages: Arc<std::sync::Mutex<Vec<Value>>>,
+        serving: tokio::task::JoinHandle<()>,
+        _repo: tempfile::TempDir,
+        _authority: crate::mcp::server::writer_test_support::WriterTestFixtureAuthority,
+    }
+
+    impl RmcpWireFixture {
+        async fn start(client_config: ClientConfig) -> Self {
+            tracedecay_project::product_runtime::register_fixture_product_runtime();
+            let (cg, repo, authority) =
+                crate::mcp::server::writer_test_support::init_indexed_repo().await;
+            let context =
+                crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+            let server = McpServer::new_with_registered_test_context(context, Vec::new())
+                .await
+                .expect("registered RMCP wire server");
+            let adapter = production_adapter(
+                &server,
+                Some(Arc::new(|response| {
+                    response.result.as_mut().expect("initialize result")["_meta"]["tracedecayInitializeRoute"] = json!({
+                        "projectPath": "/wire/oracle",
+                        "allowInit": false,
+                    });
+                })),
+            );
+            let (serving, client_io) = serve_session(adapter).await;
+            let client_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let server_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let client_transport = RecordingTransport {
+                inner: IntoTransport::<RoleClient, _, _>::into_transport(client_io),
+                sent: Arc::clone(&client_messages),
+                received: Arc::clone(&server_messages),
+            };
+            let client = client_config
+                .serve(client_transport)
+                .await
+                .expect("initialize RMCP client");
+            Self {
+                client,
+                server,
+                client_messages,
+                server_messages,
+                serving,
+                _repo: repo,
+                _authority: authority,
+            }
+        }
+
+        fn last_request(&self) -> JsonRpcRequest {
+            let response_id = self.last_response()["id"].clone();
+            let messages = self
+                .client_messages
+                .lock()
+                .expect("client wire recording lock");
+            let request = messages
+                .iter()
+                .rev()
+                .find(|message| message.get("id") == Some(&response_id))
+                .expect("recorded client request for response");
+            serde_json::from_value(request.clone()).expect("raw request shape")
+        }
+
+        fn last_response(&self) -> Value {
+            self.server_messages
+                .lock()
+                .expect("server wire recording lock")
+                .last()
+                .expect("recorded server response")
+                .clone()
+        }
+
+        async fn assert_last_response_matches_raw_dispatch(&self, decorate_initialize: bool) {
+            let request = self.last_request();
+            let mut expected = self
+                .server
+                .handle_request(&request)
+                .await
+                .expect("raw response");
+            if decorate_initialize {
+                expected.result.as_mut().expect("raw initialize result")["_meta"]["tracedecayInitializeRoute"] = json!({
+                    "projectPath": "/wire/oracle",
+                    "allowInit": false,
+                });
+            }
+            assert_eq!(
+                self.last_response(),
+                serde_json::to_value(expected).expect("serialize raw response"),
+            );
+        }
+
+        async fn shutdown(mut self) {
+            self.client.close().await.expect("close RMCP client");
+            self.serving.await.expect("join RMCP server");
+            self.server.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_initialize_is_refused_typed_and_a_corrected_handshake_still_serves() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        let (cg, repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+        let server = McpServer::new_with_registered_test_context(context, Vec::new())
+            .await
+            .expect("registered RMCP handshake server");
+        let adapter = production_adapter(&server, None);
+        let (serving, client_io) = serve_session(adapter).await;
+
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut client_read = tokio::io::BufReader::new(client_read);
+        let mut line = String::new();
+
+        client_write
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+            .await
+            .expect("send malformed initialize");
+        client_read
+            .read_line(&mut line)
+            .await
+            .expect("read the typed refusal");
+        let refusal: Value = serde_json::from_str(&line).expect("refusal is a JSON-RPC frame");
+        assert_eq!(refusal["id"], json!(1), "the refusal answers the sent id");
+        assert_eq!(
+            refusal["error"]["code"],
+            json!(-32602),
+            "a malformed initialize is invalid params, not a dropped connection: {line}"
+        );
+
+        line.clear();
+        client_write
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await
+            .expect("send the pipelined initialized notification");
+        client_write
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"handshake-retry","version":"0"}}}
+"#,
+            )
+            .await
+            .expect("send corrected initialize");
+        client_read
+            .read_line(&mut line)
+            .await
+            .expect("read the initialize result");
+        let initialized: Value =
+            serde_json::from_str(&line).expect("initialize is a JSON-RPC frame");
+        assert_eq!(initialized["id"], json!(2));
+        assert!(
+            initialized["result"]["serverInfo"]["name"].is_string(),
+            "the connection stayed usable for a corrected handshake: {line}"
+        );
+
+        drop(client_write);
+        drop(client_read);
+        serving.await.expect("join RMCP server");
+        server.shutdown().await;
+        drop(repo);
+    }
+
+    /// MCP lets either party ping at any time; a stateless SEP-2575 connection
+    /// must still answer one after it has served another request.
+    #[tokio::test]
+    async fn stateless_connection_answers_ping_after_an_earlier_request() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        let (cg, repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+        let server = McpServer::new_with_registered_test_context(context, Vec::new())
+            .await
+            .expect("registered RMCP stateless server");
+        let adapter = production_adapter(&server, None);
+        let (serving, client_io) = serve_session(adapter).await;
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut client_read = tokio::io::BufReader::new(client_read);
+        let stateless_line = |request: Value| {
+            let mut request: JsonRpcRequest =
+                serde_json::from_value(request).expect("JSON-RPC request fixture");
+            assert!(tracedecay_mcp::server::attach_stateless_request_context(
+                &mut request
+            ));
+            format!(
+                "{}\n",
+                serde_json::to_string(&request).expect("stateless request")
+            )
+        };
+
+        client_write
+            .write_all(
+                stateless_line(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+                    .as_bytes(),
+            )
+            .await
+            .expect("send stateless tools/list");
+        let mut line = String::new();
+        client_read
+            .read_line(&mut line)
+            .await
+            .expect("read tools/list response");
+        let listed: Value = serde_json::from_str(&line).expect("tools/list frame");
+        assert_eq!(listed["id"], json!(1), "{line}");
+        assert!(listed["result"]["tools"].is_array(), "{line}");
+        for field in ["resultType", "ttlMs", "cacheScope"] {
+            assert!(
+                listed["result"].get(field).is_none(),
+                "stateless requests speak a handshake revision, so {field} is absent: {line}"
+            );
+        }
+
+        for (request, id) in [
+            (
+                stateless_line(json!({"jsonrpc": "2.0", "id": 2, "method": "ping"})),
+                2,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#.to_owned() + "\n",
+                3,
+            ),
+        ] {
+            client_write
+                .write_all(request.as_bytes())
+                .await
+                .expect("send ping");
+            line.clear();
+            client_read
+                .read_line(&mut line)
+                .await
+                .expect("read ping response");
+            assert_eq!(
+                line.trim_end(),
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{}}}}"#),
+                "a later ping on a stateless connection must get an empty result: {request}",
+            );
+        }
+
+        drop(client_write);
+        drop(client_read);
+        serving.await.expect("join RMCP server");
+        server.shutdown().await;
+        drop(repo);
+    }
+
+    #[tokio::test]
+    async fn rmcp_wire_matrix_matches_raw_dispatch_initialize_tools_and_resources() {
+        let fixture = RmcpWireFixture::start(ClientConfig::default()).await;
+        let requested = fixture
+            .last_request()
+            .params
+            .as_ref()
+            .and_then(|params| params.get("protocolVersion"))
+            .cloned()
+            .expect("RMCP client initialize names a protocol version");
+        assert_eq!(
+            requested,
+            json!(ProtocolVersion::LATEST),
+            "a default RMCP client asks for the newest revision even over initialize",
+        );
+        assert_eq!(
+            fixture.last_response()["result"]["protocolVersion"],
+            json!(ProtocolVersion::LATEST_WITH_INITIALIZE),
+            "a revision without a handshake negotiates down to the newest one that has it",
+        );
+        assert_eq!(
+            fixture.last_response()["result"]["_meta"]["tracedecayInitializeRoute"],
+            json!({"projectPath": "/wire/oracle", "allowInit": false}),
+            "rmcp InitializeResult must preserve daemon-selected route metadata",
+        );
+        fixture
+            .assert_last_response_matches_raw_dispatch(true)
+            .await;
+
+        fixture
+            .client
+            .list_tools(None)
+            .await
+            .expect("RMCP tools/list");
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
+
+        fixture
+            .client
+            .call_tool(
+                CallToolRequestParams::new("tracedecay_status").with_arguments(
+                    json!({"admission_only": true, "format": "json"})
+                        .as_object()
+                        .cloned()
+                        .expect("object arguments"),
+                ),
+            )
+            .await
+            .expect("RMCP tools/call success");
+        assert_eq!(
+            fixture.last_response()["result"]["content"][0]["type"],
+            json!("text"),
+        );
+        assert!(
+            fixture.last_response()["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "RMCP success must preserve the real handler's text content",
+        );
+
+        for (tool, arguments, code) in [
+            ("tracedecay_not_a_tool", json!({}), "unknown_tool"),
+            (
+                "tracedecay_health_read",
+                json!({"surprise": true}),
+                "application_surface_invalid_request",
+            ),
+        ] {
+            fixture
+                .client
+                .call_tool(
+                    CallToolRequestParams::new(tool)
+                        .with_arguments(arguments.as_object().cloned().expect("object arguments")),
+                )
+                .await
+                .expect("a settled route refusal is a completed tool result");
+            let response = fixture.last_response();
+            assert_eq!(response.get("error"), None, "{response}");
+            assert_eq!(response["result"]["isError"], json!(true), "{response}");
+            let problem = &response["result"]["structuredContent"]["problem"];
+            assert_eq!(problem["kind"], json!("invalid_request"), "{response}");
+            assert_eq!(problem["retryable"], json!(false), "{response}");
+            assert_eq!(problem["diagnostic"]["code"], json!(code), "{response}");
+        }
+
+        fixture
+            .client
+            .call_tool(
+                CallToolRequestParams::new("tracedecay_multi_root_scope_set_read")
+                    .with_arguments(serde_json::Map::new()),
+            )
+            .await
+            .expect("semantic refusal stays a completed tool result");
+        assert_eq!(
+            fixture.last_response()["result"]["isError"],
+            json!(true),
+            "typed refusals must remain successful JSON-RPC responses with isError=true",
+        );
+
+        fixture
+            .client
+            .list_resources(None)
+            .await
+            .expect("RMCP resources/list");
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
+
+        fixture
+            .client
+            .read_resource(ReadResourceRequestParams::new("tracedecay://schema"))
+            .await
+            .expect("RMCP resources/read");
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
+
+        let unknown_resource = fixture
+            .client
+            .read_resource(ReadResourceRequestParams::new(
+                "tracedecay://not-a-resource",
+            ))
+            .await
+            .expect_err("an unknown resource URI must be a JSON-RPC error");
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
+        assert_eq!(
+            fixture.last_response()["error"]["code"],
+            json!(-32602),
+            "the typed resources/read refusal keeps the raw invalid-params code",
+        );
+        assert!(
+            unknown_resource
+                .to_string()
+                .contains("unknown resource URI: tracedecay://not-a-resource"),
+            "the typed rmcp client must receive the handler's own refusal text",
+        );
+
+        for index in 0..8 {
+            let seeded = fixture
+                .client
+                .call_tool(
+                    CallToolRequestParams::new("tracedecay_fact_store_add").with_arguments(
+                        json!({
+                            "content": format!(
+                                "RMCP_WIRE_ORACLE_{index:02}: {}",
+                                "large response remains retrievable ".repeat(180),
+                            ),
+                            "category": "project",
+                            "trust": 0.9,
+                            "format": "json",
+                        })
+                        .as_object()
+                        .cloned()
+                        .expect("object arguments"),
+                    ),
+                )
+                .await
+                .expect("seed large RMCP tools/call");
+            assert_ne!(
+                seeded.is_error,
+                Some(true),
+                "large-response seed {index} was refused: {seeded:?}"
+            );
+        }
+        let listed = fixture
+            .client
+            .call_tool(
+                CallToolRequestParams::new("tracedecay_fact_store_list").with_arguments(
+                    json!({
+                        "category": "project",
+                        "min_trust": 0.0,
+                        "limit": 200,
+                        "format": "json",
+                    })
+                    .as_object()
+                    .cloned()
+                    .expect("object arguments"),
+                ),
+            )
+            .await
+            .expect("large RMCP tools/call");
+        assert_ne!(
+            listed.is_error,
+            Some(true),
+            "large-response list was refused: {listed:?}"
+        );
+        let large_response = fixture.last_response();
+        let large_text = large_response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("large response text");
+        let large_envelope: Value =
+            serde_json::from_str(large_text).expect("large response truncation envelope");
+        assert_eq!(
+            large_envelope["truncated"],
+            json!(true),
+            "large-response list did not return a truncation envelope: {listed:?}"
+        );
+        assert!(
+            large_envelope["original_chars"]
+                .as_u64()
+                .unwrap_or_default()
+                >= u64::try_from(tracedecay_mcp::MAX_RESPONSE_CHARS)
+                    .expect("response budget fits u64"),
+            "large response must cross the production response budget",
+        );
+        assert!(
+            large_envelope["handle"]
+                .as_str()
+                .is_some_and(|handle| handle.starts_with("rh_")),
+            "large response must retain a typed retrieval handle",
+        );
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rmcp_initialize_echoes_a_supported_handshake_revision() {
+        let fixture = RmcpWireFixture::start(
+            ClientConfig::default().with_protocol_version(ProtocolVersion::V_2025_06_18),
+        )
+        .await;
+        assert_eq!(
+            fixture.last_response()["result"]["protocolVersion"],
+            json!("2025-06-18"),
+        );
+        fixture
+            .assert_last_response_matches_raw_dispatch(true)
+            .await;
+        fixture.shutdown().await;
+    }
+
+    /// The session lifts wire `params._meta` into the request context; the
+    /// caller deadline it carries must still reach dispatch as on the raw path.
+    #[tokio::test]
+    async fn rmcp_tool_call_honours_the_request_meta_caller_deadline() {
+        let fixture = RmcpWireFixture::start(ClientConfig::default()).await;
+        let mut params = CallToolRequestParams::new("tracedecay_status").with_arguments(
+            json!({"admission_only": true, "format": "json"})
+                .as_object()
+                .cloned()
+                .expect("object arguments"),
+        );
+        params.meta = Some(rmcp::model::RequestMetaObject::from(
+            rmcp::model::MetaObject(
+                tracedecay_mcp::tool_call_deadline_meta(tracedecay_domain::UtcMicros(1))
+                    .as_object()
+                    .cloned()
+                    .expect("deadline meta object"),
+            ),
+        ));
+        let elapsed = fixture.client.call_tool(params).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
+        assert!(
+            elapsed.is_err()
+                || elapsed
+                    .as_ref()
+                    .is_ok_and(|result| result.is_error == Some(true)),
+            "an elapsed caller deadline must not complete as a success: {:?}",
+            fixture.last_response()
+        );
+        fixture.shutdown().await;
+    }
+
+    /// Raw JSON-RPC dispatch frames must stay byte-for-byte what they were
+    /// before the typed envelope: the envelope is an internal representation,
+    /// never a wire change. These are the shapes a host actually parses,
+    /// method refusals, param refusals, the trivial ack, and a resource body,
+    /// pinned as exact serialized frames rather than as structural matches.
+    #[tokio::test]
+    async fn raw_json_rpc_wire_frames_are_unchanged_by_the_typed_envelope() {
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        let (cg, _repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+        let server = McpServer::new_with_registered_test_context(context, Vec::new())
+            .await
+            .expect("registered raw wire server");
+
+        for (request_line, expected) in [
+            (
+                r#"{"jsonrpc":"2.0","id":1,"method":"nope"}"#,
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found: nope"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"missing 'uri' in resources/read params"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"tracedecay://nope"}}"#,
+                r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"unknown resource URI: tracedecay://nope"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call"}"#,
+                r#"{"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"missing params for tools/call"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"arguments":{}}}"#,
+                r#"{"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"missing 'name' in tools/call params"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":"ack","method":"ping"}"#,
+                r#"{"jsonrpc":"2.0","id":"ack","result":{}}"#,
+            ),
+        ] {
+            let request: JsonRpcRequest =
+                serde_json::from_str(request_line).expect("raw request line");
+            let response = server.handle_request(&request).await.expect("raw response");
+            assert_eq!(
+                serde_json::to_string(&response).expect("serialize raw response"),
+                expected,
+                "raw wire frame changed for {request_line}",
+            );
+        }
+
+        // A resource body is too large to pin whole; its frame *shape*, field
+        // order included, is the part hosts depend on.
+        let schema_request: JsonRpcRequest = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"tracedecay://schema"}}"#,
+        )
+        .expect("raw request line");
+        let schema = serde_json::to_string(
+            &server
+                .handle_request(&schema_request)
+                .await
+                .expect("raw response"),
+        )
+        .expect("serialize raw response");
+        assert!(
+            schema.starts_with(
+                r#"{"jsonrpc":"2.0","id":6,"result":{"contents":[{"mimeType":"text/markdown","text":"#
+            ) && schema.ends_with(r#","uri":"tracedecay://schema"}]}}"#),
+            "raw resources/read frame shape changed: {schema}",
+        );
+        let parsed: Value = serde_json::from_str(&schema).expect("schema frame");
+        let text = parsed["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("schema text");
+        let authority =
+            tracedecay_runtime_core::db::migrations::render_expected_final_schema_markdown()
+                .expect("canonical schema");
+        assert_eq!(
+            text, authority,
+            "schema resource must be the migration inventory, not a second document"
+        );
+
+        // Notifications stay responseless on raw dispatch.
+        for notification in [
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#,
+        ] {
+            let request: JsonRpcRequest =
+                serde_json::from_str(notification).expect("raw notification line");
+            assert!(
+                server.handle_request(&request).await.is_none(),
+                "raw notification produced a response: {notification}",
+            );
+        }
+        server.shutdown().await;
+    }
+
+    #[test]
+    fn rmcp_selected_project_retirement_error_is_stable() {
+        let error = project_server_retired_error();
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            error.message,
+            "tool project route failed: project server was retired",
+        );
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "reason_code": "project_server_retired",
+                "retryable": true,
+                "detail": "the retained project server was replaced or revoked; retry against the current owner",
+            })),
+        );
+    }
 
     #[test]
     fn response_conversion_preserves_tool_content_and_rpc_errors() {
         let complete: CallToolResponse =
-            RmcpConnectionAdapter::response_result::<CallToolResult>(JsonRpcResponse::success(
+            rmcp_response_result::<CallToolResult>(JsonRpcResponse::success(
                 json!(7),
                 json!({"content": [{"type": "text", "text": "ok"}]}),
             ))
@@ -604,14 +804,12 @@ mod tests {
             Some("ok")
         );
 
-        let error = RmcpConnectionAdapter::response_result::<ListToolsResult>(
-            JsonRpcResponse::error_with_data(
-                json!("request"),
-                tracedecay_mcp::transport::ErrorCode::InvalidParams,
-                "invalid arguments".to_owned(),
-                Some(json!({"reason": "missing_query"})),
-            ),
-        )
+        let error = rmcp_response_result::<ListToolsResult>(JsonRpcResponse::error_with_data(
+            json!("request"),
+            tracedecay_mcp::transport::ErrorCode::InvalidParams,
+            "invalid arguments".to_owned(),
+            Some(json!({"reason": "missing_query"})),
+        ))
         .expect_err("error response");
         assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
         assert_eq!(error.message, "invalid arguments");
@@ -619,22 +817,23 @@ mod tests {
     }
 
     #[test]
-    fn adapter_accepts_the_legacy_initialize_response_shape() {
-        crate::product_runtime::register_fixture_product_runtime();
-        let initialized: InitializeResult =
-            RmcpConnectionAdapter::response_result(JsonRpcResponse::success(
-                json!(1),
-                crate::mcp::server::initialize_result("TraceDecay instructions")
-                    .expect("fixture product runtime registered"),
-            ))
-            .expect("rmcp must preserve legacy MCP initialization compatibility");
+    fn adapter_accepts_the_dispatch_initialize_response_shape() {
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        let initialized: InitializeResult = rmcp_response_result(JsonRpcResponse::success(
+            json!(1),
+            crate::mcp::server::initialize_result("TraceDecay instructions", Some("2024-11-05"))
+                .expect("fixture product runtime registered"),
+        ))
+        .expect("rmcp must accept the server's own initialize result shape");
 
+        let observed = serde_json::to_value(&initialized).expect("serialize initialized response");
+        assert_eq!(observed["protocolVersion"], json!("2024-11-05"));
+        assert_eq!(observed["instructions"], json!("TraceDecay instructions"));
+        assert_eq!(observed["serverInfo"]["name"], json!("tracedecay"));
         assert_eq!(
-            serde_json::to_value(&initialized).expect("serialize initialized response")["protocolVersion"],
-            json!("2024-11-05")
+            observed["capabilities"],
+            json!({"tools": {"listChanged": true}, "resources": {}})
         );
-        assert!(initialized.capabilities.tools.is_some());
-        assert!(initialized.capabilities.resources.is_some());
     }
 
     #[tokio::test]
@@ -649,6 +848,7 @@ mod tests {
                 cancel_attempts.fetch_add(1, Ordering::SeqCst);
                 false
             },
+            None,
         )
         .await;
 

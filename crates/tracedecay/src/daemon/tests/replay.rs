@@ -1,13 +1,25 @@
 use super::*;
 
 #[tokio::test]
-async fn projectless_user_session_setup_failure_returns_json_rpc_error() {
+async fn projectless_user_session_setup_failure_is_a_typed_unavailable_terminal() {
     let temp = TempDir::new().unwrap();
     let profile_root = temp.path().join("profile");
-    // A real profile identity but no daemon database scope: setup passes the
-    // identity gate and must then surface the registered-authority route
-    // failure as JSON-RPC instead of hanging or panicking.
+    // A real profile identity whose registered profile-session store cannot be
+    // opened: setup passes the identity gate and must then surface the
+    // registered-authority route failure as the typed unavailable terminal of
+    // the profile retained owner, instead of hanging or panicking.
+    //
+    // The unopenable store is created by putting a directory where the
+    // user-sessions database belongs. Merely withholding the daemon database
+    // scope no longer produces a failure here: in a test build
+    // `DatabaseAuthority::for_runtime` grants fixture `Test` authority to any
+    // database under the system temp dir, so the whole retained path succeeds
+    // and the refusal goes unexercised.
     let administration = test_store_administration_for_profile(&profile_root);
+    std::fs::create_dir_all(tracedecay_sessions::runtime::user_sessions_db_path(
+        &profile_root,
+    ))
+    .expect("block the registered profile-session store");
     let identity = test_client_identity_for(profile_root);
     let params = serde_json::json!({
         "name": "tracedecay_lcm_status",
@@ -26,16 +38,17 @@ async fn projectless_user_session_setup_failure_returns_json_rpc_error() {
     )
     .await;
 
-    let error = response
-        .error
-        .expect("profile setup failure must be returned as JSON-RPC");
-    assert_eq!(error.code, -32603);
-    assert!(
-        error
-            .message
-            .contains("project route error (registered_authority_unavailable)"),
-        "unexpected setup error: {}",
-        error.message
+    let result = response.result.clone().unwrap_or_else(|| {
+        panic!("profile setup failure must be a typed tool result: {response:?}")
+    });
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(
+        result["structuredContent"]["problem"]["kind"], "unavailable",
+        "{result}"
+    );
+    assert_eq!(
+        result["structuredContent"]["problem"]["code"], "registered_authority_unavailable",
+        "{result}"
     );
 }
 
@@ -91,9 +104,23 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         &first_admin,
     )
     .await;
-    assert!(
-        response.error.is_some(),
-        "blocked canonical apply must retain the daemon-admitted receipt"
+    // The profile owner refuses the receipt it could not apply, and keeps it
+    // retained for replay.
+    let result = response.result.clone().unwrap_or_else(|| {
+        panic!("blocked canonical apply must be the owner's typed refusal: {response:?}")
+    });
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(
+        result["structuredContent"]["problem"]["kind"], "unavailable",
+        "{result}"
+    );
+    assert_eq!(
+        result["structuredContent"]["problem"]["code"], "canonical_admission_failed",
+        "{result}"
+    );
+    assert_eq!(
+        result["structuredContent"]["problem"]["retryable"], true,
+        "{result}"
     );
     assert_eq!(broker.pending_count().await, 1);
     assert!(!profile_root.join("host_receipts.json").exists());
@@ -102,6 +129,26 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     // stopped, so restart replay remains the acceptance path under test.
     drop(broker);
     drop(user_db);
+    // A restart follows the first daemon's store shutdown: its detached
+    // session-runtime workers still write the profile database until joined.
+    first_admin
+        .session_temporal_refresh_schedulers()
+        .shutdown()
+        .await;
+    first_admin.release_profile_session_refresh_services().await;
+    first_admin
+        .prepare_memory_graph_reconciliation_shutdown()
+        .await
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+    first_admin
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
+        .await
+        .unwrap();
     drop(first_admin);
     std::fs::remove_file(&automation_root).unwrap();
 

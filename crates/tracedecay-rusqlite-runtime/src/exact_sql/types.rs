@@ -21,7 +21,7 @@ pub enum ExactSqlValue {
 }
 
 impl ExactSqlValue {
-    pub(super) fn into_rusqlite(self) -> Value {
+    pub(crate) fn into_rusqlite(self) -> Value {
         match self {
             Self::Null => Value::Null,
             Self::Integer(value) => Value::Integer(value),
@@ -158,13 +158,11 @@ pub struct ExactSqlRows {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExactSqlExecuteResult {
     pub changed_rows: usize,
-    pub last_insert_rowid: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExactSqlBatchResult {
     pub changed_rows: u64,
-    pub last_insert_rowid: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,6 +179,7 @@ pub struct ExactSqlRollbackReceipt {
 pub(crate) enum SqlRequest {
     Validate(ExactSqlStatement),
     Execute(ExactSqlStatement),
+    ExecuteReturning(ExactSqlStatement),
     Query(ExactSqlStatement),
     ExecuteBatch(String),
 }
@@ -189,7 +188,7 @@ impl SqlRequest {
     pub(super) fn intent(&self) -> ExactSqlWriteIntent {
         match self {
             Self::Validate(_) => ExactSqlWriteIntent::Validate,
-            Self::Execute(_) => ExactSqlWriteIntent::Execute,
+            Self::Execute(_) | Self::ExecuteReturning(_) => ExactSqlWriteIntent::Execute,
             Self::Query(_) => ExactSqlWriteIntent::Query,
             Self::ExecuteBatch(_) => ExactSqlWriteIntent::ExecuteBatch,
         }
@@ -210,7 +209,6 @@ pub enum ExactSqlWriteIntent {
     Execute,
     Query,
     ExecuteBatch,
-    Vacuum,
     BeginTransaction,
     Commit,
 }
@@ -219,7 +217,7 @@ pub enum ExactSqlWriteIntent {
 ///
 /// `Ordinary` is the default for every mutation: one fixed lease, no renewal.
 /// `AuthorizedLongLease` exists for the three write shapes that legitimately
-/// outrun a single lease while continuously making progress — fresh-schema
+/// outrun a single lease while continuously making progress, fresh-schema
 /// installation, real-scale index installation, and full-index bulk
 /// replacement. None of them steps an existing store forward from an older
 /// shape; there is no version ladder behind this policy.
@@ -240,6 +238,23 @@ pub(crate) enum TransactionPolicy {
 pub(crate) enum ExecutionPolicy {
     Bounded,
     AuthorityRevalidated,
+}
+
+/// How long one read-snapshot statement may run.
+///
+/// `Request` carries the ordinary per-statement deadline, which keeps one
+/// caller from holding a pooled reader indefinitely. `Convergence` removes it
+/// for schema-convergence audits whose single statements scan a whole table:
+/// on a large store such a scan cannot fit any fixed request deadline, and an
+/// audit interrupted at the same statement on every open never converges.
+/// Reader shutdown still interrupts a convergence statement. `Until` replaces
+/// the per-statement deadline with one instant shared by every statement, so
+/// a diagnostic audit made of many statements is bounded as a whole.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactSqlStatementBudget {
+    Request,
+    Convergence,
+    Until(std::time::Instant),
 }
 
 pub trait ExactSqlWriteAuthority: Send + Sync {
@@ -307,10 +322,26 @@ impl fmt::Display for MemoryReleaseNoOpReason {
     }
 }
 
+/// Why the reader lane declined to admit a request, when nothing failed.
+///
+/// A refusal is an answer about this lane, not about the store. Both variants
+/// leave the request servable by another lane, which is what separates them
+/// from [`ExactSqlError::ReaderUnavailable`], where a reader itself failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactSqlReaderRefusalV1 {
+    /// Every lease was taken for the whole admission budget. Waiting longer
+    /// can still succeed.
+    Saturated,
+    /// The pool is draining and will admit nothing further. Waiting cannot
+    /// succeed.
+    Draining,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExactSqlError {
     AuthorityMismatch,
     AuthorityDenied(String),
+    IsolatedSemanticEvaluationAuthorityClosed,
     InvalidAttachment,
     InvalidStatement,
     RequestLimitExceeded,
@@ -318,9 +349,17 @@ pub enum ExactSqlError {
     QueryLimitExceeded,
     Busy,
     WriterUnavailable,
+    /// The reader lane declined to admit the request. A caller that can reach
+    /// the data another way may do so; nothing has failed.
+    ReaderRefused(ExactSqlReaderRefusalV1),
+    /// A reader failed, or the pool is gone. A caller must not route around
+    /// this, because the answer it would get elsewhere hides a broken reader.
     ReaderUnavailable(String),
     TransactionClosed,
     TransactionExpired,
+    /// A job body awaited something other than its own statements, so it was
+    /// rolled back rather than hold the writer across the wait.
+    JobAwaitedForeignFuture,
     Sqlite {
         operation: &'static str,
         code: Option<i32>,
@@ -338,6 +377,9 @@ impl fmt::Display for ExactSqlError {
             Self::AuthorityDenied(reason) => {
                 write!(formatter, "exact SQL write authority denied: {reason}")
             }
+            Self::IsolatedSemanticEvaluationAuthorityClosed => {
+                formatter.write_str("isolated semantic evaluation authority is closed")
+            }
             Self::InvalidAttachment => formatter.write_str("exact SQL attachment is invalid"),
             Self::InvalidStatement => formatter.write_str("exact SQL statement is empty"),
             Self::RequestLimitExceeded => {
@@ -351,6 +393,12 @@ impl fmt::Display for ExactSqlError {
             }
             Self::Busy => formatter.write_str("exact SQL channel is busy"),
             Self::WriterUnavailable => formatter.write_str("exact SQL writer is unavailable"),
+            Self::ReaderRefused(ExactSqlReaderRefusalV1::Saturated) => {
+                formatter.write_str("exact SQL reader lane is saturated")
+            }
+            Self::ReaderRefused(ExactSqlReaderRefusalV1::Draining) => {
+                formatter.write_str("exact SQL reader lane is draining")
+            }
             Self::ReaderUnavailable(message) => {
                 write!(formatter, "exact SQL reader is unavailable: {message}")
             }
@@ -358,6 +406,9 @@ impl fmt::Display for ExactSqlError {
                 formatter.write_str("exact SQL transaction is already closed")
             }
             Self::TransactionExpired => formatter.write_str("exact SQL transaction lease expired"),
+            Self::JobAwaitedForeignFuture => {
+                formatter.write_str("exact SQL job awaited a future other than its own statements")
+            }
             Self::Sqlite {
                 operation, message, ..
             } => {

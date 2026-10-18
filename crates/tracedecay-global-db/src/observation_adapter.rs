@@ -2,49 +2,60 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_application::clock::now_micros;
+use tracedecay_contracts::clock::now_micros;
 use tracing::Instrument;
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DurableObservationV1,
-    EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, ManifestDigest,
-    ObservationCollisionOutcomeV1, ObservationIdentityMaterialV1, ObservationScopeV1,
-    PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, SanitizationReceiptV1, canonical_json_bytes_and_sha256,
-    canonical_sha256, classify_observation_collision, is_canonical_payload_revision_replay,
+    CanonicalObservationIdV1, DurableObservationV1, EvidenceAvailabilityV1,
+    GenerationBoundRepositoryProvenanceV1, ManifestDigest, ObservationCollisionOutcomeV1,
+    ObservationIdentityMaterialV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceIdentityV1, PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId,
+    RetrievalAnchorId, RetrievalAnchorRecord, SanitizationReceiptV1, canonical_json_bytes,
+    canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
+    cline_native_source_successor_id, cline_task_native_observation_id,
+    is_canonical_payload_revision_replay, prove_cline_native_source_transition, sha256_hex_suffix,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
+    ObservationIdentityCollisionDispositionV1,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, CommandDigestV1, ConsistencyModeV1, DurabilityClassV1,
-    IdempotencyIdentityV1, ObservationBatchFallbackCause, ObservationBatchPersistOutcome,
-    ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStatus,
-    ObservationProjectionStore, ObservationReadOperationV1, ObservationReadResultV1,
-    ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationStoreResult,
-    OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1, ProjectionCheckpoint,
-    ProjectionPersistOutcome, ProjectionPredecessorConvergence, ProjectionRebuildOutcome,
-    ProjectionStoreResult, RepositoryOperationEnvelopeV1, RepositoryProvenanceAttachmentV1,
-    RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
-    RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
-    RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
-    StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
+    BACKGROUND_BATCH_MAX_BYTES, BACKGROUND_BATCH_MAX_OPERATIONS, CommandDigestV1,
+    ConsistencyModeV1, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
+    DurabilityClassV1, FOREGROUND_BATCH_MAX_BYTES, IdempotencyIdentityV1,
+    ObservationBatchPersistOutcome, ObservationCommitReceipt, ObservationPersistOutcome,
+    ObservationProjectionStatus, ObservationProjectionStore, ObservationReadOperationV1,
+    ObservationReadResultV1, ObservationReplayRequest, ObservationStore, ObservationStoreError,
+    ObservationStoreResult, OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1,
+    ProjectionCheckpoint, ProjectionPersistOutcome, ProjectionPredecessorConvergence,
+    ProjectionRebuildOutcome, ProjectionStoreResult, RepositoryOperationEnvelopeV1,
+    RepositoryProvenanceAttachmentV1, RepositoryReadOperationV1, RepositoryReadResultV1,
+    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StorageRuntimeErrorV1, StoreClientIdV1,
+    StoreIdempotencyKeyV1, StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation,
+    StoredObservationRowV1,
 };
 
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_runtime_core::db::{Database, DatabaseEngineReadSnapshot, DatabaseRuntimeClientV1};
+use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
-    COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL,
-    RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
+    COMMIT_SOURCE_CURSOR_SQL, PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL, READ_CURSOR_ADVANCE_SQL,
+    READ_SOURCE_CURSOR_SQL, RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
+};
+use tracedecay_rusqlite_runtime::repository::{
+    REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS,
 };
 
 /// Observation-store adapter over the already-registered authoritative
 /// runtime. The struct is concrete: the collision tests prove the
-/// terminal-refusal fast path never accesses the retained observation row —
+/// terminal-refusal fast path never accesses the retained observation row,
 /// they corrupt and hide that row after the marker exists, so any later read
-/// fails loudly — not through an adapter seam or test-only port.
+/// fails loudly, not through an adapter seam or test-only port.
 #[derive(Clone)]
 pub struct GlobalDbObservationStore {
     database: Database,
@@ -57,9 +68,10 @@ impl GlobalDbObservationStore {
         Self { database, runtime }
     }
 
-    /// Records a terminal refusal — the marker in
-    /// `observation_admission_refusals` AND the typed `admission_refused`
-    /// coverage advance — in ONE atomic authority transaction, but only when
+    /// Records a terminal refusal, the marker in
+    /// `observation_admission_refusals` AND the typed
+    /// `observation_identity_collision` coverage advance, in ONE atomic
+    /// authority transaction, but only when
     /// the candidate stands at the sequential scan frontier; any other shape
     /// (covered replay, stale expected cursor, gap, generation jump) leaves
     /// every ledger untouched.
@@ -69,24 +81,28 @@ impl GlobalDbObservationStore {
     /// can never orphan a marker whose record the cursor still re-reads. The
     /// frontier is re-verified INSIDE the transaction (exact compare-and-set
     /// against the durable cursor), the advance-ledger row must carry the
-    /// `admission_refused` reason with no receipt, and the cursor moves to
-    /// the advance's next position — executed through the one canonical
+    /// `observation_identity_collision` reason with no receipt, and the cursor moves to
+    /// the advance's next position, executed through the one canonical
     /// cursor-advance statement set
     /// (`tracedecay_rusqlite_runtime::repository::observation_cursor_authority`)
     /// that the runtime write path also executes. No record content is
     /// decoded, derived, or hashed.
-    #[hotpath::skip]
     async fn record_refusal_with_coverage(
         &self,
         write: &AnchoredObservationWrite,
         retained_digest: &PayloadDigestV1,
-        actual_cursor: Option<&ClaudeSourceCursorV1>,
-    ) -> ObservationStoreResult<()> {
+        actual_cursor: Option<&ObservationSourceCursorV1>,
+    ) -> ObservationStoreResult<RefusalCoverageOutcome> {
         const OPERATION: &str = "record refused admission terminal and coverage";
         let candidate = write.observation();
         let identity = candidate.identity();
-        let Some(mut advance) = refused_scan_frontier(write, actual_cursor)? else {
-            return Ok(());
+        let mut advance = match refused_scan_frontier(write, actual_cursor)? {
+            RefusedScanFrontier::AtFrontier(advance) => *advance,
+            RefusedScanFrontier::NotAtFrontier => {
+                return Ok(RefusalCoverageOutcome::NotAtFrontier {
+                    actual: actual_cursor.cloned(),
+                });
+            }
         };
         match (
             write.next_cursor().file_identity(),
@@ -136,7 +152,7 @@ impl GlobalDbObservationStore {
                 let encoded = row
                     .get::<String>(0)
                     .map_err(|error| runtime_storage_error(OPERATION, error))?;
-                serde_json::from_str::<ClaudeSourceCursorV1>(&encoded)
+                serde_json::from_str::<ObservationSourceCursorV1>(&encoded)
                     .map_err(|error| runtime_storage_error(OPERATION, error))
             })
             .transpose()?;
@@ -149,7 +165,9 @@ impl GlobalDbObservationStore {
                 .rollback()
                 .await
                 .map_err(|error| runtime_storage_error(OPERATION, error))?;
-            return Ok(());
+            return Ok(RefusalCoverageOutcome::NotAtFrontier {
+                actual: durable_cursor,
+            });
         }
         transaction
             .execute(
@@ -173,7 +191,7 @@ impl GlobalDbObservationStore {
                     source_json.as_str(),
                     scope_json.as_str(),
                     coverage_json.as_str(),
-                    ObservationCoverageReason::AdmissionRefused.as_str(),
+                    ObservationCoverageReason::ObservationIdentityCollision.as_str(),
                     None::<&str>
                 ],
             )
@@ -206,17 +224,68 @@ impl GlobalDbObservationStore {
         drop(ledger_rows);
         // A coverage row that names any other reason or a receipt is a real
         // cursor-advance failure: roll the WHOLE transaction back so the
-        // marker is not visible either — no orphan, by construction.
+        // marker is not visible either, no orphan, by construction.
         if !cursor_advance_ledger_row_matches(
             ledger.as_ref(),
-            ObservationCoverageReason::AdmissionRefused.as_str(),
+            ObservationCoverageReason::ObservationIdentityCollision.as_str(),
             None,
         ) {
+            let disagreement = if let Some((stored_reason, stored_receipt_id)) = ledger.as_ref() {
+                let authority_receipt = if let Some(stored_receipt_id) =
+                    stored_receipt_id.as_deref()
+                {
+                    let mut receipt_rows = transaction
+                        .query(
+                            "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
+                            tracedecay_runtime_core::db::engine::params![stored_receipt_id],
+                        )
+                        .await
+                        .map_err(|error| runtime_storage_error(OPERATION, error))?;
+                    let receipt_json = receipt_rows
+                        .next()
+                        .await
+                        .map_err(|error| runtime_storage_error(OPERATION, error))?
+                        .map(|row| {
+                            row.get::<String>(0)
+                                .map_err(|error| runtime_storage_error(OPERATION, error))
+                        })
+                        .transpose()?;
+                    drop(receipt_rows);
+                    receipt_json.and_then(|receipt_json| {
+                        let receipt =
+                            serde_json::from_str::<SanitizationReceiptV1>(&receipt_json).ok()?;
+                        (receipt.receipt().receipt_id().as_str() == stored_receipt_id
+                            && serde_json::to_string(&receipt).ok().as_deref()
+                                == Some(receipt_json.as_str()))
+                        .then_some(receipt)
+                    })
+                } else {
+                    None
+                };
+                Some(CursorAdvanceLedgerDisagreementV1::new(
+                    advance.next_cursor().source().clone(),
+                    advance.next_cursor().scope().clone(),
+                    advance.coverage(),
+                    CursorAdvanceLedgerIdentityV1::from_stored_row_with_authority_receipt(
+                        stored_reason,
+                        stored_receipt_id.as_deref(),
+                        authority_receipt.as_ref(),
+                    ),
+                    advance.ledger_identity(),
+                ))
+            } else {
+                None
+            };
             transaction
                 .rollback()
                 .await
                 .map_err(|error| runtime_storage_error(OPERATION, error))?;
-            return Err(ObservationStoreError::CursorAdvanceCollision);
+            return Err(disagreement.map_or(
+                ObservationStoreError::CursorAdvanceCollision,
+                |disagreement| ObservationStoreError::CursorAdvanceLedgerDisagreement {
+                    disagreement: Box::new(disagreement),
+                },
+            ));
         }
         transaction
             .execute(
@@ -230,26 +299,34 @@ impl GlobalDbObservationStore {
             .await
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
         transaction
+            .execute(
+                PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
+                tracedecay_runtime_core::db::engine::params![
+                    source_json.as_str(),
+                    scope_json.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| runtime_storage_error(OPERATION, error))?;
+        transaction
             .commit()
             .await
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        Ok(())
+        Ok(RefusalCoverageOutcome::Recorded)
     }
 
-    #[hotpath::skip]
     pub async fn converge_projection_predecessor(
         &self,
     ) -> ProjectionStoreResult<ProjectionPredecessorConvergence> {
         crate::converge_projection_predecessor(&self.database).await
     }
 
-    #[hotpath::skip]
     async fn prepare_observation_persist(
         &self,
         write: AnchoredObservationWrite,
         preflight: &ObservationPreflightSnapshot,
         batch_state: &mut ObservationBatchState,
-        known_cursor: Option<Option<ClaudeSourceCursorV1>>,
+        known_cursor: Option<Option<ObservationSourceCursorV1>>,
     ) -> ObservationStoreResult<PreparedObservationPersist> {
         let observation = write.observation();
         let observation_id = observation.observation_id().clone();
@@ -262,7 +339,29 @@ impl GlobalDbObservationStore {
             preflight.admission_refusal(&observation_id, observation.payload_reference().digest())
         {
             let cursor = actual_cursor();
-            self.record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
+            if write.identity_collision_disposition()
+                == ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity
+            {
+                if matches!(
+                    refused_scan_frontier(&write, cursor.as_ref())?,
+                    RefusedScanFrontier::NotAtFrontier
+                ) {
+                    return Err(ObservationStoreError::CursorConflict {
+                        expected: Box::new(write.expected_cursor().cloned()),
+                        actual: Box::new(cursor),
+                    });
+                }
+                return Err(identity_collision(
+                    observation_id,
+                    retained_digest.clone(),
+                    observation.payload_reference().digest().clone(),
+                ));
+            }
+            // The exact refusal marker is already durable. A later stale
+            // reader may no longer stand at its original scan frontier, but
+            // that does not invalidate the terminal content verdict.
+            let _ = self
+                .record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
                 .await?;
             return Err(identity_collision(
                 observation_id,
@@ -297,9 +396,9 @@ impl GlobalDbObservationStore {
             && !canonical_payload_revision
         {
             if pending.is_some() {
-                return Err(ObservationStoreError::BatchRequiresScalarFallback {
-                    cause: ObservationBatchFallbackCause::IntraBatchIdentityCollision,
-                });
+                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                    Box::new(write),
+                ));
             }
             let retained_digest = pending
                 .as_ref()
@@ -319,8 +418,38 @@ impl GlobalDbObservationStore {
             };
             if pending.is_none() {
                 let cursor = actual_cursor();
-                self.record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
-                    .await?;
+                if write.identity_collision_disposition()
+                    == ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity
+                {
+                    if matches!(
+                        refused_scan_frontier(&write, cursor.as_ref())?,
+                        RefusedScanFrontier::NotAtFrontier
+                    ) {
+                        return Err(ObservationStoreError::CursorConflict {
+                            expected: Box::new(write.expected_cursor().cloned()),
+                            actual: Box::new(cursor),
+                        });
+                    }
+                    return Err(identity_collision(
+                        observation_id,
+                        retained_digest.clone(),
+                        observation.payload_reference().digest().clone(),
+                    ));
+                }
+                if known_cursor.is_some() {
+                    return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                        Box::new(write),
+                    ));
+                }
+                if let RefusalCoverageOutcome::NotAtFrontier { actual } = self
+                    .record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
+                    .await?
+                {
+                    return Err(ObservationStoreError::CursorConflict {
+                        expected: Box::new(write.expected_cursor().cloned()),
+                        actual: Box::new(actual),
+                    });
+                }
             }
             return Err(identity_collision(
                 observation_id,
@@ -357,6 +486,11 @@ impl GlobalDbObservationStore {
                         )?,
                     ),
                     existing,
+                ));
+            }
+            if known_cursor.is_some() {
+                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                    Box::new(write),
                 ));
             }
             let mut advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
@@ -416,9 +550,9 @@ impl GlobalDbObservationStore {
                 }))
         {
             if pending.is_some() {
-                return Err(ObservationStoreError::BatchRequiresScalarFallback {
-                    cause: ObservationBatchFallbackCause::IntraBatchSanitizationReceiptCollision,
-                });
+                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                    Box::new(write),
+                ));
             }
             return Err(ObservationStoreError::SanitizationReceiptCollision);
         }
@@ -426,9 +560,9 @@ impl GlobalDbObservationStore {
             .pending_receipt(observation.receipt())
             .is_some_and(|retained| retained != observation.receipt())
         {
-            return Err(ObservationStoreError::BatchRequiresScalarFallback {
-                cause: ObservationBatchFallbackCause::IntraBatchSanitizationReceiptCollision,
-            });
+            return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                Box::new(write),
+            ));
         }
         for alias in write.retrieval_anchor().aliases() {
             if let Some(existing) =
@@ -436,16 +570,17 @@ impl GlobalDbObservationStore {
                 && existing.anchor_id != *write.retrieval_anchor_id()
             {
                 if existing.pending {
-                    return Err(ObservationStoreError::BatchRequiresScalarFallback {
-                        cause:
-                            ObservationBatchFallbackCause::IntraBatchRetrievalAnchorAliasCollision,
+                    return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                        Box::new(write),
+                    ));
+                }
+                if !preflight.accepts_pending_cline_alias(&write, &existing.anchor_id)? {
+                    return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
+                        alias: Box::new(alias.clone()),
+                        existing_anchor_id: Box::new(existing.anchor_id),
+                        candidate_anchor_id: Box::new(write.retrieval_anchor_id().clone()),
                     });
                 }
-                return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
-                    alias: Box::new(alias.clone()),
-                    existing_anchor_id: Box::new(existing.anchor_id),
-                    candidate_anchor_id: Box::new(write.retrieval_anchor_id().clone()),
-                });
             }
         }
         let covered_duplicate =
@@ -492,6 +627,110 @@ impl GlobalDbObservationStore {
         }
         Ok(PreparedObservationPersist::Submit(Box::new(write)))
     }
+
+    /// Persists the longest prefix of `writes` that settles in one runtime
+    /// batch, returning its outcomes in input order and the writes that must
+    /// be prepared again once that prefix is durable.
+    ///
+    /// The segment future is erased here. A concrete child future would be
+    /// part of every caller's `Send` proof, and that chain exceeds the
+    /// recursion limit (rust-lang/rust#159228).
+    fn persist_observation_segment<'a>(
+        &'a self,
+        writes: Vec<AnchoredObservationWrite>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        ObservationStoreResult<(
+            Vec<ObservationBatchPersistOutcome>,
+            Vec<AnchoredObservationWrite>,
+        )>,
+    > {
+        Box::pin(async move { Self::persist_observation_segment_body(self, writes).await })
+    }
+
+    async fn persist_observation_segment_body(
+        &self,
+        writes: Vec<AnchoredObservationWrite>,
+    ) -> ObservationStoreResult<(
+        Vec<ObservationBatchPersistOutcome>,
+        Vec<AnchoredObservationWrite>,
+    )> {
+        let preflight = load_observation_preflight(&self.database, &writes).await?;
+        let mut batch_state = ObservationBatchState::from_preflight(&preflight);
+        let mut published_cursors = HashMap::<
+            (ObservationSourceIdentityV1, ObservationScopeV1),
+            ObservationSourceCursorV1,
+        >::new();
+        let mut outcomes: Vec<Option<ObservationBatchPersistOutcome>> =
+            Vec::with_capacity(writes.len());
+        let mut submits = Vec::new();
+        let mut deferred_exact_duplicates = Vec::new();
+        let mut awaiting = Vec::new();
+        let mut writes = writes.into_iter();
+        while let Some(write) = writes.next() {
+            let key = (
+                write.observation().source().clone(),
+                write.observation().scope().clone(),
+            );
+            let known_cursor = published_cursors.get(&key).cloned().map(Some);
+            let next_cursor = write.next_cursor().clone();
+            match self
+                .prepare_observation_persist(write, &preflight, &mut batch_state, known_cursor)
+                .await?
+            {
+                PreparedObservationPersist::Ready(outcome) => outcomes.push(Some(*outcome)),
+                PreparedObservationPersist::Submit(write) => {
+                    submits.push((outcomes.len(), *write));
+                    outcomes.push(None);
+                }
+                PreparedObservationPersist::DeferredExactDuplicate(write) => {
+                    deferred_exact_duplicates.push((outcomes.len(), *write));
+                    outcomes.push(None);
+                }
+                PreparedObservationPersist::AwaitsDurablePredecessor(write) => {
+                    if outcomes.is_empty() {
+                        return Err(runtime_storage_error(
+                            "persist_observations",
+                            "the first write of a batch segment has no batch predecessor",
+                        ));
+                    }
+                    awaiting.push(*write);
+                    awaiting.extend(writes);
+                    break;
+                }
+            }
+            published_cursors.insert(key, next_cursor);
+        }
+        if !submits.is_empty() {
+            let submitted = submit_observation_writes(
+                &self.database,
+                &self.runtime,
+                submits,
+                deferred_exact_duplicates,
+            )
+            .await?;
+            for (slot, outcome) in submitted {
+                outcomes[slot] = Some(outcome);
+            }
+        } else if !deferred_exact_duplicates.is_empty() {
+            return Err(runtime_storage_error(
+                "persist_observations",
+                "deferred duplicate has no preceding batch submission",
+            ));
+        }
+        let outcomes = outcomes
+            .into_iter()
+            .map(|outcome| {
+                outcome.ok_or_else(|| {
+                    runtime_storage_error(
+                        "persist_observations",
+                        "batch slot was not settled by writer authority",
+                    )
+                })
+            })
+            .collect::<ObservationStoreResult<Vec<_>>>()?;
+        Ok((outcomes, awaiting))
+    }
 }
 
 /// Immutable read authority for one bounded admission window.
@@ -503,7 +742,9 @@ struct ObservationPreflightSnapshot {
     admission_refusals: HashMap<(String, String), PayloadDigestV1>,
     stored_observations: HashMap<String, StoredObservation>,
     retrieval_aliases: HashMap<(String, String, String), RetrievalAnchorId>,
-    source_cursors: HashMap<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>,
+    cline_supersessions: HashMap<RetrievalAnchorId, RetrievalAnchorId>,
+    source_cursors:
+        HashMap<(ObservationSourceIdentityV1, ObservationScopeV1), ObservationSourceCursorV1>,
 }
 
 #[inline(always)]
@@ -512,14 +753,6 @@ fn record_observation_snapshot_probe() {
         target: "tracedecay::observation_snapshot_query",
         "query observation batch snapshot"
     );
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.observation_batch.snapshot_query_probes").inc(1_u64);
-}
-
-#[inline(always)]
-fn record_observation_snapshot_row() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.observation_batch.snapshot_rows").inc(1_u64);
 }
 
 impl ObservationPreflightSnapshot {
@@ -541,11 +774,59 @@ impl ObservationPreflightSnapshot {
         self.stored_observations.get(observation_id.as_str())
     }
 
+    fn accepts_pending_cline_alias(
+        &self,
+        write: &AnchoredObservationWrite,
+        existing_anchor: &RetrievalAnchorId,
+    ) -> ObservationStoreResult<bool> {
+        let Some(predecessor_id) = cline_task_native_observation_id(write.observation())
+            .map_err(|error| runtime_storage_error("derive Cline native source identity", error))?
+        else {
+            let Some(successor_id) = cline_native_source_successor_id(write.observation())
+                .map_err(|error| {
+                    runtime_storage_error("derive Cline native source identity", error)
+                })?
+            else {
+                return Ok(false);
+            };
+            let Some(successor) = self.stored_observation(&successor_id) else {
+                return Ok(false);
+            };
+            return Ok(successor.retrieval_anchor_id() == existing_anchor
+                && self.cline_supersessions.get(write.retrieval_anchor_id())
+                    == Some(existing_anchor)
+                && prove_cline_native_source_transition(
+                    write.observation(),
+                    successor.observation(),
+                )
+                .is_some());
+        };
+        let Some(predecessor) = self.stored_observation(&predecessor_id) else {
+            return Ok(false);
+        };
+        let prior_anchor = predecessor.retrieval_anchor();
+        let next_anchor = write.retrieval_anchor();
+        let prior_auth = prior_anchor.authorization();
+        let next_auth = next_anchor.authorization();
+        Ok(prior_anchor.anchor_id() == existing_anchor
+            && prior_anchor.owner() == next_anchor.owner()
+            && prior_anchor.aliases() == next_anchor.aliases()
+            && prior_anchor.payload_access() == next_anchor.payload_access()
+            && prior_anchor.retention_class() == next_anchor.retention_class()
+            && prior_anchor.durability() == next_anchor.durability()
+            && prior_auth.resolved_scope_id == next_auth.resolved_scope_id
+            && prior_auth.privacy_domain_id == next_auth.privacy_domain_id
+            && prior_auth.access_policy_digest == next_auth.access_policy_digest
+            && prior_auth.capability_id == next_auth.capability_id
+            && prove_cline_native_source_transition(predecessor.observation(), write.observation())
+                .is_some())
+    }
+
     fn source_cursor(
         &self,
-        source: &ClaudeSourceIdentityV1,
+        source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
-    ) -> Option<ClaudeSourceCursorV1> {
+    ) -> Option<ObservationSourceCursorV1> {
         self.source_cursors
             .get(&(source.clone(), scope.clone()))
             .cloned()
@@ -605,7 +886,7 @@ impl ObservationBatchState {
     fn retrieval_anchor_by_alias(
         &self,
         scope: &ObservationScopeV1,
-        alias: &tracedecay_domain::NativeAliasV2,
+        alias: &tracedecay_domain::NativeAlias,
     ) -> ObservationStoreResult<Option<BatchAliasAuthority>> {
         let key = retrieval_alias_key(scope, alias)?;
         Ok(self.retrieval_aliases.get(&key).cloned())
@@ -648,16 +929,17 @@ impl ObservationBatchState {
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation.query.preflight")]
+#[tracing::instrument(
+    name = "global_db.observation.query.preflight",
+    level = "trace",
+    skip_all
+)]
 async fn load_observation_preflight(
     database: &Database,
     writes: &[AnchoredObservationWrite],
 ) -> ObservationStoreResult<ObservationPreflightSnapshot> {
     const OPERATION: &str = "load observation batch preflight";
-    let snapshot = database
-        .begin_engine_read_snapshot(OPERATION)
-        .await
-        .map_err(|error| runtime_storage_error(OPERATION, error))?;
+    let snapshot = begin_observation_read_snapshot(database, OPERATION).await?;
     let admission_refusals =
         read_admission_refusals_from_snapshot(&snapshot, writes, OPERATION).await?;
     let mut seen_observation_ids = HashSet::new();
@@ -674,12 +956,30 @@ async fn load_observation_preflight(
         {
             observation_ids.push(observation.observation_id().clone());
         }
+        for counterpart in [
+            cline_task_native_observation_id(observation).map_err(|error| {
+                runtime_storage_error("derive Cline native source identity", error)
+            })?,
+            cline_native_source_successor_id(observation).map_err(|error| {
+                runtime_storage_error("derive Cline native source identity", error)
+            })?,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if seen_observation_ids.insert(counterpart.as_str().to_owned()) {
+                observation_ids.push(counterpart);
+            }
+        }
     }
     let stored_observations =
         read_stored_observations_from_snapshot(&snapshot, &observation_ids, OPERATION).await?;
     let retrieval_aliases =
         read_retrieval_aliases_from_snapshot(&snapshot, writes, OPERATION).await?;
     let source_cursors = read_source_cursors_from_snapshot(&snapshot, writes, OPERATION).await?;
+    let cline_supersessions =
+        read_cline_supersessions_from_snapshot(&snapshot, &stored_observations, writes, OPERATION)
+            .await?;
     snapshot
         .commit()
         .await
@@ -688,8 +988,73 @@ async fn load_observation_preflight(
         admission_refusals,
         stored_observations,
         retrieval_aliases,
+        cline_supersessions,
         source_cursors,
     })
+}
+
+async fn read_cline_supersessions_from_snapshot(
+    snapshot: &DatabaseEngineReadSnapshot,
+    stored: &HashMap<String, StoredObservation>,
+    writes: &[AnchoredObservationWrite],
+    operation: &'static str,
+) -> ObservationStoreResult<HashMap<RetrievalAnchorId, RetrievalAnchorId>> {
+    let mut anchors = HashMap::new();
+    for write in writes {
+        if let Some(successor_id) = cline_native_source_successor_id(write.observation())
+            .map_err(|error| runtime_storage_error("derive Cline native source identity", error))?
+            && let Some(successor) = stored.get(successor_id.as_str())
+            && prove_cline_native_source_transition(write.observation(), successor.observation())
+                .is_some()
+        {
+            anchors.insert(
+                write.retrieval_anchor_id().clone(),
+                write.retrieval_anchor().owner().clone(),
+            );
+        }
+    }
+    if anchors.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let keys = serde_json::to_string(
+        &anchors
+            .keys()
+            .map(RetrievalAnchorId::as_str)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| runtime_storage_error(operation, error))?;
+    let mut rows = snapshot.query(
+        "SELECT disposition.record_json FROM json_each(?1) AS requested
+         JOIN retrieval_anchor_dispositions AS disposition ON disposition.anchor_id = requested.value
+         WHERE disposition.sequence = (
+             SELECT MAX(current.sequence) FROM retrieval_anchor_dispositions AS current
+             WHERE current.anchor_id = disposition.anchor_id
+         )", tracedecay_runtime_core::db::engine::params![keys],
+    ).await.map_err(|error| runtime_storage_error(operation, error))?;
+    let mut supersessions = HashMap::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| runtime_storage_error(operation, error))?
+    {
+        let json = row
+            .get::<String>(0)
+            .map_err(|error| runtime_storage_error(operation, error))?;
+        let record: tracedecay_store::RetrievalAnchorDispositionRecordV1 =
+            serde_json::from_str(&json).map_err(|error| runtime_storage_error(operation, error))?;
+        record
+            .validate()
+            .map_err(|error| runtime_storage_error(operation, error))?;
+        if let Some(owner) = anchors.get(record.anchor_id())
+            && *record.owner() == tracedecay_domain::FactOwnerV1::from(owner.clone())
+            && record.state() == AnchorDispositionStateV1::Superseded
+            && record.reason_class() == AnchorDispositionReasonClassV1::Correction
+            && let Some(successor) = record.superseded_by()
+        {
+            supersessions.insert(record.anchor_id().clone(), successor.clone());
+        }
+    }
+    Ok(supersessions)
 }
 
 async fn read_admission_refusals_from_snapshot(
@@ -742,7 +1107,6 @@ async fn read_admission_refusals_from_snapshot(
         .await
         .map_err(|error| runtime_storage_error(operation, error))?
     {
-        record_observation_snapshot_row();
         let observation_id = row
             .get::<String>(0)
             .map_err(|error| runtime_storage_error(operation, error))?;
@@ -764,7 +1128,7 @@ async fn read_source_cursors_from_snapshot(
     writes: &[AnchoredObservationWrite],
     operation: &'static str,
 ) -> ObservationStoreResult<
-    HashMap<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>,
+    HashMap<(ObservationSourceIdentityV1, ObservationScopeV1), ObservationSourceCursorV1>,
 > {
     let mut requested = HashSet::with_capacity(writes.len());
     for write in writes {
@@ -806,7 +1170,6 @@ async fn read_source_cursors_from_snapshot(
         .await
         .map_err(|error| runtime_storage_error(operation, error))?
     {
-        record_observation_snapshot_row();
         let source = decode_json(
             row.get::<String>(0)
                 .map_err(|error| runtime_storage_error(operation, error))?,
@@ -829,7 +1192,7 @@ async fn read_source_cursors_from_snapshot(
 
 fn retrieval_alias_key(
     scope: &ObservationScopeV1,
-    alias: &tracedecay_domain::NativeAliasV2,
+    alias: &tracedecay_domain::NativeAlias,
 ) -> ObservationStoreResult<(String, String, String)> {
     Ok((
         serde_json::to_string(scope)
@@ -890,7 +1253,6 @@ async fn read_retrieval_aliases_from_snapshot(
         .await
         .map_err(|error| runtime_storage_error(operation, error))?
     {
-        record_observation_snapshot_row();
         let key = (
             row.get::<String>(0)
                 .map_err(|error| runtime_storage_error(operation, error))?,
@@ -909,27 +1271,31 @@ async fn read_retrieval_aliases_from_snapshot(
     Ok(aliases)
 }
 
-const OBSERVATION_BATCH_ROW_PROJECTION: &str =
-    "SELECT observation.observation_id, observation.sequence,
-            observation.observation_json, observation.committed_cursor_json,
-            anchor.anchor_json, anchor.projection_generation,
-            repository.availability_json, repository.capture_json,
-            repository_anchor.anchor_json, repository.owner_json,
-            EXISTS(
-                SELECT 1 FROM projection_queue
-                WHERE projection_queue.observation_id = observation.observation_id
-            )
-     FROM observations AS observation
-     LEFT JOIN observation_retrieval_anchors AS binding
-       ON binding.observation_id = observation.observation_id
-     LEFT JOIN retrieval_anchors AS anchor
-       ON anchor.anchor_id = binding.anchor_id
-     LEFT JOIN observation_repository_provenance AS repository
-       ON repository.observation_id = observation.observation_id
-     LEFT JOIN retrieval_anchors AS repository_anchor
-       ON repository_anchor.anchor_id = repository.retrieval_anchor_id
-     JOIN json_each(?1) AS requested
-       ON requested.value = observation.observation_id";
+fn observation_batch_row_projection() -> String {
+    format!(
+        "SELECT observation.observation_id, observation.sequence,
+                observation.observation_json, observation.committed_cursor_json,
+                anchor.anchor_json, anchor.projection_generation,
+                {REPOSITORY_PROVENANCE_HYDRATED_COLUMNS},
+                repository_anchor.anchor_json, repository.owner_json,
+                EXISTS(
+                    SELECT 1 FROM projection_queue
+                    WHERE projection_queue.observation_id = observation.observation_id
+                )
+         FROM observations AS observation
+         LEFT JOIN observation_retrieval_anchors AS binding
+           ON binding.observation_id = observation.observation_id
+         LEFT JOIN retrieval_anchors AS anchor
+           ON anchor.anchor_id = binding.anchor_id
+         LEFT JOIN observation_repository_provenance AS repository
+           ON repository.observation_id = observation.observation_id
+         {REPOSITORY_PROVENANCE_CAPTURE_JOIN}
+         LEFT JOIN retrieval_anchors AS repository_anchor
+           ON repository_anchor.anchor_id = repository.retrieval_anchor_id
+         JOIN json_each(?1) AS requested
+           ON requested.value = observation.observation_id"
+    )
+}
 
 async fn read_stored_observations_from_snapshot(
     snapshot: &DatabaseEngineReadSnapshot,
@@ -948,7 +1314,7 @@ async fn read_stored_observations_from_snapshot(
     .map_err(|error| runtime_storage_error(operation, error))?;
     record_observation_snapshot_probe();
     let mut rows = snapshot
-        .query(OBSERVATION_BATCH_ROW_PROJECTION, [requested])
+        .query(&observation_batch_row_projection(), [requested])
         .await
         .map_err(|error| runtime_storage_error(operation, error))?;
     let mut observations = HashMap::new();
@@ -957,7 +1323,6 @@ async fn read_stored_observations_from_snapshot(
         .await
         .map_err(|error| runtime_storage_error(operation, error))?
     {
-        record_observation_snapshot_row();
         let observation_id = row
             .get::<String>(0)
             .map_err(|error| runtime_storage_error(operation, error))?;
@@ -966,18 +1331,19 @@ async fn read_stored_observations_from_snapshot(
                 .map_err(|error| runtime_storage_error(operation, error))?,
         )
         .map_err(|_| runtime_storage_error(operation, "negative observation sequence"))?;
-        let observation: DurableObservationV1 = decode_json(
-            row.get::<String>(2)
-                .map_err(|error| runtime_storage_error(operation, error))?,
-            operation,
-        )?;
+        let observation_json = row
+            .get::<String>(2)
+            .map_err(|error| runtime_storage_error(operation, error))?;
+        let observation: DurableObservationV1 =
+            crate::observation::decode_observation_json(snapshot, &observation_json, operation)
+                .await?;
         if observation.observation_id().as_str() != observation_id {
             return Err(runtime_storage_error(
                 operation,
                 "observation row identity mismatch",
             ));
         }
-        let committed_cursor: ClaudeSourceCursorV1 = decode_json(
+        let committed_cursor: ObservationSourceCursorV1 = decode_json(
             row.get::<String>(3)
                 .map_err(|error| runtime_storage_error(operation, error))?,
             operation,
@@ -993,7 +1359,7 @@ async fn read_stored_observations_from_snapshot(
                 "observation committed cursor binding mismatch",
             ));
         }
-        let retrieval_anchor: RetrievalAnchorRecordV2 = decode_json(
+        let retrieval_anchor: RetrievalAnchorRecord = decode_json(
             row.get::<Option<String>>(4)
                 .map_err(|error| runtime_storage_error(operation, error))?
                 .ok_or_else(|| {
@@ -1042,7 +1408,7 @@ async fn read_stored_observations_from_snapshot(
             .map_err(|error| runtime_storage_error(operation, error))?;
         let expected_repository_owner = repository_anchor
             .as_ref()
-            .map(|anchor: &RetrievalAnchorRecordV2| serde_json::to_string(anchor.owner()))
+            .map(RetrievalAnchorRecord::owner_column_json)
             .transpose()
             .map_err(|error| runtime_storage_error(operation, error))?;
         if repository_owner != expected_repository_owner {
@@ -1086,6 +1452,11 @@ enum PreparedObservationPersist {
     Ready(Box<ObservationBatchPersistOutcome>),
     Submit(Box<AnchoredObservationWrite>),
     DeferredExactDuplicate(Box<AnchoredObservationWrite>),
+    /// The write collides with, or must compare-and-set a source cursor
+    /// published by, an earlier member of this batch that is not durable yet.
+    /// The batch commits its prefix first and re-prepares this write against
+    /// the durable result, so it settles exactly as it would alone.
+    AwaitsDurablePredecessor(Box<AnchoredObservationWrite>),
 }
 
 impl PreparedObservationPersist {
@@ -1098,12 +1469,11 @@ impl PreparedObservationPersist {
 }
 
 impl ObservationStore for GlobalDbObservationStore {
-    #[hotpath::skip]
     async fn persist_observation(
         &self,
         write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
-        let mut outcomes = self.persist_observations(vec![write]).await?;
+        let mut outcomes = Box::pin(self.persist_observations(vec![write])).await?;
         if outcomes.len() != 1 {
             return Err(runtime_storage_error(
                 "persist_observation",
@@ -1119,7 +1489,11 @@ impl ObservationStore for GlobalDbObservationStore {
             })
     }
 
-    #[hotpath::measure(future = true, label = "global_db.observation.persist.batch")]
+    #[tracing::instrument(
+        name = "global_db.observation.persist.batch",
+        level = "trace",
+        skip_all
+    )]
     async fn persist_observations(
         &self,
         writes: Vec<AnchoredObservationWrite>,
@@ -1133,86 +1507,49 @@ impl ObservationStore for GlobalDbObservationStore {
             writes = writes.len()
         );
         async move {
-            crate::hotpath_observe::record_transaction_rows(1);
-            let preflight = load_observation_preflight(&self.database, &writes).await?;
-            let mut batch_state = ObservationBatchState::from_preflight(&preflight);
-            let mut published_cursors =
-                HashMap::<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>::new(
-                );
-            let mut prepared = Vec::with_capacity(writes.len());
-            for write in writes {
-                let key = (
-                    write.observation().source().clone(),
-                    write.observation().scope().clone(),
-                );
-                let known_cursor = published_cursors.get(&key).cloned().map(Some);
-                let next_cursor = write.next_cursor().clone();
-                let item = self
-                    .prepare_observation_persist(write, &preflight, &mut batch_state, known_cursor)
-                    .await?;
-                published_cursors.insert(key, next_cursor);
-                prepared.push(item);
+            let mut settled = Vec::with_capacity(writes.len());
+            let mut remaining = writes;
+            while !remaining.is_empty() {
+                let (outcomes, awaiting) = self.persist_observation_segment(remaining).await?;
+                settled.extend(outcomes);
+                remaining = awaiting;
             }
-            let mut outcomes: Vec<Option<ObservationBatchPersistOutcome>> =
-                Vec::with_capacity(prepared.len());
-            let mut submits = Vec::new();
-            let mut deferred_exact_duplicates = Vec::new();
-            for item in prepared {
-                match item {
-                    PreparedObservationPersist::Ready(outcome) => outcomes.push(Some(*outcome)),
-                    PreparedObservationPersist::Submit(write) => {
-                        submits.push((outcomes.len(), *write));
-                        outcomes.push(None);
-                    }
-                    PreparedObservationPersist::DeferredExactDuplicate(write) => {
-                        deferred_exact_duplicates.push((outcomes.len(), *write));
-                        outcomes.push(None);
-                    }
-                }
-            }
-            if !submits.is_empty() {
-                let submitted = submit_observation_writes(
-                    &self.database,
-                    &self.runtime,
-                    submits,
-                    deferred_exact_duplicates,
-                )
-                .await?;
-                for (slot, outcome) in submitted {
-                    outcomes[slot] = Some(outcome);
-                }
-            } else if !deferred_exact_duplicates.is_empty() {
-                return Err(runtime_storage_error(
-                    "persist_observations",
-                    "deferred duplicate has no preceding batch submission",
-                ));
-            }
-            outcomes
-                .into_iter()
-                .map(|outcome| {
-                    outcome.ok_or_else(|| {
-                        runtime_storage_error(
-                            "persist_observations",
-                            "batch slot was not settled by writer authority",
-                        )
-                    })
-                })
-                .collect()
+            Ok(settled)
         }
         .instrument(span)
         .await
     }
 
-    #[hotpath::skip]
     async fn get_source_cursor(
         &self,
-        source: &ClaudeSourceIdentityV1,
+        source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
-    ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
-        read_runtime_source_cursor(&self.runtime, source, scope)
+    ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
+        read_runtime_source_cursor(&self.runtime, source, scope).await
     }
 
-    #[hotpath::skip]
+    async fn committed_source_cursors(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> ObservationStoreResult<Vec<ObservationSourceCursorV1>> {
+        match dispatch_runtime_observation_read(
+            &self.runtime,
+            ObservationReadOperationV1::CommittedSourceCursors {
+                source: source.clone(),
+                scope: scope.clone(),
+            },
+        )
+        .await?
+        {
+            ObservationReadResultV1::CommittedSourceCursors(cursors) => Ok(cursors),
+            _ => Err(runtime_storage_error(
+                "read committed observation source cursors",
+                "runtime returned a mismatched observation read result",
+            )),
+        }
+    }
+
     async fn advance_source_cursor(
         &self,
         advance: ObservationCursorAdvance,
@@ -1222,9 +1559,17 @@ impl ObservationStore for GlobalDbObservationStore {
             runtime,
             advance.next_cursor().source(),
             advance.next_cursor().scope(),
-        )?;
-        let existed_at_next = actual_cursor.as_ref() == Some(advance.next_cursor());
-        if !existed_at_next && actual_cursor.as_ref() != advance.expected_cursor() {
+        )
+        .await?;
+        // One owner per frontier. A cursor that already reached `next` has
+        // recorded the range; a second reason must not become a permanent
+        // collision that both ingest owners then warn on forever. The
+        // command still goes to the writer so the current authority epoch
+        // receipts the replay; only its outcome is reported as a duplicate.
+        let reached_frontier = actual_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.reached(advance.next_cursor()));
+        if !reached_frontier && actual_cursor.as_ref() != advance.expected_cursor() {
             return Err(ObservationStoreError::CursorConflict {
                 expected: Box::new(advance.expected_cursor().cloned()),
                 actual: Box::new(actual_cursor),
@@ -1236,6 +1581,7 @@ impl ObservationStore for GlobalDbObservationStore {
             "coverage": advance.coverage(),
         });
         let key = format!("cursor.{}", canonical_runtime_digest(&identity)?);
+        let next_cursor = advance.next_cursor().clone();
         let payload = RepositoryWritePayloadV1::ObservationCursorAdvance(Box::new(advance));
         let (command_bytes, command_digest) = canonical_json_bytes_and_sha256(
             &runtime_command_value(&payload)?,
@@ -1245,20 +1591,19 @@ impl ObservationStore for GlobalDbObservationStore {
         })?;
         let outcome = submit_runtime_write(
             runtime,
-            payload,
-            command_digest,
+            payload.clone(),
+            command_digest.clone(),
             command_bytes.len(),
             key,
             "advance observation source cursor",
         )
-        .await;
-        if existed_at_next && outcome.is_err() {
-            return Err(ObservationStoreError::CursorAdvanceCollision);
-        }
-        match outcome? {
+        .await?;
+        match outcome {
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
-                if existed_at_next =>
+            | RuntimeSubmitOutcomeV1::ExactReplay { .. }
+            | RuntimeSubmitOutcomeV1::IdempotencyConflict { .. }
+                if reached_frontier =>
             {
                 Ok(CursorAdvanceOutcome::ExactDuplicate)
             }
@@ -1266,26 +1611,68 @@ impl ObservationStore for GlobalDbObservationStore {
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => {
                 Ok(CursorAdvanceOutcome::Committed)
             }
-            RuntimeSubmitOutcomeV1::ExactReplay { .. } => Ok(CursorAdvanceOutcome::ExactDuplicate),
-            RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
-                Err(ObservationStoreError::CursorAdvanceCollision)
+            // The key names the coverage, not the cursor the advance moved
+            // from, so its receipt outlives the cursor state it advanced. A
+            // rescan that resumes behind the admitted frontier (retained
+            // history, or a cursor the startup repair rewound to its last
+            // committed observation) would otherwise replay as a no-op that
+            // leaves the cursor behind, or, once the ledger row is pruned, fail
+            // as a permanent collision on every pass. The writer's
+            // compare-and-swap keeps the advance correct, so it runs again
+            // under its own key.
+            RuntimeSubmitOutcomeV1::ExactReplay { .. }
+            | RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
+                // Another owner may have committed this key after the
+                // pre-check; it owns the range.
+                if read_runtime_source_cursor(runtime, next_cursor.source(), next_cursor.scope())
+                    .await?
+                    .is_some_and(|cursor| cursor.reached(&next_cursor))
+                {
+                    return Ok(CursorAdvanceOutcome::ExactDuplicate);
+                }
+                let key = format!(
+                    "cursor.{}",
+                    canonical_runtime_digest(&serde_json::json!({
+                        "reconcile": identity,
+                        "at": now_micros().0,
+                    }))?
+                );
+                match submit_runtime_write(
+                    runtime,
+                    payload,
+                    command_digest,
+                    command_bytes.len(),
+                    key,
+                    "reconcile observation source cursor",
+                )
+                .await?
+                {
+                    RuntimeSubmitOutcomeV1::Committed { .. }
+                    | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => {
+                        Ok(CursorAdvanceOutcome::Committed)
+                    }
+                    other => Err(rejected_submit_error(
+                        "reconcile observation source cursor",
+                        "runtime rejected cursor reconciliation",
+                        &other,
+                    )),
+                }
             }
-            other => Err(runtime_storage_error(
+            other => Err(rejected_submit_error(
                 "advance observation source cursor",
-                format!("runtime rejected cursor advance: {other:?}"),
+                "runtime rejected cursor advance",
+                &other,
             )),
         }
     }
 
-    #[hotpath::skip]
     async fn get_observation(
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ObservationStoreResult<Option<StoredObservation>> {
-        read_runtime_stored_observation(&self.runtime, observation_id)
+        read_runtime_stored_observation(&self.runtime, observation_id).await
     }
 
-    #[hotpath::skip]
     async fn replay_observations(
         &self,
         request: ObservationReplayRequest,
@@ -1302,7 +1689,9 @@ impl ObservationStore for GlobalDbObservationStore {
                 after_sequence: request.after_sequence(),
                 limit,
             },
-        )? {
+        )
+        .await?
+        {
             ObservationReadResultV1::Replay(rows) => rows
                 .into_iter()
                 .map(stored_observation_from_runtime_row)
@@ -1366,21 +1755,18 @@ fn identity_collision(
     }
 }
 
-fn dispatch_runtime_observation_read(
+async fn dispatch_runtime_observation_read(
     runtime: &DatabaseRuntimeClientV1,
     operation: ObservationReadOperationV1,
 ) -> ObservationStoreResult<ObservationReadResultV1> {
     let (command_bytes, command_digest) = canonical_json_bytes_and_sha256(&operation)
         .map_err(|error| runtime_storage_error("build observation runtime read", error))?;
-    let suffix = command_digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or_else(|| {
-            runtime_storage_error(
-                "build observation runtime read",
-                "canonical digest prefix is invalid",
-            )
-        })?;
+    let suffix = sha256_hex_suffix(command_digest.as_str()).ok_or_else(|| {
+        runtime_storage_error(
+            "build observation runtime read",
+            "canonical digest prefix is invalid",
+        )
+    })?;
     let admission_bytes = command_bytes.len();
     let requested_at = now_micros();
     let control = RuntimeRequestControlV1 {
@@ -1410,18 +1796,26 @@ fn dispatch_runtime_observation_read(
         control,
     )
     .map_err(|error| runtime_storage_error("build observation runtime read", error))?;
-    let probe = RuntimeObservationProbe::from_control(request.control());
+    let probe = Arc::new(RuntimeObservationProbe::from_control(request.control()));
     tracing::trace!(
         target: "tracedecay::observation_admission_work",
         work = "runtime_command",
         "dispatch observation runtime read"
     );
-    let outcome = runtime.dispatch_read(request, &probe).map_err(|error| {
-        runtime_storage_error(
-            "dispatch observation runtime read",
-            format!("runtime read failed: {error:?}"),
-        )
-    })?;
+    let outcome = runtime
+        .dispatch_read(request, probe)
+        .await
+        .map_err(|error| match error {
+            StoreRuntimeRegistryFailure::ReaderSaturated => {
+                ObservationStoreError::ReaderSaturated {
+                    operation: "dispatch observation runtime read",
+                }
+            }
+            error => runtime_storage_error(
+                "dispatch observation runtime read",
+                format!("runtime read failed: {error:?}"),
+            ),
+        })?;
     if !matches!(
         outcome.coverage(),
         RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
@@ -1470,18 +1864,20 @@ fn stored_observation_from_runtime_row(
     ))
 }
 
-fn read_runtime_source_cursor(
+async fn read_runtime_source_cursor(
     runtime: &DatabaseRuntimeClientV1,
-    source: &ClaudeSourceIdentityV1,
+    source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
-) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
+) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
     match dispatch_runtime_observation_read(
         runtime,
         ObservationReadOperationV1::SourceCursor {
             source: source.clone(),
             scope: scope.clone(),
         },
-    )? {
+    )
+    .await?
+    {
         ObservationReadResultV1::SourceCursor(cursor) => Ok(cursor),
         _ => Err(runtime_storage_error(
             "read observation source cursor",
@@ -1495,19 +1891,31 @@ fn read_runtime_source_cursor(
 /// the caller's expected cursor matches the durable one. Generation values
 /// are opaque source identities, not ordered counters.
 ///
-/// `Ok(None)` is the not-at-frontier verdict — a covered replay or a stale
-/// expected view — and leaves every ledger untouched. Gaps and generation
+/// `NotAtFrontier` is the not-at-frontier verdict, a covered replay or a stale
+/// expected view, and leaves every ledger untouched. Gaps and generation
 /// jumps never reach the advance constructor here: `ObservationWrite::new`
 /// already validated that this write's expected→next cursor transition
 /// covers the candidate range, which is exactly the transition the advance
 /// re-derives from the same identity, expected cursor, and range. A
 /// construction failure is therefore a contract violation, and it surfaces
-/// as the typed store error — silently answering "not at the scan frontier"
+/// as the typed store error, silently answering "not at the scan frontier"
 /// would record no coverage and leave the refused record re-read forever.
+enum RefusedScanFrontier {
+    AtFrontier(Box<ObservationCursorAdvance>),
+    NotAtFrontier,
+}
+
+enum RefusalCoverageOutcome {
+    Recorded,
+    NotAtFrontier {
+        actual: Option<ObservationSourceCursorV1>,
+    },
+}
+
 fn refused_scan_frontier(
     write: &AnchoredObservationWrite,
-    actual_cursor: Option<&ClaudeSourceCursorV1>,
-) -> ObservationStoreResult<Option<ObservationCursorAdvance>> {
+    actual_cursor: Option<&ObservationSourceCursorV1>,
+) -> ObservationStoreResult<RefusedScanFrontier> {
     let identity = write.observation().identity();
     let candidate_covered = actual_cursor.is_some_and(|cursor| {
         cursor.generation() == identity.generation()
@@ -1515,7 +1923,7 @@ fn refused_scan_frontier(
             && cursor.position() >= identity.position().end()
     });
     if candidate_covered || actual_cursor != write.expected_cursor() {
-        return Ok(None);
+        return Ok(RefusedScanFrontier::NotAtFrontier);
     }
     ObservationCursorAdvance::for_ordering(
         identity.source().clone(),
@@ -1524,12 +1932,13 @@ fn refused_scan_frontier(
         identity.ordering_domain(),
         write.expected_cursor().cloned(),
         identity.position(),
-        ObservationCoverageReason::AdmissionRefused,
+        ObservationCoverageReason::ObservationIdentityCollision,
     )
-    .map(Some)
+    .map(Box::new)
+    .map(RefusedScanFrontier::AtFrontier)
 }
 
-fn read_runtime_stored_observation(
+async fn read_runtime_stored_observation(
     runtime: &DatabaseRuntimeClientV1,
     observation_id: &CanonicalObservationIdV1,
 ) -> ObservationStoreResult<Option<StoredObservation>> {
@@ -1538,7 +1947,9 @@ fn read_runtime_stored_observation(
         ObservationReadOperationV1::Observation {
             observation_id: observation_id.clone(),
         },
-    )? {
+    )
+    .await?
+    {
         ObservationReadResultV1::Observation(row) => match *row {
             Some(row) => stored_observation_from_runtime_row(row).map(Some),
             None => Ok(None),
@@ -1556,12 +1967,81 @@ async fn submit_observation_writes(
     writes: Vec<(usize, AnchoredObservationWrite)>,
     deferred_exact_duplicates: Vec<(usize, AnchoredObservationWrite)>,
 ) -> ObservationStoreResult<Vec<(usize, ObservationBatchPersistOutcome)>> {
+    let batches = partition_observation_writes(writes)?;
+    let mut deferred_exact_duplicates = Some(deferred_exact_duplicates);
+    let mut outcomes = Vec::new();
+    let batch_count = batches.len();
+    for (index, batch) in batches.into_iter().enumerate() {
+        let deferred = if index + 1 == batch_count {
+            deferred_exact_duplicates.take().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        outcomes.extend(submit_observation_write_batch(database, runtime, batch, deferred).await?);
+    }
+    Ok(outcomes)
+}
+
+fn partition_observation_writes(
+    writes: Vec<(usize, AnchoredObservationWrite)>,
+) -> ObservationStoreResult<Vec<Vec<(usize, AnchoredObservationWrite)>>> {
+    let empty_command = serde_json::json!({
+        "kind": "observation_batch",
+        "writes": Vec::<serde_json::Value>::new(),
+    });
+    let envelope_bytes = canonical_json_bytes(&empty_command)
+        .map_err(|error| {
+            runtime_storage_error("derive observation runtime identity", error.to_string())
+        })?
+        .len();
+    let max_bytes = usize::try_from(BACKGROUND_BATCH_MAX_BYTES).unwrap_or(usize::MAX);
+    let max_operations = BACKGROUND_BATCH_MAX_OPERATIONS as usize;
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = envelope_bytes;
+    for write in writes {
+        let command_bytes = canonical_json_bytes(&runtime_observation_command(&write.1))
+            .map_err(|error| {
+                runtime_storage_error("derive observation runtime identity", error.to_string())
+            })?
+            .len();
+        let separator_bytes = usize::from(!batch.is_empty());
+        let added_bytes = command_bytes.saturating_add(separator_bytes);
+        if envelope_bytes.saturating_add(command_bytes) > max_bytes {
+            return Err(runtime_storage_error(
+                "submit observation batch",
+                format!(
+                    "one observation runtime command requires {} bytes, above the {}-byte background admission limit",
+                    envelope_bytes.saturating_add(command_bytes),
+                    max_bytes
+                ),
+            ));
+        }
+        if !batch.is_empty()
+            && (batch.len() == max_operations
+                || batch_bytes.saturating_add(added_bytes) > max_bytes)
+        {
+            batches.push(std::mem::take(&mut batch));
+            batch_bytes = envelope_bytes;
+        }
+        batch_bytes = batch_bytes
+            .saturating_add(command_bytes)
+            .saturating_add(usize::from(!batch.is_empty()));
+        batch.push(write);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+async fn submit_observation_write_batch(
+    database: &Database,
+    runtime: &DatabaseRuntimeClientV1,
+    writes: Vec<(usize, AnchoredObservationWrite)>,
+    deferred_exact_duplicates: Vec<(usize, AnchoredObservationWrite)>,
+) -> ObservationStoreResult<Vec<(usize, ObservationBatchPersistOutcome)>> {
     let admitted_at = now_micros();
-    let priority = if writes.len() == 1 {
-        OperationPriorityV1::Foreground
-    } else {
-        OperationPriorityV1::Background
-    };
     let command = serde_json::json!({
         "kind": "observation_batch",
         "writes": writes
@@ -1573,6 +2053,13 @@ async fn submit_observation_writes(
         canonical_json_bytes_and_sha256(&command).map_err(|error| {
             runtime_storage_error("derive observation runtime identity", error.to_string())
         })?;
+    let priority = if writes.len() == 1
+        && u64::try_from(command_bytes.len()).unwrap_or(u64::MAX) <= FOREGROUND_BATCH_MAX_BYTES
+    {
+        OperationPriorityV1::Foreground
+    } else {
+        OperationPriorityV1::Background
+    };
     let digest_suffix = runtime_digest_suffix(&command_digest)?;
     let metadata = observation_submit_metadata(
         runtime,
@@ -1610,16 +2097,28 @@ async fn submit_observation_writes(
         "submit observation batch",
     )
     .await?;
+    if !matches!(
+        outcome,
+        RuntimeSubmitOutcomeV1::Committed { .. }
+            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+            | RuntimeSubmitOutcomeV1::ExactReplay { .. }
+    ) {
+        return Err(rejected_submit_error(
+            "submit anchored observation",
+            format_args!(
+                "runtime rejected {}-byte observation batch",
+                command_bytes.len()
+            ),
+            &outcome,
+        ));
+    }
     const READBACK_OPERATION: &str = "read committed observation batch";
     let observation_ids = writes
         .iter()
         .chain(deferred_exact_duplicates.iter())
         .map(|(_, write)| write.observation().observation_id().clone())
         .collect::<Vec<_>>();
-    let snapshot = database
-        .begin_engine_read_snapshot(READBACK_OPERATION)
-        .await
-        .map_err(|error| runtime_storage_error(READBACK_OPERATION, error))?;
+    let snapshot = begin_observation_read_snapshot(database, READBACK_OPERATION).await?;
     let stored =
         read_stored_observations_from_snapshot(&snapshot, &observation_ids, READBACK_OPERATION)
             .await?;
@@ -1669,7 +2168,7 @@ async fn submit_observation_writes(
 fn persist_outcome_from_submit(
     stored: &StoredObservation,
     candidate: &DurableObservationV1,
-    candidate_cursor: ClaudeSourceCursorV1,
+    candidate_cursor: ObservationSourceCursorV1,
     outcome: RuntimeSubmitOutcomeV1,
 ) -> ObservationStoreResult<ObservationPersistOutcome> {
     #[cfg(tracedecay_observation_fault_harness)]
@@ -1707,9 +2206,10 @@ fn persist_outcome_from_submit(
         RuntimeSubmitOutcomeV1::ExactReplay { .. } => {
             Ok(ObservationPersistOutcome::ExactDuplicate(receipt))
         }
-        other => Err(runtime_storage_error(
+        other => Err(rejected_submit_error(
             "submit anchored observation",
-            format!("runtime rejected observation write: {other:?}"),
+            "runtime rejected observation write",
+            &other,
         )),
     }
 }
@@ -1802,11 +2302,7 @@ async fn dispatch_runtime_submit(
     transaction_scope: RuntimeTransactionScopeV1,
     operation: &'static str,
 ) -> ObservationStoreResult<RuntimeSubmitOutcomeV1> {
-    let digest_suffix = metadata
-        .idempotency
-        .command_digest
-        .as_str()
-        .strip_prefix("sha256:")
+    let digest_suffix = sha256_hex_suffix(metadata.idempotency.command_digest.as_str())
         .ok_or_else(|| runtime_storage_error(operation, "canonical digest prefix is invalid"))?;
     let deadline = RuntimeDeadlineV1 {
         deadline_id: RuntimeDeadlineIdV1::new(format!("deadline.{digest_suffix}"))
@@ -1843,7 +2339,28 @@ async fn dispatch_runtime_submit(
             }),
         )
         .await
-        .map_err(|error| runtime_storage_error(operation, format!("{error:?}")))
+        .map_err(|error| map_observation_submit_error(operation, error))
+}
+
+fn map_observation_submit_error(
+    operation: &'static str,
+    error: StoreRuntimeRegistryFailure,
+) -> ObservationStoreError {
+    match error {
+        StoreRuntimeRegistryFailure::StorageRuntime(error) => match *error {
+            StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual } => {
+                ObservationStoreError::CursorConflict { expected, actual }
+            }
+            StorageRuntimeErrorV1::ObservationCursorAdvanceCollision => {
+                ObservationStoreError::CursorAdvanceCollision
+            }
+            StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement } => {
+                ObservationStoreError::CursorAdvanceLedgerDisagreement { disagreement }
+            }
+            error => runtime_storage_error(operation, error.to_string()),
+        },
+        error => runtime_storage_error(operation, format!("{error:?}")),
+    }
 }
 
 fn runtime_command_value(
@@ -1893,12 +2410,39 @@ fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult
 }
 
 fn runtime_digest_suffix(digest: &ManifestDigest) -> ObservationStoreResult<&str> {
-    digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+    sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
         runtime_storage_error(
             "derive observation runtime identity",
             "canonical digest prefix is invalid",
         )
     })
+}
+
+async fn begin_observation_read_snapshot(
+    database: &Database,
+    operation: &'static str,
+) -> ObservationStoreResult<DatabaseEngineReadSnapshot> {
+    database
+        .read_connection()
+        .read_snapshot()
+        .await
+        .map_err(|error| match error {
+            EngineError::ReaderSaturated => ObservationStoreError::ReaderSaturated { operation },
+            error => runtime_storage_error(operation, error),
+        })
+}
+
+fn rejected_submit_error(
+    operation: &'static str,
+    rejection: impl std::fmt::Display,
+    outcome: &RuntimeSubmitOutcomeV1,
+) -> ObservationStoreError {
+    match outcome {
+        RuntimeSubmitOutcomeV1::Saturated { .. } => {
+            ObservationStoreError::WriterSaturated { operation }
+        }
+        outcome => runtime_storage_error(operation, format!("{rejection}: {outcome:?}")),
+    }
 }
 
 fn runtime_storage_error(
@@ -1912,7 +2456,6 @@ fn runtime_storage_error(
 }
 
 impl ObservationProjectionStore for GlobalDbObservationStore {
-    #[hotpath::skip]
     async fn next_queued_observation(
         &self,
     ) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
@@ -1922,6 +2465,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
                 now_micros: now_micros().0,
             },
         )
+        .await
         .map_err(projection_runtime_error)?
         {
             ObservationReadResultV1::NextQueuedProjection(observation_id) => Ok(observation_id),
@@ -1932,7 +2476,6 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         }
     }
 
-    #[hotpath::skip]
     async fn project_observation(
         &self,
         observation_id: &CanonicalObservationIdV1,
@@ -1940,7 +2483,6 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         crate::project_observation(&self.database, observation_id).await
     }
 
-    #[hotpath::skip]
     async fn project_queued_observations(
         &self,
         max: usize,
@@ -1950,12 +2492,12 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
             .map(Some)
     }
 
-    #[hotpath::skip]
     async fn projection_checkpoint(&self) -> ProjectionStoreResult<ProjectionCheckpoint> {
         match dispatch_runtime_observation_read(
             &self.runtime,
             ObservationReadOperationV1::ProjectionCheckpoint,
         )
+        .await
         .map_err(projection_runtime_error)?
         {
             ObservationReadResultV1::ProjectionCheckpoint(sequence) => {
@@ -1968,7 +2510,6 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         }
     }
 
-    #[hotpath::skip]
     async fn rebuild_projection(
         &self,
         frontier_sequence: u64,
@@ -1980,25 +2521,59 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
 fn projection_runtime_error(
     error: ObservationStoreError,
 ) -> tracedecay_store::ProjectionStoreError {
-    tracedecay_store::ProjectionStoreError::Storage {
-        operation: "dispatch observation projection runtime operation",
-        source: Box::new(error),
-    }
+    tracedecay_store::ProjectionStoreError::storage(
+        "dispatch observation projection runtime operation",
+        error,
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use tracedecay_store::SaturationScopeV1;
+
     use super::*;
 
     #[test]
-    fn adapter_contains_only_guarded_database_client() {
-        fn assert_exact_fields(store: &GlobalDbObservationStore) {
-            let GlobalDbObservationStore {
-                database: _,
-                runtime: _,
-            } = store;
+    fn writer_saturation_is_backpressure_not_a_storage_failure() {
+        for scope in [
+            SaturationScopeV1::ShardOperations,
+            SaturationScopeV1::ShardBytes,
+        ] {
+            let error = rejected_submit_error(
+                "submit anchored observation",
+                "runtime rejected observation write",
+                &RuntimeSubmitOutcomeV1::Saturated {
+                    shard_id: None,
+                    scope,
+                    retry_after_ms: 25,
+                },
+            );
+            assert!(
+                matches!(
+                    error,
+                    ObservationStoreError::WriterSaturated {
+                        operation: "submit anchored observation"
+                    }
+                ),
+                "{scope:?}: {error:?}"
+            );
         }
-
-        let _ = assert_exact_fields;
+        let error = rejected_submit_error(
+            "advance observation source cursor",
+            "runtime rejected cursor advance",
+            &RuntimeSubmitOutcomeV1::Unavailable {
+                reason: tracedecay_store::UnavailableReasonV1::MissingAuthority,
+            },
+        );
+        assert!(
+            matches!(
+                error,
+                ObservationStoreError::Storage {
+                    operation: "advance observation source cursor",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 }

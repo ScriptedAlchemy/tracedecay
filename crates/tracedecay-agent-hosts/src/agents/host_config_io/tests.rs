@@ -1,0 +1,888 @@
+use super::*;
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod jsonc_tests {
+    use super::*;
+
+    #[test]
+    fn parse_jsonc_plain_json() {
+        let input = r#"{"key": "value", "num": 42}"#;
+        let v = parse_jsonc(input);
+        assert_eq!(v["key"], "value");
+        assert_eq!(v["num"], 42);
+    }
+
+    #[test]
+    fn parse_jsonc_trailing_comma_array() {
+        let input = r#"{"items": [1, 2, 3,]}"#;
+        let v = parse_jsonc(input);
+        assert_eq!(v["items"][2], 3);
+    }
+
+    #[test]
+    fn parse_jsonc_combined() {
+        let input = "{\n  // comment\n  \"x\": /* inline */ 99,\n}";
+        let v = parse_jsonc(input);
+        assert_eq!(v["x"], 99);
+    }
+
+    #[test]
+    fn parse_jsonc_url_in_string_not_stripped() {
+        // A URL containing `//` inside a string must NOT be treated as a comment.
+        let input = r#"{"url": "https://example.com/path"}"#;
+        let v = parse_jsonc(input);
+        assert_eq!(v["url"], "https://example.com/path");
+    }
+
+    #[test]
+    fn parse_jsonc_invalid_falls_back_to_empty() {
+        let input = "not valid json at all !!!";
+        let v = parse_jsonc(input);
+        assert_eq!(v, serde_json::json!({}));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for safe config load / write
+// ---------------------------------------------------------------------------
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod safe_config_tests {
+    use super::*;
+    use std::fs;
+
+    /// Create a temp directory that is cleaned up on drop.
+    fn tmpdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("failed to create temp dir")
+    }
+
+    // ----- load_json_file_strict -----
+
+    #[test]
+    fn strict_load_returns_empty_for_missing_file() {
+        let dir = tmpdir();
+        let path = dir.path().join("nope.json");
+        let val = load_json_file_strict(&path).unwrap();
+        assert_eq!(val, serde_json::json!({}));
+    }
+
+    #[test]
+    fn strict_jsonc_load_parses_valid_jsonc() {
+        let dir = tmpdir();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            "{\n  // comment\n  \"key\": \"val\",\n  /* block */ \"n\": 1,\n}",
+        )
+        .unwrap();
+        let val = load_jsonc_file_strict(&path).unwrap();
+        assert_eq!(val["key"], "val");
+        assert_eq!(val["n"], 1);
+    }
+
+    #[test]
+    fn strict_jsonc_load_errors_on_garbage() {
+        let dir = tmpdir();
+        let path = dir.path().join("garbage.json");
+        fs::write(&path, "totally not json or jsonc !!!").unwrap();
+        let err = load_jsonc_file_strict(&path).unwrap_err();
+        assert!(err.to_string().contains("cannot parse"));
+    }
+
+    #[test]
+    fn safe_write_cleans_up_new_file_on_success() {
+        let dir = tmpdir();
+        let path = dir.path().join("config.json");
+        safe_write_json_file(&path, &serde_json::json!({"mcpServers": {}})).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written, serde_json::json!({"mcpServers": {}}));
+        let new_path = dir.path().join("config.json.new");
+        assert!(!new_path.exists(), ".new staging file should be removed");
+    }
+
+    #[test]
+    fn full_install_cycle_preserves_existing_config() {
+        // Simulate the full install cycle: strict load → mutate → safe write.
+        // Existing keys must be preserved and no copy of the prior bytes kept.
+        let dir = tmpdir();
+        let path = dir.path().join("config.json");
+        let original = serde_json::json!({
+            "theme": "dark",
+            "mcp": {
+                "existing_server": {"url": "http://localhost:8080"}
+            },
+            "other_setting": [1, 2, 3]
+        });
+        fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        // Simulate install
+        let mut config = load_json_file_strict(&path).unwrap();
+        config["mcp"]["tracedecay"] = serde_json::json!({
+            "type": "local",
+            "command": ["tracedecay", "serve"]
+        });
+        safe_write_json_file(&path, &config).unwrap();
+
+        // Verify
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // TraceDecay was added
+        assert!(result["mcp"]["tracedecay"].is_object());
+        // Existing keys survived
+        assert_eq!(result["theme"], "dark");
+        assert_eq!(
+            result["mcp"]["existing_server"]["url"],
+            "http://localhost:8080"
+        );
+        assert_eq!(result["other_setting"], serde_json::json!([1, 2, 3]));
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("config.json")]);
+    }
+
+    #[test]
+    fn full_install_cycle_aborts_on_corrupt_file() {
+        // If the existing config is corrupt, the install must fail without
+        // touching the file. This is the core regression test.
+        let dir = tmpdir();
+        let path = dir.path().join("config.json");
+        let corrupt_content = "{ this is not valid json at all }}}";
+        fs::write(&path, corrupt_content).unwrap();
+
+        // Strict load fails
+        let err = load_json_file_strict(&path);
+        assert!(err.is_err());
+
+        // Original file is byte-for-byte unchanged
+        assert_eq!(fs::read_to_string(&path).unwrap(), corrupt_content);
+    }
+}
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod path_normalize_tests {
+    use super::*;
+
+    /// Report whether `directory`'s filesystem accepts a name that is not
+    /// valid UTF-8.
+    ///
+    /// `cfg(unix)` is a compile gate, not a filesystem capability: APFS
+    /// refuses such a name outright with `EILSEQ`, so a macOS run failed at
+    /// the fixture instead of exercising the lookup. Probing keeps the
+    /// coverage everywhere the bytes are really accepted and makes the skip
+    /// visible where they are not.
+    #[cfg(unix)]
+    fn non_utf8_file_names_supported(directory: &Path) -> bool {
+        use std::os::unix::ffi::OsStringExt;
+
+        let probe = directory.join(std::ffi::OsString::from_vec(vec![b'p', 0xff]));
+        match std::fs::write(&probe, b"") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_lookup_preserves_non_unicode_parent_components() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        if !non_utf8_file_names_supported(dir.path()) {
+            println!(
+                "skipping path_lookup_preserves_non_unicode_parent_components: \
+                 this filesystem refuses non-UTF-8 file names"
+            );
+            return;
+        }
+        let invalid_parent = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b'n', b'o', b'n', 0xff]));
+        let executable = invalid_parent.join(tracedecay_bin_name());
+        std::fs::create_dir_all(&invalid_parent).unwrap();
+        std::fs::write(&executable, "").unwrap();
+        let path_var = std::env::join_paths([&invalid_parent]).unwrap();
+
+        assert_eq!(
+            which_tracedecay_path_from(None, Some(path_var.as_os_str()), None),
+            Some(executable)
+        );
+        assert!(which_tracedecay_from(None, Some(path_var.as_os_str()), None).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_classification_is_case_insensitive() {
+        assert!(is_tracedecay_exe(Path::new(r"C:\Tools\TraceDecay.EXE")));
+        assert!(is_build_output_binary(
+            Path::new(r"C:\Work\TARGET\DEBUG\TraceDecay.EXE"),
+            None
+        ));
+        assert!(is_build_output_binary(
+            Path::new(r"C:\Work\Custom\TraceDecay.EXE"),
+            Some(Path::new(r"c:\work\CUSTOM"))
+        ));
+    }
+
+    #[test]
+    fn normalizes_windows_backslashes() {
+        assert_eq!(
+            tracedecay_domain::forward_slash_text(r"C:\Users\dev\scoop\shims\tracedecay.exe"),
+            "C:/Users/dev/scoop/shims/tracedecay.exe"
+        );
+    }
+
+    #[test]
+    fn which_tracedecay_prefers_path_when_current_exe_is_cargo_target_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
+        std::fs::write(&path_bin, "").unwrap();
+        let current_exe = dir
+            .path()
+            .join("checkout/target/debug")
+            .join(tracedecay_bin_name());
+        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
+
+        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
+            .expect("PATH binary should be preferred over cargo target binary");
+
+        assert_eq!(
+            found,
+            tracedecay_domain::forward_slash_text(&path_bin.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn which_tracedecay_prefers_path_when_current_exe_is_custom_cargo_target_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
+        std::fs::write(&path_bin, "").unwrap();
+        let cargo_target_dir = dir.path().join("custom-target");
+        let current_exe = cargo_target_dir.join("debug").join(tracedecay_bin_name());
+        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
+
+        let found = which_tracedecay_from(
+            Some(&current_exe),
+            Some(path_var.as_os_str()),
+            Some(&cargo_target_dir),
+        )
+        .expect("PATH binary should be preferred over a custom cargo target binary");
+
+        assert_eq!(
+            found,
+            tracedecay_domain::forward_slash_text(&path_bin.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn which_tracedecay_skips_cargo_target_binary_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_bin = dir
+            .path()
+            .join("checkout/target/debug")
+            .join(tracedecay_bin_name());
+        let stable_bin = dir.path().join(".cargo/bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(target_bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(stable_bin.parent().unwrap()).unwrap();
+        std::fs::write(&target_bin, "").unwrap();
+        std::fs::write(&stable_bin, "").unwrap();
+        let path_var =
+            std::env::join_paths([target_bin.parent().unwrap(), stable_bin.parent().unwrap()])
+                .unwrap();
+
+        let found = which_tracedecay_from(None, Some(path_var.as_os_str()), None)
+            .expect("stable PATH binary should be found after skipping cargo target binary");
+
+        assert_eq!(
+            found,
+            tracedecay_domain::forward_slash_text(&stable_bin.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn which_tracedecay_prefers_installed_path_over_bazel_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "").unwrap();
+        for output in [
+            "bazel-out/k8-fastbuild/bin/crates/tracedecay-cli",
+            "bazel-bin/crates/tracedecay-cli",
+        ] {
+            let build_bin = dir.path().join(output).join(tracedecay_bin_name());
+            std::fs::create_dir_all(build_bin.parent().unwrap()).unwrap();
+            std::fs::write(&build_bin, "").unwrap();
+            let path_var =
+                std::env::join_paths([build_bin.parent().unwrap(), installed.parent().unwrap()])
+                    .unwrap();
+            for current in [None, Some(build_bin.as_path())] {
+                assert_eq!(
+                    which_tracedecay_path_from(current, Some(path_var.as_os_str()), None),
+                    Some(installed.clone()),
+                );
+            }
+            assert_eq!(
+                which_tracedecay_path_from(Some(&build_bin), None, None),
+                Some(build_bin)
+            );
+        }
+        assert!(!is_build_output_binary(
+            &dir.path().join("bazel-out/docs/tracedecay"),
+            None
+        ));
+    }
+
+    #[test]
+    fn which_tracedecay_keeps_non_target_current_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
+        std::fs::write(&path_bin, "").unwrap();
+        let current_exe = dir.path().join(".cargo/bin").join(tracedecay_bin_name());
+        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
+
+        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
+            .expect("non-target current exe should be accepted");
+
+        assert_eq!(
+            found,
+            tracedecay_domain::forward_slash_text(&current_exe.to_string_lossy())
+        );
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+mod local_install_safety_tests {
+    use super::*;
+
+    fn start_paused_host_write(
+        path: &Path,
+        contents: &'static [u8],
+    ) -> (
+        TestHostConfigWritePauseController,
+        std::thread::JoinHandle<std::result::Result<(), String>>,
+    ) {
+        let pause = pause_next_host_config_write_at_publication(path);
+        let path = path.to_path_buf();
+        let writer = std::thread::spawn(move || {
+            safe_write_bytes_file(&path, contents).map_err(|error| error.to_string())
+        });
+        pause.wait_until_reached();
+        (pause, writer)
+    }
+
+    #[test]
+    fn windows_hook_command_quotes_windows_paths_with_spaces() {
+        let command = hook_command_for_platform(
+            r"C:\Program Files\tracedecay\tracedecay.exe",
+            "hook-test",
+            true,
+        );
+
+        assert_eq!(
+            command,
+            r#""C:/Program Files/tracedecay/tracedecay.exe" hook-test"#
+        );
+    }
+
+    #[test]
+    fn posix_hook_command_keeps_single_quote_escaping() {
+        let command = hook_command_for_platform("/tmp/tracedecay's/bin", "hook-test", false);
+
+        assert_eq!(command, "'/tmp/tracedecay'\\''s/bin' hook-test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_rejects_symlinked_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let outside = dir.path().join("outside.md");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+        symlink(&outside, project.join("AGENTS.md")).unwrap();
+
+        let err = ensure_project_local_safe_path(&project, &project.join("AGENTS.md")).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should clearly identify the symlink risk: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_rejects_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, project.join(".codex")).unwrap();
+
+        let err = ensure_project_local_safe_path(&project, &project.join(".codex/config.toml"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should clearly identify the symlink risk: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_allows_new_file_under_canonicalized_project_alias() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let alias = dir.path().join("alias");
+        let project = actual.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        symlink(&actual, &alias).unwrap();
+
+        let alias_project = alias.join("project");
+        ensure_project_local_safe_path(&alias_project, &alias_project.join(".codex/config.toml"))
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_reports_symlink_under_canonicalized_project_alias() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let alias = dir.path().join("alias");
+        let project = actual.join("project");
+        let outside = dir.path().join("outside.md");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+        symlink(&actual, &alias).unwrap();
+        symlink(&outside, project.join("AGENTS.md")).unwrap();
+
+        let alias_project = alias.join("project");
+        let err = ensure_project_local_safe_path(&alias_project, &alias_project.join("AGENTS.md"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should clearly identify the symlink risk: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_host_writer_refuses_symlinked_config_for_every_integration() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("operator-config.json");
+        let config = dir.path().join("host-config.json");
+        std::fs::write(&outside, b"operator bytes").unwrap();
+        symlink(&outside, &config).unwrap();
+
+        let error = safe_write_bytes_file(&config, b"tracedecay bytes").unwrap_err();
+        assert!(
+            error.to_string().contains("unsafe host metadata path"),
+            "shared writer must surface its cross-host symlink refusal: {error}"
+        );
+        assert_eq!(std::fs::read(&outside).unwrap(), b"operator bytes");
+    }
+
+    #[test]
+    fn shared_host_writer_serializes_a_competing_canonical_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        std::fs::write(&config, b"original").unwrap();
+        let (pause, first) = start_paused_host_write(&config, b"first");
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let second_path = config.clone();
+        let second = std::thread::spawn(move || {
+            let result =
+                safe_write_bytes_file(&second_path, b"second").map_err(|error| error.to_string());
+            finished_tx.send(()).unwrap();
+            result
+        });
+
+        assert!(
+            finished_rx
+                .recv_timeout(std::time::Duration::from_millis(150))
+                .is_err(),
+            "a competing canonical writer must wait for the path lock"
+        );
+        pause.resume();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        assert_eq!(std::fs::read(&config).unwrap(), b"second");
+    }
+
+    #[test]
+    fn shared_host_writer_refuses_a_foreign_edit_at_publication_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        std::fs::write(&config, b"original").unwrap();
+        let pause = pause_next_host_config_write_at_publication(&config);
+        let writer_path = config.clone();
+        let writer = std::thread::spawn(move || {
+            safe_write_bytes_file(&writer_path, b"tracedecay").map_err(|error| error.to_string())
+        });
+        pause.wait_until_reached();
+
+        std::fs::write(&config, b"foreign").unwrap();
+        pause.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("changed since it was read"), "{error}");
+        assert_eq!(std::fs::read(&config).unwrap(), b"foreign");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_host_writer_retains_both_files_when_published_staging_is_mutated() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        std::fs::write(&config, b"original").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let publication = pause_next_host_config_write_at_publication(&config);
+        let published = pause_next_host_config_write_after_publication(&config);
+        let writer_path = config.clone();
+        let writer = std::thread::spawn(move || {
+            safe_write_bytes_file(&writer_path, b"tracedecay").map_err(|error| error.to_string())
+        });
+        publication.wait_until_reached();
+
+        std::fs::write(&config, b"foreign at boundary").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
+        publication.resume();
+        published.wait_until_reached();
+
+        std::fs::write(&config, b"foreign after publication").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        published.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("retained"), "{error}");
+        assert_eq!(std::fs::read(&config).unwrap(), b"foreign at boundary");
+        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, 0o640);
+        let retained = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path != &config
+                    && std::fs::read(path)
+                        .is_ok_and(|contents| contents == b"foreign after publication")
+            })
+            .expect("the ambiguous published staging file must remain recoverable");
+        assert_eq!(std::fs::metadata(retained).unwrap().mode() & 0o777, 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_host_writer_refuses_a_symlink_swap_at_publication() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&config, b"original").unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+        let (pause, writer) = start_paused_host_write(&config, b"tracedecay");
+
+        std::fs::remove_file(&config).unwrap();
+        symlink(&outside, &config).unwrap();
+        pause.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("unsafe host metadata path"), "{error}");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_host_writer_refuses_a_metadata_change_at_publication() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        std::fs::write(&config, b"original").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (pause, writer) = start_paused_host_write(&config, b"tracedecay");
+
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
+        pause.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("changed since it was read"), "{error}");
+        assert_eq!(std::fs::read(&config).unwrap(), b"original");
+        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn shared_host_writer_refuses_a_missing_file_create_at_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        let (pause, writer) = start_paused_host_write(&config, b"tracedecay");
+
+        std::fs::write(&config, b"foreign create").unwrap();
+        pause.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("changed since it was read"), "{error}");
+        assert_eq!(std::fs::read(&config).unwrap(), b"foreign create");
+    }
+}
+
+/// Install and uninstall edit only TraceDecay's member of an operator config,
+/// so the operator's bytes survive both without any copy being kept.
+#[allow(clippy::unwrap_used)]
+mod format_preserving_edit_tests {
+    use super::*;
+    use crate::agents::{install_mcp_server_entry, uninstall_mcp_server_entry};
+    use tracedecay_host_integration::HostConfigCreationV1;
+
+    fn entry(binary: &str) -> serde_json::Value {
+        serde_json::json!({"command": binary, "args": ["serve"]})
+    }
+
+    /// Install `binary` as one lifecycle operation over `recorded` facts,
+    /// returning the facts its receipt would keep.
+    fn install_recorded(
+        root: &Path,
+        path: &Path,
+        binary: &str,
+        dialect: JsonConfigDialect,
+        recorded: &[HostConfigCreationV1],
+    ) -> Vec<HostConfigCreationV1> {
+        let (installed, facts) = with_host_config_creations(root, recorded, false, || {
+            install_mcp_server_entry(path, "mcpServers", entry(binary), "test", dialect)
+        });
+        installed.unwrap();
+        facts
+    }
+
+    fn uninstall_recorded(
+        root: &Path,
+        path: &Path,
+        dialect: JsonConfigDialect,
+        recorded: &[HostConfigCreationV1],
+    ) {
+        let (removed, facts) = with_host_config_creations(root, recorded, true, || {
+            uninstall_mcp_server_entry(path, "mcpServers", dialect)
+        });
+        removed.unwrap();
+        assert_eq!(facts, Vec::new(), "an uninstall keeps no creation facts");
+    }
+
+    /// Install, reinstall with a moved binary, then uninstall `original`,
+    /// asserting the operator's bytes at every step.
+    fn assert_lifecycle_preserves_bytes(
+        file_name: &str,
+        dialect: JsonConfigDialect,
+        original: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(file_name);
+        std::fs::write(&path, original).unwrap();
+
+        let facts = install_recorded(dir.path(), &path, "/opt/a/tracedecay", dialect, &[]);
+        let installed = std::fs::read_to_string(&path).unwrap();
+        let original_value = dialect.parse_for_edit(&path, original).unwrap();
+        let mut parsed = dialect.parse_for_edit(&path, &installed).unwrap();
+        let servers = parsed["mcpServers"].as_object_mut().unwrap();
+        assert_eq!(
+            servers.remove("tracedecay"),
+            Some(entry("/opt/a/tracedecay"))
+        );
+        if original_value.get("mcpServers").is_none() {
+            parsed.as_object_mut().unwrap().remove("mcpServers");
+        }
+        assert_eq!(parsed, original_value);
+
+        let facts = install_recorded(dir.path(), &path, "/opt/b/tracedecay", dialect, &facts);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            installed.replace("/opt/a/tracedecay", "/opt/b/tracedecay"),
+            "a reinstall rewrote more than the moved command"
+        );
+
+        uninstall_recorded(dir.path(), &path, dialect, &facts);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from(file_name)]);
+    }
+
+    #[test]
+    fn json_lifecycle_restores_indentation_key_order_and_line_endings() {
+        assert_lifecycle_preserves_bytes(
+            "mcp.json",
+            JsonConfigDialect::Json,
+            "{\r\n    \"zeta\": true,\r\n    \"mcpServers\": {\r\n        \"foreign\": {\"command\": \"foreign-bin\", \"args\": []}\r\n    },\r\n    \"alpha\": [1, 2]\r\n}",
+        );
+        assert_lifecycle_preserves_bytes(
+            "minified.json",
+            JsonConfigDialect::Json,
+            r#"{"zeta":1,"mcpServers":{"foreign":{"command":"foreign-bin"}}}"#,
+        );
+    }
+
+    #[test]
+    fn jsonc_lifecycle_restores_comments_and_trailing_commas() {
+        assert_lifecycle_preserves_bytes(
+            "settings.json",
+            JsonConfigDialect::Jsonc,
+            "// operator header\n{\n\t\"theme\": \"dark\", // same-line note\n\t/* servers */\n\t\"mcpServers\": {\n\t\t\"foreign\": {\"command\": \"foreign-bin\",},\n\t},\n\t\"alpha\": [1, 2,],\n}\n",
+        );
+        // The root key TraceDecay creates is pruned again on uninstall.
+        assert_lifecycle_preserves_bytes(
+            "absent-root.json",
+            JsonConfigDialect::Jsonc,
+            "{\n  // keep me\n  \"theme\": \"dark\" // tail\n}\n",
+        );
+    }
+
+    /// A registry the operator already had, even one holding nothing but an
+    /// empty server map, is theirs: uninstall restores it byte for byte.
+    #[test]
+    fn uninstall_keeps_a_preexisting_empty_root_and_file() {
+        assert_lifecycle_preserves_bytes(
+            "mcp_config.json",
+            JsonConfigDialect::Json,
+            "{\"mcpServers\":{}}\n",
+        );
+        assert_lifecycle_preserves_bytes("empty-object.json", JsonConfigDialect::Json, "{}");
+    }
+
+    /// A registry install created is deleted again, parent directory kept,
+    /// and one the operator filled with a server of their own survives with
+    /// only TraceDecay's entry gone.
+    #[test]
+    fn uninstall_deletes_the_file_install_created_unless_the_operator_filled_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let facts = install_recorded(
+            dir.path(),
+            &path,
+            "/opt/a/tracedecay",
+            JsonConfigDialect::Json,
+            &[],
+        );
+        assert_eq!(
+            facts,
+            vec![HostConfigCreationV1 {
+                relative_path: "mcp.json".to_string(),
+                created_file: true,
+                created_containers: vec![
+                    "/mcpServers".to_string(),
+                    "/mcpServers/tracedecay".to_string(),
+                    "/mcpServers/tracedecay/args".to_string(),
+                ],
+            }]
+        );
+        uninstall_recorded(dir.path(), &path, JsonConfigDialect::Json, &facts);
+        assert!(
+            !path.exists(),
+            "install-created registry survived uninstall"
+        );
+        assert!(dir.path().is_dir());
+
+        let facts = install_recorded(
+            dir.path(),
+            &path,
+            "/opt/a/tracedecay",
+            JsonConfigDialect::Json,
+            &[],
+        );
+        let mut filled = load_json_file_strict(&path).unwrap();
+        filled["mcpServers"]["mine"] = serde_json::json!({"command": "mine"});
+        safe_write_json_file(&path, &filled).unwrap();
+        uninstall_recorded(dir.path(), &path, JsonConfigDialect::Json, &facts);
+        assert_eq!(
+            load_json_file_strict(&path).unwrap(),
+            serde_json::json!({"mcpServers": {"mine": {"command": "mine"}}})
+        );
+    }
+
+    /// Outside a recorded lifecycle nothing proves what install created, so
+    /// uninstall removes only the entry.
+    #[test]
+    fn unrecorded_uninstall_removes_only_the_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        install_mcp_server_entry(
+            &path,
+            "mcpServers",
+            entry("/opt/a/tracedecay"),
+            "test",
+            JsonConfigDialect::Json,
+        )
+        .unwrap();
+        uninstall_mcp_server_entry(&path, "mcpServers", JsonConfigDialect::Json).unwrap();
+        assert_eq!(
+            load_json_file_strict(&path).unwrap(),
+            serde_json::json!({"mcpServers": {}})
+        );
+    }
+
+    #[test]
+    fn edit_refuses_a_config_it_cannot_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = "{\n  // a comment is not JSON\n  \"a\": 1\n}\n";
+        std::fs::write(&path, original).unwrap();
+
+        let error = install_mcp_server_entry(
+            &path,
+            "mcpServers",
+            entry("/opt/a/tracedecay"),
+            "test",
+            JsonConfigDialect::Json,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot parse"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn edit_parse_refuses_json5_syntax_in_both_dialects() {
+        let path = Path::new("settings.json");
+        for dialect in [JsonConfigDialect::Json, JsonConfigDialect::Jsonc] {
+            for json5 in [
+                r#"{"a": .5}"#,
+                r#"{"a": 5.}"#,
+                r#"{"a": Infinity}"#,
+                r#"{"a": -Infinity}"#,
+                r#"{"a": "\x41"}"#,
+                r#"{"a": "\v"}"#,
+                "{\"a\": \"line\\\ncontinued\"}",
+                r#"{true: 1}"#,
+            ] {
+                assert!(
+                    dialect.parse_for_edit(path, json5).is_err(),
+                    "{dialect:?} accepted {json5}"
+                );
+            }
+            assert_eq!(
+                dialect
+                    .parse_for_edit(path, r#"{"a": 0.5, "b": "\u0041"}"#)
+                    .unwrap(),
+                serde_json::json!({"a": 0.5, "b": "A"})
+            );
+        }
+    }
+}

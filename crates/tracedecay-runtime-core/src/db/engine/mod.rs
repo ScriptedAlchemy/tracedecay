@@ -14,7 +14,7 @@ mod write_statement;
 
 pub use connection::{Connection, ReadConnection, ReaderPoolSnapshot, ReaderPoolState};
 pub use error::{Error, Result};
-pub use executor::{DatabaseAttachmentExecutor, Executor, QueryExecutor, WalCheckpointExecutor};
+pub use executor::{Executor, QueryExecutor};
 pub use params::{IntoParams, IntoValue, Params, params, params_from_iter};
 pub use row::{Row, Rows};
 pub use snapshot::ReadSnapshot;
@@ -22,7 +22,7 @@ pub use snapshot::ReadSnapshot;
 pub use statement::Statement;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use test_support::TestConnection;
-pub use transaction::{Transaction, TransactionBehavior};
+pub use transaction::{Transaction, TransactionBehavior, WriteTx};
 pub use value::{FromValue, Value, opt_i64, opt_text};
 pub use write_statement::WriteStatement;
 

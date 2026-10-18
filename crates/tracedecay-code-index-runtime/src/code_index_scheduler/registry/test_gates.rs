@@ -1,0 +1,900 @@
+//! Deterministic gates and observers the unit tests use to hold the registry
+//! at a chosen step.
+
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use super::super::{
+    CodeIndexCadenceReadModelV1, CodeIndexEventToReadyReceiptV1, LatestCompleteCodeIndexV1,
+};
+use super::{
+    CodeIndexSchedulerRegistryV1, ColdMountOpenEventV1, ColdMountOpenTestControlV1,
+    ColdMountPostCheckTestControlV1, PendingWakeDropGateTestV1, PendingWakeV1,
+    QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
+    ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, arm_worker_step_gate,
+    cold_mount_admission_barriers, cold_mount_open_controls, cold_mount_post_check_controls,
+    complete_seat_probe_miss_gate, graph_decode_gate, opened_published_text_projection_gate,
+    published_text_projection_gate, query_admission_controls, serving_swap_gate,
+    take_worker_step_gate, terminal_suppression_gate, test_gate_root,
+    text_projection_store_contention_gate, unique_mounted_for_scope, wait_notified_if_unset,
+};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+
+impl CodeIndexSchedulerRegistryV1 {
+    #[cfg(test)]
+    pub fn pause_next_published_text_projection(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        arm_worker_step_gate(
+            published_text_projection_gate(),
+            test_gate_root(&project_root),
+            format_args!(
+                "one published text projection gate per worktree: {}",
+                project_root.display()
+            ),
+        )
+    }
+
+    /// Hold the next publication's text projection once its first advance
+    /// opened the build, so the publishing pass waits in its join.
+    #[cfg(test)]
+    pub fn pause_next_opened_published_text_projection(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        arm_worker_step_gate(
+            opened_published_text_projection_gate(),
+            test_gate_root(&project_root),
+            format_args!(
+                "one opened text projection gate per worktree: {}",
+                project_root.display()
+            ),
+        )
+    }
+
+    /// Hold the next text projection advance that a held code-generation
+    /// store lock refuses, before the projection decides how to wait.
+    #[cfg(test)]
+    pub fn pause_next_text_projection_store_contention(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        arm_worker_step_gate(
+            text_projection_store_contention_gate(),
+            test_gate_root(&project_root),
+            format_args!(
+                "one store contention gate per worktree: {}",
+                project_root.display()
+            ),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_text_projection_store_contention_gate(project_root: &Path) {
+        let gate = take_worker_step_gate(
+            text_projection_store_contention_gate(),
+            &test_gate_root(project_root),
+        );
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_opened_published_text_projection_gate(project_root: &Path) {
+        let gate = take_worker_step_gate(
+            opened_published_text_projection_gate(),
+            &test_gate_root(project_root),
+        );
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_published_text_projection_gate(project_root: &Path) {
+        let gate = take_worker_step_gate(
+            published_text_projection_gate(),
+            &test_gate_root(project_root),
+        );
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    /// Panic the worker for `project_root` on its next admitted pass, or as it
+    /// exits if no pass comes first, outside the per-step guard that catches a
+    /// reconcile step's panic.
+    #[cfg(test)]
+    pub fn panic_next_worker_pass(project_root: &Path) {
+        armed_worker_panics()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(test_gate_root(project_root));
+    }
+
+    #[cfg(test)]
+    pub(super) fn panic_worker_pass_if_armed(project_root: &Path) {
+        let armed = armed_worker_panics()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&test_gate_root(project_root));
+        assert!(!armed, "injected code-index worker panic");
+    }
+
+    /// Hold the next graph tail of the worker for `project_root` right before
+    /// it seats the decoded generation. The first receiver resolves once the
+    /// worker waits there; sending on the returned sender releases it.
+    #[cfg(test)]
+    pub fn pause_next_serving_swap(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        arm_worker_step_gate(
+            serving_swap_gate(),
+            test_gate_root(&project_root),
+            format_args!("one serving swap gate per worktree"),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_serving_swap_gate(project_root: &Path) {
+        let gate = take_worker_step_gate(serving_swap_gate(), &test_gate_root(project_root));
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    /// Hold the next woken worker for `project_root` after its shutdown check,
+    /// right before a terminal publication park suppresses its pass.
+    #[cfg(test)]
+    pub fn pause_next_terminal_suppression(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        arm_worker_step_gate(
+            terminal_suppression_gate(),
+            test_gate_root(&project_root),
+            format_args!("one terminal suppression gate per worktree"),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_terminal_suppression_gate(project_root: &Path) {
+        let gate =
+            take_worker_step_gate(terminal_suppression_gate(), &test_gate_root(project_root));
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    /// Hold the next complete-seat probe for `project_root` right after its
+    /// read missed. The first receiver resolves once the probe waits there;
+    /// sending on the returned sender releases it.
+    #[cfg(test)]
+    pub fn pause_next_complete_seat_probe_miss(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        arm_worker_step_gate(
+            complete_seat_probe_miss_gate(),
+            project_root,
+            format_args!("one complete-seat probe gate per worktree"),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_complete_seat_probe_miss_gate(project_root: &Path) {
+        let gate = take_worker_step_gate(complete_seat_probe_miss_gate(), project_root);
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    /// Hold the next graph prepare of the worker for `project_root` twice:
+    /// right before it decodes the active generation, and right after the
+    /// decode returned. Each pair is the entered receiver and release sender.
+    #[cfg(test)]
+    pub fn pause_around_next_graph_decode(
+        &self,
+        project_root: PathBuf,
+    ) -> [(
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ); 2] {
+        let (before_entered, before_observed) = tokio::sync::oneshot::channel();
+        let (before_released, before_release) = tokio::sync::oneshot::channel();
+        let (after_entered, after_observed) = tokio::sync::oneshot::channel();
+        let (after_released, after_release) = tokio::sync::oneshot::channel();
+        let replaced = graph_decode_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                test_gate_root(&project_root),
+                [
+                    WorkerStepGateV1 {
+                        entered: before_entered,
+                        release: before_release,
+                    },
+                    WorkerStepGateV1 {
+                        entered: after_entered,
+                        release: after_release,
+                    },
+                ],
+            );
+        assert!(replaced.is_none(), "one graph decode gate per worktree");
+        [
+            (before_observed, before_released),
+            (after_observed, after_released),
+        ]
+    }
+
+    /// Wait at the armed before-decode gate and hand back the after-decode one.
+    #[cfg(test)]
+    pub(super) async fn enter_graph_decode_gate(project_root: &Path) -> Option<WorkerStepGateV1> {
+        let gate = graph_decode_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&test_gate_root(project_root));
+        let [before, after] = gate?;
+        Self::pass_worker_step_gate(Some(before)).await;
+        Some(after)
+    }
+
+    /// Test-only observation of an exact mounted worktree's active owner pass.
+    #[cfg(test)]
+    pub async fn reconcile_in_progress_for_test(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
+            return false;
+        };
+        let reconcile_in_progress = self
+            .mounted
+            .lock()
+            .await
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.reconcile_in_progress));
+        reconcile_in_progress.is_some_and(|reconcile_in_progress| reconcile_in_progress.running())
+    }
+
+    /// Test-only: hold an exact mounted worktree's owner-pass authority, as
+    /// the worker does from claiming a wake through text projection and graph
+    /// seating, without holding the scheduler mutex.
+    #[cfg(test)]
+    pub async fn hold_reconcile_pass_for_test(
+        &self,
+        project_root: &Path,
+    ) -> Option<super::super::ReconcilePassGuard> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        let reconcile_in_progress = self
+            .mounted
+            .lock()
+            .await
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.reconcile_in_progress))?;
+        Some(super::super::ReconcilePassGuard::enter(
+            &reconcile_in_progress,
+        ))
+    }
+
+    /// Serving slot only, no Git open, no freshness ladder, no wake.
+    #[cfg(test)]
+    pub async fn latest_complete_serving_for_test(
+        &self,
+        project_root: &Path,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        let serving = {
+            let mounted = self.mounted.lock().await;
+            Arc::clone(&mounted.get(&project_root)?.serving_generation)
+        };
+        serving
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub fn install_cold_mount_admission_barrier(&self, project_root: &Path, callers: usize) {
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
+        let barrier = Arc::new(tokio::sync::Barrier::new(callers));
+        let replaced = cold_mount_admission_barriers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, barrier);
+        assert!(replaced.is_none(), "cold-mount barrier already installed");
+    }
+
+    #[cfg(test)]
+    pub fn install_cold_mount_post_check_gate(&self, project_root: &Path) {
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
+        let replaced = cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root,
+                Arc::new(ColdMountPostCheckTestControlV1 {
+                    reached: AtomicBool::new(false),
+                    entered: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                }),
+            );
+        assert!(
+            replaced.is_none(),
+            "cold-mount post-check gate already installed"
+        );
+    }
+
+    #[cfg(test)]
+    pub async fn wait_for_cold_mount_post_check(&self, project_root: &Path) {
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
+        let control = cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .cloned()
+            .expect("cold-mount post-check gate");
+        let entered = control.entered.notified();
+        if !control.reached.load(Ordering::Acquire) {
+            entered.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn release_cold_mount_post_check(&self, project_root: &Path) {
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
+        cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .expect("cold-mount post-check gate")
+            .release
+            .notify_one();
+    }
+
+    #[cfg(test)]
+    pub fn install_cold_mount_open_gate(&self, project_root: &Path) {
+        Self::install_cold_mount_open_control(project_root, true);
+    }
+
+    #[cfg(test)]
+    pub fn install_cold_mount_open_observer(&self, project_root: &Path) {
+        Self::install_cold_mount_open_control(project_root, false);
+    }
+
+    #[cfg(test)]
+    fn install_cold_mount_open_control(project_root: &Path, blocks_open: bool) {
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
+        let replaced = cold_mount_open_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root,
+                Arc::new(ColdMountOpenTestControlV1::new(blocks_open)),
+            );
+        assert!(
+            replaced.is_none(),
+            "cold-mount open control already installed"
+        );
+    }
+
+    #[cfg(test)]
+    pub async fn wait_for_cold_mount_open_events(&self, project_root: &Path, events: usize) {
+        let control =
+            Self::cold_mount_open_control_for_test(project_root).expect("cold-mount open control");
+        let mut changed = control.changed.subscribe();
+        loop {
+            let observed = control
+                .events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len();
+            if observed >= events {
+                return;
+            }
+            let _ = changed.changed().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn wait_for_cold_mount_follower(&self, project_root: &Path) {
+        let control =
+            Self::cold_mount_open_control_for_test(project_root).expect("cold-mount open control");
+        let mut changed = control.changed.subscribe();
+        loop {
+            if control.followers.load(Ordering::Acquire) != 0 {
+                return;
+            }
+            let _ = changed.changed().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn release_cold_mount_open_gate(&self, project_root: &Path) {
+        let control =
+            Self::cold_mount_open_control_for_test(project_root).expect("cold-mount open control");
+        let mut released = control
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *released = true;
+        control.release.notify_all();
+    }
+
+    #[cfg(test)]
+    pub fn cold_mount_open_events(&self, project_root: &Path) -> Vec<ColdMountOpenEventV1> {
+        Self::cold_mount_open_control_for_test(project_root)
+            .expect("cold-mount open control")
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub fn subscribe_cold_mount_cancellation(
+        &self,
+        project_root: &Path,
+    ) -> Option<tokio::sync::watch::Receiver<()>> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        self.cold_mount_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .map(|slot| slot.cancellation.subscribe())
+    }
+
+    #[cfg(test)]
+    pub fn install_query_admission_barrier(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+        callers: usize,
+    ) {
+        let control = Arc::new(QueryAdmissionTestControlV1 {
+            lookup_gate: tokio::sync::Mutex::new(()),
+            rendezvous: tokio::sync::Barrier::new(callers),
+            pauses_after_claim: AtomicBool::new(false),
+            claim_reached: AtomicBool::new(false),
+            claim_entered: tokio::sync::Notify::new(),
+            claim_release: tokio::sync::Notify::new(),
+        });
+        let replaced = query_admission_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(scope.worktree_id.clone(), control);
+        assert!(
+            replaced.is_none(),
+            "query-admission barrier already installed"
+        );
+    }
+
+    #[cfg(test)]
+    pub fn install_query_claim_gate(&self, scope: &tracedecay_contracts::ResolvedScope) {
+        let control = Arc::new(QueryAdmissionTestControlV1 {
+            lookup_gate: tokio::sync::Mutex::new(()),
+            rendezvous: tokio::sync::Barrier::new(1),
+            pauses_after_claim: AtomicBool::new(true),
+            claim_reached: AtomicBool::new(false),
+            claim_entered: tokio::sync::Notify::new(),
+            claim_release: tokio::sync::Notify::new(),
+        });
+        let replaced = query_admission_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(scope.worktree_id.clone(), control);
+        assert!(replaced.is_none(), "query-claim gate already installed");
+    }
+
+    #[cfg(test)]
+    pub async fn wait_for_query_claim(&self, scope: &tracedecay_contracts::ResolvedScope) {
+        let control = Self::query_admission_control_for_test(scope).expect("query-claim gate");
+        wait_notified_if_unset(&control.claim_reached, &control.claim_entered).await;
+    }
+
+    #[cfg(test)]
+    pub fn release_query_claim(&self, scope: &tracedecay_contracts::ResolvedScope) {
+        Self::query_admission_control_for_test(scope)
+            .expect("query-claim gate")
+            .claim_release
+            .notify_one();
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pause_cold_mount_admission_for_test(project_root: &Path) {
+        let barrier = cold_mount_admission_barriers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pause_cold_mount_after_outer_check_for_test(project_root: &Path) {
+        let control = cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned();
+        let Some(control) = control else {
+            return;
+        };
+        control.reached.store(true, Ordering::Release);
+        control.entered.notify_waiters();
+        control.release.notified().await;
+    }
+
+    #[cfg(test)]
+    fn cold_mount_open_control_for_test(
+        project_root: &Path,
+    ) -> Option<Arc<ColdMountOpenTestControlV1>> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        cold_mount_open_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .cloned()
+    }
+
+    #[cfg(test)]
+    pub(super) fn pause_cold_mount_open_for_test(project_root: &Path) {
+        let Some(control) = Self::cold_mount_open_control_for_test(project_root) else {
+            return;
+        };
+        control.record(ColdMountOpenEventV1::Started);
+        if control.blocks_open {
+            let mut released = control
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = control
+                    .release
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn finish_cold_mount_open_for_test(project_root: &Path) {
+        if let Some(control) = Self::cold_mount_open_control_for_test(project_root) {
+            control.record(ColdMountOpenEventV1::Finished);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn note_cold_mount_follower_for_test(project_root: &Path) {
+        if let Some(control) = Self::cold_mount_open_control_for_test(project_root) {
+            control.record_follower();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn query_admission_control_for_test(
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<Arc<QueryAdmissionTestControlV1>> {
+        query_admission_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&scope.worktree_id)
+            .cloned()
+    }
+
+    #[cfg(test)]
+    async fn pending_wake_for_scope_for_test(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<Arc<PendingWakeV1>> {
+        let mounted = self.mounted.lock().await;
+        unique_mounted_for_scope(&mounted, scope)
+            .unique()
+            .map(|(_, worktree)| Arc::clone(&worktree.pending_wake))
+    }
+
+    #[cfg(test)]
+    pub async fn install_pending_wake_drop_gate(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) {
+        let mounted = self.mounted.lock().await;
+        let pending_wake = mounted
+            .values()
+            .find(|worktree| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            })
+            .map(|worktree| Arc::clone(&worktree.pending_wake))
+            .expect("mounted worktree");
+        let replaced = pending_wake
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(Arc::new(PendingWakeDropGateTestV1::new()));
+        assert!(
+            replaced.is_none(),
+            "pending-wake drop gate already installed"
+        );
+    }
+
+    #[cfg(test)]
+    async fn pending_wake_drop_gate_for_test(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Arc<PendingWakeDropGateTestV1> {
+        let pending_wake = self
+            .pending_wake_for_scope_for_test(scope)
+            .await
+            .expect("mounted worktree");
+        pending_wake
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("pending-wake drop gate")
+    }
+
+    #[cfg(test)]
+    pub async fn wait_for_pending_wake_claim_drop(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) {
+        let gate = self.pending_wake_drop_gate_for_test(scope).await;
+        wait_notified_if_unset(&gate.drop_reached, &gate.drop_entered).await;
+    }
+
+    #[cfg(test)]
+    pub async fn wait_for_foreign_pending_wake_attempt(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) {
+        let gate = self.pending_wake_drop_gate_for_test(scope).await;
+        wait_notified_if_unset(&gate.foreign_attempted, &gate.foreign_entered).await;
+    }
+
+    #[cfg(test)]
+    pub async fn release_pending_wake_claim_drop(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) {
+        let gate = self.pending_wake_drop_gate_for_test(scope).await;
+        let mut released = gate
+            .drop_released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *released = true;
+        gate.drop_release.notify_all();
+    }
+
+    /// The mounted root that owns one exact scope's worktree.
+    #[cfg(test)]
+    pub async fn mounted_root_for_scope_for_test(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<std::path::PathBuf> {
+        let mounted = self.mounted.lock().await;
+        mounted
+            .iter()
+            .find(|(_, worktree)| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            })
+            .map(|(root, _)| root.clone())
+    }
+
+    /// The pending-wake slot for one exact scope's worktree, in unix micros;
+    /// `0` means no wake is outstanding.
+    #[cfg(test)]
+    pub async fn pending_wake_micros_for_scope(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<u64> {
+        let mounted = self.mounted.lock().await;
+        mounted
+            .values()
+            .find(|worktree| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            })
+            .map(|worktree| worktree.pending_wake.lock().micros)
+    }
+
+    /// The pending-wake slot for one exact mounted root, in unix micros; `0`
+    /// means no wake is outstanding. A pass that ends while a wake is already
+    /// pending re-arms a busy follow-up whose receipt lands later, so a test
+    /// pinning wake or receipt accounting needs this as well as
+    /// `reconcile_in_progress_for_test`.
+    #[cfg(test)]
+    pub(crate) async fn pending_wake_micros_for_root(&self, project_root: &Path) -> Option<u64> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| worktree.pending_wake.lock().micros)
+    }
+
+    /// Stamp one worker wake for a mounted root even while it is parked, as
+    /// the worker's own end-of-pass continuation does.
+    #[cfg(test)]
+    pub(crate) async fn note_worker_wake_for_test(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
+        Self::note_wake(
+            &worktree.pending_wake,
+            &worktree.wake,
+            super::CodeIndexCadenceTriggerV1::HookHint,
+        );
+        true
+    }
+
+    /// The exact-source currency witness for one mounted root, so tests can
+    /// stage the unproven-seat state a restart restore leaves behind.
+    #[cfg(test)]
+    pub(crate) async fn serving_source_witness_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<RwLock<Option<super::super::ServingSourceWitnessV1>>>> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.serving_source_witness))
+    }
+
+    /// The shared source-freshness fence for one mounted root, so tests can
+    /// age its bounded proof instead of waiting the bound out in wall clock.
+    #[cfg(test)]
+    pub(crate) async fn source_freshness_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<super::super::SourceFreshnessFenceV1> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| worktree.source_freshness.clone())
+    }
+
+    /// Drop the retained serving generation, reproducing a mount whose restore
+    /// produced nothing servable.
+    #[cfg(test)]
+    pub async fn clear_serving_generation_for_scope(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) {
+        let mounted = self.mounted.lock().await;
+        for worktree in mounted.values() {
+            if worktree.repository_id == scope.repository_id
+                && worktree.worktree_id == scope.worktree_id
+            {
+                let mut serving = worktree
+                    .serving_generation
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *serving = None;
+                *worktree
+                    .text_generation
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *worktree
+                    .serving_source_witness
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                worktree
+                    .serving_generation_epoch
+                    .fetch_add(1, Ordering::AcqRel);
+                worktree.serving_generation_changed.send_replace(());
+            }
+        }
+    }
+
+    /// Run the parked worker's decode release against this worktree now, so a
+    /// test can arrange the seat and text-owner state the park site decides
+    /// on without standing up a full projection stall.
+    #[cfg(test)]
+    pub async fn release_decode_when_parked_for_test(&self, project_root: &Path) {
+        let project_root = canonical_existing_identity(project_root).expect("canonical root");
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root).expect("mounted worktree");
+        worktree
+            .residency
+            .release_decode_when_parked(&self.resident_owners);
+    }
+
+    /// Drop only the decoded seat, as a deferred serving decode does once a
+    /// published graph head serves from the text owner.
+    #[cfg(test)]
+    pub async fn release_serving_seat_for_test(&self, project_root: &Path) {
+        let project_root = canonical_existing_identity(project_root).expect("canonical root");
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root).expect("mounted worktree");
+        Self::release_superseded_serving_seat(
+            &worktree.serving_generation,
+            &worktree.serving_generation_epoch,
+            &worktree.serving_source_witness,
+            &self.serving_seats,
+            &worktree.serving_generation_changed,
+        );
+    }
+
+    /// Retires the serving generation only when this operation's metadata
+    /// rollback succeeded and its exact installation token is still current.
+    #[cfg(test)]
+    pub async fn retire_owned_serving_generation(
+        &self,
+        project_root: &Path,
+        installation: ServingGenerationInstallationV1,
+    ) -> ServingGenerationRollbackOutcomeV1 {
+        self.resolve_serving_generation_installation(project_root, &installation.claim, true)
+            .await
+    }
+
+    /// Every retained event-to-ready receipt, oldest first.
+    #[cfg(test)]
+    pub fn event_to_ready_receipts(&self) -> Vec<CodeIndexEventToReadyReceiptV1> {
+        self.cadence_telemetry
+            .borrow()
+            .receipts()
+            .cloned()
+            .collect()
+    }
+
+    /// Bounded truthful cadence read model over the retained receipts.
+    ///
+    /// Percentiles are withheld until the retained population reaches the floor
+    /// each one declares, and receipts with an unobservable arrival are reported
+    /// as unavailable rather than counted as zero-latency samples.
+    #[cfg(test)]
+    pub fn cadence_read_model(&self) -> CodeIndexCadenceReadModelV1 {
+        self.cadence_telemetry.borrow().read_model()
+    }
+
+    /// Test support for proving the explicit same-store build/publication
+    /// invariant independently of the scheduler metadata mutex.
+    #[cfg(test)]
+    pub async fn build_publication_lock_handle(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.build_publication_lock))
+    }
+
+    #[cfg(test)]
+    pub async fn retiring_owner_count(&self) -> usize {
+        self.retiring.lock().await.len()
+    }
+}
+
+#[cfg(test)]
+fn armed_worker_panics() -> &'static std::sync::Mutex<std::collections::BTreeSet<PathBuf>> {
+    static ARMED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    ARMED.get_or_init(Default::default)
+}

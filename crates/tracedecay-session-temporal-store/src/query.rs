@@ -9,9 +9,16 @@ use tracedecay_domain::{
     UtcMicros,
 };
 use tracedecay_runtime_core::db::engine::{Row, params, params_from_iter};
-use tracedecay_store::{SessionFrozenWatermarksV1, SessionStoreError, SessionStoreResult};
+use tracedecay_store::{
+    CanonicalBodyError, LOAD_CANONICAL_BODY_SQL, SessionFrozenWatermarksV1, SessionStoreError,
+    SessionStoreResult, collect_body_refs, parse_stored_observation, unpack_body,
+};
 
-pub(super) const BEGIN_OPERATION: &str = "begin session temporal generation";
+use crate::sql::{
+    SHARED_GENERATION_TABLES, SharedGenerationTable, discard_candidate_rows_sql,
+    discard_session_rows_sql, retire_superseded_versions_sql,
+};
+
 pub(super) const PERSIST_OPERATION: &str = "persist session temporal projection batch";
 pub(super) const ACTIVATE_OPERATION: &str = "activate session temporal generation";
 
@@ -55,6 +62,14 @@ pub(super) fn generation_i64(
 
 pub(super) fn frontier_i64(frontier: u64, operation: &'static str) -> SessionStoreResult<i64> {
     i64::try_from(frontier).map_err(|error| storage(operation, error))
+}
+
+pub(super) fn decode_generation_i64(
+    value: i64,
+    operation: &'static str,
+) -> SessionStoreResult<SessionProjectionGenerationV1> {
+    let value = u64::try_from(value).map_err(|error| storage(operation, error))?;
+    SessionProjectionGenerationV1::new(value).map_err(SessionStoreError::from)
 }
 
 pub(super) fn encode_watermarks(
@@ -106,48 +121,111 @@ fn decode_generation(row: &Row, operation: &'static str) -> SessionStoreResult<G
     })
 }
 
-pub(super) async fn read_active_generation(
+/// Refuses a second open candidate: generation `G` reads every row numbered
+/// `<= G`, so only one candidate may add rows above the active generation.
+pub(super) async fn require_no_open_candidate(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
+    except: Option<SessionProjectionGenerationV1>,
     operation: &'static str,
-) -> SessionStoreResult<Option<SessionProjectionGenerationV1>> {
+) -> SessionStoreResult<()> {
+    let except = except
+        .map(|generation| generation_i64(generation, operation))
+        .transpose()?;
     let mut rows = conn
         .query(
-            "SELECT generation
-             FROM session_temporal_generations
-             WHERE session_id = ?1 AND state = 'active'",
-            params![session_id.as_str()],
+            "SELECT 1 FROM session_temporal_generations
+             WHERE session_id = ?1 AND state IN ('building', 'ready')
+               AND (?2 IS NULL OR generation <> ?2)
+             LIMIT 1",
+            params![session_id.as_str(), except],
         )
         .await
         .map_err(|error| storage(operation, error))?;
-    let Some(row) = rows
+    if rows
         .next()
         .await
         .map_err(|error| storage(operation, error))?
-    else {
-        return Ok(None);
-    };
-    let value: i64 = row.get(0).map_err(|error| storage(operation, error))?;
-    let value = u64::try_from(value).map_err(|error| storage(operation, error))?;
-    SessionProjectionGenerationV1::new(value)
-        .map(Some)
-        .map_err(SessionStoreError::from)
+        .is_some()
+    {
+        return Err(SessionStoreError::IdempotencyConflict {
+            context: "session generation candidate busy",
+        });
+    }
+    Ok(())
 }
 
-pub(super) async fn require_active_generation(
-    conn: &impl crate::handle::SessionTemporalQuery,
+/// Deletes every row a terminated candidate introduced.
+pub(super) async fn discard_candidate_rows(
+    conn: &impl crate::handle::SessionTemporalExec,
     session_id: &SessionId,
-    expected: SessionProjectionGenerationV1,
+    generation: SessionProjectionGenerationV1,
     operation: &'static str,
-) -> SessionStoreResult<Option<SessionProjectionGenerationV1>> {
-    let actual = read_active_generation(conn, session_id, operation).await?;
-    match actual {
-        Some(actual) if actual == expected => Ok(Some(actual)),
-        Some(actual) => Err(SessionStoreError::StaleGeneration { expected, actual }),
-        None => Err(SessionStoreError::MissingGeneration {
-            generation: expected,
-        }),
+) -> SessionStoreResult<()> {
+    execute_per_shared_table(
+        conn,
+        session_id,
+        generation,
+        operation,
+        SHARED_GENERATION_TABLES.iter(),
+        discard_candidate_rows_sql,
+    )
+    .await
+}
+
+/// Deletes every row the generations through `generation` introduced.
+pub(super) async fn discard_session_rows(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    operation: &'static str,
+) -> SessionStoreResult<()> {
+    execute_per_shared_table(
+        conn,
+        session_id,
+        generation,
+        operation,
+        SHARED_GENERATION_TABLES.iter(),
+        discard_session_rows_sql,
+    )
+    .await
+}
+
+/// Deletes the row versions an activating generation superseded.
+pub(super) async fn retire_superseded_versions(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    operation: &'static str,
+) -> SessionStoreResult<()> {
+    execute_per_shared_table(
+        conn,
+        session_id,
+        generation,
+        operation,
+        SHARED_GENERATION_TABLES
+            .iter()
+            .filter(|table| table.versioned),
+        retire_superseded_versions_sql,
+    )
+    .await
+}
+
+async fn execute_per_shared_table<'a>(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    operation: &'static str,
+    tables: impl Iterator<Item = &'a SharedGenerationTable>,
+    sql: fn(&SharedGenerationTable) -> String,
+) -> SessionStoreResult<()> {
+    let generation = generation_i64(generation, operation)?;
+    for table in tables {
+        conn.execute(&sql(table), params![session_id.as_str(), generation])
+            .await
+            .map_err(|error| storage(operation, error))?;
     }
+    Ok(())
 }
 
 pub(super) async fn read_observation(
@@ -180,14 +258,58 @@ pub(super) async fn read_observation(
     let encoded: String = row
         .get(1)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let observation =
-        serde_json::from_str(&encoded).map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let observation = decode_stored_observation(conn, &encoded, PERSIST_OPERATION).await?;
     Ok((sequence, observation))
 }
 
-/// The largest `observation_id IN (...)` batch one observation prefetch binds,
-/// kept clear of `SQLite`'s default variable ceiling.
-const OBSERVATION_READ_BATCH: usize = 500;
+pub(super) async fn decode_stored_observation(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    encoded: &str,
+    operation: &'static str,
+) -> SessionStoreResult<DurableObservationV1> {
+    let hashes = collect_body_refs(encoded).map_err(|error| storage(operation, error))?;
+    let mut bodies = HashMap::new();
+    for hash in hashes {
+        let mut rows = conn
+            .query(LOAD_CANONICAL_BODY_SQL, params![hash.as_str()])
+            .await
+            .map_err(|error| storage(operation, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| storage(operation, error))?
+            .ok_or_else(|| {
+                storage(
+                    operation,
+                    CanonicalBodyError::Missing {
+                        content_hash: hash.clone(),
+                    },
+                )
+            })?;
+        let encoding: String = row.get(0).map_err(|error| storage(operation, error))?;
+        let blob: Vec<u8> = row.get(1).map_err(|error| storage(operation, error))?;
+        let uncompressed: i64 = row.get(2).map_err(|error| storage(operation, error))?;
+        bodies.insert(
+            hash.clone(),
+            unpack_body(&hash, &encoding, &blob, uncompressed)
+                .map_err(|error| storage(operation, error))?,
+        );
+    }
+    parse_stored_observation(encoded, |hash| {
+        bodies
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| CanonicalBodyError::Missing {
+                content_hash: hash.to_owned(),
+            })
+    })
+    .map_err(|error| storage(operation, error))
+}
+
+/// First prefetch width. A batch of full `observation_json` bodies is bounded
+/// by the exact-SQL materialization ceiling (64 MiB), not by SQLite's variable
+/// limit, so this starts small and splits when a page still does not fit.
+const OBSERVATION_READ_BATCH: usize = 32;
 
 /// Prefetches the observations a projection pass is about to decode.
 ///
@@ -211,7 +333,20 @@ pub(super) async fn read_observations(
     if unique.is_empty() {
         return Ok(observations);
     }
-    for chunk in unique.chunks(OBSERVATION_READ_BATCH) {
+    let mut pending = Vec::new();
+    let mut offset = 0usize;
+    while offset < unique.len() {
+        let end = offset
+            .saturating_add(OBSERVATION_READ_BATCH)
+            .min(unique.len());
+        pending.push((offset, end));
+        offset = end;
+    }
+    while let Some((start, end)) = pending.pop() {
+        if start >= end {
+            continue;
+        }
+        let chunk = &unique[start..end];
         let placeholders = (1..=chunk.len())
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
@@ -221,10 +356,26 @@ pub(super) async fn read_observations(
              FROM observations
              WHERE observation_id IN ({placeholders})"
         );
-        let mut rows = conn
+        let mut rows = match conn
             .query(&sql, params_from_iter(chunk.iter().copied()))
             .await
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                let error = storage(PERSIST_OPERATION, error);
+                // One materialized page of bodies exceeded the exact-SQL
+                // ceiling. Split until a single observation remains; that
+                // observation is then a typed storage failure, not a retry
+                // that looks like a busy source.
+                if observation_prefetch_exceeded_materialization_limit(&error) && chunk.len() > 1 {
+                    let mid = start + chunk.len() / 2;
+                    pending.push((mid, end));
+                    pending.push((start, mid));
+                    continue;
+                }
+                return Err(error);
+            }
+        };
         while let Some(row) = rows
             .next()
             .await
@@ -241,12 +392,20 @@ pub(super) async fn read_observations(
             let encoded: String = row
                 .get(2)
                 .map_err(|error| storage(PERSIST_OPERATION, error))?;
-            let observation = serde_json::from_str(&encoded)
-                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let observation = decode_stored_observation(conn, &encoded, PERSIST_OPERATION).await?;
             observations.insert(observation_id, (sequence, observation));
         }
     }
     Ok(observations)
+}
+
+fn observation_prefetch_exceeded_materialization_limit(error: &SessionStoreError) -> bool {
+    match error {
+        SessionStoreError::Storage { source, .. } => source
+            .to_string()
+            .contains("materialization exceeded its limit"),
+        _ => false,
+    }
 }
 
 /// The error `read_observation` raises for an id the store does not hold, reused
@@ -256,4 +415,27 @@ pub(super) fn missing_observation(observation_id: &CanonicalObservationIdV1) -> 
         PERSIST_OPERATION,
         format!("source observation {} is missing", observation_id.as_str()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PERSIST_OPERATION, observation_prefetch_exceeded_materialization_limit, storage};
+
+    #[test]
+    fn materialization_limit_is_the_prefetch_split_signal() {
+        let exceeded = storage(
+            PERSIST_OPERATION,
+            std::io::Error::other("exact SQL query materialization exceeded its limit"),
+        );
+        let locked = storage(
+            PERSIST_OPERATION,
+            std::io::Error::other("database is locked"),
+        );
+        assert!(observation_prefetch_exceeded_materialization_limit(
+            &exceeded
+        ));
+        assert!(!observation_prefetch_exceeded_materialization_limit(
+            &locked
+        ));
+    }
 }

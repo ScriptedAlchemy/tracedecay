@@ -4,10 +4,10 @@
 #
 # Why this exists on top of tests/mcp_suite/ (which already exercises
 # initialize/tools/call with hand-crafted JSON-RPC): the Inspector embeds the
-# official TypeScript SDK client, so every call here additionally proves
+# official TypeScript SDK client, so every call here also proves
 #   - protocol-version negotiation with a *newer* client (the 0.22.0 client
 #     requests protocolVersion 2025-11-25; the server answers 2024-11-05 and
-#     the SDK accepts it — the Rust tests only ever send 2024-11-05),
+#     the SDK accepts it, the Rust tests only ever send 2024-11-05),
 #   - SDK-side Zod validation of the initialize result, capability shapes,
 #     and every tool's inputSchema in tools/list,
 #   - the notifications/initialized + logging/setLevel lifecycle a real
@@ -19,8 +19,9 @@
 # into the temp dir, so it never touches the user's real tracedecay state.
 #
 # Usage:
-#   scripts/mcp-conformance-smoke.sh                # auto-detect binary
-#   TRACEDECAY_BIN=target/debug/tracedecay scripts/mcp-conformance-smoke.sh
+#   bazel build //crates/tracedecay-cli:tracedecay
+#   scripts/mcp-conformance-smoke.sh                # use the Bazel output
+#   TRACEDECAY_BIN=/path/to/tracedecay scripts/mcp-conformance-smoke.sh
 
 set -euo pipefail
 
@@ -35,7 +36,7 @@ INIT_STDERR=""
 run_smoke() {
   local work_dir="$1"
   local fixture="$2"
-  local tools_a tools_b call_out res_out
+  local tools_a tools_b call_out res_out unknown_out
   local diagnostics_out affected_out test_map_out test_map_err symbol_json impact_out impact_err node_id
   local failures=0
 
@@ -48,9 +49,17 @@ run_smoke() {
     shift
     # Run from the fixture so the spawned server's cwd matches the indexed
     # project (otherwise tool results gain a cwd-mismatch warning block).
-    (cd "$fixture" && timeout "$timeout_secs" \
+    # The spawned server inherits the inspector's stderr, which the callers
+    # capture and print when a call fails or times out; ask it for
+    # progress-level logging so a hung call leaves evidence in CI.
+    (cd "$fixture" && RUST_LOG="${SMOKE_SERVE_LOG:-warn,tracedecay=info}" timeout "$timeout_secs" \
       npx -y "@modelcontextprotocol/inspector@$INSPECTOR_VERSION" --cli \
       "$TRACEDECAY_BIN" serve -p "$fixture" "$@")
+    local status=$?
+    if ((status == 124)); then
+      echo "error: inspector call timed out after ${timeout_secs}s: $*" >&2
+    fi
+    return "$status"
   }
 
   # json_assert <file> <node expression over parsed json `j`>
@@ -108,6 +117,14 @@ NODE
     return 1
   fi
   "$TRACEDECAY_BIN" disable-upload-counter >/dev/null 2>&1 || true
+
+  # Resolve and cache the inspector package before any timed call: on a cold
+  # runner `npx` spends its first invocation downloading the package, and
+  # that install time must not count against a single call's budget.
+  if ! (cd "$fixture" && timeout 300 \
+      npx -y "@modelcontextprotocol/inspector@$INSPECTOR_VERSION" --cli --help >/dev/null 2>&1); then
+    echo "warning: inspector warm-up did not complete; timed calls include the install" >&2
+  fi
 
   # 1. tools/list succeeds through the SDK client (implies the full initialize
   #    handshake + version negotiation + Zod validation of every tool schema).
@@ -247,11 +264,14 @@ NODE
     fail "resources/list exposes tracedecay://status"
   fi
 
-  # 6. Error path: unknown tool must fail with a nonzero exit code.
-  if inspect --method tools/call --tool-name definitely_not_a_tool >/dev/null 2>&1; then
-    fail "tools/call unknown tool exits nonzero"
+  # 6. Error path: an unknown tool is a typed refusal, which MCP delivers as
+  # an isError tool result rather than a JSON-RPC error.
+  unknown_out="$work_dir/unknown.json"
+  if inspect --method tools/call --tool-name definitely_not_a_tool > "$unknown_out" 2>/dev/null &&
+    json_assert "$unknown_out" 'j.isError === true && j.structuredContent?.problem?.code === "unknown_tool"'; then
+    ok "tools/call unknown tool is a typed refusal"
   else
-    ok "tools/call unknown tool exits nonzero"
+    fail "tools/call unknown tool is a typed refusal"
   fi
 
   if ((failures > 0)); then
@@ -273,30 +293,12 @@ cleanup() {
   exit "$status"
 }
 
-find_tracedecay_bin() {
-  local target_dir candidate
-
-  if [[ -n "${TRACEDECAY_BIN:-}" ]]; then
-    printf '%s\n' "$TRACEDECAY_BIN"
-    return
-  fi
-
-  target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
-  for candidate in "$target_dir/debug/tracedecay" "$target_dir/release/tracedecay"; do
-    if [[ -x "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
-  command -v tracedecay || true
-}
-
 main() {
   local tracedecay_bin npm_cache fixture status
 
-  tracedecay_bin="$(find_tracedecay_bin)"
+  tracedecay_bin="${TRACEDECAY_BIN:-$REPO_ROOT/bazel-bin/crates/tracedecay-cli/tracedecay}"
   if [[ -z "$tracedecay_bin" || ! -x "$tracedecay_bin" ]]; then
-    echo "error: no tracedecay binary found; build one or set TRACEDECAY_BIN" >&2
+    echo "error: tracedecay binary not executable at $tracedecay_bin; run bazel build //crates/tracedecay-cli:tracedecay or set TRACEDECAY_BIN" >&2
     return 2
   fi
   tracedecay_bin="$(readlink -f "$tracedecay_bin")"

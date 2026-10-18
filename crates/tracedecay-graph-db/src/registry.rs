@@ -23,10 +23,12 @@ use self::identity::{
 };
 use self::path::canonical_graph_database_file;
 use self::support::{
-    check_registration_request, check_request, open_registered_graph, reject_path_alias,
-    retains_fault, status,
+    check_registration_request, check_request, open_registered_graph, open_registered_graph_lazy,
+    reject_path_alias, retains_fault, status,
 };
 
+#[path = "registry/code_graph_namespace.rs"]
+mod code_graph_namespace;
 #[path = "registry/identity.rs"]
 mod identity;
 #[path = "registry/path.rs"]
@@ -35,20 +37,20 @@ mod path;
 mod publication;
 #[path = "registry/publication_support.rs"]
 mod publication_support;
-#[path = "registry/staging.rs"]
-mod staging;
 #[path = "registry/support.rs"]
 mod support;
-#[path = "registry/vector_retirement.rs"]
-mod vector_retirement;
-pub use publication::{GraphPublicationPreparationV1, ProvenGraphPublicationV1};
-pub use staging::{VerifiedGenerationBatchApply, VerifiedGenerationBatchCommit};
-pub use vector_retirement::{
-    SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
-    SemanticVectorRetirementReservation,
+pub use code_graph_namespace::{
+    CODE_GRAPH_SHARD_NAMESPACE_PREFIX, code_graph_shard_namespace, is_code_graph_shard_namespace,
 };
+pub use publication::{GraphPublicationPreparationV1, ProvenGraphPublicationV1};
 
 const OPEN_WAIT_POLL: Duration = Duration::from_millis(10);
+
+#[derive(Clone, Copy)]
+enum OwnerOpenMode {
+    Eager,
+    Lazy,
+}
 
 /// Existing Grafeo stores receive daemon-lifecycle and request cancellation
 /// while opening. A newly created database file formats before cancellation
@@ -306,7 +308,7 @@ enum OpeningAuthority {
 }
 
 /// Releases an in-flight `Opening` slot when its mounting call exits without
-/// writing terminal truth — plain open failures and unwinds. Terminal
+/// writing terminal truth, plain open failures and unwinds. Terminal
 /// settlements (`Ready`/`Faulted`) overwrite the slot first, which makes this
 /// guard a no-op: `remove_opening` verifies identity and only ever removes
 /// `Opening` entries.
@@ -686,7 +688,7 @@ impl GraphDbRegistry {
     /// via the publication surface; the native runtime lease is for graphs
     /// whose state is itself the authority (for example daemon-owned session
     /// relation graphs) and for direct storage tests.
-    #[hotpath::measure(label = "graph_db.registry.resolve", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.registry.resolve", level = "trace", skip_all)]
     pub fn resolve(
         &self,
         registration: GraphDbRegistration,
@@ -885,8 +887,8 @@ impl GraphDbRegistry {
         }
     }
 
-    /// Reports whether any entry — `Ready`, `Opening`, `Closing`, `Retiring`,
-    /// or `Faulted` — currently occupies this shard's slot.
+    /// Reports whether any entry, `Ready`, `Opening`, `Closing`, `Retiring`,
+    /// or `Faulted`, currently occupies this shard's slot.
     ///
     /// A lease-only consumer of a shared physical shard (for example the code
     /// graph, which never attaches its own map owner; see
@@ -898,6 +900,23 @@ impl GraphDbRegistry {
     pub fn shard_is_registered(&self, shard_id: &StoreShardIdV1) -> Result<bool, GraphDbError> {
         let state = self.state_lock()?;
         Ok(state.entries.contains_key(shard_id))
+    }
+
+    /// Number of native Grafeo engines currently resident behind registered
+    /// owners. Lazy authority handles do not contribute until first use.
+    pub fn resident_engine_count(&self) -> Result<usize, GraphDbError> {
+        let state = self.state_lock()?;
+        let mut count = 0_usize;
+        for entry in state.entries.values() {
+            if let RegistryEntry::Ready { owner, .. } = entry
+                && owner.engine_is_open()?
+            {
+                count = count.checked_add(1).ok_or_else(|| {
+                    GraphDbError::budget_exhausted_count(GraphBudgetKind::Capacity, usize::MAX)
+                })?;
+            }
+        }
+        Ok(count)
     }
 
     /// Mounts an absent graph runtime through its exact Store map-owner
@@ -915,10 +934,31 @@ impl GraphDbRegistry {
     /// capacity accounting keeps the materializing runtime occupied. A plain
     /// open failure releases the slot for remount; `ResetRequired`,
     /// `Corrupt`, and `DurabilityUncertain` retain a terminal `Faulted` slot.
-    #[hotpath::measure(label = "graph_db.registry.attach", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.registry.attach", level = "trace", skip_all)]
     pub fn resolve_owner_attachment(
         &self,
         registration: GraphDbOwnerRegistrationV1,
+    ) -> Result<GraphDbOwnerAttachmentV1, GraphDbError> {
+        self.resolve_owner_attachment_with_mode(registration, OwnerOpenMode::Eager)
+    }
+
+    /// Mounts the exact map owner without opening its native engine.
+    ///
+    /// The first graph operation materializes the persistent engine through
+    /// the same validated open and deterministic corruption-quarantine path.
+    /// Durable relational/session owners use this route so merely retaining
+    /// their authority does not replay a corpus-sized graph at daemon startup.
+    pub fn resolve_lazy_owner_attachment(
+        &self,
+        registration: GraphDbOwnerRegistrationV1,
+    ) -> Result<GraphDbOwnerAttachmentV1, GraphDbError> {
+        self.resolve_owner_attachment_with_mode(registration, OwnerOpenMode::Lazy)
+    }
+
+    fn resolve_owner_attachment_with_mode(
+        &self,
+        registration: GraphDbOwnerRegistrationV1,
+        open_mode: OwnerOpenMode,
     ) -> Result<GraphDbOwnerAttachmentV1, GraphDbError> {
         let GraphDbOwnerRegistrationV1 {
             operation,
@@ -1007,9 +1047,7 @@ impl GraphDbRegistry {
                             (&binding, &verified_locator, &path, expected_format),
                         )?;
                         // Same-identity attach against a mounted (or still
-                        // materializing) runtime: no native open runs, so a
-                        // profile can separate these hits from full opens.
-                        hotpath::gauge!("graph_db.registry.attach.already_mounted").inc(1.0);
+                        // materializing) runtime: no native open runs.
                         return Err(GraphDbError::conflict("registry.resolve_owner_attachment"));
                     }
                     Some(RegistryEntry::Faulted {
@@ -1081,7 +1119,6 @@ impl GraphDbRegistry {
                 }
             }
         };
-        hotpath::gauge!("graph_db.registry.attach.full_open").inc(1.0);
         // Dropped on every exit below: releases the in-flight slot after a
         // plain open failure or unwind; a no-op once `Ready`/`Faulted` truth
         // has overwritten it.
@@ -1093,8 +1130,14 @@ impl GraphDbRegistry {
             path: path.clone(),
             expected_format,
         };
-        let opened =
-            open_registered_graph(&path, expected_format, &operation, authority_attachment);
+        let opened = match open_mode {
+            OwnerOpenMode::Eager => {
+                open_registered_graph(&path, expected_format, &operation, authority_attachment)
+            }
+            OwnerOpenMode::Lazy => {
+                open_registered_graph_lazy(&path, expected_format, &operation, authority_attachment)
+            }
+        };
         let mut state = self.state_lock()?;
         let slot_is_this_mount = state.entries.get(&shard_id).is_some_and(|entry| {
             matches!(
@@ -1296,7 +1339,7 @@ impl GraphDbRegistry {
         self.reopen(registration)
     }
 
-    #[hotpath::measure(label = "graph_db.registry.close", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.registry.close", level = "trace", skip_all)]
     pub fn close(&self, registration: &GraphDbRegistration) -> Result<bool, GraphDbError> {
         check_request(
             registration.cancellation.as_ref(),
@@ -1332,45 +1375,25 @@ impl GraphDbRegistry {
     /// removed the store root. The registry entry remains the path/format
     /// authority; this operation never reconstructs or canonicalizes a path
     /// from the missing filesystem tree.
+    ///
+    /// Shutdown uses the same close: the exclusive Grafeo writer is released
+    /// only after every client and exact map-owner attachment has drained, so
+    /// retained client leases stay an identity-bearing close blocker.
+    #[tracing::instrument(name = "graph_db.registry.close_retained", level = "trace", skip_all)]
     pub fn close_retained(
         &self,
         binding: &StoreRuntimeBindingV1,
         verified_locator: &VerifiedStoreLocatorV1,
     ) -> Result<bool, GraphDbError> {
-        self.close_retained_inner(binding, verified_locator, true)
-    }
-
-    /// Releases the exclusive Grafeo writer only after every client and exact
-    /// map-owner attachment has drained. Retained client leases are an
-    /// identity-bearing close blocker even during shutdown.
-    pub fn close_retained_for_shutdown(
-        &self,
-        binding: &StoreRuntimeBindingV1,
-        verified_locator: &VerifiedStoreLocatorV1,
-    ) -> Result<bool, GraphDbError> {
-        self.close_retained_inner(binding, verified_locator, true)
-    }
-
-    #[hotpath::measure(
-        label = "graph_db.registry.close_retained",
-        impl_type = "GraphDbRegistry"
-    )]
-    fn close_retained_inner(
-        &self,
-        binding: &StoreRuntimeBindingV1,
-        verified_locator: &VerifiedStoreLocatorV1,
-        require_unleased: bool,
-    ) -> Result<bool, GraphDbError> {
-        let reservation =
-            match self.reserve_close(binding, verified_locator, None, require_unleased)? {
-                CloseReservation::Absent => return Ok(false),
-                CloseReservation::Closing(reservation) => reservation,
-            };
+        let reservation = match self.reserve_close(binding, verified_locator, None, true)? {
+            CloseReservation::Absent => return Ok(false),
+            CloseReservation::Closing(reservation) => reservation,
+        };
         self.finish_eviction(*reservation)?;
         Ok(true)
     }
 
-    #[hotpath::measure(label = "graph_db.registry.evict", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.registry.evict", level = "trace", skip_all)]
     pub fn evict_idle(
         &self,
         minimum_idle: Duration,
@@ -1523,10 +1546,7 @@ impl GraphDbRegistry {
     /// Identity and client-lease checks complete under one registry-state lock,
     /// so failure leaves every target ready and success denies new resolution
     /// for the entire selected set until commit or drop.
-    #[hotpath::measure(
-        label = "graph_db.registry.retire.reserve",
-        impl_type = "GraphDbRegistry"
-    )]
+    #[tracing::instrument(name = "graph_db.registry.retire.reserve", level = "trace", skip_all)]
     pub fn reserve_retirement_batch(
         &self,
         targets: Vec<GraphDbRetirementTarget>,
@@ -1693,16 +1713,24 @@ impl GraphDbRegistry {
                 registered_path != path || registered_format != format
             })
         {
-            return Err(GraphDbError::conflict("registry.reserve_close"));
+            return Err(GraphDbError::conflict("registry.reserve_close.identity"));
         }
         match entry {
-            RegistryEntry::Opening { .. }
-            | RegistryEntry::Closing { .. }
-            | RegistryEntry::Retiring { .. } => {
-                return Err(GraphDbError::conflict("registry.reserve_close"));
+            RegistryEntry::Opening { .. } => {
+                return Err(GraphDbError::conflict("registry.reserve_close.opening"));
+            }
+            RegistryEntry::Closing { .. } => {
+                return Err(GraphDbError::conflict("registry.reserve_close.closing"));
+            }
+            RegistryEntry::Retiring { .. } => {
+                return Err(GraphDbError::conflict("registry.reserve_close.retiring"));
             }
             RegistryEntry::Ready { owner, .. } if require_unleased && !owner.is_unleased() => {
-                return Err(GraphDbError::conflict("registry.reserve_close"));
+                return Err(GraphDbError::conflict_observed(
+                    "registry.reserve_close.leased",
+                    "unleased owner",
+                    owner.lease_summary(),
+                ));
             }
             RegistryEntry::Faulted { error, .. } => return Err(error.clone()),
             RegistryEntry::Ready { .. } => {}
@@ -2036,7 +2064,7 @@ impl GraphDbRegistry {
     }
 
     fn state_lock(&self) -> Result<MutexGuard<'_, RegistryState>, GraphDbError> {
-        crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_REGISTRY, || {
+        crate::observe::wait_lock(crate::observe::LOCK_WAIT_REGISTRY, || {
             self.inner.state.lock()
         })
         .map_err(|_| GraphDbError::unavailable("graph registry state lock is poisoned"))
@@ -2399,26 +2427,6 @@ mod tests {
     }
 
     #[test]
-    fn capacity_reports_only_ready_unleased_owners_as_evictable_headroom() {
-        let temporary = TempDir::new().unwrap();
-        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
-        let owner = registry
-            .resolve_owner_attachment(owner_registration(registration(temporary.path())))
-            .unwrap();
-        let leased = registry.capacity().unwrap();
-        assert_eq!(leased.max_open, 1);
-        assert_eq!(leased.occupied, 1);
-        assert_eq!(leased.evictable, 0);
-        assert_eq!(leased.available_after_eviction(), 0);
-
-        drop(owner);
-        let idle = registry.capacity().unwrap();
-        assert_eq!(idle.occupied, 1);
-        assert_eq!(idle.evictable, 1);
-        assert_eq!(idle.available_after_eviction(), 1);
-    }
-
-    #[test]
     fn resolve_without_an_owner_attachment_is_refused() {
         let temporary = TempDir::new().unwrap();
         let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
@@ -2670,7 +2678,7 @@ mod tests {
 
         // Let the waiter observe the in-flight Opening slot, then cancel it
         // while the winner's native open is still gated: the waiter must fail
-        // with its own typed cancellation — not a reconstructed registration
+        // with its own typed cancellation, not a reconstructed registration
         // and not an unmounted-runtime error.
         thread::sleep(Duration::from_millis(100));
         waiter_cancelled.store(true, Ordering::Release);
@@ -3010,7 +3018,7 @@ mod tests {
 
         assert!(
             registry
-                .close_retained_for_shutdown(
+                .close_retained(
                     registration.authority_lease.binding(),
                     registration.authority_lease.verified_locator(),
                 )

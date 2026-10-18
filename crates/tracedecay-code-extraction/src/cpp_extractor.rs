@@ -2,13 +2,15 @@
 ///
 /// Parses C++ source files and emits nodes and edges for the code graph.
 /// Handles `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.hh` files.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::traversal::{find_descendant_by_kind, find_direct_child_by_kind};
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 mod functions;
@@ -19,7 +21,7 @@ mod types;
 pub struct CppExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -27,7 +29,7 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Current access specifier visibility inside a class/struct body.
     access_specifier: Visibility,
@@ -35,12 +37,9 @@ struct ExtractionState {
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -48,7 +47,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             access_specifier: Visibility::Private,
             class_depth: 0,
@@ -59,8 +58,7 @@ impl ExtractionState {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -77,15 +75,15 @@ impl ExtractionState {
     /// Borrowed text of a tree-sitter node, sliced straight from the source.
     /// Use for signature extraction on nodes with bodies so the (possibly
     /// huge) body is never materialized into an owned `String`.
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    fn node_str(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     /// Source slice from `node.start_byte()` up to `end_byte`.
     ///
     /// Callers pass a body child's start so the (possibly huge) body is
     /// never even borrowed as a `&str`, let alone copied.
-    fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &str {
+    fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &'s str {
         let start = node.start_byte();
         let end = end_byte.min(self.source.len()).max(start);
         std::str::from_utf8(&self.source[start..end]).unwrap_or("<invalid utf8>")
@@ -106,8 +104,7 @@ impl ExtractionState {
             .or_else(|| find_direct_child_by_kind(node, "field_declaration_list"))
             .or_else(|| find_direct_child_by_kind(node, "declaration_list"))
             .or_else(|| find_direct_child_by_kind(node, "enumerator_list"))
-            .map(|body| body.start_byte())
-            .unwrap_or_else(|| node.end_byte());
+            .map_or_else(|| node.end_byte(), |body| body.start_byte());
         self.text_before(node, end)
             .trim()
             .trim_end_matches(';')
@@ -117,25 +114,6 @@ impl ExtractionState {
 }
 
 impl CppExtractor {
-    pub fn extract_source(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -153,7 +131,7 @@ impl CppExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -167,6 +145,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -185,11 +164,6 @@ impl CppExtractor {
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("cpp", "C++", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -217,7 +191,7 @@ impl CppExtractor {
             "namespace_definition" => Self::visit_namespace(state, node),
             "template_declaration" => Self::visit_template(state, node),
             "using_declaration" => Self::visit_using_declaration(state, node),
-            "preproc_def" => Self::visit_preproc_def(state, node),
+            "preproc_def" => Self::visit_identifier_leaf(state, node, NodeKind::PreprocessorDef),
             "preproc_include" => Self::visit_preproc_include(state, node),
             "access_specifier" => Self::visit_access_specifier(state, node),
             // Comments are picked up as docstrings by the definitions they precede.
@@ -288,7 +262,7 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, name, node);
         let signature = find_direct_child_by_kind(node, "field_declaration_list")
             .map(|body| state.signature_before_child(node, body));
 
@@ -314,6 +288,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -391,7 +366,13 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -415,6 +396,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -454,7 +436,13 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Namespace, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Namespace,
+            &name,
+            node,
+        );
         let signature = find_direct_child_by_kind(node, "declaration_list")
             .map(|body| state.signature_before_child(node, body));
 
@@ -480,6 +468,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -511,7 +500,13 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Template, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Template,
+            &name,
+            node,
+        );
         let inner_body = find_direct_child_by_kind(node, "function_definition")
             .and_then(|func| {
                 func.child_by_field_name("body")
@@ -549,6 +544,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -600,18 +596,17 @@ impl crate::LanguageExtractor for CppExtractor {
         "C++"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        CppExtractor::extract_source(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        CppExtractor::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(
+            CppExtractor::extract_tree(file_path, source, tree, scope),
+        )
     }
 }
 
@@ -626,7 +621,8 @@ mod tests {
     #[test]
     fn parsed_extraction_limits_cpp_to_changed_top_level_declaration() {
         let source = "int untouched() { return 1; }\n\nint edited() { return 2; }\n";
-        let tree = CppExtractor::parse_source(source).expect("parse C++ source");
+        let tree = crate::ts_provider::parse_extractor_source("cpp", "C++", source)
+            .expect("parse C++ source");
         let root = tree.root_node();
         let mut cursor = root.walk();
         let edited = root
@@ -643,9 +639,10 @@ mod tests {
             end_position: edited.end_position().into(),
         };
 
-        let extracted = crate::LanguageExtractor::extract_parsed(
+        let extracted = crate::LanguageExtractor::extract_parsed_artifact_prepared(
             &CppExtractor,
             "sample.cpp",
+            source,
             source,
             &tree,
             ParsedExtractionScope::ChangedRegions(&[range]),
@@ -661,6 +658,7 @@ mod tests {
             edited.end_byte() - edited.start_byte()
         );
         let functions = extracted
+            .artifact
             .result
             .nodes
             .iter()

@@ -2,9 +2,9 @@
  * What the editor machine forbids.
  *
  * Each case below names a combination the six mirrored `useState` slices could
- * hold at once — a confirmation beside a review it was not given for, a saved
+ * hold at once, a confirmation beside a review it was not given for, a saved
  * notice above a change still under review, a submit built from a revision the
- * resource had already moved past — and shows either that the state cannot be
+ * resource had already moved past, and shows either that the state cannot be
  * built or that the machine refuses it and says why.
  *
  * No DOM, no transport: the machine is a pure function and is exercised as one.
@@ -17,10 +17,10 @@ import {
   reduceSettingsEditor,
   settingsApplied,
   settingsConfirmationHeld,
-  settingsFieldErrors,
   settingsRejection,
   settingsReviewOf,
   settingsScopeDirty,
+  settingsScopePlan,
   settingsSubmission,
   type SettingsEditorAction,
   type SettingsEditorState,
@@ -69,6 +69,33 @@ describe('settings editor: reaching a confirmed change', () => {
     });
     expect(settingsScopeDirty(confirmed, 'project')).toBe(true);
     expect(settingsScopeDirty(confirmed, 'user')).toBe(false);
+  });
+
+  /** The inline review states validity while the value is still being typed,
+   * from the same plan `review_requested` would freeze, never a second one. */
+  it('replans a scope live without freezing a review', () => {
+    const untouched = initialSettingsEditorState(AUTHORITY);
+    expect(settingsScopePlan(untouched, 'project')).toMatchObject({ outcome: 'unchanged' });
+    expect(settingsScopePlan(initialSettingsEditorState(null), 'project')).toBeNull();
+
+    const edited = run(untouched, {
+      type: 'project_drafted',
+      values: draftMaxFileSize('2097152'),
+    });
+    expect(edited.status).toBe('editing');
+    expect(settingsScopePlan(edited, 'project')).toMatchObject({
+      outcome: 'ready',
+      expectedRevisionId: 'rev-42',
+      patch: { max_file_size: 2_097_152 },
+    });
+    expect(settingsReviewOf(edited)).toBeNull();
+
+    const invalid = run(untouched, { type: 'project_drafted', values: draftMaxFileSize('0') });
+    expect(settingsScopePlan(invalid, 'project')).toMatchObject({
+      outcome: 'invalid',
+      errors: [{ field: 'max_file_size', message: 'max_file_size must be at least 1 byte' }],
+    });
+    expect(settingsRejection(invalid)).toBeNull();
   });
 
   it('issues a submit that names the held revision and the scope authority', () => {
@@ -189,8 +216,8 @@ describe('settings editor: a confirmation cannot outlive its review', () => {
 });
 
 describe('settings editor: a stale revision cannot reach the wire', () => {
-  // Even hand-built — the shape below is the one the mirrored slices produced
-  // routinely — a state whose review names a revision the authority has moved
+  // Even hand-built, the shape below is the one the mirrored slices produced
+  // routinely, a state whose review names a revision the authority has moved
   // past yields no request.
   it('supersedes a submit issued from a review that holds a stale revision', () => {
     const stale: SettingsEditorState = {
@@ -232,6 +259,27 @@ describe('settings editor: a stale revision cannot reach the wire', () => {
     expect(settingsSubmission(expectSubmitting(inFlight), ROUTES).expectedRevisionId).toBe(
       'rev-42',
     );
+  });
+
+  /** Leaving `submitting` would make `settleSubmit` drop the verdict when it
+   * lands: a conflict or refusal for scope A would vanish because the reader
+   * touched a scope-B field meanwhile. Edits and new reviews wait instead. */
+  it('cannot be redrafted or re-reviewed out of a write that is already in flight', () => {
+    const submitting = run(confirmedProjectChange(), { type: 'submit_started' });
+    expect(submitting.status).toBe('submitting');
+
+    const redrafted = run(submitting, {
+      type: 'user_drafted',
+      values: { ...AUTHORITY.user, watcher_debounce: '15s' },
+    });
+    expect(redrafted).toBe(submitting);
+
+    const rereviewed = run(submitting, {
+      type: 'review_requested',
+      scope: 'user',
+      idempotencyKey: IDEMPOTENCY_KEY,
+    });
+    expect(rereviewed).toBe(submitting);
   });
 
   it('cannot be dismissed out of a write that is already in flight', () => {
@@ -300,7 +348,7 @@ describe('settings editor: each verdict is its own state', () => {
         { field: 'max_file_size', message: 'max_file_size is denied by the active policy' },
       ],
     });
-    expect(settingsFieldErrors(rejected)).toHaveLength(1);
+    expect(settingsRejection(rejected)?.errors).toHaveLength(1);
     expect(settingsApplied(rejected)).toBeNull();
     expect(settingsReviewOf(rejected)).toBeNull();
   });
@@ -369,6 +417,7 @@ describe('settings editor: a save and a pending change cannot be shown at once',
     expect(settingsApplied(state)).toEqual({
       scope: 'project',
       message: 'Project settings saved',
+      revisionId: 'rev-43',
       resyncRecommended: true,
       restartRecommended: false,
     });
@@ -404,6 +453,28 @@ describe('settings editor: a save and a pending change cannot be shown at once',
 
     expect(settingsApplied(refetched)).toMatchObject({ message: 'Project settings saved' });
     expect(settingsScopeDirty(refetched, 'project')).toBe(false);
+  });
+
+  /** A refusal judged the draft as it was; once the draft moves the refusal
+   * describes nothing, and the live plan takes over. A completed write, by
+   * contrast, stays true across an edit. */
+  it('drops a resting refusal on the next edit but keeps a completed write', () => {
+    const rejected = run(initialSettingsEditorState(AUTHORITY), {
+      type: 'project_drafted',
+      values: draftMaxFileSize('0'),
+    }, {
+      type: 'review_requested',
+      scope: 'project',
+      idempotencyKey: IDEMPOTENCY_KEY,
+    });
+    expect(settingsRejection(rejected)).not.toBeNull();
+    const retyped = run(rejected, { type: 'project_drafted', values: draftMaxFileSize('4096') });
+    expect(settingsRejection(retyped)).toBeNull();
+    expect(settingsScopeDirty(retyped, 'project')).toBe(true);
+
+    const saved = applied();
+    const edited = run(saved, { type: 'project_drafted', values: draftMaxFileSize('4096') });
+    expect(settingsApplied(edited)).not.toBeNull();
   });
 
   it('does not carry a refusal across a snapshot that replaced the values it judged', () => {
@@ -458,7 +529,7 @@ describe('settings editor: refusing to review what cannot be sent', () => {
     );
 
     expect(settingsReviewOf(state)).toBeNull();
-    expect(settingsFieldErrors(state)).toEqual([
+    expect(settingsRejection(state)?.errors).toEqual([
       {
         field: 'auto_track_pr_poll_secs',
         message: 'auto_track_pr_poll_secs must be at least 60 seconds',
@@ -472,7 +543,7 @@ describe('settings editor: refusing to review what cannot be sent', () => {
     expect(unavailable).toEqual({ status: 'editor_unavailable' });
     expect(settingsReviewOf(unavailable)).toBeNull();
     expect(settingsApplied(unavailable)).toBeNull();
-    expect(settingsFieldErrors(unavailable)).toEqual([]);
+    expect(settingsRejection(unavailable)).toBeNull();
     expect(settingsScopeDirty(unavailable, 'project')).toBe(false);
     for (const action of [
       {

@@ -1,11 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use tracedecay_application::{
+use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
+use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, CapabilityGrantId,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, RegisteredRootLocatorV1, RequestContext,
-    RequestId, ResolvedScope,
+    RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
 };
 use tracedecay_daemon_service::{
     AuthorizedDaemonLspWorkspace, DaemonInvocationOutcome, DaemonInvocationProblem,
@@ -13,26 +14,29 @@ use tracedecay_daemon_service::{
     DaemonLspOwnerRegistrar, DaemonLspSessionAccess,
 };
 use tracedecay_domain::{
-    ActorId, ProjectId, RepositoryId, ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros,
-    WorktreeId, canonical_sha256,
+    ActorId, BrainId, ProjectId, RepositoryId, ScopeSetId, ScopeSetRevision, UserProfileId,
+    UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_lsp::{
     AdmittedRoot, AuthorizedLspWorkspace, GatewayCapabilities, LspSessionRegistry,
     UnavailableSemanticProvider, UpstreamCapabilities,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 
 use super::{
     RecordingFeedbackCycleObservations, UnavailableCancellationAuthority,
-    UnavailableContextAuthority, UnavailableDiagnosticAuthority, unavailable_feedback_cycle,
-    unavailable_lsp_session_factory,
+    UnavailableContextAuthority, UnavailableDiagnosticAuthority, admitted_root_fixture,
+    unavailable_feedback_cycle, unavailable_lsp_session_factory,
 };
 
 fn recovery_deadline() -> Deadline {
     Deadline::new(UtcMicros(i64::MAX)).expect("LSP deadline")
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture varies profile, project, request identity and disconnect independently to test lifecycle isolation."
+)]
 async fn open_detached_session(
     service: &DaemonInvocationService,
     registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -85,7 +89,6 @@ async fn open_detached_session(
 
 fn workspace_lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
     Arc::new(DaemonLspSessionFactory::new(
-        tokio::runtime::Handle::current(),
         Arc::new(unavailable_feedback_cycle(Arc::new(
             RecordingFeedbackCycleObservations::default(),
         ))),
@@ -134,8 +137,8 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
     let project_id = ProjectId::new("project.recovery-shared").expect("shared project");
     let profile_a = UserProfileId::new("profile.recovery-a").expect("profile A");
     let profile_b = UserProfileId::new("profile.recovery-b").expect("profile B");
-    let root_a = PathBuf::from("/projects/recovery-a");
-    let root_b = PathBuf::from("/projects/recovery-b");
+    let (root_a, root_a_uri) = admitted_root_fixture("projects/recovery-a");
+    let (root_b, root_b_uri) = admitted_root_fixture("projects/recovery-b");
     let session_a = open_detached_session(
         &service,
         &registry,
@@ -163,7 +166,9 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
         &registry,
         &session_b,
         "request.initialize-b",
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"workspaceFolders":[{"uri":"file:///projects/recovery-b","name":"B"}],"capabilities":{"workspace":{"workspaceFolders":true}}}}"#,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"workspaceFolders":[{{"uri":"{root_b_uri}","name":"B"}}],"capabilities":{{"workspace":{{"workspaceFolders":true}}}}}}}}"#
+        ),
         1,
     )
     .await;
@@ -181,7 +186,9 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
         &registry,
         &session_b,
         "request.add-a-to-b",
-        r#"{"jsonrpc":"2.0","method":"workspace/didChangeWorkspaceFolders","params":{"event":{"added":[{"uri":"file:///projects/recovery-a","name":"A"}],"removed":[]}}}"#,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"workspace/didChangeWorkspaceFolders","params":{{"event":{{"added":[{{"uri":"{root_a_uri}","name":"A"}}],"removed":[]}}}}}}"#
+        ),
         3,
     )
     .await;
@@ -231,7 +238,7 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
             problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
     ));
-    let root_c = PathBuf::from("/projects/recovery-c");
+    let (root_c, _root_c_uri) = admitted_root_fixture("projects/recovery-c");
     let session_c = open_detached_session(
         &service,
         &registry,
@@ -257,7 +264,7 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
         .open_lsp_session(
             &registry,
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///projects/recovery-a",
+                root_a_uri.clone(),
             ))),
             "request.recovery-a-stale-owner".to_owned(),
             env!("CARGO_PKG_VERSION").to_owned(),
@@ -289,55 +296,57 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
     };
     let scope_a = scope("recovery-a", &project_id);
     let scope_b = scope("recovery-b", &project_id);
-    let admission =
-        |suffix: &str, profile_id: &UserProfileId, scope: &ResolvedScope, root: &Path| {
-            let grant = CapabilityGrantSnapshot::new(
-                CapabilityGrantId::new(format!("grant.{suffix}")).expect("grant id"),
-                1,
-                canonical_sha256(&("grant.recovery", suffix)).expect("grant digest"),
-                ActorId::new("actor.lsp.recovery").expect("actor"),
-                UtcMicros(1),
-                UtcMicros(10_000),
-                scope.clone(),
-                std::collections::BTreeSet::from([capability.clone()]),
-                std::collections::BTreeSet::from([use_case.clone()]),
-                DisclosureClass::Sensitive,
-            )
-            .expect("grant");
-            let context = RequestContext::new(
-                grant.issuer.clone(),
-                scope.clone(),
-                grant,
-                RequestId::new(format!("request.{suffix}")).expect("request id"),
-                Deadline::new(UtcMicros(9_000)).expect("deadline"),
-                CancellationContext::active(format!("cancel.{suffix}")).expect("cancellation"),
-            )
-            .expect("request context");
-            let locator = RegisteredRootLocatorV1::new(
-                scope.project_id.clone(),
-                profile_id.clone(),
-                format!("store.{suffix}"),
-                root,
-            )
-            .expect("locator");
-            AuthorizedRootAdmission::new(context, locator).expect("root admission")
-        };
+    let profile_store = SharedProfileStoreLocatorV1::new(
+        BrainId::new("brain.recovery").expect("brain"),
+        profile_a.clone(),
+        "store.recovery",
+    )
+    .expect("one shared profile store");
+    let admission = |suffix: &str, scope: &ResolvedScope, root: &Path| {
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new(format!("grant.{suffix}")).expect("grant id"),
+            1,
+            canonical_sha256(&("grant.recovery", suffix)).expect("grant digest"),
+            ActorId::new("actor.lsp.recovery").expect("actor"),
+            UtcMicros(1),
+            UtcMicros(10_000),
+            scope.clone(),
+            std::collections::BTreeSet::from([capability.clone()]),
+            std::collections::BTreeSet::from([use_case.clone()]),
+            DisclosureClass::Sensitive,
+        )
+        .expect("grant");
+        let context = RequestContext::new(
+            grant.issuer.clone(),
+            scope.clone(),
+            grant,
+            RequestId::new(format!("request.{suffix}")).expect("request id"),
+            Deadline::new(UtcMicros(9_000)).expect("deadline"),
+            CancellationContext::active(format!("cancel.{suffix}")).expect("cancellation"),
+        )
+        .expect("request context");
+        let locator =
+            RegisteredRootLocatorV1::new(scope.project_id.clone(), profile_store.clone(), root)
+                .expect("locator");
+        AuthorizedRootAdmission::new(context, locator).expect("root admission")
+    };
     let scope_set = AuthorizedScopeSetAuthority::authorize_registered(
         ScopeSetId::new("scope-set.recovery-stale").expect("scope set id"),
         ScopeSetRevision::new(1).expect("revision"),
+        // One federated scope set is one profile store locator: registered
+        // roots share both its brain and profile IDs. The separately
+        // installed owners keep their distinct profiles for retirement isolation.
         vec![
-            admission("recovery-a", &profile_a, &scope_a, &root_a),
-            admission("recovery-b", &profile_b, &scope_b, &root_b),
+            admission("recovery-a", &scope_a, &root_a),
+            admission("recovery-b", &scope_b, &root_b),
         ],
         &capability,
         &use_case,
         UtcMicros(1),
     )
     .expect("scope set");
-    let root_a_admission =
-        AdmittedRoot::authorized("file:///projects/recovery-a", scope_a.scope_digest);
-    let root_b_admission =
-        AdmittedRoot::authorized("file:///projects/recovery-b", scope_b.scope_digest);
+    let root_a_admission = AdmittedRoot::authorized(root_a_uri.clone(), scope_a.scope_digest);
+    let root_b_admission = AdmittedRoot::authorized(root_b_uri.clone(), scope_b.scope_digest);
     let stale_federated_workspace = AuthorizedLspWorkspace::new(
         Some(scope_set.digest().clone()),
         vec![root_a_admission.clone(), root_b_admission.clone()],
@@ -395,7 +404,9 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
     assert_eq!(workspace_after_settlement.roots().len(), 1);
     assert_eq!(
         workspace_after_settlement.roots()[0].uri(),
-        "file:///projects/recovery-b"
+        url::Url::from_directory_path(&root_b)
+            .expect("canonical project B directory URI")
+            .as_str()
     );
     drop(sessions_after_settlement);
 

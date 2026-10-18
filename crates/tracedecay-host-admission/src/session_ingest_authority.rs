@@ -1,7 +1,10 @@
 //! Registered-database composition adapter for bounded session ingest.
 
 use std::borrow::Borrow;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use tracedecay_sessions::admission::HostAdmission;
 use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngestAuthority};
@@ -9,6 +12,7 @@ use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngest
 use tracedecay_global_db::{
     GlobalDbGitCorrelationStore, GlobalDbWorkflowStore, RegisteredGlobalDb,
 };
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_session_memory::transcript::GlobalDbTranscriptStore;
 
 use crate::{HostAdmissionAuthorities, HostAdmissionFacade};
@@ -28,6 +32,11 @@ use crate::{HostAdmissionAuthorities, HostAdmissionFacade};
 /// sites that never cross such a boundary.
 pub struct GlobalDbSessionIngestAuthority<D> {
     db: D,
+    /// The process background CPU authority every admission this authority
+    /// issues prepares captures under. Ingest composition injects the one
+    /// authority the daemon worker plan installed; read-only callers that only
+    /// resolve registered roots leave it unset.
+    background_cpu: Option<Arc<ProcessBackgroundCpuV1>>,
 }
 
 impl<D> GlobalDbSessionIngestAuthority<D>
@@ -35,7 +44,18 @@ where
     D: Borrow<RegisteredGlobalDb>,
 {
     pub const fn new(db: D) -> Self {
-        Self { db }
+        Self {
+            db,
+            background_cpu: None,
+        }
+    }
+
+    /// Mounts the process background CPU authority observation capture is
+    /// admitted through.
+    #[must_use]
+    pub fn with_background_cpu(mut self, background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
+        self.background_cpu = Some(background_cpu);
+        self
     }
 
     fn db(&self) -> &RegisteredGlobalDb {
@@ -76,6 +96,7 @@ where
                 brain_id,
                 profile_id,
                 project_id,
+                project_root,
                 repository_provenance,
             } => {
                 let authorities = HostAdmissionAuthorities::for_project(
@@ -83,7 +104,8 @@ where
                     profile_id.clone(),
                     project_id.clone(),
                     self.db(),
-                );
+                )
+                .with_project_root(project_root.to_path_buf());
                 match repository_provenance {
                     Some(provenance) => authorities.with_repository_provenance(provenance),
                     None => authorities,
@@ -97,6 +119,10 @@ where
                 profile_id.clone(),
                 self.db(),
             ),
+        };
+        let authorities = match &self.background_cpu {
+            Some(background_cpu) => authorities.with_background_cpu(Arc::clone(background_cpu)),
+            None => authorities,
         };
         Box::new(HostAdmissionFacade::new(authorities))
     }
@@ -113,16 +139,24 @@ where
         GlobalDbTranscriptStore::new(self.db.clone())
     }
 
-    #[hotpath::measure(label = "usecases.session_ingest.project_roots", future = true)]
+    #[tracing::instrument(
+        name = "usecases.session_ingest.project_roots",
+        level = "trace",
+        skip_all
+    )]
     async fn registered_project_roots(&self) -> Option<Vec<PathBuf>> {
-        let mut roots = self.db().try_list_project_paths().await.ok()?;
-        roots.extend(
-            self.db()
-                .try_list_code_project_paths(usize::MAX)
-                .await
-                .ok()?,
-        );
-        roots.extend(self.db().try_list_project_alias_paths().await.ok()?);
+        let paths: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<Vec<PathBuf>>> + Send + '_>,
+        > = Box::pin(self.db().try_list_project_paths());
+        let mut roots = paths.await.ok()?;
+        let code_paths: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<Vec<PathBuf>>> + Send + '_>,
+        > = Box::pin(self.db().try_list_code_project_paths(usize::MAX));
+        roots.extend(code_paths.await.ok()?);
+        let aliases: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<Vec<PathBuf>>> + Send + '_>,
+        > = Box::pin(self.db().try_list_project_alias_paths());
+        roots.extend(aliases.await.ok()?);
         Some(roots)
     }
 }

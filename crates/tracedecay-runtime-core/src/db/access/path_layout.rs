@@ -4,6 +4,17 @@ use tracedecay_domain::errors::Result;
 
 use super::access_io_error;
 
+/// A scope key a later lookup can still match, whether or not the profile
+/// root exists yet.
+///
+/// A daemon may enter database scope before it creates its profile root. A
+/// plain `canonicalize` fails on the missing directory and leaves the raw
+/// spelling as the key, but by the time [`super::DatabaseIdentity::for_path`]
+/// resolves an opened database the directory exists and canonicalizes to a
+/// different name wherever an ancestor is an alias (macOS `/var` ->
+/// `/private/var`, Windows `\\?\`). The scope lookup then misses and the
+/// authority fails closed. Resolving through the deepest existing ancestor
+/// gives both sides the same spelling.
 pub(super) fn canonical_profile_root(profile_root: &Path) -> Result<PathBuf> {
     let absolute = if profile_root.is_absolute() {
         profile_root.to_path_buf()
@@ -12,8 +23,8 @@ pub(super) fn canonical_profile_root(profile_root: &Path) -> Result<PathBuf> {
             .map_err(|error| access_io_error("resolve profile", profile_root, &error))?
             .join(profile_root)
     };
-    Ok(platform_identity_key(
-        &absolute.canonicalize().unwrap_or(absolute),
+    Ok(crate::path_safety::canonicalize_path_or_existing_parent(
+        &absolute,
     ))
 }
 
@@ -30,23 +41,21 @@ pub(super) fn database_profile_root(database_path: &Path, fallback_parent: &Path
 
 fn profile_project_root(database_path: &Path) -> Option<&Path> {
     let parent = database_path.parent()?;
-    // Branch graphs live one level below their project data root and share
-    // its profile authority scope. Consolidation staging shares it only for
-    // the two session snapshots consolidation itself creates; every other
-    // file under `.consolidation-input/` keeps its independent database
-    // identity rather than inheriting profile maintenance authority.
+    // Consolidation staging shares the project data root's profile authority
+    // scope only for the two session snapshots consolidation itself creates;
+    // every other file under `.consolidation-input/` keeps its independent
+    // database identity rather than inheriting profile maintenance authority.
     let staged_session_snapshot = parent
         .file_name()
         .is_some_and(|name| name == ".consolidation-input")
         && database_path
             .file_name()
             .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db");
-    let data_root =
-        if staged_session_snapshot || parent.file_name().is_some_and(|name| name == "branches") {
-            parent.parent()?
-        } else {
-            parent
-        };
+    let data_root = if staged_session_snapshot {
+        parent.parent()?
+    } else {
+        parent
+    };
     let shard_root = data_root.parent()?;
     if shard_root
         .file_name()
@@ -66,7 +75,7 @@ fn profile_project_root(database_path: &Path) -> Option<&Path> {
 fn profile_remote_node_root(database_path: &Path) -> Option<&Path> {
     if database_path
         .file_name()
-        .is_none_or(|name| name != "remote.db")
+        .is_none_or(|name| name != crate::storage::REMOTE_DB_FILENAME)
     {
         return None;
     }
@@ -84,29 +93,4 @@ fn profile_remote_node_root(database_path: &Path) -> Option<&Path> {
         return None;
     }
     remote_root.parent()
-}
-
-pub(super) fn is_legacy_repository_database(database_path: &Path) -> bool {
-    let Some(parent) = database_path.parent() else {
-        return false;
-    };
-    let is_branch_database = parent.file_name().is_some_and(|name| name == "branches");
-    if !is_branch_database
-        && database_path.file_name().is_some_and(|name| {
-            name == "global.db" || name == "user-memory.db" || name == "user-sessions.db"
-        })
-    {
-        return false;
-    }
-    let data_root = if is_branch_database {
-        let Some(data_root) = parent.parent() else {
-            return false;
-        };
-        data_root
-    } else {
-        parent
-    };
-    data_root
-        .file_name()
-        .is_some_and(|name| name == ".tracedecay")
 }

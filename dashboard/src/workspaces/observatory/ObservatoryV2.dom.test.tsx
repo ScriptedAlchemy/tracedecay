@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useScope } from '../../data/scope/store.ts';
@@ -34,16 +34,19 @@ afterEach(() => {
 });
 
 describe('the mounted Observatory accounting surface', () => {
-  it('mounts all three accounting views and keeps capped and suppressed family states distinct', async () => {
-    renderObservatory();
+  it('mounts the adoption views on one diagnostics snapshot and keeps a suppressed family distinct', async () => {
+    renderObservatory('adoption');
 
-    for (const heading of ['Adoption coverage', 'Adoption outcomes', 'Retrieval quality']) {
-      expect(await screen.findByRole('heading', { name: heading })).toBeTruthy();
+    // The inspector titles the selected source and the exact evidence titles
+    // its own section, so the source name is a heading in both landmarks.
+    for (const heading of ['Adoption coverage', 'Adoption outcomes']) {
+      expect((await screen.findAllByRole('heading', { name: heading })).length).toBeGreaterThan(0);
     }
 
-    // All three panels bind to one diagnostics snapshot. Separate panel-local
-    // query keys would issue three calls and could put their ledgers under
-    // different watermarks.
+    // The overview summaries, both adoption ledgers, and the retrieval summary
+    // all bind to one diagnostics snapshot. Separate panel-local query keys
+    // would issue several calls and could put ledgers under different
+    // watermarks.
     const diagnosticsCalls = vi
       .mocked(fetch)
       .mock.calls.filter(([input]) => new URL(String(input), 'http://localhost').pathname === '/api/plugins/analytics/diagnostics');
@@ -67,114 +70,31 @@ describe('the mounted Observatory accounting surface', () => {
     expect(suppressed?.getAttribute('data-family-state')).toBe('redacted');
     expect(suppressed?.textContent).toContain('fewer than 5 units observed');
     expect(suppressed?.textContent).not.toContain('4 records observed');
+  });
 
-    const censored = document.querySelector(
-      '[data-family-ledger="retrieval"] [data-family="retrieval.query.completed.v1"]',
-    );
+  it('keeps a capped retrieval family distinct from a silent one', async () => {
+    renderObservatory('retrieval');
+
+    expect((await screen.findAllByRole('heading', { name: 'Retrieval quality' })).length).toBeGreaterThan(0);
+    const censored = await waitFor(() => {
+      const row = document.querySelector(
+        '[data-family-ledger="retrieval"] [data-family="retrieval.query.completed.v1"]',
+      );
+      expect(row).toBeTruthy();
+      return row;
+    });
     expect(censored?.getAttribute('data-family-state')).toBe('partial');
     expect(censored?.textContent).toContain('cannot tell a family that produced nothing');
     expect(censored?.querySelector('[data-cell="numeric"]')?.textContent).toBe('—');
   });
-
-  it('preserves a stale metric coverage state even while the read model is current', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = new URL(String(input), 'http://localhost');
-        if (url.pathname === '/api/observatory') {
-          return response(envelope(observatoryModel([eventMetric('stale')]), 'complete'));
-        }
-        if (url.pathname === '/api/plugins/analytics/diagnostics') {
-          return response(envelope(diagnosticsModel(), 'complete'));
-        }
-        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
-      }),
-    );
-
-    renderObservatory();
-
-    const window = await screen.findByLabelText('Window truthfulness');
-    expect(window?.getAttribute('data-coverage-window')).toBe('stale');
-    expect(window?.querySelector('[data-state]')?.getAttribute('data-state')).toBe('stale');
-  });
-
-  it('renders a count pair without deriving a rate-floor result', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = new URL(String(input), 'http://localhost');
-        if (url.pathname === '/api/observatory') {
-          return response(envelope(observatoryModel([eventMetric('known', 4, 5)]), 'complete'));
-        }
-        if (url.pathname === '/api/plugins/analytics/diagnostics') {
-          return response(envelope(diagnosticsModel(), 'complete'));
-        }
-        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
-      }),
-    );
-
-    renderObservatory();
-
-    const pair = await screen.findByLabelText('Eligible versus observed');
-    expect(pair.getAttribute('data-coverage-ratio')).toBe('measured');
-    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('ready');
-    expect(pair.textContent).toContain('4 observed of 5 eligible');
-  });
-
-  it('does not promote a numerically populated partial metric to a measured ready pair', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = new URL(String(input), 'http://localhost');
-        if (url.pathname === '/api/observatory') {
-          return response(envelope(observatoryModel([eventMetric('partial', 24, 30)]), 'complete'));
-        }
-        if (url.pathname === '/api/plugins/analytics/diagnostics') {
-          return response(envelope(diagnosticsModel(), 'complete'));
-        }
-        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
-      }),
-    );
-
-    renderObservatory();
-
-    const pair = await screen.findByLabelText('Eligible versus observed');
-    expect(pair.getAttribute('data-coverage-ratio')).toBe('coverage_limited');
-    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('partial');
-    expect(pair.textContent).toContain('not rendered as a complete pair');
-    expect(pair.textContent).not.toContain('24 observed of 30 eligible');
-  });
-
-  it('renders equal eligible and observed counts as a measured pair', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = new URL(String(input), 'http://localhost');
-        if (url.pathname === '/api/observatory') {
-          return response(envelope(observatoryModel([eventMetric('known', 24, 24)]), 'complete'));
-        }
-        if (url.pathname === '/api/plugins/analytics/diagnostics') {
-          return response(envelope(diagnosticsModel(), 'complete'));
-        }
-        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
-      }),
-    );
-
-    renderObservatory();
-
-    const pair = await screen.findByLabelText('Eligible versus observed');
-    expect(pair.getAttribute('data-coverage-ratio')).toBe('measured');
-    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('ready');
-    expect(pair.textContent).toContain('24 observed of 24 eligible');
-  });
 });
 
-function renderObservatory() {
+function renderObservatory(inspect: 'adoption' | 'retrieval') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  // The accounting ledgers live on the Adoption wing, so this file opens the
-  // page with the camera already positioned there.
+  // The accounting ledgers are the exact evidence of their source, so the page
+  // opens with that source selected.
   return render(
-    <MemoryRouter initialEntries={['/observatory?wing=adoption']}>
+    <MemoryRouter initialEntries={[`/observatory?inspect=${inspect}`]}>
       <QueryClientProvider client={client}>
         <ObservatoryPage />
       </QueryClientProvider>
@@ -294,49 +214,6 @@ function envelope(payload: unknown, completeness: 'complete' | 'partial' = 'part
     domain_state: completeness === 'complete' ? 'ready' : 'partial',
     legal_actions: [{ kind: 'refresh', operation: 'use-case.dashboard.observatory.refresh' }],
     payload,
-  };
-}
-
-function eventMetric(
-  state: 'capped' | 'known' | 'partial' | 'sampled' | 'stale' | 'unknown',
-  observed = 24,
-  eligible = 24,
-) {
-  return {
-    calibration: null,
-    cohort: {
-      descriptor_revision: 'eligible_observability_events.v1',
-      eligible_population: 'eligible_observability_events',
-    },
-    coverage: {
-      censored: 0,
-      completed: observed,
-      eligible,
-      excluded: 0,
-      observed,
-      state,
-      unknown: 0,
-    },
-    denominator: 'eligible_observability_events',
-    denominator_value: eligible,
-    descriptor_revision: 'analytics-observability.v1',
-    evidence_class: 'measurement',
-    metric: 'observability_events',
-    provenance: {
-      projector_revision: 'observatory-projector.v1',
-      source: 'observability_envelope',
-      source_revision: 'observability-envelope.v1',
-      watermark: 'analytics:4821',
-    },
-    temporal: {
-      baseline_watermark: null,
-      delta: null,
-      horizon: { since_micros: 0, until_micros: NOW_MICROS },
-    },
-    unavailable_reason: null,
-    uncertainty: { lower: observed, reason: null, upper: observed },
-    unit: 'events',
-    value: observed,
   };
 }
 

@@ -1,43 +1,52 @@
 /// Tree-sitter based Protobuf source code extractor.
 ///
 /// Parses `.proto` files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{clean_c_comment, docstring_from_preceding_comments, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
+};
+use crate::{
+    ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1, ExtractionArtifactV1, SchemaEvidenceIssueV1,
+    SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1,
 };
 
 /// Extracts code graph nodes and edges from Protobuf source files using tree-sitter.
 pub struct ProtoExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     errors: Vec<String>,
+    schema_facts: Vec<ExtractedSchemaFactV1>,
+    schema_issues: Vec<SchemaEvidenceIssueV1>,
+    package: Option<String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
             errors: Vec::new(),
+            schema_facts: Vec::new(),
+            schema_issues: Vec::new(),
+            package: None,
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -46,8 +55,7 @@ impl ExtractionState {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -62,41 +70,40 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
+    }
+
+    fn schema_prefix(&self) -> String {
+        self.package
+            .iter()
+            .map(String::as_str)
+            .chain(
+                self.node_stack
+                    .iter()
+                    .skip(1)
+                    .map(|(name, _)| name.as_str()),
+            )
+            .collect::<Vec<_>>()
+            .join(".")
     }
 }
 
 impl ProtoExtractor {
-    pub fn extract_proto(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
-    fn extract_tree(
+    fn extract_tree_artifact(
         file_path: &str,
         source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        state.package = find_direct_child_by_kind(tree.root_node(), "package")
+            .and_then(|package| find_direct_child_by_kind(package, "fullIdent"))
+            .map(|full_ident| state.node_text(full_ident).to_owned());
+        if tree.root_node().has_error() {
+            state.schema_issues.push(SchemaEvidenceIssueV1::ParseError);
+        }
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -106,7 +113,7 @@ impl ProtoExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -120,6 +127,7 @@ impl ProtoExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -133,16 +141,11 @@ impl ProtoExtractor {
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            Self::build_artifact(state, start),
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("protobuf", "Protobuf", source)
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -161,14 +164,25 @@ impl ProtoExtractor {
         // package -> fullIdent -> ident
         let name = find_direct_child_by_kind(node, "fullIdent")
             .and_then(|fi| find_direct_child_by_kind(fi, "ident"))
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<unknown>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
+        state.package = find_direct_child_by_kind(node, "fullIdent")
+            .map(|full_ident| state.node_text(full_ident).to_owned());
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Package, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Package,
+            &name,
+            node,
+        );
         let signature = Some(
             state
                 .node_text(node)
@@ -199,6 +213,7 @@ impl ProtoExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -230,7 +245,7 @@ impl ProtoExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
         let signature = Some(
             state
                 .node_text(node)
@@ -261,6 +276,7 @@ impl ProtoExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -281,7 +297,10 @@ impl ProtoExtractor {
         // message -> messageName -> ident, messageBody -> (field | message | oneof | enum | ...)
         let name = find_direct_child_by_kind(node, "messageName")
             .and_then(|mn| find_direct_child_by_kind(mn, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -289,8 +308,20 @@ impl ProtoExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::ProtoMessage, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::ProtoMessage,
+            &name,
+            node,
+        );
         let signature = Some(format!("message {name}"));
+        state
+            .schema_facts
+            .push(ExtractedSchemaFactV1::ProtobufMessage {
+                qualified_name: qualified_schema_name(&state.schema_prefix(), &name),
+                span: source_span(node),
+            });
 
         let graph_node = Node {
             id: id.clone(),
@@ -314,6 +345,7 @@ impl ProtoExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -343,6 +375,7 @@ impl ProtoExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "field" => Self::visit_field(state, child),
+                    "mapField" => Self::visit_map_field(state, child),
                     "message" => Self::visit_message(state, child),
                     "enum" => Self::visit_enum(state, child),
                     "oneof" => Self::visit_oneof(state, child),
@@ -360,21 +393,31 @@ impl ProtoExtractor {
         // field -> type, fieldName -> ident, `=`, fieldNumber -> intLit
         let name = find_direct_child_by_kind(node, "fieldName")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let type_text = find_direct_child_by_kind(node, "type")
-            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n).to_string());
 
         let field_number = find_direct_child_by_kind(node, "fieldNumber")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "intLit"))
-            .map_or_else(|| "?".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
+        Self::record_field_fact(state, node, &name, &type_text, &field_number);
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            &name,
+            node,
+        );
         let signature = Some(format!("{type_text} {name} = {field_number}"));
 
         let graph_node = Node {
@@ -399,6 +442,7 @@ impl ProtoExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -414,12 +458,67 @@ impl ProtoExtractor {
         }
     }
 
+    fn visit_map_field(state: &mut ExtractionState, node: TsNode<'_>) {
+        let name = find_direct_child_by_kind(node, "mapName")
+            .and_then(|map_name| find_direct_child_by_kind(map_name, "ident"))
+            .map_or_else(
+                || "<anonymous>".to_owned(),
+                |n| state.node_text(n).to_owned(),
+            );
+        let key_type =
+            find_direct_child_by_kind(node, "keyType").map_or("unknown", |n| state.node_text(n));
+        let value_type =
+            find_direct_child_by_kind(node, "type").map_or("unknown", |n| state.node_text(n));
+        let field_number = find_direct_child_by_kind(node, "fieldNumber")
+            .and_then(|field_number| find_direct_child_by_kind(field_number, "intLit"))
+            .map_or("?", |n| state.node_text(n));
+        Self::record_field_fact(
+            state,
+            node,
+            &name,
+            &format!("map<{key_type},{value_type}>"),
+            field_number,
+        );
+    }
+
+    fn record_field_fact(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        name: &str,
+        type_name: &str,
+        field_number: &str,
+    ) {
+        let Ok(tag) = field_number.parse::<u32>() else {
+            state.schema_issues.push(SchemaEvidenceIssueV1::ParseError);
+            return;
+        };
+        if name.starts_with('<') || type_name == "unknown" {
+            state.schema_issues.push(SchemaEvidenceIssueV1::ParseError);
+            return;
+        }
+        state
+            .schema_facts
+            .push(ExtractedSchemaFactV1::ProtobufField {
+                message_qualified_name: state.schema_prefix(),
+                name: name.to_owned(),
+                type_name: type_name.to_owned(),
+                tag,
+                span: source_span(node),
+            });
+    }
+
     /// Extract an `enum` definition.
     fn visit_enum(state: &mut ExtractionState, node: TsNode<'_>) {
+        state
+            .schema_issues
+            .push(SchemaEvidenceIssueV1::UnsupportedSyntax);
         // enum -> enumName -> ident, enumBody -> enumField*
         let name = find_direct_child_by_kind(node, "enumName")
             .and_then(|en| find_direct_child_by_kind(en, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -427,7 +526,7 @@ impl ProtoExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
         let signature = Some(format!("enum {name}"));
 
         let graph_node = Node {
@@ -452,6 +551,7 @@ impl ProtoExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -492,18 +592,26 @@ impl ProtoExtractor {
     /// Extract an enum variant (enumField).
     fn visit_enum_field(state: &mut ExtractionState, node: TsNode<'_>) {
         // enumField -> ident, intLit
-        let name = find_direct_child_by_kind(node, "ident")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "ident").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let value = find_direct_child_by_kind(node, "intLit")
-            .map_or_else(|| "?".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            &name,
+            node,
+        );
         let signature = Some(format!("{name} = {value}"));
 
         let graph_node = Node {
@@ -528,6 +636,7 @@ impl ProtoExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -548,7 +657,10 @@ impl ProtoExtractor {
         // service -> serviceName -> ident, rpc*
         let name = find_direct_child_by_kind(node, "serviceName")
             .and_then(|sn| find_direct_child_by_kind(sn, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -556,8 +668,20 @@ impl ProtoExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::ProtoService, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::ProtoService,
+            &name,
+            node,
+        );
         let signature = Some(format!("service {name}"));
+        state
+            .schema_facts
+            .push(ExtractedSchemaFactV1::ProtobufService {
+                qualified_name: qualified_schema_name(&state.schema_prefix(), &name),
+                span: source_span(node),
+            });
 
         let graph_node = Node {
             id: id.clone(),
@@ -581,6 +705,7 @@ impl ProtoExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -621,7 +746,10 @@ impl ProtoExtractor {
         // rpc -> rpcName -> ident, enumMessageType (request), enumMessageType (response)
         let name = find_direct_child_by_kind(node, "rpcName")
             .and_then(|rn| find_direct_child_by_kind(rn, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -629,7 +757,13 @@ impl ProtoExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::ProtoRpc, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::ProtoRpc,
+            &name,
+            node,
+        );
 
         let text = state.node_text(node);
         let signature = text
@@ -637,6 +771,23 @@ impl ProtoExtractor {
             .next()
             .map(|l| l.trim().trim_end_matches(';').trim().to_string())
             .filter(|l| !l.is_empty());
+        let mut cursor = node.walk();
+        let mut message_types = node
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "enumMessageType")
+            .map(|child| state.node_text(child).trim().to_owned());
+        match (message_types.next(), message_types.next()) {
+            (Some(request_type), Some(response_type)) if !name.starts_with('<') => {
+                state.schema_facts.push(ExtractedSchemaFactV1::ProtobufRpc {
+                    service_qualified_name: state.schema_prefix(),
+                    name: name.clone(),
+                    request_type,
+                    response_type,
+                    span: source_span(node),
+                });
+            }
+            _ => state.schema_issues.push(SchemaEvidenceIssueV1::ParseError),
+        }
 
         let graph_node = Node {
             id: id.clone(),
@@ -660,6 +811,7 @@ impl ProtoExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -684,7 +836,7 @@ impl ProtoExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "oneofField" {
-                    Self::visit_oneof_field(state, child);
+                    Self::visit_field(state, child);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -693,98 +845,54 @@ impl ProtoExtractor {
         }
     }
 
-    /// Extract a field within a oneof block.
-    fn visit_oneof_field(state: &mut ExtractionState, node: TsNode<'_>) {
-        // oneof_field -> type, fieldName -> ident, `=`, fieldNumber -> intLit.
-        let name = find_direct_child_by_kind(node, "fieldName")
-            .and_then(|fn_node| find_direct_child_by_kind(fn_node, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
-
-        let type_text = find_direct_child_by_kind(node, "type")
-            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n));
-
-        let field_number = find_direct_child_by_kind(node, "fieldNumber")
-            .and_then(|fn_node| find_direct_child_by_kind(fn_node, "intLit"))
-            .map_or_else(|| "?".to_string(), |n| state.node_text(n));
-
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
-        let signature = Some(format!("{type_text} {name} = {field_number}"));
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Field,
-            name,
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature,
-            docstring: None,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-    }
-
-    /// Extract docstrings from `// comment` lines preceding definitions.
-    ///
-    /// Protobuf uses line comments (`//`) as documentation. We look for `comment`
-    /// sibling nodes that immediately precede the given definition node.
+    /// Protobuf documents definitions with the comments directly above them.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments: Vec<String> = Vec::new();
-        let mut prev = node.prev_named_sibling();
-        while let Some(prev_node) = prev {
-            if prev_node.kind() == "comment" {
-                let text = state.node_text(prev_node);
-                let stripped = text.trim_start_matches("//").trim().to_string();
-                comments.push(stripped);
-                prev = prev_node.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        comments.reverse();
-        Some(comments.join("\n"))
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: Vec::new(),
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
+    fn build_artifact(state: ExtractionState<'_>, start: Instant) -> ExtractionArtifactV1 {
+        let status = if state.schema_issues.is_empty() {
+            SchemaEvidenceStatusV1::Complete
+        } else {
+            SchemaEvidenceStatusV1::Partial
+        };
+        let mut artifact = ExtractionArtifactV1 {
+            result: ExtractionResult {
+                nodes: state.nodes,
+                edges: state.edges,
+                unresolved_refs: Vec::new(),
+                errors: state.errors,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            imports: Vec::new(),
+            clone_bodies: Vec::new(),
+            callable_arities: Vec::new(),
+            go_method_sets: Vec::new(),
+            schema_evidence: Some(ExtractedSchemaEvidenceV1 {
+                logical_path: state.file_path,
+                language: SchemaEvidenceLanguageV1::Protobuf,
+                status,
+                issues: state.schema_issues,
+                facts: state.schema_facts,
+            }),
+        };
+        artifact.canonicalize_order();
+        artifact
+    }
+}
+
+fn source_span(node: TsNode<'_>) -> tracedecay_domain::SourceSpan {
+    tracedecay_domain::SourceSpan {
+        start_byte: node.start_byte() as u64,
+        end_byte: node.end_byte() as u64,
+    }
+}
+
+fn qualified_schema_name(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}.{name}")
     }
 }
 
@@ -797,17 +905,30 @@ impl crate::LanguageExtractor for ProtoExtractor {
         "Protobuf"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_proto(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        if matches!(
+            scope,
+            crate::parsed_extraction::ParsedExtractionScope::ChangedRegions(_)
+        ) {
+            let full = Self::extract_tree_artifact(
+                file_path,
+                source,
+                tree,
+                crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+            );
+            return crate::parsed_extraction::ParsedExtractionArtifactV1::reset(
+                full.artifact,
+                crate::parsed_extraction::ParsedExtractionResetReason::ChangedRootIdentity,
+                source.len(),
+            );
+        }
+        Self::extract_tree_artifact(file_path, source, tree, scope)
     }
 }

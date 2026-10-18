@@ -17,13 +17,15 @@
 //! one is refused whole, because narrowing it silently would answer a
 //! different question than the caller asked.
 
-use tracedecay_application::{
-    AuthorizedWorkProductScopeV1, RequestContext, WorkProductOwnerAuthorizationErrorV1,
-    WorkProductOwnerAuthorizationPortV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
+use tracedecay_contracts::{
+    AuthorizedWorkProductScopeV1, RequestContext, WorkProductAuthorizedRelationScopeV1,
+    WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
+    WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::UtcMicros;
 
 use crate::work::WorkSqliteStorage;
+use crate::work_run_control::WorkSqliteJobStorage;
 
 impl WorkProductOwnerAuthorizationPortV1 for WorkSqliteStorage {
     fn authorize_scope(
@@ -32,17 +34,35 @@ impl WorkProductOwnerAuthorizationPortV1 for WorkSqliteStorage {
         selection: &WorkProductSelectionScopeV1,
         _observed_at: UtcMicros,
     ) -> Result<AuthorizedWorkProductScopeV1, WorkProductOwnerAuthorizationErrorV1> {
-        let shard = &self.handle().binding().shard_id;
-        if !selection_is_within_resolved_scope(context, selection) {
-            return Err(WorkProductOwnerAuthorizationErrorV1::NotAuthorized);
-        }
-        AuthorizedWorkProductScopeV1::new(
-            shard.brain_id.clone(),
-            shard.profile_id.clone(),
-            selection.clone(),
-        )
-        .map_err(|_| WorkProductOwnerAuthorizationErrorV1::Unavailable)
+        authorize_for_owner(&self.handle().binding().shard_id, context, selection)
     }
+}
+
+impl WorkProductOwnerAuthorizationPortV1 for WorkSqliteJobStorage<'_> {
+    fn authorize_scope(
+        &self,
+        context: &RequestContext,
+        selection: &WorkProductSelectionScopeV1,
+        _observed_at: UtcMicros,
+    ) -> Result<AuthorizedWorkProductScopeV1, WorkProductOwnerAuthorizationErrorV1> {
+        authorize_for_owner(self.owner, context, selection)
+    }
+}
+
+fn authorize_for_owner(
+    shard: &tracedecay_store::StoreShardIdV1,
+    context: &RequestContext,
+    selection: &WorkProductSelectionScopeV1,
+) -> Result<AuthorizedWorkProductScopeV1, WorkProductOwnerAuthorizationErrorV1> {
+    if !selection_is_within_resolved_scope(context, selection) {
+        return Err(WorkProductOwnerAuthorizationErrorV1::NotAuthorized);
+    }
+    AuthorizedWorkProductScopeV1::new(
+        shard.brain_id.clone(),
+        shard.profile_id.clone(),
+        selection.clone(),
+    )
+    .map_err(|_| WorkProductOwnerAuthorizationErrorV1::Unavailable)
 }
 
 fn selection_is_within_resolved_scope(
@@ -58,10 +78,10 @@ fn selection_is_within_resolved_scope(
         WorkProductSelectionScopeV1::Relations { relation_scopes } => {
             !relation_scopes.is_empty()
                 && relation_scopes.iter().all(|scope| match scope {
-                    WorkRelationScopeV1::Project { project_id } => {
+                    WorkProductAuthorizedRelationScopeV1::Project { project_id } => {
                         *project_id == resolved.project_id
                     }
-                    WorkRelationScopeV1::Repository {
+                    WorkProductAuthorizedRelationScopeV1::Repository {
                         project_id,
                         repository_id,
                     } => {

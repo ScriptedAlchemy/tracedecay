@@ -7,20 +7,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
-use tracedecay_application::VerifiedWorkGraphVersionV1;
+use tracedecay_contracts::VerifiedWorkGraphVersionV1;
 use tracedecay_domain::{
     ComponentRevision, CursorPayloadDigest, EphemeralSanitizedQueryViewV1, ManifestDigest,
     ObservationSourceIdentityV1, RankedCandidate, RetrievalAnchorId, RetrievalBudgetUsage,
     RetrievalCursor, RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverKind,
-    RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, TaskId, WorkAttemptIdentityV1,
-    canonical_sha256,
+    RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, TaskId, TemporalLaneEvidenceV1,
+    WorkAttemptIdentityV1, canonical_sha256,
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
-use tracedecay_temporal_query::ports::{TemporalExecutionSnapshot, TemporalRetrievalScope};
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
+use tracedecay_temporal_query::snapshot::TemporalRetrievalScope;
 
-use super::evidence_lanes::{
-    EvidenceLaneExecutionControlV1, LaneEvidenceBinding, TemporalLaneEvidenceV1, execute_lane,
-};
+use super::evidence_lanes::{EvidenceLaneExecutionControlV1, LaneEvidenceBinding, execute_lane};
 use super::ports::{RetrievalPortError, contract_error};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -281,7 +280,7 @@ impl<'a> CanonicalTaskSessionCandidateExportPortV1<'a> {
 }
 
 impl TaskSessionCandidateExportPortV1 for CanonicalTaskSessionCandidateExportPortV1<'_> {
-    #[hotpath::measure(label = "query.session.export")]
+    #[tracing::instrument(name = "query.session.export", level = "trace", skip_all)]
     fn export_task_session_candidates(
         &self,
         request: &TaskSessionLaneRequestV1<'_>,
@@ -374,9 +373,6 @@ impl TaskSessionCandidateExportPortV1 for CanonicalTaskSessionCandidateExportPor
             }),
         };
         batch.validate().map_err(contract_error)?;
-        // This lane emits every admitted candidate unfiltered, so a separate
-        // results gauge would always mirror this one.
-        hotpath::gauge!("query.session.candidates").set(batch.candidates.len());
         Ok(RetrieverOutcome::Complete(batch))
     }
 }

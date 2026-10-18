@@ -1,7 +1,7 @@
 //! Versioned language descriptor contracts. One versioned
 //! `LanguageDescriptorV1` per language is shared by extraction, structural
 //! search, outline, rewrite, analyzer routing, and host LSP projection.
-//! Descriptors — not extractors — select grammars and capabilities.
+//! Descriptors, not extractors, select grammars and capabilities.
 //!
 //! These are pure values: no parser acquisition, no host `ast-grep` binary,
 //! no configuration-owned executable commands or settings.
@@ -155,13 +155,7 @@ impl EdgeAuthorityV1 {
 mod tests {
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     fn descriptor() -> LanguageDescriptorV1 {
         LanguageDescriptorV1 {
@@ -191,14 +185,23 @@ mod tests {
 
         let mut duplicate_alias = descriptor();
         duplicate_alias.aliases.push("rust".to_owned());
-        assert!(duplicate_alias.validate().is_err());
+        assert_eq!(
+            duplicate_alias.validate().unwrap_err().to_string(),
+            "language descriptor alias order is not canonical"
+        );
 
         let mut duplicate_extension = descriptor();
         duplicate_extension.extensions.push("rs".to_owned());
-        assert!(duplicate_extension.validate().is_err());
+        assert_eq!(
+            duplicate_extension.validate().unwrap_err().to_string(),
+            "language descriptor extension order is not canonical"
+        );
 
         let mut reordered_roots = descriptor();
         reordered_roots.root_markers.reverse();
-        assert!(reordered_roots.validate().is_err());
+        assert_eq!(
+            reordered_roots.validate().unwrap_err().to_string(),
+            "language descriptor root marker order is not canonical"
+        );
     }
 }

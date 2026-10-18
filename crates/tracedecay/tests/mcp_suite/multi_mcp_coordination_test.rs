@@ -6,8 +6,6 @@ use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
 use tempfile::tempdir;
 #[cfg(feature = "test-transport")]
-use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-#[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
 
 #[cfg(feature = "test-transport")]
@@ -85,7 +83,7 @@ async fn concurrent_mcp_clients_converge_through_one_project_scheduler() {
     let project = isolation.path().join("project");
     initialize_project(&project);
 
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+    let harness = crate::support::seeded_composition::open(isolation.path(), [project.clone()])
         .await
         .unwrap();
     let server1 = harness.server(&project).unwrap();
@@ -102,16 +100,8 @@ async fn concurrent_mcp_clients_converge_through_one_project_scheduler() {
     .unwrap();
 
     let (queued1, queued2) = tokio::join!(
-        crate::support::handle_real_server_tool_call(
-            &server1,
-            "tracedecay_admin_sync",
-            json!({"force": true}),
-        ),
-        crate::support::handle_real_server_tool_call(
-            &server2,
-            "tracedecay_admin_sync",
-            json!({"force": true}),
-        ),
+        crate::support::handle_real_server_tool_call(&server1, "tracedecay_admin_sync", json!({})),
+        crate::support::handle_real_server_tool_call(&server2, "tracedecay_admin_sync", json!({})),
     );
     assert_eq!(tool_payload(&queued1)["status"], "queued");
     assert_eq!(tool_payload(&queued2)["status"], "queued");

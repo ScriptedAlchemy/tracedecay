@@ -5,11 +5,12 @@ use tracedecay_domain::{
     TemporalAssertionKindV1, TemporalModeV1, TemporalValidityV1,
 };
 
-use super::super::ports::{ExecutionControl, TemporalPortError};
+use super::super::execution::ExecutionControl;
 use super::types::{
     ResolutionAssertion, ResolutionCheckpoint, ResolutionLineageEdge, ResolutionLineageEdgeKind,
     ResolutionOccurrence, ResolvedOccurrence, TemporalResolution,
 };
+use crate::execution::TemporalPortError;
 
 fn checkpoint(
     control: &ExecutionControl,
@@ -38,8 +39,7 @@ fn evidence_strength(
         authority_rank(occurrence.evidence.authority),
         support
             .get(&occurrence.anchor_id)
-            .map(BTreeSet::len)
-            .unwrap_or_default(),
+            .map_or_default(BTreeSet::len),
     )
 }
 
@@ -125,7 +125,7 @@ struct SccFrame {
 /// Nodes that lie on a cycle within the subgraph induced by `nodes`.
 ///
 /// A node reaches itself iff it belongs to a strongly connected component of
-/// size greater than one, or it carries a self-edge — precisely the set the
+/// size greater than one, or it carries a self-edge, precisely the set the
 /// former per-node reachability DFS ([`cycle_members_among_reference`])
 /// computed, but in a single linear O(V + E) Tarjan pass instead of
 /// O(V * (V + E)). Recursion is expressed with an explicit work stack so deep
@@ -137,15 +137,12 @@ fn cycle_members_among(
     hook: &mut dyn FnMut(ResolutionCheckpoint) -> Result<(), TemporalPortError>,
 ) -> Result<BTreeSet<RetrievalAnchorId>, TemporalPortError> {
     let children_in_subgraph = |node: &RetrievalAnchorId| -> Vec<RetrievalAnchorId> {
-        descendants
-            .get(node)
-            .map(|set| {
-                set.iter()
-                    .filter(|child| nodes.contains(*child))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
+        descendants.get(node).map_or_default(|set| {
+            set.iter()
+                .filter(|child| nodes.contains(*child))
+                .cloned()
+                .collect()
+        })
     };
 
     let mut index_of = BTreeMap::<RetrievalAnchorId, usize>::new();
@@ -509,7 +506,7 @@ fn order_evolution(
     Ok(ordered)
 }
 
-#[hotpath::measure(label = "temporal.resolve")]
+#[tracing::instrument(name = "temporal.resolve", level = "trace", skip_all)]
 pub fn resolve_temporal_with_checkpoints(
     occurrences: &[ResolutionOccurrence],
     copies: &[LogicalCopyRecordV1],

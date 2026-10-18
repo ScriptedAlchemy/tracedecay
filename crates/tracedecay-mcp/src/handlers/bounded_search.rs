@@ -6,21 +6,23 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 
 const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);
 static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(2)));
 
-pub(crate) struct CancelSearchOnDrop(Arc<AtomicBool>);
+/// Sets the shared flag when dropped: a worker's cancellation request when
+/// its awaiting caller goes away, or its exit marker when the worker ends.
+pub(crate) struct SetFlagOnDrop(Arc<AtomicBool>);
 
-impl CancelSearchOnDrop {
-    #[cfg(test)]
-    pub(crate) fn new(cancelled: Arc<AtomicBool>) -> Self {
-        Self(cancelled)
+impl SetFlagOnDrop {
+    pub(crate) fn new(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
     }
 }
 
-impl Drop for CancelSearchOnDrop {
+impl Drop for SetFlagOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
     }
@@ -29,8 +31,8 @@ impl Drop for CancelSearchOnDrop {
 pub async fn run_bounded_search<T, E, F>(
     tool_name: &'static str,
     query: String,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
     worker: F,
 ) -> Result<T>
 where
@@ -38,7 +40,7 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce(
             Arc<AtomicBool>,
-            Option<tracedecay_application::CancellationSignal>,
+            Option<tracedecay_contracts::CancellationSignal>,
         ) -> std::result::Result<T, E>
         + Send
         + 'static,
@@ -55,13 +57,13 @@ where
     .await
 }
 
-#[hotpath::measure(future = true, label = "mcp.search.bounded")]
+#[tracing::instrument(name = "mcp.search.bounded", level = "trace", skip_all)]
 async fn run_bounded_search_with_capacity<T, E, F>(
     capacity: Arc<Semaphore>,
     budget: Duration,
     tool_name: &'static str,
     query: String,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
     worker: F,
 ) -> Result<T>
 where
@@ -69,21 +71,21 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce(
             Arc<AtomicBool>,
-            Option<tracedecay_application::CancellationSignal>,
+            Option<tracedecay_contracts::CancellationSignal>,
         ) -> std::result::Result<T, E>
         + Send
         + 'static,
 {
     if cancellation
         .as_ref()
-        .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+        .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
     {
         return Err(search_cancelled_error(tool_name));
     }
     let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel_on_drop = CancelSearchOnDrop(Arc::clone(&cancelled));
+    let cancel_on_drop = SetFlagOnDrop(Arc::clone(&cancelled));
     let worker_cancellation = cancellation.clone();
-    let outcome = tokio::time::timeout(budget, async move {
+    let outcome = native_runtime::timeout(budget, async move {
         let permit = capacity
             .acquire_owned()
             .await
@@ -91,7 +93,7 @@ where
                 message: format!("{tool_name} concurrency gate closed: {error}"),
                 query: query.clone(),
             })?;
-        tokio::task::spawn_blocking(move || {
+        native_runtime::spawn_blocking(move || {
             let _permit = permit;
             worker(cancelled, worker_cancellation)
         })
@@ -111,14 +113,17 @@ where
         Ok(result) => {
             if cancellation
                 .as_ref()
-                .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+                .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
             {
                 Err(search_cancelled_error(tool_name))
             } else {
                 result
             }
         }
-        Err(_) => Err(TraceDecayError::project_route(
+        Err(TimeoutError::TimerUnavailable(error)) => Err(TraceDecayError::Config {
+            message: format!("{tool_name} source-scan deadline is unenforceable: {error}"),
+        }),
+        Err(TimeoutError::Elapsed) => Err(TraceDecayError::project_route(
             "source_search_deadline_exceeded",
             true,
             format!(
@@ -131,7 +136,7 @@ where
 
 fn search_budget(
     tool_name: &str,
-    deadline: Option<&tracedecay_application::Deadline>,
+    deadline: Option<&tracedecay_contracts::Deadline>,
 ) -> Result<Duration> {
     match deadline {
         Some(deadline) => tracedecay_daemon_protocol::deadline_remaining(deadline)
@@ -213,5 +218,73 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         task.abort();
         cancelled_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn a_scan_completes_and_expires_without_a_tokio_runtime() {
+        let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+        let (value, expired) = tracedecay_runtime_core::native_runtime::block_on(async {
+            let value = run_bounded_search_with_capacity(
+                Arc::new(Semaphore::new(1)),
+                Duration::from_secs(5),
+                "test_search",
+                "needle".to_owned(),
+                None,
+                |_, _| Ok::<_, String>(7_u8),
+            )
+            .await;
+            let expired = run_bounded_search_with_capacity(
+                Arc::new(Semaphore::new(1)),
+                Duration::from_millis(20),
+                "test_search",
+                "needle".to_owned(),
+                None,
+                move |cancelled, _| -> std::result::Result<(), String> {
+                    while !cancelled.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                    cancelled_tx.send(()).unwrap();
+                    Ok(())
+                },
+            )
+            .await;
+            (value, expired)
+        })
+        .expect("the native runtime drives the scan");
+
+        assert_eq!(value.unwrap(), 7);
+        assert_eq!(
+            expired
+                .unwrap_err()
+                .project_route_context()
+                .map(|problem| problem.0),
+            Some("source_search_deadline_exceeded")
+        );
+        cancelled_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the expired scan's worker is told to stop");
+    }
+
+    #[tokio::test]
+    async fn a_panicking_worker_is_a_search_error() {
+        let error = run_bounded_search_with_capacity(
+            Arc::new(Semaphore::new(1)),
+            Duration::from_secs(5),
+            "test_search",
+            "needle".to_owned(),
+            None,
+            |_, _| -> std::result::Result<(), String> { panic!("scan exploded") },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                TraceDecayError::Search { message, query }
+                    if message.starts_with("test_search worker failed") && query == "needle"
+            ),
+            "{error:?}"
+        );
     }
 }

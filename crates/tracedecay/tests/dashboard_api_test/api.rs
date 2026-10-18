@@ -9,9 +9,6 @@ fn absent_canonical_fact_id(existing: &FactId) -> String {
 
 #[test]
 fn retired_dashboard_routes_fall_through_to_the_canonical_spa_index() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -19,7 +16,7 @@ fn retired_dashboard_routes_fall_through_to_the_canonical_spa_index() {
         // The suite serves the fixture bundle; production placeholder-proofing
         // lives in the CLI build script's manifest validation and the
         // registered product-runtime provider's bundle validation.
-        let fixture_index = tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS
+        let fixture_index = tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS
             .assets
             .iter()
             .find(|asset| asset.path == "index.html")
@@ -55,9 +52,6 @@ fn retired_dashboard_routes_fall_through_to_the_canonical_spa_index() {
 
 #[test]
 fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         use tracedecay_automation_runtime::automation::managed_skills::{
@@ -66,14 +60,14 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
         };
 
         let fixture = start_dashboard_fixture(false).await;
-        let profile_root = tracedecay_runtime_core::storage::default_profile_root()
-            .unwrap_or_else(|err| panic!("expected dashboard fixture profile root: {err}"));
+        let profile_root = fixture.host_runtime.profile_root().to_path_buf();
         create_managed_skill(
             &profile_root,
             ManagedSkillDraft {
                 id: "dashboard-outcome-skill".to_string(),
                 title: "Dashboard outcome skill".to_string(),
                 summary: "Fixture skill for outcome endpoint coverage.".to_string(),
+                routing_description: "Fixture skill for outcome endpoint coverage.".to_string(),
                 category: "maintenance".to_string(),
                 targets: default_managed_skill_targets(),
                 body_markdown: "Use when validating the outcomes endpoint.".to_string(),
@@ -92,7 +86,7 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
             .host_runtime
             .open_project_graph_for_test(
                 &fixture.project_root,
-                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+                tracedecay_project::project::TraceDecayOpenOptions::default(),
             )
             .await
             .unwrap_or_else(|err| panic!("failed to reopen dashboard fixture project: {err}"));
@@ -143,9 +137,6 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
 
 #[test]
 fn holographic_dashboard_endpoints_return_seeded_payloads() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -160,7 +151,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         let (status, overview) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/holographic/?q=cache&limit=5&graph_limit=10",
+                "{}/api/plugins/holographic?q=cache&limit=5&graph_limit=10",
                 fixture.base_url
             ),
         );
@@ -196,7 +187,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         let (status, entity_bounded) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/holographic/?limit=1&graph_limit=10",
+                "{}/api/plugins/holographic?limit=1&graph_limit=10",
                 fixture.base_url
             ),
         );
@@ -293,7 +284,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         let memory_status = &memory_status["payload"];
         assert_eq!(memory_status["memory"]["fact_count"], 3);
         assert_eq!(memory_status["memory"]["entity_count"], 3);
-        assert_eq!(memory_status["memory"]["algebra"]["name"], "amari_fhrr");
+        assert_eq!(memory_status["memory"]["algebra"]["name"], "map_c");
         assert_eq!(memory_status["memory"]["algebra"]["hrr_dim"], 2048);
 
         let (status, projection) = get_json(
@@ -397,11 +388,12 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             "distribution bins should cover every computed pair"
         );
         assert_eq!(
-            distribution["min"], distribution["min_score"],
+            bins[0]["start"], distribution["min_score"],
             "bins should adapt to the observed score range"
         );
         assert_eq!(
-            distribution["max"], distribution["max_score"],
+            bins[bins.len() - 1]["end"],
+            distribution["max_score"],
             "bins should adapt to the observed score range"
         );
         let occupied_bins = bins
@@ -423,9 +415,6 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
 
 #[test]
 fn holographic_fact_detail_returns_full_content_and_entities() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -542,9 +531,6 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
 
 #[test]
 fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewed_facts() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -653,9 +639,6 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
 
 #[test]
 fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(true).await;
@@ -739,9 +722,6 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
 
 #[test]
 fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -796,31 +776,26 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
 /// via the additive `storage_scope` payload field.
 #[test]
 fn lcm_serves_project_session_store_without_global_override() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::unset(GLOBAL_DB_ENV);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root);
 
-        let (cg, session_store) = setup_project(&project_root).await;
+        let (cg, session_store) = setup_project(&profile, &project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
 
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
 
         let agent = http_agent();
@@ -877,32 +852,27 @@ fn lcm_serves_project_session_store_without_global_override() {
 /// come from the resolved project store that transcript ingest writes.
 #[test]
 fn lcm_project_store_wins_over_global_accounting_override() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let (cg, session_store) = setup_project(&project_root).await;
+        let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
+        let (cg, session_store) = setup_project(&profile, &project_root).await;
         // The project store has rows; the overridden global accounting store has none.
         seed_lcm_fixture(&session_store, &project_root).await;
 
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
 
         let agent = http_agent();
@@ -933,5 +903,307 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         );
 
         server.stop();
+    });
+}
+
+#[test]
+fn lcm_large_session_pages_preserve_continuation_and_timeline_counts() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let session_id = "session-dashboard-paged";
+        let session = SessionRecord {
+            provider: "cursor".to_owned(),
+            session_id: session_id.to_owned(),
+            project_key: fixture.host_runtime.project_id().as_str().to_owned(),
+            project_path: fixture.project_root.display().to_string(),
+            title: Some("Paged dashboard session".to_owned()),
+            started_at: Some(1_700_001_000),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        assert!(
+            fixture
+                .host_runtime
+                .upsert_session_for_test(HostAdmissionScope::Project, &session)
+                .await
+                .unwrap()
+        );
+        for ordinal in 1..=70_u64 {
+            fixture
+                .host_runtime
+                .seed_session_message_observations_for_test(&[
+                    tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                        project_id: fixture.host_runtime.project_id().as_str(),
+                        provider: "cursor",
+                        session_id,
+                        message_id: &format!("paged-message-{ordinal}"),
+                        role: "user",
+                        content: "A small canonical message.",
+                        model: None,
+                        timestamp: 1_700_001_000 + ordinal as i64,
+                        ordinal,
+                    },
+                ])
+                .await
+                .unwrap();
+        }
+        fixture
+            .host_runtime
+            .materialize_session_temporal_refresh_for_test(session_id)
+            .await
+            .unwrap();
+        let agent = http_agent();
+        let base = format!(
+            "{}/api/plugins/hermes-lcm/session/{session_id}?limit=100",
+            fixture.base_url
+        );
+        let (status, first) = get_json(&agent, &base);
+        assert_eq!(status, 200);
+        let first_messages = first["payload"]["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("large session must serve a bounded page: {first}"));
+        assert_eq!(first_messages.len(), 64);
+        assert_eq!(first["coverage"]["completeness"], "partial", "{first}");
+        assert_eq!(first["coverage"]["examined"], 64, "{first}");
+        assert_eq!(first["payload"]["counts"]["message_count"], 70, "{first}");
+        let cursor = first["payload"]["next_cursor"]
+            .as_str()
+            .expect("bounded page continuation");
+        let second_url = url::Url::parse_with_params(&base, [("cursor", cursor)]).unwrap();
+        let (status, second) = get_json(&agent, second_url.as_str());
+        assert_eq!(status, 200);
+        let second_messages = second["payload"]["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("continuation must serve remaining messages: {second}"));
+        assert_eq!(second_messages.len(), 6);
+        assert!(second["payload"]["next_cursor"].is_null());
+        assert_eq!(second["coverage"]["completeness"], "complete", "{second}");
+        for field in ["eligible", "examined", "matched"] {
+            assert_eq!(second["coverage"][field], 6, "{second}");
+        }
+        assert_eq!(second["coverage"]["omitted"], 0, "{second}");
+        assert_eq!(second["payload"]["counts"]["message_count"], 70, "{second}");
+        let ids = first_messages
+            .iter()
+            .chain(second_messages)
+            .map(|message| message["message_id"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            ids.len(),
+            70,
+            "continuation must neither skip nor repeat messages"
+        );
+        let (status, timeline) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/timeline?bucket=day&limit=400",
+                fixture.base_url,
+            ),
+        );
+        assert_eq!(status, 200);
+        assert!(
+            timeline["payload"].is_object(),
+            "timeline must drain bounded pages: {timeline}"
+        );
+        assert_eq!(timeline["coverage"]["examined"], 70, "{timeline}");
+        let counted: u64 = timeline["payload"]["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bucket| bucket["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(
+            counted, 70,
+            "timeline buckets must include both canonical pages"
+        );
+    });
+}
+
+#[test]
+fn lcm_session_page_reports_messages_the_temporal_projection_has_not_published() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let session_id = "session-dashboard-lagging";
+        let session = SessionRecord {
+            provider: "cursor".to_owned(),
+            session_id: session_id.to_owned(),
+            project_key: fixture.host_runtime.project_id().as_str().to_owned(),
+            project_path: fixture.project_root.display().to_string(),
+            title: Some("Lagging dashboard session".to_owned()),
+            started_at: Some(1_700_002_000),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        assert!(
+            fixture
+                .host_runtime
+                .upsert_session_for_test(HostAdmissionScope::Project, &session)
+                .await
+                .unwrap()
+        );
+        let seed = |ordinal: u64| {
+            let message_id = format!("lagging-message-{ordinal}");
+            let fixture = &fixture;
+            async move {
+                fixture
+                    .host_runtime
+                    .seed_session_message_observations_for_test(&[
+                        tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                            project_id: fixture.host_runtime.project_id().as_str(),
+                            provider: "cursor",
+                            session_id,
+                            message_id: &message_id,
+                            role: "user",
+                            content: "A small canonical message.",
+                            model: None,
+                            timestamp: 1_700_002_000 + ordinal as i64,
+                            ordinal,
+                        },
+                    ])
+                    .await
+                    .unwrap();
+            }
+        };
+        for ordinal in 1..=3_u64 {
+            seed(ordinal).await;
+        }
+        fixture
+            .host_runtime
+            .materialize_session_temporal_refresh_for_test(session_id)
+            .await
+            .unwrap();
+        for ordinal in 4..=5_u64 {
+            seed(ordinal).await;
+        }
+        let agent = http_agent();
+        let (status, page) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/session/{session_id}?limit=100",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        let messages = page["payload"]["messages"].as_array().unwrap_or_else(|| {
+            panic!("lagging session must serve the published transcript page: {page}")
+        });
+        let message_ids = messages
+            .iter()
+            .map(|message| {
+                message["message_id"].as_str().unwrap_or_else(|| {
+                    panic!("published transcript message must carry an id: {message}")
+                })
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            message_ids,
+            [
+                "lagging-message-1",
+                "lagging-message-2",
+                "lagging-message-3"
+            ]
+            .into_iter()
+            .collect(),
+            "the page must serve only the materialized turns: {page}"
+        );
+        assert!(
+            page["payload"]["next_cursor"].is_null(),
+            "unpublished turns must not become another page: {page}"
+        );
+        assert_eq!(page["payload"]["counts"]["message_count"], 5, "{page}");
+        assert_eq!(
+            page["payload"]["counts"]["unpublished_message_count"], 2,
+            "the count must say why the transcript ends short: {page}"
+        );
+        assert_eq!(page["coverage"]["completeness"], "partial", "{page}");
+        assert_eq!(page["coverage"]["examined"], 3, "{page}");
+        assert_eq!(page["coverage"]["omitted"], 2, "{page}");
+        assert_eq!(page["coverage"]["eligible"], 5, "{page}");
+    });
+}
+
+#[test]
+fn lcm_session_page_reports_a_fully_unpublished_session_instead_of_absent() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let session_id = "session-dashboard-unpublished";
+        let session = SessionRecord {
+            provider: "cursor".to_owned(),
+            session_id: session_id.to_owned(),
+            project_key: fixture.host_runtime.project_id().as_str().to_owned(),
+            project_path: fixture.project_root.display().to_string(),
+            title: Some("Unpublished dashboard session".to_owned()),
+            started_at: Some(1_700_002_000),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        assert!(
+            fixture
+                .host_runtime
+                .upsert_session_for_test(HostAdmissionScope::Project, &session)
+                .await
+                .unwrap()
+        );
+        // No temporal refresh is materialized for this session, so every
+        // stored message stays unpublished and the page serves no
+        // occurrence to measure a provider from.
+        for ordinal in 1..=3_u64 {
+            fixture
+                .host_runtime
+                .seed_session_message_observations_for_test(&[
+                    tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                        project_id: fixture.host_runtime.project_id().as_str(),
+                        provider: "cursor",
+                        session_id,
+                        message_id: &format!("unpublished-message-{ordinal}"),
+                        role: "user",
+                        content: "A small canonical message.",
+                        model: None,
+                        timestamp: 1_700_002_000 + ordinal as i64,
+                        ordinal,
+                    },
+                ])
+                .await
+                .unwrap();
+        }
+        let agent = http_agent();
+        let (status, page) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/session/{session_id}?limit=100",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{page}");
+        assert!(
+            page["payload"]["messages"].as_array().unwrap().is_empty(),
+            "{page}"
+        );
+        assert_eq!(page["payload"]["counts"]["message_count"], 3, "{page}");
+        assert_eq!(
+            page["payload"]["counts"]["unpublished_message_count"], 3,
+            "a session the projection never published still reports its raw count: {page}"
+        );
+        assert_eq!(page["coverage"]["completeness"], "partial", "{page}");
+        assert_eq!(page["coverage"]["omitted"], 3, "{page}");
+        assert_eq!(page["coverage"]["eligible"], 3, "{page}");
     });
 }

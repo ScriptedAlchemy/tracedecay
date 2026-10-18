@@ -82,7 +82,7 @@ that the runtime never auto-applies.
 The same runtime also retains product workflow definition versioning,
 validation, activation, execution, history, pause/resume/cancel/retry,
 approval, effect reconciliation, bounded fan-out, optional synthesis,
-placement, safe Git integration, remote fencing, and backup/restore behavior.
+placement, safe Git integration, and remote fencing behavior.
 
 ## End-to-end production path
 
@@ -450,7 +450,7 @@ the journeys prove:
   cherry-pick where authorized, all preserving TaskId; and
 - pre-target verification, ref CAS, ordinary fast-forward publication,
   version-checked PR retarget, stack order, retention/quarantine, cancellation
-  races, crash points, remote fencing, and backup/restore without force,
+  races, crash points, and remote fencing without force,
   history rewrite, ambiguity replay, or false success.
 
 Focused fixtures may use disposable stock-Git repositories, fake protocol

@@ -1,4 +1,4 @@
-import type { WorkAttemptListV1 } from '../../contracts/index.ts';
+import type { WorkAttemptListV1 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkChannel } from './workChannel.ts';
 
@@ -10,7 +10,7 @@ import type { WorkChannel } from './workChannel.ts';
  * dimensions, gives each one its title and the persisted event kind that would
  * feed it, declares the seven provenance facets every card must carry, and
  * builds the absence a card wears when the projection behind it is not
- * published. It reads no data and derives no figure — `workAccountingCensus.ts`
+ * published. It reads no data and derives no figure, `workAccountingCensus.ts`
  * walks the attempt page, `workAccountingCards.ts` builds the sourced cards,
  * and `workTopologyAccounting.ts` assembles the twelve.
  *
@@ -139,7 +139,7 @@ export function accountingEventKind(dimension: WorkAccountingDimension): string 
 export interface WorkAccountingFigure {
   readonly value: number;
   readonly unit: 'width' | 'attempts' | 'effort' | 'tasks' | 'cases';
-  /** A sentence the row prints beside the figure when the figure needs one —
+  /** A sentence the row prints beside the figure when the figure needs one,
    * most often that it is a floor rather than a total. */
   readonly note?: string;
 }
@@ -157,10 +157,10 @@ export interface WorkAccountingRow {
  * Cells are carried individually and never reduced. Plan 26 keeps mechanical
  * and semantic prediction separate and keeps every cell of each matrix
  * separate; an accuracy scalar computed over them would be a dashboard formula
- * twice over — a metric the plan prohibits the UI from deriving, and a
+ * twice over, a metric the plan prohibits the UI from deriving, and a
  * collapse the plan prohibits outright.
  */
-export interface WorkAccountingMatrixCell {
+interface WorkAccountingMatrixCell {
   readonly predicted: 'conflict' | 'no_conflict' | 'abstained' | 'unknown';
   readonly observed: 'conflict' | 'no_conflict' | 'unknown';
   readonly channel: WorkChannel<WorkAccountingFigure>;
@@ -189,7 +189,7 @@ export const OBSERVED: readonly WorkAccountingMatrixCell['observed'][] = [
 /** Right-censored and unknown observations, kept apart. An observation still
  * running is not an observation with an unknown outcome, and folding them
  * would hide the one a longer horizon would fix. */
-export interface WorkAccountingCensoring {
+interface WorkAccountingCensoring {
   readonly censored: number;
   readonly unknown: number;
   readonly note: string;
@@ -198,7 +198,7 @@ export interface WorkAccountingCensoring {
 /**
  * What a measurement is pinned to.
  *
- * `metric_descriptor` is what Plan 26 means by descriptor revision — the
+ * `metric_descriptor` is what Plan 26 means by descriptor revision, the
  * `EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1` a stored value carries so it can
  * never be compared against a differently derived one. No card can carry that
  * today, because the descriptor is not published to this build.
@@ -208,7 +208,7 @@ export interface WorkAccountingCensoring {
  * separately rather than written into the same slot, so a reader is never
  * shown a version identity under the word "descriptor revision".
  */
-export interface WorkAccountingRevision {
+interface WorkAccountingRevision {
   readonly kind: 'metric_descriptor' | 'source_read_pin';
   readonly value: string;
 }
@@ -236,16 +236,6 @@ export interface WorkAccountingProvenance {
   readonly anchors: WorkChannel<readonly WorkAccountingAnchor[]>;
 }
 
-export const WORK_ACCOUNTING_FACETS = [
-  'support',
-  'eligible',
-  'censoring',
-  'intervalCoverage',
-  'horizon',
-  'descriptorRevision',
-  'anchors',
-] as const satisfies readonly (keyof WorkAccountingProvenance)[];
-
 /** A reading the card is obliged to print but that contradicts itself. Never
  * clamped and never dropped: two typed fields of one contract disagreeing is a
  * fact about the record, and rounding it away would make the record look
@@ -270,10 +260,13 @@ export interface WorkAccountingCard {
   readonly matrices: readonly WorkAccountingMatrix[] | null;
   readonly contradictions: readonly WorkAccountingContradiction[];
   readonly provenance: WorkAccountingProvenance;
+  readonly caveat?: string;
 }
 
 export interface WorkTopologyAccountingReading {
   readonly cards: readonly WorkAccountingCard[];
+  readonly stated: readonly WorkAccountingCard[];
+  readonly uncovered: readonly WorkAccountingCard[];
   /** How many of the twelve rendered a headline reading. Printed rather than
    * inferred, because a page of twelve absences and a page of twelve readings
    * are the same shape. */
@@ -281,6 +274,9 @@ export interface WorkTopologyAccountingReading {
 }
 
 // --- Absences ----------------------------------------------------------------
+
+export const METRICS_GAP_REASON =
+  'this ledger does not decode a descriptor for it, so it is a measurement not taken here rather than one measured as zero';
 
 /**
  * The absence a dimension wears when this ledger takes no measurement for it.
@@ -302,8 +298,24 @@ export function metricsGap(
   return {
     available: false,
     state: 'unsupported',
-    detail: `${measure} belongs to the ${kind} event family Plan 26 projects through ExecutionTopologyMetricsV1; this ledger does not decode a descriptor for it, so it is a measurement not taken here rather than one measured as zero.${tail}`,
+    detail: `${measure} belongs to the ${kind} event family Plan 26 projects through ExecutionTopologyMetricsV1; ${METRICS_GAP_REASON}.${tail}`,
   };
+}
+
+export function isUndecoded<T>(
+  channel: WorkChannel<T>,
+): channel is Extract<WorkChannel<T>, { available: false }> {
+  return !channel.available && channel.state === 'unsupported';
+}
+
+export function accountingCardCoverage(card: WorkAccountingCard): 'stated' | 'uncovered' {
+  const slots: WorkChannel<unknown>[] = [
+    card.reading,
+    ...card.rows.map((row) => row.channel),
+    ...(card.matrices ?? []).flatMap((matrix) => matrix.cells.map((cell) => cell.channel)),
+    ...Object.values(card.provenance),
+  ];
+  return card.contradictions.length === 0 && slots.every(isUndecoded) ? 'uncovered' : 'stated';
 }
 
 /** Every facet unavailable, for a dimension nothing in this build can source.
@@ -341,5 +353,6 @@ export function unavailableCard(
     matrices: null,
     contradictions: [],
     provenance: absentProvenance(dimension),
+    caveat: extra,
   };
 }

@@ -6,6 +6,7 @@
 //! a clean answer when an upstream analyzer is unavailable.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::diagnostics::{GatewayDiagnostic, LspPosition};
 use crate::gateway::{
@@ -20,6 +21,21 @@ use crate::workspace_diagnostics::WorkspaceDiagnosticSnapshotOutcome;
 /// Restart exhaustion is a stable health state, not an invitation for a
 /// bridge or client to start its own analyzer.
 pub const MAX_ANALYZER_RESTARTS: u8 = 3;
+/// Requests one analyzer incarnation must actually serve before its restart
+/// budget is forgiven. Reaching `Ready` is not stability: a process that
+/// initializes and then dies is exactly the crash loop the budget exists to
+/// stop, so only useful service counts, measured on the events the lane
+/// already raises rather than a timer or a poll.
+pub const ANALYZER_REQUESTS_PROVING_STABILITY: u8 = 3;
+/// How long an incarnation must have been `Ready` before the requests it
+/// served forgive its restart budget. Served count alone bounds nothing:
+/// `start → answer three requests in a millisecond → crash` reset the counter
+/// on every restart, so an analyzer dying continuously was respawned forever.
+/// A slower crash loop than the one reaching `Ready` forgave, but still not a
+/// restart *rate* bound. Survival is what the budget is about, so the reset
+/// needs both. Measured from the `Ready` event's timestamp to the served
+/// request's, on the events this lane already raises: no timer, no poll.
+pub const ANALYZER_UPTIME_PROVING_STABILITY: Duration = Duration::from_secs(30);
 pub const MAX_DIAGNOSTIC_OPERATION_ID_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +56,13 @@ pub enum AnalyzerEvent {
     StartupFailed,
     TimedOut,
     Cancelled,
+    /// The owning lane released a live client without a result. The
+    /// diagnostics refresh lane retires its client whenever a refresh ends
+    /// without a publication, whether the analyzer was silent past the quiet
+    /// window or already gone, and that boundary cannot tell the two apart.
+    /// Not a failure the analyzer demonstrably caused, so it spends no restart
+    /// budget: the process is stopped and the next caller restarts it.
+    Retired,
     RemoteError,
     TransportFailed,
     InvalidResponse,
@@ -53,6 +76,7 @@ impl AnalyzerEvent {
             Self::StartupFailed => Some("analyzer-start-failed"),
             Self::TimedOut => Some("analyzer-timeout"),
             Self::Cancelled => Some("analyzer-cancelled"),
+            Self::Retired => Some("analyzer-retired"),
             Self::RemoteError => Some("analyzer-remote-error"),
             Self::TransportFailed => Some("analyzer-transport-failed"),
             Self::InvalidResponse => Some("analyzer-invalid-response"),
@@ -66,6 +90,7 @@ impl AnalyzerEvent {
             Self::StartupFailed => Some("Analyzer failed to start."),
             Self::TimedOut => Some("Analyzer request timed out."),
             Self::Cancelled => Some("Analyzer request was cancelled."),
+            Self::Retired => Some("Analyzer client was retired without a result."),
             Self::RemoteError => Some("Analyzer request failed with a remote error."),
             Self::TransportFailed => Some("Analyzer transport failed."),
             Self::InvalidResponse => Some("Analyzer returned an invalid response."),
@@ -105,6 +130,17 @@ pub struct AnalyzerSupervisor {
     state: AnalyzerState,
     restart_attempts: u8,
     last_failure: Option<AnalyzerEvent>,
+    /// Generation of the current start attempt. A caller that began a start
+    /// and was then dropped mid-flight has its attempt superseded by whoever
+    /// takes the start over, and the process owner fences the abandoned
+    /// caller's late result against this.
+    attempt: u32,
+    /// Requests served by the incarnation `attempt` started.
+    served_requests: u8,
+    /// When the incarnation `attempt` started reached `Ready`. Paired with
+    /// `served_requests` it bounds the restart rate: a process must both do
+    /// useful work and survive to forgive the budget.
+    ready_at: Option<Instant>,
 }
 
 impl AnalyzerSupervisor {
@@ -114,6 +150,9 @@ impl AnalyzerSupervisor {
             state: AnalyzerState::AwaitingStart,
             restart_attempts: 0,
             last_failure: None,
+            attempt: 0,
+            served_requests: 0,
+            ready_at: None,
         }
     }
 
@@ -133,6 +172,20 @@ impl AnalyzerSupervisor {
         self.last_failure
     }
 
+    /// Generation of the start attempt this supervisor currently recognizes.
+    ///
+    /// A caller concluding a start it began must carry the value it was given
+    /// when it began, so that a caller which was dropped mid-start and came
+    /// back late can neither conclude nor charge the attempt that replaced it.
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    /// Requests the current incarnation has served since it reached `Ready`.
+    pub fn served_requests(&self) -> u8 {
+        self.served_requests
+    }
+
     /// Stable machine token and bounded human detail shared by LSP error data
     /// and non-LSP readiness surfaces.
     pub fn failure_evidence(&self) -> Option<(&'static str, &'static str)> {
@@ -145,18 +198,66 @@ impl AnalyzerSupervisor {
         root: &AdmittedRoot,
         event: AnalyzerEvent,
     ) -> Result<AnalyzerState, AnalyzerTransitionError> {
-        if root != &self.root {
+        self.apply_at(root, event, Instant::now())
+    }
+
+    /// `apply` with the observation time supplied, so the healthy-interval
+    /// rule is exercised without sleeping.
+    fn apply_at(
+        &mut self,
+        root: &AdmittedRoot,
+        event: AnalyzerEvent,
+        now: Instant,
+    ) -> Result<AnalyzerState, AnalyzerTransitionError> {
+        if !self.owns(root) {
             return Err(AnalyzerTransitionError::RootMismatch {
                 expected: self.root.clone(),
                 actual: root.clone(),
             });
         }
         let next = match (self.state, event) {
+            // A start in flight has exactly one owner, serialized by the
+            // analyzer client lock. A second `StartRequested` therefore means
+            // that owner went away without concluding, and this caller is
+            // taking the start over, not that two are racing. The new
+            // generation fences the abandoned owner out of the start it no
+            // longer owns.
             (
-                AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff,
+                AnalyzerState::AwaitingStart
+                | AnalyzerState::RestartBackoff
+                | AnalyzerState::Starting,
                 AnalyzerEvent::StartRequested,
-            ) => AnalyzerState::Starting,
-            (AnalyzerState::Starting | AnalyzerState::Ready, AnalyzerEvent::Ready) => {
+            ) => {
+                self.attempt = self.attempt.wrapping_add(1);
+                self.served_requests = 0;
+                self.ready_at = None;
+                AnalyzerState::Starting
+            }
+            // Spawned and initialized. This is where the process the budget is
+            // counting begins, not where it has proven anything, so the budget
+            // is deliberately untouched: resetting here lets
+            // `start → initialize → Ready → crash` restart forever.
+            (AnalyzerState::Starting, AnalyzerEvent::Ready) => {
+                self.served_requests = 0;
+                self.ready_at = Some(now);
+                AnalyzerState::Ready
+            }
+            // One request served by this incarnation. Useful service across a
+            // healthy interval is the only demonstrated stability observable
+            // from the events this lane already raises, and it is the only
+            // thing that forgives the budget, so a transient failure years
+            // into a healthy daemon does not land on a counter left over from
+            // a recovered one, while a process that keeps dying still
+            // exhausts, however many requests it answers on the way down.
+            (AnalyzerState::Ready, AnalyzerEvent::Ready) => {
+                self.served_requests = self.served_requests.saturating_add(1);
+                if self.served_requests >= ANALYZER_REQUESTS_PROVING_STABILITY
+                    && self.ready_at.is_some_and(|ready_at| {
+                        now.saturating_duration_since(ready_at) >= ANALYZER_UPTIME_PROVING_STABILITY
+                    })
+                {
+                    self.restart_attempts = 0;
+                }
                 AnalyzerState::Ready
             }
             (
@@ -182,9 +283,10 @@ impl AnalyzerSupervisor {
                     AnalyzerState::RestartBackoff
                 }
             }
-            (AnalyzerState::Starting | AnalyzerState::Ready, AnalyzerEvent::Cancelled) => {
-                AnalyzerState::RestartBackoff
-            }
+            (
+                AnalyzerState::Starting | AnalyzerState::Ready,
+                AnalyzerEvent::Cancelled | AnalyzerEvent::Retired,
+            ) => AnalyzerState::RestartBackoff,
             (AnalyzerState::Ready, AnalyzerEvent::RemoteError) => AnalyzerState::Ready,
             (_, AnalyzerEvent::Disabled) => AnalyzerState::Unavailable,
             (from, event) => {
@@ -198,6 +300,7 @@ impl AnalyzerSupervisor {
             | AnalyzerEvent::StartupFailed
             | AnalyzerEvent::TimedOut
             | AnalyzerEvent::Cancelled
+            | AnalyzerEvent::Retired
             | AnalyzerEvent::RemoteError
             | AnalyzerEvent::TransportFailed
             | AnalyzerEvent::InvalidResponse => self.last_failure = Some(event),
@@ -211,7 +314,32 @@ impl AnalyzerSupervisor {
     }
 
     pub fn is_ready_for(&self, root: &AdmittedRoot) -> bool {
-        root == &self.root && self.is_ready()
+        self.owns(root) && self.is_ready()
+    }
+
+    /// Whether `root` addresses the analyzer this supervisor watches.
+    ///
+    /// This is *process identity*, not authorization. Nothing may be admitted,
+    /// answered, or published because it passed here: request admission stays
+    /// with the session (`AdmittedRoot::is_valid` / `matches_root_uri`) and
+    /// every result is still confined to the admitted root by
+    /// `project_semantic_outcome`, which downgrades anything outside it to
+    /// `semantic-result-outside-admitted-root`. Those checks carry the scope
+    /// digest; this one deliberately does not, because the analyzer process
+    /// outlives any single admission's digest.
+    ///
+    /// An analyzer is owned by exactly one admitted root *URI*: that is the
+    /// process's workspace, and it is the identity every caller already checks
+    /// before reaching here. `AdmittedRoot` equality also compares the
+    /// optional scope digest, which binds a presentation URI to a resolved
+    /// scope-set and is absent on the plain root the analyzer owner is
+    /// constructed with. Comparing the whole value therefore rejected every
+    /// event raised from a session's authorized root as a cross-project one,
+    /// silently (each call site discards the transition error), so the
+    /// supervisor could never record a failure or authorize a restart on the
+    /// semantic lane.
+    fn owns(&self, root: &AdmittedRoot) -> bool {
+        root.uri() == self.root.uri()
     }
 }
 
@@ -739,6 +867,102 @@ mod tests {
         assert!(supervisor.is_ready_for(&root));
         assert_eq!(supervisor.last_failure(), None);
         assert_eq!(supervisor.failure_evidence(), None);
+        // Reaching `Ready` clears the evidence but not the budget: the process
+        // has spawned, not proven anything.
+        assert_eq!(supervisor.restart_attempts(), 1);
+
+        // Serving requests over a healthy interval is what proves it. Once
+        // this incarnation has, the budget is forgiven, so a transient failure
+        // much later in a daemon's life cannot land on a counter left over
+        // from a recovered one.
+        let mut clock = Instant::now() + ANALYZER_UPTIME_PROVING_STABILITY;
+        for _ in 0..ANALYZER_REQUESTS_PROVING_STABILITY {
+            supervisor
+                .apply_at(&root, AnalyzerEvent::Ready, clock)
+                .unwrap();
+            clock += Duration::from_millis(1);
+        }
+        assert_eq!(supervisor.restart_attempts(), 0);
+    }
+
+    /// Demonstrated service alone is not a restart *rate* bound: three
+    /// requests answered in a blink is throughput, not survival, and
+    /// forgiving the budget on the count alone let
+    /// `start → answer three → crash` erase the crash before it on every
+    /// restart, so an analyzer dying continuously was respawned forever. The
+    /// incarnation must also have been `Ready` for
+    /// `ANALYZER_UPTIME_PROVING_STABILITY`.
+    #[test]
+    fn a_fast_crash_loop_serving_requests_still_exhausts_the_restart_budget() {
+        let root = AdmittedRoot::new("file:///project");
+        let mut supervisor = AnalyzerSupervisor::new(root.clone());
+
+        let mut clock = Instant::now();
+        let mut state = AnalyzerState::AwaitingStart;
+        for _ in 0..MAX_ANALYZER_RESTARTS {
+            supervisor
+                .apply_at(&root, AnalyzerEvent::StartRequested, clock)
+                .unwrap();
+            supervisor
+                .apply_at(&root, AnalyzerEvent::Ready, clock)
+                .unwrap();
+            // Past the served-request threshold, but the whole incarnation
+            // lives well inside the healthy interval.
+            for _ in 0..=ANALYZER_REQUESTS_PROVING_STABILITY {
+                clock += ANALYZER_UPTIME_PROVING_STABILITY / 10;
+                supervisor
+                    .apply_at(&root, AnalyzerEvent::Ready, clock)
+                    .unwrap();
+            }
+            state = supervisor
+                .apply_at(&root, AnalyzerEvent::Crashed, clock)
+                .unwrap();
+        }
+
+        assert_eq!(state, AnalyzerState::Exhausted);
+        assert_eq!(
+            supervisor.failure_evidence(),
+            Some(("analyzer-crashed", "Analyzer process exited unexpectedly."))
+        );
+    }
+
+    /// The refresh lane retiring a client is not evidence against the
+    /// analyzer: the state must stop claiming `Ready` over a process that is
+    /// gone, but the restart budget stays untouched and the next start is a
+    /// fresh incarnation.
+    #[test]
+    fn a_retired_client_leaves_ready_without_spending_the_restart_budget() {
+        let root = AdmittedRoot::new("file:///project");
+        let mut supervisor = AnalyzerSupervisor::new(root.clone());
+        supervisor
+            .apply(&root, AnalyzerEvent::StartRequested)
+            .unwrap();
+        supervisor.apply(&root, AnalyzerEvent::Ready).unwrap();
+        let live = supervisor.attempt();
+
+        assert_eq!(
+            supervisor.apply(&root, AnalyzerEvent::Retired).unwrap(),
+            AnalyzerState::RestartBackoff
+        );
+        assert_eq!(supervisor.restart_attempts(), 0);
+        assert_eq!(
+            supervisor.failure_evidence(),
+            Some((
+                "analyzer-retired",
+                "Analyzer client was retired without a result."
+            ))
+        );
+
+        supervisor
+            .apply(&root, AnalyzerEvent::StartRequested)
+            .unwrap();
+        assert_eq!(supervisor.attempt(), live + 1);
+        assert_eq!(
+            supervisor.apply(&root, AnalyzerEvent::Retired).unwrap(),
+            AnalyzerState::RestartBackoff,
+            "a start abandoned mid-flight is retired the same way"
+        );
+        assert_eq!(supervisor.restart_attempts(), 0);
     }
 
     #[test]

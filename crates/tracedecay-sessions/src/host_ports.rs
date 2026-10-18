@@ -1,108 +1,11 @@
 //! Ports for the few host-side capabilities the session runtime reaches for
 //! but must not own.
 //!
-//! Three things the transcript runtime needs live above this crate: the agent
-//! host installation layout (`tracedecay-agent-hosts`) and the hook process
-//! spawner (root `src/hooks/`). Depending on either from here would point the
-//! session layer back at the composition root.
-//!
-//! Each capability is therefore a process-global slot the composition root
-//! fills once during startup. Every slot has a
-//! conservative default so an unwired process still runs — it just does less.
-//!
-//! Root startup must call
-//! [`hermes_profile_pin::register`] and [`session_review::register`] before any
-//! transcript ingest runs.
+//! The transcript runtime needs the agent host installation layout
+//! (`tracedecay-agent-hosts`), which lives above this crate. Depending on it
+//! from here would point the session layer back at the composition root.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::OnceLock;
-
-/// Reads the pinned TraceDecay project root out of a Hermes profile config.
-///
-/// The parser is a host-bundle concern (`tracedecay-agent-hosts`); only the
-/// answer matters here. An unregistered slot reports "no pin", which makes
-/// legacy Hermes state stores skip rather than mis-attribute.
-pub mod hermes_profile_pin {
-    use super::{OnceLock, Path};
-
-    pub type Resolver = fn(&Path) -> Option<String>;
-
-    static RESOLVER: OnceLock<Resolver> = OnceLock::new();
-
-    /// Installs the host-bundle resolver. First call wins.
-    pub fn register(resolver: Resolver) {
-        let _ = RESOLVER.set(resolver);
-    }
-
-    /// Reads the pinned project root, or `None` when unwired.
-    pub fn resolve(config_path: &Path) -> Option<String> {
-        RESOLVER.get().and_then(|resolver| resolver(config_path))
-    }
-}
-
-/// Schedules the post-ingest user session review.
-///
-/// The review hint is delivered through the root-owned daemon client. This
-/// crate must not know the daemon transport or scheduling policy.
-pub mod session_review {
-    use super::{Future, OnceLock, Pin};
-
-    pub type Scheduler =
-        for<'a> fn(&'a str, Option<&'a str>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-
-    static SCHEDULER: OnceLock<Scheduler> = OnceLock::new();
-
-    /// Installs the hook scheduler. First call wins.
-    pub fn register(scheduler: Scheduler) {
-        let _ = SCHEDULER.set(scheduler);
-    }
-
-    /// Requests a review pass; a no-op when unwired.
-    #[hotpath::skip]
-    pub async fn schedule(provider: &str, session_id: Option<&str>) {
-        if let Some(scheduler) = SCHEDULER.get() {
-            scheduler(provider, session_id).await;
-        }
-    }
-}
-
-/// Builds an *unregistered* admission facade — one with no durable authority
-/// behind it, which fails closed on every capture.
-///
-/// Standalone callers (a CLI invocation with no daemon-owned registry mount)
-/// still need an admission handle to walk a transcript and count what it
-/// *would* admit. Only the composition root can build one, so it installs the
-/// factory here.
-pub mod unregistered_admission {
-    use super::OnceLock;
-    use crate::admission::HostAdmission;
-    use tracedecay_domain::ProjectId;
-
-    #[derive(Clone, Debug)]
-    pub enum Scope {
-        /// Bound to one project identity, without a registered database.
-        Project(ProjectId),
-        /// Bound to the profile, without a registered database.
-        Profile,
-    }
-
-    pub type Factory = fn(Scope) -> Box<dyn HostAdmission>;
-
-    static FACTORY: OnceLock<Factory> = OnceLock::new();
-
-    /// Installs the unregistered-facade factory. First call wins.
-    pub fn register(factory: Factory) {
-        let _ = FACTORY.set(factory);
-    }
-
-    /// Builds an unregistered facade, or `None` when unwired.
-    #[must_use]
-    pub fn create(scope: Scope) -> Option<Box<dyn HostAdmission>> {
-        FACTORY.get().map(|factory| factory(scope))
-    }
-}
 
 /// VS Code user-data root for `home`.
 ///
@@ -137,7 +40,9 @@ fn platform_data_dir(home: &Path, product: &str) -> PathBuf {
                 return appdata_path.join(product);
             }
         }
-        home.join("AppData/Roaming").join(product)
+        // Joined per component: this root's text becomes durable transcript
+        // cursor keys, so it must carry the native spelling.
+        home.join("AppData").join("Roaming").join(product)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {

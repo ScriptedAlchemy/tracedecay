@@ -3,42 +3,31 @@ use crate::common;
 use crate::support::*;
 use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
+use std::sync::Arc;
+#[cfg(feature = "test-transport")]
 use std::time::SystemTime;
 #[cfg(feature = "test-transport")]
-use tracedecay::host_admission::LcmLineageFaultForTest;
+use tracedecay::mcp::McpServer;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
 #[cfg(feature = "test-transport")]
+use tracedecay_domain::sha256_hex_suffix;
+#[cfg(feature = "test-transport")]
 use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 #[cfg(feature = "test-transport")]
-use tracedecay_lcm::{LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft};
-use tracedecay_mcp::get_tool_definitions;
+use tracedecay_lcm::{
+    LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef,
+    LcmSummaryNodeDraft,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_project::test_support::host_admission::LcmLineageFaultForTest;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
-#[test]
-fn lcm_mutation_tools_remain_daemon_internal() {
-    let names = get_tool_definitions()
-        .expect("tool definitions")
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect::<std::collections::BTreeSet<_>>();
-
-    for retired in [
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
-    ] {
-        assert!(
-            !names.contains(retired),
-            "{retired} must remain daemon-internal"
-        );
-    }
-}
 #[tokio::test]
 async fn lcm_tools_reject_invalid_storage_routing_arguments() {
     let dir = test_temp_dir();
@@ -59,9 +48,8 @@ async fn lcm_tools_reject_invalid_storage_routing_arguments() {
         args.as_object_mut()
             .unwrap()
             .insert(removed.to_string(), value);
-        let error = expect_tool_error(
-            handle_tool_call(&cg, "tracedecay_lcm_status", args, None, None).await,
-        );
+        let error =
+            expect_tool_error(handle_tool_call(&cg, "tracedecay_lcm_status", args, None).await);
         assert!(
             error.contains(expected),
             "invalid {removed} should fail clearly: {error}"
@@ -76,7 +64,8 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let (cg, _env) = init_test_project(dir.path()).await;
     let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(220));
     let projection =
-        seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
+        seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text.clone(), 1)
+            .await;
     let temporal_db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&temporal_db, "lcm-session", vec![projection]).await;
     let db = open_active_project_session_db(&cg).await;
@@ -89,7 +78,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         &cg,
         "tracedecay_lcm_status",
         json!({"provider": "cursor"}),
-        None,
         None,
     )
     .await
@@ -106,7 +94,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "session_id": "lcm-session",
             "content_limit": 24
         }),
-        None,
         None,
     )
     .await
@@ -134,7 +121,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         &cg,
         "tracedecay_lcm_grep",
         json!({"provider": "cursor", "query": "orchard dispatch", "limit": 5}),
-        None,
         None,
     )
     .await
@@ -164,7 +150,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         &cg,
         "tracedecay_lcm_grep",
         json!({"query": "orchard dispatch", "limit": 5}),
-        None,
         None,
     )
     .await
@@ -227,7 +212,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "limit": 5
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -258,7 +242,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "limit": 5
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -284,7 +267,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "tracedecay_lcm_describe",
         json!({"provider": "cursor", "session_id": "lcm-session"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -297,10 +279,21 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "{described_payload}"
     );
     assert_eq!(described_payload["description"]["raw_message_count"], 1);
+    let preview = described_payload["description"]["raw_messages"][0]["content_preview"]
+        .as_str()
+        .expect("describe preview");
     assert!(
-        described_payload["description"]["raw_messages"][0]
-            .get("content_preview")
-            .is_some()
+        preview.starts_with("orchard dispatch"),
+        "describe returned an empty preview: {preview:?}"
+    );
+    assert!(
+        preview.chars().count() < full_text.chars().count(),
+        "describe echoed the full payload body"
+    );
+    assert_eq!(
+        described_payload["description"]["raw_messages"][0]["content_range"]["total_chars"],
+        full_text.chars().count() as u64,
+        "describe must name the captured message length, not the preview stub"
     );
     assert!(
         described_payload["description"]["raw_messages"][0]
@@ -319,7 +312,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "content_offset": 8,
             "content_limit": 16
         }),
-        None,
         None,
     )
     .await
@@ -355,7 +347,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "max_tokens": 64
         }),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -387,6 +378,93 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             .contains("EXPANDED CONTEXT")
     );
     assert!(extract_text(&result.value).len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn lcm_load_session_cursor_walk_reads_every_message_exactly_once() {
+    // More records than the internal candidate cohort window, so the walk has
+    // to advance the storage keyset rather than re-rank the first window.
+    const RECORDS: usize = 300;
+    // Small enough that a page plus its request-bound cursor fits one MCP
+    // response frame.
+    const LIMIT: usize = 4;
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let mut projections = Vec::with_capacity(RECORDS);
+    for index in 0..RECORDS {
+        projections.push(
+            seed_temporal_lcm_session_message_for_provider(
+                &cg,
+                "codex",
+                "lcm-cursor-walk",
+                &format!("lcm-walk-message-{index}"),
+                &format!("walked retained message {index}"),
+                i64::try_from(index + 1).unwrap(),
+            )
+            .await,
+        );
+    }
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-cursor-walk", projections).await;
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0usize;
+    loop {
+        let mut args = json!({
+            "provider": "codex",
+            "session_id": "lcm-cursor-walk",
+            "limit": LIMIT,
+            "content_limit": 4
+        });
+        if let Some(cursor) = &cursor {
+            args.as_object_mut()
+                .unwrap()
+                .insert("cursor".to_owned(), json!(cursor));
+        }
+        let loaded = handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None)
+            .await
+            .unwrap_or_else(|error| panic!("page {pages} of a large session must load: {error}"));
+        let loaded: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+        pages += 1;
+        let messages = loaded["messages"].as_array().unwrap();
+        assert!(
+            !messages.is_empty(),
+            "page {pages} continued with no messages: {loaded}"
+        );
+        for message in messages {
+            let message_id = message["message_id"].as_str().unwrap().to_owned();
+            assert!(
+                seen.insert(message_id.clone()),
+                "page {pages} re-served {message_id}"
+            );
+        }
+        cursor = loaded["temporal"]["next_cursor"]
+            .as_str()
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+        assert!(
+            seen.len() < RECORDS,
+            "the walk continued past the last message: {loaded}"
+        );
+        assert!(
+            pages <= RECORDS,
+            "the walk failed to reach the end of the session"
+        );
+    }
+    assert_eq!(
+        seen.len(),
+        RECORDS,
+        "a cursor walk must read every retained message exactly once"
+    );
+    for index in 0..RECORDS {
+        assert!(
+            seen.contains(&format!("lcm-walk-message-{index}")),
+            "lcm-walk-message-{index} was never served"
+        );
+    }
 }
 
 #[cfg(feature = "test-transport")]
@@ -446,7 +524,6 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
             "provider": "cursor",
             "session_id": "lcm-status-session"
         }),
-        None,
         None,
     )
     .await
@@ -518,7 +595,6 @@ async fn lcm_status_reports_lifecycle_fields_from_active_project() {
             "provider": "cursor",
             "session_id": "lcm-status-frontier"
         }),
-        None,
         None,
     )
     .await
@@ -667,9 +743,12 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
         payload_payload["description"]["external_payload"]["payload_ref"],
         payload_ref
     );
-    assert_eq!(
-        payload_payload["description"]["external_payload"]["content_preview"],
-        ""
+    let payload_preview = payload_payload["description"]["external_payload"]["content_preview"]
+        .as_str()
+        .unwrap_or_else(|| panic!("payload describe preview missing: {payload_payload}"));
+    assert!(
+        payload_preview.contains(payload_ref.as_str()),
+        "payload describe must return the stored placeholder: {payload_preview:?}"
     );
     assert_eq!(payload_payload["grain"], "occurrence");
     assert_eq!(payload_payload["state"], "available");
@@ -690,6 +769,58 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     assert!(!rendered.contains("describe source body"));
     assert!(!rendered.contains("describe external secret"));
     server.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn lcm_grep_raw_hit_store_id_expands_byte_exactly() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let content = "grep-to-expand byte identity: café\nsecond line";
+    let projection = seed_temporal_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "lcm-grep-expand-session",
+        "lcm-grep-expand-message",
+        content,
+        1,
+    )
+    .await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-grep-expand-session", vec![projection]).await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "codex",
+            "query": "grep-to-expand byte identity",
+            "scope": "session",
+            "session_id": "lcm-grep-expand-session",
+            "limit": 1
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    let store_id = grep_payload["hits"][0]["store_id"]
+        .as_i64()
+        .expect("raw grep hit must expose its LCM store id");
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "codex",
+            "session_id": "lcm-grep-expand-session",
+            "target": {"kind": "raw_message", "store_id": store_id}
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["expansion"]["content"], content);
 }
 
 #[cfg(feature = "test-transport")]
@@ -743,14 +874,17 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
             "limit": 10
         }),
         None,
-        None,
     )
     .await
     .unwrap();
     let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
     assert_eq!(grep_payload["status"], "partial");
     assert_eq!(grep_payload["count"], 1);
-    assert_eq!(grep_payload["omitted"], 3);
+    // Coverage counts the query-relevant result-eligible population, not a
+    // census of every seeded message: the single filtered hit is the only
+    // eligible anchor, and its unresolved provenance is the one omission.
+    assert_eq!(grep_payload["omitted"], 1, "payload: {grep_payload}");
+    assert_eq!(grep_payload["temporal"]["coverage"]["unknown"], 1);
     assert_eq!(
         grep_payload["hits"][0]["message_id"],
         "lcm-native-old-cli-assistant"
@@ -769,7 +903,6 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
             "content_limit": 25_000,
             "limit": 10
         }),
-        None,
         None,
     )
     .await
@@ -848,14 +981,13 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
             "limit": 10
         }),
         None,
-        None,
     )
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
     assert_eq!(payload["status"], "partial", "payload: {payload}");
     assert_eq!(payload["count"], 1);
-    assert_eq!(payload["omitted"], 3);
+    assert_eq!(payload["omitted"], 1, "payload: {payload}");
     assert_eq!(
         payload["hits"][0]["message_id"],
         "lcm-string-timestamps-target"
@@ -906,43 +1038,16 @@ async fn lcm_grep_accepts_relative_time_filters() {
             "limit": 10
         }),
         None,
-        None,
     )
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
     assert_eq!(payload["status"], "partial", "payload: {payload}");
     assert_eq!(payload["count"], 1);
-    assert_eq!(payload["omitted"], 2);
+    assert_eq!(payload["omitted"], 1, "payload: {payload}");
     assert_eq!(
         payload["hits"][0]["message_id"],
         "lcm-relative-timestamps-new"
-    );
-}
-
-#[tokio::test]
-async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
-    let dir = test_temp_dir();
-    let (cg, _env) = init_test_project(dir.path()).await;
-
-    let err = expect_tool_error(
-        handle_tool_call(
-            &cg,
-            "tracedecay_lcm_grep",
-            json!({
-                "provider": "cursor",
-                "query": "unique-cross-session-token",
-                "scope": "everything",
-                "limit": 10
-            }),
-            None,
-            None,
-        )
-        .await,
-    );
-    assert!(
-        err.contains("scope"),
-        "invalid scope should report an argument error, got {err}"
     );
 }
 
@@ -974,62 +1079,13 @@ async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_arg
         ),
     ] {
         let err = expect_tool_error(
-            handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None, None).await,
+            handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None).await,
         );
         assert!(
             err.contains("limit"),
             "{case} should report an argument error mentioning limit, got {err}"
         );
     }
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn lcm_load_session_accepts_valid_integer_args() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let projection = seed_temporal_lcm_session_message_at_micros(
-        &cg,
-        "lcm-valid-integers",
-        "lcm-valid-integers-message",
-        "valid integer argument body",
-        CanonicalMessageRoleV1::Assistant,
-        1,
-        2,
-    )
-    .await;
-    let db = open_active_project_session_db(&cg).await;
-    activate_test_temporal_generation(&db, "lcm-valid-integers", vec![projection]).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_load_session",
-        json!({
-            "provider": "cursor",
-            "session_id": "lcm-valid-integers",
-            "limit": 1,
-            "content_offset": 0,
-            "content_limit": 8,
-            "start_time": 1,
-            "end_time": 10
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "partial");
-    assert_eq!(payload["omitted"], 1);
-    assert_eq!(payload["temporal"]["coverage"]["unknown"], 1);
-    assert_eq!(
-        payload["messages"].as_array().unwrap().len(),
-        1,
-        "payload: {payload}"
-    );
-    assert_eq!(
-        payload["messages"][0]["content"].as_str().unwrap(),
-        "valid in"
-    );
 }
 
 #[cfg(feature = "test-transport")]
@@ -1052,8 +1108,8 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
     let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&db, "lcm-large-json", projections).await;
 
-    // This test asserts the raw wire contract — the truncation wrapper the
-    // server actually serves for an over-budget response — so it must read
+    // This test asserts the raw wire contract, the truncation wrapper the
+    // server actually serves for an over-budget response, so it must read
     // the response before any recovery through the retrieve handle.
     let server = real_mcp_server(cg).await;
     let response = handle_real_server_tool_call_raw(
@@ -1124,11 +1180,9 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         payload["prompt"],
         "Summarize oversized expand-query evidence"
     );
-    assert!(
-        payload["synthesis_prompt"]["system"]
-            .as_str()
-            .unwrap()
-            .contains("expanded LCM retrieval context")
+    assert_eq!(
+        payload["synthesis_prompt"]["system"],
+        LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT
     );
     assert!(
         payload["synthesis_prompt"]["user"]
@@ -1138,7 +1192,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
     );
     assert!(payload["context_truncated"].as_bool().is_some());
     assert!(payload["context_budget"]["used_chars"].as_u64().is_some());
-    assert!(!payload["matches"].as_array().unwrap().is_empty());
+    assert_eq!(payload["matches"].as_array().unwrap().len(), 1, "{payload}");
     assert!(
         payload["context_blocks"].as_array().unwrap().len() <= 3,
         "MCP expand-query context should stay compact"
@@ -1306,6 +1360,178 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
 }
 
 #[cfg(feature = "test-transport")]
+fn cursor_refusal(response: &Value, code: &str, message: &str) {
+    assert_eq!(
+        crate::support::tool_refusal(response),
+        json!({"kind": "invalid_request", "code": code, "message": message}),
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["problem"]["legal_actions"],
+        json!(["correct_request", "restart_without_cursor"]),
+        "{response}"
+    );
+}
+
+#[cfg(feature = "test-transport")]
+const CURSOR_NOT_ISSUED: &str = "The cursor was not issued by this operation. Restart without it.";
+
+#[cfg(feature = "test-transport")]
+fn cursor_parameter_changed(parameter: &str) -> String {
+    format!(
+        "The cursor was issued for a request with a different `{parameter}`. Repeat the \
+         request with the parameters that returned the cursor, or restart without it."
+    )
+}
+
+/// A session continuation belongs to the operation and request that minted
+/// it: `lcm_load_session` refuses its own cursor with a changed content slice
+/// or page size, other session operations refuse it as foreign, and only the
+/// unchanged request reads the next page.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn lcm_session_cursor_pages_only_the_operation_and_request_that_minted_it() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let mut projections = Vec::new();
+    for index in 0_i64..4 {
+        projections.push(
+            seed_temporal_lcm_session_message_for_provider(
+                &cg,
+                "codex",
+                "lcm-cursor-binding",
+                &format!("lcm-binding-message-{index}"),
+                format!("bound retained message {index}"),
+                index + 1,
+            )
+            .await,
+        );
+    }
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-cursor-binding", projections).await;
+    let server = real_mcp_server(cg).await;
+    let load = |extra: Value| {
+        let mut arguments = json!({
+            "provider": "codex",
+            "session_id": "lcm-cursor-binding",
+            "limit": 2,
+            "content_limit": 8
+        });
+        for (key, value) in extra.as_object().expect("extra arguments") {
+            arguments[key] = value.clone();
+        }
+        arguments
+    };
+    let message_ids = |payload: &Value| {
+        payload["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                message["message_id"]
+                    .as_str()
+                    .expect("message id")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let first =
+        handle_real_server_tool_call(&server, "tracedecay_lcm_load_session", load(json!({}))).await;
+    let first: Value = serde_json::from_str(extract_real_server_text(&first)).unwrap();
+    let first_ids = message_ids(&first);
+    assert_eq!(first_ids.len(), 2, "{first}");
+    let cursor = first["temporal"]["next_cursor"]
+        .as_str()
+        .expect("page one continues")
+        .to_owned();
+
+    for (parameter, changed) in [
+        (
+            "content_limit",
+            json!({"content_limit": 9, "cursor": cursor}),
+        ),
+        (
+            "content_offset",
+            json!({"content_offset": 1, "cursor": cursor}),
+        ),
+        ("limit", json!({"limit": 3, "cursor": cursor})),
+    ] {
+        cursor_refusal(
+            &handle_real_server_tool_call_raw(
+                &server,
+                "tracedecay_lcm_load_session",
+                load(changed),
+            )
+            .await,
+            "cursor.parameter_changed",
+            &cursor_parameter_changed(parameter),
+        );
+    }
+    cursor_refusal(
+        &handle_real_server_tool_call_raw(
+            &server,
+            "tracedecay_lcm_load_session",
+            load(json!({"cursor": "4.00.1.00.00"})),
+        )
+        .await,
+        "cursor.invalid",
+        CURSOR_NOT_ISSUED,
+    );
+    for (tool, arguments) in [
+        (
+            "tracedecay_lcm_grep",
+            json!({
+                "provider": "codex",
+                "query": "bound retained message",
+                "scope": "session",
+                "session_id": "lcm-cursor-binding",
+                "limit": 2,
+                "cursor": cursor
+            }),
+        ),
+        (
+            "tracedecay_lcm_expand_query",
+            json!({
+                "provider": "codex",
+                "session_id": "lcm-cursor-binding",
+                "prompt": "bound retained message",
+                "max_results": 2,
+                "cursor": cursor
+            }),
+        ),
+    ] {
+        cursor_refusal(
+            &handle_real_server_tool_call_raw(&server, tool, arguments).await,
+            "cursor.invalid",
+            CURSOR_NOT_ISSUED,
+        );
+    }
+
+    let second = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_load_session",
+        load(json!({"cursor": cursor})),
+    )
+    .await;
+    let second: Value = serde_json::from_str(extract_real_server_text(&second)).unwrap();
+    let second_ids = message_ids(&second);
+    let mut every_id = first_ids.clone();
+    every_id.extend(second_ids.iter().cloned());
+    every_id.sort();
+    assert_eq!(
+        every_id,
+        vec![
+            "lcm-binding-message-0",
+            "lcm-binding-message-1",
+            "lcm-binding-message-2",
+            "lcm-binding-message-3",
+        ],
+        "pages one and two partition the session: {first} {second}"
+    );
+    server.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -1435,12 +1661,10 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     )
     .await;
     let tampered: Value = serde_json::from_str(extract_real_server_text(&tampered)).unwrap();
-    // An unverifiable cursor fails closed as a typed not-found-or-not-
-    // authorized problem envelope rather than a served page.
-    assert_eq!(
-        tampered["problem"]["kind"], "not_found_or_not_authorized",
-        "{tampered}"
-    );
+    // An unverifiable cursor is refused as one this operation did not issue,
+    // not served as a page.
+    assert_eq!(tampered["problem"]["kind"], "invalid_request", "{tampered}");
+    assert_eq!(tampered["problem"]["code"], "cursor.invalid", "{tampered}");
 
     let rebound = handle_real_server_tool_call(
         &server,
@@ -1455,10 +1679,34 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     )
     .await;
     let rebound: Value = serde_json::from_str(extract_real_server_text(&rebound)).unwrap();
+    assert_eq!(rebound["problem"]["kind"], "invalid_request", "{rebound}");
     assert_eq!(
-        rebound["problem"]["kind"], "not_found_or_not_authorized",
+        rebound["problem"]["code"], "cursor.parameter_changed",
         "{rebound}"
     );
+    assert_eq!(
+        rebound["problem"]["message"],
+        cursor_parameter_changed("source_limit"),
+        "{rebound}"
+    );
+
+    // The same source window requested through expand-query is another
+    // operation: its node path must not redeem an lcm_expand cursor.
+    let expand_cursor_on_query = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "prompt": "Recover every paged source",
+            "node_ids": [summary_id],
+            "max_results": 3,
+            "context_max_tokens": 4096,
+            "cursor": cursor
+        }),
+    )
+    .await;
+    cursor_refusal(&expand_cursor_on_query, "cursor.invalid", CURSOR_NOT_ISSUED);
 
     let private_terminal = handle_real_server_tool_call(
         &server,
@@ -1547,6 +1795,26 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let query_cursor = first_query_page["temporal"]["next_cursor"]
         .as_str()
         .expect("expand-query source page should return a cursor");
+
+    let reprompted = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "prompt": "Recover a different answer",
+            "node_ids": [summary_id],
+            "max_results": 2,
+            "context_max_tokens": 4096,
+            "cursor": query_cursor
+        }),
+    )
+    .await;
+    cursor_refusal(
+        &reprompted,
+        "cursor.parameter_changed",
+        &cursor_parameter_changed("prompt"),
+    );
 
     let continued_query_page = handle_real_server_tool_call(
         &server,
@@ -1863,7 +2131,6 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         "{raw_payload}"
     );
     assert_eq!(raw_payload["expansion"]["from_current_session"], false);
-    assert!(raw_payload["expansion"]["externalized_note"].is_null());
     let payload_ref = raw_payload["expansion"]["payload_ref"]
         .as_str()
         .expect("cross-session external row should surface payload_ref")
@@ -1963,7 +2230,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     );
     assert!(
         receipt["payload"]["digest"].as_str().is_some_and(|digest| {
-            digest.strip_prefix("sha256:").is_some_and(|hex| {
+            sha256_hex_suffix(digest).is_some_and(|hex| {
                 hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
         }),
@@ -2000,7 +2267,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     let denied_payload: Value =
         serde_json::from_str(extract_real_server_text(&denied_payload)).unwrap();
     // A session that does not own the payload gets a typed refusal that is
-    // indistinguishable from the payload not existing — no existence oracle.
+    // indistinguishable from the payload not existing, no existence oracle.
     assert_eq!(
         denied_payload["problem"]["kind"], "not_found_or_not_authorized",
         "{denied_payload}"
@@ -2047,7 +2314,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     let wrong_provider: Value =
         serde_json::from_str(extract_real_server_text(&wrong_provider_result)).unwrap();
     // A provider that does not own the payload gets the same typed refusal as
-    // an absent payload — no existence oracle across providers.
+    // an absent payload, no existence oracle across providers.
     assert_eq!(
         wrong_provider["problem"]["kind"], "not_found_or_not_authorized",
         "{wrong_provider}"
@@ -2237,7 +2504,6 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
         "tracedecay_lcm_status",
         json!({"provider": "cursor", "session_id": "lcm-diag-session"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2289,7 +2555,6 @@ async fn lcm_status_all_provider_aggregates_provider_counts() {
         "tracedecay_lcm_status",
         json!({"provider": "all"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2331,7 +2596,6 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
         "tracedecay_lcm_status",
         json!({"provider": "all"}),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2343,11 +2607,376 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
     assert_eq!(payload["lcm"]["payload"]["missing_count"], 0);
 }
 
+/// `tracedecay_lcm_status` is the caller-facing census. Each request must
+/// count only the session it was given, leave message bodies out of the
+/// answer, and refuse a parameter the schema does not accept.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn lcm_status_over_mcp_counts_the_requested_session() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "status-alpha",
+        "status-alpha-message",
+        "alpha orchard body",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(&cg, "status-beta", "status-beta-message", "beta only", 2).await;
+    let db = open_active_project_session_db(&cg).await;
+    let alpha = db
+        .lcm_load_raw_message_for_test("cursor", "status-alpha-message")
+        .await
+        .expect("alpha raw message");
+    db.lcm_insert_summary_node_for_test(
+        HostAdmissionScope::Project,
+        LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "status-alpha".to_string(),
+            session_id: "status-alpha".to_string(),
+            depth: 0,
+            summary_text: "alpha summary must stay out of status".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: alpha.store_id,
+            }],
+            source_token_count: 20,
+            summary_token_count: 4,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: None,
+            metadata_json: None,
+        },
+    )
+    .await
+    .expect("summary should insert");
+    let server = real_mcp_server(cg).await;
+
+    let (alpha_text, alpha_status) = lcm_status_payload(
+        &server,
+        json!({"provider": "cursor", "session_id": "status-alpha"}),
+    )
+    .await;
+    assert_eq!(
+        lcm_status_scope(&alpha_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": false,
+            "provider": "cursor",
+            "session_id": "status-alpha",
+            "raw_message_count": 1,
+            "summary_node_count": 1,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 1,
+            "estimated_tokens": 0,
+            "token_estimate": {
+                "complete": false,
+                "scanned_messages": 0,
+                "next_after_store_id": 0
+            },
+            "dag_nodes": 1,
+            "dag_tokens": 4,
+            "dag_source_tokens": 20,
+            "compression_ratio": "5.0:1",
+            "depth0": {"count": 1, "tokens": 4, "source_tokens": 20},
+            "payload_coverage_state": "partial",
+            "payload_coverage_reason": "payload_file_census_requires_deep_status",
+            "integrity_mismatch_count": null,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{alpha_status}"
+    );
+
+    let (beta_text, beta_status) = lcm_status_payload(
+        &server,
+        json!({"provider": "cursor", "session_id": "status-beta"}),
+    )
+    .await;
+    assert_eq!(
+        lcm_status_scope(&beta_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": false,
+            "provider": "cursor",
+            "session_id": "status-beta",
+            "raw_message_count": 1,
+            "summary_node_count": 0,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 1,
+            "estimated_tokens": 0,
+            "token_estimate": {
+                "complete": false,
+                "scanned_messages": 0,
+                "next_after_store_id": 0
+            },
+            "dag_nodes": 0,
+            "dag_tokens": 0,
+            "dag_source_tokens": 0,
+            "compression_ratio": "0:1",
+            "depth0": null,
+            "payload_coverage_state": "partial",
+            "payload_coverage_reason": "payload_file_census_requires_deep_status",
+            "integrity_mismatch_count": null,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{beta_status}"
+    );
+
+    let (_missing_text, missing_status) = lcm_status_payload(
+        &server,
+        json!({"provider": "cursor", "session_id": "status-missing"}),
+    )
+    .await;
+    assert_eq!(
+        lcm_status_scope(&missing_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": false,
+            "provider": "cursor",
+            "session_id": "status-missing",
+            "raw_message_count": 0,
+            "summary_node_count": 0,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 0,
+            "estimated_tokens": 0,
+            "token_estimate": {"complete": true, "scanned_messages": 0},
+            "dag_nodes": 0,
+            "dag_tokens": 0,
+            "dag_source_tokens": 0,
+            "compression_ratio": "0:1",
+            "depth0": null,
+            "payload_coverage_state": "partial",
+            "payload_coverage_reason": "payload_file_census_requires_deep_status",
+            "integrity_mismatch_count": null,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{missing_status}"
+    );
+
+    let (all_text, all_status) = lcm_status_payload(&server, json!({"provider": "all"})).await;
+    assert_eq!(
+        lcm_status_scope(&all_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": false,
+            "provider": "all",
+            "raw_message_count": 2,
+            "summary_node_count": 1,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 2,
+            "estimated_tokens": 0,
+            "token_estimate": {
+                "complete": false,
+                "scanned_messages": 0,
+                "next_after_store_id": 0
+            },
+            "dag_nodes": 1,
+            "dag_tokens": 4,
+            "dag_source_tokens": 20,
+            "compression_ratio": "5.0:1",
+            "depth0": {"count": 1, "tokens": 4, "source_tokens": 20},
+            "payload_coverage_state": "partial",
+            "payload_coverage_reason": "payload_file_census_requires_deep_status",
+            "integrity_mismatch_count": null,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{all_status}"
+    );
+    assert!(
+        all_status.get("session_id").is_none(),
+        "an unfiltered census must not invent a session id: {all_status}"
+    );
+
+    let (_omitted_text, omitted_provider) = lcm_status_payload(&server, json!({})).await;
+    assert_eq!(omitted_provider["provider"], "all");
+    assert_eq!(omitted_provider["lcm"]["raw_message_count"], 2);
+    assert_eq!(omitted_provider["lcm"]["summary_node_count"], 1);
+
+    let (deep_text, deep_status) = lcm_status_payload(
+        &server,
+        json!({"provider": "cursor", "session_id": "status-alpha", "deep": true}),
+    )
+    .await;
+    assert_eq!(
+        lcm_status_scope(&deep_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": true,
+            "provider": "cursor",
+            "session_id": "status-alpha",
+            "raw_message_count": 1,
+            "summary_node_count": 1,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 1,
+            "estimated_tokens": 3,
+            "token_estimate": {"complete": true, "scanned_messages": 1},
+            "dag_nodes": 1,
+            "dag_tokens": 4,
+            "dag_source_tokens": 20,
+            "compression_ratio": "5.0:1",
+            "depth0": {"count": 1, "tokens": 4, "source_tokens": 20},
+            "payload_coverage_state": "complete",
+            "payload_coverage_reason": null,
+            "integrity_mismatch_count": 0,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{deep_status}"
+    );
+
+    let rendered = format!("{alpha_text}\n{beta_text}\n{all_text}\n{deep_text}");
+    assert!(
+        !rendered.contains("alpha orchard body"),
+        "status must count the alpha message without returning its body"
+    );
+    assert!(!rendered.contains("beta only"));
+    assert!(!rendered.contains("alpha summary must stay out of status"));
+
+    let rejected = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_lcm_status",
+        json!({"hermes_home": "/tmp/not-a-profile"}),
+    )
+    .await;
+    assert_eq!(
+        route_refusal(&rejected),
+        application_invalid_request_error(
+            "unknown parameter `hermes_home` for `tracedecay_lcm_status`"
+        )
+    );
+    server.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+async fn lcm_status_payload(server: &Arc<McpServer>, args: Value) -> (String, Value) {
+    let result = handle_real_server_tool_call(server, "tracedecay_lcm_status", args).await;
+    let text = extract_real_server_text(&result).to_owned();
+    let payload = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("tracedecay_lcm_status must return JSON: {error}\n{text}"));
+    (text, payload)
+}
+
+#[cfg(feature = "test-transport")]
+fn lcm_status_scope(payload: &Value) -> Value {
+    let mut scope = json!({
+        "status": payload["status"],
+        "authority_outcome": payload["authority_outcome"],
+        "deep": payload["deep"],
+        "provider": payload["provider"],
+        "raw_message_count": payload["lcm"]["raw_message_count"],
+        "summary_node_count": payload["lcm"]["summary_node_count"],
+        "external_payload_count": payload["lcm"]["external_payload_count"],
+        "missing_payload_count": payload["lcm"]["missing_payload_count"],
+        "unreferenced_payload_count": payload["lcm"]["unreferenced_payload_count"],
+        "maintenance_debt_count": payload["lcm"]["maintenance_debt_count"],
+        "store_messages": payload["lcm"]["store"]["messages"],
+        "estimated_tokens": payload["lcm"]["store"]["estimated_tokens"],
+        "token_estimate": payload["lcm"]["store"]["token_estimate"],
+        "dag_nodes": payload["lcm"]["dag"]["total_nodes"],
+        "dag_tokens": payload["lcm"]["dag"]["total_tokens"],
+        "dag_source_tokens": payload["lcm"]["dag"]["total_source_tokens"],
+        "compression_ratio": payload["lcm"]["dag"]["compression_ratio"],
+        "depth0": payload["lcm"]["dag"]["depths"].get("d0").cloned().unwrap_or(Value::Null),
+        "payload_coverage_state": payload["lcm"]["payload"]["coverage"]["state"],
+        "payload_coverage_reason": payload["lcm"]["payload"]["coverage"]
+            .get("reason")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "integrity_mismatch_count": payload["lcm"]["payload"]["integrity_mismatch_count"],
+        "externalized_count": payload["lcm"]["payload"]["externalized_count"],
+        "missing_count": payload["lcm"]["payload"]["missing_count"],
+        "redaction_enabled": payload["lcm"]["redaction"]["enabled"],
+        "lossy_records": payload["lcm"]["redaction"]["lossy_records"],
+        "lifecycle_state_count": payload["lcm"]["lifecycle"]["lifecycle_state_count"],
+        "frontier_count": payload["lcm"]["lifecycle"]["frontier_count"],
+        "lifecycle_debt_count": payload["lcm"]["lifecycle"]["maintenance_debt_count"],
+        "current_session_id": payload["lcm"]["lifecycle"]["current_session_id"],
+        "current_frontier_store_id": payload["lcm"]["lifecycle"]["current_frontier_store_id"],
+        "last_finalized_session_id": payload["lcm"]["lifecycle"]["last_finalized_session_id"],
+        "last_finalized_frontier_store_id": payload["lcm"]["lifecycle"]["last_finalized_frontier_store_id"]
+    });
+    if let Some(session_id) = payload.get("session_id") {
+        scope
+            .as_object_mut()
+            .expect("scope object")
+            .insert("session_id".to_owned(), session_id.clone());
+    }
+    scope
+}
+
 // Repeated LCM tool calls in one process must reuse the per-process
 // The retained project runtime must not re-run the full DDL ensure for each
 // request. Observable via the version gate: after admission, a manually
-// downgraded version marker stays downgraded across calls on the same server
-// — reconstructing the server would correctly admit and migrate it again.
+// downgraded version marker stays downgraded across calls on the same server.
+// Reconstructing the server would correctly admit and migrate it again.
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
@@ -2402,7 +3031,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     server.shutdown().await;
 }
 
-/// An invalid `scope` must be a hard error naming the valid values — never
+/// An invalid `scope` must be a hard error naming the valid values, never
 /// silently broadened to `all`.
 #[tokio::test]
 async fn lcm_grep_rejects_invalid_scope() {
@@ -2413,7 +3042,6 @@ async fn lcm_grep_rejects_invalid_scope() {
             &cg,
             "tracedecay_lcm_grep",
             json!({"query": "anything", "scope": "everything"}),
-            None,
             None,
         )
         .await,
@@ -2427,7 +3055,6 @@ async fn lcm_grep_rejects_invalid_scope() {
             &cg,
             "tracedecay_lcm_grep",
             json!({"query": "anything", "relationship_scope": "children"}),
-            None,
             None,
         )
         .await,
@@ -2476,7 +3103,7 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
             json!({"provider": "cursor", "session_id": "ghost-session", "prompt": "anything"}),
         ),
     ] {
-        match handle_tool_call(&cg, tool, args.clone(), None, None).await {
+        match handle_tool_call(&cg, tool, args.clone(), None).await {
             Ok(result) => {
                 let text = extract_text(&result.value);
                 let payload: Value = serde_json::from_str(text)
@@ -2544,7 +3171,6 @@ async fn lcm_load_session_missing_store_uses_typed_empty_messages_without_creati
         "tracedecay_lcm_load_session",
         json!({"session_id": "ghost-session"}),
         None,
-        None,
     )
     .await
     .unwrap_or_else(|error| panic!("tracedecay_lcm_load_session returned error: {error}"));
@@ -2574,54 +3200,5 @@ async fn lcm_load_session_missing_store_uses_typed_empty_messages_without_creati
         db_path.exists(),
         "tracedecay_lcm_load_session must keep configuration sessions.db at {}",
         db_path.display()
-    );
-}
-
-/// `default_context_limit = max_tokens.clamp(32_000, 65_536)` always
-/// evaluated to 32_000 because max_tokens ≤ 8_192 < 32_000, making
-/// `max_tokens` dead. `context_max_tokens` must default to the constant
-/// 32_000 so both params stay independent. The handler must accept an
-/// explicit `context_max_tokens` override and the returned payload must
-/// reflect it.
-#[tokio::test]
-async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
-    let (cg, _env) = init_test_project(project).await;
-
-    // With no retained transcript the tool returns a typed empty or unavailable
-    // outcome. This test only verifies that the independent budgets pass
-    // argument validation without requiring code indexing.
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_expand_query",
-        json!({
-            "session_id": "test-session",
-            "provider": "cursor",
-            "prompt": "what did we discuss?",
-            "max_tokens": 500,
-            "context_max_tokens": 48000,
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect("expand_query with explicit context_max_tokens must not error");
-
-    let text = extract_text(&result.value);
-    let payload: Value =
-        serde_json::from_str(text).expect("expand_query result must be valid JSON");
-
-    // The important thing: it must NOT return a Config/argument error about
-    // max_tokens or context_max_tokens. The exact empty outcome depends on
-    // whether the canonical retained-session service is mounted by the test
-    // harness.
-    assert!(
-        matches!(
-            payload["status"].as_str(),
-            Some("not_ingested" | "ok" | "unavailable" | "complete_zero" | "deleted")
-        ),
-        "unexpected status in expand_query response: {payload}"
     );
 }

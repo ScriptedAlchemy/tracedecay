@@ -1,29 +1,34 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use tracedecay_application::CancellationSignal;
+use tracedecay_contracts::CancellationSignal;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
-    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ContentDigest,
-    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, PolicyRevisionId,
-    RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
+    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1,
+    ContentDigest, EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId,
+    PolicyRevisionId, RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision,
+    SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
+    SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphGenerationManifest, GraphNamespace, GraphProjectorRevision,
     NeverCancelled, VerifiedGraphSnapshot,
 };
 
+use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use crate::graph_projection::builder::ProductionCodeGraphInputs;
 use crate::graph_projection::schema::SYMBOL_LABEL;
+use crate::graph_projection::warm_clock::WarmOwner;
 use crate::graph_projection::{
-    CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError, CodeGraphProjectionStore,
-    CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
+    CODE_GRAPH_PROJECTOR_REVISION, CodeGraphCatalogReleaseV1, CodeGraphProjectionError,
+    CodeGraphProjectionStore, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
+    CodeGraphServingWarmthV1, CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
     code_graph_projection_identity, current_generation_entity, has_label,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
-mod bundle_artifact;
 mod imports;
 mod warm_catalog;
 
@@ -35,33 +40,18 @@ impl GraphCancellation for CancelledNow {
     }
 }
 
-/// Counts cancellation observations without ever cancelling. Every snapshot
-/// read observes the request cancellation, so for two structurally identical
-/// queries against one snapshot the observation counts order exactly like the
-/// snapshot reads performed.
-#[derive(Default)]
-struct CountingCancellation(AtomicU64);
-
-impl CountingCancellation {
-    fn observations(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
+struct CancelAfter {
+    observations: AtomicU64,
+    allowed: u64,
 }
 
-impl GraphCancellation for CountingCancellation {
+impl GraphCancellation for CancelAfter {
     fn is_cancelled(&self) -> bool {
-        self.0.fetch_add(1, Ordering::Relaxed);
-        false
+        self.observations.fetch_add(1, Ordering::Relaxed) >= self.allowed
     }
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn digest<T>(byte: char) -> T
 where
@@ -147,9 +137,13 @@ fn symbol_metadata(
         branches: 0,
         loops: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         line_span: 1,
         start_line: 0,
         signature: None,
+        docstring: None,
+        is_async: false,
+        derives: Vec::new(),
         skip_test_coverage: false,
         file_identity: digest('e'),
         content_digest: digest('d'),
@@ -232,6 +226,12 @@ fn fixture_symbols() -> GenerationSymbolIndexV1 {
 }
 
 fn production_manifest() -> GraphGenerationManifest {
+    production_manifest_with_unresolved_calls(&[])
+}
+
+fn production_manifest_with_unresolved_calls(
+    unresolved_calls: &[CodeIndexUnresolvedReferenceV1],
+) -> GraphGenerationManifest {
     let projection =
         code_graph_projection_identity(GraphNamespace::new("code-graph").expect("namespace"))
             .expect("projection identity");
@@ -246,12 +246,52 @@ fn production_manifest() -> GraphGenerationManifest {
             files: &files,
             symbols: &symbols,
             imports: &[],
+            unresolved_calls,
         }),
         &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
         &|| Ok(()),
     )
     .expect("valid fixture manifest")
+}
+
+fn large_production_manifest(symbol_count: usize) -> GraphGenerationManifest {
+    let projection =
+        code_graph_projection_identity(GraphNamespace::new("code-graph").expect("namespace"))
+            .expect("projection identity");
+    let files = vec![file("file.f1", "src/alpha.rs")];
+    let mut chunks = Vec::with_capacity(symbol_count);
+    let mut symbols = Vec::with_capacity(symbol_count);
+    for index in 0..symbol_count {
+        let occurrence = format!("sym.bulk.{index:05}");
+        let qualified_name = if index % 2 == 0 {
+            format!("bulk::Needle{index}")
+        } else {
+            format!("bulk::Other{index}")
+        };
+        chunks.push(Arc::new(chunk(&occurrence, "file.f1", index as u32)));
+        let mut metadata = symbol_metadata(&occurrence, &qualified_name, "function", '1');
+        metadata.identity = id(&format!("sha256:{index:064x}"));
+        symbols.push(Arc::new(metadata));
+    }
+    let symbols =
+        GenerationSymbolIndexV1::new(generation(), symbols).expect("large fixture symbol index");
+    build_code_graph_manifest_inputs_checked(
+        projection,
+        &generation(),
+        &[],
+        &chunks,
+        Some(ProductionCodeGraphInputs {
+            files: &files,
+            symbols: &symbols,
+            imports: &[],
+            unresolved_calls: &[],
+        }),
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
+            .expect("projector revision"),
+        &|| Ok(()),
+    )
+    .expect("large fixture manifest")
 }
 
 fn store_for(manifest: GraphGenerationManifest) -> CodeGraphProjectionStore {
@@ -283,53 +323,47 @@ fn occurrences(summaries: &[CodeGraphSymbolSummaryV1]) -> Vec<String> {
 }
 
 #[test]
-fn qualified_name_resolution_is_exact_and_kind_filtered() {
-    let reader = reader(&store_for(production_manifest()));
+fn symbol_find_is_bounded_ordered_and_cancellable_during_large_scans() {
+    let reader = reader(&store_for(large_production_manifest(5_000)));
+    reader
+        .symbols_page(None, 1, request())
+        .expect("warm large fixture catalog");
+
     let hits = reader
-        .resolve_qualified_name("beta::run", None, 8, request())
-        .expect("resolve qualified name");
-    assert_eq!(occurrences(&hits), vec!["sym.beta.run".to_owned()]);
-    let metadata = hits[0].metadata.as_ref().expect("production metadata");
-    assert_eq!(metadata.kind, "function");
-    assert!(
-        hits[0].binding.is_some(),
-        "resolved symbol keeps its binding"
+        .find_symbols(
+            &|_, _, metadata| {
+                metadata.is_some_and(|metadata| metadata.simple_name.starts_with("Needle"))
+            },
+            3,
+            request(),
+        )
+        .expect("bounded symbol find");
+    assert_eq!(
+        occurrences(&hits),
+        vec![
+            "sym.bulk.00000".to_owned(),
+            "sym.bulk.00002".to_owned(),
+            "sym.bulk.00004".to_owned(),
+        ]
     );
 
-    let struct_hits = reader
-        .resolve_qualified_name("beta::Runner", Some("struct"), 8, request())
-        .expect("resolve struct");
-    assert_eq!(
-        occurrences(&struct_hits),
-        vec!["sym.beta.runner".to_owned()]
-    );
-    let kind_mismatch = reader
-        .resolve_qualified_name("beta::Runner", Some("function"), 8, request())
-        .expect("kind filter");
-    assert!(
-        kind_mismatch.is_empty(),
-        "kind filter must exclude, not coerce"
-    );
-    let unknown = reader
-        .resolve_qualified_name("delta::absent", None, 8, request())
-        .expect("unknown name");
-    assert!(unknown.is_empty());
+    let cancellation = Arc::new(CancelAfter {
+        observations: AtomicU64::new(0),
+        allowed: 4,
+    });
+    let error = reader
+        .find_symbols(&|_, _, _| false, 1, cancellation)
+        .expect_err("a long catalog scan must observe cancellation");
+    assert_eq!(error, CodeGraphProjectionError::Cancelled);
 }
 
 #[test]
-fn simple_name_resolution_matches_trailing_segment_case_insensitively() {
+fn symbol_find_denies_a_pre_cancelled_read() {
     let reader = reader(&store_for(production_manifest()));
-    let hits = reader
-        .resolve_simple_name("RUN", None, 8, request())
-        .expect("resolve simple name");
-    assert_eq!(
-        occurrences(&hits),
-        vec!["sym.alpha.run".to_owned(), "sym.beta.run".to_owned()]
-    );
-    let runner = reader
-        .resolve_simple_name("runner", Some("struct"), 8, request())
-        .expect("resolve runner");
-    assert_eq!(occurrences(&runner), vec!["sym.beta.runner".to_owned()]);
+    let error = reader
+        .find_symbols(&|_, _, _| true, 1, Arc::new(CancelledNow))
+        .expect_err("cancelled symbol find must be refused");
+    assert_eq!(error, CodeGraphProjectionError::Cancelled);
 }
 
 #[test]
@@ -376,36 +410,23 @@ fn file_and_page_listings_cover_the_generation_exactly_once() {
 }
 
 #[test]
-fn logical_path_resolution_matches_the_bound_file_occurrence() {
-    let reader = reader(&store_for(production_manifest()));
-    let hits = reader
-        .symbols_in_logical_file("src/beta.rs", 8, request())
-        .expect("logical path listing");
-    assert_eq!(
-        occurrences(&hits),
-        vec!["sym.beta.run".to_owned(), "sym.beta.runner".to_owned()]
-    );
-}
-
-#[test]
 fn logical_path_resolution_reports_an_unknown_path_as_empty_not_an_error() {
     let reader = reader(&store_for(production_manifest()));
     let hits = reader
         .symbols_in_logical_file("src/absent.rs", 8, request())
         .expect("an unpublished logical path must not be an error");
-    assert!(
-        hits.is_empty(),
+    assert_eq!(
+        occurrences(&hits),
+        Vec::<String>::new(),
         "no file at this path in the generation means no symbols, not a refusal"
     );
-}
-
-#[test]
-fn logical_path_resolution_honors_the_listing_limit() {
-    let reader = reader(&store_for(production_manifest()));
-    let hits = reader
-        .symbols_in_logical_file("src/beta.rs", 1, request())
-        .expect("limited logical path listing");
-    assert_eq!(hits.len(), 1, "the limit caps the returned symbols");
+    let published = reader
+        .symbols_in_logical_file("src/beta.rs", 8, request())
+        .expect("a published logical path lists its symbols");
+    assert_eq!(
+        occurrences(&published),
+        vec!["sym.beta.run".to_owned(), "sym.beta.runner".to_owned()]
+    );
 }
 
 #[test]
@@ -415,193 +436,6 @@ fn logical_path_resolution_denies_a_cancelled_read() {
         .symbols_in_logical_file("src/beta.rs", 8, Arc::new(CancelledNow))
         .expect_err("cancelled logical path listing must be refused");
     assert_eq!(error, CodeGraphProjectionError::Cancelled);
-}
-
-#[test]
-fn adjacency_reads_are_kind_filtered_and_endpoint_checked() {
-    let reader = reader(&store_for(production_manifest()));
-    let beta = vec![id::<SymbolOccurrenceId>("sym.beta.run")];
-
-    let callers = reader
-        .callers(&beta, &[RelationEdgeKindV1::Calls], 16, request())
-        .expect("callers");
-    assert_eq!(callers.len(), 1);
-    assert_eq!(
-        occurrences(
-            &callers[0]
-                .iter()
-                .map(|edge| edge.neighbor.clone())
-                .collect::<Vec<_>>()
-        ),
-        vec!["sym.alpha.run".to_owned()]
-    );
-
-    let all_callers = reader
-        .callers(&beta, &[], 16, request())
-        .expect("all callers");
-    assert_eq!(all_callers[0].len(), 2, "unfiltered callers include Uses");
-
-    let callees = reader
-        .callees(
-            &[id::<SymbolOccurrenceId>("sym.alpha.run")],
-            &[RelationEdgeKindV1::Calls],
-            16,
-            request(),
-        )
-        .expect("callees");
-    assert_eq!(callees[0].len(), 1);
-    assert_eq!(callees[0][0].edge.to_occurrence.as_str(), "sym.beta.run");
-}
-
-#[test]
-fn verified_adjacency_returns_relation_rows_in_seed_shape() {
-    let reader = reader(&store_for(production_manifest()));
-    let seeds = [
-        id::<SymbolOccurrenceId>("sym.gamma.main"),
-        id::<SymbolOccurrenceId>("sym.alpha.run"),
-    ];
-    let starts = super::entity_ids(&seeds).expect("seed entity identities");
-
-    let outgoing = reader
-        .snapshot
-        .outgoing_relations(
-            &starts,
-            &super::source_relation_kinds().expect("source relation kinds"),
-            16,
-            request(),
-        )
-        .expect("verified outgoing relation rows");
-    assert_eq!(outgoing.len(), seeds.len());
-    assert_eq!(outgoing[0].len(), 1);
-    assert_eq!(outgoing[1].len(), 1);
-    assert_ne!(outgoing[0][0].identity, outgoing[1][0].identity);
-
-    let incoming = reader
-        .snapshot
-        .incoming_relations(
-            &starts,
-            &super::target_relation_kinds().expect("target relation kinds"),
-            16,
-            request(),
-        )
-        .expect("verified incoming relation rows");
-    assert_eq!(incoming.len(), seeds.len());
-    assert!(incoming[0].is_empty());
-    assert_eq!(incoming[1].len(), 1);
-}
-
-/// Edge kinds outside the admitted set must stop hydration at the edge
-/// payload: their far endpoints are never read. Both queries examine the same
-/// two adjacency rows of `sym.beta.run`; the filtered one hydrates one
-/// neighbor where the unfiltered one hydrates two, so it must perform strictly
-/// fewer snapshot reads.
-#[test]
-fn kind_filtered_adjacency_skips_far_endpoint_hydration_for_excluded_edges() {
-    let reader = reader(&store_for(production_manifest()));
-    let beta = vec![id::<SymbolOccurrenceId>("sym.beta.run")];
-
-    let filtered_reads = Arc::new(CountingCancellation::default());
-    let filtered = reader
-        .callers(
-            &beta,
-            &[RelationEdgeKindV1::Calls],
-            16,
-            Arc::clone(&filtered_reads) as Arc<dyn GraphCancellation>,
-        )
-        .expect("filtered callers");
-    assert_eq!(filtered[0].len(), 1, "one Calls edge survives the filter");
-
-    let unfiltered_reads = Arc::new(CountingCancellation::default());
-    let unfiltered = reader
-        .callers(
-            &beta,
-            &[],
-            16,
-            Arc::clone(&unfiltered_reads) as Arc<dyn GraphCancellation>,
-        )
-        .expect("unfiltered callers");
-    assert_eq!(unfiltered[0].len(), 2, "both incoming edges hydrate");
-
-    assert!(
-        filtered_reads.observations() < unfiltered_reads.observations(),
-        "excluded kinds must not hydrate far endpoints: filtered={} unfiltered={}",
-        filtered_reads.observations(),
-        unfiltered_reads.observations()
-    );
-}
-
-/// Far endpoints shared inside one batch hydrate once, not once per edge.
-/// Both batches carry two seeds with one outgoing edge each; the batch whose
-/// edges converge on one shared endpoint must perform strictly fewer snapshot
-/// reads than the batch whose endpoints are distinct.
-#[test]
-fn shared_far_endpoints_hydrate_once_per_adjacency_batch() {
-    let reader = reader(&store_for(production_manifest()));
-
-    let shared_reads = Arc::new(CountingCancellation::default());
-    let shared = reader
-        .callees(
-            &[
-                id::<SymbolOccurrenceId>("sym.alpha.run"),
-                id::<SymbolOccurrenceId>("sym.beta.runner"),
-            ],
-            &[],
-            16,
-            Arc::clone(&shared_reads) as Arc<dyn GraphCancellation>,
-        )
-        .expect("shared-endpoint batch");
-    assert!(
-        shared
-            .iter()
-            .flatten()
-            .all(|edge| edge.neighbor.occurrence.as_str() == "sym.beta.run"),
-        "both edges converge on sym.beta.run"
-    );
-    assert_eq!(shared.iter().flatten().count(), 2);
-
-    let distinct_reads = Arc::new(CountingCancellation::default());
-    let distinct = reader
-        .callees(
-            &[
-                id::<SymbolOccurrenceId>("sym.gamma.main"),
-                id::<SymbolOccurrenceId>("sym.alpha.run"),
-            ],
-            &[],
-            16,
-            Arc::clone(&distinct_reads) as Arc<dyn GraphCancellation>,
-        )
-        .expect("distinct-endpoint batch");
-    assert_eq!(distinct.iter().flatten().count(), 2);
-
-    assert!(
-        shared_reads.observations() < distinct_reads.observations(),
-        "a shared far endpoint must hydrate once per batch: shared={} distinct={}",
-        shared_reads.observations(),
-        distinct_reads.observations()
-    );
-}
-
-#[test]
-fn degrees_and_kind_counts_report_true_totals() {
-    let reader = reader(&store_for(production_manifest()));
-    let degrees = reader
-        .degrees(
-            &[
-                id::<SymbolOccurrenceId>("sym.beta.run"),
-                id::<SymbolOccurrenceId>("sym.alpha.run"),
-            ],
-            request(),
-        )
-        .expect("degrees");
-    assert_eq!((degrees[0].outgoing, degrees[0].incoming), (0, 2));
-    assert_eq!((degrees[1].outgoing, degrees[1].incoming), (1, 1));
-
-    let counts = reader
-        .edge_kind_counts(&id::<SymbolOccurrenceId>("sym.beta.run"), request())
-        .expect("kind counts");
-    assert!(counts.outgoing.is_empty());
-    assert_eq!(counts.incoming.get(&RelationEdgeKindV1::Calls), Some(&1));
-    assert_eq!(counts.incoming.get(&RelationEdgeKindV1::Uses), Some(&1));
 }
 
 #[test]
@@ -684,29 +518,6 @@ fn shortest_path_distinguishes_no_path_from_truncated_search() {
     assert!(
         !capped.complete,
         "depth cap with live frontier is not a no-path verdict"
-    );
-}
-
-#[test]
-fn induced_edges_stay_inside_the_member_set() {
-    let reader = reader(&store_for(production_manifest()));
-    let members = vec![
-        id::<SymbolOccurrenceId>("sym.gamma.main"),
-        id::<SymbolOccurrenceId>("sym.alpha.run"),
-        id::<SymbolOccurrenceId>("sym.beta.run"),
-    ];
-    let edges = reader
-        .edges_among(&members, &[RelationEdgeKindV1::Calls], 64, request())
-        .expect("induced edges");
-    assert_eq!(edges.len(), 2);
-
-    let without_gamma = reader
-        .edges_among(&members[1..], &[RelationEdgeKindV1::Calls], 64, request())
-        .expect("smaller induced set");
-    assert_eq!(without_gamma.len(), 1);
-    assert_eq!(
-        without_gamma[0].edge.from_occurrence.as_str(),
-        "sym.alpha.run"
     );
 }
 
@@ -798,6 +609,64 @@ fn cancellation_denies_catalog_and_adjacency_reads() {
 }
 
 #[test]
+fn edges_among_induces_only_edges_whose_endpoints_are_both_members() {
+    let reader = reader(&store_for(production_manifest()));
+    let members = [
+        id::<SymbolOccurrenceId>("sym.alpha.run"),
+        id::<SymbolOccurrenceId>("sym.beta.run"),
+        id::<SymbolOccurrenceId>("sym.beta.runner"),
+    ];
+
+    let induced = reader
+        .edges_among(&members, &[], 16, request())
+        .expect("induced edges");
+    assert_eq!(
+        induced
+            .iter()
+            .map(|edge| (
+                edge.from_occurrence.as_str(),
+                edge.to_occurrence.as_str(),
+                edge.kind
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("sym.alpha.run", "sym.beta.run", RelationEdgeKindV1::Calls),
+            ("sym.beta.runner", "sym.beta.run", RelationEdgeKindV1::Uses),
+        ],
+        "canonical edge order, and the gamma caller outside the member set is never induced"
+    );
+
+    let calls_only = reader
+        .edges_among(&members, &[RelationEdgeKindV1::Calls], 16, request())
+        .expect("kind-filtered induced edges");
+    assert_eq!(
+        calls_only.iter().map(|edge| edge.kind).collect::<Vec<_>>(),
+        vec![RelationEdgeKindV1::Calls],
+        "an admitted-kind list drops the Uses edge between the same members"
+    );
+
+    let far_endpoint_outside = reader
+        .edges_among(
+            &[
+                id::<SymbolOccurrenceId>("sym.alpha.run"),
+                id::<SymbolOccurrenceId>("sym.gamma.main"),
+            ],
+            &[],
+            16,
+            request(),
+        )
+        .expect("induced edges");
+    assert_eq!(
+        far_endpoint_outside
+            .iter()
+            .map(|edge| (edge.from_occurrence.as_str(), edge.to_occurrence.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("sym.gamma.main", "sym.alpha.run")],
+        "a seed's edge to a non-member is dropped while its edge from a member is kept"
+    );
+}
+
+#[test]
 fn exhausted_fanout_budget_is_a_typed_refusal() {
     let reader = reader(&store_for(production_manifest()));
     let error = reader
@@ -864,73 +733,206 @@ fn retrieval_only_publication_serves_no_names_truthfully() {
     assert_eq!(summary.metadata, None, "absent metadata stays absent");
 }
 
-/// The dashboard's degree-pool and top-connected panels aggregated the whole
-/// `edges` table twice per read — the same whole-graph scan class that broke
-/// strata at scale. The bounded replacement must rank deterministically and
-/// must say so when its examination budget stopped the scan.
+/// Ranking reads the degrees the catalog tallied from the relation rows: the
+/// same totals adjacency reports, over the whole generation.
 #[test]
-fn degree_ranking_is_deterministic_and_bounded() {
+fn degree_ranking_serves_catalog_degrees_over_the_whole_generation() {
     let reader = reader(&store_for(production_manifest()));
 
-    // alpha::run 1 out + 1 in, beta::run 0 out + 2 in, beta::Runner 1 out,
-    // gamma::main 1 out. Total degree descending, then qualified name.
-    let ranking = reader
-        .degree_ranking(2, 16, request())
-        .expect("bounded degree ranking");
-    assert!(
-        ranking.complete,
-        "a budget above the symbol count is complete"
-    );
-    assert_eq!(ranking.symbols_examined, 4);
+    let ranking = reader.degree_ranking(3, request()).expect("ranking");
+
+    assert_eq!(ranking.symbol_count, 4);
     assert_eq!(
         ranking
             .ranked
             .iter()
-            .map(|entry| entry.occurrence.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        vec!["sym.alpha.run".to_owned(), "sym.beta.run".to_owned()],
-        "equal-degree symbols break ties by qualified name, not by scan order"
-    );
-    assert_eq!(
-        (ranking.ranked[0].outgoing, ranking.ranked[0].incoming),
-        (1, 1)
-    );
-
-    let full = reader
-        .degree_ranking(16, 16, request())
-        .expect("full degree ranking");
-    assert_eq!(
-        full.ranked
-            .iter()
-            .map(|entry| entry.occurrence.as_str().to_owned())
+            .map(|ranked| (
+                ranked.summary.occurrence.as_str(),
+                ranked.outgoing,
+                ranked.incoming
+            ))
             .collect::<Vec<_>>(),
         vec![
-            "sym.alpha.run".to_owned(),
-            "sym.beta.run".to_owned(),
-            "sym.beta.runner".to_owned(),
-            "sym.gamma.main".to_owned(),
+            ("sym.alpha.run", 1, 1),
+            ("sym.beta.run", 0, 2),
+            ("sym.beta.runner", 1, 0),
         ],
-        "a top size past the symbol count ranks every symbol, still totally ordered"
+        "total degree descending, then qualified name"
+    );
+    assert_eq!(
+        ranking.ranked[0]
+            .summary
+            .metadata
+            .as_ref()
+            .map(|m| m.qualified_name.as_str()),
+        Some("alpha::run"),
+        "ranked entries carry their catalog summary"
+    );
+    let occurrences: Vec<_> = ranking
+        .ranked
+        .iter()
+        .map(|ranked| ranked.summary.occurrence.clone())
+        .collect();
+    assert_eq!(
+        reader
+            .degrees(&occurrences, request())
+            .expect("adjacency degrees")
+            .iter()
+            .map(|degree| (degree.outgoing, degree.incoming))
+            .collect::<Vec<_>>(),
+        ranking
+            .ranked
+            .iter()
+            .map(|ranked| (ranked.outgoing, ranked.incoming))
+            .collect::<Vec<_>>(),
+        "catalog degrees must equal adjacency degrees"
     );
 }
 
-/// A ranking over a prefix of the graph must never be reported as the graph's
-/// ranking — the examination budget bounds the scan, and reaching it is
-/// truthful truncation rather than a silent partial answer.
+/// `sym.center` has seven neighbors across four edge kinds; `sym.leaf.*`
+/// only raise the degrees of `n::alpha` (3) and `n::Shape` (4).
+fn neighbor_manifest() -> GraphGenerationManifest {
+    let projection =
+        code_graph_projection_identity(GraphNamespace::new("code-graph").expect("namespace"))
+            .expect("projection identity");
+    let named = [
+        ("sym.center", "hub::center", "function"),
+        ("sym.n.alpha", "n::alpha", "function"),
+        ("sym.n.beta", "n::beta", "function"),
+        ("sym.n.zeta", "n::zeta", "function"),
+        ("sym.n.both", "n::both", "function"),
+        ("sym.n.trait", "n::Trait", "trait"),
+        ("sym.n.shape", "n::Shape", "struct"),
+        ("sym.n.module", "n::module", "module"),
+        ("sym.leaf.1", "leaf::one", "function"),
+        ("sym.leaf.2", "leaf::two", "function"),
+        ("sym.leaf.3", "leaf::three", "function"),
+    ];
+    let files = vec![file("file.f1", "src/hub.rs")];
+    let chunks = named
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (occurrence, _, _))| Arc::new(chunk(occurrence, "file.f1", ordinal as u32)))
+        .collect::<Vec<_>>();
+    let symbols = GenerationSymbolIndexV1::new(
+        generation(),
+        named
+            .iter()
+            .enumerate()
+            .map(|(index, (occurrence, qualified_name, kind))| {
+                let mut metadata = symbol_metadata(occurrence, qualified_name, kind, '1');
+                metadata.identity = id(&format!("sha256:{index:064x}"));
+                Arc::new(metadata)
+            })
+            .collect(),
+    )
+    .expect("neighbor fixture symbols");
+    let edges = [
+        ("sym.n.zeta", "sym.center", RelationEdgeKindV1::Calls),
+        ("sym.center", "sym.n.alpha", RelationEdgeKindV1::Calls),
+        ("sym.center", "sym.n.beta", RelationEdgeKindV1::Calls),
+        ("sym.center", "sym.n.both", RelationEdgeKindV1::Uses),
+        ("sym.n.both", "sym.center", RelationEdgeKindV1::Calls),
+        ("sym.center", "sym.n.trait", RelationEdgeKindV1::Implements),
+        ("sym.center", "sym.n.shape", RelationEdgeKindV1::TypeOf),
+        ("sym.n.module", "sym.center", RelationEdgeKindV1::Contains),
+        ("sym.n.alpha", "sym.leaf.1", RelationEdgeKindV1::Calls),
+        ("sym.n.alpha", "sym.leaf.2", RelationEdgeKindV1::Calls),
+        ("sym.n.shape", "sym.leaf.1", RelationEdgeKindV1::Uses),
+        ("sym.n.shape", "sym.leaf.2", RelationEdgeKindV1::Uses),
+        ("sym.n.shape", "sym.leaf.3", RelationEdgeKindV1::Uses),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, (from, to, kind))| edge(from, to, *kind, 2 * index as u64))
+    .collect::<Vec<_>>();
+    build_code_graph_manifest_inputs_checked(
+        projection,
+        &generation(),
+        &edges,
+        &chunks,
+        Some(ProductionCodeGraphInputs {
+            files: &files,
+            symbols: &symbols,
+            imports: &[],
+            unresolved_calls: &[],
+        }),
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
+            .expect("projector revision"),
+        &|| Ok(()),
+    )
+    .expect("neighbor fixture manifest")
+}
+
+fn neighbor_kind_rank(kind: RelationEdgeKindV1) -> u8 {
+    match kind {
+        RelationEdgeKindV1::Calls => 0,
+        RelationEdgeKindV1::Implements => 1,
+        RelationEdgeKindV1::TypeOf => 2,
+        RelationEdgeKindV1::Uses => 3,
+        RelationEdgeKindV1::Contains => 4,
+        RelationEdgeKindV1::Extends
+        | RelationEdgeKindV1::Annotates
+        | RelationEdgeKindV1::Returns
+        | RelationEdgeKindV1::Receives => 5,
+    }
+}
+
+/// Neighbors rank by their best edge kind to a seed, then total degree
+/// descending, then qualified name, whatever order the store returns them
+/// in; the cut keeps that prefix and reports the total.
 #[test]
-fn an_exhausted_ranking_budget_is_reported_not_hidden() {
-    let reader = reader(&store_for(production_manifest()));
+fn ranked_neighbors_order_by_kind_then_degree_then_name_before_the_cut() {
+    let reader = reader(&store_for(neighbor_manifest()));
+    let seeds = [id::<SymbolOccurrenceId>("sym.center")];
+    let names = |ranked: &super::CodeGraphRankedNeighborsV1| {
+        ranked
+            .neighbors
+            .iter()
+            .map(|summary| {
+                summary
+                    .metadata
+                    .as_ref()
+                    .map(|metadata| metadata.qualified_name.clone())
+                    .expect("production summary carries its name")
+            })
+            .collect::<Vec<_>>()
+    };
 
-    let ranking = reader
-        .degree_ranking(16, 2, request())
-        .expect("budget-truncated ranking");
-
-    assert!(
-        !ranking.complete,
-        "a scan stopped by its examination budget is not a complete ranking"
+    let whole = reader
+        .ranked_neighbors(&seeds, neighbor_kind_rank, 64, 16, request())
+        .expect("whole neighborhood");
+    assert_eq!(
+        names(&whole),
+        [
+            "n::alpha",
+            "n::both",
+            "n::beta",
+            "n::zeta",
+            "n::Trait",
+            "n::Shape",
+            "n::module",
+        ]
     );
-    assert_eq!(ranking.symbols_examined, 2);
-    assert_eq!(ranking.ranked.len(), 2);
+    assert_eq!((whole.total, whole.walk_truncated), (7, false));
+
+    let cut = reader
+        .ranked_neighbors(&seeds, neighbor_kind_rank, 64, 5, request())
+        .expect("cut neighborhood");
+    assert_eq!(
+        names(&cut),
+        ["n::alpha", "n::both", "n::beta", "n::zeta", "n::Trait"]
+    );
+    assert_eq!((cut.total, cut.walk_truncated), (7, false));
+
+    let walked = reader
+        .ranked_neighbors(&seeds, neighbor_kind_rank, 2, 16, request())
+        .expect("row-limited walk");
+    assert!(
+        walked.walk_truncated,
+        "a direction stopped at its row limit"
+    );
+    assert!(walked.total < 7);
 }
 
 #[test]
@@ -938,11 +940,7 @@ fn degree_ranking_refuses_zero_sized_requests() {
     let reader = reader(&store_for(production_manifest()));
 
     assert!(matches!(
-        reader.degree_ranking(0, 16, request()),
-        Err(CodeGraphProjectionError::Contract(_))
-    ));
-    assert!(matches!(
-        reader.degree_ranking(16, 0, request()),
+        reader.degree_ranking(0, request()),
         Err(CodeGraphProjectionError::Contract(_))
     ));
 }
@@ -952,7 +950,513 @@ fn degree_ranking_denies_a_cancelled_read() {
     let reader = reader(&store_for(production_manifest()));
 
     assert!(matches!(
-        reader.degree_ranking(4, 16, Arc::new(CancelledNow)),
+        reader.degree_ranking(4, Arc::new(CancelledNow)),
         Err(CodeGraphProjectionError::Cancelled)
     ));
+}
+
+#[test]
+fn census_counts_come_from_catalog_aggregates() {
+    let reader = reader(&store_for(production_manifest()));
+
+    let census = reader.census(2, request()).expect("census");
+    assert_eq!(
+        (census.symbols, census.semantic_edges, census.files),
+        (4, 3, 3)
+    );
+    assert_eq!(
+        census.symbols_by_kind,
+        BTreeMap::from([("function".to_owned(), 3), ("struct".to_owned(), 1)])
+    );
+    assert_eq!(
+        census.files_by_language,
+        BTreeMap::from([("rust".to_owned(), 3)])
+    );
+    assert_eq!(
+        census
+            .largest_files
+            .iter()
+            .map(|file| (file.logical_path.as_str(), file.symbols))
+            .collect::<Vec<_>>(),
+        vec![("src/beta.rs", 2), ("src/alpha.rs", 1)],
+        "densest file first, ties by path, truncated to the requested count"
+    );
+}
+
+#[test]
+fn file_dependencies_are_served_from_the_catalog_without_store_reads() {
+    let reader = reader(&store_for(production_manifest()));
+    reader.census(0, request()).expect("warm catalog");
+    let cost = CodeGraphReadCostMeter::start();
+
+    let dependencies = reader
+        .metered(&cost)
+        .file_dependencies(request())
+        .expect("file dependencies");
+
+    assert_eq!(
+        *dependencies.adjacency,
+        HashMap::from([
+            (
+                "src/alpha.rs".to_owned(),
+                HashSet::from(["src/beta.rs".to_owned()])
+            ),
+            ("src/beta.rs".to_owned(), HashSet::new()),
+            (
+                "src/gamma.rs".to_owned(),
+                HashSet::from(["src/alpha.rs".to_owned()])
+            ),
+        ]),
+        "the same-file beta::Runner -> beta::run use folds away"
+    );
+    assert_eq!(dependencies.dependency_edges, 3);
+    let receipt = cost.receipt();
+    assert_eq!(
+        (
+            receipt.point_reads.graph_sealed,
+            receipt.adjacency_queries,
+            receipt.adjacency_rows,
+            receipt.bytes_hydrated,
+        ),
+        (0, 0, 0, 0)
+    );
+}
+
+#[test]
+fn symbol_search_first_page_stops_before_a_full_catalog_scan() {
+    let reader = reader(&store_for(large_production_manifest(5_000)));
+    reader
+        .search_symbols("warm", None, 0, 1, request())
+        .expect("warm catalog");
+
+    let page = reader
+        .search_symbols(
+            "Needle",
+            None,
+            0,
+            20,
+            Arc::new(CancelAfter {
+                observations: AtomicU64::new(0),
+                allowed: 4,
+            }),
+        )
+        .expect("a first page must finish before the 4096-symbol cancellation checkpoint");
+    assert_eq!(page.symbols.len(), 20);
+    assert_eq!(
+        (page.has_more, page.total),
+        (true, None),
+        "stopping one match past the window does not claim a total"
+    );
+}
+
+#[test]
+fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
+    let reader = reader(&store_for(production_manifest()));
+
+    let all = reader
+        .search_symbols("RUN", None, 0, 8, request())
+        .expect("search");
+    assert_eq!(
+        all.symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sym.alpha.run", "sym.beta.run", "sym.beta.runner"],
+        "exact simple-name hits precede containment hits"
+    );
+    assert_eq!((all.has_more, all.total), (false, Some(3)));
+    assert_eq!(
+        all.indexed_symbols, 4,
+        "the page carries the generation's symbol population so coverage can \
+         name the real denominator on a miss"
+    );
+
+    let first = reader
+        .search_symbols("run", None, 0, 1, request())
+        .expect("first window");
+    assert_eq!(first.symbols.len(), 1);
+    assert_eq!(
+        (first.has_more, first.total),
+        (true, None),
+        "a scan stopped past its window does not claim a total"
+    );
+    let last = reader
+        .search_symbols("run", None, 2, 5, request())
+        .expect("last window");
+    assert_eq!(
+        last.symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sym.beta.runner"]
+    );
+    assert_eq!((last.has_more, last.total), (false, Some(3)));
+
+    let not_beta = |_: &SymbolOccurrenceId,
+                    binding: Option<&crate::graph_projection::CodeGraphSymbolBindingV1>,
+                    _: Option<&LineageSymbolRecordV1>| {
+        binding
+            .and_then(|binding| binding.logical_path.as_deref())
+            .is_some_and(|path| path != "src/beta.rs")
+    };
+    let scoped = reader
+        .search_symbols("run", Some(&not_beta), 0, 8, request())
+        .expect("scoped search");
+    assert_eq!(
+        scoped
+            .symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sym.alpha.run"]
+    );
+
+    let browse = reader
+        .search_symbols("", None, 1, 2, request())
+        .expect("browse window");
+    assert_eq!(browse.symbols.len(), 2);
+    assert_eq!(
+        (browse.has_more, browse.total),
+        (true, Some(4)),
+        "an unfiltered browse knows the census total"
+    );
+}
+
+#[test]
+fn exact_search_page_observes_cancellation_during_admission() {
+    struct AdmissionCancellation(AtomicBool);
+
+    impl GraphCancellation for AdmissionCancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    let reader = reader(&store_for(production_manifest()));
+    reader.census(0, request()).expect("warm catalog");
+    let cancellation = Arc::new(AdmissionCancellation(AtomicBool::new(false)));
+    let admit = |_: &SymbolOccurrenceId,
+                 _: Option<&crate::graph_projection::CodeGraphSymbolBindingV1>,
+                 _: Option<&LineageSymbolRecordV1>| {
+        cancellation.0.store(true, Ordering::Relaxed);
+        true
+    };
+    let request_cancellation: Arc<dyn GraphCancellation> = cancellation.clone();
+    assert_eq!(
+        reader.search_symbols("run", Some(&admit), 0, 1, request_cancellation),
+        Err(CodeGraphProjectionError::Cancelled)
+    );
+}
+
+#[test]
+fn census_and_search_refuse_zero_sizes_and_cancellation() {
+    let reader = reader(&store_for(production_manifest()));
+    reader.census(0, request()).expect("warm catalog");
+
+    assert!(matches!(
+        reader.search_symbols("run", None, 0, 0, request()),
+        Err(CodeGraphProjectionError::Contract(_))
+    ));
+    let cancelled = || -> Arc<dyn GraphCancellation> { Arc::new(CancelledNow) };
+    assert_eq!(
+        reader.census(4, cancelled()),
+        Err(CodeGraphProjectionError::Cancelled)
+    );
+    assert_eq!(
+        reader.search_symbols("run", None, 0, 4, cancelled()),
+        Err(CodeGraphProjectionError::Cancelled)
+    );
+    let error = reader
+        .search_symbols(
+            "absent",
+            None,
+            0,
+            4,
+            Arc::new(CancelAfter {
+                observations: AtomicU64::new(0),
+                allowed: 3,
+            }),
+        )
+        .expect_err("the containment scan must observe cancellation");
+    assert_eq!(error, CodeGraphProjectionError::Cancelled);
+}
+
+#[test]
+fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
+    let store = store_for(production_manifest());
+    assert_eq!(store.interactive_catalog_bytes(), None, "nothing built yet");
+    let reader = reader(&store);
+    let before = occurrences(
+        &reader
+            .symbols_page(None, 10, request())
+            .expect("warm catalog")
+            .symbols,
+    );
+    let held = store
+        .interactive_catalog_bytes()
+        .expect("a warmed catalog reports the bytes it holds");
+    // Table sizing follows the target's hash group width, so the exact figure
+    // is per-architecture; the catalog still holds every id it serves.
+    let served_id_bytes = before.iter().map(|id| id.len() as u64).sum::<u64>();
+    assert!(
+        held >= served_id_bytes,
+        "the catalog holds {held} bytes, less than the {served_id_bytes} bytes of ids it serves"
+    );
+
+    // A live reader retains the catalog owner; the release waits for it.
+    drop(reader);
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { bytes: held }
+    );
+    assert_eq!(store.interactive_catalog_bytes(), None);
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::NotReady
+    );
+    assert_eq!(
+        store.serving_warmth(),
+        Ok(CodeGraphServingWarmthV1::Warming(
+            "code graph interactive catalog was released for memory; the next graph read \
+             re-warms it"
+                .to_owned()
+        ))
+    );
+
+    // A read whose budget ends after its first look cannot rebuild the
+    // catalog itself; it answers warming and the rebuild runs on its own.
+    let reopened = self::reader(&store);
+    assert_eq!(
+        reopened
+            .symbols_page(
+                None,
+                10,
+                Arc::new(CancelAfter {
+                    observations: AtomicU64::new(0),
+                    allowed: 2,
+                }),
+            )
+            .expect_err("a released catalog is not rebuilt on the request"),
+        CodeGraphProjectionError::Unavailable(
+            "code graph interactive catalog was released and is re-warming in the background"
+                .to_owned()
+        )
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while store.serving_warmth() != Ok(CodeGraphServingWarmthV1::Warm) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the background rebuild finished: {:?}",
+            store.serving_warmth()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(store.interactive_catalog_scan_builds(), 2);
+    assert_eq!(store.interactive_catalog_bytes(), Some(held));
+    let after = occurrences(
+        &reopened
+            .symbols_page(None, 10, request())
+            .expect("the rebuilt catalog serves")
+            .symbols,
+    );
+    assert_eq!(after, before);
+}
+
+/// A parked release cannot evict the catalog under an admitted read: the
+/// owner stays retained while a reader lives and frees when the last one
+/// drops. Cloned readers — the path `metered` takes — share one hold.
+///
+/// Fails if the release evicts a ready catalog a live reader is about to
+/// walk, or keeps it after every reader is gone.
+#[test]
+fn a_release_answers_busy_while_a_reader_holds_the_catalog() {
+    let store = store_for(production_manifest());
+    let reader = reader(&store);
+    reader
+        .symbols_page(None, 10, request())
+        .expect("warm catalog");
+    let metered = reader.clone();
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy
+    );
+    drop(reader);
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy,
+        "a clone holds the same lease"
+    );
+    drop(metered);
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
+}
+
+#[test]
+fn catalog_admission_retains_a_catalog_that_warms_after_the_wait() {
+    let store = store_for(production_manifest());
+    let retain = store
+        .await_rewarm_and_retain_for(
+            Duration::from_secs(5),
+            CodeGraphReadinessRequirement::Catalog,
+        )
+        .expect("cold admission has no released warm to wait for");
+    store
+        .warm_interactive_catalog_with_cancellation(None, request())
+        .expect("the concurrent first warm finishes before the reader opens");
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy
+    );
+    let admitted = reader(&store);
+    assert!(
+        !admitted
+            .symbols_page(None, 10, request())
+            .unwrap()
+            .symbols
+            .is_empty()
+    );
+    drop(admitted);
+    drop(retain);
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
+}
+
+#[test]
+fn an_engine_admission_is_a_live_read_for_the_park_release_retry() {
+    let store = store_for(production_manifest());
+    let admission = store
+        .await_rewarm_and_retain_for(Duration::ZERO, CodeGraphReadinessRequirement::Engine)
+        .expect("cold admission has no released warm to wait for");
+    let drained = Arc::new(AtomicBool::new(false));
+    let on_drain = Arc::clone(&drained);
+    assert!(
+        store.park_release_after_reads_drain(Arc::new(move || {
+            on_drain.store(true, Ordering::Release);
+        })),
+        "an engine-only admission must take the park release retry"
+    );
+    drop(admission);
+    assert!(
+        drained.load(Ordering::Acquire),
+        "the turned-away park release runs when the admission drains"
+    );
+}
+
+/// Holds the catalog build gate for `hold`, the way a corpus-sized scan
+/// keeps a warm running, while `during` runs on another thread.
+fn with_catalog_warm_held<T: Send + 'static>(
+    store: &CodeGraphProjectionStore,
+    hold: Duration,
+    during: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let gate = store
+        .interactive_catalog
+        .build
+        .lock()
+        .expect("hold the catalog build gate");
+    // The held warm starts with the hold, not whenever its thread first
+    // runs, so its measured wall time covers the whole hold.
+    store.warm_clock.begin(WarmOwner::Catalog);
+    let running = std::thread::spawn(during);
+    std::thread::sleep(hold);
+    drop(gate);
+    running.join().expect("the held thread finishes")
+}
+
+/// A read admitted while a released catalog re-warms waits for it within
+/// its budget instead of refusing: a 1 s re-warm under a 5 s budget serves.
+///
+/// Fails if the read answers the re-warming state at once (it answered
+/// "code graph interactive catalog was released and is re-warming in the
+/// background" before reads waited), or waits past the re-warm.
+#[test]
+fn a_read_waits_for_a_rewarm_that_finishes_within_its_budget() {
+    let store = store_for(production_manifest());
+    let reader = reader(&store);
+    let before = occurrences(
+        &reader
+            .symbols_page(None, 10, request())
+            .expect("warm catalog")
+            .symbols,
+    );
+    drop(reader);
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
+
+    let waiting = store.clone();
+    let started = Instant::now();
+    let (outcome, finished) = with_catalog_warm_held(&store, Duration::from_secs(1), move || {
+        (waiting.await_rewarm(Duration::from_secs(5)), Instant::now())
+    });
+    let waited = finished.duration_since(started);
+
+    assert_eq!(outcome, Ok(()));
+    assert!(
+        waited >= Duration::from_secs(1) && waited < Duration::from_secs(5),
+        "the read waited {waited:?} for a 1 s re-warm"
+    );
+    assert_eq!(store.serving_warmth(), Ok(CodeGraphServingWarmthV1::Warm));
+    let reopened = self::reader(&store);
+    let after = occurrences(
+        &reopened
+            .symbols_page(None, 10, request())
+            .expect("the re-warmed catalog serves the read")
+            .symbols,
+    );
+    assert_eq!(after, before);
+}
+
+/// A read whose budget ends before the re-warm does answers the typed
+/// pending state with the measured warm-up still needed: the catalog's
+/// last warm took 10 s, so a read that waited 2 s of a 10 s re-warm is told
+/// to retry after the ~8 s left, not after a fixed default.
+///
+/// Fails if the read refuses before its budget, waits past it, or reports
+/// a delay shorter than the warm-up still running.
+#[test]
+fn a_read_past_its_budget_answers_the_measured_remaining_rewarm() {
+    let hold = Duration::from_secs(10);
+    let store = store_for(production_manifest());
+    let warming = store.clone();
+    with_catalog_warm_held(&store, hold, move || {
+        warming
+            .warm_interactive_catalog_with_cancellation(None, request())
+            .expect("the first warm builds the catalog");
+    });
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
+
+    let gate = store
+        .interactive_catalog
+        .build
+        .lock()
+        .expect("hold the re-warm's build gate");
+    let started = Instant::now();
+    let pending = store
+        .await_rewarm(Duration::from_secs(2))
+        .expect_err("a 2 s budget ends inside a 10 s re-warm");
+    let waited = started.elapsed();
+    let remaining = hold.saturating_sub(waited);
+    assert!(
+        waited >= Duration::from_secs(2) && waited < Duration::from_secs(3),
+        "the read waited {waited:?} of its 2 s budget"
+    );
+    assert!(
+        pending.retry_after >= remaining && pending.retry_after < Duration::from_secs(9),
+        "retry after {:?} with {remaining:?} of the re-warm left",
+        pending.retry_after
+    );
+
+    std::thread::sleep(hold.saturating_sub(started.elapsed()));
+    drop(gate);
+    assert_eq!(store.await_rewarm(Duration::from_secs(5)), Ok(()));
+    assert_eq!(store.serving_warmth(), Ok(CodeGraphServingWarmthV1::Warm));
 }

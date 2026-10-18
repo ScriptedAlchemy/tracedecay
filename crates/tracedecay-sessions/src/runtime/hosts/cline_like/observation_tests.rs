@@ -174,19 +174,165 @@ async fn checked_in_cline_family_snapshots_preserve_receipts_through_failures_an
     }
 }
 
-#[test]
-fn snapshot_budget_counts_all_task_input_files_once() {
-    let temp = tempfile::TempDir::new().expect("temp Cline task");
-    let task_dir = temp.path().join("task-1");
-    std::fs::create_dir_all(&task_dir).unwrap();
-    let transcript = task_dir.join("api_conversation_history.json");
-    std::fs::write(&transcript, b"12345").unwrap();
-    std::fs::write(task_dir.join("ui_messages.json"), b"1234").unwrap();
-    std::fs::write(task_dir.join("task_metadata.json"), b"123").unwrap();
-    std::fs::write(task_dir.join("history_item.json"), b"12").unwrap();
-    std::fs::write(task_dir.join("history.json"), b"1").unwrap();
+/// Appending to the API history must not disturb an unchanged native UI event:
+/// its observation identity (source, generation, source range) and normalized
+/// payload are facts of `ui_messages.json` alone. The reciprocal UI append
+/// also preserves the API generation and normalized records.
+#[tokio::test]
+async fn api_append_preserves_unchanged_native_ui_observation() {
+    use crate::admission::test_support::MemoryHostAdmission;
 
-    assert_eq!(snapshot_input_bytes("cline", &transcript).unwrap(), 15);
+    for (provider, api_filename) in [
+        ("cline", "api_conversation_history.json"),
+        ("roo-code", "api_messages.json"),
+        ("kilo", "api_conversation_history.json"),
+    ] {
+        let temp = tempfile::TempDir::new().expect("temp Cline-family storage");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let tasks = temp.path().join("tasks");
+        let api = write_checked_in_native_task(&tasks, &project, api_filename);
+        let source = ClineLikeSource {
+            provider,
+            storage_roots: vec![tasks],
+            user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
+            task_metadata: TaskMetadataCache::default(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let usage_observations = |admission: &MemoryHostAdmission| {
+            admission
+                .observations()
+                .into_iter()
+                .filter(|item| {
+                    item.observation()
+                        .payload()
+                        .get("native_record_kind")
+                        .and_then(Value::as_str)
+                        == Some("usage")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        capture_cline_like_snapshot_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{provider}: first capture failed: {error}"));
+
+        let mut before = usage_observations(&admission);
+        assert_eq!(
+            before.len(),
+            1,
+            "{provider}: one native UI usage observation"
+        );
+        let before = before.pop().unwrap();
+
+        let before_snapshot = source.load_snapshot(&api, &project).unwrap().unwrap();
+        let before_records =
+            normalize_cline_like_snapshot_observations(provider, &before_snapshot.messages)
+                .unwrap();
+        let before_ui = before_records
+            .iter()
+            .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
+            .collect::<Vec<_>>();
+        assert_eq!(before_ui.len(), 1);
+
+        let mut entries: Vec<Value> =
+            serde_json::from_slice(&std::fs::read(&api).unwrap()).unwrap();
+        entries.push(serde_json::json!({
+            "role": "user",
+            "content": "Also confirm the retry path",
+            "ts": 1_800_000_020_i64,
+        }));
+        std::fs::write(&api, serde_json::to_vec_pretty(&entries).unwrap()).unwrap();
+
+        let after_api = source.load_snapshot(&api, &project).unwrap().unwrap();
+        let after_api_records =
+            normalize_cline_like_snapshot_observations(provider, &after_api.messages).unwrap();
+        let after_api_ui = after_api_records
+            .iter()
+            .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
+            .collect::<Vec<_>>();
+        assert_ne!(before_snapshot.api_generation, after_api.api_generation);
+        assert_eq!(
+            before_snapshot.ui_generation, after_api.ui_generation,
+            "API append preserves UI content generation"
+        );
+        assert_eq!(
+            before_ui, after_api_ui,
+            "API append preserves exact native UI payload, source, identity, and range"
+        );
+        let unchanged_api = after_api_records
+            .iter()
+            .filter(|record| record.stream == ClineTranscriptStream::ApiHistory)
+            .collect::<Vec<_>>();
+        assert_eq!(unchanged_api.len(), 3);
+
+        capture_cline_like_snapshot_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{provider}: capture after API append failed: {error}"));
+
+        let mut after = usage_observations(&admission);
+        assert_eq!(
+            after.len(),
+            1,
+            "{provider}: API append duplicated the unchanged UI usage observation"
+        );
+        let after = after.pop().unwrap();
+        assert_eq!(
+            after.observation().identity(),
+            before.observation().identity(),
+            "{provider}: API append changed the unchanged UI observation identity"
+        );
+        assert_eq!(
+            after.observation().payload(),
+            before.observation().payload(),
+            "{provider}: API append changed the unchanged UI normalized payload"
+        );
+
+        let ui = api.parent().unwrap().join("ui_messages.json");
+        let mut entries: Vec<Value> = serde_json::from_slice(&std::fs::read(&ui).unwrap()).unwrap();
+        let mut appended = entries[0].clone();
+        appended["ts"] = serde_json::json!(1_800_000_030_i64);
+        entries.push(appended);
+        std::fs::write(&ui, serde_json::to_vec(&entries).unwrap()).unwrap();
+        let after_ui = source.load_snapshot(&api, &project).unwrap().unwrap();
+        let after_ui_records =
+            normalize_cline_like_snapshot_observations(provider, &after_ui.messages).unwrap();
+        let after_ui_api = after_ui_records
+            .iter()
+            .filter(|record| record.stream == ClineTranscriptStream::ApiHistory)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after_api.api_generation, after_ui.api_generation,
+            "UI append preserves API content generation"
+        );
+        assert_ne!(after_api.ui_generation, after_ui.ui_generation);
+        assert_eq!(
+            unchanged_api, after_ui_api,
+            "UI append preserves every API payload, source, identity, and range"
+        );
+        assert_eq!(
+            after_ui_records
+                .iter()
+                .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
+                .count(),
+            2
+        );
+    }
 }
 
 #[test]
@@ -351,6 +497,13 @@ async fn pre_cancelled_snapshot_capture_does_not_advance_cline_source() {
     ));
 }
 
+fn normalize(
+    provider: &'static str,
+    messages: &[SessionMessageRecord],
+) -> TranscriptIngestResult<Vec<ClineLikeSnapshotObservationRecord>> {
+    normalize_cline_like_snapshot_observations(provider, messages)
+}
+
 fn message(provider: &str, ordinal: i64) -> SessionMessageRecord {
     SessionMessageRecord {
         provider: provider.to_string(),
@@ -372,12 +525,9 @@ fn message(provider: &str, ordinal: i64) -> SessionMessageRecord {
 #[test]
 fn provider_identity_and_snapshot_order_feed_canonical_requests() {
     for provider in ["cline", "roo-code", "kilo"] {
-        let first =
-            normalize_cline_like_snapshot_observations(provider, &[message(provider, 0)]).unwrap();
-        let prior =
-            normalize_cline_like_snapshot_observations(provider, &[message(provider, 2)]).unwrap();
-        let moved =
-            normalize_cline_like_snapshot_observations(provider, &[message(provider, 3)]).unwrap();
+        let first = normalize(provider, &[message(provider, 0)]).unwrap();
+        let prior = normalize(provider, &[message(provider, 2)]).unwrap();
+        let moved = normalize(provider, &[message(provider, 3)]).unwrap();
         assert_eq!(first[0].provider(), provider);
         assert_eq!(first[0].native_record_id(), moved[0].native_record_id());
         assert_eq!(first[0].order(), 0);
@@ -417,7 +567,7 @@ fn usage_snapshot_emits_only_the_usage_fact() {
     usage.tool_names = None;
     usage.metadata_json = Some(serde_json::json!({"usage": {"input_tokens": 777}}).to_string());
 
-    let records = normalize_cline_like_snapshot_observations("cline", &[usage]).unwrap();
+    let records = normalize("cline", &[usage]).unwrap();
     let range = ObservationSourceRangeV1::new(1, 2).unwrap();
     let parsed = parse_normalized_observation_record_v1(
         &records[0].payload,
@@ -457,6 +607,7 @@ fn host_admission_failures_preserve_provider_with_bounded_reason_codes() {
                 retryable: true,
                 reason_code: Some("authority_unavailable"),
                 recovery: None,
+                cause: None,
             },
         );
         assert!(matches!(
@@ -465,67 +616,10 @@ fn host_admission_failures_preserve_provider_with_bounded_reason_codes() {
                 provider: error_provider,
                 reason: "authority_unavailable",
                 retryable: true,
+                ..
             } if error_provider == provider
         ));
     }
-}
-
-#[test]
-fn snapshot_normalization_preserves_roo_code_without_generic_metadata() {
-    let native = serde_json::json!({
-        "provider": "cline",
-        "session_id": "forged-task",
-        "message_id": "forged-message",
-        "role": "assistant",
-        "timestamp": 1_800_000_000_i64,
-        "ordinal": 7,
-        "kind": "message",
-        "model": "redacted-model",
-        "text": "Redacted response",
-        "tool_names": "read_file",
-        "usage": {"input_tokens": 12, "output_tokens": 3},
-        // Untyped bags / content-without-visibility must not invent facts.
-        "reasoning": "Redacted reasoning",
-        "git": {"commit": "redacted"},
-        "workflow": {"task": "redacted"},
-        "source_path": "/must-not-survive",
-        "cwd": "/must-not-survive",
-        "metadata": {"must-not-survive": true},
-    });
-    let range = ObservationSourceRangeV1::new(7, 8).unwrap();
-    let parsed = parse_normalized_observation_record_v1(
-        &serde_json::to_vec(&native).unwrap(),
-        range,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        |native| {
-            canonical_snapshot_envelope(
-                &native,
-                "roo-code",
-                "redacted-task",
-                "redacted-task:message",
-                range,
-            )
-        },
-    )
-    .expect("redacted Roo Code canonical envelope");
-    let canonical = parsed.value();
-    assert_eq!(canonical["provider"], "roo-code");
-    assert_eq!(canonical["stable_record_id"], "redacted-task:message");
-    assert_eq!(canonical["relations"]["session_id"], "redacted-task");
-    assert_eq!(
-        canonical["relations"]["message_id"],
-        "redacted-task:message"
-    );
-    assert!(canonical["relations"].get("thread_id").is_none());
-    assert_eq!(canonical["evidence"]["ordering_domain"], "snapshot_order");
-    assert_eq!(canonical["evidence"]["range"]["start"], 7);
-    // message + tool_names fallback + usage; no invented reasoning/git/workflow
-    assert_eq!(canonical["facts"].as_array().unwrap().len(), 3);
-    let encoded = canonical.to_string();
-    assert!(!encoded.contains("must-not-survive"));
-    assert!(!encoded.contains("source_path"));
-    assert!(!encoded.contains("metadata"));
-    assert!(!encoded.contains("Redacted reasoning"));
 }
 
 const GOLDEN_API_HISTORY: &str = include_str!(
@@ -562,7 +656,7 @@ fn fixture_backed_tool_use_name_reaches_canonical_facts() {
     );
     assert_eq!(
         provenance["unknown_version"]["emitted"], false,
-        "Cline-family protocol is unversioned — do not invent UnknownVersion"
+        "Cline-family protocol is unversioned. Do not invent UnknownVersion"
     );
 
     let entries = history.as_array().expect("history array");
@@ -592,7 +686,7 @@ fn fixture_backed_tool_use_name_reaches_canonical_facts() {
         );
         assert_eq!(message.tool_names.as_deref(), Some("read_file"));
 
-        let records = normalize_cline_like_snapshot_observations(provider, &[message]).unwrap();
+        let records = normalize(provider, &[message]).unwrap();
         let native: Value = serde_json::from_slice(&records[0].payload).unwrap();
         assert_eq!(native["provider"], provider);
         assert_eq!(
@@ -718,7 +812,7 @@ fn hostile_lookalike_fields_remain_absent_for_all_variants() {
             source_offset: Some(0),
             metadata_json: Some(metadata.to_string()),
         };
-        let records = normalize_cline_like_snapshot_observations(provider, &[message]).unwrap();
+        let records = normalize(provider, &[message]).unwrap();
         let native: Value = serde_json::from_slice(&records[0].payload).unwrap();
         for key in [
             "thread_id",

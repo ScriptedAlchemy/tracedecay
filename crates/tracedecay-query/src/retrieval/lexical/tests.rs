@@ -5,33 +5,60 @@
 //! `LexicalPostingReadPort` against the lexical projection land with the
 //! query/i3 composition packet.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
 use tracedecay_domain::{
     CompactCandidate, EphemeralSanitizedQueryViewV1, EvidenceRole, ExactAdmissionProof,
     ExactAdmissionRuleRevision, ExactFieldV1, FixedPointScore, FreshnessCompatibilityV1,
-    PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalError, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch, RetrieverKind, RetrieverOutcome,
-    SanitizerRevision, SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros,
-    VectorWatermark, split_subtokens, technical_tokens,
+    PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrievalSourceRoleV1, RetrieverBatch, RetrieverCoverage, RetrieverKind,
+    RetrieverOutcome, SanitizerRevision, SingleRootScopeV1, SourceFreshness, TemporalModeV1,
+    UtcMicros, VectorWatermark, split_subtokens, technical_tokens,
 };
 
 use super::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever, lexical_query_parts,
+    LexicalProximityV1, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, admit_candidate_sources,
+    lexical_query_parts,
 };
+use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, LexicalPostingReadPort, RetrievalPortError,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
+/// A request authority that never cancels: the lane must not observe it.
+struct ActiveControl;
+
+impl RetrievalExecutionControl for ActiveControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
 }
+
+static ACTIVE_CONTROL: ActiveControl = ActiveControl;
+
+/// A request authority that is already cancelled when the lane consults it.
+struct CancelledControl;
+
+impl RetrievalExecutionControl for CancelledControl {
+    fn is_cancelled(&self) -> bool {
+        true
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
+
+static CANCELLED_CONTROL: CancelledControl = CancelledControl;
+
+use tracedecay_domain::test_fixtures::id;
 
 fn digest_id<T>(byte: char) -> T
 where
@@ -39,6 +66,71 @@ where
     <T as TryFrom<String>>::Error: fmt::Debug,
 {
     T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("valid fixture digest")
+}
+
+#[test]
+fn candidate_sources_admit_rarest_first_within_the_document_budget() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    let mut pruned = Vec::new();
+    let admitted = admit_candidate_sources(
+        vec![
+            (budget * 3, "the"),
+            (10, "pendingtoolkind"),
+            (budget - 100, "pending"),
+            (budget * 2, "tool"),
+            (200, "kind"),
+        ],
+        |frequency, term| pruned.push((term.to_string(), frequency as u64)),
+    );
+    assert_eq!(
+        admitted,
+        ["pendingtoolkind", "kind"],
+        "`pending` would push the admitted total past the budget, and every later \
+         (more common) source is pruned with it"
+    );
+    assert_eq!(
+        pruned,
+        [
+            ("pending".to_owned(), (budget - 100) as u64),
+            ("tool".to_owned(), (budget * 2) as u64),
+            ("the".to_owned(), (budget * 3) as u64)
+        ]
+    );
+    let outcome = super::candidate_admission_outcome(
+        RetrieverBatch::<()> {
+            candidates: Vec::new(),
+            evidence_by_occurrence: BTreeMap::new(),
+            coverage: RetrieverCoverage::default(),
+            continuation: None,
+        },
+        pruned.clone(),
+    );
+    assert!(
+        matches!(outcome, RetrieverOutcome::Partial { value, reason: tracedecay_domain::RetrievalFailure::CandidateSourcesPruned { term_sources, document_frequency_budget } } if value.candidates.is_empty() && term_sources == pruned && document_frequency_budget == budget as u64)
+    );
+}
+
+#[test]
+fn candidate_sources_ignore_empty_sources_before_admitting_a_common_term() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    assert_eq!(
+        admit_candidate_sources(
+            vec![(0, "missing"), (budget + 1, "common"), (0, "absent")],
+            |_, _| {}
+        ),
+        ["common"],
+        "empty sources must not consume the first nonempty source exception"
+    );
+    assert!(admit_candidate_sources(vec![(0, "missing"), (0, "absent")], |_, _| {}).is_empty());
+}
+
+#[test]
+fn candidate_sources_keep_request_order_across_equal_frequencies() {
+    let half = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 / 2;
+    assert_eq!(
+        admit_candidate_sources(vec![(half, "b"), (half, "a"), (half, "c")], |_, _| {}),
+        ["b", "a"]
+    );
 }
 
 #[test]
@@ -167,15 +259,35 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         base: base_request(max_candidates),
         query_view,
         generation: id("generation.1"),
-        whole_terms: vec!["reserve".to_owned(), "stock".to_owned()],
-        subtokens: vec!["res".to_owned()],
-        phrases: Vec::new(),
-        field_filters: Vec::new(),
+        whole_terms: Cow::Owned(vec!["reserve".to_owned(), "stock".to_owned()]),
+        subtokens: Cow::Owned(vec!["res".to_owned()]),
+        phrases: Cow::Owned(Vec::new()),
+        proximities: Cow::Owned(Vec::new()),
+        field_filters: Cow::Owned(Vec::new()),
+        path_prefix: None,
         fuzzy_budget: 2,
         lexical_profile_revision: id("lexical-profile.v1"),
         score_domain: id(crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1),
         budget: budget(max_candidates),
+        control: &ACTIVE_CONTROL,
     }
+}
+
+#[test]
+fn lexical_request_owns_proximity_bounds() {
+    let mut request = lexical_request(8);
+    request.proximities = Cow::Owned(vec![LexicalProximityV1 {
+        terms: vec!["reserve".to_owned(), "stock".to_owned()],
+        maximum_gap: 9,
+    }]);
+
+    assert!(
+        request
+            .validate()
+            .expect_err("the lane request rejects an excessive gap")
+            .to_string()
+            .contains("maximum gap")
+    );
 }
 
 /// Build one lexical candidate/evidence pair with per-field fixed-point
@@ -198,6 +310,7 @@ fn lexical_pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: RetrievalSourceRoleV1::default(),
         retriever: RetrieverKind::Lexical,
         retriever_revision: id("retriever.lexical.v1"),
         score_domain: request.score_domain.clone(),
@@ -230,8 +343,11 @@ fn lexical_pair(
             .map(|subtoken| (*subtoken).to_owned())
             .collect(),
         matched_phrases: Vec::new(),
+        matched_proximities: Vec::new(),
+        spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
+        source_role: RetrievalSourceRoleV1::default(),
     };
     (candidate, evidence)
 }
@@ -375,10 +491,10 @@ fn lexical_lane_scores_candidates_with_checked_fixed_point_sums() {
 #[test]
 fn lexical_lane_applies_include_field_filters() {
     let mut request = lexical_request(8);
-    request.field_filters = vec![LexicalFieldFilterV1 {
+    request.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
         field: LexicalFieldV1::SymbolName,
         include: true,
-    }];
+    }]);
     let lane = LexicalLane::new(FakeLexicalPort::complete(three_pairs(&request)));
 
     let result = complete_batch(lane.retrieve_lexical(&request).expect("filtered retrieval"));
@@ -399,12 +515,39 @@ fn lexical_lane_applies_include_field_filters() {
 }
 
 #[test]
+fn lexical_field_filters_decode_only_the_persisted_field_spelling() {
+    let filter: LexicalFieldFilterV1 =
+        serde_json::from_value(serde_json::json!({"field": "BodyText", "include": false}))
+            .expect("persisted spelling decodes");
+    assert_eq!(
+        filter,
+        LexicalFieldFilterV1 {
+            field: LexicalFieldV1::BodyText,
+            include: false,
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(&filter).expect("encode"),
+        serde_json::json!({"field": "BodyText", "include": false})
+    );
+    let error = serde_json::from_value::<LexicalFieldFilterV1>(
+        serde_json::json!({"field": "body_text", "include": false}),
+    )
+    .expect_err("second spelling is refused");
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `body_text`, expected one of `SymbolName`, `QualifiedName`, `Path`, \
+         `Signature`, `Documentation`, `BodyText`, `PreambleText`, `ExactTerm`, `Subtoken`"
+    );
+}
+
+#[test]
 fn lexical_lane_applies_exclude_field_filters() {
     let mut request = lexical_request(8);
-    request.field_filters = vec![LexicalFieldFilterV1 {
+    request.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
         field: LexicalFieldV1::BodyText,
         include: false,
-    }];
+    }]);
     let lane = LexicalLane::new(FakeLexicalPort::complete(three_pairs(&request)));
 
     let result = complete_batch(lane.retrieve_lexical(&request).expect("filtered retrieval"));
@@ -414,6 +557,79 @@ fn lexical_lane_applies_exclude_field_filters() {
     result_order(&result, &["occ.a", "occ.b", "occ.c"]);
     assert_eq!(result.candidates[0].raw_score, FixedPointScore(900_000));
     assert_eq!(result.coverage.excluded, 0);
+}
+
+#[test]
+fn lexical_lane_ranks_production_definitions_ahead_of_stronger_test_references() {
+    let request = lexical_request(1);
+    let (production, mut production_evidence) = lexical_pair(
+        &request,
+        "occ.z",
+        &[(LexicalFieldV1::SymbolName, 100_000)],
+        &["reserve"],
+        &[],
+    );
+    production_evidence.source_role = RetrievalSourceRoleV1::ProductionDefinition;
+    let (test_hit, mut test_evidence) = lexical_pair(
+        &request,
+        "occ.a",
+        &[(LexicalFieldV1::SymbolName, 2_000_000)],
+        &["reserve"],
+        &[],
+    );
+    test_evidence.source_role = RetrievalSourceRoleV1::TestReference;
+    let lane = LexicalLane::new(FakeLexicalPort::complete(vec![
+        (test_hit, test_evidence),
+        (production, production_evidence),
+    ]));
+
+    let result = complete_batch(lane.retrieve_lexical(&request).expect("lexical retrieval"));
+
+    result_order(&result, &["occ.z"]);
+    assert_eq!(result.candidates[0].raw_score, FixedPointScore(100_000));
+    assert_eq!(
+        result.candidates[0].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_eq!(
+        result.evidence_by_occurrence[&id("occ.z")].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_eq!(result.coverage.capped, 1);
+}
+
+#[test]
+fn lexical_lane_lets_measured_scores_rank_production_other_against_tests() {
+    let request = lexical_request(1);
+    let (production, mut production_evidence) = lexical_pair(
+        &request,
+        "occ.z",
+        &[(LexicalFieldV1::BodyText, 100_000)],
+        &["reserve"],
+        &[],
+    );
+    production_evidence.source_role = RetrievalSourceRoleV1::ProductionOther;
+    let (test_hit, mut test_evidence) = lexical_pair(
+        &request,
+        "occ.a",
+        &[(LexicalFieldV1::BodyText, 2_000_000)],
+        &["reserve"],
+        &[],
+    );
+    test_evidence.source_role = RetrievalSourceRoleV1::TestReference;
+    let lane = LexicalLane::new(FakeLexicalPort::complete(vec![
+        (test_hit, test_evidence),
+        (production, production_evidence),
+    ]));
+
+    let result = complete_batch(lane.retrieve_lexical(&request).expect("lexical retrieval"));
+
+    result_order(&result, &["occ.a"]);
+    assert_eq!(result.candidates[0].raw_score, FixedPointScore(2_000_000));
+    assert_eq!(
+        result.evidence_by_occurrence[&id("occ.a")].source_role,
+        RetrievalSourceRoleV1::TestReference
+    );
 }
 
 #[test]
@@ -599,11 +815,25 @@ fn lexical_lane_reports_unavailable_when_authority_is_missing() {
     ));
 }
 
+/// A settled request never reaches the posting port: the lane unwinds with the
+/// typed cancellation error even when the port would have answered completely.
+#[test]
+fn lexical_lane_unwinds_a_cancelled_request_before_reading_postings() {
+    let mut request = lexical_request(8);
+    request.control = &CANCELLED_CONTROL;
+    let lane = LexicalLane::new(FakeLexicalPort::complete(three_pairs(&request)));
+
+    assert_eq!(
+        lane.retrieve_lexical(&request),
+        Err(RetrievalPortError::Cancelled)
+    );
+}
+
 #[test]
 fn lexical_lane_requires_at_least_one_term() {
     let mut request = lexical_request(8);
-    request.whole_terms = Vec::new();
-    request.subtokens = Vec::new();
+    request.whole_terms = Cow::Owned(Vec::new());
+    request.subtokens = Cow::Owned(Vec::new());
     let lane = LexicalLane::new(FakeLexicalPort::complete(Vec::new()));
 
     let result = lane.retrieve_lexical(&request);
@@ -616,11 +846,15 @@ fn lexical_lane_satisfies_the_generic_retriever_contract() {
     let request = lexical_request(8);
     let lane = LexicalLane::new(FakeLexicalPort::complete(three_pairs(&request)));
 
-    let outcome = Retriever::retrieve(&lane, &request).expect("generic retrieval succeeds");
+    let outcome = lane
+        .retrieve_lexical(&request)
+        .expect("generic retrieval succeeds");
     assert_eq!(complete_batch(outcome).candidates.len(), 3);
 
     let mut invalid = lexical_request(8);
     invalid.budget.max_candidates_per_lane = 0;
-    let error = Retriever::retrieve(&lane, &invalid).expect_err("invalid budget is rejected");
-    assert!(matches!(error, RetrievalError::InvalidRequest(_)));
+    let error = lane
+        .retrieve_lexical(&invalid)
+        .expect_err("invalid budget is rejected");
+    assert!(matches!(error, RetrievalPortError::Contract(_)));
 }

@@ -489,12 +489,7 @@ mod tests {
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     const TREE: &str = "89abcdef0123456789abcdef0123456789abcdef";
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String, Error = DomainError>,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     fn evidence() -> RepositoryEvidenceV1 {
         RepositoryEvidenceV1::new(
@@ -581,7 +576,12 @@ mod tests {
         let mut value = serde_json::to_value(evidence()).unwrap();
         value["head_commit"]["value"] = Value::String("0123456789abcdef".into());
 
-        assert!(serde_json::from_value::<RepositoryEvidenceV1>(value).is_err());
+        assert_eq!(
+            serde_json::from_value::<RepositoryEvidenceV1>(value)
+                .unwrap_err()
+                .to_string(),
+            "HEAD commit is not canonical"
+        );
     }
 
     #[test]
@@ -611,12 +611,20 @@ mod tests {
         .unwrap();
         let mut mismatched = serde_json::to_value(&binding).unwrap();
         mismatched["capture_id"] = Value::String("repository.capture.v1.invalid".into());
-        assert!(
-            serde_json::from_value::<GenerationBoundRepositoryProvenanceV1>(mismatched).is_err()
+        assert_eq!(
+            serde_json::from_value::<GenerationBoundRepositoryProvenanceV1>(mismatched)
+                .unwrap_err()
+                .to_string(),
+            "generation binding capture identity does not match its capture"
         );
 
         let mut tampered = serde_json::to_value(&binding).unwrap();
         tampered["capture"]["captured_at"] = Value::from(43);
-        assert!(serde_json::from_value::<GenerationBoundRepositoryProvenanceV1>(tampered).is_err());
+        assert_eq!(
+            serde_json::from_value::<GenerationBoundRepositoryProvenanceV1>(tampered)
+                .unwrap_err()
+                .to_string(),
+            "repository capture identity does not match canonical evidence"
+        );
     }
 }

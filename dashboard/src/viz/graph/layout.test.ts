@@ -1,9 +1,7 @@
 import Graph from 'graphology';
 import { describe, expect, it } from 'vitest';
 import {
-  buildDendrites,
   isMeasuredField,
-  nodeHullFrame,
   prepareField,
 } from './layout.ts';
 import type { GraphCanvasEdge, GraphCanvasNode } from './types.ts';
@@ -12,7 +10,7 @@ import type { GraphCanvasEdge, GraphCanvasNode } from './types.ts';
  * Layout preparation runs in the plain `node` project: it takes the canvas box
  * as a number and its kind hues as an injected resolver, so none of the
  * arithmetic below needs a document, a canvas context or a WebGL renderer to
- * be checked. That is the point of the module — the geometry the reader ends
+ * be checked. That is the point of the module, the geometry the reader ends
  * up looking at is decided here, and it is now decidable in isolation.
  */
 
@@ -55,17 +53,6 @@ describe('isMeasuredField', () => {
 });
 
 describe('prepareField', () => {
-  it('draws a measured field exactly where the caller placed it', () => {
-    const { graph, placed } = prepare([
-      { id: 'a', label: 'a', kind: 'k', x: -12, y: 7 },
-      { id: 'b', label: 'b', kind: 'k', x: 40, y: -3 },
-    ]);
-
-    expect(placed).toBe(true);
-    expect(position(graph, 'a')).toEqual([-12, 7]);
-    expect(position(graph, 'b')).toEqual([40, -3]);
-  });
-
   // The invariant the `placed` flag exists for: one node without coordinates
   // would otherwise be dropped at the seed circle beside nodes whose position
   // is a claim about their data, and nothing on screen tells the two apart.
@@ -144,6 +131,21 @@ describe('prepareField', () => {
     expect(Math.min(...sizes)).toBeLessThan(ceiling);
   });
 
+  it('keeps repository hubs a fixed categorical size regardless of checkout count', () => {
+    const { graph } = prepare([
+      { id: 'small-repo', label: 'small', kind: 'repository', degree: 2 },
+      { id: 'large-repo', label: 'large', kind: 'repository', degree: 40 },
+      { id: 'project', label: 'project', kind: 'project', degree: 40 },
+    ]);
+
+    expect(graph.getNodeAttribute('small-repo', 'size')).toBe(
+      graph.getNodeAttribute('large-repo', 'size'),
+    );
+    expect(graph.getNodeAttribute('large-repo', 'size') as number).toBeLessThan(
+      graph.getNodeAttribute('project', 'size') as number,
+    );
+  });
+
   it('shrinks bodies for a narrow canvas instead of fusing them', () => {
     const nodes = Array.from({ length: 20 }, (_, index) => ({
       id: `n${index}`,
@@ -162,7 +164,7 @@ describe('prepareField', () => {
   });
 
   it('records only relations whose two ends are actually drawn', () => {
-    const { graph, neighborsOf, realNodes } = prepare(
+    const { graph, realNodes } = prepare(
       [
         { id: 'a', label: 'a', kind: 'k' },
         { id: 'b', label: 'b', kind: 'k' },
@@ -175,94 +177,5 @@ describe('prepareField', () => {
 
     expect(graph.size).toBe(1);
     expect(realNodes.sort()).toEqual(['a', 'b']);
-    expect(neighborsOf.get('a')).toEqual(['b']);
-    expect(neighborsOf.get('b')).toEqual(['a']);
-  });
-});
-
-describe('buildDendrites', () => {
-  it('replaces each relation with a curve whose ends are its two real nodes', () => {
-    const { graph, realNodes } = prepare(
-      [
-        { id: 'a', label: 'a', kind: 'k', x: 0, y: 0 },
-        { id: 'b', label: 'b', kind: 'k', x: 10, y: 0 },
-      ],
-      [{ source: 'a', target: 'b' }],
-    );
-
-    const strands = buildDendrites(graph, 1);
-
-    expect(strands).toHaveLength(1);
-    expect(strands[0]!.from).toBe('a');
-    expect(strands[0]!.to).toBe('b');
-    expect(strands[0]!.points[0]).toEqual([0, 0]);
-    expect(strands[0]!.points.at(-1)).toEqual([10, 0]);
-    // The curve bows off the chord, which is what a travelling pulse follows.
-    expect(strands[0]!.points.some(([, y]) => y !== 0)).toBe(true);
-    // Waypoints are joints, never bodies, and never part of the real topology.
-    const waypoints = graph.nodes().filter((id) => id.startsWith('__way__'));
-    expect(waypoints).toHaveLength(strands[0]!.points.length - 2);
-    expect(realNodes).not.toContain(waypoints[0]);
-  });
-
-  it('curves the same subgraph identically every time', () => {
-    const build = () => {
-      const { graph } = prepare(
-        [
-          { id: 'a', label: 'a', kind: 'k', x: 0, y: 0 },
-          { id: 'b', label: 'b', kind: 'k', x: 10, y: 4 },
-        ],
-        [{ source: 'a', target: 'b' }],
-      );
-      return buildDendrites(graph, 1)[0]!.points;
-    };
-
-    expect(build()).toEqual(build());
-  });
-
-  // Legibility at density beats flourish: past the budget the relations stay
-  // straight, but they must still name their real endpoints or activation
-  // would have no idea which relation conducts.
-  it('keeps straight edges past the segment budget and still names their ends', () => {
-    const { graph } = prepare(
-      [
-        { id: 'a', label: 'a', kind: 'k', x: 0, y: 0 },
-        { id: 'b', label: 'b', kind: 'k', x: 10, y: 0 },
-      ],
-      [{ source: 'a', target: 'b' }],
-    );
-
-    const strands = buildDendrites(graph, 401);
-
-    expect(strands).toEqual([]);
-    expect(graph.nodes().filter((id) => id.startsWith('__way__'))).toEqual([]);
-    const edge = graph.edges()[0]!;
-    expect(graph.getEdgeAttribute(edge, 'srcReal')).toBe('a');
-    expect(graph.getEdgeAttribute(edge, 'dstReal')).toBe('b');
-  });
-});
-
-describe('nodeHullFrame', () => {
-  it('frames the real network with a margin, ignoring anything the renderer added', () => {
-    const graph = new Graph();
-    graph.addNode('a', { x: 0, y: 0 });
-    graph.addNode('b', { x: 10, y: 20 });
-    // A dendrite waypoint bows outside the node hull; it may not move the camera.
-    graph.addNode('__way__0:1', { x: 500, y: -500 });
-
-    const frame = nodeHullFrame(graph, ['a', 'b']);
-
-    expect(frame.x).toEqual([-1.5, 11.5]);
-    expect(frame.y).toEqual([-3, 23]);
-  });
-
-  it('gives a single body a frame with real width rather than a zero-size one', () => {
-    const graph = new Graph();
-    graph.addNode('only', { x: 4, y: 4 });
-
-    const frame = nodeHullFrame(graph, ['only']);
-
-    expect(frame.x[1] - frame.x[0]).toBeGreaterThan(0);
-    expect(frame.y[1] - frame.y[0]).toBeGreaterThan(0);
   });
 });

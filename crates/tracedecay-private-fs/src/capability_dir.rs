@@ -1,8 +1,9 @@
 //! Capability-relative durable directory primitives shared by the quarantine
 //! and retirement authorities: atomic no-replace rename between already-open
-//! parent capabilities, directory metadata sync, and recursive no-follow
-//! removal. Every mutation is relative to an open `Dir` handle so a parent
-//! path swapped for a symlink cannot redirect the operation.
+//! parent capabilities, directory metadata sync, recursive no-follow removal,
+//! and create-or-open of one entry that survives the Darwin create race.
+//! Every mutation is relative to an open `Dir` handle so a parent path
+//! swapped for a symlink cannot redirect the operation.
 
 use std::ffi::OsStr;
 use std::io;
@@ -10,9 +11,53 @@ use std::io;
 use cap_fs_ext::DirExt;
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
-use cap_std::fs::Dir;
-#[cfg(not(windows))]
-use cap_std::fs::OpenOptions;
+use cap_std::fs::{Dir, File, OpenOptions};
+
+/// How many times a create-or-open that reports the entry missing is asked
+/// again before the answer is believed. xnu bounds its own retry of the same
+/// condition at ten; downstream measurements found one extra look always
+/// sufficed, so this is generous without letting a genuinely missing parent
+/// spin.
+const CREATE_RACE_LOOKS: usize = 8;
+
+/// Creates or opens `name` beneath an already-open directory capability.
+///
+/// `options` must request `create(true)` without `create_new`: this is the
+/// create-or-open form, whose two correct answers are "the entry was created"
+/// and "the existing entry was opened". On macOS that form has a defect the
+/// others do not. `openat(dirfd, name, O_CREAT)` without `O_EXCL` hands most
+/// callers that lose the first-creation race of one name a spurious `ENOENT`
+/// (xnu's `vn_open_auth` retries a create that failed with `EEXIST` as an
+/// open, and the fallback is not atomic), even though the entry is present
+/// the moment the error arrives. `O_CREAT|O_EXCL`, opens of an existing entry,
+/// and absolute-path `open` are all correct, which is why the std-based
+/// sidecar locks never see it and only the capability-relative lock and
+/// ledger opens do, and those are exactly the files many writers create at
+/// once.
+///
+/// A `NotFound` answer is therefore looked at again a bounded number of
+/// times. A parent that is genuinely gone still reports `NotFound` after the
+/// bound, so the caller's error mapping keeps working.
+pub fn open_or_create_with(
+    directory: &Dir,
+    name: &OsStr,
+    options: &OpenOptions,
+) -> io::Result<File> {
+    look_again_on_not_found(|| directory.open_with(name, options))
+}
+
+fn look_again_on_not_found<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut looks = 0;
+    loop {
+        match attempt() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && looks < CREATE_RACE_LOOKS => {
+                looks += 1;
+                std::thread::yield_now();
+            }
+            result => return result,
+        }
+    }
+}
 
 /// Atomically renames one directory entry between already-open parent
 /// capabilities without allowing an occupied destination to be replaced.
@@ -28,62 +73,29 @@ pub fn rename_noreplace(
     {
         use std::os::fd::AsRawFd;
 
-        let from = component_cstring(from)?;
-        let to = component_cstring(to)?;
-        // SAFETY: both names are single-component C strings and both fds are
-        // already-open directory capabilities.
-        let result = unsafe {
-            libc::renameat2(
-                from_parent.as_raw_fd(),
-                from.as_ptr(),
-                to_parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        crate::rename_noreplace::rename_noreplace_at(
+            from_parent.as_raw_fd(),
+            from,
+            to_parent.as_raw_fd(),
+            to,
+        )
     }
     #[cfg(target_os = "macos")]
     {
         use std::os::fd::AsRawFd;
 
-        let from = component_cstring(from)?;
-        let to = component_cstring(to)?;
-        // SAFETY: both names are single-component C strings and RENAME_EXCL
-        // refuses an occupied destination.
-        let result = unsafe {
-            libc::renameatx_np(
-                from_parent.as_raw_fd(),
-                from.as_ptr(),
-                to_parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_EXCL,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        crate::rename_noreplace::rename_noreplace_at(
+            from_parent.as_raw_fd(),
+            from,
+            to_parent.as_raw_fd(),
+            to,
+        )
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
-
-        let from = dir_entry_wide(from_parent, from)?;
-        let to = dir_entry_wide(to_parent, to)?;
-        // SAFETY: both UTF-16 strings are NUL-terminated. Omitting
-        // MOVEFILE_REPLACE_EXISTING makes an occupied destination fail.
-        let moved = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-        if moved != 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        let from = dir_entry_path(from_parent, from)?;
+        let to = dir_entry_path(to_parent, to)?;
+        crate::rename_noreplace::rename_noreplace_paths(&from, &to)
     }
     #[cfg(not(any(
         all(target_os = "linux", target_env = "gnu"),
@@ -99,24 +111,9 @@ pub fn rename_noreplace(
     }
 }
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-fn component_cstring(name: &OsStr) -> io::Result<std::ffi::CString> {
-    use std::os::unix::ffi::OsStrExt;
-
-    std::ffi::CString::new(name.as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))
-}
-
 #[cfg(windows)]
-fn dir_entry_wide(parent: &Dir, name: &OsStr) -> io::Result<Vec<u16>> {
-    use std::os::windows::ffi::OsStrExt;
-
-    Ok(dir_path(parent)?
-        .join(name)
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect())
+fn dir_entry_path(parent: &Dir, name: &OsStr) -> io::Result<std::path::PathBuf> {
+    Ok(dir_path(parent)?.join(name))
 }
 
 /// Resolves an open directory capability back to its live filesystem path so
@@ -298,8 +295,82 @@ mod tests {
     }
 
     #[test]
-    fn sync_directory_flushes_an_open_capability() {
-        let root = tempfile::tempdir().expect("create sync fixture");
-        sync_directory(&open(root.path())).expect("sync an open directory capability");
+    fn a_transient_missing_answer_is_looked_at_again() {
+        let mut attempts = 0;
+        let value = look_again_on_not_found(|| {
+            attempts += 1;
+            if attempts <= 2 {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            } else {
+                Ok(attempts)
+            }
+        })
+        .expect("the entry that appears within the bound is returned");
+        assert_eq!(value, 3);
+    }
+
+    #[test]
+    fn a_persistent_missing_answer_is_still_reported_after_the_bound() {
+        let mut attempts = 0;
+        let error = look_again_on_not_found(|| -> io::Result<()> {
+            attempts += 1;
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        })
+        .expect_err("a parent that is genuinely gone must not spin");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(attempts, CREATE_RACE_LOOKS + 1);
+    }
+
+    #[test]
+    fn other_errors_are_not_looked_at_again() {
+        let mut attempts = 0;
+        let error = look_again_on_not_found(|| -> io::Result<()> {
+            attempts += 1;
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("only the create race is retried");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(attempts, 1);
+    }
+
+    /// Many threads racing the first creation of one name must all come back
+    /// holding the same entry. On macOS this is the `openat(O_CREAT)` race
+    /// the helper exists for; elsewhere it is a plain concurrency smoke test.
+    #[test]
+    fn concurrent_creators_of_one_entry_all_open_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().expect("create race fixture");
+        for round in 0..16 {
+            let name = format!("racy-{round}.lock");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles = (0..8)
+                .map(|_| {
+                    let path = root.path().to_path_buf();
+                    let name = name.clone();
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let directory = open(&path);
+                        let mut options = OpenOptions::new();
+                        options.read(true).write(true).create(true);
+                        barrier.wait();
+                        open_or_create_with(&directory, OsStr::new(&name), &options)
+                            .expect("a create-or-open loser must still be handed the entry")
+                            .into_std()
+                            .metadata()
+                            .expect("metadata of the opened entry")
+                            .ino()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let inodes = handles
+                .into_iter()
+                .map(|handle| handle.join().expect("creator thread"))
+                .collect::<Vec<_>>();
+            assert!(
+                inodes.iter().all(|inode| *inode == inodes[0]),
+                "every racer must open the one created entry"
+            );
+        }
     }
 }

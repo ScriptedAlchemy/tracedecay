@@ -4,7 +4,7 @@
 //! `expand_payload` asks `tombstoned_raw_ref_exists` exactly one question: was
 //! *this* payload reference tombstoned in raw message text? Answering it must
 //! not transfer or retain the store's whole tombstone history, so these tests
-//! assert on rows visited — every row `SQLite` hands back to the scan — rather
+//! assert on rows visited, every row `SQLite` hands back to the scan, rather
 //! than on query text or plan wording.
 
 use std::cell::Cell;
@@ -105,19 +105,6 @@ async fn probe_store() -> ProbeStore {
             title TEXT,
             started_at INTEGER,
             PRIMARY KEY(provider, session_id)
-        );
-        CREATE TABLE IF NOT EXISTS session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id),
-            FOREIGN KEY(provider, session_id)
-                REFERENCES sessions(provider, session_id) ON DELETE CASCADE
         );",
     )
     .await
@@ -149,11 +136,9 @@ async fn seed_raw_messages(conn: &Connection, texts: &[String]) {
             batch.push_str(&format!(
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
+                    content, content_hash, storage_kind, payload_ref, metadata_json
                  ) VALUES ('{PROVIDER}', '{message_id}', '{SESSION}', 'assistant', 1, 2,
-                    {literal}, '{message_id}-hash', 'inline', NULL, {literal},
-                    {literal}, 0, 0, NULL);\n"
+                    {literal}, '{message_id}-hash', 'inline', NULL, NULL);\n"
             ));
         }
         conn.execute_batch(&batch)
@@ -181,7 +166,7 @@ fn unrelated_ref(index: usize) -> String {
     format!("payload_{index:064}.payload")
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn tombstone_probe_stops_at_the_first_confirmed_row() {
     let store = probe_store().await;
     let mut texts = Vec::with_capacity(SEEDED_ROWS);
@@ -213,7 +198,7 @@ async fn tombstone_probe_stops_at_the_first_confirmed_row() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn tombstone_probe_ignores_unrelated_payload_tombstones() {
     let store = probe_store().await;
     let texts = (0..SEEDED_ROWS)
@@ -235,7 +220,7 @@ async fn tombstone_probe_ignores_unrelated_payload_tombstones() {
     assert_eq!(counter.queries(), 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn tombstone_probe_keeps_the_text_authority_over_the_like_prefilter() {
     let store = probe_store().await;
     let texts = (0..DECOY_ROWS)
@@ -259,7 +244,7 @@ async fn tombstone_probe_keeps_the_text_authority_over_the_like_prefilter() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn expand_payload_still_reports_a_garbage_collected_payload() {
     let store = probe_store().await;
     seed_raw_messages(&store.conn, &[tombstone_text(TARGET_REF)]).await;

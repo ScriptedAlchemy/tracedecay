@@ -1,12 +1,12 @@
 //! Mount contract for the Work graph views route.
 //!
-//! The views route is the one public surface over the durable work-product
+//! The views route is the one public API over the durable work-product
 //! graph authority, and it is composed from three tables owned by three
 //! different crates: the [`WorkOperation`] descriptor that names its path, the
 //! executable catalog row that advertises its schemas, and the operation-id
 //! table the daemon resolves a capability and use case from. A row missing from
-//! any one of them fails differently — an unmounted path, an unadvertised
-//! binding, or a request refused as invalid before it reaches the authority —
+//! any one of them fails differently, an unmounted path, an unadvertised
+//! binding, or a request refused as invalid before it reaches the authority,
 //! so all three are checked against each other here rather than each against a
 //! handwritten expectation.
 //!
@@ -24,7 +24,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::IntoResponse;
 use tower::ServiceExt;
 use tracedecay_api::{WorkHttpRequest, WorkOperation};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, RequestId, WORK_APPLICATION_OPERATION_IDS_V1,
     work_executable_binding_registry,
 };

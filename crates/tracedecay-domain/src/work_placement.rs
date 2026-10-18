@@ -307,7 +307,7 @@ impl WorkPlacementObservationV1 {
     /// The typed blockers that forbid *removing* this placement's bytes.
     ///
     /// Removal is judged more strictly than admission, and deliberately so:
-    /// dirt in a linked worktree — which does not block creating one — does
+    /// dirt in a linked worktree, which does not block creating one, does
     /// block deleting one. An unmanaged placement owns no bytes, so it has
     /// nothing removal could destroy.
     pub fn removal_blockers(
@@ -564,10 +564,12 @@ mod tests {
         }
     }
 
+    use crate::test_fixtures::fixture_abs_root as absolute_root;
+
     fn linked() -> WorkPlacementTargetV1 {
         WorkPlacementTargetV1::new(
             WorkPlacementKindV1::LinkedWorktree,
-            Some("/workspace/linked".to_owned()),
+            Some(absolute_root("/workspace/linked")),
             false,
             true,
         )
@@ -584,7 +586,7 @@ mod tests {
         assert_eq!(
             WorkPlacementTargetV1::new(
                 WorkPlacementKindV1::NoManagedPlacement,
-                Some("/workspace".to_owned()),
+                Some(absolute_root("/workspace")),
                 false,
                 false,
             )

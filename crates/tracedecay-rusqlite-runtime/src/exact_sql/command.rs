@@ -1,120 +1,316 @@
-//! What the writer thread receives, and how it runs one write transaction.
+//! What the writer task receives, and how it runs one write transaction.
 //!
 //! The handle side of the transport only sends [`WriterCommand`]s; everything
-//! that touches the writer's connection happens here, on the writer thread, so
+//! that touches the writer's connection happens here, in the writer task, so
 //! a caller never holds the connection across a channel.
 
 use std::{
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicI64, Ordering},
-        mpsc::{Receiver, RecvTimeoutError, SyncSender},
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior};
+use rusqlite::{Connection, DropBehavior, ErrorCode, Transaction, TransactionBehavior};
 
-use super::guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
+use super::clock;
+use super::guard::{ExactSqlAuthority, with_exact_sql_guard};
 use super::{
     EXACT_SQL_TRANSACTION_IDLE_LIMIT, EXACT_SQL_TRANSACTION_LIMIT, ExactSqlAttachment,
-    ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
-    ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy, MAX_EXACT_SQL_ATTACHMENTS,
-    SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database, execute_batch,
-    execute_query_unchecked, execute_request, publish_last_insert_rowid, sqlite_error,
-    verify_write_authority,
+    ExactSqlBatchResult, ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt,
+    ExactSqlRows, ExactSqlStatement, ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy,
+    MAX_EXACT_SQL_ATTACHMENTS, SqlRequest, SqlResult, TransactionPolicy, attach_database,
+    detach_database, execute_query_unchecked, execute_request, read_across_wal_recovery,
+    request_across_wal_recovery, sqlite_error, verify_write_authority,
 };
+use crate::connection::ConnectionMode;
+use crate::storage_pool::TaskTransaction;
 use rusqlite::limits::Limit;
+use tracing::Instrument;
 
 pub(crate) enum WriterCommand {
     Dispatch {
         request: SqlRequest,
-        reply: SyncSender<Result<SqlResult, ExactSqlError>>,
-        last_insert_rowid: Arc<AtomicI64>,
+        reply: async_channel::Sender<Result<SqlResult, ExactSqlError>>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
     BeginTransaction {
         behavior: TransactionBehavior,
         policy: TransactionPolicy,
-        receiver: Receiver<TransactionCommand>,
-        reply: SyncSender<Result<(), ExactSqlError>>,
-        last_insert_rowid: Arc<AtomicI64>,
-        expired: Arc<AtomicBool>,
+        receiver: async_channel::Receiver<TransactionCommand>,
+        reply: async_channel::Sender<Result<(), ExactSqlError>>,
+        lease: Arc<TransactionLeaseState>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
     CheckpointWalTruncate {
-        reply: SyncSender<Result<ExactSqlRows, ExactSqlError>>,
+        reply: async_channel::Sender<Result<ExactSqlRows, ExactSqlError>>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
-    Vacuum {
-        reply: SyncSender<Result<(), ExactSqlError>>,
+    /// One whole write transaction, run on this thread without a round trip
+    /// per statement. The job answers whether to commit.
+    Job {
+        job: WriterJob,
+        policy: JobPolicy,
+        reply: async_channel::Sender<Result<(), ExactSqlError>>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
 }
 
-const BEGIN_BUSY_ATTEMPT_BUDGET: u8 = 64;
+/// Answers whether to commit; an error rolls back and becomes the job's reply.
+pub(crate) type WriterJob =
+    Box<dyn FnOnce(&ExactSqlJobTransaction<'_>) -> Result<bool, ExactSqlError> + Send>;
+
+/// How long a write job may hold the writer. `Bounded` is one fixed lease.
+/// `AuthorizedLongLease` renews the lease after every successful statement,
+/// as the interactive long lease does, and needs attached write authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobPolicy {
+    Bounded,
+    AuthorizedLongLease,
+}
+
+/// The statements a write job may run inside its transaction, on the writer
+/// thread. Each statement gets the same guard, authority check and deadline as
+/// a statement of an interactive transaction.
+pub struct ExactSqlJobTransaction<'transaction> {
+    transaction: &'transaction (dyn JobConnection + 'transaction),
+    shutdown_requested: &'transaction Arc<AtomicBool>,
+    authority: Option<&'transaction dyn ExactSqlWriteAuthority>,
+    policy: JobPolicy,
+    deadline: Mutex<Instant>,
+}
+
+const _: () = {
+    const fn shareable<T: Send + Sync>() {}
+    shareable::<ExactSqlJobTransaction<'static>>();
+    shareable::<&ExactSqlJobTransaction<'static>>();
+};
+
+/// The job's transaction behind a trait object. A `Mutex` field would name the
+/// connection's lifetime and make [`ExactSqlJobTransaction`] invariant, and
+/// callers such as `WorkSqliteJobStorage` shorten its lifetime.
+trait JobConnection: Sync {
+    fn execute(
+        &self,
+        request: SqlRequest,
+        shutdown_requested: &Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<SqlResult, ExactSqlError>;
+}
+
+impl JobConnection for Mutex<TaskTransaction<'_>> {
+    fn execute(
+        &self,
+        request: SqlRequest,
+        shutdown_requested: &Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<SqlResult, ExactSqlError> {
+        let transaction = self.lock().unwrap_or_else(PoisonError::into_inner);
+        execute_request(
+            &transaction,
+            request,
+            true,
+            Some(Arc::clone(shutdown_requested)),
+            Some(deadline),
+            true,
+            None,
+        )
+    }
+}
+
+impl ExactSqlJobTransaction<'_> {
+    pub fn execute(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<super::ExactSqlExecuteResult, ExactSqlError> {
+        match self.dispatch(SqlRequest::Execute(statement))? {
+            SqlResult::Executed(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    pub fn query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
+        match self.dispatch(SqlRequest::Query(statement))? {
+            SqlResult::Queried(rows) => Ok(rows),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    pub fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult, ExactSqlError> {
+        match self.dispatch(SqlRequest::ExecuteBatch(sql))? {
+            SqlResult::BatchExecuted(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    fn dispatch(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
+        let deadline = *self.deadline.lock().unwrap_or_else(PoisonError::into_inner);
+        if clock::now() >= deadline {
+            return Err(ExactSqlError::TransactionExpired);
+        }
+        verify_write_authority(self.authority, request.intent())?;
+        let result = self
+            .transaction
+            .execute(request, self.shutdown_requested, deadline);
+        if result.is_ok() && self.policy == JobPolicy::AuthorizedLongLease {
+            *self.deadline.lock().unwrap_or_else(PoisonError::into_inner) =
+                clock::now() + EXACT_SQL_TRANSACTION_LIMIT;
+        }
+        result
+    }
+}
+
+/// Runs one write job: begin IMMEDIATE, the job's statements, then commit when
+/// the job asks for it and rollback otherwise.
+async fn run_writer_job(
+    connection: &mut Connection,
+    job: WriterJob,
+    policy: JobPolicy,
+    reply: &async_channel::Sender<Result<(), ExactSqlError>>,
+    authority: Option<&dyn ExactSqlWriteAuthority>,
+    shutdown_requested: &Arc<AtomicBool>,
+) -> Result<(), ExactSqlError> {
+    if policy == JobPolicy::AuthorizedLongLease && authority.is_none() {
+        return Err(ExactSqlError::AuthorityDenied(
+            "long-lease job requires attached write authority".to_owned(),
+        ));
+    }
+    verify_write_authority(authority, ExactSqlWriteIntent::BeginTransaction)?;
+    let before = connection.total_changes();
+    let transaction = begin_transaction_with_busy_retry(
+        connection,
+        TransactionBehavior::Immediate,
+        shutdown_requested,
+        || reply.is_closed(),
+    )
+    .await
+    .map_err(|error| sqlite_error("begin exact SQL job", error))?;
+    // SAFETY: `TaskTransaction::new`'s contract holds. The transaction
+    // reborrows `run_writer_job`'s `&mut Connection`, so nothing else reaches
+    // the connection. The job may use it from any thread, but only through
+    // this mutex.
+    let transaction = Mutex::new(unsafe { TaskTransaction::new(transaction) });
+    let _span = tracing::trace_span!("rusqlite.exact_sql.job").entered();
+    let verdict = job(&ExactSqlJobTransaction {
+        transaction: &transaction,
+        shutdown_requested,
+        authority,
+        policy,
+        deadline: Mutex::new(clock::now() + EXACT_SQL_TRANSACTION_LIMIT),
+    });
+    let transaction = transaction
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .into_inner();
+    // An interrupted write statement already rolled the transaction back
+    // (see `discard_transaction`), so there is nothing left to commit.
+    if !matches!(verdict, Ok(true))
+        || transaction.is_autocommit()
+        || shutdown_requested.load(Ordering::Acquire)
+    {
+        let rollback = discard_transaction(transaction, before);
+        if rollback.is_err() {
+            shutdown_requested.store(true, Ordering::Release);
+        }
+        return match (verdict, rollback) {
+            (_, Err(error)) | (Err(error), Ok(_)) => Err(error),
+            (Ok(false), Ok(_)) => Ok(()),
+            (Ok(true), Ok(_)) => Err(ExactSqlError::TransactionClosed),
+        };
+    }
+    verify_write_authority(authority, ExactSqlWriteIntent::Commit)?;
+    let _span = tracing::trace_span!("rusqlite.commit").entered();
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit exact SQL job", error))
+}
+
+/// Pause between busy-begin attempts so the acquire deadline is the real bound.
+///
+/// A yield-only loop with a small attempt count burned through in tens of
+/// microseconds while the lock holder was still scheduled, so IMMEDIATE begin
+/// failed closed under ordinary CI contention instead of waiting for the lock.
+const BEGIN_BUSY_RETRY_PAUSE: Duration = Duration::from_millis(1);
+
+/// Writer-side IMMEDIATE lock wait. Kept below the transaction idle lease so a
+/// contended or cancelled begin cannot pin the sole writer for that whole
+/// window. Sized as the prior 64-attempt budget once each attempt sleeps 1ms
+/// (the yield-only budget burned out in ~50µs under CI).
+pub(super) const EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT: Duration = Duration::from_millis(64);
+const _: () = assert!(
+    EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT.as_nanos() < EXACT_SQL_TRANSACTION_IDLE_LIMIT.as_nanos() / 2,
+    "the write-lock acquire bound must stay well below the transaction idle lease"
+);
 
 /// Takes SQLite's write lock on the worker thread, retrying while it is busy.
 ///
 /// This is measured separately from the caller-side begin it serves. The two
-/// run on different threads — the caller waits on a channel while this waits on
-/// the lock — so reporting both under one label sums a queue wait and a lock
+/// run on different threads. The caller waits on a channel while this waits on
+/// the lock, so reporting both under one label sums a queue wait and a lock
 /// wait into a single population whose mean and p95 describe neither. Keep the
 /// names distinct: the split is what says whether a slow begin was blocked by
 /// SQLite or merely by the worker being busy with something else.
-pub(super) fn begin_transaction_with_busy_retry<'connection>(
-    connection: &'connection Connection,
+pub(super) async fn begin_transaction_with_busy_retry<'connection>(
+    connection: &'connection mut Connection,
     behavior: TransactionBehavior,
     shutdown_requested: &AtomicBool,
+    cancelled: impl FnMut() -> bool,
 ) -> rusqlite::Result<Transaction<'connection>> {
     if !matches!(behavior, TransactionBehavior::Immediate) {
         return Transaction::new_unchecked(connection, behavior);
     }
-    hotpath::measure_block!("rusqlite.exact_sql.write_lock", {
-        retry_busy_begin(
-            || Transaction::new_unchecked(connection, behavior),
-            shutdown_requested,
-        )
-    })
+    retry_busy_begin(
+        connection,
+        |connection| Transaction::new_unchecked(connection, behavior),
+        shutdown_requested,
+        cancelled,
+    )
+    .instrument(tracing::trace_span!("rusqlite.exact_sql.write_lock"))
+    .await
 }
 
-pub(super) fn retry_busy_begin<T>(
-    mut begin: impl FnMut() -> rusqlite::Result<T>,
+/// Retries `begin` while `SQLite` reports the write lock busy, until the
+/// exact SQL clock reaches [`EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT`] or shutdown
+/// or cancellation is requested.
+///
+/// The deadline is checked between attempts, so it cannot shorten one
+/// `begin` call that blocks in the kernel.
+pub(super) async fn retry_busy_begin<'connection, T>(
+    connection: &'connection mut Connection,
+    mut begin: impl FnMut(&'connection Connection) -> rusqlite::Result<T>,
     shutdown_requested: &AtomicBool,
+    mut cancelled: impl FnMut() -> bool,
 ) -> rusqlite::Result<T> {
-    let deadline = Instant::now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
-    let mut attempts_remaining = BEGIN_BUSY_ATTEMPT_BUDGET;
+    let deadline = clock::now() + EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT;
     let mut original_busy_error = None;
     loop {
-        if shutdown_requested.load(Ordering::Acquire)
+        if (shutdown_requested.load(Ordering::Acquire) || cancelled())
             && let Some(original) = original_busy_error
         {
             return Err(original);
         }
-        match begin() {
+        let error = match begin(&*connection) {
             Ok(value) => {
-                if shutdown_requested.load(Ordering::Acquire)
+                if (shutdown_requested.load(Ordering::Acquire) || cancelled())
                     && let Some(original) = original_busy_error
                 {
                     return Err(original);
                 }
                 return Ok(value);
             }
-            Err(error) if sqlite_busy_or_locked(&error) => {
-                attempts_remaining = attempts_remaining.saturating_sub(1);
-                let exhausted = attempts_remaining == 0
-                    || shutdown_requested.load(Ordering::Acquire)
-                    || Instant::now() >= deadline;
-                match original_busy_error.take() {
-                    Some(original) if exhausted => return Err(original),
-                    Some(original) => original_busy_error = Some(original),
-                    None if exhausted => return Err(error),
-                    None => original_busy_error = Some(error),
-                }
-                std::thread::yield_now();
-            }
+            Err(error) if sqlite_busy_or_locked(&error) => error,
             Err(error) => return Err(error),
+        };
+        let exhausted =
+            shutdown_requested.load(Ordering::Acquire) || cancelled() || clock::now() >= deadline;
+        match original_busy_error.take() {
+            Some(original) if exhausted => return Err(original),
+            Some(original) => original_busy_error = Some(original),
+            None if exhausted => return Err(error),
+            None => original_busy_error = Some(error),
         }
+        crate::storage_pool::sleep(BEGIN_BUSY_RETRY_PAUSE).await;
     }
 }
 
@@ -126,233 +322,281 @@ fn sqlite_busy_or_locked(error: &rusqlite::Error) -> bool {
     )
 }
 
-/// Clock behind every transaction lease deadline: idle, absolute, renewal.
+/// Terminal state of one interactive transaction, shared with its caller.
 ///
-/// Production reads the monotonic wall clock. Tests may freeze and advance a
-/// writer-thread-local fake instead, so lease renewal is provable without
-/// sleeping through real lease periods.
-#[cfg(not(test))]
-fn lease_now() -> Instant {
-    Instant::now()
+/// The writer thread owns the `SQLite` transaction, so when a lease, a
+/// shutdown, or an authority revocation ends it, the writer is the side that
+/// rolls back. It publishes that rollback's real receipt here *before* it
+/// drops the command channel, so a caller holding the failed statement's
+/// error learns its work was discarded instead of being told that its own
+/// rollback failed.
+#[derive(Default)]
+pub(crate) struct TransactionLeaseState {
+    expired: AtomicBool,
+    settled: Mutex<Option<Result<ExactSqlRollbackReceipt, ExactSqlError>>>,
 }
 
-#[cfg(test)]
-use lease_clock::lease_now;
+impl TransactionLeaseState {
+    pub(super) fn is_expired(&self) -> bool {
+        self.expired.load(Ordering::Acquire)
+    }
+
+    fn expire(&self) {
+        self.expired.store(true, Ordering::Release);
+    }
+
+    fn settle(&self, outcome: Result<ExactSqlRollbackReceipt, ExactSqlError>) {
+        *self
+            .settled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+    }
+
+    /// The rollback the writer already performed, for a caller whose own
+    /// rollback arrived after the transaction was released.
+    pub(super) fn settled_rollback(
+        &self,
+    ) -> Option<Result<ExactSqlRollbackReceipt, ExactSqlError>> {
+        self.settled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// A writer command's final answer, held until the worker has recorded the
+/// command's telemetry. A caller that sees its commit then also sees that
+/// commit's `SQLite` work in the writer telemetry snapshot, instead of racing
+/// the worker and reading it into a later window.
+#[must_use = "the caller is waiting for this reply"]
+pub(crate) struct DeferredReply(Option<Box<dyn FnOnce() + Send>>);
+
+impl DeferredReply {
+    fn none() -> Self {
+        Self(None)
+    }
+
+    fn new<T: Send + 'static>(reply: async_channel::Sender<T>, value: T) -> Self {
+        Self(Some(Box::new(move || {
+            let _ = reply.try_send(value);
+        })))
+    }
+
+    pub(crate) fn send(self) {
+        if let Some(send) = self.0 {
+            send();
+        }
+    }
+}
 
 pub(crate) enum TransactionCommand {
     Attach {
         attachment: ExactSqlAttachment,
-        reply: SyncSender<Result<(), ExactSqlError>>,
+        reply: async_channel::Sender<Result<(), ExactSqlError>>,
     },
     Dispatch {
         request: SqlRequest,
         execution_policy: ExecutionPolicy,
-        reply: SyncSender<Result<SqlResult, ExactSqlError>>,
+        reply: async_channel::Sender<Result<SqlResult, ExactSqlError>>,
     },
     Commit {
-        reply: SyncSender<Result<ExactSqlCommitReceipt, ExactSqlError>>,
+        reply: async_channel::Sender<Result<ExactSqlCommitReceipt, ExactSqlError>>,
+        on_commit: Option<Box<dyn FnOnce() + Send + 'static>>,
     },
     Rollback {
-        reply: SyncSender<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
+        reply: async_channel::Sender<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
     },
 }
 
-#[hotpath::measure(label = "rusqlite_runtime.exact_sql.writer_command")]
-pub(crate) fn run_writer_command(
+#[tracing::instrument(
+    name = "rusqlite_runtime.exact_sql.writer_command",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn run_writer_command(
     connection: &mut Connection,
     command: WriterCommand,
     shutdown_requested: &Arc<AtomicBool>,
-) {
+) -> DeferredReply {
     match command {
         WriterCommand::Dispatch {
             request,
             reply,
-            last_insert_rowid,
             authority,
         } => {
             if let Err(error) = verify_write_authority(authority.as_deref(), request.intent()) {
-                let _ = reply.send(Err(error));
-                return;
+                return DeferredReply::new(reply, Err(error));
             }
             // One-shot execution only. The sibling spans
             // `rusqlite.exact_sql.transaction` and `rusqlite.exact_sql.vacuum`
             // split the pooled `rusqlite.writer.exact_sql` population, so a
             // slow exact-SQL lane is attributable to a specific command shape.
-            let (mut result, inserted) = hotpath::measure_block!("rusqlite.exact_sql.execute", {
-                execute_request(
-                    connection,
-                    request,
-                    false,
-                    Some(Arc::clone(shutdown_requested)),
-                    None,
-                    true,
-                    None,
-                )
-            });
-            publish_last_insert_rowid(
-                &mut result,
-                inserted,
-                connection.last_insert_rowid(),
-                &last_insert_rowid,
-            );
-            let _ = reply.send(result);
+            let returning = matches!(&request, SqlRequest::ExecuteReturning(_));
+            let result = request_across_wal_recovery(request, move |request| {
+                let execute = |connection: &Connection| {
+                    execute_request(
+                        connection,
+                        request,
+                        false,
+                        Some(Arc::clone(shutdown_requested)),
+                        None,
+                        true,
+                        None,
+                    )
+                };
+                if !returning {
+                    return execute(connection);
+                }
+                let before = connection.total_changes();
+                match Transaction::new_unchecked(connection, TransactionBehavior::Deferred) {
+                    Ok(transaction) => {
+                        let result = execute(&transaction).and_then(|result| {
+                            transaction
+                                .execute_batch("COMMIT")
+                                .map(|()| result)
+                                .map_err(|error| {
+                                    sqlite_error("commit returning write transaction", error)
+                                })
+                        });
+                        match result {
+                            Ok(result) => Ok(result),
+                            Err(error) => match discard_transaction(transaction, before) {
+                                Ok(_) => Err(error),
+                                Err(rollback_error) => {
+                                    shutdown_requested.store(true, Ordering::Release);
+                                    Err(rollback_error)
+                                }
+                            },
+                        }
+                    }
+                    Err(error) => Err(sqlite_error("begin returning write transaction", error)),
+                }
+            })
+            .instrument(tracing::trace_span!("rusqlite.exact_sql.execute"))
+            .await;
+            DeferredReply::new(reply, result)
         }
         WriterCommand::BeginTransaction {
             behavior,
             policy,
             receiver,
             reply,
-            last_insert_rowid,
-            expired,
+            lease,
             authority,
         } => {
             if policy == TransactionPolicy::AuthorizedLongLease && authority.is_none() {
-                let _ = reply.send(Err(ExactSqlError::AuthorityDenied(
-                    "long-lease transaction requires attached write authority".to_owned(),
-                )));
-                return;
+                return DeferredReply::new(
+                    reply,
+                    Err(ExactSqlError::AuthorityDenied(
+                        "long-lease transaction requires attached write authority".to_owned(),
+                    )),
+                );
             }
             if let Err(error) =
                 verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::BeginTransaction)
             {
-                let _ = reply.send(Err(error));
-                return;
+                return DeferredReply::new(reply, Err(error));
             }
+            // The begin is answered at once: the caller drives the transaction
+            // that follows. Only its terminal answer waits for the telemetry.
             let completion = {
                 let before = connection.total_changes();
-                match begin_transaction_with_busy_retry(connection, behavior, shutdown_requested) {
-                    // The whole writer-thread hold of one interactive
-                    // transaction, caller think-time included. Every queued
-                    // write and command behind it waits inside this span, so
-                    // it — not SQLite execution — is what explains begin
-                    // latency elsewhere while an interactive lease is open.
-                    Ok(transaction) if reply.send(Ok(())).is_ok() => Some(hotpath::measure_block!(
-                        "rusqlite.exact_sql.transaction",
-                        run_transaction(
-                            transaction,
-                            receiver,
-                            before,
-                            shutdown_requested,
-                            &last_insert_rowid,
-                            &expired,
-                            authority,
-                            policy,
-                        )
-                    )),
-                    Ok(_) => {
-                        crate::hotpath_observe::record_exact_sql_transaction_outcome(
-                            crate::hotpath_observe::ExactSqlTransactionOutcome::Abandoned,
-                        );
-                        None
+                let begun = begin_transaction_with_busy_retry(
+                    connection,
+                    behavior,
+                    shutdown_requested,
+                    || reply.is_closed(),
+                )
+                .await
+                // SAFETY: the transaction borrows the writer task's own
+                // connection, which `run_writer_command` holds by `&mut`.
+                .map(|transaction| unsafe { TaskTransaction::new(transaction) });
+                match begun {
+                    Ok(transaction) => {
+                        // The lease starts before the caller learns it holds
+                        // the transaction, so no command it sends can predate
+                        // the deadlines that command is checked against.
+                        let opened_at = clock::now();
+                        if reply.try_send(Ok(())).is_ok() {
+                            Some(
+                                run_transaction(
+                                    transaction,
+                                    opened_at,
+                                    crate::storage_pool::CommandReceiver::new(receiver),
+                                    before,
+                                    shutdown_requested,
+                                    &lease,
+                                    authority,
+                                    policy,
+                                )
+                                .instrument(tracing::trace_span!("rusqlite.exact_sql.transaction"))
+                                .await,
+                            )
+                        } else {
+                            None
+                        }
                     }
                     Err(error) => {
-                        crate::hotpath_observe::record_exact_sql_transaction_outcome(
-                            crate::hotpath_observe::ExactSqlTransactionOutcome::BeginFailed,
+                        return DeferredReply::new(
+                            reply,
+                            Err(sqlite_error("begin exact SQL transaction", error)),
                         );
-                        let _ = reply.send(Err(sqlite_error("begin exact SQL transaction", error)));
-                        None
                     }
                 }
             };
-            if let Some(completion) = completion {
-                crate::hotpath_observe::record_exact_sql_transaction_outcome(
-                    completion.outcome(expired.load(Ordering::Acquire)),
-                );
-                if completion.finish(connection).is_err() {
-                    shutdown_requested.store(true, Ordering::Release);
-                }
+            let Some(completion) = completion else {
+                return DeferredReply::none();
+            };
+            let (cleanup, terminal) = completion.finish(connection);
+            if cleanup.is_err() {
+                shutdown_requested.store(true, Ordering::Release);
             }
+            terminal
         }
         WriterCommand::CheckpointWalTruncate { reply, authority } => {
             if let Err(error) =
                 verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Query)
             {
-                let _ = reply.send(Err(error));
-                return;
+                return DeferredReply::new(reply, Err(error));
             }
             let statement = match ExactSqlStatement::new(
                 "PRAGMA wal_checkpoint(TRUNCATE)".to_owned(),
                 Vec::new(),
             ) {
                 Ok(statement) => statement,
-                Err(error) => {
-                    let _ = reply.send(Err(error));
-                    return;
-                }
+                Err(error) => return DeferredReply::new(reply, Err(error)),
             };
-            let result = hotpath::measure_block!("rusqlite.wal_checkpoint", {
+            let result = read_across_wal_recovery(move || {
                 with_exact_sql_guard(
                     connection,
-                    false,
-                    false,
+                    ExactSqlAuthority::Canonical(ConnectionMode::Writer),
                     Some(Arc::clone(shutdown_requested)),
                     None,
                     true,
                     None,
-                    crate::connection::authorize_writer,
-                    false,
-                    None,
-                    None,
-                    || execute_query_unchecked(connection, statement),
+                    || execute_query_unchecked(connection, statement.clone()),
                 )
-            });
-            let _ = reply.send(result);
+            })
+            .instrument(tracing::trace_span!("rusqlite.wal_checkpoint"))
+            .await;
+            DeferredReply::new(reply, result)
         }
-        WriterCommand::Vacuum { reply, authority } => {
-            let Some(authority) = authority else {
-                let _ = reply.send(Err(ExactSqlError::AuthorityDenied(
-                    "exclusive-maintenance vacuum requires attached write authority".to_owned(),
-                )));
-                return;
-            };
-            if let Err(error) =
-                verify_write_authority(Some(authority.as_ref()), ExactSqlWriteIntent::Vacuum)
-            {
-                let _ = reply.send(Err(error));
-                return;
-            }
-            let previous_attachment_limit =
-                match connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 1) {
-                    Ok(previous) => previous,
-                    Err(error) => {
-                        let _ = reply.send(Err(sqlite_error(
-                            "open exclusive-maintenance vacuum attachment slot",
-                            error,
-                        )));
-                        return;
-                    }
-                };
-            let mut result = hotpath::measure_block!("rusqlite.exact_sql.vacuum", {
-                with_exact_sql_guard(
-                    connection,
-                    false,
-                    true,
-                    Some(Arc::clone(shutdown_requested)),
-                    None,
-                    true,
-                    Some((Arc::clone(&authority), ExactSqlWriteIntent::Vacuum)),
-                    crate::connection::authorize_writer,
-                    true,
-                    Some(AuthorizedDatabaseOperation::Vacuum),
-                    None,
-                    || {
-                        execute_batch(connection, "PRAGMA auto_vacuum = INCREMENTAL; VACUUM")
-                            .map(|_| ())
-                    },
-                )
-            });
-            if let Err(error) =
-                connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, previous_attachment_limit)
-            {
-                shutdown_requested.store(true, Ordering::Release);
-                if result.is_ok() {
-                    result = Err(sqlite_error(
-                        "restore exclusive-maintenance vacuum attachment limit",
-                        error,
-                    ));
-                }
-            }
-            let _ = reply.send(result);
+        WriterCommand::Job {
+            job,
+            policy,
+            reply,
+            authority,
+        } => {
+            let result = run_writer_job(
+                connection,
+                job,
+                policy,
+                &reply,
+                authority.as_deref(),
+                shutdown_requested,
+            )
+            .await;
+            DeferredReply::new(reply, result)
         }
     }
 }
@@ -360,64 +604,118 @@ pub(crate) fn run_writer_command(
 pub(crate) fn reject_writer_command(command: WriterCommand) {
     match command {
         WriterCommand::Dispatch { reply, .. } => {
-            let _ = reply.send(Err(ExactSqlError::WriterUnavailable));
+            let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
         WriterCommand::BeginTransaction { reply, .. } => {
-            let _ = reply.send(Err(ExactSqlError::WriterUnavailable));
+            let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
         WriterCommand::CheckpointWalTruncate { reply, .. } => {
-            let _ = reply.send(Err(ExactSqlError::WriterUnavailable));
+            let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
-        WriterCommand::Vacuum { reply, .. } => {
-            let _ = reply.send(Err(ExactSqlError::WriterUnavailable));
+        WriterCommand::Job { reply, .. } => {
+            let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
     }
 }
 
+/// Discards the writer-owned transaction, reporting the rollback `SQLite` may
+/// already have performed.
+///
+/// `sqlite3_interrupt` on a write statement inside an explicit transaction
+/// rolls that whole transaction back itself and returns the connection to
+/// autocommit. A `ROLLBACK` issued afterwards fails with "cannot rollback - no
+/// transaction is active", which is not a durability problem. The work is
+/// already discarded, so the autocommit state is what decides here rather
+/// than a second statement.
+fn discard_transaction(
+    mut transaction: Transaction<'_>,
+    before: u64,
+) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
+    let receipt = ExactSqlRollbackReceipt {
+        discarded_changed_rows: transaction.total_changes().saturating_sub(before),
+    };
+    if transaction.is_autocommit() {
+        transaction.set_drop_behavior(DropBehavior::Ignore);
+        return Ok(receipt);
+    }
+    transaction
+        .rollback()
+        .map(|()| receipt)
+        .map_err(|error| sqlite_error("rollback write transaction", error))
+}
+
+/// Releases the writer-owned transaction and publishes the receipt for it.
+///
+/// Every path that ends a transaction without a caller-issued terminal comes
+/// through here, so the rollback is always durable, and its outcome always
+/// readable, before the command channel is dropped and the writer released.
+fn release_rolled_back(
+    transaction: TaskTransaction<'_>,
+    before: u64,
+    lease: &TransactionLeaseState,
+    attachments: Vec<ExactSqlAttachment>,
+    previous_attachment_limit: Option<i32>,
+) -> TransactionCompletion {
+    lease.settle(discard_transaction(transaction.into_inner(), before));
+    TransactionCompletion::abandoned(attachments, previous_attachment_limit)
+}
+
 #[allow(clippy::too_many_arguments)]
-fn run_transaction(
-    transaction: Transaction<'_>,
-    receiver: Receiver<TransactionCommand>,
+async fn run_transaction(
+    mut transaction: TaskTransaction<'_>,
+    opened_at: Instant,
+    receiver: crate::storage_pool::CommandReceiver<TransactionCommand>,
     before: u64,
     shutdown_requested: &Arc<AtomicBool>,
-    last_insert_rowid: &AtomicI64,
-    expired: &AtomicBool,
+    lease: &TransactionLeaseState,
     authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     policy: TransactionPolicy,
 ) -> TransactionCompletion {
     let mut attachments = Vec::new();
     let mut previous_attachment_limit = None;
-    let mut idle_deadline = lease_now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
-    let mut transaction_deadline = lease_now() + EXACT_SQL_TRANSACTION_LIMIT;
+    let mut idle_deadline = opened_at + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+    let mut transaction_deadline = opened_at + EXACT_SQL_TRANSACTION_LIMIT;
     loop {
         if shutdown_requested.load(Ordering::Acquire) {
-            let _ = transaction.rollback();
-            return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
+            return release_rolled_back(
+                transaction,
+                before,
+                lease,
+                attachments,
+                previous_attachment_limit,
+            );
         }
-        let now = lease_now();
+        let now = clock::now();
         if now >= idle_deadline || now >= transaction_deadline {
-            expired.store(true, Ordering::Release);
-            let _ = transaction.rollback();
-            return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
+            lease.expire();
+            return release_rolled_back(
+                transaction,
+                before,
+                lease,
+                attachments,
+                previous_attachment_limit,
+            );
         }
         let wait = idle_deadline
             .saturating_duration_since(now)
             .min(transaction_deadline.saturating_duration_since(now))
             .min(Duration::from_millis(25));
-        let command = match receiver.recv_timeout(wait) {
-            Ok(command) => command,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => {
+        let command = match crate::storage_pool::timeout(wait, receiver.recv()).await {
+            Some(Ok(command)) => command,
+            None => continue,
+            Some(Err(_)) => {
                 return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
             }
         };
         match command {
             TransactionCommand::Attach { attachment, reply } => {
-                if lease_now() >= transaction_deadline {
-                    expired.store(true, Ordering::Release);
-                    let _ = transaction.rollback();
-                    let _ = reply.send(Err(ExactSqlError::TransactionExpired));
-                    return TransactionCompletion::abandoned(
+                if clock::now() >= transaction_deadline {
+                    lease.expire();
+                    let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -427,15 +725,17 @@ fn run_transaction(
                         .database_name()
                         .eq_ignore_ascii_case(attachment.database_name())
                 }) {
-                    let _ = reply.send(Err(ExactSqlError::InvalidAttachment));
+                    let _ = reply.try_send(Err(ExactSqlError::InvalidAttachment));
                     continue;
                 }
                 if let Err(error) =
                     verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Execute)
                 {
-                    let _ = transaction.rollback();
-                    let _ = reply.send(Err(error));
-                    return TransactionCompletion::abandoned(
+                    let _ = reply.try_send(Err(error));
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -446,10 +746,17 @@ fn run_transaction(
                     {
                         Ok(previous) => previous_attachment_limit = Some(previous),
                         Err(error) => {
-                            let _ = transaction.rollback();
-                            let _ = reply
-                                .send(Err(sqlite_error("open exact SQL attachment limit", error)));
-                            return TransactionCompletion::abandoned(attachments, None);
+                            let _ = reply.try_send(Err(sqlite_error(
+                                "open exact SQL attachment limit",
+                                error,
+                            )));
+                            return release_rolled_back(
+                                transaction,
+                                before,
+                                lease,
+                                attachments,
+                                None,
+                            );
                         }
                     }
                 }
@@ -467,20 +774,24 @@ fn run_transaction(
                             authority.as_deref(),
                             ExactSqlWriteIntent::Execute,
                         ) {
-                            let _ = transaction.rollback();
-                            let _ = reply.send(Err(error));
-                            return TransactionCompletion::abandoned(
+                            let _ = reply.try_send(Err(error));
+                            return release_rolled_back(
+                                transaction,
+                                before,
+                                lease,
                                 attachments,
                                 previous_attachment_limit,
                             );
                         }
-                        let _ = reply.send(Ok(()));
-                        idle_deadline = lease_now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+                        idle_deadline = clock::now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+                        let _ = reply.try_send(Ok(()));
                     }
                     Err(error) => {
-                        let _ = transaction.rollback();
-                        let _ = reply.send(Err(error));
-                        return TransactionCompletion::abandoned(
+                        let _ = reply.try_send(Err(error));
+                        return release_rolled_back(
+                            transaction,
+                            before,
+                            lease,
                             attachments,
                             previous_attachment_limit,
                         );
@@ -492,19 +803,23 @@ fn run_transaction(
                 execution_policy,
                 reply,
             } => {
-                if lease_now() >= transaction_deadline {
-                    expired.store(true, Ordering::Release);
-                    let _ = transaction.rollback();
-                    let _ = reply.send(Err(ExactSqlError::TransactionExpired));
-                    return TransactionCompletion::abandoned(
+                if clock::now() >= transaction_deadline {
+                    lease.expire();
+                    let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
                 }
                 if let Err(error) = verify_write_authority(authority.as_deref(), request.intent()) {
-                    let _ = transaction.rollback();
-                    let _ = reply.send(Err(error));
-                    return TransactionCompletion::abandoned(
+                    let _ = reply.try_send(Err(error));
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -512,7 +827,7 @@ fn run_transaction(
                 if execution_policy == ExecutionPolicy::AuthorityRevalidated
                     && policy != TransactionPolicy::AuthorizedLongLease
                 {
-                    let _ = reply.send(Err(ExactSqlError::AuthorityDenied(
+                    let _ = reply.try_send(Err(ExactSqlError::AuthorityDenied(
                         "authority-revalidated batches require an authority-bound long-lease transaction"
                             .to_owned(),
                     )));
@@ -522,12 +837,14 @@ fn run_transaction(
                 let repeated_authority =
                     if execution_policy == ExecutionPolicy::AuthorityRevalidated {
                         let Some(authority) = authority.as_ref() else {
-                            let _ = transaction.rollback();
-                            let _ = reply.send(Err(ExactSqlError::AuthorityDenied(
+                            let _ = reply.try_send(Err(ExactSqlError::AuthorityDenied(
                                 "authority-revalidated batch requires attached write authority"
                                     .to_owned(),
                             )));
-                            return TransactionCompletion::abandoned(
+                            return release_rolled_back(
+                                transaction,
+                                before,
+                                lease,
                                 attachments,
                                 previous_attachment_limit,
                             );
@@ -538,77 +855,96 @@ fn run_transaction(
                     };
                 let execution_deadline =
                     (execution_policy == ExecutionPolicy::Bounded).then_some(transaction_deadline);
-                let (mut result, inserted) = execute_request(
-                    &transaction,
-                    request,
-                    true,
-                    Some(Arc::clone(shutdown_requested)),
-                    execution_deadline,
-                    execution_policy == ExecutionPolicy::Bounded,
-                    repeated_authority,
-                );
-                if shutdown_requested.load(Ordering::Acquire) {
-                    let _ = transaction.rollback();
-                    let _ = reply.send(result);
-                    return TransactionCompletion::abandoned(
+                let attempt = &mut transaction;
+                let result = request_across_wal_recovery(request, move |request| {
+                    execute_request(
+                        attempt,
+                        request,
+                        true,
+                        Some(Arc::clone(shutdown_requested)),
+                        execution_deadline,
+                        execution_policy == ExecutionPolicy::Bounded,
+                        repeated_authority.clone(),
+                    )
+                })
+                .await;
+                if shutdown_requested.load(Ordering::Acquire) || transaction.is_autocommit() {
+                    // An interrupted write statement takes the whole
+                    // transaction with it (see `discard_transaction`).
+                    // Dispatching further commands would run the caller's
+                    // remaining statements outside any transaction, so the
+                    // caller keeps its own error and the transaction is
+                    // released with the rollback already performed.
+                    let _ = reply.try_send(result);
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
                 }
                 if let Err(error) = verify_write_authority(authority.as_deref(), intent) {
-                    let _ = transaction.rollback();
-                    let _ = reply.send(Err(error));
-                    return TransactionCompletion::abandoned(
+                    let _ = reply.try_send(Err(error));
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
                 }
                 if matches!(&result, Err(ExactSqlError::AuthorityDenied(_))) {
-                    let _ = transaction.rollback();
-                    let _ = reply.send(result);
-                    return TransactionCompletion::abandoned(
+                    let _ = reply.try_send(result);
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
                 }
                 if execution_policy == ExecutionPolicy::Bounded
-                    && lease_now() >= transaction_deadline
+                    && clock::now() >= transaction_deadline
                 {
-                    expired.store(true, Ordering::Release);
-                    let _ = transaction.rollback();
-                    let _ = reply.send(Err(ExactSqlError::TransactionExpired));
-                    return TransactionCompletion::abandoned(
+                    lease.expire();
+                    let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
                 }
-                publish_last_insert_rowid(
-                    &mut result,
-                    inserted,
-                    transaction.last_insert_rowid(),
-                    last_insert_rowid,
-                );
-                let succeeded = result.is_ok();
-                let _ = reply.send(result);
-                if succeeded {
-                    let renewed_at = lease_now();
-                    idle_deadline = renewed_at + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
-                    // A long-lease transaction earns its next lease by
-                    // committing progress: full-index replacement writes far
-                    // more rows than one fixed lease can carry, but it never
-                    // stalls. Idleness, shutdown, and authority revocation
-                    // still cancel it, and `Ordinary` never renews.
-                    if policy == TransactionPolicy::AuthorizedLongLease {
-                        transaction_deadline = renewed_at + EXACT_SQL_TRANSACTION_LIMIT;
-                    }
+                let renewed_at = clock::now();
+                // The idle limit bounds a caller that sends nothing, so every
+                // completed round trip renews it. A statement that ran to its
+                // own execution deadline and then failed kept the writer busy
+                // for that whole span; charging it to idleness released the
+                // transaction before the caller, still holding the error,
+                // could roll it back.
+                idle_deadline = renewed_at + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+                // A long-lease transaction earns its next lease by committing
+                // progress: full-index replacement writes far more rows than
+                // one fixed lease can carry, but it never stalls. Idleness,
+                // shutdown, and authority revocation still cancel it, and
+                // `Ordinary` never renews.
+                if result.is_ok() && policy == TransactionPolicy::AuthorizedLongLease {
+                    transaction_deadline = renewed_at + EXACT_SQL_TRANSACTION_LIMIT;
                 }
+                // Renewed before the answer, so the caller's next command is
+                // never checked against the lease this round trip replaced.
+                let _ = reply.try_send(result);
             }
-            TransactionCommand::Commit { reply } => {
-                if lease_now() >= transaction_deadline {
-                    expired.store(true, Ordering::Release);
-                    let _ = transaction.rollback();
-                    let _ = reply.send(Err(ExactSqlError::TransactionExpired));
-                    return TransactionCompletion::abandoned(
+            TransactionCommand::Commit { reply, on_commit } => {
+                if clock::now() >= transaction_deadline {
+                    lease.expire();
+                    let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -616,20 +952,33 @@ fn run_transaction(
                 if let Err(error) =
                     verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Commit)
                 {
-                    let _ = transaction.rollback();
-                    let _ = reply.send(Err(error));
-                    return TransactionCompletion::abandoned(
+                    let _ = reply.try_send(Err(error));
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
                 }
                 let changed_rows = transaction.total_changes().saturating_sub(before);
-                let result = hotpath::measure_block!("rusqlite.commit", {
-                    transaction
-                        .commit()
-                        .map(|()| ExactSqlCommitReceipt { changed_rows })
-                        .map_err(|error| sqlite_error("commit immediate transaction", error))
-                });
+                let result = {
+                    let _span = tracing::trace_span!("rusqlite.commit").entered();
+                    {
+                        transaction
+                            .into_inner()
+                            .commit()
+                            .map(|()| ExactSqlCommitReceipt { changed_rows })
+                            .map_err(|error| sqlite_error("commit immediate transaction", error))
+                    }
+                };
+                // Ownership settles at SQLite's commit, not at reply delivery
+                // or attachment cleanup, either of which can fail afterward.
+                if result.is_ok()
+                    && let Some(on_commit) = on_commit
+                {
+                    on_commit();
+                }
                 return TransactionCompletion {
                     attachments,
                     previous_attachment_limit,
@@ -637,13 +986,7 @@ fn run_transaction(
                 };
             }
             TransactionCommand::Rollback { reply } => {
-                let discarded_changed_rows = transaction.total_changes().saturating_sub(before);
-                let result = transaction
-                    .rollback()
-                    .map(|()| ExactSqlRollbackReceipt {
-                        discarded_changed_rows,
-                    })
-                    .map_err(|error| sqlite_error("rollback immediate transaction", error));
+                let result = discard_transaction(transaction.into_inner(), before);
                 return TransactionCompletion {
                     attachments,
                     previous_attachment_limit,
@@ -662,11 +1005,11 @@ struct TransactionCompletion {
 
 enum TransactionTerminal {
     Commit {
-        reply: SyncSender<Result<ExactSqlCommitReceipt, ExactSqlError>>,
+        reply: async_channel::Sender<Result<ExactSqlCommitReceipt, ExactSqlError>>,
         result: Result<ExactSqlCommitReceipt, ExactSqlError>,
     },
     Rollback {
-        reply: SyncSender<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
+        reply: async_channel::Sender<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
         result: Result<ExactSqlRollbackReceipt, ExactSqlError>,
     },
 }
@@ -683,27 +1026,9 @@ impl TransactionCompletion {
         }
     }
 
-    /// Classifies how this transaction released the writer thread, for the
-    /// `rusqlite.exact_sql.transaction.*` outcome counters. A missing
-    /// terminal with the lease flag raised is an expiry; without it, the
-    /// caller disconnected or shutdown/authority loss rolled the work back.
-    fn outcome(&self, expired: bool) -> crate::hotpath_observe::ExactSqlTransactionOutcome {
-        match &self.terminal {
-            Some(TransactionTerminal::Commit { result: Ok(_), .. }) => {
-                crate::hotpath_observe::ExactSqlTransactionOutcome::Committed
-            }
-            Some(TransactionTerminal::Commit { result: Err(_), .. }) => {
-                crate::hotpath_observe::ExactSqlTransactionOutcome::CommitFailed
-            }
-            Some(TransactionTerminal::Rollback { .. }) => {
-                crate::hotpath_observe::ExactSqlTransactionOutcome::RolledBack
-            }
-            None if expired => crate::hotpath_observe::ExactSqlTransactionOutcome::Expired,
-            None => crate::hotpath_observe::ExactSqlTransactionOutcome::Abandoned,
-        }
-    }
-
-    fn finish(self, connection: &Connection) -> Result<(), ExactSqlError> {
+    /// Detaches what the transaction attached and returns the cleanup outcome
+    /// with the caller's terminal answer, still unsent.
+    fn finish(self, connection: &Connection) -> (Result<(), ExactSqlError>, DeferredReply) {
         let mut cleanup_error = None;
         for attachment in self.attachments.into_iter().rev() {
             if let Err(error) = detach_database(connection, attachment.database_name(), None)
@@ -718,50 +1043,23 @@ impl TransactionCompletion {
         {
             cleanup_error = Some(sqlite_error("restore exact SQL attachment limit", error));
         }
-        match self.terminal {
+        let terminal = match self.terminal {
             Some(TransactionTerminal::Commit { reply, result }) => {
                 let response = match (result, cleanup_error.as_ref()) {
                     (Ok(_), Some(error)) => Err(error.clone()),
                     (result, _) => result,
                 };
-                let _ = reply.send(response);
+                DeferredReply::new(reply, response)
             }
             Some(TransactionTerminal::Rollback { reply, result }) => {
                 let response = match (result, cleanup_error.as_ref()) {
                     (Ok(_), Some(error)) => Err(error.clone()),
                     (result, _) => result,
                 };
-                let _ = reply.send(response);
+                DeferredReply::new(reply, response)
             }
-            None => {}
-        }
-        cleanup_error.map_or(Ok(()), Err)
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod lease_clock {
-    use std::{
-        cell::Cell,
-        time::{Duration, Instant},
-    };
-
-    thread_local! {
-        static FAKE_LEASE_NOW: Cell<Option<Instant>> = const { Cell::new(None) };
-    }
-
-    /// Real monotonic time until [`advance`] freezes this thread's clock.
-    pub(crate) fn lease_now() -> Instant {
-        FAKE_LEASE_NOW.with(Cell::get).unwrap_or_else(Instant::now)
-    }
-
-    /// Freezes this thread's lease clock `by` past its current reading.
-    ///
-    /// Only code already running on the writer thread — in practice an
-    /// [`super::ExactSqlWriteAuthority`] verification — can move the clock
-    /// the transaction loop reads.
-    pub(crate) fn advance(by: Duration) {
-        let advanced = lease_now() + by;
-        FAKE_LEASE_NOW.with(|fake| fake.set(Some(advanced)));
+            None => DeferredReply::none(),
+        };
+        (cleanup_error.map_or(Ok(()), Err), terminal)
     }
 }

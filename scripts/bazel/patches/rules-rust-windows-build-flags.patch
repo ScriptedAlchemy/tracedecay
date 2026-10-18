@@ -1,0 +1,29 @@
+diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -1108,7 +1108,8 @@
+     for build_env_file in build_env_files:
+         process_wrapper_flags.add("--env-file", build_env_file)
+ 
+-    process_wrapper_flags.add_all(build_flags_files, before_each = "--arg-file")
++    if toolchain.exec_triple.system != "windows":
++        process_wrapper_flags.add_all(build_flags_files, before_each = "--arg-file")
+ 
+     all_allowed_unstable_features = []
+     if getattr(ctx.attr, "unstable_rust_features_config", None):
+@@ -1591,6 +1592,15 @@
+     all_args = [process_wrapper_flags, rustc_path, rustc_flags]
+     if rust_flags_args != None:
+         all_args.append(rust_flags_args)
++    if toolchain.exec_triple.system == "windows":
++        # Build-script flags follow authored flags, just as --arg-file does.
++        # The wrapper expands nested response files before starting rustc;
++        # keeping their paths in one response file also bounds its own argv.
++        build_flags = ctx.actions.args()
++        build_flags.set_param_file_format("multiline")
++        build_flags.use_param_file("@%s", use_always = True)
++        build_flags.add_all(build_flags_files, format_each = "@%s")
++        all_args.append(build_flags)
+ 
+     # Path mapping must be disabled whenever any input string carries a
+     # `$(location ...)` / `$(execpath ...)` macro: location expansion

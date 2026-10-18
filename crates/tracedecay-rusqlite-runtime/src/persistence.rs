@@ -10,35 +10,56 @@ use tracedecay_store::{
 use crate::{
     ledger::{self, LedgerDisposition, LedgerError},
     operation::{self, StorageOperationError, StorageOperationExecutor},
-    writer::WriterPersistence,
 };
 
 pub(crate) struct RuntimeWriterPersistence<E> {
     executor: E,
+    ledger_schema_ready: bool,
 }
 
 impl<E> RuntimeWriterPersistence<E> {
-    #[hotpath::skip]
     pub(crate) const fn new(executor: E) -> Self {
-        Self { executor }
+        Self {
+            executor,
+            ledger_schema_ready: false,
+        }
+    }
+
+    /// The first request may create the ledger inside its outer transaction.
+    /// A rollback must invalidate that observation before another request.
+    pub(crate) fn transaction_rolled_back(&mut self, schema_was_ready: bool) {
+        self.ledger_schema_ready = schema_was_ready;
+    }
+
+    pub(crate) fn ledger_schema_ready(&self) -> bool {
+        self.ledger_schema_ready
+    }
+
+    fn ensure_ledger_schema(
+        &mut self,
+        transaction: &Transaction<'_>,
+    ) -> Result<(), StorageRuntimeErrorV1> {
+        if self.ledger_schema_ready {
+            return Ok(());
+        }
+        ledger::initialize_schema(transaction).map_err(map_ledger_error)?;
+        self.ledger_schema_ready = true;
+        Ok(())
     }
 }
 
-impl<E> WriterPersistence for RuntimeWriterPersistence<E>
-where
-    E: StorageOperationExecutor + Send + 'static,
-{
-    fn lookup_idempotency(
+impl<E: StorageOperationExecutor> RuntimeWriterPersistence<E> {
+    pub(crate) fn lookup_idempotency(
         &mut self,
         transaction: &Transaction<'_>,
         binding: &StoreRuntimeBindingV1,
         idempotency: &IdempotencyIdentityV1,
     ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
-        ledger::initialize_schema(transaction).map_err(map_ledger_error)?;
+        self.ensure_ledger_schema(transaction)?;
         ledger::lookup_receipt(transaction, binding, idempotency).map_err(map_ledger_error)
     }
 
-    fn apply_and_record(
+    pub(crate) fn apply_and_record(
         &mut self,
         savepoint: &mut Savepoint<'_>,
         binding: &StoreRuntimeBindingV1,
@@ -80,7 +101,18 @@ fn map_ledger_error(error: LedgerError) -> StorageRuntimeErrorV1 {
 }
 
 fn map_operation_error(error: StorageOperationError) -> StorageRuntimeErrorV1 {
-    infrastructure(format!("closed native operation: {error}"))
+    match error {
+        StorageOperationError::ObservationSourceCursorConflict { expected, actual } => {
+            StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual }
+        }
+        StorageOperationError::ObservationCursorAdvanceCollision => {
+            StorageRuntimeErrorV1::ObservationCursorAdvanceCollision
+        }
+        StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } => {
+            StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement }
+        }
+        error => infrastructure(format!("closed native operation: {error}")),
+    }
 }
 
 fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
@@ -92,7 +124,14 @@ fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
-    use tracedecay_store::RepositoryWritePayloadV1;
+    use tracedecay_domain::{
+        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+        ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, SessionId,
+    };
+    use tracedecay_store::{
+        CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
+        ObservationCoverageReason, ObservationCoverageV1, RepositoryWritePayloadV1,
+    };
 
     use super::*;
     use crate::test_support::{metadata, request};
@@ -115,14 +154,52 @@ mod tests {
     }
 
     #[test]
+    fn immutable_cursor_advance_ledger_disagreement_survives_runtime_error_mapping() {
+        let source = ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("cursor").unwrap(),
+            SessionId::new("session.fixture").unwrap(),
+        )
+        .unwrap();
+        let coverage = ObservationCoverageV1::new(
+            ObservationSourceGenerationV1::new(7).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+        );
+        let disagreement = CursorAdvanceLedgerDisagreementV1::new(
+            source,
+            ObservationScopeV1::Profile,
+            coverage,
+            CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::BlankFrame, None),
+            CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::OutOfScope, None),
+        );
+
+        let mapped = map_operation_error(StorageOperationError::CursorAdvanceLedgerDisagreement {
+            disagreement: Box::new(disagreement),
+        });
+
+        assert!(matches!(
+            mapped,
+            StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement }
+                if matches!(
+                    disagreement.stored().reason(),
+                    tracedecay_store::CursorAdvanceLedgerReasonV1::Known(
+                        ObservationCoverageReason::BlankFrame
+                    )
+                ) && matches!(
+                    disagreement.candidate().reason(),
+                    tracedecay_store::CursorAdvanceLedgerReasonV1::Known(
+                        ObservationCoverageReason::OutOfScope
+                    )
+                )
+                    && disagreement.coverage() == coverage
+        ));
+    }
+
+    #[test]
     fn apply_and_record_returns_the_receipt_from_the_same_savepoint() {
         let mut connection = Connection::open_in_memory().unwrap();
         let request = request(metadata("operation.atomic", "key.atomic", 'a'));
         let binding = request.binding().clone();
-        let effect_id = match &request.envelope().payload {
-            RepositoryWritePayloadV1::EnqueueOutbox(entry) => entry.identity.effect_id.clone(),
-            _ => unreachable!(),
-        };
         let mut first = RuntimeWriterPersistence::new(MarkerExecutor);
         let mut transaction = connection.transaction().unwrap();
         assert!(
@@ -152,14 +229,6 @@ mod tests {
             .unwrap(),
             Some(receipt.clone())
         );
-        assert_eq!(
-            ledger::outbox_entry(&savepoint, &binding, &effect_id)
-                .unwrap()
-                .unwrap()
-                .identity
-                .effect_id,
-            effect_id
-        );
         savepoint.rollback().unwrap();
         drop(savepoint);
         transaction.commit().unwrap();
@@ -172,5 +241,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(marker_exists, 0);
+    }
+
+    fn deny_schema_change(
+        context: rusqlite::hooks::AuthContext<'_>,
+    ) -> rusqlite::hooks::Authorization {
+        match context.action {
+            rusqlite::hooks::AuthAction::CreateTable { .. }
+            | rusqlite::hooks::AuthAction::CreateIndex { .. }
+            | rusqlite::hooks::AuthAction::CreateTempTable { .. }
+            | rusqlite::hooks::AuthAction::CreateTempIndex { .. } => {
+                rusqlite::hooks::Authorization::Deny
+            }
+            _ => rusqlite::hooks::Authorization::Allow,
+        }
+    }
+
+    #[test]
+    fn lookup_after_schema_install_does_not_run_ddl() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let request = request(metadata("operation.schema.once", "key.schema.once", 's'));
+        let binding = request.binding().clone();
+        let mut persistence = RuntimeWriterPersistence::new(MarkerExecutor);
+        {
+            let transaction = connection.transaction().unwrap();
+            assert!(
+                persistence
+                    .lookup_idempotency(
+                        &transaction,
+                        &binding,
+                        &request.envelope().metadata.idempotency,
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            transaction.commit().unwrap();
+        }
+
+        connection.authorizer(Some(deny_schema_change)).unwrap();
+        let transaction = connection.transaction().unwrap();
+        assert!(
+            persistence
+                .lookup_idempotency(
+                    &transaction,
+                    &binding,
+                    &request.envelope().metadata.idempotency,
+                )
+                .unwrap()
+                .is_none()
+        );
+        transaction.commit().unwrap();
     }
 }

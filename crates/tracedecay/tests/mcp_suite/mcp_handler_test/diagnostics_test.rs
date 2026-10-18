@@ -1,0 +1,353 @@
+//! `tracedecay_diagnostics` as an MCP client calls it: one JSON-RPC
+//! `tools/call` on the production composition, then the text and problem
+//! record that client observes.
+
+use crate::support::{
+    extract_real_server_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
+    production_composition_fixture, wait_for_current_graph,
+};
+use serde_json::{Value, json};
+use tracedecay::mcp::McpServer;
+
+const UNPUBLISHED_CODE: &str = "application.diagnostics.unsupported";
+const UNPUBLISHED_MESSAGE: &str = "No diagnostic producer is configured for this scope: no tsconfig.json was found under the project root, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
+const UNPUBLISHED_MAIN_RS_MESSAGE: &str = "No diagnostic producer is configured for this scope: no tsconfig owns `src/main.rs` (searched src/tsconfig.json, tsconfig.json, and their project references), so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
+const UNPUBLISHED_MISSING_FILE_MESSAGE: &str = "No diagnostic producer is configured for this scope: no tsconfig owns `src/does-not-exist.rs` (searched src/tsconfig.json, tsconfig.json, and their project references), so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
+
+#[tokio::test]
+async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() {
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production diagnostics server");
+    wait_for_current_graph(&server).await;
+
+    assert_protocol_refusal(
+        &server,
+        json!({"scope": "package"}),
+        "application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics",
+    )
+    .await;
+    assert_protocol_refusal(
+        &server,
+        json!({"scope": "file"}),
+        "application surface request does not match its reviewed schema: `path` is required when `scope` is file",
+    )
+    .await;
+    assert_protocol_refusal(
+        &server,
+        json!({"scope": "nope"}),
+        "application surface request does not match its reviewed schema: `scope` `nope` is not one of workspace or file",
+    )
+    .await;
+    assert_protocol_refusal(
+        &server,
+        json!({"format": "yaml"}),
+        "application surface request does not match its reviewed schema: `format` must be markdown or json",
+    )
+    .await;
+
+    let workspace = call_diagnostics(
+        &server,
+        json!({"scope": "workspace", "maximum_diagnostics": 5, "format": "json"}),
+    )
+    .await;
+    let indexed_file = call_diagnostics(
+        &server,
+        json!({
+            "scope": "file",
+            "path": "src/main.rs",
+            "maximum_diagnostics": 5,
+            "format": "json"
+        }),
+    )
+    .await;
+    let missing_file = call_diagnostics(
+        &server,
+        json!({
+            "scope": "file",
+            "path": "src/does-not-exist.rs",
+            "maximum_diagnostics": 5,
+            "format": "json"
+        }),
+    )
+    .await;
+    let zero_page = call_diagnostics(
+        &server,
+        json!({"scope": "workspace", "maximum_diagnostics": 0, "format": "json"}),
+    )
+    .await;
+    let oversized_page = call_diagnostics(
+        &server,
+        json!({"scope": "workspace", "maximum_diagnostics": 1001, "format": "json"}),
+    )
+    .await;
+    let markdown =
+        call_diagnostics(&server, json!({"scope": "workspace", "format": "markdown"})).await;
+
+    for (label, result, message) in [
+        ("workspace", &workspace, UNPUBLISHED_MESSAGE),
+        ("src/main.rs", &indexed_file, UNPUBLISHED_MAIN_RS_MESSAGE),
+        (
+            "src/does-not-exist.rs",
+            &missing_file,
+            UNPUBLISHED_MISSING_FILE_MESSAGE,
+        ),
+        ("maximum_diagnostics 0", &zero_page, UNPUBLISHED_MESSAGE),
+        (
+            "maximum_diagnostics 1001",
+            &oversized_page,
+            UNPUBLISHED_MESSAGE,
+        ),
+    ] {
+        assert_unpublished_json(label, result, message);
+    }
+
+    let workspace_id = request_id(&workspace);
+    let file_id = request_id(&indexed_file);
+    assert_ne!(
+        workspace_id, file_id,
+        "each diagnostics call mints its own request id"
+    );
+    assert_eq!(
+        workspace["structuredContent"]["problem"]["code"],
+        indexed_file["structuredContent"]["problem"]["code"],
+        "a file read with no published generation uses the same authority state as the workspace"
+    );
+
+    assert_eq!(markdown["isError"], json!(true), "{markdown}");
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["kind"],
+        "unsupported"
+    );
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["code"],
+        UNPUBLISHED_CODE
+    );
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["message"],
+        UNPUBLISHED_MESSAGE
+    );
+    assert_eq!(markdown["structuredContent"]["problem"]["retry"], "never");
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["retryable"],
+        json!(false)
+    );
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["legal_actions"],
+        json!(["correct_request"]),
+        "a project without an automatic producer is routed to tracedecay_diagnose"
+    );
+    let markdown_text = extract_real_server_text(&markdown);
+    assert!(
+        markdown_text.starts_with(
+            "## diagnostics\\_read\n\n- Operation: `diagnostics_read`\n- Binding: `binding.mcp.diagnostics_read.v1`"
+        ),
+        "{markdown_text}"
+    );
+    assert!(markdown_text.contains("\n- Status: `problem`"));
+    assert!(
+        markdown_text
+            .contains("\n- Contract: `schema.application.primitive.diagnostics-read.result@1`")
+    );
+    assert!(markdown_text.contains("\n- Problem: `application.diagnostics.unsupported`"));
+    assert!(markdown_text.contains("\n- Problem kind: `unsupported`"));
+    assert!(markdown_text.contains("\n- Problem revision: `1`"));
+    assert!(markdown_text.contains("\n- Owning layer: `application`"));
+    assert!(markdown_text.contains("\n- Terminality: `pre_admission`"));
+    assert!(
+        markdown_text.contains(
+            "\n- Message: No diagnostic producer is configured for this scope: no tsconfig.json was found under the project root, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay\\_diagnose (\\`cargo\\_output\\`), then read again."
+        ),
+        "{markdown_text}"
+    );
+    assert!(markdown_text.contains("\n- Retryable: `false`"));
+    assert!(markdown_text.contains("\n- Retry: `never`"));
+    assert!(markdown_text.contains("\n- Retry scope: `none`"));
+    assert!(markdown_text.contains("\n- Retry after: `none`"));
+    assert!(markdown_text.contains("\n- Legal actions: `correct_request`"));
+    assert!(markdown_text.contains("\n- Coverage: `not_available`"));
+    assert!(
+        !markdown_text.contains("findings_cleared"),
+        "an unpublished read must not render as a clean empty page: {markdown_text}"
+    );
+    assert_ne!(
+        markdown["structuredContent"]["problem"]["request_id"]
+            .as_str()
+            .unwrap(),
+        workspace_id,
+        "the markdown presentation is a separate call"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+/// A diagnostics read holds no metered graph lease, so its receipt's elapsed
+/// time is the measured wall time of the read, which falls inside the
+/// caller's own measurement of the whole request.
+#[tokio::test]
+async fn published_diagnostics_receipt_reports_the_measured_read_time() {
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production diagnostics server");
+    wait_for_current_graph(&server).await;
+    let published = handle_real_server_tool_call(
+        &server,
+        "tracedecay_diagnose",
+        json!({
+            "cargo_output": "warning: unused variable: `result`\n --> src/main.rs:5:9\n  |\n5 |     let result = helper();\n  |         ^^^^^^\n",
+            "include_callers": false,
+        }),
+    )
+    .await;
+    let published: Value = serde_json::from_str(extract_real_server_text(&published))
+        .unwrap_or_else(|error| panic!("diagnose JSON ({error}): {published}"));
+    assert_eq!(published["published"]["status"], "published", "{published}");
+
+    let started = std::time::Instant::now();
+    let read = call_diagnostics(
+        &server,
+        json!({"scope": "workspace", "maximum_diagnostics": 5, "format": "json"}),
+    )
+    .await;
+    let request_micros = u64::try_from(started.elapsed().as_micros()).unwrap();
+    let payload: Value = serde_json::from_str(extract_real_server_text(&read))
+        .unwrap_or_else(|error| panic!("diagnostics JSON ({error}): {read}"));
+    assert_eq!(
+        payload["outcome"]["value"]["payload"]["diagnostics"][0]["logical_path"], "src/main.rs",
+        "{payload:#}"
+    );
+    let elapsed = payload["outcome"]["value"]["execution"]["budget"]["elapsed_micros"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("receipt elapsed time: {payload:#}"));
+    assert!(
+        (1..=request_micros).contains(&elapsed),
+        "elapsed_micros={elapsed} must be measured within the {request_micros}us request"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+async fn call_diagnostics(server: &McpServer, arguments: Value) -> Value {
+    handle_real_server_tool_call(server, "tracedecay_diagnostics", arguments).await
+}
+
+async fn assert_protocol_refusal(server: &McpServer, arguments: Value, detail: &str) {
+    let response =
+        handle_real_server_tool_call_raw(server, "tracedecay_diagnostics", arguments).await;
+    assert_eq!(response["id"], json!(1));
+    assert_eq!(
+        crate::support::route_refusal(&response),
+        crate::support::application_surface_refusal_error(detail)
+    );
+}
+
+fn assert_unpublished_json(label: &str, result: &Value, message: &str) {
+    assert_eq!(
+        result["isError"],
+        json!(true),
+        "{label} should be a semantic failure: {result}"
+    );
+    assert_eq!(result["content"][0]["type"], "text", "{label}: {result}");
+    let text = extract_real_server_text(result);
+    let payload: Value = serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("{label} text was not JSON ({error}): {text}"));
+    assert_eq!(
+        result["structuredContent"]["problem"], payload["problem"],
+        "{label}: {result}"
+    );
+    assert!(
+        payload.get("outcome").is_none(),
+        "{label} must not be an evidence page: {payload}"
+    );
+    assert_eq!(
+        payload["contract"]["schema_id"], "schema.application.primitive.diagnostics-read.result",
+        "{label}: {payload}"
+    );
+    assert_eq!(
+        payload["contract"]["schema_revision"],
+        json!(1),
+        "{label}: {payload}"
+    );
+    assert_eq!(
+        payload["problem"]["kind"], "unsupported",
+        "{label}: {payload}"
+    );
+    assert_eq!(
+        payload["problem"]["code"], UNPUBLISHED_CODE,
+        "{label}: {payload}"
+    );
+    assert_eq!(payload["problem"]["message"], message, "{label}: {payload}");
+    assert_eq!(
+        payload["problem"]["revision"],
+        json!(1),
+        "{label}: {payload}"
+    );
+    assert_eq!(
+        payload["problem"]["owning_layer"], "application",
+        "{label}: {payload}"
+    );
+    assert_eq!(
+        payload["problem"]["terminality"], "pre_admission",
+        "{label}: {payload}"
+    );
+    assert_eq!(
+        payload["problem"]["retryable"],
+        json!(false),
+        "{label}: {payload}"
+    );
+    assert_eq!(payload["problem"]["retry"], "never", "{label}: {payload}");
+    assert!(
+        payload["problem"]["retry_scope"].is_null(),
+        "{label}: {payload}"
+    );
+    assert!(
+        payload["problem"]["retry_after_millis"].is_null(),
+        "{label}: {payload}"
+    );
+    assert_eq!(
+        payload["problem"]["legal_actions"],
+        json!(["correct_request"]),
+        "{label}: {payload}"
+    );
+    assert_eq!(
+        payload["problem"]["details"],
+        json!([]),
+        "{label}: {payload}"
+    );
+    assert!(
+        payload["problem"]["committed_receipt"].is_null(),
+        "{label}: {payload}"
+    );
+    assert!(
+        payload["problem"]["cancellation_stage"].is_null(),
+        "{label}: {payload}"
+    );
+    assert!(
+        payload["problem"]["unavailable_classification"].is_null(),
+        "{label}: {payload}"
+    );
+    assert_eq!(
+        payload["problem"]["diagnostic"],
+        json!({
+            "code": UNPUBLISHED_CODE,
+            "message": message,
+        }),
+        "{label}: {payload}"
+    );
+    let request_id = payload["request_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} omitted request_id: {payload}"));
+    assert!(!request_id.is_empty(), "{label}: {payload}");
+    assert_eq!(payload["problem"]["request_id"], request_id, "{label}");
+    assert_eq!(payload["problem"]["trace_id"], request_id, "{label}");
+}
+
+fn request_id(result: &Value) -> &str {
+    result["structuredContent"]["problem"]["request_id"]
+        .as_str()
+        .expect("diagnostics problem request id")
+}

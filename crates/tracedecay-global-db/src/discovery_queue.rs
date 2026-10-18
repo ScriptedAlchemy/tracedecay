@@ -1,3 +1,9 @@
+//! Durable host transcript discovery path queue in the global DB.
+//!
+//! Hosts (notably Kimi) enqueue session transcript paths for ordered
+//! admission scans. This is not workspace-root git membership discovery,
+//! that lives in `tracedecay_runtime_core::git_discovery`.
+
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -113,7 +119,11 @@ fn decode_entry(
 }
 
 impl RegisteredGlobalDb {
-    #[hotpath::measure(future = true, label = "global_db.discovery_queue.persist.enqueue")]
+    #[tracing::instrument(
+        name = "global_db.discovery_queue.persist.enqueue",
+        level = "trace",
+        skip_all
+    )]
     pub async fn enqueue_host_discovery_paths(
         &self,
         provider: &str,
@@ -197,7 +207,7 @@ impl RegisteredGlobalDb {
         Ok(Some(entry))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.discovery_queue.query")]
+    #[tracing::instrument(name = "global_db.discovery_queue.query", level = "trace", skip_all)]
     pub async fn host_discovery_paths_after(
         &self,
         provider: &str,
@@ -240,7 +250,6 @@ impl RegisteredGlobalDb {
         Ok(entries)
     }
 
-    #[hotpath::skip]
     pub async fn host_discovery_path(
         &self,
         provider: &str,

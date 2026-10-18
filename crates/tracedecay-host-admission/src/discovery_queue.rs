@@ -6,7 +6,11 @@ use tracedecay_sessions::admission::{HostAdmissionOutcome, HostDiscoveryQueueEnt
 use super::{HostAdmissionFacade, host_scope};
 
 impl HostAdmissionFacade<'_> {
-    #[hotpath::measure(label = "usecases.admission.has_session_message", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.has_session_message",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn has_session_message(
         &self,
         scope: &ObservationScopeV1,
@@ -23,7 +27,108 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
-    #[hotpath::measure(label = "usecases.admission.get_parse_offset", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.existing_session_message_ids",
+        level = "trace",
+        skip_all
+    )]
+    pub(super) async fn existing_session_message_ids(
+        &self,
+        scope: &ObservationScopeV1,
+        provider: &str,
+        message_ids: Vec<String>,
+    ) -> Result<Vec<String>, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .existing_session_message_ids(provider, &message_ids)
+            .await
+            .map_err(|error| unavailable("read message identity batch", error))
+    }
+
+    pub(super) async fn read_session_backfill_state(
+        &self,
+        scope: &ObservationScopeV1,
+        key: &str,
+    ) -> Result<Option<String>, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .read_session_sync_journal(key)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "registered host backfill-state read failed");
+                HostAdmissionOutcome::registered_authority_unavailable()
+            })
+    }
+
+    pub(super) async fn list_session_backfill_state_page(
+        &self,
+        scope: &ObservationScopeV1,
+        key_prefix: &str,
+        after_key: Option<&str>,
+        through_key: &str,
+    ) -> Result<Vec<(String, String)>, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .list_incomplete_session_sync_journal_page_through(key_prefix, after_key, through_key)
+            .await
+            .map_err(|error| unavailable("list backfill-state page", error.to_string()))
+    }
+
+    pub(super) async fn session_backfill_state_high_water(
+        &self,
+        scope: &ObservationScopeV1,
+        key_prefix: &str,
+    ) -> Result<Option<String>, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .session_sync_journal_high_water(key_prefix)
+            .await
+            .map_err(|error| unavailable("read backfill-state high water", error.to_string()))
+    }
+
+    pub(super) async fn compare_and_swap_session_backfill_state(
+        &self,
+        scope: &ObservationScopeV1,
+        key: &str,
+        expected: Option<&str>,
+        replacement: &str,
+    ) -> Result<bool, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        let result = match expected {
+            Some(expected) => {
+                database
+                    .compare_and_swap_session_sync_journal(key, expected, replacement)
+                    .await
+            }
+            None => database.insert_session_sync_journal(key, replacement).await,
+        };
+        result.map_err(|error| {
+            tracing::warn!(%error, "registered host backfill-state CAS failed");
+            HostAdmissionOutcome::registered_authority_unavailable()
+        })
+    }
+
+    pub(super) async fn compare_and_delete_session_backfill_state(
+        &self,
+        scope: &ObservationScopeV1,
+        key: &str,
+        expected: &str,
+    ) -> Result<bool, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .compare_and_delete_session_sync_journal(key, expected)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "registered host backfill-state delete failed");
+                HostAdmissionOutcome::registered_authority_unavailable()
+            })
+    }
+
+    #[tracing::instrument(
+        name = "usecases.admission.get_parse_offset",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn get_parse_offset(
         &self,
         scope: &ObservationScopeV1,
@@ -34,16 +139,17 @@ impl HostAdmissionFacade<'_> {
             .authorities
             .registered_database(host_scope(scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
-        database
-            .get_parse_offset_result(path)
-            .await
-            .map_err(|error| {
-                tracing::warn!(?error, "registered host parse-offset read failed");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })
+        database.get_parse_offset(path).await.map_err(|error| {
+            tracing::warn!(?error, "registered host parse-offset read failed");
+            HostAdmissionOutcome::registered_authority_unavailable()
+        })
     }
 
-    #[hotpath::measure(label = "usecases.admission.advance_parse_offset", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.advance_parse_offset",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn advance_parse_offset(
         &self,
         scope: &ObservationScopeV1,
@@ -130,7 +236,11 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
-    #[hotpath::measure(label = "usecases.admission.enqueue_discovery", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.enqueue_discovery",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn enqueue_discovery_paths(
         &self,
         scope: &ObservationScopeV1,
@@ -145,7 +255,11 @@ impl HostAdmissionFacade<'_> {
             .map_err(|error| unavailable("enqueue", error))
     }
 
-    #[hotpath::measure(label = "usecases.admission.discovery_paths_after", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.discovery_paths_after",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn discovery_paths_after(
         &self,
         scope: &ObservationScopeV1,
@@ -161,7 +275,7 @@ impl HostAdmissionFacade<'_> {
             .map_err(|error| unavailable("read", error))
     }
 
-    #[hotpath::measure(label = "usecases.admission.discovery_path", future = true)]
+    #[tracing::instrument(name = "usecases.admission.discovery_path", level = "trace", skip_all)]
     pub(super) async fn discovery_path(
         &self,
         scope: &ObservationScopeV1,

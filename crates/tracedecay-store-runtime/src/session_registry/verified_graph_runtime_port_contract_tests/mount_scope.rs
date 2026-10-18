@@ -15,7 +15,7 @@ use tracedecay_store::{
 use super::{ContractFixture, await_mounted_graph_operation, project_id};
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
 async fn publish_foreign_memory_owner(
     path: &Path,
@@ -92,18 +92,20 @@ async fn unbound_profile_memory_denies_graph_operations() {
     let profile_runtime = super::super::open_runtime(
         &fixture.registry.registry,
         fixture.registry.resolver.as_ref(),
-        profile_shard,
-        fixture.registry.incarnation,
-        Some(
-            fixture
-                .registry
-                .profile_authority_pin("open unbound profile-memory binding fixture")
-                .await
-                .expect("profile authority pin"),
+        super::super::StoreRuntimeOpenSpec::new(
+            profile_shard,
+            fixture.registry.incarnation,
+            Some(
+                fixture
+                    .registry
+                    .profile_authority_pin("open unbound profile-memory binding fixture")
+                    .await
+                    .expect("profile authority pin"),
+            ),
+            None,
+            true,
+            "open unbound profile-memory binding fixture",
         ),
-        None,
-        true,
-        "open unbound profile-memory binding fixture",
     )
     .await
     .expect("unbound profile-memory runtime");

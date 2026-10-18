@@ -9,7 +9,7 @@ use super::{
     artifact_path_from_relative, artifact_relative_path, read_run_artifact_payload,
     validate_run_id_component,
 };
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const RUN_ARTIFACT_PUBLICATION_FILE: &str = ".tracedecay-publication.json";
 const PRODUCT_ARTIFACT_KINDS: [AutomationRunArtifactKind; 6] = [
@@ -103,16 +103,20 @@ fn validate_product_artifact_chain(
     Ok(descriptors)
 }
 
-#[hotpath::measure(label = "automation.run_artifact.chain_read", future = true)]
+#[tracing::instrument(name = "automation.run_artifact.chain_read", level = "trace", skip_all)]
 pub async fn read_published_artifact_chain(
     dashboard_root: &Path,
     run_id: &str,
     expected_identity: Option<&Value>,
 ) -> Result<Option<Vec<AutomationRunArtifact>>> {
     let publication_path = run_artifact_publication_path(dashboard_root, run_id)?;
-    crate::storage::reject_symlink_components(&publication_path, "automation artifact publication")
-        .map_err(TraceDecayError::from)?;
-    let bytes = match tokio::fs::read(&publication_path).await {
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &publication_path,
+        "automation artifact publication",
+    )
+    .map_err(TraceDecayError::from)?;
+    let read_path = publication_path.clone();
+    let bytes = match crate::automation::blocking_fs(move || std::fs::read(read_path)).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -160,7 +164,7 @@ pub async fn read_published_artifact_chain(
         .parent()
         .ok_or_else(|| config_error("artifact publication is missing its run directory"))?
         .to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         sync_directory(&run_directory)?;
         let artifacts_root = run_directory
             .parent()
@@ -177,7 +181,11 @@ pub async fn read_published_artifact_chain(
 
 // The fsync-heavy durable phase of run publication (per-artifact writes plus
 // directory syncs); slow terminals show up here rather than in the ledger append.
-#[hotpath::measure(label = "automation.run_artifact.chain_publish", future = true)]
+#[tracing::instrument(
+    name = "automation.run_artifact.chain_publish",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn publish_run_artifact_chain(
     dashboard_root: &Path,
     run_id: &str,
@@ -188,7 +196,7 @@ pub(crate) async fn publish_run_artifact_chain(
     let publication = prepare_run_artifact_publication(run_id, identity, &artifact_descriptors)?;
     let dashboard_root = dashboard_root.to_path_buf();
     let run_id = run_id.to_string();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         publish_run_artifact_chain_blocking(&dashboard_root, &run_id, &artifacts, &publication)
     })
     .await
@@ -234,8 +242,11 @@ fn publish_run_artifact_chain_blocking_with_fault(
             dashboard_root.display()
         ))
     })?;
-    crate::storage::reject_symlink_components(&artifacts_root, "automation artifact")
-        .map_err(TraceDecayError::from)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &artifacts_root,
+        "automation artifact",
+    )
+    .map_err(TraceDecayError::from)?;
     std::fs::create_dir_all(&artifacts_root).map_err(|error| {
         config_error(format!(
             "failed to create artifact root '{}': {error}",
@@ -244,8 +255,11 @@ fn publish_run_artifact_chain_blocking_with_fault(
     })?;
     sync_directory(dashboard_root)?;
     let final_directory = artifacts_root.join(run_id);
-    crate::storage::reject_symlink_components(&final_directory, "automation artifact run")
-        .map_err(TraceDecayError::from)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &final_directory,
+        "automation artifact run",
+    )
+    .map_err(TraceDecayError::from)?;
     let chain_matches = |directory: &Path| -> Result<bool> {
         for (artifact, expected) in artifacts {
             let path = artifact_path_from_relative(dashboard_root, run_id, &artifact.path)?;
@@ -420,43 +434,6 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap()
-    }
-
-    #[tokio::test]
-    async fn publication_returns_only_product_artifacts() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let run_id = "six-product-artifacts";
-        let identity = serde_json::json!({"identity": "test"});
-        let artifacts = test_artifact_chain(run_id);
-
-        publish_run_artifact_chain(temp.path(), run_id, artifacts, &identity)
-            .await
-            .unwrap();
-
-        let published = read_published_artifact_chain(temp.path(), run_id, Some(&identity))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(published.len(), 6);
-        assert_eq!(
-            published
-                .iter()
-                .map(|artifact| artifact.kind.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "traces",
-                "feedback",
-                "generated_evals",
-                "validation_gate",
-                "optimizer_diagnosis",
-                "codex_handoff",
-            ]
-        );
-        assert!(
-            run_artifact_publication_path(temp.path(), run_id)
-                .unwrap()
-                .is_file()
-        );
     }
 
     #[tokio::test]

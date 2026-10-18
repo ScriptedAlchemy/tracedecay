@@ -2,8 +2,24 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+};
+
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_SYNC_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectorySyncPolicy {
@@ -14,11 +30,17 @@ pub enum DirectorySyncPolicy {
 }
 
 /// Flush a directory's metadata so a preceding create/rename/remove is durable.
-#[hotpath::measure(label = "private_fs.framed_log.sync_directory")]
+#[tracing::instrument(
+    name = "private_fs.framed_log.sync_directory",
+    level = "trace",
+    skip_all
+)]
 pub fn sync_directory(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
+    #[cfg(test)]
+    DIRECTORY_SYNC_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     #[cfg(unix)]
     {
-        match File::open(dir).and_then(|directory| sync_owned_file(&directory)) {
+        match File::open(dir).and_then(|directory| sync_owned_file(dir, &directory)) {
             Ok(()) => Ok(()),
             Err(error)
                 if matches!(policy, DirectorySyncPolicy::TolerateUnsupported)
@@ -43,6 +65,110 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
     }
 }
 
+/// New files whose contents become durable together, before any is renamed
+/// into place.
+///
+/// On Linux each member's writeback starts as soon as it is written, and
+/// [`Self::sync`] then fsyncs the members concurrently. Concurrent fsyncs
+/// share a commit on a journaling filesystem and on ZFS's intent log alike,
+/// but on ZFS one fsync after another pays one intent-log commit each, so a
+/// seal of a hundred segments waited out a hundred commits. The cost stays
+/// proportional to the batch's own bytes. `syncfs(2)` also paid one
+/// commit, but waited for every dirty inode on the filesystem, so a one-file
+/// seal stalled for seconds behind unrelated writers. Other platforms fsync
+/// each file as it is written.
+#[derive(Default)]
+pub struct DurableFileBatch {
+    /// Paths rather than open handles, so a large seal holds no descriptors.
+    #[cfg(target_os = "linux")]
+    members: Vec<PathBuf>,
+}
+
+impl DurableFileBatch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one fully written member file, created at `path`.
+    pub fn written(&mut self, path: &Path, file: &File) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: `file` is an open descriptor for the whole call.
+            let started = unsafe {
+                libc::sync_file_range(file.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE)
+            };
+            if started != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.members.push(path.to_path_buf());
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            sync_owned_file(path, file)
+        }
+    }
+
+    /// Make every member file's contents durable.
+    #[tracing::instrument(
+        name = "private_fs.framed_log.sync_file_batch",
+        level = "trace",
+        skip_all
+    )]
+    pub fn sync(&self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let syncer = || -> io::Result<()> {
+                while let Some(member) = self.members.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    sync_file_at(member)?;
+                }
+                Ok(())
+            };
+            let syncers = self.members.len().min(DURABLE_BATCH_CONCURRENT_SYNCS);
+            std::thread::scope(|scope| {
+                let helpers = (1..syncers)
+                    .map(|_| scope.spawn(syncer))
+                    .collect::<Vec<_>>();
+                let mut outcome = syncer();
+                for helper in helpers {
+                    let helped = helper
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                    outcome = outcome.and(helped);
+                }
+                outcome
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
+}
+
+/// Barriers one batch keeps in flight together: enough for the filesystem to
+/// fold them into a shared log commit, bounded so a large seal does not
+/// spawn a thread per segment.
+#[cfg(target_os = "linux")]
+const DURABLE_BATCH_CONCURRENT_SYNCS: usize = 32;
+
+/// Flush an already-written file's contents so its bytes are durable.
+///
+/// The handle is opened for reading *and* writing. Windows implements
+/// `File::sync_all` with `FlushFileBuffers`, which requires write access and
+/// fails with `ERROR_ACCESS_DENIED` on a read-only handle, while Unix `fsync`
+/// accepts a read-only descriptor; opening for write is the one shape that is
+/// durable on both. Shared so no caller reintroduces the read-only open.
+#[tracing::instrument(name = "private_fs.framed_log.sync_file_at", level = "trace", skip_all)]
+pub fn sync_file_at(path: &Path) -> io::Result<()> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .and_then(|file| sync_owned_file(path, &file))
+}
+
 pub fn file_len(path: &Path) -> io::Result<u64> {
     match fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len()),
@@ -63,19 +189,25 @@ pub fn validate_regular_or_missing(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Restrict an existing file to owner read/write (`0o600` on unix).
+/// Restrict an existing file to owner read/write (`0o600` on unix, the
+/// protected single-ACE current-user DACL on Windows).
 ///
 /// Call this on a path you just created. Prefer [`tighten_existing_file`]
 /// when the file may be missing (that helper no-ops on `NotFound`).
+///
+/// The Windows arm must do real work: a file created under an ordinary
+/// directory inherits that directory's ACEs, and the private readers
+/// (`open_private_file`) refuse exactly that shape, so a writer that only
+/// tightened on Unix published records Windows could never read back.
 #[cfg(unix)]
 pub fn set_owner_private_file_mode(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
-#[cfg(not(unix))]
-pub fn set_owner_private_file_mode(_path: &Path) -> io::Result<()> {
-    Ok(())
+#[cfg(windows)]
+pub fn set_owner_private_file_mode(path: &Path) -> io::Result<()> {
+    crate::windows::make_private_file(path).map(drop)
 }
 
 pub fn tighten_existing_file(path: &Path) -> io::Result<()> {
@@ -93,23 +225,73 @@ pub fn tighten_existing_file(path: &Path) -> io::Result<()> {
     set_owner_private_file_mode(path)
 }
 
-#[hotpath::measure(label = "private_fs.framed_log.read_bounded")]
-pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> {
-    if !validate_regular_or_missing(path)? {
-        return Ok(None);
+/// Open `path` for reading without following a final symlink or reparse
+/// point, so every later kind/length check is answered by the exact object
+/// that will be read.
+///
+/// A symlink at the final component is reported as `InvalidInput`, the same
+/// kind [`validate_regular_or_missing`] uses for a non-regular path, so the
+/// callers that map `InvalidInput` to their unsafe-path outcome keep doing so.
+fn open_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        // `O_NONBLOCK` keeps a substituted FIFO from parking the opener until
+        // a writer appears; regular-file reads ignore it and the handle-kind
+        // check below rejects the FIFO.
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let length = fs::metadata(path)?.len();
+    #[cfg(windows)]
+    {
+        // Backup semantics let a directory open so the kind check below can
+        // reject it with the same `InvalidInput` the path-based check used.
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path).map_err(normalize_no_follow_error)
+}
+
+fn normalize_no_follow_error(error: io::Error) -> io::Error {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return io::Error::new(io::ErrorKind::InvalidInput, "path is a symbolic link");
+    }
+    error
+}
+
+/// Read a whole regular file of at most `maximum` bytes, or `None` when
+/// `path` does not exist.
+///
+/// The file is opened once, without following a final symlink, and the kind
+/// and length checks run on that opened handle's metadata, so a pathname that
+/// is swapped between check and read cannot substitute a different object
+/// (only a regular file that atomically replaced the path can be observed,
+/// in either its old or new state). Non-regular objects and symlinks fail
+/// with `InvalidInput`; an empty, oversized, or short-read file fails with
+/// `InvalidData`.
+#[tracing::instrument(name = "private_fs.framed_log.read_bounded", level = "trace", skip_all)]
+pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> {
+    let file = match open_no_follow(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        ));
+    }
+    let length = metadata.len();
     if length == 0 || length > maximum as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "bounded read length is invalid",
         ));
     }
-    hotpath::gauge!("private_fs.framed_log.read_bytes").set(length);
     let mut bytes = Vec::with_capacity(length as usize);
-    File::open(path)?
-        .take(maximum as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() != length as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -119,12 +301,14 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
     Ok(Some(bytes))
 }
 
+const TEMPORARY_SUFFIX: &str = ".tmp";
+
 fn temporary_path(path: &Path, kind: &str) -> PathBuf {
     static NONCE: AtomicU64 = AtomicU64::new(1);
     let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     parent.join(format!(
-        ".{}.{}.{}.{}.tmp",
+        ".{}.{}.{}.{}{TEMPORARY_SUFFIX}",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("spool"),
@@ -132,6 +316,48 @@ fn temporary_path(path: &Path, kind: &str) -> PathBuf {
         std::process::id(),
         nonce
     ))
+}
+
+/// Is this directory entry one of this module's staging temporaries?
+///
+/// [`with_owned_temp_publish`] stages into `.<destination>.<kind>.<pid>.<nonce>.tmp`
+/// beside the destination and publishes by rename, so a publisher killed
+/// between the two leaves that name behind. A reader enumerating a private
+/// directory must recognize the residue as its own rather than refusing the
+/// whole directory as foreign.
+#[must_use]
+pub fn is_owned_temporary_name(name: &str) -> bool {
+    name.starts_with('.') && name.ends_with(TEMPORARY_SUFFIX)
+}
+
+/// Delete staging temporaries abandoned by a killed publisher.
+///
+/// Only the exclusive owner of `dir` may call this: a live publisher in any
+/// process still owns its staging file. A non-regular entry under a staging
+/// name is foreign and is left in place for the caller's own path validation
+/// to reject.
+pub fn remove_abandoned_temporaries(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
+    let mut removed = false;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_owned_temporary_name(name) {
+            continue;
+        }
+        let path = entry.path();
+        if !fs::symlink_metadata(&path)?.file_type().is_file() {
+            continue;
+        }
+        fs::remove_file(&path)?;
+        removed = true;
+    }
+    if removed {
+        sync_directory(dir, policy)?;
+    }
+    Ok(())
 }
 
 fn remove_owned_temp(path: &Path) {
@@ -144,8 +370,149 @@ fn remove_owned_temp_if_contents_match(path: &Path, owned_contents: &[u8]) {
     }
 }
 
-fn sync_owned_file(file: &File) -> io::Result<()> {
-    hotpath::measure_block!("private_fs.framed_log.fsync", file.sync_all())
+/// Fixture fsync latency for every durability barrier this module issues at
+/// or below a root, so a test models a slow disk through the same authority
+/// production writes use instead of sleeping around it.
+#[cfg(feature = "test-helpers")]
+pub mod sync_latency {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::time::Duration;
+
+    struct Injection {
+        id: u64,
+        root: PathBuf,
+        delay: Duration,
+        syncs: Arc<AtomicU64>,
+    }
+
+    static INJECTIONS: Mutex<Vec<Injection>> = Mutex::new(Vec::new());
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    /// Active while alive; counts the barriers it delayed.
+    pub struct SyncLatencyGuard {
+        id: u64,
+        syncs: Arc<AtomicU64>,
+    }
+
+    impl SyncLatencyGuard {
+        /// File and directory fsyncs issued at or below the root so far.
+        #[must_use]
+        pub fn syncs(&self) -> u64 {
+            self.syncs.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for SyncLatencyGuard {
+        fn drop(&mut self) {
+            INJECTIONS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|injection| injection.id != self.id);
+        }
+    }
+
+    /// Delay every fsync of `root` or a path below it by `delay`.
+    #[must_use]
+    pub fn inject(root: &Path, delay: Duration) -> SyncLatencyGuard {
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        let syncs = Arc::new(AtomicU64::new(0));
+        INJECTIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Injection {
+                id,
+                root: root.to_path_buf(),
+                delay,
+                syncs: Arc::clone(&syncs),
+            });
+        SyncLatencyGuard { id, syncs }
+    }
+
+    pub(super) fn before_sync(path: &Path) {
+        let matched = INJECTIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|injection| path.starts_with(&injection.root))
+            .map(|injection| (injection.delay, Arc::clone(&injection.syncs)));
+        if let Some((delay, syncs)) = matched {
+            syncs.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(delay);
+        }
+    }
+}
+
+fn before_sync(path: &Path) {
+    #[cfg(feature = "test-helpers")]
+    sync_latency::before_sync(path);
+    #[cfg(not(feature = "test-helpers"))]
+    let _ = path;
+}
+
+fn sync_owned_file(path: &Path, file: &File) -> io::Result<()> {
+    before_sync(path);
+    {
+        let _span = tracing::trace_span!("private_fs.framed_log.fsync").entered();
+        file.sync_all()
+    }
+}
+
+/// `File::sync_data` on a caller-held handle of `path`.
+pub fn sync_file_data(path: &Path, file: &File) -> io::Result<()> {
+    before_sync(path);
+    {
+        let _span = tracing::trace_span!("private_fs.framed_log.fdatasync").entered();
+        file.sync_data()
+    }
+}
+
+/// A synced replacement for `destination`, staged so its durability barrier
+/// runs before, and outside, whatever lock guards publication.
+///
+/// [`Self::publish`] renames it into place without a barrier; the caller makes
+/// the directory entry durable. Dropping it unpublished removes the staging.
+#[derive(Debug)]
+pub struct StagedReplacement {
+    temporary: PathBuf,
+    destination: PathBuf,
+    published: bool,
+}
+
+impl StagedReplacement {
+    #[tracing::instrument(
+        name = "private_fs.framed_log.stage_replacement",
+        level = "trace",
+        skip_all
+    )]
+    pub fn stage(destination: &Path, kind: &str, bytes: &[u8]) -> io::Result<Self> {
+        validate_regular_or_missing(destination)?;
+        let (temporary, mut output) = create_owned_temp(destination, kind)?;
+        let staged = Self {
+            temporary,
+            destination: destination.to_path_buf(),
+            published: false,
+        };
+        output.write_all(bytes)?;
+        sync_owned_file(&staged.temporary, &output)?;
+        Ok(staged)
+    }
+
+    pub fn publish(mut self) -> io::Result<()> {
+        validate_regular_or_missing(&self.destination)?;
+        replace_via_rename(&self.temporary, &self.destination)?;
+        self.published = true;
+        tighten_existing_file(&self.destination)
+    }
+}
+
+impl Drop for StagedReplacement {
+    fn drop(&mut self) {
+        if !self.published {
+            remove_owned_temp(&self.temporary);
+        }
+    }
 }
 
 fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, File)> {
@@ -154,10 +521,7 @@ fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, Fil
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+        options.mode(0o600);
         match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -172,7 +536,7 @@ fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, Fil
 
 /// Publish `destination` by staging into an owned temp file, syncing, then
 /// replacing through `publish`.
-#[hotpath::measure(label = "private_fs.framed_log.publish")]
+#[tracing::instrument(name = "private_fs.framed_log.publish", level = "trace", skip_all)]
 pub fn with_owned_temp_publish<T>(
     destination: &Path,
     kind: &str,
@@ -184,7 +548,7 @@ pub fn with_owned_temp_publish<T>(
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let result = (|| {
         let value = write(&mut output)?;
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         drop(output);
         publish(&temporary, destination)?;
         tighten_existing_file(destination)?;
@@ -331,51 +695,28 @@ fn replace_existing_with_backup(
     Ok(replacement.to_path_buf())
 }
 
-#[cfg(target_os = "linux")]
-fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-    let destination = CString::new(destination.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-    let result = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+/// Atomically renames `source` onto `destination` without ever replacing an
+/// occupied destination name.
+///
+/// An occupied destination fails with `AlreadyExists` and keeps its bytes.
+/// Platforms without a no-replace primitive fail closed with `Unsupported`:
+/// retaining bytes is always preferable to risking a replacement.
+pub fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    platform_rename_noreplace(source, destination)
 }
 
-#[cfg(target_os = "macos")]
-fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-    let destination = CString::new(destination.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-    let result =
-        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    crate::rename_noreplace::rename_noreplace_at(
+        libc::AT_FDCWD,
+        source.as_os_str(),
+        libc::AT_FDCWD,
+        destination.as_os_str(),
+    )
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
+fn platform_rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "atomic no-replace rename is unsupported on this platform",
@@ -383,30 +724,8 @@ fn rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
-
-    let wide = |path: &Path| {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>()
-    };
-    let source = wide(source);
-    let destination = wide(destination);
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    crate::rename_noreplace::rename_noreplace_paths(source, destination)
 }
 
 pub fn atomic_write(
@@ -424,7 +743,35 @@ pub fn atomic_write(
     )
 }
 
-#[hotpath::measure(label = "private_fs.framed_log.write_prepared")]
+/// Atomically replaces a rebuildable accelerator without durability barriers.
+///
+/// Readers must treat a missing or invalid file as a cache miss. The durable
+/// authority must live elsewhere, so a crash during this publication can only
+/// make the next read rebuild the accelerator.
+#[tracing::instrument(
+    name = "private_fs.framed_log.write_accelerator",
+    level = "trace",
+    skip_all
+)]
+pub fn atomic_write_accelerator(destination: &Path, kind: &str, bytes: &[u8]) -> io::Result<()> {
+    validate_regular_or_missing(destination)?;
+    let (temporary, mut output) = create_owned_temp(destination, kind)?;
+    let result = (|| {
+        output.write_all(bytes)?;
+        drop(output);
+        replace_via_rename(&temporary, destination)
+    })();
+    if result.is_err() {
+        remove_owned_temp(&temporary);
+    }
+    result
+}
+
+#[tracing::instrument(
+    name = "private_fs.framed_log.write_prepared",
+    level = "trace",
+    skip_all
+)]
 pub fn atomic_write_prepared(
     destination: &Path,
     kind: &str,
@@ -432,17 +779,16 @@ pub fn atomic_write_prepared(
     prepare: impl FnOnce(&Path) -> io::Result<()>,
     directory_policy: DirectorySyncPolicy,
 ) -> io::Result<()> {
-    hotpath::gauge!("private_fs.framed_log.write_bytes").set(bytes.len());
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let result = (|| {
         output.write_all(bytes)?;
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         prepare(&temporary)?;
         // Keep flushing through the original writable handle. Windows rejects
         // FlushFileBuffers on a read-only reopen, and `prepare` may also have
         // applied destination permissions that prevent a writable reopen.
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         drop(output);
         replace_via_rename(&temporary, destination)?;
         sync_parent_directory(destination, directory_policy)
@@ -460,7 +806,11 @@ pub fn atomic_write_prepared(
 /// destination is atomically replaced while retaining the displaced object;
 /// the caller verifies that object against its exact snapshot. A mismatch is
 /// rolled back before this function returns an error.
-#[hotpath::measure(label = "private_fs.framed_log.write_prepared_conditionally")]
+#[tracing::instrument(
+    name = "private_fs.framed_log.write_prepared_conditionally",
+    level = "trace",
+    skip_all
+)]
 pub fn atomic_write_prepared_conditionally<
     Prepare,
     BeforePublish,
@@ -495,15 +845,14 @@ where
         verify_displaced,
         verify_published,
     } = callbacks;
-    hotpath::gauge!("private_fs.framed_log.write_bytes").set(bytes.len());
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let published_existing = std::cell::Cell::new(false);
     let result = (|| {
         output.write_all(bytes)?;
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         prepare(&temporary)?;
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         drop(output);
         before_publish();
         match expectation {
@@ -590,7 +939,11 @@ where
 
 /// Remove an existing destination only after atomically retaining and
 /// verifying the exact object that occupied the path at publication time.
-#[hotpath::measure(label = "private_fs.framed_log.remove_conditionally")]
+#[tracing::instrument(
+    name = "private_fs.framed_log.remove_conditionally",
+    level = "trace",
+    skip_all
+)]
 pub fn remove_conditionally(
     destination: &Path,
     before_publish: impl FnOnce(),
@@ -633,41 +986,70 @@ pub fn remove_conditionally(
     sync_parent_directory(destination, directory_policy)
 }
 
-#[hotpath::measure(label = "private_fs.framed_log.append")]
+#[tracing::instrument(name = "private_fs.framed_log.append", level = "trace", skip_all)]
 pub fn append_durable(
     path: &Path,
     frame: &[u8],
     directory_policy: DirectorySyncPolicy,
 ) -> io::Result<u64> {
-    hotpath::gauge!("private_fs.framed_log.write_bytes").set(frame.len());
     tighten_existing_file(path)?;
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut output = options.open(path)?;
+    let (mut output, created) = open_append_target(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
     output.write_all(frame)?;
-    sync_owned_file(&output)?;
-    sync_parent_directory(path, directory_policy)?;
+    sync_owned_file(path, &output)?;
+    if created {
+        sync_parent_directory(path, directory_policy)?;
+    }
     Ok(offset)
 }
 
-#[hotpath::measure(label = "private_fs.framed_log.truncate")]
-pub fn truncate_file(
-    path: &Path,
-    len: u64,
-    directory_policy: DirectorySyncPolicy,
-) -> io::Result<()> {
+/// Appends `frame` without any durability barrier. The caller owns the
+/// frame's durability and, when this creates the file, its directory entry's:
+/// typically one group commit that syncs every frame appended before it.
+#[tracing::instrument(
+    name = "private_fs.framed_log.append_unsynced",
+    level = "trace",
+    skip_all
+)]
+pub fn append_unsynced(path: &Path, frame: &[u8]) -> io::Result<u64> {
+    tighten_existing_file(path)?;
+    let (mut output, _created) = open_append_target(path)?;
+    let offset = output.seek(SeekFrom::End(0))?;
+    output.write_all(frame)?;
+    Ok(offset)
+}
+
+fn open_append_target(path: &Path) -> io::Result<(File, bool)> {
+    let mut existing = OpenOptions::new();
+    existing.append(true);
+    match existing.open(path) {
+        Ok(file) => return Ok((file, false)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let mut create = OpenOptions::new();
+    create.append(true).create_new(true);
+    #[cfg(unix)]
+    create.mode(0o600);
+    match create.open(path) {
+        Ok(file) => Ok((file, true)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            existing.open(path).map(|file| (file, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[tracing::instrument(name = "private_fs.framed_log.truncate", level = "trace", skip_all)]
+/// Truncation rewrites an existing inode's length; the directory entry is
+/// unchanged, so only the file itself needs a durability barrier.
+pub fn truncate_file(path: &Path, len: u64) -> io::Result<()> {
     tighten_existing_file(path)?;
     let output = OpenOptions::new().write(true).open(path)?;
     output.set_len(len)?;
-    sync_owned_file(&output)?;
-    tighten_existing_file(path)?;
-    sync_parent_directory(path, directory_policy)
+    sync_owned_file(path, &output)?;
+    tighten_existing_file(path)
 }
 
 #[cfg(test)]
@@ -675,7 +1057,42 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{DirectorySyncPolicy, atomic_write_prepared};
+    use super::{
+        DIRECTORY_SYNC_CALLS, DirectorySyncPolicy, append_durable, atomic_write_accelerator,
+        atomic_write_prepared,
+    };
+
+    #[test]
+    fn rebuildable_accelerators_publish_without_directory_sync() {
+        let root = tempfile::tempdir().expect("accelerator fixture root");
+        let path = root.path().join("checkpoint.bin");
+        DIRECTORY_SYNC_CALLS.with(|calls| calls.set(0));
+
+        atomic_write_accelerator(&path, "checkpoint", b"first").expect("publish accelerator");
+        atomic_write_accelerator(&path, "checkpoint", b"second").expect("replace accelerator");
+
+        assert_eq!(std::fs::read(path).expect("read accelerator"), b"second");
+        assert_eq!(DIRECTORY_SYNC_CALLS.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn appends_sync_the_directory_only_when_creating_the_log() {
+        let root = tempfile::tempdir().expect("append fixture root");
+        let log = root.path().join("events.log");
+        DIRECTORY_SYNC_CALLS.with(|calls| calls.set(0));
+
+        append_durable(&log, b"first", DirectorySyncPolicy::TolerateUnsupported)
+            .expect("create durable log");
+        assert_eq!(DIRECTORY_SYNC_CALLS.with(std::cell::Cell::get), 1);
+
+        append_durable(&log, b"second", DirectorySyncPolicy::TolerateUnsupported)
+            .expect("append durable record");
+        assert_eq!(
+            DIRECTORY_SYNC_CALLS.with(std::cell::Cell::get),
+            1,
+            "an existing directory entry does not need another durability barrier"
+        );
+    }
 
     fn deny_writes(path: &Path) {
         let mut permissions = fs::metadata(path).expect("staging metadata").permissions();

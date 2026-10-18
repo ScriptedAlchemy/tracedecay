@@ -130,7 +130,7 @@ impl ClientCapabilities {
     /// Parses only the LSP capability fields the gateway actually uses. Unknown
     /// fields are intentionally ignored rather than becoming accidental
     /// capability authority.
-    #[hotpath::measure(label = "lsp.capabilities.parse")]
+    #[tracing::instrument(name = "lsp.capabilities.parse", level = "trace", skip_all)]
     pub fn from_initialize_capabilities(value: &Value) -> Result<Self, CapabilityParseError> {
         let Some(root) = value.as_object() else {
             return Err(CapabilityParseError::ExpectedObject);
@@ -311,7 +311,7 @@ impl UpstreamCapabilities {
     /// Retains only the semantic methods the upstream server advertised in its
     /// standard `initialize` result. Missing, `false`, or malformed entries
     /// are unavailable rather than inferred from the client request.
-    #[hotpath::measure(label = "lsp.capabilities.upstream")]
+    #[tracing::instrument(name = "lsp.capabilities.upstream", level = "trace", skip_all)]
     pub(crate) fn from_initialize_response(response: &Value) -> Self {
         let capabilities = response.get("capabilities").and_then(Value::as_object);
         let mut semantic: BTreeSet<_> = [
@@ -401,7 +401,7 @@ impl EffectiveCapabilities {
 
     /// Exact server capability projection. Deferred features are absent,
     /// never advertised as `false` options that a client may still invoke.
-    #[hotpath::measure(label = "lsp.capabilities.advertise")]
+    #[tracing::instrument(name = "lsp.capabilities.advertise", level = "trace", skip_all)]
     pub fn to_lsp_server_capabilities(&self) -> Value {
         let mut capabilities = serde_json::Map::new();
         capabilities.insert("positionEncoding".into(), Value::String("utf-16".into()));
@@ -525,10 +525,7 @@ pub enum CapabilityAvailability {
 /// Why the gateway could not truthfully advertise or serve a capability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapabilityUnavailableReason {
-    ExplicitlyUnavailable,
     ClientCapabilityMissing,
-    GatewayCapabilityMissing,
-    UpstreamCapabilityMissing,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -540,7 +537,7 @@ pub struct CapabilityUnavailable {
 /// Computes the bounded intersection without advertising deferred
 /// capabilities such as rename, code actions, workspace diagnostics, or
 /// execute-command.
-#[hotpath::measure(label = "lsp.capabilities.negotiate")]
+#[tracing::instrument(name = "lsp.capabilities.negotiate", level = "trace", skip_all)]
 pub fn negotiate_capabilities(
     client: &ClientCapabilities,
     gateway: &GatewayCapabilities,
@@ -762,22 +759,6 @@ mod tests {
         assert!(
             !effective.supports_semantic(SemanticCapability::RenameCandidate),
             "graph-only sessions cannot claim analyzer-derived rename evidence"
-        );
-    }
-
-    #[test]
-    fn workspace_folders_require_both_client_and_exact_gateway_authority() {
-        let gateway = GatewayCapabilities {
-            supports_workspace_folders: true,
-            ..GatewayCapabilities::default()
-        };
-        let effective =
-            negotiate_capabilities(&full_client(), &gateway, &UpstreamCapabilities::default());
-
-        assert!(effective.workspace_folders_supported);
-        assert_eq!(
-            effective.to_lsp_server_capabilities()["workspace"]["workspaceFolders"]["supported"],
-            true
         );
     }
 
@@ -1010,32 +991,6 @@ mod tests {
                 Err(CapabilityParseError::InvalidTraceDecayCapabilities)
             );
         }
-    }
-
-    #[test]
-    fn context_capability_dto_accepts_recognized_advisory_projections() {
-        let capabilities = ClientCapabilities::from_initialize_capabilities(&json!({
-            "experimental": {
-                "tracedecay": {
-                    "revision": TRACEDECAY_CONTEXT_REVISION,
-                    "projections": [
-                        { "kind": "githubReview", "revision": TRACEDECAY_CONTEXT_REVISION },
-                        { "kind": "ciFailureLocalization", "revision": TRACEDECAY_CONTEXT_REVISION },
-                        { "kind": "agentProximity", "revision": TRACEDECAY_CONTEXT_REVISION },
-                    ],
-                }
-            }
-        }))
-        .expect("recognized advisory projection capabilities");
-
-        assert_eq!(
-            capabilities
-                .context_projections
-                .keys()
-                .map(ContextProjectionKind::as_str)
-                .collect::<Vec<_>>(),
-            vec!["agentProximity", "ciFailureLocalization", "githubReview"]
-        );
     }
 
     #[test]

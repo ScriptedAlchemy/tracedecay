@@ -4,11 +4,7 @@ import {
   type ListTaskHandoffsResultV1,
 } from '../../contracts/generated.ts';
 import type { WorkResult } from '../work/workApi.ts';
-import {
-  HANDOFF_LIST_TASK_ROUTE,
-  handoffTargetLabel,
-  readHandoffTokens,
-} from './handoffTokens.ts';
+import { HANDOFF_LIST_TASK_ROUTE, readHandoffTokens } from './handoffTokens.ts';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 
@@ -50,11 +46,6 @@ function landed(handoffs: Record<string, unknown>[]): WorkResult<ListTaskHandoff
 }
 
 describe('HANDOFF_LIST_TASK_ROUTE', () => {
-  it('names the operation and path the daemon actually mounts', () => {
-    expect(HANDOFF_LIST_TASK_ROUTE.operation).toBe('operation.handoff.list_task_handoffs');
-    expect(HANDOFF_LIST_TASK_ROUTE.path).toBe('/api/application/handoff/list-task');
-  });
-
   it('accepts a bare session id and refuses a request carrying a bearer', () => {
     expect(HANDOFF_LIST_TASK_ROUTE.request.safeParse({ session_id: 's' }).success).toBe(true);
     // The contract is `.strict()`: a client cannot smuggle a token onto this
@@ -125,39 +116,5 @@ describe('readHandoffTokens', () => {
     expect(rendered).toContain('token_digest');
     expect(rendered).not.toMatch(/"token"\s*:/);
     expect(rendered).not.toMatch(/secret/i);
-  });
-});
-
-describe('handoffTargetLabel', () => {
-  it('names a task target by id and version', () => {
-    expect(handoffTargetLabel(ListTaskHandoffsResultV1Schema.parse({
-      observed_at: 1,
-      handoffs: [token({})],
-      open_count: 1,
-      consumed_count: 0,
-      expired_count: 0,
-      truncated: false,
-    }).handoffs[0]!)).toBe('task task.alpha @ v9');
-  });
-
-  it('names an investigation target by finding', () => {
-    const parsed = ListTaskHandoffsResultV1Schema.parse({
-      observed_at: 1,
-      handoffs: [
-        token({
-          kind: 'investigation',
-          target: {
-            kind: 'investigation',
-            finding_id: 'finding.beta',
-            owner_version_digest: `sha256:${'c'.repeat(64)}`,
-          },
-        }),
-      ],
-      open_count: 1,
-      consumed_count: 0,
-      expired_count: 0,
-      truncated: false,
-    });
-    expect(handoffTargetLabel(parsed.handoffs[0]!)).toBe('finding finding.beta');
   });
 });

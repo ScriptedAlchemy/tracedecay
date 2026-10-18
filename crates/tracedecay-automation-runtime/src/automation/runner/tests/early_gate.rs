@@ -7,15 +7,15 @@ use tracedecay_domain::{ActorId, FactOwnerV1, SessionId};
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_policy::CurationApplyAuthorityV1;
 
-use super::super::session_reflector::run_session_reflector_for_store;
-use super::super::skill_writer::{SkillWriterStoreRuntime, run_skill_writer_for_store};
+use super::super::session_reflector::run_session_reflector_for_store_with_publication;
 use super::super::*;
 use crate::automation::backend::{AgentTaskBackend, AgentTaskRequest, AgentTaskResponse};
 use crate::automation::config::{
     AutomationBackend, AutomationHostMode, AutomationTaskConfig, AutomationTaskSet,
 };
+use crate::automation::lifecycle::AutomationRunLedgerPublication;
 use crate::automation::run_ledger::AutomationRunStatus;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_session_memory::session::SessionTemporalQuery;
 
 struct RecordingRetrieval {
@@ -63,6 +63,10 @@ impl AgentTaskBackend for RecordingBackend {
     {
         self.calls.fetch_add(1, Ordering::SeqCst);
         panic!("scheduled-disabled automation must not invoke its backend")
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -125,7 +129,7 @@ async fn scheduled_disabled_session_reflector_reads_no_evidence_and_runs_no_back
     let control = run_control();
     let authority = curation_authority();
 
-    let run = run_session_reflector_for_store(
+    let run = run_session_reflector_for_store_with_publication(
         directory.path().join("automation"),
         sessions.profile_database_arc(),
         &retrieval,
@@ -140,47 +144,11 @@ async fn scheduled_disabled_session_reflector_reads_no_evidence_and_runs_no_back
             ..SessionReflectorAutomationOptions::default()
         },
         None,
-    )
-    .await
-    .expect("scheduled-disabled reflector skip");
-
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(run.report["reason"], AUTOMATION_DISABLED);
-    assert_eq!(retrieval.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn scheduled_disabled_skill_writer_reads_no_evidence_and_runs_no_backend() {
-    let directory = tempfile::tempdir().expect("skill writer early gate directory");
-    let sessions = RegisteredGlobalDbTestRuntime::profile(directory.path())
-        .await
-        .expect("registered session runtime");
-    let retrieval = RecordingRetrieval::new();
-    let backend = RecordingBackend::new();
-    let config = scheduled_disabled_config();
-
-    let run = run_skill_writer_for_store(
-        SkillWriterStoreRuntime {
-            dashboard_root: directory.path().join("automation"),
-            sessions_db: sessions.profile_database_arc(),
-            analytics_project_root: None,
-            analytics_db: None,
-            authority: curation_authority(),
-        },
-        &retrieval,
-        &config,
-        &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::Scheduler,
-            run_id: Some("run.early-gate.skill-writer".to_owned()),
-            profile_root: Some(directory.path().join("profile")),
-            ..SkillWriterAutomationOptions::default()
-        },
+        AutomationRunLedgerPublication::Immediate,
         None,
     )
     .await
-    .expect("scheduled-disabled skill writer skip");
+    .expect("scheduled-disabled reflector skip");
 
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
     assert_eq!(run.report["reason"], AUTOMATION_DISABLED);

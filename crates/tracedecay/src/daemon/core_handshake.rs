@@ -10,16 +10,16 @@ use std::path::PathBuf;
 use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::errors::Result;
 
-pub use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
-
-/// Handshake for this process's current client identity and binary version.
+/// Handshake for `profile`'s client identity and this binary's version.
 pub fn handshake_for_current_client(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: Option<PathBuf>,
     scope_prefix: Option<String>,
     timings: bool,
     allow_init: bool,
 ) -> Result<DaemonHandshake> {
     tracedecay_daemon_control::handshake_for_current_client(
+        profile,
         binary_version()?,
         project_path,
         scope_prefix,
@@ -30,8 +30,8 @@ pub fn handshake_for_current_client(
 
 pub fn handshake_open_options(
     handshake: &DaemonHandshake,
-) -> crate::tracedecay::TraceDecayOpenOptions {
-    crate::tracedecay::TraceDecayOpenOptions {
+) -> tracedecay_project::project::TraceDecayOpenOptions {
+    tracedecay_project::project::TraceDecayOpenOptions {
         profile_root: Some(handshake.client_identity.profile_root.clone()),
         global_db_path: Some(handshake.client_identity.global_db_path.clone()),
     }
@@ -46,6 +46,6 @@ pub fn handshake_open_options(
 /// fallible because it reads the registered product runtime: a process whose
 /// entry point never registered one has no truthful version to advertise.
 pub(crate) fn binary_version()
--> std::result::Result<&'static str, crate::product_runtime::ProductRuntimeError> {
-    crate::version::build_version()
+-> std::result::Result<&'static str, tracedecay_project::product_runtime::ProductRuntimeError> {
+    tracedecay_project::version::build_version()
 }

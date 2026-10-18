@@ -1,33 +1,44 @@
 /// Tree-sitter based Java source code extractor.
 ///
 /// Parses Java source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{declaration_start, local_node_id};
+use crate::extraction_artifact::{
+    CallableArityV1, ExtractedCallableArityV1, ExtractedImportEvidenceV1, ExtractionArtifactV1,
+    ImportBindingV1, ImportNamespaceV1,
+};
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 use crate::{
     annotations::{
         AnnotationEmitterState, emit_annotation_usage, scan_children_for_annotation_kinds,
     },
     complexity::{JAVA_COMPLEXITY, count_complexity},
+    traversal::has_direct_child_kind,
 };
+
+/// Annotation nodes a Java declaration's `modifiers` may lead with.
+const JAVA_ANNOTATION_KINDS: &[&str] = &["marker_annotation", "annotation"];
 
 /// Extracts code graph nodes and edges from Java source files using tree-sitter.
 pub struct JavaExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
+    callable_arities: Vec<ExtractedCallableArityV1>,
     errors: Vec<String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Track nesting depth to distinguish inner classes from top-level classes.
     class_depth: usize,
@@ -35,20 +46,18 @@ struct ExtractionState {
     inside_interface: bool,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
             unresolved_refs: Vec::new(),
+            callable_arities: Vec::new(),
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
             inside_interface: false,
@@ -59,8 +68,7 @@ impl ExtractionState {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -75,16 +83,12 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        self.node_str(node).to_string()
-    }
-
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
-impl AnnotationEmitterState for ExtractionState {
+impl<'s> AnnotationEmitterState for ExtractionState<'s> {
     fn extract_annotation_name(&self, annotation_node: TsNode<'_>) -> String {
         JavaExtractor::extract_annotation_name(self, annotation_node)
     }
@@ -93,12 +97,16 @@ impl AnnotationEmitterState for ExtractionState {
         &self.file_path
     }
 
+    fn source(&self) -> &[u8] {
+        self.source
+    }
+
     fn qualified_prefix(&self) -> String {
         ExtractionState::qualified_prefix(self)
     }
 
     fn node_str(&self, node: TsNode<'_>) -> &str {
-        ExtractionState::node_str(self, node)
+        self.node_text(node)
     }
 
     fn timestamp(&self) -> u64 {
@@ -119,34 +127,15 @@ impl AnnotationEmitterState for ExtractionState {
 }
 
 impl JavaExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_java(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        let mut imports = Vec::new();
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -156,7 +145,7 @@ impl JavaExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -170,6 +159,7 @@ impl JavaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -179,20 +169,67 @@ impl JavaExtractor {
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit_node(&mut state, child);
+            if child.kind() == "import_declaration" {
+                Self::import_evidence(&mut state, &mut imports, child);
+            }
         });
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
-            scope,
-            metrics,
-        )
+        let callable_arities = std::mem::take(&mut state.callable_arities);
+        let mut artifact =
+            ExtractionArtifactV1::with_imports(Self::build_result(state, start), imports);
+        artifact.callable_arities = callable_arities;
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(artifact, scope, metrics)
     }
 
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("java", "Java", source)
+    /// `import a.b.C;` binds type `C` from package `a.b`; `import static
+    /// a.b.C.m;` binds member `m` of class `a.b.C`; `.*` imports are globs.
+    fn import_evidence(
+        state: &mut ExtractionState,
+        imports: &mut Vec<ExtractedImportEvidenceV1>,
+        node: TsNode<'_>,
+    ) {
+        let mut cursor = node.walk();
+        let children = node.children(&mut cursor).collect::<Vec<_>>();
+        let Some(name) = children
+            .iter()
+            .find(|child| matches!(child.kind(), "scoped_identifier" | "identifier"))
+        else {
+            return;
+        };
+        let path = state.node_text(*name);
+        let is_static = children.iter().any(|child| child.kind() == "static");
+        let namespace = if is_static {
+            ImportNamespaceV1::Value
+        } else {
+            ImportNamespaceV1::Type
+        };
+        let (module, binding) = if children.iter().any(|child| child.kind() == "asterisk") {
+            (path, ImportBindingV1::Glob)
+        } else {
+            let Some((module, imported)) = path.rsplit_once('.') else {
+                return;
+            };
+            (
+                module,
+                ImportBindingV1::Named {
+                    imported,
+                    local: imported,
+                },
+            )
+        };
+        match ExtractedImportEvidenceV1::private_binding(
+            &state.file_path,
+            "java",
+            module,
+            binding,
+            namespace,
+            node,
+        ) {
+            Ok(row) => imports.push(row),
+            Err(error) => state.errors.push(error),
+        }
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -238,7 +275,7 @@ impl JavaExtractor {
         let pkg_name = text
             .trim()
             .strip_prefix("package ")
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim_end_matches(';')
             .trim()
             .to_string();
@@ -248,7 +285,13 @@ impl JavaExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), pkg_name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Package, &pkg_name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Package,
+            &pkg_name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -272,6 +315,7 @@ impl JavaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -294,10 +338,10 @@ impl JavaExtractor {
         let path = text
             .trim()
             .strip_prefix("import ")
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .strip_prefix("static ")
-            .unwrap_or(text.trim().strip_prefix("import ").unwrap_or(&text).trim())
+            .unwrap_or(text.trim().strip_prefix("import ").unwrap_or(text).trim())
             .trim_end_matches(';')
             .trim()
             .to_string();
@@ -307,7 +351,7 @@ impl JavaExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &path, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -331,6 +375,7 @@ impl JavaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -352,6 +397,8 @@ impl JavaExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
+            argument_count: None,
         });
     }
 
@@ -361,9 +408,8 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
 
@@ -374,16 +420,16 @@ impl JavaExtractor {
             NodeKind::Class
         };
 
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
             kind,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -398,6 +444,7 @@ impl JavaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -432,21 +479,26 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Interface, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Interface,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Interface,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -461,6 +513,7 @@ impl JavaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -496,21 +549,20 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Enum,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -525,6 +577,7 @@ impl JavaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -565,12 +618,17 @@ impl JavaExtractor {
     /// Extract a single enum constant as an `EnumVariant` node.
     fn extract_single_enum_constant(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -579,7 +637,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -594,6 +652,7 @@ impl JavaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -615,21 +674,26 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Annotation, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Annotation,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Annotation,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -644,6 +708,7 @@ impl JavaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -665,9 +730,8 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
 
@@ -677,7 +741,7 @@ impl JavaExtractor {
         //   2. It is in an interface and has no body (no `block` child).
         let has_abstract_modifier = Self::has_modifier(node, state, "abstract");
         let has_body =
-            node.child_by_field_name("body").is_some() || Self::has_child_of_kind(node, "block");
+            node.child_by_field_name("body").is_some() || has_direct_child_kind(node, "block");
         let is_abstract = has_abstract_modifier || (state.inside_interface && !has_body);
 
         let kind = if is_abstract {
@@ -686,8 +750,8 @@ impl JavaExtractor {
             NodeKind::Method
         };
 
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &JAVA_COMPLEXITY, &state.source);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
+        let metrics = count_complexity(node, &JAVA_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -696,7 +760,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -711,10 +775,12 @@ impl JavaExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
+        Self::record_arity(state, node, &id);
 
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
@@ -740,13 +806,18 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-        let metrics = count_complexity(node, &JAVA_COMPLEXITY, &state.source);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Constructor,
+            &name,
+            node,
+        );
+        let metrics = count_complexity(node, &JAVA_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -755,7 +826,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -770,10 +841,12 @@ impl JavaExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
         state.nodes.push(graph_node);
+        Self::record_arity(state, node, &id);
 
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
@@ -789,12 +862,45 @@ impl JavaExtractor {
         Self::extract_call_sites(state, node, &id);
     }
 
+    /// Record the parameter list of a method or constructor declaration.
+    /// A receiver parameter (`Outer this`) is no argument.
+    fn record_arity(state: &mut ExtractionState, node: TsNode<'_>, node_id: &str) {
+        let Some(parameters) = node.child_by_field_name("parameters") else {
+            return;
+        };
+        let mut cursor = parameters.walk();
+        let kinds = parameters
+            .named_children(&mut cursor)
+            .map(|parameter| parameter.kind())
+            .filter(|kind| matches!(*kind, "formal_parameter" | "spread_parameter"))
+            .collect::<Vec<_>>();
+        state.callable_arities.push(ExtractedCallableArityV1 {
+            node_id: node_id.to_owned(),
+            arity: CallableArityV1 {
+                parameters: kinds.len() as u32,
+                variadic: kinds.last() == Some(&"spread_parameter"),
+            },
+        });
+    }
+
+    /// Arguments a call passes; `None` without a parsed argument list.
+    fn argument_count(node: TsNode<'_>) -> Option<u32> {
+        let arguments = node
+            .child_by_field_name("arguments")
+            .filter(|arguments| !arguments.has_error())?;
+        let mut cursor = arguments.walk();
+        let count = arguments
+            .named_children(&mut cursor)
+            .filter(|argument| !argument.is_extra())
+            .count();
+        Some(count as u32)
+    }
+
     /// Extract field declarations. Each `variable_declarator` in the field becomes a Field node.
     fn visit_field(state: &mut ExtractionState, node: TsNode<'_>) {
         let visibility = Self::extract_java_visibility(node, state);
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let signature_text = state.node_text(node).trim().to_string();
 
@@ -810,15 +916,16 @@ impl JavaExtractor {
                             Self::extract_name(state, child)
                                 .unwrap_or_else(|| "<anonymous>".to_string())
                         },
-                        |n| state.node_text(n),
+                        |n| state.node_text(n).to_string(),
                     );
 
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), field_name);
-                    let id = generate_node_id(
+                    let id = local_node_id(
                         &state.file_path,
+                        state.source,
                         &NodeKind::Field,
                         &field_name,
-                        start_line,
+                        node,
                     );
 
                     let graph_node = Node {
@@ -828,7 +935,7 @@ impl JavaExtractor {
                         qualified_name,
                         file_path: state.file_path.clone(),
                         start_line,
-                        attrs_start_line: start_line,
+                        attrs_start_line: node.start_position().row as u32,
                         end_line,
                         start_column,
                         end_column,
@@ -843,6 +950,7 @@ impl JavaExtractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     };
@@ -872,7 +980,13 @@ impl JavaExtractor {
         let end_column = node.end_position().column as u32;
         let name = format!("<static_init>:{start_line}");
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::InitBlock, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::InitBlock,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -896,6 +1010,7 @@ impl JavaExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -913,7 +1028,8 @@ impl JavaExtractor {
 
     /// Extract the name of a node by looking for a "name" field child.
     fn extract_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        node.child_by_field_name("name").map(|n| state.node_text(n))
+        node.child_by_field_name("name")
+            .map(|n| state.node_text(n).to_string())
     }
 
     /// Extract Java visibility from modifiers child.
@@ -960,21 +1076,6 @@ impl JavaExtractor {
         false
     }
 
-    fn has_child_of_kind(node: TsNode<'_>, kind: &str) -> bool {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                if cursor.node().kind() == kind {
-                    return true;
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        false
-    }
-
     /// Extract the declaration signature (text from start up to the opening `{`).
     fn extract_declaration_signature(state: &ExtractionState, node: TsNode<'_>) -> String {
         let text = state.node_text(node);
@@ -994,7 +1095,7 @@ impl JavaExtractor {
                 "block_comment" => {
                     let text = state.node_text(sibling);
                     if text.starts_with("/**") {
-                        return Some(Self::clean_javadoc(&text));
+                        return Some(Self::clean_javadoc(text));
                     }
                     // Skip non-javadoc block comments.
                     current = sibling.prev_named_sibling();
@@ -1055,11 +1156,13 @@ impl JavaExtractor {
                                 let type_name = state.node_text(inner_child);
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: class_id.to_string(),
-                                    reference_name: type_name,
+                                    reference_name: type_name.to_string(),
                                     reference_kind: EdgeKind::Extends,
                                     line: inner_child.start_position().row as u32,
                                     column: inner_child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
                                 });
                                 break;
                             }
@@ -1109,11 +1212,13 @@ impl JavaExtractor {
                     let type_name = state.node_text(child);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: class_id.to_string(),
-                        reference_name: type_name,
+                        reference_name: type_name.to_string(),
                         reference_kind: EdgeKind::Implements,
                         line: child.start_position().row as u32,
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                        argument_count: None,
                     });
                 } else if child.kind() == "type_list" {
                     Self::extract_type_list_as_implements(state, child, class_id);
@@ -1154,17 +1259,18 @@ impl JavaExtractor {
                 if child.kind() == "type_parameter" {
                     let param_name = state.node_text(child);
                     // Extract just the type name (first identifier).
-                    let name = param_name.split_whitespace().next().unwrap_or(&param_name);
+                    let name = param_name.split_whitespace().next().unwrap_or(param_name);
                     let start_line = child.start_position().row as u32;
                     let end_line = child.end_position().row as u32;
                     let start_column = child.start_position().column as u32;
                     let end_column = child.end_position().column as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                    let id = generate_node_id(
+                    let id = local_node_id(
                         &state.file_path,
+                        state.source,
                         &NodeKind::GenericParam,
                         name,
-                        start_line,
+                        child,
                     );
 
                     let graph_node = Node {
@@ -1189,6 +1295,7 @@ impl JavaExtractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     };
@@ -1215,7 +1322,7 @@ impl JavaExtractor {
         node: TsNode<'_>,
         target_id: &str,
     ) {
-        scan_children_for_annotation_kinds(node, &["marker_annotation", "annotation"], |child| {
+        scan_children_for_annotation_kinds(node, JAVA_ANNOTATION_KINDS, |child| {
             emit_annotation_usage(state, child, target_id, child.start_position().row as u32);
         });
     }
@@ -1230,7 +1337,7 @@ impl JavaExtractor {
                 if child.is_named()
                     && (child.kind() == "identifier" || child.kind() == "scoped_identifier")
                 {
-                    return state.node_text(child);
+                    return state.node_text(child).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1301,14 +1408,16 @@ impl JavaExtractor {
     ) {
         if node.kind() == "type_identifier" {
             let type_name = state.node_text(node);
-            if !builtins.contains(&type_name.as_str()) {
+            if !builtins.contains(&type_name) {
                 state.unresolved_refs.push(UnresolvedRef {
                     from_node_id: fn_node_id.to_string(),
-                    reference_name: type_name,
+                    reference_name: type_name.to_string(),
                     reference_kind: EdgeKind::Uses,
                     line: node.start_position().row as u32,
                     column: node.start_position().column as u32,
                     file_path: state.file_path.clone(),
+                    unmodeled_import: None,
+                    argument_count: None,
                 });
             }
             return;
@@ -1341,6 +1450,8 @@ impl JavaExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: Self::argument_count(child),
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
@@ -1353,6 +1464,8 @@ impl JavaExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
@@ -1382,11 +1495,11 @@ impl JavaExtractor {
                 let obj = state.node_text(obj_node);
                 return format!("{obj}.{name}");
             }
-            return name;
+            return name.to_string();
         }
         // Fallback: full text of invocation.
         let text = state.node_text(node);
-        text.split('(').next().unwrap_or(&text).trim().to_string()
+        text.split('(').next().unwrap_or(text).trim().to_string()
     }
 
     /// Extract the type name from an `object_creation_expression`.
@@ -1394,7 +1507,7 @@ impl JavaExtractor {
         // object_creation_expression: "new" type argument_list
         // The "type" field gives the type name.
         if let Some(type_node) = node.child_by_field_name("type") {
-            return state.node_text(type_node);
+            return state.node_text(type_node).to_string();
         }
         // Fallback: try to extract the type from children.
         let mut cursor = node.walk();
@@ -1406,7 +1519,7 @@ impl JavaExtractor {
                         || child.kind() == "generic_type"
                         || child.kind() == "scoped_type_identifier")
                 {
-                    return state.node_text(child);
+                    return state.node_text(child).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1437,17 +1550,14 @@ impl crate::LanguageExtractor for JavaExtractor {
         "Java"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        JavaExtractor::extract_java(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         JavaExtractor::extract_tree(file_path, source, tree, scope)
     }
 }

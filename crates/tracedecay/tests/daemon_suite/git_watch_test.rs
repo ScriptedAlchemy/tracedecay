@@ -14,7 +14,14 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
-use tracedecay_mcp::JsonRpcResponse;
+use tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY;
+
+use crate::common::IndexProgress;
+use crate::common::mcp_response::tool_json;
+
+/// How long the index may report no change before a wait gives up on it.
+const INDEX_STALL_WINDOW: Duration = Duration::from_secs(20);
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
@@ -52,6 +59,7 @@ async fn indexed_repo() -> (TempDir, PathBuf, ProductionProjectCompositionHarnes
     let root = TempDir::new().unwrap();
     let project = root.path().join("project");
     fs::create_dir_all(project.join("src")).unwrap();
+    let project = project.canonicalize().expect("canonical fixture project");
     git(&project, &["init", "-b", "main"]);
     git(&project, &["config", "user.name", "TraceDecay Test"]);
     git(
@@ -65,29 +73,8 @@ async fn indexed_repo() -> (TempDir, PathBuf, ProductionProjectCompositionHarnes
         .unwrap();
     (root, project, harness)
 }
-fn tool_payload(response: &JsonRpcResponse) -> Value {
-    assert!(response.error.is_none(), "{response:?}");
-    let result = response.result.as_ref().expect("tool result");
-    assert_ne!(result["isError"], true, "tool effect failed: {result}");
-    let text = result["content"][0]["text"].as_str().expect("tool text");
-    serde_json::from_str(text)
-        .unwrap_or_else(|error| panic!("tool returned invalid JSON: {error}; text={text}"))
-}
-async fn tool(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-    name: &str,
-    arguments: Value,
-) -> Value {
-    tool_payload(
-        &harness
-            .call_tool(project, name, arguments)
-            .await
-            .unwrap_or_else(|error| panic!("{name} failed: {error}")),
-    )
-}
 async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path) -> Value {
-    tool(
+    tool_json(
         harness,
         project,
         "tracedecay_status",
@@ -101,19 +88,34 @@ async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path)
     )
     .await
 }
+/// One `tracedecay_search` read that consumes the executor's contract the way
+/// a production client does. Search execution has bounded concurrency per project,
+/// and every dispatched `tracedecay_search` carries the daemon's operation
+/// deadline, so a request arriving while another holds the execution permit
+/// queues for it under that deadline and is served once the holder finishes,
+/// or settles with the typed `timed_out` state if the deadline passes first.
+/// `search_capacity_unavailable` is reserved for a request with no wait budget
+/// at all and for a bounded read that genuinely exceeds its limits; a
+/// concurrent reader here must never see it, so one is a failure, not a retry.
 async fn search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     query: &str,
 ) -> Value {
-    tool(
+    let payload = tool_json(
         harness,
         project,
         "tracedecay_search",
         json!({"query": query, "limit": 100, "format": "json"}),
     )
-    .await
+    .await;
+    assert_ne!(
+        payload["reason"], "search_capacity_unavailable",
+        "search {query:?} lost the execution permit race and was refused instead of queued: {payload}"
+    );
+    payload
 }
+
 fn symbol_count(payload: &Value, name: &str) -> usize {
     payload["results"]
         .as_array()
@@ -123,7 +125,8 @@ fn symbol_count(payload: &Value, name: &str) -> usize {
         .count()
 }
 fn generation_index_len(data_root: &Path, project: &Path) -> usize {
-    let scope = scoped_code_index_store_root(&data_root.join("code-index-v1"), project);
+    let project = tracedecay_runtime_core::path_safety::canonical_root_identity(project);
+    let scope = scoped_code_index_store_root(&data_root.join("code-index-v1"), &project);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &fs::read(scope.join("active-code-generation-v1.json")).expect("active generation pointer"),
     )
@@ -131,11 +134,11 @@ fn generation_index_len(data_root: &Path, project: &Path) -> usize {
     pointer.generation_index.len()
 }
 async fn request_refresh(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
-    let receipt = tool(
+    let receipt = tool_json(
         harness,
         project,
         "tracedecay_admin_sync",
-        json!({"force": true, "format": "json"}),
+        json!({"format": "json"}),
     )
     .await;
     assert_eq!(receipt["status"], "queued", "refresh receipt: {receipt}");
@@ -152,36 +155,34 @@ async fn wait_for_symbol(
     symbol: &str,
 ) -> String {
     let revision = head(project);
-    let mut last_status = Value::Null;
     let mut last_search = Value::Null;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            last_status = status(harness, project).await;
-            let worktree = &last_status["code_index_freshness"]["worktree"];
-            let generation = worktree["latest_generation_id"].as_str().map(str::to_owned);
-            let current = last_status["code_index_freshness"]["status"] == "current"
-                && worktree["coverage"] == "complete"
-                && worktree["staleness_state"] == "fresh"
-                && worktree["source_reference"] == reference
-                && worktree["source_revision"] == revision
-                && generation
-                    .as_deref()
-                    .is_some_and(|generation| prior_generation != Some(generation));
-            if current {
-                last_search = search(harness, project, symbol).await;
-                if last_search["code_generation"].as_str() == generation.as_deref()
-                    && symbol_count(&last_search, symbol) == 1
-                {
-                    return generation.expect("current generation");
-                }
+    let mut progress = IndexProgress::new(INDEX_STALL_WINDOW);
+    loop {
+        let last_status = status(harness, project).await;
+        let worktree = &last_status["code_index_freshness"]["worktree"];
+        let generation = worktree["latest_generation_id"].as_str().map(str::to_owned);
+        let current = last_status["code_index_freshness"]["status"] == "current"
+            && worktree["coverage"] == "complete"
+            && worktree["staleness_state"] == "fresh"
+            && worktree["source_reference"] == reference
+            && worktree["source_revision"] == revision
+            && generation
+                .as_deref()
+                .is_some_and(|generation| prior_generation != Some(generation));
+        if current {
+            last_search = search(harness, project, symbol).await;
+            if last_search["code_generation"].as_str() == generation.as_deref()
+                && symbol_count(&last_search, symbol) == 1
+            {
+                return generation.expect("current generation");
             }
-            tokio::task::yield_now().await;
         }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!("timed out waiting for {symbol:?}; status={last_status}; search={last_search}")
-    })
+        assert!(
+            progress.moving(&last_status),
+            "index stopped short of {symbol:?}; status={last_status}; search={last_search}"
+        );
+        tokio::task::yield_now().await;
+    }
 }
 async fn wait_for_stale_serving(
     harness: &ProductionProjectCompositionHarnessV1,
@@ -191,32 +192,32 @@ async fn wait_for_stale_serving(
     revision: &str,
     symbol: &str,
 ) {
-    let mut last = Value::Null;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            last = status(harness, project).await;
-            let worktree = &last["code_index_freshness"]["worktree"];
-            if last["code_index_freshness"]["status"] == "warming"
-                && worktree["latest_generation_id"] == generation
-                && worktree["source_reference"] == reference
-                && worktree["source_revision"] == revision
-                && worktree["staleness_state"] == "refreshing"
-                && worktree["coverage"] == "partial_refresh_in_progress"
-            {
-                let stale = search(harness, project, symbol).await;
-                assert_eq!(stale["code_generation"], generation, "{stale}");
-                assert_eq!(stale["coverage"]["recall"], "partial", "{stale}");
-                for lane in ["exact", "lexical", "graph"] {
-                    assert_eq!(stale["coverage"][lane]["status"], "stale", "{stale}");
-                    assert_eq!(stale["coverage"][lane]["generation"], generation, "{stale}");
-                }
-                return;
+    let mut progress = IndexProgress::new(INDEX_STALL_WINDOW);
+    loop {
+        let last = status(harness, project).await;
+        let worktree = &last["code_index_freshness"]["worktree"];
+        if last["code_index_freshness"]["status"] == "warming"
+            && worktree["latest_generation_id"] == generation
+            && worktree["source_reference"] == reference
+            && worktree["source_revision"] == revision
+            && worktree["staleness_state"] == "refreshing"
+            && worktree["coverage"] == "partial_refresh_in_progress"
+        {
+            let stale = search(harness, project, symbol).await;
+            assert_eq!(stale["code_generation"], generation, "{stale}");
+            assert_eq!(stale["coverage"]["recall"], "partial", "{stale}");
+            for lane in ["exact", "lexical", "graph"] {
+                assert_eq!(stale["coverage"][lane]["status"], "stale", "{stale}");
+                assert_eq!(stale["coverage"][lane]["generation"], generation, "{stale}");
             }
-            tokio::task::yield_now().await;
+            return;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("refresh omitted stale-serving evidence: {last}"));
+        assert!(
+            progress.moving(&last),
+            "refresh omitted stale-serving evidence: {last}"
+        );
+        tokio::task::yield_now().await;
+    }
 }
 #[tokio::test]
 async fn unhooked_commit_becomes_searchable_through_scheduler_reconciliation() {
@@ -291,6 +292,29 @@ async fn linked_worktree_requires_mount_then_serves_only_its_exact_generation() 
         .await
         .expect_err("an unmounted worktree must fail closed");
     assert!(format!("{error}").contains("code_index_scheduler_unavailable"));
+    // Linked worktrees index only by opt-in (`sync.watch_linked_worktrees`,
+    // default off): a mounted linked route otherwise serves its typed
+    // `linked_worktree_disabled` state and never publishes. The opt-in is a
+    // project-layer setting decided at route open, so write it through the
+    // production configuration tool before the worktree route opens.
+    let receipt = tool_json(
+        &harness,
+        &project,
+        "tracedecay_configuration_set",
+        json!({
+            "layer": {"kind": "project", "project_id": harness.project_id(&project).await.unwrap()},
+            "key": SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            "value": {"kind": "boolean", "value": true},
+            "expected_revision": harness.configuration_revision(&project).await.unwrap(),
+            "idempotency_key": "configuration.idempotency.git-watch-linked-worktree-opt-in",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(
+        receipt["outcome"]["outcome"], "effect",
+        "linked-worktree opt-in must commit: {receipt}"
+    );
     harness.shutdown().await;
 
     let harness = ProductionProjectCompositionHarnessV1::open(
@@ -312,13 +336,27 @@ async fn linked_worktree_requires_mount_then_serves_only_its_exact_generation() 
         "wt_only",
     )
     .await;
-    let isolated = search(&harness, &project, "wt_only").await;
-    assert_eq!(isolated["code_generation"], main);
-    assert_eq!(isolated["coverage"]["recall"], "full");
-    for lane in ["exact", "lexical", "graph"] {
-        assert_eq!(isolated["coverage"][lane], "complete", "{isolated}");
-    }
-    assert_eq!(symbol_count(&isolated, "wt_only"), 0);
+    // The worktree commit moved the shared `refs/heads`, which is the primary
+    // route's tier-1 git signal: its code lanes are typed stale until its next
+    // reconcile re-resolves identity (a Noop for an unchanged checkout), and
+    // the first stale read requests that pass. Judge isolation on the answer
+    // the re-verified primary gives.
+    let mut isolated = Value::Null;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            isolated = search(&harness, &project, "wt_only").await;
+            if crate::common::incomplete_code_index_query_lanes(&isolated).is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the primary never re-verified its source after the worktree commit: {isolated}")
+    });
+    assert_eq!(isolated["code_generation"], main, "{isolated}");
+    assert_eq!(symbol_count(&isolated, "wt_only"), 0, "{isolated}");
     harness.shutdown().await;
 }
 #[tokio::test]
@@ -328,7 +366,9 @@ async fn one_reconciliation_covers_a_fifty_commit_frontier() {
     let initial = wait_for_symbol(&harness, &project, "refs/heads/main", None, "on_main").await;
     for index in 0..50 {
         let mut source = format!("pub fn f{index}() {{}}\n");
-        for symbol in 0..128 {
+        // Exercise the commit frontier with a small multi-symbol file per
+        // commit; bulk symbol throughput is independent of frontier coverage.
+        for symbol in 0..8 {
             source.push_str(&format!("pub fn f{index}_{symbol}() {{}}\n"));
         }
         fs::write(project.join(format!("src/f{index}.rs")), source).unwrap();
@@ -374,10 +414,10 @@ async fn concurrent_reconciliations_converge_on_one_sealed_generation() {
         search(&harness, &project, "racy"),
         search(&harness, &project, "racy")
     );
-    assert_eq!(left["code_generation"], fresh);
-    assert_eq!(right["code_generation"], fresh);
-    assert_eq!(symbol_count(&left, "racy"), 1);
-    assert_eq!(symbol_count(&right, "racy"), 1);
+    assert_eq!(left["code_generation"], fresh, "{left}");
+    assert_eq!(right["code_generation"], fresh, "{right}");
+    assert_eq!(symbol_count(&left, "racy"), 1, "{left}");
+    assert_eq!(symbol_count(&right, "racy"), 1, "{right}");
     assert_eq!(generation_index_len(&data_root, &project), before + 1);
     harness.shutdown().await;
 }

@@ -1,0 +1,1056 @@
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+use std::path::Path;
+use std::sync::{Arc, Mutex as StdMutex};
+use tracedecay_domain::errors::Result;
+use tracedecay_domain::{ProviderId, SessionId, UtcMicros};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+
+use super::context_scout::{
+    admit_native_context_scout_lifecycle, hook_v2_context_scout_lifecycle_for_session,
+    hook_v2_native_context_scout_lifecycle, lookup_hook_v2_delivery_claim,
+    lookup_hook_v2_delivery_claim_for_event, remove_hook_v2_delivery_claim,
+    retain_hook_v2_delivery_claim,
+};
+use super::envelope::{
+    daemon_mint_hook_v2_envelope, hook_now, hook_v2_envelope, hook_v2_family_label,
+    hook_v2_lifecycle_range, hook_v2_native_session_id, hook_v2_requires_producer_work,
+};
+use super::required_project_db;
+use crate::handlers::SessionAuthorities;
+use tracedecay_contracts::retrieval::{
+    HookRuntimeDispositionV1, HookV2AdmissionResultV1, HookV2AdmitRequestV1,
+    HookV2ProfileAdmissionResultV1, HookV2RejectionReasonV1,
+};
+
+pub(super) enum HookV2BindingAdmission {
+    Bound(tracedecay_hooks::HookConfigurationSnapshotV1),
+    Unavailable,
+    CatchupRequired,
+}
+
+fn classify_hook_v2_binding(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    outcome: tracedecay_hooks::HookConfigurationReadOutcomeV1,
+) -> HookV2BindingAdmission {
+    let tracedecay_hooks::HookConfigurationReadOutcomeV1::Bound(snapshot) = outcome else {
+        return HookV2BindingAdmission::Unavailable;
+    };
+    if envelope.validate(&snapshot.binding).is_err() {
+        return HookV2BindingAdmission::CatchupRequired;
+    }
+    HookV2BindingAdmission::Bound(snapshot)
+}
+
+#[tracing::instrument(name = "mcp.hook_runtime.binding", level = "trace", skip_all)]
+pub(super) fn hook_v2_binding_admission(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    now: UtcMicros,
+) -> HookV2BindingAdmission {
+    let layout = cg.hook_store_layout();
+    let subscriber = tracedecay_hooks::HookConfigurationSubscriberV1::new(
+        tracedecay_hooks::HookConfigurationFileReaderV1::new(
+            tracedecay_hooks::hook_configuration_path(
+                &layout.data_root,
+                envelope.worktree_id,
+                envelope.producer,
+            ),
+        ),
+    );
+    classify_hook_v2_binding(envelope, subscriber.load_current(envelope.producer, now))
+}
+
+/// Where the daemon keeps the durable admission idempotency ledgers. One
+/// ledger per (hook data root, producing host), the same daemon-owned hook
+/// data root that already holds the published bindings and the replay spool.
+/// No migrated database participates.
+pub fn hook_v2_admission_ledger_root(
+    data_root: &Path,
+    host: tracedecay_domain::NativeHostIdentityV1,
+) -> std::path::PathBuf {
+    data_root
+        .join(tracedecay_hooks::PROJECT_HOOK_ADMISSIONS_DIR)
+        .join(host.hook_key())
+}
+
+/// Bound on distinct ledgers held open at once. A ledger is reopened from its
+/// log on demand, so this bounds simultaneous residency, not the project/host
+/// pairs a daemon serves over its lifetime. When every open ledger still has a
+/// commit in flight, admission reports backpressure and the hook spools the
+/// envelope for replay rather than admitting something it cannot deduplicate.
+const MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS: usize = 64;
+
+/// The daemon is the single writer of every Hook V2 admission ledger, project
+/// or profile scoped: each ledger is opened once, keyed by its root, and kept
+/// here with its cross-process writer lock held, so concurrent admissions
+/// serialize on this map instead of racing that lock.
+struct HookV2AdmissionLedgers {
+    capacity: usize,
+    open: StdMutex<BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>>,
+}
+
+static HOOK_V2_ADMISSION_LEDGERS: HookV2AdmissionLedgers =
+    HookV2AdmissionLedgers::new(MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS);
+
+/// Where producer work lived before the admission ledger owned it. A project
+/// still holding it is refused for reset with its ledgers.
+fn pre_ledger_hook_v2_pending_work_root(
+    data_root: &Path,
+    host: tracedecay_domain::NativeHostIdentityV1,
+) -> std::path::PathBuf {
+    data_root
+        .join(tracedecay_hooks::PRE_LEDGER_PENDING_WORK_DIR)
+        .join(host.hook_key())
+}
+
+fn complete_hook_v2_pending_work(
+    data_root: &Path,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+) -> bool {
+    let ledger_root = hook_v2_admission_ledger_root(data_root, envelope.producer);
+    // A released ledger reopens from its log; a removed one owes nothing.
+    if !ledger_root.is_dir() {
+        return false;
+    }
+    match with_hook_v2_admission_ledger(
+        Some(data_root),
+        ledger_root,
+        envelope.producer,
+        hook_now(),
+        |ledger| ledger.stage_work_completion(envelope),
+    ) {
+        Ok(Ok(Some(commit))) => commit.wait().is_ok(),
+        Ok(Ok(None)) => true,
+        Err(_) | Ok(Err(_)) => false,
+    }
+}
+
+fn hook_v2_work_completion(
+    data_root: &Path,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+) -> Arc<dyn Fn() + Send + Sync + 'static> {
+    let data_root = data_root.to_path_buf();
+    let envelope = envelope.clone();
+    Arc::new(move || {
+        if !complete_hook_v2_pending_work(&data_root, &envelope) {
+            tracing::warn!(
+                event = "hook_v2_work_completion_failed",
+                host = envelope.producer.hook_key(),
+                "hook V2 producer work stays pending for redrive"
+            );
+        }
+    })
+}
+
+/// Provider envelopes whose producer work is still owed, for redrive. Work
+/// past the ledger's age bound is dropped there rather than redriven forever.
+/// A ledger that cannot be read is a typed failure: an empty list is only
+/// "nothing is owed", never "the ledger was unavailable".
+#[tracing::instrument(name = "mcp.hook_runtime.pending_work", level = "trace", skip_all)]
+pub fn hook_v2_pending_work_envelopes(
+    data_root: &Path,
+    host: tracedecay_domain::NativeHostIdentityV1,
+    now: UtcMicros,
+) -> std::result::Result<Vec<tracedecay_hooks::HookEventEnvelopeV2>, HookV2AdmissionLedgerUnavailable>
+{
+    let ledger_root = hook_v2_admission_ledger_root(data_root, host);
+    let absent = |root: &Path| match std::fs::symlink_metadata(root) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err(tracedecay_hooks::HookAdmissionLedgerError::Io),
+    };
+    if absent(&ledger_root)? && absent(&pre_ledger_hook_v2_pending_work_root(data_root, host))? {
+        return Ok(Vec::new());
+    }
+    Ok(with_hook_v2_admission_ledger(
+        Some(data_root),
+        ledger_root,
+        host,
+        now,
+        |ledger| ledger.pending_work_envelopes(now),
+    )??)
+}
+
+/// Why the daemon could not use a Hook V2 admission ledger.
+#[derive(Debug, thiserror::Error)]
+pub enum HookV2AdmissionLedgerUnavailable {
+    #[error("the admission ledger owner is poisoned")]
+    Poisoned,
+    #[error("the daemon already holds its bound of open admission ledgers")]
+    AtCapacity,
+    #[error(transparent)]
+    Ledger(#[from] tracedecay_hooks::HookAdmissionLedgerError),
+}
+
+/// Stage one admission identity, with the producer work it owes. `None`
+/// means the ledger itself is unavailable, the caller must not claim an
+/// admission it cannot deduplicate. Nothing may be acknowledged before the
+/// returned commit is awaited.
+fn stage_hook_v2_admission(
+    data_root: &Path,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    work: Option<&tracedecay_hooks::HookEventEnvelopeV2>,
+    now: UtcMicros,
+) -> Option<tracedecay_hooks::HookAdmissionStagedV1> {
+    with_hook_v2_admission_ledger(
+        Some(data_root),
+        hook_v2_admission_ledger_root(data_root, envelope.producer),
+        envelope.producer,
+        now,
+        |ledger| ledger.stage_admission(envelope, work, now).ok(),
+    )
+    .ok()
+    .flatten()
+}
+
+fn with_hook_v2_admission_ledger<T>(
+    data_root: Option<&Path>,
+    ledger_root: std::path::PathBuf,
+    host: tracedecay_domain::NativeHostIdentityV1,
+    now: UtcMicros,
+    operation: impl FnOnce(&mut tracedecay_hooks::HookAdmissionLedgerV1) -> T,
+) -> std::result::Result<T, HookV2AdmissionLedgerUnavailable> {
+    HOOK_V2_ADMISSION_LEDGERS.with_ledger(data_root, ledger_root, host, now, operation)
+}
+
+impl HookV2AdmissionLedgers {
+    const fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            open: StdMutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Runs `operation` on the retained ledger at `ledger_root`, opening it on
+    /// first use and again after a failed write or a release. A project
+    /// ledger (`data_root`) whose pre-ledger pending work remains is refused
+    /// for reset. An open failure, reset refusal, poisoned owner, or a full
+    /// bound is a typed error; callers must not treat it as an empty ledger.
+    fn with_ledger<T>(
+        &self,
+        data_root: Option<&Path>,
+        ledger_root: std::path::PathBuf,
+        host: tracedecay_domain::NativeHostIdentityV1,
+        now: UtcMicros,
+        operation: impl FnOnce(&mut tracedecay_hooks::HookAdmissionLedgerV1) -> T,
+    ) -> std::result::Result<T, HookV2AdmissionLedgerUnavailable> {
+        let mut ledgers = self
+            .open
+            .lock()
+            .map_err(|_| HookV2AdmissionLedgerUnavailable::Poisoned)?;
+        if ledgers
+            .get(&ledger_root)
+            .is_some_and(tracedecay_hooks::HookAdmissionLedgerV1::needs_reopen)
+        {
+            ledgers.remove(&ledger_root);
+        }
+        if !ledgers.contains_key(&ledger_root) && ledgers.len() >= self.capacity {
+            release_one_settled_ledger(&mut ledgers)?;
+        }
+        Ok(operation(open_ledger(
+            &mut ledgers,
+            data_root,
+            ledger_root,
+            host,
+            now,
+        )?))
+    }
+}
+
+/// Every admission, dedupe identity and owed producer work is durable in the
+/// ledger's log, and every operation reaches a ledger through this map, so a
+/// handle with no commit in flight can be dropped (releasing its writer lock)
+/// and reopened from disk on next use.
+fn release_one_settled_ledger(
+    ledgers: &mut BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>,
+) -> std::result::Result<(), HookV2AdmissionLedgerUnavailable> {
+    // ponytail: first settled root by path, not least recently used; more
+    // than the bound of ledgers active at once reopen in turn.
+    let settled = ledgers
+        .iter()
+        .find(|(_, ledger)| !ledger.commits_in_flight())
+        .map(|(root, _)| root.clone())
+        .ok_or(HookV2AdmissionLedgerUnavailable::AtCapacity)?;
+    ledgers.remove(&settled);
+    Ok(())
+}
+
+fn open_ledger<'a>(
+    ledgers: &'a mut BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>,
+    data_root: Option<&Path>,
+    ledger_root: std::path::PathBuf,
+    host: tracedecay_domain::NativeHostIdentityV1,
+    now: UtcMicros,
+) -> std::result::Result<
+    &'a mut tracedecay_hooks::HookAdmissionLedgerV1,
+    HookV2AdmissionLedgerUnavailable,
+> {
+    Ok(match ledgers.entry(ledger_root) {
+        Entry::Occupied(retained) => retained.into_mut(),
+        Entry::Vacant(unopened) => {
+            let opened = match data_root {
+                Some(data_root) => refuse_pre_ledger_pending_work(data_root, host),
+                None => Ok(()),
+            }
+            .and_then(|()| {
+                tracedecay_hooks::HookAdmissionLedgerV1::open(
+                    unopened.key().clone(),
+                    host,
+                    tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
+                    now,
+                )
+            });
+            match opened {
+                Ok((ledger, _report)) => unopened.insert(ledger),
+                Err(error) => {
+                    tracing::warn!(
+                        event = "hook_v2_admission_ledger_unavailable",
+                        host = host.hook_key(),
+                        error = %error,
+                        "hook V2 admission ledger could not be opened"
+                    );
+                    return Err(error.into());
+                }
+            }
+        }
+    })
+}
+
+/// Refuses `host`'s project ledger for reset while the pre-ledger
+/// pending-work spool remains beside it.
+fn refuse_pre_ledger_pending_work(
+    data_root: &Path,
+    host: tracedecay_domain::NativeHostIdentityV1,
+) -> std::result::Result<(), tracedecay_hooks::HookAdmissionLedgerError> {
+    let root = pre_ledger_hook_v2_pending_work_root(data_root, host);
+    let present = root
+        .try_exists()
+        .map_err(|_| tracedecay_hooks::HookAdmissionLedgerError::Io)?;
+    if present {
+        return Err(tracedecay_hooks::HookAdmissionLedgerError::ResetRequired);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn forget_hook_v2_admission_ledger_for_test(
+    data_root: &Path,
+    host: tracedecay_domain::NativeHostIdentityV1,
+) {
+    HOOK_V2_ADMISSION_LEDGERS
+        .open
+        .lock()
+        .unwrap()
+        .remove(&hook_v2_admission_ledger_root(data_root, host));
+}
+
+/// The daemon-side result of admitting one Hook V2 envelope, shared by the
+/// synchronous hook action and by spool replay so both converge on the same
+/// idempotency record.
+pub enum HookV2AdmissionOutcomeV1 {
+    Admitted {
+        orchestration: tracedecay_daemon_service::HookOrchestrationAdmissionV1,
+        context_scout_address:
+            Option<Box<tracedecay_contracts::context_scout::ContextScoutAddressV1>>,
+        ready_guidance: Value,
+        feedback_notice: Value,
+        github_stack_signal_available: bool,
+    },
+    /// This exact envelope was already admitted; no work is repeated. A retry
+    /// may receive the Scout address and guidance retained before a bounded
+    /// host response was lost.
+    ExactDuplicate {
+        context_scout_address:
+            Option<Box<tracedecay_contracts::context_scout::ContextScoutAddressV1>>,
+        ready_guidance: Value,
+    },
+    /// The same event identity previously carried different bytes.
+    Conflict,
+    /// The binding no longer authorizes this envelope.
+    CatchupRequired,
+    /// Idempotency could not be recorded, so nothing was admitted.
+    Backpressured,
+    Unavailable,
+}
+
+fn retain_or_reuse_hook_v2_delivery_claim(
+    project_id: [u8; 16],
+    claim: tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+    now: UtcMicros,
+) -> std::result::Result<(), Box<tracedecay_contracts::context_scout::ContextScoutDurableClaimV1>> {
+    let envelope_id = claim.entry.envelope.envelope_id;
+    match retain_hook_v2_delivery_claim(project_id, claim, now) {
+        Ok(()) => Ok(()),
+        Err(claim)
+            if lookup_hook_v2_delivery_claim(project_id, envelope_id).as_ref()
+                == Some(claim.as_ref()) =>
+        {
+            Ok(())
+        }
+        Err(claim) => Err(claim),
+    }
+}
+
+async fn retain_ready_guidance(
+    owner: &tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1,
+    project_id: [u8; 16],
+    mut guidance: tracedecay_hooks::HookReadyGuidanceV1,
+    claim: tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+    response_event_id: [u8; 16],
+    now: UtcMicros,
+) -> Value {
+    guidance.event_id = response_event_id;
+    let envelope_id = claim.entry.envelope.envelope_id;
+    match retain_or_reuse_hook_v2_delivery_claim(project_id, claim, now) {
+        Ok(()) => match serde_json::to_value(guidance) {
+            Ok(guidance) => guidance,
+            Err(_) => {
+                if let Some(claim) = lookup_hook_v2_delivery_claim(project_id, envelope_id) {
+                    remove_hook_v2_delivery_claim(project_id, envelope_id);
+                    let _ = owner.requeue(claim).await;
+                }
+                Value::Null
+            }
+        },
+        Err(claim) => {
+            let _ = owner.requeue(*claim).await;
+            Value::Null
+        }
+    }
+}
+
+fn ready_guidance_from_retained_claim(
+    hook: &tracedecay_hooks::HookEventEnvelopeV2,
+    claim: tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+    configuration_revision: u64,
+    now: UtcMicros,
+) -> Option<(
+    tracedecay_hooks::HookReadyGuidanceV1,
+    tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
+)> {
+    (claim.lease.lease_id == hook.event_id
+        && claim.lease.expires_at.0 > now.0
+        && claim.entry.work.address.project_id == hook.project_id
+        && claim.entry.work.address.protected_session_id == hook.protected_session_id
+        && claim.entry.envelope.candidate.expires_at.0 > now.0)
+        .then(|| {
+            (
+                tracedecay_hooks::HookReadyGuidanceV1 {
+                    guidance_id: claim.entry.envelope.envelope_id,
+                    event_id: hook.event_id,
+                    configuration_revision,
+                    expires_at: claim.entry.envelope.candidate.expires_at,
+                    text: claim.entry.envelope.candidate.suggestion_text.clone(),
+                },
+                claim,
+            )
+        })
+}
+
+fn cursor_stack_wakeup_allowed(
+    first_admission: bool,
+    producer: tracedecay_domain::NativeHostIdentityV1,
+) -> bool {
+    first_admission && producer == tracedecay_domain::NativeHostIdentityV1::CursorDesktop
+}
+
+/// The project-sessions authority a hook admission may bind a native
+/// context-scout lifecycle into, with the CPU authority that binding runs
+/// under. Absent when the caller has no project sessions to bind into.
+pub struct HookV2LifecycleMountV1<'a> {
+    pub lifecycle: Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1>,
+    pub project_sessions: &'a RegisteredGlobalDb,
+    pub background_cpu: Option<&'a std::sync::Arc<ProcessBackgroundCpuV1>>,
+}
+
+/// Claude's lifecycle exists only for the Context Scout intent pass, so it is
+/// minted only while that pass is enabled. Kimi Code and `OpenCode` bind theirs for
+/// every Scout claim and are not gated.
+const fn intent_gated_lifecycle(producer: tracedecay_domain::NativeHostIdentityV1) -> bool {
+    matches!(
+        producer,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode
+    )
+}
+
+/// Mirrors the intent pass's own disabled check, so a project the pass would
+/// skip pays no lifecycle write inside the hook's synchronous budget.
+async fn context_scout_intent_enabled(cg: &TraceDecay) -> bool {
+    let Ok(pinned) = cg.configuration_runtime().client().current().await else {
+        return false;
+    };
+    tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1::from_current(
+        &pinned.into_current_state(),
+    )
+    .is_some_and(|pin| {
+        pin.intent_settings().is_some_and(|settings| settings.enabled)
+            && pin.control().state
+                != tracedecay_agent_hosts::agents::context_scout::ContextScoutServiceStateV1::Disabled
+    })
+}
+
+async fn admit_gated_native_lifecycle(
+    mount: &HookV2LifecycleMountV1<'_>,
+    provider: ProviderId,
+    lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+    producer: tracedecay_domain::NativeHostIdentityV1,
+    intent_enabled: bool,
+) -> bool {
+    if intent_gated_lifecycle(producer) && !intent_enabled {
+        return true;
+    }
+    admit_native_context_scout_lifecycle(
+        mount.project_sessions,
+        mount.background_cpu,
+        provider,
+        lifecycle,
+        range,
+    )
+    .await
+}
+
+pub async fn admit_hook_v2_envelope(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    native_session_id: Option<SessionId>,
+    now: UtcMicros,
+) -> HookV2AdmissionOutcomeV1 {
+    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, false, now).await
+}
+
+pub async fn admit_hook_v2_replayed_envelope_with_lifecycle(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    native_session_id: Option<SessionId>,
+    native_lifecycle: Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1>,
+    project_sessions: &RegisteredGlobalDb,
+    background_cpu: &std::sync::Arc<ProcessBackgroundCpuV1>,
+    now: UtcMicros,
+) -> HookV2AdmissionOutcomeV1 {
+    admit_hook_v2_envelope_with_lifecycle(
+        cg,
+        envelope,
+        native_session_id,
+        Some(HookV2LifecycleMountV1 {
+            lifecycle: native_lifecycle,
+            project_sessions,
+            background_cpu: Some(background_cpu),
+        }),
+        false,
+        now,
+    )
+    .await
+}
+
+#[tracing::instrument(name = "mcp.hook_runtime.admit", level = "trace", skip_all)]
+/// Admission composes the lifecycle mount, guidance lookup, and replay
+/// paths into one future large enough to trip `clippy::large_futures`; box
+/// it here so every caller keeps a small frame.
+async fn admit_hook_v2_envelope_with_lifecycle(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    native_session_id: Option<SessionId>,
+    mount: Option<HookV2LifecycleMountV1<'_>>,
+    host_response_available: bool,
+    now: UtcMicros,
+) -> HookV2AdmissionOutcomeV1 {
+    Box::pin(admit_hook_v2_envelope_with_lifecycle_inner(
+        cg,
+        envelope,
+        native_session_id,
+        mount,
+        host_response_available,
+        now,
+    ))
+    .await
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Hook v2 admission is one envelope validate, lifecycle bind, and receipt."
+)]
+async fn admit_hook_v2_envelope_with_lifecycle_inner(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    native_session_id: Option<SessionId>,
+    mount: Option<HookV2LifecycleMountV1<'_>>,
+    host_response_available: bool,
+    now: UtcMicros,
+) -> HookV2AdmissionOutcomeV1 {
+    let provider_envelope = envelope;
+    let snapshot = match hook_v2_binding_admission(cg, envelope, now) {
+        HookV2BindingAdmission::Bound(snapshot) => snapshot,
+        HookV2BindingAdmission::Unavailable => return HookV2AdmissionOutcomeV1::Unavailable,
+        HookV2BindingAdmission::CatchupRequired => {
+            return HookV2AdmissionOutcomeV1::CatchupRequired;
+        }
+    };
+    let canonical_envelope = daemon_mint_hook_v2_envelope(envelope);
+    let envelope = &canonical_envelope;
+    let data_root = &cg.hook_store_layout().data_root;
+    let requires_producer_work = hook_v2_requires_producer_work(envelope);
+    // One ledger commit makes the admission and the producer work it owes
+    // durable together, shared with concurrent admissions. The ledger supplies
+    // stable daemon order when the provider has no native sequence.
+    // Exact-duplicate retries reuse that order and retry only the lifecycle
+    // prerequisite before suppressing downstream effects.
+    let Some(staged) = stage_hook_v2_admission(
+        data_root,
+        envelope,
+        requires_producer_work.then_some(provider_envelope),
+        now,
+    ) else {
+        return HookV2AdmissionOutcomeV1::Backpressured;
+    };
+    let receipt = staged.receipt;
+    let commit = staged.commit;
+    if !matches!(
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || commit.wait()).await,
+        Ok(Ok(()))
+    ) {
+        return HookV2AdmissionOutcomeV1::Backpressured;
+    }
+    match receipt.decision {
+        tracedecay_hooks::HookAdmissionDecisionV1::Admitted
+        | tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate => {}
+        tracedecay_hooks::HookAdmissionDecisionV1::Conflict => {
+            return HookV2AdmissionOutcomeV1::Conflict;
+        }
+    }
+    if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
+        && receipt.work_completed
+    {
+        let retained_claim = host_response_available
+            .then(|| {
+                lookup_hook_v2_delivery_claim_for_event(envelope.project_id, envelope.event_id, now)
+            })
+            .flatten();
+        let retained_claim_authority = retained_claim
+            .as_ref()
+            .map(|claim| (claim.entry.work.address, claim.entry.work.input_watermark));
+        let claim_authority = if retained_claim_authority.is_some() {
+            retained_claim_authority
+        } else if host_response_available {
+            let lifecycle =
+                hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
+            match lifecycle.as_ref() {
+                Some(lifecycle) => {
+                    cg.resolve_mounted_context_scout_claim_authority(lifecycle)
+                        .await
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let context_scout_address = claim_authority
+            .as_ref()
+            .map(|(address, _)| Box::new(*address));
+        let ready_guidance = match (cg.context_scout_owner(), retained_claim, claim_authority) {
+            (Some(owner), Some(claim), _) => {
+                match ready_guidance_from_retained_claim(envelope, claim, snapshot.revision, now) {
+                    Some((guidance, claim)) => {
+                        retain_ready_guidance(
+                            owner.as_ref(),
+                            envelope.project_id,
+                            guidance,
+                            claim,
+                            provider_envelope.event_id,
+                            now,
+                        )
+                        .await
+                    }
+                    None => Value::Null,
+                }
+            }
+            (Some(owner), None, Some((address, input_watermark))) => match owner
+                .claim_ready_guidance_exact(
+                    envelope,
+                    address,
+                    input_watermark,
+                    snapshot.revision,
+                    now,
+                )
+                .await
+            {
+                Some((guidance, claim)) => {
+                    retain_ready_guidance(
+                        owner.as_ref(),
+                        envelope.project_id,
+                        guidance,
+                        claim,
+                        provider_envelope.event_id,
+                        now,
+                    )
+                    .await
+                }
+                None => Value::Null,
+            },
+            _ => Value::Null,
+        };
+        return HookV2AdmissionOutcomeV1::ExactDuplicate {
+            context_scout_address,
+            ready_guidance,
+        };
+    }
+    if let Some(mount) = mount.as_ref()
+        && let Some(native_lifecycle) = mount.lifecycle.as_ref()
+    {
+        let intent_enabled =
+            intent_gated_lifecycle(envelope.producer) && context_scout_intent_enabled(cg).await;
+        let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        };
+        let Ok(provider) = ProviderId::new(envelope.producer.hook_key()) else {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        };
+        if !admit_gated_native_lifecycle(
+            mount,
+            provider,
+            native_lifecycle,
+            range,
+            envelope.producer,
+            intent_enabled,
+        )
+        .await
+        {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        }
+    }
+    if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
+        && !requires_producer_work
+    {
+        return HookV2AdmissionOutcomeV1::ExactDuplicate {
+            context_scout_address: None,
+            ready_guidance: Value::Null,
+        };
+    }
+    let completion = requires_producer_work.then(|| hook_v2_work_completion(data_root, envelope));
+    let first_admission = receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::Admitted;
+    // Live-activity tap: a bound hook-v2 envelope reaching admission IS an agent
+    // working in this project, the primary live hook path for every v2-bound
+    // host. Publish it here, where the project scope is already resolved; the
+    // application lane retains it across dashboard disconnects and restarts.
+    if first_admission
+        && let Some(project_sessions) = mount.as_ref().map(|mount| mount.project_sessions)
+    {
+        tracedecay_session_memory::event_lane::publish(
+            project_sessions,
+            tracedecay_session_memory::event_lane::ActivityFamilyV1::Hook,
+            cg.project_root(),
+            cg.store_layout().identity.project_id.as_deref(),
+            1,
+            Some(hook_v2_family_label(envelope.event.family())),
+        )
+        .await;
+    }
+    let lifecycle = hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
+    let claim_authority = if host_response_available {
+        match (
+            tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1::new(
+                envelope.clone(),
+                &snapshot.binding,
+            ),
+            lifecycle.as_ref(),
+        ) {
+            (Some(hook), Some(lifecycle)) => {
+                match cg
+                    .resolve_current_context_scout_claim_authority(&hook, lifecycle, now)
+                    .await
+                {
+                    Some(authority) => Some(authority),
+                    None => match cg
+                        .resolve_current_context_scout_session_claim_authority(
+                            &hook, lifecycle, now,
+                        )
+                        .await
+                    {
+                        Some(authority) => Some(authority),
+                        // The session's intent-pass suggestion lives at its
+                        // own intent-scoped address, resolved exactly.
+                        None => match lifecycle.intent_scoped() {
+                            Some(intent_lifecycle) => {
+                                cg.resolve_current_context_scout_claim_authority(
+                                    &hook,
+                                    &intent_lifecycle,
+                                    now,
+                                )
+                                .await
+                            }
+                            None => None,
+                        },
+                    },
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let mut context_scout_address = claim_authority
+        .as_ref()
+        .map(|(address, _)| Box::new(*address));
+    let ready_guidance = match (first_admission, cg.context_scout_owner(), claim_authority) {
+        (true, Some(owner), Some((address, input_watermark))) => match owner
+            .claim_ready_guidance_exact(envelope, address, input_watermark, snapshot.revision, now)
+            .await
+        {
+            Some((guidance, claim)) => {
+                retain_ready_guidance(
+                    owner.as_ref(),
+                    envelope.project_id,
+                    guidance,
+                    claim,
+                    provider_envelope.event_id,
+                    now,
+                )
+                .await
+            }
+            None => match owner
+                .claim_ready_guidance(envelope, snapshot.revision, now)
+                .await
+            {
+                Some((guidance, claim)) => {
+                    context_scout_address = Some(Box::new(claim.entry.work.address));
+                    retain_ready_guidance(
+                        owner.as_ref(),
+                        envelope.project_id,
+                        guidance,
+                        claim,
+                        provider_envelope.event_id,
+                        now,
+                    )
+                    .await
+                }
+                None => Value::Null,
+            },
+        },
+        _ => Value::Null,
+    };
+    let orchestration = tracedecay_daemon_service::admit_registered_hook_orchestration(
+        envelope.clone(),
+        snapshot.binding.clone(),
+        lifecycle,
+        snapshot.revision,
+        false,
+        completion,
+    );
+    let feedback_notice = if first_admission {
+        tracedecay_application::advisory::peek_advisory_hook_notice(
+            envelope.project_id,
+            envelope.worktree_id,
+        )
+        .and_then(|notice| serde_json::to_value(notice).ok())
+        .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    // Hook V2 carries no actor identity, so it can only surface an opaque
+    // availability wakeup for its exact authenticated project/worktree. The
+    // actor-bound MCP expansion path authorizes and settles the signal later.
+    let github_stack_signal_available =
+        if cursor_stack_wakeup_allowed(first_admission, envelope.producer) {
+            let project_id = envelope.project_id;
+            let worktree_id = envelope.worktree_id;
+            tracedecay_runtime_core::native_runtime::timeout(
+                std::time::Duration::from_millis(50),
+                tracedecay_agent_hosts::native_integration::github_stack_hook_available(
+                    project_id,
+                    worktree_id,
+                ),
+            )
+            .await
+            .unwrap_or(false)
+        } else {
+            false
+        };
+    HookV2AdmissionOutcomeV1::Admitted {
+        orchestration,
+        context_scout_address,
+        ready_guidance,
+        feedback_notice,
+        github_stack_signal_available,
+    }
+}
+
+pub(super) async fn hook_v2_admit(
+    cg: &TraceDecay,
+    request: HookV2AdmitRequestV1,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<HookV2AdmissionResultV1> {
+    let project_sessions = required_project_db(&session_authorities)?;
+    let envelope = hook_v2_envelope(request.envelope)?;
+    let now = hook_now();
+    let native_session_id =
+        hook_v2_native_session_id(request.native_session_id.as_deref(), &envelope);
+    let native_lifecycle =
+        hook_v2_native_context_scout_lifecycle(request.native_lifecycle, &envelope);
+    Ok(
+        match admit_hook_v2_envelope_with_lifecycle(
+            cg,
+            &envelope,
+            native_session_id,
+            Some(HookV2LifecycleMountV1 {
+                lifecycle: native_lifecycle,
+                project_sessions,
+                background_cpu: session_authorities.background_cpu.as_ref(),
+            }),
+            true,
+            now,
+        )
+        .await
+        {
+            HookV2AdmissionOutcomeV1::Admitted {
+                orchestration,
+                context_scout_address,
+                ready_guidance,
+                feedback_notice,
+                github_stack_signal_available,
+            } => HookV2AdmissionResultV1::Accepted {
+                disposition: HookRuntimeDispositionV1::Accepted,
+                orchestration,
+                context_scout_address: context_scout_address.map(|address| *address),
+                ready_guidance: present(ready_guidance),
+                feedback_notice: present(feedback_notice),
+                github_stack_signal_available,
+            },
+            HookV2AdmissionOutcomeV1::ExactDuplicate {
+                context_scout_address,
+                ready_guidance,
+            } => HookV2AdmissionResultV1::ExactDuplicate {
+                disposition: HookRuntimeDispositionV1::Accepted,
+                context_scout_address: context_scout_address.map(|address| *address),
+                ready_guidance: present(ready_guidance),
+            },
+            HookV2AdmissionOutcomeV1::Conflict => HookV2AdmissionResultV1::Rejected {
+                disposition: HookRuntimeDispositionV1::CatchupRequired,
+                reason: Some(HookV2RejectionReasonV1::AdmissionIdentityConflict),
+            },
+            HookV2AdmissionOutcomeV1::CatchupRequired => HookV2AdmissionResultV1::Rejected {
+                disposition: HookRuntimeDispositionV1::CatchupRequired,
+                reason: None,
+            },
+            HookV2AdmissionOutcomeV1::Backpressured => HookV2AdmissionResultV1::Backpressured {},
+            HookV2AdmissionOutcomeV1::Unavailable => HookV2AdmissionResultV1::Unavailable {},
+        },
+    )
+}
+
+fn present(value: Value) -> Option<Value> {
+    (!value.is_null()).then_some(value)
+}
+
+/// Admits a native event that has no project route into the authenticated
+/// profile's V2 ledger. The hook supplies only decoded, content-free native
+/// material; the daemon owns the profile scope binding and all durable writes.
+#[tracing::instrument(name = "mcp.hook_runtime.profile_admit", level = "trace", skip_all)]
+pub(super) fn hook_v2_profile_admit(
+    admission: Value,
+    profile_root: &Path,
+    profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
+) -> Result<HookV2ProfileAdmissionResultV1> {
+    let routed_profile_root = std::fs::canonicalize(profile_root).map_err(|error| {
+        tracedecay_automation_runtime::automation::config_error(format!(
+            "failed to resolve authenticated Hook V2 profile route: {error}"
+        ))
+    })?;
+    if profile_identity.profile_root() != routed_profile_root.as_path() {
+        return Err(tracedecay_automation_runtime::automation::config_error(
+            "authenticated profile identity does not match the hook route",
+        ));
+    }
+    let profile_root = profile_identity.profile_root();
+    let admission =
+        serde_json::from_value::<tracedecay_hooks::ProfileScopedNativeHookAdmissionV1>(admission)
+            .map_err(|error| {
+            tracedecay_automation_runtime::automation::config_error(format!(
+                "invalid profile-scoped Hook V2 admission: {error}"
+            ))
+        })?;
+    let binding = profile_hook_v2_binding(profile_identity, admission.decoded.host);
+    let envelope = admission.into_envelope(&binding).map_err(|error| {
+        tracedecay_automation_runtime::automation::config_error(format!(
+            "profile-scoped Hook V2 envelope rejected: {error}"
+        ))
+    })?;
+    let ledger_root = profile_root
+        .join(tracedecay_hooks::PROFILE_HOOK_ADMISSIONS_DIR)
+        .join(binding.host.hook_key());
+    let now = hook_now();
+    let outcome = with_hook_v2_admission_ledger(None, ledger_root, binding.host, now, |ledger| {
+        ledger.stage_admission(&envelope, None, now)
+    })
+    .map(|staged| staged.and_then(|staged| staged.commit.wait().map(|()| staged.receipt.decision)));
+    Ok(match outcome {
+        Ok(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)) => {
+            HookV2ProfileAdmissionResultV1::Accepted {
+                disposition: HookRuntimeDispositionV1::Accepted,
+            }
+        }
+        Ok(Ok(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate)) => {
+            HookV2ProfileAdmissionResultV1::ExactDuplicate {
+                disposition: HookRuntimeDispositionV1::Accepted,
+            }
+        }
+        Ok(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Conflict)) => {
+            HookV2ProfileAdmissionResultV1::Rejected {
+                disposition: HookRuntimeDispositionV1::CatchupRequired,
+            }
+        }
+        Err(_) | Ok(Err(_)) => HookV2ProfileAdmissionResultV1::Unavailable {},
+    })
+}
+
+fn profile_hook_v2_binding(
+    profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
+    host: tracedecay_domain::NativeHostIdentityV1,
+) -> tracedecay_hooks::HookScopeBindingV1 {
+    let profile_key = format!(
+        "{}:{}",
+        profile_identity.brain_id().as_str(),
+        profile_identity.profile_id().as_str()
+    );
+    let hash16 = |domain: &str| {
+        let mut digest = Sha256::new();
+        digest.update(b"tracedecay.profile-hook-v2.binding.v1");
+        digest.update(domain.as_bytes());
+        digest.update(profile_key.as_bytes());
+        let mut value = [0; 16];
+        value.copy_from_slice(&digest.finalize()[..16]);
+        value
+    };
+    let mut token_digest = Sha256::new();
+    token_digest.update(b"tracedecay.profile-hook-v2.binding-token.v1");
+    token_digest.update(profile_key.as_bytes());
+    token_digest.update(host.hook_key().as_bytes());
+    tracedecay_hooks::HookScopeBindingV1 {
+        host,
+        project_id: hash16("profile"),
+        repository_id: hash16("repository"),
+        worktree_id: hash16("worktree"),
+        worktree_epoch: 1,
+        binding_token: token_digest.finalize().into(),
+        capabilities: [
+            tracedecay_hooks::HookEventFamily::SessionBoundary,
+            tracedecay_hooks::HookEventFamily::PromptBoundary,
+            tracedecay_hooks::HookEventFamily::ToolLifecycle,
+            tracedecay_hooks::HookEventFamily::SavedEdit,
+            tracedecay_hooks::HookEventFamily::TestLifecycle,
+        ]
+        .into_iter()
+        .map(|family| tracedecay_hooks::HookCapabilityV1 {
+            family,
+            support: tracedecay_hooks::stock_event_support(host, family),
+        })
+        .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests;

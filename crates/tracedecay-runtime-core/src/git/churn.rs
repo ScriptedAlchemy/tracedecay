@@ -1,0 +1,340 @@
+//! Bounded, read-only per-file commit counts shared by graph health consumers.
+use std::collections::HashMap;
+use std::path::Path;
+
+use tracedecay_domain::errors::{Result, TraceDecayError};
+
+use super::{GitCommandBounds, bounded_git_output, try_git_program};
+use crate::git_repository::{GitRepositoryAuthority, GitRepositoryError};
+
+/// Counts commits touching each exact UTF-8 path, relative to `project_root`
+/// (which may sit below the repository root), during the requested window.
+/// Missing/unborn repositories have no history. Unreadable history and paths that
+/// cannot be represented by the graph's string identity are errors, not zero churn.
+#[tracing::instrument(name = "runtime_core.git.file_churn", level = "trace", skip_all)]
+pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
+    let root = project_root.to_owned();
+    off_executor(move || read_file_churn(&root, days, &GitCommandBounds::default())).await
+}
+
+/// Like [`file_churn`], but the log is restricted to `paths`.
+/// An empty list reads nothing and returns an empty map.
+pub async fn file_churn_paths(
+    project_root: &Path,
+    days: u32,
+    paths: &[String],
+) -> Result<HashMap<String, usize>> {
+    if paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let root = project_root.to_owned();
+    let paths = paths.to_vec();
+    off_executor(move || read_file_churn_paths(&root, days, &paths, &GitCommandBounds::default()))
+        .await
+}
+
+async fn off_executor<T: Send + 'static>(
+    read: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let cx =
+        crate::native_runtime::cx().ok_or_else(|| churn_error("native runtime unavailable"))?;
+    cx.spawn_blocking(move |_| read())
+        .map_err(|error| churn_error(error.to_string()))?
+        .join(&cx)
+        .await
+        .map_err(|error| churn_error(error.to_string()))?
+}
+
+fn churn_error(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("git-churn-unavailable", false, detail.into())
+}
+
+fn read_file_churn(
+    root: &Path,
+    days: u32,
+    bounds: &GitCommandBounds,
+) -> Result<HashMap<String, usize>> {
+    try_git_program().map_err(|_| TraceDecayError::HostCliUnavailable {
+        program: "git".to_owned(),
+        lifecycle: "Git churn analysis".to_owned(),
+    })?;
+    match std::fs::metadata(root) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(HashMap::new());
+        }
+        Err(error) => return Err(TraceDecayError::Io(error)),
+        Ok(_) => {}
+    }
+    let repository = match GitRepositoryAuthority::discover(root) {
+        Ok(repository) => repository,
+        Err(GitRepositoryError::NotARepository { .. }) => return Ok(HashMap::new()),
+        Err(error) => return Err(churn_error(error.to_string())),
+    };
+    if repository
+        .head()
+        .map_err(|error| churn_error(error.to_string()))?
+        .commit()
+        .is_none()
+    {
+        return Ok(HashMap::new());
+    }
+    let output = bounded_git_output(
+        root,
+        &[
+            "log",
+            "--format=",
+            "--name-only",
+            "--relative",
+            "-z",
+            &format!("--since={days} days ago"),
+        ],
+        bounds,
+    )
+    .map_err(|error| churn_error(error.to_string()))?;
+    if !output.status.success() {
+        return Err(churn_error(format!(
+            "git log exited with {}",
+            output.status
+        )));
+    }
+    tally_name_only(&output.stdout)
+}
+
+fn read_file_churn_paths(
+    root: &Path,
+    days: u32,
+    paths: &[String],
+    bounds: &GitCommandBounds,
+) -> Result<HashMap<String, usize>> {
+    try_git_program().map_err(|_| TraceDecayError::HostCliUnavailable {
+        program: "git".to_owned(),
+        lifecycle: "Git churn analysis".to_owned(),
+    })?;
+    match std::fs::metadata(root) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(HashMap::new());
+        }
+        Err(error) => return Err(TraceDecayError::Io(error)),
+        Ok(_) => {}
+    }
+    let repository = match GitRepositoryAuthority::discover(root) {
+        Ok(repository) => repository,
+        Err(GitRepositoryError::NotARepository { .. }) => return Ok(HashMap::new()),
+        Err(error) => return Err(churn_error(error.to_string())),
+    };
+    if repository
+        .head()
+        .map_err(|error| churn_error(error.to_string()))?
+        .commit()
+        .is_none()
+    {
+        return Ok(HashMap::new());
+    }
+    let since = format!("--since={days} days ago");
+    let mut args = vec![
+        "log",
+        "--format=",
+        "--name-only",
+        "--relative",
+        "-z",
+        since.as_str(),
+        "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    let output =
+        bounded_git_output(root, &args, bounds).map_err(|error| churn_error(error.to_string()))?;
+    if !output.status.success() {
+        return Err(churn_error(format!(
+            "git log exited with {}",
+            output.status
+        )));
+    }
+    let allowed: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
+    let mut churn = tally_name_only(&output.stdout)?;
+    churn.retain(|path, _| allowed.contains(path.as_str()));
+    Ok(churn)
+}
+
+fn tally_name_only(stdout: &[u8]) -> Result<HashMap<String, usize>> {
+    let mut churn = HashMap::new();
+    for path in stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = std::str::from_utf8(path).map_err(|error| churn_error(error.to_string()))?;
+        *churn.entry(path.to_owned()).or_insert(0) += 1;
+    }
+    Ok(churn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_paths_and_bounded_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new(try_git_program().unwrap())
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        };
+        assert!(
+            read_file_churn(root, 90, &GitCommandBounds::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            read_file_churn(&root.join("missing"), 90, &GitCommandBounds::default())
+                .unwrap()
+                .is_empty()
+        );
+        git(&["init"]);
+        assert!(
+            read_file_churn(root, 90, &GitCommandBounds::default())
+                .unwrap()
+                .is_empty()
+        );
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        #[cfg(unix)]
+        let paths = [
+            " leading.rs",
+            "trailing.rs ",
+            "line\nbreak.rs",
+            "tab\tname.rs",
+            "utf8-λ.rs",
+        ];
+        #[cfg(not(unix))]
+        let paths = [" leading.rs", "utf8-λ.rs"];
+        for path in paths {
+            std::fs::write(root.join(path), "one").unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-m", "first"]);
+        std::fs::write(root.join(paths[0]), "two").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "second"]);
+        let counts = read_file_churn(root, 90, &GitCommandBounds::default()).unwrap();
+        let only_first = read_file_churn_paths(
+            root,
+            90,
+            &[paths[0].to_owned()],
+            &GitCommandBounds::default(),
+        )
+        .unwrap();
+        assert_eq!(only_first.len(), 1);
+        assert_eq!(only_first[paths[0]], counts[paths[0]]);
+        assert_eq!(counts.len(), paths.len());
+        for (index, path) in paths.iter().enumerate() {
+            assert_eq!(counts[*path], if index == 0 { 2 } else { 1 });
+        }
+        let limited = GitCommandBounds {
+            max_stdout_bytes: 1,
+            ..Default::default()
+        };
+        assert!(read_file_churn(root, 90, &limited).is_err());
+        let expired = GitCommandBounds {
+            deadline: std::time::Instant::now(),
+            ..Default::default()
+        };
+        assert!(read_file_churn(root, 90, &expired).is_err());
+        #[cfg(unix)]
+        if non_utf8_file_names_supported(root)
+            .expect("probe non-UTF-8 file-name support without hiding storage failures")
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let path = std::ffi::OsStr::from_bytes(b"invalid-\xff.rs");
+            std::fs::write(root.join(path), "invalid UTF-8 identity").unwrap();
+            git(&["add", "."]);
+            git(&["commit", "-m", "invalid path"]);
+            assert!(read_file_churn(root, 90, &GitCommandBounds::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn subdirectory_project_keys_paths_relative_to_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = dir.path();
+        let project = repository.join("packages/app");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new(try_git_program().unwrap())
+                .args(["-c", "user.email=test@example.com", "-c", "user.name=Test"])
+                .args(args)
+                .current_dir(repository)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        };
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/main.ts"), "one").unwrap();
+        std::fs::write(project.join("src/util.ts"), "one").unwrap();
+        std::fs::write(repository.join("outside.ts"), "one").unwrap();
+        git(&["init", "--quiet"]);
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "first"]);
+        std::fs::write(project.join("src/main.ts"), "two").unwrap();
+        std::fs::write(repository.join("outside.ts"), "two").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "second"]);
+
+        let scoped = read_file_churn_paths(
+            &project,
+            90,
+            &["src/main.ts".to_owned()],
+            &GitCommandBounds::default(),
+        )
+        .unwrap();
+        assert_eq!(scoped, HashMap::from([("src/main.ts".to_owned(), 2)]));
+        let counts = read_file_churn(&project, 90, &GitCommandBounds::default()).unwrap();
+        assert_eq!(
+            counts,
+            HashMap::from([("src/main.ts".to_owned(), 2), ("src/util.ts".to_owned(), 1)])
+        );
+    }
+
+    /// Report whether `directory`'s filesystem accepts a name that is not
+    /// valid UTF-8.
+    ///
+    /// `cfg(unix)` is a compile gate, not a filesystem capability: APFS
+    /// refuses such a name outright with `EILSEQ`, so a macOS run failed at
+    /// the fixture instead of exercising the churn refusal. Probing keeps the
+    /// coverage everywhere the bytes are accepted while propagating unrelated
+    /// storage failures.
+    #[cfg(unix)]
+    fn non_utf8_file_names_supported(directory: &std::path::Path) -> std::io::Result<bool> {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let control = directory.join("filename-control");
+        std::fs::write(&control, b"")?;
+        std::fs::remove_file(control)?;
+
+        let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
+        match std::fs::write(&probe, b"") {
+            Ok(()) => {
+                std::fs::remove_file(&probe)?;
+                Ok(true)
+            }
+            // APFS rejects invalid UTF-8 with EILSEQ; the Darwin sandbox
+            // rejects it earlier with EPERM. The control write above proves
+            // the directory itself is writable.
+            #[cfg(target_os = "macos")]
+            Err(error) if matches!(error.raw_os_error(), Some(1 | 92)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}

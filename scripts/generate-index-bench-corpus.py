@@ -353,8 +353,25 @@ def main() -> int:
         / "index-bench"
         / "corpus",
     )
+    parser.add_argument(
+        "--scale",
+        type=int,
+        default=1,
+        help=(
+            "multiply every per-language count (default 1). Scaled corpora are "
+            "still a pure function of the ordinal but are not the committed "
+            "workload, so --scale > 1 requires an explicit --out"
+        ),
+    )
     arguments = parser.parse_args()
     root: pathlib.Path = arguments.out
+    if arguments.scale < 1:
+        parser.error("--scale must be a positive integer")
+    if arguments.scale > 1:
+        if arguments.out == parser.get_default("out"):
+            parser.error("--scale > 1 requires --out outside the committed corpus")
+        for language in COUNTS:
+            COUNTS[language] *= arguments.scale
 
     if root.exists():
         shutil.rmtree(root)

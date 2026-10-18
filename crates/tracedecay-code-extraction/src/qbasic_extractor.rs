@@ -7,98 +7,22 @@
 /// definitions to Struct nodes with Field children, CONST statements to
 /// Const nodes, DIM SHARED to Field nodes, CALL sites to unresolved refs,
 /// and apostrophe comments to docstrings.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{ExtractionState, basic_identifier_text, local_node_id};
 use crate::complexity::{ComplexityMetrics, QBASIC_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from `QBasic` source files using tree-sitter.
 pub struct QBasicExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 impl QBasicExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_qbasic(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -116,7 +40,7 @@ impl QBasicExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -130,6 +54,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -156,12 +81,8 @@ impl QBasicExtractor {
                     Self::visit_type_definition(&mut state, node, pending_comment.as_deref());
                     pending_comment = None;
                 }
-                "sub_definition" => {
-                    Self::visit_sub_definition(&mut state, node, pending_comment.as_deref());
-                    pending_comment = None;
-                }
-                "function_definition" => {
-                    Self::visit_function_definition(&mut state, node, pending_comment.as_deref());
+                "sub_definition" | "function_definition" => {
+                    Self::visit_routine_definition(&mut state, node, pending_comment.as_deref());
                     pending_comment = None;
                 }
                 _ => {
@@ -172,15 +93,10 @@ impl QBasicExtractor {
 
         state.node_stack.pop();
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("qbasic", "QBasic", source)
     }
 
     /// Extract a comment from a line node, if the line is purely a comment.
@@ -236,20 +152,20 @@ impl QBasicExtractor {
         let Some(id_node) = find_direct_child_by_kind(const_stmt, "identifier") else {
             return;
         };
-        let name = state.node_text(id_node);
+        let name = basic_identifier_text(state.source, id_node);
 
         let start_line = line.start_position().row as u32;
         let end_line = line.end_position().row as u32;
         let start_column = line.start_position().column as u32;
         let end_column = line.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, line);
         let text = state.node_text(line);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -268,6 +184,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -302,19 +219,19 @@ impl QBasicExtractor {
         let Some(id_node) = find_direct_child_by_kind(dim_var, "identifier") else {
             return;
         };
-        let name = state.node_text(id_node);
+        let name = basic_identifier_text(state.source, id_node);
 
         let start_line = line.start_position().row as u32;
         let end_line = line.end_position().row as u32;
         let start_column = line.start_position().column as u32;
         let end_column = line.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Field, name, line);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Field,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -333,6 +250,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -358,21 +276,27 @@ impl QBasicExtractor {
         let Some(name_node) = node.child_by_field_name("name") else {
             return;
         };
-        let name = state.node_text(name_node);
+        let name = basic_identifier_text(state.source, name_node);
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let struct_id = generate_node_id(&state.file_path, &NodeKind::Struct, &name, start_line);
+        let struct_id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Struct,
+            name,
+            node,
+        );
         let text = state.node_text(node);
         let signature = text.lines().next().unwrap_or("").trim().to_string();
 
         let graph_node = Node {
             id: struct_id.clone(),
             kind: NodeKind::Struct,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name: qualified_name.clone(),
             file_path: state.file_path.clone(),
             start_line,
@@ -391,6 +315,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -407,7 +332,7 @@ impl QBasicExtractor {
         }
 
         // Extract type_member children as Field nodes.
-        state.node_stack.push((name, struct_id.clone()));
+        state.node_stack.push((name.to_string(), struct_id.clone()));
         let mut child_cursor = node.walk();
         if child_cursor.goto_first_child() {
             loop {
@@ -426,7 +351,7 @@ impl QBasicExtractor {
     /// Visit a `type_member` inside a TYPE block and emit a Field node.
     fn visit_type_member(state: &mut ExtractionState, member: TsNode<'_>) {
         let name = match find_direct_child_by_kind(member, "identifier") {
-            Some(id_node) => state.node_text(id_node),
+            Some(id_node) => basic_identifier_text(state.source, id_node),
             None => return,
         };
 
@@ -435,13 +360,19 @@ impl QBasicExtractor {
         let start_column = member.start_position().column as u32;
         let end_column = member.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            name,
+            member,
+        );
         let text = state.node_text(member);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Field,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -460,6 +391,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -475,8 +407,9 @@ impl QBasicExtractor {
         }
     }
 
-    /// Visit a SUB...END SUB definition and emit a Function node.
-    fn visit_sub_definition(
+    /// Visit a SUB...END SUB or FUNCTION...END FUNCTION definition and emit a
+    /// Function node.
+    fn visit_routine_definition(
         state: &mut ExtractionState,
         node: TsNode<'_>,
         pending_comment: Option<&str>,
@@ -484,14 +417,20 @@ impl QBasicExtractor {
         let Some(name_node) = node.child_by_field_name("name") else {
             return;
         };
-        let name = state.node_text(name_node);
+        let name = basic_identifier_text(state.source, name_node);
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let fn_id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            name,
+            node,
+        );
 
         // Build signature from the first line of text.
         let text = state.node_text(node);
@@ -499,7 +438,7 @@ impl QBasicExtractor {
 
         // Count complexity using the generic counter.
         let metrics = if node.child_count() > 0 {
-            count_complexity(node, &QBASIC_COMPLEXITY, &state.source)
+            count_complexity(node, &QBASIC_COMPLEXITY, state.source)
         } else {
             ComplexityMetrics::default()
         };
@@ -507,7 +446,7 @@ impl QBasicExtractor {
         let graph_node = Node {
             id: fn_id.clone(),
             kind: NodeKind::Function,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -526,6 +465,7 @@ impl QBasicExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -540,75 +480,7 @@ impl QBasicExtractor {
             });
         }
 
-        state.node_stack.push((name, fn_id.clone()));
-        Self::walk_for_calls(state, node);
-        state.node_stack.pop();
-    }
-
-    /// Visit a FUNCTION...END FUNCTION definition and emit a Function node.
-    fn visit_function_definition(
-        state: &mut ExtractionState,
-        node: TsNode<'_>,
-        pending_comment: Option<&str>,
-    ) {
-        let Some(name_node) = node.child_by_field_name("name") else {
-            return;
-        };
-        let name = state.node_text(name_node);
-
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
-
-        let text = state.node_text(node);
-        let signature = text.lines().next().unwrap_or("").trim().to_string();
-
-        let metrics = if node.child_count() > 0 {
-            count_complexity(node, &QBASIC_COMPLEXITY, &state.source)
-        } else {
-            ComplexityMetrics::default()
-        };
-
-        let graph_node = Node {
-            id: fn_id.clone(),
-            kind: NodeKind::Function,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(signature),
-            docstring: pending_comment.map(std::string::ToString::to_string),
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: metrics.branches,
-            loops: metrics.loops,
-            returns: metrics.returns,
-            max_nesting: metrics.max_nesting,
-            unsafe_blocks: metrics.unsafe_blocks,
-            unchecked_calls: metrics.unchecked_calls,
-            assertions: metrics.assertions,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: fn_id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        state.node_stack.push((name, fn_id.clone()));
+        state.node_stack.push((name.to_string(), fn_id.clone()));
         Self::walk_for_calls(state, node);
         state.node_stack.pop();
     }
@@ -616,30 +488,28 @@ impl QBasicExtractor {
     /// Extract a call reference from a `call_statement` node.
     fn extract_call_from_call_statement(state: &mut ExtractionState, call_stmt: TsNode<'_>) {
         let target_name = match find_direct_child_by_kind(call_stmt, "identifier") {
-            Some(id_node) => state.node_text(id_node),
+            Some(id_node) => basic_identifier_text(state.source, id_node),
             None => return,
         };
 
-        let from_node_id = state
-            .node_stack
-            .last()
-            .map(|(_, id)| id.clone())
-            .unwrap_or_default();
+        let from_node_id = state.node_stack.last().map_or_default(|(_, id)| id.clone());
 
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id,
-            reference_name: target_name,
+            reference_name: target_name.to_string(),
             reference_kind: EdgeKind::Calls,
             line: call_stmt.start_position().row as u32,
             column: call_stmt.start_position().column as u32,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
+            argument_count: None,
         });
     }
 
     /// Recursively walk AST nodes looking for `call_statement` nodes.
     ///
     /// `function_call` nodes (built-ins like `STR$()`) are deliberately not
-    /// extracted — they aren't user-defined.
+    /// extracted. They aren't user-defined.
     fn walk_for_calls(state: &mut ExtractionState, node: TsNode<'_>) {
         if node.kind() == "call_statement" {
             Self::extract_call_from_call_statement(state, node);
@@ -657,17 +527,6 @@ impl QBasicExtractor {
             }
         }
     }
-
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
-    }
 }
 
 impl crate::LanguageExtractor for QBasicExtractor {
@@ -679,17 +538,16 @@ impl crate::LanguageExtractor for QBasicExtractor {
         "QBasic"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_qbasic(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

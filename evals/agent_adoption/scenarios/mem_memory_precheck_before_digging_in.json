@@ -34,7 +34,10 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "recorded-fact count phrasing varies; no fixed answer to check"
+  },
   "max_tool_calls": 4,
-  "notes": "memory precheck; ready now against the two facts run.sh already seeds. No fixed ground_truth (count phrasing varies); graded on tool choice."
+  "notes": "memory precheck; ready now against the two facts run.sh already seeds. Count phrasing varies, so the answer is ungraded and the run is judged on routing only."
 }

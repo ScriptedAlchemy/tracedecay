@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Daemon invocation wire contract, authenticated client, and leaf transport.
 //!
 //! This crate sits below the composition root. It owns request/response
@@ -46,6 +47,7 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::large_enum_variant)]
 
+pub mod application_surface;
 pub mod client;
 pub mod client_identity;
 pub mod connection;
@@ -53,46 +55,57 @@ pub mod contract;
 pub mod handshake;
 pub mod lsp_wire;
 pub mod output_format;
+pub mod request;
 pub mod surface;
 pub mod transport;
 
+pub use application_surface::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+    ApplicationToolRequest, FeedbackSurfaceRequest, adapt_application_tool_request,
+    application_delivery_route, application_outcome_value, application_response,
+    application_surface_cancellation_policy, application_surface_feedback_is_observable,
+    application_surface_feedback_operation, decode_retained_request, invoke_application_surface,
+    is_source_edit_operation, parse_application_surface_invocation_payload,
+    parse_application_surface_request, parse_source_edit_arguments,
+    separate_application_tool_request,
+};
 pub use client::{
-    AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,
-    CatalogBindingResolver, DaemonInvocationClient, DaemonInvocationError,
-    DaemonInvocationExecutor, DaemonInvocationExecutorFuture, DaemonLspSessionClient,
-    DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
-    InvocationControls, ResolvedBinding, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
-    SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS, ScopeSelector,
-    SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
-    application_delivery_route, application_response, deadline_remaining, handshake_refusal_error,
-    invocation_now_micros, map_invocation_error, resolve_dispatch, wait_for_cancellation,
+    AdapterInvocation, BindingResolution, BoundInvocation, CanonicalInvocation,
+    CatalogBindingResolver, DAEMON_AUTHENTICATION_REJECTED, DaemonInvocationClient,
+    DaemonInvocationDelivery, DaemonInvocationError, DaemonInvocationExecutor,
+    DaemonInvocationExecutorFuture, DaemonInvocationResult, DaemonLspSessionClient, DispatchError,
+    DispatchInput, DispatchedInvocation, InvocationCancellationPolicy, InvocationControls,
+    ResolvedBinding, ScopeSelector, deadline_remaining, handshake_refusal_error,
+    map_invocation_error, refusal_behind_failed_write, resolve_dispatch, wait_for_cancellation,
 };
 pub use client_identity::DaemonClientIdentity;
 pub use connection::{
     DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
-    DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT, DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
-    DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_DAEMON_OPERATION_DEADLINE, DEFAULT_TOOL_REQUEST_DEADLINE,
-    DaemonConnection, DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
+    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE,
+    DEFAULT_DAEMON_OPERATION_DEADLINE, DEFAULT_TOOL_REQUEST_DEADLINE, DaemonConnection,
+    DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
     connect_to_daemon_connection, daemon_connect_failure, daemon_response_stalled,
     daemon_response_stalled_during, daemon_tool_response_bound, next_daemon_response_line,
-    tool_request_deadline, write_daemon_preamble,
+    poll_daemon_response_line, tool_request_deadline, write_daemon_handshake_preamble,
+    write_daemon_preamble,
 };
 pub use contract::{
-    CanonicalQualificationBlob, CanonicalQualificationBlobError, DAEMON_INVOCATION_PROTOCOL,
-    DAEMON_INVOCATION_REVISION, DAEMON_SHUTDOWN_METHOD, DaemonFeedbackResult,
-    DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationCancellationRequest,
-    DaemonInvocationDeliveryAckRejectReason, DaemonInvocationDeliveryAckRequest,
-    DaemonInvocationDeliveryAckResponse, DaemonInvocationDeliveryAckResponseOutcome,
-    DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationPayload,
-    DaemonInvocationProblem, DaemonInvocationRequest, DaemonInvocationResponse,
-    DaemonLspSessionAccess, HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1,
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkflowApplicationInvocation,
-    WorkflowApplicationOutcome, parse_daemon_invocation_cancellation_request,
-    parse_daemon_invocation_delivery_ack_request, parse_daemon_invocation_request,
+    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DAEMON_SHUTDOWN_METHOD,
+    DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult,
+    DaemonInvocationCancellationRequest, DaemonInvocationDeliveryAckRejectReason,
+    DaemonInvocationDeliveryAckRequest, DaemonInvocationDeliveryAckResponse,
+    DaemonInvocationDeliveryAckResponseOutcome, DaemonInvocationOperation, DaemonInvocationOutcome,
+    DaemonInvocationPayload, DaemonInvocationProblem, DaemonInvocationRequest,
+    DaemonInvocationResponse, DaemonLspSessionAccess, HandoffApplicationInvocationV1,
+    HandoffApplicationOutcomeV1, RESET_REQUIRED_STORES_META_KEY, WorkApplicationInvocationV1,
+    WorkApplicationOutcomeV1, WorkflowApplicationInvocation, WorkflowApplicationOutcome,
+    parse_daemon_invocation_cancellation_request, parse_daemon_invocation_delivery_ack_request,
+    parse_daemon_invocation_request,
 };
 pub use handshake::{
     DAEMON_HANDSHAKE_REFUSAL_PROTOCOL, DaemonHandshake, DaemonHandshakeRefusal,
     DaemonHandshakeRefusalReason, MovedStoreAdoption, client_version_skew, version_skew_action,
+    versions_name_same_build,
 };
 pub use lsp_wire::{
     ConnectionLocalRequestSequence, FramePoll, FrameSend, LspFrame, LspSessionAccess,
@@ -100,16 +113,11 @@ pub use lsp_wire::{
     MAX_LSP_WORKSPACE_ROOTS, ProcessLocalRequestSequence, SequenceExhausted,
 };
 pub use output_format::{RequestedOutputFormat, requested_output_format};
-pub use surface::{
-    ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-    ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
-    ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
-    ContextScoutSurfaceRequest, GitReadSurfaceRequest,
-};
+pub use surface::GitReadSurfaceRequest;
 pub use transport::{
     AUTH_PREFACE_PROTOCOL, BrokerListener, BrokerReadHalf, BrokerStream, BrokerWriteHalf,
-    DaemonAuthPreface, DaemonEndpoint, SOCKET_ENV, default_loopback_endpoint,
+    DaemonAuthPreface, DaemonClientReadHalf, DaemonClientStream, DaemonClientWriteHalf,
+    DaemonEndpoint, SOCKET_ENV, default_loopback_endpoint,
 };
 #[cfg(unix)]
 pub use transport::{

@@ -1,16 +1,19 @@
 use super::*;
-use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
+use crate::agents::context_scout::ContextScoutDeliveryReceiptHookV1;
 use crate::hooks::daemon_ports::daemon_admission_response;
 use std::sync::Mutex;
-use tracedecay_application::context_scout::{
-    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutFeedbackKindV1,
-    ContextScoutFeedbackV1,
+use tracedecay_contracts::context_scout::{
+    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
 use tracedecay_domain::feedback::{FeedbackCycleId, FeedbackResultId, FeedbackScopeV1};
 use tracedecay_domain::{CodeGenerationId, CommitId, ManifestDigest, RepositoryId, WorktreeId};
 use tracedecay_hooks::{
     HookAdmissionReceiptV1, HookDeliveryFutureV1, HookFeedbackDeliveryOutcomeV1,
-    HookGuidanceDispositionV1,
+    HookGuidanceDispositionV1, HookScopedFeedbackV1,
+};
+use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::lifecycle_lease::{
+    ExclusiveLeaseAttempt, acquire_exclusive_for_profile, try_acquire_exclusive_for_profile,
 };
 
 /// Test shim over [`super::native_material`], which now takes the identity
@@ -54,17 +57,17 @@ fn hook_binding_uses_exact_resolved_worktree_and_revision_epoch() {
 #[test]
 fn every_host_with_a_native_advisory_event_receives_a_daemon_binding() {
     let hosts = [
-        HookHostV1::ClaudeCode,
-        HookHostV1::Codex,
-        HookHostV1::CursorDesktop,
-        HookHostV1::CursorCloud,
-        HookHostV1::Hermes,
-        HookHostV1::Kiro,
-        HookHostV1::KimiCode,
-        HookHostV1::OpenCode,
-        HookHostV1::Cline,
-        HookHostV1::RooCode,
-        HookHostV1::Kilo,
+        NativeHostIdentityV1::ClaudeCode,
+        NativeHostIdentityV1::Codex,
+        NativeHostIdentityV1::CursorDesktop,
+        NativeHostIdentityV1::CursorCloud,
+        NativeHostIdentityV1::Hermes,
+        NativeHostIdentityV1::Kiro,
+        NativeHostIdentityV1::KimiCode,
+        NativeHostIdentityV1::OpenCode,
+        NativeHostIdentityV1::Cline,
+        NativeHostIdentityV1::RooCode,
+        NativeHostIdentityV1::Kilo,
     ];
     let families = [
         tracedecay_hooks::HookEventFamily::SessionBoundary,
@@ -88,11 +91,7 @@ fn daemon_catchup_disposition_is_not_reclassified_as_unavailable() {
     let response = serde_json::json!({
         "action": "hook_v2_admit",
         "status": "rejected",
-        "disposition": HookTransportDispositionV1::CatchupRequired,
-        "orchestration": null,
-        "ready_guidance": null,
-        "feedback_notice": null,
-        "reason": null,
+        "disposition": "catchup_required",
     });
 
     assert!(matches!(
@@ -145,7 +144,7 @@ fn daemon_admission_response_rejects_open_or_incoherent_actions() {
 
 #[test]
 fn daemon_feedback_notice_survives_into_host_delivery() {
-    let notice = tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
+    let notice = tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
             project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
             repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
@@ -163,7 +162,7 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     let current_envelope = HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
         event_id: [1; 16],
-        producer: HookHostV1::ClaudeCode,
+        producer: NativeHostIdentityV1::ClaudeCode,
         protected_session_id: [2; 32],
         project_id: envelope_identity_hash16("project", notice.scope.project_id.as_str()),
         repository_id: envelope_identity_hash16("repository", notice.scope.repository_id.as_str()),
@@ -183,11 +182,12 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     let response = serde_json::json!({
         "action": "hook_v2_admit",
         "status": "accepted",
-        "disposition": HookTransportDispositionV1::Accepted,
-        "orchestration": null,
+        "disposition": "accepted",
+        "orchestration": "enqueued",
+        "context_scout_address": null,
         "ready_guidance": null,
         "feedback_notice": notice,
-        "reason": null,
+        "github_stack_signal_available": false,
     });
 
     let admitted = daemon_admission_response(&response);
@@ -200,13 +200,41 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     ));
     assert_eq!(admitted.feedback_notice, Some(notice.clone()));
 
-    let rendered = render_host_delivery(None, Some(&notice), false).unwrap();
+    let rendered = render_host_delivery(None, None, Some(&notice), false)
+        .expect("feedback notice serializes")
+        .expect("feedback notice renders");
     assert!(rendered.starts_with("TraceDecay feedback ready for authorized lookup: "));
     let encoded = rendered.split_once(": ").unwrap().1;
     assert_eq!(
-        serde_json::from_str::<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>(encoded)
-            .unwrap(),
+        serde_json::from_str::<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>(
+            encoded
+        )
+        .unwrap(),
         notice
+    );
+}
+
+#[test]
+fn context_scout_address_is_rendered_for_the_admitted_host() {
+    let address = ContextScoutAddressV1 {
+        profile_id: [1; 16],
+        provider_id: [2; 16],
+        protected_session_id: [3; 32],
+        thread_id: [4; 16],
+        turn_id: [5; 16],
+        agent_id: [6; 16],
+        logical_message_id: [7; 16],
+        project_id: [8; 16],
+    };
+    let rendered = render_host_delivery(None, Some(&address), None, false)
+        .expect("authorized Scout address serializes")
+        .expect("authorized Scout address renders");
+    let encoded = rendered
+        .strip_prefix("TraceDecay Context Scout address for authorized operations: ")
+        .expect("bounded address prefix");
+    assert_eq!(
+        serde_json::from_str::<ContextScoutAddressV1>(encoded).unwrap(),
+        address
     );
 }
 
@@ -215,17 +243,19 @@ fn github_stack_wakeup_is_content_free() {
     let response = serde_json::json!({
         "action": "hook_v2_admit",
         "status": "accepted",
-        "disposition": HookTransportDispositionV1::Accepted,
-        "orchestration": null,
+        "disposition": "accepted",
+        "orchestration": "enqueued",
+        "context_scout_address": null,
         "ready_guidance": null,
         "feedback_notice": null,
         "github_stack_signal_available": true,
-        "reason": null,
     });
     let admitted = daemon_admission_response(&response);
     assert!(admitted.github_stack_signal_available);
 
-    let rendered = render_host_delivery(None, None, true).expect("stack wakeup renders");
+    let rendered = render_host_delivery(None, None, None, true)
+        .expect("stack wakeup serialization succeeds")
+        .expect("stack wakeup renders");
 
     assert_eq!(
         rendered,
@@ -243,13 +273,13 @@ struct RecordingFeedbackDeliveryPort {
     calls: Mutex<usize>,
 }
 
-impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>
+impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>
     for RecordingFeedbackDeliveryPort
 {
-    fn deliver_hook_v2<'a>(
+    fn deliver_hook<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
@@ -257,19 +287,10 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHook
             HookFeedbackDeliveryOutcomeV1::Delivered
         })
     }
-
-    fn deliver_legacy<'a>(
-        &'a self,
-        _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
-        _deadline: HookSynchronousDeadlineV1,
-    ) -> HookDeliveryFutureV1<'a> {
-        Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
-    }
 }
 
-fn sample_notice() -> tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
-    tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
+fn sample_notice() -> tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
+    tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
             project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
             repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
@@ -287,12 +308,12 @@ fn sample_notice() -> tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 
 }
 
 fn sample_envelope(
-    notice: &tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+    notice: &tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
 ) -> HookEventEnvelopeV2 {
     HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
         event_id: [1; 16],
-        producer: HookHostV1::ClaudeCode,
+        producer: NativeHostIdentityV1::ClaudeCode,
         protected_session_id: [2; 32],
         project_id: envelope_identity_hash16("project", notice.scope.project_id.as_str()),
         repository_id: envelope_identity_hash16("repository", notice.scope.repository_id.as_str()),
@@ -333,7 +354,6 @@ async fn feedback_notice_never_delivers_after_deadline_or_failed_admission() {
     };
     let rollback = HookFeedbackRollbackSwitchV1 {
         configuration_revision: 1,
-        route: HookFeedbackDeliveryRouteV1::HookV2,
     };
     let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
 
@@ -376,217 +396,31 @@ async fn feedback_notice_never_delivers_after_deadline_or_failed_admission() {
     assert_eq!(*port.calls.lock().unwrap(), 1);
 }
 
-#[tokio::test]
-async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
-    let project = tempfile::tempdir().unwrap();
-    let notice = sample_notice();
-    let mut envelope = sample_envelope(&notice);
-    envelope.event_id = [7; 16];
-    let envelope_id = [22; 16];
-    let receipt = ContextScoutDeliveryReceiptV1 {
-        receipt_id: context_scout_delivery_receipt_id(envelope.event_id, envelope_id),
-        envelope_id,
-        delivered_at: UtcMicros(23),
-        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
-    };
-    let feedback = ContextScoutFeedbackV1 {
-        receipt_id: receipt.receipt_id,
-        kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
-    };
-    let commit = ContextScoutFeedbackCommitV1 {
-        receipt: receipt.clone(),
-        feedback,
-    };
-    let guard = crate::hooks::TestDaemonHookActionGuard::install([
-        serde_json::json!({ "status": "stored" }),
-        serde_json::json!({ "status": "duplicate" }),
-        serde_json::json!({ "status": "stored" }),
-    ]);
-    let admission = sample_receipt(HookImmediateAdmissionStateV1::Accepted, false);
-    let rollback = HookFeedbackRollbackSwitchV1 {
-        configuration_revision: 1,
-        route: HookFeedbackDeliveryRouteV1::HookV2,
-    };
-    let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
-
-    let recorded = deliver_hook_feedback(
-        &envelope,
-        &admission,
-        rollback,
-        Some(ContextScoutDeliveryReceiptHookV1 {
-            receipt: receipt.clone(),
-        }),
-        deadline,
-        &DaemonDeliveryReceiptPort::new(project.path()),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        recorded.outcome,
-        Some(HookFeedbackDeliveryOutcomeV1::Delivered)
-    );
-
-    let committed = deliver_hook_feedback(
-        &envelope,
-        &admission,
-        rollback,
-        Some(commit.clone()),
-        deadline,
-        &DaemonContextScoutFeedbackPort::new(project.path()),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        committed.outcome,
-        Some(HookFeedbackDeliveryOutcomeV1::Duplicate)
-    );
-
-    let delivered = deliver_hook_feedback(
-        &envelope,
-        &admission,
-        rollback,
-        Some(notice.clone()),
-        deadline,
-        &DaemonFeedbackNoticeDeliveryPort::new(project.path()),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        delivered.outcome,
-        Some(HookFeedbackDeliveryOutcomeV1::Delivered)
-    );
-    assert_eq!(delivered.feedback.as_ref(), Some(&notice));
-
-    let calls = guard.calls();
-    assert_eq!(calls.len(), 3);
-    assert_eq!(calls[0].0.as_deref(), Some(project.path()));
-    assert_eq!(calls[0].1["action"], "hook_v2_delivery_receipt");
-    assert_eq!(
-        serde_json::from_value::<ContextScoutDeliveryReceiptV1>(calls[0].1["receipt"].clone())
-            .unwrap(),
-        receipt
-    );
-    assert_eq!(calls[1].1["action"], "hook_v2_feedback");
-    assert_eq!(
-        serde_json::from_value::<ContextScoutFeedbackV1>(calls[1].1["feedback"].clone()).unwrap(),
-        commit.feedback
-    );
-    assert_eq!(calls[2].1["action"], "hook_v2_feedback_notice_delivery");
-    assert_eq!(
-        serde_json::from_value::<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>(
-            calls[2].1["feedback_notice"].clone()
-        )
-        .unwrap(),
-        notice
-    );
-}
-
-#[tokio::test]
-async fn scout_receipt_and_feedback_helpers_delegate_to_daemon_ports() {
-    let project = tempfile::tempdir().unwrap();
-    let receipt = ContextScoutDeliveryReceiptV1 {
-        receipt_id: [21; 16],
-        envelope_id: [22; 16],
-        delivered_at: UtcMicros(23),
-        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
-    };
-    let feedback = ContextScoutFeedbackV1 {
-        receipt_id: receipt.receipt_id,
-        kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
-    };
-    let guard = crate::hooks::TestDaemonHookActionGuard::install([
-        serde_json::json!({ "status": "stored" }),
-        serde_json::json!({ "status": "duplicate" }),
-    ]);
-
-    assert!(record_context_scout_delivery(project.path(), &receipt).await);
-    assert!(commit_context_scout_feedback(project.path(), &receipt, feedback).await);
-
-    let calls = guard.calls();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].1["action"], "hook_v2_delivery_receipt");
-    assert_eq!(calls[1].1["action"], "hook_v2_feedback");
-}
-
 #[test]
-fn opencode_event_uses_nested_properties_identity() {
+fn opencode_event_uses_nested_data_identity() {
     let material = native_material(
         r#"{
-                "id": "event-17",
-                "properties": {
-                    "sessionID": "session-23",
-                    "file": "/project/src/lib.rs"
+                "id": "evt-17",
+                "type": "session.execution.succeeded",
+                "data": {
+                    "sessionID": "session-23"
                 }
             }"#,
-        tracedecay_hooks::HookEventFamily::SavedEdit,
+        tracedecay_hooks::HookEventFamily::SessionBoundary,
         UtcMicros(41),
     )
     .unwrap();
 
-    assert_ne!(material.event_id, hash16(b"event-17"));
+    assert_ne!(material.event_id, hash16(b"evt-17"));
     assert_eq!(material.protected_session_id, hash32(b"session-23"));
-    assert_eq!(material.file_id, Some(hash16(b"/project/src/lib.rs")));
-}
-
-fn opencode_lsp_fixture_event() -> (serde_json::Value, String) {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/packaged_host_events/opencode/baseline.json"
-    ))
-    .unwrap();
-    let event = fixture["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|event| event["identity"] == "lsp_updated")
-        .unwrap()["request"]
-        .clone();
-    let event_json = serde_json::to_string(&event).unwrap();
-    (event, event_json)
-}
-
-#[tokio::test]
-async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
-    let project = tempfile::tempdir().unwrap();
-    let (event, event_json) = opencode_lsp_fixture_event();
-    let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
-        "action": "opencode_lsp_updated",
-        "status": "accepted",
-    })]);
-
-    let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path(), None).await;
-
-    assert!(matches!(
-        dispatch,
-        HookDispatch::Handled {
-            guidance: None,
-            disposition: HookTransportDispositionV1::Accepted,
-        }
-    ));
-    let calls = guard.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0.as_deref(), Some(project.path()));
-    assert_eq!(calls[0].1["action"], "opencode_lsp_updated");
-    assert_eq!(calls[0].1["event"], event);
-}
-
-#[tokio::test]
-async fn opencode_lsp_updated_rejects_non_accepted_daemon_status() {
-    let project = tempfile::tempdir().unwrap();
-    let (_event, event_json) = opencode_lsp_fixture_event();
-    let _guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
-        "action": "opencode_lsp_updated",
-        "status": "rejected",
-    })]);
-
-    let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path(), None).await;
-    assert!(matches!(
-        dispatch,
-        HookDispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
-    ));
+    assert_eq!(material.effect_receipt_id, None);
+    assert_eq!(material.file_id, None);
 }
 
 #[tokio::test]
 async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
     let project = tempfile::tempdir().unwrap();
     let notice = sample_notice();
     let mut envelope = sample_envelope(&notice);
@@ -602,13 +436,14 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         receipt_id: [3; 16],
         ..receipt.clone()
     };
-    let port = DaemonDeliveryReceiptPort::new(project.path());
+    let runtime = crate::ports::hook_runtime::crate_test_runtime(profile.clone());
+    let port = DaemonDeliveryReceiptPort::new(&runtime, project.path());
     let rollback = HookFeedbackRollbackSwitchV1 {
         configuration_revision: 1,
-        route: HookFeedbackDeliveryRouteV1::HookV2,
     };
     let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
     let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+        "action": "hook_v2_delivery_receipt",
         "status": "stored"
     })]);
 
@@ -656,19 +491,19 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
 }
 
 #[test]
-fn opencode_tool_event_uses_nested_input_and_output_identity() {
+fn opencode_tool_event_uses_call_and_input_path_identity() {
     let material = native_material(
         r#"{
+                "tool": "edit",
+                "sessionID": "session-29",
+                "id": "call-31",
                 "input": {
-                    "tool": "apply_patch",
-                    "sessionID": "session-29",
-                    "callID": "call-31"
+                    "path": "/project/src/main.rs",
+                    "oldString": "a",
+                    "newString": "b"
                 },
-                "output": {
-                    "metadata": {
-                        "files": [{"filePath": "/project/src/main.rs"}]
-                    }
-                }
+                "status": "completed",
+                "result": {"content": []}
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -685,17 +520,11 @@ fn opencode_tool_event_uses_nested_input_and_output_identity() {
 fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
     let first = native_material(
         r#"{
-                "input": {
-                    "tool": "apply_patch",
-                    "sessionID": "session-29",
-                    "callID": "call-31",
-                    "args": {"patchText": "first payload"}
-                },
-                "output": {
-                    "metadata": {
-                        "files": [{"filePath": "/project/first.rs"}]
-                    }
-                }
+                "tool": "edit",
+                "sessionID": "session-29",
+                "id": "call-31",
+                "input": {"path": "/project/first.rs", "oldString": "first", "newString": "payload"},
+                "status": "completed"
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -703,17 +532,11 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
     .unwrap();
     let aliases_changed = native_material(
         r#"{
-                "input": {
-                    "tool": "write",
-                    "sessionID": "session-29",
-                    "callID": "call-31",
-                    "args": {"patchText": "unrelated payload"}
-                },
-                "output": {
-                    "metadata": {
-                        "files": [{"filePath": "/project/first.rs"}]
-                    }
-                }
+                "tool": "write",
+                "sessionID": "session-29",
+                "id": "call-31",
+                "input": {"path": "/project/first.rs", "content": "unrelated payload"},
+                "status": "completed"
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -721,17 +544,11 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
     .unwrap();
     let path_changed = native_material(
         r#"{
-                "input": {
-                    "tool": "write",
-                    "sessionID": "session-29",
-                    "callID": "call-31",
-                    "args": {"patchText": "unrelated payload"}
-                },
-                "output": {
-                    "metadata": {
-                        "files": [{"filePath": "/elsewhere/alias.rs"}]
-                    }
-                }
+                "tool": "write",
+                "sessionID": "session-29",
+                "id": "call-31",
+                "input": {"path": "/elsewhere/alias.rs", "content": "unrelated payload"},
+                "status": "completed"
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -739,11 +556,11 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
     .unwrap();
     let different_native_event = native_material(
         r#"{
-                "input": {
-                    "tool": "write",
-                    "sessionID": "session-29",
-                    "callID": "call-32"
-                }
+                "tool": "write",
+                "sessionID": "session-29",
+                "id": "call-32",
+                "input": {},
+                "status": "completed"
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -771,7 +588,7 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
     assert_eq!(retry.event_id, first.event_id);
 
     let temporary = tempfile::tempdir().unwrap();
-    let host = HookHostV1::ClaudeCode;
+    let host = NativeHostIdentityV1::ClaudeCode;
     let binding = spool_binding(host, [family]);
     let decoded = tracedecay_hooks::decode_native_hook_event(
         host,
@@ -786,6 +603,7 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
             temporary.path(),
             host,
             &first_envelope,
+            None,
             &binding,
             UtcMicros(10),
         ),
@@ -805,7 +623,7 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
 }
 
 fn spool_binding(
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     families: impl IntoIterator<Item = tracedecay_hooks::HookEventFamily>,
 ) -> HookScopeBindingV1 {
     HookScopeBindingV1 {
@@ -888,7 +706,8 @@ fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
     .unwrap();
 
     let lifecycle =
-        native_context_scout_lifecycle(HookHostV1::KimiCode, &fields, material.event_id).unwrap();
+        native_context_scout_lifecycle(NativeHostIdentityV1::KimiCode, &fields, material.event_id)
+            .unwrap();
 
     assert_eq!(lifecycle.session_id.as_str(), "session.kimi.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.kimi.native");
@@ -955,17 +774,256 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
     )
     .unwrap();
     let lifecycle =
-        native_context_scout_lifecycle(HookHostV1::OpenCode, &fields, material.event_id).unwrap();
+        native_context_scout_lifecycle(NativeHostIdentityV1::OpenCode, &fields, material.event_id)
+            .unwrap();
     assert_eq!(lifecycle.session_id.as_str(), "session.opencode.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.opencode.native");
 
-    let file_edit = fixture["events"]
+    let decoded = tracedecay_hooks::decode_opencode_plugin_event(
+        tracedecay_hooks::OpenCodePluginSurfaceV1::ToolExecuteAfter,
+        tool_after.as_bytes(),
+    )
+    .unwrap();
+    let binding = spool_binding(
+        NativeHostIdentityV1::OpenCode,
+        [tracedecay_hooks::HookEventFamily::SavedEdit],
+    );
+    let envelope = decoded.into_envelope(&binding, material).unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    assert_eq!(
+        append_for_replay(
+            temporary.path(),
+            NativeHostIdentityV1::OpenCode,
+            &envelope,
+            Some(lifecycle.clone()),
+            &binding,
+            UtcMicros(10),
+        ),
+        SpoolAppendOutcomeV1::Accepted,
+    );
+    let spool_root = temporary
+        .path()
+        .join("hook-v2-spool")
+        .join(NativeHostIdentityV1::OpenCode.hook_key());
+    let (mut spool, _) = HookSpoolV1::open(
+        spool_root,
+        HookSpoolConfigV1::stock(NativeHostIdentityV1::OpenCode),
+        UtcMicros(10),
+    )
+    .unwrap();
+    let replayed = spool.claim_replay_batches(UtcMicros(10), 1).unwrap();
+    assert_eq!(replayed[0].records[0].native_lifecycle, Some(lifecycle));
+
+    // The execution boundary names a session but no tool call, so it carries
+    // no Context Scout lifecycle identity.
+    let boundary = fixture["events"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|event| event["identity"] == "saved_edit")
+        .find(|event| event["identity"] == "stop")
         .unwrap()["request"]
         .to_string();
-    let fields = serde_json::from_str::<NativeIdentityFields>(&file_edit).unwrap();
-    assert!(native_context_scout_lifecycle(HookHostV1::OpenCode, &fields, [1; 16]).is_none());
+    let fields = serde_json::from_str::<NativeIdentityFields>(&boundary).unwrap();
+    assert!(
+        native_context_scout_lifecycle(NativeHostIdentityV1::OpenCode, &fields, [1; 16]).is_none()
+    );
+}
+
+/// A hook callback appending to an already-prepared spool holds its writer
+/// lease for one bounded append. Project open republishing the binding at that
+/// moment waits for the peer instead of failing the open with `Busy`.
+#[test]
+fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
+    let project = tempfile::tempdir().unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        "proj_hook_binding_contention",
+    )
+    .unwrap();
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &project_root,
+        profile.data_dir(),
+        "proj_hook_binding_contention",
+    )
+    .unwrap();
+    fn contention_scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {
+        Ok(scope("worktree.binding-contention"))
+    }
+    let runtime = HookRuntimeV1 {
+        scope_resolver: contention_scope,
+        ..crate::ports::hook_runtime::crate_test_runtime(profile.clone())
+    };
+    publish_daemon_bindings(&runtime, &layout).unwrap();
+
+    let host = NativeHostIdentityV1::ClaudeCode;
+    let capture_root = tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host);
+    let (prepared, report) =
+        HookSpoolV1::open(&capture_root, HookSpoolConfigV1::stock(host), UtcMicros(1)).unwrap();
+    assert_eq!((report.pending_records, report.next_sequence), (0, 1));
+    assert!(
+        !report.checkpoint_rewritten,
+        "publication prepares the first callback's checkpoint"
+    );
+    let barriers = tracedecay_private_fs::framed_log::sync_latency::inject(
+        &capture_root,
+        std::time::Duration::ZERO,
+    );
+    prepared.prepare().unwrap();
+    assert_eq!(
+        barriers.syncs(),
+        0,
+        "publication already prepared this exact file"
+    );
+    drop(barriers);
+    // A callback descheduled on a loaded host holds its lease past the hook's
+    // own synchronous budget but within the lease itself.
+    let held = 2 * tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET;
+    let (capture, _) = HookSpoolV1::open(
+        tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host),
+        HookSpoolConfigV1::stock(host),
+        UtcMicros(1),
+    )
+    .unwrap();
+    let delivery = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+        tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    let callback = std::thread::spawn(move || {
+        std::thread::sleep(held);
+        drop(capture);
+        drop(delivery);
+    });
+    assert!(held < HookSpoolConfigV1::stock(host).writer_lease());
+
+    publish_daemon_bindings(&runtime, &layout)
+        .expect("publication waits for the live callback instead of failing busy");
+    callback.join().unwrap();
+}
+
+/// A hook that fires while the daemon is away spools its event under the
+/// published binding. The daemon republishes that binding when it next opens
+/// the project, and its replay must still commit the queued event.
+#[tokio::test]
+async fn events_spooled_before_a_binding_republication_replay_after_it() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
+    let project = tempfile::tempdir().unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        "proj_hook_binding_republication",
+    )
+    .unwrap();
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &project_root,
+        profile.data_dir(),
+        "proj_hook_binding_republication",
+    )
+    .unwrap();
+    fn republication_scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {
+        Ok(scope("worktree.binding-republication"))
+    }
+    let runtime = HookRuntimeV1 {
+        scope_resolver: republication_scope,
+        ..crate::ports::hook_runtime::crate_test_runtime(profile.clone())
+    };
+    let host = NativeHostIdentityV1::ClaudeCode;
+    let source = tracedecay_hooks::NativeHookCaptureSourceV1::Host(host);
+    let stop = include_str!(
+        "../../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
+    )
+    .as_bytes();
+    let (project_id, worktree_id) =
+        project_and_worktree_locators_for_scope(&scope("worktree.binding-republication"));
+
+    publish_daemon_bindings(&runtime, &layout).unwrap();
+    let observed_at = now_utc();
+    assert_eq!(
+        tracedecay_hooks::capture_native_event_for_replay(
+            &layout.data_root,
+            worktree_id,
+            source,
+            stop,
+            native_capture_material(source, stop, observed_at).unwrap(),
+            observed_at,
+        ),
+        tracedecay_hooks::NativeHookCaptureOutcomeV1::Captured,
+    );
+
+    std::thread::sleep(Duration::from_millis(2));
+    publish_daemon_bindings(&runtime, &layout).unwrap();
+    let now = now_utc();
+    let binding =
+        tracedecay_hooks::published_hook_scope_binding(&layout.data_root, worktree_id, host, now)
+            .unwrap();
+    let pass = tracedecay_hooks::drain_host_spool_once(
+        &tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host),
+        HookSpoolConfigV1::stock(host),
+        project_id,
+        &mut |_| Some(binding.clone()),
+        now,
+        |_, _| std::future::ready(tracedecay_hooks::HookReplayAdmissionOutcomeV1::Admitted),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        (pass.committed, pass.tombstoned, pass.retained),
+        (1, 0, 0),
+        "the queued Stop must replay, not be tombstoned as stale: {pass:?}"
+    );
+}
+
+#[test]
+fn bound_hook_excludes_maintenance_until_dispatch_is_released() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(home.path());
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&root, "proj_hook_lease")
+        .unwrap();
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &root,
+        profile.data_dir(),
+        "proj_hook_lease",
+    )
+    .unwrap();
+    fn hook_scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {
+        Ok(scope("worktree.hook-lease"))
+    }
+    let runtime = HookRuntimeV1 {
+        scope_resolver: hook_scope,
+        ..crate::ports::hook_runtime::crate_test_runtime(profile.clone())
+    };
+    let host = NativeHostIdentityV1::ClaudeCode;
+    let payload = include_str!(
+        "../../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
+    );
+    publish_daemon_bindings(&runtime, &layout).unwrap();
+    let prepare = || {
+        prepare_bound_hook(
+            &runtime,
+            host,
+            payload,
+            &root,
+            tracedecay_hooks::decode_native_hook_event(host, payload.as_bytes()).unwrap(),
+        )
+    };
+    let prepared = prepare().unwrap();
+    assert!(matches!(
+        try_acquire_exclusive_for_profile(profile.data_dir(), "wipe").unwrap(),
+        ExclusiveLeaseAttempt::Busy { .. }
+    ));
+    drop(prepared);
+    let maintenance = acquire_exclusive_for_profile(profile.data_dir(), "wipe").unwrap();
+    let spool = tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host);
+    std::fs::remove_dir_all(&spool).unwrap();
+    assert!(matches!(prepare(), Err(Unprepared::Unavailable)));
+    assert!(!spool.exists());
+    drop(maintenance);
+    assert!(prepare().is_ok());
 }

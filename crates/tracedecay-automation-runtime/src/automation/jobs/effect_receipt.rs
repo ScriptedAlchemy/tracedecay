@@ -1,13 +1,16 @@
-use std::path::Path;
+use std::path::{Component, Path};
+
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
 
 use crate::automation::artifacts::sha256_bytes;
 use crate::automation::{AutomationCommittedReceipt, AutomationRunError, AutomationRunResult};
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::native_runtime;
 
 use super::{
     AgentTaskResponse, AutomationJob, JOB_OUTPUT_DIR, JobDelivery, TraceDecayError,
@@ -262,32 +265,24 @@ pub(super) async fn deliver_job_output(
     match &job.delivery {
         JobDelivery::File { path } => {
             let target = file_target(dashboard_root, job, run_id, path.as_deref())?;
-            if let Some(parent) = target.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                    TraceDecayError::Config {
-                        message: format!("failed to create job output directory: {error}"),
-                    }
-                })?;
-            }
             let target_digest = sha256_bytes(target.display().to_string().as_bytes());
-            let mut file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&target)
+            let root = dashboard_root.to_path_buf();
+            let mut file = crate::automation::blocking_fs(move || open_job_output(&root, &target))
                 .await
                 .map_err(|error| {
                     AutomationRunError::Runtime(TraceDecayError::Config {
                         message: format!("failed to open job output: {error}"),
                     })
                 })?;
-            hotpath::measure_block!("automation.job_delivery.write_file", {
-                file.write_all(response.output_text.as_bytes()).await
+            let output = response.output_text.clone();
+            crate::automation::blocking_fs(move || {
+                use std::io::Write as _;
+                let _span = tracing::trace_span!("automation.job_delivery.write_file").entered();
+                file.write_all(output.as_bytes())?;
+                file.flush()
             })
+            .await
             .map_err(|_| {
-                indeterminate_error(run_id, &task_key, "file", &target_digest, content_digest)
-            })?;
-            file.flush().await.map_err(|_| {
                 indeterminate_error(run_id, &task_key, "file", &target_digest, content_digest)
             })?;
             Ok(JobDeliveryOutcome::File { target_digest })
@@ -303,16 +298,21 @@ pub(super) async fn deliver_job_output(
             });
             let target_digest = sha256_bytes(url.as_bytes());
             let post_url = url.clone();
-            let attempted = tokio::task::spawn_blocking(move || {
+            let attempted = native_runtime::spawn_blocking(move || {
                 job_webhook::post_json_url(
                     &post_url,
                     &payload,
                     Duration::from_secs(WEBHOOK_TIMEOUT_SECS),
                 )
-            });
-            let status =
-                await_webhook_attempt(attempted, run_id, &task_key, &target_digest, content_digest)
-                    .await?;
+            })
+            .await;
+            let status = settle_webhook_attempt(
+                attempted,
+                run_id,
+                &task_key,
+                &target_digest,
+                content_digest,
+            )?;
             Ok(JobDeliveryOutcome::Webhook {
                 target_digest,
                 status,
@@ -321,14 +321,16 @@ pub(super) async fn deliver_job_output(
     }
 }
 
-async fn await_webhook_attempt(
-    attempted: tokio::task::JoinHandle<std::result::Result<u16, job_webhook::WebhookPostError>>,
+/// `attempted` is `Err` when the blocking worker ended without a result, so
+/// whether the POST went out is unknown.
+fn settle_webhook_attempt(
+    attempted: std::result::Result<std::result::Result<u16, job_webhook::WebhookPostError>, String>,
     run_id: &str,
     task_key: &str,
     target_digest: &str,
     content_digest: &str,
 ) -> AutomationRunResult<u16> {
-    match attempted.await {
+    match attempted {
         Err(_) => Err(indeterminate_error(
             run_id,
             task_key,
@@ -368,6 +370,46 @@ pub(super) fn delivery_context(
             "target_digest": sha256_bytes(url.as_bytes()),
         })),
     }
+}
+
+fn open_job_output(root: &Path, target: &Path) -> std::io::Result<std::fs::File> {
+    let invalid = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "job output must stay beneath its directory",
+        )
+    };
+    let relative = target.strip_prefix(root).map_err(|_| invalid())?;
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name),
+            _ => Err(invalid()),
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let (name, parents) = components.split_last().ok_or_else(invalid)?;
+    let mut directory = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
+    for parent in parents {
+        directory = match directory.open_dir_nofollow(parent) {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match directory.create_dir(parent) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                directory.open_dir_nofollow(parent)?
+            }
+            Err(error) => return Err(error),
+        };
+    }
+    let mut options = OpenOptions::new();
+    options
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .follow(FollowSymlinks::No);
+    Ok(directory.open_with(name, &options)?.into_std())
 }
 
 fn file_target(
@@ -601,74 +643,42 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn file_write_failure_after_open_is_a_bound_partial_effect() {
+    #[test]
+    fn file_output_refuses_symlink_destinations_and_parent_directories() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let output_root = temp.path().join(JOB_OUTPUT_DIR);
-        std::fs::create_dir_all(&output_root).expect("job output root");
-        std::os::unix::fs::symlink("/dev/full", output_root.join("sink")).expect("full device");
-        let job: AutomationJob = serde_json::from_value(json!({
-            "id": "private-file",
-            "name": "Private file",
-            "prompt": "write",
-            "delivery": {"mode": "file", "path": "job-output/sink"}
-        }))
-        .expect("job");
-        let response = AgentTaskResponse {
-            run_id: "run-file-attempt".to_owned(),
-            task: crate::automation::backend::AgentTaskKind::UserJob,
-            output_json: None,
-            output_text: "private delivery body".to_owned(),
-            model: None,
-            provider: None,
-            input_tokens: None,
-            output_tokens: None,
-        };
-        let error = deliver_job_output(
-            temp.path(),
-            &job,
-            "run-file-attempt",
-            &sha256_bytes(response.output_text.as_bytes()),
-            &response,
-        )
-        .await
-        .expect_err("the opened full device must reject the write");
-        let AutomationRunError::PartialEffect {
-            committed_receipt,
-            ledger_record,
-            ..
-        } = error
-        else {
-            panic!("post-open failure must be a partial effect")
-        };
-        let AutomationCommittedReceipt::UserJobDelivery(receipt) = *committed_receipt else {
-            panic!("post-open failure must carry a delivery receipt")
-        };
-        assert!(ledger_record.is_none());
-        assert_eq!(receipt.task_key(), "user_job:private-file");
-        assert!(matches!(
-            receipt.disposition(),
-            ExternalAutomationEffectDisposition::UserJobDeliveryIndeterminate { mode: "file", .. }
-        ));
-        let debug = format!("{receipt:?}");
-        assert!(!debug.contains("sink"));
-        assert!(!debug.contains("private delivery body"));
+        let outside = tempfile::tempdir().expect("outside");
+        let target = outside.path().join("existing");
+        std::fs::write(&target, b"preserve").expect("seed");
+        std::os::unix::fs::symlink(&target, temp.path().join("sink")).expect("file symlink");
+        assert!(super::open_job_output(temp.path(), &temp.path().join("sink")).is_err());
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("directory"))
+            .expect("directory symlink");
+        assert!(
+            super::open_job_output(temp.path(), &temp.path().join("directory/existing")).is_err()
+        );
+        assert_eq!(std::fs::read(&target).expect("read"), b"preserve");
+        let file = super::open_job_output(temp.path(), &temp.path().join("nested/output"))
+            .expect("ordinary nested output");
+        drop(file);
+        assert!(temp.path().join("nested/output").is_file());
     }
 
-    #[tokio::test]
-    async fn webhook_worker_panic_after_attempt_remains_a_bound_partial_effect() {
-        let attempted = tokio::task::spawn_blocking(|| {
-            // The worker "attempted" its write; the panic lands afterwards.
-            panic!("injected panic after write")
-        });
-        let error = await_webhook_attempt(
+    #[test]
+    fn webhook_worker_panic_after_attempt_remains_a_bound_partial_effect() {
+        let attempted = native_runtime::block_on(native_runtime::spawn_blocking(
+            || -> std::result::Result<u16, job_webhook::WebhookPostError> {
+                // The worker "attempted" its write; the panic lands afterwards.
+                panic!("injected panic after write")
+            },
+        ))
+        .expect("native runtime available");
+        let error = settle_webhook_attempt(
             attempted,
             "run-webhook-panic",
             "user_job:notify",
             &sha256_bytes(b"https://secret.invalid/hook?token=private"),
             &sha256_bytes(b"private body"),
         )
-        .await
         .expect_err("unknown worker phase must fail closed as indeterminate");
         let AutomationRunError::PartialEffect {
             committed_receipt,

@@ -1,0 +1,456 @@
+//! Serving notifications cover installation and renewed source admission.
+
+use std::path::Path;
+use std::process::Command;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+use tempfile::TempDir;
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1;
+use tracedecay_domain::ProjectId;
+
+use super::super::graph_activation::{
+    RESIDENT_MEMORY_GRAPH_REFUSAL_REASON, install_injected_activation_gate,
+};
+use super::super::tests::move_git_metadata;
+use super::{
+    CodeIndexCadenceOutcomeV1, CodeIndexSchedulerRegistryV1, dashboard_generation_is_ready,
+    serving_seat_matches_advertised_generation,
+};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+
+/// Failure bound on a worker event these tests wait for: a pass finishing,
+/// a publication, a renewed proof, a cancellation wake. Nothing here passes
+/// because time elapsed; an event that never arrives fails loudly.
+const WORKER_EVENT_FAILURE_CEILING: Duration = Duration::from_mins(2);
+
+#[test]
+fn dashboard_ready_requires_text_and_graph_lane_owners() {
+    assert!(dashboard_generation_is_ready(
+        None,
+        true,
+        true,
+        &Some(CodeGraphServingReadinessV1::Ready),
+    ));
+    assert!(
+        !dashboard_generation_is_ready(
+            None,
+            false,
+            true,
+            &Some(CodeGraphServingReadinessV1::Ready),
+        ),
+        "freshness must not report ready while exact or lexical lane owners are incomplete"
+    );
+    for graph in [
+        CodeGraphServingReadinessV1::Pending,
+        CodeGraphServingReadinessV1::Unavailable {
+            reason: "fixture unavailable".to_owned(),
+        },
+    ] {
+        assert!(
+            !dashboard_generation_is_ready(None, true, true, &Some(graph.clone())),
+            "freshness must not report ready while graph lane coverage is incomplete: {graph:?}"
+        );
+    }
+    assert!(
+        dashboard_generation_is_ready(
+            None,
+            true,
+            true,
+            &Some(CodeGraphServingReadinessV1::Refused {
+                reason:
+                    tracedecay_contracts::code_index_freshness::GRAPH_PUBLICATION_DEADLINE_REASON
+                        .to_owned(),
+            }),
+        ),
+        "a terminal graph refusal is a finished verdict for this generation, not active warming"
+    );
+    assert!(
+        !dashboard_generation_is_ready(
+            None,
+            true,
+            true,
+            &Some(CodeGraphServingReadinessV1::Refused {
+                reason: RESIDENT_MEMORY_GRAPH_REFUSAL_REASON.to_owned(),
+            }),
+        ),
+        "a resident-memory refusal stays parked so it can retry"
+    );
+}
+
+/// The graph-rebuild receipt (transport acceptance, both ~90s attempts): lane
+/// owners were ready on the replacement text generation while search still
+/// served the predecessor seat. Status must not call that split terminal.
+#[test]
+fn graph_rebuild_split_is_not_terminal_freshness() {
+    assert!(
+        dashboard_generation_is_ready(None, true, true, &Some(CodeGraphServingReadinessV1::Ready)),
+        "the receipt's text owner and graph activation were ready"
+    );
+    assert!(
+        !serving_seat_matches_advertised_generation(
+            true,
+            Some("generation.predecessor"),
+            Some("generation.head"),
+        ),
+        "search served the predecessor while status advertised the head"
+    );
+    assert!(
+        serving_seat_matches_advertised_generation(true, None, Some("generation.head")),
+        "with no decoded seat search serves the advertised text owner itself"
+    );
+    assert!(serving_seat_matches_advertised_generation(
+        true,
+        Some("generation.head"),
+        Some("generation.head"),
+    ));
+    assert!(serving_seat_matches_advertised_generation(
+        true,
+        Some("generation.head"),
+        None,
+    ));
+    assert!(serving_seat_matches_advertised_generation(true, None, None));
+}
+
+/// A graph-off mount serves its text owner directly and never seats the
+/// decoded generation; the empty seat is not a lagging seat.
+#[test]
+fn graph_off_text_owner_is_terminal_without_a_seat() {
+    assert!(serving_seat_matches_advertised_generation(
+        false,
+        None,
+        Some("generation.head"),
+    ));
+    assert!(serving_seat_matches_advertised_generation(
+        false,
+        Some("generation.predecessor"),
+        Some("generation.head"),
+    ));
+}
+
+/// Park the background worker and wait out whatever pass is already in flight.
+///
+/// The worker releases its admission permit after source reconciliation, so
+/// winning the permit only proves that no *new* pass can start. A pass still
+/// running past that point installs a serving generation, renews the source
+/// proof behind it, and signals `serving_generation_changed`, which a test
+/// sampling that watch would then attribute to its own next step.
+///
+/// `reconcile_in_progress` cannot bound that pass. It answers the narrower
+/// question of whether exact or lexical rebuild work is in flight, and a pass
+/// deliberately lowers it before optional graph work (#1103, #1339) while it
+/// still owns the seat and the proof. The build/publication lock is what the
+/// pass actually holds for its whole iteration, so hold that instead of
+/// sampling a flag.
+async fn quiesced_background_reconcile_admission(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) -> (
+    tokio::sync::OwnedSemaphorePermit,
+    tokio::sync::OwnedMutexGuard<()>,
+) {
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the background worker at its dequeue point");
+    // Same order the worker takes them in, so this cannot invert against a
+    // pass that already owns the permit.
+    let build_publication = registry
+        .build_publication_lock_handle(project_root)
+        .await
+        .expect("mounted worktree");
+    let build_publication =
+        tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, build_publication.lock_owned())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the owner pass for {} never finished",
+                    project_root.display()
+                )
+            });
+    (admission, build_publication)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serving_waiter_tracks_installation_freshness_and_retirement() {
+    let fixture = TempDir::new().expect("fixture root");
+    let project = fixture.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source directory");
+    std::fs::write(project.join("src/lib.rs"), "pub fn branch_probe() {}\n")
+        .expect("fixture source");
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        assert!(
+            Command::new(tracedecay_runtime_core::git::try_git_program().expect("git executable"))
+                .current_dir(&project)
+                .args(args)
+                .status()
+                .expect("run git")
+                .success()
+        );
+    }
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold worker before publication");
+    registry
+        .mount_worktree(
+            ProjectId::new("project.serving-readiness").expect("project identity"),
+            &project,
+            fixture.path().join("store"),
+        )
+        .await
+        .expect("mount worktree");
+    let scope = registry
+        .serving_code_scope(&project)
+        .await
+        .expect("mounted scope");
+    let gate = install_injected_activation_gate(&scope.worktree_id);
+    let mut publications = registry.subscribe_generation_publications();
+    let mut serving_seats = registry.subscribe_serving_seats();
+    let initial_seat = *serving_seats.borrow();
+    let mut changes = registry
+        .subscribe_serving_generation_changes(&project)
+        .await
+        .expect("serving subscription");
+    assert!(
+        registry.request_complete_generation(&project).await,
+        "mounted worktree admits complete-generation demand"
+    );
+    drop(admission);
+    let published = tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, publications.recv())
+        .await
+        .expect("sealed publication deadline")
+        .expect("sealed publication");
+    assert!(
+        registry
+            .serving_code_scope(&project)
+            .await
+            .expect("mounted scope")
+            .serving_generation
+            .is_none(),
+        "seal alone must not claim serving readiness"
+    );
+    // Text authority may wake readers before graph activation. Only the
+    // serving-seat authority certifies that activation installed a graph.
+    assert_eq!(*serving_seats.borrow(), initial_seat);
+    gate.release();
+    serving_seats
+        .wait_for(|seat| *seat != initial_seat)
+        .await
+        .expect("serving-seat authority stays open");
+    changes.borrow_and_update();
+    let generation = registry
+        .serving_code_scope(&project)
+        .await
+        .expect("mounted scope")
+        .serving_generation
+        .expect("serving seat contains the installed generation");
+    assert_eq!(generation.manifest().generation_id, published.generation_id);
+    let resolved_scope = ResolvedScope::new(
+        generation.manifest().project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        generation.snapshot().reference.clone(),
+    )
+    .expect("resolved serving scope");
+    assert!(
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .any(|symbol| symbol.simple_name == "branch_probe")
+    );
+    let canonical_project = canonical_existing_identity(&project).expect("canonical project");
+    let parked_worker = quiesced_background_reconcile_admission(&registry, &project).await;
+    move_git_metadata(&project);
+    changes.borrow_and_update();
+    let serving_seat_before_move = *serving_seats.borrow_and_update();
+    // One sample at millisecond zero cannot tell a parked worker from a pass
+    // that advertised itself idle and is still about to publish its seat and
+    // renew the source proof. Sample the whole window.
+    let unproven_window = Instant::now() + Duration::from_millis(250);
+    loop {
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                registry.latest_complete_ready(&project)
+            )
+            .await
+            .expect("moved-metadata readiness returns without walking source")
+            .is_none(),
+            "moved Git metadata cannot be promoted current before the worker renews the proof"
+        );
+        if Instant::now() >= unproven_window {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        *serving_seats.borrow(),
+        serving_seat_before_move,
+        "moved-metadata readiness admission cannot install another serving generation"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&resolved_scope)
+            .await
+            .is_some(),
+        "the retained immutable generation remains available to stale reads"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&resolved_scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "the read coalesces one verification wake on the retained worker"
+    );
+    drop(parked_worker);
+    let ready = tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, async {
+        loop {
+            changes.changed().await.expect("source proof renewal");
+            if let Some(ready) = registry.latest_complete_ready(&project).await {
+                break ready;
+            }
+        }
+    })
+    .await
+    .expect("the worker renews the unchanged source proof");
+    assert_eq!(
+        ready.generation().manifest().generation_id,
+        published.generation_id
+    );
+
+    let parked_worker = quiesced_background_reconcile_admission(&registry, &project).await;
+    changes.borrow_and_update();
+    let seat_epoch = {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&canonical_project)
+            .expect("mounted worktree")
+            .serving_generation_epoch
+            .clone()
+    };
+    let installed_epoch = seat_epoch.load(Ordering::Acquire);
+    let scheduler = registry
+        .scheduler_handle(&project)
+        .await
+        .expect("mounted scheduler");
+    {
+        let mut scheduler = scheduler.lock().expect("scheduler lock");
+        scheduler.notify_path(project.join("src/lib.rs"));
+        assert!(
+            !scheduler.request_fresh_for_query_background(),
+            "the hint's own pending pass is the remedy; the query ladder must not \
+             escalate it into an observed-change rescan"
+        );
+    }
+    assert!(
+        registry.latest_complete_ready(&project).await.is_none(),
+        "a true source hint invalidates the seated proof"
+    );
+    drop(parked_worker);
+    let revalidated = tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, async {
+        loop {
+            changes
+                .changed()
+                .await
+                .expect("source revalidation notification");
+            if let Some(ready) = registry.latest_complete_ready(&project).await {
+                break ready;
+            }
+        }
+    })
+    .await
+    .expect("unchanged-source reconciliation must wake the retained waiter");
+    assert_eq!(
+        revalidated.generation().manifest().generation_id,
+        published.generation_id,
+        "source revalidation must retain the exact unchanged generation"
+    );
+    assert_eq!(
+        seat_epoch.load(Ordering::Acquire),
+        installed_epoch,
+        "source revalidation must not replace the existing serving slot"
+    );
+    assert!(
+        registry
+            .event_to_ready_receipts()
+            .last()
+            .is_some_and(|receipt| {
+                matches!(receipt.outcome, CodeIndexCadenceOutcomeV1::Noop { .. })
+            }),
+        "the wake must follow the real unchanged-source reconcile"
+    );
+    assert!(
+        matches!(
+            publications.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "the unchanged source must wake admission without another publication"
+    );
+
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold source rebuild while checking drift admission");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn changed_branch_probe() {}\n",
+    )
+    .expect("drift source after the retained generation");
+    move_git_metadata(&project);
+    assert!(
+        registry.latest_complete_ready(&project).await.is_none(),
+        "moved Git metadata must not admit a source that changed"
+    );
+    assert_eq!(
+        registry
+            .scheduler_handle(&project)
+            .await
+            .expect("scheduler")
+            .lock()
+            .expect("scheduler lock")
+            .pending_hint_count(),
+        Some(0),
+        "the read must leave source verification to the canonical worker without fabricating an overflow"
+    );
+    drop(admission);
+    changes.borrow_and_update();
+    registry.cancel();
+    tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, changes.changed())
+        .await
+        .expect("cancellation must wake serving waiters")
+        .expect("mounted owner remains observable until shutdown drains");
+    assert!(
+        registry
+            .serving_code_scope(&project)
+            .await
+            .expect("mounted scope")
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    registry.shutdown().await;
+    assert!(registry.serving_code_scope(&project).await.is_none());
+    changes.borrow_and_update();
+    assert!(
+        changes.changed().await.is_err(),
+        "removed owner must close its subscription"
+    );
+}

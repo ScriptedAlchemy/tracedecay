@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(unix)]
 use super::DaemonEngine;
@@ -19,10 +20,10 @@ use super::{DaemonHandshake, ProjectServerKey, StoreAdministration};
 /// still warming, so the bound proxy is the deferred-activation route: it
 /// resolves the runtime at use time, answering typed-unavailable until
 /// activation publishes the runtime and recovering every dependent surface
-/// (Work topology, workflow recovery, semantic evaluation) within that
+/// (Work topology, workflow recovery) within that
 /// activation. A missing runtime is therefore never reported as success, and
 /// no rebind retry is required.
-#[hotpath::measure(label = "daemon.project.compose.bind_graph", future = true)]
+#[tracing::instrument(name = "daemon.project.compose.bind_graph", level = "trace", skip_all)]
 pub(super) async fn bind_verified_project_graph_runtime(
     database: &tracedecay_runtime_core::db::Database,
     sessions: &RegisteredGlobalDb,
@@ -39,10 +40,7 @@ pub(in crate::daemon) enum ProductionProjectCompositionRuntime {
     #[cfg(unix)]
     Unix(Box<DaemonEngine>),
     #[cfg(any(not(unix), test, feature = "test-transport"))]
-    Portable {
-        semantic_auto_download: bool,
-        startup_catch_up: bool,
-    },
+    Portable { startup_catch_up: bool },
 }
 
 impl ProductionProjectCompositionRuntime {
@@ -52,6 +50,7 @@ impl ProductionProjectCompositionRuntime {
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
         current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         route_registered: Arc<AtomicBool>,
+        route_cancellation: CancellationToken,
         handshake: DaemonHandshake,
     ) -> crate::mcp::DatabaseOwnerReconciler {
         match self {
@@ -60,6 +59,7 @@ impl ProductionProjectCompositionRuntime {
                 current_key,
                 current_project_path,
                 route_registered,
+                route_cancellation,
                 handshake,
             ),
             #[cfg(any(not(unix), test, feature = "test-transport"))]
@@ -67,11 +67,16 @@ impl ProductionProjectCompositionRuntime {
                 _store_administration.clone(),
                 current_key,
                 route_registered,
+                route_cancellation,
                 handshake,
             ),
         }
     }
 
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Portable runtimes return None; Unix production builds compile only the available reconciler arm"
+    )]
     pub(super) fn automation_scheduler_reconciler(
         &self,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
@@ -90,20 +95,6 @@ impl ProductionProjectCompositionRuntime {
         }
     }
 
-    #[hotpath::skip]
-    pub(super) const fn semantic_auto_download(&self) -> bool {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(_) => true,
-            #[cfg(any(not(unix), test, feature = "test-transport"))]
-            Self::Portable {
-                semantic_auto_download,
-                ..
-            } => *semantic_auto_download,
-        }
-    }
-
-    #[hotpath::skip]
     pub(super) const fn startup_catch_up(&self) -> bool {
         match self {
             #[cfg(unix)]
@@ -121,6 +112,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    use tracedecay_application::work::{
+        RegisteredWorkApplicationServicesV1, RegisteredWorkflowApplicationServicesV1,
+    };
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_graph_db::{
@@ -131,11 +125,8 @@ mod tests {
         Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
         TestRuntimeProfileIdentityV1,
     };
-    use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+    use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
-    use tracedecay_usecases::work::{
-        RegisteredWorkApplicationServicesV1, RegisteredWorkflowApplicationServicesV1,
-    };
 
     use super::bind_verified_project_graph_runtime;
 
@@ -281,6 +272,7 @@ mod tests {
         RegisteredWorkApplicationServicesV1::attach(sessions)
             .expect("Work topology attaches once deferred activation completes");
         RegisteredWorkflowApplicationServicesV1::attach(sessions)
+            .await
             .expect("workflow topology attaches once deferred activation completes");
         let bound = sessions
             .project_graph_runtime()
@@ -298,7 +290,7 @@ mod tests {
     }
 
     /// When graph activation never completes in-process, the composition
-    /// bind must stay a typed refusal at every dependent graph read — never
+    /// bind must stay a typed refusal at every dependent graph read, never
     /// a panic, a silent success, or an untyped empty result.
     #[tokio::test]
     async fn never_activated_graph_runtime_stays_typed_on_dependent_surfaces() {

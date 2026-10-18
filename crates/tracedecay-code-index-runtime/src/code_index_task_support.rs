@@ -1,54 +1,51 @@
 //! Owned task settlement and exact-source cursor helpers for code-index search.
 
 use tracedecay_query::code_search;
+use tracedecay_runtime_core::native_runtime;
 
 use crate::code_index_scheduler;
 
 pub fn code_index_search_unavailable_for_generation(
     code_generation: Option<String>,
     reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
-    semantic_reason: &'static str,
+    lane_reason: &'static str,
 ) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     code_search::CodeIndexSearchOutcomeV1::Unavailable(code_search::CodeIndexSearchUnavailableV1 {
         code_generation,
         reason,
-        semantic: code_search::CodeIndexSemanticStatusV1::Unavailable {
-            reason: semantic_reason,
-        },
-        coverage: code_search::CodeIndexSearchCoverageV1::unavailable(semantic_reason),
+        coverage: code_search::CodeIndexSearchCoverageV1::unavailable(lane_reason),
     })
 }
 
 pub fn code_index_search_unavailable(
     reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1,
-    semantic_reason: &'static str,
+    lane_reason: &'static str,
 ) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
-    code_index_search_unavailable_for_generation(None, reason, semantic_reason)
+    code_index_search_unavailable_for_generation(None, reason, lane_reason)
 }
 
-pub fn code_index_scope_unavailable() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
-    code_index_search_unavailable(
-        tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-        "scope_unavailable",
-    )
-}
-
-pub fn code_index_search_hydration_budget(
-    accepted_semantic_budget: Option<&tracedecay_domain::RetrievalBudget>,
-    query_budget: &tracedecay_domain::RetrievalBudget,
-) -> tracedecay_domain::RetrievalBudget {
-    accepted_semantic_budget.copied().unwrap_or(*query_budget)
+pub fn code_index_scope_unavailable(
+    error: crate::mcp_admission::CodeIndexScopeUnavailableV1,
+) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
+    let reason = error.search_reason();
+    let lane_reason = match error {
+        crate::mcp_admission::CodeIndexScopeUnavailableV1::AuthorityUnavailable => {
+            "scope_unavailable"
+        }
+        crate::mcp_admission::CodeIndexScopeUnavailableV1::NotApplicable => reason.as_str(),
+    };
+    code_index_search_unavailable(reason, lane_reason)
 }
 
 pub async fn generation_for_hydration(
     schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     generation_id: &tracedecay_domain::CodeGenerationId,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<
     code_index_scheduler::LatestCompleteCodeIndexV1,
-    tracedecay_query::code_search::CodeIndexSearchOutcomeV1,
+    Box<tracedecay_query::code_search::CodeIndexSearchOutcomeV1>,
 > {
     let generation = schedulers
         .generation_for_controlled(
@@ -64,41 +61,64 @@ pub async fn generation_for_hydration(
         .await;
     match generation {
         Ok(Some(generation)) => Ok(generation),
-        Ok(None) => Err(code_index_search_unavailable_for_generation(
+        Ok(None) => Err(Box::new(code_index_search_unavailable_for_generation(
             Some(generation_id.as_str().to_owned()),
             tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
             "generation_changed_before_hydration",
-        )),
-        Err(reason) => {
-            let semantic_reason = reason.as_str();
-            Err(code_index_search_unavailable_for_generation(
-                Some(generation_id.as_str().to_owned()),
-                reason,
-                semantic_reason,
-            ))
+        ))),
+        Err(reason) => Err(Box::new(code_index_search_unavailable_for_generation(
+            Some(generation_id.as_str().to_owned()),
+            reason,
+            reason.as_str(),
+        ))),
+    }
+}
+
+/// Awaits `task` to completion, checking `termination` every `poll_interval`
+/// while it runs. A terminal outcome is answered only once the task settles,
+/// so the work never outlives the request that owns what it holds.
+pub async fn settle_owned_blocking_task<T, O>(
+    task: impl Future<Output = Result<T, String>>,
+    poll_interval: std::time::Duration,
+    mut termination: impl FnMut() -> Option<O>,
+) -> Result<Result<T, String>, O> {
+    let mut task = std::pin::pin!(task);
+    loop {
+        if let Some(outcome) = termination() {
+            let _ = task.await;
+            return Err(outcome);
+        }
+        match native_runtime::timeout(poll_interval, task.as_mut()).await {
+            Ok(result) => return Ok(result),
+            Err(native_runtime::TimeoutError::Elapsed) => {}
+            Err(native_runtime::TimeoutError::TimerUnavailable(error)) => {
+                tracing::warn!(%error, "owned task settles without termination polls");
+                let result = task.await;
+                return termination().map_or(Ok(result), Err);
+            }
         }
     }
 }
 
-pub async fn settle_owned_blocking_task<T, O>(
-    mut task: tokio::task::JoinHandle<T>,
-    poll_interval: std::time::Duration,
-    mut termination: impl FnMut() -> Option<O>,
-) -> Result<Result<T, tokio::task::JoinError>, O> {
-    let mut terminal = None;
-    let mut control_poll = tokio::time::interval(poll_interval);
-    control_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            result = &mut task => {
-                return match terminal {
-                    Some(outcome) => Err(outcome),
-                    None => Ok(result),
-                };
-            }
-            _ = control_poll.tick(), if terminal.is_none() => {
-                terminal = termination();
-            }
+/// Starts `work` on the native runtime and detaches it. For work that never
+/// reaches Tokio. A refused start is logged, and `work` is dropped.
+#[track_caller]
+pub(crate) fn spawn_detached(event: &'static str, work: impl Future<Output = ()> + Send + 'static) {
+    if let Err(error) = native_runtime::NativeTask::spawn(work) {
+        tracing::warn!(event, %error, "native task did not start");
+    }
+}
+
+/// Awaits a task that [`native_runtime::NativeTask::spawn`] started, or
+/// reports why it did not start, so the caller has one failure path.
+pub(crate) async fn join_native<T: Clone + Send + Sync + 'static>(
+    task: &Result<native_runtime::NativeTask<T>, String>,
+) -> Result<T, String> {
+    match task.as_ref().map_err(Clone::clone)?.wait().await {
+        native_runtime::NativeTaskOutcome::Completed(value) => Ok(value),
+        native_runtime::NativeTaskOutcome::Cancelled => Err("native task was cancelled".to_owned()),
+        native_runtime::NativeTaskOutcome::Panicked(payload) => {
+            Err(format!("native task panicked: {payload}"))
         }
     }
 }
@@ -116,24 +136,20 @@ pub fn exact_source_is_complete(
 
 pub async fn verify_exact_source_cursor(
     schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     cursor: Option<&tracedecay_domain::RetrievalCursor>,
     source: &tracedecay_domain::CodeSourceCursorBindingV1,
-) -> Result<(), code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1> {
+) -> Result<(), code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1> {
     let Some(cursor) = cursor else {
         return Ok(());
     };
     let authority = schedulers.query_authority_for_scope(scope).await.ok_or(
-        code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
-            code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::AuthorityUnavailable,
-        ),
+        code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::AuthorityUnavailable,
     )?;
     authority
         .verify_code_source_cursor(cursor, source)
         .map_err(|_| {
-            code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
-                code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactCursorInvalid,
-            )
+            code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactCursorInvalid
         })
 }
 
@@ -145,7 +161,7 @@ pub enum ExactCursorPublicationErrorV1 {
 
 pub async fn bind_exact_source_cursor(
     schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
     cursor: Option<&mut tracedecay_domain::RetrievalCursor>,
     source: Option<tracedecay_domain::CodeSourceCursorBindingV1>,
 ) -> Result<(), ExactCursorPublicationErrorV1> {
@@ -174,7 +190,7 @@ mod tests {
             .try_acquire_owned()
             .expect("search permit");
         let (release, blocked) = std::sync::mpsc::channel();
-        let worker = tokio::task::spawn_blocking(move || {
+        let worker = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let _permit = permit;
             blocked.recv().expect("worker release");
             7_u8

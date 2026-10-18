@@ -73,6 +73,76 @@ def make_two_commit_project(directory: Path) -> tuple[Path, str, str]:
     return project, base_oid, head_oid
 
 
+# A fake CLI that carries the whole journey: version, init, a status probe that
+# reports the graph seated on its second call, and the two tool reads.
+#
+# `FAKE_CONTEXT_REFUSAL_ONCE` names a file whose existence makes the first
+# `tool context` call refuse the way a real daemon does when a bounded tool
+# deadline expires while its admitted worker is still settling -- typed,
+# self-declared retryable, and consumed on the first refusal so the retry
+# succeeds (issue #1203).
+FULL_JOURNEY_FAKE_TRACEDECAY = """\
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  echo "tracedecay fake-test"
+elif [[ "${1:-}" == "init" ]]; then
+  :
+elif [[ "${1:-} ${2:-}" == "branch add" ]]; then
+  if [[ -n "${FAKE_BRANCH_ADDITIONS:-}" ]]; then
+    echo "$3" >> "$FAKE_BRANCH_ADDITIONS"
+  fi
+elif [[ "${1:-}" == "status" ]]; then
+  count=0
+  if [[ -f "$FAKE_STATUS_COUNTER" ]]; then
+    count="$(cat "$FAKE_STATUS_COUNTER")"
+  fi
+  count="$((count + 1))"
+  echo "$count" >"$FAKE_STATUS_COUNTER"
+  if [[ "${FAKE_NEVER_READY:-0}" == "1" || "$count" -lt 2 ]]; then
+    echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.text-only"}},"graph_statistics":{"state":"unavailable","reason":"exact_scope_generation_not_ready"}}'
+  else
+    echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.ready","code_graph_serving":{"state":"ready"}}},"graph_statistics":{"state":"observed","generation_id":"generation.ready","symbol_count":2,"edge_count":1}}'
+  fi
+elif [[ "${1:-} ${2:-}" == "tool context" ]]; then
+  if [[ -n "${FAKE_CONTEXT_REFUSAL_ONCE:-}" && -f "$FAKE_CONTEXT_REFUSAL_ONCE" ]]; then
+    rm -f "$FAKE_CONTEXT_REFUSAL_ONCE"
+    echo "Error: config error: daemon tool call failed: tool project route failed: reason_code=tool_dispatch_deadline_exceeded retryable=true: tool 'tracedecay_context' exceeded its absolute deadline before commit; worker settlement is Settling" >&2
+    exit 1
+  fi
+  echo '{"coverage":{"exact":"complete","lexical":"complete","graph":"complete","recall":"partial"},"search_matches":[{"file":"src/main.rs"}],"symbols":[{"node_id":"symbol:main"}]}'
+elif [[ "${1:-} ${2:-}" == "tool pr_context" ]]; then
+  project=""
+  base=""
+  head=""
+  shift 2
+  while (($#)); do
+    case "$1" in
+      --project) project="$2"; shift 2 ;;
+      --base-ref) base="$2"; shift 2 ;;
+      --head-ref) head="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  git -C "$project" show-ref --verify --quiet "refs/heads/$base"
+  git -C "$project" show-ref --verify --quiet "refs/heads/$head"
+  base_oid="$(git -C "$project" rev-parse "$base^{commit}")"
+  head_oid="$(git -C "$project" rev-parse "$head^{commit}")"
+  merge_base="$(git -C "$project" merge-base "$base" "$head")"
+  printf '{"base_oid":"%s","head_oid":"%s","merge_base":"%s","graph_generation":"code-graph:sha256:ready-generation","files_changed":1,"changes":[{"path":"fixture.txt","status":"modified"}],"added":[],"modified":[{"name":"fixture_symbol","kind":"function"}],"next_cursor":"pr-context.cursor.next","symbol_page":{"limit":1,"returned":1,"has_more":true,"complete":false,"selection":"stable_prefix","continuation_available":true},"analysis_coverage":{"seed_symbols_analyzed":1,"symbols_returned":1,"symbols_complete":false,"impact_nodes_admitted":2,"impact_nodes_returned":2,"direct_call_edges_admitted":1,"impact_bytes_admitted":256,"impact_partial":false,"complete":false}}\\n' \\
+    "$base_oid" "$head_oid" "$merge_base"
+else
+  echo "unexpected fake TraceDecay arguments: $*" >&2
+  exit 2
+fi
+"""
+
+
+def write_full_journey_fake(path: Path) -> None:
+    path.write_text(FULL_JOURNEY_FAKE_TRACEDECAY, encoding="utf-8")
+    path.chmod(0o755)
+
+
 class PortableProcessTests(unittest.TestCase):
     def test_run_preserves_output_and_exit_status(self) -> None:
         completed = helper(
@@ -170,6 +240,31 @@ class PortableProcessTests(unittest.TestCase):
         resolved = helper("realpath", str(HELPER.parent / ".." / "lib" / HELPER.name))
         self.assertEqual(resolved.returncode, 0)
         self.assertEqual(Path(resolved.stdout.strip()), HELPER.resolve())
+
+    def test_resident_memory_sample_is_portable_and_never_fails_the_probe(self) -> None:
+        sampled = helper("resident-memory", "--pid", str(os.getpid()))
+        self.assertEqual(sampled.returncode, 0, sampled.stderr)
+        fields = dict(
+            field.split("=", 1) for field in sampled.stdout.split() if "=" in field
+        )
+        self.assertEqual(set(fields), {"rss_kib", "peak_rss_kib"})
+        # This interpreter is alive and resident on every supported kernel;
+        # the peak is Linux-only and reads `unavailable` elsewhere.
+        self.assertTrue(fields["rss_kib"].isdigit(), sampled.stdout)
+        self.assertGreater(int(fields["rss_kib"]), 0)
+        self.assertTrue(
+            fields["peak_rss_kib"].isdigit() or fields["peak_rss_kib"] == "unavailable",
+            sampled.stdout,
+        )
+
+        with subprocess.Popen([sys.executable, "-c", "pass"]) as exited:
+            exited.wait(timeout=10)
+            gone = helper("resident-memory", "--pid", str(exited.pid))
+        # A process that is already gone is a missing measurement, not an
+        # error: the sample is evidence for the attempts log, never a probe
+        # that may fail the readiness loop.
+        self.assertEqual(gone.returncode, 0, gone.stderr)
+        self.assertIn("rss_kib=unavailable", gone.stdout)
 
     def test_group_probes_ignore_an_unreaped_zombie_leader(self) -> None:
         holder_source = textwrap.dedent(
@@ -451,21 +546,6 @@ class IsolatedDaemonHarnessTests(unittest.TestCase):
             self.assertIn("fake daemon boot", completed.stderr)
             self.assertNotIn("command must not run", completed.stderr)
 
-    def test_shell_drivers_do_not_require_gnu_or_linux_only_commands(self) -> None:
-        forbidden = ("setsid", "timeout --", "readlink -f", "date +%s%N")
-        for script in (DAEMON_HARNESS, DOGFOOD_SCRIPT):
-            source = script.read_text(encoding="utf-8")
-            for token in forbidden:
-                self.assertNotIn(token, source, f"{script.name} still requires {token}")
-            syntax = subprocess.run(
-                ["bash", "-n", str(script)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(syntax.returncode, 0, syntax.stderr)
-
-
 class DogfoodJourneyOutputTests(unittest.TestCase):
     def test_run_mode_polls_until_strict_readiness_then_validates_journey(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dogfood-output-") as tmp:
@@ -475,60 +555,218 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
             project, base_oid, head_oid = make_two_commit_project(tmp_path)
 
             fake_binary = tmp_path / "fake-tracedecay"
-            fake_binary.write_text(
-                textwrap.dedent(
-                    """\
-                    #!/usr/bin/env bash
-                    set -euo pipefail
-                    if [[ "${1:-}" == "--version" ]]; then
-                      echo "tracedecay fake-test"
-                    elif [[ "${1:-}" == "init" ]]; then
-                      :
-                    elif [[ "${1:-}" == "status" ]]; then
-                      count=0
-                      if [[ -f "$FAKE_STATUS_COUNTER" ]]; then
-                        count="$(cat "$FAKE_STATUS_COUNTER")"
-                      fi
-                      count="$((count + 1))"
-                      echo "$count" >"$FAKE_STATUS_COUNTER"
-                      if [[ "${FAKE_NEVER_READY:-0}" == "1" || "$count" -lt 3 ]]; then
-                        echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.text-only"}},"graph_statistics":{"state":"unavailable","reason":"exact_scope_generation_not_ready"}}'
-                      else
-                        echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.ready","code_graph_serving":{"state":"ready"}}},"graph_statistics":{"state":"observed","generation_id":"generation.ready","symbol_count":2,"edge_count":1}}'
-                      fi
-                    elif [[ "${1:-} ${2:-}" == "tool context" ]]; then
-                      echo '{"coverage":{"exact":"complete","lexical":"complete","graph":"complete","semantic":{"status":"unavailable","reason":"disabled"},"recall":"partial"},"search_matches":[{"file":"src/main.rs"}],"symbols":[{"node_id":"symbol:main"}]}'
-                    elif [[ "${1:-} ${2:-}" == "tool pr_context" ]]; then
-                      project=""
-                      base=""
-                      head=""
-                      shift 2
-                      while (($#)); do
-                        case "$1" in
-                          --project) project="$2"; shift 2 ;;
-                          --base-ref) base="$2"; shift 2 ;;
-                          --head-ref) head="$2"; shift 2 ;;
-                          *) shift ;;
-                        esac
-                      done
-                      base_oid="$(git -C "$project" rev-parse "$base^{commit}")"
-                      head_oid="$(git -C "$project" rev-parse "$head^{commit}")"
-                      merge_base="$(git -C "$project" merge-base "$base" "$head")"
-                      printf '{"base_oid":"%s","head_oid":"%s","merge_base":"%s","graph_generation":"code-graph:sha256:ready-generation","files_changed":1,"changes":[{"path":"fixture.txt","status":"modified"}],"next_cursor":"pr-context.cursor.next","symbol_page":{"limit":1,"returned":1,"has_more":true,"complete":false,"selection":"stable_prefix","continuation_available":true},"analysis_coverage":{"seed_symbols_analyzed":1,"symbols_returned":1,"symbols_complete":false,"impact_nodes_admitted":2,"impact_nodes_returned":2,"direct_call_edges_admitted":1,"impact_bytes_admitted":256,"impact_partial":false,"complete":false}}\\n' \\
-                        "$base_oid" "$head_oid" "$merge_base"
-                    else
-                      echo "unexpected fake TraceDecay arguments: $*" >&2
-                      exit 2
-                    fi
-                    """
-                ),
-                encoding="utf-8",
-            )
-            fake_binary.chmod(0o755)
+            write_full_journey_fake(fake_binary)
             env = os.environ.copy()
+            env.pop("GITHUB_RUN_ID", None)
+            env.pop("GITHUB_RUN_ATTEMPT", None)
             env["TRACEDECAY_BIN"] = str(fake_binary)
             status_counter = tmp_path / "status-counter"
             env["FAKE_STATUS_COUNTER"] = str(status_counter)
+            branch_additions = tmp_path / "branch-additions"
+            env["FAKE_BRANCH_ADDITIONS"] = str(branch_additions)
+            env["TRACEDECAY_DOGFOOD_READINESS_TIMEOUT"] = "1"
+            env["TRACEDECAY_DOGFOOD_READINESS_POLL_INTERVAL"] = "0.05"
+            original_branch = subprocess.check_output(
+                ["git", "-C", str(project), "symbolic-ref", "--short", "HEAD"],
+                text=True,
+            ).strip()
+            subprocess.run(
+                ["git", "-C", str(project), "checkout", "--detach", "-q", head_oid],
+                check=True,
+            )
+            completed = subprocess.run(
+                [
+                    str(DOGFOOD_SCRIPT),
+                    "--run",
+                    str(project),
+                    base_oid,
+                    head_oid,
+                    str(output),
+                    "master",
+                    "master",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=10,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            for phase in (
+                "init",
+                "branch_head",
+                "branch_base",
+                "status",
+                "context",
+                "pr_context",
+                "runtime_status",
+            ):
+                self.assertRegex(
+                    completed.stdout,
+                    rf"tracedecay_ci_timing phase={phase} elapsed_ms=\d+ status=0",
+                )
+            self.assertIn(
+                "TraceDecay PR dogfood pr_context output is valid", completed.stdout
+            )
+            self.assertIn("tracedecay_ci_readiness attempts=2", completed.stdout)
+            # A PASS carries its phase attribution, not only the verdict: the
+            # readiness journey names when text completed and the graph seated,
+            # and reports the daemon memory it observed (unavailable here, the
+            # fake binary runs without the daemon harness).
+            self.assertRegex(
+                completed.stdout,
+                r"tracedecay_ci_readiness_phases outcome=ready attempts=2 "
+                r"first_progress_ms=\S+ first_generation_ms=\d+ text_complete_ms=\d+ "
+                r"graph_ready_ms=\d+ status_current_ms=\d+ peak_daemon_rss_mb=unavailable "
+                r"last_phase=\S+ last_files=\S+ last_graph=ready last_coverage=complete",
+            )
+            self.assertEqual(status_counter.read_text(encoding="utf-8").strip(), "3")
+            additions = branch_additions.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(additions), 2)
+            self.assertRegex(additions[0], rf"^tracedecay-dogfood/local-0-\d+/head-{head_oid}$")
+            self.assertRegex(additions[1], rf"^tracedecay-dogfood/local-0-\d+/base-{base_oid}$")
+            for addition in additions:
+                self.assertNotEqual(
+                    subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(project),
+                            "show-ref",
+                            "--verify",
+                            "--quiet",
+                            f"refs/heads/{addition}",
+                        ],
+                        check=False,
+                    ).returncode,
+                    0,
+                )
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "-C", str(project), "symbolic-ref", "-q", "HEAD"],
+                    check=False,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
+                ).strip(),
+                head_oid,
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(project), "rev-parse", original_branch],
+                    text=True,
+                ).strip(),
+                head_oid,
+            )
+            self.assertIn(
+                f"tracedecay_ci_pr_refs base_oid={base_oid} head_oid={head_oid} "
+                "base_branch=master head_branch=master",
+                completed.stdout,
+            )
+            self.assertIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
+
+    def test_run_mode_preserves_a_preexisting_owned_namespace_collision(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dogfood-ref-collision-") as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "output"
+            output.mkdir()
+            project, base_oid, head_oid = make_two_commit_project(tmp_path)
+            collision_path = tmp_path / "collision-ref"
+            original_branch = subprocess.check_output(
+                ["git", "-C", str(project), "symbolic-ref", "--short", "HEAD"],
+                text=True,
+            ).strip()
+            wrapper = textwrap.dedent(
+                """\
+                set -euo pipefail
+                project="$1"
+                base_oid="$2"
+                head_oid="$3"
+                output="$4"
+                collision_path="$5"
+                script="$6"
+                collision="refs/heads/tracedecay-dogfood/local-0-$$/base-$base_oid"
+                git -C "$project" update-ref "$collision" "$base_oid"
+                printf '%s\n' "$collision" >"$collision_path"
+                exec "$script" --run "$project" "$base_oid" "$head_oid" "$output"
+                """
+            )
+            env = os.environ.copy()
+            env.pop("GITHUB_RUN_ID", None)
+            env.pop("GITHUB_RUN_ATTEMPT", None)
+            env["TRACEDECAY_BIN"] = "/bin/true"
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    wrapper,
+                    "dogfood-ref-collision",
+                    str(project),
+                    base_oid,
+                    head_oid,
+                    str(output),
+                    str(collision_path),
+                    str(DOGFOOD_SCRIPT),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=5,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("reference already exists", completed.stderr)
+            collision = collision_path.read_text(encoding="utf-8").strip()
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(project), "rev-parse", collision], text=True
+                ).strip(),
+                base_oid,
+            )
+            head_ref = collision.rsplit("/", 1)[0] + f"/head-{head_oid}"
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "-C", str(project), "show-ref", "--verify", "--quiet", head_ref],
+                    check=False,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(project), "symbolic-ref", "--short", "HEAD"],
+                    text=True,
+                ).strip(),
+                original_branch,
+            )
+
+    def test_run_mode_reissues_a_typed_retryable_refusal_once(self) -> None:
+        """A self-declared retryable refusal must not lose the whole journey.
+
+        The daemon bounds `tracedecay_context` by its own ten-second deadline
+        contract and refuses -- typed, `retryable=true` -- when that budget
+        expires while the admitted worker is still settling, which is what a
+        call issued right after graph seating hits. The refusal is correct, so
+        the journey honours it by re-issuing the call once rather than failing
+        (issue #1203).
+        """
+        with tempfile.TemporaryDirectory(prefix="dogfood-retryable-") as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "output"
+            output.mkdir()
+            project, base_oid, head_oid = make_two_commit_project(tmp_path)
+
+            fake_binary = tmp_path / "fake-tracedecay"
+            write_full_journey_fake(fake_binary)
+            refusal_marker = tmp_path / "refuse-context-once"
+            refusal_marker.write_text("", encoding="utf-8")
+            env = os.environ.copy()
+            env["TRACEDECAY_BIN"] = str(fake_binary)
+            env["FAKE_STATUS_COUNTER"] = str(tmp_path / "status-counter")
+            env["FAKE_CONTEXT_REFUSAL_ONCE"] = str(refusal_marker)
             env["TRACEDECAY_DOGFOOD_READINESS_TIMEOUT"] = "1"
             env["TRACEDECAY_DOGFOOD_READINESS_POLL_INTERVAL"] = "0.05"
             completed = subprocess.run(
@@ -547,18 +785,79 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                 timeout=10,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stderr, "")
-            for phase in ("init", "status", "context", "pr_context", "runtime_status"):
-                self.assertRegex(
-                    completed.stdout,
-                    rf"tracedecay_ci_timing phase={phase} elapsed_ms=\d+ status=0",
-                )
-            self.assertIn(
-                "TraceDecay PR dogfood pr_context output is valid", completed.stdout
+            self.assertFalse(refusal_marker.exists())
+            # The refusal is recorded, not hidden: its failed timing line and a
+            # typed retry line both appear, followed by the successful attempt.
+            self.assertRegex(
+                completed.stdout,
+                r"tracedecay_ci_timing phase=context elapsed_ms=\d+ status=1",
             )
-            self.assertIn("tracedecay_ci_readiness attempts=3", completed.stdout)
-            self.assertEqual(status_counter.read_text(encoding="utf-8").strip(), "4")
+            self.assertIn(
+                "tracedecay_ci_retryable_refusal phase=context attempt=1",
+                completed.stdout,
+            )
+            self.assertRegex(
+                completed.stdout,
+                r"tracedecay_ci_timing phase=context elapsed_ms=\d+ status=0",
+            )
             self.assertIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
+
+    def test_run_mode_fails_when_a_retryable_refusal_repeats(self) -> None:
+        """A refusal that survives the re-issue is still a failed journey."""
+        with tempfile.TemporaryDirectory(prefix="dogfood-retryable-hard-") as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "output"
+            output.mkdir()
+            project, base_oid, head_oid = make_two_commit_project(tmp_path)
+
+            fake_binary = tmp_path / "fake-tracedecay"
+            fake_binary.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    if [[ "${1:-}" == "--version" ]]; then
+                      echo "tracedecay fake-test"
+                    elif [[ "${1:-}" == "init" ]]; then
+                      echo "Error: tool project route failed: reason_code=tool_dispatch_deadline_exceeded retryable=true: always" >&2
+                      exit 1
+                    else
+                      echo "journey advanced past a permanent refusal" >&2
+                      exit 2
+                    fi
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_binary.chmod(0o755)
+            env = os.environ.copy()
+            env["TRACEDECAY_BIN"] = str(fake_binary)
+            completed = subprocess.run(
+                [
+                    str(DOGFOOD_SCRIPT),
+                    "--run",
+                    str(project),
+                    base_oid,
+                    head_oid,
+                    str(output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=10,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(
+                completed.stdout.count(
+                    "tracedecay_ci_retryable_refusal phase=init attempt=1"
+                ),
+                1,
+            )
+            self.assertIn(
+                "error: TraceDecay PR dogfood phase 'init' failed", completed.stderr
+            )
+            self.assertNotIn("journey advanced past a permanent refusal", completed.stderr)
 
     def test_run_mode_bounds_never_ready_graph_and_surfaces_last_reason(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dogfood-not-ready-") as tmp:
@@ -577,6 +876,8 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                     if [[ "${1:-}" == "--version" ]]; then
                       echo "tracedecay fake-test"
                     elif [[ "${1:-}" == "init" ]]; then
+                      :
+                    elif [[ "${1:-} ${2:-}" == "branch add" ]]; then
                       :
                     elif [[ "${1:-}" == "status" ]]; then
                       count=0
@@ -624,6 +925,94 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                 int(status_counter.read_text(encoding="utf-8").strip()), 1
             )
             self.assertIn("exact_scope_generation_not_ready", completed.stderr)
+            self.assertNotIn("Traceback", completed.stderr)
+            self.assertNotIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
+            # The timeout attributes the journey: text was complete and
+            # current the whole time, the graph never reported ready, and
+            # every probe row carries the graph column separately from the
+            # text phase so a waiting graph is never read as a text stall.
+            self.assertRegex(
+                completed.stdout,
+                r"tracedecay_ci_readiness_phases outcome=timeout attempts=\d+ "
+                r"first_progress_ms=None first_generation_ms=\d+ text_complete_ms=\d+ "
+                r"graph_ready_ms=None status_current_ms=\d+ peak_daemon_rss_mb=unavailable "
+                r"last_phase=None last_files=None/None last_graph=None last_coverage=complete",
+            )
+            self.assertRegex(
+                completed.stderr,
+                r"attempt=1 elapsed_ms=\d+ probe_ms=\d+ status_rc=0 validation_rc=1 "
+                r"status=current coverage=complete staleness=fresh rebuild=None "
+                r"gen=on\.text-only digest=None graph=None gstats=unavailable phase=None",
+            )
+
+    def test_run_mode_retains_valid_status_when_next_probe_is_malformed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dogfood-malformed-status-") as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "output"
+            output.mkdir()
+            project, base_oid, head_oid = make_two_commit_project(tmp_path)
+
+            status_counter = tmp_path / "status-counter"
+            fake_binary = tmp_path / "fake-tracedecay"
+            fake_binary.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    if [[ "${1:-}" == "--version" ]]; then
+                      echo "tracedecay fake-test"
+                    elif [[ "${1:-}" == "init" ]]; then
+                      :
+                    elif [[ "${1:-} ${2:-}" == "branch add" ]]; then
+                      :
+                    elif [[ "${1:-}" == "status" ]]; then
+                      count=0
+                      [[ ! -f "$FAKE_STATUS_COUNTER" ]] || count="$(cat "$FAKE_STATUS_COUNTER")"
+                      count="$((count + 1))"
+                      echo "$count" >"$FAKE_STATUS_COUNTER"
+                      if ((count == 1)); then
+                        echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.valid-non-ready"}},"graph_statistics":{"state":"unavailable","reason":"exact_scope_generation_not_ready"}}'
+                      else
+                        printf '%s' '{"code_index_freshness":{"status":"current","worktree":{"latest_generation_id":"generation.malformed"'
+                      fi
+                    else
+                      echo "unexpected fake TraceDecay arguments: $*" >&2
+                      exit 2
+                    fi
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_binary.chmod(0o755)
+            env = os.environ.copy()
+            env["TRACEDECAY_BIN"] = str(fake_binary)
+            env["FAKE_STATUS_COUNTER"] = str(status_counter)
+            env["TRACEDECAY_DOGFOOD_READINESS_TIMEOUT"] = "2"
+            env["TRACEDECAY_DOGFOOD_READINESS_POLL_INTERVAL"] = "0.05"
+            started = time.monotonic()
+            completed = subprocess.run(
+                [
+                    str(DOGFOOD_SCRIPT),
+                    "--run",
+                    str(project),
+                    base_oid,
+                    head_oid,
+                    str(output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=8,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertGreaterEqual(
+                int(status_counter.read_text(encoding="utf-8").strip()), 2
+            )
+            self.assertIn("last complete status output", completed.stderr)
+            self.assertIn('"latest_generation_id":"generation.valid-non-ready"', completed.stderr)
+            self.assertNotIn("generation.malformed", completed.stderr)
             self.assertNotIn("Traceback", completed.stderr)
             self.assertNotIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
 

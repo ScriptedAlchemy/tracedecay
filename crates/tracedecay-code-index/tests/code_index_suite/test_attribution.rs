@@ -1,5 +1,10 @@
+use std::borrow::Borrow;
+
 use tracedecay_code_index::generations::GenerationPlanner;
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
+use tracedecay_code_index::provider::{
+    GenerationProviderContractErrorV1, GenerationProviderCoverageV1, GenerationProviderReadV1,
+};
 use tracedecay_code_index::test_attribution::{
     GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinErrorV1,
     GenerationTestJoinV1, TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
@@ -7,8 +12,8 @@ use tracedecay_code_index::test_attribution::{
 };
 use tracedecay_domain::{
     CodeGenerationManifestV1, ContentDigest, GenerationTestAttributionV1, ManifestDigest,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
-    TestAttributionEvidenceClassV1, UtcMicros,
+    ProviderEvaluationStateV1, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SnapshotFileDispositionV1, TestAttributionEvidenceClassV1, UtcMicros,
 };
 
 use super::support::{id, registry};
@@ -48,6 +53,7 @@ fn generation() -> (ValidatedCodeSnapshotV1, CodeGenerationManifestV1) {
                 disposition: SnapshotFileDispositionV1::Present,
             },
         ],
+        omitted_sources: Vec::new(),
     };
     let intake = SanitizedCodeIntake::new(registry(), id("sanitizer.v1"), UtcMicros(20));
     let validated = intake
@@ -115,48 +121,6 @@ fn attribution(
         evidence_class,
         attribution_revision: id("test-map.v1"),
     }
-}
-
-#[test]
-fn exact_occurrence_content_binds_current_attribution() {
-    let (snapshot, manifest) = generation();
-    let attributions = vec![attribution(
-        &manifest,
-        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
-    )];
-    let occurrence_evidence = occurrences();
-    let joined = GenerationTestJoinV1::join(
-        &manifest,
-        &snapshot,
-        &attributions,
-        &occurrence_evidence,
-        &watermark(
-            &snapshot,
-            &manifest,
-            TestAttributionJoinInputCoverageV1::Complete,
-            &attributions,
-            &occurrence_evidence,
-        ),
-    )
-    .expect("exact test attribution join");
-
-    assert_eq!(joined.coverage, GenerationTestJoinCoverageV1::Complete);
-    assert_eq!(joined.records.len(), 1);
-    assert!(matches!(
-        joined.records[0].disposition,
-        GenerationTestJoinDispositionV1::Current {
-            evidence_class: TestAttributionEvidenceClassV1::ObservedCoverageCandidates
-        }
-    ));
-    assert_eq!(
-        joined.records[0]
-            .test_occurrence
-            .as_ref()
-            .expect("test occurrence resolved")
-            .content_digest,
-        content('b')
-    );
-    assert_eq!(joined.records[0].covered_occurrences.len(), 1);
 }
 
 #[test]
@@ -267,6 +231,21 @@ fn attribution_evidence_digest_is_canonical_across_input_order() {
         &attributions,
         &occurrences,
     );
+    let mut owned_reference = attributions.clone();
+    owned_reference.sort_by_key(|attribution| attribution.evidence_class);
+    let legacy_digest = tracedecay_domain::canonical_sha256(&serde_json::json!({
+        "domain": "tracedecay.test-attribution-evidence.v1",
+        "generation_id": watermark.generation_id,
+        "snapshot_digest": watermark.snapshot_digest,
+        "content_identity": watermark.content_identity,
+        "source_revision": watermark.source_revision,
+        "attribution_revision": watermark.attribution_revision,
+        "coverage": watermark.coverage,
+        "attributions": owned_reference,
+        "occurrences": occurrences,
+    }))
+    .unwrap();
+    assert_eq!(watermark.evidence_digest, legacy_digest);
     let mut reversed_attributions = attributions.clone();
     reversed_attributions.reverse();
     let mut reversed_occurrences = occurrences.clone();
@@ -280,6 +259,27 @@ fn attribution_evidence_digest_is_canonical_across_input_order() {
             .recompute_evidence_digest(&reversed_attributions, &reversed_occurrences)
             .expect("canonical digest")
     );
+    let joined = GenerationTestJoinV1::join(
+        &manifest,
+        &snapshot,
+        &attributions,
+        &occurrences,
+        &watermark,
+    )
+    .unwrap();
+    let reversed = GenerationTestJoinV1::join(
+        &manifest,
+        &snapshot,
+        &reversed_attributions,
+        &reversed_occurrences,
+        &watermark,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&joined).unwrap(),
+        serde_json::to_vec(&reversed).unwrap()
+    );
+    assert_eq!(joined.retained_bytes(), reversed.retained_bytes());
 }
 
 #[test]
@@ -340,4 +340,161 @@ fn generation_source_and_content_drift_are_typed_partial_not_current() {
         record.disposition,
         GenerationTestJoinDispositionV1::Current { .. }
     )));
+}
+
+#[test]
+fn records_covering_one_occurrence_share_a_single_resident_copy() {
+    let (snapshot, manifest) = generation();
+    let attributions = vec![
+        attribution(
+            &manifest,
+            TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+        ),
+        attribution(
+            &manifest,
+            TestAttributionEvidenceClassV1::ConservativeDependencyCandidates,
+        ),
+    ];
+    let occurrence_evidence = occurrences();
+    let joined = GenerationTestJoinV1::join(
+        &manifest,
+        &snapshot,
+        &attributions,
+        &occurrence_evidence,
+        &watermark(
+            &snapshot,
+            &manifest,
+            TestAttributionJoinInputCoverageV1::Complete,
+            &attributions,
+            &occurrence_evidence,
+        ),
+    )
+    .expect("joined attribution");
+
+    let covered = |record: usize| -> &TestAttributionOccurrenceV1 {
+        joined.records[record].covered_occurrences[0].borrow()
+    };
+    assert_eq!(covered(0).occurrence_id, covered(1).occurrence_id);
+    assert!(
+        std::ptr::eq(covered(0), covered(1)),
+        "every test covering an occurrence must share it; a transitive closure \
+         copied per test makes the join quadratic in resident memory"
+    );
+}
+
+#[test]
+fn join_preserves_first_duplicate_and_first_stale_covered_occurrence() {
+    let (snapshot, manifest) = generation();
+    let mut attribution = attribution(
+        &manifest,
+        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+    );
+    attribution.covered_occurrences.push(id("symbol.z-missing"));
+    let attributions = vec![attribution];
+    let mut evidence = occurrences();
+    evidence[0].content_digest = content('c');
+    let watermark = watermark(
+        &snapshot,
+        &manifest,
+        TestAttributionJoinInputCoverageV1::Complete,
+        &attributions,
+        &evidence,
+    );
+    evidence.reverse();
+    let joined =
+        GenerationTestJoinV1::join(&manifest, &snapshot, &attributions, &evidence, &watermark)
+            .unwrap();
+    assert!(matches!(
+        &joined.records[0].disposition,
+        GenerationTestJoinDispositionV1::StaleContent { occurrence_id, .. }
+            if occurrence_id.as_str() == "symbol.source"
+    ));
+    evidence.extend(evidence.clone());
+    assert_eq!(
+        GenerationTestJoinV1::join(&manifest, &snapshot, &attributions, &evidence, &watermark),
+        Err(GenerationTestJoinErrorV1::DuplicateOccurrence(id(
+            "symbol.test"
+        ))),
+    );
+}
+
+#[test]
+fn join_checks_missing_test_and_covered_occurrences_without_content_drift() {
+    let (snapshot, manifest) = generation();
+    let attributions = vec![attribution(
+        &manifest,
+        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+    )];
+    for missing in ["symbol.source", "symbol.test"] {
+        let mut evidence = occurrences();
+        evidence.retain(|occurrence| occurrence.occurrence_id.as_str() != missing);
+        let watermark = watermark(
+            &snapshot,
+            &manifest,
+            TestAttributionJoinInputCoverageV1::Complete,
+            &attributions,
+            &evidence,
+        );
+        let joined =
+            GenerationTestJoinV1::join(&manifest, &snapshot, &attributions, &evidence, &watermark)
+                .unwrap();
+        assert_eq!(
+            joined.records[0].disposition,
+            GenerationTestJoinDispositionV1::MissingOccurrence {
+                occurrence_id: id(missing),
+            },
+        );
+    }
+}
+
+#[test]
+fn provider_read_state_cannot_overclaim_coverage_or_evidence() {
+    let complete = GenerationProviderCoverageV1::Complete {
+        examined: 1,
+        eligible: 1,
+        excluded: 0,
+    };
+    for (state, coverage, evidence) in [
+        (
+            ProviderEvaluationStateV1::SupportedCompletedComplete,
+            complete.clone(),
+            None,
+        ),
+        (
+            ProviderEvaluationStateV1::Partial,
+            complete.clone(),
+            Some(()),
+        ),
+        (
+            ProviderEvaluationStateV1::Unavailable,
+            GenerationProviderCoverageV1::Unavailable,
+            Some(()),
+        ),
+    ] {
+        assert_eq!(
+            GenerationProviderReadV1::new(state, coverage, evidence),
+            Err(GenerationProviderContractErrorV1::StateCoverageMismatch),
+            "{state:?} must not claim more than its coverage and evidence prove"
+        );
+    }
+    assert_eq!(
+        GenerationProviderReadV1::new(
+            ProviderEvaluationStateV1::SupportedCompletedComplete,
+            GenerationProviderCoverageV1::Complete {
+                examined: 2,
+                eligible: 1,
+                excluded: 0,
+            },
+            Some(()),
+        ),
+        Err(GenerationProviderContractErrorV1::InvalidCoverage)
+    );
+    assert!(
+        GenerationProviderReadV1::new(
+            ProviderEvaluationStateV1::SupportedCompletedComplete,
+            complete,
+            Some(())
+        )
+        .is_ok()
+    );
 }

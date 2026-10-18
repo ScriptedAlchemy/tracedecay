@@ -41,6 +41,17 @@ export function AgentHandoffs({ reading }: { reading: AgentHandoffReading }) {
       </div>
     );
   }
+  if (reading.state === 'absent') {
+    return (
+      <div className="flex min-w-0 flex-col gap-1" data-agent-handoffs="absent">
+        <StateChip kind="complete_zero_findings" detail="no Work graph yet" />
+        <p className="text-3xs leading-snug text-text-muted">
+          No task has been created, so no handoff can exist. Create a task on the Work page to
+          start the graph.
+        </p>
+      </div>
+    );
+  }
 
   const {
     handoffs,
@@ -77,7 +88,7 @@ export function AgentHandoffs({ reading }: { reading: AgentHandoffReading }) {
             across{' '}
             {unknownCount === 0
               ? 'these handoffs, and none of them declared an open question.'
-              : `these handoffs, alongside ${unknownCount.toLocaleString()} declared ${unknownCount === 1 ? 'unknown' : 'unknowns'} — questions the handing-off actor did not answer.`}
+              : `these handoffs, alongside ${unknownCount.toLocaleString()} declared ${unknownCount === 1 ? 'unknown' : 'unknowns'}, questions the handing-off actor did not answer.`}
           </p>
 
           {actors.length > 0 ? (
@@ -188,7 +199,7 @@ export function AgentHandoffs({ reading }: { reading: AgentHandoffReading }) {
 
       <p className="text-3xs leading-relaxed text-text-muted">
         Read from the work-product graph through <span className="td-value">work.views</span>
-        {fromTimeline ? ' — the newest version in the returned timeline' : ' in current mode'}
+        {fromTimeline ? ', the newest version in the returned timeline' : ' in current mode'}
         {Number.isFinite(observedAtMicros)
           ? `, observed ${formatMoment(observedAtMicros / 1_000_000)}`
           : ''}

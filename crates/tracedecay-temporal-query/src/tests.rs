@@ -5,10 +5,10 @@ use std::sync::{
 };
 
 use tracedecay_domain::{
-    AuthorizationRevision, ComponentRevision, FreshnessVectorDigest, FusionProfileId,
-    HydrationStateV1, MessageOccurrenceIdV1, PrincipalId, RepositoryId, RetrievalAnchorId,
-    RetrievalBudget, RetrievalGrainV1, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverKind, ScoreDomainId, SessionAuthorityClassV1, SessionCursorKeyIdV1,
+    AuthorizationRevision, ComponentRevision, ContextOmissionReasonV1, FreshnessVectorDigest,
+    FusionProfileId, HydrationStateV1, MessageOccurrenceIdV1, PrincipalId, RepositoryId,
+    RetrievalAnchorId, RetrievalBudget, RetrievalGrainV1, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverKind, ScoreDomainId, SessionAuthorityClassV1, SessionCursorKeyIdV1,
     SessionCursorVersionV1, SessionId, SessionSummaryIdV1, SessionSummaryRecordV1,
     SignedCursorKeyRefV1, SingleRootScopeV1, SummarySourceHorizonV1, TemporalAssertionKindV1,
     TemporalCandidateChannelV1, TemporalModeV1, TemporalValidityV1, UtcMicros, VectorWatermark,
@@ -17,26 +17,30 @@ use tracedecay_domain::{
 use super::candidates::{CandidateChannel, CandidatePlan};
 use super::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use super::cursor::{CursorError, verify_cursor};
+use super::execution::{BindingDigest, ExecutionLimits};
 use super::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationFuture, HydrationGrant, HydrationSink,
     TemporalHydrationPort,
 };
-use super::ports::{
-    BindingDigest, CandidatePageSink, ExecutionLimits, InMemoryCursorAuthenticator, KernelVersions,
-    PageKey, PageRequest, PageStatus, PortFuture, SummarySourceRecord, TemporalExecutionSnapshot,
-    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
-    TemporalPortError, TemporalPreparedCandidateCohort, TemporalReadPort, TemporalRecord,
-    TemporalRecordPageSink, TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
-};
+use super::paging::{CandidatePageSink, PageKey, PageRequest, PageStatus, TemporalRecordPageSink};
 use super::ranking::{DiversityLimits, RankingCandidate, RankingError};
 use super::resolution::summary::SummarySourceState;
 use super::resolution::types::{
     ResolutionAssertion, ResolutionEvidence, ResolutionOccurrence, ValidatedAuthorization,
 };
+use super::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
+    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalPreparedCandidateCohort,
+    TemporalSourceAccess, TemporalWatermarks,
+};
 use super::{
     TemporalKernelError, TemporalKernelRequest, execute_temporal_candidate_export,
     execute_temporal_kernel, hydrate_temporal_candidate_selection,
 };
+use crate::cursor::InMemoryCursorAuthenticator;
+use crate::execution::TemporalPortError;
+use crate::paging::{PortFuture, SummarySourceRecord, TemporalReadPort, TemporalRecord};
+use crate::snapshot::TemporalSnapshotRequest;
 use crate::test_support::block_on;
 
 struct FakeReadPort {
@@ -44,6 +48,7 @@ struct FakeReadPort {
     records: Vec<TemporalRecord>,
     candidate_pages: AtomicUsize,
     record_pages: AtomicUsize,
+    observed_record_candidates: AtomicUsize,
     max_candidate_page_items: AtomicUsize,
     observed_candidate_field_cap: AtomicUsize,
     observed_candidate_page_bytes: AtomicUsize,
@@ -59,6 +64,7 @@ impl FakeReadPort {
             records,
             candidate_pages: AtomicUsize::new(0),
             record_pages: AtomicUsize::new(0),
+            observed_record_candidates: AtomicUsize::new(0),
             max_candidate_page_items: AtomicUsize::new(0),
             observed_candidate_field_cap: AtomicUsize::new(0),
             observed_candidate_page_bytes: AtomicUsize::new(0),
@@ -70,8 +76,9 @@ impl FakeReadPort {
 }
 
 impl TemporalReadPort for FakeReadPort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a super::snapshot::TemporalRetrievalScope,
         snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         request: PageRequest,
@@ -115,15 +122,18 @@ impl TemporalReadPort for FakeReadPort {
         })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a super::snapshot::TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
-        _candidates: &'a [RankingCandidate],
+        candidates: &'a [RankingCandidate],
         request: PageRequest,
         sink: &'a mut TemporalRecordPageSink<'_>,
     ) -> PortFuture<'a, PageStatus> {
         Box::pin(async move {
             self.record_pages.fetch_add(1, Ordering::SeqCst);
+            self.observed_record_candidates
+                .store(candidates.len(), Ordering::SeqCst);
             let start = page_start(&request).min(self.records.len());
             let end = start
                 .saturating_add(request.page_item_limit())
@@ -138,17 +148,6 @@ impl TemporalReadPort for FakeReadPort {
                 PageStatus::Complete
             })
         })
-    }
-
-    fn produce_temporal_record_page_for_scope<'a>(
-        &'a self,
-        _scope: &'a super::ports::TemporalRetrievalScope,
-        snapshot: &'a TemporalExecutionSnapshot,
-        candidates: &'a [RankingCandidate],
-        request: PageRequest,
-        sink: &'a mut TemporalRecordPageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        self.produce_temporal_record_page(snapshot, candidates, request, sink)
     }
 }
 
@@ -225,9 +224,7 @@ impl VersionedTokenEstimator for Words {
     }
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn anchor(value: &str) -> RetrievalAnchorId {
     RetrievalAnchorId::new(value).expect("valid anchor")
@@ -368,6 +365,8 @@ fn request_with_key(
     )
     .expect("valid request");
     TemporalKernelRequest {
+        cursor_binding: tracedecay_domain::CursorBindingV1::new("temporal_kernel_test", Vec::new())
+            .expect("cursor binding"),
         snapshot: TemporalExecutionSnapshot::new_authorized(
             snapshot_request,
             TemporalWatermarks {
@@ -576,6 +575,11 @@ fn candidate_export_projects_lossless_temporal_evidence_without_hydration() {
         );
         assert_eq!(batch.coverage.examined, 3);
         assert!(batch.continuation.is_some());
+        assert_eq!(
+            port.observed_record_candidates.load(Ordering::SeqCst),
+            2,
+            "duplicate ranking lanes must resolve one temporal record per stable anchor"
+        );
         let first = batch
             .evidence_by_occurrence
             .values()
@@ -623,7 +627,7 @@ fn root_wide_export_reuses_the_exact_prepared_candidate_cohort() {
         .expect("participant");
         request.snapshot = TemporalExecutionSnapshot::new_authorized(
             request.snapshot.request().clone().with_retrieval_scope(
-                super::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+                super::snapshot::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
             ),
             request.snapshot.watermarks(),
             request.snapshot.versions().clone(),
@@ -719,7 +723,17 @@ fn malicious_producer_cannot_underreport_or_cross_prework_allocation_contract() 
         )
         .await;
 
-        assert_eq!(result, Err(TemporalKernelError::BudgetExceeded));
+        // The kernel forwards the port's own resource name so a caller can tell
+        // a candidate read cap from a record read cap or a work-unit ceiling.
+        assert_eq!(
+            result,
+            Err(TemporalKernelError::Port(
+                TemporalPortError::BudgetExceeded {
+                    resource: "candidate stable id bytes",
+                    accounting: None,
+                }
+            ))
+        );
         assert_eq!(port.max_candidate_page_items.load(Ordering::SeqCst), 1);
         assert_eq!(port.observed_candidate_field_cap.load(Ordering::SeqCst), 8);
         assert_eq!(
@@ -1069,6 +1083,14 @@ fn unauthorized_assertion_metadata_never_enters_resolution_or_context() {
         .await
         .expect("unauthorized assertion is ignored");
 
+        assert_eq!(
+            result
+                .ranked
+                .iter()
+                .map(|row| row.anchor_id.clone())
+                .collect::<Vec<_>>(),
+            vec![anchor("left"), anchor("right")]
+        );
         assert!(result.lineage.is_empty());
         assert!(result.conflicts.is_empty());
         assert!(!result.context.rendered.contains("private-lineage"));
@@ -1235,7 +1257,7 @@ fn summary_lineage_is_limited_to_the_selected_ranked_page() {
 /// A derived-evidence group anchor is a span/burst container, not a retrievable
 /// payload: no hydration authority resolves one. Ranking it would spend a result
 /// slot and then report an unresolvable omission, so the group stays out of the
-/// ranked page while its member occurrences keep their ordinary coverage.
+/// ranked page, and a member that never matched is not a hidden result.
 #[test]
 fn derived_group_candidate_never_ranks_as_a_standalone_row() {
     block_on(async {
@@ -1276,8 +1298,51 @@ fn derived_group_candidate_never_ranks_as_a_standalone_row() {
                 .all(|hydrated| hydrated.anchor_id() != &derived_anchor),
             "a group container must never reach hydration, so it can never be omitted"
         );
-        // The member the group pulled into the record read still counts as
-        // covered, exactly as before: only the container itself is withheld.
+        // Coverage counts what this query could have returned. Nothing here
+        // could: the only candidate is a container, and its member matched no
+        // channel of its own. Counting that member would report a result the
+        // query never had, and, once groups are wide, thousands of them.
+        assert_eq!(result.coverage.total(), Some(0));
+    });
+}
+
+/// The other half of the coverage contract: a group member that *did* match a
+/// channel of its own is an ordinary covered result. Membership neither adds a
+/// result nor takes one away.
+#[test]
+fn a_group_member_that_matched_on_its_own_is_covered_once() {
+    block_on(async {
+        let mut group = candidate("derived-span", "derived-span", 20);
+        group.channel = CandidateChannel::Span;
+        group.retriever_record_id = "span-evidence-id".to_string();
+        let direct = candidate("source-occurrence", "source-occurrence", 30);
+        let mut member = occurrence('a', "source-occurrence", 20);
+        member.evidence = member
+            .evidence
+            .with_supporting_anchor(anchor("derived-span"));
+        let port = FakeReadPort::new(
+            vec![group, direct],
+            vec![TemporalRecord::Occurrence(member)],
+        );
+
+        let result = execute_temporal_kernel(
+            &request(TemporalModeV1::Current, 1),
+            &port,
+            &FakeHydrator::default(),
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await
+        .expect("group member with its own candidate");
+
+        assert_eq!(
+            result
+                .ranked
+                .iter()
+                .map(|candidate| candidate.anchor_id.clone())
+                .collect::<Vec<_>>(),
+            vec![anchor("source-occurrence")]
+        );
         assert_eq!(result.coverage.visible, 1);
         assert_eq!(result.coverage.total(), Some(1));
     });
@@ -1560,10 +1625,16 @@ fn interleaved_hydration_preserves_ranked_results_omissions_and_cursor() {
             .as_deref()
             .expect("authorized cursor");
         assert_eq!(
-            verify_cursor(denied_cursor, &denied.snapshot, &cursor_authenticator),
+            verify_cursor(
+                denied_cursor,
+                &denied.snapshot,
+                &request(TemporalModeV1::Current, 1).cursor_binding,
+                &cursor_authenticator
+            ),
             verify_cursor(
                 authorized_cursor,
                 &authorized.snapshot,
+                &request(TemporalModeV1::Current, 1).cursor_binding,
                 &cursor_authenticator
             )
         );
@@ -1640,8 +1711,18 @@ fn full_pipeline_is_deterministic_across_restart_and_cursor_resume() {
         let restarted_cursor = restarted.next_cursor.as_deref().expect("restarted cursor");
         let cursor_authenticator = authenticator("key-1", 1, 7);
         assert_eq!(
-            verify_cursor(first_cursor, &first.snapshot, &cursor_authenticator),
-            verify_cursor(restarted_cursor, &restarted.snapshot, &cursor_authenticator)
+            verify_cursor(
+                first_cursor,
+                &first.snapshot,
+                &request(TemporalModeV1::Current, 1).cursor_binding,
+                &cursor_authenticator
+            ),
+            verify_cursor(
+                restarted_cursor,
+                &restarted.snapshot,
+                &request(TemporalModeV1::Current, 1).cursor_binding,
+                &cursor_authenticator
+            )
         );
         let mut first_without_cursor = first.clone();
         first_without_cursor.next_cursor = None;
@@ -1669,4 +1750,149 @@ fn full_pipeline_is_deterministic_across_restart_and_cursor_resume() {
         assert_ne!(resumed.ranked[0].stable_id, restarted.ranked[0].stable_id);
         assert!(resumed.next_cursor.is_none());
     });
+}
+
+#[test]
+fn a_page_that_fills_its_hydration_bytes_ends_early_and_pages_every_record() {
+    block_on(async {
+        let port = || {
+            FakeReadPort::new(
+                vec![
+                    candidate("a", "a", 30),
+                    candidate("b", "b", 20),
+                    candidate("c", "c", 10),
+                ],
+                vec![
+                    TemporalRecord::Occurrence(occurrence('a', "a", 30)),
+                    TemporalRecord::Occurrence(occurrence('b', "b", 20)),
+                    TemporalRecord::Occurrence(occurrence('c', "c", 10)),
+                ],
+            )
+        };
+        let hydrator = FakeHydrator {
+            payloads: [
+                (anchor("a"), vec![b'a'; 40]),
+                (anchor("b"), vec![b'b'; 40]),
+                (anchor("c"), vec![b'c'; 100]),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeHydrator::default()
+        };
+        let mut paged = request(TemporalModeV1::Current, 3);
+        paged.snapshot = paged
+            .snapshot
+            .with_limits(ExecutionLimits {
+                hydration_total_bytes: 64,
+                ..ExecutionLimits::default()
+            })
+            .expect("tightened hydration bytes");
+
+        let mut pages = Vec::new();
+        loop {
+            let page = execute_temporal_kernel(
+                &paged,
+                &port(),
+                &hydrator,
+                &authenticator("key-1", 1, 7),
+                &Words,
+            )
+            .await
+            .expect("a page that fills its byte budget is a shorter page, not a refusal");
+            pages.push(
+                page.ranked
+                    .iter()
+                    .map(|candidate| candidate.stable_id.clone())
+                    .collect::<Vec<_>>(),
+            );
+            match page.next_cursor {
+                Some(cursor) => paged.cursor = Some(cursor),
+                None => break,
+            }
+        }
+
+        assert_eq!(pages, [vec!["a"], vec!["b"], vec!["c"]]);
+    });
+}
+
+#[test]
+fn every_context_byte_budget_omits_records_instead_of_refusing_the_page() {
+    block_on(async {
+        let port = || {
+            FakeReadPort::new(
+                vec![candidate("a", "a", 20), candidate("b", "b", 10)],
+                vec![
+                    TemporalRecord::Occurrence(occurrence('a', "a", 20)),
+                    TemporalRecord::Occurrence(occurrence('b', "b", 10)),
+                ],
+            )
+        };
+        let hydrator = FakeHydrator {
+            payloads: [
+                (anchor("a"), vec![b'a'; 200]),
+                (anchor("b"), vec![b'b'; 200]),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeHydrator::default()
+        };
+        let run = |max_bytes: u64| {
+            let mut paged = request(TemporalModeV1::Current, 2);
+            paged.context_budget.max_bytes = max_bytes;
+            let port = port();
+            let hydrator = &hydrator;
+            async move {
+                execute_temporal_kernel(
+                    &paged,
+                    &port,
+                    hydrator,
+                    &authenticator("key-1", 1, 7),
+                    &Words,
+                )
+                .await
+            }
+        };
+        let whole = run(100_000).await.expect("unbounded page");
+        let first_only = run(whole.context.accounted_bytes - 1)
+            .await
+            .expect("one record over budget");
+        // Between a one-record context without its budget omission and the
+        // whole page lies a budget where the longest prefix fits only until
+        // the omission is recorded.
+        for max_bytes in first_only.context.accounted_bytes / 2..whole.context.accounted_bytes {
+            let page = run(max_bytes)
+                .await
+                .unwrap_or_else(|error| panic!("budget {max_bytes} refused the page: {error}"));
+            assert_eq!(page.ranked.len(), 2);
+            assert!(page.context.accounted_bytes <= max_bytes);
+            assert!(
+                page.context
+                    .bundle
+                    .omissions
+                    .iter()
+                    .any(|omission| omission.reason == ContextOmissionReasonV1::ByteBudget)
+            );
+        }
+    });
+}
+
+#[test]
+fn empty_and_goal_queries_plan_a_scope_sweep_while_text_queries_do_not() {
+    for query in ["", " \t\n"] {
+        let plan = super::plan_temporal_candidates(query, None, false);
+        assert!(plan.contains(CandidateChannel::Scope, ""), "{query:?}");
+    }
+    assert!(
+        super::plan_temporal_candidates("cargo test", None, true)
+            .contains(CandidateChannel::Scope, "")
+    );
+
+    let text = super::plan_temporal_candidates("cargo test 2026-07-18", None, false);
+    assert!(!text.clauses().is_empty());
+    assert!(
+        !text
+            .clauses()
+            .iter()
+            .any(|clause| clause.channel == CandidateChannel::Scope)
+    );
 }

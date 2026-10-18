@@ -1,10 +1,34 @@
+use crate::registered_analytics::OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL;
 use crate::tests::harness::RegisteredGlobalDbHarness;
 use crate::{
     AnalyticsEventInsert, CoverageStateV1, ObservabilityEmissionClaimV1,
-    ObservabilityRollupRebuildV1,
+    ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
+    ObservabilityRollupRebuildV1, PreparedObservabilityEmissionV1,
 };
 
-#[tokio::test]
+#[asupersync::test]
+async fn idempotency_lookup_searches_its_partial_index() {
+    let harness = RegisteredGlobalDbHarness::open("observability-idempotency-plan").await;
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            &format!("EXPLAIN QUERY PLAN {OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL}"),
+            ["scope:fixture", "idempotency:fixture"],
+        )
+        .await
+        .unwrap();
+    let mut plan = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        plan.push(row.get::<String>(3).unwrap());
+    }
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("idx_observability_event_idempotency")),
+        "the idempotency lookup must search its partial index: {plan:?}"
+    );
+}
+
+#[asupersync::test]
 async fn observability_append_is_idempotent_and_rejects_changed_input() {
     let harness = RegisteredGlobalDbHarness::open("observability-idempotency").await;
     let event = AnalyticsEventInsert {
@@ -70,7 +94,193 @@ async fn observability_append_is_idempotent_and_rejects_changed_input() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
+async fn observability_batch_appends_every_event() {
+    const APPENDS: usize = 8;
+
+    let harness = RegisteredGlobalDbHarness::open("observability-append-batch").await;
+    let events = (0..APPENDS)
+        .map(|index| AnalyticsEventInsert {
+            provider: "tracedecay-observability".to_owned(),
+            project_id: "scope:batch".to_owned(),
+            session_id: None,
+            timestamp: 1,
+            event_kind: "retrieval.query.completed.v1".to_owned(),
+            hook_name: None,
+            tool_name: None,
+            tool_category: None,
+            skill_name: None,
+            hint_category: None,
+            hint_id: Some(format!("batch:{index}")),
+            outcome: Some("succeeded".to_owned()),
+            metadata_json: Some(format!("{{\"index\":{index}}}")),
+        })
+        .collect::<Vec<_>>();
+    let ids = harness
+        .registered
+        .append_observability_events(&events)
+        .await
+        .expect("append observability batch");
+
+    assert_eq!(ids.len(), APPENDS);
+    assert_eq!(
+        harness
+            .registered
+            .count_analytics_events(Some("scope:batch"), 0)
+            .await
+            .expect("count appended events"),
+        i64::try_from(APPENDS).unwrap()
+    );
+}
+
+fn ordinary_batch_event(index: usize) -> AnalyticsEventInsert {
+    AnalyticsEventInsert {
+        provider: "tracedecay-observability".to_owned(),
+        project_id: "scope:ordinary-batch".to_owned(),
+        session_id: None,
+        timestamp: 1,
+        event_kind: "retrieval.query.completed.v1".to_owned(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: Some(format!("ordinary:{index}")),
+        outcome: Some("succeeded".to_owned()),
+        metadata_json: Some(format!("{{\"index\":{index}}}")),
+    }
+}
+
+#[asupersync::test]
+async fn ordinary_observability_batch_matches_single_appends_across_chunks_and_replays() {
+    let batch = RegisteredGlobalDbHarness::open("ordinary-batch-equivalence").await;
+    let singles = RegisteredGlobalDbHarness::open("ordinary-single-equivalence").await;
+    let seeded = ordinary_batch_event(0);
+    for db in [&batch.registered, &singles.registered] {
+        db.append_observability_event(&seeded).await.unwrap();
+    }
+    let mut events = vec![
+        ordinary_batch_event(1),
+        seeded.clone(),
+        ordinary_batch_event(1),
+    ];
+    let mut other_scope = ordinary_batch_event(1);
+    other_scope.project_id = "scope:other".to_owned();
+    events.push(other_scope);
+    events.extend(
+        (2..=crate::registered_analytics::ANALYTICS_INSERT_ROWS_PER_STATEMENT)
+            .map(ordinary_batch_event),
+    );
+    events.extend([ordinary_batch_event(1), seeded]);
+    let mut expected = Vec::new();
+    for event in &events {
+        expected.push(
+            singles
+                .registered
+                .append_observability_event(event)
+                .await
+                .unwrap(),
+        );
+    }
+    let actual = batch
+        .registered
+        .append_observability_events(&events)
+        .await
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual[0], actual[2]);
+    assert_eq!(actual[0], actual[actual.len() - 2]);
+    assert_ne!(actual[0], actual[3]);
+    assert_eq!(
+        batch
+            .registered
+            .append_observability_events(&events)
+            .await
+            .unwrap(),
+        actual
+    );
+    for (event, id) in events.iter().zip(actual) {
+        let record = batch
+            .registered
+            .read_observability_event(&event.project_id, event.hint_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.id, id);
+        assert_eq!(record.metadata_json, event.metadata_json);
+    }
+}
+
+#[asupersync::test]
+async fn ordinary_observability_batch_conflicts_roll_back_all_chunks() {
+    let harness = RegisteredGlobalDbHarness::open("ordinary-batch-rollback").await;
+    let seeded = ordinary_batch_event(0);
+    let seeded_id = harness
+        .registered
+        .append_observability_event(&seeded)
+        .await
+        .unwrap();
+    let count = crate::registered_analytics::ANALYTICS_INSERT_ROWS_PER_STATEMENT;
+    let mut events = (1..=count).map(ordinary_batch_event).collect::<Vec<_>>();
+    let mut conflict = events[0].clone();
+    conflict.metadata_json = Some("{\"changed\":true}".to_owned());
+    events.push(conflict);
+    let error = harness
+        .registered
+        .append_observability_events(&events)
+        .await
+        .unwrap_err();
+    assert!(error.contains("idempotency conflict"), "{error}");
+    assert_eq!(
+        harness
+            .registered
+            .count_analytics_events(Some(&seeded.project_id), 0)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        harness
+            .registered
+            .append_observability_event(&seeded)
+            .await
+            .unwrap(),
+        seeded_id
+    );
+
+    // A conflict within the first run must also leave no accepted prefix.
+    let mut changed = ordinary_batch_event(1);
+    changed.timestamp += 1;
+    let error = harness
+        .registered
+        .append_observability_events(&[ordinary_batch_event(1), changed])
+        .await
+        .unwrap_err();
+    assert!(error.contains("idempotency conflict"), "{error}");
+    assert_eq!(
+        harness
+            .registered
+            .count_analytics_events(Some(&seeded.project_id), 0)
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Preserve input failure precedence: an earlier replay conflict precedes
+    // an invalid later envelope, even though lookup is performed in a batch.
+    let mut changed = seeded.clone();
+    changed.timestamp += 1;
+    let mut invalid = ordinary_batch_event(2);
+    invalid.hint_id = None;
+    let error = harness
+        .registered
+        .append_observability_events(&[changed, invalid])
+        .await
+        .unwrap_err();
+    assert!(error.contains("idempotency conflict"), "{error}");
+}
+
+#[asupersync::test]
 async fn observability_outbox_replay_reuses_exact_delivery_and_settles_atomically() {
     let harness = RegisteredGlobalDbHarness::open("observability-outbox-replay").await;
     let project = "scope:outbox";
@@ -135,7 +345,7 @@ async fn observability_outbox_replay_reuses_exact_delivery_and_settles_atomicall
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn observability_outbox_refuses_changed_owner_and_preserves_pending_on_failed_settle() {
     let harness = RegisteredGlobalDbHarness::open("observability-outbox-atomicity").await;
     let project = "scope:outbox-atomic";
@@ -197,7 +407,7 @@ async fn observability_outbox_refuses_changed_owner_and_preserves_pending_on_fai
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn observability_retention_expires_settled_transport_but_preserves_pending_and_product_receipts_across_restart()
  {
     let harness = RegisteredGlobalDbHarness::open("observability-outbox-retention").await;
@@ -303,7 +513,7 @@ async fn observability_retention_expires_settled_transport_but_preserves_pending
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn observability_retention_is_bounded_and_cancelled_waits_do_not_mutate() {
     let harness = RegisteredGlobalDbHarness::open("observability-retention-bounds").await;
     let events = (0..=512)
@@ -353,11 +563,12 @@ async fn observability_retention_is_bounded_and_cancelled_waits_do_not_mutate() 
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    let database = harness.registered.clone();
-    let prune = tokio::spawn(async move { database.prune_observability_events(31 * 86_400).await });
-    tokio::task::yield_now().await;
-    prune.abort();
-    let _ = prune.await;
+    {
+        // Asupersync aborts cooperatively; dropping the queued prune is the
+        // cancellation Tokio's abort delivered.
+        let mut prune = std::pin::pin!(harness.registered.prune_observability_events(31 * 86_400));
+        let _ = futures_util::poll!(&mut prune);
+    }
     blocker.commit().await.expect("release registered writer");
     assert_eq!(
         harness
@@ -369,7 +580,7 @@ async fn observability_retention_is_bounded_and_cancelled_waits_do_not_mutate() 
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn observability_retention_preserves_dirty_sources_until_rollup_publication() {
     let harness = RegisteredGlobalDbHarness::open("observability-retention-dirty-source").await;
     let scope = "scope:retention-dirty";
@@ -454,5 +665,331 @@ async fn observability_retention_preserves_dirty_sources_until_rollup_publicatio
             .await
             .expect("count after rollup publication"),
         0
+    );
+}
+
+fn owner_write(
+    project: &str,
+    owner_event_id: &str,
+    owner_fact_json: &str,
+) -> ObservabilityOwnerEmissionWriteV1 {
+    ObservabilityOwnerEmissionWriteV1 {
+        project_id: project.to_owned(),
+        owner_event_id: owner_event_id.to_owned(),
+        owner_fact_json: owner_fact_json.to_owned(),
+    }
+}
+
+fn prepared_delivery(
+    project: &str,
+    owner_event_id: &str,
+    delivery: &str,
+) -> PreparedObservabilityEmissionV1 {
+    PreparedObservabilityEmissionV1 {
+        delivery_envelope_json: delivery.to_owned(),
+        event: AnalyticsEventInsert {
+            provider: "tracedecay-observability".to_owned(),
+            project_id: project.to_owned(),
+            session_id: None,
+            timestamp: 1,
+            event_kind: "work.integration.transition.observed.v1".to_owned(),
+            hook_name: None,
+            tool_name: None,
+            tool_category: None,
+            skill_name: None,
+            hint_category: None,
+            hint_id: Some(owner_event_id.to_owned()),
+            outcome: Some("succeeded".to_owned()),
+            metadata_json: Some(delivery.to_owned()),
+        },
+    }
+}
+
+#[asupersync::test]
+async fn owner_fact_run_preserves_siblings_when_an_owner_fact_conflicts() {
+    let harness = RegisteredGlobalDbHarness::open("observability-owner-run").await;
+    let project = "scope:owner-run";
+    let first = owner_write(project, "owner:first", r#"{"owner":"first"}"#);
+    let second = owner_write(project, "owner:second", r#"{"owner":"second"}"#);
+    let outcomes = harness
+        .registered
+        .claim_and_settle_observability_emissions(&[first.clone(), second.clone()], |index| {
+            let owner_event_id = if index == 0 {
+                "owner:first"
+            } else {
+                "owner:second"
+            };
+            Ok(prepared_delivery(
+                project,
+                owner_event_id,
+                &format!(r#"{{"delivery":"{owner_event_id}"}}"#),
+            ))
+        })
+        .await
+        .expect("settle new owner facts");
+    assert!(matches!(
+        outcomes.first(),
+        Some(ObservabilityOwnerEmissionWriteOutcomeV1::Settled { .. })
+    ));
+    assert!(matches!(
+        outcomes.get(1),
+        Some(ObservabilityOwnerEmissionWriteOutcomeV1::Settled { .. })
+    ));
+
+    let sibling = owner_write(project, "owner:sibling", r#"{"owner":"sibling"}"#);
+    let changed = owner_write(project, "owner:first", r#"{"owner":"changed"}"#);
+    let conflict = harness
+        .registered
+        .claim_and_settle_observability_emissions(
+            &[first.clone(), sibling.clone(), changed],
+            |_| {
+                Ok(prepared_delivery(
+                    project,
+                    "owner:sibling",
+                    r#"{"delivery":"sibling"}"#,
+                ))
+            },
+        )
+        .await
+        .expect("independent facts commit");
+    assert!(matches!(
+        conflict[0],
+        ObservabilityOwnerEmissionWriteOutcomeV1::Replayed
+    ));
+    assert!(matches!(
+        conflict[1],
+        ObservabilityOwnerEmissionWriteOutcomeV1::Settled { .. }
+    ));
+    assert!(matches!(
+        &conflict[2],
+        ObservabilityOwnerEmissionWriteOutcomeV1::Rejected { error }
+            if error.contains("owner fact conflict")
+    ));
+    assert!(
+        harness
+            .registered
+            .read_observability_event(project, "owner:sibling")
+            .await
+            .expect("sibling lookup")
+            .is_some(),
+        "a rejected owner fact must not discard its valid sibling"
+    );
+    let stored = harness
+        .registered
+        .read_observability_event(project, "owner:first")
+        .await
+        .expect("first lookup")
+        .expect("first delivery remains");
+    assert_eq!(
+        stored.metadata_json.as_deref(),
+        Some(r#"{"delivery":"owner:first"}"#)
+    );
+
+    let fresh = owner_write(project, "owner:fresh", r#"{"owner":"fresh"}"#);
+    let mut prepared_fresh = false;
+    let replayed = harness
+        .registered
+        .claim_and_settle_observability_emissions(&[first, second, fresh], |index| {
+            assert_eq!(index, 2, "replays must not prepare a new delivery");
+            prepared_fresh = true;
+            Ok(prepared_delivery(
+                project,
+                "owner:fresh",
+                r#"{"delivery":"fresh"}"#,
+            ))
+        })
+        .await
+        .expect("replay settled facts and settle the new one");
+    assert!(matches!(
+        replayed.first(),
+        Some(ObservabilityOwnerEmissionWriteOutcomeV1::Replayed)
+    ));
+    assert!(prepared_fresh);
+    assert_eq!(
+        harness
+            .registered
+            .read_observability_event(project, "owner:first")
+            .await
+            .expect("replay lookup")
+            .expect("replayed delivery")
+            .metadata_json
+            .as_deref(),
+        Some(r#"{"delivery":"owner:first"}"#)
+    );
+}
+
+#[asupersync::test]
+async fn owner_fact_storage_failure_rolls_back_the_entire_transaction() {
+    let harness = RegisteredGlobalDbHarness::open("observability-owner-storage-failure").await;
+    let project = "scope:owner-storage-failure";
+    let emissions = [
+        owner_write(project, "owner:first", r#"{"owner":"first"}"#),
+        owner_write(project, "owner:second", r#"{"owner":"second"}"#),
+    ];
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "CREATE TRIGGER fail_owner_insert BEFORE INSERT ON observability_emission_outbox
+             WHEN NEW.owner_event_id = 'owner:second'
+             BEGIN SELECT RAISE(ABORT, 'test owner storage failure'); END;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let error = harness
+        .registered
+        .claim_and_settle_observability_emissions(&emissions, |index| {
+            Ok(prepared_delivery(
+                project,
+                &emissions[index].owner_event_id,
+                r#"{"delivery":"owner"}"#,
+            ))
+        })
+        .await
+        .expect_err("storage failure aborts the batch");
+    assert_eq!(
+        error,
+        "failed to settle observability outbox events: SQLite execute failed: test owner storage failure"
+    );
+    for emission in &emissions {
+        assert!(
+            harness
+                .registered
+                .read_observability_event(project, &emission.owner_event_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "neither the earlier sibling nor the failed insertion may survive rollback"
+        );
+        assert!(
+            harness
+                .registered
+                .observability_emission_claim(
+                    project,
+                    &emission.owner_event_id,
+                    &emission.owner_fact_json,
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "rollback must leave no replay claim"
+        );
+    }
+}
+
+#[asupersync::test]
+async fn owner_fact_run_resolves_repeats_claims_and_stored_events_within_one_write() {
+    let harness = RegisteredGlobalDbHarness::open("observability-owner-run-resolution").await;
+    let project = "scope:owner-run-resolution";
+    harness
+        .registered
+        .claim_observability_emission(
+            project,
+            "owner:pending",
+            r#"{"owner":"pending"}"#,
+            r#"{"delivery":"pending"}"#,
+        )
+        .await
+        .expect("pending claim");
+    let adopted = harness
+        .registered
+        .append_observability_event(
+            &prepared_delivery(project, "owner:adopted", r#"{"delivery":"adopted"}"#).event,
+        )
+        .await
+        .expect("stored event without an outbox row");
+    harness
+        .registered
+        .append_observability_event(
+            &prepared_delivery(project, "owner:foreign", r#"{"delivery":"foreign"}"#).event,
+        )
+        .await
+        .expect("foreign stored event");
+
+    let run = [
+        owner_write(project, "owner:new", r#"{"owner":"new"}"#),
+        owner_write(project, "owner:new", r#"{"owner":"new"}"#),
+        owner_write(project, "owner:new", r#"{"owner":"changed"}"#),
+        owner_write(project, "owner:pending", r#"{"owner":"pending"}"#),
+        owner_write(project, "owner:pending", r#"{"owner":"changed"}"#),
+        owner_write(project, "owner:adopted", r#"{"owner":"adopted"}"#),
+        owner_write(project, "owner:foreign", r#"{"owner":"foreign"}"#),
+        owner_write(project, "", r#"{"owner":"invalid"}"#),
+    ];
+    let mut prepared = Vec::new();
+    let outcomes = harness
+        .registered
+        .claim_and_settle_observability_emissions(&run, |index| {
+            prepared.push(index);
+            let owner_event_id = run[index].owner_event_id.as_str();
+            let delivery = match owner_event_id {
+                "owner:adopted" => r#"{"delivery":"adopted"}"#.to_owned(),
+                _ => format!(r#"{{"delivery":"{owner_event_id}:run"}}"#),
+            };
+            Ok(prepared_delivery(project, owner_event_id, &delivery))
+        })
+        .await
+        .expect("owner fact run");
+
+    assert_eq!(prepared, vec![0, 5, 6]);
+    let new_id = harness
+        .registered
+        .read_observability_event(project, "owner:new")
+        .await
+        .expect("new lookup")
+        .expect("new delivery")
+        .id;
+    let rejected = |error: &str| ObservabilityOwnerEmissionWriteOutcomeV1::Rejected {
+        error: error.to_owned(),
+    };
+    assert_eq!(
+        outcomes,
+        vec![
+            ObservabilityOwnerEmissionWriteOutcomeV1::Settled {
+                analytics_event_id: new_id,
+            },
+            ObservabilityOwnerEmissionWriteOutcomeV1::Replayed,
+            rejected("observability owner fact conflict"),
+            ObservabilityOwnerEmissionWriteOutcomeV1::Replayed,
+            rejected("observability owner fact conflict"),
+            ObservabilityOwnerEmissionWriteOutcomeV1::Settled {
+                analytics_event_id: adopted,
+            },
+            rejected("observability idempotency conflict"),
+            rejected("invalid observability outbox input"),
+        ]
+    );
+    assert!(matches!(
+        harness
+            .registered
+            .observability_emission_claim(project, "owner:adopted", r#"{"owner":"adopted"}"#)
+            .await
+            .expect("adopted claim"),
+        Some(ObservabilityEmissionClaimV1::Settled { .. })
+    ));
+    assert!(matches!(
+        harness
+            .registered
+            .observability_emission_claim(project, "owner:pending", r#"{"owner":"pending"}"#)
+            .await
+            .expect("pending claim"),
+        Some(ObservabilityEmissionClaimV1::Pending { .. })
+    ));
+    assert_eq!(
+        harness
+            .registered
+            .observability_emission_claim(project, "owner:foreign", r#"{"owner":"foreign"}"#)
+            .await
+            .expect("foreign claim"),
+        None
+    );
+    assert_eq!(
+        harness
+            .registered
+            .count_analytics_events(Some(project), 0)
+            .await
+            .expect("event count"),
+        3
     );
 }

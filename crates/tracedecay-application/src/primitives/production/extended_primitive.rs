@@ -1,0 +1,1060 @@
+//! Extended primitive port: module API, qualified names, diagnostics, and storage status history.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+use sha2::{Digest, Sha256};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphReadCostMeter, CodeGraphReadinessRequirement, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_contracts::retrieval::{
+    HealthDeltaRequest, HealthDeltaResult, PrimitiveFailureKind, RetrievalPortContext,
+    SymbolPrimitiveRecord,
+};
+use tracedecay_contracts::{
+    ApplicationProblem, EvidenceDomain, OmissionReason, RetrievalPortOutcome,
+};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_domain::{CursorBindingMismatchV1, CursorBindingV1, ProjectId};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_graph_query::queries::GraphQueryManager;
+use tracedecay_graph_query::{
+    CodeGraphProjectionReadPort, CodeGraphReadRequest, SourceReadContext, map_projection_error,
+    request_graph_cancellation,
+};
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::native_runtime;
+
+use super::super::runtime::{
+    CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
+    DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, ExtendedPrimitiveFuture,
+    ExtendedPrimitivePort, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
+    ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest,
+    QualifiedNamePrimitiveResult, SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult,
+    SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1,
+    StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult,
+};
+use super::super::symbol_graph::{read_symbol_source_body, symbol_record};
+use super::{
+    AuthenticatedDiagnosticCursorAuthorityV1, DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+    all_code_graph_symbols, completed, completed_unsupported, diagnostics_result,
+    diagnostics_unavailable, evidence_unavailable, failed, graph_query_outcome, graph_read_outcome,
+    health_delta_outcome, now_observed, omitted_evidence, open_code_graph, refused,
+    unpublished_file_outcome,
+};
+use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
+use crate::graph_health_delta::{HealthDeltaError, compute_verified_health_delta};
+use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
+
+pub(super) fn public_module_symbols(
+    nodes: Vec<CodeGraphSymbolSummaryV1>,
+    path: &str,
+) -> Result<Vec<SymbolPrimitiveRecord>, ()> {
+    let mut pub_nodes: Vec<CodeGraphSymbolSummaryV1> = nodes
+        .into_iter()
+        .filter(|node| {
+            let Some(metadata) = node.metadata.as_ref() else {
+                return false;
+            };
+            let Some(file_path) = node
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.logical_path.as_deref())
+            else {
+                return false;
+            };
+            metadata.visibility == "public"
+                && tracedecay_domain::path_matches_scope(file_path, Some(path))
+        })
+        .collect();
+    pub_nodes.sort_by(|left, right| {
+        let left_path = left
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref());
+        let right_path = right
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref());
+        left_path.cmp(&right_path).then(
+            left.metadata
+                .as_ref()
+                .map(|metadata| metadata.start_line)
+                .cmp(&right.metadata.as_ref().map(|metadata| metadata.start_line)),
+        )
+    });
+    pub_nodes
+        .into_iter()
+        .map(|node| symbol_record(node, None))
+        .collect()
+}
+
+pub struct TraceDecayExtendedPrimitivePortV1 {
+    source_runtime: Arc<SourceReadContext>,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
+    database: Database,
+    observation_database: RegisteredGlobalDbLeaseV1,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
+}
+
+impl TraceDecayExtendedPrimitivePortV1 {
+    pub(super) fn new(
+        source_runtime: Arc<SourceReadContext>,
+        code_graph: Arc<dyn CodeGraphProjectionReadPort>,
+        database: Database,
+        observation_database: RegisteredGlobalDbLeaseV1,
+        code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+        diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+        diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
+    ) -> Self {
+        Self {
+            source_runtime,
+            code_graph,
+            database,
+            observation_database,
+            code_index,
+            diagnostic_identity,
+            diagnostic_cursors,
+        }
+    }
+}
+
+pub(super) const STORAGE_STATUS_HISTORY_REVISION_V1: u32 = 1;
+pub(super) const MAX_STORAGE_STATUS_HISTORY_POINTS: usize = 128;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DurableStorageStatusHistoryV1 {
+    revision: u32,
+    project_id: Option<String>,
+    store_path: String,
+    samples: Vec<StorageStatusHistoryPointV1>,
+}
+
+/// One lock per history file: concurrent reads of one store serialize their
+/// read-modify-write so no sample is dropped, and reads of different stores
+/// never wait on each other.
+// ponytail: entries are never evicted; the map holds one empty mutex per
+// store history path this daemon has read, bounded by its registered stores.
+fn storage_status_history_lock(history_path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(locks.entry(history_path.to_path_buf()).or_default())
+}
+
+pub(super) fn storage_status_history_path(
+    data_root: &Path,
+    project_id: Option<&str>,
+    store_path: &str,
+) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(project_id.unwrap_or_default().as_bytes());
+    digest.update([0]);
+    digest.update(store_path.as_bytes());
+    data_root
+        .join("storage-status-history-v1")
+        .join(format!("{}.json", encode_lowercase_hex(&digest.finalize())))
+}
+
+pub(super) fn update_storage_status_history(
+    history_path: &Path,
+    project_id: Option<String>,
+    store_path: String,
+    database_bytes: u64,
+    observed_at: i64,
+) -> (Vec<StorageStatusHistoryPointV1>, String) {
+    let history_lock = storage_status_history_lock(history_path);
+    let _guard = history_lock.lock().unwrap_or_else(PoisonError::into_inner);
+    let stored = std::fs::read(history_path).ok();
+    let restored = stored
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<DurableStorageStatusHistoryV1>(bytes).ok())
+        .filter(|durable| {
+            durable.revision == STORAGE_STATUS_HISTORY_REVISION_V1
+                && durable.project_id == project_id
+                && durable.store_path == store_path
+                && durable
+                    .samples
+                    .windows(2)
+                    .all(|pair| pair[0].observed_at <= pair[1].observed_at)
+        });
+    let invalid_stored_history = stored.is_some() && restored.is_none();
+    let mut history = restored.map_or_else(Vec::new, |durable| durable.samples);
+    let clock_regressed = history
+        .last()
+        .is_some_and(|sample| sample.observed_at > observed_at);
+    if clock_regressed {
+        history.clear();
+    }
+    // The series records store-size changes, not reads. Re-observing the same
+    // size adds no information, and appending per read would both amplify
+    // writes and make this evidence operation non-idempotent, so the same
+    // authorized status read could never agree across CLI, MCP, and HTTP.
+    let recorded = history
+        .last()
+        .is_none_or(|sample| sample.database_bytes != database_bytes);
+    if recorded {
+        history.push(StorageStatusHistoryPointV1 {
+            observed_at,
+            database_bytes,
+        });
+        if history.len() > MAX_STORAGE_STATUS_HISTORY_POINTS {
+            history.drain(..history.len() - MAX_STORAGE_STATUS_HISTORY_POINTS);
+        }
+    }
+    let persisted = !recorded
+        || serde_json::to_vec_pretty(&DurableStorageStatusHistoryV1 {
+            revision: STORAGE_STATUS_HISTORY_REVISION_V1,
+            project_id,
+            store_path,
+            samples: history.clone(),
+        })
+        .ok()
+        .and_then(|bytes| {
+            std::fs::create_dir_all(history_path.parent().unwrap_or_else(|| Path::new(".")))
+                .ok()?;
+            let temp =
+                history_path.with_extension(format!("tmp-{}-{observed_at}", std::process::id()));
+            tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically(
+                history_path,
+                &temp,
+                &bytes,
+            )
+            .ok()
+        })
+        .is_some();
+    let coverage = if !persisted {
+        "current_sample_only_history_persistence_failed"
+    } else if invalid_stored_history {
+        "durable_project_store_history_reset_invalid"
+    } else if clock_regressed {
+        "durable_project_store_history_reset_clock_regression"
+    } else {
+        "durable_project_store_history"
+    };
+    (history, coverage.to_owned())
+}
+
+/// Canonical storage-status owner used by the application operation and its
+/// dashboard projection. History is durable and scope-bound, so growth does
+/// not reset when the daemon or dashboard restarts.
+#[tracing::instrument(name = "usecases.primitives.storage_status", level = "trace", skip_all)]
+pub(crate) async fn canonical_storage_status(
+    database: &Database,
+    source_runtime: &SourceReadContext,
+    project_id: &ProjectId,
+    include_details: bool,
+) -> StorageStatusPrimitiveResult {
+    let read_only = source_runtime.is_read_only();
+    let database_path = database.canonical_database_path();
+    let store_path = database_path.display().to_string();
+    let file_bytes = database_path.metadata().ok().map(|metadata| metadata.len());
+    let page_counts = tracing::Instrument::instrument(
+        database.storage_page_counts(),
+        tracing::trace_span!("usecases.primitives.storage_status.page_counts"),
+    )
+    .await
+    .ok();
+    let page_size_bytes = page_counts.and_then(|(page_size, _, _)| u32::try_from(page_size).ok());
+    let page_count = page_counts.map(|(_, page_count, _)| page_count);
+    let freelist_pages = page_counts.map(|(_, _, freelist_pages)| freelist_pages);
+    let database_bytes = page_size_bytes
+        .zip(page_count)
+        .map(|(page_size, pages)| u64::from(page_size).saturating_mul(pages))
+        .or(file_bytes);
+    let project_id = Some(project_id.as_str().to_owned());
+    let status = if database_path.is_file() {
+        if read_only { "read_only" } else { "ok" }
+    } else {
+        "missing_graph_db"
+    };
+    let details = if include_details && page_counts.is_none() {
+        vec!["project store page telemetry unavailable".to_owned()]
+    } else {
+        Vec::new()
+    };
+    let history_path = storage_status_history_path(
+        database_path.parent().unwrap_or_else(|| Path::new(".")),
+        project_id.as_deref(),
+        &store_path,
+    );
+    let (history, history_coverage) = match database_bytes {
+        None => (Vec::new(), "current_sample_unavailable".to_owned()),
+        Some(bytes) => {
+            let history_project_id = project_id.clone();
+            let history_store_path = store_path.clone();
+            let observed_at = now_observed().0;
+            // History persistence is file I/O into the store directory; run it
+            // on the blocking pool so a stalled filesystem cannot capture an
+            // async executor thread for the daemon.
+            tracing::Instrument::instrument(
+                native_runtime::spawn_blocking(move || {
+                    update_storage_status_history(
+                        &history_path,
+                        history_project_id,
+                        history_store_path,
+                        bytes,
+                        observed_at,
+                    )
+                }),
+                tracing::trace_span!("usecases.primitives.storage_status.history"),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                (
+                    vec![StorageStatusHistoryPointV1 {
+                        observed_at,
+                        database_bytes: bytes,
+                    }],
+                    "current_sample_only_history_task_failed".to_owned(),
+                )
+            })
+        }
+    };
+    StorageStatusPrimitiveResult {
+        status: status.to_owned(),
+        read_only,
+        database_bytes,
+        page_size_bytes,
+        page_count,
+        freelist_pages,
+        details,
+        project_id,
+        store_path: Some(store_path),
+        history,
+        history_coverage: Some(history_coverage),
+    }
+}
+
+impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
+    fn qualified_name<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a QualifiedNamePrimitiveRequest,
+    ) -> ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                // The lookup answers in one page and never issues a
+                // continuation, so any presented cursor is another operation's.
+                if request.page.cursor.is_some() {
+                    return RetrievalPortOutcome::Refused(
+                        omitted_evidence(
+                            EvidenceDomain::Symbol,
+                            now_observed(),
+                            OmissionReason::Unsupported,
+                            0,
+                        ),
+                        Box::new(ApplicationProblem::cursor_refused(
+                            &CursorBindingMismatchV1::Foreign,
+                        )),
+                    );
+                }
+                let cancellation = request_graph_cancellation(context.request);
+                let reader = match open_code_graph(
+                    self.code_graph.as_ref(),
+                    context.request,
+                    now_observed(),
+                    Arc::clone(&cancellation),
+                )
+                .await
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Symbol, now_observed());
+                    }
+                };
+                let nodes = match reader.resolve_qualified_name(
+                    &request.qualified_name,
+                    None,
+                    10_000,
+                    cancellation,
+                ) {
+                    Ok(nodes) => nodes,
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &map_projection_error(error),
+                            EvidenceDomain::Symbol,
+                            now_observed(),
+                        );
+                    }
+                };
+                let symbols = nodes
+                    .into_iter()
+                    .map(|node| symbol_record(node, None))
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(symbols) = symbols else {
+                    return failed(EvidenceDomain::Symbol, now_observed());
+                };
+                let total = symbols.len() as u64;
+                completed(
+                    QualifiedNamePrimitiveResult {
+                        symbols,
+                        total: Some(total),
+                        next_cursor: None,
+                    },
+                    EvidenceDomain::Symbol,
+                    now_observed(),
+                )
+            },
+            tracing::trace_span!("usecases.primitives.qualified_name"),
+        ))
+    }
+
+    fn call_chain<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CallChainPrimitiveRequest,
+    ) -> ExtendedPrimitiveFuture<'a, CallChainPrimitiveResult> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let cancellation = request_graph_cancellation(context.request);
+                let reader = match open_code_graph(
+                    self.code_graph.as_ref(),
+                    context.request,
+                    now_observed(),
+                    Arc::clone(&cancellation),
+                )
+                .await
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Graph, now_observed());
+                    }
+                };
+                let Ok(from) =
+                    tracedecay_domain::SymbolOccurrenceId::new(request.from_node_id.clone())
+                else {
+                    return refused(
+                        PrimitiveFailureKind::InvalidRequest,
+                        "application.call-chain.from-node-id-invalid",
+                        "from_node_id is not a symbol occurrence id",
+                        EvidenceDomain::Graph,
+                        now_observed(),
+                    );
+                };
+                let Ok(to) = tracedecay_domain::SymbolOccurrenceId::new(request.to_node_id.clone())
+                else {
+                    return refused(
+                        PrimitiveFailureKind::InvalidRequest,
+                        "application.call-chain.to-node-id-invalid",
+                        "to_node_id is not a symbol occurrence id",
+                        EvidenceDomain::Graph,
+                        now_observed(),
+                    );
+                };
+                let path = match reader.shortest_path(
+                    &from,
+                    &to,
+                    &[tracedecay_domain::RelationEdgeKindV1::Calls],
+                    request.maximum_depth,
+                    100_000,
+                    cancellation,
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &map_projection_error(error),
+                            EvidenceDomain::Graph,
+                            now_observed(),
+                        );
+                    }
+                };
+                if !path.complete {
+                    return evidence_unavailable(
+                        EvidenceDomain::Graph,
+                        now_observed(),
+                        OmissionReason::Unavailable,
+                        0,
+                    );
+                }
+                let edges = path.path.unwrap_or_default();
+                let mut node_ids = vec![from.as_str().to_owned()];
+                node_ids.extend(
+                    edges
+                        .iter()
+                        .map(|edge| edge.to_occurrence.as_str().to_owned()),
+                );
+                let edge_kinds = edges
+                    .into_iter()
+                    .map(|edge| edge.kind.as_str().to_owned())
+                    .collect();
+                completed(
+                    CallChainPrimitiveResult {
+                        node_ids,
+                        edge_kinds,
+                    },
+                    EvidenceDomain::Graph,
+                    now_observed(),
+                )
+            },
+            tracing::trace_span!("usecases.primitives.call_chain"),
+        ))
+    }
+
+    fn file_dependents<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a FileDependentsPrimitiveRequest,
+    ) -> ExtendedPrimitiveFuture<'a, FileDependentsPrimitiveResult> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let observed_at = now_observed();
+                let cancellation = request_graph_cancellation(context.request);
+                let verified = match self
+                    .code_graph
+                    .open(CodeGraphReadRequest::new(
+                        context.request,
+                        observed_at,
+                        Arc::clone(&cancellation),
+                    ))
+                    .await
+                {
+                    Ok(verified) => verified,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Graph, observed_at);
+                    }
+                };
+                let cost = CodeGraphReadCostMeter::start();
+                let reader = match verified.reader_with_cancellation(
+                    context.request,
+                    observed_at,
+                    Arc::clone(&cancellation),
+                ) {
+                    Ok(reader) => reader.metered(&cost),
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Graph, observed_at);
+                    }
+                };
+                if let Some(outcome) = unpublished_file_outcome(
+                    &reader,
+                    &request.file,
+                    EvidenceDomain::Graph,
+                    Arc::clone(&cancellation),
+                ) {
+                    return outcome.with_cost(cost.receipt());
+                }
+                let query = GraphQueryManager::new(&reader, cancellation);
+                let dependents = match query.get_file_dependents(&request.file).await {
+                    Ok(dependents) => dependents,
+                    Err(error) => {
+                        return graph_query_outcome(&error, EvidenceDomain::Graph, now_observed())
+                            .with_cost(cost.receipt());
+                    }
+                };
+                let payload = FileDependentsPrimitiveResult {
+                    file: request.file.clone(),
+                    dependent_files: dependents.files,
+                };
+                let outcome = if dependents.unresolved_callers {
+                    completed_unsupported(payload, EvidenceDomain::Graph, now_observed())
+                } else {
+                    completed(payload, EvidenceDomain::Graph, now_observed())
+                };
+                outcome.with_cost(cost.receipt())
+            },
+            tracing::trace_span!("usecases.primitives.file_dependents"),
+        ))
+    }
+
+    fn source_body<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a SourceBodyPrimitiveRequest,
+    ) -> ExtendedPrimitiveFuture<'a, SourceBodyPrimitiveResult> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let cancellation = request_graph_cancellation(context.request);
+                let opened = self
+                    .code_graph
+                    .open(
+                        CodeGraphReadRequest::new(
+                            context.request,
+                            now_observed(),
+                            Arc::clone(&cancellation),
+                        )
+                        .with_readiness(CodeGraphReadinessRequirement::Engine),
+                    )
+                    .await;
+                let reader = match opened.and_then(|graph| {
+                    graph.reader_with_cancellation(
+                        context.request,
+                        now_observed(),
+                        Arc::clone(&cancellation),
+                    )
+                }) {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Source, now_observed());
+                    }
+                };
+                let Ok(occurrence) =
+                    tracedecay_domain::SymbolOccurrenceId::new(request.node_id.clone())
+                else {
+                    return refused(
+                        PrimitiveFailureKind::InvalidRequest,
+                        "application.source-body.node-id-invalid",
+                        "node_id is not a symbol occurrence id",
+                        EvidenceDomain::Source,
+                        now_observed(),
+                    );
+                };
+                let node = match reader.symbol_summary(&occurrence, cancellation) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => {
+                        return refused(
+                            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+                            "application.source-body.node-not-found",
+                            "node_id is not in the admitted graph",
+                            EvidenceDomain::Source,
+                            now_observed(),
+                        );
+                    }
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &map_projection_error(error),
+                            EvidenceDomain::Source,
+                            now_observed(),
+                        );
+                    }
+                };
+                let Some(metadata) = node.metadata else {
+                    return failed(EvidenceDomain::Source, now_observed());
+                };
+                let Some(file) = node.binding.and_then(|binding| binding.logical_path) else {
+                    return failed(EvidenceDomain::Source, now_observed());
+                };
+                let Some(line_span) = metadata.line_span.checked_sub(1) else {
+                    return failed(EvidenceDomain::Source, now_observed());
+                };
+                let Some(end_line) = metadata.start_line.checked_add(line_span) else {
+                    return failed(EvidenceDomain::Source, now_observed());
+                };
+                let Ok(body) = read_symbol_source_body(
+                    self.source_runtime.project_root(),
+                    &file,
+                    metadata.start_line,
+                    end_line,
+                )
+                .await
+                else {
+                    return failed(EvidenceDomain::Source, now_observed());
+                };
+                completed(
+                    SourceBodyPrimitiveResult {
+                        node_id: occurrence.as_str().to_owned(),
+                        file,
+                        start_line: metadata.start_line.saturating_add(1),
+                        end_line: end_line.saturating_add(1),
+                        body,
+                    },
+                    EvidenceDomain::Source,
+                    now_observed(),
+                )
+            },
+            tracing::trace_span!("usecases.primitives.source_body"),
+        ))
+    }
+
+    fn source_outline<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a SourceOutlinePrimitiveRequest,
+    ) -> ExtendedPrimitiveFuture<'a, SourceOutlinePrimitiveResult> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let cancellation = request_graph_cancellation(context.request);
+                let reader = match open_code_graph(
+                    self.code_graph.as_ref(),
+                    context.request,
+                    now_observed(),
+                    Arc::clone(&cancellation),
+                )
+                .await
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Source, now_observed());
+                    }
+                };
+                if let Some(outcome) = unpublished_file_outcome(
+                    &reader,
+                    &request.file,
+                    EvidenceDomain::Source,
+                    Arc::clone(&cancellation),
+                ) {
+                    return outcome;
+                }
+                let nodes =
+                    match reader.symbols_in_logical_file(&request.file, 100_000, cancellation) {
+                        Ok(nodes) => nodes,
+                        Err(error) => {
+                            return graph_read_outcome(
+                                &map_projection_error(error),
+                                EvidenceDomain::Source,
+                                now_observed(),
+                            );
+                        }
+                    };
+                let symbols = nodes
+                    .into_iter()
+                    .map(|node| symbol_record(node, None))
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(symbols) = symbols else {
+                    return failed(EvidenceDomain::Source, now_observed());
+                };
+                completed(
+                    SourceOutlinePrimitiveResult {
+                        file: request.file.clone(),
+                        symbols,
+                    },
+                    EvidenceDomain::Source,
+                    now_observed(),
+                )
+            },
+            tracing::trace_span!("usecases.primitives.source_outline"),
+        ))
+    }
+
+    fn module_api<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a ModuleApiPrimitiveRequest,
+    ) -> ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let cancellation = request_graph_cancellation(context.request);
+                let reader = match open_code_graph(
+                    self.code_graph.as_ref(),
+                    context.request,
+                    now_observed(),
+                    Arc::clone(&cancellation),
+                )
+                .await
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Symbol, now_observed());
+                    }
+                };
+                let nodes = match all_code_graph_symbols(&reader, cancellation) {
+                    Ok(nodes) => nodes,
+                    Err(error) => {
+                        return graph_query_outcome(&error, EvidenceDomain::Symbol, now_observed());
+                    }
+                };
+                let Ok(symbols) = public_module_symbols(nodes, &request.path) else {
+                    return failed(EvidenceDomain::Symbol, now_observed());
+                };
+                completed(
+                    ModuleApiPrimitiveResult {
+                        path: request.path.clone(),
+                        symbols,
+                    },
+                    EvidenceDomain::Symbol,
+                    now_observed(),
+                )
+            },
+            tracing::trace_span!("usecases.primitives.module_api"),
+        ))
+    }
+
+    fn health_delta<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a HealthDeltaRequest,
+    ) -> ExtendedPrimitiveFuture<'a, HealthDeltaResult> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let observed_at = now_observed();
+                let cancellation = request_graph_cancellation(context.request);
+                let verified = match self
+                    .code_graph
+                    .open(CodeGraphReadRequest::new(
+                        context.request,
+                        observed_at,
+                        Arc::clone(&cancellation),
+                    ))
+                    .await
+                {
+                    Ok(verified) => verified,
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &error,
+                            EvidenceDomain::Operational,
+                            observed_at,
+                        );
+                    }
+                };
+                let reader = match verified.reader_with_cancellation(
+                    context.request,
+                    observed_at,
+                    Arc::clone(&cancellation),
+                ) {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &error,
+                            EvidenceDomain::Operational,
+                            observed_at,
+                        );
+                    }
+                };
+                let query = GraphQueryManager::new(&reader, cancellation);
+                let verified_delta: Pin<
+                    Box<
+                        dyn Future<
+                                Output = std::result::Result<HealthDeltaResult, HealthDeltaError>,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(compute_verified_health_delta(
+                    Some(context.request.scope().project_id.as_str().to_owned()),
+                    &query,
+                    self.observation_database.as_ref(),
+                    request.before_cursor.as_deref(),
+                    request.path_prefix.as_deref(),
+                ));
+                match verified_delta.await {
+                    Ok(result) => completed(result, EvidenceDomain::Operational, now_observed()),
+                    Err(error) => health_delta_outcome(&error, observed_at),
+                }
+            },
+            tracing::trace_span!("usecases.primitives.health_delta"),
+        ))
+    }
+
+    fn storage_status<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a StorageStatusPrimitiveRequest,
+    ) -> ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                completed(
+                    canonical_storage_status(
+                        &self.database,
+                        self.source_runtime.as_ref(),
+                        &context.request.scope().project_id,
+                        request.include_details,
+                    )
+                    .await,
+                    EvidenceDomain::Operational,
+                    now_observed(),
+                )
+            },
+            tracing::trace_span!("usecases.primitives.storage_status"),
+        ))
+    }
+
+    fn diagnostics<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a DiagnosticsPrimitiveRequest,
+    ) -> ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult> {
+        Box::pin(tracing::Instrument::instrument(
+            async move {
+                let finished_at = now_observed();
+                if !(1..=1_000).contains(&request.maximum_diagnostics) {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+                }
+                let query = DiagnosticsQuery::new(self.database.clone());
+                let current = query.current_generation().await;
+                let Some(current_generation) = current.generation else {
+                    // No diagnostic publication means there is no retained
+                    // source identity to validate yet.
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+                };
+                if !matches!(current.coverage, DiagnosticQueryCoverage::Complete) {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                }
+                let document_path = match &request.scope {
+                    super::super::runtime::DiagnosticsPrimitiveScope::Workspace => None,
+                    super::super::runtime::DiagnosticsPrimitiveScope::File(path) => {
+                        let Some(path) = crate::diagnostics_publication::code_index_logical_path(
+                            self.source_runtime.project_root(),
+                            path,
+                        ) else {
+                            return diagnostics_unavailable(
+                                finished_at,
+                                OmissionReason::Unavailable,
+                            );
+                        };
+                        Some(path)
+                    }
+                    super::super::runtime::DiagnosticsPrimitiveScope::Package(_) => {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+                    }
+                };
+                let current_index = match self
+                    .code_index
+                    .current_identity(
+                        self.source_runtime.project_root().to_path_buf(),
+                        document_path.clone(),
+                    )
+                    .await
+                {
+                    Ok(identity) => identity,
+                    Err(_) => {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                    }
+                };
+                if current_index.code_generation_id != current_generation {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
+                // The code index retains the published generation; an identity
+                // it cannot resolve is one whose source proof moved and is
+                // being renewed, so the publication is stale, not absent.
+                let Some(identity) = self
+                    .diagnostic_identity
+                    .resolve(self.source_runtime.project_root().to_path_buf())
+                    .await
+                else {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                };
+                let scope = context.request.scope();
+                if identity.repository() != &scope.repository_id
+                    || identity.worktree() != Some(&scope.worktree_id)
+                    || identity.reference() != scope.reference.as_ref()
+                {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
+                if document_path
+                    .as_deref()
+                    .is_some_and(|path| identity.file(path).is_none())
+                {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                }
+                if current_generation != *identity.generation_id() {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
+                let selected_file = document_path
+                    .as_deref()
+                    .and_then(|path| identity.file(path).map(|(file, _)| file));
+                let cursor_lane = selected_file.map_or(
+                    DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                    tracedecay_domain::FileOccurrenceId::as_str,
+                );
+                let Ok(cursor_binding) = CursorBindingV1::builder("diagnostics")
+                    .parameter("scope", &request.scope)
+                    .parameter("maximum_diagnostics", &request.maximum_diagnostics)
+                    .build()
+                else {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                };
+                let cursor = match request.cursor.as_deref() {
+                    Some(cursor) => match self.diagnostic_cursors.decode(
+                        cursor,
+                        context.request,
+                        &current_generation,
+                        cursor_lane,
+                        &cursor_binding,
+                    ) {
+                        Ok(cursor) => Some(cursor),
+                        Err(Some(mismatch)) => {
+                            return RetrievalPortOutcome::Refused(
+                                omitted_evidence(
+                                    EvidenceDomain::Diagnostic,
+                                    finished_at,
+                                    OmissionReason::Unsupported,
+                                    0,
+                                ),
+                                Box::new(ApplicationProblem::cursor_refused(&mismatch)),
+                            );
+                        }
+                        Err(None) => {
+                            return diagnostics_unavailable(
+                                finished_at,
+                                OmissionReason::Unsupported,
+                            );
+                        }
+                    },
+                    None => None,
+                };
+                let page_request =
+                    DiagnosticPageRequest::new(request.maximum_diagnostics as usize, cursor);
+                let page = match selected_file {
+                    Some(file) => {
+                        query
+                            .current_by_file(&current_generation, file, &page_request)
+                            .await
+                    }
+                    None => {
+                        query
+                            .current_by_generation(&current_generation, &page_request)
+                            .await
+                    }
+                };
+                let Ok(page) = page else {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                };
+                match page.coverage {
+                    DiagnosticQueryCoverage::Complete | DiagnosticQueryCoverage::Truncated => {}
+                    DiagnosticQueryCoverage::StoreUnavailable { .. } => {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                    }
+                }
+                let next_cursor = page
+                    .next_cursor
+                    .as_ref()
+                    .map(|cursor| {
+                        self.diagnostic_cursors.encode(
+                            cursor,
+                            context.request,
+                            &current_generation,
+                            cursor_lane,
+                            &cursor_binding,
+                        )
+                    })
+                    .transpose();
+                let Ok(next_cursor) = next_cursor else {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                };
+                let mut diagnostics = Vec::new();
+                for diagnostic in page.records {
+                    if diagnostic.repository != *identity.repository()
+                        || diagnostic.worktree.as_ref() != identity.worktree()
+                        || diagnostic.reference.as_ref() != identity.reference()
+                        || diagnostic.source_revision.as_ref() != identity.source_revision()
+                        || diagnostic.generation_id != *identity.generation_id()
+                        || !diagnostic.is_current()
+                    {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                    }
+                    let Some((logical_path, expected_digest)) = identity
+                        .logical_path(&diagnostic.file_occurrence_id)
+                        .and_then(|path| identity.file(path).map(|(_, digest)| (path, digest)))
+                    else {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                    };
+                    if expected_digest != &diagnostic.content_digest {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                    }
+                    if selected_file.is_none_or(|file| file == &diagnostic.file_occurrence_id) {
+                        diagnostics.push(DiagnosticPrimitiveRecord {
+                            logical_path: logical_path.to_owned(),
+                            diagnostic,
+                        });
+                    }
+                }
+                diagnostics_result(
+                    identity.generation_id().clone(),
+                    current_index.snapshot_digest,
+                    diagnostics,
+                    page.total as u64,
+                    next_cursor,
+                    finished_at,
+                )
+            },
+            tracing::trace_span!("usecases.primitives.diagnostics"),
+        ))
+    }
+}

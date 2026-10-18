@@ -5,11 +5,10 @@
 //! remains unchanged; new structure consumers receive `DashboardEnvelopeV1`.
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
-use axum::extract::{Extension, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -18,30 +17,36 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::graph_service::GraphReadAdmissionOperation;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardVersionV1, scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery, query_rows};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
-use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
+use crate::graph::{CodeGraphReadError, GraphQueryError};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_contracts::CallableCodeOperationKind;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_runtime_core::memory::entities::normalize_entity;
+use tracedecay_runtime_core::native_runtime;
+use tracedecay_session_memory::memory::entities::normalize_entity;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 const MAX_CALL_CHAIN_DEPTH: usize = 20;
 const TEST_CALLER_DEPTH: usize = 3;
 const FACT_MATCH_LIMIT: usize = 100;
 const STRATA_MAX_FILES: usize = 50_000;
 const STRATA_MAX_DEPENDENCY_EDGES: usize = 250_000;
-const STRATA_SCAN_BUDGET_MS: u64 = 5_000;
-const STRATA_SCAN_BUDGET: Duration = Duration::from_millis(STRATA_SCAN_BUDGET_MS);
+
+#[cfg(test)]
+#[path = "graph_structure_api_tests.rs"]
+mod tests;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CallChainParamsV1 {
@@ -130,11 +135,8 @@ pub(super) struct StrataClusterV1 {
 pub(super) struct StrataScanV1 {
     cache_scope: &'static str,
     cache_state: &'static str,
-    budget_ms: u64,
-    max_files: usize,
-    max_dependency_edges: usize,
     files_examined: usize,
-    dependency_edges_examined: usize,
+    dependency_edges_examined: u64,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -151,19 +153,17 @@ pub(super) struct StrataMeasurementV1 {
     scan: StrataScanV1,
 }
 
+/// One cached dependency-strata computation for a code-graph generation.
 #[derive(Clone, Debug)]
-struct CachedStrataV1 {
+pub(crate) struct CachedStrataV1 {
     graph_generation: String,
     max_depth: usize,
     ideal_depth: usize,
     files: Vec<StrataFileV1>,
     clusters: Vec<StrataClusterV1>,
     files_examined: usize,
-    dependency_edges_examined: usize,
+    dependency_edges_examined: u64,
 }
-
-static STRATA_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<CachedStrataV1>>>> =
-    OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(super) struct FactArmCoverageV1 {
@@ -276,10 +276,10 @@ contracted_graph_routes! {
 /// `GET /api/plugins/graph/call-chain`
 async fn call_chain(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<CallChainParamsV1>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let from = params.from.trim();
             let to = params.to.trim();
@@ -295,10 +295,6 @@ async fn call_chain(
                 .max_depth
                 .unwrap_or(MAX_CALL_CHAIN_DEPTH)
                 .clamp(1, MAX_CALL_CHAIN_DEPTH);
-            let control = match graph_control::<CallChainMeasurementV1>(&state, control) {
-                Ok(control) => control,
-                Err(response) => return *response,
-            };
             let graph = match admitted_graph::<CallChainMeasurementV1>(
                 &state,
                 &control,
@@ -307,7 +303,7 @@ async fn call_chain(
             .await
             {
                 Ok(graph) => graph,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let from_occurrence = match SymbolOccurrenceId::new(from.to_owned()) {
                 Ok(occurrence) => occurrence,
@@ -397,7 +393,7 @@ async fn call_chain(
                 graph.freshness,
             )
         },
-        label = "dashboard_api.graph.call_chain"
+        tracing::trace_span!("dashboard_api.graph.call_chain"),
     )
     .await
 }
@@ -405,14 +401,10 @@ async fn call_chain(
 /// `GET /api/plugins/graph/strata`
 async fn strata(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
-            let control = match graph_control::<StrataMeasurementV1>(&state, control) {
-                Ok(control) => control,
-                Err(response) => return *response,
-            };
             let graph = match admitted_graph::<StrataMeasurementV1>(
                 &state,
                 &control,
@@ -421,100 +413,95 @@ async fn strata(
             .await
             {
                 Ok(graph) => graph,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let graph_generation = graph.reader.generation().as_str().to_owned();
-            let cache_key = graph_generation.clone();
-            let cache = STRATA_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
-            let mut guard = cache.lock().await;
-            let (snapshot, cache_state) = if let Some(existing) = guard.get(&cache_key)
-                && existing.graph_generation == graph_generation
-            {
-                (existing.clone(), "hit")
-            } else {
-                // The futures lane also records the drop-on-timeout case, so
-                // budget-exceeded scans stay visible as cancelled work.
-                let scan = match tokio::time::timeout(
-                    STRATA_SCAN_BUDGET,
-                    hotpath::future!(
+            let (snapshot, cache_state) = match state
+                .derived_snapshots
+                .strata
+                .get_or_compute(graph_generation.clone(), || async {
+                    let match_result = {
+                        let _span = tracing::trace_span!("dashboard_api.graph.strata_dependencies")
+                            .entered();
                         GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
-                            .build_file_adjacency_bounded(
-                                STRATA_MAX_FILES,
-                                STRATA_MAX_DEPENDENCY_EDGES,
-                            ),
-                        label = "dashboard_api.graph.strata_scan"
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(scan)) => scan,
-                    Ok(Err(error)) => {
-                        return graph_runtime_error_response::<StrataMeasurementV1>(&state, error);
-                    }
-                    Err(_) => {
-                        return failed_response::<StrataMeasurementV1>(
-                            &state,
-                            "strata_scan_timed_out",
-                            format!(
-                                "file adjacency scan exceeded the {}ms budget",
-                                STRATA_SCAN_BUDGET.as_millis()
-                            ),
-                            true,
-                        );
-                    }
-                };
-                // SCC/longest-path/DSM aggregation is the CPU-bound half of a
-                // cache miss; keep it distinguishable from the bounded scan.
-                let computed = hotpath::measure_block!("dashboard_api.graph.strata_compute", {
-                    let depth = dependency_depth(&scan.adjacency, scan.adjacency.len());
-                    let mut files = Vec::with_capacity(scan.adjacency.len());
-                    for chain in &depth.chains {
-                        for path in &chain.scc_files {
-                            files.push(StrataFileV1 {
-                                path: path.clone(),
-                                depth: chain.depth,
-                                scc_size: chain.scc_files.len(),
-                                chain: chain.chain.clone(),
-                            });
+                            .file_dependencies()
+                    };
+                    let dependencies = match match_result {
+                        Ok(dependencies) => dependencies,
+                        Err(error) => {
+                            return Err(graph_query_error_response::<StrataMeasurementV1>(
+                                &state, error,
+                            ));
                         }
-                    }
-                    files.sort_by(|left, right| {
-                        right
-                            .depth
-                            .cmp(&left.depth)
-                            .then_with(|| left.path.cmp(&right.path))
-                    });
-                    let clusters = dsm_clusters(&scan.adjacency)
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, cluster)| {
-                            let boundary_edges = cluster.boundary_edges();
-                            StrataClusterV1 {
-                                order: index,
-                                directory: cluster.directory,
-                                file_count: cluster.file_count,
-                                internal_edges: cluster.internal_edges,
-                                outgoing_edges: cluster.outgoing_edges,
-                                incoming_edges: cluster.incoming_edges,
-                                boundary_edges,
+                    };
+                    let observed_generation = graph_generation.clone();
+                    let computed_generation = graph_generation.clone();
+                    let snapshot = native_runtime::spawn_blocking(move || {
+                        let _span =
+                            tracing::trace_span!("dashboard_api.graph.strata_compute").entered();
+                        {
+                            let adjacency = dependencies.adjacency.as_ref();
+                            let depth = dependency_depth(adjacency, adjacency.len());
+                            let mut files = Vec::with_capacity(adjacency.len());
+                            for chain in &depth.chains {
+                                for path in &chain.scc_files {
+                                    files.push(StrataFileV1 {
+                                        path: path.clone(),
+                                        depth: chain.depth,
+                                        scc_size: chain.scc_files.len(),
+                                        chain: chain.chain.clone(),
+                                    });
+                                }
                             }
-                        })
-                        .collect();
-                    Arc::new(CachedStrataV1 {
-                        graph_generation: graph_generation.clone(),
-                        max_depth: depth.max_depth,
-                        ideal_depth: depth.ideal_depth,
-                        files,
-                        clusters,
-                        files_examined: scan.files_examined,
-                        dependency_edges_examined: scan.dependency_edges_examined,
+                            files.sort_by(|left, right| {
+                                right
+                                    .depth
+                                    .cmp(&left.depth)
+                                    .then_with(|| left.path.cmp(&right.path))
+                            });
+                            let clusters = dsm_clusters(adjacency)
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, cluster)| {
+                                    let boundary_edges = cluster.boundary_edges();
+                                    StrataClusterV1 {
+                                        order: index,
+                                        directory: cluster.directory,
+                                        file_count: cluster.file_count,
+                                        internal_edges: cluster.internal_edges,
+                                        outgoing_edges: cluster.outgoing_edges,
+                                        incoming_edges: cluster.incoming_edges,
+                                        boundary_edges,
+                                    }
+                                })
+                                .collect();
+                            Arc::new(CachedStrataV1 {
+                                graph_generation: computed_generation,
+                                max_depth: depth.max_depth,
+                                ideal_depth: depth.ideal_depth,
+                                files,
+                                clusters,
+                                files_examined: adjacency.len(),
+                                dependency_edges_examined: dependencies.dependency_edges,
+                            })
+                        }
                     })
-                });
-                guard.insert(cache_key, computed.clone());
-                (computed, "miss")
+                    .await
+                    .map_err(|error| {
+                        failed_response::<StrataMeasurementV1>(
+                            &state,
+                            "strata_compute_task_failed",
+                            error.to_string(),
+                            true,
+                        )
+                    })?;
+                    Ok((observed_generation, snapshot))
+                })
+                .await
+            {
+                Ok(cached) => cached,
+                Err(response) => return response,
             };
-            drop(guard);
-            crate::observe::record_strata_files(snapshot.files.len());
 
             measured_response(
                 &state,
@@ -530,10 +517,7 @@ async fn strata(
                     clusters: snapshot.clusters.clone(),
                     scan: StrataScanV1 {
                         cache_scope: "graph_generation",
-                        cache_state,
-                        budget_ms: STRATA_SCAN_BUDGET.as_millis() as u64,
-                        max_files: STRATA_MAX_FILES,
-                        max_dependency_edges: STRATA_MAX_DEPENDENCY_EDGES,
+                        cache_state: cache_state.as_str(),
                         files_examined: snapshot.files_examined,
                         dependency_edges_examined: snapshot.dependency_edges_examined,
                     },
@@ -544,7 +528,7 @@ async fn strata(
                 graph.freshness,
             )
         },
-        label = "dashboard_api.graph.strata"
+        tracing::trace_span!("dashboard_api.graph.strata"),
     )
     .await
 }
@@ -552,15 +536,11 @@ async fn strata(
 /// `GET /api/plugins/graph/node/{node_id}/facts`
 async fn node_facts(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
-            let control = match graph_control::<FactMatchesMeasurementV1>(&state, control) {
-                Ok(control) => control,
-                Err(response) => return *response,
-            };
             let graph = match admitted_graph::<FactMatchesMeasurementV1>(
                 &state,
                 &control,
@@ -569,7 +549,7 @@ async fn node_facts(
             .await
             {
                 Ok(graph) => graph,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let occurrence = match parse_occurrence::<FactMatchesMeasurementV1>(&state, &node_id) {
                 Ok(occurrence) => occurrence,
@@ -656,7 +636,7 @@ async fn node_facts(
                 graph.freshness,
             )
         },
-        label = "dashboard_api.graph.node_facts"
+        tracing::trace_span!("dashboard_api.graph.node_facts"),
     )
     .await
 }
@@ -664,24 +644,20 @@ async fn node_facts(
 /// `GET /api/plugins/graph/node/{node_id}/tests`
 async fn node_tests(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
-            let control = match graph_control::<TestMapMeasurementV1>(&state, control) {
-                Ok(control) => control,
-                Err(response) => return *response,
-            };
             let graph = match admitted_graph::<TestMapMeasurementV1>(
                 &state,
                 &control,
-                CallableCodeOperationKind::Callers,
+                ApplicationSurfaceOperation::CodeCallers,
             )
             .await
             {
                 Ok(graph) => graph,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let occurrence = match parse_occurrence::<TestMapMeasurementV1>(&state, &node_id) {
                 Ok(occurrence) => occurrence,
@@ -726,16 +702,20 @@ async fn node_tests(
 
             // Depth-3 caller expansion dominates test-map cost and scales with
             // fan-in, unlike the fixed-price phases around it.
-            let callers = match hotpath::measure_block!("dashboard_api.graph.test_map_impact", {
-                graph.reader.impact(
-                    std::slice::from_ref(&occurrence),
-                    &[RelationEdgeKindV1::Calls],
-                    TEST_CALLER_DEPTH as u32,
-                    STRATA_MAX_FILES,
-                    STRATA_MAX_DEPENDENCY_EDGES,
-                    Arc::clone(&graph.cancellation),
-                )
-            }) {
+            let match_result = {
+                let _span = tracing::trace_span!("dashboard_api.graph.test_map_impact").entered();
+                {
+                    graph.reader.impact(
+                        std::slice::from_ref(&occurrence),
+                        &[RelationEdgeKindV1::Calls],
+                        TEST_CALLER_DEPTH as u32,
+                        STRATA_MAX_FILES,
+                        STRATA_MAX_DEPENDENCY_EDGES,
+                        Arc::clone(&graph.cancellation),
+                    )
+                }
+            };
+            let callers = match match_result {
                 Ok(callers) => callers,
                 Err(error) => {
                     return graph_error_response::<TestMapMeasurementV1>(
@@ -747,7 +727,7 @@ async fn node_tests(
             if !callers.complete && callers.impacted.len() == STRATA_MAX_FILES {
                 return graph_error_response::<TestMapMeasurementV1>(
                     &state,
-                    crate::graph::CodeGraphReadError::BudgetExhausted {
+                    CodeGraphReadError::BudgetExhausted {
                         detail: "test-map caller expansion exceeded its complete-symbol budget"
                             .to_owned(),
                     },
@@ -788,7 +768,7 @@ async fn node_tests(
                         return graph_error_response::<TestMapMeasurementV1>(&state, error);
                     }
                 };
-                let qualification = if crate::tracedecay::is_test_file(&caller.file_path) {
+                let qualification = if tracedecay_code_index::is_test_file(&caller.file_path) {
                     "test_file"
                 } else if match has_test_annotation(&annotations) {
                     Ok(has_test_annotation) => has_test_annotation,
@@ -838,7 +818,7 @@ async fn node_tests(
                 graph.freshness,
             )
         },
-        label = "dashboard_api.graph.node_tests"
+        tracing::trace_span!("dashboard_api.graph.node_tests"),
     )
     .await
 }
@@ -846,15 +826,10 @@ async fn node_tests(
 /// `GET /api/plugins/graph/node/{node_id}/sessions`
 async fn node_sessions(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    hotpath::future!(
-        async move {
-        let control = match graph_control::<NodeSessionsMeasurementV1>(&state, control) {
-            Ok(control) => control,
-            Err(response) => return *response,
-        };
+    tracing::Instrument::instrument(async move {
         let graph = match admitted_graph::<NodeSessionsMeasurementV1>(
             &state,
             &control,
@@ -863,7 +838,7 @@ async fn node_sessions(
         .await
         {
             Ok(graph) => graph,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
         let occurrence = match parse_occurrence::<NodeSessionsMeasurementV1>(&state, &node_id) {
             Ok(occurrence) => occurrence,
@@ -932,9 +907,7 @@ async fn node_sessions(
             graph.freshness,
         )
 
-        },
-        label = "dashboard_api.graph.node_sessions"
-    )
+        }, tracing::trace_span!("dashboard_api.graph.node_sessions"))
     .await
 }
 
@@ -944,49 +917,35 @@ struct AdmittedGraphReadV1 {
     freshness: crate::graph::CodeGraphReadFreshnessV1,
 }
 
-fn graph_control<T: Serialize>(
-    state: &DashboardState,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
-) -> std::result::Result<DashboardHttpRequestControlV1, Box<Response>> {
-    control.map(|Extension(control)| control).ok_or_else(|| {
-        Box::new(unmeasured_response::<T>(
-            state,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "graph_request_admission_unavailable",
-            "dashboard HTTP request admission is unavailable",
-        ))
-    })
-}
-
-#[hotpath::measure(label = "dashboard_api.graph_structure.admitted_read", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.graph_structure.admitted_read",
+    level = "trace",
+    skip_all
+)]
 async fn admitted_graph<T: Serialize>(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,
-    operation_kind: CallableCodeOperationKind,
-) -> std::result::Result<AdmittedGraphReadV1, Response> {
+    operation: impl Into<GraphReadAdmissionOperation>,
+) -> std::result::Result<AdmittedGraphReadV1, Box<Response>> {
     let (Some(admission), Some(projection)) = (
         state.code_graph_read_admission.as_ref(),
         state.code_graph_projection_read_port.as_ref(),
     ) else {
-        return Err(unmeasured_response::<T>(
+        return Err(Box::new(unmeasured_response::<T>(
             state,
             StatusCode::SERVICE_UNAVAILABLE,
             "graph_authority_unavailable",
             "the exact-project verified code graph authority is unavailable",
-        ));
+        )));
     };
-    let operation = callable_code_operation(operation_kind).map_err(|error| {
-        graph_error_response::<T>(
-            state,
-            crate::graph::CodeGraphReadError::InvalidRequest {
-                detail: error.to_string(),
-            },
-        )
-    })?;
+    let operation = operation
+        .into()
+        .resolve()
+        .map_err(|error| Box::new(graph_error_response::<T>(state, error)))?;
     // Admission and projection-open are the per-request store-open cost every
     // structure route pays before any graph work; separate spans let a flat
     // profile distinguish them from the traversal itself.
-    let context = hotpath::future!(
+    let context = tracing::Instrument::instrument(
         admission.admit(crate::graph::CodeGraphReadAdmissionRequest::new(
             &operation,
             control.request_id(),
@@ -994,25 +953,25 @@ async fn admitted_graph<T: Serialize>(
             control.cancellation(),
             control.observed_at(),
         )),
-        label = "dashboard_api.graph.structure_admission"
+        tracing::trace_span!("dashboard_api.graph.structure_admission"),
     )
     .await
-    .map_err(|error| graph_error_response::<T>(state, error))?;
+    .map_err(|error| Box::new(graph_error_response::<T>(state, error)))?;
     let cancellation = crate::graph::application_graph_cancellation(control.cancellation());
-    let verified = hotpath::future!(
+    let verified = tracing::Instrument::instrument(
         projection.open(crate::graph::CodeGraphReadRequest::new(
             &context,
             control.observed_at(),
             Arc::clone(&cancellation),
         )),
-        label = "dashboard_api.graph.structure_open"
+        tracing::trace_span!("dashboard_api.graph.structure_open"),
     )
     .await
-    .map_err(|error| graph_error_response::<T>(state, error))?;
+    .map_err(|error| Box::new(graph_error_response::<T>(state, error)))?;
     let freshness = verified.freshness();
     let reader = verified
         .reader_with_cancellation(&context, control.observed_at(), Arc::clone(&cancellation))
-        .map_err(|error| graph_error_response::<T>(state, error))?;
+        .map_err(|error| Box::new(graph_error_response::<T>(state, error)))?;
     Ok(AdmittedGraphReadV1 {
         reader,
         cancellation,
@@ -1037,7 +996,7 @@ fn parse_occurrence<T: Serialize>(
 fn symbol_summary(
     graph: &AdmittedGraphReadV1,
     occurrence: &SymbolOccurrenceId,
-) -> std::result::Result<Option<CodeGraphSymbolSummaryV1>, crate::graph::CodeGraphReadError> {
+) -> std::result::Result<Option<CodeGraphSymbolSummaryV1>, CodeGraphReadError> {
     graph
         .reader
         .symbol_summary(occurrence, Arc::clone(&graph.cancellation))
@@ -1047,7 +1006,7 @@ fn symbol_summary(
 fn node_ref(
     state: &DashboardState,
     symbol: &CodeGraphSymbolSummaryV1,
-) -> std::result::Result<NodeRefV1, crate::graph::CodeGraphReadError> {
+) -> std::result::Result<NodeRefV1, CodeGraphReadError> {
     let metadata = symbol.metadata.as_ref().ok_or_else(|| {
         graph_reset_required("verified graph symbol is missing its lineage metadata")
     })?;
@@ -1061,7 +1020,7 @@ fn node_ref(
         graph_reset_required("verified graph symbol binding is missing its source span")
     })?;
     let source = std::fs::read(state.project_root.join(&file_path)).map_err(|error| {
-        crate::graph::CodeGraphReadError::Stale {
+        CodeGraphReadError::Stale {
             detail: format!(
                 "verified graph source {file_path:?} cannot be read for line mapping: {error}"
             ),
@@ -1087,7 +1046,7 @@ fn call_chain_steps(
     graph: &AdmittedGraphReadV1,
     from: CodeGraphSymbolSummaryV1,
     path: Option<&[tracedecay_domain::CanonicalRelationEdgeV1]>,
-) -> std::result::Result<Vec<CallChainStepV1>, crate::graph::CodeGraphReadError> {
+) -> std::result::Result<Vec<CallChainStepV1>, CodeGraphReadError> {
     let mut previous = node_ref(state, &from)?;
     let mut steps = vec![CallChainStepV1 {
         node: previous.clone(),
@@ -1135,14 +1094,8 @@ fn line_for_byte_offset(source: &[u8], byte_offset: u64) -> Option<u32> {
 }
 
 fn simple_symbol_name(qualified_name: &str) -> &str {
-    match qualified_name
-        .rsplit("::")
-        .next()
-        .and_then(|name| name.rsplit('.').next())
-    {
-        Some(name) => name,
-        None => qualified_name,
-    }
+    let segment = qualified_name.rsplit("::").next().unwrap_or(qualified_name);
+    segment.rsplit('.').next().unwrap_or(segment)
 }
 
 fn is_callable_kind(kind: &str) -> bool {
@@ -1154,7 +1107,7 @@ fn is_callable_kind(kind: &str) -> bool {
 
 fn has_test_annotation(
     annotations: &[CodeGraphSemanticEdgeV1],
-) -> std::result::Result<bool, crate::graph::CodeGraphReadError> {
+) -> std::result::Result<bool, CodeGraphReadError> {
     for annotation in annotations {
         let metadata = annotation.neighbor.metadata.as_ref().ok_or_else(|| {
             graph_reset_required("verified annotation edge is missing source-symbol metadata")
@@ -1166,8 +1119,8 @@ fn has_test_annotation(
     Ok(false)
 }
 
-fn graph_reset_required(detail: &str) -> crate::graph::CodeGraphReadError {
-    crate::graph::CodeGraphReadError::ResetRequired {
+fn graph_reset_required(detail: &str) -> CodeGraphReadError {
+    CodeGraphReadError::ResetRequired {
         detail: detail.to_owned(),
     }
 }
@@ -1183,10 +1136,8 @@ fn fact_arm_coverage(returned: usize, truncated: bool) -> FactArmCoverageV1 {
 
 fn graph_error_response<T: Serialize>(
     state: &DashboardState,
-    error: crate::graph::CodeGraphReadError,
+    error: CodeGraphReadError,
 ) -> Response {
-    use crate::graph::CodeGraphReadError;
-
     match error {
         CodeGraphReadError::MissingRegistry => unmeasured_response::<T>(
             state,
@@ -1194,12 +1145,14 @@ fn graph_error_response<T: Serialize>(
             "graph_registry_missing",
             "the exact-project code graph registry is unavailable",
         ),
-        CodeGraphReadError::Unavailable { detail } => unmeasured_response::<T>(
-            state,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "graph_authority_unavailable",
-            &detail,
-        ),
+        CodeGraphReadError::Unavailable { detail } | CodeGraphReadError::Refused { detail } => {
+            unmeasured_response::<T>(
+                state,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "graph_authority_unavailable",
+                &detail,
+            )
+        }
         CodeGraphReadError::Stale { detail } => unmeasured_response::<T>(
             state,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1242,49 +1195,34 @@ fn graph_error_response<T: Serialize>(
         CodeGraphReadError::Corrupt { detail } => {
             failed_response::<T>(state, "graph_projection_corrupt", detail, false)
         }
+        parked @ CodeGraphReadError::Parked { .. } => unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "code_index_parked",
+            &parked.to_string(),
+        ),
+        rewarming @ CodeGraphReadError::Rewarming { .. } => unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_authority_unavailable",
+            &rewarming.to_string(),
+        ),
     }
 }
 
-fn graph_runtime_error_response<T: Serialize>(
+fn graph_query_error_response<T: Serialize>(
     state: &DashboardState,
-    error: tracedecay_domain::errors::TraceDecayError,
+    error: GraphQueryError,
 ) -> Response {
-    if let Some((_authority, reason)) = error.reset_required_context() {
-        return graph_error_response::<T>(
-            state,
-            crate::graph::CodeGraphReadError::ResetRequired {
-                detail: reason.to_owned(),
-            },
-        );
+    match error {
+        GraphQueryError::Read(error) => graph_error_response::<T>(state, error),
+        GraphQueryError::EvidenceUnavailable { detail, .. } => {
+            graph_error_response::<T>(state, CodeGraphReadError::Unavailable { detail })
+        }
+        GraphQueryError::Runtime(error) => {
+            failed_response::<T>(state, "strata_read_failed", error.to_string(), false)
+        }
     }
-    if let Some((reason_code, _retryable, detail)) = error.project_route_context() {
-        let graph_error = match reason_code {
-            "code-graph-registry-missing" => crate::graph::CodeGraphReadError::MissingRegistry,
-            "code-graph-stale" => crate::graph::CodeGraphReadError::Stale {
-                detail: detail.to_owned(),
-            },
-            "code-graph-cancelled" => crate::graph::CodeGraphReadError::Cancelled,
-            "code-graph-timed-out" => crate::graph::CodeGraphReadError::TimedOut,
-            "code-graph-budget-exhausted" => crate::graph::CodeGraphReadError::BudgetExhausted {
-                detail: detail.to_owned(),
-            },
-            "code-graph-denied" => crate::graph::CodeGraphReadError::Denied,
-            "code-graph-invalid-request" => crate::graph::CodeGraphReadError::InvalidRequest {
-                detail: detail.to_owned(),
-            },
-            "code-graph-corrupt" => crate::graph::CodeGraphReadError::Corrupt {
-                detail: detail.to_owned(),
-            },
-            "code-graph-reset-required" => crate::graph::CodeGraphReadError::ResetRequired {
-                detail: detail.to_owned(),
-            },
-            _ => crate::graph::CodeGraphReadError::Unavailable {
-                detail: detail.to_owned(),
-            },
-        };
-        return graph_error_response::<T>(state, graph_error);
-    }
-    failed_response::<T>(state, "strata_scan_failed", error.to_string(), false)
 }
 
 fn measured_response<T: Serialize>(

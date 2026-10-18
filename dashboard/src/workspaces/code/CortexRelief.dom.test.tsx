@@ -1,5 +1,5 @@
 /**
- * The CORTEX relief sheet, against a wire-true `StructureReadV1<Strata>`.
+ * The Topology relief sheet, against a wire-true `StructureReadV1<Strata>`.
  *
  * jsdom has no 2D context and draws nothing, so what this suite protects is not
  * the picture but the three claims that make the picture admissible: every
@@ -23,7 +23,7 @@ import { CortexRelief } from './CortexRelief.tsx';
 import { MAX_DRAWN_REGIONS } from './cortexRelief.ts';
 
 /** The canonical envelope from a shipped fixture, with this route's payload
- * swapped in — so the test exercises the real envelope acceptance path rather
+ * swapped in, so the test exercises the real envelope acceptance path rather
  * than a hand-rolled wrapper that could drift from it. */
 function envelope(payload: unknown) {
   const base = resolveFixture('/api/plugins/graph/overview') as Record<string, unknown>;
@@ -74,13 +74,10 @@ function wideMeasurement(): StrataMeasurementV1 {
     ideal_depth: 3,
     max_depth: 3,
     scan: {
-      budget_ms: 4000,
       cache_scope: 'graph_generation',
       cache_state: 'hit',
       dependency_edges_examined: 1200,
       files_examined: 240,
-      max_dependency_edges: 40_000,
-      max_files: 20_000,
     },
   };
 }
@@ -118,7 +115,7 @@ afterEach(() => {
 });
 
 describe('CortexRelief', () => {
-  it('carries every aggregated region in an accessible equivalent, not just on the canvas', async () => {
+  it('carries every aggregated region on the canvas and in an accessible equivalent', async () => {
     const measurement = wideMeasurement();
     serve(envelope({ status: 'measured', measurement }));
     const { container } = renderCortex();
@@ -147,49 +144,6 @@ describe('CortexRelief', () => {
     }
   });
 
-  it('states the aggregation it performed, in counted figures', async () => {
-    serve(envelope({ status: 'measured', measurement: wideMeasurement() }));
-    const { container } = renderCortex();
-    await screen.findByRole('table');
-
-    const plate = container.querySelector('[data-testid="cortex-readout"]')!.textContent ?? '';
-    expect(plate).toContain('module regions');
-    expect(plate).toContain('depth strata');
-    expect(plate).toContain('contour interval');
-    expect(plate).toContain('edges / file');
-    expect(plate).toContain('folded out');
-    expect(plate).toContain(`cap ${MAX_DRAWN_REGIONS} regions`);
-  });
-
-  it('names the channels the read does not back instead of drawing them', async () => {
-    serve(envelope({ status: 'measured', measurement: wideMeasurement() }));
-    const { container } = renderCortex();
-    await screen.findByRole('table');
-
-    const key = container.querySelector('[data-testid="cortex-key"]')!.textContent ?? '';
-    // What it does draw, each traced to the measurement it came from.
-    expect(key).toContain('file-level dependency depth');
-    expect(key).toContain('area carries the count');
-    expect(key).toContain('files and not symbols');
-    expect(key).toContain('index contour');
-    // And the harder half: what it is not drawing, and why.
-    expect(key).toContain('not on this sheet');
-    expect(key).toContain('no git-churn read is exposed to this dashboard');
-    expect(key).toContain('not region-pair edge counts');
-    expect(key).toContain('live activity is published for the project and carries no path');
-  });
-
-  it('draws a measured zero as no relief rather than as flat ground', async () => {
-    serve(envelope({ status: 'measured', measurement: wideMeasurement() }));
-    renderCortex();
-    const table = await screen.findByRole('table');
-    // `src/mod3` was given zero internal edges by the fixture.
-    expect(within(table).getAllByText('no relief').length).toBe(1);
-    const key = screen.getByTestId('cortex-key').textContent ?? '';
-    expect(key).toContain('1 without relief');
-    expect(key).toContain('It is not missing from the sheet, and it is not flat ground');
-  });
-
   it('rings the region the workspace focus lives in, composing with the lens', async () => {
     serve(envelope({ status: 'measured', measurement: wideMeasurement() }));
     renderCortex('src/mod2/a.rs');
@@ -197,7 +151,7 @@ describe('CortexRelief', () => {
     expect(
       screen.getByText(/the symbol this workspace is focused on lives in/i).textContent,
     ).toContain('src/mod2');
-    expect(screen.getByText(/Move the lens to TRACE to flood it/i)).toBeTruthy();
+    expect(screen.getByText(/Open Trace to inspect its call neighborhood/i)).toBeTruthy();
   });
 
   it('says so when the focused directory is not a drawn region', async () => {
@@ -221,6 +175,7 @@ describe('CortexRelief', () => {
     expect(readout).toContain('src/mod5');
     expect(readout).toContain('stratum');
     expect(readout).toContain('e/file');
+    expect(readout).toContain('i/b');
     expect(readout).toContain('contours');
     expect(readout).toContain('in /');
   });

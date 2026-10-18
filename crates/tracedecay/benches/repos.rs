@@ -1,7 +1,9 @@
 //! Definition + on-demand shallow clone of the large repositories used by the
 //! bench. Each repo is pinned to a constant ref so successive bench runs hit
-//! identical source, and cloned with `--depth 1` (via init + fetch) to avoid
-//! pulling full history.
+//! identical source, and cloned with `--depth CLONE_DEPTH` (via init + fetch)
+//! to avoid pulling full history. The depth still bounds the transfer but
+//! leaves enough ancestry for history-walking tools (commit/pr context,
+//! changelog, blame).
 //!
 //! All repos live under the directory pointed at by `TRACEDECAY_BENCH_REPOS_DIR`.
 
@@ -13,9 +15,13 @@ pub struct Repo {
     pub name: &'static str,
     pub url: &'static str,
     /// A constant ref (tag preferred, SHA also fine). Anything that
-    /// `git fetch --depth 1 origin <ref>` will resolve.
+    /// `git fetch --depth N origin <ref>` will resolve.
     pub git_ref: &'static str,
 }
+
+/// Commits of ancestry kept in the shallow clone: enough for `HEAD~n`
+/// walks and base/head diffs the coverage groups exercise.
+const CLONE_DEPTH: &str = "64";
 
 pub const REPOS: &[Repo] = &[
     Repo {
@@ -39,6 +45,33 @@ pub const REPOS: &[Repo] = &[
         git_ref: "v22.11.0",
     },
 ];
+
+/// The disposable repository name used by the bounded tool audit. The wrapper
+/// creates this checkout from `benchmark_data/runtime/fixtures/project` and
+/// gives it enough native history for the Git coverage seeds.
+pub const SMALL_FIXTURE_NAME: &str = "runtime-fixture";
+
+pub fn small_fixture_enabled() -> bool {
+    std::env::var_os("TRACEDECAY_BENCH_SMALL_FIXTURE").is_some()
+}
+
+pub fn small_fixture_repo(root: &Path) -> Result<(Repo, PathBuf), String> {
+    let dir = root.join(SMALL_FIXTURE_NAME);
+    if !dir.is_dir() {
+        return Err(format!(
+            "small fixture checkout is missing at {}",
+            dir.display()
+        ));
+    }
+    Ok((
+        Repo {
+            name: SMALL_FIXTURE_NAME,
+            url: "benchmark_data/runtime/fixtures/project",
+            git_ref: "fixture",
+        },
+        dir,
+    ))
+}
 
 /// Returns the bench repos root, or `None` if `TRACEDECAY_BENCH_REPOS_DIR` is unset.
 pub fn repos_root() -> Option<PathBuf> {
@@ -93,6 +126,22 @@ pub fn ensure_cloned(root: &Path, repo: Repo) -> Result<PathBuf, String> {
         && let Ok(existing) = std::fs::read_to_string(&marker)
         && existing.trim() == repo.git_ref
     {
+        // A cache populated by an older shallower clone still needs the
+        // ancestry the coverage groups walk; deepen it in place.
+        if history_depth(&dir) < CLONE_DEPTH.parse::<u64>().unwrap_or(1) {
+            eprintln!("[bench] deepening {} (depth {CLONE_DEPTH})...", repo.name);
+            run_git(
+                &[
+                    "fetch",
+                    "--progress",
+                    "--deepen",
+                    CLONE_DEPTH,
+                    "origin",
+                    repo.git_ref,
+                ],
+                Some(&dir),
+            )?;
+        }
         return Ok(dir);
     }
 
@@ -110,7 +159,7 @@ pub fn ensure_cloned(root: &Path, repo: Repo) -> Result<PathBuf, String> {
     }
 
     eprintln!(
-        "[bench] fetching {} @ {} (depth 1)...",
+        "[bench] fetching {} @ {} (depth {CLONE_DEPTH})...",
         repo.name, repo.git_ref
     );
     // `--progress` forces progress output even when stderr isn't a TTY (criterion
@@ -121,7 +170,7 @@ pub fn ensure_cloned(root: &Path, repo: Repo) -> Result<PathBuf, String> {
             "fetch",
             "--progress",
             "--depth",
-            "1",
+            CLONE_DEPTH,
             "origin",
             repo.git_ref,
         ],
@@ -130,6 +179,19 @@ pub fn ensure_cloned(root: &Path, repo: Repo) -> Result<PathBuf, String> {
     run_git(&["checkout", "--force", "FETCH_HEAD"], Some(&dir))?;
     std::fs::write(&marker, repo.git_ref).map_err(|e| format!("write marker: {e}"))?;
     Ok(dir)
+}
+
+/// Count commits reachable from HEAD (0 for an empty or detached checkout).
+fn history_depth(dir: &Path) -> u64 {
+    Command::new("git")
+        .args(["rev-list", "--count", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// Revert all changes (tracked and untracked) made in `repo_dir` during the

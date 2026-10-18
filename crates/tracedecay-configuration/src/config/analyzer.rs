@@ -5,7 +5,7 @@
 //! layers; these helpers consume that pinned snapshot and return the complete
 //! validated selection set. They never probe an executable, read host state,
 //! consult an adapter default, or substitute an empty selection for a value
-//! they could not read — a missing, mistyped, tampered, or invalid input fails
+//! they could not read, a missing, mistyped, tampered, or invalid input fails
 //! closed with a typed error.
 
 use thiserror::Error;
@@ -44,12 +44,6 @@ pub fn resolved_analyzer_settings(
     }
 }
 
-/// Exposes the exact selection set the typed registry uses before any operator
-/// publishes a replacement: no analyzer is configured for any language.
-pub fn default_analyzer_settings() -> AnalyzerSettingsV1 {
-    AnalyzerSettingsV1::empty()
-}
-
 /// The one operator-published selection for `language`, if the resolved
 /// settings carry it. `AnalyzerSettingsV1::validate` already rejects duplicate
 /// or unordered language ids, so at most one selection can match.
@@ -70,7 +64,6 @@ mod tests {
     use tracedecay_domain::configuration::{
         AnalyzerExecutableId, AnalyzerExecutableReferenceV1, AnalyzerPrivacyClassV1,
         AnalyzerResourceLimitsV1, AnalyzerRestartPolicyV1, ConfigurationLayerIdV1,
-        ConfigurationValueKindV1, RestartRequirementV1, SettingScopeV1, SettingSensitivityV1,
     };
     use tracedecay_domain::{ManifestDigest, ProjectId, UserProfileId};
     use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
@@ -80,13 +73,7 @@ mod tests {
 
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("fixture id is canonical")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn analyzer_key() -> SettingKey {
         SettingKey::new(ANALYZER_SETTINGS_SETTING_KEY).unwrap()
@@ -135,40 +122,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_default_is_the_empty_selection_set() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let definition = registry.definition(&analyzer_key()).unwrap();
-        assert_eq!(
-            definition.value_kind,
-            ConfigurationValueKindV1::AnalyzerSettings
-        );
-        assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert_eq!(
-            definition.restart_requirement,
-            RestartRequirementV1::AnalyzerRestart
-        );
-        let ConfigurationValueV1::AnalyzerSettings(default) = &definition.default_value else {
-            panic!("registry default must be a typed analyzer settings value");
-        };
-        assert_eq!(*default, default_analyzer_settings());
-    }
-
-    #[test]
-    fn unset_key_resolves_to_the_registered_default() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let snapshot = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let resolved = resolved_analyzer_settings(&snapshot).unwrap();
-        let default = default_analyzer_settings();
-        assert_eq!(*resolved, default);
-        assert!(resolved.selections.is_empty());
-        assert_eq!(
-            resolved.compute_digest().unwrap(),
-            default.compute_digest().unwrap()
-        );
-    }
-
-    #[test]
     fn stored_project_value_resolves_into_the_typed_accessor() {
         let registry = ConfigurationRegistry::core().unwrap();
         let published = settings(vec![selection("python", false), selection("rust", true)]);
@@ -178,14 +131,14 @@ mod tests {
             resolve_configuration(&registry, &[project_layer(published.clone())]).unwrap();
         let resolved = resolved_analyzer_settings(&resolution.snapshot).unwrap();
         assert_eq!(*resolved, published);
-        assert_ne!(*resolved, default_analyzer_settings());
+        assert_ne!(*resolved, AnalyzerSettingsV1::empty());
         assert_eq!(
             resolved.compute_digest().unwrap(),
             published.compute_digest().unwrap()
         );
 
         // The published selection is reachable per language, including the
-        // explicitly disabled one — the accessor never hides a row.
+        // explicitly disabled one, the accessor never hides a row.
         let rust = configured_language_selection(
             resolved,
             &AnalyzerLanguageId::new("rust".to_owned()).unwrap(),
@@ -228,7 +181,12 @@ mod tests {
                 ConfigurationValueV1::AnalyzerSettings(settings(vec![selection("rust", true)])),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "setting analyzer.settings.v1 cannot be placed in UserProfile { profile_id: UserProfileId(\"profile.fixture\") }"
+        );
     }
 
     #[test]
@@ -238,18 +196,30 @@ mod tests {
         // Unsupported schema version.
         let mut future = settings(vec![selection("rust", true)]);
         future.schema_version = 2;
-        assert!(resolve_configuration(&registry, &[project_layer(future)]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[project_layer(future)])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: analyzer settings schema version is not canonical"
+        );
 
         // Non-canonical selection order (also catches duplicate languages).
         let unordered = settings(vec![selection("rust", true), selection("python", true)]);
-        assert!(resolve_configuration(&registry, &[project_layer(unordered)]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[project_layer(unordered)])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: analyzer language selection order is not canonical"
+        );
 
         // Invalid resource limits inside an otherwise well-formed selection.
         let mut zero_memory = selection("rust", true);
         zero_memory.resource_limits.maximum_memory_mib = 0;
-        assert!(
+        assert_eq!(
             resolve_configuration(&registry, &[project_layer(settings(vec![zero_memory]))])
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: configuration definition is invalid: analyzer resource limits is not canonical"
         );
 
         // A mistyped value at the analyzer key never reaches a snapshot.
@@ -263,7 +233,12 @@ mod tests {
                 ConfigurationValueV1::Text("disabled".to_owned()),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[mistyped]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[mistyped])
+                .unwrap_err()
+                .to_string(),
+            "configuration registry rejected a setting: setting value kind does not match analyzer.settings.v1: expected AnalyzerSettings, got Text"
+        );
     }
 
     #[test]

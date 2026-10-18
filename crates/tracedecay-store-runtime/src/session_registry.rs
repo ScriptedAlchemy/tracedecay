@@ -2,45 +2,42 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
-#[cfg(feature = "hotpath")]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
-use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+
 use tokio::sync::Mutex;
-use tracedecay_automation_runtime::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_domain::BrainNodeId;
-use tracedecay_sessions::observation::ObservationCancellation;
-use tracedecay_store::{
-    AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
-};
+use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{
+    ProjectOpenFailureKind, Result, StoreResetRequiredV1, TraceDecayError,
+};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
+use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
 use tracedecay_runtime_core::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1,
     DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
-use tracedecay_runtime_core::store_runtime::registry::{
+use tracedecay_runtime_core::shard_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
 };
-use tracedecay_runtime_core::store_runtime::registry::{
+use tracedecay_runtime_core::shard_runtime::registry::{
     DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
     LifecycleShardRuntimePublisher, ProfileAuthorityPin, ProfileAuthorityPinResult,
     StoreRuntimeClientLease, StoreRuntimeKey, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeResolver,
 };
-use tracedecay_runtime_core::store_runtime::resolver::{
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
+
+use crate::store_locator_resolver::{
     LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
     LocalStoreRuntimeResolverV1,
 };
-use tracedecay_session_temporal_store::relations::SessionRelationScope;
 
 mod code_graph;
 mod code_graph_manifest;
@@ -48,16 +45,17 @@ mod code_reads;
 pub mod maintenance;
 mod memory_graph_reconciliation_tasks;
 mod mounts;
-mod profile_memory;
-mod project_store_runtime;
 mod remote_recovery;
 mod retained_hook_tasks;
 mod terminal_tasks;
 
 use maintenance::RegisteredSchemaConvergenceMaintenance;
+#[cfg(any(test, feature = "test-helpers"))]
+use mounts::SessionGraphPublicationTestGateState;
 use retained_hook_tasks::RetainedHookTasks;
 
-pub use profile_memory::open_user_memory_db;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use mounts::SessionGraphPublicationTestGate;
 
 /// RAII hold for a root-owned remote-recovery writer admission.
 ///
@@ -75,19 +73,6 @@ impl RemoteRecoveryAdmission {
     }
 }
 
-/// RAII hold for a root-owned remote-recovery project quiescence fence.
-pub struct RemoteRecoveryQuiescence {
-    _hold: Box<dyn Send + Sync>,
-}
-
-impl RemoteRecoveryQuiescence {
-    pub fn hold<T: Send + Sync + 'static>(value: T) -> Self {
-        Self {
-            _hold: Box::new(value),
-        }
-    }
-}
-
 /// Operations the composition root installs after opening a registry.
 ///
 /// The concrete `RemoteRecoveryProjectLifecycleV1` stays in root because it
@@ -98,12 +83,6 @@ pub trait RemoteRecoveryProjectLifecycle: Send + Sync {
         &'a self,
         project_id: &'a ProjectId,
     ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryAdmission>> + Send + 'a>>;
-
-    fn quiesce<'a>(
-        &'a self,
-        project_id: &'a ProjectId,
-        database: &'a RegisteredGlobalDbLeaseV1,
-    ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryQuiescence>> + Send + 'a>>;
 }
 
 /// Sanity ceiling on concurrently mounted project runtime owners, not a bound
@@ -119,8 +98,8 @@ pub trait RemoteRecoveryProjectLifecycle: Send + Sync {
 /// these owners: capacity eviction cannot reclaim a mounted project, because
 /// it holds its owner attachment for the life of the mount and so is never a
 /// candidate. A ceiling this high therefore lets residency grow with the
-/// number of projects actually touched. That is the deliberate trade —
-/// refusing the fourth project was the worse failure — and the real fix is
+/// number of projects actually touched. That is the deliberate trade,
+/// refusing the fourth project was the worse failure, and the real fix is
 /// idle-project hibernation, which is follow-up work.
 ///
 /// This is the *only* declared project-population ceiling; every other ceiling
@@ -138,7 +117,7 @@ const PROJECT_GRAPH_OWNER_ADMISSION_DEMAND: usize = 3;
 /// actually reachable. Written as arithmetic rather than a literal because the
 /// profile-wide owners take their slots first: a hand-picked number is short by
 /// exactly that many, and the last project then fails inside the graph registry
-/// before ever reaching [`MAX_RETAINED_PROJECT_RUNTIME_OWNERS`].
+/// before ever reaching `MAX_RETAINED_PROJECT_RUNTIME_OWNERS`.
 pub const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
     + PROJECT_GRAPH_OWNER_ADMISSION_DEMAND * MAX_RETAINED_PROJECT_RUNTIME_OWNERS;
 
@@ -150,41 +129,6 @@ pub const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
 /// provisioned database behind, and startup remounts every discovered
 /// `remote.db`, turning the residue into a hard failure on the next start.
 const MAX_RETAINED_REMOTE_NODE_OWNERS: usize = crate::MAX_REGISTERED_REMOTE_NODES;
-
-#[cfg(feature = "hotpath")]
-static SESSION_STORE_MOUNTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-
-/// RAII observation of one full (non-reuse) session-store mount attempt.
-///
-/// Entering counts the attempt; dropping restores the in-flight gauge on
-/// every exit path, so failed, denied, or cancelled mounts cannot leak it.
-#[cfg(feature = "hotpath")]
-pub(crate) struct StoreMountObservationV1;
-
-#[cfg(feature = "hotpath")]
-impl StoreMountObservationV1 {
-    pub fn enter() -> Self {
-        let in_flight = SESSION_STORE_MOUNTS_IN_FLIGHT
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        hotpath::gauge!("daemon.session_registry.mount.attempts_total").inc(1_u64);
-        hotpath::gauge!("daemon.session_registry.mount.in_flight").set(in_flight);
-        Self
-    }
-}
-
-#[cfg(feature = "hotpath")]
-impl Drop for StoreMountObservationV1 {
-    fn drop(&mut self) {
-        let _ = SESSION_STORE_MOUNTS_IN_FLIGHT.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |in_flight| in_flight.checked_sub(1),
-        );
-        hotpath::gauge!("daemon.session_registry.mount.in_flight")
-            .set(SESSION_STORE_MOUNTS_IN_FLIGHT.load(Ordering::Relaxed));
-    }
-}
 
 struct SessionGraphOwnerV1 {
     graph: GraphDbOwnerAttachmentV1,
@@ -307,6 +251,7 @@ impl RegisteredSessionOwnerV1 {
         let Some(relation_graph) = relation_graph else {
             return Err(self);
         };
+        self.database.detach_session_relation_graph();
         let SessionGraphOwnerV1 {
             graph,
             store_target,
@@ -333,6 +278,7 @@ impl RegisteredSessionOwnerV1 {
             return None;
         };
         let owner = owner.take()?;
+        self.database.detach_session_relation_graph();
         Some((
             owner.graph.binding().clone(),
             owner.graph.verified_locator().clone(),
@@ -357,6 +303,11 @@ impl ProjectRuntimeOwnerRegistryV1 {
         self.0.lock()
     }
 
+    #[tracing::instrument(
+        name = "daemon.session_registry.list_ready_sessions",
+        level = "trace",
+        skip_all
+    )]
     fn ready_session_projects(&self) -> Result<Vec<ProjectId>> {
         let entries = self.lock().map_err(|_| {
             session_registry_error(
@@ -375,7 +326,11 @@ impl ProjectRuntimeOwnerRegistryV1 {
             .collect())
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.wait_session_graph", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.wait_session_graph",
+        level = "trace",
+        skip_all
+    )]
     async fn wait_for_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         let (relation_graph, graph_settled) = {
             let entries = self.lock().map_err(|_| {
@@ -424,6 +379,148 @@ impl ProjectRuntimeOwnerRegistryV1 {
         }
     }
 
+    /// Waits for the mounted project memory owner's background graph open to
+    /// settle. Returns `false` when this map holds no runtime for the project,
+    /// so no mount owns its graph shard.
+    async fn wait_for_memory_graph(&self, project_id: &ProjectId) -> Result<bool> {
+        let waiter = {
+            let entries = self.lock().map_err(|_| {
+                session_registry_error(
+                    "await project memory graph",
+                    "project runtime owner map lock is poisoned".to_owned(),
+                )
+            })?;
+            match entries.get(project_id) {
+                None => return Ok(false),
+                Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => owners
+                    .memory
+                    .as_ref()
+                    .map(|owner| (Arc::clone(&owner.graph), Arc::clone(&owner.graph_settled))),
+                Some(_) => None,
+            }
+        };
+        let Some((graph, graph_settled)) = waiter else {
+            return Ok(true);
+        };
+        loop {
+            let notified = graph_settled.notified();
+            let warming = matches!(
+                &*graph
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                MemoryGraphAttachmentStateV1::Warming { .. }
+            );
+            if !warming {
+                return Ok(true);
+            }
+            notified.await;
+        }
+    }
+
+    fn take_unattached_session_owner(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Option<UnattachedSessionRetirementV1>> {
+        let mut entries = self.lock().map_err(|_| {
+            session_registry_error(
+                "reserve unattached project session retirement",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        let Some(state) = entries.remove(project_id) else {
+            return Ok(None);
+        };
+        let ProjectRuntimeOwnerStateV1::Ready(mut owners) = state else {
+            entries.insert(project_id.clone(), state);
+            return Err(TraceDecayError::project_route(
+                "project_runtime_replacing_sessions",
+                true,
+                "Project session runtime is not accepting unattached retirement",
+            ));
+        };
+        let Some(sessions) = owners.sessions.take() else {
+            entries.insert(
+                project_id.clone(),
+                ProjectRuntimeOwnerStateV1::Ready(owners),
+            );
+            return Ok(None);
+        };
+        if matches!(
+            &*sessions
+                .relation_graph
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            SessionGraphAttachmentStateV1::Attached { owner: Some(_) }
+        ) {
+            owners.sessions = Some(sessions);
+            entries.insert(
+                project_id.clone(),
+                ProjectRuntimeOwnerStateV1::Ready(owners),
+            );
+            return Err(TraceDecayError::project_route(
+                "project_session_graph_attached",
+                true,
+                "Project session relation graph attached during unattached retirement",
+            ));
+        }
+        entries.insert(
+            project_id.clone(),
+            ProjectRuntimeOwnerStateV1::ReplacingSessions,
+        );
+        Ok(Some(UnattachedSessionRetirementV1 {
+            owners: self.clone(),
+            project_id: project_id.clone(),
+            sessions: Some(sessions),
+            memory: owners.memory,
+            armed: true,
+        }))
+    }
+
+    async fn wait_for_serving_session_graph(&self, project_id: &ProjectId) -> Result<()> {
+        self.wait_for_session_graph(project_id).await?;
+        let entries = self.lock().map_err(|_| {
+            session_registry_error(
+                "admit project session relation graph for serving",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        let Some(ProjectRuntimeOwnerStateV1::Ready(owners)) = entries.get(project_id) else {
+            return Err(TraceDecayError::project_route(
+                "project_session_graph_unavailable",
+                true,
+                "Project session runtime is not ready for retrieval serving",
+            ));
+        };
+        let Some(sessions) = owners.sessions.as_ref() else {
+            return Err(TraceDecayError::project_route(
+                "project_session_graph_unavailable",
+                true,
+                "Project session runtime has no relation graph owner",
+            ));
+        };
+        let attached = matches!(
+            &*sessions
+                .relation_graph
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            SessionGraphAttachmentStateV1::Attached { owner: Some(_) }
+        );
+        if attached {
+            Ok(())
+        } else {
+            Err(TraceDecayError::project_route(
+                "project_session_graph_unavailable",
+                true,
+                sessions.graph_unavailable_reason(),
+            ))
+        }
+    }
+
+    #[tracing::instrument(
+        name = "daemon.session_registry.reserve_session_replacement",
+        level = "trace",
+        skip_all
+    )]
     fn reserve_session_replacement(
         &self,
         project_id: &ProjectId,
@@ -481,92 +578,13 @@ impl ProjectRuntimeOwnerRegistryV1 {
             armed: true,
         }))
     }
-
-    fn reserve_session_recovery(
-        &self,
-        project_id: &ProjectId,
-    ) -> Result<Option<ProjectSessionRecoveryReservationV1>> {
-        let mut entries = self.lock().map_err(|_| {
-            session_registry_error(
-                "reserve project session recovery",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        let Some(state) = entries.remove(project_id) else {
-            return Ok(None);
-        };
-        let ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery) = state else {
-            let diagnostic = match &state {
-                ProjectRuntimeOwnerStateV1::Faulted(faulted) => Some(faulted.recovery_inspection()),
-                _ => None,
-            };
-            entries.insert(project_id.clone(), state);
-            return Err(TraceDecayError::project_route(
-                "project_runtime_recovery",
-                true,
-                diagnostic.map_or_else(
-                    || "Project session runtime has no resumable recovery state".to_owned(),
-                    |diagnostic| {
-                        format!(
-                            "Project session runtime is faulted and retained for typed recovery inspection: {}",
-                            diagnostic.description(),
-                        )
-                    },
-                ),
-            ));
-        };
-        entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Recovering);
-        Ok(Some(ProjectSessionRecoveryReservationV1 {
-            owners: self.clone(),
-            project_id: project_id.clone(),
-            recovery: Some(recovery),
-            armed: true,
-        }))
-    }
-
-    /// Rebuilds the fail-closed post-restart recovery record. The durable
-    /// quarantine receipt is written only after the old paired owners have
-    /// closed; it never reconstructs or remounts that terminal owner.
-    fn reconstruct_durable_terminal_recovery(
-        &self,
-        project_id: &ProjectId,
-        proof: ProjectSessionTerminalVacancyAuthorityV1,
-    ) -> Result<()> {
-        if !proof.matches_project(project_id) {
-            return Err(session_registry_error(
-                "rebuild terminal remote recovery vacancy",
-                "durable remote restore proof does not belong to this project session shard"
-                    .to_owned(),
-            ));
-        }
-        let mut entries = self.lock().map_err(|_| {
-            session_registry_error(
-                "rebuild terminal remote recovery vacancy",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        if entries.contains_key(project_id) {
-            return Err(TraceDecayError::project_route(
-                "project_runtime_recovery",
-                true,
-                "Project session runtime already has an owner or recovery reservation",
-            ));
-        }
-        entries.insert(
-            project_id.clone(),
-            ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
-                sessions: None,
-                candidate_sessions: None,
-                memory: None,
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(
-                    ProjectSessionTerminalProofV1::Durable(Box::new(proof)),
-                ),
-            }),
-        );
-        Ok(())
-    }
 }
 
+#[tracing::instrument(
+    name = "daemon.session_registry.bind_memory_graph",
+    level = "trace",
+    skip_all
+)]
 fn bind_ready_project_memory_graph(
     owners: &ProjectRuntimeOwnerRegistryV1,
     project_id: &ProjectId,
@@ -670,6 +688,7 @@ impl ProjectSessionRetirementOwnerV1 {
 struct MemoryStoreOwnerV1 {
     database: DatabaseOwnerWeakLeaseIssuerV1,
     graph: Arc<StdMutex<MemoryGraphAttachmentStateV1>>,
+    graph_settled: Arc<tokio::sync::Notify>,
     graph_open_task_key: String,
 }
 
@@ -873,10 +892,28 @@ enum ProjectRuntimeOwnerStateV1 {
     Opening,
     Ready(ProjectRuntimeOwnersV1),
     ReplacingSessions,
-    Recovering,
     RecoveryRequired(ProjectSessionRecoveryRequiredV1),
     Retiring,
     Faulted(ProjectRuntimeFaultedOwnersV1),
+}
+
+impl ProjectRuntimeOwnerStateV1 {
+    /// Typed route denial for a project whose runtime cannot serve, carrying
+    /// the retained recovery or fault inspection when there is one.
+    fn unavailable_route_error(&self) -> TraceDecayError {
+        let inspection = match self {
+            Self::RecoveryRequired(recovery) => Some(recovery.phase.inspection().description()),
+            Self::Faulted(faulted) => Some(faulted.recovery_inspection().description()),
+            Self::Opening | Self::Ready(_) | Self::ReplacingSessions | Self::Retiring => None,
+        };
+        let message = match inspection {
+            Some(inspection) => {
+                format!("Project runtime is unavailable while retirement is terminal: {inspection}")
+            }
+            None => "Project runtime is unavailable while retirement is in progress".to_owned(),
+        };
+        TraceDecayError::project_route("project_runtime_retiring", true, message)
+    }
 }
 
 /// Terminal or abandoned replacement state retains the exact old owners until
@@ -961,73 +998,131 @@ impl ProjectSessionClosedRetirementProofV1 {
                     && target.verified_locator() == &self.locator
         ) && matches!(
             self.store.outcomes(),
-            [tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementOutcome::Closed { target }]
+            [tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementOutcome::Closed { target }]
                 if target.binding() == &self.binding
         )
     }
-
-    fn durable_authority(&self) -> ProjectSessionTerminalVacancyAuthorityV1 {
-        ProjectSessionTerminalVacancyAuthorityV1 {
-            binding: self.binding.clone(),
-            locator: self.locator.clone(),
-        }
-    }
 }
 
-/// The durable, identity-only portion of an exact paired-close receipt. It is
-/// persisted in the remote restore journal after `verify()` has accepted the
-/// live Graph and Store terminal receipts, so restart recovery may open only
-/// a fresh candidate in the same terminal vacancy.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProjectSessionTerminalVacancyAuthorityV1 {
-    binding: tracedecay_store::StoreRuntimeBindingV1,
-    locator: tracedecay_store::VerifiedStoreLocatorV1,
-}
-
-impl ProjectSessionTerminalVacancyAuthorityV1 {
-    fn valid(&self) -> bool {
-        self.binding.shard_id == self.locator.shard_id
-            && self.binding.incarnation == self.locator.incarnation
-    }
-
-    fn matches_project(&self, project_id: &ProjectId) -> bool {
-        self.valid()
-            && matches!(
-                &self.binding.shard_id.scope,
-                StoreShardScopeV1::ProjectSessions { project_id: bound } if bound == project_id
-            )
-    }
-}
-
-/// A terminal vacancy is proven either by the live, non-cloneable Graph/Store
-/// receipts or by their durable journal authority after process restart.
+/// A terminal vacancy is proven by the live, non-cloneable Graph/Store
+/// receipts.
 enum ProjectSessionTerminalProofV1 {
     Live(Box<ProjectSessionClosedRetirementProofV1>),
-    Durable(Box<ProjectSessionTerminalVacancyAuthorityV1>),
 }
 
 impl ProjectSessionTerminalProofV1 {
     fn verify(&self) -> bool {
         match self {
             Self::Live(proof) => proof.verify(),
-            Self::Durable(authority) => authority.valid(),
-        }
-    }
-
-    fn durable_authority(&self) -> ProjectSessionTerminalVacancyAuthorityV1 {
-        match self {
-            Self::Live(proof) => proof.durable_authority(),
-            Self::Durable(authority) => authority.as_ref().clone(),
         }
     }
 }
+
+// These owner states nest a `BTreeMap` witness into retirement receipts. One
+// combined `Send` proof exceeds the recursion limit (rust-lang/rust#159228);
+// each field below is checked on its own.
+unsafe impl Send for ProjectSessionClosedRetirementProofV1 {}
+
+const _: fn(&ProjectSessionClosedRetirementProofV1) = |value| {
+    fn assert_send<T: Send>(_: &T) {}
+    let ProjectSessionClosedRetirementProofV1 {
+        binding,
+        locator,
+        graph,
+        store,
+    } = value;
+    assert_send(binding);
+    assert_send(locator);
+    assert_send(graph);
+    assert_send(store);
+};
+
+unsafe impl Send for ProjectSessionTerminalProofV1 {}
+
+const _: fn(&ProjectSessionTerminalProofV1) = |value| {
+    fn assert_send<T: Send>(_: &T) {}
+    match value {
+        ProjectSessionTerminalProofV1::Live(proof) => assert_send(proof),
+    }
+};
+
+unsafe impl Send for ProjectSessionRecoveryPhaseV1 {}
+
+const _: fn(&ProjectSessionRecoveryPhaseV1) = |value| {
+    fn assert_send<T: Send>(_: &T) {}
+    match value {
+        ProjectSessionRecoveryPhaseV1::ReservationAbandoned
+        | ProjectSessionRecoveryPhaseV1::GraphNativeBoundary => {}
+        ProjectSessionRecoveryPhaseV1::GraphTerminal(graph) => assert_send(graph),
+        ProjectSessionRecoveryPhaseV1::Terminal(proof) => assert_send(proof),
+    }
+};
+
+unsafe impl Send for ProjectSessionRecoveryRequiredV1 {}
+
+const _: fn(&ProjectSessionRecoveryRequiredV1) = |value| {
+    fn assert_send<T: Send>(_: &T) {}
+    let ProjectSessionRecoveryRequiredV1 {
+        sessions,
+        candidate_sessions,
+        memory,
+        phase,
+    } = value;
+    assert_send(sessions);
+    assert_send(candidate_sessions);
+    assert_send(memory);
+    assert_send(phase);
+};
+
+unsafe impl Send for ProjectRuntimeRetirementFaultV1 {}
+
+const _: fn(&ProjectRuntimeRetirementFaultV1) = |value| {
+    fn assert_send<T: Send>(_: &T) {}
+    match value {
+        ProjectRuntimeRetirementFaultV1::ReservationTargetConsumed => {}
+        ProjectRuntimeRetirementFaultV1::Reconciliation(terminal) => assert_send(terminal),
+        ProjectRuntimeRetirementFaultV1::GraphRefusal(error) => assert_send(error),
+        ProjectRuntimeRetirementFaultV1::StoreStart(error) => assert_send(error),
+        ProjectRuntimeRetirementFaultV1::Terminal { graph, store } => {
+            assert_send(graph);
+            assert_send(store);
+        }
+    }
+};
+
+unsafe impl Send for ProjectRuntimeFaultedOwnersV1 {}
+
+const _: fn(&ProjectRuntimeFaultedOwnersV1) = |value| {
+    fn assert_send<T: Send>(_: &T) {}
+    let ProjectRuntimeFaultedOwnersV1 {
+        retained,
+        sessions,
+        fault,
+    } = value;
+    assert_send(retained);
+    assert_send(sessions);
+    assert_send(fault);
+};
+
+unsafe impl Send for ProjectRuntimeOwnerStateV1 {}
+
+const _: fn(&ProjectRuntimeOwnerStateV1) = |value| {
+    fn assert_send<T: Send>(_: &T) {}
+    match value {
+        ProjectRuntimeOwnerStateV1::Opening
+        | ProjectRuntimeOwnerStateV1::ReplacingSessions
+        | ProjectRuntimeOwnerStateV1::Retiring => {}
+        ProjectRuntimeOwnerStateV1::Ready(owners) => assert_send(owners),
+        ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery) => assert_send(recovery),
+        ProjectRuntimeOwnerStateV1::Faulted(faulted) => assert_send(faulted),
+    }
+};
 
 enum ProjectRuntimeRetirementFaultV1 {
     ReservationTargetConsumed,
     Reconciliation(MemoryGraphReconciliationRetirementTerminalV1),
     GraphRefusal(tracedecay_graph_db::GraphDbError),
-    StoreStart(tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure),
+    StoreStart(tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure),
     Terminal {
         graph: GraphDbRetirementCommit,
         store: StoreRuntimeRetirementCommit,
@@ -1404,6 +1499,130 @@ impl Drop for ProjectRuntimeOwnerRetirementReservationV1 {
     }
 }
 
+/// Database-only retirement when the session relation graph never attached.
+///
+/// A Detached open cannot enter the paired graph/Store vacancy proof. The
+/// graph registry never received an owner, so only the session Store closes.
+struct UnattachedSessionRetirementV1 {
+    owners: ProjectRuntimeOwnerRegistryV1,
+    project_id: ProjectId,
+    sessions: Option<RegisteredSessionOwnerV1>,
+    memory: Option<MemoryStoreOwnerV1>,
+    armed: bool,
+}
+
+impl UnattachedSessionRetirementV1 {
+    fn database(&self) -> Result<&RegisteredGlobalDbOwnerV1> {
+        self.sessions
+            .as_ref()
+            .map(|sessions| &sessions.database)
+            .ok_or_else(|| {
+                session_registry_error(
+                    "retire unattached project session store",
+                    "unattached session retirement lost its database owner".to_owned(),
+                )
+            })
+    }
+
+    fn restore_ready(&mut self) -> Result<()> {
+        let mut entries = self.owners.lock().map_err(|_| {
+            session_registry_error(
+                "restore unattached project session owner",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        if !matches!(
+            entries.get(&self.project_id),
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
+        ) {
+            return Err(session_registry_error(
+                "restore unattached project session owner",
+                "unattached session retirement lost its map fence".to_owned(),
+            ));
+        }
+        entries.insert(
+            self.project_id.clone(),
+            ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
+                sessions: self.sessions.take(),
+                memory: self.memory.take(),
+            }),
+        );
+        self.armed = false;
+        Ok(())
+    }
+
+    fn commit_without_sessions(&mut self) -> Result<()> {
+        let mut entries = self.owners.lock().map_err(|_| {
+            session_registry_error(
+                "complete unattached project session retirement",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        if !matches!(
+            entries.get(&self.project_id),
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
+        ) {
+            return Err(session_registry_error(
+                "complete unattached project session retirement",
+                "unattached session retirement lost its map fence".to_owned(),
+            ));
+        }
+        drop(self.sessions.take());
+        entries.insert(
+            self.project_id.clone(),
+            ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
+                sessions: None,
+                memory: self.memory.take(),
+            }),
+        );
+        self.armed = false;
+        Ok(())
+    }
+
+    /// A rollback that cannot reach a truthful `Ready` keeps the retained
+    /// owner fenced as `RecoveryRequired` rather than publishing it while its
+    /// session sync binding was cleared. The unattached owner has no paired
+    /// graph/Store target, so it parks in `candidate_sessions` where
+    /// shutdown's graph-identity drain still drops it in order.
+    fn commit_recovery_required(mut self, phase: ProjectSessionRecoveryPhaseV1) -> Result<()> {
+        let mut entries = self.owners.lock().map_err(|_| {
+            session_registry_error(
+                "commit unattached project session recovery required",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        if !matches!(
+            entries.get(&self.project_id),
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
+        ) {
+            return Err(session_registry_error(
+                "commit unattached project session recovery required",
+                "unattached session retirement lost its map fence".to_owned(),
+            ));
+        }
+        entries.insert(
+            self.project_id.clone(),
+            ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
+                sessions: None,
+                candidate_sessions: self.sessions.take(),
+                memory: self.memory.take(),
+                phase,
+            }),
+        );
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for UnattachedSessionRetirementV1 {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self.restore_ready();
+    }
+}
+
 /// Exclusive recovery ownership for one mounted project session authority.
 ///
 /// The reservation removes the exact session owner from serving admission
@@ -1503,21 +1722,41 @@ impl ProjectSessionReplacementReservationV1 {
         Ok(database)
     }
 
-    fn graph_retirement_target(&self) -> Result<tracedecay_graph_db::GraphDbRetirementTarget> {
+    /// Exact shard identity of the retained old owner, read without minting
+    /// any Store or graph client.
+    fn old_shard_id(&self) -> Result<StoreShardIdV1> {
         self.sessions
             .as_ref()
-            .map(|session| session.graph.retirement_target())
+            .map(|session| session.database.registered_binding().shard_id.clone())
             .ok_or_else(|| {
                 session_registry_error(
-                    "reserve replacing project relation graph",
-                    "project session replacement has no retained graph owner".to_owned(),
+                    "identify replacing project session shard",
+                    "project session replacement has no retained session owner".to_owned(),
                 )
             })
     }
 
+    /// Hands the exact graph owner to retirement reservation.
+    ///
+    /// The owner retains the graph client that [`Self::issue_old_lease`]
+    /// binds for replay/sync fencing beyond the lifetime of any issued
+    /// database lease. Graph retirement refuses an owner with live clients, so
+    /// that retained client is released here, before the target is reserved,
+    /// on every path that retires the old owner.
+    fn graph_retirement_target(&self) -> Result<tracedecay_graph_db::GraphDbRetirementTarget> {
+        let session = self.sessions.as_ref().ok_or_else(|| {
+            session_registry_error(
+                "reserve replacing project relation graph",
+                "project session replacement has no retained graph owner".to_owned(),
+            )
+        })?;
+        session.database.detach_session_relation_graph();
+        Ok(session.graph.retirement_target())
+    }
+
     fn reserve_store_target(
         &mut self,
-    ) -> Result<tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementTarget>
+    ) -> Result<tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementTarget>
     {
         let session = self.sessions.as_mut().ok_or_else(|| {
             session_registry_error(
@@ -1824,65 +2063,6 @@ impl ProjectSessionReplacementVacancyV1 {
         }
     }
 
-    pub fn durable_terminal_authority(&self) -> Result<ProjectSessionTerminalVacancyAuthorityV1> {
-        self.require_verified_proof()?;
-        self.proof
-            .as_ref()
-            .map(ProjectSessionTerminalProofV1::durable_authority)
-            .ok_or_else(|| {
-                session_registry_error(
-                    "persist terminal remote recovery vacancy",
-                    "project session replacement lost its terminal close proof".to_owned(),
-                )
-            })
-    }
-
-    /// Makes an opened candidate map-owned before an async replay or sync
-    /// bind. Once this returns, cancellation may only leave the candidate in
-    /// `RecoveryRequired`; it cannot drop the sole owner after a downstream
-    /// service has retained one of its counted leases.
-    fn begin_candidate_activation(
-        mut self,
-        sessions: RegisteredSessionOwnerV1,
-    ) -> Result<ProjectSessionCandidateActivationV1> {
-        self.require_verified_proof()?;
-        let mut entries = self.owners.lock().map_err(|_| {
-            session_registry_error(
-                "begin recovered project session activation",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        if !matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
-        ) {
-            return Err(session_registry_error(
-                "begin recovered project session activation",
-                "project session replacement map fence disappeared".to_owned(),
-            ));
-        }
-        let proof = self.proof.take().ok_or_else(|| {
-            session_registry_error(
-                "begin recovered project session activation",
-                "project session replacement lost its terminal close proof".to_owned(),
-            )
-        })?;
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
-                sessions: None,
-                candidate_sessions: Some(sessions),
-                memory: self.memory.take(),
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            }),
-        );
-        self.armed = false;
-        Ok(ProjectSessionCandidateActivationV1 {
-            owners: self.owners.clone(),
-            project_id: self.project_id.clone(),
-        })
-    }
-
     fn commit_without_sessions(mut self) -> Result<()> {
         self.require_verified_proof()?;
         let mut entries = self.owners.lock().map_err(|_| {
@@ -1910,179 +2090,6 @@ impl ProjectSessionReplacementVacancyV1 {
         self.proof.take();
         self.armed = false;
         Ok(())
-    }
-
-    fn retain_candidate_for_recovery(mut self, sessions: RegisteredSessionOwnerV1) -> Result<()> {
-        self.require_verified_proof()?;
-        let mut entries = self.owners.lock().map_err(|_| {
-            session_registry_error(
-                "retain recovered project session owner candidate",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        if !matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
-        ) {
-            return Err(session_registry_error(
-                "retain recovered project session owner candidate",
-                "project session replacement map fence disappeared".to_owned(),
-            ));
-        }
-        let proof = self.proof.take().ok_or_else(|| {
-            session_registry_error(
-                "retain recovered project session owner candidate",
-                "project session replacement lost its terminal close proof".to_owned(),
-            )
-        })?;
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
-                sessions: None,
-                candidate_sessions: Some(sessions),
-                memory: self.memory.take(),
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            }),
-        );
-        self.armed = false;
-        Ok(())
-    }
-}
-
-/// Map-owned activation of a post-close replacement candidate. This guard
-/// intentionally owns no database, graph, or Store target itself: its sole
-/// authority is the `RecoveryRequired` map entry installed before any await.
-struct ProjectSessionCandidateActivationV1 {
-    owners: ProjectRuntimeOwnerRegistryV1,
-    project_id: ProjectId,
-}
-
-impl ProjectSessionCandidateActivationV1 {
-    fn issue_lease_with_replay_descriptor(
-        &self,
-    ) -> Result<(
-        RegisteredGlobalDbLeaseV1,
-        tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1,
-        tracedecay_store::StoreRuntimeBindingV1,
-        tracedecay_store::VerifiedStoreLocatorV1,
-    )> {
-        let entries = self.owners.lock().map_err(|_| {
-            session_registry_error(
-                "issue recovered project session candidate lease",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        let Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery)) =
-            entries.get(&self.project_id)
-        else {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate activation lost its recovery fence".to_owned(),
-            ));
-        };
-        if recovery.sessions.is_some() {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate recovery still retains a nonterminal owner".to_owned(),
-            ));
-        }
-        let Some(candidate) = recovery.candidate_sessions.as_ref() else {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate activation lost its owner".to_owned(),
-            ));
-        };
-        let ProjectSessionRecoveryPhaseV1::Terminal(proof) = &recovery.phase else {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate activation lacks a terminal close proof".to_owned(),
-            ));
-        };
-        if !proof.verify() {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate activation terminal proof is invalid".to_owned(),
-            ));
-        }
-        let database = candidate.issue_lease(SessionRelationScope::project_sessions(
-            self.project_id.clone(),
-        ))?;
-        Ok((
-            database,
-            candidate.database.weak_lease_issuer(),
-            candidate.database.registered_binding().clone(),
-            candidate.database.registered_verified_locator().clone(),
-        ))
-    }
-
-    fn publish(self) -> Result<()> {
-        let mut entries = self.owners.lock().map_err(|_| {
-            session_registry_error(
-                "publish recovered project session owner",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        let Some(state) = entries.remove(&self.project_id) else {
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation lost its recovery fence".to_owned(),
-            ));
-        };
-        let ProjectRuntimeOwnerStateV1::RecoveryRequired(mut recovery) = state else {
-            entries.insert(self.project_id.clone(), state);
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation state changed before publication".to_owned(),
-            ));
-        };
-        let Some(candidate) = recovery.candidate_sessions.take() else {
-            entries.insert(
-                self.project_id.clone(),
-                ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery),
-            );
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation lost its owner".to_owned(),
-            ));
-        };
-        let ProjectSessionRecoveryPhaseV1::Terminal(proof) = &recovery.phase else {
-            recovery.candidate_sessions = Some(candidate);
-            entries.insert(
-                self.project_id.clone(),
-                ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery),
-            );
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation lacks a terminal close proof".to_owned(),
-            ));
-        };
-        if !proof.verify() || recovery.sessions.is_some() {
-            recovery.candidate_sessions = Some(candidate);
-            entries.insert(
-                self.project_id.clone(),
-                ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery),
-            );
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation terminal proof is invalid".to_owned(),
-            ));
-        }
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
-                sessions: Some(candidate),
-                memory: recovery.memory,
-            }),
-        );
-        Ok(())
-    }
-}
-
-impl Drop for ProjectSessionCandidateActivationV1 {
-    fn drop(&mut self) {
-        // The candidate and exact terminal proof were stored in
-        // `RecoveryRequired` before this guard became observable. Dropping the
-        // guard therefore deliberately preserves that map-owned state.
     }
 }
 
@@ -2117,285 +2124,6 @@ impl Drop for ProjectSessionReplacementVacancyV1 {
     }
 }
 
-/// Atomically moves one fail-closed terminal recovery record out of the map.
-/// Its drop path restores the exact record, including terminal receipts and a
-/// candidate owner, so cancellation cannot turn recovery into a replacement.
-struct ProjectSessionRecoveryReservationV1 {
-    owners: ProjectRuntimeOwnerRegistryV1,
-    project_id: ProjectId,
-    recovery: Option<ProjectSessionRecoveryRequiredV1>,
-    armed: bool,
-}
-
-impl ProjectSessionRecoveryReservationV1 {
-    fn has_candidate(&self) -> bool {
-        self.recovery
-            .as_ref()
-            .is_some_and(|recovery| recovery.candidate_sessions.is_some())
-    }
-
-    fn into_candidate_replacement(mut self) -> Result<ProjectSessionReplacementReservationV1> {
-        let recovery = self.recovery.take().ok_or_else(|| {
-            session_registry_error(
-                "retire recovered project session candidate",
-                "project session recovery reservation was already consumed".to_owned(),
-            )
-        })?;
-        let ProjectSessionRecoveryRequiredV1 {
-            sessions,
-            candidate_sessions,
-            memory,
-            phase,
-        } = recovery;
-        let candidate = match candidate_sessions {
-            Some(candidate) => candidate,
-            None => {
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions: None,
-                    memory,
-                    phase,
-                });
-                return Err(session_registry_error(
-                    "retire recovered project session candidate",
-                    "project recovery does not retain a candidate owner".to_owned(),
-                ));
-            }
-        };
-        if sessions.is_some() {
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions: Some(candidate),
-                memory,
-                phase,
-            });
-            return Err(session_registry_error(
-                "retire recovered project session candidate",
-                "recovery still retains a nonterminal old owner".to_owned(),
-            ));
-        }
-        let proof = match phase {
-            ProjectSessionRecoveryPhaseV1::Terminal(proof) if proof.verify() => proof,
-            phase => {
-                let inspection = phase.inspection();
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions: Some(candidate),
-                    memory,
-                    phase,
-                });
-                return Err(session_registry_error(
-                    "retire recovered project session candidate",
-                    format!(
-                        "recovery does not retain exact closed proofs for the prior owner: {}",
-                        inspection.description(),
-                    ),
-                ));
-            }
-        };
-        let mut entries = match self.owners.lock() {
-            Ok(entries) => entries,
-            Err(_) => {
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions: Some(candidate),
-                    memory,
-                    phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-                });
-                return Err(session_registry_error(
-                    "retire recovered project session candidate",
-                    "project runtime owner map lock is poisoned".to_owned(),
-                ));
-            }
-        };
-        if !matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Recovering)
-        ) {
-            drop(entries);
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions: Some(candidate),
-                memory,
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            });
-            return Err(session_registry_error(
-                "retire recovered project session candidate",
-                "project session recovery map fence disappeared".to_owned(),
-            ));
-        }
-        let candidate = match ProjectSessionRetirementOwnerV1::from_ready(candidate) {
-            Ok(candidate) => candidate,
-            Err(candidate) => {
-                entries.insert(
-                    self.project_id.clone(),
-                    ProjectRuntimeOwnerStateV1::Recovering,
-                );
-                drop(entries);
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions: Some(candidate),
-                    memory,
-                    phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-                });
-                return Err(session_registry_error(
-                    "retire recovered project session candidate",
-                    "recovered candidate relation graph is not attached".to_owned(),
-                ));
-            }
-        };
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::ReplacingSessions,
-        );
-        drop(entries);
-        self.armed = false;
-        Ok(ProjectSessionReplacementReservationV1 {
-            owners: self.owners.clone(),
-            project_id: self.project_id.clone(),
-            sessions: Some(candidate),
-            memory,
-            recovery_proof: Some(proof),
-            armed: true,
-        })
-    }
-
-    fn into_terminal_vacancy(
-        mut self,
-    ) -> Result<(
-        ProjectSessionReplacementVacancyV1,
-        Option<RegisteredSessionOwnerV1>,
-    )> {
-        let recovery = self.recovery.take().ok_or_else(|| {
-            session_registry_error(
-                "resume project session recovery",
-                "project session recovery reservation was already consumed".to_owned(),
-            )
-        })?;
-        let ProjectSessionRecoveryRequiredV1 {
-            sessions,
-            candidate_sessions,
-            memory,
-            phase,
-        } = recovery;
-        if sessions.is_some() {
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions,
-                memory,
-                phase,
-            });
-            return Err(session_registry_error(
-                "resume project session recovery",
-                "old project session owner is not terminal and cannot enter vacancy".to_owned(),
-            ));
-        }
-        let proof = match phase {
-            ProjectSessionRecoveryPhaseV1::Terminal(proof) => proof,
-            phase => {
-                let inspection = phase.inspection();
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions,
-                    memory,
-                    phase,
-                });
-                return Err(session_registry_error(
-                    "resume project session recovery",
-                    format!(
-                        "project session recovery does not retain exact closed graph and Store proofs: {}",
-                        inspection.description(),
-                    ),
-                ));
-            }
-        };
-        if !proof.verify() {
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions,
-                memory,
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            });
-            return Err(session_registry_error(
-                "resume project session recovery",
-                "project session terminal recovery proof is not exact and closed".to_owned(),
-            ));
-        }
-        let mut entries = match self.owners.lock() {
-            Ok(entries) => entries,
-            Err(_) => {
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions,
-                    memory,
-                    phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-                });
-                return Err(session_registry_error(
-                    "resume project session recovery",
-                    "project runtime owner map lock is poisoned".to_owned(),
-                ));
-            }
-        };
-        if !matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Recovering)
-        ) {
-            drop(entries);
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions,
-                memory,
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            });
-            return Err(session_registry_error(
-                "resume project session recovery",
-                "project session recovery map fence disappeared".to_owned(),
-            ));
-        }
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::ReplacingSessions,
-        );
-        drop(entries);
-        self.armed = false;
-        Ok((
-            ProjectSessionReplacementVacancyV1 {
-                owners: self.owners.clone(),
-                project_id: self.project_id.clone(),
-                memory,
-                proof: Some(proof),
-                armed: true,
-            },
-            candidate_sessions,
-        ))
-    }
-}
-
-impl Drop for ProjectSessionRecoveryReservationV1 {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let Some(recovery) = self.recovery.take() else {
-            return;
-        };
-        let mut entries = self
-            .owners
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Recovering)
-        ) {
-            entries.insert(
-                self.project_id.clone(),
-                ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery),
-            );
-        }
-        self.armed = false;
-    }
-}
-
 /// One composite pre-native session retirement attempt. It keeps every lower
 /// reservation recoverable until Graph/Store terminalization is deliberately
 /// accepted, so task cancellation cannot strand a paired Store target outside
@@ -2404,7 +2132,7 @@ struct ProjectSessionNativeRetirementV1 {
     replacement: Option<ProjectSessionReplacementReservationV1>,
     graph: Option<tracedecay_graph_db::GraphDbRetirementReservation>,
     store:
-        Option<tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementReservation>,
+        Option<tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementReservation>,
     graph_native_boundary: bool,
 }
 
@@ -2412,7 +2140,7 @@ impl ProjectSessionNativeRetirementV1 {
     fn new(
         replacement: ProjectSessionReplacementReservationV1,
         graph: tracedecay_graph_db::GraphDbRetirementReservation,
-        store: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementReservation,
+        store: tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementReservation,
     ) -> Self {
         Self {
             replacement: Some(replacement),
@@ -2434,7 +2162,7 @@ impl ProjectSessionNativeRetirementV1 {
     fn store_mut(
         &mut self,
     ) -> Result<
-        &mut tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementReservation,
+        &mut tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementReservation,
     > {
         self.store.as_mut().ok_or_else(|| {
             session_registry_error(
@@ -2615,10 +2343,6 @@ impl Drop for ProjectSessionNativeRetirementV1 {
 
 static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 
-fn remote_restore_quarantine_fence_path(database: &Path) -> std::path::PathBuf {
-    database.with_extension("remote-restore-quarantine.json")
-}
-
 pub fn mark_process_long_lived_for_session_maintenance() {
     LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
 }
@@ -2627,7 +2351,7 @@ pub fn mark_process_long_lived_for_session_maintenance() {
 ///
 /// Successful schema convergence (`outcome=complete`) is an ordinary
 /// completion and must not occupy the default WARN surface. WARN is reserved
-/// for degraded outcomes — a failed converge, a poisoned status lock, or a
+/// for degraded outcomes, a failed converge, a poisoned status lock, or a
 /// memory-release failure after the audit.
 pub fn log_store_runtime_event(event: &str, fields: &[(&str, String)]) {
     if store_runtime_event_is_success(fields) {
@@ -2648,38 +2372,11 @@ mod store_runtime_event_level_tests {
     use super::store_runtime_event_is_success;
 
     #[test]
-    fn successful_schema_convergence_is_not_an_anomaly() {
-        assert!(store_runtime_event_is_success(&[
-            ("outcome", "complete".to_owned()),
-            ("database", "/tmp/registry.db".to_owned()),
-        ]));
-    }
-
-    #[test]
     fn degraded_schema_convergence_stays_an_anomaly() {
         assert!(!store_runtime_event_is_success(&[
             ("outcome", "degraded".to_owned()),
             ("error", "authority invariant failed".to_owned()),
         ]));
-    }
-
-    #[test]
-    fn events_without_a_complete_outcome_stay_loud() {
-        assert!(!store_runtime_event_is_success(&[(
-            "resource",
-            "statuses".to_owned()
-        ),]));
-    }
-}
-
-pub fn release_process_allocator_memory() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        // SAFETY: `malloc_trim` is a process-wide, thread-safe glibc allocator
-        // maintenance operation. It does not invalidate live allocations.
-        unsafe {
-            libc::malloc_trim(0);
-        }
     }
 }
 
@@ -2690,12 +2387,11 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     pub fn runtime_telemetry(
         &self,
-    ) -> tracedecay_runtime_core::store_runtime::telemetry::RuntimeTelemetryProjection {
+    ) -> tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryProjection {
         let inventory = self.registry.inventory(AdmissionConfigV1::default(), None);
-        tracedecay_runtime_core::store_runtime::telemetry::project_runtime_telemetry(&inventory)
+        tracedecay_runtime_core::shard_runtime::telemetry::project_runtime_telemetry(&inventory)
     }
 
-    #[hotpath::skip]
     async fn profile_authority_pin(&self, operation: &'static str) -> Result<ProfileAuthorityPin> {
         self.profile_pin
             .lock()
@@ -2710,6 +2406,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
     }
 
+    #[tracing::instrument(
+        name = "daemon.session_registry.admit_remote_node",
+        level = "trace",
+        skip_all
+    )]
     fn admit_remote_node_owner(
         &self,
         node_id: &BrainNodeId,
@@ -2758,6 +2459,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         ))
     }
 
+    #[tracing::instrument(
+        name = "daemon.session_registry.admit_project_runtime",
+        level = "trace",
+        skip_all
+    )]
     fn admit_project_runtime_owner(
         &self,
         project_id: &ProjectId,
@@ -2788,7 +2494,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
             Some(
                 ProjectRuntimeOwnerStateV1::ReplacingSessions
-                | ProjectRuntimeOwnerStateV1::Recovering
                 | ProjectRuntimeOwnerStateV1::RecoveryRequired(_),
             ) => {
                 return Err(TraceDecayError::project_route(
@@ -2826,6 +2531,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         )))
     }
 
+    #[tracing::instrument(
+        name = "daemon.session_registry.extend_project_runtime",
+        level = "trace",
+        skip_all
+    )]
     fn extend_project_runtime_owner(
         &self,
         project_id: &ProjectId,
@@ -2875,6 +2585,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         )))
     }
 
+    #[tracing::instrument(
+        name = "daemon.session_registry.reserve_runtime_retirement",
+        level = "trace",
+        skip_all
+    )]
     fn reserve_project_runtime_retirement(
         &self,
         project_id: &ProjectId,
@@ -2916,7 +2631,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }))
     }
 
-    #[hotpath::skip]
     async fn reserve_project_session_replacement(
         &self,
         project_id: &ProjectId,
@@ -2924,7 +2638,22 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.project_owners
             .wait_for_session_graph(project_id)
             .await?;
-        self.project_owners.reserve_session_replacement(project_id)
+        let replacement = self
+            .project_owners
+            .reserve_session_replacement(project_id)?;
+        if let Some(replacement) = &replacement {
+            // Read the shard identity from the retained owner. Issuing an old
+            // lease here would rebind a counted graph client into the
+            // owner-retained slot that `into_retirement` just released.
+            let shard_id = replacement.old_shard_id()?;
+            self.registered_schema_convergence
+                .retire(&shard_id)
+                .await
+                .map_err(|error| {
+                    session_registry_error("retire project session schema convergence", error)
+                })?;
+        }
+        Ok(replacement)
     }
 }
 
@@ -2937,6 +2666,10 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     graph_manifest_provider: Arc<code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
+    /// Process-wide admission for blocking graph and store settlement (sealed
+    /// staging releases, registered database attach, remote recovery). Closed
+    /// first at terminal shutdown so no new sweep can outlive the join.
+    operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
     profile_pin: Mutex<Option<ProfileAuthorityPin>>,
     profile_database_mount: Mutex<()>,
     profile_database: StdMutex<Option<RegisteredGlobalDbOwnerV1>>,
@@ -2954,20 +2687,28 @@ pub struct DaemonSessionRuntimeRegistryV1 {
         >,
     >,
     project_owners: ProjectRuntimeOwnerRegistryV1,
-    /// One set of graph-publication locks per code shard. The seat pass and
-    /// the background reconcile can both activate the same sealed generation,
-    /// and unserialized they race the graph database into Conflicts that burn
-    /// the whole activation window: the flight table dedupes same-key
-    /// publishers while the serving gate covers only the short
-    /// storage-ordered slices. The locks live here because the retained code
-    /// graph runtime itself is minted fresh per activation call.
+    /// One set of graph-publication locks per project publication shard.
+    /// Every worktree/branch scope of a project stages into the one shared
+    /// staging store, so corpus-sized builds must serialize on the project
+    /// shard rather than on `code_shard`. Entries are weak: a cell lives only
+    /// while a retained runtime holds it. The locks live here because the
+    /// retained code graph runtime itself is minted fresh per activation call.
     code_graph_publication_gates: StdMutex<
         BTreeMap<
             tracedecay_store::StoreShardIdV1,
-            Arc<code_graph::CodeGraphShardPublicationLocksV1>,
+            Weak<code_graph::CodeGraphShardPublicationLocksV1>,
         >,
     >,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
+    /// Registered stores whose last attach was refused with a typed reset.
+    /// The refused store stays unmounted, so every open re-runs admission and
+    /// a reset store serves on its next open without a daemon restart.
+    reset_required_stores: StdMutex<BTreeMap<StoreShardIdV1, StoreResetRequiredV1>>,
+    /// Store files deleted or replaced while this daemon held them open,
+    /// keyed by path. The writer's file probe closes the store's connections,
+    /// but the mounted owners keep their lease on the closed runtime until a
+    /// restart remounts them, so an entry lives as long as the registry.
+    lost_store_files: StdMutex<BTreeMap<std::path::PathBuf, StoreResetRequiredV1>>,
     retained_hook_tasks: RetainedHookTasks,
     session_sync_service:
         Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>,
@@ -2976,14 +2717,88 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     /// session maintenance (background historical schema convergence) for the
     /// shards it attaches. Short-lived CLI/hook processes stay `false`.
     long_lived_session_maintenance: bool,
+    /// Test-only hold applied immediately after each session relation-graph
+    /// open task publishes its settled state.
+    #[cfg(any(test, feature = "test-helpers"))]
+    session_graph_publication_gate: StdMutex<Option<Arc<SessionGraphPublicationTestGateState>>>,
 }
+
+// Each field is `Send + Sync`, but proving the registry walks those fields
+// through `Arc<Mutex<BTreeMap<...>>>` past the recursion limit
+// (rust-lang/rust#159228). The const is the field proof.
+unsafe impl Send for DaemonSessionRuntimeRegistryV1 {}
+unsafe impl Sync for DaemonSessionRuntimeRegistryV1 {}
+
+const _: fn(&DaemonSessionRuntimeRegistryV1) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let DaemonSessionRuntimeRegistryV1 {
+        identity,
+        incarnation,
+        resolver,
+        registry,
+        graph_registry,
+        graph_manifest_provider,
+        graph_lifecycle_cancelled,
+        operation_task_owner,
+        profile_pin,
+        profile_database_mount,
+        profile_database,
+        profile_memory,
+        profile_sessions_mount,
+        profile_sessions,
+        remote_nodes,
+        remote_credential_authority,
+        remote_replay_transaction,
+        remote_recovery_authorities,
+        project_owners,
+        code_graph_publication_gates,
+        registered_schema_convergence,
+        reset_required_stores,
+        lost_store_files,
+        retained_hook_tasks,
+        session_sync_service,
+        remote_recovery_project_lifecycle,
+        long_lived_session_maintenance,
+        #[cfg(any(test, feature = "test-helpers"))]
+        session_graph_publication_gate,
+    } = value;
+    assert_send_sync(identity);
+    assert_send_sync(incarnation);
+    assert_send_sync(resolver);
+    assert_send_sync(registry);
+    assert_send_sync(graph_registry);
+    assert_send_sync(graph_manifest_provider);
+    assert_send_sync(graph_lifecycle_cancelled);
+    assert_send_sync(operation_task_owner);
+    assert_send_sync(profile_pin);
+    assert_send_sync(profile_database_mount);
+    assert_send_sync(profile_database);
+    assert_send_sync(profile_memory);
+    assert_send_sync(profile_sessions_mount);
+    assert_send_sync(profile_sessions);
+    assert_send_sync(remote_nodes);
+    assert_send_sync(remote_credential_authority);
+    assert_send_sync(remote_replay_transaction);
+    assert_send_sync(remote_recovery_authorities);
+    assert_send_sync(project_owners);
+    assert_send_sync(code_graph_publication_gates);
+    assert_send_sync(registered_schema_convergence);
+    assert_send_sync(reset_required_stores);
+    assert_send_sync(lost_store_files);
+    assert_send_sync(retained_hook_tasks);
+    assert_send_sync(session_sync_service);
+    assert_send_sync(remote_recovery_project_lifecycle);
+    assert_send_sync(long_lived_session_maintenance);
+    #[cfg(any(test, feature = "test-helpers"))]
+    assert_send_sync(session_graph_publication_gate);
+};
 
 impl DaemonSessionRuntimeRegistryV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn lookup_store_runtime(
         &self,
         expected: &tracedecay_store::StoreRuntimeBindingV1,
-    ) -> tracedecay_runtime_core::store_runtime::registry::StoreRuntimeLookup {
+    ) -> tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeLookup {
         self.registry.lookup(expected)
     }
 
@@ -3003,7 +2818,11 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// work. Production callers tolerate the warming window through typed
     /// retryable refusals; deterministic fixtures await settlement instead so
     /// graph-dependent operations do not race the open task.
-    #[hotpath::measure(label = "daemon.session_registry.settle_profile_graph", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.settle_profile_graph",
+        level = "trace",
+        skip_all
+    )]
     pub async fn settle_profile_session_graph(&self) -> Result<()> {
         let waiter = {
             let mounted = self
@@ -3036,9 +2855,38 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     /// Project-scope counterpart of [`Self::settle_profile_session_graph`].
-    #[hotpath::measure(label = "daemon.session_registry.settle_project_graph", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.settle_project_graph",
+        level = "trace",
+        skip_all
+    )]
     pub async fn settle_project_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         self.project_owners.wait_for_session_graph(project_id).await
+    }
+
+    /// Awaits settlement (attached or detached) of the project memory graph
+    /// that `project_memory` opens as bounded background work.
+    pub async fn settle_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
+        self.project_owners
+            .wait_for_memory_graph(project_id)
+            .await
+            .map(drop)
+    }
+
+    /// Waits for the project's background relation-graph open and requires an
+    /// attached owner before a retrieval-capable surface is published.
+    #[tracing::instrument(
+        name = "daemon.session_registry.settle_project_graph_for_serving",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn settle_project_session_graph_for_serving(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<()> {
+        self.project_owners
+            .wait_for_serving_session_graph(project_id)
+            .await
     }
 
     pub fn install_session_sync_service(
@@ -3103,13 +2951,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    fn session_sync_service(
-        &self,
-    ) -> Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>
-    {
-        Arc::clone(&self.session_sync_service)
-    }
-
     fn active_session_sync_service(
         &self,
         operation: &'static str,
@@ -3122,7 +2963,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         })
     }
 
-    #[hotpath::skip]
+    #[tracing::instrument(
+        name = "daemon.session_registry.retire_session_sync",
+        level = "trace",
+        skip_all
+    )]
     async fn retire_project_session_sync(&self, project_id: &ProjectId) -> Result<()> {
         self.active_session_sync_service("retire project session sync")?
             .retire_project(self.identity.profile_id(), project_id)
@@ -3131,7 +2976,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|error| session_registry_error("retire project session sync", error))
     }
 
-    #[hotpath::skip]
+    #[tracing::instrument(
+        name = "daemon.session_registry.rebind_session_sync",
+        level = "trace",
+        skip_all
+    )]
     async fn rebind_project_session_sync(
         &self,
         project_id: &ProjectId,
@@ -3149,31 +2998,13 @@ impl DaemonSessionRuntimeRegistryV1 {
     ) -> Arc<OnceLock<Arc<dyn RemoteRecoveryProjectLifecycle>>> {
         Arc::clone(&self.remote_recovery_project_lifecycle)
     }
-
-    pub fn retain_hook_task<F, Fut>(&self, provider: &str, session_id: &str, operation: F) -> bool
-    where
-        F: FnOnce(ObservationCancellation) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        self.retained_hook_tasks
-            .retain(provider, session_id, operation)
-    }
 }
 
-impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
-    fn profile_id(&self) -> &tracedecay_domain::configuration::UserProfileId {
-        self.identity.profile_id()
-    }
-
-    fn profile_sessions(&self) -> RuntimeFuture<'_, RegisteredGlobalDbLeaseV1> {
-        Box::pin(DaemonSessionRuntimeRegistryV1::profile_sessions(self))
-    }
-
-    fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database> {
-        Box::pin(open_user_memory_db(self))
-    }
-}
-
+#[tracing::instrument(
+    name = "daemon.session_registry.runtime_incarnation",
+    level = "trace",
+    skip_all
+)]
 fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<StoreIncarnationV1> {
     let process_run_id = tracedecay_runtime_core::runtime_identity::process_run_id();
     let daemon_generation =
@@ -3211,16 +3042,48 @@ pub fn process_runtime_generation(process_run_id: &str) -> Option<u64> {
     Some((raw & i64::MAX as u64).max(1))
 }
 
-async fn open_runtime(
-    registry: &StoreRuntimeRegistry,
-    resolver: &LocalStoreRuntimeResolverV1,
+struct StoreRuntimeOpenSpec {
     shard_id: StoreShardIdV1,
     incarnation: StoreIncarnationV1,
     profile_pin: Option<ProfileAuthorityPin>,
     database_authority: Option<DatabaseAuthority>,
     initialize_if_missing: bool,
     operation: &'static str,
+}
+
+impl StoreRuntimeOpenSpec {
+    fn new(
+        shard_id: StoreShardIdV1,
+        incarnation: StoreIncarnationV1,
+        profile_pin: Option<ProfileAuthorityPin>,
+        database_authority: Option<DatabaseAuthority>,
+        initialize_if_missing: bool,
+        operation: &'static str,
+    ) -> Self {
+        Self {
+            shard_id,
+            incarnation,
+            profile_pin,
+            database_authority,
+            initialize_if_missing,
+            operation,
+        }
+    }
+}
+
+async fn open_runtime(
+    registry: &StoreRuntimeRegistry,
+    resolver: &LocalStoreRuntimeResolverV1,
+    spec: StoreRuntimeOpenSpec,
 ) -> Result<StoreRuntimeClientLease> {
+    let StoreRuntimeOpenSpec {
+        shard_id,
+        incarnation,
+        profile_pin,
+        database_authority,
+        initialize_if_missing,
+        operation,
+    } = spec;
     open_runtime_with_presence(
         registry,
         resolver,
@@ -3229,33 +3092,6 @@ async fn open_runtime(
         profile_pin,
         database_authority,
         initialize_if_missing,
-        false,
-        None,
-        operation,
-    )
-    .await
-    .map(|(runtime, _)| runtime)
-}
-
-async fn open_runtime_during_remote_restore(
-    registry: &StoreRuntimeRegistry,
-    resolver: &LocalStoreRuntimeResolverV1,
-    shard_id: StoreShardIdV1,
-    incarnation: StoreIncarnationV1,
-    profile_pin: Option<ProfileAuthorityPin>,
-    expected_opened_file_identity: u64,
-    operation: &'static str,
-) -> Result<StoreRuntimeClientLease> {
-    open_runtime_with_presence(
-        registry,
-        resolver,
-        shard_id,
-        incarnation,
-        profile_pin,
-        None,
-        false,
-        true,
-        Some(expected_opened_file_identity),
         operation,
     )
     .await
@@ -3271,19 +3107,16 @@ async fn open_runtime_with_presence(
     profile_pin: Option<ProfileAuthorityPin>,
     database_authority: Option<DatabaseAuthority>,
     initialize_if_missing: bool,
-    allow_remote_restore_fence: bool,
-    required_opened_file_identity: Option<u64>,
     operation: &'static str,
 ) -> Result<(StoreRuntimeClientLease, bool)> {
     let key = StoreRuntimeKey::new(shard_id.clone(), incarnation);
-    let locator = match hotpath::measure_block!(
-        "daemon.session_registry.store_open.resolve",
+    let match_result = {
+        let _span = tracing::trace_span!("daemon.session_registry.store_open.resolve").entered();
         resolver.resolve_key(&key)
-    ) {
+    };
+    let locator = match match_result {
         LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
         LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.session_registry.store_open.failed_total").inc(1_u64);
             return Err(session_registry_error(
                 operation,
                 format!(
@@ -3295,10 +3128,11 @@ async fn open_runtime_with_presence(
     };
     let authority = match database_authority {
         Some(authority) => authority,
-        None => hotpath::measure_block!(
-            "daemon.session_registry.store_open.resolve",
+        None => {
+            let _span =
+                tracing::trace_span!("daemon.session_registry.store_open.resolve").entered();
             DatabaseAuthority::for_runtime(locator.locator().path(), operation)
-        )?,
+        }?,
     };
     if authority.canonical_database_path() != locator.locator().path() {
         return Err(session_registry_error(
@@ -3310,18 +3144,6 @@ async fn open_runtime_with_presence(
             ),
         ));
     }
-    let expected_opened_file_identity = if let Some(expected) = required_opened_file_identity {
-        Some(expected)
-    } else if !allow_remote_restore_fence
-        && matches!(&shard_id.scope, StoreShardScopeV1::ProjectSessions { .. })
-    {
-        hotpath::measure_block!(
-            "daemon.session_registry.store_open.restore_fence_check",
-            remote_recovery::remote_restore_activated_open_identity(locator.locator().path())
-        )?
-    } else {
-        None
-    };
     let exists = locator
         .locator()
         .path()
@@ -3337,25 +3159,17 @@ async fn open_runtime_with_presence(
     } else {
         StoreRuntimeOpenRequest::new_authorized(shard_id, incarnation, profile_pin, authority)
     };
-    let request = match expected_opened_file_identity {
-        Some(expected) => request.require_opened_file_identity(expected),
-        None => request,
-    };
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         registry.open(request),
-        label = "daemon.session_registry.store_open.registry_open"
+        tracing::trace_span!("daemon.session_registry.store_open.registry_open"),
     )
     .await
     {
         StoreRuntimeOpenResult::Published(runtime) => Ok((runtime, exists)),
-        StoreRuntimeOpenResult::Failed(failure) => {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.session_registry.store_open.failed_total").inc(1_u64);
-            Err(registry_open_error(
-                "open registered session runtime",
-                failure,
-            ))
-        }
+        StoreRuntimeOpenResult::Failed(failure) => Err(registry_open_error(
+            "open registered session runtime",
+            failure,
+        )),
     }
 }
 
@@ -3367,6 +3181,15 @@ pub fn registry_open_error(
         StoreRuntimeRegistryFailure::ResetRequired { authority, reason } => {
             TraceDecayError::reset_required(authority, reason)
         }
+        StoreRuntimeRegistryFailure::OpenCancelled { .. } => {
+            TraceDecayError::store_open_cancelled(operation)
+        }
+        StoreRuntimeRegistryFailure::ProjectCodeBudgetExhausted { limit } => {
+            TraceDecayError::project_open(
+                ProjectOpenFailureKind::CodeRuntimeBudgetExhausted { limit },
+                format!("{operation} refused: all {limit} project code-runtime seats are taken"),
+            )
+        }
         failure => session_registry_error(operation, format!("{failure:?}")),
     }
 }
@@ -3375,84 +3198,6 @@ fn session_registry_error(operation: &'static str, message: String) -> TraceDeca
     TraceDecayError::Database {
         operation: operation.to_owned(),
         message,
-    }
-}
-
-#[cfg(test)]
-mod durable_terminal_vacancy_tests {
-    use tracedecay_domain::{BrainId, LocatorDigest, UserProfileId};
-    use tracedecay_store::{StoreAuthorityEpochV1, StoreIncarnationV1, VerifiedStoreLocatorV1};
-
-    use super::*;
-
-    fn durable_authority(project_id: &ProjectId) -> ProjectSessionTerminalVacancyAuthorityV1 {
-        let shard_id = StoreShardIdV1::project_sessions(
-            BrainId::new("brain.durable-terminal-vacancy").expect("brain identity"),
-            UserProfileId::new("profile.durable-terminal-vacancy").expect("profile identity"),
-            project_id.clone(),
-        );
-        let incarnation = StoreIncarnationV1::new(17).expect("store incarnation");
-        ProjectSessionTerminalVacancyAuthorityV1 {
-            binding: tracedecay_store::StoreRuntimeBindingV1::new(
-                shard_id.clone(),
-                incarnation,
-                StoreAuthorityEpochV1::new(23).expect("authority epoch"),
-            ),
-            locator: VerifiedStoreLocatorV1::new(
-                shard_id,
-                incarnation,
-                LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).expect("locator digest"),
-            ),
-        }
-    }
-
-    #[test]
-    fn durable_terminal_journal_reconstructs_fail_closed_recovery_before_resume() {
-        let project_id =
-            ProjectId::new("project.durable-terminal-vacancy").expect("project identity");
-        let owners = ProjectRuntimeOwnerRegistryV1::default();
-        owners
-            .reconstruct_durable_terminal_recovery(&project_id, durable_authority(&project_id))
-            .expect("rebuild terminal recovery from durable journal");
-        {
-            let entries = owners.lock().expect("project owner map");
-            let Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery)) =
-                entries.get(&project_id)
-            else {
-                panic!("durable journal must reconstruct RecoveryRequired before resume");
-            };
-            assert!(recovery.sessions.is_none());
-            assert!(recovery.candidate_sessions.is_none());
-            assert!(matches!(
-                &recovery.phase,
-                ProjectSessionRecoveryPhaseV1::Terminal(proof) if proof.verify()
-            ));
-        }
-
-        // Resuming may enter the temporary vacancy, but dropping it before a
-        // candidate is activated must return to the same durable recovery
-        // record rather than synthesize Ready or resurrect the terminal owner.
-        let recovery = owners
-            .reserve_session_recovery(&project_id)
-            .expect("reserve reconstructed recovery")
-            .expect("reconstructed recovery record");
-        let (vacancy, candidate) = recovery
-            .into_terminal_vacancy()
-            .expect("resume durable terminal vacancy");
-        assert!(candidate.is_none());
-        drop(vacancy);
-
-        let entries = owners.lock().expect("project owner map");
-        let Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery)) = entries.get(&project_id)
-        else {
-            panic!("durable vacancy restart must remain fail-closed");
-        };
-        assert!(recovery.sessions.is_none());
-        assert!(recovery.candidate_sessions.is_none());
-        assert!(matches!(
-            &recovery.phase,
-            ProjectSessionRecoveryPhaseV1::Terminal(proof) if proof.verify()
-        ));
     }
 }
 

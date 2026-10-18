@@ -1,6 +1,8 @@
 use std::error::Error;
 
-use tracedecay_store::{ParseOffset, SessionMessageRecord, SessionRecord};
+use tracedecay_store::ParseOffset;
+
+use crate::runtime::host_coverage::HostCoverageReason;
 
 /// Inclusive unix-millis threshold used to normalize mixed-resolution timestamps.
 pub const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
@@ -32,6 +34,10 @@ pub struct SessionProviderCoverage {
     pub provider: String,
     pub state: SessionProviderCoverageState,
     pub deferred_units: u64,
+    /// Refusal recorded when `state` is unavailable. Absent once a sweep can
+    /// read its source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<HostCoverageReason>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
@@ -52,17 +58,6 @@ pub struct SessionIngestHealth {
     pub max_transcript_pending_bytes: u64,
     /// Newest transcript mtime recorded at ingest time (Unix seconds).
     pub last_ingest_unix: Option<i64>,
-}
-
-/// One transcript session plus its parsed messages, for projection-only
-/// multi-session upserts from stores such as Hermes `state.db`.
-///
-/// This compatibility DTO remains local because projection-only persistence is
-/// intentionally outside the authoritative transcript store contract.
-#[derive(Debug, Clone)]
-pub struct TranscriptBatch {
-    pub session: SessionRecord,
-    pub messages: Vec<SessionMessageRecord>,
 }
 
 #[derive(Debug)]

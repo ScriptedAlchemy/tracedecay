@@ -1,43 +1,39 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    CalibrationProfileId, CodeGenerationId, CodeSearchChunkGrainV1, CompactCandidate,
-    ComponentRevision, DiversityPolicy, EdgeAuthorityV1, EphemeralSanitizedQueryViewV1,
-    ExactAdmissionRuleRevision, ExactClass, ExactTechnicalTermKindV1, FixedPointScore,
-    FreshnessCompatibilityV1, FusionProfile, HydrationReceipt, QueryNormalizationRevision,
-    RankedCandidate, RelationEdgeKindV1, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
-    ScoreDomainCalibrationV1, SourceSpan, SymbolOccurrenceId, UtcMicros,
+    CalibrationProfileId, CodeGenerationId, CompactCandidate, ComponentRevision, DiversityPolicy,
+    EdgeAuthorityV1, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass,
+    FixedPointScore, FusionProfile, HydrationReceipt, QueryNormalizationRevision, RankedCandidate,
+    RelationEdgeKindV1, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, SourceSpan,
+    SymbolOccurrenceId, UtcMicros,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
     RetrievalCursorKeyringV1,
 };
 use tracedecay_query::retrieval::graph::{
-    GraphExecutionControl, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
-    GraphPathSegmentV1,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1,
 };
 use tracedecay_query::retrieval::hydrate::{
     CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
     HydrationReadOutcomeV1, HydrationWorkPermitV1, LateHydrationSource,
 };
-use tracedecay_query::retrieval::lexical::{
-    CodeLexicalProjectionAdapterV1, LexicalLane, LexicalLaneRetriever,
-};
+use tracedecay_query::retrieval::lexical::LexicalLane;
 use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalExecutionControl,
+    RetrievalPortError,
 };
 use tracedecay_query::retrieval::{
     QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_GRAPH_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1,
 };
 
 use crate::candidate_producers::{
-    base_request, budget, chunk, complete, id, lexical_request, projection_metadata,
+    FixtureRetrievalExecutionControl, base_request, budget, complete, id, rust_artifact,
 };
 
 #[derive(Clone, Copy)]
@@ -48,18 +44,6 @@ enum GraphDisposition {
 }
 
 const CURSOR_NOW: UtcMicros = UtcMicros(10);
-
-struct FixtureGraphExecutionControl;
-
-impl GraphExecutionControl for FixtureGraphExecutionControl {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-
-    fn elapsed_micros(&self) -> u64 {
-        0
-    }
-}
 
 #[derive(Clone)]
 enum GraphPortReply {
@@ -76,7 +60,7 @@ impl GraphEvidenceReadPort for FixtureGraphPort {
     fn read_graph_evidence(
         &self,
         _request: &GraphLaneRequest,
-        _control: std::sync::Arc<dyn tracedecay_query::retrieval::graph::GraphExecutionControl>,
+        _control: std::sync::Arc<dyn RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         match &self.reply {
             GraphPortReply::Outcome(outcome) => Ok(outcome.clone()),
@@ -144,7 +128,6 @@ fn profile() -> FusionProfile {
             (RetrieverKind::Graph, 1_000_000),
         ]),
         diversity_policy_id: id("diversity.fixture.v1"),
-        rerank_policy_id: None,
         retrieval_budget: budget(16),
     }
 }
@@ -289,53 +272,23 @@ fn graph_batch(
 }
 
 fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
-    let generation = id::<CodeGenerationId>("generation.1");
     let request = base_request("--release", 16);
-    let chunks = vec![
-        chunk(
-            &generation,
-            1,
-            CodeSearchChunkGrainV1::SymbolBody,
-            "build with --release",
-            &[(ExactTechnicalTermKindV1::CliFlag, "--release")],
-            &["build", "release"],
-        ),
-        chunk(
-            &generation,
-            2,
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "fn target_alpha",
-            &[],
-            &["target", "alpha"],
-        ),
-        chunk(
-            &generation,
-            3,
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "fn target_beta",
-            &[],
-            &["target", "beta"],
-        ),
-        chunk(
-            &generation,
-            4,
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "fn target_gamma",
-            &[],
-            &["target", "gamma"],
-        ),
-    ];
-    let projection = CodeLexicalProjectionAdapterV1::new(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        chunks,
-    )
-    .expect("single-root projection builds");
+    let artifact = rust_artifact(&[
+        "pub fn build() -> &'static str {\n    \"build with --release\"\n}\n",
+        "pub fn target_alpha() {}\n",
+        "pub fn target_beta() {}\n",
+        "pub fn target_gamma() {}\n",
+    ]);
+    let generation = artifact.metadata.generation.clone();
+    let projection = artifact.reader.clone();
 
     let authority =
         CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"));
     let exact_query_view = query_view("--release");
     let exact_request = ExactLaneRequest {
+        control: &FixtureRetrievalExecutionControl,
         literals: authority.parse_literals(&exact_query_view, &request),
+        path_prefix: None,
         base: request.clone(),
         query_view: &exact_query_view,
         generation: generation.clone(),
@@ -345,13 +298,23 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
         .retrieve_exact(&exact_request)
         .expect("exact lane completes");
 
-    let mut lexical_request = lexical_request("--release", &[], &["target"], &[], 0, 16);
+    let mut lexical_request = artifact.request("--release", &[], &["target"], &[], 0, 16);
     lexical_request.base = request.clone();
     let lexical_outcome = LexicalLane::new(projection)
         .retrieve_lexical(&lexical_request)
         .expect("lexical lane completes");
     let lexical_batch = complete(lexical_outcome.clone());
-    assert_eq!(lexical_batch.candidates.len(), 3);
+    // Every row a target file seals shares that symbol's anchor, so fusion
+    // sees exactly three approximate candidates.
+    assert_eq!(
+        lexical_batch
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.anchor_id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3
+    );
 
     let graph_request = graph_request(&request, &generation);
     let reply = match disposition {
@@ -366,7 +329,7 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
         }
     };
     let graph_outcome = GraphLane::new(FixtureGraphPort { reply })
-        .retrieve_graph(&graph_request, Arc::new(FixtureGraphExecutionControl))
+        .retrieve_graph(&graph_request, Arc::new(FixtureRetrievalExecutionControl))
         .expect("graph lane reports a typed outcome");
 
     SingleRootFixture {

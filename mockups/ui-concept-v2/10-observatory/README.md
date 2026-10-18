@@ -27,7 +27,7 @@ Route: `/observatory`.
 | Timeline-range filtering and finding inspection | [final/01-system-evidence-overview.md](final/01-system-evidence-overview.md) | Select a canonical observation/range or finding while preserving project scope. |
 | A refetch or recovery result | No current plate | Required interaction/result is not depicted. |
 
-“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
+"Depicted" means visible in the plate (including a labelled state legend), not executed by the still. "No current plate" is reserved for required behavior or result that no current plate pictures.
 
 ## Historical provenance
 

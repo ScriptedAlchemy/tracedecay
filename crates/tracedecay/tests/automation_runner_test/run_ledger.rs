@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
 use tempfile::tempdir;
 use tokio::sync::Barrier;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    append_run_record, canonical_record_completion_micros, find_run_record, load_run_records,
+    append_run_record, find_run_record, load_run_ledger_task_summary, load_run_records,
     read_run_artifact_payload, run_artifact_path, run_ledger_path, write_run_artifact,
 };
 
@@ -40,6 +43,7 @@ fn record(run_id: &str, status: AutomationRunStatus) -> AutomationRunLedgerRecor
         backend_attempt_count: 0,
         backend_attempts: Vec::new(),
         fallback_status: None,
+        session_evidence_budget_stage: None,
         report_ref: None,
         artifacts: Vec::new(),
         started_at: "1782277200".to_string(),
@@ -85,15 +89,16 @@ async fn run_ledger_appends_jsonl_under_dashboard_root() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_ledger_keeps_concurrent_jsonl_writes_intact() {
     let temp = tempdir().unwrap();
-    let dashboard_root = std::sync::Arc::new(temp.path().join("dashboard"));
+    let dashboard_root = Arc::new(temp.path().join("dashboard"));
+    PrivateStoreIo::create_dir_all_durable(&dashboard_root).unwrap();
     let writers = 8;
     let lines_per_writer = 50;
-    let barrier = std::sync::Arc::new(Barrier::new(writers));
+    let barrier = Arc::new(Barrier::new(writers));
     let mut handles = Vec::new();
 
     for writer in 0..writers {
-        let dashboard_root = std::sync::Arc::clone(&dashboard_root);
-        let barrier = std::sync::Arc::clone(&barrier);
+        let dashboard_root = Arc::clone(&dashboard_root);
+        let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
             for line in 0..lines_per_writer {
@@ -202,30 +207,30 @@ async fn run_ledger_limit_and_malformed_lines_are_handled() {
 async fn run_ledger_loads_records_without_optional_fields() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
-    let legacy = serde_json::json!({
-        "schema_version": 1,
-        "run_id": "legacy-run",
+    let minimal = serde_json::json!({
+        "schema_version": 2,
+        "run_id": "minimal-run",
         "trigger": "manual_cli",
         "task": "memory_curator",
         "backend": "codex_app_server",
-        "model": "legacy-model",
+        "model": "minimal-model",
         "status": "succeeded",
         "evidence_hash": "sha256:evidence",
         "proposed_ops": null,
         "accepted_count": 1,
         "rejected_count": 0,
         "error": null,
-        "started_at": "2026-06-24T05:00:00Z",
-        "completed_at": "2026-06-24T05:00:01Z"
+        "started_at": "1782277200",
+        "completed_at": "1782277201"
     });
     tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
-    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{legacy}\n"))
+    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{minimal}\n"))
         .await
         .unwrap();
 
     let loaded = load_run_records(&dashboard_root, 10).await.unwrap();
     assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].run_id, "legacy-run");
+    assert_eq!(loaded[0].run_id, "minimal-run");
     assert_eq!(loaded[0].host_mode, None);
     assert_eq!(loaded[0].input_hash, None);
     assert_eq!(loaded[0].applied_ops, None);
@@ -235,41 +240,34 @@ async fn run_ledger_loads_records_without_optional_fields() {
 }
 
 #[tokio::test]
-async fn run_ledger_loads_legacy_rfc3339_with_consistent_micros() {
+async fn run_ledger_locked_read_resets_schema_v1_rfc3339_rows() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
-    let legacy = serde_json::json!({
-        "schema_version": 1,
-        "run_id": "legacy-micros-run",
+    let current = serde_json::json!({
+        "schema_version": 2,
+        "run_id": "schema-v2-row",
         "trigger": "manual_cli",
         "task": "memory_curator",
         "backend": "codex_app_server",
         "status": "succeeded",
         "accepted_count": 1,
         "rejected_count": 0,
-        "started_at": "2026-06-24T05:00:00Z",
-        "completed_at": "2026-06-24T05:00:01Z",
+        "started_at": "1782277200",
+        "completed_at": "1782277201",
         "completed_at_micros": 1_782_277_201_000_000_i64
     });
     tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
-    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{legacy}\n"))
+    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{current}\n"))
         .await
         .unwrap();
-
     let loaded = load_run_records(&dashboard_root, 10).await.unwrap();
-
     assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].run_id, "legacy-micros-run");
+    assert_eq!(loaded[0].run_id, "schema-v2-row");
     assert_eq!(loaded[0].completed_at_micros, Some(1_782_277_201_000_000));
-}
 
-#[tokio::test]
-async fn run_ledger_rejects_legacy_rfc3339_with_subsecond_micros() {
-    let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
-    let legacy = serde_json::json!({
+    let schema_v1 = serde_json::json!({
         "schema_version": 1,
-        "run_id": "legacy-contradiction",
+        "run_id": "schema-v1-row",
         "trigger": "manual_cli",
         "task": "memory_curator",
         "backend": "codex_app_server",
@@ -277,46 +275,123 @@ async fn run_ledger_rejects_legacy_rfc3339_with_subsecond_micros() {
         "accepted_count": 1,
         "rejected_count": 0,
         "started_at": "2026-06-24T05:00:00Z",
-        "completed_at": "2026-06-24T05:00:01Z",
-        "completed_at_micros": 1_782_277_201_000_001_i64
+        "completed_at": "2026-06-24T05:00:01Z"
     });
-    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
-    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{legacy}\n"))
+    tokio::fs::write(
+        run_ledger_path(&dashboard_root),
+        format!("{current}\n{schema_v1}\n"),
+    )
+    .await
+    .unwrap();
+
+    let refusal = find_run_record(&dashboard_root, "schema-v1-row")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refusal.reset_required_context(),
+        Some((
+            "automation run ledger",
+            "a row predates schema v2 (the released v1 wrote RFC3339 timestamps)"
+        ))
+    );
+
+    assert_eq!(
+        load_run_records(&dashboard_root, 10).await.unwrap(),
+        Vec::<AutomationRunLedgerRecord>::new()
+    );
+    assert!(
+        !run_ledger_path(&dashboard_root).exists(),
+        "the locked read deletes the retired ledger"
+    );
+    let after_reset = record("after-reset", AutomationRunStatus::Succeeded);
+    append_run_record(&dashboard_root, &after_reset)
+        .await
+        .unwrap();
+    assert_eq!(
+        load_run_records(&dashboard_root, 10).await.unwrap(),
+        [after_reset]
+    );
+}
+
+#[tokio::test]
+async fn run_ledger_resets_only_the_row_with_an_unregistered_skip_reason() {
+    for alias in [
+        "task_disabled",
+        "no_skill_writer_evidence",
+        "session_cursor_manifest_participants_limit_exceeded",
+        "session_evidence_budget_exhausted_candidates",
+        "shipped_fact_proposal_history_retired",
+    ] {
+        let temp = tempdir().unwrap();
+        let dashboard_root = temp.path().join("dashboard");
+        let mut known = record("registered-skip", AutomationRunStatus::Skipped);
+        known.trigger = AutomationTrigger::Scheduler;
+        known.task = AgentTaskKind::SkillWriter;
+        known.task_key = Some("skill_writer".to_owned());
+        known.error = Some("skill_writer_disabled".to_owned());
+        let mut retired = known.clone();
+        retired.run_id = "retired-skip".to_owned();
+        retired.error = Some(alias.to_owned());
+        retired.started_at = "1782277300".to_owned();
+        retired.completed_at = "1782277301".to_owned();
+        retired.completed_at_micros = Some(1_782_277_301_000_000);
+        let known_line = serde_json::to_string(&known).unwrap();
+        tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
+        tokio::fs::write(
+            run_ledger_path(&dashboard_root),
+            format!(
+                "{known_line}\n{}\n",
+                serde_json::to_string(&retired).unwrap()
+            ),
+        )
         .await
         .unwrap();
 
-    assert!(load_run_records(&dashboard_root, 10).await.is_err());
+        let summary = load_run_ledger_task_summary(
+            &dashboard_root,
+            AgentTaskKind::SkillWriter,
+            "skill_writer",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            summary
+                .latest_logical_activity()
+                .map(|record| (record.run_id.as_str(), record.error.as_deref())),
+            Some(("registered-skip", Some("skill_writer_disabled"))),
+            "{alias}"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(run_ledger_path(&dashboard_root))
+                .await
+                .unwrap(),
+            format!("{known_line}\n"),
+            "only the {alias} row is deleted"
+        );
+    }
 }
 
-#[test]
-fn run_ledger_normalizes_exact_legacy_rfc3339_fractional_micros() {
-    let mut legacy = record("legacy-fraction", AutomationRunStatus::Succeeded);
-    legacy.schema_version = 1;
-    legacy.completed_at = "2026-06-24T05:00:01.123456Z".to_string();
-    legacy.completed_at_micros = None;
-    let expected = 1_782_277_201_123_456_i64;
+#[tokio::test]
+async fn run_ledger_task_summary_reads_registered_skip_reasons() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let mut skipped = record("registered-skip", AutomationRunStatus::Skipped);
+    skipped.trigger = AutomationTrigger::Scheduler;
+    skipped.task = AgentTaskKind::SkillWriter;
+    skipped.task_key = Some("skill_writer".to_owned());
+    skipped.error = Some("skill_writer_disabled".to_owned());
+    append_run_record(&dashboard_root, &skipped).await.unwrap();
 
+    let summary =
+        load_run_ledger_task_summary(&dashboard_root, AgentTaskKind::SkillWriter, "skill_writer")
+            .await
+            .unwrap();
     assert_eq!(
-        canonical_record_completion_micros(&legacy).unwrap(),
-        expected
+        summary
+            .latest_logical_activity()
+            .map(|record| record.run_id.as_str()),
+        Some("registered-skip")
     );
-
-    legacy.completed_at_micros = Some(expected);
-    assert_eq!(
-        canonical_record_completion_micros(&legacy).unwrap(),
-        expected
-    );
-    legacy.completed_at_micros = Some(expected + 1);
-    assert!(canonical_record_completion_micros(&legacy).is_err());
-
-    legacy.completed_at = "2026-06-24T05:00:01.123456000Z".to_string();
-    legacy.completed_at_micros = Some(expected);
-    assert_eq!(
-        canonical_record_completion_micros(&legacy).unwrap(),
-        expected
-    );
-    legacy.completed_at = "2026-06-24T05:00:01.123456001Z".to_string();
-    assert!(canonical_record_completion_micros(&legacy).is_err());
 }
 
 #[tokio::test]

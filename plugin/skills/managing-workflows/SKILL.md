@@ -1,60 +1,42 @@
 ---
 name: managing-workflows
-description: 'Use when registering, validating, activating, or retiring Workflow definitions, issuing or redeeming handoffs, or starting, pausing, resuming, or canceling a Workflow run.'
+description: Use when the user asks to register, validate, activate, or retire a TraceDecay Workflow, issue a handoff, or control a Workflow run. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Managing Workflows
 
-Workflow is the daemon-owned definition and run surface. Every operation
-below is projected from the same executable registry as HTTP and CLI. Use
-exact definition and run identities the previous step returned; do not
-reconstruct them from a label or path.
+Follow these steps in order. Report a step you skip as `skip: <reason>`. Every
+mutation consumes the exact definition, run, or grant identity a read or a prior
+mutation returned; a name, label, or filesystem path is not authority. Use live
+operation schemas for arguments.
 
-Announce: "Using tracedecay:managing-workflows to <define/handoff/run>."
+1. Validate the definition (`tracedecay_workflow_validate_definition`). skip:
+   the request controls an existing run; go to step 4.
+2. Register it (`tracedecay_workflow_register_definition`) and keep the
+   definition identity it returns.
+3. Activate it (`tracedecay_workflow_activate_definition`). Rejection and
+   retirement (`tracedecay_workflow_reject_definition`,
+   `tracedecay_workflow_retire_definition`) are typed lifecycle transitions,
+   not deletions.
+4. Start a run from an Active version (`tracedecay_workflow_start_run`), or
+   control an existing run (`tracedecay_workflow_pause_run`,
+   `tracedecay_workflow_resume_run`, `tracedecay_workflow_cancel_run`). Inspect
+   terminal effects before retrying an interrupted request.
+5. Issue a handoff (`tracedecay_workflow_handoff_issue`) only for a step of an
+   Active version and a run started from it, and redeem
+   (`tracedecay_workflow_handoff_redeem`) only the grant it returned. skip: no
+   handoff was requested.
+6. Act on a refusal by its type. `stale` carries the requested and current
+   `expected_revision` or `expected_sequence` in `detail`: refresh and resend.
+   `conflict` is an illegal lifecycle edge or a run from an inactive version.
+   `reauthorize` needs a new handoff from its issuer.
 
-This is not `tracedecay_workflows` (read-only session recovery of `wf_*`
-runs). That read stays in `tracedecay:managing-session-context`.
+`tracedecay_workflows` reads historical `wf_*` session runs and controls
+nothing; that history belongs to `managing-session-context`, and task, attempt,
+and placement operations belong to `managing-work`.
 
-## Definitions
-
-1. Validate before write → `tracedecay_workflow_validate_definition`.
-2. Register → `tracedecay_workflow_register_definition`, then
-   `tracedecay_workflow_activate_definition`.
-3. Leave the roster → `tracedecay_workflow_retire_definition` or
-   `tracedecay_workflow_reject_definition`.
-4. Inspect → `tracedecay_workflow_get_definition`,
-   `tracedecay_workflow_list_definitions`,
-   `tracedecay_workflow_definition_history`,
-   `tracedecay_workflow_diff_definition`.
-
-## Handoffs
-
-Issue a grant with `tracedecay_workflow_handoff_issue`. Redeem only that
-grant with `tracedecay_workflow_handoff_redeem`. Do not invent grant
-identities.
-
-## Runs
-
-Start with `tracedecay_workflow_start_run`. Control an existing run with
-`tracedecay_workflow_pause_run`, `tracedecay_workflow_resume_run`, or
-`tracedecay_workflow_cancel_run`. Inspect with `tracedecay_workflow_get_run`.
-
-## Guardrails
-
-- Work task/attempt/placement operations → `tracedecay:managing-work`.
-- Raw transcript recovery of a `wf_*` run →
-  `tracedecay:managing-session-context`.
-- Mutations require the exact definition or run identity from a prior read
-  or register; a display name is not enough.
-
-## If tools are deferred or MCP fails
-
-- Deferred: one ToolSearch call —
-  `select:tracedecay_workflow_list_definitions,tracedecay_workflow_validate_definition,tracedecay_workflow_register_definition,tracedecay_workflow_start_run,tracedecay_workflow_get_run`.
-- MCP error: `tracedecay tool <name>` (see `tracedecay:using-the-cli`).
-
-## Deliverable
-
-Do not end without the definition or run identity, the last operation and
-its typed outcome, and whether a handoff grant remains unredeemed. Report
-any `tracedecay_metrics:` line.
+**Report:** the definition or run identity, the lifecycle state it reached, and
+any typed refusal with its detail. Do not resend a `stale` or `conflict` request
+unchanged.

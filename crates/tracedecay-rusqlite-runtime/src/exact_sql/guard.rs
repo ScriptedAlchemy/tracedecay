@@ -1,11 +1,19 @@
 //! The authorizer every exact SQL statement runs under.
 //!
-//! [`with_exact_sql_guard`] installs the hooks for one operation and removes
-//! them again on every exit path, so no statement outside that operation ever
-//! inherits the relaxed exact SQL authority.
+//! Every policy connection keeps one authorizer for its whole life,
+//! [`authorize_connection`]. [`with_exact_sql_guard`] activates one
+//! operation's [`ExactSqlAuthority`] for one connection on the current thread
+//! and deactivates it on every exit path, so no statement outside that
+//! operation inherits the relaxed exact SQL authority. Swapping the SQLite
+//! authorizer instead would expire every prepared statement on the
+//! connection, twice per operation.
+//!
+//! SQLite consults the authorizer only while it compiles a statement, and a
+//! statement-cache hit compiles nothing. [`prepare_cached`] therefore keys
+//! every cached statement by the authority that compiled it.
 
 use std::{
-    collections::BTreeSet,
+    cell::RefCell,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{
         Arc, Mutex,
@@ -15,102 +23,197 @@ use std::{
 };
 
 use rusqlite::{
-    Connection,
-    hooks::{Action, AuthAction, Authorization},
+    CachedStatement, Connection,
+    hooks::{AuthAction, AuthContext, Authorization},
 };
 
+use crate::connection::ConnectionMode;
+
+use super::clock;
 use super::{
     EXACT_SQL_EXECUTION_LIMIT, EXACT_SQL_PROGRESS_INTERVAL_OPS, ExactSqlError,
     ExactSqlWriteAuthority, ExactSqlWriteIntent, sqlite_error,
 };
 
-#[derive(Default)]
-pub(super) struct InsertTracker {
-    authorized_tables: Mutex<BTreeSet<String>>,
-    pub(super) applied: AtomicBool,
-}
-
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) enum AuthorizedDatabaseOperation {
     Attach,
     Detach(String),
-    Vacuum,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The authority one exact SQL operation runs under. Transaction control is
+/// always denied; savepoints only the writer channel's pinned transaction may
+/// use.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum ExactSqlAuthority {
+    /// A runtime-issued statement under a connection mode's canonical policy.
+    Canonical(ConnectionMode),
+    /// Caller SQL on the exact SQL writer channel.
+    Writer {
+        allow_savepoints: bool,
+        database_operation: Option<AuthorizedDatabaseOperation>,
+    },
+}
+
+/// Longest [`ExactSqlAuthority::cache_key_suffix`].
+pub(super) const MAX_CACHE_KEY_SUFFIX_BYTES: usize = 64;
+
+impl ExactSqlAuthority {
+    /// Distinct per authority, and no suffix ends another, so two keys are
+    /// equal only when both their SQL and their authority are. A detach
+    /// authority's statement names its database itself, so the name stays
+    /// out of the key.
+    pub(super) fn cache_key_suffix(&self) -> &'static str {
+        use AuthorizedDatabaseOperation::{Attach, Detach};
+        match self {
+            Self::Canonical(ConnectionMode::Writer) => {
+                "\n/* exact SQL authority: canonical writer */"
+            }
+            Self::Canonical(ConnectionMode::Reader) => {
+                "\n/* exact SQL authority: canonical reader */"
+            }
+            Self::Canonical(ConnectionMode::Maintenance) => {
+                "\n/* exact SQL authority: canonical maintenance */"
+            }
+            Self::Writer {
+                allow_savepoints,
+                database_operation,
+            } => match (allow_savepoints, database_operation) {
+                (false, None) => "\n/* exact SQL authority: writer */",
+                (true, None) => "\n/* exact SQL authority: writer, savepoints */",
+                (false, Some(Attach)) => "\n/* exact SQL authority: writer, attach */",
+                (true, Some(Attach)) => "\n/* exact SQL authority: writer, savepoints, attach */",
+                (false, Some(Detach(_))) => "\n/* exact SQL authority: writer, detach */",
+                (true, Some(Detach(_))) => {
+                    "\n/* exact SQL authority: writer, savepoints, detach */"
+                }
+            },
+        }
+    }
+}
+
+struct ActiveGuard {
+    connection: usize,
+    authority: ExactSqlAuthority,
+    transaction_control_denied: bool,
+}
+
+impl ActiveGuard {
+    fn authorize(&mut self, context: AuthContext<'_>) -> Authorization {
+        let transaction_control = match context.action {
+            AuthAction::Transaction { .. } => true,
+            AuthAction::Savepoint { .. } => !matches!(
+                self.authority,
+                ExactSqlAuthority::Writer {
+                    allow_savepoints: true,
+                    ..
+                }
+            ),
+            _ => false,
+        };
+        if transaction_control {
+            self.transaction_control_denied = true;
+            return Authorization::Deny;
+        }
+        match &self.authority {
+            ExactSqlAuthority::Canonical(mode) => crate::connection::authorize(*mode, context),
+            ExactSqlAuthority::Writer {
+                database_operation, ..
+            } => authorize_exact_sql_writer(context, database_operation.as_ref()),
+        }
+    }
+}
+
+thread_local! {
+    static ACTIVE_GUARD: RefCell<Option<ActiveGuard>> = const { RefCell::new(None) };
+}
+
+/// Keeps one operation's authority active until dropped, then reinstates
+/// whatever guard was active before it.
+struct Activation {
+    previous: Option<ActiveGuard>,
+}
+
+impl Activation {
+    fn begin(connection: &Connection, authority: ExactSqlAuthority) -> Self {
+        let previous = ACTIVE_GUARD.replace(Some(ActiveGuard {
+            connection: connection_identity(connection),
+            authority,
+            transaction_control_denied: false,
+        }));
+        Self { previous }
+    }
+
+    fn transaction_control_denied(&self) -> bool {
+        ACTIVE_GUARD.with_borrow(|active| {
+            active
+                .as_ref()
+                .is_some_and(|guard| guard.transaction_control_denied)
+        })
+    }
+}
+
+impl Drop for Activation {
+    fn drop(&mut self) {
+        ACTIVE_GUARD.set(self.previous.take());
+    }
+}
+
+pub(crate) fn connection_identity(connection: &Connection) -> usize {
+    // SAFETY: the handle is compared as an address and never dereferenced.
+    unsafe { connection.handle() }.addr()
+}
+
+/// The authorizer a policy connection keeps for its whole life: the exact SQL
+/// authority active for it on this thread, else its own mode's policy.
+pub(crate) fn authorize_connection(
+    connection: usize,
+    mode: ConnectionMode,
+    context: AuthContext<'_>,
+) -> Authorization {
+    ACTIVE_GUARD.with_borrow_mut(|active| match active {
+        Some(guard) if guard.connection == connection => guard.authorize(context),
+        _ => crate::connection::authorize(mode, context),
+    })
+}
+
+/// `prepare_cached` for exact SQL, keyed by the authority active on
+/// `connection` so a cached statement is only reused under the authority that
+/// compiled it.
+pub(super) fn prepare_cached<'c>(
+    connection: &'c Connection,
+    sql: &str,
+) -> rusqlite::Result<CachedStatement<'c>> {
+    let identity = connection_identity(connection);
+    let suffix = ACTIVE_GUARD.with_borrow(|active| {
+        active
+            .as_ref()
+            .filter(|guard| guard.connection == identity)
+            .map(|guard| guard.authority.cache_key_suffix())
+    });
+    match suffix {
+        Some(suffix) => connection.prepare_cached(&format!("{sql}{suffix}")),
+        None => connection.prepare_cached(sql),
+    }
+}
+
 pub(super) fn with_exact_sql_guard<T, F>(
     connection: &Connection,
-    allow_savepoints: bool,
-    allow_transactions: bool,
+    authority: ExactSqlAuthority,
     shutdown_requested: Option<Arc<AtomicBool>>,
     execution_deadline: Option<Instant>,
     enforce_statement_limit: bool,
     repeated_authority: Option<(Arc<dyn ExactSqlWriteAuthority>, ExactSqlWriteIntent)>,
-    canonical_authorizer: for<'a> fn(rusqlite::hooks::AuthContext<'a>) -> Authorization,
-    exact_sql_writer: bool,
-    database_operation: Option<AuthorizedDatabaseOperation>,
-    insert_tracker: Option<Arc<InsertTracker>>,
     operation: F,
 ) -> Result<T, ExactSqlError>
 where
     F: FnOnce() -> Result<T, ExactSqlError>,
 {
-    let denied = Arc::new(AtomicBool::new(false));
-    let hook_denied = Arc::clone(&denied);
-    let authorizer_tracker = insert_tracker.clone();
-    let authorized_database_operation = database_operation.clone();
-    connection
-        .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
-            if context.accessor.is_none()
-                && let AuthAction::Insert { table_name } = context.action
-                && !table_name.eq_ignore_ascii_case("sqlite_master")
-                && !table_name.eq_ignore_ascii_case("sqlite_schema")
-                && let Some(tracker) = &authorizer_tracker
-            {
-                tracker
-                    .authorized_tables
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(table_name.to_owned());
-            }
-            if (!allow_transactions && matches!(context.action, AuthAction::Transaction { .. }))
-                || (!allow_savepoints && matches!(context.action, AuthAction::Savepoint { .. }))
-            {
-                hook_denied.store(true, Ordering::Release);
-                Authorization::Deny
-            } else if exact_sql_writer {
-                authorize_exact_sql_writer(context, authorized_database_operation.as_ref())
-            } else {
-                canonical_authorizer(context)
-            }
-        }))
-        .map_err(|error| sqlite_error("install transaction-control guard", error))?;
-    if let Some(tracker) = &insert_tracker {
-        let hook_tracker = Arc::clone(tracker);
-        if let Err(error) = connection.update_hook(Some(
-            move |action: Action, _database: &str, table: &str, _rowid: i64| {
-                if action == Action::SQLITE_INSERT
-                    && hook_tracker
-                        .authorized_tables
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .contains(table)
-                {
-                    hook_tracker.applied.store(true, Ordering::Release);
-                }
-            },
-        )) {
-            let _ = connection.authorizer(Some(canonical_authorizer));
-            return Err(sqlite_error("install insert tracker", error));
-        }
-    }
     let deadline = if enforce_statement_limit {
-        let operation_deadline = Instant::now() + EXACT_SQL_EXECUTION_LIMIT;
-        Some(
-            execution_deadline
-                .map(|deadline| deadline.min(operation_deadline))
-                .unwrap_or(operation_deadline),
-        )
+        let operation_deadline = clock::now() + EXACT_SQL_EXECUTION_LIMIT;
+        Some(execution_deadline.map_or(operation_deadline, |deadline| {
+            deadline.min(operation_deadline)
+        }))
     } else {
         execution_deadline
     };
@@ -122,7 +225,7 @@ where
             if shutdown_requested
                 .as_ref()
                 .is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
-                || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                || deadline.is_some_and(|deadline| clock::now() >= deadline)
             {
                 return true;
             }
@@ -137,24 +240,16 @@ where
             false
         }),
     ) {
-        let _ = connection.update_hook(None::<fn(Action, &str, &str, i64)>);
-        let _ = connection.authorizer(Some(canonical_authorizer));
         return Err(sqlite_error("install execution guard", error));
     }
 
+    let activation = Activation::begin(connection, authority);
     let result = catch_unwind(AssertUnwindSafe(operation));
-    let clear_progress =
-        connection.progress_handler(EXACT_SQL_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
-    let clear_update_hook = connection.update_hook(None::<fn(Action, &str, &str, i64)>);
-    let restore_authorizer = connection.authorizer(Some(canonical_authorizer));
-    let cleanup = clear_progress
-        .map_err(|error| sqlite_error("clear execution guard", error))
-        .and_then(|()| {
-            clear_update_hook.map_err(|error| sqlite_error("clear insert tracker", error))
-        })
-        .and_then(|()| {
-            restore_authorizer.map_err(|error| sqlite_error("restore connection authorizer", error))
-        });
+    let denied = activation.transaction_control_denied();
+    drop(activation);
+    let cleanup = connection
+        .progress_handler(EXACT_SQL_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>)
+        .map_err(|error| sqlite_error("clear execution guard", error));
     let result = match result {
         Ok(result) => result,
         Err(payload) => {
@@ -169,7 +264,7 @@ where
         .take();
     if let Some(error) = authority_error {
         Err(error)
-    } else if denied.load(Ordering::Acquire) {
+    } else if denied {
         Err(ExactSqlError::TransactionControlDenied)
     } else {
         result
@@ -184,8 +279,8 @@ where
 /// lives in the connection's own `temp` schema, cannot alias or mutate
 /// anything in `main`, and disappears with the connection. Denying them while
 /// permitting durable DDL inverted the blast radius, and it left derived
-/// per-connection scratch — the projection output-state cache — unable to
-/// exist at all.
+/// per-connection scratch, such as the projection rebuild's output sets,
+/// unable to exist at all.
 ///
 /// Temporary **triggers and views** stay denied. A temp trigger can fire on a
 /// durable table and mutate it outside the invariant trigger contract, which
@@ -202,7 +297,7 @@ fn authorize_exact_sql_writer(
         AuthAction::Attach { .. }
             if matches!(
                 database_operation,
-                Some(AuthorizedDatabaseOperation::Attach | AuthorizedDatabaseOperation::Vacuum)
+                Some(AuthorizedDatabaseOperation::Attach)
             ) =>
         {
             return Authorization::Allow;
@@ -216,7 +311,7 @@ fn authorize_exact_sql_writer(
         } if code == rusqlite::ffi::SQLITE_ATTACH
             && matches!(
                 database_operation,
-                Some(AuthorizedDatabaseOperation::Attach | AuthorizedDatabaseOperation::Vacuum)
+                Some(AuthorizedDatabaseOperation::Attach)
             ) =>
         {
             return Authorization::Allow;
@@ -226,9 +321,6 @@ fn authorize_exact_sql_writer(
                 database_operation,
                 Some(AuthorizedDatabaseOperation::Detach(expected))
                     if database_name.eq_ignore_ascii_case(expected)
-            ) || matches!(
-                database_operation,
-                Some(AuthorizedDatabaseOperation::Vacuum)
             ) =>
         {
             return Authorization::Allow;

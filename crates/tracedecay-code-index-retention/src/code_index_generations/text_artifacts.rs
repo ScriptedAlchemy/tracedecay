@@ -6,10 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use cap_std::fs::Dir;
 use tracedecay_domain::canonical_text::is_lowercase_hex;
 use tracedecay_domain::{CodeGenerationId, UtcMicros, canonical_sha256};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
+use super::file_quarantine::{FileQuarantine, open_optional_dir};
 use super::journal::{
     BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
 };
@@ -26,15 +28,17 @@ use super::{
     MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1, MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1,
     MAX_TRANSACTION_BYTES, TEXT_ARTIFACT_QUARANTINE_DIRECTORY, TEXT_ARTIFACT_RECEIPT_SCHEMA,
     TEXT_ARTIFACT_RECEIPTS_DIRECTORY, TEXT_ARTIFACT_TRANSACTION_FILE,
-    TEXT_ARTIFACT_TRANSACTION_SCHEMA, code_text_artifacts_root, durable_generation_index_digest,
-    generation_file_digest, observe_cancel, open_file_sha256_hex_cancellable,
+    TEXT_ARTIFACT_TRANSACTION_SCHEMA, code_text_artifact_staging_root, code_text_artifacts_root,
+    durable_generation_index_digest, generation_file_digest, open_file_sha256_hex_cancellable,
     path_still_names_open_file, read_active_pointer, read_optional_active_pointer,
-    regular_file_exists, remove_empty_stage_root, retain_bounded_generation_index_with_text_head,
-    sha256_file_component, storage, sync_directory, validate_durable_generation_index,
-    validate_sealed_generation_identity, validate_text_artifact_descriptor,
+    regular_file_exists, retain_bounded_generation_index_with_text_head, sha256_file_component,
+    storage, validate_durable_generation_index, validate_sealed_generation_identity,
+    validate_text_artifact_descriptor,
 };
 
-const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<
+const TEXT_ARTIFACT_QUARANTINE_LABEL: &str = "text-artifact candidate";
+
+pub(super) const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<
     CodeTextArtifactRetentionTransactionV1,
 > = BoundedJournalSpec {
     file_name: TEXT_ARTIFACT_TRANSACTION_FILE,
@@ -44,66 +48,99 @@ const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<
     validate: validate_text_artifact_transaction,
 };
 
-const TEXT_ARTIFACT_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
+pub(super) const TEXT_ARTIFACT_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
     directory: TEXT_ARTIFACT_RECEIPTS_DIRECTORY,
     label: "text-artifact retention receipt",
 };
 
-/// Durably attach a verified text artifact to its sealed generation entry.
-///
-/// The lock is root-bound, so the caller can keep this exact guard while it
-/// advances the independent text head. Returning success proves the updated
-/// generation pointer and its parent directory were fsynced first.
-pub fn attach_verified_text_artifact_under_lock(
+enum VerifiedTextArtifactMutationV1<'a> {
+    Attach {
+        sealed_identity: &'a DurableSealedCodeGenerationIdentityV1,
+        descriptor: DurableCodeTextArtifactDescriptorV1,
+    },
+    Withdraw {
+        expected: &'a DurableCodeTextArtifactDescriptorV1,
+    },
+}
+
+fn mutate_verified_text_artifact_under_lock(
     lock: &CodeGenerationStoreLockV1,
     expected_pointer: &DurablePublicationPointerV1,
-    sealed_identity: &DurableSealedCodeGenerationIdentityV1,
-    descriptor: DurableCodeTextArtifactDescriptorV1,
+    mutation: VerifiedTextArtifactMutationV1<'_>,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let store_root = lock.generation_store_root()?;
-    validate_sealed_generation_identity(sealed_identity)?;
-    validate_text_artifact_descriptor(&descriptor)?;
+    let (generation_id, sealed_identity, retain_text_head) = match &mutation {
+        VerifiedTextArtifactMutationV1::Attach {
+            sealed_identity,
+            descriptor,
+        } => {
+            validate_sealed_generation_identity(sealed_identity)?;
+            validate_text_artifact_descriptor(descriptor)?;
+            (
+                descriptor.generation_id.clone(),
+                Some(*sealed_identity),
+                true,
+            )
+        }
+        VerifiedTextArtifactMutationV1::Withdraw { expected } => {
+            validate_text_artifact_descriptor(expected)?;
+            (expected.generation_id.clone(), None, false)
+        }
+    };
     let mut pointer = read_active_pointer(store_root)?;
     if &pointer != expected_pointer {
         return Err(CodeGenerationRetentionErrorV1::Conflict(
-            "active generation pointer changed before text-artifact attachment".to_owned(),
+            "active generation pointer changed before text-artifact mutation".to_owned(),
         ));
     }
     validate_durable_generation_index(&pointer)?;
-    let attached_generation_id = descriptor.generation_id.clone();
     let entry = pointer
         .generation_index
         .iter_mut()
-        .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
+        .find(|entry| entry.generation_id == generation_id.as_str())
         .ok_or_else(|| {
             CodeGenerationRetentionErrorV1::Conflict(
                 "text-artifact generation is no longer retained by the durable index".to_owned(),
             )
         })?;
-    if entry.generation_file != sealed_identity.locator
-        || entry.state_digest != sealed_identity.digest.as_str()
-        || entry.size_bytes != sealed_identity.size_bytes
+    if let Some(sealed_identity) = sealed_identity
+        && (entry.generation_file != sealed_identity.locator
+            || entry.state_digest != sealed_identity.digest.as_str()
+            || entry.size_bytes != sealed_identity.size_bytes)
     {
         return Err(CodeGenerationRetentionErrorV1::Conflict(
             "text artifact does not match the retained sealed generation".to_owned(),
         ));
     }
-    match entry.text_artifact.as_ref() {
-        Some(existing) if existing == &descriptor => return Ok(pointer),
-        Some(_) => {
-            return Err(CodeGenerationRetentionErrorV1::Conflict(
-                "sealed generation already names a different text artifact".to_owned(),
-            ));
-        }
-        None => entry.text_artifact = Some(descriptor),
+    match mutation {
+        VerifiedTextArtifactMutationV1::Attach { descriptor, .. } => match entry.text_artifact() {
+            Some(existing) if existing == &descriptor => return Ok(pointer),
+            Some(_) => {
+                return Err(CodeGenerationRetentionErrorV1::Conflict(
+                    "sealed generation already names a different text artifact".to_owned(),
+                ));
+            }
+            None => entry.text_artifact = Some(descriptor.into()),
+        },
+        VerifiedTextArtifactMutationV1::Withdraw { expected } => match entry.text_artifact() {
+            Some(existing) if existing == expected => entry.text_artifact = None,
+            Some(_) => {
+                return Err(CodeGenerationRetentionErrorV1::Conflict(
+                    "sealed generation names a newer text artifact".to_owned(),
+                ));
+            }
+            None => return Ok(pointer),
+        },
     }
-    let active_generation_id = pointer.generation_id.clone();
-    let removed = retain_bounded_generation_index_with_text_head(
-        &mut pointer.generation_index,
-        &active_generation_id,
-        Some(attached_generation_id.as_str()),
-    );
-    pointer.generation_index_truncated |= removed > 0;
+    if retain_text_head {
+        let active_generation_id = pointer.generation_id.clone();
+        let removed = retain_bounded_generation_index_with_text_head(
+            &mut pointer.generation_index,
+            &active_generation_id,
+            Some(generation_id.as_str()),
+        );
+        pointer.generation_index_truncated |= removed > 0;
+    }
     pointer.generation_index_digest = Some(durable_generation_index_digest(
         &pointer.generation_index,
         pointer.generation_index_truncated,
@@ -119,14 +156,44 @@ pub fn attach_verified_text_artifact_under_lock(
             "publication pointer exceeds its durable byte bound".to_owned(),
         ));
     }
+    // Re-read immediately before the rename. A pointer that is no longer the
+    // one this mutation observed — including a truncated file — must not be
+    // replaced by the in-memory copy.
+    let current = read_active_pointer(store_root)?;
+    if &current != expected_pointer {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "active generation pointer changed before text-artifact mutation".to_owned(),
+        ));
+    }
     atomic_write(
         &store_root.join(ACTIVE_POINTER_FILE),
-        "code-generation-text-artifact-attachment",
+        "code-generation-text-artifact-mutation",
         &bytes,
         DirectorySyncPolicy::Strict,
     )
     .map_err(storage)?;
     Ok(pointer)
+}
+
+/// Durably attach a verified text artifact to its sealed generation entry.
+///
+/// The lock is root-bound, so the caller can keep this exact guard while it
+/// advances the independent text head. Returning success proves the updated
+/// generation pointer and its parent directory were fsynced first.
+pub fn attach_verified_text_artifact_under_lock(
+    lock: &CodeGenerationStoreLockV1,
+    expected_pointer: &DurablePublicationPointerV1,
+    sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+    descriptor: DurableCodeTextArtifactDescriptorV1,
+) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
+    mutate_verified_text_artifact_under_lock(
+        lock,
+        expected_pointer,
+        VerifiedTextArtifactMutationV1::Attach {
+            sealed_identity,
+            descriptor,
+        },
+    )
 }
 
 /// Withdraw one exact derived text-artifact attachment under the canonical
@@ -141,85 +208,45 @@ pub fn withdraw_verified_text_artifact_under_lock(
     expected_pointer: &DurablePublicationPointerV1,
     descriptor: &DurableCodeTextArtifactDescriptorV1,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
-    let store_root = lock.generation_store_root()?;
-    validate_text_artifact_descriptor(descriptor)?;
-    let mut pointer = read_active_pointer(store_root)?;
-    if &pointer != expected_pointer {
-        return Err(CodeGenerationRetentionErrorV1::Conflict(
-            "active generation pointer changed before text-artifact withdrawal".to_owned(),
-        ));
-    }
-    validate_durable_generation_index(&pointer)?;
-    let entry = pointer
-        .generation_index
-        .iter_mut()
-        .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
-        .ok_or_else(|| {
-            CodeGenerationRetentionErrorV1::Conflict(
-                "text-artifact generation is no longer retained by the durable index".to_owned(),
-            )
-        })?;
-    match entry.text_artifact.as_ref() {
-        Some(existing) if existing == descriptor => entry.text_artifact = None,
-        Some(_) => {
-            return Err(CodeGenerationRetentionErrorV1::Conflict(
-                "sealed generation names a newer text artifact".to_owned(),
-            ));
-        }
-        None => return Ok(pointer),
-    }
-    pointer.generation_index_digest = Some(durable_generation_index_digest(
-        &pointer.generation_index,
-        pointer.generation_index_truncated,
-    )?);
-    validate_durable_generation_index(&pointer)?;
-    let bytes = serde_json::to_vec(&pointer).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "publication pointer serialization failed: {error}"
-        ))
-    })?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1 {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "publication pointer exceeds its durable byte bound".to_owned(),
-        ));
-    }
-    atomic_write(
-        &store_root.join(ACTIVE_POINTER_FILE),
-        "code-generation-text-artifact-withdrawal",
-        &bytes,
-        DirectorySyncPolicy::Strict,
+    mutate_verified_text_artifact_under_lock(
+        lock,
+        expected_pointer,
+        VerifiedTextArtifactMutationV1::Withdraw {
+            expected: descriptor,
+        },
     )
-    .map_err(storage)?;
-    Ok(pointer)
 }
 
-/// Select one bounded page of derived text-artifact debris from the canonical
-/// artifact root. The durable generation index is the only completed-artifact
-/// liveness authority. An in-progress builder names its staging database with
-/// the sealed generation digest, so every staging path whose source digest is
-/// still retained is preserved rather than guessed dead by wall-clock age.
+/// Select one bounded page of derived text-artifact debris. Completed
+/// artifacts live in the project's shared directory and stay live while any
+/// scope's durable index, live or quarantined, names them; this scope's own
+/// descriptors are verified before anything is planned. An in-progress
+/// builder names its staging database, in this scope's staging directory,
+/// with the sealed generation digest, so the active generation's staging is
+/// preserved rather than guessed dead by wall-clock age.
 pub(super) fn plan_collectable_text_artifacts_cancellable(
     store_root: &Path,
     active_pointer: Option<&DurablePublicationPointerV1>,
     verification: GenerationDigestVerificationV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
-    if observe_cancel(is_cancelled) {
+    if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
     // An unpublished store (`None`) has no durable index and no resumable
-    // build authority: every completed, staging, sidecar, and corrupt file
-    // under its artifact root is crash debris and therefore a candidate.
+    // build authority: every staging and sidecar file in its
+    // staging directory is crash debris and therefore a candidate.
     let mut referenced = BTreeMap::new();
-    for entry in active_pointer
-        .map(|pointer| pointer.generation_index.as_slice())
-        .unwrap_or_default()
-    {
-        if let Some(descriptor) = entry.text_artifact.as_ref() {
+    for entry in active_pointer.map_or_default(|pointer| pointer.generation_index.as_slice()) {
+        if let Some(descriptor) = entry.text_artifact() {
             validate_text_artifact_descriptor(descriptor)?;
+            // Generations that sealed the same content name one artifact.
             if referenced
                 .insert(descriptor.artifact_file.as_str(), descriptor)
-                .is_some_and(|prior| prior != descriptor)
+                .is_some_and(|prior| {
+                    (&prior.artifact_digest, prior.artifact_size_bytes)
+                        != (&descriptor.artifact_digest, descriptor.artifact_size_bytes)
+                })
             {
                 return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                     "publication-pointer text artifact path has conflicting identity".to_owned(),
@@ -227,6 +254,7 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
             }
         }
     }
+    let marked = scope_text_artifact_marks(store_root)?;
     let active_staging_source = active_pointer
         .map(|pointer| {
             generation_file_digest(&pointer.generation_file).ok_or_else(|| {
@@ -239,29 +267,14 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
         .transpose()?;
 
     let root = code_text_artifacts_root(store_root);
-    let root_metadata = match std::fs::symlink_metadata(&root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if referenced.is_empty() {
-                return Ok(CodeTextArtifactRetentionInventoryV1 {
-                    candidates: Vec::new(),
-                    unique_bytes: 0,
-                });
-            }
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-                "durable publication pointer references text artifacts but their root is missing"
-                    .to_owned(),
-            ));
-        }
-        Err(error) => return Err(storage(error)),
-    };
-    if !root_metadata.file_type().is_dir() {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "code text artifact root '{}' is not a directory",
-            root.display()
-        )));
+    let staging_root = code_text_artifact_staging_root(store_root);
+    let root_present = private_directory_exists(&root)?;
+    if !root_present && !referenced.is_empty() {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "durable publication pointer references text artifacts but their root is missing"
+                .to_owned(),
+        ));
     }
-
     // The index can name at most 32 completed artifacts, and only the active
     // generation has a resumable build authority. Verify the completed
     // liveness set directly before scanning debris, so an early candidate page
@@ -269,7 +282,7 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
     // missing.
     let mut inventory = BTreeMap::new();
     for descriptor in referenced.values() {
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         verify_completed_text_artifact(
@@ -283,12 +296,19 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
             descriptor.artifact_size_bytes,
         );
     }
+    let active_entry_has_artifact = active_pointer.is_some_and(|pointer| {
+        pointer.generation_index.iter().any(|entry| {
+            entry.generation_id == pointer.generation_id && entry.text_artifact().is_some()
+        })
+    });
+    let mut active_text_replacement_in_flight = false;
     if let Some(active_staging_source) = active_staging_source {
         let active_staging_file = format!(".text-artifact-{active_staging_source}.staging");
-        let active_staging_path = root.join(&active_staging_file);
+        let active_staging_path = staging_root.join(&active_staging_file);
         match std::fs::symlink_metadata(&active_staging_path) {
             Ok(metadata) if metadata.file_type().is_file() => {
                 inventory.insert(active_staging_file, metadata.len());
+                active_text_replacement_in_flight = active_entry_has_artifact;
             }
             Ok(_) => {
                 return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
@@ -301,103 +321,110 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
         }
     }
 
-    let mut entries = std::fs::read_dir(&root).map_err(storage)?;
     let mut candidates = BTreeMap::new();
-    for _ in 0..MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1 {
-        if observe_cancel(is_cancelled) {
-            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    let mut remaining = MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1;
+    for (directory, shared) in [(&root, true), (&staging_root, false)] {
+        if !private_directory_exists(directory)? {
+            continue;
         }
-        let Some(entry) = entries.next() else {
-            break;
-        };
-        let entry = entry.map_err(storage)?;
-        let file_name = entry.file_name().into_string().map_err(|_| {
-            CodeGenerationRetentionErrorV1::UnsafeState(
-                "code text artifact inventory filename is not UTF-8".to_owned(),
-            )
-        })?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(storage)?;
-        if !metadata.file_type().is_file() {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "code text artifact inventory path '{}' is not a regular file",
-                path.display()
-            )));
-        }
-
-        let candidate = if let Some(digest) = completed_text_artifact_digest(&file_name) {
-            if referenced.contains_key(file_name.as_str()) {
-                None
-            } else {
-                // A completed SQLite artifact can never be empty. A zero-byte
-                // file at its final content-addressed path is the only state
-                // left when publication created the destination but failed
-                // before writing any bytes. It contains no recoverable data,
-                // so retain the regular-file/inode/size checks while allowing
-                // retention to collect that publish-crash placeholder. Every
-                // non-empty candidate still requires its full content proof.
-                let candidate_verification = if metadata.len() == 0 {
-                    GenerationDigestVerificationV1::MetadataOnly
-                } else {
-                    verification
-                };
-                verify_unreferenced_completed_text_artifact(
-                    &path,
-                    digest,
-                    metadata.len(),
-                    candidate_verification,
-                    is_cancelled,
-                )?;
-                Some(CodeTextArtifactRetentionCandidateV1 {
-                    artifact_file: file_name,
-                    kind: CodeTextArtifactRetentionKindV1::Completed,
-                    size_bytes: metadata.len(),
-                })
+        let mut entries = std::fs::read_dir(directory).map_err(storage)?;
+        while remaining > 0 && candidates.len() < MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 {
+            remaining -= 1;
+            if is_cancelled() {
+                return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
-        } else if let Some(source_digest) = staging_text_artifact_source_digest(&file_name) {
-            if Some(source_digest) == active_staging_source {
-                None
-            } else {
-                Some(CodeTextArtifactRetentionCandidateV1 {
-                    artifact_file: file_name,
-                    kind: CodeTextArtifactRetentionKindV1::Staging,
-                    size_bytes: metadata.len(),
-                })
-            }
-        } else if let Some(source_digest) = staging_sidecar_text_artifact_source_digest(&file_name)
-        {
-            // SQLite sidecars of the staging database (`-journal`, `-wal`,
-            // `-shm`). They live and die with their staging file: the active
-            // build's sidecars are the builder's property, while an orphaned
-            // staging file's sidecars are the same crash debris it is. Before
-            // this arm they were "unrecognized regular file" failures that
-            // poisoned every retention plan for the scope.
-            if Some(source_digest) == active_staging_source {
-                None
-            } else {
-                Some(CodeTextArtifactRetentionCandidateV1 {
-                    artifact_file: file_name,
-                    kind: CodeTextArtifactRetentionKindV1::Staging,
-                    size_bytes: metadata.len(),
-                })
-            }
-        } else if is_corrupt_text_artifact_file(&file_name) {
-            Some(CodeTextArtifactRetentionCandidateV1 {
-                artifact_file: file_name,
-                kind: CodeTextArtifactRetentionKindV1::Corrupt,
-                size_bytes: metadata.len(),
-            })
-        } else {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "code text artifact inventory contains unrecognized regular file '{}'",
-                path.display()
-            )));
-        };
-        if let Some(candidate) = candidate {
-            inventory.insert(candidate.artifact_file.clone(), candidate.size_bytes);
-            candidates.insert(candidate.artifact_file.clone(), candidate);
-            if candidates.len() == MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 {
+            let Some(entry) = entries.next() else {
                 break;
+            };
+            let entry = entry.map_err(storage)?;
+            let file_name = entry.file_name().into_string().map_err(|_| {
+                CodeGenerationRetentionErrorV1::UnsafeState(
+                    "code text artifact inventory filename is not UTF-8".to_owned(),
+                )
+            })?;
+            let path = entry.path();
+            // This inventory reads the artifact directories without the
+            // generation-store lock, so an entry the listing just named can
+            // already be gone: the text-artifact builder retires a `.staging`
+            // family (the staging database and its `-journal`/`-wal`/`-shm`
+            // sidecars) under that lock while this scan runs. A vanished entry
+            // is reclaimed, which is what this inventory would have planned
+            // anyway, so it is not a candidate and not a failure. Failing the
+            // plan here turned every publish that raced a maintenance tick
+            // into a loud `retention_plan_failed` pass (master run
+            // 35422072661, `Storage("No such file or directory")`). A
+            // completed artifact this scope's index *references* is verified
+            // above, before this scan, and stays fail-closed if it disappears.
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(storage(error)),
+            };
+            if !metadata.file_type().is_file() {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "code text artifact inventory path '{}' is not a regular file",
+                    path.display()
+                )));
+            }
+            let staging_source = staging_text_artifact_source_digest(&file_name)
+                .or_else(|| staging_sidecar_text_artifact_source_digest(&file_name));
+            let completed = completed_text_artifact_digest(&file_name);
+            let candidate = match (shared, staging_source, completed) {
+                (true, None, Some(digest)) => {
+                    if marked.contains(file_name.as_str()) {
+                        None
+                    } else {
+                        // A completed SQLite artifact can never be empty. A
+                        // zero-byte file at its final content-addressed path
+                        // is the only state left when publication created the
+                        // destination but failed before writing any bytes. It
+                        // contains no recoverable data, so retain the
+                        // regular-file/inode/size checks while allowing
+                        // retention to collect that publish-crash placeholder.
+                        // Every non-empty candidate still requires its full
+                        // content proof.
+                        let candidate_verification = if metadata.len() == 0 {
+                            GenerationDigestVerificationV1::MetadataOnly
+                        } else {
+                            verification
+                        };
+                        if !verify_unreferenced_completed_text_artifact(
+                            &path,
+                            digest,
+                            metadata.len(),
+                            candidate_verification,
+                            is_cancelled,
+                        )? {
+                            continue;
+                        }
+                        Some(CodeTextArtifactRetentionCandidateV1 {
+                            artifact_file: file_name,
+                            kind: CodeTextArtifactRetentionKindV1::Completed,
+                            size_bytes: metadata.len(),
+                        })
+                    }
+                }
+                // The active build's staging family is the builder's
+                // property; any other staging database or sidecar is crash
+                // debris.
+                (false, Some(source_digest), _) if Some(source_digest) == active_staging_source => {
+                    None
+                }
+                (false, Some(_), _) => Some(CodeTextArtifactRetentionCandidateV1 {
+                    artifact_file: file_name,
+                    kind: CodeTextArtifactRetentionKindV1::Staging,
+                    size_bytes: metadata.len(),
+                }),
+                _ => {
+                    return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                        "code text artifact inventory contains unrecognized regular file '{}'",
+                        path.display()
+                    )));
+                }
+            };
+            if let Some(candidate) = candidate {
+                inventory.insert(candidate.artifact_file.clone(), candidate.size_bytes);
+                candidates.insert(candidate.artifact_file.clone(), candidate);
             }
         }
     }
@@ -406,7 +433,73 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
         unique_bytes: inventory
             .values()
             .fold(0_u64, |total, bytes| total.saturating_add(*bytes)),
+        active_text_replacement_in_flight,
     })
+}
+
+/// A completed artifact some scope of this store's project published under
+/// `content_key` and whose file is still in the shared directory. The file
+/// is not verified here: the caller opens it against its content address
+/// and its own projection, and rebuilds when that fails. Call it under the
+/// project lock held shared, so no retention collects the file before the
+/// caller's descriptor is durable.
+pub fn find_shared_text_artifact(
+    store_root: &Path,
+    content_key: &tracedecay_domain::ManifestDigest,
+) -> Result<Option<DurableCodeTextArtifactDescriptorV1>, CodeGenerationRetentionErrorV1> {
+    let root = code_text_artifacts_root(store_root);
+    for scope in super::segment_scope_roots(store_root)? {
+        let Some(pointer) = read_optional_active_pointer(&scope)? else {
+            continue;
+        };
+        for descriptor in pointer
+            .generation_index
+            .iter()
+            .filter_map(|entry| entry.text_artifact())
+            .filter(|descriptor| descriptor.content_key == *content_key)
+        {
+            validate_text_artifact_descriptor(descriptor)?;
+            if regular_file_exists(&root.join(&descriptor.artifact_file))? {
+                return Ok(Some(descriptor.clone()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Every completed artifact a scope of this store's project names: its live
+/// worktree scopes and any scope collection quarantined, which a recovery may
+/// restore. A store outside a shared project marks only itself.
+fn scope_text_artifact_marks(
+    store_root: &Path,
+) -> Result<BTreeSet<String>, CodeGenerationRetentionErrorV1> {
+    let mut marked = BTreeSet::new();
+    for scope in super::segment_scope_roots(store_root)? {
+        let Some(pointer) = read_optional_active_pointer(&scope)? else {
+            continue;
+        };
+        validate_durable_generation_index(&pointer)?;
+        marked.extend(
+            pointer
+                .generation_index
+                .iter()
+                .filter_map(|entry| entry.text_artifact())
+                .map(|descriptor| descriptor.artifact_file.clone()),
+        );
+    }
+    Ok(marked)
+}
+
+fn private_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+        Ok(_) => Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "code text artifact directory '{}' is not a directory",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(storage(error)),
+    }
 }
 
 pub(super) fn completed_text_artifact_digest(file_name: &str) -> Option<&str> {
@@ -423,27 +516,30 @@ pub(super) fn staging_text_artifact_source_digest(file_name: &str) -> Option<&st
         .filter(|digest| is_lowercase_hex(digest, 64))
 }
 
-/// The SQLite sidecar files a staging database leaves beside itself
-/// (`.staging-journal`, `.staging-wal`, `.staging-shm`). They carry the same
-/// source-generation digest as their staging file and share its liveness.
+/// The sidecar files a staging database leaves beside itself: SQLite's
+/// (`.staging-journal`, `.staging-wal`, `.staging-shm`) and the builder's
+/// compacted rewrite before it replaces the staging file
+/// (`.staging-compacting`), and the rollback journal SQLite keeps beside that
+/// rewrite while `VACUUM INTO` writes it (`.staging-compacting-journal`, which
+/// a kill mid-rewrite leaves behind), and a parent-artifact carry still being
+/// copied before its rename onto the staging name (`.staging-carrying` and
+/// its `.staging-carrying-journal`), and the builder's initialized sibling
+/// before atomic publication (`.staging.initializing` and its SQLite journal).
+/// They carry the same source-generation
+/// digest as their staging file and share its liveness.
 pub(super) fn staging_sidecar_text_artifact_source_digest(file_name: &str) -> Option<&str> {
     let value = file_name.strip_prefix(".text-artifact-")?;
     let digest = value
         .strip_suffix(".staging-journal")
         .or_else(|| value.strip_suffix(".staging-wal"))
-        .or_else(|| value.strip_suffix(".staging-shm"))?;
+        .or_else(|| value.strip_suffix(".staging-shm"))
+        .or_else(|| value.strip_suffix(".staging-compacting"))
+        .or_else(|| value.strip_suffix(".staging-compacting-journal"))
+        .or_else(|| value.strip_suffix(".staging-carrying"))
+        .or_else(|| value.strip_suffix(".staging-carrying-journal"))
+        .or_else(|| value.strip_suffix(".staging.initializing"))
+        .or_else(|| value.strip_suffix(".staging.initializing-journal"))?;
     is_lowercase_hex(digest, 64).then_some(digest)
-}
-
-pub(super) fn is_corrupt_text_artifact_file(file_name: &str) -> bool {
-    let Some(value) = file_name.strip_prefix("text-artifact-") else {
-        return false;
-    };
-    let Some((digest, suffix)) = value.split_once(".corrupt-") else {
-        return false;
-    };
-    let digest = digest.strip_suffix(".bin").unwrap_or(digest);
-    !suffix.is_empty() && is_lowercase_hex(digest, 64)
 }
 
 pub(super) fn verify_completed_text_artifact(
@@ -453,13 +549,19 @@ pub(super) fn verify_completed_text_artifact(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let digest = sha256_file_component(&descriptor.artifact_digest, "text artifact")?;
-    verify_unreferenced_completed_text_artifact(
+    if !verify_unreferenced_completed_text_artifact(
         path,
         digest,
         descriptor.artifact_size_bytes,
         verification,
         is_cancelled,
-    )
+    )? {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "code text artifact '{}' disappeared while its identity was being verified",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// A content-addressed path is trusted only after the open file and its path
@@ -472,15 +574,23 @@ pub(super) fn verify_unreferenced_completed_text_artifact(
     expected_size_bytes: u64,
     verification: GenerationDigestVerificationV1,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let before = std::fs::symlink_metadata(path).map_err(storage)?;
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    let before = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(storage(error)),
+    };
     if !before.file_type().is_file() || before.len() != expected_size_bytes {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "code text artifact '{}' has an invalid regular-file identity",
             path.display()
         )));
     }
-    let file = File::open(path).map_err(storage)?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(storage(error)),
+    };
     if !path_still_names_open_file(path, &file, &before)? {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "code text artifact '{}' changed while its identity was being verified",
@@ -501,12 +611,17 @@ pub(super) fn verify_unreferenced_completed_text_artifact(
             path.display()
         )));
     }
-    Ok(())
+    Ok(true)
 }
 
+/// `active_pointer` is the pointer the store carries *now*, which is not
+/// `plan.active_pointer` when generation retention rewrote the durable index
+/// earlier in the same pass. The compare-and-swap below and the receipt's
+/// index digest must both read that current value.
 pub(super) fn execute_text_artifact_retention_under_store_lock(
     store_root: &Path,
     plan: &CodeGenerationRetentionPlanV1,
+    active_pointer: Option<&DurablePublicationPointerV1>,
     completed_at: UtcMicros,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<
@@ -516,23 +631,28 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
     ),
     CodeGenerationRetentionErrorV1,
 > {
-    if observe_cancel(is_cancelled) {
+    if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
     let deleted_artifacts = plan.collectable_text_artifacts.clone();
-    let receipt = build_text_artifact_receipt(plan, deleted_artifacts.clone(), completed_at)?;
+    let receipt = build_text_artifact_receipt(
+        plan,
+        active_pointer,
+        deleted_artifacts.clone(),
+        completed_at,
+    )?;
     let transaction = CodeTextArtifactRetentionTransactionV1 {
         schema: TEXT_ARTIFACT_TRANSACTION_SCHEMA.to_owned(),
-        active_pointer: plan.active_pointer.clone(),
+        active_pointer: active_pointer.cloned(),
         receipt: receipt.clone(),
     };
-    persist_text_artifact_transaction(store_root, &transaction)?;
+    persist_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL, &transaction)?;
     let result = (|| {
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         stage_collectable_text_artifacts_cancellable(store_root, &transaction, is_cancelled)?;
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         if read_optional_active_pointer(store_root)? != transaction.active_pointer {
@@ -541,17 +661,27 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
                     .to_owned(),
             ));
         }
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
-        write_text_artifact_receipt(store_root, &receipt)?;
+        receipt_store::write_receipt(
+            store_root,
+            &TEXT_ARTIFACT_RECEIPT_STORE,
+            &receipt.receipt_digest,
+            &receipt,
+        )?;
         cleanup_committed_text_artifact_transaction(store_root, &transaction)?;
-        clear_text_artifact_transaction(store_root)
+        clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
     })();
     if let Err(error) = result {
-        if !text_artifact_receipt_is_durable(store_root, &receipt)? {
+        if !receipt_store::receipt_is_durable(
+            store_root,
+            &TEXT_ARTIFACT_RECEIPT_STORE,
+            &receipt.receipt_digest,
+            &receipt,
+        )? {
             rollback_staged_text_artifact_transaction(store_root, &transaction)?;
-            clear_text_artifact_transaction(store_root)?;
+            clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)?;
         }
         return Err(error);
     }
@@ -561,41 +691,24 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
 pub(super) fn recover_pending_text_artifact_transaction_unlocked(
     store_root: &Path,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let Some(transaction) = load_text_artifact_transaction(store_root)? else {
+    let Some(transaction) = load_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)? else {
         return Ok(());
     };
-    if text_artifact_receipt_is_durable(store_root, &transaction.receipt)? {
+    if receipt_store::receipt_is_durable(
+        store_root,
+        &TEXT_ARTIFACT_RECEIPT_STORE,
+        &transaction.receipt.receipt_digest,
+        &transaction.receipt,
+    )? {
         cleanup_committed_text_artifact_transaction(store_root, &transaction)?;
     } else {
         rollback_staged_text_artifact_transaction(store_root, &transaction)?;
     }
-    clear_text_artifact_transaction(store_root)
+    clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn text_artifact_transaction_path(store_root: &Path) -> PathBuf {
     journal_path(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
-}
-
-pub(super) fn text_artifact_transaction_stage_root(
-    store_root: &Path,
-    receipt: &CodeTextArtifactRetentionReceiptV1,
-) -> PathBuf {
-    store_root
-        .join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY)
-        .join(&receipt.receipt_digest)
-}
-
-pub(super) fn persist_text_artifact_transaction(
-    store_root: &Path,
-    transaction: &CodeTextArtifactRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    persist_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL, transaction)
-}
-
-pub(super) fn load_text_artifact_transaction(
-    store_root: &Path,
-) -> Result<Option<CodeTextArtifactRetentionTransactionV1>, CodeGenerationRetentionErrorV1> {
-    load_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn validate_text_artifact_transaction(
@@ -676,9 +789,6 @@ pub(super) fn validate_text_artifact_candidate(
             staging_text_artifact_source_digest(&candidate.artifact_file).is_some()
                 || staging_sidecar_text_artifact_source_digest(&candidate.artifact_file).is_some()
         }
-        CodeTextArtifactRetentionKindV1::Corrupt => {
-            is_corrupt_text_artifact_file(&candidate.artifact_file)
-        }
     };
     if !direct_name || candidate.artifact_file.contains(['/', '\\']) || !kind_matches_name {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
@@ -686,18 +796,6 @@ pub(super) fn validate_text_artifact_candidate(
         ));
     }
     Ok(())
-}
-
-pub(super) fn text_artifact_receipt_is_durable(
-    store_root: &Path,
-    receipt: &CodeTextArtifactRetentionReceiptV1,
-) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    receipt_store::receipt_is_durable(
-        store_root,
-        &TEXT_ARTIFACT_RECEIPT_STORE,
-        &receipt.receipt_digest,
-        receipt,
-    )
 }
 
 #[cfg(test)]
@@ -713,31 +811,32 @@ pub(super) fn stage_collectable_text_artifacts_cancellable(
     transaction: &CodeTextArtifactRetentionTransactionV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let artifacts_root = code_text_artifacts_root(store_root);
-    let stage_root = text_artifact_transaction_stage_root(store_root, &transaction.receipt);
-    std::fs::create_dir_all(&stage_root).map_err(storage)?;
-    sync_directory(stage_root.parent().ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState(
-            "text-artifact retention quarantine has no parent".to_owned(),
-        )
-    })?)?;
+    let sources = TextArtifactSources::open(store_root)?;
+    let quarantine = FileQuarantine::prepare(
+        TEXT_ARTIFACT_QUARANTINE_LABEL,
+        &store_root.join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY),
+        &transaction.receipt.receipt_digest,
+    )?;
     for candidate in &transaction.receipt.deleted_artifacts {
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         validate_text_artifact_candidate(candidate)?;
-        let source = artifacts_root.join(&candidate.artifact_file);
-        let staged = stage_root.join(&candidate.artifact_file);
-        match (regular_file_exists(&source)?, regular_file_exists(&staged)?) {
-            (true, false) => {
-                let metadata = std::fs::symlink_metadata(&source).map_err(storage)?;
-                if metadata.len() != candidate.size_bytes {
+        quarantine.stage(
+            sources.of(candidate.kind),
+            &candidate.artifact_file,
+            |file| {
+                if file.metadata().map_err(storage)?.len() != candidate.size_bytes {
                     return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                         "text-artifact candidate '{}' changed after the mark phase",
                         candidate.artifact_file
                     )));
                 }
-                if let CodeTextArtifactRetentionKindV1::Completed = candidate.kind {
+                // An empty completed artifact has nothing to hash; its
+                // content address is checked by name alone.
+                if candidate.kind == CodeTextArtifactRetentionKindV1::Completed
+                    && candidate.size_bytes != 0
+                {
                     let digest = completed_text_artifact_digest(&candidate.artifact_file)
                         .ok_or_else(|| {
                             CodeGenerationRetentionErrorV1::UnsafeState(
@@ -745,80 +844,59 @@ pub(super) fn stage_collectable_text_artifacts_cancellable(
                                     .to_owned(),
                             )
                         })?;
-                    let candidate_verification = if candidate.size_bytes == 0 {
-                        GenerationDigestVerificationV1::MetadataOnly
-                    } else {
-                        GenerationDigestVerificationV1::Full
-                    };
-                    verify_unreferenced_completed_text_artifact(
-                        &source,
-                        digest,
-                        candidate.size_bytes,
-                        candidate_verification,
-                        is_cancelled,
-                    )?;
+                    if open_file_sha256_hex_cancellable(file, is_cancelled)? != digest {
+                        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                            "code text artifact '{}' does not match its content address",
+                            candidate.artifact_file
+                        )));
+                    }
                 }
-                if observe_cancel(is_cancelled) {
+                if is_cancelled() {
                     return Err(CodeGenerationRetentionErrorV1::Cancelled);
                 }
-                std::fs::rename(&source, &staged).map_err(storage)?;
-                sync_directory(&artifacts_root)?;
-                sync_directory(&stage_root)?;
-            }
-            (false, false) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact candidate '{}' is missing before quarantine",
-                    candidate.artifact_file
-                )));
-            }
-            (false, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact candidate '{}' was already quarantined",
-                    candidate.artifact_file
-                )));
-            }
-            (true, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact candidate '{}' exists in source and quarantine",
-                    candidate.artifact_file
-                )));
-            }
-        }
+                Ok(())
+            },
+        )?;
     }
     Ok(())
+}
+
+/// The completed and staging artifact directories, each acquired once.
+struct TextArtifactSources {
+    completed: Option<Dir>,
+    staging: Option<Dir>,
+}
+
+impl TextArtifactSources {
+    fn open(store_root: &Path) -> Result<Self, CodeGenerationRetentionErrorV1> {
+        Ok(Self {
+            completed: open_optional_dir(&code_text_artifacts_root(store_root))?,
+            staging: open_optional_dir(&code_text_artifact_staging_root(store_root))?,
+        })
+    }
+
+    fn of(&self, kind: CodeTextArtifactRetentionKindV1) -> Option<&Dir> {
+        match kind {
+            CodeTextArtifactRetentionKindV1::Completed => self.completed.as_ref(),
+            CodeTextArtifactRetentionKindV1::Staging => self.staging.as_ref(),
+        }
+    }
 }
 
 pub(super) fn rollback_staged_text_artifact_transaction(
     store_root: &Path,
     transaction: &CodeTextArtifactRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let artifacts_root = code_text_artifacts_root(store_root);
-    let stage_root = text_artifact_transaction_stage_root(store_root, &transaction.receipt);
+    let sources = TextArtifactSources::open(store_root)?;
+    let quarantine = FileQuarantine::recover(
+        TEXT_ARTIFACT_QUARANTINE_LABEL,
+        &store_root.join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY),
+        &transaction.receipt.receipt_digest,
+    )?;
     for candidate in &transaction.receipt.deleted_artifacts {
-        let source = artifacts_root.join(&candidate.artifact_file);
-        let staged = stage_root.join(&candidate.artifact_file);
-        match (regular_file_exists(&source)?, regular_file_exists(&staged)?) {
-            (true, false) => {}
-            (false, true) => {
-                std::fs::rename(&staged, &source).map_err(storage)?;
-                sync_directory(&artifacts_root)?;
-                sync_directory(&stage_root)?;
-            }
-            (false, false) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact rollback cannot find '{}'",
-                    candidate.artifact_file
-                )));
-            }
-            (true, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact rollback found duplicate '{}'",
-                    candidate.artifact_file
-                )));
-            }
-        }
+        quarantine.restore(sources.of(candidate.kind), &candidate.artifact_file)?;
     }
-    remove_empty_stage_root(&stage_root)
+    quarantine.remove_empty_stage()
 }
 
 pub(super) fn cleanup_committed_text_artifact_transaction(
@@ -826,48 +904,33 @@ pub(super) fn cleanup_committed_text_artifact_transaction(
     transaction: &CodeTextArtifactRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     ensure_text_artifact_transaction_liveness(store_root, transaction)?;
-    let artifacts_root = code_text_artifacts_root(store_root);
-    let stage_root = text_artifact_transaction_stage_root(store_root, &transaction.receipt);
+    let sources = TextArtifactSources::open(store_root)?;
+    let quarantine = FileQuarantine::recover(
+        TEXT_ARTIFACT_QUARANTINE_LABEL,
+        &store_root.join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY),
+        &transaction.receipt.receipt_digest,
+    )?;
     for candidate in &transaction.receipt.deleted_artifacts {
-        let source = artifacts_root.join(&candidate.artifact_file);
-        if regular_file_exists(&source)? {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "text-artifact receipt is durable but '{}' returned to its source root",
-                candidate.artifact_file
-            )));
-        }
-        let staged = stage_root.join(&candidate.artifact_file);
-        if regular_file_exists(&staged)? {
-            std::fs::remove_file(&staged).map_err(storage)?;
-            sync_directory(&stage_root)?;
-        }
+        quarantine.remove_committed(sources.of(candidate.kind), &candidate.artifact_file)?;
     }
-    remove_empty_stage_root(&stage_root)
+    quarantine.remove_empty_stage()
 }
 
 pub(super) fn ensure_text_artifact_transaction_liveness(
     store_root: &Path,
     transaction: &CodeTextArtifactRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    // Liveness is proven against the *current* pointer: a publish may have
-    // landed since the transaction was staged (including the first publish
-    // into a previously unpublished store), and no durable descriptor target
-    // it names may be removed.
-    let Some(current) = read_optional_active_pointer(store_root)? else {
-        return Ok(());
-    };
-    validate_durable_generation_index(&current)?;
-    let deleted = transaction
+    // Liveness is proven against every scope's *current* pointer: a publish
+    // may have landed since the transaction was staged, in this scope or in
+    // a sibling that shares the completed artifact, and no durable
+    // descriptor target any of them names may be removed.
+    let marked = scope_text_artifact_marks(store_root)?;
+    if transaction
         .receipt
         .deleted_artifacts
         .iter()
-        .map(|candidate| candidate.artifact_file.as_str())
-        .collect::<BTreeSet<_>>();
-    if current
-        .generation_index
-        .iter()
-        .filter_map(|entry| entry.text_artifact.as_ref())
-        .any(|descriptor| deleted.contains(descriptor.artifact_file.as_str()))
+        .filter(|candidate| candidate.kind != CodeTextArtifactRetentionKindV1::Staging)
+        .any(|candidate| marked.contains(candidate.artifact_file.as_str()))
     {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "text-artifact retention recovery would remove a durable descriptor target".to_owned(),
@@ -876,20 +939,13 @@ pub(super) fn ensure_text_artifact_transaction_liveness(
     Ok(())
 }
 
-pub(super) fn clear_text_artifact_transaction(
-    store_root: &Path,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
-}
-
 pub(super) fn build_text_artifact_receipt(
     plan: &CodeGenerationRetentionPlanV1,
+    active_pointer: Option<&DurablePublicationPointerV1>,
     deleted_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
     completed_at: UtcMicros,
 ) -> Result<CodeTextArtifactRetentionReceiptV1, CodeGenerationRetentionErrorV1> {
-    let active_generation_index_digest = plan
-        .active_pointer
-        .as_ref()
+    let active_generation_index_digest = active_pointer
         .map(|pointer| {
             pointer.generation_index_digest.as_deref().ok_or_else(|| {
                 CodeGenerationRetentionErrorV1::UnsafeState(
@@ -922,18 +978,6 @@ pub(super) fn build_text_artifact_receipt(
         reclaimed_bytes,
         completed_at_micros: completed_at.0,
     })
-}
-
-pub(super) fn write_text_artifact_receipt(
-    store_root: &Path,
-    receipt: &CodeTextArtifactRetentionReceiptV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    receipt_store::write_receipt(
-        store_root,
-        &TEXT_ARTIFACT_RECEIPT_STORE,
-        &receipt.receipt_digest,
-        receipt,
-    )
 }
 
 pub(super) fn total_text_artifact_bytes(artifacts: &[CodeTextArtifactRetentionCandidateV1]) -> u64 {

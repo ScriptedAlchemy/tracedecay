@@ -4,7 +4,7 @@ use tracedecay_domain::{CanonicalObservationIdV1, ObservationCollisionOutcomeV1,
 use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
 
 use tracedecay_sessions::observation::{
-    CaptureClaudeObservationRequestError, ObservationApplicationError,
+    CaptureObservationRequestError, ObservationApplicationError,
 };
 
 use crate::structured_hook_error_data;
@@ -47,9 +47,8 @@ fn hook_error_response_fixtures_are_legal_and_redacted() {
 
 #[test]
 fn claude_observation_request_errors_are_bounded_hook_errors() {
-    let error = ClaudeObservationIngestError::Request(
-        CaptureClaudeObservationRequestError::SourceRangeMismatch,
-    );
+    let error =
+        ClaudeObservationIngestError::Request(CaptureObservationRequestError::SourceRangeMismatch);
     let mapped = map_claude_observation_ingest_error(&error);
     let rendered = mapped.to_string();
 
@@ -220,17 +219,49 @@ fn transcript_store_failures_keep_their_conflict_and_availability_statuses() {
 }
 
 #[test]
-fn transcript_hook_errors_keep_bounded_retry_data_without_cursor_detail() {
-    let error = tracedecay_sessions::runtime::source::TranscriptIngestError::CursorKeyMismatch {
-        expected: "private expected cursor".to_string(),
-        actual: "private actual cursor".to_string(),
-    };
+fn authority_write_failed_includes_cause_in_hook_detail() {
+    let mapped = map_transcript_ingest_error(
+        &tracedecay_sessions::runtime::source::TranscriptIngestError::HostAdmission {
+            provider: "codex",
+            reason: "authority_write_failed",
+            retryable: true,
+            status: tracedecay_sessions::admission::HostAdmissionStatus::Unavailable,
+            detail: Some(
+                "submit observation batch: exact SQL transaction lease expired".to_owned(),
+            ),
+        },
+    );
+    let rendered = mapped.to_string();
+    let data = structured_hook_error_data(&mapped).unwrap();
+    assert_eq!(data["reason_code"], "authority_write_failed");
+    assert_eq!(data["status"], "unavailable");
+    assert_eq!(data["retryable"], true);
+    let detail = data["detail"].as_str().expect("hook detail");
+    assert!(
+        detail.contains("submit observation batch"),
+        "JSON-RPC detail must carry the storage operation: {detail}"
+    );
+    assert!(
+        detail.contains("transaction lease expired"),
+        "JSON-RPC detail must carry the storage source: {detail}"
+    );
+    assert!(
+        rendered.contains("submit observation batch"),
+        "hook error message must carry the storage operation: {rendered}"
+    );
+}
+
+#[test]
+fn transcript_hook_errors_keep_bounded_retry_data_without_source_detail() {
+    let error =
+        tracedecay_sessions::runtime::source::TranscriptIngestError::InvalidSourceIdentity {
+            provider: "cursor",
+            path: std::path::PathBuf::from("/private/transcript.jsonl"),
+        };
     let mapped = map_transcript_ingest_error(&error);
     let data = structured_hook_error_data(&mapped).unwrap();
 
-    assert_eq!(data["reason_code"], "transcript_cursor_key_mismatch");
+    assert_eq!(data["reason_code"], "transcript_source_contract_invalid");
     assert_eq!(data["retryable"], false);
-    let rendered = data.to_string();
-    assert!(!rendered.contains("private expected cursor"));
-    assert!(!rendered.contains("private actual cursor"));
+    assert!(!data.to_string().contains("/private/transcript.jsonl"));
 }

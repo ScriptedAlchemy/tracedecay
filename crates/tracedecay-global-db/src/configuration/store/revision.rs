@@ -4,11 +4,12 @@ use std::future::Future;
 
 use super::audit::audit_from_transaction;
 use super::codec::insert_configuration_projections;
-use super::mutation::{commit_configuration_transaction, validate_commit_bindings};
+use super::mutation::commit_configuration_transaction;
 use super::read::{
     current_revision_id_from_executor, read_change_plan_from_executor, read_revision_from_executor,
     validate_snapshot_registry_completeness_with_registry,
 };
+use super::transact_config;
 use super::write::{insert_change_plan, insert_snapshot_entries};
 use super::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCommitV1,
@@ -63,7 +64,7 @@ pub(super) async fn insert_revision_with_registry(
 }
 
 impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
-    #[hotpath::measure(future = true, label = "global_db.configuration.query")]
+    #[tracing::instrument(name = "global_db.configuration.query", level = "trace", skip_all)]
     async fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
         let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
         let revision_id = current_revision_id_from_executor(&read).await?;
@@ -82,12 +83,12 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
             revision_id
                 .validate()
                 .map_err(ConfigurationStoreError::from)?;
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async {
                     let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
                     read_revision_from_executor(&read, &revision_id).await
                 },
-                label = "global_db.configuration.query"
+                tracing::trace_span!("global_db.configuration.query"),
             )
             .await
         }
@@ -99,33 +100,21 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
     ) -> impl Future<Output = ConfigurationStoreResult<()>> + Send {
         let plan = plan.clone();
         async move {
-            hotpath::future!(
-                async {
+            tracing::Instrument::instrument(
+                async move {
                     plan.validate().map_err(ConfigurationStoreError::from)?;
-                    let transaction = self
-                        .db
-                        .begin_write_transaction()
-                        .await
-                        .map_err(unavailable_store)?;
-                    let outcome = match read_change_plan_from_executor(
-                        &transaction,
-                        &plan.plan.plan_id,
-                    )
-                    .await
-                    {
-                        Ok(Some(existing)) if existing == plan => Ok(()),
-                        Ok(Some(_)) => Err(ConfigurationStoreError::IdempotencyConflict),
-                        Ok(None) => insert_change_plan(&transaction, &plan).await,
-                        Err(error) => Err(error),
-                    };
-                    crate::sqlite_persist::commit_outcome(
-                        transaction,
-                        outcome,
-                        ConfigurationStoreError::Unavailable,
-                    )
+                    transact_config(self.db, unavailable_store, async move |transaction| {
+                        match read_change_plan_from_executor(&transaction, &plan.plan.plan_id).await
+                        {
+                            Ok(Some(existing)) if existing == plan => Ok(()),
+                            Ok(Some(_)) => Err(ConfigurationStoreError::IdempotencyConflict),
+                            Ok(None) => insert_change_plan(&transaction, &plan).await,
+                            Err(error) => Err(error),
+                        }
+                    })
                     .await
                 },
-                label = "global_db.configuration.persist.plan"
+                tracing::trace_span!("global_db.configuration.persist.plan"),
             )
             .await
         }
@@ -139,34 +128,30 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
         let plan_id = plan_id.clone();
         async move {
             plan_id.validate().map_err(ConfigurationStoreError::from)?;
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async {
                     let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
                     read_change_plan_from_executor(&read, &plan_id).await
                 },
-                label = "global_db.configuration.query"
+                tracing::trace_span!("global_db.configuration.query"),
             )
             .await
         }
     }
 
-    #[hotpath::measure(future = true, label = "global_db.configuration.persist.commit")]
+    #[tracing::instrument(
+        name = "global_db.configuration.persist.commit",
+        level = "trace",
+        skip_all
+    )]
     async fn commit(
         &self,
         commit: ConfigurationCommitV1,
     ) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1> {
-        validate_commit_bindings(&commit)?;
-        let transaction = self
-            .db
-            .begin_write_transaction()
-            .await
-            .map_err(unavailable_store)?;
-        let outcome = commit_configuration_transaction(&transaction, &commit, false, None).await;
-        crate::sqlite_persist::commit_outcome(
-            transaction,
-            outcome,
-            ConfigurationStoreError::Unavailable,
-        )
+        commit.validate().map_err(ConfigurationStoreError::from)?;
+        transact_config(self.db, unavailable_store, async move |transaction| {
+            commit_configuration_transaction(&transaction, &commit, false, None).await
+        })
         .await
     }
 
@@ -177,12 +162,12 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
     ) -> impl Future<Output = ConfigurationStoreResult<Vec<ConfigurationAuditEvent>>> + Send {
         let after = after.cloned();
         async move {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async {
                     let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
                     audit_from_transaction(&read, after.as_ref(), limit).await
                 },
-                label = "global_db.configuration.query"
+                tracing::trace_span!("global_db.configuration.query"),
             )
             .await
         }

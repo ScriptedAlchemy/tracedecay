@@ -2,43 +2,58 @@
 //!
 //! `shutdown_owner_phases` names every retained background owner and hands it
 //! to the shutdown coordinator as (cancel, join) pairs in dependency order:
-//! producers first, then the invocation registry that admits provider work,
-//! then the store-settling reapers. The phase deadline bounds every join and
+//! manual branch publications and project opens first, then the invocation
+//! registry that holds the owners they register and admits provider work,
+//! then the remaining producers and the store-settling reapers. The phase deadline bounds every join and
 //! reports a typed timeout under the owner's name.
 //!
 //! The `cancel` side is not decoration. `prepare_shutdown_owner_phases` runs
 //! every phase's `cancel` synchronously before the *first* join is polled, so
 //! an owner that only cancels inside its join future is not actually told to
-//! stop until its phase is reached — and if the coordinator aborts the drain
+//! stop until its phase is reached, and if the coordinator aborts the drain
 //! runner first, it is never told at all and keeps running past the terminal
-//! receipt. Owners with a cheap synchronous stop (`invocation`, `maintenance`,
-//! `git_watcher`) therefore supply a real `cancel`; a `|| {}` cancel side is
-//! only correct where no synchronous stop exists.
+//! receipt. Owners with a cheap synchronous stop (`project_open`,
+//! `invocation`, `maintenance`, `git_watcher`) therefore supply a real
+//! `cancel`; a `|| {}` cancel side is only correct where no synchronous stop
+//! exists.
 
 use std::sync::Arc;
 
 use super::DaemonEngine;
-use crate::daemon::shutdown_coordination::{ShutdownOwner, ShutdownStatus};
+use crate::daemon::{project_open_tasks, shutdown_project_servers};
 #[cfg(test)]
-use crate::daemon::shutdown_orchestration::{
+use tracedecay_daemon_service::shutdown::{
     DaemonShutdownPlan, DaemonShutdownReceipt, coordinate_daemon_shutdown,
 };
-use crate::daemon::store_shutdown::ShutdownTaskReceipt;
-use crate::daemon::{log_daemon_event, project_open_tasks, shutdown_project_servers};
+use tracedecay_daemon_service::shutdown::{ShutdownOwner, ShutdownStatus};
 #[cfg(test)]
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_store_runtime::ShutdownTaskReceipt;
 
 impl DaemonEngine {
-    #[hotpath::measure(label = "daemon.engine.shutdown_owner_phases", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.shutdown_owner_phases",
+        level = "trace",
+        skip_all
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Shutdown owner-phase list is the ordered drain plan for one daemon stop."
+    )]
     pub(in crate::daemon) async fn shutdown_owner_phases(&self) -> Vec<Vec<ShutdownOwner>> {
         let project_open = project_open_tasks(&self.project_open_gates).await;
+        let store_open_cancel = self.store_administration.clone();
 
+        let manual_branch_cancel = self.store_administration.clone();
+        let manual_branch_join = self.store_administration.clone();
         let invocation_join = self.invocation.clone();
 
         let session_refresh = Arc::clone(
             self.store_administration
                 .session_temporal_refresh_schedulers(),
         );
+        let refresh_services = self.store_administration.clone();
         let automation_join = self.clone();
 
         let replay_join = self.store_administration.clone();
@@ -53,46 +68,81 @@ impl DaemonEngine {
         let watcher_cancel = self.git_watcher.clone();
         let watcher_join = self.git_watcher.clone();
 
-        let pr_join = Arc::clone(&self.pr_autotrack_task);
+        let pr_task = self.pr_autotrack_task.lock().await.take();
+        let pr_cancel = pr_task
+            .as_ref()
+            .map(crate::daemon::pr_autotrack::PrAutotrackTask::cancellation);
 
         vec![
+            vec![ShutdownOwner::with_deadline_status(
+                "manual_branch_publication",
+                move || manual_branch_cancel.cancel_manual_branch_publications(),
+                move |_| async move {
+                    match manual_branch_join
+                        .shutdown_manual_branch_publications()
+                        .await
+                    {
+                        Ok(()) => ShutdownStatus::Clean,
+                        Err(reason) => ShutdownStatus::Failed(reason),
+                    }
+                },
+            )],
+            // An admitted open registers its owners with the invocation
+            // registry, so it must settle before that registry drains: it
+            // either registers in time to be released or stops at a
+            // cancellation boundary before registering anything. The store
+            // mount it may be inside stops at its next safe point too, so the
+            // open never outlasts the cooperative window by finishing a mount.
+            vec![ShutdownOwner::with_deadline_status(
+                "project_open",
+                {
+                    let project_open_cancel = project_open.clone();
+                    move || project_open_cancel.cancel_all()
+                },
+                move |_| async move {
+                    store_open_cancel.cancel_store_opens_for_shutdown().await;
+                    if project_open.shutdown().await {
+                        ShutdownStatus::Clean
+                    } else {
+                        ShutdownStatus::TimedOut
+                    }
+                },
+            )],
             vec![ShutdownOwner::with_deadline_status(
                 "invocation",
                 {
                     let invocation_cancel = self.invocation.clone();
                     move || invocation_cancel.cancel_admissions()
                 },
-                move |_| async move {
-                    if invocation_join.shutdown().await {
-                        ShutdownStatus::Clean
-                    } else {
-                        ShutdownStatus::Failed(
-                            "invocation runtime shutdown was incomplete".to_owned(),
-                        )
-                    }
-                },
+                move |deadline| async move { invocation_join.shutdown(Some(deadline)).await },
             )],
             vec![
-                ShutdownOwner::with_deadline_status(
-                    "project_open",
-                    || {},
-                    move |_| async move {
-                        if project_open.shutdown().await {
-                            ShutdownStatus::Clean
-                        } else {
-                            ShutdownStatus::TimedOut
-                        }
+                ShutdownOwner::new(
+                    "automation",
+                    {
+                        let automation_cancel = self.clone();
+                        move || automation_cancel.cancel_automation_schedulers()
+                    },
+                    async move {
+                        automation_join.shutdown_automation_schedulers().await;
                     },
                 ),
-                ShutdownOwner::new("automation", || {}, async move {
-                    automation_join.shutdown_automation_schedulers().await;
-                }),
                 ShutdownOwner::new("session_temporal_refresh", || {}, async move {
                     session_refresh.shutdown().await;
+                    refresh_services
+                        .release_profile_session_refresh_services()
+                        .await;
                 }),
-                ShutdownOwner::new("host_admission_replay", || {}, async move {
-                    replay_join.shutdown_host_admission_replay().await;
-                }),
+                ShutdownOwner::new(
+                    "host_admission_replay",
+                    {
+                        let replay_cancel = self.store_administration.clone();
+                        move || replay_cancel.cancel_host_admission_replay()
+                    },
+                    async move {
+                        replay_join.shutdown_host_admission_replay().await;
+                    },
+                ),
                 ShutdownOwner::new(
                     "maintenance",
                     {
@@ -122,11 +172,19 @@ impl DaemonEngine {
                         }
                     },
                 ),
-                ShutdownOwner::new("pr_autotrack", || {}, async move {
-                    if let Some(task) = pr_join.lock().await.take() {
-                        task.shutdown().await;
-                    }
-                }),
+                ShutdownOwner::new(
+                    "pr_autotrack",
+                    move || {
+                        if let Some(cancellation) = pr_cancel {
+                            cancellation.cancel();
+                        }
+                    },
+                    async move {
+                        if let Some(task) = pr_task {
+                            task.shutdown().await;
+                        }
+                    },
+                ),
                 ShutdownOwner::new("session_sync", || {}, async move {
                     session_sync_join.shutdown_session_sync().await;
                 }),
@@ -187,7 +245,7 @@ impl DaemonEngine {
                             (
                                 "deadline_remaining_ms",
                                 deadline
-                                    .saturating_duration_since(tokio::time::Instant::now())
+                                    .saturating_duration_since(std::time::Instant::now())
                                     .as_millis()
                                     .to_string(),
                             ),
@@ -210,66 +268,47 @@ impl DaemonEngine {
 
     pub(in crate::daemon) fn memory_graph_reconciliation_shutdown_owner(&self) -> ShutdownOwner {
         let administration = self.store_administration.clone();
-        let store_telemetry_sampling = self.store_administration.store_telemetry_sampling();
+        // Every step stays bounded by this owner's deadline, so a genuinely
+        // stuck pass still surfaces as a typed timeout.
         ShutdownOwner::with_deadline_result(
             "memory_graph_reconciliation",
             || {},
-            move |_| {
-                hotpath::future!(
-                    async move {
-                        // Ordering is the correctness contract here: close registry
-                        // admission, cancel reconciliation, JOIN the workers while
-                        // their runtimes are still alive, and only then drain the
-                        // retained owners and close the graphs. Closing before the
-                        // join leaves the standing owner attachments leased and the
-                        // close reports a structural Conflict on every shutdown.
-                        // Every step stays bounded by this owner's deadline, so a
-                        // genuinely stuck pass still surfaces as a typed timeout.
-                        let owner = administration
-                            .prepare_memory_graph_reconciliation_shutdown()
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        owner.cancel();
-                        owner.shutdown().await?;
-                        store_telemetry_sampling.release_retained_handles_for_shutdown();
-                        administration
-                            .close_retained_graph_runtimes_for_shutdown()
-                            .await
-                            .map_err(|error| error.to_string())
-                    },
-                    label = "daemon.engine.memory_graph_reconciliation"
+            move |deadline| {
+                tracing::Instrument::instrument(
+                    async move { administration.close_stores_for_shutdown(deadline).await },
+                    tracing::trace_span!("daemon.engine.memory_graph_reconciliation"),
                 )
             },
         )
     }
 
-    #[hotpath::measure(label = "daemon.engine.shutdown.servers", future = true)]
+    #[tracing::instrument(name = "daemon.engine.shutdown.servers", level = "trace", skip_all)]
     pub(in crate::daemon) async fn shutdown_servers(
         &self,
-        deadline: tokio::time::Instant,
+        deadline: std::time::Instant,
     ) -> ShutdownTaskReceipt {
-        shutdown_project_servers(deadline, &self.store_administration).await
+        shutdown_project_servers(
+            tokio::time::Instant::from_std(deadline),
+            &self.store_administration,
+            &self.http_application_registry,
+        )
+        .await
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(in crate::daemon) async fn shutdown_all(&self) -> Arc<DaemonShutdownReceipt> {
-        let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
+        let deadline = std::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
         let lifecycle = self.lifecycle.clone();
         let shutdown_engine = self.clone();
         coordinate_daemon_shutdown(&lifecycle, deadline, async move {
             let owner_phases = shutdown_engine.shutdown_owner_phases().await;
             let terminal_owner = shutdown_engine.memory_graph_reconciliation_shutdown_owner();
             let server_engine = shutdown_engine.clone();
-            DaemonShutdownPlan::new(
-                tokio::task::JoinSet::<tracedecay_domain::errors::Result<()>>::new(),
-                owner_phases,
-                move |project_server_deadline| async move {
-                    server_engine
-                        .shutdown_servers(project_server_deadline)
-                        .await
-                },
-            )
+            DaemonShutdownPlan::new(owner_phases, move |project_server_deadline| async move {
+                server_engine
+                    .shutdown_servers(project_server_deadline)
+                    .await
+            })
             .with_terminal_owner_phases(vec![vec![terminal_owner]])
         })
         .await

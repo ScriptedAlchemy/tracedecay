@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::sync::Arc;
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -12,34 +12,23 @@ use tracedecay_domain::{
     ProjectId, ProviderId, RetentionClass, SessionId, UserProfileId,
 };
 use tracedecay_global_db::{GlobalDbObservationStore, RegisteredGlobalDb};
-use tracedecay_runtime_core::privacy::{
-    ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::HostAdmissionStatus;
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_store::{ObservationPersistOutcome, ObservationReplayRequest, ObservationStore};
 
+use crate::test_support::git::git;
+
 use tracedecay_host_admission::*;
-use tracedecay_usecases::observation::{
+use tracedecay_sessions::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ExternalSourceProjectionStateV1,
     ObservationCancellation,
 };
 
 fn initialize_repository(path: &Path) {
     fs::create_dir_all(path).unwrap();
-    let output = Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .args(["init", "-q", "-b", "main"])
-    .current_dir(path)
-    .output()
-    .unwrap();
-    assert!(
-        output.status.success(),
-        "git init failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    git(path, &["init", "-q", "-b", "main"]);
 }
 
 fn enroll_project(path: &Path, project_id: &ProjectId) {
@@ -85,7 +74,7 @@ fn host_capture_request(scope: ObservationScopeV1, record_id: &str) -> CaptureOb
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     CaptureObservationRequest::new(
@@ -128,20 +117,24 @@ async fn projectless_profile_capture_uses_the_daemon_profile_worker_plan() {
     let profile_registered = registry.profile_sessions().await.unwrap();
     let invocation = crate::daemon::DaemonInvocationState::default();
 
-    let status = invocation
-        .install_profile_worker_plan(profile_registered.clone(), identity.profile_id())
+    let installed = invocation
+        .install_profile_worker_plan_for_test(identity.clone(), profile_registered.clone())
         .await
         .unwrap();
     assert_eq!(
         tracedecay_code_index::parallelism::installed_worker_status(),
-        Some(status)
+        Some(installed.status)
     );
+    let background_cpu = installed.background_cpu;
 
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        profile_registered.as_ref(),
-    ));
+    let facade = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::for_profile(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            profile_registered.as_ref(),
+        ),
+    );
     let outcome = facade
         .capture_observation(host_capture_request(
             ObservationScopeV1::Profile,
@@ -160,6 +153,14 @@ async fn projectless_profile_capture_uses_the_daemon_profile_worker_plan() {
 
 #[tokio::test]
 async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stably() {
+    // These fixtures build a `HostAdmissionFacade` directly instead of going
+    // through `HostAdmissionTestRuntimeV1`, so nothing has installed this
+    // process's worker plan. Observation capture prepares under the background
+    // CPU authority that plan installs and refuses with
+    // `Unavailable/background_cpu_unavailable` when none is injected.
+    let background_cpu =
+        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
+            .expect("install the process background CPU authority");
     let root = TempDir::new().unwrap();
     let repository_root = root.path().join("repository");
     initialize_repository(&repository_root);
@@ -199,7 +200,8 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
         &marker,
     )
     .unwrap();
-    let facade = HostAdmissionFacade::new(
+    let facade = facade_with_background_cpu(
+        &background_cpu,
         HostAdmissionAuthorities::for_project(
             identity.brain_id().clone(),
             identity.profile_id().clone(),
@@ -222,7 +224,7 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     // Host ingress commits the observation durably but leaves the
     // external-source projection queued, so the truthful outcome is
     // `AcceptedForReplay` carrying the underlying committed persist outcome
-    // with a `Pending` projection state — never a fake immediate persist.
+    // with a `Pending` projection state, never a fake immediate persist.
     let (initial_attachment, initial_generation) = match initial {
         CaptureObservationOutcome::AcceptedForReplay {
             projection_state,
@@ -246,20 +248,15 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     assert_eq!(initial_provenance.capture().project_id(), Some(&project_id));
     assert_eq!(initial_provenance.generation_id(), &initial_generation);
 
-    let remote = Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .args([
-        "remote",
-        "add",
-        "origin",
-        "https://example.invalid/changed.git",
-    ])
-    .current_dir(&repository_root)
-    .output()
-    .unwrap();
-    assert!(remote.status.success());
+    git(
+        &repository_root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/changed.git",
+        ],
+    );
     let replay = facade
         .capture_observation(host_capture_request(
             project_scope.clone(),
@@ -297,7 +294,8 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     assert_eq!(mismatched.status, HostAdmissionStatus::Unavailable);
     assert_eq!(mismatched.reason_code, Some("project_authority_mismatch"));
 
-    let profile_facade = HostAdmissionFacade::new(
+    let profile_facade = facade_with_background_cpu(
+        &background_cpu,
         HostAdmissionAuthorities::for_profile(
             identity.brain_id().clone(),
             identity.profile_id().clone(),
@@ -354,6 +352,14 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() {
+    // These fixtures build a `HostAdmissionFacade` directly instead of going
+    // through `HostAdmissionTestRuntimeV1`, so nothing has installed this
+    // process's worker plan. Observation capture prepares under the background
+    // CPU authority that plan installs and refuses with
+    // `Unavailable/background_cpu_unavailable` when none is injected.
+    let background_cpu =
+        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
+            .expect("install the process background CPU authority");
     let temporary = TempDir::new().unwrap();
     let profile_root = temporary.path().join("profile");
     let identity =
@@ -369,10 +375,13 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
         .unwrap();
     let registered = registry.profile_sessions().await.unwrap();
 
-    let unavailable = HostAdmissionFacade::new(HostAdmissionAuthorities::unavailable_for_profile(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-    ))
+    let unavailable = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::unavailable_for_profile(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+        ),
+    )
     .capture(host_capture_request(
         ObservationScopeV1::Profile,
         "host.registered.missing",
@@ -393,11 +402,14 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
         "missing registered authority must not fall back to a direct write"
     );
 
-    let authoritative = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        registered.as_ref(),
-    ))
+    let authoritative = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::for_profile(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            registered.as_ref(),
+        ),
+    )
     .capture_observation(host_capture_request(
         ObservationScopeV1::Profile,
         "host.registered.committed",
@@ -413,11 +425,14 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
         } if matches!(*outcome, ObservationPersistOutcome::Committed(_))
     ));
 
-    let mismatch = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
-        identity.brain_id().clone(),
-        UserProfileId::new("profile.other").unwrap(),
-        registered.as_ref(),
-    ))
+    let mismatch = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::for_profile(
+            identity.brain_id().clone(),
+            UserProfileId::new("profile.other").unwrap(),
+            registered.as_ref(),
+        ),
+    )
     .capture(host_capture_request(
         ObservationScopeV1::Profile,
         "host.registered.mismatch",
@@ -437,11 +452,14 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
     );
 
     drop(daemon_scope);
-    let revoked = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        registered.as_ref(),
-    ))
+    let revoked = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::for_profile(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            registered.as_ref(),
+        ),
+    )
     .capture(host_capture_request(
         ObservationScopeV1::Profile,
         "host.registered.revoked",
@@ -468,6 +486,14 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
+    // These fixtures build a `HostAdmissionFacade` directly instead of going
+    // through `HostAdmissionTestRuntimeV1`, so nothing has installed this
+    // process's worker plan. Observation capture prepares under the background
+    // CPU authority that plan installs and refuses with
+    // `Unavailable/background_cpu_unavailable` when none is injected.
+    let background_cpu =
+        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
+            .expect("install the process background CPU authority");
     let temporary = TempDir::new().unwrap();
     let profile_root = temporary.path().join("profile");
     let project_root = temporary.path().join("project");
@@ -490,11 +516,14 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
         .await
         .unwrap();
     let profile_registered = registry.profile_sessions().await.unwrap();
-    let unavailable = HostAdmissionFacade::new(HostAdmissionAuthorities::unavailable_for_project(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-    ))
+    let unavailable = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::unavailable_for_project(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            project_id.clone(),
+        ),
+    )
     .capture(host_capture_request(
         ObservationScopeV1::Project {
             project_id: project_id.clone(),
@@ -510,12 +539,15 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     assert!(unavailable.retryable);
 
     let other_project_id = ProjectId::new("project.registered.other").unwrap();
-    let mismatch = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        other_project_id.clone(),
-        registered.as_ref(),
-    ))
+    let mismatch = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::for_project(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            other_project_id.clone(),
+            registered.as_ref(),
+        ),
+    )
     .capture(host_capture_request(
         ObservationScopeV1::Project {
             project_id: other_project_id,
@@ -527,12 +559,15 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     assert_eq!(mismatch.reason_code, Some("project_authority_mismatch"));
     assert!(!mismatch.retryable);
 
-    let wrong_shard = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-        profile_registered.as_ref(),
-    ))
+    let wrong_shard = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::for_project(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            project_id.clone(),
+            profile_registered.as_ref(),
+        ),
+    )
     .capture(host_capture_request(
         ObservationScopeV1::Project {
             project_id: project_id.clone(),
@@ -552,12 +587,15 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
         "missing or mismatched ProjectSessions authority must not use a path fallback"
     );
 
-    let committed = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-        registered.as_ref(),
-    ))
+    let committed = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::for_project(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            project_id.clone(),
+            registered.as_ref(),
+        ),
+    )
     .capture_observation(host_capture_request(
         ObservationScopeV1::Project {
             project_id: project_id.clone(),
@@ -576,12 +614,15 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     ));
 
     drop(daemon_scope);
-    let revoked = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-        registered.as_ref(),
-    ))
+    let revoked = facade_with_background_cpu(
+        &background_cpu,
+        HostAdmissionAuthorities::for_project(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            project_id.clone(),
+            registered.as_ref(),
+        ),
+    )
     .capture(host_capture_request(
         ObservationScopeV1::Project { project_id },
         "host.project.registered.revoked",
@@ -604,4 +645,11 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
         1,
         "revoked ProjectSessions authority must be rechecked at actor time"
     );
+}
+
+fn facade_with_background_cpu<'a>(
+    background_cpu: &Arc<ProcessBackgroundCpuV1>,
+    authorities: HostAdmissionAuthorities<'a>,
+) -> HostAdmissionFacade<'a> {
+    HostAdmissionFacade::new(authorities.with_background_cpu(Arc::clone(background_cpu)))
 }

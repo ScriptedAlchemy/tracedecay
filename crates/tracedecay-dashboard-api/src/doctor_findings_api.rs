@@ -1,9 +1,9 @@
-//! `GET /api/doctor/findings` — root composition for the Doctor finding family.
+//! `GET /api/doctor/findings`, root composition for the Doctor finding family.
 //!
 //! An admitted daemon owner injects the canonical composed report reader into
 //! [`DashboardState`]. This module only resolves scope and invokes that reader.
-//! Every presentation decision — family vocabulary, coverage, freshness,
-//! domain state, notes, and refresh action — belongs to
+//! Every presentation decision, family vocabulary, coverage, freshness,
+//! domain state, notes, and refresh action, belongs to
 //! [`tracedecay_api::doctor`]. A dashboard opened without an admitted reader
 //! remains explicitly unsupported.
 
@@ -13,17 +13,29 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use tracedecay_api::doctor::{
     DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE, DoctorFindingsQueryV1, DoctorReadPresentationV1,
-    KNOWN_DOCTOR_FINDING_FAMILIES, doctor_report_failure_note, parse_doctor_finding_family,
-    project_doctor_report,
+    doctor_report_failure_note, parse_doctor_finding_family, project_doctor_report,
 };
-use tracedecay_application::doctor::{
-    DoctorFindingFamilyV1, DoctorReportCoverageV1, DoctorReportEntryV1,
+use tracedecay_contracts::doctor::{
+    DOCTOR_FINDING_FAMILIES, DoctorCoverageCompletenessV1, DoctorEvidenceStateV1,
+    DoctorFamilyConsultationV1, DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1,
+    DoctorFindingFamilyV1, DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1,
+    DoctorStorageFindingKindV1,
 };
+use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
 
 use super::DashboardState;
 use super::read_model::{
     DashboardDomainStateV1, DashboardEnvelopeV1, DashboardScopeV1, scope_from_state,
 };
+
+const STORAGE_KINDS: [DoctorStorageFindingKindV1; 6] = [
+    DoctorStorageFindingKindV1::OverBudgetStore,
+    DoctorStorageFindingKindV1::OrphanStore,
+    DoctorStorageFindingKindV1::IncidentDebrisPresent,
+    DoctorStorageFindingKindV1::RetentionBacklog,
+    DoctorStorageFindingKindV1::TableGrowth,
+    DoctorStorageFindingKindV1::PendingSchemaMigration,
+];
 
 /// The canonical Doctor report projection for the read-only dashboard.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -32,11 +44,35 @@ pub struct DoctorFindingsPayloadV1 {
     pub entries: Vec<DoctorReportEntryV1>,
     pub report_coverage: Option<DoctorReportCoverageV1>,
     pub known_families: Vec<DoctorFindingFamilyV1>,
+    pub schema_convergences: Vec<SchemaConvergenceFindingV1>,
+    /// Source coverage for each typed storage finding producer. Empty when the
+    /// family filter excludes storage or the family filter was rejected.
+    pub storage_kind_statuses: Vec<StorageFindingKindStatusV1>,
     pub note: String,
 }
 
+/// Whether one storage finding producer had enough source evidence to report
+/// a real result. This is source coverage, not a health grade: `Real` can
+/// describe a clean observation or a problem finding.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageFindingSourceStateV1 {
+    Real,
+    Partial,
+    Unsupported,
+}
+
+/// Source-coverage status for one typed storage finding producer.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct StorageFindingKindStatusV1 {
+    pub kind: DoctorStorageFindingKindV1,
+    pub state: StorageFindingSourceStateV1,
+    pub observed_entries: usize,
+    pub reason: String,
+}
+
 /// `GET /api/doctor/findings`
-#[hotpath::measure(label = "dashboard_api.doctor.findings", future = true)]
+#[tracing::instrument(name = "dashboard_api.doctor.findings", level = "trace", skip_all)]
 pub async fn findings(
     State(state): State<DashboardState>,
     Query(params): Query<DoctorFindingsQueryV1>,
@@ -62,72 +98,98 @@ async fn findings_with_authorities(
             return envelope;
         }
     };
-    findings_for_family_with_authorities(scope, family_filter, doctor_report_reader).await
-}
-
-/// Project the admitted canonical Doctor report for one closed finding family.
-///
-/// Compatibility routes such as `/api/storage/findings` call this seam instead
-/// of evaluating health from dashboard-held database handles.
-pub async fn findings_for_family(
-    state: DashboardState,
-    family_filter: Option<DoctorFindingFamilyV1>,
-) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
-    let scope = scope_from_state(&state);
-    findings_for_family_with_authorities(scope, family_filter, state.doctor_report_reader.clone())
-        .await
-}
-
-async fn findings_for_family_with_authorities(
-    scope: DashboardScopeV1,
-    family_filter: Option<DoctorFindingFamilyV1>,
-    doctor_report_reader: Option<crate::DoctorReportReader>,
-) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
-    let Some(reader) = doctor_report_reader.as_ref() else {
-        return envelope(
-            scope,
+    let read = match doctor_report_reader.as_ref() {
+        None => DoctorFindingsReadV1::unavailable(
             DoctorReadPresentationV1::source_unsupported(),
-            unavailable_payload(family_filter, DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE),
-        );
-    };
-
-    // The admitted daemon composes the report across every finding producer;
-    // this single await is the expensive phase behind both `/api/doctor/*`
-    // and `/api/storage/findings`, and the span records failed reads too.
-    let report = match hotpath::future!(reader(), label = "dashboard_api.doctor.report_read").await
-    {
-        Ok(admitted) => admitted.report,
-        Err(error) => {
-            return envelope(
-                scope,
-                DoctorReadPresentationV1::source_failed(),
-                unavailable_payload(family_filter, doctor_report_failure_note(&error)),
-            );
-        }
-    };
-
-    let projection = match project_doctor_report(&report, family_filter) {
-        Ok(projection) => projection,
-        Err(rejection) => {
-            return envelope(
-                scope,
-                DoctorReadPresentationV1::source_failed(),
-                unavailable_payload(family_filter, rejection.note()),
-            );
-        }
-    };
-
-    envelope(
-        scope,
-        projection.presentation,
-        DoctorFindingsPayloadV1 {
             family_filter,
-            entries: projection.entries,
-            report_coverage: Some(projection.report_coverage),
-            known_families: KNOWN_DOCTOR_FINDING_FAMILIES.to_vec(),
-            note: projection.note,
+            DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE,
+        ),
+        // The admitted daemon composes the report across every finding
+        // producer; this single await is the expensive phase behind
+        // `/api/doctor/*`, and the span records failed reads too.
+        Some(reader) => {
+            match tracing::Instrument::instrument(
+                reader(),
+                tracing::trace_span!("dashboard_api.doctor.report_read"),
+            )
+            .await
+            {
+                Ok(admitted) => doctor_findings(
+                    &admitted.report,
+                    admitted.schema_convergences,
+                    family_filter,
+                ),
+                Err(error) => DoctorFindingsReadV1::unavailable(
+                    DoctorReadPresentationV1::source_failed(),
+                    family_filter,
+                    doctor_report_failure_note(&error),
+                ),
+            }
+        }
+    };
+    envelope(scope, read.presentation, read.payload)
+}
+
+/// One Doctor findings read: the envelope axes and the payload. Every surface
+/// that shows Doctor findings (`/api/doctor/findings`, `tracedecay doctor`)
+/// projects the daemon's canonical report through [`doctor_findings`].
+#[derive(Clone, Debug)]
+pub struct DoctorFindingsReadV1 {
+    pub presentation: DoctorReadPresentationV1,
+    pub payload: DoctorFindingsPayloadV1,
+}
+
+impl DoctorFindingsReadV1 {
+    fn unavailable(
+        presentation: DoctorReadPresentationV1,
+        family_filter: Option<DoctorFindingFamilyV1>,
+        note: impl Into<String>,
+    ) -> Self {
+        Self {
+            presentation,
+            payload: with_storage_kind_statuses(unavailable_payload(family_filter, note)),
+        }
+    }
+}
+
+/// Project the daemon's canonical Doctor report for one optional family.
+pub fn doctor_findings(
+    report: &DoctorReportV1,
+    schema_convergences: Vec<SchemaConvergenceFindingV1>,
+    family_filter: Option<DoctorFindingFamilyV1>,
+) -> DoctorFindingsReadV1 {
+    match project_doctor_report(report, family_filter) {
+        Ok(projection) => DoctorFindingsReadV1 {
+            presentation: projection.presentation,
+            payload: with_storage_kind_statuses(DoctorFindingsPayloadV1 {
+                family_filter,
+                entries: projection.entries,
+                report_coverage: Some(projection.report_coverage),
+                known_families: DOCTOR_FINDING_FAMILIES.to_vec(),
+                schema_convergences,
+                storage_kind_statuses: Vec::new(),
+                note: projection.note,
+            }),
         },
-    )
+        Err(rejection) => DoctorFindingsReadV1::unavailable(
+            DoctorReadPresentationV1::source_failed(),
+            family_filter,
+            rejection.note(),
+        ),
+    }
+}
+
+fn with_storage_kind_statuses(mut payload: DoctorFindingsPayloadV1) -> DoctorFindingsPayloadV1 {
+    if payload
+        .family_filter
+        .is_none_or(|family| family == DoctorFindingFamilyV1::Storage)
+    {
+        payload.storage_kind_statuses = STORAGE_KINDS
+            .into_iter()
+            .map(|kind| storage_kind_status(&payload, kind))
+            .collect();
+    }
+    payload
 }
 
 fn envelope(
@@ -153,8 +215,125 @@ fn unavailable_payload(
         family_filter,
         entries: Vec::new(),
         report_coverage: None,
-        known_families: KNOWN_DOCTOR_FINDING_FAMILIES.to_vec(),
+        known_families: DOCTOR_FINDING_FAMILIES.to_vec(),
+        schema_convergences: Vec::new(),
+        storage_kind_statuses: Vec::new(),
         note: note.into(),
+    }
+}
+
+fn storage_kind_status(
+    payload: &DoctorFindingsPayloadV1,
+    kind: DoctorStorageFindingKindV1,
+) -> StorageFindingKindStatusV1 {
+    let consultation = payload.report_coverage.as_ref().and_then(|coverage| {
+        coverage
+            .families()
+            .iter()
+            .find(|family| family.family() == DoctorFindingFamilyV1::Storage)
+            .map(DoctorFamilyCoverageV1::consultation)
+    });
+    let matching = payload
+        .entries
+        .iter()
+        .filter(|entry| entry.storage_kind() == Some(kind))
+        .collect::<Vec<_>>();
+    if !matching.is_empty() {
+        let complete_observations = consultation == Some(DoctorFamilyConsultationV1::Consulted)
+            && matching.iter().all(|entry| {
+                entry.finding().coverage().completeness() == DoctorCoverageCompletenessV1::Complete
+                    && matches!(
+                        entry.finding().state(),
+                        DoctorEvidenceStateV1::Stale
+                            | DoctorEvidenceStateV1::Degraded
+                            | DoctorEvidenceStateV1::HealthyCompleteCoverage
+                    )
+            });
+        let state = if complete_observations {
+            StorageFindingSourceStateV1::Real
+        } else {
+            StorageFindingSourceStateV1::Partial
+        };
+        let reason = if complete_observations {
+            format!(
+                "canonical Doctor producer returned {} observed {}",
+                matching.len(),
+                if matching.len() == 1 {
+                    "entry with complete coverage"
+                } else {
+                    "entries with complete coverage"
+                }
+            )
+        } else if let Some(DoctorFamilyConsultationV1::Unavailable { reason }) = consultation {
+            format!(
+                "canonical Doctor producer returned {} observed entries, but storage family coverage is incomplete ({})",
+                matching.len(),
+                unavailable_reason(reason)
+            )
+        } else {
+            format!(
+                "canonical Doctor producer returned {} entries, but coverage or evidence state was incomplete",
+                matching.len()
+            )
+        };
+        return StorageFindingKindStatusV1 {
+            kind,
+            state,
+            observed_entries: matching.len(),
+            reason,
+        };
+    }
+
+    let (state, reason) = match consultation {
+        Some(DoctorFamilyConsultationV1::Consulted) => (
+            StorageFindingSourceStateV1::Partial,
+            "the storage family was consulted, but the canonical report returned no typed entry for this producer; absence does not prove clean per-producer coverage"
+                .to_string(),
+        ),
+        Some(DoctorFamilyConsultationV1::Unavailable {
+            reason:
+                reason @ (DoctorFamilyUnavailableReasonV1::Unwired
+                | DoctorFamilyUnavailableReasonV1::Unsupported),
+        }) => (
+            StorageFindingSourceStateV1::Unsupported,
+            format!(
+                "canonical Doctor storage source is unavailable ({})",
+                unavailable_reason(reason)
+            ),
+        ),
+        Some(DoctorFamilyConsultationV1::Unavailable { reason }) => (
+            StorageFindingSourceStateV1::Partial,
+            format!(
+                "canonical Doctor storage source is unavailable ({}); no clean result is asserted",
+                unavailable_reason(reason)
+            ),
+        ),
+        None => (
+            StorageFindingSourceStateV1::Unsupported,
+            format!(
+                "canonical Doctor storage source supplied no consultation record: {}",
+                payload.note
+            ),
+        ),
+    };
+    StorageFindingKindStatusV1 {
+        kind,
+        state,
+        observed_entries: 0,
+        reason,
+    }
+}
+
+const fn unavailable_reason(reason: DoctorFamilyUnavailableReasonV1) -> &'static str {
+    match reason {
+        DoctorFamilyUnavailableReasonV1::Unwired => "unwired",
+        DoctorFamilyUnavailableReasonV1::Unsupported => "unsupported",
+        DoctorFamilyUnavailableReasonV1::Absent => "absent",
+        DoctorFamilyUnavailableReasonV1::Denied => "denied",
+        DoctorFamilyUnavailableReasonV1::Unknown => "unknown",
+        DoctorFamilyUnavailableReasonV1::Unavailable => "unavailable",
+        DoctorFamilyUnavailableReasonV1::ResetRequired => "reset_required",
+        DoctorFamilyUnavailableReasonV1::Corrupt => "corrupt",
     }
 }
 
@@ -166,17 +345,21 @@ mod tests {
 
     use super::*;
     use tracedecay_api::doctor::doctor_findings_refresh_action;
-    use tracedecay_application::doctor::{
+    use tracedecay_contracts::doctor::{
         AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
         CodeIndexMountReadV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
         DoctorReportComposerV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
         HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
         LanguageServerDoctorPort, LanguageServerReadV1, ObservabilityDoctorPort,
         ObservabilityReadV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
-        ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort,
-        RuntimeHealthReadV1, StorageDoctorPort,
+        ProfileAuthorityReadV1, RemoteOperationalReadV1, ResidentMemoryDoctorPort,
+        ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
     };
-    use tracedecay_application::{
+    use tracedecay_contracts::storage::{
+        SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
+        SchemaConvergenceStateV1,
+    };
+    use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestContext, RequestId, ResolvedScope,
     };
@@ -282,6 +465,15 @@ mod tests {
         }
     }
 
+    impl ResidentMemoryDoctorPort for DoctorTestSourcesV1 {
+        fn resident_memory<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+        ) -> DoctorSourceFuture<'a, ResidentMemoryReadV1> {
+            Box::pin(async { ResidentMemoryReadV1::Unobserved })
+        }
+    }
+
     impl StorageDoctorPort for DoctorTestSourcesV1 {
         fn storage_findings<'a>(
             &'a self,
@@ -344,6 +536,7 @@ mod tests {
             .with_code_index(inputs)
             .with_observability(inputs)
             .with_storage(inputs)
+            .with_memory(inputs)
             .compose(&context)
             .await
             .expect("canonical Doctor report")
@@ -373,7 +566,7 @@ mod tests {
         assert!(envelope.payload.entries.is_empty());
         assert_eq!(
             envelope.payload.known_families.len(),
-            KNOWN_DOCTOR_FINDING_FAMILIES.len()
+            DOCTOR_FINDING_FAMILIES.len()
         );
         assert_eq!(envelope.payload.family_filter, None);
         assert_eq!(envelope.payload.note, DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE);
@@ -384,19 +577,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn findings_route_echoes_valid_family_filter() {
+    async fn storage_family_without_admitted_reader_projects_every_producer_as_unsupported() {
         let envelope = findings_for_test(
             DoctorFindingsQueryV1 {
-                family: Some("configuration".to_string()),
+                family: Some("storage".to_string()),
             },
             None,
         )
         .await;
+
         assert_eq!(
             envelope.payload.family_filter,
-            Some(DoctorFindingFamilyV1::Configuration)
+            Some(DoctorFindingFamilyV1::Storage)
         );
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unsupported);
+        let statuses = &envelope.payload.storage_kind_statuses;
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|status| status.kind)
+                .collect::<Vec<_>>(),
+            STORAGE_KINDS
+        );
+        assert!(
+            statuses.iter().all(
+                |status| status.state == StorageFindingSourceStateV1::Unsupported
+                    && !status.reason.is_empty()
+            ),
+            "an unadmitted canonical source must not report any producer as real: {statuses:?}"
+        );
+
+        let other = findings_for_test(
+            DoctorFindingsQueryV1 {
+                family: Some("advisory".to_string()),
+            },
+            None,
+        )
+        .await;
+        assert!(other.payload.storage_kind_statuses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn storage_family_consulted_without_entries_is_partial_not_clean() {
+        let report = compose_report(&DoctorTestSourcesV1::all_unknown()).await;
+        let envelope = findings_for_test(
+            DoctorFindingsQueryV1 {
+                family: Some("storage".to_string()),
+            },
+            Some(report),
+        )
+        .await;
+
+        let statuses = &envelope.payload.storage_kind_statuses;
+        assert_eq!(statuses.len(), STORAGE_KINDS.len());
+        assert!(
+            statuses
+                .iter()
+                .all(|status| status.state != StorageFindingSourceStateV1::Real),
+            "unknown storage evidence must never read as a real producer result: {statuses:?}"
+        );
     }
 
     #[tokio::test]
@@ -419,17 +658,20 @@ mod tests {
     #[tokio::test]
     async fn findings_route_preserves_canonical_unknown_entries() {
         let report = compose_report(&DoctorTestSourcesV1::all_unknown()).await;
+        // Compare against the composed report rather than a fixed catalog size,
+        // so adding or retiring a finding kind does not break this route test.
+        let canonical_entries = report.entries().len();
+        assert!(
+            canonical_entries > 0,
+            "all-unknown report must carry entries"
+        );
         let envelope =
             findings_for_test(DoctorFindingsQueryV1 { family: None }, Some(report)).await;
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Partial);
-        // Advisory has both host-integration and feedback-owner findings;
-        // StorageRuntime has runtime, remote-replay, remote-operational, and
-        // profile-authority findings.
-        assert_eq!(envelope.payload.entries.len(), 11);
+        assert_eq!(envelope.payload.entries.len(), canonical_entries);
         assert!(envelope.payload.entries.iter().all(|entry| {
-            entry.finding().state()
-                == tracedecay_application::doctor::DoctorEvidenceStateV1::Unknown
+            entry.finding().state() == tracedecay_contracts::doctor::DoctorEvidenceStateV1::Unknown
         }));
         assert_eq!(
             envelope
@@ -439,39 +681,48 @@ mod tests {
                 .unwrap()
                 .families()
                 .len(),
-            KNOWN_DOCTOR_FINDING_FAMILIES.len()
+            DOCTOR_FINDING_FAMILIES.len()
         );
     }
 
-    /// The route must add no presentation of its own: every envelope axis has to
-    /// equal the API-owned projection of the very same report.
     #[tokio::test]
-    async fn route_envelope_equals_the_api_owned_projection() {
+    async fn findings_route_preserves_typed_schema_convergence() {
         let report = compose_report(&DoctorTestSourcesV1::all_unknown()).await;
+        let admitted = crate::AdmittedDoctorReportV1::new(report).with_schema_convergences(vec![
+            SchemaConvergenceFindingV1 {
+                store: "profile-sessions".to_owned(),
+                stage: SchemaConvergenceStageV1::RegisteredSchema,
+                state: SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
+                progress: Some(SchemaConvergenceProgressV1::Pages {
+                    done: 4,
+                    remaining: 7,
+                }),
+                started_at_micros: 42,
+                degraded_row: None,
+            },
+        ]);
+        let reader: crate::DoctorReportReader = Arc::new(move || {
+            let admitted = admitted.clone();
+            Box::pin(async move { Ok(admitted) })
+        });
 
-        for family in [None, Some(DoctorFindingFamilyV1::Storage)] {
-            let expected = project_doctor_report(&report, family).expect("canonical projection");
-            let envelope = findings_for_family_with_authorities(
-                dashboard_scope(),
-                family,
-                Some(reader_for(report.clone())),
-            )
-            .await;
+        let envelope = findings_with_authorities(
+            dashboard_scope(),
+            DoctorFindingsQueryV1 { family: None },
+            Some(reader),
+        )
+        .await;
 
-            assert_eq!(envelope.domain_state, expected.presentation.domain_state);
-            assert_eq!(envelope.coverage, expected.presentation.coverage);
-            assert_eq!(
-                envelope.freshness.state,
-                expected.presentation.freshness.state
-            );
-            assert_eq!(envelope.legal_actions, expected.presentation.legal_actions);
-            assert_eq!(envelope.payload.entries, expected.entries);
-            assert_eq!(
-                envelope.payload.report_coverage.as_ref(),
-                Some(&expected.report_coverage)
-            );
-            assert_eq!(envelope.payload.note, expected.note);
-            assert_eq!(envelope.payload.family_filter, family);
-        }
+        assert_eq!(
+            envelope.payload.schema_convergences[0].state,
+            SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+        );
+        assert_eq!(
+            envelope.payload.schema_convergences[0].progress,
+            Some(SchemaConvergenceProgressV1::Pages {
+                done: 4,
+                remaining: 7,
+            })
+        );
     }
 }

@@ -1,0 +1,68 @@
+{
+  "id": "scope_branch_pricing_notes",
+  "category": "git_history",
+  "pack": "pack_repeated_query",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "What did the feature/pricing-notes branch change compared with the branch that is checked out now, and has that work been merged?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_branch_diff",
+      "tracedecay_commit_context",
+      "tracedecay_git_history",
+      "tracedecay_branch_search"
+    ],
+    "acceptable": [
+      "tracedecay_diff_context",
+      "tracedecay_branch_list",
+      "tracedecay_git_diff",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states discount.rs",
+          "pattern": "\\bdiscount\\.rs\\b"
+        },
+        {
+          "id": "states NOTES.md",
+          "pattern": "\\bNOTES\\.md\\b"
+        },
+        {
+          "id": "states the branch was merged",
+          "pattern": "\\bmerge[ds]?\\b"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "claims the branch is not merged",
+          "pattern": "\\bnot (?:yet )?(?:been )?merged\\b|\\bunmerged\\b|\\bisn't merged\\b|\\bhasn't been merged\\b"
+        }
+      ]
+    }
+  },
+  "max_tool_calls": 6,
+  "repeated_query_class": "changed_scope",
+  "notes": "Changed scope and generation: the same question asked of two branches or two revisions. A hint here is a false-positive opportunity."
+}

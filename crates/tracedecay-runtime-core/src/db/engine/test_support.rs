@@ -1,23 +1,21 @@
-use std::{ops::Deref, path::Path, sync::Arc};
+use std::{fs::OpenOptions, ops::Deref, path::Path, sync::Arc};
 
-use rusqlite::Savepoint;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::{
-    ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
+    ExactSqlOnlyStorageOperationV1, ExistingWriterLocator, PersistentWriter,
     exact_sql::{ExactSqlError, ExactSqlHandle, ExactSqlWriteAuthority, ExactSqlWriteIntent},
-    reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
+    reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool},
 };
 use tracedecay_store::{
-    AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use super::{Connection, Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows};
 
 pub struct TestConnection {
     connection: Connection,
-    _readers: ReaderPool<NoReads>,
+    _readers: ReaderPool<ExactSqlOnlyReaderV1>,
     _writer: PersistentWriter,
 }
 
@@ -26,9 +24,7 @@ impl TestConnection {
         Self::open_inner(path, Some(Arc::new(AllowTestWrites)))
     }
 
-    // Only the in-crate engine tests drive this constructor; under
-    // `feature = "test-helpers"` alone it is an unused crate-private item.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn open_without_write_authority(path: &Path) -> Self {
         Self::open_inner(path, None)
     }
@@ -43,15 +39,27 @@ impl TestConnection {
     // This test-only constructor turns fixture setup failures into immediate test failures.
     #[allow(clippy::expect_used)]
     fn open_inner(path: &Path, authority: Option<Arc<dyn ExactSqlWriteAuthority>>) -> Self {
-        rusqlite::Connection::open(path).expect("create engine test database");
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .expect("create engine test database");
         let path = path
             .canonicalize()
             .expect("canonicalize engine test database");
+        let mut identity_hasher = Sha256::new();
+        identity_hasher.update(b"tracedecay.engine-test.identity.v1\0");
+        identity_hasher.update(path.as_os_str().as_encoded_bytes());
+        let identity_digest = hex::encode(identity_hasher.finalize());
         let binding: StoreRuntimeBindingV1 = serde_json::from_value(serde_json::json!({
             "shard_id": {
-                "brain_id": "brain.engine-test",
-                "profile_id": "profile.engine-test",
-                "scope": { "kind": "project", "project_id": "project.engine-test" }
+                "brain_id": format!("brain.{}", &identity_digest[..32]),
+                "profile_id": format!("profile.{}", &identity_digest[32..]),
+                "scope": {
+                    "kind": "project",
+                    "project_id": format!("project.{}", &identity_digest[..32])
+                }
             },
             "incarnation": 1,
             "authority_epoch": 1
@@ -64,18 +72,21 @@ impl TestConnection {
             LocatorDigest::new(format!("sha256:{digest}"))
                 .expect("valid engine test locator digest"),
         );
+        let runtime =
+            crate::native_runtime::handle().expect("engine fixture requires an Asupersync runtime");
         let writer = PersistentWriter::start(
+            &runtime,
             ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone())
                 .expect("valid engine test writer locator"),
             AdmissionConfigV1::default(),
-            NoWrites,
+            ExactSqlOnlyStorageOperationV1,
         )
         .expect("start engine test writer");
         let readers = ReaderPool::start(
             ExistingReaderLocator::new(binding, locator, path)
                 .expect("valid engine test reader locator"),
             AdmissionConfigV1::default().readers,
-            NoReads,
+            ExactSqlOnlyReaderV1,
         )
         .expect("start engine test readers");
         let handle = ExactSqlHandle::attach(&writer, &readers)
@@ -133,30 +144,5 @@ struct AllowTestWrites;
 impl ExactSqlWriteAuthority for AllowTestWrites {
     fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
         Ok(())
-    }
-}
-
-struct NoWrites;
-
-impl StorageOperationExecutor for NoWrites {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct NoReads;
-
-impl ReaderQueryExecutor for NoReads {
-    fn execute_read(
-        &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
-        _request: &RuntimeReadRequestV1,
-    ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
-        unreachable!("engine test SQL does not use the product read contract")
     }
 }

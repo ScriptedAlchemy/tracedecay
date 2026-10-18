@@ -44,9 +44,10 @@ async fn seed_fixture(profile: &tempfile::TempDir) -> RegisteredGlobalDbTestRunt
                  UNION ALL
                  SELECT value + 1 FROM rows WHERE value < {}
              )
-             INSERT INTO session_messages(
-                 provider, message_id, session_id, role, timestamp, ordinal, text,
-                 kind, model, tool_names, source_path, source_offset, metadata_json
+             INSERT INTO lcm_raw_messages(
+                 provider, message_id, session_id, role, timestamp, ordinal, content,
+                 kind, model, tool_names, source_path, source_offset, metadata_json,
+                 content_hash, storage_kind
              )
              SELECT
                  '{PROVIDER}',
@@ -61,7 +62,9 @@ async fn seed_fixture(profile: &tempfile::TempDir) -> RegisteredGlobalDbTestRunt
                  'tool',
                  NULL,
                  NULL,
-                 NULL
+                 NULL,
+                 'hash',
+                 'inline'
              FROM rows;",
             TOTAL_ROWS - 1
         ))
@@ -72,12 +75,12 @@ async fn seed_fixture(profile: &tempfile::TempDir) -> RegisteredGlobalDbTestRunt
 }
 
 fn session_activity_reads(criterion: &mut Criterion) {
-    let tokio = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
+    let executor = asupersync::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(0, 512)
         .build()
         .expect("build benchmark runtime");
     let profile = tempfile::tempdir().expect("temporary benchmark profile");
-    let runtime = tokio.block_on(seed_fixture(&profile));
+    let runtime = executor.block_on(seed_fixture(&profile));
     let database = runtime.profile_database();
     let database_path = database.db_path();
     let sibling = |suffix: &str| {
@@ -102,7 +105,7 @@ fn session_activity_reads(criterion: &mut Criterion) {
 
     let mut group = criterion.benchmark_group("session_activity_reads");
     for (label, since_ts, eligible_rows) in cases {
-        let validation = tokio
+        let validation = executor
             .block_on(database.session_messages_after(
                 PROVIDER,
                 TARGET_SESSION,
@@ -120,17 +123,25 @@ fn session_activity_reads(criterion: &mut Criterion) {
             BenchmarkId::new("eligible_rows", label),
             &since_ts,
             |bencher, since_ts| {
-                bencher.to_async(&tokio).iter(|| async {
+                bencher.to_async(BenchExecutor(&executor)).iter(|| async {
                     let rows = database
                         .session_messages_after(PROVIDER, TARGET_SESSION, *since_ts, PAGE_SIZE)
                         .await
                         .expect("query production session activity");
-                    criterion::black_box(rows)
+                    std::hint::black_box(rows)
                 });
             },
         );
     }
     group.finish();
+}
+
+struct BenchExecutor<'a>(&'a asupersync::runtime::Runtime);
+
+impl criterion::async_executor::AsyncExecutor for BenchExecutor<'_> {
+    fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
+        self.0.block_on(future)
+    }
 }
 
 criterion_group!(benches, session_activity_reads);

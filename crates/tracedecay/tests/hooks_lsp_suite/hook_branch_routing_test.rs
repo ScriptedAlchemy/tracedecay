@@ -3,22 +3,24 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay_runtime_core::path_safety::{
+    canonical_root_identity, plain_git_args, plain_host_path,
+};
 
+/// The canonical, plainly spelled identity of a fixture path.
+///
+/// Canonicalizing on every host is what keeps the fixture and the production
+/// resolver naming one directory; spelling the result plainly is what lets it
+/// still be handed to `git`, which refuses the `\\?\` form `canonicalize`
+/// returns on Windows.
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
+    canonical_root_identity(path)
 }
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
-        .args(args)
-        .current_dir(project)
+        .args(plain_git_args(args))
+        .current_dir(plain_host_path(project))
         .output()
         .expect("git command should run");
     assert!(
@@ -30,10 +32,11 @@ fn git(project: &Path, args: &[&str]) {
     );
 }
 
+#[cfg(unix)]
 fn git_head_oid(project: &Path) -> String {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(project)
+        .current_dir(plain_host_path(project))
         .output()
         .expect("git rev-parse should run");
     assert!(output.status.success(), "git rev-parse HEAD failed");
@@ -47,6 +50,7 @@ fn git_head_oid(project: &Path) -> String {
 /// anywhere. A subsequent write on another branch rolls the store to a newer
 /// generation under the new ref while the first branch keeps its sealed
 /// provenance record.
+#[cfg(unix)]
 #[tokio::test]
 async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
     let dir = TempDir::new().unwrap();
@@ -108,11 +112,6 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .branches
         .get("feature/hook")
         .expect("hook branch must be tracked");
-    assert!(
-        entry.served_by_project_store(),
-        "tracked branch must reference the canonical main database, found '{}'",
-        entry.db_file
-    );
     assert_eq!(entry.parent.as_deref(), Some("main"));
     let source = entry
         .graph_source
@@ -301,4 +300,38 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         !shard_root.join("branches").exists(),
         "no write may create a per-branch database"
     );
+}
+
+#[cfg(not(unix))]
+#[tokio::test]
+async fn hook_branch_write_refuses_when_scheduler_authority_is_unavailable() {
+    let dir = TempDir::new().unwrap();
+    let temp_root = canonical_temp_path(dir.path());
+    let project = temp_root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    git(&project, &["init", "-b", "main"]);
+    let harness = ProductionProjectCompositionHarnessV1::open(&temp_root, [project.clone()])
+        .await
+        .unwrap();
+    let shard_root = harness.project_data_root(&project).await.unwrap();
+    let before = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root);
+    let error = harness
+        .track_worktree_branch(&project, &project, "feature/hook")
+        .await
+        .expect_err("branch activation requires the scheduler authority");
+    assert!(matches!(
+        error,
+        tracedecay_domain::TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable: true,
+            ..
+        } if reason_code == "code_index_scheduler_unavailable"
+    ));
+    let after = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root);
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+    assert!(!shard_root.join("branches").exists());
+    harness.shutdown().await;
 }

@@ -9,8 +9,8 @@
 //! hydration.
 //!
 //! Foreground retrieval is explicitly single-root. The exact lane is
-//! independent of the fielded lexical/BM25 lane. Semantic is an optional,
-//! independently admitted augmentation.
+//! independent of the fielded lexical/BM25 lane; the graph lane expands from
+//! their seeds.
 
 pub mod dedupe;
 pub mod diversity;
@@ -27,21 +27,22 @@ pub mod ports;
 pub mod prepared_query;
 pub mod query_authority;
 pub mod request;
-pub mod rerank;
-pub mod semantic;
+mod source_tier;
+mod stage_counters;
 pub mod task_session;
 
 pub use self::execution::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
-    NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSemanticRecordV1, NativeSymbolRecordV1, QueryExecutionContractErrorV1,
+    NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1, NativeSymbolRecordV1,
+    QueryExecutionContractErrorV1,
 };
 pub use self::observation::{
     ContextUseOutcomeV1, ObservedWithCoverageV1, RetrievalPipelineObservationV1,
     observe_composition, observe_context_outcome,
 };
 pub use self::ports::{
-    ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
+    CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1, ExactTermPostingReadPort, GraphEvidenceReadPort,
+    LexicalPostingReadPort, RetrievalPortError,
 };
 pub use self::prepared_query::{
     PreparedQueryBindingsV1, PreparedQueryCursorRoutingV1, PreparedQueryErrorV1,
@@ -55,7 +56,7 @@ pub use self::query_authority::{
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 
 pub const QUERY_EXACT_RETRIEVER_REVISION_V1: &str = "retriever.exact.daemon.v1";
-pub const QUERY_LEXICAL_RETRIEVER_REVISION_V1: &str = "retriever.lexical.daemon.v1";
+pub const QUERY_LEXICAL_RETRIEVER_REVISION_V1: &str = "retriever.lexical.daemon.qualified-names.v1";
 pub const QUERY_GRAPH_RETRIEVER_REVISION_V1: &str = "retriever.graph.daemon.v1";
 pub const QUERY_SANITIZER_REVISION_V1: &str = "query-sanitizer.daemon.v1";
 pub const QUERY_NORMALIZATION_REVISION_V1: &str = "query-normalization.daemon.v1";
@@ -64,22 +65,23 @@ pub const QUERY_LEXICAL_PROFILE_REVISION_V1: &str = "lexical-profile.daemon.v1";
 pub const QUERY_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
 pub const QUERY_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
 pub const QUERY_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
-pub const QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1: &str = "score.semantic-distance.evaluation.v1";
-/// Score domain stamped on published production semantic candidates.
+/// Raw lexical score (BM25 micros) that calibrates to the full lexical
+/// feature. Fusion counts one lexical contribution per candidate, so this
+/// range is the only lexical strength utility carries: at a 1.0 ceiling every
+/// hit saturated and the graph lane alone decided between lexical candidates.
+/// Hits above it still order by raw score.
 ///
-/// Seated hybrid profiles calibrate
-/// [`QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1`]. Production search must
-/// stamp the same identity so a completed semantic batch can enter
-/// composition. A parallel `score.semantic-distance.daemon.v1` spelling is
-/// not a second admitted domain.
-pub const QUERY_SEMANTIC_SCORE_DOMAIN_V1: &str = QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1;
-/// Descending-score bounds for the useful half of canonical cosine distance,
-/// scaled by one billion. They express nonnegative cosine similarity directly
-/// in parts per million; zero and negative similarity both calibrate to zero.
-/// Consequently a profile threshold of `700_000` means cosine similarity
-/// `0.7`, rather than `0.4` under a shifted `[-1, 1]` mapping.
-pub const QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1: u64 = i64::MAX as u64 - 1_000_000_000;
-pub const QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1: u64 = i64::MAX as u64;
+/// ponytail: one static ceiling for every corpus (about the evaluator
+/// corpus's 25th-percentile top hit); BM25 grows with corpus idf, so
+/// per-query normalization is the upgrade path if larger repositories
+/// saturate.
+pub const QUERY_LEXICAL_CALIBRATION_CEILING_MICROS_V1: u64 = 32_000_000;
+/// Score domain used when the mounted core fallback policy ranks TaskSession.
+///
+/// It is not part of the exact/lexical/graph fusion profile, so search cursor
+/// identity stays the checked-in fallback policy.
+pub const QUERY_TASK_SESSION_SCORE_DOMAIN_V1: &str = "score.task_session.daemon.v1";
+pub const QUERY_TASK_SESSION_CALIBRATION_V1: &str = "calibration.task_session.query-fallback";
 
 #[cfg(test)]
 mod tests;

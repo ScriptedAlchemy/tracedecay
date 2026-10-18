@@ -1,21 +1,25 @@
 use tracedecay_automation_runtime::automation::managed_skills::{
-    MAX_MANAGED_SKILL_BODY_BYTES, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-    ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
-    apply_managed_skill_update, archive_managed_skill, create_managed_skill, disable_managed_skill,
-    list_managed_skills, load_managed_skill, managed_skill_dir, restore_managed_skill,
-    save_managed_skill, set_managed_skill_pinned, set_managed_skill_state, update_managed_skill,
+    MAX_MANAGED_SKILL_BODY_BYTES, ManagedSkillDraft, ManagedSkillExt, ManagedSkillProvenance,
+    ManagedSkillReadError, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
+    ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget, apply_managed_skill_update,
+    archive_managed_skill, create_managed_skill, disable_managed_skill, list_managed_skills,
+    load_managed_skill, managed_skill_dir, restore_managed_skill, save_managed_skill,
+    set_managed_skill_pinned, set_managed_skill_state,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
-    AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
-    load_skill_usage_records, record_skill_usage, record_skill_usage_event,
-    skill_usage_ledger_path, summarize_skill_usage, summarize_skill_usage_for,
+    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, list_skill_usage_records,
+    record_skill_usage, record_skill_usage_event, skill_usage_record_path, summarize_skill_usage,
+    summarize_skill_usage_for,
 };
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_global_db::AnalyticsEventRecord;
 
 fn draft() -> ManagedSkillDraft {
     ManagedSkillDraft {
         id: "repo-hygiene".to_string(),
         title: "Repository hygiene".to_string(),
         summary: "Keep repository maintenance guidance current.".to_string(),
+        routing_description: "Keep repository maintenance guidance current.".to_string(),
         category: "maintenance".to_string(),
         targets: vec![SkillInstallTarget::Cursor, SkillInstallTarget::Codex],
         body_markdown: "Use focused checks before changing generated files.".to_string(),
@@ -46,25 +50,44 @@ fn rejects_unsafe_skill_ids_and_support_paths() {
     ] {
         let mut draft = draft();
         draft.id = id.to_string();
-        assert!(draft.materialize().is_err(), "accepted unsafe id: {id}");
-    }
-
-    for path in [
-        "",
-        "/tmp/escape.md",
-        "../escape.md",
-        "a/../../b.md",
-        "a\\b.md",
-        "SKILL.md",
-        "skill.json",
-        "notes/freeform.md",
-        "references",
-    ] {
+        let error = draft.materialize().expect_err("accepted unsafe id");
         assert!(
-            ManagedSupportFile::new(path, b"body".to_vec()).is_err(),
-            "accepted unsafe support path: {path}",
+            error
+                .to_string()
+                .contains(&format!("unsafe managed skill id '{id}'")),
+            "unexpected refusal for {id:?}: {error}"
         );
     }
+    assert!(draft().materialize().is_ok());
+
+    for (path, refusal) in [
+        ("", "unsafe support path ''"),
+        ("/tmp/escape.md", "unsafe support path '/tmp/escape.md'"),
+        ("../escape.md", "unsafe support path '../escape.md'"),
+        ("a/../../b.md", "unsafe support path 'a/../../b.md'"),
+        ("a\\b.md", "unsafe support path 'a\\b.md'"),
+        ("SKILL.md", "support path 'SKILL.md' must be under one of"),
+        (
+            "skill.json",
+            "support path 'skill.json' must be under one of",
+        ),
+        (
+            "notes/freeform.md",
+            "support path 'notes/freeform.md' must be under one of",
+        ),
+        (
+            "references",
+            "support path 'references' must name a file under",
+        ),
+    ] {
+        let error = ManagedSupportFile::new(path, b"body".to_vec())
+            .expect_err("accepted unsafe support path");
+        assert!(
+            error.to_string().contains(refusal),
+            "unexpected refusal for {path:?}: {error}"
+        );
+    }
+    assert!(ManagedSupportFile::new("references/checklist.md", b"body".to_vec()).is_ok());
 }
 
 #[test]
@@ -74,16 +97,38 @@ fn rejects_duplicate_conflicting_and_oversized_support_files() {
         ManagedSupportFile::new("references/checklist.md", b"one".to_vec()).unwrap(),
         ManagedSupportFile::new("references/checklist.md", b"two".to_vec()).unwrap(),
     ];
-    assert!(duplicate.materialize().is_err());
+    let error = duplicate.materialize().expect_err("duplicate support path");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate managed skill support path 'references/checklist.md'"),
+        "unexpected refusal: {error}"
+    );
 
     let mut conflict = draft();
     conflict.support_files = vec![
         ManagedSupportFile::new("references/checklist.md", b"one".to_vec()).unwrap(),
         ManagedSupportFile::new("references/checklist.md/detail.md", b"two".to_vec()).unwrap(),
     ];
-    assert!(conflict.materialize().is_err());
+    let error = conflict
+        .materialize()
+        .expect_err("conflicting support path");
+    assert!(
+        error.to_string().contains(
+            "support path 'references/checklist.md/detail.md' conflicts with file path 'references/checklist.md'"
+        ),
+        "unexpected refusal: {error}"
+    );
 
-    assert!(ManagedSupportFile::new("references/huge.md", vec![b'x'; 64 * 1024 + 1]).is_err());
+    let error = ManagedSupportFile::new("references/huge.md", vec![b'x'; 64 * 1024 + 1])
+        .expect_err("oversized support file");
+    assert!(
+        error
+            .to_string()
+            .contains("support file 'references/huge.md' exceeds 65536 bytes"),
+        "unexpected refusal: {error}"
+    );
+    assert!(ManagedSupportFile::new("references/at-limit.md", vec![b'x'; 64 * 1024]).is_ok());
 }
 
 #[test]
@@ -91,6 +136,7 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
     for (field, value) in [
         ("title", ""),
         ("summary", ""),
+        ("routing_description", ""),
         ("category", ""),
         ("body_markdown", ""),
     ] {
@@ -98,6 +144,7 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
         match field {
             "title" => draft.title = value.to_string(),
             "summary" => draft.summary = value.to_string(),
+            "routing_description" => draft.routing_description = value.to_string(),
             "category" => draft.category = value.to_string(),
             "body_markdown" => draft.body_markdown = value.to_string(),
             _ => unreachable!(),
@@ -126,7 +173,7 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
     }
     for key in ["name:", "description:"] {
         assert!(
-            !markdown.contains(key),
+            !markdown.lines().any(|line| line.starts_with(key)),
             "managed markdown must not include native frontmatter key {key}"
         );
     }
@@ -209,38 +256,16 @@ fn checksum_is_deterministic_and_tracks_content_not_state_or_pin() {
     assert_ne!(first.metadata.checksum, second.metadata.checksum);
 }
 
-#[test]
-fn state_and_pin_lifecycle_preserves_automatic_activation() {
-    let mut skill = draft().materialize().unwrap();
-    skill.metadata.updated_at = 1;
-    assert_eq!(skill.metadata.state, ManagedSkillState::Active);
-    assert!(!skill.metadata.pinned);
-
-    skill.set_state(ManagedSkillState::Disabled);
-    assert!(skill.metadata.updated_at > 1);
-    assert_eq!(skill.metadata.state, ManagedSkillState::Disabled);
-    skill.metadata.updated_at = 1;
-    skill.set_pinned(true);
-    assert!(skill.metadata.updated_at > 1);
-    assert_eq!(skill.metadata.state, ManagedSkillState::Disabled);
-    assert!(skill.metadata.pinned);
-
-    skill.metadata.updated_at = 1;
-    skill.set_state(ManagedSkillState::Active);
-    assert!(skill.metadata.updated_at > 1);
-    assert_eq!(skill.metadata.state, ManagedSkillState::Active);
-    assert!(skill.metadata.pinned);
-}
-
 #[tokio::test]
 async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_revision() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let active = create_managed_skill(&profile_root, draft()).await.unwrap();
 
-    let err = update_managed_skill(
+    let err = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
+        &active.metadata.checksum,
         ManagedSkillUpdate {
             summary: Some("Bad\nsummary".to_string()),
             ..ManagedSkillUpdate::default()
@@ -281,9 +306,10 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
     assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
     assert_eq!(reloaded.metadata.checksum, active.metadata.checksum);
 
-    let err = update_managed_skill(
+    let err = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
+        &active.metadata.checksum,
         ManagedSkillUpdate {
             body_markdown: Some("x".repeat(MAX_MANAGED_SKILL_BODY_BYTES + 1)),
             ..ManagedSkillUpdate::default()
@@ -356,119 +382,32 @@ async fn managed_skill_store_persists_package_and_lifecycle() {
 }
 
 #[tokio::test]
-async fn managed_skill_store_renders_automatic_activation_in_markdown() {
+async fn managed_skill_record_without_timestamps_is_refused_unchanged() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let mut skill = draft().materialize().unwrap();
-    skill.set_pinned(true);
-    save_managed_skill(&profile_root, &skill).await.unwrap();
+    create_managed_skill(&profile_root, draft()).await.unwrap();
+    let record_path = managed_skill_dir(&profile_root, "repo-hygiene")
+        .unwrap()
+        .join("skill.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    let metadata = record["metadata"].as_object_mut().unwrap();
+    metadata.remove("created_at").unwrap();
+    metadata.remove("updated_at").unwrap();
+    let stored = serde_json::to_vec_pretty(&record).unwrap();
+    std::fs::write(&record_path, &stored).unwrap();
 
-    let skill_md = std::fs::read_to_string(
-        managed_skill_dir(&profile_root, "repo-hygiene")
-            .unwrap()
-            .join("SKILL.md"),
-    )
-    .unwrap();
-
-    assert!(skill_md.contains("state: active"));
-    assert!(skill_md.contains("pinned: true"));
-    assert!(skill_md.contains("created_at: "));
-    assert!(skill_md.contains("updated_at: "));
-}
-
-#[tokio::test]
-async fn managed_skill_load_backfills_missing_timestamps() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let skill_dir = managed_skill_dir(&profile_root, "legacy-skill").unwrap();
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("skill.json"),
-        r#"{
-  "metadata": {
-    "id": "legacy-skill",
-    "title": "Legacy skill",
-    "summary": "Old record before timestamps.",
-    "category": "maintenance",
-    "state": "active",
-    "pinned": false,
-    "checksum": "sha256:legacy",
-    "provenance": {
-      "source": "import",
-      "actor": "test",
-      "run_id": null
-    }
-  },
-  "body_markdown": "Legacy body.",
-  "support_files": []
-}"#,
-    )
-    .unwrap();
-
-    let skill = load_managed_skill(&profile_root, "legacy-skill")
+    let error = load_managed_skill(&profile_root, "repo-hygiene")
         .await
-        .unwrap();
-    assert!(skill.metadata.created_at > 0);
-    assert!(skill.metadata.updated_at > 0);
-
-    std::fs::write(
-        skill_dir.join("skill.json"),
-        r#"{
-  "metadata": {
-    "id": "legacy-skill",
-    "title": "Legacy skill",
-    "summary": "Old record with only creation time.",
-    "category": "maintenance",
-    "state": "active",
-    "pinned": false,
-    "checksum": "sha256:legacy",
-    "created_at": 100,
-    "provenance": {
-      "source": "import",
-      "actor": "test",
-      "run_id": null
-    }
-  },
-  "body_markdown": "Legacy body.",
-  "support_files": []
-}"#,
-    )
-    .unwrap();
-    let skill = load_managed_skill(&profile_root, "legacy-skill")
-        .await
-        .unwrap();
-    assert_eq!(skill.metadata.created_at, 100);
-    assert_eq!(skill.metadata.updated_at, 100);
-
-    std::fs::write(
-        skill_dir.join("skill.json"),
-        r#"{
-  "metadata": {
-    "id": "legacy-skill",
-    "title": "Legacy skill",
-    "summary": "Old record with inconsistent timestamps.",
-    "category": "maintenance",
-    "state": "active",
-    "pinned": false,
-    "checksum": "sha256:legacy",
-    "created_at": 200,
-    "updated_at": 100,
-    "provenance": {
-      "source": "import",
-      "actor": "test",
-      "run_id": null
-    }
-  },
-  "body_markdown": "Legacy body.",
-  "support_files": []
-}"#,
-    )
-    .unwrap();
-    let skill = load_managed_skill(&profile_root, "legacy-skill")
-        .await
-        .unwrap();
-    assert_eq!(skill.metadata.created_at, 200);
-    assert_eq!(skill.metadata.updated_at, 200);
+        .unwrap_err();
+    let ManagedSkillReadError::Failed(TraceDecayError::Config { message }) = error else {
+        panic!("a record without timestamps is a store refusal, not a missing skill: {error:?}");
+    };
+    assert!(
+        message.contains("missing field `created_at`"),
+        "unexpected refusal: {message}"
+    );
+    assert_eq!(std::fs::read(&record_path).unwrap(), stored);
 }
 
 #[tokio::test]
@@ -636,9 +575,10 @@ async fn managed_skill_update_activates_content_changes_immediately() {
     let before_update = create_managed_skill(&profile_root, draft()).await.unwrap();
     let created_at = before_update.metadata.created_at;
 
-    let updated = update_managed_skill(
+    let updated = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
+        &before_update.metadata.checksum,
         ManagedSkillUpdate {
             summary: Some("Updated summary from review evidence.".to_string()),
             body_markdown: Some(
@@ -667,33 +607,6 @@ async fn managed_skill_update_activates_content_changes_immediately() {
     assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
     assert_eq!(reloaded.metadata.checksum, updated.metadata.checksum);
     assert!(reloaded.render_skill_markdown().contains("Updated summary"));
-}
-
-#[tokio::test]
-async fn managed_skill_update_removes_stale_support_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    create_managed_skill(&profile_root, draft()).await.unwrap();
-    let skill_dir = managed_skill_dir(&profile_root, "repo-hygiene").unwrap();
-    assert!(skill_dir.join("references/checklist.md").is_file());
-
-    update_managed_skill(
-        &profile_root,
-        "repo-hygiene",
-        ManagedSkillUpdate {
-            support_files: Some(vec![
-                ManagedSupportFile::new("templates/new.md", b"new body".to_vec()).unwrap(),
-            ]),
-            ..ManagedSkillUpdate::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    assert!(!skill_dir.join("references/checklist.md").exists());
-    assert!(skill_dir.join("templates/new.md").is_file());
-    assert!(skill_dir.join("skill.json").is_file());
-    assert!(skill_dir.join("SKILL.md").is_file());
 }
 
 #[tokio::test]
@@ -773,6 +686,48 @@ async fn automatic_managed_skill_update_rejects_no_op_patch() {
 }
 
 #[tokio::test]
+async fn released_monolithic_skill_usage_ledger_is_a_typed_reset() {
+    for released in [
+        std::path::Path::new("skill_usage.json"),
+        std::path::Path::new("skill_usage/legacy-imported-events.json"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let skill = draft().materialize().unwrap();
+        save_managed_skill(&profile_root, &skill).await.unwrap();
+        let released_path = profile_root.join("agent_managed").join(released);
+        std::fs::create_dir_all(released_path.parent().unwrap()).unwrap();
+        let bytes = br#"{"schema_version":1,"records":{"repo-hygiene":{"view_count":3}}}"#;
+        std::fs::write(&released_path, bytes).unwrap();
+        let record_path = skill_usage_record_path(&profile_root, "repo-hygiene");
+        let record_before = std::fs::read(&record_path).ok();
+
+        for error in [
+            list_skill_usage_records(&profile_root).await.unwrap_err(),
+            record_skill_usage(
+                &profile_root,
+                &skill,
+                SkillUsageAction::View,
+                "dashboard",
+                Vec::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err(),
+        ] {
+            let (authority, reason) = error
+                .reset_required_context()
+                .unwrap_or_else(|| panic!("monolithic ledger must be a typed reset: {error:?}"));
+            assert_eq!(authority, "managed skill store");
+            assert!(reason.contains("monolithic"), "{reason}");
+        }
+        assert_eq!(std::fs::read(&released_path).unwrap(), bytes);
+        assert_eq!(std::fs::read(&record_path).ok(), record_before);
+    }
+}
+
+#[tokio::test]
 async fn managed_skill_usage_ledger_records_views_uses_and_patches() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
@@ -814,8 +769,11 @@ async fn managed_skill_usage_ledger_records_views_uses_and_patches() {
     .await
     .unwrap();
 
-    assert!(skill_usage_ledger_path(&profile_root).is_file());
-    let records = load_skill_usage_records(&profile_root, None).await.unwrap();
+    assert!(
+        skill_usage_record_path(&profile_root, "repo-hygiene").is_file(),
+        "each skill owns its usage file; writers must not share skill_usage.json"
+    );
+    let records = list_skill_usage_records(&profile_root).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].skill_id, "repo-hygiene");
     assert_eq!(records[0].state, Some(ManagedSkillState::Active));

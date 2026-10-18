@@ -17,7 +17,6 @@ function ev(
     event_id: string;
     event_revision: number;
     entity_revision: number;
-    is_receipt: boolean;
     n: number;
   }> = {},
 ): SseEventEnvelope<Body> {
@@ -33,12 +32,11 @@ function ev(
     observation_time: "ot",
     watermark: "wm",
     coverage: null,
-    is_receipt: overrides.is_receipt,
     payload: { n: overrides.n ?? event_revision },
   };
 }
 
-describe("SSE reducer — ordering", () => {
+describe("SSE reducer, ordering", () => {
   it("preserves monotone acceptance order in the batch", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ event_revision: 1 }));
@@ -59,12 +57,12 @@ describe("SSE reducer — ordering", () => {
   });
 });
 
-describe("SSE reducer — dedupe by stream/event/revision", () => {
+describe("SSE reducer, dedupe by stream/event/revision", () => {
   it("drops a duplicate (same stream/event/revision) event", () => {
     const r = createSseReducer<Body>();
     expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(true);
     expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(false);
-    expect(r.takeBatch().events).toHaveLength(1);
+    expect(r.takeBatch().events).toEqual([ev({ event_revision: 1, event_id: "e1" })]);
     expect(r.stats().observedEvents).toBe(1);
   });
 
@@ -72,11 +70,14 @@ describe("SSE reducer — dedupe by stream/event/revision", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ stream_id: "a", event_revision: 1, event_id: "x" }));
     expect(r.ingest(ev({ stream_id: "b", event_revision: 1, event_id: "x" }))).toBe(true);
-    expect(r.takeBatch().events).toHaveLength(2);
+    expect(r.takeBatch().events).toEqual([
+      ev({ stream_id: "a", event_revision: 1, event_id: "x" }),
+      ev({ stream_id: "b", event_revision: 1, event_id: "x" }),
+    ]);
   });
 });
 
-describe("SSE reducer — stale-generation rejection", () => {
+describe("SSE reducer, stale-generation rejection", () => {
   it("rejects events from an older generation and accepts newer ones", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ generation: 2, event_revision: 1, event_id: "e1" }));
@@ -108,7 +109,7 @@ describe("SSE reducer — stale-generation rejection", () => {
   });
 });
 
-describe("SSE reducer — revision gap => refetch once", () => {
+describe("SSE reducer, revision gap => refetch once", () => {
   it("emits exactly one refetch signal for a gap and coalesces multiple gaps", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ event_revision: 1, event_id: "e1" }));
@@ -128,7 +129,7 @@ describe("SSE reducer — revision gap => refetch once", () => {
   });
 });
 
-describe("SSE reducer — overflow => stale + single invalidation", () => {
+describe("SSE reducer, overflow => stale + single invalidation", () => {
   it("marks stale and emits one invalidation on event-count overflow", () => {
     const r = createSseReducer<Body>({ maxEvents: 3, sizeOf: () => 1 });
     r.ingest(ev({ event_revision: 1, event_id: "e1" }));
@@ -138,7 +139,11 @@ describe("SSE reducer — overflow => stale + single invalidation", () => {
     const batch = r.takeBatch();
     expect(batch.stale).toBe(true);
     expect(batch.refetch).toBe(true);
-    expect(batch.events).toHaveLength(3);
+    expect(batch.events).toEqual([
+      ev({ event_revision: 1, event_id: "e1" }),
+      ev({ event_revision: 2, event_id: "e2" }),
+      ev({ event_revision: 3, event_id: "e3" }),
+    ]);
   });
 
   it("marks stale on byte overflow", () => {
@@ -146,7 +151,13 @@ describe("SSE reducer — overflow => stale + single invalidation", () => {
     r.ingest(ev({ event_revision: 1, event_id: "e1" }));
     r.ingest(ev({ event_revision: 2, event_id: "e2" }));
     expect(r.ingest(ev({ event_revision: 3, event_id: "e3" }))).toBe(false);
-    expect(r.takeBatch().stale).toBe(true);
+    const batch = r.takeBatch();
+    expect(batch.stale).toBe(true);
+    expect(batch.refetch).toBe(true);
+    expect(batch.events).toEqual([
+      ev({ event_revision: 1, event_id: "e1" }),
+      ev({ event_revision: 2, event_id: "e2" }),
+    ]);
   });
 
   it("emits the invalidation only ONCE while stale", () => {
@@ -156,6 +167,7 @@ describe("SSE reducer — overflow => stale + single invalidation", () => {
     const first = r.takeBatch();
     expect(first.refetch).toBe(true);
     expect(first.stale).toBe(true);
+    expect(first.events).toEqual([ev({ event_revision: 1, event_id: "e1" })]);
     r.ingest(ev({ event_revision: 3, event_id: "e3" }));
     const second = r.takeBatch();
     expect(second.refetch).toBe(false);
@@ -172,40 +184,13 @@ describe("SSE reducer — overflow => stale + single invalidation", () => {
     expect(r.commitReseed(token)).toEqual({ status: "committed", epoch: 1 });
     expect(r.stats().stale).toBe(false);
     expect(r.ingest(ev({ generation: 2, event_revision: 101, event_id: "e101" }))).toBe(true);
-    expect(r.takeBatch().events).toHaveLength(1);
+    expect(r.takeBatch().events).toEqual([
+      ev({ generation: 2, event_revision: 101, event_id: "e101" }),
+    ]);
   });
 });
 
-describe("SSE reducer — receipt retention", () => {
-  it("retains a receipt and keeps it across a reseed (survives reload/restart)", () => {
-    const r = createSseReducer<Body>();
-    r.ingest(ev({ event_revision: 1, event_id: "r1", is_receipt: true, n: 7 }));
-    expect(r.getRetainedReceipts().map((e) => e.event_id)).toEqual(["r1"]);
-    r.takeBatch();
-    r.commitReseed(r.beginReseed());
-    expect(r.getRetainedReceipts().map((e) => e.event_id)).toEqual(["r1"]);
-  });
-
-  it("retains an already-observed duplicate receipt without re-queuing it", () => {
-    const r = createSseReducer<Body>();
-    expect(r.ingest(ev({ event_revision: 1, event_id: "r1", is_receipt: true }))).toBe(true);
-    r.takeBatch();
-    expect(r.ingest(ev({ event_revision: 1, event_id: "r1", is_receipt: true }))).toBe(false);
-    expect(r.takeBatch().events).toHaveLength(0);
-    expect(r.getRetainedReceipts()).toHaveLength(1);
-  });
-
-  it("retains a receipt that arrives while stale", () => {
-    const r = createSseReducer<Body>({ maxEvents: 1, sizeOf: () => 1 });
-    r.ingest(ev({ event_revision: 1, event_id: "e1" }));
-    r.ingest(ev({ event_revision: 2, event_id: "e2" }));
-    r.takeBatch();
-    r.ingest(ev({ event_revision: 3, event_id: "r3", is_receipt: true }));
-    expect(r.getRetainedReceipts().map((e) => e.event_id)).toEqual(["r3"]);
-  });
-});
-
-describe("SSE reducer — canonical refresh transaction", () => {
+describe("SSE reducer, canonical refresh transaction", () => {
   it("detects a gap that spans the reseed boundary", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ event_revision: 1, event_id: "e1" }));
@@ -219,7 +204,7 @@ describe("SSE reducer — canonical refresh transaction", () => {
     expect(r.ingest(ev({ event_revision: 9, event_id: "e9" }))).toBe(true);
     const batch = r.takeBatch();
     expect(batch.refetch).toBe(true);
-    expect(batch.events).toHaveLength(1);
+    expect(batch.events).toEqual([ev({ event_revision: 9, event_id: "e9" })]);
   });
 
   it("still dedupes an event redelivered after a commit", () => {
@@ -308,7 +293,7 @@ describe("SSE reducer — canonical refresh transaction", () => {
   });
 });
 
-describe("SSE reducer — housekeeping", () => {
+describe("SSE reducer, housekeeping", () => {
   it("reports pending state for the coalescing scheduler", () => {
     const r = createSseReducer<Body>();
     expect(r.hasPending()).toBe(false);
@@ -331,8 +316,8 @@ describe("SSE reducer — housekeeping", () => {
     const stats = r.stats();
     expect(stats.observedEvents).toBe(MAX_OBSERVED_IDENTITIES + 1);
     expect(stats.observedIdentities).toBe(MAX_OBSERVED_IDENTITIES);
-    // The evicted identity is still refused, because the per-stream watermark —
-    // which a reseed no longer clears — is the primary guard.
+    // The evicted identity is still refused, because the per-stream watermark,
+    // which a reseed no longer clears, is the primary guard.
     expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(false);
     expect(r.takeBatch().events).toHaveLength(0);
   });

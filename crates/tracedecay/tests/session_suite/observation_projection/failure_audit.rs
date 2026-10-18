@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queue() {
     for (stage, trigger) in [
-        ("message", "BEFORE INSERT ON session_messages"),
+        ("message", "BEFORE INSERT ON lcm_raw_messages"),
         (
             "provenance",
             "BEFORE INSERT ON observation_projection_provenance",
@@ -183,7 +183,7 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
     // the future first so suite load cannot race the real backoff clock (the
     // reopened mount must clear even a distant deadline).
     let pin_deadline = |conn: &rusqlite::Connection| {
-        let far_future = tracedecay_application::clock::now_micros()
+        let far_future = tracedecay_contracts::clock::now_micros()
             .0
             .saturating_add(3_600_000_000);
         assert_eq!(
@@ -249,7 +249,7 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
 
     // The injected trigger is durable, so the recovery attempt fails again and
     // resumes the escalating backoff from the recorded attempt history.
-    let recovery_attempted_at = tracedecay_application::clock::now_micros().0;
+    let recovery_attempted_at = tracedecay_contracts::clock::now_micros().0;
     let recovery_error = reopened_store
         .project_observation(candidate.observation_id())
         .await
@@ -314,12 +314,12 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
                 [candidate.observation_id().as_str()],
             )
             .unwrap();
-        let before = tracedecay_application::clock::now_micros().0;
+        let before = tracedecay_contracts::clock::now_micros().0;
         let retry_error = reopened_store
             .project_observation(candidate.observation_id())
             .await
             .expect_err("injected projection failure must remain retryable");
-        let after = tracedecay_application::clock::now_micros().0;
+        let after = tracedecay_contracts::clock::now_micros().0;
         assert_eq!(retry_error.durable_detail(), exact_error);
         let state = retry_conn
             .query_row(
@@ -483,7 +483,7 @@ async fn deterministic_sanitization_refusal_records_disposition_and_drains_rest(
         .await
         .expect_err("deterministic sanitization refusal must keep its typed class");
     match &error {
-        ProjectionStoreError::SanitizationRefused { reason } => assert!(
+        ProjectionStoreError::SanitizationRefused { reason, .. } => assert!(
             reason.contains("LCM privacy sanitization failed"),
             "refusal lost its content-failure detail: {reason}"
         ),
@@ -575,7 +575,7 @@ async fn environmental_raw_authority_failure_schedules_projection_retry() {
 
     // Fail the same raw-authority write the sanitization refusal flows
     // through, but with an engine fault: this side of the boundary must stay
-    // environmental — retained on the queue with a durable retry, never a
+    // environmental, retained on the queue with a durable retry, never a
     // committed skip disposition.
     let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
     raw_conn
@@ -767,6 +767,13 @@ async fn authority_reopen_accepts_historical_generation_after_supersession() {
     );
 }
 
+/// A projected message body that matches neither this binary's rendering nor
+/// the rendering a shipped release wrote is tamper. Profile reopen must name
+/// that disagreement and leave the row untouched. An interrupted write whose
+/// row is still the shipped rendering is a different admission and is not this
+/// case. Provenance identity, digests that match neither the current nor the
+/// stored output, foreign ownership, missing rows, and conflicting session
+/// fields remain hard failures as well.
 #[tokio::test]
 async fn projected_message_update_invalidates_audit_and_fails_reopen() {
     let tmp = audited_projection_fixture("session-audit-update", "message-audit-update").await;
@@ -779,22 +786,37 @@ async fn projected_message_update_invalidates_audit_and_fails_reopen() {
     let raw_conn = rusqlite::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
-            "UPDATE session_messages SET text = 'tampered projection body'
+            "UPDATE lcm_raw_messages SET content = 'tampered projection body'
              WHERE provider = 'claude' AND message_id = 'message-audit-update'",
             (),
         )
         .unwrap();
     drop(raw_conn);
 
+    let Err(error) = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay")).await
+    else {
+        panic!("a tampered projected message must fail profile reopen");
+    };
+    let message = error.to_string();
     assert!(
-        HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
-            .await
-            .is_err()
+        message.contains("projection output rows disagree with deterministic output"),
+        "{message}"
+    );
+    assert!(
+        projected_message_texts(&tmp).await[0].contains("tampered projection body"),
+        "profile reopen rewrote the tampered body instead of refusing it"
     );
 }
 
+/// A vanished projected output is not the tamper case. Provenance still names
+/// this observation as the row's creator, and the immutable projection still
+/// holds the rendering, so the audit reads the deletion as an interrupted
+/// write and restores the row rather than refusing the whole profile. History
+/// for the surviving sources keeps serving across that repair. The sibling
+/// above stays a hard failure because a body the ledger can see disagreeing
+/// with the deterministic output is tamper, not an unfinished write.
 #[tokio::test]
-async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
+async fn projected_message_delete_is_restored_from_the_immutable_projection() {
     let tmp = audited_projection_fixture("session-audit-delete", "message-audit-delete").await;
     let runtime = profile_runtime(&tmp).await;
     let database_path = runtime
@@ -802,19 +824,104 @@ async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
         .unwrap()
         .to_path_buf();
     drop(runtime);
+    let shipped = projected_message_texts(&tmp).await;
+    assert!(
+        shipped.len() == 1 && shipped[0].contains("audited projection body"),
+        "fixture did not ship the rendering this test deletes: {shipped:?}"
+    );
+
     let raw_conn = rusqlite::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
-            "DELETE FROM session_messages
+            "DELETE FROM lcm_raw_messages
              WHERE provider = 'claude' AND message_id = 'message-audit-delete'",
             (),
         )
         .unwrap();
     drop(raw_conn);
+    assert!(projected_message_texts(&tmp).await.is_empty());
 
-    assert!(
-        HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
-            .await
-            .is_err()
+    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("a created row with surviving provenance must be restored, not refused");
+    drop(reopened);
+
+    assert_eq!(
+        projected_message_texts(&tmp).await,
+        shipped,
+        "profile reopen admitted the store without putting the deleted rendering back"
     );
+}
+
+#[tokio::test]
+async fn persistent_store_corruption_surfaces_without_skipping_the_observation() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let candidate = observation(
+        "session-persistent-corruption",
+        0,
+        100,
+        "receipt.persistent-corruption",
+        conversational_payload(
+            "message-persistent-corruption",
+            "persistent corruption canary",
+        ),
+    );
+    persist(&store, candidate.clone(), None).await;
+
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_projection_corrupt
+             BEFORE INSERT ON lcm_raw_messages BEGIN
+                SELECT RAISE(ABORT, 'database disk image is malformed');
+             END;",
+        )
+        .unwrap();
+
+    let error = store
+        .project_observation(candidate.observation_id())
+        .await
+        .expect_err("store corruption must surface");
+    assert!(
+        error.is_sqlite_disk_image_corrupt(),
+        "persistent corruption surfaced as {error:?}"
+    );
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        0
+    );
+    assert_eq!(
+        table_count(&tmp, "observation_projection_dispositions").await,
+        0,
+        "store-wide corruption must never become a per-item skip"
+    );
+    let attempt_count = raw_conn
+        .query_row(
+            "SELECT attempt_count FROM projection_queue WHERE observation_id = ?1",
+            [candidate.observation_id().as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(attempt_count, 0, "corruption must not schedule a retry");
+
+    raw_conn
+        .execute_batch("DROP TRIGGER fail_projection_corrupt;")
+        .unwrap();
+    drop(raw_conn);
+    assert!(matches!(
+        store
+            .project_observation(candidate.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
 }

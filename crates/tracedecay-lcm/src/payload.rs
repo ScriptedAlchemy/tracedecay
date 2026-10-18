@@ -1,65 +1,36 @@
 use std::path::{Path, PathBuf};
 
 pub use crate::contracts::validate_payload_ref;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_runtime_core::db::engine::{
+    Executor, QueryExecutor, WriteStatement, params, params_from_iter,
+};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
-use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc, util};
+use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc};
 
 mod delete_recovery;
 mod filesystem_authority;
 mod rollback;
 
-pub(crate) use delete_recovery::ReferencedClosureCache;
 #[cfg(test)]
 pub use delete_recovery::delete_external_payload;
+pub(crate) use delete_recovery::prepare_external_payload_delete_in_transaction;
 pub use delete_recovery::{
-    CommittedPayloadRemoval, PreparedPayloadDelete, payload_file_fingerprint,
-    remove_committed_payload_file,
+    CommittedPayloadRemoval, PreparedPayloadDelete, delete_external_payload_in_transaction,
+    payload_file_fingerprint, remove_committed_payload_file,
 };
 pub use delete_recovery::{DeleteOpts, DeleteOutcome};
 #[cfg(test)]
 pub use delete_recovery::{reconcile_committed_payload_drain, remove_committed_payload_file_with};
-pub use filesystem_authority::VerifiedPayloadAuthority;
 use filesystem_authority::{
     PayloadFileWrite, prepare_payload_dir, read_verified_payload_text, write_private_file,
 };
+pub use filesystem_authority::{
+    PayloadStreamError, VerifiedPayloadAuthority, VerifiedPayloadStream,
+};
 pub use filesystem_authority::{ensure_contained, existing_payload_dir, existing_payload_dir_opt};
 pub use rollback::PayloadFileRollback;
-
-pub async fn delete_external_payload_in_transaction(
-    conn: &(impl Executor + ?Sized),
-    storage_root: &Path,
-    payload_ref: &str,
-    opts: &DeleteOpts,
-) -> Result<PreparedPayloadDelete, LcmError> {
-    delete_recovery::delete_external_payload_in_transaction(conn, storage_root, payload_ref, opts)
-        .await
-}
-
-/// Prepares one member of a caller-owned deletion batch while sharing its
-/// exact reference closure. The caller deletes GC marks only for successful
-/// preparations, in one bounded statement after the batch.
-pub(crate) async fn prepare_external_payload_delete_in_transaction_with_cache(
-    conn: &(impl Executor + ?Sized),
-    storage_root: &Path,
-    payload_ref: &str,
-    opts: &DeleteOpts,
-    referenced: &mut ReferencedClosureCache,
-) -> Result<PreparedPayloadDelete, LcmError> {
-    delete_recovery::prepare_external_payload_delete_in_transaction_with_cache(
-        conn,
-        storage_root,
-        payload_ref,
-        opts,
-        referenced,
-    )
-    .await
-}
-
-pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
-    filesystem_authority::canonical_storage_root(storage_root)
-}
 
 pub fn payload_dir(storage_root: &Path) -> PathBuf {
     storage_root.join("lcm-payloads")
@@ -157,10 +128,9 @@ fn write_external_payload_inner(
         content,
         metadata_json,
     } = write;
-    let content_hash = util::sha256_hex(content.as_bytes());
-    let owner_hash = util::sha256_hex(
-        format!("{provider}\0{session_id}\0{message_id}\0{content_hash}").as_bytes(),
-    );
+    let content_hash = sha256_hex(content.as_bytes());
+    let owner_hash =
+        sha256_hex(format!("{provider}\0{session_id}\0{message_id}\0{content_hash}").as_bytes());
     let payload_ref = format!("payload_{owner_hash}.payload");
     validate_payload_ref(&payload_ref)?;
 
@@ -190,51 +160,96 @@ pub async fn upsert_payload_metadata(
     conn: &(impl Executor + ?Sized),
     payload: &LcmPayloadRef,
 ) -> Result<(), LcmError> {
-    conn.execute(
-        "INSERT INTO lcm_external_payloads (
-            payload_ref, provider, session_id, message_id, kind, content_hash,
-            byte_count, char_count, created_at, metadata_json
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(payload_ref) DO NOTHING",
-        params![
-            payload.payload_ref.as_str(),
-            payload.provider.as_str(),
-            payload.session_id.as_str(),
-            payload.message_id.as_str(),
-            payload.kind.as_str(),
-            payload.content_hash.as_str(),
-            payload.byte_count as i64,
-            payload.char_count as i64,
-            payload.created_at,
-            payload.metadata_json.as_deref(),
-        ],
-    )
-    .await?;
-    let mut rows = conn
-        .query(
-            "SELECT provider, session_id, message_id, kind, content_hash,
+    upsert_payload_metadata_batch(conn, std::slice::from_ref(payload)).await
+}
+
+pub async fn upsert_payload_metadata_batch(
+    conn: &(impl Executor + ?Sized),
+    payloads: &[LcmPayloadRef],
+) -> Result<(), LcmError> {
+    // Ten bound variables per upsert row; the chunk stays far under SQLite's
+    // parameter cap while covering any one message's payload fan-out.
+    for chunk in payloads.chunks(100) {
+        let mut statements = Vec::with_capacity(chunk.len() * 2);
+        for payload in chunk {
+            statements.push(WriteStatement::new(
+                "INSERT INTO lcm_external_payloads (
+                    payload_ref, provider, session_id, message_id, kind, content_hash,
                     byte_count, char_count, created_at, metadata_json
-             FROM lcm_external_payloads WHERE payload_ref = ?1",
-            params![payload.payload_ref.as_str()],
-        )
-        .await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("payload manifest replay row disappeared".to_string()))?;
-    let matches = row.get::<String>(0)? == payload.provider
-        && row.get::<String>(1)? == payload.session_id
-        && row.get::<String>(2)? == payload.message_id
-        && row.get::<String>(3)? == payload.kind
-        && row.get::<String>(4)? == payload.content_hash
-        && row.get::<i64>(5)? == payload.byte_count as i64
-        && row.get::<i64>(6)? == payload.char_count as i64
-        && row.get::<Option<String>>(8)? == payload.metadata_json;
-    if !matches {
-        return Err(LcmError::ImmutablePayloadConflict {
-            payload_ref: payload.payload_ref.clone(),
-        });
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(payload_ref) DO NOTHING",
+                params![
+                    payload.payload_ref.as_str(),
+                    payload.provider.as_str(),
+                    payload.session_id.as_str(),
+                    payload.message_id.as_str(),
+                    payload.kind.as_str(),
+                    payload.content_hash.as_str(),
+                    payload.byte_count as i64,
+                    payload.char_count as i64,
+                    payload.created_at,
+                    payload.metadata_json.as_deref(),
+                ],
+            )?);
+            // A reference is being written to this payload. Clearing its GC mark in
+            // the same transaction is what lets payload GC read its reference closure
+            // outside its write transaction: GC deletes only payloads whose
+            // unreferenced mark survived into that transaction.
+            statements.push(WriteStatement::new(
+                "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
+                params![payload.payload_ref.as_str()],
+            )?);
+        }
+        conn.execute_statements(statements).await?;
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT payload_ref, provider, session_id, message_id, kind, content_hash,
+                            byte_count, char_count, created_at, metadata_json
+                     FROM lcm_external_payloads
+                     WHERE payload_ref IN ({placeholders})"
+                ),
+                params_from_iter(chunk.iter().map(|payload| payload.payload_ref.as_str())),
+            )
+            .await?;
+        let mut stored = std::collections::HashMap::new();
+        while let Some(row) = rows.next().await? {
+            stored.insert(
+                row.get::<String>(0)?,
+                (
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<i64>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<Option<String>>(9)?,
+                ),
+            );
+        }
+        for payload in chunk {
+            let Some(row) = stored.get(payload.payload_ref.as_str()) else {
+                return Err(LcmError::Db(
+                    "payload manifest replay row disappeared".to_string(),
+                ));
+            };
+            let matches = row.0 == payload.provider
+                && row.1 == payload.session_id
+                && row.2 == payload.message_id
+                && row.3 == payload.kind
+                && row.4 == payload.content_hash
+                && row.5 == payload.byte_count as i64
+                && row.6 == payload.char_count as i64
+                && row.7 == payload.metadata_json;
+            if !matches {
+                return Err(LcmError::ImmutablePayloadConflict {
+                    payload_ref: payload.payload_ref.clone(),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -249,7 +264,7 @@ pub async fn expand_payload(
     limit: usize,
 ) -> Result<LcmPayloadExpansion, LcmError> {
     validate_payload_ref(payload_ref)?;
-    let payload = hotpath::future!(
+    let payload = tracing::Instrument::instrument(
         async {
             let payload = match load_payload_metadata(conn, payload_ref).await {
                 Ok(payload) => payload,
@@ -262,7 +277,7 @@ pub async fn expand_payload(
             };
             validate_expand_payload_owner(conn, provider, session_id, payload).await
         },
-        label = "sessions.lcm.expand.payload.fetch"
+        tracing::trace_span!("sessions.lcm.expand.payload.fetch"),
     )
     .await?;
     if payload.kind == "quarantined_assistant_output" {
@@ -272,15 +287,18 @@ pub async fn expand_payload(
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
-    let (content, _authority) = hotpath::measure_block!("sessions.lcm.expand.payload.read", {
-        read_verified_payload_text(
-            &path,
-            &payload.content_hash,
-            payload.byte_count,
-            payload.char_count,
-        )?
-        .ok_or(LcmError::PayloadMissing)
-    })?;
+    let (content, _authority) = {
+        let _span = tracing::trace_span!("sessions.lcm.expand.payload.read").entered();
+        {
+            read_verified_payload_text(
+                &path,
+                &payload.content_hash,
+                payload.byte_count,
+                payload.char_count,
+            )?
+            .ok_or(LcmError::PayloadMissing)
+        }
+    }?;
 
     let total_char_count =
         usize::try_from(payload.char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
@@ -343,6 +361,40 @@ pub fn read_verified_payload_content_with_checkpoint(
     .ok_or(LcmError::PayloadMissing)?;
     checkpoint()?;
     Ok(content)
+}
+
+/// Opens the payload behind `payload_ref` and proves its content hash, byte
+/// count, and character count through one handle by reading it once through
+/// `window`, without materializing the payload. The returned stream re-reads
+/// that same proven handle in window-sized pieces; see
+/// [`VerifiedPayloadStream::emit`]. `checkpoint` runs before every read so the
+/// consumer's cancellation, deadline, or budget interrupts the proof between
+/// windows and comes back as [`PayloadStreamError::Consumer`].
+pub fn open_verified_payload_stream<E>(
+    storage_root: &Path,
+    payload_ref: &str,
+    content_hash: &str,
+    byte_count: usize,
+    char_count: usize,
+    window: &mut [u8],
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<VerifiedPayloadStream, PayloadStreamError<E>> {
+    checkpoint().map_err(PayloadStreamError::Consumer)?;
+    validate_payload_ref(payload_ref)?;
+    let dir = existing_payload_dir(storage_root)?;
+    let path = dir.join(payload_ref);
+    ensure_contained(&dir, &path)?;
+    let byte_count = u64::try_from(byte_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let char_count = u64::try_from(char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    VerifiedPayloadStream::open(
+        &path,
+        content_hash,
+        byte_count,
+        char_count,
+        window,
+        checkpoint,
+    )?
+    .ok_or(PayloadStreamError::Payload(LcmError::PayloadMissing))
 }
 
 async fn validate_expand_payload_owner(
@@ -422,8 +474,7 @@ async fn ensure_current_raw_payload_ref(
         let value: Option<String> = row.get(index).unwrap_or(None);
         if value
             .as_deref()
-            .map(extract_payload_refs_from_text)
-            .unwrap_or_default()
+            .map_or_default(extract_payload_refs_from_text)
             .iter()
             .any(|reference| reference == &payload.payload_ref)
         {

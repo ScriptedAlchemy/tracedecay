@@ -1,0 +1,65 @@
+# Hawk visibility lint. Explicit optional channel, not PR tip evidence.
+#
+# Kept off pull_request CI on purpose: tip green must not depend on
+# continue-on-error or a forged dashboard app-dist seed. Dispatch it on demand
+# until the Hawk backlog is clean enough to promote into required CI without
+# softening -D warnings.
+name: Hawk
+
+# On demand only; see distribution-acceptance.yml for why nothing runs on a
+# timer here.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hawk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hawk:
+    name: Hawk
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      # renovate: datasource=github-releases depName=astral-sh/hawk
+      HAWK_VERSION: 0.1.15
+      RUSTUP_MAX_RETRIES: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-pnpm
+
+      # The workspace roots keep the vendored dependencies (see
+      # scripts/check-rust-cache-lineage.py).
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            crates -> ../target/hawk
+            . -> target/rust-cache-lockfile-key
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      # Same single-pin rule as the ci.yml format gate: rust-toolchain.toml
+      # selects the compiler so hawk's diagnostics match the build toolchain.
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install Hawk
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
+
+      # hawk.toml selects the shipped CLI as the production entry point.
+      - name: Hawk
+        run: >
+          cargo hawk check
+          --target-dir target/hawk
+          -D warnings

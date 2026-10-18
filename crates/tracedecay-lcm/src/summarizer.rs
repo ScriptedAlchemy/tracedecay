@@ -100,9 +100,13 @@ fn summary_request_for_backlog(
         .collect::<Vec<_>>();
     let focus = focus_topic.as_deref().unwrap_or("the conversation so far");
     let prompt = format!(
-        "Summarize LCM raw messages for provider '{provider}', session '{session_id}', \
-         store_id range {first_store_id}..={last_store_id}. Focus on {focus}. \
-         Preserve durable instructions, decisions, open tasks, and facts needed to continue."
+        "Create a continuation-ready summary of the supplied messages for provider \
+         '{provider}', session '{session_id}', store_id range \
+         {first_store_id}..={last_store_id}. Focus on {focus}. Preserve user intent, \
+         durable instructions and constraints, decisions and stated rationale, completed \
+         work and evidence, open tasks and blockers, and exact paths, identifiers, \
+         citations, source references, and redaction markers. Do not invent facts or \
+         reconstruct omitted or redacted content."
     );
 
     LcmSummaryRequest {
@@ -141,43 +145,8 @@ mod tests {
             content_hash: format!("hash-{store_id}"),
             storage_kind: LcmStorageKind::Inline,
             payload_ref: None,
-            legacy_source: false,
-            legacy_truncated: false,
             metadata_json: None,
         }
-    }
-
-    #[test]
-    fn noop_mode_selects_noop_adapter() {
-        let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Noop);
-
-        assert!(adapter.is_noop());
-        assert!(adapter.persisted_summary_invocation().is_none());
-        assert!(
-            adapter
-                .summary_request("cursor", "session-1", None, &[])
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn fake_mode_selects_persisted_summary_without_route_metadata() {
-        let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Fake {
-            summary_text: "fake summary".into(),
-        });
-
-        assert!(!adapter.is_noop());
-        let invocation = adapter
-            .persisted_summary_invocation()
-            .expect("fake mode should persist a summary");
-        assert_eq!(
-            invocation,
-            &PersistedSummaryInvocation {
-                summary_text: "fake summary".into(),
-                route: None,
-                extraction_result: None,
-            }
-        );
     }
 
     #[test]
@@ -224,16 +193,18 @@ mod tests {
         });
 
         assert!(adapter.persisted_summary_invocation().is_none());
-        assert!(
-            adapter
-                .summary_request(
-                    "cursor",
-                    "session-1",
-                    None,
-                    &[raw_message(11, "user", "source")]
-                )
-                .is_some()
-        );
+        let request = adapter
+            .summary_request(
+                "cursor",
+                "session-1",
+                None,
+                &[raw_message(11, "user", "source")],
+            )
+            .expect("an empty provided summary must request an authoritative summary");
+        assert_eq!(request.provider, "cursor");
+        assert_eq!(request.session_id, "session-1");
+        assert_eq!(request.source_range.from_store_id, 11);
+        assert_eq!(request.source_range.to_store_id, 11);
     }
 
     #[test]

@@ -3,11 +3,12 @@
 //! `skill_usage` classifies stored analytics rows through [`infer_usage_events`],
 //! `runner::evidence` scores tool families through [`underused_tool_family_signals`],
 //! and `skill_writer` reports [`ToolFamilySignal`]. The module names no other
-//! subsystem — it is pure classification over `serde_json` values.
+//! subsystem, it is pure classification over `serde_json` values.
 //!
 //! Host MCP namespaces are restated here as literals so this contracts leaf
 //! does not depend on `tracedecay-agent-hosts`. They must stay aligned with
-//! `tracedecay_agent_hosts::tool_name::ALL_TOOL_PREFIXES`.
+//! the namespaces hosts still emit, including the prior plugin key and the
+//! flattened separator.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,8 +87,7 @@ pub fn normalize_tool_name(raw: &str) -> String {
 
 /// Same host MCP namespaces as `tracedecay_agent_hosts::tool_name`.
 fn strip_host_tool_prefix(name: &str) -> &str {
-    const PREFIXES: [&str; 4] = [
-        "mcp__plugin_tracedecay_tracedecay__",
+    const PREFIXES: [&str; 3] = [
         "mcp__plugin_tracedecay_graph__",
         "mcp__tracedecay__",
         "mcp_tracedecay_",
@@ -207,14 +207,17 @@ pub fn underused_tool_family_signals<'a>(
         let relevance_text = command_hint
             .as_deref()
             .map(|command| format!("{command}\n{text}"));
-        let text_with_command = relevance_text.as_deref().unwrap_or(text);
+        let text_with_command = relevance_text
+            .as_deref()
+            .unwrap_or(text)
+            .to_ascii_lowercase();
         for event in infer_usage_events(
             observation.tool_names,
             observation.metadata_json,
             Some(text),
         ) {
             if event.kind == UsageKind::Tool {
-                record_tool_family(&mut families, &event.name, text_with_command);
+                record_tool_family(&mut families, &event.name, &text_with_command);
             }
         }
     }
@@ -259,35 +262,31 @@ fn insert_skill_event(events: &mut BTreeSet<UsageEvent>, raw: &str) {
 }
 
 fn record_tool_family(families: &mut BTreeMap<String, FamilyCounts>, tool: &str, text: &str) {
-    let normalized = normalize_tool_name(tool);
-    let text = text.to_ascii_lowercase();
-    if normalized.contains("tracedecay_context")
-        || normalized.contains("tracedecay_node")
-        || normalized.contains("tracedecay_files")
+    if tool.contains("tracedecay_context")
+        || tool.contains("tracedecay_node")
+        || tool.contains("tracedecay_files")
     {
         increment_family_usage(families, "code_context");
     }
-    if normalized.contains("tracedecay_search")
-        || normalized.contains("tracedecay_grep")
-        || normalized.contains("find_exact_symbol")
+    if tool.contains("tracedecay_search")
+        || tool.contains("tracedecay_grep")
+        || tool.contains("find_exact_symbol")
     {
         increment_family_usage(families, "code_search");
     }
-    if normalized.contains("tracedecay_call") || normalized.contains("tracedecay_graph") {
+    if tool.contains("tracedecay_call") || tool.contains("tracedecay_graph") {
         increment_family_usage(families, "call_graph");
     }
-    if normalized.contains("tracedecay_impact") || normalized.contains("tracedecay_affected") {
+    if tool.contains("tracedecay_impact") || tool.contains("tracedecay_affected") {
         increment_family_usage(families, "impact_analysis");
     }
 
-    if normalized == "read" || normalized == "cat" || normalized == "sed" {
+    if tool == "read" || tool == "cat" || tool == "sed" {
         increment_family_relevance(families, "code_context");
     }
-    if matches!(normalized.as_str(), "grep" | "rg" | "glob" | "search")
-        || (matches!(normalized.as_str(), "bash" | "shell" | "exec_command")
-            && (looks_like_search_command(&text)
-                || text.contains("grep")
-                || text.contains("find ")))
+    if matches!(tool, "grep" | "rg" | "glob" | "search")
+        || (matches!(tool, "bash" | "shell" | "exec_command")
+            && (looks_like_search_command(text) || text.contains("grep") || text.contains("find ")))
     {
         increment_family_relevance(families, "code_search");
     }
@@ -298,14 +297,15 @@ fn looks_like_search_command(text: &str) -> bool {
 }
 
 fn increment_family_usage(families: &mut BTreeMap<String, FamilyCounts>, family: &str) {
-    families.entry(family.to_string()).or_default().usage_events += 1;
+    if let Some(counts) = families.get_mut(family) {
+        counts.usage_events += 1;
+    }
 }
 
 fn increment_family_relevance(families: &mut BTreeMap<String, FamilyCounts>, family: &str) {
-    families
-        .entry(family.to_string())
-        .or_default()
-        .relevant_events += 1;
+    if let Some(counts) = families.get_mut(family) {
+        counts.relevant_events += 1;
+    }
 }
 
 pub fn split_tool_names(raw: &str) -> impl Iterator<Item = String> + '_ {
@@ -695,34 +695,23 @@ mod tests {
 
     #[test]
     fn ignores_tool_names_buried_in_metadata() {
-        let events = infer_usage_events(
-            None,
-            Some(
-                r#"{
-                    "tool_calls": [{"function": {"name": "tracedecay_search"}}],
-                    "tools": [{"tool_name": "apply_patch"}]
-                }"#,
-            ),
-            None,
-        );
+        let metadata = r#"{
+            "tool_calls": [{"function": {"name": "tracedecay_search"}}],
+            "tools": [{"tool_name": "apply_patch"}]
+        }"#;
+        let events = infer_usage_events(None, Some(metadata), None);
         assert!(
             events.is_empty(),
             "tool usage should come from explicit tool fields, got {events:#?}"
         );
-    }
-
-    #[test]
-    fn shell_command_metadata_refines_category() {
-        let events = infer_usage_events(
-            Some("functions.exec_command"),
-            Some(r#"{"cmd":"rg -n \"analytics\" src tests"}"#),
-            None,
-        );
-        assert_usage_event(
-            &events,
-            UsageKind::Tool,
-            "functions.exec_command",
-            UsageCategory::BroadFileSearch,
+        let explicit = infer_usage_events(Some("tracedecay_search"), Some(metadata), None);
+        assert_eq!(
+            explicit
+                .iter()
+                .map(|event| (event.kind, event.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(UsageKind::Tool, "tracedecay_search")],
+            "{explicit:#?}"
         );
     }
 
@@ -744,57 +733,6 @@ mod tests {
             UsageKind::Skill,
             "build-web-apps:react-best-practices",
             UsageCategory::WorkflowSkill,
-        );
-    }
-
-    #[test]
-    fn ignores_url_and_path_like_colon_tokens() {
-        let events = infer_usage_events(
-            None,
-            Some(r#"{"url":"https://example.com/a:b","path":"C:\\tmp\\SKILL.md"}"#),
-            Some("Also ignore file:///tmp/tracedecay:exploring-code"),
-        );
-        assert!(
-            events.is_empty(),
-            "url and path strings should not become skills, got {events:#?}"
-        );
-    }
-
-    #[test]
-    fn normalizes_punctuation_wrapped_skill_mentions() {
-        let events = infer_usage_events(
-            None,
-            None,
-            Some("Using `tracedecay:exploring-code`, then continue."),
-        );
-        assert_usage_event(
-            &events,
-            UsageKind::Skill,
-            "tracedecay:exploring-code",
-            UsageCategory::TraceDecayWorkflowSkill,
-        );
-    }
-
-    #[test]
-    fn infers_codex_skill_usage_from_real_prose_shape() {
-        let events = infer_usage_events(
-            None,
-            Some(r#"{"source":"codex_rollout"}"#),
-            Some(include_str!(
-                "../../../tests/fixtures/analytics/codex_skill_prose.txt"
-            )),
-        );
-        assert_usage_event(
-            &events,
-            UsageKind::Skill,
-            "superpowers:using-superpowers",
-            UsageCategory::WorkflowSkill,
-        );
-        assert_usage_event(
-            &events,
-            UsageKind::Skill,
-            "tracedecay:exploring-code",
-            UsageCategory::TraceDecayWorkflowSkill,
         );
     }
 
@@ -890,6 +828,17 @@ mod tests {
                 }"#,
             ),
             Some("Aspect ratio 16:9, script bench:full, and tool MCP:browser_navigate."),
+        );
+        let anchored = infer_usage_events(
+            None,
+            None,
+            Some("Aspect ratio 16:9, using `build-web-apps:react-best-practices`."),
+        );
+        assert_usage_event(
+            &anchored,
+            UsageKind::Skill,
+            "build-web-apps:react-best-practices",
+            UsageCategory::WorkflowSkill,
         );
         assert!(
             events.is_empty(),

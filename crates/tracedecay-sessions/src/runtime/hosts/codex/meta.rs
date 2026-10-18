@@ -3,9 +3,10 @@
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 
 use serde_json::Value;
+use tracedecay_capture::codex::{nested_string_field, string_field};
 
 use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader};
 
@@ -73,37 +74,56 @@ pub struct CodexTurnContext {
 
 /// Read the leading `session_meta` line of a rollout for cwd/session-id/model.
 pub(super) fn session_meta(path: &Path) -> Option<CodexMeta> {
-    session_meta_with_provenance(path).map(|parsed| parsed.meta)
+    match session_meta_with_provenance(path) {
+        Ok(parsed) => parsed.map(|parsed| parsed.meta),
+        Err(error) => {
+            tracing::debug!(transcript_path = %path.display(), %error, "Codex metadata unavailable");
+            None
+        }
+    }
 }
 
-pub(super) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithProvenance> {
+pub(super) fn session_meta_with_provenance(
+    path: &Path,
+) -> std::io::Result<Option<CodexMetaWithProvenance>> {
     #[cfg(test)]
     {
         let reads = SESSION_META_READS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
         let mut reads = reads.lock().unwrap_or_else(|error| error.into_inner());
         let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        *reads.entry(key).or_default() += 1;
+        *reads.entry(key.clone()).or_default() += 1;
+        drop(reads);
+        let gate = SESSION_META_PARSE_GATES.get().and_then(|gates| {
+            gates
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&key)
+                .cloned()
+        });
+        if let Some(gate) = gate {
+            gate.park();
+        }
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = std::fs::File::open(path)?;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     for _ in 0..4 {
-        match frames.next_frame().ok()? {
+        match frames.next_frame()? {
             RawJsonlFrame::Eof => break,
             RawJsonlFrame::Complete { .. } | RawJsonlFrame::Partial { .. } => {
                 let Ok(value) = serde_json::from_slice::<Value>(frames.record()) else {
                     continue;
                 };
                 if let Some(meta) = session_meta_with_provenance_from_record(&value, path) {
-                    return Some(CodexMetaWithProvenance {
+                    return Ok(Some(CodexMetaWithProvenance {
                         source_frame_bytes: frames.record().len(),
                         ..meta
-                    });
+                    }));
                 }
             }
             RawJsonlFrame::Oversized { .. } | RawJsonlFrame::BudgetExhausted { .. } => {}
         }
     }
-    None
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -120,6 +140,76 @@ pub(crate) fn session_meta_read_count_for_test(path: &Path) -> usize {
         .get(&key)
         .copied()
         .unwrap_or_default()
+}
+
+/// Test barrier that parks every `session_meta` parse of one rollout until it
+/// is released, so a test can observe callers while the blocking parse is
+/// genuinely in flight instead of racing a sleep.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct SessionMetaParseGate {
+    state: Mutex<SessionMetaParseGateState>,
+    changed: Condvar,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct SessionMetaParseGateState {
+    parked: usize,
+    released: bool,
+}
+
+#[cfg(test)]
+impl SessionMetaParseGate {
+    fn park(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.parked += 1;
+        self.changed.notify_all();
+        while !state.released {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Blocks until at least `count` parses have parked at this gate.
+    #[cfg(unix)]
+    pub(crate) fn wait_parked(&self, count: usize) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        while state.parked < count {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn release(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .released = true;
+        self.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+static SESSION_META_PARSE_GATES: OnceLock<
+    Mutex<std::collections::HashMap<PathBuf, Arc<SessionMetaParseGate>>>,
+> = OnceLock::new();
+
+#[cfg(all(test, unix))]
+pub(crate) fn install_session_meta_parse_gate_for_test(path: &Path) -> Arc<SessionMetaParseGate> {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let gate = Arc::new(SessionMetaParseGate::default());
+    SESSION_META_PARSE_GATES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, Arc::clone(&gate));
+    gate
 }
 
 pub fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
@@ -151,7 +241,7 @@ fn session_meta_with_provenance_from_record(
             .unwrap_or("unknown")
             .to_string()
     });
-    // Note: real rollouts have no `model` in session_meta — only
+    // Note: real rollouts have no `model` in session_meta, only
     // `model_provider` (e.g. "openai"), which is *not* a model and must
     // not be stored as one; `turn_context` lines carry the actual model.
     let model = payload
@@ -191,22 +281,6 @@ fn session_meta_with_provenance_from_record(
         native_thread_id,
         source_frame_bytes: 0,
     })
-}
-
-pub(super) fn string_field(payload: &Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-pub(super) fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
-    payload
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
 }
 
 /// Context recorded on a `turn_context` line. Real rollouts use this for the

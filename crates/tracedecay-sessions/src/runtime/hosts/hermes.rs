@@ -19,8 +19,9 @@
 //! is derived from immutable Hermes session and message evidence.
 
 use crate::runtime::source::STRICT_JSONL_BATCH_BYTES;
-use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
+use tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES;
 
+mod callback;
 mod coverage;
 mod ingest;
 mod observation;
@@ -30,29 +31,26 @@ mod state_db;
 #[cfg(test)]
 mod tests;
 
+pub use callback::{HermesTurnCallbackOutcome, capture_turn_callback};
 pub use ingest::{
-    HermesSweepOutcome, ProjectIngestDestination, ingest_for_project, ingest_for_project_capped,
-    ingest_for_project_capped_with_admission,
-    ingest_for_project_capped_with_admission_and_cancellation, ingest_for_projects, ingest_homes,
-    ingest_homes_capped, ingest_homes_capped_with_admission, ingest_homes_for_projects,
-    ingest_user_homes, ingest_user_homes_capped, ingest_user_sessions_capped,
+    HermesSweepOutcome, ingest_for_project_capped_with_admission_and_cancellation,
+    ingest_user_sessions_capped_with_admission,
 };
-pub use ingest::{ingest_legacy_pinned_profile, ingest_user_sessions_capped_with_admission};
+pub(crate) use ingest::{ingest_project_with_sweep, ingest_user_with_sweep};
 
-#[cfg(all(test, windows))]
-use coverage::sqlite_incarnation;
 #[cfg(test)]
 use observation::{
     HermesAdmissionAction, HermesObservationRecord, HermesProjectionMetadata,
     native_observation_record, normalize_native_observation, observation_source,
-    prepare_observation_row, stable_native_id,
+    prepare_observation_row,
 };
 #[cfg(test)]
 use rows::HermesRow;
 #[cfg(test)]
 use state_db::{
-    message_columns, open_read_only_strict, read_new_rows_strict, select_new_messages_sql,
-    table_columns, validate_required_schema,
+    HERMES_PAYLOAD_BATCH_ROWS, message_columns, open_read_only_strict, read_new_rows_strict,
+    select_new_messages_sql, table_columns, try_ingest_state_db_bounded_with_admission,
+    validate_required_schema,
 };
 
 const PROVIDER: &str = "hermes";

@@ -3,10 +3,10 @@
  * the coordinator publishes no targeted SSE invalidation for query completion,
  * so whatever ends this poll ends the run's visible life in the UI.
  *
- * These cases pin the outcomes that must stay distinct — a transient transport
+ * These cases pin the outcomes that must stay distinct, a transient transport
  * failure keeps polling however many times it repeats, a standing refusal stops
  * it at once, a failure that never clears backs off to a slow tick instead of
- * either hammering or abandoning the run, and the poll ends with the surface —
+ * either hammering or abandoning the run, and the poll ends with the surface , 
  * by driving the real controller against a scripted daemon on a fake clock.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -81,7 +81,7 @@ function jsonResponse(status: number, body: unknown): Response {
 /** One scripted status read: what the daemon does on the Nth poll. */
 type StatusStep =
   | { kind: 'run'; state: RunState }
-  /** The browser could not reach the daemon at all — `fetch` rejects. */
+  /** The browser could not reach the daemon at all, `fetch` rejects. */
   | { kind: 'unreachable' }
   | { kind: 'status'; code: number };
 
@@ -215,7 +215,7 @@ describe('explorer run-status polling', () => {
   it('backs off to a slow tick on a transport failure that never clears, and shows it', async () => {
     // What is bounded is the rate, not the attempts. A daemon that never comes
     // back must cost a couple of reads a minute rather than four a second, and
-    // the reader must be looking at the failure the whole time — an offline
+    // the reader must be looking at the failure the whole time, an offline
     // lane, not a spinner that hides it.
     const { fetchMock, statusReads } = scriptedDaemon([
       { kind: 'run', state: 'pending' },
@@ -238,7 +238,13 @@ describe('explorer run-status polling', () => {
     expect(result?.outcome).toBe('transport');
     expect(result?.outcome === 'transport' ? result.state : null).toBe('offline');
     // The failure is on screen, and no lane is pretending to still be working.
-    expect(view.result.current.lanes.every((lane) => lane.state === 'offline')).toBe(true);
+    // The semantic lane keeps its own standing condition: a daemon that cannot
+    // be reached says nothing about a source that was never registered.
+    const byLane = new Map(view.result.current.lanes.map((lane) => [lane.lane, lane.state]));
+    expect(byLane.get('code')).toBe('offline');
+    expect(byLane.get('sessions')).toBe('offline');
+    expect(byLane.get('knowledge')).toBe('offline');
+    expect(byLane.get('semantic')).toBe('unregistered');
     expect(view.result.current.anyPending).toBe(false);
   });
 

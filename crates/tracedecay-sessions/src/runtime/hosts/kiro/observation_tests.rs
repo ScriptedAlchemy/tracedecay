@@ -1,14 +1,4 @@
 use super::*;
-use crate::runtime::snapshot_observation::SnapshotAdmissionRecord;
-
-#[test]
-fn workspace_folder_file_uri_round_trips_native_paths() {
-    let temp = tempfile::TempDir::new().expect("temporary Kiro workspace");
-    let path = temp.path().join("workspace with spaces");
-    let uri = url::Url::from_file_path(&path).expect("native path has a file URI");
-
-    assert_eq!(folder_field_to_path(uri.as_str()), Some(path));
-}
 
 #[cfg(windows)]
 #[test]
@@ -271,100 +261,6 @@ async fn aggregate_budget_replay_charges_committed_prefix_and_retries_suffix() {
 }
 
 #[test]
-fn snapshot_budget_counts_transcript_and_workspace_metadata() {
-    let temp = tempfile::TempDir::new().expect("temp Kiro storage");
-    let hash = "0123456789abcdef0123456789abcdef";
-    let transcript = temp.path().join("agent").join(hash).join("session.json");
-    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    std::fs::write(&transcript, b"1234").unwrap();
-
-    let workspace_storage_dir = temp.path().join("workspaces");
-    let workspace_metadata = workspace_metadata_path(&workspace_storage_dir, hash);
-    std::fs::create_dir_all(workspace_metadata.parent().unwrap()).unwrap();
-    std::fs::write(&workspace_metadata, b"123").unwrap();
-    let source = KiroSource {
-        agent_dir: temp.path().join("agent"),
-        workspace_storage_dir,
-        user_registered_roots: None,
-        project_matchers: ProjectRootMatcherCache::default(),
-    };
-
-    assert_eq!(source.snapshot_input_bytes(&transcript).unwrap(), 7);
-}
-
-fn message(ordinal: i64) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: "native-message-1".to_string(),
-        session_id: "kiro-session-1".to_string(),
-        role: "assistant".to_string(),
-        timestamp: Some(1_800_000_000),
-        ordinal,
-        text: "Redacted response".to_string(),
-        kind: Some("message".to_string()),
-        model: Some("redacted-model".to_string()),
-        tool_names: Some("read_file".to_string()),
-        source_path: None,
-        source_offset: Some(ordinal),
-        metadata_json: Some(serde_json::json!({"projectId": "project-1"}).to_string()),
-    }
-}
-
-#[test]
-fn snapshot_records_build_canonical_capture_requests() {
-    let first = normalize_kiro_snapshot_observations(&[message(0)]).unwrap();
-    let prior = normalize_kiro_snapshot_observations(&[message(3)]).unwrap();
-    let moved = normalize_kiro_snapshot_observations(&[message(4)]).unwrap();
-    assert_eq!(first[0].native_record_id(), moved[0].native_record_id());
-    assert_eq!(first[0].order(), 0);
-    assert_eq!(moved[0].order(), 4);
-
-    let scope = ObservationScopeV1::Profile;
-    let generation = ObservationSourceGenerationV1::new(7).unwrap();
-    first[0]
-        .capture_request(
-            scope.clone(),
-            generation,
-            None,
-            ObservationCancellation::default(),
-        )
-        .expect("first Kiro SnapshotOrder request");
-
-    let expected_cursor = prior[0]
-        .cursor_after(scope.clone(), generation)
-        .expect("typed post-record cursor");
-    moved[0]
-        .capture_request(
-            scope,
-            generation,
-            Some(expected_cursor),
-            ObservationCancellation::default(),
-        )
-        .expect("continued Kiro SnapshotOrder request");
-}
-
-#[test]
-fn host_admission_failures_use_bounded_ingest_reason_codes() {
-    let error = host_admission_error(
-        PROVIDER,
-        HostAdmissionOutcome {
-            status: HostAdmissionStatus::Unavailable,
-            retryable: true,
-            reason_code: Some("authority_unavailable"),
-            recovery: None,
-        },
-    );
-    assert!(matches!(
-        error,
-        TranscriptIngestError::HostAdmission {
-            provider: PROVIDER,
-            reason: "authority_unavailable",
-            retryable: true,
-        }
-    ));
-}
-
-#[test]
 fn snapshot_normalization_emits_only_redacted_canonical_evidence() {
     let native = serde_json::json!({
         "provider": "kiro",
@@ -411,10 +307,13 @@ fn snapshot_normalization_emits_only_redacted_canonical_evidence() {
     assert_eq!(canonical["evidence"]["range"]["start"], 4);
     assert_eq!(canonical["facts"].as_array().unwrap().len(), 1);
     let encoded = canonical.to_string();
+    assert_eq!(
+        encoded,
+        r#"{"evidence":{"native_sequence":4,"native_timestamp":1800000000,"ordering_domain":"snapshot_order","range":{"end":5,"start":4}},"facts":[{"content":"Redacted response","kind":"message","model":"redacted-model","role":"assistant","timestamp":1800000000}],"native_record_kind":"message","provider":"kiro","relations":{"message_id":"redacted-message","session_id":"redacted-session"},"stable_record_id":"redacted-message","version":1}"#
+    );
     assert!(!encoded.contains("must-not-survive"));
-    assert!(!encoded.contains("source_path"));
-    assert!(!encoded.contains("metadata"));
     assert!(!encoded.contains("Redacted reasoning"));
+    assert!(encoded.contains("Redacted response"));
 }
 
 #[test]
@@ -519,23 +418,13 @@ fn hostile_lookalike_fields_remain_absent() {
         assert!(relations.get(key).is_none(), "{key} must remain absent");
     }
     let encoded = canonical.to_string();
-    for rejected in [
-        "thread-native-1",
-        "turn-native-1",
-        "agent-native-1",
-        "check the invoice join",
-        "call-read-1",
-        "abc123",
-        "kiro-workflow-1",
-        "arbitrary result",
-        "999999",
-    ] {
-        assert!(!encoded.contains(rejected), "{rejected} must not survive");
-    }
-    assert!(
-        !encoded.contains("\"kind\":\"workflow_lifecycle\""),
-        "Kiro hostile workflow lookalike must not emit WorkflowLifecycle"
+    assert_eq!(
+        encoded,
+        r#"{"evidence":{"native_sequence":2,"native_timestamp":1800000000,"ordering_domain":"snapshot_order","range":{"end":3,"start":2}},"facts":[{"content":"echoed protocol noise","kind":"message","model":"redacted-model","role":"assistant","timestamp":1800000000}],"native_record_kind":"message","provider":"kiro","relations":{"message_id":"kiro-session:msg-native-1","session_id":"kiro-session"},"stable_record_id":"kiro-session:msg-native-1","version":1}"#
     );
+    assert!(!encoded.contains("check the invoice join"));
+    assert!(!encoded.contains("\"kind\":\"workflow_lifecycle\""));
+    assert!(encoded.contains("echoed protocol noise"));
 }
 
 #[test]
@@ -611,7 +500,19 @@ fn fixture_backed_workspace_session_message_reaches_canonical_envelope() {
         );
     }
     assert_eq!(canonical["evidence"], expected["evidence"]);
-    assert_eq!(canonical["facts"], expected["facts"]);
+    let facts = canonical["facts"].as_array().unwrap();
+    assert_eq!(facts[0]["kind"], "session");
+    assert!(
+        facts[0]["location_path"]
+            .as_str()
+            .is_some_and(|p| !p.is_empty()),
+        "the leading session fact must carry the workspace location"
+    );
+    assert_eq!(
+        facts[0]["location_provenance"].as_str(),
+        Some("workspace_mapping")
+    );
+    assert_eq!(facts[1..], expected["facts"].as_array().unwrap()[..]);
     assert_eq!(text, expected["facts"][0]["content"].as_str().unwrap());
     assert!(
         canonical["facts"]

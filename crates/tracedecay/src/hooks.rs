@@ -7,8 +7,10 @@ use serde_json::Value;
 
 struct RootHookReadinessProjection;
 
-impl tracedecay_dashboard_api::hooks::HookReadinessProjectionPort for RootHookReadinessProjection {
-    #[hotpath::measure(label = "hints.hook_aggregate")]
+impl tracedecay_application::analytics_bridge::HookReadinessProjectionPort
+    for RootHookReadinessProjection
+{
+    #[tracing::instrument(name = "hints.hook_aggregate", level = "trace", skip_all)]
     fn aggregate_hook_completed_readiness(&self, rows: &[Value]) -> Value {
         let distribution = tracedecay_agent_hosts::hooks::aggregate_hook_completed_readiness(rows);
         match serde_json::to_value(distribution) {
@@ -34,14 +36,14 @@ impl tracedecay_dashboard_api::hooks::HookReadinessProjectionPort for RootHookRe
     }
 }
 
-#[hotpath::measure(label = "hints.hook_install")]
+#[tracing::instrument(name = "hints.hook_install", level = "trace", skip_all)]
 pub(crate) fn install_dashboard_hook_readiness_projection() -> tracedecay_domain::errors::Result<()>
 {
     static INSTALLATION: std::sync::LazyLock<std::result::Result<(), String>> =
         std::sync::LazyLock::new(|| {
-            tracedecay_dashboard_api::hooks::install_hook_readiness_projection(std::sync::Arc::new(
-                RootHookReadinessProjection,
-            ))
+            tracedecay_application::analytics_bridge::install_hook_readiness_projection(
+                std::sync::Arc::new(RootHookReadinessProjection),
+            )
             .map_err(|_| "dashboard hook readiness projection is already installed".to_owned())
         });
     INSTALLATION

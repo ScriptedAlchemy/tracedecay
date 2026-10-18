@@ -1,11 +1,13 @@
 use std::env;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Command;
 
 use tracedecay_domain::{GitFileModeV1, GitOidV1, GitOperationStateV1};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
+use tracedecay_runtime_core::git::try_git_program;
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::NativeGitIndexError;
 use super::patch::ValidatedIndexPatch;
@@ -21,9 +23,16 @@ pub fn joined_patch_bytes(patches: &[ValidatedIndexPatch]) -> Vec<u8> {
     patch_bytes
 }
 
-pub fn git_command(repository_root: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.current_dir(repository_root);
+/// Builds a `git` invocation rooted at `repository_root` with every inherited
+/// `GIT_*` variable stripped.
+///
+/// Every path handed to git is spelled plainly first: this runtime resolves
+/// paths with `fs::canonicalize`, which on Windows returns the `\\?\`
+/// extended-length form that Git for Windows refuses to normalize.
+pub fn git_command(repository_root: &Path) -> Result<Command, NativeGitIndexError> {
+    let program = try_git_program().map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+    let mut command = Command::new(program);
+    command.current_dir(plain_host_path(repository_root));
     for (key, _) in env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(key);
@@ -32,44 +41,12 @@ pub fn git_command(repository_root: &Path) -> Command {
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
-    command
-}
-
-pub fn run_command_with_stdin(
-    mut command: Command,
-    operation: &'static str,
-    input: &[u8],
-) -> Result<Output, NativeGitIndexError> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    let Some(stdin) = child.stdin.take() else {
-        return Err(NativeGitIndexError::Io(
-            "native Git stdin was not available".to_owned(),
-        ));
-    };
-    let mut stdin = hotpath::io!(stdin, label = "usecases.git_index_tx.git.stdin");
-    stdin
-        .write_all(input)
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    drop(stdin);
-    let output = child
-        .wait_with_output()
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    if output.status.success() {
-        Ok(output)
-    } else {
-        Err(NativeGitIndexError::GitFailed {
-            operation,
-            status: output.status.to_string(),
-        })
-    }
+    Ok(command)
 }
 
 pub fn read_optional_file(path: &Path) -> Result<Vec<u8>, NativeGitIndexError> {
     match File::open(path) {
-        Ok(file) => {
-            let mut file = hotpath::io!(file, label = "usecases.git_index_tx.optional.file");
+        Ok(mut file) => {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)
                 .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
@@ -107,7 +84,11 @@ pub fn current_operation_state(git_dir: &Path) -> GitOperationStateV1 {
     }
 }
 
-#[hotpath::measure(label = "daemon.git.index_tx.fsync.directory")]
+#[tracing::instrument(
+    name = "daemon.git.index_tx.fsync.directory",
+    level = "trace",
+    skip_all
+)]
 pub fn sync_parent_directory(path: &Path) -> Result<(), NativeGitIndexError> {
     let parent = path
         .parent()

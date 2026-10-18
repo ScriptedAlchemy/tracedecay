@@ -10,7 +10,9 @@ fn cancelled_before_admission_never_enters_the_queue() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let outcome = runtime.block_on(writer.submit(request, probe)).unwrap();
+    let outcome = runtime
+        .block_on(writer.submit(&cx(), request, probe))
+        .unwrap();
     assert!(matches!(
         outcome,
         RuntimeSubmitOutcomeV1::CancelledBeforeCommit {
@@ -53,8 +55,8 @@ fn cancelled_request_does_not_interrupt_an_unrelated_request_in_the_same_batch()
         )
         .unwrap(),
     );
-    let (first_reply, mut first_result) = tokio::sync::oneshot::channel();
-    let (second_reply, mut second_result) = tokio::sync::oneshot::channel();
+    let (first_reply, mut first_result) = oneshot::channel();
+    let (second_reply, mut second_result) = oneshot::channel();
     let first = Arc::new(first);
     let second = Arc::new(second);
     let batch = request::ExecutionBatch {
@@ -81,10 +83,10 @@ fn cancelled_request_does_not_interrupt_an_unrelated_request_in_the_same_batch()
     let telemetry = WriterTelemetry::default();
     let state = AtomicU8::new(WriterState::Ready as u8);
     let watermark = CommittedWatermarkPublisher::new(binding.clone());
-    let mut persistence = CancellingFirstRequestPersistence {
+    let mut persistence = RuntimeWriterPersistence::new(CancellingFirstRequestPersistence {
         first_probe,
         sequence: 0,
-    };
+    });
 
     worker::process_execution_batch(
         &mut connection,
@@ -138,7 +140,7 @@ fn active_long_running_request_remains_interruptible() {
         )
         .unwrap(),
     );
-    let (reply, mut result) = tokio::sync::oneshot::channel();
+    let (reply, mut result) = oneshot::channel();
     let request = Arc::new(request);
     let batch = request::ExecutionBatch {
         bytes: request.envelope().metadata.admission_bytes,
@@ -159,7 +161,7 @@ fn active_long_running_request_remains_interruptible() {
         &mut connection,
         &binding,
         batch,
-        &mut LongRunningPersistence,
+        &mut RuntimeWriterPersistence::new(LongRunningPersistence),
         &telemetry,
         &state,
         &watermark,
@@ -173,4 +175,45 @@ fn active_long_running_request_remains_interruptible() {
         })
     ));
     assert_eq!(state.load(Ordering::SeqCst), WriterState::Ready as u8);
+}
+
+#[test]
+fn cancelled_first_write_leaves_no_schema_and_can_retry() {
+    let database = TestDatabase::new();
+    let request = request(metadata("operation.cancel.first", "key.cancel.first", 'f'));
+    let probe = Arc::new(Probe::new(&request, None));
+    let writer = start_with_executor(
+        &database,
+        &request,
+        CancellingFirstRequestPersistence {
+            first_probe: Arc::clone(&probe),
+            sequence: 0,
+        },
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    assert!(matches!(
+        runtime
+            .block_on(writer.submit(&cx(), request.clone(), probe))
+            .unwrap(),
+        RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. }
+    ));
+    let connection = Connection::open(&database.0).unwrap();
+    let tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0);
+    let retry_probe = Arc::new(Probe::new(&request, None));
+    assert!(matches!(
+        runtime
+            .block_on(writer.submit(&cx(), request, retry_probe))
+            .unwrap(),
+        RuntimeSubmitOutcomeV1::Committed { .. }
+    ));
+    writer.shutdown_and_join().unwrap();
 }

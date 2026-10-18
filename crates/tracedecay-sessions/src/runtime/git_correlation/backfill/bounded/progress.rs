@@ -20,14 +20,14 @@ pub(super) fn session_row_from_progress(progress: &GitHistoryProgressRow) -> Ses
 
 pub(super) const fn progress_frontier(progress: &GitHistoryProgressRow) -> GitHistoryIndexFrontier {
     GitHistoryIndexFrontier {
-        activity_timestamp: progress.activity_timestamp,
+        change_sequence: progress.change_sequence,
         source_rowid: progress.key.source_rowid,
     }
 }
 
 pub(super) fn progress_from_cursor(
     key: GitHistoryProgressKey,
-    activity_timestamp: i64,
+    change_sequence: i64,
     row: &SessionActivityRow,
     window_start: i64,
     window_end: i64,
@@ -42,7 +42,7 @@ pub(super) fn progress_from_cursor(
     let reflog_byte_length = cursor.byte_offset;
     Ok(GitHistoryProgressRow {
         key,
-        activity_timestamp,
+        change_sequence,
         provider: row.provider.clone(),
         session_id: row.session_id.clone(),
         project_path: row.project_path.clone(),

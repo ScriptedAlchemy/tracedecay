@@ -12,10 +12,11 @@ import sys
 import time
 
 from lib.process_control import terminate
+from lib.portable_process import dies_with_this_process
 
 
 # Default MCP Inspector pin, shared with scripts/mcp-conformance-smoke.sh
-# via scripts/lib/inspector_version — override both through INSPECTOR_VERSION.
+# via scripts/lib/inspector_version, override both through INSPECTOR_VERSION.
 INSPECTOR_VERSION = os.environ.get(
     "INSPECTOR_VERSION",
     Path(__file__)
@@ -78,8 +79,37 @@ def inspect(
     )
 
 
-def wait_for_daemon_socket(
-    daemon: subprocess.Popen[bytes], socket_path: Path
+def daemon_command(
+    binary: Path, socket_path: Path, *, platform_name: str = os.name
+) -> list[str]:
+    command = [str(binary), "daemon", "run"]
+    if platform_name != "nt":
+        command.extend(["--socket", str(socket_path)])
+    return command
+
+
+def daemon_environment(
+    environment: dict[str, str],
+    socket_path: Path,
+    *,
+    platform_name: str = os.name,
+) -> dict[str, str]:
+    configured = environment.copy()
+    configured.pop("TRACEDECAY_DAEMON_SOCKET", None)
+    if platform_name != "nt":
+        configured["TRACEDECAY_DAEMON_SOCKET"] = str(socket_path)
+    return configured
+
+
+def daemon_endpoint_is_ready(returncode: int, stdout: str) -> bool:
+    return returncode == 0 and "(connectable)" in stdout
+
+
+def wait_for_daemon(
+    daemon: subprocess.Popen[bytes],
+    binary: Path,
+    fixture: Path,
+    environment: dict[str, str],
 ) -> None:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -87,10 +117,23 @@ def wait_for_daemon_socket(
             raise SystemExit(
                 f"packaged daemon exited before init with {daemon.returncode}"
             )
-        if socket_path.exists():
+        status = run(
+            [str(binary), "daemon", "status"],
+            cwd=fixture,
+            environment=environment,
+            check=False,
+        )
+        if daemon_endpoint_is_ready(status.returncode, status.stdout):
             return
         time.sleep(0.05)
-    raise SystemExit("packaged daemon socket did not become ready")
+    raise SystemExit("packaged daemon endpoint did not become ready")
+
+
+def problem_of(payload: dict) -> dict:
+    """The typed problem a tool-result error carries in structuredContent."""
+    structured = payload.get("structuredContent")
+    problem = structured.get("problem") if isinstance(structured, dict) else None
+    return problem if isinstance(problem, dict) else {}
 
 
 def main() -> int:
@@ -144,17 +187,18 @@ def main() -> int:
     )
     socket_path = home / ".tracedecay" / "daemon.sock"
     socket_path.parent.mkdir(parents=True, exist_ok=True)
-    environment["TRACEDECAY_DAEMON_SOCKET"] = str(socket_path)
+    environment = daemon_environment(environment, socket_path)
     daemon = subprocess.Popen(
-        [str(binary), "daemon", "run", "--socket", str(socket_path)],
+        daemon_command(binary, socket_path),
         cwd=fixture,
         env=environment,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        preexec_fn=dies_with_this_process(),
     )
     try:
-        wait_for_daemon_socket(daemon, socket_path)
+        wait_for_daemon(daemon, binary, fixture, environment)
         run([str(binary), "init"], cwd=fixture, environment=environment)
 
         first = inspect(
@@ -226,11 +270,15 @@ def main() -> int:
             raise SystemExit("tracedecay_diagnostics returned no typed text result")
         lowered = diagnostic_text.lower()
         if diagnostic_payload.get("isError") is True:
-            if "unavailable" not in lowered or not any(
-                marker in lowered for marker in ("daemon", "authority", "service")
+            # A fixture without a configured compiler is a typed `unsupported`
+            # problem; a missing daemon authority is `unavailable`.
+            if problem_of(diagnostic_payload).get("kind") not in (
+                "unavailable",
+                "unsupported",
             ):
                 raise SystemExit(
-                    "tracedecay_diagnostics error was not typed as unavailable"
+                    "tracedecay_diagnostics error was not a typed unavailable or "
+                    "unsupported problem: " + diagnostic_text
                 )
         else:
             if diagnostics.returncode != 0:
@@ -272,8 +320,20 @@ def main() -> int:
             "definitely_not_a_tool",
             check=False,
         )
-        if unknown.returncode == 0:
-            raise SystemExit("unknown MCP tool unexpectedly succeeded")
+        try:
+            unknown_payload = json.loads(unknown.stdout)
+        except json.JSONDecodeError as error:
+            raise SystemExit(
+                "unknown MCP tool returned no typed refusal: " + unknown.stderr.strip()
+            ) from error
+        if (
+            unknown_payload.get("isError") is not True
+            or problem_of(unknown_payload).get("code") != "unknown_tool"
+        ):
+            raise SystemExit(
+                "unknown MCP tool was not a typed unknown_tool refusal: "
+                + unknown.stdout.strip()
+            )
     finally:
         terminate(daemon)
 

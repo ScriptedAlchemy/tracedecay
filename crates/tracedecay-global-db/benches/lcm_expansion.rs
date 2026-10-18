@@ -1,4 +1,6 @@
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use serde_json::json;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -17,16 +19,20 @@ use tracedecay_lcm::{
     LcmContentSlice, LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
     LcmSummaryNodeDraft,
 };
-use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_session_temporal_store::{
+    RegisteredGlobalDbSessionTemporalExecution, SessionTemporalStore,
+};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    SessionRetrievalStore, SessionTemporalSnapshotRequestV1,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
-use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, KernelVersions, TemporalExecutionSnapshot,
-    TemporalSnapshotRequest, TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 
 const PROVIDER: &str = "lcm-benchmark";
 const SESSION_ID: &str = "session.lcm-expansion";
@@ -132,7 +138,7 @@ async fn persist_observation(
     let authorization = build_observation_resolution_authorization_v1(&observation, AUTHORITY)
         .expect("benchmark observation authorization is valid");
     let access_digest = authorization.access_policy_digest.as_str().to_owned();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         &observation,
         projection_generation.clone(),
         UtcMicros(1),
@@ -260,12 +266,20 @@ async fn build_fixture() -> Fixture {
             .expect("publish benchmark leaf through production authority");
         expected_source_content.push(leaf_summary_text(index));
     }
-    let root_receipt = database
+    database
         .lcm_publish_immutable_summary_guarded(root_publication(), &publication_control, || Ok(()))
         .await
         .expect("publish benchmark root through production authority");
-    let generation = u64::try_from(root_receipt.generation)
-        .expect("published benchmark generation is non-negative");
+    let temporal = SessionTemporalStore::new(database);
+    temporal
+        .materialize_pending_session_refresh_for_test(&session_id)
+        .await
+        .expect("publish benchmark temporal rows and summary relations");
+    let frozen = temporal
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(session_id.clone()))
+        .await
+        .expect("freeze benchmark canonical temporal watermarks");
+    let watermarks = frozen.watermarks();
     let snapshot = TemporalExecutionSnapshot::new_authorized(
         TemporalSnapshotRequest::new(
             session_id,
@@ -277,11 +291,11 @@ async fn build_fixture() -> Fixture {
         )
         .expect("benchmark temporal request is valid"),
         TemporalWatermarks {
-            generation,
-            source: 0,
-            projection: 0,
-            index: 0,
-            summary: generation,
+            generation: watermarks.active_generation().value(),
+            source: watermarks.source_frontier(),
+            projection: watermarks.projection_frontier(),
+            index: watermarks.projection_frontier(),
+            summary: watermarks.summary_frontier(),
         },
         KernelVersions {
             schema: 1,
@@ -341,22 +355,30 @@ fn assert_expansion(fixture: &Fixture, expansion: &LcmExpandResponse) {
 }
 
 fn lcm_expansion(criterion: &mut Criterion) {
-    let tokio = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
+    let executor = asupersync::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(0, 512)
         .build()
         .expect("build benchmark runtime");
-    let fixture = tokio.block_on(build_fixture());
-    let preflight = tokio.block_on(expand(&fixture));
+    let fixture = executor.block_on(build_fixture());
+    let preflight = executor.block_on(expand(&fixture));
     assert_expansion(&fixture, &preflight);
 
     let mut group = criterion.benchmark_group("lcm_expansion");
     group.throughput(Throughput::Elements(SOURCE_COUNT as u64));
     group.bench_function("render_and_hydrate_summary_sources", |bencher| {
         bencher
-            .to_async(&tokio)
+            .to_async(BenchExecutor(&executor))
             .iter(|| async { black_box(expand(&fixture).await) });
     });
     group.finish();
+}
+
+struct BenchExecutor<'a>(&'a asupersync::runtime::Runtime);
+
+impl criterion::async_executor::AsyncExecutor for BenchExecutor<'_> {
+    fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
+        self.0.block_on(future)
+    }
 }
 
 criterion_group!(benches, lcm_expansion);

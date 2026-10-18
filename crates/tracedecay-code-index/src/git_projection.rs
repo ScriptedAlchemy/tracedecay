@@ -7,18 +7,19 @@ use std::fmt;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
     GitCommitMetadataV1, GitCoverageV1, GitHeadStateV1, GitHistoryV1, GitOidV1, ManifestDigest,
     RefId, RepositoryId, canonical_sha256,
 };
+use tracedecay_graph_db::graph_stable_identity as stable_identity;
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
-    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
-    GraphWatermark, SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
+    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphStoreFailureClass,
+    GraphTraversalDirection, GraphWatermark, NeverCancelled, SourceGeneration, TraversalRequest,
+    VerifiedGraphSnapshot, classify_graph_store_error,
 };
 
 use declared_topology::validate_declared_topology;
@@ -37,14 +38,6 @@ const PARENT_RELATION: &str = "GitParent";
 const REF_TARGET_RELATION: &str = "GitRefTarget";
 
 pub const GIT_TOPOLOGY_PROJECTOR_REVISION_V1: &str = "git-topology-projector.v1";
-
-struct NeverCancelled;
-
-impl GraphCancellation for NeverCancelled {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -132,11 +125,6 @@ pub enum GitTopologyProjectionError {
     RefWatermarkMismatch,
     #[error("Git topology generation does not match")]
     GenerationMismatch,
-    #[error("Git topology projection is stale")]
-    Stale {
-        projected: ManifestDigest,
-        current: ManifestDigest,
-    },
     #[error("Git topology declared binding is stale: {detail}")]
     StaleBinding { detail: &'static str },
     #[error("Git topology operation was cancelled")]
@@ -151,23 +139,12 @@ pub enum GitTopologyProjectionError {
 
 impl From<GraphDbError> for GitTopologyProjectionError {
     fn from(error: GraphDbError) -> Self {
-        match error {
-            GraphDbError::Cancelled => Self::Cancelled,
-            GraphDbError::BudgetExhausted { .. } | GraphDbError::DeadlineExceeded => {
-                Self::BudgetExhausted
-            }
-            GraphDbError::InvalidRequest { message } => Self::Contract(message),
-            GraphDbError::Corrupt { message }
-            | GraphDbError::ResetRequired { message }
-            | GraphDbError::DurabilityUncertain { message }
-            | GraphDbError::ProjectionMismatch { message, .. }
-            | GraphDbError::GenerationMismatch { message, .. } => Self::Corrupt(message),
-            GraphDbError::Conflict { .. } => {
-                Self::Unavailable("Git topology publication conflict".to_owned())
-            }
-            GraphDbError::Unavailable { message }
-            | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),
-            GraphDbError::Closed => Self::Unavailable("graph store is closed".to_owned()),
+        match classify_graph_store_error(error, "Git topology publication conflict") {
+            GraphStoreFailureClass::Cancelled => Self::Cancelled,
+            GraphStoreFailureClass::BudgetExhausted => Self::BudgetExhausted,
+            GraphStoreFailureClass::Contract(message) => Self::Contract(message),
+            GraphStoreFailureClass::Corrupt(message) => Self::Corrupt(message),
+            GraphStoreFailureClass::Unavailable(message) => Self::Unavailable(message),
         }
     }
 }
@@ -404,20 +381,6 @@ impl GitTopologyProjectionStore {
 
     pub fn coverage(&self) -> &GitCoverageV1 {
         &self.coverage
-    }
-
-    pub fn verify_ref_watermark(
-        &self,
-        current: &ManifestDigest,
-    ) -> Result<(), GitTopologyProjectionError> {
-        if &self.ref_watermark == current {
-            Ok(())
-        } else {
-            Err(GitTopologyProjectionError::Stale {
-                projected: self.ref_watermark.clone(),
-                current: current.clone(),
-            })
-        }
     }
 
     pub fn ancestors(
@@ -745,14 +708,6 @@ fn ref_entity_id(reference: &RefId) -> Result<GraphEntityId, GitTopologyProjecti
 
 fn metadata_entity_id() -> Result<GraphEntityId, GitTopologyProjectionError> {
     GraphEntityId::new(stable_identity("metadata", GIT_PROJECTION)).map_err(Into::into)
-}
-
-fn stable_identity(kind: &str, value: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(kind.as_bytes());
-    digest.update([0]);
-    digest.update(value.as_bytes());
-    format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
 fn serialize(value: &impl Serialize) -> Result<Vec<u8>, GitTopologyProjectionError> {

@@ -6,54 +6,134 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use rmcp::ServiceExt;
 use serde_json::json;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
+use tracedecay_mcp::server::RmcpConnectionAdapter;
+
 use crate::mcp::server::{
-    McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, SERVER_INSTRUCTIONS,
-    classify_mcp_method, initialize_result,
-};
-use crate::mcp::tools::{
-    default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
-    get_catalog_filtered_tool_definitions_with_warming_budget,
+    McpMethod, ProductionMcpConnectionContext, RmcpInitializeResponseDecorator,
+    SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result,
 };
 use branch_add::{branch_add_response, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
 #[cfg(all(unix, test))]
 use scheduler::{
     AutomationSchedulerHandle, automation_scheduler_configured,
-    automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
-    run_automation_scheduler_tick, scheduler_task_log_fields,
+    automation_scheduler_tick_secs_for_project, run_automation_scheduler_tick,
 };
-#[allow(unused_imports)]
-pub(crate) use tracedecay_daemon_protocol::{
-    BrokerListener, BrokerStream, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
-    DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome, DaemonInvocationRequest,
-    DaemonInvocationResponse, default_loopback_endpoint, parse_daemon_invocation_request,
+use tracedecay_contracts::project_open::{
+    ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
-pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 #[cfg(unix)]
+pub(crate) use tracedecay_daemon_protocol::ensure_private_socket_parent;
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
-    ensure_private_socket_parent, unix_socket_path_within_limit,
+    BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome,
+    DaemonInvocationRequest, DaemonInvocationResponse, default_loopback_endpoint,
+    parse_daemon_invocation_request,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
+pub(crate) use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
+use tracedecay_mcp::tools::catalog_discovery::{
+    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
+};
 use tracedecay_mcp::transport::ReplayTransport;
-use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
-use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
+use tracedecay_mcp::{
+    BrokerStreamTransport, ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport,
+};
+use tracedecay_mcp::{explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
-pub use tracedecay_daemon_protocol::SOCKET_ENV;
+/// Human-facing detail fragment for a still-warming project/profile owner.
+///
+/// Protocol control flow must key on [`PROJECT_WARMING_REASON_CODE`] (or the
+/// sibling deferred, capacity, and revoked codes below), never on this English
+/// prose.
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
     "is warming in the background; retry the same tool shortly";
+/// Typed reason a project/profile/owner open has not finished yet.
+pub const PROJECT_WARMING_REASON_CODE: &str = "project_warming";
+/// Typed reason the runtime's Doctor report is absent: the project runtime
+/// that owns the report is still mounting.
+pub(crate) const DOCTOR_REPORT_OWNER_WARMING_REASON: &str = "doctor_report_owner_warming";
+/// Typed reason a repository-identity probe deferred past its budget.
+pub use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
+/// Typed reason a retained project server was retired mid-response.
+pub const PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE: &str = "project_server_response_revoked";
+/// Typed reason the in-flight project-open task table is full.
+pub const PROJECT_OPEN_TASK_CAPACITY_REASON_CODE: &str = "project_open_task_capacity_reached";
+/// Typed reason the cached project-server table is full.
+pub const PROJECT_SERVER_CAPACITY_REASON_CODE: &str = "project_server_capacity_reached";
+
+/// Typed error for a stalled `project_open` snapshot. Status, Doctor, and
+/// the CLI all use this so a stalled open is never a successful empty report.
+/// `RetryBackoff` covers capacity, code-runtime-budget, and observability
+/// stalls alike, so it maps to the honest typed backoff that keeps the
+/// recorded detail, never to a fabricated capacity verdict. Callers that
+/// hold the exact `ProjectOpenFailure` replay it instead of this fallback.
+pub fn stalled_project_open_error(status: &ProjectOpenStatusV1) -> TraceDecayError {
+    let detail = status
+        .detail
+        .clone()
+        .unwrap_or_else(|| "project open stalled".to_owned());
+    match status.reason {
+        ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => {
+            TraceDecayError::project_route(REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, detail)
+        }
+        ProjectOpenStatusReasonV1::UnrepairableVerdict => TraceDecayError::project_open(
+            ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: false,
+            },
+            detail,
+        ),
+        ProjectOpenStatusReasonV1::RetryBackoff
+        | ProjectOpenStatusReasonV1::Unavailable
+        | ProjectOpenStatusReasonV1::Converging
+        | ProjectOpenStatusReasonV1::Ready => TraceDecayError::project_open(
+            ProjectOpenFailureKind::BackedOff {
+                retry_after_ms: status.retry_after_ms.unwrap_or(0),
+            },
+            detail,
+        ),
+    }
+}
+
+/// Reject a successful status/Doctor payload that still carries a stalled
+/// `project_open` snapshot. CLI status and Doctor both use this so a leaked
+/// snapshot cannot stay a printed success or a warning.
+pub fn reject_stalled_project_open_status(daemon_status: &serde_json::Value) -> Result<()> {
+    let Some(project_open) = daemon_status
+        .get("project_open")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .map(serde_json::from_value::<ProjectOpenStatusV1>)
+        .transpose()?
+    else {
+        return Ok(());
+    };
+    if project_open.state != ProjectOpenStatusStateV1::Stalled {
+        return Ok(());
+    }
+    Err(stalled_project_open_error(&project_open))
+}
+
+/// Typed reason a handshake route names a directory the authenticated profile
+/// has not enrolled (no `tracedecay init`, no registry row, no durable store).
+/// It is a client state, not a daemon failure: `initialize` and `tools/list`
+/// still answer, and every `tools/call` re-derives this refusal until
+/// enrollment succeeds.
+pub const PROJECT_NOT_ENROLLED_REASON_CODE: &str = "project_not_enrolled";
+/// Typed reason a project-scoped request arrived on a handshake that names no
+/// project at all (no `--project`, and no enrolled project above the cwd).
+pub const PROJECT_REQUIRED_REASON_CODE: &str = "project_required";
 #[cfg(unix)]
 const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
@@ -62,6 +142,26 @@ const MAX_CACHED_PROJECT_SERVERS: usize = 8;
 const MAX_TRACKED_PROJECT_OPEN_TASKS: usize = MAX_CACHED_PROJECT_SERVERS;
 const MAX_CACHED_PROJECT_OPEN_FAILURES: usize = 64;
 const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
+
+/// Instant a foreground request stops waiting for an open it has already claimed.
+///
+/// Measured from the claim, not from connection arrival. Route enrollment and
+/// git discovery have their own bounds. Charging them to this deadline made a
+/// restart's first request answer warming for a store whose open had already
+/// recorded `reset_required`: the connection spent the budget before it joined
+/// the watch, so the publication wait returned immediately and never read the
+/// refusal.
+fn project_open_publication_deadline(claimed_at: Instant) -> Instant {
+    claimed_at + PROJECT_OPEN_REQUEST_DEADLINE
+}
+/// One budget for every blocking repository probe a route resolution runs.
+///
+/// Route resolution reads the repository's topology, enrollment marker, and
+/// HEAD. Those are filesystem operations whose cost belongs to the volume the
+/// checkout lives on, not to this daemon, so they run off the async workers
+/// and a probe that outlives this budget becomes the retryable deferred
+/// discovery refusal instead of holding the caller.
+const REPOSITORY_DISCOVERY_DEADLINE: Duration = Duration::from_secs(2);
 const PROJECT_OPEN_FAILURE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 const PROJECT_OPEN_RESOURCE_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// Backoff for a persisted-row authority defect, which only an operator can
@@ -69,8 +169,34 @@ const PROJECT_OPEN_RESOURCE_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// `observations` row and fails on the same row every time, so the debounce
 /// cadence above would saturate a core for as long as the daemon runs.
 const PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF: Duration = Duration::from_mins(5);
-const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
-    "project route open is backed off after an invariant rejection";
+
+/// One authenticated connection's bounded first request.
+///
+/// Routing shares the parsed JSON-RPC view, while the selected transport
+/// consumes the byte-exact raw line and performs its own authoritative decode.
+pub(super) struct AuthenticatedFirstRequest {
+    raw: String,
+    parsed: Option<JsonRpcRequest>,
+}
+
+impl AuthenticatedFirstRequest {
+    pub(super) fn new(raw: String) -> Self {
+        let parsed = JsonRpcRequest::decode(raw.trim()).ok();
+        Self { raw, parsed }
+    }
+
+    pub(super) fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    pub(super) fn parsed(&self) -> Option<&JsonRpcRequest> {
+        self.parsed.as_ref()
+    }
+
+    pub(super) fn into_raw(self) -> String {
+        self.raw
+    }
+}
 
 /// How long a client rides out a project open that has not finished yet.
 ///
@@ -81,165 +207,166 @@ const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
 pub(crate) const PROJECT_OPEN_RETRY_GRACE: Duration = Duration::from_secs(15);
 pub(crate) const PROJECT_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Daemon error messages for a saturated project-open queue. Both clear on
-/// their own as in-flight opens finish, so they are retryable for the same
-/// reason [`PROJECT_WARMING_RETRY_HINT`] is.
-const PROJECT_OPEN_CAPACITY_MESSAGES: [&str; 2] = [
-    "daemon project open task capacity reached",
-    "daemon project server capacity reached",
-];
-/// Typed `error.data.kind` values for the same two capacity states.
-const PROJECT_OPEN_CAPACITY_ERROR_KINDS: [&str; 2] = [
-    "project_open_task_capacity_reached",
-    "project_server_capacity_reached",
-];
-/// Message fragments emitted when a daemon request misses its read deadline.
-const DAEMON_READ_DEADLINE_MESSAGES: [&str; 3] = [
-    "before deadline",
-    "deadline already elapsed",
-    "did not answer after",
-];
-
-/// True when a daemon error message carries the project warming hint.
-pub(crate) fn error_message_is_project_warming(message: &str) -> bool {
-    message.contains(PROJECT_WARMING_RETRY_HINT)
-}
-
-/// True when a daemon error message describes a project open that has not
-/// finished yet: either the route's warming hint or a saturated open queue.
-pub(crate) fn error_message_is_project_open_retryable(message: &str) -> bool {
-    error_message_is_project_warming(message)
-        || PROJECT_OPEN_CAPACITY_MESSAGES
-            .iter()
-            .any(|capacity| message.contains(capacity))
-}
-
-/// Response-side form of [`error_message_is_project_open_retryable`] for
-/// clients that still hold the JSON-RPC `error` member, where the capacity
-/// states also carry a typed `data.kind`.
-pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value) -> bool {
-    error
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(error_message_is_project_open_retryable)
-        || error
-            .pointer("/data/kind")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|kind| PROJECT_OPEN_CAPACITY_ERROR_KINDS.contains(&kind))
-}
-
-/// True when a daemon error message reports a missed read deadline.
-pub fn error_message_is_read_deadline(message: &str) -> bool {
-    DAEMON_READ_DEADLINE_MESSAGES
-        .iter()
-        .any(|deadline| message.contains(deadline))
-}
-
-/// True when a daemon client missed its read deadline, including the typed
-/// `daemon_response_stalled` reason code.
-pub fn error_is_read_deadline(error: &TraceDecayError) -> bool {
+/// True when a daemon error is the typed project/profile/owner warming refusal.
+pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
-        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, _, _))
-    ) || error_message_is_read_deadline(&error.to_string())
+        Some((PROJECT_WARMING_REASON_CODE, true, _))
+    )
 }
 
-pub(crate) mod automation_effect;
+/// True when repository discovery deferred or blocked this route.
+pub(crate) fn error_is_repository_discovery_deferred(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some((REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, _, _))
+    )
+}
+
+/// True when route admission refused the handshake path as not enrolled.
+pub(crate) fn error_is_project_not_enrolled(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some((PROJECT_NOT_ENROLLED_REASON_CODE, false, _))
+    )
+}
+
+fn project_open_retryable_reason(reason_code: &str) -> bool {
+    matches!(
+        reason_code,
+        PROJECT_WARMING_REASON_CODE
+            | REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE
+            | PROJECT_OPEN_TASK_CAPACITY_REASON_CODE
+            | PROJECT_SERVER_CAPACITY_REASON_CODE
+    )
+}
+
+fn project_open_capacity_limit(reason_code: &str) -> Option<usize> {
+    match reason_code {
+        PROJECT_OPEN_TASK_CAPACITY_REASON_CODE => Some(MAX_TRACKED_PROJECT_OPEN_TASKS),
+        PROJECT_SERVER_CAPACITY_REASON_CODE => Some(MAX_CACHED_PROJECT_SERVERS),
+        _ => None,
+    }
+}
+
+/// True when a daemon error describes a project open that has not finished
+/// yet: typed warming, deferred repository discovery, or a saturated open
+/// queue. Capacity clears as in-flight opens finish, so it is retryable for
+/// the same reason [`PROJECT_WARMING_REASON_CODE`] is. Classification keys on
+/// the reason code, never on English detail.
+pub(crate) fn error_is_project_open_retryable(error: &TraceDecayError) -> bool {
+    error
+        .project_route_context()
+        .is_some_and(|(reason, retryable, _)| retryable && project_open_retryable_reason(reason))
+}
+
+/// Response-side form of [`error_is_project_open_retryable`] for clients that
+/// still hold the JSON-RPC `error` member. Every retryable open refusal,
+/// including capacity, carries `data.reason_code`.
+pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value) -> bool {
+    error
+        .pointer("/data/reason_code")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(project_open_retryable_reason)
+}
+
+/// True when a one-shot tool-call transport error should be retried by a
+/// journey (or any client riding out a transient open/retirement).
+///
+/// Keys only on typed reason codes, never on English detail prose.
+pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some((reason, true, _))
+            if reason == PROJECT_WARMING_REASON_CODE
+                || reason == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE
+                || reason == PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE
+    )
+}
+
+/// Aborts its tasks when dropped. A shutdown join holds one so that the
+/// coordinator dropping the join at its phase deadline aborts the tasks the
+/// join was waiting on. Aborting a task that already finished does nothing.
+pub(crate) struct AbortTasksOnDrop(pub(crate) Vec<tokio::task::AbortHandle>);
+
+impl Drop for AbortTasksOnDrop {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 mod bootstrap;
 mod bootstrap_route;
 use bootstrap_route::{
-    apply_daemon_initialize_route, attach_initialize_route_metadata, cached_project_node_count,
-    daemon_bootstrap_response, prewarm_daemon_bootstrap_catalog,
+    apply_daemon_initialize_route, attach_initialize_route_metadata, attach_reset_required_stores,
+    cached_project_node_count, daemon_bootstrap_response, prewarm_daemon_bootstrap_catalog,
 };
 mod branch_add;
 mod branch_admin;
-mod broker_stream_transport;
-use broker_stream_transport::BrokerStreamTransport;
-mod callable_code_authorization;
 use tracedecay_code_index_runtime::code_index_branch_diff::code_index_branch_diff_executor;
-use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
+use tracedecay_code_index_runtime::code_index_executor::{
+    code_index_redundancy_executor, code_index_search_executor, code_index_similar_executor,
+};
 #[cfg(test)]
 use tracedecay_code_index_runtime::code_index_executor::{
-    code_index_search_display_binding, mcp_search_request_termination,
+    code_index_search_display_binding, code_index_text_search_display_binding,
+    mcp_search_request_termination,
 };
 #[cfg(test)]
-use tracedecay_code_index_runtime::code_index_task_support::{
-    code_index_scope_unavailable, code_index_search_hydration_budget,
-};
+use tracedecay_code_index_runtime::code_index_task_support::code_index_scope_unavailable;
 mod connection_serving;
+#[cfg(feature = "rmcp-benchmark")]
+#[doc(hidden)]
+pub use connection_serving::rmcp_benchmark;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
-#[cfg(all(unix, test))]
-use connection_serving::serve_socket_client;
 #[cfg(not(unix))]
 use connection_serving::serve_windows_broker_client_with_class_and_invocation;
+#[cfg(any(test, feature = "test-transport"))]
+pub(crate) use connection_serving::{RoutedRmcpReplay, serve_routed_rmcp_connection};
 #[cfg(test)]
 use connection_serving::{
-    await_project_owner_or_disconnect, serve_routed_rmcp_connection, serve_windows_broker_client,
+    await_project_owner_or_disconnect, serve_windows_broker_client,
     serve_windows_broker_client_with_class,
 };
-pub(crate) mod context_scout_lifecycle;
 mod core_admission;
 mod engine;
 #[cfg(unix)]
 use engine::DaemonEngine;
-use engine::{
-    ensure_context_scout_owner_before_advertising,
-    ensure_git_index_transactions_for_mutation_owners,
-};
-mod adoption_observation;
-mod automation_observation;
-pub(crate) use automation_observation::{
-    project_run_observation_producer as project_automation_observation_producer,
-    record_project_run as record_project_automation_run,
-};
+use engine::ensure_context_scout_owner_before_advertising;
 mod core_client;
 mod core_doctor;
 mod core_handshake;
 mod core_hooks;
-mod core_lifecycle;
-mod core_logging;
 mod core_proxy;
 mod database_owner_registry;
 use database_owner_registry::DatabaseOwnerRegistry;
 pub(crate) mod dashboard_automation;
 #[cfg(feature = "test-transport")]
+#[path = "../tests/common/dashboard_configuration_test_runtime.rs"]
 mod dashboard_configuration_test_runtime;
-pub(crate) mod doctor_kernel;
-pub(crate) mod hook_v2_replay;
-pub(crate) mod privacy_remediation;
+pub(crate) mod hook_v2_replay_consumer;
 pub(crate) mod project_open_owners;
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_configuration_test_runtime::{
     dashboard_configuration_authorities_for_test, register_dashboard_test_retained_runtime,
 };
-pub(crate) mod query_authority_provider;
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) mod retained_test_support;
-mod shutdown_coordination;
-mod shutdown_orchestration;
-mod shutdown_watchdog;
-#[cfg(feature = "hotpath")]
-pub use shutdown_watchdog::install_hotpath_shutdown_finalizer;
-mod store_shutdown;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
 pub use core_handshake::*;
 pub use core_hooks::*;
-pub(crate) use core_lifecycle::*;
-pub use core_logging::*;
 pub use core_proxy::*;
-pub(crate) use shutdown_coordination::ShutdownStatus;
 mod github_credential_lifecycle;
 mod graph_resolution;
 use graph_resolution::retained_project_server_resolver;
 mod http_application;
 pub use http_application::live_remote_operational_status;
 mod http_application_router;
-pub(crate) mod remote_protocol;
-mod remote_query;
-pub(crate) mod retained_owner;
 use http_application_router::{
     install_http_application_cold_resolver, install_remote_http_application_router,
     mount_http_application_router,
@@ -270,28 +397,34 @@ use lsp_sessions::{
     settle_pending_lsp_workspace_mutation, update_connection_lsp_sessions,
 };
 mod maintenance;
-mod maintenance_tasks;
-pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
-use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
 pub mod pr_autotrack;
+#[cfg(any(test, feature = "test-transport"))]
+#[allow(clippy::too_many_lines)]
 mod production_harness;
 mod store_maintenance;
 #[cfg(any(test, feature = "test-transport"))]
 pub use production_harness::ProductionProjectCompositionHarnessV1;
 #[cfg(all(unix, feature = "test-transport"))]
 pub use production_harness::capture_exact_git_snapshot_for_test;
-mod profile_host_admission_replay;
+mod profile_configuration;
+mod profile_owner;
+mod profile_retained;
+#[cfg(unix)]
+mod profile_watch;
 mod projectless;
 mod remote_deletion;
+mod remote_drain;
+mod remote_join;
+mod remote_revocation;
 #[cfg(test)]
 use projectless::projectless_tools_call_response;
-use projectless::{
-    projectless_tool_call, projectless_user_session_request, serve_projectless_client,
-};
+use projectless::{projectless_first_request, projectless_tool_call, serve_projectless_client};
+pub use remote_drain::{RemoteNodeDrainReceiptV1, live_remote_drain};
+pub use remote_join::{RemoteNodeJoinRequestV1, live_remote_join};
+pub use remote_revocation::{RemoteNodeRevocationV1, live_remote_node_revocation};
 mod project_composition;
 mod project_delivery_mount;
-#[cfg(test)]
-use project_composition::daemon_transcript_source_home;
+pub(crate) use project_composition::daemon_transcript_source_profile;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
 #[cfg(test)]
@@ -312,11 +445,19 @@ mod project_open_handshake;
 #[cfg(test)]
 use project_open_handshake::is_missing_index_error;
 use project_open_handshake::{
-    open_project_for_handshake, project_open_error_response, write_project_open_error,
+    initialize_project_open_error, open_project_for_handshake, project_open_error_response,
+    write_project_open_error,
 };
 mod project_open_orchestration;
 mod project_routing;
+// ambient-tokio: its Tokio timers run on Tokio tasks or inside the
+// native_runtime::on_tokio hops in project_server_lifecycle_hops.
 mod project_server_lifecycle;
+#[cfg(unix)]
+use project_open_orchestration::{
+    await_claimed_project_open, spawn_lifecycle_automation_scheduler_activation,
+    start_lifecycle_project_open,
+};
 use project_open_orchestration::{
     durable_enrollment_resolves_existing_store, ensure_registered_project_route,
 };
@@ -324,11 +465,6 @@ use project_open_orchestration::{
 use project_open_orchestration::{
     portable_cached_project_open_failure, portable_cached_project_server,
     portable_project_server_for_request, schedule_portable_project_server_warmup,
-};
-#[cfg(unix)]
-use project_open_orchestration::{
-    spawn_lifecycle_automation_scheduler_activation, start_lifecycle_project_open,
-    wait_for_project_open_publication,
 };
 // The portable reconciler only exists off-unix (or under test transports), so
 // its import carries the same gate as its definition.
@@ -338,19 +474,20 @@ use project_routing::portable_database_owner_reconciler;
 use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
     bind_authenticated_profile_identity, cached_or_bind_ready_project_server,
+    ensure_checkout_topology_before_admission, prefer_recorded_open_failure,
     project_open_cancellation_checkpoint, project_open_cancellation_error,
     project_open_capacity_gate, project_open_gate, project_open_task_capacity_error,
     project_open_tasks, project_route_for_handshake, project_server_capacity_error,
-    project_warming_error, resolved_project_server_key,
+    project_server_retirement_blocked_error, project_warming_error, resolved_project_server_key,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
-use project_server_lifecycle::{
+use project_server_lifecycle::{schedule_project_server_retirement, shutdown_project_servers};
+mod project_server_lifecycle_hops;
+use project_server_lifecycle_hops::{
     await_user_profile_host_admission_replay_for_identity, cancel_retained_session_history,
-    schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
-    shutdown_project_servers,
+    schedule_user_profile_host_admission_replay_for_identity,
 };
-mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
 #[cfg(test)]
@@ -359,15 +496,15 @@ pub(crate) mod session_runtime_tests;
 #[cfg(test)]
 pub(crate) mod store_runtime_tests;
 
-pub(crate) mod store_runtime;
-mod store_writer_gate;
+mod repeat_reads;
+mod repeated_queries;
+mod tool_surface;
 mod wire_io;
-pub(crate) mod work_evidence_retrieval;
-use wire_io::{
-    read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
-};
+#[cfg(test)]
+mod work_evidence_retrieval_tests;
+use wire_io::{read_line_handling_wire_oversized, write_daemon_response};
 
-pub use bootstrap::run_foreground;
+pub use bootstrap::{DaemonRunEnd, PROFILE_LOST_EXIT_CODE, run_foreground};
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
@@ -378,12 +515,6 @@ mod invocation_tests;
 mod tests;
 
 #[cfg(test)]
-#[path = "../../tracedecay-code-index-runtime/src/code_index_scheduler/ignored_dependencies_tests.rs"]
-#[allow(clippy::expect_used)]
-mod code_index_ignored_dependencies_tests;
-
-#[cfg(test)]
-#[path = "../../tracedecay-code-index-runtime/src/code_index_scheduler/registry/runtime_generation_census_tests.rs"]
 #[allow(clippy::expect_used)]
 mod code_index_runtime_generation_census_tests;
 
@@ -394,6 +525,10 @@ mod code_index_runtime_graph_activation_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod http_application_tests;
+
+#[cfg(all(test, unix))]
+#[allow(clippy::expect_used)]
+mod broker_stream_transport_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

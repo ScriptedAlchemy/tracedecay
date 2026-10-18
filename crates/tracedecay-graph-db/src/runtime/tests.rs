@@ -1,19 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
 use grafeo_common::types::Value;
 
-use super::{require_committed_vector_scalar, sync_wal};
+use super::{GraphDb, sync_wal};
+use crate::location::PersistentGraphStoreState;
 use crate::recovery::set_projection_quarantine;
 use crate::{
     GraphCommit, GraphDbError, GraphDbLeaseV1, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
     GraphDbRuntimeState, GraphDurability, GraphEntity, GraphEntityId, GraphFormatVersion,
     GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
-    GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphVector,
-    GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
-    VectorMetric, mutation,
+    GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+    TraversalRequest, mutation,
 };
 
 fn memory_db() -> GraphDbLeaseV1 {
@@ -55,18 +56,17 @@ fn owner_close_releases_the_physical_database_after_durability_uncertainty() {
     let handle = owner.issue_lease().unwrap();
     handle.inner.poisoned.store(true, Ordering::Release);
 
-    assert!(matches!(
+    assert_eq!(
         owner.close(),
-        Err(GraphDbError::DurabilityUncertain { .. })
-    ));
-    assert!(
-        handle
-            .inner
-            .database
-            .read()
-            .expect("database lock remains readable")
-            .is_none(),
-        "owner close must release the physical Grafeo database even after poisoning"
+        Err(GraphDbError::DurabilityUncertain {
+            message: "the handle was poisoned after an observed post-commit persistence failure"
+                .to_owned(),
+        })
+    );
+    assert_eq!(
+        owner.close(),
+        Err(GraphDbError::Closed),
+        "the poisoned close must release the physical database before a second close"
     );
 }
 
@@ -127,77 +127,67 @@ fn scalar_batch(value: &str) -> GraphWriteBatch {
     .unwrap()
 }
 
-fn stable_replay_batch(source: &str) -> GraphWriteBatch {
-    let entity = |identity: &str| {
-        GraphEntity::new(
-            GraphEntityId::new(identity).unwrap(),
-            BTreeSet::new(),
-            BTreeMap::from([(
-                GraphPropertyName::new("name").unwrap(),
-                GraphProperty::String(identity.to_owned()),
-            )]),
-        )
-        .unwrap()
-    };
-    GraphWriteBatch::new(
-        GraphNamespace::new("project").unwrap(),
-        GraphProjectionId::new("code").unwrap(),
-        SourceGeneration::new(source).unwrap(),
-        GraphWatermark::new(source).unwrap(),
-        vec![
-            GraphMutation::UpsertEntity(entity("a")),
-            GraphMutation::UpsertEntity(entity("b")),
-            GraphMutation::UpsertRelation(
-                GraphRelation::new(
-                    GraphRelationId::new("a-calls-b").unwrap(),
-                    GraphEntityId::new("a").unwrap(),
-                    GraphEntityId::new("b").unwrap(),
-                    GraphRelationKind::new("calls").unwrap(),
-                    BTreeMap::new(),
-                )
-                .unwrap(),
-            ),
-        ],
-        Arc::new(NeverCancelled),
-    )
-    .unwrap()
-}
+#[test]
+fn resident_engine_bytes_remeasures_after_a_write() {
+    let db = memory_db();
+    let first = db.resident_engine_bytes().unwrap().unwrap();
+    assert_eq!(db.resident_engine_bytes().unwrap(), Some(first));
 
-fn stable_replay_native_identity(
-    db: &GraphDbLeaseV1,
-    batch: &GraphWriteBatch,
-) -> (
-    Vec<grafeo_common::types::NodeId>,
-    grafeo_common::types::NodeId,
-    grafeo_common::types::EdgeId,
-) {
-    let guard = db.read_guard().unwrap();
+    for index in 0..32 {
+        let value = format!("{index}-{}", "x".repeat(900));
+        db.apply_unverified(scalar_batch(&value)).unwrap();
+    }
+
+    let measured = db.resident_engine_bytes().unwrap().unwrap();
+    let guard = db.inner.database.read().unwrap();
     let database = guard.as_ref().unwrap();
-    let existing = crate::state::ExistingBatchState::load(database, batch).unwrap();
-    let entities = existing
-        .entities
-        .values()
-        .map(|entity| entity.node)
-        .collect::<Vec<_>>();
-    let relation = existing.relations.values().next().unwrap();
-    (entities, relation.locator, relation.edge)
+    let fresh = u64::try_from(database.memory_usage().total_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(db.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX));
+    assert!(
+        measured > first,
+        "memory usage did not grow: {first} -> {measured}"
+    );
+    assert_eq!(measured, fresh);
 }
 
 #[test]
-fn identical_upsert_replay_preserves_native_entity_and_relation_identity() {
-    let db = memory_db();
-    db.apply_unverified(stable_replay_batch("generation-1"))
-        .unwrap();
-    let before = stable_replay_native_identity(&db, &stable_replay_batch("generation-2"));
+fn resident_engine_bytes_is_recomputed_after_hibernation_and_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.grafeo");
+    let options = || GraphDbOpenOptions {
+        location: GraphDbLocation::Persistent(path.clone()),
+        expected_format: GraphFormatVersion::new(2).unwrap(),
+        durability: GraphDurability::WalSync,
+        cancellation: Arc::new(NeverCancelled),
+    };
 
-    db.apply_unverified(stable_replay_batch("generation-2"))
+    let owner = GraphDbOwner::open(options()).unwrap();
+    owner
+        .issue_lease()
+        .unwrap()
+        .apply_unverified(scalar_batch("seed"))
         .unwrap();
-    let after = stable_replay_native_identity(&db, &stable_replay_batch("generation-3"));
+    owner.close().unwrap();
 
-    assert_eq!(
-        after, before,
-        "identical graph rows must be mutation no-ops"
-    );
+    let db = GraphDb::open_lazy_with_store_state(options(), PersistentGraphStoreState::Existing)
+        .unwrap();
+    drop(db.read_guard().unwrap());
+    db.resident_engine_bytes().unwrap().unwrap();
+    db.hibernate_if_lazy().unwrap();
+    assert_eq!(db.resident_engine_bytes().unwrap(), None);
+    // A measurement left over from the closed engine must not survive the
+    // reopen; the same file reopens to the same figure, so plant a stale one.
+    *db.inner.engine_usage_bytes.lock().unwrap() = Some(u64::MAX);
+
+    drop(db.read_guard().unwrap());
+    let reopened = db.resident_engine_bytes().unwrap().unwrap();
+    let guard = db.read_guard().unwrap();
+    let database = guard.as_ref().unwrap();
+    let fresh = u64::try_from(database.memory_usage().total_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(db.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX));
+    assert_eq!(reopened, fresh);
 }
 
 #[test]
@@ -275,48 +265,6 @@ fn snapshot_is_a_zero_copy_read_lease_that_blocks_writes_until_drop() {
 }
 
 #[test]
-fn open_installs_native_locator_indexes_and_entity_scalars() {
-    let db = memory_db();
-    db.apply_unverified(scalar_batch("native")).unwrap();
-    let database_guard = db.inner.database.read().unwrap();
-    let database = database_guard.as_ref().unwrap();
-    for property in [
-        "__tracedecay_graph_db_entity_key",
-        "__tracedecay_graph_db_relation_key",
-        "__tracedecay_graph_db_projection_key",
-        "__tracedecay_graph_db_publication_key",
-    ] {
-        assert!(
-            database.has_property_index(property),
-            "missing native property index {property}"
-        );
-    }
-
-    let nodes = database.find_nodes_by_property(
-        "__tracedecay_graph_db_entity_key",
-        &Value::from("70726f6a656374:61"),
-    );
-    assert_eq!(nodes.len(), 1);
-    let node = database.get_node(nodes[0]).unwrap();
-    assert_eq!(
-        node.get_property("__tracedecay_graph_db_namespace"),
-        Some(&Value::from("project"))
-    );
-    assert_eq!(
-        node.get_property("__tracedecay_graph_db_projection"),
-        Some(&Value::from("code"))
-    );
-    assert_eq!(
-        node.get_property("__tracedecay_graph_db_entity_id"),
-        Some(&Value::from("a"))
-    );
-    assert!(
-        node.get_property("__tracedecay_graph_db_payload").is_none(),
-        "typed graph state must not be hidden in a JSON payload"
-    );
-}
-
-#[test]
 fn grafeo_query_mutations_track_conflicting_marker_writes() {
     let database = grafeo_engine::GrafeoDB::new_in_memory();
     database.create_property_index("marker_key");
@@ -337,50 +285,36 @@ fn grafeo_query_mutations_track_conflicting_marker_writes() {
     first
         .execute("MATCH (n:Marker {marker_key: 'one'}) SET n.value = 1")
         .unwrap();
-    assert!(
-        second
-            .execute("MATCH (n:Marker {marker_key: 'one'}) SET n.value = 2")
-            .is_err(),
-        "the second tracked writer must conflict before changing the marker"
-    );
+    let conflict = second
+        .execute("MATCH (n:Marker {marker_key: 'one'}) SET n.value = 2")
+        .expect_err("the second tracked writer must conflict before changing the marker");
+    match conflict {
+        grafeo_common::utils::error::Error::Transaction(
+            grafeo_common::utils::error::TransactionError::WriteConflict(message),
+        ) => {
+            assert_eq!(
+                message,
+                "GRAFEO-T001: Write conflict: Write-write conflict on entity Node(NodeId(0))"
+            );
+        }
+        other => panic!("expected a write-write conflict, got {other:?}"),
+    }
     first.rollback().unwrap();
     second.rollback().unwrap();
 }
 
-#[test]
-fn vector_index_refresh_requires_the_identical_committed_scalar() {
-    let database = grafeo_engine::GrafeoDB::new_in_memory();
-    let expected = Value::Vector(vec![1.0_f32, 2.0].into());
-    let node = database
-        .session()
-        .create_node_with_props(&["Vector"], [("embedding", expected.clone())])
-        .unwrap();
-
-    assert_eq!(
-        require_committed_vector_scalar(&database, node, "embedding", &expected),
-        Ok(())
-    );
-    assert!(matches!(
-        require_committed_vector_scalar(
-            &database,
-            node,
-            "embedding",
-            &Value::Vector(vec![2.0_f32, 1.0].into()),
-        ),
-        Err(GraphDbError::DurabilityUncertain { .. })
-    ));
-}
-
-#[test]
-fn snapshots_can_cross_daemon_worker_boundaries() {
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    assert_send_sync::<super::GraphSnapshot>();
-}
+const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
+const GRAPH_CRASH_CHILD_ROOT_ENV: &str = "TRACEDECAY_GRAPH_CRASH_CHILD_ROOT";
+const GRAPH_CRASH_CHILD_READY: &str = "durable-phase.ready";
+const GRAPH_CRASH_CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 fn walsync_db(dir: &tempfile::TempDir) -> GraphDbLeaseV1 {
+    walsync_db_at(dir.path())
+}
+
+fn walsync_db_at(root: &Path) -> GraphDbLeaseV1 {
     GraphDbOwner::open(GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(dir.path().join("graph.grafeo")),
+        location: GraphDbLocation::Persistent(root.join("graph.grafeo")),
         expected_format: GraphFormatVersion::new(2).unwrap(),
         durability: GraphDurability::WalSync,
         cancellation: Arc::new(NeverCancelled),
@@ -390,44 +324,77 @@ fn walsync_db(dir: &tempfile::TempDir) -> GraphDbLeaseV1 {
     .unwrap()
 }
 
-fn vector_batch(value: &str) -> GraphWriteBatch {
-    GraphWriteBatch::new(
-        GraphNamespace::new("project").unwrap(),
-        GraphProjectionId::new("code").unwrap(),
-        SourceGeneration::new(value).unwrap(),
-        GraphWatermark::new(value).unwrap(),
-        vec![GraphMutation::UpsertEntity(
-            GraphEntity::new(
-                GraphEntityId::new("vector-entity").unwrap(),
-                BTreeSet::new(),
-                BTreeMap::from([(
-                    GraphPropertyName::new("embedding").unwrap(),
-                    GraphProperty::Vector(
-                        GraphVector::new(vec![1.0, 2.0], 2, VectorMetric::Cosine).unwrap(),
-                    ),
-                )]),
-            )
-            .unwrap(),
-        )],
-        Arc::new(NeverCancelled),
-    )
-    .unwrap()
+fn capture_unclean_walsync_image(destination: &Path) {
+    let source = tempfile::tempdir().unwrap();
+    let test_name = std::env::var("NEXTEST_TEST_NAME")
+        .ok()
+        .or_else(|| std::thread::current().name().map(str::to_owned))
+        .expect("crash child spawn needs the libtest/nextest test name");
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &test_name, "--nocapture"])
+        .env(GRAPH_CRASH_CHILD_ROOT_ENV, source.path())
+        .env_remove(SQLITE_UNSAFE_FAST_ENV)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < GRAPH_CRASH_CHILD_TIMEOUT => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "crash child {test_name} exceeded {GRAPH_CRASH_CHILD_TIMEOUT:?} without exiting; reaped"
+                );
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("crash child {test_name} wait failed: {error}");
+            }
+        }
+    };
+    assert!(
+        status.success(),
+        "crash child {test_name} failed ({status:?})"
+    );
+    assert!(
+        source.path().join(GRAPH_CRASH_CHILD_READY).is_file(),
+        "crash child must reach the durable phase before the parent copies"
+    );
+    let source_store = source.path().join("graph.grafeo");
+    let target = destination.join("graph.grafeo");
+    std::fs::copy(&source_store, &target).unwrap_or_else(|error| {
+        panic!(
+            "copy abandoned crash container {} -> {}: {error}",
+            source_store.display(),
+            target.display()
+        );
+    });
+    copy_directory(&sidecar_wal_path(&source_store), &sidecar_wal_path(&target));
 }
 
-fn apply_vector_batch_with_check(
+fn apply_scalar_batch_with_check(
     db: &GraphDbLeaseV1,
     value: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphCommit, GraphDbError> {
-    let mut batch = vector_batch(value);
+    let mut batch = scalar_batch(value);
     let digest = batch.validate_and_digest().unwrap();
     let _snapshot_gate = db.inner.snapshot_gate.write();
     let guard = db.write_guard().unwrap();
     let database = guard.as_ref().unwrap();
     let mut state = db.state_write_guard().unwrap();
+    let state = state.as_mut().unwrap();
     db.apply_locked(
         database,
-        &mut state,
+        state,
         batch,
         mutation::CommitMetadata::for_digest(digest),
         &mutation::RelationEndpointNamespaces::new(),
@@ -440,7 +407,7 @@ fn committed_entity_present(db: &GraphDbLeaseV1) -> bool {
         .unwrap()
         .entity(
             &GraphNamespace::new("project").unwrap(),
-            &GraphEntityId::new("vector-entity").unwrap(),
+            &GraphEntityId::new("a").unwrap(),
             Arc::new(NeverCancelled),
         )
         .unwrap()
@@ -513,33 +480,55 @@ fn clean_shutdown_checkpoints_the_wal_so_reopen_has_no_journal_to_replay() {
     reopened.close().unwrap();
 }
 
-/// A hard stop leaves the container without its latest sections and only the
-/// synced WAL sidecar beside it. Opening that on-disk shape must replay the
-/// journal and serve the committed write; dropping it would silently lose a
-/// commit `WalSync` already acknowledged.
+/// Subprocess unclean-exit, not machine power-loss: a child writes a WalSync
+/// commit, exits without a clean close, and leaves the container without its
+/// latest sections plus a synced WAL sidecar. Opening that on-disk shape must
+/// replay the journal and serve the committed write; dropping it would
+/// silently lose a commit `WalSync` already acknowledged.
 #[test]
 fn reopen_of_a_dirty_store_copy_replays_the_walled_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = walsync_db(&dir);
-    live.apply_unverified(scalar_batch("unclean")).unwrap();
+    if let Some(root) = std::env::var_os(GRAPH_CRASH_CHILD_ROOT_ENV) {
+        let live = walsync_db_at(Path::new(&root));
+        assert_eq!(live.inner.durability, GraphDurability::WalSync);
+        live.apply_unverified(scalar_batch("unclean")).unwrap();
+        std::fs::write(
+            Path::new(&root).join(GRAPH_CRASH_CHILD_READY),
+            b"wal-synced",
+        )
+        .unwrap();
+        std::mem::forget(live);
+        std::process::exit(0);
+    }
 
-    // Simulate the crash by snapshotting the on-disk state while the store is
-    // still open: nothing has checkpointed yet, so the committed batch exists
-    // only in the WAL sidecar the copy carries along.
-    let source = dir.path().join("graph.grafeo");
-    let source_wal = sidecar_wal_path(&source);
+    // Child writes the WalSync commit and exits without a clean close. The
+    // parent bounds that process, reaps it, and only then copies the abandoned
+    // image. Copying the live parent handle is illegal on Windows (lock 33).
+    let crash_dir = tempfile::tempdir().unwrap();
+    capture_unclean_walsync_image(crash_dir.path());
+    let target = crash_dir.path().join("graph.grafeo");
     assert!(
-        source_wal.is_dir(),
+        sidecar_wal_path(&target).is_dir(),
         "a WalSync store must journal into its sidecar before checkpoint"
     );
-    let crash_dir = tempfile::tempdir().unwrap();
-    let target = crash_dir.path().join("graph.grafeo");
-    std::fs::copy(&source, &target).unwrap();
-    copy_directory(&source_wal, &sidecar_wal_path(&target));
 
     let recovered = walsync_db(&crash_dir);
     assert_eq!(entity_marker(&recovered), Some("unclean".to_owned()));
     recovered.close().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn live_walsync_store_refuses_raw_byte_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = walsync_db(&dir);
+    live.apply_unverified(scalar_batch("live")).unwrap();
+    let source = dir.path().join("graph.grafeo");
+    let dest = dir.path().join("illegal-copy.grafeo");
+    let error = std::fs::copy(&source, &dest).expect_err("copying a live Windows store must fail");
+    assert!(
+        matches!(error.raw_os_error(), Some(32 | 33)),
+        "expected sharing/lock violation, got {error}"
+    );
     live.close().unwrap();
 }
 
@@ -590,8 +579,8 @@ fn persisted_quarantine_survives_checkpointed_reopen_and_blocks_reads_until_clea
 /// Sweeping every expiry point proves the durability contract: cancellation
 /// may only surface while the Grafeo transaction is still uncommitted (rolled
 /// back, nothing durable); once the transaction commits, the apply must settle
-/// HNSW refresh and WAL sync and report the commit. A committed write reported
-/// as `Cancelled`/`DeadlineExceeded` on a `Ready` handle is the F-class defect:
+/// WAL sync and report the commit. A committed write reported as
+/// `Cancelled`/`DeadlineExceeded` on a `Ready` handle is the F-class defect:
 /// replay short-circuits on the committed publication record and the skipped
 /// settlement is never repaired.
 #[test]
@@ -601,7 +590,7 @@ fn deadline_expiry_after_commit_settles_the_write_instead_of_cancelling() {
         let dir = tempfile::tempdir().unwrap();
         let db = walsync_db(&dir);
         let observations = AtomicUsize::new(0);
-        apply_vector_batch_with_check(&db, "calibrate", &|| {
+        apply_scalar_batch_with_check(&db, "calibrate", &|| {
             observations.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
@@ -615,7 +604,7 @@ fn deadline_expiry_after_commit_settles_the_write_instead_of_cancelling() {
         let dir = tempfile::tempdir().unwrap();
         let db = walsync_db(&dir);
         let observations = AtomicUsize::new(0);
-        let result = apply_vector_batch_with_check(&db, "window", &|| {
+        let result = apply_scalar_batch_with_check(&db, "window", &|| {
             if observations.fetch_add(1, Ordering::Relaxed) + 1 >= expiry_point {
                 Err(GraphDbError::DeadlineExceeded)
             } else {
@@ -640,7 +629,7 @@ fn deadline_expiry_after_commit_settles_the_write_instead_of_cancelling() {
                 assert!(
                     !committed,
                     "expiry point {expiry_point}: durably committed write was mistyped as \
-                     cancelled, stranding unsynced WAL and stale HNSW state on a Ready handle"
+                     cancelled, stranding unsynced WAL on a Ready handle"
                 );
                 assert_eq!(
                     db.runtime_state(),
@@ -653,4 +642,72 @@ fn deadline_expiry_after_commit_settles_the_write_instead_of_cancelling() {
             }
         }
     }
+}
+
+fn large_batch(round: usize) -> GraphWriteBatch {
+    let marker = format!("round-{round}");
+    GraphWriteBatch::new(
+        GraphNamespace::new("project").unwrap(),
+        GraphProjectionId::new("code").unwrap(),
+        SourceGeneration::new(&marker).unwrap(),
+        GraphWatermark::new(&marker).unwrap(),
+        vec![GraphMutation::UpsertEntity(
+            GraphEntity::new(
+                GraphEntityId::new("a").unwrap(),
+                BTreeSet::new(),
+                BTreeMap::from([
+                    (
+                        GraphPropertyName::new("name").unwrap(),
+                        GraphProperty::String(marker.clone()),
+                    ),
+                    (
+                        GraphPropertyName::new("payload").unwrap(),
+                        GraphProperty::String("x".repeat(1024 * 1024)),
+                    ),
+                ]),
+            )
+            .unwrap(),
+        )],
+        Arc::new(NeverCancelled),
+    )
+    .unwrap()
+}
+
+/// #4099: Grafeo checkpointed only at open and clean close, so a daemon that
+/// stayed up kept every 64 MiB WAL segment it wrote. Commits now checkpoint
+/// once the uncheckpointed history passes the threshold, which bounds the
+/// sidecar while the store stays open.
+#[test]
+fn commits_checkpoint_the_wal_so_an_open_store_keeps_a_bounded_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = sidecar_wal_path(&dir.path().join("graph.grafeo"));
+    let db = walsync_db(&dir);
+    let rounds = 5 * usize::try_from(super::GRAFEO_WAL_CHECKPOINT_BYTES / (1024 * 1024)).unwrap();
+    let bound = super::GRAFEO_WAL_CHECKPOINT_BYTES + 4 * 1024 * 1024;
+    let mut peak = 0;
+    for round in 0..rounds {
+        db.apply_unverified(large_batch(round)).unwrap();
+        peak = peak.max(crate::recovery::uncheckpointed_wal_bytes(&sidecar));
+    }
+    assert!(
+        peak <= bound,
+        "an open store let {peak} uncheckpointed WAL bytes accumulate past {bound}"
+    );
+    let segment_bytes: u64 = std::fs::read_dir(&sidecar)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.metadata().unwrap().len())
+        .sum();
+    assert!(
+        segment_bytes <= 4 * super::GRAFEO_WAL_CHECKPOINT_BYTES,
+        "the sidecar kept {segment_bytes} bytes after {rounds} MiB of commits"
+    );
+
+    db.close().unwrap();
+    let reopened = walsync_db(&dir);
+    assert_eq!(
+        entity_marker(&reopened),
+        Some(format!("round-{}", rounds - 1))
+    );
+    reopened.close().unwrap();
 }

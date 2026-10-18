@@ -13,7 +13,10 @@ use super::{
     ProjectId, RefId, RepositoryId, StackNodeId, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
     WorktreeInventorySnapshotId, canonical_sha256,
 };
-use crate::{GitHeadStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1};
+use crate::{
+    CodeGenerationId, ContentDigest, GitHeadStateV1, GitObjectFormatV1, GitOidV1,
+    GitOperationStateV1, SourceSpan,
+};
 
 const STACK_SELECTION_DIGEST_DOMAIN: &str = "tracedecay.native-integration.stack-selection.v1";
 const INDEPENDENT_SELECTION_DIGEST_DOMAIN: &str =
@@ -23,6 +26,8 @@ const REPOSITORY_SNAPSHOT_DIGEST_DOMAIN: &str =
 const PREVIEW_DIGEST_DOMAIN: &str = "tracedecay.native-integration.preview.v1";
 const APPROVAL_DIGEST_DOMAIN: &str = "tracedecay.native-integration.approval.v1";
 const RECEIPT_DIGEST_DOMAIN: &str = "tracedecay.native-integration.receipt.v1";
+const ANALYSIS_REPORT_DIGEST_DOMAIN: &str = "tracedecay.native-integration.analysis-report.v1";
+const ANALYSIS_CONFLICT_DIGEST_DOMAIN: &str = "tracedecay.native-integration.analysis-conflict.v1";
 
 /// Explicit direction of one integration. Stack meaning is never inferred.
 #[derive(
@@ -47,7 +52,7 @@ pub enum MechanicalIntegrationModeV1 {
 }
 
 /// Exact visible stack revision and declared edge selected for preflight.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenBranchStackSnapshotV1 {
     pub revision: BranchStackRevisionV1,
@@ -157,7 +162,7 @@ impl FrozenBranchStackSnapshotV1 {
 
 /// Exact same-repository branch pair selected by a separately authorized
 /// independent-branch proposal.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenIndependentBranchSelectionV1 {
     pub project_id: ProjectId,
@@ -466,7 +471,9 @@ impl NativeIntegrationRepositorySnapshotV1 {
 }
 
 /// Why a preflight cannot authorize apply.
-#[derive(Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeIntegrationUnavailabilityV1 {
     PartialEvidence,
@@ -478,6 +485,257 @@ pub enum NativeIntegrationUnavailabilityV1 {
     UnsupportedHooks,
     SigningRequired,
     DestinationOccupied,
+}
+
+/// One immutable code-generation binding used by native integration analysis.
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationGenerationBindingV1 {
+    pub generation_id: CodeGenerationId,
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: Option<WorktreeId>,
+    pub reference: Option<RefId>,
+    pub snapshot_digest: ManifestDigest,
+    pub content_identity: ContentDigest,
+    pub source_revision: Option<GitOidV1>,
+    pub source_tree: GitOidV1,
+    pub seal_digest: ManifestDigest,
+}
+
+impl NativeIntegrationGenerationBindingV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.generation_id.validate()?;
+        self.project_id.validate()?;
+        self.repository_id.validate()?;
+        self.worktree_id
+            .as_ref()
+            .map_or(Ok(()), WorktreeId::validate)?;
+        self.reference.as_ref().map_or(Ok(()), RefId::validate)?;
+        self.snapshot_digest.validate()?;
+        self.content_identity.validate()?;
+        self.source_revision
+            .as_ref()
+            .map_or(Ok(()), GitOidV1::validate)?;
+        self.source_tree.validate()?;
+        self.seal_digest.validate()
+    }
+}
+
+/// Completeness of one independently evaluated semantic evidence lane.
+#[derive(
+    Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeIntegrationAnalysisCoverageV1 {
+    Complete,
+    Partial,
+    Unsupported,
+}
+
+/// Why one semantic evidence lane cannot authorize integration.
+#[derive(
+    Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeIntegrationAnalysisGapV1 {
+    ParserFailure,
+    UnresolvedRequiredEdge,
+    WithheldSource,
+    StaleEvidence,
+    UnsupportedLanguage,
+    DynamicSchema,
+    UnboundMigrationOrder,
+    CapacityUnavailable,
+    AuthorityUnavailable,
+}
+
+/// Coverage and exact gaps for one independently evaluated analysis lane.
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationAnalysisLaneV1 {
+    pub coverage: NativeIntegrationAnalysisCoverageV1,
+    pub gaps: Vec<NativeIntegrationAnalysisGapV1>,
+}
+
+impl NativeIntegrationAnalysisLaneV1 {
+    fn validate(&self) -> Result<(), DomainError> {
+        if (self.coverage == NativeIntegrationAnalysisCoverageV1::Complete) != self.gaps.is_empty()
+            || self.gaps.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(DomainError::NonCanonical {
+                field: "native integration analysis lane coverage",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Static conflict class produced from canonical generation evidence.
+#[derive(
+    Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeIntegrationSemanticConflictKindV1 {
+    DivergentSymbol,
+    SignatureDependent,
+    TestWriteInteraction,
+    DivergentSchema,
+    MigrationOrder,
+}
+
+/// Source-local anchor for a semantic conflict finding.
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationAnalysisAnchorV1 {
+    pub generation_id: CodeGenerationId,
+    pub logical_path: String,
+    pub source_span: SourceSpan,
+}
+
+impl NativeIntegrationAnalysisAnchorV1 {
+    fn validate(&self) -> Result<(), DomainError> {
+        self.generation_id.validate()?;
+        crate::validate_code_logical_path(&self.logical_path)?;
+        self.source_span.validate()
+    }
+}
+
+/// One deterministic conflict finding with source evidence from both branches.
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationSemanticConflictV1 {
+    pub kind: NativeIntegrationSemanticConflictKindV1,
+    pub source: NativeIntegrationAnalysisAnchorV1,
+    pub destination: NativeIntegrationAnalysisAnchorV1,
+    pub evidence_digest: ManifestDigest,
+}
+
+impl NativeIntegrationSemanticConflictV1 {
+    pub fn seal(mut self) -> Result<Self, DomainError> {
+        self.source.validate()?;
+        self.destination.validate()?;
+        self.evidence_digest = self.compute_digest()?;
+        Ok(self)
+    }
+
+    pub fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {
+        canonical_sha256(&(
+            ANALYSIS_CONFLICT_DIGEST_DOMAIN,
+            self.kind,
+            &self.source,
+            &self.destination,
+        ))
+    }
+
+    fn validate(&self) -> Result<(), DomainError> {
+        self.source.validate()?;
+        self.destination.validate()?;
+        if self.compute_digest()? != self.evidence_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Daemon-produced semantic evidence for one exact native candidate tree.
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationAnalysisReportV1 {
+    pub merge_base: NativeIntegrationGenerationBindingV1,
+    pub source: NativeIntegrationGenerationBindingV1,
+    pub destination: NativeIntegrationGenerationBindingV1,
+    pub candidate: NativeIntegrationGenerationBindingV1,
+    pub graph: NativeIntegrationAnalysisLaneV1,
+    pub tests: NativeIntegrationAnalysisLaneV1,
+    pub schema: NativeIntegrationAnalysisLaneV1,
+    pub migrations: NativeIntegrationAnalysisLaneV1,
+    pub conflicts: Vec<NativeIntegrationSemanticConflictV1>,
+    pub analyzer_revision: String,
+    pub digest: ManifestDigest,
+}
+
+impl NativeIntegrationAnalysisReportV1 {
+    pub fn seal(mut self) -> Result<Self, DomainError> {
+        self.validate_fields()?;
+        self.digest = self.compute_digest()?;
+        Ok(self)
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.validate_fields()?;
+        if self.compute_digest()? != self.digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn is_complete(&self) -> bool {
+        [&self.graph, &self.tests, &self.schema, &self.migrations]
+            .into_iter()
+            .all(|lane| lane.coverage == NativeIntegrationAnalysisCoverageV1::Complete)
+    }
+
+    fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {
+        canonical_sha256(&(
+            ANALYSIS_REPORT_DIGEST_DOMAIN,
+            &self.merge_base,
+            &self.source,
+            &self.destination,
+            &self.candidate,
+            &self.graph,
+            &self.tests,
+            &self.schema,
+            &self.migrations,
+            &self.conflicts,
+            &self.analyzer_revision,
+        ))
+    }
+
+    fn validate_fields(&self) -> Result<(), DomainError> {
+        self.merge_base.validate()?;
+        self.source.validate()?;
+        self.destination.validate()?;
+        self.candidate.validate()?;
+        for lane in [&self.graph, &self.tests, &self.schema, &self.migrations] {
+            lane.validate()?;
+        }
+        for conflict in &self.conflicts {
+            conflict.validate()?;
+        }
+        if self.analyzer_revision.is_empty()
+            || self.candidate.source_revision.is_some()
+            || self.candidate.worktree_id != self.destination.worktree_id
+            || self.candidate.reference != self.destination.reference
+            || [
+                &self.merge_base.source_tree,
+                &self.source.source_tree,
+                &self.destination.source_tree,
+            ]
+            .into_iter()
+            .any(|tree| tree.format() != self.candidate.source_tree.format())
+            || [
+                &self.merge_base,
+                &self.source,
+                &self.destination,
+                &self.candidate,
+            ]
+            .into_iter()
+            .any(|binding| {
+                binding.project_id != self.destination.project_id
+                    || binding.repository_id != self.destination.repository_id
+            })
+            || self.conflicts.windows(2).any(|pair| {
+                (&pair[0].kind, &pair[0].source, &pair[0].destination)
+                    >= (&pair[1].kind, &pair[1].source, &pair[1].destination)
+            })
+        {
+            return Err(DomainError::NonCanonical {
+                field: "native integration analysis report",
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Truthful preview classification. Only `MechanicalIntegrationEligible`
@@ -510,10 +768,7 @@ pub struct NativeIntegrationPreviewV1 {
     pub repository_snapshot: NativeIntegrationRepositorySnapshotV1,
     pub grant_digest: ManifestDigest,
     pub policy_digest: ManifestDigest,
-    pub graph_revision_digest: ManifestDigest,
-    pub test_revision_digest: ManifestDigest,
-    pub schema_revision_digest: ManifestDigest,
-    pub migration_revision_digest: ManifestDigest,
+    pub analysis: Option<NativeIntegrationAnalysisReportV1>,
     pub disposition: NativeIntegrationPreviewDispositionV1,
     pub candidate_tree: Option<GitOidV1>,
     pub ordered_commits: Vec<GitOidV1>,
@@ -537,10 +792,7 @@ impl NativeIntegrationPreviewV1 {
             &self.repository_snapshot.digest,
             &self.grant_digest,
             &self.policy_digest,
-            &self.graph_revision_digest,
-            &self.test_revision_digest,
-            &self.schema_revision_digest,
-            &self.migration_revision_digest,
+            &self.analysis,
             &self.disposition,
             &self.candidate_tree,
             &self.ordered_commits,
@@ -561,16 +813,12 @@ impl NativeIntegrationPreviewV1 {
         self.preview_id.validate()?;
         self.selection.validate()?;
         self.repository_snapshot.validate()?;
-        for digest in [
-            &self.grant_digest,
-            &self.policy_digest,
-            &self.graph_revision_digest,
-            &self.test_revision_digest,
-            &self.schema_revision_digest,
-            &self.migration_revision_digest,
-        ] {
+        for digest in [&self.grant_digest, &self.policy_digest] {
             digest.validate()?;
         }
+        self.analysis
+            .as_ref()
+            .map_or(Ok(()), NativeIntegrationAnalysisReportV1::validate)?;
         if self.selection.project_id()? != &self.repository_snapshot.project_id
             || self.selection.repository_id()? != &self.repository_snapshot.repository_id
             || self.selection.source_ref()? != &self.repository_snapshot.source_ref
@@ -581,14 +829,60 @@ impl NativeIntegrationPreviewV1 {
                 field: "native integration preview scope",
             });
         }
-        let eligible = matches!(
+        let requires_analysis = matches!(
             self.disposition,
             NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
+                | NativeIntegrationPreviewDispositionV1::SemanticReviewRequired { .. }
         );
-        if eligible != self.candidate_tree.is_some() {
+        if self.candidate_tree.is_some() != self.analysis.is_some()
+            || (requires_analysis && self.analysis.is_none())
+            || matches!(
+                self.disposition,
+                NativeIntegrationPreviewDispositionV1::AlreadyIntegrated
+                    | NativeIntegrationPreviewDispositionV1::NativeConflict { .. }
+            ) && self.analysis.is_some()
+        {
             return Err(DomainError::SnapshotMismatch {
                 field: "native integration candidate tree",
             });
+        }
+        if let (Some(candidate), Some(analysis)) = (&self.candidate_tree, &self.analysis)
+            && (candidate != &analysis.candidate.source_tree
+                || analysis.merge_base.source_revision.as_ref()
+                    != Some(&self.repository_snapshot.merge_base)
+                || analysis.source.source_revision.as_ref()
+                    != Some(&self.repository_snapshot.source_tip)
+                || analysis.source.source_tree != self.repository_snapshot.source_tree
+                || analysis.destination.source_revision.as_ref()
+                    != Some(&self.repository_snapshot.destination_tip)
+                || analysis.destination.source_tree != self.repository_snapshot.destination_tree
+                || analysis.source.reference.as_ref() != Some(&self.repository_snapshot.source_ref)
+                || analysis.destination.reference.as_ref()
+                    != Some(&self.repository_snapshot.destination_ref)
+                || analysis.candidate.reference.as_ref()
+                    != Some(&self.repository_snapshot.destination_ref))
+        {
+            return Err(DomainError::SnapshotMismatch {
+                field: "native integration analysis binding",
+            });
+        }
+        match (&self.disposition, &self.analysis) {
+            (
+                NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_),
+                Some(analysis),
+            ) if analysis.is_complete() && analysis.conflicts.is_empty() => {}
+            (
+                NativeIntegrationPreviewDispositionV1::SemanticReviewRequired { evidence_digest },
+                Some(analysis),
+            ) if evidence_digest == &analysis.digest
+                && (!analysis.is_complete() || !analysis.conflicts.is_empty()) => {}
+            (NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_), _)
+            | (NativeIntegrationPreviewDispositionV1::SemanticReviewRequired { .. }, _) => {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "native integration semantic disposition",
+                });
+            }
+            _ => {}
         }
         if let Some(candidate) = &self.candidate_tree {
             candidate.validate()?;

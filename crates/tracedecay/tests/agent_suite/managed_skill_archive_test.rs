@@ -1,7 +1,7 @@
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSupportFile, SkillInstallTarget, apply_managed_skill_archive, create_managed_skill,
-    load_managed_skill, managed_skill_dir, set_managed_skill_pinned,
+    ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget, apply_managed_skill_archive,
+    create_managed_skill, load_managed_skill, managed_skill_dir, set_managed_skill_pinned,
 };
 
 fn draft() -> ManagedSkillDraft {
@@ -9,6 +9,7 @@ fn draft() -> ManagedSkillDraft {
         id: "repo-hygiene".to_string(),
         title: "Repository hygiene".to_string(),
         summary: "Keep repository maintenance guidance current.".to_string(),
+        routing_description: "Keep repository maintenance guidance current.".to_string(),
         category: "maintenance".to_string(),
         targets: vec![SkillInstallTarget::Cursor, SkillInstallTarget::Codex],
         body_markdown: "Use focused checks before changing generated files.".to_string(),

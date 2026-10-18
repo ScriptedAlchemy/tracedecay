@@ -1,49 +1,16 @@
 //! Desired/observed component activation state persistence.
 
-use super::codec::{decode_id, unavailable_store};
+use super::codec::unavailable_store;
 use super::{
     ConfigurationRevisionId, ConfigurationStoreResult, Executor, QueryExecutor, Row, UtcMicros,
     invalid_store_data, params,
 };
-
-#[derive(Clone, Debug)]
-pub(super) struct StoredComponentActivationState {
-    pub(super) component: String,
-    pub(super) desired_revision_id: ConfigurationRevisionId,
-    pub(super) observed_revision_id: Option<ConfigurationRevisionId>,
-    pub(super) last_working_revision_id: Option<ConfigurationRevisionId>,
-    pub(super) restart_required: bool,
-    pub(super) activation_error_code: Option<String>,
-}
-
-pub(super) fn validate_component_name(component: &str) -> ConfigurationStoreResult<()> {
-    if component.is_empty()
-        || component.trim() != component
-        || component.len() > 256
-        || component.chars().any(char::is_control)
-    {
-        return Err(invalid_store_data(
-            "configuration component name is not canonical",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_activation_error_code(code: Option<&str>) -> ConfigurationStoreResult<()> {
-    let Some(code) = code else {
-        return Ok(());
-    };
-    if code.is_empty()
-        || code.trim() != code
-        || code.len() > 256
-        || code.chars().any(char::is_control)
-    {
-        return Err(invalid_store_data(
-            "configuration activation error code is not canonical",
-        ));
-    }
-    Ok(())
-}
+use tracedecay_rusqlite_runtime::repository::{
+    ADVANCE_COMPONENT_DESIRED_STATE_SQL, LATEST_COMPONENT_ACTIVATION_STATES_SQL,
+};
+pub(super) use tracedecay_rusqlite_runtime::repository::{
+    StoredComponentActivationState, validate_activation_error_code, validate_component_name,
+};
 
 pub(super) fn decode_component_activation_state(
     row: &Row,
@@ -51,70 +18,37 @@ pub(super) fn decode_component_activation_state(
     let component = row
         .get::<String>(0)
         .map_err(|error| invalid_store_data(format!("read configuration component: {error}")))?;
-    validate_component_name(&component)?;
-    let desired_revision_id = decode_id(
-        row.get::<String>(1).map_err(|error| {
-            invalid_store_data(format!("read desired configuration revision: {error}"))
-        })?,
-        "desired component revision id",
-    )?;
-    let observed_revision_id = row
-        .get::<Option<String>>(2)
-        .map_err(|error| {
-            invalid_store_data(format!("read observed configuration revision: {error}"))
-        })?
-        .map(|value| decode_id(value, "observed component revision id"))
-        .transpose()?;
-    let last_working_revision_id = row
-        .get::<Option<String>>(3)
-        .map_err(|error| {
-            invalid_store_data(format!("read last working configuration revision: {error}"))
-        })?
-        .map(|value| decode_id(value, "last working component revision id"))
-        .transpose()?;
-    let restart_required = match row
-        .get::<i64>(4)
-        .map_err(|error| invalid_store_data(format!("read configuration restart state: {error}")))?
-    {
-        0 => false,
-        1 => true,
-        _ => {
-            return Err(invalid_store_data(
-                "stored configuration restart state is invalid",
-            ));
-        }
-    };
+    let desired_revision_id = row.get::<String>(1).map_err(|error| {
+        invalid_store_data(format!("read desired configuration revision: {error}"))
+    })?;
+    let observed_revision_id = row.get::<Option<String>>(2).map_err(|error| {
+        invalid_store_data(format!("read observed configuration revision: {error}"))
+    })?;
+    let last_working_revision_id = row.get::<Option<String>>(3).map_err(|error| {
+        invalid_store_data(format!("read last working configuration revision: {error}"))
+    })?;
+    let restart_required = row.get::<i64>(4).map_err(|error| {
+        invalid_store_data(format!("read configuration restart state: {error}"))
+    })?;
     let activation_error_code = row
         .get::<Option<String>>(5)
         .map_err(|error| invalid_store_data(format!("read activation error code: {error}")))?;
-    validate_activation_error_code(activation_error_code.as_deref())?;
-    Ok(StoredComponentActivationState {
+    StoredComponentActivationState::from_columns(
         component,
         desired_revision_id,
         observed_revision_id,
         last_working_revision_id,
         restart_required,
         activation_error_code,
-    })
+    )
+    .map_err(invalid_store_data)
 }
 
 pub(super) async fn latest_component_activation_states(
     transaction: &impl QueryExecutor,
 ) -> ConfigurationStoreResult<Vec<StoredComponentActivationState>> {
     let mut rows = transaction
-        .query(
-            "SELECT event.component, event.desired_revision_id, event.observed_revision_id,
-                    event.last_working_revision_id, event.restart_required,
-                    event.activation_error_code
-             FROM configuration_component_activation_events AS event
-             WHERE event.event_id = (
-                 SELECT MAX(candidate.event_id)
-                 FROM configuration_component_activation_events AS candidate
-                 WHERE candidate.component = event.component
-             )
-             ORDER BY event.component ASC",
-            (),
-        )
+        .query(LATEST_COMPONENT_ACTIVATION_STATES_SQL, ())
         .await
         .map_err(unavailable_store)?;
     let mut states = Vec::new();
@@ -157,14 +91,15 @@ pub(super) async fn insert_component_activation_event(
     state: &StoredComponentActivationState,
     occurred_at: UtcMicros,
 ) -> ConfigurationStoreResult<()> {
-    validate_component_name(&state.component)?;
-    validate_activation_error_code(state.activation_error_code.as_deref())?;
+    validate_component_name(&state.component).map_err(invalid_store_data)?;
+    validate_activation_error_code(state.activation_error_code.as_deref())
+        .map_err(invalid_store_data)?;
     transaction
         .execute(
             "INSERT INTO configuration_component_activation_events (
                 component, desired_revision_id, observed_revision_id,
                 last_working_revision_id, restart_required, activation_error_code, occurred_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 state.component.clone(),
                 state.desired_revision_id.as_str(),
@@ -191,26 +126,15 @@ pub(super) async fn advance_component_desired_state(
     desired_revision_id: &ConfigurationRevisionId,
     occurred_at: UtcMicros,
 ) -> ConfigurationStoreResult<()> {
-    for prior in latest_component_activation_states(transaction).await? {
-        let observed_revision_id = prior
-            .observed_revision_id
-            .clone()
-            .or_else(|| prior.last_working_revision_id.clone());
-        let restart_required = observed_revision_id.as_ref() != Some(desired_revision_id)
-            || prior.activation_error_code.is_some();
-        insert_component_activation_event(
-            transaction,
-            &StoredComponentActivationState {
-                component: prior.component,
-                desired_revision_id: desired_revision_id.clone(),
-                observed_revision_id,
-                last_working_revision_id: prior.last_working_revision_id,
-                restart_required,
-                activation_error_code: prior.activation_error_code,
-            },
-            occurred_at,
+    // The shared statement copies the latest rows; decoding them first keeps a
+    // malformed stored row from propagating into the event it appends.
+    latest_component_activation_states(transaction).await?;
+    transaction
+        .execute(
+            ADVANCE_COMPONENT_DESIRED_STATE_SQL,
+            params![desired_revision_id.as_str(), occurred_at.0],
         )
-        .await?;
-    }
+        .await
+        .map_err(unavailable_store)?;
     Ok(())
 }

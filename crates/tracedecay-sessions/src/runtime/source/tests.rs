@@ -1,493 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
-use crate::runtime::shared::read_new_rows;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
-
-#[derive(Clone, Copy)]
-enum ReadFailure {
-    Offset,
-    Session,
-}
-
-struct ReadFailureStore(ReadFailure);
-
-struct SinglePathSource;
-
-#[derive(Default)]
-struct CountingStore(AtomicUsize);
-
-struct MixedPathSource;
-
-#[derive(Default)]
-struct ParseConcurrencyState {
-    active: usize,
-    observed_overlap: bool,
-}
-
-#[derive(Default)]
-struct ParseConcurrencyProbe {
-    state: Mutex<ParseConcurrencyState>,
-    changed: Condvar,
-}
-
-struct ConcurrentParseSource {
-    probe: Arc<ParseConcurrencyProbe>,
-}
-
-impl TranscriptSource for SinglePathSource {
-    fn provider(&self) -> &'static str {
-        "test"
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        vec![PathBuf::from("failure.jsonl")]
-    }
-
-    fn parse_new(
-        &self,
-        _path: &Path,
-        _prev: StoredCursor,
-        _project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        None
-    }
-}
-
-impl TranscriptSource for MixedPathSource {
-    fn provider(&self) -> &'static str {
-        "mixed"
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        ["good-first.jsonl", "bad-middle.jsonl", "good-last.jsonl"]
-            .into_iter()
-            .map(PathBuf::from)
-            .collect()
-    }
-
-    fn parse_new(
-        &self,
-        _path: &Path,
-        _prev: StoredCursor,
-        _project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        unreachable!("typed test source uses try_parse_new")
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        _prev: StoredCursor,
-        _project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        if path == Path::new("bad-middle.jsonl") {
-            return Err(TranscriptIngestError::scan_io(
-                "read",
-                path,
-                std::io::Error::other("injected source failure"),
-            ));
-        }
-        Ok(Some(ParsedTranscript {
-            draft: SessionDraft {
-                session_id: path.to_string_lossy().into_owned(),
-                project_key: "mixed-project".to_string(),
-                project_path: "mixed-project".to_string(),
-                title: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            },
-            messages: Vec::new(),
-            new_cursor: StoredCursor {
-                position: 1,
-                mtime: 1,
-                file_id: 1,
-            },
-        }))
-    }
-}
-
-impl TranscriptSource for ConcurrentParseSource {
-    fn provider(&self) -> &'static str {
-        "concurrent"
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        (0..4)
-            .map(|index| PathBuf::from(format!("concurrent-{index}.jsonl")))
-            .collect()
-    }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        _prev: StoredCursor,
-        _project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        let mut state = self.probe.state.lock().unwrap();
-        state.active += 1;
-        self.probe.changed.notify_all();
-        if state.active < 2 {
-            let (next, _) = self
-                .probe
-                .changed
-                .wait_timeout_while(state, Duration::from_millis(200), |state| state.active < 2)
-                .unwrap();
-            state = next;
-        }
-        if state.active >= 2 {
-            state.observed_overlap = true;
-        }
-        state.active -= 1;
-        self.probe.changed.notify_all();
-        drop(state);
-
-        let session_id = path.to_string_lossy().into_owned();
-        Some(ParsedTranscript {
-            draft: SessionDraft {
-                session_id: session_id.clone(),
-                project_key: "concurrent-project".to_owned(),
-                project_path: "concurrent-project".to_owned(),
-                title: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            },
-            messages: Vec::new(),
-            new_cursor: StoredCursor {
-                position: 1,
-                mtime: 1,
-                file_id: 1,
-            },
-        })
-    }
-}
-
-fn injected_store_error(operation: &'static str) -> TranscriptStoreError {
-    TranscriptStoreError::Storage {
-        operation,
-        source: Box::new(std::io::Error::other("injected transcript store failure")),
-    }
-}
-
-impl tracedecay_store::TranscriptStore for ReadFailureStore {
-    fn get_parse_offset(
-        &self,
-        _cursor_path: &Path,
-    ) -> impl std::future::Future<Output = tracedecay_store::TranscriptStoreResult<ParseOffset>> + Send
-    {
-        std::future::ready(match self.0 {
-            ReadFailure::Offset => Err(injected_store_error("get_parse_offset")),
-            ReadFailure::Session => Ok(ParseOffset::default()),
-        })
-    }
-
-    fn persist_transcript_batch(
-        &self,
-        _batch: TranscriptWriteBatch,
-    ) -> impl std::future::Future<Output = tracedecay_store::TranscriptStoreResult<()>> + Send {
-        std::future::ready(Ok(()))
-    }
-}
-
-impl TranscriptIngestStore for ReadFailureStore {
-    fn get_session(
-        &self,
-        _provider: &str,
-        _session_id: &str,
-    ) -> impl std::future::Future<
-        Output = tracedecay_store::TranscriptStoreResult<Option<SessionRecord>>,
-    > + Send {
-        std::future::ready(match self.0 {
-            ReadFailure::Offset => Ok(None),
-            ReadFailure::Session => Err(injected_store_error("get_session")),
-        })
-    }
-
-    fn persist_transcript_batch_with_git_evidence(
-        &self,
-        _batch: TranscriptWriteBatch,
-        _commit_records: &[crate::runtime::git_correlation::CommitSessionRecord],
-        _span_observations: &[crate::runtime::git_correlation::SpanObservation],
-    ) -> impl std::future::Future<Output = tracedecay_store::TranscriptStoreResult<()>> + Send {
-        std::future::ready(Ok(()))
-    }
-}
-
-impl tracedecay_store::TranscriptStore for CountingStore {
-    fn get_parse_offset(
-        &self,
-        _cursor_path: &Path,
-    ) -> impl std::future::Future<Output = tracedecay_store::TranscriptStoreResult<ParseOffset>> + Send
-    {
-        std::future::ready(Ok(ParseOffset::default()))
-    }
-
-    fn persist_transcript_batch(
-        &self,
-        _batch: TranscriptWriteBatch,
-    ) -> impl std::future::Future<Output = tracedecay_store::TranscriptStoreResult<()>> + Send {
-        self.0.fetch_add(1, Ordering::Relaxed);
-        std::future::ready(Ok(()))
-    }
-}
-
-impl TranscriptIngestStore for CountingStore {
-    fn get_session(
-        &self,
-        _provider: &str,
-        _session_id: &str,
-    ) -> impl std::future::Future<
-        Output = tracedecay_store::TranscriptStoreResult<Option<SessionRecord>>,
-    > + Send {
-        std::future::ready(Ok(None))
-    }
-
-    fn persist_transcript_batch_with_git_evidence(
-        &self,
-        _batch: TranscriptWriteBatch,
-        _commit_records: &[crate::runtime::git_correlation::CommitSessionRecord],
-        _span_observations: &[crate::runtime::git_correlation::SpanObservation],
-    ) -> impl std::future::Future<Output = tracedecay_store::TranscriptStoreResult<()>> + Send {
-        self.0.fetch_add(1, Ordering::Relaxed);
-        std::future::ready(Ok(()))
-    }
-}
-
-#[tokio::test]
-async fn fail_fast_ingest_stops_at_first_bad_path_after_persisting_earlier_paths() {
-    let fail_fast_store = CountingStore::default();
-    assert!(
-        try_ingest_source_with_store(
-            &fail_fast_store,
-            &MixedPathSource,
-            Path::new("mixed-project"),
-            None,
-        )
-        .await
-        .is_err()
-    );
-    assert_eq!(fail_fast_store.0.load(Ordering::Relaxed), 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn source_prepares_multiple_transcript_files_concurrently() {
-    let probe = Arc::new(ParseConcurrencyProbe::default());
-    let source = ConcurrentParseSource {
-        probe: Arc::clone(&probe),
-    };
-    let store = CountingStore::default();
-
-    try_ingest_source_with_store(&store, &source, Path::new("concurrent-project"), None)
-        .await
-        .unwrap();
-
-    assert!(
-        probe.state.lock().unwrap().observed_overlap,
-        "at least two independent transcript files must parse concurrently"
-    );
-    assert_eq!(store.0.load(Ordering::Relaxed), 4);
-}
-
-#[test]
-fn session_metadata_merge_is_additive_and_never_regresses_existing_values() {
-    let merged = merge_session_metadata(
-        Some(r#"{"stable":"original","existing_only":1}"#),
-        Some(r#"{"stable":"replacement","new_only":2}"#.to_string()),
-    )
-    .unwrap();
-    let merged: Value = serde_json::from_str(&merged).unwrap();
-
-    assert_eq!(merged["stable"], "original");
-    assert_eq!(merged["existing_only"], 1);
-    assert_eq!(merged["new_only"], 2);
-}
-
-#[test]
-fn session_metadata_merge_unions_incremental_rollups_stably() {
-    let existing = serde_json::json!({
-        "pr_links": [
-            {"pr_url": "https://example.test/pull/2", "pr_number": 2},
-            {"pr_url": "https://example.test/pull/1", "pr_number": 1}
-        ],
-        "edited_files": [
-            {"path": "src/old.rs", "change_type": "edit", "hunks": 1}
-        ]
-    });
-    let incoming = serde_json::json!({
-        "pr_links": [
-            {"pr_url": "https://example.test/pull/1", "pr_number": 1},
-            {"pr_url": "https://example.test/pull/3", "pr_number": 3}
-        ],
-        "edited_files": [
-            {"path": "src/old.rs", "change_type": "edit", "hunks": 9},
-            {"path": "src/new.rs", "change_type": "create", "hunks": 2}
-        ]
-    });
-
-    let merged =
-        merge_session_metadata(Some(&existing.to_string()), Some(incoming.to_string())).unwrap();
-    let merged: Value = serde_json::from_str(&merged).unwrap();
-
-    assert_eq!(
-        merged["pr_links"],
-        serde_json::json!([
-            {"pr_url": "https://example.test/pull/2", "pr_number": 2},
-            {"pr_url": "https://example.test/pull/1", "pr_number": 1},
-            {"pr_url": "https://example.test/pull/3", "pr_number": 3}
-        ])
-    );
-    assert_eq!(
-        merged["edited_files"],
-        serde_json::json!([
-            {"path": "src/old.rs", "change_type": "edit", "hunks": 1},
-            {"path": "src/new.rs", "change_type": "create", "hunks": 2}
-        ])
-    );
-
-    let merged_again =
-        merge_session_metadata(Some(&merged.to_string()), Some(incoming.to_string())).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&merged_again).unwrap(),
-        merged
-    );
-}
-
-#[tokio::test]
-async fn load_transcript_cursor_propagates_offset_read_failure() {
-    let error = load_transcript_cursor(
-        &ReadFailureStore(ReadFailure::Offset),
-        TranscriptCursorKey::for_path(Path::new("failure.jsonl")),
-    )
-    .await
-    .err()
-    .expect("offset read failure must not look like zero work");
-    assert!(matches!(
-        error,
-        TranscriptIngestError::Store(TranscriptStoreError::Storage {
-            operation: "get_parse_offset",
-            ..
-        })
-    ));
-}
-
-#[tokio::test]
-async fn try_ingest_source_with_store_propagates_offset_read_failure() {
-    let error = try_ingest_source_with_store(
-        &ReadFailureStore(ReadFailure::Offset),
-        &SinglePathSource,
-        Path::new("failure-project"),
-        None,
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        TranscriptIngestError::Store(TranscriptStoreError::Storage {
-            operation: "get_parse_offset",
-            ..
-        })
-    ));
-}
-
-#[tokio::test]
-async fn persist_parsed_transcript_propagates_session_read_failure() {
-    let store = ReadFailureStore(ReadFailure::Session);
-    let path = Path::new("failure.jsonl");
-    let loaded = load_transcript_cursor(&store, TranscriptCursorKey::for_path(path))
-        .await
-        .unwrap();
-    let previous = loaded.checkpoint.clone();
-    let parsed = ParsedTranscript {
-        draft: SessionDraft {
-            session_id: "failure-session".to_string(),
-            project_key: "failure-project".to_string(),
-            project_path: "failure-project".to_string(),
-            title: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        },
-        messages: vec![SessionMessageRecord {
-            provider: "test".to_string(),
-            message_id: "failure-message".to_string(),
-            session_id: "failure-session".to_string(),
-            role: "user".to_string(),
-            timestamp: None,
-            ordinal: 0,
-            text: "failure".to_string(),
-            kind: None,
-            model: None,
-            tool_names: None,
-            source_path: None,
-            source_offset: Some(0),
-            metadata_json: None,
-        }],
-        new_cursor: StoredCursor {
-            position: 8,
-            mtime: 1,
-            file_id: 1,
-        },
-    };
-
-    let error = persist_parsed_transcript(
-        &store,
-        "test",
-        path,
-        Path::new("failure-project"),
-        loaded,
-        &previous,
-        parsed,
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        TranscriptIngestError::Store(TranscriptStoreError::Storage {
-            operation: "get_session",
-            ..
-        })
-    ));
-}
-
-#[test]
-fn stream_new_jsonl_reads_only_appended_lines() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.jsonl");
-    std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
-
-    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-    assert_eq!(first.lines.len(), 2);
-
-    // Re-reading from the advanced cursor yields nothing.
-    let again = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
-    assert_eq!(again.lines.len(), 0);
-
-    // Appending one line yields only that line on the next read.
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    f.write_all(b"{\"a\":3}\n").unwrap();
-    drop(f);
-    let third = stream_new_jsonl(&path, again.new_cursor, None).unwrap();
-    assert_eq!(third.lines.len(), 1);
-    assert_eq!(third.lines[0].value["a"], 3);
-}
 
 #[test]
 fn raw_strict_scan_reports_typed_open_failure() {
@@ -564,44 +78,6 @@ fn raw_strict_scan_reports_partial_bytes_without_advancing_cursor() {
     assert_eq!(
         raw.deferred,
         Some(JsonlFrameDeferral::Partial { offset: 0 })
-    );
-}
-
-#[test]
-fn stream_new_jsonl_defers_partial_final_line_and_respects_cap() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.jsonl");
-    std::fs::write(&path, "{\"a\":1}\n{\"a\":2}").unwrap(); // second line unterminated
-
-    let read = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-    assert_eq!(read.lines.len(), 1, "partial final line must be deferred");
-
-    // A tiny nominal cap still finishes exactly one bounded complete record.
-    let capped = stream_new_jsonl(&path, StoredCursor::default(), Some(1)).unwrap();
-    assert_eq!(capped.lines.len(), 1);
-    assert_eq!(capped.new_cursor.position, b"{\"a\":1}\n".len() as u64);
-}
-
-#[test]
-fn stream_new_jsonl_cap_returns_and_resumes_complete_prefix() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.jsonl");
-    let first = "{\"id\":1}\n";
-    let second = "{\"id\":2}\n";
-    std::fs::write(&path, format!("{first}{second}")).unwrap();
-
-    let prefix =
-        stream_new_jsonl(&path, StoredCursor::default(), Some(first.len() as u64)).unwrap();
-    assert_eq!(prefix.lines.len(), 1);
-    assert_eq!(prefix.lines[0].value["id"], 1);
-    assert_eq!(prefix.new_cursor.position, first.len() as u64);
-
-    let suffix = stream_new_jsonl(&path, prefix.new_cursor, Some(first.len() as u64)).unwrap();
-    assert_eq!(suffix.lines.len(), 1);
-    assert_eq!(suffix.lines[0].value["id"], 2);
-    assert_eq!(
-        suffix.new_cursor.position,
-        (first.len() + second.len()) as u64
     );
 }
 
@@ -733,7 +209,7 @@ fn raw_strict_recovery_advances_in_bounded_batches_through_large_backlog() {
 }
 
 #[test]
-fn stream_new_jsonl_strict_defers_oversized_complete_and_partial_records() {
+fn raw_strict_scan_covers_oversized_complete_and_partial_records_without_payload() {
     const MAX_RECORD_BYTES: usize = 32;
 
     let dir = tempfile::tempdir().unwrap();
@@ -743,24 +219,23 @@ fn stream_new_jsonl_strict_defers_oversized_complete_and_partial_records() {
 
     for terminator in ["\n", ""] {
         std::fs::write(&path, format!("{prefix}{oversized}{terminator}")).unwrap();
+        let file_len = std::fs::metadata(&path).unwrap().len();
 
-        let outcome =
-            stream_new_jsonl_strict(&path, StoredCursor::default(), None, MAX_RECORD_BYTES)
+        let raw =
+            try_stream_new_jsonl_raw_strict(&path, StoredCursor::default(), None, MAX_RECORD_BYTES)
                 .unwrap();
-        let StrictJsonlOutcome::Complete(parsed) = outcome else {
-            panic!("oversized record must advance without payload");
-        };
-        assert_eq!(parsed.lines.len(), 1);
-        assert_eq!(parsed.lines[0].value["id"], "prefix");
-        assert_eq!(
-            parsed.new_cursor.position,
-            std::fs::metadata(&path).unwrap().len()
-        );
+        assert_eq!(raw.frames.len(), 1);
+        assert_eq!(raw.frames[0].bytes, prefix.as_bytes());
+        assert_eq!(raw.skipped.len(), 1);
+        assert_eq!(raw.skipped[0].reason, RawJsonlSkippedReason::Oversized);
+        assert_eq!(raw.skipped[0].offset, prefix.len() as u64);
+        assert_eq!(raw.skipped[0].end_offset, file_len);
+        assert_eq!(raw.new_cursor.position, file_len);
     }
 }
 
 #[test]
-fn stream_new_jsonl_strict_tracks_exact_record_end_offsets() {
+fn raw_strict_scan_reports_exact_record_ranges_before_a_partial_tail() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.jsonl");
     let first = "{\"id\":1}\n";
@@ -769,27 +244,27 @@ fn stream_new_jsonl_strict_tracks_exact_record_end_offsets() {
     let partial = "{\"id\":3}";
     std::fs::write(&path, format!("{first}{blank}{second}{partial}")).unwrap();
 
-    let outcome = stream_new_jsonl_strict(&path, StoredCursor::default(), None, 64).unwrap();
-    let StrictJsonlOutcome::Deferred { parsed, reason } = outcome else {
-        panic!("partial final record must defer");
-    };
-    assert_eq!(parsed.lines.len(), 2);
-    assert_eq!(parsed.lines[0].offset, 0);
-    assert_eq!(parsed.lines[1].offset, (first.len() + blank.len()) as i64);
+    let raw = try_stream_new_jsonl_raw_strict(&path, StoredCursor::default(), None, 64).unwrap();
+    let second_offset = (first.len() + blank.len()) as u64;
+    let partial_offset = second_offset + second.len() as u64;
     assert_eq!(
-        reason,
-        JsonlFrameDeferral::Partial {
-            offset: (first.len() + blank.len() + second.len()) as u64
-        }
+        raw.frames
+            .iter()
+            .map(|frame| (frame.offset, frame.end_offset))
+            .collect::<Vec<_>>(),
+        vec![(0, first.len() as u64), (second_offset, partial_offset)]
     );
     assert_eq!(
-        parsed.new_cursor.position,
-        (first.len() + blank.len() + second.len()) as u64
+        raw.deferred,
+        Some(JsonlFrameDeferral::Partial {
+            offset: partial_offset
+        })
     );
+    assert_eq!(raw.new_cursor.position, partial_offset);
 }
 
 #[test]
-fn stream_new_jsonl_strict_isolates_suffix_after_oversized_record() {
+fn raw_strict_scan_resumes_the_suffix_after_an_oversized_record() {
     const MAX_RECORD_BYTES: usize = 40;
 
     let dir = tempfile::tempdir().unwrap();
@@ -800,251 +275,95 @@ fn stream_new_jsonl_strict_isolates_suffix_after_oversized_record() {
     std::fs::write(&path, format!("{prefix}{oversized}{suffix}")).unwrap();
 
     let first =
-        stream_new_jsonl_strict(&path, StoredCursor::default(), None, MAX_RECORD_BYTES).unwrap();
-    let StrictJsonlOutcome::Complete(parsed) = first else {
-        panic!("terminated oversized record must isolate its suffix");
-    };
-    assert_eq!(parsed.lines.len(), 1);
-    assert_eq!(parsed.lines[0].value["id"], "prefix");
+        try_stream_new_jsonl_raw_strict(&path, StoredCursor::default(), None, MAX_RECORD_BYTES)
+            .unwrap();
+    assert_eq!(first.frames.len(), 1);
+    assert_eq!(first.frames[0].bytes, prefix.as_bytes());
     let suffix_offset = (prefix.len() + oversized.len()) as u64;
-    assert_eq!(parsed.new_cursor.position, suffix_offset);
+    assert_eq!(first.new_cursor.position, suffix_offset);
 
-    let second = stream_new_jsonl_strict(&path, parsed.new_cursor, None, MAX_RECORD_BYTES).unwrap();
-    let StrictJsonlOutcome::Complete(parsed) = second else {
-        panic!("suffix must resume after the skipped oversized range");
-    };
-    assert_eq!(parsed.lines.len(), 1);
-    assert_eq!(parsed.lines[0].value["id"], "suffix");
+    let second =
+        try_stream_new_jsonl_raw_strict(&path, first.new_cursor, None, MAX_RECORD_BYTES).unwrap();
+    assert_eq!(second.frames.len(), 1);
+    assert_eq!(second.frames[0].bytes, suffix.as_bytes());
     assert_eq!(
-        parsed.new_cursor.position,
+        second.new_cursor.position,
         std::fs::metadata(&path).unwrap().len()
     );
 }
 
 #[test]
-fn stream_new_jsonl_legacy_skips_oversized_complete_frame_and_reads_suffix() {
-    const MAX_RECORD_BYTES: usize = 32;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.jsonl");
-    let prefix = "{\"id\":\"prefix\"}\n";
-    let suffix = "{\"id\":\"suffix\"}\n";
-    let oversized = format!("{{\"payload\":\"{}\"}}\n", "x".repeat(MAX_RECORD_BYTES));
-    std::fs::write(&path, format!("{prefix}{oversized}{suffix}")).unwrap();
-
-    let (parsed, deferred, _) = stream_new_jsonl_with_policy(
-        &path,
-        StoredCursor::default(),
-        None,
-        MalformedJsonlPolicy::Skip,
-        MAX_RECORD_BYTES,
-    )
-    .unwrap();
-    assert_eq!(deferred, None);
-    assert_eq!(parsed.lines.len(), 2);
-    assert_eq!(parsed.lines[0].value["id"], "prefix");
-    assert_eq!(parsed.lines[1].value["id"], "suffix");
-    assert_eq!(
-        parsed.new_cursor.position,
-        std::fs::metadata(&path).unwrap().len()
-    );
-}
-
-#[test]
-fn shared_jsonl_framer_applies_invalid_encoding_policy_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.jsonl");
-    let prefix = b"{\"id\":\"prefix\"}\n";
-    let suffix = b"{\"id\":\"suffix\"}\n";
-    let mut contents = prefix.to_vec();
-    contents.extend_from_slice(b"{\"payload\":\"");
-    contents.push(0xff);
-    contents.extend_from_slice(b"\"}\n");
-    contents.extend_from_slice(suffix);
-    std::fs::write(&path, contents).unwrap();
-
-    let legacy = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-    assert_eq!(legacy.lines.len(), 2);
-    assert_eq!(legacy.lines[1].value["id"], "suffix");
-
-    let strict = stream_new_jsonl_strict(&path, StoredCursor::default(), None, 64).unwrap();
-    let StrictJsonlOutcome::Deferred { parsed, reason } = strict else {
-        panic!("strict policy must defer invalid encoding");
-    };
-    assert_eq!(
-        reason,
-        JsonlFrameDeferral::Malformed {
-            offset: prefix.len() as u64
-        }
-    );
-    assert_eq!(parsed.lines.len(), 1);
-    assert_eq!(parsed.new_cursor.position, prefix.len() as u64);
-}
-
-#[test]
-fn stream_new_jsonl_resets_offset_when_file_identity_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.jsonl");
-    // Keep byte length stable across rewrite to simulate same-size rotation.
-    std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
-
-    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-    assert_eq!(first.lines.len(), 2);
-
-    std::fs::write(&path, "{\"a\":9}\n{\"a\":8}\n").unwrap();
-    // Simulate a non-regressing mtime guard; identity must still force a reset.
-    let stale = StoredCursor {
-        mtime: 0,
-        ..first.new_cursor
-    };
-    let rewritten = stream_new_jsonl(&path, stale, None).unwrap();
-    assert_eq!(rewritten.lines.len(), 2);
-    assert_eq!(rewritten.lines[0].value["a"], 9);
-    assert_eq!(rewritten.lines[1].value["a"], 8);
-}
-
-#[test]
-fn stream_new_jsonl_does_not_flag_append_only_progress_as_replacement() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("append-only.jsonl");
-    std::fs::write(&path, "{\"a\":1}\n").unwrap();
-
-    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-    assert!(!first.replacement_generation);
-
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(b"{\"a\":2}\n")
-        .unwrap();
-
-    let appended = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
-    assert_eq!(appended.start_offset, first.new_cursor.position);
-    assert!(!appended.replacement_generation);
-    assert_eq!(appended.new_cursor.file_id, first.new_cursor.file_id);
-}
-
-#[test]
-fn stream_new_jsonl_keeps_one_replacement_namespace_across_batches() {
+fn raw_strict_scan_keeps_one_replacement_generation_across_batches() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rewritten.jsonl");
     std::fs::write(&path, "{\"a\":1}\n").unwrap();
 
-    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+    let first = try_stream_new_jsonl_raw_strict(
+        &path,
+        StoredCursor::default(),
+        None,
+        MAX_JSONL_RECORD_BYTES,
+    )
+    .unwrap();
     assert!(!first.replacement_generation);
 
     // Replace the file with more records than one batch can frame, so the
     // rewrite is only visible at the head of the first batch.
-    let records = jsonl::MAX_JSONL_FRAMES_PER_BATCH + 500;
+    let records = MAX_JSONL_FRAMES_PER_BATCH + 500;
     let rewritten = (0..records).fold(String::new(), |mut text, index| {
         text.push_str(&format!("{{\"b\":{index}}}\n"));
         text
     });
     std::fs::write(&path, &rewritten).unwrap();
 
-    let head = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
+    let head =
+        try_stream_new_jsonl_raw_strict(&path, first.new_cursor, None, MAX_JSONL_RECORD_BYTES)
+            .unwrap();
     assert_eq!(head.start_offset, 0);
     assert!(head.replacement_generation);
-    assert_eq!(head.lines.len(), jsonl::MAX_JSONL_FRAMES_PER_BATCH);
+    assert_eq!(head.frames.len(), MAX_JSONL_FRAMES_PER_BATCH);
     assert_ne!(head.new_cursor.file_id, first.new_cursor.file_id);
 
-    let tail = stream_new_jsonl(&path, head.new_cursor, None).unwrap();
+    let tail =
+        try_stream_new_jsonl_raw_strict(&path, head.new_cursor, None, MAX_JSONL_RECORD_BYTES)
+            .unwrap();
     assert!(tail.start_offset > 0);
-    // The rewrite is a property of the stored generation, so the tail of that
-    // generation namespaces its ids with the same suffix as the head instead
-    // of re-minting bare offsets over the retained pre-rewrite rows.
+    // The rewrite is a property of the stored generation, so the tail keeps
+    // the head's generation instead of reverting to the file identity.
     assert!(tail.replacement_generation);
     assert_eq!(tail.new_cursor.file_id, head.new_cursor.file_id);
-    assert_eq!(
-        tail.lines.len(),
-        records - jsonl::MAX_JSONL_FRAMES_PER_BATCH
-    );
+    assert_eq!(tail.frames.len(), records - MAX_JSONL_FRAMES_PER_BATCH);
 }
 
 #[test]
-fn stream_new_jsonl_flags_replacement_when_the_rewrite_starts_with_a_blank_frame() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("blank-head.jsonl");
-    std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
-
-    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-    assert_eq!(first.lines.len(), 2);
-
-    // The replacement opens with a whitespace-only frame, so no parsed line
-    // carries offset zero even though the scan restarted at the file head.
-    std::fs::write(&path, "   \n{\"b\":1}\n").unwrap();
-    let rewritten = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
-    assert_eq!(rewritten.start_offset, 0);
-    assert!(rewritten.lines.first().unwrap().offset > 0);
-    assert!(rewritten.replacement_generation);
-}
-
-#[test]
-fn stream_new_jsonl_mints_a_distinct_generation_for_each_rewrite() {
+fn raw_strict_scan_mints_a_distinct_generation_for_each_rewrite() {
+    let scan = |path: &Path, cursor| {
+        try_stream_new_jsonl_raw_strict(path, cursor, None, MAX_JSONL_RECORD_BYTES).unwrap()
+    };
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("repeated-rewrite.jsonl");
     // A stable head line keeps the file identity constant across rewrites so
     // only the recorded generation can separate them.
     std::fs::write(&path, "{\"same\":1}\n{\"a\":1}\n").unwrap();
-    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+    let first = scan(&path, StoredCursor::default());
     assert!(!first.replacement_generation);
 
     std::fs::write(&path, "{\"same\":1}\n").unwrap();
-    let second = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
+    let second = scan(&path, first.new_cursor);
     assert_eq!(second.start_offset, 0);
     assert!(second.replacement_generation);
 
     std::fs::write(&path, "{\"same\":1}\n{\"b\":2}\n").unwrap();
-    let appended = stream_new_jsonl(&path, second.new_cursor, None).unwrap();
+    let appended = scan(&path, second.new_cursor);
     assert!(appended.start_offset > 0);
     assert!(appended.replacement_generation);
     assert_eq!(appended.new_cursor.file_id, second.new_cursor.file_id);
 
     std::fs::write(&path, "{\"same\":1}\n").unwrap();
-    let third = stream_new_jsonl(&path, appended.new_cursor, None).unwrap();
+    let third = scan(&path, appended.new_cursor);
     assert_eq!(third.start_offset, 0);
     assert!(third.replacement_generation);
     assert_ne!(third.new_cursor.file_id, second.new_cursor.file_id);
-}
-
-#[test]
-fn raw_strict_resume_checkpoint_detects_same_inode_rewrite_past_the_head() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("same-inode.jsonl");
-    let original = b"{\"v\":0}\n".repeat(3_000);
-    std::fs::write(&path, &original).unwrap();
-
-    let first = try_stream_new_jsonl_raw_strict_with_resume(
-        &path,
-        StoredCursor::default(),
-        None,
-        MAX_JSONL_RECORD_BYTES,
-        None,
-    )
-    .unwrap();
-    let checkpoint = JsonlResumeState {
-        generation: first.new_cursor.file_id,
-        file_identity: first.file_identity,
-        fingerprint: first.frames.last().unwrap().resume_fingerprint,
-    };
-
-    let mut rewritten = original;
-    let changed = rewritten.len() - b"{\"v\":0}\n".len();
-    rewritten[changed..].copy_from_slice(b"{\"v\":1}\n");
-    std::fs::write(&path, rewritten).unwrap();
-
-    let second = try_stream_new_jsonl_raw_strict_with_resume(
-        &path,
-        first.new_cursor,
-        None,
-        MAX_JSONL_RECORD_BYTES,
-        Some(checkpoint),
-    )
-    .unwrap();
-    assert_eq!(second.start_offset, 0);
-    assert_ne!(second.new_cursor.file_id, checkpoint.generation);
-    assert_eq!(second.frames.len(), 3_000);
 }
 
 #[test]
@@ -1087,10 +406,21 @@ fn raw_strict_resume_checkpoint_detects_same_inode_middle_rewrite() {
 }
 
 #[test]
-fn raw_strict_resume_checkpoint_preserves_append_only_progress() {
+fn raw_strict_resume_survives_rename_replacement_with_unchanged_prefix() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("append-only.jsonl");
-    std::fs::write(&path, b"{\"v\":0}\n").unwrap();
+    let path = dir.path().join("renamed.jsonl");
+    let staged = dir.path().join("renamed.jsonl.tmp");
+    let replace = |contents: &[u8]| {
+        std::fs::write(&staged, contents).unwrap();
+        std::fs::rename(&staged, &path).unwrap();
+    };
+    let checkpoint_of = |scan: &jsonl::RawNewJsonl| JsonlResumeState {
+        generation: scan.new_cursor.file_id,
+        file_identity: scan.file_identity,
+        fingerprint: scan.frames.last().unwrap().resume_fingerprint,
+    };
+    let original = b"{\"v\":0}\n{\"v\":1}\n";
+    std::fs::write(&path, original).unwrap();
     let first = try_stream_new_jsonl_raw_strict_with_resume(
         &path,
         StoredCursor::default(),
@@ -1099,30 +429,68 @@ fn raw_strict_resume_checkpoint_preserves_append_only_progress() {
         None,
     )
     .unwrap();
-    let checkpoint = JsonlResumeState {
-        generation: first.new_cursor.file_id,
-        file_identity: first.file_identity,
-        fingerprint: first.frames.last().unwrap().resume_fingerprint,
-    };
-    let first_end = first.new_cursor.position;
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(b"{\"v\":1}\n")
-        .unwrap();
+    assert_eq!(first.frames.len(), 2);
 
-    let second = try_stream_new_jsonl_raw_strict_with_resume(
+    replace(original);
+    let identical = try_stream_new_jsonl_raw_strict_with_resume(
         &path,
         first.new_cursor,
         None,
         MAX_JSONL_RECORD_BYTES,
-        Some(checkpoint),
+        Some(checkpoint_of(&first)),
     )
     .unwrap();
-    assert_eq!(second.start_offset, first_end);
-    assert_eq!(second.new_cursor.file_id, checkpoint.generation);
-    assert_eq!(second.frames.len(), 1);
+    assert_eq!(
+        (
+            identical.start_offset,
+            identical.frames.len(),
+            identical.new_cursor.file_id,
+            identical.replacement_generation,
+        ),
+        (16, 0, first.new_cursor.file_id, false)
+    );
+
+    replace(b"{\"v\":0}\n{\"v\":1}\n{\"v\":2}\n");
+    let appended = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        first.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint_of(&first)),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            appended.start_offset,
+            appended.frames.len(),
+            appended.new_cursor.position,
+            appended.new_cursor.file_id,
+            appended.file_identity,
+            appended.replacement_generation,
+        ),
+        (
+            16,
+            1,
+            24,
+            first.new_cursor.file_id,
+            first.file_identity,
+            false
+        )
+    );
+
+    replace(b"{\"v\":9}\n{\"v\":1}\n{\"v\":2}\n");
+    let edited = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        appended.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint_of(&appended)),
+    )
+    .unwrap();
+    assert_eq!(edited.start_offset, 0);
+    assert_eq!(edited.frames.len(), 3);
+    assert!(edited.replacement_generation);
+    assert_ne!(edited.new_cursor.file_id, first.new_cursor.file_id);
 }
 
 /// One resumed scan must walk the validated prefix exactly once.
@@ -1175,8 +543,16 @@ fn raw_strict_resume_validates_the_prefix_once_per_scan() {
     // below is not vacuously zero.
     assert_eq!(second.frames.len(), 1, "the appended frame must be scanned");
     assert_eq!(second.start_offset, prefix_bytes);
+    // A platform without a rewrite witness cannot trust the token, so the
+    // commit step re-proves the consumed prefix at `read_through` bytes.
+    let commit_proof = if tracedecay_private_fs::RewriteWitness::NATIVE.proves_unchanged_bytes() {
+        0
+    } else {
+        second.read_through
+    };
     assert_eq!(
-        second.io.prefix_validation_bytes, prefix_bytes,
+        second.io.prefix_validation_bytes,
+        prefix_bytes + commit_proof,
         "the resumed prefix must be hashed once, not once per consumer"
     );
 }
@@ -1184,7 +560,7 @@ fn raw_strict_resume_validates_the_prefix_once_per_scan() {
 /// A first-sight scan must not hash the whole file to police itself.
 ///
 /// The snapshot fingerprint exists to catch a rewrite that lands *during* a
-/// scan, and catching that needs two independent full passes — one before the
+/// scan, and catching that needs two independent full passes, one before the
 /// read and one after. On a cold catch-up every file takes both, which is why
 /// ingesting 109 MB of transcript cost 43.5 GB of hashing. Identity, size and
 /// mtime already fail closed on every observable change, so the pair is spent
@@ -1196,6 +572,10 @@ fn cold_full_file_scan_does_not_hash_the_whole_file() {
     let record = b"{\"v\":0}\n";
     let records = 512;
     std::fs::write(&path, record.repeat(records)).unwrap();
+    // A change time still inside the kernel's coarse quantum is not proof the
+    // bytes are stable, so the scan seals a snapshot. This assertion is about
+    // a settled file, whose token already rules that rewrite out.
+    super::jsonl::spin_until_jsonl_change_settled(&path);
 
     let scan = try_stream_new_jsonl_raw_strict_with_resume(
         &path,
@@ -1223,11 +603,15 @@ fn cold_full_file_scan_does_not_hash_the_whole_file() {
 fn unchanged_settled_repoll_reads_zero_file_bytes() {
     // The warm entry this test proves must survive between its two polls, and
     // the isolation reset is process-global.
-    let _hold = super::jsonl::HoldUnchangedGenerationCache::enter();
     let dir = tempfile::tempdir().unwrap();
+    let _hold = super::jsonl::HoldUnchangedGenerationCache::enter(dir.path());
     let path = dir.path().join("warm.jsonl");
     let record = b"{\"v\":0}\n";
     std::fs::write(&path, record.repeat(8)).unwrap();
+    // The proving scan has to observe a settled change time. A cache entry
+    // recorded inside the coarse quantum would authorize a later repoll to
+    // skip bytes a same-length rewrite could still have replaced.
+    super::jsonl::spin_until_jsonl_change_settled(&path);
 
     let first = try_stream_new_jsonl_raw_strict_with_resume(
         &path,
@@ -1270,56 +654,6 @@ fn unchanged_settled_repoll_reads_zero_file_bytes() {
     assert_eq!(second.io.content_bytes, 0);
     assert_eq!(second.io.scan_payload_read_bytes, 0);
     assert_eq!(second.io.change, JsonlChangeKind::Unchanged);
-}
-
-#[cfg(any(unix, windows))]
-#[test]
-fn stream_new_jsonl_resets_when_replaced_file_keeps_same_head() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.jsonl");
-    let replacement = dir.path().join("replacement.jsonl");
-    std::fs::write(&path, "{\"same\":1}\n{\"old\":2}\n").unwrap();
-
-    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-    assert_eq!(first.lines.len(), 2);
-
-    // Create the replacement before removing the original so its native
-    // identity cannot be recycled, while retaining the same head line.
-    std::fs::write(&replacement, "{\"same\":1}\n{\"new\":2}\n").unwrap();
-    std::fs::remove_file(&path).unwrap();
-    std::fs::rename(&replacement, &path).unwrap();
-
-    let stale = StoredCursor {
-        mtime: 0,
-        ..first.new_cursor
-    };
-    let rewritten = stream_new_jsonl(&path, stale, None).unwrap();
-    assert_eq!(rewritten.lines.len(), 2);
-    assert_eq!(rewritten.lines[0].value["same"], 1);
-    assert_eq!(rewritten.lines[1].value["new"], 2);
-}
-
-#[test]
-fn read_changed_file_detects_change_and_noops_when_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("chat.json");
-    std::fs::write(&path, "[{\"role\":\"user\"}]").unwrap();
-
-    let changed = read_changed_file(&path, StoredCursor::default(), 1024).unwrap();
-    assert!(changed.contents.contains("user"));
-    // Unchanged file → None.
-    assert!(read_changed_file(&path, changed.new_cursor, 1024).is_none());
-}
-
-#[test]
-fn collect_files_preserves_the_callers_root_spelling() {
-    let dir = tempfile::tempdir().unwrap();
-    let nested = dir.path().join("nested");
-    let transcript = nested.join("session.jsonl");
-    std::fs::create_dir_all(&nested).unwrap();
-    std::fs::write(&transcript, "{}\n").unwrap();
-
-    assert_eq!(collect_files_with_ext(dir.path(), "jsonl", 1), [transcript]);
 }
 
 #[test]
@@ -1430,140 +764,6 @@ fn bound_path_list_stops_on_cumulative_discovery_bytes() {
 }
 
 #[test]
-fn stream_new_jsonl_returns_none_for_missing_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("missing.jsonl");
-
-    assert!(stream_new_jsonl(&path, StoredCursor::default(), None).is_none());
-}
-
-#[test]
-fn stream_new_jsonl_skips_invalid_json_lines_without_panicking() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("invalid.jsonl");
-    std::fs::write(&path, "not-json\n{\"a\":2}\n").unwrap();
-
-    let read = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-    assert_eq!(read.lines.len(), 1);
-    assert_eq!(read.lines[0].value["a"], 2);
-}
-
-#[test]
-fn read_changed_file_returns_none_for_missing_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("missing.json");
-
-    assert!(read_changed_file(&path, StoredCursor::default(), 1024).is_none());
-}
-
-#[tokio::test]
-async fn read_new_rows_tracks_last_rowid() {
-    // A synthetic SQLite-backed source exercises the RowCursor kind. Seed via
-    // a shared in-memory database so the reader handle observes later writes.
-    let seed =
-        rusqlite::Connection::open("file:read_new_rows_tracks?mode=memory&cache=shared").unwrap();
-    seed.execute_batch(
-        "CREATE TABLE turns (role TEXT, text TEXT);\n\
-         INSERT INTO turns (role, text) VALUES ('user', 'hello'), ('assistant', 'hi');",
-    )
-    .unwrap();
-    let conn = crate::runtime::shared::SqliteReadConn::new(
-        rusqlite::Connection::open("file:read_new_rows_tracks?mode=memory&cache=shared").unwrap(),
-    );
-
-    let sql = "SELECT rowid, role, text FROM turns WHERE rowid > ? ORDER BY rowid";
-    let map = |_rowid: i64, row: &rusqlite::Row<'_>| row.get::<_, String>(2).ok();
-    let first = read_new_rows(&conn, sql, StoredCursor::default(), map)
-        .await
-        .unwrap();
-    assert_eq!(first.items, vec!["hello".to_string(), "hi".to_string()]);
-    assert_eq!(first.new_cursor.position, 2);
-
-    // No new rows past the advanced cursor.
-    let again = read_new_rows(&conn, sql, first.new_cursor, map)
-        .await
-        .unwrap();
-    assert_eq!(again.items.len(), 0);
-
-    seed.execute(
-        "INSERT INTO turns (role, text) VALUES ('user', 'again')",
-        (),
-    )
-    .unwrap();
-    let third = read_new_rows(&conn, sql, again.new_cursor, map)
-        .await
-        .unwrap();
-    assert_eq!(third.items, vec!["again".to_string()]);
-    assert_eq!(third.new_cursor.position, 3);
-}
-
-#[tokio::test]
-async fn read_new_rows_returns_none_for_invalid_query() {
-    let conn = crate::runtime::shared::SqliteReadConn::new(
-        rusqlite::Connection::open_in_memory().unwrap(),
-    );
-
-    let rows = read_new_rows(
-        &conn,
-        "SELECT not_a_column FROM missing_table WHERE rowid > ? ORDER BY rowid",
-        StoredCursor::default(),
-        |_rowid: i64, row: &rusqlite::Row<'_>| row.get::<_, String>(0).ok(),
-    )
-    .await;
-
-    assert!(rows.is_none());
-}
-
-#[test]
-fn parsed_transcript_structural_ids_are_protected_before_store_writes() {
-    let raw = ["AKIA", "STRUCTURAL", "234567"].concat();
-    let mut parsed = ParsedTranscript {
-        draft: SessionDraft {
-            session_id: raw.clone(),
-            project_key: "project.fixture".to_owned(),
-            project_path: "/fixture".to_owned(),
-            title: None,
-            metadata_json: None,
-            parent_session_id: Some(raw.clone()),
-            is_subagent: true,
-            agent_id: Some(raw.clone()),
-            parent_tool_use_id: Some(raw.clone()),
-        },
-        messages: vec![SessionMessageRecord {
-            provider: "test".to_owned(),
-            message_id: raw.clone(),
-            session_id: raw.clone(),
-            role: "assistant".to_owned(),
-            timestamp: None,
-            ordinal: 0,
-            text: "safe".to_owned(),
-            kind: None,
-            model: None,
-            tool_names: None,
-            source_path: None,
-            source_offset: None,
-            metadata_json: None,
-        }],
-        new_cursor: StoredCursor::default(),
-    };
-
-    protect_parsed_transcript_structural_ids(&mut parsed).unwrap();
-    let protected = parsed.draft.session_id.clone();
-    assert!(protected.starts_with("privacy.structural-id.v1."));
-    assert_eq!(
-        parsed.draft.parent_session_id.as_deref(),
-        Some(protected.as_str())
-    );
-    assert_eq!(parsed.draft.agent_id.as_deref(), Some(protected.as_str()));
-    assert_eq!(
-        parsed.draft.parent_tool_use_id.as_deref(),
-        Some(protected.as_str())
-    );
-    assert_eq!(parsed.messages[0].message_id, protected);
-    assert_eq!(parsed.messages[0].session_id, protected);
-}
-
-#[test]
 fn jsonl_file_identity_is_stable_for_an_unchanged_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
@@ -1594,34 +794,55 @@ fn content_hash_stays_inside_the_persisted_cursor_domain() {
     );
 }
 
-/// The offload helper must hand the worker's run queue to another thread:
-/// with a single-worker multi-thread runtime, a task spawned *from inside*
-/// the blocking section can only run if `block_in_place` released the
-/// worker. Running the section inline would deadlock this test until the
-/// receive timeout fails it.
+/// The offload helper must run the section on the blocking pool: with a
+/// single-worker multi-thread runtime, a task spawned *from inside* the
+/// section can only run if the worker is free. Running the section inline
+/// would deadlock this test until the receive timeout fails it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn blocking_transcript_section_yields_the_worker_queue() {
     let handle = tokio::runtime::Handle::current();
-    let value = tokio::spawn(async move {
+    let worker = std::thread::current().id();
+    let (value, work_thread) = tokio::spawn(async move {
         let (sender, receiver) = std::sync::mpsc::channel();
-        run_blocking_transcript_section(move || {
+        run_blocking_transcript_section("test", move || {
+            let work_thread = std::thread::current().id();
             handle.spawn(async move {
                 let _ = sender.send(());
             });
             receiver
                 .recv_timeout(std::time::Duration::from_secs(5))
-                .map(|()| 7)
+                .map(|()| (7, work_thread))
                 .expect("a task spawned during the blocking section must run")
         })
+        .await
+        .unwrap()
     })
     .await
     .expect("join blocking section");
     assert_eq!(value, 7);
+    assert_ne!(
+        work_thread, worker,
+        "transcript sections must not execute on a Tokio worker"
+    );
 }
 
-/// On a current-thread runtime `block_in_place` would panic, so the helper
-/// must run the section inline and still return its value.
+/// Current-thread runtimes have no `block_in_place`, so the helper must
+/// still return its value through the blocking pool.
 #[tokio::test]
-async fn blocking_transcript_section_runs_inline_on_current_thread() {
-    assert_eq!(run_blocking_transcript_section(|| 11), 11);
+async fn blocking_transcript_section_runs_on_current_thread_runtime() {
+    assert_eq!(
+        run_blocking_transcript_section("test", || 11)
+            .await
+            .unwrap(),
+        11
+    );
+}
+
+#[tokio::test]
+async fn blocking_transcript_section_reports_worker_failure() {
+    let result = run_blocking_transcript_section("test", || panic!("worker failure")).await;
+    assert!(matches!(
+        result,
+        Err(TranscriptIngestError::BlockingScanTaskFailed { provider: "test" })
+    ));
 }

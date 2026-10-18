@@ -1,24 +1,11 @@
-/** Loom track model: pure time-window math, interval packing and axis
- * generation, no DOM. The weave renderer consumes this; tests reason about it
- * directly.
+/** Loom track model: pure time-window math and axis generation, no DOM. The
+ * temporal layout consumes this; tests reason about it directly.
  *
- * Everything here is derived from real spans. Nothing in this module invents a
- * span or a magnitude — the lane packing is a projection of the same session
- * rows the canvas draws.
+ * Nothing in this module invents a span or a magnitude, every window is
+ * derived from the recorded extent it is clamped against.
  */
 
-export interface LoomSpan {
-  id: string;
-  /** Seconds since epoch. */
-  start: number;
-  /** Seconds since epoch; instants render as minimum-width marks. */
-  end: number;
-  label: string;
-  /** Secondary magnitude (e.g. message count) mapped to mark height. */
-  weight: number;
-}
-
-export interface LoomWindow {
+interface LoomWindow {
   start: number;
   end: number;
 }
@@ -53,21 +40,6 @@ export function clampWindow(view: LoomWindow, extent: LoomWindow): LoomWindow {
   return { start, end: start + span };
 }
 
-export function zoomWindow(
-  view: LoomWindow,
-  extent: LoomWindow,
-  factor: number,
-  focusTime: number,
-): LoomWindow {
-  const span = view.end - view.start;
-  const nextSpan = span * factor;
-  const ratio = span === 0 ? 0.5 : (focusTime - view.start) / span;
-  return clampWindow(
-    { start: focusTime - ratio * nextSpan, end: focusTime + (1 - ratio) * nextSpan },
-    extent,
-  );
-}
-
 /** True when the viewport is (near enough) the whole fitted extent. */
 export function isFitted(view: LoomWindow, extent: LoomWindow): boolean {
   const full = fittedWindow(extent);
@@ -83,40 +55,10 @@ function xFor(time: number, window: LoomWindow, width: number): number {
 }
 
 /* -------------------------------------------------------------------------
- * Lane packing
- * ---------------------------------------------------------------------- */
-
-/** Greedy interval packing: each span drops into the first sub-lane whose last
- * mark has already ended (plus a pixel-sized gap, so two marks that would touch
- * on screen are still separated). Overlap becomes structure instead of mud. */
-export function packTrack(spans: LoomSpan[], minGapSeconds = 0): LoomSpan[][] {
-  const ordered = [...spans].sort((a, b) => a.start - b.start || a.end - b.end);
-  const lanes: LoomSpan[][] = [];
-  const lastEnd: number[] = [];
-  for (const span of ordered) {
-    const end = Math.max(span.end, span.start + minGapSeconds);
-    let placed = false;
-    for (let lane = 0; lane < lanes.length; lane += 1) {
-      if ((lastEnd[lane] ?? -Infinity) + minGapSeconds <= span.start) {
-        lanes[lane]!.push(span);
-        lastEnd[lane] = end;
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) {
-      lanes.push([span]);
-      lastEnd.push(end);
-    }
-  }
-  return lanes;
-}
-
-/* -------------------------------------------------------------------------
  * Axis
  * ---------------------------------------------------------------------- */
 
-export interface AxisTick {
+interface AxisTick {
   x: number;
   time: number;
   label: string;
@@ -133,25 +75,37 @@ const TICK_STEPS = [
   30 * 86_400, 90 * 86_400, 180 * 86_400, 365 * 86_400,
 ] as const;
 
+/** Ruler labels are 10px text; a glyph is at most this wide, plus a gap. */
+const LABEL_CHAR_PX = 6.5;
+const LABEL_GAP_PX = 16;
+/** A late-December afternoon, the widest date and clock a label can print. */
+const WIDEST_LABEL_EPOCH = Date.UTC(2026, 11, 28, 12, 58, 58) / 1000;
+
+/** The pitch a step's own label format needs so neighbours never overprint. */
+function labelPitch(step: number): number {
+  return tickLabel(WIDEST_LABEL_EPOCH, step).length * LABEL_CHAR_PX + LABEL_GAP_PX;
+}
+
+function labelsFit(step: number, spanSeconds: number, width: number): boolean {
+  return (width * step) / spanSeconds >= labelPitch(step);
+}
+
 export function tickStepFor(spanSeconds: number, width: number): number {
   const maxTicks = Math.min(Math.max(Math.floor(width / 96), 2), 14);
   const target = spanSeconds / maxTicks;
   const step =
-    TICK_STEPS.find((candidate) => candidate >= target) ??
+    TICK_STEPS.find((candidate) => candidate >= target && labelsFit(candidate, spanSeconds, width)) ??
     TICK_STEPS[TICK_STEPS.length - 1]!;
   // The two axis tiers must never say the same thing twice: the fine row wants
   // to sit below whatever the calendar band row is showing. That preference
-  // never outranks legibility, though — dropping under the band unit can cost
-  // several rungs, and a bare "one rung below the band" rule prints 64 ticks
-  // across a two-year window. Take the LARGEST rung under the band (fewest
-  // ticks), and only if it still keeps ticks no closer than a ~48px pitch;
-  // otherwise the tiers share a unit and the band row carries the coarser one.
+  // never outranks legibility, though: take the LARGEST rung under the band
+  // (fewest ticks), and only if its own label format fits its pitch; otherwise
+  // the tiers share a unit and the band row carries the coarser one.
   const ceiling = bandCeiling(spanSeconds);
   if (step < ceiling) return step;
-  const denseLimit = Math.max(maxTicks, Math.floor(width / 48));
   const finer = [...TICK_STEPS]
     .reverse()
-    .find((candidate) => candidate < ceiling && spanSeconds / candidate <= denseLimit);
+    .find((candidate) => candidate < ceiling && labelsFit(candidate, spanSeconds, width));
   return finer ?? step;
 }
 
@@ -183,83 +137,23 @@ export function axisTicks(view: LoomWindow, width: number): AxisTick[] {
   return ticks;
 }
 
+// `toLocale*String` builds a formatter per call; a dense page formats
+// hundreds of moments per redraw, so each format is built once.
+const SECONDS_FORMAT = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const CLOCK_FORMAT = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+const MOMENT_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const DAY_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+const MONTH_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', year: '2-digit' });
+
 function tickLabel(epochSeconds: number, step: number): string {
   const date = new Date(epochSeconds * 1000);
-  if (step < 60) {
-    return date.toLocaleTimeString(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  }
-  if (step < 86_400) {
-    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  }
-  if (step < 30 * 86_400) {
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  }
-  return date.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
-}
-
-export interface DayBand {
-  x0: number;
-  x1: number;
-  /** Local midnight that opens the band. */
-  time: number;
-  label: string;
-  /** Alternating parity, so consecutive days can be tinted apart. */
-  odd: boolean;
-}
-
-/** Calendar bands behind the ticks: hours inside a day, days inside a season,
- * months beyond that. The bands are the weave's warp — the eye reads their
- * rhythm before it reads any single mark. */
-export function dayBands(view: LoomWindow, width: number): DayBand[] {
-  if (width <= 0) return [];
-  const spanSeconds = view.end - view.start;
-  const scale = bandScale(spanSeconds);
-  const bands: DayBand[] = [];
-  const cursor = new Date(view.start * 1000);
-  if (scale === 'hour') cursor.setMinutes(0, 0, 0);
-  else if (scale === 'day') cursor.setHours(0, 0, 0, 0);
-  else cursor.setDate(1), cursor.setHours(0, 0, 0, 0);
-  const hourStride = Math.max(1, Math.round(spanSeconds / 3600 / 8));
-  let guard = 0;
-  while (cursor.getTime() / 1000 < view.end && guard < 400) {
-    guard += 1;
-    const time = cursor.getTime() / 1000;
-    const next = new Date(cursor);
-    if (scale === 'hour') next.setHours(next.getHours() + hourStride);
-    else if (scale === 'day') next.setDate(next.getDate() + 1);
-    else next.setMonth(next.getMonth() + 1);
-    const nextTime = next.getTime() / 1000;
-    if (nextTime > view.start) {
-      bands.push({
-        x0: xFor(Math.max(time, view.start), view, width),
-        x1: xFor(Math.min(nextTime, view.end), view, width),
-        time,
-        label: bandLabel(time, scale),
-        odd: bands.length % 2 === 1,
-      });
-    }
-    cursor.setTime(next.getTime());
-  }
-  return bands;
-}
-
-function bandLabel(epochSeconds: number, scale: 'hour' | 'day' | 'month'): string {
-  const date = new Date(epochSeconds * 1000);
-  if (scale === 'hour') {
-    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  }
-  if (scale === 'day') {
-    return date.toLocaleDateString(undefined, {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-    });
-  }
-  return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  if (step < 60) return SECONDS_FORMAT.format(date);
+  if (step < 6 * 3600) return CLOCK_FORMAT.format(date);
+  // A window ticking every six hours or more spans days: a bare clock time
+  // would repeat "12:00 AM" across the ruler with nothing to tell them apart.
+  if (step < 86_400) return MOMENT_FORMAT.format(date);
+  if (step < 30 * 86_400) return DAY_FORMAT.format(date);
+  return MONTH_FORMAT.format(date);
 }
 
 /* -------------------------------------------------------------------------
@@ -271,9 +165,9 @@ function bandLabel(epochSeconds: number, scale: 'hour' | 'day' | 'month'): strin
  * purpose: Brain's `activitySummary.ts` exports `formatDurationMs`, and both
  * take a bare `number`, so a bare `formatDuration` would let either module's
  * formatter be imported into the other's call sites and print a duration off
- * by 1000x with no type error — a wrong number on screen rather than a build
+ * by 1000x with no type error, a wrong number on screen rather than a build
  * failure. Loom's clock is epoch seconds throughout (`formatMoment` multiplies
- * by 1000 to build a `Date`, and `weave.ts` clamps spans against 3600).
+ * by 1000 to build a `Date`, and the journey extent is padded to 3600).
  */
 export function formatDurationSeconds(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '—';
@@ -288,10 +182,5 @@ export function formatDurationSeconds(seconds: number): string {
 }
 
 export function formatMoment(epochSeconds: number): string {
-  return new Date(epochSeconds * 1000).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return MOMENT_FORMAT.format(new Date(epochSeconds * 1000));
 }

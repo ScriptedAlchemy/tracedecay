@@ -2,6 +2,7 @@
 
 use super::*;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Upper bound for the size of the `DaemonInvocationService::invoke` future.
@@ -14,55 +15,17 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 #[cfg(test)]
 const INVOKE_FUTURE_SIZE_BUDGET: usize = 24 * 1024;
 
-/// In-flight accounting for the daemon invocation front door. Entering counts
-/// one request; dropping settles it, so cancellation, panic, and every early
-/// denial path release the in-flight gauge.
-struct InvocationDispatchGaugeGuard;
-
-impl InvocationDispatchGaugeGuard {
-    fn enter() -> Self {
-        hotpath::gauge!("daemon.service.invocation.active").inc(1_u64);
-        hotpath::gauge!("daemon.service.invocation.requests_total").inc(1_u64);
-        Self
-    }
-}
-
-impl Drop for InvocationDispatchGaugeGuard {
-    fn drop(&mut self) {
-        hotpath::gauge!("daemon.service.invocation.active").dec(1_u64);
-        hotpath::gauge!("daemon.service.invocation.settled_total").inc(1_u64);
-    }
-}
-
-/// Counts a request the front door denied before any payload handler ran.
-/// The reason set is the closed [`DaemonInvocationProblem`] enum, so every
-/// key is static and bounded.
-fn observe_front_door_denial(problem: DaemonInvocationProblem) {
-    match problem {
-        DaemonInvocationProblem::InvalidRequest => {
-            hotpath::gauge!("daemon.service.invocation.denied.invalid_request").inc(1_u64);
-        }
-        DaemonInvocationProblem::UnsupportedRevision => {
-            hotpath::gauge!("daemon.service.invocation.denied.unsupported_revision").inc(1_u64);
-        }
-        DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-            hotpath::gauge!("daemon.service.invocation.denied.not_authorized").inc(1_u64);
-        }
-        DaemonInvocationProblem::ResetRequired => {
-            hotpath::gauge!("daemon.service.invocation.denied.reset_required").inc(1_u64);
-        }
-        DaemonInvocationProblem::ApplicationContractViolation => {
-            hotpath::gauge!("daemon.service.invocation.denied.contract_violation").inc(1_u64);
-        }
-        DaemonInvocationProblem::Unavailable => {
-            hotpath::gauge!("daemon.service.invocation.denied.unavailable").inc(1_u64);
-        }
-    }
-}
-
 impl DaemonInvocationService {
     pub fn operation_events(&self) -> OperationEventAuthority {
         self.operation_events.clone()
+    }
+
+    /// The cancellation table of this service generation. Every transport
+    /// and executor path registers and cancels requests through it.
+    pub fn request_cancellations(
+        &self,
+    ) -> &crate::request_cancellation::RequestCancellationRegistryV1 {
+        &self.request_cancellations
     }
 
     pub fn admit_project_request(
@@ -81,7 +44,7 @@ impl DaemonInvocationService {
         let canonical_root = match canonical_root {
             Some(canonical_root) => Some(canonical_root),
             None => {
-                resolved = project_root.canonicalize().ok();
+                resolved = canonical_existing_identity(project_root).ok();
                 resolved.as_deref()
             }
         };
@@ -93,7 +56,6 @@ impl DaemonInvocationService {
     /// `lsp_workspace` is supplied only after the daemon has resolved every
     /// requested root through registered project ownership.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn invoke(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -118,7 +80,6 @@ impl DaemonInvocationService {
     /// Executes a request with a cancellation lease that was admitted before a
     /// route-local project-open wait. The ordinary `invoke` entry point keeps
     /// owning registration for callers that do not need a pre-admission wait.
-    #[hotpath::skip]
     pub async fn invoke_with_cancellation(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -142,7 +103,6 @@ impl DaemonInvocationService {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn invoke_with_project_admission(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -167,7 +127,7 @@ impl DaemonInvocationService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "daemon.service.invocation.dispatch", future = true)]
+    #[tracing::instrument(name = "daemon.service.invocation.dispatch", level = "trace", skip_all)]
     async fn invoke_with_admission(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -179,11 +139,11 @@ impl DaemonInvocationService {
         admitted_cancellation: Option<CancellationToken>,
         project_admission: Option<&crate::project_runtime::ProjectRuntimeRequestLeaseV1>,
     ) -> DaemonInvocationResponse {
-        let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
+        // Keep the admitted dispatch frame behind one allocation for every invocation entry point.
+        Box::pin(async move {
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
-            let Some(lease) = crate::request_cancellation::register(&request_id) else {
-                observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
+            let Some(lease) = self.request_cancellations.register(&request_id) else {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -197,60 +157,50 @@ impl DaemonInvocationService {
             (Some(token), _) => token,
             (None, Some(lease)) => lease.token(),
             (None, None) => {
-                observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
                 );
             }
         };
-        let operation = request.operation();
         let delivery_route = request.delivery_route;
         // Every per-project component this request may need, taken in one pass
         // so dispatch sees one consistent view of the project. A pre-admitted
-        // lease already stored the canonicalize result; reuse it.
-        let canonical_root = match (project_root, project_admission) {
-            (Some(project_root), Some(project_admission)) => project_admission
-                .admitted_canonical_root()
-                .map(ToOwned::to_owned)
-                .or_else(|| project_root.canonicalize().ok()),
-            (Some(project_root), None) => project_root.canonicalize().ok(),
-            (None, _) => None,
-        };
+        // lease already holds the exact registered-root key.
         let runtimes = match (project_root, project_admission) {
-            (Some(project_root), Some(project_admission)) => {
-                self.project_runtimes.request_runtimes_with_admission(
-                    project_root,
-                    canonical_root.as_deref(),
-                    project_admission,
-                )
-            }
+            (Some(project_root), Some(project_admission)) => self
+                .project_runtimes
+                .request_runtimes_with_admission(project_root, project_admission),
             _ => {
-                hotpath::future!(
-                    self.project_runtimes
-                        .request_runtimes(project_root, canonical_root.as_deref()),
-                    label = "daemon.service.invocation.admission_wait"
-                )
+                let canonical_root = project_root.and_then(|root| canonical_existing_identity(root).ok());
+                tracing::Instrument::instrument(self.project_runtimes
+                        .request_runtimes(project_root, canonical_root.as_deref()), tracing::trace_span!("daemon.service.invocation.admission_wait"))
                 .await
             }
         };
         let project_runtime_admitted = runtimes.is_admitted();
+        let registered_project_root = runtimes.resolved_root;
+        let publication = runtimes.publication;
         let feedback_runtime = runtimes.feedback;
         let observations = feedback_runtime
             .as_ref()
             .map(|runtime| runtime.source_observation_port());
-        let observation_subject =
-            invocation_observation_subject(&request_id, operation, delivery_route);
+        // Validate before deriving an operation label. Wire frames with a
+        // foreign `surface_operation` must fail closed as InvalidRequest,
+        // never reach a panic path while labeling the request.
         let validated =
-            hotpath::measure_block!("daemon.service.invocation.validate", request.validate());
+            { let _span = tracing::trace_span!("daemon.service.invocation.validate").entered(); request.validate() };
         if let Err(problem) = validated {
+            let operation = request.operation();
+            let observation_subject =
+                invocation_observation_subject(&request_id, operation, delivery_route);
             if is_observable_operation(operation)
                 && let Some((argument, rejection)) = invocation_problem_rejected_argument(problem)
             {
                 emit_invocation_observation(
                     observations.as_ref(),
                     observation_subject.as_ref(),
-                    current_micros(),
+                    now_micros(),
                     FeedbackSourceEventV1::SurfaceArgumentRejected {
                         operation: feedback_observation_operation(operation),
                         route: delivery_route,
@@ -261,9 +211,11 @@ impl DaemonInvocationService {
                     },
                 );
             }
-            observe_front_door_denial(problem);
             return DaemonInvocationResponse::problem(request_id, problem);
         }
+        let operation = request.operation();
+        let observation_subject =
+            invocation_observation_subject(&request_id, operation, delivery_route);
         let pre_admission_response = match &request.payload {
             DaemonInvocationPayload::LspOpen {
                 deadline,
@@ -287,13 +239,12 @@ impl DaemonInvocationService {
                  not admitted (project graph runtime unavailable or its \
                  activation is pending)"
             );
-            observe_front_door_denial(DaemonInvocationProblem::Unavailable);
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
             );
         }
-        let dispatched_at = current_micros();
+        let dispatched_at = now_micros();
         if is_observable_operation(operation) {
             emit_invocation_observation(
                 observations.as_ref(),
@@ -308,10 +259,7 @@ impl DaemonInvocationService {
             );
         }
         let now_ms = now_millis();
-        hotpath::future!(
-            self.expire_sessions(now_ms),
-            label = "daemon.service.invocation.expire_sessions"
-        )
+        tracing::Instrument::instrument(self.expire_sessions(now_ms), tracing::trace_span!("daemon.service.invocation.expire_sessions"))
         .await;
         let feedback_service = runtimes.feedback_owner;
         let advisory_cycle = runtimes.advisory_cycle;
@@ -319,6 +267,8 @@ impl DaemonInvocationService {
         let work_runtime = runtimes.work;
         let retained_runtime = runtimes.retained;
         let lsp_owner = runtimes.lsp_owner;
+        let source_edit_owner = runtimes.source_edit;
+        let graph_tool_owner = runtimes.graph_tool;
 
         let response = match request.payload {
             DaemonInvocationPayload::GitRead {
@@ -332,6 +282,7 @@ impl DaemonInvocationService {
                     request_id,
                     project_root,
                     git_service,
+                    publication,
                     surface_operation,
                     request,
                     observed_at,
@@ -351,6 +302,7 @@ impl DaemonInvocationService {
                     &self.operation_events,
                     request_id,
                     git_service,
+                    publication,
                     request,
                     observed_at,
                     deadline,
@@ -368,6 +320,7 @@ impl DaemonInvocationService {
                     &self.operation_events,
                     request_id,
                     git_service,
+                    publication,
                     request,
                     observed_at,
                     deadline,
@@ -380,15 +333,18 @@ impl DaemonInvocationService {
                 observed_at,
                 deadline,
                 cancellation,
-            } => execute_github_stack_signal_expand(
-                request_id,
-                configuration_runtime.clone(),
-                native_integration_service,
-                request,
-                observed_at,
-                deadline,
-                cancellation,
-            ),
+            } => {
+                Box::pin(execute_github_stack_signal_expand(
+                    request_id,
+                    configuration_runtime.clone(),
+                    native_integration_service,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                ))
+                .await
+            }
             DaemonInvocationPayload::NativeIntegration {
                 surface_operation,
                 request,
@@ -502,11 +458,42 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
+                let advisory_cycle = match advisory_cycle {
+                    Some(owner)
+                        if matches!(
+                            owner.service.mount().await,
+                            DaemonAdvisoryCycleMountV1::Answers
+                        ) =>
+                    {
+                        Some(owner)
+                    }
+                    _ => {
+                        self.answering_advisory_cycle_owner(
+                            registered_project_root.as_deref(),
+                            &deadline,
+                        )
+                        .await
+                    }
+                };
                 execute_feedback_advisory_cycle(
                     request_id,
                     advisory_cycle,
                     document_uri,
                     observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::FeedbackProximity {
+                request,
+                deadline,
+                cancellation,
+            } => {
+                execute_feedback_proximity(
+                    request_id,
+                    advisory_cycle,
+                    request,
                     deadline,
                     cancellation,
                 )
@@ -576,10 +563,12 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     ApplicationSurfaceOperation::FeedbackImpact,
                     PrimitiveRequest::Impact(request),
+                    None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -594,10 +583,12 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     ApplicationSurfaceOperation::AffectedTests,
                     PrimitiveRequest::AffectedFileTests(request),
+                    None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -612,10 +603,12 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     ApplicationSurfaceOperation::TestResults,
                     PrimitiveRequest::RecentTestResults(page),
+                    None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -625,16 +618,19 @@ impl DaemonInvocationService {
             DaemonInvocationPayload::PrimitiveRead {
                 surface_operation,
                 request,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     surface_operation,
                     request,
+                    resolved_scope.as_ref(),
                     observed_at,
                     deadline,
                     cancellation,
@@ -645,11 +641,12 @@ impl DaemonInvocationService {
                 surface_operation,
                 request,
                 page,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
             } => {
-                let request = match tracedecay_application::primitive_code_into_primitive(
+                let request = match tracedecay_contracts::primitive_code_into_primitive(
                     request,
                     tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(
                     ),
@@ -667,10 +664,12 @@ impl DaemonInvocationService {
                 };
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     surface_operation,
                     request,
+                    resolved_scope.as_ref(),
                     observed_at,
                     deadline,
                     cancellation,
@@ -681,17 +680,20 @@ impl DaemonInvocationService {
                 surface_operation,
                 request,
                 page,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
             } => {
                 Box::pin(execute_callable_code(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     surface_operation,
                     request,
                     page,
+                    resolved_scope.as_ref(),
                     observed_at,
                     deadline,
                     cancellation,
@@ -716,9 +718,15 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::NotFoundOrNotAuthorized,
                     );
                 }
+                let Some(configuration_runtime) = configuration_runtime else {
+                    return match project_root {
+                        Some(_) => missing_registered_owner_problem(publication, request_id),
+                        None => runtime_mounting_problem(request_id),
+                    };
+                };
                 Box::pin(execute_configuration(
                     request_id,
-                    configuration_runtime,
+                    Some(configuration_runtime),
                     surface_operation,
                     request,
                     observed_at,
@@ -743,6 +751,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
+                    request_cancellation,
                 ))
                 .await
             }
@@ -766,12 +775,36 @@ impl DaemonInvocationService {
                 ))
                 .await
             }
+            DaemonInvocationPayload::GraphTool {
+                surface_operation,
+                arguments,
+                observed_at: _,
+                deadline,
+                cancellation,
+            } => {
+                let Some(owner) = graph_tool_owner else {
+                    return missing_registered_owner_problem(publication, request_id);
+                };
+                Box::pin(execute_graph_tool(
+                    request_id,
+                    owner,
+                    surface_operation,
+                    arguments,
+                    deadline,
+                    cancellation,
+                    request_cancellation,
+                ))
+                .await
+            }
             DaemonInvocationPayload::RetainedApplication {
                 request,
                 observed_at,
                 deadline,
                 cancellation,
             } => {
+                let Some(retained_runtime) = retained_runtime else {
+                    return missing_retained_runtime_problem(publication, request_id);
+                };
                 Box::pin(execute_retained_application(
                     request_id,
                     retained_runtime,
@@ -783,9 +816,15 @@ impl DaemonInvocationService {
                 ))
                 .await
             }
+            // Multi-root routes and the profile's retained stores and project
+            // registry belong to the daemon composition root, which serves them
+            // before this service.
             DaemonInvocationPayload::MultiRootScopeSetRead { .. }
             | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
-            | DaemonInvocationPayload::MultiRootExecute { .. } => {
+            | DaemonInvocationPayload::MultiRootExecute { .. }
+            | DaemonInvocationPayload::ProfileRetainedApplication { .. }
+            | DaemonInvocationPayload::ProfileGraphTool { .. }
+            | DaemonInvocationPayload::ProfileConfiguration { .. } => {
                 DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -798,10 +837,7 @@ impl DaemonInvocationService {
                 cancellation,
             } => {
                 let Some(registered) = work_runtime else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                    return missing_work_runtime_problem(publication, request_id);
                 };
                 let observability_producer = self.observability_producer(project_root).await;
                 Box::pin(execute_work_application(
@@ -830,10 +866,7 @@ impl DaemonInvocationService {
                     );
                 };
                 let Some(registered) = work_runtime.clone() else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                    return missing_work_runtime_problem(publication, request_id);
                 };
                 let observability_producer = self.observability_producer(Some(project_root)).await;
                 Box::pin(execute_workflow_application(
@@ -857,10 +890,7 @@ impl DaemonInvocationService {
                 cancellation,
             } => {
                 let Some(registered) = work_runtime else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                    return missing_work_runtime_problem(publication, request_id);
                 };
                 Box::pin(execute_handoff_application(
                     registered,
@@ -871,59 +901,6 @@ impl DaemonInvocationService {
                     deadline,
                     cancellation,
                 ))
-                .await
-            }
-            DaemonInvocationPayload::SemanticEvaluateAndPublish {
-                evaluated_profile_id,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                self.execute_semantic_evaluation(
-                    project_root,
-                    request_id,
-                    evaluated_profile_id,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                    request_cancellation.clone(),
-                )
-                .await
-            }
-            DaemonInvocationPayload::SemanticActivate {
-                evaluated_profile_id,
-                set_rollback,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                self.execute_semantic_activation(
-                    project_root,
-                    request_id,
-                    evaluated_profile_id,
-                    set_rollback,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                    request_cancellation.clone(),
-                )
-                .await
-            }
-            DaemonInvocationPayload::SemanticQualify {
-                evaluated_profile_id,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                self.execute_semantic_qualification(
-                    project_root,
-                    request_id,
-                    evaluated_profile_id,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                    request_cancellation.clone(),
-                )
                 .await
             }
             DaemonInvocationPayload::LspOpen {
@@ -1004,10 +981,86 @@ impl DaemonInvocationService {
                 }
                 Err(response) => *response,
             },
+            DaemonInvocationPayload::SourceEdit {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                let response = execute_source_edit(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await;
+                if let (
+                    Some(project_root),
+                    DaemonInvocationOutcome::SourceEdit { result, .. },
+                ) = (registered_project_root.as_deref(), &response.outcome)
+                    && !result.replayed
+                    && result.outcome.success()
+                {
+                    let touched = result.outcome.touched_files();
+                    if !touched.is_empty() {
+                        self.code_index_schedulers
+                            .notify_hook_paths(project_root, &touched)
+                            .await;
+                    }
+                }
+                response
+            }
+            DaemonInvocationPayload::SourceEditReconcile {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit_reconcile(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::SourceEditRollback {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                let response = execute_source_edit_rollback(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await;
+                if let (
+                    Some(project_root),
+                    DaemonInvocationOutcome::SourceEdit { result, .. },
+                ) = (registered_project_root.as_deref(), &response.outcome)
+                    && !result.replayed
+                    && result.outcome.success()
+                {
+                    self.code_index_schedulers
+                        .notify_hook_overflow(project_root)
+                        .await;
+                }
+                response
+            }
         };
         if is_observable_operation(operation) {
-            hotpath::measure_block!(
-                "daemon.service.invocation.observe_response",
+            {
+                let _span = tracing::trace_span!("daemon.service.invocation.observe_response")
+                    .entered();
                 observe_invocation_response(
                     observations.as_ref(),
                     observation_subject.as_ref(),
@@ -1015,11 +1068,22 @@ impl DaemonInvocationService {
                     delivery_route,
                     dispatched_at,
                     &response,
-                )
-            );
+                );
+            }
         }
         response
+        }).await
     }
+}
+
+fn missing_work_runtime_problem(
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
+    request_id: String,
+) -> DaemonInvocationResponse {
+    if publication == Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Ready) {
+        return super::work::concealed_application_problem(request_id);
+    }
+    super::work::missing_registered_owner_problem(publication, request_id)
 }
 
 #[cfg(test)]

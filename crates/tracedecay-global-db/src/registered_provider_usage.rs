@@ -9,13 +9,13 @@ use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{PROVIDER_USAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION};
 
 use super::RegisteredGlobalDb;
+use crate::observation_projection::provider_usage_scope;
 
 const MAX_PROVIDER_USAGE_READ: usize = 1_000;
 
 impl RegisteredGlobalDb {
     /// Reads immutable provider usage observations without consulting
     /// conversational rows or the Claude-only accounting import.
-    #[hotpath::skip]
     pub async fn provider_usage_observations(
         &self,
         scope: &ObservationScopeV1,
@@ -28,7 +28,11 @@ impl RegisteredGlobalDb {
     }
 
     /// Reads the next immutable page after an exact observation/usage ordinal.
-    #[hotpath::measure(future = true, label = "global_db.registered.provider_usage.query")]
+    #[tracing::instrument(
+        name = "global_db.registered.provider_usage.query",
+        level = "trace",
+        skip_all
+    )]
     pub async fn provider_usage_observations_after(
         &self,
         scope: &ObservationScopeV1,
@@ -109,7 +113,7 @@ impl RegisteredGlobalDb {
         }
         let upper_sequence_i64 = i64::try_from(upper_observation_sequence)
             .map_err(|_| "provider usage upper watermark exceeds integer range".to_owned())?;
-        let (scope_kind, project_id) = persisted_scope(scope);
+        let (scope_kind, project_id) = provider_usage_scope(scope);
         let mut rows = reader
             .query(
                 "SELECT observation_id, usage_ordinal, receipt_id, observation_sequence,
@@ -275,13 +279,6 @@ impl RegisteredGlobalDb {
     }
 }
 
-fn persisted_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
-    match scope {
-        ObservationScopeV1::Profile => ("profile", None),
-        ObservationScopeV1::Project { project_id } => ("project", Some(project_id.as_str())),
-    }
-}
-
 fn observation_scope(
     row: &tracedecay_runtime_core::db::engine::Row,
     kind_column: i32,
@@ -400,8 +397,14 @@ mod tests {
             payload,
         )
         .unwrap();
-        let cursor =
-            ObservationSourceCursorV1::new(source, scope, generation, range.end()).unwrap();
+        let cursor = ObservationSourceCursorV1::for_ordering(
+            source,
+            scope,
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            range.end(),
+        )
+        .unwrap();
         (observation, cursor)
     }
 
@@ -488,7 +491,7 @@ mod tests {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn live_usage_replay_is_exactly_once_and_uncorrelated_evidence_is_excluded() {
         let directory = tempfile::tempdir().unwrap();
         let conn = open_registered_test_fixture(
@@ -559,7 +562,7 @@ mod tests {
     /// observation, receipt, sequence, and scope) but disagrees on the
     /// projected counters must still be rejected. This is the only branch that
     /// can hide such a row, so it is also the only branch that reads back.
-    #[tokio::test]
+    #[asupersync::test]
     async fn live_usage_replay_rejects_a_divergent_durable_row() {
         let directory = tempfile::tempdir().unwrap();
         let conn = open_registered_test_fixture(
@@ -605,7 +608,7 @@ mod tests {
         assert_eq!(count(&conn, "observation_provider_usage").await, 1);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn rebuild_stages_and_activates_historical_usage() {
         let directory = tempfile::tempdir().unwrap();
         let conn = open_registered_test_fixture(
@@ -649,7 +652,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn provider_usage_trigger_rejects_receipt_identity_mismatch() {
         let directory = tempfile::tempdir().unwrap();
         let conn = open_registered_test_fixture(
@@ -696,7 +699,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn missing_projection_checkpoint_is_typed_unknown() {
         let harness = RegisteredGlobalDbHarness::open("provider-usage-missing-checkpoint").await;
         let scope = ObservationScopeV1::Project {
@@ -718,7 +721,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn published_checkpoint_with_no_exact_project_rows_is_known_empty() {
         let harness = RegisteredGlobalDbHarness::open("provider-usage-known-empty").await;
         let db = harness.registered.as_ref();
@@ -751,7 +754,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn exact_scope_reads_isolate_profile_and_same_session_projects() {
         let harness = RegisteredGlobalDbHarness::open("provider-usage-scope-isolation").await;
         let db = harness.registered.as_ref();
@@ -809,7 +812,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn pagination_uses_lookahead_and_pins_concurrent_appends_outside_the_scan() {
         let harness = RegisteredGlobalDbHarness::open("provider-usage-pagination").await;
         let db = harness.registered.as_ref();

@@ -10,41 +10,7 @@ async fn await_test_task<T>(task: JoinHandle<T>, label: &str) -> T {
 }
 
 #[cfg(unix)]
-async fn answer_one_proxy_request(listener: tokio::net::UnixListener, generation: u64) {
-    let (stream, _addr) = listener.accept().await.expect("accept proxied client");
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = tokio::io::BufReader::new(reader).lines();
-    let handshake_line = lines
-        .next_line()
-        .await
-        .expect("read handshake")
-        .expect("handshake line");
-    DaemonHandshake::from_line(&handshake_line).expect("parse handshake");
-    let request_line = lines
-        .next_line()
-        .await
-        .expect("read request")
-        .expect("request line");
-    let request: Value = serde_json::from_str(&request_line).expect("request json");
-    let response = json!({
-        "jsonrpc": "2.0",
-        "id": request["id"],
-        "result": { "generation": generation }
-    });
-    writer
-        .write_all(
-            serde_json::to_string(&response)
-                .expect("response json")
-                .as_bytes(),
-        )
-        .await
-        .expect("write response");
-    writer.write_all(b"\n").await.expect("write newline");
-    writer.shutdown().await.expect("shutdown fake daemon");
-}
-
-#[cfg(unix)]
-async fn answer_one_authenticated_proxy_request(
+async fn answer_one_proxy_request(
     listener: tokio::net::UnixListener,
     expected_token: &str,
     generation: u64,
@@ -52,23 +18,7 @@ async fn answer_one_authenticated_proxy_request(
     let (stream, _addr) = listener.accept().await.expect("accept proxied client");
     let (reader, mut writer) = stream.into_split();
     let mut lines = tokio::io::BufReader::new(reader).lines();
-    let auth_line = lines
-        .next_line()
-        .await
-        .expect("read auth preface")
-        .expect("auth preface line");
-    let preface =
-        tracedecay_daemon_protocol::DaemonAuthPreface::from_line(auth_line.trim()).expect("auth");
-    assert!(
-        preface.authenticate(expected_token),
-        "proxy must reload current daemon authority"
-    );
-    let handshake_line = lines
-        .next_line()
-        .await
-        .expect("read handshake")
-        .expect("handshake line");
-    DaemonHandshake::from_line(&handshake_line).expect("parse handshake");
+    read_authenticated_handshake(&mut lines, expected_token).await;
     let request_line = lines
         .next_line()
         .await
@@ -92,16 +42,12 @@ async fn answer_one_authenticated_proxy_request(
 #[cfg(unix)]
 async fn answer_initialize_route_proxy_request(
     stream: tokio::net::UnixStream,
+    expected_token: &str,
     daemon_target: &std::path::Path,
 ) -> Option<String> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = tokio::io::BufReader::new(reader).lines();
-    let handshake_line = lines
-        .next_line()
-        .await
-        .expect("read handshake")
-        .expect("handshake line");
-    let handshake = DaemonHandshake::from_line(&handshake_line).expect("daemon handshake json");
+    let handshake = read_authenticated_handshake(&mut lines, expected_token).await;
     let request_line = lines
         .next_line()
         .await
@@ -148,8 +94,8 @@ async fn answer_initialize_route_proxy_request(
 }
 
 /// A slow or contended first Git probe defers the route; it must never be a
-/// terminal failure. Both retry classifiers — the CLI's message check and the
-/// proxy's JSON-RPC response check — have to accept the deferral, or a cold
+/// terminal failure. Both retry classifiers, the CLI's message check and the
+/// proxy's JSON-RPC response check, have to accept the deferral, or a cold
 /// first open on a slow volume fails `init`/`status` outright.
 #[cfg(unix)]
 #[test]
@@ -160,7 +106,7 @@ fn deferred_repository_discovery_is_project_open_retryable() {
     );
 
     assert!(
-        super::super::error_message_is_project_open_retryable(&error.to_string()),
+        super::super::error_is_project_open_retryable(&error),
         "a deferred discovery must classify as retryable, got: {error}"
     );
 
@@ -186,7 +132,7 @@ fn terminal_repository_discovery_failures_are_not_project_open_retryable() {
         );
 
         assert!(
-            !super::super::error_message_is_project_open_retryable(&error.to_string()),
+            !super::super::error_is_project_open_retryable(&error),
             "a terminal discovery failure must not classify as retryable: {error}"
         );
     }
@@ -210,63 +156,12 @@ fn transient_daemon_connect_errors_cover_restart_window_only() {
     ));
 }
 
-#[test]
-fn saturated_connect_advice_is_distinct_from_restart_advice() {
-    let saturated = super::super::daemon_connect_failure_advice(std::io::ErrorKind::WouldBlock);
-    let restarting = super::super::daemon_connect_failure_advice(std::io::ErrorKind::NotFound);
-    let refused =
-        super::super::daemon_connect_failure_advice(std::io::ErrorKind::ConnectionRefused);
-
-    assert!(
-        saturated.contains("up but not accepting connections"),
-        "WouldBlock must name saturation, got: {saturated}"
-    );
-    assert!(
-        saturated.contains("overloaded"),
-        "WouldBlock must name overload, got: {saturated}"
-    );
-    assert!(
-        !saturated.contains("restarting"),
-        "saturation must not claim the daemon is restarting, got: {saturated}"
-    );
-    assert!(
-        restarting.contains("may be restarting"),
-        "missing socket must keep the restart hint, got: {restarting}"
-    );
-    assert_eq!(restarting, refused);
-    assert_ne!(saturated, restarting);
-}
-
-#[test]
-fn read_deadline_classifier_accepts_typed_stalled() {
-    let error =
-        tracedecay_daemon_protocol::daemon_response_stalled(std::time::Duration::from_secs(5));
-    assert!(
-        super::super::error_is_read_deadline(&error),
-        "typed stalled must classify as a read deadline"
-    );
-    assert!(
-        super::super::error_message_is_read_deadline(&error.to_string()),
-        "stalled Display must still match the string classifier"
-    );
-    let down = tracedecay_daemon_protocol::daemon_connect_failure(
-        "/tmp/daemon.sock",
-        &std::io::Error::from(std::io::ErrorKind::NotFound),
-    );
-    assert!(
-        !super::super::error_is_read_deadline(&down),
-        "connect-down must not classify as a read deadline"
-    );
-}
-
-// start_paused: these restart-window tests only wait on tokio timers
-// (sleep/poll intervals); paused time auto-advances them so each test
-// finishes in milliseconds instead of real 200-300 ms waits.
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
 
     // Simulate the `tracedecay update` restart window: the socket is
     // missing for a while, then the new daemon binds the same path.
@@ -277,7 +172,8 @@ async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
     });
 
     super::super::connect_with_restart_grace(
-        &tracedecay_daemon_identity::connection_for_socket_path(&socket),
+        socket.parent().expect("socket parent"),
+        &socket,
         std::time::Duration::from_secs(8),
         std::time::Duration::from_millis(50),
     )
@@ -287,34 +183,48 @@ async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     let dir = TempDir::new().expect("temp dir");
-    let socket = dir.path().join("daemon.sock");
+    let socket = dir
+        .path()
+        .canonicalize()
+        .expect("canonical temp dir")
+        .join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
     let grace = std::time::Duration::from_millis(300);
     let poll = std::time::Duration::from_millis(50);
-    let started = tokio::time::Instant::now();
+    let profile_root = socket.parent().expect("socket parent");
+    let mut attempts = 0_u32;
+    let started = std::time::Instant::now();
 
-    let err = super::super::connect_with_restart_grace(
-        &tracedecay_daemon_identity::connection_for_socket_path(&socket),
+    let err = super::super::connect_with_restart_grace_resolving(
+        || {
+            attempts += 1;
+            tracedecay_daemon_identity::client_connection(profile_root, &socket)
+        },
         grace,
         poll,
     )
     .await
     .expect_err("connect should fail when no daemon ever binds");
 
-    let elapsed = started.elapsed();
-    assert!(elapsed >= grace, "restart grace must be fully observed");
     assert!(
-        elapsed <= grace + poll,
-        "restart retries must stop within one poll interval after grace"
+        started.elapsed() >= grace,
+        "restart grace must be fully observed"
+    );
+    // One attempt per poll through the grace, plus the first and one past it.
+    // A loaded machine stretches each poll, so it can only lower the count.
+    assert!(
+        u128::from(attempts) <= grace.as_millis() / poll.as_millis() + 2,
+        "restart retries must stop within one poll interval after grace: {attempts} attempts"
     );
 
     let message = err.to_string();
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
-        Some((super::super::DAEMON_CONNECT_DOWN, true)),
+        Some((tracedecay_daemon_protocol::DAEMON_CONNECT_DOWN, true)),
         "missing socket after grace must be typed daemon_connect_down, got: {message}"
     );
     assert!(
@@ -327,24 +237,27 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn client_deadline_run_reports_typed_stalled() {
     let deadline = super::super::DaemonClientDeadline::until(
-        tokio::time::Instant::now() + std::time::Duration::from_millis(20),
+        std::time::Instant::now() + std::time::Duration::from_millis(20),
     )
     .expect("future deadline");
-    let err = deadline
-        .run(
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        deadline.run(
             "read",
             "tracedecay_status",
             std::future::pending::<super::super::Result<()>>(),
-        )
-        .await
-        .expect_err("pending future must stall");
+        ),
+    )
+    .await
+    .expect("the client deadline ends the pending stage")
+    .expect_err("pending future must stall");
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
-        Some((super::super::DAEMON_RESPONSE_STALLED, true)),
+        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, true)),
         "read-deadline abort must be typed daemon_response_stalled, got: {err}"
     );
 }
@@ -358,6 +271,7 @@ async fn client_deadline_run_reports_typed_stalled() {
 async fn stalled_daemon_response_is_typed_within_deadline() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind silent daemon");
     let daemon = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
@@ -369,9 +283,9 @@ async fn stalled_daemon_response_is_typed_within_deadline() {
     });
 
     let local_bound = std::time::Duration::from_millis(80);
-    let request_deadline = tokio::time::Instant::now()
+    let request_deadline = std::time::Instant::now()
         .checked_add(local_bound)
-        .and_then(|bound| bound.checked_sub(super::super::DAEMON_TOOL_RESPONSE_GRACE))
+        .and_then(|bound| bound.checked_sub(tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE))
         .expect("monotonic clock must outlive the response grace");
 
     let err = tokio::time::timeout(
@@ -392,7 +306,7 @@ async fn stalled_daemon_response_is_typed_within_deadline() {
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
-        Some((super::super::DAEMON_RESPONSE_STALLED, true)),
+        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, true)),
         "connected stall must be typed daemon_response_stalled, got: {message}"
     );
     assert!(
@@ -424,7 +338,7 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
     let rebound_endpoint = endpoint.clone();
     let (unbound_tx, unbound_rx) = tokio::sync::oneshot::channel();
     let daemon = tokio::spawn(async move {
-        answer_one_authenticated_proxy_request(first_listener, &first_token, 1).await;
+        answer_one_proxy_request(first_listener, &first_token, 1).await;
         drop(first_authority);
         std::fs::remove_file(&rebound_socket).expect("unlink first socket");
         unbound_tx.send(()).expect("notify daemon outage");
@@ -440,7 +354,7 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
         .expect("second daemon authority");
         let second_token = second_authority.auth_token().to_string();
         assert_ne!(first_token, second_token, "daemon restart must rotate auth");
-        answer_one_authenticated_proxy_request(second_listener, &second_token, 2).await;
+        answer_one_proxy_request(second_listener, &second_token, 2).await;
     });
 
     let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
@@ -495,7 +409,10 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     let project_b = TempDir::new().expect("project b temp dir");
     let project_a = project_a.path().canonicalize().expect("project a path");
     let project_b = project_b.path().canonicalize().expect("project b path");
-    let registry = crate::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
+    let registry =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
+            profile.path(),
+        )
         .await
         .expect("open retained profile runtime");
     let global_db_path = profile.path().join("global.db");
@@ -537,9 +454,10 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         &mut routed_handshake,
         &line,
     );
+    let first_request = super::super::AuthenticatedFirstRequest::new(line);
     let route = super::super::apply_daemon_initialize_route(
         &mut routed_handshake,
-        &line,
+        &first_request,
         &store_administration,
     )
     .await
@@ -565,10 +483,11 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         &mut routed_handshake,
         &rerun_without_roots,
     );
+    let first_request = super::super::AuthenticatedFirstRequest::new(rerun_without_roots);
     assert!(
         super::super::apply_daemon_initialize_route(
             &mut routed_handshake,
-            &rerun_without_roots,
+            &first_request,
             &store_administration,
         )
         .await
@@ -594,7 +513,10 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
     let alias = alias.path().canonicalize().expect("canonical alias");
     let nested = alias.join("nested");
     std::fs::create_dir_all(&nested).expect("nested alias path");
-    let registry = crate::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
+    let registry =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
+            profile.path(),
+        )
         .await
         .expect("open retained profile runtime");
     let global_db_path = profile.path().join("global.db");
@@ -622,11 +544,15 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
     })
     .to_string();
 
-    let route =
-        super::super::apply_daemon_initialize_route(&mut handshake, &line, &store_administration)
-            .await
-            .expect("daemon initialize routing should succeed")
-            .expect("authenticated daemon should resolve registry alias");
+    let first_request = super::super::AuthenticatedFirstRequest::new(line);
+    let route = super::super::apply_daemon_initialize_route(
+        &mut handshake,
+        &first_request,
+        &store_administration,
+    )
+    .await
+    .expect("daemon initialize routing should succeed")
+    .expect("authenticated daemon should resolve registry alias");
     assert_eq!(route.project_path, alias);
     assert_eq!(handshake.project_path.as_deref(), Some(alias.as_path()));
     assert!(!route.allow_init);
@@ -638,15 +564,7 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     let profile = TempDir::new().expect("profile temp dir");
     let fallback = TempDir::new().expect("fallback temp dir");
     let project = TempDir::new().expect("git project temp dir");
-    let git_status = std::process::Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .args(["init", "-q"])
-    .current_dir(project.path())
-    .status()
-    .expect("git init");
-    assert!(git_status.success(), "git init should succeed");
+    git(project.path(), &["init", "-q"]);
     let project = project
         .path()
         .canonicalize()
@@ -669,14 +587,20 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     })
     .to_string();
 
-    let config = crate::config::TraceDecayConfig {
-        root_dir: project.display().to_string(),
-        ..crate::config::TraceDecayConfig::default()
-    };
-    let config_path = crate::config::get_config_path(&project);
+    let config_path = tracedecay_runtime_core::storage::resolve_layout(&project, profile.path())
+        .map_or_else(
+            |_| tracedecay_runtime_core::config::get_tracedecay_dir(&project),
+            |layout| layout.data_root,
+        )
+        .join("config.json");
     std::fs::create_dir_all(config_path.parent().expect("legacy config parent"))
         .expect("create legacy config parent");
-    let legacy_input = serde_json::to_string_pretty(&config).expect("serialize legacy config");
+    let legacy_input = json!({
+        "version": 1,
+        "root_dir": project.display().to_string(),
+        "sync": { "auto_init": false }
+    })
+    .to_string();
     std::fs::write(&config_path, &legacy_input).expect("write legacy config fixture");
 
     let mut routed_handshake = base_handshake.clone();
@@ -688,9 +612,10 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
         &mut routed_handshake,
         &line,
     );
+    let first_request = super::super::AuthenticatedFirstRequest::new(line);
     super::super::apply_daemon_initialize_route(
         &mut routed_handshake,
-        &line,
+        &first_request,
         &store_administration,
     )
     .await
@@ -719,6 +644,7 @@ async fn serve_proxies_when_socket_already_exists() {
 
     assert!(
         super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             None,
             std::time::Duration::from_secs(8),
@@ -736,10 +662,11 @@ async fn serve_stays_in_process_without_socket_or_installed_service() {
     let other_socket = dir.path().join("other.sock");
 
     // No socket and no service claiming it: fall back immediately, even
-    // with a long grace configured — startup must not stall.
+    // with a long grace configured, startup must not stall.
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             None,
             std::time::Duration::from_secs(8),
@@ -754,6 +681,7 @@ async fn serve_stays_in_process_without_socket_or_installed_service() {
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             Some(&other_socket),
             std::time::Duration::from_secs(8),
@@ -766,10 +694,11 @@ async fn serve_stays_in_process_without_socket_or_installed_service() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn serve_waits_out_restart_window_when_service_owns_socket() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
 
     // Simulate the `tracedecay update` restart window: the service is
     // installed but the old daemon already unlinked the socket; the new
@@ -782,6 +711,7 @@ async fn serve_waits_out_restart_window_when_service_owns_socket() {
 
     assert!(
         super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             Some(&socket),
             std::time::Duration::from_secs(8),
@@ -794,13 +724,45 @@ async fn serve_waits_out_restart_window_when_service_owns_socket() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
+async fn serve_attaches_during_first_service_start_once_the_record_appears() {
+    let dir = TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+
+    // A first-ever service start: neither the authority record nor the socket
+    // exists yet when serve starts; the daemon writes its record, then binds.
+    let bind_path = socket.clone();
+    let daemon = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let authority = seed_socket_authority(&bind_path);
+        let listener =
+            tokio::net::UnixListener::bind(&bind_path).expect("bind first daemon socket");
+        (authority, listener)
+    });
+
+    assert!(
+        super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
+            &socket,
+            Some(&socket),
+            std::time::Duration::from_secs(8),
+            std::time::Duration::from_millis(50),
+        )
+        .await,
+        "serve started before the first daemon wrote its record should still attach"
+    );
+    daemon.await.expect("daemon start task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn serve_falls_back_when_installed_service_never_rebinds() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
 
     assert!(
         !super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             Some(&socket),
             std::time::Duration::from_millis(200),
@@ -812,10 +774,12 @@ async fn serve_falls_back_when_installed_service_never_rebinds() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn proxied_request_survives_daemon_restart_window() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
 
     let bind_path = socket.clone();
     let daemon = tokio::spawn(async move {
@@ -825,12 +789,7 @@ async fn proxied_request_survives_daemon_restart_window() {
         let (stream, _addr) = listener.accept().await.expect("accept proxied client");
         let (reader, mut writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        let handshake_line = lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake line");
-        DaemonHandshake::from_line(&handshake_line).expect("parse handshake");
+        read_authenticated_handshake(&mut lines, &token).await;
         let request_line = lines
             .next_line()
             .await
@@ -877,18 +836,15 @@ async fn proxied_request_survives_daemon_restart_window() {
 async fn proxy_retries_bounded_project_warming_responses() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let daemon = tokio::spawn(async move {
         for response_kind in 0..2 {
             let (stream, _addr) = listener.accept().await.expect("accept proxied client");
             let (reader, mut writer) = stream.into_split();
             let mut lines = tokio::io::BufReader::new(reader).lines();
-            let handshake_line = lines
-                .next_line()
-                .await
-                .expect("read handshake")
-                .expect("handshake line");
-            DaemonHandshake::from_line(&handshake_line).expect("parse handshake");
+            read_authenticated_handshake(&mut lines, &token).await;
             let request_line = lines
                 .next_line()
                 .await
@@ -901,7 +857,13 @@ async fn proxy_retries_bounded_project_warming_responses() {
                     "id": request["id"],
                     "error": {
                         "code": -32603,
-                        "message": "config error: TraceDecay project '/tmp/project' is warming in the background; retry the same tool shortly"
+                        "message": "TraceDecay project '/tmp/project' is warming in the background; retry the same tool shortly",
+                        "data": {
+                            "reason_code": "project_warming",
+                            "retryable": true,
+                            "detail": "TraceDecay project '/tmp/project' is warming in the background; retry the same tool shortly",
+                            "kind": "project_warming"
+                        }
                     }
                 })
             } else {
@@ -962,68 +924,6 @@ async fn proxy_retries_bounded_project_warming_responses() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn long_lived_proxy_reconnects_after_daemon_socket_rebind() {
-    let dir = TempDir::new().expect("temp dir");
-    let socket = dir.path().join("daemon.sock");
-    let first_listener = tokio::net::UnixListener::bind(&socket).expect("bind first daemon socket");
-    let rebound_socket = socket.clone();
-    let (unbound_tx, unbound_rx) = tokio::sync::oneshot::channel();
-    let daemon = tokio::spawn(async move {
-        answer_one_proxy_request(first_listener, 1).await;
-        std::fs::remove_file(&rebound_socket).expect("unlink first daemon socket");
-        unbound_tx.send(()).expect("notify daemon outage");
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let second_listener =
-            tokio::net::UnixListener::bind(&rebound_socket).expect("bind second daemon socket");
-        answer_one_proxy_request(second_listener, 2).await;
-    });
-
-    let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
-    let proxy_socket = socket.clone();
-    let proxy = tokio::spawn(async move {
-        super::super::proxy_transport_to_daemon(
-            &proxy_socket,
-            &test_handshake_defaults(),
-            None,
-            &mut transport,
-        )
-        .await
-    });
-
-    let request = |id| {
-        serde_json::to_string(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "tools/list"
-        }))
-        .expect("request json")
-    };
-    sender.send(request(1)).expect("send first request");
-    let first = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
-        .await
-        .expect("first response timed out")
-        .expect("first response");
-    let first: Value = serde_json::from_str(first.trim()).expect("first response json");
-    assert_eq!(first["result"]["generation"], json!(1));
-
-    unbound_rx.await.expect("first daemon should unlink socket");
-    sender.send(request(2)).expect("send second request");
-    let second = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
-        .await
-        .expect("second response timed out")
-        .expect("second response");
-    let second: Value = serde_json::from_str(second.trim()).expect("second response json");
-    assert_eq!(second["result"]["generation"], json!(2));
-
-    drop(sender);
-    await_test_task(proxy, "long-lived proxy task")
-        .await
-        .expect("proxy transport");
-    await_test_task(daemon, "daemon rebind task").await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn proxy_uses_daemon_initialize_route_without_registry_access() {
     let dir = TempDir::new().expect("temp dir");
     let temp_root = dir.path().canonicalize().expect("canonical temp dir");
@@ -1038,6 +938,8 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
     client_identity.global_db_path = temp_root.join("proxy-cannot-open-this-directory");
     std::fs::create_dir_all(&client_identity.global_db_path).expect("non-database authority path");
 
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("daemon socket");
     let daemon_target = target.clone();
     let accept_task = tokio::spawn(async move {
@@ -1045,8 +947,9 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
         for _ in 0..4 {
             let (stream, _addr) = listener.accept().await.expect("accept daemon client");
             let daemon_target = daemon_target.clone();
+            let token = token.clone();
             joins.push(tokio::spawn(async move {
-                answer_initialize_route_proxy_request(stream, &daemon_target).await
+                answer_initialize_route_proxy_request(stream, &token, &daemon_target).await
             }));
         }
         let mut projects = Vec::new();
@@ -1169,7 +1072,7 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
 ///
 /// RED (before the drain bound): the client disconnects while a request is in
 /// flight, the daemon never answers, and `proxy_host_input_to_daemon` awaited
-/// that request unconditionally — the serve process stayed alive forever,
+/// that request unconditionally, the serve process stayed alive forever,
 /// holding its stdio fds and daemon connection. That is the shape of a
 /// long-lived orphan serve.
 #[cfg(unix)]
@@ -1177,6 +1080,7 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
 async fn disconnected_client_does_not_outlive_a_daemon_that_never_answers() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake daemon socket");
     // A wedged daemon: it keeps accepting, so every liveness probe succeeds,
     // and it never answers the request it was handed.
@@ -1196,6 +1100,8 @@ async fn disconnected_client_does_not_outlive_a_daemon_that_never_answers() {
             None,
             &mut transport,
             Some(std::time::Duration::from_millis(250)),
+            super::super::tool_surface::ToolSurface::new(true, None).expect("tool surface"),
+            tokio::sync::watch::channel(false).1,
         )
         .await
     });
@@ -1249,8 +1155,10 @@ async fn disconnected_client_does_not_outlive_a_daemon_that_never_answers() {
 async fn batch_client_closing_stdin_immediately_still_receives_its_response() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake daemon socket");
-    let daemon = tokio::spawn(async move { answer_one_proxy_request(listener, 7).await });
+    let daemon = tokio::spawn(async move { answer_one_proxy_request(listener, &token, 7).await });
 
     let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
@@ -1287,4 +1195,351 @@ async fn batch_client_closing_stdin_immediately_still_receives_its_response() {
         .await
         .expect("proxy transport");
     await_test_task(daemon, "batch daemon task").await;
+}
+
+/// A `tools/call` result body for the fake daemon.
+#[cfg(unix)]
+fn call_result(request: &Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": request["id"],
+        "result": {
+            "content": [{"type": "text", "text": "no match for proxy window"}],
+            "structuredContent": {"matches": []},
+        }
+    })
+}
+
+/// A `tools/call` request for the fake host.
+#[cfg(unix)]
+fn tool_call_request(id: i64, tool: &str, arguments: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments}
+    })
+}
+
+/// Answers `calls` proxied requests, one connection each, mapping each
+/// request through `respond`, and returns the exact lines it wrote.
+#[cfg(unix)]
+async fn answer_proxy_requests(
+    listener: tokio::net::UnixListener,
+    token: &str,
+    calls: usize,
+    respond: impl Fn(&Value) -> Value + Send + 'static,
+) -> Vec<String> {
+    let mut written = Vec::new();
+    for _ in 0..calls {
+        let (stream, _addr) = listener.accept().await.expect("accept proxied client");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        read_authenticated_handshake(&mut lines, token).await;
+        let request_line = lines
+            .next_line()
+            .await
+            .expect("read request")
+            .expect("request line");
+        let request: Value = serde_json::from_str(&request_line).expect("request json");
+        let response = serde_json::to_string(&respond(&request)).expect("response json");
+        writer
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        writer.write_all(b"\n").await.expect("write newline");
+        writer.shutdown().await.expect("shutdown fake daemon");
+        written.push(response);
+    }
+    written
+}
+
+/// Sends each `(request, lines)` pair through one serve session, reading
+/// `lines` host response lines per request while the fake daemon answers
+/// `daemon_calls` connections with `respond`. Returns what the daemon wrote
+/// and what the host received.
+#[cfg(unix)]
+async fn requests_through_proxy(
+    repeated_query_hints: bool,
+    daemon_calls: usize,
+    respond: impl Fn(&Value) -> Value + Send + 'static,
+    requests: Vec<(Value, usize)>,
+) -> (Vec<String>, Vec<String>) {
+    let dir = TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake daemon socket");
+    let daemon = tokio::spawn(async move {
+        answer_proxy_requests(listener, &token, daemon_calls, respond).await
+    });
+
+    let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
+    let proxy_socket = socket.clone();
+    let proxy = tokio::spawn(async move {
+        super::super::proxy_transport_to_daemon_with_drain_bound(
+            &proxy_socket,
+            &test_handshake_defaults(),
+            None,
+            &mut transport,
+            None,
+            super::super::tool_surface::ToolSurface::new(false, None).expect("tool surface"),
+            tokio::sync::watch::channel(repeated_query_hints).1,
+        )
+        .await
+    });
+
+    let mut received = Vec::new();
+    for (request, lines) in requests {
+        sender.send(request.to_string()).expect("send request");
+        for _ in 0..lines {
+            let response = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+                .await
+                .expect("proxy response timed out")
+                .expect("proxy response");
+            received.push(response.trim_end().to_owned());
+        }
+    }
+    drop(sender);
+    await_test_task(proxy, "repeated query proxy task")
+        .await
+        .expect("proxy transport");
+    let written = await_test_task(daemon, "repeated query daemon task").await;
+    (written, received)
+}
+
+/// Sends the same `tools/call` twice through one serve session and returns
+/// what the daemon wrote and what the host received.
+#[cfg(unix)]
+async fn repeated_tool_call_through_proxy(
+    repeated_query_hints: bool,
+) -> (Vec<String>, Vec<String>) {
+    requests_through_proxy(
+        repeated_query_hints,
+        2,
+        call_result,
+        [1, 2]
+            .into_iter()
+            .map(|id| {
+                (
+                    tool_call_request(id, "tracedecay_search", json!({"query": "proxy window"})),
+                    1,
+                )
+            })
+            .collect(),
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn repeated_query_hints_reach_the_host_only_when_enabled() {
+    let (written, received) = repeated_tool_call_through_proxy(false).await;
+    assert_eq!(
+        received, written,
+        "disabled hints must not touch a response"
+    );
+
+    let (written, received) = repeated_tool_call_through_proxy(true).await;
+    assert_eq!(
+        received[0], written[0],
+        "a first call has nothing to repeat"
+    );
+    let repeat: Value = serde_json::from_str(&received[1]).expect("response json");
+    let content = repeat["result"]["content"].as_array().expect("content");
+    assert_eq!(content.len(), 2, "{repeat}");
+    assert_eq!(content[0]["text"], json!("no match for proxy window"));
+    assert_eq!(
+        repeat["result"]["structuredContent"],
+        json!({"matches": []})
+    );
+    let hint = content[1]["text"].as_str().unwrap_or_default();
+    assert!(
+        hint.starts_with("tracedecay_repeated_query: this tracedecay_search call shares 100%"),
+        "{hint}"
+    );
+}
+
+/// A call to a tool the host still sees as a stub is one of this session's
+/// `tools/call`s too: hydration composes with the window, and a repeat still
+/// takes a hint. Guard against the tool path this feature would otherwise
+/// bypass.
+#[cfg(unix)]
+#[tokio::test]
+async fn repeated_stub_calls_are_also_tracked_and_hinted() {
+    let respond = |request: &Value| {
+        if request["method"] == json!("tools/list") {
+            json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {"tools": [
+                    {"name": "tracedecay_impact", "description": "Blast radius of a change. More.",
+                     "inputSchema": {"type": "object", "properties": {"node_id": {"type": "string"}}}},
+                ]}
+            })
+        } else {
+            call_result(request)
+        }
+    };
+    let requests = vec![
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            1,
+        ),
+        // The first stub call hydrates the tool and announces
+        // notifications/tools/list_changed after its result.
+        (
+            tool_call_request(2, "tracedecay_impact", json!({"node_id": "session"})),
+            2,
+        ),
+        (
+            tool_call_request(3, "tracedecay_impact", json!({"node_id": "session"})),
+            1,
+        ),
+    ];
+    let (_written, received) = requests_through_proxy(true, 3, respond, requests).await;
+
+    let notification: Value = serde_json::from_str(&received[2]).expect("notification json");
+    assert_eq!(
+        notification["method"],
+        json!("notifications/tools/list_changed")
+    );
+
+    let repeat: Value = serde_json::from_str(&received[3]).expect("response json");
+    let content = repeat["result"]["content"].as_array().expect("content");
+    let hint = content
+        .last()
+        .and_then(|block| block["text"].as_str())
+        .unwrap_or_default();
+    assert!(
+        hint.starts_with("tracedecay_repeated_query: this tracedecay_impact call shares 100%"),
+        "{hint}"
+    );
+}
+
+/// `initialize` can re-route this session to another project. Calls from the
+/// previous route must not flag the first queries of the next: the window
+/// clears on the initialize request.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_initialize_forgets_the_calls_before_it() {
+    let respond = |request: &Value| {
+        if request["method"] == json!("initialize") {
+            json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "serverInfo": {"name": "tracedecay", "version": "test"},
+                    "_meta": {"tracedecayInitializeRoute": {
+                        "projectPath": "/elsewhere/project",
+                        "allowInit": false,
+                    }},
+                }
+            })
+        } else {
+            call_result(request)
+        }
+    };
+    let search = || tool_call_request(0, "tracedecay_search", json!({"query": "proxy window"}));
+    let mut requests = vec![
+        (
+            {
+                let mut request = search();
+                request["id"] = json!(1);
+                request
+            },
+            1,
+        ),
+        (
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-host", "version": "0"},
+                }
+            }),
+            1,
+        ),
+        (
+            {
+                let mut request = search();
+                request["id"] = json!(3);
+                request
+            },
+            1,
+        ),
+        (
+            {
+                let mut request = search();
+                request["id"] = json!(4);
+                request
+            },
+            1,
+        ),
+    ];
+    let (written, received) = requests_through_proxy(true, 4, respond, requests.split_off(0)).await;
+
+    assert_eq!(
+        received[0], written[0],
+        "a first call has nothing to repeat"
+    );
+    assert_eq!(
+        received[2], written[2],
+        "the new project's first call must not repeat the old project's calls"
+    );
+    let repeat: Value = serde_json::from_str(&received[3]).expect("response json");
+    let content = repeat["result"]["content"].as_array().expect("content");
+    let hint = content
+        .last()
+        .and_then(|block| block["text"].as_str())
+        .unwrap_or_default();
+    assert!(
+        hint.contains("tracedecay_search call 1 call earlier"),
+        "calls after initialize still count: {hint}"
+    );
+}
+
+/// A tool result with `isError: true` already reports the failure; appending
+/// a repeat hint would misreport it. The failed call still takes a window
+/// slot, but an identical call after it is compared with the earlier success.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_tool_call_gets_no_hint_but_still_counts() {
+    let respond = |request: &Value| {
+        let mut result = call_result(request);
+        if request["id"] == json!(2) {
+            result["result"]["isError"] = json!(true);
+        }
+        result
+    };
+    let requests = [1, 2, 3]
+        .into_iter()
+        .map(|id| {
+            (
+                tool_call_request(id, "tracedecay_search", json!({"query": "proxy window"})),
+                1,
+            )
+        })
+        .collect();
+    let (written, received) = requests_through_proxy(true, 3, respond, requests).await;
+
+    assert_eq!(
+        received[1], written[1],
+        "an isError result is never rewritten"
+    );
+    let repeat: Value = serde_json::from_str(&received[2]).expect("response json");
+    let content = repeat["result"]["content"].as_array().expect("content");
+    let hint = content
+        .last()
+        .and_then(|block| block["text"].as_str())
+        .unwrap_or_default();
+    assert!(
+        hint.contains("tracedecay_search call 2 calls earlier"),
+        "a failed call is no repeat target but still counts in the window: {hint}"
+    );
 }

@@ -97,3 +97,201 @@ impl<K: Eq + Hash, V> WeakRegistry<K, V> {
         self.lock().is_empty()
     }
 }
+
+type SingleFlightSlot<V> = Arc<asupersync::sync::Mutex<Weak<V>>>;
+
+/// Async get-or-open over weak entries with one single-flight slot per key.
+///
+/// The map lock is held only to find or insert a key's slot; the open runs
+/// under that slot's own async lock. Concurrent joins of one key therefore
+/// share a single open while other keys open independently, and a failed or
+/// cancelled open leaves the slot empty for the next join to retry.
+pub struct SingleFlightWeakRegistry<K, V> {
+    slots: Mutex<HashMap<K, SingleFlightSlot<V>>>,
+}
+
+impl<K, V> Default for SingleFlightWeakRegistry<K, V> {
+    fn default() -> Self {
+        Self {
+            slots: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<K: Eq + Hash, V> SingleFlightWeakRegistry<K, V> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the live value for `key`, or runs `open` to create it. Joins
+    /// of the same key that arrive while `open` runs wait for and share its
+    /// result; joins of other keys do not wait.
+    pub async fn get_or_open<E, Fut>(
+        &self,
+        key: K,
+        open: impl FnOnce() -> Fut,
+    ) -> std::result::Result<Arc<V>, E>
+    where
+        Fut: std::future::Future<Output = std::result::Result<V, E>>,
+        E: From<tracedecay_domain::errors::TraceDecayError>,
+    {
+        let cx = crate::native_runtime::cx().ok_or_else(|| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: "single-flight open requires a native task context".into(),
+            }
+        })?;
+        let slot = {
+            let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+            // Holding the map lock stops anyone cloning a slot, so a slot only
+            // the map holds is idle and is dead once its value has dropped.
+            slots.retain(|_, slot| {
+                Arc::strong_count(slot) > 1
+                    || slot.try_lock().is_ok_and(|value| value.strong_count() > 0)
+            });
+            Arc::clone(slots.entry(key).or_default())
+        };
+        let mut live = asupersync::sync::OwnedMutexGuard::lock(slot, &cx)
+            .await
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("single-flight open lock unavailable: {error}"),
+            })?;
+        if let Some(value) = live.upgrade() {
+            return Ok(value);
+        }
+        let value = Arc::new(open().await?);
+        *live = Arc::downgrade(&value);
+        Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod single_flight_tests {
+    use super::*;
+    use asupersync::channel::oneshot;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Waker};
+    use tracedecay_domain::errors::TraceDecayError;
+
+    fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[test]
+    fn same_key_joins_share_an_open_without_blocking_other_keys() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = asupersync::Cx::current().unwrap();
+            let registry = SingleFlightWeakRegistry::<&str, usize>::new();
+            let opens = AtomicUsize::new(0);
+            let (release_tx, mut release_rx) = oneshot::channel::<()>();
+            let mut first = pin!(registry.get_or_open("a", || async {
+                release_rx.recv(&cx).await.unwrap();
+                Ok::<_, TraceDecayError>(opens.fetch_add(1, Ordering::SeqCst))
+            }));
+            assert!(poll_once(first.as_mut()).is_pending());
+            let mut joiner = pin!(registry.get_or_open("a", || async {
+                Ok::<_, TraceDecayError>(opens.fetch_add(1, Ordering::SeqCst))
+            }));
+            assert!(poll_once(joiner.as_mut()).is_pending());
+            let other = registry
+                .get_or_open("b", || async { Ok::<_, TraceDecayError>(3) })
+                .await
+                .unwrap();
+            assert_eq!(*other, 3);
+            release_tx.send(&cx, ()).unwrap();
+            let first = first.await.unwrap();
+            let joined = joiner.await.unwrap();
+            assert!(Arc::ptr_eq(&first, &joined));
+            assert_eq!(opens.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn failed_and_cancelled_opens_leave_the_key_available() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let registry = SingleFlightWeakRegistry::<&str, usize>::new();
+            let failed = registry
+                .get_or_open("a", || async {
+                    Err::<usize, _>(TraceDecayError::Config {
+                        message: "store busy".into(),
+                    })
+                })
+                .await;
+            assert!(matches!(failed, Err(TraceDecayError::Config { .. })));
+            {
+                let mut cancelled = pin!(
+                    registry
+                        .get_or_open("a", std::future::pending::<Result<usize, TraceDecayError>>)
+                );
+                assert!(poll_once(cancelled.as_mut()).is_pending());
+            }
+            let opened = registry
+                .get_or_open("a", || async { Ok::<_, TraceDecayError>(4) })
+                .await
+                .unwrap();
+            assert_eq!(*opened, 4);
+        });
+    }
+
+    #[test]
+    fn dropped_values_reopen_and_idle_slots_are_swept() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let registry = SingleFlightWeakRegistry::<&str, usize>::new();
+            drop(
+                registry
+                    .get_or_open("a", || async { Ok::<_, TraceDecayError>(1) })
+                    .await
+                    .unwrap(),
+            );
+            let second = registry
+                .get_or_open("b", || async { Ok::<_, TraceDecayError>(2) })
+                .await
+                .unwrap();
+            assert_eq!(
+                registry
+                    .slots
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec!["b"]
+            );
+            let reopened = registry
+                .get_or_open("a", || async { Ok::<_, TraceDecayError>(3) })
+                .await
+                .unwrap();
+            assert_eq!(*reopened, 3);
+            drop(second);
+        });
+    }
+
+    #[test]
+    fn open_from_a_foreign_executor_joins_through_the_process_runtime() {
+        let registry = SingleFlightWeakRegistry::<&str, usize>::new();
+        let foreign = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("foreign executor");
+        let first = foreign
+            .block_on(registry.get_or_open("a", || async { Ok::<_, TraceDecayError>(1) }))
+            .expect("open without an ambient native context");
+        let joined = foreign
+            .block_on(registry.get_or_open("a", || async { Ok::<_, TraceDecayError>(2) }))
+            .expect("join the live value");
+        assert!(Arc::ptr_eq(&first, &joined));
+        assert_eq!(*joined, 1);
+    }
+}

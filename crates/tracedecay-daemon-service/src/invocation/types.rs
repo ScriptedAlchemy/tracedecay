@@ -1,16 +1,32 @@
 //! Shared retained-state shapes and small daemon-private types used across the invocation split.
 
-use super::*;
-use futures_util::FutureExt;
-use tracedecay_application::RegisteredRootLocatorV1;
+use std::future::Future;
+use std::pin::Pin;
 
-pub use tracedecay_application::HookOrchestrationAdmissionV1;
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
+
+use super::*;
+use tracedecay_contracts::RegisteredRootLocatorV1;
+
+use super::lsp_residency::LspSessionResidencyV1;
+
+pub use tracedecay_contracts::HookOrchestrationAdmissionV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookOrchestrationTriggerV1 {
     SavedEdit,
     Stop,
     Explicit,
+    /// The session intent pass. It owns its own per-session work address and
+    /// permits, so it supersedes only older intent work for the session and
+    /// never cancels, joins, or starves the feedback producer.
+    IntentBoundary,
+}
+
+impl HookOrchestrationTriggerV1 {
+    const fn is_intent(self) -> bool {
+        matches!(self, Self::IntentBoundary)
+    }
 }
 
 #[derive(Clone)]
@@ -19,6 +35,7 @@ pub struct HookOrchestrationRequestV1 {
     pub lifecycle: Option<ContextScoutLifecycleAddressV1>,
     pub hook_configuration_revision: u64,
     pub trigger: HookOrchestrationTriggerV1,
+    explicit_request_id: Option<ManifestDigest>,
     #[cfg(any(test, feature = "test-helpers"))]
     pub completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     #[cfg(not(any(test, feature = "test-helpers")))]
@@ -39,9 +56,16 @@ impl HookOrchestrationRequestV1 {
         } else {
             match &hook.envelope().event {
                 HookEventV2::SavedEdit { .. } => HookOrchestrationTriggerV1::SavedEdit,
+                // A stop boundary owes the feedback producer; its intent pass
+                // is the companion request `intent_companion` derives.
                 HookEventV2::SessionBoundary {
                     boundary: HookBoundaryV1::End | HookBoundaryV1::TurnComplete,
                 } => HookOrchestrationTriggerV1::Stop,
+                HookEventV2::PromptBoundary
+                | HookEventV2::ToolLifecycle {
+                    phase: HookLifecyclePhaseV1::Completed | HookLifecyclePhaseV1::Failed,
+                    ..
+                } => HookOrchestrationTriggerV1::IntentBoundary,
                 _ => return None,
             }
         };
@@ -50,8 +74,23 @@ impl HookOrchestrationRequestV1 {
             lifecycle,
             hook_configuration_revision: configuration_revision,
             trigger,
+            explicit_request_id: None,
             completion: None,
         })
+    }
+
+    /// The best-effort intent pass a native stop boundary also owes. It owes
+    /// no durable producer work, so it carries no completion.
+    pub fn intent_companion(&self) -> Option<Self> {
+        (self.trigger == HookOrchestrationTriggerV1::Stop && self.explicit_request_id.is_none())
+            .then(|| Self {
+                hook: self.hook.clone(),
+                lifecycle: self.lifecycle.clone(),
+                hook_configuration_revision: self.hook_configuration_revision,
+                trigger: HookOrchestrationTriggerV1::IntentBoundary,
+                explicit_request_id: None,
+                completion: None,
+            })
     }
 }
 
@@ -59,6 +98,11 @@ impl HookOrchestrationRequestV1 {
 pub enum HookOrchestrationWorkOutcomeV1 {
     Completed,
     RetryableFailure,
+    /// The boundary's remaining work needs a Context Scout session lifecycle
+    /// it does not have. Redriving cannot produce one, so the boundary
+    /// settles and parks at its session address until that session's next
+    /// hook carries a lifecycle, or a newer boundary supersedes it.
+    AwaitingLifecycle,
 }
 
 impl From<()> for HookOrchestrationWorkOutcomeV1 {
@@ -75,17 +119,20 @@ type HookOrchestrationWorkV1 = dyn Fn(
     ) -> HookOrchestrationFutureV1
     + Send
     + Sync;
-/// Exact hook identity: one project, one worktree, one hook event. Two
-/// admissions that agree on all three describe the same boundary, so they must
-/// share one cycle rather than start a second.
-type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
-/// Stable per-session work address. A newer boundary at the same address
-/// supersedes the running one instead of queueing behind it.
+/// Native admissions share one cycle for the same project, worktree, hook
+/// event, and lane. An explicit request also carries its public effect
+/// identity, so its retries join each other without joining native delivery.
+/// The lane flag keeps a stop boundary's intent pass from joining the
+/// feedback cycle of the same event.
+type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16], Option<ManifestDigest>, bool);
+/// Stable per-session work address of one lane. A newer boundary at the same
+/// address supersedes the running one instead of queueing behind it.
 type HookOrchestrationAddressV1 = String;
 type HookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
 
 struct HookOrchestrationInFlightEntryV1 {
     event: HookOrchestrationEventKeyV1,
+    lifecycle: Option<ContextScoutLifecycleAddressV1>,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     superseded: std::sync::atomic::AtomicBool,
     completions: StdMutex<Vec<HookOrchestrationCompletionV1>>,
@@ -95,12 +142,15 @@ struct HookOrchestrationInFlightEntryV1 {
 struct HookOrchestrationInFlightV1 {
     addresses: BTreeMap<HookOrchestrationAddressV1, Arc<HookOrchestrationInFlightEntryV1>>,
     events: BTreeMap<HookOrchestrationEventKeyV1, Arc<HookOrchestrationInFlightEntryV1>>,
+    // ponytail: one parked boundary per session that never gains a lifecycle
+    // stays until the owner retires; cap it if session churn ever shows up.
+    parked: BTreeMap<HookOrchestrationAddressV1, HookOrchestrationRequestV1>,
 }
 
 struct HookOrchestrationTaskOwnerV1 {
     accepting: bool,
     failed: bool,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Vec<NativeTask<()>>,
 }
 
 impl Default for HookOrchestrationTaskOwnerV1 {
@@ -117,12 +167,12 @@ impl HookOrchestrationTaskOwnerV1 {
     fn reap_finished(&mut self) {
         let tasks = std::mem::take(&mut self.tasks);
         for task in tasks {
-            if task.is_finished() {
-                if !matches!(task.now_or_never(), Some(Ok(()))) {
+            match task.try_finished() {
+                None => self.tasks.push(task),
+                Some(NativeTaskOutcome::Completed(())) => {}
+                Some(NativeTaskOutcome::Cancelled | NativeTaskOutcome::Panicked(_)) => {
                     self.failed = true;
                 }
-            } else {
-                self.tasks.push(task);
             }
         }
     }
@@ -139,6 +189,9 @@ pub const MAX_COALESCED_HOOK_COMPLETIONS: usize = 32;
 /// permit and coalescing bounds is backpressured instead of queued.
 pub struct BoundedHookOrchestratorV1 {
     permits: Arc<Semaphore>,
+    /// The intent lane's own bound: a slow decision engine can hold these, never
+    /// the feedback producer's.
+    intent_permits: Arc<Semaphore>,
     work: Arc<HookOrchestrationWorkV1>,
     in_flight: Arc<StdMutex<HookOrchestrationInFlightV1>>,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
@@ -165,6 +218,7 @@ impl BoundedHookOrchestratorV1 {
         (max_concurrent > 0).then(|| {
             Arc::new(Self {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
+                intent_permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
                 in_flight: Arc::new(StdMutex::new(HookOrchestrationInFlightV1::default())),
                 cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
@@ -173,10 +227,16 @@ impl BoundedHookOrchestratorV1 {
         })
     }
 
-    fn stable_address(request: &HookOrchestrationRequestV1) -> Option<HookOrchestrationAddressV1> {
-        let envelope = request.hook.envelope();
+    fn stable_address(
+        envelope: &HookEventEnvelopeV2,
+        intent: bool,
+    ) -> Option<HookOrchestrationAddressV1> {
         canonical_sha256(&(
-            "tracedecay.advisory-hook-address.v1",
+            if intent {
+                "tracedecay.intent-hook-address.v1"
+            } else {
+                "tracedecay.advisory-hook-address.v1"
+            },
             envelope.project_id,
             envelope.repository_id,
             envelope.worktree_id,
@@ -191,6 +251,7 @@ impl BoundedHookOrchestratorV1 {
         address: &HookOrchestrationAddressV1,
         operation: &Arc<HookOrchestrationInFlightEntryV1>,
         emit_terminal: bool,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         let completions = {
             let mut in_flight = in_flight
@@ -217,6 +278,12 @@ impl BoundedHookOrchestratorV1 {
             {
                 in_flight.events.remove(&operation.event);
             }
+            // Admission checks the in-flight maps and takes a permit under
+            // this lock, so the cycle leaves both in one step: no admission
+            // sees it gone yet still holding its permit, or sees its permit
+            // free while it still looks in flight. Its terminals, the host's
+            // cue to send the session's next boundary, follow.
+            drop(permit);
             completions
         };
         if emit_terminal {
@@ -226,64 +293,133 @@ impl BoundedHookOrchestratorV1 {
         }
     }
 
-    #[hotpath::measure(label = "daemon.service.hooks.admit")]
-    pub fn admit(&self, mut request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
-        let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
-            return HookOrchestrationAdmissionV1::Unavailable;
-        };
+    const fn lane_permits(&self, intent: bool) -> &Arc<Semaphore> {
+        if intent {
+            &self.intent_permits
+        } else {
+            &self.permits
+        }
+    }
+
+    #[tracing::instrument(name = "daemon.service.hooks.admit", level = "trace", skip_all)]
+    pub fn admit(&self, request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
+        match self.admit_with_cancellation(request, false) {
+            Ok(_) => HookOrchestrationAdmissionV1::Enqueued,
+            Err(admission) => admission,
+        }
+    }
+
+    /// The session behind `envelope` now has a Context Scout lifecycle: the
+    /// boundary parked at its address for want of one runs again with it.
+    pub fn resume_parked(
+        &self,
+        envelope: &HookEventEnvelopeV2,
+        lifecycle: ContextScoutLifecycleAddressV1,
+    ) {
+        let parked = Self::stable_address(envelope, false)
+            .and_then(|address| self.in_flight.lock().ok()?.parked.get(&address).cloned());
+        if let Some(mut request) = parked {
+            request.lifecycle = Some(lifecycle);
+            let _ = self.admit_with_cancellation(request, true);
+        }
+    }
+
+    fn admit_with_cancellation(
+        &self,
+        mut request: HookOrchestrationRequestV1,
+        resume: bool,
+    ) -> Result<
+        tracedecay_runtime_core::cancellation::CancellationToken,
+        HookOrchestrationAdmissionV1,
+    > {
         let envelope = request.hook.envelope();
-        let event = (envelope.project_id, envelope.worktree_id, envelope.event_id);
-        let Some(address) = Self::stable_address(&request) else {
-            return HookOrchestrationAdmissionV1::Unavailable;
+        let intent = request.trigger.is_intent();
+        let event = (
+            envelope.project_id,
+            envelope.worktree_id,
+            envelope.event_id,
+            request.explicit_request_id.clone(),
+            intent,
+        );
+        let Some(address) = Self::stable_address(envelope, intent) else {
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
         let Ok(mut task_owner) = self.task_owner.lock() else {
-            return HookOrchestrationAdmissionV1::Unavailable;
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
         task_owner.reap_finished();
         if !task_owner.accepting || task_owner.failed {
-            return HookOrchestrationAdmissionV1::Unavailable;
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
         }
         let completion = request.completion.take();
         let (permit, operation) = {
             let Ok(mut in_flight) = self.in_flight.lock() else {
-                return HookOrchestrationAdmissionV1::Unavailable;
+                return Err(HookOrchestrationAdmissionV1::Unavailable);
             };
+            // A resume runs only the boundary still parked: a newer boundary
+            // at the address has already superseded it.
+            if resume
+                && !in_flight.parked.get(&address).is_some_and(|parked| {
+                    parked.hook.envelope().event_id == request.hook.envelope().event_id
+                })
+            {
+                return Err(HookOrchestrationAdmissionV1::Unavailable);
+            }
             if let Some(incumbent) = in_flight.events.get(&event).cloned() {
                 // The exact boundary is already running. Join it: one cycle
                 // terminates once and every joined admission observes that one
                 // terminal, so a duplicate never consumes a second permit.
                 if let Some(completion) = completion {
                     let Ok(mut completions) = incumbent.completions.lock() else {
-                        return HookOrchestrationAdmissionV1::Unavailable;
+                        return Err(HookOrchestrationAdmissionV1::Unavailable);
                     };
                     if completions.len() >= MAX_COALESCED_HOOK_COMPLETIONS {
-                        return HookOrchestrationAdmissionV1::Backpressured;
+                        return Err(HookOrchestrationAdmissionV1::Backpressured);
                     }
                     completions.push(completion);
                 }
-                return HookOrchestrationAdmissionV1::Enqueued;
+                return Ok(incumbent.cancellation.clone());
+            }
+            // A public request may refer to the last mounted hook while a
+            // newer native edit is still producing its authority. It cannot
+            // discard that newer document's work; the caller can retry after
+            // the native producer mounts the current lifecycle.
+            if request.explicit_request_id.is_some()
+                && in_flight.addresses.get(&address).is_some_and(|incumbent| {
+                    (incumbent.event.0, incumbent.event.1, incumbent.event.2)
+                        != (event.0, event.1, event.2)
+                })
+            {
+                return Err(HookOrchestrationAdmissionV1::Backpressured);
             }
             let permit = if let Some(incumbent) = in_flight.addresses.remove(&address) {
                 // A newer boundary at the same stable address supersedes the
-                // incumbent: cancel it and inherit its permit once it settles.
+                // incumbent. A host boundary without its own call identity
+                // retains the exact admitted lifecycle already bound to this
+                // session; an explicit successor lifecycle remains authoritative.
+                if request.lifecycle.is_none() {
+                    request.lifecycle.clone_from(&incumbent.lifecycle);
+                }
                 incumbent
                     .superseded
                     .store(true, std::sync::atomic::Ordering::Release);
                 incumbent.cancellation.cancel();
                 None
             } else {
-                let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-                    return HookOrchestrationAdmissionV1::Backpressured;
+                let Ok(permit) = Arc::clone(self.lane_permits(intent)).try_acquire_owned() else {
+                    return Err(HookOrchestrationAdmissionV1::Backpressured);
                 };
                 Some(permit)
             };
             let work_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
             let operation = Arc::new(HookOrchestrationInFlightEntryV1 {
-                event,
+                event: event.clone(),
+                lifecycle: request.lifecycle.clone(),
                 cancellation: work_cancellation,
                 superseded: std::sync::atomic::AtomicBool::new(false),
                 completions: StdMutex::new(completion.into_iter().collect()),
             });
+            in_flight.parked.remove(&address);
             in_flight
                 .addresses
                 .insert(address.clone(), Arc::clone(&operation));
@@ -293,8 +429,12 @@ impl BoundedHookOrchestratorV1 {
         let work = Arc::clone(&self.work);
         let in_flight = Arc::clone(&self.in_flight);
         let cancellation = self.cancellation.clone();
-        let permits = Arc::clone(&self.permits);
-        let task = runtime_handle.spawn(async move {
+        let permits = Arc::clone(self.lane_permits(intent));
+        let operation_cancellation = operation.cancellation.clone();
+        let spawned_in_flight = Arc::clone(&in_flight);
+        let spawned_address = address.clone();
+        let spawned_operation = Arc::clone(&operation);
+        let task = NativeTask::spawn(async move {
             let work_cancellation = operation.cancellation.clone();
             let permit = match permit {
                 Some(permit) => Some(permit),
@@ -309,16 +449,17 @@ impl BoundedHookOrchestratorV1 {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, None);
                 return;
             };
             if cancellation.is_cancelled() || work_cancellation.is_cancelled() {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, Some(permit));
                 return;
             }
+            let resumable = request.clone();
             let mut work_future = (work)(request, work_cancellation.clone());
             // Only completed or superseded work emits terminals. Owner-level
             // cancellation reports nothing: silence is a normal result, and an
@@ -334,9 +475,40 @@ impl BoundedHookOrchestratorV1 {
                 },
                 outcome = &mut work_future => Some(outcome),
             };
+            if outcome.is_none()
+                && operation
+                    .superseded
+                    .load(std::sync::atomic::Ordering::Acquire)
+                && !cancellation.is_cancelled()
+            {
+                // Supersession is not owner retirement: the incumbent's work
+                // already started, its receipt terminal is owed, and the
+                // successor inherits this permit. Both must follow the real
+                // end of that work, including nested blocking work the
+                // future cannot cancel, so join it here instead of dropping
+                // it. Owner retirement still preempts the join.
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {}
+                    _ = &mut work_future => {}
+                }
+            }
             let emit_terminal = match outcome {
                 Some(HookOrchestrationWorkOutcomeV1::Completed) => true,
                 Some(HookOrchestrationWorkOutcomeV1::RetryableFailure) => false,
+                Some(HookOrchestrationWorkOutcomeV1::AwaitingLifecycle) => {
+                    let mut in_flight = in_flight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if in_flight
+                        .addresses
+                        .get(&address)
+                        .is_some_and(|current| Arc::ptr_eq(current, &operation))
+                    {
+                        in_flight.parked.insert(address.clone(), resumable);
+                    }
+                    true
+                }
                 None => {
                     drop(work_future);
                     operation
@@ -344,14 +516,28 @@ impl BoundedHookOrchestratorV1 {
                         .load(std::sync::atomic::Ordering::Acquire)
                 }
             };
-            Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
-            drop(permit);
+            Self::settle_operation(
+                &in_flight,
+                &address,
+                &operation,
+                emit_terminal,
+                Some(permit),
+            );
         });
+        let Ok(task) = task else {
+            Self::settle_operation(
+                &spawned_in_flight,
+                &spawned_address,
+                &spawned_operation,
+                false,
+                None,
+            );
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
+        };
         task_owner.tasks.push(task);
-        HookOrchestrationAdmissionV1::Enqueued
+        Ok(operation_cancellation)
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(&self) -> bool {
         let (tasks, mut clean) = {
             let mut task_owner = self
@@ -368,14 +554,16 @@ impl BoundedHookOrchestratorV1 {
                 entry.cancellation.cancel();
             }
         }
-        let deadline = tokio::time::Instant::now() + crate::TASK_ABORT_DEADLINE;
-        for mut task in tasks {
-            match tokio::time::timeout_at(deadline, &mut task).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => clean = false,
+        let deadline =
+            std::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+        for task in tasks {
+            match tracedecay_runtime_core::native_runtime::timeout_at(deadline, task.wait()).await {
+                Ok(NativeTaskOutcome::Completed(())) => {}
+                Ok(NativeTaskOutcome::Cancelled | NativeTaskOutcome::Panicked(_)) => clean = false,
+                // An unavailable timer aborts the task as if its deadline passed.
                 Err(_) => {
                     task.abort();
-                    let _ = task.await;
+                    task.wait().await;
                     clean = false;
                 }
             }
@@ -474,32 +662,113 @@ pub fn admit_registered_hook_orchestration(
     explicit: bool,
     completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
 ) -> HookOrchestrationAdmissionV1 {
+    // Any other hook of a session that now carries a lifecycle is the event a
+    // boundary parked for that session waits on.
     let Some(mut request) = HookOrchestrationRequestV1::from_envelope(
-        envelope,
+        envelope.clone(),
         &binding,
-        lifecycle,
+        lifecycle.clone(),
         configuration_revision,
         explicit,
     ) else {
+        if let Some(lifecycle) = lifecycle
+            && let Some(runtime) = registered_hook_orchestrator(&envelope)
+        {
+            runtime.resume_parked(&envelope, lifecycle);
+        }
         return HookOrchestrationAdmissionV1::UnsupportedTrigger;
     };
-    let Some(runtime) = hook_orchestration_registry()
-        .lock()
-        .ok()
-        .and_then(|registry| {
-            registry
-                .get(&(
-                    request.hook.envelope().project_id,
-                    request.hook.envelope().worktree_id,
-                ))
-                .cloned()
-        })
-        .and_then(|runtime| runtime.upgrade())
-    else {
+    let Some(runtime) = registered_hook_orchestrator(request.hook.envelope()) else {
         return HookOrchestrationAdmissionV1::Unavailable;
     };
+    if request.trigger.is_intent()
+        && let Some(lifecycle) = request.lifecycle.clone()
+    {
+        runtime.resume_parked(request.hook.envelope(), lifecycle);
+    }
+    let intent_companion = request.intent_companion();
     request.completion = completion;
-    runtime.admit(request)
+    let admission = runtime.admit(request);
+    // The stop boundary's own admission is what the hook reports; its intent
+    // pass is best-effort and admitted after it so it can never take the
+    // permit the owed feedback work needs.
+    if let Some(intent_companion) = intent_companion {
+        let _ = runtime.admit(intent_companion);
+    }
+    admission
+}
+
+fn registered_hook_orchestrator(
+    envelope: &HookEventEnvelopeV2,
+) -> Option<Arc<BoundedHookOrchestratorV1>> {
+    hook_orchestration_registry()
+        .lock()
+        .ok()?
+        .get(&(envelope.project_id, envelope.worktree_id))?
+        .upgrade()
+}
+
+/// An authenticated explicit claim joins the same bounded producer as native
+/// hooks. Its effect identity distinguishes it from the original saved edit;
+/// retries of that one request coalesce while unrelated successors supersede.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_registered_context_scout_request(
+    hook: AdmittedContextScoutHookV1,
+    lifecycle: ContextScoutLifecycleAddressV1,
+    hook_configuration_revision: u64,
+    effect_identity: ManifestDigest,
+    deadline: tracedecay_runtime_core::cancellation::MonotonicDeadline,
+    request_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+) -> Result<(), ApplicationProblem> {
+    let unavailable = || {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "context_scout.producer_unavailable".to_owned(),
+            message: "The current Context Scout producer did not complete the explicit request"
+                .to_owned(),
+        })
+    };
+    if request_cancellation.is_cancelled() {
+        return Err(ApplicationProblem::cancelled_before_admission());
+    }
+    if deadline.is_elapsed_at(std::time::Instant::now()) {
+        return Err(ApplicationProblem::timed_out_before_admission());
+    }
+    let runtime = registered_hook_orchestrator(hook.envelope()).ok_or_else(unavailable)?;
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    let completed = StdMutex::new(Some(completed));
+    let request = HookOrchestrationRequestV1 {
+        hook,
+        lifecycle: Some(lifecycle),
+        hook_configuration_revision,
+        trigger: HookOrchestrationTriggerV1::Explicit,
+        explicit_request_id: Some(effect_identity),
+        completion: Some(Arc::new(move || {
+            if let Ok(mut completed) = completed.lock()
+                && let Some(completed) = completed.take()
+            {
+                let _ = completed.send(());
+            }
+        })),
+    };
+    let operation_cancellation = runtime
+        .admit_with_cancellation(request, false)
+        .map_err(|_| unavailable())?;
+    let outcome = tokio::select! {
+        biased;
+        () = request_cancellation.cancelled() => Err(ApplicationProblem::cancelled_before_admission()),
+        fired = tracedecay_runtime_core::native_runtime::sleep_until(deadline.instant()) => {
+            if let Err(error) = fired {
+                tracing::error!(%error, "Context Scout admission timer unavailable; timing out");
+            }
+            Err(ApplicationProblem::timed_out_before_admission())
+        }
+        () = operation_cancellation.cancelled() => Err(unavailable()),
+        completed = completion => completed.map_err(|_| unavailable()),
+    };
+    if outcome.is_err() {
+        operation_cancellation.cancel();
+    }
+    outcome
 }
 
 pub struct SwitchableFeedbackCycleRuntimeV1 {
@@ -607,12 +876,44 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
     }
 }
 
+/// Project-local wakeup sequence for recovery work created by durable Work
+/// writes. The sender is retained by [`RegisteredWorkRuntime`]; each recovery
+/// owner receives an independent watch cursor so one scan cannot consume
+/// another owner's notification.
+///
+/// The daemon bumps this sequence after settled blocked-interval receipts,
+/// workflow fan-out census records, and workflow effect terminals are durable.
+/// Reads never bump it.
+#[derive(Clone)]
+pub(crate) struct WorkDurableWriteSignalV1 {
+    sender: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for WorkDurableWriteSignalV1 {
+    fn default() -> Self {
+        let (sender, _) = tokio::sync::watch::channel(0);
+        Self { sender }
+    }
+}
+
+impl WorkDurableWriteSignalV1 {
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.sender.subscribe()
+    }
+
+    pub(crate) fn bump(&self) {
+        self.sender
+            .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+    }
+}
+
 /// Retained daemon state for the typed Work application operations.
 #[derive(Clone)]
 pub struct RegisteredWorkRuntime {
     pub(super) database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
+    pub(super) authority: tracedecay_domain::WorkAuthority,
     pub(super) authority_digest: ManifestDigest,
     pub(super) policy_digest: ManifestDigest,
     pub(super) configuration_digest: ManifestDigest,
@@ -625,6 +926,7 @@ pub struct RegisteredWorkRuntime {
     /// Canonical Work evidence retrieval adapter with per-request
     /// evaluated-profile resolution.
     pub(super) evidence_retrieval: Arc<dyn WorkEvidenceRetrievalPortV1>,
+    pub(super) durable_write_signal: WorkDurableWriteSignalV1,
     /// Project-owned bounded replay for receipts that closed outside a request
     /// response, such as terminal attempt compare-and-swaps.
     pub(super) blocked_interval_observation_recovery:
@@ -641,6 +943,11 @@ pub struct RegisteredWorkRuntime {
 }
 
 impl RegisteredWorkRuntime {
+    /// The registered grant, bounded to one request observed at `observed_at`.
+    pub(crate) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
+        mounted_grant_at(&self.grant, observed_at)
+    }
+
     /// Cancel every retained background recovery owner without awaiting.
     ///
     /// Hoisted out of [`Self::shut_down_background_recovery`] so daemon
@@ -654,7 +961,6 @@ impl RegisteredWorkRuntime {
         self.workflow_census_observation_recovery.cancel();
     }
 
-    #[hotpath::skip]
     pub async fn shut_down_background_recovery(&self) {
         self.cancel_background_recovery();
         if let Some(recovery) = &self.workflow_fan_out_recovery {
@@ -665,13 +971,25 @@ impl RegisteredWorkRuntime {
     }
 }
 
+/// One project's retained application runtime, shared by every route that
+/// answers to the same store authority.
+///
+/// A linked worktree of the same project, and a reopen of a route whose ports
+/// were rebuilt, join this runtime instead of registering a second one. It is
+/// released with the whole root (`retire_roots`), never per route.
 #[derive(Clone)]
 pub struct RegisteredRetainedRuntime {
     pub(super) scope: ResolvedScope,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
-    pub(super) ports:
-        Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
+    pub(super) ports: Arc<tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1<'static>>,
+}
+
+impl RegisteredRetainedRuntime {
+    /// The registered grant, bounded to one request observed at `observed_at`.
+    pub(super) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
+        mounted_grant_at(&self.grant, observed_at)
+    }
 }
 
 pub struct RegisteredFeedbackRuntime {
@@ -762,8 +1080,20 @@ impl InvocationProjectRuntimeIdentityV1 {
     }
 
     pub(super) fn matches_project_root(&self, project_root: &Path) -> bool {
-        self.project_root == project_root
+        // The registered root is canonical (`\\?\` on Windows) while a file
+        // URI round-trips to the plain spelling of the same directory.
+        tracedecay_runtime_core::path_safety::same_canonical_path(&self.project_root, project_root)
     }
+}
+
+pub type ConfigurationRuntimeRefreshFuture =
+    Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+
+pub trait ConfigurationRuntimeRefreshPort: Send + Sync {
+    fn refresh(
+        &self,
+        current: tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
+    ) -> ConfigurationRuntimeRefreshFuture;
 }
 
 #[derive(Clone)]
@@ -773,28 +1103,17 @@ pub struct RegisteredConfigurationRuntime {
     pub(super) project_identity: InvocationProjectRuntimeIdentityV1,
     pub(super) actor: ActorId,
     pub(super) grants: DaemonConfigurationGrantAuthority,
-    pub(super) semantic_operation: Arc<OnceLock<Arc<ProductionSemanticConfigurationOperationV1>>>,
-    pub(super) semantic_evaluation_workers: Arc<
-        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1,
-    >,
-}
-
-impl RegisteredConfigurationRuntime {
-    pub fn semantic_evaluation_workers(
-        &self,
-    ) -> &Arc<
-        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1,
-    > {
-        &self.semantic_evaluation_workers
-    }
+    pub(super) feedback_refresh: Arc<RwLock<Option<Arc<dyn ConfigurationRuntimeRefreshPort>>>>,
 }
 
 pub struct RuntimeLspSession {
     pub(super) expires_at_ms: u64,
     pub(super) project_identity: InvocationProjectRuntimeIdentityV1,
     pub actor: RuntimeLspActor,
+    /// The session's row in the resident-memory inventory, dropped with it.
+    pub(super) residency: Option<LspSessionResidencyV1>,
     pub(super) delivery_settlements:
-        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+        Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
     /// Captured at the first poll of the current outbound frame. Retries and
     /// terminalization must reuse its exact timestamps and identity.
     pub(super) in_flight_delivery_attempt: Option<tracedecay_domain::DeliverySettlementAttemptV1>,
@@ -806,20 +1125,23 @@ pub struct RuntimeLspSession {
 struct LspLeaseTask {
     generation: u64,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
-    handle: tokio::task::JoinHandle<()>,
+    handle: tracedecay_runtime_core::native_runtime::NativeTask<()>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    finished: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl LspLeaseTask {
-    #[hotpath::skip]
     async fn stop(self) -> Result<(), DaemonInvocationProblem> {
         self.cancellation.cancel();
-        self.handle
-            .await
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
+        match self.handle.wait().await {
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(()) => Ok(()),
+            _ => Err(DaemonInvocationProblem::Unavailable),
+        }
     }
+}
 
-    fn abort(&self) {
-        self.cancellation.cancel();
+impl Drop for LspLeaseTask {
+    fn drop(&mut self) {
         self.handle.abort();
     }
 }
@@ -852,10 +1174,59 @@ impl Default for LspLeaseTaskRegistryState {
 #[derive(Default)]
 pub struct LspLeaseTaskRegistry {
     state: StdMutex<LspLeaseTaskRegistryState>,
+    /// Wall-clock milliseconds tests have moved lease time forward to.
+    #[cfg(any(test, feature = "test-helpers"))]
+    lease_clock: tokio::sync::watch::Sender<u64>,
+}
+
+/// Waits out one disconnected session's lease.
+pub(super) struct LspLeaseTimer {
+    #[cfg(any(test, feature = "test-helpers"))]
+    lease_clock: tokio::sync::watch::Receiver<u64>,
+}
+
+impl LspLeaseTimer {
+    /// Completes when wall-clock time reaches `expires_at_ms`, timed on the
+    /// native runtime. A lease whose timer cannot start ends now rather than
+    /// hold its session forever.
+    pub(super) async fn expire(self, expires_at_ms: u64) {
+        let remaining = Duration::from_millis(expires_at_ms.saturating_sub(now_millis()));
+        let timer = async {
+            if let Err(error) = tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + remaining,
+            )
+            .await
+            {
+                tracing::error!(%error, "LSP lease timer unavailable; reclaiming the session now");
+            }
+        };
+        #[cfg(any(test, feature = "test-helpers"))]
+        let timer = async {
+            let mut lease_clock = self.lease_clock;
+            tokio::select! {
+                () = timer => {}
+                _ = lease_clock.wait_for(|now_ms| *now_ms >= expires_at_ms) => {}
+            }
+        };
+        timer.await;
+    }
 }
 
 impl LspLeaseTaskRegistry {
-    #[hotpath::skip]
+    pub(super) fn lease_timer(&self) -> LspLeaseTimer {
+        LspLeaseTimer {
+            #[cfg(any(test, feature = "test-helpers"))]
+            lease_clock: self.lease_clock.subscribe(),
+        }
+    }
+
+    /// Ends every lease that expires by wall-clock `now_ms`, as if that time
+    /// had come.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn expire_leases_through(&self, now_ms: u64) {
+        self.lease_clock.send_replace(now_ms);
+    }
+
     pub async fn start<F>(
         self: &Arc<Self>,
         session_id: LspSessionId,
@@ -882,7 +1253,9 @@ impl LspLeaseTaskRegistry {
             let task_registry = Arc::downgrade(self);
             let task_session_id = session_id.clone();
             let (start, started) = tokio::sync::oneshot::channel();
-            let handle = tokio::spawn(async move {
+            #[cfg(any(test, feature = "test-helpers"))]
+            let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+            let spawned = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
                 let admitted = tokio::select! {
                     result = started => result.is_ok(),
                     () = task_cancellation.cancelled() => false,
@@ -896,13 +1269,26 @@ impl LspLeaseTaskRegistry {
                 if let Some(task_registry) = task_registry.upgrade() {
                     task_registry.finish(&task_session_id, generation);
                 }
+                #[cfg(any(test, feature = "test-helpers"))]
+                {
+                    let _ = finished_tx.send(());
+                }
             });
+            let handle = match spawned {
+                Ok(handle) => handle,
+                Err(error) => {
+                    tracing::error!(%error, "LSP lease task could not start");
+                    return Err(DaemonInvocationProblem::Unavailable);
+                }
+            };
             let previous = state.tasks.insert(
                 session_id,
                 LspLeaseTask {
                     generation,
                     cancellation,
                     handle,
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    finished: Some(finished_rx),
                 },
             );
             (previous, start, generation)
@@ -922,7 +1308,6 @@ impl LspLeaseTaskRegistry {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub async fn cancel(&self, session_id: &LspSessionId) -> Result<(), DaemonInvocationProblem> {
         self.stop_generation(session_id, None).await
     }
@@ -931,7 +1316,6 @@ impl LspLeaseTaskRegistry {
         self.take_generation(session_id, Some(generation));
     }
 
-    #[hotpath::skip]
     async fn stop_generation(
         &self,
         session_id: &LspSessionId,
@@ -961,7 +1345,6 @@ impl LspLeaseTaskRegistry {
         matches.then(|| state.tasks.remove(session_id)).flatten()
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(&self) -> Result<(), DaemonInvocationProblem> {
         let tasks = {
             let mut state = match self.state.lock() {
@@ -987,17 +1370,26 @@ impl LspLeaseTaskRegistry {
             Err(poisoned) => poisoned.into_inner().tasks.len(),
         }
     }
-}
 
-impl Drop for LspLeaseTaskRegistry {
-    fn drop(&mut self) {
-        let state = match self.state.get_mut() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
+    /// Await every registered lease task's completion signal.
+    ///
+    /// The sender fires after `finish` removes the task, so this does not
+    /// hold `lsp_sessions`. A missing receiver means the lease already ended.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn wait_until_idle(&self) {
+        let receivers = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            state
+                .tasks
+                .values_mut()
+                .filter_map(|task| task.finished.take())
+                .collect::<Vec<_>>()
         };
-        state.accepting = false;
-        for task in state.tasks.values() {
-            task.abort();
+        for finished in receivers {
+            let _ = finished.await;
         }
     }
 }
@@ -1012,7 +1404,7 @@ pub struct DaemonLspInvocationOwner {
     pub(super) scope_set_storage:
         Option<tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage>,
     pub(super) delivery_settlements:
-        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+        Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
 }
 
 #[derive(Clone)]
@@ -1022,14 +1414,11 @@ pub struct AuthorizedDaemonLspWorkspace {
 }
 
 impl DaemonLspInvocationOwner {
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn new(factory: Arc<DaemonLspSessionFactory>) -> Self {
-        Self::for_test_project(
-            factory,
-            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
-            ProjectId::new("project.test.lsp").expect("test LSP project"),
-            PathBuf::from("/test/lsp"),
-        )
+    /// The scope grant, bounded to one request observed at `observed_at`.
+    pub(super) fn scope_grant_at(&self, observed_at: UtcMicros) -> Option<CapabilityGrantSnapshot> {
+        self.scope_grant
+            .as_ref()
+            .map(|grant| mounted_grant_at(grant, observed_at))
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -1053,16 +1442,18 @@ impl DaemonLspInvocationOwner {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
     pub fn with_scope_grant(mut self, scope_grant: CapabilityGrantSnapshot) -> Self {
         self.scope_grant = Some(scope_grant);
         self
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
     pub fn with_delivery_settlements(
         mut self,
         delivery_settlements: Arc<
-            tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1,
+            tracedecay_application::observability::BoundedDeliverySettlementRecorderV1,
         >,
     ) -> Self {
         self.delivery_settlements = Some(delivery_settlements);
@@ -1080,7 +1471,7 @@ impl DaemonLspInvocationOwner {
         scope_grant: CapabilityGrantSnapshot,
         scope_set_storage: tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
         delivery_settlements: Arc<
-            tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1,
+            tracedecay_application::observability::BoundedDeliverySettlementRecorderV1,
         >,
     ) -> Self {
         Self {
@@ -1109,10 +1500,8 @@ impl LspSessionAdmissionPort for AdmittedWorkspaceSessionAdmission {
     ) -> Result<AuthorizedLspSession, LspEndpointError> {
         let mut session_bytes = [0_u8; 16];
         let mut credential_bytes = [0_u8; 32];
-        getrandom::getrandom(&mut session_bytes)
-            .map_err(|_| LspEndpointError::AdmissionRejected)?;
-        getrandom::getrandom(&mut credential_bytes)
-            .map_err(|_| LspEndpointError::AdmissionRejected)?;
+        getrandom::fill(&mut session_bytes).map_err(|_| LspEndpointError::AdmissionRejected)?;
+        getrandom::fill(&mut credential_bytes).map_err(|_| LspEndpointError::AdmissionRejected)?;
         let session_id = LspSessionId::new(format!("lsp-{}", hex::encode(session_bytes)))?;
         let credential = LspSessionCredential::new(credential_bytes.to_vec())?;
         Ok(AuthorizedLspSession {
@@ -1131,30 +1520,119 @@ pub(super) struct SharedGitTransactionPort {
 }
 
 impl GitIndexTransactionPort for SharedGitTransactionPort {
-    fn preview(
+    async fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
     ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError> {
-        self.service.preview(request)
+        self.service.preview(request).await
     }
 
-    fn apply(
+    async fn apply(
         &self,
         request: &GitIndexApplyRequestV1,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        self.cancellation.as_ref().map_or_else(
-            || self.service.apply(request),
-            |emitter| {
+        match &self.cancellation {
+            None => self.service.apply(request).await,
+            Some(emitter) => {
                 self.service
                     .apply_cancellable(request, || emitter.cancellation_requested_at())
-            },
-        )
+                    .await
+            }
+        }
     }
 
-    fn recover(
+    async fn recover(
         &self,
         request: &GitIndexRecoveryRequestV1,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError> {
-        self.service.recover(request)
+        self.service.recover(request).await
+    }
+}
+
+#[cfg(test)]
+mod context_scout_tests;
+
+#[cfg(test)]
+mod lsp_lease_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tracedecay_runtime_core::native_runtime;
+
+    use super::{LspLeaseTaskRegistry, LspSessionId};
+
+    /// A disconnected session's lease task runs on the native runtime: it
+    /// starts, finishes, and shuts down with no Tokio runtime anywhere.
+    #[test]
+    fn lease_tasks_run_without_a_tokio_runtime() {
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let registry = Arc::new(LspLeaseTaskRegistry::default());
+            let (ran, lease_ran) = tokio::sync::oneshot::channel();
+            registry
+                .start(
+                    LspSessionId::new("lsp-native-lease").expect("session id"),
+                    async move {
+                        let _ = ran.send(());
+                    },
+                )
+                .await
+                .expect("lease task starts");
+            native_runtime::timeout(Duration::from_secs(30), lease_ran)
+                .await
+                .expect("the lease task must run")
+                .expect("the lease task reports");
+            registry
+                .start(
+                    LspSessionId::new("lsp-native-pending").expect("session id"),
+                    std::future::pending(),
+                )
+                .await
+                .expect("pending lease task starts");
+            native_runtime::timeout(Duration::from_secs(30), registry.shutdown())
+                .await
+                .expect("shutdown must join the pending lease")
+                .expect("lease shutdown is clean");
+            assert_eq!(registry.active_tasks(), 0);
+        })
+        .expect("native runtime");
+    }
+
+    struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for SignalOnDrop {
+        fn drop(&mut self) {
+            if let Some(signal) = self.0.take() {
+                let _ = signal.send(());
+            }
+        }
+    }
+
+    /// A lease task dropped without being stopped, as by a shutdown owner
+    /// whose join timed out, is aborted rather than left running.
+    #[test]
+    fn a_lease_task_dropped_without_a_stop_is_aborted() {
+        native_runtime::block_on(async {
+            let registry = Arc::new(LspLeaseTaskRegistry::default());
+            let session_id = LspSessionId::new("lsp-native-dropped").expect("session id");
+            let (signal, dropped) = tokio::sync::oneshot::channel();
+            let guard = SignalOnDrop(Some(signal));
+            registry
+                .start(session_id.clone(), async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                })
+                .await
+                .expect("lease task starts");
+            drop(
+                registry
+                    .take_generation(&session_id, None)
+                    .expect("registered lease task"),
+            );
+            let _ = native_runtime::timeout(Duration::from_secs(30), dropped)
+                .await
+                .expect("a dropped lease task must be aborted");
+        })
+        .expect("native runtime");
     }
 }

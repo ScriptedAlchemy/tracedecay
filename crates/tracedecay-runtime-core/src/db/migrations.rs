@@ -1,15 +1,22 @@
 //! Schema creation for the tracedecay database.
 //!
-//! This binary creates every store at one final schema shape and never steps an
-//! older shape forward. `PRAGMA user_version` records that shape as an atomic
-//! integer built into `SQLite`; a store carrying any other value was written by
-//! an incompatible binary and is refused at open with a fresh-start remedy.
+//! Fresh stores are created directly at the current relational shape. Any
+//! other stamp or shape is a typed reset-required refusal; nothing upgrades in
+//! place.
+
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::db::connection::DatabaseEngineWriteConnection;
 use crate::db::engine::{Connection, Executor, QueryExecutor};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod final_shape;
+
+pub use final_shape::{
+    GraphStoreSchemaAdmissionV1, expected_final_schema_fingerprint, inspect_graph_store_schema,
+    render_expected_final_schema_markdown, schema_fingerprint,
+};
 
 const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
         key TEXT PRIMARY KEY,
@@ -33,53 +40,129 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
     CREATE INDEX IF NOT EXISTS idx_read_cache_session
         ON read_cache(session_id, created_at);";
 
-/// The one schema shape this binary creates and accepts. It is an identity
-/// stamp, not a ladder rung: a store at any other version is refused.
+/// The schema stamp this binary creates.
 ///
 /// Code topology lives only in the verified Grafeo generation. Exact memory
 /// content, provenance, trust, retention, and feedback live only in the
-/// canonical `memory_v2_*` tables; derived vectors are re-created from that
-/// content. A current-stamped store containing a retired projection fails
-/// closed before interpretation.
-pub const SCHEMA_VERSION: u32 = 34;
+/// canonical `memory_v2_*` tables; holographic memory vectors are re-derived
+/// from that content and never persisted. v38 stores compact writer-ledger
+/// receipts, keeps full external-source receipts only while retained, and
+/// stores each external-source mutation without what its row already says.
+/// v39 drops the handoff grant table, which lives in the project session store.
+pub const SCHEMA_VERSION: u32 = 39;
 
-/// Reads the current schema version from `PRAGMA user_version`.
-async fn get_version(conn: &impl QueryExecutor) -> Result<u32> {
-    let mut rows =
-        conn.query("PRAGMA user_version", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read user_version: {e}"),
-                operation: "get_version".to_string(),
-            })?;
-    let row = rows.next().await.map_err(|e| TraceDecayError::Database {
-        message: format!("failed to read user_version row: {e}"),
-        operation: "get_version".to_string(),
-    })?;
-    match row {
-        Some(r) => {
-            let v: i64 = r.get(0).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read user_version value: {e}"),
-                operation: "get_version".to_string(),
-            })?;
-            Ok(v as u32)
-        }
-        None => Ok(0),
+/// The runtime ledger's retired outbox and inbox tables, exactly as v39 stores
+/// carry them. Nothing reads or writes them, but a store cannot change shape
+/// in place, so the v39 shape keeps them until the next [`SCHEMA_VERSION`].
+const RETIRED_RUNTIME_EFFECTS_SCHEMA_V39: &str = "
+CREATE TABLE IF NOT EXISTS td_runtime_writer_outbox_v1 (
+    source_shard_json TEXT NOT NULL,
+    source_incarnation INTEGER NOT NULL CHECK (source_incarnation > 0),
+    source_authority_epoch INTEGER NOT NULL CHECK (source_authority_epoch > 0),
+    effect_id TEXT NOT NULL,
+    ordering_key TEXT NOT NULL,
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'dispatched', 'effect_unknown', 'acknowledged')
+    ),
+    entry_json TEXT NOT NULL,
+    source_receipt_json TEXT NOT NULL,
+    transaction_scope_json TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    durability_json TEXT NOT NULL,
+    updated_at_micros INTEGER NOT NULL,
+    PRIMARY KEY (source_shard_json, source_incarnation, source_authority_epoch, effect_id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_ordering_v1
+ON td_runtime_writer_outbox_v1 (
+    source_shard_json,
+    source_incarnation,
+    source_authority_epoch,
+    ordering_key,
+    source_sequence,
+    effect_id
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_outbox_effect_v1
+ON td_runtime_writer_outbox_v1 (source_shard_json, effect_id);
+
+CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_state_v1
+ON td_runtime_writer_outbox_v1 (
+    source_shard_json,
+    source_incarnation,
+    source_authority_epoch,
+    state,
+    updated_at_micros
+);
+
+CREATE TABLE IF NOT EXISTS td_runtime_writer_inbox_v1 (
+    target_shard_json TEXT NOT NULL,
+    target_incarnation INTEGER NOT NULL CHECK (target_incarnation > 0),
+    target_authority_epoch INTEGER NOT NULL CHECK (target_authority_epoch > 0),
+    effect_id TEXT NOT NULL,
+    ordering_key TEXT NOT NULL,
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    target_sequence INTEGER NOT NULL CHECK (target_sequence > 0),
+    identity_json TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    committed_at_micros INTEGER NOT NULL,
+    PRIMARY KEY (target_shard_json, target_incarnation, target_authority_epoch, effect_id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS td_runtime_writer_inbox_ordering_v1
+ON td_runtime_writer_inbox_v1 (
+    target_shard_json,
+    target_incarnation,
+    target_authority_epoch,
+    ordering_key,
+    source_sequence,
+    effect_id
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_inbox_effect_v1
+ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
+";
+
+fn schema_stamp_error(error: crate::db::schema_version::SchemaVersionError) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: error.to_string(),
+        operation: "schema_version".to_owned(),
     }
 }
 
-/// Sets the schema version via `PRAGMA user_version`.
-///
-/// PRAGMA statements cannot be parameterised, so we format the value
-/// directly. This is safe because `version` is a u32.
-async fn set_version(conn: &impl Executor, version: u32) -> Result<()> {
-    conn.execute(&format!("PRAGMA user_version = {version}"), ())
+/// Recorded graph version. An unstamped file is 0, and a legacy pragma is
+/// visible until [`adopt_graph_stamp`] moves it.
+async fn get_version(conn: &(impl QueryExecutor + Sync)) -> Result<u32> {
+    let version =
+        crate::db::schema_version::read_version(conn, crate::db::schema_version::GRAPH_COMPONENT)
+            .await
+            .map_err(schema_stamp_error)?;
+    match version {
+        None => Ok(0),
+        Some(version) => u32::try_from(version).map_err(|_| {
+            schema_stamp_error(crate::db::schema_version::SchemaVersionError::Unreadable {
+                component: crate::db::schema_version::GRAPH_COMPONENT.to_owned(),
+                message: format!("version {version} is outside the graph stamp range"),
+            })
+        }),
+    }
+}
+
+async fn record_graph_version(conn: &(impl Executor + Sync), version: u32) -> Result<()> {
+    crate::db::schema_version::record_version(
+        conn,
+        crate::db::schema_version::GRAPH_COMPONENT,
+        i64::from(version),
+    )
+    .await
+    .map_err(schema_stamp_error)
+}
+
+async fn adopt_graph_stamp(conn: &(impl Executor + Sync)) -> Result<()> {
+    crate::db::schema_version::retire_user_version(conn)
         .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to set user_version: {e}"),
-            operation: "set_version".to_string(),
-        })?;
-    Ok(())
+        .map_err(schema_stamp_error)
 }
 /// Configures incremental auto-vacuum for a brand-new database before any
 /// schema-shaping pragmas or tables are created.
@@ -170,55 +253,73 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
         })?;
 
     super::memory_v2::create_schema(conn, "create_schema").await?;
-    super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
+    conn.execute_batch(tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create generation diagnostics schema: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
     conn.execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
         .await
         .map_err(|e| TraceDecayError::Database {
             message: format!("failed to create graph publication schema: {e}"),
             operation: "create_schema".to_string(),
         })?;
-    conn.execute_batch(tracedecay_rusqlite_runtime::repository::SEMANTIC_VECTOR_STAGING_SCHEMA)
+    conn.execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)
         .await
         .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to create semantic vector staging schema: {e}"),
+            message: format!("failed to create runtime writer ledger: {e}"),
             operation: "create_schema".to_string(),
         })?;
-    conn.execute_batch(tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1)
+    conn.execute_batch(RETIRED_RUNTIME_EFFECTS_SCHEMA_V39)
         .await
         .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to create handoff-open schema: {e}"),
+            message: format!("failed to create retired runtime effects tables: {e}"),
             operation: "create_schema".to_string(),
         })?;
     final_shape::require_exact_final_shape(conn).await?;
-    set_version(conn, SCHEMA_VERSION).await?;
+    record_graph_version(conn, SCHEMA_VERSION).await?;
     Ok(())
 }
-/// Reports whether the file already carries user schema objects.
-///
-/// A brand-new file has `user_version = 0` and no objects at all. That is not a
-/// store at an older shape; it is an empty file this binary may create into.
-async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
+
+/// Runs a `SELECT 1 ... LIMIT 1`-shaped probe against `sqlite_master` and
+/// reports whether it matched anything.
+async fn sqlite_master_probe(
+    conn: &impl QueryExecutor,
+    sql: &str,
+    operation: &str,
+) -> Result<bool> {
     let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master
-             WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'
-             LIMIT 1",
-            (),
-        )
+        .query(sql, ())
         .await
         .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to probe sqlite_master for existing schema: {e}"),
-            operation: "ensure_schema_current".to_string(),
+            message: format!("failed to probe sqlite_master: {e}"),
+            operation: operation.to_owned(),
         })?;
     Ok(rows
         .next()
         .await
         .map_err(|e| TraceDecayError::Database {
             message: format!("failed to read sqlite_master probe row: {e}"),
-            operation: "ensure_schema_current".to_string(),
+            operation: operation.to_owned(),
         })?
         .is_some())
+}
+
+/// Reports whether the file already carries user schema objects.
+///
+/// A brand-new file has `user_version = 0` and no objects at all. That is not a
+/// store at an older shape; it is an empty file this binary may create into.
+async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
+    sqlite_master_probe(
+        conn,
+        "SELECT 1 FROM sqlite_master
+         WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'
+         LIMIT 1",
+        "ensure_schema_current",
+    )
+    .await
 }
 
 async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<Option<String>> {
@@ -279,6 +380,25 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
         })
 }
 
+/// Refuses a store that still carries an object of a retired `SQLite`
+/// projection, whatever its stamp, naming the retired object in the refusal.
+async fn require_no_retired_sqlite_projection_object(
+    conn: &(impl QueryExecutor + Sync),
+) -> Result<()> {
+    let Some(object) = retired_sqlite_projection_object(conn).await? else {
+        return Ok(());
+    };
+    let current = get_version(conn).await?;
+    Err(TraceDecayError::reset_required(
+        "SQLite store",
+        format!(
+            "database schema v{current} still contains retired SQLite projection object \
+             '{object}'; remove the store directory and let this binary create the exact \
+             relational shape"
+        ),
+    ))
+}
+
 fn unsupported_schema_version(current: u32) -> TraceDecayError {
     TraceDecayError::reset_required(
         "SQLite store",
@@ -291,14 +411,19 @@ fn unsupported_schema_version(current: u32) -> TraceDecayError {
 }
 
 /// Verifies an opened store carries the schema this binary creates, creating it
-/// when the file is still empty.
+/// when the file is still empty. Every other stamp or shape is refused.
 ///
-/// This binary has no upgrade ladder: a store stamped with any other version is
-/// refused with the fresh-start remedy rather than stepped forward.
+/// The schema ladder is awaited through a `dyn Future` so its concrete future
+/// type stops at this phase boundary: with the instrumentation wrappers compiled in,
+/// the un-erased chain (retrieval-anchor schema -> memory baseline -> this
+/// ladder -> store mount -> lifecycle -> project open) overflows rustc's
+/// `Send` query depth in the root crate's lib test.
 pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()> {
     let writer = database.writer_connection("ensure schema current").await?;
     let connection = writer.engine_connection();
-    ensure_schema_current_engine_connection(&connection).await
+    let ladder: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+        Box::pin(ensure_schema_current_engine_connection(&connection));
+    ladder.await
 }
 
 async fn ensure_schema_current_engine_connection(
@@ -308,26 +433,20 @@ async fn ensure_schema_current_engine_connection(
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_engine_connection(conn).await;
     }
-    verify_final_schema_connection(conn).await
+    verify_final_schema_connection(conn).await?;
+    adopt_graph_stamp(conn).await
 }
 
 /// Verifies that an already-existing store has the one exact final shape this
 /// binary accepts. This query-only authority intentionally cannot initialize a
 /// fresh file, so read-only mounts cannot change persisted state.
-pub(crate) async fn verify_final_schema_connection(conn: &impl QueryExecutor) -> Result<()> {
+pub(crate) async fn verify_final_schema_connection(
+    conn: &(impl QueryExecutor + Sync),
+) -> Result<()> {
+    require_no_retired_sqlite_projection_object(conn).await?;
     let current = get_version(conn).await?;
     if current != SCHEMA_VERSION {
         return Err(unsupported_schema_version(current));
-    }
-    if let Some(object) = retired_sqlite_projection_object(conn).await? {
-        return Err(TraceDecayError::reset_required(
-            "SQLite store",
-            format!(
-                "database schema v{current} still contains retired SQLite projection object \
-                 '{object}'; remove the store directory and let this binary create the exact \
-                 relational shape"
-            ),
-        ));
     }
     final_shape::require_exact_final_shape(conn).await?;
     Ok(())
@@ -339,7 +458,8 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
-    verify_final_schema_connection(conn).await
+    verify_final_schema_connection(conn).await?;
+    adopt_graph_stamp(conn).await
 }
 
 #[cfg(test)]

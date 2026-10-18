@@ -92,8 +92,10 @@ impl<'a> PersistedAssertion<'a> {
                     assertion.actor_id().map(|actor| actor.as_str()).into(),
                 ),
             ],
-            supersession: superseded_assertions(assertion.kind())
-                .into_iter()
+            supersession: assertion
+                .kind()
+                .supersedes()
+                .iter()
                 .map(|id| id.as_str().to_owned())
                 .collect(),
             payload: vec![
@@ -207,14 +209,6 @@ pub(super) fn insert_assertion(
         )?;
     }
     Ok(())
-}
-
-fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
-    match kind {
-        FactAssertionKindV1::Correction { supersedes } => vec![supersedes],
-        FactAssertionKindV1::Merge { supersedes } => supersedes.iter().collect(),
-        FactAssertionKindV1::Initial => Vec::new(),
-    }
 }
 
 /// Compare the rows hanging off a stored assertion header against the ones the

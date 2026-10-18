@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ExecutionTopologyViewV1Schema,
   type ExecutionTopologyViewV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { workTopologyReading } from './workTopologyModel.ts';
 
 function topology(generation = 'generation-7'): ExecutionTopologyViewV1 {

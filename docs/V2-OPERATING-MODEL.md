@@ -1,12 +1,11 @@
-# TraceDecay Final V2 Operating Model
+# TraceDecay final V2 operating model
 
-This is a concise operator and contributor summary of final-V2 storage, scope,
-host ingestion, and retrieval. The
+This guide describes final-V2 storage, scope, host ingestion, and retrieval
+for operators and contributors. The
 [V2 roadmap](plans/tracedecay-v2/00-plan-set-index.md) is the sole authority for
 precedence, rejected mechanisms, delivery order, and acceptance; its numbered
-plans own detailed behavior, and
-[`NEXT.md`](plans/tracedecay-v2/NEXT.md) reports current delivery status.
-Runtime status remains the truth for capabilities not yet delivered.
+plans own detailed behavior. Check runtime status to determine which
+capabilities are available.
 
 ## Authorities
 
@@ -17,15 +16,17 @@ Runtime status remains the truth for capabilities not yet delivered.
 - Grafeo is in-process and embedded. It has no graph server, sidecar, network
   transport, or separately managed process. `petgraph` and other graph/vector
   stores are not product authorities.
-- Grafeo is the sole persisted/query graph and vector projection: code symbol,
-  file, and chunk nodes; relation and traversal indexes; admitted vectors;
-  Git/evidence, session, memory, work, and workflow relation topology.
-  Canonical events, facts, source content, and reconstruction manifests remain
-  in their domain stores and are sufficient to rebuild every projection.
+- Grafeo is the sole persisted/query graph projection: code symbol, file, and
+  chunk nodes; relation and traversal indexes; Git/evidence, session, memory,
+  work, and workflow relation topology. It holds no vector index: dense code
+  retrieval is retired (plan-set index, rejected decision 11), and shared-code
+  facts live in the sealed code generation, not in Grafeo. Canonical events,
+  facts, source content, and reconstruction manifests remain in their domain
+  stores and are sufficient to rebuild every projection.
 - SQLite is relational only: registry/configuration, source cursors, admission,
   idempotency, inbox/outbox, journals, leases, receipts, redaction, retention,
   raw content and exact evidence spans, manifests, and accounting. It neither
-  shadows graph/vector data nor gains a graph-shaped compatibility table.
+  shadows graph data nor gains a graph-shaped compatibility table.
 - Every datum has one canonical authority. A rebuildable projection records its
   source generation and watermark; it never becomes a second canonical copy.
   A canonical event plus complete replay input is durable before graph
@@ -51,14 +52,14 @@ or lifecycle behavior.
 
 One daemon authority owns a local mutable store; clients reach it through the
 application boundary. Validation failures leave the prior verified graph
-readable. Grafeo `0.5.42` does not surface every mutation WAL append failure,
+readable. Grafeo `0.5.42` does not report every mutation WAL append failure,
 so `WalSync` is a flush request, not a publication receipt. Observable
 sync/close/recovery failures return typed `DurabilityUncertain` and close the
 runtime. Successful convergence remains unservable until close/reopen and full
 recovered-projection digest verification; mismatch resets and rebuilds the
 derived projection from canonical input.
 Cancellation, staleness, denial, unavailability, reset-required, corruption,
-and budget exhaustion stay typed through every surface.
+and budget exhaustion retain their types across every interface.
 
 ## Identity, scope, and host sources
 
@@ -83,8 +84,8 @@ store.
 
 ## Lossless bounded retrieval
 
-One retrieval kernel serves MCP, CLI, dashboard, host integrations, LSP, API,
-and SDK surfaces. Adapters translate and render; they do not add a second
+MCP, CLI, dashboard, host integrations, LSP, API, and SDK requests use the same
+retrieval implementation. Adapters translate and render; they do not add a second
 ranking, cursor, hydration, or store-selection path.
 
 1. Resolve authorization and freeze the request, scope, versions, and sorted
@@ -116,7 +117,7 @@ transcript activity or silently imply complete coverage.
 ## Validation
 
 All runtime validation uses isolated temporary home, profile, project, and
-socket paths. Never install, dogfood, start, restart, or test a V2 daemon
+socket paths. Never install, use, start, restart, or test a V2 daemon
 against an operator's live TraceDecay profile. Acceptance is direct production
 behavior: exact final-store admission, authoritative reset/recreation, bounded
 host ingestion, project-wide fact scope, deterministic lossless retrieval, and

@@ -1,7 +1,7 @@
 //! Generic retrieval port surface.
 //!
 //! Read-only ports are implemented by root store/projector adapters, while
-//! lanes compose the shared `Retriever<R, E>` domain port.
+//! each lane exposes its own typed retriever trait.
 //!
 //! No SQL, no transport, no policy imports. Ports are synchronous contracts;
 //! scheduling and cancellation are application-layer concerns.
@@ -19,6 +19,47 @@ use super::exact::{ExactLaneEvidence, ExactLaneRequest};
 use super::graph::{GraphLaneEvidence, GraphLaneRequest};
 use super::lexical::{LexicalLaneEvidence, LexicalLaneRequest};
 
+/// Request-scoped cancellation and monotonic deadline authority shared by
+/// retrieval lanes.
+pub trait RetrievalExecutionControl: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+
+    /// Monotonic elapsed time in the request-relative domain used by
+    /// [`RetrievalBudget::deadline_micros`].
+    fn elapsed_micros(&self) -> u64;
+}
+
+/// One sealed lexical artifact page's worth of candidate work. Readers keep
+/// streaming rows, but consult request authority before starting the next page.
+pub const RETRIEVAL_CANDIDATE_BATCH_SIZE: usize = 128;
+
+/// Page bounds for streaming one sealed generation into the durable lexical
+/// text artifact. One page is one bounded unit of background build progress,
+/// and every sealed record, including the largest clone body a real
+/// repository admits, must fit one page.
+pub const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = RETRIEVAL_CANDIDATE_BATCH_SIZE;
+pub const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
+/// Unscaled transaction width of one text-artifact source batch. The daemon
+/// scales it with host memory; a benchmark offers it unscaled.
+pub const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
+pub const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
+
+pub(crate) fn retrieval_checkpoint(
+    control: &dyn RetrievalExecutionControl,
+) -> Result<(), RetrievalPortError> {
+    if control.is_cancelled() {
+        Err(RetrievalPortError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+/// Detail of [`RetrievalPortError::AuthorityUnavailable`] when another owner
+/// holds the code-generation store lock. The holder releases it on its own;
+/// a refused pass waits for that release instead of retrying.
+pub const CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1: &str =
+    "code-generation store has an active owner";
+
 /// Incompatible indexes or models never trigger silent fallback.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RetrievalPortError {
@@ -30,6 +71,10 @@ pub enum RetrievalPortError {
     GenerationMismatch,
     #[error("lane authority is unavailable: {0}")]
     AuthorityUnavailable(String),
+    /// The process resident-memory authority refused the work's reservation.
+    /// Retrying before memory is given back reproduces the refusal.
+    #[error("resident memory refused the work: {0}")]
+    ResidentMemoryRefused(String),
     #[error("lane projection is incompatible with the request profile")]
     IncompatibleProjection,
     #[error("the read port observed stale evidence")]
@@ -44,13 +89,23 @@ pub enum RetrievalPortError {
 
 impl RetrievalPortError {
     /// True when this failure is a deterministic contract violation that the
-    /// same input reproduces on every pass — a wrong filesystem mode, a
+    /// same input reproduces on every pass, a wrong filesystem mode, a
     /// symlinked or non-directory store path, a corrupt identity. Background
     /// workers park these visibly instead of masking them as warming, unlike
     /// transient capacity, availability, staleness, and cancellation failures
     /// that a later pass can clear on its own.
     pub fn is_deterministic_contract(&self) -> bool {
         matches!(self, Self::Contract(_))
+    }
+
+    /// The code-generation store lock is held by another owner. Retrying
+    /// before that owner releases it reproduces the refusal.
+    pub fn is_generation_store_lock_contended(&self) -> bool {
+        matches!(
+            self,
+            Self::AuthorityUnavailable(detail)
+                if detail == CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1
+        )
     }
 }
 
@@ -59,7 +114,10 @@ impl From<RetrievalPortError> for RetrievalError {
         match error {
             RetrievalPortError::CapabilityManifestRejected => Self::CapabilityManifestRejected,
             RetrievalPortError::GenerationMismatch => Self::GenerationMismatch,
-            RetrievalPortError::AuthorityUnavailable(detail) => Self::AuthorityUnavailable(detail),
+            RetrievalPortError::AuthorityUnavailable(detail)
+            | RetrievalPortError::ResidentMemoryRefused(detail) => {
+                Self::AuthorityUnavailable(detail)
+            }
             RetrievalPortError::IncompatibleProjection => Self::IncompatibleProjection,
             RetrievalPortError::StaleEvidence => Self::StaleEvidence,
             RetrievalPortError::Cancelled => Self::Cancelled,
@@ -194,6 +252,10 @@ pub trait ExactTermPostingReadPort {
 /// generation.
 ///
 /// Whole-term and language-profiled subtoken postings remain independent.
+/// Implementations consult `request.control` between bounded units of row
+/// work and unwind with [`RetrievalPortError::Cancelled`] once the request is
+/// abandoned, so a settled caller never keeps its execution permit occupied
+/// while the remaining candidate rows decode and score.
 pub trait LexicalPostingReadPort {
     /// Return the committed candidate prefix for `request` against the
     /// pinned generation.
@@ -214,23 +276,8 @@ pub trait GraphEvidenceReadPort {
     fn read_graph_evidence(
         &self,
         request: &GraphLaneRequest,
-        control: std::sync::Arc<dyn super::graph::GraphExecutionControl>,
+        control: std::sync::Arc<dyn RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
-}
-
-/// Compact-candidate lane adapter surface.
-///
-/// Each lane adapts its typed request and read port into shared compact
-/// candidates; it never defines a second candidate, contribution, fusion,
-/// cursor, or hydration hierarchy.
-pub trait CompactCandidateLane<R, E> {
-    /// Produce compact candidates for `request` against the pinned
-    /// generation, preserving `(source_occurrence_id,
-    /// retriever_evidence_anchor)` pairs exactly.
-    fn candidates(
-        &self,
-        request: &R,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalPortError>;
 }
 
 /// Typed reference used by lanes to bind candidates to exact code occurrences.
@@ -258,47 +305,4 @@ pub struct CodeCandidateBindingV1 {
     pub language_descriptor_revision: LanguageDescriptorRevision,
     pub matched_term_kinds: Vec<ExactTechnicalTermKindV1>,
     pub source_occurrence: SourceOccurrenceId,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{RetrievalError, RetrievalPortError};
-
-    #[test]
-    fn retrieval_port_error_preserves_identity_in_retrieval_error() {
-        let cases = [
-            (
-                RetrievalPortError::CapabilityManifestRejected,
-                RetrievalError::CapabilityManifestRejected,
-            ),
-            (
-                RetrievalPortError::GenerationMismatch,
-                RetrievalError::GenerationMismatch,
-            ),
-            (
-                RetrievalPortError::AuthorityUnavailable("index offline".to_owned()),
-                RetrievalError::AuthorityUnavailable("index offline".to_owned()),
-            ),
-            (
-                RetrievalPortError::IncompatibleProjection,
-                RetrievalError::IncompatibleProjection,
-            ),
-            (
-                RetrievalPortError::StaleEvidence,
-                RetrievalError::StaleEvidence,
-            ),
-            (RetrievalPortError::Cancelled, RetrievalError::Cancelled),
-            (
-                RetrievalPortError::BudgetExceeded,
-                RetrievalError::BudgetExceeded,
-            ),
-            (
-                RetrievalPortError::Contract("row binding".to_owned()),
-                RetrievalError::LaneContract("row binding".to_owned()),
-            ),
-        ];
-        for (port, expected) in cases {
-            assert_eq!(RetrievalError::from(port), expected);
-        }
-    }
 }

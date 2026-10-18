@@ -4,7 +4,7 @@ design_status: current
 
 # Agents final state set
 
-This folder is the authoritative Agents implementation reference. Agents is a scalable delegation and handoff topology joined to exact Sessions, Work, Code, and Delivery evidence—not a decorative network or process monitor.
+This folder is the authoritative Agents implementation reference. Agents is a scalable delegation and handoff topology joined to exact Sessions, Work, Code, and Delivery evidence, not a decorative network or process monitor.
 
 All pictured content is **CONCEPT / SYNTHETIC DATA**. The plate defines interaction and visual grammar; its names, topology, counts, status, and failure details are not runtime receipts.
 

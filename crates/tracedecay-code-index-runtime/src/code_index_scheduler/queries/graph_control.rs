@@ -1,17 +1,17 @@
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::{RetrievalBudget, UtcMicros};
-use tracedecay_query::retrieval::graph::GraphExecutionControl;
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 
-pub struct CallableGraphExecutionControl {
+pub struct CallableRetrievalExecutionControl {
     request: RequestContext,
     started_at: Instant,
 }
 
-impl CallableGraphExecutionControl {
-    pub fn for_request(request: &RequestContext) -> Arc<dyn GraphExecutionControl> {
+impl CallableRetrievalExecutionControl {
+    pub fn for_request(request: &RequestContext) -> Arc<dyn RetrievalExecutionControl> {
         Arc::new(Self {
             request: request.clone(),
             started_at: Instant::now(),
@@ -19,13 +19,13 @@ impl CallableGraphExecutionControl {
     }
 }
 
-impl GraphExecutionControl for CallableGraphExecutionControl {
+impl RetrievalExecutionControl for CallableRetrievalExecutionControl {
     fn is_cancelled(&self) -> bool {
         self.request.cancellation().is_cancelled()
     }
 
     fn elapsed_micros(&self) -> u64 {
-        u64::try_from(self.started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
+        tracedecay_runtime_core::tracedecay::saturating_duration_micros(self.started_at.elapsed())
     }
 }
 

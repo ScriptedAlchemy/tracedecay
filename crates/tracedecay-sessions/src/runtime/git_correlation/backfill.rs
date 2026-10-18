@@ -1,16 +1,20 @@
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
 use tracedecay_capture::normalize_timestamp_secs;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
-use super::attribution::{
-    publish_graph_evidence, publish_graph_evidence_controlled, stable_backfill_span,
-};
+#[cfg(test)]
+use super::attribution::attribute_commits;
+use super::attribution::stable_backfill_span;
+use super::rows::{GitEvidenceBatch, GitEvidenceWriter};
 use super::store::GitCorrelationSessionStore;
 
 use super::{
-    AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation,
-    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GIT_HISTORY_ROWID_FRONTIER_KEY,
-    GitCorrelationError, GitCorrelationWriteTxn, ScannedCommit, SpanOverlapKind, SpanScanTarget,
-    TargetScan, normalize_worktree, run_commit_attribution_sweep,
+    AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation, CommitSessionRecord,
+    DEFAULT_SPAN_MERGE_GAP_SECS, GIT_HISTORY_ROWID_FRONTIER_KEY, GIT_HISTORY_SEQUENCE_FRONTIER_KEY,
+    GitCorrelationError, GitCorrelationWriteTxn, ScannedCommit, SessionGitSpan, SpanOverlapKind,
+    SpanScanTarget, TargetScan, normalize_worktree,
 };
 
 mod bounded;
@@ -24,7 +28,7 @@ pub use bounded::{
 #[derive(Debug)]
 pub(super) struct SessionActivityPageRow {
     pub source_rowid: i64,
-    pub activity_timestamp: i64,
+    pub change_sequence: i64,
     pub session: SessionActivityRow,
 }
 
@@ -38,6 +42,9 @@ pub(super) struct SessionActivityPageRow {
 pub struct SessionActivityRow {
     pub provider: String,
     pub session_id: String,
+    /// Where the session ran: its retained `{provider}_session_cwd`, else the
+    /// session row's `project_path`. A linked-worktree session shares the
+    /// primary checkout's `project_path`, so only its cwd names its worktree.
     pub project_path: String,
     pub started_at: Option<i64>,
     pub ended_at: Option<i64>,
@@ -72,13 +79,28 @@ impl SessionActivityRow {
         }
     }
 
-    /// The activity timestamp the incremental backfill orders and watermarks by:
-    /// the newest message time, else the declared end, else the start. Mirrors
-    /// the `COALESCE(MAX(m.timestamp), s.ended_at, s.started_at)` key used by
-    /// [`session_activity_page_after`], so the returned value compares directly
-    /// against the persisted watermark (both are raw, un-normalized bounds).
-    pub fn activity_sort_key(&self) -> Option<i64> {
-        self.message_max_ts.or(self.ended_at).or(self.started_at)
+    /// The folder whose Git history the session ran against. A provider that
+    /// records a project id rather than a folder (Claude) ran in the project
+    /// store's own admitted root.
+    ///
+    /// The recorded path is honored whenever it is a rooted path on any host:
+    /// a POSIX-absolute path (`/home/...`) is rooted on Windows too, so a
+    /// session recorded under another platform stays attributed to its own
+    /// folder instead of silently inheriting this project's root.
+    pub(super) fn folder<'a>(
+        &'a self,
+        project_root: Option<&'a std::path::Path>,
+    ) -> Option<&'a std::path::Path> {
+        let project_path = self.project_path.trim();
+        if project_path.is_empty() {
+            return None;
+        }
+        let path = std::path::Path::new(project_path);
+        if path.has_root() {
+            Some(path)
+        } else {
+            project_root
+        }
     }
 }
 
@@ -152,8 +174,8 @@ pub struct WindowBranchSegment {
 
 /// Intersects an activity window `[win_start, win_end]` with a worktree's
 /// branch `timeline` (oldest-first, from [`branch_timeline_from_reflog`]),
-/// yielding the branch segments the session overlapped. The leading stretch —
-/// before the first timeline entry that lands after `win_start` — is
+/// yielding the branch segments the session overlapped. The leading stretch,
+/// before the first timeline entry that lands after `win_start`, is
 /// attributed to `initial_branch` (callers pass the branch `HEAD` currently
 /// points at as the floor).
 ///
@@ -221,12 +243,15 @@ pub struct BackfillOptions {
     pub since: i64,
     /// Maximum number of sessions to scan.
     pub limit_sessions: usize,
-    /// Span merge gap forwarded to [`record_span_observation`].
+    /// Span merge gap forwarded to `record_span_observation`.
     pub merge_gap_secs: i64,
     /// Hard cap on commits parsed from a single `git log` invocation.
     pub max_commits_per_repo: usize,
     /// When true, derive and count everything but write nothing.
     pub dry_run: bool,
+    /// The project store's admitted root, where sessions that record a
+    /// project id instead of a folder ran.
+    pub project_root: Option<std::path::PathBuf>,
 }
 
 impl Default for BackfillOptions {
@@ -237,6 +262,7 @@ impl Default for BackfillOptions {
             merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
             max_commits_per_repo: 5_000,
             dry_run: false,
+            project_root: None,
         }
     }
 }
@@ -250,6 +276,13 @@ pub struct BackfillStats {
     pub skipped_no_window: usize,
     pub skipped_not_worktree: usize,
     pub skipped_git_error: usize,
+    /// Retained span targets whose archived branch or worktree no longer
+    /// resolves, or whose Git reads kept failing past the retry budget. Their
+    /// observed identity remains authoritative; only inferred historical
+    /// attribution is unavailable.
+    pub unavailable_attributions: usize,
+    /// Whether this pass durably advanced the incremental session tuple.
+    pub frontier_advanced: bool,
 }
 
 impl BackfillStats {
@@ -261,23 +294,48 @@ impl BackfillStats {
         }
     }
 
-    #[hotpath::skip]
     pub const fn skipped_total(&self) -> usize {
-        self.skipped_no_window + self.skipped_not_worktree + self.skipped_git_error
+        self.skipped_no_window
+            + self.skipped_not_worktree
+            + self.skipped_git_error
+            + self.unavailable_attributions
+    }
+
+    /// Whether this pass durably published evidence or advanced its source
+    /// tuple. Skip counters alone are observations, not committed progress.
+    pub const fn committed_progress(&self) -> bool {
+        self.frontier_advanced || self.spans_written > 0 || self.commits_attributed > 0
     }
 }
 
 /// Abstracts the git subprocess surface the backfill needs, so tests can run
 /// the core against a real repo ([`SystemGit`]) or a canned fixture.
 ///
-/// `Send + Sync` so a `&dyn GitReflogSource` can be held across an `.await`
-/// inside a spawned task (the startup auto-backfill runs on a tokio worker).
+/// `Send + Sync` so the convergence pass can hand an
+/// `Arc<dyn GitReflogSource>` to the blocking pool, where its subprocess
+/// waits cannot hold a native worker.
 pub trait GitReflogSource: Send + Sync {
+    /// Proves that this source has no history to publish. Sources without an
+    /// unborn-repository authority retain normal reflog reads and error handling.
+    fn has_verified_empty_history(
+        &self,
+        _worktree: &std::path::Path,
+    ) -> Result<bool, GitCorrelationError> {
+        Ok(false)
+    }
     /// `git reflog --date=unix HEAD` text for `worktree`, or `None` on error.
     fn reflog(&self, worktree: &std::path::Path) -> Option<String>;
     /// The branch `HEAD` currently points at in `worktree` (`None` = detached
     /// or unknown), used as the leading-segment floor.
     fn current_branch(&self, worktree: &std::path::Path) -> Option<String>;
+    /// Whether `reference` still resolves to a commit. Archived transcript
+    /// branches may have been deleted while their observed identity remains
+    /// valid evidence.
+    fn commit_reference_exists(
+        &self,
+        _worktree: &std::path::Path,
+        _reference: &str,
+    ) -> Result<bool, GitCorrelationError>;
     /// `git log <branch> --pretty=%H %ct --since=<since>` text for `worktree`,
     /// newest-first. `None` on error.
     fn commit_log(&self, worktree: &std::path::Path, branch: &str, since: i64) -> Option<String>;
@@ -293,7 +351,48 @@ impl SystemGit {
     }
 }
 
+pub fn git_commit_reference_exists(
+    worktree: &std::path::Path,
+    reference: &str,
+) -> Result<bool, GitCorrelationError> {
+    let resolved = format!("{reference}^{{commit}}");
+    let output = tracedecay_runtime_core::git::bounded_git_output(
+        worktree,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &resolved,
+        ],
+        &tracedecay_runtime_core::git::GitCommandBounds::default(),
+    )
+    .map_err(|error| GitCorrelationError::Unavailable(error.to_string()))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            Err(GitCorrelationError::Unavailable(format!(
+                "cannot resolve Git commit reference {reference:?}: {}",
+                detail.trim()
+            )))
+        }
+    }
+}
+
 impl GitReflogSource for SystemGit {
+    fn has_verified_empty_history(
+        &self,
+        worktree: &std::path::Path,
+    ) -> Result<bool, GitCorrelationError> {
+        bounded::verified_empty_history(worktree).map_err(|interruption| {
+            GitCorrelationError::Unavailable(format!(
+                "Git history source verification failed: {interruption:?}"
+            ))
+        })
+    }
+
     fn reflog(&self, worktree: &std::path::Path) -> Option<String> {
         Self::output(worktree, &["reflog", "--date=unix", "HEAD"])
     }
@@ -308,14 +407,24 @@ impl GitReflogSource for SystemGit {
         }
     }
 
+    fn commit_reference_exists(
+        &self,
+        worktree: &std::path::Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        git_commit_reference_exists(worktree, reference)
+    }
+
     fn commit_log(&self, worktree: &std::path::Path, branch: &str, since: i64) -> Option<String> {
+        // --since parses approximate dates: small epoch values become wall-clock
+        // times. --max-age accepts the raw timestamp; Git dates are unsigned.
         Self::output(
             worktree,
             &[
                 "log",
                 branch,
                 "--pretty=%H %ct",
-                &format!("--since={since}"),
+                &format!("--max-age={}", since.max(0)),
             ],
         )
     }
@@ -343,16 +452,16 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 
 /// Runs the historical backfill against one project's session store.
 ///
-/// `session_store` is the per-project sessions authority (already open, and —
-/// for a real run — writable). `analytics_events` contribute only
+/// `session_store` is the per-project sessions authority (already open, and,
+/// for a real run, writable). `analytics_events` contribute only
 /// provider/session timestamps (via [`AnalyticsSessionTimestampSource`]);
 /// branch data is never assumed present. `git` supplies the reflog/log
-/// subprocess surface. Fail-open: a broken repo or session is counted and
-/// skipped, never aborting the run.
+/// subprocess surface. A broken repo or session is counted and skipped; the
+/// derived evidence lands in one transaction.
 ///
 /// When `opts.dry_run` is set no rows are written; the returned counts reflect
 /// what *would* have been written.
-#[hotpath::measure(label = "sessions.git_correlation.backfill", future = true)]
+#[tracing::instrument(name = "sessions.git_correlation.backfill", level = "trace", skip_all)]
 pub async fn run_backfill<S, E, G>(
     session_store: &S,
     analytics_events: &[E],
@@ -370,146 +479,145 @@ where
         .await
         .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
-    let mut stats = BackfillStats::default();
-    backfill_rows(
-        session_store,
-        git,
-        opts,
-        &rows,
-        analytics_events,
-        &mut stats,
-    )
-    .await?;
-    crate::runtime::pipeline_metrics::record_git_backfill(
-        stats.sessions_scanned,
-        stats.spans_written,
-    );
+    let derived = derive_backfill_evidence(git, opts, &rows, analytics_events);
+    let mut stats = derived.stats;
+    if opts.dry_run {
+        stats.spans_written = derived.spans.len();
+        stats.commits_attributed = derived.commits.len();
+    } else if !derived.spans.is_empty() || !derived.commits.is_empty() {
+        let transaction = session_store.open_write_transaction().await?;
+        let mut writer = GitEvidenceWriter::open(&transaction).await?;
+        let written = writer
+            .apply(GitEvidenceBatch {
+                spans: derived.spans,
+                commits: derived.commits,
+                merge_gap_secs: opts.merge_gap_secs,
+                ..GitEvidenceBatch::default()
+            })
+            .await?;
+        writer.finish().await?;
+        GitCorrelationWriteTxn::commit(transaction).await?;
+        stats.spans_written = written.spans_changed;
+        stats.commits_attributed = written.commits_changed;
+    }
     Ok(stats)
 }
 
-/// Default number of previously-unattempted sessions the auto-backfill drains
-/// per pass. Bounds a single startup/tick so the first run on a store with
-/// months of history never blocks; successive passes advance the watermark and
-/// drain the remainder.
-pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
+/// Session-history evidence derived for every session past the durable
+/// frontier. Nothing is written: the convergence pass writes it and advances
+/// the frontier to `settled_through` in one transaction.
+#[derive(Debug)]
+pub struct CollectedBackfill {
+    pub spans: Vec<SessionGitSpan>,
+    pub commits: Vec<CommitSessionRecord>,
+    pub stats: BackfillStats,
+    /// Durable frontier the collection started from.
+    pub start: GitHistoryIndexFrontier,
+    /// Last session tuple before any transient Git failure; `None` when no
+    /// session past `start` settled.
+    pub settled_through: Option<GitHistoryIndexFrontier>,
+    pub settled_sessions: Vec<(String, String, i64)>,
+}
 
-/// Runs one incremental, idempotent pass of the historical git-span backfill,
-/// advancing a persistent watermark so unattended callers (MCP server startup)
-/// drain months of history a bounded batch at a time without a manual CLI
-/// invocation.
-///
-/// The watermark ([`AUTO_BACKFILL_WATERMARK_KEY`]) records the highest session
-/// activity timestamp already attempted. Each pass reads up to `limit_sessions`
-/// sessions strictly newer than the watermark, oldest-first, backfills them
-/// (span/commit writes are idempotent), then advances the watermark to the
-/// newest activity in the batch. Fresh sessions recorded after a pass are
-/// picked up by a later pass; a fully-drained store scans nothing.
-///
-/// Analytics timestamps are not consulted here. Canonical history indexing
-/// derives bounded pages from durable session activity and Git evidence.
-#[hotpath::measure(label = "sessions.git_correlation.backfill.incremental", future = true)]
-pub async fn run_incremental_backfill<S: GitCorrelationSessionStore, G>(
+/// Derives span and commit evidence for every retained session that changed
+/// past the durable change-sequence frontier, in change order. Evidence stops
+/// at the first transient Git failure so the frontier never passes an
+/// unresolved session; permanent exclusions (no activity window, not a
+/// worktree, verified empty history) settle without evidence.
+#[tracing::instrument(
+    name = "sessions.git_correlation.backfill.collect",
+    level = "trace",
+    skip_all
+)]
+pub async fn collect_incremental_backfill<S>(
     session_store: &S,
-    git: &G,
-    limit_sessions: usize,
-) -> Result<BackfillStats, GitCorrelationError>
+    git: Arc<dyn GitReflogSource>,
+    project_root: Option<&std::path::Path>,
+) -> Result<CollectedBackfill, GitCorrelationError>
 where
-    G: GitReflogSource + ?Sized,
+    S: GitCorrelationSessionStore,
 {
     session_store.require_project_sessions_authority()?;
-    let mut stats = BackfillStats::default();
-    if limit_sessions == 0 {
-        return Ok(stats);
-    }
     let snapshot = session_store.read_snapshot().await?;
-    let watermark = super::read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY)
-        .await?
-        .unwrap_or(0);
-    let rowid_frontier = super::read_meta_value(&snapshot, GIT_HISTORY_ROWID_FRONTIER_KEY)
-        .await?
-        .unwrap_or(0);
-    let page = session_activity_page_after(&snapshot, watermark, rowid_frontier, limit_sessions)
+    let start = super::read_history_frontier(&snapshot).await?;
+    // The whole backlog in one read: it all lands in one transaction, and a
+    // bounded page would repeat the grouped session scan once per page.
+    let page = session_activity_page_after(&snapshot, start.change_sequence, usize::MAX)
         .await
         .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
-    let rows = page
-        .iter()
-        .map(|row| row.session.clone())
-        .collect::<Vec<_>>();
-
-    // `since` is left at 0: the query already excludes anything at or below the
-    // watermark, so a second time floor would only drop legitimately-new spans.
+    let (frontiers, rows): (Vec<_>, Vec<_>) = page
+        .into_iter()
+        .map(|row| {
+            (
+                GitHistoryIndexFrontier {
+                    change_sequence: row.change_sequence,
+                    source_rowid: row.source_rowid,
+                },
+                row.session,
+            )
+        })
+        .unzip();
+    // `since` is left at 0: the query already excludes anything at or below
+    // the frontier, so a second time floor would only drop legitimate spans.
     let opts = BackfillOptions {
         since: 0,
-        limit_sessions,
+        limit_sessions: rows.len(),
         merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
         max_commits_per_repo: BackfillOptions::default().max_commits_per_repo,
         dry_run: false,
+        project_root: project_root.map(std::path::Path::to_path_buf),
     };
-    if !rows.is_empty() {
+    // Every Git read here is a subprocess whose pipes this thread waits on,
+    // so the derivation runs on the blocking pool, never a native worker.
+    let (rows, derived) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let no_analytics: &[super::AnalyticsSessionTimestamp] = &[];
-        backfill_rows(session_store, git, &opts, &rows, no_analytics, &mut stats).await?;
-
-        // Advance both tuple components together so equal activity timestamps
-        // resume at the exact unprocessed session row.
-        let new_frontier = page.last();
-        if let Some(new_frontier) = new_frontier
-            && (new_frontier.activity_timestamp, new_frontier.source_rowid)
-                > (watermark, rowid_frontier)
-        {
-            let transaction = session_store.open_write_transaction().await?;
-            advance_history_frontier(
-                &transaction,
-                GitHistoryIndexFrontier {
-                    activity_timestamp: new_frontier.activity_timestamp,
-                    source_rowid: new_frontier.source_rowid,
-                },
+        let derived = derive_backfill_evidence(git.as_ref(), &opts, &rows, no_analytics);
+        (rows, derived)
+    })
+    .await
+    .map_err(GitCorrelationError::Unavailable)?;
+    let settled_through = derived
+        .settled_rows
+        .checked_sub(1)
+        .and_then(|index| frontiers.get(index))
+        .copied();
+    let settled_sessions = rows
+        .iter()
+        .zip(&frontiers)
+        .take(derived.settled_rows)
+        .map(|(row, frontier)| {
+            (
+                row.provider.clone(),
+                row.session_id.clone(),
+                frontier.change_sequence,
             )
-            .await?;
-            GitCorrelationWriteTxn::commit(transaction).await?;
-        }
-    }
-
-    // Sweep commit attribution over the currently verified span projection.
-    // This is the only attribution path for spans recorded live by the hook
-    // route: those sessions have no transcript rows, so the session-driven
-    // backfill above never sees them, and without this sweep their commits
-    // would stay unattributed until a transcript ingest happens to run. The
-    // Graph publication is content-addressed and idempotent, so running it on
-    // every pass (including passes with zero new session rows) is safe.
-    stats.commits_attributed +=
-        run_commit_attribution_sweep(session_store, opts.merge_gap_secs, |target| {
-            scan_span_target(git, target, opts.merge_gap_secs, opts.max_commits_per_repo)
         })
-        .await?;
-    crate::runtime::pipeline_metrics::record_git_backfill(
-        stats.sessions_scanned,
-        stats.spans_written,
-    );
-    Ok(stats)
+        .collect();
+    Ok(CollectedBackfill {
+        spans: derived.spans,
+        commits: derived.commits,
+        stats: derived.stats,
+        start,
+        settled_through,
+        settled_sessions,
+    })
 }
 
 pub(super) async fn advance_history_frontier(
     transaction: &(impl Executor + ?Sized),
     candidate: GitHistoryIndexFrontier,
 ) -> Result<GitHistoryIndexFrontier, GitCorrelationError> {
-    let current = GitHistoryIndexFrontier {
-        activity_timestamp: super::read_meta_value(transaction, AUTO_BACKFILL_WATERMARK_KEY)
-            .await?
-            .unwrap_or(0),
-        source_rowid: super::read_meta_value(transaction, GIT_HISTORY_ROWID_FRONTIER_KEY)
-            .await?
-            .unwrap_or(0),
-    };
-    if (candidate.activity_timestamp, candidate.source_rowid)
-        <= (current.activity_timestamp, current.source_rowid)
+    let current = super::read_history_frontier(transaction).await?;
+    if (candidate.change_sequence, candidate.source_rowid)
+        <= (current.change_sequence, current.source_rowid)
     {
         return Ok(current);
     }
     super::write_meta_value(
         transaction,
-        AUTO_BACKFILL_WATERMARK_KEY,
-        candidate.activity_timestamp,
+        GIT_HISTORY_SEQUENCE_FRONTIER_KEY,
+        candidate.change_sequence,
     )
     .await?;
     super::write_meta_value(
@@ -524,9 +632,11 @@ pub(super) async fn advance_history_frontier(
 /// Scans one span target's branch history through the backfill's git source,
 /// mirroring the ingest-time sweep's scanner: commits on the recorded branch
 /// (or `HEAD` for detached spans) inside the gap-widened span window. Reports
-/// [`TargetScan::Unavailable`] — not an empty list — when the worktree is gone
-/// or git fails, so the sweep holds its watermark and retries the target.
-fn scan_span_target<G: GitReflogSource + ?Sized>(
+/// [`TargetScan::MissingReference`] for an archived branch that no longer
+/// exists, [`TargetScan::MissingWorktree`] for a worktree that is gone or no
+/// longer a repository, and [`TargetScan::Unavailable`] for a Git failure
+/// that a later sweep may recover.
+pub(super) fn scan_span_target<G: GitReflogSource + ?Sized>(
     git: &G,
     target: &SpanScanTarget,
     gap_secs: i64,
@@ -534,7 +644,7 @@ fn scan_span_target<G: GitReflogSource + ?Sized>(
 ) -> TargetScan {
     let worktree = std::path::Path::new(&target.worktree);
     if !worktree.is_dir() {
-        return TargetScan::Unavailable;
+        return TargetScan::MissingWorktree;
     }
     let since = target.window_start.saturating_sub(gap_secs);
     let until = target.window_end.saturating_add(gap_secs);
@@ -543,6 +653,14 @@ fn scan_span_target<G: GitReflogSource + ?Sized>(
         .as_deref()
         .filter(|branch| !branch.is_empty())
         .unwrap_or("HEAD");
+    match git.commit_reference_exists(worktree, branch) {
+        Ok(true) => {}
+        Ok(false) => return TargetScan::MissingReference,
+        Err(_) if tracedecay_runtime_core::worktree::git_worktree_root(worktree).is_none() => {
+            return TargetScan::MissingWorktree;
+        }
+        Err(_) => return TargetScan::Unavailable,
+    }
     let Some(log_text) = git.commit_log(worktree, branch, since) else {
         return TargetScan::Unavailable;
     };
@@ -555,25 +673,104 @@ fn scan_span_target<G: GitReflogSource + ?Sized>(
     )
 }
 
-/// Shared per-session backfill loop used by both the exhaustive
-/// [`run_backfill`] and the incremental [`run_incremental_backfill`]. Indexes
-/// the supplied analytics timestamps once, then folds each row into the span
-/// and commit tables, counting skips instead of aborting.
-async fn backfill_rows<S, E, G: GitReflogSource + ?Sized>(
-    session_store: &S,
+/// Evidence derived for a run of session rows, before publication.
+struct DerivedBackfill {
+    spans: Vec<SessionGitSpan>,
+    commits: Vec<CommitSessionRecord>,
+    stats: BackfillStats,
+    /// Rows before the first transient Git failure. Only these settled.
+    settled_rows: usize,
+}
+
+/// HEAD's branch history for one worktree root.
+struct WorktreeTimeline {
+    timeline: Vec<BranchTimelineEntry>,
+    current_branch: Option<String>,
+}
+
+/// One session's branch segments on its resolved worktree.
+struct PlannedSession<'r> {
+    row: &'r SessionActivityRow,
+    worktree_root: std::path::PathBuf,
+    worktree: String,
+    segments: Vec<WindowBranchSegment>,
+    analytics_within: Vec<i64>,
+}
+
+/// Git state one derivation reads once per worktree root: which root a
+/// project path resolves to and HEAD's branch timeline there. Every session
+/// of a pass observes the same repository snapshot, so re-running these
+/// subprocesses per session only multiplies the pass.
+struct WorktreeHistories<'g, G: ?Sized> {
+    git: &'g G,
+    roots: HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
+    timelines: HashMap<std::path::PathBuf, Option<Arc<WorktreeTimeline>>>,
+}
+
+impl<'g, G: GitReflogSource + ?Sized> WorktreeHistories<'g, G> {
+    fn new(git: &'g G) -> Self {
+        Self {
+            git,
+            roots: HashMap::new(),
+            timelines: HashMap::new(),
+        }
+    }
+
+    fn worktree_root(&mut self, folder: &std::path::Path) -> Option<std::path::PathBuf> {
+        self.roots
+            .entry(folder.to_path_buf())
+            .or_insert_with(|| tracedecay_runtime_core::worktree::git_worktree_root(folder))
+            .clone()
+    }
+
+    /// `Ok(None)` is verified empty history: nothing to publish, and nothing
+    /// to retry.
+    fn timeline(
+        &mut self,
+        worktree_root: &std::path::Path,
+    ) -> Result<Option<Arc<WorktreeTimeline>>, BackfillSkipReason> {
+        if let Some(known) = self.timelines.get(worktree_root) {
+            return Ok(known.clone());
+        }
+        let timeline = if self
+            .git
+            .has_verified_empty_history(worktree_root)
+            .map_err(|_| BackfillSkipReason::GitError)?
+        {
+            None
+        } else {
+            let reflog = self
+                .git
+                .reflog(worktree_root)
+                .ok_or(BackfillSkipReason::GitError)?;
+            Some(Arc::new(WorktreeTimeline {
+                timeline: branch_timeline_from_reflog(&reflog),
+                current_branch: self.git.current_branch(worktree_root),
+            }))
+        };
+        self.timelines
+            .insert(worktree_root.to_path_buf(), timeline.clone());
+        Ok(timeline)
+    }
+}
+
+/// Derives span and commit evidence for `rows` in order, stopping at the
+/// first transient Git failure. Each `(worktree, branch)` commit log is read
+/// once, from the earliest segment start any settled session needs; every
+/// segment then keeps only the commits inside its own window, exactly what a
+/// per-segment log read from that segment's start would have yielded.
+fn derive_backfill_evidence<E, G>(
     git: &G,
     opts: &BackfillOptions,
     rows: &[SessionActivityRow],
     analytics_events: &[E],
-    stats: &mut BackfillStats,
-) -> Result<(), GitCorrelationError>
+) -> DerivedBackfill
 where
-    S: GitCorrelationSessionStore,
     E: AnalyticsSessionTimestampSource,
+    G: GitReflogSource + ?Sized,
 {
     // Index analytics timestamps by (provider, session_id) for O(1) lookup.
-    let mut analytics_ts: std::collections::HashMap<(String, String), Vec<i64>> =
-        std::collections::HashMap::new();
+    let mut analytics_ts: HashMap<(String, String), Vec<i64>> = HashMap::new();
     for event in analytics_events {
         if let Some(timestamp) = event.as_analytics_session_timestamp() {
             analytics_ts
@@ -583,35 +780,121 @@ where
         }
     }
 
-    for row in rows {
+    let mut stats = BackfillStats::default();
+    let mut histories = WorktreeHistories::new(git);
+    let mut planned = Vec::new();
+    let mut settled_rows = rows.len();
+    for (index, row) in rows.iter().enumerate() {
         stats.sessions_scanned += 1;
-        let mut committed = false;
-        if let Err(reason) = backfill_one_session(
-            session_store,
-            git,
-            opts,
-            row,
-            &analytics_ts,
-            stats,
-            &mut committed,
-        )
-        .await
-        {
-            stats.record_skip(reason);
+        match plan_session(row, opts, &analytics_ts, &mut histories) {
+            Ok(Some(plan)) => planned.push((index, plan)),
+            Ok(None) => {}
+            Err(reason) => {
+                stats.record_skip(reason);
+                if reason == BackfillSkipReason::GitError {
+                    settled_rows = index;
+                    break;
+                }
+            }
         }
     }
-    Ok(())
+
+    let mut log_reads: BTreeMap<(std::path::PathBuf, String), (i64, usize)> = BTreeMap::new();
+    for (index, plan) in &planned {
+        for segment in &plan.segments {
+            if let Some(branch) = &segment.branch {
+                log_reads
+                    .entry((plan.worktree_root.clone(), branch.clone()))
+                    .and_modify(|(since, _)| *since = (*since).min(segment.start))
+                    .or_insert((segment.start, *index));
+            }
+        }
+    }
+    let mut logs = HashMap::new();
+    for ((worktree_root, branch), (since, first_row)) in log_reads {
+        match git.commit_log(&worktree_root, &branch, since) {
+            Some(log_text) => {
+                let commits = parse_commit_log(&log_text, opts.max_commits_per_repo);
+                logs.insert((worktree_root, branch), commits);
+            }
+            None if first_row < settled_rows => {
+                if settled_rows == rows.len() {
+                    stats.record_skip(BackfillSkipReason::GitError);
+                }
+                settled_rows = first_row;
+            }
+            None => {}
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut commits = Vec::new();
+    for (_, plan) in planned.iter().filter(|(index, _)| *index < settled_rows) {
+        let row = plan.row;
+        for segment in &plan.segments {
+            // Every segment yields a span seeded with its own clamped edges,
+            // so an interior segment (a mid-session branch switch) is
+            // recorded even when the window edges fall outside it.
+            let mut span = stable_backfill_span(
+                &row.provider,
+                &row.session_id,
+                segment.branch.as_deref(),
+                &plan.worktree,
+                segment.start,
+                segment.end,
+            );
+            let analytics_inside = plan
+                .analytics_within
+                .iter()
+                .filter(|&&ts| ts >= segment.start && ts <= segment.end)
+                .count();
+            span.event_count =
+                i64::try_from(analytics_inside.saturating_add(2)).unwrap_or(i64::MAX);
+            spans.push(span);
+
+            let Some(branch) = segment.branch.as_deref() else {
+                continue;
+            };
+            let Some(log) = logs.get(&(plan.worktree_root.clone(), branch.to_owned())) else {
+                continue;
+            };
+            for (sha, committed_at) in log {
+                if *committed_at < segment.start || *committed_at > segment.end {
+                    continue;
+                }
+                commits.push(CommitSessionRecord {
+                    commit_sha: sha.clone(),
+                    provider: row.provider.clone(),
+                    session_id: row.session_id.clone(),
+                    branch: Some(branch.to_string()),
+                    worktree: Some(plan.worktree.clone()),
+                    committed_at: *committed_at,
+                    span_overlap_kind: SpanOverlapKind::WithinSpan,
+                    span_id: None,
+                    relation: CommitRelation::Observed,
+                    evidence: CommitEvidence::ReflogOverlap,
+                    confidence: 30,
+                    evidence_message_id: None,
+                });
+            }
+        }
+    }
+    DerivedBackfill {
+        spans,
+        commits,
+        stats,
+        settled_rows,
+    }
 }
 
-async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource + ?Sized>(
-    session_store: &S,
-    git: &G,
+/// Resolves one session's worktree and branch segments. `Ok(None)` settles a
+/// session on verified empty history without evidence.
+fn plan_session<'r, G: GitReflogSource + ?Sized>(
+    row: &'r SessionActivityRow,
     opts: &BackfillOptions,
-    row: &SessionActivityRow,
-    analytics_ts: &std::collections::HashMap<(String, String), Vec<i64>>,
-    stats: &mut BackfillStats,
-    committed: &mut bool,
-) -> Result<(), BackfillSkipReason> {
+    analytics_ts: &HashMap<(String, String), Vec<i64>>,
+    histories: &mut WorktreeHistories<'_, G>,
+) -> Result<Option<PlannedSession<'r>>, BackfillSkipReason> {
     let (mut win_start, win_end) = row.window().ok_or(BackfillSkipReason::NoActivityWindow)?;
     if win_end < opts.since {
         return Err(BackfillSkipReason::NoActivityWindow);
@@ -620,108 +903,39 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
     if win_start > win_end {
         return Err(BackfillSkipReason::NoActivityWindow);
     }
-
-    if row.project_path.trim().is_empty() {
-        return Err(BackfillSkipReason::NotAWorktree);
-    }
-    let worktree_path = std::path::Path::new(row.project_path.trim());
-    let worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(worktree_path)
+    let folder = row
+        .folder(opts.project_root.as_deref())
         .ok_or(BackfillSkipReason::NotAWorktree)?;
-    let worktree = normalize_worktree(&worktree_root.to_string_lossy());
-
-    let reflog_text = git
-        .reflog(&worktree_root)
-        .ok_or(BackfillSkipReason::GitError)?;
-    let timeline = branch_timeline_from_reflog(&reflog_text);
-    let current_branch = git.current_branch(&worktree_root);
-
-    // Extra observation timestamps: analytics event times inside the
-    // (since-clamped) window, which refine span boundaries within a segment.
-    let mut analytics_within: Vec<i64> = Vec::new();
-    if let Some(times) = analytics_ts.get(&(row.provider.clone(), row.session_id.clone())) {
-        for &ts in times {
-            if ts >= win_start && ts <= win_end {
-                analytics_within.push(ts);
-            }
-        }
-    }
-
-    let segments = window_branch_segments(win_start, win_end, &timeline, current_branch.as_deref());
-    let mut published_spans = Vec::new();
-    let mut published_commits = Vec::new();
-
-    for segment in &segments {
-        // Every segment yields a span: seed it with its own clamped edges so an
-        // interior segment (e.g. a mid-session branch switch) is recorded even
-        // when the global window edges fall outside it. Analytics timestamps
-        // inside the segment refine the boundaries; record_span_observation
-        // merges observations on the same branch within the merge gap.
-        let mut segment_ts = vec![segment.start, segment.end];
-        segment_ts.extend(
-            analytics_within
+    let worktree_root = histories
+        .worktree_root(folder)
+        .ok_or(BackfillSkipReason::NotAWorktree)?;
+    let Some(history) = histories.timeline(&worktree_root)? else {
+        return Ok(None);
+    };
+    // Analytics event times inside the (since-clamped) window refine span
+    // boundaries within a segment.
+    let analytics_within = analytics_ts
+        .get(&(row.provider.clone(), row.session_id.clone()))
+        .map_or_default(|times| {
+            times
                 .iter()
                 .copied()
-                .filter(|&ts| ts >= segment.start && ts <= segment.end),
-        );
-        if opts.dry_run {
-            stats.spans_written += 1;
-        } else {
-            let mut span = stable_backfill_span(
-                &row.provider,
-                &row.session_id,
-                segment.branch.as_deref(),
-                &worktree,
-                segment.start,
-                segment.end,
-            );
-            span.event_count = i64::try_from(segment_ts.len()).unwrap_or(i64::MAX);
-            published_spans.push(span);
-        }
-
-        // Attribute commits on this segment's branch within the segment window.
-        let Some(branch) = segment.branch.as_deref() else {
-            continue;
-        };
-        let Some(log_text) = git.commit_log(&worktree_root, branch, segment.start) else {
-            continue;
-        };
-        for (sha, committed_at) in parse_commit_log(&log_text, opts.max_commits_per_repo) {
-            if committed_at < segment.start || committed_at > segment.end {
-                continue;
-            }
-            if opts.dry_run {
-                stats.commits_attributed += 1;
-                continue;
-            }
-            published_commits.push(CommitSessionRecord {
-                commit_sha: sha,
-                provider: row.provider.clone(),
-                session_id: row.session_id.clone(),
-                branch: Some(branch.to_string()),
-                worktree: Some(worktree.clone()),
-                committed_at,
-                span_overlap_kind: SpanOverlapKind::WithinSpan,
-                span_id: None,
-                relation: CommitRelation::Observed,
-                evidence: CommitEvidence::ReflogOverlap,
-                confidence: 30,
-                evidence_message_id: None,
-            });
-        }
-    }
-    if !opts.dry_run && (!published_spans.is_empty() || !published_commits.is_empty()) {
-        let (spans_written, commits_attributed) = publish_graph_evidence(
-            session_store,
-            "git-backfill",
-            &published_spans,
-            &published_commits,
-        )
-        .map_err(|_| BackfillSkipReason::GitError)?;
-        stats.spans_written = stats.spans_written.saturating_add(spans_written);
-        stats.commits_attributed = stats.commits_attributed.saturating_add(commits_attributed);
-        *committed = true;
-    }
-    Ok(())
+                .filter(|&ts| ts >= win_start && ts <= win_end)
+                .collect()
+        });
+    let segments = window_branch_segments(
+        win_start,
+        win_end,
+        &history.timeline,
+        history.current_branch.as_deref(),
+    );
+    Ok(Some(PlannedSession {
+        row,
+        worktree: normalize_worktree(&worktree_root.to_string_lossy()),
+        worktree_root,
+        segments,
+        analytics_within,
+    }))
 }
 
 /// Reads per-session activity windows for the backfill from a project-sessions
@@ -735,11 +949,17 @@ pub(super) async fn session_activity_rows(
     }
     let mut rows = conn
         .query(
-            "SELECT s.provider, s.session_id, s.project_path,
+            "SELECT s.provider, s.session_id,
+                    COALESCE(
+                        CASE WHEN json_valid(s.metadata_json) THEN NULLIF(json_extract(
+                            s.metadata_json, '$.' || s.provider || '_session_cwd'
+                        ), '') END,
+                        s.project_path
+                    ),
                     s.started_at, s.ended_at,
                     MIN(m.timestamp), MAX(m.timestamp)
              FROM sessions s
-             LEFT JOIN session_messages m
+             LEFT JOIN lcm_raw_messages m
                     ON m.provider = s.provider AND m.session_id = s.session_id
              GROUP BY s.provider, s.session_id
              ORDER BY COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) DESC
@@ -759,10 +979,35 @@ pub(super) async fn session_activity_rows(
     Ok(out)
 }
 
+/// Changed sessions in journal order. Rewrites keep message identities but
+/// allocate a new history revision in the source transaction.
+const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH touched AS (
+         SELECT provider, session_id, sequence AS change_sequence
+         FROM git_history_session_change
+         WHERE sequence > ?1
+     )
+     SELECT touched.provider, touched.session_id,
+            COALESCE(
+                CASE WHEN json_valid(s.metadata_json) THEN NULLIF(json_extract(
+                    s.metadata_json, '$.' || s.provider || '_session_cwd'
+                ), '') END,
+                s.project_path
+            ),
+            s.started_at, s.ended_at,
+            (SELECT MIN(m.timestamp) FROM lcm_raw_messages m
+             WHERE m.provider = s.provider AND m.session_id = s.session_id),
+            (SELECT MAX(m.timestamp) FROM lcm_raw_messages m
+             WHERE m.provider = s.provider AND m.session_id = s.session_id),
+            COALESCE(s.rowid, touched.change_sequence), touched.change_sequence
+     FROM touched
+     JOIN sessions s
+       ON s.provider = touched.provider AND s.session_id = touched.session_id
+     ORDER BY touched.change_sequence ASC
+     LIMIT ?2";
+
 pub(super) async fn session_activity_page_after(
     conn: &(impl QueryExecutor + ?Sized),
-    activity_timestamp: i64,
-    source_rowid: i64,
+    change_sequence: i64,
     limit: usize,
 ) -> Result<Vec<SessionActivityPageRow>, String> {
     if limit == 0 {
@@ -770,28 +1015,8 @@ pub(super) async fn session_activity_page_after(
     }
     let mut rows = conn
         .query(
-            "SELECT s.provider, s.session_id, s.project_path,
-                    s.started_at, s.ended_at,
-                    MIN(m.timestamp), MAX(m.timestamp),
-                    s.rowid,
-                    COALESCE(MAX(m.timestamp), s.ended_at, s.started_at)
-             FROM sessions s
-             LEFT JOIN session_messages m
-                    ON m.provider = s.provider AND m.session_id = s.session_id
-             GROUP BY s.rowid, s.provider, s.session_id
-             HAVING COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) > ?1
-                 OR (
-                    COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) = ?1
-                    AND s.rowid > ?2
-                 )
-             ORDER BY COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) ASC,
-                      s.rowid ASC
-             LIMIT ?3",
-            params![
-                activity_timestamp,
-                source_rowid,
-                i64::try_from(limit).unwrap_or(i64::MAX)
-            ],
+            SESSION_ACTIVITY_PAGE_AFTER_SQL,
+            params![change_sequence, i64::try_from(limit).unwrap_or(i64::MAX)],
         )
         .await
         .map_err(|error| format!("failed to query git history session page: {error}"))?;
@@ -805,9 +1030,9 @@ pub(super) async fn session_activity_page_after(
             source_rowid: row
                 .get(7)
                 .map_err(|error| format!("failed to decode session rowid: {error}"))?,
-            activity_timestamp: row
+            change_sequence: row
                 .get(8)
-                .map_err(|error| format!("failed to decode session activity: {error}"))?,
+                .map_err(|error| format!("failed to decode change sequence: {error}"))?,
             session: decode_session_activity_row(&row)?,
         });
     }
@@ -839,4 +1064,49 @@ fn decode_session_activity_row(row: &Row) -> Result<SessionActivityRow, String> 
             .get(6)
             .map_err(|e| format!("failed to decode message_max_ts: {e}"))?,
     })
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::SessionActivityRow;
+    use std::path::Path;
+
+    fn row(project_path: &str) -> SessionActivityRow {
+        SessionActivityRow {
+            provider: "cursor".to_owned(),
+            session_id: "s".to_owned(),
+            project_path: project_path.to_owned(),
+            started_at: Some(1),
+            ended_at: Some(2),
+            message_min_ts: None,
+            message_max_ts: None,
+        }
+    }
+
+    #[test]
+    fn folder_honors_rooted_recorded_path_on_every_platform() {
+        // A POSIX-absolute recorded folder is rooted even on Windows, where
+        // `is_absolute` alone would report false and silently re-attribute the
+        // session to this project's root instead of settling it as a
+        // non-worktree row.
+        let project_root = Path::new("project-root");
+        let row = row("/posix-style/recorded/folder");
+        assert_eq!(
+            row.folder(Some(project_root)),
+            Some(Path::new("/posix-style/recorded/folder"))
+        );
+    }
+
+    #[test]
+    fn folder_falls_back_to_project_root_for_non_path_tokens() {
+        let project_root = Path::new("project-root");
+        let row = row("proj_cli");
+        assert_eq!(row.folder(Some(project_root)), Some(project_root));
+    }
+
+    #[test]
+    fn folder_rejects_empty_recorded_path() {
+        let project_root = Path::new("project-root");
+        assert_eq!(row("   ").folder(Some(project_root)), None);
+    }
 }

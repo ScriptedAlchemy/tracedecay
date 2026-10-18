@@ -9,19 +9,24 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use thiserror::Error;
-use tracedecay_application::remote::auth::OpaqueRemoteCredential;
-use tracedecay_application::remote::credential_admission::{
+use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
+use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1, RemoteCredentialLookupErrorV1,
-    RemoteCredentialLookupPortV1,
+    RemoteCredentialLookupPortV1, RemoteCredentialUseV1,
 };
-use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
+use tracedecay_contracts::remote::protocol::{
+    RemoteProtocolFailureV1, RemoteProtocolResponseV1, remote_protocol_problem,
+};
+use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
+use tracedecay_contracts::{ApplicationContractError, RequestId, ResultContractRef};
 use tracedecay_domain::{
     BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1,
     RemoteCredentialFingerprintV1, UserProfileId, UtcMicros,
 };
 use tracedecay_rusqlite_runtime::remote::{
-    RemoteCredentialInventoryErrorV1, RemoteCredentialRegistrationV1,
-    RemoteRecoverySqliteAuthorityV1, RemoteSqliteStorageV1,
+    CredentialDerivedSpoolKeyringV1, RemoteCredentialInventoryErrorV1,
+    RemoteCredentialRegistrationV1, RemoteRecoverySqliteAuthorityV1, RemoteSpoolKeyringV1,
+    RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
 };
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 
@@ -57,11 +62,25 @@ pub enum DaemonRemoteCredentialRegistryErrorV1 {
     ResetRequired,
 }
 
-/// Shared provider of the canonical Remote Brain operational read. The
-/// composition root builds exactly one from the mounted session runtime
-/// registry; MCP, dashboard, and Doctor surfaces all read through it.
-pub type RemoteOperationalStatusProviderV1 =
-    Arc<dyn tracedecay_application::remote::status::RemoteOperationalStatusReadPort>;
+/// Typed refusal of a local Remote Brain node operator request.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteNodeOperatorErrorV1 {
+    #[error("remote node operator request is invalid")]
+    InvalidRequest,
+    #[error("grant Brain identity does not match this profile's Brain")]
+    BrainIdentityConflict,
+    #[error("a different grant or credential is already provisioned for this identity")]
+    Conflict,
+    #[error("remote node provisioning capacity is exhausted")]
+    CapacityExceeded,
+    #[error("the remote authority did not answer discovery for this enrollment")]
+    AuthorityUnavailable,
+    #[error("the remote authority could not be reached")]
+    AuthorityUnreachable,
+    #[error("remote node store is unavailable")]
+    Unavailable,
+}
 
 const REMOTE_LISTENER_STOPPED: u8 = 0;
 const REMOTE_LISTENER_SERVING: u8 = 1;
@@ -147,11 +166,11 @@ impl DaemonRemoteCredentialAuthorityV1 {
             .store(REMOTE_LISTENER_STOPPED, Ordering::Release);
     }
 
-    fn listener_read(&self) -> tracedecay_application::RemoteListenerReadV1 {
+    fn listener_read(&self) -> tracedecay_contracts::RemoteListenerReadV1 {
         match self.listener.load(Ordering::Acquire) {
-            REMOTE_LISTENER_SERVING => tracedecay_application::RemoteListenerReadV1::Serving,
-            REMOTE_LISTENER_DEGRADED => tracedecay_application::RemoteListenerReadV1::Degraded,
-            _ => tracedecay_application::RemoteListenerReadV1::Disabled,
+            REMOTE_LISTENER_SERVING => tracedecay_contracts::RemoteListenerReadV1::Serving,
+            REMOTE_LISTENER_DEGRADED => tracedecay_contracts::RemoteListenerReadV1::Degraded,
+            _ => tracedecay_contracts::RemoteListenerReadV1::Disabled,
         }
     }
 
@@ -160,9 +179,9 @@ impl DaemonRemoteCredentialAuthorityV1 {
     /// `Unconfigured` is returned only when the optional remote plane has no
     /// listener and no registered node; `Unavailable` only when a mounted
     /// authority genuinely cannot be read.
-    #[hotpath::measure(label = "daemon.remote.operational_status")]
+    #[tracing::instrument(name = "daemon.remote.operational_status", level = "trace", skip_all)]
     pub fn operational_status(&self) -> RemoteOperationalStatusReadV1 {
-        let now = tracedecay_application::clock::now_micros();
+        let now = tracedecay_contracts::clock::now_micros();
         if !self.accepting.load(Ordering::Acquire) {
             return RemoteOperationalStatusReadV1::Unavailable;
         }
@@ -170,59 +189,54 @@ impl DaemonRemoteCredentialAuthorityV1 {
             return RemoteOperationalStatusReadV1::Unavailable;
         };
         let listener = self.listener_read();
-        if listener == tracedecay_application::RemoteListenerReadV1::Disabled
+        if listener == tracedecay_contracts::RemoteListenerReadV1::Disabled
             && state.nodes.is_empty()
             && state.grants.is_empty()
             && state.enrollments.is_empty()
         {
             return RemoteOperationalStatusReadV1::Unconfigured;
         }
-        let enrollment_configured = !state.enrollments.is_empty();
+        let mut enrollment_configured = false;
         let mut pending_count = 0_u64;
         let mut quarantined_count = 0_u64;
         let mut has_sequence_gap = false;
         let mut coverage_complete = true;
         let mut authorities = Vec::new();
-        let mut current_backup_verified = !state.nodes.is_empty();
         let mut failover_in_progress = false;
         let mut recovery_required = false;
         for node in state.nodes.values() {
-            match node.storage.status_at(&self.brain_id, now) {
+            match node.storage.status_at(node.storage.member_brain(), now) {
                 Ok(snapshot) => {
                     pending_count = pending_count.saturating_add(snapshot.pending_spool_items);
                     quarantined_count =
                         quarantined_count.saturating_add(snapshot.quarantined_spool_items);
                     has_sequence_gap |= snapshot.has_sequence_gap;
+                    enrollment_configured |= snapshot.has_active_enrollment;
                     authorities.push(snapshot.authority);
                 }
                 Err(_) => coverage_complete = false,
             }
             match node.storage.recovery_operational_snapshot() {
                 Ok(snapshot) => {
-                    current_backup_verified &= snapshot.current_backup_verified;
                     failover_in_progress |= snapshot.failover_in_progress;
                     recovery_required |= snapshot.recovery_required;
                 }
-                Err(_) => {
-                    coverage_complete = false;
-                    current_backup_verified = false;
-                }
+                Err(_) => coverage_complete = false,
             }
         }
         drop(state);
         let authority = aggregate_authority_states(authorities, now);
-        let spool = tracedecay_application::remote::status::RemoteSpoolOperationalStatusV1 {
+        let spool = tracedecay_contracts::remote::status::RemoteSpoolOperationalStatusV1 {
             pending_count,
             quarantined_count,
             has_sequence_gap,
         };
         let replay_coverage_complete = pending_count == 0 && !has_sequence_gap;
-        match tracedecay_application::remote::status::RemoteOperationalStatusV1::compose(
+        match tracedecay_contracts::remote::status::RemoteOperationalStatusV1::compose(
             enrollment_configured,
             authority,
             spool,
             replay_coverage_complete,
-            current_backup_verified,
             failover_in_progress,
             recovery_required,
             now,
@@ -231,16 +245,28 @@ impl DaemonRemoteCredentialAuthorityV1 {
                 listener,
                 status,
                 coverage: if coverage_complete {
-                    tracedecay_application::DoctorCoverageCompletenessV1::Complete
+                    tracedecay_contracts::DoctorCoverageCompletenessV1::Complete
                 } else {
-                    tracedecay_application::DoctorCoverageCompletenessV1::Partial
+                    tracedecay_contracts::DoctorCoverageCompletenessV1::Partial
                 },
             },
             Err(_) => RemoteOperationalStatusReadV1::Unavailable,
         }
     }
 
-    #[hotpath::measure(label = "daemon.remote.register_storage")]
+    /// Current writer authority of one registered node store: the per-node
+    /// read [`Self::operational_status`] aggregates, so a protocol envelope
+    /// and `/remote-status` report one truth.
+    pub fn current_authority(
+        &self,
+        node: &RegisteredRemoteNodeStoreV1,
+        observed_at: UtcMicros,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteSqliteStorageErrorV1> {
+        node.storage
+            .authority_at(node.storage.member_brain(), observed_at)
+    }
+
+    #[tracing::instrument(name = "daemon.remote.register_storage", level = "trace", skip_all)]
     pub fn register_storage(
         &self,
         node_id: BrainNodeId,
@@ -257,7 +283,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
             .credential_registrations(self.maximum_credentials)
             .map_err(map_inventory_error)?;
         for registration in &registrations {
-            validate_registration(&self.brain_id, &node_id, registration)?;
+            validate_registration(storage.member_brain(), &node_id, registration)?;
         }
 
         let mut state = self
@@ -343,6 +369,24 @@ impl DaemonRemoteCredentialAuthorityV1 {
         self.register_storage(node_id.clone(), storage)
     }
 
+    /// The storage of a node this daemon already provisioned or mounted.
+    /// `None` means the node was never registered here.
+    pub fn registered_node_storage(
+        &self,
+        node_id: &BrainNodeId,
+    ) -> std::result::Result<Option<RemoteSqliteStorageV1>, DaemonRemoteCredentialRegistryErrorV1>
+    {
+        self.ensure_accepting()?;
+        let state = self
+            .state
+            .read()
+            .map_err(|_| DaemonRemoteCredentialRegistryErrorV1::Unavailable)?;
+        Ok(state
+            .nodes
+            .get(node_id)
+            .map(|registered| registered.storage.clone()))
+    }
+
     fn storage_for_credential(
         &self,
         class: RemoteCredentialClassV1,
@@ -385,15 +429,52 @@ impl DaemonRemoteCredentialAuthorityV1 {
         Ok(registered)
     }
 
+    /// The store serving `use_case` for the presented credential. A joined
+    /// store is a node's copy of another profile's Brain, so it serves only
+    /// node-local offline capture and never answers as that Brain's authority.
     pub fn storage_for_presented(
         &self,
-        class: RemoteCredentialClassV1,
+        use_case: RemoteCredentialUseV1,
         presented: &OpaqueRemoteCredential,
     ) -> std::result::Result<RegisteredRemoteNodeStoreV1, RemoteCredentialLookupErrorV1> {
         let fingerprint = presented
             .credential_fingerprint()
             .map_err(|_| RemoteCredentialLookupErrorV1::NotFound)?;
-        self.storage_for_credential(class, &fingerprint)
+        let registered = self.storage_for_credential(use_case.credential_class(), &fingerprint)?;
+        if registered.storage.is_joined() && use_case != RemoteCredentialUseV1::CaptureOffline {
+            return Err(RemoteCredentialLookupErrorV1::NotFound);
+        }
+        Ok(registered)
+    }
+
+    /// Records that the authority owning `node_id`'s joined store did not
+    /// answer the node credential `presented`, which makes offline capture
+    /// admissible there. A node that has not joined yet has nothing to record.
+    pub fn record_authority_unreachable(
+        &self,
+        presented: &OpaqueRemoteCredential,
+        brain_id: &BrainId,
+        node_id: &BrainNodeId,
+        observed_at: UtcMicros,
+    ) -> std::result::Result<(), RemoteNodeOperatorErrorV1> {
+        let Ok(registered) =
+            self.storage_for_presented(RemoteCredentialUseV1::CaptureOffline, presented)
+        else {
+            return Ok(());
+        };
+        if !registered.storage.is_joined()
+            || registered.storage.member_brain() != brain_id
+            || &registered.node_id != node_id
+        {
+            return Err(RemoteNodeOperatorErrorV1::InvalidRequest);
+        }
+        registered
+            .storage
+            .record_authority_unreachable(observed_at)
+            .map_err(|error| {
+                tracing::warn!(%error, "remote authority reachability was not recorded");
+                RemoteNodeOperatorErrorV1::Unavailable
+            })
     }
 
     pub fn cancel(&self) {
@@ -415,7 +496,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
 }
 
 impl RemoteCredentialLookupPortV1 for DaemonRemoteCredentialAuthorityV1 {
-    #[hotpath::measure(label = "daemon.remote.credential_lookup")]
+    #[tracing::instrument(name = "daemon.remote.credential_lookup", level = "trace", skip_all)]
     fn credential_by_fingerprint(
         &self,
         class: RemoteCredentialClassV1,
@@ -426,7 +507,7 @@ impl RemoteCredentialLookupPortV1 for DaemonRemoteCredentialAuthorityV1 {
             .storage
             .credential_by_fingerprint(class, fingerprint)?;
         validate_record_route(
-            &self.brain_id,
+            registered.storage.member_brain(),
             &registered.node_id,
             class,
             fingerprint,
@@ -600,4 +681,35 @@ fn map_inventory_error(
             DaemonRemoteCredentialRegistryErrorV1::Unavailable
         }
     }
+}
+
+/// Request-scoped spool keyring derived from the presented enrollment
+/// credential. Spool frames stay encrypted at rest; the key exists only while
+/// the authenticated request executes.
+pub fn presented_spool_keyring(
+    credential: &OpaqueRemoteCredential,
+    enrollment_revision: u64,
+) -> Option<Arc<dyn RemoteSpoolKeyringV1>> {
+    let bytes = credential.derive_spool_key_bytes().ok()?;
+    let keyring =
+        CredentialDerivedSpoolKeyringV1::from_secret_bytes(enrollment_revision, bytes).ok()?;
+    Some(Arc::new(keyring))
+}
+
+/// Conceal unavailable credential/store routing without disclosing a node identity.
+pub fn remote_authority_unavailable_response<T>(
+    request_id: RequestId,
+    observed_at: UtcMicros,
+    contract: ResultContractRef,
+) -> std::result::Result<RemoteProtocolResponseV1<T>, ApplicationContractError> {
+    let authority = CurrentRemoteAuthorityStateV1::Unavailable {
+        reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+        observed_at,
+    };
+    let problem = remote_protocol_problem(
+        contract,
+        request_id.clone(),
+        RemoteProtocolFailureV1::AuthorityUnavailable,
+    )?;
+    RemoteProtocolResponseV1::new(request_id, authority, Err(problem))
 }

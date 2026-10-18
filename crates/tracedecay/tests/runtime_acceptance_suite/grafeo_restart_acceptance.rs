@@ -1,29 +1,32 @@
-use crate::common;
+use crate::common::{self, fixture::copy_fixture_tree};
 
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay::application_surface::ApplicationSurfaceRequest;
-use tracedecay::daemon::{DaemonHandshake, call_default_tool};
-use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
-use tracedecay_application::retained_surfaces::RetainedSurfaceResultV1;
-use tracedecay_application::retrieval::PrimitiveRequest;
-use tracedecay_application::{ApplicationEnvelope, RequestId};
-use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay::daemon::call_default_tool;
+use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
+use tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1;
+use tracedecay_contracts::retrieval::PrimitiveRequest;
+use tracedecay_contracts::{ApplicationEnvelope, RequestId};
+use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
+use tracedecay_daemon_protocol::{DaemonHandshake, DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 fn initialize_project(home: &Path, project: &Path) {
-    copy_dir(
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         project,
-    );
-    copy_dir(
+    )
+    .expect("copy writable fixture");
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/managed_run_overlay"),
         project,
-    );
+    )
+    .expect("copy writable fixture");
     // Context fail-closes without a verified generation. Sibling graph
     // journeys commit a checkout so the daemon-owned scheduler can publish one.
     git(project, &["init", "--quiet"]);
@@ -49,19 +52,6 @@ fn git(project: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn copy_dir(source: &Path, destination: &Path) {
-    std::fs::create_dir_all(destination).expect("fixture destination");
-    for entry in std::fs::read_dir(source).expect("fixture directory") {
-        let entry = entry.expect("fixture entry");
-        let target = destination.join(entry.file_name());
-        if entry.file_type().expect("fixture entry type").is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).expect("copy checked-in fixture");
-        }
-    }
 }
 
 fn assert_command_success(label: &str, output: &Output) {
@@ -98,22 +88,31 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
         .output()
         .expect("run storage_status");
     assert_command_success("read admitted project identity", &output);
-    let envelope: Value =
-        serde_json::from_slice(&output.stdout).expect("storage status application envelope");
+    let envelope: Value = common::tool_json_structured_content(&output.stdout);
     envelope["scope"]["project_id"]
         .as_str()
         .unwrap_or_else(|| panic!("admission omitted its public project id: {envelope}"))
         .to_owned()
 }
 
-fn project_handshake(project: &Path) -> DaemonHandshake {
-    tracedecay::daemon::handshake_for_current_client(
-        Some(project.to_path_buf()),
-        None,
-        false,
-        false,
-    )
-    .expect("project daemon handshake")
+/// One project's daemon route under the test's isolated profile.
+struct ProjectRoute {
+    profile: ProfileRoot,
+    handshake: DaemonHandshake,
+}
+
+fn project_route(environment: &common::IsolatedHome, project: &Path) -> ProjectRoute {
+    ProjectRoute {
+        profile: environment.profile().clone(),
+        handshake: tracedecay::daemon::handshake_for_current_client(
+            environment.profile(),
+            Some(project.to_path_buf()),
+            None,
+            false,
+            false,
+        )
+        .expect("project daemon handshake"),
+    }
 }
 
 async fn assert_client_project_identity(
@@ -152,13 +151,13 @@ async fn assert_client_project_identity(
 }
 
 async fn fact_store_payload(
-    handshake: &DaemonHandshake,
+    route: &ProjectRoute,
     operation: &str,
     label: &str,
     arguments: Value,
 ) -> Value {
     let tool = format!("tracedecay_fact_store_{operation}");
-    let result = call_default_tool(handshake, &tool, arguments)
+    let result = call_default_tool(&route.profile, &route.handshake, &tool, arguments)
         .await
         .unwrap_or_else(|error| panic!("{label} failed: {error}"));
     tracedecay::daemon::tool_json_payload(&result, &tool)
@@ -360,7 +359,7 @@ fn relation_snapshot(payload: &Value, added: &AddedFactEvidence) -> Option<Value
 }
 
 async fn wait_for_related_fact(
-    handshake: &DaemonHandshake,
+    route: &ProjectRoute,
     added: &AddedFactEvidence,
     memory_scope: &str,
     label: &str,
@@ -374,7 +373,7 @@ async fn wait_for_related_fact(
             "min_trust": 0.0,
             "format": "json",
         });
-        let envelope = fact_store_payload(handshake, "related", label, arguments).await;
+        let envelope = fact_store_payload(route, "related", label, arguments).await;
         let payload = application_payload(&envelope, "evidence");
         if let Some(snapshot) = relation_snapshot(payload, added) {
             return snapshot;
@@ -386,7 +385,7 @@ async fn wait_for_related_fact(
 }
 
 async fn assert_related_absent(
-    handshake: &DaemonHandshake,
+    route: &ProjectRoute,
     entity: &str,
     memory_scope: &str,
     label: &str,
@@ -394,7 +393,7 @@ async fn assert_related_absent(
     let mut last_payload = Value::Null;
     for _ in 0..100 {
         let envelope = fact_store_payload(
-            handshake,
+            route,
             "related",
             label,
             json!({
@@ -420,14 +419,9 @@ async fn assert_related_absent(
     panic!("{label} never reached complete graph coverage: {last_payload}");
 }
 
-async fn get_fact(
-    handshake: &DaemonHandshake,
-    fact_id: &str,
-    memory_scope: &str,
-    label: &str,
-) -> Value {
+async fn get_fact(route: &ProjectRoute, fact_id: &str, memory_scope: &str, label: &str) -> Value {
     let envelope = fact_store_payload(
-        handshake,
+        route,
         "get",
         label,
         json!({
@@ -441,13 +435,14 @@ async fn get_fact(
 }
 
 async fn get_selected_project_fact(
-    handshake: &DaemonHandshake,
+    route: &ProjectRoute,
+    admitted_project_id: &str,
     project_id: &str,
     fact_id: &str,
     label: &str,
 ) -> Value {
     let envelope = fact_store_payload(
-        handshake,
+        route,
         "get",
         label,
         json!({
@@ -458,40 +453,16 @@ async fn get_selected_project_fact(
         }),
     )
     .await;
+    // A selector opens the target's read-only memory authority from the
+    // caller's admitted runtime, and the evidence envelope names the project
+    // whose store actually answered rather than the admitting project (#899).
+    assert_ne!(admitted_project_id, project_id);
     assert_eq!(envelope["scope"]["project_id"], project_id);
     let fact = available_fact(&application_payload(&envelope, "evidence")["fact"]);
     assert_eq!(fact["fact_id"], fact_id);
     assert_eq!(fact["owner"]["kind"], "project");
     assert_eq!(fact["owner"]["project_id"], project_id);
     fact.clone()
-}
-
-async fn assert_selected_project_write_denied(
-    handshake: &DaemonHandshake,
-    project_id: &str,
-    content: &str,
-    entity: &str,
-) {
-    let tool = "tracedecay_fact_store_add";
-    let result = call_default_tool(
-        handshake,
-        tool,
-        json!({
-            "content": content,
-            "entities": [entity],
-            "memory_scope": "project",
-            "project_selector": {"project_id": project_id},
-            "format": "json",
-        }),
-    )
-    .await
-    .expect("selected-project write denial transport");
-    assert_eq!(result["isError"], true, "selected-project write succeeded");
-    let problem = tracedecay::daemon::tool_json_payload(&result, tool)
-        .expect("selected-project write denial problem");
-    serde_json::from_value::<tracedecay_application::ApplicationProblemEnvelope>(problem.clone())
-        .unwrap_or_else(|error| panic!("invalid selected-project denial envelope: {error}"));
-    assert_eq!(problem["problem"]["kind"], "not_found_or_not_authorized");
 }
 
 fn telemetry(fact: &Value) -> Value {
@@ -503,18 +474,22 @@ fn telemetry(fact: &Value) -> Value {
     })
 }
 
-fn graph_publication_retryable(error: &str) -> bool {
-    error.contains("warming in the background")
-        || error.contains("verified code graph is not ready")
-        || error.contains("exact project code graph is unavailable")
-        || error.contains("retired before response completion")
+fn graph_publication_retryable(error: &tracedecay_domain::errors::TraceDecayError) -> bool {
+    // Control flow keys on typed project-route reason codes only, never English
+    // detail prose (migrate-callers-then-delete-legacy).
+    tracedecay::daemon::tool_call_transport_error_is_retryable(error)
+        || matches!(
+            error.project_route_context(),
+            Some(("code-graph-unavailable" | "code-graph-stale", true, _))
+        )
 }
 
-async fn request_authoritative_reconcile(handshake: &DaemonHandshake, label: &str) {
+async fn request_authoritative_reconcile(route: &ProjectRoute, label: &str) {
     let result = call_default_tool(
-        handshake,
+        &route.profile,
+        &route.handshake,
         "tracedecay_admin_sync",
-        json!({ "force": true, "format": "json" }),
+        json!({ "format": "json" }),
     )
     .await
     .unwrap_or_else(|error| panic!("{label} admin_sync failed: {error}"));
@@ -530,52 +505,67 @@ async fn request_authoritative_reconcile(handshake: &DaemonHandshake, label: &st
     );
 }
 
-async fn wait_for_current_graph(handshake: &DaemonHandshake, label: &str) {
-    let mut last = String::new();
-    tokio::time::timeout(Duration::from_secs(180), async {
-        loop {
-            match call_default_tool(
-                handshake,
-                "tracedecay_status",
-                json!({
-                    "format": "json",
-                    "include_branch_diagnostics": false,
-                    "include_storage_health": false,
-                    "include_session_ingest": false,
-                    "include_staleness": false,
-                }),
-            )
-            .await
-            {
-                Ok(result) => {
-                    let status =
-                        tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
-                            .unwrap_or_else(|error| panic!("{label} status payload: {error}"));
-                    last = status.to_string();
-                    match status["code_index_freshness"]["status"].as_str() {
-                        Some("current") => return,
-                        Some("warming") => tokio::time::sleep(Duration::from_millis(100)).await,
-                        actual => panic!("{label} graph readiness became {actual:?}: {status}"),
-                    }
+/// Longest single `wait_for` this suite issues: inside the status dispatch
+/// ceiling, so a longer overall budget is spent as consecutive waits.
+const STATUS_WAIT_SLICE: Duration = Duration::from_secs(110);
+
+async fn wait_for_current_graph(route: &ProjectRoute, label: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let budget = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(STATUS_WAIT_SLICE);
+        match call_default_tool(
+            &route.profile,
+            &route.handshake,
+            "tracedecay_status",
+            json!({
+                "format": "json",
+                "include_branch_diagnostics": false,
+                "include_storage_health": false,
+                "include_session_ingest": false,
+                "include_staleness": false,
+                "wait_for": {
+                    "state": "ready",
+                    "timeout_ms": u64::try_from(budget.as_millis()).expect("budget fits u64"),
+                },
+            }),
+        )
+        .await
+        {
+            Ok(result) => {
+                let status = tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
+                    .unwrap_or_else(|error| panic!("{label} status payload: {error}"));
+                if status["wait"] == json!({ "outcome": "reached" }) {
+                    return;
                 }
-                Err(error) if graph_publication_retryable(&error.to_string()) => {
-                    last = error.to_string();
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(error) => panic!("{label} status failed: {error}"),
+                assert!(
+                    status["wait"]["outcome"] == "timed_out"
+                        && std::time::Instant::now() < deadline,
+                    "{label} graph did not become current: {status}"
+                );
             }
+            // The restarted daemon is not accepting yet; there is no signal
+            // to wait on across the process boundary.
+            Err(error) if graph_publication_retryable(&error) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{label} graph did not become current: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{label} status failed: {error}"),
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{label} graph did not become current: {last}"));
+    }
 }
 
-async fn context_payload(handshake: &DaemonHandshake, task: &str, label: &str) -> Value {
+async fn context_payload(route: &ProjectRoute, task: &str, label: &str) -> Value {
     let mut last = String::new();
     tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             match call_default_tool(
-                handshake,
+                &route.profile,
+                &route.handshake,
                 "tracedecay_context",
                 json!({
                     "task": task,
@@ -592,7 +582,7 @@ async fn context_payload(handshake: &DaemonHandshake, task: &str, label: &str) -
                             panic!("{label} returned no JSON payload: {error}")
                         });
                 }
-                Err(error) if graph_publication_retryable(&error.to_string()) => {
+                Err(error) if graph_publication_retryable(&error) => {
                     last = error.to_string();
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -604,13 +594,8 @@ async fn context_payload(handshake: &DaemonHandshake, task: &str, label: &str) -
     .unwrap_or_else(|_| panic!("{label} failed: {last}"))
 }
 
-async fn assert_context_matches_fact(
-    handshake: &DaemonHandshake,
-    fact_id: &str,
-    task: &str,
-    label: &str,
-) {
-    let payload = context_payload(handshake, task, label).await;
+async fn assert_context_matches_fact(route: &ProjectRoute, fact_id: &str, task: &str, label: &str) {
+    let payload = context_payload(route, task, label).await;
     assert!(
         payload["memory_matches"].as_array().is_some_and(|matches| {
             matches
@@ -621,9 +606,9 @@ async fn assert_context_matches_fact(
     );
 }
 
-async fn explicit_search(handshake: &DaemonHandshake, query: &str, fact_id: &str, label: &str) {
+async fn explicit_search(route: &ProjectRoute, query: &str, fact_id: &str, label: &str) {
     let envelope = fact_store_payload(
-        handshake,
+        route,
         "search",
         label,
         json!({
@@ -651,10 +636,10 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     const B_ENTITY: &str = "RestartRelationProjectBeta";
     const PROFILE_CONTENT: &str = "Restart profile retains its mounted relation";
     const PROFILE_ENTITY: &str = "RestartRelationProfileOnly";
-    const DENIED_SELECTED_CONTENT: &str = "Selected project writes stay denied";
-    const DENIED_SELECTED_ENTITY: &str = "DeniedSelectedProjectWrite";
+    const SELECTED_CONTENT: &str = "Selected project writes land in the selected store";
+    const SELECTED_ENTITY: &str = "SelectedProjectWrite";
 
-    let (environment, project_a) = common::IsolatedEnv::acquire().await;
+    let (environment, project_a) = common::IsolatedHome::new();
     let project_b = environment.scratch().join("project-b");
     std::fs::create_dir_all(&project_b).expect("project B root");
     let mut daemon = common::spawn_tracedecay_daemon(environment.home());
@@ -664,12 +649,18 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     let project_b_id = admitted_project_id(environment.home(), &project_b);
     assert_ne!(project_a_id, project_b_id);
 
-    let first_a = project_handshake(&project_a);
-    let first_b = project_handshake(&project_b);
-    let first_a_client = tracedecay_daemon_identity::invocation_client_for_current(first_a.clone())
-        .expect("project A client");
-    let first_b_client = tracedecay_daemon_identity::invocation_client_for_current(first_b.clone())
-        .expect("project B client");
+    let first_a = project_route(&environment, &project_a);
+    let first_b = project_route(&environment, &project_b);
+    let first_a_client = tracedecay::daemon::invocation_client_for_current(
+        &first_a.profile,
+        first_a.handshake.clone(),
+    )
+    .expect("project A client");
+    let first_b_client = tracedecay::daemon::invocation_client_for_current(
+        &first_b.profile,
+        first_b.handshake.clone(),
+    )
+    .expect("project B client");
     assert_client_project_identity(
         &first_a_client,
         &project_a_id,
@@ -778,6 +769,7 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     let initial_b = wait_for_related_fact(&first_b, &added_b, "project", "initial B").await;
     let selected_b = get_selected_project_fact(
         &first_a,
+        &project_a_id,
         &project_b_id,
         &added_b.fact_id,
         "selected B through A",
@@ -785,18 +777,40 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     .await;
     assert_eq!(selected_b["owner"], added_b.owner);
     assert_eq!(selected_b["content"], B_CONTENT);
-    assert_selected_project_write_denied(
-        &first_a,
-        &project_b_id,
-        DENIED_SELECTED_CONTENT,
-        DENIED_SELECTED_ENTITY,
+    let selected_write = added_fact_evidence(
+        &fact_store_payload(
+            &first_a,
+            "add",
+            "add project B fact through A",
+            json!({
+                "content": SELECTED_CONTENT,
+                "category": "project",
+                "entities": [SELECTED_ENTITY],
+                "trust": 0.9,
+                "memory_scope": "project",
+                "project_selector": {"project_id": project_b_id},
+                "source_label": "physical-daemon-restart-acceptance",
+                "format": "json",
+            }),
+        )
+        .await,
+        SELECTED_CONTENT,
+        SELECTED_ENTITY,
+        json!({"kind": "project", "project_id": project_b_id}),
+        "committed",
+    );
+    wait_for_related_fact(
+        &first_b,
+        &selected_write,
+        "project",
+        "selected-project write lands in B",
     )
     .await;
     assert_related_absent(
-        &first_b,
-        DENIED_SELECTED_ENTITY,
+        &first_a,
+        SELECTED_ENTITY,
         "project",
-        "selected-project write denial remains absent from B",
+        "selected-project write stays out of A",
     )
     .await;
     let initial_profile =
@@ -848,14 +862,18 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     daemon = common::spawn_tracedecay_daemon(environment.home());
     assert_ne!(daemon.id(), first_daemon_pid);
 
-    let restarted_a = project_handshake(&project_a);
-    let restarted_b = project_handshake(&project_b);
-    let restarted_a_client =
-        tracedecay_daemon_identity::invocation_client_for_current(restarted_a.clone())
-            .expect("restarted A client");
-    let restarted_b_client =
-        tracedecay_daemon_identity::invocation_client_for_current(restarted_b.clone())
-            .expect("restarted B client");
+    let restarted_a = project_route(&environment, &project_a);
+    let restarted_b = project_route(&environment, &project_b);
+    let restarted_a_client = tracedecay::daemon::invocation_client_for_current(
+        &restarted_a.profile,
+        restarted_a.handshake.clone(),
+    )
+    .expect("restarted A client");
+    let restarted_b_client = tracedecay::daemon::invocation_client_for_current(
+        &restarted_b.profile,
+        restarted_b.handshake.clone(),
+    )
+    .expect("restarted B client");
     assert_client_project_identity(
         &restarted_a_client,
         &project_a_id,
@@ -868,7 +886,6 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
         "request.memory-restart.second-project-b",
     )
     .await;
-    request_authoritative_reconcile(&restarted_a, "restarted A reconcile").await;
     wait_for_current_graph(&restarted_a, "restarted A verified graph").await;
 
     assert_eq!(
@@ -882,6 +899,7 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     assert_eq!(
         get_selected_project_fact(
             &restarted_a,
+            &project_a_id,
             &project_b_id,
             &added_b.fact_id,
             "restarted selected B through A",

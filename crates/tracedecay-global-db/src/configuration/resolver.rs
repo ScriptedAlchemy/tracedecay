@@ -183,13 +183,7 @@ mod tests {
         ConfigurationValueV1, UserProfileId,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     #[test]
     fn same_value_in_a_higher_layer_changes_provenance_not_behavior() {
@@ -219,7 +213,7 @@ mod tests {
 
     #[test]
     fn user_profile_settings_cannot_be_overridden_from_a_project_layer() {
-        let registry = ConfigurationRegistry::core().unwrap();
+        let registry = ConfigurationRegistry::profile().unwrap();
         let layer = ConfigurationLayerV1 {
             layer: ConfigurationLayerIdV1::Project {
                 project_id: id("project.fixture"),
@@ -230,7 +224,12 @@ mod tests {
                 ConfigurationValueV1::Boolean(true),
             )]),
         };
-        assert!(resolve_configuration(&registry, &[layer]).is_err());
+        assert_eq!(
+            resolve_configuration(&registry, &[layer])
+                .unwrap_err()
+                .to_string(),
+            "setting user.upload_enabled.v1 cannot be placed in Project { project_id: ProjectId(\"project.fixture\") }"
+        );
 
         let user_layer = ConfigurationLayerV1 {
             layer: ConfigurationLayerIdV1::UserProfile {

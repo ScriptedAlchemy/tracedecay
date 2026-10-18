@@ -8,19 +8,43 @@ use super::*;
 use tracedecay_daemon_identity::{authority, profile_identity};
 
 pub(super) fn project_server_capacity_error() -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
+    TraceDecayError::project_route(
+        PROJECT_SERVER_CAPACITY_REASON_CODE,
+        true,
+        format!(
             "daemon project server capacity reached (capacity={MAX_CACHED_PROJECT_SERVERS}); retry after active clients finish"
         ),
-    }
+    )
+}
+
+/// Capacity refusal when a store client outside the retired owner still holds
+/// a store its release could not close. The owner's servers are already gone,
+/// so the next open retires another idle owner.
+pub(super) fn project_server_retirement_blocked_error(
+    owner: &StoreOwnerKey,
+    blocker: &TraceDecayError,
+) -> TraceDecayError {
+    let owner = owner
+        .project_id
+        .clone()
+        .unwrap_or_else(|| owner.store_root.display().to_string());
+    TraceDecayError::project_route(
+        PROJECT_SERVER_CAPACITY_REASON_CODE,
+        true,
+        format!(
+            "daemon project server capacity reached (capacity={MAX_CACHED_PROJECT_SERVERS}); retiring idle project '{owner}' is blocked: {blocker}; retry after the blocker releases"
+        ),
+    )
 }
 
 pub(super) fn project_open_task_capacity_error() -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
+    TraceDecayError::project_route(
+        PROJECT_OPEN_TASK_CAPACITY_REASON_CODE,
+        true,
+        format!(
             "daemon project open task capacity reached (capacity={MAX_TRACKED_PROJECT_OPEN_TASKS}); retry shortly"
         ),
-    }
+    )
 }
 
 pub(super) fn project_open_cancellation_error() -> TraceDecayError {
@@ -37,30 +61,54 @@ pub(super) fn project_open_cancellation_checkpoint(cancellation: &CancellationTo
 }
 
 pub(super) fn project_warming_error(project_path: &Path) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
+    TraceDecayError::project_route(
+        PROJECT_WARMING_REASON_CODE,
+        true,
+        format!(
             "TraceDecay project '{}' {PROJECT_WARMING_RETRY_HINT}",
             project_path.display(),
         ),
+    )
+}
+
+/// After the foreground publication bound, prefer a terminal open failure
+/// over a warming hint. Warming means the route is still opening.
+pub(super) fn prefer_recorded_open_failure<T>(
+    result: Result<T>,
+    state: &tokio::sync::watch::Receiver<ProjectOpenTaskState>,
+) -> Result<T> {
+    let error = match result {
+        Err(error) => error,
+        other => return other,
+    };
+    if !error_is_project_warming(&error) {
+        return Err(error);
+    }
+    match state.borrow().clone() {
+        ProjectOpenTaskState::Failed(failure) => Err(failure.to_error()),
+        ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => Err(error),
     }
 }
 
 pub(super) fn project_route_for_handshake(
     handshake: &DaemonHandshake,
+    owner_home: Option<&Path>,
 ) -> Result<(PathBuf, ProjectRouteKey)> {
     let Some(project_path) = handshake.project_path.as_ref() else {
-        return Err(TraceDecayError::Config {
-            message: "project server requested without project_path".to_string(),
-        });
+        return Err(TraceDecayError::project_route(
+            PROJECT_REQUIRED_REASON_CODE,
+            false,
+            "this operation needs a TraceDecay project, and the request named none; \
+             run it inside an initialized project or pass --project <path>",
+        ));
     };
-    let canonical_project_path = project_path
-        .canonicalize()
-        .unwrap_or_else(|_| project_path.clone());
-    if crate::config::is_ambient_project_root(&canonical_project_path) {
+    let canonical_project_path =
+        tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
+    if tracedecay_runtime_core::config::is_ambient_project_root(owner_home, &canonical_project_path)
+    {
         return Err(TraceDecayError::Config {
-            message: format!(
-                "'{}' is an ambient user/filesystem root, not an active TraceDecay code project",
-                canonical_project_path.display()
+            message: tracedecay_runtime_core::config::ambient_project_root_guidance(
+                &canonical_project_path,
             ),
         });
     }
@@ -68,7 +116,7 @@ pub(super) fn project_route_for_handshake(
     Ok((canonical_project_path, route))
 }
 
-#[hotpath::measure(label = "daemon.project.bind.identity", future = true)]
+#[tracing::instrument(name = "daemon.project.bind.identity", level = "trace", skip_all)]
 pub(super) async fn bind_authenticated_profile_identity(
     handshake: &mut DaemonHandshake,
     store_administration: &StoreAdministration,
@@ -86,8 +134,16 @@ pub(super) async fn bind_authenticated_profile_identity(
     let scoped_administration = store_administration
         .clone()
         .with_profile_identity(profile_identity);
-    let profile_database = scoped_administration.registered_profile_database().await?;
-    let global_db_path = authority::canonical_identity_path(profile_database.db_path())?;
+    let global_db_path = match scoped_administration.registered_profile_database().await {
+        Ok(profile_database) => authority::canonical_identity_path(profile_database.db_path())?,
+        // A reset-required profile authority keeps its registered location.
+        // Binding the connection to it lets every request on it answer the
+        // typed refusal instead of closing without a frame.
+        Err(error) if error.is_store_reset_required() => authority::canonical_identity_path(
+            &profile_root.join(tracedecay_runtime_core::config::GLOBAL_DB_FILENAME),
+        )?,
+        Err(error) => return Err(error),
+    };
     let supplied_global_db_path =
         authority::canonical_identity_path(&handshake.client_identity.global_db_path)?;
     if supplied_global_db_path != global_db_path {
@@ -106,12 +162,17 @@ pub(super) async fn bind_authenticated_profile_identity(
 pub(super) async fn project_open_gate(
     gates: &tokio::sync::Mutex<ProjectOpenGates>,
     route: &ProjectRouteKey,
-) -> Arc<ProjectOpenGate> {
+) -> Result<Arc<ProjectOpenGate>> {
     let mut gate_route = route.clone();
-    if let Some(git_common_dir) =
-        tracedecay_runtime_core::worktree::git_common_dir(&route.project_path)
-    {
-        gate_route.project_path = git_common_dir;
+    match tracedecay_runtime_core::worktree::git_common_dir_outcome(&route.project_path) {
+        Ok(Some(git_common_dir)) => gate_route.project_path = git_common_dir,
+        Ok(None) => {}
+        Err(tracedecay_runtime_core::git_repository::DiscoveryBlocked { .. }) => {
+            return Err(super::core_proxy::repository_discovery_deferred(
+                &route.project_path,
+                tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
+            ));
+        }
     }
     let mut gates = gates.lock().await;
     if let Some(gate) = gates
@@ -119,11 +180,11 @@ pub(super) async fn project_open_gate(
         .get(&gate_route)
         .and_then(std::sync::Weak::upgrade)
     {
-        return gate;
+        return Ok(gate);
     }
     let gate = Arc::new(ProjectOpenGate::new(()));
     gates.gates.insert(gate_route, Arc::downgrade(&gate));
-    gate
+    Ok(gate)
 }
 
 pub(super) async fn project_open_capacity_gate(
@@ -138,36 +199,79 @@ pub(super) async fn project_open_tasks(
     gates.lock().await.tasks.clone()
 }
 
-#[hotpath::measure(label = "daemon.project.route.resolve", future = true)]
+/// Finish or refuse repository discovery before any cross-project admission lock.
+///
+/// Live defect this exists for: one project's `open()` of a git ref ran while
+/// the process-wide project-open capacity gate was held, so every other
+/// project's open queued behind that hang and the profile runtime never
+/// reached Ready.
+pub(super) async fn ensure_checkout_topology_before_admission(project_path: &Path) -> Result<()> {
+    match super::core_proxy::bounded_repository_identity(
+        project_path,
+        super::core_proxy::repository_discovery_parent_deadline(),
+    )
+    .await
+    {
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(_)
+        | tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            Ok(())
+        }
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(reason) => {
+            Err(super::core_proxy::repository_discovery_deferred(
+                project_path,
+                reason,
+            ))
+        }
+    }
+}
+
+#[tracing::instrument(name = "daemon.project.route.resolve", level = "trace", skip_all)]
 pub(super) async fn resolved_project_server_key(
     store_administration: &StoreAdministration,
     canonical_project_path: &Path,
     handshake: &DaemonHandshake,
 ) -> Result<Option<ProjectServerKey>> {
-    if !durable_enrollment_resolves_existing_store(store_administration, canonical_project_path) {
+    if !durable_enrollment_resolves_existing_store(store_administration, canonical_project_path)
+        .await?
+    {
         return Ok(None);
     }
     let registry_database = store_administration.registered_profile_database().await?;
-    let Ok(layout) = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
-        canonical_project_path,
-        &crate::daemon::handshake_open_options(handshake),
-        registry_database.as_ref(),
-    )
-    .await
+    let Ok(layout) =
+        tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
+            canonical_project_path,
+            &crate::daemon::handshake_open_options(handshake),
+            registry_database.as_ref(),
+        )
+        .await
     else {
         // The canonical open remains responsible for typed identity errors and
         // any permitted repair; this is only a mounted-runtime reuse path.
         return Ok(None);
     };
-    let graph_scope = tracedecay_runtime_core::branch::current_branch(canonical_project_path)
-        .or_else(|| {
-            tracedecay_runtime_core::worktree::detached_worktree_graph_scope(canonical_project_path)
-        });
-    let (graph_db_path, _, fallback_warning) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
+    let probe_path = canonical_project_path.to_path_buf();
+    let data_root = layout.data_root.clone();
+    let fallback_warning = tracedecay_runtime_core::git_discovery::bounded_repository_probe(
         canonical_project_path,
-        &layout.data_root,
-        graph_scope.as_deref(),
-    );
+        super::core_proxy::repository_discovery_parent_deadline(),
+        move || {
+            let graph_scope =
+                tracedecay_runtime_core::branch::current_branch(&probe_path).or_else(|| {
+                    tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
+                });
+            let (_, fallback_warning) =
+                tracedecay_project::project::TraceDecay::resolve_serving_branch(
+                    &probe_path,
+                    &data_root,
+                    graph_scope.as_deref(),
+                );
+            fallback_warning
+        },
+    )
+    .await
+    .map_err(|reason| {
+        super::core_proxy::repository_discovery_deferred(canonical_project_path, reason)
+    })?;
     if fallback_warning.is_some() {
         return Ok(None);
     }
@@ -177,7 +281,7 @@ pub(super) async fn resolved_project_server_key(
             &handshake.client_identity.global_db_path,
             layout.identity.project_id,
             &layout.data_root,
-            &graph_db_path,
+            &layout.graph_db_path,
         )?,
         project_root: authority::canonical_identity_path(&layout.project_root)?,
         scope_prefix: handshake.scope_prefix.clone(),
@@ -226,12 +330,14 @@ pub(super) fn portable_database_owner_reconciler(
     store_administration: StoreAdministration,
     current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
     route_registered: Arc<AtomicBool>,
+    route_cancellation: CancellationToken,
     handshake: DaemonHandshake,
 ) -> crate::mcp::DatabaseOwnerReconciler {
     Arc::new(move |fresh| {
         let store_administration = store_administration.clone();
         let current_key = Arc::clone(&current_key);
         let route_registered = Arc::clone(&route_registered);
+        let route_cancellation = route_cancellation.clone();
         let handshake = handshake.clone();
         Box::pin(async move {
             let scope = crate::daemon::branch_admin::graph_writer_scope(
@@ -263,7 +369,11 @@ pub(super) fn portable_database_owner_reconciler(
                         .await
                         .rekey(&old_key, &new_key);
                     if !rekeyed {
+                        // Terminal revocation: this route can never serve
+                        // again, so drop its fence and end everything that
+                        // waits on its lifetime.
                         route_registered.store(false, Ordering::Release);
+                        route_cancellation.cancel();
                     }
                     *current = new_key.clone();
                     Some((old_key.owner, new_key.owner, rekeyed))

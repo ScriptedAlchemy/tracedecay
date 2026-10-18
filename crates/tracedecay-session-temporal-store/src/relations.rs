@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
     AgentInstanceId, CopyProofV1, MessageOccurrenceIdV1, ProjectId, RetrievalAnchorId, SessionId,
     TemporalValidityV1, ThreadId, UserProfileId, UtcMicros,
@@ -200,7 +200,6 @@ impl std::fmt::Debug for SessionRelationGraphStore {
 
 impl SessionRelationGraphStore {
     #[must_use]
-    #[hotpath::skip]
     pub const fn new(database: GraphDbLeaseV1) -> Self {
         Self { database }
     }
@@ -374,38 +373,6 @@ impl SessionRelationGraphStore {
         }
         Ok(visits)
     }
-
-    pub fn has_summary_successor(
-        &self,
-        scope: &SessionRelationScope,
-        session_id: &SessionId,
-        generation: u64,
-        summary_id: &str,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<bool, SessionRelationError> {
-        let namespace = namespace(scope)?;
-        let projection = projection(session_id, generation)?;
-        let snapshot = self.database.snapshot().map_err(map_graph_error)?;
-        if snapshot
-            .projection_telemetry(GraphProjectionTelemetryRequest {
-                namespace: namespace.clone(),
-                projection,
-                cancellation: Arc::clone(&cancellation),
-            })
-            .map_err(map_graph_error)?
-            .is_none()
-        {
-            return Err(SessionRelationError::NotFound);
-        }
-        let starts = [summary_entity_id(session_id, generation, summary_id)?];
-        let kinds = BTreeSet::from([
-            GraphRelationKind::new(SUMMARY_SUCCESSOR_KIND).map_err(map_graph_error)?
-        ]);
-        self.database
-            .outgoing_relations(&namespace, &starts, &kinds, 1, cancellation)
-            .map(|mut batches| batches.pop().is_some_and(|relations| !relations.is_empty()))
-            .map_err(map_graph_error)
-    }
 }
 
 pub(crate) fn projection_watermark(
@@ -437,11 +404,8 @@ pub(crate) fn projection_watermark(
             .then_with(|| left.agent_label.cmp(&right.agent_label))
     });
     let encoded = serde_json::to_vec(&canonical).map_err(|_| SessionRelationError::Invalid)?;
-    GraphWatermark::new(format!(
-        "session-relations:{}",
-        hex::encode(Sha256::digest(encoded))
-    ))
-    .map_err(map_graph_error)
+    GraphWatermark::new(format!("session-relations:{}", sha256_hex(&encoded)))
+        .map_err(map_graph_error)
 }
 
 fn build_graph(
@@ -806,22 +770,6 @@ fn occurrence_entity_id(
     )
 }
 
-fn thread_entity_id(
-    session_id: &SessionId,
-    generation: u64,
-    thread_id: &ThreadId,
-) -> Result<GraphEntityId, SessionRelationError> {
-    entity_id(session_id, generation, THREAD_KIND, thread_id.as_str())
-}
-
-fn agent_entity_id(
-    session_id: &SessionId,
-    generation: u64,
-    agent_id: &AgentInstanceId,
-) -> Result<GraphEntityId, SessionRelationError> {
-    entity_id(session_id, generation, AGENT_KIND, agent_id.as_str())
-}
-
 fn session_entity_id(
     projection_session_id: &SessionId,
     generation: u64,
@@ -895,13 +843,18 @@ fn map_graph_error(error: GraphDbError) -> SessionRelationError {
         GraphDbError::BudgetExhausted { .. } => SessionRelationError::BudgetExhausted,
         GraphDbError::Conflict { .. } => SessionRelationError::Conflict,
         GraphDbError::InvalidRequest { .. } => SessionRelationError::Invalid,
-        GraphDbError::ResetRequired { .. } => SessionRelationError::ResetRequired,
+        GraphDbError::ResetRequired { .. } | GraphDbError::FormatSuperseded { .. } => {
+            SessionRelationError::ResetRequired
+        }
         GraphDbError::DurabilityUncertain { .. } => SessionRelationError::DurabilityUncertain,
         GraphDbError::Corrupt { .. } => SessionRelationError::Corrupt,
         GraphDbError::ProjectionMismatch { .. } | GraphDbError::GenerationMismatch { .. } => {
             SessionRelationError::Conflict
         }
         GraphDbError::Unavailable { .. }
+        | GraphDbError::SourceCommitmentsUnavailable { .. }
+        | GraphDbError::SealedRevisionIncompatible { .. }
+        | GraphDbError::SealSuperseded
         | GraphDbError::SealedStoreImmutable { .. }
         | GraphDbError::Closed => SessionRelationError::Unavailable,
     }

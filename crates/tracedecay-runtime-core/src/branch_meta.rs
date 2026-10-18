@@ -4,7 +4,7 @@
 //! dir.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::BranchGraphPublicationEpochV1;
@@ -14,12 +14,12 @@ use crate::storage::{BRANCH_META_FILENAME, PrivateStoreIo};
 /// Metadata for a single tracked branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchEntry {
-    /// Relative path to the database serving this branch. Branches tracked on
-    /// the single project graph store reference the canonical main database
-    /// (`tracedecay.db`) — the same shape the default branch has always used.
-    /// Legacy private branch copies reference `branches/<stem>.db`; those
-    /// files are retained only for garbage collection and never serve.
-    pub db_file: String,
+    /// Every branch is a provenance scope of the one project graph store.
+    /// Metadata written by the retired per-branch store layout still names a
+    /// `db_file`; only the project store itself is accepted there, and the
+    /// field is never written back.
+    #[serde(default, rename = "db_file", skip_serializing)]
+    retired_store_reference: RetiredStoreReference,
     /// Nearest tracked ancestor at tracking time (None for the default
     /// branch).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -30,24 +30,12 @@ pub struct BranchEntry {
     pub last_synced_at: String,
     /// Whether automatic branch-store GC must retain this entry even when it
     /// has no matching git ref.
-    #[serde(default)]
     pub gc_protected: bool,
     /// Exact source identity of the graph published by the last successful
     /// sync. Older metadata omits this evidence and is not branch-query
     /// eligible until the next sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_source: Option<BranchGraphSourceV1>,
-}
-
-impl BranchEntry {
-    /// True when this branch is served by the single project graph store.
-    ///
-    /// Only legacy entries reference a private `branches/<stem>.db` copy;
-    /// physical deletion inventories must be limited to those.
-    #[must_use]
-    pub fn served_by_project_store(&self) -> bool {
-        self.db_file == crate::config::DB_FILENAME
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,39 +125,17 @@ pub struct BranchMeta {
 }
 
 impl BranchMeta {
-    /// Creates a new metadata with a single default branch entry pointing at
-    /// the standard `tracedecay.db`.
+    /// Creates a new metadata with a single default branch entry.
     pub fn new(default_branch: &str) -> Self {
-        Self::with_db_file(default_branch, crate::config::DB_FILENAME)
-    }
-
-    /// Creates a new metadata whose default-branch entry references the main
-    /// DB filename appropriate for `data_dir`.
-    pub fn new_for_dir(data_dir: &Path, default_branch: &str) -> Self {
-        Self::with_db_file(default_branch, crate::config::db_filename(data_dir))
-    }
-
-    /// Synthesizes metadata for a legacy store that only has the canonical
-    /// main database. The timestamps are deliberately unknown (`0`) so the
-    /// same input produces byte-identical metadata across interrupted retries.
-    pub fn for_legacy_single_db(data_dir: &Path, default_branch: &str) -> Self {
-        Self::with_db_file_and_timestamp(default_branch, crate::config::db_filename(data_dir), "0")
-    }
-
-    fn with_db_file(default_branch: &str, db_file: &str) -> Self {
         let now = now_unix_str();
-        Self::with_db_file_and_timestamp(default_branch, db_file, &now)
-    }
-
-    fn with_db_file_and_timestamp(default_branch: &str, db_file: &str, timestamp: &str) -> Self {
         let mut branches = HashMap::new();
         branches.insert(
             default_branch.to_string(),
             BranchEntry {
-                db_file: db_file.to_string(),
+                retired_store_reference: RetiredStoreReference,
                 parent: None,
-                created_at: timestamp.to_string(),
-                last_synced_at: timestamp.to_string(),
+                created_at: now.clone(),
+                last_synced_at: now,
                 gc_protected: false,
                 graph_source: None,
             },
@@ -180,13 +146,13 @@ impl BranchMeta {
         }
     }
 
-    /// Adds a new tracked branch entry.
-    pub fn add_branch(&mut self, name: &str, db_file: &str, parent: &str) {
+    /// Adds a new tracked branch entry served by the project graph store.
+    pub fn add_branch(&mut self, name: &str, parent: &str) {
         let now = now_unix_str();
         self.branches.insert(
             name.to_string(),
             BranchEntry {
-                db_file: db_file.to_string(),
+                retired_store_reference: RetiredStoreReference,
                 parent: Some(parent.to_string()),
                 created_at: now.clone(),
                 last_synced_at: now,
@@ -202,13 +168,6 @@ impl BranchMeta {
             return None; // never remove the default branch
         }
         self.branches.remove(name)
-    }
-
-    /// Updates the `last_synced_at` timestamp for a branch.
-    pub fn touch_synced(&mut self, name: &str) {
-        if let Some(entry) = self.branches.get_mut(name) {
-            entry.last_synced_at = now_unix_str();
-        }
     }
 
     pub fn publish_graph_source(&mut self, name: &str, source: BranchGraphSourceV1) {
@@ -238,6 +197,15 @@ impl BranchMeta {
         self.branches.contains_key(name)
     }
 
+    /// Returns true when a tracked branch has enough provenance to serve
+    /// queries. The default branch owns the legacy canonical store; every
+    /// other branch becomes eligible only after its exact source is sealed.
+    pub fn is_query_eligible(&self, name: &str) -> bool {
+        self.branches
+            .get(name)
+            .is_some_and(|entry| name == self.default_branch || entry.graph_source.is_some())
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.default_branch.is_empty() {
             return Err("default_branch must not be empty".to_string());
@@ -248,13 +216,6 @@ impl BranchMeta {
                 self.default_branch
             )
         })?;
-        let canonical_main = crate::config::DB_FILENAME;
-        if default.db_file != canonical_main {
-            return Err(format!(
-                "default branch '{}' must reference canonical main database '{canonical_main}', found '{}'",
-                self.default_branch, default.db_file
-            ));
-        }
         if default.parent.is_some() {
             return Err(format!(
                 "default branch '{}' must not have a parent",
@@ -262,29 +223,36 @@ impl BranchMeta {
             ));
         }
 
-        let mut db_files = BTreeMap::new();
         for (name, entry) in &self.branches {
             if name.is_empty() {
                 return Err("branch names must not be empty".to_string());
             }
-            validate_db_file(name, entry, name == &self.default_branch)?;
             if entry.parent.as_deref() == Some(name.as_str()) {
                 return Err(format!("branch '{name}' must not be its own parent"));
             }
-            // The canonical main database is shared by every branch served
-            // from the single project store; only private legacy copies must
-            // be uniquely owned.
-            if entry.served_by_project_store() {
-                continue;
-            }
-            if let Some(previous) = db_files.insert(entry.db_file.as_str(), name.as_str()) {
-                return Err(format!(
-                    "branches '{previous}' and '{name}' reference the same database '{}'",
-                    entry.db_file
-                ));
-            }
         }
         Ok(())
+    }
+}
+
+/// A `db_file` key accepted only when it names the project graph store.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RetiredStoreReference;
+
+impl<'de> Deserialize<'de> for RetiredStoreReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let store = String::deserialize(deserializer)?;
+        let project_store = crate::config::DB_FILENAME;
+        if store == project_store {
+            Ok(Self)
+        } else {
+            Err(<D::Error as serde::de::Error>::custom(format!(
+                "branch metadata names the retired per-branch store '{store}'; every branch must be served by the project graph store '{project_store}'"
+            )))
+        }
     }
 }
 
@@ -301,39 +269,10 @@ where
         .serialize(serializer)
 }
 
-fn validate_db_file(name: &str, entry: &BranchEntry, is_default: bool) -> Result<(), String> {
-    let relative = Path::new(&entry.db_file);
-    if relative.as_os_str().is_empty()
-        || relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(format!(
-            "branch '{name}' database path '{}' is not a normalized store-relative path",
-            entry.db_file
-        ));
-    }
-    if !is_default
-        && !entry.served_by_project_store()
-        && (!relative.starts_with("branches")
-            || !relative
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("db")))
-    {
-        return Err(format!(
-            "non-default branch '{name}' database path '{}' must be the canonical main database \
-             or a legacy store under 'branches/' with a .db extension",
-            entry.db_file
-        ));
-    }
-    Ok(())
-}
-
 /// Parses `branch-meta.json` content into [`BranchMeta`].
 ///
 /// This is the canonical definition of "corrupt branch metadata": anything
-/// this rejects — invalid JSON *or* valid JSON with the wrong schema — makes
+/// this rejects, invalid JSON *or* valid JSON with the wrong schema, makes
 /// the runtime fall back to single-DB mode. Every reader must go through this
 /// one predicate so invalid metadata is never treated as authority.
 pub fn parse(content: &str) -> serde_json::Result<BranchMeta> {
@@ -354,7 +293,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
             eprintln!(
-                "warning: could not inspect branch metadata at '{}': {error} — falling back to single-DB mode",
+                "warning: could not inspect branch metadata at '{}': {error}, falling back to single-DB mode",
                 path.display()
             );
             return None;
@@ -362,7 +301,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
     };
     if !metadata.file_type().is_file() {
         eprintln!(
-            "warning: corrupt branch metadata at '{}': path is not a regular file — falling back to single-DB mode",
+            "warning: corrupt branch metadata at '{}': path is not a regular file, falling back to single-DB mode",
             path.display()
         );
         return None;
@@ -371,7 +310,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
         Ok(content) => content,
         Err(error) => {
             eprintln!(
-                "warning: could not read branch metadata at '{}': {error} — falling back to single-DB mode",
+                "warning: could not read branch metadata at '{}': {error}, falling back to single-DB mode",
                 path.display()
             );
             return None;
@@ -381,7 +320,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
         Ok(meta) => Some(meta),
         Err(e) => {
             eprintln!(
-                "warning: corrupt branch metadata at '{}': {e} — falling back to single-DB mode",
+                "warning: corrupt branch metadata at '{}': {e}, falling back to single-DB mode",
                 path.display()
             );
             None
@@ -415,20 +354,6 @@ pub fn save_branch_meta_serialized(data_dir: &Path, serialized: &str) -> std::io
 pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<()> {
     let serialized = serialize_branch_meta(meta)?;
     save_branch_meta_serialized(data_dir, &serialized)
-}
-
-/// Advances the `last_synced_at` timestamp for `branch` in the project's
-/// branch metadata, best-effort.
-///
-/// This is the entry point every successful sync path calls so `branch_list`
-/// reflects real sync activity (previously `last_synced_at` only moved at
-/// branch-add finalize, making the list misleading). It silently no-ops when
-/// there is no branch metadata (single-DB mode / pre-branch projects) or when
-/// `branch` is untracked — a sync of an untracked branch has no entry to touch.
-/// The shared branch lock serializes this load-modify-save sequence with branch
-/// add, removal, GC, and pending deletion recovery.
-pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
-    update_synced_timestamp_with(tracedecay_dir, branch, || {});
 }
 
 /// Atomically allocates and publishes the exact worktree/ref/OID identity
@@ -529,34 +454,8 @@ pub fn rollback_graph_source_publication(
     Ok(BranchGraphSourceRollbackOutcomeV1::Restored)
 }
 
-fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock: impl FnOnce()) {
-    let Ok(_branch_lock) = crate::branch::acquire_branch_lock_blocking(tracedecay_dir) else {
-        return;
-    };
-    after_lock();
-    let Some(mut meta) = load_branch_meta(tracedecay_dir) else {
-        return;
-    };
-    if !meta.is_tracked(branch) {
-        return;
-    }
-    meta.touch_synced(branch);
-    let _ = save_branch_meta(tracedecay_dir, &meta);
-}
-
-/// Returns the path to the `branches/` subdirectory, creating it if needed.
-pub fn ensure_branches_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
-    let dir = data_dir.join("branches");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
 fn now_unix_str() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
+    crate::tracedecay::unix_secs().to_string()
 }
 
 /// Formats a UNIX timestamp string as a human-readable relative time.
@@ -564,10 +463,7 @@ pub fn format_timestamp(ts: &str) -> String {
     let Ok(secs) = ts.parse::<u64>() else {
         return ts.to_string();
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = crate::tracedecay::unix_secs();
     let age = now.saturating_sub(secs);
     if age < 60 {
         "just now".to_string()
@@ -583,103 +479,115 @@ pub fn format_timestamp(ts: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use serde_json::error::Category;
+
     use super::*;
-
-    #[test]
-    fn new_meta_has_default_branch() {
-        let meta = BranchMeta::new("main");
-        assert_eq!(meta.default_branch, "main");
-        assert!(meta.is_tracked("main"));
-        assert_eq!(meta.branches["main"].db_file, "tracedecay.db");
-        assert!(meta.branches["main"].parent.is_none());
-    }
-
-    #[test]
-    fn new_for_dir_tracks_current_db_file() {
-        let meta = BranchMeta::new_for_dir(Path::new("/p/.tracedecay"), "main");
-        assert_eq!(meta.branches["main"].db_file, "tracedecay.db");
-    }
 
     #[test]
     fn add_and_remove_branch() {
         let mut meta = BranchMeta::new("main");
-        meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
+        meta.add_branch("feature/foo", "main");
         assert!(meta.is_tracked("feature/foo"));
+        assert!(!meta.is_query_eligible("feature/foo"));
+        assert!(meta.is_query_eligible("main"));
         assert_eq!(meta.branches["feature/foo"].parent.as_deref(), Some("main"));
 
         let removed = meta.remove_branch("feature/foo");
         assert!(removed.is_some());
         assert!(!meta.is_tracked("feature/foo"));
-    }
-
-    #[test]
-    fn cannot_remove_default_branch() {
-        let mut meta = BranchMeta::new("main");
-        assert!(meta.remove_branch("main").is_none());
+        assert!(
+            meta.remove_branch("main").is_none(),
+            "the default branch is never removed"
+        );
+        assert!(meta.is_tracked("main"));
     }
 
     #[test]
     fn parse_rejects_schema_mismatch_as_corrupt() {
-        assert!(parse(r#"{"default_branch":"main","branches":{}}"#).is_err());
-        assert!(parse("{not valid json").is_err());
-        assert!(parse(r#"{"default_branch": 5}"#).is_err());
-        assert!(parse("[]").is_err());
+        let missing_default = parse(r#"{"default_branch":"main","branches":{}}"#).unwrap_err();
+        assert_eq!(
+            missing_default.to_string(),
+            "default_branch 'main' has no matching branch entry"
+        );
+        assert_eq!(
+            parse("{not valid json").unwrap_err().classify(),
+            Category::Syntax
+        );
+        assert_eq!(
+            parse(r#"{"default_branch": 5}"#).unwrap_err().classify(),
+            Category::Data
+        );
+        assert_eq!(parse("[]").unwrap_err().classify(), Category::Data);
     }
 
     #[test]
     fn parse_rejects_semantically_invalid_branch_metadata() {
-        for content in [
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"branches/main.db","created_at":"0","last_synced_at":"0"}}}"#,
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0"}}}"#,
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"escape":{"db_file":"../escape.db","created_at":"0","last_synced_at":"0"}}}"#,
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"left":{"db_file":"branches/shared.db","created_at":"0","last_synced_at":"0"},"right":{"db_file":"branches/shared.db","created_at":"0","last_synced_at":"0"}}}"#,
+        let retired = |store: &str, column: u32| {
+            format!(
+                "branch metadata names the retired per-branch store '{store}'; every branch must be served by the project graph store 'tracedecay.db' at line 1 column {column}"
+            )
+        };
+        for (content, expected) in [
+            (
+                r#"{"default_branch":"main","branches":{"main":{"db_file":"branches/main.db","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
+                retired("branches/main.db", 73),
+            ),
+            (
+                r#"{"default_branch":"main","branches":{"main":{"created_at":"0","last_synced_at":"0","gc_protected":false},"escape":{"db_file":"../escape.db","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
+                retired("../escape.db", 139),
+            ),
+            (
+                r#"{"default_branch":"main","branches":{"main":{"parent":"main","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
+                "default branch 'main' must not have a parent".to_owned(),
+            ),
+            (
+                r#"{"default_branch":"main","branches":{"main":{"created_at":"0","last_synced_at":"0","gc_protected":false},"loop":{"parent":"loop","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
+                "branch 'loop' must not be its own parent".to_owned(),
+            ),
         ] {
-            assert!(
-                parse(content).is_err(),
-                "accepted invalid metadata: {content}"
+            assert_eq!(
+                parse(content).unwrap_err().to_string(),
+                expected,
+                "{content}"
             );
         }
     }
 
     #[test]
-    fn parse_accepts_branches_served_by_the_project_store() {
-        // The single-store tracking shape: every branch references the
-        // canonical main database while keeping its own lineage and
-        // graph-source provenance.
-        let content = r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"feature/one":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0"},"feature/two":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0"}}}"#;
+    fn metadata_naming_the_project_store_opens_and_is_rewritten_without_a_store_reference() {
+        let content = r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0","gc_protected":false},"feature/one":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0","gc_protected":false},"feature/two":{"parent":"main","created_at":"0","last_synced_at":"0","gc_protected":true}}}"#;
 
-        let meta = parse(content).expect("single-store tracking metadata must parse");
+        let meta = parse(content).expect("project-store branch metadata must parse");
 
-        assert!(meta.branches["feature/one"].served_by_project_store());
-        assert!(meta.branches["feature/two"].served_by_project_store());
+        assert!(meta.is_tracked("feature/one"));
+        assert!(meta.branches["feature/two"].gc_protected);
         assert!(!meta.is_tracked("feature/three"));
-        let legacy = parse(
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"legacy":{"db_file":"branches/legacy.db","created_at":"0","last_synced_at":"0"}}}"#,
-        )
-        .expect("legacy private stores must keep parsing for collection");
-        assert!(!legacy.branches["legacy"].served_by_project_store());
-    }
-
-    #[test]
-    fn parse_accepts_case_insensitive_branch_database_extensions() {
-        let mut meta = BranchMeta::new("main");
-        meta.add_branch("legacy", "branches/legacy.DB", "main");
-
-        let content = serde_json::to_string(&meta).unwrap();
-
-        assert!(parse(&content).is_ok());
-    }
-
-    #[test]
-    fn legacy_single_db_metadata_is_byte_stable() {
-        let first = BranchMeta::for_legacy_single_db(Path::new("/profile/project"), "trunk");
-        let second = BranchMeta::for_legacy_single_db(Path::new("/profile/project"), "trunk");
-
-        assert_eq!(first.branches["trunk"].created_at, "0");
-        assert_eq!(first.branches["trunk"].last_synced_at, "0");
+        let serialized: serde_json::Value =
+            serde_json::from_str(&serialize_branch_meta(&meta).unwrap()).unwrap();
         assert_eq!(
-            serde_json::to_vec_pretty(&first).unwrap(),
-            serde_json::to_vec_pretty(&second).unwrap()
+            serialized,
+            serde_json::json!({
+                "default_branch": "main",
+                "branches": {
+                    "feature/one": {
+                        "parent": "main",
+                        "created_at": "0",
+                        "last_synced_at": "0",
+                        "gc_protected": false
+                    },
+                    "feature/two": {
+                        "parent": "main",
+                        "created_at": "0",
+                        "last_synced_at": "0",
+                        "gc_protected": true
+                    },
+                    "main": {
+                        "created_at": "0",
+                        "last_synced_at": "0",
+                        "gc_protected": false
+                    }
+                }
+            })
         );
     }
 
@@ -698,86 +606,17 @@ mod tests {
         std::os::unix::fs::symlink(&outside, data_dir.join(BRANCH_META_FILENAME)).unwrap();
 
         assert!(load_branch_meta(&data_dir).is_none());
-    }
 
-    #[test]
-    fn parse_old_entry_defaults_gc_protected_to_false() {
-        let meta = parse(
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"1","last_synced_at":"1"}}}"#,
-        )
-        .unwrap();
-        assert!(!meta.branches["main"].gc_protected);
-    }
-
-    #[test]
-    fn update_synced_timestamp_advances_tracked_branch() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut meta = BranchMeta::new("main");
-        meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
-        // Backdate so the advance is observable regardless of same-second timing.
-        meta.branches.get_mut("feature/foo").unwrap().last_synced_at = "1000".to_string();
-        save_branch_meta(dir.path(), &meta).unwrap();
-
-        update_synced_timestamp(dir.path(), "feature/foo");
-
-        let reloaded = load_branch_meta(dir.path()).unwrap();
-        let synced: u64 = reloaded.branches["feature/foo"]
-            .last_synced_at
-            .parse()
-            .unwrap();
-        assert!(synced > 1000, "last_synced_at should advance, got {synced}");
-    }
-
-    #[test]
-    fn update_synced_timestamp_holds_shared_branch_lock_during_load_modify_save() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut meta = BranchMeta::new("main");
-        meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
-        save_branch_meta(dir.path(), &meta).unwrap();
-        let mut observed_contention = false;
-
-        update_synced_timestamp_with(dir.path(), "feature/foo", || {
-            let error = crate::branch::try_acquire_branch_add_lock(dir.path())
-                .expect_err("timestamp update must already own the shared branch lock");
-            observed_contention = matches!(
-                error,
-                tracedecay_domain::errors::TraceDecayError::SyncLock { .. }
-            );
-        });
-
-        assert!(observed_contention);
-        assert!(
-            load_branch_meta(dir.path())
-                .unwrap()
-                .is_tracked("feature/foo")
-        );
-    }
-
-    #[test]
-    fn update_synced_timestamp_noops_for_unknown_branch() {
-        let dir = tempfile::tempdir().unwrap();
-        let meta = BranchMeta::new("main");
-        save_branch_meta(dir.path(), &meta).unwrap();
-
-        // Untracked branch: must not create an entry or error.
-        update_synced_timestamp(dir.path(), "does/not/exist");
-
-        let reloaded = load_branch_meta(dir.path()).unwrap();
-        assert!(!reloaded.is_tracked("does/not/exist"));
-    }
-
-    #[test]
-    fn update_synced_timestamp_noops_without_meta() {
-        let dir = tempfile::tempdir().unwrap();
-        // No branch-meta.json present; must silently no-op.
-        update_synced_timestamp(dir.path(), "main");
-        assert!(load_branch_meta(dir.path()).is_none());
+        std::fs::remove_file(data_dir.join(BRANCH_META_FILENAME)).unwrap();
+        std::fs::copy(&outside, data_dir.join(BRANCH_META_FILENAME)).unwrap();
+        let loaded = load_branch_meta(&data_dir).expect("regular metadata file loads");
+        assert_eq!(loaded.default_branch, "main");
     }
 
     #[test]
     fn graph_source_publication_round_trips_exact_worktree_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = BranchMeta::new_for_dir(dir.path(), "main");
+        let meta = BranchMeta::new("main");
         save_branch_meta(dir.path(), &meta).unwrap();
         let source = BranchGraphSourceV1 {
             publication_epoch: BranchGraphPublicationEpochV1::new(1).unwrap(),
@@ -820,7 +659,7 @@ mod tests {
     #[test]
     fn graph_source_rollback_requires_the_exact_installed_entry() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = BranchMeta::new_for_dir(dir.path(), "main");
+        let meta = BranchMeta::new("main");
         save_branch_meta(dir.path(), &meta).unwrap();
         let draft = BranchGraphSourceDraftV1 {
             project_id: "project.fixture".to_owned(),
@@ -868,9 +707,9 @@ mod tests {
     #[test]
     fn concurrent_graph_source_publications_allocate_distinct_epochs() {
         let dir = tempfile::tempdir().unwrap();
-        let mut meta = BranchMeta::new_for_dir(dir.path(), "main");
-        meta.add_branch("feature/one", crate::config::DB_FILENAME, "main");
-        meta.add_branch("feature/two", crate::config::DB_FILENAME, "main");
+        let mut meta = BranchMeta::new("main");
+        meta.add_branch("feature/one", "main");
+        meta.add_branch("feature/two", "main");
         save_branch_meta(dir.path(), &meta).unwrap();
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -940,15 +779,5 @@ mod tests {
                 .all(|epoch| epoch <= 2),
             "the locked publisher must allocate the first two epochs, got {first_epoch} and {second_epoch}"
         );
-    }
-
-    #[test]
-    fn roundtrip_json() {
-        let mut meta = BranchMeta::new("main");
-        meta.add_branch("feature/bar", "branches/feature_bar.db", "main");
-        let json = serde_json::to_string(&meta).unwrap();
-        let parsed: BranchMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.default_branch, "main");
-        assert!(parsed.is_tracked("feature/bar"));
     }
 }

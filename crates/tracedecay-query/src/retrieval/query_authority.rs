@@ -5,16 +5,18 @@
 //! evaluated replacement; this module does not choose weights, mint
 //! calibration identities, or generate key material.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use thiserror::Error;
 use tracedecay_domain::{
-    ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1, FusionProfile,
-    PrivacyDomainId, QueryDigest, QueryFallbackSubpayload, RetrievalContractError, RetrievalCursor,
-    RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch, RetrieverKind,
-    RetrieverOutcome, ScoreDomainId,
+    CalibrationProfileId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
+    FusionProfile, PrivacyDomainId, QueryDigest, QueryFallbackSubpayload, RetrievalAnchorId,
+    RetrievalContractError, RetrievalCursor, RetrievalCursorKeyId, RetrievalError,
+    RetrievalRequest, RetrieverBatch, RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1,
+    ScoreDomainId,
 };
+use tracedecay_temporal_query::ranking::NORMALIZED_SCORE_CEILING_MICROS;
 
 use super::evidence_lanes::{TaskSessionCandidateSelectionV1, TaskSessionLaneEvidenceV1};
 use super::fusion::{
@@ -24,20 +26,20 @@ use super::fusion::{
 
 /// Immutable comparator/ranking revision shared by the query evaluator,
 /// production authority, and cursor validation.
-pub const QUERY_RANKING_REVISION_V1: &str = "ranking.candidate.v1";
+pub const QUERY_RANKING_REVISION_V1: &str = "ranking.candidate.own-symbol-definition.v2";
 /// Versioned request-local cursor lifetime for the canonical query authority.
 pub const QUERY_CURSOR_TTL_MICROS_V1: u64 = 15 * 60 * 1_000_000;
 
-/// Complete authenticated query composition retained for semantic augmentation
-/// and server-side audit. The fallback payload is independently canonical and
-/// cannot be changed by later optional lanes.
+/// Complete authenticated query composition retained for server-side audit.
+/// The fallback payload is the canonical exact/lexical/graph result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedQueryFallbackV1 {
     pub query_digest: QueryDigest,
     pub fallback: Arc<QueryFallbackSubpayload>,
     pub composition: CompositionOutputV1,
-    /// Exact compact lane inputs retained for one optional-stage recomposition.
-    /// Already-ranked fallback candidates must never be treated as a lane.
+    /// Exact compact lane inputs the composition consumed, retained for
+    /// observation. Already-ranked fallback candidates must never be treated
+    /// as a lane.
     pub fallback_lanes: Vec<CompositionLaneInput>,
     pub page_size: usize,
     /// Authenticated client continuation supplied for this page. It remains
@@ -166,7 +168,6 @@ impl QueryAuthorityV1 {
         if calibration_lanes != expected_lanes
             || weight_lanes != expected_lanes
             || !thresholds_are_valid
-            || profile.rerank_policy_id.is_some()
         {
             return Err(QueryAuthorityErrorV1::InvalidAuthority(
                 "profile lane set does not match the mounted query authority".to_owned(),
@@ -202,9 +203,17 @@ impl QueryAuthorityV1 {
     }
 
     pub fn task_session_score_domain(&self) -> Result<ScoreDomainId, QueryAuthorityErrorV1> {
-        if self.mode != QueryAuthorityModeV1::Federated {
-            return Err(QueryAuthorityErrorV1::AuthorityModeMismatch);
+        if self.mode == QueryAuthorityModeV1::Federated {
+            return self.federated_task_session_score_domain();
         }
+        // The shipped authority is the checked-in exact/lexical/graph policy.
+        // TaskSession is not a search lane, so it does not belong in that
+        // profile, but the same mounted keyring can still rank session anchors.
+        ScoreDomainId::new(super::QUERY_TASK_SESSION_SCORE_DOMAIN_V1.to_owned())
+            .map_err(|error| QueryAuthorityErrorV1::InvalidAuthority(error.to_string()))
+    }
+
+    fn federated_task_session_score_domain(&self) -> Result<ScoreDomainId, QueryAuthorityErrorV1> {
         let calibration = self
             .profile
             .calibrations
@@ -233,11 +242,69 @@ impl QueryAuthorityV1 {
         Ok(domain)
     }
 
-    /// Rank one exact TaskSession expansion with the active evaluated
-    /// federated profile. Unrelated lanes are not represented as successful
-    /// empty batches; this projection retains only the accepted TaskSession
-    /// calibration, weight, score-domain mapping, diversity, cursor key, and
-    /// comparator revision.
+    /// One-lane profile for TaskSession selection.
+    ///
+    /// A federated profile already carries the accepted calibration. The core
+    /// fallback profile does not, and must not: adding the lane there would
+    /// change search cursor identity. The projection lives only on this read.
+    pub(super) fn task_session_ranking_profile(
+        &self,
+    ) -> Result<FusionProfile, QueryAuthorityErrorV1> {
+        let mut profile = self.profile.clone();
+        if profile
+            .calibrations
+            .contains_key(&RetrieverKind::TaskSession)
+        {
+            profile
+                .calibrations
+                .retain(|lane, _| *lane == RetrieverKind::TaskSession);
+            profile
+                .weights_micros
+                .retain(|lane, _| *lane == RetrieverKind::TaskSession);
+            return Ok(profile);
+        }
+        if self.mode == QueryAuthorityModeV1::Federated {
+            return Err(QueryAuthorityErrorV1::InvalidAuthority(
+                "federated profile omits TaskSession calibration".to_owned(),
+            ));
+        }
+        let score_domain = self.task_session_score_domain()?;
+        let calibration_profile_id =
+            CalibrationProfileId::new(super::QUERY_TASK_SESSION_CALIBRATION_V1.to_owned())
+                .map_err(|error| QueryAuthorityErrorV1::InvalidAuthority(error.to_string()))?;
+        profile.calibrations.clear();
+        profile.weights_micros.clear();
+        profile.minimum_calibrated_feature_micros.clear();
+        profile.score_domain_calibrations.clear();
+        profile
+            .calibrations
+            .insert(RetrieverKind::TaskSession, calibration_profile_id.clone());
+        profile
+            .weights_micros
+            .insert(RetrieverKind::TaskSession, 1_000_000);
+        profile.score_domain_calibrations.insert(
+            score_domain.clone(),
+            ScoreDomainCalibrationV1 {
+                calibration_profile_id,
+                score_domain,
+                // TaskSession raw scores are temporal ranking's encoded
+                // tier+within-tier scores, not a [0, 1_000_000] feature. A
+                // narrower range would saturate every ranked anchor to the
+                // same calibrated feature and hand the order to the
+                // source-validity tie-break.
+                raw_min_micros: 0,
+                raw_max_micros: NORMALIZED_SCORE_CEILING_MICROS,
+            },
+        );
+        Ok(profile)
+    }
+
+    /// Rank one exact TaskSession expansion with the mounted query authority.
+    ///
+    /// Unrelated lanes are not represented as successful empty batches. A
+    /// federated profile projects down to its TaskSession calibration. The
+    /// core fallback authority uses the same keyring and comparator without
+    /// folding TaskSession into the search fusion profile.
     pub fn select_task_session(
         &self,
         request: &RetrievalRequest,
@@ -246,17 +313,8 @@ impl QueryAuthorityV1 {
         page_size: usize,
         cursor: Option<&RetrievalCursor>,
     ) -> Result<TaskSessionCandidateSelectionV1, QueryAuthorityErrorV1> {
-        if self.mode != QueryAuthorityModeV1::Federated {
-            return Err(QueryAuthorityErrorV1::AuthorityModeMismatch);
-        }
         self.validate_request(request)?;
-        let mut profile = self.profile.clone();
-        profile
-            .calibrations
-            .retain(|lane, _| *lane == RetrieverKind::TaskSession);
-        profile
-            .weights_micros
-            .retain(|lane, _| *lane == RetrieverKind::TaskSession);
+        let profile = self.task_session_ranking_profile()?;
         let lane = CompositionLaneInput::new(RetrieverKind::TaskSession, outcome)?;
         let composition = self.kernel.compose_selected_lane(
             &FusionStageInput {
@@ -266,27 +324,16 @@ impl QueryAuthorityV1 {
             &self.diversity,
             RetrieverKind::TaskSession,
         )?;
-        let page = self.kernel.paginate_at(
+        let page = self.kernel.paginate(
             request,
             query_view,
             &self.keyring,
             &composition,
             page_size,
             cursor,
-            request.snapshot.captured_at,
         )?;
         TaskSessionCandidateSelectionV1::new(page.ranked_candidates, page.cursor)
             .map_err(|error| QueryAuthorityErrorV1::InvalidAuthority(error.to_string()))
-    }
-
-    /// Authenticate one ephemeral sanitized query with the daemon-owned key.
-    pub fn authenticate_query(
-        &self,
-        request: &RetrievalRequest,
-        query_view: &EphemeralSanitizedQueryViewV1,
-    ) -> Result<QueryDigest, QueryAuthorityErrorV1> {
-        self.validate_request(request)?;
-        Ok(self.keyring.digest_active_query(request, query_view)?)
     }
 
     /// Authenticate one prepared-query cursor payload with the daemon-owned key.
@@ -333,13 +380,16 @@ impl QueryAuthorityV1 {
 
     /// Compose and page the exact query lanes under the accepted immutable
     /// profile, returning the authenticated query identity and canonical
-    /// fallback subpayload together.
-    #[hotpath::measure(label = "query.authority.compose")]
+    /// fallback subpayload together. `anchor_tiers` names the caller anchors
+    /// each lexical site carries; see
+    /// [`CompositionKernel::compose_with_anchor_tiers`].
+    #[tracing::instrument(name = "query.authority.compose", level = "trace", skip_all)]
     pub fn compose(
         &self,
         request: &RetrievalRequest,
         query_view: &EphemeralSanitizedQueryViewV1,
         lanes: Vec<CompositionLaneInput>,
+        anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
         page_size: usize,
         cursor: Option<&RetrievalCursor>,
     ) -> Result<AuthorizedQueryFallbackV1, QueryAuthorityErrorV1> {
@@ -350,23 +400,25 @@ impl QueryAuthorityV1 {
         validate_lane_set(&lanes, &RetrieverKind::QUERY_FALLBACK_LANES)?;
         let query_digest = self.keyring.digest_active_query(request, query_view)?;
         let fallback_lanes = lanes.clone();
-        let composition = self.kernel.compose(
+        let composition = self.kernel.compose_with_anchor_tiers(
             &FusionStageInput {
                 profile: self.profile.clone(),
                 lanes,
             },
             &self.diversity,
+            anchor_tiers,
         )?;
-        let page = self.kernel.paginate_at(
+        let mut page = self.kernel.paginate(
             request,
             query_view,
             &self.keyring,
             &composition,
             page_size,
             cursor,
-            request.snapshot.captured_at,
         )?;
-        hotpath::gauge!("query.fusion.results").set(page.ranked_candidates.len());
+        for (ordinal, candidate) in page.ranked_candidates.iter_mut().enumerate() {
+            candidate.final_ordinal = ordinal as u32;
+        }
         let fallback = QueryFallbackSubpayload::new(
             composition.profile_id.clone(),
             page.ranked_candidates,
@@ -392,7 +444,7 @@ impl QueryAuthorityV1 {
     /// Compose and page every canonical retrieval lane under the accepted
     /// immutable profile. Candidate payloads remain unhydrated; the returned
     /// page is an authenticated slice of the frozen compact candidate set.
-    #[hotpath::measure(label = "query.authority.compose_federated")]
+    #[tracing::instrument(name = "query.authority.compose_federated", level = "trace", skip_all)]
     pub fn compose_federated(
         &self,
         request: &RetrievalRequest,
@@ -414,16 +466,14 @@ impl QueryAuthorityV1 {
             },
             &self.diversity,
         )?;
-        let page = self.kernel.paginate_at(
+        let page = self.kernel.paginate(
             request,
             query_view,
             &self.keyring,
             &composition,
             page_size,
             cursor,
-            request.snapshot.captured_at,
         )?;
-        hotpath::gauge!("query.fusion.results").set(page.ranked_candidates.len());
         Ok(AuthorizedFederatedRetrievalV1 {
             query_digest,
             composition,
@@ -431,34 +481,6 @@ impl QueryAuthorityV1 {
             page_size,
             request_cursor: cursor.cloned(),
         })
-    }
-
-    pub fn continuation_cursor_at(
-        &self,
-        request: &RetrievalRequest,
-        query_view: &EphemeralSanitizedQueryViewV1,
-        composition: &CompositionOutputV1,
-        next_ordinal: usize,
-    ) -> Result<RetrievalCursor, QueryAuthorityErrorV1> {
-        self.validate_request(request)?;
-        Ok(self.kernel.cursor_at(
-            request,
-            query_view,
-            &self.keyring,
-            composition,
-            next_ordinal,
-            request.snapshot.captured_at,
-        )?)
-    }
-
-    pub fn bind_semantic_continuation(
-        &self,
-        cursor: &mut RetrievalCursor,
-        semantic: tracedecay_domain::SemanticRetrievalContinuationV1,
-    ) -> Result<(), QueryAuthorityErrorV1> {
-        cursor.semantic = Some(semantic);
-        self.keyring.resign_cursor(cursor)?;
-        Ok(())
     }
 
     pub fn bind_code_source_cursor(

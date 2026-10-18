@@ -2,11 +2,11 @@
 //! (issue #762): cycle `i` stages the full corpus as generation `i` in its
 //! own physical namespace, then retires generation `i - 1` by deleting its
 //! rows the way `delete_generation_contents` does. Red when a cycle's
-//! post-retirement baseline does not return near the first cycle's — the
+//! post-retirement baseline does not return near the first cycle's, the
 //! operator daemon's cross-cycle retention shape, where every generation
 //! swap stacked another resident corpus until the kernel killed the daemon.
 //!
-//! Ignored by default. This is a measurement harness, not a contract —
+//! Ignored by default. This is a measurement harness, not a contract,
 //! nothing asserts on a memory figure.
 //!
 //! ```text
@@ -35,10 +35,6 @@ use tracedecay_graph_db::{
     GraphRelationId, GraphRelationKind, GraphWatermark, GraphWriteBatch, NeverCancelled,
     SourceGeneration,
 };
-
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod support;
 
@@ -153,7 +149,7 @@ fn stage_cycle(db: &GraphDbLeaseV1, cycle: usize, rows: usize) {
 }
 
 /// Deletes a retired cycle's rows the way `delete_generation_contents`
-/// does — relations first, then entities — through the public apply path.
+/// does, relations first, then entities, through the public apply path.
 fn retire_cycle(db: &GraphDbLeaseV1, cycle: usize, rows: usize) {
     let page_rows = page_size(rows);
     let relations = rows / RELATION_DIVISOR;
@@ -186,9 +182,6 @@ fn retire_cycle(db: &GraphDbLeaseV1, cycle: usize, rows: usize) {
 #[test]
 #[ignore = "residency measurement harness; run one scenario per process, see module docs"]
 fn generation_cycle_residency_probe() {
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("generation-cycle-residency").build();
-
     if status_kib("VmRSS").is_none() {
         println!("/proc/self/status unavailable on this platform; skipping");
         return;

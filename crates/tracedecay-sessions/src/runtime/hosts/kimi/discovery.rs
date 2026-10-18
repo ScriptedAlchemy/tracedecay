@@ -1,22 +1,23 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::runtime::host_scan::HostScanBudget;
-use crate::runtime::source::{
-    FileDiscoveryReport, TranscriptIngestResult, canonical_framed_sha256,
-};
+use crate::runtime::ingest::quarantine::SettledClaim;
+use crate::runtime::source::{FileDiscoveryReport, canonical_framed_sha256};
 
-use super::{MAX_DISCOVERY_FAILURE_EVIDENCE, invalid_frame};
+use super::MAX_DISCOVERY_FAILURE_EVIDENCE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum KimiDiscoveryFailureKind {
-    InvalidProviderPartition,
     DirectoryUnavailable,
     DirectoryEntryUnavailable,
     EntryTypeUnavailable,
-    ContextMetadataUnavailable,
+    SessionMetadataUnavailable,
+    InvalidSessionMetadata,
+    InvalidAgentPartition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +35,17 @@ pub(super) struct KimiDiscoveryReport {
     /// A partial sweep must not advance the durable discovery frontier.
     pub(super) scan_complete: bool,
     pub(super) reached_end: bool,
+    /// Session state files whose agent transcripts this pass still has to
+    /// admit. Each is finished once those transcripts are covered, so the
+    /// next history wake does not open `state.json` to rediscover them.
+    pub(super) state_gates: Vec<KimiStateGate>,
+}
+
+/// One Kimi `state.json` that becomes converged when `pending_wires` are
+/// admitted through the identity `settled` observed.
+pub(super) struct KimiStateGate {
+    pub(super) settled: SettledClaim,
+    pub(super) pending_wires: Vec<PathBuf>,
 }
 
 impl KimiDiscoveryReport {
@@ -61,28 +73,49 @@ impl KimiDiscoveryReport {
 }
 
 #[derive(Deserialize)]
-pub(super) struct KimiMetadata {
+pub(super) struct KimiSessionState {
     #[serde(default)]
-    pub(super) work_dirs: Vec<KimiWorkDir>,
+    pub(super) id: Option<String>,
+    #[serde(default)]
+    pub(super) cwd: Option<PathBuf>,
+    #[serde(default, rename = "workDir")]
+    pub(super) work_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub(super) agents: BTreeMap<String, KimiAgentState>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct KimiWorkDir {
-    pub(super) path: PathBuf,
-    #[serde(default = "local_kaos")]
-    pub(super) kaos: String,
+pub(super) struct KimiAgentState {
+    #[serde(rename = "type")]
+    pub(super) kind: String,
+    #[serde(default)]
+    pub(super) homedir: Option<PathBuf>,
 }
 
-fn local_kaos() -> String {
-    "local".to_owned()
-}
+impl KimiSessionState {
+    pub(super) fn working_directory(&self) -> Option<&Path> {
+        match (&self.cwd, &self.work_dir) {
+            (Some(cwd), Some(work_dir)) if cwd == work_dir => Some(cwd),
+            (Some(cwd), None) => Some(cwd),
+            (None, Some(work_dir)) => Some(work_dir),
+            (Some(_), Some(_)) | (None, None) => None,
+        }
+    }
 
-pub(super) fn charge_discovered_path(
-    budget: &mut HostScanBudget,
-    path: &Path,
-) -> TranscriptIngestResult<bool> {
-    let bytes = u64::try_from(path.as_os_str().as_encoded_bytes().len())
-        .map_err(|_| invalid_frame())?
-        .max(1);
-    Ok(budget.try_charge_input(bytes))
+    pub(super) fn session_id(&self, session_dir: &Path) -> Option<String> {
+        let directory_id = session_dir.file_name()?.to_str()?;
+        match self.id.as_deref() {
+            Some(id) if id == directory_id => Some(id.to_owned()),
+            Some(_) => None,
+            None if !self.agents.is_empty()
+                && self.agents.iter().all(|(agent_id, agent)| {
+                    agent.homedir.as_deref()
+                        == Some(session_dir.join("agents").join(agent_id).as_path())
+                }) =>
+            {
+                Some(directory_id.to_owned())
+            }
+            None => None,
+        }
+    }
 }

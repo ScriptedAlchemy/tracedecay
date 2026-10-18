@@ -1,29 +1,39 @@
-mod apply;
+pub(crate) mod apply;
+mod codex_echo;
+#[cfg(test)]
+mod rearm_tests;
 mod rebuild;
 mod schema;
-mod state;
+pub(crate) mod source_transition;
+pub(crate) mod state;
 mod transition;
 
+pub(crate) use apply::SendProjectionDerive;
 #[cfg(test)]
 pub(crate) use apply::apply_provider_usage_effects;
-pub(super) use apply::{derive_projection, derive_projection_with_alias, verify_workflow_effects};
+#[cfg(test)]
+pub(crate) use apply::impl_send_projection_derive;
+pub(crate) use apply::provider_usage_scope;
+pub(super) use apply::{
+    ConvergedRendering, converge_released_output_rendering, derive_projection,
+    derive_projection_with_alias, retire_source_record, verify_workflow_effects,
+};
+pub(crate) use codex_echo::converge_codex_response_echoes;
 pub use rebuild::{
     converge_projection_predecessor, project_observation, project_queued_observations,
     rebuild_projection,
 };
-#[cfg(test)]
-pub use rebuild::{project_observation_with_engine, rebuild_projection_with_engine};
-pub(crate) use schema::{
-    OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL, OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL,
-    OBSERVATION_PROJECTION_SCHEMA_SQL,
-};
+pub(crate) use schema::OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL;
 pub(super) use schema::{
     ensure_observation_projection_performance_indexes, ensure_observation_projection_schema,
 };
-pub(crate) use state::rearm_queued_projection_retries;
+pub(crate) use source_transition::verify_native_source_supersession;
+pub(crate) use state::RearmedProjectionRetries;
 #[cfg(test)]
 pub(super) use state::verify_projection_rows;
 pub(super) use state::{
-    ProjectionOutputAuthority, ProjectionRowsBatch, read_output_authorities,
-    read_projection_rows_batch, resolve_output_projection, verify_projection_rows_from_records,
+    ProjectionOutputAuthority, ProjectionRowsBatch, load_verified_session, read_output_authorities,
+    read_projection_rows_batch, resolve_output_projection, stored_output_digest,
+    stored_row_matches, verify_projection_rows_from_records,
 };
+pub(crate) use state::{REARM_PROJECTION_RETRY_BATCH_ROWS, rearm_queued_projection_retries};

@@ -5,31 +5,46 @@
 //! the path stops executing; source text and catalog declarations are not
 //! accepted as reachability evidence.
 
-use crate::common;
+use crate::common::{self, fixture::copy_fixture_tree};
 
 use std::path::Path;
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, CallableCodeSurfaceMeta,
-    CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest, parse_application_surface_request,
-    resolve_http_application_surface,
+use tracedecay_contracts::retrieval::SymbolGraphScope;
+use tracedecay_contracts::{
+    ApplicationEnvelope, ApplicationOutcome, CoverageCompleteness, EvidencePacket, LegalAction,
+    OpaqueCursor, OperationTermination, ProblemTerminality, RequestId, ResultProjection,
+    RetrievalOrder,
 };
-use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
-use tracedecay_application::retrieval::SymbolGraphScope;
-use tracedecay_application::{
-    ApplicationEnvelope, ApplicationOutcome, LegalAction, OpaqueCursor, OperationTermination,
-    ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+    parse_application_surface_request,
 };
 use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
-use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+use tracedecay_daemon_service::application_surface::{
+    CallableCodeSurfaceMeta, CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest,
+    resolve_http_application_surface,
+};
+use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
-/// Every surface pins its page size to ten rows, so a query with more matches
-/// than this must cross a page boundary to answer at all.
-const SURFACE_PAGE_SIZE: usize = 10;
+/// The page size the surface serves when MCP and CLI callers, who cannot
+/// choose one, omit it: ten rows for most reads, wider for the primitive
+/// navigation reads whose typical answer is longer (`code_callers` serves
+/// 100). A query with more matches than this must cross a page boundary to
+/// answer at all.
+fn surface_page_size(operation: ApplicationSurfaceOperation) -> usize {
+    tracedecay_contracts::application_operation_default_page_size(operation) as usize
+}
+fn symbol_search_page_size() -> usize {
+    surface_page_size(ApplicationSurfaceOperation::CodeSymbolSearch)
+}
 const PROBE_SYMBOL_COUNT: usize = 24;
+/// Callers of one anchor and callees of another; sized past the 100-row
+/// callers page.
+const PROBE_RELATION_COUNT: usize = 104;
 const PROBE_TOKEN: &str = "application_pagination_probe";
 /// Called by every `*_caller_NN` probe, so its callers and references both
 /// exceed one page.
@@ -42,16 +57,11 @@ const PROBE_TRAIT: &str = "ApplicationPaginationProbeBehavior";
 const PROBE_HIERARCHY_LEAF: &str = "ProbeLeafCanary";
 /// Takes one parameter of every `ApplicationPaginationProbeTypeNN`.
 const PROBE_TYPE_ANCHOR: &str = "application_pagination_probe_type_anchor";
-/// Size of the `HttpPageProjection::MetaCursor` family in `application_surface`: the
-/// operations whose decoded request carries a `CallableCodeSurfaceMeta`, and so
-/// can be handed a continuation cursor.
-const CURSOR_CARRYING_CODE_OPERATIONS: usize = 14;
-
 struct ProductionFixture {
     _daemon: common::DaemonProcess,
     client: DaemonInvocationClient,
     project: std::path::PathBuf,
-    _environment: common::IsolatedEnv,
+    _environment: common::IsolatedHome,
 }
 
 impl ProductionFixture {
@@ -67,15 +77,17 @@ impl ProductionFixture {
 /// opened by the daemon's own project-open path, and the client is the same
 /// invocation client the hosts use.
 async fn production_fixture() -> ProductionFixture {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
-    copy_dir(
+    let (environment, project) = common::IsolatedHome::new();
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         &project,
-    );
-    copy_dir(
+    )
+    .expect("copy writable fixture");
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/managed_run_overlay"),
         &project,
-    );
+    )
+    .expect("copy writable fixture");
     write_pagination_probe(&project);
     rewrite_managed_run_overlay_to_privacy_safe(&project);
     std::fs::write(project.join(".gitignore"), "/target\nCargo.lock\n")
@@ -86,7 +98,9 @@ async fn production_fixture() -> ProductionFixture {
         &project,
         &["commit", "-qm", "application reachability fixture"],
     );
-    let daemon = common::spawn_tracedecay_daemon(environment.home());
+    let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
+        environment.apply_toolchain_env(command);
+    });
     let initialized = common::tracedecay_command_with_home(environment.home())
         .arg("init")
         .current_dir(&project)
@@ -94,11 +108,17 @@ async fn production_fixture() -> ProductionFixture {
         .output()
         .expect("run tracedecay init");
     assert_command_success("tracedecay init", &initialized);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)
-        .expect("daemon client");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("daemon handshake");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake)
+            .expect("daemon client");
     // `run_affected_tests` needs the verified code graph; honour the same
     // published pre-admission retry contract as the later surface reads.
     for name in [
@@ -135,14 +155,14 @@ async fn production_fixture() -> ProductionFixture {
 /// inside one page.
 ///
 /// Each generated file feeds a different continuation-capable operation, and
-/// every one of them is sized past [`SURFACE_PAGE_SIZE`] so the operation is
-/// forced to mint a cursor instead of answering in one page:
+/// every one of them is sized past that operation's [`surface_page_size`] so
+/// the operation is forced to mint a cursor instead of answering in one page:
 ///
-/// * uniform free functions — symbol, signature, exact, and phrase reads;
-/// * one call sink with many callers and one caller with many callees —
+/// * uniform free functions, symbol, signature, exact, and phrase reads;
+/// * one call sink with many callers and one caller with many callees,
 ///   the relation and reference reads;
-/// * one trait with many implementors — the implementations read;
-/// * one function with many distinctly typed parameters — the type-definition
+/// * one trait with many implementors, the implementations read;
+/// * one function with many distinctly typed parameters, the type-definition
 ///   read.
 fn write_pagination_probe(project: &Path) {
     let destination = project.join("src");
@@ -167,7 +187,7 @@ fn write_pagination_probe(project: &Path) {
     // sites or prefixed names. One short file per declaration keeps the
     // generated sources privacy-safe and under the exact-lane budget.
     let mut occ_mods = String::new();
-    for index in 0..(SURFACE_PAGE_SIZE + 2) {
+    for index in 0..(surface_page_size(ApplicationSurfaceOperation::CodeExactOccurrence) + 2) {
         let name = format!("probe_occ_{index:02}.rs");
         std::fs::write(
             destination.join(&name),
@@ -222,6 +242,55 @@ fn seed_managed_test_run(home: &Path, project: &Path) {
     assert_command_success("tracedecay_run_affected_tests", &seeded);
 }
 
+/// Runs the installed compiler against a retained fixture file, then admits its
+/// actual output through the same diagnostic publisher used by agent hosts.
+fn publish_compiler_diagnostics(fixture: &ProductionFixture, compiler: &Path) {
+    let output_directory = tempfile::TempDir::new().expect("compiler output directory");
+    let compiled = std::process::Command::new(compiler)
+        .current_dir(&fixture.project)
+        .args([
+            "--crate-type=lib",
+            "--edition=2024",
+            "--emit=metadata",
+            "--color=never",
+            "src/application_pagination_types.rs",
+            "--out-dir",
+        ])
+        .arg(output_directory.path())
+        .output()
+        .expect("run the real compiler for diagnostic publication");
+    assert_command_success("compile diagnostic fixture", &compiled);
+    let cargo_output = String::from_utf8(compiled.stderr).expect("compiler diagnostic text");
+    assert!(
+        cargo_output.contains("unused variable"),
+        "the existing unused type-anchor parameters must produce real warnings: {cargo_output}"
+    );
+    let arguments = serde_json::json!({
+        "cargo_output": cargo_output,
+        "include_callers": false,
+        "format": "json",
+    });
+    let published = common::tracedecay_command_with_home(fixture.home())
+        .current_dir(&fixture.project)
+        .args(["tool", "diagnose", "--json", "--args"])
+        .arg(arguments.to_string())
+        .stdin(Stdio::null())
+        .output()
+        .expect("publish real compiler diagnostics through diagnose");
+    assert_command_success("publish compiler diagnostics", &published);
+    let published: Value =
+        serde_json::from_slice(&published.stdout).expect("diagnose publication JSON");
+    let published = tracedecay::daemon::tool_json_payload(&published, "tracedecay_diagnose")
+        .expect("canonical diagnose publication payload");
+    assert_eq!(published["published"]["status"], "published", "{published}");
+    assert!(
+        published["published"]["inserted"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "compiler warnings must reach the canonical diagnostic store: {published}"
+    );
+}
+
 fn probe_symbol_source() -> String {
     let mut source = String::new();
     for index in 0..PROBE_SYMBOL_COUNT {
@@ -239,22 +308,28 @@ fn probe_symbol_source() -> String {
 /// edges are dense in both directions from a single named anchor.
 fn probe_relation_source() -> String {
     let mut source = format!("pub fn {PROBE_SINK}(input: u32) -> u32 {{\n    input\n}}\n\n");
-    for index in 0..PROBE_SYMBOL_COUNT {
+    for index in 0..PROBE_RELATION_COUNT {
         source.push_str(&format!(
-            "pub fn {PROBE_TOKEN}_caller_{index:02}(input: u32) -> u32 {{\n    {PROBE_SINK}(input) + {index}\n}}\n\n"
+            "pub fn {PROBE_TOKEN}_caller_{index:03}(input: u32) -> u32 {{\n    {PROBE_SINK}(input) + {index}\n}}\n\n"
         ));
     }
-    for index in 0..PROBE_SYMBOL_COUNT {
+    for index in 0..PROBE_RELATION_COUNT {
         source.push_str(&format!(
-            "pub fn {PROBE_TOKEN}_leaf_{index:02}(input: u32) -> u32 {{\n    input + {index}\n}}\n\n"
+            "pub fn {PROBE_TOKEN}_leaf_{index:03}(input: u32) -> u32 {{\n    input + {index}\n}}\n\n"
         ));
     }
-    source.push_str(&format!("pub fn {PROBE_FANOUT}(input: u32) -> u32 {{\n"));
-    for index in 0..PROBE_SYMBOL_COUNT {
-        let joiner = if index == 0 { "    " } else { "        + " };
-        source.push_str(&format!("{joiner}{PROBE_TOKEN}_leaf_{index:02}(input)\n"));
+    // One call per statement: a single `a + b + ...` chain nests one level per
+    // operand and the extractor stops resolving call sites past its nesting
+    // budget, which would cap the fan-out well under the callees page.
+    source.push_str(&format!(
+        "pub fn {PROBE_FANOUT}(input: u32) -> u32 {{\n    let mut total = 0;\n"
+    ));
+    for index in 0..PROBE_RELATION_COUNT {
+        source.push_str(&format!(
+            "    total += {PROBE_TOKEN}_leaf_{index:03}(input);\n"
+        ));
     }
-    source.push_str("}\n");
+    source.push_str("    total\n}\n");
     source
 }
 
@@ -308,19 +383,6 @@ fn probe_type_source() -> String {
     source
 }
 
-fn copy_dir(source: &Path, destination: &Path) {
-    std::fs::create_dir_all(destination).expect("fixture destination");
-    for entry in std::fs::read_dir(source).expect("fixture directory") {
-        let entry = entry.expect("fixture entry");
-        let target = destination.join(entry.file_name());
-        if entry.file_type().expect("fixture entry type").is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).expect("copy checked-in fixture");
-        }
-    }
-}
-
 fn assert_command_success(label: &str, output: &Output) {
     assert!(
         output.status.success(),
@@ -350,6 +412,13 @@ fn symbol_search_surface_request(query: &str, cursor: Option<&str>) -> Applicati
 }
 
 fn evidence_payload(result: &ApplicationSurfaceInvocationResult) -> &Value {
+    evidence_packet(result)
+        .payload
+        .as_ref()
+        .expect("evidence payload")
+}
+
+fn evidence_packet(result: &ApplicationSurfaceInvocationResult) -> &EvidencePacket<Value> {
     let envelope = result.result.as_ref().unwrap_or_else(|problem| {
         panic!(
             "{} returned {:?}: {:?}",
@@ -373,7 +442,7 @@ fn evidence_payload(result: &ApplicationSurfaceInvocationResult) -> &Value {
                 result.operation.as_str(),
                 evidence.execution.termination,
             );
-            evidence.payload.as_ref().expect("evidence payload")
+            evidence
         }
         other => panic!("expected evidence outcome, got {other:?}"),
     }
@@ -406,13 +475,16 @@ fn run_application_cli(
 ) -> Output {
     let project = fixture.project.to_string_lossy().into_owned();
     let arguments = arguments.to_string();
+    // `tracedecay tool` answers to the operation's CLI binding name, the
+    // transport spelling MCP advertises (`diagnostics`, not `diagnostics_read`);
+    // the canonical identity names it only in HTTP/SDK and rendered envelopes.
     common::tracedecay_command_with_home(fixture.home())
         .current_dir(&fixture.project)
         .args([
             "tool",
             "--project",
             project.as_str(),
-            operation.as_str(),
+            operation.name_for_surface(BindingSurface::Cli),
             "--args",
             arguments.as_str(),
             "--json",
@@ -427,6 +499,26 @@ fn invocation_terminal(result: &ApplicationSurfaceInvocationResult) -> Value {
         Ok(envelope) => serde_json::to_value(envelope).expect("application evidence envelope"),
         Err(envelope) => serde_json::to_value(envelope).expect("application problem envelope"),
     }
+}
+
+/// The application envelope a CLI `--json` call printed: an answer's
+/// `structuredContent`, and for a refusal the tool result's envelope text,
+/// whose record is the one at `structuredContent.problem`.
+fn cli_terminal(printed: Value) -> Value {
+    if printed["isError"] != true {
+        return printed["structuredContent"].clone();
+    }
+    let envelope: Value = serde_json::from_str(
+        printed["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("CLI refusal names its envelope: {printed:#}")),
+    )
+    .unwrap_or_else(|error| panic!("CLI refusal envelope JSON ({error}): {printed:#}"));
+    assert_eq!(
+        envelope["problem"], printed["structuredContent"]["problem"],
+        "the refusal's structured record is its envelope's: {printed:#}"
+    );
+    envelope
 }
 
 fn terminal_disposition(value: &Value) -> (&str, &str) {
@@ -454,7 +546,7 @@ fn terminal_disposition(value: &Value) -> (&str, &str) {
     let kind = problem["kind"]
         .as_str()
         .unwrap_or_else(|| panic!("typed application problem: {value:#}"));
-    // Every problem variant serializes a top-level `code` — the diagnostic
+    // Every problem variant serializes a top-level `code`, the diagnostic
     // code when a diagnostic exists, else the variant's canonical code
     // (`ApplicationProblemRecord::new` in `result/envelope.rs`). Variants like
     // `NotFoundOrNotAuthorized` structurally carry no diagnostic
@@ -500,7 +592,7 @@ const READINESS_RETRY_FLOOR_MILLIS: u64 = 250;
 /// carries the LAST problem record verbatim, so a never-resolving admission
 /// (for example a defective initial identity capture) stays diagnostic
 /// instead of collapsing into an opaque timeout.
-async fn admitted_mcp_invocation(
+pub(super) async fn admitted_mcp_invocation(
     client: &DaemonInvocationClient,
     operation: ApplicationSurfaceOperation,
     request_id: &str,
@@ -564,7 +656,7 @@ async fn invoke_mcp_symbol_search(
 
 /// Asserts the page is the first of several and was produced by the cursor
 /// authority rather than by truncation.
-fn assert_first_page_of_many(surface: &str, payload: &Value) {
+fn assert_first_page_of_many(surface: &str, page_size: usize, payload: &Value) {
     let items = payload["items"]
         .as_array()
         .unwrap_or_else(|| panic!("{surface} symbol page items: {payload:#}"));
@@ -572,12 +664,12 @@ fn assert_first_page_of_many(surface: &str, payload: &Value) {
         .as_u64()
         .unwrap_or_else(|| panic!("{surface} symbol page total: {payload:#}"));
     assert!(
-        total > SURFACE_PAGE_SIZE as u64,
-        "{surface} probe query must exceed one page, saw {total}"
+        total > page_size as u64,
+        "{surface} probe query must exceed one page of {page_size}, saw {total}"
     );
     assert_eq!(
         items.len(),
-        SURFACE_PAGE_SIZE,
+        page_size,
         "{surface} must return a full first page"
     );
     assert!(
@@ -677,17 +769,23 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     )
     .await;
     let immediate = evidence_payload(&immediate).clone();
-    assert_first_page_of_many("immediate post-open MCP", &immediate);
+    assert_first_page_of_many(
+        "immediate post-open MCP",
+        symbol_search_page_size(),
+        &immediate,
+    );
 
     let fresh_client = || {
         let handshake = tracedecay::daemon::handshake_for_current_client(
+            fixture._environment.profile(),
             Some(fixture.project.clone()),
             None,
             false,
             false,
         )
         .expect("daemon handshake");
-        tracedecay_daemon_identity::invocation_client_for_current(handshake).expect("daemon client")
+        tracedecay::daemon::invocation_client_for_current(fixture._environment.profile(), handshake)
+            .expect("daemon client")
     };
     let client_a = fresh_client();
     let client_b = fresh_client();
@@ -718,7 +816,7 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
         ("concurrent-d", d),
     ] {
         let payload = evidence_payload(&result);
-        assert_first_page_of_many(label, payload);
+        assert_first_page_of_many(label, symbol_search_page_size(), payload);
         assert_eq!(
             payload["items"], immediate["items"],
             "{label} must reach the same mounted owner"
@@ -746,6 +844,8 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
 #[tokio::test(flavor = "multi_thread")]
 async fn operation_family_executes_through_cli_mcp_and_http() {
     let fixture = production_fixture().await;
+    let compiler = std::env::var_os("RUSTC").expect("Bazel must provide the fixture compiler");
+    publish_compiler_diagnostics(&fixture, Path::new(&compiler));
     let cases = [
         (
             ApplicationSurfaceOperation::FeedbackImpact,
@@ -821,6 +921,7 @@ async fn operation_family_executes_through_cli_mcp_and_http() {
         );
         let cli: Value = serde_json::from_slice(&cli.stdout)
             .unwrap_or_else(|error| panic!("parse CLI {} JSON: {error}", operation.as_str()));
+        let cli = cli_terminal(cli);
 
         assert_eq!(
             mcp.binding_id.as_str(),
@@ -883,7 +984,7 @@ async fn production_project_open_serves_a_paginated_symbol_graph_read() {
     )
     .await;
     let first = evidence_payload(&result).clone();
-    assert_first_page_of_many("MCP", &first);
+    assert_first_page_of_many("MCP", symbol_search_page_size(), &first);
 
     let cursor = first["next_cursor"]
         .as_str()
@@ -923,8 +1024,8 @@ async fn production_project_open_serves_a_paginated_symbol_graph_read() {
 
 /// The MCP, HTTP, and CLI surfaces must reach the same daemon-owned primitive.
 ///
-/// Each surface is entered through its own shipped entry point — the MCP and
-/// HTTP application resolvers in-process, and the CLI as the installed binary —
+/// Each surface is entered through its own shipped entry point, the MCP and
+/// HTTP application resolvers in-process, and the CLI as the installed binary,
 /// so a surface that stops routing to the daemon fails here.
 #[tokio::test(flavor = "multi_thread")]
 async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
@@ -936,7 +1037,7 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
     )
     .await;
     let mcp = evidence_payload(&mcp).clone();
-    assert_first_page_of_many("MCP", &mcp);
+    assert_first_page_of_many("MCP", symbol_search_page_size(), &mcp);
 
     let http = resolve_http_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
@@ -948,10 +1049,10 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
     .await
     .expect("HTTP application dispatch");
     let http = evidence_payload(&http).clone();
-    assert_first_page_of_many("HTTP", &http);
+    assert_first_page_of_many("HTTP", symbol_search_page_size(), &http);
 
     let cli = cli_symbol_search_payload(&fixture, PROBE_TOKEN, None);
-    assert_first_page_of_many("CLI", &cli);
+    assert_first_page_of_many("CLI", symbol_search_page_size(), &cli);
 
     assert_eq!(mcp["items"], http["items"], "MCP and HTTP page contents");
     assert_eq!(mcp["items"], cli["items"], "MCP and CLI page contents");
@@ -975,9 +1076,14 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
 /// operation can never be quietly skipped.
 #[derive(Clone, Copy, Debug)]
 enum ContinuationExpectation {
-    /// The fixture must drive this operation past [`SURFACE_PAGE_SIZE`]. A
-    /// short page fails and says to grow the fixture.
+    /// The fixture must drive this operation past its [`surface_page_size`].
+    /// A short page fails and says to grow the fixture.
     CrossesPages,
+    /// [`CrossesPages`](Self::CrossesPages), and the fixture holds exactly this
+    /// many rows: `total` must report that count and the cursors must walk
+    /// every row once, so a lane budget can no longer pass off its admitted
+    /// prefix as the whole relation set.
+    CrossesPagesWithTotal(u64),
     /// The runtime materializes at most one row here whatever the fixture
     /// holds, so there is no continuation to mint. A page that does mint one
     /// fails, because the operation has become continuation-capable and owes
@@ -1049,7 +1155,7 @@ fn callable_code_meta(cursor: Option<&str>) -> Value {
 /// the freshness-resolved latest complete generation.
 fn code_query_scope() -> Value {
     serde_json::json!({
-        "generation": tracedecay_application::UNPINNED_LATEST_GENERATION_SENTINEL,
+        "generation": tracedecay_contracts::UNPINNED_LATEST_GENERATION_SENTINEL,
         "path_prefix": Value::Null,
     })
 }
@@ -1145,12 +1251,13 @@ fn continuation_cases() -> Vec<ContinuationCase> {
                 serde_json::json!({
                     "node_id": anchors.sink,
                     "maximum_depth": 1,
-                    "resolve_trait_dispatch": false,
                     "scope": symbol_graph_scope(),
                     "meta": callable_code_meta(cursor),
                 })
             },
-            expectation: ContinuationExpectation::CrossesPages,
+            expectation: ContinuationExpectation::CrossesPagesWithTotal(
+                PROBE_RELATION_COUNT as u64,
+            ),
         },
         ContinuationCase {
             operation: ApplicationSurfaceOperation::CodeCallees,
@@ -1163,7 +1270,9 @@ fn continuation_cases() -> Vec<ContinuationCase> {
                     "meta": callable_code_meta(cursor),
                 })
             },
-            expectation: ContinuationExpectation::CrossesPages,
+            expectation: ContinuationExpectation::CrossesPagesWithTotal(
+                PROBE_RELATION_COUNT as u64,
+            ),
         },
         ContinuationCase {
             operation: ApplicationSurfaceOperation::CodeFacets,
@@ -1212,19 +1321,6 @@ fn continuation_cases() -> Vec<ContinuationCase> {
             },
         },
         ContinuationCase {
-            operation: ApplicationSurfaceOperation::CodeDefinition,
-            arguments: |anchors, cursor| {
-                serde_json::json!({
-                    "node_id": anchors.sink,
-                    "scope": code_query_scope(),
-                    "meta": callable_code_meta(cursor),
-                })
-            },
-            expectation: ContinuationExpectation::BoundedToOneRow {
-                authority: "navigation_symbol_query pushes the one resolved start symbol",
-            },
-        },
-        ContinuationCase {
             operation: ApplicationSurfaceOperation::CodeTimeline,
             arguments: |_, cursor| {
                 serde_json::json!({
@@ -1245,6 +1341,15 @@ async fn continuation_page(
     label: &str,
     arguments: Value,
 ) -> Value {
+    evidence_payload(&continuation_result(fixture, operation, label, arguments).await).clone()
+}
+
+async fn continuation_result(
+    fixture: &ProductionFixture,
+    operation: ApplicationSurfaceOperation,
+    label: &str,
+    arguments: Value,
+) -> ApplicationSurfaceInvocationResult {
     let build_request = || {
         parse_application_surface_request(operation, arguments.clone()).unwrap_or_else(|error| {
             panic!(
@@ -1265,7 +1370,7 @@ async fn continuation_page(
         "{} must decode into a request that carries a surface cursor",
         operation.as_str()
     );
-    let result = admitted_mcp_invocation(
+    admitted_mcp_invocation(
         &fixture.client,
         operation,
         &format!(
@@ -1274,8 +1379,7 @@ async fn continuation_page(
         ),
         build_request,
     )
-    .await;
-    evidence_payload(&result).clone()
+    .await
 }
 
 /// The continuation contract holds for every operation whose surface request
@@ -1297,31 +1401,22 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
     let anchors = ProbeAnchors::resolve(&fixture).await;
     let cases = continuation_cases();
 
-    // The surface projects fourteen operations as
-    // `HttpPageProjection::MetaCursor`, and each is covered once. The
-    // mapping is private, so the size is restated here; every case still
-    // proves its own membership when its request decodes, in
-    // `continuation_page`.
     let declared = cases
         .iter()
         .map(|case| case.operation.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        declared.len(),
-        CURSOR_CARRYING_CODE_OPERATIONS,
-        "every cursor-carrying code operation is covered exactly once"
-    );
     assert_eq!(declared.len(), cases.len(), "no operation is covered twice");
 
     for case in cases {
         let surface = case.operation.as_str();
-        let first = continuation_page(
+        let first_result = continuation_result(
             &fixture,
             case.operation,
             "first",
             (case.arguments)(&anchors, None),
         )
         .await;
+        let first = evidence_payload(&first_result).clone();
         match case.expectation {
             ContinuationExpectation::BoundedToOneRow { authority } => {
                 let items = first["items"]
@@ -1340,7 +1435,8 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
                 assert_truncation_agrees_with_cursor(surface, &first);
                 continue;
             }
-            ContinuationExpectation::CrossesPages => {}
+            ContinuationExpectation::CrossesPages
+            | ContinuationExpectation::CrossesPagesWithTotal(_) => {}
         }
 
         let items = first["items"]
@@ -1349,13 +1445,53 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
         let total = first["total"]
             .as_u64()
             .unwrap_or_else(|| panic!("{surface} page total: {first:#}"));
+        if let ContinuationExpectation::CrossesPagesWithTotal(expected) = case.expectation {
+            assert_eq!(
+                total, expected,
+                "{surface} must report the fixture's whole relation set: {first:#}"
+            );
+            assert_eq!(
+                evidence_packet(&first_result).coverage.completeness,
+                CoverageCompleteness::Complete,
+                "{surface} coverage must read complete when every relation is counted: {first:#}"
+            );
+            let mut walked = std::collections::BTreeSet::new();
+            let mut page = first.clone();
+            loop {
+                for item in page["items"].as_array().expect("page items") {
+                    let node_id = item["symbol"]["node_id"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{surface} relation node id: {item:#}"));
+                    assert!(
+                        walked.insert(node_id.to_owned()),
+                        "{surface} served {node_id} twice while walking its cursors"
+                    );
+                }
+                let Some(cursor) = page["next_cursor"].as_str().map(str::to_owned) else {
+                    break;
+                };
+                page = continuation_page(
+                    &fixture,
+                    case.operation,
+                    "walk",
+                    (case.arguments)(&anchors, Some(cursor.as_str())),
+                )
+                .await;
+            }
+            assert_eq!(
+                walked.len() as u64,
+                expected,
+                "{surface} cursors must walk every relation exactly once"
+            );
+        }
+        let page_size = surface_page_size(case.operation);
         assert!(
-            total > SURFACE_PAGE_SIZE as u64 && items.len() == SURFACE_PAGE_SIZE,
-            "{surface} must be driven past one page of {SURFACE_PAGE_SIZE} rows; the \
+            total > page_size as u64 && items.len() == page_size,
+            "{surface} must be driven past one page of {page_size} rows; the \
              fixture produced {total} matching rows, so grow the probe sources in \
              `write_pagination_probe` rather than accepting single-page coverage: {first:#}"
         );
-        assert_first_page_of_many(surface, &first);
+        assert_first_page_of_many(surface, page_size, &first);
 
         let cursor = first["next_cursor"]
             .as_str()
@@ -1406,7 +1542,8 @@ fn cli_symbol_search_payload(
     let output = run_symbol_search_cli(fixture.home(), &fixture.project, query, cursor);
     assert_command_success("CLI code_symbol_search", &output);
     let envelope: ApplicationEnvelope<Value> =
-        serde_json::from_slice(&output.stdout).expect("CLI application envelope");
+        serde_json::from_value(common::tool_json_structured_content(&output.stdout))
+            .expect("CLI application envelope");
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
         panic!("CLI code_symbol_search must return an evidence outcome");
     };

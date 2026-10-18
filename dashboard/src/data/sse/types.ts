@@ -12,7 +12,7 @@ export const MAX_QUEUED_BYTES = 10 * 1024 * 1024; // 10 MiB
  *
  * Identity memory has to outlive the queue. A canonical refresh commits while
  * the stream keeps running, and an event redelivered after that commit must
- * still be recognized as already applied — clearing the identity set was what
+ * still be recognized as already applied, clearing the identity set was what
  * let a redelivery be applied twice. So the growth is bounded explicitly
  * instead of by wiping: two full queue ceilings, evicted in insertion order.
  * The per-stream watermark is the primary guard (anything at or below it is
@@ -23,7 +23,7 @@ export const MAX_QUEUED_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const MAX_OBSERVED_IDENTITIES = 2 * MAX_QUEUED_EVENTS;
 
 /** Stable identity of a stream connection generation. */
-export interface StreamIdentity {
+interface StreamIdentity {
   /** Opaque stream ID (a workspace/projection SSE channel). */
   stream_id: string;
   /**
@@ -34,7 +34,7 @@ export interface StreamIdentity {
 }
 
 /** Monotone revision pair carried by every event. */
-export interface EventRevision {
+interface EventRevision {
   /** Per-stream event sequence revision. Strictly increases with no gaps. */
   event_revision: number;
   /** Revision of the entity/projection the event mutates. */
@@ -42,7 +42,7 @@ export interface EventRevision {
 }
 
 /**
- * A single SSE event envelope. `payload` is opaque to the reducer — it never
+ * A single SSE event envelope. `payload` is opaque to the reducer, it never
  * derives product semantics (branch stack, merge order, readiness, legal
  * action) from it.
  */
@@ -58,12 +58,6 @@ export interface SseEventEnvelope<TPayload = unknown> {
   watermark: string;
   /** Coverage descriptor (opaque to the reducer). */
   coverage: unknown;
-  /**
-   * Whether this event is a receipt for an already-observed operation. The
-   * reducer retains receipts even when their event_revision would otherwise be
-   * treated as already-seen, so a crash/restart never loses a receipt.
-   */
-  is_receipt?: boolean;
   /**
    * Decode-stashed raw SSE frame length. Overflow accounting uses this so it
    * does not re-serialize the envelope on every ingest. Absent on hand-built
@@ -88,7 +82,7 @@ export interface SseBatch<TPayload = unknown> {
   refetch: boolean;
   /**
    * True when the projection is marked stale (overflow). Stale is sticky until
-   * a canonical refresh actually succeeds — see {@link ReseedToken}.
+   * a canonical refresh actually succeeds, see {@link ReseedToken}.
    */
   stale: boolean;
 }
@@ -104,7 +98,7 @@ export type RefetchReason =
 /**
  * Handle on one canonical-refresh transaction.
  *
- * The refresh is asynchronous and slow — it awaits every active query — so the
+ * The refresh is asynchronous and slow, it awaits every active query, so the
  * stream keeps running underneath it. The token records the canonical-signal
  * epoch the refresh was issued against, which is what lets the reducer answer
  * the only question that matters when the refresh settles: is this refresh

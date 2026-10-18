@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
+use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use tracedecay_graph_db::{
     GraphEntityId, GraphNamespace, GraphRelationKind, GraphTraversalDirection, NeverCancelled,
     TraversalRequest, VerifiedGraphSnapshot,

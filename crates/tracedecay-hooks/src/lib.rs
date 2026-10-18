@@ -13,16 +13,20 @@ pub mod capture;
 pub mod config;
 pub mod core_events;
 pub mod delivery_spool;
+pub mod hook_v2_replay;
 pub mod native;
 pub mod runtime;
 pub mod spool;
 
 pub use admission_ledger::{
-    HookAdmissionDecisionV1, HookAdmissionLedgerLimitsV1, HookAdmissionLedgerReceiptV1,
-    HookAdmissionLedgerV1,
+    HookAdmissionCommitV1, HookAdmissionDecisionV1, HookAdmissionLedgerError,
+    HookAdmissionLedgerLimitsV1, HookAdmissionLedgerReceiptV1, HookAdmissionLedgerV1,
+    HookAdmissionStagedV1, PRE_LEDGER_PENDING_WORK_DIR, PROFILE_HOOK_ADMISSIONS_DIR,
+    PROJECT_HOOK_ADMISSIONS_DIR, hook_admission_reset_required_roots,
 };
 pub use capture::{
     NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1, capture_native_event_for_replay,
+    spool_hook_event,
 };
 pub use config::{
     HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationFileReaderV1,
@@ -30,21 +34,28 @@ pub use config::{
     HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, hook_configuration_path,
 };
 pub use core_events::{
-    DaemonHookEvent, HOOK_EVENT_METHOD, HookAgent, HookEventNotifyOutcomeV1, HookRouteMetadata,
+    DaemonHookEvent, HOOK_EVENT_METHOD, HookEventNotifyOutcomeV1, HookRouteMetadata,
     HookTerminalReceipt,
 };
 pub use delivery_spool::{
-    HookDeliveryReceiptSpoolV1, HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
+    HookDeliveryReceiptSpoolV1, HookDeliveryReceiptWriterV1, HookDeliveryRetentionV1,
+    HookDeliverySourceReceiptV1, hook_delivery_publication_name, hook_delivery_receipt_spool_root,
+    hook_delivery_spool_directory,
+};
+pub use hook_v2_replay::{
+    HookReplayAdmissionOutcomeV1, HookReplayPassReportV1, HookReplayTombstoneReasonV1,
+    admit_replayed_envelope_with_authoritative_session, drain_host_spool_once,
+    hook_v2_spool_directory, hook_v2_spool_root, published_hook_scope_binding,
 };
 pub use native::{
-    DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
-    OpenCodePluginSurfaceV1, ProfileScopedNativeHookAdmissionV1, decode_bound_native_hook_event,
-    decode_native_hook_event, decode_opencode_lsp_event, decode_opencode_plugin_event,
+    DecodedNativeHookEventV1, NativeContextScoutLifecycleV1, NativeEnvelopeMaterialV1,
+    NativeHookDecodeError, OpenCodePluginSurfaceV1, ProfileScopedNativeHookAdmissionV1,
+    decode_bound_native_hook_event, decode_native_hook_event, decode_opencode_plugin_event,
 };
 pub use runtime::{
-    AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HookAdmissionFutureV1,
-    HookAdmissionReceiptV1, HookDeliveryFutureV1, HookFeedbackDeliveryOutcomeV1,
-    HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1, HookFeedbackDeliveryV1,
+    AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HOOK_SYNCHRONOUS_BUDGET,
+    HookAdmissionFutureV1, HookAdmissionReceiptV1, HookDeliveryFutureV1,
+    HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryPortV1, HookFeedbackDeliveryV1,
     HookFeedbackRollbackSwitchV1, HookGuidanceDispositionV1, HookGuidanceStateV1,
     HookImmediateAdmissionStateV1, HookImmediateAdmissionV1, HookReadyGuidanceV1,
     HookRuntimeControlV1, HookRuntimeErrorV1, HookScopedFeedbackV1, HookSynchronousDeadlineV1,
@@ -52,8 +63,8 @@ pub use runtime::{
     finish_synchronous_hook,
 };
 pub use spool::{
-    HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1, HookSpoolError,
-    HookSpoolRecordV1, HookSpoolV1,
+    HOOK_SPOOL_RECORDS_FILE, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
+    HookSpoolError, HookSpoolRecordV1, HookSpoolResetReasonV1, HookSpoolV1, hook_spool_staged_name,
 };
 
 use serde::{Deserialize, Serialize};
@@ -71,11 +82,6 @@ pub const MAX_SPOOL_AGE_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 pub const MAX_REPLAY_BATCH_RECORDS: u16 = 64;
 pub const MAX_REPLAY_BATCH_BYTES: u32 = 256 * 1024;
 pub const MAX_SUGGESTION_BYTES: usize = 4 * 1024;
-
-/// Canonical native host identity used by hook decoding, configuration, and
-/// persisted spool state. The alias preserves the Hook V2 API name while
-/// preventing a second host vocabulary from drifting from the domain catalog.
-pub type HookHostV1 = NativeHostIdentityV1;
 
 /// Event families that a host hook itself may emit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,40 +108,55 @@ pub enum HookEventSupportV1 {
 
 /// Checked-in native host matrix. `Unavailable` is truthful absence and never
 /// permission to infer an event from command text or another host surface.
-pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> HookEventSupportV1 {
+pub const fn stock_event_support(
+    host: NativeHostIdentityV1,
+    family: HookEventFamily,
+) -> HookEventSupportV1 {
     use HookEventFamily::{
         PromptBoundary, SavedEdit, SessionBoundary, TestLifecycle, ToolLifecycle,
     };
     use HookEventSupportV1::{Native, ReceiptDerived, Unavailable};
 
     match (host, family) {
-        (HookHostV1::ClaudeCode, SessionBoundary | ToolLifecycle) => Native,
-        (HookHostV1::ClaudeCode, SavedEdit | TestLifecycle) => ReceiptDerived,
-        (HookHostV1::ClaudeCode, PromptBoundary) => Unavailable,
-        (HookHostV1::Codex, SessionBoundary | ToolLifecycle) => Native,
-        (HookHostV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
-        (HookHostV1::Codex, PromptBoundary) => Unavailable,
-        (HookHostV1::CursorDesktop, SessionBoundary | SavedEdit) => Native,
-        (HookHostV1::CursorDesktop, TestLifecycle) => ReceiptDerived,
-        (HookHostV1::CursorDesktop, PromptBoundary | ToolLifecycle) => Unavailable,
+        (NativeHostIdentityV1::ClaudeCode, SessionBoundary | ToolLifecycle) => Native,
+        (NativeHostIdentityV1::ClaudeCode, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (NativeHostIdentityV1::ClaudeCode, PromptBoundary) => Unavailable,
+        (NativeHostIdentityV1::Codex, SessionBoundary | ToolLifecycle) => Native,
+        (NativeHostIdentityV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (NativeHostIdentityV1::Codex, PromptBoundary) => Unavailable,
+        (NativeHostIdentityV1::CursorDesktop, SessionBoundary | SavedEdit) => Native,
+        (NativeHostIdentityV1::CursorDesktop, TestLifecycle) => ReceiptDerived,
+        (NativeHostIdentityV1::CursorDesktop, PromptBoundary | ToolLifecycle) => Unavailable,
         (
-            HookHostV1::CursorCloud,
+            NativeHostIdentityV1::CursorCloud,
             SessionBoundary | PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
         ) => Unavailable,
-        (HookHostV1::Hermes, SessionBoundary | ToolLifecycle) => Native,
-        (HookHostV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
-        (HookHostV1::Hermes, PromptBoundary) => Unavailable,
-        (HookHostV1::Kiro, PromptBoundary) => Native,
-        (HookHostV1::Kiro, SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
+        (NativeHostIdentityV1::Hermes, SessionBoundary | ToolLifecycle) => Native,
+        (NativeHostIdentityV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (NativeHostIdentityV1::Hermes, PromptBoundary) => Unavailable,
+        (NativeHostIdentityV1::Kiro, PromptBoundary) => Native,
+        (
+            NativeHostIdentityV1::Kiro,
+            SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
+        ) => Unavailable,
+        (NativeHostIdentityV1::KimiCode, ToolLifecycle | SavedEdit) => Native,
+        (NativeHostIdentityV1::KimiCode, SessionBoundary) => Native,
+        (NativeHostIdentityV1::KimiCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (NativeHostIdentityV1::OpenCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
+        (NativeHostIdentityV1::OpenCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (NativeHostIdentityV1::Pi, SessionBoundary) => Native,
+        (NativeHostIdentityV1::Pi, PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
             Unavailable
         }
-        (HookHostV1::KimiCode, ToolLifecycle | SavedEdit) => Native,
-        (HookHostV1::KimiCode, SessionBoundary) => Native,
-        (HookHostV1::KimiCode, PromptBoundary | TestLifecycle) => Unavailable,
-        (HookHostV1::OpenCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
-        (HookHostV1::OpenCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (NativeHostIdentityV1::FactoryDroid, SessionBoundary) => Native,
         (
-            HookHostV1::Cline | HookHostV1::RooCode | HookHostV1::Kilo,
+            NativeHostIdentityV1::FactoryDroid,
+            PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
+        ) => Unavailable,
+        (
+            NativeHostIdentityV1::Cline
+            | NativeHostIdentityV1::RooCode
+            | NativeHostIdentityV1::Kilo,
             SessionBoundary | PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
         ) => Unavailable,
     }
@@ -223,7 +244,7 @@ impl HookEventV2 {
 pub struct HookEventEnvelopeV2 {
     pub schema_version: u16,
     pub event_id: [u8; 16],
-    pub producer: HookHostV1,
+    pub producer: NativeHostIdentityV1,
     pub protected_session_id: [u8; 32],
     pub project_id: [u8; 16],
     pub repository_id: [u8; 16],
@@ -277,7 +298,11 @@ impl HookEventEnvelopeV2 {
 /// bytes. This is the only constructor those fields may use: a producer or
 /// consumer copy that drifts makes envelope matching fail closed with no error.
 pub fn envelope_identity_hash16(domain: &str, value: &str) -> [u8; 16] {
-    let digest = Sha256::digest(format!("{domain}:{value}").as_bytes());
+    let mut digest = Sha256::new();
+    digest.update(domain.as_bytes());
+    digest.update(b":");
+    digest.update(value.as_bytes());
+    let digest = digest.finalize();
     let mut output = [0; 16];
     output.copy_from_slice(&digest[..16]);
     output
@@ -294,7 +319,7 @@ pub struct HookCapabilityV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookScopeBindingV1 {
-    pub host: HookHostV1,
+    pub host: NativeHostIdentityV1,
     pub project_id: [u8; 16],
     pub repository_id: [u8; 16],
     pub worktree_id: [u8; 16],
@@ -361,8 +386,6 @@ pub enum HookTransportDispositionV1 {
 pub enum HookContractError {
     #[error("hook schema version is unsupported")]
     UnsupportedSchemaVersion,
-    #[error("hook envelope is malformed")]
-    MalformedEnvelope,
     #[error("event family is unsupported by the native host binding")]
     UnsupportedFamily,
     #[error("hook envelope identity is invalid")]
@@ -373,14 +396,6 @@ pub enum HookContractError {
     BindingMismatch,
     #[error("event exceeds its structural budget")]
     EventBudgetExceeded,
-    #[error("spool record exceeds its byte budget")]
-    SpoolBudgetExceeded,
-    #[error("spool quota is full")]
-    SpoolFull,
-    #[error("spool entry is expired")]
-    SpoolExpired,
-    #[error("spool checksum does not verify against the exact encoded envelope")]
-    SpoolChecksumInvalid,
     #[error("replay batch exceeds its bound")]
     ReplayBatchExceeded,
     #[error("guidance is not approved for render")]
@@ -422,7 +437,7 @@ mod tests {
 
     fn binding() -> HookScopeBindingV1 {
         HookScopeBindingV1 {
-            host: HookHostV1::CursorDesktop,
+            host: NativeHostIdentityV1::CursorDesktop,
             project_id: [1; 16],
             repository_id: [2; 16],
             worktree_id: [3; 16],
@@ -439,7 +454,7 @@ mod tests {
         HookEventEnvelopeV2 {
             schema_version: HOOK_EVENT_SCHEMA_VERSION,
             event_id: [8; 16],
-            producer: HookHostV1::CursorDesktop,
+            producer: NativeHostIdentityV1::CursorDesktop,
             protected_session_id: [9; 32],
             project_id: [1; 16],
             repository_id: [2; 16],
@@ -488,49 +503,61 @@ mod tests {
     #[test]
     fn host_matrix_matches_checked_in_native_capture_authority() {
         assert_eq!(
-            stock_event_support(HookHostV1::Kiro, HookEventFamily::ToolLifecycle),
+            stock_event_support(NativeHostIdentityV1::Kiro, HookEventFamily::ToolLifecycle),
             HookEventSupportV1::Unavailable
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Kiro, HookEventFamily::SavedEdit),
+            stock_event_support(NativeHostIdentityV1::Kiro, HookEventFamily::SavedEdit),
             HookEventSupportV1::Unavailable
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Kiro, HookEventFamily::PromptBoundary),
+            stock_event_support(NativeHostIdentityV1::Kiro, HookEventFamily::PromptBoundary),
             HookEventSupportV1::Native,
             "the checked-in Kiro userPromptSubmit capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::KimiCode, HookEventFamily::SessionBoundary),
+            stock_event_support(
+                NativeHostIdentityV1::KimiCode,
+                HookEventFamily::SessionBoundary
+            ),
             HookEventSupportV1::Native,
             "the checked-in Kimi Stop capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::CursorCloud, HookEventFamily::SessionBoundary),
+            stock_event_support(
+                NativeHostIdentityV1::CursorCloud,
+                HookEventFamily::SessionBoundary
+            ),
             HookEventSupportV1::Unavailable,
             "Cursor Desktop captures cannot prove a Cursor Cloud callback"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Hermes, HookEventFamily::TestLifecycle),
+            stock_event_support(NativeHostIdentityV1::Hermes, HookEventFamily::TestLifecycle),
             HookEventSupportV1::ReceiptDerived
         );
         assert_eq!(
-            stock_event_support(HookHostV1::ClaudeCode, HookEventFamily::ToolLifecycle),
+            stock_event_support(
+                NativeHostIdentityV1::ClaudeCode,
+                HookEventFamily::ToolLifecycle
+            ),
             HookEventSupportV1::Native,
             "the checked-in Claude PostToolUse capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Hermes, HookEventFamily::ToolLifecycle),
+            stock_event_support(NativeHostIdentityV1::Hermes, HookEventFamily::ToolLifecycle),
             HookEventSupportV1::Native,
             "the checked-in Hermes post_tool_call capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Codex, HookEventFamily::ToolLifecycle),
+            stock_event_support(NativeHostIdentityV1::Codex, HookEventFamily::ToolLifecycle),
             HookEventSupportV1::Native,
             "the checked-in Codex PostToolUse capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::CursorDesktop, HookEventFamily::SavedEdit),
+            stock_event_support(
+                NativeHostIdentityV1::CursorDesktop,
+                HookEventFamily::SavedEdit
+            ),
             HookEventSupportV1::Native,
             "the checked-in Cursor afterFileEdit capture proves this native family"
         );
@@ -538,17 +565,38 @@ mod tests {
 
     #[test]
     fn closed_hook_wire_rejects_unknown_event_and_capability_fields() {
-        let mut wire = serde_json::to_value(envelope()).unwrap();
+        let original = envelope();
+        let clean = serde_json::to_value(&original).unwrap();
+        assert_eq!(
+            serde_json::from_value::<HookEventEnvelopeV2>(clean.clone()).unwrap(),
+            original
+        );
+        let mut wire = clean;
         wire["event"]["unexpected"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<HookEventEnvelopeV2>(wire).is_err());
+        let error = serde_json::from_value::<HookEventEnvelopeV2>(wire)
+            .expect_err("unknown event fields must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "unknown field `unexpected`, expected `boundary`"
+        );
 
-        let mut capability = serde_json::to_value(HookCapabilityV1 {
+        let capability = HookCapabilityV1 {
             family: HookEventFamily::SessionBoundary,
             support: HookEventSupportV1::Native,
-        })
-        .unwrap();
-        capability["unexpected"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<HookCapabilityV1>(capability).is_err());
+        };
+        let clean_capability = serde_json::to_value(capability).unwrap();
+        assert_eq!(
+            serde_json::from_value::<HookCapabilityV1>(clean_capability.clone()).unwrap(),
+            capability
+        );
+        let mut unknown = clean_capability;
+        unknown["unexpected"] = serde_json::json!(true);
+        let error = serde_json::from_value::<HookCapabilityV1>(unknown)
+            .expect_err("unknown capability fields must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "unknown field `unexpected`, expected `family` or `support`"
+        );
     }
 
     #[test]

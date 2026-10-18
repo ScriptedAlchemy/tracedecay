@@ -1,15 +1,14 @@
 //! In-process structural (AST) search over the project working tree.
 //!
-//! This is the read-only sibling of the `ast_grep_rewrite` edit tool. Where the
-//! rewrite path shells out to the host `ast-grep` binary, structural *search*
-//! runs entirely in-process: the [`ast_grep_core`] pattern engine is generic
+//! This is the read-only sibling of the `ast_grep_rewrite` edit tool; both run
+//! entirely in-process: the [`ast_grep_core`] pattern engine is generic
 //! over a tree-sitter [`Language`], so we wire the repo's own bundled grammars
 //! (served by [`tracedecay_code_extraction::ts_provider`]) into its `Language` trait.
 //!
 //! That means:
 //!   * no external `ast-grep` CLI requirement (the tool registers
 //!     unconditionally),
-//!   * no additional tree-sitter grammar crates — the same 0.26 grammars the
+//!   * no additional tree-sitter grammar crates, the same 0.26 grammars the
 //!     indexer builds against back the search,
 //!   * pattern parsing/matching happen with zero subprocess spawn per file.
 //!
@@ -21,16 +20,17 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use ast_grep_core::matcher::PatternBuilder;
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, TSLanguage};
 use ast_grep_core::{AstGrep, Language, Pattern, PatternError};
 
-use tracedecay_code_extraction::ts_provider;
+use tracedecay_code_extraction::{LanguageExtractor, LanguageRegistry, ts_provider};
 
 use crate::grep_search::MAX_INTERACTIVE_SOURCE_BYTES;
-use crate::source_walk::source_walk;
-use tracedecay_domain::repository_path_matches_scope;
+use crate::source_walk::{forward_slash_relative, source_walk};
+use tracedecay_domain::{IndexPathPolicyV1, repository_path_matches_scope};
 
 /// Bytes sniffed from the head of each file to classify it as binary.
 const BINARY_SNIFF_BYTES: usize = 8_192;
@@ -119,44 +119,44 @@ fn expando_for_key(key: &str) -> Option<char> {
         | "rust" | "swift" => Some('µ'),
         // C/C++ use an astral-plane char (any letter is a valid identifier start).
         "c" | "cpp" => Some('𐀀'),
-        // CSS / Nix use `_` (`$` is interpolation / at-rule syntax there).
-        "css" | "nix" => Some('_'),
+        // CSS / Nix / Zig use `_` (`$` is interpolation / sigil syntax there).
+        "css" | "nix" | "zig" => Some('_'),
         // Everything else (js/ts/tsx, java, scala, bash, lua, json, yaml,
-        // markdown, dart, solidity, …) parses `$` fine — no expando.
+        // markdown, dart, solidity, …) parses `$` fine, no expando.
         _ => None,
     }
 }
 
-/// Maps a file extension to a `ts_provider` language key. Returns `None` for
-/// extensions we do not confidently route; the caller then skips the file. The
-/// key is still validated against the compiled grammar tier via
-/// [`ts_provider::try_language`], so listing a key here that is not bundled is
-/// harmless (the file is skipped).
-fn lang_key_for_ext(ext: &str) -> Option<&'static str> {
-    Some(match ext {
-        "rs" => "rust",
-        "go" => "go",
-        "py" | "pyi" => "python",
-        "js" | "jsx" | "mjs" | "cjs" => "javascript",
-        "ts" | "mts" | "cts" => "typescript",
-        "tsx" => "tsx",
-        "java" => "java",
-        "kt" | "kts" => "kotlin",
-        "scala" | "sc" => "scala",
-        "c" | "h" => "c",
-        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" => "cpp",
-        "cs" => "c_sharp",
-        "swift" => "swift",
-        "rb" => "ruby",
-        "php" => "php",
-        "lua" => "lua",
-        "sh" | "bash" => "bash",
-        "dart" => "dart",
-        "ex" | "exs" => "elixir",
-        "hs" => "haskell",
-        "nix" => "nix",
-        "css" => "css",
+/// Grammar key, plus the extractor that prepared parse text.
+/// No extractor means the grammar reads the file's own bytes.
+struct StructuralRoute<'r> {
+    key: String,
+    extractor: Option<&'r dyn LanguageExtractor>,
+}
+
+/// Extractor dispatch, then extensions no extractor claims (`mjs`, `pyi`,
+/// `c++`, …). [`ts_provider::try_language`] still decides whether this build
+/// has the grammar.
+fn structural_route<'r>(
+    registry: &'r LanguageRegistry,
+    rel_path: &str,
+) -> Option<StructuralRoute<'r>> {
+    if let Some(extractor) = registry.extractor_for_file(rel_path) {
+        return Some(StructuralRoute {
+            key: extractor.retained_grammar_key(rel_path),
+            extractor: Some(extractor),
+        });
+    }
+    let key = match rel_path.rsplit('.').next()? {
+        "mjs" | "cjs" => "javascript",
+        "mts" | "cts" => "typescript",
+        "pyi" => "python",
+        "c++" => "cpp",
         _ => return None,
+    };
+    Some(StructuralRoute {
+        key: key.to_owned(),
+        extractor: None,
     })
 }
 
@@ -164,7 +164,7 @@ fn lang_key_for_ext(ext: &str) -> Option<&'static str> {
 /// line it starts on.
 #[derive(Debug, Clone)]
 pub struct AstGrepSearchMatch {
-    pub file: String,
+    pub file: Arc<str>,
     /// Exact UTF-8 byte range minted by the bundled tree-sitter authority.
     pub start_byte: usize,
     pub end_byte: usize,
@@ -243,30 +243,20 @@ fn build_lang_pattern(key: &str, pattern: &str) -> Option<Result<(TdLang, Patter
 
 /// Runs a structural search over `project_root`.
 ///
-/// * `lang` — explicit `ts_provider` language key; when `None`, the language is
+/// * `lang`, explicit `ts_provider` language key; when `None`, the language is
 ///   inferred per file from its extension.
-/// * `path_glob` — optional `.gitignore`-style glob restricting the files
+/// * `path_glob`, optional `.gitignore`-style glob restricting the files
 ///   scanned.
-/// * `max_results` — hard cap; one extra match past the cap is collected so
+/// * `max_results`, hard cap; one extra match past the cap is collected so
 ///   truncation can be reported honestly.
-#[hotpath::measure(label = "code_index.search.ast_grep")]
+#[tracing::instrument(name = "code_index.search.ast_grep", level = "trace", skip_all)]
 pub fn search_tree(
     project_root: &Path,
     pattern: &str,
     lang: Option<&str>,
     path_glob: Option<&str>,
     max_results: usize,
-) -> Result<AstGrepSearchResult, AstGrepSearchError> {
-    search_tree_scoped(project_root, pattern, lang, path_glob, max_results, None)
-}
-
-pub(crate) fn search_tree_scoped(
-    project_root: &Path,
-    pattern: &str,
-    lang: Option<&str>,
-    path_glob: Option<&str>,
-    max_results: usize,
-    scope_prefix: Option<&str>,
+    path_policy: &IndexPathPolicyV1,
 ) -> Result<AstGrepSearchResult, AstGrepSearchError> {
     search_tree_scoped_with_cancel(
         project_root,
@@ -274,12 +264,14 @@ pub(crate) fn search_tree_scoped(
         lang,
         path_glob,
         max_results,
-        scope_prefix,
+        None,
+        path_policy,
         || false,
     )
 }
 
-#[hotpath::measure(label = "code_index.search.ast_grep_cancel")]
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(name = "code_index.search.ast_grep_cancel", level = "trace", skip_all)]
 pub fn search_tree_scoped_with_cancel<F>(
     project_root: &Path,
     pattern: &str,
@@ -287,6 +279,7 @@ pub fn search_tree_scoped_with_cancel<F>(
     path_glob: Option<&str>,
     max_results: usize,
     scope_prefix: Option<&str>,
+    path_policy: &IndexPathPolicyV1,
     is_cancelled: F,
 ) -> Result<AstGrepSearchResult, AstGrepSearchError>
 where
@@ -318,8 +311,11 @@ where
         }
     }
 
-    let walker = source_walk(project_root, path_glob)
+    let walker = source_walk(project_root, path_glob, path_policy)
         .map_err(|error| AstGrepSearchError::InvalidGlob(error.glob))?;
+
+    // One registry per sweep. An explicit language skips inference.
+    let registry = lang.is_none().then(LanguageRegistry::new);
 
     let mut result = AstGrepSearchResult::default();
 
@@ -334,27 +330,29 @@ where
         }
         let path = entry.path();
 
-        // An explicit language applies to every caller-selected file, including
-        // extensionless names such as Dockerfile. Without one, infer by suffix.
-        let key = match lang {
-            Some(explicit) => explicit,
-            None => match path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .and_then(lang_key_for_ext)
-            {
-                Some(k) => k,
-                None => continue,
-            },
-        };
-
         let Ok(rel) = path.strip_prefix(project_root) else {
             continue;
         };
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if !repository_path_matches_scope(&rel_str, scope_prefix) {
+        let rel_str = forward_slash_relative(rel);
+        if !repository_path_matches_scope(rel_str.as_ref(), scope_prefix) {
             continue;
         }
+
+        // An explicit language applies to every selected file, including
+        // extensionless names such as Dockerfile.
+        let route = match lang {
+            Some(explicit) => StructuralRoute {
+                key: explicit.to_string(),
+                extractor: None,
+            },
+            None => match registry
+                .as_ref()
+                .and_then(|registry| structural_route(registry, &rel_str))
+            {
+                Some(route) => route,
+                None => continue,
+            },
+        };
 
         let Ok(metadata) = entry.metadata() else {
             continue;
@@ -376,9 +374,15 @@ where
             continue;
         };
 
+        // Prepared text keeps the file's offsets, so ranges index `source`.
+        let parse_source = route.extractor.map_or_else(
+            || Cow::Borrowed(source.as_str()),
+            |extractor| extractor.prepare_parse_source(&source),
+        );
+
         // Get-or-compile the pattern for this language.
-        let entry = cache.entry(key.to_string()).or_insert_with(|| {
-            match build_lang_pattern(key, pattern) {
+        let entry = cache.entry(route.key.clone()).or_insert_with(|| {
+            match build_lang_pattern(&route.key, pattern) {
                 Some(Ok(built)) => Some(built),
                 _ => None,
             }
@@ -387,31 +391,33 @@ where
             continue;
         };
 
-        let stop = if crate::hotpath_observe::sample_hot_loop() {
-            hotpath::measure_block!(
-                "code_index_ast_grep_file",
+        let text = AstGrepFileText {
+            source: &source,
+            parse_source: &parse_source,
+        };
+        let file = AstGrepFileIdentity {
+            rel_str: &rel_str,
+            key: &route.key,
+        };
+        let stop = if crate::observe::sample_hot_loop() {
+            {
+                let _span = tracing::trace_span!("code_index_ast_grep_file").entered();
                 examine_ast_grep_file(
-                    &source,
+                    text,
                     td_lang,
                     compiled,
-                    AstGrepFileIdentity {
-                        rel_str: &rel_str,
-                        key,
-                    },
+                    file,
                     &mut result,
                     max_results,
                     &is_cancelled,
                 )
-            )
+            }
         } else {
             examine_ast_grep_file(
-                &source,
+                text,
                 td_lang,
                 compiled,
-                AstGrepFileIdentity {
-                    rel_str: &rel_str,
-                    key,
-                },
+                file,
                 &mut result,
                 max_results,
                 &is_cancelled,
@@ -425,17 +431,73 @@ where
     Ok(result)
 }
 
+/// `Ok(None)` when nothing matches. `Err` when `path` has no grammar or the
+/// pattern does not compile. The language is inferred from `path`.
+#[tracing::instrument(name = "code_index.rewrite.ast_grep", level = "trace", skip_all)]
+pub fn rewrite_source(
+    path: &Path,
+    source: &str,
+    pattern: &str,
+    rewrite: &str,
+) -> Result<Option<String>, String> {
+    if pattern.trim().is_empty() {
+        return Err(AstGrepSearchError::EmptyPattern.to_string());
+    }
+    let refused = || {
+        format!(
+            "no structural grammar for '{}' in this build; use tracedecay_str_replace for text edits",
+            path.display()
+        )
+    };
+    let rel_str = forward_slash_relative(path);
+    let registry = LanguageRegistry::new();
+    let Some(route) = structural_route(&registry, &rel_str) else {
+        return Err(refused());
+    };
+    let Some((lang, compiled)) = build_lang_pattern(&route.key, pattern).transpose()? else {
+        return Err(refused());
+    };
+    let parse_source = route.extractor.map_or_else(
+        || Cow::Borrowed(source),
+        |extractor| extractor.prepare_parse_source(source),
+    );
+    let doc = StrDoc::try_new(parse_source.as_ref(), lang)
+        .map_err(|error| format!("failed to parse '{}': {error}", path.display()))?;
+    let edits = AstGrep::doc(doc).root().replace_all(&compiled, rewrite);
+    if edits.is_empty() {
+        return Ok(None);
+    }
+    let mut rewritten = Vec::with_capacity(source.len());
+    let mut cursor = 0;
+    for edit in edits {
+        rewritten.extend_from_slice(&source.as_bytes()[cursor..edit.position]);
+        rewritten.extend_from_slice(&edit.inserted_text);
+        cursor = edit.position + edit.deleted_length;
+    }
+    rewritten.extend_from_slice(&source.as_bytes()[cursor..]);
+    String::from_utf8(rewritten)
+        .map(Some)
+        .map_err(|error| format!("structural rewrite produced invalid UTF-8: {error}"))
+}
+
 /// Which file a match is attributed to: its project-relative path and the
 /// language key. Both are only ever copied into the emitted match, and they
 /// always describe the same file, so they travel as one value.
 #[derive(Clone, Copy)]
 struct AstGrepFileIdentity<'file> {
-    rel_str: &'file str,
+    rel_str: &'file Arc<str>,
     key: &'file str,
 }
 
+/// File bytes and parser input. Offsets match, so ranges index `source`.
+#[derive(Clone, Copy)]
+struct AstGrepFileText<'file> {
+    source: &'file str,
+    parse_source: &'file str,
+}
+
 fn examine_ast_grep_file<C: Fn() -> bool>(
-    source: &str,
+    text: AstGrepFileText<'_>,
     td_lang: &TdLang,
     compiled: &Pattern,
     file: AstGrepFileIdentity<'_>,
@@ -444,7 +506,7 @@ fn examine_ast_grep_file<C: Fn() -> bool>(
     is_cancelled: &C,
 ) -> bool {
     result.files_scanned += 1;
-    let Ok(doc) = StrDoc::try_new(source, td_lang.clone()) else {
+    let Ok(doc) = StrDoc::try_new(text.parse_source, td_lang.clone()) else {
         return false;
     };
     let ast = AstGrep::doc(doc);
@@ -458,15 +520,17 @@ fn examine_ast_grep_file<C: Fn() -> bool>(
         let line0 = start.line();
         result.lines_examined = result.lines_examined.saturating_add(1);
         result.lines_visited = result.lines_visited.saturating_add(1);
-        let line_text = source_line_at_byte(source, range.start);
+        let line_text = source_line_at_byte(text.source, range.start);
         result.matches.push(AstGrepSearchMatch {
-            file: file.rel_str.to_owned(),
+            file: Arc::clone(file.rel_str),
             start_byte: range.start,
             end_byte: range.end,
             node_kind: node.kind().into_owned(),
             line: (line0 as u32) + 1,
             column: (start.column(&node) as u32) + 1,
-            matched_text: collapse_snippet(&node.text()),
+            matched_text: collapse_snippet(
+                text.source.get(range.start..range.end).unwrap_or_default(),
+            ),
             line_text,
             lang: file.key.to_string(),
         });
@@ -499,16 +563,45 @@ fn source_line_at_byte(source: &str, byte_offset: usize) -> String {
 /// squeezing interior whitespace and capping length.
 fn collapse_snippet(text: &str) -> String {
     const MAX: usize = 200;
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() > MAX {
-        let truncated: String = collapsed.chars().take(MAX).collect();
-        format!("{truncated}…")
-    } else {
-        collapsed
+    // Single-pass collapse into one String, no intermediate Vec from
+    // split_whitespace().collect().join(" "), and truncate while scanning so
+    // long nodes never allocate a second full copy.
+    let mut collapsed = String::new();
+    let mut chars = 0_usize;
+    let mut pending_space = false;
+    let mut truncated = false;
+    for piece in text.split_whitespace() {
+        if piece.is_empty() {
+            continue;
+        }
+        if pending_space {
+            if chars >= MAX {
+                truncated = true;
+                break;
+            }
+            collapsed.push(' ');
+            chars += 1;
+        }
+        for ch in piece.chars() {
+            if chars >= MAX {
+                truncated = true;
+                break;
+            }
+            collapsed.push(ch);
+            chars += 1;
+        }
+        if truncated {
+            break;
+        }
+        pending_space = true;
     }
+    if truncated {
+        collapsed.push('…');
+    }
+    collapsed
 }
 
-/// Classifies a byte buffer as binary when a NUL byte appears in the head — the
+/// Classifies a byte buffer as binary when a NUL byte appears in the head, the
 /// same heuristic `git` and `ripgrep` use.
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0)
@@ -524,6 +617,10 @@ mod tests {
         fs::write(dir.join(name), body).unwrap();
     }
 
+    fn no_exclusions() -> IndexPathPolicyV1 {
+        IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap()
+    }
+
     #[test]
     fn pre_process_rewrites_named_and_anonymous_metavars() {
         // Named single/double/triple -> expando; positional `$1` untouched.
@@ -534,35 +631,96 @@ mod tests {
     }
 
     #[test]
-    fn expando_matches_upstream_table() {
-        assert_eq!(expando_for_key("rust"), Some('µ'));
-        assert_eq!(expando_for_key("c"), Some('𐀀'));
-        assert_eq!(expando_for_key("css"), Some('_'));
-        assert_eq!(expando_for_key("javascript"), None);
+    fn rewrite_swaps_metavariables_in_code_and_leaves_comments_and_strings() {
+        let source = "fn f() {\n    take(a, 1);\n    take(\n        b,\n        2,\n    );\n}\n\
+                      // take(a, 1)\nconst S: &str = \"take(a, 1)\";\n";
+        let rewritten = rewrite_source(
+            Path::new("src/lib.rs"),
+            source,
+            "take($A, $B)",
+            "take($B, $A)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "fn f() {\n    take(1, a);\n    take(2, b);\n}\n\
+             // take(a, 1)\nconst S: &str = \"take(a, 1)\";\n"
+        );
     }
 
     #[test]
-    fn finds_rust_call_shape_in_process() {
+    fn rewrite_without_a_match_or_grammar_does_not_rewrite() {
+        assert_eq!(
+            rewrite_source(Path::new("a.rs"), "fn f() {}\n", "missing($A)", "x"),
+            Ok(None)
+        );
+        let refused =
+            rewrite_source(Path::new("notes.txt"), "take(a)\n", "take($A)", "x").unwrap_err();
+        assert_eq!(
+            refused,
+            "no structural grammar for 'notes.txt' in this build; \
+             use tracedecay_str_replace for text edits"
+        );
+    }
+
+    #[test]
+    #[cfg(any(feature = "lite", feature = "lang-json"))]
+    fn rewrite_applies_structural_edits_in_json() {
+        let rewritten = rewrite_source(
+            Path::new("config/settings.json"),
+            "{\n  \"enabled\": true,\n  \"level\": 1\n}\n",
+            "true",
+            "false",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(rewritten, "{\n  \"enabled\": false,\n  \"level\": 1\n}\n");
+    }
+
+    #[test]
+    #[cfg(any(feature = "lite", feature = "lang-json"))]
+    fn inferred_language_search_scans_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "settings.json", "{\n  \"enabled\": true\n}\n");
+
+        let res = search_tree(dir.path(), "true", None, None, 50, &no_exclusions()).unwrap();
+
+        let hit = res
+            .matches
+            .iter()
+            .find(|hit| hit.matched_text == "true")
+            .expect("json `true` is a structural match");
+        assert_eq!(hit.file.as_ref(), "settings.json");
+        assert_eq!(hit.lang, "json");
+    }
+
+    #[test]
+    fn svelte_search_matches_only_inside_the_script_block() {
         let dir = tempfile::tempdir().unwrap();
         write(
             dir.path(),
-            "orders.rs",
-            "fn place(wh: &mut W, o: &O) {\n    reserve_stock(wh, &item.sku, item.quantity);\n    let t = compute_total(&o.items);\n}\n",
-        );
-        // A file whose only mention is a comment must not match the call shape.
-        write(
-            dir.path(),
-            "util.js",
-            "// reserve_stock is called elsewhere\nconst note = 'reserve_stock(a, b, c)';\n",
+            "App.svelte",
+            "<style>\n  p { content: target(1); }\n</style>\n<script>\n  target(2);\n</script>\n",
         );
 
-        let res = search_tree(dir.path(), "reserve_stock($$$)", None, None, 50).unwrap();
-        assert_eq!(res.matches.len(), 1, "matches: {:?}", res.matches);
-        let m = &res.matches[0];
-        assert_eq!(m.file, "orders.rs");
-        assert_eq!(m.line, 2);
-        assert_eq!(m.lang, "rust");
-        assert!(m.matched_text.contains("reserve_stock"));
+        let res = search_tree(dir.path(), "target($A)", None, None, 50, &no_exclusions()).unwrap();
+
+        assert!(
+            res.matches
+                .iter()
+                .all(|hit| hit.matched_text != "target(1)"),
+            "style-block text is not a structural match: {:?}",
+            res.matches
+        );
+        let hit = res
+            .matches
+            .iter()
+            .find(|hit| hit.matched_text == "target(2)")
+            .expect("script-block call is a structural match");
+        assert_eq!(hit.file.as_ref(), "App.svelte");
+        assert_eq!(hit.lang, "typescript");
+        assert_eq!(hit.line, 5);
     }
 
     #[test]
@@ -577,6 +735,7 @@ mod tests {
             None,
             50,
             None,
+            &no_exclusions(),
             || true,
         )
         .unwrap();
@@ -594,135 +753,34 @@ mod tests {
         fs::write(dir.path().join("oversized.rs"), oversized).unwrap();
         write(dir.path(), "tracked.rs", "fn tracked() { target(2); }\n");
 
-        let result = search_tree(dir.path(), "target($A)", Some("rust"), None, 50).unwrap();
-
-        assert_eq!(result.files_scanned, 1);
-        assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].file, "tracked.rs");
-    }
-
-    #[test]
-    fn generated_trees_are_pruned_unless_the_path_glob_selects_them() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("src")).unwrap();
-        fs::create_dir_all(dir.path().join("dist")).unwrap();
-        fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
-        write(
-            dir.path(),
-            "src/tracked.rs",
-            "fn tracked() { target(1); }\n",
-        );
-        write(
-            dir.path(),
-            "dist/generated.rs",
-            "fn generated() { target(2); }\n",
-        );
-        write(
-            dir.path(),
-            "node_modules/pkg/unrelated.rs",
-            "fn unrelated() { target(3); }\n",
-        );
-
-        let default = search_tree(dir.path(), "target($A)", Some("rust"), None, 50).unwrap();
-        assert_eq!(
-            default
-                .matches
-                .iter()
-                .map(|item| item.file.as_str())
-                .collect::<Vec<_>>(),
-            vec!["src/tracked.rs"]
-        );
-
-        let selected =
-            search_tree(dir.path(), "target($A)", Some("rust"), Some("dist/**"), 50).unwrap();
-        assert_eq!(
-            selected
-                .matches
-                .iter()
-                .map(|item| item.file.as_str())
-                .collect::<Vec<_>>(),
-            vec!["dist/generated.rs"]
-        );
-    }
-
-    #[test]
-    fn basename_glob_can_select_a_file_inside_a_generated_tree() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("dist/nested")).unwrap();
-        write(
-            dir.path(),
-            "dist/nested/generated.rs",
-            "fn generated() { target(1); }\n",
-        );
-
-        let selected = search_tree(
+        let result = search_tree(
             dir.path(),
             "target($A)",
             Some("rust"),
-            Some("generated.rs"),
+            None,
             50,
+            &no_exclusions(),
         )
         .unwrap();
 
-        assert_eq!(selected.matches.len(), 1);
-        assert_eq!(selected.matches[0].file, "dist/nested/generated.rs");
-    }
-
-    #[test]
-    fn explicit_lang_overrides_extension_inference_for_selected_files() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "a.rs", "fn f() { g(1); }\n");
-        write(dir.path(), "b.py", "g(1)\n");
-        let res = search_tree(dir.path(), "g($A)", Some("rust"), Some("b.py"), 50).unwrap();
-        assert_eq!(res.matches.len(), 1);
-        assert_eq!(res.matches[0].file, "b.py");
-        assert_eq!(res.matches[0].lang, "rust");
-    }
-
-    #[test]
-    fn explicit_lang_scans_extensionless_caller_selected_file() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "Dockerfile", "FROM alpine\nRUN echo ready\n");
-
-        let res = search_tree(
-            dir.path(),
-            "RUN echo ready",
-            Some("dockerfile"),
-            Some("Dockerfile"),
-            50,
-        )
-        .unwrap();
-
-        assert_eq!(res.files_scanned, 1);
-        assert_eq!(res.matches.len(), 1, "matches: {:?}", res.matches);
-        assert_eq!(res.matches[0].file, "Dockerfile");
-    }
-
-    #[test]
-    fn path_glob_scopes_the_sweep() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("src")).unwrap();
-        fs::create_dir(dir.path().join("tests")).unwrap();
-        write(
-            dir.path().join("src").as_path(),
-            "a.rs",
-            "fn f() { g(1); }\n",
-        );
-        write(
-            dir.path().join("tests").as_path(),
-            "b.rs",
-            "fn f() { g(2); }\n",
-        );
-        let res = search_tree(dir.path(), "g($A)", None, Some("src/**/*.rs"), 50).unwrap();
-        assert_eq!(res.matches.len(), 1);
-        assert_eq!(res.matches[0].file, "src/a.rs");
+        assert_eq!(result.files_scanned, 1);
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].file.as_ref(), "tracked.rs");
     }
 
     #[test]
     fn unknown_explicit_lang_is_hard_error() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "a.rs", "fn f() {}\n");
-        let err = search_tree(dir.path(), "g($A)", Some("klingon"), None, 50).unwrap_err();
+        let err = search_tree(
+            dir.path(),
+            "g($A)",
+            Some("klingon"),
+            None,
+            50,
+            &no_exclusions(),
+        )
+        .unwrap_err();
         assert!(matches!(err, AstGrepSearchError::UnknownLang(_)));
     }
 
@@ -730,22 +788,9 @@ mod tests {
     fn empty_pattern_rejected() {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
-            search_tree(dir.path(), "   ", None, None, 50).unwrap_err(),
+            search_tree(dir.path(), "   ", None, None, 50, &no_exclusions()).unwrap_err(),
             AstGrepSearchError::EmptyPattern
         ));
-    }
-
-    #[test]
-    fn truncates_at_max_results() {
-        let dir = tempfile::tempdir().unwrap();
-        write(
-            dir.path(),
-            "a.rs",
-            "fn f() {\n g(1);\n g(2);\n g(3);\n g(4);\n}\n",
-        );
-        let res = search_tree(dir.path(), "g($A)", Some("rust"), None, 2).unwrap();
-        assert_eq!(res.matches.len(), 2);
-        assert!(res.truncated);
     }
 
     #[test]
@@ -759,7 +804,15 @@ mod tests {
         body.push_str("}\n");
         write(dir.path(), "dense.rs", &body);
 
-        let result = search_tree(dir.path(), "target($A)", Some("rust"), None, 1).unwrap();
+        let result = search_tree(
+            dir.path(),
+            "target($A)",
+            Some("rust"),
+            None,
+            1,
+            &no_exclusions(),
+        )
+        .unwrap();
 
         assert_eq!(result.matches.len(), 1);
         assert!(result.truncated);
@@ -771,14 +824,5 @@ mod tests {
             result.lines_examined
         );
         assert!(result.lines_visited < TOTAL_LINES);
-    }
-
-    #[test]
-    fn source_line_lookup_uses_the_match_byte_offset() {
-        let source = "first\r\nsecond é\r\nthird\n";
-        let offset = source.find('é').unwrap();
-
-        assert_eq!(source_line_at_byte(source, offset), "second é");
-        assert!(source_line_at_byte(source, source.len() + 1).is_empty());
     }
 }

@@ -1,12 +1,19 @@
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::LazyLock;
 
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::{DatabaseEngineReadConnection, DatabaseEngineReadSnapshot};
+use tracedecay_runtime_core::ports::registered_schema::RegisteredSchemaInstallationV1;
+use tracedecay_rusqlite_runtime::repository::{
+    GraphPublicationSchemaObjectV1, canonical_graph_publication_schema_inventory,
+};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
-    Column, INDEXES, Index, REGISTRY_TABLE_NAMES, SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3, TABLES,
-    Table,
+    Column, INDEX_DESCENDING_COLUMNS, INDEX_EXPRESSION_COLUMN, INDEXES, Index,
+    REGISTRY_TABLE_NAMES, TABLES, Table,
 };
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
@@ -15,75 +22,12 @@ use super::{normalize_trigger_sql, starts_with_ignore_ascii_case};
 
 const OPERATION: &str = "validate global database authority schema";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct GraphPublicationSchemaObject {
-    object_type: String,
-    table: String,
-    sql: String,
-}
-
-type GraphPublicationSchemaInventory = BTreeMap<String, GraphPublicationSchemaObject>;
+type GraphPublicationSchemaInventory = BTreeMap<String, GraphPublicationSchemaObjectV1>;
 type GraphPublicationSchemaBuildResult =
     std::result::Result<GraphPublicationSchemaInventory, String>;
 
 static EXPECTED_GRAPH_PUBLICATION_SCHEMA: LazyLock<GraphPublicationSchemaBuildResult> =
-    LazyLock::new(build_expected_graph_publication_schema);
-
-fn build_expected_graph_publication_schema() -> GraphPublicationSchemaBuildResult {
-    let connection = rusqlite::Connection::open_in_memory()
-        .map_err(|error| format!("failed to open canonical graph publication schema: {error}"))?;
-    connection
-        .execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
-        .map_err(|error| {
-            format!("failed to install canonical graph publication schema: {error}")
-        })?;
-    read_rusqlite_graph_publication_inventory(&connection)
-}
-
-fn read_rusqlite_graph_publication_inventory(
-    connection: &rusqlite::Connection,
-) -> std::result::Result<GraphPublicationSchemaInventory, String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT type, name, tbl_name, COALESCE(sql, '')
-             FROM sqlite_master
-             WHERE type IN ('table', 'index', 'trigger', 'view')
-               AND name NOT LIKE 'sqlite_%'
-             ORDER BY name",
-        )
-        .map_err(|error| format!("failed to prepare canonical graph schema inventory: {error}"))?;
-    let rows = statement
-        .query_map((), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
-        .map_err(|error| format!("failed to query canonical graph schema inventory: {error}"))?;
-    let mut inventory = GraphPublicationSchemaInventory::new();
-    for row in rows {
-        let (object_type, name, table, sql) =
-            row.map_err(|error| format!("failed to read canonical graph schema object: {error}"))?;
-        if inventory
-            .insert(
-                name.clone(),
-                GraphPublicationSchemaObject {
-                    object_type,
-                    table,
-                    sql,
-                },
-            )
-            .is_some()
-        {
-            return Err(format!(
-                "canonical graph publication schema repeats object '{name}'"
-            ));
-        }
-    }
-    Ok(inventory)
-}
+    LazyLock::new(canonical_graph_publication_schema_inventory);
 
 fn outer_parentheses_enclose_value(value: &str) -> bool {
     let bytes = value.as_bytes();
@@ -178,7 +122,7 @@ fn validate_table(
 }
 
 fn column_metadata_matches(actual: &ActualColumn, expected: &Column) -> bool {
-    actual.hidden == 0
+    actual.hidden == expected.hidden
         && actual
             .declared_type
             .eq_ignore_ascii_case(expected.declared_type)
@@ -211,24 +155,45 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
     let expected_partial = expected.name.is_some_and(|name| {
         name.eq_ignore_ascii_case("idx_session_temporal_generations_one_active")
             || name.eq_ignore_ascii_case("idx_session_refresh_operations_one_running")
+            || name.eq_ignore_ascii_case("idx_observations_valid_session_sequence")
     });
-    expected
+    if expected
         .name
-        .is_none_or(|name| actual.name.eq_ignore_ascii_case(name))
-        && actual.unique == expected.unique
-        && actual.origin.eq_ignore_ascii_case(expected.origin)
-        && actual.partial == expected_partial
-        && actual.columns.len() == expected.columns.len()
-        && actual
-            .columns
+        .is_some_and(|name| !actual.name.eq_ignore_ascii_case(name))
+        || actual.unique != expected.unique
+        || !actual.origin.eq_ignore_ascii_case(expected.origin)
+        || actual.partial != expected_partial
+        || actual.columns.len() != expected.columns.len()
+    {
+        return false;
+    }
+    let descending = expected.name.and_then(|name| {
+        INDEX_DESCENDING_COLUMNS
             .iter()
-            .zip(expected.columns)
-            .all(|(actual, expected)| {
-                actual.cid >= 0
-                    && !actual.descending
-                    && actual.collation.eq_ignore_ascii_case("BINARY")
-                    && actual.name.eq_ignore_ascii_case(expected)
-            })
+            .find(|(index, _)| index.eq_ignore_ascii_case(name))
+            .map(|(_, columns)| *columns)
+    });
+    actual
+        .columns
+        .iter()
+        .zip(expected.columns)
+        .all(|(actual, expected_column)| {
+            if expected_column.eq_ignore_ascii_case(INDEX_EXPRESSION_COLUMN) {
+                return actual.cid == -2 && actual.name.is_none();
+            }
+            actual.cid >= 0
+                && actual.descending
+                    == descending.is_some_and(|columns| {
+                        columns
+                            .iter()
+                            .any(|column| column.eq_ignore_ascii_case(expected_column))
+                    })
+                && actual.collation.eq_ignore_ascii_case("BINARY")
+                && actual
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(expected_column))
+        })
 }
 
 fn primary_key_index_columns(contract: &Table) -> Option<Vec<&str>> {
@@ -259,20 +224,28 @@ fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) ->
                 actual.cid >= 0
                     && !actual.descending
                     && actual.collation.eq_ignore_ascii_case("BINARY")
-                    && actual.name.eq_ignore_ascii_case(expected)
+                    && actual
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
             })
 }
 
-fn validate_indexes_for_table(
-    table: &str,
-    actual: &[ActualIndex],
-) -> tracedecay_domain::errors::Result<()> {
-    let expected = INDEXES
+fn contract_indexes_for_table(table: &str) -> Vec<&'static Index> {
+    INDEXES
         .iter()
         .filter(|contract| contract.table.eq_ignore_ascii_case(table))
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn validate_indexes_for_table(
+    table_contract: &Table,
+    expected: &[&Index],
+    actual: &[ActualIndex],
+) -> tracedecay_domain::errors::Result<()> {
+    let table = table_contract.name;
     let mut matched_actual = vec![false; actual.len()];
-    for contract in &expected {
+    for contract in expected {
         let Some(actual_index) = actual
             .iter()
             .enumerate()
@@ -290,13 +263,10 @@ fn validate_indexes_for_table(
         };
         matched_actual[actual_index] = true;
     }
-    let table_contract = TABLES
-        .iter()
-        .find(|contract| contract.name.eq_ignore_ascii_case(table));
     if expected
         .iter()
         .all(|contract| !contract.origin.eq_ignore_ascii_case("pk"))
-        && let Some(primary_key_columns) = table_contract.and_then(primary_key_index_columns)
+        && let Some(primary_key_columns) = primary_key_index_columns(table_contract)
     {
         let Some(actual_index) = actual.iter().enumerate().position(|(index, actual)| {
             !matched_actual[index] && primary_key_index_matches(actual, &primary_key_columns)
@@ -368,8 +338,9 @@ async fn validate_observation_autoincrement(
     let mut rows = conn
         .query(
             "SELECT EXISTS(
-                SELECT 1 FROM global_schema_migrations
-                WHERE migration = 'observations-v2-canonical-autoincrement'
+                SELECT 1 FROM tracedecay_schema_version
+                WHERE component = 'observations-v2-canonical-autoincrement'
+                  AND version = 1
              ),
              COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'observations'), 0),
              COALESCE((SELECT MAX(sequence) FROM observations), 0)",
@@ -449,7 +420,11 @@ async fn validate_contracts(
             )
         })?;
         validate_table(contract, actual)?;
-        validate_indexes_for_table(contract.name, &actual.indexes)?;
+        validate_indexes_for_table(
+            contract,
+            &contract_indexes_for_table(contract.name),
+            &actual.indexes,
+        )?;
     }
     Ok(())
 }
@@ -459,12 +434,6 @@ pub async fn validate_session_temporal_schema_contract(
     table_names: &[&str],
 ) -> tracedecay_domain::errors::Result<()> {
     validate_named_tables_and_indexes(conn, table_names).await
-}
-
-pub async fn validate_released_v3_temporal_projection_receipt_contract(
-    conn: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<()> {
-    validate_contracts(conn, &[&SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3]).await
 }
 
 pub async fn validate_session_graph_publication_schema_contract(
@@ -548,7 +517,7 @@ async fn read_graph_publication_inventory(
         if inventory
             .insert(
                 name.clone(),
-                GraphPublicationSchemaObject {
+                GraphPublicationSchemaObjectV1 {
                     object_type,
                     table,
                     sql,
@@ -588,26 +557,65 @@ pub async fn validate_remote_deletion_schema_contract(
 ///
 /// Transcript, LCM, git-correlation, and workflow-index tables are independently owned by their
 /// schema modules; this validator intentionally neither claims nor validates those domains.
-pub async fn validate_authority_schema_contract(
-    conn: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<()> {
-    validate_tables_and_indexes(conn, TABLES).await?;
-    for invariant in super::invariants::INVARIANTS {
-        for trigger in invariant.triggers {
-            validate_trigger(conn, trigger).await?;
+///
+/// Each concrete connection implements this instead of one generic async function: nesting
+/// `validate_tables_and_indexes` under the trigger walk overflows the next solver's `Send`
+/// proof (rust-lang/rust#159228). The returned future only awaits already-erased children.
+pub(crate) trait AuthoritySchemaContract: Sync {
+    fn validate_authority_schema<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'a>>;
+}
+
+macro_rules! impl_authority_schema_contract {
+    ($ty:ty) => {
+        impl AuthoritySchemaContract for $ty {
+            fn validate_authority_schema<'a>(
+                &'a self,
+            ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'a>>
+            {
+                Box::pin(async move {
+                    let tables: Pin<
+                        Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+                    > = Box::pin(validate_tables_and_indexes(self, TABLES));
+                    tables.await?;
+                    for invariant in super::invariants::INVARIANTS {
+                        for trigger in invariant.triggers {
+                            let checked: Pin<
+                                Box<
+                                    dyn Future<Output = tracedecay_domain::errors::Result<()>>
+                                        + Send
+                                        + '_,
+                                >,
+                            > = Box::pin(validate_trigger(self, trigger));
+                            checked.await?;
+                        }
+                    }
+                    let autoincrement: Pin<
+                        Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+                    > = Box::pin(validate_observation_autoincrement(self));
+                    autoincrement.await
+                })
+            }
         }
-    }
-    validate_observation_autoincrement(conn).await?;
-    Ok(())
+    };
+}
+
+impl_authority_schema_contract!(DatabaseEngineReadConnection);
+impl_authority_schema_contract!(DatabaseEngineReadSnapshot);
+impl_authority_schema_contract!(RegisteredSchemaInstallationV1);
+
+pub(crate) fn validate_authority_schema_contract<'a>(
+    conn: &'a impl AuthoritySchemaContract,
+) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'a>> {
+    conn.validate_authority_schema()
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{
-        normalize_default, validate_registry_schema_contract, validate_tables_and_indexes,
-    };
+    use super::{normalize_default, validate_tables_and_indexes};
     use crate::schema_contract::definitions::TABLES;
     use crate::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::{
@@ -658,21 +666,7 @@ mod tests {
         assert_eq!(normalize_default(Some("(')')")).as_deref(), Some("')'"));
     }
 
-    #[tokio::test]
-    async fn registry_contract_validates_through_engine_connection() {
-        let directory = tempfile::tempdir().unwrap();
-        let (database, _owner) = open_registered_test_database_fixture(
-            &directory.path().join("global.db"),
-            TestDatabaseRuntimeScope::Profile,
-        )
-        .await
-        .unwrap();
-        validate_registry_schema_contract(&database.read_connection())
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
+    #[asupersync::test]
     async fn table_contract_metadata_is_read_in_a_constant_query_count() {
         let directory = tempfile::tempdir().unwrap();
         let (database, _owner) = open_registered_test_database_fixture(

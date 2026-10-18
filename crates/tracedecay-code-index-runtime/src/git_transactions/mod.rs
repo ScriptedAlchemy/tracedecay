@@ -14,7 +14,7 @@ mod store;
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexPreviewPortResultV1,
     GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1, GitIndexTransactionPort,
     GitIndexTransactionPortError,
@@ -32,7 +32,7 @@ use tracedecay_store::GitIndexTransactionStore;
 /// roots through this form before mounting an assembler; snapshot capture must
 /// use the same resolution so alias paths (macOS `/tmp` → `/private/tmp`, and
 /// other symlink roots) do not produce equal repository state that fails as
-/// `stale_preview`. Comparison stays exact — callers must not loosen identity
+/// `stale_preview`. Comparison stays exact, callers must not loosen identity
 /// equality to paper over divergent path forms.
 pub fn canonicalize_repository_root(repository_root: &Path) -> std::io::Result<PathBuf> {
     repository_root.canonicalize()
@@ -55,7 +55,7 @@ pub use service::{
     CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionPort, GitIndexNativeExecutor,
     GitIndexPolicyRecheckPort, NativeGitIndexApplyResult,
 };
-pub use store::{DaemonGitIndexTransactionStore, SharedDaemonGitIndexTransactionStore};
+pub use store::DaemonGitIndexTransactionStore;
 
 /// The only constructor that makes a daemon Git transaction port available to
 /// callers. It creates one queue-owning service, completes durable startup
@@ -73,29 +73,29 @@ where
     S: GitIndexTransactionStore,
     N: GitIndexRecoveryExecutor,
 {
-    pub fn save_preview_input(
+    pub async fn save_preview_input(
         &self,
         input: GitIndexPreviewInputV1,
     ) -> Result<(), GitIndexTransactionPortError> {
-        self.port.save_preview_input(input)
+        self.port.save_preview_input(input).await
     }
 
-    pub fn read_preview_input(
+    pub async fn read_preview_input(
         &self,
         preview_id: &GitIndexPreviewId,
         observed_at: UtcMicros,
     ) -> Result<GitIndexPreviewInputV1, GitIndexTransactionPortError> {
-        self.port.read_preview_input(preview_id, observed_at)
+        self.port.read_preview_input(preview_id, observed_at).await
     }
 
-    pub fn read_preview(
+    pub async fn read_preview(
         &self,
         preview_id: &GitIndexPreviewId,
     ) -> Result<GitIndexPreviewV1, GitIndexTransactionPortError> {
-        self.port.read_preview(preview_id)
+        self.port.read_preview(preview_id).await
     }
 
-    pub fn start(
+    pub async fn start(
         store: S,
         native: N,
         classifier: C,
@@ -105,13 +105,8 @@ where
     ) -> Result<Self, GitIndexTransactionPortError> {
         let port =
             DaemonGitIndexTransactionPort::new(store, native, classifier, authorization, queue);
-        port.recover_startup(observed_at)?;
+        port.recover_startup(observed_at).await?;
         Ok(Self { port })
-    }
-
-    #[cfg(test)]
-    pub fn mutation_queue_for_test(&self) -> &std::sync::Arc<RepositoryMutationQueue> {
-        self.port.mutation_queue_for_test()
     }
 }
 
@@ -119,25 +114,17 @@ impl<S, N, C, A> DaemonGitIndexTransactionService<S, N, C, A>
 where
     S: GitIndexTransactionStore,
     N: GitIndexNativeExecutor + GitIndexRecoveryExecutor,
-    C: GitEffectClassifier,
+    C: GitEffectClassifier + Sync,
     A: GitIndexPolicyRecheckPort,
 {
-    pub fn apply_cancellable(
+    pub async fn apply_cancellable(
         &self,
         request: &GitIndexApplyRequestV1,
-        cancellation_requested: impl Fn() -> Option<UtcMicros>,
+        cancellation_requested: impl Fn() -> Option<UtcMicros> + Sync,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        self.port.apply_cancellable(request, cancellation_requested)
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
-    pub fn quarantine_preview_for_test(
-        &self,
-        preview: &tracedecay_domain::GitIndexPreviewV1,
-        observed_at: UtcMicros,
-    ) -> Result<(), GitIndexTransactionPortError> {
-        self.port.quarantine_preview_for_test(preview, observed_at)
+        self.port
+            .apply_cancellable(request, cancellation_requested)
+            .await
     }
 }
 
@@ -145,28 +132,28 @@ impl<S, N, C, A> GitIndexTransactionPort for DaemonGitIndexTransactionService<S,
 where
     S: GitIndexTransactionStore,
     N: GitIndexNativeExecutor + GitIndexRecoveryExecutor,
-    C: GitEffectClassifier,
+    C: GitEffectClassifier + Sync,
     A: GitIndexPolicyRecheckPort,
 {
-    fn preview(
+    async fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
     ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError> {
-        self.port.preview(request)
+        self.port.preview(request).await
     }
 
-    fn apply(
+    async fn apply(
         &self,
         request: &GitIndexApplyRequestV1,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        self.port.apply(request)
+        self.port.apply(request).await
     }
 
-    fn recover(
+    async fn recover(
         &self,
         request: &GitIndexRecoveryRequestV1,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError> {
-        self.port.recover(request)
+        self.port.recover(request).await
     }
 }
 

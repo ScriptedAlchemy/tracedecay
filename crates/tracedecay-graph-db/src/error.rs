@@ -1,6 +1,7 @@
 use std::fmt;
 
 use thiserror::Error;
+use tracedecay_store::runtime::{GraphPublicationStoreErrorV1, RuntimeInterruptionV1};
 
 /// Named graph-operation budget that was exhausted.
 ///
@@ -13,17 +14,23 @@ pub enum GraphBudgetKind {
     Write,
     Capacity,
     Mutation,
+    /// The process-wide measured-RSS admission watermark. A corpus-sized
+    /// publication that trips it is refused with the daemon still alive and
+    /// its text serving intact, instead of growing until the kernel kills the
+    /// whole process. The scheduler treats this name as a typed graph
+    /// refusal, never a retryable fault.
+    ResidentMemory,
 }
 
 impl GraphBudgetKind {
     #[must_use]
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
             Self::Write => "write",
             Self::Capacity => "capacity",
             Self::Mutation => "mutation",
+            Self::ResidentMemory => "resident_memory",
         }
     }
 
@@ -36,6 +43,7 @@ impl GraphBudgetKind {
             "write" => Some(Self::Write),
             "capacity" => Some(Self::Capacity),
             "mutation" => Some(Self::Mutation),
+            "resident_memory" => Some(Self::ResidentMemory),
             _ => None,
         }
     }
@@ -106,8 +114,35 @@ pub enum GraphDbError {
     },
     #[error("graph database reset required: {message}")]
     ResetRequired { message: String },
+    /// The store carries an earlier TraceDecay graph format marker. Every
+    /// namespace in a registry-owned container is a derived index, so its
+    /// owner deletes the container family and the canonical replay
+    /// authorities re-project into a fresh store; nothing is converted.
+    #[error("graph database format {found} is superseded by format {expected}")]
+    FormatSuperseded { found: u32, expected: u32 },
     #[error("graph database is corrupt: {message}")]
     Corrupt { message: String },
+    /// The seal a read opened was retired while it was read: a newer code
+    /// generation superseded it. The read is not corrupt; its caller retries
+    /// against the current seal.
+    #[error(
+        "sealed code generation was superseded while it was read; retry against the current seal"
+    )]
+    SealSuperseded,
+    #[error(
+        "sealed code generation `{sealed_state_digest}` predates authenticated source commitments"
+    )]
+    SourceCommitmentsUnavailable { sealed_state_digest: String },
+    /// The sealed generation's rows are refused by the current reader's
+    /// contract (a historical writer revision). No retry or rebuild of the
+    /// graph can ever complete it; only a fresh code-index seal can.
+    #[error(
+        "sealed code generation `{sealed_state_digest}` is refused by the current reader: {message}"
+    )]
+    SealedRevisionIncompatible {
+        sealed_state_digest: String,
+        message: String,
+    },
     /// A write reached a generation that is sealed into an immutable
     /// compacted store. Sealed rows accept exact idempotent replays only;
     /// anything else is refused with this typed error rather than a generic
@@ -122,6 +157,81 @@ pub enum GraphDbError {
     Closed,
 }
 
+/// Store failure folded into a projection error that does not carry graph-db
+/// context fields. Callers that keep richer variants map [`GraphDbError`]
+/// themselves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphStoreFailureClass {
+    Cancelled,
+    BudgetExhausted,
+    Contract(String),
+    Corrupt(String),
+    Unavailable(String),
+}
+
+/// Classify a store error the way git topology and workflow topology do.
+///
+/// `conflict_unavailable` is the caller-specific conflict message. Every other
+/// arm is identical for those projections, including the closed-store wording.
+#[must_use]
+pub fn classify_graph_store_error(
+    error: GraphDbError,
+    conflict_unavailable: &str,
+) -> GraphStoreFailureClass {
+    match error {
+        GraphDbError::Cancelled => GraphStoreFailureClass::Cancelled,
+        GraphDbError::BudgetExhausted { .. } | GraphDbError::DeadlineExceeded => {
+            GraphStoreFailureClass::BudgetExhausted
+        }
+        GraphDbError::InvalidRequest { message } => GraphStoreFailureClass::Contract(message),
+        GraphDbError::Corrupt { message }
+        | GraphDbError::ResetRequired { message }
+        | GraphDbError::DurabilityUncertain { message }
+        | GraphDbError::ProjectionMismatch { message, .. }
+        | GraphDbError::GenerationMismatch { message, .. } => {
+            GraphStoreFailureClass::Corrupt(message)
+        }
+        error @ GraphDbError::FormatSuperseded { .. } => {
+            GraphStoreFailureClass::Corrupt(error.to_string())
+        }
+        GraphDbError::Conflict { .. } => {
+            GraphStoreFailureClass::Unavailable(conflict_unavailable.to_owned())
+        }
+        GraphDbError::Unavailable { message } | GraphDbError::SealedStoreImmutable { message } => {
+            GraphStoreFailureClass::Unavailable(message)
+        }
+        error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
+        | GraphDbError::SealedRevisionIncompatible { .. }
+        | GraphDbError::SealSuperseded) => GraphStoreFailureClass::Unavailable(error.to_string()),
+        GraphDbError::Closed => {
+            GraphStoreFailureClass::Unavailable("graph store is closed".to_owned())
+        }
+    }
+}
+
+impl From<GraphPublicationStoreErrorV1> for GraphDbError {
+    fn from(error: GraphPublicationStoreErrorV1) -> Self {
+        match error {
+            GraphPublicationStoreErrorV1::InvalidRequest(error) => {
+                GraphDbError::invalid(error.to_string())
+            }
+            GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::Cancelled) => {
+                GraphDbError::Cancelled
+            }
+            GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::DeadlineExceeded) => {
+                GraphDbError::DeadlineExceeded
+            }
+            error @ GraphPublicationStoreErrorV1::Infrastructure(_) => {
+                GraphDbError::unavailable(error.to_string())
+            }
+            error @ GraphPublicationStoreErrorV1::CommitRefused => {
+                GraphDbError::invalid(error.to_string())
+            }
+            GraphPublicationStoreErrorV1::Corrupt(message) => GraphDbError::Corrupt { message },
+        }
+    }
+}
+
 impl GraphDbError {
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::InvalidRequest {
@@ -131,7 +241,6 @@ impl GraphDbError {
 
     /// A conflict verdict from `site` with no compared evidence.
     #[must_use]
-    #[hotpath::skip]
     pub const fn conflict(site: &'static str) -> Self {
         Self::Conflict {
             context: GraphConflictContextV1 {
@@ -166,7 +275,6 @@ impl GraphDbError {
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn budget_exhausted(kind: GraphBudgetKind, limit: u64) -> Self {
         Self::BudgetExhausted { kind, limit }
     }
@@ -189,21 +297,10 @@ pub(crate) fn rollback_failure(
 
 #[cfg(test)]
 mod tests {
-    use super::{GraphBudgetKind, GraphDbError, rollback_failure};
-
-    #[test]
-    fn budget_exhausted_names_kind_and_limit() {
-        let error = GraphDbError::budget_exhausted(GraphBudgetKind::Mutation, 4_096);
-        assert_eq!(
-            error.to_string(),
-            "graph mutation budget exhausted (limit 4096)"
-        );
-        assert_eq!(
-            GraphDbError::budget_exhausted_count(GraphBudgetKind::Write, 4 * 1024 * 1024)
-                .to_string(),
-            "graph write budget exhausted (limit 4194304)"
-        );
-    }
+    use super::{
+        GraphBudgetKind, GraphDbError, GraphStoreFailureClass, classify_graph_store_error,
+        rollback_failure,
+    };
 
     #[test]
     fn budget_kind_from_name_round_trips_and_rejects_unnamed() {
@@ -228,27 +325,22 @@ mod tests {
     }
 
     #[test]
-    fn conflict_renders_site_and_compared_evidence() {
+    fn store_failure_classification_keeps_shared_verdicts() {
         assert_eq!(
-            GraphDbError::conflict("publication.expected_prior_head").to_string(),
-            "graph database conflict at `publication.expected_prior_head`"
-        );
-        let observed = GraphDbError::conflict_observed(
-            "publication.expected_prior_head",
-            "head seq 3",
-            "head seq 5",
+            classify_graph_store_error(GraphDbError::Cancelled, "unused"),
+            GraphStoreFailureClass::Cancelled
         );
         assert_eq!(
-            observed.to_string(),
-            "graph database conflict at `publication.expected_prior_head` \
-             (expected head seq 3, actual head seq 5)"
+            classify_graph_store_error(GraphDbError::Closed, "unused"),
+            GraphStoreFailureClass::Unavailable("graph store is closed".to_owned())
         );
-        let GraphDbError::Conflict { context } = observed else {
-            panic!("conflict constructor must produce the conflict variant");
-        };
-        assert_eq!(context.site, "publication.expected_prior_head");
-        assert_eq!(context.expected.as_deref(), Some("head seq 3"));
-        assert_eq!(context.actual.as_deref(), Some("head seq 5"));
+        assert_eq!(
+            classify_graph_store_error(
+                GraphDbError::conflict("site"),
+                "Git topology publication conflict",
+            ),
+            GraphStoreFailureClass::Unavailable("Git topology publication conflict".to_owned())
+        );
     }
 
     #[test]

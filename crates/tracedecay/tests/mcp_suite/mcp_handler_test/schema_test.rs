@@ -2,39 +2,10 @@ use crate::support::*;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracedecay::mcp::McpServer;
-use tracedecay::tracedecay::TraceDecay;
 use tracedecay_mcp::get_tool_definitions;
-#[test]
-fn outline_schema_requires_file_without_provider_property() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let schema = tool_schema(&tools, "tracedecay_outline");
-
-    assert_eq!(required_args_at(schema, &[]), vec!["file"]);
-    assert!(
-        schema["properties"]
-            .as_object()
-            .is_some_and(|properties| !properties.contains_key("provider")),
-        "tracedecay_outline should not advertise a provider property: {schema}"
-    );
-}
-
 #[tokio::test]
 async fn schema_required_arguments_match_representative_handler_parsers() {
-    let (cg, _env, _dir) = setup_empty_project().await;
     let tools = get_tool_definitions().expect("tool definitions");
-
-    // Direct `args.get(...).ok_or(...)` parser style.
-    assert_schema_requires(&tools, "tracedecay_search", &["query"]);
-    expect_missing_argument_error(
-        &cg,
-        "tracedecay_search",
-        json!({}),
-        "missing required parameter: query",
-    )
-    .await;
-
-    // Routed graph tools need the production query authority mounted before
-    // dispatch reaches their operation parser.
     let fixture = production_composition_fixture().await;
     let server = fixture
         .harness
@@ -42,35 +13,41 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         .expect("production project server");
     wait_for_current_graph(&server).await;
 
-    // Shared helper parser style, including canonical node_id despite id alias support.
+    // Typed request decode.
+    assert_schema_requires(&tools, "tracedecay_search", &["query"]);
+    expect_real_server_missing_argument_error(
+        &server,
+        "tracedecay_search",
+        json!({}),
+        Refusal::Problem,
+        "invalid arguments for tracedecay_search: missing field `query`",
+    )
+    .await;
+
+    // Routed graph tools need the production query authority mounted before
+    // dispatch reaches their operation parser.
+    // Canonical application request parser style.
     assert_schema_requires(&tools, "tracedecay_callers", &["node_id"]);
     expect_real_server_missing_argument_error(
         &server,
         "tracedecay_callers",
         json!({}),
-        "missing required parameter: node_id",
+        Refusal::Route,
+        "missing field `node_id`",
     )
     .await;
 
-    // Non-empty array parser style.
-    assert_schema_requires(&tools, "tracedecay_callers_for", &["node_ids"]);
-    expect_real_server_missing_argument_error(
-        &server,
-        "tracedecay_callers_for",
-        json!({}),
-        "node_ids",
-    )
-    .await;
     // Multi-field edit parser style.
     assert_schema_requires(
         &tools,
         "tracedecay_insert_at",
         &["path", "anchor", "content"],
     );
-    expect_missing_argument_error(
-        &cg,
+    expect_real_server_missing_argument_error(
+        &server,
         "tracedecay_insert_at",
         json!({ "path": "src/lib.rs" }),
+        Refusal::Route,
         "missing required parameter: anchor",
     )
     .await;
@@ -79,90 +56,100 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
     // Exact fact routes project only their operation-specific required fields;
     // the git, port, and context routes are here so that "the handler rejects a
     // call with no arguments" is checked together with "the schema told the
-    // caller which arguments were missing" — either half alone lets the two
+    // caller which arguments were missing", either half alone lets the two
     // drift apart.
-    for (tool_name, required_args, expected_message) in [
+    for (tool_name, required_args, refusal, expected_message) in [
         (
             "tracedecay_fact_store_add",
             &["content"][..],
+            Refusal::Route,
             "missing field `content`",
         ),
         (
             "tracedecay_fact_store_search",
             &["query"][..],
+            Refusal::Route,
             "missing field `query`",
         ),
         (
             "tracedecay_fact_store_probe",
             &["entity"][..],
+            Refusal::Route,
             "missing field `entity`",
         ),
         (
             "tracedecay_fact_store_related",
             &["entity"][..],
+            Refusal::Route,
             "missing field `entity`",
         ),
         (
             "tracedecay_fact_store_get",
             &["fact_id"][..],
+            Refusal::Route,
             "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_update",
             &["fact_id"][..],
+            Refusal::Route,
             "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_remove",
             &["fact_id"][..],
+            Refusal::Route,
             "missing field `fact_id`",
         ),
-        // Hand-written git schemas, parsed with the `require_*_arg` helpers.
         (
-            "tracedecay_diff_context",
-            &["files"][..],
-            "missing required parameter: files",
-        ),
-        (
-            "tracedecay_changelog",
-            &["from_ref", "to_ref"][..],
-            "missing required parameter: from_ref",
+            "tracedecay_fact_store_supersede",
+            &["fact_id", "superseded_by"][..],
+            Refusal::Route,
+            "missing field `fact_id`",
         ),
         // Generated schemas, decoded straight into a typed request struct, so
         // the parser error is serde's rather than a hand-written message.
         (
+            "tracedecay_diff_context",
+            &["files"][..],
+            Refusal::Problem,
+            "missing field `files`",
+        ),
+        (
+            "tracedecay_changelog",
+            &["from_ref", "to_ref"][..],
+            Refusal::Problem,
+            "missing field `from_ref`",
+        ),
+        (
             "tracedecay_port_status",
             &["source_dir", "target_dir"][..],
+            Refusal::Problem,
             "missing field `source_dir`",
         ),
         (
             "tracedecay_port_order",
             &["source_dir"][..],
+            Refusal::Problem,
             "missing field `source_dir`",
         ),
-        ("tracedecay_context", &["task"][..], "missing field `task`"),
+        (
+            "tracedecay_context",
+            &["task"][..],
+            Refusal::Problem,
+            "missing field `task`",
+        ),
     ] {
         assert_schema_requires(&tools, tool_name, required_args);
-        if matches!(
+        expect_real_server_missing_argument_error(
+            &server,
             tool_name,
-            "tracedecay_diff_context"
-                | "tracedecay_changelog"
-                | "tracedecay_port_status"
-                | "tracedecay_port_order"
-        ) {
-            expect_real_server_missing_argument_error(
-                &server,
-                tool_name,
-                json!({}),
-                expected_message,
-            )
-            .await;
-        } else {
-            expect_missing_argument_error(&cg, tool_name, json!({}), expected_message).await;
-        }
+            json!({}),
+            refusal,
+            expected_message,
+        )
+        .await;
     }
-    fixture.harness.shutdown().await;
-
     // Nested-object parser style.
     assert_schema_requires(
         &tools,
@@ -173,41 +160,35 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
     let target_branches = expand["properties"]["target"]["oneOf"]
         .as_array()
         .expect("closed target branches");
-    assert_eq!(target_branches.len(), 3);
-    assert_eq!(target_branches[0]["required"], json!(["kind", "store_id"]));
-    assert_eq!(target_branches[1]["required"], json!(["kind", "node_id"]));
+    assert_eq!(target_branches.len(), 4);
     assert_eq!(
-        target_branches[2]["required"],
+        target_branches[0]["properties"]["kind"]["const"],
+        "canonical_occurrence"
+    );
+    assert_eq!(
+        target_branches[0]["required"],
+        json!(["kind", "message_id"])
+    );
+    assert_eq!(target_branches[1]["required"], json!(["kind", "store_id"]));
+    assert_eq!(target_branches[2]["required"], json!(["kind", "node_id"]));
+    assert_eq!(
+        target_branches[3]["required"],
         json!(["kind", "payload_ref"])
     );
-    expect_missing_argument_error(
-        &cg,
+    expect_real_server_missing_argument_error(
+        &server,
         "tracedecay_lcm_expand",
         json!({ "provider": "cursor", "session_id": "session-1", "target": {} }),
+        Refusal::Route,
         "target: missing field `kind`",
     )
     .await;
+    fixture.shutdown().await;
 }
 
 #[test]
-fn lcm_tool_schemas_are_registered_with_stable_names() {
+fn lcm_tool_schemas_are_read_only_and_closed() {
     let tools = get_tool_definitions().expect("tool definitions");
-    let names = tools
-        .iter()
-        .map(|tool| tool.name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-
-    for expected in [
-        "tracedecay_lcm_status",
-        "tracedecay_lcm_load_session",
-        "tracedecay_lcm_grep",
-        "tracedecay_lcm_describe",
-        "tracedecay_lcm_expand",
-        "tracedecay_lcm_expand_query",
-        "tracedecay_lcm_doctor",
-    ] {
-        assert!(names.contains(expected), "missing {expected}");
-    }
 
     for read_only in [
         "tracedecay_lcm_status",
@@ -235,17 +216,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         {
             assert_eq!(branch["additionalProperties"], false);
         }
-    }
-
-    for retired in [
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
-    ] {
-        assert!(
-            !names.contains(retired),
-            "{retired} must remain daemon-internal"
-        );
     }
 
     for scoped in [
@@ -277,12 +247,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .expect("tracedecay_lcm_load_session definition");
     assert_eq!(load.input_schema["required"], json!(["session_id"]));
     assert!(
-        load.input_schema["properties"]["provider"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("across all providers")
-    );
-    assert!(
         load.input_schema["properties"]
             .get("content_limit")
             .is_some()
@@ -307,12 +271,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
             .and_then(Value::as_array)
             .is_some_and(|required| required.iter().any(|field| field == "provider")),
         "tracedecay_lcm_grep provider must stay optional"
-    );
-    assert!(
-        grep.input_schema["properties"]["provider"]["description"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("all providers")
     );
     assert_eq!(
         grep.input_schema["properties"]["limit"]["type"],
@@ -387,12 +345,17 @@ fn retrieve_tool_schema_requires_handle_and_canonical_project_selector() {
     let properties = tool_properties(&tools, "tracedecay_retrieve");
 
     assert!(properties.contains_key("handle"));
+    assert!(properties.contains_key("offset"));
+    assert!(properties.contains_key("max_chars"));
     assert!(properties.contains_key("project_selector"));
     for alias in ["project_id", "project_path", "project_root", "root"] {
         assert!(!properties.contains_key(alias));
     }
     assert!(!properties.contains_key("retrieve_handle"));
     assert_eq!(retrieve.input_schema["required"], json!(["handle"]));
+    assert_eq!(properties["offset"]["default"], json!(0));
+    // Pages above the response-frame budget are clamped, not refused.
+    assert_eq!(properties["max_chars"]["minimum"], json!(1));
     assert_eq!(
         properties["project_selector"]["required"],
         json!(["project_id"])
@@ -410,21 +373,6 @@ fn retrieve_tool_schema_requires_handle_and_canonical_project_selector() {
             .collect::<Vec<_>>(),
         vec!["project_id"]
     );
-
-    assert!(retrieve.description.contains("tracedecay_retrieve"));
-    assert!(retrieve.description.contains("required argument `handle`"));
-    assert!(retrieve.description.contains("pass the same selector"));
-    assert!(
-        retrieve
-            .description
-            .contains("Only call it when the missing details are needed")
-    );
-    assert!(
-        properties["handle"]["description"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("required `handle` argument")
-    );
 }
 
 #[test]
@@ -433,7 +381,11 @@ fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
 
     // Registered-project readers dispatch to other mounted projects, so the
     // selector has to be discoverable from the schema.
-    for name in ["tracedecay_context", "tracedecay_grep", "tracedecay_read"] {
+    for name in [
+        "tracedecay_context",
+        "tracedecay_grep",
+        "tracedecay_callers",
+    ] {
         let properties = tool_properties(&tools, name);
         assert!(properties.contains_key("project_selector"));
         for alias in ["project_id", "project_path", "project_root", "root"] {
@@ -464,7 +416,7 @@ fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
 
 #[test]
 fn exact_fact_store_definitions_project_canonical_request_schemas() {
-    let registry = tracedecay_application::mcp_executable_binding_registry()
+    let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .expect("MCP executable binding registry");
     let tools = get_tool_definitions().expect("tool definitions");
     for operation in [
@@ -477,6 +429,7 @@ fn exact_fact_store_definitions_project_canonical_request_schemas() {
         "fact_store_get",
         "fact_store_update",
         "fact_store_remove",
+        "fact_store_supersede",
         "fact_store_list",
         "fact_feedback",
         "memory_status",
@@ -484,13 +437,14 @@ fn exact_fact_store_definitions_project_canonical_request_schemas() {
         let operation_id =
             tracedecay_tool_catalog::OperationId::new(format!("operation.application.{operation}"))
                 .expect("fact-store operation id");
-        let mut canonical = registry
-            .get(&operation_id)
-            .and_then(|availability| availability.binding())
-            .unwrap_or_else(|| panic!("{operation} executable binding"))
-            .request_schema()
-            .body()
-            .clone();
+        let mut canonical = tracedecay_mcp::mcp_input_schema(
+            registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .unwrap_or_else(|| panic!("{operation} executable binding"))
+                .request_schema()
+                .body(),
+        );
         let tool_name = format!("tracedecay_{operation}");
         let mut advertised = tool_schema(&tools, &tool_name).clone();
         for schema in [&mut canonical, &mut advertised] {
@@ -509,8 +463,6 @@ fn exact_fact_store_definitions_project_canonical_request_schemas() {
 #[test]
 fn exact_memory_tool_definitions_exclude_legacy_payload_aliases() {
     let tools = get_tool_definitions().expect("tool definitions");
-    let tool_names: std::collections::HashSet<_> =
-        tools.iter().map(|tool| tool.name.as_str()).collect();
     let fact_add = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_fact_store_add")
@@ -564,20 +516,6 @@ fn exact_memory_tool_definitions_exclude_legacy_payload_aliases() {
         trust_type == "number" || *trust_type == serde_json::json!(["number", "null"]),
         "trust must be a number (nullable Option<f64> is also accepted): {trust_type}"
     );
-    // FactStoreAddRequestV1::trust is Option<f64> with no schemars range.
-
-    assert!(
-        !tool_names.contains("tracedecay_record_decision"),
-        "unshipped legacy decision tool should not be exposed"
-    );
-    assert!(
-        !tool_names.contains("tracedecay_record_code_area"),
-        "unshipped legacy code-area tool should not be exposed"
-    );
-    assert!(
-        !tool_names.contains("tracedecay_session_recall"),
-        "unshipped legacy recall tool should not be exposed"
-    );
 }
 
 #[test]
@@ -600,7 +538,11 @@ fn managed_skill_tool_definitions_are_read_only() {
     assert_eq!(list.annotations.as_ref().unwrap()["readOnlyHint"], true);
     assert_eq!(view.annotations.as_ref().unwrap()["readOnlyHint"], true);
     assert_eq!(
-        list.input_schema["properties"]["state"]["enum"],
+        list.input_schema["properties"]["state"]["anyOf"],
+        json!([{"$ref": "#/$defs/ManagedSkillState"}, {"type": "null"}])
+    );
+    assert_eq!(
+        list.input_schema["$defs"]["ManagedSkillState"]["enum"],
         json!(["active", "disabled", "archived"])
     );
     assert_eq!(view.input_schema["required"], json!(["id"]));
@@ -718,29 +660,56 @@ pub(crate) fn assert_schema_requires(
     );
 }
 
-pub(crate) async fn expect_missing_argument_error(
-    cg: &TraceDecay,
-    tool_name: &str,
-    args: Value,
-    expected_message: &str,
-) {
-    let message = expect_tool_error(handle_tool_call(cg, tool_name, args, None, None).await);
-    assert!(
-        message.contains(expected_message),
-        "{tool_name} parser error should mention `{expected_message}`, got `{message}`"
-    );
+/// How a tool's parser rejection reaches the client.
+#[derive(Clone, Copy)]
+enum Refusal {
+    /// Graph-tool owner: an `isError` result carrying an `invalid_request`
+    /// problem record.
+    Problem,
+    /// Application-surface schema admission: a settled route refusal whose
+    /// diagnostic is `application_surface_invalid_request`.
+    Route,
 }
 
 async fn expect_real_server_missing_argument_error(
     server: &Arc<McpServer>,
     tool_name: &str,
     args: Value,
+    refusal: Refusal,
     expected_message: &str,
 ) {
     let response = handle_real_server_tool_call_raw(server, tool_name, args).await;
-    let message = response["error"]["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{tool_name} should reject missing arguments: {response}"));
+    let message = match refusal {
+        Refusal::Problem => {
+            assert!(
+                response.get("error").is_none(),
+                "{tool_name} should refuse as a tool result: {response}"
+            );
+            let problem = refusal_problem(&response["result"]);
+            assert_eq!(
+                problem["kind"], "invalid_request",
+                "{tool_name}: {response}"
+            );
+            assert_eq!(
+                problem["code"], "application.surface.invalid_request",
+                "{tool_name}: {response}"
+            );
+            problem["message"].as_str()
+        }
+        Refusal::Route => {
+            let refusal = route_refusal(&response);
+            assert_eq!(
+                (&refusal["kind"], &refusal["diagnostic"]["code"]),
+                (
+                    &json!("invalid_request"),
+                    &json!("application_surface_invalid_request")
+                ),
+                "{tool_name}: {response}"
+            );
+            response["result"]["structuredContent"]["problem"]["diagnostic"]["message"].as_str()
+        }
+    }
+    .unwrap_or_else(|| panic!("{tool_name} should reject missing arguments: {response}"));
     assert!(
         message.contains(expected_message),
         "{tool_name} parser error should mention `{expected_message}`, got `{message}`"

@@ -1,8 +1,8 @@
 //! Integration coverage for historical session↔git convergence
 //! (`tracedecay sessions git-sync`).
 //!
-//! Seeds a `sessions.db` with two sessions — one spanning a mid-session branch
-//! switch — against a real git repo carrying commits on both branches, runs
+//! Seeds a `sessions.db` with two sessions, one spanning a mid-session branch
+//! switch, against a real git repo carrying commits on both branches, runs
 //! the backfill core directly (no binary spawn), and asserts `sessions_for`
 //! returns the expected branch/commit attribution, including the branch-switch
 //! case. A fake [`GitReflogSource`] supplies the branch timeline so the switch
@@ -11,15 +11,19 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::git_correlation::{
-    BackfillOptions, BranchTimelineEntry, CommitRelationFilter, GitRefFilter, GitReflogSource,
-    SessionsForQuery, normalize_worktree,
+    BackfillOptions, BackfillStats, BranchTimelineEntry, CommitRelationFilter, GitCorrelationError,
+    GitHistoryIndexFrontier, GitRefFilter, GitReflogSource, SessionsForQuery, SystemGit,
+    git_commit_reference_exists, normalize_worktree,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -148,6 +152,14 @@ impl GitReflogSource for FakeGit {
         self.current.clone()
     }
 
+    fn commit_reference_exists(
+        &self,
+        _worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        git_commit_reference_exists(&self.real_repo, reference)
+    }
+
     fn commit_log(&self, _worktree: &Path, branch: &str, since: i64) -> Option<String> {
         // Delegate to the real repo so commit shas/times are authentic.
         let out = Command::new(common::git_program())
@@ -191,22 +203,18 @@ async fn open_seeded_db(repo: &Path) -> (TempDir, HostAdmissionTestRuntimeV1, St
         .await
         .unwrap()
     );
-    assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_switch", "m1", T_BASE + 50),
-        )
-        .await
-        .unwrap()
-    );
-    assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_switch", "m2", T_BASE + 850),
-        )
-        .await
-        .unwrap()
-    );
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &message("s_switch", "m1", T_BASE + 50),
+    )
+    .await
+    .unwrap();
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &message("s_switch", "m2", T_BASE + 850),
+    )
+    .await
+    .unwrap();
 
     // s_main only overlaps the first main stretch.
     assert!(
@@ -217,14 +225,12 @@ async fn open_seeded_db(repo: &Path) -> (TempDir, HostAdmissionTestRuntimeV1, St
         .await
         .unwrap()
     );
-    assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_main", "m3", T_BASE + 200),
-        )
-        .await
-        .unwrap()
-    );
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &message("s_main", "m3", T_BASE + 200),
+    )
+    .await
+    .unwrap();
 
     (tmp, db, project)
 }
@@ -232,7 +238,9 @@ async fn open_seeded_db(repo: &Path) -> (TempDir, HostAdmissionTestRuntimeV1, St
 #[tokio::test]
 async fn backfill_attributes_branch_switch_and_commits() {
     let (_base, repo, main_shas, feature_shas) = build_repo();
-    let worktree = normalize_worktree(&repo.to_string_lossy());
+    // The stored worktree is the repo's canonical name; the fixture's own
+    // spelling can be an alias (an 8.3 TEMP root on Windows).
+    let worktree = normalize_worktree(&repo.canonicalize().unwrap().to_string_lossy());
     let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
 
     // HEAD held main until +300, switched to feature at +300, back to main at
@@ -405,19 +413,27 @@ async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
     assert_eq!(ids, vec!["s_main".to_string(), "s_switch".to_string()]);
 }
 
-/// Watermark key mirrored from `git_correlation::AUTO_BACKFILL_WATERMARK_KEY`
-/// (that const is `pub(crate)`, so integration tests reference the literal).
-const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+const GIT_HISTORY_SEQUENCE_FRONTIER_KEY: &str = "git_history_change_sequence_frontier";
 
-fn incremental_git(repo: &Path) -> FakeGit {
-    FakeGit {
+fn incremental_git(repo: &Path) -> Arc<FakeGit> {
+    Arc::new(FakeGit {
         timeline: vec![
             (T_BASE + 300, Some("feature".to_string())),
             (T_BASE + 600, Some("main".to_string())),
         ],
         current: Some("main".to_string()),
         real_repo: repo.to_path_buf(),
-    }
+    })
+}
+
+/// One production convergence pass that must settle without a later failure.
+async fn converge(db: &HostAdmissionTestRuntimeV1, git: &Arc<FakeGit>) -> BackfillStats {
+    let outcome = db
+        .converge_git_evidence_for_test(git.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.later_failure, None);
+    outcome.pass.backfill
 }
 
 #[tokio::test]
@@ -428,37 +444,30 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
 
     // No pass has run yet, so no watermark is recorded.
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
         None
     );
 
     // First pass drains both seeded sessions and writes their spans.
-    let first = db
-        .run_incremental_git_backfill_for_test(&git, 50)
-        .await
-        .unwrap();
+    let first = converge(&db, &git).await;
     assert_eq!(first.sessions_scanned, 2);
     assert!(
         first.spans_written >= 2,
         "both sessions map to the worktree"
     );
 
-    // The watermark advances to the newest session activity: s_switch's last
-    // message at T_BASE + 850.
+    // The journal counts two session rows and three messages, ending at m3.
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 850)
+        Some(5)
     );
 
     // A second pass finds nothing newer than the watermark: no rescans.
-    let second = db
-        .run_incremental_git_backfill_for_test(&git, 50)
-        .await
-        .unwrap();
+    let second = converge(&db, &git).await;
     assert_eq!(second.sessions_scanned, 0);
     assert_eq!(second.spans_written, 0);
 
@@ -481,46 +490,204 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
 }
 
 #[tokio::test]
-async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
+async fn project_host_admission_drain_bootstraps_retained_git_evidence() {
     let (_base, repo, _main, _feature) = build_repo();
     let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
+    let scope = ObservationScopeV1::Project {
+        project_id: ProjectId::new("project.git-backfill").unwrap(),
+    };
+
+    let drained = db
+        .facade()
+        .drain_projection_queue("claude", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+    assert!(!drained.deferred, "the two-session history fits one page");
+    assert_eq!(
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        Some(5),
+        "the production host-admission caller must advance the durable frontier"
+    );
+    let hits = db
+        .git_sessions_for_for_test(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Branch("main".to_owned()),
+                since: None,
+                until: None,
+                limit: 20,
+            },
+            CommitRelationFilter::Observed,
+        )
+        .await
+        .unwrap();
+    assert!(
+        hits.iter().any(|hit| hit.session_id == "s_main"),
+        "retained session metadata must become queryable Git evidence"
+    );
+}
+
+/// Rowid half of the durable history frontier.
+const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
+
+/// A catch-up of thousands of retained sessions converges in one pass that
+/// installs one metadata generation over the appended rows. Git evidence used
+/// to be one whole-projection manifest capped at 4 MB (about 1,300 sessions)
+/// and republished per session, so a catch-up this size never settled and the
+/// history scheduler re-ran it for as long as the daemon lived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_catch_up_converges_in_one_pass_and_then_stays_settled() {
+    const SESSIONS: i64 = 5_000;
+    let (_base, repo, _main, _feature) = build_repo();
+    let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("db tmpdir: {e}"));
+    let project_id = ProjectId::new("project.git-backfill-catch-up").unwrap();
+    let db = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join(".tracedecay"),
+        &repo,
+        project_id.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("open registered sessions runtime: {error}"));
+    let project = repo.to_string_lossy().to_string();
+    for index in 0..SESSIONS {
+        let started = T_BASE + index * 60;
+        let session_id = format!("catch-up-{index:05}");
+        db.seed_session_messages_for_test(
+            HostAdmissionScope::Project,
+            &session(&session_id, &project, started, started + 30),
+            &[message(&session_id, &format!("m-{index:05}"), started + 15)],
+        )
+        .await
+        .unwrap();
+    }
+    let last_sequence = SESSIONS * 2; // One session and one message change each.
+    let scope = ObservationScopeV1::Project { project_id };
+
+    let first = db
+        .converge_git_evidence_for_test(Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(first.later_failure, None);
+    let receipt = first.pass;
+    assert_eq!(
+        receipt.frontier,
+        GitHistoryIndexFrontier {
+            change_sequence: last_sequence,
+            source_rowid: 5_000,
+        },
+        "the receipt's frontier is the last session's (change sequence, rowid)"
+    );
+    assert_eq!(receipt.backfill.sessions_scanned, 5_000);
+    assert_eq!(receipt.backfill.skipped_git_error, 0);
+    let generation = receipt
+        .generation
+        .expect("the catch-up installs one generation");
+    assert_eq!(
+        generation.sequence, 1,
+        "the whole catch-up is one metadata publication"
+    );
+    assert_eq!(
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        Some(last_sequence)
+    );
+    assert_eq!(
+        db.git_correlation_meta_for_test(GIT_HISTORY_ROWID_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        Some(5_000)
+    );
+    let settled = db.git_correlation_health_for_test().await.unwrap();
+    assert_eq!(settled.span_count, 5_000);
+    // Time-overlap attribution: the main commits at T_BASE + 100 and + 700
+    // fall within the merge gap of the first 32 and 42 sessions.
+    assert_eq!(settled.commit_count, 74);
+
+    // The history pass that follows drains through the production host
+    // admission caller: nothing is deferred, so the scheduler moves on.
+    let following = db
+        .facade()
+        .drain_projection_queue("claude", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+    assert!(!following.deferred);
+    assert_eq!(
+        db.git_correlation_health_for_test().await.unwrap(),
+        settled,
+        "a pass without new evidence must not publish another generation"
+    );
+}
+
+#[tokio::test]
+async fn convergence_resumes_from_the_durable_frontier_after_restart() {
+    let (_base, repo, main_shas, _feature) = build_repo();
+    let (db_tmp, db, project) = open_seeded_db(&repo).await;
     let git = incremental_git(&repo);
 
-    // A cap of one session per pass drains oldest-first. s_main's activity
-    // (last message T_BASE + 200) precedes s_switch's (T_BASE + 850).
-    let pass1 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
-        .await
-        .unwrap();
-    assert_eq!(pass1.sessions_scanned, 1);
+    // One pass drains the whole retained history in ingest order: s_switch
+    // (newest message m2), then s_main (m3).
+    let pass1 = converge(&db, &git).await;
+    assert_eq!(pass1.sessions_scanned, 2);
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 200),
-        "oldest session processed first"
+        Some(5)
     );
-
-    let pass2 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
+    let first_commit = main_shas.last().expect("first main commit");
+    let first_commit_hits = db
+        .git_sessions_for_for_test(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Commit(first_commit.clone()),
+                since: None,
+                until: None,
+                limit: 20,
+            },
+            CommitRelationFilter::Observed,
+        )
         .await
         .unwrap();
+    let mut first_commit_ids = first_commit_hits
+        .iter()
+        .map(|hit| hit.session_id.as_str())
+        .collect::<Vec<_>>();
+    first_commit_ids.sort_unstable();
+    assert_eq!(first_commit_ids, vec!["s_main", "s_switch"]);
+
+    // Release and reopen the complete registered runtime: the next pass
+    // resumes from the durable tuple frontier, not process state, so only
+    // the session recorded after the restart is scanned.
+    drop(db);
+    let db = HostAdmissionTestRuntimeV1::project(
+        db_tmp.path().join(".tracedecay"),
+        &repo,
+        ProjectId::new("project.git-backfill").unwrap(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("restart registered sessions runtime: {error}"));
+    db.seed_session_messages_for_test(
+        HostAdmissionScope::Project,
+        &session("s_late", &project, T_BASE + 900, T_BASE + 950),
+        &[message("s_late", "m4", T_BASE + 940)],
+    )
+    .await
+    .unwrap();
+
+    let pass2 = converge(&db, &git).await;
     assert_eq!(pass2.sessions_scanned, 1);
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 850)
+        Some(7)
     );
 
     // History fully drained: the next pass has nothing to do.
-    let pass3 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
-        .await
-        .unwrap();
+    let pass3 = converge(&db, &git).await;
     assert_eq!(pass3.sessions_scanned, 0);
 
-    // Both sessions ended up attributed to main across the two passes.
     let hits = db
         .git_sessions_for_for_test(
             &SessionsForQuery {
@@ -535,7 +702,14 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
         .unwrap();
     let mut ids: Vec<String> = hits.iter().map(|h| h.session_id.clone()).collect();
     ids.sort();
-    assert_eq!(ids, vec!["s_main".to_string(), "s_switch".to_string()]);
+    assert_eq!(
+        ids,
+        vec![
+            "s_late".to_string(),
+            "s_main".to_string(),
+            "s_switch".to_string()
+        ]
+    );
 }
 
 #[tokio::test]
@@ -561,14 +735,12 @@ async fn backfill_skips_non_worktree_sessions() {
         .await
         .unwrap()
     );
-    assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_orphan", "m1", T_BASE + 50),
-        )
-        .await
-        .unwrap()
-    );
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &message("s_orphan", "m1", T_BASE + 50),
+    )
+    .await
+    .unwrap();
 
     let git = FakeGit {
         timeline: vec![],

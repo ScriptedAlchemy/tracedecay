@@ -3,7 +3,7 @@ import { cn } from './cn';
 import { channelNumber } from '../app/channels.ts';
 
 /**
- * Instrument primitives — the vocabulary the whole dashboard is drawn in.
+ * Instrument primitives, the vocabulary the whole dashboard is drawn in.
  *
  * The grammar is deliberately small and repeated everywhere, because that
  * repetition is what makes a console read as one machined object rather than a
@@ -106,6 +106,7 @@ export function Panel({
   children,
   className,
   bodyClassName,
+  headerClassName,
   tone = 'edge',
   elevation = 'face',
 }: {
@@ -115,9 +116,12 @@ export function Panel({
   children: ReactNode;
   className?: string;
   bodyClassName?: string;
+  /** For a header whose actions must wrap at a breakpoint instead of clipping;
+   * the default 32px single line is unchanged unless a caller opts in. */
+  headerClassName?: string;
   tone?: 'edge' | 'signal';
   /** Which plane of the chassis the panel body occupies. `well` recesses the
-   * body so the region reads as something you look into — use it for lists,
+   * body so the region reads as something you look into, use it for lists,
    * logs and canvases, not for prose. */
   elevation?: 'face' | 'well';
 }) {
@@ -130,7 +134,12 @@ export function Panel({
       )}
     >
       <Corners tone={tone} />
-      <header className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
+      <header
+        className={cn(
+          'flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5',
+          headerClassName,
+        )}
+      >
         <h2 className="td-title truncate">{legend}</h2>
         <span aria-hidden className="td-rule" />
         {actions}
@@ -151,14 +160,14 @@ export function Panel({
   );
 }
 
-export type ReadoutSize = 'sm' | 'md' | 'lg' | 'xl' | 'display';
+type ReadoutSize = 'sm' | 'md' | 'lg' | 'xl' | 'display';
 
 /** `sm`–`lg` stay on the text scale for cells that sit inside prose rhythm.
  * `xl` and `display` switch to `.td-display`, which retunes tracking and
- * weight for large monospaced figures — the two tiers are visually different
- * kinds of object, not just different sizes of the same one. */
+ * weight for large monospaced figures. The two tiers are different kinds of
+ * object, not different sizes of the same one. */
 const VALUE_SIZE: Record<ReadoutSize, string> = {
-  sm: 'td-value text-xs',
+  sm: 'td-value text-sm',
   md: 'td-value text-base font-medium',
   lg: 'td-value text-xl font-medium',
   xl: 'td-display text-2xl',
@@ -223,7 +232,7 @@ export function Readout({
           <span className="td-meter-fill" style={{ width: `${rail * 100}%` }} />
         </span>
       ) : null}
-      {note ? <span className="truncate text-3xs text-text-muted">{note}</span> : null}
+      {note ? <span className="truncate text-sm text-text-muted">{note}</span> : null}
     </div>
   );
 }
@@ -267,7 +276,7 @@ export function Meter({
    * class joiner with no conflict resolution: passing `h-px` would leave both
    * `h-1` and `h-px` on the element and let stylesheet order pick the winner,
    * which is not something a call site can depend on. Track colour, by
-   * contrast, is safely overridable — `td-meter` lives in `@layer components`,
+   * contrast, is safely overridable, `td-meter` lives in `@layer components`,
    * so a `bg-*` utility from the caller reliably wins.
    */
   height?: MeterHeight;
@@ -296,7 +305,7 @@ export function Meter({
  * table rather than as ragged sentences.
  *
  * The rail hides itself below `sm`, where 80px of bar would take the width the
- * name needs. `fraction: null` draws the track and no fill — a row whose share
+ * name needs. `fraction: null` draws the track and no fill, a row whose share
  * of the whole is unknown must not borrow a length. The meter stays out of the
  * accessibility tree because the figure beside it is the same number. */
 export function MeterRow({
@@ -320,12 +329,13 @@ export function MeterRow({
    * something (a kind, a source) as well as named. */
   leading?: ReactNode;
   /** `wide` widens the figure column by half a rem, for values that carry a
-   * unit suffix and would otherwise wrap the row. */
-  figureWidth?: 'standard' | 'wide';
+   * unit suffix and would otherwise wrap the row; `byte` widens it to hold a
+   * four-figure byte size with its unit (`204.7 MiB`). */
+  figureWidth?: 'standard' | 'wide' | 'byte';
   className?: string;
 }) {
   return (
-    <div className={cn('flex items-center gap-2 text-xs', className)}>
+    <div className={cn('flex items-center gap-2 text-sm', className)}>
       {leading}
       <span className="min-w-0 flex-1 truncate text-text-primary" title={title}>
         {label}
@@ -338,8 +348,8 @@ export function MeterRow({
       />
       <span
         className={cn(
-          'td-value shrink-0 text-right text-2xs text-text-secondary',
-          figureWidth === 'wide' ? 'w-14' : 'w-12',
+          'td-value shrink-0 text-right text-xs text-text-secondary',
+          figureWidth === 'byte' ? 'w-[4.75rem]' : figureWidth === 'wide' ? 'w-14' : 'w-12',
         )}
         data-cell="numeric"
       >
@@ -353,7 +363,7 @@ export function MeterRow({
  * directly under it the same quantity as a length.
  *
  * The rail is right-aligned and grows leftward so the number and its bar share
- * the row's trailing edge — a left-growing bar under a right-set figure reads
+ * the row's trailing edge, a left-growing bar under a right-set figure reads
  * as two unrelated ragged things. `fraction: null` draws the track and no fill,
  * because a row whose share of the whole is unknown must not borrow a length.
  * The meter stays out of the accessibility tree: the figure above it is the
@@ -384,7 +394,7 @@ export function FigureRail({
         className,
       )}
     >
-      <span className="td-value text-2xs leading-none text-text-secondary" data-cell="numeric">
+      <span className="td-value text-xs leading-none text-text-secondary" data-cell="numeric">
         {value}
         {unit ? <span className="td-unit ml-1">{unit}</span> : null}
       </span>
@@ -395,18 +405,18 @@ export function FigureRail({
 
 /** One labelled term in a definition grid: the label engraved above in caps,
  * the value below, wrapping rather than truncating. Used for the horizon lines
- * where the value is a scope reference or a pair of timestamps — strings a
+ * where the value is a scope reference or a pair of timestamps, strings a
  * reader has to be able to read in full, not scan. */
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <dt className="uppercase tracking-[0.08em] text-text-muted">{label}</dt>
+      <dt className="uppercase tracking-[0.08em] text-text-muted text-3xs">{label}</dt>
       <dd className="min-w-0 break-words text-text-secondary tabular">{children}</dd>
     </div>
   );
 }
 
-/** A definition-list term for a single short string of provenance — a ref, an
+/** A definition-list term for a single short string of provenance, a ref, an
  * id, a stamp. Tighter than `Field` and truncating rather than wrapping,
  * because these sit in a grid under a record where the label carries the
  * meaning and the full value is on the record itself. `muted` files the term as
@@ -426,8 +436,8 @@ export function Fact({
       <dd
         className={
           muted
-            ? 'truncate text-3xs text-text-muted'
-            : 'truncate text-3xs text-text-secondary'
+            ? 'truncate text-sm text-text-muted'
+            : 'truncate text-sm text-text-secondary'
         }
       >
         {value}
@@ -446,7 +456,7 @@ export interface ReadoutItem {
   fraction?: number | null | undefined;
 }
 
-/** A ruled row of readouts divided by hairlines — the instrument's answer to a
+/** A ruled row of readouts divided by hairlines, the instrument's answer to a
  * row of stat cards. Cells share one bezel instead of each owning a box.
  *
  * At `elevation="raised"` the bar becomes the surface's headline: it lifts off
@@ -491,7 +501,7 @@ export function ReadoutBar({
   );
 }
 
-/** The one element allowed to signal liveness with colour alone — and it never
+/** The one element allowed to signal liveness with colour alone, and it never
  * does so alone: a lamp always sits beside its own label. `live` adds the slow
  * flash, which `prefers-reduced-motion` pins fully lit. */
 export function Lamp({
@@ -535,7 +545,7 @@ export function WorkspaceHeader({
       <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
         {channelNumber(path)}
       </span>
-      <h1 className="shrink-0 text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
+      <h1 className="shrink-0 text-xs font-semibold uppercase tracking-[0.2em] text-text-primary">
         {title}
       </h1>
       {/* Withdrawn below `sm`, where the line has no width to spend on filler:
@@ -543,50 +553,11 @@ export function WorkspaceHeader({
        * header overflow at 320 CSS px. Above `sm` it earns its width. */}
       <span aria-hidden className="td-rule max-sm:hidden" />
       {note ? (
-        <span className="min-w-0 truncate text-3xs tracking-[0.04em] text-text-muted">
+        <span className="min-w-0 truncate text-sm text-text-muted">
           {note}
         </span>
       ) : null}
       {actions}
     </header>
-  );
-}
-
-/** A proportional bar rendered as a graduated gauge: hairline track, ticked
- * scale, filled to the measured fraction. Renders nothing but the track when
- * the fraction is unknown — an empty gauge is honest, a guessed one is not. */
-export function Gauge({
-  fraction,
-  className,
-  ariaLabel,
-  tone = 'bg-accent',
-}: {
-  fraction: number | null;
-  className?: string;
-  ariaLabel: string;
-  tone?: string;
-}) {
-  const clamped = fraction == null ? null : Math.max(0, Math.min(1, fraction));
-  return (
-    <div
-      className={cn('relative h-2 w-full border border-edge-subtle bg-surface-0', className)}
-      role="img"
-      aria-label={ariaLabel}
-    >
-      {clamped != null ? (
-        <div
-          className={cn('absolute inset-y-0 left-0', tone)}
-          style={{ width: `${clamped * 100}%` }}
-        />
-      ) : null}
-      <span
-        aria-hidden
-        className="absolute inset-0 flex justify-between opacity-70"
-        style={{
-          backgroundImage:
-            'repeating-linear-gradient(to right, var(--raw-edge-strong) 0 1px, transparent 1px 25%)',
-        }}
-      />
-    </div>
   );
 }

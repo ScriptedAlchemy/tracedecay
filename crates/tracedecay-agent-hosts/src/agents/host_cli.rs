@@ -2,7 +2,7 @@
 //!
 //! Some hosts own their plugin registration, cache, and enabled state
 //! outright. For those, the canonical way to install or remove TraceDecay is
-//! the host's own command — not config surgery on state the host considers
+//! the host's own command, not config surgery on state the host considers
 //! private. This module is the single boundary through which TraceDecay
 //! invokes such a command.
 //!
@@ -20,10 +20,13 @@
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::config::host_program_search_path;
+
+pub(crate) use tracedecay_automation_runtime::automation::executable_lookup::resolve_on_path;
 
 /// Wall-clock bound for one host CLI invocation.
 ///
@@ -55,8 +58,8 @@ pub(crate) struct HostCliOutcomeV1 {
 }
 
 impl HostCliOutcomeV1 {
-    /// A clean exit is the only success. Anything else — non-zero, signalled,
-    /// or timed out — leaves host state unproven and must not be reported as a
+    /// A clean exit is the only success. Anything else, non-zero, signalled,
+    /// or timed out, leaves host state unproven and must not be reported as a
     /// completed lifecycle step.
     pub(crate) fn succeeded(&self) -> bool {
         !self.timed_out && self.status == Some(0)
@@ -101,7 +104,7 @@ impl HostCliOutcomeV1 {
 /// plugin lifecycle"), so the operator learns both what is missing and what it
 /// was needed for.
 pub(crate) fn require_host_cli(program: &str, lifecycle: &str) -> Result<PathBuf> {
-    let path_var = std::env::var_os("PATH");
+    let path_var = host_program_search_path();
     require_host_cli_from(program, lifecycle, path_var.as_deref())
 }
 
@@ -121,107 +124,6 @@ fn require_host_cli_from(
     })
 }
 
-/// First executable match for `program` across `path_var`.
-pub(crate) fn resolve_on_path(
-    program: &str,
-    path_var: Option<&std::ffi::OsStr>,
-) -> Result<Option<PathBuf>> {
-    let Some(path_var) = path_var else {
-        return Ok(None);
-    };
-    for dir in std::env::split_paths(path_var) {
-        for name in candidate_file_names(program) {
-            let candidate = dir.join(&name);
-            if is_executable_file(&candidate)? {
-                return Ok(Some(candidate));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Executable spellings to try for a bare program name.
-fn candidate_file_names(program: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec![
-            format!("{program}.exe"),
-            format!("{program}.cmd"),
-            format!("{program}.bat"),
-            program.to_string(),
-        ]
-    } else {
-        vec![program.to_string()]
-    }
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> Result<bool> {
-    use std::os::unix::fs::PermissionsExt;
-    match std::fs::metadata(path) {
-        Ok(metadata) if !metadata.is_file() => Ok(false),
-        Ok(metadata) if metadata.permissions().mode() & 0o111 != 0 => Ok(true),
-        Ok(_) => Err(TraceDecayError::Config {
-            message: format!(
-                "host CLI candidate `{}` exists but is not executable",
-                path.display()
-            ),
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(TraceDecayError::Io(error)),
-    }
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> Result<bool> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.is_file()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(TraceDecayError::Io(error)),
-    }
-}
-
-/// Spawn a host command, absorbing the transient `ETXTBSY` window that follows
-/// a fresh write of the executable.
-///
-/// Linux refuses `execve` with `ETXTBSY` while *any* process holds the image
-/// open for writing — including a process that merely inherited the descriptor
-/// across a `fork` and has not reached its own `exec` yet. A lifecycle that
-/// drives a host CLI shortly after something installed or updated that binary
-/// can therefore be refused for a reason that has nothing to do with the host,
-/// and reporting it would blame the host for a race in its installer.
-///
-/// The retry is deliberately tiny and bounded: the condition clears as soon as
-/// the writer's descriptor closes. Every other spawn failure — including a
-/// missing or non-executable file — is returned on the first attempt, so no
-/// real refusal is delayed or masked.
-fn spawn_admitting_recent_writes(command: &mut Command) -> std::io::Result<std::process::Child> {
-    const ATTEMPTS: u32 = 5;
-    const BACKOFF: Duration = Duration::from_millis(20);
-
-    let mut attempt = 0;
-    loop {
-        match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(error) => {
-                let busy = error.raw_os_error() == Some(TEXT_FILE_BUSY);
-                attempt += 1;
-                if !busy || attempt >= ATTEMPTS {
-                    return Err(error);
-                }
-                std::thread::sleep(BACKOFF);
-            }
-        }
-    }
-}
-
-/// `ETXTBSY`. Named rather than matched through `ErrorKind`, which has no
-/// stable variant for it.
-#[cfg(unix)]
-const TEXT_FILE_BUSY: i32 = 26;
-
-#[cfg(not(unix))]
-const TEXT_FILE_BUSY: i32 = i32::MIN;
-
 /// Run one host CLI invocation under [`HOST_CLI_TIMEOUT`], capturing its typed
 /// outcome.
 ///
@@ -229,17 +131,9 @@ const TEXT_FILE_BUSY: i32 = i32::MIN;
 /// rest of the environment is cleared. This lets an isolated-HOME test drive a
 /// real lifecycle without touching the operator's own configuration or
 /// workspace.
-#[hotpath::measure(label = "hosts.agent.host_cli.invoke")]
+#[tracing::instrument(name = "hosts.agent.host_cli.invoke", level = "trace", skip_all)]
 pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result<HostCliOutcomeV1> {
-    // Resolve the executable before admitting the child working directory.
-    // A relative PATH entry is relative to the operator's current directory;
-    // once `current_dir(home)` is applied below, asking the OS to resolve it
-    // again could launch a different file (or fail despite a successful
-    // preflight resolution).
-    let resolved_program =
-        std::fs::canonicalize(program).map_err(|error| TraceDecayError::Config {
-            message: format!("could not resolve `{}`: {error}", program.display()),
-        })?;
+    let (mut command, resolved_program) = admitted_host_command(program, args, home)?;
     let rendered_program = resolved_program
         .file_name()
         .and_then(|name| name.to_str())
@@ -247,27 +141,7 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
         .to_string();
     let rendered_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
 
-    let (launch_program, launch_args) = resolve_launch_command(&resolved_program)?;
-    let mut command = Command::new(&launch_program);
-    command
-        .args(&launch_args)
-        .args(args)
-        // Host lifecycle commands must observe the profile and directory the
-        // transaction admitted, not the operator's ambient process state.
-        .current_dir(home)
-        .env_clear()
-        .env("HOME", home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    admit_windows_profile_environment(&mut command, home);
-
-    let mut child =
-        spawn_admitting_recent_writes(&mut command).map_err(|error| TraceDecayError::Config {
-            message: format!("could not run `{}`: {error}", resolved_program.display()),
-        })?;
+    let mut child = spawn_host_command(&mut command, &resolved_program)?;
 
     // Drain both pipes concurrently: a command that writes more than one pipe
     // buffer would otherwise block on write while we block on wait.
@@ -296,8 +170,8 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
         }
     };
 
-    let stdout = stdout_handle.map(join_reader).unwrap_or_default();
-    let stderr = stderr_handle.map(join_reader).unwrap_or_default();
+    let stdout = stdout_handle.map_or_default(join_reader);
+    let stderr = stderr_handle.map_or_default(join_reader);
 
     Ok(HostCliOutcomeV1 {
         program: rendered_program,
@@ -307,6 +181,167 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
         stdout,
         stderr,
     })
+}
+
+fn spawn_host_command(command: &mut Command, resolved_program: &Path) -> Result<Child> {
+    command.spawn().map_err(|error| TraceDecayError::Config {
+        message: format!("could not run `{}`: {error}", resolved_program.display()),
+    })
+}
+
+/// The host command for `program args` under the admitted `home`, with the
+/// resolved executable path for diagnostics.
+///
+/// `home` is both `HOME` and the working directory and the rest of the
+/// environment is cleared: host lifecycle commands must observe the profile
+/// and directory the transaction admitted, not the operator's ambient state.
+fn admitted_host_command(program: &Path, args: &[&str], home: &Path) -> Result<(Command, PathBuf)> {
+    // Resolve the executable before admitting the child working directory.
+    // A relative PATH entry is relative to the operator's current directory;
+    // once `current_dir(home)` is applied, asking the OS to resolve it again
+    // could launch a different file (or fail despite a successful preflight
+    // resolution).
+    let resolved_program =
+        std::fs::canonicalize(program).map_err(|error| TraceDecayError::Config {
+            message: format!("could not resolve `{}`: {error}", program.display()),
+        })?;
+    let (launch_program, launch_args) = resolve_launch_command(&resolved_program)?;
+    let mut command = Command::new(&launch_program);
+    command
+        .args(&launch_args)
+        .args(args)
+        .current_dir(home)
+        .env_clear()
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    admit_windows_profile_environment(&mut command, home);
+
+    Ok((command, resolved_program))
+}
+
+/// How long a host server TraceDecay started gets to exit after SIGTERM
+/// before it is killed.
+const HOST_SERVER_TERMINATION_GRACE: Duration = Duration::from_secs(5);
+
+/// A long-running host command TraceDecay started, such as a host's local API
+/// server. Its combined output is captured for diagnostics while it runs.
+/// Dropping it without [`HostServerChild::terminate`] still kills and reaps
+/// the process, so no failure path can leak it.
+pub(crate) struct HostServerChild {
+    child: Option<std::process::Child>,
+    output: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+/// Start `program args` under the admitted `home` (see [`run_host_cli`]) with
+/// `env` added to the cleared environment, and keep it running.
+#[tracing::instrument(name = "hosts.agent.host_cli.spawn_server", level = "trace", skip_all)]
+pub(crate) fn spawn_host_server(
+    program: &Path,
+    args: &[&str],
+    home: &Path,
+    env: &[(&str, &std::ffi::OsStr)],
+) -> Result<HostServerChild> {
+    let (mut command, resolved_program) = admitted_host_command(program, args, home)?;
+    command.envs(env.iter().copied());
+    let mut child = spawn_host_command(&mut command, &resolved_program)?;
+    let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    if let Some(stdout) = child.stdout.take() {
+        spawn_shared_reader(stdout, std::sync::Arc::clone(&output));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_shared_reader(stderr, std::sync::Arc::clone(&output));
+    }
+    Ok(HostServerChild {
+        child: Some(child),
+        output,
+    })
+}
+
+impl HostServerChild {
+    /// Everything the server has written to stdout and stderr so far.
+    pub(crate) fn output(&self) -> String {
+        self.output.lock().map_or_else(
+            |poisoned| poisoned.into_inner().clone(),
+            |output| output.clone(),
+        )
+    }
+
+    /// The exit status when the server has already exited on its own.
+    pub(crate) fn exited(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        match self.child.as_mut() {
+            Some(child) => child.try_wait().map_err(TraceDecayError::Io),
+            None => Ok(None),
+        }
+    }
+
+    /// Ask the server to shut down, kill it after
+    /// [`HOST_SERVER_TERMINATION_GRACE`], and return the exit status that
+    /// proves the process is gone.
+    pub(crate) fn terminate(mut self) -> Result<std::process::ExitStatus> {
+        let Some(mut child) = self.child.take() else {
+            return Err(TraceDecayError::Config {
+                message: "host server was already reaped".to_string(),
+            });
+        };
+        request_graceful_exit(&child);
+        let deadline = Instant::now() + HOST_SERVER_TERMINATION_GRACE;
+        while Instant::now() < deadline {
+            if let Some(status) = child.try_wait().map_err(TraceDecayError::Io)? {
+                return Ok(status);
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        child.kill().map_err(TraceDecayError::Io)?;
+        child.wait().map_err(TraceDecayError::Io)
+    }
+}
+
+impl Drop for HostServerChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// SIGTERM by PID lets the host run its own shutdown (Kimi removes its
+/// server instance record). The child is not reaped yet, so the PID cannot
+/// name another process.
+#[cfg(unix)]
+fn request_graceful_exit(child: &std::process::Child) {
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `kill` takes plain integers and has no memory effects.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+}
+
+/// Windows has no graceful signal for a console-less child; the grace wait
+/// then ends in `kill`.
+#[cfg(not(unix))]
+fn request_graceful_exit(_child: &std::process::Child) {}
+
+fn spawn_shared_reader<R: Read + Send + 'static>(
+    mut source: R,
+    output: std::sync::Arc<std::sync::Mutex<String>>,
+) {
+    std::thread::spawn(move || {
+        let mut chunk = [0_u8; 4096];
+        while let Ok(read) = source.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            if let Ok(mut output) = output.lock() {
+                output.push_str(&String::from_utf8_lossy(&chunk[..read]));
+            }
+        }
+    });
 }
 
 /// Convert a finished host CLI invocation into success or the host's own
@@ -379,7 +414,7 @@ fn read_mcp_config_observation(
 }
 
 /// Run one host `mcp …` registry command with the shared peer-preservation
-/// guard used by Copilot and Kiro.
+/// guard used by Copilot and Droid.
 ///
 /// The host owns the registry merge. A buggy or changed command must not
 /// silently discard an operator's other MCP servers. The exact post-command
@@ -388,7 +423,7 @@ fn read_mcp_config_observation(
 /// verification step rejects the effect. Snapshot once after the child exits:
 /// reading again after recording would let a foreign writer be absorbed into
 /// the transaction's intended state.
-#[hotpath::measure(label = "hosts.agent.host_cli.registry_step")]
+#[tracing::instrument(name = "hosts.agent.host_cli.registry_step", level = "trace", skip_all)]
 pub(crate) fn run_mcp_registry_step(
     program: &Path,
     args: &[&str],
@@ -497,13 +532,15 @@ fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
         if interpreter.starts_with('-') || interpreter.contains('=') {
             return Ok((program.to_path_buf(), Vec::new()));
         }
-        let interpreter_path = resolve_on_path(interpreter, std::env::var_os("PATH").as_deref())?
-            .ok_or_else(|| TraceDecayError::Config {
-            message: format!(
-                "could not resolve env-shebang interpreter `{interpreter}` for `{}` on PATH",
-                program.display()
-            ),
-        })?;
+        let search_path = host_program_search_path();
+        let interpreter_path = resolve_on_path(interpreter, search_path.as_deref())?.ok_or_else(
+            || TraceDecayError::Config {
+                message: format!(
+                    "could not resolve env-shebang interpreter `{interpreter}` for `{}` on PATH",
+                    program.display()
+                ),
+            },
+        )?;
         // Preserve the admitted executable spelling. Multicall launchers such
         // as Volta dispatch from argv[0] (`node`); canonicalizing the final
         // symlink to `volta-shim` invokes a private target that correctly
@@ -558,16 +595,18 @@ fn admit_windows_profile_environment(command: &mut Command, home: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::io::Write as _;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::process::CommandExt as _;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::test_executable::write_executable_script;
 
     /// Write an executable shell script usable as a fake host CLI, mirroring
     /// the `install_fake_codex_launcher` pattern used by the root test suite.
     #[cfg(unix)]
     pub(super) fn write_fake_cli(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write fake host cli");
-        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("chmod fake host cli");
+        write_executable_script(path, format!("#!/bin/sh\n{body}\n")).expect("write fake host cli");
     }
 
     #[test]
@@ -650,18 +689,44 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
-    fn a_clean_exit_captures_stdout_and_reports_success() {
+    fn an_executable_held_open_for_writing_is_refused_on_the_first_attempt() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("faux");
-        write_fake_cli(&bin, "echo \"ran: $*\"");
+        let bin = dir.path().join("claude");
+        write_fake_cli(&bin, "exit 0");
+        let bin = std::fs::canonicalize(&bin).unwrap();
+        let _writer = std::fs::OpenOptions::new().append(true).open(&bin).unwrap();
+        let (mut attempts, attempt_marker) = std::io::pipe().unwrap();
+        let (mut command, resolved_program) =
+            admitted_host_command(&bin, &["plugin", "list"], dir.path()).unwrap();
+        // Every exec attempt forks a child that writes one byte here first, so
+        // the bytes read back count the attempts the spawn made.
+        unsafe {
+            command.pre_exec(move || {
+                let _ = (&attempt_marker).write(&[1]);
+                Ok(())
+            });
+        }
 
-        let outcome = run_host_cli(&bin, &["plugin", "uninstall", "tracedecay"], dir.path())
-            .expect("spawning a present binary must not error");
+        let error = spawn_host_command(&mut command, &resolved_program)
+            .expect_err("Linux refuses to exec a file that is open for writing");
+        drop(command);
+        let mut marks = Vec::new();
+        attempts.read_to_end(&mut marks).unwrap();
 
-        assert!(outcome.succeeded());
-        assert_eq!(outcome.stdout.trim(), "ran: plugin uninstall tracedecay");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "config error: could not run `{}`: Text file busy (os error 26)",
+                bin.display()
+            )
+        );
+        assert_eq!(
+            marks.len(),
+            1,
+            "the refusal must come from the first exec attempt, not a retry"
+        );
     }
 
     #[cfg(unix)]
@@ -686,44 +751,26 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn child_receives_only_the_admitted_profile_and_working_directory() {
-        struct AmbientKiroHomeGuard {
-            previous: Option<std::ffi::OsString>,
-            _lock: std::sync::MutexGuard<'static, ()>,
-        }
-
-        impl AmbientKiroHomeGuard {
-            fn set(value: &Path) -> Self {
-                let lock = crate::config::lock_user_data_dir_test_env();
-                let previous = std::env::var_os("KIRO_HOME");
-                // SAFETY: the shared profile-discovery lock is held for the
-                // guard's lifetime, so no sibling profile test observes this
-                // temporary ambient value.
-                unsafe {
-                    std::env::set_var("KIRO_HOME", value);
-                }
-                Self {
-                    previous,
-                    _lock: lock,
-                }
-            }
-        }
-
-        impl Drop for AmbientKiroHomeGuard {
-            fn drop(&mut self) {
-                // SAFETY: see `AmbientKiroHomeGuard::set`.
-                unsafe {
-                    match self.previous.take() {
-                        Some(previous) => std::env::set_var("KIRO_HOME", previous),
-                        None => std::env::remove_var("KIRO_HOME"),
-                    }
-                }
-            }
+        const AMBIENT_CHILD: &str = "TRACEDECAY_TEST_AMBIENT_KIRO_HOME_CHILD";
+        if std::env::var_os(AMBIENT_CHILD).is_none() {
+            // The ambient `KIRO_HOME` is process environment; a child
+            // isolates it from concurrently running tests.
+            let ambient = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agents::host_cli::tests::child_receives_only_the_admitted_profile_and_working_directory",
+                ])
+                .env(AMBIENT_CHILD, "1")
+                .env("KIRO_HOME", ambient.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "the ambient KIRO_HOME child failed");
+            return;
         }
 
         let home = tempfile::tempdir().unwrap();
         let bin = home.path().join("faux");
-        let ambient = tempfile::tempdir().unwrap();
-        let _ambient = AmbientKiroHomeGuard::set(ambient.path());
         write_fake_cli(
             &bin,
             r#"
@@ -745,7 +792,7 @@ printf '%s' "$HOME" > "$HOME/home"
         // shell assigns itself a default `PATH` when it starts without one, so
         // a `#!/bin/sh` probe reports that synthesized default rather than
         // `<unset>` even though `env_clear` did remove the variable. What the
-        // admission actually promises — and what this asserts — is that the
+        // admission actually promises, and what this asserts, is that the
         // *ambient* value did not reach the child.
         let observed = std::fs::read_to_string(home.path().join("path")).unwrap();
         let ambient = std::env::var("PATH").unwrap_or_default();
@@ -771,44 +818,11 @@ printf '%s' "$HOME" > "$HOME/home"
     #[cfg(unix)]
     #[test]
     fn env_shebang_interpreter_is_resolved_before_ambient_path_is_cleared() {
-        use std::os::unix::fs::PermissionsExt;
-
-        struct PathGuard {
-            previous: Option<std::ffi::OsString>,
-            _lock: std::sync::MutexGuard<'static, ()>,
-        }
-
-        impl PathGuard {
-            fn set(path: &std::ffi::OsStr) -> Self {
-                let lock = crate::config::lock_user_data_dir_test_env();
-                let previous = std::env::var_os("PATH");
-                // SAFETY: the shared profile-discovery lock serializes this
-                // process-global test environment mutation.
-                unsafe { std::env::set_var("PATH", path) };
-                Self {
-                    previous,
-                    _lock: lock,
-                }
-            }
-        }
-
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: see `PathGuard::set`.
-                unsafe {
-                    match self.previous.take() {
-                        Some(previous) => std::env::set_var("PATH", previous),
-                        None => std::env::remove_var("PATH"),
-                    }
-                }
-            }
-        }
-
         let home = tempfile::tempdir().unwrap();
         let node_dir = tempfile::tempdir().unwrap();
         let attacker_dir = tempfile::tempdir().unwrap();
         let node = node_dir.path().join("node");
-        std::fs::write(
+        write_executable_script(
             &node,
             r#"#!/bin/sh
 printf '%s' "$*" > "$HOME/node-args"
@@ -817,28 +831,19 @@ exit 0
 "#,
         )
         .unwrap();
-        let mut node_permissions = std::fs::metadata(&node).unwrap().permissions();
-        node_permissions.set_mode(0o755);
-        std::fs::set_permissions(&node, node_permissions).unwrap();
 
         let attacker = attacker_dir.path().join("attacker");
-        std::fs::write(
+        write_executable_script(
             &attacker,
             "#!/bin/sh\nprintf '%s' invoked > \"$HOME/attacker-ran\"\n",
         )
         .unwrap();
-        let mut attacker_permissions = std::fs::metadata(&attacker).unwrap().permissions();
-        attacker_permissions.set_mode(0o755);
-        std::fs::set_permissions(&attacker, attacker_permissions).unwrap();
 
-        let launcher = home.path().join("kiro-cli");
-        std::fs::write(&launcher, "#!/usr/bin/env node\n").unwrap();
-        let mut launcher_permissions = std::fs::metadata(&launcher).unwrap().permissions();
-        launcher_permissions.set_mode(0o755);
-        std::fs::set_permissions(&launcher, launcher_permissions).unwrap();
+        let launcher = home.path().join("host-cli");
+        write_executable_script(&launcher, "#!/usr/bin/env node\n").unwrap();
 
         let path = std::env::join_paths([node_dir.path(), attacker_dir.path()]).unwrap();
-        let _path = PathGuard::set(&path);
+        let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["mcp", "add"], home.path())
             .expect("env-shebang launchers must run after interpreter admission");
 
@@ -855,7 +860,7 @@ exit 0
         );
         // As above, `<unset>` is not observable through a `#!/bin/sh` probe:
         // the shell synthesizes a default `PATH` when it inherits none. The
-        // guarantee under test is that neither ambient entry survived — not
+        // guarantee under test is that neither ambient entry survived, not
         // the attacker directory, and not even the directory the interpreter
         // itself was resolved from, because the parent resolves it once and
         // passes an absolute path rather than letting the child re-resolve.
@@ -873,43 +878,12 @@ exit 0
     #[cfg(unix)]
     #[test]
     fn env_shebang_interpreter_preserves_multicall_symlink_name() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        struct PathGuard {
-            previous: Option<std::ffi::OsString>,
-            _lock: std::sync::MutexGuard<'static, ()>,
-        }
-
-        impl PathGuard {
-            fn set(path: &std::ffi::OsStr) -> Self {
-                let lock = crate::config::lock_user_data_dir_test_env();
-                let previous = std::env::var_os("PATH");
-                // SAFETY: the shared profile-discovery lock serializes this
-                // process-global test environment mutation.
-                unsafe { std::env::set_var("PATH", path) };
-                Self {
-                    previous,
-                    _lock: lock,
-                }
-            }
-        }
-
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: see `PathGuard::set`.
-                unsafe {
-                    match self.previous.take() {
-                        Some(previous) => std::env::set_var("PATH", previous),
-                        None => std::env::remove_var("PATH"),
-                    }
-                }
-            }
-        }
+        use std::os::unix::fs::symlink;
 
         let home = tempfile::tempdir().unwrap();
         let bin_dir = tempfile::tempdir().unwrap();
         let shim = bin_dir.path().join("volta-shim");
-        std::fs::write(
+        write_executable_script(
             &shim,
             r#"#!/bin/sh
 if [ "$(basename "$0")" != node ]; then
@@ -920,19 +894,13 @@ printf '%s' "$*" > "$HOME/node-args"
 "#,
         )
         .unwrap();
-        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim, permissions).unwrap();
         symlink(&shim, bin_dir.path().join("node")).unwrap();
 
         let launcher = home.path().join("codex");
-        std::fs::write(&launcher, "#!/usr/bin/env node\n").unwrap();
-        let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&launcher, permissions).unwrap();
+        write_executable_script(&launcher, "#!/usr/bin/env node\n").unwrap();
 
         let path = std::env::join_paths([bin_dir.path()]).unwrap();
-        let _path = PathGuard::set(&path);
+        let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["plugin", "add"], home.path())
             .expect("the admitted multicall interpreter must launch");
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { WorkGraphReadV1Schema } from '../../contracts/index.ts';
+import { WorkGraphReadV1Schema } from '../../contracts/generated.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
+import { workTaskView } from '../../test/workTaskViewFixture.ts';
 import { absentChannel, channelGap, type WorkChannelGap } from './workChannel.ts';
 import { workGraphReading } from './workGraphModel.ts';
 import {
@@ -17,7 +18,7 @@ import type { WorkTaskView } from './workProductView.ts';
  *
  * The assertions that matter most are the negative ones. Every projection here
  * is missing at least one channel the projections ask it to encode, and the danger is
- * not that a gap renders badly — it is that a gap quietly acquires a value.
+ * not that a gap renders badly, it is that a gap quietly acquires a value.
  * So each reading is checked to report its absent channels as absent, and the
  * causal readings are checked to keep "both finished, order unread" separate
  * from "consistent", which is the one collapse that would turn an unknown into
@@ -25,19 +26,7 @@ import type { WorkTaskView } from './workProductView.ts';
  */
 
 function projection(overrides: Partial<WorkTaskView> = {}): WorkTaskView {
-  return {
-    accepted_proposal: null,
-    acceptance_evidence_required: false,
-    dependencies: [],
-    execution_admitted: false,
-    history_len: 1,
-    relation_replan: null,
-    task_accepted: false,
-    task_id: 'task',
-    title: 'Task',
-    version: 1,
-    ...overrides,
-  };
+  return workTaskView(overrides);
 }
 
 function runtimeGraph(
@@ -185,7 +174,7 @@ describe('the attempt weave', () => {
   });
 
   /** A retry is a repeated crossing of the same landing, and the count is the
-   * only thing that says so — there is no second timestamp to separate them. */
+   * only thing that says so, there is no second timestamp to separate them. */
   it('counts a repeated crossing of one landing as a retry', () => {
     const reading = workWeaveReading(
       [projection({ task_id: 'a' })],
@@ -354,7 +343,7 @@ describe('the workload aggregation', () => {
 describe('the absent channels', () => {
   /** The two absences no mounted read closes. Effort, concurrency and churn
    * left this list when `operation.work.views` put
-   * `WorkProductProjectionBundleV1` on the wire — their gaps are now the graph
+   * `WorkProductProjectionBundleV1` on the wire, their gaps are now the graph
    * READ's state, proved in `workGraphModel.test.ts`, not a schema absence. */
   const gaps: readonly WorkChannelGap[] = ['wall_clock', 'observed_order'];
 
@@ -378,7 +367,7 @@ describe('the absent channels', () => {
  * The seam where the execution record meets the weave.
  *
  * The weave keeps its own reading of the snapshot whatever the attempt list
- * says — threads and landings are the snapshot's incidence — and the four
+ * says, threads and landings are the snapshot's incidence, and the four
  * attempt-derived channels resolve independently. What is asserted here is that
  * the resolution is honest in both directions: a channel goes live only when a
  * page proved it, and when no page arrived the channel names the state the read
@@ -484,10 +473,10 @@ describe('the attempt channels bound onto the weave', () => {
  * The graph channels bound onto the four projections.
  *
  * Every graph read here is built by the shared wire fixture and parsed through
- * `WorkGraphReadV1Schema` — the same schema `callWork` parses the wire with —
+ * `WorkGraphReadV1Schema`, the same schema `callWork` parses the wire with,
  * so these bindings and the DOM tests cannot drift into two ideas of the
  * contract. The separations under proof: declared-and-empty from absent,
- * withheld from zero, and the one fill-in the mount must never cause — causal
+ * withheld from zero, and the one fill-in the mount must never cause, causal
  * candidates acquiring an observed order.
  */
 describe('the graph channels bound onto the projections', () => {
@@ -498,7 +487,7 @@ describe('the graph channels bound onto the projections', () => {
     });
   }
 
-  it('weights the critical path with the authority’s own chain and effort', () => {
+  it('weights the critical path with the authority\'s own chain and effort', () => {
     const reading = workDagReading(
       [projection({ task_id: 'a' })],
       graphOf({
@@ -526,8 +515,8 @@ describe('the graph channels bound onto the projections', () => {
   });
 
   /** The 09:34 causal-binding constraint, as a test. Candidates are DECLARED
-   * data: an empty set is somebody answering "none", and the observed order —
-   * the different question — must stay the stated absence it always was. */
+   * data: an empty set is somebody answering "none", and the observed order,
+   * the different question, must stay the stated absence it always was. */
   it('keeps declared causal candidates apart from any observed order', () => {
     const declared = workCausalReading(
       [projection({ task_id: 'b', dependencies: ['a'] })],

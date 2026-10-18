@@ -1,7 +1,7 @@
 //! Canonical observation-capture seeding for dashboard integration fixtures.
 //!
 //! The daemon session-temporal projection discovers sessions exclusively from
-//! `session_temporal_observation_effects`; raw `sessions`/`session_messages`
+//! `session_temporal_observation_effects`; raw `sessions`/`lcm_raw_messages`
 //! upserts never reach it. Fixtures that want their sessions readable through
 //! the daemon LCM/explorer authorities must therefore seed messages through
 //! the same durable-observation persist/project route production ingest uses,
@@ -19,9 +19,10 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -128,15 +129,14 @@ fn build_observation(seed: &DashboardSessionMessageSeedV1<'_>) -> Result<Durable
     .map_err(|error| fixture_error("durable observation", error))
 }
 
-/// Persists one canonical message observation and projects it into the
-/// session-temporal observation effects the refresh scheduler discovers from.
-pub async fn seed_session_message_observation_for_test(
-    project_database: &RegisteredGlobalDb,
-    seed: DashboardSessionMessageSeedV1<'_>,
-) -> Result<()> {
-    let observation = build_observation(&seed)?;
+/// Match the host admission projector's bounded transaction window.
+const FIXTURE_BATCH_ITEMS: usize = 32;
+
+fn anchored_observation_write(
+    seed: &DashboardSessionMessageSeedV1<'_>,
+) -> Result<AnchoredObservationWrite> {
+    let observation = build_observation(seed)?;
     let identity = observation.identity();
-    let observation_id = observation.observation_id().clone();
     let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
         observation.scope().clone(),
@@ -171,46 +171,100 @@ pub async fn seed_session_message_observation_for_test(
         tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
     )
     .map_err(|error| fixture_error("resolution authorization", error))?;
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection.clone(),
         UtcMicros(1),
         authorization,
     )
     .map_err(|error| fixture_error("retrieval anchor", error))?;
+    AnchoredObservationWrite::new(write, anchor, projection)
+        .map_err(|error| fixture_error("anchored write", error))
+}
+
+/// Persists and projects a fixture observation corpus through the production
+/// batch persist/project authorities.
+pub async fn seed_session_message_observations_for_test(
+    project_database: &RegisteredGlobalDb,
+    seeds: &[DashboardSessionMessageSeedV1<'_>],
+) -> Result<()> {
     let store = project_database.observation_store();
-    store
-        .persist_observation(
-            AnchoredObservationWrite::new(write, anchor, projection)
-                .map_err(|error| fixture_error("anchored write", error))?,
-        )
-        .await
-        .map_err(|error| fixture_error("persist observation", error))?;
-    store
-        .project_observation(&observation_id)
-        .await
-        .map_err(|error| fixture_error("project observation", error))?;
+    for chunk in seeds.chunks(FIXTURE_BATCH_ITEMS) {
+        let writes = chunk
+            .iter()
+            .map(anchored_observation_write)
+            .collect::<Result<Vec<_>>>()?;
+        let count = writes.len();
+        if count == 0 {
+            continue;
+        }
+        let outcomes = store
+            .persist_observations(writes)
+            .await
+            .map_err(|error| fixture_error("persist observation page", error))?;
+        if outcomes.len() != count {
+            return Err(fixture_error(
+                "persist observation page",
+                format!("expected {count} outcomes, got {}", outcomes.len()),
+            ));
+        }
+        let projected = store
+            .project_queued_observations(count)
+            .await
+            .map_err(|error| fixture_error("project observation page", error))?
+            .ok_or_else(|| {
+                fixture_error(
+                    "project observation page",
+                    "registered batched projector is unavailable",
+                )
+            })?;
+        if projected.items.len() != count {
+            return Err(fixture_error(
+                "project observation page",
+                format!(
+                    "expected {count} projected items, got {}",
+                    projected.items.len()
+                ),
+            ));
+        }
+        if projected.has_more {
+            return Err(fixture_error(
+                "project observation page",
+                "fixture page must fully project before the next page",
+            ));
+        }
+    }
     Ok(())
 }
 
 /// Materializes the pending session-temporal refresh so the seeded
 /// observations become readable through the daemon retrieval authority, then
 /// re-applies the session relation projection for the newly-active
-/// generation — the step the daemon's LCM effects loop performs after every
+/// generation, the step the daemon's LCM effects loop performs after every
 /// production refresh, without which summary lineage reads go relation-blind.
 pub async fn materialize_session_temporal_refresh_for_test(
     project_database: &RegisteredGlobalDb,
     session_id: &str,
 ) -> Result<()> {
-    let session_id =
-        SessionId::new(session_id).map_err(|error| fixture_error("session id", error))?;
-    tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(project_database)
-        .materialize_pending_session_refresh_for_test(&session_id)
+    materialize_session_temporal_refreshes_for_test(project_database, &[session_id]).await
+}
+
+/// Retains one discovery cursor while materializing a fixture corpus.
+pub async fn materialize_session_temporal_refreshes_for_test(
+    project_database: &RegisteredGlobalDb,
+    session_ids: &[&str],
+) -> Result<()> {
+    let session_ids = session_ids
+        .iter()
+        .map(|id| SessionId::new(*id).map_err(|error| fixture_error("session id", error)))
+        .collect::<Result<Vec<_>>>()?;
+    tracedecay_session_temporal_store::SessionTemporalStore::new(project_database)
+        .materialize_pending_session_refreshes_for_test(&session_ids)
         .await
         .map_err(|error| fixture_error("materialize session refresh", error))?;
-    project_database
-        .apply_active_session_relation_projection(
-            &session_id,
+    SessionTemporalAccess::new(project_database)
+        .apply_active_session_relation_projections_for_test(
+            &session_ids,
             std::sync::Arc::new(DashboardFixtureGraphCancellation),
         )
         .await

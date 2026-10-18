@@ -1,19 +1,25 @@
-use tracedecay_domain::canonical_text::sha256_hex;
-
 use super::candidate_output::{
-    CandidateWorkloadV1, compute_corpus_digest_from_embedded_bytes, validate_workload_for_tuning,
+    CandidateWorkloadV1, compute_workload_digest, validate_need_provenance_against_embedded_corpus,
+    validate_workload_for_tuning,
 };
 use super::evaluate::SearchEvalError;
 
-const WORKLOAD_PATH: &str =
-    "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
-const WORKLOAD_SHA256: &str = "7ce90140511ab52ff00057a8c3c6c65f9db7a87fc713e13bc45a9a9a946b41cb";
+const WORKLOAD_PATH: &str = "tests/fixtures/search_quality/query-lexical-graph-workload-v1.json";
+/// Canonical identity of the packaged workload inputs.
+///
+/// This is [`compute_workload_digest`]: schema, queries, corpus, profile, and
+/// execution contract. It deliberately excludes `expected_query_fallback_digests`.
+/// Those receipts observe ranking; folding them into this pin made every
+/// receipt edit, including a generation-only reseal, rewrite the workload
+/// identity as well.
+pub const WORKLOAD_SHA256: &str =
+    "sha256:b40c4c470dc2afae55debd2930d39f9f5d56494afd8a010672fb53bceb0295ec";
 
 const FILES: &[(&str, &[u8])] = &[
     (
         WORKLOAD_PATH,
         include_bytes!(
-            "../../assets/runtime-root/tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
+            "../../assets/runtime-root/tests/fixtures/search_quality/query-lexical-graph-workload-v1.json"
         ),
     ),
     (
@@ -71,9 +77,21 @@ const FILES: &[(&str, &[u8])] = &[
         ),
     ),
     (
+        "tests/fixtures/context_eval_project/src/auth/session.rs",
+        include_bytes!(
+            "../../assets/runtime-root/tests/fixtures/context_eval_project/src/auth/session.rs"
+        ),
+    ),
+    (
         "tests/fixtures/context_eval_project/src/storage/config_store.rs",
         include_bytes!(
             "../../assets/runtime-root/tests/fixtures/context_eval_project/src/storage/config_store.rs"
+        ),
+    ),
+    (
+        "tests/fixtures/context_eval_project/src/net/retry.rs",
+        include_bytes!(
+            "../../assets/runtime-root/tests/fixtures/context_eval_project/src/net/retry.rs"
         ),
     ),
     (
@@ -90,35 +108,26 @@ const FILES: &[(&str, &[u8])] = &[
             "../../assets/runtime-root/tests/fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture"
         ),
     ),
-    (
-        "tests/fixtures/search_quality/incremental/time-after.rs",
-        include_bytes!(
-            "../../assets/runtime-root/tests/fixtures/search_quality/incremental/time-after.rs"
-        ),
-    ),
 ];
 
 pub fn packaged_evaluator_files() -> &'static [(&'static str, &'static [u8])] {
     FILES
 }
 
+#[tracing::instrument(name = "search_eval.packaged.load_workload", level = "trace", skip_all)]
 pub fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
-    let observed_workload_digest = sha256_hex(FILES[0].1);
+    let workload = serde_json::from_slice::<CandidateWorkloadV1>(FILES[0].1).map_err(|error| {
+        SearchEvalError::Contract(format!("parse packaged evaluator workload: {error}"))
+    })?;
+    let observed_workload_digest = compute_workload_digest(&workload).map_err(|error| {
+        SearchEvalError::Contract(format!("hash packaged evaluator workload: {error}"))
+    })?;
     if observed_workload_digest != WORKLOAD_SHA256 {
         return Err(SearchEvalError::Contract(format!(
             "packaged evaluator workload digest mismatch: expected {WORKLOAD_SHA256}, observed {observed_workload_digest}"
         )));
     }
-    let workload = serde_json::from_slice::<CandidateWorkloadV1>(FILES[0].1).map_err(|error| {
-        SearchEvalError::Contract(format!("parse packaged evaluator workload: {error}"))
-    })?;
     validate_workload_for_tuning(&workload)?;
+    validate_need_provenance_against_embedded_corpus(&workload, FILES)?;
     Ok(workload)
-}
-
-/// Derive the corpus binding from the bytes embedded in this package. This is
-/// deliberately separate from evaluator materialization: qualification loading
-/// must not create a temporary evaluator root merely to establish corpus identity.
-pub fn current_corpus_digest(workload: &CandidateWorkloadV1) -> Result<String, SearchEvalError> {
-    Ok(compute_corpus_digest_from_embedded_bytes(workload, FILES)?)
 }

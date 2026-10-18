@@ -1,18 +1,16 @@
 //! AWS Kiro agent integration.
 //!
-//! Global MCP registration is driven through Kiro's own registry CLI
-//! (`kiro-cli mcp add` / `kiro-cli mcp remove`), which owns
-//! `~/.kiro/settings/mcp.json`. TraceDecay does not merge that file itself: the
-//! host owns the registry, and emulating its writes is exactly what the
-//! host-capability doctrine forbids. The binary is therefore a hard
-//! requirement for the global lifecycle, with no config-editing fallback.
+//! Kiro documents its MCP registry as plain JSON files, user-level
+//! `~/.kiro/settings/mcp.json` and workspace-level `.kiro/settings/mcp.json`
+//! (<https://kiro.dev/docs/cli/mcp/configuration/>), and hot-reloads them on
+//! save. TraceDecay edits those files directly through the shared
+//! byte-preserving JSON editor and never runs `kiro-cli`: its `mcp`
+//! subcommands refuse to run until the operator signs in, which would make
+//! TraceDecay's lifecycle depend on a Kiro account.
 //!
-//! The rest of the integration has no CLI equivalent and stays
-//! TraceDecay-written: global tracedecay steering
-//! (`~/.kiro/steering/tracedecay.md`), a tracedecay-managed Kiro agent
-//! (`~/.kiro/agents/tracedecay.json`) selected as the default when doing so
-//! does not overwrite a user's existing default-agent choice, and the
-//! workspace-local `.kiro/settings/mcp.json`.
+//! The canonical global integration is MCP-only and does not create global
+//! steering, a managed agent, or a default-agent selection. Workspace-local
+//! registration also writes steering and a managed agent.
 //!
 //! User-owned Kiro agents remain user-managed. If `~/.kiro/agents/tracedecay.json`
 //! already exists and is not the file tracedecay writes, install and uninstall
@@ -20,31 +18,31 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
-use crate::errors::{Result, TraceDecayError};
 use tracedecay_automation_runtime::automation::skill_targets::{
-    SkillInstallTarget, install_managed_skills, profile_root_for_agent_home,
+    SkillInstallTarget, install_managed_skills,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
+use super::serve_args::ServeArgs;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpUninstallPolicy, UpdatePluginOutcome, backup_config_file, config_backup_path,
     install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay, safe_write_json_file,
     uninstall_mcp_server_entry,
 };
 
 pub struct KiroIntegration;
 
-const PROMPT_MARKER: &str = "## TraceDecay: mandatory tool routing";
-/// Heading an older tracedecay version wrote for the same steering block. An
-/// existing install carries this marker (with the same [`PROMPT_END_MARKER`]),
-/// so install/uninstall/doctor must recognize it too — otherwise a reinstall
-/// appends the new block and strands the old one (duplicate steering), and
-/// uninstall never removes it.
-const PROMPT_MARKER_LEGACY: &str = "## Prefer tracedecay MCP tools";
-const PROMPT_END_MARKER: &str = "<!-- tracedecay:kiro:end -->";
+/// Ownership sentinels of the tracedecay steering block, so wording can change
+/// without another marker migration.
+const STEERING_SENTINELS: super::prompt_rules::OwnedBlockSentinels =
+    super::prompt_rules::OwnedBlockSentinels {
+        start: "<!-- tracedecay:kiro:start -->",
+        end: "<!-- tracedecay:kiro:end -->",
+    };
 const KIRO_AGENT_NAME: &str = "tracedecay";
 const OWNED_AGENT_DESCRIPTION: &str =
     "Default Kiro agent with tracedecay MCP tools and code-research guardrails.";
@@ -53,27 +51,8 @@ const KIRO_ALLOWED_BUILTIN_TOOLS: &str = "@builtin";
 const KIRO_ALLOWED_TRACEDECAY_TOOLS: &str = "@tracedecay";
 const KIRO_PROMPT_HOOK: &str = "hook-kiro-prompt-submit";
 
-/// Name of Kiro's own MCP registry binary.
-const KIRO_CLI: &str = "kiro-cli";
-
-/// What the binary is required *for*, used in the typed absence error.
-const KIRO_CLI_LIFECYCLE: &str = "kiro MCP registry lifecycle";
-
-/// Name Kiro's registry selects the server by (`kiro-cli mcp add --name`,
-/// `kiro-cli mcp remove --name`) and the key it lands under in
-/// `mcpServers`. The two are the same string by Kiro's own contract, so the
-/// doctor and registration-state readers below keep reading `mcpServers`.
-const KIRO_MCP_SERVER_NAME: &str = "tracedecay";
-
-/// Arguments the tracedecay MCP server is launched with.
-///
-/// Shared by the CLI-driven global registration (one raw `--args` value per
-/// item) and the workspace-local config writer, so the two spellings of the
-/// same server cannot drift apart.
-const MCP_SERVER_ARGS: &[&str] = &["serve"];
-
 /// A hook the managed Kiro agent registers. Kiro's documented hook entry
-/// schema is `command` plus an optional `matcher` — nothing else, so no
+/// schema is `command` plus an optional `matcher`, nothing else, so no
 /// timeout or other tuning field exists to carry here.
 struct KiroManagedHook {
     event: &'static str,
@@ -87,7 +66,7 @@ struct KiroManagedHook {
 ///
 /// No `stop`/session-end hook is registered. Kiro's documentation describes a
 /// Stop trigger, so the host-event catalog carries it
-/// (`fixtures/host_events/kiro.json`, identity `stop`) — but only at
+/// (`fixtures/host_events/kiro.json`, identity `stop`), but only at
 /// `support: documented_unverified`, because tracedecay has never captured a
 /// real Kiro stop event or verified Kiro's persisted session format. Until a
 /// capture verifies it the native decoder rejects the event (see `decode_kiro`
@@ -128,30 +107,16 @@ fn managed_agent_hooks(tracedecay_bin: &str) -> serde_json::Value {
 }
 
 fn kiro_home(home: &Path) -> PathBuf {
-    // Kiro's registry CLI is invoked with an environment-cleared child and
-    // therefore resolves its profile from the admitted HOME. Do the same for
-    // every path we inspect or write here; an ambient operator KIRO_HOME must
-    // never redirect an isolated lifecycle to another profile.
+    // Every path resolves from the admitted HOME; an ambient operator
+    // KIRO_HOME must never redirect an isolated lifecycle to another profile.
     home.join(".kiro")
 }
 
-fn mcp_config_path(home: &Path) -> PathBuf {
+pub(super) fn mcp_config_path(home: &Path) -> PathBuf {
     kiro_home(home).join("settings/mcp.json")
 }
 
-fn cli_config_path(home: &Path) -> PathBuf {
-    kiro_home(home).join("settings/cli.json")
-}
-
-fn managed_agent_path(home: &Path) -> PathBuf {
-    kiro_home(home).join("agents/tracedecay.json")
-}
-
-fn steering_path(home: &Path) -> PathBuf {
-    kiro_home(home).join("steering/tracedecay.md")
-}
-
-fn managed_skill_index_path(home: &Path) -> PathBuf {
+pub(super) fn managed_skill_index_path(home: &Path) -> PathBuf {
     kiro_home(home).join("steering/tracedecay-managed-skills.md")
 }
 
@@ -160,33 +125,11 @@ fn workspace_mcp_config_path(project_path: &Path) -> PathBuf {
 }
 
 enum KiroDoctorInstallationState {
-    HostAbsent,
     TraceDecayAbsent,
     Installed,
 }
 
 fn kiro_doctor_installation_state(home: &Path) -> Result<KiroDoctorInstallationState> {
-    let host_home = kiro_home(home);
-    match std::fs::metadata(&host_home) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => {
-            return Err(TraceDecayError::Config {
-                message: format!("Kiro home {} is not a directory", host_home.display()),
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(KiroDoctorInstallationState::HostAbsent);
-        }
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "failed to inspect Kiro home {}: {error}",
-                    host_home.display()
-                ),
-            });
-        }
-    }
-
     let mcp_path = mcp_config_path(home);
     match std::fs::metadata(&mcp_path) {
         Ok(metadata) if metadata.is_file() => {}
@@ -245,7 +188,7 @@ fn kiro_doctor_installation_state(home: &Path) -> Result<KiroDoctorInstallationS
             ),
         });
     };
-    if servers.contains_key(KIRO_MCP_SERVER_NAME) {
+    if servers.contains_key("tracedecay") {
         Ok(KiroDoctorInstallationState::Installed)
     } else {
         Ok(KiroDoctorInstallationState::TraceDecayAbsent)
@@ -265,18 +208,10 @@ impl AgentIntegration for KiroIntegration {
         true
     }
 
-    /// Workspace-local registration still writes `.kiro/settings/mcp.json`
-    /// directly rather than driving `kiro-cli mcp add --scope workspace`.
-    /// `--scope workspace` resolves against the CLI's *working directory*, and
-    /// `host_cli::run_host_cli` admits the profile home as its working
-    /// directory. That cannot target an arbitrary `project_path` from here;
-    /// adopting it needs a project-aware host-CLI invocation first. Until then
-    /// the file write is the only way to target the requested project. The
-    /// global path above *is* CLI-driven.
-    #[hotpath::measure(label = "kiro_project_install")]
+    #[tracing::instrument(name = "kiro_project_install", level = "trace", skip_all)]
     fn activate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -293,13 +228,13 @@ impl AgentIntegration for KiroIntegration {
                 skill_index_path.as_path(),
             ],
         )?;
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin, &ctx.serve_args)?;
         install_steering_rules(&steering)?;
         install_managed_agent(
             &agent_path,
             &ctx.tracedecay_bin,
             &steering,
-            &ctx.home,
+            ctx.profile.data_dir(),
             Some(&skill_index_path),
         )?;
         Ok(())
@@ -307,8 +242,9 @@ impl AgentIntegration for KiroIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(vec![
@@ -319,12 +255,10 @@ impl AgentIntegration for KiroIntegration {
         ])
     }
 
-    /// Mirrors `activate_project_host_component_registration`: the workspace
-    /// scope is file-written for the same working-directory reason.
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
-        ctx: &InstallContext,
+        _components: &[super::host_bundle::HostComponentV1],
+        _ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
         let mcp_path = workspace_mcp_config_path(project_path);
@@ -342,45 +276,18 @@ impl AgentIntegration for KiroIntegration {
         )?;
         uninstall_mcp_server(&mcp_path)?;
         remove_steering_rules(&steering)?;
-        remove_kiro_managed_skill_index(&ctx.home, &skill_index_path)?;
+        remove_kiro_managed_skill_index(&skill_index_path)?;
         uninstall_managed_agent(&agent_path);
         Ok(())
     }
 
-    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        // The managed agent file is the only generated artifact (it bakes the
-        // tracedecay binary path into its hook commands). The shared MCP
-        // config, CLI default-agent setting, and steering rules are config —
-        // they stay untouched. A user-managed agent file is never rewritten.
-        let agent_path = managed_agent_path(&ctx.home);
-        if !is_owned_agent_file(&agent_path) {
-            return Ok(UpdatePluginOutcome::NotInstalled);
-        }
-        let skill_index_path = managed_skill_index_path(&ctx.home);
-        install_managed_agent(
-            &agent_path,
-            &ctx.tracedecay_bin,
-            &steering_path(&ctx.home),
-            &ctx.home,
-            Some(&skill_index_path),
-        )?;
-        Ok(UpdatePluginOutcome::Refreshed(vec![agent_path]))
-    }
-
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mKiro integration\x1b[0m");
+        dc.section("Kiro integration");
         let host_home = kiro_home(&ctx.home);
         match kiro_doctor_installation_state(&ctx.home) {
-            Ok(KiroDoctorInstallationState::HostAbsent) => {
-                dc.warn(&format!(
-                    "Kiro is not detected at {} — run `tracedecay install --agent kiro` if you use Kiro",
-                    host_home.display()
-                ));
-                return;
-            }
             Ok(KiroDoctorInstallationState::TraceDecayAbsent) => {
                 dc.warn(&format!(
-                    "Kiro is detected at {}, but TraceDecay is not installed — run `tracedecay install --agent kiro` if you use Kiro",
+                    "Kiro is detected at {}, but TraceDecay is not installed, run `tracedecay install --agent kiro` if you use Kiro",
                     host_home.display()
                 ));
                 return;
@@ -398,99 +305,98 @@ impl AgentIntegration for KiroIntegration {
             &ctx.project_path,
             global_server.as_ref(),
         );
-        doctor_check_steering(dc, &ctx.home);
-        doctor_check_managed_agent(dc, &ctx.home);
-        doctor_check_default_agent(dc, &ctx.home);
-    }
-
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            ctx.profile.data_dir(),
+            &[
+                managed_skill_index_path(&ctx.home),
+                ctx.project_path
+                    .join(".kiro/steering/tracedecay-managed-skills.md"),
+            ],
+            SkillInstallTarget::Kiro,
+        );
     }
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::{
-            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
-        };
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
 
-        if component != HostBundleComponentV1::ContextMcp {
+        if component != HostComponentV1::ContextMcp {
             return State::Missing;
         }
-        kiro_context_mcp_registration_state(&ctx.home)
+        kiro_context_mcp_registration_state(&ctx.home, &ctx.catalog_profiles.serve_args(self.id()))
     }
 
     fn is_detected(&self, home: &Path) -> bool {
         kiro_home(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(mcp_config_path(home))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        vec![
-            mcp_config_path(home),
-            cli_config_path(home),
-            managed_agent_path(home),
-            steering_path(home),
-            managed_skill_index_path(home),
-        ]
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
+        vec![mcp_config_path(home), managed_skill_index_path(home)]
     }
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
-            let path = mcp_config_path(home);
-            vec![path.clone(), config_backup_path(&path)]
+        if components == [super::host_bundle::HostComponentV1::ContextMcp] {
+            vec![mcp_config_path(home)]
         } else {
-            self.host_registration_paths(home)
+            self.host_registration_paths(home, profile)
         }
     }
 
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
-            let kiro_cli = require_kiro_cli()?;
-            kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
+            install_mcp_server(
+                &mcp_config_path(&ctx.home),
+                &ctx.tracedecay_bin,
+                &ctx.serve_args,
+            )?;
         }
         Ok(())
     }
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
-            let kiro_cli = require_kiro_cli()?;
-            kiro_mcp_remove_with(&kiro_cli, &ctx.home)?;
+        if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
+            uninstall_mcp_server(&mcp_config_path(&ctx.home))?;
         }
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         mcp_registry_has_tracedecay(&mcp_config_path(home))
     }
 
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
-        if !self.has_tracedecay(home) {
+        let profile_root = profile.data_dir();
+        if !self.has_tracedecay(home, profile) {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
+            &crate::host_io(),
             profile_root,
             SkillInstallTarget::Kiro,
             &managed_skill_index_path(home),
@@ -508,6 +414,7 @@ impl AgentIntegration for KiroIntegration {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
+            &crate::host_io(),
             profile_root,
             SkillInstallTarget::Kiro,
             &skill_index_path,
@@ -523,83 +430,18 @@ fn mcp_registry_has_tracedecay(path: &Path) -> bool {
     mcp_config_has_tracedecay(path, "mcpServers", load_json_file)
 }
 
-// ---------------------------------------------------------------------------
 // Install helpers
-// ---------------------------------------------------------------------------
 
-fn mcp_server_entry(tracedecay_bin: &str) -> serde_json::Value {
+fn mcp_server_entry(tracedecay_bin: &str, serve_args: &ServeArgs) -> serde_json::Value {
     json!({
         "command": tracedecay_bin,
-        "args": MCP_SERVER_ARGS,
+        "args": serve_args.json(&[]),
         "disabled": false
     })
 }
 
-/// Resolve Kiro's own registry CLI, or fail with the typed requirement.
-///
-/// Kiro owns `~/.kiro/settings/mcp.json` through `kiro-cli mcp`. Its CLI is
-/// therefore a hard requirement for the global lifecycle, not a preference
-/// with a config-editing fallback: emulating those writes is precisely what
-/// the host-capability doctrine forbids, and a half-emulated registration is
-/// indistinguishable on disk from a corrupt one.
-fn require_kiro_cli() -> Result<PathBuf> {
-    super::host_cli::require_host_cli(KIRO_CLI, KIRO_CLI_LIFECYCLE)
-}
-
-/// Drive Kiro's own registry to add the tracedecay MCP server globally.
-///
-/// Split from the trait method so tests can supply a fake CLI and an isolated
-/// `HOME` without mutating the process environment.
-#[hotpath::measure(label = "kiro_mcp_install")]
-fn kiro_mcp_add_with(kiro_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
-    // Make the global scope explicit. Kiro's CLI also supports a workspace
-    // registry, but this lifecycle owns only the profile-global entry; the
-    // workspace (`--scope workspace`) form is deliberately not driven here —
-    // see `activate_project_host_component_registration`.
-    let mut args = vec![
-        "mcp",
-        "add",
-        "--name",
-        KIRO_MCP_SERVER_NAME,
-        "--command",
-        tracedecay_bin,
-    ];
-    for server_arg in MCP_SERVER_ARGS {
-        args.extend(["--args", server_arg]);
-    }
-    args.extend(["--scope", "global", "--force"]);
-    run_mcp_registry_step(kiro_cli, &args, home)
-}
-
-/// Drive Kiro's own registry to drop the tracedecay MCP server globally.
-fn kiro_mcp_remove_with(kiro_cli: &Path, home: &Path) -> Result<()> {
-    run_mcp_registry_step(
-        kiro_cli,
-        &[
-            "mcp",
-            "remove",
-            "--name",
-            KIRO_MCP_SERVER_NAME,
-            "--scope",
-            "global",
-        ],
-        home,
-    )
-}
-
-fn run_mcp_registry_step(kiro_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
-    super::host_cli::run_mcp_registry_step(
-        kiro_cli,
-        args,
-        home,
-        &mcp_config_path(home),
-        KIRO_MCP_SERVER_NAME,
-        "Kiro CLI",
-    )
-}
-
 /// Render a path as a `file://` resource URI for Kiro's agent config. Reuses
-/// the LSP client's encoder, which additionally handles Windows drive paths and
+/// the LSP client's encoder, which also handles Windows drive paths and
 /// UNC (`//server/share`) prefixes; POSIX paths encode identically to before.
 fn file_resource_uri(path: &Path) -> String {
     tracedecay_lsp::analyzer::client::file_uri_from_path_text(&path.to_string_lossy())
@@ -625,12 +467,12 @@ fn managed_agent_config(
     })
 }
 
-/// Register MCP server in a workspace-local `.kiro/settings/mcp.json`.
-fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
+/// Register the MCP server in a user- or workspace-level Kiro `mcp.json`.
+fn install_mcp_server(path: &Path, tracedecay_bin: &str, serve_args: &ServeArgs) -> Result<()> {
     install_mcp_server_entry(
         path,
         "mcpServers",
-        mcp_server_entry(tracedecay_bin),
+        mcp_server_entry(tracedecay_bin, serve_args),
         "Kiro",
         JsonConfigDialect::Json,
     )
@@ -641,12 +483,12 @@ fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
 /// Returns true when tracedecay owns the resulting agent file. A pre-existing
 /// user-managed `tracedecay.json` is preserved and returns false so the default
 /// agent selector is not pointed at a file whose policy tracedecay does not own.
-#[hotpath::measure(label = "kiro_agent_install")]
+#[tracing::instrument(name = "kiro_agent_install", level = "trace", skip_all)]
 fn install_managed_agent(
     path: &Path,
     tracedecay_bin: &str,
     steering_path: &Path,
-    profile_home: &Path,
+    profile_root: &Path,
     managed_skill_index_path: Option<&Path>,
 ) -> Result<bool> {
     if path.exists() && !is_owned_agent_file(path) {
@@ -658,12 +500,11 @@ fn install_managed_agent(
     }
 
     let managed_skill_index_path = match managed_skill_index_path {
-        Some(index_path) => install_kiro_managed_skill_index(profile_home, index_path)?,
+        Some(index_path) => install_kiro_managed_skill_index(profile_root, index_path)?,
         None => None,
     };
-    let backup = backup_config_file(path)?;
     let config = managed_agent_config(tracedecay_bin, steering_path, managed_skill_index_path);
-    safe_write_json_file(path, &config, backup.as_deref())?;
+    safe_write_json_file(path, &config)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Wrote tracedecay Kiro agent to {}",
         path.display()
@@ -672,159 +513,78 @@ fn install_managed_agent(
 }
 
 fn install_kiro_managed_skill_index<'a>(
-    home: &Path,
+    profile_root: &Path,
     index_path: &'a Path,
 ) -> Result<Option<&'a Path>> {
-    let profile_root = profile_root_for_agent_home(home);
-    super::retired_memory_digest::remove_state(&profile_root)?;
-    super::retired_memory_digest::remove_prompt_block(index_path)?;
-    let summary = install_managed_skills(&profile_root, SkillInstallTarget::Kiro, index_path)?;
+    let summary = install_managed_skills(
+        &crate::host_io(),
+        profile_root,
+        SkillInstallTarget::Kiro,
+        index_path,
+    )?;
     Ok((summary.exported_count > 0).then_some(index_path))
 }
 
-fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) -> Result<()> {
-    super::remove_managed_skill_prompt_index(home, index_path, SkillInstallTarget::Kiro)
+fn remove_kiro_managed_skill_index(index_path: &Path) -> Result<()> {
+    super::remove_managed_skill_prompt_index(index_path, SkillInstallTarget::Kiro)
 }
 
-fn is_builtin_default_agent(agent: &str) -> bool {
-    matches!(agent, "kiro_default" | "default")
-}
-
-/// Add or refresh tracedecay's global steering resource for default Kiro
-/// sessions. When the marker is present but the block content is stale (an
-/// older tracedecay version wrote it), the block is replaced in place: a
-/// marker-to-end-marker splice when the owned end marker exists, otherwise
-/// the generic marker-to-next-heading strip plus a fresh append.
+/// Add or refresh tracedecay's steering resource. Every owned block converges
+/// onto exactly one copy of the current block in place; operator text around
+/// it is preserved.
 fn install_steering_rules(path: &Path) -> Result<()> {
-    let block = prompt_rules_text();
+    let block = steering_block_text();
     super::prompt_rules::reconcile_prompt_rules_with(path, |existing| {
-        if existing.contains(&block) {
-            return Ok(super::prompt_rules::PromptRulesEdit::Unchanged);
-        }
-        if contains_prompt_marker(existing) {
-            if let Some(range) = tracedecay_prompt_block_range(existing) {
-                let mut new_contents = String::with_capacity(existing.len() + block.len());
-                new_contents.push_str(&existing[..range.start]);
-                new_contents.push_str(&block);
-                new_contents.push_str(&existing[range.end..]);
-                return Ok(super::prompt_rules::PromptRulesEdit::Refreshed(
-                    new_contents,
-                ));
-            }
-            let marker = if existing.contains(PROMPT_MARKER) {
-                PROMPT_MARKER
-            } else {
-                PROMPT_MARKER_LEGACY
-            };
-            let stripped =
-                super::prompt_rules::strip_heading_block(existing, marker).ok_or_else(|| {
-                    TraceDecayError::Config {
-                        message: format!(
-                            "could not isolate tracedecay steering block in {}",
-                            path.display()
-                        ),
-                    }
-                })?;
-            return Ok(super::prompt_rules::PromptRulesEdit::Refreshed(
-                super::prompt_rules::refreshed_contents(&stripped, &block),
-            ));
-        }
-        let separator = if existing.trim().is_empty() {
-            ""
-        } else {
-            "\n\n"
-        };
-        Ok(super::prompt_rules::PromptRulesEdit::Added(format!(
-            "{existing}{separator}{block}\n"
-        )))
+        let ranges = owned_steering_ranges(existing);
+        Ok(super::prompt_rules::converge_owned_block(
+            existing, &ranges, &block,
+        ))
     })
 }
 
-fn prompt_rules_text() -> String {
-    format!(
-        "{}\n\n{}",
-        prompt_rules_text_without_end_marker(),
-        PROMPT_END_MARKER
-    )
+fn steering_block_text() -> String {
+    STEERING_SENTINELS.render(&steering_guidance_text())
 }
 
-fn prompt_rules_text_without_end_marker() -> String {
+fn steering_guidance_text() -> String {
     format!(
-        "## TraceDecay: mandatory tool routing\n\n\
-This project has a live TraceDecay code graph. If there is even a 1% chance a \
-tracedecay tool applies, you MUST use it BEFORE Kiro's file reads, codebase scan, \
-or `delegate`. This is a mandate, not a preference — you cannot rationalize your \
-way out of it.\n\n\
-| The moment you are in | Do this first |\n\
-|---|---|\n\
-| Searching for literal/regex code text | `tracedecay_grep` |\n\
-| Searching for a symbol or concept | `tracedecay_search` (names) or `tracedecay_context` (concepts) |\n\
-| About to read a source file | `tracedecay_outline` -> `tracedecay_body` -> `tracedecay_read` slices |\n\
-| \"Who calls X\" / \"what does X call\" / \"trace this\" | `tracedecay_callers` / `tracedecay_callees` |\n\
-| About to change code, wondering what breaks | `tracedecay_impact` / `tracedecay_diff_context` / `tracedecay_affected` |\n\
-| Project / storage identity question | `tracedecay_active_project` / `tracedecay_storage_status` |\n\
-| A prior decision or past conversation is referenced | `tracedecay_message_search` / `tracedecay_lcm_expand_query` |\n\n\
-| Red-flag thought | Reality |\n\
-|---|---|\n\
-| \"Grep is faster for this\" | `tracedecay_grep` handles literal/regex code search; `tracedecay_search` is pre-ranked for names. |\n\
-| \"I'll just read the whole file\" | `tracedecay_outline` / `tracedecay_body` answer at a fraction of the tokens. |\n\
-| \"This is a simple lookup\" | Simple lookups are exactly what the graph is for. |\n\
-| \"I already know this codebase\" | The graph is fresher than your memory. Check it. |\n\n\
-SUBAGENT-STOP: if you were handed the exact files, symbols, or excerpts to act on, \
-do NOT re-run discovery — act on what you were given. Explicit user instructions and \
-project rules (CLAUDE.md / AGENTS.md) win over this mandate; the mandate wins over the \
-default \"just grep it\" habit. Never fight a direct instruction to satisfy it.\n\n\
-Do not use Kiro's `delegate` tool for codebase exploration, architecture mapping, \
-call graph work, symbol lookup, or other code research until tracedecay MCP tools \
-have been tried. Delegation is still appropriate for long-running execution work \
-such as builds, tests, generated reports, or independent implementation tasks.\n\n\
-For durable project/user facts, use `tracedecay_fact_store_add` to persist them and \
-`tracedecay_fact_store_search` to recall or deduplicate them; use \
-`tracedecay_fact_feedback` and read-only `tracedecay_memory_status` over ad-hoc notes. Do not \
-store secrets, credentials, or unnecessary PII in persistent facts. Use \
-`memory_scope=user` for durable preferences or projectless chat and \
-`memory_scope=project` for active-codebase facts.\n\n\
+        "## TraceDecay code intelligence\n\n\
+This project has a TraceDecay code graph exposed as `tracedecay_*` MCP tools. Use it \
+when the task is about code structure, callers, impact, or where something lives; use \
+Kiro's native file reads and edits for known files, ordinary local edits, and \
+non-indexed material.\n\n\
+Use `tracedecay_context` for concepts, `tracedecay_search` for symbols, `tracedecay_grep` \
+for literal or regex text, and `tracedecay_callers`, `tracedecay_callees`, or \
+`tracedecay_impact` for relationships. Use `tracedecay_active_project` or \
+`tracedecay_storage_status` for identity and `tracedecay_message_search` when prior \
+conversation context matters.\n\n\
+Read the freshness and coverage line that opens each result; an empty result does not \
+prove absence. Preserve exact project/worktree selectors and opaque continuation or \
+mutation identities. Explicit user instructions and project rules win over this guidance.\n\n\
+For durable project/user facts, `tracedecay_fact_store_add` persists and \
+`tracedecay_fact_store_search` recalls or deduplicates them; prefer `tracedecay_fact_feedback` \
+and read-only `tracedecay_memory_status` over ad-hoc notes. Use `memory_scope=user` for \
+durable preferences or projectless chat and `memory_scope=project` for active-codebase \
+facts. Do not store secrets, credentials, or unnecessary PII in persistent facts.\n\n\
 {cli_fallback}\n\n\
-If you discover a gap where an extractor, schema, or tracedecay tool could answer a \
-question natively, propose opening an issue at \
-https://github.com/ScriptedAlchemy/tracedecay. Remind the user to strip sensitive \
-or proprietary code from the bug description before submitting.",
+A preview or read result does not authorize mutation. Once the user has authorized a \
+change, continue through implementation and relevant verification; pause only for a \
+missing decision or an external or destructive action outside that authority.",
         cli_fallback = super::CLI_FALLBACK_PROMPT_RULES,
     )
 }
 
-// ---------------------------------------------------------------------------
 // Uninstall helpers
-// ---------------------------------------------------------------------------
 
 fn uninstall_mcp_server(path: &Path) -> Result<()> {
-    uninstall_mcp_server_entry(
-        path,
-        "mcpServers",
-        JsonConfigDialect::Json,
-        McpUninstallPolicy {
-            prune_empty_root: true,
-            remove_empty_file: true,
-        },
-    )
+    uninstall_mcp_server_entry(path, "mcpServers", JsonConfigDialect::Json)
 }
 
+/// Remove every tracedecay-owned steering block.
 fn remove_steering_rules(path: &Path) -> Result<()> {
     super::prompt_rules::remove_prompt_rules_with(path, |contents| {
-        if !contains_prompt_marker(contents) {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        }
-        let Some(range) = tracedecay_prompt_block_range(contents) else {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        };
-        let new_contents = super::prompt_rules::splice_out(contents, range.start, range.end);
-        if new_contents.is_empty() {
-            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
-        } else {
-            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
-                "{new_contents}\n"
-            )))
-        }
+        let ranges = owned_steering_ranges(contents);
+        Ok(super::prompt_rules::remove_owned_blocks(contents, &ranges))
     })
 }
 
@@ -862,8 +622,9 @@ fn is_owned_agent_config(config: &serde_json::Value) -> bool {
 
 fn kiro_context_mcp_registration_state(
     home: &Path,
-) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-    use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+    serve_args: &ServeArgs,
+) -> super::host_bundle::HostBundleRegistrationStateV1 {
+    use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
     let Ok(mcp_bytes) = std::fs::read(mcp_config_path(home)) else {
         return State::Missing;
@@ -881,41 +642,23 @@ fn kiro_context_mcp_registration_state(
         .get("command")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|command| !command.is_empty())
-        && server
-            .get("args")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+        && serve_args.matches_json(server.get("args"), &[])
         && server.get("disabled").and_then(serde_json::Value::as_bool) != Some(true);
-    if !mcp_current {
-        return State::Repairable;
+    if mcp_current {
+        State::Current
+    } else {
+        State::Repairable
     }
-    State::Current
 }
 
-/// True when the steering file carries either the current or the legacy
-/// tracedecay block marker.
-fn contains_prompt_marker(contents: &str) -> bool {
-    contents.contains(PROMPT_MARKER) || contents.contains(PROMPT_MARKER_LEGACY)
+/// Every tracedecay-owned steering block in document order.
+fn owned_steering_ranges(contents: &str) -> Vec<Range<usize>> {
+    super::prompt_rules::owned_block_ranges(contents, |contents, from| {
+        STEERING_SENTINELS.block_range(contents, from)
+    })
 }
 
-/// Byte range of the tracedecay steering block, starting at whichever marker
-/// (current or legacy) appears first and running to the owned end marker. The
-/// legacy block carries the same [`PROMPT_END_MARKER`], so a legacy install is
-/// spliced/removed in place exactly like a current one.
-fn tracedecay_prompt_block_range(contents: &str) -> Option<Range<usize>> {
-    let start = [PROMPT_MARKER, PROMPT_MARKER_LEGACY]
-        .iter()
-        .filter_map(|marker| contents.find(marker))
-        .min()?;
-    let marker = PROMPT_END_MARKER;
-    let end_marker = contents[start..].find(marker)?;
-    let end = start + end_marker + marker.len();
-    Some(start..end)
-}
-
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_mcp_config(dc: &mut DoctorCounters, home: &Path) -> Option<serde_json::Value> {
     let path = mcp_config_path(home);
@@ -1040,204 +783,6 @@ fn doctor_check_workspace_mcp_override(
             "Workspace Kiro MCP tracedecay override in {} is compatible",
             path.display()
         ));
-    }
-}
-
-fn doctor_check_steering(dc: &mut DoctorCounters, home: &Path) {
-    let path = steering_path(home);
-    if !path.exists() {
-        dc.warn("~/.kiro/steering/tracedecay.md does not exist");
-        return;
-    }
-    let contents = std::fs::read_to_string(&path).unwrap_or_default();
-    if !contains_prompt_marker(&contents) {
-        dc.fail(
-            "Kiro global tracedecay.md missing tracedecay rules -- run `tracedecay install --agent kiro`",
-        );
-    } else if tracedecay_prompt_block_range(&contents).is_none() {
-        dc.fail(
-            "Kiro global tracedecay.md contains tracedecay rules without an owned end marker -- remove the stale block and run `tracedecay install --agent kiro`",
-        );
-    } else {
-        dc.pass("Kiro global tracedecay.md contains tracedecay rules");
-    }
-}
-
-fn doctor_check_managed_agent(dc: &mut DoctorCounters, home: &Path) {
-    let path = managed_agent_path(home);
-    if !path.exists() {
-        dc.fail(&format!(
-            "Kiro tracedecay agent NOT installed at {} -- run `tracedecay install --agent kiro`",
-            path.display()
-        ));
-        return;
-    }
-
-    let config = load_json_file(&path);
-    if !is_owned_agent_config(&config) {
-        dc.warn(&format!(
-            "{} is user-managed; tracedecay hooks were not installed there",
-            path.display()
-        ));
-        return;
-    }
-
-    dc.pass(&format!("Kiro tracedecay agent: {}", path.display()));
-
-    if config
-        .get("includeMcpJson")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
-        dc.pass("Kiro tracedecay agent includes global/workspace MCP config");
-    } else {
-        dc.fail("Kiro tracedecay agent missing includeMcpJson=true -- run `tracedecay install --agent kiro`");
-    }
-
-    doctor_check_agent_tools(dc, &config);
-    doctor_check_agent_allowed_tools(dc, &config);
-
-    let expected_resource = file_resource_uri(&steering_path(home));
-    if config
-        .get("resources")
-        .and_then(|v| v.as_array())
-        .is_some_and(|arr| {
-            arr.iter()
-                .any(|v| v.as_str() == Some(expected_resource.as_str()))
-        })
-    {
-        dc.pass("Kiro tracedecay agent loads global steering as a resource");
-    } else {
-        dc.fail(
-            "Kiro tracedecay agent missing global steering resource -- run `tracedecay install --agent kiro`",
-        );
-    }
-
-    for hook in KIRO_MANAGED_HOOKS {
-        doctor_check_agent_hook(dc, &config, hook.event, hook.matcher, hook.subcommand);
-    }
-}
-
-fn doctor_check_agent_tools(dc: &mut DoctorCounters, config: &serde_json::Value) {
-    if json_array_contains_str(config, "tools", KIRO_AGENT_ALL_TOOLS) {
-        dc.pass("Kiro tracedecay agent exposes all configured tools");
-    } else {
-        dc.warn(
-            "Kiro tracedecay agent tools list is not permissive -- run `tracedecay install --agent kiro`",
-        );
-    }
-}
-
-fn doctor_check_agent_allowed_tools(dc: &mut DoctorCounters, config: &serde_json::Value) {
-    let required = [KIRO_ALLOWED_BUILTIN_TOOLS, KIRO_ALLOWED_TRACEDECAY_TOOLS];
-    let missing: Vec<&str> = required
-        .iter()
-        .copied()
-        .filter(|tool| !json_array_contains_str(config, "allowedTools", tool))
-        .collect();
-
-    if missing.is_empty() {
-        dc.pass("Kiro tracedecay agent pre-approves built-in and tracedecay tools");
-    } else {
-        dc.warn(
-            "Kiro tracedecay agent allowedTools is not permissive -- run `tracedecay install --agent kiro`",
-        );
-        for tool in missing {
-            dc.info(&format!("missing allowedTools entry: {tool}"));
-        }
-    }
-}
-
-fn json_array_contains_str(config: &serde_json::Value, field: &str, expected: &str) -> bool {
-    config
-        .get(field)
-        .and_then(|v| v.as_array())
-        .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(expected)))
-}
-
-fn doctor_check_agent_hook(
-    dc: &mut DoctorCounters,
-    config: &serde_json::Value,
-    event: &str,
-    matcher: Option<&str>,
-    subcommand: &str,
-) {
-    let hook = find_agent_hook(config, event, matcher, subcommand);
-    let Some(hook) = hook else {
-        let matcher_label = matcher.map_or(String::new(), |m| format!(" ({m})"));
-        dc.fail(&format!(
-            "Kiro {event}{matcher_label} hook missing {subcommand} -- run `tracedecay install --agent kiro`"
-        ));
-        return;
-    };
-
-    // Kiro's hook schema is `command` + optional `matcher` only. A stray
-    // `timeout_ms` is residue from an older tracedecay version that wrote an
-    // undocumented field; a reinstall rewrites the entry to the exact schema.
-    if hook.get("timeout_ms").is_some() {
-        dc.warn(&format!(
-            "Kiro {event} hook carries an undocumented timeout_ms field from an older \
-             tracedecay version -- run `tracedecay install --agent kiro` to rewrite it"
-        ));
-        return;
-    }
-    let matcher_label = matcher.map_or(String::new(), |m| format!(" ({m})"));
-    dc.pass(&format!("Kiro {event}{matcher_label} hook installed"));
-}
-
-fn find_agent_hook<'a>(
-    config: &'a serde_json::Value,
-    event: &str,
-    matcher: Option<&str>,
-    subcommand: &str,
-) -> Option<&'a serde_json::Value> {
-    config
-        .get("hooks")
-        .and_then(|v| v.get(event))
-        .and_then(serde_json::Value::as_array)?
-        .iter()
-        .find(|hook| {
-            let matcher_ok = match matcher {
-                Some(expected) => {
-                    hook.get("matcher").and_then(serde_json::Value::as_str) == Some(expected)
-                }
-                None => hook.get("matcher").is_none(),
-            };
-            matcher_ok
-                && hook
-                    .get("command")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|cmd| cmd.split_whitespace().any(|part| part == subcommand))
-        })
-}
-
-fn doctor_check_default_agent(dc: &mut DoctorCounters, home: &Path) {
-    let path = cli_config_path(home);
-    if !path.exists() {
-        dc.fail(&format!(
-            "{} not found -- run `tracedecay install --agent kiro`",
-            path.display()
-        ));
-        return;
-    }
-
-    let config = load_json_file(&path);
-    let default_agent = config
-        .get("chat")
-        .and_then(|v| v.get("defaultAgent"))
-        .and_then(serde_json::Value::as_str);
-
-    match default_agent {
-        Some(KIRO_AGENT_NAME) => dc.pass("Kiro default agent is tracedecay"),
-        Some(agent) if is_builtin_default_agent(agent) => dc.warn(
-            "Kiro default agent is still the built-in default -- run `tracedecay install --agent kiro`",
-        ),
-        Some(agent) => dc.warn(&format!(
-            "Kiro default agent is \"{agent}\"; tracedecay hooks run only when the tracedecay agent is selected"
-        )),
-        None => dc.warn(
-            "Kiro default agent is not set; tracedecay hooks run only when the tracedecay agent is selected",
-        ),
     }
 }
 

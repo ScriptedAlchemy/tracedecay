@@ -6,7 +6,7 @@ import type {
   WorkGraphVersionEntryV1,
   WorkRuntimeAttemptProjectionV1,
   WorkRuntimeProjectionV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkResult } from './workApi.ts';
 import type { WorkChannel } from './workChannel.ts';
@@ -29,11 +29,10 @@ import type { WorkChannel } from './workChannel.ts';
  * What `operation.work.views` said, or the reason it said nothing.
  *
  * Shaped like `WorkAttemptReading` on purpose: a read is pending, refused, or
- * answered, and there is no fourth case and no empty default. The one
- * difference is that this read has no typed `absent` — the daemon conceals
- * absence and denial behind one 404, which `workRefusal` reports as `denied`,
- * so an absence arrives here as a refusal wearing that state rather than as an
- * answer.
+ * answered, and there is no fourth case and no empty default. An authorized
+ * selection with no graph yet is an answer, the daemon's `absent` mode, and
+ * arrives as a read whose page carries no entry; only a real denial arrives as
+ * a refusal.
  */
 export type WorkGraphReading =
   | { readonly state: 'pending' }
@@ -48,23 +47,23 @@ export type WorkGraphReading =
  * a timeline of them plus the coverage that timeline was read under. Every
  * channel below is a property of ONE graph version, so a timeline read is
  * reduced to its newest entry and the rest of the timeline is reported as
- * `entries` and `coverage` rather than folded into a channel — an average over
+ * `entries` and `coverage` rather than folded into a channel, an average over
  * versions would be a number no version holds.
  *
- * `entry` is null exactly when a timeline came back with no entries in it. That
- * is a SUCCESS: a complete coverage of zero returned entries means the read
- * reached the authority and the authority had no version in the window. The
- * channels are absent under it, but absent with `complete_zero_findings`, never
- * with a failure state.
+ * `entry` is null exactly when a timeline came back with no entries in it, or
+ * the read answered `absent` because no graph exists yet. Both are SUCCESSES:
+ * the read reached the authority and the authority had no version to serve.
+ * The channels are absent under them, but absent with `complete_zero_findings`,
+ * never with a failure state.
  */
-export interface WorkGraphPage {
+interface WorkGraphPage {
   readonly mode: WorkGraphReadV1['mode'];
   readonly scope: AuthorizedWorkProductScopeV1;
   readonly entry: WorkGraphVersionEntryV1 | null;
   /** How many versions the read carried: one for the two snapshot modes, the
    * length of the timeline for the other two. */
   readonly entries: number;
-  /** The timeline's own coverage, or null for a snapshot mode — which returns
+  /** The timeline's own coverage, or null for a snapshot mode, which returns
    * one version by construction and has no window to be partial over. */
   readonly coverage: WorkGraphTimelineCoverageV1 | null;
 }
@@ -85,8 +84,8 @@ function newestEntry(
 /**
  * The graph read as a reading.
  *
- * `undefined` is the request still being in flight — or never issued, because a
- * disabled query has no data — which is distinct from every answer the daemon
+ * `undefined` is the request still being in flight, or never issued, because a
+ * disabled query has no data, which is distinct from every answer the daemon
  * can give.
  */
 export function workGraphReading(
@@ -120,6 +119,17 @@ export function workGraphReading(
           entry: newestEntry(read.timeline.entries),
           entries: read.timeline.entries.length,
           coverage: read.timeline.coverage,
+        },
+      };
+    case 'absent':
+      return {
+        state: 'read',
+        page: {
+          mode: read.mode,
+          scope: read.authorized_scope,
+          entry: null,
+          entries: 0,
+          coverage: null,
         },
       };
     default: {
@@ -180,7 +190,7 @@ export function terminalWorkAttempt(state: WorkAttemptStateV1): boolean {
  * contract carries these measurements, so reporting them as
  * `unsupported_schema` would tell a reader the build cannot do something it
  * can. Each case is the state the read actually returned, in that state's own
- * words — including the one that is not a failure at all.
+ * words, including the one that is not a failure at all.
  */
 export function graphChannelGap(
   reading: WorkGraphReading,
@@ -201,12 +211,15 @@ export function graphChannelGap(
       };
     case 'read':
       // The honest success with nothing in it. The read reached the authority
-      // and the authority held no version in the window, which is a fact about
-      // the window rather than a failure of the read.
+      // and the authority held no version to serve, which is a fact about the
+      // graph or the window rather than a failure of the read.
       return {
         available: false,
         state: 'complete_zero_findings',
-        detail: `the work-product graph read returned no graph version at all, so there is no version for ${measure} to be a property of — this is the authority reporting an empty window, not a read that failed`,
+        detail:
+          reading.page.mode === 'absent'
+            ? `no Work graph exists yet, so there is no version for ${measure} to be a property of; create a task to start one`
+            : `the work-product graph read returned no graph version at all, so there is no version for ${measure} to be a property of, this is the authority reporting an empty window, not a read that failed`,
       };
     default: {
       const unhandled: never = reading;
@@ -250,12 +263,12 @@ export interface WorkEffortMassReading {
    * so the authority returns them only under COMPLETE runtime coverage and
    * returns nothing at all otherwise (`work_product_projection.rs` gates all
    * three on `runtime_complete`). Absent here therefore means the split could
-   * not be taken — never that nothing is ready.
+   * not be taken, never that nothing is ready.
    */
   readonly split: WorkChannel<WorkEffortSplitReading>;
 }
 
-export interface WorkEffortSplitReading {
+interface WorkEffortSplitReading {
   readonly ready: number;
   readonly running: number;
   readonly blocked: number;
@@ -276,7 +289,7 @@ export interface WorkTimelineInstantReading {
   readonly deadline: number | null;
 }
 
-export interface WorkChurnEntry {
+interface WorkChurnEntry {
   readonly taskId: string;
   readonly updatedAt: number;
   /** Microseconds between the recorded update and the instant this read was
@@ -302,7 +315,7 @@ export interface WorkChurnReading {
   readonly ahead: number;
 }
 
-export interface WorkRuntimeAttemptReading {
+interface WorkRuntimeAttemptReading {
   readonly attemptId: string;
   readonly taskId: string;
   readonly runId: string;
@@ -413,7 +426,7 @@ export function runtimeReading(runtime: WorkRuntimeProjectionV1): WorkChannel<Wo
       available: false,
       state: 'unavailable',
       detail:
-        'the runtime projection could not be read at all, so the attempts under this graph version are unmeasured — this is not a reading of zero attempts, and nothing about what is running follows from it',
+        'the runtime projection could not be read at all, so the attempts under this graph version are unmeasured, this is not a reading of zero attempts, and nothing about what is running follows from it',
     };
   }
   return {

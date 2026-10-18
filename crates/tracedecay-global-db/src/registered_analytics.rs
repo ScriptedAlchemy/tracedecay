@@ -1,18 +1,39 @@
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::future::Future;
+use std::pin::Pin;
 
-use tracedecay_runtime_core::db::engine::Value;
+use tracedecay_runtime_core::db::engine::{Value, opt_text};
 
 use super::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
     AnalyticsToolCounts, ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
-    RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, analytics_scope_query,
-    row_to_analytics_event,
+    ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
+    ObservabilityRollupRetentionReceiptV1, PreparedObservabilityEmissionV1, RegisteredGlobalDb,
+    RegisteredGlobalDbWriteTransaction, analytics_scope_query,
+    observability_rollup::expire_observability_rollups, row_to_analytics_event,
 };
 
 const OBSERVABILITY_DETAIL_RETENTION_SECONDS: i64 = 30 * 86_400;
 const OBSERVABILITY_ROLLUP_RETENTION_SECONDS: i64 = 395 * 86_400;
 const MAX_OBSERVABILITY_OUTBOX_JSON_BYTES: usize = 1_048_576;
 const OBSERVABILITY_RETENTION_ROWS_PER_CLASS: usize = 512;
+pub(crate) const ANALYTICS_INSERT_ROWS_PER_STATEMENT: usize = 500;
+// The provider is a literal so `idx_observability_event_idempotency` stays
+// usable; the planner does not match a bound value against an index predicate.
+pub(crate) const OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL: &str =
+    "SELECT id, provider, project_id, session_id, timestamp, event_kind,
+            hook_name, tool_name, tool_category, skill_name, hint_category,
+            hint_id, outcome, metadata_json
+     FROM analytics_events
+     WHERE provider = 'tracedecay-observability' AND project_id = ?1 AND hint_id = ?2
+     LIMIT 1";
+
+#[derive(Clone, Copy)]
+enum AnalyticsAppendKind {
+    General,
+    Observability,
+}
 const ACTIVE_DIRTY_ROLLUP_SOURCE_EXCLUSION_SQL: &str = r#"
 NOT (
     analytics_events.event_kind IN (
@@ -41,13 +62,18 @@ pub struct ObservabilityRetentionReceiptV1 {
     pub expired_detail: u64,
     pub expired_rollup: u64,
     pub expired_settled_outbox: u64,
+    pub expired_rollups: ObservabilityRollupRetentionReceiptV1,
     /// A bounded page remains and maintenance should use its retry cadence.
     pub has_more: bool,
 }
 
 impl RegisteredGlobalDb {
     /// Read an existing exact owner claim without allocating a new delivery.
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.claim")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.claim",
+        level = "trace",
+        skip_all
+    )]
     pub async fn observability_emission_claim(
         &self,
         project_id: &str,
@@ -107,21 +133,61 @@ impl RegisteredGlobalDb {
         }))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.append")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append",
+        level = "trace",
+        skip_all
+    )]
     pub async fn append_analytics_event(
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
-        crate::hotpath_observe::record_transaction_rows(1);
-        let transaction = self
-            .begin_write_transaction()
+        let writer = self
+            .runtime_database()
+            .writer_connection("append analytics event")
             .await
-            .map_err(|error| format!("failed to begin analytics event transaction: {error}"))?;
-        let id = append_analytics_event_in_existing_tx(&transaction, event).await?;
-        transaction
-            .commit()
+            .map_err(|error| format!("failed to acquire analytics event writer: {error}"))?;
+        let mut rows = writer
+            .execute_returning(
+                "INSERT INTO analytics_events
+                     (provider, project_id, session_id, timestamp, event_kind, hook_name,
+                      tool_name, tool_category, skill_name, hint_category, hint_id, outcome,
+                      metadata_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) RETURNING id",
+                tracedecay_runtime_core::db::engine::params![
+                    event.provider.as_str(),
+                    event.project_id.as_str(),
+                    event.session_id.as_deref(),
+                    event.timestamp,
+                    event.event_kind.as_str(),
+                    event.hook_name.as_deref(),
+                    event.tool_name.as_deref(),
+                    event.tool_category.as_deref(),
+                    event.skill_name.as_deref(),
+                    event.hint_category.as_deref(),
+                    event.hint_id.as_deref(),
+                    event.outcome.as_deref(),
+                    event.metadata_json.as_deref(),
+                ],
+            )
             .await
-            .map_err(|error| format!("failed to commit analytics event transaction: {error}"))?;
+            .map_err(|error| format!("failed to append analytics event: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read appended analytics event id: {error}"))?
+            .ok_or_else(|| "analytics append returned no id".to_owned())?;
+        let id = row
+            .get::<i64>(0)
+            .map_err(|error| format!("failed to decode appended analytics event id: {error}"))?;
+        if rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to finish appended analytics event id: {error}"))?
+            .is_some()
+        {
+            return Err("analytics append returned more than one id".to_owned());
+        }
         Ok(id)
     }
 
@@ -130,29 +196,120 @@ impl RegisteredGlobalDb {
     /// The registered writer serializes the lookup and insert; the partial
     /// unique index remains the cross-process backstop. Reusing a key with
     /// changed canonical input is an explicit conflict.
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.registered.analytics.append_observability"
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append_observability",
+        level = "trace",
+        skip_all
     )]
     pub async fn append_observability_event(
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
-        crate::hotpath_observe::record_transaction_rows(1);
+        match self
+            .append_observability_events(std::slice::from_ref(event))
+            .await?
+            .as_slice()
+        {
+            [id] => Ok(*id),
+            _ => Err("observability append returned an invalid id count".to_owned()),
+        }
+    }
+
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append_observability_batch",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn append_observability_events(
+        &self,
+        events: &[AnalyticsEventInsert],
+    ) -> Result<Vec<i64>, String> {
+        self.append_events(events, AnalyticsAppendKind::Observability)
+            .await
+    }
+
+    async fn append_events(
+        &self,
+        events: &[AnalyticsEventInsert],
+        kind: AnalyticsAppendKind,
+    ) -> Result<Vec<i64>, String> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
         let transaction = self
             .begin_write_transaction()
             .await
-            .map_err(|error| format!("failed to begin observability transaction: {error}"))?;
-        let id = append_observability_event_in_existing_tx(&transaction, event).await?;
+            .map_err(|error| format!("failed to begin analytics append transaction: {error}"))?;
+        let ids = match kind {
+            AnalyticsAppendKind::General => {
+                append_analytics_events_in_existing_tx(&transaction, events).await?
+            }
+            AnalyticsAppendKind::Observability => {
+                append_observability_events_in_existing_tx(&transaction, events).await?
+            }
+        };
         transaction
             .commit()
             .await
-            .map_err(|error| format!("failed to commit observability event: {error}"))?;
-        Ok(id)
+            .map_err(|error| format!("failed to commit analytics append transaction: {error}"))?;
+        Ok(ids)
+    }
+
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.read_observability",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn read_observability_event(
+        &self,
+        project_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<AnalyticsEventRecord>, String> {
+        let opened: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_domain::errors::Result<
+                            tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(self.read_snapshot());
+        let snapshot = opened
+            .await
+            .map_err(|error| format!("failed to begin observability event snapshot: {error}"))?;
+        let queried: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_runtime_core::db::engine::Result<
+                            tracedecay_runtime_core::db::engine::Rows,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(snapshot.query(
+            OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL,
+            tracedecay_runtime_core::db::engine::params![project_id, idempotency_key],
+        ));
+        let mut rows = queried
+            .await
+            .map_err(|error| format!("failed to read observability event: {error}"))?;
+        rows.next()
+            .await
+            .map_err(|error| format!("failed to decode observability event: {error}"))?
+            .map(|row| {
+                row_to_analytics_event(&row)
+                    .ok_or_else(|| "failed to decode observability event row".to_owned())
+            })
+            .transpose()
     }
 
     /// Claim one stable owner fact without replacing a prior delivery.
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.claim")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.claim",
+        level = "trace",
+        skip_all
+    )]
     pub async fn claim_observability_emission(
         &self,
         project_id: &str,
@@ -215,7 +372,11 @@ impl RegisteredGlobalDb {
     }
 
     /// CAS a pending delivery to its delayed-coverage representation.
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.persist.delay")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.persist.delay",
+        level = "trace",
+        skip_all
+    )]
     pub async fn delay_observability_emission(
         &self,
         project_id: &str,
@@ -286,7 +447,11 @@ impl RegisteredGlobalDb {
     }
 
     /// Append the exact delivery and settle its outbox row in one transaction.
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.settle")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.settle",
+        level = "trace",
+        skip_all
+    )]
     pub async fn settle_observability_emission(
         &self,
         project_id: &str,
@@ -319,7 +484,9 @@ impl RegisteredGlobalDb {
         {
             return Err("observability outbox settlement conflict".to_owned());
         }
-        let id = append_observability_event_in_existing_tx(&transaction, event).await?;
+        let id = append_observability_event_in_existing_tx(&transaction, event)
+            .await
+            .map_err(|error| error.to_string())?;
         if let Some(settled_id) = stored.analytics_event_id {
             if settled_id != id {
                 return Err("observability outbox receipt conflict".to_owned());
@@ -349,10 +516,55 @@ impl RegisteredGlobalDb {
         Ok(id)
     }
 
+    /// Claim and settle one run of worker-owned owner facts in a single write.
+    ///
+    /// The outbox lookup runs inside the transaction. `prepare_new` is invoked
+    /// only for a fact that has no outbox row, so a replay allocates no
+    /// producer sequence. Invalid or conflicting facts are rejected individually;
+    /// storage failures roll the whole transaction back. Each step reads or
+    /// writes the whole run in one statement, so the writer round trips stay
+    /// constant per run rather than growing with the facts in it.
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.claim_settle",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn claim_and_settle_observability_emissions<F>(
+        &self,
+        emissions: &[ObservabilityOwnerEmissionWriteV1],
+        prepare_new: F,
+    ) -> Result<Vec<ObservabilityOwnerEmissionWriteOutcomeV1>, String>
+    where
+        F: FnMut(usize) -> Result<PreparedObservabilityEmissionV1, String>,
+    {
+        if emissions.is_empty() {
+            return Ok(Vec::new());
+        }
+        if emissions.len() > 1_024 {
+            return Err("invalid observability outbox batch".to_owned());
+        }
+        let transaction = self.begin_write_transaction().await.map_err(|error| {
+            format!("failed to begin observability outbox claim and settlement: {error}")
+        })?;
+        let outcomes =
+            match claim_and_settle_owner_facts_in_tx(&transaction, emissions, prepare_new).await {
+                Ok(outcomes) => outcomes,
+                Err(error) => return Err(rollback_observability_write(transaction, error).await),
+            };
+        transaction.commit().await.map_err(|error| {
+            format!("failed to commit observability outbox claim and settlement: {error}")
+        })?;
+        Ok(outcomes)
+    }
+
     /// Reads only producer-stamped [`tracedecay_domain::ObservabilityEnvelopeV1`]
     /// carriers. This table is not a generic delivery outbox: recovery decodes
     /// every pending row through that exact envelope before settlement.
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.pending")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.pending",
+        level = "trace",
+        skip_all
+    )]
     pub async fn pending_observability_emissions(
         &self,
         project_id: &str,
@@ -403,9 +615,14 @@ impl RegisteredGlobalDb {
         Ok(pending)
     }
 
-    /// Expires only optional observability detail and rollup rows through the
-    /// registered writer. Product receipts retain their owning lifecycle.
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.prune")]
+    /// Expires only optional observability detail and rollup rows, plus the
+    /// daily rollup generations past the same horizon, through the registered
+    /// writer. Product receipts retain their owning lifecycle.
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.prune",
+        level = "trace",
+        skip_all
+    )]
     pub async fn prune_observability_events(
         &self,
         now_seconds: i64,
@@ -417,6 +634,10 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| format!("failed to begin observability retention: {error}"))?;
+        // Expired dirty-day markers go first: they protect their source rows
+        // from the analytics pass below, and a day past the horizon has no
+        // generation left to rebuild.
+        let expired_rollups = expire_observability_rollups(&transaction, now_seconds).await?;
         let (expired_detail_outbox, expired_detail) = prune_observability_retention_class(
             &transaction,
             now_seconds.saturating_sub(OBSERVABILITY_DETAIL_RETENTION_SECONDS),
@@ -443,34 +664,22 @@ impl RegisteredGlobalDb {
             expired_detail,
             expired_rollup,
             expired_settled_outbox: expired_detail_outbox.saturating_add(expired_rollup_outbox),
+            expired_rollups,
             has_more,
         })
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.append_batch")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append_batch",
+        level = "trace",
+        skip_all
+    )]
     pub async fn append_analytics_events(
         &self,
         events: &[AnalyticsEventInsert],
     ) -> Result<Vec<i64>, String> {
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
-        crate::hotpath_observe::record_transaction_rows(
-            u64::try_from(events.len()).unwrap_or(u64::MAX),
-        );
-        let transaction = self
-            .begin_write_transaction()
+        self.append_events(events, AnalyticsAppendKind::General)
             .await
-            .map_err(|error| format!("failed to begin analytics event batch: {error}"))?;
-        let mut ids = Vec::with_capacity(events.len());
-        for event in events {
-            ids.push(append_analytics_event_in_existing_tx(&transaction, event).await?);
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit analytics event batch: {error}"))?;
-        Ok(ids)
     }
 
     /// Atomically appends one imported JSONL frontier and advances its cursor.
@@ -480,7 +689,11 @@ impl RegisteredGlobalDb {
     /// is the durable cursor the caller read before parsing: the append is
     /// refused when another importer has already advanced it, so two concurrent
     /// importers can never both claim the same byte range.
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.append_cursor")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append_cursor",
+        level = "trace",
+        skip_all
+    )]
     pub async fn append_analytics_events_with_cursor(
         &self,
         events: &[AnalyticsEventInsert],
@@ -495,10 +708,7 @@ impl RegisteredGlobalDb {
         super::transcript::require_expected_offset(&transaction, cursor_path, expected_cursor)
             .await
             .map_err(|error| format!("failed to claim analytics import cursor: {error}"))?;
-        let mut ids = Vec::with_capacity(events.len());
-        for event in events {
-            ids.push(append_analytics_event_in_existing_tx(&transaction, event).await?);
-        }
+        let ids = append_analytics_events_in_existing_tx(&transaction, events).await?;
         super::transcript::set_parse_offset(&transaction, cursor_path, cursor)
             .await
             .map_err(|error| format!("failed to persist analytics import cursor: {error}"))?;
@@ -509,7 +719,11 @@ impl RegisteredGlobalDb {
         Ok(ids)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.query")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.query",
+        level = "trace",
+        skip_all
+    )]
     pub async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
@@ -585,7 +799,11 @@ impl RegisteredGlobalDb {
         Ok(events)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.count")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.count",
+        level = "trace",
+        skip_all
+    )]
     pub async fn count_analytics_events(
         &self,
         project_id: Option<&str>,
@@ -616,7 +834,11 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode analytics event count: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.tools")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.tools",
+        level = "trace",
+        skip_all
+    )]
     pub async fn query_analytics_tool_counts(
         &self,
         project_id: Option<&str>,
@@ -665,7 +887,11 @@ impl RegisteredGlobalDb {
         Ok(counts)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.hints")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.hints",
+        level = "trace",
+        skip_all
+    )]
     pub async fn query_analytics_hint_counts(
         &self,
         project_id: Option<&str>,
@@ -723,6 +949,72 @@ impl RegisteredGlobalDb {
     }
 }
 
+async fn append_analytics_events_in_existing_tx(
+    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    events: &[AnalyticsEventInsert],
+) -> Result<Vec<i64>, String> {
+    let mut ids = Vec::with_capacity(events.len());
+    for chunk in events.chunks(ANALYTICS_INSERT_ROWS_PER_STATEMENT) {
+        let mut sql = String::from(
+            "INSERT INTO analytics_events
+                 (provider, project_id, session_id, timestamp, event_kind, hook_name,
+                  tool_name, tool_category, skill_name, hint_category, hint_id, outcome,
+                  metadata_json)
+                 VALUES ",
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 13);
+        for (index, event) in chunk.iter().enumerate() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            values.extend([
+                Value::Text(event.provider.clone()),
+                Value::Text(event.project_id.clone()),
+                opt_text(event.session_id.as_deref()),
+                Value::Integer(event.timestamp),
+                Value::Text(event.event_kind.clone()),
+                opt_text(event.hook_name.as_deref()),
+                opt_text(event.tool_name.as_deref()),
+                opt_text(event.tool_category.as_deref()),
+                opt_text(event.skill_name.as_deref()),
+                opt_text(event.hint_category.as_deref()),
+                opt_text(event.hint_id.as_deref()),
+                opt_text(event.outcome.as_deref()),
+                opt_text(event.metadata_json.as_deref()),
+            ]);
+        }
+        sql.push_str(" RETURNING id");
+
+        let mut rows = transaction
+            .query(&sql, values)
+            .await
+            .map_err(|error| format!("failed to append analytics event batch: {error}"))?;
+        let mut chunk_ids = Vec::with_capacity(chunk.len());
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read appended analytics event ids: {error}"))?
+        {
+            chunk_ids.push(row.get::<i64>(0).map_err(|error| {
+                format!("failed to decode appended analytics event id: {error}")
+            })?);
+        }
+        if chunk_ids.len() != chunk.len() {
+            return Err(format!(
+                "analytics event batch returned {} ids for {} inserted rows",
+                chunk_ids.len(),
+                chunk.len()
+            ));
+        }
+        // `id` is an INTEGER PRIMARY KEY rowid alias allocated in VALUES order.
+        // RETURNING order is unspecified, so restore input order explicitly.
+        chunk_ids.sort_unstable();
+        ids.extend(chunk_ids);
+    }
+    Ok(ids)
+}
+
 async fn append_analytics_event_in_existing_tx(
     transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
     event: &AnalyticsEventInsert,
@@ -766,6 +1058,332 @@ struct StoredObservabilityOutboxRecord {
     owner_fact_json: String,
     delivery_envelope_json: String,
     analytics_event_id: Option<i64>,
+}
+
+fn validate_owner_fact_input(
+    project_id: &str,
+    owner_event_id: &str,
+    owner_fact_json: &str,
+) -> Result<(), String> {
+    if project_id.is_empty()
+        || owner_event_id.is_empty()
+        || project_id.len() > 256
+        || owner_event_id.len() > 256
+        || owner_fact_json.len() > MAX_OBSERVABILITY_OUTBOX_JSON_BYTES
+        || serde_json::from_str::<serde_json::Value>(owner_fact_json).is_err()
+    {
+        return Err("invalid observability outbox input".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_prepared_owner_emission(
+    emission: &ObservabilityOwnerEmissionWriteV1,
+    prepared: &PreparedObservabilityEmissionV1,
+) -> Result<(), String> {
+    validate_observability_event(&prepared.event)?;
+    validate_outbox_input(
+        &emission.project_id,
+        &emission.owner_event_id,
+        &emission.owner_fact_json,
+        &prepared.delivery_envelope_json,
+    )?;
+    if prepared.event.project_id != emission.project_id
+        || prepared.event.hint_id.as_deref() != Some(emission.owner_event_id.as_str())
+        || prepared.event.metadata_json.as_deref() != Some(prepared.delivery_envelope_json.as_str())
+    {
+        return Err("observability outbox delivery binding conflict".to_owned());
+    }
+    Ok(())
+}
+
+async fn claim_and_settle_owner_facts_in_tx<F>(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    emissions: &[ObservabilityOwnerEmissionWriteV1],
+    prepare_new: F,
+) -> Result<Vec<ObservabilityOwnerEmissionWriteOutcomeV1>, String>
+where
+    F: FnMut(usize) -> Result<PreparedObservabilityEmissionV1, String>,
+{
+    let mut outcomes = emissions
+        .iter()
+        .map(|emission| {
+            validate_owner_fact_input(
+                &emission.project_id,
+                &emission.owner_event_id,
+                &emission.owner_fact_json,
+            )
+            .err()
+            .map(|error| ObservabilityOwnerEmissionWriteOutcomeV1::Rejected { error })
+        })
+        .collect::<Vec<_>>();
+    let prepared =
+        prepare_unclaimed_owner_facts(transaction, emissions, &mut outcomes, prepare_new).await?;
+    settle_prepared_owner_facts(transaction, emissions, &mut outcomes, prepared).await?;
+    outcomes
+        .into_iter()
+        .map(|outcome| {
+            outcome.ok_or_else(|| "observability outbox batch left a fact unresolved".to_owned())
+        })
+        .collect()
+}
+
+/// Resolves every still-open fact against the outbox and prepares a delivery
+/// only for a fact no row owns yet.
+async fn prepare_unclaimed_owner_facts<F>(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    emissions: &[ObservabilityOwnerEmissionWriteV1],
+    outcomes: &mut [Option<ObservabilityOwnerEmissionWriteOutcomeV1>],
+    mut prepare_new: F,
+) -> Result<Vec<(usize, PreparedObservabilityEmissionV1)>, String>
+where
+    F: FnMut(usize) -> Result<PreparedObservabilityEmissionV1, String>,
+{
+    let open = emissions
+        .iter()
+        .zip(outcomes.iter())
+        .filter(|(_, outcome)| outcome.is_none())
+        .map(|(emission, _)| (emission.project_id.clone(), emission.owner_event_id.clone()));
+    // Facts claimed earlier in this run join the stored ones, so a repeated
+    // owner fact replays exactly as it would against a committed row.
+    let mut known = stored_owner_facts(transaction, open.collect()).await?;
+    let mut prepared = Vec::new();
+    for (index, emission) in emissions.iter().enumerate() {
+        if outcomes[index].is_some() {
+            continue;
+        }
+        let key = (emission.project_id.clone(), emission.owner_event_id.clone());
+        if let Some(owner_fact_json) = known.get(&key) {
+            outcomes[index] = Some(if *owner_fact_json == emission.owner_fact_json {
+                ObservabilityOwnerEmissionWriteOutcomeV1::Replayed
+            } else {
+                ObservabilityOwnerEmissionWriteOutcomeV1::Rejected {
+                    error: "observability owner fact conflict".to_owned(),
+                }
+            });
+            continue;
+        }
+        match prepare_new(index).and_then(|candidate| {
+            validate_prepared_owner_emission(emission, &candidate)?;
+            Ok(candidate)
+        }) {
+            Ok(candidate) => {
+                known.insert(key, emission.owner_fact_json.clone());
+                prepared.push((index, candidate));
+            }
+            Err(error) => {
+                outcomes[index] =
+                    Some(ObservabilityOwnerEmissionWriteOutcomeV1::Rejected { error });
+            }
+        }
+    }
+    Ok(prepared)
+}
+
+/// Adopts an exact stored event, appends the rest in one statement, and
+/// settles their outbox rows in one statement.
+async fn settle_prepared_owner_facts(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    emissions: &[ObservabilityOwnerEmissionWriteV1],
+    outcomes: &mut [Option<ObservabilityOwnerEmissionWriteOutcomeV1>],
+    prepared: Vec<(usize, PreparedObservabilityEmissionV1)>,
+) -> Result<(), String> {
+    // A prepared event is bound to its fact, so the fact's owner key is the
+    // event's idempotency key.
+    let owner_key = |index: usize| {
+        (
+            emissions[index].project_id.clone(),
+            emissions[index].owner_event_id.clone(),
+        )
+    };
+    let existing = stored_observability_events(
+        transaction,
+        prepared
+            .iter()
+            .map(|(index, _)| owner_key(*index))
+            .collect(),
+    )
+    .await?;
+    let mut settled = Vec::with_capacity(prepared.len());
+    let mut appends = Vec::new();
+    for (index, candidate) in prepared {
+        match existing.get(&owner_key(index)) {
+            Some(stored) if analytics_record_matches_insert(stored, &candidate.event) => {
+                settled.push((index, candidate.delivery_envelope_json, Some(stored.id)));
+            }
+            // Identity conflicts are detected before any mutation. Reject
+            // this independently offered fact without discarding siblings.
+            Some(_) => {
+                outcomes[index] = Some(ObservabilityOwnerEmissionWriteOutcomeV1::Rejected {
+                    error: ObservabilityAppendError::Conflict.to_string(),
+                });
+            }
+            None => {
+                appends.push(candidate.event);
+                settled.push((index, candidate.delivery_envelope_json, None));
+            }
+        }
+    }
+    let mut appended = append_analytics_events_in_existing_tx(transaction, &appends)
+        .await?
+        .into_iter();
+    let mut rows = Vec::with_capacity(settled.len());
+    for (index, delivery_envelope_json, stored_id) in settled {
+        let analytics_event_id = match stored_id {
+            Some(id) => id,
+            None => appended
+                .next()
+                .ok_or_else(|| "observability outbox batch lost an appended event id".to_owned())?,
+        };
+        rows.push((
+            &emissions[index],
+            delivery_envelope_json,
+            analytics_event_id,
+        ));
+        outcomes[index] =
+            Some(ObservabilityOwnerEmissionWriteOutcomeV1::Settled { analytics_event_id });
+    }
+    insert_settled_outbox_rows(transaction, &rows).await?;
+    Ok(())
+}
+
+/// Appends `(?, ?), ...)` for `keys` to `sql`, closing an `IN (VALUES` list.
+fn bind_key_pairs(mut sql: String, keys: Vec<(String, String)>) -> (String, Vec<Value>) {
+    let mut values = Vec::with_capacity(keys.len() * 2);
+    for (index, (first, second)) in keys.into_iter().enumerate() {
+        if index > 0 {
+            sql.push(',');
+        }
+        sql.push_str("(?, ?)");
+        values.extend([Value::Text(first), Value::Text(second)]);
+    }
+    sql.push(')');
+    (sql, values)
+}
+
+/// Stored owner facts for `keys`, by `(project_id, owner_event_id)`.
+async fn stored_owner_facts(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    keys: Vec<(String, String)>,
+) -> Result<BTreeMap<(String, String), String>, String> {
+    let mut stored = BTreeMap::new();
+    if keys.is_empty() {
+        return Ok(stored);
+    }
+    let (sql, values) = bind_key_pairs(
+        "SELECT project_id, owner_event_id, owner_fact_json
+         FROM observability_emission_outbox
+         WHERE (project_id, owner_event_id) IN (VALUES "
+            .to_owned(),
+        keys,
+    );
+    let mut rows = transaction
+        .query(&sql, values)
+        .await
+        .map_err(|error| format!("failed to read observability outbox events: {error}"))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| format!("failed to decode observability outbox event: {error}"))?
+    {
+        let column = |index: i32| {
+            row.get::<String>(index)
+                .map_err(|error| format!("failed to decode observability outbox event: {error}"))
+        };
+        stored.insert((column(0)?, column(1)?), column(2)?);
+    }
+    Ok(stored)
+}
+
+/// Stored canonical observability events for `keys`, by
+/// `(project_id, hint_id)`.
+async fn stored_observability_events(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    keys: Vec<(String, String)>,
+) -> Result<BTreeMap<(String, String), AnalyticsEventRecord>, String> {
+    let mut stored = BTreeMap::new();
+    if keys.is_empty() {
+        return Ok(stored);
+    }
+    let (sql, values) = bind_key_pairs(
+        "SELECT id, provider, project_id, session_id, timestamp, event_kind,
+                hook_name, tool_name, tool_category, skill_name, hint_category,
+                hint_id, outcome, metadata_json
+         FROM analytics_events
+         WHERE provider = 'tracedecay-observability' AND hint_id IS NOT NULL
+           AND (project_id, hint_id) IN (VALUES "
+            .to_owned(),
+        keys,
+    );
+    let mut rows = transaction
+        .query(&sql, values)
+        .await
+        .map_err(|error| format!("failed to read observability idempotency keys: {error}"))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| format!("failed to decode observability idempotency row: {error}"))?
+    {
+        let record = row_to_analytics_event(&row)
+            .ok_or_else(|| "failed to decode observability canonical input".to_owned())?;
+        let key = (
+            record.project_id.clone(),
+            record.hint_id.clone().unwrap_or_default(),
+        );
+        stored.insert(key, record);
+    }
+    Ok(stored)
+}
+
+async fn insert_settled_outbox_rows(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    rows: &[(&ObservabilityOwnerEmissionWriteV1, String, i64)],
+) -> Result<(), String> {
+    for chunk in rows.chunks(ANALYTICS_INSERT_ROWS_PER_STATEMENT) {
+        let mut sql = String::from(
+            "INSERT INTO observability_emission_outbox
+                 (project_id, owner_event_id, owner_fact_json,
+                  delivery_envelope_json, state, analytics_event_id)
+             VALUES ",
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 5);
+        for (index, (emission, delivery_envelope_json, analytics_event_id)) in
+            chunk.iter().enumerate()
+        {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?, ?, ?, ?, 'settled', ?)");
+            values.extend([
+                Value::Text(emission.project_id.clone()),
+                Value::Text(emission.owner_event_id.clone()),
+                Value::Text(emission.owner_fact_json.clone()),
+                Value::Text(delivery_envelope_json.clone()),
+                Value::Integer(*analytics_event_id),
+            ]);
+        }
+        let inserted = transaction
+            .execute(&sql, values)
+            .await
+            .map_err(|error| format!("failed to settle observability outbox events: {error}"))?;
+        if inserted != chunk.len() as u64 {
+            return Err(format!(
+                "observability outbox settlement changed {inserted} rows instead of {}",
+                chunk.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn rollback_observability_write(
+    transaction: RegisteredGlobalDbWriteTransaction<'_>,
+    error: String,
+) -> String {
+    match transaction.rollback().await {
+        Ok(()) => error,
+        Err(rollback_error) => format!("{error}; rollback failed: {rollback_error}"),
+    }
 }
 
 fn validate_outbox_input(
@@ -824,46 +1442,125 @@ async fn read_outbox_record(
     Ok(stored)
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ObservabilityAppendError {
+    #[error("observability idempotency conflict")]
+    Conflict,
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// Resolve replay and in-batch duplicates before inserting each bounded run.
+/// All runs share the caller's transaction, so a later conflict rolls back
+/// earlier appends just as the single-event path does.
+async fn append_observability_events_in_existing_tx(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    events: &[AnalyticsEventInsert],
+) -> Result<Vec<i64>, String> {
+    let mut ids = Vec::with_capacity(events.len());
+    for chunk in events.chunks(ANALYTICS_INSERT_ROWS_PER_STATEMENT) {
+        let keys = chunk
+            .iter()
+            .filter_map(|event| {
+                event
+                    .hint_id
+                    .as_ref()
+                    .map(|hint| (event.project_id.clone(), hint.clone()))
+            })
+            .collect();
+        let stored = stored_observability_events(transaction, keys).await?;
+        let mut pending = BTreeMap::<(String, String), usize>::new();
+        let mut appends = Vec::<AnalyticsEventInsert>::new();
+        let mut ordered_keys = Vec::with_capacity(chunk.len());
+        let mut resolved = BTreeMap::new();
+        for event in chunk {
+            validate_observability_event(event)?;
+            let hint = event
+                .hint_id
+                .as_ref()
+                .ok_or("invalid canonical observability event")?;
+            let key = (event.project_id.clone(), hint.clone());
+            if let Some(record) = stored.get(&key) {
+                if !analytics_record_matches_insert(record, event) {
+                    return Err(ObservabilityAppendError::Conflict.to_string());
+                }
+                resolved.insert(key.clone(), record.id);
+            } else if let Some(index) = pending.get(&key) {
+                if appends[*index] != *event {
+                    return Err(ObservabilityAppendError::Conflict.to_string());
+                }
+            } else {
+                pending.insert(key.clone(), appends.len());
+                appends.push(event.clone());
+            }
+            ordered_keys.push(key);
+        }
+        let appended = append_analytics_events_in_existing_tx(transaction, &appends).await?;
+        for (key, index) in pending {
+            let id = appended
+                .get(index)
+                .ok_or("observability batch lost an appended event id")?;
+            resolved.insert(key, *id);
+        }
+        for key in ordered_keys {
+            ids.push(
+                *resolved
+                    .get(&key)
+                    .ok_or("observability batch left an event unresolved")?,
+            );
+        }
+    }
+    Ok(ids)
+}
+
 async fn append_observability_event_in_existing_tx(
     transaction: &RegisteredGlobalDbWriteTransaction<'_>,
     event: &AnalyticsEventInsert,
-) -> Result<i64, String> {
-    if event.provider != "tracedecay-observability"
-        || event.hint_id.as_deref().is_none_or(str::is_empty)
-        || event.metadata_json.is_none()
-    {
-        return Err("invalid canonical observability event".to_string());
-    }
+) -> Result<i64, ObservabilityAppendError> {
+    validate_observability_event(event).map_err(ObservabilityAppendError::Failed)?;
     let mut rows = transaction
         .query(
-            "SELECT id, provider, project_id, session_id, timestamp, event_kind,
-                    hook_name, tool_name, tool_category, skill_name, hint_category,
-                    hint_id, outcome, metadata_json
-             FROM analytics_events
-             WHERE provider = ?1 AND project_id = ?2 AND hint_id = ?3
-             LIMIT 1",
+            OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL,
             tracedecay_runtime_core::db::engine::params![
-                event.provider.as_str(),
                 event.project_id.as_str(),
                 event.hint_id.as_deref()
             ],
         )
         .await
-        .map_err(|error| format!("failed to read observability idempotency key: {error}"))?;
-    if let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| format!("failed to decode observability idempotency row: {error}"))?
-    {
-        let stored = row_to_analytics_event(&row)
-            .ok_or_else(|| "failed to decode observability canonical input".to_owned())?;
+        .map_err(|error| {
+            ObservabilityAppendError::Failed(format!(
+                "failed to read observability idempotency key: {error}"
+            ))
+        })?;
+    if let Some(row) = rows.next().await.map_err(|error| {
+        ObservabilityAppendError::Failed(format!(
+            "failed to decode observability idempotency row: {error}"
+        ))
+    })? {
+        let stored = row_to_analytics_event(&row).ok_or_else(|| {
+            ObservabilityAppendError::Failed(
+                "failed to decode observability canonical input".to_owned(),
+            )
+        })?;
         if !analytics_record_matches_insert(&stored, event) {
-            return Err("observability idempotency conflict".to_string());
+            return Err(ObservabilityAppendError::Conflict);
         }
         return Ok(stored.id);
     }
     drop(rows);
-    append_analytics_event_in_existing_tx(transaction, event).await
+    append_analytics_event_in_existing_tx(transaction, event)
+        .await
+        .map_err(ObservabilityAppendError::Failed)
+}
+
+fn validate_observability_event(event: &AnalyticsEventInsert) -> Result<(), String> {
+    if event.hint_id.as_deref().is_none_or(str::is_empty) {
+        return Err("invalid canonical observability event".to_owned());
+    }
+    if event.provider != "tracedecay-observability" || event.metadata_json.is_none() {
+        return Err("invalid canonical observability event".to_owned());
+    }
+    Ok(())
 }
 
 fn analytics_record_matches_insert(
@@ -895,21 +1592,23 @@ async fn prune_observability_retention_class(
     // Settled outbox entries are replay transport state, not permanent product
     // evidence. Remove them before their exact analytics row so foreign-key
     // enforcement never requires a fail-open cascade. Pending claims have no
-    // analytics id and cannot match this deletion.
+    // analytics id and cannot match this deletion. The class and cutoff seek
+    // `idx_observability_event_retention`, so a pass reads the expired rows of
+    // one class, not every observability row older than the cutoff.
     let eligible_ids = format!(
         "SELECT id FROM analytics_events
          WHERE provider = 'tracedecay-observability'
-           AND timestamp < ?1
            AND json_extract(metadata_json, '$.retention_class') = ?2
+           AND timestamp < ?1
            AND {ACTIVE_DIRTY_ROLLUP_SOURCE_EXCLUSION_SQL}
-         ORDER BY id
+         ORDER BY timestamp, id
          LIMIT ?3"
     );
     let expired_outbox = transaction
         .execute(
             &format!(
                 "DELETE FROM observability_emission_outbox
-                 WHERE state = 'settled' AND analytics_event_id IN ({eligible_ids})"
+                 WHERE analytics_event_id IN ({eligible_ids}) AND state = 'settled'"
             ),
             tracedecay_runtime_core::db::engine::params![cutoff_seconds, retention_class, limit],
         )
@@ -934,15 +1633,15 @@ async fn observability_retention_has_more(
         "SELECT EXISTS(
              SELECT 1 FROM analytics_events
              WHERE provider = 'tracedecay-observability'
-               AND (
-                   (timestamp < ?1 AND json_extract(metadata_json, '$.retention_class')
-                       = 'optional_local_detail30d')
-                   OR
-                   (timestamp < ?2 AND json_extract(metadata_json, '$.retention_class')
-                       = 'local_rollup395d')
-               )
+               AND json_extract(metadata_json, '$.retention_class') = 'optional_local_detail30d'
+               AND timestamp < ?1
                AND {ACTIVE_DIRTY_ROLLUP_SOURCE_EXCLUSION_SQL}
-             LIMIT 1
+         ) OR EXISTS(
+             SELECT 1 FROM analytics_events
+             WHERE provider = 'tracedecay-observability'
+               AND json_extract(metadata_json, '$.retention_class') = 'local_rollup395d'
+               AND timestamp < ?2
+               AND {ACTIVE_DIRTY_ROLLUP_SOURCE_EXCLUSION_SQL}
          )"
     );
     let mut rows = transaction

@@ -10,7 +10,7 @@
 //!   opens a file beneath a project worktree.
 //!
 //! The canonicalization callers deliberately differ in what they do with the
-//! result — see [`collapse_relative_components`] — so only the algorithm is
+//! result, see [`collapse_relative_components`], so only the algorithm is
 //! shared, never the policy.
 
 use std::io;
@@ -75,12 +75,190 @@ pub fn same_canonical_path(left: &Path, right: &Path) -> bool {
         || canonicalize_path_or_existing_parent(left) == canonicalize_path_or_existing_parent(right)
 }
 
+/// The filesystem identity a root is stored under and compared through.
+///
+/// [`same_canonical_path`] answers "are these one directory"; this answers
+/// "what is that directory called", which is what a caller needs when it has
+/// to `strip_prefix` a root off a descendant or hand the root to a serializer.
+/// Both sides of such a pair routinely arrive spelled differently, a macOS
+/// `/var` alias against a `/private/var` root, a native `C:\` document against
+/// a `\\?\C:\` root, and a raw `strip_prefix` reports the descendant as
+/// outside its own root.
+///
+/// Existing ancestors are resolved so those aliases collapse to one name, and
+/// the result is spelled plainly (see [`plain_host_path`]) so it can cross
+/// into a file URL, YAML, TOML, or a child process without the verbatim prefix
+/// leaking.
+#[must_use]
+pub fn canonical_root_identity(path: &Path) -> PathBuf {
+    plain_host_path(&canonicalize_path_or_existing_parent(path))
+}
+
+/// [`canonical_root_identity`] for a path that must exist: a missing path is
+/// the [`std::fs::canonicalize`] error instead of a name resolved through its
+/// deepest existing ancestor.
+pub fn canonical_existing_identity(path: &Path) -> io::Result<PathBuf> {
+    path.canonicalize()
+        .map(|canonical| plain_host_path(&canonical))
+}
+
+/// Rewrites a Windows extended-length (`\\?\`) *disk* path to its ordinary
+/// form, so it can be handed to a tool that does not understand the verbatim
+/// prefix.
+///
+/// [`std::fs::canonicalize`] returns the verbatim form for every Windows path,
+/// so every path this runtime resolves reads `\\?\D:\repo\.git` rather than
+/// `D:\repo\.git`. Git for Windows normalizes the paths it is given and
+/// rejects that spelling, most visibly through
+/// `GIT_ALTERNATE_OBJECT_DIRECTORIES`, where a verbatim entry makes every
+/// object-writing command fail, so a resolved path must be spelled plainly
+/// before it crosses into a child process.
+///
+/// Only a verbatim disk path is shortened. `\\?\UNC\server\share` and device
+/// namespace paths genuinely need the prefix and are returned unchanged, as is
+/// every path that does not carry one (which is every path on Unix). A caller
+/// that has to put such a path into a URL must encode or refuse it rather than
+/// hand the verbatim spelling on: `file:///` plus `\\?\UNC\...` is not a URL
+/// any tool parses.
+///
+/// Pass the `Path` that is held, never a string rebuilt from it. A path whose
+/// encoding is not valid UTF-8 (or, on Windows, not valid UTF-16) is handed
+/// back unchanged, because shortening it would require inventing bytes; a
+/// caller that pre-stringifies with `to_string_lossy` instead turns those units
+/// into U+FFFD and gets a *different* path that this transform then happily
+/// shortens, so the lossy name reaches the child process looking correct while
+/// naming nothing.
+#[must_use]
+pub fn plain_host_path(path: &Path) -> PathBuf {
+    // Deliberately a string transform rather than `Path::components`: the
+    // prefix is only *parsed* as a prefix on Windows, and this must behave
+    // identically wherever the path was produced, so it can be exercised on
+    // any host.
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    let bytes = rest.as_bytes();
+    let is_verbatim_disk =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    if is_verbatim_disk {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Spells every `git` argument plainly (see [`plain_host_path`]).
+///
+/// Arguments that are not verbatim disk paths, flags, refs, relative paths,
+/// every Unix argument, are returned unchanged, so a command builder can
+/// apply this to its whole argument list instead of guessing which positions
+/// carry a resolved path (`git worktree add <path>` refuses a `\\?\` root
+/// with "could not create leading directories ... Invalid argument").
+///
+/// No argument this returns is a verbatim *disk* path, whatever the caller
+/// passed in. The remaining verbatim spellings, UNC and device namespace,
+/// are handed on unchanged for the reason [`plain_host_path`] gives, so a
+/// caller building a `file://` URL out of one of them must encode or refuse it
+/// there.
+pub fn plain_git_args<'a>(args: &'a [&str]) -> impl Iterator<Item = PathBuf> + 'a {
+    args.iter().map(|arg| plain_host_path(Path::new(arg)))
+}
+
+/// Spells an absolute Windows path in its extended-length (`\\?\`) form, the
+/// inverse of [`plain_host_path`].
+///
+/// A drive path `D:\x` becomes `\\?\D:\x` and a UNC path `\\server\share\x`
+/// becomes `\\?\UNC\server\share\x`. A path that already carries a `\\?\` or
+/// `\\.\` prefix, or is not absolute in Windows syntax, is returned unchanged.
+/// Windows applies no normalization to an extended-length name, so the input
+/// must already be absolute with backslash separators and no `.` or `..`
+/// components, which is what [`std::path::absolute`] returns on Windows.
+///
+/// Like [`plain_host_path`] this is a transform on the spelling so it can be
+/// exercised on any host; only Windows callers should apply it.
+#[must_use]
+pub fn extended_length_path(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let bytes = text.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+        return PathBuf::from(format!(r"\\?\{text}"));
+    }
+    match text.strip_prefix(r"\\") {
+        Some(share) if !share.starts_with(['?', '.']) && !share.is_empty() => {
+            PathBuf::from(format!(r"\\?\UNC\{share}"))
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Why a database path cannot be handed to `SQLite`.
+#[derive(Debug, thiserror::Error)]
+pub enum SqliteDatabasePathError {
+    #[error("cannot resolve SQLite database path '{path}': {source}")]
+    Unresolved {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    /// No retry changes this: `SQLite`'s Unix VFS refuses the name and its
+    /// Windows VFS silently truncates it to the limit.
+    #[error(
+        "SQLite database path '{path}' is {bytes} bytes; SQLite's default VFS opens names shorter than {limit} bytes"
+    )]
+    NameTooLong {
+        path: PathBuf,
+        bytes: usize,
+        limit: usize,
+    },
+    #[error("SQLite has no default VFS to open '{path}' with")]
+    VfsUnavailable { path: PathBuf },
+}
+
+/// The spelling `SQLite` must be given to open the database at `path`.
+///
+/// `std::fs` adds the extended-length prefix to a long Windows path itself;
+/// `SQLite`'s Windows VFS hands the name to `CreateFileW` as given, so an
+/// ordinary absolute path past `MAX_PATH` (260) fails to open. The path is
+/// made absolute and, on Windows, spelled with [`extended_length_path`]. A
+/// name longer than the default VFS's pathname limit is a typed refusal
+/// rather than an open failure a caller would retry.
+pub fn sqlite_database_path(path: &Path) -> std::result::Result<PathBuf, SqliteDatabasePathError> {
+    let absolute =
+        std::path::absolute(path).map_err(|source| SqliteDatabasePathError::Unresolved {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    #[cfg(windows)]
+    let absolute = extended_length_path(&absolute);
+    let limit = tracedecay_rusqlite_runtime::default_vfs_max_pathname().ok_or_else(|| {
+        SqliteDatabasePathError::VfsUnavailable {
+            path: absolute.clone(),
+        }
+    })?;
+    // The Windows VFS keeps at most `mxPathname - 1` bytes of a full name, so
+    // a name of exactly `mxPathname` bytes is refused on every platform.
+    let bytes = absolute.as_os_str().len();
+    if bytes >= limit {
+        return Err(SqliteDatabasePathError::NameTooLong {
+            path: absolute,
+            bytes,
+            limit,
+        });
+    }
+    Ok(absolute)
+}
+
 /// Drops `.` and resolves `..` lexically, without touching the filesystem.
 ///
 /// This is a separate step rather than part of canonicalization because the
 /// callers genuinely disagree about it: the daemon authority applies it to the
-/// identity paths it writes, while the profile-identity migration must not —
-/// collapsing there would rewrite identity strings already on disk.
+/// identity paths it writes, while the profile-identity migration must not.
+/// Collapsing there would rewrite identity strings already on disk.
 #[must_use]
 pub fn collapse_relative_components(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
@@ -100,8 +278,8 @@ pub fn collapse_relative_components(path: &Path) -> PathBuf {
 /// beneath its authorized worktree.
 ///
 /// `.` components are dropped; anything that could escape or re-root the
-/// worktree — an absolute path, a prefix or root component, `..`, or a path
-/// that normalizes away to nothing — is rejected rather than repaired.
+/// worktree, an absolute path, a prefix or root component, `..`, or a path
+/// that normalizes away to nothing, is rejected rather than repaired.
 pub fn normalize_source_edit_relative_path(path: &Path) -> Result<PathBuf> {
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err(source_edit_unsafe_path());
@@ -141,10 +319,25 @@ pub fn source_edit_path_error(operation: &'static str, error: io::Error) -> Trac
 #[cfg(test)]
 mod tests {
     use super::{
-        canonicalize_existing_prefix, collapse_relative_components,
-        normalize_source_edit_relative_path, same_canonical_path,
+        canonical_root_identity, canonicalize_existing_prefix, collapse_relative_components,
+        extended_length_path, normalize_source_edit_relative_path, plain_git_args, plain_host_path,
+        same_canonical_path,
     };
     use std::path::{Path, PathBuf};
+
+    /// Whether `path` is spelled as an extended-length *disk* path, the one
+    /// spelling git for Windows refuses outright.
+    fn is_verbatim_disk_path(path: &Path) -> bool {
+        path.to_str()
+            .and_then(|text| text.strip_prefix(r"\\?\"))
+            .is_some_and(|rest| {
+                let bytes = rest.as_bytes();
+                bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && bytes[2] == b'\\'
+            })
+    }
 
     #[test]
     fn canonicalization_reattaches_a_missing_tail_to_an_existing_ancestor() {
@@ -202,6 +395,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("temporary directory");
         let root = temp.path().canonicalize().expect("canonical temp root");
 
+        assert!(same_canonical_path(
+            &root.join("left.db"),
+            &root.join("left.db"),
+        ));
         assert!(!same_canonical_path(
             &root.join("left.db"),
             &root.join("right.db"),
@@ -213,6 +410,171 @@ mod tests {
         assert_eq!(
             collapse_relative_components(Path::new("/a/./b/../c")),
             PathBuf::from("/a/c")
+        );
+    }
+
+    /// Runs on every host, like its inverse below. The staging path is the
+    /// 275-character name `SQLite` could not open on the Windows runner.
+    #[test]
+    fn an_absolute_windows_path_is_spelled_with_its_extended_length_prefix() {
+        let staging = r"D:\a\_temp\tmp\.tmpTPA5kk\profile\projects\proj_8d6c098d2dd75ba9\code-index-v1\bc92ebba09df969fbaddcbda144ce85df1aee980d85ab9e9111ef8bd13ed757c\code-text-artifact-staging-v1\.text-artifact-55d951cf30e3b0e5f75b4162f14663864eb036b71a246d78de9d41f645f91bf7.staging.initializing";
+        let extended_staging = format!(r"\\?\{staging}");
+        let spellings: [(&str, &str); 7] = [
+            (staging, &extended_staging),
+            (r"\\server\share\graph.db", r"\\?\UNC\server\share\graph.db"),
+            (r"\\?\D:\store\graph.db", r"\\?\D:\store\graph.db"),
+            (
+                r"\\?\UNC\server\share\graph.db",
+                r"\\?\UNC\server\share\graph.db",
+            ),
+            (r"\\.\pipe\tracedecay", r"\\.\pipe\tracedecay"),
+            (r"relative\graph.db", r"relative\graph.db"),
+            (
+                "/home/user/.tracedecay/graph.db",
+                "/home/user/.tracedecay/graph.db",
+            ),
+        ];
+        for (input, expected) in spellings {
+            assert_eq!(
+                extended_length_path(Path::new(input)),
+                PathBuf::from(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            plain_host_path(Path::new(&extended_staging)),
+            PathBuf::from(staging)
+        );
+    }
+
+    /// Unix `SQLite` refuses a full name of 512 bytes or more with a bare
+    /// "unable to open database file"; the handoff names the limit instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_sqlite_name_past_the_vfs_limit_is_refused_with_the_limit() {
+        let root = Path::new("/");
+        let within = root.join("d".repeat(510));
+        assert_eq!(super::sqlite_database_path(&within).unwrap(), within);
+
+        let past = root.join("d".repeat(511));
+        match super::sqlite_database_path(&past) {
+            Err(super::SqliteDatabasePathError::NameTooLong { path, bytes, limit }) => {
+                assert_eq!((path, bytes, limit), (past, 512, 512));
+            }
+            other => panic!("expected a typed name-length refusal, got {other:?}"),
+        }
+    }
+
+    /// Runs on every host: the transform is defined on the spelling, not on
+    /// how the running platform happens to parse it.
+    #[test]
+    fn only_a_verbatim_disk_path_is_spelled_plainly_for_child_processes() {
+        assert_eq!(
+            plain_host_path(Path::new(r"\\?\D:\a\_temp\repo\.git\objects")),
+            PathBuf::from(r"D:\a\_temp\repo\.git\objects")
+        );
+        assert_eq!(
+            plain_host_path(Path::new(r"\\?\c:\repo")),
+            PathBuf::from(r"c:\repo")
+        );
+        for preserved in [
+            r"\\?\UNC\server\share\repo",
+            r"\\?\Volume{9f4c2b1e-0000-0000-0000-100000000000}\repo",
+            r"\\server\share\repo",
+            r"D:\repo",
+            "/home/user/repo",
+        ] {
+            assert_eq!(
+                plain_host_path(Path::new(preserved)),
+                PathBuf::from(preserved),
+                "{preserved} must be handed on unchanged"
+            );
+        }
+    }
+
+    /// The property a command builder relies on when it applies the transform
+    /// to a whole argument list: whatever went in, nothing that comes out is a
+    /// verbatim disk path, and nothing that was not one is rewritten.
+    #[test]
+    fn no_git_argument_is_ever_a_verbatim_disk_path() {
+        let arguments = [
+            "worktree",
+            "add",
+            "--detach",
+            r"\\?\D:\a\_temp\.tmpAbCdEf\repo",
+            r"\\?\c:\a\_temp\.tmpAbCdEf\repo\.git",
+            "refs/heads/main",
+            "HEAD~1",
+            "src/lib.rs",
+            r"\\?\UNC\server\share\repo",
+            r"\\server\share\repo",
+            r"D:\repo",
+            "/home/user/repo",
+        ];
+
+        let spelled: Vec<PathBuf> = plain_git_args(&arguments).collect();
+
+        for argument in &spelled {
+            assert!(
+                !is_verbatim_disk_path(argument),
+                "{} reached git as a verbatim disk path",
+                argument.display()
+            );
+        }
+        assert_eq!(spelled[3], PathBuf::from(r"D:\a\_temp\.tmpAbCdEf\repo"));
+        assert_eq!(
+            spelled[4],
+            PathBuf::from(r"c:\a\_temp\.tmpAbCdEf\repo\.git")
+        );
+        for (index, argument) in arguments.iter().enumerate() {
+            if index == 3 || index == 4 {
+                continue;
+            }
+            assert_eq!(
+                spelled[index],
+                PathBuf::from(argument),
+                "'{argument}' must be handed to git unchanged"
+            );
+        }
+    }
+
+    /// A test that canonicalizes its `tempfile` root yields a Windows `\\?\`
+    /// path; that spelling must still reach git without the verbatim prefix.
+    #[cfg(windows)]
+    #[test]
+    fn a_canonicalized_temp_root_reaches_git_without_its_verbatim_prefix() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let canonical = temp.path().canonicalize().expect("canonical temp root");
+        assert!(
+            is_verbatim_disk_path(&canonical),
+            "a canonicalized Windows temp root is the verbatim spelling this guards: {}",
+            canonical.display()
+        );
+        let canonical = canonical.to_str().expect("UTF-8 temp root");
+
+        let spelled: Vec<PathBuf> =
+            plain_git_args(&["-C", canonical, "rev-parse", "HEAD"]).collect();
+
+        assert!(!is_verbatim_disk_path(&spelled[1]));
+        assert!(same_canonical_path(&spelled[1], temp.path()));
+        assert_eq!(spelled[0], PathBuf::from("-C"));
+    }
+
+    /// A path whose encoding this transform cannot read is handed back exactly,
+    /// never repaired through a lossy round-trip: the documented contract the
+    /// callers depend on.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_valid_utf8_is_handed_back_unchanged() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let raw = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff\xfe/repo"));
+
+        assert_eq!(plain_host_path(&raw), raw);
+        assert!(
+            plain_host_path(&raw).as_os_str().as_bytes().contains(&0xff),
+            "a lossy conversion would have replaced the byte with U+FFFD"
         );
     }
 
@@ -229,5 +591,35 @@ mod tests {
                 "'{rejected}' must not be addressable"
             );
         }
+    }
+
+    /// The property every root check depends on: a descendant a client built
+    /// from its own spelling of the root strips cleanly off the root's
+    /// identity, including when the suffix does not exist yet, while a sibling
+    /// of the root still does not.
+    #[test]
+    fn root_identity_lets_a_caller_built_descendant_strip_off_a_resolved_root() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let built = temp.path().join("project");
+        std::fs::create_dir(&built).expect("create project root");
+        let resolved = built.canonicalize().expect("canonical project root");
+
+        let identity = canonical_root_identity(&resolved);
+        assert!(same_canonical_path(&identity, &built));
+        assert_eq!(identity, plain_host_path(&resolved));
+        assert!(!identity.to_string_lossy().starts_with(r"\\?\"));
+
+        let unsaved = canonical_root_identity(&built.join("new/nested/overlay.rs"));
+        assert_eq!(
+            unsaved.strip_prefix(&identity).ok(),
+            Some(Path::new("new/nested/overlay.rs")),
+            "an overlay that does not exist yet must stay beneath the root identity"
+        );
+        assert!(
+            canonical_root_identity(&temp.path().join("project-other/lib.rs"))
+                .strip_prefix(&identity)
+                .is_err(),
+            "a sibling of the root must stay outside it"
+        );
     }
 }

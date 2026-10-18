@@ -1,0 +1,139 @@
+name: Set up Bazel
+description: >
+  Installs Bazel through the pinned bazelisk with its repository cache, and a
+  disk cache named by `cache-key` that only master saves: other refs restore
+  master's entry, and their own saves would be multi-GB copies that ordinary
+  master and PR runs cannot reuse. Jobs with the same configuration and
+  runner image share a restore prefix; master callers save fresh
+  action outputs after the build, including failed tests. Test runtimes are
+  declared Bazel inputs.
+
+inputs:
+  cache-key:
+    description: Disk-cache name; jobs with the same runner image and flags share it.
+    required: true
+  extra-restore-keys:
+    description: >
+      Comma-separated extra disk-cache names restored after this job's own
+      prefix misses. Use when two jobs share rustc flags and runner image so
+      Clippy can reuse Test Linux action outputs.
+    default: ""
+  tailscale-client-id:
+    description: OIDC client for trusted Linux CI; empty keeps the hosted-only build.
+    default: ""
+
+outputs:
+  fleet-enabled:
+    description: Whether this job uses private workers and dynamic execution.
+    value: ${{ inputs.tailscale-client-id != '' }}
+  disk-cache-path:
+    description: Action-cache directory to save after the caller's build.
+    value: ${{ steps.disk-cache-config.outputs.path }}
+  disk-cache-key:
+    description: Run-specific save key returned by the cache restore action.
+    value: ${{ steps.disk-cache.outputs.cache-primary-key }}
+
+runs:
+  using: composite
+  steps:
+    # crate_universe's cargo checks out git dependencies under D:/b; asupersync
+    # carries paths past MAX_PATH there, which libgit2 refuses without this.
+    - name: Allow long git paths
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        git config --global core.longpaths true
+        git config --system core.longpaths true
+
+    # Cache versions include the literal path. Keep setup-bazel's existing
+    # directory and key prefix to restore previously compiled outputs.
+    - name: Resolve action cache location
+      id: disk-cache-config
+      shell: bash
+      env:
+        CACHE_NAME: ${{ inputs.cache-key }}
+        EXTRA_RESTORE_KEYS: ${{ inputs.extra-restore-keys }}
+      run: |
+        node <<'JS'
+        const fs = require('node:fs');
+        const os = require('node:os');
+        const path = process.platform === 'win32'
+          ? 'D:/b-disk'
+          : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-disk`;
+        const names = [process.env.CACHE_NAME, ...(process.env.EXTRA_RESTORE_KEYS || '')
+          .split(',')
+          .map((name) => name.trim())
+          .filter(Boolean)];
+        const prefixes = names.map((name) =>
+          `setup-bazel-1-${process.platform}-${os.arch()}-disk-${name}-`);
+        fs.appendFileSync(
+          process.env.GITHUB_OUTPUT,
+          `path=${path}\nprefix=${prefixes[0]}\nrestore-keys<<EOF\n${prefixes.join('\n')}\nEOF\n`,
+        );
+        JS
+
+    - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+      with:
+        bazelisk-cache: true
+        repository-cache: true
+        disk-cache: false
+        bazelrc: >-
+          build --disk_cache=${{ steps.disk-cache-config.outputs.path }}
+        cache-save: ${{ github.ref == 'refs/heads/master' }}
+        # Windows build-script runfiles nest each vendored crate's sources
+        # under its repository name twice; a short output base (default
+        # D:/_bazel) keeps MSVC's header paths under MAX_PATH.
+        output-base: ${{ runner.os == 'Windows' && 'D:/b' || '' }}
+
+    # Bazel validates action contents itself. A fresh save key retains new
+    # source-build outputs even when MODULE.bazel and BUILD files are unchanged.
+    - name: Restore master action cache
+      id: disk-cache
+      if: inputs.tailscale-client-id == ''
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.disk-cache-config.outputs.path }}
+        key: ${{ steps.disk-cache-config.outputs.prefix }}run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+        restore-keys: ${{ steps.disk-cache-config.outputs.restore-keys }}
+
+    - name: Connect to the private Bazel fleet
+      if: inputs.tailscale-client-id != ''
+      uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4
+      with:
+        oauth-client-id: ${{ inputs.tailscale-client-id }}
+        audience: api.tailscale.com/${{ inputs.tailscale-client-id }}
+        tags: tag:bazel-ci
+        ping: ubuntu-main
+
+    - name: Share compilation and tests with private workers
+      if: inputs.tailscale-client-id != ''
+      shell: bash
+      run: |
+        if [[ $RUNNER_OS != Linux || $RUNNER_ARCH != X64 ]]; then
+          echo 'The CI fleet configuration requires a Linux x86_64 runner.' >&2
+          exit 1
+        fi
+        mkdir -p /tmp/zig-cache
+        # Use the checkout's existing local rc import for fleet settings.
+        # Tests carry their tools in runfiles, so both branches use identical inputs.
+        cat > .bazelrc.local <<'RC'
+        build --config=rbe-linux
+        build --remote_executor=grpc://ubuntu-main:50051
+        build --remote_cache=grpc://ubuntu-main:50051
+        build --remote_instance_name=main
+        build --remote_timeout=600
+        build --remote_local_fallback
+        build --remote_download_outputs=toplevel
+        build --jobs=40
+        build --local_resources=cpu=HOST_CPUS
+        build --local_resources=memory=HOST_RAM*.5
+        build --internal_spawn_scheduler
+        build --dynamic_local_strategy=sandboxed
+        build --dynamic_remote_strategy=remote
+        build --strategy=Rustc=dynamic
+        build --strategy=TestRunner=dynamic
+        build --bes_backend=grpc://ubuntu-main:1985
+        build --bes_results_url=https://ubuntu-main.tail039078.ts.net/invocation/
+        build --bes_timeout=30s
+        build --bes_upload_mode=fully_async
+        RC

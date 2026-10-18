@@ -1,3 +1,5 @@
+// Its own test binary, not a core_cli_suite module: the conformance run sets and
+// restores process environment variables in-process.
 //! Conformance contract for every `RouteExposureV1::Public` executable binding.
 //!
 //! Each available executable binding advertises a public route path to clients.
@@ -34,6 +36,7 @@
 
 #[path = "../../tracedecay/tests/common/mod.rs"]
 mod common;
+use common::{apply_isolated_profile_env, run_ok};
 
 #[path = "work_route_exposure_conformance/work_evidence.rs"]
 mod work_evidence;
@@ -43,7 +46,6 @@ mod work_evidence;
 mod work_task_session;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -55,21 +57,16 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
-use tracedecay::application_surface::http_application_router;
-use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay_application::{
+use tracedecay_application::operation_stream::OperationEventAuthority;
+use tracedecay_contracts::{
     EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1, EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1,
     work_executable_binding_registry,
 };
+use tracedecay_daemon_service::application_surface::http_application_router;
 use tracedecay_domain::ProjectId;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_tool_catalog::RouteExposureV1;
-use tracedecay_usecases::operation_stream::OperationEventAuthority;
-
-/// Pins the global database away from the operator's profile. The production
-/// constant is crate-private, so the name is repeated here for the same reason
-/// the shared test harness repeats it.
-const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 
 /// Tail that no canonical binding declares, used to prove the routers really
 /// answer `404` for an unmounted path instead of swallowing everything.
@@ -82,41 +79,12 @@ const ABSENT_TAIL: &str = "/application/route-exposure-conformance-absent";
 const RELATIVE_WITNESS_TAIL: &str = "/application/primitives/storage_status";
 
 /// A project id the registry cannot resolve, used to show that an unresolved
-/// project also answers `404` — which is why the witness probe above has to pass
+/// project also answers `404`, which is why the witness probe above has to pass
 /// before any per-route verdict is trusted.
 const UNKNOWN_PROJECT_ID: &str = "project.route-exposure-conformance-unknown";
 
 /// Guards against a malformed schema cycle producing an unbounded instance.
 const MAX_SCHEMA_DEPTH: usize = 32;
-
-/// Restores a process environment variable when the guard drops.
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        // Every test in this binary pins the environment through
-        // `ProductionDaemon::start`, which holds the shared env lock for the
-        // fixture's whole life, so no other thread reads the environment while
-        // it is being pinned.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
 
 /// A live daemon over a registered project under a throwaway profile, plus the
 /// credentials it published for its own HTTP application endpoint.
@@ -129,15 +97,13 @@ struct ProductionDaemon {
     authorization: String,
     home: TempDir,
     profile: PathBuf,
-    _guards: Vec<EnvVarGuard>,
-    // Held for the fixture's whole life: starting a daemon pins process-wide
-    // environment variables, and this binary now hosts more than one test.
-    _env_lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl ProductionDaemon {
     fn start() -> Self {
-        let env_lock = common::lock_global_db_env();
+        // `inner_router` builds an in-process daemon handshake, which reads the
+        // registered product runtime; only `main` registers one in production.
+        common::register_process_product_runtime();
         let home = tempfile::tempdir().expect("isolated home");
         let root = home.path().to_path_buf();
         let profile = root.join(".tracedecay");
@@ -154,15 +120,6 @@ impl ProductionDaemon {
             "pub const ROUTE_EXPOSURE_FIXTURE: bool = true;\n",
         )
         .expect("fixture source");
-
-        let guards = vec![
-            EnvVarGuard::set("HOME", &root),
-            EnvVarGuard::set("USERPROFILE", &root),
-            EnvVarGuard::set("XDG_CONFIG_HOME", root.join(".config")),
-            EnvVarGuard::set(USER_DATA_DIR_ENV, &profile),
-            EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-            EnvVarGuard::set("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1"),
-        ];
 
         run_ok(
             Command::new("git")
@@ -216,9 +173,13 @@ impl ProductionDaemon {
             authorization: format!("Bearer {token}"),
             home,
             profile,
-            _guards: guards,
-            _env_lock: env_lock,
         }
+    }
+
+    fn profile_root(&self) -> ProfileRoot {
+        ProfileRoot::new(&self.profile)
+            .with_home(self.home.path())
+            .with_global_db_override(self.profile.join("global.db"))
     }
 
     /// External URL for a canonical route path, which already starts with
@@ -344,8 +305,7 @@ impl DashboardProcess {
                 self.base_url,
                 self.diagnostics
                     .lock()
-                    .map(|captured| captured.clone())
-                    .unwrap_or_default()
+                    .map_or_default(|captured| captured.clone())
             );
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -376,7 +336,7 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
                 if let Some(rest) = line.split_once("listening on ")
                     && let Some(url) = rest.1.split_whitespace().next()
                 {
-                    listening = Some(url.trim_end_matches('/').to_owned());
+                    listening = Some(dashboard_api_base_url(url));
                     break;
                 }
             }
@@ -386,7 +346,7 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
     if let Some(url) = listening {
         // Keep draining the pipe for the server's whole life. Dropping the read
         // end here would turn the dashboard's next stdout write into SIGPIPE,
-        // killing the very mount the journey is about to exercise — a failure
+        // killing the very mount the journey is about to exercise, a failure
         // that surfaces later as a connection refusal with no cause attached.
         std::thread::spawn(move || {
             let mut line = String::new();
@@ -403,30 +363,22 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
     panic!("dashboard never announced a listen URL\nstdout:\n{seen}\nstderr:\n{stderr}");
 }
 
-fn isolated(home: &Path, profile: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    command
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env(USER_DATA_DIR_ENV, profile)
-        .env(GLOBAL_DB_ENV, profile.join("global.db"))
-        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
-    command
+/// The API base for a dashboard launch URL (`http://ADDR/?token=T`): its
+/// userinfo carries the token, so ureq sends it as the Basic password.
+fn dashboard_api_base_url(launch_url: &str) -> String {
+    let (origin, token) = launch_url
+        .split_once("/?token=")
+        .unwrap_or_else(|| panic!("dashboard launch URL carries no token: {launch_url}"));
+    let authority = origin
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("dashboard launch URL is not loopback HTTP: {launch_url}"));
+    format!("http://tracedecay:{token}@{authority}")
 }
 
-fn run_ok(command: &mut Command, label: &str) -> Vec<u8> {
-    let output = command
-        .output()
-        .unwrap_or_else(|error| panic!("{label} could not run: {error}"));
-    assert!(
-        output.status.success(),
-        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
+fn isolated(home: &Path, profile: &Path) -> Command {
+    let mut command = Command::new(tracedecay_exe());
+    apply_isolated_profile_env(&mut command, home, profile);
+    command
 }
 
 fn wait_for_authority(daemon: &mut Child, path: &Path) -> Value {
@@ -508,21 +460,10 @@ impl RouteObservation {
     }
 }
 
-/// A cursor that no live topology generation ever matches, used to prove the
-/// stale-cursor refusal on both mounts. The identity fields are well-formed so
-/// the request decodes and the staleness verdict is the handler's, not serde's.
-fn superseded_cursor_request() -> Value {
-    serde_json::json!({
-        "page_size": 25,
-        "cursor": {
-            "generation": "work-topology/route-exposure-superseded",
-            "start_after": {
-                "task_id": "task.work-surface-conformance",
-                "run_id": "run.work-surface-conformance",
-                "attempt_id": "attempt.work-surface-conformance.1",
-            },
-        },
-    })
+/// A cursor the daemon never minted. It decodes as the opaque cursor string,
+/// so the refusal is the operation's, not serde's.
+fn foreign_cursor_request() -> Value {
+    serde_json::json!({ "page_size": 25, "cursor": "bc1.7b7d" })
 }
 
 fn product_selection() -> Value {
@@ -601,8 +542,8 @@ fn product_task_create_draft() -> Value {
 /// Both arms are named because the point is that the surface never leaves the
 /// contract: a served operation carries a binding, a contract, and one of the
 /// three outcome families; a refused one carries the safe problem record and a
-/// status that says so. Anything else — a bare `405`, an empty body, an
-/// untagged object — is the failure this gate exists to catch.
+/// status that says so. Anything else, a bare `405`, an empty body, an
+/// untagged object, is the failure this gate exists to catch.
 fn assert_canonical_envelope(label: &str, status: u16, body: &Value) {
     assert_ne!(status, 404, "{label} must be mounted: {body}");
     assert_ne!(status, 405, "{label} must accept POST: {body}");
@@ -674,7 +615,8 @@ fn post_envelope(
 }
 
 /// Posts to the dashboard's public mount, which needs no daemon credentials of
-/// its own: it resolves the active project and forwards through the same owner.
+/// its own: the listener's access token rides in the base URL's userinfo, and
+/// the mount resolves the active project and forwards through the same owner.
 fn post_dashboard_envelope(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) {
     let mut response = agent
         .post(url)
@@ -697,8 +639,8 @@ fn post_dashboard_envelope(agent: &ureq::Agent, url: &str, body: &Value) -> (u16
 /// The mounting window between daemon start and the project runtime binding is
 /// a real production state the dashboard renders as retryable warming, so it
 /// is graded here rather than slept past: every answer inside the window must
-/// be the typed retryable unavailable problem — never an empty success, a
-/// crash, or a concealment — and the first answer outside it is returned for
+/// be the typed retryable unavailable problem, never an empty success, a
+/// crash, or a concealment, and the first answer outside it is returned for
 /// the caller's strict assertions.
 fn poll_past_warming(label: &str, post: &mut dyn FnMut() -> (u16, Value)) -> (u16, Value) {
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -730,7 +672,7 @@ fn poll_past_warming(label: &str, post: &mut dyn FnMut() -> (u16, Value)) -> (u1
 ///
 /// This deliberately does not reuse [`assert_canonical_envelope`]: that helper
 /// reads any `404` as an unmounted route, but a concealed denial answers `404`
-/// *with* the canonical problem record — the discriminator between the two is
+/// *with* the canonical problem record, the discriminator between the two is
 /// the envelope in the body, which is exactly what is asserted here.
 fn assert_typed_problem(label: &str, status: u16, body: &Value, expected: (u16, &str, bool)) {
     let (expected_status, expected_kind, expected_retryable) = expected;
@@ -756,18 +698,19 @@ fn assert_typed_problem(label: &str, status: u16, body: &Value, expected: (u16, 
 /// it: every previous test of the surface either stubbed the owner, mocked the
 /// fetch, or graded route registration without looking at the answer. This runs
 /// both surfaces of one live daemon in the order a real client encounters them
-/// and grades every typed state the dashboard renders — warming, absence,
-/// staleness, denial, refusal, and the real payloads — so a drift on either
+/// and grades every typed state the dashboard renders, warming, absence,
+/// staleness, denial, refusal, and the real payloads, so a drift on either
 /// side is a failure with a named side.
 #[test]
 fn the_work_surface_answers_real_requests_on_both_published_mounts() {
     let fixture = ProductionDaemon::start();
     let dashboard = DashboardProcess::start(&fixture);
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build(),
+    );
 
     let list_request = serde_json::json!({ "page_size": 25, "cursor": null });
     let daemon_list = fixture.external_url("/application/work/list-attempts");
@@ -798,23 +741,26 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         );
     }
 
-    // -- Staleness against an absent topology. -------------------------------
-    // A cursor names the snapshot it was minted under; with no topology in
-    // scope, resuming would fabricate a page, so the answer is the typed stale
-    // refusal that tells the client to restart from the first page.
-    let stale = superseded_cursor_request();
+    // -- A cursor the daemon never minted. ------------------------------------
+    // Resuming from it would page a result set nobody asked for, so both
+    // mounts answer the one typed cursor refusal.
+    let foreign = foreign_cursor_request();
     for (label, (status, body)) in [
         (
-            "daemon work/list-attempts (cursor without topology)",
-            post_envelope(&agent, &daemon_list, &fixture, &stale),
+            "daemon work/list-attempts (foreign cursor)",
+            post_envelope(&agent, &daemon_list, &fixture, &foreign),
         ),
         (
-            "dashboard api/work/list-attempts (cursor without topology)",
-            post_dashboard_envelope(&agent, &dashboard_list, &stale),
+            "dashboard api/work/list-attempts (foreign cursor)",
+            post_dashboard_envelope(&agent, &dashboard_list, &foreign),
         ),
     ] {
         eprintln!("{label} -> {status} {body}");
-        assert_typed_problem(label, status, &body, (409, "stale", true));
+        assert_typed_problem(label, status, &body, (400, "invalid_request", false));
+        assert_eq!(
+            body["value"]["problem"]["code"], "cursor.invalid",
+            "{label}: {body}"
+        );
     }
 
     // -- Denial: an attempt that does not exist is concealed. ----------------
@@ -933,49 +879,69 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         .expect("created event observation time");
     work_evidence::assert_live_task_rooted_retrieval(&agent, &fixture, &dashboard, observed_at);
 
-    for retired in ["snapshot", "delta", "replan-dependencies", "accept-task"] {
-        let (status, body) = post_envelope(
-            &agent,
-            &fixture.external_url(&format!("/application/work/{retired}")),
-            &fixture,
-            &serde_json::json!({}),
-        );
-        assert_eq!(status, 404, "retired daemon Work route {retired}: {body}");
-        let (status, body) = post_dashboard_envelope(
-            &agent,
-            &format!("{}/api/work/{retired}", dashboard.base_url),
-            &serde_json::json!({}),
-        );
-        assert_eq!(
-            status, 404,
-            "retired dashboard Work route {retired}: {body}"
-        );
-    }
-
-    // -- Product publication does not fabricate executor topology. -----------
-    // Product graph state and executor topology have distinct authorities. A
-    // committed task is readable through Work views, but cannot by itself mint
-    // a topology generation or an authorized empty attempts page.
-    for (label, post) in [
-        (
-            "daemon work/list-attempts (product graph only)",
-            &mut (|| post_envelope(&agent, &daemon_list, &fixture, &list_request))
-                as &mut dyn FnMut() -> (u16, Value),
-        ),
-        (
-            "dashboard api/work/list-attempts (product graph only)",
-            &mut || post_dashboard_envelope(&agent, &dashboard_list, &list_request),
-        ),
-    ] {
-        let (status, body) = poll_past_warming(label, post);
-        eprintln!("{label} -> {status} {body}");
-        assert_eq!(status, 200, "{label}: {body}");
-        assert_eq!(body["value"]["outcome"]["outcome"], "evidence", "{body}");
-        let payload = &body["value"]["outcome"]["value"]["payload"];
-        assert_eq!(
-            payload["state"], "absent",
-            "{label} must not alias product graph tasks into executor topology: {body}"
-        );
+    // -- Product publication binds an empty attempt page. --------------------
+    // Once a product task exists, the product graph supplies the canonical
+    // generation for every attempt-page reader. With no admitted attempts the
+    // truthful result is a complete zero-item page under that generation, not
+    // the `absent` state reserved above for a scope with no Work at all.
+    let mut list_generation = None;
+    for operation in ["list-attempts", "execution-history"] {
+        let daemon_route = fixture.external_url(&format!("/application/work/{operation}"));
+        let dashboard_route = format!("{}/api/work/{operation}", dashboard.base_url);
+        for (label, post) in [
+            (
+                format!("daemon work/{operation} (product graph only)"),
+                &mut (|| post_envelope(&agent, &daemon_route, &fixture, &list_request))
+                    as &mut dyn FnMut() -> (u16, Value),
+            ),
+            (
+                format!("dashboard api/work/{operation} (product graph only)"),
+                &mut || post_dashboard_envelope(&agent, &dashboard_route, &list_request),
+            ),
+        ] {
+            let (status, body) = poll_past_warming(&label, post);
+            eprintln!("{label} -> {status} {body}");
+            assert_eq!(status, 200, "{label}: {body}");
+            assert_eq!(body["value"]["outcome"]["outcome"], "evidence", "{body}");
+            let payload = &body["value"]["outcome"]["value"]["payload"];
+            assert_eq!(
+                payload["state"], "listed",
+                "{label} must bind the existing product graph: {body}"
+            );
+            if operation == "list-attempts" {
+                let generation = payload["topology"]["generation"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{label} must name the product generation: {body}"));
+                assert!(!generation.is_empty(), "{label}: {body}");
+                assert_eq!(payload["topology"]["task_count"], 1, "{label}: {body}");
+                assert_eq!(
+                    payload["attempts"],
+                    serde_json::json!([]),
+                    "{label}: {body}"
+                );
+                assert_eq!(
+                    payload["coverage"],
+                    serde_json::json!({ "coverage": "complete", "returned": 0 }),
+                    "{label}: {body}"
+                );
+                if let Some(expected) = &list_generation {
+                    assert_eq!(generation, expected, "both mounts must bind one generation");
+                } else {
+                    list_generation = Some(generation.to_owned());
+                }
+            } else {
+                assert_eq!(payload["spans"], serde_json::json!([]), "{label}: {body}");
+                assert_eq!(
+                    payload["attempt_coverage"],
+                    serde_json::json!({ "coverage": "complete", "returned": 0 }),
+                    "{label}: {body}"
+                );
+                assert_eq!(
+                    payload["timing_coverage"]["coverage"], "complete",
+                    "{label}: {body}"
+                );
+            }
+        }
     }
 }
 
@@ -1012,11 +978,12 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         "horizon": { "since_micros": 1, "until_micros": 2 },
         "max_events": 10_000,
     });
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build(),
+    );
     let route = fixture.external_url(route_path);
     let expected_metric_names = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
         .iter()
@@ -1174,12 +1141,14 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         (measurements.len(), reported, metric_names, stable)
     };
 
-    let anonymous = agent
-        .post(&route)
-        .header("origin", &fixture.origin)
-        .content_type("application/json")
-        .send(request.to_string())
-        .expect("anonymous operation.work.topology_metrics response");
+    let anonymous =
+        common::http_call_with_retry("anonymous operation.work.topology_metrics", || {
+            agent
+                .post(&route)
+                .header("origin", &fixture.origin)
+                .content_type("application/json")
+                .send(request.to_string())
+        });
     assert_eq!(
         anonymous.status().as_u16(),
         StatusCode::UNAUTHORIZED.as_u16(),
@@ -1244,12 +1213,16 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
 
     fixture.restart();
     let restored_route = fixture.external_url(route_path);
-    let anonymous_after_restart = agent
-        .post(&restored_route)
-        .header("origin", &fixture.origin)
-        .content_type("application/json")
-        .send(request.to_string())
-        .expect("anonymous restarted operation.work.topology_metrics response");
+    let anonymous_after_restart = common::http_call_with_retry(
+        "anonymous restarted operation.work.topology_metrics",
+        || {
+            agent
+                .post(&restored_route)
+                .header("origin", &fixture.origin)
+                .content_type("application/json")
+                .send(request.to_string())
+        },
+    );
     assert_eq!(
         anonymous_after_restart.status().as_u16(),
         StatusCode::UNAUTHORIZED.as_u16(),
@@ -1322,8 +1295,8 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
 /// `the_work_surface_answers_real_requests_on_both_published_mounts` proves the
 /// TaskId-rooted read at its floor: a task with no accepted attempt, whose only
 /// truthful answer is zero selected sources. The question a dashboard user
-/// actually opens a task to ask — *who worked on this, and in which provider
-/// session* — was never driven on either mount. This runs one real pinned
+/// actually opens a task to ask. *who worked on this, and in which provider
+/// session*, was never driven on either mount. This runs one real pinned
 /// provider through the production spawn path, links the accepted attempt,
 /// imports the provider transcript, and grades the answer on the daemon mount
 /// and the dashboard mount, in all four temporal modes, across a physical
@@ -1336,11 +1309,12 @@ fn the_dashboard_work_surface_answers_who_worked_on_a_task_on_both_published_mou
     // request may legitimately queue behind a rebinding project runtime. The
     // budget is generous on purpose: a client timeout here would read as a
     // surface failure it is not.
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(120)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build(),
+    );
 
     work_task_session::assert_provider_qualified_task_session_evidence(&agent, &mut fixture);
 }
@@ -1348,11 +1322,12 @@ fn the_dashboard_work_surface_answers_who_worked_on_a_task_on_both_published_mou
 #[test]
 fn public_executable_routes_are_served_by_the_production_daemon() {
     let fixture = ProductionDaemon::start();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build(),
+    );
 
     assert_external_surface_is_authenticated_and_resolving(&agent, &fixture);
 
@@ -1398,7 +1373,7 @@ fn public_executable_routes_are_served_by_the_production_daemon() {
         .enable_all()
         .build()
         .expect("probe runtime");
-    let inner = runtime.block_on(inner_router(&fixture.project));
+    let inner = runtime.block_on(inner_router(&fixture.profile_root(), &fixture.project));
 
     let mut observations = Vec::with_capacity(declared_routes.len());
     for (operation_id, (route_path, body)) in declared_routes {
@@ -1425,8 +1400,8 @@ fn public_executable_routes_are_served_by_the_production_daemon() {
             assert!(
                 probe.status == StatusCode::NOT_FOUND.as_u16()
                     || probe.status == StatusCode::METHOD_NOT_ALLOWED.as_u16(),
-                "the {surface} method-mismatch probe answered {} — neither 404 \
-                 nor 405 — so it no longer discriminates a mounted path. A \
+                "the {surface} method-mismatch probe answered {}, neither 404 \
+                 nor 405, so it no longer discriminates a mounted path. A \
                  binding served on GET as well as POST would do this; give such \
                  a binding a probe method it does not serve instead of relaxing \
                  this check.\n  {}",
@@ -1620,15 +1595,16 @@ fn post_probe(
 
 /// Builds the same in-process router the daemon mounts, used only as secondary
 /// evidence so an inner/outer disagreement can be named precisely.
-async fn inner_router(project: &Path) -> axum::Router {
+async fn inner_router(profile: &ProfileRoot, project: &Path) -> axum::Router {
     let handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
         Some(project.to_path_buf()),
         None,
         false,
         false,
     )
     .expect("production daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)
+    let client = tracedecay::daemon::invocation_client_for_current(profile, handshake)
         .expect("production daemon client");
     http_application_router(
         client,
@@ -1825,3 +1801,7 @@ fn number_instance(object: &Map<String, Value>) -> Value {
     }
     Value::from(chosen)
 }
+
+#[path = "support/tracedecay_exe.rs"]
+mod tracedecay_exe;
+use tracedecay_exe::tracedecay_exe;

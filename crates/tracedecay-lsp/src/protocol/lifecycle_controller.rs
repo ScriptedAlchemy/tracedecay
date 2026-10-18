@@ -393,7 +393,7 @@ where
             {
                 let _ = cancellation.cancel_upstream(&root, &request_id);
             }
-            self.complete_context_request(
+            self.finish_admitted_request(
                 request_id,
                 pending.response_id,
                 Err(RpcFailure::request_failure(
@@ -413,7 +413,7 @@ where
             {
                 let _ = context.cancel_request(&root, &pending.operation_id);
             }
-            self.complete_context_request(
+            self.finish_admitted_request(
                 request_id,
                 pending.response_id,
                 Err(RpcFailure::request_failure(
@@ -430,7 +430,7 @@ where
             {
                 let _ = context.cancel_request(&root, &pending.operation_id);
             }
-            self.complete_context_request(
+            self.finish_admitted_request(
                 request_id,
                 pending.response_id,
                 Err(RpcFailure::request_failure(
@@ -590,23 +590,17 @@ where
                 return;
             }
         };
-        let mounted_context = self
-            .context
-            .port
-            .as_ref()
-            .map(|context| {
-                context
-                    .registrations()
-                    .into_iter()
-                    .filter(|registration| {
-                        is_supported_context_projection(&registration.kind)
-                            && registration.revision > 0
-                    })
-                    .take(MAX_CONTEXT_PROJECTION_KINDS)
-                    .map(|registration| (registration.kind, registration.revision))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
+        let mounted_context = self.context.port.as_ref().map_or_default(|context| {
+            context
+                .registrations()
+                .into_iter()
+                .filter(|registration| {
+                    is_supported_context_projection(&registration.kind) && registration.revision > 0
+                })
+                .take(MAX_CONTEXT_PROJECTION_KINDS)
+                .map(|registration| (registration.kind, registration.revision))
+                .collect::<BTreeMap<_, _>>()
+        });
         let mut gateway_capabilities = self.lifecycle.gateway_capabilities.clone();
         let dynamic_workspace_diagnostics = client.diagnostic_dynamic_registration
             && client.supports_document_diagnostics
@@ -756,7 +750,7 @@ where
                 .or_else(|| context_pending.map(|pending| pending.response_id))
                 .or_else(|| expansion_pending.map(|pending| pending.response_id));
             if let Some(response_id) = response_id {
-                self.complete_context_request(
+                self.finish_admitted_request(
                     id.clone(),
                     response_id,
                     Err(RpcFailure::request_failure(

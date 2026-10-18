@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::{cell::Cell, rc::Rc};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_domain::{
     DiversityPolicy, EvidenceRole, ExactClass, HydrationReceipt, PublicRetrieverStatus,
@@ -12,10 +13,11 @@ use super::{
 };
 use crate::retrieval::fusion::{CompositionKernel, FusionStageInput};
 use crate::retrieval::hydrate::{
-    CanonicalLateHydration, HydrationAuthorizationV1, HydrationExecutionControlV1,
-    HydrationOutcomeV1, HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationStageError,
+    CanonicalLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,
+    HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationStageError,
     HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
 };
+use crate::retrieval::ports::RetrievalExecutionControl;
 
 fn receipt(
     candidate: &tracedecay_domain::RankedCandidate,
@@ -34,7 +36,7 @@ fn receipt(
 }
 
 #[test]
-fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
+fn an_optional_lane_budget_miss_does_not_take_down_exact_lexical_or_graph() {
     let exact = exact_candidate("exact", 1);
     let lexical = candidate(RetrieverKind::Lexical, "lexical", 900_000, 0);
     let graph = candidate(RetrieverKind::Graph, "graph", 800_000, 0);
@@ -52,7 +54,7 @@ fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
             RetrieverOutcome::Complete(batch(vec![graph], "graph evidence")),
         ),
         (
-            RetrieverKind::Semantic,
+            RetrieverKind::Temporal,
             RetrieverOutcome::BudgetExceeded(RetrievalBudgetUsage::default()),
         ),
     ];
@@ -64,10 +66,10 @@ fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
             },
             &no_caps(),
         )
-        .expect("semantic budget miss must not fail composition");
+        .expect("an optional lane budget miss must not fail composition");
 
     assert_eq!(
-        composition.public_lane_statuses[&RetrieverKind::Semantic],
+        composition.public_lane_statuses[&RetrieverKind::Temporal],
         PublicRetrieverStatus::Partial
     );
     assert_eq!(
@@ -91,82 +93,7 @@ fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
             .candidate
             .contributions
             .iter()
-            .all(|contribution| contribution.retriever != RetrieverKind::Semantic)
-    }));
-}
-
-#[test]
-fn composition_is_shuffle_stable_and_exact_is_non_demotable() {
-    let exact = exact_candidate("exact", 1);
-    let lexical = candidate(RetrieverKind::Lexical, "lexical", 900_000, 0);
-    let graph = candidate(RetrieverKind::Graph, "graph", 800_000, 0);
-    let lanes = vec![
-        (
-            RetrieverKind::ExactLiteral,
-            RetrieverOutcome::Complete(batch(vec![exact], "exact evidence")),
-        ),
-        (
-            RetrieverKind::Lexical,
-            RetrieverOutcome::Complete(batch(vec![lexical], "lexical evidence")),
-        ),
-        (
-            RetrieverKind::Graph,
-            RetrieverOutcome::Complete(batch(vec![graph], "graph evidence")),
-        ),
-    ];
-    let kernel = CompositionKernel::new(id("ranking.fixture.v1"));
-    let first = kernel
-        .compose(
-            &FusionStageInput {
-                profile: profile(),
-                lanes: composition_lanes(lanes.clone()),
-            },
-            &no_caps(),
-        )
-        .expect("composition succeeds");
-
-    for iteration in 0..100 {
-        let mut shuffled = lanes.clone();
-        let offset = iteration % shuffled.len();
-        shuffled.rotate_left(offset);
-        if iteration % 2 == 1 {
-            shuffled.reverse();
-        }
-        let rerun = kernel
-            .compose(
-                &FusionStageInput {
-                    profile: profile(),
-                    lanes: composition_lanes(shuffled),
-                },
-                &no_caps(),
-            )
-            .expect("shuffled composition succeeds");
-        assert_eq!(first, rerun, "shuffle {iteration} changed composition");
-    }
-    assert_eq!(
-        first.ranked_candidates[0].candidate.exact_class,
-        ExactClass::ExactMessage
-    );
-    assert_eq!(
-        first
-            .ranked_candidates
-            .iter()
-            .map(|ranked| ranked.candidate.utility_micros)
-            .collect::<Vec<_>>(),
-        vec![1, 450_000, 200_000]
-    );
-    assert_eq!(first.comparator_records.len(), 3);
-    assert!(first.comparator_records.iter().all(|record| {
-        !record.anchor_id.as_str().is_empty()
-            && !record.logical_evidence_id.as_str().is_empty()
-            && !record.source_occurrence_ids.is_empty()
-    }));
-    assert!(first.ranked_candidates.iter().all(|ranked| {
-        ranked
-            .candidate
-            .decisions
-            .iter()
-            .any(|decision| decision.kind == RankingDecisionKind::ComparatorProvenance)
+            .all(|contribution| contribution.retriever != RetrieverKind::Temporal)
     }));
 }
 
@@ -214,6 +141,153 @@ fn fusion_retains_every_occurrence_evidence_pair_and_contribution() {
         fused.occurrences[1].retriever_evidence_anchor
     );
     assert_eq!(fused.utility_micros, 500_000);
+}
+
+#[test]
+fn one_lane_counts_at_most_its_weight_per_candidate_however_many_chunks_matched() {
+    // One symbol split into three saturating chunks against one symbol that
+    // matched in a single chunk: chunk count must not decide the order.
+    let mut split = Vec::new();
+    for ordinal in 0..3 {
+        let mut chunk = candidate(RetrieverKind::Lexical, "split", 5_000_000, ordinal);
+        chunk.source_occurrence_id = id(&format!("occurrence.split.chunk-{ordinal}"));
+        chunk.retriever_evidence_anchor =
+            tracedecay_domain::RetrievalAnchorId::new(format!("evidence.split.chunk-{ordinal}"))
+                .unwrap();
+        split.push(chunk);
+    }
+    let whole = candidate(RetrieverKind::Lexical, "whole", 6_000_000, 3);
+    let mut lexical = split;
+    lexical.push(whole);
+
+    let output = CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: profile(),
+                lanes: composition_lanes(vec![
+                    (
+                        RetrieverKind::ExactLiteral,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                    (
+                        RetrieverKind::Lexical,
+                        RetrieverOutcome::Complete(batch(lexical, "lexical")),
+                    ),
+                    (
+                        RetrieverKind::Graph,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                ]),
+            },
+            &no_caps(),
+        )
+        .unwrap();
+
+    let ranked = &output.ranked_candidates;
+    assert_eq!(ranked.len(), 2);
+    let split = ranked
+        .iter()
+        .find(|ranked| ranked.candidate.anchor_id.as_str() == "anchor.split")
+        .expect("split symbol fused");
+    assert_eq!(split.candidate.contributions.len(), 3);
+    assert_eq!(
+        split.candidate.utility_micros, 500_000,
+        "three saturating chunks contribute the lexical weight once"
+    );
+    assert_eq!(
+        ranked[0].candidate.anchor_id.as_str(),
+        "anchor.whole",
+        "with equal utility the stronger raw score orders, not the chunk count"
+    );
+}
+
+#[test]
+fn a_caller_anchored_site_outranks_every_exact_hit_that_carries_no_anchor() {
+    // Ordinary task words admitted as exact identifiers fill the page with
+    // exact-class hits; the one site carrying the caller's anchor is an
+    // approximate lexical hit whose anchor tier the lexical calibration
+    // saturates away.
+    let lanes = || {
+        composition_lanes(vec![
+            (
+                RetrieverKind::ExactLiteral,
+                RetrieverOutcome::Complete(batch(
+                    (0..3_u32)
+                        .map(|ordinal| {
+                            let mut hit = exact_candidate(&format!("word-{ordinal}"), 1_000_000);
+                            hit.ordinal_rank = ordinal;
+                            hit
+                        })
+                        .collect(),
+                    "exact",
+                )),
+            ),
+            (
+                RetrieverKind::Lexical,
+                RetrieverOutcome::Complete(batch(
+                    vec![candidate(RetrieverKind::Lexical, "anchored", 900_000, 0)],
+                    "lexical",
+                )),
+            ),
+            (
+                RetrieverKind::Graph,
+                RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+            ),
+        ])
+    };
+    let kernel = CompositionKernel::new(id("ranking.fixture.v1"));
+    let input = FusionStageInput {
+        profile: profile(),
+        lanes: lanes(),
+    };
+    let order = |output: &crate::retrieval::fusion::CompositionOutputV1| {
+        output
+            .ranked_candidates
+            .iter()
+            .map(|ranked| ranked.candidate.anchor_id.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let unanchored = kernel.compose(&input, &no_caps()).unwrap();
+    assert_eq!(
+        order(&unanchored).last().map(String::as_str),
+        Some("anchor.anchored"),
+        "without tiers exact class orders first: {:?}",
+        order(&unanchored)
+    );
+
+    let tiers = BTreeMap::from([(id("anchor.anchored"), 1_u32)]);
+    let anchored = kernel
+        .compose_with_anchor_tiers(&input, &no_caps(), &tiers)
+        .unwrap();
+    assert_eq!(
+        order(&anchored)[0],
+        "anchor.anchored",
+        "{:?}",
+        order(&anchored)
+    );
+    assert_eq!(
+        order(&anchored)[1..],
+        order(&unanchored)[..3],
+        "the unanchored hits keep their exact-first order behind the anchor"
+    );
+    assert_eq!(anchored.comparator_records[0].anchor_tier, 1);
+    assert!(
+        anchored.comparator_records[1..]
+            .iter()
+            .all(|record| record.anchor_tier == 0)
+    );
+    assert!(
+        anchored.ranked_candidates[0]
+            .candidate
+            .decisions
+            .iter()
+            .any(
+                |decision| decision.kind == RankingDecisionKind::ComparatorProvenance
+                    && decision.detail.starts_with("anchor_tier=1;")
+            ),
+        "the provenance names the leading key"
+    );
 }
 
 #[test]
@@ -468,66 +542,6 @@ fn logical_copies_and_file_caps_preserve_contradictions_deterministically() {
     );
     assert_eq!(output.dedupe_decisions.len(), 1);
     assert_eq!(output.diversity_decisions.len(), 0);
-}
-
-#[test]
-fn file_diversity_caps_non_exact_hits_and_refills_from_other_files() {
-    let mut first = candidate(RetrieverKind::Lexical, "file-a-first", 900_000, 0);
-    first.file_occurrence_id = Some(id("file.a"));
-    let mut second = candidate(RetrieverKind::Lexical, "file-a-second", 800_000, 1);
-    second.file_occurrence_id = Some(id("file.a"));
-    let mut capped = candidate(RetrieverKind::Lexical, "file-a-capped", 700_000, 2);
-    capped.file_occurrence_id = Some(id("file.a"));
-    let mut refill = candidate(RetrieverKind::Lexical, "file-b-refill", 600_000, 3);
-    refill.file_occurrence_id = Some(id("file.b"));
-
-    let policy = DiversityPolicy {
-        per_file: Some(2),
-        ..no_caps()
-    };
-    let output = CompositionKernel::new(id("ranking.fixture.v1"))
-        .compose(
-            &FusionStageInput {
-                profile: profile(),
-                lanes: composition_lanes(vec![
-                    (
-                        RetrieverKind::ExactLiteral,
-                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
-                    ),
-                    (
-                        RetrieverKind::Lexical,
-                        RetrieverOutcome::Complete(batch(
-                            vec![first, second, capped, refill],
-                            "lexical",
-                        )),
-                    ),
-                    (
-                        RetrieverKind::Graph,
-                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
-                    ),
-                ]),
-            },
-            &policy,
-        )
-        .expect("file cap applies");
-
-    assert_eq!(
-        output
-            .ranked_candidates
-            .iter()
-            .map(|ranked| ranked.candidate.anchor_id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "anchor.file-a-first",
-            "anchor.file-a-second",
-            "anchor.file-b-refill"
-        ]
-    );
-    assert_eq!(output.diversity_decisions.len(), 1);
-    assert_eq!(
-        output.diversity_decisions[0].decision.detail,
-        "capped by file"
-    );
 }
 
 #[test]
@@ -838,7 +852,7 @@ struct FixedHydrationExecutionControl {
     cancelled: bool,
 }
 
-impl HydrationExecutionControlV1 for FixedHydrationExecutionControl {
+impl RetrievalExecutionControl for FixedHydrationExecutionControl {
     fn elapsed_micros(&self) -> u64 {
         self.elapsed_micros
     }
@@ -1092,36 +1106,6 @@ fn hydration_deadline_is_request_relative_for_older_generation_and_still_cancell
 }
 
 #[test]
-fn default_hydration_control_does_not_charge_generation_age_to_request_deadline() {
-    let mut request = request();
-    request.snapshot.captured_at = tracedecay_domain::UtcMicros(0);
-    let ranked = single_ranked_candidate();
-    let mut deadline_budget = budget();
-    deadline_budget.deadline_micros = Some(1_000_000);
-    let mut source = PreflightHydrationSource {
-        authorizations: 0,
-        preflights: 0,
-        reads: 0,
-        estimated_bytes: 1,
-        mismatched_receipt: false,
-        remaining_deadlines: Vec::new(),
-    };
-
-    let page = CanonicalLateHydration::new(&mut source)
-        .hydrate(&request, &ranked, &deadline_budget)
-        .expect("an older generation does not consume the request deadline");
-
-    assert_eq!(
-        (source.authorizations, source.preflights, source.reads),
-        (1, 1, 1)
-    );
-    assert!(matches!(
-        page.results[0].outcome,
-        HydrationOutcomeV1::Complete(_)
-    ));
-}
-
-#[test]
 fn hydration_rejects_receipts_outside_the_issued_work_permit() {
     let request = request();
     let ranked = single_ranked_candidate();
@@ -1155,21 +1139,21 @@ fn hydration_rejects_receipts_outside_the_issued_work_permit() {
 
 struct MutableHydrationExecutionControl {
     elapsed_micros: u64,
-    cancelled: Rc<Cell<bool>>,
+    cancelled: Arc<AtomicBool>,
 }
 
-impl HydrationExecutionControlV1 for MutableHydrationExecutionControl {
+impl RetrievalExecutionControl for MutableHydrationExecutionControl {
     fn elapsed_micros(&self) -> u64 {
         self.elapsed_micros
     }
 
     fn is_cancelled(&self) -> bool {
-        self.cancelled.get()
+        self.cancelled.load(Ordering::Relaxed)
     }
 }
 
 struct CancellingHydrationSource {
-    cancelled: Rc<Cell<bool>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl LateHydrationSource<String> for CancellingHydrationSource {
@@ -1196,7 +1180,7 @@ impl LateHydrationSource<String> for CancellingHydrationSource {
         candidate: &tracedecay_domain::RankedCandidate,
         _permit: &HydrationWorkPermitV1,
     ) -> HydrationReadOutcomeV1<String> {
-        self.cancelled.set(true);
+        self.cancelled.store(true, Ordering::Relaxed);
         HydrationReadOutcomeV1::Complete {
             payload: "must not publish".to_owned(),
             receipt: receipt(candidate, 1),
@@ -1208,10 +1192,10 @@ impl LateHydrationSource<String> for CancellingHydrationSource {
 fn hydration_rechecks_cancellation_after_source_work_before_publishing_payload() {
     let request = request();
     let ranked = single_ranked_candidate();
-    let cancelled = Rc::new(Cell::new(false));
+    let cancelled = Arc::new(AtomicBool::new(false));
     let control = MutableHydrationExecutionControl {
         elapsed_micros: 0,
-        cancelled: Rc::clone(&cancelled),
+        cancelled: Arc::clone(&cancelled),
     };
     let mut source = CancellingHydrationSource { cancelled };
 

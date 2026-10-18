@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 
 use jsonschema::Validator;
 use serde_json::Value;
-use tracedecay_automation_runtime::automation::skill_frontmatter::{
-    SkillFrontmatterValue, parse_skill_frontmatter,
-};
+use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 
 /// A path relative to the repository root.
 pub fn repo_path(relative: &str) -> PathBuf {
@@ -131,28 +129,4 @@ pub fn is_kebab_case_skill_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
-/// Every regular file under `root`, relative to it, sorted.
-pub fn relative_files_under(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()))
-        {
-            let path = entry.expect("read tree entry").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                files.push(
-                    path.strip_prefix(root)
-                        .expect("collected paths live under root")
-                        .to_path_buf(),
-                );
-            }
-        }
-    }
-    files.sort();
-    files
 }

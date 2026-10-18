@@ -735,6 +735,144 @@ fn purge_access_transition_clears_active_assertion() {
 }
 
 #[test]
+fn supersession_clears_active_assertion_without_purging_payload_access() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE memory_v2_current_facts (
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    payload_access TEXT NOT NULL,
+                    trust_score REAL,
+                    active_assertion_id TEXT,
+                    last_event_id TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (fact_id, owner_kind, project_id)
+                );",
+        )
+        .unwrap();
+    let owner = FactOwnerV1::Profile;
+    let owner_columns = OwnerColumns::new(&owner).unwrap();
+    let source = profile_fact_id("operation.supersession-projection.source");
+    let target = profile_fact_id("operation.supersession-projection.target");
+    connection
+        .execute(
+            "INSERT INTO memory_v2_current_facts (
+                    fact_id, owner_kind, project_id, payload_access, trust_score,
+                    active_assertion_id, last_event_id, updated_at
+                 ) VALUES (?1, 'profile', '', 'eligible', 0.8, ?2, ?3, 1)",
+            params![
+                source.as_str(),
+                FactAssertionId::new("assertion.active").unwrap().as_str(),
+                FactEventId::new("event.previous").unwrap().as_str(),
+            ],
+        )
+        .unwrap();
+    let event = FactLineageEventV1::new(
+        source.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy { fact_id: target },
+            evidence_ids: vec![],
+        },
+        UtcMicros(2),
+        None,
+    )
+    .unwrap();
+    let batch = FactWriteBatch::new(
+        source.clone(),
+        owner,
+        None,
+        vec![event],
+        vec![],
+        vec![],
+        None,
+    )
+    .unwrap();
+    let savepoint = connection.savepoint().unwrap();
+
+    publish_projection(&savepoint, &owner_columns, &batch).unwrap();
+    let (access, active) = savepoint
+        .query_row(
+            "SELECT payload_access, active_assertion_id
+             FROM memory_v2_current_facts
+             WHERE fact_id = ?1 AND owner_kind = 'profile' AND project_id = ''",
+            [source.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .unwrap();
+
+    assert_eq!(access, "eligible");
+    assert_eq!(active, None);
+}
+
+#[test]
+fn supersession_projection_rejects_a_trailing_lineage_event() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE memory_v2_current_facts (
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    payload_access TEXT NOT NULL,
+                    trust_score REAL,
+                    active_assertion_id TEXT,
+                    last_event_id TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (fact_id, owner_kind, project_id)
+                );",
+        )
+        .unwrap();
+    let owner = FactOwnerV1::Profile;
+    let owner_columns = OwnerColumns::new(&owner).unwrap();
+    let source = profile_fact_id("operation.supersession-projection.non-terminal.source");
+    let target = profile_fact_id("operation.supersession-projection.non-terminal.target");
+    let supersession = FactLineageEventV1::new(
+        source.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy { fact_id: target },
+            evidence_ids: vec![],
+        },
+        UtcMicros(2),
+        None,
+    )
+    .unwrap();
+    let retained = FactLineageEventV1::new(
+        source.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::Retained,
+            evidence_ids: vec![],
+        },
+        UtcMicros(3),
+        None,
+    )
+    .unwrap();
+    let batch = FactWriteBatch::new(
+        source,
+        owner,
+        None,
+        vec![supersession, retained],
+        vec![],
+        vec![],
+        None,
+    )
+    .unwrap();
+    let savepoint = connection.savepoint().unwrap();
+
+    let error = publish_projection(&savepoint, &owner_columns, &batch).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("fact supersession must be the final event")
+    );
+}
+
+#[test]
 fn stale_projection_transitions_are_rejected() {
     let mut connection = rusqlite::Connection::open_in_memory().unwrap();
     connection
@@ -792,7 +930,16 @@ fn stale_projection_transitions_are_rejected() {
     )
     .unwrap();
 
-    for event in [stale_trust, stale_access] {
+    for (event, refusal) in [
+        (
+            stale_trust,
+            "Invalid parameter name: fact trust transition is stale",
+        ),
+        (
+            stale_access,
+            "Invalid parameter name: fact payload access transition is stale",
+        ),
+    ] {
         let batch = FactWriteBatch::new(
             fact_id.clone(),
             owner.clone(),
@@ -805,7 +952,12 @@ fn stale_projection_transitions_are_rejected() {
         .unwrap();
         let savepoint = connection.savepoint().unwrap();
 
-        assert!(publish_projection(&savepoint, &owner_columns, &batch).is_err());
+        assert_eq!(
+            publish_projection(&savepoint, &owner_columns, &batch)
+                .unwrap_err()
+                .to_string(),
+            refusal
+        );
     }
 }
 
@@ -910,7 +1062,10 @@ fn lineage_read_rejects_stored_event_identity_mismatch() {
         .unwrap();
     let query = FactLineageQuery::new(FactOwnerV1::Profile, requested_fact_id, None, 10).unwrap();
 
-    assert!(read_lineage(&connection, &query).is_err());
+    assert_eq!(
+        read_lineage(&connection, &query).unwrap_err().to_string(),
+        "Invalid parameter name: stored lineage event identity mismatch"
+    );
 }
 
 #[test]

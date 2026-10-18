@@ -2,27 +2,36 @@
 //!
 //! Literal/regex search over UTF-8 text sources in the project working tree
 //! (respecting `.gitignore`). This closes the gap that made agents fall back
-//! to raw `rg` —
+//! to raw `rg`.
 //! `tracedecay_search` only matches symbol *names*, not file *content*.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde_json::{Value, json};
-use tracedecay_application::{
-    CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, Omission,
-    OmissionReason,
-};
+use serde_json::Value;
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::grep_search::{
     GrepScanOmissionsV1, GrepSearchHit, GrepSearchQuery, MAX_INTERACTIVE_SOURCE_BYTES,
     MAX_LINE_BYTES, search_tree_with_cancel,
 };
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
+    GrepGraphEnrichmentV1, GrepMatchV1, GrepScanOmissionsV1 as GrepScanOmissionCountsV1,
+    GrepSearchResultV1, GrepSurfaceRequestV1,
+};
+use tracedecay_contracts::{
+    CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, Omission,
+    OmissionReason,
+};
+use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 use crate::ToolResult;
+use crate::handlers::graph::graph_tool_completion;
 use crate::handlers::run_bounded_search;
+use crate::handlers::support::{decode_primitive_request, text_tool_result};
 use crate::tools::render::{self, Md};
 use crate::unique_file_paths;
 
@@ -34,149 +43,119 @@ const DEFAULT_MAX_RESULTS: usize = 50;
 const MAX_CONTEXT_LINES: usize = 3;
 /// Maximum graph symbols inspected while enriching one bounded grep response.
 const MAX_ENRICHMENT_SYMBOLS: usize = 500_000;
-/// A single bounded content-search hit.
-struct GrepHit {
-    file: String,
-    line: u32,
-    text: String,
-    before: Vec<String>,
-    after: Vec<String>,
-    symbol: Option<String>,
-    node_id: Option<String>,
-}
 
-impl From<GrepSearchHit> for GrepHit {
-    fn from(hit: GrepSearchHit) -> Self {
-        Self {
-            file: hit.file,
-            line: hit.line,
-            text: hit.text,
-            before: hit.before,
-            after: hit.after,
-            symbol: None,
-            node_id: None,
-        }
+fn grep_match(hit: GrepSearchHit) -> GrepMatchV1 {
+    GrepMatchV1 {
+        file: hit.file.to_string(),
+        line: hit.line,
+        text: hit.text,
+        before: hit.before,
+        after: hit.after,
+        symbol: None,
+        node_id: None,
     }
 }
 
-#[hotpath::measure(future = true, label = "mcp.search.grep.total")]
-pub async fn handle_grep(
+#[tracing::instrument(name = "mcp.search.grep.total", level = "trace", skip_all)]
+pub async fn compute_grep(
     project_root: &Path,
+    path_policy: &IndexPathPolicyV1,
     graph: std::result::Result<&VerifiedGraphQuery, &TraceDecayError>,
     args: Value,
     scope_prefix: Option<&str>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
-) -> Result<ToolResult> {
-    let pattern =
-        args.get("pattern")
-            .and_then(Value::as_str)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: pattern".to_string(),
-            })?;
-    if pattern.is_empty() {
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
+) -> Result<GraphToolCompletionV1> {
+    let request: GrepSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_grep")?;
+    if request.pattern.is_empty() {
         return Err(TraceDecayError::Config {
             message: "pattern must not be empty".to_string(),
         });
     }
-
-    let fixed_strings = args
-        .get("fixed_strings")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let case_sensitive = args
-        .get("case_sensitive")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let path_glob = args
-        .get("path_glob")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let max_results = args
-        .get("max_results")
-        .and_then(Value::as_u64)
+    let max_results = request
+        .max_results
         .map_or(DEFAULT_MAX_RESULTS, |v| (v as usize).min(MAX_RESULTS_CAP))
         .max(1);
-    let context_lines = args
-        .get("context_lines")
-        .and_then(Value::as_u64)
+    let context_lines = request
+        .context_lines
         .map_or(0, |v| (v as usize).min(MAX_CONTEXT_LINES));
 
     let project_root_buf = project_root.to_path_buf();
+    let path_policy = path_policy.clone();
+    let pattern = request.pattern.clone();
     let query = GrepSearchQuery {
-        pattern: pattern.to_owned(),
-        fixed_strings,
-        case_sensitive,
-        path_glob,
+        pattern: request.pattern,
+        fixed_strings: request.fixed_strings.unwrap_or(false),
+        case_sensitive: request.case_sensitive.unwrap_or(false),
+        path_glob: request.path_glob,
+        scope_prefix: scope_prefix.map(str::to_owned),
         context_lines,
         max_results,
     };
-    let scan = hotpath::future!(
+    let scan = tracing::Instrument::instrument(
         run_bounded_search(
             "tracedecay_grep",
-            pattern.to_owned(),
+            pattern,
             deadline,
             cancellation,
             move |cancelled, transport_cancellation| {
-                search_tree_with_cancel(&project_root_buf, &query, || {
+                search_tree_with_cancel(&project_root_buf, &query, &path_policy, || {
                     cancelled.load(std::sync::atomic::Ordering::Acquire)
                         || transport_cancellation
                             .as_ref()
-                            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+                            .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
                 })
             },
         ),
-        label = "mcp.search.grep.scan"
+        tracing::trace_span!("mcp.search.grep.scan"),
     )
     .await?;
 
-    // Scope filtering mirrors `tracedecay_search`: when the client pins a
-    // subtree, only hits under it are returned.
-    let mut hits = scan
-        .hits
-        .into_iter()
-        .map(GrepHit::from)
-        .filter(|hit| {
-            tracedecay_runtime_core::path_scope::path_matches_scope(hit.file.as_str(), scope_prefix)
-        })
-        .collect::<Vec<_>>();
+    let mut hits = scan.hits.into_iter().map(grep_match).collect::<Vec<_>>();
     let truncated = scan.truncated || hits.len() > max_results;
     hits.truncate(max_results);
 
-    let graph_error = match graph {
-        Ok(graph) => {
-            enrich_hits_from_graph(graph, &mut hits)?;
-            None
-        }
-        Err(error) => Some(error),
+    // Enrichment is the same optional accelerator as the open itself: a
+    // published occurrence graph still refuses catalog-backed lookups while
+    // its interactive catalog warms, and that refusal is retryable state the
+    // one-shot caller never re-sends. Report it beside the lexical answer.
+    let enrichment_error = match graph {
+        Ok(graph) => enrich_hits_from_graph(graph, &mut hits).err(),
+        Err(_) => None,
     };
+    let graph_error = enrichment_error.as_ref().or_else(|| graph.err());
     let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_str()));
-    let mut output_value = build_output_value(
-        &hits,
+    let graph_enrichment = graph_enrichment(&hits, graph_error);
+    let result = grep_result(
+        hits,
         truncated,
         scan.files_scanned,
         scan.lines_examined,
         scan.omissions,
+        graph_enrichment,
     );
-    output_value["graph_enrichment"] = graph_enrichment_value(&hits, graph_error);
-
-    let text = hotpath::measure_block!(
-        "mcp.search.grep.render",
-        render::finalize(Some(project_root), &args, &output_value, || {
-            render_grep_md(&hits, truncated, scan.files_scanned, scan.omissions)
-        })
-    );
-    // Grep aggregates more raw content than any other search tool; the encoded
-    // payload size explains transport pressure that timing alone cannot.
-    hotpath::gauge!("mcp.search.grep.response_bytes").set(text.len());
-    Ok(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Grep(result),
         touched_files,
     ))
 }
 
-#[hotpath::measure]
-fn enrich_hits_from_graph(graph: &VerifiedGraphQuery, hits: &mut [GrepHit]) -> Result<()> {
+/// Renders a grep result as its tool text, with `value` as its JSON body.
+pub fn render_grep(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    result: &GrepSearchResultV1,
+) -> Result<ToolResult> {
+    let text = {
+        let _span = tracing::trace_span!("mcp.search.grep.render").entered();
+        render::finalize(response_handle_root, args, value, || render_grep_md(result))
+    };
+    Ok(text_tool_result(&text, Vec::new()))
+}
+
+#[tracing::instrument(level = "trace", skip_all)]
+fn enrich_hits_from_graph(graph: &VerifiedGraphQuery, hits: &mut [GrepMatchV1]) -> Result<()> {
     let paths = hits
         .iter()
         .map(|hit| hit.file.clone())
@@ -234,32 +213,32 @@ fn enrich_hits_from_graph(graph: &VerifiedGraphQuery, hits: &mut [GrepHit]) -> R
     Ok(())
 }
 
-#[hotpath::measure]
-fn graph_enrichment_value(hits: &[GrepHit], error: Option<&TraceDecayError>) -> Value {
+#[tracing::instrument(level = "trace", skip_all)]
+fn graph_enrichment(
+    hits: &[GrepMatchV1],
+    error: Option<&TraceDecayError>,
+) -> GrepGraphEnrichmentV1 {
     if let Some(error) = error {
         return match error.project_route_context() {
-            Some((reason_code, retryable, detail)) => json!({
-                "status": "unavailable",
-                "reason_code": reason_code,
-                "retryable": retryable,
-                "detail": detail,
-            }),
-            None => json!({
-                "status": "unavailable",
-                "reason_code": "verified-code-graph-read-unavailable",
-                "retryable": false,
-                "detail": error.to_string(),
-            }),
+            Some((reason_code, retryable, detail)) => GrepGraphEnrichmentV1::Unavailable {
+                reason_code: reason_code.to_owned(),
+                retryable,
+                detail: detail.to_owned(),
+            },
+            None => GrepGraphEnrichmentV1::Unavailable {
+                reason_code: "verified-code-graph-read-unavailable".to_owned(),
+                retryable: false,
+                detail: error.to_string(),
+            },
         };
     }
-    json!({
-        "status": "complete",
-        "enriched": hits.iter().filter(|hit| hit.node_id.is_some()).count(),
-        "returned": hits.len(),
-    })
+    GrepGraphEnrichmentV1::Complete {
+        enriched: hits.iter().filter(|hit| hit.node_id.is_some()).count() as u64,
+        returned: hits.len() as u64,
+    }
 }
 
-#[hotpath::measure]
+#[tracing::instrument(level = "trace", skip_all)]
 fn grep_metadata(
     lines_examined: usize,
     returned: usize,
@@ -306,61 +285,42 @@ fn grep_metadata(
     (coverage, omissions)
 }
 
-fn build_output_value(
-    hits: &[GrepHit],
+fn grep_result(
+    hits: Vec<GrepMatchV1>,
     truncated: bool,
     files_scanned: usize,
     lines_examined: usize,
     omission_counts: GrepScanOmissionsV1,
-) -> Value {
-    let items: Vec<Value> = hits
-        .iter()
-        .map(|hit| {
-            let mut item = json!({
-                "file": hit.file,
-                "line": hit.line,
-                "text": hit.text,
-            });
-            if !hit.before.is_empty() {
-                item["before"] = json!(hit.before);
-            }
-            if !hit.after.is_empty() {
-                item["after"] = json!(hit.after);
-            }
-            if let Some(symbol) = &hit.symbol {
-                item["symbol"] = json!(symbol);
-            }
-            if let Some(node_id) = &hit.node_id {
-                item["node_id"] = json!(node_id);
-            }
-            item
-        })
-        .collect();
+    graph_enrichment: GrepGraphEnrichmentV1,
+) -> GrepSearchResultV1 {
     let (coverage, omissions) =
         grep_metadata(lines_examined, hits.len(), truncated, omission_counts);
-
-    json!({
-        "results": items,
-        "match_count": hits.len(),
-        "files_scanned": files_scanned,
-        "truncated": truncated,
-        "coverage": coverage,
-        "omissions": omissions,
-    })
+    GrepSearchResultV1 {
+        match_count: hits.len() as u64,
+        results: hits,
+        files_scanned: files_scanned as u64,
+        truncated,
+        coverage,
+        omissions,
+        scan_omissions: GrepScanOmissionCountsV1 {
+            oversized_files: omission_counts.oversized_files as u64,
+            oversized_lines: omission_counts.oversized_lines as u64,
+            unavailable_sources: omission_counts.unavailable_sources as u64,
+        },
+        graph_enrichment,
+        freshness: None,
+    }
 }
 
-fn render_grep_md(
-    hits: &[GrepHit],
-    truncated: bool,
-    files_scanned: usize,
-    omission_counts: GrepScanOmissionsV1,
-) -> String {
+fn render_grep_md(result: &GrepSearchResultV1) -> String {
+    let hits = &result.results;
+    let files_scanned = result.files_scanned;
     let mut md = Md::new();
     md.heading(2, "Grep Results");
     if hits.is_empty() {
         md.empty_note("No matching lines.");
         md.line(&format!("_Scanned {files_scanned} files._"));
-        append_partial_coverage_md(&mut md, omission_counts);
+        append_partial_coverage_md(&mut md, result.scan_omissions);
         return md.render();
     }
 
@@ -381,24 +341,24 @@ fn render_grep_md(
     if hits.iter().any(|hit| hit.node_id.is_some()) {
         md.blank();
         md.line(
-            "_Use `tracedecay_body` with a result's `node_id` to read the verified enclosing symbol._",
+            "_Use `tracedecay_source_body` with a result's `node_id` to read the verified enclosing symbol._",
         );
     }
 
     md.blank();
-    let mut summary = format!("_{} matches across {files_scanned} files._", hits.len());
-    if truncated {
+    let mut summary = format!("_{} matches; {files_scanned} files scanned._", hits.len());
+    if result.truncated {
         let _ = write!(
             summary,
-            " Results capped — narrow with `path_glob` or a more specific pattern."
+            " Results capped. Narrow with `path_glob` or a more specific pattern."
         );
     }
     md.line(&summary);
-    append_partial_coverage_md(&mut md, omission_counts);
+    append_partial_coverage_md(&mut md, result.scan_omissions);
     md.render()
 }
 
-fn append_partial_coverage_md(md: &mut Md, omissions: GrepScanOmissionsV1) {
+fn append_partial_coverage_md(md: &mut Md, omissions: GrepScanOmissionCountsV1) {
     if omissions.oversized_files > 0 {
         let noun = if omissions.oversized_files == 1 {
             "file"
@@ -441,6 +401,7 @@ fn append_partial_coverage_md(md: &mut Md, omissions: GrepScanOmissionsV1) {
 mod tests {
     use std::path::Path;
 
+    use serde_json::json;
     use tracedecay_code_index::grep_search::GrepSearchResult;
 
     use super::*;
@@ -450,7 +411,7 @@ mod tests {
         pattern: &str,
         path_glob: Option<&str>,
         max_results: usize,
-        is_cancelled: impl Fn() -> bool,
+        is_cancelled: impl Fn() -> bool + Sync,
     ) -> GrepSearchResult {
         search_tree_with_cancel(
             project,
@@ -459,9 +420,11 @@ mod tests {
                 fixed_strings: false,
                 case_sensitive: true,
                 path_glob: path_glob.map(str::to_owned),
+                scope_prefix: None,
                 context_lines: 0,
                 max_results,
             },
+            &tracedecay_code_index_runtime::registry_default_index_path_policy(),
             is_cancelled,
         )
         .expect("bounded scan")
@@ -486,7 +449,7 @@ mod tests {
         );
 
         assert_eq!(scan.hits.len(), 1, "{scan:?}");
-        assert_eq!(scan.hits[0].file, "docs/plans/notes.md");
+        assert_eq!(scan.hits[0].file.as_ref(), "docs/plans/notes.md");
         assert_eq!(scan.hits[0].line, 3);
         assert!(
             scan.hits[0]
@@ -535,7 +498,7 @@ mod tests {
         let files = scan
             .hits
             .iter()
-            .map(|hit| hit.file.as_str())
+            .map(|hit| hit.file.as_ref())
             .collect::<Vec<_>>();
 
         assert!(files.contains(&"src/tracked.rs"), "{files:?}");
@@ -624,7 +587,7 @@ mod tests {
         let files = scan
             .hits
             .iter()
-            .map(|hit| hit.file.as_str())
+            .map(|hit| hit.file.as_ref())
             .collect::<Vec<_>>();
         assert!(
             files.contains(&"dist/generated.js"),
@@ -638,41 +601,41 @@ mod tests {
         std::fs::write(path, source).expect("oversized fixture");
     }
 
-    fn assert_partial_output(output: &Value, visited: u64, returned: u64, omissions: Value) {
+    fn assert_partial_output(output: &Value, visited: u64, returned: u64, omissions: &Value) {
         assert_eq!(output["truncated"], json!(false));
         assert_eq!(output["coverage"]["completeness"], json!("partial"));
         assert_eq!(output["coverage"]["visited"], json!(visited));
         assert_eq!(output["coverage"]["eligible"], Value::Null);
         assert_eq!(output["coverage"]["returned"], json!(returned));
-        assert_eq!(output["omissions"], omissions);
+        assert_eq!(&output["omissions"], omissions);
     }
 
-    fn scan_output(project: &Path, pattern: &str) -> (GrepSearchResult, Value) {
-        let scan = scan(project, pattern, None, 10, || false);
+    fn scan_result(scan: &GrepSearchResult) -> GrepSearchResultV1 {
         let hits = scan
             .hits
             .iter()
             .cloned()
-            .map(GrepHit::from)
+            .map(grep_match)
             .collect::<Vec<_>>();
-        let output = build_output_value(
-            &hits,
+        let enrichment = graph_enrichment(&hits, None);
+        grep_result(
+            hits,
             scan.truncated,
             scan.files_scanned,
             scan.lines_examined,
             scan.omissions,
-        );
+            enrichment,
+        )
+    }
+
+    fn scan_output(project: &Path, pattern: &str) -> (GrepSearchResult, Value) {
+        let scan = scan(project, pattern, None, 10, || false);
+        let output = serde_json::to_value(scan_result(&scan)).expect("grep result JSON");
         (scan, output)
     }
 
     fn rendered_scan(scan: &GrepSearchResult) -> String {
-        let hits = scan
-            .hits
-            .iter()
-            .cloned()
-            .map(GrepHit::from)
-            .collect::<Vec<_>>();
-        render_grep_md(&hits, scan.truncated, scan.files_scanned, scan.omissions)
+        render_grep_md(&scan_result(scan))
     }
 
     fn one_budget_omission() -> Value {
@@ -689,10 +652,10 @@ mod tests {
 
         let (scan, output) = scan_output(project.path(), "OVERSIZED_ONLY_TOKEN");
 
-        assert!(scan.hits.is_empty());
+        assert_eq!(scan.hits.len(), 0);
         assert_eq!(scan.omissions.oversized_files, 1);
         assert!(!scan.truncated);
-        assert_partial_output(&output, 0, 0, one_budget_omission());
+        assert_partial_output(&output, 0, 0, &one_budget_omission());
 
         let markdown = rendered_scan(&scan);
         assert!(markdown.contains("No matching lines."), "{markdown}");
@@ -720,13 +683,13 @@ mod tests {
         let (scan, output) = scan_output(project.path(), "MIXED_OVERSIZED_TOKEN");
 
         assert_eq!(scan.hits.len(), 1);
-        assert_eq!(scan.hits[0].file, "tracked.txt");
+        assert_eq!(scan.hits[0].file.as_ref(), "tracked.txt");
         assert_eq!(scan.files_scanned, 1);
         assert_eq!(scan.lines_examined, 3);
         assert_eq!(scan.omissions.oversized_files, 1);
         assert!(!scan.truncated);
         assert_eq!(output["results"][0]["file"], json!("tracked.txt"));
-        assert_partial_output(&output, 3, 1, one_budget_omission());
+        assert_partial_output(&output, 3, 1, &one_budget_omission());
 
         let markdown = rendered_scan(&scan);
         assert!(markdown.contains("tracked.txt:2"), "{markdown}");
@@ -747,7 +710,7 @@ mod tests {
 
         assert_eq!(scan.lines_examined, 1);
         assert_eq!(scan.omissions.oversized_lines, 1);
-        assert_partial_output(&output, 1, 0, one_budget_omission());
+        assert_partial_output(&output, 1, 0, &one_budget_omission());
 
         let markdown = rendered_scan(&scan);
         assert!(
@@ -765,13 +728,21 @@ mod tests {
             unavailable_sources: 2,
             ..GrepScanOmissionsV1::default()
         };
-        let output = build_output_value(&[], false, 0, 0, omission_counts);
+        let result = grep_result(
+            Vec::new(),
+            false,
+            0,
+            0,
+            omission_counts,
+            graph_enrichment(&[], None),
+        );
+        let output = serde_json::to_value(&result).expect("grep result JSON");
 
         assert_partial_output(
             &output,
             0,
             0,
-            json!([
+            &json!([
                 {
                     "domain": "source",
                     "count": 1,
@@ -785,7 +756,7 @@ mod tests {
             ]),
         );
 
-        let markdown = render_grep_md(&[], false, 0, omission_counts);
+        let markdown = render_grep_md(&result);
         assert!(
             markdown.contains(&format!(
                 "skipped 1 line longer than the {MAX_LINE_BYTES}-byte scan limit"
@@ -795,6 +766,310 @@ mod tests {
         assert!(
             markdown.contains("2 source candidates were unavailable"),
             "{markdown}"
+        );
+    }
+
+    const ENRICHMENT_TOKEN: &str = "GREP_ENRICHMENT_REFUSAL_TOKEN";
+    const ENRICHED_FILE: &str = "src/lib.rs";
+    const ENRICHED_LINE: u32 = 2;
+    const ENRICHED_TEXT: &str = "    let _ = \"GREP_ENRICHMENT_REFUSAL_TOKEN\";";
+    const ENRICHED_SOURCE: &str =
+        "pub fn greet() {\n    let _ = \"GREP_ENRICHMENT_REFUSAL_TOKEN\";\n}\n";
+    const ENRICHED_SYMBOL: &str = "greet";
+    const ENRICHED_OCCURRENCE: &str = "symbol.grep-enrichment.greet";
+
+    fn fixture_id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("valid fixture identity")
+    }
+
+    fn fixture_digest<T>(fill: char) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        fixture_id(&format!("sha256:{}", String::from(fill).repeat(64)))
+    }
+
+    /// A request context whose deadline the caller chooses. A deadline already
+    /// in the past is the retryable refusal a published-but-warming graph
+    /// answers catalog-backed lookups with.
+    fn fixture_request_context(
+        cancellation: &tracedecay_contracts::CancellationSignal,
+        expires_at: tracedecay_domain::UtcMicros,
+    ) -> tracedecay_contracts::RequestContext {
+        use tracedecay_contracts::{
+            CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext,
+            RequestId, ResolvedScope,
+        };
+        use tracedecay_domain::{ActorId, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId};
+
+        let scope = ResolvedScope::new(
+            fixture_id::<ProjectId>("project.grep-enrichment.fixture"),
+            fixture_id::<RepositoryId>("repository.grep-enrichment.fixture"),
+            fixture_id::<WorktreeId>("worktree.grep-enrichment.fixture"),
+            Some(fixture_id::<RefId>("refs/heads/grep-enrichment-fixture")),
+        )
+        .expect("fixture resolved scope");
+        let grant = CapabilityGrantSnapshot::new(
+            fixture_id::<CapabilityGrantId>("grant.grep-enrichment.fixture"),
+            1,
+            fixture_digest('a'),
+            fixture_id::<ActorId>("actor.grep-enrichment-fixture.issuer"),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            scope.clone(),
+            std::collections::BTreeSet::from([
+                fixture_id::<tracedecay_tool_catalog::CapabilityId>(
+                    "capability.grep-enrichment.fixture",
+                ),
+            ]),
+            std::collections::BTreeSet::from([fixture_id::<tracedecay_tool_catalog::UseCaseId>(
+                "use-case.grep-enrichment.fixture",
+            )]),
+            DisclosureClass::Evidence,
+        )
+        .expect("fixture capability grant");
+        RequestContext::new(
+            fixture_id::<ActorId>("actor.grep-enrichment-fixture.requester"),
+            scope,
+            grant,
+            fixture_id::<RequestId>("request.grep-enrichment.fixture"),
+            Deadline::new(expires_at).expect("fixture deadline"),
+            cancellation.context(),
+        )
+        .expect("fixture request context")
+    }
+
+    /// One published generation holding `greet`, whose line span covers the
+    /// token line in [`ENRICHED_SOURCE`].
+    fn fixture_graph(
+        cancellation: &tracedecay_contracts::CancellationSignal,
+        expires_at: tracedecay_domain::UtcMicros,
+    ) -> tracedecay_graph_query::VerifiedGraphQuery {
+        use std::sync::Arc;
+        use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
+        use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+        use tracedecay_domain::{
+            BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
+            CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1, ContentDigest,
+            FileOccurrenceId, LanguageDescriptorRevision, LanguageId, PolicyRevisionId,
+            SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+            SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
+        };
+
+        let generation = fixture_id::<CodeGenerationId>("generation.grep-enrichment.1");
+        let file = fixture_id::<FileOccurrenceId>("file.grep-enrichment.lib");
+        let occurrence = fixture_id::<SymbolOccurrenceId>(ENRICHED_OCCURRENCE);
+        let files = [SanitizedCodeFileV1 {
+            file_occurrence_id: file.clone(),
+            logical_path: ENRICHED_FILE.to_owned(),
+            language: Some(LanguageId::new("rust").expect("fixture language")),
+            content_digest: fixture_digest('b'),
+            disposition: SnapshotFileDispositionV1::Present,
+        }];
+        let symbols = vec![Arc::new(LineageSymbolRecordV1 {
+            occurrence: occurrence.clone(),
+            identity: fixture_digest('c'),
+            qualified_name: ENRICHED_SYMBOL.to_owned(),
+            simple_name: ENRICHED_SYMBOL.to_owned(),
+            kind: "function".to_owned(),
+            visibility: "public".to_owned(),
+            branches: 0,
+            loops: 0,
+            max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            // `start_line` is zero-based, so this spans source lines 1 to 3.
+            line_span: 3,
+            start_line: 0,
+            signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
+            skip_test_coverage: false,
+            file_identity: fixture_digest('d'),
+            content_digest: fixture_digest('e'),
+        })];
+        let chunks = [Arc::new(CodeSearchChunkV1 {
+            id: fixture_id("chunk.grep-enrichment.greet"),
+            anchor: CodeSearchChunkAnchorV1 {
+                generation_id: generation.clone(),
+                file_occurrence_id: file,
+                symbol_occurrence_id: Some(occurrence),
+                parent_chunk_id: None,
+                source_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: ENRICHED_SOURCE.len() as u64,
+                },
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                ordinal: 0,
+            },
+            content_digest: fixture_digest::<ContentDigest>('f'),
+            language_descriptor_revision: fixture_id::<LanguageDescriptorRevision>(
+                "language.rust.grep-enrichment.v1",
+            ),
+            chunker_revision: fixture_id::<ChunkerRevision>("chunker.grep-enrichment.v1"),
+            sanitizer_revision: fixture_id::<SanitizerRevision>("sanitizer.grep-enrichment.v1"),
+            sensitivity: SensitivityDecision {
+                level: SensitivityLevelV1::Public,
+                policy_revision: fixture_id::<PolicyRevisionId>("policy.grep-enrichment.v1"),
+            },
+            exact_terms: Vec::new(),
+            subtokens: Vec::new(),
+            sanitized_text: BoundedSanitizedText::new(ENRICHED_SOURCE)
+                .expect("bounded fixture text"),
+        })];
+        let symbols = GenerationSymbolIndexV1::new(generation.clone(), symbols)
+            .expect("valid fixture symbol index");
+
+        let store =
+            HermeticCodeGraphProjectionStore::memory(cancellation).expect("fixture projection");
+        store
+            .publish_indexed_with_cancellation(
+                &generation,
+                &[],
+                &chunks,
+                &files,
+                &symbols,
+                Arc::new(tracedecay_graph_db::NeverCancelled),
+            )
+            .expect("publish fixture generation");
+        let graph_cancellation =
+            tracedecay_graph_query::application_graph_cancellation(cancellation);
+        let reader = store
+            .verified_store(&generation)
+            .expect("open verified fixture generation")
+            .interactive_reader_with_cancellation(&generation, Arc::clone(&graph_cancellation))
+            .expect("open generation-pinned fixture reader");
+        tracedecay_graph_query::VerifiedGraphQuery::from_fixture_reader(
+            reader,
+            graph_cancellation,
+            fixture_request_context(cancellation, expires_at),
+        )
+    }
+
+    async fn grep_token(
+        project: &Path,
+        graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    ) -> Value {
+        let completion = compute_grep(
+            project,
+            &tracedecay_code_index_runtime::registry_default_index_path_policy(),
+            Ok(graph),
+            json!({"pattern": ENRICHMENT_TOKEN, "fixed_strings": true, "format": "json"}),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("grep answers lexically whatever the graph says");
+        completion.result.result_value().expect("grep result JSON")
+    }
+
+    #[tokio::test]
+    async fn grep_keeps_lexical_hits_when_graph_enrichment_refuses() {
+        use tracedecay_domain::UtcMicros;
+
+        let project = tempfile::tempdir().expect("temp project");
+        std::fs::create_dir_all(project.path().join("src")).expect("source fixture directory");
+        std::fs::write(project.path().join(ENRICHED_FILE), ENRICHED_SOURCE)
+            .expect("source fixture");
+        let cancellation = tracedecay_contracts::CancellationSignal::active(
+            "cancellation.grep-enrichment.fixture",
+        )
+        .expect("fixture cancellation");
+        let lexical_hit = json!({
+            "file": ENRICHED_FILE,
+            "line": ENRICHED_LINE,
+            "text": ENRICHED_TEXT,
+        });
+
+        let serving = fixture_graph(&cancellation, UtcMicros(i64::MAX));
+        let enriched = grep_token(project.path(), &serving).await;
+        assert_eq!(
+            enriched["results"],
+            json!([{
+                "file": ENRICHED_FILE,
+                "line": ENRICHED_LINE,
+                "text": ENRICHED_TEXT,
+                "symbol": ENRICHED_SYMBOL,
+                "node_id": ENRICHED_OCCURRENCE,
+            }]),
+            "the same fixture generation does enrich this hit when it answers"
+        );
+        assert_eq!(
+            enriched["graph_enrichment"],
+            json!({"status": "complete", "enriched": 1, "returned": 1})
+        );
+
+        // The generation is published, but the catalog-backed page refuses.
+        let refusing = fixture_graph(&cancellation, UtcMicros(1));
+        let refused = grep_token(project.path(), &refusing).await;
+        assert_eq!(
+            refused["results"],
+            json!([lexical_hit]),
+            "the lexical answer survives the refusal, and claims no symbol"
+        );
+        assert_eq!(refused["match_count"], 1);
+        assert_eq!(
+            refused["graph_enrichment"],
+            json!({
+                "status": "unavailable",
+                "reason_code": "code-graph-timed-out",
+                "retryable": true,
+                "detail": "the code-graph read timed out",
+            }),
+            "the refusal is reported beside the hits rather than replacing them"
+        );
+    }
+
+    #[tokio::test]
+    async fn subtree_scope_is_admitted_before_reads_and_the_result_cap() {
+        let project = tempfile::tempdir().expect("temp project");
+        let outside = project.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        for index in 0..16 {
+            std::fs::write(
+                outside.join(format!("{index}.rs")),
+                "SCOPE_TOKEN\nSCOPE_TOKEN\n",
+            )
+            .expect("outside fixture");
+        }
+        std::fs::create_dir_all(project.path().join("target_scope")).expect("scope directory");
+        std::fs::write(project.path().join("target_scope/hit.rs"), "SCOPE_TOKEN\n")
+            .expect("scoped fixture");
+        let graph_unavailable = TraceDecayError::Config {
+            message: "graph unavailable in this fixture".to_owned(),
+        };
+
+        let completion = compute_grep(
+            project.path(),
+            &tracedecay_code_index_runtime::registry_default_index_path_policy(),
+            Err(&graph_unavailable),
+            json!({"pattern": "SCOPE_TOKEN", "fixed_strings": true, "max_results": 1}),
+            Some("target_scope"),
+            None,
+            None,
+        )
+        .await
+        .expect("scoped grep");
+        let output = completion.result.result_value().expect("grep result JSON");
+
+        assert_eq!(
+            output["results"],
+            json!([{"file": "target_scope/hit.rs", "line": 1, "text": "SCOPE_TOKEN"}]),
+            "out-of-scope matches must not consume the scoped result budget"
+        );
+        assert_eq!(
+            output["truncated"], false,
+            "the scope holds exactly one match"
+        );
+        assert_eq!(
+            output["files_scanned"], 1,
+            "files outside the scope are never read"
         );
     }
 }

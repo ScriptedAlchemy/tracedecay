@@ -1,8 +1,8 @@
 /**
  * The project registry, as one authority.
  *
- * Four surfaces read the registry — the scope bar, the command palette, Remote
- * Brain's overview and its scoped project panel — and each had invented its own
+ * Four surfaces read the registry, the scope bar, the command palette, Remote
+ * Brain's overview and its scoped project panel, and each had invented its own
  * query key. Only one of those keys (`['projects']`) was the key the SSE
  * `project_registry_changed` invalidation names, so a project rename or an
  * active-project switch refreshed Remote Brain and left the scope bar showing
@@ -13,9 +13,10 @@
  * Every key here is rooted at {@link PROJECT_REGISTRY_ROOT}, and the SSE
  * invalidation names that root. React Query matches keys by prefix, so one
  * invalidation reaches the list and every per-project entry without having to
- * enumerate them — and a key added later is covered by construction rather than
+ * enumerate them, and a key added later is covered by construction rather than
  * by remembering to add it to the event handler.
  */
+import { dashboardFetch } from '../auth/credential.ts';
 import { useQuery } from '@tanstack/react-query';
 import {
   DashboardEnvelopeV1Schema,
@@ -28,11 +29,12 @@ import {
 } from '../../contracts/generated.ts';
 import { readOnlyScopeRefusal, scopedQueryKey, useScope } from '../scope/store.ts';
 import type { RegistryReading } from '../scope/store.ts';
+import { decodeJsonBody, UNDECODABLE } from './responseBody.ts';
 import type { WireSchema } from './wireSchema.ts';
 
 /** The prefix every registry query key starts with, and the one the daemon's
  * `project_registry_changed` invalidation names. */
-export const PROJECT_REGISTRY_ROOT = 'projects';
+const PROJECT_REGISTRY_ROOT = 'projects';
 
 /** `status` on a 404 from `GET /api/projects/{id}`: the registry was read and
  * holds no project under that id. Verbatim from `src/dashboard/projects.rs`. */
@@ -59,18 +61,8 @@ export type ProjectRegistryResult<T> =
   | { outcome: 'envelope'; envelope: DashboardEnvelopeV1<T> }
   | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string };
 
-const undecodable = Symbol('undecodable');
-
-async function decodedBody(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return undecodable;
-  }
-}
-
 /**
- * `GET /api/projects` or `GET /api/projects/{id}` — envelope-only.
+ * `GET /api/projects` or `GET /api/projects/{id}`, envelope-only.
  *
  * A body is accepted only when it is `DashboardEnvelopeV1<T>`. The envelope's
  * known registry outcomes (`not_found`, `missing_registry`, and
@@ -84,13 +76,13 @@ export async function fetchProjectRegistry<T>(
 ): Promise<ProjectRegistryResult<T>> {
   let response: Response;
   try {
-    response = await fetch(url, { headers: { accept: 'application/json' }, ...init });
+    response = await dashboardFetch(url, { headers: { accept: 'application/json' }, ...init });
   } catch (err) {
     if (init?.signal?.aborted === true) throw err;
     return { outcome: 'transport', state: 'offline' };
   }
   if (response.status === 405) {
-    const refusal = readOnlyScopeRefusal(await decodedBody(response));
+    const refusal = readOnlyScopeRefusal(await decodeJsonBody(response, init?.signal));
     if (refusal) {
       return { outcome: 'transport', state: 'locked', detail: refusal.detail };
     }
@@ -99,8 +91,8 @@ export async function fetchProjectRegistry<T>(
   if (response.status === 401) return { outcome: 'transport', state: 'unauthorized' };
   if (response.status === 403) return { outcome: 'transport', state: 'denied' };
 
-  const body = await decodedBody(response);
-  if (body === undecodable) {
+  const body = await decodeJsonBody(response, init?.signal);
+  if (body === UNDECODABLE) {
     return { outcome: 'transport', state: 'unsupported_schema' };
   }
   const parsed = DashboardEnvelopeV1Schema(payloadSchema).safeParse(body);
@@ -125,7 +117,7 @@ function isRegistryUnavailableStatus(status: unknown): boolean {
 }
 
 /**
- * `GET /api/projects` — the listing.
+ * `GET /api/projects`, the listing.
  *
  * Truncated by default (the daemon clamps `limit` to 250 and defaults it to
  * 100), so this answers "some of the registry" and callers must not read a
@@ -145,13 +137,13 @@ export function useProjectRegistry(options?: { enabled?: boolean }) {
 }
 
 /**
- * `GET /api/projects/{id}` — one project, exactly.
+ * `GET /api/projects/{id}`, one project, exactly.
  *
  * A single row, so it is bounded regardless of how many projects are
  * registered, and it answers for a project whose graph is not mounted. It
- * carries both facts the scope needs — the canonical `label` and `is_active`,
+ * carries both facts the scope needs, the canonical `label` and `is_active`,
  * which the daemon computes against the same `active_project_id` that decides
- * whether a write is accepted — which is why reconciliation asks this rather
+ * whether a write is accepted, which is why reconciliation asks this rather
  * than searching the listing.
  */
 export function useProjectEntry(projectId: string | null, options?: { enabled?: boolean }) {
@@ -180,8 +172,8 @@ export function projectRegistryPayload<T>(
  *
  * `status: "ok"` is a measurement. A 404 `not_found` is also a measurement, of
  * the opposite fact: the registry was read and holds no project under this id.
- * Everything else — the registry missing or unopenable (503), a transport
- * failure, an unreadable body — is `unknown`, and deliberately so, because the
+ * Everything else, the registry missing or unopenable (503), a transport
+ * failure, an unreadable body, is `unknown`, and deliberately so, because the
  * two mistakes available here are not symmetric. Claiming a measurement would
  * let a failed read discard a label that may well be right and withdraw a
  * write that would have been accepted; `unknown` keeps the best-known name,

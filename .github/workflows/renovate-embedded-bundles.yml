@@ -1,0 +1,91 @@
+# Renovate's hosted app cannot run postUpgradeTasks, so its npm bumps change
+# the minified ChatGPT extension output without rebuilding the committed
+# `plugin/chatgpt-extension/embedded/` files, and CI's `check:embedded` fails.
+# This rebuilds them on Renovate PRs and pushes the result back to the branch.
+#
+# The build job installs the updated dependencies with a read-only token. Only
+# the push job holds RELEASE_PLZ_TOKEN, and it runs no repository code. A
+# GITHUB_TOKEN push would not retrigger CI; the PAT push does, and its actor is
+# not renovate[bot], so this workflow skips that run. renovate.json ignores the
+# github-actions[bot] author, so Renovate keeps rebasing the branch.
+name: Renovate embedded bundles
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "pnpm-lock.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ github.actor }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Rebuild ChatGPT extension bundles
+    if: >-
+      github.actor == 'renovate[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+
+      - uses: ./.github/actions/setup-pnpm
+
+      - name: Build TypeScript SDK for the ChatGPT extension
+        working-directory: sdks/typescript
+        run: pnpm run build
+
+      - name: Build ChatGPT extension embedded artifacts
+        working-directory: plugin/chatgpt-extension
+        run: pnpm run build
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: chatgpt-extension-embedded
+          path: plugin/chatgpt-extension/embedded/
+          if-no-files-found: error
+          retention-days: 1
+
+  push:
+    name: Push regenerated bundles
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: chatgpt-extension-embedded
+          path: plugin/chatgpt-extension/embedded/
+
+      # Pushing the built SHA to the branch fails if Renovate moved it in the
+      # meantime; the newer push starts its own run.
+      - name: Commit and push when the bundles changed
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- plugin/chatgpt-extension/embedded; then
+            echo "Embedded bundles already match the build."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "build(plugin): regenerate ChatGPT extension embedded bundles" -- plugin/chatgpt-extension/embedded
+          git push origin "HEAD:refs/heads/$BRANCH"

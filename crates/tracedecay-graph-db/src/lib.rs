@@ -1,57 +1,55 @@
 mod adjacency_id_index;
-mod backup;
-mod bundle;
+mod corrupt_store;
 mod epoch_cache;
 mod error;
 mod generation;
 mod generation_runtime;
-mod generation_staging_runtime;
-mod hotpath_observe;
 mod lease;
 mod limits;
 mod location;
 mod mutation;
+mod observe;
 mod owner;
 mod point_read;
 mod projection;
 mod projection_identity_index;
 mod projection_read;
 mod publication;
+mod read_meter;
 mod recovery;
 mod registry;
+mod row_index;
 mod runtime;
 mod schema;
+mod sealed_layer;
 mod sealed_store;
-pub mod semantic_vector_native;
 mod state;
-mod store_quarantine;
+#[cfg(test)]
+mod thread_allocation;
 mod traversal;
-mod vector;
 mod verified_marker;
 
-pub use backup::GraphBackupReceipt;
-pub use bundle::{
-    MAX_SEALED_READ_BUNDLE_ARTIFACT_BYTES_V1, SEALED_READ_BUNDLE_FORMAT_V1,
-    SealedReadBundleArtifactStateV1, SealedReadBundleArtifactV1, SealedReadBundleManifestV1,
-    SealedReadBundleWriterV1, load_sealed_read_bundle_artifact, retire_sealed_read_bundle,
-    sweep_aborted_sealed_read_bundle_temporaries,
+pub use error::{
+    GraphBudgetKind, GraphConflictContextV1, GraphDbError, GraphStoreFailureClass,
+    classify_graph_store_error,
 };
-pub use error::{GraphBudgetKind, GraphConflictContextV1, GraphDbError};
 pub use generation::{
-    GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,
+    GRAPH_ROW_SPILL_RUN_BYTES, GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationManifestProvider, GraphGenerationRelation,
-    GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphProjectionIdentity,
-    GraphProjectorRevision, GraphRelationRef, GraphReplayCollectionOutcome,
-    SealedCodeGenerationReplay, SealedGraphStateDigest, SemanticVectorGenerationReplay,
+    GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphGenerationRowSpill,
+    GraphGenerationRows, GraphProjectionIdentity, GraphProjectorRevision, GraphRelationRef,
+    GraphReplayCollectionOutcome, GraphRowDigestSum, GraphSpillRowFootprint,
+    SealedCodeGenerationReplay, SealedGraphStateDigest, SpilledGraphGeneration,
+    SupersededReplayRetirement,
 };
+pub use generation_runtime::{SealedStagingRelease, SealedStagingRetentionReason};
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};
 pub use limits::{
     MAX_GRAPH_BATCH_CANONICAL_BYTES, MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS,
     MAX_GRAPH_IDENTIFIER_BYTES, MAX_GRAPH_PROPERTIES, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
-    MAX_GRAPH_PROPERTY_VALUE_BYTES, MAX_GRAPH_VECTOR_DIMENSION,
-    MAX_SEMANTIC_VECTOR_GRAPH_BATCH_CANONICAL_BYTES, MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
-    MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, MAX_VERIFIED_GENERATION_ENTITIES,
-    MAX_VERIFIED_GENERATION_RELATIONS,
+    MAX_GRAPH_PROPERTY_VALUE_BYTES, MAX_NATIVE_GENERATION_STAGE_MUTATIONS,
+    MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+    MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS,
 };
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 pub use location::{GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphFormatVersion};
@@ -71,11 +69,9 @@ pub use projection::{
     GraphCancellation, GraphCommit, GraphEntity, GraphEntityId, GraphGenerationId,
     GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace, GraphProjectionId,
     GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphVector, GraphWatermark, GraphWriteBatch, SourceGeneration,
+    GraphWatermark, GraphWriteBatch, SourceGeneration,
 };
 pub use projection::{NeverCancelled, ProjectionReplacement};
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-pub use projection_read::GraphProjectionLabelPage;
 pub use projection_read::{
     GraphProjectionPage, GraphProjectionReadRequest, GraphProjectionTelemetry,
     GraphProjectionTelemetryRequest,
@@ -88,17 +84,24 @@ pub use publication::{
 pub(crate) use publication::{
     GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest, GraphPublicationReceipt,
 };
+pub use read_meter::{GraphReadCost, GraphReadMeter};
 pub use recovery::VerifiedGraphCommit;
+pub use registry::{
+    CODE_GRAPH_SHARD_NAMESPACE_PREFIX, code_graph_shard_namespace, is_code_graph_shard_namespace,
+};
 pub use registry::{
     GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryCapacity,
     GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementCommit,
     GraphDbRetirementOutcome, GraphDbRetirementRefusal, GraphDbRetirementReservation,
-    GraphPublicationPreparationV1, ProvenGraphPublicationV1, SemanticVectorRetentionAction,
-    SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
-    SemanticVectorRetirementReservation, VerifiedGenerationBatchApply,
-    VerifiedGenerationBatchCommit,
+    GraphPublicationPreparationV1, ProvenGraphPublicationV1,
 };
-pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
+pub use runtime::{GraphDb, GraphDbRuntimeState, GraphServingEnginePin, GraphSnapshot};
+pub use schema::graph_stable_identity;
+pub use sealed_layer::{
+    GraphLayeredRowSpill, GraphLayeredRowsV1, GraphSealedBaseAbsenceV1, GraphSealedBaseV1,
+    GraphSiblingSealedBaseV1, LayeredGraphGeneration,
+};
+pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 
 /// What hydration decoded on **this thread** since the last take.
 ///
@@ -117,13 +120,13 @@ pub struct GraphDbHydrationCounters {
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn take_graph_db_hydration_counters() -> GraphDbHydrationCounters {
-    hotpath_observe::take_hydration_counters()
+    observe::take_hydration_counters()
 }
 
 /// How sealed-generation verification resolved on **this thread** since the
 /// last take.
 ///
-/// Independent of the Hotpath feature on purpose: a test that asserts a marker
+/// Independent of measurement instrumentation on purpose: a test that asserts a marker
 /// hit skipped the row enumeration must be able to observe that in an ordinary
 /// build.
 ///
@@ -145,7 +148,7 @@ pub struct GraphDbVerificationCounters {
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn take_graph_db_verification_counters() -> GraphDbVerificationCounters {
-    hotpath_observe::take_verification_counters()
+    observe::take_verification_counters()
 }
 
 /// Fan-out decode, quarantine-lock, and epoch-cache work on **this thread**
@@ -167,13 +170,20 @@ pub struct GraphDbTraversalCounters {
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn take_graph_db_traversal_counters() -> GraphDbTraversalCounters {
-    hotpath_observe::take_traversal_counters()
+    observe::take_traversal_counters()
+}
+
+/// Runs `run` with `hook` called on **this thread** just before each lock
+/// wait, with the lock's `graph_db.lock.wait.*` label. Lock waits on other
+/// threads never call it.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn with_graph_db_lock_wait_hook<R>(
+    hook: impl FnMut(&'static str) + 'static,
+    run: impl FnOnce() -> R,
+) -> R {
+    observe::lock_wait_hook::with(hook, run)
 }
 pub use traversal::{
     GraphRelationTarget, GraphTraversalDirection, RelationFanoutOverflow, TraversalRequest,
     TraversalResult, TraversalVisit,
-};
-pub use vector::{
-    GraphVectorIndexRequest, GraphVectorIndexStatus, MAX_VECTOR_SEARCH_LIMIT, VectorMatch,
-    VectorMetric, VectorSearchRequest, VectorSearchResult,
 };

@@ -1,6 +1,5 @@
 //! Canonical public HTTP adapter for daemon-owned handoff opens.
 
-use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -9,40 +8,25 @@ use axum::extract::{DefaultBodyLimit, Extension, Path, State};
 use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
-use schemars::JsonSchema;
 use serde_json::Value;
-use tracedecay_application::{
-    ApplicationProblem, IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1,
-    ListTaskHandoffsRequestV1, ListTaskHandoffsResultV1, OpenInvestigationHandoffRequestV1,
-    OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1, RequestId,
-    RetryDirective,
-};
+use tracedecay_contracts::RequestId;
 
 use crate::http::{
-    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
+    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, dispatch_json_operation,
     invalid_request_response,
 };
 
-fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
-    T::schema_name()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum HandoffOperation {
-    IssueTaskHandoff,
-    ListTaskHandoffs,
-    OpenInvestigationHandoff,
-    OpenTaskHandoff,
+mounted_operations! {
+    pub enum HandoffOperation;
+    id_prefix = "operation.handoff.",
+    route_prefix = "handoff",
+    IssueTaskHandoff: "issue_task_handoff", "issue-task";
+    ListTaskHandoffs: "list_task_handoffs", "list-task";
+    OpenInvestigationHandoff: "open_investigation_handoff", "open-investigation";
+    OpenTaskHandoff: "open_task_handoff", "open-task";
 }
 
 impl HandoffOperation {
-    pub const ALL: [Self; 4] = [
-        Self::IssueTaskHandoff,
-        Self::ListTaskHandoffs,
-        Self::OpenInvestigationHandoff,
-        Self::OpenTaskHandoff,
-    ];
-
     /// True for operations that only read the grant store.
     ///
     /// The three token operations issue or consume a grant. Enumeration only
@@ -50,67 +34,6 @@ impl HandoffOperation {
     /// mutation for retry and replay purposes.
     pub const fn is_read_only(self) -> bool {
         matches!(self, Self::ListTaskHandoffs)
-    }
-
-    pub const fn operation_id_str(self) -> &'static str {
-        match self {
-            Self::IssueTaskHandoff => "operation.handoff.issue_task_handoff",
-            Self::ListTaskHandoffs => "operation.handoff.list_task_handoffs",
-            Self::OpenInvestigationHandoff => "operation.handoff.open_investigation_handoff",
-            Self::OpenTaskHandoff => "operation.handoff.open_task_handoff",
-        }
-    }
-
-    pub const fn route_segment(self) -> &'static str {
-        match self {
-            Self::IssueTaskHandoff => "issue-task",
-            Self::ListTaskHandoffs => "list-task",
-            Self::OpenInvestigationHandoff => "open-investigation",
-            Self::OpenTaskHandoff => "open-task",
-        }
-    }
-
-    pub const fn route_path(self) -> &'static str {
-        match self {
-            Self::IssueTaskHandoff => "/handoff/issue-task",
-            Self::ListTaskHandoffs => "/handoff/list-task",
-            Self::OpenInvestigationHandoff => "/handoff/open-investigation",
-            Self::OpenTaskHandoff => "/handoff/open-task",
-        }
-    }
-
-    pub const fn application_route_path(self) -> &'static str {
-        match self {
-            Self::IssueTaskHandoff => "/application/handoff/issue-task",
-            Self::ListTaskHandoffs => "/application/handoff/list-task",
-            Self::OpenInvestigationHandoff => "/application/handoff/open-investigation",
-            Self::OpenTaskHandoff => "/application/handoff/open-task",
-        }
-    }
-
-    pub fn request_schema_name(self) -> Cow<'static, str> {
-        match self {
-            Self::IssueTaskHandoff => schema_name::<IssueTaskHandoffRequestV1>(),
-            Self::ListTaskHandoffs => schema_name::<ListTaskHandoffsRequestV1>(),
-            Self::OpenInvestigationHandoff => schema_name::<OpenInvestigationHandoffRequestV1>(),
-            Self::OpenTaskHandoff => schema_name::<OpenTaskHandoffRequestV1>(),
-        }
-    }
-
-    pub fn result_schema_name(self) -> Cow<'static, str> {
-        match self {
-            Self::IssueTaskHandoff => schema_name::<IssueTaskHandoffResultV1>(),
-            Self::ListTaskHandoffs => schema_name::<ListTaskHandoffsResultV1>(),
-            Self::OpenInvestigationHandoff => schema_name::<OpenInvestigationHandoffResultV1>(),
-            Self::OpenTaskHandoff => schema_name::<OpenTaskHandoffResultV1>(),
-        }
-    }
-
-    fn parse(segment: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.route_segment() == segment)
     }
 }
 
@@ -158,33 +81,21 @@ async fn operation<O>(
 where
     O: HandoffApplicationOwner,
 {
-    let request = match hotpath::measure_block!("api.http.admission", {
-        match HandoffOperation::parse(&segment) {
-            None => Err(adapter_problem_response(
-                request_id,
-                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-            )),
-            Some(operation) => match body {
-                Ok(Json(body)) => Ok(HandoffHttpRequest {
-                    operation,
-                    request_id,
-                    controls,
-                    body,
-                }),
-                Err(_) => Err(invalid_request_response(
-                    request_id,
-                    "handoff.invalid_body",
-                    "The handoff-open request body is invalid or exceeds the configured limit",
-                )),
-            },
-        }
-    }) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    hotpath::future!(
-        async move { owner.invoke_handoff(request).await },
-        label = "api.http.handler"
+    dispatch_json_operation(
+        HandoffOperation::from_route_segment(&segment),
+        request_id,
+        body,
+        (
+            "handoff.invalid_body",
+            "The handoff-open request body is invalid or exceeds the configured limit",
+        ),
+        |operation, request_id, body| HandoffHttpRequest {
+            operation,
+            request_id,
+            controls,
+            body,
+        },
+        |request| owner.invoke_handoff(request),
     )
     .await
 }

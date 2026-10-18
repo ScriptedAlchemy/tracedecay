@@ -1,16 +1,27 @@
 //! Owner-private filesystem creation, validation, and durable publication,
-//! plus the process-wide OS primitives that share this crate's cold,
-//! dependency-light position: background CPU admission and Windows
-//! file-handle identity.
+//! plus the Windows file-handle identity primitive that shares this crate's
+//! cold, dependency-light position.
 
 use std::fs::File;
 use std::io;
 
-pub mod background_cpu;
 pub mod capability_dir;
+mod coarse_time;
+mod file_lease;
 pub mod framed_log;
+mod inode_generation;
+mod lock_admission;
+mod rename_noreplace;
+
+pub use coarse_time::{ChangeClockReading, ChangeStamp, RewriteWitness, change_time_settled};
+pub use inode_generation::inode_generation;
+
+pub use file_lease::FileLease;
+pub use lock_admission::{LockAdmissionError, lock_shared_until, lock_until};
 #[cfg(windows)]
 pub mod windows_file;
+#[cfg(windows)]
+mod windows_rewrite_witness;
 
 /// A private-file creation failure that distinguishes pre-creation errors from
 /// validation errors on an already-created exact file handle.
@@ -52,15 +63,6 @@ impl std::error::Error for PrivateFileCreationFailure {
     }
 }
 
-/// Receipt from [`make_private_directory`]: the pre-heal state observed on the
-/// exact directory handle that was re-permissioned.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MadePrivateDirectory {
-    /// Unix permission bits observed before re-permissioning; `None` on
-    /// platforms without Unix modes.
-    pub previous_unix_mode: Option<u32>,
-}
-
 #[cfg(windows)]
 pub mod windows;
 
@@ -68,7 +70,8 @@ pub mod windows;
 pub use windows::{
     available_space, create_private_directory, create_private_file, create_private_file_retained,
     make_private_directory, make_private_file, open_private_directory, open_private_file,
-    validate_directory_path, validate_private_directory, validate_private_file,
+    replace_file_atomically, validate_directory_path, validate_private_directory,
+    validate_private_file,
 };
 
 #[cfg(unix)]
@@ -78,7 +81,7 @@ mod unix {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::path::Path;
 
-    #[hotpath::measure(label = "private_fs.create_directory")]
+    #[tracing::instrument(name = "private_fs.create_directory", level = "trace", skip_all)]
     pub fn create_private_directory(path: &Path) -> io::Result<()> {
         let mut builder = fs::DirBuilder::new();
         builder.mode(0o700);
@@ -97,7 +100,7 @@ mod unix {
         Ok(())
     }
 
-    #[hotpath::measure(label = "private_fs.open_directory")]
+    #[tracing::instrument(name = "private_fs.open_directory", level = "trace", skip_all)]
     pub fn open_private_directory(path: &Path) -> io::Result<fs::File> {
         let mut options = fs::OpenOptions::new();
         options
@@ -114,7 +117,7 @@ mod unix {
 
     /// Creates a new private file and returns its exact handle with any
     /// post-creation validation failure.
-    #[hotpath::measure(label = "private_fs.create_file")]
+    #[tracing::instrument(name = "private_fs.create_file", level = "trace", skip_all)]
     pub fn create_private_file_retained(
         path: &Path,
     ) -> Result<fs::File, crate::PrivateFileCreationFailure> {
@@ -137,7 +140,7 @@ mod unix {
         Ok(file)
     }
 
-    #[hotpath::measure(label = "private_fs.open_file")]
+    #[tracing::instrument(name = "private_fs.open_file", level = "trace", skip_all)]
     pub fn open_private_file(path: &Path) -> io::Result<fs::File> {
         let mut options = fs::OpenOptions::new();
         options
@@ -149,7 +152,7 @@ mod unix {
         Ok(file)
     }
 
-    #[hotpath::measure(label = "private_fs.make_private_file")]
+    #[tracing::instrument(name = "private_fs.make_private_file", level = "trace", skip_all)]
     pub fn make_private_file(path: &Path) -> io::Result<fs::File> {
         let mut options = fs::OpenOptions::new();
         options
@@ -175,13 +178,12 @@ mod unix {
     /// opened handle, when the current user owns it.
     ///
     /// The directory analogue of [`make_private_file`]: creation-time privacy
-    /// belongs to [`create_private_directory`], while this converges a legacy
-    /// directory an older binary created under a permissive umask. It never
-    /// follows symlinks, refuses a directory another user owns (ownership is
+    /// belongs to [`create_private_directory`], while this tightens a directory
+    /// the caller created through an ordinary path. It never follows symlinks, refuses a directory another user owns (ownership is
     /// the proof the caller may tighten it), and re-validates the handle after
     /// tightening so a concurrent swap cannot smuggle a non-private object.
-    #[hotpath::measure(label = "private_fs.make_private_directory")]
-    pub fn make_private_directory(path: &Path) -> io::Result<crate::MadePrivateDirectory> {
+    #[tracing::instrument(name = "private_fs.make_private_directory", level = "trace", skip_all)]
+    pub fn make_private_directory(path: &Path) -> io::Result<()> {
         let mut options = fs::OpenOptions::new();
         options
             .read(true)
@@ -196,12 +198,8 @@ mod unix {
                 "filesystem handle is not owned by the current user",
             ));
         }
-        let previous_mode = metadata.permissions().mode() & 0o777;
         file.set_permissions(fs::Permissions::from_mode(0o700))?;
-        validate_handle(&file, true, 0o700)?;
-        Ok(crate::MadePrivateDirectory {
-            previous_unix_mode: Some(previous_mode),
-        })
+        validate_handle(&file, true, 0o700)
     }
 
     pub fn validate_directory_path(path: &Path) -> io::Result<()> {
@@ -215,7 +213,7 @@ mod unix {
     }
 
     /// Returns bytes available to the current user at `path` (quota-aware).
-    #[hotpath::measure(label = "private_fs.available_space")]
+    #[tracing::instrument(name = "private_fs.available_space", level = "trace", skip_all)]
     pub fn available_space(path: &Path) -> io::Result<u64> {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
@@ -282,9 +280,94 @@ pub use unix::{
 #[cfg(not(any(unix, windows)))]
 compile_error!("TraceDecay private filesystem authority requires Unix or Windows");
 
+/// Native non-blocking exclusive-lock contention.
+///
+/// Unix `flock`/`fcntl` reports a held lock as [`io::ErrorKind::WouldBlock`].
+/// Windows `LockFileEx` with `LOCKFILE_FAIL_IMMEDIATELY` reports
+/// `ERROR_LOCK_VIOLATION` (33) instead, often with a kind other than
+/// `WouldBlock`. Sharing violations (`ERROR_SHARING_VIOLATION`, 32) and
+/// `AccessDenied` (`ERROR_ACCESS_DENIED`, 5) are different operations, an
+/// open/ACL problem is not proof that another authority holds the lock.
+pub fn is_lock_contended(error: &io::Error) -> bool {
+    classify_lock_contention(error, cfg!(windows))
+}
+
+/// `ERROR_LOCK_VIOLATION`: the Win32 code `LockFileEx` returns for a
+/// `LOCKFILE_FAIL_IMMEDIATELY` conflict.
+const WINDOWS_LOCK_VIOLATION: i32 = 33;
+
+/// The platform-independent core of [`is_lock_contended`], so the Windows
+/// mapping is provable from a test on any host. `windows_semantics` is the
+/// only platform input; everything else is the same decision everywhere.
+fn classify_lock_contention(error: &io::Error, windows_semantics: bool) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || (windows_semantics && error.raw_os_error() == Some(WINDOWS_LOCK_VIOLATION))
+}
+
+#[cfg(test)]
+mod lock_contention_tests {
+    use super::{classify_lock_contention, is_lock_contended};
+
+    /// Windows `LockFileEx` semantics, asserted from any host.
+    fn windows(error: &std::io::Error) -> bool {
+        classify_lock_contention(error, true)
+    }
+
+    /// Unix `flock`/`fcntl` semantics, asserted from any host.
+    fn unix(error: &std::io::Error) -> bool {
+        classify_lock_contention(error, false)
+    }
+
+    #[test]
+    fn would_block_is_typed_contention_on_every_platform() {
+        let would_block = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(is_lock_contended(&would_block));
+        assert!(windows(&would_block));
+        assert!(unix(&would_block));
+    }
+
+    #[test]
+    fn lock_violation_33_is_contention_only_under_windows_semantics() {
+        let violation = std::io::Error::from_raw_os_error(33);
+        assert!(
+            windows(&violation),
+            "ERROR_LOCK_VIOLATION (33) is the Windows non-blocking lock conflict"
+        );
+        assert!(
+            !unix(&violation),
+            "Unix errno 33 (EPIPE) is not LockFileEx contention"
+        );
+        assert_eq!(is_lock_contended(&violation), cfg!(windows));
+    }
+
+    #[test]
+    fn access_denied_is_not_lock_contention() {
+        let kind = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_lock_contended(&kind));
+        assert!(!windows(&kind));
+        let raw = std::io::Error::from_raw_os_error(5);
+        assert!(
+            !windows(&raw),
+            "ERROR_ACCESS_DENIED (5) is an ACL problem, not a held lock"
+        );
+        assert!(!is_lock_contended(&raw));
+    }
+
+    #[test]
+    fn sharing_violation_is_not_lock_contention() {
+        let raw = std::io::Error::from_raw_os_error(32);
+        assert!(
+            !windows(&raw),
+            "ERROR_SHARING_VIOLATION (32) is an open/share conflict, not LockFileEx contention"
+        );
+        assert!(!is_lock_contended(&raw));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::path::Path;
 
     use tempfile::tempdir;
 
@@ -320,26 +403,38 @@ mod tests {
         create_private_directory(&directory).unwrap();
         let directory_link = temp.path().join("directory-link");
         symlink(&directory, &directory_link).unwrap();
-        assert!(open_private_directory(&directory_link).is_err());
+        drop(open_private_directory(&directory).unwrap());
+        let refused = open_private_directory(&directory_link).unwrap_err();
+        // `O_NOFOLLOW | O_DIRECTORY` on a symlink fails ENOTDIR on Linux and
+        // ELOOP (normalized to InvalidInput) on the BSDs.
+        assert!(
+            matches!(
+                refused.kind(),
+                std::io::ErrorKind::NotADirectory | std::io::ErrorKind::InvalidInput
+            ),
+            "{refused:?}"
+        );
 
         let file_path = directory.join("store");
         drop(create_private_file(&file_path).unwrap());
         let file_link = directory.join("store-link");
         symlink(&file_path, &file_link).unwrap();
-        assert!(open_private_file(&file_link).is_err());
+        drop(open_private_file(&file_path).unwrap());
+        let refused = open_private_file(&file_link).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(refused.to_string(), "path is a symbolic link");
     }
 
     #[test]
-    fn owned_permissive_directory_is_healed_through_its_handle() {
+    fn owned_permissive_directory_is_tightened_through_its_handle() {
         let temp = tempdir().unwrap();
-        let directory = temp.path().join("legacy");
+        let directory = temp.path().join("permissive");
         create_private_directory(&directory).unwrap();
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o775)).unwrap();
         assert!(open_private_directory(&directory).is_err());
 
-        let receipt = super::make_private_directory(&directory).unwrap();
+        super::make_private_directory(&directory).unwrap();
 
-        assert_eq!(receipt.previous_unix_mode, Some(0o775));
         assert_eq!(
             std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
             0o700
@@ -348,17 +443,31 @@ mod tests {
     }
 
     #[test]
-    fn directory_heal_rejects_symlinks_and_non_directories() {
+    fn directory_tightening_rejects_symlinks_and_non_directories() {
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         let temp = tempdir().unwrap();
         let directory = temp.path().join("target");
         create_private_directory(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
         let link = temp.path().join("link");
         symlink(&directory, &link).unwrap();
-        assert!(super::make_private_directory(&link).is_err());
+        let refused = super::make_private_directory(&link).unwrap_err();
+        // `O_NOFOLLOW | O_DIRECTORY` on a symlink fails ENOTDIR on Linux and
+        // ELOOP (normalized to InvalidInput) on the BSDs.
+        assert!(
+            matches!(
+                refused.kind(),
+                std::io::ErrorKind::NotADirectory | std::io::ErrorKind::InvalidInput
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(mode(&directory), 0o755, "the link target stays untouched");
 
         let file_path = temp.path().join("regular");
         drop(create_private_file(&file_path).unwrap());
-        assert!(super::make_private_directory(&file_path).is_err());
+        let refused = super::make_private_directory(&file_path).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::NotADirectory);
+        assert_eq!(mode(&file_path), 0o600, "the file stays untouched");
     }
 
     #[test]
@@ -388,19 +497,13 @@ mod available_space_tests {
     use super::available_space;
 
     #[test]
-    fn available_space_reports_positive_capacity_on_tempdir() {
-        let temp = tempdir().unwrap();
-        let available = available_space(temp.path()).unwrap();
-        assert!(
-            available > 0,
-            "expected positive free space, got {available}"
-        );
-    }
-
-    #[test]
     fn available_space_rejects_missing_path() {
         let temp = tempdir().unwrap();
         let missing = temp.path().join("does-not-exist");
-        assert!(available_space(&missing).is_err());
+        assert_eq!(
+            available_space(&missing).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(available_space(temp.path()).unwrap() > 0);
     }
 }

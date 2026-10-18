@@ -1,14 +1,16 @@
 //! Production capture-to-store path for canonical external sources.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracedecay_application::{
+use tracedecay_contracts::{
     SourceCanonicalRefetchAuthorityV1, SourceCaptureAdmissionErrorV1, SourceCaptureApplicationV1,
     try_now_micros,
 };
 use tracedecay_domain::{
-    ComponentVersion, LocatorDigest, ManifestDigest, ObservationScopeV1, ProviderId,
+    CanonicalObservationIdV1, ClineTranscriptStream, ComponentVersion, DurableObservationV1,
+    LocatorDigest, ManifestDigest, ObservationScopeV1, ObservationSourceIdentityV1, ProviderId,
     SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1, SourceAggregateFrontierV1,
     SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1, SourceContentStateV1,
     SourceCoverageV1, SourceCursorV1, SourceDefinitionV1, SourceDeletionSemanticsV1,
@@ -16,21 +18,25 @@ use tracedecay_domain::{
     SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
     SourceProviderEnvelopeV1, SourceRefetchStrategyV1, SourceRefreshCauseV1,
     SourceRefreshReceiptV1, SourceSnapshotIdV1, SourceWholeRootStageV1, UtcMicros,
-    canonical_sha256,
+    canonical_sha256, cline_task_native_observation_id, prove_cline_native_source_transition,
+    sha256_hex_suffix,
 };
 use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryOperationEnvelopeV1,
     RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
-    SourceCommitApplyOutcomeV1, SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1,
-    SourceObjectTransitionV1, SourceObservationEvidenceV1, SourcePendingProjectionV1,
-    SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit, build_source_projection,
+    SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1, SourceCommitV1,
+    SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
+    SourcePendingProjectionV1, SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit,
+    build_source_projection,
 };
 
-use tracedecay_application::request_identity::{
+use tracedecay_contracts::request_identity::{
     LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
 };
-use tracedecay_runtime_core::db::DatabaseRuntimeClientV1;
+use tracedecay_runtime_core::{
+    db::DatabaseRuntimeClientV1, shard_runtime::registry::StoreRuntimeRegistryFailure,
+};
 
 #[derive(Debug, Error)]
 pub enum RuntimeExternalSourceErrorV1 {
@@ -38,8 +44,24 @@ pub enum RuntimeExternalSourceErrorV1 {
     Admission(#[from] SourceCaptureAdmissionErrorV1),
     #[error("external source commit is invalid: {0}")]
     Invalid(String),
-    #[error("external source runtime is unavailable")]
-    Unavailable,
+    #[error(
+        "external source runtime rejected {admission_bytes}-byte commit for {commit_count} source observations: {outcome:?}"
+    )]
+    SubmitRejected {
+        outcome: Box<RuntimeSubmitOutcomeV1>,
+        admission_bytes: u64,
+        commit_count: usize,
+    },
+    #[error("external source runtime {phase} dispatch failed: {failure:?}")]
+    Dispatch {
+        phase: &'static str,
+        failure: Box<StoreRuntimeRegistryFailure>,
+    },
+    #[error("external source runtime {phase} read was unavailable: {coverage:?}")]
+    ReadUnavailable {
+        phase: &'static str,
+        coverage: Box<RuntimeReadCoverageV1>,
+    },
     #[error("external source idempotency key conflicts with a prior command")]
     IdempotencyConflict,
 }
@@ -48,8 +70,8 @@ const HOST_EXTERNAL_SOURCE_PROJECTOR: &str = "projector.host-observation.externa
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeSourceCaptureOutcomeV1 {
-    Projected(SourceCommitReceiptV1),
-    ProjectionPending(SourceCommitReceiptV1),
+    Projected(SourceCommitReceiptSummaryV1),
+    ProjectionPending(SourceCommitReceiptSummaryV1),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -175,6 +197,7 @@ fn host_source_authority(
 fn prepare_host_source_commit(
     receipt: &tracedecay_store::ObservationCommitReceipt,
     current: Option<&SourceStoreStateV1>,
+    predecessor: Option<SourceObjectRevisionV1>,
     runtime: &tracedecay_store::StoreRuntimeBindingV1,
 ) -> Result<
     (tracedecay_domain::SourceBindingIdentityV1, SourceCommitV1),
@@ -194,7 +217,7 @@ fn prepare_host_source_commit(
     let partition = SourcePartitionIdV1::new(
         canonical_sha256(&(
             "tracedecay.host-observation.partition.v1",
-            observation.source(),
+            host_task_source(observation)?,
             observation.scope(),
         ))
         .map_err(invalid)?,
@@ -204,29 +227,8 @@ fn prepare_host_source_commit(
         observation.observation_id(),
     )
     .map_err(invalid)?;
-    let native_object = SourceNativeObjectIdV1::new(
-        canonical_sha256(&(
-            "tracedecay.host-observation.native-object.v1",
-            observation.observation_id(),
-        ))
-        .map_err(invalid)?,
-    );
-    let sanitized_digest =
-        ManifestDigest::new(observation.payload_reference().digest().as_str()).map_err(invalid)?;
-    let source_observation = SourceObjectObservationV1::new(
-        native_object,
-        SourceObjectRevisionV1::new(
-            canonical_sha256(&(
-                "tracedecay.host-observation.revision.v1",
-                observation.observation_id(),
-                observation.payload_reference(),
-            ))
-            .map_err(invalid)?,
-        ),
-        sanitized_digest.clone(),
-        SourceContentStateV1::Live,
-    )
-    .map_err(invalid)?;
+    let source_observation = host_source_object(observation)?;
+    let sanitized_digest = source_observation.sanitized_digest().clone();
     let request_digest = canonical_sha256(&(
         "tracedecay.host-observation.request.v1",
         observation.observation_id(),
@@ -322,8 +324,12 @@ fn prepare_host_source_commit(
     .map_err(invalid)?;
     let mutation = SourceObjectMutationV1::new(
         source_observation,
-        None,
-        SourceObjectTransitionV1::Initial,
+        predecessor.clone(),
+        if predecessor.is_some() {
+            SourceObjectTransitionV1::Successor
+        } else {
+            SourceObjectTransitionV1::Initial
+        },
         evidence,
     )
     .map_err(invalid)?;
@@ -366,7 +372,6 @@ impl RuntimeExternalSourceStore {
         Self { runtime }
     }
 
-    #[hotpath::skip]
     pub async fn capture_host_observations(
         &self,
         receipts: &[tracedecay_store::ObservationCommitReceipt],
@@ -374,17 +379,36 @@ impl RuntimeExternalSourceStore {
         if receipts.is_empty() {
             return Ok(Vec::new());
         }
+        let mut binding_identities = Vec::with_capacity(receipts.len());
+        let mut binding_objects = std::collections::BTreeMap::<_, BTreeSet<_>>::new();
+        for receipt in receipts {
+            let (_, _, binding_identity) = host_source_authority(receipt, self.runtime.binding())?;
+            binding_objects
+                .entry(binding_identity.clone())
+                .or_default()
+                .insert(
+                    host_source_object(receipt.observation())?
+                        .native_object()
+                        .clone(),
+                );
+            binding_identities.push(binding_identity);
+        }
         let mut states = std::collections::BTreeMap::new();
+        for (binding_identity, objects) in binding_objects {
+            let state = self.read_state(binding_identity.clone(), objects).await?;
+            states.insert(binding_identity, state);
+        }
         let mut settled = vec![None; receipts.len()];
         let mut pending_commits = Vec::new();
-        for (slot, receipt) in receipts.iter().enumerate() {
-            let (_, _, binding_identity) = host_source_authority(receipt, self.runtime.binding())?;
-            if !states.contains_key(&binding_identity) {
-                let state = self.read_state(binding_identity.clone()).await?;
-                states.insert(binding_identity.clone(), state);
-            }
+        for (slot, (receipt, binding_identity)) in
+            receipts.iter().zip(binding_identities).enumerate()
+        {
             let current = states.get(&binding_identity).and_then(Option::as_ref);
-            let (_, commit) = prepare_host_source_commit(receipt, current, self.runtime.binding())?;
+            let predecessor = self
+                .host_source_predecessor(receipt.observation(), current, &binding_identity)
+                .await?;
+            let (_, commit) =
+                prepare_host_source_commit(receipt, current, predecessor, self.runtime.binding())?;
             if let Some(existing) = self
                 .read_receipt(binding_identity.clone(), commit.idempotency_key().clone())
                 .await?
@@ -399,12 +423,14 @@ impl RuntimeExternalSourceStore {
                         )
                     })?;
                 if existing.request_digest() != commit.request_digest()
-                    || current.is_none_or(|state| {
-                        state
-                            .observed_objects()
-                            .get(source_observation.native_object())
-                            != Some(source_observation)
-                    })
+                    || !self
+                        .host_receipt_is_current_or_superseded(
+                            receipt.observation(),
+                            source_observation,
+                            current,
+                            &binding_identity,
+                        )
+                        .await?
                 {
                     return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
                 }
@@ -413,11 +439,15 @@ impl RuntimeExternalSourceStore {
             }
             match apply_source_commit(current, commit.clone()).map_err(invalid)? {
                 SourceCommitApplyOutcomeV1::Committed(state) => {
-                    settled[slot] = Some((binding_identity.clone(), state.receipt().clone()));
+                    settled[slot] = Some((
+                        binding_identity.clone(),
+                        SourceCommitReceiptSummaryV1::of(state.receipt()),
+                    ));
                     states.insert(binding_identity.clone(), Some(*state));
                 }
                 SourceCommitApplyOutcomeV1::ExactDuplicate(receipt) => {
-                    settled[slot] = Some((binding_identity, *receipt));
+                    settled[slot] =
+                        Some((binding_identity, SourceCommitReceiptSummaryV1::of(&receipt)));
                     continue;
                 }
             }
@@ -451,12 +481,14 @@ impl RuntimeExternalSourceStore {
                     tracedecay_store::OperationPriorityV1::Background,
                 )?
             };
+            let admission_bytes = request.envelope().metadata.admission_bytes;
+            let commit_count = pending_commits.len();
             let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
             match self
                 .runtime
                 .dispatch_submit(request, probe)
                 .await
-                .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?
+                .map_err(|failure| dispatch_error("host observation commit", failure))?
             {
                 RuntimeSubmitOutcomeV1::Committed { .. }
                 | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
@@ -464,7 +496,13 @@ impl RuntimeExternalSourceStore {
                 RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
                     return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
                 }
-                _ => return Err(RuntimeExternalSourceErrorV1::Unavailable),
+                outcome => {
+                    return Err(RuntimeExternalSourceErrorV1::SubmitRejected {
+                        outcome: Box::new(outcome),
+                        admission_bytes,
+                        commit_count,
+                    });
+                }
             }
         }
         let mut projection_pending = std::collections::BTreeMap::new();
@@ -480,8 +518,9 @@ impl RuntimeExternalSourceStore {
         settled
             .into_iter()
             .map(|settled| {
-                let (binding, receipt) =
-                    settled.ok_or(RuntimeExternalSourceErrorV1::Unavailable)?;
+                let (binding, receipt) = settled.ok_or_else(|| {
+                    invalid("host observation commit did not settle every requested receipt")
+                })?;
                 Ok(
                     if projection_pending.get(&binding).copied().unwrap_or(false) {
                         RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt)
@@ -493,7 +532,6 @@ impl RuntimeExternalSourceStore {
             .collect()
     }
 
-    #[hotpath::skip]
     pub async fn capture_host_observation(
         &self,
         receipt: &tracedecay_store::ObservationCommitReceipt,
@@ -502,13 +540,12 @@ impl RuntimeExternalSourceStore {
             .await?
             .into_iter()
             .next()
-            .ok_or(RuntimeExternalSourceErrorV1::Unavailable)
+            .ok_or_else(|| invalid("host observation commit returned no capture outcome"))
     }
 
     /// The daemon-owned host-admission drain invokes this bounded operation;
     /// capture never creates detached replay tasks. Restart resumes from the
     /// durable predecessor chain on the next admission drain.
-    #[hotpath::skip]
     pub async fn drain_host_projection_replay(
         &self,
         max: usize,
@@ -523,7 +560,6 @@ impl RuntimeExternalSourceStore {
         .await
     }
 
-    #[hotpath::skip]
     async fn drain_projection_replay_outcome(
         &self,
         binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
@@ -534,17 +570,24 @@ impl RuntimeExternalSourceStore {
         projector
             .validate()
             .map_err(|error| RuntimeExternalSourceErrorV1::Invalid(error.to_string()))?;
-        let mut projected = 0;
+        let mut projected = 0_usize;
         let mut exhausted = false;
-        while projected < max && !cancellation.is_cancelled() {
+        // A head lost to another drainer still spends budget, so a drainer
+        // that keeps losing ends with the queue deferred, never spinning.
+        for _ in 0..max {
+            if cancellation.is_cancelled() {
+                break;
+            }
             let Some(pending) = self.read_pending_projection(binding.clone()).await? else {
                 exhausted = true;
                 break;
             };
-            let projection =
-                build_source_projection(&pending, projector.clone()).map_err(invalid)?;
-            self.submit_projection(projection).await?;
-            projected = projected.saturating_add(1);
+            if self
+                .project_pending_head(&pending, projector.clone())
+                .await?
+            {
+                projected = projected.saturating_add(1);
+            }
         }
         let deferred = !exhausted
             && !cancellation.is_cancelled()
@@ -555,27 +598,235 @@ impl RuntimeExternalSourceStore {
         })
     }
 
-    #[hotpath::skip]
+    /// Projects `pending`, the queue head this drainer read. Returns `false`
+    /// when the write failed because another drainer already projected that
+    /// head: the next read sees the head it left.
+    async fn project_pending_head(
+        &self,
+        pending: &SourcePendingProjectionV1,
+        projector: ComponentVersion,
+    ) -> Result<bool, RuntimeExternalSourceErrorV1> {
+        let projection = build_source_projection(pending, projector).map_err(invalid)?;
+        let Err(error) = self.submit_projection(projection).await else {
+            return Ok(true);
+        };
+        let binding = pending.binding_identity().map_err(invalid)?;
+        let head = self.read_pending_projection(Some(binding)).await?;
+        if head.is_some_and(|head| {
+            head.receipt().receipt_digest() == pending.receipt().receipt_digest()
+        }) {
+            return Err(error);
+        }
+        Ok(false)
+    }
+
+    /// A stream cutover may replace only the exact retained combined record.
+    async fn host_source_predecessor(
+        &self,
+        observation: &DurableObservationV1,
+        current: Option<&SourceStoreStateV1>,
+        binding: &tracedecay_domain::SourceBindingIdentityV1,
+    ) -> Result<Option<SourceObjectRevisionV1>, RuntimeExternalSourceErrorV1> {
+        let object = host_source_object(observation)?;
+        let previous = match current {
+            Some(state) => state
+                .observed_object(object.native_object())
+                .map_err(invalid)?,
+            None => None,
+        };
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
+        if previous == &object {
+            return Ok(None);
+        }
+        let Some(prior_id) = cline_task_native_observation_id(observation).map_err(invalid)? else {
+            // Historical receipt replay is checked separately and never writes.
+            return Ok(None);
+        };
+        let prior = self
+            .read_host_observation(prior_id.clone())
+            .await?
+            .ok_or(RuntimeExternalSourceErrorV1::IdempotencyConflict)?;
+        if prove_cline_native_source_transition(&prior, observation).is_none()
+            || host_source_object(&prior)? != *previous
+        {
+            return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
+        }
+        let key = derive_logical_effect_idempotency(
+            LogicalEffectIdempotencyDomain::HostObservation,
+            &prior_id,
+        )
+        .map_err(invalid)?;
+        let retained = self
+            .read_receipt(binding.clone(), key)
+            .await?
+            .ok_or(RuntimeExternalSourceErrorV1::IdempotencyConflict)?;
+        let committed_previous = current
+            .map(|state| state.latest_mutation(object.native_object()))
+            .transpose()
+            .map_err(invalid)?
+            .flatten()
+            .is_some_and(|mutation| {
+                mutation.observation() == previous && retained.committed(mutation)
+            });
+        if !committed_previous {
+            return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
+        }
+        Ok(Some(previous.revision().clone()))
+    }
+
+    /// An immutable old receipt stays valid after its one proven native-stream
+    /// successor. Reading it must never reinstall its obsolete payload.
+    async fn host_receipt_is_current_or_superseded(
+        &self,
+        observation: &DurableObservationV1,
+        object: &SourceObjectObservationV1,
+        current: Option<&SourceStoreStateV1>,
+        binding: &tracedecay_domain::SourceBindingIdentityV1,
+    ) -> Result<bool, RuntimeExternalSourceErrorV1> {
+        let Some(state) = current else {
+            return Ok(false);
+        };
+        let Some(latest) = state
+            .observed_object(object.native_object())
+            .map_err(invalid)?
+        else {
+            return Ok(false);
+        };
+        if latest == object {
+            return Ok(true);
+        }
+        if observation.source().explicit_source_key().is_some()
+            || !matches!(
+                observation.source().provider().as_str(),
+                "cline" | "roo-code" | "kilo"
+            )
+        {
+            return Ok(false);
+        }
+        let Some(native_id) = observation.identity().native_record_id() else {
+            return Ok(false);
+        };
+        for stream in [
+            ClineTranscriptStream::ApiHistory,
+            ClineTranscriptStream::UiMessages,
+        ] {
+            let source = stream
+                .source_identity(
+                    observation.source().provider().clone(),
+                    observation.source().session_id().clone(),
+                )
+                .map_err(invalid)?;
+            let identity = tracedecay_domain::ObservationIdentityMaterialV1::for_native_record(
+                source,
+                observation.scope().clone(),
+                observation.identity().generation(),
+                observation.identity().position(),
+                observation.identity().ordering_domain(),
+                native_id.clone(),
+            )
+            .map_err(invalid)?;
+            let id = CanonicalObservationIdV1::derive(&identity).map_err(invalid)?;
+            let Some(successor) = self.read_host_observation(id.clone()).await? else {
+                continue;
+            };
+            if prove_cline_native_source_transition(observation, &successor).is_none()
+                || host_source_object(&successor)? != *latest
+            {
+                continue;
+            }
+            let key = derive_logical_effect_idempotency(
+                LogicalEffectIdempotencyDomain::HostObservation,
+                &id,
+            )
+            .map_err(invalid)?;
+            let Some(retained) = self.read_receipt(binding.clone(), key).await? else {
+                return Ok(false);
+            };
+            return Ok(state
+                .latest_mutation(object.native_object())
+                .map_err(invalid)?
+                .is_some_and(|mutation| {
+                    mutation.observation() == latest
+                        && mutation.predecessor() == Some(object.revision())
+                        && mutation.transition() == SourceObjectTransitionV1::Successor
+                        && retained.committed(mutation)
+                }));
+        }
+        Ok(false)
+    }
+
+    async fn read_host_observation(
+        &self,
+        observation_id: CanonicalObservationIdV1,
+    ) -> Result<Option<DurableObservationV1>, RuntimeExternalSourceErrorV1> {
+        let operation = RepositoryReadOperationV1::Project(
+            tracedecay_store::ProjectReadOperationV1::Observation(
+                tracedecay_store::ObservationReadOperationV1::Observation { observation_id },
+            ),
+        );
+        let digest = canonical_sha256(&operation).map_err(invalid)?;
+        let suffix = digest_suffix(digest.as_str())?;
+        let request = tracedecay_store::RuntimeReadRequestV1::new(
+            self.runtime.binding().clone(),
+            tracedecay_store::ConsistencyModeV1::LatestAvailable,
+            RuntimeReadOperationV1::Repository { op: operation },
+            tracedecay_store::OperationPriorityV1::Foreground,
+            1,
+            runtime_control(suffix, runtime_now()?)?,
+        )
+        .map_err(invalid)?;
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
+        let outcome = self
+            .runtime
+            .dispatch_read(request, probe)
+            .await
+            .map_err(|failure| dispatch_error("host observation", failure))?;
+        if !matches!(
+            outcome.coverage(),
+            RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
+        ) {
+            return Err(read_unavailable("host observation", outcome.coverage()));
+        }
+        match outcome.value() {
+            Some(RuntimeReadResultV1::Repository {
+                result: RepositoryReadResultV1::Project(result),
+            }) => match result.as_ref() {
+                tracedecay_store::ProjectReadResultV1::Observation(
+                    tracedecay_store::ObservationReadResultV1::Observation(row),
+                ) => Ok(row.as_ref().as_ref().map(|row| row.observation.clone())),
+                _ => Err(invalid(
+                    "host observation read returned a mismatched result",
+                )),
+            },
+            _ => Err(invalid(
+                "host observation read returned a mismatched result",
+            )),
+        }
+    }
+
     async fn read_receipt(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
         idempotency_key: ManifestDigest,
-    ) -> Result<Option<SourceCommitReceiptV1>, RuntimeExternalSourceErrorV1> {
+    ) -> Result<Option<SourceCommitReceiptSummaryV1>, RuntimeExternalSourceErrorV1> {
         let operation = ExternalSourceReadOperationV1::CommitReceipt {
             binding,
             idempotency_key,
         };
         let request = runtime_read_request(self.runtime.binding(), operation)?;
-        let probe = ExternalSourceRuntimeProbe::from_control(request.control());
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         let outcome = self
             .runtime
-            .dispatch_read(request, &probe)
-            .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
+            .dispatch_read(request, probe)
+            .await
+            .map_err(|failure| dispatch_error("commit receipt", failure))?;
         if !matches!(
             outcome.coverage(),
             RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
         ) {
-            return Err(RuntimeExternalSourceErrorV1::Unavailable);
+            return Err(read_unavailable("commit receipt", outcome.coverage()));
         }
         match outcome.value() {
             Some(RuntimeReadResultV1::Repository {
@@ -584,27 +835,27 @@ impl RuntimeExternalSourceStore {
                         receipt,
                     )),
             }) => Ok(receipt.as_ref().map(|receipt| receipt.as_ref().clone())),
-            _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
+            _ => Err(invalid("commit receipt read returned a mismatched result")),
         }
     }
 
-    #[hotpath::skip]
     async fn read_pending_projection(
         &self,
         binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
     ) -> Result<Option<SourcePendingProjectionV1>, RuntimeExternalSourceErrorV1> {
         let operation = ExternalSourceReadOperationV1::NextPendingProjection { binding };
         let request = runtime_read_request(self.runtime.binding(), operation)?;
-        let probe = ExternalSourceRuntimeProbe::from_control(request.control());
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         let outcome = self
             .runtime
-            .dispatch_read(request, &probe)
-            .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
+            .dispatch_read(request, probe)
+            .await
+            .map_err(|failure| dispatch_error("pending projection", failure))?;
         if !matches!(
             outcome.coverage(),
             RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
         ) {
-            return Err(RuntimeExternalSourceErrorV1::Unavailable);
+            return Err(read_unavailable("pending projection", outcome.coverage()));
         }
         match outcome.value() {
             Some(RuntimeReadResultV1::Repository {
@@ -613,11 +864,12 @@ impl RuntimeExternalSourceStore {
                         ExternalSourceReadResultV1::PendingProjection(pending),
                     ),
             }) => Ok(pending.as_ref().map(|pending| pending.as_ref().clone())),
-            _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
+            _ => Err(invalid(
+                "pending projection read returned a mismatched result",
+            )),
         }
     }
 
-    #[hotpath::skip]
     async fn submit_projection(
         &self,
         projection: SourceProjectionCommitV1,
@@ -636,7 +888,7 @@ impl RuntimeExternalSourceStore {
             .runtime
             .dispatch_submit(request, probe)
             .await
-            .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?
+            .map_err(|failure| dispatch_error("projection commit", failure))?
         {
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
@@ -644,27 +896,32 @@ impl RuntimeExternalSourceStore {
             RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
                 Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
             }
-            _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
+            outcome => Err(RuntimeExternalSourceErrorV1::SubmitRejected {
+                outcome: Box::new(outcome),
+                admission_bytes: serialized_len(&projection)?,
+                commit_count: 1,
+            }),
         }
     }
 
-    #[hotpath::skip]
     pub(crate) async fn read_state(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
+        objects: BTreeSet<SourceNativeObjectIdV1>,
     ) -> Result<Option<SourceStoreStateV1>, RuntimeExternalSourceErrorV1> {
-        let operation = ExternalSourceReadOperationV1::State { binding };
+        let operation = ExternalSourceReadOperationV1::State { binding, objects };
         let request = runtime_read_request(self.runtime.binding(), operation)?;
-        let probe = ExternalSourceRuntimeProbe::from_control(request.control());
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         let outcome = self
             .runtime
-            .dispatch_read(request, &probe)
-            .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
+            .dispatch_read(request, probe)
+            .await
+            .map_err(|failure| dispatch_error("source state", failure))?;
         if !matches!(
             outcome.coverage(),
             RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
         ) {
-            return Err(RuntimeExternalSourceErrorV1::Unavailable);
+            return Err(read_unavailable("source state", outcome.coverage()));
         }
         match outcome.value() {
             Some(RuntimeReadResultV1::Repository {
@@ -677,7 +934,7 @@ impl RuntimeExternalSourceStore {
                 result:
                     RepositoryReadResultV1::ExternalSource(ExternalSourceReadResultV1::State(None)),
             }) => Ok(None),
-            _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
+            _ => Err(invalid("source state read returned a mismatched result")),
         }
     }
 }
@@ -736,13 +993,51 @@ fn host_source_binding(
     Ok(binding)
 }
 
+fn host_task_source(
+    observation: &DurableObservationV1,
+) -> Result<ObservationSourceIdentityV1, RuntimeExternalSourceErrorV1> {
+    if ClineTranscriptStream::from_source(observation.source()).is_some() {
+        ObservationSourceIdentityV1::for_provider(
+            observation.source().provider().clone(),
+            observation.source().session_id().clone(),
+        )
+        .map_err(invalid)
+    } else {
+        Ok(observation.source().clone())
+    }
+}
+
+fn host_source_object(
+    observation: &DurableObservationV1,
+) -> Result<SourceObjectObservationV1, RuntimeExternalSourceErrorV1> {
+    let task_id = cline_task_native_observation_id(observation).map_err(invalid)?;
+    let native_id = task_id.as_ref().unwrap_or(observation.observation_id());
+    SourceObjectObservationV1::new(
+        SourceNativeObjectIdV1::new(
+            canonical_sha256(&("tracedecay.host-observation.native-object.v1", native_id))
+                .map_err(invalid)?,
+        ),
+        SourceObjectRevisionV1::new(
+            canonical_sha256(&(
+                "tracedecay.host-observation.revision.v1",
+                observation.observation_id(),
+                observation.payload_reference(),
+            ))
+            .map_err(invalid)?,
+        ),
+        ManifestDigest::new(observation.payload_reference().digest().as_str()).map_err(invalid)?,
+        SourceContentStateV1::Live,
+    )
+    .map_err(invalid)
+}
+
 fn host_native_root(
     observation: &tracedecay_domain::DurableObservationV1,
 ) -> Result<LocatorDigest, RuntimeExternalSourceErrorV1> {
     LocatorDigest::new(
         canonical_sha256(&(
             "tracedecay.host-observation.native-root.v1",
-            observation.source(),
+            host_task_source(observation)?,
             observation.scope(),
         ))
         .map_err(invalid)?
@@ -877,7 +1172,7 @@ fn runtime_control(
 }
 
 fn digest_suffix(digest: &str) -> Result<&str, RuntimeExternalSourceErrorV1> {
-    digest.strip_prefix("sha256:").ok_or_else(|| {
+    sha256_hex_suffix(digest).ok_or_else(|| {
         RuntimeExternalSourceErrorV1::Invalid(
             "external source runtime digest is not canonical SHA-256".to_owned(),
         )
@@ -940,6 +1235,29 @@ fn invalid(error: impl std::fmt::Display) -> RuntimeExternalSourceErrorV1 {
     RuntimeExternalSourceErrorV1::Invalid(error.to_string())
 }
 
+fn dispatch_error(
+    phase: &'static str,
+    failure: StoreRuntimeRegistryFailure,
+) -> RuntimeExternalSourceErrorV1 {
+    RuntimeExternalSourceErrorV1::Dispatch {
+        phase,
+        failure: Box::new(failure),
+    }
+}
+
+fn read_unavailable(
+    phase: &'static str,
+    coverage: &RuntimeReadCoverageV1,
+) -> RuntimeExternalSourceErrorV1 {
+    RuntimeExternalSourceErrorV1::ReadUnavailable {
+        phase,
+        coverage: Box::new(coverage.clone()),
+    }
+}
+
 fn host_external_source_projector() -> Result<ComponentVersion, RuntimeExternalSourceErrorV1> {
     ComponentVersion::new(HOST_EXTERNAL_SOURCE_PROJECTOR).map_err(invalid)
 }
+
+#[cfg(test)]
+mod tests;

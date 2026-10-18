@@ -5,20 +5,18 @@
 //! preamble, and bounded response reads.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::io::AsyncWriteExt;
-use tokio::time::{Instant, timeout};
+use asupersync::io::AsyncWriteExt;
 
 use crate::handshake::DaemonHandshake;
-use crate::transport::{BrokerStream, DaemonAuthPreface, DaemonEndpoint};
-use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_framing::{
-    WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
+use crate::transport::{
+    DaemonAuthPreface, DaemonClientStream, DaemonClientWriteHalf, DaemonEndpoint,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_framing::{BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
 pub const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
-pub const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const DAEMON_TOOL_RESPONSE_GRACE: Duration = Duration::from_secs(30);
 pub const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
 pub const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -50,7 +48,7 @@ pub trait DaemonLivenessProbe: Send + Sync {
 #[derive(Clone)]
 pub struct DaemonConnection {
     pub endpoint: DaemonEndpoint,
-    pub auth_token: Option<String>,
+    pub auth_token: String,
     /// The daemon version advertised by the authority record that named this
     /// endpoint. Lets transport failures name version skew instead of hiding
     /// it behind a raw io error.
@@ -59,7 +57,7 @@ pub struct DaemonConnection {
 }
 
 impl DaemonConnection {
-    pub fn new(endpoint: DaemonEndpoint, auth_token: Option<String>) -> Self {
+    pub fn new(endpoint: DaemonEndpoint, auth_token: String) -> Self {
         Self {
             endpoint,
             auth_token,
@@ -78,10 +76,6 @@ impl DaemonConnection {
     pub fn with_daemon_version(mut self, daemon_version: impl Into<String>) -> Self {
         self.daemon_version = Some(daemon_version.into());
         self
-    }
-
-    pub fn unauthenticated_for_test(endpoint: DaemonEndpoint) -> Self {
-        Self::new(endpoint, None)
     }
 }
 
@@ -145,7 +139,7 @@ pub fn daemon_response_stalled(elapsed: Duration) -> TraceDecayError {
         DAEMON_RESPONSE_STALLED,
         true,
         format!(
-            "daemon did not answer after {}s; stalled or saturated — run `tracedecay daemon status`",
+            "daemon did not answer after {}s; stalled or saturated. Run `tracedecay daemon status`",
             elapsed.as_secs()
         ),
     )
@@ -162,13 +156,13 @@ pub fn daemon_response_stalled_during(
         DAEMON_RESPONSE_STALLED,
         true,
         format!(
-            "daemon did not answer after {}s ({stage} stage of '{request_label}'); stalled or saturated — run `tracedecay daemon status`",
+            "daemon did not answer after {}s ({stage} stage of '{request_label}'); stalled or saturated. Run `tracedecay daemon status`",
             elapsed.as_secs()
         ),
     )
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.ensure_live", future = true)]
+#[tracing::instrument(name = "daemon_protocol.client.ensure_live", level = "trace", skip_all)]
 pub async fn ensure_daemon_connection_live(
     connection: &DaemonConnection,
     request_label: &str,
@@ -176,75 +170,116 @@ pub async fn ensure_daemon_connection_live(
     if let Some(probe) = connection.liveness.as_ref() {
         probe.ensure_live(request_label)?;
     }
-    timeout(
-        DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
-        BrokerStream::connect(&connection.endpoint),
-    )
-    .await
-    .map_err(|_| TraceDecayError::Config {
-        message: format!(
-            "daemon health check timed out at '{}' while request '{request_label}' was awaiting a response; the request was already sent and was not retried",
-            connection.endpoint
-        ),
-    })?
-    .map(|_| ())
-    .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "daemon became unreachable at '{}' while request '{request_label}' was awaiting a response: {error}; the request was already sent and was not retried",
-            connection.endpoint
-        ),
-    })
+    Ok(())
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.response.wait", future = true)]
+/// Reads the next daemon frame, polling `ensure_live` whenever the read is
+/// still pending.
+///
+/// A delivered frame always wins over the probe: the read is polled first,
+/// keeps running while the probe runs, and a failed probe ends the wait only
+/// if one more read still blocks. Every poll of the socket reads it directly,
+/// so that read sees everything the daemon wrote before it stopped listening.
+///
+/// `read_mcp_line` is dropped when another branch wins `select!`; the partial
+/// frame lives on the caller's line reader, so it also survives this call.
+pub async fn poll_daemon_response_line<R, F, Fut>(
+    line_reader: &mut BoundedLineReader<R>,
+    request_label: &str,
+    liveness_poll_interval: Duration,
+    mut ensure_live: F,
+) -> Result<Option<String>>
+where
+    R: asupersync::io::AsyncBufRead + Unpin,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    loop {
+        tokio::select! {
+            biased;
+            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            () = asupersync::time::sleep(asupersync::time::wall_now(), liveness_poll_interval) => {}
+        }
+        let probe = ensure_live();
+        tokio::pin!(probe);
+        let probe_failure = tokio::select! {
+            biased;
+            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            probe_result = &mut probe => match probe_result {
+                Ok(()) => continue,
+                Err(error) => error,
+            },
+        };
+        tokio::select! {
+            biased;
+            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            () = std::future::ready(()) => return Err(probe_failure),
+        }
+    }
+}
+
+fn response_line(
+    result: std::io::Result<Option<String>>,
+    request_label: &str,
+) -> Result<Option<String>> {
+    match result {
+        Ok(line) => Ok(line),
+        Err(error) if is_wire_oversized_io_error(&error) => Err(TraceDecayError::Config {
+            message: format!(
+                "daemon {request_label} response exceeded wire message bound ({WIRE_RECORD_TOO_LARGE})"
+            ),
+        }),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[tracing::instrument(
+    name = "daemon_protocol.client.response.wait",
+    level = "trace",
+    skip_all
+)]
 pub async fn next_daemon_response_line<R>(
-    reader: &mut R,
+    reader: &mut BoundedLineReader<R>,
     connection: &DaemonConnection,
     request_label: &str,
     liveness_poll_interval: Duration,
 ) -> Result<Option<String>>
 where
-    R: tokio::io::AsyncBufRead + Unpin,
+    R: asupersync::io::AsyncBufRead + Unpin,
 {
-    let read = read_bounded_mcp_line(reader);
-    tokio::pin!(read);
-    loop {
-        tokio::select! {
-            result = &mut read => {
-                return match result {
-                    Ok(line) => Ok(line),
-                    Err(error) if is_wire_oversized_io_error(&error) => {
-                        Err(TraceDecayError::Config {
-                            message: format!(
-                                "daemon {request_label} response exceeded wire message bound ({WIRE_RECORD_TOO_LARGE})"
-                            ),
-                        })
-                    }
-                    Err(error) => Err(error.into()),
-                };
-            }
-            () = tokio::time::sleep(liveness_poll_interval) => {
-                ensure_daemon_connection_live(connection, request_label).await?;
-            }
-        }
-    }
+    poll_daemon_response_line(reader, request_label, liveness_poll_interval, || {
+        ensure_daemon_connection_live(connection, request_label)
+    })
+    .await
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.preamble", future = true)]
-pub async fn write_daemon_preamble(
-    writer: &mut tokio::io::WriteHalf<BrokerStream>,
-    connection: &DaemonConnection,
+/// Writes the auth preface and the handshake line.
+///
+/// Callers that already hold a [`DaemonConnection`] use
+/// [`write_daemon_preamble`]. The composition-root client uses this directly
+/// because its connection type is the authority record, not the protocol
+/// connection.
+pub async fn write_daemon_handshake_preamble(
+    writer: &mut (impl asupersync::io::AsyncWrite + Unpin),
+    auth_token: &str,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
-    if let Some(token) = connection.auth_token.as_deref() {
-        writer
-            .write_all(DaemonAuthPreface::new(token).to_line()?.as_bytes())
-            .await?;
-        writer.write_all(b"\n").await?;
-    }
+    writer
+        .write_all(DaemonAuthPreface::new(auth_token).to_line()?.as_bytes())
+        .await?;
+    writer.write_all(b"\n").await?;
     writer.write_all(handshake.to_line()?.as_bytes()).await?;
     writer.write_all(b"\n").await?;
     Ok(())
+}
+
+#[tracing::instrument(name = "daemon_protocol.client.preamble", level = "trace", skip_all)]
+pub async fn write_daemon_preamble(
+    writer: &mut DaemonClientWriteHalf,
+    connection: &DaemonConnection,
+    handshake: &DaemonHandshake,
+) -> Result<()> {
+    write_daemon_handshake_preamble(writer, &connection.auth_token, handshake).await
 }
 
 pub fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
@@ -262,13 +297,15 @@ pub fn is_saturated_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
 
 pub fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
     if is_saturated_daemon_connect_error(kind) {
-        "The daemon is up but not accepting connections — likely overloaded. Retry shortly, or check `tracedecay daemon status`."
+        "The daemon is up but not accepting connections, likely overloaded. Retry shortly, or check `tracedecay daemon status`."
     } else {
-        "The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`."
+        "The daemon may be restarting (e.g. after `tracedecay update`). Retry shortly, or check `tracedecay daemon status`."
     }
 }
 
-pub async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Result<BrokerStream> {
+pub async fn connect_to_daemon_connection(
+    connection: &DaemonConnection,
+) -> Result<DaemonClientStream> {
     connect_with_restart_grace(
         connection,
         DAEMON_RESTART_GRACE,
@@ -277,15 +314,15 @@ pub async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Resu
     .await
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.connect", future = true)]
+#[tracing::instrument(name = "daemon_protocol.client.connect", level = "trace", skip_all)]
 pub async fn connect_with_restart_grace(
     connection: &DaemonConnection,
     grace: Duration,
     poll_interval: Duration,
-) -> Result<BrokerStream> {
+) -> Result<DaemonClientStream> {
     let deadline = Instant::now() + grace;
     loop {
-        match BrokerStream::connect(&connection.endpoint).await {
+        match DaemonClientStream::connect(&connection.endpoint).await {
             Ok(stream) => return Ok(stream),
             Err(TraceDecayError::Io(err)) => {
                 if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
@@ -301,7 +338,7 @@ pub async fn connect_with_restart_grace(
                         }
                     });
                 }
-                tokio::time::sleep(poll_interval).await;
+                asupersync::time::sleep(asupersync::time::wall_now(), poll_interval).await;
             }
             Err(error) => return Err(error),
         }
@@ -334,6 +371,50 @@ mod tests {
         );
     }
 
+    /// A daemon whose listen backlog is full must surface as the typed
+    /// saturated refusal at once instead of a connect that never settles.
+    /// Delete with the `connect_unix` workaround on asupersync 0.6.0.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn full_listen_backlog_fails_fast_as_saturated() {
+        use socket2::{Domain, SockAddr, Socket, Type};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("daemon.sock");
+        let address = SockAddr::unix(&socket).expect("socket address");
+        let listener = Socket::new(Domain::UNIX, Type::STREAM, None).expect("listener socket");
+        listener.bind(&address).expect("bind");
+        listener.listen(0).expect("listen");
+        let mut queued = Vec::new();
+        loop {
+            assert!(queued.len() < 64, "the listen backlog never filled");
+            let peer = Socket::new(Domain::UNIX, Type::STREAM, None).expect("peer socket");
+            peer.set_nonblocking(true).expect("non-blocking peer");
+            match peer.connect(&address) {
+                Ok(()) => queued.push(peer),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("filling the listen backlog failed: {error}"),
+            }
+        }
+        let connection = DaemonConnection::new(DaemonEndpoint::Unix(socket), String::new());
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_with_restart_grace(&connection, Duration::ZERO, Duration::ZERO),
+        )
+        .await
+        .expect("a saturated connect must fail instead of waiting")
+        .expect_err("a full backlog must refuse the connect");
+
+        assert_eq!(
+            error
+                .project_route_context()
+                .map(|(code, retryable, _)| (code, retryable)),
+            Some((DAEMON_CONNECT_SATURATED, true)),
+            "{error}"
+        );
+    }
+
     #[test]
     fn connect_failures_are_typed_reason_codes() {
         let down = daemon_connect_failure(
@@ -357,6 +438,83 @@ mod tests {
         );
         assert!(down.to_string().contains("may be restarting"));
         assert!(saturated.to_string().contains("up but not accepting"));
+    }
+
+    /// The daemon side of one accepted request connection, driven by the
+    /// client's liveness probe so the stop lands exactly while the probe runs.
+    #[cfg(unix)]
+    struct StoppingDaemon {
+        listener: tokio::net::UnixListener,
+        stream: tokio::net::UnixStream,
+    }
+
+    #[cfg(unix)]
+    async fn await_response_while_daemon_stops(
+        reply: Option<&'static [u8]>,
+    ) -> Result<Option<String>> {
+        use tokio::io::AsyncWriteExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("daemon.sock");
+        let endpoint = DaemonEndpoint::Unix(socket.clone());
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        let (client, _writer) = DaemonClientStream::connect(&endpoint)
+            .await
+            .expect("connect")
+            .into_split();
+        let (stream, _) = listener.accept().await.expect("accept");
+        let daemon = std::cell::RefCell::new(Some(StoppingDaemon { listener, stream }));
+        // The stopped daemon keeps the request connection open, so only the
+        // probe can end a read that still blocks.
+        let held_connection = std::cell::RefCell::new(None);
+        let mut reader = BoundedLineReader::new(asupersync::io::BufReader::new(client));
+        poll_daemon_response_line(&mut reader, "tracedecay_status", Duration::ZERO, || {
+            let stopping = daemon.borrow_mut().take();
+            let socket = socket.clone();
+            let endpoint = &endpoint;
+            let held_connection = &held_connection;
+            async move {
+                if let Some(StoppingDaemon {
+                    listener,
+                    mut stream,
+                }) = stopping
+                {
+                    if let Some(reply) = reply {
+                        stream.write_all(reply).await?;
+                    }
+                    drop(listener);
+                    std::fs::remove_file(&socket)?;
+                    held_connection.replace(Some(stream));
+                }
+                DaemonClientStream::connect(endpoint).await.map(drop)
+            }
+        })
+        .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reply_written_before_the_daemon_stops_listening_wins_over_the_failed_probe() {
+        let answered = await_response_while_daemon_stops(Some(b"{\"jsonrpc\":\"2.0\",\"id\":1}\n"))
+            .await
+            .expect("a delivered reply must not be replaced by the probe failure");
+        assert_eq!(answered.as_deref(), Some("{\"jsonrpc\":\"2.0\",\"id\":1}"));
+
+        let unanswered = await_response_while_daemon_stops(None)
+            .await
+            .expect_err("a read that still blocks must end with the probe failure");
+        assert!(
+            matches!(&unanswered, TraceDecayError::Io(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "unanswered request must surface the probe's connect failure, got: {unanswered:?}"
+        );
+
+        let partial = await_response_while_daemon_stops(Some(b"{\"jsonrpc\":\"2.0\""))
+            .await
+            .expect_err("an incomplete frame still blocks, so the probe failure wins");
+        assert!(
+            matches!(&partial, TraceDecayError::Io(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "partial frame must surface the probe's connect failure, got: {partial:?}"
+        );
     }
 
     #[test]

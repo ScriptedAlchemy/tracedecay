@@ -1,0 +1,1453 @@
+//! Additional ranked lexical routes fused into one lexical lane batch.
+//!
+//! The strict query always runs first. Caller anchors, preferred-symbol lookup,
+//! identifier splitting, and configured aliases are visible additive routes.
+//! The preferred-symbol route runs when the query's shape clears the name
+//! gate (see [`classify_query_shape`]) unless the caller decides explicitly;
+//! the receipt carries the decision and its margin.
+//! Each route is ranked through the ordinary lexical lane against the same
+//! pinned generation, then merged into the single lexical lane input that
+//! composition admits. Strict hits retain precedence without alternative-score
+//! inflation; other additive route scores combine. The committed prefix is
+//! sorted strict-first under stable tie-breakers, and every surviving candidate
+//! keeps a receipt naming the routes that ranked it.
+//!
+//! Caller anchors are must-have evidence, not a soft boost: a candidate that
+//! matched an anchor outranks every candidate that matched none, in this lane
+//! and in composition, each anchor with matches keeps at least its best sites
+//! through the lane cap, and the receipt names every anchor's outcome,
+//! including "no matches", counted against what the response carries.
+//!
+//! Routes are ranked retrieval, not exhaustive grep; they never widen the
+//! lane cap and never mint exact-tier admission.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tracedecay_contracts::retrieval::{LexicalAnchorDropReasonV1, LexicalAnchorDropV1};
+use tracedecay_domain::{
+    CodeGenerationId, CompactCandidate, FixedPointScore, RetrievalAnchorId, RetrievalBudget,
+    RetrievalFailure, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
+    RetrieverOutcome, SourceOccurrenceId, is_identifier_token, is_qualified_name_token,
+    split_subtokens, technical_tokens,
+};
+
+use super::{
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalProximityV1,
+    LexicalQueryPartsV1, lexical_checkpoint_digest, lexical_query_parts, normalize_lexical,
+};
+use crate::retrieval::ports::{RetrievalPortError, contract_error, lane_candidate_cap};
+
+/// Maximum number of caller-supplied lexical anchors on one request.
+pub const MAX_LEXICAL_ANCHORS_V1: usize = 8;
+/// Maximum UTF-8 bytes in one lexical anchor.
+pub const MAX_LEXICAL_ANCHOR_BYTES_V1: usize = 128;
+pub const MAX_LEXICAL_ALIASES_V1: usize = 8;
+pub const MAX_LEXICAL_ALIAS_BYTES_V1: usize = 128;
+/// Maximum identifier-shaped tokens the preferred-symbol route ranks; the
+/// tokens are taken in query order so the bound is deterministic.
+pub const MAX_PREFERRED_SYMBOL_TOKENS_V1: usize = 8;
+
+/// Lexical score added per distinct caller anchor a merged candidate matched.
+///
+/// It orders the lexical lane's own committed prefix and its cap. Composition
+/// calibrates the lexical domain into `[0, 1]` and saturates well below any
+/// BM25 sum, so the tier cannot order the fused page; composition reads
+/// [`LexicalRouteReceiptV1::anchor_tiers`] for that. Anchors are the caller's
+/// statement of what the answer is
+/// about, so one anchor match must outrank any sum of incidental query-word
+/// matches. The bound is provable from the request contract: one
+/// `(term, field)` BM25 score is below 2^28 micros (idf of a 2^32-row corpus
+/// times the saturated term-frequency factor times the strongest field
+/// weight), a route matches at most nine fields times the ~2^11 terms a
+/// 4 KiB query can carry, and at most 19 routes merge, which keeps every
+/// unanchored merged score below 2^47.
+pub const LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1: u64 = 1 << 48;
+
+/// Query words that look like identifiers but name what the caller is asking
+/// about rather than a symbol. Compared case-insensitively.
+const PREFERRED_SYMBOL_STOPLIST_V1: &[&str] = &[
+    "class",
+    "struct",
+    "enum",
+    "interface",
+    "function",
+    "method",
+    "type",
+    "const",
+    "let",
+    "var",
+    "namespace",
+    "where",
+    "find",
+    "explain",
+    "fn",
+    "def",
+    "trait",
+    "impl",
+    "module",
+    "the",
+    "a",
+    "an",
+    "of",
+    "in",
+    "is",
+    "to",
+    "for",
+    "and",
+    "or",
+    "how",
+    "what",
+    "does",
+    "do",
+    "who",
+    "calls",
+    "this",
+    "that",
+    "with",
+    "from",
+    "show",
+    "me",
+    "all",
+    "defined",
+    "definition",
+    "implements",
+    "implementation",
+];
+
+/// Typed rejection for caller-supplied lexical routing.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum LexicalRouteErrorV1 {
+    #[error("lexical_anchors accepts at most {max} anchors; {actual} were supplied")]
+    TooManyAnchors { max: usize, actual: usize },
+    #[error("lexical anchor {index} is empty")]
+    EmptyAnchor { index: usize },
+    #[error("lexical anchor {index} exceeds {max} bytes")]
+    AnchorTooLong { index: usize, max: usize },
+    #[error(
+        "lexical anchor {index} must be one identifier or technical term: no surrounding whitespace, inner whitespace, or control characters"
+    )]
+    AnchorNotOneTerm { index: usize },
+    #[error("lexical anchor {index} repeats an earlier anchor")]
+    DuplicateAnchor { index: usize },
+    #[error("lexical aliases accept at most {max} entries; {actual} were supplied")]
+    TooManyAliases { max: usize, actual: usize },
+    #[error("lexical alias {index} has an invalid {side}")]
+    InvalidAlias { index: usize, side: &'static str },
+    #[error("lexical alias {index} maps a query to itself")]
+    IdentityAlias { index: usize },
+    #[error("lexical alias {index} repeats an earlier alias")]
+    DuplicateAlias { index: usize },
+}
+
+/// One validated exact identifier or technical term ranked through its own
+/// lexical route.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct LexicalAnchorV1(String);
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalAliasV1 {
+    pub strict_query: String,
+    pub alternative: String,
+}
+
+impl LexicalAnchorV1 {
+    fn validate(value: &str, index: usize) -> Result<(), LexicalRouteErrorV1> {
+        if value.is_empty() {
+            return Err(LexicalRouteErrorV1::EmptyAnchor { index });
+        }
+        if value.len() > MAX_LEXICAL_ANCHOR_BYTES_V1 {
+            return Err(LexicalRouteErrorV1::AnchorTooLong {
+                index,
+                max: MAX_LEXICAL_ANCHOR_BYTES_V1,
+            });
+        }
+        let one_term = value.trim() == value
+            && !value
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+            && lexical_query_parts(value).is_ok_and(|parts| !parts.whole_terms.is_empty());
+        if !one_term {
+            return Err(LexicalRouteErrorV1::AnchorNotOneTerm { index });
+        }
+        Ok(())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// True when `task` is one identifier (`gmres`, `shared_token`, `camelCase`)
+/// or one `Type.method` / `path::name` token. Two or more words are prose.
+/// Prose must stay off the preferred-symbol route. Forcing it there drops
+/// MRR to 0.016.
+pub fn task_is_name_shaped(task: &str) -> bool {
+    let task = task.trim();
+    if task.is_empty() || task.chars().any(char::is_whitespace) {
+        return false;
+    }
+    is_identifier_token(task)
+        || is_qualified_name_token(task)
+        || (task.contains('.') && task.split('.').all(is_identifier_token))
+}
+
+/// A token only code would spell: a `::` path, an inner underscore, or a
+/// lowercase-to-uppercase hump. Plain words such as `update` stay prose.
+fn names_identifier(token: &str) -> bool {
+    is_qualified_name_token(token)
+        || (is_identifier_token(token)
+            && (token.trim_matches('_').contains('_')
+                || token
+                    .as_bytes()
+                    .windows(2)
+                    .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())))
+}
+
+impl LexicalAliasV1 {
+    fn validate(
+        &self,
+        index: usize,
+    ) -> Result<(LexicalQueryPartsV1, LexicalQueryPartsV1), LexicalRouteErrorV1> {
+        let strict = validate_alias_text(&self.strict_query, index, "strict query")?;
+        let alternative = validate_alias_text(&self.alternative, index, "alternative")?;
+        if strict == alternative {
+            return Err(LexicalRouteErrorV1::IdentityAlias { index });
+        }
+        Ok((strict, alternative))
+    }
+}
+
+fn validate_alias_text(
+    value: &str,
+    index: usize,
+    side: &'static str,
+) -> Result<LexicalQueryPartsV1, LexicalRouteErrorV1> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > MAX_LEXICAL_ALIAS_BYTES_V1
+        || value.chars().any(char::is_control)
+    {
+        return Err(LexicalRouteErrorV1::InvalidAlias { index, side });
+    }
+    lexical_query_parts(value)
+        .map(normalized_query_parts)
+        .map_err(|_| LexicalRouteErrorV1::InvalidAlias { index, side })
+}
+
+fn normalized_query_parts(mut parts: LexicalQueryPartsV1) -> LexicalQueryPartsV1 {
+    for term in parts
+        .whole_terms
+        .iter_mut()
+        .chain(&mut parts.subtokens)
+        .chain(&mut parts.phrases)
+    {
+        *term = normalize_lexical(term);
+    }
+    parts
+}
+
+/// Whether the preferred-symbol route runs: decided by the query's shape
+/// unless the caller states it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SymbolRoutePreferenceV1 {
+    #[default]
+    ByQueryShape,
+    Always,
+    Never,
+}
+
+impl From<bool> for SymbolRoutePreferenceV1 {
+    fn from(prefer_symbol: bool) -> Self {
+        if prefer_symbol {
+            Self::Always
+        } else {
+            Self::Never
+        }
+    }
+}
+
+impl From<Option<bool>> for SymbolRoutePreferenceV1 {
+    fn from(prefer_symbol: Option<bool>) -> Self {
+        prefer_symbol.map_or(Self::ByQueryShape, Self::from)
+    }
+}
+
+/// The lane a query's shape selects. `Name` adds the symbol-name route to the
+/// strict query; `Prose` runs the strict query without it.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalQueryRouteV1 {
+    #[default]
+    Prose,
+    Name,
+}
+
+/// Who chose the [`LexicalQueryRouteV1`]: the query-shape gate or the caller.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalRouteDeciderV1 {
+    #[default]
+    QueryShape,
+    Caller,
+}
+
+/// The query-shape routing decision a search reports.
+///
+/// `margin_micros` is the classifier's distance from the name gate in
+/// millionths, in `[-500_000, 500_000]`: the share of content words that are
+/// identifier-shaped, minus one half. It is reported even when the caller
+/// decided the route, so evals can compare the two. It measures query shape
+/// only; it is not evidence that the corpus can answer the query.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalRouteDecisionV1 {
+    pub route: LexicalQueryRouteV1,
+    pub margin_micros: i32,
+    pub decided_by: LexicalRouteDeciderV1,
+}
+
+/// Classify a query as name-shaped or prose by the share of its content
+/// words (stoplisted and single-character words excluded) that only code
+/// would spell (see `names_identifier`), judged on the whole token and on the
+/// trailing name of a `a.b` or `a::b` spelling. The query is name-shaped when at
+/// least half its content words are identifiers, so `getUserById` and
+/// `where is parse_config called` route to the name lane while prose with one
+/// incidental identifier keeps the prose route alone. Returns the route and
+/// its margin in micros.
+pub fn classify_query_shape(query: &str) -> (LexicalQueryRouteV1, i32) {
+    let words = query_content_words(query);
+    if words.is_empty() {
+        return (LexicalQueryRouteV1::Prose, -500_000);
+    }
+    let total = words.len() as i64;
+    let names = words
+        .iter()
+        .filter(|word| {
+            names_identifier(word.raw.trim_end_matches(['.', ':'])) || names_identifier(&word.name)
+        })
+        .count() as i64;
+    let margin = ((2 * names - total) * 500_000 / total) as i32;
+    let route = if names > 0 && margin >= 0 {
+        LexicalQueryRouteV1::Name
+    } else {
+        LexicalQueryRouteV1::Prose
+    };
+    (route, margin)
+}
+
+/// Caller-controlled options for the strict query and additive lexical routes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LexicalRoutingV1 {
+    pub anchors: Vec<LexicalAnchorV1>,
+    pub prefer_symbol: SymbolRoutePreferenceV1,
+    pub aliases: Vec<LexicalAliasV1>,
+    pub phrases: Vec<String>,
+    pub proximities: Vec<LexicalProximityV1>,
+    pub field_filters: Vec<LexicalFieldFilterV1>,
+}
+
+impl LexicalRoutingV1 {
+    /// Validate raw caller anchors: bounded count, bounded bytes, one term
+    /// each, no repeats. Order is preserved because it is the caller's
+    /// evidence order.
+    pub fn new(
+        anchors: Vec<String>,
+        prefer_symbol: impl Into<SymbolRoutePreferenceV1>,
+    ) -> Result<Self, LexicalRouteErrorV1> {
+        if anchors.len() > MAX_LEXICAL_ANCHORS_V1 {
+            return Err(LexicalRouteErrorV1::TooManyAnchors {
+                max: MAX_LEXICAL_ANCHORS_V1,
+                actual: anchors.len(),
+            });
+        }
+        let mut validated = Vec::with_capacity(anchors.len());
+        let mut seen = BTreeSet::new();
+        for (index, anchor) in anchors.into_iter().enumerate() {
+            LexicalAnchorV1::validate(&anchor, index)?;
+            if !seen.insert(anchor.clone()) {
+                return Err(LexicalRouteErrorV1::DuplicateAnchor { index });
+            }
+            validated.push(LexicalAnchorV1(anchor));
+        }
+        Ok(Self {
+            anchors: validated,
+            prefer_symbol: prefer_symbol.into(),
+            aliases: Vec::new(),
+            phrases: Vec::new(),
+            proximities: Vec::new(),
+            field_filters: Vec::new(),
+        })
+    }
+
+    /// Anchors each identifier `task` names (`run_update_command`,
+    /// `camelCase`, `a::b`) after the caller's anchors, up to the anchor cap.
+    /// An exact symbol-name hit on an ordinary task word would otherwise
+    /// outrank the one symbol the task actually names.
+    #[must_use]
+    pub fn with_task_identifiers(mut self, task: &str) -> Self {
+        for (_, token) in technical_tokens(task) {
+            if self.anchors.len() >= MAX_LEXICAL_ANCHORS_V1 {
+                break;
+            }
+            let token = token.trim_matches(['.', ':']);
+            if names_identifier(token)
+                && !self.anchors.iter().any(|anchor| anchor.as_str() == token)
+                && LexicalAnchorV1::validate(token, self.anchors.len()).is_ok()
+            {
+                self.anchors.push(LexicalAnchorV1(token.to_owned()));
+            }
+        }
+        self
+    }
+
+    pub fn with_aliases(
+        mut self,
+        mut aliases: Vec<LexicalAliasV1>,
+    ) -> Result<Self, LexicalRouteErrorV1> {
+        if aliases.len() > MAX_LEXICAL_ALIASES_V1 {
+            return Err(LexicalRouteErrorV1::TooManyAliases {
+                max: MAX_LEXICAL_ALIASES_V1,
+                actual: aliases.len(),
+            });
+        }
+        aliases.sort();
+        let mut seen = BTreeSet::new();
+        for (index, alias) in aliases.iter().enumerate() {
+            if !seen.insert(alias.validate(index)?) {
+                return Err(LexicalRouteErrorV1::DuplicateAlias { index });
+            }
+        }
+        self.aliases = aliases;
+        Ok(self)
+    }
+
+    /// Query route plus the preferred-symbol name route for name-first lexical
+    /// lookup.
+    pub fn prefer_symbol() -> Self {
+        Self {
+            prefer_symbol: SymbolRoutePreferenceV1::Always,
+            ..Self::default()
+        }
+    }
+}
+
+/// Why the lexical lane tried a configured alternative.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalAlternativeReasonV1 {
+    ConfiguredVocabularyAlias,
+}
+
+/// Which route ranked a candidate. Serialized into the response so a caller
+/// can see why a hit ranked.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "route", rename_all = "snake_case")]
+pub enum LexicalRouteKindV1 {
+    /// The caller's strict lexical query.
+    Query,
+    /// One caller-supplied exact identifier or term.
+    Anchor { anchor: LexicalAnchorV1 },
+    /// Identifier-shaped tokens of the query, restricted to symbol names.
+    PreferredSymbol { tokens: Vec<String> },
+    /// Identifier and path components recovered from the strict query.
+    IdentifierSplit {
+        strict_query: String,
+        terms: Vec<String>,
+    },
+    /// A configured query-time vocabulary alternative.
+    Alias {
+        strict_query: String,
+        alternative: String,
+        reason: LexicalAlternativeReasonV1,
+    },
+}
+
+/// One planned lexical route: its identity plus the lane request terms.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LexicalRouteV1 {
+    pub kind: LexicalRouteKindV1,
+    pub parts: LexicalQueryPartsV1,
+    pub proximities: Vec<LexicalProximityV1>,
+    pub field_filters: Vec<LexicalFieldFilterV1>,
+}
+
+/// The ordered routes one hybrid query runs through the lexical lane. The
+/// query route is always first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LexicalRoutePlanV1 {
+    decision: LexicalRouteDecisionV1,
+    routes: Vec<LexicalRouteV1>,
+}
+
+fn identifier_split_route(
+    query: &str,
+    query_parts: &LexicalQueryPartsV1,
+    field_filters: &[LexicalFieldFilterV1],
+) -> Option<LexicalRouteV1> {
+    let [whole_term] = query_parts.whole_terms.as_slice() else {
+        return None;
+    };
+    let canonical = whole_term.to_ascii_lowercase();
+    let mut seen = BTreeSet::new();
+    let terms = split_subtokens(whole_term)
+        .into_iter()
+        .take(MAX_PREFERRED_SYMBOL_TOKENS_V1)
+        .filter(|term| term != &canonical && seen.insert(term.clone()))
+        .collect::<Vec<_>>();
+    let (whole_terms, proximities) = match terms.as_slice() {
+        [] => return None,
+        [_] => (terms.clone(), Vec::new()),
+        _ => (
+            Vec::new(),
+            vec![LexicalProximityV1 {
+                terms: terms.clone(),
+                maximum_gap: 0,
+            }],
+        ),
+    };
+    Some(LexicalRouteV1 {
+        kind: LexicalRouteKindV1::IdentifierSplit {
+            strict_query: query.to_owned(),
+            terms,
+        },
+        parts: LexicalQueryPartsV1 {
+            whole_terms,
+            subtokens: Vec::new(),
+            phrases: Vec::new(),
+        },
+        proximities,
+        field_filters: field_filters.to_vec(),
+    })
+}
+
+impl LexicalRoutePlanV1 {
+    /// Plan the strict query, caller-order anchors, preferred-symbol recovery,
+    /// identifier splitting, then byte-sorted matching aliases.
+    pub fn plan(query: &str, routing: &LexicalRoutingV1) -> Result<Self, RetrievalPortError> {
+        let mut query_parts = lexical_query_parts(query)?;
+        let strict_parts = normalized_query_parts(query_parts.clone());
+        query_parts.phrases.extend(routing.phrases.iter().cloned());
+        query_parts.phrases.sort();
+        query_parts.phrases.dedup();
+        let mut routes = vec![LexicalRouteV1 {
+            kind: LexicalRouteKindV1::Query,
+            parts: query_parts.clone(),
+            proximities: routing.proximities.clone(),
+            field_filters: routing.field_filters.clone(),
+        }];
+        for anchor in &routing.anchors {
+            routes.push(LexicalRouteV1 {
+                kind: LexicalRouteKindV1::Anchor {
+                    anchor: anchor.clone(),
+                },
+                parts: lexical_query_parts(anchor.as_str())?,
+                proximities: Vec::new(),
+                field_filters: routing.field_filters.clone(),
+            });
+        }
+        let (shape_route, margin_micros) = classify_query_shape(query);
+        let (wanted, decided_by) = match routing.prefer_symbol {
+            SymbolRoutePreferenceV1::ByQueryShape => {
+                (shape_route, LexicalRouteDeciderV1::QueryShape)
+            }
+            SymbolRoutePreferenceV1::Always => {
+                (LexicalQueryRouteV1::Name, LexicalRouteDeciderV1::Caller)
+            }
+            SymbolRoutePreferenceV1::Never => {
+                (LexicalQueryRouteV1::Prose, LexicalRouteDeciderV1::Caller)
+            }
+        };
+        let mut decision = LexicalRouteDecisionV1 {
+            route: LexicalQueryRouteV1::Prose,
+            margin_micros,
+            decided_by,
+        };
+        if wanted == LexicalQueryRouteV1::Name {
+            let tokens = preferred_symbol_tokens(query);
+            if !tokens.is_empty() {
+                decision.route = LexicalQueryRouteV1::Name;
+                let mut whole_terms = tokens.clone();
+                whole_terms.sort();
+                whole_terms.dedup();
+                routes.push(LexicalRouteV1 {
+                    kind: LexicalRouteKindV1::PreferredSymbol { tokens },
+                    parts: LexicalQueryPartsV1 {
+                        whole_terms,
+                        subtokens: Vec::new(),
+                        phrases: Vec::new(),
+                    },
+                    proximities: Vec::new(),
+                    field_filters: vec![LexicalFieldFilterV1 {
+                        field: LexicalFieldV1::SymbolName,
+                        include: true,
+                    }],
+                });
+            }
+        }
+        if let Some(route) = identifier_split_route(query, &query_parts, &routing.field_filters) {
+            routes.push(route);
+        }
+        for alias in &routing.aliases {
+            if normalized_query_parts(lexical_query_parts(&alias.strict_query)?) != strict_parts {
+                continue;
+            }
+            routes.push(LexicalRouteV1 {
+                kind: LexicalRouteKindV1::Alias {
+                    strict_query: query.to_owned(),
+                    alternative: alias.alternative.clone(),
+                    reason: LexicalAlternativeReasonV1::ConfiguredVocabularyAlias,
+                },
+                parts: lexical_query_parts(&alias.alternative)?,
+                proximities: Vec::new(),
+                field_filters: routing.field_filters.clone(),
+            });
+        }
+        Ok(Self { decision, routes })
+    }
+
+    /// Which lane the query's shape (or the caller) selected, with the
+    /// classifier margin. `Name` only when the symbol-name route was planned.
+    pub fn decision(&self) -> LexicalRouteDecisionV1 {
+        self.decision
+    }
+
+    pub fn routes(&self) -> &[LexicalRouteV1] {
+        &self.routes
+    }
+
+    pub fn descriptors(&self) -> Vec<LexicalRouteKindV1> {
+        self.routes.iter().map(|route| route.kind.clone()).collect()
+    }
+}
+
+/// Identifier-shaped tokens of a natural-language query, in query order.
+///
+/// A token is a maximal run of `[A-Za-z0-9_:.]` that starts with a letter or
+/// underscore. Qualified spellings (`Foo::bar`, `Foo.bar`) normalize to their
+/// trailing segment because the symbol-name field indexes bare names.
+/// Stoplisted query words and single characters are dropped; the result is
+/// deduplicated and bounded to [`MAX_PREFERRED_SYMBOL_TOKENS_V1`].
+pub fn preferred_symbol_tokens(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut seen = BTreeSet::new();
+    for word in query_content_words(query) {
+        if tokens.len() >= MAX_PREFERRED_SYMBOL_TOKENS_V1 {
+            break;
+        }
+        if seen.insert(word.name.clone()) {
+            tokens.push(word.name);
+        }
+    }
+    tokens
+}
+
+/// One identifier-grammar query word that is not stoplisted: its raw
+/// spelling and the bare symbol name it normalizes to.
+struct QueryContentWordV1 {
+    raw: String,
+    name: String,
+}
+
+/// Every content word of `query` in query order, with repeats.
+fn query_content_words(query: &str) -> Vec<QueryContentWordV1> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut flush = |current: &mut String| {
+        if current.is_empty() {
+            return;
+        }
+        let raw = std::mem::take(current);
+        let Some(name) = trailing_symbol_name(&raw) else {
+            return;
+        };
+        if name.chars().count() < 2
+            || PREFERRED_SYMBOL_STOPLIST_V1
+                .iter()
+                .any(|stop| stop.eq_ignore_ascii_case(name))
+        {
+            return;
+        }
+        let name = name.to_owned();
+        words.push(QueryContentWordV1 { raw, name });
+    };
+    for character in query.chars() {
+        let continues = character.is_ascii_alphanumeric() || matches!(character, '_' | ':' | '.');
+        let starts = character.is_ascii_alphabetic() || character == '_';
+        if current.is_empty() {
+            if starts {
+                current.push(character);
+            }
+        } else if continues {
+            current.push(character);
+        } else {
+            flush(&mut current);
+        }
+    }
+    flush(&mut current);
+    words
+}
+
+/// The bare identifier a qualified token names, or `None` when no segment is
+/// identifier-shaped (for example a trailing `.` or a numeric segment).
+fn trailing_symbol_name(token: &str) -> Option<&str> {
+    token
+        .rsplit([':', '.'])
+        .find(|segment| !segment.is_empty())
+        .filter(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+                && segment
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
+}
+
+/// One executed route: its identity and the lane's typed outcome for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LexicalRouteOutcomeV1 {
+    pub kind: LexicalRouteKindV1,
+    pub outcome: RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>,
+}
+
+/// Why one route ranked one candidate.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalRouteMatchV1 {
+    pub route: LexicalRouteKindV1,
+    pub score_micros: u64,
+    pub matched_terms: Vec<String>,
+    pub spelling_variants: Vec<super::LexicalSpellingVariantV1>,
+}
+
+/// What one caller anchor contributed to the response.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum LexicalAnchorOutcomeV1 {
+    /// `matched` rows in the served generation carried the anchor.
+    /// `admitted` counts the result sites carrying it: those the lane kept
+    /// through its cap until [`LexicalRouteReceiptV1::reconcile_served`]
+    /// narrows it to the sites the response carries, moving the rest into
+    /// `dropped` by reason.
+    Matched {
+        matched: u64,
+        admitted: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dropped: Vec<LexicalAnchorDropV1>,
+    },
+    /// The anchor route served and found no row carrying the anchor.
+    Unmatched,
+    /// The anchor route did not serve; the lane outcome names why.
+    NotServed,
+}
+
+/// One caller anchor's outcome, in caller order. Serialized flat
+/// (`{"anchor", "outcome", ...}`), which is why it is not
+/// `deny_unknown_fields`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LexicalAnchorReceiptV1 {
+    pub anchor: LexicalAnchorV1,
+    #[serde(flatten)]
+    pub outcome: LexicalAnchorOutcomeV1,
+}
+
+/// Route evidence for one composed lexical lane, keyed by candidate anchor so
+/// the response can attach it to each ranked result. It is additive
+/// presentation metadata: never part of ranking identity, fallback bytes, or
+/// cursor state.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalRouteReceiptV1 {
+    pub routes: Vec<LexicalRouteKindV1>,
+    pub matches_by_anchor: BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>>,
+    pub anchors: Vec<LexicalAnchorReceiptV1>,
+    /// Lane-admitted sites a serving stage removed from the response.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dropped_sites: BTreeMap<RetrievalAnchorId, LexicalAnchorDropReasonV1>,
+    /// Sites whose own symbol or qualified name an anchor route matched.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub declaring_sites: BTreeSet<RetrievalAnchorId>,
+    /// The planned query-shape route and its margin.
+    #[serde(default)]
+    pub decision: LexicalRouteDecisionV1,
+}
+
+impl LexicalRouteReceiptV1 {
+    pub fn has_disclosure(&self) -> bool {
+        self.routes.len() > 1 || !self.matches_by_anchor.is_empty()
+    }
+
+    /// Each lane-admitted site's anchor tier: twice the distinct caller
+    /// anchors it carries, plus one when it declares one of them.
+    /// Composition ranks a site carrying more anchors ahead of every site
+    /// carrying fewer, and among equals the definition ahead of its mentions.
+    pub fn anchor_tiers(&self) -> BTreeMap<RetrievalAnchorId, u32> {
+        self.matches_by_anchor
+            .iter()
+            .filter_map(|(site, matches)| {
+                let anchors = matches
+                    .iter()
+                    .filter_map(|route_match| match &route_match.route {
+                        LexicalRouteKindV1::Anchor { anchor } => Some(anchor),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                // At most `MAX_LEXICAL_ANCHORS_V1` anchors, so the tier fits.
+                (!anchors.is_empty()).then(|| {
+                    let declares = u32::from(self.declaring_sites.contains(site));
+                    (site.clone(), anchors.len() as u32 * 2 + declares)
+                })
+            })
+            .collect()
+    }
+
+    /// Recount every matched anchor against the sites the response carries.
+    /// `classify` names why a lane-admitted site not already recorded as
+    /// dropped is absent from the response, or `None` when it is carried;
+    /// a later stage calls this again to record only its own removals.
+    pub fn reconcile_served(
+        &mut self,
+        classify: impl Fn(&RetrievalAnchorId) -> Option<LexicalAnchorDropReasonV1>,
+    ) {
+        for site in self.matches_by_anchor.keys() {
+            if !self.dropped_sites.contains_key(site)
+                && let Some(reason) = classify(site)
+            {
+                self.dropped_sites.insert(site.clone(), reason);
+            }
+        }
+        for receipt in &mut self.anchors {
+            let LexicalAnchorOutcomeV1::Matched {
+                admitted, dropped, ..
+            } = &mut receipt.outcome
+            else {
+                continue;
+            };
+            let mut carried = 0_u64;
+            let mut removed = BTreeMap::<LexicalAnchorDropReasonV1, u64>::new();
+            for (site, matches) in &self.matches_by_anchor {
+                let carries_anchor = matches.iter().any(|route_match| {
+                    matches!(&route_match.route, LexicalRouteKindV1::Anchor { anchor } if *anchor == receipt.anchor)
+                });
+                if !carries_anchor {
+                    continue;
+                }
+                match self.dropped_sites.get(site) {
+                    None => carried += 1,
+                    Some(reason) => *removed.entry(*reason).or_default() += 1,
+                }
+            }
+            *admitted = carried;
+            *dropped = removed
+                .into_iter()
+                .map(|(reason, sites)| LexicalAnchorDropV1 { reason, sites })
+                .collect();
+        }
+    }
+}
+
+/// Every caller anchor among `routes` with the given outcome; used when the
+/// query route did not serve and no anchor route could contribute.
+fn anchor_receipts_not_served(routes: &[LexicalRouteKindV1]) -> Vec<LexicalAnchorReceiptV1> {
+    routes
+        .iter()
+        .filter_map(|route| match route {
+            LexicalRouteKindV1::Anchor { anchor } => Some(LexicalAnchorReceiptV1 {
+                anchor: anchor.clone(),
+                outcome: LexicalAnchorOutcomeV1::NotServed,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Merge the executed routes into the one lexical lane input composition
+/// admits.
+///
+/// The query route is authoritative for lane availability: when it did not
+/// serve, its typed outcome is returned unchanged. A servable query route
+/// merged with a non-servable additive route yields a `Partial` outcome whose
+/// reason names the failed route, so recall is never overstated.
+pub fn merge_lexical_routes(
+    generation: &CodeGenerationId,
+    lane_budget: &RetrievalBudget,
+    base_budget: &RetrievalBudget,
+    routes: Vec<LexicalRouteOutcomeV1>,
+) -> Result<
+    (
+        RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>,
+        LexicalRouteReceiptV1,
+    ),
+    RetrievalPortError,
+> {
+    let descriptors: Vec<LexicalRouteKindV1> =
+        routes.iter().map(|route| route.kind.clone()).collect();
+    let mut routes = routes.into_iter();
+    let query = routes.next().ok_or_else(|| {
+        RetrievalPortError::Contract("lexical routing requires the query route".to_owned())
+    })?;
+    if query.kind != LexicalRouteKindV1::Query {
+        return Err(RetrievalPortError::Contract(
+            "the first lexical route must be the query route".to_owned(),
+        ));
+    }
+    let (query_batch, mut partial_reason) = match query.outcome {
+        RetrieverOutcome::Complete(batch) => (batch, None),
+        RetrieverOutcome::Partial { value, reason } => (value, Some(reason)),
+        other => {
+            let anchors = anchor_receipts_not_served(&descriptors);
+            return Ok((
+                other,
+                LexicalRouteReceiptV1 {
+                    routes: descriptors,
+                    anchors,
+                    ..LexicalRouteReceiptV1::default()
+                },
+            ));
+        }
+    };
+    let additional: Vec<LexicalRouteOutcomeV1> = routes.collect();
+    if additional.is_empty() {
+        let matches_by_anchor = query_batch
+            .candidates
+            .iter()
+            .filter_map(|candidate| {
+                let evidence = query_batch
+                    .evidence_by_occurrence
+                    .get(&candidate.source_occurrence_id)?;
+                (!evidence.spelling_variants.is_empty()).then(|| {
+                    (
+                        candidate.anchor_id.clone(),
+                        vec![LexicalRouteMatchV1 {
+                            route: LexicalRouteKindV1::Query,
+                            score_micros: candidate.raw_score.micros(),
+                            matched_terms: matched_terms(evidence),
+                            spelling_variants: evidence.spelling_variants.clone(),
+                        }],
+                    )
+                })
+            })
+            .collect();
+        let receipt = LexicalRouteReceiptV1 {
+            routes: descriptors,
+            matches_by_anchor,
+            ..LexicalRouteReceiptV1::default()
+        };
+        let outcome = match partial_reason {
+            Some(reason) => RetrieverOutcome::Partial {
+                value: query_batch,
+                reason,
+            },
+            None => RetrieverOutcome::Complete(query_batch),
+        };
+        return Ok((outcome, receipt));
+    }
+
+    let mut merged = MergedRoutes::default();
+    merged.absorb(&LexicalRouteKindV1::Query, &query_batch)?;
+    for route in &additional {
+        match &route.outcome {
+            RetrieverOutcome::Complete(batch) => merged.absorb(&route.kind, batch)?,
+            RetrieverOutcome::Partial { value, reason } => {
+                merged.absorb(&route.kind, value)?;
+                partial_reason.get_or_insert_with(|| reason.clone());
+            }
+            other => {
+                merged.exhausted = false;
+                if let LexicalRouteKindV1::Anchor { anchor } = &route.kind {
+                    merged.anchors.push(AnchorRoute {
+                        anchor: anchor.clone(),
+                        served: false,
+                        matched: 0,
+                        ranking: Vec::new(),
+                    });
+                }
+                partial_reason.get_or_insert_with(|| additive_route_failure(&route.kind, other));
+            }
+        }
+    }
+    let (batch, matches_by_anchor, anchors, declaring_sites) =
+        merged.into_batch(generation, lane_candidate_cap(lane_budget, base_budget))?;
+    let mut receipt = LexicalRouteReceiptV1 {
+        routes: descriptors,
+        matches_by_anchor,
+        anchors,
+        dropped_sites: BTreeMap::new(),
+        declaring_sites,
+        decision: LexicalRouteDecisionV1::default(),
+    };
+    receipt.reconcile_served(|_| None);
+    let outcome = match partial_reason {
+        Some(reason) => RetrieverOutcome::Partial {
+            value: batch,
+            reason,
+        },
+        None => RetrieverOutcome::Complete(batch),
+    };
+    Ok((outcome, receipt))
+}
+
+fn additive_route_failure(
+    kind: &LexicalRouteKindV1,
+    outcome: &RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>,
+) -> RetrievalFailure {
+    let route = route_label(kind);
+    match outcome {
+        RetrieverOutcome::Unavailable(failure) => failure.clone(),
+        RetrieverOutcome::Stale(_) => RetrievalFailure::StaleSource,
+        RetrieverOutcome::Denied => RetrievalFailure::AuthorityUnavailable {
+            detail: format!("lexical route {route} was not served"),
+        },
+        RetrieverOutcome::BudgetExceeded(_) => RetrievalFailure::Internal {
+            detail: format!("lexical route {route} exceeded its budget"),
+        },
+        RetrieverOutcome::TimedOut(_) => RetrievalFailure::Internal {
+            detail: format!("lexical route {route} timed out"),
+        },
+        RetrieverOutcome::Cancelled => RetrievalFailure::Internal {
+            detail: format!("lexical route {route} was cancelled"),
+        },
+        RetrieverOutcome::Complete(_) | RetrieverOutcome::Partial { .. } => {
+            RetrievalFailure::Internal {
+                detail: format!("lexical route {route} reported a servable outcome as a failure"),
+            }
+        }
+    }
+}
+
+fn route_label(kind: &LexicalRouteKindV1) -> String {
+    match kind {
+        LexicalRouteKindV1::Query => "query".to_owned(),
+        LexicalRouteKindV1::Anchor { anchor } => format!("anchor:{}", anchor.as_str()),
+        LexicalRouteKindV1::PreferredSymbol { tokens } => {
+            format!("preferred_symbol:{}", tokens.join(","))
+        }
+        LexicalRouteKindV1::IdentifierSplit { terms, .. } => {
+            format!("identifier_split:{}", terms.join(","))
+        }
+        LexicalRouteKindV1::Alias { alternative, .. } => format!("alias:{alternative}"),
+    }
+}
+
+fn matched_terms(evidence: &LexicalLaneEvidence) -> Vec<String> {
+    let mut terms: Vec<String> = evidence
+        .matched_whole_terms
+        .iter()
+        .chain(&evidence.matched_subtokens)
+        .chain(&evidence.matched_phrases)
+        .cloned()
+        .collect();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+struct MergedCandidate {
+    candidate: CompactCandidate,
+    evidence: LexicalLaneEvidence,
+    matches: Vec<LexicalRouteMatchV1>,
+    strict: bool,
+    /// Distinct caller anchors whose routes ranked this occurrence.
+    anchors: BTreeSet<LexicalAnchorV1>,
+    /// An anchor route matched this occurrence's own symbol or qualified name.
+    declares_anchor: bool,
+}
+
+/// One caller anchor route's contribution, in caller order.
+struct AnchorRoute {
+    anchor: LexicalAnchorV1,
+    served: bool,
+    /// Rows the route found eligible before its own cap.
+    matched: u64,
+    /// The route's committed prefix as `(fused anchor, occurrence)` in the
+    /// route's own score order; the reservation walks it site by site.
+    ranking: Vec<(RetrievalAnchorId, SourceOccurrenceId)>,
+}
+
+#[derive(Default)]
+struct MergedRoutes {
+    by_occurrence: BTreeMap<SourceOccurrenceId, MergedCandidate>,
+    coverage: RetrieverCoverage,
+    exhausted: bool,
+    absorbed_routes: usize,
+    anchors: Vec<AnchorRoute>,
+}
+
+/// The merged lane's admitted batch, its per-candidate route matches, and the
+/// per-anchor receipts.
+type MergedLexicalLane = (
+    RetrieverBatch<LexicalLaneEvidence>,
+    BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>>,
+    Vec<LexicalAnchorReceiptV1>,
+    BTreeSet<RetrievalAnchorId>,
+);
+
+/// Canonical merged order: production definitions before every other
+/// source role, then strict routes before alternatives, then the
+/// anchor-tiered score, then stable occurrence identity.
+fn merged_candidate_cmp(left: &MergedCandidate, right: &MergedCandidate) -> std::cmp::Ordering {
+    left.candidate
+        .source_role
+        .admission_rank()
+        .cmp(&right.candidate.source_role.admission_rank())
+        .then_with(|| right.strict.cmp(&left.strict))
+        .then_with(|| right.candidate.raw_score.cmp(&left.candidate.raw_score))
+        .then_with(|| {
+            left.candidate
+                .source_occurrence_id
+                .cmp(&right.candidate.source_occurrence_id)
+        })
+        .then_with(|| {
+            left.candidate
+                .retriever_evidence_anchor
+                .cmp(&right.candidate.retriever_evidence_anchor)
+        })
+}
+
+impl MergedRoutes {
+    fn absorb(
+        &mut self,
+        kind: &LexicalRouteKindV1,
+        batch: &RetrieverBatch<LexicalLaneEvidence>,
+    ) -> Result<(), RetrievalPortError> {
+        let is_alternative = matches!(
+            kind,
+            LexicalRouteKindV1::IdentifierSplit { .. } | LexicalRouteKindV1::Alias { .. }
+        );
+        batch.validate().map_err(contract_error)?;
+        if let LexicalRouteKindV1::Anchor { anchor } = kind {
+            self.anchors.push(AnchorRoute {
+                anchor: anchor.clone(),
+                served: true,
+                matched: batch.coverage.eligible,
+                ranking: batch
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        (
+                            candidate.anchor_id.clone(),
+                            candidate.source_occurrence_id.clone(),
+                        )
+                    })
+                    .collect(),
+            });
+        }
+        let route_exhausted = batch
+            .continuation
+            .as_ref()
+            .is_some_and(|continuation| continuation.exhausted);
+        self.exhausted = if self.absorbed_routes == 0 {
+            route_exhausted
+        } else {
+            self.exhausted && route_exhausted
+        };
+        self.absorbed_routes += 1;
+        self.coverage.examined = self
+            .coverage
+            .examined
+            .saturating_add(batch.coverage.examined);
+        self.coverage.excluded = self
+            .coverage
+            .excluded
+            .saturating_add(batch.coverage.excluded);
+        self.coverage.capped = self.coverage.capped.saturating_add(batch.coverage.capped);
+        self.coverage.unknown = self.coverage.unknown.saturating_add(batch.coverage.unknown);
+        for candidate in &batch.candidates {
+            let evidence = batch
+                .evidence_by_occurrence
+                .get(&candidate.source_occurrence_id)
+                .ok_or_else(|| {
+                    RetrievalPortError::Contract(
+                        "lexical route evidence is missing for a returned occurrence".to_owned(),
+                    )
+                })?;
+            let route_match = LexicalRouteMatchV1 {
+                route: kind.clone(),
+                score_micros: candidate.raw_score.micros(),
+                matched_terms: matched_terms(evidence),
+                spelling_variants: evidence.spelling_variants.clone(),
+            };
+            let route_anchor = match kind {
+                LexicalRouteKindV1::Anchor { anchor } => Some(anchor.clone()),
+                _ => None,
+            };
+            let declares_anchor = route_anchor.is_some()
+                && evidence.field_scores_micros.iter().any(|(field, score)| {
+                    *score > 0
+                        && matches!(
+                            field,
+                            LexicalFieldV1::SymbolName | LexicalFieldV1::QualifiedName
+                        )
+                });
+            match self.by_occurrence.get_mut(&candidate.source_occurrence_id) {
+                Some(existing) => {
+                    if existing.candidate.anchor_id != candidate.anchor_id
+                        || existing.candidate.logical_evidence_id != candidate.logical_evidence_id
+                        || existing.candidate.retriever_evidence_anchor
+                            != candidate.retriever_evidence_anchor
+                    {
+                        return Err(RetrievalPortError::Contract(
+                            "lexical routes disagree on the identity of one source occurrence"
+                                .to_owned(),
+                        ));
+                    }
+                    if is_alternative && existing.strict {
+                        // The strict route's evidence stands, but the
+                        // alternative's source role still folds: a
+                        // definition-field match under any admitted route
+                        // marks the occurrence a production definition.
+                        existing.evidence.source_role =
+                            existing.evidence.source_role.min(evidence.source_role);
+                        existing.matches.push(route_match);
+                        continue;
+                    }
+                    existing.candidate.raw_score = existing
+                        .candidate
+                        .raw_score
+                        .checked_add(candidate.raw_score)
+                        .map_err(contract_error)?;
+                    merge_evidence(&mut existing.evidence, evidence)?;
+                    existing.matches.push(route_match);
+                    existing.anchors.extend(route_anchor);
+                    existing.declares_anchor |= declares_anchor;
+                }
+                None => {
+                    self.by_occurrence.insert(
+                        candidate.source_occurrence_id.clone(),
+                        MergedCandidate {
+                            candidate: candidate.clone(),
+                            evidence: evidence.clone(),
+                            matches: vec![route_match],
+                            strict: !is_alternative,
+                            anchors: route_anchor.into_iter().collect(),
+                            declares_anchor,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Occurrences every anchor keeps through the cap: walking each served
+    /// anchor route in its own score order, the best row of each of its first
+    /// `cap / (anchors + 1)` distinct sites (fused anchors). One row per site
+    /// keeps the reservation within the cap even when a site is an oversized
+    /// symbol split into many chunks; the query route keeps the same share, so
+    /// no anchor, common or rare, starves another.
+    fn reserved_occurrences(&self, cap: usize) -> BTreeSet<SourceOccurrenceId> {
+        let served = self.anchors.iter().filter(|route| route.served).count();
+        let sites_per_anchor = cap.div_ceil(served.saturating_add(1)).max(1);
+        let mut reserved = BTreeSet::new();
+        for route in &self.anchors {
+            let mut sites = BTreeSet::new();
+            for (site, occurrence) in &route.ranking {
+                if sites.len() >= sites_per_anchor {
+                    break;
+                }
+                if sites.insert(site.clone()) {
+                    reserved.insert(occurrence.clone());
+                }
+            }
+        }
+        reserved
+    }
+
+    fn into_batch(
+        self,
+        generation: &CodeGenerationId,
+        cap: usize,
+    ) -> Result<MergedLexicalLane, RetrievalPortError> {
+        let reserved = self.reserved_occurrences(cap);
+        let mut admitted: Vec<MergedCandidate> = self.by_occurrence.into_values().collect();
+        for merged in &mut admitted {
+            let tier = FixedPointScore(
+                (merged.anchors.len() as u64)
+                    .checked_mul(LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1)
+                    .ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "lexical anchor tier overflowed the fixed-point score".to_owned(),
+                        )
+                    })?,
+            );
+            merged.candidate.raw_score = merged
+                .candidate
+                .raw_score
+                .checked_add(tier)
+                .map_err(contract_error)?;
+            // The emitted candidate mirrors the aggregated evidence role:
+            // one source-role application after route aggregation.
+            merged.candidate.source_role = merged.evidence.source_role;
+        }
+        admitted.sort_by(merged_candidate_cmp);
+        let eligible = admitted.len() as u64;
+        let truncated = admitted.len().saturating_sub(cap);
+        if truncated > 0 {
+            // Reserved anchor sites take seats first, in canonical order and
+            // never beyond the cap; the remaining seats go to the best of the
+            // rest. Re-sorting after the cut keeps the committed prefix
+            // canonical.
+            let mut seats = cap;
+            let (mut kept, rest): (Vec<_>, Vec<_>) = admitted.into_iter().partition(|merged| {
+                let keep = seats > 0 && reserved.contains(&merged.candidate.source_occurrence_id);
+                seats -= usize::from(keep);
+                keep
+            });
+            kept.extend(rest.into_iter().take(seats));
+            kept.sort_by(merged_candidate_cmp);
+            admitted = kept;
+        }
+        // Admitted site counts are filled from `matches_by_anchor` by
+        // `LexicalRouteReceiptV1::reconcile_served`.
+        let anchors = self
+            .anchors
+            .iter()
+            .map(|route| LexicalAnchorReceiptV1 {
+                anchor: route.anchor.clone(),
+                outcome: if !route.served {
+                    LexicalAnchorOutcomeV1::NotServed
+                } else if route.matched == 0 {
+                    LexicalAnchorOutcomeV1::Unmatched
+                } else {
+                    LexicalAnchorOutcomeV1::Matched {
+                        matched: route.matched,
+                        admitted: 0,
+                        dropped: Vec::new(),
+                    }
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut candidates = Vec::with_capacity(admitted.len());
+        let mut evidence_by_occurrence = BTreeMap::new();
+        let mut matches_by_anchor: BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>> =
+            BTreeMap::new();
+        let mut declaring_sites = BTreeSet::new();
+        for (ordinal, merged) in admitted.into_iter().enumerate() {
+            let mut candidate = merged.candidate;
+            candidate.ordinal_rank = ordinal as u32;
+            if merged.declares_anchor {
+                declaring_sites.insert(candidate.anchor_id.clone());
+            }
+            evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), merged.evidence);
+            matches_by_anchor
+                .entry(candidate.anchor_id.clone())
+                .or_default()
+                .extend(merged.matches);
+            candidates.push(candidate);
+        }
+        let checkpoint_digest = lexical_checkpoint_digest(generation, &candidates)?;
+        let batch = RetrieverBatch {
+            candidates,
+            evidence_by_occurrence,
+            coverage: RetrieverCoverage {
+                examined: self.coverage.examined,
+                eligible,
+                excluded: self.coverage.excluded,
+                capped: self.coverage.capped.saturating_add(truncated as u64),
+                unknown: self.coverage.unknown,
+            },
+            continuation: Some(RetrieverContinuation {
+                lane: RetrieverKind::Lexical,
+                checkpoint_digest,
+                exhausted: self.exhausted && truncated == 0,
+            }),
+        };
+        batch.validate().map_err(contract_error)?;
+        Ok((batch, matches_by_anchor, anchors, declaring_sites))
+    }
+}
+
+/// Fold one route's evidence for an occurrence into the evidence already
+/// merged for it: per-field scores add, matched terms union, flags OR.
+fn merge_evidence(
+    existing: &mut LexicalLaneEvidence,
+    incoming: &LexicalLaneEvidence,
+) -> Result<(), RetrievalPortError> {
+    if existing.binding.candidate_anchor != incoming.binding.candidate_anchor
+        || existing.binding.occurrence != incoming.binding.occurrence
+        || existing.binding.language_descriptor_revision
+            != incoming.binding.language_descriptor_revision
+        || existing.binding.source_occurrence != incoming.binding.source_occurrence
+    {
+        return Err(RetrievalPortError::Contract(
+            "lexical routes disagree on the binding of one source occurrence".to_owned(),
+        ));
+    }
+    // Match kinds describe each query route, not the identity of its source.
+    existing
+        .binding
+        .matched_term_kinds
+        .extend_from_slice(&incoming.binding.matched_term_kinds);
+    existing.binding.matched_term_kinds.sort();
+    existing.binding.matched_term_kinds.dedup();
+    for (field, score) in &incoming.field_scores_micros {
+        match existing
+            .field_scores_micros
+            .iter_mut()
+            .find(|(existing_field, _)| existing_field == field)
+        {
+            Some((_, existing_score)) => {
+                *existing_score = FixedPointScore(*existing_score)
+                    .checked_add(FixedPointScore(*score))
+                    .map_err(contract_error)?
+                    .micros();
+            }
+            None => existing.field_scores_micros.push((*field, *score)),
+        }
+    }
+    // The merged role is the strongest across routes: an occurrence that
+    // any admitted route read as a production definition keeps that tier.
+    existing.source_role = existing.source_role.min(incoming.source_role);
+    union_terms(
+        &mut existing.matched_whole_terms,
+        &incoming.matched_whole_terms,
+    );
+    union_terms(&mut existing.matched_subtokens, &incoming.matched_subtokens);
+    union_terms(&mut existing.matched_phrases, &incoming.matched_phrases);
+    existing
+        .matched_proximities
+        .extend(incoming.matched_proximities.iter().cloned());
+    existing.matched_proximities.sort();
+    existing.matched_proximities.dedup();
+    existing
+        .spelling_variants
+        .extend(incoming.spelling_variants.iter().cloned());
+    existing.spelling_variants.sort();
+    existing.spelling_variants.dedup();
+    existing.typo_recovery_applied |= incoming.typo_recovery_applied;
+    existing.echo_penalty_applied |= incoming.echo_penalty_applied;
+    Ok(())
+}
+
+fn union_terms(existing: &mut Vec<String>, incoming: &[String]) {
+    existing.extend(incoming.iter().cloned());
+    existing.sort();
+    existing.dedup();
+}
+
+#[cfg(test)]
+mod task_shape {
+    use super::task_is_name_shaped;
+
+    #[test]
+    fn classifies_a_single_token_as_a_name_and_prose_as_prose() {
+        assert!(task_is_name_shaped("gmres"));
+        assert!(task_is_name_shaped("shared_token"));
+        assert!(task_is_name_shaped("camelCase"));
+        assert!(task_is_name_shaped("Type.method"));
+        assert!(task_is_name_shaped("path::name"));
+        assert!(task_is_name_shaped("  gmres  "));
+        assert!(!task_is_name_shaped("gmres solver"));
+        assert!(!task_is_name_shaped("how does gmres work"));
+        assert!(!task_is_name_shaped("fix the solver."));
+        assert!(!task_is_name_shaped(""));
+    }
+}
+
+#[cfg(test)]
+mod tests;

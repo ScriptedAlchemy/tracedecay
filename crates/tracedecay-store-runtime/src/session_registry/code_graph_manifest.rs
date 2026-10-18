@@ -1,25 +1,59 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
-use tracedecay_code_index::production::UninterruptibleCodeIndexControlV1;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphLayeredReportV1, CodeGraphProjectionError, SealedCodeGraphRowsError,
+    build_layered_code_graph_rows, build_sealed_code_graph_rows,
+};
+use tracedecay_code_index::production::{
+    CodeIndexProductionErrorV1, SealedGenerationFileWindowsV1, SealedGenerationSegmentReadV1,
+};
+use tracedecay_code_index_retention::code_index_generations::code_generation_segments_root;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
-use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId};
+use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, sha256_hex_suffix};
 use tracedecay_graph_db::{
-    GraphBudgetKind, GraphDbError, GraphGenerationManifest, GraphGenerationManifestProvider,
-    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
-    SealedCodeGenerationReplay, SealedGraphStateDigest,
+    GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphGenerationRowSpill,
+    GraphGenerationRows, GraphLayeredRowSpill, GraphNamespace, GraphProjectionId,
+    GraphProjectionIdentity, GraphProjectorRevision, GraphSealedBaseAbsenceV1,
+    GraphSiblingSealedBaseV1, SealedCodeGenerationReplay, SealedGraphStateDigest,
+    SpilledGraphGeneration,
 };
-use tracedecay_runtime_core::resident_memory::{
-    ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureV1,
-};
+use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1;
 use tracedecay_store::{GraphProjectionIdentityV1, StoreShardIdV1};
 
 const SEAL_READ_CHECK_BYTES: usize = 64 * 1024;
+
+fn classify_sealed_generation_decode_error(
+    error: CodeIndexProductionErrorV1,
+    sealed_state_digest: &ManifestDigest,
+) -> GraphDbError {
+    match error {
+        CodeIndexProductionErrorV1::SourceCommitmentsUnavailable => {
+            GraphDbError::SourceCommitmentsUnavailable {
+                sealed_state_digest: sealed_state_digest.as_str().to_owned(),
+            }
+        }
+        // A row shape or an envelope revision this build no longer reads is
+        // the same typed state to replay: the sealed bytes are intact, this
+        // build just cannot derive a graph from them, so replay reports
+        // unavailability and the generation is rebuilt rather than declared
+        // corrupt.
+        error @ (CodeIndexProductionErrorV1::SealedRowContractRefused { .. }
+        | CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(_)) => {
+            GraphDbError::SealedRevisionIncompatible {
+                sealed_state_digest: sealed_state_digest.as_str().to_owned(),
+                message: error.to_string(),
+            }
+        }
+        error => GraphDbError::Corrupt {
+            message: format!("sealed code generation replay is invalid: {error}"),
+        },
+    }
+}
 
 fn validate_sealed_generation_metadata(metadata: &std::fs::Metadata) -> Result<u64, GraphDbError> {
     if !metadata.file_type().is_file() {
@@ -35,6 +69,9 @@ fn validate_sealed_generation_metadata(metadata: &std::fs::Metadata) -> Result<u
     Ok(metadata.len())
 }
 
+/// Readers hold no store lock, so retention may hard-link or rename a seal
+/// while it is read. Both advance ctime without touching the bytes, so ctime
+/// is not part of a seal's identity.
 fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -45,8 +82,6 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
             && left.len() == right.len()
             && left.mtime() == right.mtime()
             && left.mtime_nsec() == right.mtime_nsec()
-            && left.ctime() == right.ctime()
-            && left.ctime_nsec() == right.ctime_nsec()
     }
     #[cfg(windows)]
     {
@@ -96,13 +131,15 @@ impl CheckedSealReader<'_> {
         std::io::Error::other("sealed code generation checked read failed")
     }
 
+    /// Returns the verified handle, whose bytes a caller may re-read without
+    /// trusting the path again.
     fn finish(
         self,
         path: &std::path::Path,
         opened_metadata: &std::fs::Metadata,
         admitted_len: u64,
         expected_digest: &str,
-    ) -> Result<(), GraphDbError> {
+    ) -> Result<File, GraphDbError> {
         (self.check)()?;
         let final_file_metadata =
             self.reader
@@ -113,19 +150,16 @@ impl CheckedSealReader<'_> {
                         "sealed code generation metadata cannot be revalidated: {error}"
                     ),
                 })?;
-        let final_path_metadata =
-            path.symlink_metadata()
-                .map_err(|error| GraphDbError::Corrupt {
-                    message: format!("sealed code generation path cannot be revalidated: {error}"),
-                })?;
         if !same_file_identity(opened_metadata, &final_file_metadata)
-            || !same_file_identity(opened_metadata, &final_path_metadata)
             || self.bytes_read != admitted_len
         {
             return Err(GraphDbError::Corrupt {
                 message: "sealed code generation identity or length changed while it was read"
                     .to_owned(),
             });
+        }
+        if seal_left_path(path, opened_metadata)? {
+            return Err(GraphDbError::SealSuperseded);
         }
         #[cfg(windows)]
         if !same_windows_handle_identity(self.reader.get_ref(), path)? {
@@ -140,8 +174,35 @@ impl CheckedSealReader<'_> {
                     .to_owned(),
             });
         }
-        Ok(())
+        Ok(self.reader.into_inner())
     }
+}
+
+/// Retention retires seals without waiting for readers. A read that outlives
+/// its path reports the seal superseded; the bytes it read are not evidence
+/// of corruption.
+fn seal_left_path(
+    path: &std::path::Path,
+    opened_metadata: &std::fs::Metadata,
+) -> Result<bool, GraphDbError> {
+    match path.symlink_metadata() {
+        Ok(path_metadata) => Ok(!same_file_identity(opened_metadata, &path_metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(GraphDbError::Corrupt {
+            message: format!("sealed code generation path cannot be revalidated: {error}"),
+        }),
+    }
+}
+
+/// Whether any of `seal_paths` still names the seal. The segment sweep
+/// collects a seal's segments only once no root names the seal.
+fn seal_still_named(seal_paths: &[PathBuf]) -> Result<bool, GraphDbError> {
+    for path in seal_paths {
+        if seal_is_present(path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl Read for CheckedSealReader<'_> {
@@ -234,9 +295,12 @@ fn open_checked_seal_reader<'a>(
 /// first, then from the graph replay pool. Retirement moves a sealed file
 /// strictly canonical->pool by atomic rename, so probing in that order
 /// observes a live seal in at least one root; every read is digest-verified,
-/// which makes recovery from either root equally trustworthy. Typed
-/// interruptions from the caller's probe are transport states and must
-/// surface immediately instead of triggering a second full read.
+/// which makes recovery from either root equally trustworthy. Readers take no
+/// store or pool lock: a seal is immutable and content-addressed, so the
+/// digest-verified bytes of the opened handle are the seal, and a seal that
+/// retires mid-read is unavailable. Typed interruptions from the caller's
+/// probe are transport states and must surface immediately instead of
+/// triggering a second full read.
 fn with_verified_seal_from_roots<T>(
     canonical: &std::path::Path,
     pool: &std::path::Path,
@@ -273,35 +337,31 @@ fn with_verified_seal_from_roots<T>(
     read(pool, expected_digest, check)
 }
 
-fn decode_verified_seal_from_roots(
-    canonical: &std::path::Path,
-    pool: &std::path::Path,
-    expected_digest: &str,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
-    let segments_root = canonical
-        .parent()
-        .and_then(std::path::Path::parent)
-        .ok_or_else(|| GraphDbError::invalid("canonical generation root has no store parent"))?
-        .join("code-generation-segments-v1");
-    with_verified_seal_from_roots(
-        canonical,
-        pool,
-        expected_digest,
-        check,
-        |path, expected_digest, check| {
-            decode_verified_seal(path, &segments_root, expected_digest, check)
-        },
-    )
+/// Only NotFound abstains; malformed or inaccessible seal authority fails closed.
+fn seal_is_present(path: &std::path::Path) -> Result<bool, GraphDbError> {
+    match path.symlink_metadata() {
+        Ok(metadata) => validate_sealed_generation_metadata(&metadata).map(|_| true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(GraphDbError::unavailable(format!(
+            "sealed generation metadata cannot be read: {error}"
+        ))),
+    }
 }
 
-#[hotpath::measure(label = "daemon.session_registry.seal.decode")]
-fn decode_verified_seal(
+/// Reads the partitioned manifest at `path` and proves it is the seal named
+/// by `expected_digest`. The digest is checked over the bytes read from the
+/// opened handle, so a retirement that unlinks the path after the open
+/// cannot change them.
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.read_manifest",
+    level = "trace",
+    skip_all
+)]
+fn read_verified_seal_manifest(
     path: &std::path::Path,
-    segments_root: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
+) -> Result<Vec<u8>, GraphDbError> {
     (check)()?;
     let path_metadata = path.symlink_metadata().map_err(|error| {
         GraphDbError::unavailable(format!(
@@ -328,7 +388,131 @@ fn decode_verified_seal(
             message: "sealed code generation identity changed while it was opened".to_owned(),
         });
     }
-    let expected_digest =
+
+    let mut manifest = Vec::new();
+    file.by_ref()
+        .take(admitted_len)
+        .read_to_end(&mut manifest)
+        .map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed generation manifest read failed: {error}"),
+        })?;
+    if u64::try_from(manifest.len()).ok() != Some(admitted_len)
+        || encode_lowercase_hex(&Sha256::digest(&manifest)) != expected_digest
+    {
+        return Err(GraphDbError::Corrupt {
+            message: "sealed generation manifest filename digest does not match its bytes"
+                .to_owned(),
+        });
+    }
+    (check)()?;
+    Ok(manifest)
+}
+
+/// The paths that can name one seal and the roots holding its segments.
+struct SealRoutes {
+    seal_paths: Vec<PathBuf>,
+    segment_roots: Vec<PathBuf>,
+}
+
+struct VerifiedSealGraphSourceV1 {
+    source: SealedGenerationFileWindowsV1,
+    sealed_state_digest: ManifestDigest,
+    routes: SealRoutes,
+}
+
+/// Runs a graph build over `source`'s file segments, read from the segment
+/// roots of `routes`, and classifies its failure. A cancellation or deadline
+/// the segment reader observed is the build's outcome, whatever error the
+/// build reported after it. A build whose seal no route names any more read
+/// a retired seal: it is superseded, not corrupt.
+fn with_verified_segments<T>(
+    sealed_state_digest: &ManifestDigest,
+    routes: &SealRoutes,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    build: impl FnOnce(
+        &mut tracedecay_code_index::production::SealedGenerationSegmentReaderV1<'_>,
+    ) -> Result<T, SealedCodeGraphRowsError>,
+) -> Result<T, GraphDbError> {
+    let mut interruption = None;
+    let mut read_segment = |request: SealedGenerationSegmentReadV1<'_>,
+                            buffer: &mut Vec<u8>|
+     -> Result<(), CodeIndexProductionErrorV1> {
+        if let Err(error) = (check)() {
+            if matches!(
+                error,
+                GraphDbError::Cancelled | GraphDbError::DeadlineExceeded
+            ) {
+                interruption = Some(error.clone());
+            }
+            return Err(CodeIndexProductionErrorV1::Contract(error.to_string()));
+        }
+        read_partitioned_segment(
+            select_partitioned_segment_root(&routes.segment_roots, request)?,
+            request,
+            buffer,
+        )
+    };
+    let built = build(&mut read_segment);
+    if let Some(interruption) = interruption {
+        return Err(interruption);
+    }
+    let error = match built {
+        Ok(built) => return Ok(built),
+        Err(SealedCodeGraphRowsError::Source(error)) => {
+            classify_sealed_generation_decode_error(error, sealed_state_digest)
+        }
+        Err(SealedCodeGraphRowsError::Projection(error)) => {
+            classify_sealed_projection_build_error(error)
+        }
+    };
+    if matches!(error, GraphDbError::Corrupt { .. }) && !seal_still_named(&routes.seal_paths)? {
+        return Err(GraphDbError::SealSuperseded);
+    }
+    Err(error)
+}
+
+/// Builds the code graph of the authenticated seal `manifest` into `spill`,
+/// streaming its file segments from `routes` one window at a time.
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.spill_graph",
+    level = "trace",
+    skip_all
+)]
+#[allow(clippy::too_many_arguments)]
+fn spill_verified_seal_graph(
+    seal: &VerifiedSealGraphSourceV1,
+    projection: GraphProjectionIdentity,
+    projector_revision: &GraphProjectorRevision,
+    spill: GraphGenerationRowSpill,
+    admit: &mut dyn FnMut(
+        tracedecay_code_index::production::CodeGraphBuildBoundV1,
+    ) -> Result<(), GraphDbError>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<SpilledGraphGeneration, GraphDbError> {
+    with_verified_segments(
+        &seal.sealed_state_digest,
+        &seal.routes,
+        check,
+        |read_segment| {
+            build_sealed_code_graph_rows(
+                projection,
+                &seal.source,
+                read_segment,
+                projector_revision,
+                spill,
+                admit,
+                check,
+            )
+        },
+    )
+}
+
+/// Authenticates a seal's partitioned manifest for a streaming graph build.
+fn open_verified_seal(
+    manifest: &[u8],
+    expected_digest: &str,
+) -> Result<(SealedGenerationFileWindowsV1, ManifestDigest), GraphDbError> {
+    let sealed_state_digest =
         ManifestDigest::new(format!("sha256:{expected_digest}")).map_err(|error| {
             GraphDbError::Corrupt {
                 message: format!(
@@ -336,119 +520,450 @@ fn decode_verified_seal(
                 ),
             }
         })?;
-    (check)()?;
-    let decoded = tracedecay_code_index::production::CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
-        &mut file,
-        admitted_len,
-        Some(&expected_digest),
-        &UninterruptibleCodeIndexControlV1,
-    );
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_registry.seal.decode.bytes_total").inc(admitted_len);
-    let monolithic = decoded.map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed code generation replay is invalid: {error}"),
-    })?;
-    let generation = if let Some(generation) = monolithic {
-        generation
-    } else {
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| GraphDbError::Corrupt {
-                message: format!("sealed generation manifest seek failed: {error}"),
-            })?;
-        let mut manifest = Vec::new();
-        file.read_to_end(&mut manifest)
-            .map_err(|error| GraphDbError::Corrupt {
-                message: format!("sealed generation manifest read failed: {error}"),
-            })?;
-        if encode_lowercase_hex(&Sha256::digest(&manifest))
-            != expected_digest
-                .as_str()
-                .strip_prefix("sha256:")
-                .unwrap_or(expected_digest.as_str())
-        {
-            return Err(GraphDbError::Corrupt {
-                message: "sealed generation manifest filename digest does not match its bytes"
-                    .to_owned(),
-            });
-        }
-        tracedecay_code_index::production::CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-            &manifest,
-            |digest, expected_size| {
-                (check)().map_err(|error| {
-                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        error.to_string(),
-                    )
-                })?;
-                let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
-                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        "sealed segment digest is not sha256".to_owned(),
-                    )
-                })?;
-                let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
-                let metadata = segment_path.symlink_metadata().map_err(|error| {
-                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        format!("sealed generation segment is unavailable: {error}"),
-                    )
-                })?;
-                if !metadata.file_type().is_file() || metadata.len() != expected_size {
-                    return Err(
-                        tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                            "sealed generation segment identity does not match its manifest"
-                                .to_owned(),
-                        ),
-                    );
-                }
-                std::fs::read(&segment_path).map_err(|error| {
-                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        format!("sealed generation segment read failed: {error}"),
-                    )
-                })
-            },
-        )
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed code generation replay is invalid: {error}"),
-        })?
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "sealed code generation format revision is incompatible".to_owned(),
-        })?
-    };
-    (check)()?;
-    let final_file_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed code generation metadata cannot be revalidated: {error}"),
-    })?;
-    let final_path_metadata = path
-        .symlink_metadata()
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed code generation path cannot be revalidated: {error}"),
-        })?;
-    if !same_file_identity(&opened_metadata, &final_file_metadata)
-        || !same_file_identity(&opened_metadata, &final_path_metadata)
-    {
-        return Err(GraphDbError::Corrupt {
-            message: "sealed code generation identity or length changed while it was read"
-                .to_owned(),
-        });
-    }
-    #[cfg(windows)]
-    if !same_windows_handle_identity(&file, path)? {
-        return Err(GraphDbError::Corrupt {
-            message: "sealed code generation identity or length changed while it was read"
-                .to_owned(),
-        });
-    }
-    Ok(generation)
+    let source = SealedGenerationFileWindowsV1::open(manifest)
+        .map_err(|error| classify_sealed_generation_decode_error(error, &sealed_state_digest))?;
+    Ok((source, sealed_state_digest))
 }
 
-#[hotpath::measure(label = "daemon.session_registry.seal.verify")]
+/// Builds the code graph of the seal `sealed_state_digest` names, read from
+/// the canonical generations root or, once retention moved it, the replay
+/// pool, into `spill`. The seal must hold `generation`.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spill_sealed_generation_graph_from_roots(
+    generations_root: &std::path::Path,
+    replay_root: &std::path::Path,
+    sealed_state_digest: &SealedGraphStateDigest,
+    generation: &tracedecay_domain::CodeGenerationId,
+    projection: GraphProjectionIdentity,
+    projector_revision: &GraphProjectorRevision,
+    spill: GraphGenerationRowSpill,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<SpilledGraphGeneration, GraphDbError> {
+    let seal = open_seal_from_roots(
+        generations_root,
+        replay_root,
+        sealed_state_digest,
+        generation,
+        check,
+        "code_graph_manifest.spill_sealed_generation_graph",
+    )?;
+    spill_verified_seal_graph(
+        &seal,
+        projection,
+        projector_revision,
+        spill,
+        &mut |_| Ok(()),
+        check,
+    )
+}
+
+/// Authenticates the seal `sealed_state_digest` names, read from the
+/// canonical generations root or, once retention moved it, the replay pool,
+/// and requires it to hold `generation`; a different generation is a
+/// conflict at `site`.
+fn open_seal_from_roots(
+    generations_root: &std::path::Path,
+    replay_root: &std::path::Path,
+    sealed_state_digest: &SealedGraphStateDigest,
+    generation: &tracedecay_domain::CodeGenerationId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    site: &'static str,
+) -> Result<VerifiedSealGraphSourceV1, GraphDbError> {
+    let digest = sha256_hex_suffix(sealed_state_digest.as_str())
+        .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
+    let seal_file = format!("generation-{digest}.json");
+    let segments_root = code_generation_segments_root(
+        generations_root
+            .parent()
+            .ok_or_else(|| GraphDbError::invalid("generation root has no store parent"))?,
+    );
+    let canonical = generations_root.join(&seal_file);
+    let pool = replay_root.join(&seal_file);
+    let manifest = with_verified_seal_from_roots(
+        &canonical,
+        &pool,
+        digest,
+        check,
+        read_verified_seal_manifest,
+    )?;
+    let (source, sealed_state_digest) = open_verified_seal(&manifest, digest)?;
+    drop(manifest);
+    if source.generation_id() != generation {
+        return Err(GraphDbError::conflict(site));
+    }
+    let routes = SealRoutes {
+        seal_paths: vec![canonical, pool],
+        segment_roots: vec![segments_root],
+    };
+    Ok(VerifiedSealGraphSourceV1 {
+        source,
+        sealed_state_digest,
+        routes,
+    })
+}
+
+/// A layered row spill over a parent's sealed graph, or why it has none.
+pub(super) type LayeredRowSpillV1 =
+    Result<Result<GraphLayeredRowSpill, GraphSealedBaseAbsenceV1>, GraphDbError>;
+
+/// The sealed graph a layered refresh builds its delta over.
+pub(super) enum LayeredBaseV1<'a> {
+    /// The graph the scope sealed for the seal's parent code generation.
+    Parent(&'a tracedecay_domain::CodeGenerationId),
+    /// A cold graph another scope of the same store sealed, the base of a
+    /// scope's first generation: a linked worktree at its sibling's tree.
+    Sibling(GraphSiblingSealedBaseV1),
+}
+
+/// A seal's graph rows as its publication seals them: a delta over the
+/// sealed graph of the seal's parent code generation, or for a seal with no
+/// parent over a sibling scope's sealed graph, when `layered_spill` resolves
+/// one and the base's inputs admit it, the cold rows otherwise.
+///
+/// A layered attempt that fails for any reason but an interruption is
+/// reported and replaced by the cold build, which is the authority a
+/// layered generation must equal.
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.graph_rows",
+    level = "trace",
+    skip_all
+)]
+pub(super) fn graph_rows_from_roots(
+    generations_root: &std::path::Path,
+    replay_root: &std::path::Path,
+    sealed_state_digest: &SealedGraphStateDigest,
+    generation: &tracedecay_domain::CodeGenerationId,
+    projection: GraphProjectionIdentity,
+    projector_revision: &GraphProjectorRevision,
+    layered_spill: &dyn Fn(LayeredBaseV1<'_>) -> LayeredRowSpillV1,
+    sibling_bases: &dyn Fn() -> Result<Vec<GraphSiblingSealedBaseV1>, GraphDbError>,
+    cold_spill: &dyn Fn() -> Result<GraphGenerationRowSpill, GraphDbError>,
+    admit: &mut dyn FnMut(
+        tracedecay_code_index::production::CodeGraphBuildBoundV1,
+    ) -> Result<(), GraphDbError>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError> {
+    let seal = open_seal_from_roots(
+        generations_root,
+        replay_root,
+        sealed_state_digest,
+        generation,
+        check,
+        "code_graph_manifest.graph_rows",
+    )?;
+    let mut layered = |base: &str, spill: LayeredRowSpillV1| {
+        layered_graph_rows(
+            &seal,
+            generation,
+            &projection,
+            projector_revision,
+            base,
+            spill,
+            admit,
+            check,
+        )
+    };
+    if let Some(parent) = seal.source.manifest().parent_generation.clone() {
+        if let Some(built) = layered(
+            parent.as_str(),
+            layered_spill(LayeredBaseV1::Parent(&parent)),
+        )? {
+            return Ok(built);
+        }
+    } else {
+        let siblings = match sibling_bases() {
+            Ok(siblings) => siblings,
+            Err(error) if is_interruption(&error) => return Err(error),
+            Err(error) => {
+                tracing::warn!(
+                    event = "code_graph_layered_refresh_unavailable",
+                    generation = %generation,
+                    error = %error,
+                    "sibling sealed graphs could not be listed; sealing the generation cold"
+                );
+                Vec::new()
+            }
+        };
+        for sibling in siblings {
+            let base = sibling.base().generation().as_str().to_owned();
+            if let Some(built) = layered(&base, layered_spill(LayeredBaseV1::Sibling(sibling)))? {
+                return Ok(built);
+            }
+        }
+    }
+    let spilled = spill_verified_seal_graph(
+        &seal,
+        projection,
+        projector_revision,
+        cold_spill()?,
+        admit,
+        check,
+    )?;
+    Ok((spilled.into(), None))
+}
+
+fn is_interruption(error: &GraphDbError) -> bool {
+    matches!(
+        error,
+        GraphDbError::Cancelled | GraphDbError::DeadlineExceeded | GraphDbError::SealSuperseded
+    )
+}
+
+/// The seal's rows as a delta over `base`, or `None` when the base declines
+/// or the attempt fails for any reason but an interruption.
+#[allow(clippy::too_many_arguments)]
+fn layered_graph_rows(
+    seal: &VerifiedSealGraphSourceV1,
+    generation: &tracedecay_domain::CodeGenerationId,
+    projection: &GraphProjectionIdentity,
+    projector_revision: &GraphProjectorRevision,
+    base: &str,
+    spill: LayeredRowSpillV1,
+    admit: &mut dyn FnMut(
+        tracedecay_code_index::production::CodeGraphBuildBoundV1,
+    ) -> Result<(), GraphDbError>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Option<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>)>, GraphDbError> {
+    let layered = spill.and_then(|spill| match spill {
+        Ok(spill) => with_verified_segments(
+            &seal.sealed_state_digest,
+            &seal.routes,
+            check,
+            |read_segment| {
+                build_layered_code_graph_rows(
+                    projection.clone(),
+                    &seal.source,
+                    read_segment,
+                    projector_revision,
+                    spill,
+                    admit,
+                    check,
+                )
+            },
+        )
+        .map(|built| built.map_err(|decline| format!("{decline:?}"))),
+        Err(absence) => Ok(Err(format!("{absence:?}"))),
+    });
+    match layered {
+        Ok(Ok(built)) => return Ok(Some((built.generation.into(), Some(built.report)))),
+        Ok(Err(reason)) => tracing::info!(
+            event = "code_graph_layered_refresh_declined",
+            generation = %generation,
+            base = %base,
+            reason = %reason,
+            "the refresh seals cold rather than as a delta over this base's graph"
+        ),
+        Err(error) if is_interruption(&error) => return Err(error),
+        Err(error) => tracing::warn!(
+            event = "code_graph_layered_refresh_unavailable",
+            generation = %generation,
+            base = %base,
+            error = %error,
+            "a layered graph refresh could not be built; sealing the generation cold"
+        ),
+    }
+    Ok(None)
+}
+
+struct PinnedPartitionedSegmentV1 {
+    digest: String,
+    size_bytes: u64,
+    file: File,
+}
+
+fn partitioned_segment_request(
+    request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+) -> Result<(&str, u64, u64, u64), tracedecay_code_index::production::CodeIndexProductionErrorV1> {
+    use tracedecay_code_index::production::{
+        CodeIndexProductionErrorV1, SealedGenerationSegmentReadV1,
+    };
+    let (digest, expected_size, offset, length) = match request {
+        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+            (digest.as_str(), size_bytes, 0, size_bytes)
+        }
+        SealedGenerationSegmentReadV1::Range {
+            digest,
+            size_bytes,
+            offset,
+            length,
+        } => (digest.as_str(), size_bytes, offset, length),
+    };
+    if offset
+        .checked_add(length)
+        .is_none_or(|end| end > expected_size)
+    {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment range exceeds its manifest identity".to_owned(),
+        ));
+    }
+    Ok((digest, expected_size, offset, length))
+}
+
+fn select_partitioned_segment_root<'a>(
+    roots: &'a [PathBuf],
+    request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+) -> Result<&'a std::path::Path, CodeIndexProductionErrorV1> {
+    let (digest, _, _, _) = partitioned_segment_request(request)?;
+    let digest = sha256_hex_suffix(digest).ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
+    })?;
+    for root in roots {
+        match root
+            .join(format!("segment-{digest}.json"))
+            .symlink_metadata()
+        {
+            Ok(_) => return Ok(root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed segment metadata cannot be read: {error}"
+                )));
+            }
+        }
+    }
+    Err(CodeIndexProductionErrorV1::Contract(
+        "sealed generation segment is absent from active routes".to_owned(),
+    ))
+}
+
+fn open_partitioned_segment(
+    segments_root: &std::path::Path,
+    request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+) -> Result<PinnedPartitionedSegmentV1, tracedecay_code_index::production::CodeIndexProductionErrorV1>
+{
+    use tracedecay_code_index::production::CodeIndexProductionErrorV1;
+
+    let (digest, expected_size, _, _) = partitioned_segment_request(request)?;
+    let digest_hex = sha256_hex_suffix(digest).ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
+    })?;
+    let path = segments_root.join(format!("segment-{digest_hex}.json"));
+    let path_metadata = path.symlink_metadata().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment is unavailable: {error}"
+        ))
+    })?;
+    if !path_metadata.file_type().is_file() || path_metadata.len() != expected_size {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment identity does not match its manifest".to_owned(),
+        ));
+    }
+    let file = File::open(&path).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment cannot be opened: {error}"
+        ))
+    })?;
+    let file_metadata = file.metadata().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment metadata cannot be read: {error}"
+        ))
+    })?;
+    if !same_file_identity(&path_metadata, &file_metadata) {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment identity changed while it was opened".to_owned(),
+        ));
+    }
+    #[cfg(windows)]
+    if !same_windows_handle_identity(&file, &path)
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?
+    {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment identity changed while it was opened".to_owned(),
+        ));
+    }
+    Ok(PinnedPartitionedSegmentV1 {
+        digest: digest.to_owned(),
+        size_bytes: expected_size,
+        file,
+    })
+}
+
+fn read_pinned_partitioned_segment(
+    pinned: &mut PinnedPartitionedSegmentV1,
+    request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+    buffer: &mut Vec<u8>,
+) -> Result<(), tracedecay_code_index::production::CodeIndexProductionErrorV1> {
+    use tracedecay_code_index::production::CodeIndexProductionErrorV1;
+
+    let (digest, expected_size, offset, length) = partitioned_segment_request(request)?;
+    if digest != pinned.digest || expected_size != pinned.size_bytes {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation evidence pages do not share one segment identity".to_owned(),
+        ));
+    }
+    let length = usize::try_from(length).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment range exceeds addressable memory".to_owned(),
+        )
+    })?;
+    buffer.clear();
+    buffer.resize(length, 0);
+    pinned
+        .file
+        .seek(SeekFrom::Start(offset))
+        .and_then(|_| pinned.file.read_exact(buffer))
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment read failed: {error}"
+            ))
+        })
+}
+
+fn read_partitioned_segment(
+    segments_root: &std::path::Path,
+    request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+    buffer: &mut Vec<u8>,
+) -> Result<(), tracedecay_code_index::production::CodeIndexProductionErrorV1> {
+    use tracedecay_code_index::production::CodeIndexProductionErrorV1;
+    let (digest, expected_size, offset, length) = partitioned_segment_request(request)?;
+    let digest_hex = sha256_hex_suffix(digest).ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
+    })?;
+    let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
+    let metadata = segment_path.symlink_metadata().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment is unavailable: {error}"
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() != expected_size {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment identity does not match its manifest".to_owned(),
+        ));
+    }
+    let length = usize::try_from(length).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment range exceeds addressable memory".to_owned(),
+        )
+    })?;
+    buffer.clear();
+    buffer.resize(length, 0);
+    File::open(segment_path)
+        .and_then(|mut file| {
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(buffer)
+        })
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment read failed: {error}"
+            ))
+        })
+}
+
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.verify",
+    level = "trace",
+    skip_all
+)]
 fn verify_checked_seal(
     path: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(), GraphDbError> {
+) -> Result<File, GraphDbError> {
     let (mut reader, opened_metadata, admitted_len) = open_checked_seal_reader(path, check)?;
     let copied = std::io::copy(&mut reader, &mut std::io::sink());
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_registry.seal.verify.bytes_total").inc(reader.bytes_read);
+
     if let Some(error) = reader.failure.take() {
         return Err(error);
     }
@@ -458,20 +973,38 @@ fn verify_checked_seal(
     reader.finish(path, &opened_metadata, admitted_len, expected_digest)
 }
 
-#[hotpath::measure(label = "daemon.session_registry.seal.verify_bundle")]
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.verify_bundle",
+    level = "trace",
+    skip_all
+)]
 fn verify_checked_seal_bundle(
     path: &std::path::Path,
     segments_root: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    verify_checked_seal(path, expected_digest, check)?;
+    verify_checked_seal_bundle_with_evidence_barrier(
+        path,
+        segments_root,
+        expected_digest,
+        check,
+        || {},
+    )
+}
+
+fn verify_checked_seal_bundle_with_evidence_barrier(
+    path: &std::path::Path,
+    segments_root: &std::path::Path,
+    expected_digest: &str,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    evidence_barrier: impl FnOnce(),
+) -> Result<(), GraphDbError> {
+    let mut file = verify_checked_seal(path, expected_digest, check)?;
     let mut prefix = vec![0_u8; SEAL_READ_CHECK_BYTES];
-    let mut file = File::open(path).map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed generation manifest cannot be reopened: {error}"),
-    })?;
     let read = file
-        .read(&mut prefix)
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| file.read(&mut prefix))
         .map_err(|error| GraphDbError::Corrupt {
             message: format!("sealed generation manifest prefix read failed: {error}"),
         })?;
@@ -494,45 +1027,72 @@ fn verify_checked_seal_bundle(
     if revision != Some(tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1) {
         return (check)();
     }
-    let manifest = std::fs::read(path).map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed generation manifest read failed: {error}"),
-    })?;
-    tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
+    let mut manifest = Vec::new();
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_to_end(&mut manifest))
+        .map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed generation manifest read failed: {error}"),
+        })?;
+    let mut pinned_evidence = None;
+    let mut evidence_barrier = Some(evidence_barrier);
+    let mut interruption = None;
+    let verified =
+        tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
         &manifest,
-        |digest, expected_size| {
-            (check)().map_err(|error| {
-                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                    error.to_string(),
-                )
-            })?;
-            let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
-                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                    "sealed segment digest is not sha256".to_owned(),
-                )
-            })?;
-            let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
-            let metadata = segment_path.symlink_metadata().map_err(|error| {
-                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation segment is unavailable: {error}"
-                ))
-            })?;
-            if !metadata.file_type().is_file() || metadata.len() != expected_size {
+        |request, buffer| {
+            if let Err(error) = (check)() {
+                if matches!(error, GraphDbError::Cancelled | GraphDbError::DeadlineExceeded) {
+                    interruption = Some(error.clone());
+                }
                 return Err(
                     tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        "sealed generation segment identity does not match its manifest".to_owned(),
+                        error.to_string(),
                     ),
                 );
             }
-            std::fs::read(segment_path).map_err(|error| {
-                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation segment read failed: {error}"
-                ))
-            })
+            match request {
+                tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
+                    ..
+                } => read_partitioned_segment(segments_root, request, buffer),
+                tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
+                    ..
+                } => {
+                    if pinned_evidence.is_none() {
+                        pinned_evidence = Some(open_partitioned_segment(segments_root, request)?);
+                        if let Some(barrier) = evidence_barrier.take() {
+                            barrier();
+                        }
+                    }
+                    read_pinned_partitioned_segment(
+                        pinned_evidence.as_mut().ok_or_else(|| {
+                            tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                                "sealed generation evidence handle was not pinned".to_owned(),
+                            )
+                        })?,
+                        request,
+                        buffer,
+                    )
+                }
+            }
         },
-    )
-    .map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed generation component verification failed: {error}"),
-    })?;
+    );
+    if let Some(interruption) = interruption {
+        return Err(interruption);
+    }
+    if let Err(error) = verified {
+        // The segment sweep collects a seal's segments only once no root
+        // names the seal, so a missing segment of a retired seal is its
+        // retirement, and of a live seal is corruption.
+        let opened_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed code generation metadata cannot be revalidated: {error}"),
+        })?;
+        if seal_left_path(path, &opened_metadata)? {
+            return Err(GraphDbError::SealSuperseded);
+        }
+        return Err(GraphDbError::Corrupt {
+            message: format!("sealed generation component verification failed: {error}"),
+        });
+    }
     (check)()
 }
 
@@ -545,15 +1105,14 @@ pub(super) fn verify_sealed_generation_source_from_roots(
     sealed_state_digest: &SealedGraphStateDigest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    let digest = sealed_state_digest
-        .as_str()
-        .strip_prefix("sha256:")
+    let digest = sha256_hex_suffix(sealed_state_digest.as_str())
         .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
     let seal_file = format!("generation-{digest}.json");
-    let segments_root = generations_root
-        .parent()
-        .ok_or_else(|| GraphDbError::invalid("generation root has no store parent"))?
-        .join("code-generation-segments-v1");
+    let segments_root = code_generation_segments_root(
+        generations_root
+            .parent()
+            .ok_or_else(|| GraphDbError::invalid("generation root has no store parent"))?,
+    );
     with_verified_seal_from_roots(
         &generations_root.join(&seal_file),
         &replay_root.join(&seal_file),
@@ -565,273 +1124,57 @@ pub(super) fn verify_sealed_generation_source_from_roots(
     )
 }
 
+/// The exact repository and worktree source retained by a runtime.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CodeGenerationRouteV1 {
+    repository: RepositoryId,
+    generations_root: PathBuf,
+}
+
 #[derive(Clone)]
 struct BoundCodeGenerationSourceV1 {
     project_shard: StoreShardIdV1,
     project_id: ProjectId,
-    repositories: BTreeSet<RepositoryId>,
-    generations_root: PathBuf,
     replay_root: PathBuf,
+    routes: BTreeMap<CodeGenerationRouteV1, usize>,
 }
 
-/// One already-decoded sealed generation — offered by the code-index
-/// activation path or retained from this provider's own verified disk decode —
-/// addressed by the exact identity that authorizes it.
-///
-/// The producing side decoded these bytes only after verifying that their
-/// SHA-256 equals `sealed_state_digest`, so an entry that matches a replay's
-/// `generation` *and* `sealed_state_digest` denotes the same immutable payload
-/// the canonical seal file holds. Matching on the digest — never on the
-/// generation id alone — is what keeps a superseded or foreign decode from
-/// being served in place of the requested seal.
-#[derive(Clone)]
-struct DecodedSealedCodeGenerationV1 {
-    generation: tracedecay_domain::CodeGenerationId,
-    sealed_state_digest: SealedGraphStateDigest,
-    decoded: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
-    /// Sealed source-byte census of the decode this offer retains. A checked
-    /// fact from the generation itself, used only to report retained offer
-    /// bytes; a census that cannot be computed reports zero rather than
-    /// refusing the offer, because the offer is an accelerator and the census
-    /// is telemetry.
-    source_total_bytes: u64,
+/// A runtime owns one reference; equal routes retire only with their last owner.
+#[must_use = "retain the route guard for the runtime's lifetime"]
+pub(super) struct CodeGraphManifestRouteV1 {
+    provider: Arc<DaemonCodeGraphManifestProviderV1>,
+    shard: StoreShardIdV1,
+    route: CodeGenerationRouteV1,
 }
 
-impl DecodedSealedCodeGenerationV1 {
-    /// Census the decode as it is retained, so the byte accounting a release
-    /// reports is fixed at retention time rather than recomputed from a
-    /// payload that may already be gone.
-    fn retained(
-        generation: tracedecay_domain::CodeGenerationId,
-        sealed_state_digest: SealedGraphStateDigest,
-        decoded: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
-    ) -> Self {
-        let source_total_bytes = decoded
-            .generation_statistics()
-            .map_or(0, |statistics| statistics.source_total_bytes);
-        Self {
-            generation,
-            sealed_state_digest,
-            decoded,
-            source_total_bytes,
+impl Drop for CodeGraphManifestRouteV1 {
+    fn drop(&mut self) {
+        let mut sources = match self.provider.sources.write() {
+            Ok(sources) => sources,
+            Err(error) => {
+                tracing::error!(%error, "cannot retire poisoned graph replay route registry");
+                return;
+            }
+        };
+        if let Some(binding) = sources.get_mut(&self.shard) {
+            if let Some(references) = binding.routes.get_mut(&self.route) {
+                *references -= 1;
+                if *references == 0 {
+                    binding.routes.remove(&self.route);
+                }
+            }
+            if binding.routes.is_empty() {
+                sources.remove(&self.shard);
+            }
         }
-    }
-}
-
-/// The decodes one shard may reuse instead of re-reading its sealed payload:
-/// the decode offered by the activating code index (plan 40, stage 1) and the
-/// provider's own most recent digest-verified disk decode. Both are pure
-/// accelerators matched on the exact generation AND sealed-state digest; a
-/// miss always falls through to the canonical-then-pool disk read, and the
-/// durable-source verification in
-/// [`verify_sealed_generation_source_from_roots`] never consults them.
-///
-/// Both slots are bounded the same two ways. Supersession bounds them inside a
-/// shard: a fresh activation offer drops the hydration it replaces. Release
-/// bounds them across the daemon: the retirement of the commissioning runtime
-/// and the resident-memory pressure backstop each drop the whole shard entry.
-#[derive(Default)]
-struct ShardDecodedSealsV1 {
-    offered: Option<DecodedSealedCodeGenerationV1>,
-    hydrated: Option<DecodedSealedCodeGenerationV1>,
-}
-
-impl ShardDecodedSealsV1 {
-    /// The decode for this exact replay identity held in either slot.
-    fn matching(
-        &self,
-        generation: &tracedecay_domain::CodeGenerationId,
-        sealed_state_digest: &SealedGraphStateDigest,
-    ) -> Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>> {
-        self.retained()
-            .find(|candidate| {
-                candidate.generation == *generation
-                    && candidate.sealed_state_digest == *sealed_state_digest
-            })
-            .map(|candidate| Arc::clone(&candidate.decoded))
-    }
-
-    fn retained(&self) -> impl Iterator<Item = &DecodedSealedCodeGenerationV1> {
-        [self.offered.as_ref(), self.hydrated.as_ref()]
-            .into_iter()
-            .flatten()
-    }
-
-    fn retained_decodes(&self) -> usize {
-        self.retained().count()
-    }
-
-    fn retained_bytes(&self) -> u64 {
-        self.retained().fold(0_u64, |total, retained| {
-            total.saturating_add(retained.source_total_bytes)
-        })
-    }
-}
-
-/// The retained decoded seals, owned separately from the provider so a
-/// resident-memory pressure reclaimer can hold a `Weak` to exactly this state
-/// and nothing else.
-///
-/// Every retained slot holds a whole decoded generation. Until release landed,
-/// nothing ever removed one: a decode stayed live for the lifetime of the
-/// daemon's session registry, invisible to the resident-memory admission
-/// authority, which is one of the unaccounted holders behind a 16GiB limit
-/// sitting inside a 42GiB process.
-#[derive(Default)]
-pub(super) struct DecodedCodeGenerationOffersV1 {
-    seals: RwLock<BTreeMap<StoreShardIdV1, ShardDecodedSealsV1>>,
-}
-
-impl DecodedCodeGenerationOffersV1 {
-    /// Record the decode the activating code index offered for this shard.
-    ///
-    /// A fresh activation offer supersedes whatever this provider retained
-    /// from an older hydration; dropping that hydration bounds decode
-    /// retention to the seals still in play for the shard.
-    fn offer(
-        &self,
-        project_shard: StoreShardIdV1,
-        offered: DecodedSealedCodeGenerationV1,
-    ) -> Result<(), GraphDbError> {
-        let mut seals = self.write()?;
-        let slot = seals.entry(project_shard).or_default();
-        slot.offered = Some(offered);
-        slot.hydrated = None;
-        Self::publish_retained_gauge(&seals);
-        Ok(())
-    }
-
-    /// Record the digest-verified decode this provider just paid a full disk
-    /// pass for, so a repeated hydration of the same replay reuses it instead
-    /// of reading and parsing the sealed payload a second time.
-    fn retain_hydrated(
-        &self,
-        project_shard: StoreShardIdV1,
-        hydrated: DecodedSealedCodeGenerationV1,
-    ) -> Result<(), GraphDbError> {
-        let mut seals = self.write()?;
-        seals.entry(project_shard).or_default().hydrated = Some(hydrated);
-        Self::publish_retained_gauge(&seals);
-        Ok(())
-    }
-
-    /// The retained decode for this exact replay identity, if one is held.
-    ///
-    /// Deliberately not take-on-read. One activation has two legitimate
-    /// consumers of the same decode — the current-revision publication and the
-    /// interrupted-predecessor recovery that rebuilds a historical manifest at
-    /// its own projector revision — so consuming on first read would force the
-    /// second to re-read and re-parse exactly the bytes this decode exists to
-    /// spare. The lifetime bound is supersession and release, not first read.
-    fn matching(
-        &self,
-        project_shard: &StoreShardIdV1,
-        generation: &tracedecay_domain::CodeGenerationId,
-        sealed_state_digest: &SealedGraphStateDigest,
-    ) -> Result<
-        Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
-        GraphDbError,
-    > {
-        let seals = self.seals.read().map_err(|_| {
-            GraphDbError::unavailable("code generation manifest provider lock is poisoned")
-        })?;
-        Ok(seals
-            .get(project_shard)
-            .and_then(|slot| slot.matching(generation, sealed_state_digest)))
-    }
-
-    /// Drop one shard's retained decodes at retirement and report the census
-    /// bytes released.
-    ///
-    /// This is the primary retention fix. A retained decode is an
-    /// activation-scoped accelerator over bytes that stay durable on disk;
-    /// once the runtime that commissioned it retires, nothing can consume it
-    /// again, so holding whole decoded generations past that point is pure
-    /// resident cost. Before this, nothing removed them at all. Both slots go
-    /// together: the hydration was retained to serve the same activation
-    /// window as the offer.
-    fn release_shard(&self, project_shard: &StoreShardIdV1) -> u64 {
-        let Ok(mut seals) = self.write() else {
-            return 0;
-        };
-        let released_bytes = seals
-            .remove(project_shard)
-            .map_or(0, |slot| slot.retained_bytes());
-        Self::publish_retained_gauge(&seals);
-        released_bytes
-    }
-
-    /// Drop every retained decode and report the census bytes released.
-    ///
-    /// The pressure backstop. Dropping a retained decode never loses truth:
-    /// the sealed payload stays on disk and the canonical read reconstructs
-    /// it, so this costs one re-decode and never revokes work that is already
-    /// admitted.
-    fn release_all(&self) -> u64 {
-        let Ok(mut seals) = self.write() else {
-            return 0;
-        };
-        let released_bytes = Self::retained_bytes_of(&seals);
-        seals.clear();
-        Self::publish_retained_gauge(&seals);
-        released_bytes
-    }
-
-    #[cfg(test)]
-    fn retained_offer_count(&self) -> usize {
-        self.write()
-            .map_or(0, |seals| Self::retained_decodes_of(&seals))
-    }
-
-    #[cfg(test)]
-    fn retained_bytes(&self) -> u64 {
-        self.write()
-            .map_or(0, |seals| Self::retained_bytes_of(&seals))
-    }
-
-    fn write(
-        &self,
-    ) -> Result<
-        std::sync::RwLockWriteGuard<'_, BTreeMap<StoreShardIdV1, ShardDecodedSealsV1>>,
-        GraphDbError,
-    > {
-        self.seals.write().map_err(|_| {
-            GraphDbError::unavailable("code generation manifest provider lock is poisoned")
-        })
-    }
-
-    fn retained_decodes_of(seals: &BTreeMap<StoreShardIdV1, ShardDecodedSealsV1>) -> usize {
-        seals
-            .values()
-            .map(ShardDecodedSealsV1::retained_decodes)
-            .sum()
-    }
-
-    fn retained_bytes_of(seals: &BTreeMap<StoreShardIdV1, ShardDecodedSealsV1>) -> u64 {
-        seals.values().fold(0_u64, |total, slot| {
-            total.saturating_add(slot.retained_bytes())
-        })
-    }
-
-    fn publish_retained_gauge(seals: &BTreeMap<StoreShardIdV1, ShardDecodedSealsV1>) {
-        hotpath::gauge!("daemon.memory.decoded_offers_bytes")
-            .set(Self::retained_bytes_of(seals) as f64);
-        hotpath::gauge!("daemon.memory.decoded_offers")
-            .set(Self::retained_decodes_of(seals) as f64);
     }
 }
 
 pub(super) struct DaemonCodeGraphManifestProviderV1 {
     sources: RwLock<BTreeMap<StoreShardIdV1, BoundCodeGenerationSourceV1>>,
-    /// Per-shard decoded seals — the activation offer (plan 40, stage 1) and
-    /// this provider's own last verified disk decode — so graph publication
-    /// and the recovery branches reuse an already-verified decode instead of
-    /// re-reading and re-parsing the same sealed payload. Held behind an
-    /// `Arc` so the pressure reclaimer can reach exactly this state through a
-    /// `Weak` without keeping the provider alive.
-    decoded: Arc<DecodedCodeGenerationOffersV1>,
-    /// Keeps the pressure reclaimer registered for this provider's lifetime.
-    _pressure_registration: Option<ResidentMemoryPressureRegistrationV1>,
+    /// The measured-RSS cell sealed publication answers to, so the one
+    /// admission authority governs the corpus-sized build.
+    pressure: Arc<ResidentMemoryPressureV1>,
 }
 
 impl Default for DaemonCodeGraphManifestProviderV1 {
@@ -843,158 +1186,62 @@ impl Default for DaemonCodeGraphManifestProviderV1 {
 }
 
 impl DaemonCodeGraphManifestProviderV1 {
-    /// Bind the offer store to a measured-RSS pressure cell.
+    /// Bind the provider to a measured-RSS pressure cell.
     ///
     /// Production passes the process cell fed by the daemon's `VmRSS` sampler.
-    /// Tests pass an isolated cell so a fake RSS series drives the backstop
+    /// Tests pass an isolated cell so a fake RSS series drives the refusal
     /// without touching `/proc` or other cases.
     pub(super) fn with_pressure(pressure: &Arc<ResidentMemoryPressureV1>) -> Self {
-        let decoded = Arc::new(DecodedCodeGenerationOffersV1::default());
-        let reclaim_target = Arc::downgrade(&decoded);
-        let registration = pressure
-            .register_pressure_reclaimer(
-                DECODED_OFFER_PRESSURE_PRIORITY_V1,
-                Arc::new(move |_request| {
-                    reclaim_target
-                        .upgrade()
-                        .map_or(0, |offers| offers.release_all())
-                }),
-            )
-            .ok();
         Self {
             sources: RwLock::new(BTreeMap::new()),
-            decoded,
-            _pressure_registration: registration,
+            pressure: Arc::clone(pressure),
         }
     }
-}
 
-/// Decoded offers release before anything a query is actively serving from:
-/// they are pure accelerators over bytes that remain on disk.
-const DECODED_OFFER_PRESSURE_PRIORITY_V1: u32 = 10;
+    /// The measured-RSS pressure cell this provider was bound to.
+    pub(super) fn resident_memory_pressure(&self) -> &Arc<ResidentMemoryPressureV1> {
+        &self.pressure
+    }
 
-impl DaemonCodeGraphManifestProviderV1 {
     pub(super) fn bind(
-        &self,
+        self: &Arc<Self>,
         project_shard: StoreShardIdV1,
         project_id: ProjectId,
         repository: RepositoryId,
         generations_root: PathBuf,
         replay_root: PathBuf,
-    ) -> Result<(), GraphDbError> {
+    ) -> Result<CodeGraphManifestRouteV1, GraphDbError> {
         let mut sources = self.sources.write().map_err(|_| {
             GraphDbError::unavailable("code generation manifest provider lock is poisoned")
         })?;
+        let route = CodeGenerationRouteV1 {
+            repository,
+            generations_root,
+        };
         if let Some(existing) = sources.get_mut(&project_shard) {
-            if existing.project_shard != project_shard
-                || existing.project_id != project_id
-                || existing.generations_root != generations_root
-                || existing.replay_root != replay_root
-            {
+            if existing.project_id != project_id || existing.replay_root != replay_root {
                 return Err(GraphDbError::conflict("code_graph_manifest.bind"));
             }
-            existing.repositories.insert(repository);
-            return Ok(());
+            let references = existing.routes.entry(route.clone()).or_default();
+            *references = references.checked_add(1).ok_or_else(|| {
+                GraphDbError::unavailable("code graph replay route reference count overflow")
+            })?;
+        } else {
+            sources.insert(
+                project_shard.clone(),
+                BoundCodeGenerationSourceV1 {
+                    project_shard: project_shard.clone(),
+                    project_id,
+                    replay_root,
+                    routes: BTreeMap::from([(route.clone(), 1)]),
+                },
+            );
         }
-        sources.insert(
-            project_shard.clone(),
-            BoundCodeGenerationSourceV1 {
-                project_shard,
-                project_id,
-                repositories: BTreeSet::from([repository]),
-                generations_root,
-                replay_root,
-            },
-        );
-        Ok(())
-    }
-
-    /// Offer the sealed generation this shard just decoded for query serving.
-    ///
-    /// Cold activation decodes the sealed payload once to serve queries; without
-    /// this offer the graph publication and recovery branches decode the very
-    /// same bytes a second time through [`decode_verified_seal_from_roots`].
-    /// The offer is a pure accelerator: it is consulted only on an exact
-    /// generation-and-digest match, and every miss falls through to the
-    /// canonical-then-pool read that remains the authority.
-    ///
-    /// The offer is released when the runtime that commissioned it retires,
-    /// and dropped early under measured memory pressure, so a shard that is
-    /// offered a decode nobody ever claims does not retain a whole generation
-    /// for the daemon's lifetime.
-    pub(super) fn offer_decoded_code_generation(
-        &self,
-        project_shard: StoreShardIdV1,
-        generation: tracedecay_domain::CodeGenerationId,
-        sealed_state_digest: SealedGraphStateDigest,
-        decoded: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), GraphDbError> {
-        // The offer supersedes any hydration this provider retained for the
-        // shard, and is censused as it lands so release can report the bytes
-        // it frees.
-        self.decoded.offer(
-            project_shard,
-            DecodedSealedCodeGenerationV1::retained(generation, sealed_state_digest, decoded),
-        )
-    }
-
-    /// An already-verified decode for this exact replay — the activation
-    /// offer or the provider's own last disk decode — or `None` to read from
-    /// disk.
-    ///
-    /// `None` is an abstention, never a verdict: it means "not already decoded
-    /// here", and the caller must still resolve the seal from the canonical
-    /// root or the replay pool.
-    fn reusable_decode(
-        &self,
-        owner: &GraphProjectionIdentityV1,
-        source: &SealedCodeGenerationReplay,
-    ) -> Result<
-        Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
-        GraphDbError,
-    > {
-        self.decoded.matching(
-            &owner.shard_id,
-            &source.generation,
-            &source.sealed_state_digest,
-        )
-    }
-
-    /// Retain the digest-verified decode this provider just paid a full disk
-    /// pass for, so a repeated hydration of the same replay (verified-snapshot
-    /// recovery, pending-predecessor completion retries) reuses it instead of
-    /// reading and parsing the sealed payload a second time.
-    fn retain_hydrated_decode(
-        &self,
-        project_shard: StoreShardIdV1,
-        source: &SealedCodeGenerationReplay,
-        decoded: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), GraphDbError> {
-        self.decoded.retain_hydrated(
-            project_shard,
-            DecodedSealedCodeGenerationV1::retained(
-                source.generation.clone(),
-                source.sealed_state_digest.clone(),
-                decoded,
-            ),
-        )
-    }
-
-    /// Release the decoded seals this shard's retiring runtime commissioned —
-    /// the activation offer and any hydration retained alongside it —
-    /// reporting the census bytes released.
-    pub(super) fn release_decoded_offer(&self, project_shard: &StoreShardIdV1) -> u64 {
-        self.decoded.release_shard(project_shard)
-    }
-
-    #[cfg(test)]
-    pub(super) fn retained_decoded_offer_count(&self) -> usize {
-        self.decoded.retained_offer_count()
-    }
-
-    #[cfg(test)]
-    pub(super) fn retained_decoded_offer_bytes(&self) -> u64 {
-        self.decoded.retained_bytes()
+        Ok(CodeGraphManifestRouteV1 {
+            provider: Arc::clone(self),
+            shard: project_shard,
+            route,
+        })
     }
 }
 
@@ -1003,8 +1250,9 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         &self,
         owner: &GraphProjectionIdentityV1,
         source: &SealedCodeGenerationReplay,
+        spill: GraphGenerationRowSpill,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphGenerationManifest, GraphDbError> {
+    ) -> Result<SpilledGraphGeneration, GraphDbError> {
         check()?;
         let binding = self
             .sources
@@ -1020,7 +1268,10 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                 )
             })?;
         if owner.shard_id != binding.project_shard
-            || !binding.repositories.contains(&source.repository)
+            || !binding
+                .routes
+                .keys()
+                .any(|route| route.repository == source.repository)
         {
             return Err(GraphDbError::conflict(
                 "code_graph_manifest.hydrate_sealed_code_generation",
@@ -1038,68 +1289,108 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                 "code_graph_manifest.hydrate_sealed_code_generation",
             ));
         }
-
-        // Reuse a decode whose SHA-256 was already proven equal to this
-        // replay's sealed-state digest — the one the activating code index
-        // offered (plan 40, stage 1) or the provider's own last verified disk
-        // decode. The reuse is matched on the exact generation AND sealed
-        // state digest, and the identity guards below still run against it, so
-        // the only difference from the disk path is that the identical bytes
-        // are not read and parsed a second time.
-        let reused = self.reusable_decode(owner, source)?;
-        let decoded_from_disk = reused.is_none();
-        let generation = match reused {
-            Some(already_decoded) => {
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("session_registry.seal.decode.reused_total").inc(1_u64);
-                already_decoded
+        let digest = sha256_hex_suffix(source.sealed_state_digest.as_str())
+            .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
+        let seal_file = format!("generation-{digest}.json");
+        let routes = binding
+            .routes
+            .keys()
+            .filter(|route| route.repository == source.repository)
+            .collect::<Vec<_>>();
+        let segment_roots = routes
+            .iter()
+            .map(|route| {
+                route
+                    .generations_root
+                    .parent()
+                    .map(code_generation_segments_root)
+                    .ok_or_else(|| {
+                        GraphDbError::invalid("canonical generation root has no store parent")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut manifest = None;
+        let mut canonical_error = None;
+        for route in &routes {
+            check()?;
+            let canonical = route.generations_root.join(&seal_file);
+            // Presence is only a prefilter: retention may move the seal before
+            // the read opens it, and the single replay-pool probe below
+            // resolves that move.
+            if !seal_is_present(&canonical)? {
+                continue;
             }
+            match read_verified_seal_manifest(&canonical, digest, check) {
+                Ok(bytes) => manifest = Some(bytes),
+                Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
+                    return Err(error);
+                }
+                Err(error) => canonical_error = Some(error),
+            }
+            break;
+        }
+        let manifest = match manifest {
+            Some(manifest) => manifest,
             None => {
-                let digest = source
-                    .sealed_state_digest
-                    .as_str()
-                    .strip_prefix("sha256:")
-                    .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
-                let seal_file = format!("generation-{digest}.json");
-                Arc::new(decode_verified_seal_from_roots(
-                    &binding.generations_root.join(&seal_file),
-                    &binding.replay_root.join(&seal_file),
-                    digest,
-                    check,
-                )?)
+                let pool = binding.replay_root.join(&seal_file);
+                if !seal_is_present(&pool)? {
+                    return Err(canonical_error.unwrap_or_else(|| {
+                        GraphDbError::unavailable(
+                            "sealed code generation is absent from all active routes and replay pool",
+                        )
+                    }));
+                }
+                read_verified_seal_manifest(&pool, digest, check).map_err(|error| {
+                    if matches!(
+                        error,
+                        GraphDbError::Cancelled | GraphDbError::DeadlineExceeded
+                    ) {
+                        error
+                    } else {
+                        canonical_error.unwrap_or(error)
+                    }
+                })?
             }
         };
-        if generation.manifest().project_id != binding.project_id
-            || generation.snapshot().repository != source.repository
-            || generation.manifest().generation_id != source.generation
+        let (sealed, sealed_state_digest) = open_verified_seal(&manifest, digest)?;
+        drop(manifest);
+        if sealed.manifest().project_id != binding.project_id
+            || sealed.snapshot().repository != source.repository
+            || sealed.generation_id() != &source.generation
         {
             return Err(GraphDbError::conflict(
                 "code_graph_manifest.hydrate_sealed_code_generation",
             ));
         }
-        if decoded_from_disk {
-            self.retain_hydrated_decode(owner.shard_id.clone(), source, Arc::clone(&generation))?;
-        }
-
+        let seal = VerifiedSealGraphSourceV1 {
+            source: sealed,
+            sealed_state_digest,
+            routes: SealRoutes {
+                seal_paths: routes
+                    .iter()
+                    .map(|route| route.generations_root.join(&seal_file))
+                    .chain(std::iter::once(binding.replay_root.join(&seal_file)))
+                    .collect(),
+                segment_roots,
+            },
+        };
         let projection = GraphProjectionIdentity::new(
             GraphNamespace::new(owner.namespace.as_str())?,
             GraphProjectionId::new(owner.projection.as_str())?,
         );
         // The replay, not the current reader, owns the projector revision at
         // this boundary. An interrupted historical publication must be able
-        // to reconstruct its exact manifest so the ordered journal can
-        // advance. `GraphGenerationManifest::from_replay` compares the
-        // rebuilt dependency closure and recovered digest with the durable
-        // replay before any rows are served, while current graph readers keep
-        // enforcing the current revision independently.
-        tracedecay_code_index::graph_projection::build_published_code_graph_manifest_checked(
+        // to reconstruct its exact rows so the ordered journal can advance;
+        // the registry compares the rebuilt digests with the durable replay
+        // before any row is served.
+        spill_verified_seal_graph(
+            &seal,
             projection,
-            &generation,
-            &GraphProjectorRevision::try_from(source.projector_revision.as_str().to_owned())?,
+            &source.projector_revision,
+            spill,
+            &mut |_| Ok(()),
             check,
         )
-        .map(Arc::unwrap_or_clone)
-        .map_err(classify_sealed_projection_build_error)
     }
 }
 
@@ -1130,15 +1421,19 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
-    use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
-    use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId};
+    use tracedecay_code_index_retention::code_index_generations::{
+        DurablePublicationPointerV1, acquire_code_generation_store_lock,
+        code_generation_segments_root,
+    };
+    use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId, sha256_hex_suffix};
     use tracedecay_graph_db::{
-        GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphNamespace,
-        GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
+        GraphDbError, GraphGenerationManifestProvider, GraphGenerationRowSpill, GraphNamespace,
+        GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
+        SealedCodeGenerationReplay, SealedGraphStateDigest, SpilledGraphGeneration,
     };
     use tracedecay_store::{
         BrainId, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, StoreShardIdV1,
@@ -1146,19 +1441,48 @@ mod tests {
     };
 
     use super::{
-        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES,
-        validate_sealed_generation_metadata, verify_checked_seal,
+        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, read_verified_seal_manifest,
+        spill_sealed_generation_graph_from_roots, validate_sealed_generation_metadata,
+        verify_checked_seal, verify_checked_seal_bundle_with_evidence_barrier,
         verify_sealed_generation_source_from_roots,
     };
     use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     };
 
+    /// A fresh row spill for `owner`'s projection, removed with the spill.
+    fn spill_for(owner: &GraphProjectionIdentityV1) -> GraphGenerationRowSpill {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        GraphGenerationRowSpill::create(
+            std::env::temp_dir().join(format!(
+                "tracedecay-provider-spill-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )),
+            GraphProjectionIdentity::new(
+                GraphNamespace::new(owner.namespace.as_str()).unwrap(),
+                GraphProjectionId::new(owner.projection.as_str()).unwrap(),
+            ),
+        )
+        .unwrap()
+    }
+
+    /// Hydrates `source` the way the registry does, into a fresh spill.
+    fn hydrate(
+        provider: &DaemonCodeGraphManifestProviderV1,
+        owner: &GraphProjectionIdentityV1,
+        source: &SealedCodeGenerationReplay,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<SpilledGraphGeneration, GraphDbError> {
+        provider.hydrate_sealed_code_generation(owner, source, spill_for(owner), check)
+    }
+
     fn fixture(
         generations_root: std::path::PathBuf,
         replay_root: std::path::PathBuf,
     ) -> (
-        DaemonCodeGraphManifestProviderV1,
+        Arc<DaemonCodeGraphManifestProviderV1>,
+        super::CodeGraphManifestRouteV1,
         GraphProjectionIdentityV1,
         SealedCodeGenerationReplay,
     ) {
@@ -1169,8 +1493,8 @@ mod tests {
             UserProfileId::new("profile.provider").unwrap(),
             project.clone(),
         );
-        let provider = DaemonCodeGraphManifestProviderV1::default();
-        provider
+        let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
+        let route = provider
             .bind(
                 shard.clone(),
                 project,
@@ -1181,6 +1505,7 @@ mod tests {
             .unwrap();
         (
             provider,
+            route,
             GraphProjectionIdentityV1 {
                 shard_id: shard,
                 namespace: GraphNamespaceV1::new("namespace.provider").unwrap(),
@@ -1210,34 +1535,29 @@ mod tests {
         let replay_root = temp.path().join("replay");
         std::fs::create_dir_all(&generations_root).unwrap();
         std::fs::create_dir_all(&replay_root).unwrap();
-        let (provider, owner, source) = fixture(generations_root.clone(), replay_root.clone());
+        let (provider, _route, owner, source) =
+            fixture(generations_root.clone(), replay_root.clone());
         let seal_file = format!(
             "generation-{}.json",
-            source
-                .sealed_state_digest
-                .as_str()
-                .strip_prefix("sha256:")
-                .unwrap()
+            sha256_hex_suffix(source.sealed_state_digest.as_str()).unwrap()
         );
 
         assert!(matches!(
-            provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
+            hydrate(&provider, &owner, &source, &|| Ok(())),
             Err(GraphDbError::Unavailable { .. })
         ));
 
         let mut foreign = source.clone();
         foreign.repository = RepositoryId::new("repository.foreign").unwrap();
         assert!(matches!(
-            provider
-                .hydrate_sealed_code_generation(&owner, &foreign, &|| Ok(()))
-                .unwrap_err(),
+            hydrate(&provider, &owner, &foreign, &|| Ok(())).unwrap_err(),
             GraphDbError::Conflict { .. }
         ));
 
         // A retired seal that only survives in the replay pool is still read.
         std::fs::write(replay_root.join(&seal_file), b"corrupt").unwrap();
         assert!(matches!(
-            provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
+            hydrate(&provider, &owner, &source, &|| Ok(())),
             Err(GraphDbError::Corrupt { .. })
         ));
 
@@ -1245,8 +1565,70 @@ mod tests {
         std::fs::remove_file(replay_root.join(&seal_file)).unwrap();
         std::fs::write(generations_root.join(&seal_file), b"corrupt").unwrap();
         assert!(matches!(
-            provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
+            hydrate(&provider, &owner, &source, &|| Ok(())),
             Err(GraphDbError::Corrupt { .. })
+        ));
+    }
+
+    /// A linked worktree shares its project's shard while sealing into its own
+    /// code-index store. Rebinding that shard with the worktree's roots used to
+    /// be refused as `code_graph_manifest.bind`, which failed every branch
+    /// publication; the roots are a lookup route, not the source identity.
+    #[test]
+    fn one_shard_admits_every_worktree_route_and_reads_the_seal_from_each() {
+        let temp = TempDir::new().unwrap();
+        let primary_generations = temp.path().join("primary/generations");
+        let primary_replay = temp.path().join("primary/replay");
+        let branch_generations = temp.path().join("branch/generations");
+        let branch_replay = primary_replay.clone();
+        for root in [
+            &primary_generations,
+            &primary_replay,
+            &branch_generations,
+            &branch_replay,
+        ] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let (provider, _route, owner, source) = fixture(primary_generations, primary_replay);
+
+        let _branch_route = provider
+            .bind(
+                owner.shard_id.clone(),
+                ProjectId::new("project.provider").unwrap(),
+                source.repository.clone(),
+                branch_generations.clone(),
+                branch_replay.clone(),
+            )
+            .expect("a worktree route under the same project shard is not a conflict");
+
+        // Neither route holds the seal: the shard abstains rather than claiming
+        // corruption.
+        assert!(matches!(
+            hydrate(&provider, &owner, &source, &|| Ok(())),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+
+        // Only the branch worktree's store holds it, and the read reaches there.
+        let seal_file = format!(
+            "generation-{}.json",
+            sha256_hex_suffix(source.sealed_state_digest.as_str()).unwrap()
+        );
+        std::fs::write(branch_generations.join(&seal_file), b"corrupt").unwrap();
+        assert!(matches!(
+            hydrate(&provider, &owner, &source, &|| Ok(())),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+
+        // A genuinely different source under the same shard stays fatal.
+        assert!(matches!(
+            provider.bind(
+                owner.shard_id.clone(),
+                ProjectId::new("project.foreign").unwrap(),
+                source.repository.clone(),
+                branch_generations,
+                branch_replay,
+            ),
+            Err(GraphDbError::Conflict { .. })
         ));
     }
 
@@ -1257,14 +1639,11 @@ mod tests {
         let replay_root = temp.path().join("replay");
         std::fs::create_dir_all(&generations_root).unwrap();
         std::fs::create_dir_all(&replay_root).unwrap();
-        let (provider, owner, source) = fixture(generations_root.clone(), replay_root.clone());
+        let (provider, _route, owner, source) =
+            fixture(generations_root.clone(), replay_root.clone());
         let seal_file = format!(
             "generation-{}.json",
-            source
-                .sealed_state_digest
-                .as_str()
-                .strip_prefix("sha256:")
-                .unwrap()
+            sha256_hex_suffix(source.sealed_state_digest.as_str()).unwrap()
         );
         std::fs::write(generations_root.join(&seal_file), b"canonical").unwrap();
         std::fs::write(replay_root.join(&seal_file), b"pool").unwrap();
@@ -1274,15 +1653,14 @@ mod tests {
         // pool copy (which would probe the closure again).
         let probes = AtomicUsize::new(0);
         assert_eq!(
-            provider
-                .hydrate_sealed_code_generation(&owner, &source, &|| {
-                    if probes.fetch_add(1, Ordering::SeqCst) == 0 {
-                        Ok(())
-                    } else {
-                        Err(GraphDbError::Cancelled)
-                    }
-                })
-                .unwrap_err(),
+            hydrate(&provider, &owner, &source, &|| {
+                if probes.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(())
+                } else {
+                    Err(GraphDbError::Cancelled)
+                }
+            })
+            .unwrap_err(),
             GraphDbError::Cancelled
         );
         assert_eq!(probes.load(Ordering::SeqCst), 2);
@@ -1328,38 +1706,6 @@ mod tests {
     }
 
     #[test]
-    fn sealed_projection_build_interruptions_stay_typed_and_never_read_as_corruption() {
-        use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
-
-        use super::classify_sealed_projection_build_error;
-
-        assert_eq!(
-            classify_sealed_projection_build_error(CodeGraphProjectionError::DeadlineExceeded),
-            GraphDbError::DeadlineExceeded
-        );
-        assert_eq!(
-            classify_sealed_projection_build_error(CodeGraphProjectionError::Cancelled),
-            GraphDbError::Cancelled
-        );
-        assert!(matches!(
-            classify_sealed_projection_build_error(CodeGraphProjectionError::BudgetExhausted {
-                budget: "capacity".to_owned(),
-                limit: 7,
-            }),
-            GraphDbError::BudgetExhausted {
-                kind: GraphBudgetKind::Capacity,
-                limit: 7,
-            }
-        ));
-        assert!(matches!(
-            classify_sealed_projection_build_error(CodeGraphProjectionError::Contract(
-                "entity payload is malformed".to_owned()
-            )),
-            GraphDbError::Corrupt { .. }
-        ));
-    }
-
-    #[test]
     fn sealed_generation_read_preserves_deadline_error() {
         let temp = TempDir::new().unwrap();
         let bytes = vec![b'a'; SEAL_READ_CHECK_BYTES * 3];
@@ -1375,8 +1721,9 @@ mod tests {
                 } else {
                     Ok(())
                 }
-            }),
-            Err(GraphDbError::DeadlineExceeded)
+            })
+            .unwrap_err(),
+            GraphDbError::DeadlineExceeded
         );
     }
 
@@ -1432,6 +1779,205 @@ mod tests {
         verify(&|| Ok(())).unwrap();
     }
 
+    fn two_second_check() -> impl Fn() -> Result<(), GraphDbError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        move || {
+            if std::time::Instant::now() >= deadline {
+                Err(GraphDbError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// A graph publisher holds the project's replay-pool lock while it reads
+    /// seals. Seal reads take neither that lock nor the canonical store lock,
+    /// so they answer instead of polling a lock their own thread holds until
+    /// the deadline.
+    #[test]
+    fn sealed_source_verification_answers_while_the_store_and_pool_locks_are_held() {
+        let temp = TempDir::new().unwrap();
+        let store_root = temp.path().join("store");
+        let generations_root = store_root.join("code-generations-v1");
+        let replay_root = temp.path().join("replay");
+        std::fs::create_dir_all(&generations_root).unwrap();
+        tracedecay_private_fs::create_private_directory(&replay_root).unwrap();
+        let digest = "772b0ae89b16929b615e26a584f5f492ba6a29d94903f45490df8de3a7d06d36";
+        let sealed_state_digest =
+            SealedGraphStateDigest::try_from(format!("sha256:{digest}")).unwrap();
+        let pool_seal = replay_root.join(format!("generation-{digest}.json"));
+        let _store_lock = acquire_code_generation_store_lock(&store_root).unwrap();
+        let _pool_lock = acquire_code_generation_store_lock(&replay_root).unwrap();
+        let verify = || {
+            verify_sealed_generation_source_from_roots(
+                &generations_root,
+                &replay_root,
+                &sealed_state_digest,
+                &two_second_check(),
+            )
+        };
+
+        std::fs::write(
+            &pool_seal,
+            b"pool-only seal read under a held replay-pool lock\n",
+        )
+        .unwrap();
+        assert_eq!(verify(), Ok(()));
+        std::fs::write(
+            &pool_seal,
+            b"pool-only seal read under a held replay-pool lock!",
+        )
+        .unwrap();
+        assert!(matches!(verify(), Err(GraphDbError::Corrupt { .. })));
+        std::fs::remove_file(&pool_seal).unwrap();
+        assert!(matches!(verify(), Err(GraphDbError::Unavailable { .. })));
+    }
+
+    #[test]
+    fn hydration_answers_while_the_store_and_pool_locks_are_held() {
+        let fixture = partitioned_seal_fixture("held-locks");
+        let replay_root = fixture.pool_manifest.parent().unwrap().to_path_buf();
+        let generations_root = fixture.scope_root.join("code-generations-v1");
+        let shard = StoreShardIdV1::project(
+            BrainId::new("brain.held-locks").unwrap(),
+            UserProfileId::new("profile.held-locks").unwrap(),
+            fixture.project.clone(),
+        );
+        let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
+        let _route = provider
+            .bind(
+                shard.clone(),
+                fixture.project.clone(),
+                fixture.repository.clone(),
+                generations_root.clone(),
+                replay_root.clone(),
+            )
+            .unwrap();
+        let owner = GraphProjectionIdentityV1 {
+            shard_id: shard,
+            namespace: GraphNamespaceV1::new("namespace.held-locks").unwrap(),
+            projection: GraphProjectionIdV1::new("code-generation").unwrap(),
+        };
+        let source = SealedCodeGenerationReplay {
+            repository: fixture.repository.clone(),
+            generation: fixture.generation.clone(),
+            sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+                "sha256:{}",
+                fixture.digest
+            ))
+            .unwrap(),
+            projector_revision: GraphProjectorRevision::try_from(
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+            )
+            .unwrap(),
+        };
+        let _store_lock = acquire_code_generation_store_lock(&fixture.scope_root).unwrap();
+        let _pool_lock = acquire_code_generation_store_lock(&replay_root).unwrap();
+
+        let pooled = hydrate(&provider, &owner, &source, &two_second_check()).unwrap();
+        assert_eq!(pooled.row_counts(), (10, 9));
+        let canonical = generations_root.join(fixture.pool_manifest.file_name().unwrap());
+        std::fs::rename(&fixture.pool_manifest, &canonical).unwrap();
+        let canonical_only = hydrate(&provider, &owner, &source, &two_second_check()).unwrap();
+        assert_eq!(canonical_only.row_counts(), (10, 9));
+        std::fs::remove_file(&canonical).unwrap();
+        assert!(matches!(
+            hydrate(&provider, &owner, &source, &two_second_check()),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+    }
+
+    /// The graph reconciler stages a pool seal for unlink by renaming it out
+    /// of the content-addressed namespace. A verification that was reading it
+    /// then reports the seal unavailable, not corrupt.
+    #[test]
+    fn a_pool_seal_staged_for_unlink_mid_read_is_superseded() {
+        let temp = TempDir::new().unwrap();
+        let generations_root = temp.path().join("store/code-generations-v1");
+        let replay_root = temp.path().join("replay");
+        std::fs::create_dir_all(&generations_root).unwrap();
+        std::fs::create_dir_all(&replay_root).unwrap();
+        let bytes = vec![b'a'; SEAL_READ_CHECK_BYTES * 4];
+        let digest = hex::encode(Sha256::digest(&bytes));
+        let sealed_state_digest =
+            SealedGraphStateDigest::try_from(format!("sha256:{digest}")).unwrap();
+        let pool_seal = replay_root.join(format!("generation-{digest}.json"));
+        let staged = replay_root.join(format!(".generation-{digest}.unlink-test"));
+        std::fs::write(&pool_seal, &bytes).unwrap();
+        let checks = AtomicUsize::new(0);
+        let verify = |retire_mid_read: bool| {
+            checks.store(0, Ordering::SeqCst);
+            verify_sealed_generation_source_from_roots(
+                &generations_root,
+                &replay_root,
+                &sealed_state_digest,
+                &|| {
+                    if retire_mid_read && checks.fetch_add(1, Ordering::SeqCst) == 5 {
+                        std::fs::rename(&pool_seal, &staged).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+        };
+
+        assert_eq!(verify(false), Ok(()));
+        assert_eq!(verify(true), Err(GraphDbError::SealSuperseded));
+    }
+
+    /// The segment sweep collects a seal's segments only once no root names
+    /// the seal. Missing segments of a live seal are corruption; missing
+    /// segments of a seal that retired during verification are its
+    /// retirement.
+    #[test]
+    fn swept_segments_are_corruption_for_a_live_seal_and_retirement_for_a_retired_one() {
+        let fixture = partitioned_seal_fixture("swept-segments");
+        let manifest_checks = AtomicUsize::new(0);
+        verify_checked_seal(&fixture.pool_manifest, &fixture.digest, &|| {
+            manifest_checks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        let manifest_checks = manifest_checks.load(Ordering::SeqCst);
+        let staged = fixture
+            .pool_manifest
+            .with_file_name(format!(".generation-{}.unlink-test", fixture.digest));
+        let sweep = || {
+            for entry in std::fs::read_dir(&fixture.segments_root).unwrap() {
+                let path = entry.unwrap().path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("segment-"))
+                {
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
+        };
+        let verify_sweeping_segments = |retire_seal: bool| {
+            let checks = AtomicUsize::new(0);
+            verify_checked_seal_bundle_with_evidence_barrier(
+                &fixture.pool_manifest,
+                &fixture.segments_root,
+                &fixture.digest,
+                &|| {
+                    if checks.fetch_add(1, Ordering::SeqCst) == manifest_checks {
+                        if retire_seal {
+                            std::fs::rename(&fixture.pool_manifest, &staged).unwrap();
+                        }
+                        sweep();
+                    }
+                    Ok(())
+                },
+                || {},
+            )
+            .unwrap_err()
+        };
+
+        let live = verify_sweeping_segments(false);
+        assert!(matches!(live, GraphDbError::Corrupt { .. }), "{live:?}");
+        assert_eq!(verify_sweeping_segments(true), GraphDbError::SealSuperseded);
+    }
+
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git")
             .args(args)
@@ -1445,14 +1991,422 @@ mod tests {
         );
     }
 
-    /// One disk pass hydrates a replay; the second hydration of the same
-    /// replay reuses that digest-verified decode and produces the identical
-    /// manifest. Falsifiable by construction: the sealed file is deleted
-    /// between the two hydrations, so any second read attempt fails, while
-    /// durable-source verification — which must never trust the retained
-    /// decode — is required to observe the loss.
+    struct PartitionedSealFixture {
+        _temporary: TempDir,
+        pool_manifest: std::path::PathBuf,
+        scope_root: std::path::PathBuf,
+        segments_root: std::path::PathBuf,
+        digest: String,
+        project: ProjectId,
+        repository: RepositoryId,
+        generation: CodeGenerationId,
+    }
+
+    const PARTITIONED_FIXTURE_FILES: [&str; 3] = ["lib", "alpha", "beta"];
+
+    fn partitioned_seal_fixture(label: &str) -> PartitionedSealFixture {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let project_root = root.join("project");
+        std::fs::create_dir_all(project_root.join("src")).unwrap();
+        git(&project_root, &["init", "-q", "-b", "main"]);
+        git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+        git(
+            &project_root,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        for module in PARTITIONED_FIXTURE_FILES {
+            std::fs::write(
+                project_root.join(format!("src/{module}.rs")),
+                format!(
+                    "pub fn {module}_first(value: usize) -> usize {{ value + 1 }}\n\
+                     pub fn {module}_second(value: usize) -> usize {{ {module}_first(value) * 2 }}\n"
+                ),
+            )
+            .unwrap();
+        }
+        git(&project_root, &["add", "."]);
+        git(&project_root, &["commit", "-qm", "partitioned fixture"]);
+        let project_id = ProjectId::new(format!("project.manifest-{label}")).unwrap();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .unwrap();
+        let canonical_project = project_root.canonicalize().unwrap();
+        let store_root = root.join("code-index-store");
+        let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            &canonical_project,
+            scoped_store.clone(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .unwrap();
+        scheduler.reconcile_now().unwrap();
+        let latest = scheduler.latest_complete().unwrap();
+        let repository = latest.generation().snapshot().repository.clone();
+        let generation = latest.generation().manifest().generation_id.clone();
+        drop(scheduler);
+        let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+            &std::fs::read(scoped_store.join("active-code-generation-v1.json")).unwrap(),
+        )
+        .unwrap();
+        let digest = sha256_hex_suffix(&pointer.state_digest).unwrap().to_owned();
+        let canonical_manifest = scoped_store
+            .join("code-generations-v1")
+            .join(pointer.generation_file);
+        let segments_root = code_generation_segments_root(&scoped_store);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&canonical_manifest).unwrap()).unwrap();
+        // Graph pages are the only segments a build reads, and verification
+        // reads them after the evidence Range read that fires its barrier.
+        assert!(
+            manifest["generation"]["code_graph_pages"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 1,
+            "fixture must read several graph pages after the evidence Range read"
+        );
+        let replay_root = root.join("replay-pool");
+        tracedecay_private_fs::create_private_directory(&replay_root).unwrap();
+        let pool_manifest = replay_root.join(canonical_manifest.file_name().unwrap());
+        {
+            let _store_lock = acquire_code_generation_store_lock(&scoped_store).unwrap();
+            let _pool_lock = acquire_code_generation_store_lock(&replay_root).unwrap();
+            std::fs::rename(canonical_manifest, &pool_manifest).unwrap();
+        }
+        PartitionedSealFixture {
+            _temporary: temporary,
+            pool_manifest,
+            scope_root: scoped_store,
+            segments_root,
+            digest,
+            project: project_id,
+            repository,
+            generation,
+        }
+    }
+
     #[test]
-    fn disk_hydration_is_single_pass_and_source_verification_stays_fail_closed() {
+    fn active_routes_skip_absent_locked_store_for_canonical_and_pool_hydration() {
+        let fixture = partitioned_seal_fixture("active-routes");
+        let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
+        let shard = StoreShardIdV1::project(
+            BrainId::new("brain.active-routes").unwrap(),
+            UserProfileId::new("profile.active-routes").unwrap(),
+            fixture.project.clone(),
+        );
+        let absent_store = fixture
+            .pool_manifest
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("aaa-absent");
+        std::fs::create_dir_all(absent_store.join("code-generations-v1")).unwrap();
+        let replay_root = fixture.pool_manifest.parent().unwrap().to_path_buf();
+        let absent_route = provider
+            .bind(
+                shard.clone(),
+                fixture.project.clone(),
+                fixture.repository.clone(),
+                absent_store.join("code-generations-v1"),
+                replay_root.clone(),
+            )
+            .unwrap();
+        let store = fixture.scope_root.as_path();
+        assert!(absent_store.as_path() < store);
+        let route = provider
+            .bind(
+                shard.clone(),
+                fixture.project.clone(),
+                fixture.repository.clone(),
+                store.join("code-generations-v1"),
+                replay_root,
+            )
+            .unwrap();
+        let equal_route = provider
+            .bind(
+                shard.clone(),
+                fixture.project.clone(),
+                fixture.repository.clone(),
+                store.join("code-generations-v1"),
+                fixture.pool_manifest.parent().unwrap().to_path_buf(),
+            )
+            .unwrap();
+        drop(route);
+        let owner = GraphProjectionIdentityV1 {
+            shard_id: shard,
+            namespace: GraphNamespaceV1::new("namespace.active-routes").unwrap(),
+            projection: GraphProjectionIdV1::new("code-generation").unwrap(),
+        };
+        let source = SealedCodeGenerationReplay {
+            repository: fixture.repository.clone(),
+            generation: fixture.generation.clone(),
+            sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+                "sha256:{}",
+                fixture.digest
+            ))
+            .unwrap(),
+            projector_revision: GraphProjectorRevision::try_from(
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+            )
+            .unwrap(),
+        };
+
+        let _absent_lock = acquire_code_generation_store_lock(&absent_store).unwrap();
+        let canonical = store
+            .join("code-generations-v1")
+            .join(fixture.pool_manifest.file_name().unwrap());
+        std::fs::copy(&fixture.pool_manifest, &canonical).unwrap();
+        let hydrate_route = |route_kind: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            hydrate(&provider, &owner, &source, &|| {
+                if std::time::Instant::now() >= deadline {
+                    Err(GraphDbError::DeadlineExceeded)
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_or_else(|error| panic!("{route_kind} hydration failed: {error:?}"));
+        };
+        hydrate_route("canonical");
+        std::fs::remove_file(&canonical).unwrap();
+        hydrate_route("pool");
+        // A verified pool copy also recovers a damaged canonical payload.
+        std::fs::write(&canonical, b"corrupt").unwrap();
+        hydrate_route("canonical recovery");
+        drop(equal_route);
+        drop(absent_route);
+        assert!(provider.sources.read().unwrap().is_empty());
+        assert!(matches!(
+            hydrate(&provider, &owner, &source, &|| Ok(())),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn equal_route_references_retire_exactly_and_reject_divergent_replay_authority() {
+        let temporary = TempDir::new().unwrap();
+        let generations = temporary.path().join("generations");
+        let replay = temporary.path().join("replay");
+        let (provider, initial, owner, source) = fixture(generations.clone(), replay.clone());
+        drop(initial);
+        for _ in 0..16 {
+            let first = provider
+                .bind(
+                    owner.shard_id.clone(),
+                    ProjectId::new("project.provider").unwrap(),
+                    source.repository.clone(),
+                    generations.clone(),
+                    replay.clone(),
+                )
+                .unwrap();
+            let second = provider
+                .bind(
+                    owner.shard_id.clone(),
+                    ProjectId::new("project.provider").unwrap(),
+                    source.repository.clone(),
+                    generations.clone(),
+                    replay.clone(),
+                )
+                .unwrap();
+            assert!(matches!(
+                provider.bind(
+                    owner.shard_id.clone(),
+                    ProjectId::new("project.provider").unwrap(),
+                    source.repository.clone(),
+                    generations.clone(),
+                    temporary.path().join("other-replay")
+                ),
+                Err(GraphDbError::Conflict { .. })
+            ));
+            drop(first);
+            let sources = provider.sources.read().unwrap();
+            let routes = &sources.get(&owner.shard_id).unwrap().routes;
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes.values().copied().collect::<Vec<_>>(), vec![1]);
+            drop(sources);
+            drop(second);
+            assert!(provider.sources.read().unwrap().is_empty());
+        }
+    }
+
+    /// Builds the fixture's graph from its pool seal and interrupts the build
+    /// once `reads` segment reads have passed their check.
+    /// Builds the fixture's graph from its pool seal, probing `check` before
+    /// every read.
+    fn spill_partitioned(
+        fixture: &PartitionedSealFixture,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<SpilledGraphGeneration, GraphDbError> {
+        let generations_root = fixture.scope_root.join("code-generations-v1");
+        let replay_root = fixture.pool_manifest.parent().unwrap();
+        let owner = GraphProjectionIdentityV1 {
+            shard_id: StoreShardIdV1::project(
+                BrainId::new("brain.spill-interruption").unwrap(),
+                UserProfileId::new("profile.spill-interruption").unwrap(),
+                fixture.project.clone(),
+            ),
+            namespace: GraphNamespaceV1::new("namespace.spill-interruption").unwrap(),
+            projection: GraphProjectionIdV1::new("code-generation").unwrap(),
+        };
+        spill_sealed_generation_graph_from_roots(
+            &generations_root,
+            replay_root,
+            &SealedGraphStateDigest::try_from(format!("sha256:{}", fixture.digest)).unwrap(),
+            &fixture.generation,
+            GraphProjectionIdentity::new(
+                GraphNamespace::new(owner.namespace.as_str()).unwrap(),
+                GraphProjectionId::new(owner.projection.as_str()).unwrap(),
+            ),
+            &GraphProjectorRevision::try_from(
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+            )
+            .unwrap(),
+            spill_for(&owner),
+            check,
+        )
+    }
+
+    fn spill_partitioned_with_interruption(
+        label: &str,
+        reads: usize,
+        interruption: GraphDbError,
+    ) -> GraphDbError {
+        let fixture = partitioned_seal_fixture(label);
+        let checks = AtomicUsize::new(0);
+        let error = spill_partitioned(&fixture, &|| {
+            if checks.fetch_add(1, Ordering::SeqCst) >= reads {
+                Err(interruption.clone())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(checks.load(Ordering::SeqCst), reads + 1);
+        error
+    }
+
+    /// Retention retires a seal without waiting for a graph build reading it,
+    /// and the segment sweep then collects its segments. The build read a
+    /// superseded generation, not a corrupt one; the same swept segments
+    /// under a seal a root still names are corruption.
+    #[test]
+    fn a_seal_retired_during_a_build_segment_read_is_superseded_not_corrupt() {
+        let build_sweeping_segments = |label: &str, retire_seal: bool| {
+            let fixture = partitioned_seal_fixture(label);
+            let manifest_checks = AtomicUsize::new(0);
+            read_verified_seal_manifest(&fixture.pool_manifest, &fixture.digest, &|| {
+                manifest_checks.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+            let manifest_checks = manifest_checks.load(Ordering::SeqCst);
+            let staged = fixture
+                .pool_manifest
+                .with_file_name(format!(".generation-{}.unlink-test", fixture.digest));
+            let checks = AtomicUsize::new(0);
+            spill_partitioned(&fixture, &|| {
+                if checks.fetch_add(1, Ordering::SeqCst) == manifest_checks {
+                    if retire_seal {
+                        std::fs::rename(&fixture.pool_manifest, &staged).unwrap();
+                    }
+                    for entry in std::fs::read_dir(&fixture.segments_root).unwrap() {
+                        let path = entry.unwrap().path();
+                        if path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with("segment-"))
+                        {
+                            std::fs::remove_file(path).unwrap();
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_err()
+        };
+
+        let live = build_sweeping_segments("build-swept-live", false);
+        assert!(matches!(live, GraphDbError::Corrupt { .. }), "{live:?}");
+        let retired = build_sweeping_segments("build-swept-retired", true);
+        assert_eq!(
+            retired.to_string(),
+            "sealed code generation was superseded while it was read; retry against the current seal"
+        );
+    }
+
+    fn verify_partitioned_with_interruption(
+        label: &str,
+        interruption: GraphDbError,
+    ) -> GraphDbError {
+        let fixture = partitioned_seal_fixture(label);
+        let evidence_ranges_started = AtomicBool::new(false);
+        let interrupted_range_checks = AtomicUsize::new(0);
+        let error = verify_checked_seal_bundle_with_evidence_barrier(
+            &fixture.pool_manifest,
+            &fixture.segments_root,
+            &fixture.digest,
+            &|| {
+                if evidence_ranges_started.load(Ordering::SeqCst) {
+                    interrupted_range_checks.fetch_add(1, Ordering::SeqCst);
+                    Err(interruption.clone())
+                } else {
+                    Ok(())
+                }
+            },
+            || evidence_ranges_started.store(true, Ordering::SeqCst),
+        )
+        .unwrap_err();
+        assert_eq!(interrupted_range_checks.load(Ordering::SeqCst), 1);
+        error
+    }
+
+    #[test]
+    fn sealed_graph_build_preserves_cancellation_between_segment_reads() {
+        assert_eq!(
+            spill_partitioned_with_interruption("spill-cancelled", 4, GraphDbError::Cancelled),
+            GraphDbError::Cancelled
+        );
+    }
+
+    #[test]
+    fn sealed_graph_build_preserves_deadline_between_segment_reads() {
+        assert_eq!(
+            spill_partitioned_with_interruption(
+                "spill-deadline",
+                4,
+                GraphDbError::DeadlineExceeded
+            ),
+            GraphDbError::DeadlineExceeded
+        );
+    }
+
+    #[test]
+    fn partitioned_verify_callback_preserves_cancellation() {
+        assert_eq!(
+            verify_partitioned_with_interruption("verify-cancelled", GraphDbError::Cancelled),
+            GraphDbError::Cancelled
+        );
+    }
+
+    #[test]
+    fn partitioned_verify_callback_preserves_deadline() {
+        assert_eq!(
+            verify_partitioned_with_interruption("verify-deadline", GraphDbError::DeadlineExceeded,),
+            GraphDbError::DeadlineExceeded
+        );
+    }
+
+    /// Hydration rebuilds the sealed generation's graph rows from its segments
+    /// on disk every time, so a replay whose seal is gone fails typed rather
+    /// than being answered from memory, and a foreign sealed digest is never
+    /// served.
+    #[test]
+    fn hydration_builds_the_sealed_graph_from_disk_and_fails_closed_once_it_is_gone() {
         let temporary = TempDir::new().unwrap();
         let root = temporary.path().canonicalize().unwrap();
         let project_root = root.join("project");
@@ -1490,9 +2444,9 @@ mod tests {
         .unwrap();
         scheduler.reconcile_now().unwrap();
         let latest = scheduler.latest_complete().unwrap();
-        let decoded_handle = latest.generation_handle();
         let generation_id = latest.generation().manifest().generation_id.clone();
         let repository_id = latest.generation().snapshot().repository.clone();
+        drop(latest);
         drop(scheduler);
         let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
             &std::fs::read(scoped_store.join("active-code-generation-v1.json")).unwrap(),
@@ -1509,8 +2463,8 @@ mod tests {
             UserProfileId::new("profile.single-pass").unwrap(),
             project_id.clone(),
         );
-        let provider = DaemonCodeGraphManifestProviderV1::default();
-        provider
+        let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
+        let _route = provider
             .bind(
                 shard.clone(),
                 project_id,
@@ -1525,49 +2479,30 @@ mod tests {
         )
         .unwrap();
         let owner = GraphProjectionIdentityV1 {
-            shard_id: shard.clone(),
+            shard_id: shard,
             namespace: GraphNamespaceV1::new(namespace.as_str()).unwrap(),
             projection: GraphProjectionIdV1::new(projection.projection.as_str()).unwrap(),
         };
         let source = SealedCodeGenerationReplay {
             repository: repository_id,
             generation: generation_id,
-            sealed_state_digest: sealed_state_digest.clone(),
+            sealed_state_digest,
             projector_revision: GraphProjectorRevision::try_from(
                 tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
             )
             .unwrap(),
         };
 
-        // Nothing was offered, so the first hydration pays the one disk pass.
-        let first = provider
-            .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
-            .expect("first hydration decodes the sealed payload from disk");
+        let first = hydrate(&provider, &owner, &source, &|| Ok(()))
+            .expect("hydration builds the sealed graph from disk");
+        let second = hydrate(&provider, &owner, &source, &|| Ok(()))
+            .expect("a second hydration builds it again");
+        assert_eq!(first.row_counts(), second.row_counts());
+        assert_eq!(
+            first.expected_recovered_digest(),
+            second.expected_recovered_digest()
+        );
 
-        // Delete the seal from both roots so any further byte pass must fail.
-        let digest = pointer.state_digest.strip_prefix("sha256:").unwrap();
-        let seal_file = format!("generation-{digest}.json");
-        std::fs::remove_file(generations_root.join(&seal_file)).unwrap();
-
-        // Durable-source verification never trusts the retained decode.
-        assert!(matches!(
-            verify_sealed_generation_source_from_roots(
-                &generations_root,
-                &replay_root,
-                &sealed_state_digest,
-                &|| Ok(()),
-            ),
-            Err(GraphDbError::Unavailable { .. })
-        ));
-
-        // The same replay hydrates again from the retained decode — identical
-        // manifest, zero further byte passes.
-        let second = provider
-            .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
-            .expect("repeated hydration reuses the verified decode");
-        assert_eq!(first, second);
-
-        // The retained decode never answers a foreign sealed digest.
         let foreign = SealedCodeGenerationReplay {
             sealed_state_digest: SealedGraphStateDigest::try_from(format!(
                 "sha256:{}",
@@ -1576,22 +2511,15 @@ mod tests {
             .unwrap(),
             ..source.clone()
         };
-        provider
-            .hydrate_sealed_code_generation(&owner, &foreign, &|| Ok(()))
-            .expect_err("a foreign sealed digest must never be served from the retained decode");
-
-        // A fresh activation offer supersedes the retained decode, so the old
-        // replay can only be answered from disk again — which is now gone.
-        provider
-            .offer_decoded_code_generation(
-                shard,
-                CodeGenerationId::new("generation.superseding").unwrap(),
-                foreign.sealed_state_digest.clone(),
-                decoded_handle,
-            )
-            .unwrap();
         assert!(matches!(
-            provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
+            hydrate(&provider, &owner, &foreign, &|| Ok(())),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+
+        let digest = sha256_hex_suffix(&pointer.state_digest).unwrap();
+        std::fs::remove_file(generations_root.join(format!("generation-{digest}.json"))).unwrap();
+        assert!(matches!(
+            hydrate(&provider, &owner, &source, &|| Ok(())),
             Err(GraphDbError::Unavailable { .. })
         ));
     }

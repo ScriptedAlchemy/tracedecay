@@ -16,8 +16,8 @@ use tracedecay_global_db::{
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{
     Connection, Error as EngineError, Executor, IntoParams, QueryExecutor, Rows, TestConnection,
+    Transaction,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::handle::{
@@ -85,6 +85,36 @@ impl SessionTemporalExec for TestConnection {
     }
 }
 
+impl SessionTemporalQuery for Transaction {
+    fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> impl Future<Output = Result<Rows, EngineError>> + Send
+    where
+        P: IntoParams + Send,
+    {
+        Transaction::query(self, sql, params)
+    }
+}
+
+impl SessionTemporalExec for Transaction {
+    fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> impl Future<Output = Result<u64, EngineError>> + Send
+    where
+        P: IntoParams + Send,
+    {
+        Transaction::execute(self, sql, params)
+    }
+
+    fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
+        Transaction::execute_batch(self, sql)
+    }
+}
+
 impl SessionTemporalQuery for RegisteredGlobalDbWriteTransaction<'_> {
     fn query<P>(
         &self,
@@ -118,6 +148,10 @@ impl SessionTemporalExec for RegisteredGlobalDbWriteTransaction<'_> {
 impl SessionTemporalWriteTxn for RegisteredGlobalDbWriteTransaction<'_> {
     fn commit(self) -> impl Future<Output = Result<(), EngineError>> + Send {
         RegisteredGlobalDbWriteTransaction::commit(self)
+    }
+
+    fn rollback(self) -> impl Future<Output = Result<(), EngineError>> + Send {
+        RegisteredGlobalDbWriteTransaction::rollback(self)
     }
 }
 
@@ -160,6 +194,12 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDb {
         RegisteredGlobalDb::read_snapshot(self)
     }
 
+    fn health_read_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, EngineError>> + Send {
+        RegisteredGlobalDb::health_read_snapshot(self)
+    }
+
     fn begin_write_transaction(
         &self,
     ) -> impl Future<Output = Result<Self::WriteTxn<'_>, TraceDecayError>> + Send {
@@ -193,10 +233,6 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDb {
         };
         Ok((scope, SessionRelationGraphStore::new(lease)))
     }
-
-    fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1> {
-        RegisteredGlobalDb::project_graph_runtime(self)
-    }
 }
 
 impl SessionTemporalRegisteredDb for RegisteredGlobalDbLeaseV1 {
@@ -206,6 +242,12 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDbLeaseV1 {
         &self,
     ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, TraceDecayError>> + Send {
         RegisteredGlobalDb::read_snapshot(self)
+    }
+
+    fn health_read_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, EngineError>> + Send {
+        RegisteredGlobalDb::health_read_snapshot(self)
     }
 
     fn begin_write_transaction(
@@ -222,9 +264,5 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDbLeaseV1 {
         &self,
     ) -> Result<(SessionRelationScope, SessionRelationGraphStore), TraceDecayError> {
         <RegisteredGlobalDb as SessionTemporalRegisteredDb>::session_relation_store(self)
-    }
-
-    fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1> {
-        RegisteredGlobalDb::project_graph_runtime(self)
     }
 }

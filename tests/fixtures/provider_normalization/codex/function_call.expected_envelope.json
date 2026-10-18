@@ -13,7 +13,9 @@
       "kind": "tool_invocation",
       "invocation_id": "call-redacted",
       "name": "shell",
-      "arguments": null
+      "arguments": {
+        "cmd": "cargo sweep quarkonium --locked"
+      }
     }
   ],
   "evidence": {

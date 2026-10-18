@@ -5,27 +5,32 @@
 //! reachable from the published MCP servers.
 
 use super::*;
-use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
-use tracedecay_semantic_contracts::SemanticResourceCeilings;
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    CodeIndexDemandAdmissionV1, CodeIndexDemandV1,
+    query_runtime::{
+        DeferredMountAttemptV1, QueryRuntimeMountErrorV1,
+        retry_deferred_query_authority_until_serving,
+    },
+};
+use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
-/// Bundled so the builder keeps one argument list instead of thirteen
-/// positional parameters.
+/// Bundled so the builder keeps one argument list instead of ten positional
+/// parameters.
 pub(super) struct CodeIndexActivationMountInputs {
     pub(super) invocation: DaemonInvocationState,
     pub(super) project_id: tracedecay_domain::ProjectId,
     pub(super) project_root: PathBuf,
     pub(super) store_root: PathBuf,
-    pub(super) semantic_runtime: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
-    pub(super) semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
-    pub(super) semantic_resources: SemanticResourceCeilings,
     pub(super) native_graph_activation: bool,
-    pub(super) scope: tracedecay_application::ResolvedScope,
+    pub(super) index_paths: tracedecay_domain::IndexPathPolicyV1,
+    pub(super) scope: tracedecay_contracts::ResolvedScope,
     pub(super) route_registered: Arc<AtomicBool>,
     pub(super) cancellation: CancellationToken,
     pub(super) graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     pub(super) graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
-    pub(super) profile_id: tracedecay_domain::configuration::UserProfileId,
 }
 
 /// Build the deferred code-index mount for this route. The closure is fenced on
@@ -40,50 +45,39 @@ pub(super) fn code_index_activation_mount(
         project_id,
         project_root,
         store_root,
-        semantic_runtime,
-        semantic_lifecycle,
-        semantic_resources,
         native_graph_activation,
+        index_paths,
         scope,
         route_registered,
         cancellation,
         graph_runtime,
         graph_publication_database,
-        profile_id,
     } = inputs;
     let mount: code_index_scheduler::CodeIndexActivationMountV1 = Arc::new(move || {
         let invocation = invocation.clone();
         let project_id = project_id.clone();
         let project_root = project_root.clone();
         let store_root = store_root.clone();
-        let semantic_runtime = semantic_runtime.clone();
-        let semantic_lifecycle = semantic_lifecycle.clone();
-        let semantic_resources = semantic_resources;
         let native_graph_activation = native_graph_activation;
+        let index_paths = index_paths.clone();
         let scope = scope.clone();
         let route_registered = Arc::clone(&route_registered);
         let cancellation = cancellation.clone();
         let graph_runtime = Arc::clone(&graph_runtime);
         let graph_publication_database = Arc::clone(&graph_publication_database);
-        let profile_id = profile_id.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked before code-index mount".to_owned());
                 }
-                // Order-sensitive: subscribing before the mount is what keeps the
-                // first generation publication observable by the waiter below.
-                let publications = invocation
-                    .code_index_schedulers
-                    .subscribe_generation_publications();
+                let query_project_id = project_id.clone();
+                let query_graph_runtime = Arc::clone(&graph_runtime);
                 let mount = invocation.mount_code_index(
                     project_id,
                     &project_root,
                     store_root,
-                    Some(&semantic_runtime),
-                    semantic_lifecycle,
-                    Some(semantic_resources),
                     native_graph_activation,
+                    index_paths,
                     graph_runtime,
                     graph_publication_database,
                 );
@@ -97,22 +91,21 @@ pub(super) fn code_index_activation_mount(
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked after code-index mount".to_owned());
                 }
-
                 // Query authority depends on the first sealed generation, but
                 // hook hints must become deliverable as soon as the scheduler is
                 // mounted. Keep that wait in its own route-fenced task.
                 spawn_query_authority_when_generation_ready(QueryAuthorityWaitInputs {
                     invocation: invocation.clone(),
-                    publications,
                     project_root: project_root.clone(),
-                    profile_id: profile_id.clone(),
+                    project_id: query_project_id,
+                    graph_runtime: query_graph_runtime,
                     scope: scope.clone(),
                     route_registered: Arc::clone(&route_registered),
                     cancellation: cancellation.clone(),
                 });
                 Ok(())
             },
-            label = "daemon.project.activate.mount"
+            tracing::trace_span!("daemon.project.activate.mount"),
         ))
     });
     mount
@@ -121,134 +114,117 @@ pub(super) fn code_index_activation_mount(
 /// Route-fenced inputs for the post-mount query-authority wait.
 struct QueryAuthorityWaitInputs {
     invocation: DaemonInvocationState,
-    publications:
-        tokio::sync::broadcast::Receiver<code_index_scheduler::CodeIndexGenerationPublishedV1>,
     project_root: PathBuf,
-    profile_id: tracedecay_domain::configuration::UserProfileId,
-    scope: tracedecay_application::ResolvedScope,
+    project_id: tracedecay_domain::ProjectId,
+    graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
+    scope: tracedecay_contracts::ResolvedScope,
     route_registered: Arc<AtomicBool>,
     cancellation: CancellationToken,
 }
 
-/// Wait for this project's first sealed generation, then mount its query
-/// authority. Route revocation, cancellation, and a closed publication channel
-/// each end the wait without mounting; a lagged channel or the route poll
-/// re-reads the serving slot, because a retained `Noop` restore does not
-/// republish.
+/// Wait for this project's first retained generation, then mount the
+/// checked-in core query policy from the project's durable cursor-key
+/// authority. Route revocation (which cancels this route's own token) ends
+/// the wait without mounting.
+///
+/// The wait is the same one the full route's deferred mount uses: a restart
+/// restores its retained generation without announcing it and may leave the
+/// decoded serving slot empty, so only the retained text owner proves the
+/// generation a mount needs.
 fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs) {
     let QueryAuthorityWaitInputs {
-        invocation: authority_invocation,
-        mut publications,
-        project_root: authority_project,
-        profile_id: authority_profile_id,
-        scope: authority_scope,
-        route_registered: authority_route_registered,
-        cancellation: authority_cancellation,
+        invocation,
+        project_root,
+        project_id,
+        graph_runtime,
+        scope,
+        route_registered,
+        cancellation,
     } = inputs;
-    tokio::spawn(hotpath::future!(
+    let log_project_root = project_root.clone();
+    let spawned = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
         async move {
-            let mut route_poll = tokio::time::interval(std::time::Duration::from_secs(1));
-            route_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let generation_ready = if authority_invocation
-                .code_index_schedulers
-                .latest_generation_id(&authority_project)
-                .await
-                .is_some()
-            {
-                true
-            } else {
-                loop {
-                    if !authority_route_registered.load(Ordering::Acquire) {
-                        break false;
-                    }
-                    tokio::select! {
-                        () = authority_cancellation.cancelled() => break false,
-                        _ = route_poll.tick() => {
-                            if !authority_route_registered.load(Ordering::Acquire) {
-                                break false;
-                            }
-                            if authority_invocation
-                                .code_index_schedulers
-                                .latest_generation_id(&authority_project)
-                                .await
-                                .is_some()
-                            {
-                                break true;
-                            }
-                        }
-                        publication = publications.recv() => match publication {
-                            Ok(publication)
-                                if publication.project_root == authority_project =>
-                            {
-                                break true;
-                            }
-                            Ok(_) => {}
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                if authority_invocation
-                                    .code_index_schedulers
-                                    .latest_generation_id(&authority_project)
-                                    .await
-                                    .is_some()
-                                {
-                                    break true;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                break false;
-                            }
-                        }
-                    }
-                }
-            };
-            if !generation_ready
-                || authority_cancellation.is_cancelled()
-                || !authority_route_registered.load(Ordering::Acquire)
-            {
-                return;
-            }
+            let schedulers = invocation.code_index_schedulers.clone();
             let mut awaiting_generation_logged = false;
-            loop {
-                let outcome = tokio::select! {
-                    biased;
-                    () = authority_cancellation.cancelled() => return,
-                    outcome = authority_invocation.mount_query_authority_for_project(
-                        &authority_project,
-                        &authority_profile_id,
-                        &authority_scope,
-                    ) => outcome,
-                };
-                if authority_cancellation.is_cancelled()
-                    || !authority_route_registered.load(Ordering::Acquire)
-                {
-                    return;
-                }
-                match outcome {
-                    Err(error @ QueryRuntimeMountErrorV1::GenerationUnavailable) => {
-                        if !awaiting_generation_logged {
-                            log_query_authority_activation_outcome(
-                                &authority_project,
-                                Err(error),
-                            );
-                            awaiting_generation_logged = true;
+            let retry = retry_deferred_query_authority_until_serving(
+                &schedulers,
+                project_root.clone(),
+                || {
+                    let first_await = !awaiting_generation_logged;
+                    awaiting_generation_logged = true;
+                    let invocation = invocation.clone();
+                    let graph_runtime = Arc::clone(&graph_runtime);
+                    let project_id = project_id.clone();
+                    let project_root = project_root.clone();
+                    let scope = scope.clone();
+                    let route_registered = Arc::clone(&route_registered);
+                    async move {
+                        if !route_registered.load(Ordering::Acquire) {
+                            return DeferredMountAttemptV1::Terminal;
                         }
-                        tokio::select! {
-                            () = authority_cancellation.cancelled() => return,
-                            _ = route_poll.tick() => {},
-                            publication = publications.recv() => match publication {
-                                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                            }
+                        let outcome = mount_core_query_authority_from_project_sessions(
+                            &invocation,
+                            &graph_runtime,
+                            &project_id,
+                            &project_root,
+                            &scope,
+                        )
+                        .await;
+                        let awaiting = matches!(
+                            outcome,
+                            Err(QueryRuntimeMountErrorV1::GenerationUnavailable)
+                        );
+                        if !awaiting || first_await {
+                            log_query_authority_activation_outcome(&project_root, outcome);
+                        }
+                        if awaiting {
+                            DeferredMountAttemptV1::AwaitNextPublication
+                        } else {
+                            DeferredMountAttemptV1::Terminal
                         }
                     }
-                    outcome => {
-                        log_query_authority_activation_outcome(&authority_project, outcome);
-                        return;
-                    }
-                }
+                },
+            );
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {}
+                () = retry => {}
             }
         },
-        label = "daemon.project.activate.query_authority"
+        tracing::trace_span!("daemon.project.activate.query_authority"),
     ));
+    if let Err(error) = spawned {
+        log_query_authority_activation_outcome(
+            &log_project_root,
+            Err(QueryRuntimeMountErrorV1::Mount(error)),
+        );
+    }
+}
+
+/// Mounts the checked-in core query policy from the project's durable
+/// cursor-key authority, which lives in the mounted project session database.
+async fn mount_core_query_authority_from_project_sessions(
+    invocation: &DaemonInvocationState,
+    graph_runtime: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
+    project_id: &tracedecay_domain::ProjectId,
+    project_root: &Path,
+    scope: &tracedecay_contracts::ResolvedScope,
+) -> std::result::Result<(), QueryRuntimeMountErrorV1> {
+    let Some(session_db) = graph_runtime
+        .mounted_project_session_store(project_id)
+        .await
+    else {
+        return Err(QueryRuntimeMountErrorV1::Mount(
+            "project session database is not mounted".to_owned(),
+        ));
+    };
+    let cursor_keys = SessionTemporalAccess::new(&*session_db)
+        .load_session_cursor_key_provider_result()
+        .await
+        .map_err(|error| QueryRuntimeMountErrorV1::FallbackKeyUnavailable(error.to_string()))?;
+    invocation
+        .mount_core_query_authority_for_project(project_root, scope, &cursor_keys)
+        .await
 }
 
 /// Classify and emit the post-wait query-authority mount result.
@@ -295,25 +271,6 @@ fn log_query_authority_activation_outcome(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::daemon) enum QueryAuthorityActivationLogV1 {
-    Mounted,
-    AwaitingGeneration,
-    Degraded,
-}
-
-pub(in crate::daemon) fn classify_query_authority_activation_outcome(
-    outcome: &std::result::Result<(), QueryRuntimeMountErrorV1>,
-) -> QueryAuthorityActivationLogV1 {
-    match outcome {
-        Ok(()) => QueryAuthorityActivationLogV1::Mounted,
-        Err(QueryRuntimeMountErrorV1::GenerationUnavailable) => {
-            QueryAuthorityActivationLogV1::AwaitingGeneration
-        }
-        Err(_) => QueryAuthorityActivationLogV1::Degraded,
-    }
-}
-
 /// Hint sink handed to the activation owner: it coalesces after-edit hook paths
 /// and overflow notices onto the mounted scheduler.
 pub(super) fn code_index_activation_hint_sink(
@@ -324,19 +281,24 @@ pub(super) fn code_index_activation_hint_sink(
         let schedulers = schedulers.clone();
         let project_root = project_root.clone();
         Box::pin(async move {
-            let paths_accepted = if batch.paths.is_empty() {
-                true
+            let paths = if batch.paths.is_empty() {
+                CodeIndexDemandAdmissionV1::Queued
             } else {
                 schedulers
                     .notify_hook_paths(&project_root, &batch.paths)
                     .await
             };
-            let overflow_accepted = if batch.overflow {
+            // One wake per batch: a refusal already reached the caller, and a
+            // second notify for the same batch would post a second wake.
+            if !paths.is_queued() {
+                return paths;
+            }
+            let overflow = if batch.overflow {
                 schedulers.notify_hook_overflow(&project_root).await
             } else {
-                true
+                CodeIndexDemandAdmissionV1::Queued
             };
-            paths_accepted && overflow_accepted
+            paths.strongest_refusal(overflow)
         })
     });
     sink
@@ -351,28 +313,37 @@ pub(super) fn code_index_hook_sink(
     let sink: crate::mcp::server::CodeIndexHookSink =
         Arc::new(move |root: PathBuf, rel_paths: Vec<String>| {
             let activation = Arc::clone(&activation);
-            Box::pin(async move { activation.notify_hook_paths(&root, rel_paths).await })
+            Box::pin(async move {
+                activation
+                    .admit(&root, CodeIndexDemandV1::HookPaths(rel_paths))
+                    .await
+            })
         });
     sink
 }
 
-/// MCP-facing reconcile sink: an overflowed hook batch asks the activation
-/// owner for a full reconcile instead of enumerating paths.
+/// MCP-facing reconcile sink: a caller that has already decided the whole
+/// worktree must be reconciled asks the activation owner for that pass instead
+/// of enumerating paths.
+///
+/// The caller names who is asking, and the front door decides what that means.
+/// Every demand the daemon raises by itself, host lifecycle hooks, the
+/// server's startup catch-up, the path hints arriving through
+/// [`code_index_hook_sink`], is [`CodeIndexDemandV1::Reconcile`] and stays
+/// behind `sync.watch_linked_worktrees`. Only a route the operator named
+/// (`tracedecay init` / `tracedecay sync` through `tracedecay_admin_sync`) is
+/// [`CodeIndexDemandV1::OperatorReconcile`]. Routing the daemon's own demands
+/// as operator demand indexed every un-opted-in linked worktree moments after
+/// it opened and made the published `code_index=linked_worktree_disabled` state
+/// a lie.
 pub(super) fn code_index_reconcile_sink(
-    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> crate::mcp::server::CodeIndexReconcileSink {
-    let sink: crate::mcp::server::CodeIndexReconcileSink = Arc::new(move |root: PathBuf| {
-        let schedulers = schedulers.clone();
-        let activation = Arc::clone(&activation);
-        Box::pin(async move {
-            if schedulers.notify_hook_overflow(&root).await {
-                true
-            } else {
-                activation.notify_hook_overflow(&root).await
-            }
-        })
-    });
+    let sink: crate::mcp::server::CodeIndexReconcileSink =
+        Arc::new(move |root: PathBuf, demand: CodeIndexDemandV1| {
+            let activation = Arc::clone(&activation);
+            Box::pin(async move { activation.admit(&root, demand).await })
+        });
     sink
 }
 
@@ -381,55 +352,32 @@ pub(super) fn code_index_reconcile_sink(
 /// overflow wake solely when that evidence proves a reconcile is required.
 pub(super) fn code_index_freshness_probe_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> crate::mcp::server::CodeIndexFreshnessProbeSink {
     Arc::new(move |root: PathBuf| {
         let schedulers = schedulers.clone();
-        Box::pin(async move { schedulers.probe_freshness(&root).await })
+        let activation = Arc::clone(&activation);
+        Box::pin(async move {
+            if let Some(verdict) = activation
+                .gate_demand(&root, &CodeIndexDemandV1::Reconcile)
+                .await
+            {
+                return verdict;
+            }
+            schedulers.probe_freshness_admission(&root).await
+        })
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
-    use tempfile::TempDir;
-    use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
-
     use super::*;
-
-    #[test]
-    fn pre_seat_generation_gap_is_typed_status_not_degraded() {
-        assert_eq!(
-            classify_query_authority_activation_outcome(&Ok(())),
-            QueryAuthorityActivationLogV1::Mounted
-        );
-        assert_eq!(
-            classify_query_authority_activation_outcome(&Err(
-                QueryRuntimeMountErrorV1::GenerationUnavailable
-            )),
-            QueryAuthorityActivationLogV1::AwaitingGeneration
-        );
-        assert_eq!(
-            classify_query_authority_activation_outcome(&Err(
-                QueryRuntimeMountErrorV1::KeyUnavailable
-            )),
-            QueryAuthorityActivationLogV1::Degraded
-        );
-    }
-
-    fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .current_dir(root)
-        .args(arguments)
-        .status()
-        .expect("run git");
-        assert!(status.success(), "git {arguments:?}");
-    }
+    use crate::test_support::git::git;
+    use tempfile::TempDir;
+    use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
     fn repository() -> TempDir {
         let root = TempDir::new().expect("repository root");
@@ -438,17 +386,104 @@ mod tests {
         root
     }
 
+    fn parked(
+        reason: &str,
+    ) -> tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+        tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+            reason: reason.to_owned(),
+            blocked_reason: Some(
+                tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
+            ),
+            remediation: "reset".to_owned(),
+            parked_at_micros: 1,
+            observed_passes: 1,
+            retries_on_wake: false,
+        }
+    }
+
+    #[test]
+    fn host_outcome_maps_corrupt_terminal_unavailable_not_degraded() {
+        use crate::mcp::server::{
+            CODE_INDEX_FOREIGN_ROOT, CODE_INDEX_IDENTITY_UNRESOLVED,
+            CODE_INDEX_LINKED_WORKTREE_DISABLED, CODE_INDEX_NO_PROVEN_CHANGE,
+            CODE_INDEX_NOT_APPLICABLE, CODE_INDEX_ROUTE_RETIRED, CODE_INDEX_SCHEDULER_UNAVAILABLE,
+            code_index_host_outcome,
+        };
+        use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1;
+        use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
+        use tracedecay_sessions::admission::HostAdmissionStatus;
+        let corrupt =
+            code_index_host_outcome(&CodeIndexDemandAdmissionV1::Terminal(parked("term")));
+        assert_eq!(corrupt.status, HostAdmissionStatus::Unavailable);
+        assert!(!corrupt.retryable);
+        assert_eq!(
+            corrupt.reason_code,
+            Some(CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT)
+        );
+
+        let not_applicable = code_index_host_outcome(&CodeIndexDemandAdmissionV1::NotApplicable);
+        assert_eq!(not_applicable.status, HostAdmissionStatus::NotApplicable);
+        assert!(!not_applicable.retryable);
+        assert!(not_applicable.status.commits_replay_record());
+        assert_eq!(not_applicable.reason_code, Some(CODE_INDEX_NOT_APPLICABLE));
+
+        let unresolved = code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(
+            CodeIndexDemandUnavailableV1::IdentityUnresolved,
+        ));
+        assert!(unresolved.retryable);
+        assert_eq!(unresolved.reason_code, Some(CODE_INDEX_IDENTITY_UNRESOLVED));
+
+        let linked = code_index_host_outcome(&CodeIndexDemandAdmissionV1::RefusedByPolicy);
+        assert_eq!(linked.status, HostAdmissionStatus::Degraded);
+        assert!(!linked.retryable);
+        assert_eq!(
+            linked.reason_code,
+            Some(CODE_INDEX_LINKED_WORKTREE_DISABLED)
+        );
+
+        let unmounted = code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(
+            CodeIndexDemandUnavailableV1::SchedulerUnmounted,
+        ));
+        assert_eq!(unmounted.status, HostAdmissionStatus::Unavailable);
+        assert!(unmounted.retryable);
+        assert_eq!(
+            unmounted.reason_code,
+            Some(CODE_INDEX_SCHEDULER_UNAVAILABLE)
+        );
+
+        for (cause, reason) in [
+            (
+                CodeIndexDemandUnavailableV1::RouteRetired,
+                CODE_INDEX_ROUTE_RETIRED,
+            ),
+            (
+                CodeIndexDemandUnavailableV1::ForeignRoot,
+                CODE_INDEX_FOREIGN_ROOT,
+            ),
+            (
+                CodeIndexDemandUnavailableV1::NoProvenChange,
+                CODE_INDEX_NO_PROVEN_CHANGE,
+            ),
+        ] {
+            let outcome = code_index_host_outcome(&CodeIndexDemandAdmissionV1::Unavailable(cause));
+            assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+            assert!(
+                !outcome.retryable,
+                "{reason} must stay non-retryable at the host wire"
+            );
+            assert_eq!(outcome.reason_code, Some(reason));
+        }
+    }
+
     /// `tracedecay init` reports "code-index reconciliation requested" through
     /// this sink before any scheduler is mounted. The pre-mount request must be
-    /// accepted and must start the demand-driven mount — otherwise init's
+    /// accepted and must start the demand-driven mount, otherwise init's
     /// message is a no-op and the first index never runs.
     #[tokio::test]
     async fn reconcile_request_before_mount_activates_indexing() {
         let repository = repository();
-        let root = repository
-            .path()
-            .canonicalize()
-            .expect("canonical repository root");
+        let root =
+            canonical_existing_identity(repository.path()).expect("canonical repository root");
         let mount_attempts = Arc::new(AtomicUsize::new(0));
         let mount: code_index_scheduler::CodeIndexActivationMountV1 = {
             let mount_attempts = Arc::clone(&mount_attempts);
@@ -467,7 +502,7 @@ mod tests {
                 let overflow_batches = Arc::clone(&overflow_batches);
                 Box::pin(async move {
                     overflow_batches.lock().expect("record batch").push(batch);
-                    true
+                    CodeIndexDemandAdmissionV1::Queued
                 })
             })
         };
@@ -478,11 +513,15 @@ mod tests {
             mount,
             hint_sink,
         ));
-        let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
-        let sink = code_index_reconcile_sink(registry, Arc::clone(&activation));
+        let sink = code_index_reconcile_sink(Arc::clone(&activation));
 
         assert!(
-            sink(root.clone()).await,
+            sink(
+                root.clone(),
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandV1::OperatorReconcile
+            )
+            .await
+                == tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::Queued,
             "a pre-mount reconcile request must be accepted, not dropped"
         );
 
@@ -501,5 +540,252 @@ mod tests {
         })
         .await
         .expect("pre-mount reconcile must mount the scheduler and flush the overflow request");
+    }
+
+    #[tokio::test]
+    async fn freshness_reader_publishes_a_failed_mount_without_private_detail() {
+        let repository = repository();
+        let root =
+            canonical_existing_identity(repository.path()).expect("canonical repository root");
+        let activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new(
+            &root,
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            Arc::new(|| Box::pin(async { Err("/private/operator/path".to_owned()) })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
+        ));
+        let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+        let reader = super::super::project_dashboard_freshness_reader(
+            registry.clone(),
+            Arc::clone(&activation),
+        );
+        let waiter = super::super::project_readiness_waiter(registry, Arc::clone(&activation));
+
+        assert_eq!(
+            activation
+                .admit(&root, CodeIndexDemandV1::OperatorReconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        );
+        while !activation.mount_failed() {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            reader(root.clone()).await,
+            Err(
+                tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::MountFailed
+            )
+        );
+        let waited = waiter(
+            root,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("the readiness authority returns typed mount failure");
+        assert!(matches!(
+            waited,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
+                reason
+            } if reason == "code_index_mount_failed"
+        ));
+    }
+
+    /// `tracedecay sync` retries a failed mount while the retained failure
+    /// flag stays published. A readiness wait that begins during that retry
+    /// must observe the retry's settlement instead of reporting the stale
+    /// failure immediately.
+    #[tokio::test(start_paused = true)]
+    async fn readiness_wait_started_during_mount_retry_waits_for_settlement() {
+        let repository = repository();
+        let root =
+            canonical_existing_identity(repository.path()).expect("canonical repository root");
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let retry_started = Arc::new(tokio::sync::Notify::new());
+        let release_retry = Arc::new(tokio::sync::Notify::new());
+        let mount: code_index_scheduler::CodeIndexActivationMountV1 = {
+            let mount_attempts = Arc::clone(&mount_attempts);
+            let retry_started = Arc::clone(&retry_started);
+            let release_retry = Arc::clone(&release_retry);
+            Arc::new(move || {
+                let mount_attempts = Arc::clone(&mount_attempts);
+                let retry_started = Arc::clone(&retry_started);
+                let release_retry = Arc::clone(&release_retry);
+                Box::pin(async move {
+                    if mount_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Err("the first mount failed".to_owned());
+                    }
+                    retry_started.notify_one();
+                    release_retry.notified().await;
+                    Err("the retry mount failed".to_owned())
+                })
+            })
+        };
+        let activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new(
+            &root,
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            mount,
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
+        ));
+        let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+        let waiter = super::super::project_readiness_waiter(registry, Arc::clone(&activation));
+        let mut mount_failure = activation.subscribe_mount_failure();
+
+        assert_eq!(
+            activation
+                .admit(&root, CodeIndexDemandV1::OperatorReconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        );
+        while !*mount_failure.borrow_and_update() {
+            mount_failure
+                .changed()
+                .await
+                .expect("the activation owns the mount-failure publication");
+        }
+
+        // The operator retry: a second mount attempt is in flight while the
+        // retained failure is still published.
+        let retry_started_observation = retry_started.notified();
+        assert_eq!(
+            activation
+                .admit(&root, CodeIndexDemandV1::OperatorReconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        );
+        retry_started_observation.await;
+        assert!(activation.mount_in_progress());
+        assert!(activation.mount_failed());
+
+        let mut waited = Box::pin(waiter(
+            root,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
+            std::time::Duration::from_secs(1),
+        ));
+        std::future::poll_fn(|context| {
+            assert!(
+                waited.as_mut().poll(context).is_pending(),
+                "the retained failure must not settle readiness while a retry is in flight"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        release_retry.notify_one();
+        let waited = waited.await.expect("the readiness authority stays typed");
+        assert!(
+            matches!(
+                waited,
+                tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
+                    reason
+                }
+                if reason == "code_index_mount_failed"
+            ),
+            "the wait must classify the retry's failed settlement"
+        );
+    }
+
+    /// A linked worktree under the default `sync.watch_linked_worktrees = false`
+    /// carries `LinkedWorktreeDisabled` automatic admission, which is the
+    /// filesystem-watcher policy. `tracedecay init` inside that worktree still
+    /// asks for a reconcile by name through this sink, and that demand must
+    /// mount the scheduler: otherwise a daemon-first init from a linked
+    /// worktree reports "code-index reconciliation requested" while nothing is
+    /// ever indexed.
+    #[tokio::test]
+    async fn explicit_reconcile_overrides_linked_worktree_watch_policy() {
+        let repository = repository();
+        let root =
+            canonical_existing_identity(repository.path()).expect("canonical repository root");
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let mount: code_index_scheduler::CodeIndexActivationMountV1 = {
+            let mount_attempts = Arc::clone(&mount_attempts);
+            Arc::new(move || {
+                let mount_attempts = Arc::clone(&mount_attempts);
+                Box::pin(async move {
+                    mount_attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+        let hint_sink: code_index_scheduler::CodeIndexActivationHintSinkV1 =
+            Arc::new(move |_batch| Box::pin(async move { CodeIndexDemandAdmissionV1::Queued }));
+        let activation = Arc::new(
+            code_index_scheduler::CodeIndexActivationV1::new_with_admission(
+                &root,
+                Arc::new(AtomicBool::new(true)),
+                CancellationToken::new(),
+                code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+                mount,
+                hint_sink,
+            ),
+        );
+        // The watch-driven hint path keeps the gate.
+        assert!(
+            matches!(
+                activation
+                    .admit(
+                        &root,
+                        CodeIndexDemandV1::HookPaths(vec!["lib.rs".to_owned()])
+                    )
+                    .await,
+                CodeIndexDemandAdmissionV1::RefusedByPolicy
+            ),
+            "a watch-driven hint must still honour the linked-worktree watch policy"
+        );
+
+        let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+        let hook_sink = code_index_hook_sink(Arc::clone(&activation));
+        assert_eq!(
+            hook_sink(root.clone(), vec!["lib.rs".to_owned()]).await,
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::RefusedByPolicy
+        );
+        let probe_sink = code_index_freshness_probe_sink(registry.clone(), Arc::clone(&activation));
+        assert_eq!(
+            probe_sink(root.clone()).await,
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::RefusedByPolicy
+        );
+        let sink = code_index_reconcile_sink(Arc::clone(&activation));
+        // The daemon's own whole-worktree demands, a `workspaceOpen` /
+        // `sessionStart` hook effect, the server's startup catch-up, are
+        // automatic and must honour the same watch policy as a path hint:
+        // otherwise every un-opted-in linked worktree is indexed the moment
+        // its full server opens, and the typed `linked_worktree_disabled`
+        // admission the daemon publishes for it is false.
+        assert!(
+            sink(
+                root.clone(),
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandV1::Reconcile
+            )
+            .await
+                == tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::RefusedByPolicy,
+            "an automatic whole-worktree demand must honour the linked-worktree watch policy"
+        );
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            mount_attempts.load(Ordering::SeqCst),
+            0,
+            "a refused automatic demand must not start the demand-driven mount"
+        );
+        assert!(
+            sink(
+                root.clone(),
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandV1::OperatorReconcile
+            )
+            .await
+                == tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::Queued,
+            "explicit reconcile demand must be accepted on a linked worktree"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while mount_attempts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("explicit reconcile must mount the scheduler on a linked worktree");
     }
 }

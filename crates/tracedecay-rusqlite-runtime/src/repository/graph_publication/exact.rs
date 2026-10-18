@@ -18,23 +18,23 @@ use tracedecay_store::{
 };
 
 use crate::exact_sql::{
-    ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
-    ExactSqlValue,
+    ExactSqlError, ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement,
+    ExactSqlTransaction, ExactSqlValue,
 };
 
 use super::{
     EncodedProjection, begin_pending_discard_commit, begin_replay_retirement_commit,
     begin_retired_cleanup_finalize_commit, begin_verified_commit,
     encode_direct_dependency_generations, encode_optional_head, ensure_not_interrupted,
-    sequence_from_i64, sequence_to_i64,
+    infrastructure, sequence_from_i64, sequence_to_i64,
 };
 
 #[path = "support.rs"]
 mod support;
 use support::{
     begin, begin_read, commit, ensure_owner, ensure_shard_owner, execute,
-    has_active_inbound_dependencies, insert_verified_dependencies, optional_text, read_by_sequence,
-    read_conflicts, read_exact, read_exact_metadata, read_exact_tombstone,
+    has_active_inbound_dependencies, insert_verified_dependencies, integer_at, optional_text,
+    query, read_by_sequence, read_conflicts, read_exact, read_exact_metadata, read_exact_tombstone,
     read_first_conflict_sequence, read_head, read_pending, read_pending_sequence,
     read_projection_page, read_replays_by_sequences, read_tombstone_conflicts,
     read_tombstones_by_sequences, replay_metadata_page, retired_cleanup_metadata_page, rollback,
@@ -55,7 +55,7 @@ const TOMBSTONE_COLUMNS: &str = "replay_sequence, shard_id, namespace, projectio
 const REPLAY_READER_ACQUIRE_SLICE: Duration = Duration::from_millis(10);
 
 trait ExactQueryAuthority {
-    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()>;
+    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError>;
 }
 
 pub(super) enum ExactPublicationRead {
@@ -64,11 +64,11 @@ pub(super) enum ExactPublicationRead {
 }
 
 impl ExactQueryAuthority for ExactPublicationRead {
-    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
+    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
         match self {
-            Self::Snapshot(snapshot) => snapshot.query(statement).map_err(|_| ()),
-            Self::Transaction(Some(transaction)) => transaction.query(statement).map_err(|_| ()),
-            Self::Transaction(None) => Err(()),
+            Self::Snapshot(snapshot) => snapshot.query(statement),
+            Self::Transaction(Some(transaction)) => transaction.query(statement),
+            Self::Transaction(None) => Err(ExactSqlError::TransactionClosed),
         }
     }
 }
@@ -84,14 +84,14 @@ impl Drop for ExactPublicationRead {
 }
 
 impl ExactQueryAuthority for ExactSqlTransaction {
-    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
-        self.query(statement).map_err(|_| ())
+    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
+        self.query(statement)
     }
 }
 
 impl ExactQueryAuthority for ExactSqlReadSnapshot {
-    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
-        self.query(statement).map_err(|_| ())
+    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
+        self.query(statement)
     }
 }
 
@@ -160,23 +160,7 @@ impl GraphPublicationExactSqlStorage {
     }
 }
 
-pub(super) fn authoritative_verified_head_in_transaction(
-    transaction: &ExactSqlTransaction,
-    projection: &GraphProjectionIdentityV1,
-) -> GraphPublicationStoreResultV1<Option<GraphVerifiedHeadV1>> {
-    let encoded = EncodedProjection::new(projection)?;
-    read_head(transaction, &encoded)
-}
-
-pub(super) fn active_replay_in_transaction(
-    transaction: &ExactSqlTransaction,
-    key: &GraphPublicationKeyV1,
-) -> GraphPublicationStoreResultV1<Option<GraphPublicationReplayRecordV1>> {
-    let encoded = EncodedProjection::new(&key.projection)?;
-    read_exact(transaction, &encoded, key)
-}
-
-pub(crate) fn retire_replay_in_transaction(
+fn retire_replay_in_transaction(
     transaction: &ExactSqlTransaction,
     request: &GraphPublicationReplayRetirementV1,
 ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
@@ -242,6 +226,105 @@ pub(crate) fn retire_replay_in_transaction(
     if has_active_inbound_dependencies(transaction, replay.sequence)? {
         return Ok(GraphReplayRetirementOutcomeV1::Conflict);
     }
+    tombstone_retired_replay(transaction, encoded, request, &replay)
+}
+
+pub(crate) fn retire_verified_head_replay_in_transaction(
+    transaction: &ExactSqlTransaction,
+    request: &GraphPublicationReplayRetirementV1,
+    expected_head: &GraphVerifiedHeadV1,
+) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+    request.validate()?;
+    let encoded = EncodedProjection::new(&request.key.projection)?;
+    let retired_conflicts = read_tombstone_conflicts(transaction, &encoded, &request.key)?;
+    if let Some(retired) = retired_conflicts
+        .iter()
+        .find(|retired| retired.key == request.key)
+    {
+        return Ok(if retired.retirement() == *request {
+            GraphReplayRetirementOutcomeV1::ExactReplay(retired.clone())
+        } else {
+            GraphReplayRetirementOutcomeV1::Conflict
+        });
+    }
+    if !retired_conflicts.is_empty() {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    }
+    let conflicts = read_conflicts(transaction, &encoded, &request.key)?;
+    let Some(replay) = conflicts
+        .iter()
+        .find(|replay| replay.publication.key == request.key)
+        .cloned()
+    else {
+        return Ok(if conflicts.is_empty() {
+            GraphReplayRetirementOutcomeV1::Missing
+        } else {
+            GraphReplayRetirementOutcomeV1::Conflict
+        });
+    };
+    if replay.publication.input_digest != request.input_digest
+        || replay.publication.dependency_generation_closure_digest
+            != request.dependency_generation_closure_digest
+        || replay.publication.direct_dependency_generations != request.direct_dependency_generations
+        || replay.publication.expected_prior_head != request.expected_prior_head
+        || replay.publication.expected_recovered_digest != request.expected_recovered_digest
+        || replay.publication.canonical_replay_source_digest
+            != request.canonical_replay_source_digest
+    {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    }
+    let Some(head) = read_head(transaction, &encoded)? else {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    };
+    if head != *expected_head || head.sequence != replay.sequence {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    }
+    if let Some(pending) = read_pending(transaction, &encoded, Some(&head))? {
+        return Ok(GraphReplayRetirementOutcomeV1::PendingReplay { pending });
+    }
+    if has_active_inbound_dependencies(transaction, replay.sequence)? {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    }
+    let changed = execute(
+        transaction,
+        "DELETE FROM graph_verified_heads_v1
+         WHERE shard_id = ?1 AND namespace = ?2 AND projection = ?3
+           AND replay_sequence = ?4",
+        vec![
+            text(encoded.shard_id.clone()),
+            text(encoded.namespace.clone()),
+            text(encoded.projection.clone()),
+            ExactSqlValue::Integer(sequence_to_i64(replay.sequence)?),
+        ],
+    )?
+    .changed_rows;
+    if changed != 1 {
+        return Err(GraphPublicationStoreErrorV1::Corrupt(
+            "verified graph head moved during head retirement".to_owned(),
+        ));
+    }
+    tombstone_retired_replay(transaction, encoded, request, &replay)
+}
+
+/// Tombstone one replay whose retirement guards already passed: the durable
+/// retired identity, its dependency closure moved to the tombstone ledger,
+/// and the live dependency edges removed, in the caller's transaction.
+///
+/// Tombstones are permanent for the life of the store. Append, verified-head
+/// compare-and-swap, and retirement all consult them: a key that was retired
+/// answers `RetiredReplayConflict`/`RetiredReplay` instead of being appended or
+/// seated again, and a crash-retried retirement answers `ExactReplay` instead
+/// of `Missing`. Deleting one would let a restarted publisher resurrect a
+/// retired replay under its old key. The bound is one row per retired graph
+/// replay, about one per code-index publication: a sweep profile measured 47
+/// rows in 86 KB plus a 28 KB index after about 30 publications (about 2.4 KB
+/// per retirement).
+fn tombstone_retired_replay(
+    transaction: &ExactSqlTransaction,
+    encoded: EncodedProjection,
+    request: &GraphPublicationReplayRetirementV1,
+    replay: &GraphPublicationReplayRecordV1,
+) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
     let tombstone = GraphPublicationReplayTombstoneV1::new(
         replay.sequence,
         request.clone(),
@@ -270,7 +353,7 @@ pub(crate) fn retire_replay_in_transaction(
                     encode_direct_dependency_generations(&request.direct_dependency_generations)?
                         .len(),
                 )
-                .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?,
+                .map_err(|error| infrastructure("size graph replay dependencies", error))?,
             ),
             optional_text(encode_optional_head(request.expected_prior_head.as_ref())?),
             text(request.expected_recovered_digest.as_str()),
@@ -356,7 +439,7 @@ pub(crate) fn discard_pending_replay_in_transaction(
     Ok(GraphPendingReplayDiscardOutcomeV1::Discarded(replay))
 }
 
-pub(crate) fn append_replay_in_transaction(
+fn append_replay_in_transaction(
     transaction: &ExactSqlTransaction,
     publication: &GraphPublicationReplayV1,
 ) -> GraphPublicationStoreResultV1<GraphReplayAppendOutcomeV1> {
@@ -407,7 +490,7 @@ pub(crate) fn append_replay_in_transaction(
     if let Some(pending) = read_pending(transaction, &encoded, actual.as_ref())? {
         return Ok(GraphReplayAppendOutcomeV1::PendingReplayConflict { pending });
     }
-    let inserted = execute(
+    let inserted = query(
         transaction,
         "INSERT INTO graph_publication_replay_v1 (
             shard_id, namespace, projection, generation, idempotency_key,
@@ -415,7 +498,9 @@ pub(crate) fn append_replay_in_transaction(
             direct_dependency_bytes, expected_prior_head,
             expected_recovered_digest, canonical_replay_source_digest,
             canonical_replay_source
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         RETURNING sequence"
+            .to_owned(),
         vec![
             text(encoded.shard_id),
             text(encoded.namespace),
@@ -431,7 +516,7 @@ pub(crate) fn append_replay_in_transaction(
                     )?
                     .len(),
                 )
-                .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?,
+                .map_err(|error| infrastructure("size graph replay dependencies", error))?,
             ),
             optional_text(encode_optional_head(
                 publication.expected_prior_head.as_ref(),
@@ -441,8 +526,13 @@ pub(crate) fn append_replay_in_transaction(
             ExactSqlValue::Blob(publication.canonical_replay_source.clone()),
         ],
     )?;
+    let [row] = inserted.as_slice() else {
+        return Err(GraphPublicationStoreErrorV1::Corrupt(
+            "graph replay insert did not return exactly one sequence".to_owned(),
+        ));
+    };
     let record = GraphPublicationReplayRecordV1::new(
-        sequence_from_i64(inserted.last_insert_rowid)?,
+        sequence_from_i64(integer_at(row, 0)?)?,
         publication.clone(),
     )?;
     insert_verified_dependencies(transaction, &record)?;
@@ -450,7 +540,11 @@ pub(crate) fn append_replay_in_transaction(
 }
 
 impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
-    #[hotpath::measure(label = "rusqlite.graph_publication.append_replay")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.append_replay",
+        level = "trace",
+        skip_all
+    )]
     fn append_replay(
         &mut self,
         publication: &GraphPublicationReplayV1,
@@ -473,7 +567,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.pending_replay")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.pending_replay",
+        level = "trace",
+        skip_all
+    )]
     fn pending_replay(
         &mut self,
         projection: &GraphProjectionIdentityV1,
@@ -489,7 +587,7 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         Ok(pending)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.replay")]
+    #[tracing::instrument(name = "rusqlite.graph_publication.replay", level = "trace", skip_all)]
     fn replay(
         &mut self,
         key: &GraphPublicationKeyV1,
@@ -510,7 +608,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         Ok(replay)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.replay_page")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.replay_page",
+        level = "trace",
+        skip_all
+    )]
     fn replay_page(
         &mut self,
         request: &GraphPublicationReplayPageRequestV1,
@@ -591,7 +693,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         Ok(page)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.projection_page")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.projection_page",
+        level = "trace",
+        skip_all
+    )]
     fn projection_page(
         &mut self,
         request: &GraphPublicationProjectionPageRequestV1,
@@ -613,7 +719,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
             .map_err(GraphPublicationStoreErrorV1::from)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.retire_replay")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.retire_replay",
+        level = "trace",
+        skip_all
+    )]
     fn retire_replay(
         &mut self,
         request: &GraphPublicationReplayRetirementV1,
@@ -641,7 +751,48 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite_runtime.graph_publication.discard_pending_replay")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.retire_verified_head_replay",
+        level = "trace",
+        skip_all
+    )]
+    fn retire_verified_head_replay(
+        &mut self,
+        request: &GraphPublicationReplayRetirementV1,
+        expected_head: &GraphVerifiedHeadV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+        request.validate()?;
+        ensure_not_interrupted(context)?;
+        ensure_owner(&self.handle, &request.key.projection)?;
+        let transaction = begin(&self.handle, context)?;
+        let outcome = match retire_verified_head_replay_in_transaction(
+            &transaction,
+            request,
+            expected_head,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => return rollback_error(transaction, error),
+        };
+        if let Err(error) = ensure_not_interrupted(context) {
+            return rollback_error(transaction, error);
+        }
+        if matches!(outcome, GraphReplayRetirementOutcomeV1::Retired(_)) {
+            if let Err(error) = begin_replay_retirement_commit(context) {
+                return rollback_error(transaction, error);
+            }
+            commit(transaction)?;
+            Ok(outcome)
+        } else {
+            rollback(transaction, outcome)
+        }
+    }
+
+    #[tracing::instrument(
+        name = "rusqlite_runtime.graph_publication.discard_pending_replay",
+        level = "trace",
+        skip_all
+    )]
     fn discard_pending_replay(
         &mut self,
         request: &GraphPendingReplayDiscardV1,
@@ -668,7 +819,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.retired_cleanup_page")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.retired_cleanup_page",
+        level = "trace",
+        skip_all
+    )]
     fn retired_cleanup_page(
         &mut self,
         request: &GraphPublicationRetiredCleanupPageRequestV1,
@@ -684,8 +839,8 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
             .as_ref()
             .map_or(0, |cursor| cursor.sequence.get());
         // One keyset metadata page (limit + 1 signals a further page), then
-        // one batched materialization of the admitted records — the same
-        // page shape `replay_page` uses — instead of three reader round
+        // one batched materialization of the admitted records, the same
+        // page shape `replay_page` uses, instead of three reader round
         // trips per tombstone. The snapshot keeps both reads consistent.
         let metadata = retired_cleanup_metadata_page(
             &snapshot,
@@ -746,7 +901,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
             .map_err(GraphPublicationStoreErrorV1::from)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.finalize_retired_cleanup")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.finalize_retired_cleanup",
+        level = "trace",
+        skip_all
+    )]
     fn finalize_retired_replay_cleanup(
         &mut self,
         request: &GraphPublicationReplayRetirementV1,
@@ -806,7 +965,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         ))
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.verified_head")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.verified_head",
+        level = "trace",
+        skip_all
+    )]
     fn verified_head(
         &mut self,
         projection: &GraphProjectionIdentityV1,
@@ -821,7 +984,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         Ok(head)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.cas_verified_head")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.cas_verified_head",
+        level = "trace",
+        skip_all
+    )]
     fn compare_and_swap_verified_head(
         &mut self,
         request: &GraphVerifiedHeadCompareAndSwapV1,

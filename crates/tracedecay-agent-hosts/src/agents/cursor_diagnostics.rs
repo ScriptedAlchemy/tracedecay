@@ -17,16 +17,6 @@ use std::path::{Path, PathBuf};
 
 use super::DoctorCounters;
 
-/// Legacy marker recognized in existing Cursor logs by doctor diagnostics.
-///
-/// Proxy-only `serve` no longer emits it, but older logs remain actionable, so
-/// the scanner below still has to recognize it. The literal moved down here
-/// with the Cursor diagnostics that are its only reader; `serve` itself stays
-/// in the root crate. Root wiring: `src/serve.rs` re-exports this constant
-/// instead of declaring its own copy.
-pub const DEGRADED_SERVE_STDERR_MARKER: &str =
-    "[tracedecay] serve: staying alive in degraded MCP mode";
-
 /// How many of the newest Cursor log sessions to scan. Each session directory
 /// corresponds to one Cursor launch; older sessions describe long-fixed runs.
 const MAX_SESSIONS_SCANNED: usize = 3;
@@ -48,8 +38,6 @@ pub(crate) struct CursorMcpLogFindings {
     /// Connection failures where the stdio shim reached the managed daemon,
     /// but the daemon socket reset or broke before initialization completed.
     pub daemon_transport_failures: usize,
-    /// Legacy degraded-mode marker lines retained in recent Cursor logs.
-    pub degraded_mode_notices: usize,
     /// Log files (newest session first) that contained at least one finding.
     pub affected_logs: Vec<PathBuf>,
     /// Whether any Cursor MCP log was found at all (distinguishes "clean"
@@ -62,7 +50,6 @@ impl CursorMcpLogFindings {
         self.literal_placeholder_lines > 0
             || self.connection_failures > 0
             || self.daemon_transport_failures > 0
-            || self.degraded_mode_notices > 0
     }
 }
 
@@ -94,7 +81,6 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| !name.contains("tracedecay"));
             let mut affected = false;
-            let stale_ambiguity = stale_degraded_ambiguity(&contents);
             for line in contents.lines() {
                 if require_tracedecay_mention && !line.contains("tracedecay") {
                     continue;
@@ -114,10 +100,6 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
                 if daemon_transport_failure {
                     findings.daemon_transport_failures += 1;
                 }
-                if line.contains(DEGRADED_SERVE_STDERR_MARKER) && !stale_ambiguity {
-                    findings.degraded_mode_notices += 1;
-                    affected = true;
-                }
             }
             if affected {
                 findings.affected_logs.push(log_path);
@@ -125,25 +107,6 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
         }
     }
     findings
-}
-
-fn stale_degraded_ambiguity(contents: &str) -> bool {
-    let Some(ambiguity_start) = contents.find("Multiple tracedecay projects found") else {
-        return false;
-    };
-    let ambiguity = &contents[ambiguity_start..];
-    let mut paths = Vec::new();
-    for line in ambiguity.lines().skip(1) {
-        if line.contains(DEGRADED_SERVE_STDERR_MARKER) {
-            break;
-        }
-        let trimmed = line.trim();
-        let path = Path::new(trimmed);
-        if path.is_absolute() {
-            paths.push(path);
-        }
-    }
-    !paths.is_empty() && paths.iter().any(|path| !path.exists())
 }
 
 /// Reports Cursor MCP log findings through the doctor counters, with the
@@ -155,13 +118,12 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
         findings.literal_placeholder_lines += scanned.literal_placeholder_lines;
         findings.connection_failures += scanned.connection_failures;
         findings.daemon_transport_failures += scanned.daemon_transport_failures;
-        findings.degraded_mode_notices += scanned.degraded_mode_notices;
         findings.scanned_any_log |= scanned.scanned_any_log;
         findings.affected_logs.extend(scanned.affected_logs);
     }
     if !findings.scanned_any_log {
         // No Cursor MCP logs on this machine (different platform layout, or
-        // Cursor has not run) — nothing to report.
+        // Cursor has not run), nothing to report.
         return;
     }
     if !findings.has_findings() {
@@ -171,13 +133,14 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     if findings.literal_placeholder_lines > 0 {
         dc.warn(&format!(
             "Cursor spawned tracedecay with a literal unexpanded `${{workspaceFolder}}` \
-             {} time(s) in recent logs (headless/background agent scopes may not expand it)",
+             {} time(s) in recent logs (Cursor does not expand it for plugin MCP servers; \
+             the current bundle passes no `--path`, run `tracedecay update-plugin`)",
             findings.literal_placeholder_lines
         ));
     }
     if findings.connection_failures > 0 {
         dc.warn(&format!(
-            "{} failed tracedecay MCP connection(s) in recent Cursor logs — Cursor never \
+            "{} failed tracedecay MCP connection(s) in recent Cursor logs. Cursor never \
              retries a failed MCP server, so affected sessions report \"Timed out waiting \
              for connection\" on every tool call",
             findings.connection_failures
@@ -186,23 +149,15 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     if findings.daemon_transport_failures > 0 {
         dc.info(&format!(
             "    {} failure(s) reached the managed daemon but its socket reset or broke; \
-             run `tracedecay daemon status` and \
-             `journalctl --user -u tracedecay.service` to check for saturation, restart, \
+             run `tracedecay daemon status` and the `logs:` command it prints \
+             to check for saturation, restart, \
              or OOM evidence before reloading Cursor",
             findings.daemon_transport_failures
         ));
     }
-    if findings.degraded_mode_notices > 0 {
-        dc.warn(&format!(
-            "found {} legacy tracedecay serve degraded-mode notice(s) in recent Cursor logs \
-             (an older version failed project resolution at startup); run `tracedecay init` \
-             in the affected project",
-            findings.degraded_mode_notices
-        ));
-    }
     dc.info(
         "    After fixing the cause, toggle the tracedecay MCP server in Cursor Settings → MCP \
-         or reload the Cursor window — Cursor does not retry a failed MCP scope on its own.",
+         or reload the Cursor window. Cursor does not retry a failed MCP scope on its own.",
     );
     for log in findings.affected_logs.iter().take(3) {
         dc.info(&format!("    log: {}", log.display()));
@@ -223,7 +178,7 @@ pub(crate) fn plugin_version_staleness(
     }
     Some(format!(
         "Cursor plugin bundle was rendered by tracedecay {plugin_version} but this binary is \
-         {binary_version} — run `tracedecay update-plugin`, then reload Cursor"
+         {binary_version}, run `tracedecay update-plugin`, then reload Cursor"
     ))
 }
 
@@ -323,7 +278,6 @@ mod tests {
         assert!(findings.scanned_any_log);
         assert_eq!(findings.literal_placeholder_lines, 1);
         assert_eq!(findings.connection_failures, 1);
-        assert_eq!(findings.degraded_mode_notices, 0);
         assert_eq!(findings.affected_logs.len(), 1);
         assert!(findings.has_findings());
     }
@@ -343,80 +297,6 @@ mod tests {
         assert_eq!(findings.connection_failures, 2);
         assert_eq!(findings.daemon_transport_failures, 2);
         assert_eq!(findings.affected_logs.len(), 1);
-        assert!(findings.has_findings());
-    }
-
-    /// The scanner must match the exact marker older `serve` versions emitted;
-    /// [`DEGRADED_SERVE_STDERR_MARKER`] retains that legacy log contract.
-    #[test]
-    fn scan_detects_degraded_mode_notice() {
-        let logs = TempDir::new().unwrap();
-        write_session_log(
-            logs.path(),
-            "20260702T030000",
-            "mcp-server-plugin-tracedecay-tracedecay.log",
-            &format!(
-                "2026-07-02 03:00:00.000 [warning] {DEGRADED_SERVE_STDERR_MARKER} — MCP \
-                 handshake will complete\n"
-            ),
-        );
-
-        let findings = scan_cursor_mcp_logs(logs.path());
-        assert_eq!(findings.degraded_mode_notices, 1);
-        assert!(findings.has_findings());
-    }
-
-    #[test]
-    fn scan_ignores_stale_degraded_ambiguity_after_worktree_removed() {
-        let logs = TempDir::new().unwrap();
-        let repo = logs.path().join("repo");
-        let stale_worktree = logs.path().join("repo/.worktrees/codex-read-context");
-        std::fs::create_dir_all(&repo).unwrap();
-        write_session_log(
-            logs.path(),
-            "20260702T030000",
-            "mcp-server-plugin-tracedecay-tracedecay.log",
-            &format!(
-                "2026-07-02 03:00:00.000 [error] Error: config error: Multiple tracedecay \
-                 projects found — pass -p <path> to select one:\n\
-                   {}\n\
-                   {}\n\
-                 {DEGRADED_SERVE_STDERR_MARKER} — MCP handshake will complete\n",
-                repo.display(),
-                stale_worktree.display()
-            ),
-        );
-
-        let findings = scan_cursor_mcp_logs(logs.path());
-        assert!(findings.scanned_any_log);
-        assert_eq!(findings.degraded_mode_notices, 0);
-        assert!(!findings.has_findings(), "{findings:?}");
-    }
-
-    #[test]
-    fn scan_keeps_degraded_ambiguity_when_paths_still_exist() {
-        let logs = TempDir::new().unwrap();
-        let repo = logs.path().join("repo");
-        let worktree = logs.path().join("repo/.worktrees/codex-read-context");
-        std::fs::create_dir_all(&repo).unwrap();
-        std::fs::create_dir_all(&worktree).unwrap();
-        write_session_log(
-            logs.path(),
-            "20260702T030000",
-            "mcp-server-plugin-tracedecay-tracedecay.log",
-            &format!(
-                "2026-07-02 03:00:00.000 [error] Error: config error: Multiple tracedecay \
-                 projects found — pass -p <path> to select one:\n\
-                   {}\n\
-                   {}\n\
-                 {DEGRADED_SERVE_STDERR_MARKER} — MCP handshake will complete\n",
-                repo.display(),
-                worktree.display()
-            ),
-        );
-
-        let findings = scan_cursor_mcp_logs(logs.path());
-        assert_eq!(findings.degraded_mode_notices, 1);
         assert!(findings.has_findings());
     }
 
@@ -478,34 +358,5 @@ mod tests {
         std::fs::create_dir_all(logs.path().join("20260702T024608")).unwrap();
         let findings = scan_cursor_mcp_logs(logs.path());
         assert!(!findings.scanned_any_log);
-    }
-
-    #[test]
-    fn log_roots_cover_supported_platform_layouts() {
-        let home = Path::new("/home/user");
-        let roots = cursor_log_roots(home);
-        assert!(roots.contains(&home.join(".config/Cursor/logs")));
-        assert!(roots.contains(&home.join("Library/Application Support/Cursor/logs")));
-        assert!(roots.contains(&home.join("AppData/Roaming/Cursor/logs")));
-    }
-
-    #[test]
-    fn plugin_version_staleness_flags_mismatch_only() {
-        let stale = serde_json::json!({ "name": "tracedecay", "version": "0.1.0" });
-        let message = plugin_version_staleness(&stale, "0.2.0")
-            .expect("mismatched versions should produce a warning");
-        assert!(message.contains("0.1.0"), "{message}");
-        assert!(message.contains("0.2.0"), "{message}");
-        assert!(message.contains("update-plugin"), "{message}");
-
-        let current = serde_json::json!({ "name": "tracedecay", "version": "0.2.0" });
-        assert_eq!(plugin_version_staleness(&current, "0.2.0"), None);
-
-        // A manifest without a version (or a non-string one) is not a
-        // staleness signal — the manifest-completeness check owns that.
-        assert_eq!(
-            plugin_version_staleness(&serde_json::json!({ "name": "tracedecay" }), "0.2.0"),
-            None
-        );
     }
 }

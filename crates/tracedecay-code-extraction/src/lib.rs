@@ -9,9 +9,10 @@ use std::collections::HashMap;
 
 mod types;
 
-// Lite — always available (no cfg needed)
+// Lite. Always available (no cfg needed)
 mod astro_extractor;
 mod c_extractor;
+mod clone_body;
 mod cpp_extractor;
 mod csharp_extractor;
 mod go_extractor;
@@ -30,10 +31,9 @@ pub(crate) mod basic_common;
 pub(crate) mod common;
 pub mod complexity;
 mod extraction_artifact;
-pub(crate) mod hotpath_observe;
 pub mod incremental;
+pub(crate) mod observe;
 pub mod parsed_extraction;
-pub mod redundancy;
 pub mod source_mask;
 pub(crate) mod traversal;
 pub mod ts_provider;
@@ -84,6 +84,8 @@ mod gwbasic_extractor;
 mod haskell_extractor;
 #[cfg(feature = "lang-hlsl")]
 mod hlsl_extractor;
+#[cfg(feature = "lang-json")]
+mod json_extractor;
 #[cfg(feature = "lang-julia")]
 mod julia_extractor;
 #[cfg(feature = "lang-lean")]
@@ -92,9 +94,6 @@ mod lean_extractor;
 mod lua_extractor;
 #[cfg(feature = "lang-markdown")]
 mod markdown_extractor;
-/// Grammar-free; always compiled so the retrieval layer can read section
-/// structure without linking a tree-sitter bundle.
-pub mod markdown_structure;
 #[cfg(feature = "lang-metal")]
 mod metal_extractor;
 #[cfg(feature = "lang-msbasic2")]
@@ -122,13 +121,25 @@ mod wgsl_extractor;
 #[cfg(feature = "lang-zig")]
 mod zig_extractor;
 
-// Lite — always available (no cfg needed)
+// Lite. Always available (no cfg needed)
 pub use astro_extractor::AstroExtractor;
 pub use c_extractor::CExtractor;
+pub use clone_body::{
+    CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1, CloneBodyEligibilityV1, CloneBodyRenameIssueV1,
+    CloneBodyRenameStatusV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
+    CloneTokenIterV1, CloneTokenStreamErrorV1, CloneTokenStreamV1, ConservativeCloneTokenV1,
+    ExtractedCloneBodyV1, MAX_AUTOMATIC_CLONE_BODY_BYTES_V1, MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+    MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1, RENAME_CLONE_NORMALIZATION_REVISION_V1,
+};
 pub use cpp_extractor::CppExtractor;
 pub use csharp_extractor::CSharpExtractor;
 pub use extraction_artifact::{
-    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
+    CallableArityV1, ExtractedCallableArityV1, ExtractedGoMethodSetRowV1,
+    ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1,
+    ExtractionArtifactV1, GoMethodSetRowV1, GoMethodSignatureV1, GoTypeTokenV1, GoTypeV1,
+    ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1, SchemaEvidenceIssueV1,
+    SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1, SqlSchemaActionV1, SqlSchemaObjectKindV1,
+    import_module_kind,
 };
 pub use go_extractor::GoExtractor;
 pub use java_extractor::JavaExtractor;
@@ -138,7 +149,7 @@ pub use rust_extractor::RustExtractor;
 pub use scala_extractor::ScalaExtractor;
 pub use svelte_extractor::SvelteExtractor;
 pub use swift_extractor::SwiftExtractor;
-pub use typescript_extractor::TypeScriptExtractor;
+pub use typescript_extractor::{TypeScriptExtractor, is_test_framework_call_signature};
 
 // Medium
 #[cfg(feature = "lang-bash")]
@@ -185,6 +196,8 @@ pub use gwbasic_extractor::GwBasicExtractor;
 pub use haskell_extractor::HaskellExtractor;
 #[cfg(feature = "lang-hlsl")]
 pub use hlsl_extractor::HlslExtractor;
+#[cfg(feature = "lang-json")]
+pub use json_extractor::JsonExtractor;
 #[cfg(feature = "lang-julia")]
 pub use julia_extractor::JuliaExtractor;
 #[cfg(feature = "lang-lean")]
@@ -221,7 +234,8 @@ pub use wgsl_extractor::WgslExtractor;
 pub use zig_extractor::ZigExtractor;
 
 use crate::types::ExtractionResult;
-use parsed_extraction::{ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionScope};
+use parsed_extraction::{ParsedExtractionArtifactV1, ParsedExtractionScope};
+use std::time::Instant;
 use tree_sitter::Tree;
 
 /// Trait for language-specific source code extractors.
@@ -234,6 +248,13 @@ pub trait LanguageExtractor: Send + Sync {
 
     /// Human-readable language name.
     fn language_name(&self) -> &str;
+
+    /// Whether this extractor indexes configuration documents: manifest and
+    /// settings keys that resolvers read, not executable code that calls or
+    /// is called.
+    fn indexes_configuration(&self) -> bool {
+        matches!(self.language_name(), "JSON" | "TOML")
+    }
 
     /// Grammar key used by the shared retained parser for this path.
     fn retained_grammar_key(&self, file_path: &str) -> String {
@@ -263,62 +284,72 @@ pub trait LanguageExtractor: Send + Sync {
         Cow::Borrowed(source)
     }
 
-    /// Extract nodes, edges, and unresolved refs from source code.
-    ///
-    /// `file_path` is the relative path used for qualified names and node IDs.
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult;
-
-    /// Extract the legacy graph and any structured evidence supported by this
-    /// language. The default preserves existing extractors without another
-    /// parse or a parallel evidence authority.
-    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::hotpath_observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || ExtractionArtifactV1::from_result(self.extract(file_path, source)),
-            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
-        )
-    }
-
-    /// Extract from the shared retained tree. Implementations traverse only
-    /// the requested complete top-level regions and never acquire a parser.
-    ///
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: ParsedExtractionScope<'_>,
-    ) -> ParsedExtraction;
-
-    /// Extract an artifact from an already parser-owned tree. The default
-    /// delegates exactly once to the legacy parsed-tree method.
+    /// Extract graph and source-bound clone facts from one parser-owned tree.
     fn extract_parsed_artifact(
         &self,
         file_path: &str,
         source: &str,
+        parsed_source: &str,
         tree: &Tree,
         scope: ParsedExtractionScope<'_>,
     ) -> ParsedExtractionArtifactV1 {
-        ParsedExtractionArtifactV1::from_parsed(self.extract_parsed(file_path, source, tree, scope))
+        self.extract_parsed_artifact_prepared(file_path, source, parsed_source, tree, scope)
+            .with_conservative_clone_bodies(
+                tree,
+                parsed_source,
+                &self.retained_grammar_key(file_path),
+                file_path,
+            )
     }
 
     /// Extract from a retained tree together with the exact text the parser
     /// consumed (the [`LanguageExtractor::prepare_parse_source`] output the
-    /// retained document already holds).
+    /// retained document already holds). This is the one required entry
+    /// point: implementations traverse only the requested complete top-level
+    /// regions and never acquire a parser.
     ///
     /// `parsed_source` is byte-identical to `source` for plain grammars;
     /// composite adapters receive their own mask back and must not re-mask.
-    /// The default ignores it and preserves each extractor's existing path.
     fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
-        _parsed_source: &str,
+        parsed_source: &str,
         tree: &Tree,
         scope: ParsedExtractionScope<'_>,
-    ) -> ParsedExtractionArtifactV1 {
-        self.extract_parsed_artifact(file_path, source, tree, scope)
+    ) -> ParsedExtractionArtifactV1;
+
+    /// Parse `source` with this extractor's own grammar and extract the whole
+    /// document. A grammar that fails to load or parse yields an artifact
+    /// carrying only that error.
+    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+        crate::observe::measure_extract_file(|| {
+            let started = Instant::now();
+            let parsed_source = self.prepare_parse_source(source);
+            match ts_provider::parse_extractor_source(
+                &self.retained_grammar_key(file_path),
+                self.language_name(),
+                &parsed_source,
+            ) {
+                Ok(tree) => {
+                    self.extract_parsed_artifact(
+                        file_path,
+                        source,
+                        &parsed_source,
+                        &tree,
+                        ParsedExtractionScope::FullDocument,
+                    )
+                    .artifact
+                }
+                Err(error) => ExtractionArtifactV1::from_result(ExtractionResult {
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                    unresolved_refs: Vec::new(),
+                    errors: vec![error],
+                    duration_ms: started.elapsed().as_millis() as u64,
+                }),
+            }
+        })
     }
 }
 
@@ -333,12 +364,19 @@ pub struct LanguageRegistry {
     by_extension: HashMap<String, usize>,
 }
 
+/// Required by `clippy::new_without_default` because `new` takes no arguments.
+impl Default for LanguageRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LanguageRegistry {
     /// Creates a new registry with all built-in language extractors.
     pub fn new() -> Self {
         #[allow(unused_mut)]
         let mut extractors: Vec<Box<dyn LanguageExtractor>> = vec![
-            // Lite — always available
+            // Lite. Always available
             Box::new(RustExtractor),
             Box::new(GoExtractor),
             Box::new(JavaExtractor),
@@ -411,6 +449,8 @@ impl LanguageRegistry {
         extractors.push(Box::new(MetalExtractor));
         #[cfg(feature = "lang-markdown")]
         extractors.push(Box::new(MarkdownExtractor));
+        #[cfg(feature = "lang-json")]
+        extractors.push(Box::new(JsonExtractor));
         #[cfg(feature = "lang-r")]
         extractors.push(Box::new(RExtractor));
         #[cfg(feature = "lang-sql")]
@@ -450,23 +490,19 @@ impl LanguageRegistry {
         }
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[doc(hidden)]
-    pub fn from_extractors_for_test(extractors: Vec<Box<dyn LanguageExtractor>>) -> Self {
-        Self::from_extractors(extractors)
-    }
-
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
-        let extractor = path.rsplit('.').next().and_then(|ext| {
+        path.rsplit('.').next().and_then(|ext| {
             self.by_extension
                 .get(ext)
                 .map(|&index| self.extractors[index].as_ref())
-        });
-        if extractor.is_none() {
-            crate::hotpath_observe::record_dispatch_no_extractor();
-        }
-        extractor
+        })
+    }
+
+    /// Whether `path` is a configuration document rather than code.
+    pub fn is_configuration_file(&self, path: &str) -> bool {
+        self.extractor_for_file(path)
+            .is_some_and(|extractor| extractor.indexes_configuration())
     }
 
     /// Returns all supported file extensions across all extractors.
@@ -475,11 +511,5 @@ impl LanguageRegistry {
             .iter()
             .flat_map(|e| e.extensions().iter().copied())
             .collect()
-    }
-}
-
-impl Default for LanguageRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }

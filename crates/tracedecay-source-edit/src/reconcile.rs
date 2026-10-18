@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, CancellationStage, EffectTermination, ReconciliationState,
     SourceEditAuthorizationPort, SourceEditEffectRequestV1, SourceEditReconciliationDispositionV1,
     SourceEditReconciliationRequestV1, now_micros, source_edit_operation,
@@ -9,7 +9,6 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
@@ -18,13 +17,17 @@ use super::journal::{
     SourceEditDurability, SourceEditJournalStateV1, SourceEditJournalV1, same_source_edit_authority,
 };
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
+use super::plan::{commit_source_edit_postimages, rollback_planned_source_edit_files};
+use super::port::SourceEditRuntime;
 use super::records::{
     applied_durable_record, applied_record, durable_record,
     persist_interrupted_reconciliation_attempt, reconciliation_attempt_record, unknown_record,
 };
-use super::verify::{application_contract_error, application_problem, config_error};
+use super::verify::{
+    application_contract_error, application_problem, config_error, idempotency_conflict,
+};
 
-#[hotpath::measure(label = "usecases.edit.reconcile", future = true)]
+#[tracing::instrument(name = "usecases.edit.reconcile", level = "trace", skip_all)]
 pub(super) async fn reconcile_source_edit_effect_unknown_inner<A>(
     graph: &SourceEditRuntime,
     request: SourceEditReconciliationRequestV1,
@@ -43,7 +46,7 @@ where
     let original_operation =
         source_edit_operation(request.kind).map_err(application_contract_error)?;
     let durability = SourceEditDurability::for_graph(graph);
-    let _lock = durability.lock()?;
+    let _lock = durability.lock().await?;
     if let Some(stored) =
         recover_reconciliation_attempt(&durability, &request, &attempt_input_digest)?
     {
@@ -68,7 +71,7 @@ where
                 "source edit reconciliation identity does not match the retained effect",
             ));
         }
-        let authority = tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+        let authority = tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
             request.authority.clone(),
             request.proof.clone(),
             request.context.scope(),
@@ -142,7 +145,7 @@ fn recover_reconciliation_attempt(
         return Ok(None);
     };
     if stored.input_digest != *attempt_input_digest {
-        return Err(config_error(
+        return Err(idempotency_conflict(
             "source edit reconciliation attempt idempotency key conflicts with a prior input",
         ));
     }
@@ -183,7 +186,7 @@ fn recover_reconciliation_attempt(
 
 pub(super) struct SourceEditReconciliationAttemptV1<'a> {
     pub(super) operation: &'a ApplicationOperation,
-    pub(super) authority: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    pub(super) authority: &'a tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     pub(super) input_digest: &'a ManifestDigest,
     pub(super) control: Option<&'a SourceEditEffectControlV1>,
 }
@@ -226,7 +229,7 @@ fn reconcile_prepared_source_edit(
     reconcile_prepared_source_edit_controlled(durability, project_root, operation, request, None)
 }
 
-#[hotpath::measure(label = "usecases.edit.reconcile_prepared")]
+#[tracing::instrument(name = "usecases.edit.reconcile_prepared", level = "trace", skip_all)]
 fn reconcile_prepared_source_edit_controlled(
     durability: &SourceEditDurability,
     project_root: &Path,
@@ -258,9 +261,7 @@ fn reconcile_prepared_source_edit_controlled(
     let (_outcome, record) = match request.disposition.clone() {
         SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state } => {
             let predicted_state = journal.predicted_state.as_ref().ok_or_else(|| {
-                config_error(
-                    "source edit committed state cannot be proven from this legacy journal",
-                )
+                config_error("source edit committed state cannot be proven without a prediction")
             })?;
             if &committed_state != predicted_state || observed_state != *predicted_state {
                 return Err(config_error(
@@ -326,11 +327,11 @@ fn reconcile_prepared_source_edit_controlled(
     Ok(result)
 }
 
-#[hotpath::measure(label = "usecases.edit.recover", future = true)]
+#[tracing::instrument(name = "usecases.edit.recover", level = "trace", skip_all)]
 pub(super) async fn recover_source_edit_transaction(
     durability: &SourceEditDurability,
     graph: &SourceEditRuntime,
-    scope: &tracedecay_application::ResolvedScope,
+    scope: &tracedecay_contracts::ResolvedScope,
 ) -> Result<()> {
     let Some(journal) = durability.load_journal()? else {
         return Ok(());
@@ -367,7 +368,7 @@ pub(super) async fn recover_source_edit_transaction(
     // never finalized. But the edit primitive publishes every file to disk
     // BEFORE the journal advances to `Applied`, so the worktree may already hold
     // the finished edit. Inspect the on-disk state before touching a single
-    // byte — a crash after a successful write must never silently roll that
+    // byte, a crash after a successful write must never silently roll that
     // written edit back to its preimage. This mirrors the client-timeout path,
     // which surfaces `EffectUnknown` and lets `source_edit_reconcile` decide,
     // rather than destroying bytes.
@@ -376,20 +377,19 @@ pub(super) async fn recover_source_edit_transaction(
     // (i) Roll forward. The worktree already holds the exact previewed result,
     //     so the write succeeded and only the bookkeeping was lost. Finalize the
     //     commit and keep every byte; the client-timeout `ConfirmCommitted`
-    //     disposition reaches the same durable record. `recovery_files` is only
-    //     ever populated alongside `predicted_state` (see `execute.rs`), so a
-    //     present predicted state is guaranteed here.
+    //     disposition reaches the same durable record. Loading a persisted
+    //     journal rejects one without a predicted state.
     if journal.predicted_state.as_ref() == Some(&observed_state) {
-        hotpath::future!(
-            graph.commit_source_edit_postimages(&journal.recovery_files),
-            label = "usecases.edit.recover.commit"
-        )
-        .await?;
+        {
+            let _span = tracing::trace_span!("usecases.edit.recover.commit").entered();
+            commit_source_edit_postimages(graph.project_root(), &journal.recovery_files)?
+        };
         let outcome = SourceEditOutcome::Reconciled {
             success: true,
             message: "source edit crash recovery confirmed the edit already committed to disk"
                 .to_owned(),
         };
+        durability.persist_rollback_record(&journal, &observed_state, true)?;
         let record = applied_record(&journal, &outcome, observed_state, now_micros(), None)?;
         durability.persist_receipt(&record)?;
         return durability.clear_journal();
@@ -397,10 +397,10 @@ pub(super) async fn recover_source_edit_transaction(
 
     // (ii)/(iii) The write did not complete. When the worktree is still fully at
     //     the preimage (ii) the write never landed and rollback is a no-op. When
-    //     it is a torn partial multi-file write (iii) — some files published,
-    //     others not — rolling back to a consistent pre-edit state lets the whole
+    //     it is a torn partial multi-file write (iii), some files published,
+    //     others not, rolling back to a consistent pre-edit state lets the whole
     //     atomic plan be retried, but it discards the bytes of the files that did
-    //     publish, so we WARN first. `recover_source_edit_preimages` restores
+    //     publish, so we WARN first. `rollback_planned_source_edit_files` restores
     //     per file and REFUSES any foreign bytes outright, so it can only ever
     //     touch files it can prove hold either the preimage or the intended edit;
     //     genuinely unaccountable content fails recovery instead of being erased.
@@ -414,11 +414,10 @@ pub(super) async fn recover_source_edit_transaction(
              are being discarded"
         );
     }
-    hotpath::future!(
-        graph.recover_source_edit_preimages(&journal.recovery_files),
-        label = "usecases.edit.recover.preimage"
-    )
-    .await?;
+    {
+        let _span = tracing::trace_span!("usecases.edit.recover.preimage").entered();
+        rollback_planned_source_edit_files(graph.project_root(), &journal.recovery_files)?
+    };
     let restored_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if restored_state != journal.expected_state {
         return Err(config_error(
@@ -444,7 +443,7 @@ pub(super) async fn recover_source_edit_transaction(
     durability.clear_journal()
 }
 
-#[hotpath::measure(label = "usecases.edit.replay")]
+#[tracing::instrument(name = "usecases.edit.replay", level = "trace", skip_all)]
 pub(super) fn recover_or_replay(
     durability: &SourceEditDurability,
     request: &SourceEditEffectRequestV1,
@@ -452,7 +451,7 @@ pub(super) fn recover_or_replay(
 ) -> Result<Option<SourceEditApplicationResult>> {
     if let Some(stored) = durability.load_receipt(&request.idempotency_key)? {
         if stored.input_digest != *input_digest {
-            return Err(config_error(
+            return Err(idempotency_conflict(
                 "source edit idempotency key conflicts with a prior input",
             ));
         }
@@ -526,10 +525,11 @@ mod tests {
     use crate::test_support::*;
 
     use crate::digest::{planned_source_edit_state_digest, source_edit_recovery_digest};
+    use crate::plan::PlannedSourceEditFile;
     use std::fs;
     use tempfile::tempdir;
-    use tracedecay_application::source_edit::EditResult;
-    use tracedecay_application::{CancellationSignal, Deadline};
+    use tracedecay_contracts::source_edit::EditResult;
+    use tracedecay_contracts::{CancellationSignal, Deadline};
     use tracedecay_domain::UtcMicros;
 
     #[test]
@@ -568,7 +568,7 @@ mod tests {
         };
         let request = fixture_request();
         let mut journal = fixture_journal(&request, SourceEditJournalStateV1::Prepared);
-        journal.recovery_files = vec![tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+        journal.recovery_files = vec![PlannedSourceEditFile {
             relative_path: "src/lib.rs".to_owned(),
             expected: Some("old".to_owned()),
             intended: Some("new".to_owned()),
@@ -578,7 +578,28 @@ mod tests {
         journal.recovery_files[0].expected = Some("tampered".to_owned());
         durability.persist_journal(&journal).unwrap();
 
-        assert!(durability.load_journal().is_err());
+        let error = durability.load_journal().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: source edit recovery journal digest does not match its preimages"
+        );
+    }
+
+    #[test]
+    fn journal_without_predicted_state_is_rejected() {
+        let directory = tempdir().unwrap();
+        let durability = SourceEditDurability {
+            root: directory.path().to_path_buf(),
+        };
+        let request = fixture_request();
+        let mut journal = fixture_journal(&request, SourceEditJournalStateV1::Prepared);
+        durability.persist_journal(&journal).unwrap();
+        assert!(durability.load_journal().unwrap().is_some());
+
+        journal.predicted_state = None;
+        durability.persist_journal(&journal).unwrap();
+        let error = durability.load_journal().unwrap_err().to_string();
+        assert!(error.contains("no predicted state"), "{error}");
     }
 
     #[test]
@@ -730,7 +751,7 @@ mod tests {
             cancellation,
         );
         let reconciliation_authority =
-            tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+            tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
                 reconciliation.authority.clone(),
                 reconciliation.proof.clone(),
                 reconciliation.context.scope(),
@@ -810,7 +831,7 @@ mod tests {
         let attempt_input = digest(SHA256_B);
         let operation = source_edit_reconciliation_operation().unwrap();
         let reconciliation_authority =
-            tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+            tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
                 reconciliation.authority.clone(),
                 reconciliation.proof.clone(),
                 reconciliation.context.scope(),
@@ -865,7 +886,7 @@ mod tests {
         journal.predicted_state = Some(
             planned_source_edit_state_digest(
                 &files,
-                &[tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                &[PlannedSourceEditFile {
                     relative_path: "src/lib.rs".to_owned(),
                     expected: Some("before".to_owned()),
                     intended: Some("after".to_owned()),
@@ -930,7 +951,7 @@ mod tests {
         journal.predicted_state = Some(
             planned_source_edit_state_digest(
                 &files,
-                &[tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                &[PlannedSourceEditFile {
                     relative_path: "src/lib.rs".to_owned(),
                     expected: Some("before".to_owned()),
                     intended: Some("intended".to_owned()),
@@ -951,15 +972,20 @@ mod tests {
         );
         let operation = source_edit_operation(request.edit.kind()).unwrap();
 
-        assert!(
-            reconcile_prepared_source_edit(
-                &durability,
-                project.path(),
-                &operation,
-                reconciliation,
-            )
-            .is_err()
+        let Err(error) =
+            reconcile_prepared_source_edit(&durability, project.path(), &operation, reconciliation)
+        else {
+            panic!("a reconciliation naming an unrelated committed state must be refused");
+        };
+        assert_eq!(
+            error.to_string(),
+            "config error: source edit committed-state inspection does not match the exact preview"
         );
-        assert!(durability.load_journal().unwrap().is_some());
+        let retained = durability
+            .load_journal()
+            .unwrap()
+            .expect("journal retained");
+        assert_eq!(retained.effect_id, journal.effect_id);
+        assert!(matches!(retained.state, SourceEditJournalStateV1::Prepared));
     }
 }

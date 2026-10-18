@@ -17,11 +17,9 @@ impl AgentTaskBackend for TransientThenJsonBackend {
     {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= 2 {
-            return Err(
-                tracedecay_automation::backend::AgentTaskError::from_backend_message(
-                    "timed out waiting for transient test backend",
-                ),
-            );
+            return Err(tracedecay_automation::backend::AgentTaskError::Timeout {
+                reason: "timed out waiting for transient test backend".to_owned(),
+            });
         }
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
@@ -33,6 +31,10 @@ impl AgentTaskBackend for TransientThenJsonBackend {
             input_tokens: None,
             output_tokens: None,
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -51,6 +53,61 @@ fn exact_fact(fact_id: &str, expected_last_event_id: &str) -> Value {
         "fact_id": fact_id,
         "expected_last_event_id": expected_last_event_id,
     })
+}
+
+#[tokio::test]
+async fn memory_curator_empty_store_skips_without_a_backend_attempt_and_releases_lock() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    let backend = JsonBackend::new(json!({"ops": []}));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            memory_curator: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+
+    let run = settle_memory_curator(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        MemoryCuratorAutomationOptions {
+            trigger: AutomationTrigger::ManualCli,
+            fact_review_limit: 4,
+            min_confidence: 0.5,
+            run_id: None,
+        },
+        &run_control,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("nothing_to_review")
+    );
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.backend_attempt_count, 0);
+    assert!(run.ledger_record.backend_attempts.is_empty());
+    assert!(
+        !cg.store_layout()
+            .dashboard_root
+            .join("automation_locks")
+            .join("memory_curator.lock")
+            .exists(),
+        "the empty run must release its scheduler lock"
+    );
 }
 
 #[tokio::test]
@@ -103,8 +160,8 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
+    let run = settle_memory_curator(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -128,7 +185,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     );
     assert_eq!(
         run.ledger_record.prompt_version.as_deref(),
-        Some("memory_curator:v1")
+        Some("memory_curator:v2")
     );
     assert_eq!(run.ledger_record.accepted_count, 1);
     assert_eq!(run.ledger_record.rejected_count, 0);
@@ -244,6 +301,10 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     );
     assert_eq!(
         validation_payload["improvement_gate"]["generated_evals_status"],
+        json!("not_run")
+    );
+    assert_eq!(
+        validation_payload["improvement_gate"]["record_integrity_status"],
         json!("passed")
     );
     assert_eq!(
@@ -333,10 +394,6 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     .unwrap();
     assert_eq!(eval_payload["status"], json!("generated_from_validation"));
     assert_eq!(eval_payload["loop_stage"], json!("generated_evals"));
-    assert_eq!(
-        eval_payload["automatic_application"]["status"],
-        json!("applied")
-    );
     assert_eq!(eval_payload["source_refs"][0]["kind"], json!("traces"));
     assert_eq!(eval_payload["source_refs"][1]["kind"], json!("feedback"));
     assert_eq!(
@@ -347,49 +404,42 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         eval_payload["format"],
         json!("tracedecay_automation_eval:v1")
     );
-    assert_eq!(eval_payload["runner"]["type"], json!("validation_replay"));
     assert_eq!(
-        eval_payload["runner"]["commands"][0],
-        json!(
-            "cargo test --test automation_runner_test memory_curator_repairs_then_applies_validated_ops_and_records_ledger -- --nocapture"
-        )
+        eval_payload["record_integrity"]["type"],
+        json!("recorded_validation_integrity")
     );
     assert_eq!(
-        eval_payload["runner"]["artifact_api"],
+        eval_payload["record_integrity"]["inputs"]["expected_eval_count"],
+        json!(1)
+    );
+    assert!(
+        eval_payload["record_integrity"]["inputs"]["validation_report_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+    assert_eq!(eval_payload["record_integrity"]["status"], json!("passed"));
+    assert_eq!(
+        eval_payload["record_integrity"]["checks"][0]["check"],
+        json!("accepted_count_matches")
+    );
+    assert_eq!(
+        eval_payload["record_integrity"]["checks"][0]["status"],
+        json!("passed")
+    );
+    assert_eq!(
+        eval_payload["independent_evaluation"]["status"],
+        json!("not_run")
+    );
+    assert_eq!(
+        eval_payload["independent_evaluation"]["artifact_api"],
         json!(format!(
             "/api/automation/runs/{}/artifacts/generated_evals",
             run.run_id
         ))
     );
     assert_eq!(
-        eval_payload["runner"]["inputs"]["artifact_kind"],
-        json!("generated_evals")
-    );
-    assert_eq!(
-        eval_payload["runner"]["inputs"]["expected_eval_count"],
-        json!(1)
-    );
-    assert!(
-        eval_payload["runner"]["inputs"]["validation_report_hash"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
-    assert_eq!(
-        eval_payload["runner"]["checks"].as_array().unwrap().len(),
-        3
-    );
-    assert_eq!(eval_payload["runner"]["status"], json!("passed"));
-    assert_eq!(
-        eval_payload["runner"]["results"][0]["check"],
-        json!("accepted_count_matches")
-    );
-    assert_eq!(
-        eval_payload["runner"]["results"][0]["status"],
-        json!("passed")
-    );
-    assert_eq!(
-        eval_payload["automatic_application"]["retry_required"],
-        json!(false)
+        eval_payload["independent_evaluation"]["harness_commands"][0],
+        json!("bazel test //crates/tracedecay:automation_runner_test --test_arg=memory_curator")
     );
     assert!(
         eval_payload["artifact_refs"]
@@ -411,9 +461,10 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
                 && entry["source_feedback_ref"] == json!("accepted:0")
                 && entry["schema_version"] == json!(1)
                 && entry["kind"] == json!("automation_validation_regression")
-                && entry["harness"]["type"] == json!("cargo_test_filter")
+                && entry["harness"]["type"] == json!("bazel_test_filter")
+                && entry["harness"]["status"] == json!("not_run")
                 && entry["harness"]["commands"][0]
-                    == json!("cargo test --test automation_runner_test memory_curator")
+                    == json!("bazel test //crates/tracedecay:automation_runner_test --test_arg=memory_curator")
                 && entry["fixture"]["candidate"].is_object()
                 && entry["source_feedback"]["artifact_kind"] == json!("feedback")
                 && entry["source_feedback"]["feedback_id"] == json!("accepted:0")
@@ -531,17 +582,12 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         ))
     );
     assert_eq!(
-        handoff_payload["eval_replay"]["artifact_api"],
-        json!(format!(
-            "/api/automation/runs/{}/artifacts/generated_evals",
-            run.run_id
-        ))
+        handoff_payload["independent_evaluation"]["status"],
+        json!("not_run")
     );
     assert_eq!(
-        handoff_payload["eval_replay"]["commands"][0],
-        json!(
-            "cargo test --test automation_runner_test memory_curator_repairs_then_applies_validated_ops_and_records_ledger -- --nocapture"
-        )
+        handoff_payload["readiness"]["independent_evaluation_status"],
+        json!("not_run")
     );
     assert!(
         handoff_payload["request"]["evidence_hash"]
@@ -597,8 +643,8 @@ async fn memory_curator_persists_transient_transient_success_retry_receipt() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
+    let run = settle_memory_curator(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -644,8 +690,8 @@ async fn scheduler_memory_curator_applies_validated_ops_automatically() {
     config.tasks.memory_curator.interval_secs = Some(1);
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
+    let run = settle_memory_curator(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -690,8 +736,8 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
+    let run = settle_memory_curator(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -712,10 +758,7 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
 
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["summary"]["eval_count"], json!(0));
-    assert_eq!(
-        eval_payload["automatic_application"]["status"],
-        json!("no_candidate")
-    );
+    assert_eq!(eval_payload["record_integrity"]["status"], json!("not_run"));
     assert_eq!(eval_payload["eval_definitions"], json!([]));
 
     let validation_payload =
@@ -758,152 +801,6 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
 }
 
 #[tokio::test]
-async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_examples() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    let facts = seed_duplicate_facts(&cg).await;
-    let backend = JsonBackend::new(json!({
-        "ops": [normalize_tags_op(&facts)]
-    }));
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
-
-    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
-        &config,
-        &test_configuration_revision(),
-        &backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            fact_review_limit: 4,
-            min_confidence: 0.5,
-            run_id: None,
-        },
-        &run_control,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(run.ledger_record.accepted_count, 1);
-    assert_eq!(run.ledger_record.rejected_count, 0);
-
-    let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
-    assert_eq!(eval_payload["runner"]["status"], json!("passed"));
-    assert_eq!(
-        eval_payload["automatic_application"]["status"],
-        json!("applied")
-    );
-
-    let validation_payload =
-        read_artifact(&cg, &run.run_id, &run.ledger_record, "validation_gate").await;
-    assert_eq!(
-        validation_payload["task_validation"]["decision"],
-        json!("passed")
-    );
-    assert_eq!(
-        validation_payload["improvement_gate"]["decision"],
-        json!("ready_for_handoff")
-    );
-    assert_eq!(
-        validation_payload["improvement_gate"]["handoff_status"],
-        json!("ready")
-    );
-    assert_eq!(
-        validation_payload["improvement_gate"]["generated_evals_status"],
-        json!("passed")
-    );
-    assert_eq!(
-        validation_payload["improvement_gate"]["optimizer_status"],
-        json!("ready_for_handoff")
-    );
-
-    let optimizer_payload =
-        read_artifact(&cg, &run.run_id, &run.ledger_record, "optimizer_diagnosis").await;
-    assert_eq!(optimizer_payload["blockers"], json!([]));
-
-    let handoff_payload =
-        read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
-    assert_eq!(handoff_payload["status"], json!("ready_for_review"));
-    assert_eq!(
-        handoff_payload["readiness"]["validation_gate_decision"],
-        json!("ready_for_handoff")
-    );
-    assert_eq!(
-        handoff_payload["machine_summary"]["next_stage"],
-        json!("monitor_applied_outcomes")
-    );
-}
-
-#[tokio::test]
-async fn memory_curator_runner_applies_validated_ops_under_apply_policy() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    let facts = seed_duplicate_facts(&cg).await;
-    let backend = JsonBackend::new(json!({
-        "ops": [normalize_tags_op(&facts)]
-    }));
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
-
-    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
-        &config,
-        &test_configuration_revision(),
-        &backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            fact_review_limit: 4,
-            min_confidence: 0.5,
-            run_id: None,
-        },
-        &run_control,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(backend.calls(), 1);
-    assert_eq!(
-        run.report["curation_policy"]["decision"]["disposition"],
-        json!("allow")
-    );
-    assert_eq!(
-        run.report["curation_policy"]["effect"]["mutates_store"],
-        json!(true)
-    );
-    assert_eq!(run.report["llm_apply"]["applied"], json!(1));
-    assert!(
-        fact_exists(&cg, &facts.loser_id, run_control.read_control()).await,
-        "canonical curation retains the fact after normalizing its tags"
-    );
-}
-
-#[tokio::test]
 async fn memory_curator_quarantines_legacy_output_after_bounded_repair_exhaustion() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
@@ -934,8 +831,8 @@ async fn memory_curator_quarantines_legacy_output_after_bounded_repair_exhaustio
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let error = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
+    let error = settle_memory_curator(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -1006,8 +903,8 @@ async fn memory_curator_runner_auto_applies_validated_operations() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
+    let run = settle_memory_curator(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -1071,7 +968,7 @@ async fn memory_curator_stops_before_backend_or_apply_when_caller_is_interrupted
     let owner = project_memory_owner(&cg);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         owner.clone(),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let winner_tags_before = memory
@@ -1101,8 +998,8 @@ async fn memory_curator_stops_before_backend_or_apply_when_caller_is_interrupted
     let interrupted = Arc::new(AtomicBool::new(true));
     let run_control = test_automation_run_control(Arc::clone(&interrupted));
 
-    let error = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        &cg,
+    let error = settle_memory_curator(
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,

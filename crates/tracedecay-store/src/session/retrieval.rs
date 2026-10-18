@@ -5,7 +5,7 @@ use tracedecay_domain::{
     SessionId, SessionSummaryRecordV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1,
     TemporalModeV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::common::{
     SessionSnapshotFreezePermit, SessionStoreError, SessionStoreResult,
@@ -65,12 +65,10 @@ impl SessionTemporalRetrievalRequestV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
@@ -79,7 +77,6 @@ impl SessionTemporalRetrievalRequestV1 {
         &self.snapshot
     }
 
-    #[hotpath::skip]
     pub const fn page_size(&self) -> usize {
         self.page_size
     }

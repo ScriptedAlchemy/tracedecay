@@ -27,12 +27,6 @@ pub struct StoredCursor {
     pub file_id: u64,
 }
 
-/// Rows read past a stored cursor and the resulting advanced cursor.
-pub struct NewRows<T> {
-    pub items: Vec<T>,
-    pub new_cursor: StoredCursor,
-}
-
 #[cfg(test)]
 mod tests {
     use super::TranscriptIngestStats;

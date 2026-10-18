@@ -1,10 +1,10 @@
 //! The canonical Work HTTP surface.
 //!
-//! Every Work adapter — the daemon's application router, the dashboard's public
-//! `/api/work` mount, the catalog registry, and the generated SDKs — is derived
+//! Every Work adapter, the daemon's application router, the dashboard's public
+//! `/api/work` mount, the catalog registry, and the generated SDKs, is derived
 //! from the single [`WorkOperation`] descriptor in this module. Adding an
-//! operation is one enum variant plus one row in the `work_operations!` table,
-//! which derives every key, id, segment, and path; there is no second route
+//! operation is one row in the `work_operations!` table, which derives the
+//! variant and every key, id, segment, and path; there is no second route
 //! table to keep in step, and no adapter that can drift from the catalog
 //! without failing to compile.
 //!
@@ -25,14 +25,15 @@ use axum::routing::post;
 use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
-use tracedecay_application::{
-    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand,
-    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
-    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
-    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, RequestId,
-    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1,
+use tracedecay_contracts::{
+    AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
+    AdvanceWorkJobRequestV1, AdvanceWorkJobResultV1, ApplicationProblem, CancelWorkAttemptCommand,
+    CreateWorkTaskRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, RequestId, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    RetryDirective, RetryWorkAttemptCommandV1, ReviewWorkProposalRequestV1,
     StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
     WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
@@ -50,85 +51,35 @@ use tracedecay_domain::{
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
-    invalid_request_response,
+    dispatch_json_operation, invalid_request_problem,
 };
 
 fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
     T::schema_name()
 }
 
-/// One canonical Work operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum WorkOperation {
-    GenerateProposal,
-    Create,
-    ReviewProposal,
-    AcceptProposal,
-    AdmitExecution,
-    StartAttempt,
-    Synthesize,
-    AttemptStatus,
-    CancelAttempt,
-    ResumeAttempts,
-    RetryAttempt,
-    ListAttempts,
-    ExecutionHistory,
-    HydrateArtifacts,
-    RetrieveEvidence,
-    Views,
-    Experience,
-    CompareProposal,
-    PrepareGraphMutation,
-    MutateGraph,
-    Topology,
-    TopologyMetrics,
-    PrepareDuplicateAdjudication,
-    AdjudicateDuplicate,
-    AdjudicateLeak,
-    PauseRun,
-    ResumeRun,
-    RunControl,
-    PlacementPreflight,
-    AdmitPlacement,
-    PlacementStatus,
-    ReleasePlacement,
-}
-
-/// Derive every Work operation projection from one `(variant, key, segment)`
-/// table.
+/// Derive the Work operation enum and every projection from one
+/// `(variant, key, segment, description)` table.
 ///
 /// The catalog id, router path, catalog path, and dashboard path are all
 /// mechanical compositions of the key and segment, so the table is the single
 /// place an operation is described. A row cannot disagree with itself.
 macro_rules! work_operations {
-    ($($variant:ident: $key:literal, $segment:literal;)+) => {
+    ($($variant:ident: $key:literal, $segment:literal, $description:literal;)+) => {
+        mounted_operations! {
+            /// One canonical Work operation.
+            pub enum WorkOperation;
+            with_key,
+            id_prefix = "operation.work.",
+            route_prefix = "work",
+            $($variant: $key, $segment;)+
+        }
+
         impl WorkOperation {
-            /// The catalog operation key, as it appears in `operation.work.{key}`.
-            pub const fn operation_key(self) -> &'static str {
-                match self { $(Self::$variant => $key,)+ }
-            }
-
-            /// The catalog operation id, as a literal the route documents can hold.
-            pub const fn operation_id_str(self) -> &'static str {
-                match self { $(Self::$variant => concat!("operation.work.", $key),)+ }
-            }
-
-            /// The final path segment that names this operation on its router.
-            pub const fn route_segment(self) -> &'static str {
-                match self { $(Self::$variant => $segment,)+ }
-            }
-
-            /// The path this operation answers on the application router.
-            pub const fn route_path(self) -> &'static str {
-                match self { $(Self::$variant => concat!("/work/", $segment),)+ }
-            }
-
-            /// The path the catalog advertises, which the executable nests
-            /// under its `/application` prefix.
-            pub const fn application_route_path(self) -> &'static str {
-                match self {
-                    $(Self::$variant => concat!("/application/work/", $segment),)+
-                }
+            /// Concise discovery text that distinguishes this operation from
+            /// the other Work lifecycle controls.
+            pub const fn description(self) -> &'static str {
+                match self { $(Self::$variant => $description,)+ }
             }
 
             /// The public dashboard path where the dashboard mounts this
@@ -141,77 +92,75 @@ macro_rules! work_operations {
 }
 
 work_operations! {
-    GenerateProposal: "generate_proposal", "generate-proposal";
-    Create: "create", "create";
-    ReviewProposal: "review_proposal", "review-proposal";
-    AcceptProposal: "accept_proposal", "accept-proposal";
-    AdmitExecution: "admit_execution", "admit-execution";
-    StartAttempt: "start_attempt", "start-attempt";
-    Synthesize: "synthesize", "synthesize";
-    AttemptStatus: "attempt_status", "attempt-status";
-    CancelAttempt: "cancel_attempt", "cancel-attempt";
-    ResumeAttempts: "resume_attempts", "resume-attempts";
-    RetryAttempt: "retry_attempt", "retry-attempt";
-    ListAttempts: "list_attempts", "list-attempts";
-    ExecutionHistory: "execution_history", "execution-history";
-    HydrateArtifacts: "hydrate_artifacts", "hydrate-artifacts";
-    RetrieveEvidence: "retrieve_evidence", "retrieve-evidence";
-    Views: "views", "views";
-    Experience: "experience", "experience";
-    CompareProposal: "compare_proposal", "compare-proposal";
-    PrepareGraphMutation: "prepare_graph_mutation", "prepare-graph-mutation";
-    MutateGraph: "mutate_graph", "mutate-graph";
-    Topology: "topology", "topology";
-    TopologyMetrics: "topology_metrics", "topology-metrics";
-    PrepareDuplicateAdjudication: "prepare_duplicate_adjudication", "prepare-duplicate-adjudication";
-    AdjudicateDuplicate: "adjudicate_duplicate", "adjudicate-duplicate";
-    AdjudicateLeak: "adjudicate_leak", "adjudicate-leak";
-    PauseRun: "pause_run", "pause-run";
-    ResumeRun: "resume_run", "resume-run";
-    RunControl: "run_control", "run-control";
-    PlacementPreflight: "placement_preflight", "placement-preflight";
-    AdmitPlacement: "admit_placement", "admit-placement";
-    PlacementStatus: "placement_status", "placement-status";
-    ReleasePlacement: "release_placement", "release-placement";
+    GenerateProposal: "generate_proposal", "generate-proposal",
+        "Generate an evidence-calibrated proposal for one task against an exact current Work graph.";
+    Create: "create", "create",
+        "Create a Work task with its initiative, plan, milestone, and item under the supplied mutation identity.";
+    ReviewProposal: "review_proposal", "review-proposal",
+        "Reject or supersede an exact proposal under the supplied graph mutation identity.";
+    AcceptProposal: "accept_proposal", "accept-proposal",
+        "Accept an exact proposal under the supplied graph mutation identity.";
+    AdmitExecution: "admit_execution", "admit-execution",
+        "Admit an accepted task for execution against an exact Work graph version.";
+    StartAttempt: "start_attempt", "start-attempt",
+        "Start one admitted provider attempt using its exact task, run, attempt, and execution snapshot.";
+    Synthesize: "synthesize", "synthesize",
+        "Admit one synthesis attempt over exact sibling attempts, or return why none can be cited.";
+    AttemptStatus: "attempt_status", "attempt-status",
+        "Read current state and evidence for one exact task, run, and attempt identity.";
+    CancelAttempt: "cancel_attempt", "cancel-attempt",
+        "Request cancellation of one exact attempt while preserving the cancellation request identity.";
+    ResumeAttempts: "resume_attempts", "resume-attempts",
+        "Recover open attempts after daemon restart and fence those that require an explicit retry.";
+    RetryAttempt: "retry_attempt", "retry-attempt",
+        "Admit a new attempt identity after verifying the selected failure of an original attempt.";
+    ListAttempts: "list_attempts", "list-attempts",
+        "Page durable attempts in the authorized scope under one verified topology generation.";
+    ExecutionHistory: "execution_history", "execution-history",
+        "Read durable execution spans and terminal-event order for a generation-bound attempt page.";
+    HydrateArtifacts: "hydrate_artifacts", "hydrate-artifacts",
+        "Page attempt artifact references and sealed evidence, without artifact bytes, under one verified generation.";
+    RetrieveEvidence: "retrieve_evidence", "retrieve-evidence",
+        "Read or expand evidence for one task at an exact verified Work graph version.";
+    Views: "views", "views",
+        "Read current, as-of, evolution, or forensic projections of the selected Work graph.";
+    Experience: "experience", "experience",
+        "Read consent-authorized prior accepted-work evidence applicable to one task for ephemeral use.";
+    CompareProposal: "compare_proposal", "compare-proposal",
+        "Compare one task's relations and evidence between two exact graph versions without applying changes.";
+    PrepareGraphMutation: "prepare_graph_mutation", "prepare-graph-mutation",
+        "Bind a selected graph change to current authority and revision pins, returning an executable mutation.";
+    MutateGraph: "mutate_graph", "mutate-graph",
+        "Apply an exact prepared Work graph mutation using its preserved identity and revision pins.";
+    Topology: "topology", "topology",
+        "Page execution placement lanes and branch, review, and integration policy under a verified generation.";
+    TopologyMetrics: "topology_metrics", "topology-metrics",
+        "Read bounded execution-topology measurements and coverage for an observability horizon.";
+    PrepareDuplicateAdjudication: "prepare_duplicate_adjudication", "prepare-duplicate-adjudication",
+        "Bind a duplicate-effort verdict for an exact attempt pair to current evidence and revisions.";
+    AdjudicateDuplicate: "adjudicate_duplicate", "adjudicate-duplicate",
+        "Record a prepared, evidence-backed duplicate-effort verdict with its exact command identity.";
+    AdjudicateLeak: "adjudicate_leak", "adjudicate-leak",
+        "Scan canonical execution evidence and record a revisioned leak verdict for one exact attempt.";
+    PauseRun: "pause_run", "pause-run",
+        "Pause an admitted run and fence new attempt reservations at the expected authority version.";
+    ResumeRun: "resume_run", "resume-run",
+        "Resume a paused run using its exact current authority version.";
+    RunControl: "run_control", "run-control",
+        "Read one admitted run's control state and current live-attempt frontier.";
+    PlacementPreflight: "placement_preflight", "placement-preflight",
+        "Evaluate one run's exact placement target and blockers without changing placement state.";
+    AdmitPlacement: "admit_placement", "admit-placement",
+        "Claim an exact placement target for one task and run under the placement authority.";
+    PlacementStatus: "placement_status", "placement-status",
+        "Read the durable or absent placement state for one exact task and run.";
+    ReleasePlacement: "release_placement", "release-placement",
+        "Release or quarantine one run's placement at the expected authority version without deleting bytes.";
+    AdvanceJob: "advance_job", "advance-job",
+        "Advance a named parallel job with reviewed synthesis through the next Work steps; call again until it settles.";
 }
 
 impl WorkOperation {
-    /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 32] = [
-        Self::GenerateProposal,
-        Self::Create,
-        Self::ReviewProposal,
-        Self::AcceptProposal,
-        Self::AdmitExecution,
-        Self::StartAttempt,
-        Self::Synthesize,
-        Self::AttemptStatus,
-        Self::CancelAttempt,
-        Self::ResumeAttempts,
-        Self::RetryAttempt,
-        Self::ListAttempts,
-        Self::ExecutionHistory,
-        Self::HydrateArtifacts,
-        Self::RetrieveEvidence,
-        Self::Views,
-        Self::Experience,
-        Self::CompareProposal,
-        Self::PrepareGraphMutation,
-        Self::MutateGraph,
-        Self::Topology,
-        Self::TopologyMetrics,
-        Self::PrepareDuplicateAdjudication,
-        Self::AdjudicateDuplicate,
-        Self::AdjudicateLeak,
-        Self::PauseRun,
-        Self::ResumeRun,
-        Self::RunControl,
-        Self::PlacementPreflight,
-        Self::AdmitPlacement,
-        Self::PlacementStatus,
-        Self::ReleasePlacement,
-    ];
-
     /// The catalog operation id.
     pub fn operation_id(self) -> String {
         self.operation_id_str().to_owned()
@@ -245,9 +194,8 @@ impl WorkOperation {
         match self {
             Self::GenerateProposal => schema_name::<GenerateProposalRequest>(),
             Self::Create => schema_name::<CreateWorkTaskRequestV1>(),
-            Self::ReviewProposal | Self::AcceptProposal => {
-                schema_name::<DecideWorkProposalRequestV1>()
-            }
+            Self::ReviewProposal => schema_name::<ReviewWorkProposalRequestV1>(),
+            Self::AcceptProposal => schema_name::<AcceptWorkProposalRequestV1>(),
             Self::AdmitExecution => schema_name::<AdmitWorkExecutionRequestV1>(),
             Self::StartAttempt => schema_name::<StartWorkAttemptCommand>(),
             Self::Synthesize => schema_name::<AdmitWorkSynthesisCommand>(),
@@ -278,6 +226,7 @@ impl WorkOperation {
             Self::AdmitPlacement => schema_name::<AdmitWorkPlacementCommand>(),
             Self::PlacementStatus => schema_name::<WorkPlacementStatusRequestV1>(),
             Self::ReleasePlacement => schema_name::<ReleaseWorkPlacementCommand>(),
+            Self::AdvanceJob => schema_name::<AdvanceWorkJobRequestV1>(),
         }
     }
 
@@ -285,17 +234,16 @@ impl WorkOperation {
     pub fn result_schema_name(self) -> Cow<'static, str> {
         match self {
             Self::GenerateProposal => schema_name::<GeneratedWorkProposal>(),
-            Self::Create | Self::ReviewProposal | Self::AcceptProposal | Self::AdmitExecution => {
+            Self::Create | Self::ReviewProposal | Self::AcceptProposal => {
                 schema_name::<WorkProductMutationReceiptV1>()
             }
+            Self::AdmitExecution => schema_name::<AdmittedWorkExecutionV1>(),
             Self::StartAttempt | Self::AttemptStatus | Self::CancelAttempt => {
                 schema_name::<WorkAttemptV1>()
             }
             Self::Synthesize => schema_name::<WorkSynthesisAttemptV1>(),
             Self::ResumeAttempts => schema_name::<WorkAttemptRecoveryReportV1>(),
-            Self::RetryAttempt => {
-                schema_name::<tracedecay_application::WorkRetryAttemptOutcomeV1>()
-            }
+            Self::RetryAttempt => schema_name::<tracedecay_contracts::WorkRetryAttemptOutcomeV1>(),
             Self::ListAttempts => schema_name::<WorkAttemptListV1>(),
             Self::ExecutionHistory => schema_name::<WorkExecutionHistoryV1>(),
             Self::HydrateArtifacts => schema_name::<WorkArtifactHydrationV1>(),
@@ -317,30 +265,15 @@ impl WorkOperation {
             Self::PlacementPreflight => schema_name::<WorkPlacementPreflightV1>(),
             Self::AdmitPlacement | Self::ReleasePlacement => schema_name::<WorkPlacementV1>(),
             Self::PlacementStatus => schema_name::<WorkPlacementReadingV1>(),
+            Self::AdvanceJob => schema_name::<AdvanceWorkJobResultV1>(),
         }
     }
 
-    /// Resolve an operation from the final path segment that names it.
-    ///
-    /// The route segment is the one public name a Work operation has, so every
-    /// adapter that accepts an operation by name — the router, the CLI, the
-    /// catalog — resolves it here rather than keeping a second name table.
-    pub fn from_route_segment(segment: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.route_segment() == segment)
-    }
-
     /// Whether the embedded dashboard has a real operator journey for this
-    /// operation. Scheduler-owned attempt start remains available to its owning
-    /// surface but is not a dashboard API.
+    /// operation. Scheduler-owned attempt start and the guided job, which the
+    /// CLI and agents drive, are not dashboard APIs.
     pub const fn is_dashboard_operation(self) -> bool {
-        !matches!(self, Self::StartAttempt)
-    }
-
-    fn parse(segment: &str) -> Option<Self> {
-        Self::from_route_segment(segment)
+        !matches!(self, Self::StartAttempt | Self::AdvanceJob)
     }
 }
 
@@ -457,35 +390,21 @@ async fn dispatch<O>(
 where
     O: WorkApplicationOwner,
 {
-    let request = match hotpath::measure_block!("api.http.admission", {
-        // An operation this build does not mount is concealed the same way an
-        // unauthorised one is, so probing a path cannot reveal what exists.
-        match WorkOperation::parse(&segment) {
-            None => Err(adapter_problem_response(
-                request_id,
-                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-            )),
-            Some(operation) => match body {
-                Ok(Json(body)) => Ok(WorkHttpRequest {
-                    operation,
-                    request_id,
-                    controls,
-                    body,
-                }),
-                Err(_) => Err(invalid_request_response(
-                    request_id,
-                    "work.invalid_body",
-                    "The Work request body is invalid or exceeds the configured limit",
-                )),
-            },
-        }
-    }) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    hotpath::future!(
-        async move { owner.invoke_work(request).await },
-        label = "api.http.handler"
+    dispatch_json_operation(
+        WorkOperation::from_route_segment(&segment),
+        request_id,
+        body,
+        (
+            "work.invalid_body",
+            "The Work request body is invalid or exceeds the configured limit",
+        ),
+        |operation, request_id, body| WorkHttpRequest {
+            operation,
+            request_id,
+            controls,
+            body,
+        },
+        |request| owner.invoke_work(request),
     )
     .await
 }
@@ -495,145 +414,14 @@ where
 /// The owner decodes against the typed contract, so this is the refusal it
 /// returns when that decode fails: the same canonical problem envelope every
 /// other malformed application request produces.
-pub fn work_invalid_request_response(request_id: RequestId) -> Response {
-    invalid_request_response(
+pub fn work_invalid_request(
+    request_id: RequestId,
+) -> Result<crate::HttpJsonEnvelope<Value>, crate::HttpAdapterError> {
+    invalid_request_problem(
         request_id,
         "work.invalid_request",
         "The Work application request is invalid",
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
-
-    use super::WorkOperation;
-
-    #[test]
-    fn every_operation_is_reachable_by_the_segment_its_path_ends_with() {
-        for operation in WorkOperation::ALL {
-            let path = operation.route_path();
-            let segment = path.rsplit('/').next().expect("a non-empty final segment");
-            assert_eq!(segment, operation.route_segment(), "{path}");
-            assert_eq!(
-                WorkOperation::parse(operation.route_segment()),
-                Some(operation),
-                "{path}"
-            );
-        }
-    }
-
-    #[test]
-    fn retired_projection_operations_are_not_public_routes() {
-        for retired in ["snapshot", "delta", "replan_dependencies", "accept_task"] {
-            assert!(
-                WorkOperation::from_str(retired).is_err(),
-                "retired operation {retired} must not decode"
-            );
-            assert!(
-                WorkOperation::ALL
-                    .iter()
-                    .all(|operation| operation.operation_key() != retired),
-                "retired operation {retired} must not be mounted"
-            );
-        }
-    }
-
-    #[test]
-    fn the_catalog_and_dashboard_paths_are_the_router_path_under_their_prefixes() {
-        for operation in WorkOperation::ALL {
-            assert_eq!(
-                operation.application_route_path(),
-                format!("/application{}", operation.route_path())
-            );
-            assert_eq!(
-                operation.dashboard_route_path(),
-                format!("/api{}", operation.route_path()),
-                "{}",
-                operation.operation_key()
-            );
-        }
-    }
-
-    #[test]
-    fn the_operation_id_literal_is_the_key_under_the_canonical_prefix() {
-        for operation in WorkOperation::ALL {
-            assert_eq!(
-                operation.operation_id_str(),
-                format!("operation.work.{}", operation.operation_key())
-            );
-            assert_eq!(operation.operation_id(), operation.operation_id_str());
-        }
-    }
-
-    #[test]
-    fn read_only_operations_are_declared_exactly() {
-        let read_only = WorkOperation::ALL
-            .into_iter()
-            .filter(|operation| operation.is_read_only())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            read_only,
-            vec![
-                WorkOperation::GenerateProposal,
-                WorkOperation::AttemptStatus,
-                WorkOperation::ListAttempts,
-                WorkOperation::ExecutionHistory,
-                WorkOperation::HydrateArtifacts,
-                WorkOperation::RetrieveEvidence,
-                WorkOperation::Views,
-                WorkOperation::Experience,
-                WorkOperation::CompareProposal,
-                WorkOperation::PrepareGraphMutation,
-                WorkOperation::Topology,
-                WorkOperation::TopologyMetrics,
-                WorkOperation::PrepareDuplicateAdjudication,
-                WorkOperation::RunControl,
-                WorkOperation::PlacementPreflight,
-                WorkOperation::PlacementStatus,
-            ]
-        );
-    }
-
-    #[test]
-    fn dashboard_excludes_scheduler_owned_attempt_start() {
-        let excluded = WorkOperation::ALL
-            .into_iter()
-            .filter(|operation| !operation.is_dashboard_operation())
-            .collect::<Vec<_>>();
-        assert_eq!(excluded, vec![WorkOperation::StartAttempt]);
-    }
-
-    #[test]
-    fn task_creation_proposal_decisions_and_execution_admission_publish_product_receipts() {
-        for operation in [
-            WorkOperation::Create,
-            WorkOperation::ReviewProposal,
-            WorkOperation::AcceptProposal,
-            WorkOperation::AdmitExecution,
-        ] {
-            assert_eq!(
-                operation.result_schema_name(),
-                "WorkProductMutationReceiptV1",
-                "{}",
-                operation.operation_key()
-            );
-        }
-        assert_eq!(
-            WorkOperation::Create.request_schema_name(),
-            "CreateWorkTaskRequestV1"
-        );
-        for operation in [WorkOperation::ReviewProposal, WorkOperation::AcceptProposal] {
-            assert_eq!(
-                operation.request_schema_name(),
-                "DecideWorkProposalRequestV1",
-                "{}",
-                operation.operation_key()
-            );
-        }
-        assert_eq!(
-            WorkOperation::AdmitExecution.request_schema_name(),
-            "AdmitWorkExecutionRequestV1"
-        );
-    }
+    .map(Into::into)
+    .map_err(Into::into)
 }

@@ -2,7 +2,7 @@
 //!
 //! These tests pin that the query-facing MCP entry point
 //! (`resolve_registered_project_route_for_tool`) resolves scope ONCE into the
-//! transport-neutral `tracedecay_application::ResolvedScope` and carries it
+//! transport-neutral `tracedecay_contracts::ResolvedScope` and carries it
 //! on the routed project reader, failing closed exactly as the unrouted
 //! selection already did.
 
@@ -141,9 +141,9 @@ async fn registered_but_unmounted_project_still_reports_unavailable() {
         )
         .await
         .expect("phantom project registers");
-    let context = runtime
-        .mcp_server_context_for_test(cg, None)
-        .expect("registered MCP server context");
+    let context =
+        crate::test_support::host_admission::mcp_server_context_for_test(runtime, cg, None)
+            .expect("registered MCP server context");
     let server = McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server");

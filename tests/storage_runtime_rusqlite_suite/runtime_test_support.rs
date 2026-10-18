@@ -15,20 +15,18 @@ use tracedecay_rusqlite_runtime::{
     reader::{ExistingReaderLocator, ReaderQueryExecutor},
 };
 use tracedecay_store::{
-    AdmissionConfigV1, CommitSequenceV1, LocatorDigest, RepositoryOperationEnvelopeV1,
-    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOutcomeV1,
-    RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    RuntimeSubmitRequestV1, RuntimeTransactionIdV1, RuntimeTransactionScopeV1, ShardWatermarkV1,
-    StorageRuntimeErrorV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
-    TransactionalOutboxEntryV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, CommitSequenceV1, LocatorDigest, ReaderBudgetV1,
+    RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
+    RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
+    RuntimeTransactionScopeV1, SanitizedCleanDiagnosticSnapshotV1, ShardWatermarkV1,
+    StorageRuntimeErrorV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 pub(crate) struct ReaderRuntimeFixture {
     pub(crate) binding: StoreRuntimeBindingV1,
     pub(crate) reader_budget: ReaderBudgetFixture,
-    pub(crate) initial_commit_sequence: u64,
-    pub(crate) published_commit_sequence: u64,
 }
 
 pub(crate) struct ReaderBudgetFixture {
@@ -39,71 +37,91 @@ pub(crate) struct ReaderBudgetFixture {
 
 pub(crate) struct WriterRuntimeFixture {
     pub(crate) origin_binding: StoreRuntimeBindingV1,
-    pub(crate) target_binding: StoreRuntimeBindingV1,
-    pub(crate) effect_id: &'static str,
-    pub(crate) ordering_key: &'static str,
     pub(crate) commit_sequences: [u64; 2],
+}
+
+pub(crate) fn seed_acceptance_rows(connection: &Connection, suspend_autocheckpoint: bool) {
+    let autocheckpoint = if suspend_autocheckpoint {
+        "PRAGMA wal_autocheckpoint=0;\n"
+    } else {
+        ""
+    };
+    connection
+        .execute_batch(&format!(
+            "PRAGMA journal_mode=WAL;
+             {autocheckpoint}CREATE TABLE acceptance_rows(value INTEGER NOT NULL);
+             INSERT INTO acceptance_rows(value) VALUES (1);"
+        ))
+        .expect("seed acceptance authority");
+}
+
+pub(crate) fn acceptance_reader_budget(fixture: &ReaderRuntimeFixture) -> ReaderBudgetV1 {
+    let mut budget = AdmissionConfigV1::default().readers;
+    budget.min_per_hot_shard = fixture.reader_budget.min_per_hot_shard;
+    budget.max_per_hot_shard = fixture.reader_budget.max_per_hot_shard;
+    budget.idle_burst_retire_ms = fixture.reader_budget.idle_burst_retire_ms;
+    budget
+}
+
+fn project_scope_binding(
+    brain_id: &str,
+    profile_id: &str,
+    scope_kind: &str,
+    project_id: &str,
+    incarnation: u64,
+    authority_epoch: u64,
+) -> StoreRuntimeBindingV1 {
+    serde_json::from_value(json!({
+        "shard_id": {
+            "brain_id": brain_id,
+            "profile_id": profile_id,
+            "scope": { "kind": scope_kind, "project_id": project_id }
+        },
+        "incarnation": incarnation,
+        "authority_epoch": authority_epoch
+    }))
+    .expect("construct runtime binding")
 }
 
 pub(crate) fn reader_runtime_fixture() -> ReaderRuntimeFixture {
     ReaderRuntimeFixture {
-        binding: serde_json::from_value(json!({
-            "shard_id": {
-                "brain_id": "brain.runtime-reader",
-                "profile_id": "profile.runtime-reader",
-                "scope": { "kind": "project", "project_id": "project.runtime-reader" }
-            },
-            "incarnation": 1,
-            "authority_epoch": 7
-        }))
-        .expect("construct reader runtime binding"),
+        binding: project_scope_binding(
+            "brain.runtime-reader",
+            "profile.runtime-reader",
+            "project",
+            "project.runtime-reader",
+            1,
+            7,
+        ),
         reader_budget: ReaderBudgetFixture {
             min_per_hot_shard: 2,
             max_per_hot_shard: 2,
             idle_burst_retire_ms: 30_000,
         },
-        initial_commit_sequence: 4,
-        published_commit_sequence: 5,
     }
 }
 
 pub(crate) fn maintenance_binding() -> StoreRuntimeBindingV1 {
-    serde_json::from_value(json!({
-        "shard_id": {
-            "brain_id": "brain.runtime-maintenance",
-            "profile_id": "profile.runtime-maintenance",
-            "scope": { "kind": "project", "project_id": "project.runtime-maintenance" }
-        },
-        "incarnation": 3,
-        "authority_epoch": 11
-    }))
-    .expect("construct maintenance runtime binding")
+    project_scope_binding(
+        "brain.runtime-maintenance",
+        "profile.runtime-maintenance",
+        "project",
+        "project.runtime-maintenance",
+        3,
+        11,
+    )
 }
 
 pub(crate) fn writer_runtime_fixture() -> WriterRuntimeFixture {
     WriterRuntimeFixture {
-        origin_binding: serde_json::from_value(json!({
-            "shard_id": {
-                "brain_id": "brain.runtime-writer",
-                "profile_id": "profile.runtime-writer",
-                "scope": { "kind": "project", "project_id": "project.runtime-writer-origin" }
-            },
-            "incarnation": 5,
-            "authority_epoch": 13
-        }))
-        .expect("construct writer origin binding"),
-        target_binding: serde_json::from_value(json!({
-            "shard_id": {
-                "brain_id": "brain.runtime-writer",
-                "profile_id": "profile.runtime-writer",
-                "scope": { "kind": "project_sessions", "project_id": "project.runtime-writer-origin" }
-            },
-            "incarnation": 6,
-            "authority_epoch": 17
-        }))
-        .expect("construct writer target binding"),
-        effect_id: "effect.runtime.writer",
-        ordering_key: "project.runtime-writer.serialized",
+        origin_binding: project_scope_binding(
+            "brain.runtime-writer",
+            "profile.runtime-writer",
+            "project",
+            "project.runtime-writer-origin",
+            5,
+            13,
+        ),
         commit_sequences: [1, 2],
     }
 }
@@ -160,8 +178,13 @@ where
     E: StorageOperationExecutor + Send + 'static,
 {
     let locator = writer_locator(database, binding);
-    PersistentWriter::start(locator, AdmissionConfigV1::default(), executor)
-        .expect("start persistent acceptance writer")
+    PersistentWriter::start(
+        &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
+        locator,
+        AdmissionConfigV1::default(),
+        executor,
+    )
+    .expect("start persistent acceptance writer")
 }
 
 pub(crate) fn writer_locator(
@@ -278,12 +301,9 @@ pub(crate) fn read_request(
     .expect("valid acceptance read request")
 }
 
-pub(crate) fn outbox_request(
+pub(crate) fn diagnostics_request(
     binding: &StoreRuntimeBindingV1,
-    target: &StoreRuntimeBindingV1,
     operation_id: &str,
-    effect_id: &str,
-    ordering_key: &str,
 ) -> RuntimeSubmitRequestV1 {
     let digest = format!("sha256:{}", "a".repeat(64));
     let metadata: StoreOperationMetadataV1 = serde_json::from_value(json!({
@@ -302,33 +322,6 @@ pub(crate) fn outbox_request(
         "admitted_at": 1
     }))
     .expect("valid acceptance operation metadata");
-    let source_shard = serde_json::to_value(&binding.shard_id).expect("encode source shard");
-    let target_shard = serde_json::to_value(&target.shard_id).expect("encode target shard");
-    let outbox: TransactionalOutboxEntryV1 = serde_json::from_value(json!({
-        "identity": {
-            "effect_id": effect_id,
-            "command_digest": format!("sha256:{}", "e".repeat(64)),
-            "ordering_key": ordering_key,
-            "source_watermark": {
-                "shard_id": source_shard,
-                "incarnation": binding.incarnation,
-                "authority_epoch": binding.authority_epoch,
-                "commit_sequence": 0
-            },
-            "target_watermark": {
-                "shard_id": target_shard,
-                "incarnation": target.incarnation,
-                "authority_epoch": target.authority_epoch,
-                "commit_sequence": 0
-            }
-        },
-        "effect": "publish_observation",
-        "state": "pending",
-        "acknowledgement": null,
-        "enqueued_at": 1,
-        "updated_at": 1
-    }))
-    .expect("valid acceptance outbox entry");
     let transaction_scope = RuntimeTransactionScopeV1 {
         transaction_id: RuntimeTransactionIdV1::new(format!("transaction.{operation_id}"))
             .expect("valid acceptance transaction id"),
@@ -348,7 +341,14 @@ pub(crate) fn outbox_request(
     RuntimeSubmitRequestV1::new(
         RepositoryOperationEnvelopeV1 {
             metadata,
-            payload: RepositoryWritePayloadV1::EnqueueOutbox(Box::new(outbox)),
+            payload: RepositoryWritePayloadV1::Diagnostics(Box::new(
+                SanitizedCleanDiagnosticSnapshotV1::new(
+                    tracedecay_domain::CodeGenerationId::new("generation.runtime.acceptance")
+                        .expect("valid acceptance generation id"),
+                    Vec::new(),
+                )
+                .expect("valid acceptance diagnostics snapshot"),
+            )),
         },
         transaction_scope,
         control,

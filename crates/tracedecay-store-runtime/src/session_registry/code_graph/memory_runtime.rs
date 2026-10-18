@@ -8,16 +8,39 @@ use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
     VerifiedGraphSnapshot,
 };
-use tracedecay_runtime_core::store::memory::{
-    ProjectMemoryGraphReconciliationScheduleV1, schedule_project_memory_graph_reconciliation,
-};
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
     FactReadControl, GraphPublicationInputDigestV1, GraphPublicationKeyV1, StoreShardIdV1,
     StoreShardScopeV1,
 };
 
-use super::super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
+use super::super::{DaemonSessionRuntimeRegistryV1, session_registry_error};
+
+pub(crate) struct MemoryGraphRuntimeTaskContext {
+    identity: super::super::LocalProfileIdentityAuthorityV1,
+    registry: tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistry,
+    graph_registry: tracedecay_graph_db::GraphDbRegistry,
+    graph_lifecycle_cancelled: Arc<AtomicBool>,
+    incarnation: tracedecay_store::StoreIncarnationV1,
+}
+
+impl MemoryGraphRuntimeTaskContext {
+    pub(crate) fn new(
+        identity: super::super::LocalProfileIdentityAuthorityV1,
+        registry: tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistry,
+        graph_registry: tracedecay_graph_db::GraphDbRegistry,
+        graph_lifecycle_cancelled: Arc<AtomicBool>,
+        incarnation: tracedecay_store::StoreIncarnationV1,
+    ) -> Self {
+        Self {
+            identity,
+            registry,
+            graph_registry,
+            graph_lifecycle_cancelled,
+            incarnation,
+        }
+    }
+}
 
 pub fn inline_graph_publication_input_digest(
     publication_key: &GraphPublicationKeyV1,
@@ -33,26 +56,6 @@ pub fn inline_graph_publication_input_digest(
         .map_err(|error| GraphDbError::invalid(error.to_string()))
 }
 
-pub fn schedule_bound_memory_graph_reconciliation(
-    database: &tracedecay_runtime_core::db::Database,
-) -> Result<()> {
-    match schedule_project_memory_graph_reconciliation(database.clone()) {
-        ProjectMemoryGraphReconciliationScheduleV1::Scheduled
-        | ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled => Ok(()),
-        ProjectMemoryGraphReconciliationScheduleV1::Retiring => Err(session_registry_error(
-            "schedule verified memory graph reconciliation",
-            "memory graph reconciliation is fenced for runtime retirement".to_owned(),
-        )),
-        ProjectMemoryGraphReconciliationScheduleV1::NotMounted => Err(session_registry_error(
-            "schedule verified memory graph reconciliation",
-            "writable memory database has no bound verified graph runtime".to_owned(),
-        )),
-        ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed => Err(session_registry_error(
-            "schedule verified memory graph reconciliation",
-            "memory graph reconciliation lifecycle is closed".to_owned(),
-        )),
-    }
-}
 use super::RetainedVerifiedGraphRuntimeV1;
 
 impl RetainedVerifiedGraphRuntimeV1 {
@@ -69,7 +72,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
     }
 }
 
-impl tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1
+impl tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1
     for RetainedVerifiedGraphRuntimeV1
 {
     fn relational_binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
@@ -117,18 +120,19 @@ impl tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1
 
 impl DaemonSessionRuntimeRegistryV1 {
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn retain_memory_graph_runtime(
         &self,
         shard_id: StoreShardIdV1,
         database: tracedecay_runtime_core::db::DatabaseOwnerV1,
-    ) -> Result<RetainedVerifiedGraphRuntimeV1> {
+    ) -> super::super::Result<RetainedVerifiedGraphRuntimeV1> {
         Self::retain_memory_graph_runtime_for_task(
-            self.identity.clone(),
-            self.registry.clone(),
-            self.graph_registry.clone(),
-            Arc::clone(&self.graph_lifecycle_cancelled),
-            self.incarnation,
+            MemoryGraphRuntimeTaskContext::new(
+                self.identity.clone(),
+                self.registry.clone(),
+                self.graph_registry.clone(),
+                Arc::clone(&self.graph_lifecycle_cancelled),
+                self.incarnation,
+            ),
             shard_id,
             database,
             ObservationCancellation::default(),
@@ -137,17 +141,19 @@ impl DaemonSessionRuntimeRegistryV1 {
         .map_err(|failure| failure.error)
     }
 
-    #[hotpath::skip]
     pub(crate) async fn retain_memory_graph_runtime_for_task(
-        identity: super::super::LocalProfileIdentityAuthorityV1,
-        registry: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistry,
-        graph_registry: tracedecay_graph_db::GraphDbRegistry,
-        graph_lifecycle_cancelled: Arc<AtomicBool>,
-        incarnation: tracedecay_store::StoreIncarnationV1,
+        context: MemoryGraphRuntimeTaskContext,
         shard_id: StoreShardIdV1,
         database: tracedecay_runtime_core::db::DatabaseOwnerV1,
         cancellation: ObservationCancellation,
     ) -> std::result::Result<RetainedVerifiedGraphRuntimeV1, MemoryGraphRuntimeOpenFailureV1> {
+        let MemoryGraphRuntimeTaskContext {
+            identity,
+            registry,
+            graph_registry,
+            graph_lifecycle_cancelled,
+            incarnation,
+        } = context;
         if !matches!(
             &shard_id.scope,
             StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileMemory

@@ -7,8 +7,10 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::tracedecay::TraceDecay;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 
 /// Complete detached reconciliation admission requested by the MCP server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,13 +28,19 @@ pub(crate) struct BackgroundRefreshRequest {
     pub(crate) freshness_probe_sink: Option<super::CodeIndexFreshnessProbeSink>,
 }
 
+pub(crate) enum BackgroundRefreshOutcome {
+    Admitted(Option<HashMap<String, u64>>),
+    NotApplicable,
+    LinkedWorktreeDisabled,
+}
+
 /// Injectable ownership boundary for detached reconciliation admission.
 /// Production returns no token map because scheduler acceptance is distinct
 /// from index publication; test writers may return one to verify injection.
 pub(crate) type BackgroundRefreshWriter = Arc<
     dyn Fn(
             BackgroundRefreshRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Option<HashMap<String, u64>>>> + Send>>
+        ) -> Pin<Box<dyn Future<Output = Result<BackgroundRefreshOutcome>> + Send>>
         + Send
         + Sync
         + 'static,
@@ -44,7 +52,7 @@ pub(crate) fn direct_background_refresh_writer() -> BackgroundRefreshWriter {
 
 pub(crate) async fn execute_background_refresh_direct(
     request: BackgroundRefreshRequest,
-) -> Result<Option<HashMap<String, u64>>> {
+) -> Result<BackgroundRefreshOutcome> {
     let canonical_root =
         request
             .project_root
@@ -56,7 +64,10 @@ pub(crate) async fn execute_background_refresh_direct(
                 ),
             })?;
     let active_branch = tracedecay_runtime_core::branch::current_branch(&canonical_root);
-    if request.graph.project_root() != canonical_root
+    // `canonicalize` spells verbatim `\\?\C:\` on Windows while a mounted
+    // graph records the plain canonical root; compare identities, not
+    // spelling.
+    if !same_canonical_path(request.graph.project_root(), &canonical_root)
         || request.graph.active_branch() != active_branch.as_deref()
     {
         return Err(TraceDecayError::Config {
@@ -64,12 +75,14 @@ pub(crate) async fn execute_background_refresh_direct(
         });
     }
     let accepted = match request.mode {
+        // The server's own catch-up and read refreshes are the daemon acting
+        // on its own; they never widen a route past its watch policy.
         BackgroundRefreshModeV1::ForceReconcile => request
             .reconcile_sink
-            .map(|sink| sink(canonical_root))
+            .map(|sink| sink(canonical_root, super::CodeIndexDemandV1::Reconcile))
             .ok_or_else(|| {
                 TraceDecayError::project_route(
-                    "code_index_scheduler_unavailable",
+                    super::CODE_INDEX_SCHEDULER_UNAVAILABLE,
                     true,
                     "background refresh requires the daemon code-index scheduler",
                 )
@@ -79,18 +92,23 @@ pub(crate) async fn execute_background_refresh_direct(
             .map(|sink| sink(canonical_root))
             .ok_or_else(|| {
                 TraceDecayError::project_route(
-                    "code_index_scheduler_unavailable",
+                    super::CODE_INDEX_SCHEDULER_UNAVAILABLE,
                     true,
                     "background freshness probing requires the daemon code-index scheduler",
                 )
             })?,
     };
-    if !accepted.await {
-        return Err(TraceDecayError::project_route(
-            "code_index_scheduler_unavailable",
-            true,
-            "background refresh was not accepted by the code-index scheduler",
-        ));
+    match accepted.await {
+        CodeIndexDemandAdmissionV1::Queued => Ok(BackgroundRefreshOutcome::Admitted(None)),
+        CodeIndexDemandAdmissionV1::NotApplicable => Ok(BackgroundRefreshOutcome::NotApplicable),
+        CodeIndexDemandAdmissionV1::RefusedByPolicy => {
+            Ok(BackgroundRefreshOutcome::LinkedWorktreeDisabled)
+        }
+        CodeIndexDemandAdmissionV1::Terminal(parked) => {
+            Err(parked.publication_authority_corrupt_error())
+        }
+        CodeIndexDemandAdmissionV1::Unavailable(cause) => {
+            Err(super::code_index_unavailable_error(cause))
+        }
     }
-    Ok(None)
 }

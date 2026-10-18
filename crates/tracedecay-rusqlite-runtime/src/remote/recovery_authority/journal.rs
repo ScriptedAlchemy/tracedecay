@@ -44,15 +44,10 @@ where
                 .map_err(|_| RemoteRecoveryOperationErrorV1::Unavailable)?;
             return Ok(BeginOperationV1::Completed(Box::new(committed)));
         }
-        if matches!(
-            existing.state.as_str(),
-            "cancelled" | "timed_out" | "rolled_back"
-        ) {
-            return Err(match existing.state.as_str() {
-                "cancelled" => RemoteRecoveryOperationErrorV1::Cancelled,
-                "timed_out" => RemoteRecoveryOperationErrorV1::TimedOut,
-                _ => RemoteRecoveryOperationErrorV1::RecoveryRequired,
-            });
+        match existing.state.as_str() {
+            "cancelled" => return Err(RemoteRecoveryOperationErrorV1::Cancelled),
+            "timed_out" => return Err(RemoteRecoveryOperationErrorV1::TimedOut),
+            _ => {}
         }
         retained_pre_state_digest = Some(existing.pre_state_digest);
     }
@@ -102,9 +97,8 @@ pub(super) fn publish_promoted_authorities(
     handle: &ExactSqlHandle,
     authority_key: &str,
     expected: &RecoveryAuthorityExpectationV1,
-    replacement: &RemoteWriterFenceV1,
+    promoted: &CurrentRemoteAuthorityV1,
     frontier_sequence: u64,
-    observed_at: UtcMicros,
 ) -> Result<(), RemoteRecoveryOperationErrorV1> {
     let transaction = handle
         .begin_immediate()
@@ -115,15 +109,10 @@ pub(super) fn publish_promoted_authorities(
     if stored_frontier > frontier_sequence {
         return Err(RemoteRecoveryOperationErrorV1::Conflict);
     }
-    if current.fence != *replacement {
+    if current.fence != promoted.fence {
         if !expected.matches_writer(&current.fence) {
             return Err(RemoteRecoveryOperationErrorV1::StaleAuthority);
         }
-        let replacement_authority = CurrentRemoteAuthorityV1 {
-            fence: replacement.clone(),
-            credential_revision: current.credential_revision,
-            observed_at,
-        };
         let result = transaction
             .execute(
                 ExactSqlStatement::new(
@@ -134,11 +123,11 @@ pub(super) fn publish_promoted_authorities(
                         .to_owned(),
                     vec![
                         text(
-                            &serde_json::to_string(&replacement_authority)
+                            &serde_json::to_string(promoted)
                                 .map_err(|_| RemoteRecoveryOperationErrorV1::Corruption)?,
                         ),
                         integer(frontier_sequence)?,
-                        ExactSqlValue::Integer(observed_at.0),
+                        ExactSqlValue::Integer(promoted.observed_at.0),
                         text(authority_key),
                         text(
                             &serde_json::to_string(&current)
@@ -154,7 +143,7 @@ pub(super) fn publish_promoted_authorities(
             return Err(RemoteRecoveryOperationErrorV1::Conflict);
         }
     }
-    promote_primary_writer_in(&transaction, expected, replacement, observed_at)?;
+    promote_primary_writer_in(&transaction, expected, promoted)?;
     transaction
         .commit()
         .map(|_receipt| ())
@@ -164,8 +153,7 @@ pub(super) fn publish_promoted_authorities(
 fn promote_primary_writer_in(
     transaction: &ExactSqlTransaction,
     expected: &RecoveryAuthorityExpectationV1,
-    replacement: &RemoteWriterFenceV1,
-    observed_at: UtcMicros,
+    promoted: &CurrentRemoteAuthorityV1,
 ) -> Result<(), RemoteRecoveryOperationErrorV1> {
     let rows = transaction
         .query(
@@ -194,7 +182,7 @@ fn promote_primary_writer_in(
     let CurrentRemoteAuthorityStateV1::Available(current) = state else {
         return Err(RemoteRecoveryOperationErrorV1::StaleAuthority);
     };
-    if writer.authority.fence == *replacement && current.fence == *replacement {
+    if writer.authority.fence == promoted.fence && current.fence == promoted.fence {
         return Ok(());
     }
     if !expected.matches_writer(&writer.authority.fence)
@@ -203,8 +191,7 @@ fn promote_primary_writer_in(
     {
         return Err(RemoteRecoveryOperationErrorV1::StaleAuthority);
     }
-    writer.authority.fence = replacement.clone();
-    writer.authority.observed_at = observed_at;
+    writer.authority = promoted.clone();
     let replacement_state = CurrentRemoteAuthorityStateV1::Available(writer.authority.clone());
     let changed = transaction
         .execute(
@@ -223,7 +210,7 @@ fn promote_primary_writer_in(
                         &serde_json::to_string(&writer)
                             .map_err(|_| RemoteRecoveryOperationErrorV1::Corruption)?,
                     ),
-                    ExactSqlValue::Integer(observed_at.0),
+                    ExactSqlValue::Integer(promoted.observed_at.0),
                     text(&expected.brain_id),
                     text(encoded_state),
                     text(encoded_writer),
@@ -372,12 +359,14 @@ pub(super) fn record_physical_failure(
     observed_at: UtcMicros,
 ) -> Result<(), RemoteRecoveryOperationErrorV1> {
     let state = match error {
-        RemoteRecoveryPhysicalEffectErrorV1::RolledBack => "rolled_back",
         RemoteRecoveryPhysicalEffectErrorV1::Cancelled => "cancelled",
         RemoteRecoveryPhysicalEffectErrorV1::TimedOut => "timed_out",
         RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired
         | RemoteRecoveryPhysicalEffectErrorV1::Unavailable
-        | RemoteRecoveryPhysicalEffectErrorV1::Corruption => "forward_recovery_required",
+        | RemoteRecoveryPhysicalEffectErrorV1::Corruption
+        | RemoteRecoveryPhysicalEffectErrorV1::WriterAuthorityUnpublished => {
+            "forward_recovery_required"
+        }
     };
     update_operation_state(handle, operation_id, input_digest, state, observed_at)
 }
@@ -439,6 +428,9 @@ pub(super) fn load_authority_in(
 pub(super) fn map_store_error(error: RemoteSqliteStorageErrorV1) -> RemoteRecoveryOperationErrorV1 {
     match error {
         RemoteSqliteStorageErrorV1::Corruption => RemoteRecoveryOperationErrorV1::Corruption,
+        RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished => {
+            RemoteRecoveryOperationErrorV1::WriterAuthorityUnpublished
+        }
         _ => RemoteRecoveryOperationErrorV1::Unavailable,
     }
 }

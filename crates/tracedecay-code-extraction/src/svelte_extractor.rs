@@ -8,14 +8,13 @@
 //!
 //! Supported block forms (Svelte 4 and 5):
 //!
-//! * `<script lang="ts">` — component instance script
-//! * `<script>` — component instance script (plain JS)
-//! * `<script module>` — module-level script (Svelte 5)
-//! * `<script context="module">` — module-level script (Svelte 4)
+//! * `<script lang="ts">`, component instance script
+//! * `<script>`, component instance script (plain JS)
+//! * `<script module>`, module-level script (Svelte 5)
+//! * `<script context="module">`, module-level script (Svelte 4)
 
 use std::borrow::Cow;
 
-use crate::types::ExtractionResult;
 use crate::typescript_extractor::TypeScriptExtractor;
 use crate::{ExtractionArtifactV1, LanguageExtractor};
 use tree_sitter::Tree;
@@ -25,11 +24,6 @@ use tree_sitter::Tree;
 pub struct SvelteExtractor;
 
 impl SvelteExtractor {
-    pub fn extract_svelte(file_path: &str, source: &str) -> ExtractionResult {
-        let masked = Self::mask_non_script(source);
-        TypeScriptExtractor::extract_typescript(file_path, &masked)
-    }
-
     /// Replace every byte outside `<script>` blocks with whitespace.
     ///
     /// Keeping both byte length and line endings unchanged means the TypeScript
@@ -82,7 +76,7 @@ impl SvelteExtractor {
                     j += 1;
                 }
                 if j == lines.len() {
-                    // Unclosed tag — treat remainder as content.
+                    // Unclosed tag. Treat remainder as content.
                     if content_start < lines.len() {
                         ranges.push((content_start, lines.len()));
                     }
@@ -116,45 +110,14 @@ impl LanguageExtractor for SvelteExtractor {
     }
 
     fn prepare_parse_source<'a>(&self, source: &'a str) -> Cow<'a, str> {
-        crate::hotpath_observe::measure_language(|| Cow::Owned(Self::mask_non_script(source)))
-    }
-
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_svelte(file_path, source)
+        crate::observe::measure_language(|| Cow::Owned(Self::mask_non_script(source)))
     }
 
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::hotpath_observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || {
-                let masked = Self::mask_non_script(source);
-                TypeScriptExtractor::extract_typescript_artifact(file_path, &masked)
-            },
-            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
-        )
-    }
-
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        let masked = Self::mask_non_script(source);
-        TypeScriptExtractor.extract_parsed(file_path, &masked, tree, scope)
-    }
-
-    fn extract_parsed_artifact(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        let masked = Self::mask_non_script(source);
-        TypeScriptExtractor.extract_parsed_artifact(file_path, &masked, tree, scope)
+        crate::observe::measure_extract_file(|| {
+            let masked = Self::mask_non_script(source);
+            TypeScriptExtractor::extract_typescript_artifact(file_path, &masked)
+        })
     }
 
     /// The retained document already holds this extractor's mask as its parse
@@ -167,7 +130,13 @@ impl LanguageExtractor for SvelteExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
-        TypeScriptExtractor.extract_parsed_artifact(file_path, parsed_source, tree, scope)
+        TypeScriptExtractor.extract_parsed_artifact_prepared(
+            file_path,
+            parsed_source,
+            parsed_source,
+            tree,
+            scope,
+        )
     }
 }
 

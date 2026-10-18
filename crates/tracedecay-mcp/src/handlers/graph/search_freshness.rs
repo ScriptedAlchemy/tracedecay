@@ -1,0 +1,508 @@
+//! The `freshness:` verdict that opens every search and context response.
+//!
+//! Two typed authorities feed it and neither is defaulted. The search
+//! executor reports, per lane, whether it served the current complete
+//! generation or an older one (`CodeIndexLaneStatusV1::Stale`); its ready
+//! gate already ran the scheduler's source-freshness ladder. The daemon
+//! scheduler registry reports the worktree's staleness-ladder state, whether
+//! a rebuild is in flight, and the latest sealed generation. A response is
+//! `fresh` only when both agree; anything else is `possibly_stale` with one
+//! compact line describing the indexing state, so an agent can decide
+//! whether sufficient results are usable without a status preflight.
+
+use std::fmt::Write as _;
+
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexBuildPhaseV1, CodeIndexFreshnessPayloadV1, CodeIndexStalenessStateV1,
+    CodeIndexWorktreeFreshnessV1,
+};
+use tracedecay_contracts::retrieval::{
+    CodeGraphReadFreshnessV1, PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1,
+    PrimitiveSearchFreshnessV1, ServedCodeGraphGenerationV1,
+};
+
+use tracedecay_query::code_search::{CodeIndexLaneStatusV1, CodeIndexSearchCoverageV1};
+
+/// What the daemon scheduler registry answered for the project root.
+pub(super) enum WorktreeFreshnessSourceV1 {
+    /// The registry has a mounted scheduler for this worktree.
+    Worktree(Box<CodeIndexWorktreeFreshnessV1>),
+    /// The registry is attached but has no mounted scheduler for this root.
+    NotMounted,
+    /// No scheduler authority is attached to this server (direct mode).
+    Unattached,
+}
+
+pub(super) fn worktree_freshness_from_payload(
+    payload: Option<&CodeIndexFreshnessPayloadV1>,
+) -> WorktreeFreshnessSourceV1 {
+    match payload {
+        None => WorktreeFreshnessSourceV1::Unattached,
+        Some(payload) => match payload.worktrees.first() {
+            Some(worktree) => WorktreeFreshnessSourceV1::Worktree(Box::new(worktree.clone())),
+            None => WorktreeFreshnessSourceV1::NotMounted,
+        },
+    }
+}
+
+/// The served generation of a completed search, or the typed reason no
+/// generation could be served.
+#[derive(Clone, Copy)]
+pub(super) enum ServedGenerationV1<'a> {
+    Served(&'a str),
+    Unavailable { reason: &'a str },
+}
+
+fn phase_label(phase: CodeIndexBuildPhaseV1) -> &'static str {
+    match phase {
+        CodeIndexBuildPhaseV1::SourceScan => "source_scan",
+        CodeIndexBuildPhaseV1::RelationalPreparation => "relational_preparation",
+        CodeIndexBuildPhaseV1::BulkCommit => "bulk_commit",
+        CodeIndexBuildPhaseV1::IndexBuild => "index_build",
+        CodeIndexBuildPhaseV1::Verification => "verification",
+        CodeIndexBuildPhaseV1::GraphPublication => "graph_publication",
+        CodeIndexBuildPhaseV1::Ready => "ready",
+    }
+}
+
+fn stale_lanes(coverage: &CodeIndexSearchCoverageV1) -> Vec<String> {
+    [
+        ("exact", &coverage.exact),
+        ("lexical", &coverage.lexical),
+        ("graph", &coverage.graph),
+    ]
+    .into_iter()
+    .filter(|(_, status)| matches!(status, CodeIndexLaneStatusV1::Stale { .. }))
+    .map(|(lane, _)| lane.to_owned())
+    .collect()
+}
+
+/// Whether the scheduler's reading proves `served_generation` current: the
+/// worktree is fresh, nothing is rebuilding, and no newer generation sealed.
+fn scheduler_proves_current(
+    state: &CodeIndexWorktreeFreshnessV1,
+    served_generation: Option<&str>,
+) -> bool {
+    state.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+        && !state.rebuild_in_flight
+        && (state.latest_generation_id.is_none()
+            || served_generation.is_none()
+            || state.latest_generation_id.as_deref() == served_generation)
+}
+
+/// The executor's lane coverage restated under the scheduler's reading, so
+/// the lanes and the verdict answer to one freshness authority. The query
+/// gate marks a lane stale when it could not prove freshness itself; once
+/// the scheduler proves the generation that lane served current, the lane
+/// is complete for it.
+pub(super) fn lanes_under_scheduler_freshness(
+    mut coverage: CodeIndexSearchCoverageV1,
+    served_generation: &str,
+    worktree: &WorktreeFreshnessSourceV1,
+) -> CodeIndexSearchCoverageV1 {
+    let WorktreeFreshnessSourceV1::Worktree(state) = worktree else {
+        return coverage;
+    };
+    if state.latest_generation_id.as_deref() != Some(served_generation)
+        || !scheduler_proves_current(state, Some(served_generation))
+    {
+        return coverage;
+    }
+    for lane in [
+        &mut coverage.exact,
+        &mut coverage.lexical,
+        &mut coverage.graph,
+    ] {
+        match lane {
+            CodeIndexLaneStatusV1::Stale { generation } if generation == served_generation => {
+                *lane = CodeIndexLaneStatusV1::Complete;
+            }
+            CodeIndexLaneStatusV1::Partial { generation, .. }
+                if generation.as_deref() == Some(served_generation) =>
+            {
+                *generation = None;
+            }
+            _ => {}
+        }
+    }
+    coverage
+}
+
+/// Derive the verdict from the executor's lane coverage and the scheduler's
+/// worktree state.
+pub(super) fn search_freshness(
+    served: ServedGenerationV1<'_>,
+    coverage: &CodeIndexSearchCoverageV1,
+    worktree: &WorktreeFreshnessSourceV1,
+) -> PrimitiveSearchFreshnessV1 {
+    let stale_lanes = stale_lanes(coverage);
+    let (served_generation, reason) = match served {
+        ServedGenerationV1::Served(generation) => (Some(generation.to_owned()), None),
+        ServedGenerationV1::Unavailable { reason } => (None, Some(reason.to_owned())),
+    };
+    let scheduler_says_stale = match worktree {
+        WorktreeFreshnessSourceV1::Worktree(state) => {
+            !scheduler_proves_current(state, served_generation.as_deref())
+        }
+        WorktreeFreshnessSourceV1::NotMounted | WorktreeFreshnessSourceV1::Unattached => false,
+    };
+    if reason.is_none() && stale_lanes.is_empty() && !scheduler_says_stale {
+        return PrimitiveSearchFreshnessV1 {
+            state: PrimitiveFreshnessStateV1::Fresh,
+            indexing: None,
+        };
+    }
+
+    let mut summary = String::new();
+    let (latest_generation, staleness_state, rebuild_in_flight) = match worktree {
+        WorktreeFreshnessSourceV1::Worktree(state) => {
+            let _ = write!(
+                summary,
+                "state={} rebuild_in_flight={}",
+                state
+                    .staleness_state
+                    .map_or("unknown", CodeIndexStalenessStateV1::as_str),
+                state.rebuild_in_flight
+            );
+            (
+                state.latest_generation_id.clone(),
+                state.staleness_state,
+                Some(state.rebuild_in_flight),
+            )
+        }
+        WorktreeFreshnessSourceV1::NotMounted => {
+            summary.push_str("scheduler=not_mounted");
+            (None, None, None)
+        }
+        WorktreeFreshnessSourceV1::Unattached => {
+            summary.push_str("scheduler=unattached");
+            (None, None, None)
+        }
+    };
+    let _ = write!(
+        summary,
+        " served_generation={}",
+        served_generation.as_deref().unwrap_or("none")
+    );
+    if let Some(latest) = latest_generation.as_deref() {
+        let _ = write!(summary, " latest_generation={latest}");
+    }
+    if let WorktreeFreshnessSourceV1::Worktree(state) = worktree {
+        if let Some(progress) = &state.restore_progress {
+            let _ = write!(
+                summary,
+                " restore={}/{} authenticated_checks remaining={}",
+                progress.authenticated_completed,
+                progress.authenticated_total,
+                progress.authenticated_remaining
+            );
+        }
+        if let Some(hints) = state.hook_hint_count.filter(|count| *count > 0) {
+            let _ = write!(summary, " pending_hook_hints={hints}");
+        }
+        if let Some(progress) = &state.progress {
+            let _ = write!(
+                summary,
+                " progress={} {}/{} files",
+                phase_label(progress.phase),
+                progress.completed_files,
+                progress.total_files
+            );
+        }
+    }
+    if !stale_lanes.is_empty() {
+        let _ = write!(summary, " stale_lanes={}", stale_lanes.join(","));
+    }
+    if let Some(reason) = reason.as_deref() {
+        let _ = write!(summary, " unavailable={reason}");
+    }
+    let parked = match worktree {
+        WorktreeFreshnessSourceV1::Worktree(state) => state
+            .parked
+            .clone()
+            .filter(|parked| !parked.retries_on_wake),
+        WorktreeFreshnessSourceV1::NotMounted | WorktreeFreshnessSourceV1::Unattached => None,
+    };
+    PrimitiveSearchFreshnessV1 {
+        state: PrimitiveFreshnessStateV1::PossiblyStale,
+        indexing: Some(PrimitiveIndexingStateV1 {
+            summary,
+            served_generation,
+            latest_generation,
+            staleness_state,
+            rebuild_in_flight,
+            stale_lanes,
+            reason,
+            parked,
+        }),
+    }
+}
+
+/// The verdict for a graph read that served `served` whole: one generation
+/// across every lane, stale on every lane when the seat is.
+pub fn graph_read_freshness(
+    served: &ServedCodeGraphGenerationV1,
+    payload: Option<&CodeIndexFreshnessPayloadV1>,
+) -> PrimitiveSearchFreshnessV1 {
+    let coverage = match served.freshness {
+        CodeGraphReadFreshnessV1::Current => CodeIndexSearchCoverageV1::warm(),
+        CodeGraphReadFreshnessV1::LastCompleteStale { .. } => {
+            CodeIndexSearchCoverageV1::stale(&served.generation)
+        }
+    };
+    let worktree = worktree_freshness_from_payload(payload);
+    let coverage = lanes_under_scheduler_freshness(coverage, &served.generation, &worktree);
+    search_freshness(
+        ServedGenerationV1::Served(&served.generation),
+        &coverage,
+        &worktree,
+    )
+}
+
+/// The opening lines of a rendered response: the verdict, plus the indexing
+/// state when the verdict is `possibly_stale`.
+pub fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String {
+    let mut lines = format!("freshness: {}\n", freshness.state.as_str());
+    if let Some(indexing) = &freshness.indexing {
+        let _ = writeln!(lines, "indexing: {}", indexing.summary);
+        if let Some(parked) = &indexing.parked {
+            let _ = writeln!(lines, "parked: {}", parked.reason);
+            let _ = writeln!(lines, "remedy: {}", parked.remediation);
+            lines.push_str("retryable: false\n");
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_contracts::code_index_freshness::{
+        CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1, CodeIndexFreshnessCoverageV1,
+        CodeIndexRestoreProgressV1, CodeIndexStalenessStateV1,
+    };
+
+    use super::*;
+
+    fn worktree(
+        staleness_state: &str,
+        rebuild_in_flight: bool,
+        latest_generation_id: Option<&str>,
+    ) -> WorktreeFreshnessSourceV1 {
+        WorktreeFreshnessSourceV1::Worktree(Box::new(CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/fixture".to_owned(),
+            latest_generation_id: latest_generation_id.map(str::to_owned),
+            staleness_state: CodeIndexStalenessStateV1::from_wire(staleness_state),
+            rebuild_in_flight,
+            hook_hint_count: Some(0),
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
+            ..CodeIndexWorktreeFreshnessV1::default()
+        }))
+    }
+
+    #[test]
+    fn settled_generation_is_fresh_when_lanes_and_scheduler_agree() {
+        let freshness = search_freshness(
+            ServedGenerationV1::Served("generation.1"),
+            &CodeIndexSearchCoverageV1::warm(),
+            &worktree("fresh", false, Some("generation.1")),
+        );
+        assert_eq!(freshness.state, PrimitiveFreshnessStateV1::Fresh);
+        assert!(freshness.indexing.is_none());
+        assert_eq!(freshness_lines(&freshness), "freshness: fresh\n");
+    }
+
+    #[test]
+    fn executor_stale_lanes_are_possibly_stale_even_without_a_scheduler() {
+        let coverage = CodeIndexSearchCoverageV1::stale("generation.0");
+        let freshness = search_freshness(
+            ServedGenerationV1::Served("generation.0"),
+            &coverage,
+            &WorktreeFreshnessSourceV1::Unattached,
+        );
+        assert_eq!(freshness.state, PrimitiveFreshnessStateV1::PossiblyStale);
+        let indexing = freshness.indexing.as_ref().expect("indexing line");
+        assert_eq!(indexing.stale_lanes, ["exact", "lexical", "graph"]);
+        assert_eq!(
+            indexing.summary,
+            "scheduler=unattached served_generation=generation.0 stale_lanes=exact,lexical,graph"
+        );
+        assert_eq!(
+            freshness_lines(&freshness),
+            "freshness: possibly_stale\nindexing: scheduler=unattached served_generation=generation.0 stale_lanes=exact,lexical,graph\n"
+        );
+    }
+
+    #[test]
+    fn scheduler_rebuild_or_newer_generation_marks_a_warm_page_possibly_stale() {
+        let warm = CodeIndexSearchCoverageV1::warm();
+        let refreshing = search_freshness(
+            ServedGenerationV1::Served("generation.1"),
+            &warm,
+            &worktree("refreshing", true, Some("generation.1")),
+        );
+        assert_eq!(refreshing.state, PrimitiveFreshnessStateV1::PossiblyStale);
+        assert_eq!(
+            refreshing
+                .indexing
+                .as_ref()
+                .map(|indexing| indexing.summary.as_str()),
+            Some(
+                "state=refreshing rebuild_in_flight=true served_generation=generation.1 latest_generation=generation.1"
+            )
+        );
+
+        let newer = search_freshness(
+            ServedGenerationV1::Served("generation.1"),
+            &warm,
+            &worktree("fresh", false, Some("generation.2")),
+        );
+        assert_eq!(newer.state, PrimitiveFreshnessStateV1::PossiblyStale);
+        assert_eq!(
+            newer
+                .indexing
+                .as_ref()
+                .and_then(|indexing| indexing.latest_generation.as_deref()),
+            Some("generation.2")
+        );
+
+        let unattached = search_freshness(
+            ServedGenerationV1::Served("generation.1"),
+            &warm,
+            &WorktreeFreshnessSourceV1::Unattached,
+        );
+        assert_eq!(
+            unattached.state,
+            PrimitiveFreshnessStateV1::Fresh,
+            "the executor's current-generation claim stands when no scheduler authority is attached"
+        );
+    }
+
+    #[test]
+    fn unavailable_search_reports_the_indexing_state_with_progress() {
+        let mut state = CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/fixture".to_owned(),
+            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
+            rebuild_in_flight: true,
+            hook_hint_count: Some(3),
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        state.progress = Some(CodeIndexBuildProgressV1 {
+            generation_id: "generation.next".to_owned(),
+            daemon_incarnation: 1,
+            producer_incarnation: 1,
+            progress_epoch: 1,
+            sealed_source_digest: "sha256:fixture".to_owned(),
+            phase: CodeIndexBuildPhaseV1::BulkCommit,
+            committed_pages: 0,
+            committed_chunks: 0,
+            committed_imports: 0,
+            committed_payload_bytes: 0,
+            completed_files: 250,
+            total_files: 500,
+            completed_lexical_units: 0,
+            total_lexical_units: 0,
+            current_batch_pages: 0,
+            current_batch_payload_bytes: 0,
+            elapsed_micros: 0,
+            last_commit_latency_micros: None,
+            files_per_second: None,
+            lexical_units_per_second: None,
+            estimated_remaining_seconds: None,
+            last_progress_micros: 0,
+            blocked_reason: None,
+        });
+        let freshness = search_freshness(
+            ServedGenerationV1::Unavailable {
+                reason: "generation_unavailable",
+            },
+            &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
+            &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
+        );
+        assert_eq!(freshness.state, PrimitiveFreshnessStateV1::PossiblyStale);
+        let indexing = freshness.indexing.expect("indexing line");
+        assert_eq!(
+            indexing.summary,
+            "state=indexing rebuild_in_flight=true served_generation=none pending_hook_hints=3 progress=bulk_commit 250/500 files unavailable=generation_unavailable"
+        );
+        assert_eq!(indexing.reason.as_deref(), Some("generation_unavailable"));
+        assert_eq!(indexing.stale_lanes.len(), 0);
+    }
+
+    #[test]
+    fn unavailable_search_reports_bounded_restore_progress_without_a_rebuild() {
+        let state = CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/fixture".to_owned(),
+            latest_generation_id: Some("generation.restoring".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Restoring),
+            rebuild_in_flight: false,
+            hook_hint_count: Some(0),
+            coverage: CodeIndexFreshnessCoverageV1::PartialArtifactRestore,
+            restore_progress: Some(CodeIndexRestoreProgressV1 {
+                generation_id: "generation.restoring".to_owned(),
+                artifact_digest: format!("sha256:{}", "a".repeat(64)),
+                authenticated_completed: 4,
+                authenticated_total: 6,
+                authenticated_remaining: 2,
+            }),
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        let freshness = search_freshness(
+            ServedGenerationV1::Unavailable {
+                reason: "generation_restoring",
+            },
+            &CodeIndexSearchCoverageV1::unavailable("generation_restoring"),
+            &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
+        );
+
+        let indexing = freshness.indexing.expect("restore indexing line");
+        assert_eq!(
+            indexing.summary,
+            "state=restoring rebuild_in_flight=false served_generation=none latest_generation=generation.restoring restore=4/6 authenticated_checks remaining=2 unavailable=generation_restoring"
+        );
+        assert!(!indexing.summary.contains("generation_rebuilding"));
+    }
+
+    #[test]
+    fn a_terminal_park_is_rendered_with_its_remedy_and_no_retry() {
+        let park = |retries_on_wake| {
+            WorktreeFreshnessSourceV1::Worktree(Box::new(CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/fixture".to_owned(),
+                staleness_state: Some(CodeIndexStalenessStateV1::Parked),
+                parked: Some(CodeIndexConvergenceParkedV1 {
+                    reason: "source unreadable".to_owned(),
+                    blocked_reason: None,
+                    remediation: "fix it, then run `tracedecay sync`".to_owned(),
+                    parked_at_micros: 1,
+                    observed_passes: 1,
+                    retries_on_wake,
+                }),
+                ..CodeIndexWorktreeFreshnessV1::default()
+            }))
+        };
+        let unavailable = |worktree| {
+            search_freshness(
+                ServedGenerationV1::Unavailable {
+                    reason: "generation_unverified",
+                },
+                &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
+                &worktree,
+            )
+        };
+
+        assert_eq!(
+            freshness_lines(&unavailable(park(false))),
+            "freshness: possibly_stale\n\
+             indexing: state=parked rebuild_in_flight=false served_generation=none unavailable=generation_unverified\n\
+             parked: source unreadable\n\
+             remedy: fix it, then run `tracedecay sync`\n\
+             retryable: false\n"
+        );
+        let rechecked = unavailable(park(true));
+        assert_eq!(
+            rechecked.indexing.and_then(|indexing| indexing.parked),
+            None,
+            "a park every wake re-checks is not terminal"
+        );
+    }
+}

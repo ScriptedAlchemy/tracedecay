@@ -1,22 +1,44 @@
 //! Strict advisory runtime acceptance over authentic provider response captures.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay_application::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
 #[cfg(feature = "test-transport")]
-use tracedecay_application::feedback::{
+use tracedecay_application::advisory::ci_runtime::{
+    CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
+    ProjectCiCodeAnchorStoreV1,
+};
+use tracedecay_application::advisory::github_runtime::{
+    GitHubProviderLifecycleV1, GitHubReviewBodyReadOutcomeV1, GitHubSourceAccessAuthorityV1,
+    ProjectGitHubAnchorAuthorityV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_application::advisory::github_runtime::{
+    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
+    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
+    GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_application::advisory::{CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource};
+use tracedecay_application::advisory::{
+    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,
+    GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
+    GitHubReadResponseDecoderV1, GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_contracts::feedback::{
     CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, CiFailureLocalizationRequestV1,
     GitHubReviewReadPort, GitHubReviewReadPortOutcomeV1,
 };
-use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
+use tracedecay_contracts::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
 #[cfg(feature = "test-transport")]
-use tracedecay_application::now_micros;
-use tracedecay_application::{
+use tracedecay_contracts::now_micros;
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
 };
@@ -31,41 +53,31 @@ use tracedecay_domain::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
+use tracedecay_project::project::TraceDecay;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::ci_runtime::{
-    CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
-    ProjectCiCodeAnchorStoreV1,
-};
-use tracedecay_usecases::advisory::github_runtime::{
-    GitHubProviderLifecycleV1, GitHubReviewBodyReadOutcomeV1, GitHubSourceAccessAuthorityV1,
-    ProjectGitHubAnchorAuthorityV1,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::github_runtime::{
-    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
-    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
-    GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::{CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource};
-use tracedecay_usecases::advisory::{
-    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1,
-    GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
-    GitHubReadOnlyCredentialV1, GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1,
-    GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
-};
 
 #[cfg(feature = "test-transport")]
-use tracedecay_application::feedback::{
-    FeedbackCycleAdvisoryV1, FeedbackCycleControl, FeedbackCycleExecutionRequest,
-    FeedbackCycleService, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
-    FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackRuntimeStateV1, ProximityEvaluationRequestV1, feedback_surface_operation,
+use tracedecay_application::ProjectSourceAccessSnapshot;
+#[cfg(feature = "test-transport")]
+use tracedecay_application::advisory::fixtures::AdvisoryProximityFixtureEvidenceV1;
+#[cfg(feature = "test-transport")]
+use tracedecay_application::advisory::proximity_runtime::{
+    CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
+    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay_application::{
+use tracedecay_application::feedback::concrete::open_feedback_runtime;
+#[cfg(feature = "test-transport")]
+use tracedecay_contracts::feedback::{
+    FeedbackCycleAdvisoryV1, FeedbackCycleControl, FeedbackCycleExecutionRequest,
+    FeedbackCycleService, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
+    FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackProximityAccessKindV1,
+    FeedbackProximityEncounterV1, FeedbackProximityIntervalV1, FeedbackProximityParticipantV1,
+    FeedbackProximityRelationV1, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
+    ProximityEvaluationRequestV1, feedback_surface_operation,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_contracts::{
     AdvisoryFindingContributorV1, AdvisoryFindingValidityWindowV1, DiagnosticProviderDescriptor,
     DiagnosticProviderIdentity, DiagnosticProviderIdentityParts, DiagnosticProviderResult,
     DiagnosticProviderState, PolicyDecisionRef, ProviderCoverage, ProviderDocumentIdentity,
@@ -89,22 +101,11 @@ use tracedecay_domain::feedback::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
-    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CodeGenerationId,
-    ComponentVersion, LocatorDigest, ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceRangeV1, SessionId, SymbolOccurrenceId,
+    AgentInstanceId, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
+    CodeGenerationId, ComponentVersion, LocatorDigest, ObservationId, ObservationOrderingDomainV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, SessionId, SymbolOccurrenceId,
 };
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::fixtures::AdvisoryProximityFixtureEvidenceV1;
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::proximity_runtime::{
-    CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
-    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
 
 mod code_graph;
 use crate::common;
@@ -225,7 +226,7 @@ impl GitHubSourceAccessAuthorityV1 for PanicGitHubSourceAccess {
         &'a self,
         _context: &'a RequestContext,
         _request: &'a GitHubReviewReadRequestV1,
-    ) -> FeedbackPortFuture<'a, tracedecay_usecases::advisory::GitHubProviderLifecycleV1> {
+    ) -> FeedbackPortFuture<'a, tracedecay_application::advisory::GitHubProviderLifecycleV1> {
         Box::pin(async { panic!("denied GitHub request reached source access authority") })
     }
 }
@@ -272,23 +273,10 @@ fn scope() -> FeedbackScopeV1 {
     }
 }
 
-#[test]
-fn github_source_access_uses_owner_bound_ureq_dtos() {
-    let credential = GitHubReadOnlyCredentialV1::anonymous();
-    let target = GitHubRepositoryTargetV1 {
-        owner: "ScriptedAlchemy".to_owned(),
-        repository: "tracedecay".to_owned(),
-        pull_request_number: 421,
-        pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
-    };
-    assert!(target.validate());
-    let _owner_inputs = (credential, target, GitHubHttpReadConfigV1::default());
-}
-
 #[tokio::test]
 async fn authentic_github_and_ci_responses_use_production_decoders() {
     let pull_request = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/pull_request.json"
     ));
     let request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::RestGetPullRequest,
@@ -331,7 +319,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
         ..request.clone()
     };
     let review = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review.json"
     ));
     assert!(
         decoder
@@ -360,7 +348,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     )
     .unwrap();
     let thread = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
     ));
     let thread_request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
@@ -401,16 +389,16 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 
     let ci = GitHubCiOfficialResponseDecoderV1::decode(
         include_str!(
-            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_run.json"
+            "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/workflow_run.json"
         ),
         include_str!(
-            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_job.json"
+            "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/workflow_job.json"
         ),
         include_str!(
-            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_run.json"
+            "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/check_run.json"
         ),
         include_str!(
-            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_annotations.json"
+            "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/check_annotations.json"
         ),
     )
     .expect("authentic CI responses decode");
@@ -421,7 +409,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 #[tokio::test]
 async fn corrupt_provider_identity_fails_production_decoder() {
     let mut pull_request = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/pull_request.json"
     ));
     pull_request["id"] = json!(0);
     let request = GitHubReviewReadRequestV1 {
@@ -569,7 +557,7 @@ fn github_context(scope: &FeedbackScopeV1, project_id: ProjectId) -> RequestCont
 
 #[tokio::test]
 async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access() {
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     let source = "pub fn reviewed() {}\npub fn batched() {}\n";
     std::fs::write(project.join("src/lib.rs"), source).unwrap();
@@ -598,7 +586,9 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
         .expect("read fixture head");
     assert!(output.status.success());
     let head = CommitId::new(String::from_utf8(output.stdout).unwrap().trim()).unwrap();
-    let graph = TraceDecay::init(&project).await.unwrap();
+    let graph = TraceDecay::init_with_options(&project, environment.open_options())
+        .await
+        .unwrap();
     let database = graph.db().clone();
     let scope = FeedbackScopeV1 {
         project_id: ProjectId::new("project.github.body").unwrap(),
@@ -616,14 +606,13 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
         pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
     };
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_comment.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review_comment.json"
     ))
     .unwrap();
     let body = fixture.pointer("/response/body").unwrap().as_str().unwrap();
     let provider_body_digest =
         ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(body)))).unwrap();
-    let retained_body =
-        tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(body).unwrap();
+    let retained_body = tracedecay_privacy::sanitize_provider_metadata_text(body).unwrap();
     let seed = GitHubReviewAnchorSeedV1 {
         comment_id: GitHubReviewCommentIdV1::new("3556767423").unwrap(),
         author_node_id: "BOT_kgDOC98s_g".to_owned(),
@@ -654,11 +643,30 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
         current_start_line: Some(2),
         current_line: Some(2),
     };
+    let reply_body = "Agreed, the second call can reuse it.";
+    let reply_seed = GitHubReviewAnchorSeedV1 {
+        comment_id: GitHubReviewCommentIdV1::new("3556767426").unwrap(),
+        author_node_id: "MDQ6VXNlcjE=".to_owned(),
+        body_digest: ManifestDigest::new(format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(reply_body))
+        ))
+        .unwrap(),
+        retained_body: reply_body.to_owned(),
+        safe_url: "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767426"
+            .to_owned(),
+        ..seed.clone()
+    };
     let batch = authority
-        .resolve_many(&request, &[seed, second_seed])
+        .resolve_many(&request, &[seed, second_seed, reply_seed])
         .await
         .expect("canonical body anchors");
-    assert_eq!(batch.len(), 2);
+    assert_eq!(batch.len(), 3);
+    assert_eq!(
+        batch[2].original, batch[0].original,
+        "a reply on the same lines shares the code anchor"
+    );
+    assert_ne!(batch[2].body_anchor, batch[0].body_anchor);
     assert_eq!(
         batch[0].original.span,
         Some(SourceSpan {
@@ -739,7 +747,7 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
 #[tokio::test]
 async fn unauthorized_ci_request_is_denied_before_provider_read() {
     let fixture =
-        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap();
     let scope = scope();
     let request = CiFailureLocalizationRequestV1 {
@@ -758,7 +766,7 @@ async fn unauthorized_ci_request_is_denied_before_provider_read() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canonical_graph() {
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    let (_environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
@@ -798,9 +806,9 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
 
     let mut scope = scope();
     scope.head_commit_id = CommitId::new(head).unwrap();
-    let code_graph = hermetic_ci_code_graph(&scope, &project);
+    let (code_graph, code_index_identity) = hermetic_ci_code_graph(&scope, &project);
     let mut provider_record =
-        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap()
             .ci_provider_record;
     provider_record.workflow_run.head_sha = scope.head_commit_id.as_str().to_owned();
@@ -835,8 +843,13 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
             observed_at: now_micros(),
         },
     };
-    let store = ProjectCiCodeAnchorStoreV1::new(project.clone(), scope.clone(), code_graph.clone())
-        .unwrap();
+    let store = ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+        project.clone(),
+        scope.clone(),
+        code_graph.clone(),
+        Arc::clone(&code_index_identity),
+    )
+    .unwrap();
     let evidence = store
         .resolve(&ci_context(&scope, now_micros()), &request, &retained)
         .await
@@ -853,7 +866,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
     assert!(evidence.generation.is_some());
     assert_eq!(
         evidence.symbol.as_ref().map(|symbol| symbol.file.as_str()),
-        Some("src/lib.rs")
+        Some("file.advisory.ci.src-lib")
     );
     assert!(!evidence.callers.is_empty());
     assert!(!evidence.tests.is_empty());
@@ -872,15 +885,20 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
         stale_scope.head_commit_id.as_str().to_owned();
     stale_record.provider_record.check_run.head_sha =
         stale_scope.head_commit_id.as_str().to_owned();
-    let stale = ProjectCiCodeAnchorStoreV1::new(project, stale_scope.clone(), code_graph)
-        .unwrap()
-        .resolve(
-            &ci_context(&stale_scope, now_micros()),
-            &stale_request,
-            &stale_record,
-        )
-        .await
-        .expect("typed partial evidence");
+    let stale = ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+        project,
+        stale_scope.clone(),
+        code_graph,
+        code_index_identity,
+    )
+    .unwrap()
+    .resolve(
+        &ci_context(&stale_scope, now_micros()),
+        &stale_request,
+        &stale_record,
+    )
+    .await
+    .expect("typed partial evidence");
     assert_eq!(
         stale.state,
         tracedecay_domain::feedback::CiFailureLocalizationStateV1::Partial
@@ -896,7 +914,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
 #[tokio::test]
 async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
     let fixture =
-        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap();
     let scope = scope();
     let request = GitHubReviewReadRequestV1 {
@@ -923,7 +941,7 @@ async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
 /// must then return a non-vacuous typed four-pillar terminal cycle.
 #[tokio::test]
 async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/lib.rs"), "pub fn shared_edit() {}\n").unwrap();
     // The advisory surface is scoped to a branch and head commit, so an
@@ -948,7 +966,17 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         );
     }
     common::initialize_tracedecay_cli_project(environment.home(), &project);
-    let _daemon = common::spawn_tracedecay_daemon(environment.home());
+    let daemon_log = environment.home().join("advisory-daemon.log");
+    let _daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
+        // `.cargo/config.toml` sets TRACEDECAY_DISABLE_GLOBAL_DB=1 so cargo
+        // children never touch the operator ledger. This journey depends on
+        // the registered profile accounting owner for hint-outcome settlement.
+        command
+            .env_remove("TRACEDECAY_DISABLE_GLOBAL_DB")
+            .stderr(Stdio::from(
+                std::fs::File::create(&daemon_log).expect("create isolated advisory daemon log"),
+            ));
+    });
     let transcript = project.join("cursor-proximity.jsonl");
     std::fs::write(
         &transcript,
@@ -981,10 +1009,9 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "format": "json",
     })
     .to_string();
-    // The first tool call triggers the daemon's cold project open, and the
-    // hook tool surface deliberately returns the typed warming state instead
-    // of retrying internally. Waiting that documented retryable state out is
-    // the client protocol, so only a non-warming failure is a test failure.
+    // Project opening and observation projection are both deferred. Retry
+    // their typed progress states within the same fixed deadline; a terminal
+    // successful response must still prove that this pass committed data.
     let ingest_deadline = std::time::Instant::now() + Duration::from_secs(60);
     let output = loop {
         let output = common::tracedecay_command_with_home(environment.home())
@@ -1001,17 +1028,52 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             .output()
             .expect("invoke registered daemon observation path");
         if output.status.success() {
-            break output;
+            let response: Value =
+                serde_json::from_slice(&output.stdout).expect("registered daemon ingest response");
+            let payload: Value = serde_json::from_str(
+                response["content"][0]["text"]
+                    .as_str()
+                    .expect("registered daemon ingest response text"),
+            )
+            .expect("registered daemon ingest payload");
+            // `completed: true` with `accepted_for_replay` means the catch-up
+            // sweep has not yet drained this admission. That is not a durable
+            // commit, so keep polling until a terminal that proves the
+            // transcript, or the deadline reports the last payload.
+            if matches!(
+                payload["status"].as_str(),
+                Some("committed" | "exact_duplicate")
+            ) {
+                break output;
+            }
+            if payload["completed"] != false && payload["status"] != "accepted_for_replay" {
+                break output;
+            }
+            if payload["completed"] == false {
+                assert_eq!(
+                    payload["admission"]["retryable"], true,
+                    "incomplete ingest must carry a retryable admission: {response}"
+                );
+            }
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // A refresh that has not published within the hook's wait is a
+            // typed retryable refusal of this same request, not a failure.
+            let retryable_refusal =
+                serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|response| {
+                    response["structuredContent"]["problem"]["retryable"] == true
+                });
+            assert!(
+                retryable_refusal || stderr.contains("is warming in the background"),
+                "registered daemon ingest failed\nstdout:\n{}\nstderr:\n{stderr}",
+                String::from_utf8_lossy(&output.stdout),
+            );
         }
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(
-            stderr.contains("is warming in the background"),
-            "registered daemon ingest failed\nstdout:\n{}\nstderr:\n{stderr}",
-            String::from_utf8_lossy(&output.stdout),
-        );
         assert!(
             std::time::Instant::now() < ingest_deadline,
-            "registered daemon project stayed warming past the ingest deadline\nstderr:\n{stderr}",
+            "registered daemon ingest did not complete before its deadline\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
@@ -1023,14 +1085,22 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             .expect("registered daemon ingest response text"),
     )
     .expect("registered daemon ingest payload");
-    assert_eq!(
-        payload["status"], "committed",
-        "registered daemon ingest did not commit: {response}"
+    // The daemon's project catch-up sweep drains the whole Cursor projection
+    // queue for this scope, so it can project the observations this ingest
+    // admitted on an earlier deferred pass. Both terminal states below prove
+    // the transcript is durable; only `accepted_for_replay` would not.
+    assert!(
+        matches!(
+            payload["status"].as_str(),
+            Some("committed" | "exact_duplicate")
+        ),
+        "registered daemon ingest did not commit: {response}\ndaemon log:\n{}",
+        std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
     );
 
     // Codex records a turn in its rollout, not in the Stop event, so the
     // project-scoped Stop ingest below has to find a rollout whose `cwd` is
-    // this project — exactly the shape the daemon's project scheduler admits.
+    // this project, exactly the shape the daemon's project scheduler admits.
     let codex_sessions = environment.home().join(".codex/sessions");
     std::fs::create_dir_all(&codex_sessions).unwrap();
     let mut codex_meta: Value = serde_json::from_str(include_str!(
@@ -1067,40 +1137,77 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "format": "json",
     })
     .to_string();
-    let stop_output = common::tracedecay_command_with_home(environment.home())
-        .args([
-            "tool",
-            "--project",
-            project_arg.as_str(),
-            "tracedecay_hook_runtime",
-            "--args",
-            stop_args.as_str(),
-            "--json",
-        ])
-        .current_dir(&project)
-        .output()
-        .expect("invoke registered daemon stop path");
-    assert!(
-        stop_output.status.success(),
-        "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&stop_output.stdout),
-        String::from_utf8_lossy(&stop_output.stderr)
-    );
-    let stop_response: Value =
-        serde_json::from_slice(&stop_output.stdout).expect("registered daemon stop response");
-    let stop_payload: Value = serde_json::from_str(
-        stop_response["content"][0]["text"]
-            .as_str()
-            .expect("registered daemon stop response text"),
-    )
-    .expect("registered daemon stop payload");
-    assert_eq!(
-        stop_payload["status"], "committed",
-        "registered daemon stop ingest did not commit: {stop_response}"
-    );
+    // The project catch-up sweep races this pass for the rollout just written.
+    // Admission is the durable commit. A sweep that admits it first leaves the
+    // hook with nothing new to persist and reports `exact_duplicate`. Both
+    // terminals prove the transcript is durable; `accepted_for_replay` proves
+    // neither. A deferred or still-warming pass is the same typed progress the
+    // Cursor ingest above rides out.
+    let stop_deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let stop_output = common::tracedecay_command_with_home(environment.home())
+            .args([
+                "tool",
+                "--project",
+                project_arg.as_str(),
+                "tracedecay_hook_runtime",
+                "--args",
+                stop_args.as_str(),
+                "--json",
+            ])
+            .current_dir(&project)
+            .output()
+            .expect("invoke registered daemon stop path");
+        if stop_output.status.success() {
+            let stop_response: Value = serde_json::from_slice(&stop_output.stdout)
+                .expect("registered daemon stop response");
+            let stop_payload: Value = serde_json::from_str(
+                stop_response["content"][0]["text"]
+                    .as_str()
+                    .expect("registered daemon stop response text"),
+            )
+            .expect("registered daemon stop payload");
+            if stop_payload["completed"] != false {
+                assert!(
+                    matches!(
+                        stop_payload["status"].as_str(),
+                        Some("committed" | "exact_duplicate")
+                    ),
+                    "registered daemon stop ingest proved neither a commit nor a duplicate: {stop_response}\ndaemon log:\n{}",
+                    std::fs::read_to_string(&daemon_log)
+                        .expect("read isolated advisory daemon log"),
+                );
+                break;
+            }
+            assert_eq!(
+                stop_payload["admission"]["retryable"], true,
+                "incomplete stop ingest must carry a retryable admission: {stop_response}"
+            );
+        } else {
+            let stderr = String::from_utf8_lossy(&stop_output.stderr).into_owned();
+            assert!(
+                stderr.contains("is warming in the background"),
+                "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{stderr}\ndaemon log:\n{}",
+                String::from_utf8_lossy(&stop_output.stdout),
+                std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
+            );
+        }
+        assert!(
+            std::time::Instant::now() < stop_deadline,
+            "registered daemon stop ingest did not complete before its deadline\nstdout:\n{}\nstderr:\n{}\ndaemon log:\n{}",
+            String::from_utf8_lossy(&stop_output.stdout),
+            String::from_utf8_lossy(&stop_output.stderr),
+            std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 
     let advisory_args = json!({
-        "document_uri": format!("file://{}", project.join("src/lib.rs").display()),
+        // Serialized as a file URL rather than concatenated: a Windows native
+        // path pasted after `file://` is not a file URI at all.
+        "document_uri": url::Url::from_file_path(project.join("src/lib.rs"))
+            .expect("advisory document URI")
+            .to_string(),
     })
     .to_string();
     // Feedback/advisory registration is a deferred background upgrade keyed
@@ -1130,8 +1237,9 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             serde_json::from_str::<Value>(&stdout)
                 .ok()
                 .is_some_and(|response| {
-                    response["problem"]["code"] == "feedback.advisory-cycle.unavailable"
-                        && response["problem"]["retryable"] == true
+                    let problem = &response["structuredContent"]["problem"];
+                    problem["code"] == "feedback.advisory-cycle.unavailable"
+                        && problem["retryable"] == true
                 });
         assert!(
             retryable_unavailable,
@@ -1140,7 +1248,8 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         );
         assert!(
             std::time::Instant::now() < advisory_deadline,
-            "advisory cycle stayed unavailable past the deferred registration deadline\nstdout:\n{stdout}",
+            "advisory cycle stayed unavailable past the deferred registration deadline\nstdout:\n{stdout}\ndaemon log:\n{}",
+            std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
@@ -1195,8 +1304,8 @@ fn assert_four_pillar_terminal_cycle(advisory: &Value) {
         .unwrap_or_else(|| panic!("cycle published is not a boolean: {cycle}"));
     if termination == FeedbackCycleTerminationV1::IncompleteCoverage {
         assert!(
-            !published,
-            "an incomplete-coverage cycle is not publishable: {cycle}"
+            published,
+            "current incomplete-coverage evidence must remain inspectable: {cycle}"
         );
     }
 }
@@ -1219,7 +1328,7 @@ fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
         "cycle": {
             "termination": "incomplete_coverage",
             "provider_states": ["unavailable", "unavailable", "supported_completed_complete"],
-            "published": false,
+            "published": true,
         },
         "producer_contributions": contributions.clone(),
     })));
@@ -1246,14 +1355,6 @@ fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
             json!({"cycle": {
                 "termination": "clean",
                 "provider_states": ["supported_completed_complete"],
-                "published": true,
-            }}),
-        ),
-        (
-            "an incomplete-coverage cycle claiming publication",
-            json!({"cycle": {
-                "termination": "incomplete_coverage",
-                "provider_states": ["unavailable"],
                 "published": true,
             }}),
         ),
@@ -1317,7 +1418,7 @@ fn find_advisory_cycle(value: &Value) -> Option<Value> {
 //
 // `packaged_host_ingest_delivers_a_registered_advisory_cycle` above proves the
 // truthful *negative*: a hermetic project has no GitHub/CI reachability, so
-// those pillars report their own unavailable state. The plan additionally
+// those pillars report their own unavailable state. The plan also
 // requires one scenario where a single saved-edit/stop boundary returns
 // post-edit diagnostics/impact, a localized CI failure, an existing GitHub
 // review finding, and a concurrent-agent proximity warning *together*, in one
@@ -1326,13 +1427,13 @@ fn find_advisory_cycle(value: &Value) -> Option<Value> {
 // The remote halves cannot come from the network in a hermetic test, and the
 // plan rejects synthetic lookalike providers as acceptance evidence. So both
 // remote pillars are replayed from the suite's checked-in recorded provider
-// captures (`crates/tracedecay-usecases/src/advisory/fixtures/
+// captures (`crates/tracedecay-application/src/advisory/fixtures/
 // provider_branch_review/`, the same captures the decoder tests above consume)
 // through the shipped decoders, sanitizer, and canonical anchor authorities.
 // Only immutable *identity* (head commit, reviewed path and lines) is
-// retargeted onto this test's real repository — the same retargeting
+// retargeted onto this test's real repository, the same retargeting
 // `ci_localization_resolves_generation_symbol_callers_and_tests_from_canonical_graph`
-// already performs — so the recorded protocol shape, bodies, digests, and
+// already performs, so the recorded protocol shape, bodies, digests, and
 // lifecycle flags stay exactly as captured.
 // ---------------------------------------------------------------------------
 
@@ -1407,17 +1508,19 @@ impl FeedbackImpactPort for GraphDerivedImpact {
     }
 }
 
+/// Authoritative runtime state resolved for the generation under evaluation.
 #[cfg(feature = "test-transport")]
-struct SharedFeedbackObservations(Arc<dyn FeedbackObservationPort + Send + Sync>);
+struct ResolvedRuntimeState(FeedbackRuntimeStateV1);
 
 #[cfg(feature = "test-transport")]
-impl FeedbackObservationPort for SharedFeedbackObservations {
-    fn observe(
-        &self,
-        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        observation: tracedecay_domain::feedback::FeedbackCycleObservationV1,
-    ) {
-        self.0.observe(input, observation);
+impl FeedbackRuntimeStatePort for ResolvedRuntimeState {
+    fn resolve<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _input: &'a FeedbackEvaluationInputV1,
+    ) -> FeedbackPortFuture<'a, Option<FeedbackRuntimeStateV1>> {
+        let runtime = self.0.clone();
+        Box::pin(async move { Some(runtime) })
     }
 }
 
@@ -1433,33 +1536,33 @@ fn four_pillar_digest(fill: char) -> ManifestDigest {
 fn four_pillar_context(
     resolved: &ResolvedScope,
     requester: &ActorId,
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     now: UtcMicros,
 ) -> RequestContext {
     let capabilities = BTreeSet::from([
         operation.capability_id().clone(),
         CapabilityId::new(
-            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1.to_owned(),
+            tracedecay_contracts::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1.to_owned(),
         )
         .expect("ci capability"),
         CapabilityId::new(
-            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1.to_owned(),
+            tracedecay_contracts::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1.to_owned(),
         )
         .expect("github capability"),
-        CapabilityId::new(tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1.to_owned())
+        CapabilityId::new(tracedecay_contracts::feedback::PROXIMITY_CAPABILITY_ID_V1.to_owned())
             .expect("proximity capability"),
     ]);
     let use_cases = BTreeSet::from([
         operation.use_case_id().clone(),
         UseCaseId::new(
-            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_USE_CASE_ID_V1.to_owned(),
+            tracedecay_contracts::feedback::CI_FAILURE_LOCALIZE_USE_CASE_ID_V1.to_owned(),
         )
         .expect("ci use case"),
         UseCaseId::new(
-            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_USE_CASE_ID_V1.to_owned(),
+            tracedecay_contracts::feedback::GITHUB_REVIEW_INGEST_USE_CASE_ID_V1.to_owned(),
         )
         .expect("github use case"),
-        UseCaseId::new(tracedecay_application::feedback::PROXIMITY_USE_CASE_ID_V1.to_owned())
+        UseCaseId::new(tracedecay_contracts::feedback::PROXIMITY_USE_CASE_ID_V1.to_owned())
             .expect("proximity use case"),
     ]);
     let grant = CapabilityGrantSnapshot::new(
@@ -1522,7 +1625,7 @@ fn recorded_peer_observation(session: &SessionId, ordinal: u64) -> CanonicalObse
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
@@ -1560,7 +1663,9 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     assert!(head.status.success());
     let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
 
-    let graph = TraceDecay::init(&project).await.expect("canonical graph");
+    let graph = TraceDecay::init_with_options(&project, environment.open_options())
+        .await
+        .expect("canonical graph");
     let database = graph.db().clone();
 
     let resolved = ResolvedScope::new(
@@ -1589,7 +1694,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     // cross-response identity, so a drifted or hand-edited fixture fails here
     // rather than silently weakening the assertions.
     let fixture =
-        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .expect("checked-in composite provider capture");
 
     // ---- Pillar 2: a localized CI failure, through the production store ----
@@ -1626,13 +1731,17 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
             observed_at: now,
         },
     };
-    let code_graph = hermetic_ci_code_graph(&scope, &project);
-    let ci_code_evidence =
-        ProjectCiCodeAnchorStoreV1::new(project.clone(), scope.clone(), code_graph)
-            .unwrap()
-            .resolve(&context, &ci_request, &retained)
-            .await
-            .expect("production CI localization over the canonical graph");
+    let (code_graph, code_index_identity) = hermetic_ci_code_graph(&scope, &project);
+    let ci_code_evidence = ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+        project.clone(),
+        scope.clone(),
+        code_graph,
+        code_index_identity,
+    )
+    .unwrap()
+    .resolve(&context, &ci_request, &retained)
+    .await
+    .expect("production CI localization over the canonical graph");
     assert_eq!(
         ci_code_evidence.state,
         tracedecay_domain::feedback::CiFailureLocalizationStateV1::Complete,
@@ -1682,7 +1791,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     // ---- Pillar 3: an existing GitHub review finding, through the production
     // decoder, sanitizer, and canonical anchor authority ----
     let mut thread = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
     ));
     let pull_request = thread
         .pointer_mut("/data/repository/pullRequest")
@@ -1754,6 +1863,44 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         scope: scope.clone(),
         observed_at: now,
     };
+    let participant = |ordinal: usize| FeedbackProximityParticipantV1 {
+        source: ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("provider.cursor").unwrap(),
+            peers[ordinal].clone(),
+        )
+        .unwrap(),
+        agent_id: AgentInstanceId::new(format!("agent.advisory.peer.{}", ordinal + 1)).unwrap(),
+        worktree_id: Some(scope.worktree_id.clone()),
+        worktree_root: project.to_string_lossy().into_owned(),
+        branch_ref: Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+        head_revision: Some(scope.head_commit_id.clone()),
+        access: FeedbackProximityAccessKindV1::Write,
+        activity: FeedbackProximityIntervalV1 {
+            start: UtcMicros(now.0.saturating_sub(2_000_000)),
+            end: now,
+        },
+        address: tracedecay_domain::feedback::ProximityAddressV1 {
+            scope: scope.clone(),
+            file: ci_symbol.file.clone(),
+            span: Some(ci_symbol.span),
+            symbol: Some(ci_symbol.symbol.clone()),
+        },
+    };
+    let encounter = FeedbackProximityEncounterV1 {
+        encounter_id: four_pillar_digest('3'),
+        scope: scope.clone(),
+        interval: FeedbackProximityIntervalV1 {
+            start: UtcMicros(now.0.saturating_sub(1_000_000)),
+            end: now,
+        },
+        participants: vec![participant(0), participant(1)],
+        relation: FeedbackProximityRelationV1::OverlappingEdit {
+            warning_class: ProximityWarningClassV1::SameFile,
+        },
+        observed_at: UtcMicros(now.0.saturating_sub(1_000_000)),
+        expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
+        coverage: ProximityCoverageV1::Complete,
+    };
     let proximity_evidence = fixture
         .proximity_evidence(AdvisoryProximityFixtureEvidenceV1 {
             observations: peers
@@ -1764,6 +1911,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
             retrieval_anchor_ids: vec![
                 RetrievalAnchorId::new("anchor.advisory.four-pillar.proximity").unwrap(),
             ],
+            encounter,
             address: tracedecay_domain::feedback::ProximityAddressV1 {
                 scope: scope.clone(),
                 file: ci_symbol.file.clone(),
@@ -1791,10 +1939,18 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     let proximity_owner = ProximityRuntimeOwnerV1::new(
         scope.clone(),
         RecordedProximityEvidenceAuthority {
-            batch: CanonicalProximityEvidenceBatchV1::new(
-                vec![proximity_evidence],
-                ProximityCoverageV1::Complete,
-            )
+            batch: CanonicalProximityEvidenceBatchV1 {
+                evidence: vec![proximity_evidence],
+                coverage: ProximityCoverageV1::Complete,
+                source_generation: CodeGenerationId::new(
+                    "generation.advisory.four-pillar.proximity",
+                )
+                .unwrap(),
+                observed_at: now,
+                expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
+                omissions: Vec::new(),
+            }
+            .validated()
             .expect("proximity evidence batch"),
         },
         (),
@@ -1880,9 +2036,15 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         effective_capabilities: BTreeSet::from([operation.capability_id().clone()]),
         grant_expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
     };
-    let feedback = open_feedback_runtime(database, &project, resolved.clone(), access)
-        .await
-        .expect("production feedback runtime");
+    let feedback = open_feedback_runtime(
+        database,
+        &project,
+        project.join("response-handles"),
+        resolved.clone(),
+        access,
+    )
+    .await
+    .expect("production feedback runtime");
 
     let generation = ci_generation.generation_id.clone();
     let file_digest = four_pillar_digest('4');
@@ -2038,9 +2200,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     );
 
     let service = FeedbackCycleService::new(
-        move |_context: &RequestContext, _input: &FeedbackEvaluationInputV1| {
-            Some(runtime_state.clone())
-        },
+        ResolvedRuntimeState(runtime_state),
         SavedGenerationDiagnostics {
             results: vec![
                 DiagnosticProviderResult::new(
@@ -2056,7 +2216,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         },
         GraphDerivedImpact(impact),
         feedback.publication_store(),
-        SharedFeedbackObservations(feedback.observation_port()),
+        feedback.observation_port(),
         feedback.route_authorization(),
         operation,
     );
@@ -2068,7 +2228,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
                 input,
                 providers: vec![provider],
                 maximum_returned_findings: 32,
-                usage: tracedecay_application::feedback::FeedbackBudgetUsage {
+                usage: tracedecay_contracts::feedback::FeedbackBudgetUsage {
                     completed_at: UtcMicros(now.0.saturating_add(1_000)),
                     tokens_consumed: 1,
                     cost_microunits: 1,
@@ -2179,7 +2339,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         FeedbackFindingLifecycleV1::Active
     );
     // `Clean` is reserved for a covered cycle that found nothing, so a positive
-    // four-pillar cycle terminates `Blocked` — findings present, coverage
+    // four-pillar cycle terminates `Blocked`, findings present, coverage
     // complete. The point of pinning it is that it is neither `Clean` (which
     // would mean the pillars produced nothing) nor any degraded terminal.
     assert_eq!(

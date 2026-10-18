@@ -29,6 +29,6 @@ The product never invents private chain-of-thought, transcript content, authorsh
 
 ## Production authorities
 
-- Each underlying authority—Work, Sessions, Agents, local Git, Code, pull requests, reviews, CI, releases, and generation freshness—reports its own ready, served-empty, partial, stale, denied, rate-limited, not-published, unavailable, or failed state.
+- Each underlying authority, Work, Sessions, Agents, local Git, Code, pull requests, reviews, CI, releases, and generation freshness, reports its own ready, served-empty, partial, stale, denied, rate-limited, not-published, unavailable, or failed state.
 - Missing provider authority is represented as `not_published · requires github_read_authority`; it does not erase locally available repository and pipeline evidence.
 - The journey projection carries source identity and evidence grade (`exact`, `explicit`, `inferred`, `ambiguous`, or `unavailable`) without converting missing data into a successful empty result.

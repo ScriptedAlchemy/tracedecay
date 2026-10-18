@@ -5,12 +5,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tracedecay_application::feedback::FeedbackFindingReadV1;
-use tracedecay_application::{
+use tracedecay_contracts::feedback::FeedbackFindingReadV1;
+use tracedecay_contracts::{
     HandoffAuthoritySnapshotV1, HandoffOpenBindingV1, HandoffOpenError, HandoffOpenService,
     HandoffOpenTargetError, HandoffOpenTargetPort, HandoffOpenTargetV1,
     investigation_owner_version_digest,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::administrative_effect::{administrative_authority, administrative_command_effect};
 use super::*;
@@ -38,26 +39,45 @@ impl HandoffOpenTargetPort for DaemonHandoffOpenTargets {
                 HandoffOpenTargetV1::Task {
                     task_id, version, ..
                 } => {
-                    let authority = WorkAuthority::new(
-                        context.scope().project_id.clone(),
-                        context.scope().repository_id.clone(),
-                        context.scope().worktree_id.clone(),
-                        context.actor().clone(),
-                        context.grant().digest.clone(),
+                    let selection = tracedecay_contracts::WorkProductSelectionScopeV1::relations(
+                        std::collections::BTreeSet::from([
+                            tracedecay_contracts::WorkProductAuthorizedRelationScopeV1::Repository {
+                                project_id: context.scope().project_id.clone(),
+                                repository_id: context.scope().repository_id.clone(),
+                            },
+                        ]),
                     )
                     .map_err(|_| HandoffOpenTargetError::Unavailable)?;
-                    match tracedecay_application::WorkStoragePort::projection(
-                        &self.work, &authority, task_id,
-                    ) {
-                        Ok(projection) => Ok(projection.version() == *version),
-                        Err(tracedecay_application::WorkStorageError::NotFoundOrNotAuthorized) => {
-                            Ok(false)
+                    let binding = tracedecay_contracts::WorkProductBindingV1::new(
+                        CapabilityId::new("capability.work.views")
+                            .map_err(|_| HandoffOpenTargetError::Unavailable)?,
+                        UseCaseId::new("use-case.work.views")
+                            .map_err(|_| HandoffOpenTargetError::Unavailable)?,
+                    );
+                    let read = tracedecay_contracts::WorkProductReadServiceV1::new(
+                        self.work.clone(),
+                        self.work.clone(),
+                        binding,
+                    )
+                    .read_graph(
+                        context,
+                        tracedecay_contracts::WorkGraphReadRequestV1::current(
+                            selection,
+                            self.observed_at,
+                        ),
+                    );
+                    match read {
+                        Ok(tracedecay_contracts::WorkGraphReadV1::Current { snapshot, .. }) => {
+                            Ok(snapshot.graph().item(task_id).is_some()
+                                && snapshot.graph().version().get() == version.get())
                         }
-                        Err(
-                            tracedecay_application::WorkStorageError::VersionConflict
-                            | tracedecay_application::WorkStorageError::IdempotencyConflict
-                            | tracedecay_application::WorkStorageError::Unavailable,
-                        ) => Err(HandoffOpenTargetError::Unavailable),
+                        Ok(tracedecay_contracts::WorkGraphReadV1::Absent { .. }) => Ok(false),
+                        Ok(
+                            tracedecay_contracts::WorkGraphReadV1::AsOf { .. }
+                            | tracedecay_contracts::WorkGraphReadV1::Evolution { .. }
+                            | tracedecay_contracts::WorkGraphReadV1::Forensic { .. },
+                        )
+                        | Err(_) => Err(HandoffOpenTargetError::Unavailable),
                     }
                 }
                 HandoffOpenTargetV1::Investigation {
@@ -141,13 +161,13 @@ fn current_feedback_finding(
             .payload
             .ok_or(HandoffOpenTargetError::Unavailable)
             .map(|result| Some(result.finding)),
-        ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
-            Err(HandoffOpenTargetError::Unavailable)
-        }
+        ApplicationOutcome::Preview(_)
+        | ApplicationOutcome::Effect(_)
+        | ApplicationOutcome::Result(_) => Err(HandoffOpenTargetError::Unavailable),
     }
 }
 
-#[hotpath::measure(label = "daemon.service.handoff.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.handoff.execute", level = "trace", skip_all)]
 pub(super) async fn execute_handoff_application(
     registered: RegisteredWorkRuntime,
     feedback: Option<Arc<FeedbackRuntime>>,
@@ -159,7 +179,7 @@ pub(super) async fn execute_handoff_application(
 ) -> DaemonInvocationResponse {
     let operation_key = request.operation_key();
     let Some((_, capability, use_case)) =
-        tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::HANDOFF_APPLICATION_OPERATION_IDS_V1
             .iter()
             .find(|(operation, _, _)| *operation == operation_key)
     else {
@@ -203,7 +223,7 @@ pub(super) async fn execute_handoff_application(
             );
         }
     };
-    let authority = match registered.database.handoff_open_storage() {
+    let authority = match registered.database.handoff_open_storage().await {
         Ok(authority) => authority,
         Err(_) => {
             return DaemonInvocationResponse::problem(
@@ -243,7 +263,7 @@ pub(super) async fn execute_handoff_application(
         HandoffApplicationInvocationV1::IssueTaskHandoff(request) => service
             .issue_task(&context, request, authority_snapshot, observed_at)
             .await
-            .and_then(|grant| tracedecay_application::IssueTaskHandoffResultV1::from_grant(&grant))
+            .and_then(|grant| tracedecay_contracts::IssueTaskHandoffResultV1::from_grant(&grant))
             .map(HandoffApplicationResult::IssueTask),
         HandoffApplicationInvocationV1::ListTaskHandoffs(request) => service
             .list_task(&context, request, observed_at)
@@ -335,7 +355,7 @@ fn handoff_request_context(
     let context = RequestContext::new(
         registered.actor.clone(),
         registered.grant.scope.clone(),
-        registered.grant.clone(),
+        registered.grant_at(observed_at),
         canonical_request_id.clone(),
         deadline,
         cancellation,
@@ -346,6 +366,11 @@ fn handoff_request_context(
     match context.admission_at(observed_at) {
         RequestAdmission::Cancelled => return Err(HandoffRequestContextError::Cancelled),
         RequestAdmission::TimedOut => return Err(HandoffRequestContextError::TimedOut),
+        RequestAdmission::GrantExpired => {
+            return Err(HandoffRequestContextError::Problem(
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            ));
+        }
         RequestAdmission::Admitted => {}
     }
     if !context.allows(&capability, &use_case) {
@@ -357,10 +382,10 @@ fn handoff_request_context(
 }
 
 enum HandoffApplicationResult {
-    IssueTask(tracedecay_application::IssueTaskHandoffResultV1),
-    ListTask(tracedecay_application::ListTaskHandoffsResultV1),
-    Investigation(tracedecay_application::OpenInvestigationHandoffResultV1),
-    Task(tracedecay_application::OpenTaskHandoffResultV1),
+    IssueTask(tracedecay_contracts::IssueTaskHandoffResultV1),
+    ListTask(tracedecay_contracts::ListTaskHandoffsResultV1),
+    Investigation(tracedecay_contracts::OpenInvestigationHandoffResultV1),
+    Task(tracedecay_contracts::OpenTaskHandoffResultV1),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -450,18 +475,18 @@ fn complete_handoff_effect(
 /// `EffectId`, an idempotency key and a `DurableEffect` receipt, all of which
 /// assert a committed state change. This operation reads the grant store and
 /// leaves it byte-identical, so it carries an operation receipt and a coverage
-/// claim instead — and the coverage claim is only `Complete` when the
+/// claim instead, and the coverage claim is only `Complete` when the
 /// enumeration did not hit its ceiling.
 fn handoff_evidence(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
     operation_key: &str,
     use_case: UseCaseId,
-    result: tracedecay_application::ListTaskHandoffsResultV1,
+    result: tracedecay_contracts::ListTaskHandoffsResultV1,
     observed_at: UtcMicros,
     deadline: Deadline,
 ) -> Result<
-    ApplicationOutcome<tracedecay_application::ListTaskHandoffsResultV1>,
+    ApplicationOutcome<tracedecay_contracts::ListTaskHandoffsResultV1>,
     ApplicationContractError,
 > {
     let (authority, execution) = administrative_authority(
@@ -512,7 +537,7 @@ fn handoff_evidence(
                     field: "handoff list sort contract",
                 }
             })?,
-            tracedecay_application::MAX_HANDOFF_LIST_RESULTS_V1,
+            tracedecay_contracts::MAX_HANDOFF_LIST_RESULTS_V1,
             (!result.truncated).then_some(returned),
             returned,
         )?,

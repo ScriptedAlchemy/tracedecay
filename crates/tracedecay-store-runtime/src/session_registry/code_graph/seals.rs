@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
@@ -17,6 +18,9 @@ pub(super) struct StagedReplayUnlink {
     fingerprint: StagedFileFingerprint,
 }
 
+/// Binds a seal's path to its open handle across one stage-verify-finalize
+/// operation. The seal's bytes are proven by their digest, never by an equal
+/// fingerprint, so no change-time settledness is needed here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StagedFileFingerprint {
     len: u64,
@@ -78,13 +82,13 @@ fn staged_identity_matches(
     let handle_metadata = file
         .metadata()
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    if staged_fingerprint(&path_metadata)? != *expected
-        || staged_fingerprint(&handle_metadata)? != *expected
-    {
-        return Ok(false);
-    }
+    let fingerprint_matches = staged_fingerprint(&path_metadata)? == *expected
+        && staged_fingerprint(&handle_metadata)? == *expected;
     #[cfg(windows)]
     {
+        if !fingerprint_matches {
+            return Ok(false);
+        }
         let path_file =
             File::open(path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         let path_identity = tracedecay_private_fs::windows_file::information(&path_file)
@@ -98,7 +102,7 @@ fn staged_identity_matches(
     }
     #[cfg(unix)]
     {
-        Ok(true)
+        Ok(fingerprint_matches)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -111,12 +115,17 @@ fn staged_identity_matches(
 
 /// Move a replay seal out of the content-addressed namespace while the caller
 /// holds the replay-pool lock. Digest verification happens after releasing it.
-#[hotpath::measure(label = "daemon.session_registry.replay_unlink_stage")]
+#[tracing::instrument(
+    name = "daemon.session_registry.replay_unlink_stage",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn stage_project_graph_replay_unlink(
     replay_root: &Path,
     sealed_digest: &SealedGraphStateDigest,
 ) -> Result<Option<StagedReplayUnlink>, GraphDbError> {
-    let digest = digest_hex(sealed_digest)?;
+    let digest = sha256_hex_suffix(sealed_digest.as_str())
+        .ok_or_else(|| GraphDbError::invalid("code generation replay digest is not sha256"))?;
     let path = replay_root.join(format!("generation-{digest}.json"));
     match path.symlink_metadata() {
         Ok(metadata) => {
@@ -173,14 +182,19 @@ pub(super) fn stage_project_graph_replay_unlink(
 /// Verify outside the replay-pool lock, then reacquire it only to prove and
 /// remove the exact staged inode. A concurrent install at the canonical path
 /// is independent and remains untouched.
-#[hotpath::measure(label = "daemon.session_registry.replay_unlink_finalize")]
+#[tracing::instrument(
+    name = "daemon.session_registry.replay_unlink_finalize",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn finalize_project_graph_replay_unlink(
     staged: StagedReplayUnlink,
     replay_root: &Path,
     sealed_digest: &SealedGraphStateDigest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    let digest = digest_hex(sealed_digest)?;
+    let digest = sha256_hex_suffix(sealed_digest.as_str())
+        .ok_or_else(|| GraphDbError::invalid("code generation replay digest is not sha256"))?;
     let verified = verify_seal_digest(&staged.path, digest, check);
     let _pool = lock_project_graph_replay_pool(replay_root, check)?;
     if !staged_identity_matches(&staged.path, &staged.file, &staged.fingerprint)? {
@@ -195,7 +209,11 @@ pub(super) fn finalize_project_graph_replay_unlink(
     verified
 }
 
-#[hotpath::measure(label = "daemon.session_registry.replay_pool_lock")]
+#[tracing::instrument(
+    name = "daemon.session_registry.replay_pool_lock",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn lock_project_graph_replay_pool(
     replay_root: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -217,6 +235,93 @@ pub(super) fn lock_project_graph_replay_pool(
     lock_code_generation_store(replay_root, check)
 }
 
+/// Opened seal inode captured under the replay-pool lock. Hashing and
+/// materialization run after the lock is released; mutation reacquires and
+/// revalidates this exact identity.
+pub(super) struct StableSealedSourceProofV1 {
+    path: PathBuf,
+    file: File,
+    fingerprint: StagedFileFingerprint,
+}
+
+fn resolve_stable_seal_path(
+    generations_root: &Path,
+    replay_root: &Path,
+    digest: &str,
+) -> Result<PathBuf, GraphDbError> {
+    let seal_file = format!("generation-{digest}.json");
+    let canonical = generations_root.join(&seal_file);
+    let pool = replay_root.join(&seal_file);
+    match canonical.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(canonical),
+        Ok(_) => Err(GraphDbError::Corrupt {
+            message: "canonical sealed generation is not a regular file".to_owned(),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match pool.symlink_metadata() {
+                Ok(metadata) if metadata.file_type().is_file() => Ok(pool),
+                Ok(_) => Err(GraphDbError::Corrupt {
+                    message: "project graph replay seal is not a regular file".to_owned(),
+                }),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Err(GraphDbError::Corrupt {
+                        message: "sealed generation source is missing from the canonical root and the replay pool".to_owned(),
+                    })
+                }
+                Err(error) => Err(GraphDbError::unavailable(error.to_string())),
+            }
+        }
+        Err(error) => Err(GraphDbError::unavailable(error.to_string())),
+    }
+}
+
+/// Prove the durable seal's stable identity, then release the replay-pool
+/// lock so digest scanning can run without blocking cleanup.
+pub(super) fn prove_stable_sealed_source(
+    generations_root: &Path,
+    replay_root: &Path,
+    sealed_state_digest: &SealedGraphStateDigest,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<StableSealedSourceProofV1, GraphDbError> {
+    let digest = sha256_hex_suffix(sealed_state_digest.as_str())
+        .ok_or_else(|| GraphDbError::invalid("code generation replay digest is not sha256"))?;
+    let _pool = lock_project_graph_replay_pool(replay_root, check)?;
+    let path = resolve_stable_seal_path(generations_root, replay_root, digest)?;
+    let file = File::open(&path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+    let fingerprint = staged_fingerprint(
+        &file
+            .metadata()
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?,
+    )?;
+    if !staged_identity_matches(&path, &file, &fingerprint)? {
+        return Err(GraphDbError::conflict("seals.prove_stable_sealed_source"));
+    }
+    Ok(StableSealedSourceProofV1 {
+        path,
+        file,
+        fingerprint,
+    })
+}
+
+/// Reacquire the replay-pool lock and refuse mutation unless the proven inode
+/// is still the path's exact identity.
+pub(super) fn revalidate_stable_sealed_source(
+    proof: &StableSealedSourceProofV1,
+    replay_root: &Path,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<
+    tracedecay_code_index_retention::code_index_generations::CodeGenerationStoreLockV1,
+    GraphDbError,
+> {
+    let pool = lock_project_graph_replay_pool(replay_root, check)?;
+    if !staged_identity_matches(&proof.path, &proof.file, &proof.fingerprint)? {
+        return Err(GraphDbError::conflict(
+            "seals.revalidate_stable_sealed_source",
+        ));
+    }
+    Ok(pool)
+}
+
 fn lock_code_generation_store(
     root: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -235,19 +340,16 @@ fn lock_code_generation_store(
     }
 }
 
-fn digest_hex(sealed: &SealedGraphStateDigest) -> Result<&str, GraphDbError> {
-    sealed
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or_else(|| GraphDbError::invalid("code generation replay digest is not sha256"))
-}
-
 fn sync_replay_root(replay_root: &Path) -> Result<(), GraphDbError> {
     sync_directory(replay_root, DirectorySyncPolicy::Strict)
         .map_err(|error| GraphDbError::unavailable(error.to_string()))
 }
 
-#[hotpath::measure(label = "daemon.session_registry.verify_seal_digest")]
+#[tracing::instrument(
+    name = "daemon.session_registry.verify_seal_digest",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn verify_seal_digest(
     path: &Path,
     expected: &str,
@@ -306,6 +408,7 @@ mod tests {
 
     use super::{
         finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
+        prove_stable_sealed_source, revalidate_stable_sealed_source,
         stage_project_graph_replay_unlink, verify_seal_digest,
     };
 
@@ -471,5 +574,77 @@ mod tests {
         assert_eq!(std::fs::read(staged_path).unwrap(), bytes);
         assert_eq!(std::fs::read(retained).unwrap(), bytes);
         assert!(!canonical.exists());
+    }
+
+    #[test]
+    fn journal_resume_source_scan_releases_replay_pool_lock() {
+        let temp = TempDir::new().unwrap();
+        let generations_root = temp.path().join("code-generations-v1");
+        let replay_root = temp.path().join("graph-replay");
+        std::fs::create_dir_all(&generations_root).unwrap();
+        drop(lock_project_graph_replay_pool(&replay_root, &|| Ok(())).unwrap());
+        let bytes = vec![b'x'; 3 * 64 * 1024];
+        let digest_hex = hex::encode(Sha256::digest(&bytes));
+        let digest =
+            tracedecay_graph_db::SealedGraphStateDigest::try_from(format!("sha256:{digest_hex}"))
+                .unwrap();
+        std::fs::write(
+            generations_root.join(format!("generation-{digest_hex}.json")),
+            &bytes,
+        )
+        .unwrap();
+
+        let proof =
+            prove_stable_sealed_source(&generations_root, &replay_root, &digest, &|| Ok(()))
+                .unwrap();
+        let pool_acquisitions_during_scan = AtomicUsize::new(0);
+        verify_seal_digest(&proof.path, &digest_hex, &|| {
+            match tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_lock(
+                &replay_root,
+            ) {
+                Ok(Some(lock)) => {
+                    pool_acquisitions_during_scan.fetch_add(1, Ordering::SeqCst);
+                    drop(lock);
+                    Ok(())
+                }
+                Ok(None) => Ok(()),
+                Err(error) => Err(GraphDbError::unavailable(error.to_string())),
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            pool_acquisitions_during_scan.load(Ordering::SeqCst),
+            5,
+            "digest scan checks the replay-pool lock before each 64KiB read, at EOF, and once more"
+        );
+        drop(revalidate_stable_sealed_source(&proof, &replay_root, &|| Ok(())).unwrap());
+    }
+
+    #[test]
+    fn journal_resume_source_revalidate_conflicts_on_replaced_inode() {
+        let temp = TempDir::new().unwrap();
+        let generations_root = temp.path().join("code-generations-v1");
+        let replay_root = temp.path().join("graph-replay");
+        std::fs::create_dir_all(&generations_root).unwrap();
+        drop(lock_project_graph_replay_pool(&replay_root, &|| Ok(())).unwrap());
+        let bytes = b"sealed generation";
+        let digest_hex = hex::encode(Sha256::digest(bytes));
+        let digest =
+            tracedecay_graph_db::SealedGraphStateDigest::try_from(format!("sha256:{digest_hex}"))
+                .unwrap();
+        let path = generations_root.join(format!("generation-{digest_hex}.json"));
+        std::fs::write(&path, bytes).unwrap();
+        let proof =
+            prove_stable_sealed_source(&generations_root, &replay_root, &digest, &|| Ok(()))
+                .unwrap();
+        let retained = path.with_extension("retained-evidence");
+        std::fs::rename(&path, &retained).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            revalidate_stable_sealed_source(&proof, &replay_root, &|| Ok(())),
+            Err(GraphDbError::Conflict { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read(retained).unwrap(), bytes);
     }
 }

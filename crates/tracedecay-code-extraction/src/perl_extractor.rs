@@ -1,21 +1,23 @@
 /// Tree-sitter based Perl source code extractor.
 ///
 /// Parses Perl source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{PERL_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Perl source files using tree-sitter.
 pub struct PerlExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -23,18 +25,15 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Depth of package nesting. > 0 means we are inside a package.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -42,7 +41,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -52,8 +51,7 @@ impl ExtractionState {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -68,35 +66,12 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl PerlExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_perl(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -114,7 +89,7 @@ impl PerlExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -128,6 +103,7 @@ impl PerlExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -148,11 +124,6 @@ impl PerlExtractor {
         )
     }
 
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("perl", "Perl", source)
-    }
-
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_definition" => Self::visit_function(state, node),
@@ -167,9 +138,10 @@ impl PerlExtractor {
     ///
     /// If `class_depth` > 0, this is a method inside a package; otherwise it is a top-level function.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let kind = if state.class_depth > 0 {
             NodeKind::Method
@@ -184,8 +156,8 @@ impl PerlExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &PERL_COMPLEXITY, &state.source);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
+        let metrics = count_complexity(node, &PERL_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -209,6 +181,7 @@ impl PerlExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -237,10 +210,12 @@ impl PerlExtractor {
     /// we handle them by scanning ahead through siblings until the next
     /// `package_statement` or end of the `source_file` children.
     fn visit_package(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "package_name")
-            .map_or_else(|| "<anonymous>".to_string(), |pn| state.node_text(pn));
+        let name = find_direct_child_by_kind(node, "package_name").map_or_else(
+            || "<anonymous>".to_string(),
+            |pn| state.node_text(pn).to_string(),
+        );
 
-        // Skip `package main;` — it just returns to the top-level scope.
+        // Skip `package main;`. It just returns to the top-level scope.
         if name == "main" {
             // Pop any existing package scope.
             if state.class_depth > 0 {
@@ -266,7 +241,13 @@ impl PerlExtractor {
         let end_column = 0u32;
 
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            node,
+        );
 
         let text = state.node_text(node);
         let signature = text
@@ -297,6 +278,7 @@ impl PerlExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -316,8 +298,8 @@ impl PerlExtractor {
         state.node_stack.push((name.clone(), id));
         state.class_depth += 1;
 
-        // We don't recurse into the package_statement node itself —
-        // the siblings (function_definition, etc.) will be visited by
+        // We don't recurse into the package_statement node itself.
+        // The siblings (function_definition, etc.) will be visited by
         // the parent visit_children call. They will see class_depth > 0.
     }
 
@@ -339,9 +321,10 @@ impl PerlExtractor {
 
     /// Extract a `use` or `require` statement as a Use node.
     fn visit_use(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("package_name")
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("package_name").map_or_else(
+            || "<unknown>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -349,7 +332,7 @@ impl PerlExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -373,6 +356,7 @@ impl PerlExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -405,8 +389,7 @@ impl PerlExtractor {
             if is_our {
                 let var_name = left_node
                     .child_by_field_name("variable_name")
-                    .map(|n| state.node_text(n))
-                    .unwrap_or_default();
+                    .map_or_default(|n| state.node_text(n));
 
                 // Only treat ALL_CAPS variables as constants.
                 let bare_name = var_name.trim_start_matches('$');
@@ -422,8 +405,13 @@ impl PerlExtractor {
                     let end_column = node.end_position().column as u32;
                     let text = state.node_text(node);
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                    let id =
-                        generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+                    let id = local_node_id(
+                        &state.file_path,
+                        state.source,
+                        &NodeKind::Const,
+                        &name,
+                        node,
+                    );
                     let docstring = Self::extract_docstring(state, node);
 
                     let graph_node = Node {
@@ -448,6 +436,7 @@ impl PerlExtractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     };
@@ -526,14 +515,16 @@ impl PerlExtractor {
 
                         if let Some(name) = callee_name {
                             // Skip Perl built-in keywords that aren't real calls.
-                            if !Self::is_perl_builtin(&name) {
+                            if !Self::is_perl_builtin(name) {
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: fn_node_id.to_string(),
-                                    reference_name: name,
+                                    reference_name: name.to_string(),
                                     reference_kind: EdgeKind::Calls,
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -553,6 +544,8 @@ impl PerlExtractor {
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -578,15 +571,19 @@ impl PerlExtractor {
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             } else {
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: fn_node_id.to_string(),
-                                    reference_name: name,
+                                    reference_name: name.to_string(),
                                     reference_kind: EdgeKind::Calls,
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -681,18 +678,15 @@ impl crate::LanguageExtractor for PerlExtractor {
         "Perl"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_perl(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        match scope {
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(match scope {
             crate::parsed_extraction::ParsedExtractionScope::FullDocument => {
                 Self::extract_tree(file_path, source, tree, scope)
             }
@@ -709,6 +703,6 @@ impl crate::LanguageExtractor for PerlExtractor {
                     source.len(),
                 )
             }
-        }
+        })
     }
 }

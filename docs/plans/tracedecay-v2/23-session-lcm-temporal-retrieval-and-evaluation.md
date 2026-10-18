@@ -169,7 +169,7 @@ The kernel executes in this order:
    text, every semantic filter, provider/session selector, grain, temporal mode
    and cutoff, budget, ranking/diversity versions, and policy digest into one
    canonical request.
-2. `SessionTemporalExecutionPort` freezes a sorted manifest for every
+2. `RegisteredGlobalDbSessionTemporalExecution::execute` freezes a sorted manifest for every
    participating session/source: store generation and source, projection,
    graph, index, summary, configuration, and authorization watermarks.
 3. `TemporalReadPort` emits compact exact-literal, lexical, phrase, fuzzy,
@@ -362,7 +362,7 @@ values cannot disagree.
 
 The receipt is carried through `SessionRefreshProgressV1`,
 `SessionRefreshReceiptV1`, `SessionTemporalExecutionReport`, and
-`crates/tracedecay-usecases/src/session/types.rs::SessionTemporalMetadataView`. The view binds
+`crates/tracedecay-session-runtime/src/session_retrieval/contract.rs::SessionTemporalMetadataView`. The view binds
 the requested mode/cutoff and the complete sorted source receipts. Aggregate
 freshness is derived from source receipts and is never hard-coded to `Fresh`.
 Wrong scope is the request-level
@@ -431,9 +431,9 @@ reads.
 - `crates/tracedecay-store/src/session/common.rs` owns
   `SessionFrozenWatermarksV1`, expanded to the sorted per-session/per-source
   manifest.
-- `projection.rs::SessionTemporalProjectionStore` owns generation writes,
-  derived records/members, count/digest receipts, ready/active transitions, and
-  immutable replay.
+- `projection.rs` owns the bounded projection batch and its count/digest
+  receipt contracts; candidate generations are written, activated, and
+  replayed only through the refresh port below.
 - `retrieval.rs::SessionRetrievalStore` owns frozen compact reads and
   `expand_derived_members(snapshot, id, after_ordinal, limit)`.
 - `summary.rs::SessionSummaryStore` owns immutable summary publication and leaf
@@ -460,13 +460,13 @@ reads.
 - `src/query/temporal/context.rs` owns exact-budget context assembly.
 - `src/query/temporal/mod.rs::execute_temporal_kernel` is the sole orchestration
   entry point.
-- `crates/tracedecay-usecases/src/session/retrieval.rs::SessionRetrievalService::retrieve`
+- `crates/tracedecay-session-memory/src/session/retrieval.rs::SessionRetrievalService::retrieve`
   owns authorization and canonical request construction.
-- `crates/tracedecay-usecases/src/session/ports.rs::SessionTemporalExecutionPort` owns the
+- `crates/tracedecay-session-temporal-store/src/lib.rs::RegisteredGlobalDbSessionTemporalExecution` owns the
   application/kernel boundary.
-- `crates/tracedecay-usecases/src/session/refresh.rs::SessionRefreshService` owns explicit
+- `crates/tracedecay-session-memory/src/session/refresh.rs::SessionRefreshService` owns explicit
   refresh begin-or-join, status, and cancellation.
-- `crates/tracedecay-usecases/src/session/types.rs` owns application request, result,
+- `crates/tracedecay-session-memory/src/session/types.rs` owns application request, result,
   freshness, abstention, and coverage views.
 
 ### Database, daemon, and final-store admission

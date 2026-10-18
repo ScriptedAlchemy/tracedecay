@@ -2,7 +2,7 @@
 design_status: current
 ---
 
-# Loom 06 — Feedback continuation
+# Loom 06, Feedback continuation
 
 - **Asset:** `06-feedback-continuation.png`
 - **Lifecycle:** `current`
@@ -32,7 +32,7 @@ Feedback is written to TraceDecay's local feedback authority. Its lifecycle is `
 
 ## Evidence and honesty
 
-The feedback record, its author/time, and its target are exact local facts. “Acted upon” requires evidenced later work; proximity alone is not enough. Provider acknowledgements, private reasoning, and external comment delivery are never fabricated. The canonical evidence ladder applies to every continuation edge.
+The feedback record, its author/time, and its target are exact local facts. "Acted upon" requires evidenced later work; proximity alone is not enough. Provider acknowledgements, private reasoning, and external comment delivery are never fabricated. The canonical evidence ladder applies to every continuation edge.
 
 ## Scale and accessibility acceptance
 

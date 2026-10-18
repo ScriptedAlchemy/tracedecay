@@ -1,73 +1,66 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 use crate::runtime::host_scan::HostScanBudget;
-use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
+use crate::runtime::source::TranscriptIngestResult;
 
 use super::opencode::{
     MAX_ID_BYTES, MAX_MESSAGES_PER_PAGE, OpenCodeMessageRef, OpenCodePageCursor,
-    OpenCodeReferencePage, OpenCodeScanSource, install_progress_handler, open_scan_connection,
+    OpenCodeReferencePage, OpenCodeScanSource, install_progress_handler, invalid_frame, scan_error,
     sql_text,
 };
 
-const PROVIDER: &str = "opencode";
-
 pub(super) fn scan_part_reference_page(
+    connection: &Connection,
     source: &OpenCodeScanSource,
     cursor: OpenCodePageCursor,
     mut budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenCodeReferencePage, HostScanBudget)> {
-    let Some(connection) = open_scan_connection(source, &mut budget)? else {
-        return Ok((
-            OpenCodeReferencePage {
-                references: Vec::new(),
-                next: cursor,
-                source_complete: true,
-            },
-            budget,
-        ));
-    };
-    install_progress_handler(&connection, &source.source_path, &budget)?;
+    install_progress_handler(connection, &source.source_path, &budget)?;
     let matcher = source.scope_matcher();
     let mut statement = connection
         .prepare(
-            "SELECT p.rowid AS change_rowid,
-                    m.rowid AS message_rowid,
-                    CASE WHEN length(m.id) <= ?1 THEN m.id ELSE NULL END AS message_id,
-                    CASE WHEN length(m.session_id) <= ?1 THEN m.session_id ELSE NULL END
+            "WITH page AS (
+                 SELECT p.rowid AS change_rowid, m.rowid AS message_rowid,
+                        m.id, m.session_id, s.directory, length(m.data) AS message_bytes
+                 FROM part p
+                 JOIN message m ON m.id = p.message_id
+                 JOIN session s ON s.id = m.session_id
+                 WHERE p.rowid > ?2
+                 ORDER BY p.rowid
+                 LIMIT ?3
+             ),
+             part_sums AS (
+                 SELECT all_parts.message_id,
+                        SUM(length(all_parts.data)) AS part_bytes,
+                        MAX(length(all_parts.data)) AS max_part_bytes,
+                        COUNT(*) AS part_count
+                 FROM part all_parts
+                 WHERE all_parts.message_id IN (SELECT id FROM page)
+                 GROUP BY all_parts.message_id
+             )
+             SELECT page.change_rowid,
+                    page.message_rowid,
+                    CASE WHEN length(page.id) <= ?1 THEN page.id ELSE NULL END AS message_id,
+                    CASE WHEN length(page.session_id) <= ?1 THEN page.session_id ELSE NULL END
                         AS session_id,
-                    CASE WHEN length(s.directory) <= ?1 THEN s.directory ELSE NULL END
+                    CASE WHEN length(page.directory) <= ?1 THEN page.directory ELSE NULL END
                         AS directory,
-                    length(m.data) AS message_bytes,
-                    COALESCE((
-                        SELECT SUM(length(all_parts.data))
-                        FROM part all_parts
-                        WHERE all_parts.message_id = m.id
-                    ), 0) AS part_bytes,
-                    COALESCE((
-                        SELECT MAX(length(all_parts.data))
-                        FROM part all_parts
-                        WHERE all_parts.message_id = m.id
-                    ), 0) AS max_part_bytes,
-                    (
-                        SELECT COUNT(*)
-                        FROM part all_parts
-                        WHERE all_parts.message_id = m.id
-                    ) AS part_count,
+                    page.message_bytes,
+                    COALESCE(part_sums.part_bytes, 0) AS part_bytes,
+                    COALESCE(part_sums.max_part_bytes, 0) AS max_part_bytes,
+                    COALESCE(part_sums.part_count, 0) AS part_count,
                     (
                         SELECT COUNT(*) - 1
                         FROM message ordered
-                        WHERE ordered.session_id = m.session_id
-                          AND ordered.rowid <= m.rowid
+                        WHERE ordered.session_id = page.session_id
+                          AND ordered.rowid <= page.message_rowid
                     ) AS source_order
-             FROM part p
-             JOIN message m ON m.id = p.message_id
-             JOIN session s ON s.id = m.session_id
-             WHERE p.rowid > ?2
-             ORDER BY p.rowid
-             LIMIT ?3",
+             FROM page
+             LEFT JOIN part_sums ON part_sums.message_id = page.id
+             ORDER BY page.change_rowid",
         )
         .map_err(|error| scan_error("prepare part change query", &source.source_path, error))?;
     let mut rows = statement
@@ -176,20 +169,4 @@ pub(super) fn scan_part_reference_page(
         },
         budget,
     ))
-}
-
-fn scan_error(
-    operation: &'static str,
-    path: &Path,
-    error: impl std::error::Error + Send + Sync + 'static,
-) -> TranscriptIngestError {
-    TranscriptIngestError::ScanIo {
-        operation,
-        path: path.to_path_buf(),
-        source: std::io::Error::other(error),
-    }
-}
-
-const fn invalid_frame() -> TranscriptIngestError {
-    TranscriptIngestError::InvalidFrameState { provider: PROVIDER }
 }

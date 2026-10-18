@@ -1,59 +1,58 @@
 //! `tracedecay analytics …` entry points: thin daemon admin-CLI round-trips.
 
 use std::path::PathBuf;
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use serde_json::{Value, json};
+use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
 
-fn cli_project_root() -> Option<PathBuf> {
+use crate::commands::{admin_cli_result, admin_cli_result_mismatch, admin_cli_scope};
+
+fn cli_project_root(profile: &ProfileRoot) -> Option<PathBuf> {
     std::env::current_dir()
         .ok()
-        .and_then(|cwd| tracedecay_runtime_core::config::discover_project_root(&cwd))
+        .and_then(|cwd| profile.discover_project_root(&cwd))
 }
-
 /// `tracedecay analytics sync`: import hook JSONL rows into the durable
 /// `analytics_events` table and print what happened.
-pub async fn run_analytics_sync() -> tracedecay_domain::errors::Result<()> {
-    let project_root = cli_project_root();
-    let outcome = call_admin_cli(project_root, json!({ "action": "analytics_sync" })).await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&outcome).unwrap_or_default()
-    );
+pub async fn run_analytics_sync(profile: &ProfileRoot) -> tracedecay_domain::errors::Result<()> {
+    let project_root = cli_project_root(profile);
+    let outcome = match admin_cli_result(
+        profile,
+        project_root.as_deref(),
+        AdminCliSurfaceRequestV1::AnalyticsSync {
+            scope: admin_cli_scope(project_root.as_deref()),
+        },
+    )
+    .await?
+    {
+        AdminCliResultV1::AnalyticsSync(outcome) => outcome,
+        _ => return Err(admin_cli_result_mismatch("analytics_sync")),
+    };
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
     Ok(())
 }
-
 /// `tracedecay analytics diagnostics`: the CLI wrapper around the dashboard
-/// diagnostics summary — durable `analytics_events` plus merged hook JSONL.
+/// diagnostics summary, durable `analytics_events` plus merged hook JSONL.
 pub async fn run_analytics_diagnostics(
+    profile: &ProfileRoot,
     all_projects: bool,
     no_sync: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_root = cli_project_root();
-    let summary = call_admin_cli(
-        project_root,
-        json!({
-            "action": "analytics_diagnostics",
-            "all": all_projects,
-            "no_sync": no_sync,
-        }),
+    let project_root = cli_project_root(profile);
+    let summary = match admin_cli_result(
+        profile,
+        project_root.as_deref(),
+        AdminCliSurfaceRequestV1::AnalyticsDiagnostics {
+            scope: admin_cli_scope(project_root.as_deref()),
+            all: all_projects,
+            no_sync,
+        },
     )
-    .await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&summary).unwrap_or_default()
-    );
+    .await?
+    {
+        AdminCliResultV1::AnalyticsDiagnostics(summary) => summary,
+        _ => return Err(admin_cli_result_mismatch("analytics_diagnostics")),
+    };
+    println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
-}
-
-#[hotpath::measure(label = "cli.analytics.admin_call", future = true)]
-async fn call_admin_cli(
-    project_root: Option<PathBuf>,
-    arguments: Value,
-) -> tracedecay_domain::errors::Result<Value> {
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)?;
-    let result =
-        tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
-            .await?;
-    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }

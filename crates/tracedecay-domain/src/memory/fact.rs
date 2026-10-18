@@ -71,6 +71,20 @@ pub enum FactCategoryV1 {
     CodeArea,
 }
 
+impl FactCategoryV1 {
+    /// The serde wire label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::UserPref => "user_pref",
+            Self::Project => "project",
+            Self::Tool => "tool",
+            Self::Decision => "decision",
+            Self::CodeArea => "code_area",
+        }
+    }
+}
+
 /// Stable source material from which a fact identity is derived. Mutable text,
 /// paths, ranks, and timestamps are deliberately excluded.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -488,6 +502,15 @@ pub enum FactAssertionKindV1 {
 }
 
 impl FactAssertionKindV1 {
+    /// The assertions this one supersedes, in canonical order.
+    pub fn supersedes(&self) -> &[FactAssertionId] {
+        match self {
+            Self::Correction { supersedes } => std::slice::from_ref(supersedes),
+            Self::Merge { supersedes } => supersedes,
+            Self::Initial => &[],
+        }
+    }
+
     fn canonicalized(mut self) -> Result<Self, DomainError> {
         match &mut self {
             Self::Correction { supersedes } => supersedes.validate(),

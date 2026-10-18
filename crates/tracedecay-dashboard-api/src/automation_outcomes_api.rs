@@ -2,61 +2,67 @@
 //! activated managed skills and recall trajectory of automatically applied
 //! facts.
 
-use axum::extract::{Extension, State};
-use axum::http::StatusCode;
-use axum::response::Json;
-use serde_json::{Value, json};
+use axum::extract::State;
+use axum::response::{IntoResponse, Json, Response};
+use schemars::JsonSchema;
+use serde::Serialize;
 
 use super::automation_authority_error_response;
 use super::exact_automation_authority;
-use super::{DashboardAutomationAuthorityErrorV1, DashboardHttpRequestControlV1, DashboardState};
-use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_code};
-use crate::read_model::DashboardDomainStateV1;
+use super::{DashboardAutomationAuthorityErrorV1, DashboardState, RequestControl};
+use crate::memory_api::control::{
+    fact_read_control, request_terminal_state, terminal_read_response,
+};
 use tracedecay_automation_runtime::automation::managed_skills::list_managed_skills;
 use tracedecay_automation_runtime::automation::outcomes::{
-    AutomationOutcomesSnapshot, compute_fact_outcomes, compute_skill_outcomes,
-    load_outcomes_snapshot,
+    AutomationOutcomesSnapshot, FactOutcomeRecord, SkillOutcomeRecord, compute_fact_outcomes,
+    compute_skill_outcomes, load_outcomes_snapshot,
 };
 use tracedecay_automation_runtime::automation::skill_usage::summarize_skill_usage;
 use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_store::FactReadControl;
 
-#[hotpath::measure(label = "dashboard_api.outcomes.read", future = true)]
+/// Refresh watermarks of the persisted outcomes snapshot. `available` is
+/// false when the snapshot could not be read, which differs from a snapshot
+/// that was never refreshed.
+#[derive(Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub(crate) struct AutomationOutcomesSnapshotStatusV1 {
+    available: bool,
+    skills_refreshed_at: Option<i64>,
+    facts_refreshed_at: Option<i64>,
+}
+
+/// `GET /api/automation/outcomes`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct AutomationOutcomesPayloadV1 {
+    generated_at: i64,
+    skills: Vec<SkillOutcomeRecord>,
+    facts: Vec<FactOutcomeRecord>,
+    snapshot: AutomationOutcomesSnapshotStatusV1,
+    /// Why the snapshot could not be read; empty when it was.
+    error: String,
+}
+
+#[tracing::instrument(name = "dashboard_api.outcomes.read", level = "trace", skip_all)]
 pub async fn outcomes(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
-) -> (StatusCode, Json<Value>) {
-    let Some(Extension(control)) = control else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "detail": "dashboard HTTP request admission is unavailable",
-            })),
-        );
-    };
+    RequestControl(control): RequestControl,
+) -> Response {
     let result = outcomes_payload(&state, &fact_read_control(&control)).await;
     if let Some(state) = request_terminal_state(&control) {
-        let (code, detail) = terminal_read_code(state);
-        return (
-            if state == DashboardDomainStateV1::TimedOut {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::REQUEST_TIMEOUT
-            },
-            Json(json!({"detail": detail, "code": code})),
-        );
+        return terminal_read_response(state).into_response();
     }
     match result {
-        Ok(payload) => (StatusCode::OK, Json(payload)),
-        Err(error) => automation_authority_error_response(error),
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => automation_authority_error_response(error).into_response(),
     }
 }
 
 async fn outcomes_payload(
     state: &DashboardState,
     read_control: &FactReadControl,
-) -> std::result::Result<Value, DashboardAutomationAuthorityErrorV1> {
+) -> std::result::Result<AutomationOutcomesPayloadV1, DashboardAutomationAuthorityErrorV1> {
     let now = current_timestamp();
     let authority = exact_automation_authority(state)?;
     let profile_root = authority.profile_root();
@@ -82,13 +88,13 @@ async fn outcomes_payload(
         .map_err(automation_failure)?;
 
     let (snapshot, error) = snapshot_fields(load_outcomes_snapshot(&state.dashboard_root).await);
-    Ok(json!({
-        "generated_at": now,
-        "skills": skill_outcomes,
-        "facts": fact_outcomes,
-        "snapshot": snapshot,
-        "error": error,
-    }))
+    Ok(AutomationOutcomesPayloadV1 {
+        generated_at: now,
+        skills: skill_outcomes,
+        facts: fact_outcomes,
+        snapshot,
+        error,
+    })
 }
 
 fn automation_failure(error: impl ToString) -> DashboardAutomationAuthorityErrorV1 {
@@ -106,22 +112,24 @@ fn automation_failure(error: impl ToString) -> DashboardAutomationAuthorityError
 /// A snapshot that failed to load is not a snapshot that has never been
 /// refreshed: reporting the defaulted `None` watermarks with an empty `error`
 /// asserted that the read succeeded and found nothing.
-fn snapshot_fields(loaded: Result<AutomationOutcomesSnapshot>) -> (Value, String) {
+fn snapshot_fields(
+    loaded: Result<AutomationOutcomesSnapshot>,
+) -> (AutomationOutcomesSnapshotStatusV1, String) {
     match loaded {
         Ok(snapshot) => (
-            json!({
-                "available": true,
-                "skills_refreshed_at": snapshot.skills_refreshed_at,
-                "facts_refreshed_at": snapshot.facts_refreshed_at,
-            }),
+            AutomationOutcomesSnapshotStatusV1 {
+                available: true,
+                skills_refreshed_at: snapshot.skills_refreshed_at,
+                facts_refreshed_at: snapshot.facts_refreshed_at,
+            },
             String::new(),
         ),
         Err(error) => (
-            json!({
-                "available": false,
-                "skills_refreshed_at": Value::Null,
-                "facts_refreshed_at": Value::Null,
-            }),
+            AutomationOutcomesSnapshotStatusV1 {
+                available: false,
+                skills_refreshed_at: None,
+                facts_refreshed_at: None,
+            },
             error.to_string(),
         ),
     }
@@ -139,9 +147,14 @@ mod tests {
             message: "failed to parse automation outcomes snapshot '/x/outcomes.json'".to_owned(),
         }));
 
-        assert_eq!(snapshot["available"], json!(false));
-        assert_eq!(snapshot["skills_refreshed_at"], Value::Null);
-        assert_eq!(snapshot["facts_refreshed_at"], Value::Null);
+        assert_eq!(
+            snapshot,
+            AutomationOutcomesSnapshotStatusV1 {
+                available: false,
+                skills_refreshed_at: None,
+                facts_refreshed_at: None,
+            }
+        );
         assert!(
             error.contains("failed to parse automation outcomes snapshot"),
             "the failed read must be reported, not an empty error: {error}"
@@ -152,8 +165,8 @@ mod tests {
     fn a_never_refreshed_snapshot_stays_distinct_from_a_failed_read() {
         let (snapshot, error) = snapshot_fields(Ok(AutomationOutcomesSnapshot::default()));
 
-        assert_eq!(snapshot["available"], json!(true));
-        assert_eq!(snapshot["skills_refreshed_at"], Value::Null);
+        assert!(snapshot.available);
+        assert_eq!(snapshot.skills_refreshed_at, None);
         assert!(error.is_empty(), "a successful read reports no error");
     }
 }

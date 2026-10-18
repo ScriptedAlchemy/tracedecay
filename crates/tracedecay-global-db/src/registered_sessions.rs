@@ -13,14 +13,12 @@ pub(crate) use super::{SessionProviderCoverage, SessionProviderCoverageState};
 pub(crate) use tracedecay_sessions::runtime::store_access::SESSION_MESSAGES_AFTER_SQL;
 
 impl RegisteredGlobalDb {
-    #[hotpath::skip]
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
         SessionStoreAccess::new(self)
             .cursor_session_ingest_health()
             .await
     }
 
-    #[hotpath::skip]
     pub async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
@@ -30,7 +28,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn has_session_message(
         &self,
         provider: &str,
@@ -41,12 +38,20 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
+    pub async fn existing_session_message_ids(
+        &self,
+        provider: &str,
+        message_ids: &[String],
+    ) -> Result<Vec<String>, String> {
+        SessionStoreAccess::new(self)
+            .existing_session_message_ids(provider, message_ids)
+            .await
+    }
+
     pub async fn session_message_count(&self) -> Result<i64, String> {
         SessionStoreAccess::new(self).session_message_count().await
     }
 
-    #[hotpath::skip]
     pub async fn session_message_count_for_project(
         &self,
         project_key: &str,
@@ -56,7 +61,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn session_messages_after(
         &self,
         provider: &str,
@@ -74,7 +78,6 @@ impl RegisteredGlobalDb {
     /// `Ok(None)` is the truthful "this store holds no timestamped messages";
     /// a failed query or an unreadable timestamp stays an error rather than
     /// masquerading as an idle store.
-    #[hotpath::skip]
     pub async fn latest_session_activity_secs(
         &self,
     ) -> tracedecay_domain::errors::Result<Option<i64>> {
@@ -85,7 +88,6 @@ impl RegisteredGlobalDb {
 
     /// Reads one message by provider and id. `Ok(None)` is truthful absence;
     /// snapshot, query, and row-decode failures stay typed errors.
-    #[hotpath::skip]
     pub async fn get_session_message(
         &self,
         provider: &str,
@@ -100,7 +102,6 @@ impl RegisteredGlobalDb {
     ///
     /// `Ok(vec![])` is the truthful "nothing matched"; snapshot, query, and
     /// row-decode failures are typed errors instead of an empty result page.
-    #[hotpath::skip]
     pub async fn search_session_messages(
         &self,
         provider: &str,
@@ -116,7 +117,6 @@ impl RegisteredGlobalDb {
     /// Lists each session's latest canonical goal state, newest first.
     /// Goals with no native timestamp rank after all timestamped goals
     /// instead of being assigned a fabricated epoch-zero time.
-    #[hotpath::skip]
     pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
@@ -127,7 +127,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn workflow_fact_rows(
         &self,
     ) -> Result<Vec<(String, Option<String>, Option<String>)>, TraceDecayError> {
@@ -197,7 +196,7 @@ mod tests {
         );
     }
 
-    async fn insert_interleaved_session_messages(database: &RegisteredGlobalDb, rows: i64) {
+    async fn insert_interleaved_messages(database: &RegisteredGlobalDb, rows: i64) {
         let final_value = rows - 1;
         let transaction = database.begin_write_transaction().await.unwrap();
         transaction
@@ -207,9 +206,10 @@ mod tests {
                     UNION ALL
                     SELECT value + 1 FROM rows WHERE value < {final_value}
                  )
-                 INSERT INTO session_messages(
-                    provider, message_id, session_id, role, timestamp, ordinal, text,
-                    kind, model, tool_names, source_path, source_offset, metadata_json
+                 INSERT INTO lcm_raw_messages(
+                    provider, message_id, session_id, role, timestamp, ordinal, content,
+                    kind, model, tool_names, source_path, source_offset, metadata_json,
+                    content_hash, storage_kind
                  )
                  SELECT
                     'claude',
@@ -218,7 +218,8 @@ mod tests {
                     'assistant',
                     1700000000 + ({final_value} - value / 8),
                     CASE WHEN value % 2 = 0 THEN value / 4 ELSE value / 2 END,
-                    'payload', NULL, NULL, printf('tool-%04d', {final_value} - value), NULL, NULL, NULL
+                    'payload', NULL, NULL, printf('tool-%04d', {final_value} - value), NULL, NULL, NULL,
+                    'hash', 'inline'
                  FROM rows;"
             ))
             .await
@@ -226,7 +227,7 @@ mod tests {
         transaction.commit().await.unwrap();
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn cursor_ingest_authority_is_shared_and_provider_scoped() {
         let profile = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
@@ -336,22 +337,74 @@ mod tests {
                     provider: "claude".into(),
                     state: SessionProviderCoverageState::Unavailable,
                     deferred_units: 1,
+                    reason: None,
                 },
                 SessionProviderCoverage {
                     provider: "kimi".into(),
                     state: SessionProviderCoverageState::Complete,
                     deferred_units: 0,
+                    reason: None,
                 },
                 SessionProviderCoverage {
                     provider: "opencode".into(),
                     state: SessionProviderCoverageState::Partial,
                     deferred_units: 3,
+                    reason: None,
                 },
             ]
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
+    async fn coverage_status_names_refusals_and_skips_packed_reason_codes() {
+        let profile = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .unwrap();
+        // 259 is the unreleased packed shape: state 3 with reason 1 in bits 8+.
+        for (provider, file_id) in [("claude", 3), ("kimi", 7), ("opencode", 259), ("pi", 4)] {
+            database
+                .set_parse_offset(
+                    &format!("host-coverage://{provider}/v1"),
+                    ParseOffset {
+                        byte_offset: 1,
+                        mtime: 1,
+                        file_id,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let health = database
+            .session_ingest_health_for_provider(None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&health.provider_coverage).unwrap(),
+            serde_json::json!([
+                {"provider": "claude", "state": "unavailable", "deferred_units": 1},
+                {
+                    "provider": "kimi",
+                    "state": "unavailable",
+                    "deferred_units": 1,
+                    "reason": "source_identity_unavailable",
+                },
+                {
+                    "provider": "pi",
+                    "state": "unavailable",
+                    "deferred_units": 1,
+                    "reason": "database_missing",
+                },
+            ])
+        );
+    }
+
+    #[asupersync::test]
     async fn interleaved_session_activity_reads_use_covering_index() {
         let profile = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
@@ -371,7 +424,7 @@ mod tests {
                 .await
         );
 
-        insert_interleaved_session_messages(database, 2_048).await;
+        insert_interleaved_messages(database, 2_048).await;
 
         let activities = database
             .session_messages_after("claude", "target", 1_700_000_000, 512)
@@ -402,12 +455,14 @@ mod tests {
             ],
         )
         .await;
-        assert_scoped_index_plan(&activity_plan, "idx_session_messages_session_activity");
+        assert_scoped_index_plan(&activity_plan, "idx_lcm_raw_session_activity");
+        // The index orders the scan; `metadata_json` is fetched from the table
+        // for the bounded page rather than duplicated into the index.
         assert!(
-            activity_plan
+            !activity_plan
                 .iter()
                 .any(|detail| detail.contains("COVERING INDEX")),
-            "activity query plan is not covering: {activity_plan:?}"
+            "activity index must not carry the metadata blob: {activity_plan:?}"
         );
     }
 }

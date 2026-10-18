@@ -6,6 +6,7 @@ import {
   DashboardDomainStateV1Schema,
   DashboardEnvelopeV1Schema,
   DoctorFindingsPayloadV1Schema,
+  ExplorerResultPageV1Schema,
   MemoryAlgebraStatusV1Schema,
   MemoryCategoryCountV1Schema,
   MemoryFactDetailPayloadV1Schema,
@@ -16,12 +17,10 @@ import {
   MemoryStatusPayloadV1Schema,
   MemoryStatusV1Schema,
   MemoryTrustBucketV1Schema,
-  StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
+  StoreTelemetryEntryV1Schema,
   WIRE_SCHEMA_REVISION,
-  assertNever,
-  type DashboardDomainStateV1,
-} from "../../src/contracts/index.ts";
+} from "../../src/contracts/generated.ts";
 
 const PayloadSchema = z.object({ ok: z.boolean() });
 
@@ -54,10 +53,6 @@ function readyEnvelope(overrides: Record<string, unknown> = {}): Record<string, 
 }
 
 describe("wire domain-state decoder", () => {
-  it("decodes a known variant", () => {
-    expect(DashboardDomainStateV1Schema.parse("ready")).toBe("ready");
-  });
-
   it("keeps `unsupported` and `unsupported_schema` distinct (both server-canonical)", () => {
     expect(DashboardDomainStateV1Schema.parse("unsupported")).toBe("unsupported");
     expect(DashboardDomainStateV1Schema.parse("unsupported_schema")).toBe("unsupported_schema");
@@ -66,35 +61,6 @@ describe("wire domain-state decoder", () => {
   it("maps an UNKNOWN value to unsupported_schema instead of throwing", () => {
     expect(DashboardDomainStateV1Schema.parse("brand_new_state")).toBe("unsupported_schema");
     expect(DashboardDomainStateV1Schema.parse(42)).toBe("unsupported_schema");
-  });
-
-  it("is exhaustively switchable with assertNever (never-checked)", () => {
-    function label(state: DashboardDomainStateV1): string {
-      switch (state) {
-        case "loading":
-        case "complete_zero_findings":
-        case "ready":
-        case "partial":
-        case "stale":
-        case "locked":
-        case "denied":
-        case "unauthorized":
-        case "redacted":
-        case "conflicting":
-        case "offline":
-        case "unknown":
-        case "cancelled":
-        case "timed_out":
-        case "error":
-        case "unsupported_schema":
-        case "unsupported":
-          return state;
-        default:
-          return assertNever(state);
-      }
-    }
-    expect(label("ready")).toBe("ready");
-    expect(label("unsupported")).toBe("unsupported");
   });
 });
 
@@ -246,9 +212,12 @@ describe("Doctor findings decoder", () => {
       report_coverage: null,
       remediations: [],
       known_families: ["configuration"],
+      schema_convergences: [],
+      storage_kind_statuses: [],
       note: "configuration drift observed",
     });
 
+    expect(parsed.entries[0]!.finding.family).toBe("configuration");
     expect(parsed).not.toHaveProperty("remediations");
     expect(parsed.entries[0]!.finding).not.toHaveProperty("remediation");
   });
@@ -281,7 +250,6 @@ describe("wire storage payload decoders", () => {
       stores: [
         {
           store: "s",
-          role: "graph",
           roles: ["graph", "memory"],
           path: "/p",
           read: {
@@ -322,6 +290,7 @@ describe("wire storage payload decoders", () => {
     });
     expect(parsed.stores[0]!.read.kind).toBe("observed");
     expect(parsed.stores[0]!.roles).toEqual(["graph", "memory"]);
+    expect(StoreTelemetryEntryV1Schema.shape).not.toHaveProperty("role");
     // A dashboard read cannot establish its own growth baseline.
     const growth = parsed.stores[0]!.growth;
     expect(growth.state).toBe("unknown");
@@ -330,7 +299,6 @@ describe("wire storage payload decoders", () => {
   it("rejects the retired unsupported budget and absent growth variants", () => {
     const entry = {
       store: "s",
-      role: "graph",
       roles: ["graph"],
       path: "/p",
       read: { kind: "unknown", store: "s" },
@@ -377,22 +345,15 @@ describe("wire storage payload decoders", () => {
     }
   });
 
-  it("decodes a storage findings payload", () => {
-    const parsed = StorageFindingsPayloadV1Schema.parse({
-      family_filter: "storage",
-      entries: [],
-      report_coverage: null,
-      known_families: ["storage"],
-      kind_statuses: [
-        {
-          kind: "orphan_store",
-          state: "unsupported",
-          observed_entries: 0,
-          reason: "r",
-        },
-      ],
-      note: "n",
-    });
-    expect(parsed.kind_statuses?.[0]?.kind).toBe("orphan_store");
+});
+
+
+describe("wire arbitrary JSON fields", () => {
+  it("requires declared metadata while preserving null and nested JSON values", () => {
+    const page = { limit: 10, next_offset: null, offset: 0, rows: [], total: 0 };
+    expect(ExplorerResultPageV1Schema.safeParse(page).success).toBe(false);
+    expect(ExplorerResultPageV1Schema.parse({ ...page, metadata: null }).metadata).toBeNull();
+    const metadata = { nested: [false, null, { label: "retained" }] };
+    expect(ExplorerResultPageV1Schema.parse({ ...page, metadata }).metadata).toEqual(metadata);
   });
 });

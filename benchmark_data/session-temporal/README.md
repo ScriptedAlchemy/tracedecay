@@ -37,10 +37,9 @@ Runtime sanitizer provenance for those fixtures is in
 scripts/run-session-temporal-benchmark.sh --dry-run
 scripts/run-session-temporal-benchmark.sh --run   # diagnostic on Linux or macOS
 scripts/run-session-temporal-benchmark.sh --refresh-contract  # Linux only
-cargo bench --bench session_temporal --all-features -- --run
 ```
 
-Dry-run is Cargo-free. `--run` isolates `HOME` and `TRACEDECAY_DATA_DIR` and
+Dry-run performs no build. The measurement runner uses Bazel `--config=release`. `--run` isolates `HOME` and `TRACEDECAY_DATA_DIR` and
 measures: `rebuild_activate`, `exact_replay`, `compact_rank`, and `late_hydrate`.
 `--run` prints diagnostic samples but never changes checked-in evidence.
 `--refresh-contract` is Linux-only and the only publishing path: it requires a
@@ -48,8 +47,8 @@ clean source commit, performs that same real measurement without accepting
 caller-supplied values, and publishes the result before pointing the evidence
 index at it. The workload manifest is static configuration and is never
 rewritten by runs. The published result records the clean source commit and
-mode — the commit is the content authority for every tracked artifact, so no
-per-file hashes are maintained — plus warmups, measured repetitions, and
+mode, the commit is the content authority for every tracked artifact, so no
+per-file hashes are maintained, plus warmups, measured repetitions, and
 record counts.
 
 ## Observed focused tests
@@ -57,7 +56,7 @@ record counts.
 Recorded only when executed in the same capture window:
 
 ```bash
-cargo test --test session_suite --all-features temporal_derived_evidence:: -- --test-threads=1
+bazel test --config=ci //crates/tracedecay:session_suite --test_arg=temporal_derived_evidence:: --test_arg=--test-threads=1
 ```
 
 Quantiles are descriptive nearest-rank sample labels, not inferential claims.

@@ -1,30 +1,76 @@
 # Contributing to tracedecay
 
-Thanks for your interest in contributing! This guide covers everything you need to get started.
+This guide covers local setup, tests, and contribution requirements.
 
-## Getting Started
+## Getting started
 
 ```bash
 git clone https://github.com/ScriptedAlchemy/tracedecay.git
 cd tracedecay
-cargo build
-cargo nextest run --workspace --all-features --no-fail-fast
+pnpm install
+bazel build //...
+bazel test //... --test_output=errors
 ```
 
-Requires **Rust 1.85+** (edition 2024) and **Node.js 22+ with npm**.
+Use the Rust toolchain pinned in `rust-toolchain.toml` (edition 2024) and
+**Node.js 22+ and pnpm** (the version pinned by `packageManager` in
+`package.json`; an older pnpm switches to it automatically). Run
+`pnpm install` at the repository root after cloning and whenever
+`pnpm-lock.yaml` or a `Cargo.lock` changes. Besides the npm packages, it
+installs every crate into `.pnpm/crates`, which the committed
+`.cargo/config.toml` substitutes for crates.io and the pinned git sources, so
+`cargo` cannot resolve dependencies until it has run. Bazel is the workspace
+build, test, check, run, benchmark, and code-generation authority locally
+and in CI. Cargo metadata and dependency resolution remain inputs to Bazel;
+formatting does not compile or execute the workspace. Commands below run
+from the repository root unless noted.
+
+Two Cargo errors mean "run `pnpm install` at the repository root". Before any
+install, Cargo reports `failed to read root of directory source
+<repo>/.pnpm/crates/git`. When `Cargo.lock` names a crate that is not vendored
+yet, it reports `no matching package named '<crate>' found` with `location
+searched: directory source '<repo>/.pnpm/crates/crates-io'`.
+`verifyDepsBeforeRun` guards only the npm packages against `pnpm-lock.yaml`;
+`pnpm install` reads `Cargo.lock` as it is and never rewrites it or fails when
+a `Cargo.toml` no longer matches it.
+
+To add, remove, or bump a crate, edit the manifests by hand and refresh the
+lock from outside the checkout with the pinned toolchain, then vendor the
+result:
+
+```bash
+# <toolchain> is the channel in rust-toolchain.toml; add -p <crate> for one bump
+cd / && cargo +<toolchain> update -w --manifest-path "$repo/Cargo.toml"
+cd "$repo" && pnpm install
+```
+
+Inside the checkout `cargo update` refuses the vendored git sources and
+`cargo add` sees only vendored crates. Do not use `pnpm add crate:`; from a
+member directory it regenerates the whole `Cargo.lock`, and at the root it
+fails. `pnpm remove crate:` is unsupported. Unused `.pnpm/crates` directories
+stay in place after `pnpm install` and are inert once the lock stops naming
+them. Dashboard `contracts:generate` and `contracts:check` run the
+`//sdks/codegen:generate` and `//sdks/codegen:dashboard_schema` Bazel targets
+from the repository root.
+
+Use your current checkout; no particular absolute path or historical PR branch
+is required. See [AGENTS.md](AGENTS.md) for checkout safety and shared-work rules.
 
 The dashboard bundle at `dashboard/app-dist/` is generated output and is
 git-ignored, so a fresh clone has none. The CLI build script
-(`crates/tracedecay-cli/build.rs`) — the only crate that embeds the bundle —
-runs `npm ci` (when `dashboard/node_modules` is absent) and `npm run build`
-before embedding the UI, and fails the Rust build if npm is missing. Setting
-`TRACEDECAY_SKIP_DASHBOARD_BUILD` skips that npm rebuild only when
-`TRACEDECAY_DASHBOARD_BUNDLE_SHA256` holds the existing bundle's digest
-(print it with `python3 scripts/check-dashboard-bundle.py dashboard/app-dist
---print-digest`); a missing or mismatched digest fails the build. CI builds
-the bundle once in the `dashboard-assets` job and every Rust job downloads it
-as an artifact. GitHub Releases ship prebuilt binaries; workspace Cargo
-packages are private.
+(`crates/tracedecay-cli/build.rs`), the only crate that embeds the bundle,
+builds the frontend into an immutable, digest-named copy under its own
+`OUT_DIR` rather than embedding `app-dist`: `pnpm run build` runs when the
+frontend inputs' content fingerprint changes, and the Rust build fails if pnpm
+is missing or the installed packages no longer match `pnpm-lock.yaml`. Setting
+`TRACEDECAY_SKIP_DASHBOARD_BUILD` stages a prebuilt `dashboard/app-dist`
+instead, and only when `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` holds that
+bundle's digest (print it with `python3 scripts/check-dashboard-bundle.py
+dashboard/app-dist --print-digest`); a missing or mismatched digest fails the
+build. Bazel builds the bundle as `//dashboard:app_dist` and passes it and
+its `//dashboard:bundle_sha256` digest to that skip mode; release workflows
+ship only that embedded output. GitHub Releases ship prebuilt binaries;
+workspace Cargo packages are private.
 
 Do not assume a green baseline for the full suite: run it and read the
 failures; treat new failures in code you touched as yours.
@@ -35,7 +81,7 @@ Read [the V2 operating-model summary](docs/V2-OPERATING-MODEL.md) before
 changing storage, retrieval, or host ingestion, then follow the linked
 authoritative roadmap plans. `tracedecay-graph-db` is the sole final Grafeo
 boundary; SQLite is relational only. V2 persisted data is reset or recreated
-when incompatible—do not add a prior-store reader, conversion, backfill,
+when incompatible, do not add a prior-store reader, conversion, backfill,
 shadow path, or dual write.
 
 Tests and local validation must use isolated temporary home, profile, project,
@@ -49,50 +95,54 @@ This tree map is for source orientation only. The
 precedence and acceptance.
 
 ```
-src/             Main tracedecay crate (daemon, MCP tools, sessions, application)
-crates/          Workspace members (code-extraction, graph-db, domain, hosts, …)
-dashboard/       Embedded React dashboard
-plugin/          Host bundles (Claude, Codex, Cursor, Kimi, OpenCode)
-tests/           Integration suites
-docs/            Design docs and the V2 roadmap
+crates/tracedecay/     Composition-root library and its integration suites
+crates/tracedecay-cli/ Shipped tracedecay binary and CLI integration suites
+crates/               Workspace members (code-extraction, graph-db, domain, hosts, …)
+dashboard/            Embedded React dashboard
+plugin/               Host bundles (Claude, Codex, Cursor, Kimi, OpenCode)
+tests/                Shared fixtures, distribution suites, and cross-crate gates
+docs/                 Design docs and the V2 roadmap
 ```
 
-## Feature Flags
+## Feature flags
 
-tracedecay supports more than 50 languages. `Cargo.toml` is the source of truth
-for the exact feature membership:
+tracedecay supports more than 50 languages. The root `Cargo.toml` is a virtual
+workspace, not a package. `crates/tracedecay-cli/Cargo.toml` and
+`crates/tracedecay/Cargo.toml` expose the language tiers;
+`crates/tracedecay-code-extraction/Cargo.toml` owns grammar feature membership:
 
 | Feature | Coverage |
 |---------|----------|
 | `lite` | Core extractors such as Rust, Go, Java, TypeScript/JS, Python, C/C++, Kotlin, C#, and Swift |
 | `medium` | `lite` plus Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, and VB.NET |
-| `full` (default) | `medium` plus all remaining `lang-*` features listed in `Cargo.toml` |
+| `full` (default) | `medium` plus the remaining grammars selected by the extractor crate's `full` feature |
 
-Build with fewer languages for faster compile times during development:
+Build and test the generated Bazel targets during development:
 
 ```bash
-cargo build --no-default-features --features lite
-cargo nextest run --no-default-features --features lite
+bazel build //crates/tracedecay-cli:tracedecay
+bazel test //crates/tracedecay-code-extraction:main --test_output=errors
 ```
 
-## Making Changes
+Use Cargo for a feature combination only when `scripts/bazel/gen_builds.py`
+does not generate an equivalent Bazel target.
 
-1. **Fork and branch** from `master` for stable changes, `beta` for experimental features.
-2. **Write tests.** Every extraction change should have a corresponding test in `tests/`. Follow the existing pattern: create a fixture in `tests/fixtures/` and assert on extracted nodes/edges.
-3. **Run the full test suite** before submitting:
+## Making changes
+
+1. **Use the task's branch**, or branch from `master` for a new contribution. Confirm the target before working on a release-channel branch.
+2. **Write tests in the owning crate.** Extraction changes belong with `crates/tracedecay-code-extraction/`; follow nearby inline tests or crate-local integration suites and assert on extracted nodes/edges.
+3. **Run the owning Bazel test target**, then broaden for unresolved risk. Documentation-only edits do not require application builds.
    ```bash
-   cargo nextest run --workspace --all-features --no-fail-fast
+   bazel test //path/to/package:target --test_output=errors
    ```
-   Cargo-launched test processes are isolated from your real `~/.tracedecay`
-   profile: `.cargo/config.toml` pins `TRACEDECAY_DATA_DIR` to
-   `target/test-profile/.tracedecay` (enforced by
-   `tests/core_cli_suite/test_profile_isolation_test.rs`). Tests that need a private profile
-   should still override it per-test, e.g. via
+   The `rust_test` wrapper sets `TRACEDECAY_DATA_DIR` under Bazel's
+   `TEST_TMPDIR` and disables the global database. Tests that need a private
+   profile should still override it per test with
    `common::TraceDecayStorageEnvGuard` or `common::apply_tracedecay_home_env`.
-4. **Format your code** with the standard Rust toolchain:
+4. **Format Rust code**, then build the workspace:
    ```bash
    cargo fmt
-   cargo clippy --workspace --all-targets
+   bazel build //...
    ```
 
 ### Public wire compatibility changes
@@ -104,16 +154,16 @@ external boundary alongside its behavior.
 
 ### Clippy policy
 
-The CI `Clippy` job runs the same command contributors should run locally before
-pushing:
+The CI `Clippy` job runs the rules_rust Clippy aspect over every Bazel target
+with `-D warnings`:
 
 ```bash
-cargo clippy --workspace --all-targets
+bazel build --config=clippy //...
 ```
 
-This check is blocking in CI: the workflow fails if `cargo clippy --workspace
---all-targets` exits non-zero. The crate-level lint policy in `src/lib.rs`
-currently denies `clippy::all`, `clippy::unwrap_used`, and
+The check is blocking: the workflow fails on any Clippy warning.
+The composition-root lint policy in
+`crates/tracedecay/src/lib.rs` currently denies `clippy::all`, `clippy::unwrap_used`, and
 `clippy::expect_used`; new violations of those lints must be fixed or justified
 with the narrowest practical `#[allow(...)]` at the affected item. Do not add a
 broad allow or weaken the crate policy just to get CI green.
@@ -124,53 +174,61 @@ but they do not block CI unless a future policy change promotes a specific lint
 to `deny`.
 
 There is no separate Clippy baseline file today. If a policy change intentionally
-promotes additional advisory lints to blocking, update `src/lib.rs`, fix or
-narrowly allow the existing violations in the same change, and update this
+promotes additional advisory lints to blocking, update the owning crate's lint
+policy, fix or narrowly allow the existing violations in the same change, and update this
 section so the contributor command and blocking/advisory split still match CI.
 
-## Adding a New Language Extractor
+## Adding a new language extractor
 
 1. Add a tree-sitter grammar dependency (or vendor it under `vendor/`).
 2. Create `crates/tracedecay-code-extraction/src/{lang}_extractor.rs` implementing the `LanguageExtractor` trait.
 3. Register it in `LanguageRegistry` with a feature flag (e.g., `lang-{name}`) in that crate's `lib.rs` and `Cargo.toml`.
-4. Add a test module `crates/tracedecay-code-extraction/tests/{lang}.rs` (inline source or a fixture under `crates/tracedecay-code-extraction/fixtures/`).
+4. Add a test module under `crates/tracedecay-code-extraction/tests/main/` and register it in that directory's `main.rs`; follow nearby source and fixture patterns.
 5. Update the feature flag tables in that crate's `Cargo.toml` and this document.
 
-## Validating Plugins and Skills
+When sharing traversal helpers, preserve child ordering, named versus anonymous
+node handling, and direct-child versus descendant semantics. Compare against
+`crates/tracedecay-code-extraction/src/traversal.rs` and keep language-specific
+behavior local; cover the consuming extractor before and after consolidation.
+
+## Validating plugins and skills
 
 Changes under `plugin/` or `crates/tracedecay-agent-hosts/` are covered
 by a layered validation system: vendored JSON-schema checks, per-host skill
 frontmatter contracts, cross-bundle sync/parity tests, and a CI
 schema-validation workflow. `plugin/skills/` is the shared source of truth for
-bundled skills — do not fork host-specific copies. Before submitting, run:
+bundled skills, do not fork host-specific copies. Before submitting, run:
 
 ```bash
-cargo nextest run -E 'binary(=agent_suite)'
+bazel test //crates/tracedecay:agent_suite --test_output=errors
 ```
 
 See [`docs/PLUGIN-VALIDATION.md`](docs/PLUGIN-VALIDATION.md) for the full
 layer breakdown, schema refresh procedure, and how to add a skill or a new
 ecosystem bundle correctly.
 
-## Changing the Rust-to-Dashboard Wire Contract
+## Changing the Rust-to-dashboard wire contract
 
-`dashboard/src/contracts/generated.ts`, `dashboard/src/contracts/index.ts`, and
+`dashboard/src/contracts/types.ts`, `dashboard/src/contracts/decoders.ts`,
+`dashboard/src/contracts/generated.ts`, and
 `dashboard/codegen/schemas/dashboard-contracts.schema.json` are generated, not
 hand-written. The Rust `schemars` output is authoritative: the codegen CLI
-shells out to `cargo test --test dashboard_contract_schema_export -- --ignored
-writes_dashboard_contract_schema`, regenerates all three files, and compares
-them byte-for-byte with what is committed.
+exports the schema through `//sdks/codegen:dashboard_schema`, which calls
+the `tracedecay-dashboard-api` library's canonical renderer. In
+`contracts:check` mode, it generates all four dashboard files and the
+TypeScript SDK sources, then compares every generated output byte-for-byte
+with the committed files.
 
 After changing any Rust type that crosses the dashboard API boundary:
 
 ```bash
 cd dashboard
-npm run contracts:generate   # rewrite the generated files
-npm run contracts:check      # what CI runs; exits 1 on any drift
+pnpm run contracts:generate   # rewrite the generated files
+pnpm run contracts:check      # what CI runs; exits 1 on any drift
 ```
 
 `contracts:check` is a blocking CI step in the `dashboard` job of `ci.yml`, not
-an advisory one. Do not hand-edit the generated files — the check will fail and
+an advisory one. Do not hand-edit the generated files. The check will fail and
 the fix is to regenerate and commit.
 
 The generated contract files (and the embedded Cursor extension bundle) are
@@ -178,20 +236,23 @@ marked `linguist-generated` in `.gitattributes`, so GitHub collapses them in
 PR diffs and excludes them from language stats; review the Rust source of the
 contract change instead.
 
-## Running Specific Tests
+## Running specific tests
+
+Run the generated Bazel test target that owns the behavior:
 
 ```bash
-# All extractor tests for a specific language
-cargo nextest run -p tracedecay-code-extraction --test rust
-
-# A single test by name
-cargo nextest run test_find_stale_files
-
-# Only sync-related tests
-cargo nextest run sync
+bazel test //crates/tracedecay-code-extraction:main --test_output=errors
+bazel test //crates/tracedecay:agent_suite --test_output=errors
 ```
 
-## Commit Messages
+To pass a libtest filter to one target, add it after `--test_arg`, for example:
+
+```bash
+bazel test //crates/tracedecay-code-extraction:main \
+  --test_arg=test_rust_file_node_is_root --test_output=errors
+```
+
+## Commit messages
 
 Follow conventional commit style:
 
@@ -212,23 +273,47 @@ scripts/install-git-hooks.sh
 CI validates commit messages with commitlint (`commitlint.config.cjs`):
 
 ```bash
-git show --no-patch --format=%B HEAD | npm run --silent lint:commit --
+git show --no-patch --format=%B HEAD | pnpm run --silent lint:commit --
 ```
 
 Run the same command locally (per commit) before pushing to lint every
 non-merge commit in a branch range. Merge commits are skipped to match CI
 behavior.
 
-## Pull Requests
+## Pull requests
 
 - Target `master` for bug fixes and stable features.
-- Target `beta` for experimental or breaking changes.
-- Keep PRs focused — one logical change per PR.
+- Confirm the target branch with the maintainer for release-channel work; do not
+  infer it from an archived plan or PR number.
+- Keep PRs focused. One logical change per PR.
 - Include test coverage for new behavior.
 - Do not hand-edit `CHANGELOG.md`; release automation generates it from
   conventional commit messages.
 
-## Reporting Issues
+### What CI spends on a pull request
+
+CI runs on GitHub's free hosted runners: 20 concurrent jobs for the whole
+account, 5 of them macOS. Pull requests and the
+integration branch share that capacity. CI selects jobs by run state:
+
+| State | Runs |
+|---|---|
+| Draft pull request | Repository gates and benchmark-harness self-tests. |
+| Ready pull request, push to `master`, or `CI` dispatch | Repository gates, benchmark-harness self-tests, Linux and Windows Bazel build and test, Clippy, feature gates, the shipped CLI, and the dashboard. |
+| `CI` with `run_os=true` | Adds the macOS Bazel build and test lane. |
+| `CI` with `run_hosts=true` | Adds stock host integrations. |
+
+Use `gh workflow run ci.yml --ref <branch>` to request an additional run; add
+`-f run_os=true` or `-f run_hosts=true` for the optional lanes. A newer PR
+head replaces its prior run. Master finishes its current snapshot and retains
+only the newest pending tip, so merges faster than the long pole still produce
+a complete green/red signal. Explicit `run_os` / `run_hosts` dispatches keep
+separate concurrency groups so a default push cannot cancel them while they
+are queued or running. Closing or merging a PR cancels its remaining runs and
+drops its Actions caches. Nothing runs on a timer: the packaged-crate
+distribution tests and the Hawk lint are `workflow_dispatch` only.
+
+## Reporting issues
 
 Open an issue at https://github.com/ScriptedAlchemy/tracedecay/issues with:
 
@@ -237,7 +322,7 @@ Open an issue at https://github.com/ScriptedAlchemy/tracedecay/issues with:
 - Steps to reproduce
 - Expected vs. actual behavior
 
-## Code of Conduct
+## Code of conduct
 
 This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). Be respectful and constructive.
 

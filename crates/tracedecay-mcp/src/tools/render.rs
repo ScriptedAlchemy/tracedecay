@@ -12,14 +12,41 @@ use crate::response_handles::{
     note_response_handle_store_skipped_no_project_root, observe_response_truncation,
     store_response_handle,
 };
-use crate::tools::MAX_RESPONSE_CHARS;
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_mcp_catalog::MAX_RESPONSE_CHARS;
 use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub use tracedecay_runtime_core::text::format_relative_time;
 
+mod ranked_tail;
+pub(crate) use ranked_tail::{RankedRow, ranked_rows_md};
+
 const MARKDOWN_TRUNCATION_RESERVED_CHARS: usize = 2_048;
+
+/// Agent-facing recovery text for a truncated response.
+///
+/// The stored body is larger than one response frame by definition. The
+/// instruction must not tell the caller to page through and join that body
+/// back into the conversation.
+fn truncated_response_recovery_instruction(
+    preview_chars: usize,
+    original_chars: usize,
+    expires_at: i64,
+    handle: &str,
+) -> String {
+    format!(
+        "This response was truncated: `preview` contains only the first {preview_chars} of \
+         {original_chars} characters. The original response is stored locally and expires at \
+         {expires_at} (TTL {RESPONSE_HANDLE_TTL_SECS} seconds). Use the preview. Do not page \
+         through and join the stored body back into the conversation. If one omitted detail \
+         is required, call `{RESPONSE_RETRIEVE_TOOL}` once with required argument `handle` \
+         set to `{handle}` and an offset/max_chars window for that span only. If the original \
+         call used `project_selector.project_id`, pass the same selector. Only call it if the \
+         missing details are needed."
+    )
+}
 
 fn parse_format(args: &Value) -> RequestedOutputFormat {
     requested_output_format(args)
@@ -30,16 +57,21 @@ pub fn wants_json(args: &Value) -> bool {
     parse_format(args) == RequestedOutputFormat::Json
 }
 
-pub fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Value, md: F) -> String
+pub fn finalize<F>(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    md: F,
+) -> String
 where
     F: FnOnce() -> String,
 {
-    finalize_with_format(project_root, parse_format(args), value, md)
+    finalize_with_format(response_handle_root, parse_format(args), value, md)
 }
 
-#[hotpath::measure(label = "mcp.server.response.render")]
+#[tracing::instrument(name = "mcp.server.response.render", level = "trace", skip_all)]
 pub fn finalize_with_format<F>(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     format: RequestedOutputFormat,
     value: &Value,
     md: F,
@@ -50,38 +82,39 @@ where
     match format {
         RequestedOutputFormat::Json => {
             let json = value.to_string();
-            truncated_json_envelope_with_handle(project_root, &json)
+            truncated_json_envelope_with_handle(response_handle_root, &json)
         }
         RequestedOutputFormat::Markdown => {
             let text = md();
             if text.is_empty() {
                 return text;
             }
-            truncated_markdown_with_handle(project_root, &text)
+            truncated_markdown_with_handle(response_handle_root, &text)
         }
     }
 }
 
-/// Wraps oversized JSON text in a valid preview envelope. With a project root,
+/// Wraps oversized JSON text in a valid preview envelope. With a handle root,
 /// stores the full original locally and includes a retrieval handle.
 ///
 /// If local handle storage is unavailable or fails, the envelope still carries
 /// a preview but also includes explicit recovery metadata so clients can tell
 /// why no handle was emitted and what to retry.
-pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatted: &str) -> String {
+pub fn truncated_json_envelope_with_handle(
+    response_handle_root: Option<&Path>,
+    formatted: &str,
+) -> String {
     if formatted.len() <= MAX_RESPONSE_CHARS {
         return formatted.to_string();
     }
     let started = std::time::Instant::now();
     let now = current_timestamp();
-    let handle = prepare_truncated_response_handle(project_root, formatted);
+    let handle = prepare_truncated_response_handle(response_handle_root, formatted);
     let original_chars = formatted.chars().count();
     let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
     loop {
-        while end > 0 && !formatted.is_char_boundary(end) {
-            end -= 1;
-        }
-        let preview = &formatted[..end];
+        let preview = utf8_prefix_at_or_before(formatted, end);
+        end = preview.len();
         let mut envelope = serde_json::json!({
             "truncated": true,
             "original_chars": original_chars,
@@ -105,13 +138,11 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
                 );
                 object.insert(
                     "retrieve_instruction".to_string(),
-                    serde_json::json!(format!(
-                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. If the original call used `project_selector.project_id`, pass the same selector so the handle is read from that project cache. Only call it if the missing details are needed.",
+                    serde_json::json!(truncated_response_recovery_instruction(
                         preview.chars().count(),
                         original_chars,
                         record.expires_at,
-                        RESPONSE_HANDLE_TTL_SECS,
-                        record.handle
+                        &record.handle,
                     )),
                 );
             } else if let Some(status) = &handle.unavailable {
@@ -128,7 +159,7 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
                 // failed/absent handle means the preview is all that survives.
                 handle.record.is_some(),
                 now,
-                truncation_handle_status(project_root, &handle),
+                truncation_handle_status(response_handle_root, &handle),
                 started.elapsed(),
             );
             return text;
@@ -138,7 +169,7 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
 }
 
 pub fn markdown_preview_with_handle(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     full_text: &str,
     preview: &str,
 ) -> String {
@@ -146,17 +177,17 @@ pub fn markdown_preview_with_handle(
         return full_text.to_string();
     }
     if full_text == preview {
-        return truncated_markdown_with_handle(project_root, full_text);
+        return truncated_markdown_with_handle(response_handle_root, full_text);
     }
-    markdown_preview_truncation_with_handle(project_root, full_text, preview)
+    markdown_preview_truncation_with_handle(response_handle_root, full_text, preview)
 }
 
-fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> String {
+fn truncated_markdown_with_handle(response_handle_root: Option<&Path>, text: &str) -> String {
     if text.len() <= MAX_RESPONSE_CHARS {
         return text.to_string();
     }
     render_markdown_truncation_with_handle(
-        project_root,
+        response_handle_root,
         text,
         text.len(),
         |end| markdown_truncation_preview(text, end),
@@ -171,12 +202,12 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
 }
 
 fn markdown_preview_truncation_with_handle(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     full_text: &str,
     preview: &str,
 ) -> String {
     render_markdown_truncation_with_handle(
-        project_root,
+        response_handle_root,
         full_text,
         preview.len(),
         |end| {
@@ -197,7 +228,7 @@ fn markdown_preview_truncation_with_handle(
 }
 
 fn render_markdown_truncation_with_handle(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     full_text: &str,
     mut end: usize,
     mut preview_for_end: impl FnMut(usize) -> String,
@@ -205,7 +236,7 @@ fn render_markdown_truncation_with_handle(
 ) -> String {
     let started = std::time::Instant::now();
     let now = current_timestamp();
-    let handle = prepare_truncated_response_handle(project_root, full_text);
+    let handle = prepare_truncated_response_handle(response_handle_root, full_text);
     end = end.min(MAX_RESPONSE_CHARS.saturating_sub(MARKDOWN_TRUNCATION_RESERVED_CHARS));
     loop {
         let preview = preview_for_end(end);
@@ -216,7 +247,7 @@ fn render_markdown_truncation_with_handle(
                 rendered.len(),
                 handle.record.is_some(),
                 now,
-                truncation_handle_status(project_root, &handle),
+                truncation_handle_status(response_handle_root, &handle),
                 started.elapsed(),
             );
             return rendered;
@@ -231,21 +262,20 @@ fn markdown_truncation_preview(text: &str, budget: usize) -> String {
     }
     let has_late_priority = CONTEXT_PRIORITY_HEADINGS
         .iter()
-        .any(|heading| text.find(heading).is_some_and(|idx| idx > budget));
+        .any(|heading| markdown_heading_at(text, heading).is_some_and(|idx| idx > budget));
     if !has_late_priority {
         return markdown_prefix_preview(text, budget);
     }
 
     let prefix_budget = budget.saturating_mul(2) / 3;
-    let prefix = utf8_prefix_at_or_before(text, prefix_budget);
+    let prefix = whole_markdown_prefix(text, prefix_budget);
     let prefix_len = prefix.len();
     let mut preview = prefix.to_string();
-    close_open_markdown_fence(&mut preview);
     let mut remaining = budget.saturating_sub(preview.len());
     let mut preserved = String::new();
 
     for heading in CONTEXT_PRIORITY_HEADINGS {
-        let Some(start) = text.find(heading) else {
+        let Some(start) = markdown_heading_at(text, heading) else {
             continue;
         };
         if start < prefix_len {
@@ -263,10 +293,9 @@ fn markdown_truncation_preview(text: &str, budget: usize) -> String {
         remaining -= section_header.len();
 
         let section = markdown_section_at(text, start);
-        let section_preview = utf8_prefix_at_or_before(section, remaining);
+        let section_preview = whole_markdown_prefix(section, remaining);
         preserved.push_str(section_preview);
         let section_truncated = section_preview.len() < section.len();
-        close_open_markdown_fence(&mut preserved);
         remaining = budget.saturating_sub(preview.len() + preserved.len());
         if section_truncated && remaining >= 5 {
             preserved.push_str("\n...");
@@ -282,37 +311,89 @@ fn markdown_truncation_preview(text: &str, budget: usize) -> String {
 }
 
 fn markdown_prefix_preview(text: &str, budget: usize) -> String {
-    let mut preview = utf8_prefix_at_or_before(text, budget).to_string();
-    close_open_markdown_fence(&mut preview);
-    preview
+    whole_markdown_prefix(text, budget).to_string()
+}
+
+fn markdown_heading_at(text: &str, heading: &str) -> Option<usize> {
+    let mut fence = MarkdownFence::default();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if !fence.is_open() && line.trim_end().starts_with(heading) {
+            return Some(offset);
+        }
+        fence.observe(line);
+        offset += line.len();
+    }
+    None
 }
 
 fn markdown_section_at(text: &str, start: usize) -> &str {
     let rest = &text[start..];
-    let end = ["\n## ", "\n### "]
-        .into_iter()
-        .filter_map(|marker| rest[1..].find(marker).map(|idx| idx + 1))
-        .min()
-        .unwrap_or(rest.len());
-    &rest[..end]
-}
-
-fn close_open_markdown_fence(markdown: &mut String) {
-    if has_open_markdown_fence(markdown) {
-        if !markdown.ends_with('\n') {
-            markdown.push('\n');
+    let mut fence = MarkdownFence::default();
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if offset > 0 && !fence.is_open() && (line.starts_with("## ") || line.starts_with("### ")) {
+            return &rest[..offset];
         }
-        markdown.push_str("```");
+        fence.observe(line);
+        offset += line.len();
     }
+    rest
 }
 
-pub fn has_open_markdown_fence(markdown: &str) -> bool {
-    markdown
-        .lines()
-        .filter(|line| line.trim_start().starts_with("```"))
-        .count()
-        % 2
-        == 1
+/// Generated code blocks are indivisible preview units; omitted bytes remain
+/// in the retained response rather than appearing as a synthetically closed body.
+pub(crate) fn whole_markdown_prefix(markdown: &str, budget: usize) -> &str {
+    let prefix = utf8_prefix_at_or_before(markdown, budget);
+    let mut fence = MarkdownFence::default();
+    let mut opening = None;
+    let mut offset = 0;
+    for line in markdown.split_inclusive('\n') {
+        if offset >= prefix.len() {
+            break;
+        }
+        let was_open = fence.is_open();
+        fence.observe(line);
+        if !was_open && fence.is_open() {
+            opening = Some(offset);
+        } else if !fence.is_open() && offset + line.len() <= prefix.len() {
+            opening = None;
+        }
+        offset += line.len();
+        if offset > prefix.len() {
+            break;
+        }
+    }
+    &prefix[..opening.unwrap_or(prefix.len())]
+}
+
+#[derive(Default)]
+pub(crate) struct MarkdownFence {
+    opening: Option<(u8, usize)>,
+}
+
+impl MarkdownFence {
+    pub(crate) fn is_open(&self) -> bool {
+        self.opening.is_some()
+    }
+
+    pub(crate) fn observe(&mut self, line: &str) {
+        let line = line.trim_start();
+        let Some(marker @ (b'`' | b'~')) = line.bytes().next() else {
+            return;
+        };
+        let width = line.bytes().take_while(|byte| *byte == marker).count();
+        if width < 3 {
+            return;
+        }
+        if let Some((open_marker, open_width)) = self.opening {
+            if marker == open_marker && width >= open_width && line[width..].trim().is_empty() {
+                self.opening = None;
+            }
+        } else {
+            self.opening = Some((marker, width));
+        }
+    }
 }
 
 struct TruncatedResponseHandle {
@@ -321,61 +402,59 @@ struct TruncatedResponseHandle {
 }
 
 fn truncation_handle_status(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     handle: &TruncatedResponseHandle,
 ) -> &'static str {
     if handle.record.is_some() {
         "stored"
-    } else if project_root.is_none() {
+    } else if response_handle_root.is_none() {
         "no_project_root"
     } else {
         "store_failed"
     }
 }
 
-/// Runs the synchronous response-handle disk write without stalling the async
-/// executor worker that renders the response.
-///
-/// The truncating render path is synchronous by design (it sits under dozens
-/// of sync handler helpers), but it usually executes on a tokio worker.
-/// `block_in_place` hands that worker's run queue to another thread for the
-/// duration of the write; it panics outside a multi-thread runtime, so the
-/// flavor is checked first and everything else (current-thread runtimes,
-/// plain threads) keeps the previous inline behavior. The remaining
-/// `block_in_place` panic case is a `LocalSet` on a multi-thread runtime,
-/// which this workspace does not use.
-fn run_blocking_handle_store<T>(work: impl FnOnce() -> T) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(work)
-        }
-        _ => work(),
+/// The adapter records the full typed error in internal telemetry. Public
+/// output must not disclose project-local filesystem paths.
+fn handle_store_failure_status(error: &TraceDecayError) -> Value {
+    if matches!(error, TraceDecayError::LockDeadline { .. }) {
+        return serde_json::json!({
+            "reason_code": "handle_store_busy",
+            "message": "The local response-handle cache stayed busy with other writers past its admission deadline, so no retrieval handle is available.",
+            "retryable": true,
+            "retry_instruction": "Re-run the original MCP tool to regenerate the full response and a fresh handle."
+        });
     }
+    serde_json::json!({
+        "reason_code": "handle_store_failed",
+        "message": "The full response could not be cached locally, so no retrieval handle is available.",
+        "retryable": true,
+        "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
+    })
 }
 
 fn prepare_truncated_response_handle(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     text: &str,
 ) -> TruncatedResponseHandle {
-    if let Some(root) = project_root {
-        match hotpath::measure_block!(
-            "mcp.server.response.handle_store",
-            run_blocking_handle_store(|| store_response_handle(root, text, current_timestamp()))
-        ) {
+    if let Some(root) = response_handle_root {
+        let match_result = {
+            let _span = tracing::trace_span!("mcp.server.response.handle_store").entered();
+            // ponytail: the truncating render path is synchronous (it sits
+            // under dozens of sync handler helpers), so this small bounded
+            // write blocks the executor worker rendering the response. Move
+            // it to `native_runtime::spawn_blocking` if the render path goes
+            // async or the write shows up in worker stall timings.
+            store_response_handle(root, text, current_timestamp())
+        };
+        match match_result {
             Ok(record) => TruncatedResponseHandle {
                 record: Some(record),
                 unavailable: None,
             },
-            // The adapter records the full typed error in internal telemetry.
-            // Public output must not disclose project-local filesystem paths.
-            Err(_) => TruncatedResponseHandle {
+            Err(error) => TruncatedResponseHandle {
                 record: None,
-                unavailable: Some(serde_json::json!({
-                    "reason_code": "handle_store_failed",
-                    "message": "The full response could not be cached locally, so no retrieval handle is available.",
-                    "retryable": true,
-                    "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
-                })),
+                unavailable: Some(handle_store_failure_status(&error)),
             },
         }
     } else {
@@ -403,7 +482,7 @@ fn render_markdown_truncation(
     if let Some(record) = &handle.record {
         let _ = writeln!(
             rendered,
-            "Full response stored locally. Retrieve it with `{RESPONSE_RETRIEVE_TOOL}` using handle `{}` before {}.",
+            "Preview is the context to use. Do not join stored pages back into the conversation. If one omitted detail is required, call `{RESPONSE_RETRIEVE_TOOL}` once using handle `{}` before {}.",
             record.handle, record.expires_at
         );
     } else if let Some(status) = &handle.unavailable {
@@ -465,18 +544,35 @@ impl Md {
         self
     }
 
+    /// Appends already-rendered markdown verbatim.
+    pub fn raw(&mut self, markdown: &str) -> &mut Self {
+        self.buf.push_str(markdown);
+        self
+    }
+
     pub fn blank(&mut self) -> &mut Self {
         self.buf.push('\n');
         self
     }
 
     pub fn code(&mut self, lang: &str, body: &str) -> &mut Self {
-        let _ = writeln!(self.buf, "```{lang}");
+        let width = body
+            .split_inclusive('\n')
+            .map(|line| {
+                line.trim_start()
+                    .bytes()
+                    .take_while(|byte| *byte == b'`')
+                    .count()
+            })
+            .fold(2, usize::max)
+            .saturating_add(1);
+        let fence = "`".repeat(width);
+        let _ = writeln!(self.buf, "{fence}{lang}");
         self.buf.push_str(body);
         if !body.ends_with('\n') {
             self.buf.push('\n');
         }
-        self.buf.push_str("```\n");
+        let _ = writeln!(self.buf, "{fence}");
         self
     }
 
@@ -539,6 +635,35 @@ pub fn diagnostics_md(value: &Value) -> String {
     md.render()
 }
 
+/// Closes the summary fields, then lists the files whose sites were withheld.
+fn risky_pattern_omissions_md(md: &mut Md, value: &Value) {
+    let omissions = value
+        .get("omissions")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    if omissions.is_empty() {
+        md.blank();
+        return;
+    }
+    md.field("Coverage", "partial");
+    md.blank();
+    md.heading(3, "Omitted files");
+    for omission in omissions {
+        let text = |key: &str| omission.get(key).and_then(Value::as_str).unwrap_or("");
+        let withheld = omission
+            .get("withheld_match_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        md.bullet(&format!(
+            "**{}**: {} ({}), {withheld} site(s) withheld",
+            text("file"),
+            text("reason"),
+            text("cause"),
+        ));
+    }
+    md.blank();
+}
+
 /// Renders the `tracedecay_unsafe_patterns` payload
 /// (`{ match_count, by_kind, matches: [...] }`).
 ///
@@ -578,7 +703,7 @@ pub fn risky_patterns_md(value: &Value) -> String {
             .join(", ");
         md.field("By kind", &summary);
     }
-    md.blank();
+    risky_pattern_omissions_md(&mut md, value);
 
     if matches.is_empty() {
         md.empty_note("No risky patterns found.");
@@ -608,78 +733,10 @@ pub fn risky_patterns_md(value: &Value) -> String {
     md.render()
 }
 
-/// Dedicated markdown renderer for `tracedecay_unused_imports`.
-///
-/// The generic renderer dumped the `imports` array as anonymous records; this
-/// spells each finding as `NAME unused in file:line` so agents (and tests) get
-/// a stable, greppable location — the same shape as [`risky_patterns_md`].
-pub fn unused_imports_md(value: &Value) -> String {
-    let mut md = Md::new();
-    md.heading(2, "Unused Imports");
-
-    let imports = value
-        .get("imports")
-        .and_then(Value::as_array)
-        .map_or(&[][..], Vec::as_slice);
-    let count = value
-        .get("unused_import_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(imports.len() as u64);
-    md.field("Unused import count", &count.to_string());
-    // A paged walk must never read as a whole-repository verdict: state the
-    // scanned scope and how to resume before listing findings.
-    let complete = value.get("complete").and_then(Value::as_bool);
-    if let Some(scanned) = value.get("scanned_files").and_then(Value::as_u64) {
-        md.field("Files scanned", &scanned.to_string());
-    }
-    if complete == Some(false) {
-        md.field("Coverage", "partial");
-        if let Some(reason) = value.get("partial_reason").and_then(Value::as_str) {
-            md.field("Partial reason", reason);
-        }
-        if let Some(cursor) = value.get("next_cursor").and_then(Value::as_str) {
-            md.field("Resume with cursor", cursor);
-        }
-    }
-    md.blank();
-
-    if imports.is_empty() {
-        if complete == Some(false) {
-            md.empty_note("No unused imports in the scanned page; the walk is incomplete.");
-        } else {
-            md.empty_note("No unused imports found.");
-        }
-        return md.render();
-    }
-
-    md.heading(3, "Findings");
-    for imp in imports {
-        let name = imp
-            .get("unused")
-            .and_then(Value::as_str)
-            .or_else(|| imp.get("name").and_then(Value::as_str));
-        let file = imp
-            .get("file")
-            .and_then(Value::as_str)
-            .unwrap_or("<unknown>");
-        let line = imp.get("line").and_then(Value::as_u64).unwrap_or(0);
-        let label = name.unwrap_or("<unknown>");
-        md.bullet(&format!("**{label} unused in {file}:{line}**"));
-        // Show the full import path when it differs from the flagged identifier
-        // (grouped/aliased imports like `foo::{a, b as c}`).
-        if let Some(full) = imp.get("name").and_then(Value::as_str)
-            && Some(full) != name
-        {
-            md.line(&format!("  **Import:** {full}"));
-        }
-    }
-    md.render()
-}
-
 /// Dedicated markdown renderer for `tracedecay_unmounted_files`.
 ///
-/// An empty answer here is a real and welcome verdict — "every source file is
-/// reachable" — so it is spelled out rather than left as the generic renderer's
+/// An empty answer here is a real and welcome verdict, "every source file is
+/// reachable", so it is spelled out rather than left as the generic renderer's
 /// silence. The per-ecosystem section is not decoration: "unmounted" means
 /// something stronger for cargo than for a bundler, and a language nobody
 /// modelled must say so out loud rather than let a clean report imply coverage
@@ -779,7 +836,7 @@ fn render_ecosystem(md: &mut Md, ecosystem: &Value) {
     let number = |key: &str| ecosystem.get(key).and_then(Value::as_u64).unwrap_or(0);
     let findings = number("unmounted_file_count");
     md.bullet(&format!(
-        "**{name}** — {status} · {} package(s) · {} entry point(s) · {} file(s) scanned · {findings} unmounted",
+        "**{name}**, {status} · {} package(s) · {} entry point(s) · {} file(s) scanned · {findings} unmounted",
         number("package_count"),
         number("entry_point_count"),
         number("scanned_file_count"),
@@ -863,28 +920,6 @@ fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
             .collect::<Vec<_>>();
         if !callers.is_empty() {
             md.line(&format!("  **Callers:** {}", callers.join(", ")));
-        }
-    }
-    if let Some(dupes) = diagnostic.get("near_duplicates").and_then(Value::as_array) {
-        let dupes = dupes
-            .iter()
-            .filter_map(|dupe| {
-                let name = dupe.get("name").and_then(Value::as_str)?;
-                let file = dupe.get("file").and_then(Value::as_str).unwrap_or("");
-                let line = dupe.get("line").and_then(Value::as_u64).unwrap_or(0);
-                let kind = dupe
-                    .get("overlap_kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                Some(if file.is_empty() {
-                    format!("{name} [{kind}]")
-                } else {
-                    format!("{name} ({file}:{line}) [{kind}]")
-                })
-            })
-            .collect::<Vec<_>>();
-        if !dupes.is_empty() {
-            md.line(&format!("  **Near-duplicates:** {}", dupes.join(", ")));
         }
     }
 }

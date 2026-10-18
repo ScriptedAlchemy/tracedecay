@@ -4,26 +4,41 @@
 //! and bounded history are read through `gix`.
 
 use std::collections::{BTreeSet, HashMap};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 
 use gix::bstr::ByteSlice as _;
+
+/// Threads one status call may spawn for its tracked-file modification check.
+/// gix spawns these per call and lets them exit when it returns; left
+/// unlimited it starts one per logical core on every status, which on a
+/// 96-core host created roughly 90 short-lived threads per call during an
+/// index. Four keeps the check parallel on large indexes.
+pub const GIT_STATUS_MODIFICATION_CHECK_THREADS: usize = 4;
 use tracedecay_domain::git::{
     GitChangeKindV1, GitDegradationV1, GitFileModeV1, GitHeadStateV1, GitObjectFormatV1, GitOidV1,
     GitOperationStateV1, GitStatusEntryV1, GitTrackedStatusV1,
 };
+use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 
 mod history;
 mod native_integration;
+mod tree_links;
 pub use history::{
     GitHistoryBudget, GitHistoryOptions, GitHistoryTermination, GitRepositoryHistory,
 };
 pub use native_integration::{
-    GitNativeApplyOutcome, GitNativeIntegrationMode, GitNativePreflight,
+    GitNativeApplyOutcome, GitNativeCandidateTreeV1, GitNativeCandidateTreeVisitError,
+    GitNativeIntegrationMode, GitNativePreflight, GitNativePreflightCaptureError,
     GitNativePreflightDisposition, GitNativeUnsupportedReason,
 };
+pub use tree_links::resolve_tree_link;
 
 /// A typed failure from the in-process Git repository authority.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum GitRepositoryError {
     #[error("not a Git repository: {path}")]
     NotARepository { path: String },
@@ -38,6 +53,25 @@ pub enum GitRepositoryError {
     },
     #[error(transparent)]
     Domain(#[from] tracedecay_domain::research::DomainError),
+}
+
+/// [`try_repository_topology`] found another thread walking this path.
+///
+/// Only callers that must not wait on that blocking filesystem walk see
+/// this; they answer it under their own deadline.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("repository discovery blocked on {path}")]
+pub struct DiscoveryBlocked {
+    pub path: String,
+}
+
+/// A failed [`try_repository_topology`] probe.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum GitTopologyProbeError {
+    #[error(transparent)]
+    Blocked(#[from] DiscoveryBlocked),
+    #[error(transparent)]
+    Repository(#[from] GitRepositoryError),
 }
 
 /// One resolved reference and its direct object target, if it has one.
@@ -66,34 +100,908 @@ pub struct GitRepositoryAuthority {
     common_dir: PathBuf,
 }
 
-impl GitRepositoryAuthority {
-    #[hotpath::measure(label = "runtime_core.git.repository_discover")]
-    pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
-        let repository = gix::discover_opts(
-            path,
-            gix::discover::upwards::Options::default(),
-            repository_open_options(),
+/// The repository paths one discovery resolves, before any ref or object is
+/// read: the upward walk for `.git`, the repository open, and the canonical
+/// form of each directory it names.
+///
+/// Separated from [`GitRepositoryAuthority`] because topology is the only part
+/// of a discovery that is stable for a checkout. HEAD, refs, and status are
+/// live reads and are answered from a freshly discovered authority every time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitRepositoryTopologyV1 {
+    pub worktree_root: Option<PathBuf>,
+    pub git_dir: PathBuf,
+    pub common_dir: PathBuf,
+}
+
+/// One retained topology resolution.
+///
+/// The mutex covers only the memo and the in-flight walk handle. The blocking
+/// repository walk runs outside it, so a hung `open()` of one checkout cannot
+/// queue every other project-open thread on this lock.
+#[derive(Default)]
+struct CheckoutTopologySlot {
+    state: Mutex<CheckoutTopologyState>,
+    /// [`CHECKOUT_TOPOLOGY_USES`] tick of the last lookup; a full memo drops
+    /// the slot with the oldest tick.
+    last_used: AtomicU64,
+}
+
+impl CheckoutTopologySlot {
+    fn touch(&self) {
+        self.last_used.fetch_max(
+            CHECKOUT_TOPOLOGY_USES.fetch_add(1, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+#[derive(Default)]
+enum CheckoutTopologyState {
+    #[default]
+    Vacant,
+    Resolving(Arc<TopologyWalk>),
+    Ready(Arc<GitRepositoryTopologyV1>),
+}
+
+/// One in-flight discovery walk and the answer it hands every caller that
+/// joined it.
+///
+/// Kept apart from the slot state because a path that is not retained
+/// publishes [`CheckoutTopologyState::Vacant`], and its waiters still need
+/// the walk's answer.
+#[derive(Default)]
+struct TopologyWalk {
+    outcome: Mutex<TopologyWalkOutcome>,
+    finished: Condvar,
+}
+
+type TopologyResult = Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError>;
+
+#[derive(Default)]
+enum TopologyWalkOutcome {
+    #[default]
+    Walking,
+    Published(TopologyResult),
+    /// The owner unwound without an answer; a waiter claims a new walk.
+    Abandoned,
+}
+
+impl TopologyWalk {
+    /// The published answer, or `None` when the walk was abandoned.
+    fn wait(&self) -> Option<TopologyResult> {
+        let outcome = self
+            .finished
+            .wait_while(
+                self.outcome.lock().unwrap_or_else(PoisonError::into_inner),
+                |outcome| matches!(outcome, TopologyWalkOutcome::Walking),
+            )
+            .unwrap_or_else(PoisonError::into_inner);
+        match &*outcome {
+            TopologyWalkOutcome::Published(result) => Some(result.clone()),
+            TopologyWalkOutcome::Walking | TopologyWalkOutcome::Abandoned => None,
+        }
+    }
+
+    fn is_walking(&self) -> bool {
+        matches!(
+            *self.outcome.lock().unwrap_or_else(PoisonError::into_inner),
+            TopologyWalkOutcome::Walking
         )
-        .map_err(|error| match error {
-            gix::discover::Error::Discover(gix::discover::upwards::Error::NoGitRepository {
-                ..
-            }) => GitRepositoryError::NotARepository {
-                path: path.display().to_string(),
+    }
+
+    fn finish(&self, outcome: TopologyWalkOutcome) {
+        *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) = outcome;
+        self.finished.notify_all();
+    }
+}
+
+/// Retained checkout-root topologies.
+///
+/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map drops a settled
+/// slot that retains nothing before one that retains a root, least recently
+/// used first within each. Clearing it whole, or plain LRU, let a burst of
+/// one-off probes evict the roots a daemon keeps serving, so a deferred route
+/// on a slow volume walked again instead of converging.
+static CHECKOUT_TOPOLOGY: LazyLock<Mutex<HashMap<PathBuf, Arc<CheckoutTopologySlot>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static CHECKOUT_TOPOLOGY_USES: AtomicU64 = AtomicU64::new(0);
+
+/// A daemon serves few project roots; this bound exists so a long-lived
+/// process that probes many paths cannot grow the memo without limit.
+const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
+
+/// Last branch read from each Git directory's HEAD, keyed by that file's
+/// identity. Bounded like [`CHECKOUT_TOPOLOGY`] but cleared whole when full:
+/// an entry costs one HEAD read to rebuild, not a discovery walk.
+static HEAD_BRANCHES: LazyLock<Mutex<HeadBranchMemo>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+type HeadBranchMemo = HashMap<PathBuf, (HeadFileStamp, Option<String>)>;
+
+/// Identity of a HEAD file. Git replaces HEAD by renaming a lock file over
+/// it, so every checkout yields a new change time; an equal stamp proves the
+/// branch unchanged only once that change time is settled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeadFileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64),
+    changed: ChangeStamp,
+}
+
+impl HeadFileStamp {
+    fn read(head: &Path) -> Option<Self> {
+        let sampled_at = ChangeClockReading::now();
+        let metadata = std::fs::symlink_metadata(head).ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            inode: (metadata.dev(), metadata.ino()),
+            changed: RewriteWitness::native_path_stamp(head, &metadata, sampled_at),
+        })
+    }
+}
+
+/// Repository topology for `path`, resolved once per checkout root.
+///
+/// Live defect this exists for: one daemon connection asked the same
+/// repository for its common directory, worktree root, and linked-worktree
+/// shape a dozen times, and each question ran a complete `gix` discovery,
+/// an upward walk to the filesystem root plus a repository open. On a slow
+/// volume that is seconds per question, paid again by every concurrent
+/// client, and it ran inline on the async workers that also poll the daemon's
+/// accept loop.
+///
+/// Only a path that **is** its own worktree root is retained. The checkout's
+/// `.git` marker and linked-worktree `commondir` are revalidated before reuse,
+/// so replacing or retargeting that root cannot inherit its old identity.
+/// Every other path, a subdirectory, a bare repository, an unresolvable
+/// directory, is discovered live, so a repository created below it is
+/// observed immediately.
+///
+/// Concurrent callers for one path share one walk: a caller that finds the
+/// walk in flight waits for it and receives its answer, success or typed
+/// failure, instead of walking the volume again. The wait is on that walk
+/// alone; no slot or map lock is held across it.
+pub fn repository_topology(
+    path: &Path,
+) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
+    let slot = checkout_topology_slot(path);
+    loop {
+        match checkout_resolution(&slot) {
+            CheckoutResolution::Ready(topology) => return Ok(topology),
+            CheckoutResolution::Owner(walk) => return walk_checkout_topology(path, &slot, walk),
+            CheckoutResolution::InFlight(walk) => {
+                #[cfg(any(test, feature = "test-helpers"))]
+                observe_topology_wait(path);
+                if let Some(result) = walk.wait() {
+                    return result;
+                }
+            }
+        }
+    }
+}
+
+/// [`repository_topology`] for callers that must not wait on another
+/// thread's walk, because it is blocking filesystem IO with no deadline. A
+/// walk already in flight for `path` is [`DiscoveryBlocked`].
+pub fn try_repository_topology(
+    path: &Path,
+) -> Result<Arc<GitRepositoryTopologyV1>, GitTopologyProbeError> {
+    let slot = checkout_topology_slot(path);
+    match checkout_resolution(&slot) {
+        CheckoutResolution::Ready(topology) => Ok(topology),
+        CheckoutResolution::Owner(walk) => Ok(walk_checkout_topology(path, &slot, walk)?),
+        CheckoutResolution::InFlight(_) => Err(DiscoveryBlocked {
+            path: path.display().to_string(),
+        }
+        .into()),
+    }
+}
+
+/// Run the walk this caller claimed and hand its answer to every joiner.
+fn walk_checkout_topology(
+    path: &Path,
+    slot: &CheckoutTopologySlot,
+    walk: Arc<TopologyWalk>,
+) -> TopologyResult {
+    let guard = CheckoutResolutionGuard { slot, walk };
+    #[cfg(any(test, feature = "test-helpers"))]
+    observe_topology_resolution(path);
+    let resolved = {
+        let _span = tracing::trace_span!("runtime_core.git.topology.resolve").entered();
+        GitRepositoryAuthority::discover_uncached(path)
+    }
+    .map(|authority| Arc::new(authority.into_topology()));
+    guard.publish(path, resolved.clone());
+    resolved
+}
+
+/// A live retained topology, or `None` when the memo is empty, stale, or
+/// another thread owns the walk. Liveness reads the filesystem and must not
+/// run while the slot mutex is held.
+fn live_ready_topology(slot: &CheckoutTopologySlot) -> Option<Arc<GitRepositoryTopologyV1>> {
+    let ready = {
+        let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*state {
+            CheckoutTopologyState::Ready(topology) => Some(Arc::clone(topology)),
+            CheckoutTopologyState::Vacant | CheckoutTopologyState::Resolving(_) => None,
+        }
+    }?;
+    checkout_topology_is_live(&ready).then_some(ready)
+}
+
+enum CheckoutResolution {
+    Ready(Arc<GitRepositoryTopologyV1>),
+    Owner(Arc<TopologyWalk>),
+    InFlight(Arc<TopologyWalk>),
+}
+
+/// The live retained topology for `slot`, else the single in-flight walk:
+/// claimed by this caller, or the one another thread already owns.
+///
+/// Joiners wait on that walk, never on this slot mutex: waiting on the
+/// mutex is the queue that stalled every other project open.
+fn checkout_resolution(slot: &CheckoutTopologySlot) -> CheckoutResolution {
+    if let Some(topology) = live_ready_topology(slot) {
+        return CheckoutResolution::Ready(topology);
+    }
+    let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+    if let CheckoutTopologyState::Resolving(walk) = &*state {
+        return CheckoutResolution::InFlight(Arc::clone(walk));
+    }
+    let walk = Arc::new(TopologyWalk::default());
+    *state = CheckoutTopologyState::Resolving(Arc::clone(&walk));
+    CheckoutResolution::Owner(walk)
+}
+
+/// Settles a claimed walk. One that never published, because its owner
+/// unwound, is abandoned so its waiters claim a new walk instead of hanging.
+struct CheckoutResolutionGuard<'a> {
+    slot: &'a CheckoutTopologySlot,
+    walk: Arc<TopologyWalk>,
+}
+
+impl CheckoutResolutionGuard<'_> {
+    fn publish(self, path: &Path, resolved: TopologyResult) {
+        let topology = resolved.as_ref().ok();
+        let retain = topology
+            .and_then(|topology| topology.worktree_root.as_deref())
+            .is_some_and(|root| path.canonicalize().is_ok_and(|canonical| canonical == root));
+        if !retain
+            && let Some(topology) = topology
+            && let Some(root) = topology.worktree_root.as_deref()
+        {
+            // Publish the root before this slot, and without holding this
+            // slot: the root's own resolution never locks a second slot, but
+            // holding this one across that lock would invert the order.
+            publish_checkout_root_topology(root, topology);
+        }
+        self.settle_slot(match topology {
+            Some(topology) if retain => CheckoutTopologyState::Ready(Arc::clone(topology)),
+            _ => CheckoutTopologyState::Vacant,
+        });
+        self.walk.finish(TopologyWalkOutcome::Published(resolved));
+    }
+
+    /// Replace the slot state only while it still names this walk.
+    fn settle_slot(&self, next: CheckoutTopologyState) {
+        let mut state = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(&*state, CheckoutTopologyState::Resolving(walk) if Arc::ptr_eq(walk, &self.walk))
+        {
+            *state = next;
+        }
+    }
+}
+
+impl Drop for CheckoutResolutionGuard<'_> {
+    fn drop(&mut self) {
+        if self.walk.is_walking() {
+            self.settle_slot(CheckoutTopologyState::Vacant);
+            self.walk.finish(TopologyWalkOutcome::Abandoned);
+        }
+    }
+}
+
+/// Retain a topology under the worktree root it resolved, not the path it was
+/// discovered from.
+///
+/// Safe to call while holding another path's slot: the root's own resolution
+/// takes the retain arm above and never reaches for a second slot, so no
+/// thread holds these two locks in the opposite order.
+fn publish_checkout_root_topology(root: &Path, topology: &Arc<GitRepositoryTopologyV1>) {
+    let slot = checkout_topology_slot(root);
+    let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+    *state = CheckoutTopologyState::Ready(Arc::clone(topology));
+}
+
+/// A live retained topology for `path`, without resolving one.
+///
+/// Never creates a slot: a peek that inserted would let unresolvable paths
+/// evict the memo this exists to preserve.
+fn retained_checkout_topology(path: &Path) -> Option<Arc<GitRepositoryTopologyV1>> {
+    let slot = Arc::clone(
+        CHECKOUT_TOPOLOGY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)?,
+    );
+    slot.touch();
+    live_ready_topology(&slot)
+}
+
+fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
+    let mut slots = CHECKOUT_TOPOLOGY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(slot) = slots.get(path) {
+        slot.touch();
+        return Arc::clone(slot);
+    }
+    while slots.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES
+        && evict_least_recently_used_settled_slot(&mut slots)
+    {}
+    let slot = Arc::new(CheckoutTopologySlot::default());
+    slot.touch();
+    slots.insert(path.to_path_buf(), Arc::clone(&slot));
+    slot
+}
+
+/// Drop a settled slot, reporting whether one was dropped: the least recently
+/// used vacant slot, else the least recently used retained root, whose loss
+/// costs a discovery walk. A slot with a walk in flight stays, because its
+/// owner publishes into that slot and an evicted one would discard the
+/// answer; the map may then exceed its bound until those walks settle and a
+/// later insertion evicts back down to it. `try_lock` skips a slot another
+/// thread holds, since that thread may be waiting for this map lock.
+fn evict_least_recently_used_settled_slot(
+    slots: &mut HashMap<PathBuf, Arc<CheckoutTopologySlot>>,
+) -> bool {
+    let victim = slots
+        .iter()
+        .filter_map(|(path, slot)| {
+            let retains = match &*slot.state.try_lock().ok()? {
+                CheckoutTopologyState::Resolving(_) => return None,
+                CheckoutTopologyState::Vacant => false,
+                CheckoutTopologyState::Ready(_) => true,
+            };
+            Some((path, retains, slot.last_used.load(Ordering::Relaxed)))
+        })
+        .min_by_key(|&(_, retains, last_used)| (retains, last_used))
+        .map(|(path, _, _)| path.clone());
+    victim.is_some_and(|victim| slots.remove(&victim).is_some())
+}
+
+/// Whether a retained checkout-root topology still describes the filesystem.
+///
+/// `<root>/.git` is the entry the upward walk stopped at. Its live target and
+/// the per-worktree `commondir` target must still equal the retained identity;
+/// existence alone would let a path replacement inherit stale authority.
+fn checkout_topology_is_live(topology: &GitRepositoryTopologyV1) -> bool {
+    let Some(root) = topology.worktree_root.as_ref() else {
+        return false;
+    };
+    let dot_git = root.join(".git");
+    let live_git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let Ok(path) = gix::discover::path::from_gitdir_file(&dot_git) else {
+            return false;
+        };
+        path
+    };
+    let Ok(live_git_dir) = live_git_dir.canonicalize() else {
+        return false;
+    };
+    if live_git_dir != topology.git_dir {
+        return false;
+    }
+    let common_dir_file = live_git_dir.join("commondir");
+    let live_common_dir =
+        match gix::discover::path::from_plain_file_relative_to_file(&common_dir_file) {
+            Some(Ok(path)) => match path.canonicalize() {
+                Ok(path) => path,
+                Err(_) => return false,
             },
-            error => GitRepositoryError::UnreadableRepository {
+            Some(Err(_)) => return false,
+            None => live_git_dir,
+        };
+    live_common_dir == topology.common_dir
+}
+
+/// Counts live `gix` discoveries and injects discovery latency, per root.
+///
+/// Repository discovery is the blocking filesystem cost the daemon's route
+/// resolution is bounded against, so tests need both to observe how many
+/// discoveries a journey really runs and to make one slow on demand.
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Default)]
+struct RepositoryDiscoveryObservation {
+    discoveries: u64,
+    topology_resolutions: u64,
+    /// Callers that joined a walk another thread owned, instead of walking.
+    topology_waits: u64,
+    delay: Option<std::time::Duration>,
+    /// When set, live discovery pays [`Self::delay`] then returns
+    /// [`GitRepositoryError::UnreadableRepository`] without opening the
+    /// repository, so callers can exercise the Git CLI fallback after a
+    /// slow unreadable authority phase.
+    force_unreadable: bool,
+    /// When set, the walk waits on a test channel instead of sleeping, so a
+    /// hung discovery is controllable without occupying a timeout.
+    block: Option<std::sync::Arc<RepositoryDiscoveryBlockGate>>,
+    /// When set, a caller's discovery budget ends only when the walk does.
+    clock_held: bool,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+static REPOSITORY_DISCOVERY_OBSERVATIONS: LazyLock<
+    Mutex<HashMap<PathBuf, RepositoryDiscoveryObservation>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn repository_discovery_observations()
+-> std::sync::MutexGuard<'static, HashMap<PathBuf, RepositoryDiscoveryObservation>> {
+    REPOSITORY_DISCOVERY_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn observed_discovery_root(root: &Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn observe_repository_discovery(path: &Path) {
+    let (delay, block) = {
+        let mut observations = repository_discovery_observations();
+        if observations.is_empty() {
+            return;
+        }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let mut delay = None;
+        let mut block = None;
+        for (root, observation) in observations.iter_mut() {
+            if !canonical.starts_with(root) {
+                continue;
+            }
+            observation.discoveries = observation.discoveries.saturating_add(1);
+            delay = delay.or(observation.delay);
+            if block.is_none() {
+                block.clone_from(&observation.block);
+            }
+        }
+        (delay, block)
+    };
+    // Waiting under the observation lock would serialize every other root's
+    // discovery behind this one and hide the concurrency the tests assert.
+    if let Some(block) = block {
+        block.enter_and_wait();
+    }
+    if let Some(delay) = delay {
+        std::thread::sleep(delay);
+    }
+}
+
+/// One test-owned block of the live discovery walk under a root.
+///
+/// The walk signals [`Self::entered`] and then waits on `release`. Other
+/// projects are not in this wait. Callers of the blocked root that join the
+/// walk wait for its release; [`try_repository_topology`] callers get
+/// [`DiscoveryBlocked`].
+#[cfg(any(test, feature = "test-helpers"))]
+struct RepositoryDiscoveryBlockGate {
+    entered: asupersync::channel::watch::Sender<bool>,
+    release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl RepositoryDiscoveryBlockGate {
+    fn enter_and_wait(&self) {
+        // Claim the release before announcing entry, so "entered" names the
+        // one parked walk and a later walk of the same root never takes its
+        // place and waits on the caller that is about to release it.
+        let release = self
+            .release
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let _ = self.entered.send(true);
+        if let Some(release) = release {
+            let _ = release.recv();
+        }
+    }
+}
+
+/// Handle for a discovery walk parked on a channel.
+///
+/// Dropping `release` unblocks the walk. Await [`Self::wait_entered`] to learn
+/// the walk has reached the blocking section.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct RepositoryDiscoveryBlock {
+    entered: asupersync::channel::watch::Receiver<bool>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl RepositoryDiscoveryBlock {
+    /// Wait until the parked walk has entered its blocking section. Callable
+    /// from any executor.
+    #[allow(clippy::expect_used)]
+    pub async fn wait_entered(&mut self) {
+        let cx = crate::native_runtime::cx().expect("native runtime for the discovery block");
+        discovery_block_entered(&cx, &mut self.entered).await;
+    }
+
+    /// Let the parked walk finish.
+    pub fn release(self) {
+        let _ = self.release.send(());
+    }
+}
+
+/// Park every live discovery walk under `root` until [`RepositoryDiscoveryBlock::release`].
+///
+/// The walk signals `entered` from the blocking section and does not hold the
+/// topology slot while it waits. Implies [`observe_repository_discovery_for_test`].
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn block_repository_discovery_for_test(root: &Path) -> RepositoryDiscoveryBlock {
+    forget_retained_checkout_topology_for_test(root);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (entered_tx, entered_rx) = asupersync::channel::watch::channel(false);
+    repository_discovery_observations().insert(
+        observed_discovery_root(root),
+        RepositoryDiscoveryObservation {
+            block: Some(std::sync::Arc::new(RepositoryDiscoveryBlockGate {
+                entered: entered_tx,
+                release: Mutex::new(Some(release_rx)),
+            })),
+            ..RepositoryDiscoveryObservation::default()
+        },
+    );
+    RepositoryDiscoveryBlock {
+        entered: entered_rx,
+        release: release_tx,
+    }
+}
+
+/// Completes once a test block for `directory` has entered its wait, and
+/// never when no block is armed, so production deadlines keep their own timer.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) async fn repository_discovery_parked(cx: &asupersync::Cx, directory: &Path) {
+    if let Some(block) = armed_discovery_block(directory)
+        && discovery_block_entered(cx, &mut block.entered.subscribe()).await
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
+}
+
+/// Whether the walk entered its block before the block was disarmed.
+#[cfg(any(test, feature = "test-helpers"))]
+async fn discovery_block_entered(
+    cx: &asupersync::Cx,
+    entered: &mut asupersync::channel::watch::Receiver<bool>,
+) -> bool {
+    loop {
+        if entered.borrow_and_update_clone() {
+            return true;
+        }
+        if entered.changed(cx).await.is_err() {
+            return false;
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn armed_discovery_block(directory: &Path) -> Option<std::sync::Arc<RepositoryDiscoveryBlockGate>> {
+    let observations = repository_discovery_observations();
+    if observations.is_empty() {
+        return None;
+    }
+    let canonical = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+    observations.iter().find_map(|(root, observation)| {
+        canonical
+            .starts_with(root)
+            .then(|| observation.block.clone())
+            .flatten()
+    })
+}
+
+/// Begin counting live discoveries under `root`, and forget any topology
+/// already retained for it, so a fixture's counts start from a cold authority.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn observe_repository_discovery_for_test(root: &Path) {
+    forget_retained_checkout_topology_for_test(root);
+    repository_discovery_observations().insert(
+        observed_discovery_root(root),
+        RepositoryDiscoveryObservation::default(),
+    );
+}
+
+/// Make every live discovery walk under `root` take `delay`, modelling a
+/// repository on a slow volume. A repository opened from a retained topology
+/// pays no walk and so is not delayed, which is exactly the convergence the
+/// deferral tests assert. Implies [`observe_repository_discovery_for_test`].
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn delay_repository_discovery_for_test(root: &Path, delay: std::time::Duration) {
+    forget_retained_checkout_topology_for_test(root);
+    repository_discovery_observations().insert(
+        observed_discovery_root(root),
+        RepositoryDiscoveryObservation {
+            delay: Some(delay),
+            ..RepositoryDiscoveryObservation::default()
+        },
+    );
+}
+
+/// Pay `delay` on every live discovery under `root`, then fail as an
+/// unreadable authority so the Git CLI fallback is the only resolution path.
+///
+/// Models a slow in-process phase that returns unreadable while both phases
+/// still share one discovery deadline.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn unreadable_repository_discovery_for_test(root: &Path, delay: std::time::Duration) {
+    forget_retained_checkout_topology_for_test(root);
+    repository_discovery_observations().insert(
+        observed_discovery_root(root),
+        RepositoryDiscoveryObservation {
+            delay: Some(delay),
+            force_unreadable: true,
+            ..RepositoryDiscoveryObservation::default()
+        },
+    );
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn forced_unreadable_repository_discovery(path: &Path) -> bool {
+    let observations = repository_discovery_observations();
+    if observations.is_empty() {
+        return false;
+    }
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    observations
+        .iter()
+        .any(|(root, observation)| observation.force_unreadable && canonical.starts_with(root))
+}
+
+/// Live `gix` discoveries observed under `root` since observation began.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn repository_discovery_count_for_test(root: &Path) -> u64 {
+    observed_count(root, |observation| observation.discoveries)
+}
+
+/// Topology resolutions under `root`, the discoveries the retained authority
+/// could not answer, since observation began.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn repository_topology_resolution_count_for_test(root: &Path) -> u64 {
+    observed_count(root, |observation| observation.topology_resolutions)
+}
+
+/// Callers under `root` that joined another thread's in-flight walk, since
+/// observation began.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn repository_topology_wait_count_for_test(root: &Path) -> u64 {
+    observed_count(root, |observation| observation.topology_waits)
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn observed_count(root: &Path, count: impl Fn(&RepositoryDiscoveryObservation) -> u64) -> u64 {
+    repository_discovery_observations()
+        .get(&observed_discovery_root(root))
+        .map_or(0, count)
+}
+
+/// Wait until `callers` callers under `root` have either joined the parked
+/// walk or already returned, as `returned` counts them.
+///
+/// A caller that returned without joining is the defect a test asserts on,
+/// so both end the wait; a caller that did neither within ten seconds fails.
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::expect_used)]
+pub async fn wait_for_topology_callers_for_test(
+    root: &Path,
+    callers: u64,
+    returned: impl Fn() -> u64,
+) {
+    let cx = crate::native_runtime::cx().expect("native runtime for the caller wait");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while repository_topology_wait_count_for_test(root) + returned() < callers {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "callers neither joined the parked discovery walk nor returned"
+        );
+        // The timer runs in a native task so a Tokio caller never polls it.
+        let mut pause = cx
+            .spawn(|cx| async move {
+                asupersync::time::sleep(cx.now(), std::time::Duration::from_millis(5)).await;
+            })
+            .expect("native pause task");
+        let _ = pause.join(&cx).await;
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn observe_topology_resolution(path: &Path) {
+    count_topology_observation(path, |observation| &mut observation.topology_resolutions);
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn observe_topology_wait(path: &Path) {
+    count_topology_observation(path, |observation| &mut observation.topology_waits);
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn count_topology_observation(
+    path: &Path,
+    counter: impl Fn(&mut RepositoryDiscoveryObservation) -> &mut u64,
+) {
+    let mut observations = repository_discovery_observations();
+    if observations.is_empty() {
+        return;
+    }
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    for (root, observation) in observations.iter_mut() {
+        if canonical.starts_with(root) {
+            let count = counter(observation);
+            *count = count.saturating_add(1);
+        }
+    }
+}
+
+/// Stop the wall clock from ending discovery budgets under `root`, for tests
+/// whose subject is not the discovery deadline. Keeps any delay or block
+/// already armed there.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn hold_repository_discovery_clock_for_test(root: &Path) {
+    repository_discovery_observations()
+        .entry(observed_discovery_root(root))
+        .or_default()
+        .clock_held = true;
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) fn repository_discovery_clock_held(directory: &Path) -> bool {
+    let observations = repository_discovery_observations();
+    if observations.is_empty() {
+        return false;
+    }
+    let canonical = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+    observations
+        .iter()
+        .any(|(root, observation)| observation.clock_held && canonical.starts_with(root))
+}
+
+/// Stop observing `root` and drop its retained topology.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reset_repository_discovery_for_test(root: &Path) {
+    repository_discovery_observations().remove(&observed_discovery_root(root));
+    forget_retained_checkout_topology_for_test(root);
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn forget_retained_checkout_topology_for_test(root: &Path) {
+    let canonical = observed_discovery_root(root);
+    CHECKOUT_TOPOLOGY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|path, _| !path.starts_with(&canonical) && !canonical.starts_with(path));
+}
+
+impl GitRepositoryAuthority {
+    /// Open the repository `path` belongs to.
+    ///
+    /// A retained topology answers the *where* half of a discovery, the
+    /// upward walk for `.git` and the canonical form of each directory it
+    /// names, so this opens the repository directly at its checkout root (its
+    /// Git directory when bare) instead of walking the volume again. Live
+    /// reads (HEAD, refs, status) still come from a freshly opened repository.
+    ///
+    /// Live defect this exists for: the topology memo only short-circuited
+    /// `repository_topology`. Every HEAD read, one per route resolution, from
+    /// `current_branch`, still ran a complete repository discovery, so on a slow
+    /// volume a deferred route never converged: the memo was warm and the next
+    /// request paid the whole walk again anyway.
+    pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
+        if let Some(topology) = retained_checkout_topology(path)
+            && let Some(authority) = Self::open_retained(&topology)
+        {
+            return Ok(authority);
+        }
+        // Cold opens share the per-path walk: a caller that finds the walk in
+        // progress waits for its topology instead of starting another one.
+        let topology = repository_topology(path)?;
+        Self::open_retained(&topology).ok_or_else(|| GitRepositoryError::UnreadableRepository {
+            path: path.display().to_string(),
+            detail: "retained Git directory could not be opened".to_owned(),
+        })
+    }
+
+    /// Open a repository whose topology is already known, or `None` when the
+    /// open fails and the full walk has to decide.
+    fn open_retained(topology: &GitRepositoryTopologyV1) -> Option<Self> {
+        let repository = {
+            let _span = tracing::trace_span!("runtime_core.git.repository_open_retained").entered();
+            // A `--separate-git-dir` directory has no link back to its
+            // checkout, so opened by itself it reads as bare.
+            crate::git_open::open(topology.worktree_root.as_ref().unwrap_or(&topology.git_dir))
+        }
+        .ok()?;
+        Some(Self {
+            repository: repository.into_sync(),
+            worktree_root: topology.worktree_root.clone(),
+            git_dir: topology.git_dir.clone(),
+            common_dir: topology.common_dir.clone(),
+        })
+    }
+
+    #[tracing::instrument(
+        name = "runtime_core.git.repository_discover",
+        level = "trace",
+        skip_all
+    )]
+    fn discover_uncached(path: &Path) -> Result<Self, GitRepositoryError> {
+        #[cfg(any(test, feature = "test-helpers"))]
+        observe_repository_discovery(path);
+        #[cfg(any(test, feature = "test-helpers"))]
+        if forced_unreadable_repository_discovery(path) {
+            return Err(GitRepositoryError::UnreadableRepository {
                 path: path.display().to_string(),
-                detail: error.to_string(),
-            },
+                detail: "test-forced unreadable repository discovery".to_owned(),
+            });
+        }
+        let repository = {
+            let _span = tracing::trace_span!("runtime_core.git.repository_discover.walk").entered();
+            crate::git_open::discover(path)
+        }
+        .map_err(|error| {
+            match error.downcast_any_ref::<gix::discover::upwards::Error>() {
+                // Like git without GIT_DISCOVERY_ACROSS_FILESYSTEM, a walk that
+                // stops at a mount boundary (a tmpfs /tmp, say) or a ceiling has
+                // found no repository; nothing on disk was unreadable.
+                Some(
+                    gix::discover::upwards::Error::NoGitRepository { .. }
+                    | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. }
+                    | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. },
+                ) => GitRepositoryError::NotARepository {
+                    path: path.display().to_string(),
+                },
+                _ => GitRepositoryError::UnreadableRepository {
+                    path: path.display().to_string(),
+                    detail: error.to_string(),
+                },
+            }
         })?;
-        let worktree_root = repository
-            .workdir()
-            .map(|path| canonical(path, "worktree root"))
-            .transpose()
-            .map_err(|error| repository_error(path, error))?;
-        let git_dir = canonical(repository.git_dir(), "Git directory")
-            .map_err(|error| repository_error(path, error))?;
-        let common_dir = canonical(repository.common_dir(), "Git common directory")
-            .map_err(|error| repository_error(path, error))?;
+        let (worktree_root, git_dir, common_dir) = {
+            let _span =
+                tracing::trace_span!("runtime_core.git.repository_discover.canonicalize").entered();
+            (
+                repository
+                    .workdir()
+                    .map(|path| canonical(path, "worktree root"))
+                    .transpose(),
+                canonical(repository.git_dir(), "Git directory"),
+                canonical(repository.common_dir(), "Git common directory"),
+            )
+        };
+        let worktree_root = worktree_root.map_err(|error| repository_error(path, error))?;
+        let git_dir = git_dir.map_err(|error| repository_error(path, error))?;
+        let common_dir = common_dir.map_err(|error| repository_error(path, error))?;
         Ok(Self {
             repository: repository.into_sync(),
             worktree_root,
@@ -105,6 +1013,15 @@ impl GitRepositoryAuthority {
     /// Exact per-worktree checkout root, absent for bare repositories.
     pub fn worktree_root(&self) -> Option<&Path> {
         self.worktree_root.as_deref()
+    }
+
+    /// The stable paths this discovery resolved, without the open repository.
+    fn into_topology(self) -> GitRepositoryTopologyV1 {
+        GitRepositoryTopologyV1 {
+            worktree_root: self.worktree_root,
+            git_dir: self.git_dir,
+            common_dir: self.common_dir,
+        }
     }
 
     /// Exact per-worktree Git directory.
@@ -129,14 +1046,81 @@ impl GitRepositoryAuthority {
         }
     }
 
+    /// The branch HEAD names for the checkout `path` belongs to; `None` when
+    /// HEAD is detached or the repository is unreadable.
+    ///
+    /// Every tool call asks this, and opening the repository per call was the
+    /// dominant per-request Git cost. For a retained checkout the answer is
+    /// reused until the HEAD file's identity changes. Reftable repositories
+    /// keep HEAD in the table stack, so their answer is never reused.
+    pub fn current_branch(path: &Path) -> Option<String> {
+        let topology = repository_topology(path).ok()?;
+        let stamp = HeadFileStamp::read(&topology.git_dir.join("HEAD"));
+        if let Some(stamp) = &stamp
+            && let Some((cached, branch)) = HEAD_BRANCHES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&topology.git_dir)
+            && cached == stamp
+        {
+            return branch.clone();
+        }
+        let authority = match Self::open_retained(&topology) {
+            Some(authority) => authority,
+            None => Self::discover(path).ok()?,
+        };
+        let branch = authority.head().ok()?.branch().map(str::to_owned);
+        // The stamp was taken before the read, so a HEAD replaced in between
+        // is re-read on the next call instead of being pinned.
+        if let Some(stamp) = stamp
+            && stamp.changed.is_settled()
+            && !topology.common_dir.join("reftable").exists()
+        {
+            let mut branches = HEAD_BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
+            if branches.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES {
+                branches.clear();
+            }
+            branches.insert(topology.git_dir.clone(), (stamp, branch.clone()));
+        }
+        branch
+    }
+
     /// Exact HEAD state for this repository or linked worktree.
+    #[tracing::instrument(name = "runtime_core.git.head", level = "trace", skip_all)]
     pub fn head(&self) -> Result<GitHeadStateV1, GitRepositoryError> {
         let repository = self.repository.to_thread_local();
         head_from_gix(&repository)
     }
 
+    /// Whether any current main or linked worktree has the reference checked out.
+    ///
+    /// Reading the complete repository worktree inventory lets mutation
+    /// callers fail closed when a linked checkout was not part of their
+    /// authorized routing roots or appeared after preflight.
+    pub fn reference_is_checked_out(&self, reference: &str) -> Result<bool, GitRepositoryError> {
+        let repository = self.repository.to_thread_local();
+        let main = repository
+            .main_repo()
+            .map_err(|error| operation("open main worktree", error))?;
+        if main.workdir().is_some() && head_matches_reference(head_from_gix(&main)?, reference) {
+            return Ok(true);
+        }
+        for proxy in repository
+            .worktrees()
+            .map_err(|error| operation("list worktrees", error))?
+        {
+            let linked = proxy
+                .into_repo()
+                .map_err(|error| operation("open linked worktree", error))?;
+            if head_matches_reference(head_from_gix(&linked)?, reference) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// All ordinary repository refs in stable name order.
-    #[hotpath::measure(label = "runtime_core.git.references")]
+    #[tracing::instrument(name = "runtime_core.git.references", level = "trace", skip_all)]
     pub fn references(&self) -> Result<Vec<GitReference>, GitRepositoryError> {
         let repository = self.repository.to_thread_local();
         let platform = repository
@@ -193,8 +1177,30 @@ impl GitRepositoryAuthority {
 
     /// Live staged, unstaged, untracked, ignored, conflict, and submodule
     /// status directly from the current index and working tree.
-    #[hotpath::measure(label = "runtime_core.git.status")]
+    #[tracing::instrument(name = "runtime_core.git.status", level = "trace", skip_all)]
     pub fn status(&self) -> Result<GitRepositoryStatus, GitRepositoryError> {
+        self.collect_status(None)
+    }
+
+    /// [`Self::status`] under the deadline and cancellation that bound the
+    /// request's Git subprocesses. The walk stops when either fires, and that
+    /// failure is returned instead of the partial status gix leaves behind.
+    #[tracing::instrument(name = "runtime_core.git.status_bounded", level = "trace", skip_all)]
+    pub fn status_bounded(
+        &self,
+        bounds: &crate::git::GitCommandBounds,
+    ) -> Result<GitRepositoryStatus, GitRepositoryError> {
+        let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        crate::git::run_interruptible(bounds, &interrupt, || {
+            self.collect_status(Some(Arc::clone(&interrupt)))
+        })
+        .map_err(|error| operation("status", error))?
+    }
+
+    fn collect_status(
+        &self,
+        interrupt: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<GitRepositoryStatus, GitRepositoryError> {
         use gix::diff::index::ChangeRef;
         use gix::dir::entry::Status as DirectoryStatus;
         use gix::status::Item;
@@ -206,10 +1212,16 @@ impl GitRepositoryAuthority {
             .status(gix::progress::Discard)
             .map_err(|error| operation("status", error))?
             .untracked_files(gix::status::UntrackedFiles::Files)
-            .index_worktree_rewrites(None);
+            .index_worktree_rewrites(None)
+            .index_worktree_options_mut(|options| {
+                options.thread_limit = Some(GIT_STATUS_MODIFICATION_CHECK_THREADS);
+            });
         platform.dirwalk_options_mut(|options| {
             options.set_emit_ignored(Some(gix::dir::walk::EmissionMode::Matching));
         });
+        if let Some(interrupt) = interrupt {
+            platform = platform.should_interrupt_owned(interrupt);
+        }
         let status = platform
             .into_iter(Vec::<gix::bstr::BString>::new())
             .map_err(|error| operation("status", error))?;
@@ -462,6 +1474,16 @@ impl GitRepositoryAuthority {
     }
 }
 
+fn head_matches_reference(head: GitHeadStateV1, reference: &str) -> bool {
+    let GitHeadStateV1::Attached { branch, .. } = head else {
+        return false;
+    };
+    branch == reference
+        || reference
+            .strip_prefix("refs/heads/")
+            .is_some_and(|short| branch == short)
+}
+
 #[derive(Debug)]
 struct TrackedStatusBuilder {
     path: String,
@@ -519,16 +1541,6 @@ impl TrackedStatusBuilder {
             submodule: self.submodule,
         }
     }
-}
-
-/// Preserve the repository's normal configuration and attribute semantics
-/// while rejecting `GIT_*` redirection from the daemon environment.
-fn repository_open_options() -> gix::open::Options {
-    let mut permissions = gix::open::Permissions::secure();
-    permissions.env.git_prefix = gix::sec::Permission::Deny;
-    permissions.env.objects = gix::sec::Permission::Deny;
-    permissions.config.env = false;
-    gix::open::Options::default().permissions(permissions)
 }
 
 fn head_from_gix(repository: &gix::Repository) -> Result<GitHeadStateV1, GitRepositoryError> {
@@ -650,5 +1662,150 @@ fn operation(operation: &'static str, error: impl std::fmt::Display) -> GitRepos
     GitRepositoryError::Operation {
         operation,
         detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use super::{
+        GitRepositoryError, GitRepositoryTopologyV1, MAX_RETAINED_CHECKOUT_TOPOLOGIES,
+        TopologyResult, block_repository_discovery_for_test, observe_repository_discovery,
+        observe_repository_discovery_for_test, repository_discovery_count_for_test,
+        repository_discovery_parked, repository_topology,
+        repository_topology_resolution_count_for_test, reset_repository_discovery_for_test,
+        wait_for_topology_callers_for_test,
+    };
+
+    /// A full memo makes room by dropping slots that retain nothing, so a
+    /// root survives a burst of one-off probes however long the burst runs.
+    /// Clearing the whole memo, or plain LRU once the burst outgrew the
+    /// bound, dropped that root too, and a deferred route on a slow volume
+    /// walked again instead of converging.
+    #[test]
+    fn a_full_topology_memo_keeps_a_retained_root() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(&repository).expect("repository directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet", "-b", "main"])
+            .current_dir(&repository)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        let repository = repository.canonicalize().expect("canonical repository");
+        observe_repository_discovery_for_test(&repository);
+        repository_topology(&repository).expect("retained repository topology");
+
+        let probes = tempfile::tempdir().expect("probe directory");
+        for probe in 0..MAX_RETAINED_CHECKOUT_TOPOLOGIES * 2 {
+            let path = probes.path().join(probe.to_string());
+            std::fs::create_dir_all(&path).expect("probe path");
+            let _ = repository_topology(&path);
+        }
+        repository_topology(&repository).expect("repository topology");
+
+        assert_eq!(
+            repository_topology_resolution_count_for_test(&repository),
+            1,
+            "a burst of one-off probes evicted the retained root"
+        );
+        reset_repository_discovery_for_test(&repository);
+    }
+
+    #[asupersync::test]
+    async fn discovery_block_retains_entry_for_late_subscribers() {
+        let cx = asupersync::Cx::current().expect("test task context");
+        let root = tempfile::tempdir().expect("discovery root");
+        let mut block = block_repository_discovery_for_test(root.path());
+        let path = root.path().to_path_buf();
+        let discovery = std::thread::spawn(move || observe_repository_discovery(&path));
+        block.wait_entered().await;
+
+        let entered = asupersync::time::timeout(
+            cx.now(),
+            Duration::from_secs(1),
+            repository_discovery_parked(&cx, root.path()),
+        )
+        .await;
+        block.release();
+        discovery.join().expect("discovery worker");
+        reset_repository_discovery_for_test(root.path());
+
+        assert!(
+            entered.is_ok(),
+            "a late subscriber must see the parked walk"
+        );
+    }
+
+    /// Park the first walk of `path`, join it from a second caller, release,
+    /// and return both answers with the number of live walks.
+    async fn owner_and_joined_answers(
+        root: &Path,
+        path: &Path,
+    ) -> (TopologyResult, TopologyResult, u64) {
+        let mut block = block_repository_discovery_for_test(root);
+        let owner = std::thread::spawn({
+            let path = path.to_path_buf();
+            move || repository_topology(&path)
+        });
+        block.wait_entered().await;
+        let joined = std::thread::spawn({
+            let path = path.to_path_buf();
+            move || repository_topology(&path)
+        });
+        wait_for_topology_callers_for_test(root, 1, || u64::from(joined.is_finished())).await;
+        block.release();
+        let answers = (
+            owner.join().expect("owner"),
+            joined.join().expect("joined caller"),
+            repository_discovery_count_for_test(root),
+        );
+        reset_repository_discovery_for_test(root);
+        answers
+    }
+
+    /// A subdirectory's walk is not retained under its own path, and a failed
+    /// walk is retained nowhere; both still answer the callers that joined it.
+    #[asupersync::test]
+    async fn unretained_walks_hand_their_answer_to_joined_callers() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let repository = temporary.path().join("repository");
+        let package = repository.join("package");
+        std::fs::create_dir_all(&package).expect("package directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet", "-b", "main"])
+            .current_dir(&repository)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        let repository = repository.canonicalize().expect("canonical repository");
+        let package = package.canonicalize().expect("canonical package");
+
+        let (owner, joined, walks) = owner_and_joined_answers(&repository, &package).await;
+        let expected = GitRepositoryTopologyV1 {
+            worktree_root: Some(repository.clone()),
+            git_dir: repository.join(".git"),
+            common_dir: repository.join(".git"),
+        };
+        assert_eq!(owner.expect("owner topology").as_ref(), &expected);
+        assert_eq!(joined.expect("joined topology").as_ref(), &expected);
+        assert_eq!(walks, 1);
+
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("plain directory");
+        let outside = outside.canonicalize().expect("canonical plain directory");
+        let (owner, joined, walks) = owner_and_joined_answers(&outside, &outside).await;
+        for answer in [owner, joined] {
+            match answer {
+                Err(GitRepositoryError::NotARepository { path }) => {
+                    assert_eq!(path, outside.display().to_string());
+                }
+                answer => panic!("a plain directory is not a repository: {answer:?}"),
+            }
+        }
+        assert_eq!(walks, 1);
     }
 }

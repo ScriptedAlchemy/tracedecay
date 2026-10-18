@@ -1,12 +1,20 @@
 # Dashboard
 
-The embedded dashboard is the daemon’s graphical client for code intelligence,
+The embedded dashboard is the daemon's graphical client for code intelligence,
 project memory, lossless context, work, configuration, diagnostics, and usage.
-Start it with:
+Start it from an enrolled repo, or pass `--path`:
 
 ```bash
 tracedecay dashboard --open
+tracedecay dashboard --path /path/to/enrolled/repo --open
 ```
+
+The listener is bound to that one launch project. `$HOME` and other ambient
+roots are not projects: the command refuses and names `--path`. Code search
+covers only the bound project. A request that names another enrolled repo
+(`?project_id=` or `/api/projects/{id}/plugins/graph/search`) fails closed with
+`wrong_project` instead of returning `total=0`. A listener with no project
+fails closed with `empty_scope`.
 
 The dashboard uses generated Rust API contracts and the same application
 operations as CLI, MCP, LSP, SDK, hooks, and host integrations. Browser code
@@ -27,6 +35,20 @@ The dashboard binds to loopback and is intended for the local operator. It
 supports keyboard navigation, screen readers, responsive layouts, reduced
 motion, bounded graph rendering, and a non-graph form for selected evidence.
 
+Loopback is reachable by every account on the machine, so each dashboard
+listener mints a random access token and prints a launch URL of the form
+`http://127.0.0.1:PORT/?token=…`. Opening it redirects to the tokenless path
+with the token in the URL fragment, which browsers never send over the wire or
+in a `Referer`. The page keeps the token in origin-scoped `sessionStorage` and
+sends it as the Basic-auth password for user `tracedecay` on every API request
+and on the fetch-based event stream. Scripts send the same header. The
+dashboard never sets a cookie: browsers share cookies across every port of a
+host, so a cookie would reach any other service on loopback. The embedded page
+shell (`/`, `/static/**`, client routes) carries no secret and is served
+without the token. A request to `/api/**` without the token gets
+`401 dashboard_request_unauthenticated`; a request whose `Host` or `Origin`
+does not name the bound listener gets `403`.
+
 ## Code graph plugin API
 
 The legacy `/legacy` frontend's Code Graph tab reads a project-local, bounded
@@ -39,16 +61,16 @@ Hermes wrapper the same routes are reverse-proxied at
 | Route | Description |
 |---|---|
 | `GET /overview` | Landing analytics: totals, `nodes_by_kind`, `edges_by_kind`, `files_by_language` (extension-bucketed), `top_connected` (12 highest-degree symbols), `largest_files` (by `node_count`). |
-| `GET /search?q=&limit=&offset=` | Paginated symbol search over name, qualified name, signature, and file path (`LIKE`, escaped). Exact-name matches rank first. Results carry full-graph `degree`. `limit` ≤ 200. |
+| `GET /search?q=&limit=&offset=&project_id=` | Paginated symbol search over name, qualified name, signature, and file path (`LIKE`, escaped) **in the launch project only**. Exact-name matches rank first. Results carry full-graph `degree`. `limit` ≤ 200. A `project_id` that is not the launch project returns `domain_state: unknown` with omission reason `wrong_project` (payload null). A bound-project miss is `complete_zero_findings`, not a ready empty list. |
 | `GET /node/{id}` | Single node detail: signature, doc, visibility, span (`start_line`/`end_line`/columns), complexity counters, `degree`. 404 with a `detail` body when missing. |
 | `GET /node/{id}/neighbors?limit=` | Depth-1 neighborhood: `callers` / `callees` (calls edges, hydrated node rows + `degree`), raw `edges` touching the node, and `edges_by_kind` counts. |
-| `GET /subgraph?node_id=&limit_nodes=&limit_edges=` | One-hop subgraph for visualization. Caps default 80 nodes / 120 edges (max 250 / 500); `capped.nodes` / `capped.edges` report truncation. Accepts `q=` instead of `node_id` (best search hit becomes the seed; a query with no hit returns an empty payload). With no seed at all it returns the **default overview slice** (`mode: "default"`): the top-degree hubs plus the edges among them — hubs with no edges to other hubs are pruned in favor of interconnected ones, and isolated nodes only fill leftover capacity (so tiny or edge-free indexes still render). Seeded responses carry `mode: "seeded"`. Nodes carry `degree` so the UI can show collapsed-neighbor counts. |
+| `GET /subgraph?node_id=&limit_nodes=&limit_edges=` | One-hop subgraph for visualization. Caps default 80 nodes / 120 edges (max 250 / 500); `capped.nodes` / `capped.edges` report truncation. Accepts `q=` instead of `node_id` (best search hit becomes the seed; a query with no hit returns an empty payload). With no seed at all it returns the **default overview slice** (`mode: "default"`): the top-degree hubs plus the edges among them, hubs with no edges to other hubs are pruned in favor of interconnected ones, and isolated nodes only fill leftover capacity (so tiny or edge-free indexes still render). Seeded responses carry `mode: "seeded"`. Nodes carry `degree` so the UI can show collapsed-neighbor counts. |
 | `GET /path?from=&to=&max_depth=` | Undirected BFS shortest path between two node ids (depth default 6, max 10; visited-set capped at 20k). Returns `found`, ordered `path` ids, hydrated `nodes`, and the `edges` along the route. |
 
 `GET /api/capabilities` advertises `features.graph: true` and lists `graph`
 in `dashboards`; hosts can feature-detect via
 `window.__HERMES_PLUGIN_SDK__.capabilities`. Full legacy-frontend history
-(views, wiring, tests) is archived at `docs/archive/graph-explorer.md`.
+(views, wiring, tests) lives in git history under `docs/archive/graph-explorer.md`.
 
 ## Hermes plugin and LCM diagnostics
 
@@ -79,7 +101,7 @@ defaults:
 
 | Variable | Effect |
 |---|---|
-| `TRACEDECAY_DASHBOARD_URL` | Uses the specified existing dashboard server instead of spawning one. |
+| `TRACEDECAY_DASHBOARD_URL` | Uses the specified existing dashboard server instead of spawning one; pass its launch URL so the wrapper can present the access token. |
 | `TRACEDECAY_BIN` | Selects the `tracedecay` executable used when the wrapper starts the dashboard. |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Selects the project root passed to the dashboard; when unset, the wrapper uses the Hermes process working directory. |
 

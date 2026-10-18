@@ -6,12 +6,10 @@ use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_auto_applies_safe_consolidations() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let automation_provenance = || ManagedSkillProvenance {
         source: ManagedSkillSource::AutomationRun,
         actor: "skill_writer".to_string(),
@@ -23,6 +21,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             id: "automation-run-review".to_string(),
             title: "Automation run review".to_string(),
             summary: "Review automation run ledgers before applying changes.".to_string(),
+            routing_description: "Review automation run ledgers before applying changes.".to_string(),
             category: "workflow".to_string(),
             targets: tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown:
@@ -40,6 +39,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             id: "automation-run-checks".to_string(),
             title: "Automation run checks".to_string(),
             summary: "Review automation run ledgers and validation gates.".to_string(),
+            routing_description: "Review automation run ledgers and validation gates.".to_string(),
             category: "workflow".to_string(),
             targets: tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown:
@@ -57,6 +57,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             id: "pinned-automation-guide".to_string(),
             title: "Pinned deployment guide".to_string(),
             summary: "Deployment rollback runbook kept pinned by the user.".to_string(),
+            routing_description: "Deployment rollback runbook kept pinned by the user.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
@@ -78,6 +79,8 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
 
     let backend = SequentialJsonBackend::new(vec![
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [
             {
                 "action": "merge",
@@ -97,6 +100,8 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             ]
         }),
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [{
                 "action": "merge",
                 "id": "automation-run-review",
@@ -110,7 +115,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
     ]);
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,

@@ -1,21 +1,23 @@
 /// Tree-sitter based Swift source code extractor.
 ///
 /// Parses Swift source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{SWIFT_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Swift source files using tree-sitter.
 pub struct SwiftExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -23,18 +25,15 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Depth of class/struct/enum/protocol/extension nesting. > 0 means inside a type body.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -42,7 +41,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -52,8 +51,7 @@ impl ExtractionState {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -68,36 +66,12 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl SwiftExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_swift(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-            start,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -115,7 +89,7 @@ impl SwiftExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -129,6 +103,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -147,11 +122,6 @@ impl SwiftExtractor {
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("swift", "Swift", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -187,11 +157,11 @@ impl SwiftExtractor {
                 // Fallback: get everything after "import "
                 let text = state.node_text(node);
                 text.strip_prefix("import ")
-                    .unwrap_or(&text)
+                    .unwrap_or(text)
                     .trim()
                     .to_string()
             },
-            |n| state.node_text(n),
+            |n| state.node_text(n).to_string(),
         );
 
         let start_line = node.start_position().row as u32;
@@ -199,7 +169,7 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -223,6 +193,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -260,7 +231,7 @@ impl SwiftExtractor {
         if cursor.goto_first_child() {
             loop {
                 if cursor.field_name() == Some("declaration_kind") {
-                    return state.node_text(cursor.node());
+                    return state.node_text(cursor.node()).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -269,7 +240,7 @@ impl SwiftExtractor {
         }
         // Fallback: check first child text.
         if let Some(first) = node.child(0) {
-            return state.node_text(first);
+            return state.node_text(first).to_string();
         }
         "class".to_string()
     }
@@ -284,7 +255,13 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -308,6 +285,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -345,7 +323,13 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Struct, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Struct,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -369,6 +353,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -404,7 +389,7 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -428,6 +413,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -475,15 +461,16 @@ impl SwiftExtractor {
     fn visit_enum_entry(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .or_else(|| {
-                find_direct_child_by_kind(node, "simple_identifier").map(|n| state.node_text(n))
+                find_direct_child_by_kind(node, "simple_identifier")
+                    .map(|n| state.node_text(n).to_string())
             })
             .unwrap_or_else(|| {
                 // Fallback: parse text after "case "
                 let text = state.node_text(node);
                 text.strip_prefix("case ")
-                    .unwrap_or(&text)
+                    .unwrap_or(text)
                     .trim()
                     .to_string()
             });
@@ -493,7 +480,13 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -517,6 +510,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -539,8 +533,10 @@ impl SwiftExtractor {
             || "<anonymous>".to_string(),
             |n| {
                 // Could be a user_type wrapping a type_identifier.
-                find_direct_child_by_kind(n, "type_identifier")
-                    .map_or_else(|| state.node_text(n), |ti| state.node_text(ti))
+                find_direct_child_by_kind(n, "type_identifier").map_or_else(
+                    || state.node_text(n).to_string(),
+                    |ti| state.node_text(ti).to_string(),
+                )
             },
         );
 
@@ -551,7 +547,13 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Extension, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Extension,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -575,6 +577,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -600,9 +603,10 @@ impl SwiftExtractor {
 
     /// Extract a protocol declaration (maps to Interface).
     fn visit_protocol(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let docstring = Self::extract_docstring(state, node);
         let signature = Self::extract_first_line_signature(state, node);
@@ -611,7 +615,13 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Interface, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Interface,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -635,6 +645,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -685,9 +696,10 @@ impl SwiftExtractor {
     fn visit_protocol_function(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .or_else(|| {
-                find_direct_child_by_kind(node, "simple_identifier").map(|n| state.node_text(n))
+                find_direct_child_by_kind(node, "simple_identifier")
+                    .map(|n| state.node_text(n).to_string())
             })
             .unwrap_or_else(|| "<anonymous>".to_string());
 
@@ -696,7 +708,13 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Method,
+            &name,
+            node,
+        );
         let signature = Self::extract_first_line_signature(state, node);
 
         let graph_node = Node {
@@ -721,6 +739,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -742,9 +761,10 @@ impl SwiftExtractor {
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .or_else(|| {
-                find_direct_child_by_kind(node, "simple_identifier").map(|n| state.node_text(n))
+                find_direct_child_by_kind(node, "simple_identifier")
+                    .map(|n| state.node_text(n).to_string())
             })
             .unwrap_or_else(|| "<anonymous>".to_string());
 
@@ -763,8 +783,8 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &SWIFT_COMPLEXITY, &state.source);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
+        let metrics = count_complexity(node, &SWIFT_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -788,6 +808,7 @@ impl SwiftExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -818,8 +839,14 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-        let metrics = count_complexity(node, &SWIFT_COMPLEXITY, &state.source);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Constructor,
+            &name,
+            node,
+        );
+        let metrics = count_complexity(node, &SWIFT_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -843,6 +870,7 @@ impl SwiftExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -879,7 +907,7 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let text = state.node_text(node);
 
         let graph_node = Node {
@@ -904,6 +932,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -925,9 +954,10 @@ impl SwiftExtractor {
     fn visit_typealias(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .or_else(|| {
-                find_direct_child_by_kind(node, "type_identifier").map(|n| state.node_text(n))
+                find_direct_child_by_kind(node, "type_identifier")
+                    .map(|n| state.node_text(n).to_string())
             })
             .unwrap_or_else(|| "<anonymous>".to_string());
 
@@ -936,7 +966,13 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::TypeAlias, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::TypeAlias,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -960,6 +996,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -986,10 +1023,12 @@ impl SwiftExtractor {
                 // For class/struct/enum, this is a type_identifier directly.
                 // For extension, it may be a user_type wrapping type_identifier.
                 if n.kind() == "user_type" {
-                    find_direct_child_by_kind(n, "type_identifier")
-                        .map_or_else(|| state.node_text(n), |ti| state.node_text(ti))
+                    find_direct_child_by_kind(n, "type_identifier").map_or_else(
+                        || state.node_text(n).to_string(),
+                        |ti| state.node_text(ti).to_string(),
+                    )
                 } else {
-                    state.node_text(n)
+                    state.node_text(n).to_string()
                 }
             },
         )
@@ -1009,8 +1048,8 @@ impl SwiftExtractor {
                     if let Some(inherits_from) = child.child_by_field_name("inherits_from") {
                         let base_name = find_direct_child_by_kind(inherits_from, "type_identifier")
                             .map_or_else(
-                                || state.node_text(inherits_from),
-                                |ti| state.node_text(ti),
+                                || state.node_text(inherits_from).to_string(),
+                                |ti| state.node_text(ti).to_string(),
                             );
                         let line = inherits_from.start_position().row as u32;
                         let column = inherits_from.start_position().column as u32;
@@ -1021,6 +1060,8 @@ impl SwiftExtractor {
                             line,
                             column,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                 }
@@ -1037,19 +1078,19 @@ impl SwiftExtractor {
     fn extract_property_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(pattern) = node.child_by_field_name("name") {
             if let Some(ident) = pattern.child_by_field_name("bound_identifier") {
-                return state.node_text(ident);
+                return state.node_text(ident).to_string();
             }
             // Fallback: find simple_identifier in pattern.
             if let Some(ident) = find_direct_child_by_kind(pattern, "simple_identifier") {
-                return state.node_text(ident);
+                return state.node_text(ident).to_string();
             }
-            return state.node_text(pattern);
+            return state.node_text(pattern).to_string();
         }
         // Fallback: find pattern child then simple_identifier.
         if let Some(pattern) = find_direct_child_by_kind(node, "pattern")
             && let Some(ident) = find_direct_child_by_kind(pattern, "simple_identifier")
         {
-            return state.node_text(ident);
+            return state.node_text(ident).to_string();
         }
         "<anonymous>".to_string()
     }
@@ -1066,7 +1107,7 @@ impl SwiftExtractor {
                     && let Some(vis_mod) = find_direct_child_by_kind(child, "visibility_modifier")
                 {
                     let text = state.node_text(vis_mod);
-                    return match text.as_str() {
+                    return match text {
                         "private" | "fileprivate" => Visibility::Private,
                         "internal" => Visibility::PubCrate,
                         _ => Visibility::Pub,
@@ -1159,6 +1200,8 @@ impl SwiftExtractor {
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
+                                unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1198,10 +1241,10 @@ impl SwiftExtractor {
                             if let Some(ident) =
                                 find_direct_child_by_kind(child, "simple_identifier")
                             {
-                                last_name = Some(state.node_text(ident));
+                                last_name = Some(state.node_text(ident).to_string());
                             }
                         } else if child.kind() == "simple_identifier" && last_name.is_none() {
-                            last_name = Some(state.node_text(child));
+                            last_name = Some(state.node_text(child).to_string());
                         }
                         if !cursor.goto_next_sibling() {
                             break;
@@ -1210,7 +1253,7 @@ impl SwiftExtractor {
                 }
                 last_name
             }
-            _ => Some(state.node_text(first_child)),
+            _ => Some(state.node_text(first_child).to_string()),
         }
     }
 
@@ -1270,11 +1313,12 @@ impl SwiftExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::@{}", state.qualified_prefix(), annot_name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::AnnotationUsage,
             &annot_name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -1299,6 +1343,7 @@ impl SwiftExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1311,6 +1356,8 @@ impl SwiftExtractor {
             line: start_line,
             column: start_column,
             file_path: state.file_path.clone(),
+            unmodeled_import: None,
+            argument_count: None,
         });
 
         state.edges.push(Edge {
@@ -1328,18 +1375,18 @@ impl SwiftExtractor {
         // Try user_type -> type_identifier path.
         if let Some(ut) = find_direct_child_by_kind(node, "user_type") {
             if let Some(ti) = find_direct_child_by_kind(ut, "type_identifier") {
-                return state.node_text(ti);
+                return state.node_text(ti).to_string();
             }
-            return state.node_text(ut);
+            return state.node_text(ut).to_string();
         }
         // Fallback: text after '@', before '('.
         let text = state.node_text(node);
         text.trim()
             .strip_prefix('@')
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .split('(')
             .next()
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .to_string()
     }
@@ -1365,18 +1412,21 @@ impl crate::LanguageExtractor for SwiftExtractor {
         "Swift"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_swift(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope, Instant::now())
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path,
+            source,
+            tree,
+            scope,
+            Instant::now(),
+        ))
     }
 }
 
@@ -1391,7 +1441,8 @@ mod tests {
     #[test]
     fn parsed_extraction_limits_swift_to_changed_top_level_declaration() {
         let source = "func untouched() {}\n\nfunc changed() {}\n";
-        let tree = SwiftExtractor::parse_source(source).expect("parse Swift source");
+        let tree = crate::ts_provider::parse_extractor_source("swift", "Swift", source)
+            .expect("parse Swift source");
         let root = tree.root_node();
         let mut cursor = root.walk();
         let changed = root
@@ -1408,9 +1459,10 @@ mod tests {
             end_position: changed.end_position().into(),
         };
 
-        let extracted = crate::LanguageExtractor::extract_parsed(
+        let extracted = crate::LanguageExtractor::extract_parsed_artifact_prepared(
             &SwiftExtractor,
             "sample.swift",
+            source,
             source,
             &tree,
             ParsedExtractionScope::ChangedRegions(&[range]),
@@ -1426,6 +1478,7 @@ mod tests {
             changed.end_byte() - changed.start_byte()
         );
         let functions = extracted
+            .artifact
             .result
             .nodes
             .iter()

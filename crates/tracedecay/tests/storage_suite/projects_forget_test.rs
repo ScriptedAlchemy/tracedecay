@@ -8,15 +8,26 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
+use tracedecay_global_db::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
 use tracedecay_global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 static PROJECTS_FORGET_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn close_profile_runtime(db: HostAdmissionTestRuntimeV1) {
     db.checkpoint_profile_database_for_test().await;
     drop(db);
+}
+
+async fn admit_profile_registry(profile_root: &Path) -> ProfileRegistryMaintenanceRuntime {
+    let identity =
+        tracedecay_daemon_identity::profile_identity::load_existing(profile_root).unwrap();
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .unwrap();
+    ProfileRegistryMaintenanceRuntime::from_admitted_lease(
+        registry.profile_database().await.unwrap(),
+    )
 }
 
 /// Registers one complete project identity: code project row, root alias,
@@ -52,7 +63,6 @@ async fn register_project_fixture(
         project_id: project.project_id.clone(),
         store_id: store.store_id.clone(),
         branch_name: "main".to_string(),
-        db_relpath: format!("projects/{project_id}/tracedecay.db"),
         parent_scope_id: None,
         last_synced_at: Some(102),
         writable: true,
@@ -109,9 +119,7 @@ async fn forget_project_removes_exactly_one_registered_project() {
             "projects forget test",
         )
         .unwrap();
-        let runtime = ProfileRegistryMaintenanceRuntime::open(profile.path())
-            .await
-            .unwrap();
+        let runtime = admit_profile_registry(profile.path()).await;
         // Path-shaped and id-shaped selectors must resolve the same identity.
         let by_path = runtime
             .resolve_registered_project(&root_a)
@@ -168,9 +176,12 @@ async fn forget_project_removes_exactly_one_registered_project() {
         .unwrap();
     assert!(db.get_code_project("proj_a").await.unwrap().is_none());
     assert!(db.get_code_project("proj_b").await.unwrap().is_some());
+    // The ledger stores the resolved root, so the expectation must resolve
+    // too: on macOS a tempdir is handed out as `/var/folders/...` while the
+    // registry records `/private/var/folders/...` for the same directory.
     assert_eq!(
         db.project_ledger_paths_for_test().await.unwrap(),
-        vec![root_b.clone()],
+        vec![tracedecay_runtime_core::path_safety::canonical_root_identity(&root_b)],
         "only the forgotten project's token-ledger row is retired"
     );
     close_profile_runtime(db).await;
@@ -200,9 +211,7 @@ async fn forget_project_keep_store_retires_rows_but_preserves_bytes() {
             "projects forget test",
         )
         .unwrap();
-        let runtime = ProfileRegistryMaintenanceRuntime::open(profile.path())
-            .await
-            .unwrap();
+        let runtime = admit_profile_registry(profile.path()).await;
         let context = runtime
             .resolve_registered_project(Path::new("proj_kept"))
             .await
@@ -272,9 +281,7 @@ async fn forget_refuses_malformed_store_relpath_without_any_mutation() {
             "projects forget test",
         )
         .unwrap();
-        let runtime = ProfileRegistryMaintenanceRuntime::open(profile.path())
-            .await
-            .unwrap();
+        let runtime = admit_profile_registry(profile.path()).await;
         let context = runtime
             .resolve_registered_project(Path::new("proj_escape"))
             .await

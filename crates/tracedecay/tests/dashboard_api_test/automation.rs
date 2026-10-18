@@ -3,13 +3,10 @@ use tracedecay_automation_runtime::automation::backend::AgentTaskRetryAttempt;
 
 #[test]
 fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let mut fixture = start_dashboard_configuration_fixture().await;
-        let project_id = "dashboard_fixture_project";
+        let project_id = fixture.project_id.clone();
         let agent = http_agent();
         let base_url = fixture.base_url.clone();
 
@@ -37,7 +34,7 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
             agent
                 .post(&curate_url)
                 .header(
-                    tracedecay_application::APPLICATION_REQUEST_ID_HEADER,
+                    tracedecay_contracts::APPLICATION_REQUEST_ID_HEADER,
                     "request.dashboard.fact-store-curate-single-launcher",
                 )
                 .send_json(serde_json::json!({
@@ -59,9 +56,22 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
             serde_json::from_str(&body).expect("fact_store_curate JSON response");
         assert_eq!(status, 200);
         let memory_run = &memory_payload["value"]["outcome"]["value"]["payload"];
-        assert_eq!(memory_run["terminal"]["status"], "skipped");
-        assert_eq!(memory_run["task"], "memory_curator");
-        assert_eq!(memory_run["terminal"]["reason"], "backend_disabled");
+        assert_eq!(
+            memory_run,
+            &serde_json::json!({
+                "run_id": "request.dashboard.fact-store-curate-single-launcher",
+                "task": "memory_curator",
+                "request_digest": memory_run["request_digest"],
+                "state": "started",
+            })
+        );
+        let settled = wait_for_settled_run(
+            &agent,
+            &base_url,
+            "request.dashboard.fact-store-curate-single-launcher",
+        );
+        assert_eq!(settled["status"], "skipped");
+        assert_eq!(settled["error"], "backend_disabled");
 
         let response = crate::common::http_call_with_retry(
             "POST fact_store_curate with caller-selected operations",
@@ -69,7 +79,7 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
                 agent
                     .post(&curate_url)
                     .header(
-                        tracedecay_application::APPLICATION_REQUEST_ID_HEADER,
+                        tracedecay_contracts::APPLICATION_REQUEST_ID_HEADER,
                         "request.dashboard.fact-store-curate-reject-operations",
                     )
                     .send_json(serde_json::json!({
@@ -132,41 +142,43 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
 
 #[test]
 fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root)
+            .with_global_db_override(&global_db_path);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let fixture = seed_memory_fixture(&cg).await;
         let curated_fact_id = fixture.near_duplicate_fact_id.clone();
         let fake_codex = FakeCodexAppServer::new_memory_curator(
             fixture.near_duplicate_fact_id.clone(),
             fixture.near_duplicate_last_event_id.clone(),
         );
-        let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake_codex.bin);
+        let project_id = cg
+            .configuration_runtime()
+            .configuration_target()
+            .project_id
+            .as_str()
+            .to_owned();
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
+        configure_codex_summarizer(&agent, &base_url, &project_id, &fake_codex.bin);
 
         let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
         let (status, current_config) = get_json(&agent, &config_url);
@@ -202,14 +214,16 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
             status, 200,
             "dashboard automation run failed: {completed}"
         );
-        let run = &completed["value"]["outcome"]["value"]["payload"];
-        let run_id = run["run_id"]
+        let receipt = &completed["value"]["outcome"]["value"]["payload"];
+        assert_eq!(receipt["state"], "started", "{completed}");
+        let run_id = receipt["run_id"]
             .as_str()
-            .unwrap_or_else(|| panic!("completed response should include run_id: {completed}"))
+            .unwrap_or_else(|| panic!("the curate receipt should include run_id: {completed}"))
             .to_string();
-        assert_eq!(run["terminal"]["status"], "completed");
-        assert_eq!(run["terminal"]["summary"]["accepted_count"], 1);
-        assert_eq!(run["terminal"]["summary"]["rejected_count"], 0);
+        let settled = wait_for_settled_run(&agent, &base_url, &run_id);
+        assert_eq!(settled["status"], "succeeded", "{settled}");
+        assert_eq!(settled["accepted_count"], 1);
+        assert_eq!(settled["rejected_count"], 0);
         let records = tracedecay_automation_runtime::automation::run_ledger::load_run_records(
             &dashboard_root,
             10,
@@ -294,14 +308,10 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         let (status, evals) = get_json(&agent, &format!("{artifact_url}/generated_evals"));
         assert_eq!(status, 200, "generated eval artifact failed: {evals}");
         assert_eq!(evals["payload"]["format"], "tracedecay_automation_eval:v1");
-        assert_eq!(evals["payload"]["runner"]["status"], "passed");
+        assert_eq!(evals["payload"]["record_integrity"]["status"], "passed");
         assert_eq!(
-            evals["payload"]["runner"]["results"][0]["status"],
-            "passed"
-        );
-        assert_eq!(
-            evals["payload"]["automatic_application"]["status"],
-            "applied"
+            evals["payload"]["independent_evaluation"]["status"],
+            "not_run"
         );
         assert_eq!(
             evals["payload"]["eval_definitions"][0]["eval_id"],
@@ -317,7 +327,11 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         );
         assert_eq!(
             gate["payload"]["improvement_gate"]["generated_evals_status"],
-            "passed"
+            "not_run"
+        );
+        assert_eq!(
+            gate["payload"]["task_validation"]["automatic_application"]["status"],
+            "applied"
         );
 
         let (status, handoff) = get_json(&agent, &format!("{artifact_url}/codex_handoff"));
@@ -348,6 +362,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
                 "id": "final-smoke-review",
                 "title": "Final smoke review",
                 "summary": "Inspect self-improvement run artifacts and active skill state.",
+                "routing_description": "Inspect self-improvement run artifacts and active skill state.",
                 "category": "workflow",
                 "body_markdown": "Check the run ledger, generated evals, validation gate, and active skill.",
                 "targets": ["codex"],
@@ -398,25 +413,115 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
     });
 }
 
+/// The curator can take as long as its backend does; the request answers at
+/// admission with the run's receipt, and the run settles on the daemon.
 #[test]
-fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
+        let fixture = seed_memory_fixture(&cg).await;
+        let slow_codex = FakeCodexAppServer::new_memory_curator_held(
+            fixture.near_duplicate_fact_id.clone(),
+            fixture.near_duplicate_last_event_id.clone(),
+        );
+        let project_id = cg
+            .configuration_runtime()
+            .configuration_target()
+            .project_id
+            .as_str()
+            .to_owned();
+        let agent = http_agent();
+        let port = pick_free_port();
+        let (access, base_url) = dashboard_access_for(port);
+        let mut server = spawn_dashboard_server_with_configuration_runtime(
+            cg,
+            host_runtime,
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            port,
+            access,
+        );
+        wait_for_dashboard(&agent, &base_url).await;
+        configure_codex_summarizer(&agent, &base_url, &project_id, &slow_codex.bin);
+        let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
+        let (status, current_config) = get_json(&agent, &config_url);
+        assert_eq!(status, 200, "config read should succeed: {current_config}");
+        let (status, config) = patch_json_body(
+            &agent,
+            &config_url,
+            &serde_json::json!({
+                "expected_revision_id": current_config["configuration_revision_id"],
+                "idempotency_key": "dashboard-slow-curator-receipt",
+                "enabled": true,
+                "backend": "codex_app_server",
+                "host_mode": "standalone",
+                "memory_curator": { "enabled": true, "schedule": "manual" }
+            }),
+        );
+        assert_eq!(status, 200, "automation config patch failed: {config}");
+
+        let run_id = "request.dashboard.slow-curator-receipt";
+        let response = agent
+            .post(format!(
+                "{base_url}/api/application/retained/fact_store_curate"
+            ))
+            .header(tracedecay_contracts::APPLICATION_REQUEST_ID_HEADER, run_id)
+            .send_json(serde_json::json!({
+                "fact_review_limit": 4,
+                "min_confidence_millionths": 500_000
+            }))
+            .unwrap_or_else(|error| panic!("POST fact_store_curate failed: {error}"));
+        let (status, receipt) = response_to_json(response);
+        assert_eq!(status, 200, "fact_store_curate failed: {receipt}");
+        let payload = &receipt["value"]["outcome"]["value"]["payload"];
+        assert_eq!(
+            payload,
+            &serde_json::json!({
+                "run_id": run_id,
+                "task": "memory_curator",
+                "request_digest": payload["request_digest"],
+                "state": "started",
+            })
+        );
+        assert_eq!(
+            receipt["value"]["outcome"]["value"]["reconciliation"],
+            "pending"
+        );
+        // The backend cannot complete before release, so receiving this receipt
+        // proves admission does not await the curator, independent of CPU load.
+        slow_codex.wait_for_turn();
+        slow_codex.release_turn();
+        let settled = wait_for_settled_run(&agent, &base_url, run_id);
+        assert_eq!(settled["status"], "succeeded", "{settled}");
+        assert_eq!(settled["trigger"], "application");
+        assert_eq!(settled["accepted_count"], 1);
+
+        server.stop();
+    });
+}
+
+#[test]
+fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let tmp_root = canonical_existing_identity(tmp.path())
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let global_db_path = tmp_root.join("global").join("global.db");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let profile = ProfileRoot::new(&profile_root)
+            .with_global_db_override(&global_db_path);
+
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let run_id = "artifact_api_run";
         let created_at = "2026-06-24T00:00:00Z";
@@ -478,6 +583,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                     backoff_millis: 0,
                 }],
                 fallback_status: None,
+                session_evidence_budget_stage: None,
                 report_ref: None,
                 artifacts: vec![artifact],
                 started_at: ledger_unix_seconds.to_string(),
@@ -490,12 +596,13 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
 
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -557,23 +664,17 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
 
 #[test]
 fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_receipt_trajectories() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         use tracedecay_automation_runtime::automation::managed_skills::{
             ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
             default_managed_skill_targets,
@@ -586,6 +687,7 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
                 id: "dashboard-outcome-trajectory-skill".to_owned(),
                 title: "Dashboard outcome trajectory skill".to_owned(),
                 summary: "Fixture for automatic outcome tracking.".to_owned(),
+                routing_description: "Fixture for automatic outcome tracking.".to_owned(),
                 category: "maintenance".to_owned(),
                 targets: default_managed_skill_targets(),
                 body_markdown: "Use when checking automatic outcome trajectories.".to_owned(),
@@ -616,12 +718,13 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
 
         let agent = http_agent();
         let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let (access, base_url) = dashboard_access_for(port);
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
+            access,
         );
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -669,4 +772,31 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
 
         server.stop();
     });
+}
+
+/// The run's row in the dashboard's newest-first run history once it reaches a
+/// terminal status. `fact_store_curate` answers at admission; the run settles
+/// on the daemon afterwards.
+fn wait_for_settled_run(agent: &ureq::Agent, base_url: &str, run_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (status, runs) = get_json(agent, &format!("{base_url}/api/automation/runs?limit=50"));
+        assert_eq!(status, 200, "run history read failed: {runs}");
+        if let Some(run) = runs["runs"].as_array().and_then(|records| {
+            records.iter().find(|record| {
+                record["run_id"] == run_id
+                    && matches!(
+                        record["status"].as_str(),
+                        Some("succeeded" | "failed" | "skipped")
+                    )
+            })
+        }) {
+            return run.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "run {run_id} never settled: {runs}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }

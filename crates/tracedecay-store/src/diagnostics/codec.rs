@@ -20,17 +20,14 @@ use tracedecay_domain::{
 
 /// Stored `record_state` text for a live record.
 pub const DIAGNOSTIC_STATE_CURRENT: &str = "current";
-/// Stored `record_state` text for a record replaced by a later generation.
-pub const DIAGNOSTIC_STATE_SUPERSEDED: &str = "superseded";
 /// Stored `record_state` text for a record cleared by a later generation.
 pub const DIAGNOSTIC_STATE_CLEARED: &str = "cleared";
 
 /// The stored discriminant of `record_state`, decoupled from the
-/// `state_generation` back-pointer that two of its three forms carry.
+/// `state_generation` back-pointer that the cleared form carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagnosticRecordStateKindV1 {
     Current,
-    Superseded,
     Cleared,
 }
 
@@ -40,18 +37,15 @@ impl DiagnosticRecordStateKindV1 {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             DIAGNOSTIC_STATE_CURRENT => Some(Self::Current),
-            DIAGNOSTIC_STATE_SUPERSEDED => Some(Self::Superseded),
             DIAGNOSTIC_STATE_CLEARED => Some(Self::Cleared),
             _ => None,
         }
     }
 
     /// The exact text persisted in `record_state`.
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Current => DIAGNOSTIC_STATE_CURRENT,
-            Self::Superseded => DIAGNOSTIC_STATE_SUPERSEDED,
             Self::Cleared => DIAGNOSTIC_STATE_CLEARED,
         }
     }
@@ -60,31 +54,24 @@ impl DiagnosticRecordStateKindV1 {
     /// carries, or `None` for the current state, which stores SQL `NULL`.
     ///
     /// Callers use the name to build a decode error naming the exact field.
-    #[hotpath::skip]
     pub const fn state_generation_field(self) -> Option<&'static str> {
         match self {
             Self::Current => None,
-            Self::Superseded => Some("successor_generation"),
             Self::Cleared => Some("cleared_in_generation"),
         }
     }
 
     /// Rebuilds the typed state from this kind plus the decoded back-pointer.
     ///
-    /// Returns `None` when the two disagree — a non-current kind with no
-    /// generation, or a current kind carrying one — so the caller reports a
-    /// corrupt row rather than inventing a state.
+    /// Returns `None` when the two disagree so the caller reports a corrupt
+    /// row rather than inventing a state. That covers a non-current kind with
+    /// no generation, or a current kind carrying one.
     pub fn into_state(
         self,
         state_generation: Option<CodeGenerationId>,
     ) -> Option<DiagnosticRecordStateV1> {
         match (self, state_generation) {
             (Self::Current, None) => Some(DiagnosticRecordStateV1::Current),
-            (Self::Superseded, Some(successor_generation)) => {
-                Some(DiagnosticRecordStateV1::Superseded {
-                    successor_generation,
-                })
-            }
             (Self::Cleared, Some(cleared_in_generation)) => {
                 Some(DiagnosticRecordStateV1::Cleared {
                     cleared_in_generation,
@@ -101,12 +88,6 @@ impl DiagnosticRecordStateKindV1 {
 pub fn diagnostic_state_columns(state: &DiagnosticRecordStateV1) -> (&'static str, Option<&str>) {
     match state {
         DiagnosticRecordStateV1::Current => (DIAGNOSTIC_STATE_CURRENT, None),
-        DiagnosticRecordStateV1::Superseded {
-            successor_generation,
-        } => (
-            DIAGNOSTIC_STATE_SUPERSEDED,
-            Some(successor_generation.as_str()),
-        ),
         DiagnosticRecordStateV1::Cleared {
             cleared_in_generation,
         } => (
@@ -201,9 +182,6 @@ mod tests {
     fn every_record_state_round_trips_through_its_columns() {
         let cases = [
             DiagnosticRecordStateV1::Current,
-            DiagnosticRecordStateV1::Superseded {
-                successor_generation: generation("generation.successor"),
-            },
             DiagnosticRecordStateV1::Cleared {
                 cleared_in_generation: generation("generation.cleared"),
             },
@@ -227,12 +205,6 @@ mod tests {
     #[test]
     fn state_columns_and_back_pointer_must_agree() {
         assert!(
-            DiagnosticRecordStateKindV1::Superseded
-                .into_state(None)
-                .is_none(),
-            "a superseded row without a successor is corrupt"
-        );
-        assert!(
             DiagnosticRecordStateKindV1::Cleared
                 .into_state(None)
                 .is_none(),
@@ -245,6 +217,10 @@ mod tests {
             "a current row must not carry a state generation"
         );
         assert!(DiagnosticRecordStateKindV1::parse("archived").is_none());
+        assert!(
+            DiagnosticRecordStateKindV1::parse("superseded").is_none(),
+            "retired superseded rows must be refused, not reinterpreted"
+        );
     }
 
     #[test]

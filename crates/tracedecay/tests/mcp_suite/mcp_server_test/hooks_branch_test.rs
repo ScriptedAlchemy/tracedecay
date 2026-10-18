@@ -1,12 +1,16 @@
+use crate::common::fixture::git_run as git;
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
-use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
 use tracedecay::mcp::McpServer;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
+};
 
 /// Two registered projects inside one throwaway profile for fail-closed route
 /// tests. Neither project claims a mounted code-index authority.
@@ -46,6 +50,21 @@ fn init_git_repo(root: &Path) {
 }
 
 async fn production_routed_projects() -> ProductionRoutedProjects {
+    let projects = production_routed_projects_ready_for_first_read().await;
+    let active_server = projects
+        .harness
+        .server(&projects.active_root)
+        .expect("active project server");
+    let target_server = projects
+        .harness
+        .server(&projects.target_root)
+        .expect("target project server");
+    crate::support::warm_code_index_search(&active_server, "active_only").await;
+    crate::support::warm_code_index_search(&target_server, "target_only").await;
+    projects
+}
+
+async fn production_routed_projects_ready_for_first_read() -> ProductionRoutedProjects {
     let isolation = TempDir::new().unwrap();
     let active_root = isolation.path().join("active");
     let target_root = isolation.path().join("target");
@@ -67,16 +86,19 @@ async fn production_routed_projects() -> ProductionRoutedProjects {
         init_git_repo(root);
     }
 
-    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
+    let harness = crate::support::seeded_composition::open(
         isolation.path(),
         [active_root.clone(), target_root.clone()],
     )
     .await
     .expect("production routed-project composition");
-    let active_server = harness.server(&active_root).expect("active project server");
     let target_server = harness.server(&target_root).expect("target project server");
-    crate::support::warm_code_index_search(&active_server, "active_only").await;
-    crate::support::warm_code_index_search(&target_server, "target_only").await;
+    assert!(
+        target_server
+            .wait_for_startup_catch_up(Duration::from_secs(30))
+            .await,
+        "target startup catch-up must settle before the first routed read"
+    );
 
     ProductionRoutedProjects {
         isolation,
@@ -186,7 +208,7 @@ impl RoutedProjects {
     ///
     /// `TraceDecay::init` registered each store under its own identity id, so
     /// re-registering under a synthetic id would leave the root's alias
-    /// pointing at a project row that owns no store — the ambiguity
+    /// pointing at a project row that owns no store, the ambiguity
     /// [`hook_route_to_ambiguously_registered_project_fails_closed`] covers
     /// deliberately.
     async fn registered_runtime(&self) -> ProjectScopedTestRuntimeV1 {
@@ -223,36 +245,37 @@ impl RoutedProjects {
     }
 }
 
-/// A `workspaceOpen` notification naming the workspace `cwd` a host just
-/// opened, with no route identity — it can only steer follow-up calls on the
-/// same connection.
+/// A hook event in the form the daemon hook client delivers it: a stateless
+/// request, since a notification has no `initialize` session to ride on a
+/// connection it opens. Its id cannot collide with the numeric tool-call ids.
+fn hook_event(params: Value) -> String {
+    jsonrpc_request(json!("hook"), "tracedecay/hookEvent", params)
+}
+
+/// A `workspaceOpen` hook naming the workspace `cwd` a host just opened, with
+/// no route identity, it can only steer follow-up calls on the same
+/// connection.
 fn workspace_open(cwd: &Path) -> String {
-    jsonrpc_notification_with_params(
-        "tracedecay/hookEvent",
-        json!({
-            "agent": "codex",
-            "event": "workspaceOpen",
-            "cwd": cwd.to_string_lossy()
-        }),
-    )
+    hook_event(json!({
+        "agent": "codex",
+        "event": "workspaceOpen",
+        "cwd": cwd.to_string_lossy()
+    }))
 }
 
 /// A `workspaceOpen` carrying route identity, the shape every real host sends.
 /// The session id is what lets the route survive to the agent's own socket.
 fn workspace_open_for_session(cwd: &Path, session_id: &str) -> String {
-    jsonrpc_notification_with_params(
-        "tracedecay/hookEvent",
-        json!({
-            "agent": "codex",
-            "event": "workspaceOpen",
+    hook_event(json!({
+        "agent": "codex",
+        "event": "workspaceOpen",
+        "cwd": cwd.to_string_lossy(),
+        "route": {
+            "session_id": session_id,
             "cwd": cwd.to_string_lossy(),
-            "route": {
-                "session_id": session_id,
-                "cwd": cwd.to_string_lossy(),
-                "worktree": cwd.to_string_lossy(),
-            }
-        }),
-    )
+            "worktree": cwd.to_string_lossy(),
+        }
+    }))
 }
 
 fn files_call(id: i64) -> String {
@@ -274,6 +297,21 @@ fn files_call_for_session(id: i64, session_id: &str) -> String {
     )
 }
 
+fn exact_symbol_call_for_session(id: i64, session_id: &str, name: &str) -> String {
+    jsonrpc_request(
+        json!(id),
+        "tools/call",
+        json!({
+            "name": "tracedecay_find_exact_symbol",
+            "arguments": {
+                "session_id": session_id,
+                "name": name,
+                "format": "json"
+            }
+        }),
+    )
+}
+
 /// Asserts a routed read refused rather than answering, and that it did not
 /// hand back the active project's files as if the route had resolved.
 fn assert_route_failed_closed(response: &Value, label: &str, expected_detail: &str) {
@@ -287,6 +325,16 @@ fn assert_route_failed_closed(response: &Value, label: &str, expected_detail: &s
     assert!(
         message.contains(expected_detail),
         "{label} must report `{expected_detail}`: {response}"
+    );
+}
+
+/// Asserts a routed read was refused as a typed not-found, which names no
+/// project and serves none.
+fn assert_route_denied(response: &Value, label: &str) {
+    assert_eq!(
+        crate::support::route_refusal(response),
+        json!({"kind": "not_found_or_not_authorized", "retryable": false, "diagnostic": null}),
+        "{label} must be refused as not found: {response}"
     );
 }
 
@@ -329,6 +377,68 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
         "active_only.rs",
         "target_only.rs",
     );
+    projects.shutdown().await;
+}
+
+#[tokio::test]
+async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
+    let projects = production_routed_projects_ready_for_first_read().await;
+    let target_workspace = projects.target_root().to_path_buf();
+    let target_server = projects
+        .harness
+        .server(&target_workspace)
+        .expect("target project server");
+    let server = projects.server();
+    let session_id = "sess-unhinted-source-edit";
+
+    run_client_connection_with_messages(
+        Arc::clone(&server),
+        vec![workspace_open_for_session(&target_workspace, session_id)],
+    )
+    .await;
+
+    fs::write(
+        target_workspace.join("src/target_only.rs"),
+        "fn target_only() -> i32 { routed_edit_visible() }\n\
+         fn routed_edit_visible() -> i32 { 3 }\n",
+    )
+    .expect("write tracked source without a hook hint");
+
+    run_client_connection_with_messages(
+        Arc::clone(&server),
+        vec![exact_symbol_call_for_session(
+            1,
+            session_id,
+            "routed_edit_visible",
+        )],
+    )
+    .await;
+    crate::support::wait_for_readiness(&target_server, "fresh", Duration::from_secs(30)).await;
+
+    let responses = run_client_connection_with_messages(
+        server,
+        vec![exact_symbol_call_for_session(
+            2,
+            session_id,
+            "routed_edit_visible",
+        )],
+    )
+    .await;
+    let response = response_with_id(&responses, json!(2));
+    let payload: Value = serde_json::from_str(successful_tool_text(
+        &response,
+        "routed exact-symbol read after unhinted edit",
+    ))
+    .expect("routed exact-symbol JSON");
+    assert!(
+        payload["matches"].as_array().is_some_and(|matches| {
+            matches
+                .iter()
+                .any(|symbol| symbol["name"] == "routed_edit_visible")
+        }),
+        "the routed exact-symbol read must expose the unhinted edit: {payload}"
+    );
+
     projects.shutdown().await;
 }
 
@@ -485,10 +595,9 @@ async fn hook_route_from_unregistered_cwd_fails_closed_without_active_fallback()
         vec![workspace_open(&unregistered_workspace), files_call(1)],
     )
     .await;
-    assert_route_failed_closed(
+    assert_route_denied(
         &response_with_id(&responses, json!(1)),
         "unresolvable hook route",
-        "did not resolve to a registered project",
     );
     projects.shutdown().await;
 }
@@ -507,10 +616,9 @@ async fn unknown_explicit_identity_does_not_inherit_connection_project() {
         ],
     )
     .await;
-    assert_route_failed_closed(
+    assert_route_denied(
         &response_with_id(&responses, json!(1)),
         "unknown explicit identity after a target workspace route",
-        "has no registered private project route",
     );
     projects.shutdown().await;
 }

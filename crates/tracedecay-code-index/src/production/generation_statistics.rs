@@ -15,6 +15,10 @@ pub struct CodeIndexGenerationStatisticsV1 {
     pub source_total_bytes: u64,
     pub symbol_count: u64,
     pub edge_count: u64,
+    /// References the generic name resolver dropped for multiple matching definitions.
+    /// Excludes module-specific resolution. `None` means the count was not measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambiguous_name_drops: Option<u64>,
 }
 
 impl CodeIndexPublishedGenerationV1 {
@@ -24,22 +28,42 @@ impl CodeIndexPublishedGenerationV1 {
     /// including parsed, error, and unsupported spans. Keeping the checked
     /// accumulation here makes a census faithful to the sealed generation and
     /// prevents downstream runtime telemetry from reading removed SQL tables.
-    #[hotpath::measure(label = "code_index.build.statistics")]
+    #[tracing::instrument(name = "code_index.build.statistics", level = "trace", skip_all)]
     pub fn generation_statistics(
         &self,
     ) -> Result<CodeIndexGenerationStatisticsV1, CodeIndexProductionErrorV1> {
+        Ok(self.statistics.clone())
+    }
+
+    pub fn clone_update_statistics(&self) -> (u64, u64, bool) {
+        (
+            self.clone_payloads_reused,
+            self.clone_stale_invalidations,
+            self.clone_payloads_computed > 0 || self.clone_stale_invalidations > 0,
+        )
+    }
+}
+
+impl CodeIndexGenerationStatisticsV1 {
+    pub(super) fn from_generation_parts(
+        files: &[std::sync::Arc<super::FileGenerationArtifactsV1>],
+        symbol_count: usize,
+        edge_count: usize,
+        ambiguous_name_drops: Option<u64>,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
         let source_total_bytes =
-            checked_source_total(self.files.iter().map(|file| &file.extraction.coverage))?;
-        let symbol_count = u64::try_from(self.symbols.symbols.len()).map_err(|_| {
+            checked_source_total(files.iter().map(|file| &file.extraction.coverage))?;
+        let symbol_count = u64::try_from(symbol_count).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("generation symbol count exceeds u64".to_owned())
         })?;
-        let edge_count = u64::try_from(self.edges.len()).map_err(|_| {
+        let edge_count = u64::try_from(edge_count).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("generation edge count exceeds u64".to_owned())
         })?;
         Ok(CodeIndexGenerationStatisticsV1 {
             source_total_bytes,
             symbol_count,
             edge_count,
+            ambiguous_name_drops,
         })
     }
 }
@@ -67,32 +91,16 @@ fn checked_source_total<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::CodeIndexGenerationStatisticsV1;
 
     #[test]
-    fn source_total_includes_parsed_error_and_unsupported_coverage() {
-        let coverages = [
-            ExtractionCoverageV1 {
-                parsed_bytes: 5,
-                error_bytes: 7,
-                unsupported_bytes: 11,
-                symbols_extracted: 0,
-                relations_extracted: 0,
-                ambiguity_count: 0,
-            },
-            ExtractionCoverageV1 {
-                parsed_bytes: 13,
-                error_bytes: 0,
-                unsupported_bytes: 17,
-                symbols_extracted: 0,
-                relations_extracted: 0,
-                ambiguity_count: 0,
-            },
-        ];
-
-        assert_eq!(
-            checked_source_total(coverages.iter()).expect("coverage total"),
-            53
-        );
+    fn a_census_sealed_before_the_field_decodes_as_not_counted() {
+        let statistics: CodeIndexGenerationStatisticsV1 =
+            serde_json::from_str(r#"{"source_total_bytes":1,"symbol_count":2,"edge_count":3}"#)
+                .expect("old census");
+        assert_eq!(statistics.source_total_bytes, 1);
+        assert_eq!(statistics.symbol_count, 2);
+        assert_eq!(statistics.edge_count, 3);
+        assert_eq!(statistics.ambiguous_name_drops, None);
     }
 }

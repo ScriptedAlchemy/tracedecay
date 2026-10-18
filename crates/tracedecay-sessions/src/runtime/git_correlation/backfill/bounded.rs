@@ -1,6 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use super::history_failures;
@@ -54,16 +52,24 @@ impl BoundedGitControl {
         Ok(())
     }
 
-    pub(super) fn verified_graph_cancellation(&self) -> Arc<AtomicBool> {
-        self.cancellation.verified_graph_cancellation()
-    }
-
     fn should_soft_stop(&self, reserve: Duration) -> Result<bool, BoundedBackfillInterruption> {
         self.check()?;
         Ok(self
             .deadline
             .is_none_or(|deadline| deadline.saturating_duration_since(Instant::now()) <= reserve))
     }
+}
+
+pub(super) fn verified_empty_history(
+    project_path: &std::path::Path,
+) -> Result<bool, BoundedBackfillInterruption> {
+    let control =
+        BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
+    let Some(source) = native::capture_unborn_source(project_path, &control)? else {
+        return Ok(false);
+    };
+    native::verify_unborn_source(project_path, &source, &control)?;
+    Ok(true)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,7 +114,7 @@ impl GraphPageBudget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GitHistoryIndexFrontier {
-    pub activity_timestamp: i64,
+    pub change_sequence: i64,
     pub source_rowid: i64,
 }
 
@@ -144,20 +150,7 @@ where
 {
     session_store.require_project_sessions_authority()?;
     let snapshot = session_store.read_snapshot().await?;
-    let stored_activity = super::super::read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY)
-        .await?
-        .unwrap_or_else(|| opts.since.saturating_sub(1));
-    let stored_rowid = super::super::read_meta_value(&snapshot, GIT_HISTORY_ROWID_FRONTIER_KEY)
-        .await?
-        .unwrap_or(0);
-    let mut frontier = GitHistoryIndexFrontier {
-        activity_timestamp: stored_activity.max(opts.since.saturating_sub(1)),
-        source_rowid: if stored_activity >= opts.since.saturating_sub(1) {
-            stored_rowid
-        } else {
-            0
-        },
-    };
+    let mut frontier = super::super::read_history_frontier(&snapshot).await?;
     if let Err(interruption) = control.check() {
         drop(snapshot);
         return Ok(interrupted_outcome(
@@ -173,20 +166,41 @@ where
         history_progress::read_oldest_progress(&snapshot).await?
     };
     if let Some(progress) = active_progress {
+        let mut current = snapshot.query(
+            "SELECT sequence FROM git_history_session_change WHERE provider = ?1 AND session_id = ?2",
+            params![progress.provider.as_str(), progress.session_id.as_str()],
+        ).await?;
+        let revision = current
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?;
+        drop(current);
+        if revision != Some(progress.change_sequence) {
+            drop(snapshot);
+            let mut committed = false;
+            let interruption =
+                reset_exact_progress(session_store, &progress, control, &mut committed)
+                    .await
+                    .err();
+            return Ok(BoundedBackfillOutcome {
+                stats: BackfillStats::default(),
+                committed,
+                frontier,
+                remaining_sessions: 1,
+                unresolved_failures: 0,
+                interruption,
+            });
+        }
         drop(snapshot);
         return Ok(
             resume_active_progress_page(session_store, progress, frontier, opts, control).await,
         );
     }
     let requested = opts.limit_sessions.saturating_add(1);
-    let mut rows = session_activity_page_after(
-        &snapshot,
-        frontier.activity_timestamp,
-        frontier.source_rowid,
-        requested,
-    )
-    .await
-    .map_err(GitCorrelationError::Db)?;
+    let mut rows = session_activity_page_after(&snapshot, frontier.change_sequence, requested)
+        .await
+        .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
     if let Err(interruption) = control.check() {
         return Ok(interrupted_outcome(
@@ -212,7 +226,7 @@ where
         }
         stats.sessions_scanned = stats.sessions_scanned.saturating_add(1);
         let candidate_frontier = GitHistoryIndexFrontier {
-            activity_timestamp: row.activity_timestamp,
+            change_sequence: row.change_sequence,
             source_rowid: row.source_rowid,
         };
         let mut frontier_pending = false;
@@ -280,17 +294,20 @@ where
                     interruption,
                 ));
             }
-            frontier = match persist_frontier(session_store, candidate_frontier, control).await {
-                Ok(frontier) => frontier,
-                Err(interruption) => {
-                    return Ok(interrupted_outcome(
-                        stats,
-                        committed,
-                        frontier,
-                        interruption,
-                    ));
-                }
-            };
+            frontier =
+                match persist_frontier(session_store, &row.session, candidate_frontier, control)
+                    .await
+                {
+                    Ok(frontier) => frontier,
+                    Err(interruption) => {
+                        return Ok(interrupted_outcome(
+                            stats,
+                            committed,
+                            frontier,
+                            interruption,
+                        ));
+                    }
+                };
             committed = true;
         }
     }
@@ -434,13 +451,13 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
             BackfillSkipReason::NoActivityWindow,
         ));
     }
-    if row.project_path.trim().is_empty() {
+    let Some(project_path) = row.folder(opts.project_root.as_deref()) else {
         return Ok(StreamGitEvidenceOutcome::Skip(
             BackfillSkipReason::NotAWorktree,
         ));
-    }
+    };
+    let project_path = project_path.to_path_buf();
     control.check()?;
-    let project_path = std::path::PathBuf::from(row.project_path.trim());
     if opts.dry_run {
         dry_run_native_history(
             &project_path,
@@ -466,13 +483,61 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
     drop(snapshot);
     if progress.is_none() {
         let native_control = control.clone();
-        let native_path = project_path;
+        let native_path = project_path.clone();
         let cursor = run_blocking(control, move || {
-            native::initialize_reflog_cursor(&native_path, window_end, &native_control)
+            native::initialize_history_source(&native_path, window_end, &native_control)
         })
         .await;
         let cursor = match cursor {
-            Ok(cursor) => cursor,
+            Ok(native::HistorySource::Reflog(cursor)) => *cursor,
+            Ok(native::HistorySource::Unborn(source)) => {
+                let native_control = control.clone();
+                run_blocking(control, move || {
+                    native::verify_unborn_source(&project_path, &source, &native_control)
+                })
+                .await?;
+                let transaction = session_store
+                    .open_write_transaction()
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                control.check()?;
+                // A concurrent worker may already have captured real history.
+                // Its progress remains authoritative and must not be skipped.
+                if history_progress::read_progress(&transaction, key)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+                    .is_some()
+                {
+                    return Ok(StreamGitEvidenceOutcome::Progressed);
+                }
+                history_failures::clear_unresolved(&transaction, key.source_rowid)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                let frontier = super::advance_history_frontier(&transaction, candidate_frontier)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                let mut writer = GitEvidenceWriter::open(&transaction)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                writer
+                    .replace_backfill_session(
+                        &row.provider,
+                        &row.session_id,
+                        candidate_frontier.change_sequence,
+                    )
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                writer
+                    .finish()
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                control.check()?;
+                GitCorrelationWriteTxn::commit(transaction)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                *committed = true;
+                return Ok(StreamGitEvidenceOutcome::Applied(Some(frontier)));
+            }
             Err(BoundedBackfillInterruption::UnsupportedSourceFraming) => {
                 return history_failures::record_candidate(
                     session_store,
@@ -489,7 +554,7 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
         };
         let progress = progress_from_cursor(
             key,
-            candidate_frontier.activity_timestamp,
+            candidate_frontier.change_sequence,
             row,
             window_start,
             window_end,
@@ -626,6 +691,11 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
     }
 }
 
+#[tracing::instrument(
+    name = "sessions.git_correlation.backfill.dry_run",
+    level = "trace",
+    skip_all
+)]
 async fn dry_run_native_history(
     project_path: &std::path::Path,
     window_start: i64,
@@ -636,10 +706,19 @@ async fn dry_run_native_history(
 ) -> Result<(), BoundedBackfillInterruption> {
     let path = project_path.to_owned();
     let native_control = control.clone();
-    let mut cursor = run_blocking(control, move || {
-        native::initialize_reflog_cursor(&path, window_end, &native_control)
+    let cursor = run_blocking(control, move || {
+        match native::initialize_history_source(&path, window_end, &native_control)? {
+            native::HistorySource::Reflog(cursor) => Ok(Some(*cursor)),
+            native::HistorySource::Unborn(source) => {
+                native::verify_unborn_source(&path, &source, &native_control)?;
+                Ok(None)
+            }
+        }
     })
     .await?;
+    let Some(mut cursor) = cursor else {
+        return Ok(());
+    };
     let initial_cursor = cursor.clone();
     let canonical_worktree = cursor.worktree.clone();
     let source_length = cursor.byte_offset;
@@ -809,6 +888,7 @@ async fn dry_run_segment(
 
 async fn persist_frontier<S: GitCorrelationSessionStore>(
     session_store: &S,
+    row: &SessionActivityRow,
     candidate: GitHistoryIndexFrontier,
     control: &BoundedGitControl,
 ) -> Result<GitHistoryIndexFrontier, BoundedBackfillInterruption> {
@@ -819,6 +899,17 @@ async fn persist_frontier<S: GitCorrelationSessionStore>(
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     control.check()?;
     let persisted = super::advance_history_frontier(&transaction, candidate)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let mut writer = GitEvidenceWriter::open(&transaction)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    writer
+        .replace_backfill_session(&row.provider, &row.session_id, candidate.change_sequence)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    writer
+        .finish()
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     control.check()?;

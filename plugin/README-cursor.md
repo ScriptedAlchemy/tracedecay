@@ -14,24 +14,28 @@ GUI-launched Cursor does not depend on shell `PATH`.
 The plugin registers the TraceDecay MCP server under the `tracedecay` key as:
 
 ```bash
-tracedecay serve --path ${workspaceFolder}
+tracedecay serve
 ```
 
-Cursor Settings surfaces that MCP server key literally, so the Cursor bundle
+Cursor Settings displays that MCP server key literally, so the Cursor bundle
 uses `tracedecay` (not the Claude/Codex `graph` key). Each Cursor workspace
-gets its own `.tracedecay/` index. Cursor's MCP runner resolves
-`${workspaceFolder}` in normal editor windows.
+gets its own project store.
 
-Some Cursor contexts (headless agent-session MCP scopes) pass the literal,
-unexpanded `${workspaceFolder}` from the user home directory. Cursor never
-retries a failed MCP scope, so `serve` detects unexpanded `${...}` values,
-warns on stderr, and falls back to project discovery: cwd walk-up, MCP
-initialize roots, then the global project registry. Registry fallback accepts
-only a unique registered project; otherwise `serve` exits with an actionable
-"multiple projects" error. The template keeps `--path ${workspaceFolder}`
-because normal Cursor windows expand it and home-dir discovery cannot scope
-multi-project setups. If tools still do not connect, run
-`tracedecay doctor`.
+Cursor runs plugin MCP servers in its profile scope, spawned per workspace
+with the workspace folder as the working directory, and it never expands
+`${workspaceFolder}` there (every spawn of the former `--path
+${workspaceFolder}` template logged the literal string). `serve` therefore
+resolves the workspace from its working directory (project walk-up, then the
+enclosing git checkout) and from MCP initialize roots. A `--path` value that
+still carries an unexpanded `${...}` template is discarded with a stderr
+warning and the same discovery runs.
+
+When discovery lands on a directory the profile has not enrolled, the MCP
+handshake still completes and every tool call answers with the typed
+`project_not_enrolled` refusal naming that directory and the fix
+(`tracedecay init` there). The daemon re-checks the route on each call, so
+the server recovers without a reload once the project is initialized. If
+tools still do not connect, run `tracedecay doctor`.
 
 Hook commands derive the active project from Cursor's event payload /
 `CURSOR_PROJECT_DIR`, not from the plugin directory. They only submit bounded
@@ -43,6 +47,10 @@ Every MCP tool is also available from the shell as `tracedecay tool <name>`
 parameters). The bundled `using-the-cli` skill and always-applied rule use
 that CLI fallback when MCP transport errors or times out, instead of querying
 `.tracedecay` databases.
+The CLI uses the same daemon authority and is not an availability guarantee;
+neither client starts a missing or stopped service. If the daemon is
+unavailable or intentionally held, report that state and use scoped native
+tools without retrying or changing daemon lifecycle.
 
 ## Desktop native diagnostics
 
@@ -53,7 +61,7 @@ Cursor after installation so the extension starts
 
 The extension forwards bounded native diagnostics only for the single admitted
 workspace folder. It sends URI, document version, range, source, message, and
-safe diagnostic metadata—never document text or arbitrary diagnostic payloads.
+safe diagnostic metadata, never document text or arbitrary diagnostic payloads.
 The gateway merges that native upstream lane internally but, in Cursor-native
 mode, publishes only TraceDecay findings back to avoid duplicating Cursor's own
 diagnostics. Multi-root workspaces are not supported.
@@ -66,29 +74,32 @@ TraceDecay does not install or claim ownership of `rust-analyzer`,
 
 For compiler output Cursor already captured, call `tracedecay_diagnose` first:
 it maps the supplied `cargo`/`clippy` stderr to symbols and callers without
-starting a toolchain. Use `tracedecay_diagnostics` only when fresh structured
-diagnostics are needed; it runs the relevant type checker, so respect Cursor's
-approval/run mode even though the tool does not edit the workspace.
+starting a toolchain, and publishes the findings for the current indexed
+generation. `tracedecay_diagnostics` reads those published diagnostics; it
+never runs a compiler itself. Each TypeScript project (every package
+`tsconfig.json` in a monorepo) whose package or workspace root has
+`node_modules/.bin/tsc` is checked automatically by the daemon after each
+complete index generation, so its read is populated without a paste; for any
+other toolchain, or before the workspace install (`pnpm install`, `yarn
+install`, or `npm install`, from the lockfile), the read is a typed problem
+that names the exact next step.
 
 `tracedecay lsp servers [--json]` is the separate CLI discovery command
 for supported local language servers and install hints. It is informational:
 it does not install or start a server. It is **not** an MCP tool, so do not add
 it (or a wildcard) to `mcpAllowlist`.
 
-For literal strings, regexes, and config keys inside indexed code, use
-`tracedecay_grep`; reserve `tracedecay_search` for symbol names and
-`tracedecay_context` for concept-level discovery.
-
 For sessions resumed from compacted context, any recovery guidance is produced
 from the daemon's canonical session state after the hook admission succeeds;
 the `sessionStart` adapter does not read a session store itself.
 
-Slash workflows ship as Cursor-native commands
-(`/tracedecay-map-architecture`, `/tracedecay-check-health`,
-`/tracedecay-curate-memory`, `/tracedecay-review-diff`, ...). Their slugs keep
-the `tracedecay-` prefix so typing `/tracedecay` lists every command. The
-files in `overlays/cursor/commands/` are independently authored for Cursor
-(skill handoff + approval notes), not generated from `plugin/commands/`.
+Workflows no skill covers ship as Cursor-native commands
+(`/tracedecay-audit-safety`, `/tracedecay-draft-commit`,
+`/tracedecay-test-changes`, ...). Their slugs keep the `tracedecay-` prefix so
+typing `/tracedecay` lists every command. Every skill is also invocable by
+name, for example `/assessing-impact`. The files in `overlays/cursor/commands/`
+are independently authored for Cursor (skill handoff + approval notes), not
+generated from `plugin/commands/`.
 
 ## Auto-review and `permissions.json`
 
@@ -112,7 +123,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_automation_run_artifact_view",
     "tracedecay:tracedecay_automation_run_list",
     "tracedecay:tracedecay_automation_run_view",
-    "tracedecay:tracedecay_body",
     "tracedecay:tracedecay_branch_diff",
     "tracedecay:tracedecay_branch_list",
     "tracedecay:tracedecay_branch_search",
@@ -120,28 +130,20 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_call_chain",
     "tracedecay:tracedecay_callees",
     "tracedecay:tracedecay_callers",
-    "tracedecay:tracedecay_callers_for",
     "tracedecay:tracedecay_changelog",
     "tracedecay:tracedecay_circular",
-    "tracedecay:tracedecay_code_callees",
-    "tracedecay:tracedecay_code_callers",
     "tracedecay:tracedecay_code_declaration",
-    "tracedecay:tracedecay_code_definition",
     "tracedecay:tracedecay_code_exact_occurrence",
     "tracedecay:tracedecay_code_facets",
-    "tracedecay:tracedecay_code_implementations",
     "tracedecay:tracedecay_code_phrase_search",
     "tracedecay:tracedecay_code_references",
-    "tracedecay:tracedecay_code_signature_search",
     "tracedecay:tracedecay_code_symbol_search",
     "tracedecay:tracedecay_code_timeline",
     "tracedecay:tracedecay_code_type_definition",
-    "tracedecay:tracedecay_code_type_hierarchy",
     "tracedecay:tracedecay_commit_context",
     "tracedecay:tracedecay_complexity",
     "tracedecay:tracedecay_config",
     "tracedecay:tracedecay_configuration_audit",
-    "tracedecay:tracedecay_configuration_explain",
     "tracedecay:tracedecay_configuration_get",
     "tracedecay:tracedecay_configuration_list",
     "tracedecay:tracedecay_configuration_observed_state",
@@ -160,7 +162,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_derives",
     "tracedecay:tracedecay_diagnose",
     "tracedecay:tracedecay_diagnostics",
-    "tracedecay:tracedecay_diagnostics_read",
     "tracedecay:tracedecay_diff_context",
     "tracedecay:tracedecay_distribution",
     "tracedecay:tracedecay_doc_coverage",
@@ -180,7 +181,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_feedback_list",
     "tracedecay:tracedecay_field_sites",
     "tracedecay:tracedecay_file_dependents",
-    "tracedecay:tracedecay_file_metadata",
     "tracedecay:tracedecay_files",
     "tracedecay:tracedecay_find_exact_symbol",
     "tracedecay:tracedecay_gini",
@@ -200,7 +200,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_hotspots",
     "tracedecay:tracedecay_impact",
     "tracedecay:tracedecay_implementations",
-    "tracedecay:tracedecay_impls",
     "tracedecay:tracedecay_inheritance_depth",
     "tracedecay:tracedecay_largest",
     "tracedecay:tracedecay_lcm_describe",
@@ -218,7 +217,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_native_integration_status",
     "tracedecay:tracedecay_node",
     "tracedecay:tracedecay_observatory_read",
-    "tracedecay:tracedecay_outline",
     "tracedecay:tracedecay_port_order",
     "tracedecay:tracedecay_port_status",
     "tracedecay:tracedecay_pr_context",
@@ -228,9 +226,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_project_search",
     "tracedecay:tracedecay_qualified_name",
     "tracedecay:tracedecay_rank",
-    "tracedecay:tracedecay_read",
     "tracedecay:tracedecay_recursion",
-    "tracedecay:tracedecay_redundancy",
     "tracedecay:tracedecay_remote_status",
     "tracedecay:tracedecay_rename_preview",
     "tracedecay:tracedecay_retrieve",
@@ -242,7 +238,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_signature",
     "tracedecay:tracedecay_signature_search",
     "tracedecay:tracedecay_similar",
-    "tracedecay:tracedecay_simplify_scan",
     "tracedecay:tracedecay_skill_list",
     "tracedecay:tracedecay_skill_view",
     "tracedecay:tracedecay_source_body",
@@ -258,7 +253,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_type_hierarchy",
     "tracedecay:tracedecay_unmounted_files",
     "tracedecay:tracedecay_unsafe_patterns",
-    "tracedecay:tracedecay_unused_imports",
     "tracedecay:tracedecay_work_attempt_status",
     "tracedecay:tracedecay_work_compare_proposal",
     "tracedecay:tracedecay_work_execution_history",
@@ -298,37 +292,38 @@ Notes:
   are deliberately excluded so they keep going through review. The listed Work
   reads include execution `topology`; use them to inspect Work before choosing
   a mutation.
-- Two borderline entries: `tracedecay_diagnostics` runs your toolchain
-  (cargo/tsc/pyright) and `tracedecay_dashboard` starts a localhost server.
-  Both are non-destructive, but remove those lines if you want a prompt first.
+- One borderline entry: `tracedecay_dashboard` starts a localhost server. It
+  is non-destructive, but remove that line if you want a prompt first.
+  `tracedecay_diagnostics` is a read; the daemon runs a TypeScript project's
+  own `tsc` in the background regardless of this list.
 - `tracedecay_retrieve` only dereferences the required `handle` from a
-  project-local truncated MCP response. Use it when omitted details are needed;
-  it restores that exact cached response and does not re-run the source tool.
-- Do **not** use `tracedecay:*` — it would auto-approve the editing tools too.
+  project-local truncated MCP response. Use it for one omitted span; do not
+  reassemble the stored body into the conversation. It does not re-run the
+  source tool.
+- Do **not** use `tracedecay:*`. It would auto-approve the editing tools too.
 - Entries from per-user and per-repo files are concatenated; allowlists are a
   convenience, not a security boundary.
 
 ## Troubleshooting a dead MCP scope
 
-Cursor spawns MCP servers with the user home directory as the working
-directory, and it **never retries a failed MCP server**: if the `tracedecay
-serve` process exits at startup (for example when a headless agent scope
-passes a literal, unexpanded `${workspaceFolder}`), every later tool call in
-that session reports "Timed out waiting for connection" until you toggle the
+Cursor **never retries a failed MCP server**: if the `tracedecay serve`
+process exits or fails `initialize` at startup, every later tool call in that
+session reports "Timed out waiting for connection" until you toggle the
 server or reload the window.
 
 Two layers of defense ship with this plugin:
 
-- `tracedecay serve` does not exit when project resolution fails at startup.
-  It completes the MCP handshake and answers tool calls with an actionable
-  error naming the failure and the fix; it rechecks the project on every tool
-  call and recovers automatically once `tracedecay init` (or a corrected
-  `--path`) makes resolution succeed.
+- `tracedecay serve` does not exit, and the daemon does not fail `initialize`,
+  when project resolution lands on an unenrolled directory. The handshake
+  completes and tool calls answer with the typed `project_not_enrolled` error
+  naming the directory and the fix; the daemon rechecks the route on every
+  tool call and recovers automatically once `tracedecay init` (or a corrected
+  `--path`) makes admission succeed.
 - `tracedecay doctor` scans supported host integration evidence
   (`~/.config/Cursor/logs` on Linux, `~/Library/Application Support/Cursor/logs`
-  on macOS, `%APPDATA%\Cursor\logs` on Windows) for tracedecay spawn failures —
+  on macOS, `%APPDATA%\Cursor\logs` on Windows) for tracedecay spawn failures,
   literal `${workspaceFolder}` errors, `Connection failed: MCP error -32000`,
-  degraded-mode notices — and checks that the installed plugin bundle version
+  degraded-mode notices, and checks that the installed plugin bundle version
   matches the binary.
 
 If a scope has already failed: fix the cause (usually `tracedecay init` in the

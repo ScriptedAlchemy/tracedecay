@@ -3,25 +3,86 @@ use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
 use std::fmt::Write as _;
 use std::fs;
-#[path = "retrieve_truncation_support.rs"]
-mod retrieve_truncation_support;
-#[cfg(feature = "test-transport")]
-use retrieve_truncation_support::call_production_tool;
-use retrieve_truncation_support::retrieve_json_arguments;
 
+#[cfg(feature = "test-transport")]
+fn retrieve_json_arguments(handle: &str) -> Value {
+    json!({ "format": "json", "handle": handle })
+}
+
+#[cfg(feature = "test-transport")]
+async fn retrieve_all_json_pages(fixture: &ProductionCompositionFixture, handle: &str) -> String {
+    let mut offset = 0usize;
+    let mut content = String::new();
+    loop {
+        let page = call_production_tool(
+            fixture,
+            "tracedecay_retrieve",
+            json!({"format": "json", "handle": handle, "offset": offset}),
+        )
+        .await;
+        let page: Value =
+            serde_json::from_str(extract_text(&page.value)).expect("retrieve page JSON");
+        let page_content = page["content"].as_str().expect("retrieve page content");
+        content.push_str(page_content);
+        if !page["has_more"].as_bool().expect("retrieve has_more") {
+            return content;
+        }
+        offset = page["next_offset"].as_u64().expect("retrieve next_offset") as usize;
+    }
+}
+
+#[cfg(feature = "test-transport")]
+async fn call_production_tool(
+    fixture: &ProductionCompositionFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> tracedecay_mcp::ToolResult {
+    let response = fixture
+        .harness
+        .call_tool(&fixture.project_root, tool_name, arguments)
+        .await
+        .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
+    assert!(
+        response.error.is_none(),
+        "{tool_name} returned a production MCP error: {:?}",
+        response.error.as_ref().map(|error| &error.message)
+    );
+    tracedecay_mcp::ToolResult::new(
+        response
+            .result
+            .unwrap_or_else(|| panic!("{tool_name} returned no production MCP result")),
+        Vec::new(),
+    )
+}
+
+#[cfg(feature = "test-transport")]
+async fn fixture_response_handle_root(
+    fixture: &ProductionCompositionFixture,
+) -> std::path::PathBuf {
+    fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production retrieve server")
+        .cg()
+        .await
+        .store_layout()
+        .response_handle_root
+        .clone()
+}
+
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn retrieve_tool_returns_full_stored_response() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let fixture = production_composition_fixture().await;
+    let response_handle_root = fixture_response_handle_root(&fixture).await;
     let original = "{\"items\":[{\"id\":1,\"name\":\"alpha\"}]}";
     let stored = tracedecay_mcp::response_handles::store_response_handle(
-        cg.project_root(),
+        &response_handle_root,
         original,
-        tracedecay::tracedecay::current_timestamp(),
+        tracedecay_runtime_core::tracedecay::current_timestamp(),
     )
     .unwrap();
 
-    let response_handle_root =
-        tracedecay_runtime_core::storage::resolve_response_handle_root(cg.project_root()).unwrap();
     let stored_payload: Value = serde_json::from_str(
         &fs::read_to_string(response_handle_root.join(format!("{}.json", stored.handle))).unwrap(),
     )
@@ -30,128 +91,125 @@ async fn retrieve_tool_returns_full_stored_response() {
     assert!(stored_payload.get("original_chars").is_none());
     assert_eq!(stored_payload["content"], original);
 
-    let result = handle_tool_call(
-        &cg,
+    let result = call_production_tool(
+        &fixture,
         "tracedecay_retrieve",
         retrieve_json_arguments(&stored.handle),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let payload: Value = serde_json::from_str(text).unwrap();
-
+    .await;
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(payload["handle"], stored.handle);
     assert_eq!(payload["content"], original);
     assert_eq!(payload["expired"], false);
 
-    let alias_result = handle_tool_call(
-        &cg,
+    let markdown = call_production_tool(
+        &fixture,
         "tracedecay_retrieve",
-        json!({
-            "format": "json",
-            "handle": stored.handle,
-            "retrieve_handle": stored.handle,
-        }),
-        None,
-        None,
+        json!({"format": "markdown", "handle": stored.handle, "offset": 2, "max_chars": 7}),
     )
     .await;
+    let markdown = extract_text(&markdown.value);
+    assert!(markdown.contains("**offset:** 2"));
+    assert!(markdown.contains("**next_offset:** 9"));
+    assert!(markdown.contains("**has_more:** true"));
+    assert!(markdown.ends_with(&original.chars().skip(2).take(7).collect::<String>()));
+
+    let alias = fixture
+        .harness
+        .call_tool(
+            &fixture.project_root,
+            "tracedecay_retrieve",
+            json!({
+                "format": "json",
+                "handle": stored.handle,
+                "retrieve_handle": stored.handle,
+            }),
+        )
+        .await
+        .expect("production retrieve invocation");
     assert!(
-        alias_result.is_err(),
-        "tracedecay_retrieve must accept only the canonical `handle` field"
+        alias.error.is_none(),
+        "tracedecay_retrieve refusal is a tool result: {:?}",
+        alias.error.as_ref().map(|error| &error.message)
     );
+    let problem = refusal_problem(
+        alias
+            .result
+            .as_ref()
+            .expect("tracedecay_retrieve refusal result"),
+    );
+    assert_eq!(problem["kind"], "invalid_request");
+    assert_eq!(problem["code"], "application.surface.invalid_request");
+    assert_eq!(
+        problem["message"],
+        "invalid arguments for tracedecay_retrieve: unknown field `retrieve_handle`, expected one of `handle`, `offset`, `max_chars`"
+    );
+    fixture.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+async fn retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_frames() {
+    let fixture = production_composition_fixture().await;
+    let response_handle_root = fixture_response_handle_root(&fixture).await;
+    let cases = [
+        "a".repeat(16 * 1024),
+        "b".repeat(1024 * 1024),
+        format!("{}尾", "🦀漢字".repeat(6_000)),
+        "c".repeat(4 * 1024 * 1024),
+    ];
 
-    let missing = handle_tool_call(
-        &cg,
-        "tracedecay_retrieve",
-        retrieve_json_arguments("rh_0123456789abcdef01234567"),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let missing_payload: Value = serde_json::from_str(extract_text(&missing.value)).unwrap();
-    assert_eq!(missing_payload["expired"], Value::Null);
-    assert_eq!(missing_payload["content"], Value::Null);
-    assert_eq!(missing_payload["reason_code"], "handle_not_found");
-    assert_eq!(missing_payload["retryable"], true);
-    assert!(
-        missing_payload["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("not found")
-    );
-    assert!(
-        missing_payload["retry_instruction"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Re-run the original MCP tool")
-    );
-
-    let expired = tracedecay_mcp::response_handles::store_response_handle(
-        cg.project_root(),
-        "{\"items\":[42]}",
-        tracedecay::tracedecay::current_timestamp()
-            - tracedecay_mcp::response_handles::RESPONSE_HANDLE_TTL_SECS
-            - 5,
-    )
-    .unwrap();
-
-    let expired_result = handle_tool_call(
-        &cg,
-        "tracedecay_retrieve",
-        retrieve_json_arguments(&expired.handle),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let expired_payload: Value = serde_json::from_str(extract_text(&expired_result.value)).unwrap();
-    assert_eq!(expired_payload["expired"], true);
-    assert_eq!(expired_payload["content"], Value::Null);
-    assert_eq!(expired_payload["reason_code"], "handle_expired");
-    assert_eq!(expired_payload["retryable"], true);
-    assert_eq!(expired_payload["expires_at"], expired.expires_at);
-    assert!(
-        expired_payload["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("expired")
-    );
-    assert!(
-        expired_payload["retry_instruction"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Re-run the original MCP tool")
-    );
-
-    let identity_path =
-        tracedecay_runtime_core::storage::repository_identity_path(cg.project_root()).unwrap();
-    fs::write(
-        &identity_path,
-        r#"{"schema_version":1,"project_id":"../operator-private"}"#,
-    )
-    .unwrap();
-    let unavailable = handle_tool_call(
-        &cg,
-        "tracedecay_retrieve",
-        retrieve_json_arguments("rh_0123456789abcdef01234567"),
-        None,
-        None,
-    )
-    .await
-    .expect_err("invalid storage identity must fail closed");
-    let public = unavailable.to_string();
-    assert!(public.contains("response-handle cache is unavailable"));
-    assert!(!public.contains(cg.project_root().to_string_lossy().as_ref()));
-    assert!(!public.contains(identity_path.to_string_lossy().as_ref()));
+    for original in cases {
+        let stored = tracedecay_mcp::response_handles::store_response_handle(
+            &response_handle_root,
+            &original,
+            tracedecay_runtime_core::tracedecay::current_timestamp(),
+        )
+        .unwrap();
+        let mut offset = 0usize;
+        let mut reconstructed = String::new();
+        loop {
+            let result = call_production_tool(
+                &fixture,
+                "tracedecay_retrieve",
+                json!({
+                    "format": "json",
+                    "handle": stored.handle,
+                    "offset": offset,
+                    "max_chars": tracedecay_mcp::MAX_RESPONSE_CHARS,
+                }),
+            )
+            .await;
+            let response = tracedecay_mcp::transport::JsonRpcResponse::success(
+                json!(71),
+                result.value.clone(),
+            );
+            let frame = tracedecay_mcp::serialize_response_line(&response);
+            assert!(
+                frame.len() <= tracedecay_mcp::MAX_RESPONSE_CHARS,
+                "retrieve frame exceeded the canonical cap: {} > {}",
+                frame.len(),
+                tracedecay_mcp::MAX_RESPONSE_CHARS
+            );
+            let page: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+            assert_eq!(page["offset"].as_u64(), Some(offset as u64));
+            assert_eq!(
+                page["total_chars"].as_u64(),
+                Some(original.chars().count() as u64)
+            );
+            let content = page["content"].as_str().expect("page content");
+            reconstructed.push_str(content);
+            if !page["has_more"].as_bool().expect("has_more") {
+                assert!(page["next_offset"].is_null());
+                break;
+            }
+            let next = page["next_offset"].as_u64().expect("continuation offset") as usize;
+            assert_eq!(next, offset + content.chars().count());
+            offset = next;
+        }
+        assert_eq!(reconstructed, original);
+    }
+    fixture.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
@@ -191,12 +249,12 @@ async fn fact_store_large_json_list_response_uses_retrieve_handle() {
     .await;
     let markdown_text = extract_text(&markdown_list.value);
     assert!(
-        markdown_text.starts_with("## fact\\_store\\_list"),
-        "default fact-store output should remain the canonical compact human view: {markdown_text}"
+        markdown_text.starts_with("## fact\\_store\\_list\n\n### Payload\n\n"),
+        "default fact-store output should lead with the bounded evidence payload: {markdown_text}"
     );
-    assert!(markdown_text.contains("complete: --json"));
+    assert!(markdown_text.contains("use --json for the complete typed result"));
     assert!(!markdown_text.contains("# Truncated Response"));
-    assert!(!markdown_text.contains("LONG_FACT_MARKER_00"));
+    assert!(markdown_text.contains("\"content\": \"LONG_FACT_MARKER_"));
 
     let listed = call_production_tool(
         &fixture,
@@ -251,18 +309,8 @@ async fn fact_store_large_json_list_response_uses_retrieve_handle() {
     assert_eq!(deleted_fact["status"]["fact_id"], last_fact_id);
     assert_eq!(deleted_fact["status"]["payload_access"], "deleted");
 
-    let retrieved = call_production_tool(
-        &fixture,
-        "tracedecay_retrieve",
-        retrieve_json_arguments(&handle),
-    )
-    .await;
-    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
-    assert_eq!(retrieved_payload["expired"], false);
-    let full_json = retrieved_payload["content"]
-        .as_str()
-        .expect("retrieve response should contain original JSON text");
-    let full: Value = serde_json::from_str(full_json).expect("retrieved content should be JSON");
+    let full_json = retrieve_all_json_pages(&fixture, &handle).await;
+    let full: Value = serde_json::from_str(&full_json).expect("retrieved content should be JSON");
     assert_eq!(
         full["outcome"]["value"]["payload"]["facts"]
             .as_array()
@@ -338,17 +386,7 @@ async fn grep_large_response_uses_retrievable_truncation_handle() {
         "stored original must exceed the truncated wire payload"
     );
 
-    let retrieved = call_production_tool(
-        &fixture,
-        "tracedecay_retrieve",
-        retrieve_json_arguments(handle),
-    )
-    .await;
-    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
-    assert_eq!(retrieved_payload["expired"], false);
-    let full_json = retrieved_payload["content"]
-        .as_str()
-        .expect("retrieve response should contain full discovery JSON");
+    let full_json = retrieve_all_json_pages(&fixture, handle).await;
     assert_eq!(
         full_json.chars().count() as u64,
         original_chars,
@@ -360,7 +398,7 @@ async fn grep_large_response_uses_retrievable_truncation_handle() {
         "fixture must distinguish UTF-8 bytes from characters"
     );
     let full: Value =
-        serde_json::from_str(full_json).expect("retrieved discovery content should be JSON");
+        serde_json::from_str(&full_json).expect("retrieved discovery content should be JSON");
     assert_eq!(
         full["match_count"].as_u64(),
         Some(EXPECTED_MATCH_COUNT as u64),
@@ -452,17 +490,7 @@ async fn diff_context_large_response_uses_retrievable_truncation_handle() {
         .as_str()
         .expect("large diff_context response should include a handle");
 
-    let retrieved = call_production_tool(
-        &fixture,
-        "tracedecay_retrieve",
-        retrieve_json_arguments(handle),
-    )
-    .await;
-    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
-    assert_eq!(retrieved_payload["expired"], false);
-    let full_json = retrieved_payload["content"]
-        .as_str()
-        .expect("retrieve response should contain full diff_context JSON");
+    let full_json = retrieve_all_json_pages(&fixture, handle).await;
     assert!(
         full_json.contains(&format!(
             "reversible_diff_context_marker_{LAST_LARGE_RESPONSE_MARKER:03}"

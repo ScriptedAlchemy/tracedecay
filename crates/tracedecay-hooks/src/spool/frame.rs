@@ -3,45 +3,89 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use tracedecay_domain::{UtcMicros, framed_log::checksum as frame_checksum};
-use tracedecay_private_fs::framed_log::{append_durable, truncate_file as shared_truncate_file};
+use tracedecay_private_fs::framed_log::{append_unsynced, truncate_file as shared_truncate_file};
 
-use crate::{HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, HookHostV1, MAX_HOOK_PAYLOAD_BYTES};
+use crate::{
+    HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, MAX_HOOK_PAYLOAD_BYTES,
+    NativeContextScoutLifecycleV1,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_domain::NativeHostIdentityV1;
 
-use super::types::{HookSpoolRecordV1, ScanResult};
+use super::types::{HookSpoolRecordV1, PendingRecordV1, ScanResult};
 use super::{
-    DIRECTORY_POLICY, FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES,
-    HookSpoolConfigV1, HookSpoolError, SPOOL_FORMAT_VERSION, SPOOL_MAGIC, records_path,
-    validate_regular_or_missing,
+    FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES, HookSpoolConfigV1,
+    HookSpoolError, SPOOL_FORMAT_VERSION, SPOOL_MAGIC, records_path, validate_regular_or_missing,
 };
 
-pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolError> {
-    hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame.len());
-    hotpath::measure_block!("hooks.spool.fsync.frame", {
-        append_durable(path, frame, DIRECTORY_POLICY)
-            .map(|_| ())
-            .map_err(|_| HookSpoolError::Io)
+const SPOOL_PAYLOAD_VERSION: u16 = 1;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookSpoolPayloadV1 {
+    spool_payload_version: u16,
+    envelope: HookEventEnvelopeV2,
+    native_lifecycle: Option<NativeContextScoutLifecycleV1>,
+}
+
+pub(super) fn encode_spool_payload(
+    envelope: &HookEventEnvelopeV2,
+    native_lifecycle: Option<&NativeContextScoutLifecycleV1>,
+) -> Result<Vec<u8>, HookSpoolError> {
+    if native_lifecycle.is_some_and(|lifecycle| !lifecycle.matches_envelope(envelope)) {
+        return Err(HookSpoolError::EnvelopeRejected(
+            crate::HookContractError::BindingMismatch,
+        ));
+    }
+    tracedecay_domain::canonical_json_bytes(&HookSpoolPayloadV1 {
+        spool_payload_version: SPOOL_PAYLOAD_VERSION,
+        envelope: envelope.clone(),
+        native_lifecycle: native_lifecycle.cloned(),
     })
+    .map_err(|_| HookSpoolError::RecordTooLarge)
+}
+
+/// Writes one frame without syncing it, even into a new records file;
+/// [`super::HookSpoolV1::commit`] makes it and the file's name durable.
+pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolError> {
+    append_unsynced(path, frame)
+        .map(|_| ())
+        .map_err(|_| HookSpoolError::Io)
 }
 
 pub(super) fn truncate_records(root: &Path, length: u64) -> Result<(), HookSpoolError> {
-    hotpath::measure_block!("hooks.spool.fsync.truncate", {
-        shared_truncate_file(&records_path(root), length, DIRECTORY_POLICY)
-            .map_err(|_| HookSpoolError::Io)
-    })
+    {
+        let _span = tracing::trace_span!("hooks.spool.fsync.truncate").entered();
+        shared_truncate_file(&records_path(root), length).map_err(|_| HookSpoolError::Io)
+    }
 }
 
-#[hotpath::measure(label = "hooks.spool.scan_records")]
+#[tracing::instrument(name = "hooks.spool.scan_records", level = "trace", skip_all)]
 pub(super) fn scan_records(
     root: &Path,
     config: HookSpoolConfigV1,
 ) -> Result<ScanResult, HookSpoolError> {
+    scan_records_from(root, config, Vec::new(), 0)
+}
+
+#[tracing::instrument(name = "hooks.spool.scan_records_suffix", level = "trace", skip_all)]
+pub(super) fn scan_records_from(
+    root: &Path,
+    config: HookSpoolConfigV1,
+    mut records: Vec<PendingRecordV1>,
+    validated_end: u64,
+) -> Result<ScanResult, HookSpoolError> {
     let path = records_path(root);
     if !validate_regular_or_missing(&path)? {
+        if validated_end != 0 || !records.is_empty() {
+            return Err(HookSpoolError::MetadataCorrupted);
+        }
         return Ok(ScanResult {
-            records: Vec::new(),
+            records,
             valid_end: 0,
             physical_len: 0,
+            scanned_records: 0,
             partial_tail: None,
             corruption: None,
         });
@@ -50,17 +94,19 @@ pub(super) fn scan_records(
     if physical_len > config.limits.max_host_bytes {
         return Err(HookSpoolError::SpoolFull);
     }
-    let mut file = hotpath::io!(
-        File::open(&path).map_err(|_| HookSpoolError::Io)?,
-        label = "hooks.spool.scan"
-    );
-    let mut records = Vec::new();
-    let mut offset = 0u64;
-    let mut previous_sequence = None;
+    let mut file = File::open(&path).map_err(|_| HookSpoolError::Io)?;
+    if validated_end > physical_len {
+        return Err(HookSpoolError::MetadataCorrupted);
+    }
+    file.seek(SeekFrom::Start(validated_end))
+        .map_err(|_| HookSpoolError::Io)?;
+    let mut offset = validated_end;
+    let mut previous_sequence = records.last().map(|record| record.sequence);
+    let mut scanned_records = 0u32;
     while offset < physical_len {
         let remaining = physical_len - offset;
         if remaining < FRAME_LENGTH_BYTES as u64 {
-            return partial_scan(records, offset, physical_len, &mut file);
+            return partial_scan(records, offset, physical_len, scanned_records, &mut file);
         }
         let mut prefix = [0u8; FRAME_LENGTH_BYTES];
         file.read_exact(&mut prefix)
@@ -71,7 +117,7 @@ pub(super) fn scan_records(
             .checked_add(MAX_HOOK_PAYLOAD_BYTES)
             .ok_or(HookSpoolError::MetadataCorrupted)?;
         if declared < minimum || declared > maximum {
-            return Ok(corrupt_scan(records, offset, physical_len));
+            return Ok(corrupt_scan(records, offset, physical_len, scanned_records));
         }
         let frame_len = FRAME_LENGTH_BYTES
             .checked_add(declared)
@@ -79,7 +125,7 @@ pub(super) fn scan_records(
         if frame_len as u64 > remaining {
             file.seek(SeekFrom::Start(offset))
                 .map_err(|_| HookSpoolError::Io)?;
-            return partial_scan(records, offset, physical_len, &mut file);
+            return partial_scan(records, offset, physical_len, scanned_records, &mut file);
         }
         let mut frame = Vec::with_capacity(frame_len);
         frame.extend_from_slice(&prefix);
@@ -89,34 +135,38 @@ pub(super) fn scan_records(
         let record = match decode_complete_frame(&frame, offset, config.host) {
             Ok(record) => record,
             Err(HookSpoolError::Corrupted { .. }) | Err(HookSpoolError::MetadataCorrupted) => {
-                return Ok(corrupt_scan(records, offset, physical_len));
+                return Ok(corrupt_scan(records, offset, physical_len, scanned_records));
             }
             Err(error) => return Err(error),
         };
         if previous_sequence.is_some_and(|previous| record.sequence <= previous)
             || records.len() >= config.limits.max_host_records as usize
         {
-            return Ok(corrupt_scan(records, offset, physical_len));
+            return Ok(corrupt_scan(records, offset, physical_len, scanned_records));
         }
         previous_sequence = Some(record.sequence);
+        let record_offset = offset;
         offset = offset.saturating_add(u64::from(record.framed_len));
-        records.push(record);
+        records.push(PendingRecordV1::from_record(&record, record_offset));
+        scanned_records = scanned_records
+            .checked_add(1)
+            .ok_or(HookSpoolError::MetadataCorrupted)?;
     }
-    hotpath::gauge!("hooks.spool.scan.frame_count").set(records.len());
-    hotpath::gauge!("hooks.spool.scan.bytes").set(physical_len);
     Ok(ScanResult {
         records,
         valid_end: offset,
         physical_len,
+        scanned_records,
         partial_tail: None,
         corruption: None,
     })
 }
 
 pub(super) fn partial_scan(
-    records: Vec<HookSpoolRecordV1>,
+    records: Vec<PendingRecordV1>,
     offset: u64,
     physical_len: u64,
+    scanned_records: u32,
     file: &mut impl Read,
 ) -> Result<ScanResult, HookSpoolError> {
     let mut partial_tail = Vec::with_capacity((physical_len - offset) as usize);
@@ -126,26 +176,29 @@ pub(super) fn partial_scan(
         records,
         valid_end: offset,
         physical_len,
+        scanned_records,
         partial_tail: Some(partial_tail),
         corruption: None,
     })
 }
 
 pub(super) fn corrupt_scan(
-    records: Vec<HookSpoolRecordV1>,
+    records: Vec<PendingRecordV1>,
     offset: u64,
     physical_len: u64,
+    scanned_records: u32,
 ) -> ScanResult {
     ScanResult {
         records,
         valid_end: offset,
         physical_len,
+        scanned_records,
         partial_tail: None,
         corruption: Some(offset),
     }
 }
 
-#[hotpath::measure(label = "hooks.spool.encode_frame")]
+#[tracing::instrument(name = "hooks.spool.encode_frame", level = "trace", skip_all)]
 pub(super) fn encode_frame(
     sequence: u64,
     queued_at: UtcMicros,
@@ -171,15 +224,14 @@ pub(super) fn encode_frame(
     frame.extend_from_slice(payload);
     let checksum = frame_checksum(&frame);
     frame.extend_from_slice(&checksum);
-    hotpath::gauge!("hooks.spool.encode.frame_bytes").set(frame.len());
     Ok(frame)
 }
 
-#[hotpath::measure(label = "hooks.spool.decode_frame")]
+#[tracing::instrument(name = "hooks.spool.decode_frame", level = "trace", skip_all)]
 pub(super) fn decode_complete_frame(
     frame: &[u8],
     file_offset: u64,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
 ) -> Result<HookSpoolRecordV1, HookSpoolError> {
     let minimum = FRAME_LENGTH_BYTES + FRAME_HEADER_BYTES + FRAME_CHECKSUM_BYTES;
     if frame.len() < minimum {
@@ -248,7 +300,7 @@ pub(super) fn decode_complete_frame(
         });
     }
     let payload = &frame[62..checksum_at];
-    let envelope = decode_exact_envelope(payload, file_offset)?;
+    let (envelope, native_lifecycle) = decode_spool_payload(payload, file_offset)?;
     if envelope.producer != host || envelope.protected_session_id != protected_session_id {
         return Err(HookSpoolError::Corrupted {
             at_offset: file_offset,
@@ -259,10 +311,38 @@ pub(super) fn decode_complete_frame(
         protected_session_id,
         queued_at,
         envelope,
+        native_lifecycle,
         encoded_len: u32::try_from(payload_len).map_err(|_| HookSpoolError::MetadataCorrupted)?,
         checksum,
         framed_len: u32::try_from(frame.len()).map_err(|_| HookSpoolError::MetadataCorrupted)?,
     })
+}
+
+fn decode_spool_payload(
+    payload: &[u8],
+    file_offset: u64,
+) -> Result<(HookEventEnvelopeV2, Option<NativeContextScoutLifecycleV1>), HookSpoolError> {
+    let value: Value = serde_json::from_slice(payload).map_err(|_| HookSpoolError::Corrupted {
+        at_offset: file_offset,
+    })?;
+    if value.get("spool_payload_version").is_none() {
+        return decode_exact_envelope(payload, file_offset).map(|envelope| (envelope, None));
+    }
+    let decoded: HookSpoolPayloadV1 =
+        serde_json::from_value(value).map_err(|_| HookSpoolError::Corrupted {
+            at_offset: file_offset,
+        })?;
+    if decoded.spool_payload_version != SPOOL_PAYLOAD_VERSION
+        || decoded
+            .native_lifecycle
+            .as_ref()
+            .is_some_and(|lifecycle| !lifecycle.matches_envelope(&decoded.envelope))
+    {
+        return Err(HookSpoolError::Corrupted {
+            at_offset: file_offset,
+        });
+    }
+    Ok((decoded.envelope, decoded.native_lifecycle))
 }
 
 fn decode_exact_envelope(

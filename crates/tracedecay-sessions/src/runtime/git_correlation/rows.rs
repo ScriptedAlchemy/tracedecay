@@ -1,0 +1,1071 @@
+//! Durable per-session Git evidence rows in the project sessions store.
+//!
+//! Every span and commit attribution is one row keyed by its session, written
+//! in the caller's transaction and never rewritten wholesale: a write loads
+//! only the sessions it touches, merges into them, and upserts the rows that
+//! changed. The projection generation is metadata over those rows (a sequence,
+//! a digest chained over each change, and row counts), so its size does not
+//! grow with the number of sessions and nothing replays the whole projection.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+
+use super::attribution::{
+    infer_captured_branch, merge_commit, merge_span, transcript_spans_from_observations,
+};
+use super::{
+    CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
+    GitCorrelationError, GitRefFilter, GitScopeFilter, SessionGitCorrelationHit, SessionGitSpan,
+    SessionsForQuery, SpanObservation, canonical_providers, canonical_worktree_key, commit_hits,
+    commit_identities_with_producer_fallback, commit_record_matches_query, commit_record_order,
+    digest_bytes, intersect_id_maps, normalize_worktree, parse_commit_sha, scope_session_ids,
+    session_provider_identities, sessions_for_limit, span_hits, span_identities,
+    span_matches_query, validate_commit_record, validate_span,
+};
+
+pub(super) const GIT_EVIDENCE_ROWS_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS git_evidence_span (
+        span_id TEXT PRIMARY KEY CHECK(length(span_id) > 0),
+        session_id TEXT NOT NULL CHECK(length(session_id) > 0),
+        provider TEXT NOT NULL,
+        branch TEXT,
+        worktree TEXT NOT NULL,
+        first_ts INTEGER NOT NULL,
+        last_ts INTEGER NOT NULL,
+        sequence INTEGER NOT NULL,
+        record TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_git_evidence_span_session
+        ON git_evidence_span(session_id);
+    CREATE INDEX IF NOT EXISTS idx_git_evidence_span_branch
+        ON git_evidence_span(branch, last_ts, span_id);
+    CREATE INDEX IF NOT EXISTS idx_git_evidence_span_worktree
+        ON git_evidence_span(worktree, last_ts, span_id);
+    CREATE INDEX IF NOT EXISTS idx_git_evidence_span_sequence
+        ON git_evidence_span(sequence);
+    CREATE INDEX IF NOT EXISTS idx_git_evidence_span_last_ts
+        ON git_evidence_span(last_ts);
+    CREATE TABLE IF NOT EXISTS git_evidence_commit (
+        commit_sha TEXT NOT NULL CHECK(length(commit_sha) > 0),
+        session_id TEXT NOT NULL CHECK(length(session_id) > 0),
+        record TEXT NOT NULL,
+        PRIMARY KEY (commit_sha, session_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_git_evidence_commit_session
+        ON git_evidence_commit(session_id);
+    CREATE TABLE IF NOT EXISTS git_history_session_publication (
+        provider TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        PRIMARY KEY(provider, session_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS git_evidence_generation (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        sequence INTEGER NOT NULL CHECK(sequence > 0),
+        digest TEXT NOT NULL CHECK(length(digest) > 0),
+        span_count INTEGER NOT NULL CHECK(span_count >= 0),
+        commit_count INTEGER NOT NULL CHECK(commit_count >= 0),
+        attributed_through INTEGER NOT NULL CHECK(attributed_through >= 0)
+    );
+";
+
+/// Hub fan-out page width for newest-first span index reads.
+const SPAN_INDEX_PAGE_ROWS: i64 = 256;
+/// Page width for complete scope scans; stays under the exact-SQL row cap.
+const SPAN_IDENTITY_PAGE_ROWS: i64 = 4_096;
+
+struct SpanIndexRow {
+    session_id: String,
+    provider: String,
+    first_ts: i64,
+    last_ts: i64,
+    span_id: String,
+}
+
+/// Evidence one write folds into the per-session rows.
+#[derive(Debug, Default)]
+pub struct GitEvidenceBatch {
+    /// Raw transcript and hook observations, shaped into spans against the
+    /// stored spans of their sessions.
+    pub observations: Vec<SpanObservation>,
+    pub spans: Vec<SessionGitSpan>,
+    pub commits: Vec<CommitSessionRecord>,
+    pub merge_gap_secs: i64,
+}
+
+impl GitEvidenceBatch {
+    fn is_empty(&self) -> bool {
+        self.observations.is_empty() && self.spans.is_empty() && self.commits.is_empty()
+    }
+}
+
+/// Rows one write changed relative to what was stored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GitEvidenceWrite {
+    pub spans_changed: usize,
+    pub commits_changed: usize,
+}
+
+/// The projection generation: metadata over the evidence rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitEvidenceGeneration {
+    pub sequence: i64,
+    pub digest: String,
+    pub span_count: u64,
+    pub commit_count: u64,
+    /// Every span written at or before this sequence has been attributed.
+    pub attributed_through: i64,
+}
+
+impl GitEvidenceGeneration {
+    pub fn generation_id(&self) -> String {
+        format!("session-git-evidence:{}", self.digest)
+    }
+
+    pub fn source_watermark(&self) -> String {
+        format!("git-evidence-sequence:{}", self.sequence)
+    }
+}
+
+/// Folds evidence into the rows inside one caller-owned write transaction and
+/// installs one new generation for the whole transaction in [`Self::finish`].
+pub struct GitEvidenceWriter<'t, T: Executor + ?Sized> {
+    transaction: &'t T,
+    base: Option<GitEvidenceGeneration>,
+    sequence: i64,
+    change_digest: Vec<String>,
+    spans_added: u64,
+    commits_added: u64,
+    spans_removed: u64,
+    commits_removed: u64,
+    attributed_through: Option<i64>,
+}
+
+impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
+    pub async fn open(transaction: &'t T) -> Result<Self, GitCorrelationError> {
+        let base = read_generation(transaction).await?;
+        let sequence = base
+            .as_ref()
+            .map_or(1, |base| base.sequence.saturating_add(1));
+        Ok(Self {
+            transaction,
+            base,
+            sequence,
+            change_digest: Vec::new(),
+            spans_added: 0,
+            commits_added: 0,
+            spans_removed: 0,
+            commits_removed: 0,
+            attributed_through: None,
+        })
+    }
+
+    /// Start replacement of one retained-history revision. Explicit capture
+    /// and hook observations remain facts; inferred backfill evidence is
+    /// retracted before this revision's staged pages are published: inferred
+    /// spans are deleted and a branch inferred onto a captured span is
+    /// cleared, keeping the captured span.
+    pub async fn replace_backfill_session(
+        &mut self,
+        provider: &str,
+        session_id: &str,
+        revision: i64,
+    ) -> Result<(), GitCorrelationError> {
+        let mut rows = self.transaction.query(
+            "SELECT sequence FROM git_history_session_change WHERE provider = ?1 AND session_id = ?2",
+            params![provider, session_id],
+        ).await?;
+        let current = rows
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?;
+        drop(rows);
+        if current != Some(revision) {
+            return Err(GitCorrelationError::Unavailable(
+                "session history changed during Git evidence derivation".to_owned(),
+            ));
+        }
+        let mut rows = self.transaction.query(
+            "SELECT sequence FROM git_history_session_publication WHERE provider = ?1 AND session_id = ?2",
+            params![provider, session_id],
+        ).await?;
+        let published = rows
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?;
+        drop(rows);
+        if published == Some(revision) {
+            return Ok(());
+        }
+        self.clear_session_inference(provider, session_id).await?;
+        self.transaction.execute(
+            "INSERT INTO git_history_session_publication(provider, session_id, sequence) VALUES (?1, ?2, ?3)
+             ON CONFLICT(provider, session_id) DO UPDATE SET sequence = excluded.sequence",
+            params![provider, session_id, revision],
+        ).await?;
+        Ok(())
+    }
+
+    async fn clear_session_inference(
+        &mut self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<(), GitCorrelationError> {
+        let (spans, commits) = load_session_rows(
+            self.transaction,
+            &BTreeSet::from([session_id.to_owned()]),
+            &mut HashMap::new(),
+        )
+        .await?;
+        let mut cleared = BTreeSet::new();
+        for span in spans.values().filter(|span| {
+            span.provider == provider
+                && (span.branch_provenance == super::BranchProvenance::Inferred
+                    || span.capture_window.is_some())
+        }) {
+            if span.source == super::SpanSource::Backfill {
+                continue;
+            }
+            cleared.insert(span.span_id.clone());
+            let mut captured = span.clone();
+            if captured.branch_provenance == super::BranchProvenance::Inferred {
+                captured.branch = None;
+                captured.branch_provenance = super::BranchProvenance::Captured;
+            }
+            if let Some(capture) = captured.capture_window.take() {
+                captured.first_ts = capture.first_ts;
+                captured.last_ts = capture.last_ts;
+                captured.event_count = capture.event_count;
+            }
+            self.upsert_span(&captured).await?;
+        }
+        let removed = spans
+            .values()
+            .filter(|span| span.provider == provider && span.source == super::SpanSource::Backfill)
+            .map(|span| span.span_id.clone())
+            .collect::<BTreeSet<_>>();
+        for span_id in &removed {
+            self.transaction
+                .execute(
+                    "DELETE FROM git_evidence_span WHERE span_id = ?1",
+                    params![span_id.as_str()],
+                )
+                .await?;
+            self.spans_removed += 1;
+            self.change_digest
+                .push(serde_json::to_string(&("delete_span", span_id))?);
+        }
+        // A relation dies with the evidence it was derived from: every record
+        // on a removed inferred span goes, and so does any record the
+        // inference itself produced (a branchless ReflogOverlap, or the
+        // TimeOverlap the inferred branch admitted). Captured evidence linked
+        // to a surviving captured span stays. The span keeps its identity,
+        // only its inferred branch is cleared.
+        for record in commits.values().filter(|record| {
+            record.provider == provider
+                && (record.evidence == super::CommitEvidence::ReflogOverlap
+                    || record.span_id.as_ref().is_some_and(|id| {
+                        removed.contains(id)
+                            || (cleared.contains(id)
+                                && matches!(
+                                    record.evidence,
+                                    super::CommitEvidence::ReflogOverlap
+                                        | super::CommitEvidence::TimeOverlap
+                                ))
+                    }))
+        }) {
+            self.transaction
+                .execute(
+                    "DELETE FROM git_evidence_commit WHERE commit_sha = ?1 AND session_id = ?2",
+                    params![record.commit_sha.as_str(), session_id],
+                )
+                .await?;
+            self.commits_removed += 1;
+            self.change_digest.push(serde_json::to_string(&(
+                "delete_commit",
+                &record.commit_sha,
+                session_id,
+            ))?);
+        }
+        Ok(())
+    }
+
+    async fn upsert_span(&mut self, span: &SessionGitSpan) -> Result<(), GitCorrelationError> {
+        let record = serde_json::to_string(span)?;
+        self.transaction
+            .execute(
+                "INSERT INTO git_evidence_span(
+                             span_id, session_id, provider, branch, worktree,
+                             first_ts, last_ts, sequence, record
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                         ON CONFLICT(span_id) DO UPDATE SET
+                             session_id = excluded.session_id,
+                             provider = excluded.provider,
+                             branch = excluded.branch,
+                             worktree = excluded.worktree,
+                             first_ts = excluded.first_ts,
+                             last_ts = excluded.last_ts,
+                             sequence = excluded.sequence,
+                             record = excluded.record",
+                params![
+                    span.span_id.as_str(),
+                    span.session_id.as_str(),
+                    span.provider.as_str(),
+                    span.branch.as_deref(),
+                    span.worktree.as_str(),
+                    span.first_ts,
+                    span.last_ts,
+                    self.sequence,
+                    record.as_str()
+                ],
+            )
+            .await?;
+        self.change_digest.push(record);
+        Ok(())
+    }
+
+    /// Merges `batch` into the stored rows of the sessions it names and
+    /// upserts every row whose canonical record changed.
+    pub async fn apply(
+        &mut self,
+        batch: GitEvidenceBatch,
+    ) -> Result<GitEvidenceWrite, GitCorrelationError> {
+        if batch.is_empty() {
+            return Ok(GitEvidenceWrite::default());
+        }
+        let GitEvidenceBatch {
+            mut observations,
+            spans: mut incoming_spans,
+            commits: mut incoming_commits,
+            merge_gap_secs,
+        } = batch;
+        // Resolve each worktree spelling at intake: a host may report an
+        // OS alias (8.3 short name, symlinked root) where git reports the
+        // canonical name, and the fold keys on one worktree. Stored rows
+        // resolve at load so an older alias heals on write. The map lives
+        // only for this transaction: a spelling resolves once here and a
+        // later operation sees the path as it then exists.
+        let mut worktree_keys = HashMap::new();
+        for observation in &mut observations {
+            observation.worktree = keyed_worktree(&mut worktree_keys, &observation.worktree)?;
+        }
+        for span in &mut incoming_spans {
+            span.worktree = keyed_worktree(&mut worktree_keys, &span.worktree)?;
+        }
+        for record in &mut incoming_commits {
+            if let Some(worktree) = record.worktree.take() {
+                record.worktree = Some(keyed_worktree(&mut worktree_keys, &worktree)?);
+            }
+        }
+        let session_ids = observations
+            .iter()
+            .map(|observation| observation.session_id.clone())
+            .chain(incoming_spans.iter().map(|span| span.session_id.clone()))
+            .chain(
+                incoming_commits
+                    .iter()
+                    .map(|record| record.session_id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        let (mut stored_spans, mut stored_commits) =
+            load_session_rows(self.transaction, &session_ids, &mut worktree_keys).await?;
+        let mut spans = group_by_session(stored_spans.values().cloned(), |span| &span.session_id);
+        // A newly captured observation can invalidate the inferred window.
+        // Retract that inference before merging, so the capture keeps its
+        // identity without stretching a branch beyond its retained evidence.
+        // Only canonical ingest has retained message history to reattribute.
+        let invalidated = observations
+            .iter()
+            .filter(|observation| {
+                spans
+                    .get(&observation.session_id)
+                    .is_some_and(|session_spans| {
+                        session_spans.iter().any(|span| {
+                            span.branch_provenance == super::BranchProvenance::Inferred
+                                && span.source == super::SpanSource::Ingest
+                                && span.provider == observation.provider
+                                && span.session_id == observation.session_id
+                                && span.thread_id == observation.thread_id
+                                && observation.branch.is_none()
+                                && span.worktree == normalize_worktree(&observation.worktree)
+                                && span.source == observation.source
+                                && (observation.ts < span.first_ts || observation.ts > span.last_ts)
+                                && span.capture_window.is_some_and(|capture| {
+                                    super::observation_extends_span(
+                                        capture.first_ts,
+                                        capture.last_ts,
+                                        observation.ts,
+                                        merge_gap_secs,
+                                    )
+                                })
+                        })
+                    })
+            })
+            .map(|observation| (observation.provider.clone(), observation.session_id.clone()))
+            .collect::<BTreeSet<_>>();
+        for (provider, session_id) in &invalidated {
+            self.clear_session_inference(provider, session_id).await?;
+            super::history_changes::invalidate_session_history(
+                self.transaction,
+                provider,
+                session_id,
+            )
+            .await?;
+        }
+        if !invalidated.is_empty() {
+            (stored_spans, stored_commits) =
+                load_session_rows(self.transaction, &session_ids, &mut worktree_keys).await?;
+            spans = group_by_session(stored_spans.values().cloned(), |span| &span.session_id);
+        }
+
+        let mut commits = group_by_session(stored_commits.values().cloned(), |record| {
+            &record.session_id
+        });
+        let current = stored_spans.values().cloned().collect::<Vec<_>>();
+        let candidates =
+            transcript_spans_from_observations(&current, &observations, merge_gap_secs)
+                .into_iter()
+                .chain(incoming_spans);
+        for mut incoming in candidates {
+            validate_span(&incoming)?;
+            incoming.worktree = normalize_worktree(&incoming.worktree);
+            let session_spans = spans.entry(incoming.session_id.clone()).or_default();
+            if incoming.source == super::SpanSource::Backfill
+                && infer_captured_branch(session_spans, &incoming)
+            {
+                continue;
+            }
+            merge_span(session_spans, &incoming);
+        }
+        for mut incoming in incoming_commits {
+            validate_commit_record(&incoming)?;
+            incoming.commit_sha = parse_commit_sha(&incoming.commit_sha)?;
+            incoming.worktree = incoming.worktree.as_deref().map(normalize_worktree);
+            merge_commit(
+                commits.entry(incoming.session_id.clone()).or_default(),
+                &incoming,
+            );
+        }
+
+        let mut write = GitEvidenceWrite::default();
+        for session_id in &session_ids {
+            let session_spans = spans.entry(session_id.clone()).or_default();
+            let session_commits = commits.entry(session_id.clone()).or_default();
+            canonical_providers(session_spans, session_commits)?;
+            if session_commits.iter().any(|record| {
+                record.span_id.as_deref().is_some_and(|span_id| {
+                    !session_spans.iter().any(|span| span.span_id == span_id)
+                })
+            }) {
+                return Err(GitCorrelationError::Contract(
+                    "Git evidence relation references an absent span".to_owned(),
+                ));
+            }
+            for span in session_spans.iter() {
+                if stored_spans.get(&span.span_id) == Some(span) {
+                    continue;
+                }
+                if !stored_spans.contains_key(&span.span_id) {
+                    self.spans_added = self.spans_added.saturating_add(1);
+                }
+                self.upsert_span(span).await?;
+                write.spans_changed += 1;
+            }
+            for record in session_commits.iter() {
+                let key = (record.commit_sha.clone(), record.session_id.clone());
+                if stored_commits.get(&key) == Some(record) {
+                    continue;
+                }
+                if !stored_commits.contains_key(&key) {
+                    self.commits_added = self.commits_added.saturating_add(1);
+                }
+                let encoded = serde_json::to_string(record)?;
+                self.transaction
+                    .execute(
+                        "INSERT INTO git_evidence_commit(commit_sha, session_id, record)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(commit_sha, session_id) DO UPDATE SET
+                             record = excluded.record",
+                        params![
+                            record.commit_sha.as_str(),
+                            record.session_id.as_str(),
+                            encoded.as_str()
+                        ],
+                    )
+                    .await?;
+                self.change_digest.push(encoded);
+                write.commits_changed += 1;
+            }
+        }
+        Ok(write)
+    }
+
+    /// Spans no attribution has covered yet, plus every span whose window
+    /// still reaches `open_since` (a commit made after its last observation
+    /// may yet fall inside its merge gap).
+    pub async fn spans_pending_attribution(
+        &self,
+        open_since: i64,
+    ) -> Result<Vec<SessionGitSpan>, GitCorrelationError> {
+        let attributed_through = self.base.as_ref().map_or(0, |base| base.attributed_through);
+        let mut rows = self
+            .transaction
+            .query(
+                // `+span_id` keeps the planner off an ordered full scan of
+                // the primary key; the two indexed ranges bound the read to
+                // the spans this pass can still attribute.
+                "SELECT record FROM git_evidence_span
+                 WHERE sequence > ?1 OR last_ts >= ?2
+                 ORDER BY +span_id",
+                params![attributed_through, open_since],
+            )
+            .await?;
+        let mut spans = Vec::new();
+        while let Some(row) = rows.next().await? {
+            spans.push(decode_record(&row)?);
+        }
+        Ok(spans)
+    }
+
+    /// Records that every stored span, including this transaction's writes,
+    /// has been attributed.
+    pub fn mark_attributed(&mut self) {
+        self.attributed_through = Some(if self.change_digest.is_empty() {
+            self.base.as_ref().map_or(0, |base| base.sequence)
+        } else {
+            self.sequence
+        });
+    }
+
+    /// Installs this transaction's generation when a row changed. Attribution
+    /// coverage alone moves the existing generation's coverage mark without
+    /// minting a new generation of unchanged evidence.
+    pub async fn finish(self) -> Result<Option<GitEvidenceGeneration>, GitCorrelationError> {
+        let base_attributed = self.base.as_ref().map_or(0, |base| base.attributed_through);
+        if self.change_digest.is_empty() {
+            if let (Some(through), Some(_)) = (self.attributed_through, &self.base)
+                && through > base_attributed
+            {
+                self.transaction
+                    .execute(
+                        "UPDATE git_evidence_generation SET attributed_through = ?1
+                         WHERE singleton = 1",
+                        params![through],
+                    )
+                    .await?;
+            }
+            return Ok(None);
+        }
+        let attributed_through = self.attributed_through.unwrap_or(base_attributed);
+        let changed_rows = self.change_digest.len();
+        let mut changes = self.change_digest;
+        changes.sort_unstable();
+        let previous = self
+            .base
+            .as_ref()
+            .map_or_else(String::new, |base| base.digest.clone());
+        let digest = digest_bytes(
+            serde_json::to_string(&(
+                "tracedecay.session-git-evidence-generation.v3",
+                previous,
+                self.sequence,
+                changes,
+            ))?
+            .as_bytes(),
+        );
+        let generation = GitEvidenceGeneration {
+            sequence: self.sequence,
+            digest,
+            span_count: self
+                .base
+                .as_ref()
+                .map_or(0, |base| base.span_count)
+                .saturating_add(self.spans_added)
+                .saturating_sub(self.spans_removed),
+            commit_count: self
+                .base
+                .as_ref()
+                .map_or(0, |base| base.commit_count)
+                .saturating_add(self.commits_added)
+                .saturating_sub(self.commits_removed),
+            attributed_through,
+        };
+        self.transaction
+            .execute(
+                "INSERT INTO git_evidence_generation(
+                     singleton, sequence, digest, span_count, commit_count, attributed_through
+                 ) VALUES (1, ?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(singleton) DO UPDATE SET
+                     sequence = excluded.sequence,
+                     digest = excluded.digest,
+                     span_count = excluded.span_count,
+                     commit_count = excluded.commit_count,
+                     attributed_through = excluded.attributed_through",
+                params![
+                    generation.sequence,
+                    generation.digest.as_str(),
+                    generation.span_count,
+                    generation.commit_count,
+                    generation.attributed_through
+                ],
+            )
+            .await?;
+        tracing::debug!(
+            event = "git_evidence_generation_installed",
+            sequence = generation.sequence,
+            rows_changed = changed_rows,
+            span_count = generation.span_count,
+            commit_count = generation.commit_count,
+            "installed a Git evidence generation over the changed session rows"
+        );
+        Ok(Some(generation))
+    }
+}
+
+fn group_by_session<T>(
+    rows: impl IntoIterator<Item = T>,
+    session: impl Fn(&T) -> &String,
+) -> HashMap<String, Vec<T>> {
+    let mut grouped = HashMap::<String, Vec<T>>::new();
+    for row in rows {
+        grouped.entry(session(&row).clone()).or_default().push(row);
+    }
+    grouped
+}
+
+type StoredSpans = BTreeMap<String, SessionGitSpan>;
+type StoredCommits = BTreeMap<(String, String), CommitSessionRecord>;
+
+async fn load_session_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+    session_ids: &BTreeSet<String>,
+    worktree_keys: &mut HashMap<String, String>,
+) -> Result<(StoredSpans, StoredCommits), GitCorrelationError> {
+    let ids = serde_json::to_string(session_ids)?;
+    let mut spans = BTreeMap::new();
+    let mut rows = conn
+        .query(
+            "SELECT record FROM git_evidence_span
+             WHERE session_id IN (SELECT value FROM json_each(?1))",
+            params![ids.as_str()],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let span: SessionGitSpan = decode_record(&row)?;
+        spans.insert(span.span_id.clone(), span);
+    }
+    let mut commits = BTreeMap::new();
+    let mut rows = conn
+        .query(
+            "SELECT record FROM git_evidence_commit
+             WHERE session_id IN (SELECT value FROM json_each(?1))",
+            params![ids.as_str()],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let record: CommitSessionRecord = decode_record(&row)?;
+        commits.insert(
+            (record.commit_sha.clone(), record.session_id.clone()),
+            record,
+        );
+    }
+    for span in spans.values_mut() {
+        span.worktree = keyed_worktree(worktree_keys, &span.worktree)?;
+    }
+    for record in commits.values_mut() {
+        if let Some(worktree) = record.worktree.take() {
+            record.worktree = Some(keyed_worktree(worktree_keys, &worktree)?);
+        }
+    }
+    Ok((spans, commits))
+}
+
+/// The worktree identity the fold keys on, resolved once per distinct
+/// lexical spelling inside one operation. The cache is never shared across
+/// operations: a path created after an earlier miss, or a retargeted link,
+/// resolves to its new identity on the next transaction.
+fn keyed_worktree(
+    cache: &mut HashMap<String, String>,
+    spelling: &str,
+) -> Result<String, GitCorrelationError> {
+    let key = normalize_worktree(spelling);
+    if let Some(resolved) = cache.get(&key) {
+        return Ok(resolved.clone());
+    }
+    let resolved = canonical_worktree_key(&key)?;
+    cache.insert(key, resolved.clone());
+    Ok(resolved)
+}
+
+fn decode_record<T: serde::de::DeserializeOwned>(row: &Row) -> Result<T, GitCorrelationError> {
+    let record = row.get::<String>(0)?;
+    serde_json::from_str(&record).map_err(|error| {
+        GitCorrelationError::Corrupt(format!("Git evidence row does not decode: {error}"))
+    })
+}
+
+async fn read_generation(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<Option<GitEvidenceGeneration>, GitCorrelationError> {
+    let mut rows = conn
+        .query(
+            "SELECT sequence, digest, span_count, commit_count, attributed_through
+             FROM git_evidence_generation WHERE singleton = 1",
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let count = |index: i32| -> Result<u64, GitCorrelationError> {
+        u64::try_from(row.get::<i64>(index)?).map_err(|_| {
+            GitCorrelationError::Corrupt(
+                "Git evidence generation records a negative count".to_owned(),
+            )
+        })
+    };
+    Ok(Some(GitEvidenceGeneration {
+        sequence: row.get(0)?,
+        digest: row.get(1)?,
+        span_count: count(2)?,
+        commit_count: count(3)?,
+        attributed_through: row.get(4)?,
+    }))
+}
+
+/// Bounded query view over the evidence rows of one read snapshot.
+///
+/// Every read is an indexed lookup: session queries page a branch or
+/// worktree's newest-first span index and hydrate only the sessions that can
+/// appear in the result; commit queries read one SHA-prefix range. Results
+/// equal what the same aggregation computes over every stored row.
+pub struct GitEvidenceView<'c, Q: QueryExecutor + ?Sized> {
+    conn: &'c Q,
+    generation: GitEvidenceGeneration,
+}
+
+/// Opens the view, answering `Ok(None)` when no evidence was ever written.
+pub async fn open_git_evidence_view<Q: QueryExecutor + ?Sized>(
+    conn: &Q,
+) -> Result<Option<GitEvidenceView<'_, Q>>, GitCorrelationError> {
+    Ok(read_generation(conn)
+        .await?
+        .map(|generation| GitEvidenceView { conn, generation }))
+}
+
+impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
+    pub const fn generation(&self) -> &GitEvidenceGeneration {
+        &self.generation
+    }
+
+    pub fn health(&self, backfill_watermark: Option<i64>) -> CorrelationIndexHealth {
+        CorrelationIndexHealth {
+            projection_available: true,
+            generation: Some(self.generation.generation_id()),
+            source_watermark: Some(self.generation.source_watermark()),
+            span_count: self.generation.span_count,
+            commit_count: self.generation.commit_count,
+            backfill_watermark,
+        }
+    }
+
+    pub fn presence(&self, backfill_watermark: Option<i64>) -> CorrelationIndexPresence {
+        CorrelationIndexPresence {
+            projection_available: true,
+            generation: Some(self.generation.generation_id()),
+            source_watermark: Some(self.generation.source_watermark()),
+            spans_present: self.generation.span_count > 0,
+            commits_present: self.generation.commit_count > 0,
+            backfill_watermark,
+        }
+    }
+
+    #[tracing::instrument(
+        name = "sessions.git_correlation.rows.sessions_for",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn sessions_for(
+        &self,
+        query: &SessionsForQuery,
+        relation: CommitRelationFilter,
+    ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
+        let limit = sessions_for_limit(query);
+        match &query.git_ref {
+            GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => {
+                let sessions = self.leading_sessions(query, limit).await?;
+                let (spans, _) = self.session_rows(&sessions).await?;
+                Ok(span_hits(
+                    spans.iter().filter(|span| span_matches_query(span, query)),
+                    limit,
+                ))
+            }
+            GitRefFilter::Commit(sha) => {
+                let records = self.commit_records_with_prefix(sha).await?;
+                Ok(commit_hits(
+                    records
+                        .iter()
+                        .filter(|record| commit_record_matches_query(record, sha, relation, query)),
+                    limit,
+                ))
+            }
+        }
+    }
+
+    /// `None` for an empty filter, otherwise the authoritative (possibly
+    /// empty) intersection of every scoped selector.
+    #[tracing::instrument(
+        name = "sessions.git_correlation.rows.session_ids_for_scope",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn session_ids_for_scope(
+        &self,
+        filter: &GitScopeFilter,
+    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
+        if filter.is_empty() {
+            return Ok(None);
+        }
+        let mut selected: Option<BTreeMap<String, String>> = None;
+        if let Some(branch) = &filter.branch {
+            selected = Some(intersect_id_maps(
+                selected,
+                self.span_identities_where("branch", branch).await?,
+            ));
+        }
+        if let Some(worktree) = &filter.worktree {
+            selected = Some(intersect_id_maps(
+                selected,
+                self.span_identities_where("worktree", worktree).await?,
+            ));
+        }
+        if let Some(commit) = &filter.commit {
+            let records = self.commit_records_with_prefix(commit).await?;
+            selected = Some(intersect_id_maps(
+                selected,
+                commit_identities_with_producer_fallback(records.iter()),
+            ));
+        }
+        Ok(Some(scope_session_ids(selected)))
+    }
+
+    /// Resolves a single branch or worktree selector only far enough for a
+    /// caller to detect that its own session bound was exceeded. Compound and
+    /// commit selectors keep the complete intersection above.
+    #[tracing::instrument(
+        name = "sessions.git_correlation.rows.session_ids_for_scope_bounded",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn session_ids_for_scope_bounded(
+        &self,
+        filter: &GitScopeFilter,
+        maximum: usize,
+    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
+        let git_ref = match (&filter.branch, &filter.worktree, &filter.commit) {
+            (Some(branch), None, None) => GitRefFilter::Branch(branch.clone()),
+            (None, Some(worktree), None) => GitRefFilter::Worktree(worktree.clone()),
+            _ => return self.session_ids_for_scope(filter).await,
+        };
+        let query = SessionsForQuery {
+            git_ref,
+            since: None,
+            until: None,
+            limit: maximum,
+        };
+        let sessions = self.leading_sessions(&query, maximum).await?;
+        let (spans, _) = self.session_rows(&sessions).await?;
+        Ok(Some(scope_session_ids(Some(span_identities(spans.iter())))))
+    }
+
+    /// Every span and commit attribution recorded for `session_ids`. Spans
+    /// come back in `(provider, session_id, first_ts, span_id)` order and
+    /// commits in canonical `(commit_sha, session_id)` order.
+    #[tracing::instrument(
+        name = "sessions.git_correlation.rows.session_evidence",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn session_evidence(
+        &self,
+        session_ids: &BTreeSet<String>,
+    ) -> Result<(Vec<SessionGitSpan>, Vec<CommitSessionRecord>), GitCorrelationError> {
+        let (mut spans, mut commits) = self.session_rows(session_ids).await?;
+        spans.sort_by(|left, right| {
+            (
+                &left.provider,
+                &left.session_id,
+                left.first_ts,
+                &left.span_id,
+            )
+                .cmp(&(
+                    &right.provider,
+                    &right.session_id,
+                    right.first_ts,
+                    &right.span_id,
+                ))
+        });
+        commits.sort_by(commit_record_order);
+        Ok((spans, commits))
+    }
+
+    async fn session_rows(
+        &self,
+        session_ids: &BTreeSet<String>,
+    ) -> Result<(Vec<SessionGitSpan>, Vec<CommitSessionRecord>), GitCorrelationError> {
+        if session_ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let (spans, commits) =
+            load_session_rows(self.conn, session_ids, &mut HashMap::new()).await?;
+        Ok((
+            spans.into_values().collect(),
+            commits.into_values().collect(),
+        ))
+    }
+
+    /// Sessions that can rank among the first `limit` hits: the span index is
+    /// paged newest-`last_ts` first, so the first in-window span seen for a
+    /// session carries that session's sort key. Paging stops once `limit`
+    /// sessions are known and the next span can no longer tie the `limit`-th
+    /// session's key, or once spans end before `since`.
+    async fn leading_sessions(
+        &self,
+        query: &SessionsForQuery,
+        limit: usize,
+    ) -> Result<BTreeSet<String>, GitCorrelationError> {
+        let (column, value) = match &query.git_ref {
+            GitRefFilter::Branch(branch) => ("branch", branch),
+            GitRefFilter::Worktree(worktree) => ("worktree", worktree),
+            GitRefFilter::Commit(_) => return Ok(BTreeSet::new()),
+        };
+        let mut selected = BTreeSet::new();
+        let mut boundary: Option<i64> = None;
+        let mut after = None;
+        loop {
+            let page = self
+                .span_index_page(column, value, after.take(), SPAN_INDEX_PAGE_ROWS)
+                .await?;
+            let full = page.len() as i64 == SPAN_INDEX_PAGE_ROWS;
+            for row in page {
+                if query.since.is_some_and(|since| row.last_ts < since)
+                    || boundary.is_some_and(|boundary| row.last_ts < boundary)
+                {
+                    return Ok(selected);
+                }
+                after = Some((row.last_ts, row.span_id));
+                if query.until.is_some_and(|until| row.first_ts > until) {
+                    continue;
+                }
+                if selected.insert(row.session_id) && selected.len() == limit {
+                    boundary = Some(row.last_ts);
+                }
+            }
+            if !full {
+                return Ok(selected);
+            }
+        }
+    }
+
+    /// Every `(session_id, provider)` identity on `column = value`, read in
+    /// index pages so a hub branch never materializes as one result.
+    async fn span_identities_where(
+        &self,
+        column: &str,
+        value: &str,
+    ) -> Result<BTreeMap<String, String>, GitCorrelationError> {
+        let mut pairs = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .span_index_page(column, value, after.take(), SPAN_IDENTITY_PAGE_ROWS)
+                .await?;
+            let full = page.len() as i64 == SPAN_IDENTITY_PAGE_ROWS;
+            if let Some(last) = page.last() {
+                after = Some((last.last_ts, last.span_id.clone()));
+            }
+            pairs.extend(page.into_iter().map(|row| (row.session_id, row.provider)));
+            if !full {
+                break;
+            }
+        }
+        Ok(session_provider_identities(pairs.iter().map(
+            |(session_id, provider)| (session_id.as_str(), provider.as_str()),
+        )))
+    }
+
+    /// One newest-first keyset page of the `(column, last_ts, span_id)` index
+    /// strictly after `after`.
+    async fn span_index_page(
+        &self,
+        column: &str,
+        value: &str,
+        after: Option<(i64, String)>,
+        page_rows: i64,
+    ) -> Result<Vec<SpanIndexRow>, GitCorrelationError> {
+        let mut rows = match after {
+            None => {
+                self.conn
+                    .query(
+                        &format!(
+                            "SELECT session_id, provider, first_ts, last_ts, span_id
+                             FROM git_evidence_span WHERE {column} = ?1
+                             ORDER BY last_ts DESC, span_id DESC LIMIT ?2"
+                        ),
+                        params![value, page_rows],
+                    )
+                    .await?
+            }
+            Some((last_ts, span_id)) => {
+                self.conn
+                    .query(
+                        &format!(
+                            "SELECT session_id, provider, first_ts, last_ts, span_id
+                             FROM git_evidence_span WHERE {column} = ?1
+                             AND (last_ts < ?3 OR (last_ts = ?3 AND span_id < ?4))
+                             ORDER BY last_ts DESC, span_id DESC LIMIT ?2"
+                        ),
+                        params![value, page_rows, last_ts, span_id.as_str()],
+                    )
+                    .await?
+            }
+        };
+        let mut page = Vec::new();
+        while let Some(row) = rows.next().await? {
+            page.push(SpanIndexRow {
+                session_id: row.get::<String>(0)?,
+                provider: row.get::<String>(1)?,
+                first_ts: row.get::<i64>(2)?,
+                last_ts: row.get::<i64>(3)?,
+                span_id: row.get::<String>(4)?,
+            });
+        }
+        Ok(page)
+    }
+
+    /// Every commit/session record whose SHA starts with `sha`, in canonical
+    /// order. SHAs are lowercase hex, so `[sha, sha + 'g')` is the prefix
+    /// range.
+    async fn commit_records_with_prefix(
+        &self,
+        sha: &str,
+    ) -> Result<Vec<CommitSessionRecord>, GitCorrelationError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT record FROM git_evidence_commit
+                 WHERE commit_sha >= ?1 AND commit_sha < ?2
+                 ORDER BY commit_sha, session_id",
+                params![sha, format!("{sha}g")],
+            )
+            .await?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().await? {
+            records.push(decode_record::<CommitSessionRecord>(&row)?);
+        }
+        Ok(records)
+    }
+}

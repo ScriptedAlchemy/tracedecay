@@ -15,6 +15,7 @@ pub enum Error {
         target: &'static str,
         value: i64,
     },
+    RuntimeContextUnavailable,
     Runtime(String),
     Sqlite {
         operation: &'static str,
@@ -23,6 +24,9 @@ pub enum Error {
         message: String,
     },
     Busy,
+    /// Every reader was leased for the whole admission wait. Nothing failed;
+    /// the same read can succeed once a reader returns.
+    ReaderSaturated,
     InvalidOperation(String),
     StatementBatch {
         index: usize,
@@ -30,6 +34,9 @@ pub enum Error {
     },
     TransactionClosed,
     TransactionExpired,
+    /// A write job's body awaited something other than its own statements,
+    /// so the job rolled back instead of holding the writer across the wait.
+    JobAwaitedForeignFuture,
 }
 
 impl fmt::Display for Error {
@@ -52,11 +59,15 @@ impl fmt::Display for Error {
                 formatter,
                 "column {column} integer {value} is out of range for {target}"
             ),
+            Self::RuntimeContextUnavailable => {
+                formatter.write_str("SQLite operation requires an Asupersync runtime context")
+            }
             Self::Runtime(message) => write!(formatter, "SQLite runtime failed: {message}"),
             Self::Sqlite {
                 operation, message, ..
             } => write!(formatter, "SQLite {operation} failed: {message}"),
             Self::Busy => formatter.write_str("SQLite runtime is busy"),
+            Self::ReaderSaturated => formatter.write_str("exact SQL reader lane is saturated"),
             Self::InvalidOperation(message) => formatter.write_str(message),
             Self::StatementBatch { index, source } => {
                 write!(
@@ -66,6 +77,9 @@ impl fmt::Display for Error {
             }
             Self::TransactionClosed => formatter.write_str("SQLite transaction is closed"),
             Self::TransactionExpired => formatter.write_str("SQLite transaction lease expired"),
+            Self::JobAwaitedForeignFuture => {
+                formatter.write_str("SQLite write job awaited a future other than its statements")
+            }
         }
     }
 }
@@ -92,9 +106,16 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
             ),
             ExactSqlError::TransactionClosed => Self::TransactionClosed,
             ExactSqlError::TransactionExpired => Self::TransactionExpired,
+            ExactSqlError::JobAwaitedForeignFuture => Self::JobAwaitedForeignFuture,
             ExactSqlError::RequestLimitExceeded => {
                 Self::InvalidOperation("SQL request exceeds migration limits".to_owned())
             }
+            // A materialization ceiling is a property of the submitted
+            // statement, not of the engine: the untyped `Runtime` fallback
+            // made callers read it as a transient storage fault and replay it.
+            ExactSqlError::QueryLimitExceeded => Self::InvalidOperation(
+                "exact SQL query materialization exceeded its limit".to_owned(),
+            ),
             ExactSqlError::AuthorityDenied(message) => Self::InvalidOperation(message),
             ExactSqlError::Sqlite {
                 operation,
@@ -108,6 +129,9 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
                 message,
             },
             ExactSqlError::Busy => Self::Busy,
+            ExactSqlError::ReaderRefused(
+                tracedecay_rusqlite_runtime::exact_sql::ExactSqlReaderRefusalV1::Saturated,
+            ) => Self::ReaderSaturated,
             error => Self::Runtime(error.to_string()),
         }
     }
@@ -125,7 +149,6 @@ impl Error {
         }
     }
 
-    #[hotpath::skip]
     pub const fn sqlite_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { code, .. } => *code,
@@ -134,12 +157,99 @@ impl Error {
         }
     }
 
-    #[hotpath::skip]
     pub const fn sqlite_extended_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { extended_code, .. } => *extended_code,
             Self::StatementBatch { source, .. } => source.sqlite_extended_code(),
             _ => None,
+        }
+    }
+
+    /// True when replaying this exact statement can never succeed.
+    ///
+    /// A `SQLITE_CONSTRAINT` abort is a schema-contract trigger or constraint
+    /// refusing this exact row, and `InvalidOperation` is an admission or
+    /// materialization ceiling refusing this exact statement. Neither is a
+    /// transient engine condition, so a caller that retries one spins until
+    /// something else changes the durable state.
+    pub const fn is_deterministic_refusal(&self) -> bool {
+        match self {
+            Self::InvalidOperation(_) => true,
+            Self::StatementBatch { source, .. } => source.is_deterministic_refusal(),
+            _ => matches!(self.sqlite_code(), Some(SQLITE_CONSTRAINT)),
+        }
+    }
+
+    /// True when another connection holds the database (`SQLITE_BUSY` or
+    /// `SQLITE_LOCKED`) or the runtime lane itself is saturated: the same
+    /// statement can succeed once the holder releases.
+    pub const fn is_busy_or_locked(&self) -> bool {
+        match self {
+            Self::Busy => true,
+            Self::StatementBatch { source, .. } => source.is_busy_or_locked(),
+            _ => matches!(self.sqlite_code(), Some(SQLITE_BUSY | SQLITE_LOCKED)),
+        }
+    }
+
+    /// True when this failure says the database could not be read right now
+    /// (held, interrupted, an I/O fault, or a file that would not open), so
+    /// the same read can succeed later without anything changing.
+    pub const fn is_transient_read_failure(&self) -> bool {
+        match self {
+            Self::TransactionExpired => true,
+            Self::StatementBatch { source, .. } => source.is_transient_read_failure(),
+            _ => {
+                self.is_busy_or_locked()
+                    || matches!(
+                        self.sqlite_code(),
+                        Some(SQLITE_INTERRUPT | SQLITE_IOERR | SQLITE_CANTOPEN)
+                    )
+            }
+        }
+    }
+}
+
+/// `SQLITE_BUSY`: another connection holds a conflicting database lock.
+const SQLITE_BUSY: i32 = 5;
+/// `SQLITE_LOCKED`: a conflicting lock inside the same shared cache.
+const SQLITE_LOCKED: i32 = 6;
+/// `SQLITE_CONSTRAINT`: a constraint or `RAISE(ABORT)` trigger refused the row.
+const SQLITE_CONSTRAINT: i32 = 19;
+const SQLITE_INTERRUPT: i32 = 9;
+const SQLITE_IOERR: i32 = 10;
+const SQLITE_CANTOPEN: i32 = 14;
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    fn sqlite(extended_code: i32) -> Error {
+        Error::Sqlite {
+            operation: "step",
+            code: Some(extended_code & 0xff),
+            extended_code: Some(extended_code),
+            message: "fixture".to_owned(),
+        }
+    }
+
+    #[test]
+    fn transient_read_failures_are_named_by_engine_code() {
+        // SQLITE_BUSY_SNAPSHOT, SQLITE_LOCKED, SQLITE_IOERR_SHORT_READ.
+        for transient in [sqlite(517), sqlite(6), sqlite(522), Error::Busy] {
+            assert!(transient.is_transient_read_failure(), "{transient:?}");
+        }
+        // SQLITE_CONSTRAINT_TRIGGER, SQLITE_CORRUPT, a column that does not
+        // decode: each answers the same on every read.
+        for verdict in [
+            sqlite(1811),
+            sqlite(11),
+            Error::TypeMismatch {
+                column: 0,
+                expected: "text",
+                actual: "integer",
+            },
+        ] {
+            assert!(!verdict.is_transient_read_failure(), "{verdict:?}");
         }
     }
 }

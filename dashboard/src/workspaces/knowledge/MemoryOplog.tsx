@@ -1,5 +1,5 @@
 /**
- * MEMORY OPLOG — the store's own record of what changed.
+ * MEMORY OPLOG, the store's own record of what changed.
  *
  * `/oplog` reads canonical lineage operations, newest first. Its rows account
  * for committed memory mutations; the separate automation run ledger records
@@ -10,9 +10,11 @@
  * detail.
  */
 import { PayloadBoundary } from '../../ui/ReadSection.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { Panel, Readout } from '../../ui/instrument.tsx';
-import { useMemoryOplog, type OplogEvent, type OplogPayload } from '../../data/query/memory.ts';
-import { formatUtcMicros, oplogReading } from './memoryModel.ts';
+import type { MemoryOplogEventV1, MemoryOplogPayloadV1 } from '../../contracts/generated.ts';
+import { useMemoryOplog } from '../../data/query/memory.ts';
+import { oplogReading } from './memoryModel.ts';
 
 export function MemoryOplog() {
   const oplog = useMemoryOplog();
@@ -27,7 +29,7 @@ export function MemoryOplog() {
   );
 }
 
-function OplogBody({ data }: { data: OplogPayload }) {
+function OplogBody({ data }: { data: MemoryOplogPayloadV1 }) {
   const reading = oplogReading(data);
   // The handler answers HTTP 200 with an `error` string when the store cannot
   // be opened, so an unreadable store and a store with no operations arrive
@@ -43,7 +45,7 @@ function OplogBody({ data }: { data: OplogPayload }) {
   if (reading.events.length === 0 && tallyMatches) {
     return (
       <p className="text-2xs leading-relaxed text-text-muted">
-        the audit is readable and holds no operations — nothing has ever written to this
+        the audit is readable and holds no operations, nothing has ever written to this
         memory store
       </p>
     );
@@ -76,7 +78,7 @@ function OplogBody({ data }: { data: OplogPayload }) {
         {reading.events.length.toLocaleString()} most recent operations returned, newest first
       </p>
       {/* The log is the one thing on this view that scrolls, and it holds no
-        * focusable content of its own — so it takes the tab stop and carries
+        * focusable content of its own, so it takes the tab stop and carries
         * the accessible name on the node that actually scrolls (WCAG 2.1.1). */}
       <ol
         role="region"
@@ -92,12 +94,12 @@ function OplogBody({ data }: { data: OplogPayload }) {
   );
 }
 
-function OplogRow({ event }: { event: OplogEvent }) {
+function OplogRow({ event }: { event: MemoryOplogEventV1 }) {
   return (
     <li className="flex flex-col gap-0.5 border-l-2 border-edge-subtle pl-2">
       <p className="flex flex-wrap items-baseline gap-x-2 text-3xs text-text-muted">
         <span className="td-value" data-cell="numeric">
-          {formatUtcMicros(event.ts)}
+          {formatMicrosUtc(event.ts)}
         </span>
         <span className="text-text-secondary">{event.op}</span>
         {/* `fact_id` is null only for an operation with no canonical fact target. */}

@@ -1,87 +1,16 @@
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::{ExtractionState, local_node_id};
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 pub struct ElixirExtractor;
 
-struct ExtractionState {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    }
-}
-
 impl ElixirExtractor {
-    pub fn extract_elixir(file_path: &str, source: &str) -> ExtractionResult {
-        let tree = match Self::parse_source(source) {
-            Ok(t) => t,
-            Err(msg) => {
-                let start = Instant::now();
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -99,7 +28,7 @@ impl ElixirExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -113,6 +42,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -127,14 +57,10 @@ impl ElixirExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
-    }
-
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("elixir", "Elixir", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -177,7 +103,13 @@ impl ElixirExtractor {
         let name = Self::call_arg_name(state, node).unwrap_or_else(|| "?".to_string());
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -201,6 +133,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -228,7 +161,13 @@ impl ElixirExtractor {
         let start_line = node.start_position().row as u32;
         let sig = Self::first_line(state, node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
         let visibility = if is_private {
             Visibility::Private
         } else {
@@ -259,6 +198,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -283,7 +223,13 @@ impl ElixirExtractor {
         let start_line = node.start_position().row as u32;
         let sig = Self::first_line(state, node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -307,6 +253,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -331,7 +278,13 @@ impl ElixirExtractor {
             .map_or_else(|| "?".to_string(), |(n, _)| n.clone());
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
         let sig = Self::first_line(state, node);
 
         let graph_node = Node {
@@ -356,6 +309,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -375,7 +329,7 @@ impl ElixirExtractor {
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
         let name = Self::call_arg_name(state, node).unwrap_or_else(|| "?".to_string());
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -399,6 +353,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -417,7 +372,7 @@ impl ElixirExtractor {
     fn call_head(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // In tree-sitter-elixir, call has a `target` field or first named child is the callee.
         if let Some(target) = node.child_by_field_name("target") {
-            return Some(state.node_text(target));
+            return Some(state.node_text(target).to_string());
         }
         // Fall back: first identifier child.
         let mut cursor = node.walk();
@@ -425,7 +380,7 @@ impl ElixirExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "identifier" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -445,7 +400,7 @@ impl ElixirExtractor {
                 if child.kind() == "arguments"
                     && let Some(arg) = child.named_child(0)
                 {
-                    return Some(state.node_text(arg));
+                    return Some(state.node_text(arg).to_string());
                 }
                 // For `def name(args)` the function name might be directly a `call`
                 // child (a call of name/args).
@@ -458,7 +413,7 @@ impl ElixirExtractor {
                     let text = state.node_text(child);
                     // Skip the defmodule/def keyword itself.
                     if !matches!(
-                        text.as_str(),
+                        text,
                         "defmodule"
                             | "def"
                             | "defp"
@@ -470,7 +425,7 @@ impl ElixirExtractor {
                             | "use"
                             | "alias"
                     ) {
-                        return Some(text);
+                        return Some(text.to_string());
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -505,7 +460,7 @@ impl ElixirExtractor {
             let head = Self::call_head(state, prev)?;
             if head == "@doc" {
                 let text = state.node_text(prev);
-                return Some(text);
+                return Some(text.to_string());
             }
         }
         None
@@ -531,6 +486,8 @@ impl ElixirExtractor {
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
+                            unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     Self::extract_calls(state, child, fn_id);
@@ -548,16 +505,6 @@ impl ElixirExtractor {
         let text = state.node_text(node);
         text.lines().next().map(|l| l.trim().to_string())
     }
-
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
-    }
 }
 
 impl crate::LanguageExtractor for ElixirExtractor {
@@ -569,17 +516,16 @@ impl crate::LanguageExtractor for ElixirExtractor {
         "Elixir"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_elixir(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope)
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path, source, tree, scope,
+        ))
     }
 }

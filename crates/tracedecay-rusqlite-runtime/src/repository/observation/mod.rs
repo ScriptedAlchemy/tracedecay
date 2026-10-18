@@ -1,35 +1,48 @@
 //! Writing, advancing, and reading one observation.
 //!
 //! The executor owns the transaction shape; the siblings own the pieces it
-//! composes — [`authority`] the anchor/provenance/receipt rows a write persists
+//! composes, [`authority`] the anchor/provenance/receipt rows a write persists
 //! and a replay verifies, and [`rows`] the single projection every read decodes
 //! through.
 
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ProjectionGenerationId,
-    classify_observation_collision,
+    CanonicalObservationIdV1, DurableObservationV1, ObservationCollisionOutcomeV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    ProjectionGenerationId, SanitizationReceiptV1, classify_observation_collision,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationCoverageReason, ObservationCursorAdvance,
-    ObservationReadOperationV1, ObservationReadResultV1, ProjectionRebuildProgressV1,
-    ProjectionRebuildStateV1, SESSION_MESSAGE_PROJECTOR_VERSION,
+    AnchoredObservationWrite, CanonicalBodyError, CursorAdvanceLedgerDisagreementV1,
+    CursorAdvanceLedgerIdentityV1, LOAD_CANONICAL_BODY_SQL, ObservationCoverageReason,
+    ObservationCursorAdvance, ObservationReadOperationV1, ObservationReadResultV1,
+    PROJECTION_TERMINAL_RETRY_MICROS, ProjectionRebuildProgressV1, ProjectionRebuildStateV1,
+    SESSION_MESSAGE_PROJECTOR_VERSION, UPSERT_CANONICAL_BODY_SQL, parse_stored_observation,
+    slim_stored_json,
 };
 
-use super::support::{decode, encode, invalid};
+use crate::operation::StorageOperationError;
+
+use super::support::{CachedStatements, decode, encode, invalid};
 
 mod authority;
 pub mod cursor_authority;
 mod rows;
 
+pub use authority::{REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS};
+
 use authority::{
     cursor_advance_receipt_matches, persist_repository_provenance, persist_retrieval_anchor,
     persist_sanitization_receipt, read_cursor, verify_observation_authority,
 };
-use cursor_authority::{COMMIT_SOURCE_CURSOR_SQL, RECORD_CURSOR_ADVANCE_SQL};
-use rows::{
-    OBSERVATION_ROW_PROJECTION, decode_nonnegative, decode_observation_row, encoded_observation_row,
+use cursor_authority::{
+    COMMIT_SOURCE_CURSOR_SQL, PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL, READ_CURSOR_ADVANCE_SQL,
+    RECORD_CURSOR_ADVANCE_SQL,
 };
+use rows::{
+    EncodedObservationRow, decode_nonnegative, decode_observation_row, encoded_observation_row,
+    observation_row_projection,
+};
+use tracedecay_store::StoredObservationRowV1;
 
 #[derive(Clone, Default)]
 pub struct ObservationExecutor;
@@ -39,18 +52,18 @@ impl ObservationExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         write: &AnchoredObservationWrite,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         let observation = write.observation();
         let source_json = encode(observation.source())?;
         let scope_json = encode(observation.scope())?;
-        let observation_json = encode(observation)?;
+        let observation_json = encode_stored_observation(savepoint, observation)?;
         let committed_cursor_json = encode(write.next_cursor())?;
         let receipt = observation.receipt();
         let receipt_json = encode(receipt)?;
         let receipt_id = receipt.receipt().receipt_id().as_str();
         let payload_digest = observation.payload_reference().digest().as_str();
         let existing = savepoint
-            .query_row(
+            .query_row_cached(
                 "SELECT payload_digest, receipt_id, observation_json
                  FROM observations WHERE observation_id = ?1",
                 [observation.observation_id().as_str()],
@@ -64,7 +77,8 @@ impl ObservationExecutor {
             )
             .optional()?;
         if let Some((stored_digest, stored_receipt_id, stored_observation)) = existing {
-            let stored_observation = decode(stored_observation)?;
+            let stored_observation =
+                decode_stored_observation_on_savepoint(savepoint, stored_observation)?;
             let collision = classify_observation_collision(&stored_observation, observation);
             if collision == ObservationCollisionOutcomeV1::ExactDuplicate
                 && stored_observation.identity() != observation.identity()
@@ -89,7 +103,7 @@ impl ObservationExecutor {
                         advance = advance.with_resume_checkpoint(file_identity, resume_fingerprint);
                     }
                     (None, None) => {}
-                    _ => return Err(invalid("cursor resume checkpoint is incomplete")),
+                    _ => return Err(invalid("cursor resume checkpoint is incomplete").into()),
                 }
                 return self.execute_cursor_advance(savepoint, &advance);
             }
@@ -98,15 +112,15 @@ impl ObservationExecutor {
                 || stored_receipt_id != receipt_id
                 || stored_observation != *observation
             {
-                return Err(invalid("observation identity collision"));
+                return Err(invalid("observation identity collision").into());
             }
-            let stored_receipt: String = savepoint.query_row(
+            let stored_receipt: String = savepoint.query_row_cached(
                 "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
                 [receipt_id],
                 |row| row.get(0),
             )?;
             if stored_receipt != receipt_json {
-                return Err(invalid("sanitization receipt identity collision"));
+                return Err(invalid("sanitization receipt identity collision").into());
             }
             verify_observation_authority(savepoint, write)?;
             return Ok(());
@@ -114,16 +128,20 @@ impl ObservationExecutor {
 
         let actual_cursor = read_cursor(savepoint, &source_json, &scope_json)?;
         if actual_cursor.as_ref() != write.expected_cursor() {
-            return Err(invalid("observation source cursor conflict"));
+            return Err(observation_source_cursor_conflict(
+                write.expected_cursor().cloned(),
+                actual_cursor,
+            ));
         }
 
         persist_sanitization_receipt(savepoint, receipt)?;
 
-        savepoint.execute(
+        let sequence: i64 = savepoint.query_row_cached(
             "INSERT INTO observations (
                 observation_id, payload_digest, receipt_id,
                 observation_json, committed_cursor_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             RETURNING sequence",
             params![
                 observation.observation_id().as_str(),
                 payload_digest,
@@ -131,10 +149,10 @@ impl ObservationExecutor {
                 observation_json,
                 committed_cursor_json,
             ],
+            |row| row.get(0),
         )?;
-        let sequence = savepoint.last_insert_rowid();
         persist_retrieval_anchor(savepoint, write.retrieval_anchor())?;
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)
              VALUES (?1, ?2)",
             params![
@@ -147,11 +165,15 @@ impl ObservationExecutor {
             observation.observation_id().as_str(),
             write.repository_provenance_attachment(),
         )?;
-        savepoint.execute(
+        savepoint.execute_cached(
             COMMIT_SOURCE_CURSOR_SQL,
             params![source_json, scope_json, committed_cursor_json],
         )?;
-        savepoint.execute(
+        savepoint.execute_cached(
+            PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
+            params![source_json, scope_json],
+        )?;
+        savepoint.execute_cached(
             "INSERT INTO projection_queue (observation_id, observation_sequence)
              VALUES (?1, ?2)",
             params![observation.observation_id().as_str(), sequence],
@@ -163,24 +185,32 @@ impl ObservationExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         advance: &ObservationCursorAdvance,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         let source_json = encode(advance.next_cursor().source())?;
         let scope_json = encode(advance.next_cursor().scope())?;
         let actual_cursor = read_cursor(savepoint, &source_json, &scope_json)?;
-        if actual_cursor.as_ref() == Some(advance.next_cursor()) {
-            if cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
-                return Ok(());
-            }
-            return Err(invalid("source cursor advance identity collision"));
+        // The durable cursor owns the range. Live ingest and catch-up both
+        // advance the same bytes with legitimately different reasons; once
+        // the frontier is reached the first ledger row stays and the later
+        // owner is a no-op. A disagreement is still a failure below, when
+        // this advance would be the write that moves the cursor.
+        if actual_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.reached(advance.next_cursor()))
+        {
+            return Ok(());
         }
         if actual_cursor.as_ref() != advance.expected_cursor() {
-            return Err(invalid("observation source cursor conflict"));
+            return Err(observation_source_cursor_conflict(
+                advance.expected_cursor().cloned(),
+                actual_cursor,
+            ));
         }
         if let Some(receipt) = advance.sanitization_receipt() {
             persist_sanitization_receipt(savepoint, receipt)?;
         }
         let coverage_json = encode(&advance.coverage())?;
-        savepoint.execute(
+        savepoint.execute_cached(
             RECORD_CURSOR_ADVANCE_SQL,
             params![
                 source_json,
@@ -192,12 +222,21 @@ impl ObservationExecutor {
                     .map(|receipt| receipt.receipt().receipt_id().as_str()),
             ],
         )?;
-        if !cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
-            return Err(invalid("source cursor advance identity collision"));
+        if let Some(disagreement) =
+            cursor_advance_ledger_disagreement(savepoint, &source_json, &scope_json, advance)?
+        {
+            return Err(disagreement);
         }
-        savepoint.execute(
+        if !cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
+            return Err(StorageOperationError::ObservationCursorAdvanceCollision);
+        }
+        savepoint.execute_cached(
             COMMIT_SOURCE_CURSOR_SQL,
             params![source_json, scope_json, encode(advance.next_cursor())?],
+        )?;
+        savepoint.execute_cached(
+            PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
+            params![source_json, scope_json],
         )?;
         Ok(())
     }
@@ -212,18 +251,26 @@ impl ObservationExecutor {
                 let cursor = read_cursor(snapshot, &encode(source)?, &encode(scope)?)?;
                 Ok(ObservationReadResultV1::SourceCursor(cursor))
             }
+            ObservationReadOperationV1::CommittedSourceCursors { source, scope } => {
+                Ok(ObservationReadResultV1::CommittedSourceCursors(
+                    committed_source_cursors(snapshot, source, scope)?,
+                ))
+            }
             ObservationReadOperationV1::Observation { observation_id } => {
                 let row = snapshot
-                    .query_row(
+                    .query_row_cached(
                         &format!(
-                            "{OBSERVATION_ROW_PROJECTION}
-                             WHERE observation.observation_id = ?1"
+                            "{}
+                             WHERE observation.observation_id = ?1",
+                            observation_row_projection()
                         ),
                         [observation_id.as_str()],
                         encoded_observation_row,
                     )
                     .optional()?;
-                let value = row.map(decode_observation_row).transpose()?;
+                let value = row
+                    .map(|row| decode_hydrated_observation_row(snapshot, row))
+                    .transpose()?;
                 if value
                     .as_ref()
                     .is_some_and(|row| row.observation.observation_id() != observation_id)
@@ -234,7 +281,7 @@ impl ObservationExecutor {
             }
             ObservationReadOperationV1::RetrievalAnchorByAlias { scope, alias } => {
                 let anchor_id = snapshot
-                    .query_row(
+                    .query_row_cached(
                         "SELECT anchor_id FROM retrieval_anchor_aliases
                          WHERE owner_json = ?1 AND alias_kind = ?2 AND locator_digest = ?3",
                         params![
@@ -261,10 +308,11 @@ impl ObservationExecutor {
                 }
                 let after_sequence = i64::try_from(*after_sequence)
                     .map_err(|_| invalid("observation replay frontier exceeds SQLite integer"))?;
-                let mut statement = snapshot.prepare(&format!(
-                    "{OBSERVATION_ROW_PROJECTION}
+                let mut statement = snapshot.prepare_cached(&format!(
+                    "{}
                      WHERE observation.sequence > ?1
-                     ORDER BY observation.sequence ASC LIMIT ?2"
+                     ORDER BY observation.sequence ASC LIMIT ?2",
+                    observation_row_projection()
                 ))?;
                 let rows = statement.query_map(
                     params![after_sequence, i64::from(*limit)],
@@ -272,24 +320,29 @@ impl ObservationExecutor {
                 )?;
                 let mut observations = Vec::new();
                 for row in rows {
-                    observations.push(decode_observation_row(row?)?);
+                    observations.push(decode_hydrated_observation_row(snapshot, row?)?);
                 }
                 Ok(ObservationReadResultV1::Replay(observations))
             }
             ObservationReadOperationV1::NextQueuedProjection { now_micros } => {
                 let observation_id = snapshot
-                    .query_row(
+                    .query_row_cached(
                         "SELECT observation_id FROM projection_queue
                          WHERE next_retry_at_micros <= ?2
                            AND observation_sequence = (
                              SELECT MIN(observation_sequence) FROM projection_queue
+                             WHERE next_retry_at_micros < ?3
                            )
                            AND NOT EXISTS (
                            SELECT 1 FROM observation_projection_rebuilds
                            WHERE projector_version = ?1
                          )
                          LIMIT 1",
-                        (SESSION_MESSAGE_PROJECTOR_VERSION, now_micros),
+                        (
+                            SESSION_MESSAGE_PROJECTOR_VERSION,
+                            now_micros,
+                            PROJECTION_TERMINAL_RETRY_MICROS,
+                        ),
                         |row| row.get::<_, String>(0),
                     )
                     .optional()?
@@ -302,7 +355,7 @@ impl ObservationExecutor {
             }
             ObservationReadOperationV1::ProjectionCheckpoint => {
                 let checkpoint = snapshot
-                    .query_row(
+                    .query_row_cached(
                         "SELECT last_sequence FROM observation_projection_checkpoints
                          WHERE projector_version = ?1",
                         [SESSION_MESSAGE_PROJECTOR_VERSION],
@@ -319,7 +372,7 @@ impl ObservationExecutor {
             }
             ObservationReadOperationV1::ProjectionRebuildProgress => {
                 let progress = snapshot
-                    .query_row(
+                    .query_row_cached(
                         "SELECT generation, frontier_sequence, aliases_staged_through, staged_through,
                                 projected_rows, skipped_observations, state
                          FROM observation_projection_rebuilds WHERE projector_version = ?1",
@@ -364,6 +417,207 @@ impl ObservationExecutor {
                 Ok(ObservationReadResultV1::ProjectionRebuildProgress(progress))
             }
         }
+    }
+}
+
+/// Committed cursors of one source in commit order, read through the indexed
+/// session-id projection and narrowed to the exact source and scope.
+fn committed_source_cursors(
+    snapshot: &Transaction<'_>,
+    source: &ObservationSourceIdentityV1,
+    scope: &ObservationScopeV1,
+) -> rusqlite::Result<Vec<ObservationSourceCursorV1>> {
+    let mut statement = snapshot.prepare_cached(
+        "SELECT committed_cursor_json FROM observations
+         WHERE json_valid(observation_json)
+           AND json_extract(observation_json, '$.identity.source.session_id') = ?1
+         ORDER BY sequence ASC",
+    )?;
+    let rows = statement.query_map([source.session_id().as_str()], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut cursors = Vec::new();
+    for row in rows {
+        let cursor: ObservationSourceCursorV1 = decode(row?)?;
+        if cursor.source() == source && cursor.scope() == scope {
+            cursors.push(cursor);
+        }
+    }
+    Ok(cursors)
+}
+
+fn cursor_advance_ledger_disagreement(
+    savepoint: &Savepoint<'_>,
+    source_json: &str,
+    scope_json: &str,
+    advance: &ObservationCursorAdvance,
+) -> Result<Option<StorageOperationError>, StorageOperationError> {
+    let stored = savepoint
+        .query_row_cached(
+            READ_CURSOR_ADVANCE_SQL,
+            params![source_json, scope_json, encode(&advance.coverage())?],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    let Some((stored_reason, stored_receipt_id)) = stored else {
+        return Ok(None);
+    };
+    let candidate_receipt_id = advance
+        .sanitization_receipt()
+        .map(|receipt| receipt.receipt().receipt_id().as_str());
+    if stored_reason == advance.reason().as_str()
+        && stored_receipt_id.as_deref() == candidate_receipt_id
+    {
+        return Ok(None);
+    }
+    let authority_receipt = canonical_ledger_receipt(savepoint, stored_receipt_id.as_deref())?;
+    let stored = CursorAdvanceLedgerIdentityV1::from_stored_row_with_authority_receipt(
+        &stored_reason,
+        stored_receipt_id.as_deref(),
+        authority_receipt.as_ref(),
+    );
+    let candidate = advance.ledger_identity();
+    Ok(Some(
+        StorageOperationError::CursorAdvanceLedgerDisagreement {
+            disagreement: Box::new(CursorAdvanceLedgerDisagreementV1::new(
+                advance.next_cursor().source().clone(),
+                advance.next_cursor().scope().clone(),
+                advance.coverage(),
+                stored,
+                candidate,
+            )),
+        },
+    ))
+}
+
+/// Resolve a ledger receipt through the canonical receipt authority.
+///
+/// The ledger identifier alone is untrusted storage text. A receipt is safe to
+/// expose only when a matching, canonically encoded authority record exists.
+fn canonical_ledger_receipt(
+    savepoint: &Savepoint<'_>,
+    stored_receipt_id: Option<&str>,
+) -> rusqlite::Result<Option<SanitizationReceiptV1>> {
+    let Some(stored_receipt_id) = stored_receipt_id else {
+        return Ok(None);
+    };
+    let receipt_json = savepoint
+        .query_row_cached(
+            "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
+            [stored_receipt_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(receipt_json) = receipt_json else {
+        return Ok(None);
+    };
+    let Ok(receipt) = serde_json::from_str::<SanitizationReceiptV1>(&receipt_json) else {
+        return Ok(None);
+    };
+    if receipt.receipt().receipt_id().as_str() != stored_receipt_id
+        || encode(&receipt).ok().as_deref() != Some(receipt_json.as_str())
+    {
+        return Ok(None);
+    }
+    Ok(Some(receipt))
+}
+
+fn encode_stored_observation(
+    savepoint: &Savepoint<'_>,
+    observation: &DurableObservationV1,
+) -> rusqlite::Result<String> {
+    let encoded = encode(observation)?;
+    let (slim, bodies) = slim_stored_json(&encoded).map_err(|error| invalid(error.to_string()))?;
+    for body in &bodies {
+        savepoint.execute_cached(
+            UPSERT_CANONICAL_BODY_SQL,
+            params![
+                body.content_hash.as_str(),
+                body.encoding,
+                body.blob.as_slice(),
+                body.uncompressed_bytes
+            ],
+        )?;
+    }
+    Ok(slim)
+}
+
+fn decode_stored_observation(
+    connection: &Connection,
+    json: &str,
+) -> rusqlite::Result<DurableObservationV1> {
+    parse_stored_observation(
+        json,
+        |hash| -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+            let (encoding, blob, uncompressed): (String, Vec<u8>, i64) = connection
+                .query_row_cached(LOAD_CANONICAL_BODY_SQL, [hash], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()?
+                .ok_or_else(|| CanonicalBodyError::Missing {
+                    content_hash: hash.to_owned(),
+                })?;
+            tracedecay_store::unpack_body(hash, &encoding, &blob, uncompressed).map_err(Into::into)
+        },
+    )
+    .map_err(|error| match error.downcast::<rusqlite::Error>() {
+        Ok(error) => *error,
+        Err(error) => {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error)
+        }
+    })
+}
+
+fn decode_stored_observation_on_savepoint(
+    savepoint: &Savepoint<'_>,
+    json: String,
+) -> rusqlite::Result<DurableObservationV1> {
+    decode_stored_observation(savepoint, &json)
+}
+
+fn decode_hydrated_observation_row(
+    snapshot: &Transaction<'_>,
+    row: EncodedObservationRow,
+) -> rusqlite::Result<StoredObservationRowV1> {
+    let (
+        sequence,
+        json,
+        cursor,
+        anchor,
+        generation,
+        availability,
+        capture,
+        repository_anchor,
+        owner,
+        queued,
+    ) = row;
+    let json = if tracedecay_store::stored_json_needs_hydrate(&json) {
+        let observation = decode_stored_observation(snapshot, &json)?;
+        encode(&observation)?
+    } else {
+        json
+    };
+    decode_observation_row((
+        sequence,
+        json,
+        cursor,
+        anchor,
+        generation,
+        availability,
+        capture,
+        repository_anchor,
+        owner,
+        queued,
+    ))
+}
+
+fn observation_source_cursor_conflict(
+    expected: Option<ObservationSourceCursorV1>,
+    actual: Option<ObservationSourceCursorV1>,
+) -> StorageOperationError {
+    StorageOperationError::ObservationSourceCursorConflict {
+        expected: Box::new(expected),
+        actual: Box::new(actual),
     }
 }
 

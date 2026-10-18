@@ -1,4 +1,4 @@
-# Call-chain transit map — design note
+# Call-chain transit map, design note
 
 `call-chain-transit.html` · shots: `shots/call-chain-transit-{dark,light}.png`
 
@@ -13,17 +13,17 @@ the room without reading a single symbol name.
 | Channel | Encodes |
 | --- | --- |
 | Band (vertical position) | The crate that owns the station. |
-| Band **order** | Measured dependency depth — the longest path from that crate to a leaf crate in the workspace's Cargo dependency graph. `tracedecay-domain` = 0, `tracedecay-api` = 5. |
+| Band **order** | Measured dependency depth. The longest path from that crate to a leaf crate in the workspace's Cargo dependency graph. `tracedecay-domain` = 0, `tracedecay-api` = 5. |
 | Gutter numeral | That depth, printed. It is the axis tick; the crate name annotates it. |
 | Station x-position | Position in the chain, 1 → 8, evenly spaced. Encodes **nothing** about time, cost or call frequency. |
 | Station hue | Symbol kind, `kindColor` arc. |
 | Station numeral | Chain order. |
-| Line | The chain. Level runs plus a 45° diagonal per hop — except where the depth crossed exceeds the horizontal room a hop gets, where the diagonal is simply steeper. |
+| Line | The chain. Level runs plus a 45° diagonal per hop, except where the depth crossed exceeds the horizontal room a hop gets, where the diagonal is simply steeper. |
 | Line colour | Accent for a hop that descends or stays level; error hue plus a halo and a double stroke for a hop that climbs. |
 | Foot ruler numeral | That hop's depth delta, negative downward. |
 
 Both panels share one band geometry, one scale and one station spacing, so the
-two silhouettes are directly comparable — that is the whole argument for
+two silhouettes are directly comparable. That is the whole argument for
 stacking them rather than putting them side by side.
 
 ## Where absence is shown rather than cropped
@@ -32,8 +32,8 @@ stacking them rather than putting them side by side.
 neither chain enters them. They keep their full band height, their gutter label
 and their depth numeral, hatched and captioned `NO STATION ON THIS ROUTE`. A
 strata chart that quietly drops the layers a chain skips is structurally
-incapable of showing you a layer being skipped — which is one of the two things
-this chart is for. Route B additionally leaves `tracedecay-domain` empty, and
+incapable of showing you a layer being skipped. Which is one of the two things
+this chart is for. Route B also leaves `tracedecay-domain` empty, and
 that empty band is the visible fact that the correction path never reaches the
 domain model.
 
@@ -58,7 +58,7 @@ Invented: every symbol, every hop, both routes, and all depth values.
 chosen chain and says nothing about how that chain was chosen. Between two
 symbols there are usually many paths; the shortest one is the least likely to
 contain the violation, and "all of them" is a hairball. The honest options are
-(a) pick the chain that maximises depth climbs and label it as such — a
+(a) pick the chain that maximises depth climbs and label it as such, a
 *worst-path* view, useful and clearly captioned; (b) let the user drive it from
 a selected symbol; or (c) drop the two-symbol framing and draw every chain that
 contains a climb, which is a different chart. I do not think the surface is
@@ -70,6 +70,6 @@ shippable until that selection rule is stated on it.
   scrolling or a rank cut-off, and the label spacing does not survive either.
 - Station labels are `module` + short name; the crate comes from the band. A
   chain crossing two modules with the same leaf name would read ambiguously.
-- A climbing hop is not necessarily a bug — a legitimate callback climbs. The
+- A climbing hop is not necessarily a bug. A legitimate callback climbs. The
   page says so; a real surface would need to let the user mark a climb as
   intended, which implies persistent state this mockup does not model.

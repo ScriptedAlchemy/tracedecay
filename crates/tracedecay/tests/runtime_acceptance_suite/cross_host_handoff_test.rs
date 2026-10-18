@@ -1,6 +1,5 @@
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
@@ -8,12 +7,11 @@ use tracedecay_domain::{
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     ProjectId, ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_runtime_core::privacy::{
-    ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::{HostAdmissionScope, HostAdmissionStatus};
+use tracedecay_sessions::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay_store::{ObservationReplayRequest, StoredObservation};
-use tracedecay_usecases::observation::{CaptureObservationRequest, ObservationCancellation};
 
 const PROJECT_ID: &str = "project.cross-host-handoff";
 const PROJECT_PATH: &str = "repo://cross-host-handoff";
@@ -196,7 +194,7 @@ fn handoff_request(
                 CanonicalObservationEvidenceV1::new(ordering_domain, range)
                     .with_native_sequence(native_sequence),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     let source =

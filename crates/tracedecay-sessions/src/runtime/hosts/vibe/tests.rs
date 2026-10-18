@@ -4,6 +4,8 @@ use std::time::{Duration, SystemTime};
 use serde_json::Value;
 use tempfile::TempDir;
 
+use crate::admission::test_support::MemoryHostAdmission;
+
 fn write_session_messages(root: &Path, name: &str, mtime_secs: u64) -> PathBuf {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).unwrap();
@@ -95,40 +97,126 @@ fn pagination_completes_older_work_then_surfaces_finite_new_arrivals() {
     assert!(!page0_after.paths.contains(&oldest));
 }
 
-#[test]
-fn vibe_workflow_lookalike_stays_ordinary_message_without_goal_kind() {
-    // Vibe has no DurableObservation / WorkflowLifecycle normalizer yet.
-    // Prove lookalike lifecycle bags are not promoted into session_messages
-    // kind=goal (the legacy goals surface) or metadata keys.
+/// One unbounded profile-scope capture of the Vibe home under `home`.
+async fn capture_profile(
+    admission: &MemoryHostAdmission,
+    home: &Path,
+    project: &Path,
+) -> VibeCaptureOutcome {
+    capture_vibe_observations(
+        admission,
+        &VibeSource::with_home(home),
+        project,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn accepted_prefixed_session_and_nonmessage_prefix_share_canonical_cursor_identity() {
+    crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    let session_id = "session_280d6113-53d5-460d-b519-9cf819759a28";
+    let session = tmp.path().join(".vibe/logs/session").join(session_id);
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        session.join("meta.json"),
+        serde_json::json!({
+            "session_id": session_id,
+            "environment": {"working_directory": project}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        session.join("messages.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type": "metadata"}),
+            serde_json::json!({"role": "assistant", "content": "visible after metadata"})
+        ),
+    )
+    .unwrap();
+    let admission = MemoryHostAdmission::default();
+
+    let outcome = capture_profile(&admission, tmp.path(), &project).await;
+
+    assert!(!outcome.deferred);
+    let observations = admission.observations();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(
+        observations[0].observation().source().session_id().as_str(),
+        tracedecay_privacy::protect_sensitive_structural_id(session_id).unwrap()
+    );
+    assert!(
+        observations[0]
+            .observation()
+            .payload()
+            .to_string()
+            .contains("visible after metadata")
+    );
+}
+
+#[tokio::test]
+async fn vibe_workflow_lookalike_admits_as_one_ordinary_message() {
+    // Vibe has no workflow-lifecycle normalizer: a record carrying lookalike
+    // goal/todo/workflow bags admits as its message content alone.
+    crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    let session = tmp.path().join(".vibe/logs/session/vibe-lookalike");
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        session.join("meta.json"),
+        serde_json::json!({
+            "session_id": "vibe-lookalike",
+            "environment": {"working_directory": project}
+        })
+        .to_string(),
+    )
+    .unwrap();
     let input: Value = serde_json::from_str(include_str!(
         "../../../../../../tests/fixtures/provider_normalization/vibe/workflow_lookalike.input.json"
     ))
     .expect("Vibe workflow lookalike input");
-    let meta = VibeMeta {
-        session_id: "vibe-lookalike".to_string(),
-        working_directory: PathBuf::from("/tmp/vibe-project"),
-        model: Some("vibe-model".to_string()),
-    };
-    let message = message_from_line(
-        &input,
-        &meta,
-        Path::new("/tmp/vibe-project/.vibe/logs/session/vibe-lookalike/messages.jsonl"),
-        0,
-    )
-    .expect("lookalike must still parse as a transcript message");
-    assert_eq!(message.kind.as_deref(), Some("message"));
-    assert_eq!(
-        message.text,
-        "Vibe workflow lookalike remains an ordinary message"
-    );
-    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-    for key in ["workflow", "todos", "thread_goal_updated", "status", "kind"] {
-        assert!(
-            metadata.get(key).is_none(),
-            "Vibe must not promote lookalike key {key} into message metadata"
+    std::fs::write(session.join("messages.jsonl"), format!("{input}\n")).unwrap();
+    let admission = MemoryHostAdmission::default();
+
+    capture_profile(&admission, tmp.path(), &project).await;
+
+    let observations = admission.observations();
+    assert_eq!(observations.len(), 1);
+    let envelope: tracedecay_domain::CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(observations[0].observation().payload().clone()).unwrap();
+    let [
+        tracedecay_domain::CanonicalObservationFactV1::Session {
+            location_provenance,
+            ..
+        },
+        tracedecay_domain::CanonicalObservationFactV1::Message { content, .. },
+    ] = envelope.facts()
+    else {
+        panic!(
+            "lookalike must admit as a location session plus one message fact: {:?}",
+            envelope.facts()
         );
-    }
-    let encoded = message.metadata_json.unwrap_or_default();
+    };
+    assert_eq!(
+        location_provenance.as_deref(),
+        Some("session_meta"),
+        "the leading session fact must carry meta.json location provenance"
+    );
+    assert_eq!(
+        content,
+        &Value::String("Vibe workflow lookalike remains an ordinary message".to_owned())
+    );
+    let payload = observations[0].observation().payload().to_string();
     for rejected in [
         "vibe-hostile-task",
         "todo-hostile-1",
@@ -136,8 +224,8 @@ fn vibe_workflow_lookalike_stays_ordinary_message_without_goal_kind() {
         "invented goal",
     ] {
         assert!(
-            !encoded.contains(rejected),
-            "{rejected} must not survive Vibe message metadata shaping"
+            !payload.contains(rejected),
+            "{rejected} must not survive Vibe observation normalization"
         );
     }
 }

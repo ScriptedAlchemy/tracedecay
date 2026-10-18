@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
 from typing import Any
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def decode_json_stdout(stdout: str) -> Any:
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        return stdout
 
 
 _NOT_FOUND = re.compile(
@@ -67,6 +79,20 @@ def response_problem_code(response: dict[str, Any]) -> tuple[str | None, str | N
             return state, code
         if isinstance(code, str) and code:
             return "failed", code
+    result = response.get("result")
+    contents = result.get("contents") if isinstance(result, dict) else None
+    if isinstance(contents, list):
+        for content in contents:
+            if not isinstance(content, dict) or content.get("mimeType") != "text/plain":
+                continue
+            text = content.get("text")
+            if not isinstance(text, str):
+                continue
+            # Plain resource availability is a status/reason record, not prose
+            # containing the word "unavailable" (as in the overview resource).
+            fields = dict(line.split(": ", 1) for line in text.splitlines() if ": " in line)
+            if fields.get("status") in {"unavailable", "denied", "failed", "cancelled", "deadline_exceeded"}:
+                return fields["status"], fields.get("reason") or None
     return None, None
 
 
@@ -112,10 +138,14 @@ def response_handle(response: dict[str, Any]) -> str | None:
     return None
 
 
-def fact_id_with_content(response: dict[str, Any], content: str) -> int | None:
+def fact_id_with_content(response: dict[str, Any], content: str) -> str | int | None:
     for value in objects(response):
         fact_id = value.get("fact_id")
-        if isinstance(fact_id, int) and not isinstance(fact_id, bool) and fact_id > 0 and value.get("content") == content:
+        valid_id = (
+            isinstance(fact_id, str) and bool(fact_id)
+            or isinstance(fact_id, int) and not isinstance(fact_id, bool) and fact_id > 0
+        )
+        if valid_id and value.get("content") == content:
             return fact_id
     for text in text_blocks(response):
         matched = re.search(rf"^\s*-\s*#(\d+).*:\s*{re.escape(content)}\s*$", text, re.MULTILINE)

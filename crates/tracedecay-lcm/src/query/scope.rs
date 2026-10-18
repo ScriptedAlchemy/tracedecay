@@ -11,9 +11,9 @@ use tracedecay_runtime_core::db::engine::Value;
 /// each read on the `(provider, session_id, …)` indexes.
 ///
 /// The unbounded `all` scope renders no predicate at all (instead of a
-/// constant-true one), which keeps SQLite's bare `COUNT(*)` optimization —
+/// constant-true one), which keeps SQLite's bare `COUNT(*)` optimization,
 /// counting via the table b-tree instead of walking every index entry under a
-/// tautology — available to the census queries.
+/// tautology, available to the census queries.
 ///
 /// Column names come from call-site literals; scope values are always bound.
 pub(super) struct LcmScopeSql {
@@ -70,22 +70,19 @@ impl LcmScopeSql {
 
 #[cfg(test)]
 mod tests {
-    use super::LcmScopeSql;
+    use super::{LcmScopeSql, Value};
 
     #[test]
     fn unbounded_scope_omits_predicates_and_binds_nothing() {
         let scope = LcmScopeSql::new("provider", "session_id", "all", None);
-        assert!(scope.where_clause().is_empty());
-        assert!(scope.and_clause().is_empty());
-        assert!(scope.values().is_empty());
-    }
+        assert_eq!(scope.where_clause(), "");
+        assert_eq!(scope.and_clause(), "");
+        assert_eq!(scope.values(), &[] as &[Value]);
 
-    #[test]
-    fn provider_scope_is_sargable_equality() {
-        let scope = LcmScopeSql::new("provider", "session_id", "cursor", None);
-        assert_eq!(scope.where_clause(), "WHERE provider = ?");
-        assert_eq!(scope.and_clause(), " AND provider = ?");
-        assert_eq!(scope.values().len(), 1);
+        let provider = LcmScopeSql::new("provider", "session_id", "cursor", None);
+        assert_eq!(provider.where_clause(), "WHERE provider = ?");
+        assert_eq!(provider.and_clause(), " AND provider = ?");
+        assert_eq!(provider.values(), &[Value::Text("cursor".to_owned())]);
     }
 
     #[test]
@@ -95,6 +92,12 @@ mod tests {
             scope.where_clause(),
             "WHERE provider = ? AND session_id = ?"
         );
-        assert_eq!(scope.values().len(), 2);
+        assert_eq!(
+            scope.values(),
+            &[
+                Value::Text("cursor".to_owned()),
+                Value::Text("session-a".to_owned())
+            ]
+        );
     }
 }

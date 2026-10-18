@@ -1,6 +1,6 @@
 //! At-rest snapshot probe: full LPG replay vs a columnar `CompactStore` base.
 //!
-//! Ignored by default. This is a measurement harness, not a contract — nothing
+//! Ignored by default. This is a measurement harness, not a contract, nothing
 //! here asserts on a timing or a memory figure. It answers one question:
 //!
 //! > Reopening a *sealed* generation costs a full replay of every node and edge
@@ -16,24 +16,19 @@
 //! invoked once per cell of the matrix:
 //!
 //! ```text
-//! TRACEDECAY_ATREST_MODE=replay  TRACEDECAY_ATREST_ROWS=500000 \
-//!   cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
-//!   --test at_rest_snapshot -- --ignored --nocapture --exact at_rest_reopen_probe
-//!
-//! TRACEDECAY_ATREST_MODE=compact TRACEDECAY_ATREST_ROWS=500000 \
-//!   cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
-//!   --test at_rest_snapshot -- --ignored --nocapture --exact at_rest_reopen_probe
+//! bazel test //crates/tracedecay-graph-db:at_rest_snapshot \
+//!   --test_env=TRACEDECAY_ATREST_MODE=replay --test_env=TRACEDECAY_ATREST_ROWS=500000 \
+//!   --test_arg=--ignored --test_arg=--nocapture --test_output=streamed
 //! ```
 //!
-//! `graph-disk-tier` is required for the `compact` mode: it turns on
-//! `grafeo-engine/compact-store`, without which `GrafeoDB::compact()` does not
-//! exist. The `replay` mode runs under either feature state and is the baseline.
+//! `TRACEDECAY_ATREST_MODE=compact` runs the columnar side; `replay` is the
+//! baseline.
 //!
 //! # What the two modes do differently
 //!
 //! Exactly one call. Both stage the same rows through the same public
 //! `apply_unverified` path and close through the same registry. `compact` mode
-//! additionally calls [`GraphDb::compact_snapshot_for_bench`] after the last
+//! also calls [`GraphDb::compact_snapshot_for_bench`] after the last
 //! commit and before the close. That single call swaps grafeo's live store for a
 //! `LayeredStore` (columnar base + empty overlay), which changes what `close`
 //! serializes and what the next `open` has to reconstruct:
@@ -48,8 +43,8 @@
 //! * `open wall` is the figure that maps onto activation of a sealed
 //!   generation. This is the 619s number the investigation is chasing.
 //! * `VmRSS after open` is the residency a daemon carries per open generation.
-//! * `first read` exercises the reads that actually have to work afterwards —
-//!   point lookups and a bounded traversal — so a fast open that cannot answer
+//! * `first read` exercises the reads that actually have to work afterwards,
+//!   point lookups and a bounded traversal, so a fast open that cannot answer
 //!   a query is not scored as a win.
 //! * `VmHWM delta over close` is the publish peak: the transient cost of
 //!   serializing the generation out. Only comparable across separate processes.
@@ -63,16 +58,12 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphDbLeaseV1, GraphEntity, GraphEntityId, GraphLabel, GraphMutation,
     GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphRelation,
     GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch,
-    NeverCancelled, SourceGeneration, TraversalRequest,
+    MAX_NATIVE_GENERATION_STAGE_MUTATIONS, NeverCancelled, SourceGeneration, TraversalRequest,
 };
 
 mod support;
 
 use support::RegisteredGraph;
-
-/// Mirrors the crate-private `limits::MAX_NATIVE_GENERATION_STAGE_MUTATIONS`,
-/// the page size the native generation runtime actually flushes at.
-const PRODUCTION_STAGE_PAGE: usize = 65_536;
 
 /// Default row count when `TRACEDECAY_ATREST_ROWS` is unset.
 const DEFAULT_ROWS: usize = 500_000;
@@ -195,8 +186,11 @@ impl Mode {
 /// Stages `rows` entities and `rows / RELATION_DIVISOR` relations in
 /// production-sized pages.
 fn stage(db: &GraphDbLeaseV1, rows: usize) {
-    for (page, start) in (0..rows).step_by(PRODUCTION_STAGE_PAGE).enumerate() {
-        let end = (start + PRODUCTION_STAGE_PAGE).min(rows);
+    for (page, start) in (0..rows)
+        .step_by(MAX_NATIVE_GENERATION_STAGE_MUTATIONS)
+        .enumerate()
+    {
+        let end = (start + MAX_NATIVE_GENERATION_STAGE_MUTATIONS).min(rows);
         let mutations = (start..end)
             .map(|index| GraphMutation::UpsertEntity(entity(index)))
             .collect();
@@ -205,8 +199,11 @@ fn stage(db: &GraphDbLeaseV1, rows: usize) {
     }
 
     let relations = rows / RELATION_DIVISOR;
-    for (page, start) in (0..relations).step_by(PRODUCTION_STAGE_PAGE).enumerate() {
-        let end = (start + PRODUCTION_STAGE_PAGE).min(relations);
+    for (page, start) in (0..relations)
+        .step_by(MAX_NATIVE_GENERATION_STAGE_MUTATIONS)
+        .enumerate()
+    {
+        let end = (start + MAX_NATIVE_GENERATION_STAGE_MUTATIONS).min(relations);
         let mutations = (start..end)
             .map(|index| GraphMutation::UpsertRelation(relation(index)))
             .collect();
@@ -234,7 +231,7 @@ struct FirstReads {
 /// These are deliberately real calls through the public read surface rather
 /// than a claim that the store "would" answer them: a columnar base that opens
 /// instantly but cannot resolve an entity is not a win, and this is where that
-/// shows up — as a zero hit count or a resolution error.
+/// shows up, as a zero hit count or a resolution error.
 fn first_reads(db: &GraphDbLeaseV1, rows: usize) -> FirstReads {
     let namespace = namespace();
 
@@ -298,12 +295,6 @@ fn at_rest_reopen_probe() {
         .unwrap_or(DEFAULT_ROWS);
     let mode = Mode::from_env();
 
-    #[cfg(not(feature = "graph-disk-tier"))]
-    if mode == Mode::Compact {
-        println!("compact mode needs --features graph-disk-tier; skipping");
-        return;
-    }
-
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("store");
     std::fs::create_dir_all(&root).unwrap();
@@ -314,11 +305,8 @@ fn at_rest_reopen_probe() {
     let stage_wall = started.elapsed();
 
     // The seal. In compact mode this is the whole intervention.
-    // Only ever assigned under `graph-disk-tier`, where `compact()` exists.
-    #[cfg_attr(not(feature = "graph-disk-tier"), allow(unused_mut))]
     let mut compact_error: Option<String> = None;
     let compact_started = Instant::now();
-    #[cfg(feature = "graph-disk-tier")]
     if mode == Mode::Compact
         && let Err(error) = db.compact_snapshot_for_bench()
     {
@@ -338,9 +326,7 @@ fn at_rest_reopen_probe() {
     let hwm_closed = peak_rss_kib().unwrap();
     let rss_closed = live_rss_kib().unwrap();
 
-    let on_disk = std::fs::metadata(root.join("graph.grafeo"))
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+    let on_disk = std::fs::metadata(root.join("graph.grafeo")).map_or(0, |meta| meta.len());
 
     // ---- activation path ----
     let open_started = Instant::now();
@@ -361,7 +347,7 @@ fn at_rest_reopen_probe() {
     println!("=== at-rest reopen probe ===");
     println!("mode              : {}", mode.label());
     println!(
-        "rows              : {rows} entities + {relations} relations, pages of {PRODUCTION_STAGE_PAGE}"
+        "rows              : {rows} entities + {relations} relations, pages of {MAX_NATIVE_GENERATION_STAGE_MUTATIONS}"
     );
     println!("--- staging ---");
     println!("stage wall        : {:.2}s", stage_wall.as_secs_f64());

@@ -1,10 +1,13 @@
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
+use super::RegisteredGlobalDb;
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_domain::SessionId;
 use tracedecay_lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest, LcmDescribeResponse,
-    LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest, LcmExpandResponse,
-    LcmGcConfig, LcmGcReport, LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage,
+    LcmError, LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmLoadSessionPage,
     LcmLoadSessionRequest, LcmPreflightRequest, LcmPreflightResponse, LcmRecentSession,
     LcmRelationProjectionStatus, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
     LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus, LcmSummaryExpansion, compression,
@@ -12,19 +15,100 @@ use tracedecay_lcm::{
     payload,
     types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
 };
-use tracedecay_sessions::runtime::{SessionMessageRecord, SessionStoreAccess};
-use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
-
-use super::RegisteredGlobalDb;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_session_temporal_store::operations as session_temporal_operations;
 use tracedecay_session_temporal_store::seed_session_relation_projection;
 use tracedecay_session_temporal_store::store::execution_control_graph_cancellation;
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionStoreAccess};
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::execution::TemporalPortError;
+
+fn drive_lcm_compression<'a>(
+    transaction: &'a crate::RegisteredGlobalDbWriteTransaction<'a>,
+    scope: &'a ObservationScopeV1,
+    publisher: &'a session_temporal_operations::GlobalDbLcmSummaryPublication<
+        'a,
+        crate::RegisteredGlobalDbWriteTransaction<'a>,
+    >,
+    storage_root: &'a Path,
+    request: &'a LcmCompressionRequest,
+    payload_rollback: &'a mut payload::PayloadFileRollback,
+    retained: Option<compression::RetainedCompressionGuard>,
+) -> Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse,
+                    LcmError,
+                >,
+            > + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let begun: Pin<
+            Box<
+                dyn Future<Output = Result<compression::CompressionAdmission, LcmError>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(compression::begin_compression_pass(
+            transaction,
+            scope,
+            storage_root,
+            request,
+            payload_rollback,
+            retained,
+        ));
+        let classified = match begun.await? {
+            compression::CompressionAdmission::Finished(response) => return Ok(response),
+            compression::CompressionAdmission::Classify(publish) => {
+                let classified: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<compression::CompressionClassification, LcmError>,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(compression::classify_compression_pass(
+                    transaction,
+                    publisher,
+                    request,
+                    publish,
+                ));
+                classified.await?
+            }
+        };
+        match classified {
+            compression::CompressionClassification::Finished(response) => Ok(response),
+            compression::CompressionClassification::Publish(publish) => {
+                let published: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<
+                                    tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse,
+                                    LcmError,
+                                >,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(compression::publish_compression_pass(
+                    transaction,
+                    publisher,
+                    request,
+                    publish,
+                ));
+                published.await
+            }
+        }
+    })
+}
 
 fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
     control.checkpoint().map_err(|error| match error {
         TemporalPortError::Cancelled => LcmError::Cancelled,
         TemporalPortError::DeadlineExceeded => LcmError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { resource } => LcmError::Db(format!(
+        TemporalPortError::BudgetExceeded { resource, .. } => LcmError::Db(format!(
             "LCM relation execution exhausted {resource} budget"
         )),
         other => LcmError::Db(format!("LCM relation execution control failed: {other}")),
@@ -32,7 +116,6 @@ fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
 }
 
 impl RegisteredGlobalDb {
-    #[hotpath::skip]
     pub(super) async fn lcm_read_snapshot(
         &self,
     ) -> Result<tracedecay_runtime_core::db::DatabaseEngineReadSnapshot, LcmError> {
@@ -43,7 +126,6 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).lcm_storage_root()
     }
 
-    #[hotpath::skip]
     pub async fn lcm_status(
         &self,
         provider: &str,
@@ -54,7 +136,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_describe(
         &self,
         request: LcmDescribeRequest,
@@ -62,7 +143,6 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).lcm_describe(request).await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_expand(
         &self,
         request: LcmExpandRequest,
@@ -70,7 +150,6 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).lcm_expand(request).await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_expand_summary_node(
         &self,
         provider: &str,
@@ -82,28 +161,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
-    pub async fn lcm_expand_query(
-        &self,
-        request: LcmExpandQueryRequest,
-    ) -> Result<LcmExpandQueryResponse, LcmError> {
-        SessionStoreAccess::new(self)
-            .lcm_expand_query(request)
-            .await
-    }
-
-    #[hotpath::measure(future = true, label = "global_db.registered.lcm.grep")]
-    pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
-        let git_scope_session_ids =
-            tracedecay_session_temporal_store::SessionTemporalAccess::new(self)
-                .git_scope_session_ids(&request.git_filter)
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-        SessionStoreAccess::new(self)
-            .lcm_grep(request, git_scope_session_ids.as_deref())
-            .await
-    }
-
-    #[hotpath::skip]
     pub async fn lcm_load_session(
         &self,
         request: LcmLoadSessionRequest,
@@ -113,7 +170,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_recent_sessions(
         &self,
         provider: Option<&str>,
@@ -124,14 +180,12 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_session_providers(&self, session_id: &str) -> Result<Vec<String>, LcmError> {
         SessionStoreAccess::new(self)
             .lcm_session_providers(session_id)
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_session_replay_slice(
         &self,
         request: &LcmSessionReplayRequest,
@@ -141,7 +195,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_raw_message_store_id(
         &self,
         provider: &str,
@@ -152,7 +205,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_status_with_options(
         &self,
         provider: &str,
@@ -160,14 +212,15 @@ impl RegisteredGlobalDb {
         deep: bool,
         gc_config: &LcmGcConfig,
     ) -> Result<LcmStatus, LcmError> {
-        SessionStoreAccess::new(self)
-            .lcm_status_with_options(provider, session_id, deep, gc_config)
-            .await
+        let access = SessionStoreAccess::new(self);
+        let status: Pin<Box<dyn Future<Output = Result<LcmStatus, LcmError>> + Send + '_>> =
+            Box::pin(access.lcm_status_with_options(provider, session_id, deep, gc_config));
+        status.await
     }
 
     /// Publishes one immutable summary and advances its native relation
     /// projection in the same controlled mutation journey.
-    #[hotpath::measure(future = true, label = "global_db.registered.lcm.publish")]
+    #[tracing::instrument(name = "global_db.registered.lcm.publish", level = "trace", skip_all)]
     pub async fn lcm_publish_immutable_summary_guarded<F>(
         &self,
         publication: LcmImmutableSummaryPublication,
@@ -210,21 +263,21 @@ impl RegisteredGlobalDb {
         before_commit()?;
         transaction.commit().await?;
         check_execution(control)?;
-        self.apply_active_session_relation_projection(
-            &session_id,
-            execution_control_graph_cancellation(control),
-        )
-        .await
-        .map_err(|error| {
-            LcmError::Db(format!(
-                "apply native LCM summary relation projection: {error}"
-            ))
-        })?;
+        SessionTemporalAccess::new(self)
+            .apply_active_session_relation_projection(
+                &session_id,
+                execution_control_graph_cancellation(control),
+            )
+            .await
+            .map_err(|error| {
+                LcmError::Db(format!(
+                    "apply native LCM summary relation projection: {error}"
+                ))
+            })?;
         check_execution(control)?;
         Ok(receipt)
     }
 
-    #[hotpath::skip]
     pub async fn lcm_session_boundary_guarded<F>(
         &self,
         request: LcmSessionBoundaryRequest,
@@ -238,7 +291,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_preflight(
         &self,
         request: LcmPreflightRequest,
@@ -246,10 +298,9 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).lcm_preflight(request).await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_compress_guarded<F>(
         &self,
-        request: LcmCompressionRequest,
+        request: &LcmCompressionRequest,
         control: &ExecutionControl,
         before_commit: F,
     ) -> Result<LcmCompressionResponse, LcmError>
@@ -257,6 +308,7 @@ impl RegisteredGlobalDb {
         F: FnOnce() -> Result<(), LcmError>,
     {
         check_execution(control)?;
+        let scope = SessionStoreAccess::new(self).lcm_session_scope()?;
         let storage_root = self.lcm_storage_root()?;
         let session_id = SessionId::new(request.session_id.clone()).map_err(|error| {
             LcmError::Db(format!(
@@ -283,64 +335,256 @@ impl RegisteredGlobalDb {
             &transaction,
             relation_projection,
         );
-        let mut response = compression::compress(
-            &transaction,
-            &publisher,
-            storage_root,
-            request,
-            &mut payload_rollback,
-        )
-        .await?;
+        let compressed = tracing::Instrument::instrument(
+            drive_lcm_compression(
+                &transaction,
+                &scope,
+                &publisher,
+                storage_root,
+                request,
+                &mut payload_rollback,
+                None,
+            ),
+            tracing::trace_span!("sessions.lcm.compress"),
+        );
+        let mut response = compressed.await?.response;
         check_execution(control)?;
         before_commit()?;
-        transaction.commit().await?;
-        payload_rollback.disarm();
+        transaction
+            .commit_with_on_commit(move || payload_rollback.disarm())
+            .await?;
         if !response.summary_nodes.is_empty() {
             check_execution(control)?;
-            self.apply_active_session_relation_projection(
-                &session_id,
-                execution_control_graph_cancellation(control),
-            )
-            .await
-            .map_err(|error| {
-                LcmError::Db(format!("apply native LCM relation projection: {error}"))
-            })?;
+            SessionTemporalAccess::new(self)
+                .apply_active_session_relation_projection(
+                    &session_id,
+                    execution_control_graph_cancellation(control),
+                )
+                .await
+                .map_err(|error| {
+                    LcmError::Db(format!("apply native LCM relation projection: {error}"))
+                })?;
             response.relation_projection_status = LcmRelationProjectionStatus::Applied;
             check_execution(control)?;
         }
         Ok(response)
     }
 
-    #[hotpath::skip]
-    pub async fn lcm_payload_health_detail(
+    pub async fn lcm_compress_retained_page_guarded<F>(
         &self,
-        storage_root: &Path,
-        provider: &str,
-        session_id: Option<&str>,
-        deep: bool,
-        sample_limit: usize,
-        cfg: &LcmGcConfig,
-    ) -> Result<tracedecay_lcm::query::PayloadHealthDetail, LcmError> {
-        SessionStoreAccess::new(self)
-            .lcm_payload_health_detail(storage_root, provider, session_id, deep, sample_limit, cfg)
+        request: &LcmCompressionRequest,
+        control: &ExecutionControl,
+        before_commit: F,
+        guard: compression::RetainedCompressionGuard,
+        convergence_candidate: Option<
+            &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
+        >,
+    ) -> Result<tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse, LcmError>
+    where
+        F: FnOnce() -> Result<(), LcmError>,
+    {
+        check_execution(control)?;
+        let scope = SessionStoreAccess::new(self).lcm_session_scope()?;
+        let storage_root = self.lcm_storage_root()?;
+        let session_id = SessionId::new(request.session_id.clone()).map_err(|error| {
+            LcmError::Db(format!(
+                "invalid retained LCM compression session identity '{}': {error}",
+                request.session_id
+            ))
+        })?;
+        let begun: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_domain::errors::Result<
+                            crate::RegisteredGlobalDbWriteTransaction<'_>,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(self.begin_write_transaction());
+        let transaction = begun
             .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let mut payload_rollback =
+            payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
+        if let Some(candidate) = convergence_candidate {
+            let revision: Pin<Box<dyn Future<Output = Result<(), LcmError>> + Send + '_>> =
+                Box::pin(
+                    tracedecay_lcm::summary_convergence::require_candidate_revision(
+                        &transaction,
+                        candidate,
+                    ),
+                );
+            revision.await?;
+        }
+        let seeded: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_store::SessionStoreResult<
+                            tracedecay_session_temporal_store::relations::SessionRelationProjection,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(seed_session_relation_projection(
+            self,
+            &transaction,
+            &session_id,
+            execution_control_graph_cancellation(control),
+        ));
+        let relation_projection = seeded.await.map_err(|error| {
+            LcmError::Db(format!(
+                "seed native retained LCM relation projection: {error}"
+            ))
+        })?;
+        check_execution(control)?;
+        let publisher = session_temporal_operations::GlobalDbLcmSummaryPublication::for_scope(
+            &transaction,
+            relation_projection,
+        );
+        let compressed = tracing::Instrument::instrument(
+            drive_lcm_compression(
+                &transaction,
+                &scope,
+                &publisher,
+                storage_root,
+                request,
+                &mut payload_rollback,
+                Some(guard),
+            ),
+            tracing::trace_span!("sessions.lcm.compress"),
+        );
+        let bounded = compressed.await?;
+        if bounded.response.status != "needs_summary"
+            && let Some(candidate) = convergence_candidate
+        {
+            let state = if bounded.has_more {
+                tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Pending
+            } else {
+                tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Current
+            };
+            let settled_outcome: Pin<Box<dyn Future<Output = Result<bool, LcmError>> + Send + '_>> =
+                Box::pin(tracedecay_lcm::summary_convergence::record_outcome(
+                    &transaction,
+                    candidate,
+                    state,
+                    None,
+                    0,
+                    0,
+                ));
+            let settled = settled_outcome.await?;
+            if !settled {
+                let revision: Pin<Box<dyn Future<Output = Result<(), LcmError>> + Send + '_>> =
+                    Box::pin(
+                        tracedecay_lcm::summary_convergence::require_candidate_revision(
+                            &transaction,
+                            candidate,
+                        ),
+                    );
+                revision.await?;
+                return Err(LcmError::Db(
+                    "retained convergence queue settlement affected no row".to_string(),
+                ));
+            }
+        }
+        check_execution(control)?;
+        before_commit()?;
+        let committed: Pin<
+            Box<dyn Future<Output = tracedecay_runtime_core::db::engine::Result<()>> + Send + '_>,
+        > = Box::pin(transaction.commit_with_on_commit(move || payload_rollback.disarm()));
+        committed.await?;
+        // Retained convergence publishes the durable relation effect journal
+        // atomically with the summary, lifecycle frontier, and queue outcome.
+        // Applying that potentially session-wide graph is recovered by the
+        // scheduler's separately bounded relation page.
+        Ok(bounded)
     }
 
-    #[hotpath::skip]
-    pub async fn lcm_preview_payload_gc(
+    pub async fn lcm_invalidate_retained_raw_revision_page(
         &self,
-        storage_root: &Path,
-        provider: &str,
-        session_id: Option<&str>,
-        cfg: &LcmGcConfig,
-        now: i64,
-    ) -> Result<LcmGcReport, LcmError> {
-        SessionStoreAccess::new(self)
-            .lcm_preview_payload_gc(storage_root, provider, session_id, cfg, now)
+        candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
+        max_affected: usize,
+    ) -> Result<(usize, bool), LcmError> {
+        let Some(_) = candidate.stale_from_store_id else {
+            return Ok((0, false));
+        };
+        let transaction = self
+            .begin_write_transaction()
             .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let budget = max_affected.max(1);
+        let mut work = 0_usize;
+        let mut current = candidate.clone();
+        loop {
+            tracedecay_lcm::summary_convergence::require_candidate_revision(&transaction, &current)
+                .await?;
+            let Some(stale_from_store_id) = current.stale_from_store_id else {
+                break;
+            };
+            let invalidation = session_temporal_operations::invalidate_raw_summary_revision(
+                &transaction,
+                current.provider.as_str(),
+                current.session_id.as_str(),
+                stale_from_store_id,
+                budget.saturating_sub(work).max(1),
+            )
+            .await?;
+            transaction
+                .execute(
+                    "UPDATE lcm_lifecycle_state
+                     SET current_frontier_store_id = CASE
+                           WHEN current_frontier_store_id IS NULL THEN NULL
+                           ELSE MIN(current_frontier_store_id, ?3)
+                         END,
+                         updated_at = unixepoch()
+                     WHERE provider = ?1 AND conversation_id = ?2",
+                    tracedecay_runtime_core::db::engine::params![
+                        current.provider.as_str(),
+                        current.session_id.as_str(),
+                        invalidation.rewind_frontier_store_id,
+                    ],
+                )
+                .await
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+            if invalidation.has_more {
+                tracedecay_lcm::summary_convergence::record_invalidation_page_yield(
+                    &transaction,
+                    &current,
+                )
+                .await?;
+                work = work.saturating_add(invalidation.work_count);
+                break;
+            }
+            tracedecay_lcm::summary_convergence::complete_stale_raw_revision(
+                &transaction,
+                &current,
+            )
+            .await?;
+            let affected_summary = invalidation.stale_summary_count > 0;
+            work = work.saturating_add(invalidation.work_count.max(1));
+            let Some(next) = tracedecay_lcm::summary_convergence::candidate_for_session(
+                &transaction,
+                current.provider.as_str(),
+                current.session_id.as_str(),
+            )
+            .await?
+            else {
+                current.stale_from_store_id = None;
+                break;
+            };
+            current = next;
+            if affected_summary || work >= budget {
+                break;
+            }
+        }
+        let has_more = current.stale_from_store_id.is_some();
+        transaction
+            .commit()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        Ok((work, has_more))
     }
 
-    #[hotpath::skip]
     pub async fn lcm_run_payload_gc_apply(
         &self,
         storage_root: &Path,
@@ -354,7 +598,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_protect_session_raw_messages(
         &self,
         provider: &str,
@@ -365,13 +608,30 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
+    pub async fn lcm_protect_session_raw_messages_page(
+        &self,
+        provider: &str,
+        session_id: &str,
+        after_store_id: i64,
+        page_limit: usize,
+        page_max_bytes: u64,
+    ) -> Result<tracedecay_lcm::summary_convergence::LcmRawProtectionPage, LcmError> {
+        SessionStoreAccess::new(self)
+            .lcm_protect_session_raw_messages_page(
+                provider,
+                session_id,
+                after_store_id,
+                page_limit,
+                page_max_bytes,
+            )
+            .await
+    }
+
     pub async fn lcm_ingest_raw_message(
         &self,
         storage_root: &Path,
         message: &SessionMessageRecord,
     ) -> Result<(), LcmError> {
-        crate::hotpath_observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .lcm_ingest_raw_message(storage_root, message)
             .await

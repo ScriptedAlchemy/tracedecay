@@ -53,7 +53,7 @@ impl CursorComposerSweepOutcome {
         deferred: bool,
     ) -> CursorComposerSweepFailure {
         CursorComposerSweepFailure {
-            outcome: self.finished(bytes_consumed, deferred),
+            outcome: Box::new(self.finished(bytes_consumed, deferred)),
             error,
         }
     }
@@ -62,7 +62,7 @@ impl CursorComposerSweepOutcome {
 /// Typed termination of a composer sweep after zero or more durable writes.
 #[derive(Debug)]
 pub struct CursorComposerSweepFailure {
-    pub outcome: CursorComposerSweepOutcome,
+    pub outcome: Box<CursorComposerSweepOutcome>,
     pub error: TranscriptIngestError,
 }
 

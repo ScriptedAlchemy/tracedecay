@@ -1,0 +1,188 @@
+//! Canonical problem envelopes for application-surface refusals and invocation failures.
+
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use tracedecay_contracts::{
+    ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, LegalAction,
+    ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+};
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceAdapterError, CatalogBindingResolver, DispatchError,
+};
+use tracedecay_domain::UtcMicros;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, BindingSurface};
+
+use super::catalog::{application_surface_catalog_ref, resolve_application_binding};
+
+/// Refuse a registered request that never reached dispatch in the canonical envelope.
+///
+/// Everything before the executor call is adapter territory: the catalog would
+/// not build, the operation is not advertised, or its binding carries no public
+/// route. A bare status here would answer a registered route with an empty body no
+/// client can read a code, a retry directive or a request id out of, so these
+/// failures are reported as the same `ApplicationProblemEnvelope` the dispatched
+/// path returns, owned by the adapter layer rather than the runtime.
+pub(super) fn registered_adapter_unavailable(
+    request_id: RequestId,
+    code: &str,
+    message: &str,
+) -> Result<tracedecay_api::HttpJsonEnvelope<serde_json::Value>, tracedecay_api::HttpAdapterError> {
+    tracedecay_api::adapter_problem(
+        request_id,
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: code.to_owned(),
+            message: message.to_owned(),
+        }),
+    )
+    .map(Into::into)
+    .map_err(Into::into)
+}
+
+pub(super) fn application_contract_error_response(error: ApplicationContractError) -> Response {
+    tracing::error!(%error, "application problem envelope violated its canonical contract");
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
+fn invalid_surface_request_problem(message: String) -> ApplicationProblem {
+    ApplicationProblem::invalid_request_without_action(
+        "application.surface.invalid_request",
+        message,
+    )
+}
+
+pub(super) fn http_adapter_problem(
+    contract: ResultContractRef,
+    request_id: RequestId,
+    error: ApplicationSurfaceAdapterError,
+) -> std::result::Result<ApplicationProblemEnvelope, ApplicationContractError> {
+    let problem = match error {
+        ApplicationSurfaceAdapterError::UnknownOrNotAuthorized => {
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        ApplicationSurfaceAdapterError::InvalidRequestHandle => {
+            invalid_surface_request_problem("The application request is invalid".to_owned())
+        }
+        ApplicationSurfaceAdapterError::InvalidSurfaceRequest { detail } => {
+            invalid_surface_request_problem(format!("The application request is invalid: {detail}"))
+        }
+        // Catalog composition is derived from `const` application specs, so
+        // these failures are deterministic for the lifetime of the process.
+        // Reporting them as `unavailable` told clients to retry a request that
+        // can never succeed.
+        ApplicationSurfaceAdapterError::Catalog(_)
+        | ApplicationSurfaceAdapterError::Contract(_)
+        | ApplicationSurfaceAdapterError::Identifier(_)
+        | ApplicationSurfaceAdapterError::CatalogValidation(_) => ApplicationProblem::Unsupported {
+            diagnostic: SafeDiagnostic {
+                code: "application.surface.catalog_unavailable".to_owned(),
+                message: "The application catalog for this operation could not be composed"
+                    .to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+            detail: None,
+        },
+        // Genuinely transient: the owning daemon transport is not answering.
+        ApplicationSurfaceAdapterError::DaemonUnavailable => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "application.surface.unavailable".to_owned(),
+                message: "The application service for this operation is unavailable".to_owned(),
+            })
+        }
+        // Also transient, with the connect diagnostic preserved: no daemon
+        // accepted the connection, so the request was never sent.
+        ApplicationSurfaceAdapterError::DaemonUnreachable {
+            reason_code,
+            detail,
+        } => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: reason_code,
+            message: detail,
+        }),
+    };
+    ApplicationProblemEnvelope::new(contract, request_id, problem)
+        .map(|problem| problem.with_owning_layer(ProblemOwningLayer::Adapter))
+}
+
+/// A refusal settled before any handler ran (a refused project open, an
+/// unreachable daemon) as the typed problem envelope of `tool_name` under
+/// its `surface` binding's result contract, with that binding's id.
+///
+/// No route can hand such a call to its handler, so the truthful answer for
+/// the named operation is this runtime-owned terminal. Returns `None` for
+/// tools without a mounted application binding on `surface`.
+pub fn settled_tool_refusal(
+    surface: BindingSurface,
+    tool_name: &str,
+    request_id: RequestId,
+    problem: ApplicationProblem,
+) -> Option<(BindingId, ApplicationProblemEnvelope)> {
+    let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
+    let catalog = application_surface_catalog_ref().ok()?;
+    let resolver = CatalogBindingResolver::new(catalog);
+    let binding = resolve_application_binding(&resolver, surface, operation)?;
+    let contract = ResultContractRef::from_schema(&binding.result_schema);
+    let envelope = ApplicationProblemEnvelope::new(contract, request_id, problem).ok()?;
+    Some((
+        binding.binding_id,
+        envelope.with_owning_layer(ProblemOwningLayer::Runtime),
+    ))
+}
+
+pub(crate) fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
+    tracedecay_contracts::clock::try_now_micros()
+        .map_err(ApplicationSurfaceAdapterError::invalid_request)
+}
+
+pub(super) fn invocation_contract_problem(
+    error: tracedecay_contracts::InvocationError,
+) -> Result<ApplicationProblem, ApplicationSurfaceAdapterError> {
+    Ok(match error {
+        tracedecay_contracts::InvocationError::Denied => {
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        tracedecay_contracts::InvocationError::Cancelled => {
+            ApplicationProblem::cancelled_before_admission()
+        }
+        tracedecay_contracts::InvocationError::DeadlineExceeded => {
+            ApplicationProblem::timed_out_before_admission()
+        }
+        tracedecay_contracts::InvocationError::InvalidRequest => {
+            ApplicationProblem::invalid_request_without_action(
+                "application.surface.invalid_request",
+                "The daemon rejected the application request",
+            )
+        }
+        tracedecay_contracts::InvocationError::Conflict => ApplicationProblem::conflict(
+            "application.surface.conflict",
+            "The application request conflicts with current state",
+        ),
+        tracedecay_contracts::InvocationError::Unavailable => {
+            ApplicationProblem::unavailable(SafeDiagnostic::new(
+                "application.surface.unavailable",
+                "The application service for this operation is unavailable",
+            )?)
+        }
+        // Dispatchers intercept unreachable before republishing problems; this
+        // projection keeps the connect diagnostic for any caller that still
+        // renders it as a problem.
+        tracedecay_contracts::InvocationError::Unreachable {
+            reason_code,
+            detail,
+        } => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: reason_code,
+            message: detail,
+        }),
+        // The daemon's typed problem is the authority; republishing it keeps
+        // its diagnostic (e.g. `configuration.conflict`) intact instead of
+        // substituting a generic surface code.
+        tracedecay_contracts::InvocationError::Problem(problem) => *problem,
+    })
+}
+
+pub fn map_dispatch_error(error: DispatchError) -> ApplicationSurfaceAdapterError {
+    match error {
+        DispatchError::UnknownOrNotAuthorized => {
+            ApplicationSurfaceAdapterError::UnknownOrNotAuthorized
+        }
+    }
+}

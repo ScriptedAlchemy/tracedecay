@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, Row, Statement, params};
 use serde_json::Value;
 use tracedecay_capture::opencode as opencode_capture;
 use tracedecay_domain::{
@@ -10,26 +11,26 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+use tracedecay_privacy::parse_normalized_observation_record_v1;
 use tracedecay_store::ParseOffset;
 
 use crate::admission::HostAdmission;
 use crate::observation::{CaptureObservationRequest, ObservationCancellation};
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget, HostScanEvidence};
-use crate::runtime::opencode_frontier::{
+use crate::runtime::hosts::opencode_frontier::{
     GENERATION_KEY as OPENCODE_GENERATION_FRONTIER_KEY,
     REWRITE_KEY as OPENCODE_REWRITE_FRONTIER_KEY, prepare_generation_rewrite,
     read as read_frontier, write as write_frontier,
 };
-use crate::runtime::opencode_snapshot::MAX_SNAPSHOT_DATABASE_IO_BYTES;
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceSweep};
 use crate::runtime::shared::TranscriptScopeMatcher;
 use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_CAPTURE_UNIT_BYTES, SnapshotAdmissionRecord, SnapshotAdmissionRunner,
-    SnapshotCaptureOutcome,
+    MAX_SNAPSHOT_CAPTURE_UNIT_BYTES, SnapshotAdmissionBatch, SnapshotAdmissionRecord,
+    SnapshotAdmissionRunner, SnapshotCaptureOutcome,
 };
 use crate::runtime::source::{
     HostProviderCoverage, TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
-    persist_host_provider_coverage,
+    content_hash64, persist_host_provider_coverage,
 };
 
 const PROVIDER: &str = "opencode";
@@ -45,7 +46,6 @@ pub(super) const OPENCODE_PART_FRONTIER_KEY: &str = "host-frontier://opencode/pa
 #[derive(Clone)]
 pub struct OpenCodeSource {
     database_path: PathBuf,
-    snapshot_scratch_root: PathBuf,
     scope: OpenCodeSourceScope,
 }
 
@@ -57,7 +57,6 @@ enum OpenCodeSourceScope {
 
 #[derive(Clone)]
 pub(super) struct OpenCodeScanSource {
-    pub(super) database_path: PathBuf,
     pub(super) source_path: PathBuf,
     scope: OpenCodeSourceScope,
 }
@@ -100,7 +99,6 @@ enum OpenCodeScanKind {
 }
 
 impl OpenCodeScanKind {
-    #[hotpath::skip]
     const fn frontier_key(self) -> &'static str {
         match self {
             Self::Messages => OPENCODE_SQL_FRONTIER_KEY,
@@ -146,6 +144,14 @@ impl SnapshotAdmissionRecord for OpenCodeRecord {
 
     fn payload(&self) -> &[u8] {
         &self.payload
+    }
+
+    fn source_generation(
+        &self,
+        _batch_generation: ObservationSourceGenerationV1,
+    ) -> TranscriptIngestResult<ObservationSourceGenerationV1> {
+        ObservationSourceGenerationV1::new(content_hash64(&self.native_record_id).max(1))
+            .map_err(TranscriptIngestError::from)
     }
 
     fn capture_request(
@@ -202,71 +208,37 @@ impl SnapshotAdmissionRecord for OpenCodeRecord {
 impl OpenCodeSource {
     pub fn new_for_project(project_root: &Path) -> Option<Self> {
         let home = crate::runtime::home_dir()?;
-        let snapshot_scratch_root = crate::runtime::opencode_snapshot::snapshot_scratch_root()?;
-        Some(Self::with_database_for_project_and_scratch(
+        Some(Self::with_scope(
             opencode_data_dir(&home).join("opencode.db"),
-            snapshot_scratch_root,
-            project_root.to_path_buf(),
+            OpenCodeSourceScope::Project(project_root.to_path_buf()),
         ))
     }
 
     pub fn new_for_user(roots: Vec<PathBuf>) -> Option<Self> {
         let home = crate::runtime::home_dir()?;
-        let snapshot_scratch_root = crate::runtime::opencode_snapshot::snapshot_scratch_root()?;
-        Some(Self::with_database_for_user_and_scratch(
+        Some(Self::with_scope(
             opencode_data_dir(&home).join("opencode.db"),
-            snapshot_scratch_root,
-            roots,
+            OpenCodeSourceScope::Profile(roots),
         ))
     }
 
     #[cfg(test)]
     pub fn with_database_for_project(database_path: PathBuf, project_root: PathBuf) -> Self {
-        let snapshot_scratch_root = database_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("opencode-snapshot-scratch");
-        Self::with_database_for_project_and_scratch(
-            database_path,
-            snapshot_scratch_root,
-            project_root,
-        )
-    }
-
-    fn with_database_for_project_and_scratch(
-        database_path: PathBuf,
-        snapshot_scratch_root: PathBuf,
-        project_root: PathBuf,
-    ) -> Self {
-        Self {
-            database_path,
-            snapshot_scratch_root,
-            scope: OpenCodeSourceScope::Project(project_root),
-        }
+        Self::with_scope(database_path, OpenCodeSourceScope::Project(project_root))
     }
 
     #[cfg(test)]
     pub fn with_database_for_user(database_path: PathBuf, registered_roots: Vec<PathBuf>) -> Self {
-        let snapshot_scratch_root = database_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("opencode-snapshot-scratch");
-        Self::with_database_for_user_and_scratch(
+        Self::with_scope(
             database_path,
-            snapshot_scratch_root,
-            registered_roots,
+            OpenCodeSourceScope::Profile(registered_roots),
         )
     }
 
-    fn with_database_for_user_and_scratch(
-        database_path: PathBuf,
-        snapshot_scratch_root: PathBuf,
-        registered_roots: Vec<PathBuf>,
-    ) -> Self {
+    fn with_scope(database_path: PathBuf, scope: OpenCodeSourceScope) -> Self {
         Self {
             database_path,
-            snapshot_scratch_root,
-            scope: OpenCodeSourceScope::Profile(registered_roots),
+            scope,
         }
     }
 }
@@ -280,6 +252,7 @@ impl OpenCodeScanSource {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn capture_opencode_observations(
     facade: &dyn HostAdmission,
     source: &OpenCodeSource,
@@ -287,36 +260,75 @@ pub(crate) async fn capture_opencode_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<OpenCodeCaptureOutcome> {
-    let snapshot_budget = HostScanBudget::new(
-        MAX_SNAPSHOT_DATABASE_IO_BYTES,
-        usize::MAX,
+    capture_opencode_observations_with_sweep(
+        facade,
+        source,
+        scope,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new(PROVIDER, None),
+    )
+    .await
+}
+
+/// A message the store permanently refuses is reported in `sweep` and its
+/// session is skipped from that message on until the message changes, while
+/// its siblings keep being admitted and the page frontier keeps advancing.
+pub(crate) async fn capture_opencode_observations_with_sweep(
+    facade: &dyn HostAdmission,
+    source: &OpenCodeSource,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
+) -> TranscriptIngestResult<OpenCodeCaptureOutcome> {
+    let open_budget = HostScanBudget::new(
+        0,
+        8,
         Instant::now() + HOST_SCAN_WINDOW,
         cancellation.clone(),
     );
-    let snapshot_attempt = crate::runtime::opencode_snapshot::snapshot_database(
+    let (opened, open_budget) = crate::runtime::hosts::opencode_snapshot::open_database(
         source.database_path.clone(),
-        source.snapshot_scratch_root.clone(),
-        snapshot_budget,
+        open_budget,
     )
     .await?;
-    let (snapshot, snapshot_budget) = snapshot_attempt;
-    let Some(snapshot) = snapshot else {
-        let outcome = outcome_for_scan_evidence(snapshot_budget.evidence());
-        persist_host_provider_coverage(
-            facade,
-            &scope,
-            PROVIDER,
-            HostProviderCoverage::Unavailable,
-            1,
-        )
-        .await?;
-        return Ok(outcome);
+    let database = match opened {
+        crate::runtime::hosts::opencode_snapshot::OpenedOpenCodeDatabase::Ready(database) => {
+            *database
+        }
+        crate::runtime::hosts::opencode_snapshot::OpenedOpenCodeDatabase::Refused(reason) => {
+            let outcome = outcome_for_scan_evidence(open_budget.evidence());
+            persist_host_provider_coverage(
+                facade,
+                &scope,
+                PROVIDER,
+                HostProviderCoverage::Unavailable,
+                1,
+                Some(reason),
+            )
+            .await?;
+            return Ok(outcome);
+        }
+        crate::runtime::hosts::opencode_snapshot::OpenedOpenCodeDatabase::Stopped => {
+            let outcome = outcome_for_scan_evidence(open_budget.evidence());
+            persist_host_provider_coverage(
+                facade,
+                &scope,
+                PROVIDER,
+                HostProviderCoverage::Unavailable,
+                1,
+                None,
+            )
+            .await?;
+            return Ok(outcome);
+        }
     };
     let scan_source = OpenCodeScanSource {
-        database_path: snapshot.path.clone(),
         source_path: source.database_path.clone(),
         scope: source.scope.clone(),
     };
+    drop(database.reader);
     let max_input_bytes = max_new_bytes
         .unwrap_or(MAX_SNAPSHOT_CAPTURE_UNIT_BYTES)
         .min(MAX_SNAPSHOT_CAPTURE_UNIT_BYTES);
@@ -327,12 +339,12 @@ pub(crate) async fn capture_opencode_observations(
         cancellation.clone(),
     );
     let mut runner = SnapshotAdmissionRunner::new(PROVIDER, max_new_bytes);
-    let current_generation = snapshot.generation.generation_id();
+    let current_generation = database.generation.generation_id();
     let (mut generation_frontier, mut rewrite_frontier) = prepare_generation_rewrite(
         facade,
         &scope,
         current_generation,
-        snapshot.source_file_identity,
+        database.source_file_identity,
     )
     .await?;
     for scan_kind in [
@@ -354,14 +366,14 @@ pub(crate) async fn capture_opencode_observations(
             read_frontier(facade, &scope, scan_kind.frontier_key()).await?
         };
         let initialize_part_frontier = matches!(scan_kind, OpenCodeScanKind::Parts)
-            && stored_frontier.file_id != snapshot.source_file_identity;
-        let mut durable_frontier = if stored_frontier.file_id == snapshot.source_file_identity {
+            && stored_frontier.file_id != database.source_file_identity;
+        let mut durable_frontier = if stored_frontier.file_id == database.source_file_identity {
             stored_frontier
         } else {
             ParseOffset {
                 byte_offset: 0,
                 mtime: stored_frontier.mtime,
-                file_id: snapshot.source_file_identity,
+                file_id: database.source_file_identity,
             }
         };
         let mut cursor = OpenCodePageCursor {
@@ -373,42 +385,69 @@ pub(crate) async fn capture_opencode_observations(
                 break;
             }
             let owned_source = scan_source.clone();
-            let scan = tokio::task::spawn_blocking(move || {
-                scan_reference_page(&owned_source, scan_kind, cursor, scan_budget)
+            let scan = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                scan_materialized_page(
+                    &owned_source,
+                    scan_kind,
+                    cursor,
+                    scan_budget,
+                    initialize_part_frontier,
+                    database.source_file_identity,
+                )
             })
             .await
             .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
-            let (page, mut returned_budget) = scan;
+            let (page, materialized, mut returned_budget) = scan;
             let previous_cursor = cursor;
             cursor = page.next;
             let mut page_fully_processed = returned_budget.checkpoint();
-            if page_fully_processed && !page.references.is_empty() && !initialize_part_frontier {
-                let owned_source = scan_source.clone();
-                let materialized = tokio::task::spawn_blocking(move || {
-                    materialize_reference_page(&owned_source, page.references, returned_budget)
-                })
-                .await
-                .map_err(|_| {
-                    TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER }
-                })??;
-                let (materialized, budget) = materialized;
-                returned_budget = budget;
+            if let Some(materialized) = materialized {
                 page_fully_processed = materialized.fully_processed;
-                runner
-                    .admit_batch(
+                let mut claims: HashMap<(String, String), SourceClaim> = HashMap::new();
+                let refusals = runner
+                    .admit_batch_gated(
                         facade,
                         materialized.input_bytes,
                         &scope,
                         cancellation,
-                        || Ok(Some((snapshot.generation, materialized.records))),
+                        {
+                            let generation = database.generation;
+                            move || {
+                                Ok(Some(vec![SnapshotAdmissionBatch::new(
+                                    generation,
+                                    materialized.records,
+                                )]))
+                            }
+                        },
+                        |record: &OpenCodeRecord| {
+                            let Some(claim) = sweep.observe_stream(
+                                &source.database_path,
+                                &record.session_id,
+                                &[record.native_record_id.as_bytes()],
+                            ) else {
+                                return false;
+                            };
+                            claims.insert(
+                                (record.session_id.clone(), record.native_record_id.clone()),
+                                claim,
+                            );
+                            true
+                        },
                     )
                     .await?;
+                for refusal in refusals {
+                    let key = (refusal.session_id, refusal.native_record_id);
+                    let Some(claim) = claims.remove(&key) else {
+                        return Err(refusal.error);
+                    };
+                    sweep.refused(claim, refusal.error)?;
+                }
             }
             if page_fully_processed && cursor != previous_cursor {
                 durable_frontier = ParseOffset {
                     byte_offset: u64::try_from(cursor.after_rowid).map_err(|_| invalid_frame())?,
                     mtime: durable_frontier.mtime.saturating_add(1),
-                    file_id: snapshot.source_file_identity,
+                    file_id: database.source_file_identity,
                 };
                 facade
                     .advance_parse_offset(&scope, scan_kind.frontier_key(), durable_frontier)
@@ -447,12 +486,12 @@ pub(crate) async fn capture_opencode_observations(
                     generation_frontier = ParseOffset {
                         byte_offset: current_generation,
                         mtime: revision,
-                        file_id: snapshot.source_file_identity,
+                        file_id: database.source_file_identity,
                     };
                     rewrite_frontier = ParseOffset {
                         byte_offset: 0,
                         mtime: revision,
-                        file_id: snapshot.source_file_identity,
+                        file_id: database.source_file_identity,
                     };
                     write_frontier(
                         facade,
@@ -494,15 +533,15 @@ pub(crate) async fn capture_opencode_observations(
         stats,
         bytes_consumed,
         deferred_by_byte_cap,
-        scan_cancelled: evidence.cancelled || snapshot_budget.evidence().cancelled,
+        scan_cancelled: evidence.cancelled || open_budget.evidence().cancelled,
         scan_input_bound_reached: evidence.input_bound_reached
-            || snapshot_budget.evidence().input_bound_reached,
+            || open_budget.evidence().input_bound_reached,
         scan_non_durable_units: evidence
             .non_durable_units
-            .saturating_add(snapshot_budget.evidence().non_durable_units),
+            .saturating_add(open_budget.evidence().non_durable_units),
         scan_unavailable_units: evidence
             .unavailable_units
-            .saturating_add(snapshot_budget.evidence().unavailable_units),
+            .saturating_add(open_budget.evidence().unavailable_units),
     };
     let deferred_units = outcome
         .scan_non_durable_units
@@ -523,73 +562,132 @@ pub(crate) async fn capture_opencode_observations(
                 HostProviderCoverage::Complete
             },
             deferred_units,
+            None,
         )
         .await?;
     }
     Ok(outcome)
 }
 
+/// Scope selection and payload hydration share one native snapshot, released
+/// before durable admission can await another database or a busy worker.
+fn scan_materialized_page(
+    source: &OpenCodeScanSource,
+    scan_kind: OpenCodeScanKind,
+    cursor: OpenCodePageCursor,
+    mut budget: HostScanBudget,
+    initialize_part_frontier: bool,
+    source_file_identity: u64,
+) -> TranscriptIngestResult<(
+    OpenCodeReferencePage,
+    Option<OpenCodeMaterializedPage>,
+    HostScanBudget,
+)> {
+    if !budget.checkpoint() {
+        return Ok((
+            OpenCodeReferencePage {
+                references: Vec::new(),
+                next: cursor,
+                source_complete: false,
+            },
+            None,
+            budget,
+        ));
+    }
+    let reader = tracedecay_rusqlite_runtime::open_verified_read_snapshot(&source.source_path)
+        .map_err(|error| scan_error("open OpenCode page snapshot", &source.source_path, error))?;
+    if reader.file_identity() != source_file_identity {
+        return Err(TranscriptIngestError::ScanGenerationChanged {
+            path: source.source_path.clone(),
+        });
+    }
+    let (mut page, mut budget) =
+        scan_reference_page(reader.connection(), source, scan_kind, cursor, budget)?;
+    let materialized =
+        if budget.checkpoint() && !page.references.is_empty() && !initialize_part_frontier {
+            let (materialized, returned_budget) = materialize_reference_page(
+                reader.connection(),
+                source,
+                std::mem::take(&mut page.references),
+                budget,
+            )?;
+            budget = returned_budget;
+            Some(materialized)
+        } else {
+            None
+        };
+    Ok((page, materialized, budget))
+}
+
 fn scan_reference_page(
+    connection: &Connection,
     source: &OpenCodeScanSource,
     scan_kind: OpenCodeScanKind,
     cursor: OpenCodePageCursor,
     budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenCodeReferencePage, HostScanBudget)> {
     match scan_kind {
-        OpenCodeScanKind::Messages => scan_message_reference_page(source, cursor, budget),
-        OpenCodeScanKind::Parts => {
-            crate::runtime::opencode_part_scan::scan_part_reference_page(source, cursor, budget)
+        OpenCodeScanKind::Messages => {
+            scan_message_reference_page(connection, source, cursor, budget)
         }
-        OpenCodeScanKind::Rewrite => scan_message_reference_page(source, cursor, budget),
+        OpenCodeScanKind::Parts => {
+            crate::runtime::hosts::opencode_part_scan::scan_part_reference_page(
+                connection, source, cursor, budget,
+            )
+        }
+        OpenCodeScanKind::Rewrite => {
+            scan_message_reference_page(connection, source, cursor, budget)
+        }
     }
 }
 
 fn scan_message_reference_page(
+    connection: &Connection,
     source: &OpenCodeScanSource,
     cursor: OpenCodePageCursor,
     mut budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenCodeReferencePage, HostScanBudget)> {
-    let Some(connection) = open_scan_connection(source, &mut budget)? else {
-        return Ok((
-            OpenCodeReferencePage {
-                references: Vec::new(),
-                next: cursor,
-                source_complete: true,
-            },
-            budget,
-        ));
-    };
-    install_progress_handler(&connection, &source.source_path, &budget)?;
+    install_progress_handler(connection, &source.source_path, &budget)?;
     let matcher = source.scope_matcher();
     let mut statement = connection
         .prepare(
-            "SELECT m.rowid,
-                    CASE WHEN length(m.id) <= ?1 THEN m.id ELSE NULL END AS message_id,
-                    CASE WHEN length(m.session_id) <= ?1 THEN m.session_id ELSE NULL END
+            "WITH page AS (
+                 SELECT m.rowid, m.id, m.session_id, s.directory,
+                        length(m.data) AS message_bytes
+                 FROM message m
+                 JOIN session s ON s.id = m.session_id
+                 WHERE m.rowid > ?2
+                 ORDER BY m.rowid
+                 LIMIT ?3
+             ),
+             part_sums AS (
+                 SELECT p.message_id,
+                        SUM(length(p.data)) AS part_bytes,
+                        MAX(length(p.data)) AS max_part_bytes,
+                        COUNT(*) AS part_count
+                 FROM part p
+                 WHERE p.message_id IN (SELECT id FROM page)
+                 GROUP BY p.message_id
+             )
+             SELECT page.rowid,
+                    CASE WHEN length(page.id) <= ?1 THEN page.id ELSE NULL END AS message_id,
+                    CASE WHEN length(page.session_id) <= ?1 THEN page.session_id ELSE NULL END
                         AS session_id,
-                    CASE WHEN length(s.directory) <= ?1 THEN s.directory ELSE NULL END
+                    CASE WHEN length(page.directory) <= ?1 THEN page.directory ELSE NULL END
                         AS directory,
-                    length(m.data) AS message_bytes,
-                    COALESCE((
-                        SELECT SUM(length(p.data)) FROM part p WHERE p.message_id = m.id
-                    ), 0) AS part_bytes,
-                    COALESCE((
-                        SELECT MAX(length(p.data)) FROM part p WHERE p.message_id = m.id
-                    ), 0) AS max_part_bytes,
-                    (
-                        SELECT COUNT(*) FROM part p WHERE p.message_id = m.id
-                    ) AS part_count,
+                    page.message_bytes,
+                    COALESCE(part_sums.part_bytes, 0) AS part_bytes,
+                    COALESCE(part_sums.max_part_bytes, 0) AS max_part_bytes,
+                    COALESCE(part_sums.part_count, 0) AS part_count,
                     (
                         SELECT COUNT(*) - 1
                         FROM message ordered
-                        WHERE ordered.session_id = m.session_id
-                          AND ordered.rowid <= m.rowid
+                        WHERE ordered.session_id = page.session_id
+                          AND ordered.rowid <= page.rowid
                     ) AS source_order
-             FROM message m
-             JOIN session s ON s.id = m.session_id
-             WHERE m.rowid > ?2
-             ORDER BY m.rowid
-             LIMIT ?3",
+             FROM page
+             LEFT JOIN part_sums ON part_sums.message_id = page.id
+             ORDER BY page.rowid",
         )
         .map_err(|error| {
             scan_error(
@@ -704,24 +802,33 @@ fn scan_message_reference_page(
 }
 
 fn materialize_reference_page(
+    connection: &Connection,
     source: &OpenCodeScanSource,
     references: Vec<OpenCodeMessageRef>,
     mut budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenCodeMaterializedPage, HostScanBudget)> {
-    let Some(connection) = open_scan_connection(source, &mut budget)? else {
-        budget.mark_unavailable();
-        return Ok((
-            OpenCodeMaterializedPage {
-                records: Vec::new(),
-                input_bytes: 0,
-                fully_processed: false,
-            },
-            budget,
-        ));
-    };
-    install_progress_handler(&connection, &source.source_path, &budget)?;
+    install_progress_handler(connection, &source.source_path, &budget)?;
     let max_native_json_bytes =
         u64::try_from(MAX_NATIVE_JSON_BYTES).map_err(|_| invalid_frame())?;
+    let mut payload_statement = connection
+        .prepare(
+            "SELECT CASE WHEN length(m.data) <= ?1 THEN m.data ELSE NULL END,
+                    CASE WHEN length(s.parent_id) <= ?3 THEN s.parent_id ELSE NULL END,
+                    length(s.parent_id)
+             FROM message m LEFT JOIN session s ON s.id = m.session_id
+             WHERE m.rowid = ?2",
+        )
+        .map_err(|error| scan_error("prepare message payload query", &source.source_path, error))?;
+    let mut parts_statement = connection
+        .prepare(
+            "SELECT id, length(data),
+                    CASE WHEN length(data) <= ?1 THEN data ELSE NULL END
+             FROM part
+             WHERE message_id = ?2
+             ORDER BY id
+             LIMIT ?3",
+        )
+        .map_err(|error| scan_error("prepare part query", &source.source_path, error))?;
     let before = budget.consumed_input_bytes();
     let mut records = Vec::with_capacity(references.len());
     let mut fully_processed = true;
@@ -742,7 +849,12 @@ fn materialize_reference_page(
             fully_processed = false;
             break;
         }
-        match load_record(&connection, &reference, &source.source_path)? {
+        match load_record(
+            &mut payload_statement,
+            &mut parts_statement,
+            &reference,
+            &source.source_path,
+        )? {
             Some(record) => records.push(record),
             None => budget.mark_non_durable(),
         }
@@ -758,20 +870,16 @@ fn materialize_reference_page(
 }
 
 fn load_record(
-    connection: &Connection,
+    payload_statement: &mut Statement<'_>,
+    parts_statement: &mut Statement<'_>,
     reference: &OpenCodeMessageRef,
     database_path: &Path,
 ) -> TranscriptIngestResult<Option<OpenCodeRecord>> {
-    let mut statement = connection
-        .prepare(
-            "SELECT CASE WHEN length(data) <= ?1 THEN data ELSE NULL END
-             FROM message WHERE rowid = ?2",
-        )
-        .map_err(|error| scan_error("prepare message payload query", database_path, error))?;
-    let mut rows = statement
+    let mut rows = payload_statement
         .query(params![
             i64::try_from(MAX_NATIVE_JSON_BYTES).map_err(|_| invalid_frame())?,
-            reference.rowid
+            reference.rowid,
+            MAX_ID_BYTES
         ])
         .map_err(|error| scan_error("query message payload", database_path, error))?;
     let Some(row) = rows
@@ -784,6 +892,13 @@ fn load_record(
     let Some(data) = data else {
         return Ok(None);
     };
+    let parent_session_id = sql_text(row, 1, database_path, "decode parent session id")?;
+    let parent_bytes = row
+        .get::<_, Option<i64>>(2)
+        .map_err(|error| scan_error("decode parent session length", database_path, error))?;
+    if parent_bytes.is_some() && parent_session_id.is_none() {
+        return Ok(None);
+    }
     let Ok(mut message) = serde_json::from_slice::<Value>(&data) else {
         return Ok(None);
     };
@@ -796,15 +911,19 @@ fn load_record(
     message_fields
         .entry("sessionID")
         .or_insert_with(|| Value::String(reference.session_id.clone()));
-    let parts = load_parts(connection, &reference.id, database_path)?;
+    let parts = load_parts(parts_statement, &reference.id, database_path)?;
     if parts.deferred {
         return Ok(None);
     }
-    let payload = serde_json::to_vec(&serde_json::json!({
+    let mut record = serde_json::json!({
         "message": message,
         "parts": parts.values,
-    }))
-    .map_err(|_| invalid_frame())?;
+        "transcript_path": database_path.to_string_lossy(),
+    });
+    if let Some(parent_session_id) = parent_session_id {
+        record["session"] = serde_json::json!({ "parentID": parent_session_id });
+    }
+    let payload = serde_json::to_vec(&record).map_err(|_| invalid_frame())?;
     if payload.len() as u64 > MAX_OPENCODE_RECORD_BYTES {
         return Ok(None);
     }
@@ -822,20 +941,10 @@ struct LoadedParts {
 }
 
 fn load_parts(
-    connection: &Connection,
+    statement: &mut Statement<'_>,
     message_id: &str,
     database_path: &Path,
 ) -> TranscriptIngestResult<LoadedParts> {
-    let mut statement = connection
-        .prepare(
-            "SELECT id, length(data),
-                    CASE WHEN length(data) <= ?1 THEN data ELSE NULL END
-             FROM part
-             WHERE message_id = ?2
-             ORDER BY id
-             LIMIT ?3",
-        )
-        .map_err(|error| scan_error("prepare part query", database_path, error))?;
     let mut query = statement
         .query(params![
             i64::try_from(MAX_NATIVE_JSON_BYTES).map_err(|_| invalid_frame())?,
@@ -872,18 +981,6 @@ fn load_parts(
         values.push(value);
     }
     Ok(LoadedParts { values, deferred })
-}
-
-pub(super) fn open_scan_connection(
-    source: &OpenCodeScanSource,
-    budget: &mut HostScanBudget,
-) -> TranscriptIngestResult<Option<Connection>> {
-    if !budget.checkpoint() {
-        return Ok(None);
-    }
-    tracedecay_rusqlite_runtime::open_immutable_reader(&source.database_path)
-        .map(Some)
-        .map_err(|error| scan_error("open immutable database", &source.source_path, error))
 }
 
 pub(super) fn install_progress_handler(
@@ -963,7 +1060,7 @@ fn outcome_for_scan_evidence(evidence: HostScanEvidence) -> OpenCodeCaptureOutco
     }
 }
 
-fn opencode_data_dir(home: &Path) -> PathBuf {
+pub(in crate::runtime) fn opencode_data_dir(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/opencode")
     } else if cfg!(target_os = "windows") {
@@ -973,7 +1070,7 @@ fn opencode_data_dir(home: &Path) -> PathBuf {
     }
 }
 
-fn scan_error(
+pub(super) fn scan_error(
     operation: &'static str,
     path: &Path,
     error: impl std::error::Error + Send + Sync + 'static,
@@ -985,7 +1082,7 @@ fn scan_error(
     }
 }
 
-const fn invalid_frame() -> TranscriptIngestError {
+pub(super) const fn invalid_frame() -> TranscriptIngestError {
     TranscriptIngestError::InvalidFrameState { provider: PROVIDER }
 }
 

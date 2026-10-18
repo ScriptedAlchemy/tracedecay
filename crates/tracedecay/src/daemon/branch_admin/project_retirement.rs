@@ -1,14 +1,29 @@
-use std::sync::Arc;
-
-use super::super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus};
 use super::{StoreAdministration, StoreOwnerKey};
+use std::time::Instant;
+
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome, TimeoutError};
+use tracedecay_store_runtime::{ShutdownStatus, ShutdownTaskOutcome, ShutdownTaskReceipt};
+
+/// Drops the process-global Context Scout owner when this project's other
+/// owners are torn down. A retired or remotely-deleted project must not keep
+/// a strong `Database` handle for the process lifetime. `graph_db_path` is the
+/// database the retiring runtime bound: a late retirement of a runtime whose
+/// owner was already replaced by a newer database identity leaves the live
+/// replacement registered.
+pub(crate) fn retire_registered_context_scout_owner(
+    project_id: &tracedecay_domain::ProjectId,
+    graph_db_path: &std::path::Path,
+) {
+    let hook_id = tracedecay_hooks::envelope_identity_hash16("project", project_id.as_str());
+    let _ = tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner(
+        hook_id,
+        graph_db_path,
+    );
+}
 
 pub(super) struct ProjectServerRetirement {
     pub(super) owner: StoreOwnerKey,
     completion: tokio::sync::watch::Receiver<ProjectServerRetirementStatus>,
-    _task: tokio::task::JoinHandle<()>,
-    _fence: Option<std::sync::Arc<ProjectRetirementFenceV1>>,
-    capacity_reuse: bool,
 }
 
 pub(crate) struct ProjectServerCapacityRetirementCompletion {
@@ -16,7 +31,6 @@ pub(crate) struct ProjectServerCapacityRetirementCompletion {
 }
 
 impl ProjectServerCapacityRetirementCompletion {
-    #[hotpath::skip]
     pub(crate) async fn wait(self) -> tracedecay_domain::errors::Result<()> {
         match wait_for_project_server_retirement(self.completion).await {
             ProjectServerRetirementStatus::Clean => Ok(()),
@@ -48,9 +62,11 @@ pub(crate) struct ProjectServerRetirementAdmission<'a> {
 }
 
 impl ProjectServerRetirementAdmission<'_> {
-    /// Snapshot only the already-tracked retirements for this exact physical
+    /// Snapshot only the still-pending retirements for this exact physical
     /// project owner. Capacity reuse awaits these receipts inside its detached
-    /// task, without joining unrelated project retirement work.
+    /// task, without joining unrelated project retirement work. A failed
+    /// receipt was already reported to the open that retired the owner, so a
+    /// later retirement never replays it.
     pub(crate) fn prior_completions_for_owner(
         &self,
         owner: &StoreOwnerKey,
@@ -59,9 +75,9 @@ impl ProjectServerRetirementAdmission<'_> {
             .iter()
             .filter(|retirement| {
                 &retirement.owner == owner
-                    && !matches!(
+                    && matches!(
                         &*retirement.completion.borrow(),
-                        ProjectServerRetirementStatus::Clean
+                        ProjectServerRetirementStatus::Pending
                     )
             })
             .map(|retirement| ProjectServerCapacityRetirementCompletion {
@@ -77,10 +93,15 @@ impl ProjectServerRetirementAdmission<'_> {
     where
         Task: std::future::Future<Output = ()> + Send + 'static,
     {
-        let task = tokio::spawn(retirement);
-        track_project_server_retirement_after_admission(&mut self.retirements, owner, task, false);
+        track_project_server_retirement_after_admission(
+            &mut self.retirements,
+            owner,
+            spawn_tokio_retirement(retirement),
+        );
     }
 
+    /// Track one capacity retirement whose outcome the retiring open awaits.
+    /// It supersedes an earlier failed receipt of the same owner.
     pub(crate) fn spawn_and_track_fallible<Task>(
         &mut self,
         owner: StoreOwnerKey,
@@ -89,56 +110,65 @@ impl ProjectServerRetirementAdmission<'_> {
     where
         Task: std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static,
     {
-        self.retirements.retain(|retirement| {
-            !matches!(
-                &*retirement.completion.borrow(),
-                ProjectServerRetirementStatus::Clean
-            )
-        });
-        let (task_completion, completion) =
-            tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
-        hotpath::gauge!("retirement_pending").inc(1.0);
-        let finalizer = ProjectServerRetirementFinalizer {
-            completion: task_completion,
-            terminal: false,
-        };
-        let task = tokio::spawn(async move {
-            let status = match retirement.await {
-                Ok(()) => ProjectServerRetirementStatus::Clean,
-                Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
-            };
-            finalizer.complete(status);
-        });
+        self.retirements
+            .retain(|tracked| match &*tracked.completion.borrow() {
+                ProjectServerRetirementStatus::Clean => false,
+                ProjectServerRetirementStatus::Failed(_) => tracked.owner != owner,
+                ProjectServerRetirementStatus::Pending => true,
+            });
+        let completion = spawn_fallible_retirement(retirement);
         self.retirements.push(ProjectServerRetirement {
             owner,
             completion: completion.clone(),
-            _task: task,
-            _fence: None,
-            capacity_reuse: true,
         });
         ProjectServerCapacityRetirementCompletion { completion }
     }
 }
 
-pub(in crate::daemon) struct ProjectRetirementFenceV1 {
-    // Field order is lifecycle order: reopen roots before releasing the store
-    // writer gate so a deletion owner can never have its permanent fence
-    // removed by this temporary recovery guard.
-    _invocation: tracedecay_daemon_service::ProjectRuntimeRootQuiescenceV1,
-    _project_open: crate::daemon::project_open_admission::ProjectOpenIdentityQuiescenceV1,
-    _writer: crate::daemon::store_writer_gate::WriterAdmissionGuard,
+fn spawn_fallible_retirement<Task>(
+    retirement: Task,
+) -> tokio::sync::watch::Receiver<ProjectServerRetirementStatus>
+where
+    Task: std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static,
+{
+    let (task_completion, completion) =
+        tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
+    let finalizer = ProjectServerRetirementFinalizer {
+        completion: task_completion,
+        terminal: false,
+    };
+    let retirement = async move {
+        let status = match retirement.await {
+            Ok(()) => ProjectServerRetirementStatus::Clean,
+            Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
+        };
+        finalizer.complete(status);
+    };
+    // Without a Tokio runtime the retirement is dropped unstarted, and its
+    // finalizer publishes the failed receipt.
+    if let Some(runtime) = native_runtime::tokio_handle(RETIREMENT_TOKIO_SITE) {
+        runtime.spawn(retirement);
+    }
+    completion
 }
 
-impl ProjectRetirementFenceV1 {
-    pub(super) fn new(
-        invocation: tracedecay_daemon_service::ProjectRuntimeRootQuiescenceV1,
-        project_open: crate::daemon::project_open_admission::ProjectOpenIdentityQuiescenceV1,
-        writer: crate::daemon::store_writer_gate::WriterAdmissionGuard,
-    ) -> Self {
-        Self {
-            _invocation: invocation,
-            _project_open: project_open,
-            _writer: writer,
+/// Retirements reach `project_server_lifecycle`, whose timers are Tokio's, so
+/// they run on the daemon's Tokio runtime.
+const RETIREMENT_TOKIO_SITE: &str = "daemon.project_retirement";
+
+/// Spawns `retirement` on the Tokio runtime and returns its receipt. Without
+/// a Tokio runtime the retirement never runs and its receipt is a failure.
+fn spawn_tokio_retirement(
+    retirement: impl std::future::Future<Output = ()> + Send + 'static,
+) -> impl std::future::Future<Output = ProjectServerRetirementStatus> + Send + 'static {
+    let task = native_runtime::tokio_handle(RETIREMENT_TOKIO_SITE)
+        .map(|runtime| runtime.spawn(retirement));
+    async move {
+        match task {
+            Some(task) => tokio_retirement_status(task).await,
+            None => ProjectServerRetirementStatus::Failed(
+                "no Tokio runtime ran the project server retirement".to_owned(),
+            ),
         }
     }
 }
@@ -157,30 +187,18 @@ struct ProjectServerRetirementFinalizer {
 
 impl ProjectServerRetirementFinalizer {
     fn complete(mut self, status: ProjectServerRetirementStatus) {
-        match &status {
-            ProjectServerRetirementStatus::Clean => {
-                hotpath::gauge!("daemon.branch_admin.retirement.clean_total").inc(1_u64);
-            }
-            ProjectServerRetirementStatus::Failed(_) => {
-                hotpath::gauge!("daemon.branch_admin.retirement.failed_total").inc(1_u64);
-            }
-            ProjectServerRetirementStatus::Pending => {}
-        }
         self.completion.send_replace(status);
         self.terminal = true;
-        hotpath::gauge!("retirement_pending").inc(-1.0);
     }
 }
 
 impl Drop for ProjectServerRetirementFinalizer {
     fn drop(&mut self) {
         if !self.terminal {
-            hotpath::gauge!("daemon.branch_admin.retirement.abandoned_total").inc(1_u64);
             self.completion
                 .send_replace(ProjectServerRetirementStatus::Failed(
                     "retirement tracking task ended without a terminal receipt".to_owned(),
                 ));
-            hotpath::gauge!("retirement_pending").inc(-1.0);
         }
     }
 }
@@ -208,11 +226,35 @@ async fn wait_for_project_server_retirement(
     }
 }
 
+async fn tokio_retirement_status(
+    task: tokio::task::JoinHandle<()>,
+) -> ProjectServerRetirementStatus {
+    match task.await {
+        Ok(()) => ProjectServerRetirementStatus::Clean,
+        Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
+    }
+}
+
+/// The receipt of a native owner aborted for retirement: its cancellation is
+/// the clean outcome.
+async fn aborted_native_retirement_status(task: NativeTask<()>) -> ProjectServerRetirementStatus {
+    match task.wait().await {
+        NativeTaskOutcome::Completed(()) | NativeTaskOutcome::Cancelled => {
+            ProjectServerRetirementStatus::Clean
+        }
+        NativeTaskOutcome::Panicked(panic) => {
+            ProjectServerRetirementStatus::Failed(format!("task panicked: {panic}"))
+        }
+    }
+}
+
+/// Records one retirement and publishes `joined`'s status from a native
+/// task. When the native runtime refuses that task, its finalizer publishes
+/// a failed receipt.
 fn track_project_server_retirement_after_admission(
     retirements: &mut Vec<ProjectServerRetirement>,
     owner: StoreOwnerKey,
-    task: tokio::task::JoinHandle<()>,
-    cancelled_is_clean: bool,
+    joined: impl std::future::Future<Output = ProjectServerRetirementStatus> + Send + 'static,
 ) {
     retirements.retain(|retirement| {
         !matches!(
@@ -222,85 +264,87 @@ fn track_project_server_retirement_after_admission(
     });
     let (task_completion, completion) =
         tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
-    hotpath::gauge!("retirement_pending").inc(1.0);
     let finalizer = ProjectServerRetirementFinalizer {
         completion: task_completion,
         terminal: false,
     };
-    let task = tokio::spawn(async move {
-        let status = match task.await {
-            Ok(()) => ProjectServerRetirementStatus::Clean,
-            Err(error) if cancelled_is_clean && error.is_cancelled() => {
-                ProjectServerRetirementStatus::Clean
-            }
-            Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
-        };
-        finalizer.complete(status);
-    });
-    retirements.push(ProjectServerRetirement {
-        owner,
-        completion,
-        _task: task,
-        _fence: None,
-        capacity_reuse: false,
-    });
+    // Detached: the receipt, not the task, is what callers wait on.
+    if let Err(error) = NativeTask::spawn(async move { finalizer.complete(joined.await) }) {
+        tracing::error!(%error, "project server retirement tracker was refused");
+    }
+    retirements.push(ProjectServerRetirement { owner, completion });
 }
 
 async fn track_project_server_retirement(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     owner: StoreOwnerKey,
-    task: tokio::task::JoinHandle<()>,
-    cancelled_is_clean: bool,
+    joined: impl std::future::Future<Output = ProjectServerRetirementStatus> + Send + 'static,
 ) {
     let mut retirements = retirements.lock().await;
-    track_project_server_retirement_after_admission(
-        &mut retirements,
-        owner,
-        task,
-        cancelled_is_clean,
-    );
+    track_project_server_retirement_after_admission(&mut retirements, owner, joined);
 }
 
-pub(super) async fn attach_project_retirement_fence(
-    retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
-    profile_root: &std::path::Path,
-    project_id: &str,
-    fence: std::sync::Arc<ProjectRetirementFenceV1>,
-) {
-    let mut retirements = retirements.lock().await;
-    for retirement in retirements.iter_mut().filter(|retirement| {
-        retirement.owner.profile_root == profile_root
-            && retirement.owner.project_id.as_deref() == Some(project_id)
-            && !matches!(
-                &*retirement.completion.borrow(),
-                ProjectServerRetirementStatus::Clean
-            )
-    }) {
-        retirement._fence.get_or_insert_with(|| Arc::clone(&fence));
-    }
-}
-
+#[cfg(test)]
 pub(super) async fn track_retirement_task(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     owner: StoreOwnerKey,
     task: tokio::task::JoinHandle<()>,
 ) {
-    track_project_server_retirement(retirements, owner, task, false).await;
+    track_project_server_retirement(retirements, owner, tokio_retirement_status(task)).await;
 }
 
-pub(super) async fn track_aborted_retirement_task(
+/// Spawns `retirement` on the Tokio runtime and tracks its receipt.
+pub(super) async fn track_tokio_retirement(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     owner: StoreOwnerKey,
-    task: tokio::task::JoinHandle<()>,
+    retirement: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
-    track_project_server_retirement(retirements, owner, task, true).await;
+    track_project_server_retirement(retirements, owner, spawn_tokio_retirement(retirement)).await;
+}
+
+pub(super) async fn track_aborted_native_retirement_task(
+    retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
+    owner: StoreOwnerKey,
+    task: NativeTask<()>,
+) {
+    track_project_server_retirement(retirements, owner, aborted_native_retirement_status(task))
+        .await;
+}
+
+async fn shutdown_receipt(
+    completions: Vec<(
+        String,
+        tokio::sync::watch::Receiver<ProjectServerRetirementStatus>,
+    )>,
+    deadline: Instant,
+) -> ShutdownTaskReceipt {
+    let mut receipt = ShutdownTaskReceipt::default();
+    for (owner, completion) in completions {
+        let status = match native_runtime::timeout_at(
+            deadline,
+            wait_for_project_server_retirement(completion),
+        )
+        .await
+        {
+            Ok(ProjectServerRetirementStatus::Clean) => ShutdownStatus::Clean,
+            Ok(ProjectServerRetirementStatus::Failed(error)) => ShutdownStatus::Failed(error),
+            Ok(ProjectServerRetirementStatus::Pending) | Err(TimeoutError::Elapsed) => {
+                ShutdownStatus::TimedOut
+            }
+            Err(error @ TimeoutError::TimerUnavailable(_)) => {
+                ShutdownStatus::Failed(error.to_string())
+            }
+        };
+        receipt.outcomes.push(ShutdownTaskOutcome { owner, status });
+    }
+    receipt
 }
 
 pub(super) async fn settle_project_retirements(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     profile_root: &std::path::Path,
     project_id: &str,
-    deadline: tokio::time::Instant,
+    deadline: Instant,
 ) -> ShutdownTaskReceipt {
     let completions = retirements
         .lock()
@@ -317,21 +361,7 @@ pub(super) async fn settle_project_retirements(
             )
         })
         .collect::<Vec<_>>();
-    let mut receipt = ShutdownTaskReceipt::default();
-    for (owner, completion) in completions {
-        let status =
-            match tokio::time::timeout_at(deadline, wait_for_project_server_retirement(completion))
-                .await
-            {
-                Ok(ProjectServerRetirementStatus::Clean) => ShutdownTaskStatus::Clean,
-                Ok(ProjectServerRetirementStatus::Failed(error)) => {
-                    ShutdownTaskStatus::Failed(error)
-                }
-                Ok(ProjectServerRetirementStatus::Pending) => ShutdownTaskStatus::TimedOut,
-                Err(_) => ShutdownTaskStatus::TimedOut,
-            };
-        receipt.outcomes.push(ShutdownTaskOutcome { owner, status });
-    }
+    let receipt = shutdown_receipt(completions, deadline).await;
     retirements.lock().await.retain(|retirement| {
         !matches!(
             &*retirement.completion.borrow(),
@@ -347,7 +377,6 @@ impl StoreAdministration {
     /// The caller must take this before the owner registry whenever it may
     /// evict or replace a live server, then call
     /// [`ProjectServerRetirementAdmission::spawn_and_track`] without awaiting.
-    #[hotpath::skip]
     pub(crate) async fn acquire_project_server_retirement_admission(
         &self,
     ) -> ProjectServerRetirementAdmission<'_> {
@@ -359,19 +388,22 @@ impl StoreAdministration {
     // pub(crate): daemon bootstrap tests register retirements from outside
     // branch_admin to exercise the shutdown join path.
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn track_project_server_retirement(
         &self,
         owner: StoreOwnerKey,
         task: tokio::task::JoinHandle<()>,
     ) {
-        track_project_server_retirement(&self.project_server_retirements, owner, task, false).await;
+        track_project_server_retirement(
+            &self.project_server_retirements,
+            owner,
+            tokio_retirement_status(task),
+        )
+        .await;
     }
 
     // pub(crate): the test-transport production harness joins retirements from
     // outside branch_admin during its shutdown sequence.
     #[cfg(any(test, feature = "test-transport"))]
-    #[hotpath::skip]
     pub(crate) async fn join_project_server_retirements(&self) {
         let completions = self
             .project_server_retirements
@@ -394,63 +426,44 @@ impl StoreAdministration {
             });
     }
 
-    #[hotpath::skip]
-    pub(crate) async fn completed_capacity_retirement_failure(&self) -> Option<String> {
-        self.project_server_retirements
-            .lock()
-            .await
-            .iter()
-            .filter(|retirement| retirement.capacity_reuse)
-            .find_map(|retirement| match &*retirement.completion.borrow() {
-                ProjectServerRetirementStatus::Failed(error) => Some(error.clone()),
-                ProjectServerRetirementStatus::Pending | ProjectServerRetirementStatus::Clean => {
-                    None
-                }
-            })
-    }
-
     /// Bounded retirement join for daemon shutdown: every tracked retirement
     /// is awaited up to `deadline` and reported under its owner's identity, so
     /// a hung retirement surfaces as a typed timeout instead of a silent hang.
-    #[hotpath::skip]
     pub(crate) async fn join_project_server_retirements_until(
         &self,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<Instant>,
     ) -> ShutdownTaskReceipt {
-        let completions =
-            match tokio::time::timeout_at(deadline, self.project_server_retirements.lock()).await {
-                Ok(retirements) => retirements
-                    .iter()
-                    .map(|retirement| {
-                        (
-                            retirement_shutdown_owner_label(&retirement.owner),
-                            retirement.completion.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-                Err(_) => {
-                    return ShutdownTaskReceipt::timed_out("project_server_retirement_registry");
-                }
-            };
-        let mut receipt = ShutdownTaskReceipt::default();
-        for (owner, completion) in completions {
-            let status = match tokio::time::timeout_at(
-                deadline,
-                wait_for_project_server_retirement(completion),
-            )
-            .await
-            {
-                Ok(ProjectServerRetirementStatus::Clean) => ShutdownTaskStatus::Clean,
-                Ok(ProjectServerRetirementStatus::Failed(error)) => {
-                    ShutdownTaskStatus::Failed(error)
-                }
-                Ok(ProjectServerRetirementStatus::Pending) => ShutdownTaskStatus::TimedOut,
-                Err(_) => ShutdownTaskStatus::TimedOut,
-            };
-            receipt.outcomes.push(ShutdownTaskOutcome { owner, status });
-        }
+        let deadline = deadline.into();
+        let completions = match native_runtime::timeout_at(
+            deadline,
+            self.project_server_retirements.lock(),
+        )
+        .await
+        {
+            Ok(retirements) => retirements
+                .iter()
+                .map(|retirement| {
+                    (
+                        retirement_shutdown_owner_label(&retirement.owner),
+                        retirement.completion.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            Err(TimeoutError::Elapsed) => {
+                return ShutdownTaskReceipt::timed_out("project_server_retirement_registry");
+            }
+            Err(error @ TimeoutError::TimerUnavailable(_)) => {
+                return ShutdownTaskReceipt {
+                    outcomes: vec![ShutdownTaskOutcome {
+                        owner: "project_server_retirement_registry".to_owned(),
+                        status: ShutdownStatus::Failed(error.to_string()),
+                    }],
+                };
+            }
+        };
+        let receipt = shutdown_receipt(completions, deadline).await;
         if let Ok(mut retirements) =
-            tokio::time::timeout_at(deadline, self.project_server_retirements.lock()).await
+            native_runtime::timeout_at(deadline, self.project_server_retirements.lock()).await
         {
             retirements.retain(|retirement| {
                 !matches!(
@@ -470,7 +483,6 @@ mod tests {
 
     use super::*;
     use crate::daemon::project_server_lifecycle;
-    use crate::daemon::store_writer_gate::{StoreWriterClass, WriterScope};
 
     fn owner(project_id: &str) -> StoreOwnerKey {
         isolated_owner(std::path::Path::new("/profile"), project_id)
@@ -494,24 +506,25 @@ mod tests {
         project_root: &std::path::Path,
         project_id: &str,
     ) -> (
-        crate::tracedecay::TraceDecay,
-        crate::host_admission::HostAdmissionTestRuntimeV1,
+        tracedecay_project::project::TraceDecay,
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(profile_root).expect("isolated profile root");
         std::fs::create_dir_all(project_root).expect("isolated project root");
         let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
             .expect("typed project identity");
-        let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
-            profile_root,
-            project_root,
-            project_id,
-        )
-        .await
-        .expect("isolated host-admission runtime");
+        let runtime =
+            tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+                profile_root,
+                project_root,
+                project_id,
+            )
+            .await
+            .expect("isolated host-admission runtime");
         let graph = runtime
             .initialize_project_graph_for_test(
                 project_root,
-                crate::tracedecay::TraceDecayOpenOptions {
+                tracedecay_project::project::TraceDecayOpenOptions {
                     profile_root: Some(profile_root.to_path_buf()),
                     global_db_path: None,
                 },
@@ -522,13 +535,13 @@ mod tests {
     }
 
     async fn isolated_sibling_graph(
-        runtime: &crate::host_admission::HostAdmissionTestRuntimeV1,
+        runtime: &tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
         profile_root: &std::path::Path,
         project_root: &std::path::Path,
         project_id: &str,
     ) -> (
-        crate::tracedecay::TraceDecay,
-        crate::host_admission::HostAdmissionTestRuntimeV1,
+        tracedecay_project::project::TraceDecay,
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(project_root).expect("isolated sibling project root");
         let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
@@ -540,7 +553,7 @@ mod tests {
         let graph = sibling
             .initialize_project_graph_for_test(
                 project_root,
-                crate::tracedecay::TraceDecayOpenOptions {
+                tracedecay_project::project::TraceDecayOpenOptions {
                     profile_root: Some(profile_root.to_path_buf()),
                     global_db_path: None,
                 },
@@ -548,6 +561,75 @@ mod tests {
             .await
             .expect("isolated sibling registered graph");
         (graph, sibling)
+    }
+
+    #[tokio::test]
+    async fn project_retirement_unregisters_context_scout_owner_and_rebind_is_fresh() {
+        let root = tempfile::TempDir::new().expect("retirement fixture");
+        let profile = root.path().join("profile");
+        let project = root.path().join("project");
+        let (graph, _runtime) =
+            isolated_registered_graph(&profile, &project, "proj_retire_scout").await;
+        let project_id =
+            tracedecay_domain::ProjectId::new("proj_retire_scout".to_owned()).expect("project id");
+        let hook_id = tracedecay_hooks::envelope_identity_hash16("project", project_id.as_str());
+        let retired = graph
+            .context_scout_owner()
+            .expect("writable open registers a Context Scout owner");
+        assert_eq!(
+            tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
+                hook_id
+            )
+            .len(),
+            1
+        );
+
+        retire_registered_context_scout_owner(&project_id, &graph.db_path());
+        assert!(
+            tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
+                hook_id
+            )
+            .is_empty(),
+            "retirement must remove the process-global Context Scout owner"
+        );
+
+        tracedecay_global_db::register_registered_schema_installer();
+        let replacement_root = tempfile::TempDir::new().expect("replacement database");
+        let replacement_path = replacement_root.path().join("graph.db");
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &replacement_path,
+            "re-registered Context Scout owner",
+        )
+        .expect("replacement authority");
+        let replacement = tracedecay_runtime_core::db::Database::publish_test_runtime(
+            &replacement_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("replacement database")
+        .0;
+        let fresh =
+            tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
+                replacement.clone(),
+                hook_id,
+                tracedecay_domain::UtcMicros(2),
+                None,
+            )
+            .await
+            .expect("fresh owner after retirement");
+        assert!(
+            !std::sync::Arc::ptr_eq(&retired, &fresh),
+            "re-registering after retirement must bind a new owner"
+        );
+        assert_eq!(
+            fresh.store().database().canonical_database_path(),
+            replacement.canonical_database_path()
+        );
+        tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner(
+            hook_id,
+            replacement.canonical_database_path(),
+        );
     }
 
     #[tokio::test]
@@ -567,48 +649,15 @@ mod tests {
         });
         track_retirement_task(retirements, owner("project-a"), second_task).await;
 
-        let roots = [std::path::PathBuf::from("/repository")]
-            .into_iter()
-            .collect();
-        let invocation_registry = tracedecay_daemon_service::ProjectRuntimeRegistryV1::default();
-        let invocation = invocation_registry
-            .quiesce_roots(&roots)
-            .await
-            .expect("quiesce invocation roots");
-        let open_tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
-        let project_open = open_tasks
-            .quiesce_project_identity(std::path::Path::new("/profile"), "project-a", &roots)
-            .await
-            .expect("quiesce project-open identity");
-        let scope = WriterScope::store("/profile/projects/project-a", StoreWriterClass::Owner);
-        let writer = administration.gate.acquire(&scope).await;
-        let fence = Arc::new(ProjectRetirementFenceV1::new(
-            invocation,
-            project_open,
-            writer,
-        ));
-        attach_project_retirement_fence(
-            retirements,
-            std::path::Path::new("/profile"),
-            "project-a",
-            Arc::clone(&fence),
-        )
-        .await;
-        drop(fence);
-
         let first = settle_project_retirements(
             retirements,
             std::path::Path::new("/profile"),
             "project-a",
-            tokio::time::Instant::now(),
+            Instant::now(),
         )
         .await;
-        assert_eq!(first.status(), ShutdownTaskStatus::TimedOut);
+        assert_eq!(first.status(), ShutdownStatus::TimedOut);
         assert_eq!(retirements.lock().await.len(), 2);
-        assert!(
-            administration.gate.try_acquire(&scope).is_none(),
-            "a timed-out retirement must keep replacement publication fenced"
-        );
 
         first_release.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -626,36 +675,56 @@ mod tests {
         })
         .await
         .expect("first retirement owner should complete before the test deadline");
-        assert!(
-            administration.gate.try_acquire(&scope).is_none(),
-            "one completed owner cannot release the aggregate project fence"
-        );
         let partially_settled = settle_project_retirements(
             retirements,
             std::path::Path::new("/profile"),
             "project-a",
-            tokio::time::Instant::now(),
+            Instant::now(),
         )
         .await;
-        assert_eq!(partially_settled.status(), ShutdownTaskStatus::TimedOut);
+        assert_eq!(partially_settled.status(), ShutdownStatus::TimedOut);
         assert_eq!(retirements.lock().await.len(), 1);
-        assert!(
-            administration.gate.try_acquire(&scope).is_none(),
-            "the remaining owner retains its copy of the aggregate project fence"
-        );
         second_release.notify_one();
         let second = settle_project_retirements(
             retirements,
             std::path::Path::new("/profile"),
             "project-a",
-            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            Instant::now() + std::time::Duration::from_secs(1),
         )
         .await;
         assert!(second.is_clean());
         assert!(retirements.lock().await.is_empty());
-        assert!(
-            administration.gate.try_acquire(&scope).is_some(),
-            "retry releases the fence only after observing the retained owner complete"
+    }
+
+    // Remote recovery settles retirements under `native_runtime::block_on`
+    // from a blocking thread, where no Tokio runtime is entered.
+    #[test]
+    fn shutdown_receipt_settles_outside_any_tokio_runtime() {
+        let (_clean_sender, clean) =
+            tokio::sync::watch::channel(ProjectServerRetirementStatus::Clean);
+        let (_pending_sender, pending) =
+            tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
+        let deadline = Instant::now() + std::time::Duration::from_millis(50);
+
+        let receipt = native_runtime::block_on(shutdown_receipt(
+            vec![("clean".to_owned(), clean), ("pending".to_owned(), pending)],
+            deadline,
+        ))
+        .expect("native runtime");
+
+        assert!(Instant::now() >= deadline);
+        assert_eq!(
+            receipt.outcomes,
+            [
+                ShutdownTaskOutcome {
+                    owner: "clean".to_owned(),
+                    status: ShutdownStatus::Clean,
+                },
+                ShutdownTaskOutcome {
+                    owner: "pending".to_owned(),
+                    status: ShutdownStatus::TimedOut,
+                },
+            ]
         );
     }
 
@@ -671,10 +740,10 @@ mod tests {
             &retirements,
             std::path::Path::new("/profile"),
             "project-a",
-            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            Instant::now() + std::time::Duration::from_secs(1),
         )
         .await;
-        assert!(matches!(receipt.status(), ShutdownTaskStatus::Failed(_)));
+        assert!(matches!(receipt.status(), ShutdownStatus::Failed(_)));
         assert_eq!(retirements.lock().await.len(), 1);
     }
 
@@ -821,29 +890,45 @@ mod tests {
             .expect("exact capacity retirement completes cleanly");
         release_unrelated.notify_one();
         administration.join_project_server_retirements().await;
+    }
+
+    #[tokio::test]
+    async fn failed_capacity_retirement_is_reported_once_and_superseded_by_the_next() {
+        let administration = StoreAdministration::default();
+        let blocked = owner("project-blocked");
+        let mut admission = administration
+            .acquire_project_server_retirement_admission()
+            .await;
+        let failed = admission.spawn_and_track_fallible(blocked.clone(), async {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "store client still leased".to_owned(),
+            })
+        });
+        drop(admission);
+        assert_eq!(
+            failed
+                .wait()
+                .await
+                .expect_err("a refused release fails its retirement")
+                .to_string(),
+            "config error: project server retirement failed before capacity reuse: \
+             config error: store client still leased"
+        );
 
         let mut admission = administration
             .acquire_project_server_retirement_admission()
             .await;
-        let failed = admission.spawn_and_track_fallible(owner("project-failed"), async move {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "synthetic capacity cleanup failure".to_owned(),
-            })
-        });
+        assert_eq!(
+            admission.prior_completions_for_owner(&blocked).len(),
+            0,
+            "a reported failure is never replayed into the owner's next retirement"
+        );
+        let next = admission.spawn_and_track_fallible(blocked, async { Ok(()) });
+        assert_eq!(admission.retirements.len(), 1);
         drop(admission);
-        drop(failed);
-        let failure = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if let Some(failure) = administration.completed_capacity_retirement_failure().await
-                {
-                    break failure;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("completed capacity failure must remain replayable");
-        assert!(failure.contains("synthetic capacity cleanup failure"));
+        next.wait()
+            .await
+            .expect("the next retirement of the owner settles on its own outcome");
     }
 
     #[tokio::test]
@@ -971,9 +1056,12 @@ mod tests {
         drop(admission);
         drop(replacement);
 
+        let http_application_registry =
+            crate::daemon::http_application::DaemonHttpApplicationRegistry::default();
         let mut shutdown = Box::pin(project_server_lifecycle::shutdown_project_servers(
             tokio::time::Instant::now() + std::time::Duration::from_secs(5),
             &administration,
+            &http_application_registry,
         ));
         std::future::poll_fn(|context| {
             assert!(
@@ -1000,7 +1088,7 @@ mod tests {
         assert!(
             receipt.outcomes.iter().any(|outcome| {
                 outcome.owner == "project_server_retirement[project-idle]"
-                    && outcome.status == ShutdownTaskStatus::Clean
+                    && outcome.status == ShutdownStatus::Clean
             }),
             "shutdown must report the exact evicted owner through its retirement receipt"
         );
@@ -1008,5 +1096,57 @@ mod tests {
             idle_witness.upgrade().is_none(),
             "joined retirement must release the exact evicted server"
         );
+    }
+
+    /// The tracker of a Tokio-owned retirement runs on the native runtime, so
+    /// a caller with no Tokio runtime can track and settle it.
+    #[test]
+    fn a_tokio_retirement_is_tracked_and_settled_without_a_tokio_runtime() {
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("tokio runtime");
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio.spawn(async move {
+            let _ = released.await;
+        });
+        let hazards = crate::test_support::native_runtime_hazards();
+        let receipt = native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let administration = StoreAdministration::default();
+            let retirements = &administration.project_server_retirements;
+            track_retirement_task(retirements, owner("project-a"), task).await;
+            let _ = release.send(());
+            settle_project_retirements(
+                retirements,
+                std::path::Path::new("/profile"),
+                "project-a",
+                Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await
+        })
+        .expect("native runtime");
+        assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+        assert_eq!(receipt.status(), ShutdownStatus::Clean);
+    }
+
+    #[test]
+    fn an_aborted_native_owner_settles_its_retirement_clean() {
+        let receipt = native_runtime::block_on(async {
+            let administration = StoreAdministration::default();
+            let retirements = &administration.project_server_retirements;
+            let task = NativeTask::spawn(std::future::pending::<()>()).expect("native task");
+            task.abort();
+            track_aborted_native_retirement_task(retirements, owner("project-a"), task).await;
+            settle_project_retirements(
+                retirements,
+                std::path::Path::new("/profile"),
+                "project-a",
+                Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await
+        })
+        .expect("native runtime");
+        assert_eq!(receipt.status(), ShutdownStatus::Clean);
     }
 }

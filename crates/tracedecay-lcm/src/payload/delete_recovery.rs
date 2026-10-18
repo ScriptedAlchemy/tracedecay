@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -6,10 +5,11 @@ use super::filesystem_authority::{
     ensure_contained, existing_payload_dir_opt, inspect_payload_file_for_delete,
     read_payload_file_for_verify, remove_verified_payload_file, verify_payload_file_authority,
 };
-use super::{LcmError, gc, load_payload_metadata, util, validate_payload_ref};
+use super::{LcmError, LcmPayloadRef, gc, load_payload_metadata, validate_payload_ref};
+use tracedecay_domain::canonical_text::sha256_hex;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
-use tracedecay_runtime_core::db::engine::{Executor, Value as SqlValue, params};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeleteOpts {
@@ -46,56 +46,6 @@ pub enum CommittedPayloadRemoval {
     Missing,
     Removed(u64),
     ReplacementPreserved,
-}
-
-/// Memoizes [`gc::referenced_payload_refs`] for a caller that deletes many
-/// payloads inside one transaction.
-///
-/// Reuse is exact rather than approximate. Whether a payload `X` sits in the
-/// live reference closure is only ever changed by `X`'s own deletion:
-///
-/// * `tombstone_residual_placeholders` rewrites a bracket placeholder only when
-///   [`gc::tombstone_placeholder_in_text`] finds that placeholder's `ref=` equal
-///   to the ref being deleted, and `extract_payload_refs_from_text` yields at
-///   most one ref per bracket — so tombstoning `Y` cannot drop a reference to
-///   any `X != Y`.
-/// * The `payload_ref` column is only nulled on rows whose column already equals
-///   the ref being deleted.
-///
-/// Nothing else in the delete path writes `lcm_raw_messages`, the sole table the
-/// closure scan reads. One scan per provider therefore answers every iteration
-/// exactly as a fresh per-payload scan would have.
-#[derive(Debug, Default)]
-pub struct ReferencedClosureCache {
-    by_provider: BTreeMap<String, BTreeSet<String>>,
-}
-
-impl ReferencedClosureCache {
-    #[hotpath::skip]
-    async fn is_referenced(
-        &mut self,
-        conn: &(impl Executor + ?Sized),
-        provider: &str,
-        payload_ref: &str,
-    ) -> Result<bool, LcmError> {
-        if !self.by_provider.contains_key(provider) {
-            let refs = gc::referenced_payload_refs(conn, provider, None).await?;
-            self.by_provider.insert(provider.to_string(), refs);
-        }
-        Ok(self
-            .by_provider
-            .get(provider)
-            .is_some_and(|refs| refs.contains(payload_ref)))
-    }
-
-    /// Applies the shrink a completed placeholder rewrite performed on the
-    /// database, so a repeated ref in the same batch reads the post-rewrite
-    /// truth instead of the pre-rewrite snapshot.
-    fn forget(&mut self, payload_ref: &str) {
-        for refs in self.by_provider.values_mut() {
-            refs.remove(payload_ref);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -162,36 +112,32 @@ pub fn reconcile_committed_payload_drain(
     }
 }
 
-pub(super) async fn delete_external_payload_in_transaction(
+pub async fn delete_external_payload_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
     opts: &DeleteOpts,
 ) -> Result<PreparedPayloadDelete, LcmError> {
-    let mut referenced = ReferencedClosureCache::default();
-    let prepared = prepare_external_payload_delete_in_transaction_with_cache(
-        conn,
-        storage_root,
-        payload_ref,
-        opts,
-        &mut referenced,
-    )
-    .await?;
+    let prepared =
+        prepare_external_payload_delete_in_transaction(conn, storage_root, payload_ref, opts)
+            .await?;
     let deleted_refs = [payload_ref.to_string()];
     gc::delete_gc_marks(conn, &deleted_refs).await?;
     Ok(prepared)
 }
 
-pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
+/// Prepares one member of a caller-owned deletion batch. The caller deletes
+/// GC marks only for successful preparations, in one bounded statement after
+/// the batch.
+pub(crate) async fn prepare_external_payload_delete_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
     opts: &DeleteOpts,
-    referenced: &mut ReferencedClosureCache,
 ) -> Result<PreparedPayloadDelete, LcmError> {
     validate_payload_ref(payload_ref)?;
     // The DB-side cleanup below must still run for a store whose payload
-    // directory is gone — the file simply counts as already removed.
+    // directory is gone, the file simply counts as already removed.
     let dir = existing_payload_dir_opt(storage_root)?;
     let path = match dir.as_deref() {
         Some(dir) => {
@@ -251,10 +197,18 @@ pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
     let tombstone_missing_payload =
         opts.rewrite_placeholders && !opts.remove_file && !opts.verify_hash;
     if let Some(metadata) = metadata.as_ref()
-        && referenced
-            .is_referenced(conn, &metadata.provider, payload_ref)
-            .await?
         && !tombstone_missing_payload
+        && !gc::owner_referenced_payloads(
+            conn,
+            &[gc::PayloadOwner {
+                payload_ref: payload_ref.to_string(),
+                provider: metadata.provider.clone(),
+                session_id: metadata.session_id.clone(),
+                message_id: metadata.message_id.clone(),
+            }],
+        )
+        .await?
+        .is_empty()
     {
         return Err(LcmError::StillReferenced);
     }
@@ -263,11 +217,10 @@ pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
         params![payload_ref],
     )
     .await?;
-    if opts.rewrite_placeholders {
-        placeholders_rewritten = tombstone_residual_placeholders(conn, payload_ref).await?;
-        // The rewrite above is unscoped and exhaustive, so this ref is now
-        // absent from the live closure of every provider.
-        referenced.forget(payload_ref);
+    if opts.rewrite_placeholders
+        && let Some(metadata) = metadata.as_ref()
+    {
+        placeholders_rewritten = tombstone_owner_placeholders(conn, metadata).await?;
     }
 
     let file_removed = opts.remove_file && file_existed;
@@ -345,7 +298,7 @@ where
     };
     let quarantine_name = format!(
         ".tracedecay-pending-delete-{}",
-        util::sha256_hex(payload_ref.as_bytes())
+        sha256_hex(payload_ref.as_bytes())
     );
     let quarantine = dir.join(&quarantine_name);
     ensure_contained(&dir, &quarantine)?;
@@ -438,33 +391,34 @@ pub fn payload_file_fingerprint(
     };
     let text = std::str::from_utf8(&content).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     Ok((
-        util::sha256_hex(&content),
+        sha256_hex(&content),
         content.len() as u64,
         text.chars().count() as u64,
     ))
 }
 
-async fn tombstone_residual_placeholders(
+/// Tombstones the deleted payload's placeholders in its owner row, the only
+/// row that references it (`gc::owner_referenced_payloads`). The lookup is one
+/// `(provider, message_id)` unique-index seek, so a delete never reads other
+/// rows' text; a placeholder quoted elsewhere is text, not a reference.
+async fn tombstone_owner_placeholders(
     conn: &(impl Executor + ?Sized),
-    payload_ref: &str,
+    metadata: &LcmPayloadRef,
 ) -> Result<usize, LcmError> {
-    // `payload_ref = ?` is the indexable arm and covers every row whose stored
-    // ref must be cleared. The `LIKE` arm is only reachable for text that embeds
-    // a placeholder, which no index can answer; narrowing it from a bare
-    // `%ref%` to `%live-prefix%ref%` keeps the arm exact — a rewrite only ever
-    // changes a bracket that starts with a live prefix and carries `ref=<ref>`
-    // after it — while dropping inline bodies and already-tombstoned rows that
-    // the bare pattern dragged back for no change.
-    let like_patterns = gc::live_prefix_ref_like_patterns(payload_ref);
-    let like_sql = gc::placeholder_text_like_sql(like_patterns.len());
-    let sql = format!(
-        "SELECT store_id, storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
-         FROM lcm_raw_messages
-         WHERE payload_ref = ? OR {like_sql}"
-    );
-    let mut values = vec![SqlValue::Text(payload_ref.to_string())];
-    values.extend(gc::bind_placeholder_like_patterns(&like_patterns));
-    let mut rows = conn.query(&sql, values).await?;
+    let payload_ref = metadata.payload_ref.as_str();
+    let mut rows = conn
+        .query(
+            "SELECT store_id, storage_kind, payload_ref, content, snippet_text, index_text,
+                    metadata_json, placeholder_text
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND message_id = ?2 AND session_id = ?3",
+            params![
+                metadata.provider.as_str(),
+                metadata.message_id.as_str(),
+                metadata.session_id.as_str()
+            ],
+        )
+        .await?;
     let mut updates = Vec::new();
     while let Some(row) = rows.next().await? {
         let store_id: i64 = row.get(0)?;
@@ -482,14 +436,15 @@ async fn tombstone_residual_placeholders(
             }
             tombstoned
         });
-        let new_snippet = gc::tombstone_placeholder_in_text(&snippet_text, payload_ref);
-        if new_snippet != snippet_text {
+        if gc::tombstone_placeholder_in_text(&snippet_text, payload_ref) != snippet_text {
             changed += 1;
         }
-        let new_index = gc::tombstone_placeholder_in_text(&index_text, payload_ref);
-        if new_index != index_text {
+        if gc::tombstone_placeholder_in_text(&index_text, payload_ref) != index_text {
             changed += 1;
         }
+        let placeholder_text: Option<String> = row.get(7)?;
+        let new_placeholder =
+            placeholder_text.map(|text| gc::tombstone_placeholder_in_text(&text, payload_ref));
         let new_metadata = metadata_json.map(|text| {
             let tombstoned = gc::tombstone_placeholder_in_text(&text, payload_ref);
             if tombstoned != text {
@@ -509,8 +464,7 @@ async fn tombstone_residual_placeholders(
                 store_id,
                 clear_raw_ref,
                 new_content,
-                new_snippet,
-                new_index,
+                new_placeholder,
                 new_metadata,
                 changed,
             ));
@@ -518,19 +472,16 @@ async fn tombstone_residual_placeholders(
     }
 
     let mut changed_total = 0usize;
-    for (store_id, clear_raw_ref, content, snippet_text, index_text, metadata_json, changed) in
-        updates
-    {
+    for (store_id, clear_raw_ref, content, placeholder_text, metadata_json, changed) in updates {
         if clear_raw_ref {
             conn.execute(
                 "UPDATE lcm_raw_messages
-                 SET storage_kind = 'inline', payload_ref = NULL, content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
+                 SET storage_kind = 'inline', payload_ref = NULL, content = ?2, placeholder_text = ?3, metadata_json = ?4
                  WHERE store_id = ?1",
                 params![
                     store_id,
                     content.as_deref(),
-                    snippet_text,
-                    index_text,
+                    placeholder_text.as_deref(),
                     metadata_json.as_deref()
                 ],
             )
@@ -538,13 +489,12 @@ async fn tombstone_residual_placeholders(
         } else {
             conn.execute(
                 "UPDATE lcm_raw_messages
-                 SET content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
+                 SET content = ?2, placeholder_text = ?3, metadata_json = ?4
                  WHERE store_id = ?1",
                 params![
                     store_id,
                     content.as_deref(),
-                    snippet_text,
-                    index_text,
+                    placeholder_text.as_deref(),
                     metadata_json.as_deref()
                 ],
             )

@@ -5,11 +5,19 @@
 
 use std::future::Future;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay_hooks::{DaemonHookEvent, HookRouteMetadata};
+use tracedecay_contracts::retrieval::{HookIngestTranscriptRequestV1, HookRuntimeSurfaceRequestV1};
+use tracedecay_hooks::DaemonHookEvent;
+use tracedecay_hooks::delivery_spool::HookDeliveryReceiptOutcomeV1;
+
+use crate::ports::hook_runtime::HookRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::lifecycle_lease::{
+    SharedLeaseAttempt, try_acquire_shared_for_profile,
+};
 
 mod analytics;
 mod claude;
@@ -24,47 +32,38 @@ pub mod hint_outcomes;
 mod hook_boundary_failure_matrix;
 mod kiro;
 pub mod memory_inject;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod pi_tests;
 mod post_tool_use;
 mod steering;
 mod store_layout;
 pub mod tool_hints;
 pub use dispatch::NATIVE_HOOK_HOSTS;
-pub use dispatch::NativeContextScoutLifecycleV1;
 pub use dispatch::native_capture_material;
 pub use dispatch::project_and_worktree_locators_for_scope as hook_scope_locators;
 pub use dispatch::project_id_for_layout as hook_project_id_for_layout;
 pub use dispatch::protected_session_id_for_native as protected_native_session_id;
 pub use dispatch::publish_daemon_bindings as publish_hook_bindings;
+pub use dispatch::worktree_id_for_layout as hook_worktree_id_for_layout;
+pub use tracedecay_hooks::NativeContextScoutLifecycleV1;
 
 pub use claude::{
-    evaluate_hook_decision, hook_claude_post_compact, hook_claude_post_tool_use,
-    hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
-    hook_stop,
+    hook_claude_post_compact, hook_claude_post_tool_use, hook_claude_session_start, hook_stop,
 };
 pub use codex::{
-    codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
-    codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
-    codex_workspace_status_from_event, evaluate_codex_subagent_start, hook_codex_post_compact,
-    hook_codex_post_tool_use, hook_codex_session_start, hook_codex_stop, hook_codex_subagent_start,
-    hook_codex_user_prompt_submit, record_codex_subagent_start,
+    codex_project_root_from_event, codex_user_prompt_submit_context_for_event,
+    codex_workspace_status_from_event, hook_codex_post_compact, hook_codex_post_tool_use,
+    hook_codex_session_start, hook_codex_user_prompt_submit,
 };
 pub use cursor::{
     CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_project_root_from_event, cursor_session_start_json,
-    evaluate_cursor_subagent_start, hook_cursor_after_file_edit, hook_cursor_after_shell,
-    hook_cursor_post_tool_use, hook_cursor_pre_compact, hook_cursor_session_end,
-    hook_cursor_session_start, hook_cursor_stop, hook_cursor_subagent_start,
-    hook_cursor_workspace_open,
+    hook_cursor_post_tool_use, hook_cursor_session_start,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
-pub use kiro::{
-    evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
-    hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
-};
-pub use steering::{
-    CODEX_SESSION_CONTEXT_BUDGET, CURSOR_PLUGIN_SKILLS, CURSOR_SESSION_CONTEXT_BUDGET,
-    HookWorkspaceStatus, build_codex_session_context, build_codex_session_context_for_workspace,
-    build_cursor_session_context, cursor_staleness_hint,
-};
+pub use kiro::hook_kiro_prompt_submit;
+pub use steering::HookWorkspaceStatus;
+pub(crate) use steering::SKILL_MANDATE;
 
 #[cfg(test)]
 use analytics::HOOK_ANALYTICS_FILENAME;
@@ -74,88 +73,346 @@ pub use analytics::{
     measure_host_event_payload_bytes,
 };
 use analytics::{
-    record_hint_analytics, record_hint_emitted, record_hook_analytics, record_hook_invoked,
-    record_hook_invoked_parsed, record_other_hook_invoked, record_workspace_status_analytics,
+    HookStdinRefusal, record_hint_analytics, record_hint_emitted, record_hook_invoked,
+    record_hook_invoked_parsed, record_hook_stdin_refused, record_native_hook_invoked_parsed,
+    record_workspace_status_analytics,
 };
 
 pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadinessDistributions {
     analytics::aggregate_hook_completed_readiness(rows)
 }
 
-use tool_hints::{HintAgent, ToolHint};
+/// Records the `hook_invoked`/`hook_completed` pair for a native callback that
+/// the capture fast path answers without entering a host response handler.
+///
+/// Every other hook entry point opens its span through the same recorder. The
+/// capture path did not, so each capture-only callback fired silently: the
+/// project's `hook_analytics.jsonl` gained no row, `tracedecay analytics`
+/// reported the host as never having invoked a hook, and that is exactly the
+/// signal a broken install gives. Attribution follows the host's own event name,
+/// read the way the Hermes terminal-receipt handler reads it, so a capture
+/// row is indistinguishable from the response row the same event produces.
+///
+/// `hook_name` is the event the subcommand itself names. It wins over the
+/// payload's own event name, so an empty, malformed, or nameless payload (and
+/// Claude's `TOOL_INPUT`-driven `preToolUse`) still records the host event.
+///
+/// The returned span writes `hook_completed` when dropped; the caller notes
+/// the capture outcome on it first.
+#[tracing::instrument(
+    name = "agent_hosts.hooks.record_native_capture",
+    level = "trace",
+    skip_all
+)]
+pub fn record_native_capture_invoked(
+    runtime: &HookRuntimeV1,
+    project_root: Option<&Path>,
+    host: NativeHostIdentityV1,
+    hook_name: Option<&str>,
+    event_json: &str,
+) -> NativeCaptureTelemetryV1 {
+    NativeCaptureTelemetryV1(record_native_hook_invoked(
+        runtime,
+        project_root,
+        host,
+        hook_name,
+        event_json,
+    ))
+}
+
+/// Records a stdin refusal for a native callback, attributed to the host and
+/// the event its subcommand names.
+pub fn record_native_capture_stdin_refused(
+    runtime: &HookRuntimeV1,
+    project_root: Option<&Path>,
+    host: NativeHostIdentityV1,
+    hook_name: Option<&str>,
+    oversized: bool,
+) {
+    record_hook_stdin_refused(
+        runtime,
+        project_root,
+        host,
+        hook_name.unwrap_or(NATIVE_CALLBACK_HOOK_NAME),
+        if oversized {
+            HookStdinRefusal::Oversized
+        } else {
+            HookStdinRefusal::Unreadable
+        },
+    );
+}
+
+/// The `hook_completed` half of a capture-path invocation.
+pub struct NativeCaptureTelemetryV1(analytics::HookTimingSpan);
+
+impl NativeCaptureTelemetryV1 {
+    /// Notes where the capture landed. `receipt` is the delivery receipt of a
+    /// spooled event; one the hook could not retain is recorded here, not as
+    /// a lost event.
+    pub fn note_capture_outcome(
+        &self,
+        outcome: &tracedecay_hooks::NativeHookCaptureOutcomeV1,
+        receipt: Option<&HookDeliveryReceiptOutcomeV1>,
+    ) {
+        use tracedecay_hooks::NativeHookCaptureOutcomeV1 as Outcome;
+        use tracedecay_sessions::admission::{
+            HostAdmissionStatus as Status, HostAdmissionTelemetryDisposition as Disposition,
+        };
+        let (status, retryable, reason) = match outcome {
+            Outcome::Captured => (
+                Status::AcceptedForReplay,
+                true,
+                receipt.map_or(
+                    "hook_v2_spooled_delivery_receipt_unattempted",
+                    HookDeliveryReceiptOutcomeV1::spooled_reason_code,
+                ),
+            ),
+            Outcome::Unsupported => (Status::Degraded, false, "native_capture_unsupported"),
+            Outcome::Unbound => (Status::Unavailable, true, "native_capture_unbound"),
+            Outcome::Rejected => (Status::Unavailable, false, "native_capture_rejected"),
+            Outcome::Full => (Status::Backpressured, true, "native_capture_spool_full"),
+            Outcome::ResetRequired(_) => {
+                (Status::Unavailable, false, "native_capture_reset_required")
+            }
+            Outcome::Unavailable(_) => (Status::Unavailable, true, "native_capture_unavailable"),
+            Outcome::ScopeUnavailable => (
+                Status::Unavailable,
+                true,
+                "native_capture_scope_unavailable",
+            ),
+            Outcome::AdmissionTimedOut => {
+                self.0
+                    .note_disposition(Disposition::timeout("native_capture_admission_timed_out"));
+                return;
+            }
+        };
+        self.0.note_disposition(Disposition::from_parts(
+            status,
+            Some(retryable),
+            Some(reason.to_owned()),
+        ));
+    }
+}
+
+const NATIVE_CALLBACK_HOOK_NAME: &str = "nativeCallback";
+
+/// The event name a host puts in its own payload.
+fn payload_event_name(parsed: &Value) -> Option<&str> {
+    parsed
+        .get("hook_event_name")
+        .or_else(|| parsed.get("type"))
+        .or_else(|| parsed.get("event"))
+        .and_then(Value::as_str)
+}
+
+fn record_native_hook_invoked(
+    runtime: &HookRuntimeV1,
+    project_root: Option<&Path>,
+    host: NativeHostIdentityV1,
+    hook_name: Option<&str>,
+    event_json: &str,
+) -> analytics::HookTimingSpan {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let hook_name = hook_name
+        .or_else(|| payload_event_name(&parsed))
+        .unwrap_or(NATIVE_CALLBACK_HOOK_NAME);
+    record_native_hook_invoked_parsed(runtime, project_root, host, hook_name, event_json, &parsed)
+}
+
+use tool_hints::ToolHint;
+use tracedecay_domain::{HostIntegrationIdV1, NativeHostIdentityV1};
 use tracedecay_policy::hint_delivery::HintDeliveryDecisionV1;
 
-pub async fn dispatch_kimi_event(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry = record_other_hook_invoked(Some(project_root), "kimi_event", event_json);
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_kimi_event",
+    level = "trace",
+    skip_all
+)]
+async fn dispatch_kimi_event(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
+    started: Instant,
+) -> Option<String> {
     dispatch::dispatch(
-        tracedecay_hooks::HookHostV1::KimiCode,
+        runtime,
+        NativeHostIdentityV1::KimiCode,
         event_json,
         project_root,
-        Some(&telemetry),
+        Some(telemetry),
+        started,
     )
     .await
-    .into_recorded_guidance(&telemetry)
+    .into_recorded_guidance(telemetry)
     .flatten()
 }
 
-pub async fn dispatch_opencode_event(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry = record_other_hook_invoked(Some(project_root), "opencode_event", event_json);
-    let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
-        dispatch::dispatch_opencode_lsp_updated(event_json, project_root, Some(&telemetry)).await
-    } else {
-        dispatch::dispatch(
-            tracedecay_hooks::HookHostV1::OpenCode,
+const PI_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
+const PI_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
+
+/// Pi lifecycle events record under the Pi host with Pi's own event name, and
+/// each session boundary lands that session's transcript through the
+/// canonical Pi source so recall reflects the session the event names.
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_pi_event",
+    level = "trace",
+    skip_all
+)]
+async fn dispatch_pi_event(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
+    started: Instant,
+) -> Option<String> {
+    let guidance = dispatch::dispatch(
+        runtime,
+        NativeHostIdentityV1::Pi,
+        event_json,
+        project_root,
+        Some(telemetry),
+        started,
+    )
+    .await
+    .into_recorded_guidance(telemetry)
+    .flatten();
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    if matches!(
+        parsed.get("hook_event_name").and_then(Value::as_str),
+        Some("session_start" | "agent_end")
+    ) {
+        ingest_transcript_for_event(
+            runtime,
+            "pi",
             event_json,
-            project_root,
-            Some(&telemetry),
+            Some(project_root),
+            Some(PI_HOT_INGEST_MAX_BYTES),
+            PI_HOT_INGEST_BUDGET,
+            Some(telemetry),
         )
-        .await
-    };
-    dispatch.into_recorded_guidance(&telemetry).flatten()
+        .await;
+    }
+    guidance
 }
 
-pub async fn dispatch_opencode_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry =
-        record_other_hook_invoked(Some(project_root), "opencode_tool_after", event_json);
-    dispatch::dispatch_opencode_tool_after(event_json, project_root, Some(&telemetry))
-        .await
-        .into_recorded_guidance(&telemetry)
-        .flatten()
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_droid_event",
+    level = "trace",
+    skip_all
+)]
+async fn dispatch_droid_event(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
+    started: Instant,
+) -> Option<String> {
+    dispatch::dispatch(
+        runtime,
+        NativeHostIdentityV1::FactoryDroid,
+        event_json,
+        project_root,
+        Some(telemetry),
+        started,
+    )
+    .await
+    .into_recorded_guidance(telemetry)
+    .flatten()
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.write_output")]
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_opencode_event",
+    level = "trace",
+    skip_all
+)]
+async fn dispatch_opencode_event(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
+    started: Instant,
+) -> Option<String> {
+    dispatch::dispatch(
+        runtime,
+        NativeHostIdentityV1::OpenCode,
+        event_json,
+        project_root,
+        Some(telemetry),
+        started,
+    )
+    .await
+    .into_recorded_guidance(telemetry)
+    .flatten()
+}
+
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_opencode_tool_after",
+    level = "trace",
+    skip_all
+)]
+async fn dispatch_opencode_tool_after(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+    telemetry: &analytics::HookTimingSpan,
+    started: Instant,
+) -> Option<String> {
+    dispatch::dispatch_opencode_tool_after(
+        runtime,
+        event_json,
+        project_root,
+        Some(telemetry),
+        started,
+    )
+    .await
+    .into_recorded_guidance(telemetry)
+    .flatten()
+}
+
+/// Deliver a response hook's output and retain its delivery receipt.
+///
+/// The host's output is the delivery, so it is flushed first and a receipt
+/// that cannot be retained never fails the hook. Receipt writers share the
+/// spool and wait on each other only for a rename; a publish lock held past
+/// the synchronous budget, measured from that wait, leaves the synced receipt
+/// staged for the daemon's drain to adopt.
+#[tracing::instrument(name = "hosts.hooks.write_output", level = "trace", skip_all)]
 pub(crate) async fn write_hook_output(
+    profile: &ProfileRoot,
     project_root: Option<&Path>,
-    host: tracedecay_hooks::HookHostV1,
+    host: NativeHostIdentityV1,
     event_json: &str,
     output: &str,
-    telemetry: Option<&analytics::HookTimingSpan>,
 ) -> bool {
-    let delivery_writer = match project_root {
-        None => None,
+    let (layout, _lease) = match project_root {
+        None => (None, None),
         Some(project_root) => {
-            let Some(layout) = store_layout::enrolled_layout(project_root) else {
+            if !profile.data_dir().is_dir() {
+                return false;
+            }
+            // Dispatch has already released its lease. Hold a fresh one through
+            // output delivery and receipt retention so maintenance cannot race either.
+            let lease = match try_acquire_shared_for_profile(profile.data_dir(), "hook output") {
+                Ok(SharedLeaseAttempt::Acquired(lease)) => lease,
+                Ok(SharedLeaseAttempt::Busy) => return false,
+                Err(error) => {
+                    tracing::warn!(host = host.hook_key(), %error, "Hook output lease failed");
+                    return false;
+                }
+            };
+            let Some(layout) = store_layout::enrolled_layout(profile.data_dir(), project_root)
+                .filter(|layout| layout.data_root.is_dir())
+            else {
                 tracing::warn!(
                     host = host.hook_key(),
                     "Hook output delivery has no enrolled project layout"
                 );
                 return false;
             };
-            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
-                tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
-            ) {
-                Ok(writer) => Some(writer),
-                Err(error) => {
-                    tracing::warn!(host = host.hook_key(), %error, "Hook output delivery receipt spool could not be opened");
-                    return false;
-                }
-            }
+            (Some(layout), Some(lease))
         }
     };
-    // Scoped so both the stdout handle and its lock guard (neither of which is
-    // `Send`) are fully dropped before the delivery-settlement await below;
-    // otherwise the compiler must treat this future as holding a `!Send`
-    // guard across that suspend point.
     let written = {
         let stdout = std::io::stdout();
         let mut stdout = stdout.lock();
@@ -168,36 +425,43 @@ pub(crate) async fn write_hook_output(
         eprintln!("tracedecay hook: failed to flush host output: {error}");
         return false;
     }
-    let Some(project_root) = project_root else {
-        return true;
-    };
-    let Some(delivery_writer) = delivery_writer else {
-        tracing::error!(
-            host = host.hook_key(),
-            "Hook output delivery writer disappeared"
-        );
-        return false;
+    if let Some(layout) = layout {
+        let receipt = retain_output_receipt(&layout.data_root, host, event_json, output);
+        if !matches!(receipt, HookDeliveryReceiptOutcomeV1::Delivered(_)) {
+            tracing::warn!(
+                host = host.hook_key(),
+                ?receipt,
+                "Hook output was delivered but its delivery receipt was not retained"
+            );
+        }
+    }
+    true
+}
+
+/// Durably retains the delivery receipt of a hook output the host already
+/// received. The daemon replay lane settles and acknowledges it, including
+/// when the callback runs while the daemon is offline.
+fn retain_output_receipt(
+    data_root: &Path,
+    host: NativeHostIdentityV1,
+    event_json: &str,
+    output: &str,
+) -> HookDeliveryReceiptOutcomeV1 {
+    let identity_unavailable = HookDeliveryReceiptOutcomeV1::Refused {
+        reason: tracedecay_hooks::delivery_spool::HookDeliveryReceiptRefusalV1::IdentityUnavailable,
     };
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
     let session = event_session_id(&parsed).unwrap_or_else(|| "session-unavailable".to_owned());
     let settled_at = daemon_ports::now_utc();
     let Some(owner) = hook_output_owner_event_id(host, event_json, output) else {
-        tracing::error!(
-            host = host.hook_key(),
-            "Hook output delivery identity could not be derived"
-        );
-        return false;
+        return identity_unavailable;
     };
     let Ok(channel) = tracedecay_domain::canonical_sha256(&(
         "tracedecay.hook-output-channel.v1",
         host.hook_key(),
         session,
     )) else {
-        tracing::error!(
-            host = host.hook_key(),
-            "Hook output delivery channel identity could not be derived"
-        );
-        return false;
+        return identity_unavailable;
     };
     let settlement = tracedecay_domain::DeliverySettlementV1 {
         attempt: tracedecay_domain::DeliverySettlementAttemptV1 {
@@ -220,41 +484,18 @@ pub(crate) async fn write_hook_output(
         settled_at,
         drop_reason: None,
     };
-    let receipt = match tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            tracing::warn!(%error, "Hook output delivery receipt is invalid");
-            return false;
-        }
-    };
-    let receipt = match delivery_writer.append_or_replay(&receipt) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            tracing::warn!(%error, "Hook output delivery receipt could not be persisted");
-            return false;
-        }
-    };
-    let settlement = receipt.settlement;
-    drop(delivery_writer);
-    if let Err(error) = daemon_hook_action(
-        Some(project_root),
-        serde_json::json!({
-            "action": "delivery_settlement",
-            "settlement": settlement,
-        }),
-        telemetry,
-    )
-    .await
-    {
-        // The source receipt is durable and the daemon replay lane will retry
-        // the exact retained settlement after a transport or daemon failure.
-        tracing::warn!(%error, "Hook output delivery receipt could not be reported; retained for replay");
+    match tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) {
+        Ok(receipt) => HookDeliveryReceiptOutcomeV1::retain(
+            tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host),
+            tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+            &receipt,
+        ),
+        Err(error) => Err(error).into(),
     }
-    true
 }
 
 fn hook_output_owner_event_id(
-    host: tracedecay_hooks::HookHostV1,
+    host: NativeHostIdentityV1,
     event_json: &str,
     output: &str,
 ) -> Option<String> {
@@ -271,69 +512,126 @@ fn hook_output_owner_event_id(
     ))
 }
 
+/// Reads the bounded hook event, or records the refusal against `host` and
+/// the event the subcommand names and returns the handler's exit code.
 macro_rules! read_hook_event {
-    () => {{
-        match $crate::hooks::read_stdin_bounded() {
-            Ok($crate::hooks::HookStdinRead::Event(event)) => event,
-            Ok($crate::hooks::HookStdinRead::Oversized) => {
-                eprintln!(
-                    "tracedecay hook: stdin exceeds wire message bound ({})",
-                    ::tracedecay_framing::WIRE_RECORD_TOO_LARGE
-                );
-                return 0;
-            }
-            Err(e) => {
-                eprintln!("tracedecay hook: failed to read stdin: {e}");
-                return 1;
+    ($runtime:expr, $host:expr, $hook_name:expr) => {{
+        match $crate::hooks::take_hook_event($crate::hooks::read_stdin_bounded()) {
+            Ok(event) => event,
+            Err(refusal) => {
+                return $crate::hooks::refuse_hook_stdin($runtime, $host, $hook_name, refusal);
             }
         }
     }};
 }
 pub(crate) use read_hook_event;
 
-/// Shared native-event handler body: read the bounded event, resolve the
-/// project root, dispatch, and deliver any guidance for `host`.
-async fn hook_native_event(
-    host: tracedecay_hooks::HookHostV1,
-    dispatch: impl AsyncFnOnce(&str, &Path) -> Option<String>,
+pub(crate) fn refuse_hook_stdin(
+    runtime: &HookRuntimeV1,
+    host: NativeHostIdentityV1,
+    hook_name: &str,
+    refusal: HookStdinAdmission,
 ) -> i32 {
-    let event = read_hook_event!();
-    let Some(root) = native_event_project_root(&event).await else {
+    let refused = match refusal {
+        HookStdinAdmission::Oversized => HookStdinRefusal::Oversized,
+        HookStdinAdmission::ReadFailed(_) => HookStdinRefusal::Unreadable,
+        HookStdinAdmission::Event(_) => return 0,
+    };
+    let cwd = std::env::current_dir().ok();
+    record_hook_stdin_refused(runtime, cwd.as_deref(), host, hook_name, refused);
+    report_rejected_hook_stdin(&refusal);
+    hook_stdin_exit_code(&refusal).unwrap_or(1)
+}
+
+/// Shared native-event handler body: read the bounded event, resolve the
+/// project root, record the invocation (profile-level when no enrolled
+/// project owns the event), dispatch, and deliver any guidance for `host`.
+async fn hook_native_event(
+    runtime: &HookRuntimeV1,
+    host: NativeHostIdentityV1,
+    hook_name: Option<&'static str>,
+    dispatch: impl AsyncFnOnce(
+        &HookRuntimeV1,
+        &str,
+        &Path,
+        &analytics::HookTimingSpan,
+        Instant,
+    ) -> Option<String>,
+) -> i32 {
+    let started = Instant::now();
+    let event = read_hook_event!(
+        runtime,
+        host,
+        hook_name.unwrap_or(NATIVE_CALLBACK_HOOK_NAME)
+    );
+    let root = native_event_project_root(runtime, &event).await;
+    let telemetry = record_native_hook_invoked(runtime, root.as_deref(), host, hook_name, &event);
+    let Some(root) = root else {
         return 0;
     };
-    if let Some(guidance) = dispatch(&event, &root).await
-        && !write_hook_output(Some(&root), host, &event, &guidance, None).await
+    if let Some(guidance) = dispatch(runtime, &event, &root, &telemetry, started).await
+        && !write_hook_output(&runtime.profile, Some(&root), host, &event, &guidance).await
     {
         return 1;
     }
     0
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.kimi_event")]
-pub async fn hook_kimi_event() -> i32 {
-    hook_native_event(tracedecay_hooks::HookHostV1::KimiCode, dispatch_kimi_event).await
+#[tracing::instrument(name = "hosts.hooks.kimi_event", level = "trace", skip_all)]
+pub async fn hook_kimi_event(runtime: &HookRuntimeV1) -> i32 {
+    hook_native_event(
+        runtime,
+        NativeHostIdentityV1::KimiCode,
+        None,
+        dispatch_kimi_event,
+    )
+    .await
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.opencode_event")]
-pub async fn hook_opencode_event() -> i32 {
+#[tracing::instrument(name = "hosts.hooks.pi_event", level = "trace", skip_all)]
+pub async fn hook_pi_event(runtime: &HookRuntimeV1) -> i32 {
+    hook_native_event(runtime, NativeHostIdentityV1::Pi, None, dispatch_pi_event).await
+}
+
+#[tracing::instrument(name = "hosts.hooks.droid_event", level = "trace", skip_all)]
+pub async fn hook_droid_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
-        tracedecay_hooks::HookHostV1::OpenCode,
+        runtime,
+        NativeHostIdentityV1::FactoryDroid,
+        None,
+        dispatch_droid_event,
+    )
+    .await
+}
+
+#[tracing::instrument(name = "hosts.hooks.opencode_event", level = "trace", skip_all)]
+pub async fn hook_opencode_event(runtime: &HookRuntimeV1) -> i32 {
+    hook_native_event(
+        runtime,
+        NativeHostIdentityV1::OpenCode,
+        None,
         dispatch_opencode_event,
     )
     .await
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.opencode_tool_after")]
-pub async fn hook_opencode_tool_after() -> i32 {
+/// OpenCode's direct tool callback payload carries no event name; the plugin
+/// hook it answers (`ctx.tool.hook("execute.after")`) is the name.
+pub const OPENCODE_TOOL_EXECUTE_AFTER_HOOK_NAME: &str = "tool.execute.after";
+
+#[tracing::instrument(name = "hosts.hooks.opencode_tool_after", level = "trace", skip_all)]
+pub async fn hook_opencode_tool_after(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
-        tracedecay_hooks::HookHostV1::OpenCode,
+        runtime,
+        NativeHostIdentityV1::OpenCode,
+        Some(OPENCODE_TOOL_EXECUTE_AFTER_HOOK_NAME),
         dispatch_opencode_tool_after,
     )
     .await
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.native_resolve_root")]
-async fn native_event_project_root(event: &str) -> Option<PathBuf> {
+#[tracing::instrument(name = "hosts.hooks.native_resolve_root", level = "trace", skip_all)]
+async fn native_event_project_root(runtime: &HookRuntimeV1, event: &str) -> Option<PathBuf> {
     let parsed = serde_json::from_str::<Value>(event).ok();
     let start = parsed
         .as_ref()
@@ -341,23 +639,17 @@ async fn native_event_project_root(event: &str) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    crate::ports::hook_runtime::resolve_project_root_with_identity(&start).await
+    (runtime.project_root_resolver)(&runtime.profile, &start).await
 }
 
-pub(crate) async fn daemon_tool_json(
-    project_root: Option<&Path>,
-    tool_name: &str,
-    arguments: Value,
-) -> crate::errors::Result<Value> {
-    crate::ports::hook_runtime::daemon_tool_json(project_root, tool_name, arguments, false).await
-}
-
-#[hotpath::measure(future = true, label = "hosts.hooks.daemon_action")]
+#[tracing::instrument(name = "hosts.hooks.daemon_action", level = "trace", skip_all)]
 pub(crate) async fn daemon_hook_action(
+    runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
-    mut arguments: Value,
+    request: HookRuntimeSurfaceRequestV1,
     telemetry: Option<&analytics::HookTimingSpan>,
-) -> crate::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
+    let mut arguments = serde_json::to_value(request)?;
     arguments["format"] = serde_json::json!("json");
     let payload_bytes = analytics::measure_json_payload_bytes(&arguments);
     #[cfg(test)]
@@ -368,7 +660,8 @@ pub(crate) async fn daemon_hook_action(
         return result;
     }
     let started = std::time::Instant::now();
-    let result = crate::ports::hook_runtime::daemon_tool_json(
+    let result = (runtime.daemon_tool)(
+        &runtime.profile,
         project_root,
         "tracedecay_hook_runtime",
         arguments,
@@ -385,89 +678,33 @@ pub(crate) async fn daemon_hook_action(
     result
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.ingest_user_session")]
+#[tracing::instrument(name = "hosts.hooks.ingest_user_session", level = "trace", skip_all)]
 pub(crate) async fn ingest_user_session(
+    runtime: &HookRuntimeV1,
     provider: &str,
     session_id: Option<String>,
     telemetry: Option<&analytics::HookTimingSpan>,
-) -> bool {
+) {
     if session_id.is_none() {
-        return false;
+        return;
     }
-    match daemon_hook_action(
+    if let Err(error) = daemon_hook_action(
+        runtime,
         None,
-        serde_json::json!({
-            "action": "ingest_transcript",
-            "provider": provider.to_lowercase(),
-            "user_scope": true,
-            "session_id": session_id,
+        HookRuntimeSurfaceRequestV1::IngestTranscript(HookIngestTranscriptRequestV1 {
+            provider: provider.to_lowercase(),
+            user_scope: true,
+            session_id,
+            event_json: None,
+            messages: None,
+            max_new_bytes: None,
         }),
         telemetry,
     )
     .await
     {
-        Ok(result) => result
-            .get("messages_upserted")
-            .and_then(Value::as_u64)
-            .is_some_and(|count| count > 0),
-        Err(error) => {
-            eprintln!("[tracedecay] user {provider} ingest daemon call failed: {error}");
-            false
-        }
+        tracing::warn!(provider, %error, "user transcript ingest daemon call failed");
     }
-}
-
-/// Fail-open transcript ingest shared by Cursor and Kiro catch-up hooks.
-///
-/// Daemon errors and budget timeouts are typed here. They must not collapse
-/// into a zero-counter success that hosts would treat as "nothing to review".
-#[derive(Default)]
-pub(crate) struct TranscriptIngestOutcome {
-    user_scope: bool,
-    messages_upserted: u64,
-    failed: bool,
-    timed_out: bool,
-}
-
-impl TranscriptIngestOutcome {
-    fn from_daemon_result(result: &Value) -> Self {
-        Self {
-            user_scope: result
-                .get("user_scope")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            messages_upserted: result
-                .get("messages_upserted")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            failed: false,
-            timed_out: false,
-        }
-    }
-
-    fn failed() -> Self {
-        Self {
-            failed: true,
-            ..Self::default()
-        }
-    }
-
-    fn timed_out() -> Self {
-        Self {
-            timed_out: true,
-            ..Self::default()
-        }
-    }
-
-    pub(crate) fn should_schedule_user_review(&self) -> bool {
-        !self.failed && !self.timed_out && self.user_scope && self.messages_upserted > 0
-    }
-}
-
-enum IngestAttempt {
-    Succeeded(Value),
-    Failed,
-    TimedOut,
 }
 
 pub(crate) async fn await_within_stop_budget<T>(
@@ -479,7 +716,7 @@ pub(crate) async fn await_within_stop_budget<T>(
     if let Some(telemetry) = telemetry {
         telemetry.note_timeout_budget(budget);
     }
-    match tokio::time::timeout(budget, work).await {
+    match asupersync::time::timeout(asupersync::time::wall_now(), budget, work).await {
         Ok(value) => {
             if let Some(telemetry) = telemetry {
                 telemetry.note_timed_out(false);
@@ -495,62 +732,51 @@ pub(crate) async fn await_within_stop_budget<T>(
     }
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.ingest_transcript")]
+#[tracing::instrument(name = "hosts.hooks.ingest_transcript", level = "trace", skip_all)]
 pub(crate) async fn ingest_transcript_for_event(
+    runtime: &HookRuntimeV1,
     provider: &str,
     event_json: &str,
     project_root: Option<&Path>,
     max_new_bytes: Option<u64>,
     budget: Duration,
     telemetry: Option<&analytics::HookTimingSpan>,
-) -> TranscriptIngestOutcome {
-    let mut args = serde_json::json!({
-        "action": "ingest_transcript",
-        "provider": provider,
-        "user_scope": project_root.is_none(),
-        "event_json": event_json,
+) {
+    let args = HookRuntimeSurfaceRequestV1::IngestTranscript(HookIngestTranscriptRequestV1 {
+        provider: provider.to_owned(),
+        user_scope: project_root.is_none(),
+        session_id: None,
+        event_json: Some(event_json.to_owned()),
+        messages: None,
+        max_new_bytes,
     });
-    if let Some(max_new_bytes) = max_new_bytes {
-        args["max_new_bytes"] = serde_json::json!(max_new_bytes);
-    }
-    args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
-    match await_within_stop_budget(
+    await_within_stop_budget(
         async {
-            match daemon_hook_action(project_root, args, telemetry).await {
-                Ok(result) => IngestAttempt::Succeeded(result),
-                Err(error) => {
-                    tracing::warn!(provider, %error, "transcript ingest daemon call failed");
-                    IngestAttempt::Failed
-                }
+            if let Err(error) = daemon_hook_action(runtime, project_root, args, telemetry).await {
+                tracing::warn!(provider, %error, "transcript ingest daemon call failed");
             }
         },
         budget,
         telemetry,
-        || {
-            tracing::warn!(provider, "transcript ingest daemon call timed out");
-            IngestAttempt::TimedOut
-        },
+        || tracing::warn!(provider, "transcript ingest daemon call timed out"),
     )
-    .await
-    {
-        IngestAttempt::Succeeded(result) => TranscriptIngestOutcome::from_daemon_result(&result),
-        IngestAttempt::Failed => TranscriptIngestOutcome::failed(),
-        IngestAttempt::TimedOut => TranscriptIngestOutcome::timed_out(),
-    }
+    .await;
 }
 
 pub(crate) async fn reset_counter_for_project(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     telemetry: Option<&analytics::HookTimingSpan>,
 ) {
     if let Err(error) = daemon_hook_action(
+        runtime,
         Some(project_root),
-        serde_json::json!({ "action": "reset_counter" }),
+        HookRuntimeSurfaceRequestV1::ResetCounter {},
         telemetry,
     )
     .await
     {
-        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
+        tracing::warn!(%error, "local counter reset daemon call failed");
     }
 }
 
@@ -566,54 +792,31 @@ pub fn additional_context_json(event_name: &str, additional_context: &str) -> St
     .to_string()
 }
 
-pub(crate) fn compact_daemon_args(
-    action: &str,
-    provider: &str,
-    user_scope: bool,
-    event_json: &str,
-    session_id: Option<&str>,
-) -> Value {
-    let mut args = serde_json::json!({
-        "action": action,
-        "provider": provider,
-        "user_scope": user_scope,
-        "event_json": event_json,
-    });
-    if let Some(session_id) = session_id {
-        args["session_id"] = serde_json::json!(session_id);
-    }
-    args
-}
-
-#[hotpath::measure(future = true, label = "hosts.hooks.notify_event")]
+#[tracing::instrument(name = "hosts.hooks.notify_event", level = "trace", skip_all)]
 pub(crate) async fn notify_hook_event_with_telemetry(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     event: DaemonHookEvent,
     telemetry: &analytics::HookTimingSpan,
-) {
+) -> tracedecay_hooks::HookEventNotifyOutcomeV1 {
     let payload_bytes = analytics::measure_json_payload_bytes(&event);
-    crate::ports::hook_runtime::notify_hook_event(project_root, event).await;
+    let outcome = (runtime.event_notifier)(&runtime.profile, project_root, event).await;
     telemetry.note_completed_daemon_notification(payload_bytes);
+    outcome
 }
 
-pub(crate) async fn notify_hook_event_with_optional_telemetry(
-    project_root: &Path,
-    event: DaemonHookEvent,
-    telemetry: Option<&analytics::HookTimingSpan>,
-) {
-    match telemetry {
-        Some(telemetry) => {
-            notify_hook_event_with_telemetry(project_root, event, telemetry).await;
-        }
-        None => {
-            crate::ports::hook_runtime::notify_hook_event(project_root, event).await;
-        }
-    }
-}
-
-#[hotpath::measure(future = true, label = "hosts.hooks.hermes_terminal_receipt")]
-pub async fn hook_hermes_terminal_receipt() -> i32 {
-    let event_json = read_hook_event!();
+#[tracing::instrument(
+    name = "hosts.hooks.hermes_terminal_receipt",
+    level = "trace",
+    skip_all
+)]
+pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
+    let event_json = read_hook_event!(
+        runtime,
+        NativeHostIdentityV1::Hermes,
+        NATIVE_CALLBACK_HOOK_NAME
+    );
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event_json) else {
         return 0;
     };
@@ -632,10 +835,7 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         });
     let project_root = match cwd {
         Some(cwd) => {
-            crate::ports::hook_runtime::resolve_project_root_with_identity(std::path::Path::new(
-                &cwd,
-            ))
-            .await
+            (runtime.project_root_resolver)(&runtime.profile, std::path::Path::new(&cwd)).await
         }
         None => None,
     };
@@ -645,16 +845,19 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("nativeCallback");
     let hook_telemetry = record_hook_invoked(
+        runtime,
         project_root.as_deref(),
-        HintAgent::Hermes,
+        HostIntegrationIdV1::Hermes,
         hook_name,
         &event_json,
     );
     let guidance = dispatch::dispatch_for_scope(
-        tracedecay_hooks::HookHostV1::Hermes,
+        runtime,
+        NativeHostIdentityV1::Hermes,
         &event_json,
         project_root.as_deref(),
         Some(&hook_telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&hook_telemetry)
@@ -669,14 +872,19 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         && event.receipt.is_some()
     {
         if let Some(project_root) = project_root.as_ref() {
-            notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
-        } else if let Err(error) = daemon_hook_action(
-            None,
-            serde_json::json!({ "action": "hermes_receipt", "event": event }),
-            Some(&hook_telemetry),
-        )
-        .await
-        {
+            notify_hook_event_with_telemetry(runtime, project_root, event, &hook_telemetry).await;
+        } else if let Err(error) = match serde_json::to_value(&event) {
+            Ok(event) => {
+                daemon_hook_action(
+                    runtime,
+                    None,
+                    HookRuntimeSurfaceRequestV1::HermesReceipt { event },
+                    Some(&hook_telemetry),
+                )
+                .await
+            }
+            Err(error) => Err(error.into()),
+        } {
             tracing::warn!(%error, "user Hermes receipt daemon call failed");
         }
     }
@@ -685,11 +893,11 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         |guidance| serde_json::json!({ "additional_context": guidance }).to_string(),
     );
     if !write_hook_output(
+        &runtime.profile,
         project_root.as_deref(),
-        tracedecay_hooks::HookHostV1::Hermes,
+        NativeHostIdentityV1::Hermes,
         &event_json,
         &output,
-        Some(&hook_telemetry),
     )
     .await
     {
@@ -698,75 +906,8 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     0
 }
 
-pub async fn schedule_user_session_review(provider: &str, session_id: Option<&str>) {
-    let hint = daemon_hook_action(
-        None,
-        serde_json::json!({
-            "action": "user_review",
-            "provider": provider,
-            "session_id": session_id,
-        }),
-        None,
-    );
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(25), hint).await;
-}
-
-const TRACEDECAY_RESEARCH_BLOCK_REASON: &str = "STOP: Use tracedecay MCP tools \
-(tracedecay_context, tracedecay_grep, tracedecay_search, tracedecay_callees, \
-tracedecay_callers, tracedecay_impact, tracedecay_files, tracedecay_affected) \
-instead of agents for code research. Route literal/regex text to tracedecay_grep, \
-symbol names to tracedecay_search, and concepts to tracedecay_context. TraceDecay \
-is faster and more precise for symbol relationships, call paths, and code structure. \
-Only use agents for code exploration if you have already tried tracedecay and it \
-cannot answer the question.";
-
-fn research_block_reason(hint: Option<ToolHint>) -> String {
-    let base = std::env::var("TRACEDECAY_RESEARCH_BLOCK_REASON")
-        .ok()
-        .unwrap_or_else(|| TRACEDECAY_RESEARCH_BLOCK_REASON.to_string());
-    hint.map_or_else(
-        || base.clone(),
-        |hint| format!("{}\n\n{}", base, format_tool_hint(&hint)),
-    )
-}
-
 #[cfg(test)]
-pub(crate) struct EnvGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-#[cfg(test)]
-impl EnvGuard {
-    pub(crate) fn set_path(key: &'static str, value: &Path) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-#[cfg(test)]
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
-    crate::config::lock_user_data_dir_test_env()
-}
-
-#[cfg(test)]
-pub(crate) fn run_with_test_env_lock<T>(future: impl std::future::Future<Output = T>) -> T {
-    let _lock = lock_test_env();
+pub(crate) fn block_on_hook_test_runtime<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -847,7 +988,7 @@ impl Drop for TestDaemonHookActionGuard {
 fn take_test_daemon_hook_action(
     project_root: Option<&Path>,
     arguments: &Value,
-) -> Option<crate::errors::Result<Value>> {
+) -> Option<tracedecay_domain::errors::Result<Value>> {
     let mut state = TEST_DAEMON_HOOK_ACTION
         .state
         .lock()
@@ -858,40 +999,11 @@ fn take_test_daemon_hook_action(
     state
         .calls
         .push((project_root.map(Path::to_path_buf), arguments.clone()));
-    Some(
-        state
-            .responses
-            .pop_front()
-            .ok_or_else(|| crate::errors::TraceDecayError::Config {
-                message: "daemon hook test responder has no response".to_string(),
-            }),
-    )
-}
-
-pub(crate) fn hook_route_metadata_from_parsed(
-    parsed: &Value,
-    project_root: &Path,
-) -> HookRouteMetadata {
-    let cwd = event_cwd_from_parsed(parsed);
-    let route_root = cwd.as_deref().unwrap_or(project_root);
-    let worktree = crate::worktree::git_worktree_root(route_root)
-        .unwrap_or_else(|| project_root.to_path_buf());
-    let branch = crate::branch::current_branch(&worktree);
-    HookRouteMetadata {
-        session_id: hook_route_session_id(parsed),
-        thread_id: text_field(
-            parsed,
-            &[
-                "thread_id",
-                "threadId",
-                "conversation_thread_id",
-                "conversationThreadId",
-            ],
-        ),
-        cwd,
-        worktree: Some(worktree),
-        branch,
-    }
+    Some(state.responses.pop_front().ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon hook test responder has no response".to_string(),
+        }
+    }))
 }
 
 const HOOK_SESSION_ID_KEYS: &[&str] = &[
@@ -908,14 +1020,15 @@ fn hook_route_session_id(parsed: &Value) -> Option<String> {
 }
 
 fn deduped_project_hint_with_id(
+    profile: &ProfileRoot,
     root: Option<&Path>,
-    agent: HintAgent,
+    agent: HostIntegrationIdV1,
     session_id: Option<String>,
     hint_id: &str,
     hint: ToolHint,
 ) -> Option<ToolHint> {
     let Some(session_id) = session_id else {
-        record_hint_emitted(root, agent, None, hint_id, &hint);
+        record_hint_emitted(profile.data_dir(), root, agent, None, hint_id, &hint);
         return Some(hint);
     };
 
@@ -923,21 +1036,13 @@ fn deduped_project_hint_with_id(
     // those decisions in the user profile so one missing cwd does not turn
     // every prompt/tool event into the same repeated hint.
     let project_path = root
-        .and_then(store_layout::layout)
+        .and_then(|root| store_layout::layout(profile.data_dir(), root))
         .filter(|layout| layout.data_root.is_dir())
         .map(|layout| layout.data_root.join("tool_hints_seen.json"));
-    let path = project_path.or_else(|| {
-        crate::storage::default_profile_root()
-            .ok()
-            .map(|profile| profile.join("tool_hints_seen.json"))
-    });
-    let Some(path) = path else {
-        record_hint_emitted(root, agent, Some(&session_id), hint_id, &hint);
-        return Some(hint);
-    };
+    let path = project_path.unwrap_or_else(|| profile.data_dir().join("tool_hints_seen.json"));
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
     let decision = dedupe.decide(&session_id, hint.category);
-    // Every decision — including the suppressed ones — advances the persisted
+    // Every decision, including the suppressed ones, advances the persisted
     // budget, so the save is unconditional.
     let _ = dedupe.save(&path);
 
@@ -949,7 +1054,15 @@ fn deduped_project_hint_with_id(
         HintDeliveryDecisionV1::SuppressBudget => ("suppressed_budget", hint),
         HintDeliveryDecisionV1::SuppressDuplicate => ("suppressed_duplicate", hint),
     };
-    record_hint_analytics(root, event, agent, Some(&session_id), hint_id, &reported);
+    record_hint_analytics(
+        profile.data_dir(),
+        root,
+        event,
+        agent,
+        Some(&session_id),
+        hint_id,
+        &reported,
+    );
 
     matches!(
         decision,
@@ -958,12 +1071,49 @@ fn deduped_project_hint_with_id(
     .then_some(reported)
 }
 
+fn usable_absolute_temp_root_from(raw: &Path) -> Option<PathBuf> {
+    if raw.as_os_str().is_empty() || !raw.is_absolute() {
+        return None;
+    }
+    let temp_root = tracedecay_runtime_core::path_safety::canonical_root_identity(raw);
+    (temp_root.is_absolute() && !temp_root.as_os_str().is_empty()).then_some(temp_root)
+}
+
+fn usable_absolute_temp_root() -> Option<PathBuf> {
+    usable_absolute_temp_root_from(&std::env::temp_dir())
+}
+
 fn nearest_project_like_root(start: &Path) -> Option<PathBuf> {
-    if let Some(root) = crate::worktree::git_worktree_root(start) {
+    nearest_project_like_root_with_temp_root(start, usable_absolute_temp_root().as_deref())
+}
+
+fn nearest_project_like_root_with_temp_root(
+    start: &Path,
+    temp_root: Option<&Path>,
+) -> Option<PathBuf> {
+    // Fail closed when temp identity is unavailable: skipping the bound would
+    // re-enroll ephemeral agent git worktrees under the process temp root.
+    let temp_root = temp_root.and_then(usable_absolute_temp_root_from)?;
+    let start_id = tracedecay_runtime_core::path_safety::canonical_root_identity(start);
+    if start_id.starts_with(&temp_root) {
+        return None;
+    }
+    if let Some(root) = tracedecay_runtime_core::worktree::git_worktree_root(start) {
+        let root_id = tracedecay_runtime_core::path_safety::canonical_root_identity(&root);
+        if root_id.starts_with(&temp_root) {
+            return None;
+        }
         return Some(root);
     }
     let mut dir = start.to_path_buf();
     loop {
+        // Same starts_with bound as the git-worktree refusal: a marker inside
+        // the temp tree must not enroll, not only a marker exactly at temp_root.
+        if tracedecay_runtime_core::path_safety::canonical_root_identity(&dir)
+            .starts_with(&temp_root)
+        {
+            return None;
+        }
         if project_marker_exists(&dir) {
             return Some(dir);
         }
@@ -991,22 +1141,6 @@ fn project_marker_exists(dir: &Path) -> bool {
         "tsconfig.json",
     ];
     MARKERS.iter().any(|marker| dir.join(marker).exists())
-}
-
-fn rel_under_root(root: &Path, abs: &Path) -> Option<String> {
-    let stripped = abs.strip_prefix(root).ok()?;
-    if stripped.as_os_str().is_empty() {
-        return None;
-    }
-    if stripped.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return None;
-    }
-    Some(stripped.to_string_lossy().replace('\\', "/"))
 }
 
 fn text_field(value: &Value, keys: &[&str]) -> Option<String> {
@@ -1050,22 +1184,22 @@ fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {
 /// Claude, Codex, and Kiro all send the session working directory under the
 /// same key, so this resolver is host-neutral and lives beside the other
 /// event-field readers rather than in any one host's module.
-fn event_project_root(parsed: &Value) -> Option<PathBuf> {
+fn event_project_root(profile: &ProfileRoot, parsed: &Value) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    crate::config::discover_project_root(&cwd)
+    profile.discover_project_root(&cwd)
 }
 
 /// [`event_project_root`] for callers that hold only the raw event JSON.
-fn event_project_root_from_json(event_json: &str) -> Option<PathBuf> {
+fn event_project_root_from_json(profile: &ProfileRoot, event_json: &str) -> Option<PathBuf> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    event_project_root(&parsed)
+    event_project_root(profile, &parsed)
 }
 
 /// The project root of the hook process's own working directory. Used by the
 /// surfaces whose payload carries no `cwd` at all.
-fn process_cwd_project_root() -> Option<PathBuf> {
+fn process_cwd_project_root(profile: &ProfileRoot) -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    crate::config::discover_project_root(&cwd)
+    profile.discover_project_root(&cwd)
 }
 
 /// Resolves the project root from the event `cwd`, falling back to the hook
@@ -1073,20 +1207,23 @@ fn process_cwd_project_root() -> Option<PathBuf> {
 /// non-project `cwd` still resolves to nothing: the event named a directory, and
 /// silently re-attributing it to wherever the hook happens to run would route the
 /// event into an unrelated project.
-fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
+fn event_project_root_or_process_cwd(profile: &ProfileRoot, parsed: &Value) -> Option<PathBuf> {
     match event_cwd_from_parsed(parsed) {
-        Some(cwd) => crate::config::discover_project_root(&cwd),
-        None => process_cwd_project_root(),
+        Some(cwd) => profile.discover_project_root(&cwd),
+        None => process_cwd_project_root(profile),
     }
 }
 
 /// Identity-aware [`event_project_root`]: consults the registry so a
 /// global-store-only checkout still resolves. Shared by every host whose session
 /// events carry `cwd`.
-#[hotpath::measure(future = true, label = "hosts.hooks.resolve_root")]
-async fn event_project_root_with_identity(parsed: &Value) -> Option<PathBuf> {
+#[tracing::instrument(name = "hosts.hooks.resolve_root", level = "trace", skip_all)]
+async fn event_project_root_with_identity(
+    runtime: &HookRuntimeV1,
+    parsed: &Value,
+) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    crate::ports::hook_runtime::resolve_project_root_with_identity(&cwd).await
+    (runtime.project_root_resolver)(&runtime.profile, &cwd).await
 }
 
 fn format_tool_hint(hint: &ToolHint) -> String {
@@ -1106,6 +1243,55 @@ pub(crate) enum HookStdinRead {
     /// Stdin exceeded [`tracedecay_framing::MAX_WIRE_MESSAGE_BYTES`].
     /// No payload bytes are retained.
     Oversized,
+}
+
+/// Shared stdin admission for every host hook. Policy lives here so a shell
+/// cannot invent a second exit code or continue on an unread event.
+pub(crate) enum HookStdinAdmission {
+    Event(String),
+    Oversized,
+    ReadFailed(std::io::Error),
+}
+
+pub(crate) fn classify_hook_stdin(read: std::io::Result<HookStdinRead>) -> HookStdinAdmission {
+    match read {
+        Ok(HookStdinRead::Event(event)) => HookStdinAdmission::Event(event),
+        Ok(HookStdinRead::Oversized) => HookStdinAdmission::Oversized,
+        Err(error) => HookStdinAdmission::ReadFailed(error),
+    }
+}
+
+/// Exit code for a rejected stdin read. `None` means the event was admitted.
+pub(crate) fn hook_stdin_exit_code(admission: &HookStdinAdmission) -> Option<i32> {
+    match admission {
+        HookStdinAdmission::Event(_) => None,
+        HookStdinAdmission::Oversized => Some(0),
+        HookStdinAdmission::ReadFailed(_) => Some(1),
+    }
+}
+
+fn report_rejected_hook_stdin(admission: &HookStdinAdmission) {
+    match admission {
+        HookStdinAdmission::Oversized => {
+            eprintln!(
+                "tracedecay hook: stdin exceeds wire message bound ({})",
+                tracedecay_framing::WIRE_RECORD_TOO_LARGE
+            );
+        }
+        HookStdinAdmission::ReadFailed(error) => {
+            eprintln!("tracedecay hook: failed to read stdin: {error}");
+        }
+        HookStdinAdmission::Event(_) => {}
+    }
+}
+
+pub(crate) fn take_hook_event(
+    read: std::io::Result<HookStdinRead>,
+) -> Result<String, HookStdinAdmission> {
+    match classify_hook_stdin(read) {
+        HookStdinAdmission::Event(event) => Ok(event),
+        admission => Err(admission),
+    }
 }
 
 /// Read host-hook stdin with the host wire message byte cap enforced before
@@ -1133,6 +1319,9 @@ mod wire_stdin_bound_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod hint_analytics_tests;
+
+#[cfg(test)]
+mod output_delivery_tests;
 
 #[cfg(test)]
 mod tests;

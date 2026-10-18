@@ -1,0 +1,373 @@
+use tracedecay_domain::errors::TraceDecayError;
+
+use super::{
+    ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemKind,
+    ApplicationUnavailableClassV1, CancellationStage, LegalAction, ProblemTerminality,
+    RetryDirective, SafeDiagnostic,
+};
+
+#[test]
+fn invalid_request_offers_correction_and_never_retries() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.invalid-request".to_owned(),
+        message: "The request is invalid.".to_owned(),
+    };
+    let problem =
+        ApplicationProblem::invalid_request(diagnostic.code.clone(), diagnostic.message.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
+        }
+    );
+    assert_eq!(problem.safe_message(), "The request is invalid.");
+    assert_eq!(problem.reason_code(), "application.invalid-request");
+}
+
+#[test]
+fn invalid_request_without_action_offers_no_recovery() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.invalid-request.closed".to_owned(),
+        message: "The request is invalid.".to_owned(),
+    };
+    let problem = ApplicationProblem::invalid_request_without_action(
+        diagnostic.code.clone(),
+        diagnostic.message.clone(),
+    );
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    );
+    assert_eq!(problem.safe_message(), "The request is invalid.");
+    assert!(problem.legal_actions().is_empty());
+}
+
+#[test]
+fn saturated_retries_after_delay() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.saturated".to_owned(),
+        message: "The authority has no remaining capacity.".to_owned(),
+    };
+    let problem =
+        ApplicationProblem::saturated(diagnostic.code.clone(), diagnostic.message.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::Saturated {
+            diagnostic,
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
+            detail: None,
+        }
+    );
+    assert_eq!(
+        problem.safe_message(),
+        "The authority has no remaining capacity."
+    );
+    assert_eq!(problem.reason_code(), "application.saturated");
+}
+
+#[test]
+fn conflict_retries_only_after_revalidate_and_refresh() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.conflict".to_owned(),
+        message: "The request conflicts with current state.".to_owned(),
+    };
+    let problem = ApplicationProblem::conflict(diagnostic.code.clone(), diagnostic.message.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::Conflict {
+            diagnostic,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+            detail: None,
+        }
+    );
+    assert_eq!(
+        problem.safe_message(),
+        "The request conflicts with current state."
+    );
+    assert_eq!(problem.reason_code(), "application.conflict");
+}
+
+#[test]
+fn reset_required_is_a_distinct_non_retryable_terminal() {
+    let problem = ApplicationProblem::reset_required(
+        SafeDiagnostic::new("store.reset_required", "The store must be reset.")
+            .expect("fixture diagnostic is valid"),
+    );
+
+    assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
+    assert_eq!(problem.canonical_code(), "reset_required");
+    assert_eq!(problem.retry(), RetryDirective::Never);
+    assert_eq!(problem.legal_actions(), &[LegalAction::Reset]);
+    assert_eq!(problem.terminality(), ProblemTerminality::AdmittedTerminal);
+    assert!(problem.is_admitted_terminal());
+    assert!(problem.committed_receipt().is_none());
+
+    let wire = serde_json::to_value(&problem).expect("problem serializes");
+    assert_eq!(wire["kind"], "reset_required");
+    assert_eq!(wire["retry"], "never");
+    assert_eq!(wire["legal_actions"], serde_json::json!(["reset"]));
+
+    let mut unknown = wire.clone();
+    unknown["unexpected"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<ApplicationProblem>(unknown).is_err());
+
+    let mut retrying = wire.clone();
+    retrying["retry"] = serde_json::json!("after_delay");
+    assert!(serde_json::from_value::<ApplicationProblem>(retrying).is_err());
+
+    let mut wrong_action = wire;
+    wrong_action["legal_actions"] = serde_json::json!(["retry"]);
+    assert!(serde_json::from_value::<ApplicationProblem>(wrong_action).is_err());
+}
+
+#[test]
+fn cancellation_terminality_is_bound_to_the_exact_observed_stage() {
+    let pre_admission = ApplicationProblem::cancelled_before_admission();
+    assert_eq!(
+        pre_admission.terminality(),
+        ProblemTerminality::PreAdmission
+    );
+    assert_eq!(
+        pre_admission.cancellation_stage(),
+        Some(CancellationStage::BeforeAdmission)
+    );
+
+    for stage in [
+        CancellationStage::BeforeRead,
+        CancellationStage::DuringRead,
+        CancellationStage::BeforeEffect,
+        CancellationStage::EffectInFlight,
+    ] {
+        let cancelled =
+            ApplicationProblem::cancelled(stage).expect("admitted cancellation stage is valid");
+        let timed_out =
+            ApplicationProblem::timed_out(stage).expect("admitted timeout stage is valid");
+        for terminal in [cancelled, timed_out] {
+            assert_eq!(terminal.terminality(), ProblemTerminality::AdmittedTerminal);
+            assert_eq!(terminal.cancellation_stage(), Some(stage));
+            let wire = serde_json::to_value(&terminal).expect("terminal serializes");
+            assert_eq!(wire["stage"], serde_json::to_value(stage).expect("stage"));
+            assert_eq!(
+                serde_json::from_value::<ApplicationProblem>(wire).expect("terminal round trips"),
+                terminal
+            );
+        }
+    }
+}
+
+#[test]
+fn cancellation_after_effect_or_during_reconciliation_is_not_a_no_effect_terminal() {
+    for stage in [
+        CancellationStage::Reconciling,
+        CancellationStage::AfterCommit,
+    ] {
+        assert_eq!(
+            ApplicationProblem::cancelled(stage)
+                .unwrap_err()
+                .to_string(),
+            "application problem cancellation stage is inconsistent with the application contract"
+        );
+        assert_eq!(
+            ApplicationProblem::timed_out(stage)
+                .unwrap_err()
+                .to_string(),
+            "application problem cancellation stage is inconsistent with the application contract"
+        );
+        let wire = serde_json::json!({
+            "kind": "cancelled", "stage": stage, "retry": "never", "legal_actions": []
+        });
+        assert_eq!(
+            serde_json::from_value::<ApplicationProblem>(wire)
+                .unwrap_err()
+                .to_string(),
+            "application problem cancellation stage is inconsistent with the application contract"
+        );
+    }
+}
+
+#[test]
+fn unavailable_and_execution_failure_classes_cannot_change_admission_semantics() {
+    let authority = ApplicationProblem::unavailable(
+        SafeDiagnostic::new("authority.unavailable", "The authority is unavailable")
+            .expect("diagnostic"),
+    );
+    assert_eq!(authority.terminality(), ProblemTerminality::PreAdmission);
+    assert_eq!(
+        authority.unavailable_classification(),
+        Some(ApplicationUnavailableClassV1::Authority)
+    );
+
+    for classification in [
+        ApplicationUnavailableClassV1::BackendUnavailable,
+        ApplicationUnavailableClassV1::BackendDisconnected,
+        ApplicationUnavailableClassV1::BackendRetryable,
+    ] {
+        let terminal = ApplicationProblem::admitted_unavailable(
+            classification,
+            SafeDiagnostic::new("backend.unavailable", "The backend is unavailable")
+                .expect("diagnostic"),
+        )
+        .expect("admitted unavailable terminal");
+        assert_eq!(terminal.terminality(), ProblemTerminality::AdmittedTerminal);
+        assert_eq!(terminal.unavailable_classification(), Some(classification));
+        let wire = serde_json::to_value(&terminal).expect("terminal serializes");
+        assert_eq!(
+            serde_json::from_value::<ApplicationProblem>(wire).expect("terminal decodes"),
+            terminal
+        );
+    }
+
+    for classification in [
+        ApplicationExecutionFailureClassV1::Denied,
+        ApplicationExecutionFailureClassV1::MalformedOutput,
+        ApplicationExecutionFailureClassV1::Permanent,
+    ] {
+        let terminal = ApplicationProblem::execution_failed(
+            classification,
+            SafeDiagnostic::new("backend.failed", "The backend execution failed")
+                .expect("diagnostic"),
+        )
+        .expect("execution-failed terminal");
+        assert_eq!(terminal.terminality(), ProblemTerminality::AdmittedTerminal);
+        assert_eq!(
+            terminal.execution_failure_classification(),
+            Some(classification)
+        );
+    }
+
+    let mut authority_wire = serde_json::to_value(authority).expect("authority wire");
+    authority_wire["classification"] = serde_json::json!("backend_unavailable");
+    authority_wire["retry"] = serde_json::json!("after_delay");
+    assert!(serde_json::from_value::<ApplicationProblem>(authority_wire).is_err());
+}
+
+#[test]
+fn application_problem_converts_to_typed_trace_decay_error() {
+    let denied = ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never);
+    let denied_error = TraceDecayError::from(denied);
+    let (reason_code, retryable, _) = denied_error
+        .project_route_context()
+        .expect("denial stays a project-route error");
+    assert_eq!(reason_code, "not_found_or_not_authorized");
+    assert!(!retryable);
+
+    let warming = ApplicationProblem::unavailable(
+        SafeDiagnostic::new(
+            super::RUNTIME_MOUNTING_REASON_CODE,
+            "The project runtime for this operation is still mounting",
+        )
+        .expect("fixture diagnostic is valid"),
+    );
+    let warming_error = warming.into_trace_decay_error();
+    let (reason_code, retryable, _) = warming_error
+        .project_route_context()
+        .expect("warming stays a project-route error");
+    assert_eq!(reason_code, super::RUNTIME_MOUNTING_REASON_CODE);
+    assert!(retryable);
+}
+
+#[test]
+fn direct_serialization_rejects_an_invalid_terminal() {
+    let invalid = ApplicationProblem::ResetRequired {
+        diagnostic: SafeDiagnostic::new("store.reset_required", "The store must be reset.")
+            .expect("fixture diagnostic is valid"),
+        retry: RetryDirective::AfterDelay,
+        legal_actions: vec![LegalAction::Retry],
+        detail: None,
+    };
+    assert_eq!(
+        serde_json::to_value(invalid).unwrap_err().to_string(),
+        "reset-required terminal is inconsistent with the application contract"
+    );
+}
+
+/// An expired capability grant is an authority refusal the caller can recover
+/// from with a new request, not a deadline: reporting it as `TimedOut` with
+/// `Retry: never` told agents the tool itself had given up.
+#[test]
+fn an_expired_grant_is_refused_as_an_authority_problem_not_a_timeout() {
+    use crate::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::{
+        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    };
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.grant-expiry").unwrap(),
+        RepositoryId::new("repository.grant-expiry").unwrap(),
+        WorktreeId::new("worktree.grant-expiry").unwrap(),
+        None,
+    )
+    .unwrap();
+    let actor = ActorId::new("actor.grant-expiry").unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.grant-expiry").unwrap(),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(100),
+        scope.clone(),
+        [CapabilityId::new("capability.grant-expiry").unwrap()].into(),
+        [UseCaseId::new("use-case.grant-expiry").unwrap()].into(),
+        DisclosureClass::Sensitive,
+    )
+    .unwrap();
+    let context = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.grant-expiry").unwrap(),
+        Deadline::new(UtcMicros(1_000)).unwrap(),
+        CancellationContext::active("cancel.grant-expiry").unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        context.admission_at(UtcMicros(50)),
+        RequestAdmission::Admitted
+    );
+    assert_eq!(
+        context.admission_at(UtcMicros(100)),
+        RequestAdmission::GrantExpired
+    );
+    assert_eq!(
+        context.admission_at(UtcMicros(1_000)),
+        RequestAdmission::TimedOut,
+        "an elapsed deadline stays a timeout"
+    );
+
+    let problem = ApplicationProblem::ensure_admitted(&context, UtcMicros(100)).unwrap_err();
+    assert_eq!(
+        problem,
+        ApplicationProblem::grant_expired_before_admission()
+    );
+    assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+    assert_eq!(
+        problem.unavailable_classification(),
+        Some(ApplicationUnavailableClassV1::Authority)
+    );
+    assert_eq!(problem.reason_code(), super::GRANT_EXPIRED_REASON_CODE);
+    assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
+    assert_eq!(problem.terminality(), ProblemTerminality::PreAdmission);
+    let wire = serde_json::to_value(&problem).expect("grant expiry serializes");
+    assert_eq!(
+        serde_json::from_value::<ApplicationProblem>(wire).expect("grant expiry decodes"),
+        problem
+    );
+}

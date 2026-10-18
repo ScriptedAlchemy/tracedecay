@@ -20,19 +20,12 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_code_index::production::CodeGraphBuildBoundV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
-use tracedecay_graph_db::{
-    GraphDbError, GraphGenerationDependency, SealedGraphStateDigest,
-    SealedReadBundleArtifactStateV1, VerifiedGraphSnapshot,
-};
+use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest, VerifiedGraphSnapshot};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
-use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
-use tracedecay_usecases::semantic_runtime::{
-    SemanticVectorGraphScopeV1, VerifiedSemanticVectorGraphRuntimeV1,
-};
+use tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
 
 /// Sealed-generation replay identity the seat port needs to retain a runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,20 +34,33 @@ pub struct CodeGraphReplayBindingV1 {
     pub sealed_state_digest: SealedGraphStateDigest,
 }
 
+/// Process-memory admission authority invoked after a sealed build has
+/// selected its cold or changed-page plan and before it materializes a page.
+pub trait CodeGraphBuildAdmissionV1: Send + Sync {
+    fn admit(
+        &self,
+        bound: CodeGraphBuildBoundV1,
+    ) -> std::result::Result<Box<dyn Send>, GraphDbError>;
+}
+
 /// Short-lived activation lease returned by [`CodeGraphSeatRuntimePortV1`].
 ///
-/// The serving slot keeps [`Self::authority`]. The activation lease may remain
-/// alive in the detached catalog-restore task so optional read artifacts never
-/// delay occurrence graph publication.
+/// The serving slot keeps [`Self::authority`]; the activation lease itself is
+/// released once the verified snapshot is installed.
 pub trait CodeGraphSeatLeaseV1: Send {
-    fn sweep_aborted_read_bundle_temporaries(&self) -> std::result::Result<(), GraphDbError>;
-
     fn authority(&self) -> Arc<CanonicalCodeGraphStoreLeaseV1>;
 
+    /// Publishes the retained sealed generation's graph head, building its
+    /// rows from the sealed segments when the head has not landed yet.
     fn publish_verified_snapshot(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
         request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
+
+    fn publish_verified_snapshot_admitted(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+        admission: Arc<dyn CodeGraphBuildAdmissionV1>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 
     fn recover_verified_snapshot_from_head(
@@ -62,35 +68,10 @@ pub trait CodeGraphSeatLeaseV1: Send {
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 
-    fn load_sealed_read_bundle_catalog(
+    fn recover_verified_generation(
         &self,
-        request_cancelled: &Arc<AtomicBool>,
-    ) -> std::result::Result<SealedReadBundleArtifactStateV1, GraphDbError>;
-
-    fn semantic_vector_identity(
-        &self,
-    ) -> std::result::Result<
-        (
-            ProjectId,
-            RepositoryId,
-            WorktreeId,
-            CodeGenerationId,
-            GraphGenerationDependency,
-        ),
-        GraphDbError,
-    >;
-
-    fn semantic_vector_staging_binding(&self) -> (StoreShardIdV1, StoreRuntimeBindingV1);
-
-    /// Convert this lease into the verified semantic-vector runtime adapter.
-    ///
-    /// The adapter lives on the registry side (it forwards the retained
-    /// runtime's semantic-vector methods). The scheduler provider only holds
-    /// the seat port.
-    fn into_semantic_vector_runtime(
-        self: Box<Self>,
-        scope: SemanticVectorGraphScopeV1,
-    ) -> Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>;
+        request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 }
 
 /// Registry-side seat gate the code-index scheduler consumes.
@@ -111,6 +92,5 @@ pub trait CodeGraphSeatRuntimePortV1: Send + Sync {
         generation_id: CodeGenerationId,
         project_database: Arc<Database>,
         replay_binding: CodeGraphReplayBindingV1,
-        decoded_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
     ) -> CodeGraphSeatLeaseFutureV1<'_>;
 }

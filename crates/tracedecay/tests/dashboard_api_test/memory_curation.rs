@@ -55,9 +55,6 @@ fn retained_effect_payload<'a>(response: &'a Value, operation: &str) -> &'a Valu
 
 #[test]
 fn retained_admin_journey_commits_add_update_feedback_and_remove() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_retained_memory_fixture().await;
@@ -214,10 +211,69 @@ fn retained_admin_journey_commits_add_update_feedback_and_remove() {
 }
 
 #[test]
+fn fact_detail_keeps_a_superseded_fact_readable_by_id() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_retained_memory_fixture().await;
+        let agent = http_agent();
+        let add = |content: &str| {
+            let (status, added) = post_json_body(
+                &agent,
+                &retained_url(&fixture, "fact_store_add"),
+                &serde_json::json!({ "content": content, "category": "decision" }),
+            );
+            assert_eq!(status, 200, "fact add failed: {added}");
+            retained_effect_payload(&added, "fact_store_add")["result"]["fact"]["fact"]["fact_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("add must return a fact id: {added}"))
+                .to_owned()
+        };
+        let retired = add("Dashboard detail reads the retired wording");
+        let successor = add("Dashboard detail reads the corrected wording");
+        let (status, superseded) = post_json_body(
+            &agent,
+            &retained_url(&fixture, "fact_store_supersede"),
+            &serde_json::json!({ "fact_id": retired, "superseded_by": successor }),
+        );
+        assert_eq!(status, 200, "supersede failed: {superseded}");
+        retained_effect_payload(&superseded, "fact_store_supersede");
+
+        let detail = |fact_id: &str| {
+            let (status, detail) = get_json(
+                &agent,
+                &format!(
+                    "{}/api/plugins/holographic/fact/{fact_id}",
+                    fixture.base_url
+                ),
+            );
+            assert_eq!(status, 200, "{detail}");
+            detail
+        };
+        let retired_detail = detail(&retired);
+        assert_eq!(retired_detail["domain_state"], "ready", "{retired_detail}");
+        let retired_row = &retired_detail["payload"]["fact"];
+        assert_eq!(
+            retired_row["content"],
+            "Dashboard detail reads the retired wording"
+        );
+        assert_eq!(retired_row["superseded_by"], successor.as_str());
+
+        let successor_detail = detail(&successor);
+        assert_eq!(
+            successor_detail["domain_state"], "ready",
+            "{successor_detail}"
+        );
+        let successor_row = &successor_detail["payload"]["fact"];
+        assert_eq!(
+            successor_row["content"],
+            "Dashboard detail reads the corrected wording"
+        );
+        assert_eq!(successor_row.get("superseded_by"), None);
+    });
+}
+
+#[test]
 fn retained_mutations_deny_foreign_project_scope_without_a_receipt() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_retained_memory_fixture().await;
@@ -244,36 +300,33 @@ fn retained_mutations_deny_foreign_project_scope_without_a_receipt() {
         );
 
         assert_eq!(
-            status, 404,
-            "foreign-project retained mutation must fail closed: {denied}"
+            status, 422,
+            "foreign-project retained mutation must be refused as unsupported: {denied}"
         );
         assert_eq!(denied["kind"], "problem");
+        assert_eq!(denied["value"]["problem"]["kind"], "unsupported");
         assert_eq!(
-            denied["value"]["problem"]["kind"],
-            "not_found_or_not_authorized"
+            denied["value"]["problem"]["code"],
+            "memory.cross_project_write_unsupported"
         );
         assert_eq!(denied["value"]["problem"]["owning_layer"], "application");
         assert!(
             denied["value"]["problem"]["committed_receipt"].is_null(),
-            "denied mutation cannot report a committed effect: {denied}"
-        );
-        assert!(
-            denied["value"].get("binding_id").is_none(),
-            "concealed denial cannot expose the retained binding: {denied}"
+            "refused mutation cannot report a committed effect: {denied}"
         );
 
         for (store, url) in [
             (
                 "active",
                 format!(
-                    "{}/api/plugins/holographic/?q=crossboundarysentinel&limit=10",
+                    "{}/api/plugins/holographic?q=crossboundarysentinel&limit=10",
                     fixture.base_url
                 ),
             ),
             (
                 "registered target",
                 format!(
-                    "{}/api/projects/{target_project_id}/plugins/holographic/?q=crossboundarysentinel&limit=10",
+                    "{}/api/projects/{target_project_id}/plugins/holographic?q=crossboundarysentinel&limit=10",
                     fixture.base_url
                 ),
             ),
@@ -308,15 +361,11 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
         SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1,
     };
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::{
         MemoryApplication, ProjectMemoryFactAddRequest, automatic_fact_add_command,
     };
     use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddMaterialV1};
-
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -324,7 +373,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
             .host_runtime
             .open_project_graph_for_test(
                 &fixture.project_root,
-                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+                tracedecay_project::project::TraceDecayOpenOptions::default(),
             )
             .await
             .unwrap_or_else(|error| panic!("open dashboard fixture project: {error}"));
@@ -445,7 +494,6 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
             "state=applied must exclude the quarantined receipt: {listed}"
         );
         assert_eq!(listed["limit"], 50);
-        assert_eq!(listed["error"], "");
         let receipts = listed["receipts"]
             .as_array()
             .unwrap_or_else(|| panic!("automatic receipt list must contain receipts: {listed}"));

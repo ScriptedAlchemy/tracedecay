@@ -9,18 +9,19 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
+use tracedecay_domain::canonical_text::{
+    encode_lowercase_hex, encode_tagged_lowercase_hex, sha256_hex,
+};
 use tracedecay_store::runtime::{
     GraphDependencyGenerationClosureDigestV1, GraphDependencyGenerationIdentityV1,
     GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
-    GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-    GraphPublicationReplayV1, GraphRecoveredGenerationDigestV1, GraphVerifiedHeadV1,
-    MAX_GRAPH_REPLAY_SOURCE_BYTES_V1, StoreShardIdV1,
+    GraphPublicationInputDigestV1, GraphPublicationReplayV1, GraphRecoveredGenerationDigestV1,
+    GraphVerifiedHeadV1, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1, StoreShardIdV1,
 };
 
 use crate::limits::{MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS};
-use crate::schema::{NAMESPACE_PROPERTY, required_string};
-use crate::state::latest_projection;
+use crate::schema::{ENTITY_ID_PROPERTY, NAMESPACE_PROPERTY, decode_identity, required_string};
+use crate::state::{latest_projection, projection_node_counts};
 use crate::{
     GraphBudgetKind, GraphDbError, GraphEntity, GraphEntityId, GraphGenerationId,
     GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
@@ -40,22 +41,28 @@ mod identity;
 mod recovered;
 #[path = "generation/replay.rs"]
 mod replay;
+#[path = "generation/spill.rs"]
+mod spill;
 pub use identity::{
     GraphEntityRef, GraphGenerationDependency, GraphProjectionIdentity, GraphRelationRef,
 };
 #[cfg(test)]
 pub(crate) use recovered::recovered_generation_digest_chunked;
 pub(crate) use recovered::recovered_generation_digest_from_database;
+pub(crate) use recovered::recovered_relation_lanes;
 pub(crate) use replay::InlineOnlyGraphGenerationManifestProvider;
 use replay::validate_sealed_replay;
 pub use replay::{
     GraphGenerationManifestProvider, GraphGenerationReplayMetadata, GraphGenerationReplaySource,
     GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
-    SemanticVectorGenerationReplay,
 };
 pub(crate) use replay::{
-    checked_decode_replay_source, metadata_manifest_from_replay, validate_metadata_binding,
-    validate_supplied_manifest_binding,
+    checked_decode_replay_source, metadata_manifest_from_source, validate_supplied_rows_binding,
+};
+pub(crate) use spill::{ENTITIES_FILE, read_spilled_entity};
+pub use spill::{
+    GRAPH_ROW_SPILL_RUN_BYTES, GraphGenerationRowSpill, GraphGenerationRows,
+    GraphSpillRowFootprint, SpilledGraphGeneration,
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -119,8 +126,8 @@ pub struct GraphGenerationManifest {
     pub dependencies: Vec<GraphGenerationDependency>,
     pub entities: Vec<GraphEntity>,
     pub relations: Vec<GraphGenerationRelation>,
-    /// Memoized canonical digests of this instance. Never serialized — the
-    /// canonical replay payload and every digest byte are unchanged — and
+    /// Memoized canonical digests of this instance. Never serialized, the
+    /// canonical replay payload and every digest byte are unchanged, and
     /// invisible to equality; re-validated against the fields on every read.
     #[serde(skip)]
     digest_memo: ManifestDigestMemo,
@@ -129,9 +136,9 @@ pub struct GraphGenerationManifest {
 /// The small, cheaply cloned metadata half of a generation manifest: exactly
 /// the fields that name a generation and bind it to its dependency closure.
 ///
-/// Every stage after the staged rows are durable — the close/reopen
+/// Every stage after the staged rows are durable, the close/reopen
 /// recovered-digest proof, quarantine, lease seating, and the finalization
-/// receipt — reads only these fields. Carrying them separately lets the bulk
+/// receipt, reads only these fields. Carrying them separately lets the bulk
 /// `entities`/`relations` vectors (multiple gigabytes on a first index) be
 /// released the moment the last staging page commits, instead of staying live
 /// through reopen and verification alongside the rebuilt in-RAM store.
@@ -151,6 +158,10 @@ pub struct GraphGenerationManifestIdentity {
     /// it. Re-validated against `dependencies` on every read and invisible to
     /// equality and clones.
     digest_memo: DependencyClosureDigestMemo,
+    /// The namespace this identity's rows are stored under when another
+    /// projection sealed them: a sibling scope's base, read and proven
+    /// under this projection. `None` for rows stored under their own.
+    stored_namespace: Option<GraphNamespace>,
 }
 
 impl GraphGenerationManifestIdentity {
@@ -171,7 +182,18 @@ impl GraphGenerationManifestIdentity {
             watermark,
             dependencies,
             digest_memo: DependencyClosureDigestMemo::default(),
+            stored_namespace: None,
         }
+    }
+
+    /// This identity over rows stored under `physical`, the namespace its
+    /// generation was sealed under, possibly by another projection.
+    pub(crate) fn stored_under(mut self, physical: GraphNamespace) -> Result<Self, GraphDbError> {
+        self.stored_namespace = None;
+        if physical != self.physical_namespace()? {
+            self.stored_namespace = Some(physical);
+        }
+        Ok(self)
     }
 
     pub fn dependency_closure_digest(
@@ -182,6 +204,9 @@ impl GraphGenerationManifestIdentity {
     }
 
     pub(crate) fn physical_namespace(&self) -> Result<GraphNamespace, GraphDbError> {
+        if let Some(stored) = &self.stored_namespace {
+            return Ok(stored.clone());
+        }
         physical_namespace(
             &self.projection.namespace,
             &self.projection.projection,
@@ -270,7 +295,7 @@ impl fmt::Debug for DependencyClosureDigestMemo {
 /// every mutation pattern the repository exercises (dependency, generation,
 /// source, watermark, and row-set size changes). The bulk rows are validated
 /// by count only: replacing a row in place on the same instance after a
-/// digest read would go unobserved, and no flow does that — production
+/// digest read would go unobserved, and no flow does that, production
 /// manifests are constructed, proven, and then held behind `Arc`, while
 /// fixtures mutate freshly constructed or freshly cloned (cold) instances
 /// before their first digest read.
@@ -304,6 +329,7 @@ struct RecoveredGenerationDigestMemo {
     entity_count: usize,
     relation_count: usize,
     digest: GraphRecoveredGenerationDigestV1,
+    row_sum: GraphRowDigestSum,
 }
 
 impl RecoveredGenerationDigestMemo {
@@ -324,6 +350,23 @@ pub enum GraphReplayCollectionOutcome {
     Retired(Box<GraphGenerationReplaySource>),
     Retained,
     Absent,
+    /// Relational retirement can proceed, but native row delete needs the
+    /// staging engine already resident. The release-queue entry stays queued.
+    RetentionPending,
+}
+
+/// Receipt of one superseded-replay retirement pass over a projection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SupersededReplayRetirement {
+    /// Superseded replays tombstoned, their generation contents deleted, and
+    /// their cleanup finalized.
+    pub retired: usize,
+    /// Superseded replays kept because a live reader, a dependency edge, a
+    /// pending publication, or a concurrent retirement still names them.
+    pub retained: usize,
+    /// Relational retirements whose native row delete waits for the staging
+    /// engine to be resident; the tombstone is revisited by the next pass.
+    pub pending: usize,
 }
 
 impl GraphGenerationManifest {
@@ -372,9 +415,24 @@ impl GraphGenerationManifest {
                 MAX_VERIFIED_GENERATION_RELATIONS,
             ));
         }
-        let dependencies = checked_sorted_dependencies(dependencies, check)?;
-        let entities = checked_sorted_entities(entities, check)?;
-        let relations = checked_sorted_relations(relations, check)?;
+        let dependencies = checked_sorted_by(
+            dependencies,
+            check,
+            Ord::cmp,
+            "a graph generation repeats a dependency",
+        )?;
+        let entities = checked_sorted_by(
+            entities,
+            check,
+            |left, right| left.identity.cmp(&right.identity),
+            "a graph generation repeats an entity identity",
+        )?;
+        let relations = checked_sorted_by(
+            relations,
+            check,
+            |left, right| left.identity.cmp(&right.identity),
+            "a graph generation repeats a relation identity",
+        )?;
         let manifest = Self {
             projection,
             generation,
@@ -389,83 +447,97 @@ impl GraphGenerationManifest {
         Ok(manifest)
     }
 
-    #[hotpath::measure(
-        label = "graph_db.generation.replay.hydrate",
-        impl_type = "GraphGenerationManifest"
-    )]
-    pub fn from_replay(
+    /// The manifest an inline replay journals, bound to its relational key.
+    pub fn from_inline_replay(
         publication: &GraphPublicationReplayV1,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Self, GraphDbError> {
+        check()?;
+        let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
+        let rows = GraphGenerationRows::from_replay_source(
+            publication,
+            source,
+            &InlineOnlyGraphGenerationManifestProvider,
+            || {
+                Err(GraphDbError::unavailable(
+                    "an inline replay hydrates without a row spill",
+                ))
+            },
+            check,
+        )?;
+        rows.into_manifest(check).map(Arc::unwrap_or_clone)
+    }
+}
+
+impl GraphGenerationRows {
+    /// Hydrates the rows a journaled replay names and binds them to its
+    /// relational key and digests. A sealed code generation is rebuilt by
+    /// `provider` into the spill `spill` creates.
+    #[tracing::instrument(name = "graph_db.generation.replay.hydrate", level = "trace", skip_all)]
+    pub(crate) fn from_replay_source(
+        publication: &GraphPublicationReplayV1,
+        source: GraphGenerationReplaySource,
         provider: &dyn GraphGenerationManifestProvider,
+        spill: impl FnOnce() -> Result<GraphGenerationRowSpill, GraphDbError>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Self, GraphDbError> {
         check()?;
         publication
             .validate()
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
-        let manifest = match source {
-            GraphGenerationReplaySource::InlineManifest(manifest) => *manifest,
-            GraphGenerationReplaySource::MetadataOnlyManifest(_)
-            | GraphGenerationReplaySource::SemanticVectorGeneration(_) => {
+        let rows: Self = match source {
+            GraphGenerationReplaySource::InlineManifest(manifest) => {
+                manifest.validate_checked(check)?;
+                Self::Manifest(Arc::new(*manifest))
+            }
+            GraphGenerationReplaySource::MetadataOnlyManifest(_) => {
                 return Err(GraphDbError::unavailable(
                     "metadata-only replay requires verified native generation rows",
                 ));
             }
             GraphGenerationReplaySource::SealedCodeGeneration(source) => {
                 validate_sealed_replay(&source)?;
-                provider.hydrate_sealed_code_generation(
-                    &publication.key.projection,
-                    &source,
-                    check,
-                )?
+                provider
+                    .hydrate_sealed_code_generation(
+                        &publication.key.projection,
+                        &source,
+                        spill()?,
+                        check,
+                    )?
+                    .into()
             }
         };
-        manifest.validate_checked(check)?;
+        let identity = rows.identity();
         let projection = &publication.key.projection;
-        if projection.namespace.as_str() != manifest.projection.namespace.as_str()
-            || projection.projection.as_str() != manifest.projection.projection.as_str()
-            || publication.key.generation.as_str() != manifest.generation.as_str()
+        if projection.namespace.as_str() != identity.projection.namespace.as_str()
+            || projection.projection.as_str() != identity.projection.projection.as_str()
+            || publication.key.generation.as_str() != identity.generation.as_str()
         {
             return Err(GraphDbError::invalid(
                 "canonical graph replay identity does not match its relational key",
             ));
         }
         if publication.direct_dependency_generations
-            != manifest.relational_dependency_generations(&projection.shard_id)?
+            != relational_dependency_generations(&identity.dependencies, &projection.shard_id)?
         {
             return Err(GraphDbError::conflict("generation.from_replay"));
         }
         if publication.dependency_generation_closure_digest.as_str()
-            != manifest.dependency_closure_digest(check)?.as_str()
+            != rows.dependency_closure_digest(check)?.as_str()
             || publication.expected_recovered_digest.as_str()
-                != manifest.expected_recovered_digest(check)?.as_str()
+                != rows.expected_recovered_digest(check)?.as_str()
         {
             return Err(GraphDbError::conflict("generation.from_replay"));
         }
         check()?;
-        crate::hotpath_observe::record_counts(
-            manifest.entities.len(),
-            manifest.relations.len(),
-            1,
-            0,
-        );
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Replay,
-        );
-        Ok(manifest)
+        let (entities, relations) = rows.row_counts();
+        crate::observe::record_counts(entities, relations, 1, 0);
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Replay);
+        Ok(rows)
     }
+}
 
-    pub fn from_inline_replay(
-        publication: &GraphPublicationReplayV1,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<Self, GraphDbError> {
-        Self::from_replay(
-            publication,
-            &InlineOnlyGraphGenerationManifestProvider,
-            check,
-        )
-    }
-
+impl GraphGenerationManifest {
     pub fn canonical_replay_source(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -524,8 +596,8 @@ impl GraphGenerationManifest {
 
     /// The metadata half of this manifest, cloned away from its bulk rows.
     /// Carries the memoized dependency-closure digest along when it still
-    /// binds, so later phases that hold only the identity — staging, the
-    /// close/reopen recovered-digest proof, recovery — do not recompute a
+    /// binds, so later phases that hold only the identity, staging, the
+    /// close/reopen recovered-digest proof, recovery, do not recompute a
     /// digest this manifest already proved.
     #[must_use]
     pub fn identity(&self) -> GraphGenerationManifestIdentity {
@@ -539,6 +611,7 @@ impl GraphGenerationManifest {
                 .digest_memo
                 .dependency_closure
                 .propagated(&self.dependencies),
+            stored_namespace: None,
         }
     }
 
@@ -553,15 +626,32 @@ impl GraphGenerationManifest {
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+        self.recovered_digest_and_row_sum(check)
+            .map(|(digest, _)| digest)
+    }
+
+    /// The order-independent row half of [`Self::expected_recovered_digest`].
+    pub(crate) fn row_sum(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphRowDigestSum, GraphDbError> {
+        self.recovered_digest_and_row_sum(check)
+            .map(|(_, row_sum)| row_sum)
+    }
+
+    fn recovered_digest_and_row_sum(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(GraphRecoveredGenerationDigestV1, GraphRowDigestSum), GraphDbError> {
         if let Some(memo) = self.digest_memo.expected_recovered.get() {
             if memo.binds(self) {
-                return Ok(memo.digest.clone());
+                return Ok((memo.digest.clone(), memo.row_sum));
             }
             // Mutated after seeding: the pinned key is stale, so every read
             // recomputes from the current fields.
             return self.compute_expected_recovered_digest(check);
         }
-        let digest = self.compute_expected_recovered_digest(check)?;
+        let (digest, row_sum) = self.compute_expected_recovered_digest(check)?;
         // A lost seeding race means another reader memoized the same value.
         let _ = self
             .digest_memo
@@ -571,16 +661,19 @@ impl GraphGenerationManifest {
                 entity_count: self.entities.len(),
                 relation_count: self.relations.len(),
                 digest: digest.clone(),
+                row_sum,
             });
-        Ok(digest)
+        Ok((digest, row_sum))
     }
 
+    #[tracing::instrument(name = "code_index.seal.digest", level = "trace", skip_all)]
     fn compute_expected_recovered_digest(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
-        let digest = recovered_generation_digest(self, check)?;
+    ) -> Result<(GraphRecoveredGenerationDigestV1, GraphRowDigestSum), GraphDbError> {
+        let (digest, row_sum) = recovered_generation_digest(self, check)?;
         GraphRecoveredGenerationDigestV1::new(format!("sha256:{digest}"))
+            .map(|digest| (digest, row_sum))
             .map_err(|error| GraphDbError::invalid(error.to_string()))
     }
 
@@ -633,38 +726,18 @@ impl GraphGenerationManifest {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphPublicationReplayV1, GraphDbError> {
         check()?;
-        let projection = GraphProjectionIdentityV1 {
+        // Proved on this instance first so the identity inherits the memo.
+        self.dependency_closure_digest(check)?;
+        let expected_recovered_digest = self.expected_recovered_digest(check)?;
+        self.identity().relational_replay_with_payload(
             shard_id,
-            namespace: GraphNamespaceV1::new(self.projection.namespace.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            projection: GraphProjectionIdV1::new(self.projection.projection.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-        };
-        let direct_dependencies = self.relational_dependency_generations(&projection.shard_id)?;
-        let key = GraphPublicationKeyV1::new(
-            projection,
-            GraphGenerationIdV1::new(self.generation.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-        );
-        GraphPublicationReplayV1::new(
-            key,
+            idempotency_key,
             input_digest,
-            self.dependency_closure_digest(check)?,
-            direct_dependencies,
             expected_prior_head,
-            self.expected_recovered_digest(check)?,
+            expected_recovered_digest,
             payload,
+            check,
         )
-        .map_err(|error| GraphDbError::invalid(error.to_string()))
-    }
-
-    fn relational_dependency_generations(
-        &self,
-        shard_id: &StoreShardIdV1,
-    ) -> Result<Vec<GraphDependencyGenerationIdentityV1>, GraphDbError> {
-        relational_dependency_generations(&self.dependencies, shard_id)
     }
 
     pub(crate) fn validate_checked(
@@ -748,58 +821,22 @@ impl GraphGenerationManifest {
     }
 }
 
-fn checked_sorted_dependencies(
-    mut dependencies: Vec<GraphGenerationDependency>,
+fn checked_sorted_by<T>(
+    mut items: Vec<T>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphGenerationDependency>, GraphDbError> {
+    mut order: impl FnMut(&T, &T) -> std::cmp::Ordering,
+    duplicate: &'static str,
+) -> Result<Vec<T>, GraphDbError> {
     check()?;
-    dependencies.sort_unstable();
-    for pair in dependencies.windows(2) {
+    items.sort_unstable_by(&mut order);
+    for pair in items.windows(2) {
         check()?;
-        if pair[0] == pair[1] {
-            return Err(GraphDbError::invalid(
-                "a graph generation repeats a dependency",
-            ));
+        if order(&pair[0], &pair[1]).is_eq() {
+            return Err(GraphDbError::invalid(duplicate));
         }
     }
     check()?;
-    Ok(dependencies)
-}
-
-fn checked_sorted_entities(
-    mut entities: Vec<GraphEntity>,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphEntity>, GraphDbError> {
-    check()?;
-    entities.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
-    for pair in entities.windows(2) {
-        check()?;
-        if pair[0].identity == pair[1].identity {
-            return Err(GraphDbError::invalid(
-                "a graph generation repeats an entity identity",
-            ));
-        }
-    }
-    check()?;
-    Ok(entities)
-}
-
-fn checked_sorted_relations(
-    mut relations: Vec<GraphGenerationRelation>,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphGenerationRelation>, GraphDbError> {
-    check()?;
-    relations.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
-    for pair in relations.windows(2) {
-        check()?;
-        if pair[0].identity == pair[1].identity {
-            return Err(GraphDbError::invalid(
-                "a graph generation repeats a relation identity",
-            ));
-        }
-    }
-    check()?;
-    Ok(relations)
+    Ok(items)
 }
 
 /// The dependency-closure digest, shared by the full manifest and its
@@ -858,10 +895,7 @@ pub(crate) fn physical_namespace(
             "failed to encode physical graph generation identity: {error}"
         ))
     })?;
-    GraphNamespace::new(format!(
-        "generation:{}",
-        hex::encode(Sha256::digest(encoded))
-    ))
+    GraphNamespace::new(format!("generation:{}", sha256_hex(&encoded)))
 }
 
 pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bool {
@@ -891,7 +925,7 @@ pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bo
 /// `crate::verified_marker` for what that marker does and does not assert.
 ///
 /// Returns the proven digest and the number of canonical bytes it hashed.
-#[hotpath::measure(label = "graph_db.generation.recover.verify")]
+#[tracing::instrument(name = "graph_db.generation.recover.verify", level = "trace", skip_all)]
 pub(crate) fn verify_recovered_generation(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
@@ -908,7 +942,7 @@ pub(crate) fn verify_recovered_generation(
 /// enumeration count the publication tests pin ("stream the proof exactly
 /// once") stays a statement about the authority's rows; the sealed copy pays
 /// its own post-reopen proof, counted separately.
-#[hotpath::measure(label = "graph_db.sealed_store.verify")]
+#[tracing::instrument(name = "graph_db.sealed_store.verify", level = "trace", skip_all)]
 pub(crate) fn verify_sealed_copy_generation(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
@@ -918,8 +952,8 @@ pub(crate) fn verify_sealed_copy_generation(
     #[cfg(test)]
     SEALED_COPY_PROOFS.with(|count| count.set(count.get() + 1));
     // The canonical byte count is the same stream the staging proof would
-    // have hashed (the digests match byte for byte), so a sealed *build* —
-    // which enumerated the staging database's rows to produce this copy —
+    // have hashed (the digests match byte for byte), so a sealed *build*,
+    // which enumerated the staging database's rows to produce this copy,
     // may file it with the publication's verify-once marker.
     verify_recovered_rows(database, identity, expected, check)
 }
@@ -968,12 +1002,23 @@ fn verify_recovered_rows(
             }
         })?;
     if &actual != expected {
+        // Name the row set the observed digest was taken over. A digest pair
+        // on its own cannot distinguish "these rows changed" from "a
+        // different number of rows was enumerated", the released-row and
+        // partial-restage failures are exactly the second kind, and without
+        // the counts every such report reads as unexplained corruption.
+        let (entities, relations) = projection_node_counts(
+            database,
+            &physical_namespace,
+            &identity.projection.projection,
+        )?;
         return Err(GraphDbError::GenerationMismatch {
             namespace: identity.projection.namespace.to_string(),
             projection: identity.projection.projection.to_string(),
             generation: identity.generation.to_string(),
             message: format!(
-                "expected recovered digest `{}`, observed `{}`",
+                "expected recovered digest `{}`, observed `{}` over {entities} stored \
+                 entities and {relations} stored relations",
                 expected.as_str(),
                 actual.as_str()
             ),
@@ -1068,32 +1113,6 @@ pub(crate) fn dependency_closure_canonicalizations() -> usize {
     DEPENDENCY_CLOSURE_CANONICALIZATIONS.with(std::cell::Cell::get)
 }
 
-/// Digest of the generation identity frames alone, in the exact byte layout
-/// the recovered-generation proof hashes before its entity and relation
-/// frames. This is the binding digest for derived read artifacts (the sealed
-/// read bundle): it reuses [`write_generation_identity_frames`] so there is
-/// exactly one canonical encoding of a generation's identity, never a
-/// parallel authority.
-pub(crate) fn generation_identity_frames_digest(
-    identity: &GraphGenerationManifestIdentity,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<String, GraphDbError> {
-    let mut digest = Sha256::new();
-    let mut writer = CheckedDigestWriter::new(&mut digest, check);
-    let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
-    write_generation_identity_frames(
-        &mut writer,
-        &mut canonical,
-        &identity.projection,
-        &identity.generation,
-        &identity.source_generation,
-        &identity.watermark,
-        &identity.dependencies,
-    )?;
-    writer.finish()?;
-    Ok(encode_lowercase_hex(&digest.finalize()))
-}
-
 pub(crate) fn physical_namespace_projection_map(
     identity: &GraphGenerationManifestIdentity,
 ) -> Result<BTreeMap<GraphNamespace, GraphProjectionIdentity>, GraphDbError> {
@@ -1132,8 +1151,8 @@ pub(crate) fn recovered_entity_ref(
         .ok_or_else(|| GraphDbError::Corrupt {
             message: "recovered generation relation escapes its dependency closure".to_owned(),
         })?;
-    let identity = GraphEntityId::new(required_string(
-        entity.get_property(crate::schema::ENTITY_ID_PROPERTY),
+    let identity = GraphEntityId::new(decode_identity(
+        entity.get_property(ENTITY_ID_PROPERTY),
         "recovered generation endpoint identity",
     )?)
     .map_err(|error| GraphDbError::Corrupt {
@@ -1145,10 +1164,10 @@ pub(crate) fn recovered_entity_ref(
 fn recovered_generation_digest(
     manifest: &GraphGenerationManifest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<String, GraphDbError> {
+) -> Result<(String, GraphRowDigestSum), GraphDbError> {
     #[cfg(test)]
     MANIFEST_CANONICALIZATIONS.with(|count| count.set(count.get() + 1));
-    recovered_generation_digest_with_config(
+    recovered_generation_digest_and_rows(
         manifest,
         check,
         ManifestDigestPipelineConfig::production(),
@@ -1250,9 +1269,6 @@ impl ManifestDigestPipelineMetrics {
         }
         let current = self.current_bytes.fetch_add(bytes, Ordering::AcqRel) + bytes;
         self.peak_bytes.fetch_max(current, Ordering::AcqRel);
-        hotpath::gauge!("graph_db.generation.manifest_digest.in_flight_bytes").set(current as f64);
-        hotpath::gauge!("graph_db.generation.manifest_digest.peak_in_flight_bytes")
-            .set(self.peak_bytes.load(Ordering::Acquire) as f64);
         drop(gate);
         Ok(ManifestDigestReservation {
             bytes,
@@ -1290,13 +1306,9 @@ impl Drop for ManifestDigestReservation {
             Ok(gate) => gate,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let prior = self
-            .metrics
+        self.metrics
             .current_bytes
             .fetch_sub(self.bytes, Ordering::AcqRel);
-        let remaining = prior.saturating_sub(self.bytes);
-        hotpath::gauge!("graph_db.generation.manifest_digest.in_flight_bytes")
-            .set(remaining as f64);
         self.metrics.reservation_released.notify_all();
     }
 }
@@ -1331,12 +1343,25 @@ struct ReservedManifestDigestChunk {
     _reservation: ManifestDigestReservation,
 }
 
-#[hotpath::measure(label = "graph_db.generation.manifest_digest")]
+#[cfg(test)]
 fn recovered_generation_digest_with_config(
     manifest: &GraphGenerationManifest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     config: ManifestDigestPipelineConfig,
 ) -> Result<String, GraphDbError> {
+    recovered_generation_digest_and_rows(manifest, check, config).map(|(digest, _)| digest)
+}
+
+#[tracing::instrument(
+    name = "graph_db.generation.manifest_digest",
+    level = "trace",
+    skip_all
+)]
+fn recovered_generation_digest_and_rows(
+    manifest: &GraphGenerationManifest,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    config: ManifestDigestPipelineConfig,
+) -> Result<(String, GraphRowDigestSum), GraphDbError> {
     let GraphGenerationManifest {
         projection,
         generation,
@@ -1370,8 +1395,6 @@ fn recovered_generation_digest_with_config(
         )
         .collect::<Vec<_>>();
     let workers = config.effective_workers(chunks.len())?;
-    hotpath::gauge!("graph_db.generation.manifest_digest.effective_workers").set(workers as f64);
-    hotpath::gauge!("graph_db.generation.manifest_digest.chunks").set(chunks.len() as f64);
     if workers == 1 {
         for chunk in chunks {
             digest_manifest_chunk_serial(chunk, &mut writer, &mut canonical, check)?;
@@ -1386,11 +1409,16 @@ fn recovered_generation_digest_with_config(
             workers,
         )?;
     }
+    let row_sum = writer.row_sum();
     writer.finish()?;
-    Ok(encode_lowercase_hex(&digest.finalize()))
+    Ok((encode_lowercase_hex(&digest.finalize()), row_sum))
 }
 
-#[hotpath::measure(label = "graph_db.generation.manifest_digest.parallel")]
+#[tracing::instrument(
+    name = "graph_db.generation.manifest_digest.parallel",
+    level = "trace",
+    skip_all
+)]
 fn digest_manifest_chunks_parallel(
     chunks: &[ManifestDigestChunk<'_>],
     writer: &mut CheckedDigestWriter<'_>,
@@ -1486,17 +1514,13 @@ fn digest_manifest_chunks_parallel(
                             let mut start = 0usize;
                             for &end in &encoded.frame_ends {
                                 check()?;
-                                write_digest_bytes(writer, &encoded.bytes[start..end])?;
+                                writer.add_row_frame(&[&encoded.bytes[start..end]])?;
                                 start = end;
                             }
                             drop(encoded);
                             drop(reservation);
                         }
                         ManifestDigestChunkEncoding::SerialFallback => {
-                            hotpath::gauge!(
-                                "graph_db.generation.manifest_digest.serial_fallback_chunks"
-                            )
-                            .inc(1_u64);
                             // The worker buffer is already gone; release its
                             // reservation before the one-row serial buffer grows.
                             drop(reservation);
@@ -1525,7 +1549,11 @@ fn digest_manifest_chunks_parallel(
     })
 }
 
-#[hotpath::measure(label = "graph_db.generation.manifest_digest.serial_chunk")]
+#[tracing::instrument(
+    name = "graph_db.generation.manifest_digest.serial_chunk",
+    level = "trace",
+    skip_all
+)]
 fn digest_manifest_chunk_serial(
     chunk: ManifestDigestChunk<'_>,
     writer: &mut CheckedDigestWriter<'_>,
@@ -1536,7 +1564,7 @@ fn digest_manifest_chunk_serial(
         ManifestDigestChunk::Entities(rows) => {
             for entity in rows {
                 check()?;
-                write_canonical_frame(
+                write_canonical_row_frame(
                     writer,
                     canonical,
                     "entity",
@@ -1548,7 +1576,7 @@ fn digest_manifest_chunk_serial(
         ManifestDigestChunk::Relations(rows) => {
             for relation in rows {
                 check()?;
-                write_canonical_frame(
+                write_canonical_row_frame(
                     writer,
                     canonical,
                     "relation",
@@ -1561,7 +1589,11 @@ fn digest_manifest_chunk_serial(
     Ok(())
 }
 
-#[hotpath::measure(label = "graph_db.generation.manifest_digest.encode_chunk")]
+#[tracing::instrument(
+    name = "graph_db.generation.manifest_digest.encode_chunk",
+    level = "trace",
+    skip_all
+)]
 fn encode_manifest_digest_chunk(
     chunk: ManifestDigestChunk<'_>,
     worker_bytes: usize,
@@ -1636,14 +1668,10 @@ fn append_encoded_manifest_frame<T: Serialize + ?Sized>(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<bool, GraphDbError> {
     check()?;
-    let bytes = match canonical.encode(value, subject) {
+    let bytes = match canonical.encode_bounded(value, subject) {
         Ok(bytes) => bytes,
-        Err(GraphDbError::InvalidRequest { message })
-            if message.contains("canonical graph replay exceeds its payload bound") =>
-        {
-            return Ok(false);
-        }
-        Err(error) => return Err(error),
+        Err(CanonicalEncodeError::PayloadBound) => return Ok(false),
+        Err(CanonicalEncodeError::Graph(error)) => return Err(error),
     };
     let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
     let frame_bytes = tag_len
@@ -1687,7 +1715,7 @@ fn write_generation_identity_frames(
         writer,
         canonical,
         "format",
-        "tracedecay.graph-generation.v1",
+        "tracedecay.graph-generation.v2",
         "recovered generation format",
     )?;
     write_canonical_frame(
@@ -1730,8 +1758,8 @@ fn write_generation_identity_frames(
 /// Big-endian `(tag length, payload length)` headers of one digest frame.
 ///
 /// The streaming writer ([`write_frame`]) and the parallel proof's chunk
-/// encoder (`generation::recovered`) emit the identical frame layout —
-/// `tag_len | tag | byte_len | bytes` — so the length encoding lives here
+/// encoder (`generation::recovered`) emit the identical frame layout,
+/// `tag_len | tag | byte_len | bytes`, so the length encoding lives here
 /// once and the two emitters cannot drift.
 fn frame_length_headers(tag: &str, bytes: &[u8]) -> Result<([u8; 8], [u8; 8]), GraphDbError> {
     let tag_len =
@@ -1764,6 +1792,37 @@ fn write_canonical_frame<T: Serialize + ?Sized>(
     write_frame(writer, tag, bytes)
 }
 
+/// One entity or relation row into the order-independent row sum.
+fn write_row_frame(
+    writer: &mut CheckedDigestWriter<'_>,
+    tag: &str,
+    bytes: &[u8],
+) -> Result<RowLanes, GraphDbError> {
+    let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
+    writer.add_row_frame(&[&tag_len, tag.as_bytes(), &byte_len, bytes])
+}
+
+pub(crate) fn row_frame_lanes(tag: &str, bytes: &[u8]) -> Result<RowLanes, GraphDbError> {
+    let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
+    Ok(GraphRowDigestSum::frame_lanes(&[
+        &tag_len,
+        tag.as_bytes(),
+        &byte_len,
+        bytes,
+    ]))
+}
+
+fn write_canonical_row_frame<T: Serialize + ?Sized>(
+    writer: &mut CheckedDigestWriter<'_>,
+    canonical: &mut CheckedVecWriter<'_>,
+    tag: &str,
+    value: &T,
+    subject: &str,
+) -> Result<(), GraphDbError> {
+    let bytes = canonical.encode(value, subject)?;
+    write_row_frame(writer, tag, bytes).map(drop)
+}
+
 fn write_digest_bytes(
     writer: &mut CheckedDigestWriter<'_>,
     bytes: &[u8],
@@ -1776,12 +1835,195 @@ fn write_digest_bytes(
     }
 }
 
+/// The order-independent half of a recovered-generation digest: the count of
+/// row frames and the sum, modulo 2^256, of each frame's SHA-256.
+///
+/// A generation's rows are a set, so their digest is a function of the set
+/// and never of the order or the build that produced it. That is what lets a
+/// layered generation derive its digest from its base's sum, minus the base
+/// rows it hides and plus the rows it adds, without streaming the base, and
+/// still equal the digest a cold build of the same rows records.
+///
+/// ponytail: an additive multiset hash detects corruption and build drift,
+/// not an adversary who chooses rows to collide sums; LtHash is the upgrade
+/// if the digest ever becomes a security boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphRowDigestSum {
+    lanes: RowLanes,
+    rows: u64,
+}
+
+/// One row frame's SHA-256 as the four big-endian lanes a
+/// [`GraphRowDigestSum`] adds.
+pub(crate) type RowLanes = [u64; 4];
+
+impl GraphRowDigestSum {
+    fn frame_lanes(parts: &[&[u8]]) -> [u64; 4] {
+        let mut hasher = Sha256::new();
+        for part in parts {
+            hasher.update(part);
+        }
+        let hash = hasher.finalize();
+        let mut lanes = [0_u64; 4];
+        for (lane, bytes) in lanes.iter_mut().zip(hash.as_chunks::<8>().0.iter()) {
+            let mut word = [0_u8; 8];
+            word.copy_from_slice(bytes);
+            *lane = u64::from_be_bytes(word);
+        }
+        lanes
+    }
+
+    fn add_lanes(&mut self, other: [u64; 4]) {
+        let mut carry = false;
+        for (lane, addend) in self.lanes.iter_mut().rev().zip(other.iter().rev()) {
+            let (sum, first) = lane.overflowing_add(*addend);
+            let (sum, second) = sum.overflowing_add(u64::from(carry));
+            *lane = sum;
+            carry = first || second;
+        }
+    }
+
+    fn sub_lanes(&mut self, other: [u64; 4]) {
+        let mut borrow = false;
+        for (lane, subtrahend) in self.lanes.iter_mut().rev().zip(other.iter().rev()) {
+            let (difference, first) = lane.overflowing_sub(*subtrahend);
+            let (difference, second) = difference.overflowing_sub(u64::from(borrow));
+            *lane = difference;
+            borrow = first || second;
+        }
+    }
+
+    fn add_frame(&mut self, parts: &[&[u8]]) -> RowLanes {
+        let lanes = Self::frame_lanes(parts);
+        self.add_row_lanes(lanes);
+        lanes
+    }
+
+    /// Adds one row whose frame hashed to `lanes`.
+    pub(crate) fn add_row_lanes(&mut self, lanes: RowLanes) {
+        self.add_lanes(lanes);
+        self.rows = self.rows.wrapping_add(1);
+    }
+
+    /// Adds every row `other` holds.
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.add_lanes(other.lanes);
+        self.rows = self.rows.wrapping_add(other.rows);
+    }
+
+    /// Removes every row `other` holds; refused when `other` holds more rows
+    /// than this sum.
+    pub(crate) fn subtract(&mut self, other: Self) -> Result<(), GraphDbError> {
+        self.rows = self
+            .rows
+            .checked_sub(other.rows)
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: "a row digest sum removed more rows than it holds".to_owned(),
+            })?;
+        self.sub_lanes(other.lanes);
+        Ok(())
+    }
+
+    /// Adds the row frame `tag` over `canonical` bytes.
+    #[cfg(test)]
+    pub(crate) fn add_row(&mut self, tag: &str, canonical: &[u8]) -> Result<(), GraphDbError> {
+        let (tag_len, byte_len) = frame_length_headers(tag, canonical)?;
+        self.add_frame(&[&tag_len, tag.as_bytes(), &byte_len, canonical]);
+        Ok(())
+    }
+
+    /// Removes a row frame an earlier [`Self::add_row`] added.
+    #[cfg(test)]
+    pub(crate) fn remove_row(&mut self, tag: &str, canonical: &[u8]) -> Result<(), GraphDbError> {
+        let (tag_len, byte_len) = frame_length_headers(tag, canonical)?;
+        self.sub_lanes(Self::frame_lanes(&[
+            &tag_len,
+            tag.as_bytes(),
+            &byte_len,
+            canonical,
+        ]));
+        self.rows = self
+            .rows
+            .checked_sub(1)
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: "a row digest sum removed more rows than it holds".to_owned(),
+            })?;
+        Ok(())
+    }
+
+    fn to_bytes(self) -> [u8; 40] {
+        let mut bytes = [0_u8; 40];
+        for (slot, lane) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(self.lanes) {
+            slot.copy_from_slice(&lane.to_be_bytes());
+        }
+        bytes[32..].copy_from_slice(&self.rows.to_be_bytes());
+        bytes
+    }
+
+    /// Lowercase hex of the lanes then the row count, the form receipts carry.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        encode_lowercase_hex(&self.to_bytes())
+    }
+
+    pub fn from_hex(value: &str) -> Result<Self, GraphDbError> {
+        let corrupt = || GraphDbError::Corrupt {
+            message: "a recorded row digest sum is not 40 bytes of lowercase hex".to_owned(),
+        };
+        let bytes = hex::decode(value).map_err(|_| corrupt())?;
+        if bytes.len() != 40 || encode_lowercase_hex(&bytes) != value {
+            return Err(corrupt());
+        }
+        let mut sum = Self::default();
+        for (lane, word) in sum.lanes.iter_mut().zip(bytes.as_chunks::<8>().0.iter()) {
+            let mut buffer = [0_u8; 8];
+            buffer.copy_from_slice(word);
+            *lane = u64::from_be_bytes(buffer);
+        }
+        let mut rows = [0_u8; 8];
+        rows.copy_from_slice(&bytes[32..]);
+        sum.rows = u64::from_be_bytes(rows);
+        Ok(sum)
+    }
+}
+
+/// The recovered digest of the generation `identity` names whose rows hash
+/// to `rows`, without a row in hand.
+pub(crate) fn recovered_digest_from_row_sum(
+    identity: &GraphGenerationManifestIdentity,
+    rows: GraphRowDigestSum,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+    let mut digest = Sha256::new();
+    let mut writer = CheckedDigestWriter::new(&mut digest, check);
+    let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    write_generation_identity_frames(
+        &mut writer,
+        &mut canonical,
+        &identity.projection,
+        &identity.generation,
+        &identity.source_generation,
+        &identity.watermark,
+        &identity.dependencies,
+    )?;
+    writer.rows = rows;
+    writer.finish()?;
+    GraphRecoveredGenerationDigestV1::new(format!(
+        "sha256:{}",
+        encode_lowercase_hex(&digest.finalize())
+    ))
+    .map_err(|error| GraphDbError::invalid(error.to_string()))
+}
+
+/// Hashes a generation's identity frames in order and its row frames into
+/// an order-independent [`GraphRowDigestSum`], sealed into the digest as the
+/// final frame by [`Self::finish`].
 struct CheckedDigestWriter<'a> {
     digest: &'a mut Sha256,
+    rows: GraphRowDigestSum,
     bytes_since_check: u64,
-    /// Every byte fed to the digest, for the verify byte gauge. Counted here
-    /// rather than derived from row counts so the gauge reports the work the
-    /// proof actually did.
+    /// Every byte fed to the digest. Counted here rather than derived from row
+    /// counts so the verify outcome reports the work the proof actually did.
     total_bytes: u64,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
     failure: Option<GraphDbError>,
@@ -1791,6 +2033,7 @@ impl<'a> CheckedDigestWriter<'a> {
     fn new(digest: &'a mut Sha256, check: &'a dyn Fn() -> Result<(), GraphDbError>) -> Self {
         Self {
             digest,
+            rows: GraphRowDigestSum::default(),
             bytes_since_check: 0,
             total_bytes: 0,
             check,
@@ -1798,11 +2041,40 @@ impl<'a> CheckedDigestWriter<'a> {
         }
     }
 
+    /// Seals the row sum into the digest as its final frame.
     fn finish(mut self) -> Result<(), GraphDbError> {
         if let Some(error) = self.failure.take() {
             return Err(error);
         }
-        (self.check)()
+        (self.check)()?;
+        let rows = self.rows.to_bytes();
+        let (tag_len, byte_len) = frame_length_headers("rows", &rows)?;
+        self.digest.update(tag_len);
+        self.digest.update(b"rows");
+        self.digest.update(byte_len);
+        self.digest.update(rows);
+        Ok(())
+    }
+
+    /// One whole row frame, `tag_len | tag | byte_len | bytes` split across
+    /// `parts`, into the row sum.
+    fn add_row_frame(&mut self, parts: &[&[u8]]) -> Result<RowLanes, GraphDbError> {
+        if let Some(error) = self.failure.take() {
+            return Err(error);
+        }
+        let length = parts.iter().map(|part| part.len() as u64).sum::<u64>();
+        self.bytes_since_check = self.bytes_since_check.saturating_add(length);
+        self.total_bytes = self.total_bytes.saturating_add(length);
+        if self.bytes_since_check >= DIGEST_CHECK_INTERVAL_BYTES {
+            self.bytes_since_check = 0;
+            (self.check)()?;
+        }
+        Ok(self.rows.add_frame(parts))
+    }
+
+    /// The row sum so far. Read before `finish` consumes the writer.
+    fn row_sum(&self) -> GraphRowDigestSum {
+        self.rows
     }
 
     /// The byte count so far. Read before `finish` consumes the writer.
@@ -1843,12 +2115,38 @@ impl Write for CheckedDigestWriter<'_> {
     }
 }
 
+/// Why a bounded canonical encode stopped before its value was written.
+#[derive(Debug)]
+enum CanonicalEncodeError {
+    /// The encoding passes the writer's payload bound. A caller with a
+    /// smaller-frame route takes it; every other caller refuses the request.
+    PayloadBound,
+    Graph(GraphDbError),
+}
+
+impl From<GraphDbError> for CanonicalEncodeError {
+    fn from(error: GraphDbError) -> Self {
+        Self::Graph(error)
+    }
+}
+
+impl CanonicalEncodeError {
+    fn into_graph_error(self, subject: &str) -> GraphDbError {
+        match self {
+            Self::PayloadBound => GraphDbError::invalid(format!(
+                "failed to encode {subject}: canonical graph replay exceeds its payload bound"
+            )),
+            Self::Graph(error) => error,
+        }
+    }
+}
+
 struct CheckedVecWriter<'a> {
     bytes: Vec<u8>,
     bytes_since_check: u64,
     max_bytes: usize,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
-    failure: Option<GraphDbError>,
+    failure: Option<CanonicalEncodeError>,
     #[cfg(test)]
     allocation_growths: usize,
 }
@@ -1870,9 +2168,9 @@ impl<'a> CheckedVecWriter<'a> {
         })
     }
 
-    fn finish(mut self) -> Result<Vec<u8>, GraphDbError> {
-        if let Some(error) = self.failure.take() {
-            return Err(error);
+    fn finish(mut self, subject: &str) -> Result<Vec<u8>, GraphDbError> {
+        if let Some(failure) = self.failure.take() {
+            return Err(failure.into_graph_error(subject));
         }
         (self.check)()?;
         Ok(self.bytes)
@@ -1883,6 +2181,15 @@ impl<'a> CheckedVecWriter<'a> {
         value: &T,
         subject: &str,
     ) -> Result<&[u8], GraphDbError> {
+        self.encode_bounded(value, subject)
+            .map_err(|error| error.into_graph_error(subject))
+    }
+
+    fn encode_bounded<T: Serialize + ?Sized>(
+        &mut self,
+        value: &T,
+        subject: &str,
+    ) -> Result<&[u8], CanonicalEncodeError> {
         self.bytes.clear();
         self.bytes_since_check = 0;
         self.failure = None;
@@ -1912,6 +2219,7 @@ impl Write for CheckedVecWriter<'_> {
             .checked_add(bytes.len())
             .ok_or_else(|| io::Error::other("canonical graph replay size overflow"))?;
         if next_len > self.max_bytes {
+            self.failure = Some(CanonicalEncodeError::PayloadBound);
             return Err(io::Error::other(
                 "canonical graph replay exceeds its payload bound",
             ));
@@ -1936,10 +2244,10 @@ impl Write for CheckedVecWriter<'_> {
             if self.bytes.try_reserve_exact(additional).is_err()
                 || self.bytes.capacity() > self.max_bytes
             {
-                self.failure = Some(GraphDbError::budget_exhausted_count(
-                    GraphBudgetKind::Write,
-                    self.max_bytes,
-                ));
+                self.failure = Some(
+                    GraphDbError::budget_exhausted_count(GraphBudgetKind::Write, self.max_bytes)
+                        .into(),
+                );
                 return Err(io::Error::other(
                     "canonical graph replay allocation exceeds its product budget",
                 ));
@@ -1961,7 +2269,7 @@ impl Write for CheckedVecWriter<'_> {
         if self.bytes_since_check >= DIGEST_CHECK_INTERVAL_BYTES {
             self.bytes_since_check = 0;
             if let Err(error) = (self.check)() {
-                self.failure = Some(error);
+                self.failure = Some(error.into());
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "canonical graph replay interrupted",
@@ -1977,7 +2285,7 @@ impl Write for CheckedVecWriter<'_> {
     }
 }
 
-fn checked_canonical_bytes<T: Serialize + ?Sized>(
+pub(crate) fn checked_canonical_bytes<T: Serialize + ?Sized>(
     value: &T,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     subject: &str,
@@ -1985,7 +2293,7 @@ fn checked_canonical_bytes<T: Serialize + ?Sized>(
 ) -> Result<Vec<u8>, GraphDbError> {
     let mut writer = CheckedVecWriter::new(check, max_bytes)?;
     let encoded = serde_json::to_writer(&mut writer, value);
-    let bytes = writer.finish()?;
+    let bytes = writer.finish(subject)?;
     encoded
         .map_err(|error| GraphDbError::invalid(format!("failed to encode {subject}: {error}")))?;
     Ok(bytes)
@@ -1997,23 +2305,21 @@ mod checked_vec_writer_tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::time::Instant;
 
     use sha2::{Digest, Sha256};
     use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
     use super::{
-        CheckedVecWriter, GraphDbError, GraphGenerationManifest, MANIFEST_DIGEST_CHUNK_ROWS,
-        MANIFEST_DIGEST_MAX_IN_FLIGHT_BYTES, MANIFEST_DIGEST_WORKER_BYTES, ManifestDigestChunk,
-        ManifestDigestChunkEncoding, ManifestDigestPipelineConfig, ManifestDigestPipelineMetrics,
-        canonical_buffer_allocation_growths, checked_canonical_bytes, checked_sorted_entities,
+        CanonicalEncodeError, CheckedVecWriter, EncodedManifestDigestChunk, GraphDbError,
+        GraphGenerationManifest, ManifestDigestChunk, ManifestDigestChunkEncoding,
+        ManifestDigestPipelineConfig, ManifestDigestPipelineMetrics, append_encoded_manifest_frame,
+        canonical_buffer_allocation_growths, checked_canonical_bytes, checked_sorted_by,
         encode_manifest_digest_chunk, frame_length_headers, recovered_generation_digest,
         recovered_generation_digest_with_config, reset_canonical_buffer_allocation_growths,
     };
     use crate::{
-        GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId, GraphGenerationRelation,
-        GraphLabel, GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
-        GraphPropertyName, GraphRelationId, GraphRelationKind, GraphWatermark, SourceGeneration,
+        GraphEntity, GraphEntityId, GraphGenerationId, GraphNamespace, GraphProjectionId,
+        GraphProjectionIdentity, GraphWatermark, SourceGeneration,
     };
 
     #[test]
@@ -2024,7 +2330,9 @@ mod checked_vec_writer_tests {
 
         serde_json::to_writer(&mut writer, &value).expect("fixture fits the writer bound");
         let allocation_growths = writer.allocation_growths();
-        let actual = writer.finish().expect("bounded writer finishes");
+        let actual = writer
+            .finish("tiny fixture")
+            .expect("bounded writer finishes");
 
         assert_eq!(
             actual,
@@ -2048,11 +2356,60 @@ mod checked_vec_writer_tests {
         let error = checked_canonical_bytes(&value, &|| Ok(()), "bounded fixture", 8_192)
             .expect_err("8,193 encoded bytes must exceed the bound");
 
-        assert!(matches!(
-            error,
-            GraphDbError::InvalidRequest { message }
-                if message.contains("canonical graph replay exceeds its payload bound")
-        ));
+        assert_eq!(
+            error.to_string(),
+            "invalid graph database request: failed to encode bounded fixture: canonical graph \
+             replay exceeds its payload bound"
+        );
+    }
+
+    /// A serializer failure is a refused request even when its text reads
+    /// like the bound; only the writer's own bound refusal falls back.
+    #[test]
+    fn manifest_frames_fall_back_only_for_the_payload_bound() {
+        struct RefusesToSerialize;
+        impl serde::Serialize for RefusesToSerialize {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom(
+                    "canonical graph replay exceeds its payload bound",
+                ))
+            }
+        }
+        let check = || Ok(());
+        let mut canonical = CheckedVecWriter::new(&check, 8_192).expect("bounded writer");
+        let mut encoded = EncodedManifestDigestChunk {
+            bytes: Vec::new(),
+            frame_ends: Vec::new(),
+        };
+
+        let fits = append_encoded_manifest_frame(
+            &mut canonical,
+            &mut encoded,
+            1 << 20,
+            "entity",
+            &vec![0_u8; 4_096],
+            "oversized fixture",
+            &check,
+        )
+        .expect("an oversized row is a fallback, not a failure");
+        assert!(!fits, "an oversized row must take the serial fallback");
+
+        let error = append_encoded_manifest_frame(
+            &mut canonical,
+            &mut encoded,
+            1 << 20,
+            "entity",
+            &RefusesToSerialize,
+            "refusing fixture",
+            &check,
+        )
+        .expect_err("a serializer failure must refuse the chunk");
+        assert_eq!(
+            error.to_string(),
+            "invalid graph database request: failed to encode refusing fixture: canonical graph \
+             replay exceeds its payload bound"
+        );
+        assert_eq!(encoded.frame_ends, Vec::<usize>::new());
     }
 
     #[test]
@@ -2065,7 +2422,14 @@ mod checked_vec_writer_tests {
         let error = serde_json::to_writer(&mut writer, &value)
             .expect_err("the final encoded byte must be refused");
 
-        assert!(error.to_string().contains("canonical graph replay exceeds"));
+        assert_eq!(
+            error.to_string(),
+            "canonical graph replay exceeds its payload bound"
+        );
+        assert!(matches!(
+            writer.failure,
+            Some(CanonicalEncodeError::PayloadBound)
+        ));
         assert!(writer.bytes.len() <= max_bytes);
         assert!(writer.bytes.capacity() <= max_bytes);
     }
@@ -2075,11 +2439,11 @@ mod checked_vec_writer_tests {
         let manifest = manifest_with_entities(4_096);
 
         reset_canonical_buffer_allocation_growths();
-        let digest = recovered_generation_digest(&manifest, &|| Ok(())).unwrap();
+        let (digest, _) = recovered_generation_digest(&manifest, &|| Ok(())).unwrap();
         let allocation_growths = canonical_buffer_allocation_growths();
         assert_eq!(
             digest,
-            "786f46a4a0f263e5c67927f2a196ce95bd7071733478fb94560c5736dce44f9f"
+            "61ebfe7635c49c4fd06518de9ac17ef1be0fadc782ff24f5669f03143d782333"
         );
 
         assert!(
@@ -2229,7 +2593,13 @@ mod checked_vec_writer_tests {
         entities.shrink_to_fit();
         let allocation = entities.as_ptr();
 
-        let sorted = checked_sorted_entities(entities, &|| Ok(())).unwrap();
+        let sorted = checked_sorted_by(
+            entities,
+            &|| Ok(()),
+            |left, right| left.identity.cmp(&right.identity),
+            "a graph generation repeats an entity identity",
+        )
+        .unwrap();
 
         assert_eq!(
             sorted.as_ptr(),
@@ -2241,117 +2611,6 @@ mod checked_vec_writer_tests {
                 .windows(2)
                 .all(|rows| rows[0].identity < rows[1].identity)
         );
-    }
-
-    #[test]
-    #[ignore = "large synthetic manifest timing/RSS harness; run explicitly in a fresh process"]
-    fn manifest_digest_sandbox_probe() {
-        let rows = std::env::var("TRACEDECAY_MANIFEST_BENCH_ROWS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(250_000usize);
-        let mode = std::env::var("TRACEDECAY_MANIFEST_BENCH_MODE")
-            .unwrap_or_else(|_| "parallel".to_owned());
-        let workers = std::env::var("TRACEDECAY_MANIFEST_BENCH_WORKERS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(8usize);
-        let projection = GraphProjectionIdentity::new(
-            GraphNamespace::new("manifest-sandbox").unwrap(),
-            GraphProjectionId::new("code").unwrap(),
-        );
-        let payload = "manifest-payload-".repeat(16);
-        let entities = (0..rows)
-            .map(|index| {
-                GraphEntity::new(
-                    GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
-                    BTreeSet::from([GraphLabel::new("symbol").unwrap()]),
-                    BTreeMap::from([
-                        (
-                            GraphPropertyName::new("name").unwrap(),
-                            GraphProperty::String(format!("symbol_{index}")),
-                        ),
-                        (
-                            GraphPropertyName::new("payload").unwrap(),
-                            GraphProperty::String(payload.clone()),
-                        ),
-                    ]),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let relations = (0..rows.saturating_sub(1))
-            .map(|index| {
-                GraphGenerationRelation::new(
-                    GraphRelationId::new(format!("relation:{index:08}")).unwrap(),
-                    GraphEntityRef::new(
-                        projection.clone(),
-                        GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
-                    ),
-                    GraphEntityRef::new(
-                        projection.clone(),
-                        GraphEntityId::new(format!("entity:{:08}", index + 1)).unwrap(),
-                    ),
-                    GraphRelationKind::new("calls").unwrap(),
-                    BTreeMap::new(),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let manifest = GraphGenerationManifest::new(
-            projection,
-            GraphGenerationId::new("manifest-sandbox-generation").unwrap(),
-            SourceGeneration::new("manifest-sandbox-source").unwrap(),
-            GraphWatermark::new("manifest-sandbox-watermark").unwrap(),
-            vec![],
-            entities,
-            relations,
-        )
-        .unwrap();
-        let rss_before = proc_status_kib("VmRSS");
-        let hwm_before = proc_status_kib("VmHWM");
-        let metrics = Arc::new(ManifestDigestPipelineMetrics::default());
-        let config = match mode.as_str() {
-            "serial" => ManifestDigestPipelineConfig::serial(),
-            "parallel" => ManifestDigestPipelineConfig::testing(
-                workers,
-                MANIFEST_DIGEST_CHUNK_ROWS,
-                MANIFEST_DIGEST_WORKER_BYTES,
-                MANIFEST_DIGEST_MAX_IN_FLIGHT_BYTES,
-                Arc::clone(&metrics),
-            ),
-            other => panic!("unknown TRACEDECAY_MANIFEST_BENCH_MODE `{other}`"),
-        };
-        let started = Instant::now();
-        let digest =
-            recovered_generation_digest_with_config(&manifest, &|| Ok(()), config).unwrap();
-        let elapsed = started.elapsed();
-        println!(
-            "manifest_digest mode={mode} workers={workers} entities={} relations={} \
-             elapsed_ms={} rss_before_kib={} rss_after_kib={} hwm_before_kib={} \
-             hwm_after_kib={} peak_in_flight_bytes={} digest={digest}",
-            manifest.entities.len(),
-            manifest.relations.len(),
-            elapsed.as_millis(),
-            rss_before,
-            proc_status_kib("VmRSS"),
-            hwm_before,
-            proc_status_kib("VmHWM"),
-            metrics.peak_bytes(),
-        );
-    }
-
-    fn proc_status_kib(field: &str) -> u64 {
-        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-            return 0;
-        };
-        let prefix = format!("{field}:");
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(&prefix))
-            .and_then(|value| value.split_whitespace().next())
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0)
     }
 
     fn manifest_with_entities(entity_count: usize) -> GraphGenerationManifest {
@@ -2377,6 +2636,126 @@ mod checked_vec_writer_tests {
             vec![],
         )
         .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod row_digest_sum_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{
+        GraphGenerationManifest, GraphRowDigestSum, checked_canonical_bytes,
+        recovered_digest_from_row_sum,
+    };
+    use crate::{
+        GraphEntity, GraphEntityId, GraphGenerationId, GraphNamespace, GraphProjectionId,
+        GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphWatermark,
+        SourceGeneration,
+    };
+    use tracedecay_store::runtime::MAX_GRAPH_REPLAY_SOURCE_BYTES_V1;
+
+    fn entity(index: usize, payload: &str) -> GraphEntity {
+        GraphEntity::new(
+            GraphEntityId::new(format!("entity:{index:03}")).unwrap(),
+            BTreeSet::new(),
+            BTreeMap::from([(
+                GraphPropertyName::new("payload").unwrap(),
+                GraphProperty::String(payload.to_owned()),
+            )]),
+        )
+        .unwrap()
+    }
+
+    fn manifest(generation: &str, entities: Vec<GraphEntity>) -> GraphGenerationManifest {
+        GraphGenerationManifest::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("row-sum-probe").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            GraphGenerationId::new(generation).unwrap(),
+            SourceGeneration::new(format!("source-{generation}")).unwrap(),
+            GraphWatermark::new(format!("watermark-{generation}")).unwrap(),
+            vec![],
+            entities,
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn canonical(entity: &GraphEntity) -> Vec<u8> {
+        checked_canonical_bytes(
+            entity,
+            &|| Ok(()),
+            "probe",
+            MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
+        )
+        .unwrap()
+    }
+
+    fn sum_of(entities: &[GraphEntity]) -> GraphRowDigestSum {
+        let mut sum = GraphRowDigestSum::default();
+        for entity in entities {
+            sum.add_row("entity", &canonical(entity)).unwrap();
+        }
+        sum
+    }
+
+    /// A child generation's digest composed from its parent's row sum, minus
+    /// the rows it hides and replaces and plus the rows it adds, equals the
+    /// digest of the child's rows hashed from scratch.
+    #[test]
+    fn a_composed_row_sum_digests_exactly_like_a_cold_manifest() {
+        let parent = (0..40)
+            .map(|index| entity(index, "parent"))
+            .collect::<Vec<_>>();
+        let mut composed = sum_of(&parent);
+        // Entity 3 disappears, entity 7 changes, entity 40 is new.
+        composed
+            .remove_row("entity", &canonical(&parent[3]))
+            .unwrap();
+        composed
+            .remove_row("entity", &canonical(&parent[7]))
+            .unwrap();
+        composed
+            .add_row("entity", &canonical(&entity(7, "child")))
+            .unwrap();
+        composed
+            .add_row("entity", &canonical(&entity(40, "child")))
+            .unwrap();
+
+        let mut child_rows = parent
+            .iter()
+            .filter(|row| !["entity:003", "entity:007"].contains(&row.identity.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        child_rows.push(entity(7, "child"));
+        child_rows.push(entity(40, "child"));
+        // Construction order is irrelevant to a set digest.
+        child_rows.reverse();
+        let cold = manifest("child", child_rows);
+
+        assert_eq!(
+            recovered_digest_from_row_sum(&cold.identity(), composed, &|| Ok(())).unwrap(),
+            cold.expected_recovered_digest(&|| Ok(())).unwrap()
+        );
+        assert_ne!(
+            recovered_digest_from_row_sum(&cold.identity(), sum_of(&parent), &|| Ok(())).unwrap(),
+            cold.expected_recovered_digest(&|| Ok(())).unwrap(),
+            "the parent's rows must not digest as the child's"
+        );
+        assert_eq!(
+            GraphRowDigestSum::from_hex(&composed.to_hex()).unwrap(),
+            composed
+        );
+    }
+
+    #[test]
+    fn removing_a_row_the_sum_never_held_is_refused() {
+        let mut empty = GraphRowDigestSum::default();
+        assert!(matches!(
+            empty.remove_row("entity", &canonical(&entity(0, "absent"))),
+            Err(crate::GraphDbError::Corrupt { .. })
+        ));
     }
 }
 
@@ -2618,45 +2997,6 @@ mod manifest_digest_memo_tests {
         assert_eq!(
             control.dependency_closure_digest(&|| Ok(())).unwrap(),
             dependency_after
-        );
-    }
-
-    #[test]
-    fn identity_mutation_recomputes_the_propagated_digest() {
-        let manifest = manifest_fixture("digest-memo-identity", vec![dependency(1), dependency(2)]);
-        let seeded = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
-        let mut identity = manifest.identity();
-        identity.dependencies.pop();
-
-        let recomputed = identity.dependency_closure_digest(&|| Ok(())).unwrap();
-        assert_ne!(recomputed, seeded);
-        let control = super::dependency_closure_digest(&identity.dependencies, &|| Ok(())).unwrap();
-        assert_eq!(recomputed, control);
-    }
-
-    #[test]
-    fn a_clone_starts_with_a_cold_memo() {
-        let manifest = manifest_fixture("digest-memo-clone", vec![dependency(1)]);
-        let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
-        let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
-
-        let clone = manifest.clone();
-        reset_manifest_canonicalizations();
-        reset_dependency_closure_canonicalizations();
-        assert_eq!(
-            clone.dependency_closure_digest(&|| Ok(())).unwrap(),
-            dependency_digest
-        );
-        assert_eq!(clone.expected_recovered_digest(&|| Ok(())).unwrap(), sealed);
-        assert_eq!(
-            dependency_closure_canonicalizations(),
-            1,
-            "a clone must recompute rather than inherit its source's memo"
-        );
-        assert_eq!(
-            manifest_canonicalizations(),
-            1,
-            "a clone must recompute rather than inherit its source's memo"
         );
     }
 }

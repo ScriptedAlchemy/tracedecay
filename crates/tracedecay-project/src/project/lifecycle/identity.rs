@@ -1,0 +1,410 @@
+//! Store-layout identity resolution: mapping a project root to its
+//! authoritative store layout.
+
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::storage::{self, StoreLayout};
+
+use super::{MovedStoreAdoption, TraceDecay, TraceDecayOpenOptions};
+
+impl TraceDecay {
+    #[tracing::instrument(
+        name = "lifecycle.resolve_registered_layout",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn resolve_registered_configuration_layout(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+        registry_database: &RegisteredGlobalDb,
+    ) -> Result<StoreLayout> {
+        Self::resolve_store_layout_for_authority(
+            project_root,
+            open_options,
+            Some(registry_database),
+            false,
+            &MovedStoreAdoption::Never,
+        )
+        .await
+    }
+
+    /// Resolves the store layout for a project that has never been enrolled,
+    /// minting a fresh path-derived profile-sharded identity so first-touch
+    /// `init` can bootstrap it under the daemon's authority.
+    ///
+    /// This differs from [`Self::resolve_registered_configuration_layout`] only
+    /// in that a project with no repository identity marker or registry match
+    /// falls through to a default identity instead of failing closed.
+    pub async fn resolve_first_touch_configuration_layout(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+        registry_database: &RegisteredGlobalDb,
+    ) -> Result<StoreLayout> {
+        Self::resolve_first_touch_configuration_layout_with_adoption(
+            project_root,
+            open_options,
+            registry_database,
+            &MovedStoreAdoption::Never,
+        )
+        .await
+    }
+
+    /// First-touch resolution that can remap a moved non-git project whose
+    /// store evidence still names the previous registry root, only under an
+    /// explicit operator adoption decision; ambient first-touch passes
+    /// [`MovedStoreAdoption::Never`] and always mints fresh.
+    #[tracing::instrument(
+        name = "lifecycle.resolve_first_touch_layout",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn resolve_first_touch_configuration_layout_with_adoption(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+        registry_database: &RegisteredGlobalDb,
+        adoption: &MovedStoreAdoption,
+    ) -> Result<StoreLayout> {
+        Self::resolve_store_layout_for_authority(
+            project_root,
+            open_options,
+            Some(registry_database),
+            true,
+            adoption,
+        )
+        .await
+    }
+
+    #[tracing::instrument(name = "lifecycle.resolve_store_layout", level = "trace", skip_all)]
+    async fn resolve_store_layout_for_authority(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+        registry_database: Option<&RegisteredGlobalDb>,
+        allow_default_identity: bool,
+        adoption: &MovedStoreAdoption,
+    ) -> Result<StoreLayout> {
+        let profile_root = open_options.resolved_profile_root()?;
+        storage::refuse_retired_checkout_layout(&profile_root, project_root)?;
+        // Every profile reads the same `.git/` marker. One naming a shard this
+        // profile does not hold yields to the registry, and only names the
+        // project when nothing else does.
+        let (mut selected, unheld_marker_layout) =
+            match storage::resolve_persisted_layout(project_root, &profile_root)? {
+                Some(layout) if layout.data_root.is_dir() => (Some(layout), None),
+                unheld => (None, unheld),
+            };
+        // Every linked worktree resolves through its repository, attached or
+        // not; suppressing this for detached worktrees dropped them onto the
+        // path-hashed identity fallback and minted a duplicate store.
+        let git_common_dir = match tracedecay_runtime_core::worktree::git_common_dir_outcome(
+            project_root,
+        ) {
+            Ok(git_common_dir) => git_common_dir,
+            Err(tracedecay_runtime_core::git_repository::DiscoveryBlocked { path }) => {
+                return Err(TraceDecayError::project_route(
+                    tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                    true,
+                    format!("repository discovery blocked on {path}"),
+                ));
+            }
+        };
+        if selected.is_none()
+            && let Some(registry_database) = registry_database
+            && let Some(resolution) = registry_database
+                .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
+                .await?
+        {
+            selected = Some(storage::profile_sharded_layout(
+                project_root,
+                &profile_root,
+                &resolution.project.project_id,
+            )?);
+        }
+
+        if allow_default_identity
+            && let MovedStoreAdoption::AdoptNamed(requested) = adoption
+            && let Some(layout) = selected.as_ref()
+            && layout.identity.project_id.as_deref() != Some(requested.as_str())
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "cannot adopt project '{requested}' onto root '{}' that already \
+                     resolves to registered project '{}'",
+                    project_root.display(),
+                    layout.identity.project_id.as_deref().unwrap_or("<unknown>")
+                ),
+            });
+        }
+
+        match selected {
+            Some(layout) => Ok(layout),
+            None if allow_default_identity => {
+                // The registry refuses to mint a durable authority for a root
+                // under the OS temp directory, but by the time it is asked the
+                // shard directory, hook configs, and databases have already
+                // been materialized from the default layout, which is how a
+                // fixture reaching a daemon under another profile left 111
+                // /tmp-rooted stores in that profile. Refuse here, before any
+                // layout exists to write into.
+                if let Some(message) =
+                    tracedecay_global_db::ephemeral_root_rejection(project_root, &profile_root)
+                {
+                    return Err(TraceDecayError::Config { message });
+                }
+                if let Some(registry_database) = registry_database {
+                    let adopted: Pin<
+                        Box<dyn Future<Output = Result<Option<StoreLayout>>> + Send + '_>,
+                    > = Box::pin(
+                        tracedecay_application::project_adoption::adopt_moved_nongit_project(
+                            project_root,
+                            &profile_root,
+                            registry_database,
+                            adoption,
+                        ),
+                    );
+                    if let Some(layout) = adopted.await? {
+                        return Ok(layout);
+                    }
+                }
+                match unheld_marker_layout {
+                    Some(layout) => Ok(layout),
+                    None => storage::default_profile_sharded_layout(project_root, &profile_root),
+                }
+            }
+            None => Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::IdentityUnregistered,
+                "registered configuration layout requires an enrolled or registry-resolved project identity",
+            )),
+        }
+    }
+
+    /// Whether a hook may treat `project_root` as a `TraceDecay` project of
+    /// `profile`: its store exists there, or its repository names an identity.
+    pub fn is_initialized_in_profile(
+        profile: &tracedecay_runtime_core::config::ProfileRoot,
+        project_root: &Path,
+    ) -> bool {
+        Self::is_initialized_with_options(
+            project_root,
+            &TraceDecayOpenOptions::for_profile(profile),
+        ) || tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
+    }
+
+    pub fn is_initialized_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> bool {
+        let option_resolved_store_exists = open_options
+            .resolved_profile_root()
+            .and_then(|profile_root| {
+                tracedecay_runtime_core::storage::resolve_layout(project_root, &profile_root)
+            })
+            .is_ok_and(|layout| layout.graph_db_path.exists());
+        if open_options.profile_root.is_some() || open_options.global_db_path.is_some() {
+            return option_resolved_store_exists;
+        }
+        option_resolved_store_exists
+            || tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
+    }
+
+    pub async fn has_initialized_store_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> bool {
+        Self::initialized_store_layout_with_options(project_root, open_options)
+            .await
+            .is_some()
+    }
+
+    /// Resolves the store layout for a project using the same registry/alias
+    /// aware path as [`Self::has_initialized_store`], returning it only when
+    /// the resolved store's graph database actually exists.
+    pub async fn initialized_store_layout_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Option<StoreLayout> {
+        Self::try_initialized_store_layout_with_options(project_root, open_options)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Resolves an initialized store without discarding identity conflicts or
+    /// other storage errors. User-facing diagnostics must use this variant so
+    /// a preserved split store is never mislabeled as uninitialized.
+    #[tracing::instrument(name = "lifecycle.try_initialized_layout", level = "trace", skip_all)]
+    pub async fn try_initialized_store_layout_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<Option<StoreLayout>> {
+        let layout =
+            Self::resolve_store_layout_for_local_identity(project_root, open_options).await?;
+        Ok(layout.graph_db_path.is_file().then_some(layout))
+    }
+
+    /// Resolves the profile store layout for a local path using the `.git/`
+    /// repository identity marker first, then the global registry aliases for
+    /// the git identity. Nothing in the working tree carries identity.
+    pub async fn resolve_store_layout_for_identity_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<StoreLayout> {
+        Self::resolve_store_layout_for_local_identity(project_root, open_options).await
+    }
+
+    async fn resolve_store_layout_for_local_identity(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<StoreLayout> {
+        let adoption = MovedStoreAdoption::Never;
+        let resolved: Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + '_>> =
+            Box::pin(Self::resolve_store_layout_for_authority(
+                project_root,
+                open_options,
+                None,
+                true,
+                &adoption,
+            ));
+        resolved.await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// First touch of a root under the OS temp directory against a durable
+    /// profile is refused before any layout, and therefore any shard
+    /// directory, exists. A hermetic (temp) profile still admits temp roots.
+    #[asupersync::test]
+    async fn first_touch_refuses_an_ephemeral_root_before_minting_a_layout() {
+        const PROFILE_ENV: &str = "TRACEDECAY_EPHEMERAL_ROOT_FIXTURE_PROFILE";
+        let Some(profile) = std::env::var_os(PROFILE_ENV) else {
+            let scratch = tempfile::TempDir::new_in(
+                std::env::var_os("TEST_TMPDIR").expect("Bazel writable test directory"),
+            )
+            .expect("isolated admission fixture");
+            let temporary = scratch.path().join("temporary");
+            std::fs::create_dir(&temporary).expect("fixture OS temporary directory");
+            // A child gives the OS temp classifier a private root without
+            // changing process-wide environment beneath other unit tests.
+            // Its durable profile is a sibling, even when Bazel scratch is
+            // itself inside the host's ordinary temporary directory.
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("test executable"),
+            )
+            .args([
+                "--exact",
+                "project::lifecycle::identity::tests::first_touch_refuses_an_ephemeral_root_before_minting_a_layout",
+            ])
+            .env(PROFILE_ENV, scratch.path().join("profile"))
+            .env("TMPDIR", &temporary)
+            .env("TMP", &temporary)
+            .env("TEMP", &temporary)
+            .output()
+            .expect("run isolated ephemeral-root admission test");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "isolated admission test must run and pass: {stdout}\n{stderr}",
+            );
+            return;
+        };
+        let durable_profile = std::path::PathBuf::from(profile);
+        std::fs::create_dir(&durable_profile).expect("create durable profile fixture");
+        assert!(
+            !tracedecay_global_db::is_ephemeral_path(&durable_profile),
+            "the profile must be outside this process's OS temporary directory",
+        );
+        let ephemeral_project = tempfile::TempDir::new().expect("ephemeral project");
+        assert!(tracedecay_global_db::is_ephemeral_path(
+            ephemeral_project.path()
+        ));
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(durable_profile.clone()),
+            global_db_path: Some(durable_profile.join("registry.db")),
+        };
+        let error = TraceDecay::resolve_store_layout_for_authority(
+            ephemeral_project.path(),
+            &options,
+            None,
+            true,
+            &MovedStoreAdoption::Never,
+        )
+        .await
+        .expect_err("an ephemeral root must not receive a default layout in a durable profile");
+        assert!(
+            matches!(error, TraceDecayError::Config { .. }),
+            "the refusal is a typed configuration failure: {error:?}"
+        );
+        assert!(
+            !durable_profile.join("projects").exists(),
+            "refusal must leave no shard directory behind"
+        );
+
+        let hermetic = tempfile::TempDir::new().expect("hermetic profile");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(hermetic.path().join("profile")),
+            global_db_path: Some(hermetic.path().join("profile/registry.db")),
+        };
+        let layout = TraceDecay::resolve_store_layout_for_authority(
+            ephemeral_project.path(),
+            &options,
+            None,
+            true,
+            &MovedStoreAdoption::Never,
+        )
+        .await
+        .expect("a throwaway profile still admits throwaway roots");
+        assert!(
+            layout.data_root.starts_with(
+                hermetic
+                    .path()
+                    .canonicalize()
+                    .expect("canonical hermetic profile")
+            )
+        );
+    }
+
+    #[asupersync::test]
+    async fn first_touch_refuses_a_retired_checkout_enrollment_marker() {
+        let project = tempfile::TempDir::new().expect("project");
+        let hermetic = tempfile::TempDir::new().expect("hermetic profile");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(hermetic.path().join("profile")),
+            global_db_path: Some(hermetic.path().join("profile/registry.db")),
+        };
+        std::fs::create_dir_all(project.path().join(".tracedecay")).expect("retired dir");
+        std::fs::write(
+            project.path().join(".tracedecay/enrollment.json"),
+            r#"{"project_id":"proj_retired","storage_mode":"profile_sharded"}"#,
+        )
+        .expect("retired enrollment marker");
+
+        let error = TraceDecay::resolve_store_layout_for_authority(
+            project.path(),
+            &options,
+            None,
+            true,
+            &MovedStoreAdoption::Never,
+        )
+        .await
+        .expect_err("a retired checkout layout must be refused, not ignored");
+
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _)| authority),
+            Some("project store"),
+            "{error:?}"
+        );
+        assert!(
+            !hermetic.path().join("profile/projects").exists(),
+            "refusal must mint no store"
+        );
+    }
+}

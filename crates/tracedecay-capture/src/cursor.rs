@@ -1,15 +1,21 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
-    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    ObservationId, ObservationOrderingDomainV1, ProviderId, ProviderUsageCounterSemanticsV1,
-    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, SessionId,
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
+    CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1, ObservationId,
+    ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ProviderId,
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1, SessionId,
 };
 use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatch_tool};
 
-use crate::{ObservationRecordParseErrorV1, parse_cursor_human_timestamp};
+use crate::git_facts::append_diff_and_pull_request_facts;
+use crate::{
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64,
+    parse_cursor_human_timestamp, parse_rfc3339_timestamp,
+};
 
 pub fn normalize_cursor_observation(
     native: &Value,
@@ -39,10 +45,7 @@ pub fn normalize_cursor_observation_with_message_id(
     agent_id: Option<&str>,
     parent_agent_id: Option<&str>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // Cursor transcript records order by file bytes, so the range length is
-    // the source record's byte length. Failures are counted, never hidden.
-    hotpath::gauge!("capture.cursor.record_bytes").inc(range.end() - range.start());
-    let envelope = normalize_cursor_record(
+    normalize_cursor_record(
         native,
         session_id,
         stable_record_id,
@@ -50,15 +53,11 @@ pub fn normalize_cursor_observation_with_message_id(
         range,
         agent_id,
         parent_agent_id,
-    );
-    if envelope.is_err() {
-        hotpath::gauge!("capture.cursor.normalize_failures").inc(1u64);
-    }
-    envelope
+    )
 }
 
 /// Cursor host composition for one source record, not a per-token walk.
-#[hotpath::measure(label = "capture.cursor.normalize")]
+#[tracing::instrument(name = "capture.cursor.normalize", level = "trace", skip_all)]
 fn normalize_cursor_record(
     native: &Value,
     session_id: &str,
@@ -132,7 +131,9 @@ fn normalize_cursor_record(
     if let Some(content) = content {
         if let Some(message_content) = canonical_cursor_message_content(content) {
             facts.push(CanonicalObservationFactV1::Message {
-                role: canonical_message_role(native.get("role").and_then(Value::as_str)),
+                role: crate::content::canonical_message_role(
+                    native.get("role").and_then(Value::as_str),
+                ),
                 content: message_content,
                 model: cursor_record_message_model(native, message.unwrap_or(native)).or_else(
                     || {
@@ -145,13 +146,12 @@ fn normalize_cursor_record(
                 timestamp,
             });
         }
-        append_cursor_content_facts(content, &stable_record_id, &mut facts);
+        append_cursor_content_facts(content, &mut facts);
     }
     append_cursor_tool_call_facts(
         message
             .and_then(|message| message.get("tool_calls"))
             .or_else(|| native.get("tool_calls")),
-        &stable_record_id,
         &mut facts,
     );
     append_cursor_usage_fact(native, message, &mut facts);
@@ -205,37 +205,32 @@ fn canonical_cursor_message_content(content: &Value) -> Option<Value> {
     }
 }
 
-fn append_cursor_content_facts(
-    content: &Value,
-    stable_record_id: &ObservationId,
-    facts: &mut Vec<CanonicalObservationFactV1>,
-) {
+fn append_cursor_content_facts(content: &Value, facts: &mut Vec<CanonicalObservationFactV1>) {
     let Some(items) = content.as_array() else {
         return;
     };
     for item in items {
         match item.get("type").and_then(Value::as_str) {
             Some("tool_use") => {
-                let invocation_id = canonical_native_observation_id(
-                    item.get("id").and_then(Value::as_str),
-                    stable_record_id,
-                );
-                let name = item
+                let invocation_id =
+                    canonical_native_observation_id(item.get("id").and_then(Value::as_str));
+                let Some(name) = item
                     .get("name")
                     .and_then(Value::as_str)
                     .filter(|name| !name.trim().is_empty())
-                    .unwrap_or("tool")
-                    .to_string();
+                else {
+                    continue;
+                };
                 facts.push(CanonicalObservationFactV1::ToolInvocation {
                     invocation_id,
-                    name: name.clone(),
+                    name: name.to_owned(),
                     arguments: item
                         .get("input")
                         .or_else(|| item.get("arguments"))
                         .cloned()
                         .unwrap_or(Value::Null),
                 });
-                if is_subagent_dispatch_tool(&name) {
+                if is_subagent_dispatch_tool(name) {
                     facts.push(CanonicalObservationFactV1::Workflow {
                         evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
                         reference: item.get("id").and_then(Value::as_str).map(str::to_string),
@@ -244,22 +239,19 @@ fn append_cursor_content_facts(
                 }
             }
             Some("tool_result") => {
-                facts.push(CanonicalObservationFactV1::ToolResult {
-                    invocation_id: item
-                        .get("tool_use_id")
+                facts.push(crate::accounted_tool_result(
+                    item.get("tool_use_id")
                         .or_else(|| item.get("id"))
                         .and_then(Value::as_str)
-                        .map(|id| canonical_native_observation_id(Some(id), stable_record_id)),
-                    content: item
-                        .get("content")
+                        .and_then(|id| canonical_native_observation_id(Some(id))),
+                    item.get("content")
                         .or_else(|| item.get("result"))
                         .cloned()
                         .unwrap_or(Value::Null),
-                    success: item
-                        .get("is_error")
+                    item.get("is_error")
                         .and_then(Value::as_bool)
                         .map(|error| !error),
-                });
+                ));
             }
             Some("thinking" | "reasoning") => {
                 let content = item
@@ -283,7 +275,6 @@ fn append_cursor_content_facts(
 
 fn append_cursor_tool_call_facts(
     tool_calls: Option<&Value>,
-    stable_record_id: &ObservationId,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     let Some(tool_calls) = tool_calls.and_then(Value::as_array) else {
@@ -291,19 +282,19 @@ fn append_cursor_tool_call_facts(
     };
     for tool_call in tool_calls {
         let function = tool_call.get("function").unwrap_or(tool_call);
-        let name = function
+        let Some(name) = function
             .get("name")
             .or_else(|| tool_call.get("name"))
             .and_then(Value::as_str)
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or("tool")
-            .to_string();
+        else {
+            continue;
+        };
         facts.push(CanonicalObservationFactV1::ToolInvocation {
             invocation_id: canonical_native_observation_id(
                 tool_call.get("id").and_then(Value::as_str),
-                stable_record_id,
             ),
-            name,
+            name: name.to_owned(),
             arguments: function
                 .get("arguments")
                 .or_else(|| tool_call.get("arguments"))
@@ -375,7 +366,7 @@ fn append_cursor_usage_fact(
         // The counters ride the message record itself, so they are correlated
         // to this exact session/message (the envelope relations) and count that
         // one message's tokens: message scope, delta semantics. The model comes
-        // only from the record's own spellings — never from tracedecay-injected
+        // only from the record's own spellings, never from tracedecay-injected
         // session enrichment, which is neighboring-session evidence.
         facts.push(CanonicalObservationFactV1::ProviderUsage {
             model: cursor_record_message_model(native, message.unwrap_or(native)).map_or(
@@ -431,45 +422,90 @@ fn append_cursor_git_facts(native: &Value, facts: &mut Vec<CanonicalObservationF
             content: None,
         });
     }
-    if native
+    let has_diffs = native
         .get("gitDiffs")
         .and_then(Value::as_array)
-        .is_some_and(|diffs| !diffs.is_empty())
-    {
-        facts.push(CanonicalObservationFactV1::Git {
-            evidence_kind: CanonicalGitEvidenceKindV1::Diff,
-            reference: None,
-            content: None,
-        });
-    }
-    if let Some(pull_requests) = native.get("pullRequests").and_then(Value::as_array) {
-        for pull_request in pull_requests {
-            let reference = ["url", "htmlUrl", "html_url", "id"]
+        .is_some_and(|diffs| !diffs.is_empty());
+    let pull_request_references = native
+        .get("pullRequests")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|pull_request| {
+            ["url", "htmlUrl", "html_url", "id"]
                 .into_iter()
                 .find_map(|key| pull_request.get(key).and_then(Value::as_str))
-                .map(str::to_string);
-            facts.push(CanonicalObservationFactV1::Git {
-                evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
-                reference: reference.clone(),
-                content: None,
-            });
-            facts.push(CanonicalObservationFactV1::Workflow {
-                evidence_kind: CanonicalWorkflowEvidenceKindV1::PullRequest,
-                reference,
-                content: None,
-            });
-        }
+                .map(str::to_string)
+        });
+    append_diff_and_pull_request_facts(facts, has_diffs, pull_request_references);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CursorObservationIdentityV1 {
+    primary: ObservationId,
+    collision_disambiguation: Option<ObservationId>,
+}
+
+impl CursorObservationIdentityV1 {
+    pub fn primary(&self) -> &ObservationId {
+        &self.primary
+    }
+
+    pub fn collision_disambiguation(&self) -> Option<&ObservationId> {
+        self.collision_disambiguation.as_ref()
+    }
+
+    pub fn into_primary(self) -> ObservationId {
+        self.primary
+    }
+
+    pub fn into_collision_disambiguation(self) -> Option<ObservationId> {
+        self.collision_disambiguation
     }
 }
 
+pub fn cursor_observation_identity(
+    session_id: &str,
+    value: &Value,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+) -> Result<CursorObservationIdentityV1, ObservationRecordParseErrorV1> {
+    let has_native_id = cursor_native_record_id(value).is_some();
+    let primary = observation_native_record_id(session_id, value)?;
+    let collision_disambiguation = if has_native_id {
+        None
+    } else {
+        Some(
+            ObservationPositionalOccurrenceV1::new(range)
+                .disambiguate(&primary)
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+        )
+    };
+    Ok(CursorObservationIdentityV1 {
+        primary,
+        collision_disambiguation,
+    })
+}
+
 pub fn observation_native_record_id(
-    provider: &str,
     session_id: &str,
     value: &Value,
 ) -> Result<ObservationId, ObservationRecordParseErrorV1> {
     let mut hasher = Sha256::new();
+    if let Some(native_id) = cursor_native_record_id(value) {
+        hasher.update(b"tracedecay.provider-native-record.native-id.v1\0");
+        hasher.update(b"cursor");
+        hasher.update([0]);
+        hasher.update(session_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(native_id.as_bytes());
+        return ObservationId::new(format!(
+            "cursor.native.sha256:{}",
+            encode_lowercase_hex(&hasher.finalize())
+        ))
+        .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed);
+    }
     hasher.update(b"tracedecay.provider-native-record.v1\0");
-    hasher.update(provider.as_bytes());
+    hasher.update(b"cursor");
     hasher.update([0]);
     hasher.update(session_id.as_bytes());
     hasher.update([0]);
@@ -478,10 +514,23 @@ pub fn observation_native_record_id(
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
     );
     ObservationId::new(format!(
-        "{provider}.native.sha256:{}",
-        hex::encode(hasher.finalize())
+        "cursor.native.sha256:{}",
+        encode_lowercase_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+}
+
+fn cursor_native_record_id(value: &Value) -> Option<&str> {
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            value
+                .pointer("/message/id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+        })
 }
 
 pub fn cursor_projected_message_id(
@@ -491,11 +540,7 @@ pub fn cursor_projected_message_id(
     generation: u64,
     namespace_replacement: bool,
 ) -> Result<ObservationId, ObservationRecordParseErrorV1> {
-    let base = native
-        .get("id")
-        .or_else(|| native.pointer("/message/id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
+    let base = cursor_native_record_id(native)
         .map_or_else(|| format!("{session_id}:{source_offset}"), str::to_string);
     // Truncate/rename replacements reuse byte offsets across file generations.
     // Namespace only on replacement rescans so first-generation ids stay stable.
@@ -507,31 +552,8 @@ pub fn cursor_projected_message_id(
     ObservationId::new(message_id).map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
-fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
-}
-
-fn canonical_native_observation_id(
-    native_id: Option<&str>,
-    fallback: &ObservationId,
-) -> ObservationId {
-    native_id
-        .and_then(|id| ObservationId::new(id).ok())
-        .unwrap_or_else(|| fallback.clone())
-}
-
-fn canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
+fn canonical_native_observation_id(native_id: Option<&str>) -> Option<ObservationId> {
+    native_id.and_then(|id| ObservationId::new(id).ok())
 }
 
 fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {
@@ -539,14 +561,16 @@ fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String
 }
 
 fn record_timestamp(value: &Value) -> Option<i64> {
-    value
-        .get("timestamp")
-        .or_else(|| value.get("created_at"))
-        .and_then(|timestamp| {
-            timestamp
-                .as_i64()
-                .or_else(|| timestamp.as_str().and_then(|value| value.parse().ok()))
-        })
+    let timestamp = value.get("timestamp").or_else(|| value.get("created_at"))?;
+    if let Some(numeric) = timestamp.as_i64() {
+        return Some(numeric);
+    }
+    let text = timestamp.as_str()?;
+    // Numeric strings stay unscaled integers. RFC3339 is a separate spelling
+    // of the same field, not a fallback clock.
+    text.parse::<i64>()
+        .ok()
+        .or_else(|| parse_rfc3339_timestamp(text))
 }
 
 /// Extracts and parses the first `<timestamp>…</timestamp>` tag carried by a

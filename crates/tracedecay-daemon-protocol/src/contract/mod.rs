@@ -1,0 +1,3403 @@
+//! The daemon invocation wire contract.
+//!
+//! These are the request, response, outcome, and problem shapes exchanged over
+//! the daemon's closed post-handshake invocation protocol. They are data: no
+//! socket, no admission decision, no runtime registry, no database.
+//!
+//! The contract lives here in `tracedecay-daemon-protocol`, outside the
+//! daemon's service crate, on purpose. Its callers are the application surface
+//! and the invocation client, which have no business reaching into the
+//! daemon's service internals just to name a payload. Keeping the shapes here
+//! means a caller depends on the protocol, not on the server that happens to
+//! implement it.
+//!
+//! Behavior stays with the daemon. Anything that interprets a request remains
+//! in `tracedecay-daemon-service`. That includes authority minting, scope
+//! resolution, and dispatch. Only construction, validation, and the
+//! application-DTO conversions travel with the types they belong to.
+
+#[macro_use]
+mod application_family;
+mod feedback;
+mod git;
+mod git_surface;
+mod handoff;
+mod lsp;
+mod problem_response;
+mod work;
+mod workflow;
+
+pub use feedback::DaemonFeedbackResult;
+pub use git::{DaemonGitEffectResult, DaemonGitPreviewResult};
+pub use handoff::{HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1};
+pub use lsp::DaemonLspSessionAccess;
+use serde::{Deserialize, Serialize};
+use tracedecay_contracts::{
+    ApplicationOutcome, ApplicationProblem, AuthorizedScopeSet, CancellationContext, Deadline,
+    MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
+    MultiRootScopeSetReadRequestV1, ObservatoryReadRequestV1, PageRequest, ResolvedScope,
+    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
+};
+use tracedecay_domain::{ManifestDigest, ScopeSetId, UtcMicros};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+pub use work::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
+pub use workflow::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
+
+use crate::lsp_wire::{MAX_LSP_FRAME_BYTES, MAX_LSP_WORKSPACE_ROOTS};
+use crate::surface::GitReadSurfaceRequest;
+use tracedecay_contracts::ConfigurationWireRequestV1;
+use tracedecay_contracts::context_scout::ContextScoutSurfaceRequestV1;
+use tracedecay_contracts::feedback::FeedbackProximityReadRequestV1;
+use tracedecay_contracts::feedback::observations::{
+    FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
+};
+use tracedecay_contracts::git::GitHubStackSignalExpandSurfaceRequest;
+use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
+use tracedecay_contracts::retrieval::PrimitiveRequest;
+
+/// Request-field character rules. The contract accepts opaque handles and ids
+/// only in a shape it can echo back safely, so validation travels with the
+/// wire types rather than with the server that reads them.
+fn valid_token(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+fn valid_printable(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+}
+
+fn valid_lsp_control(deadline: &Deadline, cancellation: &CancellationContext) -> bool {
+    deadline.expires_at.0 > 0 && cancellation.token_id.as_str().len() <= MAX_OPAQUE_HANDLE_BYTES
+}
+
+fn valid_observation_window(
+    observed_at: &UtcMicros,
+    deadline: &Deadline,
+    cancellation: &CancellationContext,
+) -> bool {
+    observed_at.0 > 0 && valid_lsp_control(deadline, cancellation)
+}
+
+/// Stable discriminator for the closed post-handshake invocation protocol.
+pub const DAEMON_INVOCATION_PROTOCOL: &str = "tracedecay.daemon.invocation";
+/// Initial revision of the daemon-owned invocation wire shape.
+pub const DAEMON_INVOCATION_REVISION: u16 = 1;
+/// Request method a control client sends over the closed protocol to ask the
+/// daemon to shut down.
+pub const DAEMON_SHUTDOWN_METHOD: &str = "tracedecay/daemon/shutdown";
+/// `initialize` result `_meta` key listing every registered store the daemon
+/// serves in a typed reset-required state.
+pub const RESET_REQUIRED_STORES_META_KEY: &str = "tracedecay/reset_required_stores";
+const DAEMON_INVOCATION_CANCEL_OPERATION: &str = "invocation_cancel";
+const DAEMON_INVOCATION_DELIVERY_ACK_OPERATION: &str = "invocation_delivery_ack";
+
+const MAX_INVOCATION_REQUEST_ID_BYTES: usize = 128;
+const MAX_CLIENT_REVISION_BYTES: usize = 128;
+const MAX_ROOT_HINT_BYTES: usize = 4_096;
+const MAX_OPAQUE_HANDLE_BYTES: usize = 256;
+
+/// A separate authenticated control frame that can interrupt an in-flight
+/// read without contending on that invocation's response connection.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DaemonInvocationCancellationRequest {
+    protocol: String,
+    revision: u16,
+    request_id: String,
+    operation: String,
+    target_request_id: String,
+}
+
+impl DaemonInvocationCancellationRequest {
+    pub fn new(target_request_id: impl Into<String>) -> Self {
+        let target_request_id = target_request_id.into();
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: target_request_id.clone(),
+            operation: DAEMON_INVOCATION_CANCEL_OPERATION.to_owned(),
+            target_request_id,
+        }
+    }
+
+    pub fn target_request_id(&self) -> &str {
+        &self.target_request_id
+    }
+
+    fn validate(&self) -> bool {
+        self.protocol == DAEMON_INVOCATION_PROTOCOL
+            && self.revision == DAEMON_INVOCATION_REVISION
+            && self.operation == DAEMON_INVOCATION_CANCEL_OPERATION
+            && valid_token(&self.request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+            && valid_token(&self.target_request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+    }
+}
+
+pub fn parse_daemon_invocation_cancellation_request(
+    line: &str,
+) -> Option<DaemonInvocationCancellationRequest> {
+    let request = serde_json::from_str::<DaemonInvocationCancellationRequest>(line.trim()).ok()?;
+    request.validate().then_some(request)
+}
+
+/// Terminal acknowledgement emitted by a surface adapter only after its own
+/// response boundary has completed.  The daemon socket write is deliberately
+/// not a delivery receipt: a CLI must first write and flush stdout, then send
+/// this frame on the authenticated connection that carried the invocation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DaemonInvocationDeliveryAckRequest {
+    protocol: String,
+    revision: u16,
+    request_id: String,
+    operation: String,
+    target_request_id: String,
+    outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonInvocationDeliveryAckRejectReason {
+    RecorderUnavailable,
+    RecorderAtCapacity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DaemonInvocationDeliveryAckResponse {
+    protocol: String,
+    revision: u16,
+    request_id: String,
+    operation: String,
+    #[serde(flatten)]
+    outcome: DaemonInvocationDeliveryAckResponseOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DaemonInvocationDeliveryAckResponseOutcome {
+    Accepted,
+    Rejected {
+        reason: DaemonInvocationDeliveryAckRejectReason,
+    },
+}
+
+impl DaemonInvocationDeliveryAckResponse {
+    pub fn accepted(request_id: impl Into<String>) -> Self {
+        Self::with_outcome(
+            request_id,
+            DaemonInvocationDeliveryAckResponseOutcome::Accepted,
+        )
+    }
+
+    pub fn rejected(
+        request_id: impl Into<String>,
+        reason: DaemonInvocationDeliveryAckRejectReason,
+    ) -> Self {
+        Self::with_outcome(
+            request_id,
+            DaemonInvocationDeliveryAckResponseOutcome::Rejected { reason },
+        )
+    }
+
+    fn with_outcome(
+        request_id: impl Into<String>,
+        outcome: DaemonInvocationDeliveryAckResponseOutcome,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            operation: DAEMON_INVOCATION_DELIVERY_ACK_OPERATION.to_owned(),
+            outcome,
+        }
+    }
+
+    pub fn matches_request(&self, request_id: &str) -> bool {
+        self.protocol == DAEMON_INVOCATION_PROTOCOL
+            && self.revision == DAEMON_INVOCATION_REVISION
+            && self.operation == DAEMON_INVOCATION_DELIVERY_ACK_OPERATION
+            && self.request_id == request_id
+    }
+
+    pub fn rejection_reason(&self) -> Option<DaemonInvocationDeliveryAckRejectReason> {
+        match self.outcome {
+            DaemonInvocationDeliveryAckResponseOutcome::Accepted => None,
+            DaemonInvocationDeliveryAckResponseOutcome::Rejected { reason } => Some(reason),
+        }
+    }
+}
+
+impl DaemonInvocationDeliveryAckRequest {
+    pub fn delivered(target_request_id: impl Into<String>) -> Self {
+        let target_request_id = target_request_id.into();
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: target_request_id.clone(),
+            operation: DAEMON_INVOCATION_DELIVERY_ACK_OPERATION.to_owned(),
+            target_request_id,
+            outcome: tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+            drop_reason: None,
+        }
+    }
+
+    pub fn dropped(
+        target_request_id: impl Into<String>,
+        drop_reason: tracedecay_domain::DeliveryDropReasonV1,
+    ) -> Self {
+        let target_request_id = target_request_id.into();
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: target_request_id.clone(),
+            operation: DAEMON_INVOCATION_DELIVERY_ACK_OPERATION.to_owned(),
+            target_request_id,
+            outcome: tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+            drop_reason: Some(drop_reason),
+        }
+    }
+
+    pub fn target_request_id(&self) -> &str {
+        &self.target_request_id
+    }
+
+    pub fn outcome(
+        &self,
+    ) -> (
+        tracedecay_domain::DeliverySettlementOutcomeV1,
+        Option<tracedecay_domain::DeliveryDropReasonV1>,
+    ) {
+        (self.outcome, self.drop_reason)
+    }
+
+    fn validate(&self) -> bool {
+        self.protocol == DAEMON_INVOCATION_PROTOCOL
+            && self.revision == DAEMON_INVOCATION_REVISION
+            && self.operation == DAEMON_INVOCATION_DELIVERY_ACK_OPERATION
+            && valid_token(&self.request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+            && valid_token(&self.target_request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+            && self.request_id == self.target_request_id
+            && matches!(
+                (self.outcome, self.drop_reason),
+                (
+                    tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+                    None
+                ) | (
+                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                    Some(_)
+                )
+            )
+    }
+}
+
+pub fn parse_daemon_invocation_delivery_ack_request(
+    line: &str,
+) -> Option<DaemonInvocationDeliveryAckRequest> {
+    let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+    (value.get("protocol").and_then(serde_json::Value::as_str) == Some(DAEMON_INVOCATION_PROTOCOL)
+        && value.get("operation").and_then(serde_json::Value::as_str)
+            == Some(DAEMON_INVOCATION_DELIVERY_ACK_OPERATION))
+    .then_some(())?;
+    let request = serde_json::from_value::<DaemonInvocationDeliveryAckRequest>(value).ok()?;
+    request.validate().then_some(request)
+}
+
+#[cfg(test)]
+mod delivery_ack_tests {
+    use super::{
+        DaemonInvocationDeliveryAckRequest, DaemonInvocationDeliveryAckResponse,
+        DaemonInvocationDeliveryAckResponseOutcome, parse_daemon_invocation_delivery_ack_request,
+    };
+    use tracedecay_domain::DeliveryDropReasonV1;
+
+    #[test]
+    fn delivered_ack_round_trips_and_rejects_a_drop_reason() {
+        let ack = DaemonInvocationDeliveryAckRequest::delivered("request.cli.delivery.1");
+        let wire = serde_json::to_string(&ack).expect("delivery ACK wire");
+        let parsed = parse_daemon_invocation_delivery_ack_request(&wire)
+            .expect("delivered ACK should parse");
+        assert_eq!(parsed.target_request_id(), "request.cli.delivery.1");
+        assert_eq!(
+            parsed.outcome().0,
+            tracedecay_domain::DeliverySettlementOutcomeV1::Delivered
+        );
+
+        let invalid = wire.replace(
+            "\"outcome\":\"delivered\"",
+            "\"outcome\":\"delivered\",\"drop_reason\":\"disconnected\"",
+        );
+        assert!(parse_daemon_invocation_delivery_ack_request(&invalid).is_none());
+    }
+
+    #[test]
+    fn dropped_ack_requires_a_reason_and_response_is_typed() {
+        let ack = DaemonInvocationDeliveryAckRequest::dropped(
+            "request.cli.delivery.2",
+            DeliveryDropReasonV1::Disconnected,
+        );
+        let wire = serde_json::to_string(&ack).expect("dropped ACK wire");
+        assert!(parse_daemon_invocation_delivery_ack_request(&wire).is_some());
+
+        let response = DaemonInvocationDeliveryAckResponse::rejected(
+            "request.cli.delivery.2",
+            super::DaemonInvocationDeliveryAckRejectReason::RecorderAtCapacity,
+        );
+        let value = serde_json::to_value(response).expect("ACK response wire");
+        assert_eq!(value["status"], "rejected");
+        assert_eq!(value["reason"], "recorder_at_capacity");
+        assert!(matches!(
+            serde_json::from_value::<DaemonInvocationDeliveryAckResponse>(value)
+                .expect("ACK response parse")
+                .outcome,
+            DaemonInvocationDeliveryAckResponseOutcome::Rejected {
+                reason: super::DaemonInvocationDeliveryAckRejectReason::RecorderAtCapacity
+            }
+        ));
+    }
+}
+
+/// Closed operations accepted by the daemon invocation connection.
+///
+/// Git operations carry only their reviewed typed surface DTOs. Authority,
+/// policy proof, actor, and scope are minted by the daemon after project
+/// admission and never accepted from a client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonInvocationOperation {
+    GitStatus,
+    GitDiff,
+    GitHistory,
+    GitBlame,
+    GitHunks,
+    GitPreview,
+    GitApply,
+    GitHubStackSignalExpand,
+    NativeIntegrationStackSnapshot,
+    NativeIntegrationPreflight,
+    NativeIntegrationApprove,
+    NativeIntegrationApply,
+    NativeIntegrationStatus,
+    NativeIntegrationCancel,
+    NativeIntegrationWorktreeInventory,
+    NativeIntegrationWorktreeInspect,
+    NativeIntegrationWorktreeConfirm,
+    NativeIntegrationWorktreeRemove,
+    NativeIntegrationWorktreeReconcile,
+    FeedbackDiagnostics,
+    FeedbackGet,
+    FeedbackExpand,
+    FeedbackList,
+    FeedbackAdvisoryCycle,
+    FeedbackProximity,
+    FeedbackImpact,
+    AffectedTests,
+    FeedbackObserve,
+    PrimitiveImpact,
+    PrimitiveAffectedTests,
+    PrimitiveTestResults,
+    PrimitiveRead,
+    CodeExactOccurrence,
+    CodePhraseSearch,
+    CodeCallees,
+    CodeFacets,
+    CodeTimeline,
+    CodeDeclaration,
+    CodeTypeDefinition,
+    CodeReferences,
+    Configuration,
+    ContextScout,
+    ObservatoryRead,
+    RetainedApplication,
+    ProfileRetainedApplication,
+    ProfileGraphTool,
+    ProfileConfiguration,
+    MultiRootScopeSetRead,
+    MultiRootScopeSetCompareAndSwap,
+    MultiRootExecute,
+    WorkApplication,
+    WorkflowApplication,
+    HandoffApplication,
+    LspOpen,
+    LspFrame,
+    LspPoll,
+    LspAcknowledge,
+    LspReconnect,
+    LspDetach,
+    SourceEdit,
+    SourceEditReconcile,
+    SourceEditRollback,
+    GraphTool,
+}
+
+impl DaemonInvocationOperation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GitStatus => "git_status",
+            Self::GitDiff => "git_diff",
+            Self::GitHistory => "git_history",
+            Self::GitBlame => "git_blame",
+            Self::GitHunks => "git_hunks",
+            Self::GitPreview => "git_preview",
+            Self::GitApply => "git_apply",
+            Self::GitHubStackSignalExpand => "github_stack_signal_expand",
+            Self::NativeIntegrationStackSnapshot => "stack_snapshot",
+            Self::NativeIntegrationPreflight => "preflight_native_integration",
+            Self::NativeIntegrationApprove => "approve_native_integration",
+            Self::NativeIntegrationApply => "apply_native_integration",
+            Self::NativeIntegrationStatus => "native_integration_status",
+            Self::NativeIntegrationCancel => "cancel_native_integration",
+            Self::NativeIntegrationWorktreeInventory => "worktree_inventory",
+            Self::NativeIntegrationWorktreeInspect => "worktree_cleanup_inspect",
+            Self::NativeIntegrationWorktreeConfirm => "worktree_cleanup_confirm",
+            Self::NativeIntegrationWorktreeRemove => "worktree_cleanup_remove",
+            Self::NativeIntegrationWorktreeReconcile => "worktree_cleanup_reconcile",
+            Self::FeedbackDiagnostics => "feedback_diagnostics",
+            Self::FeedbackGet => "feedback_get",
+            Self::FeedbackExpand => "feedback_expand",
+            Self::FeedbackList => "feedback_list",
+            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
+            Self::FeedbackProximity => "feedback_proximity",
+            Self::FeedbackImpact => "feedback_impact",
+            Self::AffectedTests => "affected_tests",
+            Self::FeedbackObserve => "feedback_observe",
+            Self::PrimitiveImpact => "primitive_impact",
+            Self::PrimitiveAffectedTests => "primitive_affected_tests",
+            Self::PrimitiveTestResults => "test_results",
+            Self::PrimitiveRead => "primitive_read",
+            Self::CodeExactOccurrence => "code_exact_occurrence",
+            Self::CodePhraseSearch => "code_phrase_search",
+            Self::CodeCallees => "code_callees",
+            Self::CodeFacets => "code_facets",
+            Self::CodeTimeline => "code_timeline",
+            Self::CodeDeclaration => "code_declaration",
+            Self::CodeTypeDefinition => "code_type_definition",
+            Self::CodeReferences => "code_references",
+            Self::Configuration => "configuration",
+            Self::ContextScout => "context_scout",
+            Self::ObservatoryRead => "observatory_read",
+            Self::RetainedApplication => "retained_application",
+            Self::ProfileRetainedApplication => "profile_retained_application",
+            Self::ProfileGraphTool => "profile_graph_tool",
+            Self::ProfileConfiguration => "profile_configuration",
+            Self::MultiRootScopeSetRead => "multi_root_scope_set_read",
+            Self::MultiRootScopeSetCompareAndSwap => "multi_root_scope_set_compare_and_swap",
+            Self::MultiRootExecute => "multi_root_execute",
+            Self::WorkApplication => "work_application",
+            Self::WorkflowApplication => "workflow_application",
+            Self::HandoffApplication => "handoff_application",
+            Self::LspOpen => "lsp_open",
+            Self::LspFrame => "lsp_frame",
+            Self::LspPoll => "lsp_poll",
+            Self::LspAcknowledge => "lsp_acknowledge",
+            Self::LspReconnect => "lsp_reconnect",
+            Self::LspDetach => "lsp_detach",
+            Self::SourceEdit => "source_edit",
+            Self::SourceEditReconcile => "source_edit_reconcile",
+            Self::SourceEditRollback => "source_edit_rollback",
+            Self::GraphTool => "graph_tool",
+        }
+    }
+}
+
+/// One versioned, request-correlated daemon operation.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DaemonInvocationRequest {
+    pub protocol: String,
+    pub revision: u16,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_route: Option<FeedbackDeliveryRouteV1>,
+    #[serde(flatten)]
+    pub payload: DaemonInvocationPayload,
+}
+
+/// Operation-specific fields for the closed invocation set.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum DaemonInvocationPayload {
+    GitRead {
+        surface_operation: ApplicationSurfaceOperation,
+        request: GitReadSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    GitPreview {
+        request: GitPreviewSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    GitApply {
+        request: GitApplySurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    GitHubStackSignalExpand {
+        request: GitHubStackSignalExpandSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    NativeIntegration {
+        surface_operation: ApplicationSurfaceOperation,
+        request: tracedecay_contracts::NativeIntegrationSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackDiagnostics {
+        request_handle: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackGet {
+        request_handle: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackExpand {
+        request_handle: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackList {
+        request_handle: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackAdvisoryCycle {
+        document_uri: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackProximity {
+        request: FeedbackProximityReadRequestV1,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackImpact {
+        request_handle: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    AffectedTests {
+        request_handle: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackObserve {
+        subject_digest: ManifestDigest,
+        observed_at: UtcMicros,
+        event: FeedbackSourceEventV1,
+    },
+    PrimitiveImpact {
+        request: tracedecay_contracts::retrieval::GraphImpactPrimitiveRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    PrimitiveAffectedTests {
+        request: tracedecay_contracts::retrieval::AffectedFileTestsPrimitiveRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    PrimitiveTestResults {
+        page: PageRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    PrimitiveRead {
+        surface_operation: ApplicationSurfaceOperation,
+        request: PrimitiveRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    PrimitiveCode {
+        surface_operation: ApplicationSurfaceOperation,
+        request: tracedecay_contracts::PrimitiveCodeSurfaceRequest,
+        page: PageRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    CallableCode {
+        surface_operation: ApplicationSurfaceOperation,
+        request: tracedecay_contracts::CallableCodeSurfaceRequest,
+        page: PageRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    Configuration {
+        surface_operation: ApplicationSurfaceOperation,
+        request: ConfigurationWireRequestV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    ContextScout {
+        surface_operation: ApplicationSurfaceOperation,
+        request: ContextScoutSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    ObservatoryRead {
+        request: ObservatoryReadRequestV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    RetainedApplication {
+        request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    /// A retained request against the authenticated profile's own stores. It
+    /// names no project: the daemon composition root owns the profile.
+    ProfileRetainedApplication {
+        request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    /// A graph-tool request the daemon's profile owner answers: a read of
+    /// the authenticated profile's project registry, or another operation's
+    /// request that selects the profile. It names no project: the daemon
+    /// composition root owns the profile.
+    ProfileGraphTool {
+        surface_operation: ApplicationSurfaceOperation,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    /// A configuration request of profile settings only
+    /// ([`ConfigurationWireRequestV1::targets_profile_settings`]). It names no
+    /// project: the daemon composition root serves it from the profile's own
+    /// configuration store.
+    ProfileConfiguration {
+        surface_operation: ApplicationSurfaceOperation,
+        request: ConfigurationWireRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    MultiRootScopeSetRead {
+        request: MultiRootScopeSetReadRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    MultiRootScopeSetCompareAndSwap {
+        request: MultiRootScopeSetCasRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    MultiRootExecute {
+        request: MultiRootExecuteRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    WorkApplication {
+        request: Box<WorkApplicationInvocationV1>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    WorkflowApplication {
+        request: WorkflowApplicationInvocation,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    HandoffApplication {
+        request: HandoffApplicationInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    LspOpen {
+        client_revision: String,
+        requested_root_uri: Option<String>,
+        workspace_folders: Vec<String>,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    LspFrame {
+        session: DaemonLspSessionAccess,
+        frame: String,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    LspPoll {
+        session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    LspAcknowledge {
+        session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    LspReconnect {
+        session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    LspDetach {
+        session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    SourceEdit {
+        request: SourceEditInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    SourceEditReconcile {
+        request: SourceEditReconciliationInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    SourceEditRollback {
+        request: SourceEditRollbackInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    GraphTool {
+        surface_operation: ApplicationSurfaceOperation,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+}
+
+impl DaemonInvocationRequest {
+    pub fn profile_graph_tool(
+        request_id: impl Into<String>,
+        surface_operation: ApplicationSurfaceOperation,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::ProfileGraphTool {
+                surface_operation,
+                arguments,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn graph_tool(
+        request_id: impl Into<String>,
+        surface_operation: ApplicationSurfaceOperation,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::GraphTool {
+                surface_operation,
+                arguments,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    /// One typed constructor for the whole Plan 36 native-integration journey.
+    ///
+    /// The transport carries exact typed identity only; it contains no Git
+    /// logic and no fallback mutation path.
+    pub fn native_integration(
+        request_id: impl Into<String>,
+        surface_operation: ApplicationSurfaceOperation,
+        request: tracedecay_contracts::NativeIntegrationSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::NativeIntegration {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn feedback(
+        request_id: impl Into<String>,
+        operation: ApplicationSurfaceOperation,
+        request_handle: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        let payload = match operation {
+            ApplicationSurfaceOperation::FeedbackDiagnostics => {
+                DaemonInvocationPayload::FeedbackDiagnostics {
+                    request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                }
+            }
+            ApplicationSurfaceOperation::FeedbackGet => DaemonInvocationPayload::FeedbackGet {
+                request_handle,
+                resolved_scope: None,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+            ApplicationSurfaceOperation::FeedbackExpand => {
+                DaemonInvocationPayload::FeedbackExpand {
+                    request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                }
+            }
+            ApplicationSurfaceOperation::FeedbackList => DaemonInvocationPayload::FeedbackList {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+            ApplicationSurfaceOperation::FeedbackImpact => {
+                DaemonInvocationPayload::FeedbackImpact {
+                    request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                }
+            }
+            ApplicationSurfaceOperation::AffectedTests => DaemonInvocationPayload::AffectedTests {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+            ApplicationSurfaceOperation::TestResults
+            | ApplicationSurfaceOperation::ObservatoryRead
+            | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+            | ApplicationSurfaceOperation::FeedbackProximity
+            | ApplicationSurfaceOperation::SessionLookup
+            | ApplicationSurfaceOperation::QualifiedName
+            | ApplicationSurfaceOperation::CallChain
+            | ApplicationSurfaceOperation::FileDependents
+            | ApplicationSurfaceOperation::SourceLines
+            | ApplicationSurfaceOperation::SourceBody
+            | ApplicationSurfaceOperation::SourceOutline
+            | ApplicationSurfaceOperation::ModuleApi
+            | ApplicationSurfaceOperation::HealthRead
+            | ApplicationSurfaceOperation::HealthDelta
+            | ApplicationSurfaceOperation::StorageStatus
+            | ApplicationSurfaceOperation::DiagnosticsRead
+            | ApplicationSurfaceOperation::CodeSymbolSearch
+            | ApplicationSurfaceOperation::CodeSignatureSearch
+            | ApplicationSurfaceOperation::CodeImplementations
+            | ApplicationSurfaceOperation::CodeTypeHierarchy
+            | ApplicationSurfaceOperation::CodeCallers => {
+                unreachable!("primitive operations use their typed constructor")
+            }
+            ApplicationSurfaceOperation::CodeExactOccurrence
+            | ApplicationSurfaceOperation::CodePhraseSearch
+            | ApplicationSurfaceOperation::CodeCallees
+            | ApplicationSurfaceOperation::CodeFacets
+            | ApplicationSurfaceOperation::CodeTimeline
+            | ApplicationSurfaceOperation::CodeDeclaration
+            | ApplicationSurfaceOperation::CodeTypeDefinition
+            | ApplicationSurfaceOperation::CodeReferences => {
+                unreachable!("callable code operations use their typed constructor")
+            }
+            ApplicationSurfaceOperation::GitStatus
+            | ApplicationSurfaceOperation::GitDiff
+            | ApplicationSurfaceOperation::GitHistory
+            | ApplicationSurfaceOperation::GitBlame
+            | ApplicationSurfaceOperation::GitHunks
+            | ApplicationSurfaceOperation::GitPreview
+            | ApplicationSurfaceOperation::GitApply
+            | ApplicationSurfaceOperation::GitHubStackSignalExpand => {
+                unreachable!("Git operations use their typed constructors")
+            }
+            ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+            | ApplicationSurfaceOperation::NativeIntegrationPreflight
+            | ApplicationSurfaceOperation::NativeIntegrationApprove
+            | ApplicationSurfaceOperation::NativeIntegrationApply
+            | ApplicationSurfaceOperation::NativeIntegrationStatus
+            | ApplicationSurfaceOperation::NativeIntegrationCancel => {
+                unreachable!("native-integration operations use their typed constructor")
+            }
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+            | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+            | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+            | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+            | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
+                unreachable!("native worktree operations use their typed constructor")
+            }
+            ApplicationSurfaceOperation::ConfigurationList
+            | ApplicationSurfaceOperation::ConfigurationGet
+            | ApplicationSurfaceOperation::ConfigurationSet
+            | ApplicationSurfaceOperation::ConfigurationUnset
+            | ApplicationSurfaceOperation::ConfigurationBatch
+            | ApplicationSurfaceOperation::ConfigurationObservedState
+            | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+            | ApplicationSurfaceOperation::ConfigurationProtectedApply
+            | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+            | ApplicationSurfaceOperation::ConfigurationRollbackApply
+            | ApplicationSurfaceOperation::ConfigurationAudit => {
+                unreachable!("configuration operations use their typed constructor")
+            }
+            ApplicationSurfaceOperation::ContextScoutStatus
+            | ApplicationSurfaceOperation::ContextScoutRecent
+            | ApplicationSurfaceOperation::ContextScoutExplain
+            | ApplicationSurfaceOperation::ContextScoutCapability
+            | ApplicationSurfaceOperation::ContextScoutBudget
+            | ApplicationSurfaceOperation::ContextScoutPause
+            | ApplicationSurfaceOperation::ContextScoutResume
+            | ApplicationSurfaceOperation::ContextScoutCancel
+            | ApplicationSurfaceOperation::ContextScoutClaim
+            | ApplicationSurfaceOperation::ContextScoutDelivery
+            | ApplicationSurfaceOperation::ContextScoutFeedback => {
+                unreachable!("Context Scout operations use their typed constructor")
+            }
+            ApplicationSurfaceOperation::StrReplace
+            | ApplicationSurfaceOperation::MultiStrReplace
+            | ApplicationSurfaceOperation::InsertAt
+            | ApplicationSurfaceOperation::AstGrepRewrite
+            | ApplicationSurfaceOperation::ReplaceSymbol
+            | ApplicationSurfaceOperation::InsertAtSymbol
+            | ApplicationSurfaceOperation::MoveSymbol
+            | ApplicationSurfaceOperation::RenameSymbol
+            | ApplicationSurfaceOperation::SourceEditReconcile
+            | ApplicationSurfaceOperation::SourceEditRollback => {
+                unreachable!("source-edit operations use their typed constructors")
+            }
+            ApplicationSurfaceOperation::Context
+            | ApplicationSurfaceOperation::Node
+            | ApplicationSurfaceOperation::Impact
+            | ApplicationSurfaceOperation::Similar
+            | ApplicationSurfaceOperation::Redundancy
+            | ApplicationSurfaceOperation::RenamePreview
+            | ApplicationSurfaceOperation::PortStatus
+            | ApplicationSurfaceOperation::PortOrder
+            | ApplicationSurfaceOperation::Todos
+            | ApplicationSurfaceOperation::TestMap
+            | ApplicationSurfaceOperation::TestRisk
+            | ApplicationSurfaceOperation::Gini
+            | ApplicationSurfaceOperation::DependencyDepth
+            | ApplicationSurfaceOperation::Health
+            | ApplicationSurfaceOperation::Dsm
+            | ApplicationSurfaceOperation::Diagnose
+            | ApplicationSurfaceOperation::DeadCode
+            | ApplicationSurfaceOperation::Circular
+            | ApplicationSurfaceOperation::Hotspots
+            | ApplicationSurfaceOperation::UnmountedFiles
+            | ApplicationSurfaceOperation::Rank
+            | ApplicationSurfaceOperation::Largest
+            | ApplicationSurfaceOperation::Coupling
+            | ApplicationSurfaceOperation::InheritanceDepth
+            | ApplicationSurfaceOperation::Distribution
+            | ApplicationSurfaceOperation::Recursion
+            | ApplicationSurfaceOperation::Complexity
+            | ApplicationSurfaceOperation::DocCoverage
+            | ApplicationSurfaceOperation::GodClass
+            | ApplicationSurfaceOperation::UnsafePatterns
+            | ApplicationSurfaceOperation::Constructors
+            | ApplicationSurfaceOperation::FieldSites
+            | ApplicationSurfaceOperation::FindExactSymbol
+            | ApplicationSurfaceOperation::ByQualifiedName
+            | ApplicationSurfaceOperation::Signature
+            | ApplicationSurfaceOperation::Derives
+            | ApplicationSurfaceOperation::Grep
+            | ApplicationSurfaceOperation::AstGrepSearch
+            | ApplicationSurfaceOperation::Affected
+            | ApplicationSurfaceOperation::DiffContext
+            | ApplicationSurfaceOperation::Changelog
+            | ApplicationSurfaceOperation::CommitContext
+            | ApplicationSurfaceOperation::PrContext
+            | ApplicationSurfaceOperation::BranchSearch
+            | ApplicationSurfaceOperation::BranchDiff
+            | ApplicationSurfaceOperation::BranchList
+            | ApplicationSurfaceOperation::Files
+            | ApplicationSurfaceOperation::Config
+            | ApplicationSurfaceOperation::Retrieve
+            | ApplicationSurfaceOperation::AutomationRunList
+            | ApplicationSurfaceOperation::AutomationRunView
+            | ApplicationSurfaceOperation::AutomationRunArtifactView
+            | ApplicationSurfaceOperation::SkillList
+            | ApplicationSurfaceOperation::SkillView
+            | ApplicationSurfaceOperation::HermesSkillBridge
+            | ApplicationSurfaceOperation::Analytics
+            | ApplicationSurfaceOperation::Search
+            | ApplicationSurfaceOperation::RunAffectedTests
+            | ApplicationSurfaceOperation::Dashboard
+            | ApplicationSurfaceOperation::Status
+            | ApplicationSurfaceOperation::ActiveProject
+            | ApplicationSurfaceOperation::RemoteStatus
+            | ApplicationSurfaceOperation::Runtime
+            | ApplicationSurfaceOperation::ProjectList
+            | ApplicationSurfaceOperation::ProjectSearch
+            | ApplicationSurfaceOperation::ProjectContext
+            | ApplicationSurfaceOperation::AdminSync
+            | ApplicationSurfaceOperation::AdminCli
+            | ApplicationSurfaceOperation::AdminProject
+            | ApplicationSurfaceOperation::HookRuntime => {
+                unreachable!("graph-tool operations use their typed constructor")
+            }
+            ApplicationSurfaceOperation::FactStoreCurate
+            | ApplicationSurfaceOperation::FactStoreAdd
+            | ApplicationSurfaceOperation::FactStoreSearch
+            | ApplicationSurfaceOperation::FactStoreProbe
+            | ApplicationSurfaceOperation::FactStoreRelated
+            | ApplicationSurfaceOperation::FactStoreReason
+            | ApplicationSurfaceOperation::FactStoreContradict
+            | ApplicationSurfaceOperation::FactStoreGet
+            | ApplicationSurfaceOperation::FactStoreUpdate
+            | ApplicationSurfaceOperation::FactStoreRemove
+            | ApplicationSurfaceOperation::FactStoreSupersede
+            | ApplicationSurfaceOperation::FactStoreList
+            | ApplicationSurfaceOperation::FactFeedback
+            | ApplicationSurfaceOperation::MemoryStatus
+            | ApplicationSurfaceOperation::SessionRefreshStatus
+            | ApplicationSurfaceOperation::SessionRefreshCancel
+            | ApplicationSurfaceOperation::SessionRefreshBegin
+            | ApplicationSurfaceOperation::MessageSearch
+            | ApplicationSurfaceOperation::SessionsFor
+            | ApplicationSurfaceOperation::Workflows
+            | ApplicationSurfaceOperation::LcmStatus
+            | ApplicationSurfaceOperation::LcmDoctor
+            | ApplicationSurfaceOperation::LcmLoadSession
+            | ApplicationSurfaceOperation::LcmGrep
+            | ApplicationSurfaceOperation::LcmDescribe
+            | ApplicationSurfaceOperation::LcmExpand
+            | ApplicationSurfaceOperation::LcmExpandQuery => {
+                unreachable!("retained operations use their typed constructor")
+            }
+        };
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload,
+        }
+    }
+
+    pub fn feedback_advisory_cycle(
+        request_id: impl Into<String>,
+        document_uri: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn feedback_proximity(
+        request_id: impl Into<String>,
+        request: FeedbackProximityReadRequestV1,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::FeedbackProximity {
+                request,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn feedback_observation(
+        request_id: impl Into<String>,
+        subject_digest: ManifestDigest,
+        observed_at: UtcMicros,
+        event: FeedbackSourceEventV1,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::FeedbackObserve {
+                subject_digest,
+                observed_at,
+                event,
+            },
+        }
+    }
+
+    pub fn primitive(
+        request_id: impl Into<String>,
+        operation: ApplicationSurfaceOperation,
+        request: PrimitiveRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Result<Self, DaemonInvocationProblem> {
+        if request.surface_operation() != Some(operation) {
+            return Err(DaemonInvocationProblem::InvalidRequest);
+        }
+        let payload = match request {
+            PrimitiveRequest::Impact(request) => DaemonInvocationPayload::PrimitiveImpact {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+            PrimitiveRequest::AffectedFileTests(request) => {
+                DaemonInvocationPayload::PrimitiveAffectedTests {
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                }
+            }
+            PrimitiveRequest::RecentTestResults(page) => {
+                DaemonInvocationPayload::PrimitiveTestResults {
+                    page,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                }
+            }
+            request => DaemonInvocationPayload::PrimitiveRead {
+                surface_operation: operation,
+                request,
+                resolved_scope: None,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        };
+        Ok(Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload,
+        })
+    }
+
+    /// A configuration request, routed to the profile's configuration store
+    /// when it touches profile settings only and to the project's otherwise.
+    pub fn configuration(
+        request_id: impl Into<String>,
+        surface_operation: ApplicationSurfaceOperation,
+        request: ConfigurationWireRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        let payload = if request.targets_profile_settings() {
+            DaemonInvocationPayload::ProfileConfiguration {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            }
+        } else {
+            DaemonInvocationPayload::Configuration {
+                surface_operation,
+                request,
+                resolved_scope: None,
+                observed_at,
+                deadline,
+                cancellation,
+            }
+        };
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload,
+        }
+    }
+
+    pub fn context_scout(
+        request_id: impl Into<String>,
+        surface_operation: ApplicationSurfaceOperation,
+        request: ContextScoutSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::ContextScout {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn retained_application(
+        request_id: impl Into<String>,
+        request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::RetainedApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn profile_retained_application(
+        request_id: impl Into<String>,
+        request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::ProfileRetainedApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn observatory_read(
+        request_id: impl Into<String>,
+        request: ObservatoryReadRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::ObservatoryRead {
+                request,
+                resolved_scope: None,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn multi_root_scope_set_read(
+        request_id: impl Into<String>,
+        request: MultiRootScopeSetReadRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::MultiRootScopeSetRead {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn multi_root_scope_set_compare_and_swap(
+        request_id: impl Into<String>,
+        request: MultiRootScopeSetCasRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn multi_root_execute(
+        request_id: impl Into<String>,
+        request: MultiRootExecuteRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::MultiRootExecute {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn work_application(
+        request_id: impl Into<String>,
+        request: WorkApplicationInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::WorkApplication {
+                request: Box::new(request),
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn workflow_application(
+        request_id: impl Into<String>,
+        request: WorkflowApplicationInvocation,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::WorkflowApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn handoff_application(
+        request_id: impl Into<String>,
+        request: HandoffApplicationInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::HandoffApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn callable_code(
+        request_id: impl Into<String>,
+        surface_operation: ApplicationSurfaceOperation,
+        request: tracedecay_contracts::CallableCodeSurfaceRequest,
+        page: PageRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        debug_assert!(matches!(
+            (&request, surface_operation),
+            (
+                tracedecay_contracts::CallableCodeSurfaceRequest::ExactOccurrence(_),
+                ApplicationSurfaceOperation::CodeExactOccurrence,
+            ) | (
+                tracedecay_contracts::CallableCodeSurfaceRequest::PhraseSearch(_),
+                ApplicationSurfaceOperation::CodePhraseSearch,
+            ) | (
+                tracedecay_contracts::CallableCodeSurfaceRequest::Callees(_),
+                ApplicationSurfaceOperation::CodeCallees,
+            ) | (
+                tracedecay_contracts::CallableCodeSurfaceRequest::Facets(_),
+                ApplicationSurfaceOperation::CodeFacets,
+            ) | (
+                tracedecay_contracts::CallableCodeSurfaceRequest::Timeline(_),
+                ApplicationSurfaceOperation::CodeTimeline,
+            ) | (
+                tracedecay_contracts::CallableCodeSurfaceRequest::Declaration(_),
+                ApplicationSurfaceOperation::CodeDeclaration,
+            ) | (
+                tracedecay_contracts::CallableCodeSurfaceRequest::TypeDefinition(_),
+                ApplicationSurfaceOperation::CodeTypeDefinition,
+            ) | (
+                tracedecay_contracts::CallableCodeSurfaceRequest::References(_),
+                ApplicationSurfaceOperation::CodeReferences,
+            )
+        ));
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::CallableCode {
+                surface_operation,
+                request,
+                page,
+                resolved_scope: None,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn primitive_code(
+        request_id: impl Into<String>,
+        surface_operation: ApplicationSurfaceOperation,
+        request: tracedecay_contracts::PrimitiveCodeSurfaceRequest,
+        page: PageRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::PrimitiveCode {
+                surface_operation,
+                request,
+                page,
+                resolved_scope: None,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn lsp_open(
+        request_id: impl Into<String>,
+        client_revision: impl Into<String>,
+        requested_root_uri: Option<String>,
+        workspace_folders: Vec<String>,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::LspOpen {
+                client_revision: client_revision.into(),
+                requested_root_uri,
+                workspace_folders,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn lsp_frame(
+        request_id: impl Into<String>,
+        session: DaemonLspSessionAccess,
+        frame: impl Into<String>,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::LspFrame {
+                session,
+                frame: frame.into(),
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn lsp_poll(
+        request_id: impl Into<String>,
+        session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::LspPoll {
+                session,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn lsp_acknowledge(
+        request_id: impl Into<String>,
+        session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::LspAcknowledge {
+                session,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn lsp_detach(
+        request_id: impl Into<String>,
+        session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::LspDetach {
+                session,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub fn lsp_reconnect(
+        request_id: impl Into<String>,
+        session: DaemonLspSessionAccess,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::LspReconnect {
+                session,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn with_delivery_route(mut self, route: FeedbackDeliveryRouteV1) -> Self {
+        self.delivery_route = Some(route);
+        self
+    }
+
+    /// Apply a resolved cross-project scope to payloads that carry one.
+    ///
+    /// `None` is always accepted (current-project / no selector). `Some` is
+    /// preserved only on payloads that own a `resolved_scope` field; every
+    /// other payload fails closed so a cross-project selector can never
+    /// silently alias the active project.
+    pub fn with_resolved_scope(
+        mut self,
+        scope: Option<ResolvedScope>,
+    ) -> Result<Self, DaemonInvocationProblem> {
+        match (&mut self.payload, scope) {
+            (
+                DaemonInvocationPayload::FeedbackGet { resolved_scope, .. }
+                | DaemonInvocationPayload::Configuration { resolved_scope, .. }
+                | DaemonInvocationPayload::ObservatoryRead { resolved_scope, .. }
+                | DaemonInvocationPayload::PrimitiveRead { resolved_scope, .. }
+                | DaemonInvocationPayload::PrimitiveCode { resolved_scope, .. }
+                | DaemonInvocationPayload::CallableCode { resolved_scope, .. },
+                scope,
+            ) => {
+                *resolved_scope = scope;
+                Ok(self)
+            }
+            // A profile setting resolves the same under every project selector.
+            (DaemonInvocationPayload::ProfileConfiguration { .. }, _) | (_, None) => Ok(self),
+            (_, Some(_)) => Err(DaemonInvocationProblem::InvalidRequest),
+        }
+    }
+
+    pub fn lsp_workspace_folders(&self) -> Option<&[String]> {
+        match &self.payload {
+            DaemonInvocationPayload::LspOpen {
+                workspace_folders, ..
+            } => Some(workspace_folders),
+            _ => None,
+        }
+    }
+
+    pub fn lsp_open_control(&self) -> Option<(&Deadline, &CancellationContext)> {
+        match &self.payload {
+            DaemonInvocationPayload::LspOpen {
+                deadline,
+                cancellation,
+                ..
+            } => Some((deadline, cancellation)),
+            _ => None,
+        }
+    }
+
+    pub fn operation(&self) -> DaemonInvocationOperation {
+        match &self.payload {
+            // Derive from the typed body, not `surface_operation`. A foreign
+            // wire `surface_operation` is rejected by `validate()`; labeling
+            // must stay total so the connection task never panics on input.
+            DaemonInvocationPayload::GitRead { request, .. } => match &request.request {
+                tracedecay_contracts::git::GitReadRequestV1::Status => {
+                    DaemonInvocationOperation::GitStatus
+                }
+                tracedecay_contracts::git::GitReadRequestV1::Diff { .. } => {
+                    DaemonInvocationOperation::GitDiff
+                }
+                tracedecay_contracts::git::GitReadRequestV1::History { .. } => {
+                    DaemonInvocationOperation::GitHistory
+                }
+                tracedecay_contracts::git::GitReadRequestV1::Blame { .. } => {
+                    DaemonInvocationOperation::GitBlame
+                }
+                tracedecay_contracts::git::GitReadRequestV1::Hunks { .. } => {
+                    DaemonInvocationOperation::GitHunks
+                }
+            },
+            DaemonInvocationPayload::GitPreview { .. } => DaemonInvocationOperation::GitPreview,
+            DaemonInvocationPayload::GitHubStackSignalExpand { .. } => {
+                DaemonInvocationOperation::GitHubStackSignalExpand
+            }
+            DaemonInvocationPayload::GitApply { .. } => DaemonInvocationOperation::GitApply,
+            DaemonInvocationPayload::NativeIntegration { request, .. } => match request {
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::StackSnapshot(_) => {
+                    DaemonInvocationOperation::NativeIntegrationStackSnapshot
+                }
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Preflight(_) => {
+                    DaemonInvocationOperation::NativeIntegrationPreflight
+                }
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Approve(_) => {
+                    DaemonInvocationOperation::NativeIntegrationApprove
+                }
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Apply(_) => {
+                    DaemonInvocationOperation::NativeIntegrationApply
+                }
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Status(_) => {
+                    DaemonInvocationOperation::NativeIntegrationStatus
+                }
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Cancel(_) => {
+                    DaemonInvocationOperation::NativeIntegrationCancel
+                }
+                tracedecay_contracts::NativeIntegrationSurfaceRequest::Worktree(request) => {
+                    match request {
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Inventory(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+                        }
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Inspect(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeInspect
+                        }
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Confirm(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
+                        }
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Remove(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeRemove
+                        }
+                        tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Reconcile(_) => {
+                            DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
+                        }
+                    }
+                }
+            },
+            DaemonInvocationPayload::FeedbackDiagnostics { .. } => {
+                DaemonInvocationOperation::FeedbackDiagnostics
+            }
+            DaemonInvocationPayload::FeedbackGet { .. } => DaemonInvocationOperation::FeedbackGet,
+            DaemonInvocationPayload::FeedbackExpand { .. } => {
+                DaemonInvocationOperation::FeedbackExpand
+            }
+            DaemonInvocationPayload::FeedbackList { .. } => DaemonInvocationOperation::FeedbackList,
+            DaemonInvocationPayload::FeedbackAdvisoryCycle { .. } => {
+                DaemonInvocationOperation::FeedbackAdvisoryCycle
+            }
+            DaemonInvocationPayload::FeedbackProximity { .. } => {
+                DaemonInvocationOperation::FeedbackProximity
+            }
+            DaemonInvocationPayload::FeedbackImpact { .. } => {
+                DaemonInvocationOperation::FeedbackImpact
+            }
+            DaemonInvocationPayload::AffectedTests { .. } => {
+                DaemonInvocationOperation::AffectedTests
+            }
+            DaemonInvocationPayload::FeedbackObserve { .. } => {
+                DaemonInvocationOperation::FeedbackObserve
+            }
+            DaemonInvocationPayload::PrimitiveImpact { .. } => {
+                DaemonInvocationOperation::PrimitiveImpact
+            }
+            DaemonInvocationPayload::PrimitiveAffectedTests { .. } => {
+                DaemonInvocationOperation::PrimitiveAffectedTests
+            }
+            DaemonInvocationPayload::PrimitiveTestResults { .. } => {
+                DaemonInvocationOperation::PrimitiveTestResults
+            }
+            DaemonInvocationPayload::PrimitiveRead { .. } => {
+                DaemonInvocationOperation::PrimitiveRead
+            }
+            DaemonInvocationPayload::PrimitiveCode { .. } => {
+                DaemonInvocationOperation::PrimitiveRead
+            }
+            DaemonInvocationPayload::CallableCode {
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::ExactOccurrence(_),
+                ..
+            } => DaemonInvocationOperation::CodeExactOccurrence,
+            DaemonInvocationPayload::CallableCode {
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::PhraseSearch(_),
+                ..
+            } => DaemonInvocationOperation::CodePhraseSearch,
+            DaemonInvocationPayload::CallableCode {
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::Callees(_),
+                ..
+            } => DaemonInvocationOperation::CodeCallees,
+            DaemonInvocationPayload::CallableCode {
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::Facets(_),
+                ..
+            } => DaemonInvocationOperation::CodeFacets,
+            DaemonInvocationPayload::CallableCode {
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::Timeline(_),
+                ..
+            } => DaemonInvocationOperation::CodeTimeline,
+            DaemonInvocationPayload::CallableCode {
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::Declaration(_),
+                ..
+            } => DaemonInvocationOperation::CodeDeclaration,
+            DaemonInvocationPayload::CallableCode {
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::TypeDefinition(_),
+                ..
+            } => DaemonInvocationOperation::CodeTypeDefinition,
+            DaemonInvocationPayload::CallableCode {
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::References(_),
+                ..
+            } => DaemonInvocationOperation::CodeReferences,
+            DaemonInvocationPayload::Configuration { .. } => {
+                DaemonInvocationOperation::Configuration
+            }
+            DaemonInvocationPayload::ContextScout { .. } => DaemonInvocationOperation::ContextScout,
+            DaemonInvocationPayload::ObservatoryRead { .. } => {
+                DaemonInvocationOperation::ObservatoryRead
+            }
+            DaemonInvocationPayload::RetainedApplication { .. } => {
+                DaemonInvocationOperation::RetainedApplication
+            }
+            DaemonInvocationPayload::ProfileRetainedApplication { .. } => {
+                DaemonInvocationOperation::ProfileRetainedApplication
+            }
+            DaemonInvocationPayload::ProfileGraphTool { .. } => {
+                DaemonInvocationOperation::ProfileGraphTool
+            }
+            DaemonInvocationPayload::ProfileConfiguration { .. } => {
+                DaemonInvocationOperation::ProfileConfiguration
+            }
+            DaemonInvocationPayload::MultiRootScopeSetRead { .. } => {
+                DaemonInvocationOperation::MultiRootScopeSetRead
+            }
+            DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. } => {
+                DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
+            }
+            DaemonInvocationPayload::MultiRootExecute { .. } => {
+                DaemonInvocationOperation::MultiRootExecute
+            }
+            DaemonInvocationPayload::WorkApplication { .. } => {
+                DaemonInvocationOperation::WorkApplication
+            }
+            DaemonInvocationPayload::WorkflowApplication { .. } => {
+                DaemonInvocationOperation::WorkflowApplication
+            }
+            DaemonInvocationPayload::HandoffApplication { .. } => {
+                DaemonInvocationOperation::HandoffApplication
+            }
+            DaemonInvocationPayload::LspOpen { .. } => DaemonInvocationOperation::LspOpen,
+            DaemonInvocationPayload::LspFrame { .. } => DaemonInvocationOperation::LspFrame,
+            DaemonInvocationPayload::LspPoll { .. } => DaemonInvocationOperation::LspPoll,
+            DaemonInvocationPayload::LspAcknowledge { .. } => {
+                DaemonInvocationOperation::LspAcknowledge
+            }
+            DaemonInvocationPayload::LspReconnect { .. } => DaemonInvocationOperation::LspReconnect,
+            DaemonInvocationPayload::LspDetach { .. } => DaemonInvocationOperation::LspDetach,
+            DaemonInvocationPayload::SourceEdit { .. } => DaemonInvocationOperation::SourceEdit,
+            DaemonInvocationPayload::SourceEditReconcile { .. } => {
+                DaemonInvocationOperation::SourceEditReconcile
+            }
+            DaemonInvocationPayload::SourceEditRollback { .. } => {
+                DaemonInvocationOperation::SourceEditRollback
+            }
+            DaemonInvocationPayload::GraphTool { .. } => DaemonInvocationOperation::GraphTool,
+        }
+    }
+
+    pub fn requires_project(&self) -> bool {
+        matches!(
+            self.operation(),
+            DaemonInvocationOperation::GitStatus
+                | DaemonInvocationOperation::GitDiff
+                | DaemonInvocationOperation::GitHistory
+                | DaemonInvocationOperation::GitBlame
+                | DaemonInvocationOperation::GitHubStackSignalExpand
+                | DaemonInvocationOperation::GitHunks
+                | DaemonInvocationOperation::GitPreview
+                | DaemonInvocationOperation::GitApply
+                | DaemonInvocationOperation::NativeIntegrationStackSnapshot
+                | DaemonInvocationOperation::NativeIntegrationPreflight
+                | DaemonInvocationOperation::NativeIntegrationApprove
+                | DaemonInvocationOperation::NativeIntegrationApply
+                | DaemonInvocationOperation::NativeIntegrationStatus
+                | DaemonInvocationOperation::NativeIntegrationCancel
+                | DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+                | DaemonInvocationOperation::NativeIntegrationWorktreeInspect
+                | DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
+                | DaemonInvocationOperation::NativeIntegrationWorktreeRemove
+                | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
+                | DaemonInvocationOperation::FeedbackDiagnostics
+                | DaemonInvocationOperation::FeedbackGet
+                | DaemonInvocationOperation::FeedbackExpand
+                | DaemonInvocationOperation::FeedbackList
+                | DaemonInvocationOperation::FeedbackAdvisoryCycle
+                | DaemonInvocationOperation::FeedbackProximity
+                | DaemonInvocationOperation::FeedbackImpact
+                | DaemonInvocationOperation::AffectedTests
+                | DaemonInvocationOperation::FeedbackObserve
+                | DaemonInvocationOperation::PrimitiveImpact
+                | DaemonInvocationOperation::PrimitiveAffectedTests
+                | DaemonInvocationOperation::PrimitiveTestResults
+                | DaemonInvocationOperation::PrimitiveRead
+                | DaemonInvocationOperation::CodeExactOccurrence
+                | DaemonInvocationOperation::CodePhraseSearch
+                | DaemonInvocationOperation::CodeCallees
+                | DaemonInvocationOperation::CodeFacets
+                | DaemonInvocationOperation::CodeTimeline
+                | DaemonInvocationOperation::CodeDeclaration
+                | DaemonInvocationOperation::CodeTypeDefinition
+                | DaemonInvocationOperation::CodeReferences
+                | DaemonInvocationOperation::Configuration
+                | DaemonInvocationOperation::ContextScout
+                | DaemonInvocationOperation::ObservatoryRead
+                | DaemonInvocationOperation::RetainedApplication
+                | DaemonInvocationOperation::MultiRootScopeSetRead
+                | DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
+                | DaemonInvocationOperation::MultiRootExecute
+                | DaemonInvocationOperation::WorkApplication
+                | DaemonInvocationOperation::WorkflowApplication
+                | DaemonInvocationOperation::HandoffApplication
+                | DaemonInvocationOperation::LspOpen
+                | DaemonInvocationOperation::SourceEdit
+                | DaemonInvocationOperation::SourceEditReconcile
+                | DaemonInvocationOperation::SourceEditRollback
+                | DaemonInvocationOperation::GraphTool
+        )
+    }
+
+    pub fn is_workflow_application(&self) -> bool {
+        matches!(
+            &self.payload,
+            DaemonInvocationPayload::WorkflowApplication { .. }
+        )
+    }
+
+    /// The caller's immutable budget also bounds the terminal delivery ACK.
+    /// Work output must not hold an authenticated connection past the
+    /// invocation's own deadline when a surface disappears before `ACKing`.
+    pub fn delivery_ack_deadline(&self) -> Option<&Deadline> {
+        match &self.payload {
+            DaemonInvocationPayload::WorkApplication { deadline, .. } => Some(deadline),
+            _ => None,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), DaemonInvocationProblem> {
+        if self.protocol != DAEMON_INVOCATION_PROTOCOL {
+            return Err(DaemonInvocationProblem::InvalidRequest);
+        }
+        if self.revision != DAEMON_INVOCATION_REVISION {
+            return Err(DaemonInvocationProblem::UnsupportedRevision);
+        }
+        if !valid_token(&self.request_id, MAX_INVOCATION_REQUEST_ID_BYTES) {
+            return Err(DaemonInvocationProblem::InvalidRequest);
+        }
+        match &self.payload {
+            DaemonInvocationPayload::MultiRootScopeSetRead {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || MultiRootScopeSetReadRequestV1::new(request.scope_set_id.clone()).is_err()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || request.validate().is_err()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::MultiRootExecute {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || request.validate().is_err()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::GitRead {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let expected = match &request.request {
+                    tracedecay_contracts::git::GitReadRequestV1::Status => {
+                        ApplicationSurfaceOperation::GitStatus
+                    }
+                    tracedecay_contracts::git::GitReadRequestV1::Diff { .. } => {
+                        ApplicationSurfaceOperation::GitDiff
+                    }
+                    tracedecay_contracts::git::GitReadRequestV1::History { .. } => {
+                        ApplicationSurfaceOperation::GitHistory
+                    }
+                    tracedecay_contracts::git::GitReadRequestV1::Blame { .. } => {
+                        ApplicationSurfaceOperation::GitBlame
+                    }
+                    tracedecay_contracts::git::GitReadRequestV1::Hunks { .. } => {
+                        ApplicationSurfaceOperation::GitHunks
+                    }
+                };
+                if *surface_operation != expected {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::NativeIntegration {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let expected = match request {
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::StackSnapshot(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Preflight(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationPreflight
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Approve(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationApprove
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Apply(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationApply
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Status(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationStatus
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Cancel(_) => {
+                        ApplicationSurfaceOperation::NativeIntegrationCancel
+                    }
+                    tracedecay_contracts::NativeIntegrationSurfaceRequest::Worktree(request) => {
+                        match request {
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Inventory(
+                                _,
+                            ) => ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory,
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Inspect(_) => {
+                                ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+                            }
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Confirm(_) => {
+                                ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+                            }
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Remove(_) => {
+                                ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+                            }
+                            tracedecay_contracts::git::NativeWorktreeSurfaceRequest::Reconcile(
+                                _,
+                            ) => ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile,
+                        }
+                    }
+                };
+                if *surface_operation != expected {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::GitPreview {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::GitHubStackSignalExpand {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::GitApply {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::PrimitiveImpact {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::PrimitiveAffectedTests {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::PrimitiveTestResults {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::WorkApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::WorkflowApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::HandoffApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::SourceEdit {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::SourceEditReconcile {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::SourceEditRollback {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::PrimitiveRead {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || request.surface_operation() != Some(*surface_operation)
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::GraphTool {
+                surface_operation,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || !surface_operation.is_graph_tool()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::ProfileGraphTool {
+                surface_operation,
+                arguments,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || !surface_operation.is_profile_owner_request(arguments)
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::ObservatoryRead {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !(1..=365).contains(&request.window_days)
+                    || !valid_observation_window(observed_at, deadline, cancellation)
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::Configuration {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::ProfileConfiguration {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || !request.targets_profile_settings()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::PrimitiveCode {
+                surface_operation,
+                request,
+                page,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || PageRequest::new(page.page_size, page.cursor.clone()).is_err()
+                    || !valid_lsp_control(deadline, cancellation)
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let matches = matches!(
+                    (surface_operation, request),
+                    (
+                        ApplicationSurfaceOperation::CodeSymbolSearch,
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::SymbolSearch(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeSignatureSearch,
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::SignatureSearch(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeImplementations,
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::Implementations(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeTypeHierarchy,
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::TypeHierarchy(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeCallers,
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::Callers(_),
+                    )
+                );
+                if !matches {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::CallableCode {
+                surface_operation,
+                request,
+                page,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || PageRequest::new(page.page_size, page.cursor.clone()).is_err()
+                    || !valid_lsp_control(deadline, cancellation)
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let matches = matches!(
+                    (surface_operation, request),
+                    (
+                        ApplicationSurfaceOperation::CodeExactOccurrence,
+                        tracedecay_contracts::CallableCodeSurfaceRequest::ExactOccurrence(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodePhraseSearch,
+                        tracedecay_contracts::CallableCodeSurfaceRequest::PhraseSearch(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeCallees,
+                        tracedecay_contracts::CallableCodeSurfaceRequest::Callees(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeFacets,
+                        tracedecay_contracts::CallableCodeSurfaceRequest::Facets(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeTimeline,
+                        tracedecay_contracts::CallableCodeSurfaceRequest::Timeline(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeDeclaration,
+                        tracedecay_contracts::CallableCodeSurfaceRequest::Declaration(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeTypeDefinition,
+                        tracedecay_contracts::CallableCodeSurfaceRequest::TypeDefinition(_),
+                    ) | (
+                        ApplicationSurfaceOperation::CodeReferences,
+                        tracedecay_contracts::CallableCodeSurfaceRequest::References(_),
+                    )
+                );
+                if !matches {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::ContextScout {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || !request.matches(*surface_operation)
+                    || matches!(
+                        request,
+                        ContextScoutSurfaceRequestV1::Recent(request)
+                            | ContextScoutSurfaceRequestV1::Explain(request)
+                            if !(1..=32).contains(&request.limit)
+                    )
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::RetainedApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::ProfileRetainedApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::FeedbackDiagnostics {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::FeedbackGet {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::FeedbackExpand {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::FeedbackList {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::FeedbackImpact {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::AffectedTests {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_token(request_handle, MAX_OPAQUE_HANDLE_BYTES)
+                    || !valid_observation_window(observed_at, deadline, cancellation)
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_printable(document_uri, MAX_ROOT_HINT_BYTES)
+                    || !valid_observation_window(observed_at, deadline, cancellation)
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::FeedbackProximity {
+                request,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_observation_window(&request.observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::FeedbackObserve {
+                subject_digest,
+                observed_at,
+                event,
+            } => {
+                if subject_digest.validate().is_err()
+                    || observed_at.0 <= 0
+                    || event.validate().is_none()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::LspOpen {
+                client_revision,
+                requested_root_uri,
+                workspace_folders,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_printable(client_revision, MAX_CLIENT_REVISION_BYTES)
+                    || requested_root_uri
+                        .as_deref()
+                        .is_some_and(|uri| !valid_printable(uri, MAX_ROOT_HINT_BYTES))
+                    || workspace_folders.len() > MAX_LSP_WORKSPACE_ROOTS
+                    || workspace_folders
+                        .iter()
+                        .any(|folder| !valid_printable(folder, MAX_ROOT_HINT_BYTES))
+                    || !valid_lsp_control(deadline, cancellation)
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::LspFrame {
+                session,
+                frame,
+                deadline,
+                cancellation,
+            } => {
+                let _ = session.clone().into_access()?;
+                if frame.len() > MAX_LSP_FRAME_BYTES || !valid_lsp_control(deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::LspPoll {
+                session,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::LspAcknowledge {
+                session,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::LspReconnect {
+                session,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::LspDetach {
+                session,
+                deadline,
+                cancellation,
+            } => {
+                let _ = session.clone().into_access()?;
+                if !valid_lsp_control(deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parse an invocation only when it explicitly selects this protocol. Ordinary
+/// MCP JSON-RPC frames continue through the established daemon route.
+///
+/// Measured as the wire decode phase: this full-line parse runs between
+/// `daemon.wire.read_line` and the dispatch span, so without its own label a
+/// slow request could not be attributed between payload decode and handling.
+#[tracing::instrument(name = "daemon.wire.decode_invocation", level = "trace", skip_all)]
+pub fn parse_daemon_invocation_request(
+    line: &str,
+) -> Option<Result<DaemonInvocationRequest, DaemonInvocationResponse>> {
+    let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+    if value.get("protocol").and_then(serde_json::Value::as_str) != Some(DAEMON_INVOCATION_PROTOCOL)
+    {
+        return None;
+    }
+    let request_id = value
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    // A frame that names this protocol but no longer deserializes is either
+    // a foreign revision (explicitly, or as same-revision wire drift between
+    // build versions) or a malformed request. Answer the former as the typed
+    // revision refusal so a skewed client never has to guess from
+    // `invalid_request` whether its own request was wrong.
+    let envelope_revision = value.get("revision").and_then(serde_json::Value::as_u64);
+    Some(serde_json::from_value(value).map_err(|_| {
+        let problem = match envelope_revision {
+            Some(revision) if revision != u64::from(DAEMON_INVOCATION_REVISION) => {
+                DaemonInvocationProblem::UnsupportedRevision
+            }
+            _ => DaemonInvocationProblem::InvalidRequest,
+        };
+        DaemonInvocationResponse::problem(request_id, problem)
+    }))
+}
+
+#[cfg(test)]
+mod operation_label_tests {
+    use super::DaemonInvocationOperation;
+
+    /// Handle-bearing feedback operations and their direct-request primitive
+    /// twins are distinct dispatch paths; the client labels every invocation
+    /// with `as_str`, so a shared label would merge them in observability.
+    #[test]
+    fn primitive_operations_carry_labels_distinct_from_their_feedback_twins() {
+        for (feedback, primitive) in [
+            (
+                DaemonInvocationOperation::FeedbackImpact,
+                DaemonInvocationOperation::PrimitiveImpact,
+            ),
+            (
+                DaemonInvocationOperation::AffectedTests,
+                DaemonInvocationOperation::PrimitiveAffectedTests,
+            ),
+        ] {
+            assert_ne!(
+                feedback.as_str(),
+                primitive.as_str(),
+                "{feedback:?} vs {primitive:?}"
+            );
+        }
+    }
+}
+
+/// A safe, deliberately non-diagnostic daemon invocation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonInvocationProblem {
+    InvalidRequest,
+    UnsupportedRevision,
+    NotFoundOrNotAuthorized,
+    ResetRequired,
+    ApplicationContractViolation,
+    Unavailable,
+}
+
+impl DaemonInvocationProblem {
+    /// Preserve the typed refusal as a reason-coded error. Never format the
+    /// variant with `Debug` into a user-facing message.
+    pub fn into_trace_decay_error(self) -> tracedecay_domain::errors::TraceDecayError {
+        let (reason_code, retryable, detail) = match self {
+            Self::InvalidRequest => (
+                "daemon_invocation.invalid_request",
+                false,
+                "The daemon invocation request is invalid",
+            ),
+            Self::UnsupportedRevision => (
+                "daemon_invocation.unsupported_revision",
+                false,
+                "The daemon invocation revision is unsupported",
+            ),
+            Self::NotFoundOrNotAuthorized => (
+                "daemon_invocation.not_found_or_not_authorized",
+                false,
+                "The requested daemon invocation was not found or is not authorized",
+            ),
+            Self::ResetRequired => (
+                "daemon_invocation.reset_required",
+                false,
+                "The daemon invocation store must be reset",
+            ),
+            Self::ApplicationContractViolation => (
+                "daemon_invocation.application_contract_violation",
+                false,
+                "The daemon invocation violated its application contract",
+            ),
+            Self::Unavailable => (
+                "daemon_invocation.unavailable",
+                true,
+                "The daemon invocation is unavailable",
+            ),
+        };
+        tracedecay_domain::errors::TraceDecayError::project_route(reason_code, retryable, detail)
+    }
+}
+
+#[cfg(test)]
+mod invocation_wire_revision_tests {
+    use super::{
+        DAEMON_INVOCATION_PROTOCOL, DaemonInvocationOutcome, DaemonInvocationProblem,
+        parse_daemon_invocation_request,
+    };
+
+    fn parse_problem(line: &str) -> DaemonInvocationProblem {
+        let response = parse_daemon_invocation_request(line)
+            .expect("frames naming the invocation protocol must be answered")
+            .expect_err("undecodable frames must produce a typed response");
+        match response.outcome {
+            DaemonInvocationOutcome::Problem { problem } => problem,
+            outcome => panic!("expected a typed problem response, got {outcome:?}"),
+        }
+    }
+
+    #[test]
+    fn foreign_revision_frames_refuse_as_unsupported_revision() {
+        let line = format!(
+            r#"{{"protocol":"{DAEMON_INVOCATION_PROTOCOL}","revision":2,"request_id":"request.future","operation":"future_operation"}}"#
+        );
+        assert_eq!(
+            parse_problem(&line),
+            DaemonInvocationProblem::UnsupportedRevision,
+            "a frame from a different wire revision is a revision refusal, not a caller mistake"
+        );
+    }
+
+    #[test]
+    fn same_revision_malformed_frames_stay_invalid_request() {
+        let line = format!(
+            r#"{{"protocol":"{DAEMON_INVOCATION_PROTOCOL}","revision":1,"request_id":"request.same","operation":"no_such_operation"}}"#
+        );
+        assert_eq!(
+            parse_problem(&line),
+            DaemonInvocationProblem::InvalidRequest,
+        );
+    }
+}
+
+#[cfg(test)]
+mod invocation_problem_tests {
+    use super::{DaemonInvocationProblem, DaemonInvocationResponse};
+
+    #[test]
+    fn application_contract_violation_round_trips_without_diagnostics() {
+        let response = DaemonInvocationResponse::problem(
+            "request.application-contract",
+            DaemonInvocationProblem::ApplicationContractViolation,
+        );
+        let wire = serde_json::to_value(&response).expect("daemon invocation response wire");
+        assert_eq!(wire["status"], "problem");
+        assert_eq!(wire["problem"], "application_contract_violation");
+        assert!(wire.get("diagnostic").is_none());
+        assert!(wire.get("message").is_none());
+        assert_eq!(
+            serde_json::from_value::<DaemonInvocationResponse>(wire)
+                .expect("daemon invocation response")
+                .outcome,
+            response.outcome
+        );
+    }
+}
+
+#[cfg(test)]
+mod wire_input_fail_closed_tests {
+    use super::{
+        DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationPayload,
+        DaemonInvocationProblem, DaemonInvocationRequest, parse_daemon_invocation_request,
+    };
+    use crate::surface::GitReadSurfaceRequest;
+    use tracedecay_contracts::git::GitReadRequestV1;
+    use tracedecay_contracts::{
+        CancellationContext, Deadline, ObservatoryReadRequestV1, ResolvedScope,
+    };
+    use tracedecay_domain::{ProjectId, RepositoryId, UtcMicros, WorktreeId};
+    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
+    fn deadline() -> Deadline {
+        Deadline::new(UtcMicros(5_000_000)).expect("deadline")
+    }
+
+    fn cancellation() -> CancellationContext {
+        CancellationContext::active("cancel.wire-fail-closed").expect("cancellation")
+    }
+
+    fn test_scope(suffix: &str) -> ResolvedScope {
+        ResolvedScope::new(
+            ProjectId::new(format!("project.{suffix}")).expect("project id"),
+            RepositoryId::new(format!("repository.{suffix}")).expect("repository id"),
+            WorktreeId::new(format!("worktree.{suffix}")).expect("worktree id"),
+            None,
+        )
+        .expect("resolved scope")
+    }
+
+    fn git_status_read(surface_operation: ApplicationSurfaceOperation) -> DaemonInvocationRequest {
+        DaemonInvocationRequest::git_read(
+            "request.git-wire-fail-closed",
+            surface_operation,
+            GitReadSurfaceRequest {
+                request: GitReadRequestV1::Status,
+                max_entries: 32,
+                max_bytes: 64 * 1024,
+            },
+            UtcMicros(1),
+            deadline(),
+            cancellation(),
+        )
+    }
+
+    #[test]
+    fn foreign_surface_operation_on_git_read_validates_as_invalid_request() {
+        let request = git_status_read(ApplicationSurfaceOperation::FeedbackGet);
+        assert_eq!(
+            request.validate(),
+            Err(DaemonInvocationProblem::InvalidRequest),
+            "a GitRead frame with a foreign surface_operation must fail closed"
+        );
+        // Labeling must stay total: deriving the operation from the typed body
+        // must not panic even when surface_operation is foreign.
+        assert_eq!(request.operation(), DaemonInvocationOperation::GitStatus);
+    }
+
+    #[test]
+    fn matching_git_read_surface_operation_validates() {
+        let request = git_status_read(ApplicationSurfaceOperation::GitStatus);
+        assert_eq!(request.validate(), Ok(()));
+        assert_eq!(request.operation(), DaemonInvocationOperation::GitStatus);
+    }
+
+    #[test]
+    fn issued_primitive_pairs_preserve_their_wire_owner() {
+        let meta = serde_json::json!({
+            "temporal": {"kind": "current"}, "page": {"page_size": 10, "cursor": null},
+            "projection": "evidence", "order": "source_position"
+        });
+        let scope =
+            serde_json::to_value(tracedecay_contracts::retrieval::SymbolGraphScope::default())
+                .expect("symbol scope");
+        for (operation, primitive, body) in [
+            (
+                ApplicationSurfaceOperation::SessionLookup,
+                "session_lookup",
+                serde_json::json!({"session_id":"session.pair", "meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::QualifiedName,
+                "qualified_name",
+                serde_json::json!({"qualified_name":"module::item", "page":{"page_size":10}}),
+            ),
+            (
+                ApplicationSurfaceOperation::CallChain,
+                "call_chain",
+                serde_json::json!({"from_node_id":"node.from", "to_node_id":"node.to", "maximum_depth":3}),
+            ),
+            (
+                ApplicationSurfaceOperation::FileDependents,
+                "file_dependents",
+                serde_json::json!({"file":"src/lib.rs"}),
+            ),
+            (
+                ApplicationSurfaceOperation::SourceLines,
+                "source_lines",
+                serde_json::json!({"file":"file.pair", "span":{"start_byte":0,"end_byte":1}, "meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::SourceBody,
+                "source_body",
+                serde_json::json!({"node_id":"node.pair"}),
+            ),
+            (
+                ApplicationSurfaceOperation::SourceOutline,
+                "source_outline",
+                serde_json::json!({"file":"src/lib.rs"}),
+            ),
+            (
+                ApplicationSurfaceOperation::ModuleApi,
+                "module_api",
+                serde_json::json!({"path":"src"}),
+            ),
+            (
+                ApplicationSurfaceOperation::HealthRead,
+                "health_read",
+                serde_json::json!({}),
+            ),
+            (
+                ApplicationSurfaceOperation::HealthDelta,
+                "health_delta",
+                serde_json::json!({"meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::StorageStatus,
+                "storage_status",
+                serde_json::json!({"include_details":true}),
+            ),
+            (
+                ApplicationSurfaceOperation::DiagnosticsRead,
+                "diagnostics_read",
+                serde_json::json!({"scope":"workspace", "maximum_diagnostics":10}),
+            ),
+            (
+                ApplicationSurfaceOperation::FeedbackImpact,
+                "impact",
+                serde_json::json!({"node_id":"node.pair", "maximum_depth":3, "scope":scope, "meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::AffectedTests,
+                "affected_file_tests",
+                serde_json::json!({"files":["src/lib.rs"], "maximum_depth":3, "filter":null, "meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::TestResults,
+                "recent_test_results",
+                serde_json::json!({"page_size":10}),
+            ),
+        ] {
+            let request: tracedecay_contracts::retrieval::PrimitiveRequest =
+                serde_json::from_value(serde_json::json!({"primitive":primitive,"request":body}))
+                    .expect("issued body");
+            assert_eq!(request.surface_operation(), Some(operation));
+            assert!(
+                request
+                    .application_operation()
+                    .expect("canonical operation")
+                    .is_some()
+            );
+            let frame = DaemonInvocationRequest::primitive(
+                "request.pair",
+                operation,
+                request,
+                UtcMicros(1),
+                deadline(),
+                cancellation(),
+            )
+            .expect("matching pair");
+            let mut wire = serde_json::to_value(frame).expect("wire frame");
+            let roundtrip: DaemonInvocationRequest =
+                serde_json::from_value(wire.clone()).expect("wire roundtrip");
+            assert_eq!(roundtrip.validate(), Ok(()), "{operation:?}");
+            if wire.get("surface_operation").is_some() {
+                wire["surface_operation"] =
+                    serde_json::json!(if operation == ApplicationSurfaceOperation::StorageStatus {
+                        "source_lines"
+                    } else {
+                        "storage_status"
+                    });
+                let foreign: DaemonInvocationRequest =
+                    serde_json::from_value(wire).expect("foreign label frame");
+                assert_eq!(
+                    foreign.validate(),
+                    Err(DaemonInvocationProblem::InvalidRequest),
+                    "{operation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn code_primitive_conversion_keeps_the_canonical_owner() {
+        let scope =
+            serde_json::to_value(tracedecay_contracts::retrieval::SymbolGraphScope::default())
+                .expect("scope");
+        let meta = serde_json::to_value(tracedecay_contracts::CallableCodeSurfaceMeta::default())
+            .expect("meta");
+        for (operation, body) in [
+            (
+                ApplicationSurfaceOperation::CodeSymbolSearch,
+                serde_json::json!({"query":"item", "scope":scope, "meta":meta, "lazy_index_ignored_dependencies":false}),
+            ),
+            (
+                ApplicationSurfaceOperation::CodeSignatureSearch,
+                serde_json::json!({"returns":"String"}),
+            ),
+            (
+                ApplicationSurfaceOperation::CodeImplementations,
+                serde_json::json!({"selector":{"selector":"trait", "name":"Display"}}),
+            ),
+            (
+                ApplicationSurfaceOperation::CodeTypeHierarchy,
+                serde_json::json!({"node_id":"node.pair"}),
+            ),
+            (
+                ApplicationSurfaceOperation::CodeCallers,
+                serde_json::json!({"node_id":"node.pair"}),
+            ),
+        ] {
+            let crate::application_surface::ApplicationSurfaceRequest::PrimitiveCode(request) =
+                crate::application_surface::parse_application_surface_request(operation, body)
+                    .expect("surface request")
+            else {
+                panic!("code primitive");
+            };
+            let request_copy =
+                serde_json::from_value(serde_json::to_value(&request).expect("code body"))
+                    .expect("typed code body");
+            let primitive = tracedecay_contracts::primitive_code_into_primitive(
+                request_copy,
+                tracedecay_domain::SanitizerRevision::new("sanitizer.pair").expect("sanitizer"),
+                tracedecay_domain::QueryNormalizationRevision::new("normalization.pair")
+                    .expect("normalization"),
+                tracedecay_contracts::PageRequest::first(10).expect("page"),
+            )
+            .expect("primitive conversion");
+            assert_eq!(primitive.surface_operation(), Some(operation));
+            assert!(
+                primitive
+                    .application_operation()
+                    .expect("application operation")
+                    .is_some()
+            );
+            let frame = DaemonInvocationRequest::primitive_code(
+                "request.code-pair",
+                operation,
+                request,
+                tracedecay_contracts::PageRequest::first(10).expect("page"),
+                UtcMicros(1),
+                deadline(),
+                cancellation(),
+            );
+            assert_eq!(frame.validate(), Ok(()));
+            let mut wire = serde_json::to_value(frame).expect("code frame");
+            wire["surface_operation"] = serde_json::json!("storage_status");
+            let foreign: DaemonInvocationRequest =
+                serde_json::from_value(wire).expect("foreign code frame");
+            assert_eq!(
+                foreign.validate(),
+                Err(DaemonInvocationProblem::InvalidRequest)
+            );
+        }
+    }
+
+    #[test]
+    fn raw_only_primitive_bodies_cannot_borrow_an_issued_owner() {
+        let meta = serde_json::json!({"temporal":{"kind":"current"}, "page":{"page_size":10}, "projection":"evidence", "order":"source_position"});
+        let body = serde_json::json!({"file":"src/lib.rs", "mode":"full", "include_symbols":false, "meta":meta});
+        let request: tracedecay_contracts::retrieval::PrimitiveRequest =
+            serde_json::from_value(serde_json::json!({"primitive":"source_read", "request":body}))
+                .expect("raw body");
+        assert_eq!(request.surface_operation(), None);
+        assert!(
+            request
+                .application_operation()
+                .expect("unissued operation")
+                .is_none()
+        );
+        let frame = DaemonInvocationRequest {
+            protocol: super::DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: super::DAEMON_INVOCATION_REVISION,
+            request_id: "request.raw-only".to_owned(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::PrimitiveRead {
+                surface_operation: ApplicationSurfaceOperation::SourceLines,
+                request,
+                resolved_scope: None,
+                observed_at: UtcMicros(1),
+                deadline: deadline(),
+                cancellation: cancellation(),
+            },
+        };
+        let roundtrip: DaemonInvocationRequest =
+            serde_json::from_value(serde_json::to_value(frame).expect("raw frame"))
+                .expect("raw roundtrip");
+        assert_eq!(
+            roundtrip.validate(),
+            Err(DaemonInvocationProblem::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn retired_unissued_grep_ast_and_depth_primitives_are_refused() {
+        let valid = DaemonInvocationRequest::primitive(
+            "request.retired-primitive",
+            ApplicationSurfaceOperation::StorageStatus,
+            tracedecay_contracts::retrieval::PrimitiveRequest::StorageStatus(
+                tracedecay_contracts::retrieval::StorageStatusPrimitiveRequest {
+                    include_details: false,
+                },
+            ),
+            UtcMicros(1),
+            deadline(),
+            cancellation(),
+        )
+        .expect("storage status is an issued primitive");
+        let mut wire = serde_json::to_value(&valid).expect("frame");
+        for primitive in ["lexical_grep", "ast_grep", "dependency_depth"] {
+            wire["request"] = serde_json::json!({
+                "primitive": primitive,
+                "request": {"window": {"limit": 10}}
+            });
+            let line = serde_json::to_string(&wire).expect("line");
+            let parsed =
+                parse_daemon_invocation_request(&line).expect("protocol frame is answered");
+            let Err(response) = parsed else {
+                panic!("{primitive} deserialized as a live primitive");
+            };
+            assert_eq!(
+                response.outcome,
+                DaemonInvocationOutcome::Problem {
+                    problem: DaemonInvocationProblem::InvalidRequest
+                }
+            );
+            assert!(
+                serde_json::from_value::<tracedecay_contracts::retrieval::PrimitiveRequest>(
+                    wire["request"].clone()
+                )
+                .is_err(),
+                "{primitive} must not deserialize as a primitive request"
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_constructor_refuses_foreign_owners_without_panicking() {
+        let request = tracedecay_contracts::retrieval::PrimitiveRequest::StorageStatus(
+            tracedecay_contracts::retrieval::StorageStatusPrimitiveRequest {
+                include_details: true,
+            },
+        );
+        assert!(matches!(
+            DaemonInvocationRequest::primitive(
+                "request.foreign-constructor",
+                ApplicationSurfaceOperation::SourceLines,
+                request,
+                UtcMicros(1),
+                deadline(),
+                cancellation()
+            ),
+            Err(DaemonInvocationProblem::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn deserialized_primitive_body_rejects_a_foreign_operation() {
+        let request = DaemonInvocationRequest::primitive(
+            "request.primitive-wire-identity",
+            ApplicationSurfaceOperation::StorageStatus,
+            tracedecay_contracts::retrieval::PrimitiveRequest::StorageStatus(
+                tracedecay_contracts::retrieval::StorageStatusPrimitiveRequest {
+                    include_details: true,
+                },
+            ),
+            UtcMicros(1),
+            deadline(),
+            cancellation(),
+        )
+        .expect("valid primitive request");
+        assert_eq!(request.validate(), Ok(()));
+        let mut wire = serde_json::to_value(request).expect("serialize primitive frame");
+        wire["surface_operation"] = serde_json::json!("source_lines");
+        let malformed: DaemonInvocationRequest =
+            serde_json::from_value(wire).expect("deserialize structurally valid frame");
+        assert_eq!(
+            malformed.validate(),
+            Err(DaemonInvocationProblem::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn with_resolved_scope_preserves_scope_on_payloads_that_carry_it() {
+        let scope = test_scope("preserve");
+        for (label, request) in [
+            (
+                "observatory",
+                DaemonInvocationRequest::observatory_read(
+                    "request.observatory.scope",
+                    ObservatoryReadRequestV1::default(),
+                    UtcMicros(1),
+                    deadline(),
+                    cancellation(),
+                ),
+            ),
+            (
+                "feedback_get",
+                DaemonInvocationRequest::feedback(
+                    "request.feedback.scope",
+                    ApplicationSurfaceOperation::FeedbackGet,
+                    "feedback.handle.scope".to_owned(),
+                    UtcMicros(1),
+                    deadline(),
+                    cancellation(),
+                ),
+            ),
+        ] {
+            let request = request
+                .with_resolved_scope(Some(scope.clone()))
+                .unwrap_or_else(|_| panic!("{label} must carry resolved_scope"));
+            let carried = match &request.payload {
+                DaemonInvocationPayload::ObservatoryRead {
+                    resolved_scope: Some(carried),
+                    ..
+                }
+                | DaemonInvocationPayload::FeedbackGet {
+                    resolved_scope: Some(carried),
+                    ..
+                } => carried,
+                other => panic!("{label}: expected payload with preserved scope, got {other:?}"),
+            };
+            assert_eq!(
+                carried, &scope,
+                "{label} must preserve the cross-project selector"
+            );
+        }
+    }
+
+    #[test]
+    fn with_resolved_scope_refuses_payloads_that_cannot_carry_it() {
+        let scope = test_scope("refuse");
+        let request = git_status_read(ApplicationSurfaceOperation::GitStatus);
+        assert_eq!(
+            request
+                .with_resolved_scope(Some(scope))
+                .map(|_| ())
+                .expect_err("GitRead cannot carry resolved_scope"),
+            DaemonInvocationProblem::InvalidRequest,
+            "cross-project selectors must not silently alias the active project"
+        );
+    }
+
+    #[test]
+    fn with_resolved_scope_none_is_accepted_for_all_payloads() {
+        let git_read = git_status_read(ApplicationSurfaceOperation::GitStatus);
+        let observatory = DaemonInvocationRequest::observatory_read(
+            "request.observatory.none",
+            ObservatoryReadRequestV1::default(),
+            UtcMicros(1),
+            deadline(),
+            cancellation(),
+        );
+        for (label, request) in [("git_read", git_read), ("observatory", observatory)] {
+            let before = serde_json::to_value(&request).expect(label);
+            let accepted = request.with_resolved_scope(None).unwrap_or_else(|problem| {
+                panic!("{label}: CurrentProject must be accepted, got {problem:?}")
+            });
+            assert_eq!(
+                serde_json::to_value(&accepted).expect(label),
+                before,
+                "{label}: None must leave the invocation frame unchanged"
+            );
+        }
+    }
+}
+
+/// Response envelope paired with one invocation request id.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DaemonInvocationResponse {
+    pub protocol: String,
+    pub revision: u16,
+    pub request_id: String,
+    #[serde(flatten)]
+    pub outcome: DaemonInvocationOutcome,
+}
+
+/// Bounded operation outcomes. LSP payloads remain protocol frames, not an
+/// unrestricted stream or arbitrary daemon-socket response.
+// `WorkApplication` is matched and constructed across two dozen call sites
+// (work_cli, application_surface, service::invocation::work and its tests);
+// boxing it would ripple through all of them for a wire contract type.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DaemonInvocationOutcome {
+    GitRead {
+        scope: ResolvedScope,
+        result: DaemonFeedbackResult,
+    },
+    GitPreview {
+        scope: ResolvedScope,
+        preview: DaemonGitPreviewResult,
+    },
+    GitApply {
+        scope: ResolvedScope,
+        effect: DaemonGitEffectResult,
+    },
+    GitHubStackSignalExpand {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<serde_json::Value>,
+    },
+    NativeIntegration {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<serde_json::Value>,
+    },
+    Feedback {
+        scope: ResolvedScope,
+        result: DaemonFeedbackResult,
+    },
+    Primitive {
+        scope: ResolvedScope,
+        result: DaemonFeedbackResult,
+    },
+    CallableCode {
+        scope: ResolvedScope,
+        result: DaemonFeedbackResult,
+    },
+    Configuration {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<serde_json::Value>,
+    },
+    ContextScout {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<serde_json::Value>,
+    },
+    ObservatoryRead {
+        scope: ResolvedScope,
+        result: DaemonFeedbackResult,
+    },
+    RetainedApplication {
+        scope: ResolvedScope,
+        outcome:
+            ApplicationOutcome<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1>,
+    },
+    RetainedApplicationProblem {
+        scope: ResolvedScope,
+        problem: ApplicationProblem,
+    },
+    MultiRootScopeSetRead {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<Option<AuthorizedScopeSet>>,
+    },
+    MultiRootScopeSetCompareAndSwap {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<MultiRootScopeSetCasResultV1>,
+    },
+    MultiRootQueryPage {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<tracedecay_contracts::MultiRootQueryPageV1<serde_json::Value>>,
+    },
+    WorkApplication {
+        scope: ResolvedScope,
+        outcome: WorkApplicationOutcomeV1,
+    },
+    WorkflowApplication {
+        scope: ResolvedScope,
+        outcome: WorkflowApplicationOutcome,
+    },
+    HandoffApplication {
+        scope: ResolvedScope,
+        outcome: HandoffApplicationOutcomeV1,
+    },
+    ObservationAccepted,
+    ApplicationProblem {
+        problem: ApplicationProblem,
+    },
+    LspOpened {
+        session: DaemonLspSessionAccess,
+        expires_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_set_id: Option<ScopeSetId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_set_digest: Option<ManifestDigest>,
+    },
+    LspFrameAccepted {
+        backpressured: bool,
+        closed: bool,
+    },
+    LspFrame {
+        frame: Option<String>,
+        closed: bool,
+    },
+    LspAcknowledged {
+        acknowledged: bool,
+    },
+    LspReconnected {
+        session: DaemonLspSessionAccess,
+    },
+    LspDetached,
+    SourceEdit {
+        scope: ResolvedScope,
+        result: tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
+    },
+    GraphTool {
+        scope: ResolvedScope,
+        completion: tracedecay_contracts::graph_tool::GraphToolCompletionV1,
+    },
+    Problem {
+        problem: DaemonInvocationProblem,
+    },
+}
+
+impl DaemonInvocationResponse {
+    pub fn lsp_opened(
+        request_id: String,
+        session: DaemonLspSessionAccess,
+        expires_at_ms: u64,
+        scope_set_id: Option<ScopeSetId>,
+        scope_set_digest: Option<ManifestDigest>,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id,
+            outcome: DaemonInvocationOutcome::LspOpened {
+                session,
+                expires_at_ms,
+                scope_set_id,
+                scope_set_digest,
+            },
+        }
+    }
+
+    pub fn with_outcome(request_id: String, outcome: DaemonInvocationOutcome) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id,
+            outcome,
+        }
+    }
+}

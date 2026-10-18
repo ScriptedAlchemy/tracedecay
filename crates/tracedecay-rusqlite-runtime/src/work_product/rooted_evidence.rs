@@ -1,12 +1,12 @@
 //! Exact TaskId-rooted projection from an immutable verified Work graph.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     VerifiedWorkEvidenceRootV1, VerifiedWorkGraphVersionV1, WorkEvidenceRootReadErrorV1,
     WorkEvidenceRootReadPortV1, WorkProductPortContextV1,
 };
-use tracedecay_domain::{TaskId, WorkProductGraphV1, WorkProductRelationV1};
+use tracedecay_domain::{TaskId, WorkProductGraphV1};
 
-use super::{fold_graph, load_covered_journal, verified_version};
+use super::{FromStoreFault, fold_graph, load_covered_journal, verified_version};
 use crate::work::WorkSqliteStorage;
 
 impl WorkEvidenceRootReadPortV1 for WorkSqliteStorage {
@@ -31,7 +31,7 @@ impl WorkEvidenceRootReadPortV1 for WorkSqliteStorage {
         let relations = graph
             .relations()
             .into_iter()
-            .filter(|relation| relation_touches_task(relation, task_id))
+            .filter(|relation| relation.touches_task(task_id))
             .collect();
         let proposal_decisions = graph
             .proposal_decisions()
@@ -69,7 +69,7 @@ fn verified_graph(
     // a version folded across an event outside the selection never existed
     // under it, while a version inside the covered prefix stays readable.
     let covered = load_covered_journal(storage.handle(), scope)
-        .ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
+        .map_err(WorkEvidenceRootReadErrorV1::from_fault)?;
     let (journal, published) = (covered.journal, covered.published);
     let Some(version) = published
         .iter()
@@ -101,26 +101,4 @@ fn verified_graph(
         return Err(WorkEvidenceRootReadErrorV1::Stale);
     }
     Ok((verified, graph))
-}
-
-fn relation_touches_task(relation: &WorkProductRelationV1, task_id: &TaskId) -> bool {
-    match relation {
-        WorkProductRelationV1::MilestoneContainsTask { task_id: task, .. }
-        | WorkProductRelationV1::Evidence { task_id: task, .. }
-        | WorkProductRelationV1::AcceptedAttempt { task_id: task, .. }
-        | WorkProductRelationV1::Handoff { task_id: task, .. }
-        | WorkProductRelationV1::ProposalDecision { task_id: task, .. } => task == task_id,
-        WorkProductRelationV1::Gates {
-            dependency,
-            dependent,
-        } => dependency == task_id || dependent == task_id,
-        WorkProductRelationV1::Informational { source, target } => {
-            source == task_id || target == task_id
-        }
-        WorkProductRelationV1::CausalCandidate { cause, effect } => {
-            cause == task_id || effect == task_id
-        }
-        WorkProductRelationV1::InitiativeContainsPlan { .. }
-        | WorkProductRelationV1::PlanContainsMilestone { .. } => false,
-    }
 }

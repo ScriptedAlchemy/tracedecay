@@ -12,7 +12,7 @@ use tracedecay_store::{
 use super::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1, StoreRuntimeClientLease,
 };
-use crate::store_runtime::registry::{
+use crate::shard_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
     StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
@@ -671,8 +671,14 @@ impl Database {
         locators.insert(profile_key, profile_locator);
         locators.insert(target_key, target_locator);
         let resolver = Arc::new(ExactTestRuntimeResolver { locators });
+        let runtime = crate::native_runtime::handle().ok_or_else(|| TraceDecayError::Config {
+            message: "test database runtime publication requires an Asupersync runtime".to_owned(),
+        })?;
         let registry =
-            StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
+            StoreRuntimeRegistry::new(runtime, resolver, Arc::new(LifecycleShardRuntimePublisher))
+                .map_err(|error| {
+                    test_runtime_error("construct test runtime registry", format!("{error:?}"))
+                })?;
         let profile_authority = if target_is_profile {
             authority.clone()
         } else {
@@ -900,37 +906,7 @@ fn test_runtime_open_failure(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn caller_supplied_profile_identity_controls_registered_fixture_binding() {
-        let root = tempfile::tempdir().expect("registered fixture root");
-        let path = root.path().join("sessions.db");
-        let authority = DatabaseAuthority::acquire_test(&path, "explicit fixture identity")
-            .expect("acquire fixture authority");
-        let identity = TestRuntimeProfileIdentityV1::new(
-            BrainId::new("brain.explicit-fixture").expect("fixture brain identity"),
-            UserProfileId::new("profile.explicit-fixture").expect("fixture profile identity"),
-        );
-
-        let (database, _) = Database::publish_registered_test_runtime_for_profile_identity(
-            &path,
-            &authority,
-            TestDatabaseRuntimeMode::Initialize,
-            identity.clone(),
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .expect("publish explicitly identified fixture");
-
-        assert_eq!(
-            database.registered_binding().shard_id,
-            StoreShardIdV1::profile_sessions(
-                identity.brain_id().clone(),
-                identity.profile_id().clone(),
-            )
-        );
-    }
-
-    #[tokio::test]
+    #[asupersync::test]
     async fn daemon_scoped_registered_fixture_requires_exact_daemon_authority() {
         let root = tempfile::tempdir().expect("daemon-scoped fixture root");
         let _scope = crate::db::enter_daemon_database_scope(

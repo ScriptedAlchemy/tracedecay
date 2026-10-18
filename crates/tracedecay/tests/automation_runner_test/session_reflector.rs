@@ -1,27 +1,54 @@
 use crate::support::*;
+#[cfg(feature = "test-transport")]
+use sha2::{Digest, Sha256};
+use tracedecay_domain::SessionId;
+#[cfg(feature = "test-transport")]
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 #[path = "session_reflector/automatic_fact_receipts.rs"]
 mod automatic_fact_receipts;
 
+struct StructuralBudgetRefusalRetrieval {
+    anchor_session_id: SessionId,
+    stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
+}
+
+impl StructuralBudgetRefusalRetrieval {
+    fn new(stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1) -> Self {
+        Self {
+            anchor_session_id: SessionId::new("session.structural-budget-refusal").unwrap(),
+            stage,
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for StructuralBudgetRefusalRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve(
+        &self,
+        _query: tracedecay_session_memory::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'_> {
+        let stage = self.stage;
+        Box::pin(async move {
+            AutomationTemporalRetrieval::StructuralRefusal(
+                tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                    stage,
+                    accounting: None,
+                },
+            )
+        })
+    }
+}
+
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "test-transport")]
-use tracedecay_automation_runtime::ports::session_evidence::{LcmGrepSort, LcmScope};
+use tracedecay_lcm::{LcmGrepSort, LcmScope};
 #[cfg(feature = "test-transport")]
 use tracedecay_store::{ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery};
-
-#[test]
-fn session_reflector_options_have_no_storage_selector() {
-    let options = serde_json::to_value(SessionReflectorAutomationOptions::default()).unwrap();
-    assert!(options.get("storage_scope").is_none());
-    assert!(options.get("hermes_home").is_none());
-    assert!(
-        serde_json::from_value::<SessionReflectorAutomationOptions>(json!({
-            "storage_scope": "hermes_profile"
-        }))
-        .is_err()
-    );
-}
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
@@ -32,7 +59,7 @@ async fn retained_session_reflector_preserves_retrieval_and_defers_ledger_public
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
     let backend = SessionJsonBackend::new(json!({"facts": []}));
     let retained = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &scheduler_config(Some(3600), None),
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -84,7 +111,7 @@ async fn session_reflector_runner_skips_when_task_is_disabled() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -143,7 +170,7 @@ async fn session_reflector_interrupts_validation_before_near_match_or_apply() {
         ..AutomationConfig::default()
     };
 
-    let error = run_session_reflector_with_backend(
+    let error = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -160,7 +187,7 @@ async fn session_reflector_interrupts_validation_before_near_match_or_apply() {
     interrupted.store(false, Ordering::Release);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     assert!(
@@ -173,11 +200,15 @@ async fn session_reflector_interrupts_validation_before_near_match_or_apply() {
 }
 
 #[tokio::test]
-async fn session_reflector_fails_closed_on_stale_temporal_evidence() {
+async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_ledgers() {
     let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let backend = SessionJsonBackend::new(json!({"facts": []}));
-    let retrieval = RejectedAutomationSessionRetrieval::new("session_evidence_stale");
+    let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
+    let skill_backend = SkillJsonBackend::new(no_skill_needed_output(
+        "Session reflection does not warrant a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -188,53 +219,103 @@ async fn session_reflector_fails_closed_on_stale_temporal_evidence() {
                 schedule: Some("manual".to_string()),
                 ..AutomationTaskConfig::default()
             },
+            skill_writer: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
             ..AutomationTaskSet::default()
         },
         ..AutomationConfig::default()
     };
+    let reflector_retrieval = StructuralBudgetRefusalRetrieval::new(
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+    );
+    let skill_retrieval = StructuralBudgetRefusalRetrieval::new(
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+    );
 
-    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+    let reflector = settle_session_reflector(
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
-        &backend,
-        &retrieval,
+        &reflector_backend,
+        &reflector_retrieval,
         SessionReflectorAutomationOptions::default(),
     )
     .await
     .unwrap();
+    let skill = settle_skill_writer(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &skill_backend,
+        &skill_retrieval,
+        SkillWriterAutomationOptions {
+            profile_root: Some(profile_root.clone()),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(reflector_backend.calls(), 0);
+    assert_eq!(skill_backend.calls(), 0);
+    for (run, report, stage) in [
+        (
+            &reflector.ledger_record,
+            &reflector.report,
+            tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+        ),
+        (
+            &skill.ledger_record,
+            &skill.report,
+            tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+        ),
+    ] {
+        assert_eq!(report["reason"], json!("session_evidence_budget_exhausted"));
+        assert_eq!(
+            run.error.as_deref(),
+            Some("session_evidence_budget_exhausted")
+        );
+        assert_eq!(run.fallback_status, None);
+        assert_eq!(run.session_evidence_budget_stage, Some(stage));
+    }
+    let mut published: Vec<_> = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| (record.run_id, record.session_evidence_budget_stage))
+        .collect();
+    published.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut expected = vec![
+        (
+            reflector.run_id.clone(),
+            reflector.ledger_record.session_evidence_budget_stage,
+        ),
+        (
+            skill.run_id.clone(),
+            skill.ledger_record.session_evidence_budget_stage,
+        ),
+    ];
+    expected.sort_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(
-        run.ledger_record.error.as_deref(),
-        Some("session_evidence_stale")
+        published, expected,
+        "settlement publishes each unpersisted refusal once, keeping its budget stage"
     );
-    assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "rejected evidence must not write a ledger record"
-    );
-    assert!(
-        !cg.store_layout()
-            .dashboard_root
-            .join("automation_outcomes.json")
-            .exists(),
-        "rejected evidence must not refresh fact outcomes"
-    );
+    assert!(!profile_root.exists());
 }
 
 #[tokio::test]
 async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_writes() {
+    // Budget exhaustion is never a bare rejection: retrieval reports it as a
+    // staged structural refusal, covered by the budget-stage test above.
     for reason in [
         "session_evidence_denied",
         "session_evidence_stale",
         "session_evidence_partial",
         "session_evidence_unavailable",
-        "session_evidence_budget_exhausted",
         "session_evidence_cancelled",
     ] {
         let temp = tempdir().unwrap();
@@ -242,7 +323,10 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         let cg = init_project(temp.path()).await;
         let retrieval = RejectedAutomationSessionRetrieval::new(reason);
         let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
-        let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+        let skill_backend = SkillJsonBackend::new(no_skill_needed_output(
+            "Rejected evidence must not produce a managed skill mutation.",
+            "no_action",
+        ));
         let config = AutomationConfig {
             enabled: true,
             backend: AutomationBackend::CodexAppServer,
@@ -263,20 +347,19 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
             ..AutomationConfig::default()
         };
 
-        let reflector =
-            tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-                &cg,
-                &config,
-                &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-                &test_configuration_revision(),
-                &reflector_backend,
-                &retrieval,
-                SessionReflectorAutomationOptions::default(),
-            )
-            .await
-            .unwrap();
-        let skill = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
+        let reflector = settle_session_reflector(
+            &automation_project_context(&cg),
+            &config,
+            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+            &test_configuration_revision(),
+            &reflector_backend,
+            &retrieval,
+            SessionReflectorAutomationOptions::default(),
+        )
+        .await
+        .unwrap();
+        let skill = settle_skill_writer(
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &skill_backend,
@@ -293,12 +376,15 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         assert_eq!(skill.ledger_record.error.as_deref(), Some(reason));
         assert_eq!(reflector_backend.calls(), 0);
         assert_eq!(skill_backend.calls(), 0);
-        assert!(
-            load_run_records(&cg.store_layout().dashboard_root, 10)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 2, "settlement publishes both skip terminals");
+        assert!(records.iter().all(|record| {
+            record.status == AutomationRunStatus::Skipped
+                && record.error.as_deref() == Some(reason)
+                && record.proposed_ops.is_none()
+        }));
         assert!(!profile_root.exists());
     }
 
@@ -307,7 +393,10 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
     let cg = init_project(temp.path()).await;
     let retrieval = EmptyAutomationSessionRetrieval::new();
     let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
-    let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+    let skill_backend = SkillJsonBackend::new(no_skill_needed_output(
+        "No retained evidence supports a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -327,46 +416,47 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         },
         ..AutomationConfig::default()
     };
-    let reflector =
-        tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-            &cg,
-            &config,
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-            &test_configuration_revision(),
-            &reflector_backend,
-            &retrieval,
-            SessionReflectorAutomationOptions::default(),
-        )
-        .await
-        .unwrap();
-    let skill =
-        tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
-            &config,
-            &test_configuration_revision(),
-            &skill_backend,
-            &retrieval,
-            SkillWriterAutomationOptions {
-                profile_root: Some(profile_root.clone()),
-                ..SkillWriterAutomationOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+    let reflector = settle_session_reflector(
+        &automation_project_context(&cg),
+        &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &test_configuration_revision(),
+        &reflector_backend,
+        &retrieval,
+        SessionReflectorAutomationOptions::default(),
+    )
+    .await
+    .unwrap();
+    let skill = settle_skill_writer(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &skill_backend,
+        &retrieval,
+        SkillWriterAutomationOptions {
+            profile_root: Some(profile_root.clone()),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(
         reflector.ledger_record.error.as_deref(),
         Some("no_session_evidence")
     );
     assert_eq!(
         skill.ledger_record.error.as_deref(),
-        Some("no_skill_writer_evidence")
+        Some("no_session_evidence")
     );
-    assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 2, "settlement publishes both skip terminals");
+    assert!(records.iter().all(|record| {
+        record.status == AutomationRunStatus::Skipped
+            && record.error.as_deref() == Some("no_session_evidence")
+            && record.proposed_ops.is_none()
+    }));
     assert!(!profile_root.exists());
 }
 
@@ -378,7 +468,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     seed_session_evidence(&cg).await;
     let seed_memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let seeded = record_session_automatic_facts(
@@ -416,7 +506,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             },
             {
                 "content": "Use the fact-store workflow only when the user explicitly asks to memorize or remember a subject",
-                "category": "tool_guidance",
+                "category": "tool",
                 "tags": ["memory", "workflow"],
                 "entities": ["TraceDecay"],
                 "trust": 0.74,
@@ -515,7 +605,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -583,7 +673,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     ));
     assert!(has_quarantine_reason("reason is required"));
     assert!(has_quarantine_reason(
-        "confidence is not supported; use trust"
+        "fact proposal contains an unsupported field"
     ));
     assert_eq!(
         run.report["accepted_facts"][2]["add_fact_request"]["trust"],
@@ -591,7 +681,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     );
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts: Vec<_> = list_automatic_fact_receipts(
@@ -672,7 +762,11 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     );
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("session_reflector"));
-    assert_eq!(eval_payload["summary"]["eval_count"], json!(11));
+    assert_eq!(
+        eval_payload["summary"]["eval_count"],
+        json!(4),
+        "evals come from applied receipt ids plus the sanitized rejection summary"
+    );
     assert!(
         eval_payload["eval_definitions"]
             .as_array()
@@ -681,12 +775,15 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             .any(
                 |entry| entry["eval_id"] == json!("session_reflector:accepted:0")
                     && entry["harness"]["commands"][0]
-                        == json!("cargo test --test automation_runner_test session_reflector")
+                        == json!(
+                            "bazel test //crates/tracedecay:automation_runner_test --test_arg=session_reflector"
+                        )
+                    && entry["harness"]["status"] == json!("not_run")
             )
     );
     assert_eq!(
-        eval_payload["runner"]["commands"].as_array().unwrap().len(),
-        1
+        eval_payload["independent_evaluation"]["status"],
+        json!("not_run")
     );
     let handoff_payload =
         read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
@@ -696,7 +793,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
         json!("inspect automatically applied fact receipts and canonical fact ids")
     );
     assert_eq!(
-        handoff_payload["eval_replay"]["commands"]
+        handoff_payload["independent_evaluation"]["harness_commands"]
             .as_array()
             .unwrap()
             .len(),
@@ -772,7 +869,7 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -805,7 +902,7 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
 
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -895,7 +992,7 @@ async fn session_reflector_runner_reports_partial_terminal_effects_for_duplicate
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -960,7 +1057,7 @@ async fn session_reflector_records_terminal_quarantine_without_an_admitted_fact(
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -990,7 +1087,7 @@ async fn session_reflector_records_terminal_quarantine_without_an_admitted_fact(
 
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     assert!(
@@ -1013,7 +1110,7 @@ async fn session_automatic_facts_replay_same_run_idempotently() {
     let owner = project_memory_owner(&cg);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         owner,
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -1077,7 +1174,6 @@ async fn session_automatic_facts_replay_same_run_idempotently() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_rejects_unsupported_source_role_and_time_filters_without_writes() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let project_db = project_session_runtime(&cg).await;
@@ -1109,17 +1205,30 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
         },
     )
     .await;
-    let _global_db = isolate_global_db(&cg);
 
     let backend = InspectSessionEvidenceBackend;
-    for (host_mode, query) in [
-        (AutomationHostMode::Standalone, "active project banana"),
-        (AutomationHostMode::DelegatedHost, "project banana evidence"),
-    ] {
-        let config = AutomationConfig {
+    let unsupported_filter_options = SessionReflectorAutomationOptions {
+        trigger: AutomationTrigger::ManualCli,
+        provider: "cursor".to_string(),
+        query: "active project banana".to_string(),
+        scope: LcmScope::Session,
+        session_id: Some("project-reflect-1".to_string()),
+        include_summaries: false,
+        evidence_limit: 5,
+        sort: LcmGrepSort::Relevance,
+        source: Some("project_lcm".to_string()),
+        role: Some("assistant".to_string()),
+        start_time: Some(1_715_100_000),
+        end_time: Some(1_715_100_010),
+        run_id: None,
+        ..SessionReflectorAutomationOptions::default()
+    };
+    let standalone = run_session_reflector(
+        &cg,
+        &AutomationConfig {
             enabled: true,
             backend: AutomationBackend::CodexAppServer,
-            host_mode,
+            host_mode: AutomationHostMode::Standalone,
             tasks: AutomationTaskSet {
                 session_reflector: AutomationTaskConfig {
                     enabled: true,
@@ -1129,44 +1238,87 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
                 ..AutomationTaskSet::default()
             },
             ..AutomationConfig::default()
-        };
+        },
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &backend,
+        unsupported_filter_options.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        standalone.ledger_record.status,
+        AutomationRunStatus::Skipped
+    );
+    assert_eq!(
+        standalone.ledger_record.error.as_deref(),
+        Some("session_evidence_filter_unavailable")
+    );
 
-        let run = run_session_reflector_with_backend(
-            &cg,
-            &config,
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-            &backend,
-            SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::ManualCli,
-                provider: "cursor".to_string(),
-                query: query.to_string(),
-                scope: LcmScope::Session,
-                session_id: Some("project-reflect-1".to_string()),
-                include_summaries: false,
-                evidence_limit: 5,
-                sort: LcmGrepSort::Relevance,
-                source: Some("project_lcm".to_string()),
-                role: Some("assistant".to_string()),
-                start_time: Some(1_715_100_000),
-                end_time: Some(1_715_100_010),
-                run_id: None,
-                ..SessionReflectorAutomationOptions::default()
+    let delegated = run_session_reflector(
+        &cg,
+        &AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            host_mode: AutomationHostMode::DelegatedHost,
+            tasks: AutomationTaskSet {
+                session_reflector: AutomationTaskConfig {
+                    enabled: true,
+                    schedule: Some("manual".to_string()),
+                    ..AutomationTaskConfig::default()
+                },
+                ..AutomationTaskSet::default()
             },
-        )
-        .await
-        .unwrap();
+            ..AutomationConfig::default()
+        },
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &backend,
+        SessionReflectorAutomationOptions {
+            query: "project banana evidence".to_string(),
+            ..unsupported_filter_options
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(delegated.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        delegated.ledger_record.error.as_deref(),
+        Some("delegated_host_mode")
+    );
 
-        assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-        assert_eq!(
-            run.ledger_record.error.as_deref(),
-            Some("session_evidence_filter_unavailable")
-        );
-    }
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
+        project_memory_owner(&cg),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        list_automatic_fact_receipts(&memory, None, 10, run_control.read_control())
             .await
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "filter and host-mode refusals must not write automatic facts"
+    );
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    let mut skip_reasons: Vec<_> = records
+        .iter()
+        .map(|record| record.error.as_deref())
+        .collect();
+    skip_reasons.sort();
+    assert_eq!(
+        skip_reasons,
+        vec![
+            Some("delegated_host_mode"),
+            Some("session_evidence_filter_unavailable")
+        ],
+        "settlement publishes the filter refusal beside the delegated host gate: {records:?}"
+    );
+    assert!(
+        records.iter().all(|record| {
+            record.status == AutomationRunStatus::Skipped && record.proposed_ops.is_none()
+        }),
+        "refusals must not persist an applied run: {records:?}"
     );
 }
 
@@ -1232,8 +1384,8 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
         ..AutomationConfig::default()
     };
 
-    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+    let run = settle_session_reflector(
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -1251,107 +1403,6 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
         run.report["rejected_facts"]
     );
     assert_eq!(run.ledger_record.rejected_count, 0);
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn session_reflector_suppresses_replay_for_filtered_runs() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    let db = project_session_runtime(&cg).await;
-    seed_session_message_in_db(
-        &db,
-        cg.project_root(),
-        SeedSessionMessage {
-            provider: "cursor",
-            session_id: "session-replay-filtered",
-            message_id: "session-replay-filtered-message-001",
-            role: "user",
-            timestamp: 1_715_000_070,
-            text: "Always pass the offline flag to cargo nextest on this machine.",
-            source: None,
-        },
-    )
-    .await;
-    let backend = SessionJsonBackend::new(json!({"facts": []}));
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
-
-    let run = run_session_reflector_with_backend(
-        &cg,
-        &config,
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-        &backend,
-        SessionReflectorAutomationOptions {
-            role: Some("assistant".to_string()),
-            ..SessionReflectorAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(
-        run.ledger_record.error.as_deref(),
-        Some("session_evidence_filter_unavailable")
-    );
-}
-
-#[tokio::test]
-async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    let backend = SessionJsonBackend::new(json!({"facts": []}));
-    let retrieval = EmptyAutomationSessionRetrieval::new();
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
-
-    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
-        &config,
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-        &test_configuration_revision(),
-        &backend,
-        &retrieval,
-        SessionReflectorAutomationOptions {
-            include_recent_sessions: false,
-            ..SessionReflectorAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(
-        run.ledger_record.error.as_deref(),
-        Some("no_session_evidence")
-    );
 }
 
 #[cfg(feature = "test-transport")]
@@ -1389,6 +1440,10 @@ impl AgentTaskBackend for NoSummaryReplayBackend {
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -1449,8 +1504,8 @@ async fn session_reflector_replay_respects_include_summaries_false() {
         "Remember TraceDecay automation should manage durable session reflection facts directly.",
     );
 
-    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+    let run = settle_session_reflector(
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -1491,7 +1546,7 @@ async fn session_reflector_runner_ledgers_malformed_backend_output() {
         ..AutomationConfig::default()
     };
 
-    let err = run_session_reflector_with_backend(
+    let err = run_session_reflector(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -1557,7 +1612,7 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
         ..AutomationConfig::default()
     };
 
-    let err = run_session_reflector_with_backend(
+    let err = run_session_reflector(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -1588,7 +1643,19 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
     assert_eq!(records[0].model.as_deref(), Some("fixture-model"));
     assert!(records[0].evidence_hash.is_some());
     assert!(records[0].input_hash.is_some());
-    assert_eq!(records[0].proposed_ops.as_ref(), Some(&output));
+    let expected_sha256 = encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(serde_json::to_vec(&output).unwrap()),
+    );
+    assert_eq!(
+        records[0].proposed_ops.as_ref(),
+        Some(&json!({
+            "schema_version": 1,
+            "expected_field": "facts",
+            "output_sha256": expected_sha256,
+            "output_kind": "object",
+        }))
+    );
     assert!(records[0].error.as_deref().is_some_and(|error| {
         error.contains("session reflector output must include a facts array")
     }));
@@ -1622,7 +1689,7 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
         ..AutomationConfig::default()
     };
 
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -1640,7 +1707,7 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
     .unwrap();
 
     // The backend failure is transient, but this test pins the noop-fallback
-    // record, not retry semantics (covered by backend.rs retry tests) —
+    // record, not retry semantics (covered by backend.rs retry tests),
     // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     assert_noop_fallback_record(

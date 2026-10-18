@@ -65,7 +65,7 @@ export function SearchField({
       <div
         className={cn(
           // The field is meant to be the largest control on the page and its
-          // input measured 18.6px tall — the shell was 35px (`h-10` at a 14px
+          // input measured 18.6px tall, the shell was 35px (`h-10` at a 14px
           // root) and the input only claimed its own line box inside it. The
           // shell now clears the touch minimum with its two hairlines counted,
           // and the input stretches into it rather than floating in the middle.
@@ -92,7 +92,7 @@ export function SearchField({
           spellCheck={false}
           autoComplete="off"
           className={cn(
-            'min-w-0 flex-1 self-stretch bg-transparent text-sm text-text-primary outline-none',
+            'min-w-0 flex-1 self-stretch bg-transparent text-body text-text-primary outline-none',
             'placeholder:text-text-muted',
           )}
         />
@@ -115,7 +115,7 @@ export function SearchField({
         </span>
       </div>
       {hint ? (
-        <p id={hintId} className="text-2xs leading-relaxed text-text-muted">
+        <p id={hintId} className="text-sm leading-relaxed text-text-muted">
           {hint}
         </p>
       ) : null}

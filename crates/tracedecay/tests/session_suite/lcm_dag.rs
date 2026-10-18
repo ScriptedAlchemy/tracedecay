@@ -1,10 +1,10 @@
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition};
 use tracedecay_lcm::{
-    LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmGrepRequest, LcmGrepSort, LcmScope,
-    LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
+    LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmSessionBoundaryRequest, LcmSourceRef,
+    LcmStorageKind, LcmSummaryNodeDraft,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::common::{lcm_dag_message as raw_message, lcm_dag_session as sample_session};
@@ -47,7 +47,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     ) -> bool {
         self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
-            .unwrap_or(false)
+            .is_ok()
     }
 
     async fn lcm_insert_summary_node(
@@ -90,29 +90,6 @@ async fn summary_table_counts(db: &HostAdmissionTestRuntimeV1) -> (i64, i64) {
         }
     }
     (node_ids.len() as i64, source_count)
-}
-
-async fn summary_fts_count(db: &HostAdmissionTestRuntimeV1, query: &str) -> i64 {
-    db.lcm_grep_for_test(LcmGrepRequest {
-        provider: "all".to_string(),
-        query: query.to_string(),
-        scope: LcmScope::All,
-        session_id: None,
-        include_summaries: true,
-        limit: 100,
-        sort: LcmGrepSort::Relevance,
-        source: None,
-        role: None,
-        start_time: None,
-        end_time: None,
-        git_filter: Default::default(),
-    })
-    .await
-    .expect("summary search")
-    .hits
-    .into_iter()
-    .filter(|hit| hit.kind == "summary_node")
-    .count() as i64
 }
 
 async fn lineage_effect_count(db: &HostAdmissionTestRuntimeV1) -> i64 {
@@ -207,9 +184,6 @@ async fn summary_node_preserves_source_lineage_and_expands_sources() {
     let db = registered_lcm_runtime(&tmp).await;
     let store_ids =
         insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta", "gamma"]).await;
-    let mut first_source = raw_message("cursor", "session-1-message-1", "session-1", 1, "alpha");
-    first_source.timestamp = Some(1_715_000_001_000_000);
-    assert!(db.upsert_session_message(&first_source).await);
 
     let node = db
         .lcm_insert_summary_node(summary_draft(
@@ -516,26 +490,6 @@ async fn summary_insert_rejects_non_decreasing_child_depth_without_persisting_ro
 }
 
 #[tokio::test]
-async fn summary_fts_matches_inserted_summary_text() {
-    let tmp = TempDir::new().unwrap();
-    let db = registered_lcm_runtime(&tmp).await;
-    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha"]).await;
-    db.lcm_insert_summary_node(summary_draft(
-        "cursor",
-        "session-1",
-        0,
-        "unique summary fts phrase",
-        vec![LcmSourceRef::RawMessage {
-            store_id: store_ids[0],
-        }],
-    ))
-    .await
-    .expect("summary node insert should succeed");
-
-    assert_eq!(summary_fts_count(&db, "\"unique summary\"").await, 1);
-}
-
-#[tokio::test]
 async fn summary_node_ids_are_stable_for_identical_drafts() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;
@@ -720,10 +674,18 @@ async fn immutable_publication_preserves_order_and_stales_transitive_descendants
         .expect("successor publication")
         .summary;
 
+    // The superseded leaf is stale in the active generation, so no LCM read
+    // returns it; its successor is the one visible summary over these sources.
+    assert_eq!(
+        db.lcm_expand_summary_node_for_test("cursor", "session-1", &leaf.node_id)
+            .await
+            .expect_err("a stale summary must not expand"),
+        LcmError::SummaryNodeNotFound
+    );
     let expanded_leaf = db
-        .lcm_expand_summary_node_for_test("cursor", "session-1", &leaf.node_id)
+        .lcm_expand_summary_node_for_test("cursor", "session-1", &successor.node_id)
         .await
-        .expect("leaf expansion");
+        .expect("successor expansion");
     assert_eq!(
         expanded_leaf
             .sources
@@ -743,7 +705,7 @@ async fn immutable_publication_preserves_order_and_stales_transitive_descendants
             format!("1:anchor:{}", store_ids[1]),
             format!("2:anchor:{}", store_ids[2]),
         ],
-        "the authoritative manifest and compatibility projection preserve source order"
+        "the canonical lineage preserves source order"
     );
     assert_eq!(
         db.lcm_summary_successor_edges_for_test()
@@ -759,6 +721,58 @@ async fn immutable_publication_preserves_order_and_stales_transitive_descendants
     assert!(active.contains(&(parent.node_id.clone(), "stale".to_string())));
     assert!(active.contains(&(grandparent.node_id.clone(), "stale".to_string())));
     assert!(active.contains(&(successor.node_id.clone(), "available".to_string())));
+
+    // A second successor needs the transitive predecessor closure, while none
+    // of those stale ancestors become current retrieval candidates again.
+    let latest_request = LcmImmutableSummaryPublication {
+        summary_id: "summary.leaf-v3".to_string(),
+        predecessor_summary_id: Some(successor.node_id.clone()),
+        draft: summary_draft(
+            "cursor",
+            "session-1",
+            0,
+            "leaf v3",
+            store_ids
+                .iter()
+                .copied()
+                .map(|store_id| LcmSourceRef::RawMessage { store_id })
+                .collect(),
+        ),
+    };
+    let latest = db
+        .lcm_publish_immutable_summary(latest_request.clone())
+        .await
+        .expect("transitive successor publication");
+    let expected_edges = vec![
+        (leaf.node_id.clone(), successor.node_id.clone()),
+        (successor.node_id.clone(), latest.summary.node_id.clone()),
+    ];
+    assert_eq!(
+        db.lcm_summary_successor_edges_for_test().await.unwrap(),
+        expected_edges
+    );
+    drop(db);
+    let db = registered_lcm_runtime(&tmp).await;
+    let replay = db
+        .lcm_publish_immutable_summary(latest_request)
+        .await
+        .expect("reopened successor replay");
+    assert_eq!(
+        replay.disposition,
+        LcmSummaryPublicationDisposition::ExactReplay
+    );
+    assert_eq!(replay.summary, latest.summary);
+    assert_eq!(
+        db.lcm_summary_successor_edges_for_test().await.unwrap(),
+        expected_edges
+    );
+    let active = db
+        .lcm_active_summary_availability_for_test("session-1")
+        .await
+        .unwrap();
+    assert!(active.contains(&(leaf.node_id, "stale".to_string())));
+    assert!(active.contains(&(successor.node_id, "stale".to_string())));
+    assert!(active.contains(&(latest.summary.node_id, "available".to_string())));
 }
 
 #[tokio::test]

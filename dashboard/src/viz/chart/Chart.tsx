@@ -43,13 +43,27 @@ function themedOption(
   const muted = text;
   const edge = token('--raw-graph-edge', '#333a46');
   const accent = token('--raw-graph-accent', '#7aa2f7');
+  // The series palette, in the order ECharts assigns it. Cyan stays first so
+  // a single-series chart keeps reading as signal; the rest are the design
+  // system's own registers (measured amber, ready green, restricted violet,
+  // informational blue, ink) so a multi-series chart is drawn in tokens the
+  // legend beside it can reproduce. Colour is never the sole encoding: callers
+  // pair each series with a line style, and the legend names it.
+  const palette = [
+    accent,
+    token('--raw-graph-alert', '#e0b25a'),
+    token('--raw-state-ready', '#5fbf8a'),
+    token('--raw-state-locked', '#a58ad6'),
+    token('--raw-sev-info', '#7d9ac9'),
+    text,
+  ];
   // The chart's type has to come from the same token as the rest of the app.
   // This used to name Inter directly, which meant a chart axis silently kept
   // typing in the old face after the design system changed its body face --
   // exactly the drift a token layer exists to prevent.
   const sans = token('--font-sans', 'system-ui, sans-serif');
   return {
-    color: [accent],
+    color: palette,
     // `false`, not a shortened duration: ECharts' entry animation grows bars and
     // sweeps lines from zero toward their real value, which on a chart of
     // measured quantities is a sequence of numbers the daemon never reported.
@@ -61,7 +75,7 @@ function themedOption(
     yAxis: undefined,
     grid: { left: 8, right: 8, top: 24, bottom: 8, containLabel: true },
     tooltip: {
-      // The tooltip floats over the night glass, so it is dark glass too —
+      // The tooltip floats over the night glass, so it is dark glass too,
       // a paper tooltip over the optical window would blow the exposure.
       backgroundColor: token('--raw-graph-substrate', '#0b0d14'),
       borderColor: edge,
@@ -92,13 +106,13 @@ function themedOption(
   };
 }
 
-/** ECharts host — the single quantitative charting library, loaded
+/** ECharts host, the single quantitative charting library, loaded
  * lazily per route. Token-driven: colors resolve from the live theme and
  * re-resolve on theme flips; reduced motion disables animation. The
  * surrounding view must keep an accessible textual equivalent.
  *
  * Lifecycle: the instance is created ONCE. Callers build `option` inline, so
- * its identity changes on every render — keying the mount effect to it threw
+ * its identity changes on every render, keying the mount effect to it threw
  * the canvas away, re-ran the dynamic `import('echarts')`, and re-initialised
  * the chart on every parent update. Applying the option is now its own effect,
  * and a theme flip bumps a revision counter rather than being read through a
@@ -119,10 +133,10 @@ export const Chart = memo(function Chart({
   // The app's own three-state control (system / reduced / full), which persists
   // across visits. This used to read `prefers-reduced-motion` directly, so a
   // reader who pinned "Reduced" on a machine whose OS says otherwise got no
-  // effect here at all — and a reader who pinned "Full" was overridden by the
+  // effect here at all, and a reader who pinned "Full" was overridden by the
   // OS. The media query is one input to that decision, not the decision.
   const { reduced } = useReducedMotion();
-  // Pure over `option`, so its identity is the whole cache key — a caller that
+  // Pure over `option`, so its identity is the whole cache key, a caller that
   // stabilizes the option literal stops re-scanning its series on every render.
   const unsupported = useMemo(() => unsupportedSeries(option), [option]);
 

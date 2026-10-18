@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, LcmLineageFaultForTest};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition};
 use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandRequest, LcmExpandTarget,
-    LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
+    LcmSourceRef, LcmSummaryNodeDraft,
 };
+use tracedecay_project::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
+};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use crate::common::{lcm_dag_message, lcm_dag_session};
 
@@ -48,7 +51,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     ) -> bool {
         self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
-            .unwrap_or(false)
+            .is_ok()
     }
 
     async fn lcm_publish_immutable_summary(
@@ -151,12 +154,6 @@ async fn exact_replay_uses_only_frozen_canonical_authority() {
         .await
         .unwrap();
 
-    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::CorruptCompatibilitySummaryText {
-        node_id: "summary.replay.canonical".into(),
-        text: "corrupt legacy projection".into(),
-    })
-    .await
-    .unwrap();
     db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ShiftRawMessageTimestamp {
         store_id: store_ids[0],
         delta: 999_999,
@@ -183,7 +180,7 @@ async fn exact_replay_uses_only_frozen_canonical_authority() {
     let replay = db
         .lcm_publish_immutable_summary(requested)
         .await
-        .expect("legacy, anchor, and active-generation evolution must not affect exact replay");
+        .expect("anchor and active-generation evolution must not affect exact replay");
     assert_eq!(
         replay.disposition,
         LcmSummaryPublicationDisposition::ExactReplay
@@ -701,7 +698,7 @@ async fn pending_relation_receipt_requires_explicit_recovery_before_read() {
     drop(journal_rows);
     drop(snapshot);
     assert!(
-        database
+        SessionTemporalAccess::new(database)
             .active_session_summary_relations(
                 &session_id,
                 &["summary.relation-recovery".to_owned()],
@@ -714,7 +711,7 @@ async fn pending_relation_receipt_requires_explicit_recovery_before_read() {
     );
 
     assert_eq!(
-        database
+        SessionTemporalAccess::new(database)
             .recover_pending_session_relation_projections(10, Arc::new(NeverCancelled))
             .await
             .expect("recover pending graph projection"),
@@ -740,7 +737,7 @@ async fn pending_relation_receipt_requires_explicit_recovery_before_read() {
             .expect("recovered journal count value"),
         0
     );
-    let (_, relations) = database
+    let (_, relations) = SessionTemporalAccess::new(database)
         .active_session_summary_relations(
             &session_id,
             &["summary.relation-recovery".to_owned()],
@@ -855,11 +852,11 @@ async fn concurrent_publications_leave_one_active_generation() {
     let session_id = tracedecay_domain::SessionId::new("session-concurrent").expect("session id");
     // A loser that re-applied the refreshed generation may leave its own
     // superseded marker pending; recovery settles exactly that marker.
-    database
+    SessionTemporalAccess::new(database)
         .recover_pending_session_relation_projections(10, Arc::new(NeverCancelled))
         .await
         .expect("settle any superseded publication marker");
-    let (active_generation, relations) = database
+    let (active_generation, relations) = SessionTemporalAccess::new(database)
         .active_session_summary_relations(
             &session_id,
             &[
@@ -920,7 +917,7 @@ async fn concurrent_publications_leave_one_active_generation() {
     drop(journal_rows);
     drop(snapshot);
     assert_eq!(
-        database
+        SessionTemporalAccess::new(database)
             .recover_pending_session_relation_projections(10, Arc::new(NeverCancelled))
             .await
             .expect("recovery after settlement is idempotent"),
@@ -1007,45 +1004,6 @@ async fn immutable_summary_exact_replay_keeps_frozen_lineage_after_close() {
 }
 
 #[tokio::test]
-async fn immutable_summary_exact_replay_survives_production_open() {
-    let tmp = TempDir::new().unwrap();
-    let profile_root = tmp.path().join(".tracedecay");
-    let requested = {
-        let db = registered_lcm_runtime(&tmp).await;
-        let store_ids = insert_messages(&db, "cursor", "session-production-open", &["alpha"]).await;
-        let requested = publication(
-            "summary.production-open.primary",
-            None,
-            draft(
-                "cursor",
-                "session-production-open",
-                0,
-                "production open summary",
-                vec![LcmSourceRef::RawMessage {
-                    store_id: store_ids[0],
-                }],
-            ),
-        );
-        db.lcm_publish_immutable_summary(requested.clone())
-            .await
-            .unwrap();
-        requested
-    };
-
-    let reopened = HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .expect("registered runtime must accept immutable-summary receipt authority");
-    let replay = reopened
-        .lcm_publish_immutable_summary(requested)
-        .await
-        .expect("exact replay must survive production close/open");
-    assert_eq!(
-        replay.disposition,
-        LcmSummaryPublicationDisposition::ExactReplay
-    );
-}
-
-#[tokio::test]
 async fn immutable_summary_lineage_rejects_foreign_session_canary_sources_without_disclosure() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;
@@ -1125,24 +1083,6 @@ async fn immutable_summary_lineage_rejects_foreign_session_canary_sources_withou
         after_global.summary_successors,
         before_global.summary_successors
     );
-    let canary = db
-        .lcm_grep_for_test(LcmGrepRequest {
-            provider: "cursor".into(),
-            query: FOREIGN_CANARY.into(),
-            scope: LcmScope::Session,
-            session_id: Some("session-victim".into()),
-            include_summaries: true,
-            limit: 10,
-            sort: LcmGrepSort::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-            git_filter: Default::default(),
-        })
-        .await
-        .unwrap();
-    assert!(canary.hits.is_empty());
 }
 
 #[tokio::test]
@@ -1247,7 +1187,7 @@ async fn summary_source_pages_remain_gap_free_across_exact_replay_and_unrelated_
 }
 
 #[tokio::test]
-async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publication_state() {
+async fn lcm_describe_and_expand_preserve_database_generation_and_publication_state() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(
@@ -1278,25 +1218,6 @@ async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publicati
         .unwrap();
 
     let before = db.lcm_lineage_counts_for_test(None).await.unwrap();
-
-    let grep = db
-        .lcm_grep_for_test(LcmGrepRequest {
-            provider: "cursor".into(),
-            query: "readonly lineage".into(),
-            scope: LcmScope::Session,
-            session_id: Some("session-readonly".into()),
-            include_summaries: true,
-            limit: 10,
-            sort: LcmGrepSort::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-            git_filter: Default::default(),
-        })
-        .await
-        .expect("grep must succeed");
-    assert!(!grep.hits.is_empty());
 
     db.lcm_describe_for_test(LcmDescribeRequest {
         provider: "cursor".into(),

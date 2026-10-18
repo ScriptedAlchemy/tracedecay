@@ -1,6 +1,11 @@
 [build]
 # Keep this portable. On this machine and in CI, `target` is repo-local.
 target-dir = "target"
+# No `rustc-workspace-wrapper` here: Cargo has no per-target form of it, and
+# Windows cannot execute `scripts/macos-rustc-wrapper.sh` (os error 193
+# fails every Cargo command). macOS release builds set
+# `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER` instead; see the apple target
+# comment.
 
 [env]
 # Disable C/C++ assertions in vendored tree-sitter grammars so that grammar
@@ -9,54 +14,119 @@ target-dir = "target"
 # setting; it has no effect on Rust code.
 CFLAGS = { value = "-DNDEBUG", force = false }
 CXXFLAGS = { value = "-DNDEBUG", force = false }
+# MSVC encodes narrow string literals in the host ANSI code page unless told
+# otherwise, so grammar symbol names spelled as universal character names
+# (Lean's `\u00b7`, Haskell's `\u2192`) become invalid or lossy UTF-8 and
+# tree-sitter's `node_kind_for_id` panics on them. cc-rs reads the
+# target-qualified variable instead of the plain one, so it repeats NDEBUG.
+CFLAGS_x86_64_pc_windows_msvc = { value = "-DNDEBUG /utf-8", force = false }
+CXXFLAGS_x86_64_pc_windows_msvc = { value = "-DNDEBUG /utf-8", force = false }
+CFLAGS_aarch64_pc_windows_msvc = { value = "-DNDEBUG /utf-8", force = false }
+CXXFLAGS_aarch64_pc_windows_msvc = { value = "-DNDEBUG /utf-8", force = false }
+# SQLite's sorter merges at most 16 runs, so 15 helpers are the largest
+# effective auxiliary width. Keep the bundled build deterministic across
+# developer and CI hosts instead of accepting SQLite's default ceiling of 8.
+# Memory statistics are off: with them on, every SQLite allocation and free
+# in the process takes one global mutex, which serializes all concurrent
+# connections. Nothing reads those statistics or sets a heap limit.
+LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15 -DSQLITE_DEFAULT_MEMSTATUS=0", force = true }
 
 # Global accounting (savings ledger, worldwide-counter flushes) is ON by
 # default for installed binaries, but `cargo test` / `cargo run` would then
 # write temp-project rows into the developer's real ~/.tracedecay/global.db.
-# Keep cargo-launched processes hermetic; tests that exercise the ledger opt
-# back in with TRACEDECAY_ENABLE_GLOBAL_DB=1.
+# Keep cargo-launched processes hermetic; tests that exercise the ledger
+# remove TRACEDECAY_DISABLE_GLOBAL_DB from the child they launch.
 # Installed binaries run outside cargo and are unaffected.
 TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 
 # Point cargo-launched processes at a workspace-local profile. Without this,
-# any test (or `tracedecay` binary a test spawns) that doesn't set
-# TRACEDECAY_DATA_DIR itself resolves storage to the developer's real
-# ~/.tracedecay, enrolling temp fixture repos into the real profile and
-# contending with a live daemon. Tests that need a private profile override
-# this per-test (`force = false`); the HOME-fallback tests remove the variable
-# in-process. Installed binaries run outside cargo and are unaffected, but the
-# profile does apply to `cargo run` — use the installed binary (or set
-# TRACEDECAY_DATA_DIR yourself) for real `daemon install-service` runs.
+# a test binary or a `tracedecay` binary a test spawns without its own
+# environment resolves storage to the developer's real ~/.tracedecay,
+# enrolling temp fixture repos into the real profile and contending with a
+# live daemon. `force = true` so an ambient export in the developer's shell
+# cannot redirect the whole test run back to the real profile. In-process
+# tests pass their own TempDir `ProfileRoot` explicitly; spawned binaries get
+# theirs through `Command::env`. Installed binaries run outside cargo and are
+# unaffected, but the profile does apply to `cargo run`. Use the installed
+# binary for real `daemon install-service` runs.
 # Enforced by crates/tracedecay-cli/tests/core_cli_suite/test_profile_isolation_test.rs.
-TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false, relative = true }
+TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = true, relative = true }
 
 # Cheaper Linux debuginfo handling, scoped to the gnu triples so Windows
 # (MSVC supports only packed split-debuginfo) and macOS (already defaults to
 # unpacked) keep their platform defaults. `split-debuginfo=unpacked` leaves
 # debuginfo in the object files instead of linking it into every binary; it
 # is linker-agnostic and a no-op for profiles that build without debuginfo.
-# Deliberately no linker flags here: rustc already links
-# x86_64-unknown-linux-gnu with its bundled rust-lld, CI symlinks ld -> mold
-# (see .github/actions/setup-linux-mold; `-fuse-ld=mold` needs GCC >= 12),
-# and driver-only flags such as `-B` would land on the raw linker command
-# line — and fail — for anyone who sets `target.<triple>.linker` or
+# `embed-bitcode=no` skips LLVM bitcode in rlibs for the ordinary dev and
+# `--release` graphs (neither uses LTO). `[profile.dist]` thin LTO still
+# needs bitcode; those invocations pass `-C embed-bitcode=yes`, which
+# rustc resolves last. Deliberately no linker flags here: rustc already
+# links x86_64-unknown-linux-gnu with its bundled rust-lld, and driver-only
+# flags such as `-B` would land on the raw linker command
+# line, and fail, for anyone who sets `target.<triple>.linker` or
 # CARGO_TARGET_<TRIPLE>_LINKER to a linker executable directly. Developers
 # who want mold locally opt in through their own linker config or RUSTFLAGS
 # (a user-set RUSTFLAGS env var replaces these flags entirely).
-# Hotpath lanes that need --cfg tokio_unstable must source
-# scripts/hotpath-rustflags.sh so the env still carries mold and
-# unpacked split-debuginfo.
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "split-debuginfo=unpacked"]
+rustflags = ["-C", "split-debuginfo=unpacked", "-C", "embed-bitcode=no"]
 
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "split-debuginfo=unpacked"]
+rustflags = ["-C", "split-debuginfo=unpacked", "-C", "embed-bitcode=no"]
+
+# Local macOS links of the tracedecay executable go through this wrapper,
+# which ad-hoc signs the product binary as `dev.tracedecay.cli` with
+# designated requirement `identifier "dev.tracedecay.cli"`. The linker
+# default identifier is the hashed deps filename (`tracedecay-<hash>`), and
+# the default ad-hoc requirement is that binary's cdhash, so TCC treats
+# every rebuild as a new app. The wrapper forwards to `cc`, or to
+# `TRACEDECAY_MACOS_LD` when that is set. That signature does not survive
+# release strip: release builds implicitly pass `-C strip=debuginfo`, and
+# rustc's `rust-objcopy` then regenerates the ad-hoc identifier from the
+# deps filename. `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER=<checkout>/scripts/
+# macos-rustc-wrapper.sh` signs the same file again after rustc returns,
+# and that is the file `cargo build` / `cargo install` copies into place.
+# The macOS CI and release jobs export it; set it in your environment or
+# user Cargo config for local macOS release builds. `install.sh` and
+# `tracedecay update` sign the installed file after the archive checksum
+# check. Replacing `CARGO_TARGET_<triple>_LINKER` bypasses these hooks;
+# sign the final binary with `scripts/macos-stable-codesign.sh`. Release
+# jobs do not Apple-sign; a Developer ID signature is left untouched by
+# install and update.
+[target.aarch64-apple-darwin]
+linker = "scripts/macos-sign-linker.sh"
+
+[target.x86_64-apple-darwin]
+linker = "scripts/macos-sign-linker.sh"
 
 [alias]
-# Local default for the full Rust test suite. Requires cargo-nextest:
+# Full Rust test suite. Requires cargo-nextest:
 # https://nexte.st/docs/installation/pre-built-binaries/
-# The perf cargo profile keeps the critical-path kernels (code index, graph,
-# sha2, …) optimized for the generation-scale suites in the full run; see
-# [profile.perf] in the root Cargo.toml.
+# Both aliases build with the perf cargo profile, which keeps the
+# critical-path kernels (code index, graph, sha2, …) optimized for the
+# generation-scale suites; see [profile.perf] in the root Cargo.toml.
+#
+# `test-ci` is the hosted acceptance selection: nextest's `ci` policy
+# (.config/nextest.toml: fail-fast off, one retry that still fails flaky
+# results, 8 threads, slow-timeout termination), the root fixture feature and
+# `search-eval`, which is what compiles the evaluator acceptance suites (the
+# root crate's dependency on the evaluator is optional so the Linux transport
+# partition does not link it; a `--workspace` run resolves the evaluator
+# anyway). `.github/workflows/ci.yml` runs this
+# exact alias, and its support binaries/archives are built with `--profile
+# perf` so they share artifacts with it. Extra flags append: `cargo test-ci
+# --locked -E 'binary(=x)'`.
+test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers,tracedecay/search-eval --cargo-profile perf"
+# Deliberately broader than CI: every optional feature (test-transport
+# acceptance suites, …) under the same cargo profile, with the
+# default nextest policy (no retries).
 test-all = "nextest run --workspace --all-features --no-fail-fast --cargo-profile perf"
-test-ci = "nextest run --workspace --all-features --no-fail-fast --cargo-profile perf"
+
+# `pnpm install` writes the block below and generates the included file from
+# Cargo.lock: the source replacement for the sources it vendors under
+# `.pnpm/crates` (see `cargo` in pnpm-workspace.yaml). Do not edit it by hand;
+# rerun `pnpm install` when Cargo.lock changes.
+# >>> pnpm-managed cargo sources >>>
+[[include]]
+path = "../.pnpm/crates/config.toml"
+optional = true
+# <<< pnpm-managed cargo sources <<<

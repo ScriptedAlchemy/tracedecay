@@ -354,20 +354,11 @@ impl TryFrom<RuntimeBatchCompatibilityWireV1> for RuntimeBatchCompatibilityV1 {
 
 /// Scope of a local transaction selected after batch compatibility is checked.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(try_from = "RuntimeTransactionScopeWireV1")]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeTransactionScopeV1 {
     pub transaction_id: RuntimeTransactionIdV1,
     pub compatibility: RuntimeBatchCompatibilityV1,
     pub opened_at: UtcMicros,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RuntimeTransactionScopeWireV1 {
-    transaction_id: RuntimeTransactionIdV1,
-    compatibility: RuntimeBatchCompatibilityV1,
-    opened_at: UtcMicros,
 }
 
 impl RuntimeTransactionScopeV1 {
@@ -379,22 +370,7 @@ impl RuntimeTransactionScopeV1 {
         &self,
         metadata: &StoreOperationMetadataV1,
     ) -> Result<(), StorageRuntimeContractErrorV1> {
-        self.validate()?;
         self.compatibility.validate_operation(metadata)
-    }
-}
-
-impl TryFrom<RuntimeTransactionScopeWireV1> for RuntimeTransactionScopeV1 {
-    type Error = StorageRuntimeContractErrorV1;
-
-    fn try_from(wire: RuntimeTransactionScopeWireV1) -> Result<Self, Self::Error> {
-        let scope = Self {
-            transaction_id: wire.transaction_id,
-            compatibility: wire.compatibility,
-            opened_at: wire.opened_at,
-        };
-        scope.validate()?;
-        Ok(scope)
     }
 }
 

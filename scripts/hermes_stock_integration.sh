@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # End-to-end proof that `tracedecay install --agent hermes` works against
-# STOCK (upstream NousResearch/hermes-agent) Hermes — not just customized
+# STOCK (upstream NousResearch/hermes-agent) Hermes, not just customized
 # forks. Used by the `hermes-integration` CI job and runnable locally:
 #
 #   git clone https://github.com/NousResearch/hermes-agent.git /tmp/hermes-upstream
 #   git -C /tmp/hermes-upstream checkout <pinned ref>
-#   cargo build -p tracedecay-cli --bin tracedecay
+#   bazel build //crates/tracedecay-cli:tracedecay
 #   scripts/hermes_stock_integration.sh
 #
 # Environment:
-#   TRACEDECAY_BIN        tracedecay binary to install/test (default: target/debug/tracedecay)
+#   TRACEDECAY_BIN        tracedecay binary to install/test (default: bazel-bin/crates/tracedecay-cli/tracedecay)
 #   HERMES_UPSTREAM_DIR  stock hermes-agent checkout (default: /tmp/hermes-upstream)
 #
 # Everything is offline and deterministic: a throwaway user HOME (and its
@@ -38,6 +38,21 @@ run_integration() {
             PYTHONPATH="$HERMES_UPSTREAM_DIR" \
                 "$hermes_python" "$REPO_ROOT/scripts/hermes_stock_check.py"
     )
+
+    echo "== dashboard wrapper loads under the Hermes interpreter"
+    "$hermes_python" -m unittest discover -s "$REPO_ROOT/dashboard/hermes-wrapper" -p 'test_*.py'
+    (
+        cd "$HERMES_UPSTREAM_DIR" &&
+            PYTHONPATH="$HERMES_UPSTREAM_DIR" "$hermes_python" -c '
+import sys
+from pathlib import Path
+import hermes_cli.web_server
+plugin = sys.modules["hermes_dashboard_plugin_tracedecay"]
+loaded = plugin.dashboard_upstream.__code__.co_filename
+assert loaded == str(Path(plugin.__file__).with_name("embed_proxy.py")), loaded
+'
+    )
+    echo "ok - stock Hermes mounts the deployed dashboard api with its embed helpers"
 
     echo "== hermes plugins list"
     plugins_list="$(cd "$HERMES_UPSTREAM_DIR" && COLUMNS=200 \

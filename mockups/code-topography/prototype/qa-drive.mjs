@@ -3,7 +3,7 @@
  *
  * Round two is a claim about feel, so it needs a gate that can fail. This script
  * opens the page in Chromium, performs REAL pointer gestures (synthesised mouse
- * events, not a scripted call into the simulation — the harness can only be
+ * events, not a scripted call into the simulation. The harness can only be
  * asked where a node is, never told to move one), records every frame with the
  * page's own flight recorder, and asserts on the recording:
  *
@@ -14,7 +14,7 @@
  *   · frame-time p95 stayed under one 60 Hz budget
  *
  * The same gestures also produce the keyframe screenshots. Playwright is not a
- * dependency of this folder — it is resolved out of the dashboard's
+ * dependency of this folder. It is resolved out of the dashboard's
  * node_modules, the only place in the repo that has it, and the location comes
  * from an environment variable so no machine-local path is ever committed:
  *
@@ -58,7 +58,7 @@ const GATE = Object.freeze({
   workMsP95Ceiling: 16.7,
   /**
    * Ceiling on the frame INTERVAL. A page holding 60 Hz has an interval of
-   * 16.7 ms by definition, so this can only ever detect dropped frames — 25 ms
+   * 16.7 ms by definition, so this can only ever detect dropped frames, 25 ms
    * is one and a half frames.
    */
   frameIntervalP95Ceiling: 25,
@@ -112,11 +112,11 @@ function startServer() {
   });
 }
 
-/* ---- result collection: report every failure, not just the first -------- */
+/* ---- result collection: report every failure -------------------------------- */
 const results = [];
 function check(label, passed, detail) {
   results.push({ label, passed, detail });
-  console.log(`  ${passed ? 'PASS' : 'FAIL'}  ${label} — ${detail}`);
+  console.log(`  ${passed ? 'PASS' : 'FAIL'}  ${label}, ${detail}`);
 }
 const measurements = {};
 
@@ -190,7 +190,7 @@ async function runGesture(page, { name, nodeId, expectFollow }) {
    * This is not a convenience: dragging a hub across a channel barely changes
    * that channel's length, so the first run of this gate measured `focus`
    * pulling its stiffest neighbour `hctx` (k=204) only 2.5 % while the much
-   * weaker `hsearch` (k=72) came along 11 % — purely because `hsearch` happened
+   * weaker `hsearch` (k=72) came along 11 %, purely because `hsearch` happened
    * to lie along the drag direction. A follow ratio read off an arbitrary
    * direction is a statement about layout geometry, not about coupling. Aiming
    * down the channel makes the reading a measurement of stiffness, and applying
@@ -339,7 +339,7 @@ async function runGesture(page, { name, nodeId, expectFollow }) {
     `[${name}] frame interval p95 shows no dropped frames`,
     take.frameMs.p95 !== null && take.frameMs.p95 < GATE.frameIntervalP95Ceiling,
     `interval p50 ${take.frameMs.p50?.toFixed(2)} ms, p95 ${take.frameMs.p95?.toFixed(2)} ms ` +
-      `(max ${take.frameMs.max?.toFixed(0)} ms — the screenshot pauses this driver itself causes)`,
+      `(max ${take.frameMs.max?.toFixed(0)} ms. The screenshot pauses this driver itself causes)`,
   );
 
   check(
@@ -466,7 +466,7 @@ async function main() {
   const failed = results.filter((result) => !result.passed);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   if (failed.length) {
-    console.error(`FAILED:\n${failed.map((result) => `  ${result.label} — ${result.detail}`).join('\n')}`);
+    console.error(`FAILED:\n${failed.map((result) => `  ${result.label}, ${result.detail}`).join('\n')}`);
     process.exitCode = 1;
   }
 }

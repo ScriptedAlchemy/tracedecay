@@ -85,7 +85,6 @@ pub struct CheckpointBlockers {
 }
 
 impl CheckpointBlockers {
-    #[hotpath::skip]
     pub const fn is_clear(&self) -> bool {
         self.blockers.is_empty() && self.omitted == 0
     }
@@ -96,14 +95,57 @@ impl CheckpointBlockers {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CheckpointBlocker {
-    pub lease_id: SnapshotLeaseIdV1,
-    pub age: Duration,
+pub enum CheckpointBlocker {
+    SnapshotLease {
+        lease_id: SnapshotLeaseIdV1,
+        age: Duration,
+    },
+    PhysicalReader {
+        reader_id: u64,
+        age: Duration,
+    },
+    /// Another process holds the database open while no reader of this
+    /// runtime does, so it is the connection pinning the WAL. `pid` is that
+    /// process and `process` its command name.
+    ForeignConnection {
+        pid: u32,
+        process: String,
+    },
 }
+
+pub(crate) trait CheckpointBlockerSource: Send + Sync {
+    fn checkpoint_blockers(&self) -> CheckpointBlockers;
+
+    /// Completes once snapshots whose owners had already released them when
+    /// this call began have rolled back, so a requested checkpoint never
+    /// reports a reader that no caller still holds as pinning the WAL.
+    fn await_released_snapshots(&self) -> futures_util::future::BoxFuture<'static, ()>;
+
+    /// Ends every snapshot that has been open at least `age`: its worker
+    /// interrupts any running statement and rolls the read back, and the
+    /// snapshot's later reads fail as revoked. Returns how many were asked.
+    fn revoke_snapshots_older_than(&self, _age: Duration) -> usize {
+        0
+    }
+}
+
+/// How long a fenced drain lets in-flight snapshots run before it revokes
+/// them: the background read deadline.
+pub(crate) const FENCE_READ_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How long a fence may stay up. Past it, whatever still pins the WAL is
+/// named in a finding, writes resume, and the checkpoint retries with backoff.
+pub(crate) const FENCE_LIMIT: Duration = Duration::from_secs(6);
+
+/// Retry interval while the fence is up.
+pub(crate) const FENCED_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// First and largest retry interval once the fence has expired.
+pub(crate) const EXPIRED_RETRY_MIN: Duration = Duration::from_secs(1);
+pub(crate) const EXPIRED_RETRY_MAX: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CheckpointMode {
-    Passive,
     Restart,
     Truncate,
 }
@@ -129,7 +171,6 @@ pub(crate) struct CheckpointReport {
 }
 
 impl CheckpointReport {
-    #[hotpath::skip]
     pub(crate) const fn complete(self) -> bool {
         !self.busy && self.checkpointed_frames >= self.log_frames
     }
@@ -142,14 +183,7 @@ pub enum CheckpointInterruption {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MaintenanceCheckpointMode {
-    Restart,
-    Truncate,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CheckpointKind {
-    Passive,
     Restart,
     Truncate,
 }
@@ -157,7 +191,6 @@ pub enum CheckpointKind {
 impl CheckpointKind {
     fn from_internal(mode: CheckpointMode) -> Self {
         match mode {
-            CheckpointMode::Passive => Self::Passive,
             CheckpointMode::Restart => Self::Restart,
             CheckpointMode::Truncate => Self::Truncate,
         }
@@ -304,6 +337,14 @@ pub enum CheckpointPressure {
         wal: CheckpointWal,
         blockers: CheckpointBlockers,
     },
+    /// A hard-pressure drain outlived its fence: `holders` still pin the WAL,
+    /// so the fence dropped and writes run while the checkpoint retries with
+    /// backoff. Past twice the hard limit the writer blocks again
+    /// ([`Self::BlockGeneral`]), so the WAL stays bounded.
+    FenceExpired {
+        wal: CheckpointWal,
+        holders: CheckpointBlockers,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -325,6 +366,7 @@ pub(crate) enum CheckpointDecision {
         report: CheckpointReport,
         snapshot_blockers: CheckpointBlockers,
         hard_drain_required: bool,
+        fence_expired: bool,
         elapsed: Duration,
     },
 }
@@ -333,7 +375,6 @@ pub(crate) enum CheckpointDecision {
 pub(crate) enum CheckpointError<E> {
     InvalidConfig(CheckpointConfigError),
     Driver(E),
-    MaintenanceStillDraining(CheckpointBlockers),
     AuthorityDenied(RuntimeWriteAuthorityStage),
 }
 
@@ -342,11 +383,6 @@ impl<E: fmt::Display> fmt::Display for CheckpointError<E> {
         match self {
             Self::InvalidConfig(error) => write!(formatter, "invalid checkpoint policy: {error}"),
             Self::Driver(error) => write!(formatter, "SQLite checkpoint failed: {error}"),
-            Self::MaintenanceStillDraining(inventory) => write!(
-                formatter,
-                "exclusive checkpoint requested before snapshots drained ({} blockers)",
-                inventory.count()
-            ),
             Self::AuthorityDenied(stage) => {
                 write!(formatter, "runtime write authority denied at {stage:?}")
             }

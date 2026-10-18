@@ -4,8 +4,8 @@
 //! terms plus a central `ExactAdmissionProof`.
 //!
 //! The exact lane is a true independent lane, separate from the fielded
-//! lexical/BM25 lane. An approximate, graph-only, or later semantic candidate
-//! cannot precede an eligible exact result.
+//! lexical/BM25 lane. An approximate or graph-only candidate cannot precede an
+//! eligible exact result.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,16 +14,17 @@ use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, CursorPayloadDigest, EphemeralSanitizedQueryViewV1,
     ExactAdmissionProof, ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1,
     FixedPointScore, RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest,
-    Retriever, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, exact_search_canonical, is_cli_flag_token, is_commit_hash,
-    is_compiler_error_code_token, is_configuration_key_token, is_identifier_token, is_path_shape,
-    is_qualified_name_token, is_runtime_error_code_token, is_tool_name_token,
+    RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    exact_search_canonical, is_cli_flag_token, is_commit_hash, is_compiler_error_code_token,
+    is_configuration_key_token, is_identifier_token, is_path_shape, is_qualified_name_token,
+    is_runtime_error_code_token, is_tool_name_token,
 };
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, ExactTermPostingReadPort, LaneBoundEvidence,
-    LaneEvidenceRejections, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
-    contract_error, lane_bound_evidence, lane_candidate_cap,
+    CodeCandidateBindingV1, ExactTermPostingReadPort, LaneBoundEvidence, LaneEvidenceRejections,
+    RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalExecutionControl, RetrievalPortError,
+    candidate_checkpoint_prefix, checkpoint_digest, contract_error, lane_bound_evidence,
+    lane_candidate_cap, retrieval_checkpoint,
 };
 
 /// Wording the exact lane uses when a port-emitted batch fails the shared
@@ -36,7 +37,6 @@ const EXACT_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
 
 /// Exact technical literals are parsed under a versioned exact-admission
 /// specification before any lane executes.
-#[derive(Debug, PartialEq, Eq)]
 pub struct ExactLaneRequest<'a> {
     pub base: RetrievalRequest,
     pub query_view: &'a EphemeralSanitizedQueryViewV1,
@@ -44,7 +44,12 @@ pub struct ExactLaneRequest<'a> {
     /// Candidate literals with their typed fields, pre-parsed by the central
     /// admission validator. The lane never re-derives exact status.
     pub literals: Vec<ExactLiteralV1>,
+    /// Applied before the candidate cap, so out-of-scope matches cannot
+    /// crowd in-scope ones out of a bounded selection.
+    pub path_prefix: Option<&'a str>,
     pub budget: RetrievalBudget,
+    /// The same live request authority used by the other retrieval lanes.
+    pub control: &'a dyn RetrievalExecutionControl,
 }
 
 impl ExactLaneRequest<'_> {
@@ -100,6 +105,15 @@ pub struct ExactLaneEvidence {
     /// The validated admission proof minted centrally; the lane attaches it,
     /// it never constructs it.
     pub admission_proof: ExactAdmissionProof,
+    /// Source-role evidence for the same-symbol definition/reference order.
+    /// Absent historical evidence deserializes as a non-definition hit.
+    #[serde(default)]
+    pub source_role: tracedecay_domain::RetrievalSourceRoleV1,
+    /// The share of the query's literal specificity (each literal weighs the
+    /// inverse of the rows it matched) that `matched_literals` carry, in
+    /// `[1, 1_000_000]` micros. It is the candidate's exact score: matching
+    /// every literal, or the query's only literal, scores the full million.
+    pub specificity_micros: u64,
 }
 
 impl LaneBoundEvidence for ExactLaneEvidence {
@@ -149,6 +163,11 @@ impl ExactLaneEvidence {
         for literal in &self.matched_literals {
             literal.validate()?;
         }
+        if !(1..=FULL_SPECIFICITY_MICROS).contains(&self.specificity_micros) {
+            return Err(RetrievalPortError::Contract(
+                "exact lane specificity is outside (0, 1] of the query".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -164,17 +183,6 @@ impl ExactLaneEvidence {
         }
         Ok(())
     }
-}
-
-/// The exact-lane retriever contract. Implementations adapt the store-side
-/// `ExactTermPostingReadPort` into `CompactCandidate` values for one frozen
-/// generation.
-pub trait ExactLaneRetriever {
-    /// Retrieve the committed exact-tier candidate prefix for `request`.
-    fn retrieve_exact(
-        &self,
-        request: &ExactLaneRequest<'_>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError>;
 }
 
 /// The sole exact-admission authority surface.
@@ -269,20 +277,14 @@ impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
             ));
             literals.push(literal);
         }
-        for atom in exact_query_atoms(query) {
-            let field = atom
-                .field
-                .or_else(|| classify_unprefixed_exact(atom.text.as_str(), atom.quoted));
-            let Some(field) = field else {
-                continue;
-            };
-            if !exact_field_accepts(field, &atom.text) {
-                continue;
+        let mut push = |field: ExactFieldV1, text: &str| {
+            if !exact_field_accepts(field, text) {
+                return;
             }
-            let (canonical_bytes, _) = canonicalize_exact(field, &atom.text);
+            let (canonical_bytes, _) = canonicalize_exact(field, text);
             let literal = ExactLiteralV1 {
                 field,
-                original_bytes: atom.text.into_bytes(),
+                original_bytes: text.as_bytes().to_vec(),
                 canonical_bytes,
             };
             if seen.insert((
@@ -291,6 +293,30 @@ impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
                 literal.canonical_bytes.clone(),
             )) {
                 literals.push(literal);
+            }
+        };
+        let atoms = exact_query_atoms(query);
+        for atom in &atoms {
+            if let Some(field) = atom
+                .field
+                .or_else(|| classify_unprefixed_exact(atom.text.as_str(), atom.quoted))
+            {
+                push(field, &atom.text);
+            }
+        }
+        // A query of bare words may spell one identifier (`store response
+        // handle`). Each word alone is an exact literal, so without the
+        // joined spelling every symbol named `store` would outrank the
+        // definition the words name. Only the whole query is joined: joining
+        // its sub-runs turns natural-language pairs such as `dirty state`
+        // into exact hits that bury the answer.
+        if atoms.len() > 1
+            && atoms
+                .iter()
+                .all(|atom| atom.field.is_none() && !atom.quoted && is_identifier(&atom.text))
+        {
+            for spelled in spelled_identifiers(&atoms) {
+                push(ExactFieldV1::Identifier, &spelled);
             }
         }
         literals
@@ -376,6 +402,28 @@ fn exact_query_atoms(query: &str) -> Vec<ExactQueryAtom> {
         });
     }
     atoms
+}
+
+/// The snake_case, camelCase, and PascalCase identifiers `words` spell.
+fn spelled_identifiers(words: &[ExactQueryAtom]) -> [String; 3] {
+    let capitalized = |word: &str| {
+        let mut chars = word.chars();
+        chars
+            .next()
+            .map_or_default(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+    };
+    let snake = words
+        .iter()
+        .map(|word| word.text.as_str())
+        .collect::<Vec<_>>()
+        .join("_");
+    let tail = words[1..]
+        .iter()
+        .map(|word| capitalized(&word.text))
+        .collect::<String>();
+    let camel = words[0].text.clone() + &tail;
+    let pascal = capitalized(&words[0].text) + &tail;
+    [snake, camel, pascal]
 }
 
 fn is_contextual_error_text(value: &str) -> bool {
@@ -536,12 +584,13 @@ fn is_known_tool(value: &str) -> bool {
     is_tool_name_token(value)
 }
 
-/// Fixed-point score contributed by one admitted matched literal.
+/// The exact score of a candidate carrying all of the query's literal
+/// specificity.
 ///
 /// The exact tier is non-demotable and its identity is the validated proof.
-/// The lane's raw score is a deterministic count of admitted literals, never a
-/// float or a port-supplied ranking signal.
-const ADMITTED_LITERAL_SCORE_MICROS: u64 = 1_000_000;
+/// The lane's raw score is the evidence's fixed-point specificity share,
+/// never a float.
+const FULL_SPECIFICITY_MICROS: u64 = 1_000_000;
 
 /// The independent exact-literal lane.
 ///
@@ -631,7 +680,10 @@ where
         // every candidate still compares against the verified minted proof.
         let mut verified_proofs: BTreeMap<(ExactFieldV1, Vec<u8>, Vec<u8>), ExactAdmissionProof> =
             BTreeMap::new();
-        for candidate in &batch.candidates {
+        for (ordinal, candidate) in batch.candidates.iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             let evidence = lane_bound_evidence(
                 batch,
                 candidate,
@@ -705,15 +757,16 @@ where
             }
             admitted.push((candidate.clone(), evidence.clone()));
         }
-        // Canonical deterministic order: admitted matched-literal count
+        // Canonical deterministic order: production definitions ahead of
+        // every other source role, then matched-literal specificity
         // (descending), then stable occurrence identity, then the evidence
         // anchor. Port emission order can never select a different prefix.
         admitted.sort_by(|left, right| {
-            right
-                .1
-                .matched_literals
-                .len()
-                .cmp(&left.1.matched_literals.len())
+            left.1
+                .source_role
+                .admission_rank()
+                .cmp(&right.1.source_role.admission_rank())
+                .then_with(|| right.1.specificity_micros.cmp(&left.1.specificity_micros))
                 .then_with(|| {
                     left.0
                         .source_occurrence_id
@@ -742,14 +795,16 @@ where
         let mut candidates = Vec::with_capacity(admitted.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, (mut candidate, evidence)) in admitted.into_iter().enumerate() {
+            if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
             candidate.ordinal_rank = ordinal as u32;
-            candidate.raw_score = FixedPointScore(
-                (evidence.matched_literals.len() as u64)
-                    .saturating_mul(ADMITTED_LITERAL_SCORE_MICROS),
-            );
+            candidate.source_role = evidence.source_role;
+            candidate.raw_score = FixedPointScore(evidence.specificity_micros);
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
+        retrieval_checkpoint(request.control)?;
         let checkpoint_digest = exact_checkpoint_digest(&request.generation, &candidates)?;
         let rebuilt = RetrieverBatch {
             candidates,
@@ -770,19 +825,15 @@ where
         rebuilt.validate().map_err(contract_error)?;
         Ok(rebuilt)
     }
-}
 
-impl<A, P> ExactLaneRetriever for ExactLane<A, P>
-where
-    A: ExactAdmissionAuthority,
-    P: ExactTermPostingReadPort,
-{
-    #[hotpath::measure(label = "query.lane.exact")]
-    fn retrieve_exact(
+    /// Retrieve the committed exact candidate prefix for `request`.
+    #[tracing::instrument(name = "query.lane.exact", level = "trace", skip_all)]
+    pub fn retrieve_exact(
         &self,
         request: &ExactLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
+        retrieval_checkpoint(request.control)?;
         self.enforce_request_literals(request)?;
         let outcome = match self.postings.read_exact_postings(request) {
             Ok(outcome) => outcome,
@@ -805,41 +856,8 @@ where
             },
             outcome => outcome,
         };
-        crate::hotpath_metrics::record_lane(
-            "query.lane.exact.candidates",
-            "query.lane.exact.examined",
-            "query.lane.exact.results",
-            "query.lane.exact.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.exact.residency", &outcome);
         Ok(outcome)
-    }
-}
-
-impl<'a, A, P> Retriever<ExactLaneRequest<'a>, ExactLaneEvidence> for ExactLane<A, P>
-where
-    A: ExactAdmissionAuthority,
-    P: ExactTermPostingReadPort,
-{
-    fn retrieve(
-        &self,
-        request: &ExactLaneRequest<'a>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalError> {
-        self.retrieve_exact(request)
-            .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
-    }
-}
-
-impl<'a, A, P> CompactCandidateLane<ExactLaneRequest<'a>, ExactLaneEvidence> for ExactLane<A, P>
-where
-    A: ExactAdmissionAuthority,
-    P: ExactTermPostingReadPort,
-{
-    fn candidates(
-        &self,
-        request: &ExactLaneRequest<'a>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
-        self.retrieve_exact(request)
     }
 }
 

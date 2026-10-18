@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::code_intelligence::identity::{FileOccurrenceId, SourceSpan, SymbolOccurrenceId};
@@ -19,11 +20,10 @@ crate::canonical_text::validated_string_newtype!(
     DomainError,
     super::validate_label;
     ProximityContributionIdV1 => "proximity contribution id",
-    ProximityWarningIdV1 => "proximity warning id",
     ProximityObservationIdV1 => "proximity observation id",
 );
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityTierV1 {
     /// Exact same-file/range/symbol conflicts emit without a risk threshold.
@@ -32,7 +32,7 @@ pub enum ProximityTierV1 {
     Configured,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityWarningClassV1 {
     SameFile,
@@ -47,7 +47,7 @@ pub enum ProximityWarningClassV1 {
     IncompatibleBranchWorktree,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityRelationPathKindV1 {
     DirectCaller,
@@ -60,14 +60,14 @@ pub enum ProximityRelationPathKindV1 {
     NeighborhoodMembership,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityRelationStrengthV1 {
     Direct,
     Transitive,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityBranchWorktreeIncompatibilityV1 {
     Compatible,
@@ -76,7 +76,7 @@ pub enum ProximityBranchWorktreeIncompatibilityV1 {
     Incompatible,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityCoverageV1 {
     Complete,
@@ -87,7 +87,7 @@ pub enum ProximityCoverageV1 {
     Private,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProximityInclusionV1 {
     Included,
@@ -100,7 +100,7 @@ pub enum ProximityInclusionV1 {
 
 /// A privacy-scoped code address. It identifies the coarse changed-code shape
 /// but carries no other actor, session, or private-source content.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProximityAddressV1 {
     pub scope: FeedbackScopeV1,
@@ -120,7 +120,7 @@ impl ProximityAddressV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProximityRelationPathV1 {
     pub kind: ProximityRelationPathKindV1,
@@ -137,7 +137,7 @@ impl ProximityRelationPathV1 {
 
 /// Explicit threshold inputs. Scores use basis points to preserve equality and
 /// persistence semantics without encoding a local scoring implementation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProximityRiskInputsV1 {
     pub overlap_size: u32,
@@ -165,7 +165,6 @@ impl ProximityRiskInputsV1 {
 #[serde(deny_unknown_fields)]
 pub struct ProximityContributionV1 {
     pub contribution_id: ProximityContributionIdV1,
-    pub warning_id: ProximityWarningIdV1,
     pub warning_class: ProximityWarningClassV1,
     pub source_observation_ids: Vec<ProximityObservationIdV1>,
     pub retrieval_anchor_ids: Vec<RetrievalAnchorId>,
@@ -190,23 +189,8 @@ impl ProximityContributionV1 {
         observed_at.0 >= self.expires_at.0
     }
 
-    /// Records presentation suppression without discarding the evidence,
-    /// threshold provenance, or expiry that produced the duplicate warning.
-    pub fn suppressed_duplicate(mut self) -> Result<Self, DomainError> {
-        self.validate()?;
-        if self.inclusion != ProximityInclusionV1::Included {
-            return Err(DomainError::NonCanonical {
-                field: "proximity duplicate suppression input",
-            });
-        }
-        self.inclusion = ProximityInclusionV1::SuppressedDuplicate;
-        self.validate()?;
-        Ok(self)
-    }
-
     pub fn validate(&self) -> Result<(), DomainError> {
         self.contribution_id.validate()?;
-        self.warning_id.validate()?;
         let immediate_class = matches!(
             self.warning_class,
             ProximityWarningClassV1::SameFile
@@ -412,7 +396,6 @@ mod tests {
     fn concealed_private_contribution() -> ProximityContributionV1 {
         ProximityContributionV1 {
             contribution_id: ProximityContributionIdV1::new("contribution.private").unwrap(),
-            warning_id: ProximityWarningIdV1::new("warning.private").unwrap(),
             warning_class: ProximityWarningClassV1::Neighborhood,
             source_observation_ids: Vec::new(),
             retrieval_anchor_ids: Vec::new(),
@@ -446,7 +429,10 @@ mod tests {
     fn concealed_proximity_requires_matching_coverage() {
         let mut contribution = concealed_private_contribution();
         contribution.inclusion = ProximityInclusionV1::Denied;
-        assert!(contribution.validate().is_err());
+        assert_eq!(
+            contribution.validate().unwrap_err().to_string(),
+            "proximity inclusion coverage is not canonical"
+        );
         contribution.coverage = ProximityCoverageV1::Denied;
         assert!(contribution.validate().is_ok());
     }

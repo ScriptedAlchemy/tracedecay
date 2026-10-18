@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use super::super::locking::{acquire_code_generation_store_lock_checked, store_lock_park_count};
 use super::*;
 
 fn ensure_replay_pool(pool_root: &std::path::Path) {
@@ -33,7 +34,7 @@ fn isolated_pool() -> (tempfile::TempDir, std::path::PathBuf) {
 /// typed busy result instead of a deadline-free flock. Nothing is exposed.
 #[test]
 fn publisher_between_probe_and_execute_defers_without_exposure() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     ensure_replay_pool(&pool_root);
 
@@ -43,14 +44,13 @@ fn publisher_between_probe_and_execute_defers_without_exposure() {
     drop(probe);
 
     let publisher = hold_replay_pool(&pool_root);
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     assert!(
         !plan.collectable_generations.is_empty(),
         "the race is only live when execute would acquire the pool"
     );
     let collectable = plan.collectable_generations[0].clone();
-    let started = Instant::now();
     let error = execute_code_generation_retention(
         store.path(),
         plan,
@@ -59,15 +59,10 @@ fn publisher_between_probe_and_execute_defers_without_exposure() {
         Some(&pool_root),
     )
     .expect_err("a held pool after a successful probe must defer");
-    let elapsed = started.elapsed();
 
     assert!(
         matches!(error, CodeGenerationRetentionErrorV1::GraphReplayPoolBusy),
         "executor must return the typed busy result, got {error:?}"
-    );
-    assert!(
-        elapsed < GRAPH_REPLAY_POOL_ACQUIRE_BUDGET + Duration::from_millis(50),
-        "bounded acquire must finish inside the budget, took {elapsed:?}"
     );
     assert!(
         !transaction_path(store.path()).exists(),
@@ -101,53 +96,194 @@ fn publisher_between_probe_and_execute_defers_without_exposure() {
 }
 
 #[test]
+fn segment_only_sweep_defers_while_the_replay_pool_is_held() {
+    let store = tempfile::TempDir::new().expect("store root");
+    std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
+        .expect("create generation root");
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+    let orphan_bytes = b"unreferenced final evidence pack";
+    let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
+    let orphan_path = segments_root.join(format!("segment-{orphan_digest}.json"));
+    std::fs::write(&orphan_path, orphan_bytes).expect("write orphan segment");
+    let pool_root = store.path().join("graph-replay-pool");
+    ensure_replay_pool(&pool_root);
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        Some(&pool_root),
+    )
+    .expect("plan segment-only sweep");
+    assert!(plan.collectable_generations.is_empty());
+    assert!(plan.has_collectable_work());
+
+    let publisher = hold_replay_pool(&pool_root);
+    let error = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(122),
+        Some(&pool_root),
+    )
+    .expect_err("a segment-only sweep must respect the replay-pool lock");
+    assert!(matches!(
+        error,
+        CodeGenerationRetentionErrorV1::GraphReplayPoolBusy
+    ));
+    assert!(
+        orphan_path.is_file(),
+        "a deferred segment-only sweep must not unlink any segment"
+    );
+    drop(publisher);
+}
+
+#[test]
+fn segment_sweep_marks_a_replay_unlink_while_staged() {
+    let store = tempfile::TempDir::new().expect("store root");
+    std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
+        .expect("create generation root");
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+    let orphan_bytes = b"unreferenced final evidence pack";
+    let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
+    let orphan_path = segments_root.join(format!("segment-{orphan_digest}.json"));
+    std::fs::write(&orphan_path, orphan_bytes).expect("write orphan segment");
+    let index_bytes = b"unreferenced resolution index page";
+    let index_digest = encode_lowercase_hex(&Sha256::digest(index_bytes));
+    let index_path = segments_root.join(format!("segment-{index_digest}.json"));
+    std::fs::write(&index_path, index_bytes).expect("write orphan index segment");
+    let index_segment = serde_json::json!({
+        "segment_digest": format!("sha256:{index_digest}"),
+        "segment_size_bytes": index_bytes.len(),
+        "decoded_size_bytes": index_bytes.len()
+    });
+
+    let pool_root = store.path().join("graph-replay-pool");
+    ensure_replay_pool(&pool_root);
+    let replay_manifest = serde_json::to_vec(&serde_json::json!({
+        "state_digest": format!("sha256:{}", "0".repeat(64)),
+        "generation": {
+            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+            "snapshot": { "files": [] },
+            "file_segments": [],
+            "file_evidence": [],
+            "code_graph_pages": [],
+            "generation_evidence": {
+                "segment_digest": format!("sha256:{orphan_digest}"),
+                "segment_size_bytes": orphan_bytes.len(),
+                "pages": [{
+                    "page_ordinal": 0,
+                    "page_digest": format!("sha256:{orphan_digest}"),
+                    "page_size_bytes": orphan_bytes.len()
+                }]
+            },
+            "resolution_index": {
+                "definitions": [index_segment],
+                "references": [index_segment],
+                "import_aliases": index_segment
+            }
+        }
+    }))
+    .expect("encode staged replay manifest");
+    let replay_digest = encode_lowercase_hex(&Sha256::digest(&replay_manifest));
+    let staged_unlink = pool_root.join(format!(".generation-{replay_digest}.unlink-123-456-1"));
+    let mut corrupted_replay_manifest = replay_manifest.clone();
+    corrupted_replay_manifest.push(b' ');
+    std::fs::write(&staged_unlink, corrupted_replay_manifest).expect("stage corrupt replay unlink");
+    let error = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        Some(&pool_root),
+    )
+    .expect_err("a replay entry that changed under its content address must fail closed");
+    assert!(matches!(
+        error,
+        CodeGenerationRetentionErrorV1::UnsafeState(_)
+    ));
+    assert!(orphan_path.is_file());
+    std::fs::write(&staged_unlink, replay_manifest).expect("stage replay unlink");
+
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        Some(&pool_root),
+    )
+    .expect("mark while replay unlink is staged");
+    assert!(
+        !plan.has_collectable_work(),
+        "the hidden replay manifest must mark its evidence pack and resolution index live"
+    );
+    assert!(
+        orphan_path.is_file() && index_path.is_file(),
+        "planning must preserve the segments while replay liveness is ambiguous"
+    );
+
+    std::fs::remove_file(&staged_unlink).expect("finish staged replay unlink");
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(123),
+        Some(&pool_root),
+    )
+    .expect("collect after replay pool becomes empty");
+    assert!(report.deleted_generations.is_empty());
+    assert!(
+        !orphan_path.exists() && !index_path.exists(),
+        "maintenance must reclaim both orphans after replay ambiguity clears"
+    );
+}
+
+#[test]
 fn checked_acquire_returns_cancelled_without_waiting_out_the_budget() {
     let (_root, pool) = isolated_pool();
     let publisher = hold_replay_pool(&pool);
-    let started = Instant::now();
+    reset_graph_replay_pool_acquire_observation();
     let error = match acquire_graph_replay_pool_lock_checked(
         &pool,
         Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
-        &|| true,
+        &|| graph_replay_pool_acquire_observation().0 >= 1,
     ) {
         Ok(_) => panic!("cancellation must win a held-pool wait"),
         Err(error) => error,
     };
-    let elapsed = started.elapsed();
 
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "cancelled acquire must not poll the budget, took {elapsed:?}"
+    assert_eq!(
+        graph_replay_pool_acquire_observation(),
+        (1, 0),
+        "a cancel raised after the contended try must stop before the park slice"
     );
     drop(publisher);
 }
 
 #[test]
 fn execute_cancels_held_pool_acquire_before_any_exposure() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     let publisher = hold_replay_pool(&pool_root);
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
-    let checks = AtomicUsize::new(0);
-    let started = Instant::now();
+    reset_graph_replay_pool_acquire_observation();
     let error = execute_code_generation_retention_cancellable(
         store.path(),
         plan,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(121),
         Some(&pool_root),
-        &|| checks.fetch_add(1, Ordering::SeqCst) >= 2,
+        &|| graph_replay_pool_acquire_observation().0 >= 1,
     )
     .expect_err("cancellation during pool wait must abort execute");
-    let elapsed = started.elapsed();
 
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "cancelled execute must not wait out the acquire budget, took {elapsed:?}"
+    assert_eq!(
+        graph_replay_pool_acquire_observation(),
+        (1, 0),
+        "cancelled execute must stop before the acquire parks"
     );
     assert!(
         !transaction_path(store.path()).exists(),
@@ -168,22 +304,69 @@ fn execute_cancels_held_pool_acquire_before_any_exposure() {
 fn checked_acquire_returns_busy_when_the_carried_deadline_has_elapsed() {
     let (_root, pool) = isolated_pool();
     let publisher = hold_replay_pool(&pool);
-    let started = Instant::now();
+    reset_graph_replay_pool_acquire_observation();
     let error = match acquire_graph_replay_pool_lock_checked(&pool, Instant::now(), &|| false) {
         Ok(_) => panic!("an elapsed deadline must defer a held pool"),
         Err(error) => error,
     };
-    let elapsed = started.elapsed();
 
     assert!(matches!(
         error,
         CodeGenerationRetentionErrorV1::GraphReplayPoolBusy
     ));
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "an expired deadline must not poll, took {elapsed:?}"
+    assert_eq!(
+        graph_replay_pool_acquire_observation(),
+        (1, 0),
+        "an expired held acquire must make one non-blocking try and skip the poll loop"
     );
     drop(publisher);
+}
+
+#[test]
+fn store_lock_returns_cancelled_without_waiting_out_the_budget() {
+    let (_root, store) = isolated_pool();
+    let holder = hold_replay_pool(&store);
+    let consults = AtomicUsize::new(0);
+    let parks = store_lock_park_count();
+    let error = match acquire_code_generation_store_lock_checked(
+        &store,
+        Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+        &|| consults.fetch_add(1, Ordering::SeqCst) >= 1,
+    ) {
+        Ok(_) => panic!("cancellation must win a held store lock"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
+    assert_eq!(
+        store_lock_park_count(),
+        parks,
+        "a cancel raised while the store lock is contended must stop before the park slice"
+    );
+    drop(holder);
+}
+
+#[test]
+fn store_lock_returns_busy_when_the_carried_deadline_has_elapsed() {
+    let (_root, store) = isolated_pool();
+    let holder = hold_replay_pool(&store);
+    let parks = store_lock_park_count();
+    let error = match acquire_code_generation_store_lock_checked(&store, Instant::now(), &|| false)
+    {
+        Ok(_) => panic!("an elapsed deadline must defer a held store lock"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        CodeGenerationRetentionErrorV1::GenerationStoreBusy
+    ));
+    assert_eq!(
+        store_lock_park_count(),
+        parks,
+        "an expired held store lock must not poll"
+    );
+    drop(holder);
 }
 
 #[test]

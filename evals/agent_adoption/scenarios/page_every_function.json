@@ -1,0 +1,77 @@
+{
+  "id": "page_every_function",
+  "category": "code_exploration",
+  "pack": "pack_repeated_query",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "List every function and method defined in this crate, each with the file that defines it. The list must be complete.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_source_outline",
+      "tracedecay_files",
+      "tracedecay_search",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_grep",
+      "tracedecay_module_api",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states raw_total_len",
+          "pattern": "\\braw_total_len\\b"
+        },
+        {
+          "id": "states apply_discount",
+          "pattern": "\\bapply_discount\\b"
+        },
+        {
+          "id": "states check_availability",
+          "pattern": "\\bcheck_availability\\b"
+        },
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        },
+        {
+          "id": "states compute_total",
+          "pattern": "\\bcompute_total\\b"
+        },
+        {
+          "id": "states compute_grand_total",
+          "pattern": "\\bcompute_grand_total\\b"
+        }
+      ]
+    }
+  },
+  "max_tool_calls": 8,
+  "repeated_query_class": "pagination",
+  "notes": "Exhaustive enumeration: per-file outlines and paged listings repeat one question over different files or pages. A hint here is a false-positive opportunity."
+}

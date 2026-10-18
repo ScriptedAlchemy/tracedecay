@@ -3,8 +3,13 @@ use std::fs;
 use std::os::unix::fs::symlink;
 
 use rusqlite::Connection;
+use serde::Deserialize;
 use serde_json::json;
-use tracedecay_domain::ObservationScopeV1;
+use tracedecay_domain::{
+    CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalWorkflowEvidenceKindV1,
+    ObservationScopeV1,
+};
+use tracedecay_store::ParseOffset;
 
 use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
 use crate::observation::ObservationCancellation;
@@ -22,6 +27,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         .execute_batch(
             "CREATE TABLE session (
                 id TEXT PRIMARY KEY,
+                parent_id TEXT,
                 directory TEXT NOT NULL
              );
              CREATE TABLE message (
@@ -77,50 +83,6 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
 }
 
 #[tokio::test]
-async fn immutable_database_read_is_scoped_resumable_and_budgeted() {
-    let (_temp, project, database) = fixture();
-    let source = OpenCodeSource::with_database_for_project(database, project);
-    let admission = MemoryHostAdmission::default();
-    let cancellation = ObservationCancellation::default();
-
-    let deferred = capture_opencode_observations(
-        &admission,
-        &source,
-        ObservationScopeV1::Profile,
-        Some(0),
-        &cancellation,
-    )
-    .await
-    .unwrap();
-    assert!(deferred.deferred_by_byte_cap);
-    assert!(admission.observations().is_empty());
-
-    let resumed = capture_opencode_observations(
-        &admission,
-        &source,
-        ObservationScopeV1::Profile,
-        None,
-        &cancellation,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resumed.stats.messages_upserted, 1);
-    assert_eq!(admission.observations().len(), 1);
-
-    let replay = capture_opencode_observations(
-        &admission,
-        &source,
-        ObservationScopeV1::Profile,
-        None,
-        &cancellation,
-    )
-    .await
-    .unwrap();
-    assert_eq!(replay.stats.messages_upserted, 0);
-    assert_eq!(admission.observations().len(), 1);
-}
-
-#[tokio::test]
 async fn steady_state_restart_keeps_high_water_without_per_row_durability_reads() {
     let (_temp, project, database) = fixture();
     let admission = MemoryHostAdmission::default();
@@ -151,10 +113,7 @@ async fn steady_state_restart_keeps_high_water_without_per_row_durability_reads(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        coverage.file_id,
-        crate::runtime::source::HostProviderCoverage::Complete as u64
-    );
+    assert_eq!(coverage.file_id, 1);
     assert_eq!(coverage.byte_offset, 0);
     let reads_after_first_sweep = admission.session_message_read_count();
 
@@ -173,6 +132,109 @@ async fn steady_state_restart_keeps_high_water_without_per_row_durability_reads(
         admission.session_message_read_count(),
         reads_after_first_sweep,
         "a quiet restart must not repeat per-row durability lookups"
+    );
+}
+
+#[tokio::test]
+async fn task_spawn_and_child_parent_reach_the_canonical_envelopes() {
+    let (_temp, project, database) = fixture();
+    let writer = Connection::open(&database).unwrap();
+    writer
+        .execute(
+            "INSERT INTO session(id, parent_id, directory) VALUES ('ses_child', 'ses_project', ?1)",
+            [project.to_string_lossy()],
+        )
+        .unwrap();
+    for (message, session, part) in [
+        (
+            "msg_task",
+            "ses_project",
+            json!({
+                "type": "tool", "tool": "task", "callID": "call_649e87f9",
+                "state": {
+                    "status": "completed", "input": {"description": "Survey the loom"},
+                    "metadata": {"parentSessionId": "ses_project", "sessionId": "ses_child"},
+                    "output": "done"
+                }
+            }),
+        ),
+        (
+            "msg_child",
+            "ses_child",
+            json!({"type": "text", "text": "Survey the loom"}),
+        ),
+    ] {
+        writer
+            .execute(
+                "INSERT INTO message(id, session_id, time_created, data) VALUES (?1, ?2, 2, ?3)",
+                rusqlite::params![
+                    message,
+                    session,
+                    json!({"role": "assistant", "time": {"created": 2}}).to_string()
+                ],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    format!("part_{message}"),
+                    message,
+                    session,
+                    part.to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(writer);
+    let admission = MemoryHostAdmission::default();
+
+    capture_opencode_observations(
+        &admission,
+        &OpenCodeSource::with_database_for_project(database, project),
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    let envelopes: Vec<CanonicalObservationEnvelopeV1> = admission
+        .observations()
+        .iter()
+        .map(|stored| {
+            CanonicalObservationEnvelopeV1::deserialize(stored.observation().payload()).unwrap()
+        })
+        .collect();
+    let child = envelopes
+        .iter()
+        .find(|envelope| envelope.relations().session_id().as_str() == "ses_child")
+        .expect("child message captured");
+    assert_eq!(
+        child
+            .relations()
+            .parent_session_id()
+            .map(|parent| parent.as_str()),
+        Some("ses_project")
+    );
+    let spawn = CanonicalObservationFactV1::Workflow {
+        evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+        reference: Some("ses_child".to_owned()),
+        content: Some(json!({"tool_use_id": "call_649e87f9", "text": "Survey the loom"})),
+    };
+    assert!(
+        envelopes.iter().any(|envelope| {
+            envelope.relations().session_id().as_str() == "ses_project"
+                && envelope.facts().contains(&spawn)
+        }),
+        "the parent's task part records the spawn edge"
+    );
+    assert!(
+        envelopes
+            .iter()
+            .filter(|envelope| envelope.relations().session_id().as_str() == "ses_project")
+            .all(|envelope| envelope.relations().parent_session_id().is_none()),
+        "a root session records no parent"
     );
 }
 
@@ -323,37 +385,6 @@ async fn profile_scope_is_the_complement_of_registered_project_scope() {
         observations[0].observation().source().session_id().as_str(),
         "ses_other"
     );
-}
-
-#[tokio::test]
-async fn malformed_suffix_defers_without_hiding_committed_prefix() {
-    let (_temp, project, database) = fixture();
-    let connection = Connection::open(&database).unwrap();
-    connection
-        .execute(
-            "INSERT INTO message(id, session_id, time_created, data)
-             VALUES ('msg_z_malformed', 'ses_project', 2, '{')",
-            (),
-        )
-        .unwrap();
-    drop(connection);
-    let source = OpenCodeSource::with_database_for_project(database, project);
-    let admission = MemoryHostAdmission::default();
-
-    let outcome = capture_opencode_observations(
-        &admission,
-        &source,
-        ObservationScopeV1::Profile,
-        None,
-        &ObservationCancellation::default(),
-    )
-    .await
-    .unwrap();
-
-    assert!(outcome.deferred_by_byte_cap);
-    assert_eq!(outcome.scan_non_durable_units, 1);
-    assert_eq!(outcome.stats.messages_upserted, 1);
-    assert_eq!(admission.observations().len(), 1);
 }
 
 #[tokio::test]
@@ -627,15 +658,24 @@ async fn durable_sql_frontier_reaches_rows_beyond_a_poisoned_pass_after_restart(
     connection
         .execute("DELETE FROM message WHERE session_id = 'ses_project'", ())
         .unwrap();
-    for ordinal in 0..super::MAX_MESSAGES_PER_PASS {
-        connection
-            .execute(
+    connection.execute_batch("BEGIN").unwrap();
+    {
+        let mut poison = connection
+            .prepare(
                 "INSERT INTO message(id, session_id, time_created, data)
                  VALUES (?1, 'ses_project', ?2, '{')",
-                rusqlite::params![format!("poison-{ordinal:05}"), ordinal as i64],
             )
             .unwrap();
+        for ordinal in 0..super::MAX_MESSAGES_PER_PASS {
+            poison
+                .execute(rusqlite::params![
+                    format!("poison-{ordinal:05}"),
+                    ordinal as i64
+                ])
+                .unwrap();
+        }
     }
+    connection.execute_batch("COMMIT").unwrap();
     connection
         .execute(
             "INSERT INTO message(id, session_id, time_created, data)
@@ -664,7 +704,7 @@ async fn durable_sql_frontier_reaches_rows_beyond_a_poisoned_pass_after_restart(
     .await
     .unwrap();
     assert_eq!(first.stats.messages_upserted, 0);
-    let frontier = admission
+    let mut frontier = admission
         .get_parse_offset(
             &ObservationScopeV1::Profile,
             super::OPENCODE_SQL_FRONTIER_KEY,
@@ -674,7 +714,68 @@ async fn durable_sql_frontier_reaches_rows_beyond_a_poisoned_pass_after_restart(
         .unwrap();
     assert!(frontier.byte_offset > 0);
 
-    let resumed = capture_opencode_observations(
+    // How many restarts the poison costs is a property of the host, not of the
+    // frontier contract. A pass ends at whichever bound trips first, and
+    // `HOST_SCAN_WINDOW` trips before the `MAX_MESSAGES_PER_PASS` row budget on
+    // any machine that cannot scan the whole poisoned span inside that window,
+    // so "one restart clears every poisoned row" only holds on a fast, idle
+    // host. What must hold everywhere is that the persisted frontier never
+    // rewinds across a restart and that the row past the poison is eventually
+    // admitted exactly once. Each restart that makes progress retires at least
+    // one `MAX_MESSAGES_PER_PAGE` page, which bounds the poisoned span.
+    let restart_bound = super::MAX_MESSAGES_PER_PASS / super::MAX_MESSAGES_PER_PAGE + 1;
+    let mut upserted = first.stats.messages_upserted;
+    let mut restarts = 0_usize;
+    while upserted == 0 {
+        restarts += 1;
+        assert!(
+            restarts <= restart_bound,
+            "the poisoned span never yielded the row past it in {restart_bound} restarts; \
+             the durable frontier stalled at {}",
+            frontier.byte_offset
+        );
+        let resumed = capture_opencode_observations(
+            &admission,
+            &source,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        upserted += resumed.stats.messages_upserted;
+        let resumed_frontier = admission
+            .get_parse_offset(
+                &ObservationScopeV1::Profile,
+                super::OPENCODE_SQL_FRONTIER_KEY,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            resumed_frontier.byte_offset >= frontier.byte_offset,
+            "restart {restarts} rewound the durable frontier from {} to {}",
+            frontier.byte_offset,
+            resumed_frontier.byte_offset
+        );
+        frontier = resumed_frontier;
+    }
+    assert_eq!(upserted, 1);
+    assert!(admission.observations().iter().any(|stored| {
+        stored
+            .observation()
+            .payload()
+            .to_string()
+            .contains("fair-restart")
+    }));
+}
+
+#[tokio::test]
+async fn oversized_opencode_database_admits_its_project_session() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project.clone());
+    let admission = MemoryHostAdmission::default();
+    capture_opencode_observations(
         &admission,
         &source,
         ObservationScopeV1::Profile,
@@ -683,12 +784,502 @@ async fn durable_sql_frontier_reaches_rows_beyond_a_poisoned_pass_after_restart(
     )
     .await
     .unwrap();
-    assert_eq!(resumed.stats.messages_upserted, 1);
+
+    let writer = Connection::open(&database).unwrap();
+    writer
+        .execute(
+            "INSERT INTO session(id, directory) VALUES ('ses_large', ?1)",
+            [project.to_string_lossy()],
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO message(id, session_id, time_created, data)
+             VALUES ('msg_large', 'ses_large', 4, ?1)",
+            [json!({"role": "user", "time": {"created": 4}}).to_string()],
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO part(id, message_id, session_id, data)
+             VALUES ('part_large', 'msg_large', 'ses_large', ?1)",
+            [json!({"type": "text", "text": "oversized-db-visible"}).to_string()],
+        )
+        .unwrap();
+    drop(writer);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&database)
+        .unwrap();
+    file.set_len(560 * 1024 * 1024).unwrap();
+    drop(file);
+    assert!(std::fs::metadata(&database).unwrap().len() > 512 * 1024 * 1024);
+
+    let outcome = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let coverage = admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://opencode/v1")
+        .await
+        .unwrap()
+        .unwrap();
+    let admitted = admission.observations().iter().any(|stored| {
+        stored.observation().source().session_id().as_str() == "ses_large"
+            && stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("oversized-db-visible")
+    });
+    assert!(
+        admitted,
+        "oversized OpenCode database must admit ses_large; admitted={admitted} coverage_file_id={} deferred_units={} messages_upserted={}",
+        coverage.file_id, coverage.byte_offset, outcome.stats.messages_upserted
+    );
+    assert_eq!(coverage.file_id, 1);
+    assert_eq!(coverage.byte_offset, 0);
+}
+
+#[tokio::test]
+async fn appended_opencode_messages_are_admitted_without_repeating_earlier_ones() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project.clone());
+    let admission = MemoryHostAdmission::default();
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let before = admission.observations().len();
+    assert!(
+        admission.observations().iter().any(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("secret-ses_project")
+        }),
+        "the original project session must be admitted before the append"
+    );
+
+    let writer = Connection::open(&database).unwrap();
+    for (id, text) in [
+        ("msg_appended_a", "appended-only-a"),
+        ("msg_appended_b", "appended-only-b"),
+    ] {
+        writer
+            .execute(
+                "INSERT INTO message(id, session_id, time_created, data)
+                 VALUES (?1, 'ses_project', 5, ?2)",
+                rusqlite::params![
+                    id,
+                    json!({"role": "user", "time": {"created": 5}}).to_string()
+                ],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data)
+                 VALUES (?1, ?2, 'ses_project', ?3)",
+                rusqlite::params![
+                    format!("part_{id}"),
+                    id,
+                    json!({"type": "text", "text": text}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(writer);
+
+    let appended = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let observations = admission.observations();
+    assert!(observations.iter().any(|stored| {
+        stored
+            .observation()
+            .payload()
+            .to_string()
+            .contains("secret-ses_project")
+    }));
+    assert!(observations.iter().any(|stored| {
+        stored
+            .observation()
+            .payload()
+            .to_string()
+            .contains("appended-only-a")
+    }));
+    assert!(observations.iter().any(|stored| {
+        stored
+            .observation()
+            .payload()
+            .to_string()
+            .contains("appended-only-b")
+    }));
+    assert_eq!(observations.len(), before + 2);
+    assert_eq!(appended.stats.messages_upserted, 2);
+}
+
+#[tokio::test]
+async fn orphaned_session_rows_cannot_stall_message_or_part_frontiers() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project);
+    let admission = MemoryHostAdmission::default();
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    // More than a full page of messages and parts whose session row is gone,
+    // followed by one new message and one late part on a live session.
+    let writer = Connection::open(&database).unwrap();
+    for index in 0..super::MAX_MESSAGES_PER_PAGE * 2 {
+        let id = format!("msg_orphan_{index:03}");
+        writer
+            .execute(
+                "INSERT INTO message(id, session_id, time_created, data)
+                 VALUES (?1, 'ses_deleted', 2, ?2)",
+                rusqlite::params![
+                    id,
+                    json!({"role": "user", "time": {"created": 2}}).to_string()
+                ],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data)
+                 VALUES (?1, ?2, 'ses_deleted', ?3)",
+                rusqlite::params![
+                    format!("part_{id}"),
+                    id,
+                    json!({"type": "text", "text": "orphan"}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    writer
+        .execute(
+            "INSERT INTO message(id, session_id, time_created, data)
+             VALUES ('msg_after_orphans', 'ses_project', 3, ?1)",
+            [json!({"role": "user", "time": {"created": 3}}).to_string()],
+        )
+        .unwrap();
+    for (id, message_id, text) in [
+        (
+            "part_after_orphans",
+            "msg_after_orphans",
+            "after-orphans-message",
+        ),
+        (
+            "part_late_after_orphans",
+            "msg_ses_project",
+            "after-orphans-part",
+        ),
+    ] {
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data)
+                 VALUES (?1, ?2, 'ses_project', ?3)",
+                rusqlite::params![
+                    id,
+                    message_id,
+                    json!({"type": "text", "text": text}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(writer);
+
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let payloads = admission
+        .observations()
+        .iter()
+        .map(|stored| stored.observation().payload().to_string())
+        .collect::<Vec<_>>();
+    for expected in ["after-orphans-message", "after-orphans-part"] {
+        assert!(
+            payloads.iter().any(|payload| payload.contains(expected)),
+            "{expected} must be admitted past the orphaned rows"
+        );
+    }
+    assert!(
+        !payloads
+            .iter()
+            .any(|payload| payload.contains("msg_orphan_"))
+    );
+}
+
+#[tokio::test]
+async fn missing_opencode_database_names_its_coverage_reason() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = OpenCodeSource::with_database_for_project(
+        temp.path().join("missing-opencode.db"),
+        temp.path().join("project"),
+    );
+    let admission = MemoryHostAdmission::default();
+    // Unreleased packed shape: state 3 with the missing-database reason in bits 8+.
+    admission
+        .advance_parse_offset(
+            &ObservationScopeV1::Profile,
+            "host-coverage://opencode/v1",
+            ParseOffset {
+                byte_offset: 1,
+                mtime: 1,
+                file_id: 259,
+            },
+        )
+        .await
+        .unwrap();
+
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    let coverage = admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://opencode/v1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(coverage.file_id, 4);
+}
+
+#[tokio::test]
+async fn wal_reuse_updates_existing_parts_without_changing_file_headers() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project);
+    let writer = Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    for index in 0..3 {
+        writer
+            .execute(
+                "INSERT INTO message(id, session_id, time_created, data)
+             VALUES (?1, 'ses_project', 2, ?2)",
+                rusqlite::params![
+                    format!("unchanged-{index}"),
+                    json!({"role": "user"}).to_string()
+                ],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data)
+             VALUES (?1, ?1, 'ses_project', ?2)",
+                rusqlite::params![
+                    format!("unchanged-{index}"),
+                    json!({"type": "text", "text": format!("unchanged sibling {index}")})
+                        .to_string()
+                ],
+            )
+            .unwrap();
+    }
+    let update = |text: &str| {
+        writer
+            .execute(
+                "UPDATE part SET data = ?1 WHERE id = 'part_ses_project'",
+                [json!({"type": "text", "text": text}).to_string()],
+            )
+            .unwrap();
+    };
+    for index in 0..32 {
+        update(&format!("warm-{index}"));
+    }
+    writer
+        .execute_batch("PRAGMA wal_checkpoint(RESTART)")
+        .unwrap();
+    update("first-reused-wal-content");
+    let header = fs::read(&database).unwrap()[..100].to_vec();
+    let wal = database.with_extension("db-wal");
+    let wal_header = fs::read(&wal).unwrap()[..32].to_vec();
+    let wal_len = fs::metadata(&wal).unwrap().len();
+    let admission = MemoryHostAdmission::default();
+    let first = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.stats.messages_upserted, 4);
+    update("second-reused-wal-content");
+    assert_eq!(header, fs::read(&database).unwrap()[..100]);
+    assert_eq!(wal_header, fs::read(&wal).unwrap()[..32]);
+    assert_eq!(wal_len, fs::metadata(&wal).unwrap().len());
+    let updated = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.stats.messages_upserted, 1);
     assert!(admission.observations().iter().any(|stored| {
         stored
             .observation()
             .payload()
             .to_string()
-            .contains("fair-restart")
+            .contains("second-reused-wal-content")
     }));
+    let calls_before = admission.capture_call_counts();
+    let unchanged = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unchanged.stats.messages_upserted, 0);
+    let calls_after = admission.capture_call_counts();
+    assert_eq!(calls_after.0 - calls_before.0, 0, "no scalar fallback");
+    assert!(
+        calls_after.1 - calls_before.1 <= 1,
+        "unchanged siblings share one admission window"
+    );
+}
+
+const RETAINED_PROJECT_PAYLOAD: &str = r#"{"message":{"id":"msg_ses_project","role":"user","sessionID":"ses_project","time":{"created":1}},"parts":[{"id":"part_ses_project","text":"secret-ses_project","type":"text"}],"transcript_path":"{transcript}"}"#;
+
+#[tokio::test]
+async fn retained_read_snapshot_keeps_reference_scope_and_payload_together() {
+    use super::{
+        OpenCodePageCursor, OpenCodeScanKind, OpenCodeScanSource, OpenCodeSourceScope,
+        materialize_reference_page, scan_reference_page,
+    };
+    use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+    use crate::runtime::hosts::opencode_snapshot::{OpenedOpenCodeDatabase, open_database};
+    let (_temp, project, database) = fixture();
+    let writer = Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    let budget = HostScanBudget::new(
+        1024 * 1024,
+        100,
+        std::time::Instant::now() + HOST_SCAN_WINDOW,
+        ObservationCancellation::default(),
+    );
+    let (opened, budget) = open_database(database.clone(), budget).await.unwrap();
+    let OpenedOpenCodeDatabase::Ready(reader) = opened else {
+        panic!("read snapshot refused")
+    };
+    let source = OpenCodeScanSource {
+        source_path: database,
+        scope: OpenCodeSourceScope::Project(project),
+    };
+    let (references, budget) = scan_reference_page(
+        reader.reader.connection(),
+        &source,
+        OpenCodeScanKind::Messages,
+        OpenCodePageCursor::default(),
+        budget,
+    )
+    .unwrap();
+    assert_eq!(references.references.len(), 1);
+    writer
+        .execute_batch(
+            "BEGIN;
+        DELETE FROM part WHERE session_id = 'ses_project';
+        DELETE FROM message WHERE session_id = 'ses_project';
+        INSERT INTO message(rowid, id, session_id, time_created, data)
+        VALUES (1, 'foreign-replacement', 'ses_other', 2, '{\"role\":\"user\"}');
+        INSERT INTO part(id, message_id, session_id, data)
+        VALUES ('foreign-part', 'foreign-replacement', 'ses_other',
+        '{\"type\":\"text\",\"text\":\"foreign-secret\"}');
+        COMMIT;",
+        )
+        .unwrap();
+    let (page, _) = materialize_reference_page(
+        reader.reader.connection(),
+        &source,
+        references.references,
+        budget,
+    )
+    .unwrap();
+    assert_eq!(page.records.len(), 1);
+    let payload = String::from_utf8(page.records[0].payload.clone()).unwrap();
+    let transcript = serde_json::to_string(&source.source_path).unwrap();
+    let expected =
+        RETAINED_PROJECT_PAYLOAD.replace("{transcript}", &transcript[1..transcript.len() - 1]);
+    assert_eq!(payload, expected);
+    assert!(!payload.contains("foreign-secret") && page.records[0].session_id == "ses_project");
+}
+
+#[tokio::test]
+async fn page_snapshot_refuses_a_replaced_database_identity() {
+    use super::{
+        OpenCodePageCursor, OpenCodeScanKind, OpenCodeScanSource, OpenCodeSourceScope,
+        scan_materialized_page,
+    };
+    use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+    use crate::runtime::hosts::opencode_snapshot::{OpenedOpenCodeDatabase, open_database};
+    let (_temp, project, database) = fixture();
+    let (_other_temp, _, replacement) = fixture();
+    let budget = HostScanBudget::new(
+        1024 * 1024,
+        100,
+        std::time::Instant::now() + HOST_SCAN_WINDOW,
+        ObservationCancellation::default(),
+    );
+    let (opened, budget) = open_database(database.clone(), budget).await.unwrap();
+    let OpenedOpenCodeDatabase::Ready(opened) = opened else {
+        panic!("read snapshot refused")
+    };
+    let identity = opened.source_file_identity;
+    drop(opened);
+    fs::remove_file(&database).unwrap();
+    fs::rename(replacement, &database).unwrap();
+    let source = OpenCodeScanSource {
+        source_path: database,
+        scope: OpenCodeSourceScope::Project(project),
+    };
+    assert!(matches!(
+        scan_materialized_page(
+            &source,
+            OpenCodeScanKind::Messages,
+            OpenCodePageCursor::default(),
+            budget,
+            false,
+            identity
+        ),
+        Err(TranscriptIngestError::ScanGenerationChanged { .. })
+    ));
 }

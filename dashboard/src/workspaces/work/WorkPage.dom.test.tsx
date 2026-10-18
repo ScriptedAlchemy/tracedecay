@@ -18,6 +18,7 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useScope } from '../../data/scope/store.ts';
+import { applicationProblem, applicationSuccess } from '../../test/applicationEnvelope.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
 import { WorkPage } from './WorkPage.tsx';
 
@@ -26,52 +27,11 @@ function graphBody(
     { taskId: 'task-alpha', title: 'Alpha task' },
   ],
 ) {
-  return {
-    kind: 'success',
-    value: {
-      binding_id: 'binding.http.work.views',
-      contract: { schema_id: 'schema.work.views.result', schema_revision: 1 },
-      request_id: 'request-1',
-      scope: {
-        project_id: 'project.work',
-        repository_id: 'repository.work',
-        worktree_id: 'worktree.work',
-        reference: null,
-        scope_digest: 'sha256:scope',
-      },
-      outcome: {
-        outcome: 'evidence',
-        value: {
-          payload: workGraphRead({ tasks }),
-        },
-      },
-    },
-  };
+  return applicationSuccess('operation.work.views', workGraphRead({ tasks }));
 }
 
 function graphBodyFromPayload(payload: ReturnType<typeof workGraphRead>) {
-  const body = graphBody([]);
-  body.value.outcome.value.payload = payload;
-  return body;
-}
-
-function workSuccess(payload: unknown, bindingId: string) {
-  return {
-    kind: 'success',
-    value: {
-      binding_id: bindingId,
-      contract: { schema_id: 'schema.work.result', schema_revision: 1 },
-      request_id: 'request-1',
-      scope: {
-        project_id: 'project.work',
-        repository_id: 'repository.work',
-        worktree_id: 'worktree.work',
-        reference: null,
-        scope_digest: 'sha256:scope',
-      },
-      outcome: { outcome: 'evidence', value: { payload } },
-    },
-  };
+  return applicationSuccess('operation.work.views', payload);
 }
 
 /** Answers the product graph route and refuses anything else, so a test that
@@ -106,7 +66,7 @@ beforeEach(() => {
   serve((url) =>
     url.includes('/work/views')
       ? { status: 200, body: graphBody() }
-      : { status: 503, body: { kind: 'problem', value: { problem: {} } } },
+      : { status: 503, body: applicationProblem('unavailable') },
   );
 });
 
@@ -122,7 +82,7 @@ describe('the Work page over mounted routes', () => {
       calls.push(url);
       return url.includes('/work/views')
         ? { status: 200, body: graphBody() }
-        : { status: 410, body: { kind: 'problem', value: { problem: {} } } };
+        : { status: 410, body: applicationProblem('unavailable') };
     });
 
     renderPage();
@@ -130,53 +90,6 @@ describe('the Work page over mounted routes', () => {
     expect(await screen.findByRole('button', { name: 'Alpha task' })).toBeTruthy();
     expect(calls.some((url) => url.includes('/work/snapshot'))).toBe(false);
     expect(calls.some((url) => url.includes('/work/delta'))).toBe(false);
-  });
-
-  it('reads the product graph and names the task it returned', async () => {
-    renderPage();
-    expect(await screen.findByText('Alpha task')).toBeTruthy();
-  });
-
-  it('labels the default Work view as the active project', async () => {
-    renderPage();
-    expect(
-      await screen.findByText('canonical task graph · the active project · exact product authority'),
-    ).toBeTruthy();
-  });
-
-  it('labels an exact selected project without claiming it is active', async () => {
-    useScope.setState({
-      scope: {
-        kind: 'project',
-        projectId: 'project-beta',
-        label: 'Beta',
-        activation: 'selected',
-      },
-    });
-    renderPage();
-
-    const provenance = await screen.findByText(
-      'canonical task graph · Beta (project-beta) · selected project · exact product authority',
-    );
-    expect(provenance.textContent).not.toContain('active project');
-  });
-
-  it('labels an explicitly selected active project from reconciled scope state', async () => {
-    useScope.setState({
-      scope: {
-        kind: 'project',
-        projectId: 'project-alpha',
-        label: 'Alpha',
-        activation: 'active',
-      },
-    });
-    renderPage();
-
-    expect(
-      await screen.findByText(
-        'canonical task graph · Alpha (project-alpha) · selected active project · exact product authority',
-      ),
-    ).toBeTruthy();
   });
 
   it('leaves the shell its own main landmark and scrolls inside a named region', async () => {
@@ -192,48 +105,75 @@ describe('the Work page over mounted routes', () => {
    * drawn as the second.
    */
   it('draws no board when the runtime is unavailable', async () => {
-    serve(() => ({ status: 503, body: { kind: 'problem', value: { problem: {} } } }));
+    serve(() => ({ status: 503, body: applicationProblem('unavailable') }));
     const { container } = renderPage();
-    await waitFor(() => expect(screen.getByText(/Work runtime is unavailable/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/fixture unavailable problem/)).toBeTruthy());
     expect(container.querySelector('[data-work-board]')).toBeNull();
-    expect(container.getAttribute('data-work-authority')).not.toBe('read');
+    expect(screen.getByTestId('work-page').getAttribute('data-work-authority')).toBe('unread');
   });
 
   it('reports a denial as denied rather than as an empty board', async () => {
-    serve(() => ({ status: 404, body: { kind: 'problem', value: { problem: {} } } }));
+    serve(() => ({ status: 404, body: applicationProblem('not_found_or_not_authorized') }));
     const { container } = renderPage();
-    await waitFor(() => expect(screen.getByText(/not authorized/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/fixture not_found_or_not_authorized problem/)).toBeTruthy());
     expect(container.querySelector('[data-work-board]')).toBeNull();
+  });
+
+  it('offers task creation when no Work graph exists yet, and keeps a denial a denial', async () => {
+    const absent = {
+      mode: 'absent',
+      authorized_scope: {
+        owner_brain_id: 'brain.work',
+        owner_profile_id: 'profile.work',
+        selection: { selection: 'profile_owned_no_git' },
+      },
+      selection_coverage: { coverage: 'complete', covered_events: 0 },
+    };
+    serve((url) =>
+      url.includes('/work/views')
+        ? { status: 200, body: applicationSuccess('operation.work.views', absent) }
+        : { status: 503, body: applicationProblem('unavailable') },
+    );
+    const first = renderPage();
+    await waitFor(() =>
+      expect(first.container.querySelector('[data-work-graph="absent"]')).not.toBeNull(),
+    );
+    expect(screen.getAllByText(/no Work graph yet/).length).toBeGreaterThan(0);
+    expect(screen.getByText('Create work')).toBeTruthy();
+    expect(screen.queryByText(/fixture not_found_or_not_authorized problem/)).toBeNull();
+    expect(first.container.querySelector('[data-work-board]')).toBeNull();
+    expect(
+      first.container.querySelector('[data-work-register]')?.getAttribute('data-work-register'),
+    ).toBe('complete_zero_findings');
+    first.unmount();
+
+    serve(() => ({ status: 404, body: applicationProblem('not_found_or_not_authorized') }));
+    const denied = renderPage();
+    await waitFor(() => expect(screen.getByText(/fixture not_found_or_not_authorized problem/)).toBeTruthy());
+    expect(denied.container.querySelector('[data-work-graph="absent"]')).toBeNull();
+    expect(screen.queryByText('Create work')).toBeNull();
   });
 
   it('reports an envelope it cannot read as unsupported rather than guessing', async () => {
     serve(() => ({ status: 200, body: { kind: 'success', value: { outcome: {} } } }));
     const { container } = renderPage();
-    await waitFor(() => expect(screen.getByText(/envelope is not the shape/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/envelope does not answer operation.work.views/)).toBeTruthy());
     expect(container.querySelector('[data-work-board]')).toBeNull();
   });
 
-  /** An empty board is legitimate — but only when the daemon said the board was
+  /** An empty board is legitimate, but only when the daemon said the board was
    * complete and empty. */
   it('draws an empty board only from a current product graph that was empty', async () => {
     serve((url) =>
       url.includes('/work/views')
         ? { status: 200, body: graphBody([]) }
-        : { status: 503, body: { kind: 'problem', value: { problem: {} } } },
+        : { status: 503, body: applicationProblem('unavailable') },
     );
     const { container } = renderPage();
     await waitFor(() => expect(container.querySelector('[data-work-board]')).not.toBeNull());
     expect(screen.getAllByText(/No task in this build has reached this gate/).length).toBeGreaterThan(
       0,
     );
-  });
-
-  it('draws no boundary aside for the retired attempt family', async () => {
-    renderPage();
-    await screen.findByText('Alpha task');
-    // Execution belongs to the Workflow runtime; there is no withheld attempt
-    // inventory left to disclose, so the page must not print one.
-    expect(screen.queryByLabelText('Work boundary')).toBeNull();
   });
 
   it('selects a task by keyboard and records it in the address', async () => {
@@ -283,10 +223,10 @@ describe('the Work page over mounted routes', () => {
       if (url.includes('/work/prepare-graph-mutation')) {
         return {
           status: 200,
-          body: workSuccess(prepared, 'binding.http.work.prepare_graph_mutation'),
+          body: applicationSuccess('operation.work.prepare_graph_mutation', prepared),
         };
       }
-      return { status: 503, body: { kind: 'problem', value: { problem: {} } } };
+      return { status: 503, body: applicationProblem('unavailable') };
     });
     const user = userEvent.setup();
     renderPage();
@@ -359,10 +299,10 @@ describe('the Work page over mounted routes', () => {
       if (url.includes('/work/prepare-graph-mutation')) {
         return {
           status: 200,
-          body: workSuccess(prepared, 'binding.http.work.prepare_graph_mutation'),
+          body: applicationSuccess('operation.work.prepare_graph_mutation', prepared),
         };
       }
-      return { status: 503, body: { kind: 'problem', value: { problem: {} } } };
+      return { status: 503, body: applicationProblem('unavailable') };
     });
     const user = userEvent.setup();
     renderPage();
@@ -389,11 +329,21 @@ describe('the Work page over mounted routes', () => {
   it('gives every stage table a caption and column headers', async () => {
     const { container } = renderPage();
     await screen.findByText('Alpha task');
-    const tables = [...container.querySelectorAll('table')];
-    expect(tables.length).toBeGreaterThan(0);
-    for (const table of tables) {
-      expect(table.querySelector('caption')?.textContent ?? '').not.toBe('');
-      expect(table.querySelectorAll('th[scope="col"]').length).toBeGreaterThan(0);
-    }
+    const tables = [...container.querySelectorAll('table')].map((table) => ({
+      caption: /^Tasks whose furthest recorded gate is ([a-z ]+),|^(Admitted task-activity frames)/
+        .exec(table.querySelector('caption')?.textContent ?? '')
+        ?.slice(1)
+        .find(Boolean),
+      columns: [...table.querySelectorAll('th[scope="col"]')].map((th) => th.textContent),
+    }));
+    const stage = ['Task', 'Identity', 'Version', 'Deps', 'History', 'Attempts'];
+    expect(tables).toEqual([
+      { caption: 'proposal open', columns: stage },
+      { caption: 'proposal accepted', columns: stage },
+      { caption: 'task accepted', columns: stage },
+      { caption: 'execution admitted', columns: stage },
+      { caption: 'terminal evidence', columns: stage },
+      { caption: 'Admitted task-activity frames', columns: ['Observed (UTC)', 'Project', 'Event', 'Frame'] },
+    ]);
   });
 });

@@ -44,6 +44,7 @@ describe("SSE query invalidation", () => {
         events: [
           event("storage_telemetry_invalidated"),
           event("project_registry_changed"),
+          event("code_index_activity", "project.alpha"),
           event("heartbeat"),
         ],
         refetch: false,
@@ -52,7 +53,64 @@ describe("SSE query invalidation", () => {
     ).toEqual([
       ["storage", "telemetry"],
       ["projects"],
+      ["code-index", "freshness", "project:project.alpha"],
     ]);
+  });
+
+  it("scopes code_index_activity to the event's project freshness key", () => {
+    expect(
+      targetedInvalidationKeys({
+        events: [event("code_index_activity", "project.alpha")],
+        refetch: false,
+        stale: false,
+      }),
+    ).toEqual([["code-index", "freshness", "project:project.alpha"]]);
+    expect(
+      targetedInvalidationKeys({
+        events: [event("code_index_activity", "project.beta")],
+        refetch: false,
+        stale: false,
+      }),
+    ).toEqual([["code-index", "freshness", "project:project.beta"]]);
+  });
+
+  it("invalidates the all-projects freshness key when the event is the active project", () => {
+    expect(
+      targetedInvalidationKeys(
+        {
+          events: [event("code_index_activity", "project.alpha")],
+          refetch: false,
+          stale: false,
+        },
+        "project.alpha",
+      ),
+    ).toEqual([
+      ["code-index", "freshness", "project:project.alpha"],
+      ["code-index", "freshness", "all"],
+    ]);
+  });
+
+  it("does not invalidate all-projects freshness for a foreign project's activity", () => {
+    expect(
+      targetedInvalidationKeys(
+        {
+          events: [event("code_index_activity", "project.beta")],
+          refetch: false,
+          stale: false,
+        },
+        "project.alpha",
+      ),
+    ).toEqual([["code-index", "freshness", "project:project.beta"]]);
+  });
+
+  it("does not invent a code-index target for activity without a project", () => {
+    expect(
+      targetedInvalidationKeys({
+        events: [event("code_index_activity")],
+        refetch: false,
+        stale: false,
+      }),
+    ).toEqual([]);
   });
 
   it("invalidates all canonical queries after a revision gap", () => {
@@ -76,12 +134,12 @@ describe("SSE query invalidation", () => {
   });
 
   /**
-   * Every Work read part, not just the projection pair. The attempt list and
-   * canonical topology page are scoped like the snapshot they are drawn beside,
-   * so either surviving a project switch would put one project's execution
-   * structure under another project's snapshot. Adding a read part to
-   * `workScopeInvalidationKeys` is expected to widen these lists — a part
-   * missing from them is a stale read, not a saved refetch.
+   * Every Work read part, including those beyond the projection pair. The
+   * attempt list and canonical topology page are scoped like the snapshot they
+   * are drawn beside, so either surviving a project switch would put one
+   * project's execution structure under another project's snapshot. Adding a
+   * read part to `workScopeInvalidationKeys` is expected to widen these lists.
+   * A part missing from them is a stale read, not a saved refetch.
    */
   it("targets exact Work keys and the default alias for active-project activity", () => {
     expect(

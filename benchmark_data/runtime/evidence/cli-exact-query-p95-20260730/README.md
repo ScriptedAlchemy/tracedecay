@@ -1,6 +1,6 @@
 # Integrated CLI exact-query p95 evidence
 
-> **Dated runtime evidence — not acceptance authority.** Preserve these raw
+> **Dated runtime evidence, not acceptance authority.** Preserve these raw
 > samples and their provenance, but do not recreate their exact counts,
 > snapshots, receipts, attestations, binary/worktree choreography, or gates as
 > build prerequisites. Current requirements come only from the

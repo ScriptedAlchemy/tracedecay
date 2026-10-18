@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_store::runtime::{
     GraphPublicationInputDigestV1, GraphPublicationReplayV1, GraphVerifiedHeadV1, StoreShardIdV1,
 };
 
-use super::{GraphDbError, GraphGenerationManifest, GraphIdempotencyKey};
+use super::{
+    GraphDbError, GraphGenerationManifest, GraphGenerationRowSpill, GraphGenerationRows,
+    GraphIdempotencyKey, SpilledGraphGeneration,
+};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -25,20 +29,11 @@ pub struct SealedCodeGenerationReplay {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticVectorGenerationReplay {
-    pub metadata: GraphGenerationReplayMetadata,
-    pub semantic_generation_id: tracedecay_domain::VectorGenerationIdV1,
-    pub base_generation: Option<tracedecay_domain::VectorGenerationIdV1>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GraphGenerationReplaySource {
     InlineManifest(Box<GraphGenerationManifest>),
     MetadataOnlyManifest(GraphGenerationReplayMetadata),
     SealedCodeGeneration(SealedCodeGenerationReplay),
-    SemanticVectorGeneration(SemanticVectorGenerationReplay),
 }
 
 impl GraphGenerationManifest {
@@ -70,54 +65,20 @@ impl GraphGenerationManifest {
             check,
         )
     }
-
-    pub(crate) fn relational_semantic_vector_replay_with_recovered_digest(
-        &self,
-        plan: &tracedecay_store::SemanticVectorStagePlan,
-        idempotency_key: GraphIdempotencyKey,
-        input_digest: GraphPublicationInputDigestV1,
-        expected_recovered_digest: tracedecay_store::GraphRecoveredGenerationDigestV1,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphPublicationReplayV1, GraphDbError> {
-        self.validate_checked(check)?;
-        let payload = self.replay_source_payload(
-            GraphGenerationReplaySource::SemanticVectorGeneration(SemanticVectorGenerationReplay {
-                metadata: GraphGenerationReplayMetadata {
-                    projection: self.projection.clone(),
-                    generation: self.generation.clone(),
-                    source_generation: self.source_generation.clone(),
-                    watermark: self.watermark.clone(),
-                    dependencies: self.dependencies.clone(),
-                },
-                semantic_generation_id: plan.semantic_generation_id.clone(),
-                base_generation: plan.base_generation.clone(),
-            }),
-            check,
-        )?;
-        let mut replay = self.relational_replay_with_payload(
-            plan.key.projection.shard_id.clone(),
-            idempotency_key,
-            input_digest,
-            plan.expected_prior_verified_head.clone(),
-            payload,
-            check,
-        )?;
-        replay.expected_recovered_digest = expected_recovered_digest;
-        replay
-            .validate()
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        Ok(replay)
-    }
 }
 
-pub(crate) fn metadata_manifest_from_replay(
+/// Hydrates the metadata-only manifest a replay `source` describes, or
+/// `None` when the source carries (or names) native rows. The caller decodes
+/// the canonical payload once and inspects the source itself first; the
+/// binding validation here reuses the decoded metadata rather than parsing a
+/// second time.
+pub(crate) fn metadata_manifest_from_source(
     publication: &GraphPublicationReplayV1,
+    source: &GraphGenerationReplaySource,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Option<GraphGenerationManifest>, GraphDbError> {
-    let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
     let metadata = match source {
         GraphGenerationReplaySource::MetadataOnlyManifest(metadata) => metadata,
-        GraphGenerationReplaySource::SemanticVectorGeneration(vector) => vector.metadata,
         GraphGenerationReplaySource::InlineManifest(_)
         | GraphGenerationReplaySource::SealedCodeGeneration(_) => return Ok(None),
     };
@@ -136,46 +97,23 @@ pub(crate) fn metadata_manifest_from_replay(
         check,
     )?;
     validate_metadata_publication(publication)?;
-    validate_decoded_metadata_binding(publication, &manifest, &metadata, false, check)?;
+    validate_decoded_metadata_binding(publication, &manifest, metadata, false, check)?;
     Ok(Some(manifest))
-}
-
-pub(crate) fn validate_metadata_binding(
-    publication: &GraphPublicationReplayV1,
-    manifest: &GraphGenerationManifest,
-    validate_expected_digest: bool,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(), GraphDbError> {
-    validate_metadata_publication(publication)?;
-    manifest.validate_checked(check)?;
-    let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
-    let metadata = match source {
-        GraphGenerationReplaySource::MetadataOnlyManifest(metadata) => metadata,
-        GraphGenerationReplaySource::SemanticVectorGeneration(vector) => vector.metadata,
-        GraphGenerationReplaySource::InlineManifest(_)
-        | GraphGenerationReplaySource::SealedCodeGeneration(_) => {
-            return Err(GraphDbError::conflict("replay.validate_metadata_binding"));
-        }
-    };
-    validate_decoded_metadata_binding(
-        publication,
-        manifest,
-        &metadata,
-        validate_expected_digest,
-        check,
-    )
 }
 
 fn validate_metadata_publication(
     publication: &GraphPublicationReplayV1,
 ) -> Result<(), GraphDbError> {
-    hotpath::measure_block!("graph_db.generation.replay.binding.validate", {
-        publication
-            .validate()
-            .map_err(|error| GraphDbError::Corrupt {
-                message: format!("metadata-only graph replay is invalid: {error}"),
-            })
-    })
+    {
+        let _span = tracing::trace_span!("graph_db.generation.replay.binding.validate").entered();
+        {
+            publication
+                .validate()
+                .map_err(|error| GraphDbError::Corrupt {
+                    message: format!("metadata-only graph replay is invalid: {error}"),
+                })
+        }
+    }
 }
 
 fn validate_decoded_metadata_binding(
@@ -198,22 +136,55 @@ fn validate_decoded_metadata_binding(
     validate_publication_manifest_identity(publication, manifest, validate_expected_digest, check)
 }
 
-pub(crate) fn validate_supplied_manifest_binding(
+/// Pins supplied rows to the journaled replay they claim to publish.
+pub(crate) fn validate_supplied_rows_binding(
     publication: &GraphPublicationReplayV1,
-    manifest: &GraphGenerationManifest,
+    rows: &GraphGenerationRows,
     validate_expected_digest: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    hotpath::measure_block!("graph_db.generation.replay.binding.validate", {
-        publication
-            .validate()
-            .map_err(|error| GraphDbError::Corrupt {
-                message: format!("graph publication replay is invalid: {error}"),
-            })
-    })?;
+    {
+        let _span = tracing::trace_span!("graph_db.generation.replay.binding.validate").entered();
+        {
+            publication
+                .validate()
+                .map_err(|error| GraphDbError::Corrupt {
+                    message: format!("graph publication replay is invalid: {error}"),
+                })
+        }
+    }?;
+    let manifest = match rows {
+        GraphGenerationRows::Manifest(manifest) => manifest,
+        // Spilled and layered rows only ever publish a sealed code
+        // generation, whose journal names its replay source rather than a
+        // manifest; the journaled digests were derived from these exact rows
+        // at append.
+        GraphGenerationRows::Spilled(_) | GraphGenerationRows::Layered(_) => {
+            return match checked_decode_replay_source(&publication.canonical_replay_source, check)?
+            {
+                GraphGenerationReplaySource::SealedCodeGeneration(source) => {
+                    validate_sealed_replay(&source)?;
+                    validate_publication_identity(
+                        publication,
+                        &rows.identity(),
+                        validate_expected_digest
+                            .then(|| rows.expected_recovered_digest(check))
+                            .transpose()?,
+                        check,
+                    )
+                }
+                GraphGenerationReplaySource::InlineManifest(_)
+                | GraphGenerationReplaySource::MetadataOnlyManifest(_) => Err(
+                    GraphDbError::conflict("replay.validate_supplied_manifest_binding"),
+                ),
+            };
+        }
+    };
     manifest.validate_checked(check)?;
     match checked_decode_replay_source(&publication.canonical_replay_source, check)? {
-        GraphGenerationReplaySource::InlineManifest(replayed) if replayed.as_ref() == manifest => {
+        GraphGenerationReplaySource::InlineManifest(replayed)
+            if replayed.as_ref() == manifest.as_ref() =>
+        {
             validate_publication_manifest_identity(
                 publication,
                 manifest,
@@ -226,15 +197,6 @@ pub(crate) fn validate_supplied_manifest_binding(
                 publication,
                 manifest,
                 &metadata,
-                validate_expected_digest,
-                check,
-            )
-        }
-        GraphGenerationReplaySource::SemanticVectorGeneration(vector) => {
-            validate_decoded_metadata_binding(
-                publication,
-                manifest,
-                &vector.metadata,
                 validate_expected_digest,
                 check,
             )
@@ -268,26 +230,47 @@ fn validate_publication_manifest_identity(
     validate_expected_digest: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    hotpath::measure_block!("graph_db.generation.replay.binding.identity", {
-        let direct_dependencies =
-            manifest.relational_dependency_generations(&publication.key.projection.shard_id)?;
-        if publication.key.projection.namespace.as_str() != manifest.projection.namespace.as_str()
-            || publication.key.projection.projection.as_str()
-                != manifest.projection.projection.as_str()
-            || publication.key.generation.as_str() != manifest.generation.as_str()
-            || publication.direct_dependency_generations != direct_dependencies
-            || publication.dependency_generation_closure_digest
-                != manifest.dependency_closure_digest(check)?
-            || (validate_expected_digest
-                && publication.expected_recovered_digest
-                    != manifest.expected_recovered_digest(check)?)
+    let expected_digest = if validate_expected_digest {
+        Some(manifest.expected_recovered_digest(check)?)
+    } else {
+        None
+    };
+    // Proved on the manifest first so the identity inherits the memo.
+    manifest.dependency_closure_digest(check)?;
+    validate_publication_identity(publication, &manifest.identity(), expected_digest, check)
+}
+
+fn validate_publication_identity(
+    publication: &GraphPublicationReplayV1,
+    identity: &super::GraphGenerationManifestIdentity,
+    expected_digest: Option<tracedecay_store::runtime::GraphRecoveredGenerationDigestV1>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
+    {
+        let _span = tracing::trace_span!("graph_db.generation.replay.binding.identity").entered();
         {
-            return Err(GraphDbError::conflict(
-                "replay.validate_publication_manifest_identity",
-            ));
+            let direct_dependencies = super::relational_dependency_generations(
+                &identity.dependencies,
+                &publication.key.projection.shard_id,
+            )?;
+            if publication.key.projection.namespace.as_str()
+                != identity.projection.namespace.as_str()
+                || publication.key.projection.projection.as_str()
+                    != identity.projection.projection.as_str()
+                || publication.key.generation.as_str() != identity.generation.as_str()
+                || publication.direct_dependency_generations != direct_dependencies
+                || publication.dependency_generation_closure_digest
+                    != identity.dependency_closure_digest(check)?
+                || expected_digest
+                    .is_some_and(|expected| publication.expected_recovered_digest != expected)
+            {
+                return Err(GraphDbError::conflict(
+                    "replay.validate_publication_manifest_identity",
+                ));
+            }
+            Ok(())
         }
-        Ok(())
-    })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -352,7 +335,7 @@ impl GraphProjectorRevision {
 }
 
 fn validate_sha256(value: &str, subject: &str) -> Result<(), GraphDbError> {
-    let Some(digest) = value.strip_prefix("sha256:") else {
+    let Some(digest) = sha256_hex_suffix(value) else {
         return Err(GraphDbError::invalid(format!("{subject} must use sha256")));
     };
     if digest.len() != 64
@@ -365,13 +348,19 @@ fn validate_sha256(value: &str, subject: &str) -> Result<(), GraphDbError> {
     Ok(())
 }
 
+/// Rebuilds a sealed code generation's graph rows from its durable source.
+///
+/// The registry hands the provider a spill under the store's own scratch
+/// root; the provider pushes the rows in batches and finishes it, so a
+/// replay never holds the whole generation in memory.
 pub trait GraphGenerationManifestProvider: Send + Sync {
     fn hydrate_sealed_code_generation(
         &self,
         owner: &tracedecay_store::GraphProjectionIdentityV1,
         source: &SealedCodeGenerationReplay,
+        spill: GraphGenerationRowSpill,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphGenerationManifest, GraphDbError>;
+    ) -> Result<SpilledGraphGeneration, GraphDbError>;
 }
 
 pub(crate) struct InlineOnlyGraphGenerationManifestProvider;
@@ -381,15 +370,16 @@ impl GraphGenerationManifestProvider for InlineOnlyGraphGenerationManifestProvid
         &self,
         _owner: &tracedecay_store::GraphProjectionIdentityV1,
         _source: &SealedCodeGenerationReplay,
+        _spill: GraphGenerationRowSpill,
         _check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphGenerationManifest, GraphDbError> {
+    ) -> Result<SpilledGraphGeneration, GraphDbError> {
         Err(GraphDbError::unavailable(
             "sealed code generation replay provider is not mounted",
         ))
     }
 }
 
-#[hotpath::measure(label = "graph_db.generation.replay.decode")]
+#[tracing::instrument(name = "graph_db.generation.replay.decode", level = "trace", skip_all)]
 pub(crate) fn checked_decode_replay_source(
     payload: &[u8],
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -399,7 +389,7 @@ pub(crate) fn checked_decode_replay_source(
     // exactly one byte per `Read::read` call through `io::Bytes` (measured:
     // 2.9M one-byte reads and ~21x the slice-mode wall time for a 2.9MB
     // payload), and `io::Bytes` retries `ErrorKind::Interrupted`, so the old
-    // checked reader's per-interval cancellation never aborted the parse —
+    // checked reader's per-interval cancellation never aborted the parse,
     // its failure only surfaced after the full slow parse finished. Checks at
     // the decode boundaries bound the work between two cancellation checks by
     // one slice parse of a payload capped at
@@ -414,26 +404,19 @@ pub(crate) fn checked_decode_replay_source(
             "canonical graph generation replay is invalid: {error}"
         ))
     })?;
-    crate::hotpath_observe::record_counts(0, 0, 1, payload.len());
-    crate::hotpath_observe::record_hydration_source(hydration_source(&source));
+    crate::observe::record_counts(0, 0, 1, payload.len());
+    crate::observe::record_hydration_source(hydration_source(&source));
     Ok(source)
 }
 
-fn hydration_source(
-    source: &GraphGenerationReplaySource,
-) -> crate::hotpath_observe::HydrationSource {
+fn hydration_source(source: &GraphGenerationReplaySource) -> crate::observe::HydrationSource {
     match source {
-        GraphGenerationReplaySource::InlineManifest(_) => {
-            crate::hotpath_observe::HydrationSource::Inline
-        }
+        GraphGenerationReplaySource::InlineManifest(_) => crate::observe::HydrationSource::Inline,
         GraphGenerationReplaySource::MetadataOnlyManifest(_) => {
-            crate::hotpath_observe::HydrationSource::Metadata
+            crate::observe::HydrationSource::Metadata
         }
         GraphGenerationReplaySource::SealedCodeGeneration(_) => {
-            crate::hotpath_observe::HydrationSource::Sealed
-        }
-        GraphGenerationReplaySource::SemanticVectorGeneration(_) => {
-            crate::hotpath_observe::HydrationSource::SemanticVector
+            crate::observe::HydrationSource::Sealed
         }
     }
 }
@@ -542,40 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_inline_source_decodes_the_identical_manifest() {
-        let manifest = corpus_manifest();
-        let payload = manifest.canonical_replay_source(&|| Ok(())).unwrap();
-        let decoded = checked_decode_replay_source(&payload, &|| Ok(())).unwrap();
-        assert_eq!(
-            decoded,
-            GraphGenerationReplaySource::InlineManifest(Box::new(manifest))
-        );
-    }
-
-    #[test]
-    fn canonical_sealed_source_decodes_the_identical_replay() {
-        let sealed = SealedCodeGenerationReplay {
-            repository: tracedecay_domain::RepositoryId::new("repository.replay").unwrap(),
-            generation: tracedecay_domain::CodeGenerationId::new("code-generation.replay").unwrap(),
-            sealed_state_digest: SealedGraphStateDigest::try_from(format!(
-                "sha256:{}",
-                "5".repeat(64)
-            ))
-            .unwrap(),
-            projector_revision: GraphProjectorRevision::try_from("projector.replay".to_owned())
-                .unwrap(),
-        };
-        let payload = metadata_manifest()
-            .sealed_replay_payload(sealed.clone(), &|| Ok(()))
-            .unwrap();
-        let decoded = checked_decode_replay_source(&payload, &|| Ok(())).unwrap();
-        assert_eq!(
-            decoded,
-            GraphGenerationReplaySource::SealedCodeGeneration(sealed)
-        );
-    }
-
-    #[test]
     fn malformed_payloads_are_rejected_as_invalid() {
         let payload = corpus_manifest()
             .canonical_replay_source(&|| Ok(()))
@@ -642,12 +591,12 @@ mod tests {
         assert_eq!(result, Err(GraphDbError::Cancelled));
     }
 
-    /// `metadata_manifest_from_replay` must decode the canonical payload
-    /// exactly once; the binding validation reuses the decoded metadata. The
-    /// hydration counters record one replay row per decode, so a second parse
-    /// pass fails this test.
+    /// Metadata hydration must decode the canonical payload exactly once;
+    /// the binding validation reuses the decoded metadata. The hydration
+    /// counters record one replay row per decode, so a second parse pass
+    /// fails this test.
     #[test]
-    fn metadata_manifest_from_replay_decodes_the_payload_once() {
+    fn metadata_manifest_hydration_decodes_the_payload_once() {
         let manifest = metadata_manifest();
         let publication = manifest
             .relational_metadata_replay(
@@ -658,11 +607,13 @@ mod tests {
                 &|| Ok(()),
             )
             .unwrap();
-        let _ = crate::hotpath_observe::take_hydration_counters();
-        let hydrated = metadata_manifest_from_replay(&publication, &|| Ok(()))
+        let _ = crate::observe::take_hydration_counters();
+        let source =
+            checked_decode_replay_source(&publication.canonical_replay_source, &|| Ok(())).unwrap();
+        let hydrated = metadata_manifest_from_source(&publication, &source, &|| Ok(()))
             .unwrap()
             .expect("a metadata-only replay must hydrate a metadata manifest");
-        let counters = crate::hotpath_observe::take_hydration_counters();
+        let counters = crate::observe::take_hydration_counters();
         assert_eq!(
             counters.replay_rows, 1,
             "metadata hydration must decode the canonical payload exactly once: {counters:?}"

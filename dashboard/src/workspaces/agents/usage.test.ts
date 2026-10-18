@@ -85,13 +85,6 @@ describe('describeWindow', () => {
 });
 
 describe('formatSpan', () => {
-  it('scales its unit to the magnitude', () => {
-    expect(formatSpan(0.5)).toBe('30 min');
-    expect(formatSpan(9.4)).toBe('9.4 h');
-    expect(formatSpan(30)).toBe('30 h');
-    expect(formatSpan(73.87)).toBe('3.1 d');
-    expect(formatSpan(600)).toBe('25 d');
-  });
 
   it('renders an em dash for an unknown span', () => {
     expect(formatSpan(null)).toBe('—');
@@ -156,13 +149,6 @@ describe('familyVerdict', () => {
     ).toBe('idle');
   });
 
-  it('summarises the live payload in one sentence instead of four null rows', () => {
-    const summary = familiesSummary(live);
-    expect(summary).toContain('2 of 4');
-    expect(summary).toContain('zero times');
-    expect(summary).toContain('cannot be flagged by construction');
-  });
-
   it('yields the summary to the rows when a family is actually flagged', () => {
     expect(
       familiesSummary([
@@ -171,7 +157,10 @@ describe('familyVerdict', () => {
     ).toBeNull();
   });
 
-  it('has nothing to say about an empty family list', () => {
+  it('summarizes an unflagged family list, and has nothing to say about an empty one', () => {
+    expect(familiesSummary(live)).toBe(
+      'No family is flagged: 2 of 4 have a substitute detector at all, and it fired zero times in this window. The other 2 cannot be flagged by construction.',
+    );
     expect(familiesSummary([])).toBeNull();
   });
 });

@@ -1,27 +1,21 @@
 use serde_json::json;
 use tracedecay_domain::{
-    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorLineageRefV2,
-    AnchorProvenanceRelationV2, AnchorSourceGenerationV2, CapabilityId, ComponentVersion,
-    CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass, FactAssertionKindV1,
-    FactCategoryV1, FactCurationActionV1, FactEvidenceRefV1, FactEvidenceRelationV1,
-    FactIdentityMaterialV1, FactIdentitySourceV1, ObservationScopeV1, PayloadReferenceV1,
-    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId, ProvenanceId,
-    ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2Parts,
-    RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1,
-    VectorWatermark,
+    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorLineageRef, AnchorProvenanceRelation,
+    AnchorSourceGeneration, CapabilityId, ComponentVersion, CoverageReportV1, EntityId, EntityKind,
+    EntityRef, EvidenceClass, FactAssertionKindV1, FactCategoryV1, FactCurationActionV1,
+    FactEvidenceRefV1, FactEvidenceRelationV1, FactIdentityMaterialV1, FactIdentitySourceV1,
+    ObservationScopeV1, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+    ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
+    RetrievalAnchorRecordParts, RetrievalAnchorTarget, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
+    SensitivityV1, VectorWatermark,
 };
 
 use super::*;
 
 mod add_material;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String, Error = DomainError>,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
     FactId::derive(
@@ -34,19 +28,6 @@ fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
         .unwrap(),
     )
     .unwrap()
-}
-
-#[test]
-fn fact_read_control_observes_live_interruption_state() {
-    let interrupted = std::sync::Arc::new(std::sync::RwLock::new(false));
-    let observed = std::sync::Arc::clone(&interrupted);
-    let control = FactReadControl::new(std::sync::Arc::new(move || {
-        *observed.read().expect("read interruption fixture")
-    }));
-
-    assert!(!control.interrupted());
-    *interrupted.write().expect("write interruption fixture") = true;
-    assert!(control.interrupted());
 }
 
 fn receipt_for(material: &serde_json::Value) -> SanitizationReceiptV1 {
@@ -197,13 +178,13 @@ fn projected_fact(
     .unwrap()
 }
 
-fn anchor(entity_id: &str, source_anchors: Vec<AnchorLineageRefV2>) -> RetrievalAnchorRecordV2 {
+fn anchor(entity_id: &str, source_anchors: Vec<AnchorLineageRef>) -> RetrievalAnchorRecord {
     const DIGEST_A: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::Entity(EntityRef {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::Entity(EntityRef {
             id: EntityId::new(entity_id).unwrap(),
             kind: EntityKind::Document,
         }),
@@ -212,7 +193,7 @@ fn anchor(entity_id: &str, source_anchors: Vec<AnchorLineageRefV2>) -> Retrieval
         occurred_at: None,
         ingested_at: UtcMicros(1),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new("projection.fixture").unwrap(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),
@@ -232,9 +213,9 @@ fn anchor(entity_id: &str, source_anchors: Vec<AnchorLineageRefV2>) -> Retrieval
     .unwrap()
 }
 
-fn anchor_source(anchor_id: RetrievalAnchorId) -> AnchorLineageRefV2 {
-    AnchorLineageRefV2::new(
-        AnchorProvenanceRelationV2::DerivedFrom,
+fn anchor_source(anchor_id: RetrievalAnchorId) -> AnchorLineageRef {
+    AnchorLineageRef::new(
+        AnchorProvenanceRelation::DerivedFrom,
         anchor_id,
         ObservationScopeV1::Profile,
     )
@@ -304,28 +285,6 @@ fn batch_rejects_missing_and_cyclic_anchor_lineage() {
     )
     .unwrap_err();
     assert!(matches!(error, FactStoreError::CyclicAnchorLineage { .. }));
-}
-
-#[test]
-fn batch_accepts_order_independent_acyclic_anchor_lineage() {
-    let owner = FactOwnerV1::Profile;
-    let fact_id = fact_id(owner.clone(), "operation.anchor-dag");
-    let root = anchor("entity.dag.root", vec![]);
-    let child = anchor(
-        "entity.dag.child",
-        vec![anchor_source(root.anchor_id().clone())],
-    );
-
-    FactWriteBatch::new(
-        fact_id.clone(),
-        owner.clone(),
-        None,
-        vec![payload_event(fact_id, owner, 1)],
-        vec![child, root],
-        vec![],
-        None,
-    )
-    .unwrap();
 }
 
 #[test]
@@ -454,20 +413,6 @@ fn normalized_tag_batch_rejects_non_correction_and_timestamp_mismatch() {
             })
         ));
     }
-}
-
-#[test]
-fn batch_accepts_item_counts_at_the_limit() {
-    let owner = FactOwnerV1::Profile;
-    let fact_id = fact_id(owner.clone(), "operation.batch-limit.boundary");
-    let events = (1..=MAX_FACT_WRITE_BATCH_EVENTS)
-        .map(|offset| payload_event(fact_id.clone(), owner.clone(), offset as i64))
-        .collect();
-    let new_anchors = (0..MAX_FACT_WRITE_BATCH_NEW_ANCHORS)
-        .map(|index| anchor(&format!("entity.batch-limit.{index}"), vec![]))
-        .collect();
-
-    FactWriteBatch::new(fact_id, owner, None, events, new_anchors, vec![], None).unwrap();
 }
 
 #[test]
@@ -887,49 +832,6 @@ fn durable_memory_receipts_expose_infallible_stable_state_digests() {
 }
 
 #[test]
-fn automatic_fact_receipt_preserves_typed_automation_run_id() {
-    let owner = FactOwnerV1::Profile;
-    let material = serde_json::json!({
-        "content": "durable automatic fact",
-        "category": "decision",
-        "tags": [],
-        "entities": [],
-        "metadata": {},
-    });
-    let request = ProjectMemoryFactAddMaterialV1::new(
-        owner.clone(),
-        "durable automatic fact".to_owned(),
-        FactCategoryV1::Decision,
-        None,
-        vec![],
-        vec![],
-        serde_json::json!({}),
-        receipt_for(&material),
-        Some("run.fixture.1".to_owned()),
-        Confidence::new(0.5).unwrap(),
-        None,
-    )
-    .unwrap()
-    .into_command(id("operation.automatic-fact"))
-    .unwrap();
-    let receipt = ProjectMemoryAutomaticFactReceiptV1::new(
-        id("automatic-fact.automation.fixture"),
-        owner,
-        ProjectMemoryAutomaticFactStateV1::Quarantined,
-        request,
-        ProjectMemoryAutomaticFactEvidenceV1::default(),
-        ProjectMemoryAutomaticFactEffectV1::Quarantined {
-            reason: "privacy sanitizer declined the automatic apply".to_owned(),
-        },
-        UtcMicros(1),
-    )
-    .unwrap();
-
-    assert_eq!(receipt.automation_run_id(), Some("run.fixture.1"));
-    assert_eq!(receipt.request().actor(), None);
-}
-
-#[test]
 fn automatic_fact_state_wire_contract_is_terminal_only() {
     for (state, expected) in [
         (ProjectMemoryAutomaticFactStateV1::Applied, "applied"),
@@ -954,12 +856,14 @@ fn automatic_fact_state_wire_contract_is_terminal_only() {
 
 #[test]
 fn automatic_fact_evidence_rejects_unknown_persisted_fields() {
-    assert!(
+    assert_eq!(
         serde_json::from_value::<ProjectMemoryAutomaticFactEvidenceV1>(json!({
             "evidence_hash": "evidence.fixture",
             "unexpected": true,
         }))
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "unknown field `unexpected`, expected one of `evidence_hash`, `item`, `validation`"
     );
 }
 

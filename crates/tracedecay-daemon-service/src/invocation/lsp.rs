@@ -1,11 +1,20 @@
 //! LSP session lifecycle: registered-owner lookup, session admission, frame relay, and expiry.
 
 use super::*;
+use crate::project_runtime::ProjectRuntimesStop;
+use crate::shutdown::{ShutdownJoined, ShutdownStatus};
 use tracedecay_lsp::LspRuntimeFailure;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::resident_memory::{ResidentOwnerScopeV1, process_resident_owners_v1};
+
+use super::lsp_residency::LspSessionResidencyV1;
 
 mod project_lifecycle;
 mod workspace_admission;
+
+#[cfg(test)]
+mod federated_pairing_tests;
 mod workspace_diagnostics;
 
 use workspace_admission::CurrentLspWorkspaceAuthorityV1;
@@ -25,7 +34,7 @@ pub(super) fn admit_lsp_control(
             ApplicationProblem::cancelled_before_admission(),
         )));
     }
-    if deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(now_micros()) {
         return Err(Box::new(DaemonInvocationResponse::application_problem(
             request_id,
             ApplicationProblem::timed_out_before_admission(),
@@ -39,13 +48,54 @@ pub fn canonicalize_lsp_roots(
         PathBuf,
         String,
         ResolvedScope,
-        tracedecay_application::RegisteredRootLocatorV1,
+        tracedecay_contracts::RegisteredRootLocatorV1,
     )],
 ) -> bool {
     roots.sort_by(|left, right| left.2.scope_digest.cmp(&right.2.scope_digest));
     !roots
         .windows(2)
         .any(|pair| pair[0].2.scope_digest == pair[1].2.scope_digest)
+}
+
+/// Register a session under its owner's granted worktree scope.
+fn lsp_session_residency(
+    owner: &DaemonLspInvocationOwner,
+    session: &LspSessionId,
+    actor: &RuntimeLspActor,
+) -> Option<LspSessionResidencyV1> {
+    let Some(grant) = owner.scope_grant.as_ref() else {
+        tracing::warn!(
+            event = "lsp_session_residency_unscoped",
+            "an LSP session opened without a worktree scope grant is not visible to the resident-memory inventory"
+        );
+        return None;
+    };
+    LspSessionResidencyV1::register(
+        process_resident_owners_v1(),
+        ResidentOwnerScopeV1 {
+            project_id: grant.scope.project_id.clone(),
+            worktree_id: grant.scope.worktree_id.clone(),
+        },
+        session,
+        actor.retained_bytes(),
+    )
+    .inspect_err(|error| {
+        tracing::error!(
+            event = "resident_owner_registration_failed",
+            kind = "session",
+            error = %error,
+            "an LSP session is not visible to the resident-memory inventory"
+        );
+    })
+    .ok()
+}
+
+impl RuntimeLspSession {
+    fn observe_residency(&self) {
+        if let Some(residency) = &self.residency {
+            residency.observe(self.actor.retained_bytes());
+        }
+    }
 }
 
 pub(super) async fn runtime_lsp_actor(
@@ -60,7 +110,7 @@ impl DaemonInvocationService {
     /// that does not need an await to close.
     ///
     /// Kept separate so the daemon shutdown coordinator can run it during
-    /// `prepare_shutdown_owner_phases` — before *any* owner join is polled —
+    /// `prepare_shutdown_owner_phases`, before *any* owner join is polled,
     /// instead of only when the invocation owner's own phase is reached.
     /// Every call here is idempotent.
     pub fn cancel_admissions(&self) {
@@ -69,13 +119,11 @@ impl DaemonInvocationService {
         self.work_attempt_processes.begin_shutdown();
     }
 
-    #[hotpath::skip]
     pub async fn begin_shutdown(&self) {
         *self.lsp_admission_open.lock().await = false;
         self.cancel_admissions();
     }
 
-    #[hotpath::skip]
     pub async fn install_lsp_owner(
         &self,
         project_root: PathBuf,
@@ -85,7 +133,6 @@ impl DaemonInvocationService {
         self.project_runtimes.publish(project_root, owner).await
     }
 
-    #[hotpath::skip]
     pub async fn lsp_owner(&self, project_root: Option<&Path>) -> Option<DaemonLspInvocationOwner> {
         let project_root = project_root?;
         if let Some(owner) = self
@@ -95,11 +142,10 @@ impl DaemonInvocationService {
         {
             return Some(owner);
         }
-        let canonical_root = project_root.canonicalize().ok()?;
+        let canonical_root = canonical_existing_identity(project_root).ok()?;
         self.project_runtimes.get(&canonical_root).await
     }
 
-    #[hotpath::skip]
     pub async fn lsp_owner_matches_scope(
         &self,
         project_root: &Path,
@@ -111,7 +157,6 @@ impl DaemonInvocationService {
             .is_some_and(|grant| grant.scope == *scope)
     }
 
-    #[hotpath::skip]
     pub async fn multi_root_query_context(
         &self,
         project_root: &Path,
@@ -120,7 +165,7 @@ impl DaemonInvocationService {
         observed_at: UtcMicros,
     ) -> Option<(RequestContext, ManifestDigest)> {
         let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
+        let grant = owner.scope_grant_at(observed_at)?;
         if grant.scope != *scope {
             return None;
         }
@@ -137,7 +182,6 @@ impl DaemonInvocationService {
         Some((context, digest))
     }
 
-    #[hotpath::skip]
     pub async fn persisted_scope_set(
         &self,
         project_root: &Path,
@@ -152,7 +196,6 @@ impl DaemonInvocationService {
         (scope_set.actor_id() == &grant.issuer).then_some(scope_set)
     }
 
-    #[hotpath::skip]
     pub async fn compare_and_swap_scope_set(
         &self,
         active_project_root: &Path,
@@ -160,7 +203,7 @@ impl DaemonInvocationService {
         mut roots: Vec<(
             PathBuf,
             ResolvedScope,
-            tracedecay_application::RegisteredRootLocatorV1,
+            tracedecay_contracts::RegisteredRootLocatorV1,
         )>,
         observed_at: UtcMicros,
         deadline: &Deadline,
@@ -200,7 +243,7 @@ impl DaemonInvocationService {
         let mut storages = vec![active_storage.clone()];
         for (ordinal, (project_root, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
-            let grant = owner.scope_grant?;
+            let grant = owner.scope_grant_at(observed_at)?;
             if grant.scope != *scope {
                 return None;
             }
@@ -217,7 +260,7 @@ impl DaemonInvocationService {
             )
             .ok()?;
             admissions.push(
-                tracedecay_application::AuthorizedRootAdmission::new(context, locator.clone())
+                tracedecay_contracts::AuthorizedRootAdmission::new(context, locator.clone())
                     .ok()?,
             );
         }
@@ -231,7 +274,7 @@ impl DaemonInvocationService {
         )
         .ok()?;
         if request_cancellation.is_some_and(CancellationToken::is_cancelled)
-            || deadline.is_elapsed_at(current_micros())
+            || deadline.is_elapsed_at(now_micros())
         {
             return None;
         }
@@ -239,21 +282,25 @@ impl DaemonInvocationService {
         // first durable write. Once the first compare-and-swap starts, finish
         // every authorized replica so the caller receives one authoritative
         // settlement instead of a fabricated interruption over a partial
-        // effect.
-        for storage in storages {
-            match storage
-                .compare_and_swap(request.expected_revision, &next)
-                .ok()?
-            {
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
-                    let stored = storage.read(next.scope_set_id()).ok()?;
-                    if stored.as_ref() != Some(&next) {
-                        return None;
+        // effect. The writes park their thread on the writer, so they run on
+        // the blocking pool.
+        let expected_revision = request.expected_revision;
+        let next = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            for storage in storages {
+                match storage.compare_and_swap(expected_revision, &next).ok()? {
+                    tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
+                    tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
+                        let stored = storage.read(next.scope_set_id()).ok()?;
+                        if stored.as_ref() != Some(&next) {
+                            return None;
+                        }
                     }
                 }
             }
-        }
+            Some(next)
+        })
+        .await
+        .ok()??;
         Some((
             active_scope,
             MultiRootScopeSetCasResultV1 {
@@ -263,7 +310,6 @@ impl DaemonInvocationService {
         ))
     }
 
-    #[hotpath::skip]
     pub async fn multi_root_evidence<T>(
         &self,
         project_root: &Path,
@@ -278,7 +324,7 @@ impl DaemonInvocationService {
         T: Serialize,
     {
         let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
+        let grant = owner.scope_grant_at(observed_at)?;
         let scope = grant.scope.clone();
         let context = RequestContext::new(
             grant.issuer.clone(),
@@ -305,7 +351,7 @@ impl DaemonInvocationService {
         let authority = AuthorityReceipt::from_context(&context, policy, observed_at).ok()?;
         let execution = OperationReceipt::completed(
             observed_at,
-            current_micros(),
+            now_micros(),
             deadline,
             OperationBudgetUsage::default(),
         )
@@ -350,17 +396,41 @@ impl DaemonInvocationService {
         Some((scope, ApplicationOutcome::Evidence(packet)))
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.expire_all", future = true)]
-    pub async fn expire_all(&self) -> bool {
+    /// `deadline` is the daemon shutdown phase deadline, when there is one;
+    /// project observability drains spend it instead of their own budget.
+    #[tracing::instrument(name = "daemon.service.lsp.expire_all", level = "trace", skip_all)]
+    pub async fn expire_all(&self, deadline: Option<std::time::Instant>) -> ShutdownJoined {
+        let started = std::time::Instant::now();
+        let step = |outcome: &str| {
+            tracedecay_runtime_core::logging::log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", outcome.to_string()),
+                    ("owner", "invocation".to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+        };
         self.begin_shutdown().await;
         let lease_shutdown = self.lsp_lease_tasks.shutdown().await;
+        step("lsp_lease_tasks_joined");
         let work_attempts_clean = self.work_attempt_processes.shutdown().await;
+        step("work_attempt_processes_joined");
         self.lsp_sessions.lock().await.clear();
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
-        let project_runtimes_clean = self.project_runtimes.shut_down_all().await;
+        step("lsp_registries_cleared");
+        let project_runtimes = self.project_runtimes.shut_down_all(deadline).await;
+        step("project_runtimes_shut_down");
+        // A project open that lost its registration to this shutdown dropped
+        // its observability owner, whose drain still holds the store lease.
+        self.store_observability.join_retirement_drains().await;
+        step("observability_retirements_joined");
         self.session_holder_databases.lock().await.clear();
-        self.operation_events.expire_all().await;
+        // The operation-event authority is process-global, not owned by this
+        // composition: only frontiers without a live producer expire here.
+        self.operation_events.expire_idle().await;
+        step("idle_operation_events_expired");
         let lease_shutdown_clean = lease_shutdown.is_ok();
         if let Err(problem) = lease_shutdown {
             tracing::error!(
@@ -371,16 +441,24 @@ impl DaemonInvocationService {
         if !work_attempts_clean {
             tracing::error!("active Work attempt process failed while shutdown joined it");
         }
-        project_runtimes_clean && lease_shutdown_clean && work_attempts_clean
+        let (project_runtimes_stopped, lost_work) = match project_runtimes {
+            ProjectRuntimesStop::Stopped => (true, Vec::new()),
+            ProjectRuntimesStop::StoppedWithLostWork(lost_work) => (true, lost_work),
+            ProjectRuntimesStop::DidNotStop => (false, Vec::new()),
+        };
+        let status = if project_runtimes_stopped && lease_shutdown_clean && work_attempts_clean {
+            ShutdownStatus::Clean
+        } else {
+            ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
+        };
+        ShutdownJoined { status, lost_work }
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn active_lsp_runtime_count(&self) -> usize {
         self.lsp_sessions.lock().await.len()
     }
 
-    #[hotpath::skip]
     async fn admit_lsp_workspace_holder(
         &self,
         workspace: &AuthorizedLspWorkspace,
@@ -393,7 +471,7 @@ impl DaemonInvocationService {
         self.worktree_holder_admission.admit_holders(roots).await
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.open", future = true)]
+    #[tracing::instrument(name = "daemon.service.lsp.open", level = "trace", skip_all)]
     pub async fn open_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -517,12 +595,14 @@ impl DaemonInvocationService {
         let expires_at_ms = now_ms.saturating_add(LSP_SESSION_TTL_MS);
         let session_id = access.session_id().clone();
         let project_identity = lsp_owner.project_identity.clone();
+        let residency = lsp_session_residency(&lsp_owner, &session_id, &actor);
         self.lsp_sessions.lock().await.insert(
             session_id,
             RuntimeLspSession {
                 expires_at_ms,
                 project_identity,
                 actor,
+                residency,
                 delivery_settlements: lsp_owner.delivery_settlements,
                 in_flight_delivery_attempt: None,
                 next_delivery_sequence: 1,
@@ -537,7 +617,7 @@ impl DaemonInvocationService {
         )
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.send", future = true)]
+    #[tracing::instrument(name = "daemon.service.lsp.send", level = "trace", skip_all)]
     pub async fn send_lsp_frame(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -560,6 +640,7 @@ impl DaemonInvocationService {
         let admission = session
             .actor
             .try_handle_client_payload(frame.as_bytes(), now_ms);
+        session.observe_residency();
         let (backpressured, closed) = match admission {
             ClientFrameAdmission::Consumed(dispatch) => (false, dispatch.closed),
             ClientFrameAdmission::Backpressured => (true, false),
@@ -576,7 +657,6 @@ impl DaemonInvocationService {
 
     /// The one fenced workspace-folder intent a session actor is holding for
     /// its daemon owner, if any.
-    #[hotpath::skip]
     pub async fn pending_lsp_workspace_folder_mutation(
         &self,
         session: &DaemonLspSessionAccess,
@@ -592,7 +672,6 @@ impl DaemonInvocationService {
     /// Answers a fenced workspace-folder intent: an authorized workspace
     /// applies it, `None` rejects it. A stale fence (the actor re-parsed a
     /// newer change or the scope set moved) settles as a no-op.
-    #[hotpath::skip]
     pub async fn settle_lsp_workspace_folder_mutation(
         &self,
         session: &DaemonLspSessionAccess,
@@ -631,7 +710,7 @@ impl DaemonInvocationService {
         };
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.poll", future = true)]
+    #[tracing::instrument(name = "daemon.service.lsp.poll", level = "trace", skip_all)]
     pub(super) async fn poll_lsp_frame(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -651,6 +730,7 @@ impl DaemonInvocationService {
             );
         };
         let dispatch = session.actor.flush_due(now_ms);
+        session.observe_residency();
         let outbound = session.actor.poll_outbound().map(ToOwned::to_owned);
         if let Some(frame) = outbound.as_deref() {
             let _ = retain_lsp_delivery_attempt(
@@ -658,7 +738,7 @@ impl DaemonInvocationService {
                 &mut session.next_delivery_sequence,
                 frame,
                 access.session_id(),
-                current_micros(),
+                now_micros(),
             );
         }
         let frame = outbound.and_then(|frame| String::from_utf8(frame).ok());
@@ -673,7 +753,7 @@ impl DaemonInvocationService {
         )
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.acknowledge", future = true)]
+    #[tracing::instrument(name = "daemon.service.lsp.acknowledge", level = "trace", skip_all)]
     pub(super) async fn acknowledge_lsp_frame(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -694,7 +774,7 @@ impl DaemonInvocationService {
         };
         let acknowledged = session.actor.acknowledge_outbound();
         if acknowledged {
-            session.settle_in_flight_delivery(
+            let _ = session.settle_in_flight_delivery(
                 tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
                 None,
             );
@@ -705,7 +785,7 @@ impl DaemonInvocationService {
         )
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.detach", future = true)]
+    #[tracing::instrument(name = "daemon.service.lsp.detach", level = "trace", skip_all)]
     pub async fn detach_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -736,7 +816,7 @@ impl DaemonInvocationService {
         // The stdio bridge reaches this path after a write or flush failure.
         // Removing the actor discards its in-flight frame, so terminalize that
         // exact captured attempt before any later detach bookkeeping can fail.
-        session.settle_in_flight_delivery(
+        let _ = session.settle_in_flight_delivery(
             tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
             Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
         );
@@ -745,17 +825,29 @@ impl DaemonInvocationService {
             .cancel(access.session_id())
             .await
             .is_ok();
-        let actor_detached = match session.actor.lifecycle() {
-            SessionLifecycle::Exited => true,
-            _ => session.actor.detach().is_ok(),
-        };
+        // Detach is idempotent over every state that already satisfies it.
+        // `LspSessionControl::detach` is a transition, so it refuses
+        // `Detached -> Detached`, and `Exited`/`Expired` are already past it.
+        // Only a still-attached actor needs the transition, and needs it for
+        // the in-flight reset it carries. Reporting the other three as a
+        // failed detach is what made a session the daemon's own connection
+        // teardown (`disconnect_lsp_session`) had already detached come back
+        // as `Unavailable`, so a gracefully exiting stdio bridge failed with
+        // "LSP gateway authority is unavailable" after its own
+        // `shutdown`/`exit`.
+        if !matches!(
+            session.actor.lifecycle(),
+            SessionLifecycle::Detached | SessionLifecycle::Exited | SessionLifecycle::Expired
+        ) {
+            let _ = session.actor.detach();
+        }
         if !endpoint_closed {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         }
-        if !lease_cancelled || !actor_detached {
+        if !lease_cancelled {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -764,7 +856,7 @@ impl DaemonInvocationService {
         DaemonInvocationResponse::with_outcome(request_id, DaemonInvocationOutcome::LspDetached)
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.reconnect", future = true)]
+    #[tracing::instrument(name = "daemon.service.lsp.reconnect", level = "trace", skip_all)]
     pub async fn reconnect_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -786,7 +878,7 @@ impl DaemonInvocationService {
             Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
         };
         let mut credential_bytes = [0_u8; 32];
-        if getrandom::getrandom(&mut credential_bytes).is_err() {
+        if getrandom::fill(&mut credential_bytes).is_err() {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -866,7 +958,7 @@ impl DaemonInvocationService {
         )
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.disconnect", future = true)]
+    #[tracing::instrument(name = "daemon.service.lsp.disconnect", level = "trace", skip_all)]
     pub async fn disconnect_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -880,15 +972,13 @@ impl DaemonInvocationService {
         let session_id = access.session_id().clone();
         let sessions = Arc::clone(&self.lsp_sessions);
         let registry = Arc::clone(lsp_registry);
+        let lease_timer = self.lsp_lease_tasks.lease_timer();
         let (activate_expiry, expiry_activated) = tokio::sync::oneshot::channel::<u64>();
         let expiry = async move {
             let Ok(expires_at_ms) = expiry_activated.await else {
                 return;
             };
-            tokio::time::sleep(std::time::Duration::from_millis(
-                expires_at_ms.saturating_sub(now_millis()),
-            ))
-            .await;
+            lease_timer.expire(expires_at_ms).await;
             registry.lock().await.expire_at(expires_at_ms);
             sessions
                 .lock()
@@ -968,7 +1058,6 @@ impl DaemonInvocationService {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn authenticate(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -1002,7 +1091,6 @@ impl DaemonInvocationService {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn expire_sessions(&self, now_ms: u64) {
         self.lsp_sessions
             .lock()

@@ -2,14 +2,19 @@ use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde_json::Value;
+use tracedecay_contracts::retrieval::{
+    SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
+    SessionRetrievalBudgetStageV1,
+};
 use tracedecay_domain::{SessionId, SignedCursorKeyRefV1};
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, MAX_TEMPORAL_PARTICIPANTS, TemporalAuthorizedRoot,
-    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
-    TemporalPreparedCandidateCohort, TemporalRetrievalScope, TemporalSourceAccess,
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::snapshot::{
+    MAX_TEMPORAL_PARTICIPANTS, TemporalParticipantAuthorization, TemporalParticipantGeneration,
+    TemporalParticipantManifest, TemporalPreparedCandidateCohort, TemporalSourceAccess,
     TemporalWatermarks,
 };
+use tracedecay_temporal_query::snapshot::{TemporalAuthorizedRoot, TemporalRetrievalScope};
 
 use super::execution::{
     AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
@@ -17,6 +22,10 @@ use super::execution::{
 use super::map_control_error;
 use super::sql::TemporalSqlRead;
 use super::sql::TemporalSqlRows;
+
+// Keep a full root window from becoming one long exact-SQL materialization.
+// This matches the existing frozen-participant read batch in `retrieval`.
+const PREPARED_PARTICIPANT_BATCH: usize = 64;
 
 /// Decides what a request is actually allowed to see of one participant source.
 ///
@@ -112,12 +121,18 @@ pub(super) async fn freeze_participants(
             ],
         )
         .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        .map_err(|error| {
+            SessionTemporalExecutionError::storage("read session participant", error)
+        })?;
 
-    collect_participant_rows(read, rows, request, None).await
+    collect_participant_rows(read, vec![rows], request, None).await
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.freeze.prepared_candidates")]
+#[tracing::instrument(
+    name = "session_temporal.freeze.prepared_candidates",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn freeze_prepared_candidate_participants(
     read: &TemporalSqlRead<'_>,
     request: &AuthorizedTemporalExecutionRequest,
@@ -160,24 +175,42 @@ pub(super) async fn freeze_prepared_candidate_participants(
         });
     }
     if keys.len() > MAX_TEMPORAL_PARTICIPANTS {
-        return Err(SessionTemporalExecutionError::BudgetExhausted);
+        return Err(SessionTemporalExecutionError::BudgetExhausted {
+            stage: SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,
+            accounting: Some(SessionRetrievalBudgetAccountingV1 {
+                limit: MAX_TEMPORAL_PARTICIPANTS as u64,
+                observed: SessionRetrievalBudgetObservationV1::Requested {
+                    units: keys.len() as u64,
+                },
+            }),
+        });
     }
-    let encoded_keys = serde_json::to_string(
-        &keys
-            .iter()
-            .map(|(session_id, provider, generation)| {
-                serde_json::json!({
-                    "session_id": session_id,
-                    "provider": provider,
-                    "generation": generation,
+    let expected_count = keys.len();
+    let keys = keys.into_iter().collect::<Vec<_>>();
+    let mut row_batches = Vec::with_capacity(keys.len().div_ceil(PREPARED_PARTICIPANT_BATCH));
+    for keys in keys.chunks(PREPARED_PARTICIPANT_BATCH) {
+        snapshot_request
+            .execution_control()
+            .checkpoint()
+            .map_err(map_control_error)?;
+        let encoded_keys = serde_json::to_string(
+            &keys
+                .iter()
+                .map(|(session_id, provider, generation)| {
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "provider": provider,
+                        "generation": generation,
+                    })
                 })
-            })
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-    let rows = read
-        .query(
-            "WITH requested AS (
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        // Keep the bounded requested keys outermost; reordering this join can
+        // scan the entire project population for each participant.
+        row_batches.push(
+            read.query(
+                "WITH requested AS (
                  SELECT json_extract(value, '$.session_id') AS session_id,
                         json_extract(value, '$.provider') AS provider,
                         CAST(json_extract(value, '$.generation') AS INTEGER) AS generation
@@ -187,15 +220,15 @@ pub(super) async fn freeze_prepared_candidate_participants(
                     generation.frozen_watermarks_json, source.project_key,
                     source.metadata_json, unixepoch(), relation.generation
              FROM requested
-             JOIN sessions AS source
+             CROSS JOIN sessions AS source
                ON source.session_id = requested.session_id
               AND source.provider = requested.provider
               AND source.project_key = ?2
-             JOIN session_temporal_generations AS generation
+             CROSS JOIN session_temporal_generations AS generation
                ON generation.session_id = requested.session_id
               AND generation.generation = requested.generation
               AND generation.state = 'active'
-             JOIN session_relation_receipts AS relation
+             CROSS JOIN session_relation_receipts AS relation
                ON relation.session_id = generation.session_id
               AND relation.generation = generation.generation
               AND relation.state = 'applied'
@@ -203,20 +236,24 @@ pub(super) async fn freeze_prepared_candidate_participants(
              WHERE (?3 IS NULL OR source.provider = ?3)
              ORDER BY generation.session_id, source.provider
              LIMIT 257",
-            params![
-                encoded_keys,
-                root.project_key(),
-                snapshot_request.provider_scope()
-            ],
-        )
-        .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-    collect_participant_rows(read, rows, request, Some(keys.len())).await
+                params![
+                    encoded_keys,
+                    root.project_key(),
+                    snapshot_request.provider_scope()
+                ],
+            )
+            .await
+            .map_err(|error| {
+                SessionTemporalExecutionError::storage("read prepared participants", error)
+            })?,
+        );
+    }
+    collect_participant_rows(read, row_batches, request, Some(expected_count)).await
 }
 
 async fn collect_participant_rows(
     read: &TemporalSqlRead<'_>,
-    mut rows: TemporalSqlRows,
+    row_batches: Vec<TemporalSqlRows>,
     request: &AuthorizedTemporalExecutionRequest,
     expected_count: Option<usize>,
 ) -> Result<
@@ -240,91 +277,93 @@ async fn collect_participant_rows(
         summary: 0,
     };
     let mut shared_cursor_key = None::<Option<SignedCursorKeyRefV1>>;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
-    {
-        snapshot_request
-            .execution_control()
-            .checkpoint()
-            .map_err(map_control_error)?;
-        let session_id = row
-            .get::<String>(0)
-            .ok()
-            .and_then(|value| SessionId::new(value).ok())
-            .ok_or(SessionTemporalExecutionError::Unavailable)?;
-        let source_id = row
-            .get::<String>(1)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let generation = row
-            .get::<i64>(2)
-            .ok()
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(SessionTemporalExecutionError::Unavailable)?;
-        let encoded = row
-            .get::<String>(3)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let participant_project_key = row
-            .get::<String>(4)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let participant_metadata = row
-            .get::<Option<String>>(5)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let snapshot_time = row
-            .get::<i64>(6)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let graph_generation = row
-            .get::<i64>(7)
-            .ok()
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(SessionTemporalExecutionError::Unavailable)?;
-        let mut authorization =
-            participant_authorization(snapshot_request.authorized_root(), &participant_project_key);
-        let access = participant_source_access(participant_metadata.as_deref(), snapshot_time)
-            .unwrap_or_else(|| {
-                authorization = TemporalParticipantAuthorization::Denied;
-                TemporalSourceAccess::Available
-            });
-        let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        if frozen.active_generation > generation {
-            return Err(SessionTemporalExecutionError::Unavailable);
-        }
-        let watermarks = TemporalWatermarks {
-            generation,
-            source: frozen.source_frontier,
-            projection: frozen.projection_frontier,
-            index: frozen.projection_frontier,
-            summary: frozen.summary_frontier,
-        };
-        aggregate.generation = aggregate.generation.max(watermarks.generation);
-        aggregate.source = aggregate.source.max(watermarks.source);
-        aggregate.projection = aggregate.projection.max(watermarks.projection);
-        aggregate.index = aggregate.index.max(watermarks.index);
-        aggregate.summary = aggregate.summary.max(watermarks.summary);
-        match &shared_cursor_key {
-            Some(expected) if expected != &frozen.cursor_key => {
+    for mut rows in row_batches {
+        while let Some(row) = rows.next().await.map_err(|error| {
+            SessionTemporalExecutionError::storage("read participant row", error)
+        })? {
+            snapshot_request
+                .execution_control()
+                .checkpoint()
+                .map_err(map_control_error)?;
+            let session_id = row
+                .get::<String>(0)
+                .ok()
+                .and_then(|value| SessionId::new(value).ok())
+                .ok_or(SessionTemporalExecutionError::Unavailable)?;
+            let source_id = row
+                .get::<String>(1)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let generation = row
+                .get::<i64>(2)
+                .ok()
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(SessionTemporalExecutionError::Unavailable)?;
+            let encoded = row
+                .get::<String>(3)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let participant_project_key = row
+                .get::<String>(4)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let participant_metadata = row
+                .get::<Option<String>>(5)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let snapshot_time = row
+                .get::<i64>(6)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let graph_generation = row
+                .get::<i64>(7)
+                .ok()
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(SessionTemporalExecutionError::Unavailable)?;
+            let mut authorization = participant_authorization(
+                snapshot_request.authorized_root(),
+                &participant_project_key,
+            );
+            let access = participant_source_access(participant_metadata.as_deref(), snapshot_time)
+                .unwrap_or_else(|| {
+                    authorization = TemporalParticipantAuthorization::Denied;
+                    TemporalSourceAccess::Available
+                });
+            let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            if frozen.active_generation > generation {
                 return Err(SessionTemporalExecutionError::Unavailable);
             }
-            None => shared_cursor_key = Some(frozen.cursor_key.clone()),
-            Some(_) => {}
+            let watermarks = TemporalWatermarks {
+                generation,
+                source: frozen.source_frontier,
+                projection: frozen.projection_frontier,
+                index: frozen.projection_frontier,
+                summary: frozen.summary_frontier,
+            };
+            aggregate.generation = aggregate.generation.max(watermarks.generation);
+            aggregate.source = aggregate.source.max(watermarks.source);
+            aggregate.projection = aggregate.projection.max(watermarks.projection);
+            aggregate.index = aggregate.index.max(watermarks.index);
+            aggregate.summary = aggregate.summary.max(watermarks.summary);
+            match &shared_cursor_key {
+                Some(expected) if expected != &frozen.cursor_key => {
+                    return Err(SessionTemporalExecutionError::Unavailable);
+                }
+                None => shared_cursor_key = Some(frozen.cursor_key.clone()),
+                Some(_) => {}
+            }
+            entries.push(
+                TemporalParticipantGeneration::new(
+                    session_id,
+                    source_id,
+                    watermarks,
+                    graph_generation,
+                    &configuration_digest,
+                    snapshot_request.access_digest(),
+                    authorization,
+                    access,
+                )
+                .map_err(map_control_error)?,
+            );
         }
-        entries.push(
-            TemporalParticipantGeneration::new(
-                session_id,
-                source_id,
-                watermarks,
-                graph_generation,
-                &configuration_digest,
-                snapshot_request.access_digest(),
-                authorization,
-                access,
-            )
-            .map_err(map_control_error)?,
-        );
+        drop(rows);
     }
-    drop(rows);
     if expected_count.is_some_and(|expected| entries.len() != expected) {
         return Err(SessionTemporalExecutionError::Stale { generation_lag: 1 });
     }
@@ -341,7 +380,11 @@ async fn collect_participant_rows(
     Ok((participants, aggregate, shared_cursor_key.flatten()))
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.freeze.root_readiness")]
+#[tracing::instrument(
+    name = "session_temporal.freeze.root_readiness",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn root_readiness(
     read: &TemporalSqlRead<'_>,
     request: &AuthorizedTemporalExecutionRequest,
@@ -378,11 +421,11 @@ pub(super) async fn root_readiness(
             params![root.project_key(), snapshot_request.provider_scope()],
         )
         .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        .map_err(|error| SessionTemporalExecutionError::storage("read root readiness", error))?;
     let row = rows
         .next()
         .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
+        .map_err(|error| SessionTemporalExecutionError::storage("read root readiness", error))?
         .ok_or(SessionTemporalExecutionError::Unavailable)?;
     let total = row
         .get::<i64>(0)
@@ -451,11 +494,11 @@ async fn authorized_scope_has_sources(
             .await
         }
     }
-    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+    .map_err(|error| SessionTemporalExecutionError::storage("read authorized sources", error))?;
     rows.next()
         .await
         .map(|row| row.is_some())
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)
+        .map_err(|error| SessionTemporalExecutionError::storage("read authorized sources", error))
 }
 
 #[derive(Deserialize)]
@@ -470,14 +513,33 @@ struct FrozenWatermarksWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-    use tracedecay_domain::{RetrievalGrainV1, TemporalModeV1};
-    use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
+    use std::time::Instant;
+
+    use crate::SessionTemporalExecutionReport;
+    use tempfile::{TempDir, tempdir};
+    use tracedecay_domain::{
+        CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+        CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
+        ContextOmissionReasonV1, DurableObservationV1, ObservationId,
+        ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+        ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+        PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, RetrievalGrainV1,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, TemporalModeV1, UtcMicros,
+    };
+    use tracedecay_global_db::tests::harness::{
+        bind_test_session_relation_graph, open_registered_test_database_fixture,
+        publish_test_session_relation_projection,
+    };
+    use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
-    use tracedecay_temporal_query::context::ContextBudget;
-    use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
+    use tracedecay_temporal_query::candidates::CandidateChannel;
+    use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+    use tracedecay_temporal_query::execution::{ExecutionControl, ExecutionLimits};
     use tracedecay_temporal_query::ranking::DiversityLimits;
+    use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
+    use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 
     fn root(project_id: Option<&str>) -> TemporalAuthorizedRoot {
         match project_id {
@@ -489,9 +551,7 @@ mod tests {
         .expect("valid authorized root")
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     fn execution_request() -> AuthorizedTemporalExecutionRequest {
         let snapshot = TemporalSnapshotRequest::new(
@@ -509,6 +569,8 @@ mod tests {
         .expect("provider scope");
         AuthorizedTemporalExecutionRequest::new(
             snapshot,
+            tracedecay_domain::CursorBindingV1::new("session_retrieval", Vec::new())
+                .expect("cursor binding"),
             "graph stale".to_string(),
             None,
             10,
@@ -516,7 +578,7 @@ mod tests {
             ContextBudget {
                 max_bytes: 64 * 1024,
                 max_tokens: 4_096,
-                estimator_version: "test-estimator.v1".to_string(),
+                estimator_version: "words-v1".to_string(),
             },
             1,
             1,
@@ -525,6 +587,39 @@ mod tests {
     }
 
     fn root_execution_request(query: &str) -> AuthorizedTemporalExecutionRequest {
+        root_execution_request_with_limits(query, ExecutionLimits::default())
+    }
+
+    /// The same root request under an execution control that already refuses.
+    fn root_execution_request_under_control(
+        query: &str,
+        control: ExecutionControl,
+    ) -> AuthorizedTemporalExecutionRequest {
+        let request = root_execution_request(query);
+        let snapshot = request.snapshot_request().clone();
+        AuthorizedTemporalExecutionRequest::new(
+            snapshot.with_execution_control(control),
+            tracedecay_domain::CursorBindingV1::new("session_retrieval", Vec::new())
+                .expect("cursor binding"),
+            query.to_string(),
+            None,
+            10,
+            DiversityLimits::unbounded(),
+            ContextBudget {
+                max_bytes: 64 * 1024,
+                max_tokens: 4_096,
+                estimator_version: "words-v1".to_string(),
+            },
+            1,
+            1,
+            digest('4'),
+        )
+    }
+
+    fn root_execution_request_with_limits(
+        query: &str,
+        limits: ExecutionLimits,
+    ) -> AuthorizedTemporalExecutionRequest {
         let snapshot = TemporalSnapshotRequest::new(
             SessionId::new("root-anchor").expect("session"),
             digest('1'),
@@ -538,9 +633,12 @@ mod tests {
         .expect("authorized root")
         .with_provider_scope(Some("codex".to_string()))
         .expect("provider scope")
-        .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot);
+        .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot)
+        .with_limits(limits);
         AuthorizedTemporalExecutionRequest::new(
             snapshot,
+            tracedecay_domain::CursorBindingV1::new("session_retrieval", Vec::new())
+                .expect("cursor binding"),
             query.to_string(),
             None,
             10,
@@ -548,7 +646,7 @@ mod tests {
             ContextBudget {
                 max_bytes: 64 * 1024,
                 max_tokens: 4_096,
-                estimator_version: "test-estimator.v1".to_string(),
+                estimator_version: "words-v1".to_string(),
             },
             1,
             1,
@@ -556,11 +654,158 @@ mod tests {
         )
     }
 
+    /// `execute()` signs its continuation cursors, so a root fixture that stops at
+    /// `freeze()` needs no key and one that runs a query needs exactly one.
+    async fn seed_root_cursor_key(connection: &TestConnection) {
+        connection
+            .execute(
+                "INSERT INTO session_query_cursor_keys (
+                     key_id, key_version, key_material, created_at, retired_at
+                 ) VALUES ('cursor.key.root', 1, ?1, 1, NULL)",
+                params![vec![7u8; 32]],
+            )
+            .await
+            .expect("root cursor signing key");
+    }
+
+    /// Hands the seeded session's relation receipt to the production publisher.
+    ///
+    /// `seed_root_sessions` writes a receipt itself so a freeze-only fixture has a
+    /// graph watermark to check; the receipt is immutable, so a fixture that goes
+    /// on to publish a real projection must let the publisher mint its own.
+    async fn publish_root_relation_projection(
+        database: &RegisteredGlobalDbLeaseV1,
+        connection: &TestConnection,
+        session_id: &str,
+    ) {
+        for table in [
+            "session_relation_effect_journal",
+            "session_relation_receipts",
+        ] {
+            connection
+                .execute(
+                    &format!("DELETE FROM {table} WHERE session_id = ?1"),
+                    params![session_id],
+                )
+                .await
+                .expect("release fixture relation receipt");
+        }
+        publish_test_session_relation_projection(database, session_id, 1)
+            .await
+            .expect("published relation projection");
+    }
+
+    /// Canonical observation and anchor rows for one seeded root message.
+    ///
+    /// The relation projection the record read loads is reconstructed from these
+    /// two payloads, so a fixture that stubs them with `{}` can freeze a snapshot
+    /// but never execute a query.
+    fn fixture_root_evidence(
+        session_id: &str,
+        ordinal: u64,
+        record_id: &str,
+        receipt_id: &str,
+        text: &str,
+    ) -> (String, String) {
+        let session = SessionId::new(session_id).expect("session id");
+        let provider = ProviderId::new("codex").expect("provider");
+        let record_id = ObservationId::new(record_id).expect("record id");
+        let source = ObservationSourceIdentityV1::for_provider(provider.clone(), session.clone())
+            .expect("observation source");
+        let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider,
+            "message",
+            record_id.clone(),
+            CanonicalObservationRelationsV1::new(session).with_message_id(
+                ObservationId::new(format!("message.{ordinal}")).expect("message id"),
+            ),
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::User,
+                content: serde_json::json!({ "text": text }),
+                model: None,
+                timestamp: Some(i64::try_from(ordinal + 1).expect("timestamp")),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        )
+        .expect("observation envelope");
+        let payload = serde_json::to_value(envelope).expect("payload");
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).expect("source generation"),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            record_id,
+        )
+        .expect("observation identity");
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(receipt_id).expect("receipt id"),
+                ComponentVersion::new("sanitizer.root-fixture.v1").expect("sanitizer version"),
+            )
+            .expect("receipt ref"),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).expect("payload reference")),
+        )
+        .expect("sanitization receipt");
+        let observation = DurableObservationV1::new(
+            identity,
+            receipt,
+            RetentionClass::new("retention.root-fixture").expect("retention class"),
+            payload,
+        )
+        .expect("durable observation");
+        let projection_generation =
+            ProjectionGenerationId::new("projection.root-fixture.v1").expect("projection id");
+        let authorization = tracedecay_store::build_observation_resolution_authorization_v1(
+            &observation,
+            "root-fixture",
+        )
+        .expect("resolution authorization");
+        let anchor = tracedecay_store::build_observation_retrieval_anchor(
+            &observation,
+            projection_generation,
+            UtcMicros(1),
+            authorization,
+        )
+        .expect("retrieval anchor");
+        (
+            serde_json::to_string(&observation).expect("observation json"),
+            serde_json::to_string(&anchor).expect("anchor json"),
+        )
+    }
+
+    /// Occurrence identity is a content digest, so fixtures must mint canonical
+    /// ones or the record read refuses them before any budget is charged.
+    fn canonical_occurrence_id(index: usize) -> String {
+        format!("sha256:{index:064x}")
+    }
+
     async fn seed_root_sessions(
         connection: &TestConnection,
         count: usize,
         hit_count: usize,
         source_frontier: u64,
+    ) {
+        seed_root_sessions_with_text(connection, count, hit_count, source_frontier, &|_| {
+            "needle cohort".to_string()
+        })
+        .await;
+    }
+
+    /// Seeds `count` sessions of which the first `hit_count` carry one message,
+    /// whose text `message_text` supplies per session index.
+    ///
+    /// Term overlap across sessions is what separates the lexical tiers, so a
+    /// fixture that exercises them has to choose each session's words.
+    async fn seed_root_sessions_with_text(
+        connection: &TestConnection,
+        count: usize,
+        hit_count: usize,
+        source_frontier: u64,
+        message_text: &dyn Fn(usize) -> String,
     ) {
         for index in 0..count {
             let session_id = format!("session.{index:03}");
@@ -584,7 +829,8 @@ mod tests {
                     params![
                         session_id.as_str(),
                         format!(
-                            "{{\"active_generation\":1,\"cursor_key\":null,\
+                            "{{\"active_generation\":1,\
+                             \"cursor_key\":{{\"key_id\":\"cursor.key.root\",\"version\":1}},\
                              \"projection_frontier\":1,\"source_frontier\":{source_frontier},\
                              \"summary_frontier\":1}}"
                         )
@@ -629,7 +875,7 @@ mod tests {
             let observation_id = format!("observation.{index:03}");
             let anchor_id = format!("anchor.{index:03}");
             let turn_id = format!("turn.{index:03}");
-            let occurrence_id = format!("occurrence.{index:03}");
+            let occurrence_id = canonical_occurrence_id(index);
             let message_id = format!("message.{index:03}");
             connection
                 .execute(
@@ -640,17 +886,25 @@ mod tests {
                 )
                 .await
                 .expect("sanitization receipt");
+            let text = message_text(index);
+            let (observation_json, anchor_json) = fixture_root_evidence(
+                session_id.as_str(),
+                u64::try_from(index).expect("observation ordinal"),
+                &format!("record.{index:03}"),
+                receipt_id.as_str(),
+                &text,
+            );
             connection
                 .execute(
                     "INSERT INTO observations (
                          observation_id, payload_digest, receipt_id, observation_json,
                          committed_cursor_json
-                     ) VALUES (?1, ?2, ?3, '{\"identity\":{\"source\":{
-                         \"provider\":\"codex\"}}}', '{}')",
+                     ) VALUES (?1, ?2, ?3, ?4, '{}')",
                     params![
                         observation_id.as_str(),
                         format!("sha256:payload.{index:03}"),
-                        receipt_id.as_str()
+                        receipt_id.as_str(),
+                        observation_json.as_str()
                     ],
                 )
                 .await
@@ -659,8 +913,8 @@ mod tests {
                 .execute(
                     "INSERT INTO retrieval_anchors (
                          anchor_id, anchor_json, owner_json, projection_generation
-                     ) VALUES (?1, '{}', '{\"kind\":\"profile\"}', 'fixture')",
-                    params![anchor_id.as_str()],
+                     ) VALUES (?1, ?2, '{\"kind\":\"profile\"}', 'fixture')",
+                    params![anchor_id.as_str(), anchor_json.as_str()],
                 )
                 .await
                 .expect("retrieval anchor");
@@ -678,40 +932,503 @@ mod tests {
                 .execute(
                     "INSERT INTO session_occurrences (
                          session_id, generation, occurrence_id, source_observation_id,
-                         source_provider, projection_output_ordinal, retrieval_anchor_id,
-                         message_id, turn_id, role, knowledge_at, valid_time_json,
-                         evidence_json, sanitized_content_digest, sanitized_content_bytes,
-                         snippet_text, index_text
-                     ) VALUES (?1, 1, ?2, ?3, 'codex', 0, ?4, ?5, ?6, 'user', ?7,
-                               '{\"kind\":\"unknown\"}', '{}',
+                         source_sequence, source_provider, projection_output_ordinal,
+                         retrieval_anchor_id, message_id, turn_id,
+                         copied_from_anchor_ids_json, role, knowledge_at, valid_time_json,
+                         evidence_json, sanitized_content_digest, sanitized_content_bytes, index_text
+                     ) VALUES (?1, 1, ?2, ?3, ?4, 'codex', 0, ?5, ?6, ?7, '[]', 'user', ?8,
+                               '{\"kind\":\"unknown\"}',
+                               '{\"authority\":\"provider_native\",
+                                 \"evidence_class\":\"provider_declared\",
+                                 \"source_anchor_id\":\"source-evidence-anchor\",
+                                 \"sanitization_receipt\":{
+                                    \"receipt_id\":\"root-receipt\",
+                                    \"sanitizer_version\":\"root-sanitizer\"
+                                 }}',
                                '0000000000000000000000000000000000000000000000000000000000000000',
-                               14, 'needle cohort', 'needle cohort')",
+                               14, ?9)",
                     params![
                         session_id.as_str(),
                         occurrence_id.as_str(),
                         observation_id.as_str(),
+                        i64::try_from(index + 1).expect("source sequence"),
                         anchor_id.as_str(),
                         message_id.as_str(),
                         turn_id.as_str(),
-                        i64::try_from(index + 1).expect("knowledge at")
+                        i64::try_from(index + 1).expect("knowledge at"),
+                        text.as_str()
                     ],
                 )
                 .await
                 .expect("occurrence");
+            connection
+                .execute(
+                    "INSERT INTO session_current_entities (
+                         session_id, generation, entity_kind, entity_id,
+                         current_assertion_id, current_occurrence_id, coverage_json
+                     ) VALUES (?1, 1, 'occurrence_anchor', ?2, NULL, ?3, '{}')",
+                    params![
+                        session_id.as_str(),
+                        anchor_id.as_str(),
+                        occurrence_id.as_str()
+                    ],
+                )
+                .await
+                .expect("current occurrence anchor");
         }
     }
 
-    #[tokio::test]
-    async fn root_no_hit_over_256_sessions_is_truthful_zero_not_manifest_limit() {
-        let directory = tempdir().expect("temporary directory");
+    async fn open_root_fixture(
+        directory: &TempDir,
+    ) -> (
+        RegisteredGlobalDbLeaseV1,
+        RegisteredGlobalDbOwnerV1,
+        TestConnection,
+    ) {
         let database_path = directory.path().join("sessions.db");
-        let (database, _owner) = open_registered_test_database_fixture(
+        let (database, owner) = open_registered_test_database_fixture(
             &database_path,
             TestDatabaseRuntimeScope::ProfileSessions,
         )
         .await
         .expect("registered schema");
-        let connection = TestConnection::open(&database_path);
+        bind_test_session_relation_graph(&database).expect("session relation graph");
+        (database, owner, TestConnection::open(&database_path))
+    }
+
+    /// Groups the first seeded session's matching occurrence together with
+    /// `extra_members` further matching occurrences into one span evidence row.
+    async fn seed_root_span_evidence(connection: &TestConnection, extra_members: usize) {
+        seed_root_span(connection, extra_members, "needle cohort", "anchor.000").await;
+    }
+
+    /// The production shape of a wide group: a span of ordinary chatter that
+    /// happens to contain the one message the query matched. Each member carries
+    /// its own anchor and text, so no channel proposes it as a result.
+    async fn seed_root_span_over_unmatched_members(
+        connection: &TestConnection,
+        extra_members: usize,
+    ) {
+        seed_root_span(connection, extra_members, "surrounding chatter", "").await;
+    }
+
+    async fn seed_root_span(
+        connection: &TestConnection,
+        extra_members: usize,
+        text: &str,
+        shared_anchor: &str,
+    ) {
+        let mut members = vec![canonical_occurrence_id(0)];
+        for extra in 0..extra_members {
+            let occurrence_id = canonical_occurrence_id(1_000 + extra);
+            let anchor_id = if shared_anchor.is_empty() {
+                let anchor_id = format!("anchor.000.m{extra}");
+                connection
+                    .execute(
+                        "INSERT INTO retrieval_anchors (
+                             anchor_id, anchor_json, owner_json, projection_generation
+                         ) VALUES (?1, '{}', '{}', 'fixture')",
+                        params![anchor_id.as_str()],
+                    )
+                    .await
+                    .expect("span member anchor");
+                anchor_id
+            } else {
+                shared_anchor.to_owned()
+            };
+            connection
+                .execute(
+                    "INSERT INTO session_occurrences (
+                         session_id, generation, occurrence_id, source_observation_id,
+                         source_sequence, source_provider, projection_output_ordinal,
+                         retrieval_anchor_id, message_id, turn_id,
+                         copied_from_anchor_ids_json, role, knowledge_at, valid_time_json,
+                         evidence_json, sanitized_content_digest, sanitized_content_bytes, index_text
+                     ) VALUES ('session.000', 1, ?1, 'observation.000', 1, 'codex', ?2,
+                               ?4, ?3, 'turn.000', '[]', 'user', ?2,
+                               '{\"kind\":\"unknown\"}',
+                               '{\"authority\":\"provider_native\",
+                                 \"evidence_class\":\"provider_declared\",
+                                 \"source_anchor_id\":\"source-evidence-anchor\",
+                                 \"sanitization_receipt\":{
+                                    \"receipt_id\":\"root-receipt\",
+                                    \"sanitizer_version\":\"root-sanitizer\"
+                                 }}',
+                               '0000000000000000000000000000000000000000000000000000000000000000',
+                               14, ?5)",
+                    params![
+                        occurrence_id.as_str(),
+                        i64::try_from(extra + 1).expect("member ordinal"),
+                        format!("message.000.m{extra}"),
+                        anchor_id.as_str(),
+                        text
+                    ],
+                )
+                .await
+                .expect("span member occurrence");
+            connection
+                .execute(
+                    "INSERT INTO session_current_entities (
+                         session_id, generation, entity_kind, entity_id,
+                         current_assertion_id, current_occurrence_id, coverage_json
+                     ) VALUES ('session.000', 1, 'occurrence_anchor', ?1, NULL, ?2, '{}')
+                     ON CONFLICT DO NOTHING",
+                    params![anchor_id.as_str(), occurrence_id.as_str()],
+                )
+                .await
+                .expect("current span member anchor");
+            members.push(occurrence_id);
+        }
+        // A group container carries its own anchor. Sharing a member's anchor would
+        // make the container and the message indistinguishable to every filter
+        // that withholds containers from results.
+        connection
+            .execute(
+                "INSERT INTO retrieval_anchors (
+                     anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('span-anchor.000', '{}', '{\"kind\":\"profile\"}', 'fixture')",
+                (),
+            )
+            .await
+            .expect("span container anchor");
+        connection
+            .execute(
+                "INSERT INTO session_derived_evidence (
+                     session_id, generation, evidence_kind, evidence_id, retrieval_anchor_id,
+                     first_occurrence_id, last_occurrence_id, algorithm_version,
+                     configuration_digest, member_count, member_digest, evidence_json
+                 ) VALUES ('session.000', 1, 'span', 'span.000', 'span-anchor.000',
+                           ?1, ?2, 'fixture.v1', 'sha256:fixture', ?3, 'sha256:members', '{}')",
+                params![
+                    members.first().expect("first member").as_str(),
+                    members.last().expect("last member").as_str(),
+                    i64::try_from(members.len()).expect("member count")
+                ],
+            )
+            .await
+            .expect("span evidence");
+        for (ordinal, occurrence_id) in members.iter().enumerate() {
+            let role = if ordinal == 0 {
+                "first"
+            } else if ordinal + 1 == members.len() {
+                "last"
+            } else {
+                "member"
+            };
+            connection
+                .execute(
+                    "INSERT INTO session_derived_evidence_members (
+                         session_id, generation, evidence_kind, first_occurrence_id, ordinal,
+                         occurrence_id, member_role
+                     ) VALUES ('session.000', 1, 'span', ?1, ?2, ?3, ?4)",
+                    params![
+                        members.first().expect("first member").as_str(),
+                        i64::try_from(ordinal).expect("ordinal"),
+                        occurrence_id.as_str(),
+                        role
+                    ],
+                )
+                .await
+                .expect("span member");
+        }
+    }
+
+    struct WordEstimator;
+
+    impl VersionedTokenEstimator for WordEstimator {
+        fn version(&self) -> &'static str {
+            "words-v1"
+        }
+
+        fn token_policy(&self) -> TokenPolicy {
+            TokenPolicy::Whitespace
+        }
+    }
+
+    /// The measured shape behind the conjunctive clause: a root where each of the
+    /// query's terms is common and their conjunction is rare. Two sessions carry
+    /// all four terms; every other session carries three of them, so an OR clause
+    /// proposes the entire root and even a drop-one clause proposes hundreds.
+    async fn seed_root_lexical_cohort(connection: &TestConnection, count: usize) {
+        seed_root_sessions_with_text(connection, count, count, 1, &|index| {
+            match index {
+                0 | 1 => "alpha beta gamma delta",
+                _ => match index % 4 {
+                    0 => "beta gamma delta",
+                    1 => "alpha gamma delta",
+                    2 => "alpha beta delta",
+                    _ => "alpha beta gamma",
+                },
+            }
+            .to_string()
+        })
+        .await;
+    }
+
+    /// One session holds three of the query's four terms and nothing holds all
+    /// four, so the strict tier is a verified zero and the drop-one tier answers.
+    async fn seed_root_relaxable_cohort(connection: &TestConnection) {
+        seed_root_sessions_with_text(connection, 4, 4, 1, &|index| match index {
+            0 => "alpha beta gamma".to_string(),
+            _ => format!("beta without the rest {index}"),
+        })
+        .await;
+    }
+
+    fn ranked_anchors(report: &SessionTemporalExecutionReport) -> Vec<String> {
+        let mut anchors = report
+            .result()
+            .ranked
+            .iter()
+            .map(|candidate| candidate.anchor_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        // Two messages that match identically are ordered by recency; the claim
+        // under test is which population answered, not its internal order.
+        anchors.sort();
+        anchors
+    }
+
+    fn answering_channels(report: &SessionTemporalExecutionReport) -> Vec<CandidateChannel> {
+        let mut channels = report
+            .result()
+            .ranked
+            .iter()
+            .flat_map(|candidate| &candidate.contributions)
+            .map(|contribution| contribution.channel)
+            .collect::<Vec<_>>();
+        channels.sort();
+        channels.dedup();
+        channels
+    }
+
+    /// The measured failure: four common terms over 300 sessions proposed 41,064
+    /// candidates for a query two messages answer, and the candidate read refused
+    /// before either reached a page. All four terms must match one message.
+    #[asupersync::test]
+    async fn root_conjunctive_lexical_answers_with_the_messages_every_term_matches() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_lexical_cohort(&connection, 300).await;
+        seed_root_cursor_key(&connection).await;
+        for session in ["session.000", "session.001"] {
+            publish_root_relation_projection(&database, &connection, session).await;
+        }
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let report = execution
+            .execute(
+                root_execution_request("alpha beta gamma delta"),
+                &WordEstimator,
+            )
+            .await
+            .expect("a conjunction two messages satisfy must be retrievable");
+
+        assert_eq!(
+            ranked_anchors(&report),
+            vec!["anchor.000".to_owned(), "anchor.001".to_owned()],
+            "only the messages every term matches are results"
+        );
+        // 298 sessions match three of the four terms. Reaching the relaxation
+        // tier here would answer a question nobody asked, with hundreds of rows.
+        assert!(
+            !answering_channels(&report).contains(&CandidateChannel::LexicalRelaxed),
+            "a strict tier that answered must not relax: {:?}",
+            answering_channels(&report)
+        );
+        assert_eq!(report.result().coverage.total(), Some(2));
+        assert!(
+            report
+                .result()
+                .context
+                .bundle
+                .omissions
+                .iter()
+                .all(|omission| {
+                    omission.reason != ContextOmissionReasonV1::RootContinuationUnavailable
+                })
+        );
+        assert!(report.result().next_cursor.is_none());
+    }
+
+    /// A strict tier that is verified empty, scanned to exhaustion under these
+    /// filters and this snapshot, takes exactly one named step down the ladder,
+    /// and the answer says which tier produced it.
+    #[asupersync::test]
+    async fn a_verified_zero_strict_tier_relaxes_one_named_step() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_relaxable_cohort(&connection).await;
+        seed_root_cursor_key(&connection).await;
+        publish_root_relation_projection(&database, &connection, "session.000").await;
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let report = execution
+            .execute(
+                root_execution_request("alpha beta gamma delta"),
+                &WordEstimator,
+            )
+            .await
+            .expect("a verified-zero strict tier relaxes rather than refusing");
+
+        assert_eq!(ranked_anchors(&report), vec!["anchor.000".to_owned()]);
+        assert_eq!(
+            answering_channels(&report),
+            vec![CandidateChannel::LexicalRelaxed],
+            "the relaxation tier answered, and the receipt names it"
+        );
+    }
+
+    /// A tier that ran out of time was never verified empty, so the ladder does
+    /// not advance: the query reports the timeout it hit. The same fixture and
+    /// query relax and answer without the deadline, which is what makes the
+    /// withheld step observable rather than assumed.
+    #[asupersync::test]
+    async fn a_timed_out_strict_tier_refuses_instead_of_relaxing() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_relaxable_cohort(&connection).await;
+        seed_root_cursor_key(&connection).await;
+        publish_root_relation_projection(&database, &connection, "session.000").await;
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let result = execution
+            .execute(
+                root_execution_request_under_control(
+                    "alpha beta gamma delta",
+                    ExecutionControl::new(Some(Instant::now())),
+                ),
+                &WordEstimator,
+            )
+            .await;
+
+        match result {
+            Err(SessionTemporalExecutionError::DeadlineExceeded) => {}
+            other => panic!(
+                "a timed-out lexical scan must stay a deadline, not become a \
+                 relaxed answer or a zero: {other:?}"
+            ),
+        }
+    }
+
+    #[asupersync::test]
+    async fn root_span_matched_by_many_members_is_one_candidate_over_300_sessions() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_sessions(&connection, 300, 1, 1).await;
+        seed_root_span_evidence(&connection, 4).await;
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let (_, snapshot, _) = execution
+            .freeze(&root_execution_request("needle cohort"))
+            .await
+            .expect("rare root hit with derived evidence");
+
+        let spans: Vec<_> = snapshot
+            .prepared_candidate_cohort()
+            .expect("prepared cohort")
+            .candidates()
+            .iter()
+            .filter(|candidate| candidate.channel == CandidateChannel::Span)
+            .collect();
+        // The clause reports the span once however many of its five members
+        // match; one row per matching member would overrun the candidate read.
+        assert_eq!(
+            spans.len(),
+            1,
+            "a span matched by several members must be one candidate: {spans:?}"
+        );
+        assert_eq!(spans[0].session.as_deref(), Some("session.000"));
+    }
+
+    /// The refusal this reproduces: one rare hit across 300 sessions, wrapped in a
+    /// span whose membership dwarfs `record_limit`. The query must return its hit
+    /// under the unchanged ceiling, because a group costs its bounds, not its
+    /// census.
+    #[asupersync::test]
+    async fn root_rare_hit_executes_under_the_unchanged_record_ceiling() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_sessions(&connection, 300, 1, 1).await;
+        seed_root_cursor_key(&connection).await;
+        publish_root_relation_projection(&database, &connection, "session.000").await;
+
+        seed_root_span_over_unmatched_members(&connection, 2_000).await;
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let report = execution
+            .execute(root_execution_request("needle cohort"), &WordEstimator)
+            .await
+            .expect("a rare root hit inside a wide span must still be retrievable");
+
+        assert_eq!(
+            report
+                .result()
+                .ranked
+                .iter()
+                .map(|candidate| candidate.anchor_id.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["anchor.000".to_owned()],
+            "the matching message is the result; the span's 2000 members are not"
+        );
+        // Coverage counts the query-relevant population, so a wider span cannot
+        // inflate it into thousands of phantom omissions.
+        assert_eq!(report.result().coverage.total(), Some(1));
+    }
+
+    /// A record read that genuinely runs out must say so in its own terms. Before
+    /// this, every one of these reached the surface as an indistinguishable
+    /// "unavailable".
+    #[asupersync::test]
+    async fn root_record_read_exhaustion_is_a_typed_budget_refusal_from_execute() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_sessions(&connection, 300, 8, 1).await;
+        seed_root_cursor_key(&connection).await;
+        for index in 0..8 {
+            publish_root_relation_projection(
+                &database,
+                &connection,
+                &format!("session.{index:03}"),
+            )
+            .await;
+        }
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let result = execution
+            .execute(
+                root_execution_request_with_limits(
+                    "needle cohort",
+                    ExecutionLimits {
+                        record_limit: 4,
+                        ..ExecutionLimits::default()
+                    },
+                ),
+                &WordEstimator,
+            )
+            .await;
+
+        match result {
+            Err(SessionTemporalExecutionError::BudgetExhausted { stage, accounting }) => {
+                assert_eq!(stage, SessionRetrievalBudgetStageV1::RecordReadExhausted);
+                assert_eq!(
+                    accounting,
+                    Some(SessionRetrievalBudgetAccountingV1 {
+                        limit: 4,
+                        observed: SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
+                            units: 4,
+                        },
+                    }),
+                    "the refusal reports the ceiling it hit and what it consumed"
+                );
+            }
+            other => panic!("record-read exhaustion must be typed, not collapsed: {other:?}"),
+        }
+    }
+
+    #[asupersync::test]
+    async fn root_no_hit_over_256_sessions_is_truthful_zero_not_manifest_limit() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
         seed_root_sessions(&connection, 300, 0, 1).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -728,17 +1445,29 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
+    async fn root_readiness_preserves_storage_failure() {
+        let directory = tempdir().expect("temporary directory");
+        let connection = TestConnection::open(&directory.path().join("missing-schema.db"));
+        let result = root_readiness(
+            &TemporalSqlRead::engine_connection(&connection),
+            &root_execution_request("needle cohort"),
+        )
+        .await;
+
+        match result {
+            Err(SessionTemporalExecutionError::Storage { operation, detail }) => {
+                assert_eq!(operation, "read root readiness");
+                assert!(detail.contains("sessions"), "missing table cause: {detail}");
+            }
+            other => panic!("a broken read must retain its storage cause: {other:?}"),
+        }
+    }
+
+    #[asupersync::test]
     async fn root_no_hit_reports_aggregate_projection_staleness() {
         let directory = tempdir().expect("temporary directory");
-        let database_path = directory.path().join("sessions.db");
-        let (database, _owner) = open_registered_test_database_fixture(
-            &database_path,
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .expect("registered schema");
-        let connection = TestConnection::open(&database_path);
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
         seed_root_sessions(&connection, 3, 0, 2).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -754,17 +1483,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_rare_hit_over_256_sessions_freezes_only_the_admitted_participant() {
         let directory = tempdir().expect("temporary directory");
-        let database_path = directory.path().join("sessions.db");
-        let (database, _owner) = open_registered_test_database_fixture(
-            &database_path,
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .expect("registered schema");
-        let connection = TestConnection::open(&database_path);
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
         seed_root_sessions(&connection, 300, 1, 1).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -786,31 +1508,67 @@ mod tests {
         assert_eq!(readiness, Some(SessionDataFreshness::Fresh));
     }
 
-    #[tokio::test]
-    async fn root_common_hit_over_256_sessions_reports_candidate_budget_not_manifest_limit() {
+    #[asupersync::test]
+    async fn root_strict_population_over_one_window_returns_truthful_partial_coverage() {
         let directory = tempdir().expect("temporary directory");
-        let database_path = directory.path().join("sessions.db");
-        let (database, _owner) = open_registered_test_database_fixture(
-            &database_path,
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .expect("registered schema");
-        let connection = TestConnection::open(&database_path);
-        seed_root_sessions(&connection, 300, 300, 1).await;
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_sessions_with_text(&connection, 300, 280, 1, &|index| {
+            format!("needle strict-{index:03} cohort")
+        })
+        .await;
+        seed_root_cursor_key(&connection).await;
+        for index in 24..280 {
+            publish_root_relation_projection(
+                &database,
+                &connection,
+                &format!("session.{index:03}"),
+            )
+            .await;
+        }
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
-        let result = execution
+        let (_, snapshot, _) = execution
             .freeze(&root_execution_request("needle cohort"))
-            .await;
+            .await
+            .expect("full root candidate window");
+        let cohort = snapshot
+            .prepared_candidate_cohort()
+            .expect("prepared root candidate cohort");
+        assert_eq!(cohort.candidates().len(), 256);
+        assert_eq!(
+            cohort.strict_population(),
+            Some(TemporalCandidatePopulationCount::Exact(280))
+        );
+        let report = execution
+            .execute(root_execution_request("needle cohort"), &WordEstimator)
+            .await
+            .expect("a full root candidate window must return partial coverage");
+        let result = report.result();
 
-        assert!(matches!(
-            result,
-            Err(SessionTemporalExecutionError::BudgetExhausted)
-        ));
+        assert_eq!(result.ranked.len(), 10);
+        assert_eq!(
+            result.coverage.total(),
+            Some(280),
+            "unexpected coverage: {:?}",
+            result.coverage
+        );
+        assert_eq!(result.coverage.visible, 256);
+        assert_eq!(result.coverage.hidden, 0);
+        assert_eq!(result.coverage.unknown, 24);
+        assert!(result.next_cursor.is_none());
+        assert_eq!(
+            result
+                .context
+                .bundle
+                .omissions
+                .iter()
+                .find(|omission| omission.anchor_id.is_none())
+                .map(|omission| omission.reason.as_str()),
+            Some("root_continuation_unavailable")
+        );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn participant_freeze_rejects_an_active_generation_without_its_applied_graph_receipt() {
         let directory = tempdir().expect("temporary directory");
         let database_path = directory.path().join("sessions.db");

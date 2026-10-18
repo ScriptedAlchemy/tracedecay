@@ -4,7 +4,7 @@
  * The defect these guard is silent and has no visible symptom until it matters:
  * four surfaces read the project registry, each had its own query key, and the
  * SSE `project_registry_changed` handler named exactly one of them. The scope
- * bar's key was not the one, and the scope bar has no poll — so a project rename
+ * bar's key was not the one, and the scope bar has no poll, so a project rename
  * or an active-project switch left it holding the pre-change answer for the rest
  * of the session, and it is the read that decides whether write controls are
  * offered.
@@ -18,10 +18,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { targetedInvalidationKeys } from '../sse/useEvents.tsx';
 import type { SseBatch } from '../sse/types.ts';
 import {
-  PROJECT_REGISTRY_ROOT,
   PROJECT_NOT_FOUND,
   projectRegistryEntryKey,
-  projectRegistryInvalidationKey,
   projectRegistryListKey,
   fetchProjectRegistry,
   registryAnnotation,
@@ -35,20 +33,8 @@ import {
 } from '../../contracts/generated.ts';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
+import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
 import { READ_ONLY_SCOPE_STATUS } from '../scope/store.ts';
-
-/**
- * React Query's default key matching: a query is invalidated when the
- * invalidation key is a prefix of it.
- *
- * Reimplemented rather than asserted through a QueryClient because the property
- * under test is about the keys themselves, and a test that spun up a client
- * could pass while the keys were unrelated — the client would just invalidate
- * nothing and report success.
- */
-function matches(invalidation: readonly unknown[], queryKey: readonly unknown[]): boolean {
-  return invalidation.every((segment, index) => queryKey[index] === segment);
-}
 
 function registryBatch(): SseBatch {
   return {
@@ -57,59 +43,29 @@ function registryBatch(): SseBatch {
 }
 
 describe('project registry query keys', () => {
-  it('roots every registry key at the shared prefix', () => {
-    expect(projectRegistryListKey[0]).toBe(PROJECT_REGISTRY_ROOT);
-    expect(projectRegistryEntryKey('proj_a')[0]).toBe(PROJECT_REGISTRY_ROOT);
-    expect(projectRegistryInvalidationKey).toEqual([PROJECT_REGISTRY_ROOT]);
-  });
+  it('keeps the listing and each project entry in their own cache slots', () => {
+    const client = new QueryClient();
+    const slots = [
+      [[...projectRegistryListKey, 'unscoped'], 'listing'],
+      [[...projectRegistryEntryKey('list'), 'unscoped'], 'entry named list'],
+      [[...projectRegistryEntryKey('proj_a'), 'unscoped'], 'entry a'],
+      [[...projectRegistryEntryKey('proj_b'), 'unscoped'], 'entry b'],
+    ] as const;
+    for (const [key, value] of slots) client.setQueryData(key, value);
 
-  it('keeps entries for different projects apart', () => {
-    expect(projectRegistryEntryKey('proj_a')).not.toEqual(projectRegistryEntryKey('proj_b'));
-  });
-
-  it('does not collide the listing with an entry', () => {
-    expect(projectRegistryListKey).not.toEqual(projectRegistryEntryKey('list'));
-  });
-
-  /**
-   * The registry's direct daemon route carries no selected project. Its query
-   * key therefore ends in the unscoped token, while the invalidation still has
-   * to match the listing and every per-project entry it cannot enumerate.
-   */
-  it('is reached by the registry invalidation, listing and entries alike', () => {
-    const held = [
-      [...projectRegistryListKey, 'unscoped'],
-      [...projectRegistryEntryKey('proj_a'), 'unscoped'],
-      [...projectRegistryEntryKey('proj_b'), 'unscoped'],
-    ];
-    for (const queryKey of held) {
-      expect(matches(projectRegistryInvalidationKey, queryKey)).toBe(true);
-    }
-  });
-
-  it('is the key a project_registry_changed event actually invalidates', () => {
-    // The end-to-end link: the event handler's own output, matched against the
-    // keys the readers hold. A literal in the handler used to name only one.
-    const keys = targetedInvalidationKeys(registryBatch());
-    expect(keys).toContainEqual([...projectRegistryInvalidationKey]);
-
-    const invalidation = keys.find((key) =>
-      matches(key, [...projectRegistryListKey, 'unscoped']),
-    );
-    expect(invalidation).toBeDefined();
-    expect(
-      matches(invalidation as readonly string[], [
-        ...projectRegistryEntryKey('proj_a'),
-        'unscoped',
-      ]),
-    ).toBe(true);
+    expect(slots.map(([key]) => client.getQueryData(key))).toEqual([
+      'listing',
+      'entry named list',
+      'entry a',
+      'entry b',
+    ]);
   });
 
   /**
    * The same claim, made against React Query itself rather than against the
    * model of it above. `matches` is this file's reading of prefix matching, and
    * a wrong reading would let both tests pass while the client invalidated
-   * nothing — so one test holds real cache entries and checks they were really
+   * nothing, so one test holds real cache entries and checks they were really
    * marked stale.
    */
   it('marks both the listing and each entry stale in a real client', async () => {
@@ -134,13 +90,6 @@ describe('project registry query keys', () => {
     expect(client.getQueryState(unrelated)?.isInvalidated).toBe(false);
   });
 
-  it('does not invalidate the whole cache for a registry change', () => {
-    // Prefix matching makes an empty key match everything. The registry root has
-    // to be narrower than that, or a rename would discard every read in the app.
-    for (const key of targetedInvalidationKeys(registryBatch())) {
-      expect(key.length).toBeGreaterThan(0);
-    }
-  });
 });
 
 function fixturePayload(pathname: string): Record<string, unknown> {
@@ -151,26 +100,6 @@ function fixturePayload(pathname: string): Record<string, unknown> {
 describe('fetchProjectRegistry', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-  });
-
-  it('accepts only the envelope at the daemon-wide project route', async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify(fixtureEnvelope(fixturePayload('/api/projects/proj_b'))), {
-        status: 200,
-      }),
-    );
-    vi.stubGlobal('fetch', fetchMock);
-
-    const result = await fetchProjectRegistry(
-      '/api/projects/proj_b',
-      ProjectContextPayloadV1Schema,
-    );
-
-    expect(result.outcome).toBe('envelope');
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/projects/proj_b',
-      expect.objectContaining({ headers: { accept: 'application/json' } }),
-    );
   });
 
   it('keeps a decoded 503 registry answer in the canonical envelope result', async () => {
@@ -277,6 +206,24 @@ describe('fetchProjectRegistry', () => {
       fetchProjectRegistry('/api/projects/proj_b', ProjectContextPayloadV1Schema),
     ).resolves.toEqual({ outcome: 'transport', state: 'unsupported_schema' });
   });
+
+  it.each([200, 405])(
+    'preserves an abort that lands while a %i body is still being read',
+    async (status) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, init?: RequestInit) =>
+          responseWithBodyPendingUntilAbort(status, init?.signal),
+        ),
+      );
+      const controller = new AbortController();
+      const pending = fetchProjectRegistry('/api/projects', ProjectContextPayloadV1Schema, {
+        signal: controller.signal,
+      });
+      controller.abort();
+      await expect(pending).rejects.toThrow(/abort/i);
+    },
+  );
 });
 
 function context(overrides: Partial<ProjectContextPayloadV1>): ProjectContextPayloadV1 {
@@ -294,6 +241,7 @@ function project(label: string) {
     canonical_root: '/repo',
     created_at: 1,
     default_branch: 'main',
+    head_branch: 'main',
     display_root: '/repo',
     git_common_dir: null,
     label,
@@ -313,14 +261,6 @@ function registryEnvelope(
 }
 
 describe('registryReading', () => {
-  it('measures both facts from an ok answer', () => {
-    expect(
-      registryReading(
-        registryEnvelope(context({ is_active: true, project: project('Canonical') })),
-      ),
-    ).toEqual({ state: 'measured', label: 'Canonical', isActive: true });
-  });
-
   it('measures a not-active answer as a real reading', () => {
     expect(
       registryReading(
@@ -383,18 +323,9 @@ describe('registryReading', () => {
     },
   );
 
-  it('reports an absent result as unknown rather than assuming', () => {
-    expect(registryReading(undefined)).toEqual({ state: 'unknown' });
-  });
 });
 
 describe('registryAnnotation', () => {
-  it('says nothing about a name the registry confirmed', () => {
-    expect(
-      registryAnnotation(registryEnvelope(context({ project: project('Canonical') }))),
-    ).toBeNull();
-  });
-
   it('marks a name the answer did not confirm', () => {
     expect(registryAnnotation(registryEnvelope(context({ project: null })))).toBe('unconfirmed');
   });

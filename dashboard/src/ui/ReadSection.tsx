@@ -9,8 +9,8 @@ import { StateChip, type DomainStateKind } from './StateChip';
  * One read, resolved: either a value to render or a domain state that says why
  * there is none.
  *
- * Every wire ladder in this dashboard — the bare-payload JSON routes, the
- * `DashboardEnvelopeV1` routes, the structure reads, the Work envelope — is a
+ * Every wire ladder in this dashboard, the bare-payload JSON routes, the
+ * `DashboardEnvelopeV1` routes, the structure reads, the Work envelope, is a
  * different union at the transport edge and the same question at the render
  * edge: *may the body run, and if not, what does the reader get told?* Each
  * ladder answers that once, in an adapter beside its fetcher, and every surface
@@ -23,14 +23,16 @@ import { StateChip, type DomainStateKind } from './StateChip';
  * another, because each site re-derived the mapping. A single normalisation
  * makes drift a compile error instead of a screen nobody looks at twice.
  */
-export type ReadState<T> =
+export type ReadState<T, BlockedState extends DomainStateKind = DomainStateKind> =
   | { kind: 'ready'; value: T }
   | {
       kind: 'blocked';
       /** What the reader is told this read is. Always one of the taxonomy. */
-      state: DomainStateKind;
+      state: BlockedState;
       /** Whatever the source said about this state, and nothing where it said nothing. */
       detail?: string | undefined;
+      /** A decoded response can report unknown without supplying a payload. */
+      responseReceived?: boolean | undefined;
       /**
        * The decoded body a *source-level* refusal still carried.
        *
@@ -43,64 +45,12 @@ export type ReadState<T> =
       payload?: T | undefined;
     };
 
-/**
- * The states a payload read can be blocked in — the six failure outcomes plus
- * the two the ladder itself contributes.
- *
- * Narrower than `DomainStateKind` on purpose. A surface that words these in its
- * own terms — the Automations scheduler queues do — can then switch over them
- * exhaustively and fail to build when the set grows, which is the guarantee the
- * per-surface `PayloadResult` switches used to hold individually.
- */
-export type PayloadBlockedState =
-  | 'loading'
-  | 'unknown'
-  | 'offline'
-  | 'unauthorized'
-  | 'denied'
-  | 'error'
-  | 'unsupported_schema'
-  | 'unavailable';
-
-/** A payload read resolved, with its blocked states narrowed. Assignable to
- * `ReadState<T>` wherever only the taxonomy matters. */
-export type PayloadReadState<T> =
-  | { kind: 'ready'; value: T }
-  | {
-      kind: 'blocked';
-      state: PayloadBlockedState;
-      detail?: string | undefined;
-      payload?: T | undefined;
-    };
-
-/** The domain state a non-ok payload read renders as.
- *
- * Exhaustive over the failure outcomes, so a new one added to `PayloadResult`
- * fails to build here rather than falling into whichever arm a chain of
- * ternaries happened to end on — which is how 401 and 403 spent their whole
- * life rendering as a generic error whose only discriminator was status text. */
-function payloadFailureState(
-  result: Exclude<PayloadResult<unknown>, { outcome: 'ok' }>,
-): PayloadBlockedState {
-  switch (result.outcome) {
-    case 'offline':
-      return 'offline';
-    case 'unauthorized':
-      return 'unauthorized';
-    case 'denied':
-      return 'denied';
-    case 'error':
-      return 'error';
-    case 'unsupported_schema':
-      return 'unsupported_schema';
-    case 'unavailable':
-      return 'unavailable';
-    default: {
-      const exhaustive: never = result;
-      return exhaustive;
-    }
-  }
-}
+/** A payload read resolved, with blocked states derived from its outcomes so
+ * new outcomes remain exhaustive without a second list or identity switch. */
+export type PayloadReadState<T> = ReadState<
+  T,
+  'loading' | 'unknown' | Exclude<PayloadResult<unknown>['outcome'], 'ok'>
+>;
 
 /**
  * The payload ladder, resolved.
@@ -126,7 +76,7 @@ export function payloadReadState<T>(
   }
   return {
     kind: 'blocked',
-    state: payloadFailureState(result),
+    state: result.outcome,
     detail: result.outcome === 'error' ? result.detail : undefined,
   };
 }
@@ -135,8 +85,8 @@ export function payloadReadState<T>(
  * The envelope ladder, resolved to the envelope itself.
  *
  * The value is the whole `DashboardEnvelopeV1<T>` rather than its payload because the
- * truth header — coverage, freshness, authorization, the server's own legal
- * actions — is what every envelope surface renders beside the body, and a
+ * truth header, coverage, freshness, authorization, the server's own legal
+ * actions, is what every envelope surface renders beside the body, and a
  * reader handed only the payload would have to fetch it back out.
  *
  * The three sentences are per-site because what a reader needs to be told about
@@ -164,7 +114,10 @@ export function envelopeReadState<T>(
     return {
       kind: 'blocked',
       state: result.state,
-      detail: result.detail ?? details.transport ?? 'daemon unreachable',
+      detail: result.detail ?? (result.responseReceived
+        ? 'no usable result was provided'
+        : details.transport ?? 'daemon unreachable'),
+      responseReceived: result.responseReceived,
     };
   }
   return { kind: 'ready', value: result.envelope };
@@ -175,7 +128,7 @@ export function envelopeReadState<T>(
  *
  * The two chromes are the two places a blocked read can land, and they differ
  * because the surrounding surface differs. `centered` is for a channel that has
- * nothing else on it — the state takes the whole plate, and the title rides
+ * nothing else on it, the state takes the whole plate, and the title rides
  * inside it because there is no heading above. `panel` is for a titled section
  * among others: the heading and its blurb stay drawn, and only the body becomes
  * a chip, so the reader can still see which of six sections is the one that
@@ -202,13 +155,13 @@ export function ReadSection<T>({
     return state.kind === 'ready' ? (
       <>{children(state.value)}</>
     ) : (
-      <CenteredState title={title} kind={state.state} detail={state.detail} />
+      <CenteredState title={title} kind={state.state} detail={state.detail} responseReceived={state.responseReceived} />
     );
   }
   return (
     <section className={className} aria-label={title}>
       <h2 className="px-4 pt-4 text-sm font-semibold tracking-tight">{title}</h2>
-      {blurb ? <p className="px-4 pt-0.5 text-2xs text-text-muted">{blurb}</p> : null}
+      {blurb ? <p className="px-4 pt-0.5 text-body text-text-muted">{blurb}</p> : null}
       {state.kind === 'ready' ? (
         children(state.value)
       ) : (
@@ -234,7 +187,7 @@ export function PayloadBoundary<T>({
    * state for it.
    *
    * For payloads that carry their own `status` discriminant, where the child
-   * switches on it and has a sentence per condition — "the project registry is
+   * switches on it and has a sentence per condition, "the project registry is
    * not configured" says what to do about it, and the generic chip cannot,
    * because it does not know which source this is. Opt-in, because a child
    * that does not check `status` would otherwise render a failure body as
@@ -306,7 +259,7 @@ export function EnvelopeSection<T>({
  * come from the caller; these are the designed defaults per state.
  *
  * Partial on purpose. Every state listed has one next action that holds
- * wherever it appears — start the daemon, authenticate, update the build,
+ * wherever it appears, start the daemon, authenticate, update the build,
  * retry. `unavailable` has none: what to do about a source that cannot serve
  * depends on which source and on the reason it reported, both of which reach
  * the chip as its detail. A generic sentence here would either restate the
@@ -367,31 +320,38 @@ export function CenteredState({
   title,
   kind,
   detail,
+  responseReceived,
 }: {
   title: string;
   kind: DomainStateKind;
   detail?: string | undefined;
+  responseReceived?: boolean | undefined;
 }) {
-  const guidance = STATE_GUIDANCE[kind];
+  const guidance = kind === 'unknown' && responseReceived
+    ? {
+        sentence: 'The daemon responded without a usable result for this read.',
+        action: 'The reported reason describes why no result is shown.',
+      }
+    : STATE_GUIDANCE[kind];
   // A dead channel on an instrument still shows its ruled field and its bezel:
   // the reader can see the surface is present and simply carrying no signal.
   // Sized by its CONTAINER, not the viewport: this plate renders both on
   // full-width channels and inside narrow query rails, and the wide-plate
   // padding (p-8 outside, px-8 inside) left a ~230px rail about 90px of text
-  // column — the guidance wrapped one or two words per line. Below the @md
+  // column, the guidance wrapped one or two words per line. Below the @md
   // container width the paddings drop and the card takes the rail's full
   // width; the wide plates keep their original geometry.
   return (
     <div className="td-graticule @container flex h-full min-h-48 items-center justify-center bg-surface-0 p-3 @md:p-8">
       <div className="relative flex w-full max-w-md flex-col items-center gap-3 border border-edge-subtle bg-surface-1 px-3 py-4 text-center @md:w-auto @md:px-8 @md:py-6">
         <Corners />
-        <h1 className="text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
+        <h1 className="text-xs font-semibold uppercase tracking-[0.2em] text-text-primary">
           {title}
         </h1>
         <span aria-hidden className="h-px w-10 bg-edge-strong" />
         <StateChip kind={kind} detail={detail} />
         {guidance ? (
-          <p className="max-w-xs text-xs leading-relaxed text-text-muted">
+          <p className="max-w-xs text-body leading-relaxed text-text-muted">
             {guidance.sentence}{' '}
             <span className="text-text-secondary">{guidance.action}</span>
           </p>

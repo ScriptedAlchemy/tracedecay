@@ -12,9 +12,12 @@ async fn sqlite_writer_uses_production_wal_normal_policy() {
     let (database, _) = common::initialize_test_database(&tmp.path().join("policy.db"))
         .await
         .expect("initialize SQLite policy fixture");
-    let reader = database.read_connection();
+    let writer = database
+        .begin_write_transaction("inspect SQLite writer policy")
+        .await
+        .expect("begin production writer policy inspection");
     let (journal_mode, synchronous) = {
-        let mut rows = reader
+        let mut rows = writer
             .query(
                 "SELECT lower(journal_mode), synchronous
                  FROM pragma_journal_mode(), pragma_synchronous()",
@@ -33,7 +36,7 @@ async fn sqlite_writer_uses_production_wal_normal_policy() {
         )
     };
     let wal_autocheckpoint = {
-        let mut rows = reader
+        let mut rows = writer
             .query("PRAGMA wal_autocheckpoint", ())
             .await
             .expect("inspect production SQLite checkpoint policy");
@@ -44,6 +47,11 @@ async fn sqlite_writer_uses_production_wal_normal_policy() {
             .expect("production SQLite checkpoint policy row");
         row.get::<i64>(0).expect("wal_autocheckpoint")
     };
+
+    writer
+        .rollback()
+        .await
+        .expect("finish writer policy inspection");
 
     assert_eq!(journal_mode, "wal");
     assert_eq!(synchronous, 1);
@@ -67,8 +75,8 @@ mod temporal_kernel_behavior {
 
 mod lcm_payload_behavior {
     use tempfile::TempDir;
-    use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_lcm::{LcmExpandRequest, LcmExpandTarget};
+    use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_sessions::admission::HostAdmissionScope;
 
     use super::common::{lcm_payload_message, lcm_payload_session};
@@ -120,7 +128,7 @@ mod lcm_payload_behavior {
 
 mod lcm_query_behavior {
     use tempfile::TempDir;
-    use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_sessions::admission::HostAdmissionScope;
 
     use super::common::{lcm_payload_message, lcm_payload_session};
@@ -153,18 +161,19 @@ mod lcm_query_behavior {
             .expect("store canonical LCM record");
 
         let status = runtime
-            .lcm_status_for_test("cursor", Some("durable-query-session"))
+            .lcm_status_deep_for_test("cursor", Some("durable-query-session"))
             .await
             .expect("read canonical LCM status");
         assert_eq!(status.raw_message_count, 1);
         assert_eq!(status.store.messages, 1);
         assert!(status.store.token_estimate.complete);
+        assert_eq!(status.store.token_estimate.scanned_messages, 1);
     }
 }
 
 mod lcm_schema_durability {
     use tempfile::TempDir;
-    use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_sessions::admission::HostAdmissionScope;
 
     use super::common::{lcm_payload_message, lcm_payload_session};

@@ -1,21 +1,20 @@
 //! Storage-neutral code-search chunk and projection contracts.
 //!
 //! These values are immutable logical records, not rows coupled to a lexical
-//! table, vector table, or vendor index. Chunks are the replayable source for
-//! lexical and later model/version-specific projections; embeddings never
-//! become source or symbol authority.
+//! table or vendor index. Chunks are the replayable source for lexical and
+//! graph projections; a projection never becomes source or symbol authority.
 //!
 //! Code search does not define parallel ranking, fusion-profile,
 //! contribution, candidate, cursor, or hydration types here; those live in
 //! `crate::retrieval`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::research::id::{ManifestDigest, PrivacyDomainId, SanitizationReceiptId};
+use crate::research::id::{ManifestDigest, SanitizationReceiptId};
 use crate::research::{DomainError, canonical_sha256};
 
 use super::identity::{
@@ -32,13 +31,13 @@ pub const MAX_CHUNK_TEXT_BYTES: usize = 64 * 1024;
 /// Maximum sanitized query bytes held in one request-local query view.
 pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 
-const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v1";
+const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v2";
+const CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN: &str = "tracedecay.code-source-parent-delta.v1";
+const CODE_REUSED_PARTITION_DIGEST_DOMAIN: &str = "tracedecay.code-reused-partition.v1";
+const CODE_REUSED_PARTITION_ARC_SHARE_DIGEST_DOMAIN: &str =
+    "tracedecay.code-reused-partition.arc-share.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
-const EMBEDDING_PROJECTION_KEY_DIGEST_DOMAIN: &str = "tracedecay.embedding-projection-key.v1";
-const SEMANTIC_SEARCH_INDEX_KEY_DIGEST_DOMAIN: &str = "tracedecay.semantic-search-index-key.v1";
-
-pub const EMBEDDING_PROJECTION_SCHEMA_V1: &str = "tracedecay.embedding-projection.v1";
-pub const SEMANTIC_SEARCH_INDEX_SCHEMA_V1: &str = "tracedecay.semantic-search-index.v1";
+pub const PROJECTION_PUBLICATION_SEPARATOR: &str = "tracedecay.projection-batch-receipt.v1";
 
 fn validate_sorted_unique<T: Ord>(values: &[T], field: &'static str) -> Result<(), DomainError> {
     if values.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -182,6 +181,18 @@ pub enum CodeSearchChunkGrainV1 {
     FileWindow,
 }
 
+impl CodeSearchChunkGrainV1 {
+    /// Row-codec grain ordinal. Append new grains; reordering changes sealed
+    /// artifact bytes. Capability emission sorts a filtered copy of this list.
+    pub const ORDER: [Self; 5] = [
+        Self::SymbolSignature,
+        Self::SymbolBody,
+        Self::SymbolMember,
+        Self::FilePreamble,
+        Self::FileWindow,
+    ];
+}
+
 /// Where one chunk lives inside one generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -248,17 +259,86 @@ pub enum ExactTechnicalTermKindV1 {
     CommitIdentifier,
 }
 
+impl ExactTechnicalTermKindV1 {
+    /// Lexical row-codec ordinal and the capability manifest's kind set.
+    ///
+    /// The codec stores the index in this array. Append new kinds; reordering
+    /// changes sealed artifact bytes.
+    pub const ORDER: [Self; 11] = [
+        Self::WholeSymbol,
+        Self::QualifiedName,
+        Self::Path,
+        Self::CompilerErrorCode,
+        Self::CompilerErrorText,
+        Self::RuntimeErrorCode,
+        Self::RuntimeErrorText,
+        Self::CliFlag,
+        Self::ToolName,
+        Self::ConfigurationKey,
+        Self::CommitIdentifier,
+    ];
+}
+
 /// One whole exact technical term extracted as evidence. Extraction
 /// evidence only; protected lexical policy is applied separately.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+///
+/// Wire form: the source bytes travel as `original_text` when they are UTF-8
+/// (every parser-emitted term is a slice of sanitized text, so this is the
+/// production case) and as an `original_bytes` array otherwise. The canonical
+/// bytes are a pure function of `kind` and the original bytes, so they are
+/// derived on read rather than persisted. Readers accept the earlier shape
+/// (`original_bytes` array plus `canonical_bytes` array) unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactTechnicalTermV1 {
     kind: ExactTechnicalTermKindV1,
     original_bytes: Vec<u8>,
     canonical_bytes: Vec<u8>,
     span: SourceSpan,
-    #[serde(skip_serializing_if = "Option::is_none")]
     symbol_occurrence_id: Option<SymbolOccurrenceId>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExactTechnicalTermWireRefV1<'a> {
+    kind: ExactTechnicalTermKindV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_bytes: Option<&'a [u8]>,
+    span: SourceSpan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_occurrence_id: Option<&'a SymbolOccurrenceId>,
+}
+
+impl Serialize for ExactTechnicalTermV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let original_text = std::str::from_utf8(&self.original_bytes).ok();
+        ExactTechnicalTermWireRefV1 {
+            kind: self.kind,
+            original_text,
+            original_bytes: original_text
+                .is_none()
+                .then_some(self.original_bytes.as_slice()),
+            span: self.span,
+            symbol_occurrence_id: self.symbol_occurrence_id.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl ExactTechnicalTermV1 {
+    fn canonical_bytes_for(kind: ExactTechnicalTermKindV1, original_bytes: &[u8]) -> Vec<u8> {
+        match kind {
+            ExactTechnicalTermKindV1::CliFlag
+            | ExactTechnicalTermKindV1::ConfigurationKey
+            | ExactTechnicalTermKindV1::ToolName
+            | ExactTechnicalTermKindV1::CommitIdentifier => original_bytes.to_ascii_lowercase(),
+            _ => original_bytes.to_vec(),
+        }
+    }
 }
 
 impl ExactTechnicalTermV1 {
@@ -322,19 +402,26 @@ impl ExactTechnicalTermV1 {
         Self::from_parts(kind, original_bytes, span, None)
     }
 
+    /// Rebuild a term from the parts an admitted projection persisted. This
+    /// is the binary-storage counterpart of the wire deserializer: the same
+    /// shape validation runs, and the canonical bytes are re-derived rather
+    /// than trusted.
+    pub fn from_persisted_parts(
+        kind: ExactTechnicalTermKindV1,
+        original_bytes: Vec<u8>,
+        span: SourceSpan,
+        symbol_occurrence_id: Option<SymbolOccurrenceId>,
+    ) -> Result<Self, DomainError> {
+        Self::from_parts(kind, original_bytes, span, symbol_occurrence_id)
+    }
+
     fn from_parts(
         kind: ExactTechnicalTermKindV1,
         original_bytes: Vec<u8>,
         span: SourceSpan,
         symbol_occurrence_id: Option<SymbolOccurrenceId>,
     ) -> Result<Self, DomainError> {
-        let canonical_bytes = match kind {
-            ExactTechnicalTermKindV1::CliFlag
-            | ExactTechnicalTermKindV1::ConfigurationKey
-            | ExactTechnicalTermKindV1::ToolName
-            | ExactTechnicalTermKindV1::CommitIdentifier => original_bytes.to_ascii_lowercase(),
-            _ => original_bytes.clone(),
-        };
+        let canonical_bytes = Self::canonical_bytes_for(kind, &original_bytes);
         let term = Self {
             kind,
             original_bytes,
@@ -383,15 +470,6 @@ impl ExactTechnicalTermV1 {
         self.symbol_occurrence_id.as_ref()
     }
 
-    pub fn requires_extraction_authority(&self) -> bool {
-        matches!(
-            self.kind,
-            ExactTechnicalTermKindV1::WholeSymbol
-                | ExactTechnicalTermKindV1::CompilerErrorText
-                | ExactTechnicalTermKindV1::RuntimeErrorText
-        )
-    }
-
     fn validate_shape(&self) -> Result<(), DomainError> {
         self.span.validate()?;
         if self.span.is_empty() || self.original_bytes.is_empty() || self.canonical_bytes.is_empty()
@@ -428,16 +506,7 @@ impl ExactTechnicalTermV1 {
             }
             kind => validate_self_authenticating_technical_term(kind, &self.original_bytes)?,
         }
-        let expected_canonical = match self.kind {
-            ExactTechnicalTermKindV1::CliFlag
-            | ExactTechnicalTermKindV1::ConfigurationKey
-            | ExactTechnicalTermKindV1::ToolName
-            | ExactTechnicalTermKindV1::CommitIdentifier => {
-                self.original_bytes.to_ascii_lowercase()
-            }
-            _ => self.original_bytes.clone(),
-        };
-        if self.canonical_bytes != expected_canonical {
+        if self.canonical_bytes != Self::canonical_bytes_for(self.kind, &self.original_bytes) {
             return Err(DomainError::NonCanonical {
                 field: "exact technical term canonical bytes",
             });
@@ -505,18 +574,42 @@ impl<'de> Deserialize<'de> for ExactTechnicalTermV1 {
         #[serde(deny_unknown_fields)]
         struct Wire {
             kind: ExactTechnicalTermKindV1,
-            original_bytes: Vec<u8>,
-            canonical_bytes: Vec<u8>,
+            #[serde(default)]
+            original_text: Option<String>,
+            #[serde(default)]
+            original_bytes: Option<Vec<u8>>,
+            /// Retained only for terms persisted before the canonical bytes
+            /// became derived; when present it must still recompute.
+            #[serde(default)]
+            canonical_bytes: Option<Vec<u8>>,
             span: SourceSpan,
             #[serde(default)]
             symbol_occurrence_id: Option<SymbolOccurrenceId>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
+        let original_bytes = match (wire.original_text, wire.original_bytes) {
+            (Some(text), None) => text.into_bytes(),
+            (None, Some(bytes)) => bytes,
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(serde::de::Error::custom(
+                    "exact technical term must carry exactly one of original_text or original_bytes",
+                ));
+            }
+        };
+        let canonical_bytes = Self::canonical_bytes_for(wire.kind, &original_bytes);
+        if wire
+            .canonical_bytes
+            .is_some_and(|persisted| persisted != canonical_bytes)
+        {
+            return Err(serde::de::Error::custom(DomainError::NonCanonical {
+                field: "exact technical term canonical bytes",
+            }));
+        }
         let term = Self {
             kind: wire.kind,
-            original_bytes: wire.original_bytes,
-            canonical_bytes: wire.canonical_bytes,
+            original_bytes,
+            canonical_bytes,
             span: wire.span,
             symbol_occurrence_id: wire.symbol_occurrence_id,
         };
@@ -707,10 +800,13 @@ pub struct ChangedCodeChunkV1 {
     pub current_digest: Option<ContentDigest>,
 }
 
-/// Ordered changed/reused/deleted chunk manifest between two generations.
-/// Downstream projectors prove exactly which generation-bound chunks they
-/// consumed, skipped, replaced, or removed. A no-op generation
-/// emits empty `added_or_changed` and `deleted` sets plus explicit `reused`.
+/// Ordered changed/deleted chunk manifest between two generations.
+///
+/// Unchanged chunks are a complement of the prior generation, not a list:
+/// `reused_count` plus `reused_digest` authenticate the ordered reused
+/// partition without enumerating it (plan 40 §6 / parent-delta). A no-op
+/// generation emits empty `added_or_changed` and `deleted` sets with a
+/// non-zero `reused_count`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChangedCodeChunkSetV1 {
@@ -719,7 +815,10 @@ pub struct ChangedCodeChunkSetV1 {
     pub manifest_digest: ManifestDigest,
     pub added_or_changed: Vec<ChangedCodeChunkV1>,
     pub deleted: Vec<ChangedCodeChunkV1>,
-    pub reused: Vec<ChangedCodeChunkV1>,
+    /// Request-authenticated unchanged chunks that required no projector work.
+    pub reused_count: u64,
+    /// Canonical digest over the ordered reused `(chunk_id, content_digest)` pairs.
+    pub reused_digest: ManifestDigest,
 }
 
 #[derive(Serialize)]
@@ -729,7 +828,185 @@ struct ChangedCodeChunkSetDigestInput<'a> {
     to_generation: &'a CodeGenerationId,
     added_or_changed: &'a [ChangedCodeChunkV1],
     deleted: &'a [ChangedCodeChunkV1],
-    reused: &'a [ChangedCodeChunkV1],
+    reused_count: u64,
+    reused_digest: &'a ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct CodeReusedPartitionDigestInput<'a> {
+    domain: &'static str,
+    chunks: &'a [(CodeSearchChunkId, ContentDigest)],
+}
+
+/// Digest an ordered reused partition without retaining the rows.
+pub fn code_reused_partition_digest(
+    chunks: &[(CodeSearchChunkId, ContentDigest)],
+) -> Result<ManifestDigest, DomainError> {
+    for (chunk, digest) in chunks {
+        chunk.validate()?;
+        digest.validate()?;
+    }
+    if chunks.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(DomainError::NonCanonical {
+            field: "reused partition chunk order",
+        });
+    }
+    canonical_sha256(&CodeReusedPartitionDigestInput {
+        domain: CODE_REUSED_PARTITION_DIGEST_DOMAIN,
+        chunks,
+    })
+}
+
+#[derive(Serialize)]
+struct CodeReusedPartitionArcShareDigestInput<'a> {
+    domain: &'static str,
+    parent_full_replay_digest: &'a ManifestDigest,
+    prior_generation: &'a CodeGenerationId,
+    current_generation: &'a CodeGenerationId,
+    reused_count: u64,
+}
+
+/// Seal Arc-shared reuse without enumerating the complement.
+///
+/// Parent `full_replay_digest` already authenticated the corpus at parent
+/// publish. Shared file pages stay byte-identical by Arc pointer identity, so
+/// child publish binds that parent seal plus reused cardinality instead of
+/// re-hashing every unchanged `(chunk_id, content_digest)` pair.
+///
+/// `shared_file_count` is a publish-time gate only (must be non-zero when
+/// reuse is claimed). It is not hashed so parentless restore can recompute
+/// this seal from persisted source commitments without live parent pages.
+pub fn code_reused_partition_arc_share_digest(
+    parent_full_replay_digest: &ManifestDigest,
+    prior_generation: &CodeGenerationId,
+    current_generation: &CodeGenerationId,
+    reused_count: u64,
+) -> Result<ManifestDigest, DomainError> {
+    parent_full_replay_digest.validate()?;
+    prior_generation.validate()?;
+    current_generation.validate()?;
+    canonical_sha256(&CodeReusedPartitionArcShareDigestInput {
+        domain: CODE_REUSED_PARTITION_ARC_SHARE_DIGEST_DOMAIN,
+        parent_full_replay_digest,
+        prior_generation,
+        current_generation,
+        reused_count,
+    })
+}
+
+/// The two source identities sealed by one code generation.
+///
+/// The incremental digest authenticates the physical generation transition
+/// and all three change partitions. The full-replay digest authenticates the
+/// ordered source as a parent-delta: genesis seals `parent_full_replay_digest =
+/// None` over the changed-set partitions alone; successors bind the parent's
+/// full-replay digest plus the affected partitions and reused complement seal.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeGenerationSourceCommitmentsV1 {
+    pub incremental_manifest_digest: ManifestDigest,
+    /// Parent-delta source seal (`CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN` /
+    /// `tracedecay.code-source-parent-delta.v1`). Field name is historical; it
+    /// is not a generation-independent full-corpus replay hash.
+    pub full_replay_digest: ManifestDigest,
+    /// Parent generation's `full_replay_digest` when this commitment was sealed
+    /// as a successor. `None` for genesis.
+    pub parent_full_replay_digest: Option<ManifestDigest>,
+}
+
+#[derive(Serialize)]
+struct CodeSourceParentDeltaDigestInput<'a> {
+    domain: &'static str,
+    parent_full_replay_digest: Option<&'a ManifestDigest>,
+    added_or_changed: &'a [ChangedCodeChunkV1],
+    deleted: &'a [ChangedCodeChunkV1],
+    reused_count: u64,
+    reused_digest: &'a ManifestDigest,
+}
+
+/// Digest source identity from an optional parent full-replay digest plus the
+/// changed-set partitions (without enumerating the reused complement).
+pub fn code_source_parent_delta_digest(
+    parent_full_replay: Option<&ManifestDigest>,
+    changes: &ChangedCodeChunkSetV1,
+) -> Result<ManifestDigest, DomainError> {
+    if let Some(parent) = parent_full_replay {
+        parent.validate()?;
+    }
+    changes.reused_digest.validate()?;
+    for change in changes.added_or_changed.iter().chain(&changes.deleted) {
+        change.chunk_id.validate()?;
+        if let Some(digest) = &change.prior_digest {
+            digest.validate()?;
+        }
+        if let Some(digest) = &change.current_digest {
+            digest.validate()?;
+        }
+    }
+    canonical_sha256(&CodeSourceParentDeltaDigestInput {
+        domain: CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN,
+        parent_full_replay_digest: parent_full_replay,
+        added_or_changed: &changes.added_or_changed,
+        deleted: &changes.deleted,
+        reused_count: changes.reused_count,
+        reused_digest: &changes.reused_digest,
+    })
+}
+
+impl CodeGenerationSourceCommitmentsV1 {
+    /// Seal source commitments from the changed-set and an optional parent
+    /// full-replay digest. Callers must not rebuild the full chunk corpus.
+    pub fn from_changed_chunks(
+        parent_full_replay: Option<&ManifestDigest>,
+        changes: &ChangedCodeChunkSetV1,
+    ) -> Result<Self, DomainError> {
+        changes.validate()?;
+        match (parent_full_replay, changes.from_generation.as_ref()) {
+            (None, None) | (Some(_), Some(_)) => {}
+            _ => {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "source commitment parent binding",
+                });
+            }
+        }
+        Ok(Self {
+            incremental_manifest_digest: changes.manifest_digest.clone(),
+            parent_full_replay_digest: parent_full_replay.cloned(),
+            full_replay_digest: code_source_parent_delta_digest(parent_full_replay, changes)?,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.incremental_manifest_digest.validate()?;
+        self.full_replay_digest.validate()?;
+        if let Some(parent) = &self.parent_full_replay_digest {
+            parent.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Recompute the parent-delta full-replay digest from the sealed parent
+    /// binding and the projection changed-set.
+    pub fn validate_for_changes(&self, changes: &ChangedCodeChunkSetV1) -> Result<(), DomainError> {
+        self.validate()?;
+        changes.validate()?;
+        if self.incremental_manifest_digest != changes.manifest_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        match (
+            self.parent_full_replay_digest.as_ref(),
+            changes.from_generation.as_ref(),
+        ) {
+            (None, None) | (Some(_), Some(_)) => {}
+            _ => return Err(DomainError::DigestMismatch),
+        }
+        if self.full_replay_digest
+            != code_source_parent_delta_digest(self.parent_full_replay_digest.as_ref(), changes)?
+        {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
 }
 
 impl ChangedCodeChunkSetV1 {
@@ -740,11 +1017,69 @@ impl ChangedCodeChunkSetV1 {
             to_generation: &self.to_generation,
             added_or_changed: &self.added_or_changed,
             deleted: &self.deleted,
-            reused: &self.reused,
+            reused_count: self.reused_count,
+            reused_digest: &self.reused_digest,
         })
     }
 
+    /// Seal the reused complement from an ordered `(chunk_id, content_digest)`
+    /// stream without retaining the rows.
+    pub fn seal_reused_partition(
+        reused: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(u64, ManifestDigest), DomainError> {
+        let reused_digest = code_reused_partition_digest(reused)?;
+        Ok((reused.len() as u64, reused_digest))
+    }
+
+    /// Seal Arc-shared reuse from the parent full-replay commitment.
+    ///
+    /// Use at Arc-share publish only. Pair-list sealing stays on the mixed /
+    /// non-shared path. See [`code_reused_partition_arc_share_digest`].
+    /// `shared_file_count` must be non-zero when `reused_count > 0`; it gates
+    /// publish authenticity and is not part of the digest.
+    pub fn seal_arc_shared_reused_partition(
+        parent_full_replay_digest: &ManifestDigest,
+        prior_generation: &CodeGenerationId,
+        current_generation: &CodeGenerationId,
+        reused_count: u64,
+        shared_file_count: u64,
+    ) -> Result<(u64, ManifestDigest), DomainError> {
+        if shared_file_count == 0 && reused_count > 0 {
+            return Err(DomainError::NonCanonical {
+                field: "arc-share reused partition without shared files",
+            });
+        }
+        let reused_digest = code_reused_partition_arc_share_digest(
+            parent_full_replay_digest,
+            prior_generation,
+            current_generation,
+            reused_count,
+        )?;
+        Ok((reused_count, reused_digest))
+    }
+
+    /// Structural request checks only. `reused_count` / `reused_digest` are
+    /// sealed into `manifest_digest`, but this does not reconstruct the
+    /// complement, call [`Self::validate_reused_complement`] at the
+    /// publication or restore boundary that holds the current corpus.
     pub fn validate(&self) -> Result<(), DomainError> {
+        self.validate_partitions()?;
+        self.manifest_digest.validate()?;
+        if self.compute_digest()? != self.manifest_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    /// Write `manifest_digest` over a set that passes [`Self::validate`],
+    /// without hashing the set a second time to compare against it.
+    pub fn seal(&mut self) -> Result<(), DomainError> {
+        self.validate_partitions()?;
+        self.manifest_digest = self.compute_digest()?;
+        Ok(())
+    }
+
+    fn validate_partitions(&self) -> Result<(), DomainError> {
         self.to_generation.validate()?;
         if let Some(from_generation) = &self.from_generation {
             from_generation.validate()?;
@@ -766,25 +1101,196 @@ impl ChangedCodeChunkSetV1 {
         validate_changed_partition(&self.deleted, "deleted chunk order", |change| {
             change.prior_digest.is_some() && change.current_digest.is_none()
         })?;
-        validate_changed_partition(&self.reused, "reused chunk order", |change| {
-            change.prior_digest.is_some() && change.prior_digest == change.current_digest
-        })?;
+        self.reused_digest.validate()?;
 
         let mut seen = BTreeSet::new();
-        for change in self
-            .added_or_changed
-            .iter()
-            .chain(&self.deleted)
-            .chain(&self.reused)
-        {
+        for change in self.added_or_changed.iter().chain(&self.deleted) {
             if !seen.insert(&change.chunk_id) {
                 return Err(DomainError::DuplicateId {
                     field: "changed chunk partitions",
                 });
             }
         }
-        self.manifest_digest.validate()?;
-        if self.compute_digest()? != self.manifest_digest {
+        Ok(())
+    }
+
+    /// Prove `reused_count` / `reused_digest` against the current corpus.
+    ///
+    /// Always reconstructs the unchanged partition as the ordered complement of
+    /// `added_or_changed` inside `current` (and refuses deleted ids that are
+    /// still present). When `prior` is supplied, also recomputes the transition
+    /// complement from both manifests independently and requires the same seal.
+    /// The supplied seal is not self-authenticating: a producer that forges
+    /// count+digest and recomputes public digests still fails here.
+    pub fn validate_reused_complement(
+        &self,
+        prior: Option<&[(CodeSearchChunkId, ContentDigest)]>,
+        current: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        self.validate()?;
+        for (chunk_id, digest) in current {
+            chunk_id.validate()?;
+            digest.validate()?;
+        }
+        if current.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(DomainError::NonCanonical {
+                field: "reused complement current chunk order",
+            });
+        }
+        if let Some(prior) = prior {
+            for (chunk_id, digest) in prior {
+                chunk_id.validate()?;
+                digest.validate()?;
+            }
+            if prior.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+                return Err(DomainError::NonCanonical {
+                    field: "reused complement prior chunk order",
+                });
+            }
+            let mut previous = prior.iter().peekable();
+            let mut expected = Vec::new();
+            for (chunk_id, digest) in current {
+                while previous.next_if(|prior| prior.0 < *chunk_id).is_some() {}
+                let prior_digest = previous
+                    .next_if(|prior| prior.0 == *chunk_id)
+                    .map(|prior| &prior.1);
+                if prior_digest == Some(digest) {
+                    expected.push((chunk_id.clone(), digest.clone()));
+                }
+            }
+            let (reused_count, reused_digest) = Self::seal_reused_partition(&expected)?;
+            if reused_count != self.reused_count || reused_digest != self.reused_digest {
+                return Err(DomainError::DigestMismatch);
+            }
+        }
+
+        let mut added = BTreeMap::new();
+        for change in &self.added_or_changed {
+            let Some(current_digest) = change.current_digest.as_ref() else {
+                return Err(DomainError::NonCanonical {
+                    field: "added or changed current digest",
+                });
+            };
+            if added.insert(&change.chunk_id, current_digest).is_some() {
+                return Err(DomainError::DuplicateId {
+                    field: "added or changed chunk partitions",
+                });
+            }
+        }
+        let deleted = self
+            .deleted
+            .iter()
+            .map(|change| &change.chunk_id)
+            .collect::<BTreeSet<_>>();
+
+        let mut reused = Vec::with_capacity(current.len().saturating_sub(added.len()));
+        for (chunk_id, digest) in current {
+            if deleted.contains(chunk_id) {
+                return Err(DomainError::NonCanonical {
+                    field: "deleted chunk still present in current corpus",
+                });
+            }
+            match added.remove(chunk_id) {
+                Some(expected) if expected == digest => {}
+                Some(_) => return Err(DomainError::DigestMismatch),
+                None => reused.push((chunk_id.clone(), digest.clone())),
+            }
+        }
+        if !added.is_empty() {
+            return Err(DomainError::NonCanonical {
+                field: "added or changed chunk missing from current corpus",
+            });
+        }
+
+        let (reused_count, reused_digest) = Self::seal_reused_partition(&reused)?;
+        if reused_count != self.reused_count || reused_digest != self.reused_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    /// Prove `reused_count` / `reused_digest` on a parentless restore path.
+    ///
+    /// When the persisted seal matches the Arc-share domain under
+    /// `parent_full_replay`, authenticate cardinality and the changed
+    /// partitions against `current` without rehashing a pair-list complement
+    /// (live parent pages are unavailable after restart). Otherwise fall
+    /// through to [`Self::validate_reused_complement`].
+    pub fn validate_reused_complement_for_restore(
+        &self,
+        parent_full_replay: Option<&ManifestDigest>,
+        current: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        if let (Some(parent), Some(from_generation)) =
+            (parent_full_replay, self.from_generation.as_ref())
+        {
+            let arc_share = code_reused_partition_arc_share_digest(
+                parent,
+                from_generation,
+                &self.to_generation,
+                self.reused_count,
+            )?;
+            if arc_share == self.reused_digest {
+                return self.validate_arc_shared_reused_corpus(current);
+            }
+        }
+        self.validate_reused_complement(None, current)
+    }
+
+    /// Corpus membership proof for an Arc-share reused seal (no pair-list).
+    fn validate_arc_shared_reused_corpus(
+        &self,
+        current: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        self.validate()?;
+        for (chunk_id, digest) in current {
+            chunk_id.validate()?;
+            digest.validate()?;
+        }
+        if current.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(DomainError::NonCanonical {
+                field: "reused complement current chunk order",
+            });
+        }
+
+        let mut added = BTreeMap::new();
+        for change in &self.added_or_changed {
+            let Some(current_digest) = change.current_digest.as_ref() else {
+                return Err(DomainError::NonCanonical {
+                    field: "added or changed current digest",
+                });
+            };
+            if added.insert(&change.chunk_id, current_digest).is_some() {
+                return Err(DomainError::DuplicateId {
+                    field: "added or changed chunk partitions",
+                });
+            }
+        }
+        let deleted = self
+            .deleted
+            .iter()
+            .map(|change| &change.chunk_id)
+            .collect::<BTreeSet<_>>();
+
+        let mut reused = 0_u64;
+        for (chunk_id, digest) in current {
+            if deleted.contains(chunk_id) {
+                return Err(DomainError::NonCanonical {
+                    field: "deleted chunk still present in current corpus",
+                });
+            }
+            match added.remove(chunk_id) {
+                Some(expected) if expected == digest => {}
+                Some(_) => return Err(DomainError::DigestMismatch),
+                None => reused = reused.saturating_add(1),
+            }
+        }
+        if !added.is_empty() {
+            return Err(DomainError::NonCanonical {
+                field: "added or changed chunk missing from current corpus",
+            });
+        }
+        if reused != self.reused_count {
             return Err(DomainError::DigestMismatch);
         }
         Ok(())
@@ -817,342 +1323,9 @@ fn validate_changed_partition(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingPoolingV1 {
-    Mean,
-    Cls,
-    LastToken,
-    MeanSqrtLength,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingTruncationSideV1 {
-    Left,
-    Right,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingDeviceClassV1 {
-    Cpu,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingMetricV1 {
-    Cosine,
-    DotProduct,
-    EuclideanL2,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingNormalizationV1 {
-    None,
-    L2,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingPrecisionV1 {
-    Fp32,
-    Fp16,
-    Bf16,
-    Int8,
-}
-
-/// Immutable identity of one fully published semantic vector generation.
-///
-/// This identity is shared by projection stores and semantic retrieval
-/// adapters; neither layer may define a lookalike generation key.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct VectorGenerationIdV1(ManifestDigest);
-
-impl VectorGenerationIdV1 {
-    pub fn new(digest: ManifestDigest) -> Self {
-        Self(digest)
-    }
-
-    pub fn as_digest(&self) -> &ManifestDigest {
-        &self.0
-    }
-
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.0.validate()
-    }
-}
-
-/// Complete identity of one embedding projection. Every vector-affecting
-/// input is pinned here; its canonical digest becomes the profile digest in
-/// [`ProjectionKeyV1`].
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
-pub struct EmbeddingProjectionKeyV1 {
-    pub model_artifact_digest: ManifestDigest,
-    pub tokenizer_digest: ManifestDigest,
-    pub config_digest: ManifestDigest,
-    pub query_instruction_digest: Option<ManifestDigest>,
-    pub document_instruction_digest: Option<ManifestDigest>,
-    pub pooling: EmbeddingPoolingV1,
-    pub truncation_side: EmbeddingTruncationSideV1,
-    pub truncation_length: u32,
-    /// Exact number of documents in every full inference tensor. The final
-    /// tensor may be shorter. This is projection identity because changing
-    /// the padded tensor shape can change floating-point vector bytes.
-    pub inference_batch_size: u32,
-    /// Exact sanitized-text byte ceiling for every inference group. This is
-    /// projection identity because it can split a count-valid group and alter
-    /// the native runtime's tensor boundaries.
-    pub inference_batch_bytes: u32,
-    pub runtime_backend: String,
-    pub runtime_build_revision: String,
-    pub device_class: EmbeddingDeviceClassV1,
-    pub dimensions: u32,
-    pub metric: EmbeddingMetricV1,
-    pub normalization: EmbeddingNormalizationV1,
-    pub precision: EmbeddingPrecisionV1,
-    pub chunk_schema_revision: String,
-    pub chunker_revision: ChunkerRevision,
-    pub privacy_domain: PrivacyDomainId,
-    pub privacy_key_epoch: u64,
-}
-
-/// Validated projection/privacy authority shared by vector production and
-/// bounded runtime session identity. Its fields are private so adapters cannot
-/// reconstruct a compatible-looking identity from unconstrained strings.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AdmittedEmbeddingProjectionKeyV1 {
-    embedding_key: EmbeddingProjectionKeyV1,
-    projection_key: ProjectionKeyV1,
-}
-
-impl Serialize for AdmittedEmbeddingProjectionKeyV1 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(Serialize)]
-        struct AdmittedProjectionRef<'a> {
-            embedding_key: &'a EmbeddingProjectionKeyV1,
-            projection_key: &'a ProjectionKeyV1,
-        }
-
-        AdmittedProjectionRef {
-            embedding_key: &self.embedding_key,
-            projection_key: &self.projection_key,
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for AdmittedEmbeddingProjectionKeyV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct AdmittedProjectionRepr {
-            embedding_key: EmbeddingProjectionKeyV1,
-            projection_key: ProjectionKeyV1,
-        }
-
-        let repr = AdmittedProjectionRepr::deserialize(deserializer)?;
-        let admitted = repr
-            .embedding_key
-            .admit()
-            .map_err(serde::de::Error::custom)?;
-        if admitted.projection_key != repr.projection_key {
-            return Err(serde::de::Error::custom(
-                "admitted embedding projection key digest mismatch",
-            ));
-        }
-        Ok(admitted)
-    }
-}
-
-impl EmbeddingProjectionKeyV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.model_artifact_digest.validate()?;
-        self.tokenizer_digest.validate()?;
-        self.config_digest.validate()?;
-        if let Some(digest) = &self.query_instruction_digest {
-            digest.validate()?;
-        }
-        if let Some(digest) = &self.document_instruction_digest {
-            digest.validate()?;
-        }
-        if self.truncation_length == 0 {
-            return Err(DomainError::Empty {
-                field: "embedding truncation length",
-            });
-        }
-        if self.inference_batch_size == 0 {
-            return Err(DomainError::Empty {
-                field: "embedding inference batch size",
-            });
-        }
-        if self.inference_batch_bytes == 0 {
-            return Err(DomainError::Empty {
-                field: "embedding inference batch byte ceiling",
-            });
-        }
-        if self.dimensions == 0 {
-            return Err(DomainError::Empty {
-                field: "embedding dimensions",
-            });
-        }
-        validate_revision(&self.runtime_backend, "embedding runtime backend")?;
-        validate_revision(
-            &self.runtime_build_revision,
-            "embedding runtime build revision",
-        )?;
-        validate_revision(
-            &self.chunk_schema_revision,
-            "embedding chunk schema revision",
-        )?;
-        self.chunker_revision.validate()?;
-        self.privacy_domain.validate()?;
-        Ok(())
-    }
-
-    pub fn admit(&self) -> Result<AdmittedEmbeddingProjectionKeyV1, DomainError> {
-        Ok(AdmittedEmbeddingProjectionKeyV1 {
-            embedding_key: self.clone(),
-            projection_key: ProjectionKeyV1 {
-                kind: ProjectionKindV1::Embedding,
-                schema_revision: EMBEDDING_PROJECTION_SCHEMA_V1.to_string(),
-                profile_digest: self.canonical_digest()?,
-            },
-        })
-    }
-
-    pub fn canonical_digest(&self) -> Result<ManifestDigest, DomainError> {
-        self.validate()?;
-        canonical_sha256(&(EMBEDDING_PROJECTION_KEY_DIGEST_DOMAIN, self))
-    }
-
-    pub fn projection_key(&self) -> Result<ProjectionKeyV1, DomainError> {
-        Ok(self.admit()?.projection_key)
-    }
-}
-
-impl AdmittedEmbeddingProjectionKeyV1 {
-    pub fn embedding_key(&self) -> &EmbeddingProjectionKeyV1 {
-        &self.embedding_key
-    }
-
-    pub fn projection_key(&self) -> &ProjectionKeyV1 {
-        &self.projection_key
-    }
-
-    pub fn privacy_domain(&self) -> &PrivacyDomainId {
-        &self.embedding_key.privacy_domain
-    }
-
-    pub fn privacy_key_epoch(&self) -> u64 {
-        self.embedding_key.privacy_key_epoch
-    }
-}
-
-/// Search structure used over one compatible immutable vector generation.
-///
-/// This is intentionally distinct from [`EmbeddingProjectionKeyV1`]:
-/// changing an index implementation or its parameters must rebuild only the
-/// derived search structure and query caches, never the vector projection.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum SemanticSearchIndexKindV1 {
-    ExactFlat,
-    /// Approximate HNSW candidate generation over the serving generation's
-    /// persisted vector index, exact-rescored with the canonical distance.
-    /// Candidate coverage is index-bounded: published distances stay exact,
-    /// but the candidate set is not guaranteed to equal a full scan's.
-    AnnHnswExactRescore,
-}
-
-/// Complete identity inputs for one semantic search structure.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticSearchIndexProfileV1 {
-    pub kind: SemanticSearchIndexKindV1,
-    pub implementation_revision: String,
-    pub parameters_digest: ManifestDigest,
-}
-
-/// Independent immutable identity of a derived semantic search structure.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticSearchIndexKeyV1 {
-    pub kind: SemanticSearchIndexKindV1,
-    pub schema_revision: String,
-    pub profile_digest: ManifestDigest,
-}
-
-impl SemanticSearchIndexProfileV1 {
-    pub fn exact_flat_v1() -> Result<Self, DomainError> {
-        Ok(Self {
-            kind: SemanticSearchIndexKindV1::ExactFlat,
-            implementation_revision: "semantic.exact-flat.v1".to_owned(),
-            parameters_digest: canonical_sha256(&(
-                "tracedecay.semantic-exact-flat-parameters.v1",
-                "scan-all-compatible-vectors",
-                "canonical-distance-then-anchor",
-            ))?,
-        })
-    }
-
-    /// HNSW candidate generation with exact rescoring. The parameters digest
-    /// commits to the candidate-oversample policy so a tuning change mints a
-    /// new index identity instead of silently shifting served candidate sets.
-    pub fn ann_hnsw_exact_rescore_v1() -> Result<Self, DomainError> {
-        Ok(Self {
-            kind: SemanticSearchIndexKindV1::AnnHnswExactRescore,
-            implementation_revision: "semantic.ann-hnsw-exact-rescore.v1".to_owned(),
-            parameters_digest: canonical_sha256(&(
-                "tracedecay.semantic-ann-hnsw-exact-rescore-parameters.v1",
-                "hnsw-candidates-oversample-4x",
-                "exact-rescore-canonical-distance-then-anchor",
-                "flat-fallback-on-missing-or-incomplete-index",
-            ))?,
-        })
-    }
-
-    pub fn validate(&self) -> Result<(), DomainError> {
-        validate_revision(
-            &self.implementation_revision,
-            "semantic search index implementation revision",
-        )?;
-        self.parameters_digest.validate()
-    }
-
-    pub fn index_key(&self) -> Result<SemanticSearchIndexKeyV1, DomainError> {
-        self.validate()?;
-        Ok(SemanticSearchIndexKeyV1 {
-            kind: self.kind,
-            schema_revision: SEMANTIC_SEARCH_INDEX_SCHEMA_V1.to_owned(),
-            profile_digest: canonical_sha256(&(SEMANTIC_SEARCH_INDEX_KEY_DIGEST_DOMAIN, self))?,
-        })
-    }
-}
-
-impl SemanticSearchIndexKeyV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        validate_revision(
-            &self.schema_revision,
-            "semantic search index schema revision",
-        )?;
-        self.profile_digest.validate()
-    }
-}
-
 /// Identity of one projection profile: kind, schema revision, and a
-/// canonical profile digest. `EmbeddingProjectionKeyV1` is the typed
-/// semantic profile whose digest occupies `profile_digest`; adapters cannot
-/// define a second projection-key identity.
+/// canonical profile digest. Adapters cannot define a second
+/// projection-key identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionKeyV1 {
@@ -1161,13 +1334,12 @@ pub struct ProjectionKeyV1 {
     pub profile_digest: ManifestDigest,
 }
 
-/// The projection families query/semantic recognize.
+/// The projection families the code index recognizes.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionKindV1 {
     Lexical,
     Graph,
-    Embedding,
 }
 
 /// Why a projection replay was requested.
@@ -1231,9 +1403,10 @@ pub struct CodeChunkProjectionReceiptV1 {
     pub output_digest: Option<ContentDigest>,
 }
 
-/// The complete receipt for one projection batch. Failed or
-/// partial receipt sets remain inspectable but cannot activate a projection
-/// generation.
+/// The complete receipt for one projection batch. Affected chunks carry
+/// explicit rows; unchanged chunks are authenticated by the request digest
+/// and summarized by `reused_count`. Failed or partial affected rows remain
+/// inspectable but cannot activate a projection generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionBatchReceiptV1 {
@@ -1242,14 +1415,28 @@ pub struct ProjectionBatchReceiptV1 {
     pub source_generation: CodeGenerationId,
     pub source_manifest_digest: ManifestDigest,
     pub receipts: Vec<CodeChunkProjectionReceiptV1>,
+    /// Request-authenticated unchanged chunks that required no projector work.
     pub reused_count: u64,
     pub publication_digest: ManifestDigest,
 }
 
+pub fn projection_batch_publication_digest(
+    batch: &ProjectionBatchReceiptV1,
+) -> Result<ManifestDigest, DomainError> {
+    canonical_sha256(&(
+        PROJECTION_PUBLICATION_SEPARATOR,
+        &batch.target_projection_key,
+        &batch.request_digest,
+        &batch.source_generation,
+        &batch.source_manifest_digest,
+        &batch.receipts,
+        batch.reused_count,
+    ))
+}
+
 /// The mandatory base capability manifest. Consumers must reject a missing,
 /// incompatible, mixed-generation, or unauthorized base manifest before
-/// candidate production. The optional semantic manifest augments this base;
-/// its absence cannot block authorized lexical/graph retrieval.
+/// candidate production.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeIndexCapabilityManifestV1 {
@@ -1268,10 +1455,19 @@ pub struct CodeIndexCapabilityManifestV1 {
     pub manifest_digest: ManifestDigest,
 }
 
+/// Capability identity is deliberately generation-independent.
+///
+/// `generation_id` is provenance, not capability: two generations that sealed
+/// the same source under the same runtime revisions, coverage, sanitization
+/// receipts, and privacy identity offer the identical indexing authority, and
+/// a checkout that reseals the same commit must not be refused as
+/// capability-incompatible. The manifest still carries its `generation_id`,
+/// and `CodeIndexPublishedGenerationV1` still refuses a capability manifest
+/// naming a different generation than its own, so the pairing stays bound,
+/// by that invariant rather than by this digest.
 #[derive(Serialize)]
 struct CodeIndexCapabilityManifestDigestInput<'a> {
     domain: &'static str,
-    generation_id: &'a CodeGenerationId,
     chunk_schema_revision: &'a str,
     chunker_revision: &'a ChunkerRevision,
     language_descriptor_revisions: &'a [LanguageDescriptorRevision],
@@ -1289,7 +1485,6 @@ impl CodeIndexCapabilityManifestV1 {
     pub fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {
         canonical_sha256(&CodeIndexCapabilityManifestDigestInput {
             domain: CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN,
-            generation_id: &self.generation_id,
             chunk_schema_revision: &self.chunk_schema_revision,
             chunker_revision: &self.chunker_revision,
             language_descriptor_revisions: &self.language_descriptor_revisions,
@@ -1369,17 +1564,9 @@ mod tests {
     use crate::code_intelligence::language::EdgeAuthorityV1;
     use crate::research::id::{PrivacyDomainId, SanitizationReceiptId};
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use crate::test_fixtures::repeated_sha256_text as digest;
 
     #[test]
     fn ephemeral_query_view_is_bounded_and_redacts_its_text() {
@@ -1410,14 +1597,102 @@ mod tests {
         }
     }
 
+    #[test]
+    fn arc_share_reused_digest_binds_parent_seal_not_pair_list() {
+        let parent = id::<ManifestDigest>(&digest('a'));
+        let prior = id::<CodeGenerationId>("generation.1");
+        let current = id::<CodeGenerationId>("generation.2");
+        let (count, sealed) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+            &parent, &prior, &current, 9, 3,
+        )
+        .expect("arc-share seal");
+        assert_eq!(count, 9);
+        let again =
+            code_reused_partition_arc_share_digest(&parent, &prior, &current, 9).expect("again");
+        assert_eq!(sealed, again);
+        let pair_list = code_reused_partition_digest(&[(
+            id::<CodeSearchChunkId>("chunk.reused"),
+            id::<ContentDigest>(&digest('c')),
+        )])
+        .expect("pair list");
+        assert_ne!(
+            sealed, pair_list,
+            "arc-share attestation must not collide with pair-list reused seals"
+        );
+        assert!(
+            ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+                &parent, &prior, &current, 9, 0,
+            )
+            .is_err(),
+            "reuse without shared files must fail closed"
+        );
+        // Shared-file count is a publish gate only; digest ignores it.
+        let same_digest = code_reused_partition_arc_share_digest(&parent, &prior, &current, 9)
+            .expect("digest without shared count");
+        assert_eq!(sealed, same_digest);
+    }
+
+    #[test]
+    fn arc_share_reused_complement_restores_without_pair_list() {
+        let parent = id::<ManifestDigest>(&digest('a'));
+        let prior = id::<CodeGenerationId>("generation.1");
+        let current_gen = id::<CodeGenerationId>("generation.2");
+        let reused_chunk = id::<CodeSearchChunkId>("chunk.reused");
+        let reused_digest_content = id::<ContentDigest>(&digest('c'));
+        let (reused_count, reused_digest) =
+            ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
+                &parent,
+                &prior,
+                &current_gen,
+                1,
+                1,
+            )
+            .expect("arc-share seal");
+        let mut changes = ChangedCodeChunkSetV1 {
+            from_generation: Some(prior),
+            to_generation: current_gen,
+            manifest_digest: id(&digest('0')),
+            added_or_changed: vec![change("chunk.added", None, Some('a'))],
+            deleted: Vec::new(),
+            reused_count,
+            reused_digest,
+        };
+        changes.manifest_digest = changes.compute_digest().expect("digest");
+        let current = [
+            (
+                id::<CodeSearchChunkId>("chunk.added"),
+                id::<ContentDigest>(&digest('a')),
+            ),
+            (reused_chunk, reused_digest_content),
+        ];
+        changes
+            .validate_reused_complement_for_restore(Some(&parent), &current)
+            .expect("arc-share restore proves corpus without pair-list");
+        assert_eq!(
+            changes
+                .validate_reused_complement(None, &current)
+                .unwrap_err()
+                .to_string(),
+            "manifest digest does not match its canonical domain-separated payload",
+            "pair-list path must still reject an arc-share seal"
+        );
+    }
+
     fn changed_set() -> ChangedCodeChunkSetV1 {
+        let reused = [(
+            id::<CodeSearchChunkId>("chunk.reused"),
+            id::<ContentDigest>(&digest('c')),
+        )];
+        let (reused_count, reused_digest) =
+            ChangedCodeChunkSetV1::seal_reused_partition(&reused).expect("reused seal");
         let mut changes = ChangedCodeChunkSetV1 {
             from_generation: Some(id("generation.1")),
             to_generation: id("generation.2"),
             manifest_digest: id(&digest('0')),
             added_or_changed: vec![change("chunk.added", None, Some('a'))],
             deleted: vec![change("chunk.deleted", Some('b'), None)],
-            reused: vec![change("chunk.reused", Some('c'), Some('c'))],
+            reused_count,
+            reused_digest,
         };
         changes.manifest_digest = changes.compute_digest().expect("digest computable");
         changes
@@ -1469,12 +1744,18 @@ mod tests {
             grain: CodeSearchChunkGrainV1::SymbolBody,
             ordinal: 0,
         };
-        assert!(anchor.validate().is_err());
+        assert_eq!(
+            anchor.validate().unwrap_err().to_string(),
+            "symbol grain chunk without symbol occurrence references an unknown identity"
+        );
 
         let mut file_anchor = anchor.clone();
         file_anchor.grain = CodeSearchChunkGrainV1::FileWindow;
         file_anchor.symbol_occurrence_id = Some(id("symbol.fixture"));
-        assert!(file_anchor.validate().is_err());
+        assert_eq!(
+            file_anchor.validate().unwrap_err().to_string(),
+            "file grain chunk with symbol occurrence references an unknown identity"
+        );
 
         let mut symbol_anchor = anchor;
         symbol_anchor.symbol_occurrence_id = Some(id("symbol.fixture"));
@@ -1486,7 +1767,12 @@ mod tests {
     #[test]
     fn bounded_sanitized_text_enforces_the_chunk_bound() {
         assert!(BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES)).is_ok());
-        assert!(BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES + 1)).is_err());
+        assert_eq!(
+            BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES + 1))
+                .unwrap_err()
+                .to_string(),
+            "bounded sanitized chunk text violates the structural bounds for sanitized text"
+        );
     }
 
     #[test]
@@ -1524,22 +1810,26 @@ mod tests {
         .expect("whole exact term is inside the chunk");
 
         term.canonical_bytes.clear();
-        assert!(
+        assert_eq!(
             term.validate_within(&SourceSpan {
                 start_byte: 10,
                 end_byte: 30,
             })
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "exact technical term must not be empty"
         );
 
         term.canonical_bytes = b"module::symbol".to_vec();
         term.span.end_byte = 31;
-        assert!(
+        assert_eq!(
             term.validate_within(&SourceSpan {
                 start_byte: 10,
                 end_byte: 30,
             })
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "exact technical term span is not canonical"
         );
     }
 
@@ -1582,8 +1872,18 @@ mod tests {
                 b"arbitrary prose".as_slice(),
             ),
         ] {
-            assert!(
-                ExactTechnicalTermV1::technical(kind, value.to_vec(), span(value)).is_err(),
+            let expected = match kind {
+                ExactTechnicalTermKindV1::CompilerErrorText
+                | ExactTechnicalTermKindV1::RuntimeErrorText => {
+                    "contextual exact term authority is not canonical"
+                }
+                _ => "exact technical term kind is not canonical",
+            };
+            assert_eq!(
+                ExactTechnicalTermV1::technical(kind, value.to_vec(), span(value))
+                    .unwrap_err()
+                    .to_string(),
+                expected,
                 "{kind:?} accepted wrong-kind bytes"
             );
         }
@@ -1699,14 +1999,20 @@ mod tests {
             "span": { "start_byte": 6, "end_byte": 18 }
         }]);
 
-        assert!(
-            serde_json::from_value::<CodeSearchChunkV1>(wire.clone()).is_err(),
+        assert_eq!(
+            serde_json::from_value::<CodeSearchChunkV1>(wire.clone())
+                .unwrap_err()
+                .to_string(),
+            "whole symbol exact term authority is not canonical",
             "serialized input cannot forge parser-owned WholeSymbol evidence"
         );
 
         wire["exact_terms"][0]["symbol_occurrence_id"] = serde_json::json!("symbol.forged");
-        assert!(
-            serde_json::from_value::<CodeSearchChunkV1>(wire).is_err(),
+        assert_eq!(
+            serde_json::from_value::<CodeSearchChunkV1>(wire)
+                .unwrap_err()
+                .to_string(),
+            "whole symbol chunk authority is not canonical",
             "serialized symbol evidence must match the chunk occurrence"
         );
     }
@@ -1724,9 +2030,45 @@ mod tests {
         assert!(duplicate.validate().is_err());
 
         let mut malformed_reuse = valid.clone();
-        malformed_reuse.reused[0].current_digest = Some(id(&digest('d')));
+        malformed_reuse.reused_digest = id(&digest('d'));
         malformed_reuse.manifest_digest = malformed_reuse.compute_digest().unwrap();
-        assert!(malformed_reuse.validate().is_err());
+        // Structural validate only seals the supplied fields; it does not
+        // reconstruct the complement. A forged seal that recomputes the public
+        // digest still looks well-formed until the current corpus proves it.
+        assert!(malformed_reuse.validate().is_ok());
+        let current = [
+            (id("chunk.added"), id(&digest('a'))),
+            (id("chunk.reused"), id(&digest('c'))),
+        ];
+        assert!(valid.validate_reused_complement(None, &current).is_ok());
+        assert!(matches!(
+            malformed_reuse.validate_reused_complement(None, &current),
+            Err(DomainError::DigestMismatch)
+        ));
+
+        let mut wrong_count = valid.clone();
+        wrong_count.reused_count = 0;
+        wrong_count.reused_digest = ChangedCodeChunkSetV1::seal_reused_partition(&[]).unwrap().1;
+        wrong_count.manifest_digest = wrong_count.compute_digest().unwrap();
+        assert!(wrong_count.validate().is_ok());
+        assert!(matches!(
+            wrong_count.validate_reused_complement(None, &current),
+            Err(DomainError::DigestMismatch)
+        ));
+
+        let prior = [
+            (id("chunk.deleted"), id(&digest('b'))),
+            (id("chunk.reused"), id(&digest('c'))),
+        ];
+        assert!(
+            valid
+                .validate_reused_complement(Some(&prior), &current)
+                .is_ok()
+        );
+        assert!(matches!(
+            malformed_reuse.validate_reused_complement(Some(&prior), &current),
+            Err(DomainError::DigestMismatch)
+        ));
 
         let mut mixed_generation = valid.clone();
         mixed_generation.from_generation = Some(mixed_generation.to_generation.clone());
@@ -1753,6 +2095,91 @@ mod tests {
     }
 
     #[test]
+    fn source_commitments_bind_parent_delta_without_full_corpus_hash() {
+        let incremental = changed_set();
+        let parent_replay = id::<ManifestDigest>(&digest('e'));
+        let first = CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+            Some(&parent_replay),
+            &incremental,
+        )
+        .expect("source commitments");
+
+        assert_eq!(
+            first.incremental_manifest_digest,
+            incremental.compute_digest().expect("incremental digest")
+        );
+        assert_eq!(
+            first.parent_full_replay_digest.as_ref(),
+            Some(&parent_replay)
+        );
+        assert_ne!(
+            first.incremental_manifest_digest, first.full_replay_digest,
+            "the generation-bound changed-set digest is not a parent-delta identity"
+        );
+        first
+            .validate_for_changes(&incremental)
+            .expect("parent-delta commitments validate");
+
+        let mut republished = incremental.clone();
+        republished.from_generation = Some(id("generation.8"));
+        republished.to_generation = id("generation.9");
+        republished.manifest_digest = republished.compute_digest().expect("republished digest");
+        let second = CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+            Some(&parent_replay),
+            &republished,
+        )
+        .expect("republished source commitments");
+
+        assert_ne!(
+            first.incremental_manifest_digest, second.incremental_manifest_digest,
+            "incremental identity must retain its generation watermarks"
+        );
+        assert_eq!(
+            first.full_replay_digest, second.full_replay_digest,
+            "parent-delta full replay ignores generation watermarks and seals partitions only"
+        );
+
+        let mut tampered = first.clone();
+        tampered.full_replay_digest = id(&digest('f'));
+        assert!(tampered.validate_for_changes(&incremental).is_err());
+
+        let mut wrong_parent = first;
+        wrong_parent.parent_full_replay_digest = Some(id(&digest('d')));
+        assert!(wrong_parent.validate_for_changes(&incremental).is_err());
+
+        let genesis_changes = {
+            let (reused_count, reused_digest) =
+                ChangedCodeChunkSetV1::seal_reused_partition(&[]).expect("empty reused");
+            let mut changes = ChangedCodeChunkSetV1 {
+                from_generation: None,
+                to_generation: id("generation.1"),
+                manifest_digest: id(&digest('0')),
+                added_or_changed: vec![change("chunk.added", None, Some('a'))],
+                deleted: vec![],
+                reused_count,
+                reused_digest,
+            };
+            changes.manifest_digest = changes.compute_digest().expect("genesis digest");
+            changes
+        };
+        let genesis =
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(None, &genesis_changes)
+                .expect("genesis commitments");
+        assert!(genesis.parent_full_replay_digest.is_none());
+        genesis
+            .validate_for_changes(&genesis_changes)
+            .expect("genesis parent-delta validates");
+        assert!(
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+                Some(&parent_replay),
+                &genesis_changes
+            )
+            .is_err(),
+            "genesis changes cannot bind a parent full-replay digest"
+        );
+    }
+
+    #[test]
     fn capability_manifest_requires_canonical_vectors_and_digest() {
         let valid = capability_manifest();
         valid.validate().expect("canonical capability manifest");
@@ -1776,6 +2203,50 @@ mod tests {
     }
 
     #[test]
+    fn capability_identity_survives_a_new_generation_but_not_a_new_capability() {
+        let sealed = capability_manifest();
+        // The same source resealed under a new generation id, a checkout, a
+        // detached HEAD, a rollback that mints a fresh generation.
+        let mut resealed = sealed.clone();
+        resealed.generation_id = id("generation.v1.0cbc773a.00000002.resealed");
+        resealed.manifest_digest = resealed.compute_digest().expect("digest computable");
+        assert_eq!(
+            sealed.manifest_digest, resealed.manifest_digest,
+            "a new generation id must not change capability identity"
+        );
+
+        // A real capability or coverage change still refuses.
+        for changed in [
+            {
+                let mut changed = sealed.clone();
+                changed.chunker_revision = id("chunker.v2");
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.privacy_key_epoch = 2;
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.source_coverage.files_eligible = 2;
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.sanitization_receipts = vec![id("receipt.other")];
+                changed
+            },
+        ] {
+            assert_ne!(
+                sealed.manifest_digest,
+                changed.compute_digest().expect("digest computable"),
+                "a capability, privacy, coverage, or sanitization change must refuse reuse"
+            );
+        }
+    }
+
+    #[test]
     fn language_descriptor_requires_canonical_extension_order() {
         let descriptor = super::super::language::LanguageDescriptorV1 {
             language: LanguageId::new("rust").unwrap(),
@@ -1789,6 +2260,9 @@ mod tests {
             stable_member_spans: true,
             capabilities: super::super::language::LanguageCapabilitySetV1::default(),
         };
-        assert!(descriptor.validate().is_err());
+        assert_eq!(
+            descriptor.validate().unwrap_err().to_string(),
+            "language descriptor extension order is not canonical"
+        );
     }
 }

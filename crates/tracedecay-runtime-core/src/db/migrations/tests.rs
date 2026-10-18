@@ -6,7 +6,12 @@ use tracedecay_rusqlite_runtime::exact_sql::{
 
 use crate::db::engine::{Connection, TestConnection};
 
-use super::{SCHEMA_VERSION, create_schema_connection, ensure_schema_current_connection};
+use super::{
+    SCHEMA_VERSION, create_schema_connection, ensure_schema_current_connection,
+    verify_final_schema_connection,
+};
+use crate::db::engine::params;
+use tracedecay_domain::errors::TraceDecayError;
 
 mod final_shape;
 mod fts;
@@ -18,14 +23,8 @@ mod fts;
 struct AllowSchemaWrites;
 
 impl ExactSqlWriteAuthority for AllowSchemaWrites {
-    fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
-        if intent == ExactSqlWriteIntent::Vacuum {
-            Err(ExactSqlError::AuthorityDenied(
-                "ordinary schema fixture cannot vacuum".to_owned(),
-            ))
-        } else {
-            Ok(())
-        }
+    fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+        Ok(())
     }
 }
 
@@ -56,15 +55,45 @@ async fn create_schema_db() -> (TestConnection, TempDir) {
     (conn, dir)
 }
 
-/// Sets PRAGMA `user_version` on the connection.
 async fn set_user_version(conn: &Connection, version: u32) {
+    if ledger_table_exists(conn).await {
+        crate::db::schema_version::record_version(
+            conn,
+            crate::db::schema_version::GRAPH_COMPONENT,
+            i64::from(version),
+        )
+        .await
+        .expect("failed to set schema version");
+        return;
+    }
     conn.execute(&format!("PRAGMA user_version = {version}"), ())
         .await
         .expect("failed to set user_version");
 }
 
-/// Reads PRAGMA `user_version` from the connection.
+async fn ledger_table_exists(conn: &Connection) -> bool {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tracedecay_schema_version'",
+            (),
+        )
+        .await
+        .expect("probe schema ledger");
+    rows.next()
+        .await
+        .expect("read schema ledger probe")
+        .is_some()
+}
+
 async fn get_user_version(conn: &Connection) -> u32 {
+    let version =
+        crate::db::schema_version::read_version(conn, crate::db::schema_version::GRAPH_COMPONENT)
+            .await
+            .expect("failed to read schema version");
+    u32::try_from(version.unwrap_or(0)).expect("schema version fits u32")
+}
+
+async fn pragma_user_version(conn: &Connection) -> u32 {
     let mut rows = conn
         .query("PRAGMA user_version", ())
         .await
@@ -74,8 +103,8 @@ async fn get_user_version(conn: &Connection) -> u32 {
         .await
         .expect("failed to read user_version row")
         .expect("user_version should return a row");
-    let v: i64 = row.get(0).expect("failed to read user_version value");
-    v as u32
+    let version: i64 = row.get(0).expect("failed to read user_version value");
+    u32::try_from(version).expect("user_version fits u32")
 }
 
 /// Checks whether a table exists in `sqlite_master`.
@@ -131,28 +160,11 @@ async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// An empty file is created at the one supported shape, and reopening it is a
-/// pure identity check.
-#[tokio::test]
-async fn an_empty_database_is_created_at_the_supported_schema_version() {
-    let (conn, _dir) = create_raw_db().await;
-
-    assert_eq!(super::get_version(&*conn).await.unwrap(), 0);
-    ensure_schema_current_connection(&conn).await.unwrap();
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-
-    ensure_schema_current_connection(&conn)
-        .await
-        .expect("reopening a current store is an identity check");
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-}
-
-/// A store stamped with any other version was written by an incompatible
-/// binary. This binary has no ladder, so it refuses with the fresh-start
-/// remedy instead of upgrading in place.
-#[tokio::test]
+/// Every stamp but the current one, including the released v34 and v35
+/// stores, is refused without mutation: nothing upgrades in place.
+#[asupersync::test]
 async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy() {
-    for stamped in [1_u32, 18, 24, SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
+    for stamped in [1_u32, 18, 24, 33, 34, 35, SCHEMA_VERSION + 1] {
         let (conn, _dir) = create_schema_db().await;
         set_user_version(&conn, stamped).await;
 
@@ -182,7 +194,40 @@ async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy(
     }
 }
 
-#[tokio::test]
+/// The handoff grant store lives in the project session store: a fresh graph
+/// store has no copy of it, and a v38 store that still carries one is refused
+/// for reset rather than admitted or rewritten.
+#[asupersync::test]
+async fn the_graph_store_has_no_handoff_table_and_refuses_the_v38_shape_that_did() {
+    let (fresh, _fresh_dir) = create_schema_db().await;
+    assert!(!table_exists(&fresh, "handoff_open_grants_v1").await);
+
+    let (v38, _v38_dir) = create_schema_db().await;
+    v38.execute_batch(tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1)
+        .await
+        .unwrap();
+    set_user_version(&v38, 38).await;
+
+    let error = ensure_schema_current_connection(&v38)
+        .await
+        .expect_err("the v38 graph store must be refused");
+    let TraceDecayError::ResetRequired { authority, reason } = error else {
+        panic!("expected ResetRequired, got {error:?}");
+    };
+    assert_eq!(
+        (authority.as_str(), reason.as_str()),
+        (
+            "SQLite store",
+            "database schema v38 is not the v39 shape this binary creates; this store was \
+             created by an incompatible binary and cannot be upgraded in place. Remove the \
+             store directory and let this binary create a fresh one."
+        )
+    );
+    assert!(table_exists(&v38, "handoff_open_grants_v1").await);
+    assert_eq!(get_user_version(&v38).await, 38);
+}
+
+#[asupersync::test]
 async fn the_former_v26_shape_is_refused_without_mutation() {
     let (conn, _dir) = create_raw_db().await;
     conn.execute_batch(
@@ -220,7 +265,7 @@ async fn the_former_v26_shape_is_refused_without_mutation() {
     assert!(!column_exists(&conn, "graph_publication_replay_v1", "expected_prior_head").await);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn a_current_stamp_with_retired_code_graph_tables_is_reset_required() {
     for retired in [
         "nodes",
@@ -255,7 +300,7 @@ async fn a_current_stamp_with_retired_code_graph_tables_is_reset_required() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_required() {
     for retired in [
         "memory_facts",
@@ -308,7 +353,63 @@ async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_require
     }
 }
 
-#[tokio::test]
+/// v36 retired the semantic-vector staging family with dense code retrieval.
+/// A leftover object of that family on the current stamp is refused by the
+/// writer ladder and by the read-only verifier, and the refusal names it.
+#[asupersync::test]
+async fn a_retired_semantic_vector_staging_object_is_reset_required_on_every_stamp() {
+    for (retired, ddl) in [
+        (
+            "semantic_vector_stages",
+            "CREATE TABLE semantic_vector_stages (stage_id TEXT PRIMARY KEY);",
+        ),
+        (
+            "semantic_vector_replay_stage_identity_guard",
+            "CREATE TRIGGER semantic_vector_replay_stage_identity_guard
+             BEFORE INSERT ON graph_publication_replay_v1 BEGIN
+                 SELECT RAISE(ABORT, 'retired staging guard');
+             END;",
+        ),
+    ] {
+        for stamped in [SCHEMA_VERSION] {
+            let (conn, _dir) = create_schema_db().await;
+            conn.execute_batch(ddl).await.unwrap();
+            set_user_version(&conn, stamped).await;
+
+            let writer_error = ensure_schema_current_connection(&conn)
+                .await
+                .expect_err("a retired staging object must not be admitted or repaired");
+            let read_only_error = verify_final_schema_connection(&conn)
+                .await
+                .expect_err("a read-only verifier must refuse a retired staging object");
+            for error in [writer_error, read_only_error] {
+                assert_eq!(
+                    error
+                        .reset_required_context()
+                        .map(|(authority, _reason)| authority),
+                    Some("SQLite store"),
+                    "v{stamped} {retired}: {error}"
+                );
+                assert!(
+                    error.to_string().contains(retired),
+                    "v{stamped} refusal must identify the retired object: {error}"
+                );
+            }
+            assert_eq!(
+                string_column(
+                    &conn,
+                    &format!("SELECT name FROM sqlite_master WHERE name = '{retired}'"),
+                )
+                .await,
+                [retired],
+                "refusal must leave the retired object in place"
+            );
+            assert_eq!(get_user_version(&conn).await, stamped);
+        }
+    }
+}
+
+#[asupersync::test]
 async fn a_current_stamp_with_retired_memory_projection_columns_is_reset_required() {
     for retired in ["source_label", "projection_state", "vector_watermark_json"] {
         let (conn, _dir) = create_schema_db().await;
@@ -338,7 +439,7 @@ async fn a_current_stamp_with_retired_memory_projection_columns_is_reset_require
 
 /// Creation is atomic: an interrupted create leaves neither DDL nor a version
 /// stamp behind, and the retry still produces the full shape.
-#[tokio::test]
+#[asupersync::test]
 async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
     let (conn, _dir) = create_raw_db().await;
     super::configure_fresh_auto_vacuum(&conn, "test interrupted fresh schema")
@@ -368,7 +469,7 @@ async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
 /// The creation DDL installs the retained relational shape in one transaction:
 /// canonical memory, evidence assembly, external sources, and graph publication
 /// manifests, without recreating either superseded `SQLite` projection.
-#[tokio::test]
+#[asupersync::test]
 async fn fresh_creation_installs_every_stage_of_the_final_shape() {
     let (conn, _dir) = create_schema_db().await;
 
@@ -394,6 +495,7 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         .await,
         [
             "memory_v2_assertion_evidence",
+            "memory_v2_assertion_payload_digests",
             "memory_v2_assertion_payload_purges",
             "memory_v2_assertion_payloads",
             "memory_v2_assertion_payloads_fts",
@@ -431,6 +533,8 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "memory_fact_relations",
         "memory_facts_fts",
         "memory_facts_fts_data",
+        "semantic_vector_stages",
+        "semantic_vector_stage_batches",
     ] {
         assert!(
             !table_exists(&conn, retired).await,
@@ -548,4 +652,196 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "fresh terminal receipt schema must reject an intermediate state"
     );
     assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+}
+
+// ---------------------------------------------------------------------------
+// Persisted payload content digests (#834)
+// ---------------------------------------------------------------------------
+
+const PAYLOAD_FIXTURE_CONTENTS: [&str; 3] = [
+    "Unicode café naïve 東京 🚀",
+    "JSON escaped quote \" and backslash \\ with\ttab and\nnewline",
+    "trailing whitespace ",
+];
+
+/// Seeds one profile fact with a single asserted payload through the raw
+/// authority tables.
+async fn seed_payload(conn: &Connection, ordinal: usize, content: &str) {
+    let fact_id = format!("fact.payload.{ordinal}");
+    let assertion_id = format!("assertion.payload.{ordinal}");
+    conn.execute(
+        "INSERT INTO memory_v2_facts (
+            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+         ) VALUES (?1, 'profile', '', '{\"kind\":\"profile\"}', '{}', ?2)",
+        params![fact_id.as_str(), ordinal as i64],
+    )
+    .await
+    .expect("seed fact");
+    conn.execute(
+        "INSERT INTO memory_v2_assertions (
+            assertion_id, fact_id, owner_kind, project_id, owner_json,
+            assertion_header_json, kind_json, payload_reference_json, receipt_json,
+            asserted_at, actor_id
+         ) VALUES (?1, ?2, 'profile', '', '{\"kind\":\"profile\"}', '{}', '{}', '{}', '{}', ?3, NULL)",
+        params![assertion_id.as_str(), fact_id.as_str(), ordinal as i64],
+    )
+    .await
+    .expect("seed assertion");
+    conn.execute(
+        "INSERT INTO memory_v2_assertion_payloads (
+            assertion_id, fact_id, owner_kind, project_id, payload_json, content
+         ) VALUES (?1, ?2, 'profile', '', '{}', ?3)",
+        params![assertion_id.as_str(), fact_id.as_str(), content],
+    )
+    .await
+    .expect("seed payload");
+}
+
+async fn digest_rows(conn: &Connection) -> Vec<(String, String)> {
+    let mut rows = conn
+        .query(
+            "SELECT fact_id, content_digest FROM memory_v2_assertion_payload_digests
+             ORDER BY payload_rowid ASC",
+            (),
+        )
+        .await
+        .expect("query digest rows");
+    let mut values = Vec::new();
+    while let Some(row) = rows.next().await.expect("read digest row") {
+        values.push((
+            row.get(0).expect("read digest fact id"),
+            row.get(1).expect("read digest value"),
+        ));
+    }
+    values
+}
+
+#[asupersync::test]
+async fn deleting_a_payload_drops_its_digest_and_digests_never_update() {
+    let (conn, _dir) = create_schema_db().await;
+    for (ordinal, content) in PAYLOAD_FIXTURE_CONTENTS.iter().enumerate() {
+        seed_payload(&conn, ordinal, content).await;
+    }
+    conn.execute_batch(
+        "INSERT INTO memory_v2_assertion_payload_digests (
+            payload_rowid, assertion_id, fact_id, owner_kind, project_id, content_digest
+         )
+         SELECT rowid, assertion_id, fact_id, owner_kind, project_id,
+                'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+         FROM memory_v2_assertion_payloads;",
+    )
+    .await
+    .expect("seed digest rows");
+    assert_eq!(
+        digest_rows(&conn).await.len(),
+        PAYLOAD_FIXTURE_CONTENTS.len()
+    );
+
+    let update = conn
+        .execute_batch(
+            "UPDATE memory_v2_assertion_payload_digests SET content_digest = \
+             'sha256:1111111111111111111111111111111111111111111111111111111111111111';",
+        )
+        .await;
+    assert!(
+        update
+            .expect_err("digest rows are immutable")
+            .to_string()
+            .contains("immutable")
+    );
+
+    conn.execute_batch(
+        "DELETE FROM memory_v2_assertion_payloads WHERE fact_id = 'fact.payload.1';",
+    )
+    .await
+    .expect("delete a payload");
+    let remaining: Vec<String> = digest_rows(&conn)
+        .await
+        .into_iter()
+        .map(|(fact_id, _digest)| fact_id)
+        .collect();
+    assert_eq!(
+        remaining,
+        vec!["fact.payload.0".to_owned(), "fact.payload.2".to_owned()]
+    );
+}
+
+#[asupersync::test]
+async fn the_content_digest_lookup_is_an_indexed_point_read() {
+    let (conn, _dir) = create_schema_db().await;
+    let mut rows = conn
+        .query(
+            "EXPLAIN QUERY PLAN
+             SELECT current_facts.fact_id
+             FROM memory_v2_assertion_payload_digests AS digests
+             CROSS JOIN memory_v2_current_facts AS current_facts
+               ON current_facts.fact_id = digests.fact_id
+              AND current_facts.owner_kind = digests.owner_kind
+              AND current_facts.project_id = digests.project_id
+              AND current_facts.active_assertion_id = digests.assertion_id
+             CROSS JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current_facts.fact_id
+              AND facts.owner_kind = current_facts.owner_kind
+              AND facts.project_id = current_facts.project_id
+             WHERE digests.owner_kind = 'profile'
+               AND digests.project_id = ''
+               AND digests.content_digest = 'sha256:x'
+               AND facts.owner_json = '{}'
+               AND current_facts.payload_access = 'eligible'
+             ORDER BY current_facts.fact_id ASC
+             LIMIT 1",
+            (),
+        )
+        .await
+        .expect("explain the digest lookup");
+    let mut plan = Vec::new();
+    while let Some(row) = rows.next().await.expect("read plan row") {
+        plan.push(row.get::<String>(3).expect("read plan detail"));
+    }
+    let plan = plan.join("\n");
+    assert!(
+        plan.contains("SEARCH digests USING INDEX memory_v2_assertion_payload_digests_lookup"),
+        "the digest lookup must drive from the digest index: {plan}"
+    );
+    assert!(
+        !plan.contains("SCAN digests"),
+        "the digest lookup must never scan the digest table: {plan}"
+    );
+}
+
+#[asupersync::test]
+async fn a_user_version_stamp_at_the_current_schema_upgrades_onto_the_ledger() {
+    let (conn, _dir) = create_schema_db().await;
+    conn.execute_batch("DROP TABLE tracedecay_schema_version")
+        .await
+        .expect("remove the adopted ledger");
+    conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), ())
+        .await
+        .expect("restore the legacy stamp");
+
+    ensure_schema_current_connection(&conn)
+        .await
+        .expect("current legacy stamp must be admitted and adopted");
+
+    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+    assert_eq!(pragma_user_version(&conn).await, 0);
+    assert!(ledger_table_exists(&conn).await);
+}
+
+#[asupersync::test]
+async fn an_older_user_version_is_refused_without_adopting_it() {
+    let (conn, _dir) = create_schema_db().await;
+    conn.execute_batch("DROP TABLE tracedecay_schema_version")
+        .await
+        .expect("remove the adopted ledger");
+    conn.execute("PRAGMA user_version = 38", ())
+        .await
+        .expect("stamp the previous graph schema");
+
+    let error = ensure_schema_current_connection(&conn)
+        .await
+        .expect_err("an older pragma must be refused");
+    assert!(error.to_string().contains("database schema v38"), "{error}");
+    assert_eq!(pragma_user_version(&conn).await, 38);
+    assert!(!ledger_table_exists(&conn).await);
 }

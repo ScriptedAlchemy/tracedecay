@@ -2,22 +2,97 @@
 
 use serde::Deserialize;
 use tracedecay_domain::{
-    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationFactV1, CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1,
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
+    CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1,
     CanonicalWorkflowSemanticKindV1, DurableObservationV1, ObservationContractError,
     ObservationScopeV1,
 };
 
 use crate::cursor_dispatch::{cursor_dispatch_model, dispatch_text, is_subagent_dispatch_tool};
-use crate::provider_descriptor::{synthesizes_native_record_id, tool_metadata_normalizer};
+use crate::provider_descriptor::{
+    ProviderMessageSemantics, provider_message_semantics, synthesizes_native_record_id,
+    tool_metadata_normalizer,
+};
 use crate::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SessionMessageRecord, SessionRecord, WorkflowFactRecord,
 };
 
-#[hotpath::measure(label = "store.projection.derive_canonical")]
+/// Which projector rendering to derive.
+///
+/// Releases through v0.1.0-beta.37 wrote `ShippedRelease`. The reducer is
+/// otherwise unchanged; only Codex goal-context semantics were added after
+/// that tag.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CanonicalRendering {
+    Current,
+    ShippedRelease,
+}
+
+/// Codex goal-context semantics are the only post-release rendering. A shipped
+/// derivation withholds them. Every other field is this reducer.
+fn rendering_message_semantics(
+    rendering: CanonicalRendering,
+    provider: &str,
+    native_record_kind: &str,
+    role: &str,
+    content: &serde_json::Value,
+    has_native_item_identity: bool,
+) -> Option<ProviderMessageSemantics> {
+    match rendering {
+        CanonicalRendering::ShippedRelease => None,
+        CanonicalRendering::Current => provider_message_semantics(
+            provider,
+            native_record_kind,
+            role,
+            content,
+            has_native_item_identity,
+        ),
+    }
+}
+
+/// The `(project_key, project_path)` a session row in `scope` carries before
+/// any observation names its working directory. Every writer of a session row
+/// uses this, so the projection's later cwd only refines the path.
+pub fn session_project_fields(scope: &ObservationScopeV1) -> (String, String) {
+    match scope {
+        ObservationScopeV1::Profile => ("user".to_owned(), "user".to_owned()),
+        ObservationScopeV1::Project { project_id } => (
+            project_id.as_str().to_owned(),
+            project_id.as_str().to_owned(),
+        ),
+    }
+}
+
 pub fn derive_canonical_projection(
     observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
+    derive_canonical_projection_for(observation, CanonicalRendering::Current)
+}
+
+/// Whether the stored row is the message row a shipped release wrote for
+/// `observation`, as judged by `stores` against each released message.
+///
+/// A current-provenance row that still holds that rendering is an interrupted
+/// write. Any other body, including a derivation that does not complete, is not.
+pub fn stored_message_is_shipped_release_rendering(
+    observation: &DurableObservationV1,
+    stores: impl Fn(&SessionMessageRecord) -> bool,
+) -> bool {
+    let Ok(released) =
+        derive_canonical_projection_for(observation, CanonicalRendering::ShippedRelease)
+    else {
+        return false;
+    };
+    released
+        .message()
+        .is_some_and(|projection| stores(projection.message()))
+}
+
+#[tracing::instrument(name = "store.projection.derive_canonical", level = "trace", skip_all)]
+fn derive_canonical_projection_for(
+    observation: &DurableObservationV1,
+    rendering: CanonicalRendering,
 ) -> ProjectionStoreResult<ObservationProjection> {
     let envelope =
         CanonicalObservationEnvelopeV1::deserialize(observation.payload()).map_err(|_| {
@@ -40,16 +115,24 @@ pub fn derive_canonical_projection(
         ));
     }
 
-    let mut projected = canonical_message_fields(&envelope)?;
-    let session_fields = if envelope.provider().as_str() == "claude" {
-        None
-    } else {
-        canonical_session_fields(&envelope)
-    };
-    let (primary_message_id, derived_messages) =
+    let mut projected = canonical_message_fields_for(rendering, &envelope)?;
+    // A Claude row keeps its project id as its path, so the Session fact's
+    // other fields stay masked off the row; only the transcript it was read
+    // from is evidence the row should answer.
+    let session_fields = canonical_session_fields(&envelope).map(|fields| {
+        if envelope.provider().as_str() == "claude" {
+            CanonicalSessionFields {
+                transcript_path: fields.transcript_path,
+                ..Default::default()
+            }
+        } else {
+            fields
+        }
+    });
+    let primary_message_id =
         canonical_compatibility_message_fields(&envelope, session_fields.as_ref(), &mut projected)?;
     let workflow_facts = canonical_workflow_facts(&envelope)?;
-    if projected.is_none() && derived_messages.is_empty() && workflow_facts.is_empty() {
+    if projected.is_none() && workflow_facts.is_empty() {
         return ObservationProjection::for_skip(
             observation,
             ProjectionSkipReason::NonConversationalRecord,
@@ -57,13 +140,7 @@ pub fn derive_canonical_projection(
     }
     let provider = envelope.provider().as_str().to_owned();
     let session_id = envelope.relations().session_id().as_str().to_owned();
-    let (project_key, fallback_project_path) = match observation.scope() {
-        ObservationScopeV1::Profile => ("user".to_owned(), "user".to_owned()),
-        ObservationScopeV1::Project { project_id } => (
-            project_id.as_str().to_owned(),
-            project_id.as_str().to_owned(),
-        ),
-    };
+    let (project_key, fallback_project_path) = session_project_fields(observation.scope());
     let timestamp = projected
         .as_ref()
         .and_then(|projected| projected.timestamp)
@@ -74,7 +151,33 @@ pub fn derive_canonical_projection(
         .and_then(|fields| fields.project_path.clone())
         .unwrap_or(fallback_project_path);
     let session_metadata = canonical_session_metadata_map(&provider, session_fields.as_ref());
-    let session_metadata_json = serialize_metadata_map(&session_metadata)?;
+    // The edit rollup is a session-level fact: it lands on the session row
+    // and stays out of the per-message metadata copy below.
+    let mut session_row_metadata = session_metadata.clone();
+    // A Claude row keeps its project id as its path, so the cwd its records
+    // carry survives only as a row annotation: Git history evidence for the
+    // session belongs to the worktree it ran in.
+    if provider == "claude" {
+        session_row_metadata.extend(canonical_session_metadata_map(
+            &provider,
+            canonical_session_fields(&envelope).as_ref(),
+        ));
+    }
+    let edited_files = canonical_edited_files(&envelope);
+    if !edited_files.is_empty() {
+        session_row_metadata.insert(
+            EDITED_FILES_KEY.to_owned(),
+            serde_json::Value::Array(edited_files),
+        );
+    }
+    let spawned_sessions = canonical_spawned_sessions(&envelope);
+    if !spawned_sessions.is_empty() {
+        session_row_metadata.insert(
+            SPAWNED_SESSIONS_KEY.to_owned(),
+            serde_json::Value::Array(spawned_sessions),
+        );
+    }
+    let session_metadata_json = serialize_metadata_map(&session_row_metadata)?;
     let session = SessionRecord {
         provider: provider.clone(),
         session_id: session_id.clone(),
@@ -104,7 +207,13 @@ pub fn derive_canonical_projection(
             .relations()
             .agent_id()
             .map(|id| id.as_str().to_owned()),
-        parent_tool_use_id: None,
+        // A spawning call names a call in the parent session, so it is
+        // recorded only alongside that parent.
+        parent_tool_use_id: envelope
+            .relations()
+            .parent_session_id()
+            .and(envelope.relations().parent_tool_use_id())
+            .map(|id| id.as_str().to_owned()),
     };
     let ordinal = envelope
         .evidence()
@@ -113,7 +222,8 @@ pub fn derive_canonical_projection(
     let ordinal = i64::try_from(ordinal).map_err(|_| {
         ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
     })?;
-    let metadata_json = canonical_message_metadata(
+    let metadata_json = canonical_message_metadata_for(
+        rendering,
         &envelope,
         (!session_metadata.is_empty()).then_some(&session_metadata),
     )?;
@@ -130,45 +240,26 @@ pub fn derive_canonical_projection(
         })
     };
     let source_offset = i64::try_from(envelope.evidence().range().start()).ok();
-    let mut messages =
-        Vec::with_capacity(usize::from(projected.is_some()) + derived_messages.len());
-    if let Some(projected) = projected {
-        messages.push((
+    let message = projected.map(|projected| {
+        (
             session.clone(),
             canonical_session_message_record(
                 &provider,
                 &session_id,
-                base_message_id.clone(),
+                base_message_id,
                 timestamp,
                 ordinal,
                 source_offset,
-                &metadata_json,
+                metadata_json.as_deref(),
                 projected,
             ),
-        ));
-    }
-    for derived in derived_messages {
-        messages.push((
-            session.clone(),
-            canonical_session_message_record(
-                &provider,
-                &session_id,
-                derived
-                    .message_id
-                    .unwrap_or_else(|| format!("{base_message_id}:{}", derived.suffix)),
-                derived.fields.timestamp.or(timestamp),
-                ordinal,
-                source_offset,
-                &metadata_json,
-                derived.fields,
-            ),
-        ));
-    }
+        )
+    });
     let workflow_facts: Vec<(SessionRecord, WorkflowFactRecord)> = workflow_facts
         .into_iter()
         .map(|fact| (session.clone(), fact))
         .collect();
-    ObservationProjection::for_outputs(observation, messages, workflow_facts)
+    ObservationProjection::for_outputs(observation, message, workflow_facts)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -179,7 +270,7 @@ fn canonical_session_message_record(
     timestamp: Option<i64>,
     ordinal: i64,
     source_offset: Option<i64>,
-    metadata_json: &str,
+    metadata_json: Option<&str>,
     fields: CanonicalMessageFields,
 ) -> SessionMessageRecord {
     SessionMessageRecord {
@@ -195,10 +286,11 @@ fn canonical_session_message_record(
         tool_names: fields.tool_names,
         source_path: None,
         source_offset,
-        metadata_json: Some(metadata_json.to_owned()),
+        metadata_json: metadata_json.map(str::to_owned),
     }
 }
 
+#[derive(Default)]
 struct CanonicalSessionFields {
     project_path: Option<String>,
     location_path: Option<String>,
@@ -288,6 +380,103 @@ fn canonical_session_metadata_map(
     metadata
 }
 
+/// `sessions.metadata_json` key of the provider-native edited-file rollup:
+/// `[{path, edited_at_micros?, change_type?, hunks?}]`, one entry per file-edit
+/// fact. The store reconciles the arrays of a session's records by union.
+pub const EDITED_FILES_KEY: &str = "edited_files";
+
+/// Message `metadata_json` key carrying the host's tool-use identifier for the
+/// record's tool invocation (see [`host_tool_use_id`]). Absent when the host
+/// recorded none.
+pub const TOOL_USE_ID_KEY: &str = "tool_use_id";
+
+/// `sessions.metadata_json` key of the spawn rollup on a delegating session:
+/// `[{session_id, tool_use_id}]`, one entry per child session the host
+/// recorded this session's tool call spawning. Hosts that record the spawning
+/// call only in the parent transcript (Codex `SubAgentActivity`, OpenCode
+/// `task` parts) bind a child's `parent_tool_use_id` through it. The store
+/// reconciles the arrays of a session's records by union.
+pub const SPAWNED_SESSIONS_KEY: &str = "spawned_sessions";
+
+/// One rollup entry per `Git { FileEdit }` fact that names its path. The time,
+/// change type, and hunk count are copied only when the capture recorded them
+/// from the host (`edited_at_micros`, `change_type`, `hunks` in the fact
+/// content); nothing is derived from session bounds or neighbouring records.
+fn canonical_edited_files(envelope: &CanonicalObservationEnvelopeV1) -> Vec<serde_json::Value> {
+    envelope
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+                reference: Some(path),
+                content,
+            } if !path.is_empty() => {
+                let mut entry = serde_json::Map::new();
+                entry.insert("path".to_owned(), serde_json::Value::String(path.clone()));
+                let content = content.as_ref().and_then(serde_json::Value::as_object);
+                for key in ["edited_at_micros", "change_type", "hunks"] {
+                    if let Some(value) = content.and_then(|content| content.get(key)) {
+                        entry.insert(key.to_owned(), value.clone());
+                    }
+                }
+                Some(serde_json::Value::Object(entry))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// One rollup entry per `Workflow { Subagent }` fact that names the spawned
+/// session (`reference`) and the spawning call (`content.tool_use_id`), both
+/// as the host recorded them. A subagent fact without either names no spawn.
+fn canonical_spawned_sessions(envelope: &CanonicalObservationEnvelopeV1) -> Vec<serde_json::Value> {
+    envelope
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            CanonicalObservationFactV1::Workflow {
+                evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                reference: Some(session_id),
+                content: Some(content),
+            } if !session_id.is_empty() => {
+                let tool_use_id = content
+                    .get(TOOL_USE_ID_KEY)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())?;
+                Some(serde_json::json!({
+                    "session_id": session_id,
+                    TOOL_USE_ID_KEY: tool_use_id,
+                }))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The host's own identifier of the record's tool invocation, for a fork or
+/// tool result to bind to. A subagent dispatch wins over other invocations on
+/// the same record because that is the call a child session's
+/// `parent_tool_use_id` names.
+fn host_tool_use_id(envelope: &CanonicalObservationEnvelopeV1) -> Option<&str> {
+    let mut invocations = envelope.facts().iter().filter_map(|fact| match fact {
+        CanonicalObservationFactV1::ToolInvocation {
+            invocation_id: Some(invocation_id),
+            name,
+            ..
+        } => Some((invocation_id.as_str(), name.as_str())),
+        _ => None,
+    });
+    let first = invocations.next()?;
+    Some(
+        std::iter::once(first)
+            .chain(invocations)
+            .find(|(_, name)| is_subagent_dispatch_tool(name))
+            .unwrap_or(first)
+            .0,
+    )
+}
+
 fn serialize_metadata_map(
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> ProjectionStoreResult<Option<String>> {
@@ -308,27 +497,104 @@ fn canonical_session_metadata(
     serialize_metadata_map(&canonical_session_metadata_map(provider, session))
 }
 
+#[cfg(test)]
 fn canonical_message_metadata(
     envelope: &CanonicalObservationEnvelopeV1,
     session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> ProjectionStoreResult<String> {
-    let serde_json::Value::Object(mut metadata) = serde_json::to_value(envelope)
-        .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))?
-    else {
-        return Err(ProjectionStoreError::Contract(
-            ObservationContractError::CanonicalEncoding,
-        ));
+) -> ProjectionStoreResult<Option<String>> {
+    canonical_message_metadata_for(CanonicalRendering::Current, envelope, session_metadata)
+}
+
+/// Message metadata holds only what the envelope does not: session, tool, and
+/// provider-semantics keys. The envelope itself stays in its `observations`
+/// row; [`message_metadata_with_envelope`] merges the two for readers that
+/// render the full record.
+fn canonical_message_metadata_for(
+    rendering: CanonicalRendering,
+    envelope: &CanonicalObservationEnvelopeV1,
+    session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> ProjectionStoreResult<Option<String>> {
+    let mut metadata = match rendering {
+        // Released rows embedded the whole envelope.
+        CanonicalRendering::ShippedRelease => match serde_json::to_value(envelope) {
+            Ok(serde_json::Value::Object(envelope)) => envelope,
+            _ => {
+                return Err(ProjectionStoreError::Contract(
+                    ObservationContractError::CanonicalEncoding,
+                ));
+            }
+        },
+        CanonicalRendering::Current => serde_json::Map::new(),
     };
     if let Some(session_metadata) = session_metadata {
         metadata.extend(session_metadata.clone());
     }
-    if let Some(normalize) =
-        tool_metadata_normalizer(metadata.get("source").and_then(serde_json::Value::as_str))
-    {
+    let source = metadata
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let normalizer = tool_metadata_normalizer(source.as_deref());
+    if let Some(normalize) = normalizer {
         normalize(&mut metadata, envelope.facts())?;
     }
-    serde_json::to_string(&metadata)
-        .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
+    let tool_use_id = match rendering {
+        CanonicalRendering::Current => host_tool_use_id(envelope),
+        // Released rows carried the first subagent dispatch id of a Cursor
+        // transcript record, including the capture fallback.
+        CanonicalRendering::ShippedRelease => normalizer.and_then(|_| {
+            envelope.facts().iter().find_map(|fact| match fact {
+                CanonicalObservationFactV1::ToolInvocation {
+                    invocation_id: Some(invocation_id),
+                    name,
+                    ..
+                } if is_subagent_dispatch_tool(name) => Some(invocation_id.as_str()),
+                _ => None,
+            })
+        }),
+    };
+    if let Some(tool_use_id) = tool_use_id {
+        metadata.insert(
+            TOOL_USE_ID_KEY.to_owned(),
+            serde_json::Value::String(tool_use_id.to_owned()),
+        );
+    }
+    if let Some(CanonicalObservationFactV1::Message { role, content, .. }) = envelope
+        .facts()
+        .iter()
+        .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
+        && let Some(semantics) = rendering_message_semantics(
+            rendering,
+            envelope.provider().as_str(),
+            envelope.native_record_kind(),
+            role.as_str(),
+            content,
+            envelope.relations().message_id() != Some(envelope.stable_record_id()),
+        )
+    {
+        metadata.extend(semantics.metadata);
+    }
+    serialize_metadata_map(&metadata)
+}
+
+/// The full message metadata: the observation `envelope` payload overlaid by
+/// the row's stored keys, byte-identical to a row that embedded the envelope.
+pub fn message_metadata_with_envelope(
+    stored: Option<&str>,
+    envelope: &serde_json::Value,
+) -> ProjectionStoreResult<String> {
+    let encoding = || ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding);
+    let serde_json::Value::Object(mut metadata) = envelope.clone() else {
+        return Err(encoding());
+    };
+    if let Some(stored) = stored {
+        let serde_json::Value::Object(stored) =
+            serde_json::from_str(stored).map_err(|_| encoding())?
+        else {
+            return Err(encoding());
+        };
+        metadata.extend(stored);
+    }
+    serde_json::to_string(&metadata).map_err(|_| encoding())
 }
 
 fn canonical_workflow_facts(
@@ -462,72 +728,51 @@ struct CanonicalMessageFields {
     tool_names: Option<String>,
 }
 
-struct CanonicalDerivedMessageFields {
-    suffix: String,
-    message_id: Option<String>,
-    fields: CanonicalMessageFields,
-}
-
+/// Renders a Cursor record's host-specific parts into its one message row.
+/// Returns the row's message id when the rendering owns that identity.
 fn canonical_compatibility_message_fields(
     envelope: &CanonicalObservationEnvelopeV1,
     session: Option<&CanonicalSessionFields>,
     primary: &mut Option<CanonicalMessageFields>,
-) -> ProjectionStoreResult<(Option<String>, Vec<CanonicalDerivedMessageFields>)> {
+) -> ProjectionStoreResult<Option<String>> {
     match session.and_then(|session| session.source.as_deref()) {
         Some("cursor_composer") => {
-            canonical_composer_compatibility_message_fields(envelope).map(|derived| (None, derived))
+            canonical_composer_message_fields(envelope, primary)?;
+            Ok(None)
         }
-        Some("cursor_transcript") => {
-            canonical_cursor_compatibility_message_fields(envelope, primary)
-        }
-        _ => Ok((None, Vec::new())),
+        Some("cursor_transcript") => canonical_cursor_dispatch_message_fields(envelope, primary),
+        _ => Ok(None),
     }
 }
 
-fn canonical_composer_compatibility_message_fields(
+/// A composer bubble's thinking, tool call, tool result, and pull-request
+/// links follow its message text in the bubble's one row. A bubble without
+/// message text takes its role and kind from the first of those parts.
+fn canonical_composer_message_fields(
     envelope: &CanonicalObservationEnvelopeV1,
-) -> ProjectionStoreResult<Vec<CanonicalDerivedMessageFields>> {
-    let mut derived = Vec::new();
-    let mut reasoning_index = 0usize;
-    let mut tool_index = 0usize;
-    let mut pull_request_index = 0usize;
+    primary: &mut Option<CanonicalMessageFields>,
+) -> ProjectionStoreResult<()> {
     let has_tool_invocation = envelope
         .facts()
         .iter()
         .any(|fact| matches!(fact, CanonicalObservationFactV1::ToolInvocation { .. }));
+    let mut parts = Vec::new();
     for fact in envelope.facts() {
-        let (suffix, fields) = match fact {
+        let part = match fact {
             CanonicalObservationFactV1::Reasoning {
                 visibility: CanonicalReasoningVisibilityV1::Visible,
                 content: Some(content),
-            } => {
-                let suffix = if reasoning_index == 0 {
-                    "thinking".to_owned()
-                } else {
-                    format!("thinking:{reasoning_index}")
-                };
-                reasoning_index += 1;
-                (
-                    suffix,
-                    CanonicalMessageFields {
-                        role: "assistant".to_owned(),
-                        text: canonical_fact_text(content)?,
-                        kind: "reasoning".to_owned(),
-                        model: None,
-                        timestamp: None,
-                        tool_names: None,
-                    },
-                )
-            }
+            } => CanonicalMessageFields {
+                role: "assistant".to_owned(),
+                text: canonical_fact_text(content)?,
+                kind: "reasoning".to_owned(),
+                model: None,
+                timestamp: None,
+                tool_names: None,
+            },
             CanonicalObservationFactV1::ToolInvocation {
                 name, arguments, ..
             } => {
-                let suffix = if tool_index == 0 {
-                    "tool".to_owned()
-                } else {
-                    format!("tool:{tool_index}")
-                };
-                tool_index += 1;
                 let normalized_name = name.to_ascii_lowercase();
                 let kind = if ["edit", "write", "patch"]
                     .iter()
@@ -537,141 +782,152 @@ fn canonical_composer_compatibility_message_fields(
                 } else {
                     "tool_call"
                 };
-                (
-                    suffix,
-                    CanonicalMessageFields {
-                        role: "assistant".to_owned(),
-                        text: canonical_fact_text(arguments)?,
-                        kind: kind.to_owned(),
-                        model: None,
-                        timestamp: None,
-                        tool_names: Some(name.clone()),
-                    },
-                )
+                CanonicalMessageFields {
+                    role: "assistant".to_owned(),
+                    text: composer_part_text(arguments)?,
+                    kind: kind.to_owned(),
+                    model: None,
+                    timestamp: None,
+                    tool_names: Some(name.clone()),
+                }
             }
             CanonicalObservationFactV1::ToolResult { content, .. } if !has_tool_invocation => {
-                let suffix = if tool_index == 0 {
-                    "tool".to_owned()
-                } else {
-                    format!("tool:{tool_index}")
-                };
-                tool_index += 1;
-                (
-                    suffix,
-                    CanonicalMessageFields {
-                        role: "tool".to_owned(),
-                        text: canonical_fact_text(content)?,
-                        kind: "tool_result".to_owned(),
-                        model: None,
-                        timestamp: None,
-                        tool_names: None,
-                    },
-                )
+                CanonicalMessageFields {
+                    role: "tool".to_owned(),
+                    text: composer_part_text(content)?,
+                    kind: "tool_result".to_owned(),
+                    model: None,
+                    timestamp: None,
+                    tool_names: None,
+                }
             }
             CanonicalObservationFactV1::Git {
                 evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
                 reference,
                 content,
-            } => {
-                let suffix = format!("pr:{pull_request_index}");
-                pull_request_index += 1;
-                let text = reference.clone().unwrap_or(
+            } => CanonicalMessageFields {
+                role: "system".to_owned(),
+                text: reference.clone().unwrap_or(
                     content
                         .as_ref()
                         .map(canonical_fact_text)
                         .transpose()?
                         .unwrap_or_default(),
-                );
-                (
-                    suffix,
-                    CanonicalMessageFields {
-                        role: "system".to_owned(),
-                        text,
-                        kind: "pr_link".to_owned(),
-                        model: None,
-                        timestamp: None,
-                        tool_names: None,
-                    },
-                )
-            }
+                ),
+                kind: "pr_link".to_owned(),
+                model: None,
+                timestamp: None,
+                tool_names: None,
+            },
             _ => continue,
         };
-        derived.push(CanonicalDerivedMessageFields {
-            suffix,
-            message_id: None,
-            fields,
-        });
+        parts.push(part);
     }
-    Ok(derived)
-}
-
-fn canonical_cursor_compatibility_message_fields(
-    envelope: &CanonicalObservationEnvelopeV1,
-    primary: &mut Option<CanonicalMessageFields>,
-) -> ProjectionStoreResult<(Option<String>, Vec<CanonicalDerivedMessageFields>)> {
-    let dispatches = envelope
+    let has_message = envelope
         .facts()
         .iter()
-        .filter_map(|fact| match fact {
-            CanonicalObservationFactV1::ToolInvocation {
-                invocation_id,
-                name,
-                arguments,
-            } if is_subagent_dispatch_tool(name) => Some((invocation_id, name, arguments)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if dispatches.is_empty() {
-        return Ok((None, Vec::new()));
+        .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }));
+    let mut parts = parts.into_iter();
+    if !has_message {
+        let Some(first) = parts.next() else {
+            return Ok(());
+        };
+        let tool_names = primary
+            .as_ref()
+            .and_then(|fields| fields.tool_names.clone());
+        *primary = Some(CanonicalMessageFields {
+            tool_names,
+            ..first
+        });
     }
+    let Some(row) = primary.as_mut() else {
+        return Ok(());
+    };
+    for part in parts.filter(|part| !part.text.is_empty()) {
+        if !row.text.is_empty() {
+            row.text.push_str("\n\n");
+        }
+        row.text.push_str(&part.text);
+    }
+    Ok(())
+}
 
-    let only_dispatches = envelope
+/// Composer bubbles record a tool call's arguments and result as `null`; a
+/// part with no recorded payload contributes no text.
+fn composer_part_text(value: &serde_json::Value) -> ProjectionStoreResult<String> {
+    if value.is_null() {
+        Ok(String::new())
+    } else {
+        canonical_fact_text(value)
+    }
+}
+
+/// A transcript record whose whole content is one subagent dispatch renders as
+/// that dispatch: its prompt, the model it asked for, and a row id naming the
+/// call. Any other record keeps its message rendering, whose text already
+/// carries every dispatch input.
+fn canonical_cursor_dispatch_message_fields(
+    envelope: &CanonicalObservationEnvelopeV1,
+    primary: &mut Option<CanonicalMessageFields>,
+) -> ProjectionStoreResult<Option<String>> {
+    let mut invocations = envelope.facts().iter().filter_map(|fact| match fact {
+        CanonicalObservationFactV1::ToolInvocation {
+            invocation_id,
+            name,
+            arguments,
+        } => Some((invocation_id, name, arguments)),
+        _ => None,
+    });
+    let (Some((invocation_id, name, arguments)), None) = (invocations.next(), invocations.next())
+    else {
+        return Ok(None);
+    };
+    if !is_subagent_dispatch_tool(name) {
+        return Ok(None);
+    }
+    let only_dispatch = envelope
         .facts()
         .iter()
         .find_map(|fact| match fact {
             CanonicalObservationFactV1::Message { content, .. } => {
                 Some(content.as_array().is_some_and(|items| {
-                    !items.is_empty()
-                        && items.iter().all(|item| {
-                            item.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
-                                && item
-                                    .get("name")
-                                    .and_then(serde_json::Value::as_str)
-                                    .is_some_and(is_subagent_dispatch_tool)
-                        })
+                    items.len() == 1
+                        && items[0].get("type").and_then(serde_json::Value::as_str)
+                            == Some("tool_use")
                 }))
             }
             _ => None,
         })
         .unwrap_or(true);
-    let session_id = envelope.relations().session_id().as_str();
-    let mut derived = Vec::new();
-    let mut primary_message_id = None;
-    for (index, (invocation_id, name, arguments)) in dispatches.into_iter().enumerate() {
-        let fields = CanonicalMessageFields {
-            role: "assistant".to_owned(),
-            text: dispatch_text(arguments).map_or_else(|| canonical_fact_text(arguments), Ok)?,
-            kind: "tool_dispatch".to_owned(),
-            model: cursor_dispatch_model(arguments),
-            timestamp: None,
-            tool_names: Some(name.clone()),
-        };
-        let message_id = format!("{session_id}:tool_dispatch:{}", invocation_id.as_str());
-        if only_dispatches && index == 0 {
-            *primary = Some(fields);
-            primary_message_id = Some(message_id);
-        } else {
-            derived.push(CanonicalDerivedMessageFields {
-                suffix: format!("tool_dispatch:{index}"),
-                message_id: Some(message_id),
-                fields,
-            });
-        }
+    if !only_dispatch {
+        return Ok(None);
     }
-    Ok((primary_message_id, derived))
+    *primary = Some(CanonicalMessageFields {
+        role: "assistant".to_owned(),
+        text: dispatch_text(arguments).map_or_else(|| canonical_fact_text(arguments), Ok)?,
+        kind: "tool_dispatch".to_owned(),
+        model: cursor_dispatch_model(arguments),
+        timestamp: None,
+        tool_names: Some(name.clone()),
+    });
+    Ok(invocation_id.as_ref().map(|invocation_id| {
+        format!(
+            "{}:tool_dispatch:{}",
+            envelope.relations().session_id().as_str(),
+            invocation_id.as_str()
+        )
+    }))
 }
 
+#[cfg(test)]
 fn canonical_message_fields(
+    envelope: &CanonicalObservationEnvelopeV1,
+) -> ProjectionStoreResult<Option<CanonicalMessageFields>> {
+    canonical_message_fields_for(CanonicalRendering::Current, envelope)
+}
+
+fn canonical_message_fields_for(
+    rendering: CanonicalRendering,
     envelope: &CanonicalObservationEnvelopeV1,
 ) -> ProjectionStoreResult<Option<CanonicalMessageFields>> {
     let facts = envelope.facts();
@@ -693,9 +949,31 @@ fn canonical_message_fields(
         .iter()
         .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
     {
+        let role = role.as_str();
+        let text = match rendering {
+            CanonicalRendering::Current => canonical_message_text(content)?,
+            CanonicalRendering::ShippedRelease => canonical_fact_text(content)?,
+        };
+        if let Some(semantics) = rendering_message_semantics(
+            rendering,
+            envelope.provider().as_str(),
+            envelope.native_record_kind(),
+            role,
+            content,
+            envelope.relations().message_id() != Some(envelope.stable_record_id()),
+        ) {
+            return Ok(Some(CanonicalMessageFields {
+                role: semantics.role.to_owned(),
+                text: semantics.text,
+                kind: semantics.kind.to_owned(),
+                model: model.clone(),
+                timestamp: *timestamp,
+                tool_names,
+            }));
+        }
         return Ok(Some(CanonicalMessageFields {
-            role: canonical_role(*role).to_owned(),
-            text: canonical_fact_text(content)?,
+            role: role.to_owned(),
+            text,
             kind: "message".to_owned(),
             model: model.clone(),
             timestamp: *timestamp,
@@ -732,6 +1010,11 @@ fn canonical_message_fields(
         }));
     }
 
+    // The observation's one row renders its first fact with text. A record
+    // whose renderable facts are all empty (a compaction without a summary, a
+    // subagent session start) still projects that first fact: the row carries
+    // the session and its relations.
+    let mut first_empty = None;
     for fact in facts {
         if matches!(
             fact,
@@ -826,9 +1109,47 @@ fn canonical_message_fields(
             | CanonicalObservationFactV1::Boundary { .. }
             | CanonicalObservationFactV1::Unknown { .. } => continue,
         };
+        if fields.text.is_empty() {
+            first_empty.get_or_insert(fields);
+            continue;
+        }
         return Ok(Some(fields));
     }
-    Ok(None)
+    Ok(first_empty)
+}
+
+/// A content-block array renders as its text blocks and subagent dispatch
+/// inputs; other blocks stay in the envelope.
+fn canonical_message_text(content: &serde_json::Value) -> ProjectionStoreResult<String> {
+    let Some(blocks) = content.as_array() else {
+        return canonical_fact_text(content);
+    };
+    let parts = blocks
+        .iter()
+        .filter_map(
+            |block| match block.get("type").and_then(serde_json::Value::as_str)? {
+                "text" | "input_text" | "output_text" => block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                "tool_use"
+                    if block
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_subagent_dispatch_tool) =>
+                {
+                    dispatch_text(block)
+                }
+                _ => None,
+            },
+        )
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        canonical_fact_text(content)
+    } else {
+        Ok(parts.join("\n\n"))
+    }
 }
 
 pub fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<String> {
@@ -842,16 +1163,6 @@ pub fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<S
     }
     serde_json::to_string(value)
         .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
-}
-
-fn canonical_role(role: CanonicalMessageRoleV1) -> &'static str {
-    match role {
-        CanonicalMessageRoleV1::User => "user",
-        CanonicalMessageRoleV1::Assistant => "assistant",
-        CanonicalMessageRoleV1::System => "system",
-        CanonicalMessageRoleV1::Tool => "tool",
-        CanonicalMessageRoleV1::Unknown => "unknown",
-    }
 }
 
 fn reasoning_kind(visibility: CanonicalReasoningVisibilityV1) -> &'static str {
@@ -900,11 +1211,11 @@ pub fn workflow_semantic_kind(kind: CanonicalWorkflowSemanticKindV1) -> &'static
 mod tests {
     use serde_json::json;
     use tracedecay_domain::{
-        CanonicalBoundaryKindV1, CanonicalObservationEvidenceV1, CanonicalObservationRelationsV1,
-        ComponentVersion, ObservationId, ObservationIdentityMaterialV1,
-        ObservationOrderingDomainV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-        ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, RetentionClass,
-        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        CanonicalBoundaryKindV1, CanonicalMessageRoleV1, CanonicalObservationEvidenceV1,
+        CanonicalObservationRelationsV1, ComponentVersion, ObservationId,
+        ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationSourceGenerationV1,
+        ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProviderId,
+        RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1, SessionId,
     };
 
@@ -926,8 +1237,8 @@ mod tests {
     }
 
     /// Envelope in the legacy file-bytes ordering domain, so identity material
-    /// built by `ObservationIdentityMaterialV1::new` — the only constructor that
-    /// omits a native record id — agrees with it.
+    /// built by `ObservationIdentityMaterialV1::new`, the only constructor that
+    /// omits a native record id, agrees with it.
     fn provider_envelope(
         provider: &str,
         facts: Vec<CanonicalObservationFactV1>,
@@ -1048,12 +1359,14 @@ mod tests {
             );
             let observation = observation_without_native_record_id(&envelope);
             let projection = derive_canonical_projection(&observation).unwrap();
-            let output = projection.messages().next().unwrap();
+            let output = projection.message().unwrap();
 
             assert_eq!(output.message().message_id, row_id);
             assert_eq!(output.session().project_key, "user");
             assert_eq!(output.session().project_path, "user");
-            assert!(output.session().metadata_json.is_none());
+            let session_metadata: serde_json::Value =
+                serde_json::from_str(output.session().metadata_json.as_deref().unwrap()).unwrap();
+            assert_eq!(session_metadata["claude_session_cwd"], cwd);
         }
     }
 
@@ -1070,7 +1383,7 @@ mod tests {
         let projection =
             derive_canonical_projection(&observation_without_native_record_id(&claude)).unwrap();
         assert_eq!(
-            projection.messages().count(),
+            usize::from(projection.message().is_some()),
             1,
             "claude synthesizes its record id, so a missing native id still projects"
         );
@@ -1132,7 +1445,7 @@ mod tests {
     #[test]
     fn cursor_transcript_message_metadata_normalizes_tool_fields() {
         let envelope = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: ObservationId::new("tool.dispatch").unwrap(),
+            invocation_id: Some(ObservationId::new("tool.dispatch").unwrap()),
             name: "Task".to_owned(),
             arguments: json!({"prompt": "explore"}),
         }]);
@@ -1140,7 +1453,9 @@ mod tests {
             canonical_session_metadata_map("cursor", Some(&cursor_transcript_session_fields()));
 
         let metadata: serde_json::Value = serde_json::from_str(
-            &canonical_message_metadata(&envelope, Some(&session_metadata)).unwrap(),
+            &canonical_message_metadata(&envelope, Some(&session_metadata))
+                .unwrap()
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(metadata["tool_calls"][0]["id"], "tool.dispatch");
@@ -1166,6 +1481,7 @@ mod tests {
                     Some(&other_source),
                 )),
             )
+            .unwrap()
             .unwrap(),
         )
         .unwrap();
@@ -1174,7 +1490,170 @@ mod tests {
             "tool-metadata normalization belongs to the cursor transcript source only"
         );
         assert!(other_metadata.get("tool_events").is_none());
-        assert!(other_metadata.get("tool_use_id").is_none());
+        assert_eq!(
+            other_metadata["tool_use_id"], "tool.dispatch",
+            "the host tool-use id is provider-neutral"
+        );
+    }
+
+    #[test]
+    fn tool_use_id_is_present_only_when_the_host_recorded_it() {
+        let host_unrecorded = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
+            invocation_id: None,
+            name: "Read".to_owned(),
+            arguments: json!({}),
+        }]);
+        assert_eq!(host_tool_use_id(&host_unrecorded), None);
+        assert!(
+            canonical_message_metadata(&host_unrecorded, None)
+                .unwrap()
+                .is_none()
+        );
+
+        // The subagent dispatch binds a fork even when it is not first.
+        let dispatching = envelope(vec![
+            CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: Some(ObservationId::new("toolu_read").unwrap()),
+                name: "Read".to_owned(),
+                arguments: json!({}),
+            },
+            CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: Some(ObservationId::new("toolu_task").unwrap()),
+                name: "Task".to_owned(),
+                arguments: json!({"prompt": "explore"}),
+            },
+        ]);
+        assert_eq!(host_tool_use_id(&dispatching), Some("toolu_task"));
+
+        let exec = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
+            invocation_id: Some(ObservationId::new("call_abc").unwrap()),
+            name: "exec".to_owned(),
+            arguments: json!({}),
+        }]);
+        let metadata: serde_json::Value =
+            serde_json::from_str(&canonical_message_metadata(&exec, None).unwrap().unwrap())
+                .unwrap();
+        assert_eq!(metadata, json!({"tool_use_id": "call_abc"}));
+    }
+
+    #[test]
+    fn file_edit_facts_roll_up_on_the_session_row_only() {
+        let edits = envelope(vec![
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::User,
+                content: json!("edited"),
+                model: None,
+                timestamp: Some(42),
+            },
+            CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+                reference: Some("/work/src/lib.rs".to_owned()),
+                content: Some(json!({
+                    "type": "FileChange",
+                    "edited_at_micros": 1_700_000_000_123_456i64,
+                    "change_type": "update",
+                    "hunks": 2,
+                    "unified_diff": "never copied"
+                })),
+            },
+            CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+                reference: Some("/work/src/new.rs".to_owned()),
+                content: None,
+            },
+            CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::Commit,
+                reference: Some("abc123".to_owned()),
+                content: None,
+            },
+        ]);
+        assert_eq!(
+            serde_json::Value::Array(canonical_edited_files(&edits)),
+            json!([
+                {
+                    "path": "/work/src/lib.rs",
+                    "edited_at_micros": 1_700_000_000_123_456i64,
+                    "change_type": "update",
+                    "hunks": 2
+                },
+                {"path": "/work/src/new.rs"}
+            ]),
+            "each recorded key is copied; absent keys stay absent"
+        );
+
+        let projection = derive_canonical_projection(&observation_without_native_record_id(
+            &provider_envelope("claude", edits.facts().to_vec()),
+        ))
+        .unwrap();
+        let output = projection.message().unwrap();
+        let session_metadata: serde_json::Value =
+            serde_json::from_str(output.session().metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            session_metadata["edited_files"][1]["path"],
+            "/work/src/new.rs"
+        );
+        assert!(
+            output.message().metadata_json.is_none(),
+            "the rollup is session evidence, not message metadata: {:?}",
+            output.message().metadata_json
+        );
+
+        let no_edits = provider_envelope(
+            "claude",
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!("no edits"),
+                model: None,
+                timestamp: Some(43),
+            }],
+        );
+        let projection =
+            derive_canonical_projection(&observation_without_native_record_id(&no_edits)).unwrap();
+        assert!(
+            projection
+                .message()
+                .unwrap()
+                .session()
+                .metadata_json
+                .is_none(),
+            "a record without edit facts records no edited_files array"
+        );
+    }
+
+    #[test]
+    fn subagent_spawn_facts_roll_up_on_the_delegating_session_row() {
+        let spawn = provider_envelope(
+            "claude",
+            vec![
+                CanonicalObservationFactV1::Workflow {
+                    evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                    reference: Some("child-thread".to_owned()),
+                    content: Some(json!({"tool_use_id": "call_spawn", "text": "/root/explorer"})),
+                },
+                CanonicalObservationFactV1::Workflow {
+                    evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                    reference: None,
+                    content: Some(json!({"tool_use_id": "call_unnamed"})),
+                },
+                CanonicalObservationFactV1::Workflow {
+                    evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                    reference: Some("child-without-call".to_owned()),
+                    content: None,
+                },
+            ],
+        );
+        let projection =
+            derive_canonical_projection(&observation_without_native_record_id(&spawn)).unwrap();
+        let output = projection.message().unwrap();
+        let session_metadata: serde_json::Value =
+            serde_json::from_str(output.session().metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            session_metadata["spawned_sessions"],
+            json!([{"session_id": "child-thread", "tool_use_id": "call_spawn"}]),
+            "only a fact naming both the child and the host call records a spawn"
+        );
+        assert_eq!(output.message().kind.as_deref(), Some("workflow_subagent"));
+        assert_eq!(output.message().text, "/root/explorer");
     }
 
     #[test]
@@ -1194,7 +1673,7 @@ mod tests {
                 ]),
             },
             CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: ObservationId::new("tool.fixture").unwrap(),
+                invocation_id: Some(ObservationId::new("tool.fixture").unwrap()),
                 name: "Read".to_owned(),
                 arguments: json!({"path": "redacted"}),
             },
@@ -1235,41 +1714,63 @@ mod tests {
     }
 
     #[test]
-    fn canonical_projection_does_not_duplicate_goal_colocated_with_message() {
-        let envelope = envelope(vec![
-            CanonicalObservationFactV1::WorkflowLifecycle {
-                semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
-                provider_reference: Some("session.fixture".to_owned()),
-                item_id: None,
-                parent_reference: None,
-                list_reference: None,
-                state: None,
-                status: Some("active".to_owned()),
-                item_order: None,
-                revision: None,
-                event_sequence: None,
-                content: Some(json!({"objective": "supporting goal"})),
-            },
-            CanonicalObservationFactV1::Message {
-                role: CanonicalMessageRoleV1::Assistant,
-                content: json!({"text": "authored response"}),
-                model: None,
-                timestamp: Some(43),
-            },
-        ]);
+    fn canonical_projection_renders_codex_goal_context_like_direct_ingest() {
+        let envelope = envelope(vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::User,
+            content: json!([{
+                "type": "text",
+                "text": concat!(
+                    "<codex_internal_context source=\"goal\">",
+                    "<objective>finish canonical projection</objective>\n",
+                    "Token budget: 12000\nTokens remaining: 11000",
+                    "</codex_internal_context>"
+                )
+            }]),
+            model: Some("gpt-5.6-sol".to_owned()),
+            timestamp: Some(44),
+        }]);
 
         let fields = canonical_message_fields(&envelope).unwrap().unwrap();
-        assert_eq!(fields.kind, "message");
-        assert_eq!(fields.text, "authored response");
+        assert_eq!(fields.role, "system");
+        assert_eq!(
+            fields.text,
+            "Codex active goal: finish canonical projection"
+        );
+        assert_eq!(fields.kind, "goal_context");
+        let metadata: serde_json::Value = serde_json::from_str(
+            &canonical_message_metadata(&envelope, None)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["source"], "codex_rollout");
+        assert_eq!(metadata["codex_internal_context"], "goal");
+        assert_eq!(
+            metadata["codex_goal"]["objective"],
+            "finish canonical projection"
+        );
+        assert_eq!(metadata["codex_goal"]["token_budget"], 12000);
+        assert_eq!(metadata["codex_goal"]["tokens_remaining"], 11000);
     }
 
     #[test]
     fn canonical_projection_skips_boundary_only_records() {
-        let envelope = envelope(vec![CanonicalObservationFactV1::Boundary {
+        let message = envelope(vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::User,
+            content: json!({"text": "kept"}),
+            model: None,
+            timestamp: Some(7),
+        }]);
+        let fields = canonical_message_fields(&message).unwrap().unwrap();
+        assert_eq!(fields.role, "user");
+        assert_eq!(fields.text, "kept");
+        assert_eq!(fields.kind, "message");
+        assert_eq!(fields.timestamp, Some(7));
+
+        let boundary = envelope(vec![CanonicalObservationFactV1::Boundary {
             boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
         }]);
-
-        assert!(canonical_message_fields(&envelope).unwrap().is_none());
+        assert!(canonical_message_fields(&boundary).unwrap().is_none());
     }
 
     #[test]
@@ -1337,8 +1838,21 @@ mod tests {
         );
 
         let session_metadata_map = canonical_session_metadata_map("codex", Some(&fields));
+        let stored = canonical_message_metadata(&envelope, Some(&session_metadata_map))
+            .unwrap()
+            .unwrap();
+        let stored_metadata: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert!(
+            stored_metadata.get("stable_record_id").is_none()
+                && stored_metadata.get("facts").is_none(),
+            "the envelope is stored once, in its observation row: {stored}"
+        );
         let message_metadata: serde_json::Value = serde_json::from_str(
-            &canonical_message_metadata(&envelope, Some(&session_metadata_map)).unwrap(),
+            &message_metadata_with_envelope(
+                Some(&stored),
+                &serde_json::to_value(&envelope).unwrap(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -1354,39 +1868,6 @@ mod tests {
             "profile_pin"
         );
         assert_eq!(message_metadata["stable_record_id"], "record.fixture");
-    }
-
-    #[test]
-    fn cursor_transcript_metadata_uses_the_canonical_session_namespace() {
-        let fields = CanonicalSessionFields {
-            project_path: Some("/workspace/project".to_owned()),
-            location_path: Some("/workspace/project/.worktrees/feature".to_owned()),
-            transcript_path: Some("/transcripts/session.jsonl".to_owned()),
-            title: None,
-            started_at: None,
-            ended_at: None,
-            source: Some("cursor_transcript".to_owned()),
-            native_source: Some("cursor".to_owned()),
-            profile: None,
-            location_provenance: Some("hook_event".to_owned()),
-        };
-        let metadata: serde_json::Value = serde_json::from_str(
-            canonical_session_metadata("cursor", Some(&fields))
-                .unwrap()
-                .as_deref()
-                .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            metadata["cursor_session_cwd"],
-            "/workspace/project/.worktrees/feature"
-        );
-        assert_eq!(
-            metadata["cursor_session_worktree"],
-            "/workspace/project/.worktrees/feature"
-        );
-        assert_eq!(metadata["cursor_session_location_provenance"], "hook_event");
     }
 
     #[test]

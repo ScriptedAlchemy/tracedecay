@@ -3,6 +3,8 @@
 use crate::db::engine::Executor;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+/// Installs the external-source state shape. Cheap idempotent DDL only, so it
+/// belongs inside a caller's leased schema transaction.
 pub async fn install_external_source_schema(
     connection: &impl Executor,
     operation: &str,
@@ -13,6 +15,5 @@ pub async fn install_external_source_schema(
         .map_err(|error| TraceDecayError::Database {
             message: format!("{operation}: failed to install external source state: {error}"),
             operation: operation.to_owned(),
-        })?;
-    Ok(())
+        })
 }

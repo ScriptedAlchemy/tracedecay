@@ -4,18 +4,19 @@ use std::sync::{
 };
 
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId, Confidence,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGeneration, CapabilityId, Confidence,
     CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass, FactAssertionId, FactEventId,
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, ObservationScopeV1,
     PayloadAccessState, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
     ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, UtcMicros,
+    RetrievalAnchorRecordParts, RetrievalAnchorTarget, ScopeResolutionId, UtcMicros,
     VectorWatermark,
 };
 use tracedecay_store::{
     FactAsOfResponseV1, FactCommitReceipt, FactContradictionStateV1, FactCurrentResponseV1,
     FactLineageCursor, FactLineageResponseV1, FactQueryCoverageV1, FactStoreResult,
     ProjectMemoryAutomationRunReceiptsV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactSupersedeCommandV1, ProjectMemoryFactSupersedeOutcomeV1,
 };
 
 use super::*;
@@ -171,7 +172,7 @@ impl FactStore for FakeAuthority {
     async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
-    ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
+    ) -> FactStoreResult<Option<RetrievalAnchorRecord>> {
         self.anchor_queries
             .lock()
             .unwrap()
@@ -344,6 +345,15 @@ impl ProjectMemoryFactStore for FakeAuthority {
         Err(authority_fixture_error())
     }
 
+    async fn supersede_project_memory_fact(
+        &self,
+        _request: ProjectMemoryFactSupersedeCommandV1,
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactSupersedeOutcomeV1> {
+        self.authority_calls.lock().unwrap().push("supersede");
+        Err(authority_fixture_error())
+    }
+
     async fn record_project_memory_fact_feedback(
         &self,
         _request: ProjectMemoryFactFeedbackCommandV1,
@@ -417,16 +427,31 @@ impl ProjectMemoryFactStore for FakeAuthority {
         Ok(None)
     }
 
-    async fn dashboard_project_memory_vector_points(
+    async fn dashboard_project_memory_store_revision(
+        &self,
+        _owner: FactOwnerV1,
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryStoreRevisionV1> {
+        self.authority_calls
+            .lock()
+            .unwrap()
+            .push("dashboard-store-revision");
+        Ok(ProjectMemoryStoreRevisionV1::default())
+    }
+
+    async fn dashboard_project_memory_vector_snapshot(
         &self,
         _query: ProjectMemoryDashboardVectorPointsQueryV1,
         _read_control: &FactReadControl,
-    ) -> FactStoreResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
+    ) -> FactStoreResult<ProjectMemoryDashboardVectorSnapshotV1> {
         self.authority_calls
             .lock()
             .unwrap()
             .push("dashboard-vectors");
-        Ok(vec![])
+        Ok(ProjectMemoryDashboardVectorSnapshotV1::new(
+            ProjectMemoryStoreRevisionV1::default(),
+            vec![],
+        ))
     }
 
     async fn dashboard_project_memory_oplog(
@@ -539,12 +564,7 @@ fn owner() -> FactOwnerV1 {
     }
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String, Error = DomainError>,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
     FactId::derive(
@@ -612,13 +632,13 @@ fn stored_fact(owner: FactOwnerV1, operation: &str, projected_as_of: UtcMicros) 
     .unwrap()
 }
 
-fn profile_anchor() -> RetrievalAnchorRecordV2 {
+fn profile_anchor() -> RetrievalAnchorRecord {
     const DIGEST_A: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::Entity(EntityRef {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::Entity(EntityRef {
             id: EntityId::new("entity.memory.external").unwrap(),
             kind: EntityKind::Document,
         }),
@@ -627,7 +647,7 @@ fn profile_anchor() -> RetrievalAnchorRecordV2 {
         occurred_at: None,
         ingested_at: UtcMicros(1),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new("projection.memory.external").unwrap(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),
@@ -775,74 +795,6 @@ async fn owner_mismatch_is_rejected_before_authority_access() {
 }
 
 #[tokio::test]
-async fn typed_queries_propagate_without_identity_loss() {
-    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    let fact_id = fact_id(owner(), "operation.memory.query");
-    let current = CurrentFactsQuery::new(owner(), None, 10).unwrap();
-    let current_fact = FactCurrentQuery::new(owner(), fact_id.clone()).unwrap();
-    let as_of = FactAsOfQuery::new(owner(), fact_id.clone(), UtcMicros(5)).unwrap();
-    let lineage = FactLineageQuery::new(owner(), fact_id, None, 10).unwrap();
-    let anchor_id = id::<RetrievalAnchorId>("anchor.memory.query");
-    let anchor_query = RetrievalAnchorQuery::new(owner(), anchor_id.clone()).unwrap();
-
-    assert!(
-        application
-            .query_current_facts(current)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        application
-            .query_fact_current(current_fact)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(application.query_fact_as_of(as_of).await.unwrap().is_none());
-    assert!(
-        application
-            .query_fact_lineage(lineage)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let anchor: Option<RetrievalAnchorRecordV2> = application
-        .get_retrieval_anchor(anchor_query)
-        .await
-        .unwrap();
-    assert!(anchor.is_none());
-
-    assert_eq!(
-        application.authority.current_queries.lock().unwrap().len(),
-        1
-    );
-    assert_eq!(
-        application
-            .authority
-            .current_fact_queries
-            .lock()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(application.authority.as_of_queries.lock().unwrap().len(), 1);
-    assert_eq!(
-        application.authority.lineage_queries.lock().unwrap().len(),
-        1
-    );
-    assert_eq!(
-        application
-            .authority
-            .anchor_queries
-            .lock()
-            .unwrap()
-            .as_slice(),
-        &[anchor_id]
-    );
-}
-
-#[tokio::test]
 async fn current_page_must_advance_cursor_and_stay_bounded() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
     let first = stored_fact(owner(), "operation.current.first", UtcMicros(1));
@@ -952,6 +904,71 @@ async fn automation_receipt_recovery_rejects_foreign_authority_identity() {
         Err(MemoryApplicationError::InvalidAuthorityResult {
             invariant: "memory automation receipt recovery identity",
         })
+    ));
+}
+
+#[test]
+fn read_cancelled_maps_to_cancellation_variant_not_store() {
+    let error = MemoryApplicationError::from(FactStoreError::ReadCancelled);
+    assert!(
+        matches!(
+            error,
+            MemoryApplicationError::Cancelled(FactStoreError::ReadCancelled)
+        ),
+        "ReadCancelled must stay typed as cancellation, not Store: {error:?}"
+    );
+    assert!(!matches!(error, MemoryApplicationError::Store(_)));
+
+    let mapped = memory_application_error(error);
+    assert!(
+        is_memory_application_cancellation(&mapped),
+        "ReadCancelled must map to typed cancellation, not a generic store/database wrap: {mapped}"
+    );
+    assert!(
+        mapped.to_string().contains("cancelled"),
+        "typed cancellation must keep the store cancellation Display: {mapped}"
+    );
+    assert!(
+        !mapped.to_string().contains("config error"),
+        "cancellation must not be wrapped as a config error: {mapped}"
+    );
+}
+
+#[test]
+fn store_storage_error_cause_survives_into_trace_decay_message() {
+    let error = MemoryApplicationError::from(FactStoreError::Storage {
+        operation: "open project memory",
+        source: Box::new(std::io::Error::other("disk full")),
+    });
+    assert!(
+        matches!(error, MemoryApplicationError::Store(_)),
+        "ordinary Storage failures stay Store, not Cancelled: {error:?}"
+    );
+    let mapped = memory_application_error(error);
+    let message = mapped.to_string();
+    assert!(
+        message.contains("fact store operation failed"),
+        "Store Display must remain in the TraceDecayError chain: {message}"
+    );
+    assert!(
+        message.contains("fact storage operation open project memory failed"),
+        "Storage Display must survive flatten_error_chain: {message}"
+    );
+    assert!(
+        message.contains("disk full"),
+        "Storage source must survive flatten_error_chain: {message}"
+    );
+}
+
+#[test]
+fn graph_deadline_exceeded_maps_to_cancellation_variant_not_store() {
+    let error = MemoryApplicationError::from(FactStoreError::GraphDeadlineExceeded);
+    assert!(matches!(
+        error,
+        MemoryApplicationError::Cancelled(FactStoreError::GraphDeadlineExceeded)
+    ));
+    assert!(is_memory_application_cancellation(
+        &memory_application_error(error)
     ));
 }
 

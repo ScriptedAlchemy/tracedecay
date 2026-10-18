@@ -13,7 +13,7 @@
  * `log1p` rather than `log` so a count of zero maps to zero instead of negative
  * infinity, and so the scale is defined for every non-negative value an endpoint
  * can serve. A row with one event lands at 8% of the band against a ceiling of
- * 6,774 — visible, ranked, and honestly labelled as logarithmic — where a linear
+ * 6,774, visible, ranked, and honestly labelled as logarithmic, where a linear
  * scale puts it at 0.015% and draws nothing at all.
  *
  * Null, not zero, when the ceiling is missing or non-positive: a rail with no

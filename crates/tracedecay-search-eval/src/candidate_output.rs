@@ -1,107 +1,91 @@
-//! Production-bound query/semantic candidate-output generator.
+//! Production-bound exact/lexical/graph candidate-output generator.
 //!
-//! Builds one published code generation from checked-in sanitized corpus
-//! fixtures, then runs the shared `CompositionKernel` over the real exact,
-//! lexical, and graph production lanes. A separate native entry point accepts
-//! admitted semantic/rerank authorities; missing optional stages stay pending.
+//! Publishes one code generation per queried scope set from checked-in
+//! sanitized corpus fixtures, seals each into the production lexical artifact,
+//! then runs the shared `CompositionKernel` over the real exact, lexical, and
+//! graph production lanes.
 //!
 //! Outputs deterministic checked-in `train` / `validation` candidate records
-//! plus current/10x resource samples, cancellation, offline, and fallback
-//! digests. Labels are ordinary reviewable fixture data and never confer
-//! activation authority.
+//! plus current/10x resource samples and ranking receipts. Cancellation is
+//! proved fail-closed before those records are returned; it is not restamped
+//! as a policy field. Labels are ordinary reviewable fixture data, never a
+//! production authority.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 
-use tracedecay_application::historical_query::{
-    HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
-    HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
-};
-use tracedecay_application::{NativeHistoricalBlobReaderV1, ResolvedScope};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1,
-    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionConfigV1,
+    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
+    CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
+    MemorySealedPublicationStoreV1, SealedGenerationSegmentPublicationV1,
+    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+    VerifiedSealedLexicalSymbolDisplayV1,
 };
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
+use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::historical_query::{
+    HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
+    HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
 };
-#[cfg(test)]
-use tracedecay_domain::ScoreDomainId;
-use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, CodeSearchChunkV1, ComponentRevision, DiversityPolicy,
-    EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId,
-    HydrationReceipt, HydrationRevision, LanguageId, ManifestDigest, PolicyRevisionId, PrincipalId,
-    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, PublicRetrieverStatus, QueryFallbackSubpayload,
-    QueryNormalizationRevision, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
-    RerankPolicy, RetrievalBudget, RetrievalFailure, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1,
-    TemporalModeV1, UtcMicros, VectorWatermark,
+    ChunkerRevision, CodeSearchChunkV1, ComponentRevision, EphemeralSanitizedQueryViewV1,
+    ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId, LanguageId, ManifestDigest,
+    PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1,
+    PublicRetrieverStatus, QueryFallbackSubpayload, QueryNormalizationRevision, RelationEdgeKindV1,
+    RepositoryDirtyStateV1, RepositoryId, RetrievalFailure, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorWatermark,
 };
+use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_query::retrieval::exact::{
-    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneEvidence,
+    ExactLaneRequest,
 };
 use tracedecay_query::retrieval::fusion::{
-    CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
+    CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageError,
+    FusionStageInput,
 };
 use tracedecay_query::retrieval::graph::{
-    GraphLane, GraphLaneRequest, GraphLaneRetriever, production_code_index_freshness,
-};
-use tracedecay_query::retrieval::hydrate::{
-    CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
-    HydrationReadOutcomeV1, HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, production_code_index_freshness,
 };
 use tracedecay_query::retrieval::lexical::{
-    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1,
+    CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
+    LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1, lexical_query_parts,
+    merge_lexical_routes,
 };
-use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
-use tracedecay_query::search_quality::semantic_native::{
-    SemanticChannelAblationV1, SemanticNativeHydrationMeasurementV1, SemanticNativeQueryInputV1,
-    SemanticNativeQueryOutputV1, SemanticNativeQueryStageMeasurementsV1,
-    SemanticNativeResourceEvidenceV1, SemanticNativeResourceSampleV1,
-    SemanticNativeStageMeasurementV1, SemanticNativeStageResultV1, evaluate_native_query,
+use tracedecay_query::retrieval::ports::{
+    CodeCandidateBindingV1, TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
 };
-
 use tracedecay_query::search_quality::candidate_output::{
-    CorpusDocumentV1, EVALUATION_CACHE_STATE, EVALUATION_SEED, REQUIRED_CANCELLATION,
-    REQUIRED_OFFLINE, canonical_json_bytes, canonical_sha256, evaluated_diversity_policy,
-    evaluated_rerank_policy, fusion_profile, retrieval_budget, typed_id as id,
-};
-
-pub use tracedecay_query::search_quality::candidate_output::{
-    CandidateOutputError, CandidateWorkloadV1, DirectEvaluatedProfileMaterialV1,
-    EvaluationConcurrencyContractV1, EvaluationExecutionContractV1,
-    GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1, IncrementalFixtureV1,
-    OptionalStageMeasurementV1, OptionalStageMeasurementsV1, PRODUCTION_BOUNDARY,
-    ProductionCandidateNativeExecutionAuthorityV1, ProductionCandidateNativeGenerationResourcesV1,
-    ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
-    ProductionCandidateNativeResourceContextV1, ProductionCandidateOutputV1,
-    ProductionCandidateSemanticProjectionSourcesV1, ProfileSpecV1, QueryCandidateRowV1,
-    RankedCandidateRowV1, ResourceMeasurementStatusV1, ResourceSampleV1, WORKLOAD_RELATIVE,
-    WorkloadQueryV1, compute_corpus_digest, compute_corpus_digest_from_embedded_bytes,
-    compute_profile_material_digest, compute_workload_digest, direct_evaluated_profile_material,
-    load_candidate_workload, load_direct_evaluated_profile_material, validate_workload_for_tuning,
+    CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
+    EVALUATION_SEED, GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1,
+    PRODUCTION_BOUNDARY, ProductionCandidateOutputV1, ProfileSpecV1, QueryCandidateRowV1,
+    RankedCandidateRowV1, ResourceSampleV1, WORKLOAD_RELATIVE, WorkloadQueryV1,
+    canonical_json_bytes, canonical_sha256, compute_corpus_digest, compute_profile_material_digest,
+    compute_workload_digest, evaluated_diversity_policy, fusion_profile, load_candidate_workload,
+    retrieval_budget, typed_id as id, validate_workload_for_tuning,
 };
 
 mod control;
 use control::ActiveControl;
+
+mod peak_rss;
+use peak_rss::{completed_resource_sample, peak_rss_bytes};
 
 mod cancellation;
 use cancellation::prove_cancellation;
@@ -120,143 +104,36 @@ pub struct GenerateCandidateOutputsOptions<'a> {
     pub admitted_scope: AdmittedCorpusScopeFn,
 }
 
-/// Immutable identity and request material prepared by the production QUERY
-/// generator for one native semantic query.
-
-#[derive(Clone, Default)]
-struct SharedPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
-}
-
-impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
-    fn load_active(
-        &self,
-        scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        let active = self.active.lock().map_err(|_| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(
-                "candidate-output publication lock is poisoned".to_owned(),
-            )
-        })?;
-        Ok(active
-            .get(scope)
-            .map(|generation| generation.as_ref().clone()))
-    }
-
-    fn publish_atomically(
-        &mut self,
-        scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().map_err(|_| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(
-                "candidate-output publication lock is poisoned".to_owned(),
-            )
-        })?;
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct ApplyingProjectionSink;
-
-impl CodeChunkProjectionSink for ApplyingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions: Vec<ChunkProjectionDecisionV1> = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            })
-            .collect();
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        decisions.extend(
-            request
-                .changes
-                .reused
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: ProjectionOperationV1::Reused,
-                    outcome: ProjectionOutcomeV1::Reused,
-                    output_digest: None,
-                }),
-        );
-        decisions.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
-}
-
 #[derive(Clone)]
 struct OccurrenceMapEntry {
     document_id: String,
     scope: String,
-    fixture_path: String,
     display_anchors: Vec<String>,
 }
 
-/// Retrieval adapters keyed by canonical allowed-scope key (sorted, deduped),
-/// as produced by [`canonical_scope_key`].
-type ScopedLexicalProjections = BTreeMap<Vec<String>, CodeLexicalProjectionAdapterV1>;
-type ScopedGraphEvidence = BTreeMap<Vec<String>, CodeGraphEvidenceReader>;
+/// One queried scope set's corpus: the generation published over exactly the
+/// files those scopes admit, its sealed lexical artifact, and its graph
+/// evidence. Each scope set is its own repository snapshot, so lexical
+/// statistics and graph edges never cross into files a query cannot see.
+struct ScopedCorpus {
+    generation: Arc<CodeIndexPublishedGenerationV1>,
+    lexical: CodeLexicalArtifactReaderV1,
+    graph: CodeGraphEvidenceReader,
+    /// Owns the sealed artifact file `lexical` serves.
+    _artifact_directory: TempDir,
+}
 
 struct PublishedCorpus {
-    generation: Arc<CodeIndexPublishedGenerationV1>,
-    lexical_projections: ScopedLexicalProjections,
-    graph_projections: ScopedGraphEvidence,
-    incremental_generation: Arc<CodeIndexPublishedGenerationV1>,
-    incremental_before_content_digest: String,
-    incremental_after_content_digest: String,
+    /// Keyed by canonical allowed-scope key, as produced by
+    /// [`canonical_scope_key`]; `None` when the scopes admit no indexable
+    /// source file.
+    scopes: BTreeMap<Vec<String>, Option<ScopedCorpus>>,
     occurrence_map: BTreeMap<String, OccurrenceMapEntry>,
-    file_scopes: BTreeMap<String, String>,
     repo_root: PathBuf,
     source_commit: GitOidV1,
     corpus: Vec<CorpusDocumentV1>,
     corpus_digest: String,
     eligible_chunks: u64,
-    no_op_generation: Arc<CodeIndexPublishedGenerationV1>,
-    deletion_generation: Arc<CodeIndexPublishedGenerationV1>,
     admitted_scope: AdmittedCorpusScopeFn,
 }
 
@@ -282,11 +159,114 @@ fn canonical_scope_key(scopes: &[String]) -> Vec<String> {
     key
 }
 
-fn build_query_projections(
+/// Seal `generation` into the production lexical artifact and reopen it for
+/// serving: the same partitioned encoding, verified page source, builder, and
+/// reader the daemon runs, over an in-memory segment store and a private
+/// temporary directory.
+#[tracing::instrument(
+    name = "search_eval.corpus.lexical_artifact",
+    level = "trace",
+    skip_all
+)]
+fn seal_lexical_artifact(
     generation: &CodeIndexPublishedGenerationV1,
-    file_scopes: &BTreeMap<String, String>,
-    queries: &[WorkloadQueryV1],
-) -> Result<(ScopedLexicalProjections, ScopedGraphEvidence), CandidateOutputError> {
+    metadata: &CodeLexicalProjectionMetadataV1,
+) -> Result<(TempDir, CodeLexicalArtifactReaderV1), CandidateOutputError> {
+    let contract =
+        |error: &dyn std::fmt::Display| CandidateOutputError::Contract(error.to_string());
+    let mut segments = BTreeMap::new();
+    let mut evidence_pack = Vec::new();
+    let manifest = generation
+        .encode_partitioned_sealed(|publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    page_digest, bytes, ..
+                } => {
+                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                    evidence_pack.extend_from_slice(bytes);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    segment_digest,
+                    ..
+                } => {
+                    segments.insert(
+                        segment_digest.as_str().to_owned(),
+                        std::mem::take(&mut evidence_pack),
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| contract(&error))?;
+    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
+        .map_err(|error| contract(&error))?;
+    let segments = Arc::new(segments);
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        &manifest,
+        state_digest,
+        move |digest, _, buffer, _control| {
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed evaluation segment is missing".to_owned(),
+                )
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
+        },
+        TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+        TEXT_ARTIFACT_PAGE_BYTES_V1,
+    )
+    .map_err(|error| contract(&error))?;
+    let directory = tempfile::tempdir().map_err(|error| contract(&error))?;
+    let path = directory.path().join("lexical-artifact.sqlite");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
+        .map_err(|error| contract(&error))?;
+    let receipt = loop {
+        match source
+            .next_page(&ActiveControl)
+            .map_err(|error| contract(&error))?
+        {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                builder
+                    .append_page(&page, &ActiveControl)
+                    .map_err(|error| contract(&error))?;
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+        }
+    };
+    let verified = loop {
+        match builder
+            .advance_finalization(&receipt, 4_096, &ActiveControl)
+            .map_err(|error| contract(&error))?
+        {
+            CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {}
+            CodeLexicalArtifactFinalizationStepV1::Ready(verified) => break *verified,
+        }
+    };
+    drop(builder);
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &path,
+        &verified,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &ActiveControl,
+    )
+    .map_err(|error| contract(&error))?;
+    Ok((directory, reader))
+}
+
+/// The lexical artifact and graph evidence over every file of `generation`.
+fn scoped_retrieval(
+    generation: Arc<CodeIndexPublishedGenerationV1>,
+) -> Result<ScopedCorpus, CandidateOutputError> {
     let generation_id = generation.manifest().generation_id.clone();
     let freshness = production_code_index_freshness(
         generation.manifest().seal.sealed_at,
@@ -310,52 +290,27 @@ fn build_query_projections(
             tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
         )?,
         exact_score_domain: id(tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)?,
+        clone_route: Some(CodeLexicalCloneRouteV1 {
+            project_id: generation.manifest().project_id.clone(),
+            worktree_id: generation.snapshot().worktree.clone(),
+            snapshot_digest: generation.manifest().snapshot_digest.clone(),
+        }),
     };
-    let admitted = generation
-        .admitted_chunks()
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let mut lexical = BTreeMap::new();
-    let mut graph = BTreeMap::new();
-    for scope_key in queries
-        .iter()
-        .map(|query| canonical_scope_key(&query.allowed_scopes))
-        .collect::<BTreeSet<_>>()
-    {
-        let scope_contains = |file_occurrence_id: &str| {
-            file_scopes
-                .get(file_occurrence_id)
-                .is_some_and(|scope| scope_key.binary_search(scope).is_ok())
-        };
-        let scoped_admitted = admitted
-            .iter()
-            .filter(|chunk| scope_contains(chunk.chunk().anchor.file_occurrence_id.as_str()))
-            .cloned()
-            .collect();
-        lexical.insert(
-            scope_key.clone(),
-            CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), scoped_admitted)
-                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-        );
-        let graph_chunks = generation
-            .chunks()
-            .chunks()
-            .iter()
-            .filter(|chunk| scope_contains(chunk.anchor.file_occurrence_id.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        graph.insert(
-            scope_key,
-            CodeGraphEvidenceReader::new_for_evaluation(
-                generation_id.clone(),
-                Some(generation.snapshot().repository.clone()),
-                freshness.clone(),
-                generation.edges(),
-                &graph_chunks,
-            )
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-        );
-    }
-    Ok((lexical, graph))
+    let (artifact_directory, lexical) = seal_lexical_artifact(&generation, &metadata)?;
+    let graph = CodeGraphEvidenceReader::new_for_evaluation(
+        generation_id,
+        Some(generation.snapshot().repository.clone()),
+        freshness,
+        generation.edges(),
+        generation.chunks().chunks(),
+    )
+    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    Ok(ScopedCorpus {
+        generation,
+        lexical,
+        graph,
+        _artifact_directory: artifact_directory,
+    })
 }
 
 /// The corpora published for one candidate-generation call, memoized by scale.
@@ -364,13 +319,8 @@ fn build_query_projections(
 /// identity it mints is content-derived (`content_identity` hashes the corpus
 /// digest and the copy count), both of its timestamps are constants, and it
 /// sorts its files before building. Two calls with equal arguments therefore
-/// produce byte-identical generations down to the generation id, and the store
-/// they publish through is created and dropped inside the call, so nothing
-/// observable distinguishes one build from two.
-///
-/// The fallback phase and the native phase of one evaluation each published
-/// their own 1x and 10x corpora, so the identical build ran twice per scale.
-/// This cache lets the two phases share one build apiece.
+/// produce byte-identical generations down to the generation id, so the 1x
+/// and 10x corpora are each published once per evaluation.
 #[derive(Default)]
 struct PublishedCorpusCache {
     by_scale: BTreeMap<usize, PublishedCorpus>,
@@ -386,7 +336,18 @@ impl PublishedCorpusCache {
         admitted_scope: AdmittedCorpusScopeFn,
     ) -> Result<(), CandidateOutputError> {
         if let Entry::Vacant(entry) = self.by_scale.entry(copies) {
-            let published = publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)?;
+            let published = match copies {
+                1 => {
+                    let _span =
+                        tracing::trace_span!("search_eval.corpus.publish.current").entered();
+                    publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)
+                }
+                10 => {
+                    let _span = tracing::trace_span!("search_eval.corpus.publish.10x").entered();
+                    publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)
+                }
+                _ => publish_corpus_with_scale(repo_root, workload, copies, admitted_scope),
+            }?;
             entry.insert(published);
         }
         Ok(())
@@ -408,9 +369,15 @@ impl PublishedCorpusCache {
 pub fn generate_candidate_outputs(
     options: &GenerateCandidateOutputsOptions<'_>,
 ) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
-    hotpath::measure_block!("search_eval.generate_candidates", {
-        generate_candidate_outputs_sharing_corpora(options, &mut PublishedCorpusCache::default())
-    })
+    {
+        let _span = tracing::trace_span!("search_eval.generate_candidates").entered();
+        {
+            generate_candidate_outputs_sharing_corpora(
+                options,
+                &mut PublishedCorpusCache::default(),
+            )
+        }
+    }
 }
 
 fn generate_candidate_outputs_sharing_corpora(
@@ -517,539 +484,7 @@ fn generate_candidate_outputs_sharing_corpora(
     })
 }
 
-/// Generate the same byte-stable query fallback plus evidence-bearing native
-/// semantic/rerank results. Missing optional authorities remain pending.
-#[hotpath::measure(label = "search_eval.native.generate")]
-pub fn generate_candidate_outputs_with_native(
-    options: &GenerateCandidateOutputsOptions<'_>,
-    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
-) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
-    // One cache across both phases: the fallback phase below publishes the 1x
-    // and 10x corpora, and the native phase reuses those exact builds instead
-    // of republishing byte-identical ones.
-    let mut corpora = PublishedCorpusCache::default();
-    let mut generated = generate_candidate_outputs_sharing_corpora(options, &mut corpora)?;
-    let workload_path = options.workload_path.map_or_else(
-        || options.repo_root.join(WORKLOAD_RELATIVE),
-        Path::to_path_buf,
-    );
-    let workload = load_candidate_workload(&workload_path)?;
-    corpora.ensure(options.repo_root, &workload, 1, options.admitted_scope)?;
-    corpora.ensure(options.repo_root, &workload, 10, options.admitted_scope)?;
-    let published = corpora.get(1)?;
-    let ten_x_published = corpora.get(10)?;
-    if ten_x_published.eligible_chunks
-        != published.eligible_chunks.checked_mul(10).ok_or_else(|| {
-            CandidateOutputError::Contract("current eligible chunk count overflows 10x".to_owned())
-        })?
-    {
-        return Err(CandidateOutputError::Contract(
-            "native 10x generation does not contain exactly ten times the eligible chunks"
-                .to_owned(),
-        ));
-    }
-    let corpus_digest = compute_corpus_digest(options.repo_root, &workload)?;
-
-    for output in &mut generated.outputs {
-        let profile = workload
-            .profile_matrix
-            .iter()
-            .find(|profile| profile.profile_id == output.profile_id)
-            .ok_or_else(|| {
-                CandidateOutputError::Contract(format!(
-                    "native output references unknown profile {}",
-                    output.profile_id
-                ))
-            })?;
-        let queries = workload
-            .queries
-            .iter()
-            .filter(|query| query.partition == output.partition)
-            .collect::<Vec<_>>();
-        let (rows, current) = hotpath::measure_block!("search_eval.native_partition.current", {
-            measure_native_partition(
-                published,
-                profile,
-                &queries,
-                authority,
-                &generated.workload_digest,
-                &corpus_digest,
-                "current",
-            )
-        })?;
-        let (_, ten_x) = hotpath::measure_block!("search_eval.native_partition.ten_x", {
-            measure_native_partition(
-                ten_x_published,
-                profile,
-                &queries,
-                authority,
-                &generated.workload_digest,
-                &corpus_digest,
-                "10x",
-            )
-        })?;
-        let evidence = SemanticNativeResourceEvidenceV1 {
-            samples: BTreeMap::from([("current".to_owned(), current), ("10x".to_owned(), ten_x)]),
-        };
-        evidence
-            .validate()
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-        output.optional_stages = native_optional_stage_measurements(profile, &rows)?;
-        apply_native_resource_evidence(output, &evidence)?;
-        output.queries = rows;
-    }
-    Ok(generated)
-}
-
-#[hotpath::measure(label = "search_eval.native.partition")]
-fn measure_native_partition(
-    published: &PublishedCorpus,
-    profile: &ProfileSpecV1,
-    queries: &[&WorkloadQueryV1],
-    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
-    workload_digest: &str,
-    corpus_digest: &str,
-    scale: &str,
-) -> Result<
-    (
-        Vec<QueryCandidateRowV1>,
-        SemanticNativeStageResultV1<SemanticNativeResourceSampleV1>,
-    ),
-    CandidateOutputError,
-> {
-    hotpath::gauge!("search_eval_queries_total").set(queries.len());
-    hotpath::gauge!("search_eval_queries_completed").set(0_usize);
-    let mut rows = None;
-    let generation = &published.generation;
-    let mut execute_queries = || {
-        let mut measured_rows = Vec::with_capacity(queries.len());
-        let mut latency_samples_us = Vec::with_capacity(queries.len());
-        for (index, query) in queries.iter().enumerate() {
-            let started = Instant::now();
-            measured_rows.push(retrieve_one_native_query(
-                published, profile, query, authority,
-            )?);
-            latency_samples_us.push(elapsed_micros(started));
-            hotpath::gauge!("search_eval_queries_completed").set(index.saturating_add(1));
-        }
-        rows = Some(measured_rows);
-        Ok(latency_samples_us)
-    };
-    let evidence = authority.measure_resources(
-        ProductionCandidateNativeResourceContextV1 {
-            profile,
-            queries,
-            code: generation,
-            incremental_code: &published.incremental_generation,
-            incremental_before_content_digest: &published.incremental_before_content_digest,
-            incremental_after_content_digest: &published.incremental_after_content_digest,
-            code_generation: &generation.manifest().generation_id,
-            workload_digest,
-            corpus_digest,
-            scale,
-            eligible_chunks: published.eligible_chunks,
-            semantic_projection_sources: ProductionCandidateSemanticProjectionSourcesV1 {
-                one_symbol: &published.incremental_generation,
-                deletion: &published.deletion_generation,
-                no_op: &published.no_op_generation,
-            },
-        },
-        &mut execute_queries,
-    )?;
-    let rows = rows.ok_or_else(|| {
-        CandidateOutputError::Contract(
-            "native resource authority did not execute the exact query workload".to_owned(),
-        )
-    })?;
-    if let SemanticNativeStageResultV1::Complete(sample) = &evidence {
-        let source_manifest_digest = &generation.projection().request().changes.manifest_digest;
-        if sample.provenance.workload_digest != workload_digest
-            || sample.provenance.corpus_digest != corpus_digest
-            || sample.provenance.scale != scale
-            || sample.provenance.code_generation_id != generation.manifest().generation_id.as_str()
-            || sample.provenance.code_source_manifest_digest != source_manifest_digest.as_str()
-            || sample.provenance.incremental_code_generation_id
-                != published
-                    .incremental_generation
-                    .manifest()
-                    .generation_id
-                    .as_str()
-            || sample.provenance.incremental_code_source_manifest_digest
-                != published
-                    .incremental_generation
-                    .projection()
-                    .request()
-                    .changes
-                    .manifest_digest
-                    .as_str()
-            || sample.provenance.incremental_before_content_digest
-                != published.incremental_before_content_digest
-            || sample.provenance.incremental_after_content_digest
-                != published.incremental_after_content_digest
-            || sample.provenance.threads == 0
-            || sample.provenance.max_concurrent_sessions == 0
-            || sample.provenance.batch_size == 0
-            || sample.provenance.sequence_length == 0
-            || sample.provenance.load_deadline_ms == 0
-            || sample.eligible_chunks != published.eligible_chunks
-            || sample.measured_queries != queries.len() as u64
-        {
-            return Err(CandidateOutputError::Contract(
-                "native resource evidence is not bound to the exact evaluator workload".to_owned(),
-            ));
-        }
-    }
-    Ok((rows, evidence))
-}
-
-fn elapsed_micros(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
-}
-
-fn retriever_outcome_candidate_count<E>(
-    outcome: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<E>>,
-) -> u64 {
-    match outcome {
-        RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
-            batch.candidates.len() as u64
-        }
-        RetrieverOutcome::Unavailable(_)
-        | RetrieverOutcome::Denied
-        | RetrieverOutcome::Stale(_)
-        | RetrieverOutcome::BudgetExceeded(_)
-        | RetrieverOutcome::TimedOut(_)
-        | RetrieverOutcome::Cancelled => 0,
-    }
-}
-
-#[hotpath::measure(label = "search_eval.native.retrieve")]
-fn retrieve_one_native_query(
-    published: &PublishedCorpus,
-    profile: &ProfileSpecV1,
-    query: &WorkloadQueryV1,
-    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
-) -> Result<QueryCandidateRowV1, CandidateOutputError> {
-    let prepared = prepare_production_query(published, profile, query)?;
-    let mut fusion = fusion_profile(profile, true)?;
-    let mut native = None;
-    let semantic_allowed_chunks = published
-        .generation
-        .chunks()
-        .chunks()
-        .iter()
-        .filter(|chunk| {
-            published
-                .file_scopes
-                .get(chunk.anchor.file_occurrence_id.as_str())
-                .is_some_and(|scope| query.allowed_scopes.contains(scope))
-        })
-        .map(|chunk| chunk.id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut evaluate = |inputs: ProductionCandidateNativeQueryInputsV1<'_>| {
-        if native.is_some() {
-            return Err(CandidateOutputError::Contract(format!(
-                "native authority evaluated query {} more than once",
-                query.query_id
-            )));
-        }
-        fusion.rerank_policy_id = inputs
-            .rerank
-            .as_ref()
-            .map(|rerank| rerank.policy.policy_id.clone());
-        native = Some(
-            evaluate_native_query(SemanticNativeQueryInputV1 {
-                profile_spec: profile,
-                fusion_profile: &fusion,
-                diversity_policy: &prepared.diversity,
-                kernel: &prepared.kernel,
-                fallback_lanes: &prepared.fallback_lanes,
-                query_measurements: prepared.query_measurements,
-                semantic: inputs.semantic,
-                fallback: &prepared.fallback,
-                rerank: inputs.rerank,
-            })
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-        );
-        Ok(())
-    };
-    authority.with_query_inputs(
-        ProductionCandidateNativeQueryContextV1 {
-            profile,
-            query,
-            request: &prepared.request,
-            query_view: &prepared.query_view,
-            code: &published.generation,
-            code_generation: &prepared.code_generation,
-            semantic_allowed_chunks: &semantic_allowed_chunks,
-            rerank_policy: prepared.rerank_policy.as_ref(),
-        },
-        &mut evaluate,
-    )?;
-    let mut native = native.ok_or_else(|| {
-        CandidateOutputError::Contract(format!(
-            "native authority did not evaluate query {}",
-            query.query_id
-        ))
-    })?;
-    let ranked = match &native.rerank.on {
-        SemanticNativeStageResultV1::Complete(ranked) => ranked.clone(),
-        SemanticNativeStageResultV1::NotRequested | SemanticNativeStageResultV1::Pending { .. } => {
-            native.rerank.off.clone()
-        }
-    };
-    native.measurements.hydration = Some(measure_late_hydration(
-        published,
-        &prepared.request,
-        &ranked,
-        &retrieval_budget(),
-    )?);
-    validate_native_query_output(profile, &prepared.fallback, &native)?;
-    let ranked = map_ranked_candidate_list(published, &ranked)?;
-    let (historical, historical_ranked) = historical_candidates(published, query)?;
-    let ranked = merge_candidate_timelines(query, ranked, historical_ranked);
-    Ok(QueryCandidateRowV1 {
-        query_id: query.query_id.clone(),
-        abstained: ranked.is_empty(),
-        ranked,
-        historical,
-        native: Some(native),
-    })
-}
-
-fn validate_native_query_output(
-    profile: &ProfileSpecV1,
-    fallback: &QueryFallbackSubpayload,
-    native: &SemanticNativeQueryOutputV1,
-) -> Result<(), CandidateOutputError> {
-    if native.profile_id != profile.profile_id
-        || native.fallback_digest != fallback.digest.as_str()
-        || !native.fallback_bytes_unchanged
-    {
-        return Err(CandidateOutputError::Contract(format!(
-            "native query output does not preserve the exact query fallback for {}",
-            profile.profile_id
-        )));
-    }
-    let observed = native
-        .ablations
-        .iter()
-        .map(|result| result.ablation)
-        .collect::<BTreeSet<_>>();
-    if observed.len() != native.ablations.len()
-        || !observed.contains(&SemanticChannelAblationV1::ExactLexical)
-        || !observed.contains(&SemanticChannelAblationV1::QueryExactLexicalGraph)
-    {
-        return Err(CandidateOutputError::Contract(
-            "native query output is missing required query baseline ablations".to_owned(),
-        ));
-    }
-    for ablation in &native.ablations {
-        if ablation.measurement.output_candidates != ablation.ranked_candidates.len() as u64 {
-            return Err(CandidateOutputError::Contract(
-                "native fusion measurement does not match its ranked output".to_owned(),
-            ));
-        }
-    }
-    let hydration = native.measurements.hydration.ok_or_else(|| {
-        CandidateOutputError::Contract(
-            "native query output is missing genuine late-hydration measurements".to_owned(),
-        )
-    })?;
-    if hydration.source_fetches != hydration.receipts
-        || hydration.receipts > hydration.selected_candidates
-        || (hydration.receipts != 0 && hydration.bytes_hydrated == 0)
-    {
-        return Err(CandidateOutputError::Contract(
-            "native late-hydration measurements do not match source receipts".to_owned(),
-        ));
-    }
-    let semantic_ablations = [
-        SemanticChannelAblationV1::ExactLexicalSemantic,
-        SemanticChannelAblationV1::HybridExactLexicalGraphSemantic,
-    ];
-    match (&native.exact_flat_oracle, &native.measurements.semantic) {
-        (
-            SemanticNativeStageResultV1::Complete(oracle),
-            SemanticNativeStageResultV1::Complete(measurement),
-        ) => {
-            if measurement.output_candidates != oracle.hits.len() as u64 {
-                return Err(CandidateOutputError::Contract(
-                    "native semantic measurement does not match the exact-flat oracle".to_owned(),
-                ));
-            }
-            if semantic_ablations
-                .iter()
-                .any(|ablation| !observed.contains(ablation))
-            {
-                return Err(CandidateOutputError::Contract(
-                    "complete semantic output is missing required channel ablations".to_owned(),
-                ));
-            }
-        }
-        (SemanticNativeStageResultV1::NotRequested, SemanticNativeStageResultV1::NotRequested)
-        | (
-            SemanticNativeStageResultV1::Pending { .. },
-            SemanticNativeStageResultV1::Pending { .. },
-        ) => {
-            if semantic_ablations
-                .iter()
-                .any(|ablation| observed.contains(ablation))
-            {
-                return Err(CandidateOutputError::Contract(
-                    "semantic ablations cannot exist without a complete semantic run".to_owned(),
-                ));
-            }
-        }
-        _ => {
-            return Err(CandidateOutputError::Contract(
-                "native semantic result and measurement states disagree".to_owned(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn native_optional_stage_measurements(
-    profile: &ProfileSpecV1,
-    rows: &[QueryCandidateRowV1],
-) -> Result<OptionalStageMeasurementsV1, CandidateOutputError> {
-    let native = rows
-        .iter()
-        .map(|row| {
-            row.native.as_ref().ok_or_else(|| {
-                CandidateOutputError::Contract(format!(
-                    "native generation omitted query evidence {}",
-                    row.query_id
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(OptionalStageMeasurementsV1 {
-        semantic: aggregate_native_stage(
-            profile.semantic_weight_ppm != 0,
-            native.iter().map(|native| &native.exact_flat_oracle),
-        )?,
-        rerank: aggregate_native_rerank_stage(profile.rerank_weight_ppm != 0, &native)?,
-    })
-}
-
-fn aggregate_native_stage<'a, T: 'a>(
-    requested: bool,
-    results: impl Iterator<Item = &'a SemanticNativeStageResultV1<T>>,
-) -> Result<OptionalStageMeasurementV1, CandidateOutputError> {
-    let results = results.collect::<Vec<_>>();
-    if !requested {
-        if results
-            .iter()
-            .any(|result| !matches!(result, SemanticNativeStageResultV1::NotRequested))
-        {
-            return Err(CandidateOutputError::Contract(
-                "unrequested native stage reported execution".to_owned(),
-            ));
-        }
-        return Ok(OptionalStageMeasurementV1::NotRequested);
-    }
-    if results
-        .iter()
-        .any(|result| matches!(result, SemanticNativeStageResultV1::NotRequested))
-    {
-        return Err(CandidateOutputError::Contract(
-            "requested native stage reported not_requested".to_owned(),
-        ));
-    }
-    Ok(
-        if results
-            .iter()
-            .all(|result| matches!(result, SemanticNativeStageResultV1::Complete(_)))
-        {
-            OptionalStageMeasurementV1::Complete
-        } else {
-            OptionalStageMeasurementV1::Pending
-        },
-    )
-}
-
-fn aggregate_native_rerank_stage(
-    requested: bool,
-    native: &[&SemanticNativeQueryOutputV1],
-) -> Result<OptionalStageMeasurementV1, CandidateOutputError> {
-    for output in native {
-        let states_agree = match (&output.rerank.on, &output.rerank.execution) {
-            (
-                SemanticNativeStageResultV1::NotRequested,
-                SemanticNativeStageResultV1::NotRequested,
-            )
-            | (
-                SemanticNativeStageResultV1::Complete(_),
-                SemanticNativeStageResultV1::Complete(_),
-            ) => true,
-            (
-                SemanticNativeStageResultV1::Pending { reason: left },
-                SemanticNativeStageResultV1::Pending { reason: right },
-            ) => left == right,
-            _ => false,
-        };
-        if !states_agree {
-            return Err(CandidateOutputError::Contract(
-                "rerank output and resource execution states disagree".to_owned(),
-            ));
-        }
-    }
-    aggregate_native_stage(requested, native.iter().map(|native| &native.rerank.on))
-}
-
-fn apply_native_resource_evidence(
-    output: &mut ProductionCandidateOutputV1,
-    evidence: &SemanticNativeResourceEvidenceV1,
-) -> Result<(), CandidateOutputError> {
-    let expected_chunks = output
-        .resources
-        .iter()
-        .map(|(scale, sample)| (scale.clone(), sample.eligible_chunks))
-        .collect::<BTreeMap<_, _>>();
-    let mut projected = BTreeMap::new();
-    for (scale, stage) in &evidence.samples {
-        let eligible_chunks = expected_chunks.get(scale).copied().ok_or_else(|| {
-            CandidateOutputError::Contract(format!("unknown native resource scale {scale}"))
-        })?;
-        let sample = match stage {
-            SemanticNativeStageResultV1::Complete(sample) => {
-                let projected = sample.as_existing_evaluator_sample().ok_or_else(|| {
-                    CandidateOutputError::Contract(format!(
-                        "complete native resource sample {scale} is incomplete"
-                    ))
-                })?;
-                if projected.eligible_chunks != eligible_chunks {
-                    return Err(CandidateOutputError::Contract(format!(
-                        "native resource sample {scale} has the wrong eligible chunk count"
-                    )));
-                }
-                projected
-            }
-            SemanticNativeStageResultV1::Pending { reason } => ResourceSampleV1 {
-                status: ResourceMeasurementStatusV1::Pending,
-                eligible_chunks,
-                peak_rss_bytes: None,
-                latency_samples_us: Vec::new(),
-                measured_queries: 0,
-                pending_reason: Some(format!(
-                    "native semantic resource measurement pending: {reason:?}"
-                )),
-            },
-            SemanticNativeStageResultV1::NotRequested => {
-                return Err(CandidateOutputError::Contract(format!(
-                    "native resource sample {scale} cannot be not_requested"
-                )));
-            }
-        };
-        projected.insert(scale.clone(), sample);
-    }
-    output.resources = projected;
-    output.native_resources = Some(evidence.clone());
-    Ok(())
-}
-
-/// Direct production call for one query/profile — used by tests to prove the
+/// Direct production call for one query/profile, used by tests to prove the
 /// generator emits identical candidate bytes.
 pub fn retrieve_partition_query_bytes(
     repo_root: &Path,
@@ -1129,11 +564,32 @@ fn generate_partition_output(
     let peak_before = peak_rss_bytes();
     for query in &queries {
         let started = Instant::now();
-        // prepare_production_query already fuses the query-fallback profile, so
-        // the row and both partition fallback digests share one composition.
+        // The row and both partition receipts share one composition. The
+        // receipt is the ordered ranking, not the generation-scoped fallback
+        // subpayload: that digest moves whenever extractor revisions reseal
+        // the generation every occurrence id names.
         let composed = compose_production_query(published, profile, query)?;
-        let fallback = query_fallback_from_composition(&composed)?;
-        fallback_digests.push((query.query_id.as_str(), fallback.digest.as_str().to_owned()));
+        let ranked = map_ranked_candidates(published, &composed)?;
+        let coverage = query_lane_coverage(&composed);
+        // The subpayload's digest is unfit as a ranking pin; its contract is
+        // not. Constructing it still proves canonical `final_ordinal` order,
+        // per-candidate validity, and query-fallback-only contributions for
+        // every composed query.
+        QueryFallbackSubpayload::new(
+            composed.profile_id.clone(),
+            composed.ranked_candidates.clone(),
+            coverage.clone(),
+            composed.freshness.clone(),
+            None,
+        )
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+        let receipt = ranking_receipt_digest(
+            composed.profile_id.as_str(),
+            query.query_id.as_str(),
+            &coverage,
+            &ranked,
+        )?;
+        fallback_digests.push((query.query_id.as_str(), receipt));
         rows.push(query_row_from_composition(published, query, &composed)?);
         latencies_us.push(started.elapsed().as_micros() as u64);
     }
@@ -1146,7 +602,7 @@ fn generate_partition_output(
     );
 
     let fallback_digest = canonical_sha256(&(
-        "tracedecay.search-eval.partition-fallbacks.v1",
+        "tracedecay.search-eval.partition-rankings.v1",
         &fallback_digests,
     ))?;
     let query_digest = fallback_digest.clone();
@@ -1182,11 +638,7 @@ fn generate_partition_output(
         query_fallback_digest: query_digest,
         expected_query_fallback_digest,
         query_fallback_matches_expected,
-        cancellation: REQUIRED_CANCELLATION.to_owned(),
-        offline: REQUIRED_OFFLINE.to_owned(),
-        optional_stages: optional_stage_measurements(profile),
         resources,
-        native_resources: None,
         queries: rows,
     })
 }
@@ -1209,30 +661,6 @@ fn measure_partition_resources(
         latencies_us,
         queries.len() as u64,
     ))
-}
-
-fn completed_resource_sample(
-    eligible_chunks: u64,
-    peak_rss_bytes: Option<u64>,
-    latency_samples_us: Vec<u64>,
-    measured_queries: u64,
-) -> ResourceSampleV1 {
-    let (status, pending_reason) = if peak_rss_bytes.is_some() {
-        (ResourceMeasurementStatusV1::Measured, None)
-    } else {
-        (
-            ResourceMeasurementStatusV1::Pending,
-            Some("Linux peak RSS measurement is unavailable".to_owned()),
-        )
-    };
-    ResourceSampleV1 {
-        status,
-        eligible_chunks,
-        peak_rss_bytes,
-        latency_samples_us,
-        measured_queries,
-        pending_reason,
-    }
 }
 
 fn retrieve_one_query(
@@ -1258,53 +686,78 @@ fn query_row_from_composition(
         ranked,
         abstained,
         historical,
-        native: None,
     })
 }
 
-pub(super) fn optional_stage_measurements(profile: &ProfileSpecV1) -> OptionalStageMeasurementsV1 {
-    OptionalStageMeasurementsV1 {
-        semantic: if profile.semantic_weight_ppm == 0 {
-            OptionalStageMeasurementV1::NotRequested
-        } else {
-            OptionalStageMeasurementV1::Pending
-        },
-        rerank: if profile.rerank_weight_ppm == 0 {
-            OptionalStageMeasurementV1::NotRequested
-        } else {
-            OptionalStageMeasurementV1::Pending
-        },
-    }
-}
-
+/// Run one query through the real exact, lexical, and graph lanes and compose
+/// them under the profile's fusion material.
 fn compose_production_query(
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
 ) -> Result<CompositionOutputV1, CandidateOutputError> {
-    Ok(prepare_production_query(published, profile, query)?.query_output)
+    let scope_key = canonical_scope_key(&query.allowed_scopes);
+    let scoped = published.scopes.get(&scope_key).ok_or_else(|| {
+        CandidateOutputError::Contract(format!(
+            "missing scoped corpus for query {}",
+            query.query_id
+        ))
+    })?;
+    let lanes = match scoped {
+        Some(scoped) => production_lanes(scoped, profile, query)?,
+        None => unindexed_scope_lanes()?,
+    };
+    let kernel = CompositionKernel::new(id::<ComponentRevision>(
+        tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
+    )?);
+    kernel
+        .compose(
+            &FusionStageInput {
+                profile: fusion_profile(profile)?,
+                lanes,
+            },
+            &evaluated_diversity_policy()?,
+        )
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))
 }
 
-struct PreparedProductionQueryV1 {
-    code_generation: CodeGenerationId,
-    request: RetrievalRequest,
-    query_view: EphemeralSanitizedQueryViewV1,
-    kernel: CompositionKernel,
-    fallback_lanes: Vec<CompositionLaneInput>,
-    query_measurements: SemanticNativeQueryStageMeasurementsV1,
-    query_output: CompositionOutputV1,
-    fallback: QueryFallbackSubpayload,
-    diversity: DiversityPolicy,
-    rerank_policy: Option<RerankPolicy>,
+/// A scope set with no indexable source file publishes no generation: its
+/// exact and lexical lanes complete over zero documents, and with no seeds the
+/// graph lane is unavailable exactly as it is for any seedless query.
+fn unindexed_scope_lanes() -> Result<Vec<CompositionLaneInput>, CandidateOutputError> {
+    fn empty<E>() -> RetrieverOutcome<RetrieverBatch<E>> {
+        RetrieverOutcome::Complete(RetrieverBatch {
+            candidates: Vec::new(),
+            evidence_by_occurrence: BTreeMap::new(),
+            coverage: RetrieverCoverage::default(),
+            continuation: None,
+        })
+    }
+    let contract = |error: FusionStageError| CandidateOutputError::Contract(error.to_string());
+    Ok(vec![
+        CompositionLaneInput::new(RetrieverKind::ExactLiteral, empty::<ExactLaneEvidence>())
+            .map_err(contract)?,
+        CompositionLaneInput::new(RetrieverKind::Lexical, empty::<LexicalLaneEvidence>())
+            .map_err(contract)?,
+        CompositionLaneInput::new(
+            RetrieverKind::Graph,
+            RetrieverOutcome::<RetrieverBatch<GraphLaneEvidence>>::Unavailable(
+                RetrievalFailure::AuthorityUnavailable {
+                    detail: "no graph seeds from exact/lexical".to_owned(),
+                },
+            ),
+        )
+        .map_err(contract)?,
+    ])
 }
 
-fn prepare_production_query(
-    published: &PublishedCorpus,
+fn production_lanes(
+    scoped: &ScopedCorpus,
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
-) -> Result<PreparedProductionQueryV1, CandidateOutputError> {
-    let generation_id = published.generation.manifest().generation_id.clone();
-    let request = retrieval_request(&profile.profile_id, published)?;
+) -> Result<Vec<CompositionLaneInput>, CandidateOutputError> {
+    let generation_id = scoped.generation.manifest().generation_id.clone();
+    let request = retrieval_request(&profile.profile_id, &scoped.generation)?;
     let query_view = EphemeralSanitizedQueryViewV1::sanitize(
         &query.query,
         id::<SanitizerRevision>(tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1)?,
@@ -1314,93 +767,67 @@ fn prepare_production_query(
     )
     .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
 
-    let scope_key = canonical_scope_key(&query.allowed_scopes);
-    let lexical_projection = published
-        .lexical_projections
-        .get(&scope_key)
-        .cloned()
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(format!(
-                "missing lexical projection for query {}",
-                query.query_id
-            ))
-        })?;
     let authority = CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>(
         tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
     )?);
     let exact_lane = ExactLane::new(
         authority.clone(),
-        lexical_projection.exact_adapter(authority.clone()),
+        scoped.lexical.exact_adapter(authority.clone()),
     );
-    let lexical_lane = LexicalLane::new(lexical_projection);
-    let graph_lane = GraphLane::new(
-        published
-            .graph_projections
-            .get(&scope_key)
-            .cloned()
-            .ok_or_else(|| {
-                CandidateOutputError::Contract(format!(
-                    "missing graph projection for query {}",
-                    query.query_id
-                ))
-            })?,
-    );
+    let lexical_lane = LexicalLane::new(scoped.lexical.clone());
+    let graph_lane = GraphLane::new(scoped.graph.clone());
 
     let budget = retrieval_budget();
     let exact_request = ExactLaneRequest {
+        control: &ActiveControl,
         base: request.clone(),
         query_view: &query_view,
         generation: generation_id.clone(),
         literals: authority.parse_literals(&query_view, &request),
+        path_prefix: None,
         budget,
     };
-    let exact_started = Instant::now();
     let exact_outcome = exact_lane
         .retrieve_exact(&exact_request)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let exact_measurement = SemanticNativeStageMeasurementV1 {
-        elapsed_micros: elapsed_micros(exact_started),
-        input_candidates: exact_request.literals.len() as u64,
-        output_candidates: retriever_outcome_candidate_count(&exact_outcome),
-    };
 
-    let lexical_parts = lexical_query_parts(query_view.as_str())
+    let lexical_routing = LexicalRoutingV1::default()
+        .with_aliases(query.lexical_aliases.clone())
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let lexical_request = LexicalLaneRequest {
-        base: request.clone(),
-        query_view: &query_view,
-        generation: generation_id.clone(),
-        whole_terms: lexical_parts.whole_terms,
-        subtokens: lexical_parts.subtokens,
-        phrases: lexical_parts.phrases,
-        field_filters: Vec::new(),
-        fuzzy_budget: 8,
-        lexical_profile_revision: id(
-            tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
-        )?,
-        score_domain: id(tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1)?,
-        budget,
-    };
-    let lexical_input_candidates = lexical_request
-        .whole_terms
-        .len()
-        .saturating_add(lexical_request.subtokens.len())
-        .saturating_add(lexical_request.phrases.len())
-        .saturating_add(lexical_request.field_filters.len())
-        as u64;
-    let lexical_started = Instant::now();
-    let lexical_outcome = lexical_lane
-        .retrieve_lexical(&lexical_request)
+    let route_plan = LexicalRoutePlanV1::plan(query_view.as_str(), &lexical_routing)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let lexical_measurement = SemanticNativeStageMeasurementV1 {
-        elapsed_micros: elapsed_micros(lexical_started),
-        input_candidates: lexical_input_candidates,
-        output_candidates: retriever_outcome_candidate_count(&lexical_outcome),
-    };
+    let mut route_outcomes = Vec::with_capacity(route_plan.routes().len());
+    for route in route_plan.routes() {
+        let lexical_outcome = lexical_lane
+            .retrieve_lexical(&LexicalLaneRequest {
+                base: request.clone(),
+                query_view: &query_view,
+                generation: generation_id.clone(),
+                whole_terms: std::borrow::Cow::Borrowed(route.parts.whole_terms.as_slice()),
+                subtokens: std::borrow::Cow::Borrowed(route.parts.subtokens.as_slice()),
+                phrases: std::borrow::Cow::Borrowed(route.parts.phrases.as_slice()),
+                proximities: std::borrow::Cow::Borrowed(route.proximities.as_slice()),
+                field_filters: std::borrow::Cow::Borrowed(route.field_filters.as_slice()),
+                path_prefix: None,
+                fuzzy_budget: 8,
+                lexical_profile_revision: id(
+                    tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
+                )?,
+                score_domain: id(tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1)?,
+                budget,
+                control: &ActiveControl,
+            })
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+        route_outcomes.push(LexicalRouteOutcomeV1 {
+            kind: route.kind.clone(),
+            outcome: lexical_outcome,
+        });
+    }
+    let (lexical_outcome, _) =
+        merge_lexical_routes(&generation_id, &budget, &request.budget, route_outcomes)
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
 
     let seed_anchors = graph_seeds_from_outcomes(&exact_outcome, &lexical_outcome);
-    let graph_input_candidates = seed_anchors.len() as u64;
-    let graph_started = Instant::now();
     let graph_outcome = if seed_anchors.is_empty() {
         RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
             detail: "no graph seeds from exact/lexical".to_owned(),
@@ -1422,66 +849,20 @@ fn prepare_production_query(
             .retrieve_graph(&graph_request, Arc::new(ActiveControl))
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
     };
-    let graph_measurement = SemanticNativeStageMeasurementV1 {
-        elapsed_micros: elapsed_micros(graph_started),
-        input_candidates: graph_input_candidates,
-        output_candidates: retriever_outcome_candidate_count(&graph_outcome),
-    };
 
-    let kernel = CompositionKernel::new(id::<ComponentRevision>(
-        tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
-    )?);
-    let fallback_profile = query_fallback_profile(profile);
-    let fusion_profile = fusion_profile(&fallback_profile, false)?;
-    let fallback_lanes = vec![
+    Ok(vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         CompositionLaneInput::new(RetrieverKind::Lexical, lexical_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         CompositionLaneInput::new(RetrieverKind::Graph, graph_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-    ];
-    let diversity = evaluated_diversity_policy()?;
-    let query_output = kernel
-        .compose(
-            &FusionStageInput {
-                profile: fusion_profile,
-                lanes: fallback_lanes.clone(),
-            },
-            &diversity,
-        )
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let fallback = query_fallback_from_composition(&query_output)?;
-    let rerank_policy = evaluated_rerank_policy(profile)?;
-    Ok(PreparedProductionQueryV1 {
-        code_generation: generation_id,
-        request,
-        query_view,
-        kernel,
-        fallback_lanes,
-        query_measurements: SemanticNativeQueryStageMeasurementsV1 {
-            exact: exact_measurement,
-            lexical: lexical_measurement,
-            graph: graph_measurement,
-        },
-        query_output,
-        fallback,
-        diversity,
-        rerank_policy,
-    })
+    ])
 }
 
-fn query_fallback_profile(profile: &ProfileSpecV1) -> ProfileSpecV1 {
-    let mut fallback = profile.clone();
-    "query-fallback".clone_into(&mut fallback.profile_id);
-    fallback.semantic_weight_ppm = 0;
-    fallback.rerank_weight_ppm = 0;
-    fallback
-}
-
-fn query_fallback_from_composition(
+fn query_lane_coverage(
     output: &CompositionOutputV1,
-) -> Result<QueryFallbackSubpayload, CandidateOutputError> {
+) -> BTreeMap<RetrieverKind, PublicRetrieverStatus> {
     let mut coverage = BTreeMap::new();
     for lane in RetrieverKind::QUERY_FALLBACK_LANES {
         coverage.insert(
@@ -1493,180 +874,50 @@ fn query_fallback_from_composition(
                 .unwrap_or(PublicRetrieverStatus::Unavailable),
         );
     }
-    let fallback = QueryFallbackSubpayload::new(
-        output.profile_id.clone(),
-        output.ranked_candidates.clone(),
-        coverage,
-        output.freshness.clone(),
-        None,
-    )
-    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    fallback
-        .validate()
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    Ok(fallback)
+    coverage
+}
+
+/// Ranking identity the search-eval pins compare.
+///
+/// Production `QueryFallbackSubpayload` digests stay generation-scoped: every
+/// lexical occurrence id is `code-chunk:{generation}:{chunk}`, and the eval
+/// request's freshness digest names that generation, whose fingerprint includes
+/// extractor revisions. Hashing that subpayload made an extractor revision
+/// bump look like a ranking change. This receipt hashes the generation-free
+/// rows the quality report already scores, plus the public lane coverage.
+fn ranking_receipt_digest(
+    profile_id: &str,
+    query_id: &str,
+    lane_coverage: &BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    ranked: &[RankedCandidateRowV1],
+) -> Result<String, CandidateOutputError> {
+    canonical_sha256(&(
+        "tracedecay.search-eval.ranking-receipt.v1",
+        profile_id,
+        query_id,
+        lane_coverage,
+        ranked,
+    ))
 }
 
 fn map_ranked_candidates(
     published: &PublishedCorpus,
     output: &CompositionOutputV1,
 ) -> Result<Vec<RankedCandidateRowV1>, CandidateOutputError> {
-    map_ranked_candidate_list(published, &output.ranked_candidates)
-}
-
-struct CandidateCorpusHydrationSourceV1<'a> {
-    published: &'a PublishedCorpus,
-    source_fetches: u64,
-}
-
-impl CandidateCorpusHydrationSourceV1<'_> {
-    fn binding<'a>(
-        &'a self,
-        candidate: &'a tracedecay_domain::RankedCandidate,
-    ) -> Option<(
-        &'a OccurrenceMapEntry,
-        &'a tracedecay_domain::OccurrenceProvenance,
-    )> {
-        candidate
-            .candidate
-            .occurrences
-            .iter()
-            .find_map(|occurrence| {
-                self.published
-                    .occurrence_map
-                    .get(occurrence.source_occurrence_id.as_str())
-                    .map(|entry| (entry, occurrence))
-            })
-            .or_else(|| {
-                self.published
-                    .occurrence_map
-                    .get(candidate.candidate.anchor_id.as_str())
-                    .zip(candidate.candidate.occurrences.first())
-            })
-    }
-}
-
-impl LateHydrationSource<Vec<u8>> for CandidateCorpusHydrationSourceV1<'_> {
-    fn authorize(
-        &mut self,
-        _request: &RetrievalRequest,
-        candidate: &tracedecay_domain::RankedCandidate,
-    ) -> HydrationAuthorizationV1 {
-        if self.binding(candidate).is_some() {
-            HydrationAuthorizationV1::Authorized
-        } else {
-            HydrationAuthorizationV1::Unavailable(HydrationUnavailableV1::Invalid)
-        }
-    }
-
-    fn preflight_authorized(
-        &mut self,
-        _request: &RetrievalRequest,
-        candidate: &tracedecay_domain::RankedCandidate,
-        permit: &HydrationWorkPermitV1,
-    ) -> HydrationPreflightOutcomeV1 {
-        let Some((entry, occurrence)) = self.binding(candidate) else {
-            return HydrationPreflightOutcomeV1::Unavailable(HydrationUnavailableV1::Invalid);
-        };
-        if !permit
-            .source_occurrence_ids
-            .contains(&occurrence.source_occurrence_id)
-        {
-            return HydrationPreflightOutcomeV1::Unavailable(HydrationUnavailableV1::Invalid);
-        }
-        match fs::metadata(self.published.repo_root.join(&entry.fixture_path)) {
-            Ok(metadata) if metadata.len() <= permit.remaining_bytes => {
-                HydrationPreflightOutcomeV1::Ready {
-                    estimated_bytes: metadata.len(),
-                }
-            }
-            Ok(_) => HydrationPreflightOutcomeV1::BudgetExceeded,
-            Err(_) => HydrationPreflightOutcomeV1::Unavailable(HydrationUnavailableV1::Internal),
-        }
-    }
-
-    fn hydrate_authorized(
-        &mut self,
-        _request: &RetrievalRequest,
-        candidate: &tracedecay_domain::RankedCandidate,
-        _permit: &HydrationWorkPermitV1,
-    ) -> HydrationReadOutcomeV1<Vec<u8>> {
-        let Some((entry, occurrence)) = self.binding(candidate) else {
-            return HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::Invalid);
-        };
-        let anchor_id = candidate.candidate.anchor_id.clone();
-        let source_occurrence_id = occurrence.source_occurrence_id.clone();
-        let freshness = occurrence.freshness.clone();
-        let path = self.published.repo_root.join(&entry.fixture_path);
-        let hydration_revision = match HydrationRevision::new("hydration.search-eval.corpus.v1") {
-            Ok(revision) => revision,
-            Err(_) => {
-                return HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::Internal);
-            }
-        };
-        match fs::read(path) {
-            Ok(payload) => {
-                self.source_fetches = self.source_fetches.saturating_add(1);
-                HydrationReadOutcomeV1::Complete {
-                    receipt: HydrationReceipt {
-                        anchor_id,
-                        source_occurrence_id,
-                        hydration_revision,
-                        bytes_hydrated: payload.len() as u64,
-                        authorized: true,
-                        freshness,
-                    },
-                    payload,
-                }
-            }
-            Err(_) => HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::Internal),
-        }
-    }
-}
-
-#[hotpath::measure(label = "search_eval.hydrate.late")]
-fn measure_late_hydration(
-    published: &PublishedCorpus,
-    request: &RetrievalRequest,
-    ranked: &[tracedecay_domain::RankedCandidate],
-    budget: &RetrievalBudget,
-) -> Result<SemanticNativeHydrationMeasurementV1, CandidateOutputError> {
-    let mut source = CandidateCorpusHydrationSourceV1 {
-        published,
-        source_fetches: 0,
-    };
-    let started = Instant::now();
-    let page = CanonicalLateHydration::new(&mut source)
-        .hydrate(request, ranked, budget)
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let bytes_hydrated = page
-        .receipts
-        .iter()
-        .map(|receipt| receipt.bytes_hydrated)
-        .sum();
-    Ok(SemanticNativeHydrationMeasurementV1 {
-        elapsed_micros: elapsed_micros(started),
-        selected_candidates: page.results.len() as u64,
-        source_fetches: source.source_fetches,
-        receipts: page.receipts.len() as u64,
-        bytes_hydrated,
-    })
+    map_ranked_candidate_list(&published.occurrence_map, &output.ranked_candidates)
 }
 
 fn map_ranked_candidate_list(
-    published: &PublishedCorpus,
+    occurrence_map: &BTreeMap<String, OccurrenceMapEntry>,
     ranked_candidates: &[tracedecay_domain::RankedCandidate],
 ) -> Result<Vec<RankedCandidateRowV1>, CandidateOutputError> {
     let mut rows = Vec::new();
     for ranked in ranked_candidates {
-        let entry = published
-            .occurrence_map
+        let entry = occurrence_map
             .get(ranked.candidate.anchor_id.as_str())
             .or_else(|| {
                 ranked.candidate.occurrences.iter().find_map(|occurrence| {
-                    published
-                        .occurrence_map
-                        .get(occurrence.source_occurrence_id.as_str())
+                    occurrence_map.get(occurrence.source_occurrence_id.as_str())
                 })
             })
             .cloned()
@@ -1728,15 +979,11 @@ fn historical_candidates(
     published: &PublishedCorpus,
     query: &WorkloadQueryV1,
 ) -> Result<(HistoricalQueryExecutionV1, Vec<RankedCandidateRowV1>), CandidateOutputError> {
-    if !query.strata.iter().any(|stratum| {
-        matches!(
-            stratum.as_str(),
-            "incremental_edit"
-                | "incremental_delete"
-                | "incremental_rename"
-                | "renamed_moved_symbol"
-        )
-    }) {
+    if !query
+        .strata
+        .iter()
+        .any(|stratum| stratum.requires_historical_query())
+    {
         return Ok((HistoricalQueryExecutionV1::NotRequested, Vec::new()));
     }
 
@@ -1880,19 +1127,125 @@ fn publish_corpus_with_scale(
     copies: usize,
     admitted_scope: AdmittedCorpusScopeFn,
 ) -> Result<PublishedCorpus, CandidateOutputError> {
-    if copies == 0 {
+    if !matches!(copies, 1 | 10) {
         return Err(CandidateOutputError::Contract(
-            "corpus scale must be positive".to_owned(),
+            "evaluation corpus scale must be current or exact 10x".to_owned(),
         ));
     }
     let corpus_digest = compute_corpus_digest(repo_root, workload)?;
+    let scope_keys = workload
+        .queries
+        .iter()
+        .map(|query| canonical_scope_key(&query.allowed_scopes))
+        .collect::<BTreeSet<_>>();
+    let mut scopes = BTreeMap::new();
+    let mut occurrence_map = BTreeMap::new();
+    // Admitted-chunk counts per corpus file. Chunking is file-local, so a file
+    // several scope sets admit is counted once.
+    let mut file_chunks: BTreeMap<FileOccurrenceId, u64> = BTreeMap::new();
+    for scope_key in scope_keys {
+        let documents = workload
+            .corpus
+            .iter()
+            .filter(|document| scope_key.contains(&document.scope))
+            .collect::<Vec<_>>();
+        let Some((generation, file_to_document)) =
+            publish_scope_generation(repo_root, &corpus_digest, &scope_key, &documents, copies)?
+        else {
+            scopes.insert(scope_key, None);
+            continue;
+        };
+        let mut scope_file_chunks: BTreeMap<FileOccurrenceId, u64> = BTreeMap::new();
+        let admitted = generation
+            .admitted_chunks()
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+        for chunk in admitted.iter() {
+            *scope_file_chunks
+                .entry(chunk.chunk().anchor.file_occurrence_id.clone())
+                .or_default() += 1;
+        }
+        drop(admitted);
+        for (file, counts) in scope_file_chunks {
+            file_chunks.entry(file).or_insert(counts);
+        }
+        let symbol_displays: BTreeMap<_, _> = generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.occurrence.clone(),
+                    VerifiedSealedLexicalSymbolDisplayV1::from(symbol.as_ref()),
+                )
+            })
+            .collect();
+        for chunk in generation.chunks().chunks() {
+            let Some(document) = file_to_document.get(chunk.anchor.file_occurrence_id.as_str())
+            else {
+                continue;
+            };
+            let qualified_name = chunk
+                .anchor
+                .symbol_occurrence_id
+                .as_ref()
+                .and_then(|symbol| symbol_displays.get(symbol))
+                .map(VerifiedSealedLexicalSymbolDisplayV1::qualified_name);
+            let display_anchors = display_anchors_for_chunk(chunk, document, qualified_name);
+            let entry = || OccurrenceMapEntry {
+                document_id: document.document_id.clone(),
+                scope: document.scope.clone(),
+                display_anchors: display_anchors.clone(),
+            };
+            if let Some(symbol) = &chunk.anchor.symbol_occurrence_id {
+                occurrence_map.insert(format!("code-symbol:{}", symbol.as_str()), entry());
+                occurrence_map.insert(format!("code-graph:{}", symbol.as_str()), entry());
+            }
+            occurrence_map.insert(format!("code-chunk:{}", chunk.id.as_str()), entry());
+        }
+        scopes.insert(
+            scope_key,
+            Some({
+                let _span = tracing::trace_span!("search_eval.corpus.scope_retrieval").entered();
+                scoped_retrieval(generation)
+            }?),
+        );
+    }
+    Ok(PublishedCorpus {
+        scopes,
+        occurrence_map,
+        repo_root: repo_root.to_path_buf(),
+        source_commit: GitOidV1::new(workload.source_repository_commit.clone())
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        corpus: workload.corpus.clone(),
+        corpus_digest,
+        eligible_chunks: file_chunks.values().sum(),
+        admitted_scope,
+    })
+}
+
+/// A published generation and the corpus document behind each file path.
+type ScopeGeneration = (
+    Arc<CodeIndexPublishedGenerationV1>,
+    BTreeMap<String, CorpusDocumentV1>,
+);
+
+/// Publish one generation over `documents` (each copied `copies` times) with
+/// the daemon's production code-index owner, returning it with the corpus
+/// document each file occurrence came from. `None` when no document is in an
+/// indexable language: production publishes no generation for such a tree.
+fn publish_scope_generation(
+    repo_root: &Path,
+    corpus_digest: &str,
+    scope_key: &[String],
+    documents: &[&CorpusDocumentV1],
+    copies: usize,
+) -> Result<Option<ScopeGeneration>, CandidateOutputError> {
     let language_registry = StaticLanguageRegistry::new();
     let mut files = Vec::new();
     let mut captured = Vec::new();
     let mut file_to_document = BTreeMap::new();
-    let mut file_scopes = BTreeMap::new();
     for copy in 0..copies {
-        for document in &workload.corpus {
+        for &document in documents {
             let absolute = repo_root.join(&document.path);
             let bytes = fs::read(&absolute).map_err(|source| CandidateOutputError::Read {
                 path: absolute.clone(),
@@ -1906,10 +1259,6 @@ fn publish_corpus_with_scale(
             let file_occurrence_id =
                 id::<FileOccurrenceId>(&format!("file.{}{}", document.document_id, copy_suffix))?;
             file_to_document.insert(file_occurrence_id.as_str().to_owned(), document.clone());
-            file_scopes.insert(
-                file_occurrence_id.as_str().to_owned(),
-                document.scope.clone(),
-            );
             let language = id::<LanguageId>(&document.language)?;
             let indexable = language_registry.descriptor(&language).is_some();
             files.push(SanitizedCodeFileV1 {
@@ -1932,6 +1281,9 @@ fn publish_corpus_with_scale(
             }
         }
     }
+    if captured.is_empty() {
+        return Ok(None);
+    }
     files.sort_by(|left, right| {
         (&left.logical_path, &left.file_occurrence_id)
             .cmp(&(&right.logical_path, &right.file_occurrence_id))
@@ -1945,15 +1297,15 @@ fn publish_corpus_with_scale(
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.candidate.v1")?],
         content_identity: id(&canonical_sha256(&(
-            "tracedecay.search-eval.scaled-corpus.v1",
-            &corpus_digest,
+            "tracedecay.search-eval.scoped-corpus.v1",
+            corpus_digest,
+            scope_key,
             copies,
         ))?)?,
         captured_at: UtcMicros(1_000_000),
         files,
+        omitted_sources: Vec::new(),
     };
-    let incremental_snapshot_base = snapshot.clone();
-    let incremental_captured_base = captured.clone();
     let target_projection_key = ProjectionKeyV1 {
         kind: ProjectionKindV1::Lexical,
         schema_revision: "lexical.candidate.v1".to_owned(),
@@ -1970,7 +1322,7 @@ fn publish_corpus_with_scale(
             dirty: RepositoryDirtyStateV1::Dirty,
         },
         sealed_at: UtcMicros(1_100_000),
-        target_projection_key: target_projection_key.clone(),
+        target_projection_key,
     };
     let config = CodeIndexProductionConfigV1 {
         project_id: id::<ProjectId>("project.candidate.fixture")?,
@@ -1978,346 +1330,35 @@ fn publish_corpus_with_scale(
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         policy_revision: id::<PolicyRevisionId>("policy.candidate.v1")?,
         // Must match the daemon production code-index projection identity so
-        // evaluate-and-publish can activate the same embedding projection the
-        // mounted journey pins (`chunker.daemon.v2` / `privacy.local-code-index`).
-        chunker_revision: id::<ChunkerRevision>("chunker.daemon.v2")?,
+        // the evaluated corpus chunks exactly as the mounted journey does.
+        chunker_revision: id::<ChunkerRevision>(DAEMON_CODE_INDEX_CHUNKER_REVISION)?,
         privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
-        .map_err(|error| {
-            CandidateOutputError::Contract(format!("open production owner: {error}"))
-        })?;
-    let generation = owner
-        .build_and_publish(request, &ActiveControl)
-        .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
-    let expected_chunks = match copies {
-        1 => workload.execution_contract.exact_eligible_chunks_current,
-        10 => workload.execution_contract.exact_eligible_chunks_10x,
-        _ => {
-            return Err(CandidateOutputError::Contract(
-                "evaluation corpus scale must be current or exact 10x".to_owned(),
-            ));
-        }
-    };
-    let observed_chunks = generation.chunks().chunks().len() as u64;
-    if observed_chunks != expected_chunks {
-        return Err(CandidateOutputError::Contract(format!(
-            "eligible chunk count mismatch for {copies}x corpus: declared {expected_chunks}, observed {observed_chunks}"
-        )));
-    }
-    let mut incremental_snapshot = incremental_snapshot_base;
-    incremental_snapshot.captured_at = UtcMicros(1_150_000);
-    let mut incremental_captured = incremental_captured_base;
-    let incremental_document = workload
-        .corpus
-        .iter()
-        .find(|document| document.document_id == workload.incremental_fixture.document_id)
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(
-                "incremental fixture names an unknown corpus document".to_owned(),
-            )
-        })?;
-    let changed_file =
-        id::<FileOccurrenceId>(&format!("file.{}", incremental_document.document_id))?;
-    let canonical_root =
-        fs::canonicalize(repo_root).map_err(|source| CandidateOutputError::Read {
-            path: repo_root.to_path_buf(),
-            source,
-        })?;
-    let expected_after_path = canonical_root.join(&workload.incremental_fixture.after_path);
-    let after_path =
-        fs::canonicalize(&expected_after_path).map_err(|source| CandidateOutputError::Read {
-            path: expected_after_path.clone(),
-            source,
-        })?;
-    if after_path != expected_after_path {
-        return Err(CandidateOutputError::Contract(
-            "incremental fixture must be a checked-in non-symlink path".to_owned(),
-        ));
-    }
-    let after_bytes = fs::read(&after_path).map_err(|source| CandidateOutputError::Read {
-        path: after_path,
-        source,
+    let published =
+        CodeIndexProductionOwnerV1::new(config, MemorySealedPublicationStoreV1::default())
+            .map_err(|error| {
+                CandidateOutputError::Contract(format!("open production owner: {error}"))
+            })?
+            .build_and_publish(request, &ActiveControl)
+            .map_err(|error| {
+                CandidateOutputError::Contract(format!("publish generation: {error}"))
+            })?;
+    let generation = published.decoded().map(Arc::clone).ok_or_else(|| {
+        CandidateOutputError::Contract("a generation without a parent builds cold".to_owned())
     })?;
-    let observed_after_sha256 = sha256_hex(&after_bytes);
-    if observed_after_sha256 != workload.incremental_fixture.after_sha256 {
-        return Err(CandidateOutputError::Contract(
-            "incremental fixture bytes do not match the workload digest".to_owned(),
-        ));
-    }
-    let changed = incremental_captured
-        .iter_mut()
-        .find(|file| file.file_occurrence_id == changed_file)
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(
-                "incremental fixture corpus document is not eligible".to_owned(),
-            )
-        })?;
-    if changed.sanitized_bytes.as_ref() == after_bytes.as_slice() {
-        return Err(CandidateOutputError::Contract(
-            "incremental before/after fixture bytes are identical".to_owned(),
-        ));
-    }
-    changed.sanitized_bytes = Arc::from(after_bytes);
-    let changed_digest = content_digest(&changed.sanitized_bytes);
-    let snapshot_file = incremental_snapshot
-        .files
-        .iter_mut()
-        .find(|file| file.file_occurrence_id == changed_file)
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(
-                "incremental resource file is absent from the sanitized snapshot".to_owned(),
-            )
-        })?;
-    let incremental_before_content_digest = snapshot_file.content_digest.as_str().to_owned();
-    snapshot_file.content_digest = changed_digest.clone();
-    let incremental_after_content_digest = changed_digest.as_str().to_owned();
-    incremental_snapshot.content_identity = id(&canonical_sha256(&(
-        "tracedecay.search-eval.incremental-corpus.v1",
-        generation.manifest().generation_id.clone(),
-        changed_file.clone(),
-        changed_digest,
-    ))?)?;
-    let scenario_snapshot = incremental_snapshot.clone();
-    let scenario_captured = incremental_captured.clone();
-    let incremental_generation = owner
-        .build_and_publish(
-            CodeIndexBuildRequestV1 {
-                snapshot: incremental_snapshot,
-                captured_files: incremental_captured,
-                changed_files: BTreeSet::from([incremental_document.source_path.clone()]),
-                invalidations: BTreeSet::new(),
-                ignored_source_admissions: Vec::new(),
-                repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
-                    tree: None,
-                    dirty: RepositoryDirtyStateV1::Dirty,
-                },
-                sealed_at: UtcMicros(1_200_000),
-                target_projection_key: target_projection_key.clone(),
-            },
-            &ActiveControl,
-        )
-        .map_err(|error| {
-            CandidateOutputError::Contract(format!(
-                "publish incremental resource generation: {error}"
-            ))
-        })?;
-    let incremental_changes = &incremental_generation.projection().request().changes;
-    let changed_chunks = incremental_changes
-        .added_or_changed
-        .iter()
-        .filter_map(|change| {
-            incremental_generation
-                .chunks()
-                .chunks()
-                .iter()
-                .find(|chunk| chunk.id == change.chunk_id)
-        })
-        .collect::<Vec<_>>();
-    let deleted_chunks = incremental_changes
-        .deleted
-        .iter()
-        .filter_map(|change| {
-            generation
-                .chunks()
-                .chunks()
-                .iter()
-                .find(|chunk| chunk.id == change.chunk_id)
-        })
-        .collect::<Vec<_>>();
-    let affected_count = incremental_changes
-        .added_or_changed
-        .len()
-        .saturating_add(incremental_changes.deleted.len());
-    if incremental_generation.manifest().parent_generation
-        != Some(generation.manifest().generation_id.clone())
-        || affected_count == 0
-        || affected_count >= incremental_generation.chunks().chunks().len()
-        || changed_chunks.len() != incremental_changes.added_or_changed.len()
-        || deleted_chunks.len() != incremental_changes.deleted.len()
-        || changed_chunks
-            .iter()
-            .chain(deleted_chunks.iter())
-            .any(|chunk| chunk.anchor.file_occurrence_id != changed_file)
-        || !changed_chunks
-            .iter()
-            .any(|chunk| chunk.anchor.symbol_occurrence_id.is_some())
-    {
-        return Err(CandidateOutputError::Contract(
-            "resource corpus did not produce a genuine changed-chunk incremental generation"
-                .to_owned(),
-        ));
-    }
-
-    let no_op_generation = build_projection_source_generation(
-        &mut owner,
-        scenario_snapshot.clone(),
-        scenario_captured.clone(),
-        BTreeSet::new(),
-        UtcMicros(1_250_000),
-        target_projection_key.clone(),
-        "no-op",
-    )?;
-    if !no_op_generation
-        .projection()
-        .request()
-        .changes
-        .added_or_changed
-        .is_empty()
-        || !no_op_generation
-            .projection()
-            .request()
-            .changes
-            .deleted
-            .is_empty()
-    {
-        return Err(CandidateOutputError::Contract(
-            "no-op projection case performed projection work".to_owned(),
-        ));
-    }
-
-    let mut deletion_snapshot = scenario_snapshot.clone();
-    deletion_snapshot.captured_at = UtcMicros(1_300_000);
-    deletion_snapshot
-        .files
-        .retain(|file| file.file_occurrence_id != changed_file);
-    deletion_snapshot.content_identity = id(&canonical_sha256(&(
-        "tracedecay.search-eval.deletion-case.v1",
-        &deletion_snapshot.files,
-    ))?)?;
-    let mut deletion_captured = scenario_captured.clone();
-    deletion_captured.retain(|file| file.file_occurrence_id != changed_file);
-    let deletion_generation = build_projection_source_generation(
-        &mut owner,
-        deletion_snapshot,
-        deletion_captured,
-        BTreeSet::from([incremental_document.source_path.clone()]),
-        UtcMicros(1_350_000),
-        target_projection_key,
-        "deletion",
-    )?;
-
-    let qualified_names: BTreeMap<_, _> = generation
-        .symbols()
-        .symbols
-        .iter()
-        .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
-        .collect();
-    let mut occurrence_map = BTreeMap::new();
-    for chunk in generation.chunks().chunks() {
-        let Some(document) = file_to_document.get(chunk.anchor.file_occurrence_id.as_str()) else {
-            continue;
-        };
-        let qualified_name = chunk
-            .anchor
-            .symbol_occurrence_id
-            .as_ref()
-            .and_then(|symbol| qualified_names.get(symbol));
-        let display_anchors = display_anchors_for_chunk(chunk, document, qualified_name);
-        if let Some(symbol) = &chunk.anchor.symbol_occurrence_id {
-            occurrence_map.insert(
-                format!("code-symbol:{}", symbol.as_str()),
-                OccurrenceMapEntry {
-                    document_id: document.document_id.clone(),
-                    scope: document.scope.clone(),
-                    fixture_path: document.path.clone(),
-                    display_anchors: display_anchors.clone(),
-                },
-            );
-            occurrence_map.insert(
-                format!("code-graph:{}", symbol.as_str()),
-                OccurrenceMapEntry {
-                    document_id: document.document_id.clone(),
-                    scope: document.scope.clone(),
-                    fixture_path: document.path.clone(),
-                    display_anchors: display_anchors.clone(),
-                },
-            );
-        }
-        occurrence_map.insert(
-            format!("code-chunk:{}", chunk.id.as_str()),
-            OccurrenceMapEntry {
-                document_id: document.document_id.clone(),
-                scope: document.scope.clone(),
-                fixture_path: document.path.clone(),
-                display_anchors,
-            },
-        );
-    }
-
-    let eligible_chunks = generation
-        .admitted_chunks()
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
-        .len() as u64;
-    let (lexical_projections, graph_projections) =
-        build_query_projections(&generation, &file_scopes, &workload.queries)?;
-    Ok(PublishedCorpus {
-        generation,
-        lexical_projections,
-        graph_projections,
-        incremental_generation,
-        incremental_before_content_digest,
-        incremental_after_content_digest,
-        occurrence_map,
-        file_scopes,
-        repo_root: repo_root.to_path_buf(),
-        source_commit: GitOidV1::new(workload.source_repository_commit.clone())
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-        corpus: workload.corpus.clone(),
-        corpus_digest,
-        eligible_chunks,
-        no_op_generation,
-        deletion_generation,
-        admitted_scope,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_projection_source_generation(
-    owner: &mut CodeIndexProductionOwnerV1<SharedPublicationStore, ApplyingProjectionSink>,
-    mut snapshot: SanitizedCodeSnapshotV1,
-    captured_files: Vec<CodeIndexCapturedFileV1>,
-    changed_files: BTreeSet<String>,
-    sealed_at: UtcMicros,
-    target_projection_key: ProjectionKeyV1,
-    label: &str,
-) -> Result<Arc<CodeIndexPublishedGenerationV1>, CandidateOutputError> {
-    snapshot.captured_at = UtcMicros(sealed_at.0.saturating_sub(10_000));
-    owner
-        .build_and_publish(
-            CodeIndexBuildRequestV1 {
-                snapshot,
-                captured_files,
-                changed_files,
-                invalidations: BTreeSet::new(),
-                ignored_source_admissions: Vec::new(),
-                repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
-                    tree: None,
-                    dirty: RepositoryDirtyStateV1::Dirty,
-                },
-                sealed_at,
-                target_projection_key,
-            },
-            &ActiveControl,
-        )
-        .map_err(|error| {
-            CandidateOutputError::Contract(format!(
-                "publish {label} semantic projection source: {error}"
-            ))
-        })
+    Ok(Some((generation, file_to_document)))
 }
 
 fn display_anchors_for_chunk(
     chunk: &CodeSearchChunkV1,
     document: &CorpusDocumentV1,
-    qualified_name: Option<&String>,
+    qualified_name: Option<&str>,
 ) -> Vec<String> {
     let mut anchors = BTreeSet::from([document.document_id.clone()]);
     if let Some(qualified_name) = qualified_name {
-        anchors.insert(qualified_name.clone());
+        anchors.insert(qualified_name.to_owned());
         anchors.insert(display_qualified_anchor(document, qualified_name));
     }
     for term in &chunk.exact_terms {
@@ -2451,9 +1492,9 @@ fn graph_seeds_from_outcomes(
 
 fn retrieval_request(
     profile_id: &str,
-    published: &PublishedCorpus,
+    generation: &CodeIndexPublishedGenerationV1,
 ) -> Result<RetrievalRequest, CandidateOutputError> {
-    let manifest = published.generation.manifest();
+    let manifest = generation.manifest();
     let freshness_digest = canonical_sha256(&(
         "tracedecay.search-eval.freshness.v1",
         &manifest.generation_id,
@@ -2502,70 +1543,34 @@ fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<(), Candidat
     })
 }
 
-fn peak_rss_bytes() -> Option<u64> {
-    let Ok(status) = fs::read_to_string("/proc/self/status") else {
-        return None;
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::peak_rss::{
+        PeakRssObservation, peak_rss_bytes_from_status, windows_peak_rss_observation,
     };
-    peak_rss_bytes_from_status(&status)
-}
-
-fn peak_rss_bytes_from_status(status: &str) -> Option<u64> {
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmHWM:") {
-            let kb: u64 = rest
-                .split_whitespace()
-                .next()
-                .and_then(|value| value.parse().ok())?;
-            return Some(kb.saturating_mul(1024));
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-mod fallback_baseline_tests;
-
-#[cfg(test)]
-mod tests {
     use super::*;
-    use crate::semantic_native::SemanticNativePendingReasonV1;
+    use crate::packaged_assets::PackagedEvaluatorAssets;
+    use std::sync::Mutex;
+    use tracedecay_query::search_quality::candidate_output::{
+        ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1,
+    };
 
-    struct TestRepositoryFixture {
-        _temp: tempfile::TempDir,
-        root: PathBuf,
-    }
-
-    impl TestRepositoryFixture {
-        fn clone() -> Self {
-            let temp = tempfile::tempdir().expect("temporary repository fixture");
-            let root = temp.path().join("repo");
-            let output = std::process::Command::new("git")
-                .arg("clone")
-                .arg("--quiet")
-                .arg(repo_root())
-                .arg(&root)
-                .output()
-                .expect("clone repository fixture");
-            assert!(
-                output.status.success(),
-                "clone repository fixture: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            Self { _temp: temp, root }
-        }
-    }
-
-    fn authenticated_repo_fixture() -> Arc<TestRepositoryFixture> {
-        static FIXTURE: std::sync::OnceLock<Mutex<std::sync::Weak<TestRepositoryFixture>>> =
+    /// One materialized copy of the packaged workload, corpus, and Git
+    /// authority shared by every test in this binary. The packaged root is
+    /// the same fixture the production `compare` command evaluates, so the
+    /// tests never depend on the checkout they run from.
+    pub(crate) fn packaged_fixture() -> Arc<PackagedEvaluatorAssets> {
+        static FIXTURE: std::sync::OnceLock<Mutex<std::sync::Weak<PackagedEvaluatorAssets>>> =
             std::sync::OnceLock::new();
         let mut fixture = FIXTURE
             .get_or_init(|| Mutex::new(std::sync::Weak::new()))
             .lock()
-            .expect("repository fixture lock");
+            .expect("packaged fixture lock");
         if let Some(fixture) = fixture.upgrade() {
             return fixture;
         }
-        let replacement = Arc::new(TestRepositoryFixture::clone());
+        let replacement =
+            Arc::new(crate::packaged_assets::materialize().expect("packaged evaluator assets"));
         *fixture = Arc::downgrade(&replacement);
         replacement
     }
@@ -2584,140 +1589,164 @@ mod tests {
         .ok()
     }
 
-    fn repo_root() -> PathBuf {
-        crate::checked_in_fixture_root()
+    fn workload() -> CandidateWorkloadV1 {
+        packaged_fixture().workload().clone()
     }
 
-    fn workload() -> CandidateWorkloadV1 {
-        load_candidate_workload(&repo_root().join(WORKLOAD_RELATIVE)).expect("workload loads")
+    fn ranked_with_generation(generation: &str) -> tracedecay_domain::RankedCandidate {
+        let occurrence = tracedecay_domain::OccurrenceProvenance {
+            source_occurrence_id: id(&format!("code-chunk:{generation}:chunk.stable"))
+                .expect("occurrence id"),
+            file_occurrence_id: Some(id("file.time").expect("file id")),
+            retriever_evidence_anchor: tracedecay_domain::RetrievalAnchorId::new("evidence.stable")
+                .expect("evidence anchor"),
+            source_namespace: id("ns.code.daemon").expect("namespace"),
+            repository_id: None,
+            session_or_thread_id: None,
+            logical_copy_cluster_id: None,
+            logical_copy_evidence_anchor: None,
+            evidence_role: tracedecay_domain::EvidenceRole::Primary,
+            freshness: tracedecay_domain::SourceFreshness {
+                source_namespace: id("ns.code.daemon").expect("freshness namespace"),
+                source_instance: id("instance.code-index.daemon").expect("instance"),
+                source_watermark: Some(1),
+                projection_watermark: Some(1),
+                observed_at: UtcMicros(1_000_000),
+                source_generation: Some(1),
+                generation_lag: Some(0),
+                compatibility: tracedecay_domain::FreshnessCompatibilityV1::Current,
+                policy_revision: id("policy.candidate.v1").expect("policy"),
+            },
+        };
+        tracedecay_domain::RankedCandidate {
+            candidate: tracedecay_domain::FusedCandidate {
+                anchor_id: tracedecay_domain::RetrievalAnchorId::new("code-symbol:symbol.stable")
+                    .expect("anchor"),
+                logical_evidence_id: id("code-symbol:symbol.stable").expect("evidence"),
+                occurrences: vec![occurrence],
+                exact_class: ExactClass::Approximate,
+                source_role: Default::default(),
+                utility_micros: 1,
+                contributions: Vec::new(),
+                freshness: Vec::new(),
+                decisions: Vec::new(),
+            },
+            final_ordinal: 0,
+        }
+    }
+
+    /// Extractor revision bumps reseal the generation embedded in every
+    /// `code-chunk:{generation}:{chunk}` occurrence id. The production
+    /// fallback digest binds that id; the ranking receipt must not.
+    #[test]
+    fn ranking_receipt_ignores_generation_scoped_occurrence_ids() {
+        let generation_a = "generation.v1.aaaaaaaa.00000001";
+        let generation_b = "generation.v1.bbbbbbbb.00000002";
+        let mut map = BTreeMap::new();
+        map.insert(
+            "code-symbol:symbol.stable".to_owned(),
+            OccurrenceMapEntry {
+                document_id: "time".to_owned(),
+                scope: "research".to_owned(),
+                display_anchors: vec!["time::UtcMicros".to_owned()],
+            },
+        );
+        let rows_a = map_ranked_candidate_list(&map, &[ranked_with_generation(generation_a)])
+            .expect("map generation a");
+        let rows_b = map_ranked_candidate_list(&map, &[ranked_with_generation(generation_b)])
+            .expect("map generation b");
+        assert_eq!(
+            rows_a, rows_b,
+            "display rows are keyed by the generation-free anchor"
+        );
+
+        let coverage = BTreeMap::from([
+            (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
+            (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
+            (RetrieverKind::Graph, PublicRetrieverStatus::Unavailable),
+        ]);
+        let receipt =
+            |rows: &[RankedCandidateRowV1],
+             lanes: &BTreeMap<RetrieverKind, PublicRetrieverStatus>| {
+                ranking_receipt_digest("profile.query-fallback", "train-001", lanes, rows)
+                    .expect("ranking receipt")
+            };
+        let receipt_a = receipt(&rows_a, &coverage);
+        assert_eq!(receipt_a, receipt(&rows_b, &coverage));
+
+        let mut coverage_changed = coverage.clone();
+        coverage_changed.insert(RetrieverKind::Graph, PublicRetrieverStatus::Complete);
+        assert_ne!(
+            receipt_a,
+            receipt(&rows_a, &coverage_changed),
+            "lane coverage is part of the ranking receipt"
+        );
+        let mut reordered = rows_a;
+        reordered.push(RankedCandidateRowV1 {
+            anchor: "code-chunk:chunk.other".to_owned(),
+            anchors: vec!["watermark::merge_max".to_owned()],
+            scope: "research".to_owned(),
+            document_id: "watermark".to_owned(),
+            tier: "approximate".to_owned(),
+        });
+        assert_ne!(
+            receipt_a,
+            receipt(&reordered, &coverage),
+            "a different ranked set must move the receipt"
+        );
+
+        let production_digest = |generation: &str| {
+            let lanes = RetrieverKind::QUERY_FALLBACK_LANES
+                .into_iter()
+                .map(|lane| (lane, PublicRetrieverStatus::Complete))
+                .collect();
+            tracedecay_domain::QueryFallbackSubpayload::new(
+                id("profile.query-fallback").expect("profile"),
+                vec![ranked_with_generation(generation)],
+                lanes,
+                Vec::new(),
+                None,
+            )
+            .expect("production fallback subpayload")
+            .digest
+        };
+        assert_ne!(
+            production_digest(generation_a).as_str(),
+            production_digest(generation_b).as_str(),
+            "the production fallback digest still moves with the sealed generation"
+        );
     }
 
     #[test]
-    fn direct_evaluated_material_matches_checked_in_profile() {
+    fn fusion_profile_carries_the_checked_in_lane_weights() {
         let workload = workload();
         let spec = workload
             .profile_matrix
             .iter()
             .find(|profile| profile.profile_id == "query-fallback")
             .expect("checked-in fallback profile");
-        let material = load_direct_evaluated_profile_material(&repo_root(), None, &spec.profile_id)
-            .expect("evaluated profile material");
+        let profile = fusion_profile(spec).expect("fusion profile");
 
         assert_eq!(
-            material.profile.profile_id.as_str(),
+            profile.profile_id.as_str(),
             format!("profile.{}", spec.profile_id)
         );
         assert_eq!(
-            material.profile.weights_micros.get(&RetrieverKind::Lexical),
-            Some(&spec.lexical_weight_ppm)
+            profile.weights_micros,
+            BTreeMap::from([
+                (RetrieverKind::ExactLiteral, 1_000_000),
+                (RetrieverKind::Lexical, spec.lexical_weight_ppm),
+                (RetrieverKind::Graph, spec.graph_weight_ppm),
+            ])
         );
         assert_eq!(
-            material.profile.weights_micros.get(&RetrieverKind::Graph),
-            Some(&spec.graph_weight_ppm)
+            profile.calibrations.keys().copied().collect::<Vec<_>>(),
+            RetrieverKind::QUERY_FALLBACK_LANES
         );
-        assert!(
-            !material
-                .profile
-                .weights_micros
-                .contains_key(&RetrieverKind::Semantic)
-        );
-        assert!(material.rerank.is_none());
-
-        let semantic =
-            load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-conservative")
-                .expect("semantic material");
-        assert!(
-            semantic
-                .profile
-                .weights_micros
-                .contains_key(&RetrieverKind::Semantic)
-        );
-        let semantic_score_domain = id::<ScoreDomainId>(
-            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
-        )
-        .expect("evaluation semantic score domain");
-        let semantic_calibration = semantic
-            .profile
-            .score_domain_calibrations
-            .get(&semantic_score_domain)
-            .expect("semantic score calibration");
+        assert!(profile.minimum_calibrated_feature_micros.is_empty());
         assert_eq!(
-            semantic_calibration.raw_min_micros,
-            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1
-        );
-        assert_eq!(
-            semantic_calibration.raw_max_micros,
-            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1
-        );
-        // Pin the binding, not the number. Restating the constant here just
-        // makes it a second place to edit when someone tunes the gate; what
-        // must hold is that the checked-in declaration is exactly the cut that
-        // reaches fusion.
-        let declared = workload
-            .profile_matrix
-            .iter()
-            .find(|spec| spec.profile_id == "hybrid-conservative")
-            .expect("checked-in hybrid-conservative profile")
-            .calibration_threshold_ppm;
-        assert_eq!(
-            semantic
-                .profile
-                .minimum_calibrated_feature_micros
-                .get(&RetrieverKind::Semantic),
-            Some(&declared)
-        );
-        let reranked =
-            load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")
-                .expect("rerank material");
-        assert_eq!(
-            reranked.profile.rerank_policy_id.as_ref(),
-            reranked.rerank.as_ref().map(|policy| &policy.policy_id)
-        );
-        assert_eq!(reranked.diversity.per_file, Some(2));
-        assert_eq!(
-            reranked.rerank.as_ref().map(|policy| policy.max_candidates),
-            Some(16)
-        );
-    }
-
-    /// `calibration_threshold_ppm` was documented as "not a threshold in
-    /// force" while it was in fact gating production fusion. That false claim
-    /// made the field look like a free fixture knob, and it was re-tuned five
-    /// times in one day to move a failing activation gate. This test states
-    /// the real contract so the claim cannot silently return.
-    #[test]
-    fn calibration_threshold_ppm_is_in_force() {
-        let mut spec = workload()
-            .profile_matrix
-            .iter()
-            .find(|spec| spec.semantic_weight_ppm > 0)
-            .expect("a semantic profile")
-            .clone();
-
-        let declared = fusion_profile(&spec, true).expect("semantic fusion profile");
-        assert_eq!(
-            declared
-                .minimum_calibrated_feature_micros
-                .get(&RetrieverKind::Semantic),
-            Some(&spec.calibration_threshold_ppm),
-            "the declared cut must reach fusion verbatim"
-        );
-
-        spec.calibration_threshold_ppm += 1;
-        let moved = fusion_profile(&spec, true).expect("moved fusion profile");
-        assert_ne!(
-            declared.minimum_calibrated_feature_micros, moved.minimum_calibrated_feature_micros,
-            "moving the declaration must move the gate: this field is not documentation"
-        );
-
-        // With the semantic lane absent there is nothing for the cut to gate,
-        // so it must not leak into the fallback profile.
-        spec.semantic_weight_ppm = 0;
-        assert!(
-            fusion_profile(&spec, true)
-                .expect("lexical-only fusion profile")
-                .minimum_calibrated_feature_micros
-                .is_empty()
+            evaluated_diversity_policy().expect("diversity").per_file,
+            Some(2)
         );
     }
 
@@ -2725,34 +1754,25 @@ mod tests {
     fn profile_material_digest_binds_every_checked_in_weight() {
         let workload = workload();
         let profile = workload.profile_matrix.first().expect("profile");
+        assert_eq!(profile.profile_id, "query-fallback");
+        assert_eq!(profile.lexical_weight_ppm, 1_000_000);
+        assert_eq!(profile.graph_weight_ppm, 250_000);
         let digest = compute_profile_material_digest(profile).expect("digest");
-        let mut changed = profile.clone();
-        changed.semantic_weight_ppm = changed.semantic_weight_ppm.saturating_add(1);
+
+        let mut lexical = profile.clone();
+        lexical.lexical_weight_ppm = 1_000_001;
+        let mut graph = profile.clone();
+        graph.graph_weight_ppm = 250_001;
 
         assert_ne!(
             digest,
-            compute_profile_material_digest(&changed).expect("changed digest")
+            compute_profile_material_digest(&lexical).expect("lexical digest"),
+            "the material digest must bind the checked-in lexical weight"
         );
-    }
-
-    #[test]
-    fn native_stage_completes_only_when_every_query_has_real_evidence() {
-        let complete = SemanticNativeStageResultV1::Complete(());
-        let pending = SemanticNativeStageResultV1::<()>::Pending {
-            reason: SemanticNativePendingReasonV1::SemanticGenerationUnavailable,
-        };
-
-        assert_eq!(
-            aggregate_native_stage(true, [&complete, &complete].into_iter()).expect("complete"),
-            OptionalStageMeasurementV1::Complete
-        );
-        assert_eq!(
-            aggregate_native_stage(true, [&complete, &pending].into_iter()).expect("pending"),
-            OptionalStageMeasurementV1::Pending
-        );
-        assert!(
-            aggregate_native_stage(false, [&complete].into_iter()).is_err(),
-            "unrequested execution must fail closed"
+        assert_ne!(
+            digest,
+            compute_profile_material_digest(&graph).expect("graph digest"),
+            "the material digest must bind the checked-in graph weight"
         );
     }
 
@@ -2778,10 +1798,9 @@ mod tests {
 
     #[test]
     fn historical_candidates_require_product_repository_identity() {
-        let fixture = authenticated_repo_fixture();
-        let workload = load_candidate_workload(&fixture.root.join(WORKLOAD_RELATIVE))
-            .expect("markerless workload");
-        let published = publish_corpus(&fixture.root, &workload, no_admitted_corpus_scope)
+        let fixture = packaged_fixture();
+        let workload = workload();
+        let published = publish_corpus(fixture.root(), &workload, no_admitted_corpus_scope)
             .expect("markerless corpus");
         let query = workload
             .queries
@@ -2870,7 +1889,8 @@ mod tests {
     #[test]
     fn direct_workload_rejects_duplicate_profile_ids_and_empty_partitions() {
         let mut duplicate = workload();
-        duplicate.profile_matrix[1].profile_id = duplicate.profile_matrix[0].profile_id.clone();
+        let copy = duplicate.profile_matrix[0].clone();
+        duplicate.profile_matrix.push(copy);
         let error = validate_workload_for_tuning(&duplicate).expect_err("duplicate profile id");
         assert!(error.to_string().contains("duplicate profile_id"));
 
@@ -2913,8 +1933,9 @@ mod tests {
 
     #[test]
     fn candidate_generation_rejects_partially_unknown_profile_selection() {
+        let fixture = packaged_fixture();
         let error = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &repo_root(),
+            repo_root: fixture.root(),
             admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["query-fallback".to_owned(), "unknown-profile".to_owned()]),
@@ -2925,8 +1946,8 @@ mod tests {
 
     #[test]
     fn direct_outputs_cover_train_and_validation() {
-        let fixture = authenticated_repo_fixture();
-        let fixture_root = &fixture.root;
+        let fixture = packaged_fixture();
+        let fixture_root = fixture.root();
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
@@ -2942,8 +1963,15 @@ mod tests {
             assert_eq!(output.schema_version, 2);
             assert!(output.partition == "train" || output.partition == "validation");
             assert_eq!(output.production_boundary, PRODUCTION_BOUNDARY);
-            assert_eq!(output.cancellation, REQUIRED_CANCELLATION);
-            assert_eq!(output.offline, REQUIRED_OFFLINE);
+            // Cancellation is proved by `generate_candidate_outputs` returning
+            // Ok (`prove_cancellation` is fail-closed). A single-variant stamp
+            // on the output added no evidence.
+            assert!(
+                serde_json::to_value(output)
+                    .expect("candidate output serializes")
+                    .get("cancellation")
+                    .is_none()
+            );
             assert_eq!(output.fallback_digest, output.query_fallback_digest);
             assert_eq!(
                 output.expected_query_fallback_digest,
@@ -2957,7 +1985,7 @@ mod tests {
             assert_eq!(output.seed, EVALUATION_SEED);
             assert_eq!(output.cache_state, EVALUATION_CACHE_STATE);
             let current = output.resources.get("current").expect("current samples");
-            let expected_status = if peak_rss_bytes().is_some() {
+            let expected_status = if peak_rss_bytes().is_measured() {
                 ResourceMeasurementStatusV1::Measured
             } else {
                 ResourceMeasurementStatusV1::Pending
@@ -2985,7 +2013,10 @@ mod tests {
                 ten_x.eligible_chunks,
                 current.eligible_chunks.saturating_mul(10)
             );
-            assert_eq!(ten_x.peak_rss_bytes.is_some(), peak_rss_bytes().is_some());
+            assert_eq!(
+                ten_x.peak_rss_bytes.is_some(),
+                peak_rss_bytes().is_measured()
+            );
             assert!(
                 output.queries.iter().all(|query| {
                     serde_json::to_value(query)
@@ -3020,14 +2051,51 @@ mod tests {
         }
     }
 
+    /// The evaluator measures the chunks production emits for the corpus, so
+    /// an extractor revision reaches the evaluation without a workload edit.
+    /// `extractor.rust.v14` turned item-position macro invocations into
+    /// symbols; the three in `session.rs` must be served as such.
     #[test]
-    fn published_corpus_maps_production_source_occurrences() {
-        let fixture = authenticated_repo_fixture();
-        let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
+    fn published_corpus_serves_the_symbols_production_extracts() {
+        let fixture = packaged_fixture();
+        let published = publish_corpus(fixture.root(), &workload(), fixture_admitted_scope)
             .expect("publish corpus");
 
-        for chunk in published.generation.chunks().chunks() {
+        let macro_symbols = published
+            .occurrence_map
+            .iter()
+            .filter(|(key, _)| key.starts_with("code-symbol:"))
+            .flat_map(|(_, entry)| &entry.display_anchors)
+            .filter(|anchor| anchor.starts_with("crates/") && anchor.ends_with('!'))
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            macro_symbols,
+            BTreeSet::from([
+                "crates/tracedecay-domain/src/session.rs::nonzero_numeric_value!",
+                "crates/tracedecay-domain/src/session.rs::session_string_id!",
+            ])
+        );
+    }
+
+    #[test]
+    fn published_corpus_maps_production_source_occurrences() {
+        let fixture = packaged_fixture();
+        let workload = workload();
+        let published = publish_corpus(fixture.root(), &workload, fixture_admitted_scope)
+            .expect("publish corpus");
+
+        for chunk in published
+            .scopes
+            .values()
+            .flatten()
+            .flat_map(|scoped| scoped.generation.chunks().chunks())
+        {
+            assert_eq!(
+                chunk.chunker_revision.as_str(),
+                DAEMON_CODE_INDEX_CHUNKER_REVISION,
+                "evaluation corpus must use the current daemon chunker identity"
+            );
             let chunk_occurrence = format!("code-chunk:{}", chunk.id.as_str());
             assert!(
                 published.occurrence_map.contains_key(&chunk_occurrence),
@@ -3120,69 +2188,6 @@ mod tests {
     }
 
     #[test]
-    fn complete_optional_stage_status_requires_native_evidence_at_validation() {
-        let stages = serde_json::from_value::<OptionalStageMeasurementsV1>(serde_json::json!({
-            "semantic": "complete",
-            "rerank": "not_requested"
-        }))
-        .expect("complete is an evidence-bearing native state");
-        assert_eq!(stages.semantic, OptionalStageMeasurementV1::Complete);
-    }
-
-    #[test]
-    fn native_query_stages_and_late_hydration_emit_raw_measurements() {
-        let fixture = authenticated_repo_fixture();
-        let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
-            .expect("published corpus");
-        let profile = workload
-            .profile_matrix
-            .iter()
-            .find(|profile| profile.profile_id == "query-fallback")
-            .expect("fallback profile");
-        let query = workload.queries.first().expect("query");
-        let prepared =
-            prepare_production_query(&published, profile, query).expect("prepared query");
-        let fusion = fusion_profile(profile, true).expect("fusion");
-        let mut native = evaluate_native_query(SemanticNativeQueryInputV1 {
-            profile_spec: profile,
-            fusion_profile: &fusion,
-            diversity_policy: &prepared.diversity,
-            kernel: &prepared.kernel,
-            fallback_lanes: &prepared.fallback_lanes,
-            query_measurements: prepared.query_measurements,
-            semantic: None,
-            fallback: &prepared.fallback,
-            rerank: None,
-        })
-        .expect("native query evaluation");
-        let ranked = native.rerank.off.clone();
-        native.measurements.hydration = Some(
-            measure_late_hydration(&published, &prepared.request, &ranked, &retrieval_budget())
-                .expect("late hydration"),
-        );
-
-        assert_eq!(
-            native.measurements.query.lexical.output_candidates,
-            prepared
-                .fallback_lanes
-                .iter()
-                .find(|lane| lane.lane == RetrieverKind::Lexical)
-                .map(|lane| retriever_outcome_candidate_count(&lane.outcome))
-                .expect("lexical lane")
-        );
-        assert!(native.ablations.iter().all(|ablation| {
-            ablation.measurement.output_candidates == ablation.ranked_candidates.len() as u64
-        }));
-        let hydration = native
-            .measurements
-            .hydration
-            .expect("hydration measurement");
-        assert_eq!(hydration.source_fetches, hydration.receipts);
-        assert!(hydration.receipts <= hydration.selected_candidates);
-    }
-
-    #[test]
     fn distinct_ten_x_corpus_produces_measured_resource_evidence() {
         const CHILD_ENV: &str = "TRACEDECAY_RESOURCE_EVIDENCE_TEST_CHILD";
         if std::env::var_os(CHILD_ENV).is_some() {
@@ -3210,8 +2215,8 @@ mod tests {
     }
 
     fn assert_distinct_ten_x_corpus_produces_measured_resource_evidence() {
-        let fixture = authenticated_repo_fixture();
-        let fixture_root = &fixture.root;
+        let fixture = packaged_fixture();
+        let fixture_root = fixture.root();
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
@@ -3223,7 +2228,11 @@ mod tests {
         let report =
             crate::evaluate_generated_outputs(fixture_root, &workload, &result).expect("evaluate");
 
-        let expected_status = if peak_rss_bytes().is_some() {
+        let expected_status = crate::DirectEvaluationStatusV1::Fail;
+        #[cfg(windows)]
+        let expected_resource_status = crate::DirectEvaluationStatusV1::Pass;
+        #[cfg(not(windows))]
+        let expected_resource_status = if peak_rss_bytes().is_measured() {
             crate::DirectEvaluationStatusV1::Pass
         } else {
             crate::DirectEvaluationStatusV1::Pending
@@ -3241,32 +2250,59 @@ mod tests {
             report
                 .profiles
                 .iter()
-                .all(|profile| { profile.resource_status == expected_status })
+                .all(|profile| { profile.resource_status == expected_resource_status })
+        );
+
+        let mut quality_failure = result.clone();
+        for output in &mut quality_failure.outputs {
+            for sample in output.resources.values_mut() {
+                sample.status = ResourceMeasurementStatusV1::Measured;
+                sample.peak_rss_bytes = Some(4096);
+                sample.pending_reason = None;
+            }
+            for query in &mut output.queries {
+                query.ranked.clear();
+                query.abstained = true;
+            }
+        }
+        let failed_report =
+            crate::evaluate_generated_outputs(fixture_root, &workload, &quality_failure)
+                .expect("evaluate known quality failure with measured resources");
+        assert_eq!(
+            failed_report.status,
+            crate::DirectEvaluationStatusV1::Fail,
+            "measured resource evidence must not promote a quality failure"
+        );
+        assert!(
+            failed_report.profiles.iter().all(|profile| {
+                profile.resource_status == crate::DirectEvaluationStatusV1::Pass
+            })
+        );
+        assert!(
+            failed_report
+                .profiles
+                .iter()
+                .any(|profile| profile.failed_queries > 0)
         );
 
         let current = publish_corpus(fixture_root, &workload, fixture_admitted_scope)
             .expect("current corpus");
         let ten_x = publish_corpus_with_scale(fixture_root, &workload, 10, fixture_admitted_scope)
             .expect("10x corpus");
-        assert_ne!(
-            current.generation.manifest().generation_id,
-            ten_x.generation.manifest().generation_id
-        );
+        for (scope_key, scoped) in &current.scopes {
+            let (Some(scoped), Some(ten_x_scoped)) = (scoped, &ten_x.scopes[scope_key]) else {
+                assert!(scoped.is_none() && ten_x.scopes[scope_key].is_none());
+                continue;
+            };
+            assert_ne!(
+                scoped.generation.manifest().generation_id,
+                ten_x_scoped.generation.manifest().generation_id
+            );
+        }
         assert_eq!(
             ten_x.eligible_chunks,
             current.eligible_chunks.saturating_mul(10)
         );
-        for published in [&current, &ten_x] {
-            let no_op = &published.no_op_generation.projection().request().changes;
-            assert!(no_op.added_or_changed.is_empty());
-            assert!(no_op.deleted.is_empty());
-            let deletion = &published.deletion_generation.projection().request().changes;
-            assert!(!deletion.deleted.is_empty());
-            assert_eq!(
-                deletion.from_generation.as_ref(),
-                Some(&published.no_op_generation.manifest().generation_id)
-            );
-        }
 
         let mut missing_resource = result.clone();
         missing_resource.outputs[0].resources.remove("10x");
@@ -3280,14 +2316,14 @@ mod tests {
 
         let mut duplicate_query = result.clone();
         duplicate_query.outputs[0].queries[1] = duplicate_query.outputs[0].queries[0].clone();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &duplicate_query)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &duplicate_query)
             .expect_err("duplicate query row");
         assert!(error.to_string().contains("duplicate query row"));
 
         let mut duplicate_profile_partition = result.clone();
         duplicate_profile_partition.outputs[1] = duplicate_profile_partition.outputs[0].clone();
         let error = crate::evaluate_generated_outputs(
-            &repo_root(),
+            fixture_root,
             &workload,
             &duplicate_profile_partition,
         )
@@ -3296,32 +2332,32 @@ mod tests {
 
         let mut forged = result;
         forged.outputs[0].production_boundary = "lookalike".to_owned();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("forged production boundary");
         assert!(error.to_string().contains("production boundary"));
 
         forged.outputs[0].production_boundary = PRODUCTION_BOUNDARY.to_owned();
         forged.outputs[0].fixture_source_commit = "forged".to_owned();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("forged source commit");
         assert!(error.to_string().contains("source commit"));
 
         forged.outputs[0].fixture_source_commit = workload.source_repository_commit.clone();
         forged.outputs[0].corpus_digest = canonical_sha256(&"forged corpus").expect("digest");
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("forged corpus digest");
         assert!(error.to_string().contains("byte-exact corpus"));
 
         forged.outputs[0].corpus_digest =
-            compute_corpus_digest(&repo_root(), &workload).expect("corpus digest");
+            compute_corpus_digest(fixture_root, &workload).expect("corpus digest");
         forged.outputs[0].toolchain.clear();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("missing environment");
         assert!(error.to_string().contains("environment summary"));
 
         forged.outputs[0].toolchain = "rustc:test".to_owned();
         forged.outputs[0].queries[0].abstained = !forged.outputs[0].queries[0].ranked.is_empty();
-        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
             .expect_err("inconsistent abstention");
         assert!(error.to_string().contains("inconsistent abstention"));
     }
@@ -3333,27 +2369,128 @@ mod tests {
     }
 
     #[test]
-    fn evaluation_rejects_optional_stage_status_that_disagrees_with_profile() {
-        let fixture = authenticated_repo_fixture();
-        let workload = workload();
-        let mut result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &fixture.root,
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["hybrid-reranked".to_owned()]),
-        })
-        .expect("generate");
-        result.outputs[0].optional_stages.semantic = OptionalStageMeasurementV1::NotRequested;
+    fn resource_sample_translates_typed_peak_rss_observation() {
+        let measured =
+            completed_resource_sample(12, PeakRssObservation::Measured(4096), vec![7], 1);
+        assert_eq!(measured.status, ResourceMeasurementStatusV1::Measured);
+        assert_eq!(measured.peak_rss_bytes, Some(4096));
+        assert_eq!(measured.pending_reason, None);
 
-        let error = crate::evaluate_generated_outputs(&fixture.root, &workload, &result)
-            .expect_err("configured semantic stage cannot be reported as not requested");
-        assert!(error.to_string().contains("optional stage status"));
+        // The retained reason is the typed sampler outcome, and its wire form
+        // is a tagged member of the closed vocabulary rather than prose.
+        for (reason, expected) in [
+            (
+                ResourceMeasurementPendingReasonV1::LinuxStatusReadFailure {
+                    error: "denied".to_owned(),
+                },
+                serde_json::json!({ "reason": "linux_status_read_failure", "error": "denied" }),
+            ),
+            (
+                ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm,
+                serde_json::json!({ "reason": "linux_missing_nonzero_vm_hwm" }),
+            ),
+            (
+                ResourceMeasurementPendingReasonV1::MacOsGetrusageFailure {
+                    error: "denied".to_owned(),
+                },
+                serde_json::json!({ "reason": "mac_os_getrusage_failure", "error": "denied" }),
+            ),
+            (
+                ResourceMeasurementPendingReasonV1::MacOsNonPositiveMaxRss,
+                serde_json::json!({ "reason": "mac_os_non_positive_max_rss" }),
+            ),
+            (
+                ResourceMeasurementPendingReasonV1::WindowsProcessMemoryInfoFailure {
+                    error: "access denied".to_owned(),
+                },
+                serde_json::json!({
+                    "reason": "windows_process_memory_info_failure",
+                    "error": "access denied",
+                }),
+            ),
+            (
+                ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize,
+                serde_json::json!({ "reason": "windows_zero_peak_working_set_size" }),
+            ),
+            (
+                ResourceMeasurementPendingReasonV1::UnsupportedPlatform {
+                    platform: "other".to_owned(),
+                },
+                serde_json::json!({ "reason": "unsupported_platform", "platform": "other" }),
+            ),
+        ] {
+            let pending = completed_resource_sample(
+                12,
+                PeakRssObservation::Pending(reason.clone()),
+                vec![7],
+                1,
+            );
+            assert_eq!(pending.status, ResourceMeasurementStatusV1::Pending);
+            assert_eq!(pending.peak_rss_bytes, None);
+            assert_eq!(pending.pending_reason, Some(reason));
+            assert_eq!(
+                serde_json::to_value(&pending.pending_reason).expect("serialize pending reason"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn windows_peak_rss_observation_rejects_api_failure_and_zero() {
+        assert_eq!(
+            windows_peak_rss_observation(4096, Some("access denied".to_owned())),
+            PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::WindowsProcessMemoryInfoFailure {
+                    error: "access denied".to_owned(),
+                }
+            )
+        );
+        assert_eq!(
+            windows_peak_rss_observation(0, None),
+            PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize
+            )
+        );
+        assert_eq!(
+            windows_peak_rss_observation(4096, None),
+            PeakRssObservation::Measured(4096)
+        );
+    }
+
+    #[test]
+    fn peak_rss_combination_keeps_failed_required_observation_pending() {
+        let reason = ResourceMeasurementPendingReasonV1::WindowsProcessMemoryInfoFailure {
+            error: "access denied".to_owned(),
+        };
+        assert_eq!(
+            PeakRssObservation::Pending(reason.clone()).max(PeakRssObservation::Measured(4096)),
+            PeakRssObservation::Pending(reason)
+        );
+        assert_eq!(
+            PeakRssObservation::Measured(4096).max(PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm,
+            )),
+            PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm
+            )
+        );
+        assert_eq!(
+            PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize
+            )
+            .max(PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::LinuxMissingNonzeroVmHwm,
+            )),
+            PeakRssObservation::Pending(
+                ResourceMeasurementPendingReasonV1::WindowsZeroPeakWorkingSetSize
+            )
+        );
     }
 
     #[test]
     fn resource_evidence_enforces_state_and_exact_catalog_without_size_caps() {
-        let fixture = authenticated_repo_fixture();
-        let fixture_root = &fixture.root;
+        let fixture = packaged_fixture();
+        let fixture_root = fixture.root();
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
@@ -3406,10 +2543,14 @@ mod tests {
         current.latency_samples_us.fill(u64::MAX);
         let report = crate::evaluate_generated_outputs(fixture_root, &workload, &large_measurement)
             .expect("evaluate");
-        assert_eq!(
-            report.profiles[0].resource_status,
+        // Only "current" was rewritten as measured; "10x" keeps the host's
+        // own sample, which stays pending where peak RSS is unreadable.
+        let expected_large = if peak_rss_bytes().is_measured() {
             crate::DirectEvaluationStatusV1::Pass
-        );
+        } else {
+            crate::DirectEvaluationStatusV1::Pending
+        };
+        assert_eq!(report.profiles[0].resource_status, expected_large);
 
         let mut extra_resource = result;
         let synthetic = extra_resource.outputs[0]
@@ -3430,10 +2571,10 @@ mod tests {
 
     #[test]
     fn candidate_bytes_match_direct_production_calls() {
-        let fixture = authenticated_repo_fixture();
+        let fixture = packaged_fixture();
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &fixture.root,
+            repo_root: fixture.root(),
             admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["query-fallback".to_owned()]),
@@ -3446,7 +2587,7 @@ mod tests {
             .expect("train output");
         let probe = train.queries.first().expect("at least one train query");
         let direct = retrieve_partition_query_bytes(
-            &fixture.root,
+            fixture.root(),
             &workload,
             "query-fallback",
             &probe.query_id,
@@ -3462,11 +2603,11 @@ mod tests {
 
     #[test]
     fn query_phrase_and_historical_queries_reach_their_checked_in_anchors() {
-        let fixture = authenticated_repo_fixture();
+        let fixture = packaged_fixture();
         let workload = workload();
         let retrieve = |query_id: &str| {
             let bytes = retrieve_partition_query_bytes(
-                &fixture.root,
+                fixture.root(),
                 &workload,
                 "query-fallback",
                 query_id,
@@ -3510,59 +2651,56 @@ mod tests {
         );
 
         let historical = retrieve("train-012");
-        assert!(historical.ranked.iter().take(10).any(|candidate| {
-            candidate.anchor
+        let historical_top = historical.ranked.iter().take(10).collect::<Vec<_>>();
+        assert!(
+            historical_top.iter().any(|candidate| {
+                candidate.anchor
                 == "git:01b0a0afe34c3342d6b5b076383f86ed8a8d0c66:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"
                 || candidate.anchors.iter().any(|anchor| {
                     anchor
                         == "git:01b0a0afe34c3342d6b5b076383f86ed8a8d0c66:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"
                 })
-        }));
+            }),
+            "historical top 10: {historical_top:#?}"
+        );
     }
 
+    /// A file in one scope must land in every scope set admitting that scope
+    /// and in no other; overlapping sets are the path a singleton workload
+    /// never exercises.
     #[test]
-    fn semantic_profiles_do_not_claim_a_comparison_when_only_fallback_ran() {
-        let fixture = authenticated_repo_fixture();
-        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &fixture.root,
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["hybrid-conservative".to_owned()]),
-        })
-        .expect("generate");
+    fn scoped_projections_partition_chunks_into_every_admitting_scope_set_only() {
+        let fixture = packaged_fixture();
+        let mut workload = workload();
+        let profile = workload.profile_matrix[0].clone();
+        let mut probe = |query_id: &str, scopes: &[&str]| {
+            let mut query = workload.queries[0].clone();
+            query.query_id = query_id.to_owned();
+            query.query = "repository watermark".to_owned();
+            query.allowed_scopes = scopes.iter().map(|scope| (*scope).to_owned()).collect();
+            workload.queries.push(query.clone());
+            query
+        };
+        let research = probe("probe-research", &["research"]);
+        let project = probe("probe-project", &["project"]);
+        let overlapping = probe("probe-overlap", &["research", "project", "research"]);
+        let published = publish_corpus(fixture.root(), &workload, fixture_admitted_scope)
+            .expect("published corpus");
+        let scopes = |query: &WorkloadQueryV1| {
+            let output = compose_production_query(&published, &profile, query)
+                .expect("scoped query composes");
+            map_ranked_candidates(&published, &output)
+                .expect("ranked candidates map")
+                .into_iter()
+                .map(|candidate| candidate.scope)
+                .collect::<BTreeSet<_>>()
+        };
 
-        for output in result.outputs {
-            assert_eq!(
-                output.optional_stages.semantic,
-                OptionalStageMeasurementV1::Pending
-            );
-            assert_eq!(
-                output.optional_stages.rerank,
-                OptionalStageMeasurementV1::NotRequested
-            );
-        }
-    }
-
-    #[test]
-    fn rerank_profiles_remain_pending_when_no_rerank_measurement_ran() {
-        let fixture = authenticated_repo_fixture();
-        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &fixture.root,
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["hybrid-reranked".to_owned()]),
-        })
-        .expect("generate");
-
-        for output in result.outputs {
-            assert_eq!(
-                output.optional_stages.semantic,
-                OptionalStageMeasurementV1::Pending
-            );
-            assert_eq!(
-                output.optional_stages.rerank,
-                OptionalStageMeasurementV1::Pending
-            );
-        }
+        assert_eq!(scopes(&research), BTreeSet::from(["research".to_owned()]));
+        assert_eq!(scopes(&project), BTreeSet::from(["project".to_owned()]));
+        assert_eq!(
+            scopes(&overlapping),
+            BTreeSet::from(["project".to_owned(), "research".to_owned()])
+        );
     }
 }

@@ -9,8 +9,8 @@
 //! weaker copy silently accepts rows the real table would reject, and the
 //! divergence surfaces only in production.
 //!
-//! Every consumer that creates one of these tables — production installer,
-//! adapter test fixture, or parity harness — should install it from here
+//! Every consumer that creates one of these tables, production installer,
+//! adapter test fixture, or parity harness, should install it from here
 //! rather than restating the columns.
 
 /// Immutable, owner-bound retrieval anchors.
@@ -40,8 +40,9 @@ pub const RETRIEVAL_ANCHORS_SCHEMA_DDL: &str = "
 /// generation is current at a time.
 pub const GENERATION_DIAGNOSTICS_SCHEMA_DDL: &str =
     "CREATE TABLE IF NOT EXISTS generation_diagnostics (
-        diagnostic_anchor TEXT PRIMARY KEY,
+        diagnostic_anchor TEXT NOT NULL,
         generation_id TEXT NOT NULL,
+        publication_revision INTEGER NOT NULL CHECK(publication_revision > 0),
         repository TEXT NOT NULL,
         worktree TEXT,
         reference TEXT,
@@ -64,11 +65,15 @@ pub const GENERATION_DIAGNOSTICS_SCHEMA_DDL: &str =
         collected_at INTEGER NOT NULL,
         record_state TEXT NOT NULL DEFAULT 'current',
         state_generation TEXT,
-        persisted_at INTEGER NOT NULL DEFAULT 0
+        persisted_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (generation_id, publication_revision, diagnostic_anchor)
     );
 
     CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_generation_state
         ON generation_diagnostics (generation_id, record_state);
+
+    CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_anchor_revision
+        ON generation_diagnostics (diagnostic_anchor, publication_revision DESC);
 
     CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_generation_state_anchor
         ON generation_diagnostics (generation_id, record_state, diagnostic_anchor);
@@ -82,12 +87,40 @@ pub const GENERATION_DIAGNOSTICS_SCHEMA_DDL: &str =
         );
 
     CREATE TABLE IF NOT EXISTS diagnostic_generation_publications (
-        generation_id TEXT PRIMARY KEY,
+        generation_id TEXT NOT NULL,
+        publication_revision INTEGER NOT NULL CHECK(publication_revision > 0),
         record_state TEXT NOT NULL,
         state_generation TEXT,
-        published_at INTEGER NOT NULL
+        published_at INTEGER NOT NULL,
+        PRIMARY KEY (generation_id, publication_revision)
     );
+
+    CREATE INDEX IF NOT EXISTS idx_diagnostic_publications_generation_revision
+        ON diagnostic_generation_publications (generation_id, publication_revision DESC);
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_diagnostic_generation_current
         ON diagnostic_generation_publications (record_state)
         WHERE record_state = 'current';";
+
+/// Clears the current generation's records before a newer clean generation
+/// publishes (`?1` cleared state, `?2` the publishing generation, `?3` current
+/// state).
+///
+/// Both clear statements name the `'current'` literal of the
+/// `idx_diagnostic_generation_current` predicate: connections plan once
+/// without bound values, so a bound state would scan the publication table.
+pub const CLEAR_CURRENT_DIAGNOSTICS_SQL: &str = "UPDATE generation_diagnostics
+     SET record_state = ?1, state_generation = ?2
+     WHERE record_state = ?3 AND generation_id != ?2
+     AND (generation_id, publication_revision) IN (
+       SELECT generation_id, publication_revision
+       FROM diagnostic_generation_publications
+       WHERE record_state = 'current'
+     )";
+
+/// Clears the current publication row (`?1` cleared state, `?2` the publishing
+/// generation).
+pub const CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL: &str =
+    "UPDATE diagnostic_generation_publications
+     SET record_state = ?1, state_generation = ?2
+     WHERE record_state = 'current'";

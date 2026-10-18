@@ -9,9 +9,6 @@ use crate::dashboard_api_support::*;
 
 #[test]
 fn doctor_findings_endpoint_is_typed_unsupported_without_an_admitted_source() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -53,7 +50,7 @@ fn doctor_findings_endpoint_is_typed_unsupported_without_an_admitted_source() {
             .unwrap_or_else(|| panic!("known families should be an array: {envelope}"));
         assert_eq!(
             families.len(),
-            tracedecay_api::doctor::KNOWN_DOCTOR_FINDING_FAMILIES.len(),
+            tracedecay_contracts::doctor::DOCTOR_FINDING_FAMILIES.len(),
             "the closed family vocabulary must be advertised in full: {envelope}"
         );
 
@@ -71,9 +68,6 @@ fn doctor_findings_endpoint_is_typed_unsupported_without_an_admitted_source() {
 
 #[test]
 fn doctor_findings_endpoint_rejects_a_family_outside_the_closed_vocabulary() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;

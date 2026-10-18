@@ -1,34 +1,51 @@
-use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay_project::project::TraceDecay;
 
-use super::daemon::daemon_tool_json;
+use tracedecay_contracts::code_index_freshness::{
+    CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+    CodeIndexReadinessWaitOutcomeV1,
+};
+use tracedecay_contracts::graph_tool::GraphToolResultV1;
+use tracedecay_contracts::retrieval::{
+    AdminCliRegistryEmptyV1, AdminCliResultV1, AdminCliSurfaceRequestV1, AdminSyncAdmissionV1,
+    AdminSyncResultV1,
+};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-/// True when the global DB has zero registered projects (or can't be opened
-/// at all) — i.e. the user has not run `tracedecay init` anywhere yet.
-async fn is_fresh_install() -> bool {
-    daemon_tool_json(
-        None,
-        "tracedecay_admin_cli",
-        serde_json::json!({ "action": "registry_empty" }),
+use super::daemon::admin_cli_result;
+
+/// True when the profile registry has zero registered projects, i.e. the user
+/// has not run `tracedecay init` anywhere yet. An unreadable registry is not
+/// a fresh install: the offer to initialize is only made on a known-empty one.
+async fn is_fresh_install(profile: &ProfileRoot) -> bool {
+    matches!(
+        admin_cli_result(profile, None, AdminCliSurfaceRequestV1::RegistryEmpty {}).await,
+        Ok(AdminCliResultV1::RegistryEmpty(AdminCliRegistryEmptyV1 {
+            empty: true
+        }))
     )
-    .await
-    .ok()
-    .and_then(|value| value.get("empty").and_then(serde_json::Value::as_bool))
-    .unwrap_or(false)
 }
 
 /// When invoked with no subcommand, offer to create the index if none exists.
-pub(crate) async fn handle_no_command() -> tracedecay_domain::errors::Result<()> {
-    let project_path = tracedecay::config::resolve_path(None);
-    if TraceDecay::has_initialized_store(&project_path).await {
-        // Already initialized — show help via clap
+pub(crate) async fn handle_no_command(
+    profile: &ProfileRoot,
+) -> tracedecay_domain::errors::Result<()> {
+    let project_path = tracedecay_configuration::resolve_path(None);
+    if TraceDecay::has_initialized_store_with_options(
+        &project_path,
+        &tracedecay_project::project::TraceDecayOpenOptions::for_profile(profile),
+    )
+    .await
+    {
+        // Already initialized, show help via clap
         let _ = <crate::cli::Cli as clap::CommandFactory>::command().print_help();
         eprintln!();
         return Ok(());
     }
-    if is_fresh_install().await {
+    if is_fresh_install(profile).await {
         eprintln!("\x1b[1;36mWelcome to tracedecay!\x1b[0m");
         eprintln!(
             "Looks like a new installation. To get started, run \x1b[1mtracedecay init\x1b[0m \
@@ -36,50 +53,27 @@ pub(crate) async fn handle_no_command() -> tracedecay_domain::errors::Result<()>
         );
         eprintln!();
     }
-    if !io::stdin().is_terminal() {
-        eprintln!(
-            "No TraceDecay index found at '{}'. Non-interactive: skipping index creation (run `tracedecay init`).",
-            project_path.display()
-        );
-        return Ok(());
-    }
-    eprint!(
-        "No TraceDecay index found at '{}'. Create one now? [Y/n] ",
+    // Bare `tracedecay` is ambiguous (help vs init) and creating a store here
+    // is how phantom indexes used to appear. Present the next command and
+    // return; do not read stdin on a terminal or a pipe.
+    eprintln!(
+        "No TraceDecay index found at '{}'. Skipping index creation (run `tracedecay init`).",
         project_path.display()
     );
-    io::stderr().flush().ok();
-    let mut answer = String::new();
-    io::stdin().lock().read_line(&mut answer).map_err(|e| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("failed to read stdin: {}", e),
-        }
-    })?;
-    let answer = answer.trim();
-    if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-        handle_init(
-            Some(project_path.to_string_lossy().into_owned()),
-            Vec::new(),
-            Vec::new(),
-            None,
-            false,
-            false,
-        )
-        .await?;
-    }
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.init.run", future = true)]
+#[tracing::instrument(name = "cli.init.run", level = "trace", skip_all)]
 pub(crate) async fn handle_init(
+    profile: &ProfileRoot,
     path: Option<String>,
-    skip_folders: Vec<String>,
-    include_folders: Vec<String>,
     adopt_project: Option<String>,
     fresh: bool,
     assume_yes: bool,
+    wait: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_path = tracedecay::config::resolve_path(path);
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+    let project_path = tracedecay_configuration::resolve_path(path);
+    let profile_root = profile.data_dir().to_path_buf();
     if let Some(message) =
         tracedecay_global_db::ephemeral_root_rejection(&project_path, &profile_root)
     {
@@ -87,27 +81,37 @@ pub(crate) async fn handle_init(
     }
     let adoption = moved_store_adoption_request(adopt_project, fresh, assume_yes)?;
     let mut handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
         Some(project_path.clone()),
         None,
         false,
         true,
     )?;
     handshake.moved_store_adoption = adoption;
-    #[cfg(unix)]
-    let daemon_available = tracedecay_daemon_control::daemon_reachable();
-    #[cfg(not(unix))]
-    let daemon_available = true;
+    let daemon_available = init_daemon_available(profile);
 
     let project_path_for_remedy = project_path.clone();
-    handle_init_with_daemon_availability(
-        project_path,
-        skip_folders,
-        include_folders,
-        handshake,
-        daemon_available,
-    )
-    .await
-    .map_err(|error| annotate_reset_required_init_error(error, &project_path_for_remedy))
+    handle_init_with_daemon_availability(profile, project_path, handshake, daemon_available, wait)
+        .await
+        .map_err(|error| annotate_reset_required_init_error(error, &project_path_for_remedy))
+}
+
+/// Whether a daemon is accepting connections for this profile.
+///
+/// A connectable endpoint is the whole precondition: `brokered_init` carries
+/// its own 120 s bootstrap deadline, so a daemon that has not finished
+/// answering initialize within the one-second reachability probe is still the
+/// daemon this init must broker through. Requiring the identity proof here
+/// refused cold starts on CPU-constrained hosts and told the operator to start
+/// a daemon that was already running.
+///
+/// This resolves through the daemon-control authority on every platform rather
+/// than a `cfg` split. The unix socket and the Windows loopback authority are
+/// both behind `daemon_socket_connectable`, so assuming availability wherever
+/// the transport differs would let init proceed on Windows without the
+/// scheduler it then requires.
+fn init_daemon_available(profile: &ProfileRoot) -> bool {
+    tracedecay_daemon_control::daemon_socket_connectable(profile)
 }
 
 /// Maps explicit `tracedecay init` flags to the adoption request the daemon
@@ -119,7 +123,7 @@ fn moved_store_adoption_request(
     adopt_project: Option<String>,
     fresh: bool,
     assume_yes: bool,
-) -> tracedecay_domain::errors::Result<tracedecay::tracedecay::MovedStoreAdoption> {
+) -> tracedecay_domain::errors::Result<tracedecay_project::project::MovedStoreAdoption> {
     if fresh && adopt_project.is_some() {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "--fresh mints a new project identity and contradicts --adopt-project; \
@@ -129,11 +133,11 @@ fn moved_store_adoption_request(
     }
     Ok(match (adopt_project, fresh, assume_yes) {
         (Some(project_id), _, _) => {
-            tracedecay::tracedecay::MovedStoreAdoption::AdoptNamed(project_id)
+            tracedecay_project::project::MovedStoreAdoption::AdoptNamed(project_id)
         }
-        (None, true, _) => tracedecay::tracedecay::MovedStoreAdoption::Never,
-        (None, false, true) => tracedecay::tracedecay::MovedStoreAdoption::AdoptUnique,
-        (None, false, false) => tracedecay::tracedecay::MovedStoreAdoption::OfferCandidates,
+        (None, true, _) => tracedecay_project::project::MovedStoreAdoption::Never,
+        (None, false, true) => tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
+        (None, false, false) => tracedecay_project::project::MovedStoreAdoption::OfferCandidates,
     })
 }
 
@@ -145,36 +149,38 @@ fn annotate_reset_required_init_error(
     error: tracedecay_domain::errors::TraceDecayError,
     project_path: &Path,
 ) -> tracedecay_domain::errors::TraceDecayError {
-    let is_reset_required = match &error {
-        tracedecay_domain::errors::TraceDecayError::ResetRequired { .. } => true,
-        // Daemon-brokered opens serialize the typed state over JSON-RPC; the
-        // schema-shape refusal text is the stable marker that survives it.
-        other => other.to_string().contains("shape this binary creates"),
-    };
-    if !is_reset_required {
+    if error.reset_required_context().is_none() {
         return error;
     }
+    let project_path = project_path.to_string_lossy();
+    let reset_command = shell_words::join([
+        "tracedecay",
+        "storage",
+        "reset-project-store",
+        "--project-root",
+        project_path.as_ref(),
+        "--yes",
+    ]);
+    let init_command = shell_words::join(["tracedecay", "init", project_path.as_ref()]);
     tracedecay_domain::errors::TraceDecayError::Config {
         message: format!(
             "{error}\n\nthis store cannot be opened until it is reset; run:\n  \
-             tracedecay storage reset-project-store --project-root {} --yes\n\
-             then re-run `tracedecay init {}` — sessions re-ingest from the \
-             preserved transcripts",
-            project_path.display(),
-            project_path.display()
+             {reset_command}\n\
+             then re-run `{init_command}`, sessions re-ingest from the \
+             preserved transcripts"
         ),
     }
 }
 
 async fn handle_init_with_daemon_availability(
+    profile: &ProfileRoot,
     project_path: PathBuf,
-    skip_folders: Vec<String>,
-    include_folders: Vec<String>,
     handshake: tracedecay_daemon_protocol::DaemonHandshake,
     daemon_available: bool,
+    wait: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     if daemon_available {
-        return brokered_init(&project_path, &skip_folders, &include_folders, &handshake).await;
+        return brokered_init(profile, &project_path, &handshake, wait).await;
     }
     Err(tracedecay_domain::errors::TraceDecayError::project_route(
         "code_index_scheduler_unavailable",
@@ -184,24 +190,20 @@ async fn handle_init_with_daemon_availability(
 }
 
 async fn brokered_init(
+    profile: &ProfileRoot,
     project_path: &Path,
-    skip_folders: &[String],
-    include_folders: &[String],
     handshake: &tracedecay_daemon_protocol::DaemonHandshake,
+    wait: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    if !skip_folders.is_empty() || !include_folders.is_empty() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first".to_string(),
-        });
-    }
     // Init deliberately triggers a cold project open behind this single
     // status call. The default warming-retry grace is far tighter than a cold
     // open can take on a debug build or slow shared runner, which surfaced as
     // "daemon tracedecay_status timed out during read before deadline" failures
     // in CI. Give the bootstrap a generous budget so the client waits out the
     // background open instead of abandoning it just before it completes.
-    let init_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    let init_deadline = Instant::now() + Duration::from_secs(120);
     tracedecay::daemon::call_default_tool_awaiting_project_open(
+        profile,
         handshake,
         "tracedecay_status",
         serde_json::json!({"format": "json", "admission_only": true}),
@@ -211,30 +213,160 @@ async fn brokered_init(
     // Admission alone does not start indexing: the code-index scheduler mounts
     // on first demand, and the background full-server upgrade that would
     // eventually demand it does not survive a daemon restart. Request the
-    // reconciliation explicitly so the message below reports something that
+    // reconciliation explicitly so the receipt below reports something that
     // actually happened.
-    let reconcile = tracedecay::daemon::call_default_tool_awaiting_project_open(
-        handshake,
-        "tracedecay_admin_sync",
-        serde_json::json!({}),
-        init_deadline,
-    )
-    .await;
-    if let Err(error) = reconcile {
-        if !code_index_reconciliation_is_optional(project_path, &error).await {
-            return Err(error);
+    let reconcile = admin_sync(profile, handshake.clone(), init_deadline).await;
+    let reconcile = match reconcile {
+        Err(error) => {
+            if !code_index_reconciliation_is_optional(project_path, &error).await {
+                return Err(error);
+            }
+            eprintln!("{}", init_unavailable_receipt(project_path));
+            return Ok(());
         }
-        eprintln!(
-            "initialized {}; code indexing is unavailable for this non-Git project",
-            project_path.display()
-        );
-        return Ok(());
+        Ok(reconcile) => reconcile,
+    };
+    match reconcile.status {
+        // `queued` means the daemon accepted the reconcile demand into its
+        // pre-mount queue. Default init names that request as a typed
+        // not-ready receipt; `--wait` holds on the existing status
+        // `wait_for` ready gate until the first generation serves.
+        AdminSyncAdmissionV1::Queued => {
+            if wait {
+                return wait_for_first_generation(profile, handshake, project_path).await;
+            }
+            eprintln!("{}", init_queued_not_ready_receipt(project_path));
+        }
+        AdminSyncAdmissionV1::NotApplicable => {
+            eprintln!("{}", init_not_applicable_receipt(project_path));
+        }
     }
-    eprintln!(
-        "initialized {}; daemon code-index reconciliation requested",
-        project_path.display()
-    );
     Ok(())
+}
+
+/// How long `init --wait` holds for the first ready generation after
+/// reconcile is queued. The CLI deadline is slightly longer than the
+/// `wait_for` budget so dispatch cannot refuse `timeout_ms` as oversized.
+const INIT_FIRST_GENERATION_WAIT: Duration = Duration::from_secs(120);
+const INIT_FIRST_GENERATION_WAIT_MS: u64 = 110_000;
+
+fn init_queued_not_ready_receipt(project_path: &Path) -> String {
+    format!(
+        "enrolled {}; first generation not ready (code_index_reconciliation_requested)\n\
+         poll `tracedecay status` until graph_statistics.state is available, or rerun `tracedecay init --wait`",
+        project_path.display()
+    )
+}
+
+fn init_ready_receipt(project_path: &Path) -> String {
+    format!(
+        "enrolled {}; first generation ready",
+        project_path.display()
+    )
+}
+
+fn init_not_applicable_receipt(project_path: &Path) -> String {
+    format!(
+        "enrolled {}; code indexing does not apply to this non-Git project",
+        project_path.display()
+    )
+}
+
+fn init_unavailable_receipt(project_path: &Path) -> String {
+    format!(
+        "enrolled {}; code indexing is unavailable for this non-Git project",
+        project_path.display()
+    )
+}
+
+async fn wait_for_first_generation(
+    profile: &ProfileRoot,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
+    project_path: &Path,
+) -> tracedecay_domain::errors::Result<()> {
+    let deadline = Instant::now() + INIT_FIRST_GENERATION_WAIT;
+    let result = tracedecay::daemon::call_default_tool_awaiting_project_open(
+        profile,
+        handshake,
+        "tracedecay_status",
+        serde_json::json!({
+            "format": "json",
+            "wait_for": {"state": "ready", "timeout_ms": INIT_FIRST_GENERATION_WAIT_MS}
+        }),
+        deadline,
+    )
+    .await?;
+    let payload = tracedecay::daemon::recover_truncated_tool_payload(
+        profile,
+        handshake,
+        "tracedecay_status",
+        result,
+        Some(deadline),
+    )
+    .await?;
+    crate::commands::reject_problem_envelope(&payload, "tracedecay_status")?;
+    require_first_generation_ready(&payload)?;
+    eprintln!("{}", init_ready_receipt(project_path));
+    Ok(())
+}
+
+fn require_first_generation_ready(
+    payload: &serde_json::Value,
+) -> tracedecay_domain::errors::Result<()> {
+    let wait = payload.get("wait").ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::tool_refused(
+            "tracedecay_status",
+            Some(CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned()),
+            Some("status omitted the requested first-generation readiness proof".to_owned()),
+        )
+    })?;
+    match serde_json::from_value::<CodeIndexReadinessWaitOutcomeV1>(wait.clone())? {
+        CodeIndexReadinessWaitOutcomeV1::Reached => {}
+        CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => {
+            return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
+                "tracedecay_status",
+                Some(CODE_INDEX_READINESS_WAIT_TIMED_OUT.to_owned()),
+                Some(format!(
+                    "init --wait timed out before the first generation was ready; last \
+                         state: {last_state}"
+                )),
+            ));
+        }
+        CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
+            return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
+                "tracedecay_status",
+                Some(CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned()),
+                Some(format!(
+                    "init --wait cannot reach a ready first generation: {reason}"
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Asks the project's owner for the operator's code-index reconcile.
+async fn admin_sync(
+    profile: &ProfileRoot,
+    handshake: tracedecay_daemon_protocol::DaemonHandshake,
+    deadline: Instant,
+) -> tracedecay_domain::errors::Result<AdminSyncResultV1> {
+    match crate::tool_command::owner_operation_result(
+        profile,
+        handshake,
+        ApplicationSurfaceOperation::AdminSync,
+        serde_json::json!({}),
+        deadline,
+    )
+    .await?
+    {
+        GraphToolResultV1::AdminSync(result) => Ok(result),
+        _ => Err(tracedecay_domain::errors::TraceDecayError::project_route(
+            "owner_result_mismatch",
+            false,
+            "the project owner answered tracedecay_admin_sync with another operation's result",
+        )),
+    }
 }
 
 async fn code_index_reconciliation_is_optional(
@@ -261,6 +393,127 @@ async fn code_index_reconciliation_is_optional(
     )
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod daemon_precondition_tests {
+    use std::path::Path;
+    use tracedecay_contracts::code_index_freshness::{
+        CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+        CodeIndexReadinessWaitOutcomeV1,
+    };
+    use tracedecay_domain::errors::TraceDecayError;
+
+    pub(super) struct SocketEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl SocketEnvGuard {
+        pub(super) fn set(value: &Path) -> Self {
+            let previous = std::env::var_os(tracedecay_daemon_protocol::SOCKET_ENV);
+            unsafe {
+                std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for SocketEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(previous) => {
+                        std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, previous);
+                    }
+                    None => std::env::remove_var(tracedecay_daemon_protocol::SOCKET_ENV),
+                }
+            }
+        }
+    }
+
+    /// Init's daemon precondition is a probe on every platform, not a `cfg`.
+    ///
+    /// This test is deliberately not gated to unix. On Windows the endpoint is
+    /// the loopback authority rather than a socket file, and a profile that
+    /// has no authority record has no daemon to broker through, so the answer
+    /// must be `false` there exactly as it is on unix. Hardcoding availability
+    /// off-unix let init run past the scheduler it then requires, and that
+    /// regression is only observable from a test the Windows shard compiles.
+    #[test]
+    fn init_daemon_availability_is_probed_on_every_platform() {
+        let profile = tempfile::TempDir::new().expect("temp profile");
+        let _socket = SocketEnvGuard::set(&profile.path().join("absent.sock"));
+
+        assert!(
+            !super::init_daemon_available(&tracedecay_runtime_core::config::ProfileRoot::new(
+                profile.path()
+            )),
+            "an endpoint with no listener must not count as an available daemon"
+        );
+    }
+
+    #[test]
+    fn queued_init_receipt_is_typed_not_ready() {
+        let text = super::init_queued_not_ready_receipt(Path::new("/repo"));
+        assert!(
+            text.contains("enrolled /repo"),
+            "receipt must name enrollment, not a finished index: {text}"
+        );
+        assert!(
+            text.contains("first generation not ready"),
+            "receipt must say the first generation is not ready: {text}"
+        );
+        assert!(
+            text.contains("code_index_reconciliation_requested"),
+            "receipt must carry the typed not-ready reason: {text}"
+        );
+        assert!(
+            !text.contains("initialized "),
+            "receipt must not look like a finished index: {text}"
+        );
+    }
+
+    #[test]
+    fn first_generation_ready_requires_positive_wait_proof() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"wait": null}),
+            serde_json::json!({"wait": {"outcome": "unknown"}}),
+        ] {
+            assert!(super::require_first_generation_ready(&payload).is_err());
+        }
+        let payload = serde_json::json!({
+            "wait": CodeIndexReadinessWaitOutcomeV1::Reached
+        });
+        assert!(super::require_first_generation_ready(&payload).is_ok());
+    }
+
+    #[test]
+    fn first_generation_wait_preserves_timeout_and_unavailable_refusals() {
+        for (outcome, code) in [
+            (
+                CodeIndexReadinessWaitOutcomeV1::TimedOut {
+                    last_state: "warming".to_owned(),
+                },
+                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+            ),
+            (
+                CodeIndexReadinessWaitOutcomeV1::Unavailable {
+                    reason: "scheduler unavailable".to_owned(),
+                },
+                CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+            ),
+        ] {
+            let error =
+                super::require_first_generation_ready(&serde_json::json!({"wait": outcome}))
+                    .expect_err("only reached proves readiness");
+            let TraceDecayError::ToolRefused(refusal) = error else {
+                panic!("wait outcome must retain its typed refusal");
+            };
+            assert_eq!(refusal.code.as_deref(), Some(code));
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod init_bootstrap_tests {
@@ -284,7 +537,7 @@ mod init_bootstrap_tests {
             client_instance_id: "commands-init-test".to_string(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
-            moved_store_adoption: tracedecay::tracedecay::MovedStoreAdoption::Never,
+            moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
         }
     }
 
@@ -297,10 +550,10 @@ mod init_bootstrap_tests {
         let handshake = test_handshake(&project, &profile);
 
         let error = handle_init_with_daemon_availability(
+            &ProfileRoot::new(&profile),
             project.clone(),
-            Vec::new(),
-            Vec::new(),
             handshake,
+            false,
             false,
         )
         .await
@@ -318,136 +571,52 @@ mod init_bootstrap_tests {
         );
     }
 
-    struct SocketEnvGuard {
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl SocketEnvGuard {
-        fn set(value: &Path) -> Self {
-            let previous = std::env::var_os(tracedecay::daemon::SOCKET_ENV);
-            unsafe {
-                std::env::set_var(tracedecay::daemon::SOCKET_ENV, value);
-            }
-            Self { previous }
-        }
-    }
-
-    impl Drop for SocketEnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.previous.take() {
-                    Some(previous) => {
-                        std::env::set_var(tracedecay::daemon::SOCKET_ENV, previous);
-                    }
-                    None => std::env::remove_var(tracedecay::daemon::SOCKET_ENV),
-                }
-            }
-        }
-    }
-
-    /// Init's "daemon code-index reconciliation requested" must describe a
-    /// request that actually crossed the wire: admission first, then the
-    /// explicit `tracedecay_admin_sync` reconcile. Without the second call the
-    /// first index only starts if the background full-server upgrade survives
-    /// long enough to demand it, which a daemon restart silently discards.
-    #[tokio::test]
-    async fn brokered_init_requests_a_real_code_index_reconciliation() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
-        static SOCKET_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-        let _serialize = SOCKET_ENV_TEST_LOCK.lock().await;
-        let temp = tempfile::TempDir::new().unwrap();
-        let project = temp.path().join("project");
-        let profile = temp.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        let socket = temp.path().join("daemon.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let _socket_env = SocketEnvGuard::set(&socket);
-
-        let recorded: std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let responder = {
-            let recorded = std::sync::Arc::clone(&recorded);
-            tokio::spawn(async move {
-                for _ in 0..2 {
-                    let (stream, _addr) = listener.accept().await.unwrap();
-                    let (reader, mut writer) = stream.into_split();
-                    let mut lines = tokio::io::BufReader::new(reader).lines();
-                    let _handshake_line = lines.next_line().await.unwrap().unwrap();
-                    let request_line = lines.next_line().await.unwrap().unwrap();
-                    let request: serde_json::Value = serde_json::from_str(&request_line).unwrap();
-                    recorded.lock().unwrap().push((
-                        request["params"]["name"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_owned(),
-                        request["params"]["arguments"].clone(),
-                    ));
-                    let response = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": request["id"],
-                        "result": { "content": [] },
-                    });
-                    writer
-                        .write_all(serde_json::to_string(&response).unwrap().as_bytes())
-                        .await
-                        .unwrap();
-                    writer.write_all(b"\n").await.unwrap();
-                    writer.shutdown().await.unwrap();
-                }
-            })
+    /// A worktree parked on a corrupt publication authority refuses the
+    /// reconcile; the operator reads its cause and remedy as whole fields,
+    /// not folded into one sentence cut at the diagnostic bound.
+    #[test]
+    fn a_parked_admin_sync_refusal_prints_as_fields() {
+        let parked = tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
+            reason: format!("the publication authority is corrupt: {}", "x".repeat(600)),
+            blocked_reason: None,
+            remediation: "run `tracedecay daemon restart`".to_owned(),
+            parked_at_micros: 1,
+            observed_passes: 1,
+            retries_on_wake: false,
+        };
+        let detail = parked
+            .publication_authority_corrupt_error()
+            .project_route_typed_detail()
+            .cloned()
+            .expect("a parked refusal carries its typed detail");
+        let refusal = tracedecay_mcp::application_output::tool_result::ApplicationRefusal {
+            operation: ApplicationSurfaceOperation::AdminSync,
+            binding_id: tracedecay_tool_catalog::BindingId::new("binding.cli.admin_sync.v1")
+                .unwrap(),
+            problem: tracedecay_contracts::ApplicationProblemEnvelope::new(
+                tracedecay_contracts::ResultContractRef::new(
+                    tracedecay_tool_catalog::SchemaId::new(
+                        "schema.application.primitive.admin-sync.result",
+                    )
+                    .unwrap(),
+                    1,
+                )
+                .unwrap(),
+                tracedecay_contracts::RequestId::new("request.cli.admin-sync").unwrap(),
+                tracedecay_contracts::ApplicationProblem::from_detail(detail),
+            )
+            .unwrap(),
         };
 
-        let handshake = test_handshake(&project, &profile);
-        brokered_init(&project, &[], &[], &handshake)
-            .await
-            .expect("brokered init against the fixture daemon");
-        tokio::time::timeout(std::time::Duration::from_secs(5), responder)
-            .await
-            .expect("fixture daemon must observe both requests")
-            .expect("fixture daemon task");
-
-        let recorded = recorded.lock().unwrap();
-        let names: Vec<&str> = recorded.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(
-            names,
-            ["tracedecay_status", "tracedecay_admin_sync"],
-            "init must request the reconcile it reports, after admission"
-        );
-        assert_eq!(
-            recorded[0].1["admission_only"],
-            serde_json::json!(true),
-            "the bootstrap status call stays admission-only"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn brokered_init_retains_folder_option_error_before_sending_request() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let project = temp.path().join("project");
-        let profile = temp.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        let handshake = test_handshake(&project, &profile);
-
-        let error = handle_init_with_daemon_availability(
-            project,
-            vec!["generated".to_string()],
-            Vec::new(),
-            handshake,
-            true,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("brokered init does not yet support --skip-folders/--include-folders"),
-            "unexpected brokered-init error: {error}"
-        );
-        assert!(
-            !profile.exists(),
-            "brokered rejection must not open a local store"
+            crate::commands::process_error_text(refusal.into_error()),
+            format!(
+                "project route error (application.code-index.parked)\n\
+                 Parked cause: the publication authority is corrupt: {}\n\
+                 Parked remedy: run `tracedecay daemon restart`\n\
+                 Retries on wake: false",
+                "x".repeat(600)
+            )
         );
     }
 
@@ -481,49 +650,75 @@ mod init_bootstrap_tests {
         assert!(!code_index_reconciliation_is_optional(&nested_git, &unavailable).await);
         assert!(!code_index_reconciliation_is_optional(&non_git, &unrelated).await);
     }
-}
 
-#[hotpath::measure(label = "cli.sync.run", future = true)]
-pub(crate) async fn handle_sync(
-    path: Option<String>,
-    force: bool,
-    skip_folders: Vec<String>,
-    include_folders: Vec<String>,
-    doctor: bool,
-    verbose: bool,
-) -> tracedecay_domain::errors::Result<()> {
-    if !skip_folders.is_empty() || !include_folders.is_empty() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first".to_string(),
-        });
-    }
-    let resolved =
-        super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(path))
-            .await?;
-    let handshake = tracedecay::daemon::handshake_for_current_client(
-        Some(resolved.project_path.clone()),
-        None,
-        false,
-        false,
-    )?;
-    let result = tracedecay::daemon::call_default_tool(
-        &handshake,
-        "tracedecay_admin_sync",
-        serde_json::json!({"force": force}),
-    )
-    .await?;
-    if verbose {
-        eprintln!(
-            "{}",
-            serde_json::to_string_pretty(&result).unwrap_or_default()
+    #[test]
+    fn reset_remedy_commands_survive_paths_with_spaces_and_apostrophes() {
+        let error = annotate_reset_required_init_error(
+            tracedecay_domain::errors::TraceDecayError::reset_required(
+                "project-fixture",
+                "incompatible persisted shape",
+            ),
+            Path::new("/repo/it's an example"),
+        );
+
+        let text = error.to_string();
+        assert!(text.contains("this store cannot be opened until it is reset"));
+        let reset_command = text
+            .split_once("run:\n  ")
+            .expect("reset command must be named")
+            .1;
+        let (reset_command, then_part) = reset_command
+            .split_once("\n")
+            .expect("reset command ends before the init remedy");
+        assert_eq!(
+            shell_words::split(reset_command).unwrap(),
+            [
+                "tracedecay",
+                "storage",
+                "reset-project-store",
+                "--project-root",
+                "/repo/it's an example",
+                "--yes",
+            ]
+        );
+        let init_command = then_part
+            .split_once("`tracedecay init ")
+            .map(|(_, tail)| tail)
+            .and_then(|tail| tail.split_once('`').map(|(command, _)| command))
+            .expect("init remedy must be named");
+        assert_eq!(
+            shell_words::split(&format!("tracedecay init {init_command}")).unwrap(),
+            ["tracedecay", "init", "/repo/it's an example"]
         );
     }
-    eprintln!(
-        "code-index reconciliation queued via daemon for {}",
-        resolved.project_path.display()
-    );
-    if doctor {
-        tracedecay::doctor::run_doctor().await?;
+}
+
+#[tracing::instrument(name = "cli.sync.run", level = "trace", skip_all)]
+pub(crate) async fn handle_sync(
+    profile: &ProfileRoot,
+    path: Option<String>,
+    verbose: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    let resolved = super::scope::resolve_project_scope(
+        profile,
+        tracedecay_configuration::resolve_path_with_discovery(profile, path),
+    )
+    .await?;
+    let handshake = super::daemon::client_handshake(profile, Some(&resolved.project_path))?;
+    let deadline = crate::tool_command::tool_command_deadline()?;
+    let result = admin_sync(profile, handshake, deadline).await?;
+    if verbose {
+        eprintln!("{}", serde_json::to_string_pretty(&result)?);
+    }
+    match result.status {
+        AdminSyncAdmissionV1::Queued => eprintln!(
+            "code-index reconciliation queued via daemon for {}",
+            resolved.project_path.display()
+        ),
+        AdminSyncAdmissionV1::NotApplicable => eprintln!(
+            "code indexing does not apply to {}",
+            resolved.project_path.display()
+        ),
     }
     Ok(())
 }

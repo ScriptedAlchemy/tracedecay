@@ -3,6 +3,8 @@ pub mod projector;
 pub mod registry;
 pub mod wake;
 mod worker;
+#[cfg(test)]
+mod worker_tests;
 
 pub use history::{ProfileSessionHistoricalIngestor, ProjectSessionHistoricalIngestor};
 pub use registry::SessionTemporalRefreshSchedulerRegistry;

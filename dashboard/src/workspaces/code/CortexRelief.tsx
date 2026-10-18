@@ -1,12 +1,6 @@
 /**
- * CORTEX — the macro sheet of the structure LENS. One navigable space:
- * Far = CORTEX. Touch a symbol = TRACE floods. Enter a file = CORE SAMPLE.
- *
- * This is the far end of the same continuum the LENS ruler already carries, not
- * a page of its own: it renders inside the `cortex` position above the
- * connectivity spine, and it takes the workspace's current symbol focus so the
- * reader can see WHERE on the terrain the thing they are tracing lives. Moving
- * the ruler to TRACE or CORE from here changes altitude over the same identity.
+ * TOPOLOGY aggregates modules above the symbol graph and keeps the current
+ * symbol focus visible on that module terrain.
  *
  * The division of labour is the plan's honesty boundary (`:196`):
  *
@@ -14,8 +8,8 @@
  *                       Every figure printed here comes from there.
  *   `cortexRender.ts`   draws. Decides nothing.
  *   this file           composes the two, and is responsible for one thing of
- *                       its own: saying out loud what the picture is and — the
- *                       harder half — what it is NOT showing.
+ *                       its own: saying out loud what the picture is and, the
+ *                       harder half, what it is NOT showing.
  *
  * ACCESSIBILITY. The canvas is one `role="img"` with a description carrying the
  * same claims as the caption, and the region table is its exact equivalent:
@@ -44,6 +38,7 @@ import {
   cortexAbsences,
   cortexLegendPanels,
   directoryOf,
+  foldNote,
   type CortexModel,
   type CortexRegion,
 } from './cortexRelief.ts';
@@ -60,14 +55,14 @@ export function CortexRelief({ focusPath }: { focusPath?: string | null }) {
   return (
     <section
       className="flex flex-col border-b border-edge-subtle"
-      aria-label="CORTEX module relief"
+      aria-label="Topology module relief"
     >
       <div className="flex flex-wrap items-baseline gap-2 border-b border-edge-subtle px-3 py-2">
-        <h2 className="td-title">CORTEX</h2>
+        <h2 className="td-title">Topology</h2>
         <span aria-hidden className="td-rule" />
         <span className="td-legend normal-case tracking-normal text-text-muted">
           the indexed repository as continuous relief · elevation is dependency depth,
-          area is file mass, contour density is internal connectivity
+          area is file mass, contour rings are internal edges per boundary edge
         </span>
       </div>
       {strata.isPending ? (
@@ -135,9 +130,9 @@ function ReliefSheet({
       {focusedDirectory !== null ? (
         <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-text-muted">
           the symbol this workspace is focused on lives in{' '}
-          <span className="td-value text-text-secondary">{focusedDirectory}</span> —{' '}
+          <span className="td-value text-text-secondary">{focusedDirectory}</span>,{' '}
           {model.drawnRegions.some((region) => region.directory === focusedDirectory)
-            ? 'that region is ringed on the relief above. Move the lens to TRACE to flood it.'
+            ? 'that region is ringed on the relief above. Open Trace to inspect its call neighborhood.'
             : 'that directory is not one of the drawn regions, so nothing is ringed above; its row is in the table below if the scan reached it.'}
         </p>
       ) : null}
@@ -165,7 +160,7 @@ function ReliefPlate({ model }: { model: CortexModel }) {
     {
       label: 'contour interval',
       value: '0.50',
-      unit: 'edges / file',
+      unit: 'i / boundary',
       note: 'index every 5th',
     },
     {
@@ -178,10 +173,7 @@ function ReliefPlate({ model }: { model: CortexModel }) {
       label: 'folded out',
       value: model.foldedRegions.toLocaleString(),
       unit: 'regions',
-      note:
-        model.foldedRegions === 0
-          ? 'the whole clustering is drawn'
-          : `${model.foldedFiles.toLocaleString()} files, all in the table`,
+      note: foldNote(model),
     },
   ];
   return (
@@ -199,14 +191,6 @@ function ReliefPlate({ model }: { model: CortexModel }) {
           </div>
         ))}
       </dl>
-      {model.capped ? (
-        <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-state-unknown">
-          the scan stopped at its budget — {model.scan.max_files.toLocaleString()} files and{' '}
-          {model.scan.max_dependency_edges.toLocaleString()} dependency edges in{' '}
-          {model.scan.budget_ms} ms — so this terrain is the part of the repository the scan
-          reached, and the strata above are a floor rather than a depth
-        </p>
-      ) : null}
       {model.unplacedRegions > 0 ? (
         <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-state-unknown">
           {model.unplacedRegions}{' '}
@@ -249,8 +233,8 @@ function ReliefAbsences({ model }: { model: CortexModel }) {
       <dl className="grid grid-cols-1 gap-x-3 gap-y-1.5 sm:grid-cols-3">
         {cortexAbsences(model).map((panel) => (
           <div key={panel.label} className="flex min-w-0 flex-col">
-            <dt className="td-legend normal-case tracking-normal text-text-muted">
-              {panel.label} — <span className="text-state-unknown">{panel.reading}</span>
+            <dt className="td-legend whitespace-normal normal-case leading-snug tracking-normal text-text-muted">
+              {panel.label}, <span className="text-state-unknown">{panel.reading}</span>
             </dt>
             <dd className="text-3xs leading-snug text-text-muted">{panel.teach}</dd>
           </div>
@@ -258,6 +242,36 @@ function ReliefAbsences({ model }: { model: CortexModel }) {
       </dl>
     </div>
   );
+}
+
+function couplingReadout(region: CortexRegion): string {
+  switch (region.contour) {
+    case 'none':
+      return '—';
+    case 'sealed':
+      return 'sealed';
+    case 'open':
+      return region.coupling === null ? '—' : `${region.coupling.toFixed(2)} i/b`;
+    default: {
+      const unhandled: never = region.contour;
+      return unhandled;
+    }
+  }
+}
+
+function contourReadout(region: CortexRegion): string {
+  switch (region.contour) {
+    case 'none':
+      return 'no relief';
+    case 'sealed':
+      return 'sealed';
+    case 'open':
+      return String(region.contours);
+    default: {
+      const unhandled: never = region.contour;
+      return unhandled;
+    }
+  }
 }
 
 function SelectedRegion({ region }: { region: CortexRegion }) {
@@ -285,7 +299,8 @@ function SelectedRegion({ region }: { region: CortexRegion }) {
         · <span className="td-value text-text-secondary">{region.fileCount}</span> files ·{' '}
         <span className="td-value text-text-secondary">{region.internalEdges}</span> internal ·{' '}
         <span className="td-value text-text-secondary">{region.density.toFixed(2)}</span> e/file ·{' '}
-        <span className="td-value text-text-secondary">{region.contours}</span> contours ·{' '}
+        <span className="td-value text-text-secondary">{couplingReadout(region)}</span> ·{' '}
+        <span className="td-value text-text-secondary">{contourReadout(region)}</span> contours ·{' '}
         <span className="td-value text-text-secondary">{region.incomingEdges}</span> in /{' '}
         <span className="td-value text-text-secondary">{region.outgoingEdges}</span> out
       </span>
@@ -294,7 +309,7 @@ function SelectedRegion({ region }: { region: CortexRegion }) {
 }
 
 const REGION_ROW =
-  'grid grid-cols-[minmax(8rem,2fr)_repeat(8,minmax(3.5rem,1fr))] items-center text-left text-2xs';
+  'grid grid-cols-[minmax(8rem,2fr)_repeat(9,minmax(3.5rem,1fr))] items-center text-left text-2xs';
 
 /** The accessible equivalent of the relief: every region in the measurement,
  * drawn or folded, with the numbers the field encodes. Windowed through
@@ -309,7 +324,7 @@ function RegionTable({
   selected: string | null;
   onSelect: (directory: string | null) => void;
 }) {
-  const caption = `Every module region the strata scan clustered — ${model.totalRegions.toLocaleString()} directories over ${model.totalFiles.toLocaleString()} files — including the ${model.foldedRegions.toLocaleString()} the drawing cap folds out. Ordered by ${model.clusterOrdering}.`;
+  const caption = `Every module region the strata scan clustered, ${model.totalRegions.toLocaleString()} directories over ${model.totalFiles.toLocaleString()} files, including the ${model.foldedRegions.toLocaleString()} folded out (${foldNote(model)}). Ordered by ${model.clusterOrdering}.`;
   const windowed = model.regions.length > 200;
   return (
     <div
@@ -342,6 +357,9 @@ function RegionTable({
               </span>
               <span role="columnheader" className="td-legend px-3 py-2">
                 e / file
+              </span>
+              <span role="columnheader" className="td-legend px-3 py-2">
+                coupling
               </span>
               <span role="columnheader" className="td-legend px-3 py-2">
                 contours
@@ -382,7 +400,7 @@ function RegionRow({
       className={cn(REGION_ROW, 'border-b border-edge-subtle', active && 'bg-surface-2')}
     >
       <div role="cell" className="max-w-72 px-3 py-1.5">
-        {/* The row's only control, so it carries the touch minimum itself —
+        {/* The row's only control, so it carries the touch minimum itself,
           * the cell's text metrics left it 16.5px tall. */}
         <button
           type="button"
@@ -421,8 +439,13 @@ function RegionRow({
         {region.density.toFixed(2)}
       </div>
       <div role="cell" className="px-3 py-1.5 tabular-nums text-text-secondary">
-        {region.contours === 0 ? (
+        {couplingReadout(region)}
+      </div>
+      <div role="cell" className="px-3 py-1.5 tabular-nums text-text-secondary">
+        {region.contour === 'none' ? (
           <span className="text-state-unknown">no relief</span>
+        ) : region.contour === 'sealed' ? (
+          'sealed'
         ) : (
           region.contours
         )}

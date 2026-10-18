@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
-    ActorId, Confidence, DomainError, FactCategoryV1, FactEventId, FactOwnerV1, FactPayloadV1,
-    PayloadAccessState, ProvenanceId, SanitizationReceiptV1, SanitizerDispositionV1,
-    canonical_sha256,
+    ActorId, Confidence, DomainError, FactCategoryV1, FactEventId, FactId, FactOwnerV1,
+    FactPayloadV1, PayloadAccessState, ProvenanceId, SanitizationReceiptV1, SanitizerDispositionV1,
+    canonical_sha256, sha256_hex_suffix,
 };
 
 use super::super::super::{
@@ -209,9 +209,7 @@ fn project_memory_fact_add_input_digest(
         );
     }
     let digest = canonical_sha256(&("tracedecay.project-memory.fact-add-input.v1", material))?;
-    digest
-        .as_str()
-        .strip_prefix("sha256:")
+    sha256_hex_suffix(digest.as_str())
         .map(ToOwned::to_owned)
         .ok_or_else(|| {
             FactStoreError::Contract(DomainError::NonCanonical {
@@ -435,6 +433,62 @@ impl ProjectMemoryFactRemoveCommandV1 {
 
     pub fn target(&self) -> &ProjectMemoryFactIdV1 {
         &self.target
+    }
+    pub fn operation_id(&self) -> &ProvenanceId {
+        &self.operation_id
+    }
+    pub fn expected_last_event_id(&self) -> Option<&FactEventId> {
+        self.expected_last_event_id.as_ref()
+    }
+    pub fn actor(&self) -> Option<&ActorId> {
+        self.actor.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectMemoryFactSupersedeCommandV1 {
+    target: ProjectMemoryFactIdV1,
+    superseded_by: ProjectMemoryFactIdV1,
+    operation_id: ProvenanceId,
+    expected_last_event_id: Option<FactEventId>,
+    actor: Option<ActorId>,
+}
+
+impl ProjectMemoryFactSupersedeCommandV1 {
+    pub fn new(
+        target: ProjectMemoryFactIdV1,
+        superseded_by: ProjectMemoryFactIdV1,
+        operation_id: ProvenanceId,
+        expected_last_event_id: Option<FactEventId>,
+        actor: Option<ActorId>,
+    ) -> FactStoreResult<Self> {
+        if target.owner() != superseded_by.owner() {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        if target.fact_id() == superseded_by.fact_id() {
+            return Err(FactStoreError::Contract(DomainError::SelfSupersession));
+        }
+        operation_id.validate()?;
+        if let Some(event_id) = &expected_last_event_id {
+            event_id.validate()?;
+        }
+        if let Some(actor) = &actor {
+            actor.validate()?;
+        }
+        Ok(Self {
+            target,
+            superseded_by,
+            operation_id,
+            expected_last_event_id,
+            actor,
+        })
+    }
+
+    pub fn target(&self) -> &ProjectMemoryFactIdV1 {
+        &self.target
+    }
+    pub fn superseded_by(&self) -> &ProjectMemoryFactIdV1 {
+        &self.superseded_by
     }
     pub fn operation_id(&self) -> &ProvenanceId {
         &self.operation_id
@@ -794,6 +848,95 @@ impl ProjectMemoryFactRemoveOutcomeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectMemoryFactSupersedeOutcomeV1 {
+    Superseded {
+        fact_id: FactId,
+        superseded_by: FactId,
+        commit_receipt: FactCommitReceipt,
+        commit_replayed: bool,
+    },
+    AlreadySuperseded {
+        fact_id: FactId,
+        superseded_by: FactId,
+    },
+    NotFound,
+}
+
+impl ProjectMemoryFactSupersedeOutcomeV1 {
+    pub fn superseded(
+        target: &ProjectMemoryFactIdV1,
+        superseded_by: &ProjectMemoryFactIdV1,
+        commit_receipt: FactCommitReceipt,
+        commit_replayed: bool,
+    ) -> FactStoreResult<Self> {
+        if target.owner() != superseded_by.owner()
+            || commit_receipt.owner() != target.owner()
+            || commit_receipt.fact_id() != target.fact_id()
+            || commit_receipt.active_assertion_id().is_some()
+        {
+            return Err(FactStoreError::InvalidCommitReceipt);
+        }
+        Ok(Self::Superseded {
+            fact_id: target.fact_id().clone(),
+            superseded_by: superseded_by.fact_id().clone(),
+            commit_receipt,
+            commit_replayed,
+        })
+    }
+
+    pub fn already_superseded(
+        target: &ProjectMemoryFactIdV1,
+        superseded_by: &ProjectMemoryFactIdV1,
+    ) -> FactStoreResult<Self> {
+        if target.owner() != superseded_by.owner() {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        Ok(Self::AlreadySuperseded {
+            fact_id: target.fact_id().clone(),
+            superseded_by: superseded_by.fact_id().clone(),
+        })
+    }
+
+    pub fn was_superseded(&self) -> bool {
+        matches!(self, Self::Superseded { .. })
+    }
+
+    pub fn commit_replayed(&self) -> bool {
+        matches!(
+            self,
+            Self::Superseded {
+                commit_replayed: true,
+                ..
+            }
+        )
+    }
+
+    pub fn fact_id(&self) -> Option<&FactId> {
+        match self {
+            Self::Superseded { fact_id, .. } | Self::AlreadySuperseded { fact_id, .. } => {
+                Some(fact_id)
+            }
+            Self::NotFound => None,
+        }
+    }
+
+    pub fn superseded_by(&self) -> Option<&FactId> {
+        match self {
+            Self::Superseded { superseded_by, .. }
+            | Self::AlreadySuperseded { superseded_by, .. } => Some(superseded_by),
+            Self::NotFound => None,
+        }
+    }
+
+    pub fn commit_receipt(&self) -> Option<&FactCommitReceipt> {
+        match self {
+            Self::Superseded { commit_receipt, .. } => Some(commit_receipt),
+            Self::AlreadySuperseded { .. } | Self::NotFound => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactFeedbackOutcomeV1 {
     fact: ProjectMemoryFactProjectionV1,
     event_id: FactEventId,
@@ -894,6 +1037,11 @@ mod tests {
         let old = Confidence::new(0.5).unwrap();
         let new = Confidence::new(0.6).unwrap();
         assert!(validate_feedback_trust_delta(old, new, 100_000).is_ok());
-        assert!(validate_feedback_trust_delta(old, new, -100_000).is_err());
+        assert_eq!(
+            validate_feedback_trust_delta(old, new, -100_000)
+                .unwrap_err()
+                .to_string(),
+            "fact contract validation failed"
+        );
     }
 }

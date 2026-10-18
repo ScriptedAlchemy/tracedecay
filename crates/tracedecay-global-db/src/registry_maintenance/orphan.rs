@@ -1,4 +1,5 @@
 use super::*;
+use tracedecay_runtime_core::config::DB_FILENAME;
 
 pub fn inspect_profile_store_orphans(
     profile_root: &Path,
@@ -31,14 +32,6 @@ pub fn inspect_profile_store_orphans(
     }
 
     report
-}
-
-pub fn inspect_registry_orphan_manifest(
-    manifest_path: &Path,
-    profile_root: &Path,
-    verified_at: i64,
-) -> RegistryOrphanRelinkReport {
-    inspect_registry_orphan_manifest_inner(manifest_path, profile_root, verified_at, false)
 }
 
 fn inspect_registry_orphan_manifest_inner(
@@ -173,8 +166,8 @@ fn inspect_registry_orphan_manifest_inner(
             project_id,
             store_kind: "code_project".to_string(),
             storage_mode: "profile_sharded".to_string(),
-            store_relpath: path_string(&store_relpath),
-            manifest_relpath: Some(path_string(&manifest_relpath)),
+            store_relpath: tracedecay_domain::forward_slash_path(&store_relpath),
+            manifest_relpath: Some(tracedecay_domain::forward_slash_path(&manifest_relpath)),
             last_verified_at: Some(verified_at),
             last_write_at: None,
         },
@@ -236,48 +229,19 @@ fn classify_project_root(
             );
         }
     };
-    // Legacy read-only evidence: markers written before the working-tree
-    // cutover still vouch for orphan re-adoption; nothing rewrites them.
-    let enrollment = match read_legacy_enrollment_marker(&canonical_root) {
-        Ok(marker) => marker.map(|marker| marker.project_id),
-        Err(error) => {
-            return (
-                RegistryOrphanRelinkStatus::Blocked,
-                Some(format!("could not validate enrollment marker: {error}")),
-                canonical_root,
-            );
-        }
-    };
-    let identity = match (repository_identity.as_deref(), enrollment.as_deref()) {
-        (Some(repository), Some(enrolled)) if repository != enrolled => (
-            RegistryOrphanRelinkStatus::Blocked,
-            Some(format!(
-                "repository identity project '{repository}' disagrees with enrollment project '{enrolled}'"
-            )),
-        ),
-        (Some(repository), Some(_)) if repository == project_id => {
-            (RegistryOrphanRelinkStatus::Eligible, None)
-        }
-        (Some(repository), Some(_)) => (
+    let identity = match repository_identity.as_deref() {
+        Some(owner) if owner == project_id => (RegistryOrphanRelinkStatus::Eligible, None),
+        Some(owner) => (
             RegistryOrphanRelinkStatus::Retired,
             Some(format!(
-                "repository identity and enrollment name retired project '{repository}' instead of manifest project '{project_id}'"
+                "repository identity names retired project '{owner}' instead of manifest project '{project_id}'"
             )),
         ),
-        (Some(owner), None) | (None, Some(owner)) if owner == project_id => {
-            (RegistryOrphanRelinkStatus::Eligible, None)
-        }
-        (Some(owner), None) | (None, Some(owner)) => (
-            RegistryOrphanRelinkStatus::Retired,
-            Some(format!(
-                "project marker names retired project '{owner}' instead of manifest project '{project_id}'"
-            )),
-        ),
-        (None, None) if reject_ephemeral_root => (
+        None if reject_ephemeral_root => (
             RegistryOrphanRelinkStatus::Blocked,
-            Some("project has no repository identity or enrollment marker".to_string()),
+            Some("project has no repository identity marker".to_string()),
         ),
-        (None, None) => (RegistryOrphanRelinkStatus::Eligible, None),
+        None => (RegistryOrphanRelinkStatus::Eligible, None),
     };
     (identity.0, identity.1, canonical_root)
 }
@@ -300,13 +264,6 @@ fn validate_manifest_shape(
             "store manifest '{}' is {:?}, not code_project",
             manifest_path.display(),
             manifest.store_kind
-        ));
-    }
-    if manifest.storage_mode != StorageMode::ProfileSharded {
-        issues.push(format!(
-            "store manifest '{}' is {:?}, not profile_sharded",
-            manifest_path.display(),
-            manifest.storage_mode
         ));
     }
     if strip_profile_root(profile_root, &manifest.data_root).is_none() {
@@ -376,31 +333,20 @@ fn reconstruct_graph_scopes(
             ));
         }
     };
+    let graph_db_path = branch_dir.join(DB_FILENAME);
+    if strip_profile_root(profile_root, &graph_db_path).is_none() {
+        return invalid(format!(
+            "project graph database '{}' is missing or escapes profile root",
+            graph_db_path.display()
+        ));
+    }
     let mut scopes = Vec::new();
-    let mut issues = Vec::new();
     for (branch_name, entry) in &meta.branches {
-        let db_relpath = Path::new(&entry.db_file);
-        if !is_safe_relpath(db_relpath) {
-            issues.push(format!(
-                "branch '{branch_name}' has unsafe database path '{}'",
-                entry.db_file
-            ));
-            continue;
-        }
-        let absolute_db_path = branch_dir.join(db_relpath);
-        let Some(profile_db_relpath) = strip_profile_root(profile_root, &absolute_db_path) else {
-            issues.push(format!(
-                "branch '{branch_name}' database '{}' is missing or escapes profile root",
-                absolute_db_path.display()
-            ));
-            continue;
-        };
         scopes.push(GraphScopeUpsert {
             graph_scope_id: graph_scope_id(store_id, branch_name),
             project_id: project_id.to_string(),
             store_id: store_id.to_string(),
             branch_name: branch_name.clone(),
-            db_relpath: path_string(&profile_db_relpath),
             parent_scope_id: entry
                 .parent
                 .as_ref()
@@ -410,7 +356,7 @@ fn reconstruct_graph_scopes(
         });
     }
     scopes.sort_by(|a, b| a.branch_name.cmp(&b.branch_name));
-    (Some(meta.default_branch), scopes, issues)
+    (Some(meta.default_branch), scopes, Vec::new())
 }
 
 fn graph_scope_id(store_id: &str, branch_name: &str) -> String {
@@ -435,7 +381,7 @@ fn push_artifact_if_present(
     artifacts.push(StoreArtifactUpsert {
         store_id: store_id.to_string(),
         artifact_kind: artifact_kind.to_string(),
-        relpath: path_string(&relpath),
+        relpath: tracedecay_domain::forward_slash_path(&relpath),
         size_bytes: i64::try_from(meta.len()).ok(),
         schema_version,
         updated_at: Some(updated_at),
@@ -456,6 +402,49 @@ fn is_safe_relpath(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn path_string(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    const LEGACY_META: &str = r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"3","gc_protected":false},"feature":{"parent":"main","created_at":"0","last_synced_at":"5","gc_protected":false}}}"#;
+
+    #[test]
+    fn reconstructed_graph_scopes_locate_every_branch_in_the_project_store() {
+        let profile = tempfile::tempdir().unwrap();
+        let data_root = profile.path().join("projects/p");
+        fs::create_dir_all(&data_root).unwrap();
+        let branch_meta_path = data_root.join("branch-meta.json");
+        fs::write(&branch_meta_path, LEGACY_META).unwrap();
+
+        let (_, scopes, issues) =
+            reconstruct_graph_scopes(&branch_meta_path, "store", "project", profile.path());
+        assert_eq!(scopes, Vec::new());
+        assert_eq!(
+            issues,
+            vec![format!(
+                "project graph database '{}' is missing or escapes profile root",
+                data_root.join(DB_FILENAME).display()
+            )]
+        );
+
+        fs::write(data_root.join(DB_FILENAME), b"graph").unwrap();
+        let (default_branch, scopes, issues) =
+            reconstruct_graph_scopes(&branch_meta_path, "store", "project", profile.path());
+        assert_eq!(default_branch.as_deref(), Some("main"));
+        assert_eq!(issues, Vec::<String>::new());
+        let scope = |branch: &str, parent: Option<&str>, synced: i64| GraphScopeUpsert {
+            graph_scope_id: format!("store:branch:{branch}"),
+            project_id: "project".to_string(),
+            store_id: "store".to_string(),
+            branch_name: branch.to_string(),
+            parent_scope_id: parent.map(|parent| format!("store:branch:{parent}")),
+            last_synced_at: Some(synced),
+            writable: true,
+        };
+        assert_eq!(
+            scopes,
+            vec![scope("feature", Some("main"), 5), scope("main", None, 3)]
+        );
+    }
 }

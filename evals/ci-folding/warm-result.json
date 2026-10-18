@@ -1,0 +1,82 @@
+{
+  "repository": "/fast/projects/tracedecay",
+  "head": "af722c0074d4152b97271d952e75f33d7e9bd112",
+  "command": "cargo test --locked -p tracedecay-framing --lib",
+  "hauler": "cargo-hauler 0.9.14",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6",
+  "rows": [
+    {
+      "mode": "fresh",
+      "sha": "6ac95f2946c2dcbbd8d4ec8bf0b078da5bb02e8d",
+      "seconds": 16.762,
+      "exit_code": 0,
+      "compiled": 17,
+      "fresh": 0,
+      "passed": 6,
+      "failed": 0
+    },
+    {
+      "mode": "fresh",
+      "sha": "6cb9b6286e3a7dc02f8d2e080ab6d3fc5a39a85a",
+      "seconds": 12.205,
+      "exit_code": 0,
+      "compiled": 17,
+      "fresh": 0,
+      "passed": 6,
+      "failed": 0
+    },
+    {
+      "mode": "fresh",
+      "sha": "af722c0074d4152b97271d952e75f33d7e9bd112",
+      "seconds": 12.47,
+      "exit_code": 0,
+      "compiled": 17,
+      "fresh": 0,
+      "passed": 6,
+      "failed": 0
+    },
+    {
+      "mode": "warm",
+      "sha": "6ac95f2946c2dcbbd8d4ec8bf0b078da5bb02e8d",
+      "seconds": 13.122,
+      "exit_code": 0,
+      "compiled": 17,
+      "fresh": 0,
+      "passed": 6,
+      "failed": 0
+    },
+    {
+      "mode": "warm",
+      "sha": "6cb9b6286e3a7dc02f8d2e080ab6d3fc5a39a85a",
+      "seconds": 1.184,
+      "exit_code": 0,
+      "compiled": 0,
+      "fresh": 17,
+      "passed": 6,
+      "failed": 0
+    },
+    {
+      "mode": "warm",
+      "sha": "af722c0074d4152b97271d952e75f33d7e9bd112",
+      "seconds": 1.143,
+      "exit_code": 0,
+      "compiled": 0,
+      "fresh": 17,
+      "passed": 6,
+      "failed": 0
+    }
+  ],
+  "negative_control": {
+    "mode": "negative-control",
+    "sha": "af722c0074d4152b97271d952e75f33d7e9bd112+failing-test",
+    "seconds": 1.986,
+    "exit_code": 101,
+    "compiled": 1,
+    "fresh": 16,
+    "passed": 6,
+    "failed": 1
+  },
+  "fresh_seconds": 41.437,
+  "warm_seconds": 15.449,
+  "speedup": 2.682
+}

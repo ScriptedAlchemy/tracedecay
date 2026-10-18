@@ -6,19 +6,17 @@
 //! typed gateway/provider port.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracedecay_daemon_protocol::{
-    ConnectionLocalRequestSequence, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
-    ProcessLocalRequestSequence,
+    ConnectionLocalRequestSequence, LspFrame, MAX_LSP_FRAME_BYTES, ProcessLocalRequestSequence,
 };
-use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
+use tracedecay_domain::ManifestDigest;
 use tracedecay_tool_catalog::BindingId;
 
-use crate::bridge::DaemonLspSessionTransport;
+use crate::analyzer::broker::DiagnosticSeverity;
 use crate::capabilities::{
     CapabilityAvailability, CapabilityParseError, ClientCapabilities, EffectiveCapabilities,
     GatewayCapabilities, UpstreamCapabilities, is_supported_context_projection,
@@ -36,8 +34,8 @@ use crate::context::{
     TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 use crate::diagnostics::{
-    DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
-    GatewayDiagnostic, LspPosition, LspRange, MAX_DOCUMENT_DIAGNOSTICS,
+    DiagnosticMerge, DiagnosticSource, DocumentDiagnosticReport, GatewayDiagnostic, LspPosition,
+    LspRange, MAX_DOCUMENT_DIAGNOSTICS,
 };
 use crate::dispatch::{dispatch_incoming, parse_incoming};
 use crate::gateway::{
@@ -92,7 +90,6 @@ use diagnostics_controller::DiagnosticsController;
 use dynamic_diagnostics_controller::DynamicDiagnosticsController;
 use lifecycle_controller::LifecycleController;
 use native_integration_controller::NativeIntegrationController;
-pub use outbound_controller::DaemonLspProtocolTransport;
 use outbound_controller::OutboundController;
 #[cfg(test)]
 use outbound_controller::QueuedFrame;
@@ -146,6 +143,11 @@ where
         self.lifecycle.gateway.workspace()
     }
 
+    /// Bytes of unsaved document text this session holds.
+    pub fn retained_bytes(&self) -> u64 {
+        u64::try_from(self.lifecycle.overlays.retained_bytes()).unwrap_or(u64::MAX)
+    }
+
     /// Admits one bridge-owned frame without ambiguous post-dispatch
     /// backpressure. A consumed frame is never reported as retryable.
     pub fn try_handle_client_payload(
@@ -169,10 +171,7 @@ where
     /// Decodes and routes one already-admitted JSON-RPC payload. Responses and
     /// server notifications remain queued until a typed daemon-session
     /// transport acknowledges delivery to the bridge.
-    #[hotpath::measure(
-        label = "lsp_protocol_handle_payload",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp_protocol_handle_payload", level = "trace", skip_all)]
     pub fn handle_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
         self.prepare_payload_dispatch(now_ms);
         self.handle_prepared_payload(payload, now_ms)
@@ -202,10 +201,10 @@ where
                 closed: false,
             };
         }
-        let Ok(value) = hotpath::measure_block!(
-            "lsp.rpc.payload_json_parse",
+        let Ok(value) = ({
+            let _span = tracing::trace_span!("lsp.rpc.payload_json_parse").entered();
             serde_json::from_slice::<Value>(payload)
-        ) else {
+        }) else {
             self.enqueue_value(error_response(
                 Value::Null,
                 RpcFailure {
@@ -228,7 +227,6 @@ where
         self.poll_semantic_requests();
         self.flush_context_changes();
         self.flush_native_integration_status();
-        self.observe_outbound_queue();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(
@@ -330,7 +328,6 @@ where
         self.poll_semantic_requests();
         self.flush_context_changes();
         self.flush_native_integration_status();
-        self.observe_outbound_queue();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(
@@ -347,10 +344,7 @@ where
             }
         }
     }
-    #[hotpath::measure(
-        label = "lsp_protocol_did_open",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp_protocol_did_open", level = "trace", skip_all)]
     pub(crate) fn handle_did_open(
         &mut self,
         params: &Value,
@@ -398,10 +392,7 @@ where
         Ok(())
     }
 
-    #[hotpath::measure(
-        label = "lsp_protocol_did_change",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp_protocol_did_change", level = "trace", skip_all)]
     pub(crate) fn handle_did_change(
         &mut self,
         params: &Value,
@@ -430,9 +421,7 @@ where
             .overlays
             .change(&uri, version, &changes)
             .map_err(|error| self.close_for_overlay_error(error))?;
-        self.diagnostics.workspace_snapshots.clear();
-        self.diagnostics.workspace_failures.clear();
-        self.discard_document_context(&uri);
+        self.invalidate_document(&uri);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
             .control
@@ -460,9 +449,7 @@ where
             .overlays
             .close(&uri)
             .map_err(overlay_failure)?;
-        self.diagnostics.workspace_snapshots.clear();
-        self.diagnostics.workspace_failures.clear();
-        self.discard_document_context(&uri);
+        self.invalidate_document(&uri);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
             .control
@@ -485,9 +472,7 @@ where
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
-        self.diagnostics.workspace_snapshots.clear();
-        self.diagnostics.workspace_failures.clear();
-        self.discard_document_context(&uri);
+        self.invalidate_document(&uri);
         if matches!(
             self.lifecycle.gateway.document_saved(uri.clone()),
             FeedbackCycleResponse::Accepted
@@ -502,6 +487,12 @@ where
             }
         }
         Ok(())
+    }
+
+    fn invalidate_document(&mut self, uri: &str) {
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
+        self.discard_document_context(uri);
     }
 }
 

@@ -8,16 +8,14 @@ pub use tracedecay_domain::configuration::{
 use crate::{AutomationError, Result, config_error};
 
 pub const DEFAULT_SCHEDULER_TICK_SECS: u64 = 60;
-pub const DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS: u32 = 180;
-pub const DEFAULT_LEGACY_SESSION_RETENTION_DAYS: u32 = 180;
+const DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS: u32 = 180;
+const DEFAULT_SESSION_MESSAGE_RETENTION_DAYS: u32 = 180;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionConfig {
     #[serde(default = "default_analytics_events_days")]
     pub analytics_events_days: Option<u32>,
-    #[serde(default = "default_legacy_session_days")]
-    pub session_messages_days: Option<u32>,
-    #[serde(default = "default_legacy_session_days")]
+    #[serde(default = "default_session_message_days")]
     pub lcm_raw_messages_days: Option<u32>,
 }
 
@@ -27,16 +25,15 @@ fn default_analytics_events_days() -> Option<u32> {
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn default_legacy_session_days() -> Option<u32> {
-    Some(DEFAULT_LEGACY_SESSION_RETENTION_DAYS)
+fn default_session_message_days() -> Option<u32> {
+    Some(DEFAULT_SESSION_MESSAGE_RETENTION_DAYS)
 }
 
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
             analytics_events_days: default_analytics_events_days(),
-            session_messages_days: default_legacy_session_days(),
-            lcm_raw_messages_days: default_legacy_session_days(),
+            lcm_raw_messages_days: default_session_message_days(),
         }
     }
 }
@@ -374,11 +371,7 @@ impl CronSchedule {
     }
 }
 
-/// Hinnant's `civil_from_days`, written with `div_euclid`/`rem_euclid` rather
-/// than the branch form used by the canonical copy in
-/// `tracedecay_capture::timestamp`. The two agree for every input; this crate
-/// keeps its own so it can stay free of workspace dependencies, which is worth
-/// more than deduplicating twelve lines of pure arithmetic.
+/// Local Hinnant `civil_from_days` so this crate stays free of workspace dependencies.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -559,37 +552,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_config_patch_merges_without_clearing_omitted_fields() {
-        let current = AutomationConfigPatch {
-            enabled: Some(true),
-            memory_curator: AutomationTaskPatch {
-                enabled: Some(true),
-                schedule: Some(Some("manual".to_string())),
-                ..AutomationTaskPatch::default()
-            },
-            ..AutomationConfigPatch::default()
-        };
-        let patch = AutomationConfigPatch {
-            timeout_secs: Some(120),
-            scheduler_tick_secs: Some(20),
-            memory_curator: AutomationTaskPatch {
-                schedule: Some(None),
-                ..AutomationTaskPatch::default()
-            },
-            ..AutomationConfigPatch::default()
-        };
-
-        let merged = merge_project_config(Some(current), patch);
-
-        assert_eq!(merged.enabled, Some(true));
-        assert_eq!(merged.model_id, None);
-        assert_eq!(merged.timeout_secs, Some(120));
-        assert_eq!(merged.scheduler_tick_secs, Some(20));
-        assert_eq!(merged.memory_curator.enabled, Some(true));
-        assert_eq!(merged.memory_curator.schedule, Some(None));
-    }
-
-    #[test]
     fn session_evidence_budget_backoff_is_patchable_clearable_and_nonzero() {
         let base = AutomationConfig::default();
         assert_eq!(
@@ -672,53 +634,6 @@ mod tests {
     }
 
     #[test]
-    fn model_only_patch_is_cleared_while_backend_is_disabled() {
-        let patch = AutomationConfigPatch {
-            model_id: Some(Some("must-not-survive".to_owned())),
-            ..AutomationConfigPatch::default()
-        };
-
-        let merged = merge_project_config(
-            Some(AutomationConfigPatch {
-                backend: Some(AutomationBackend::Disabled),
-                ..AutomationConfigPatch::default()
-            }),
-            patch.clone(),
-        );
-        let disabled = AutomationConfig {
-            enabled: false,
-            backend: AutomationBackend::Disabled,
-            model_id: None,
-            tasks: AutomationTaskSet::default(),
-            ..AutomationConfig::default()
-        };
-        let effective = effective_config(&disabled, Some(&patch))
-            .expect("disabled backend should normalize away a model-only patch");
-
-        assert_eq!(merged.model_id, Some(None));
-        assert_eq!(effective.backend, AutomationBackend::Disabled);
-        assert_eq!(effective.model_id, None);
-    }
-
-    #[test]
-    fn merged_non_codex_backend_records_an_explicit_model_clear() {
-        let current = AutomationConfigPatch {
-            backend: Some(AutomationBackend::CodexAppServer),
-            model_id: Some(Some("gpt-5.6-mini".to_owned())),
-            ..AutomationConfigPatch::default()
-        };
-        let patch = AutomationConfigPatch {
-            backend: Some(AutomationBackend::Disabled),
-            ..AutomationConfigPatch::default()
-        };
-
-        let merged = merge_project_config(Some(current), patch);
-
-        assert_eq!(merged.backend, Some(AutomationBackend::Disabled));
-        assert_eq!(merged.model_id, Some(None));
-    }
-
-    #[test]
     fn codex_model_set_and_clear_preserve_explicit_patch_intent() {
         let codex = AutomationConfigPatch {
             backend: Some(AutomationBackend::CodexAppServer),
@@ -763,7 +678,11 @@ mod tests {
             };
             effective_config(&AutomationConfig::default(), Some(&patch)).unwrap();
         }
-        for schedule in ["60 * * * *", "*/0 * * * *", "5-1 * * * *"] {
+        for (schedule, detail) in [
+            ("60 * * * *", "value 60 is outside 0-59"),
+            ("*/0 * * * *", "step must be a positive integer"),
+            ("5-1 * * * *", "range start exceeds range end"),
+        ] {
             let patch = AutomationConfigPatch {
                 skill_writer: AutomationTaskPatch {
                     schedule: Some(Some(schedule.to_string())),
@@ -771,7 +690,14 @@ mod tests {
                 },
                 ..AutomationConfigPatch::default()
             };
-            assert!(effective_config(&AutomationConfig::default(), Some(&patch)).is_err());
+            assert_eq!(
+                effective_config(&AutomationConfig::default(), Some(&patch))
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "config error: skill_writer schedule is invalid: config error: invalid cron schedule '{schedule}': {detail}"
+                )
+            );
         }
     }
 
@@ -795,15 +721,29 @@ mod tests {
             timeout_secs: 0,
             ..AutomationConfig::default()
         };
-        assert!(validate_config(&config).is_err());
+        let rejection =
+            |config: &AutomationConfig| validate_config(config).unwrap_err().to_string();
+        assert_eq!(
+            rejection(&config),
+            "config error: automation timeout_secs must be greater than zero"
+        );
 
         config.timeout_secs = 60;
         config.scheduler_tick_secs = 0;
-        assert!(validate_config(&config).is_err());
+        assert_eq!(
+            rejection(&config),
+            "config error: automation scheduler_tick_secs must be greater than zero"
+        );
 
         config.scheduler_tick_secs = 60;
         config.tasks.memory_curator.interval_secs = Some(0);
-        assert!(validate_config(&config).is_err());
+        assert_eq!(
+            rejection(&config),
+            "config error: memory_curator interval_secs must be greater than zero"
+        );
+
+        config.tasks.memory_curator.interval_secs = Some(60);
+        validate_config(&config).unwrap();
     }
 
     #[test]

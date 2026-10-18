@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DomainError, ObservationContractError,
-    ObservationId, ObservationScopeV1, RetentionClass, SanitizationReceiptV1, SessionId,
+    DomainError, ObservationContractError, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    RetentionClass, SanitizationReceiptV1, SessionId,
 };
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationStoreError, ParseOffset, ProjectionStoreError,
@@ -23,21 +24,24 @@ use tracedecay_store::{
 
 use crate::admission::{HostAdmission, is_admission_cancellation};
 use crate::observation::{
-    CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
-    CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
+    CaptureObservationOutcome, CaptureObservationRequest, CaptureObservationRequestError,
+    ObservationApplicationError, ObservationCancellation,
 };
-use crate::runtime::claude::{
+use crate::runtime::hosts::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
-    ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
+    ClaudeSourceFrame, ClaudeSourceScanIdentity, identify_claude_source,
+    is_claude_session_transcript, try_scan_claude_source_frames_with_resume,
 };
+use crate::runtime::ingest::quarantine::SourceSweep;
+use crate::runtime::observation::jsonl_observation_admission::is_deterministic_content_refusal;
 use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
-    HostProviderCoverage, JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds,
-    TranscriptIngestError, TranscriptSource, persist_host_provider_coverage,
-    run_blocking_transcript_section,
+    HostProviderCoverage, JsonlPrefixRecovery, JsonlResumeState, STRICT_JSONL_BATCH_BYTES,
+    TranscriptDiscoveryBounds, TranscriptIngestError, jsonl_file_identity,
+    persist_host_provider_coverage, run_blocking_transcript_section,
 };
-use tracedecay_runtime_core::privacy::PrivacySanitizerError;
+use tracedecay_privacy::PrivacySanitizerError;
 
 pub const CLAUDE_TRANSCRIPT_RETENTION_CLASS: &str = "transcript.claude.v1";
 /// Every pass, including startup recovery, bounds its raw and parsed backlog.
@@ -71,6 +75,18 @@ pub struct ClaudeObservationIngestStats {
 }
 
 impl ClaudeObservationIngestStats {
+    /// Committed coverage a later pass resumes after. Duplicates re-commit
+    /// what an earlier pass already covered, and a deferred source commits
+    /// nothing however many bytes it read.
+    #[must_use]
+    pub fn advanced_coverage(&self) -> bool {
+        self.observations_committed > 0
+            || self.cursor_advances > 0
+            || self.records_rejected > 0
+            || self.records_quarantined > 0
+            || self.projections_completed > 0
+    }
+
     #[must_use]
     fn merge(mut self, other: Self) -> Self {
         self.transcript = self.transcript.merge(other.transcript);
@@ -133,7 +149,7 @@ impl ClaudeObservationIngestStats {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedClaudeFrame {
-    pub committed_cursor: ClaudeSourceCursorV1,
+    pub committed_cursor: ObservationSourceCursorV1,
     pub exact_duplicate: bool,
 }
 
@@ -146,7 +162,7 @@ pub enum ClaudeObservationIngestError {
     #[error("Claude observation application failed")]
     Application(#[from] ObservationApplicationError),
     #[error("Claude observation request is invalid")]
-    Request(#[from] CaptureClaudeObservationRequestError),
+    Request(#[from] CaptureObservationRequestError),
     #[error("Claude observation privacy policy is unavailable")]
     Privacy(#[from] PrivacySanitizerError),
     #[error("Claude observation store operation failed")]
@@ -223,20 +239,23 @@ enum FrameCaptureOutcome {
     Persisted(CapturedClaudeFrame),
     Rejected(SanitizationReceiptV1),
     Quarantined(SanitizationReceiptV1),
+    /// A deterministic refusal that will never succeed. The caller covers past
+    /// the frame so the source does not fail every pass.
+    Refused(ObservationCoverageReason),
 }
 
 struct FrameCaptureContext {
-    source: ClaudeSourceIdentityV1,
+    source: ObservationSourceIdentityV1,
     scope: ObservationScopeV1,
-    generation: ClaudeFileGenerationV1,
+    generation: ObservationSourceGenerationV1,
     file_identity: u64,
     retention_class: RetentionClass,
     cancellation: ObservationCancellation,
 }
 
 struct NonDurableSegment {
-    covered: ClaudeByteRangeV1,
-    reason: NonDurableFrameReason,
+    covered: ObservationSourceRangeV1,
+    reason: ObservationCoverageReason,
     sanitization_receipt: Option<SanitizationReceiptV1>,
     resume_fingerprint: u64,
 }
@@ -270,7 +289,7 @@ impl ScannedSegment {
 }
 
 /// Converts a durable observation cursor into a provider scanner cursor.
-pub fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCursor {
+pub fn scanner_cursor(cursor: Option<&ObservationSourceCursorV1>) -> StoredCursor {
     cursor.map_or_else(StoredCursor::default, |cursor| StoredCursor {
         position: cursor.byte_offset(),
         mtime: 0,
@@ -279,13 +298,19 @@ pub fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCursor {
 }
 
 fn cursor_at(
-    source: &ClaudeSourceIdentityV1,
+    source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
-    generation: ClaudeFileGenerationV1,
+    generation: ObservationSourceGenerationV1,
     offset: u64,
     resume_checkpoint: Option<(u64, u64)>,
-) -> Result<ClaudeSourceCursorV1, ObservationContractError> {
-    let cursor = ClaudeSourceCursorV1::new(source.clone(), scope.clone(), generation, offset)?;
+) -> Result<ObservationSourceCursorV1, ObservationContractError> {
+    let cursor = ObservationSourceCursorV1::for_ordering(
+        source.clone(),
+        scope.clone(),
+        generation,
+        ObservationOrderingDomainV1::FileBytes,
+        offset,
+    )?;
     Ok(
         resume_checkpoint.map_or(cursor.clone(), |(file_identity, resume_fingerprint)| {
             cursor.with_resume_checkpoint(file_identity, resume_fingerprint)
@@ -294,12 +319,12 @@ fn cursor_at(
 }
 
 fn expected_cursor_for_frame(
-    actual: Option<&ClaudeSourceCursorV1>,
-    source: &ClaudeSourceIdentityV1,
+    actual: Option<&ObservationSourceCursorV1>,
+    source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
-    generation: ClaudeFileGenerationV1,
+    generation: ObservationSourceGenerationV1,
     frame_start: u64,
-) -> Result<Option<ClaudeSourceCursorV1>, ObservationContractError> {
+) -> Result<Option<ObservationSourceCursorV1>, ObservationContractError> {
     if actual.is_some_and(|cursor| {
         cursor.generation() == generation && cursor.byte_offset() > frame_start
     }) {
@@ -312,9 +337,9 @@ fn expected_cursor_for_frame(
 }
 
 fn cursor_after_receipt(
-    actual: Option<ClaudeSourceCursorV1>,
-    committed: &ClaudeSourceCursorV1,
-) -> ClaudeSourceCursorV1 {
+    actual: Option<ObservationSourceCursorV1>,
+    committed: &ObservationSourceCursorV1,
+) -> ObservationSourceCursorV1 {
     match actual {
         Some(actual)
             if actual.generation() == committed.generation()
@@ -330,9 +355,9 @@ fn cursor_after_receipt(
 /// parsed payload.
 fn build_claude_capture_request(
     frame: &mut ClaudeSourceFrame,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
     context: &FrameCaptureContext,
-) -> Result<CaptureClaudeObservationRequest, ClaudeObservationIngestError> {
+) -> Result<CaptureObservationRequest, ClaudeObservationIngestError> {
     let parsed_record = frame
         .take_parsed_record()
         .ok_or(ClaudeObservationIngestError::MissingParsedRecord)?;
@@ -344,7 +369,7 @@ fn build_claude_capture_request(
         .and_then(|record_id| {
             ObservationId::new(record_id.to_owned()).map_err(ClaudeObservationIngestError::from)
         })?;
-    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         context.source.clone(),
         context.scope.clone(),
         context.generation,
@@ -352,7 +377,7 @@ fn build_claude_capture_request(
         parsed_record.ordering_domain(),
         native_record_id,
     )?;
-    Ok(CaptureClaudeObservationRequest::new(
+    Ok(CaptureObservationRequest::new(
         parsed_record,
         identity,
         expected_cursor,
@@ -362,33 +387,76 @@ fn build_claude_capture_request(
     .with_resume_checkpoint(context.file_identity, frame.resume_fingerprint))
 }
 
+/// A cursor advance collision means the ledger cannot prove this command, not
+/// that the source is behind. If the durable cursor already covers the range,
+/// the position is applied and catch-up must continue instead of blocking
+/// every later source.
+async fn already_applied_cursor<A: HostAdmission + ?Sized>(
+    admission: &A,
+    error: &TranscriptIngestError,
+    source: &ObservationSourceIdentityV1,
+    scope: &ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    end: u64,
+) -> Option<ObservationSourceCursorV1> {
+    if !matches!(
+        error,
+        TranscriptIngestError::HostAdmission {
+            reason: "observation_cursor_advance_collision",
+            ..
+        }
+    ) {
+        return None;
+    }
+    let durable = admission.get_source_cursor(source, scope).await.ok()??;
+    (durable.generation() == generation && durable.byte_offset() >= end).then_some(durable)
+}
+
 /// Sanitize and commit one already-framed record before any V1 sink.
 async fn capture_frame<A: HostAdmission + ?Sized>(
     admission: &A,
     frame: &mut ClaudeSourceFrame,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
     context: &FrameCaptureContext,
 ) -> Result<FrameCaptureOutcome, ClaudeObservationIngestError> {
     let request = build_claude_capture_request(frame, expected_cursor, context)?;
-    match admission
-        .capture_observation(request)
-        .await
-        .map_err(|outcome| host_admission_error("claude", outcome))?
-    {
-        CaptureClaudeObservationOutcome::Persisted {
-            outcome,
-            sanitized_record,
-            ..
-        }
-        | CaptureClaudeObservationOutcome::AcceptedForReplay {
-            outcome,
-            sanitized_record,
-            ..
-        } => {
-            let receipt = outcome.receipt();
-            if !frame.set_sanitized_record(*sanitized_record) {
-                return Err(ClaudeObservationIngestError::InvalidFrameState);
+    let captured = match admission.capture_observation(request).await {
+        Ok(captured) => captured,
+        Err(error) => {
+            // Same convergence rule as JSONL and Hermes: a refusal that
+            // re-fails identically must cover past the frame. Failing the
+            // source leaves history blocked on a record that cannot commit.
+            if is_deterministic_content_refusal(&error) && !context.cancellation.is_cancelled() {
+                let reason = if error.reason_code == Some("observation_identity_collision") {
+                    ObservationCoverageReason::ObservationIdentityCollision
+                } else {
+                    ObservationCoverageReason::AdmissionRefused
+                };
+                return Ok(FrameCaptureOutcome::Refused(reason));
             }
+            let mapped = host_admission_error("claude", error);
+            if let Some(durable) = already_applied_cursor(
+                admission,
+                &mapped,
+                &context.source,
+                &context.scope,
+                context.generation,
+                frame.end_offset,
+            )
+            .await
+            {
+                return Ok(FrameCaptureOutcome::Persisted(CapturedClaudeFrame {
+                    committed_cursor: durable,
+                    exact_duplicate: true,
+                }));
+            }
+            return Err(mapped.into());
+        }
+    };
+    match captured {
+        CaptureObservationOutcome::Persisted { outcome, .. }
+        | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
+            let receipt = outcome.receipt();
             Ok(FrameCaptureOutcome::Persisted(CapturedClaudeFrame {
                 committed_cursor: receipt.committed_cursor().clone(),
                 exact_duplicate: matches!(
@@ -398,10 +466,10 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
                 ),
             }))
         }
-        CaptureClaudeObservationOutcome::Rejected { receipt, .. } => {
+        CaptureObservationOutcome::Rejected { receipt, .. } => {
             Ok(FrameCaptureOutcome::Rejected(receipt))
         }
-        CaptureClaudeObservationOutcome::Quarantined { receipt, .. } => {
+        CaptureObservationOutcome::Quarantined { receipt, .. } => {
             Ok(FrameCaptureOutcome::Quarantined(receipt))
         }
     }
@@ -410,7 +478,7 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
 async fn advance_non_durable_covered_range<A: HostAdmission + ?Sized>(
     admission: &A,
     context: &FrameCaptureContext,
-    observation_cursor: &mut Option<ClaudeSourceCursorV1>,
+    observation_cursor: &mut Option<ObservationSourceCursorV1>,
     segment: NonDurableSegment,
     stats: &mut ClaudeObservationIngestStats,
 ) -> Result<(), ClaudeObservationIngestError> {
@@ -448,10 +516,30 @@ async fn advance_non_durable_covered_range<A: HostAdmission + ?Sized>(
         )?,
     }
     .with_resume_checkpoint(context.file_identity, resume_fingerprint);
-    let outcome = admission
+    let outcome = match admission
         .advance_non_durable_source_cursor(advance, context.cancellation.clone())
         .await
-        .map_err(|outcome| host_admission_error("claude", outcome))?;
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let mapped = host_admission_error("claude", error);
+            if let Some(durable) = already_applied_cursor(
+                admission,
+                &mapped,
+                &context.source,
+                &context.scope,
+                context.generation,
+                end,
+            )
+            .await
+            {
+                *observation_cursor = Some(durable);
+                stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
+                return Ok(());
+            }
+            return Err(mapped.into());
+        }
+    };
     *observation_cursor = Some(cursor_at(
         &context.source,
         &context.scope,
@@ -472,7 +560,7 @@ async fn advance_non_durable_covered_range<A: HostAdmission + ?Sized>(
 
 struct PreparedSource {
     capture_context: FrameCaptureContext,
-    observation_cursor: Option<ClaudeSourceCursorV1>,
+    observation_cursor: Option<ObservationSourceCursorV1>,
     segments: Vec<ScannedSegment>,
     stats: ClaudeObservationIngestStats,
 }
@@ -527,6 +615,66 @@ struct SourceProcessingContext<'a, A: ?Sized> {
     cancellation: &'a ObservationCancellation,
 }
 
+/// Chooses the key a transcript's cursor and observations live under. New
+/// transcripts use the path key. A transcript ingested under the stem key
+/// keeps it while its physical file still owns the stem cursor; any other
+/// file with that stem uses its path key instead of contending for the cursor.
+async fn resolve_claude_source<A>(
+    context: &SourceProcessingContext<'_, A>,
+    identity: &ClaudeSourceScanIdentity,
+) -> Result<
+    (
+        ObservationSourceIdentityV1,
+        Option<ObservationSourceCursorV1>,
+    ),
+    ClaudeObservationIngestError,
+>
+where
+    A: HostAdmission + ?Sized,
+{
+    let session_id = SessionId::new(identity.session_id.clone())?;
+    let path_source = ObservationSourceIdentityV1::for_source(
+        session_id.clone(),
+        SessionId::new(identity.source_id.clone())?,
+    )?;
+    let path_cursor = context
+        .admission
+        .get_source_cursor(&path_source, context.scope)
+        .await
+        .map_err(|outcome| host_admission_error("claude", outcome))?;
+    if path_cursor.is_some() {
+        return Ok((path_source, path_cursor));
+    }
+    let stem_source = ObservationSourceIdentityV1::for_source(
+        session_id,
+        SessionId::new(identity.stem_source_id.clone())?,
+    )?;
+    let Some(stem_cursor) = context
+        .admission
+        .get_source_cursor(&stem_source, context.scope)
+        .await
+        .map_err(|outcome| host_admission_error("claude", outcome))?
+    else {
+        return Ok((path_source, None));
+    };
+    let owns_stem_cursor = match stem_cursor.file_identity() {
+        // A cursor without a recorded identity cannot be attributed; it keeps
+        // the behavior it had before path keying.
+        None => true,
+        Some(recorded) => {
+            let path = identity.source_path.clone();
+            run_blocking_transcript_section("claude", move || jsonl_file_identity(&path))
+                .await?
+                .is_ok_and(|physical| physical == recorded)
+        }
+    };
+    Ok(if owns_stem_cursor {
+        (stem_source, Some(stem_cursor))
+    } else {
+        (path_source, None)
+    })
+}
+
 async fn prepare_source<A>(
     context: &SourceProcessingContext<'_, A>,
     path: &Path,
@@ -538,23 +686,27 @@ where
     if context.cancellation.is_cancelled() {
         return Err(ObservationApplicationError::Cancelled.into());
     }
-    let identity = hotpath::measure_block!(
-        "sessions.hosts.claude.identify_blocking",
-        run_blocking_transcript_section(|| identify_claude_source(path))
-    )
-    .ok_or_else(|| TranscriptIngestError::InvalidSourceIdentity {
-        provider: "claude",
-        path: path.to_path_buf(),
-    })?;
-    let source = ClaudeSourceIdentityV1::for_source(
-        SessionId::new(identity.session_id.clone())?,
-        SessionId::new(identity.source_id.clone())?,
-    )?;
-    let observation_cursor = context
-        .admission
-        .get_source_cursor(&source, context.scope)
-        .await
-        .map_err(|outcome| host_admission_error("claude", outcome))?;
+    let identity = {
+        run_blocking_transcript_section("claude", {
+            let projects_dir = context.source_adapter.projects_dir().to_path_buf();
+            let path = path.to_path_buf();
+            move || identify_claude_source(&projects_dir, &path)
+        })
+        .await?
+    };
+    let Some(identity) = identity else {
+        if !is_claude_session_transcript(path) {
+            return Ok(SourcePreparation::Finished(
+                ClaudeObservationIngestStats::default(),
+            ));
+        }
+        return Err(TranscriptIngestError::InvalidSourceIdentity {
+            provider: "claude",
+            path: path.to_path_buf(),
+        }
+        .into());
+    };
+    let (source, observation_cursor) = resolve_claude_source(context, &identity).await?;
     let previous = scanner_cursor(observation_cursor.as_ref());
     let resume_state = observation_cursor.as_ref().and_then(|cursor| {
         Some(JsonlResumeState {
@@ -563,18 +715,37 @@ where
             fingerprint: cursor.resume_fingerprint()?,
         })
     });
-    let Some(mut scan) = hotpath::measure_block!(
-        "sessions.hosts.claude.scan_blocking",
-        run_blocking_transcript_section(|| {
-            try_scan_claude_source_frames_with_resume(
-                identity,
-                previous,
-                max_new_bytes,
-                resume_state,
-            )
-        })
-    )?
-    else {
+    let mut prefix_recovery = JsonlPrefixRecovery::Report;
+    let scan = loop {
+        let scan = {
+            run_blocking_transcript_section("claude", {
+                let identity = identity.clone();
+                let prefix_recovery = prefix_recovery.clone();
+                move || {
+                    try_scan_claude_source_frames_with_resume(
+                        identity,
+                        previous,
+                        max_new_bytes,
+                        resume_state,
+                        prefix_recovery,
+                    )
+                }
+            })
+            .await?
+        }?;
+        // Only `Report` stops at a diverged prefix, and the retry supplies
+        // checkpoints, so this runs at most twice.
+        if !scan.as_ref().is_some_and(|scan| scan.prefix_diverged) {
+            break scan;
+        }
+        let committed = context
+            .admission
+            .committed_source_cursors(&source, context.scope)
+            .await
+            .map_err(|outcome| host_admission_error("claude", outcome))?;
+        prefix_recovery = JsonlPrefixRecovery::committed(&committed);
+    };
+    let Some(mut scan) = scan else {
         return Ok(SourcePreparation::Finished(
             ClaudeObservationIngestStats::default(),
         ));
@@ -607,14 +778,18 @@ where
             end_offset: covered_through,
         };
     }
-    let retained = hotpath::measure_block!(
-        "sessions.hosts.claude.scope_blocking",
-        run_blocking_transcript_section(|| {
-            context
-                .source_adapter
-                .retain_scoped_frames(&mut scan, context.project_root)
+    let (scan, retained) = {
+        run_blocking_transcript_section("claude", {
+            let source_adapter = context.source_adapter.clone();
+            let project_root = context.project_root.to_path_buf();
+            move || {
+                let retained = source_adapter.retain_scoped_frames(&mut scan, &project_root);
+                (scan, retained)
+            }
         })
-    );
+        .await?
+    };
+    let mut scan = scan;
     scan.coverage = coverage;
     if retained.is_none() {
         return Ok(SourcePreparation::Finished(deferred_source_stats(
@@ -622,7 +797,20 @@ where
         )));
     }
 
-    let generation = ClaudeFileGenerationV1::new(scan.file_generation)?;
+    let generation = ObservationSourceGenerationV1::new(scan.file_generation)?;
+    if let Some(previous) = observation_cursor
+        .as_ref()
+        .map(ObservationSourceCursorV1::generation)
+        && previous != generation
+    {
+        let (ClaudeFrameCoverage::Complete { start_offset, .. }
+        | ClaudeFrameCoverage::Deferred { start_offset, .. }) = coverage;
+        context
+            .admission
+            .begin_source_rewrite(&source, context.scope, previous, generation, start_offset)
+            .await
+            .map_err(|outcome| host_admission_error("claude", outcome))?;
+    }
     let retention_class = RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS)?;
     let capture_context = FrameCaptureContext {
         source,
@@ -647,21 +835,22 @@ where
 async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
     admission: &A,
     capture_context: &FrameCaptureContext,
-    observation_cursor: &mut Option<ClaudeSourceCursorV1>,
+    observation_cursor: &mut Option<ObservationSourceCursorV1>,
     segment: ScannedSegment,
     stats: &mut ClaudeObservationIngestStats,
 ) -> Result<bool, ClaudeObservationIngestError> {
     let resume_fingerprint = segment.resume_fingerprint();
     match segment {
         ScannedSegment::Skipped(skipped) => {
-            let covered = ClaudeByteRangeV1::new(skipped.offset, skipped.end_offset)?;
+            let covered = ObservationSourceRangeV1::new(skipped.offset, skipped.end_offset)?;
             let reason = match skipped.reason {
-                ClaudeSkippedFrameReason::Whitespace => NonDurableFrameReason::BlankFrame,
-                ClaudeSkippedFrameReason::OutOfScope => NonDurableFrameReason::OutOfScope,
-                ClaudeSkippedFrameReason::Malformed | ClaudeSkippedFrameReason::Oversized => {
-                    stats.deferred_sources = 1;
-                    return Ok(false);
+                ClaudeSkippedFrameReason::Whitespace => ObservationCoverageReason::BlankFrame,
+                ClaudeSkippedFrameReason::OutOfScope => ObservationCoverageReason::OutOfScope,
+                ClaudeSkippedFrameReason::RetainedPrefix => {
+                    ObservationCoverageReason::RetainedPrefix
                 }
+                ClaudeSkippedFrameReason::Malformed => ObservationCoverageReason::MalformedFrame,
+                ClaudeSkippedFrameReason::Oversized => ObservationCoverageReason::OversizedFrame,
             };
             advance_non_durable_covered_range(
                 admission,
@@ -685,7 +874,7 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
                 capture_context.generation,
                 frame.offset,
             )?;
-            let range = ClaudeByteRangeV1::new(frame.offset, frame.end_offset)?;
+            let range = ObservationSourceRangeV1::new(frame.offset, frame.end_offset)?;
             match capture_frame(admission, &mut frame, expected, capture_context).await? {
                 FrameCaptureOutcome::Persisted(captured) => {
                     *observation_cursor = Some(cursor_after_receipt(
@@ -708,8 +897,24 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
                         observation_cursor,
                         NonDurableSegment {
                             covered: range,
-                            reason: NonDurableFrameReason::SanitizerRejected,
+                            reason: ObservationCoverageReason::SanitizerRejected,
                             sanitization_receipt: Some(receipt),
+                            resume_fingerprint,
+                        },
+                        stats,
+                    )
+                    .await?;
+                }
+                FrameCaptureOutcome::Refused(reason) => {
+                    stats.records_rejected = stats.records_rejected.saturating_add(1);
+                    advance_non_durable_covered_range(
+                        admission,
+                        capture_context,
+                        observation_cursor,
+                        NonDurableSegment {
+                            covered: range,
+                            reason,
+                            sanitization_receipt: None,
                             resume_fingerprint,
                         },
                         stats,
@@ -724,7 +929,7 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
                         observation_cursor,
                         NonDurableSegment {
                             covered: range,
-                            reason: NonDurableFrameReason::SanitizerQuarantined,
+                            reason: ObservationCoverageReason::SanitizerQuarantined,
                             sanitization_receipt: Some(receipt),
                             resume_fingerprint,
                         },
@@ -780,7 +985,7 @@ enum ClaudeWindowedCaptureFailure {
     /// The admission batch demands per-frame capture (a non-durable record in
     /// the window or a store-level scalar-fallback verdict). Nothing from the
     /// failed window committed; the carried stats cover only committed work.
-    ScalarReplay(ClaudeObservationIngestStats),
+    ScalarReplay(Box<ClaudeObservationIngestStats>),
     Error(ClaudeObservationIngestError),
 }
 
@@ -790,8 +995,8 @@ enum ClaudeWindowedCaptureFailure {
 async fn capture_frame_window<A: HostAdmission + ?Sized>(
     admission: &A,
     context: &FrameCaptureContext,
-    observation_cursor: &mut Option<ClaudeSourceCursorV1>,
-    window: &mut Vec<Box<ClaudeSourceFrame>>,
+    observation_cursor: &mut Option<ObservationSourceCursorV1>,
+    window: &mut Vec<ClaudeSourceFrame>,
     stats: &mut ClaudeObservationIngestStats,
 ) -> Result<(), ClaudeWindowedCaptureFailure> {
     let frames = std::mem::take(window);
@@ -832,8 +1037,8 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
             }
             for outcome in outcomes {
                 match outcome {
-                    CaptureClaudeObservationOutcome::Persisted { outcome, .. }
-                    | CaptureClaudeObservationOutcome::AcceptedForReplay { outcome, .. } => {
+                    CaptureObservationOutcome::Persisted { outcome, .. }
+                    | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
                         let receipt = outcome.receipt();
                         *observation_cursor = Some(cursor_after_receipt(
                             observation_cursor.take(),
@@ -856,10 +1061,10 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
                     // a time and surfaces non-durable outcomes inline. Either
                     // way the per-frame replay pass owns typed rejected and
                     // quarantined coverage advances.
-                    CaptureClaudeObservationOutcome::Rejected { .. }
-                    | CaptureClaudeObservationOutcome::Quarantined { .. } => {
-                        return Err(ClaudeWindowedCaptureFailure::ScalarReplay(std::mem::take(
-                            stats,
+                    CaptureObservationOutcome::Rejected { .. }
+                    | CaptureObservationOutcome::Quarantined { .. } => {
+                        return Err(ClaudeWindowedCaptureFailure::ScalarReplay(Box::new(
+                            std::mem::take(stats),
                         )));
                     }
                 }
@@ -868,8 +1073,18 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
         }
         Err(outcome) => {
             if outcome.recovery.is_some() && !context.cancellation.is_cancelled() {
-                return Err(ClaudeWindowedCaptureFailure::ScalarReplay(std::mem::take(
-                    stats,
+                return Err(ClaudeWindowedCaptureFailure::ScalarReplay(Box::new(
+                    std::mem::take(stats),
+                )));
+            }
+            // A batched advance collision does not say which frame is uncovered.
+            // Replay one frame at a time from the durable cursor: frames the
+            // cursor already covers stay applied, and only a real miss fails.
+            if outcome.reason_code == Some("observation_cursor_advance_collision")
+                && !context.cancellation.is_cancelled()
+            {
+                return Err(ClaudeWindowedCaptureFailure::ScalarReplay(Box::new(
+                    std::mem::take(stats),
                 )));
             }
             Err(ClaudeWindowedCaptureFailure::Error(
@@ -893,7 +1108,7 @@ async fn apply_prepared_source_windowed<A: HostAdmission + ?Sized>(
         segments,
         mut stats,
     } = prepared;
-    let mut window: Vec<Box<ClaudeSourceFrame>> = Vec::new();
+    let mut window: Vec<ClaudeSourceFrame> = Vec::new();
     let fail = |stats: ClaudeObservationIngestStats, error: ClaudeObservationIngestError| {
         ClaudeWindowedCaptureFailure::Error(terminal_error_after_progress(stats, error))
     };
@@ -903,7 +1118,7 @@ async fn apply_prepared_source_windowed<A: HostAdmission + ?Sized>(
         }
         match segment {
             ScannedSegment::Frame(frame) => {
-                window.push(frame);
+                window.push(*frame);
                 if window.len() >= CLAUDE_CAPTURE_WINDOW_FRAMES {
                     capture_frame_window(
                         admission,
@@ -976,42 +1191,59 @@ async fn process_source<A>(
 where
     A: HostAdmission + ?Sized,
 {
-    match prepare_source(context, path, max_new_bytes).await? {
-        SourcePreparation::Finished(stats) => Ok(stats),
-        SourcePreparation::Ready(prepared) => {
-            match apply_prepared_source_windowed(*prepared, context.admission, context.cancellation)
-                .await
-            {
-                Ok(stats) => Ok(stats),
-                Err(ClaudeWindowedCaptureFailure::Error(error)) => Err(error),
-                Err(ClaudeWindowedCaptureFailure::ScalarReplay(committed)) => {
-                    // Nothing from the refused window committed, so a fresh
-                    // scan from the durable cursor reproduces exactly the
-                    // uncaptured tail; per-frame capture then lands typed
-                    // rejected/quarantined coverage for the offending record.
-                    let replay = match prepare_source(context, path, max_new_bytes).await {
-                        Ok(SourcePreparation::Finished(stats)) => stats,
-                        Ok(SourcePreparation::Ready(prepared)) => {
-                            match apply_prepared_source(
-                                *prepared,
-                                context.admission,
-                                context.cancellation,
-                            )
-                            .await
-                            {
-                                Ok(stats) => stats,
-                                Err(error) => {
-                                    return Err(merge_committed_into_error(committed, error));
-                                }
+    let prepared = match prepare_source(context, path, max_new_bytes).await? {
+        SourcePreparation::Finished(stats) => return Ok(stats),
+        SourcePreparation::Ready(prepared) => prepared,
+    };
+    let source = prepared.capture_context.source.clone();
+    let generation = prepared.capture_context.generation;
+    let stats =
+        match apply_prepared_source_windowed(*prepared, context.admission, context.cancellation)
+            .await
+        {
+            Ok(stats) => stats,
+            Err(ClaudeWindowedCaptureFailure::Error(error)) => return Err(error),
+            Err(ClaudeWindowedCaptureFailure::ScalarReplay(committed)) => {
+                // Nothing from the refused window committed, so a fresh
+                // scan from the durable cursor reproduces exactly the
+                // uncaptured tail; per-frame capture then lands typed
+                // rejected/quarantined coverage for the offending record.
+                let replay = match prepare_source(context, path, max_new_bytes).await {
+                    Ok(SourcePreparation::Finished(stats)) => stats,
+                    Ok(SourcePreparation::Ready(prepared)) => {
+                        match apply_prepared_source(
+                            *prepared,
+                            context.admission,
+                            context.cancellation,
+                        )
+                        .await
+                        {
+                            Ok(stats) => stats,
+                            Err(error) => {
+                                return Err(merge_committed_into_error(*committed, error));
                             }
                         }
-                        Err(error) => return Err(merge_committed_into_error(committed, error)),
-                    };
-                    Ok(committed.merge(replay))
-                }
+                    }
+                    Err(error) => return Err(merge_committed_into_error(*committed, error)),
+                };
+                (*committed).merge(replay)
             }
-        }
+        };
+    // A deferred pass has not yet read the new generation to the end, so a
+    // record it has not offered again may still follow.
+    if stats.deferred_sources == 0 {
+        context
+            .admission
+            .complete_source_rewrite(&source, context.scope, generation)
+            .await
+            .map_err(|outcome| {
+                merge_committed_into_error(
+                    stats.clone(),
+                    host_admission_error("claude", outcome).into(),
+                )
+            })?;
     }
+    Ok(stats)
 }
 
 /// Folds windowed-phase committed stats into a replay failure so terminal
@@ -1031,7 +1263,11 @@ fn merge_committed_into_error(
     }
 }
 
-#[hotpath::measure(label = "sessions.hosts.claude.drain_projection", future = true)]
+#[tracing::instrument(
+    name = "sessions.hosts.claude.drain_projection",
+    level = "trace",
+    skip_all
+)]
 pub async fn drain_projection_queue<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
@@ -1080,39 +1316,58 @@ fn frontier_store_error(
     .into()
 }
 
+/// Sources this pass will not visit.
+///
+/// A list longer than the page is the next rotation, not a failed pass. Once
+/// the frontier has walked the list once, later pages are refresh, and the
+/// unseen tail must not keep history retrying. A truncated discovery still
+/// defers: files the walk never returned are not covered by the frontier.
+fn claude_rotation_deferred(total: usize, byte_offset: u64, discovery_truncated: bool) -> usize {
+    let covered_once = byte_offset >= u64::try_from(total).unwrap_or(u64::MAX);
+    let mut deferred = if covered_once {
+        0
+    } else {
+        total.saturating_sub(MAX_CLAUDE_SOURCES_PER_PASS)
+    };
+    if discovery_truncated {
+        deferred = deferred.max(1);
+    }
+    deferred
+}
+
+/// The pass's window of sources, the sources it defers, and whether the
+/// listing is longer than one window, so the frontier must keep rotating.
 async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
     source: &ClaudeSource,
-    project_root: &Path,
-) -> Result<(Vec<PathBuf>, usize), ClaudeObservationIngestError> {
-    let discovery = hotpath::measure_block!(
-        "sessions.hosts.claude.discover_blocking",
-        run_blocking_transcript_section(|| {
-            source
-                .discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
+) -> Result<(Vec<PathBuf>, usize, bool), ClaudeObservationIngestError> {
+    let discovery = {
+        run_blocking_transcript_section("claude", {
+            let source = source.clone();
+            move || source.discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
         })
-    );
+        .await?
+    };
     let discovery_truncated = discovery.is_truncated();
     let mut paths = discovery.paths;
     paths.sort();
     paths.dedup();
     if paths.is_empty() {
-        return Ok((paths, 0));
+        return Ok((paths, 0, false));
     }
     let frontier = admission
         .get_parse_offset(scope, CLAUDE_SOURCE_FRONTIER_KEY)
         .await
         .map_err(|error| frontier_store_error("read Claude source frontier", error))?
         .unwrap_or_default();
-    let start = usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % paths.len();
+    let total = paths.len();
+    let start = usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % total;
     paths.rotate_left(start);
-    let mut deferred = paths.len().saturating_sub(MAX_CLAUDE_SOURCES_PER_PASS);
-    if discovery_truncated {
-        deferred = deferred.max(1);
-    }
+    let deferred = claude_rotation_deferred(total, frontier.byte_offset, discovery_truncated);
+    let rotating = total > MAX_CLAUDE_SOURCES_PER_PASS;
     paths.truncate(MAX_CLAUDE_SOURCES_PER_PASS);
-    Ok((paths, deferred))
+    Ok((paths, deferred, rotating))
 }
 
 async fn advance_source_frontier<A: HostAdmission + ?Sized>(
@@ -1143,8 +1398,30 @@ async fn advance_source_frontier<A: HostAdmission + ?Sized>(
         .map_err(|error| frontier_store_error("advance Claude source frontier", error))
 }
 
+/// Folds one source failure the sweep did not absorb into the pass summary:
+/// failed source count, first reason code, and whether every failure was
+/// retryable.
+fn note_source_failure(
+    summary: &mut Option<(u64, &'static str, bool)>,
+    path: &Path,
+    error: &ClaudeObservationIngestError,
+) {
+    let failure = crate::runtime::classify_claude_observation_failure(error);
+    let summary = summary.get_or_insert((0, failure.reason_code, failure.retryable));
+    summary.0 = summary.0.saturating_add(1);
+    summary.2 &= failure.retryable;
+    tracing::warn!(
+        source = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown"),
+        reason_code = failure.reason_code,
+        retryable = failure.retryable,
+        "Claude observation source ingest failed"
+    );
+}
+
 /// Ingest one Claude source through caller-prepared project admission authority.
-#[hotpath::measure(label = "sessions.hosts.claude.ingest_source", future = true)]
 pub async fn ingest_source_with_observations_with_admission<A>(
     source: &ClaudeSource,
     project_root: &Path,
@@ -1152,6 +1429,35 @@ pub async fn ingest_source_with_observations_with_admission<A>(
     admission: &A,
     max_new_bytes: Option<u64>,
     cancellation: ObservationCancellation,
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
+where
+    A: HostAdmission + ?Sized,
+{
+    ingest_source_with_sweep(
+        source,
+        project_root,
+        scope,
+        admission,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new("claude", None),
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "sessions.hosts.claude.ingest_source",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn ingest_source_with_sweep<A>(
+    source: &ClaudeSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    admission: &A,
+    max_new_bytes: Option<u64>,
+    cancellation: ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
 where
     A: HostAdmission + ?Sized,
@@ -1166,7 +1472,7 @@ where
         scope: &scope,
         cancellation: &cancellation,
     };
-    let (paths, deferred) = scheduled_source_paths(admission, &scope, source, project_root).await?;
+    let (paths, deferred, rotating) = scheduled_source_paths(admission, &scope, source).await?;
     let scheduled_source_count = paths.len();
     let mut stats = ClaudeObservationIngestStats {
         deferred_sources: u64::try_from(deferred).unwrap_or(u64::MAX),
@@ -1181,6 +1487,14 @@ where
             continue;
         }
         attempted_sources = attempted_sources.saturating_add(1);
+        let claim = match sweep.observe_file(&path).await {
+            Ok(Some(claim)) => claim,
+            Ok(None) => continue,
+            Err(error) => {
+                note_source_failure(&mut source_failures, &path, &error.into());
+                continue;
+            }
+        };
         let source_budget = remaining_bytes.min(STRICT_JSONL_BATCH_BYTES);
         remaining_bytes = remaining_bytes.saturating_sub(source_budget);
         let outcome = match process_source(&processing_context, &path, Some(source_budget)).await {
@@ -1189,15 +1503,9 @@ where
                 if let Some(progress) = error.accumulated_stats() {
                     stats = stats.merge(progress.clone());
                 }
-                let failure = crate::runtime::classify_claude_observation_failure(&error);
-                let summary =
-                    source_failures.get_or_insert((0_u64, failure.reason_code, failure.retryable));
-                summary.0 = summary.0.saturating_add(1);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "Claude observation source ingest failed"
-                );
+                if let Err(error) = sweep.refused(claim, error) {
+                    note_source_failure(&mut source_failures, &path, &error);
+                }
                 continue;
             }
         };
@@ -1210,7 +1518,7 @@ where
         }
         stats = stats.merge(outcome);
     }
-    if (deferred > 0 || attempted_sources < scheduled_source_count)
+    if (rotating || deferred > 0 || attempted_sources < scheduled_source_count)
         && let Err(error) = advance_source_frontier(admission, &scope, attempted_sources).await
     {
         return Err(terminal_error_after_progress(stats, error));
@@ -1254,6 +1562,7 @@ where
             HostProviderCoverage::Partial
         },
         merged.deferred_sources,
+        None,
     )
     .await?;
     Ok(merged)
@@ -1270,17 +1579,42 @@ pub async fn ingest_user_sessions_with_admission<A>(
 where
     A: HostAdmission + ?Sized,
 {
+    ingest_user_sessions_with_sweep(
+        profile_root,
+        session_id,
+        registered_roots,
+        admission,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new("claude", None),
+    )
+    .await
+}
+
+pub(crate) async fn ingest_user_sessions_with_sweep<A>(
+    profile_root: &Path,
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
+    admission: &A,
+    max_new_bytes: Option<u64>,
+    cancellation: ObservationCancellation,
+    sweep: &mut SourceSweep,
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
+where
+    A: HostAdmission + ?Sized,
+{
     let Some(source) = ClaudeSource::new() else {
         return Ok(ClaudeObservationIngestStats::default());
     };
     let source = source.for_user_scope(session_id, registered_roots);
-    ingest_source_with_observations_with_admission(
+    ingest_source_with_sweep(
         &source,
         profile_root,
         ObservationScopeV1::Profile,
         admission,
         max_new_bytes,
         cancellation,
+        sweep,
     )
     .await
 }

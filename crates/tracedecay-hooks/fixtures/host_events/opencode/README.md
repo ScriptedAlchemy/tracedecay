@@ -1,14 +1,21 @@
 # OpenCode native plugin capture
 
-`baseline.json` is the sanitized event bundle captured from OpenCode 1.18.4.
-The edit/tool/session events were captured with `@opencode-ai/plugin` 1.15.13
-on 2026-07-21. The `lsp.updated` event was captured with
-`@opencode-ai/plugin` 1.18.4 on 2026-07-26 after an isolated custom LSP emitted
-a standard diagnostic during a real `opencode run` edit. Both captures used a
-temporary local plugin.
+`baseline.json` is the sanitized event bundle captured from OpenCode 2.0.19
+on 2026-09-29 with a temporary local V2 plugin (`@opencode/plugin` 2.0.19)
+under an isolated `$XDG_CONFIG_HOME`, during a real
+`opencode run --standalone --auto` edit of a sandbox file.
 
-Sanitization replaces project, session, call, event, patch, and result content
-with deterministic placeholders while retaining the native object keys, value
-types, event channels, and array shape. The raw `lsp.updated` event digest is
+The plugin recorded every `execute.after` tool hook and every event on
+`ctx.event.subscribe()`. The public V2 stream emitted no `file.edited`,
+`filesystem.changed`, `session.idle`, `session.status`, or `lsp.updated` event
+for that run; edits surface only through the tool hook, and the turn boundary
+is the durable `session.execution.succeeded` event, which carries no
+`location`. The bundle keeps one edit tool callback, one non-mutating tool
+callback, and that boundary event.
+
+Sanitization replaces project, session, message, call, and event identities,
+timestamps and sequence numbers, and patch, string, and result content with
+deterministic placeholders while retaining the native object keys, value
+types, hook channels, and array shape. The SHA-256 of the raw capture log is
 recorded in the bundle. The checked-in bundle contains no raw source text,
 credentials, user identity, or host paths.

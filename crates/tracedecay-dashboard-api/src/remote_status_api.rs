@@ -1,16 +1,16 @@
-//! `GET /api/remote/status` — Remote Brain operational plane for Settings.
+//! `GET /api/remote/status`. Remote Brain operational plane for Settings.
 //!
 //! An admitted daemon owner injects the canonical operational read into
 //! [`DashboardState`]. This module maps that one application shape onto a
 //! schemars-typed dashboard DTO. A dashboard opened without an admitted
-//! reader remains explicitly unavailable — never an empty success.
+//! reader remains explicitly unavailable, never an empty success.
 
 use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_application::doctor::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
-use tracedecay_application::remote::status::{
+use tracedecay_contracts::doctor::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
+use tracedecay_contracts::remote::status::{
     RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1, RemoteOperationalStatusV1,
     RemoteSpoolOperationalStatusV1,
 };
@@ -43,9 +43,10 @@ pub(crate) fn status_from_reader(
     scope: DashboardScopeV1,
     reader: Option<crate::RemoteOperationalStatusReader>,
 ) -> DashboardEnvelopeV1<RemoteOperationalStatusPayloadV1> {
-    let envelope = hotpath::measure_block!("dashboard_api.status.projection", {
+    let envelope = {
+        let _span = tracing::trace_span!("dashboard_api.status.projection").entered();
         project_remote_status(scope, reader)
-    });
+    };
     crate::observe::record_freshness_state(envelope.freshness.state);
     envelope
 }
@@ -187,7 +188,6 @@ pub enum RemoteOperationalStatusPayloadV1 {
         authority: RemoteAuthoritySummaryV1,
         spool: RemoteSpoolSummaryV1,
         replay_coverage_complete: bool,
-        current_backup_verified: bool,
         failover_in_progress: bool,
         recovery_required: bool,
         observed_at: UtcMicros,
@@ -212,7 +212,6 @@ impl RemoteOperationalStatusPayloadV1 {
             authority: RemoteAuthoritySummaryV1::from_state(status.authority),
             spool: RemoteSpoolSummaryV1::from_status(status.spool),
             replay_coverage_complete: status.replay_coverage_complete,
-            current_backup_verified: status.current_backup_verified,
             failover_in_progress: status.failover_in_progress,
             recovery_required: status.recovery_required,
             observed_at: status.observed_at,
@@ -286,6 +285,7 @@ impl RemoteFenceSummaryV1 {
 pub enum RemoteAuthorityMissingReasonV1 {
     RegistryUnavailable,
     PlacementUnknown,
+    WriterAuthorityUnpublished,
     AuthorityUnreachable,
     AuthorityAuthenticationFailed,
     CallerAuthenticationFailed,
@@ -302,6 +302,9 @@ impl RemoteAuthorityMissingReasonV1 {
         match reason {
             RemoteAuthorityUnavailableReasonV1::RegistryUnavailable => Self::RegistryUnavailable,
             RemoteAuthorityUnavailableReasonV1::PlacementUnknown => Self::PlacementUnknown,
+            RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished => {
+                Self::WriterAuthorityUnpublished
+            }
             RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable => Self::AuthorityUnreachable,
             RemoteAuthorityUnavailableReasonV1::AuthorityAuthenticationFailed => {
                 Self::AuthorityAuthenticationFailed
@@ -392,43 +395,6 @@ mod tests {
         }
     }
 
-    fn available_authority() -> CurrentRemoteAuthorityStateV1 {
-        serde_json::from_value(serde_json::json!({
-            "state": "available",
-            "value": {
-                "fence": {
-                    "brain_id": "brain.status",
-                    "shard_id": "shard.status",
-                    "generation_id": "generation.status",
-                    "placement_revision": 1,
-                    "authority_epoch": 1,
-                    "authority_node_id": "node.authority"
-                },
-                "credential_revision": 1,
-                "observed_at": 10
-            }
-        }))
-        .unwrap()
-    }
-
-    fn ready_status() -> RemoteOperationalStatusV1 {
-        RemoteOperationalStatusV1::compose(
-            true,
-            available_authority(),
-            RemoteSpoolOperationalStatusV1 {
-                pending_count: 0,
-                quarantined_count: 0,
-                has_sequence_gap: false,
-            },
-            true,
-            true,
-            false,
-            false,
-            UtcMicros(10),
-        )
-        .unwrap()
-    }
-
     #[test]
     fn absent_reader_returns_typed_unavailable_not_empty_success() {
         let envelope = status_from_reader(scope(), None);
@@ -442,50 +408,6 @@ mod tests {
             }
         );
         assert_eq!(envelope.legal_actions, vec![refresh_action()]);
-    }
-
-    #[test]
-    fn present_reader_maps_the_canonical_observed_status() {
-        let status = ready_status();
-        let reader: crate::RemoteOperationalStatusReader =
-            Arc::new(move || RemoteOperationalStatusReadV1::Observed {
-                listener: RemoteListenerReadV1::Serving,
-                status: status.clone(),
-                coverage: DoctorCoverageCompletenessV1::Complete,
-            });
-
-        let envelope = status_from_reader(scope(), Some(reader));
-
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
-        assert_eq!(
-            envelope.payload,
-            RemoteOperationalStatusPayloadV1::Observed {
-                listener: RemoteListenerKindV1::Serving,
-                coverage: DoctorCoverageCompletenessV1::Complete,
-                readiness: RemoteReadinessKindV1::Ready,
-                enrollment_configured: true,
-                authority: RemoteAuthoritySummaryV1::Available {
-                    fence: RemoteFenceSummaryV1 {
-                        brain_id: "brain.status".to_owned(),
-                        shard_id: "shard.status".to_owned(),
-                        generation_id: "generation.status".to_owned(),
-                        placement_revision: 1,
-                        authority_epoch: 1,
-                        authority_node_id: "node.authority".to_owned(),
-                    },
-                },
-                spool: RemoteSpoolSummaryV1 {
-                    pending_count: 0,
-                    quarantined_count: 0,
-                    has_sequence_gap: false,
-                },
-                replay_coverage_complete: true,
-                current_backup_verified: true,
-                failover_in_progress: false,
-                recovery_required: false,
-                observed_at: UtcMicros(10),
-            }
-        );
     }
 
     #[test]

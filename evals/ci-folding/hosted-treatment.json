@@ -1,0 +1,1160 @@
+{
+  "run_id": 36384828151,
+  "url": "https://github.com/ScriptedAlchemy/tracedecay/actions/runs/36384828151",
+  "head_sha": "3036ab39c015b3b1989e426fbf1a29c469e88627",
+  "status": "completed",
+  "conclusion": "failure",
+  "linux_complete": true,
+  "created_at": "2026-09-28T06:06:26Z",
+  "run_started_at": "2026-09-28T06:06:26Z",
+  "jobs": [
+    {
+      "id": 108808253686,
+      "name": "Test Linux core-contracts",
+      "status": "completed",
+      "conclusion": "failure",
+      "queue_seconds": 6.0,
+      "run_seconds": 1038.0,
+      "started_at": "2026-09-28T06:08:01Z",
+      "completed_at": "2026-09-28T06:25:19Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 17.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 4.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 22.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install Cargo Hauler",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run the group's partitions through Hauler",
+          "conclusion": "failure",
+          "seconds": 976.0
+        },
+        {
+          "name": "Stop the worker's Hauler daemon",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Upload Linux partition reports and timings",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "id": 108808253715,
+      "name": "Test Linux core-storage",
+      "status": "completed",
+      "conclusion": "failure",
+      "queue_seconds": 4.0,
+      "run_seconds": 822.0,
+      "started_at": "2026-09-28T06:07:59Z",
+      "completed_at": "2026-09-28T06:21:41Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 17.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 22.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install Cargo Hauler",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run the group's partitions through Hauler",
+          "conclusion": "failure",
+          "seconds": 763.0
+        },
+        {
+          "name": "Stop the worker's Hauler daemon",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Upload Linux partition reports and timings",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "id": 108808253720,
+      "name": "Test Linux root-journeys",
+      "status": "completed",
+      "conclusion": "failure",
+      "queue_seconds": 4.0,
+      "run_seconds": 1270.0,
+      "started_at": "2026-09-28T06:07:59Z",
+      "completed_at": "2026-09-28T06:29:09Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 19.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 24.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install Cargo Hauler",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run the group's partitions through Hauler",
+          "conclusion": "failure",
+          "seconds": 1206.0
+        },
+        {
+          "name": "Stop the worker's Hauler daemon",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Upload Linux partition reports and timings",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "id": 108808253724,
+      "name": "Test Linux root-transport",
+      "status": "completed",
+      "conclusion": "failure",
+      "queue_seconds": 4.0,
+      "run_seconds": 1560.0,
+      "started_at": "2026-09-28T06:07:59Z",
+      "completed_at": "2026-09-28T06:33:59Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 17.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 23.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Install Cargo Hauler",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run the group's partitions through Hauler",
+          "conclusion": "failure",
+          "seconds": 1496.0
+        },
+        {
+          "name": "Stop the worker's Hauler daemon",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Upload Linux partition reports and timings",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "id": 108808253771,
+      "name": "Test Linux runtime",
+      "status": "completed",
+      "conclusion": "failure",
+      "queue_seconds": 4.0,
+      "run_seconds": 1457.0,
+      "started_at": "2026-09-28T06:07:59Z",
+      "completed_at": "2026-09-28T06:32:16Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 17.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 21.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install Cargo Hauler",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run the group's partitions through Hauler",
+          "conclusion": "failure",
+          "seconds": 1400.0
+        },
+        {
+          "name": "Stop the worker's Hauler daemon",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Upload Linux partition reports and timings",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    },
+    {
+      "id": 108808253823,
+      "name": "Test Linux root-lib-sessions",
+      "status": "completed",
+      "conclusion": "failure",
+      "queue_seconds": 4.0,
+      "run_seconds": 1616.0,
+      "started_at": "2026-09-28T06:07:59Z",
+      "completed_at": "2026-09-28T06:34:55Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 17.0
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-linux-mold",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 20.0
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Install ast-grep",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install Cargo Hauler",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Install cargo-nextest",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 3.0
+        },
+        {
+          "name": "Check the partitions cover every test target",
+          "conclusion": "success",
+          "seconds": 2.0
+        },
+        {
+          "name": "Run the group's partitions through Hauler",
+          "conclusion": "failure",
+          "seconds": 1561.0
+        },
+        {
+          "name": "Stop the worker's Hauler daemon",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Upload Linux partition reports and timings",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Cache Rust build outputs",
+          "conclusion": "success",
+          "seconds": 1.0
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run ./.github/actions/setup-pnpm",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped",
+          "seconds": 0.0
+        },
+        {
+          "name": "Post Run actions/checkout@v7",
+          "conclusion": "success",
+          "seconds": 0.0
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "seconds": 0.0
+        }
+      ]
+    }
+  ],
+  "timings": {
+    "root-lib-sessions": {
+      "group": "root-lib-sessions",
+      "partitions": [
+        {
+          "partition": "root-lib",
+          "build": null,
+          "test": {
+            "seconds": 1219.832,
+            "exit_code": 100
+          },
+          "report": "target/nextest/linux/root-lib.xml",
+          "error": null
+        },
+        {
+          "partition": "root-sessions",
+          "build": {
+            "seconds": 240.454,
+            "exit_code": 0
+          },
+          "test": {
+            "seconds": 100.527,
+            "exit_code": 0
+          },
+          "report": "target/nextest/linux/root-sessions.xml",
+          "error": null
+        }
+      ]
+    },
+    "root-journeys": {
+      "group": "root-journeys",
+      "partitions": [
+        {
+          "partition": "root-journeys",
+          "build": {
+            "seconds": 1027.87,
+            "exit_code": 0
+          },
+          "test": {
+            "seconds": 178.599,
+            "exit_code": 100
+          },
+          "report": "target/nextest/linux/root-journeys.xml",
+          "error": null
+        }
+      ]
+    },
+    "core-contracts": {
+      "group": "core-contracts",
+      "partitions": [
+        {
+          "partition": "core-contracts",
+          "build": null,
+          "test": {
+            "seconds": 976.158,
+            "exit_code": 100
+          },
+          "report": "target/nextest/linux/core-contracts.xml",
+          "error": null
+        }
+      ]
+    },
+    "root-transport": {
+      "group": "root-transport",
+      "partitions": [
+        {
+          "partition": "root-transport",
+          "build": {
+            "seconds": 960.551,
+            "exit_code": 0
+          },
+          "test": {
+            "seconds": 437.026,
+            "exit_code": 100
+          },
+          "report": "target/nextest/linux/root-transport.xml",
+          "error": null
+        },
+        {
+          "partition": "root-dashboard-api",
+          "build": null,
+          "test": {
+            "seconds": 98.657,
+            "exit_code": 0
+          },
+          "report": "target/nextest/linux/root-dashboard-api.xml",
+          "error": null
+        }
+      ]
+    },
+    "runtime": {
+      "group": "runtime",
+      "partitions": [
+        {
+          "partition": "runtime",
+          "build": null,
+          "test": {
+            "seconds": 1399.206,
+            "exit_code": 100
+          },
+          "report": "target/nextest/linux/runtime.xml",
+          "error": null
+        }
+      ]
+    },
+    "core-storage": {
+      "group": "core-storage",
+      "partitions": [
+        {
+          "partition": "core-storage",
+          "build": null,
+          "test": {
+            "seconds": 763.126,
+            "exit_code": 100
+          },
+          "report": "target/nextest/linux/core-storage.xml",
+          "error": null
+        }
+      ]
+    }
+  },
+  "comparison": {
+    "root-lib": {
+      "tests": 805,
+      "baseline_tests": 805,
+      "inventory_identical": true,
+      "missing_tests": [],
+      "added_tests": [],
+      "failed_tests": [
+        [
+          "tracedecay",
+          "daemon::tests::bootstrap::production_composition_dashboard_persists_project_settings_over_http"
+        ]
+      ],
+      "baseline_failed_tests": [
+        [
+          "tracedecay",
+          "daemon::tests::bootstrap::production_composition_dashboard_persists_project_settings_over_http"
+        ],
+        [
+          "tracedecay",
+          "daemon::tests::bootstrap::project_registry_read_does_not_wait_for_a_blocked_project_open"
+        ]
+      ],
+      "new_failures": [],
+      "resolved_failures": [
+        [
+          "tracedecay",
+          "daemon::tests::bootstrap::project_registry_read_does_not_wait_for_a_blocked_project_open"
+        ]
+      ]
+    },
+    "root-sessions": {
+      "tests": 735,
+      "baseline_tests": 735,
+      "inventory_identical": true,
+      "missing_tests": [],
+      "added_tests": [],
+      "failed_tests": [],
+      "baseline_failed_tests": [],
+      "new_failures": [],
+      "resolved_failures": []
+    },
+    "root-journeys": {
+      "tests": 1117,
+      "baseline_tests": 1117,
+      "inventory_identical": true,
+      "missing_tests": [],
+      "added_tests": [],
+      "failed_tests": [
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "advisory_runtime_acceptance::retained_review_body_expansion_rechecks_exact_scope_and_source_access"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "application_production_reachability::every_cursor_carrying_code_operation_mints_and_spends_a_continuation"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "daemon_runtime_acceptance::authentic_callback_to_all_delivery_surfaces"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "runtime_surface_acceptance::production_primitive_code_routes_have_cli_mcp_http_parity"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::cancelling_generic_tool_reaps_child_and_closes_request"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_accepts_slow_byte_stream"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_handles_concurrent_requests_without_crosstalk"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_preserves_late_reply_within_response_grace"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_rejects_semantic_truncation_envelope_without_output"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_rejects_truncated_frame_without_output"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_retrieves_semantic_truncation_envelope"
+        ]
+      ],
+      "baseline_failed_tests": [
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "advisory_runtime_acceptance::retained_review_body_expansion_rechecks_exact_scope_and_source_access"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "application_production_reachability::every_cursor_carrying_code_operation_mints_and_spends_a_continuation"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "daemon_runtime_acceptance::authentic_callback_to_all_delivery_surfaces"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "runtime_surface_acceptance::production_primitive_code_routes_have_cli_mcp_http_parity"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::cancelling_generic_tool_reaps_child_and_closes_request"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_accepts_slow_byte_stream"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_handles_concurrent_requests_without_crosstalk"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_preserves_late_reply_within_response_grace"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_rejects_semantic_truncation_envelope_without_output"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_rejects_truncated_frame_without_output"
+        ],
+        [
+          "tracedecay::runtime_acceptance_suite",
+          "tool_client_transport::generic_tool_retrieves_semantic_truncation_envelope"
+        ]
+      ],
+      "new_failures": [],
+      "resolved_failures": []
+    },
+    "core-contracts": {
+      "tests": 3752,
+      "baseline_tests": 3752,
+      "inventory_identical": true,
+      "missing_tests": [],
+      "added_tests": [],
+      "failed_tests": [
+        [
+          "tracedecay-code-extraction::extract_alloc",
+          "incremental_walk_of_tiny_item_pays_only_for_that_item"
+        ]
+      ],
+      "baseline_failed_tests": [
+        [
+          "tracedecay-code-extraction::extract_alloc",
+          "incremental_walk_of_tiny_item_pays_only_for_that_item"
+        ]
+      ],
+      "new_failures": [],
+      "resolved_failures": []
+    },
+    "root-dashboard-api": {
+      "tests": 77,
+      "baseline_tests": 77,
+      "inventory_identical": true,
+      "missing_tests": [],
+      "added_tests": [],
+      "failed_tests": [],
+      "baseline_failed_tests": [],
+      "new_failures": [],
+      "resolved_failures": []
+    },
+    "root-transport": {
+      "tests": 651,
+      "baseline_tests": 651,
+      "inventory_identical": true,
+      "missing_tests": [],
+      "added_tests": [],
+      "failed_tests": [
+        [
+          "tracedecay::mcp_suite",
+          "mcp_handler_test::hook_runtime_request_test::project_transcript_ingest_settles_emitted_hints_in_the_served_profile"
+        ],
+        [
+          "tracedecay::transport_acceptance_suite",
+          "typed_terminal_restart_acceptance::reset_required_serving::reset_required_profile_session_store_is_served_typed_until_its_named_reset"
+        ]
+      ],
+      "baseline_failed_tests": [
+        [
+          "tracedecay::mcp_suite",
+          "mcp_handler_test::graph_query_test::redundancy_pull_request_scope_shares_one_budget_and_resumes_changed_families"
+        ],
+        [
+          "tracedecay::mcp_suite",
+          "mcp_handler_test::hook_runtime_request_test::project_transcript_ingest_settles_emitted_hints_in_the_served_profile"
+        ],
+        [
+          "tracedecay::transport_acceptance_suite",
+          "typed_terminal_restart_acceptance::reset_required_serving::reset_required_profile_session_store_is_served_typed_until_its_named_reset"
+        ]
+      ],
+      "new_failures": [],
+      "resolved_failures": [
+        [
+          "tracedecay::mcp_suite",
+          "mcp_handler_test::graph_query_test::redundancy_pull_request_scope_shares_one_budget_and_resumes_changed_families"
+        ]
+      ]
+    },
+    "runtime": {
+      "tests": 3696,
+      "baseline_tests": 3696,
+      "inventory_identical": true,
+      "missing_tests": [],
+      "added_tests": [],
+      "failed_tests": [
+        [
+          "tracedecay-store-runtime",
+          "session_registry::code_graph::sealed_publication_tests::sealed_publication_refuses_over_the_resident_memory_watermark"
+        ]
+      ],
+      "baseline_failed_tests": [
+        [
+          "tracedecay-store-runtime",
+          "session_registry::code_graph::sealed_publication_tests::sealed_publication_refuses_over_the_resident_memory_watermark"
+        ]
+      ],
+      "new_failures": [],
+      "resolved_failures": []
+    },
+    "core-storage": {
+      "tests": 2820,
+      "baseline_tests": 2820,
+      "inventory_identical": true,
+      "missing_tests": [],
+      "added_tests": [],
+      "failed_tests": [
+        [
+          "tracedecay-query",
+          "retrieval::lexical::projection::artifact::builder::tests::open_serves_the_sealed_clone_census_and_verification_recomputes_it"
+        ]
+      ],
+      "baseline_failed_tests": [
+        [
+          "tracedecay-query",
+          "retrieval::lexical::projection::artifact::builder::tests::open_serves_the_sealed_clone_census_and_verification_recomputes_it"
+        ]
+      ],
+      "new_failures": [],
+      "resolved_failures": []
+    }
+  },
+  "missing_partition_reports": [],
+  "linux_runner_minutes": 129.38333333333333,
+  "max_linux_worker_minutes": 26.933333333333334,
+  "linux_verdict_ready_minutes_from_creation": 28.483333333333334,
+  "linux_execution_span_minutes": 26.933333333333334,
+  "overall_minutes_from_creation": 28.566666666666666,
+  "baseline_summary": {
+    "workers": 8,
+    "linux_runner_minutes": 157.76666666666665,
+    "max_linux_worker_minutes": 24.266666666666666,
+    "last_linux_worker_minutes_from_creation": 25.233333333333334,
+    "linux_aggregate_minutes_from_creation": 25.933333333333334,
+    "whole_workflow_minutes_from_creation": 33.3,
+    "all_allocated_job_runner_minutes": 209.98333333333332
+  },
+  "treatment_summary": {
+    "workers": 6,
+    "linux_runner_minutes": 129.38333333333333,
+    "max_linux_worker_minutes": 26.933333333333334,
+    "last_linux_worker_minutes_from_creation": 28.483333333333334,
+    "linux_aggregate_minutes_from_creation": 28.566666666666666,
+    "whole_workflow_minutes_from_creation": 28.566666666666666,
+    "all_allocated_job_runner_minutes": 172.7
+  },
+  "comparison_summary": {
+    "testcase_count": 13653,
+    "baseline_failed_identities": 19,
+    "treatment_failed_identities": 17,
+    "new_failed_identities": 0,
+    "all_inventories_identical": true,
+    "linux_runner_minutes_saved": 28.383333333333326,
+    "linux_runner_minutes_reduction_percent": 17.990703570673983
+  },
+  "treatment_skipped_testcases": {
+    "root-lib": 0,
+    "root-sessions": 0,
+    "root-journeys": 0,
+    "core-contracts": 0,
+    "root-dashboard-api": 0,
+    "root-transport": 0,
+    "runtime": 0,
+    "core-storage": 0
+  },
+  "hauler_stop_steps": [
+    {
+      "worker": "Test Linux core-contracts",
+      "conclusion": "success"
+    },
+    {
+      "worker": "Test Linux core-storage",
+      "conclusion": "success"
+    },
+    {
+      "worker": "Test Linux root-journeys",
+      "conclusion": "success"
+    },
+    {
+      "worker": "Test Linux root-transport",
+      "conclusion": "success"
+    },
+    {
+      "worker": "Test Linux runtime",
+      "conclusion": "success"
+    },
+    {
+      "worker": "Test Linux root-lib-sessions",
+      "conclusion": "success"
+    }
+  ]
+}

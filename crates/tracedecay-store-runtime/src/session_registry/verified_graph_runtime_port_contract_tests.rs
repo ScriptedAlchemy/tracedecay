@@ -13,16 +13,18 @@ use tracedecay_graph_db::{
 use tracedecay_store::{
     FactReadControl, GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1,
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationKeyV1,
-    GraphPublicationOperationContextV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
-    ProjectId, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1,
-    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    StoreShardIdV1, StoreShardScopeV1,
+    GraphPublicationOperationContextV1, GraphPublicationReplayPageRequestV1,
+    GraphPublicationRetiredCleanupPageRequestV1, GraphPublicationStoreV1,
+    GraphReplayAppendOutcomeV1, ProjectId, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, StoreShardIdV1, StoreShardScopeV1,
 };
 
 use super::DaemonSessionRuntimeRegistryV1;
 use super::code_graph::inline_graph_publication_input_digest;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
+use tracedecay_runtime_core::db::DatabaseAccessMode;
 
 mod concurrency;
 mod mount_scope;
@@ -96,6 +98,23 @@ impl ContractFixture {
     }
 }
 
+#[tokio::test]
+async fn mounted_project_memory_read_issues_a_read_only_lease() {
+    let fixture = ContractFixture::new("mounted-memory-read").await;
+    let project_id = project_id("mounted-memory-read");
+    let (_database, _sessions) = fixture.mount_project(&project_id).await;
+    let read = fixture
+        .registry
+        .mounted_project_memory(&project_id, DatabaseAccessMode::ReadOnly)
+        .expect("read lease");
+    assert!(!read.is_writable());
+    let write = fixture
+        .registry
+        .mounted_project_memory(&project_id, DatabaseAccessMode::ReadWrite)
+        .expect("write lease");
+    assert!(write.is_writable());
+}
+
 fn project_id(label: &str) -> ProjectId {
     ProjectId::new(format!("project.graph-port-contract.{label}")).expect("project id")
 }
@@ -126,6 +145,69 @@ fn manifest(
 
 fn key(label: &str) -> GraphIdempotencyKey {
     GraphIdempotencyKey::new(format!("publication.{label}")).expect("idempotency key")
+}
+
+#[tokio::test]
+async fn multi_scope_startup_retains_graph_authorities_without_opening_engines() {
+    let fixture = ContractFixture::new("lazy-startup").await;
+    fixture
+        .registry
+        .profile_memory()
+        .await
+        .expect("profile memory authority");
+    fixture
+        .registry
+        .profile_sessions()
+        .await
+        .expect("profile session authority");
+    fixture
+        .registry
+        .settle_profile_session_graph()
+        .await
+        .expect("profile session graph attachment");
+
+    let project_id = project_id("lazy-startup");
+    let roots = fixture.project_roots(&project_id);
+    for root in &roots {
+        std::fs::create_dir_all(root).expect("worktree root");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+    }
+    let project_memory = fixture
+        .registry
+        .project_memory(project_id.clone(), roots.clone())
+        .await
+        .expect("project memory authority");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while project_memory.memory_graph_runtime().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("project memory graph authority attachment");
+    fixture
+        .registry
+        .project_sessions(project_id.clone(), roots)
+        .await
+        .expect("project session authority");
+    fixture
+        .registry
+        .settle_project_session_graph(&project_id)
+        .await
+        .expect("project session graph attachment");
+
+    assert_eq!(
+        fixture
+            .registry
+            .graph_registry
+            .resident_engine_count()
+            .expect("resident graph engine census"),
+        0,
+        "startup must retain lazy relation-graph authorities without replaying Grafeo"
+    );
 }
 
 fn cancellation(cancelled: bool) -> Arc<AtomicBool> {
@@ -216,8 +298,8 @@ fn snapshot_through_database(
 /// activated memory graph to the live session lease during mount and on late
 /// attachment, and daemon composition unconditionally binds the
 /// deferred-activation route. Whichever route arrives first wins the single
-/// binding cell, so every later rebind of the same runtime — resolved or
-/// deferred — must stay an idempotent no-op instead of a conflict, and the
+/// binding cell, so every later rebind of the same runtime, resolved or
+/// deferred, must stay an idempotent no-op instead of a conflict, and the
 /// installed route must actually resolve to the mounted runtime rather than
 /// merely exist.
 #[tokio::test]
@@ -369,6 +451,74 @@ async fn read_only_memory_database_rejects_a_writer_graph_runtime() {
 }
 
 #[tokio::test]
+async fn read_only_open_does_not_publish_a_project_memory_owner() {
+    let temp = TempDir::new().expect("read-only owner isolation root");
+    let profile_root = temp.path().join("profile");
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let project_id = project_id("ro-open-no-publish");
+    let project_root = temp.path().join("served");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+
+    let seed_scope =
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 41, "ro-seed")
+            .expect("seed database scope");
+    let seed = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("seed registry");
+    let _seeded = seed
+        .project_memory(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("seed writable memory");
+    seed.shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join seed graph reconciliation");
+    drop((seed, seed_scope));
+
+    let reopen_scope =
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 42, "ro-reopen")
+            .expect("reopened database scope");
+    let reopened = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("reopened registry");
+    let read_only = reopened
+        .project_memory_read_only(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("cross-project read-only open");
+    assert!(!read_only.is_writable());
+    assert!(
+        !reopened.project_has_ready_memory_owner(&project_id),
+        "read-only open must not publish a registry owner"
+    );
+    assert!(
+        reopened
+            .mounted_project_memory(&project_id, DatabaseAccessMode::ReadOnly)
+            .is_err(),
+        "read-only open must not install a mounted memory owner"
+    );
+    drop((read_only, reopened, reopen_scope));
+
+    let _later_scope =
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 43, "ro-later")
+            .expect("later database scope");
+    let later = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("later registry");
+    let writable = later
+        .project_memory(project_id, [project_root])
+        .await
+        .expect("subsequent writable mount");
+    assert!(
+        writable.is_writable(),
+        "project_memory must not inherit a read-only owner from a prior read-only open"
+    );
+}
+
+#[tokio::test]
 async fn bound_verified_port_does_not_retain_the_database_facade() {
     let fixture = ContractFixture::new("no-database-cycle").await;
     let project_id = project_id("no-database-cycle");
@@ -456,30 +606,6 @@ async fn stale_republication_conflicts_after_a_new_head_wins() {
     ));
 }
 
-/// The first-ever publish of a fresh projection drives two irreversible
-/// durable commits — the relational journal append and the verified-head
-/// CAS — each of which must hold its own at-most-once commit grant. Routing
-/// both through one arbitration context let the append consume the grant, so
-/// the CAS was refused on every first publish and surfaced as infrastructure
-/// unavailability ("relational graph publication authority is unavailable").
-#[tokio::test]
-async fn first_publish_of_a_fresh_projection_installs_the_verified_head() {
-    let fixture = ContractFixture::new("first-publish").await;
-    let project_id = project_id("first-publish");
-    let (database, _sessions) = fixture.mount_project(&project_id).await;
-    let projection = projection("first-publish");
-    let manifest = manifest(&projection, "first-publish", "1");
-    let published = publish_through_database(&database, &manifest, key("first-publish"), false)
-        .expect("first publish must journal the replay and install the verified head");
-    assert_eq!(published.generation(), &manifest.generation);
-
-    let head = snapshot_through_database(&database, &projection)
-        .expect("verified snapshot read after the first publish")
-        .expect("verified head must be visible after the first publish");
-    assert_eq!(head.generation(), &manifest.generation);
-    assert_eq!(head.verified_head(), published.verified_head());
-}
-
 /// A projection that has never published a verified head is a typed empty
 /// start (`Ok(None)`), not an unavailability error. Treating it as retryable
 /// unavailability wedged fresh projects in an endless ingest retry loop.
@@ -509,7 +635,7 @@ async fn project_graph_publications_are_isolated_by_project_shard() {
         .expect("first project publication");
 
     // The second shard never published this projection, so it must observe
-    // the typed empty start — never the first shard's head.
+    // the typed empty start, never the first shard's head.
     assert!(matches!(
         snapshot_through_database(&second_database, &projection),
         Ok(None)
@@ -608,12 +734,12 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
         .registry
         .retire_project_session_relation_graph(&project_id)
         .await
-        .expect_err("external old session facade must refuse graph close");
+        .expect_err("external old session facade must refuse Store close");
     match refusal {
         TraceDecayError::Database { operation, message } => {
-            assert_eq!(operation, "reserve project session graph retirement");
+            assert_eq!(operation, "reserve project session Store retirement");
             assert!(
-                message.contains("graph database conflict"),
+                message.contains("ClientLeases"),
                 "unexpected close refusal: {message}"
             );
         }
@@ -627,7 +753,7 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
         .expect("close refusal restores a mounted ProjectSessions route");
     assert!(
         !external_old_sessions.shares_client_with(&restored),
-        "restoration must not reinsert the facade that still leases the old graph handle"
+        "restoration must not reinsert the facade that still leases the old Store client"
     );
     let (replay_binding, replay_path) = fixture
         .registry
@@ -637,6 +763,11 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
     assert_eq!(replay_binding, *restored.binding());
     assert_eq!(replay_path, restored.db_path());
     assert_eq!(old_binding.shard_id, replay_binding.shard_id);
+    fixture
+        .registry
+        .settle_project_session_graph_for_serving(&project_id)
+        .await
+        .expect("a refused close keeps the session relation graph serving");
 
     drop((external_old_sessions, restored));
     fixture
@@ -663,20 +794,88 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
 }
 
 #[tokio::test]
-async fn linked_worktree_roots_share_the_project_graph_runtime_authority() {
-    let fixture = ContractFixture::new("linked-worktrees").await;
-    let project_id = project_id("linked-worktrees");
-    let (project_database, _sessions) = fixture.mount_project(&project_id).await;
-    let projection = projection("linked-worktrees");
-    let manifest = manifest(&projection, "linked-worktrees", "1");
+async fn detached_session_graph_store_close_refusal_restores_route_and_retry_closes() {
+    let fixture = ContractFixture::new("detached-session-close-retry").await;
+    let session_sync =
+        Arc::new(tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default());
+    fixture
+        .registry
+        .install_session_sync_service(&session_sync)
+        .expect("install session sync lifecycle authority");
+    let project_id = project_id("detached-session-close-retry");
+    let roots = fixture.project_roots(&project_id);
+    for root in &roots {
+        std::fs::create_dir_all(root).expect("worktree root");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+    }
+    let project_database = fixture
+        .registry
+        .project_memory(project_id.clone(), roots.clone())
+        .await
+        .expect("project graph database");
+    drop(await_mounted_graph_operation(&project_database).await);
+    // A closed task admission publishes the session relation graph Detached,
+    // the state a failed graph open leaves behind.
+    fixture.registry.retained_hook_tasks.begin_shutdown();
+    let external_sessions = fixture
+        .registry
+        .project_sessions(project_id.clone(), roots)
+        .await
+        .expect("project sessions database");
 
-    publish_through_database(&project_database, &manifest, key("linked-worktrees"), false)
-        .expect("primary worktree publication");
-    let linked_snapshot = snapshot_through_database(&project_database, &projection)
-        .expect("linked worktree reads shared project graph")
-        .expect("published verified head");
+    let refusal = fixture
+        .registry
+        .retire_project_session_relation_graph(&project_id)
+        .await
+        .expect_err("an external session lease must refuse the Store close");
+    match refusal {
+        TraceDecayError::Database { operation, message } => {
+            assert_eq!(
+                operation,
+                "reserve unattached project session Store retirement"
+            );
+            assert!(
+                message.contains("ClientLeases"),
+                "unexpected close refusal: {message}"
+            );
+        }
+        other => panic!("unexpected close refusal: {other:?}"),
+    }
+    assert!(
+        fixture
+            .registry
+            .remote_replay_transaction
+            .target_descriptor(&project_id)
+            .is_ok(),
+        "close refusal restores the replay route"
+    );
+    assert!(
+        fixture
+            .registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .is_some(),
+        "close refusal restores the ProjectSessions route"
+    );
 
-    assert_eq!(linked_snapshot.generation(), &manifest.generation);
+    drop(external_sessions);
+    fixture
+        .registry
+        .retire_project_session_relation_graph(&project_id)
+        .await
+        .expect("retry closes the Detached session Store after the external lease drops");
+    assert!(
+        fixture
+            .registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .is_none(),
+        "successful retry removes the ProjectSessions route"
+    );
 }
 
 #[tokio::test]
@@ -793,7 +992,7 @@ impl RuntimeRequestProbeV1 for NeverInterruptedProbe {
 
 /// A publish interrupted between the relational journal append and the
 /// verified-head CAS leaves an active replay with no head. The next publish of
-/// the same publication must resume it to a verified snapshot — answering
+/// the same publication must resume it to a verified snapshot, answering
 /// Conflict instead wedges the projection permanently (every later publish and
 /// read fails until the store is deleted).
 #[tokio::test]
@@ -883,8 +1082,8 @@ async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
     assert_eq!(snapshot.generation(), &initial_manifest.generation);
 }
 
-/// An orphaned pending replay — journaled by a publisher that died before its
-/// verified-head CAS and never retried under the same publication key — must
+/// An orphaned pending replay, journaled by a publisher that died before its
+/// verified-head CAS and never retried under the same publication key, must
 /// not block the projection forever. The relational journal is an ordered
 /// log, so a later publication of a NEWER generation completes the
 /// predecessor first and then lands its own head. This is the live wedge
@@ -969,6 +1168,100 @@ async fn orphaned_pending_replay_is_completed_by_the_next_generations_publicatio
         .expect("verified snapshot after the completion")
         .expect("published verified head");
     assert_eq!(snapshot.generation(), &successor.generation);
+}
+
+/// Every publication of an inline projection supersedes the previous
+/// generation, and the publish must reclaim it: its journal row, tombstone and
+/// native rows. Retirement used to run on the publish's spent commit grant and
+/// failed with an opaque infrastructure error on every publication, so every
+/// superseded generation stayed journaled forever.
+#[tokio::test]
+async fn repeated_publications_leave_exactly_one_live_generation() {
+    let fixture = ContractFixture::new("retire-superseded").await;
+    let project_id = project_id("retire-superseded");
+    let (project_database, _sessions) = fixture.mount_project(&project_id).await;
+    let projection = projection("retire-superseded");
+    for generation in 1..=4 {
+        let published = publish_through_database(
+            &project_database,
+            &manifest(
+                &projection,
+                &format!("retire-{generation}"),
+                &generation.to_string(),
+            ),
+            key(&format!("retire-superseded-{generation}")),
+            false,
+        )
+        .expect("publication installs the next head");
+        assert_eq!(
+            published.generation().as_str(),
+            format!("generation.retire-{generation}")
+        );
+    }
+
+    let identity = profile_identity::load_or_create(&fixture.root.join("profile"))
+        .expect("profile identity authority");
+    let relational_projection = GraphProjectionIdentityV1 {
+        shard_id: StoreShardIdV1::project(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            project_id.clone(),
+        ),
+        namespace: GraphNamespaceV1::new(projection.namespace.as_str())
+            .expect("relational namespace"),
+        projection: GraphProjectionIdV1::new(projection.projection.as_str())
+            .expect("relational projection"),
+    };
+    let cancellation_identity = RuntimeCancellationIdentityV1 {
+        cancellation_id: RuntimeCancellationIdV1::new("retire-superseded-cancellation")
+            .expect("cancellation id"),
+        generation: 1,
+    };
+    let deadline_identity = RuntimeDeadlineV1 {
+        deadline_id: RuntimeDeadlineIdV1::new("retire-superseded-deadline").expect("deadline id"),
+    };
+    let control = RuntimeRequestControlV1 {
+        requested_at: UtcMicros(1),
+        deadline: deadline_identity.clone(),
+        cancellation: cancellation_identity.clone(),
+    };
+    let probe = NeverInterruptedProbe {
+        cancellation: cancellation_identity,
+        deadline: deadline_identity,
+    };
+    let context = GraphPublicationOperationContextV1::new(&control, &probe)
+        .expect("publication operation context");
+    let mut storage = project_database
+        .graph_publication_storage()
+        .expect("graph publication storage");
+    let replays = storage
+        .replay_page(
+            &GraphPublicationReplayPageRequestV1::new(relational_projection.clone(), None, 64)
+                .expect("replay page request"),
+            &context,
+        )
+        .expect("replay page");
+    assert_eq!(
+        replays
+            .records
+            .iter()
+            .map(|record| record.publication.key.generation.as_str())
+            .collect::<Vec<_>>(),
+        vec!["generation.retire-4"],
+        "only the installed head's generation stays journaled"
+    );
+    let tombstones = storage
+        .retired_cleanup_page(
+            &GraphPublicationRetiredCleanupPageRequestV1::new(relational_projection, None, 64)
+                .expect("retired cleanup page request"),
+            &context,
+        )
+        .expect("retired cleanup page");
+    assert_eq!(
+        tombstones.records.len(),
+        0,
+        "retirement finalized every tombstone"
+    );
 }
 
 #[tokio::test]

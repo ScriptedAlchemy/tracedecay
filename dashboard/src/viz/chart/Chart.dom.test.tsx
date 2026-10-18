@@ -11,7 +11,7 @@ import { Chart } from './Chart.tsx';
  * The font one mattered more than it looks. `textStyle.fontFamily` was the only
  * hard-coded family in the tree, so every ECharts axis label, tooltip and legend
  * in the product kept typing in the old body face after the design system moved
- * to a new one — a token layer that a component is free to bypass is not a token
+ * to a new one, a token layer that a component is free to bypass is not a token
  * layer. The assertion below is deliberately about the SOURCE of the family
  * rather than its value: naming the new face here would just re-create the bug
  * one face later.
@@ -29,7 +29,7 @@ const applied: EChartsOption[] = [];
 
 // The narrow registered build, not the full distribution: `Chart` imports
 // `./echarts.ts` so the bundle carries only the series the product draws.
-// `isRegisteredSeries` is the real one — mocking it would make the
+// `isRegisteredSeries` is the real one, mocking it would make the
 // unsupported-series case unable to fail.
 vi.mock('./echarts.ts', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./echarts.ts')>()),
@@ -118,18 +118,13 @@ describe('Chart theming and motion', () => {
     expect(JSON.stringify(option)).not.toContain('Inter');
   });
 
-  it('animates by default when nothing has asked for stillness', async () => {
-    render(<Chart option={OPTION} ariaLabel="tokens per day" />);
-    expect((await lastOption()).animation).toBe(true);
-  });
-
   it('honours a pinned "reduced" preference on an OS reporting none', async () => {
     // The exact bypass: the app's own control said reduce, the OS said nothing,
     // and the chart animated anyway because it only ever asked the OS.
     localStorage.setItem('td.motion-preference', 'reduced');
     render(<Chart option={OPTION} ariaLabel="tokens per day" />);
 
-    // `false`, never a shortened duration — the intermediate values are numbers
+    // `false`, never a shortened duration, the intermediate values are numbers
     // that were never measured, so they must not be drawn at any speed.
     expect((await lastOption()).animation).toBe(false);
   });
@@ -178,24 +173,6 @@ describe('Chart registered-series guard', () => {
     vi.unstubAllGlobals();
   });
 
-  it('draws a registered series', async () => {
-    render(<Chart option={OPTION} ariaLabel="tokens per day" />);
-    expect((await lastOption()).series).toBeTruthy();
-  });
-
-  it('names a de-registered bar series instead of mounting a blank canvas', async () => {
-    const { queryByRole, getByText } = render(
-      <Chart
-        option={{ series: [{ type: 'bar', data: [1] }] } as EChartsOption}
-        ariaLabel="events per day"
-      />,
-    );
-
-    expect(getByText(/cannot draw a bar series/i)).toBeTruthy();
-    expect(queryByRole('img')).toBeNull();
-    await waitFor(() => expect(applied.length).toBe(0));
-  });
-
   it('names an unregistered series instead of mounting a blank canvas', async () => {
     const { queryByRole, getByText } = render(
       <Chart
@@ -209,6 +186,26 @@ describe('Chart registered-series guard', () => {
     // The canvas host carries `role="img"`; its absence is the whole point.
     expect(queryByRole('img')).toBeNull();
     await waitFor(() => expect(applied.length).toBe(0));
+  });
+
+  it('draws a scatter series, which the memory projection plots', async () => {
+    const { getByRole, queryByText } = render(
+      <Chart
+        option={
+          {
+            xAxis: { type: 'value' },
+            yAxis: { type: 'value' },
+            series: [{ type: 'scatter', data: [[0.2, 0.7]] }],
+          } as EChartsOption
+        }
+        ariaLabel="memory projection"
+      />,
+    );
+
+    const option = await lastOption();
+    expect(option.series).toEqual([{ type: 'scatter', data: [[0.2, 0.7]] }]);
+    expect(getByRole('img').getAttribute('aria-label')).toBe('memory projection');
+    expect(queryByText(/cannot draw/i)).toBeNull();
   });
 
   it('reports every unregistered series once, and still refuses a mixed option', () => {

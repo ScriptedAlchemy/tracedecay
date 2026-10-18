@@ -41,6 +41,13 @@ pub enum WorkflowRunStateError {
     InvalidPlacementReceipt,
     #[error("workflow step effect receipt is invalid or stale")]
     InvalidEffectReceipt,
+    #[error(
+        "workflow step effect receipt names placement digest {found}, but the step is placed at {expected}"
+    )]
+    PlacementDigestStale {
+        expected: ManifestDigest,
+        found: ManifestDigest,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -82,6 +89,13 @@ pub enum WorkflowStepStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum WorkflowRunCommand {
+    RebindFanOutChildRetry {
+        step_id: WorkflowStepId,
+        planned_attempt: WorkAttemptIdentityV1,
+        prior_attempt: WorkAttemptIdentityV1,
+        replacement_attempt: WorkAttemptIdentityV1,
+        retry_receipt_digest: ManifestDigest,
+    },
     SettleFanOutChildren {
         step_id: WorkflowStepId,
         attempts: Vec<WorkAttemptIdentityV1>,
@@ -127,6 +141,13 @@ pub enum WorkflowRunEventKind {
     FanOutChildrenSettled {
         step_id: WorkflowStepId,
         attempts: Vec<WorkAttemptIdentityV1>,
+    },
+    FanOutChildRetryRebound {
+        step_id: WorkflowStepId,
+        planned_attempt: WorkAttemptIdentityV1,
+        prior_attempt: WorkAttemptIdentityV1,
+        replacement_attempt: WorkAttemptIdentityV1,
+        retry_receipt_digest: ManifestDigest,
     },
     StepStarted {
         step_id: WorkflowStepId,
@@ -352,6 +373,28 @@ impl WorkflowRunProjection {
         context: WorkflowRunEventContext,
     ) -> Result<WorkflowRunEvent, WorkflowRunStateError> {
         let event = match command {
+            WorkflowRunCommand::RebindFanOutChildRetry {
+                step_id,
+                planned_attempt,
+                prior_attempt,
+                replacement_attempt,
+                retry_receipt_digest,
+            } => {
+                self.validate_fan_out_retry(
+                    &step_id,
+                    &planned_attempt,
+                    &prior_attempt,
+                    &replacement_attempt,
+                    &retry_receipt_digest,
+                )?;
+                WorkflowRunEventKind::FanOutChildRetryRebound {
+                    step_id,
+                    planned_attempt,
+                    prior_attempt,
+                    replacement_attempt,
+                    retry_receipt_digest,
+                }
+            }
             WorkflowRunCommand::SettleFanOutChildren { step_id, attempts } => {
                 self.require_running()?;
                 let plan = self
@@ -561,6 +604,21 @@ impl WorkflowRunProjection {
                 next.settled_fan_out_attempts
                     .extend(attempts.iter().cloned());
             }
+            WorkflowRunEventKind::FanOutChildRetryRebound {
+                step_id,
+                planned_attempt,
+                prior_attempt,
+                replacement_attempt,
+                retry_receipt_digest,
+            } => {
+                next.validate_fan_out_retry(
+                    step_id,
+                    planned_attempt,
+                    prior_attempt,
+                    replacement_attempt,
+                    retry_receipt_digest,
+                )?;
+            }
             WorkflowRunEventKind::StepStarted { step_id, placement } => {
                 next.require_running()?;
                 next.require_step_status(step_id, WorkflowStepStatus::Ready)?;
@@ -686,6 +744,95 @@ impl WorkflowRunProjection {
         &self.settled_fan_out_attempts
     }
 
+    pub fn active_fan_out_attempt<'a>(
+        &'a self,
+        planned_attempt: &'a WorkAttemptIdentityV1,
+    ) -> &'a WorkAttemptIdentityV1 {
+        self.history
+            .iter()
+            .rev()
+            .find_map(|event| match event.event() {
+                WorkflowRunEventKind::FanOutChildRetryRebound {
+                    planned_attempt: candidate,
+                    replacement_attempt,
+                    ..
+                } if candidate == planned_attempt => Some(replacement_attempt),
+                _ => None,
+            })
+            .unwrap_or(planned_attempt)
+    }
+
+    pub fn planned_fan_out_attempt(
+        &self,
+        active_attempt: &WorkAttemptIdentityV1,
+    ) -> Option<&WorkAttemptIdentityV1> {
+        self.fan_out_plans
+            .values()
+            .flat_map(|plan| &plan.children)
+            .map(|child| &child.attempt_identity)
+            .find(|planned| self.active_fan_out_attempt(planned) == active_attempt)
+            .or_else(|| {
+                self.history
+                    .iter()
+                    .rev()
+                    .find_map(|event| match event.event() {
+                        WorkflowRunEventKind::FanOutChildRetryRebound {
+                            planned_attempt,
+                            prior_attempt,
+                            replacement_attempt,
+                            ..
+                        } if prior_attempt == active_attempt
+                            || replacement_attempt == active_attempt =>
+                        {
+                            Some(planned_attempt)
+                        }
+                        _ => None,
+                    })
+            })
+    }
+
+    pub fn event_by_command_id(&self, command_id: &WorkCommandId) -> Option<&WorkflowRunEvent> {
+        self.history
+            .iter()
+            .find(|event| event.command_id() == command_id)
+    }
+
+    fn validate_fan_out_retry(
+        &self,
+        step_id: &WorkflowStepId,
+        planned_attempt: &WorkAttemptIdentityV1,
+        prior_attempt: &WorkAttemptIdentityV1,
+        replacement_attempt: &WorkAttemptIdentityV1,
+        retry_receipt_digest: &ManifestDigest,
+    ) -> Result<(), WorkflowRunStateError> {
+        self.require_running()?;
+        let plan = self
+            .fan_out_plans
+            .get(step_id)
+            .ok_or(WorkflowRunStateError::UnknownStep)?;
+        if !plan
+            .children
+            .iter()
+            .any(|child| &child.attempt_identity == planned_attempt)
+            || !self.released_fan_out_attempts.contains(planned_attempt)
+            || self.settled_fan_out_attempts.contains(planned_attempt)
+            || self.active_fan_out_attempt(planned_attempt) != prior_attempt
+            || replacement_attempt == prior_attempt
+            || replacement_attempt.task_id() != prior_attempt.task_id()
+            || replacement_attempt.run_id() != prior_attempt.run_id()
+            || retry_receipt_digest.validate().is_err()
+            || self
+                .fan_out_plans
+                .values()
+                .flat_map(|candidate| &candidate.children)
+                .map(|child| &child.attempt_identity)
+                .any(|candidate| self.active_fan_out_attempt(candidate) == replacement_attempt)
+        {
+            return Err(WorkflowRunStateError::InvalidTransition);
+        }
+        Ok(())
+    }
+
     fn validate_outputs(
         &self,
         step_id: &WorkflowStepId,
@@ -787,11 +934,14 @@ impl WorkflowRunProjection {
                 .validate_outputs(outputs)
                 .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt)?;
         }
-        if effect_receipt.run_id() != &self.run_id
-            || effect_receipt.step_id() != step_id
-            || effect_receipt.placement_digest() != placement.placement_digest()
-        {
+        if effect_receipt.run_id() != &self.run_id || effect_receipt.step_id() != step_id {
             return Err(WorkflowRunStateError::InvalidEffectReceipt);
+        }
+        if effect_receipt.placement_digest() != placement.placement_digest() {
+            return Err(WorkflowRunStateError::PlacementDigestStale {
+                expected: placement.placement_digest().clone(),
+                found: effect_receipt.placement_digest().clone(),
+            });
         }
         Ok(())
     }

@@ -2,7 +2,7 @@ import type {
   ExecutionTopologyMeasurementV1,
   ExecutionTopologyMetricsV1,
   MetricCoverageV1,
-} from '../../contracts/index.ts';
+} from '../../contracts/generated.ts';
 import { formatMicrosUtc } from '../../ui/format.ts';
 import { humanizeMetric } from '../../ui/metricModel.ts';
 import type { WorkResult } from './workApi.ts';
@@ -19,7 +19,7 @@ import {
  * The Plan 24 integration/stack cards, fed from the mounted
  * `operation.work.topology_metrics` read.
  *
- * Work mounts no integration apply/review/stack mutation operation — Plan 24
+ * Work mounts no integration apply/review/stack mutation operation, Plan 24
  * keeps accepted integration lowered only through the Plan 36
  * native-integration family. These builders decode the observed accounting
  * the projection publishes, cell by cell: nothing here derives a rate, sums a
@@ -27,7 +27,7 @@ import {
  */
 
 /** The Plan 26 descriptor the integration-outcome cells carry. */
-export const MERGE_ATTEMPTS_METRIC = 'work_merge_attempts_total';
+const MERGE_ATTEMPTS_METRIC = 'work_merge_attempts_total';
 
 /** The metrics read's own reason, phrased for a channel. */
 function metricsAbsence(
@@ -279,7 +279,7 @@ export function integrationOutcomesCard(
     INTEGRATION_MANDATE,
     {
       available: true,
-      value: `${coverage.observed} observed native integrations across ${readableCells.length} readable kind/outcome ${readableCells.length === 1 ? 'cell' : 'cells'}${suppressedNote} — counts are the projector's own cells, never summed here`,
+      value: `${coverage.observed} observed native integrations across ${readableCells.length} readable kind/outcome ${readableCells.length === 1 ? 'cell' : 'cells'}${suppressedNote}, counts are the projector's own cells, never summed here`,
     },
     rows,
     metricsProvenance(model, coverage, descriptorRevision, 'observed native integrations'),

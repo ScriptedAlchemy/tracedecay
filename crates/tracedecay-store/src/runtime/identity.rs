@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_canonical_text};
 pub use tracedecay_domain::{
     AuthorityEpoch, BrainId, BrainNodeId, LocatorDigest, ProjectId, RefId, RepositoryId,
@@ -51,14 +52,6 @@ macro_rules! canonical_id {
             }
         }
 
-        impl TryFrom<&str> for $name {
-            type Error = StorageRuntimeContractErrorV1;
-
-            fn try_from(value: &str) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
         impl From<$name> for String {
             fn from(value: $name) -> Self {
                 value.0
@@ -90,12 +83,10 @@ canonical_id!(
 );
 canonical_id!(RuntimeOperationPermitIdV1, "runtime operation permit id");
 canonical_id!(RuntimeTransactionIdV1, "runtime transaction id");
-// Application-layer effect and idempotency identities cannot be imported here:
-// `tracedecay-store` deliberately depends only on `tracedecay-domain`. These
-// names make the storage ownership explicit, while the checked string
+// Application-layer idempotency identities cannot be imported here:
+// `tracedecay-store` deliberately depends only on `tracedecay-domain`. This
+// name makes the storage ownership explicit, while the checked string
 // conversions above provide the lossless adapter boundary.
-canonical_id!(StoreEffectIdV1, "store effect id");
-canonical_id!(StoreEffectOrderingKeyV1, "store effect ordering key");
 canonical_id!(StoreIdempotencyKeyV1, "store idempotency key");
 
 pub(super) fn validate_canonical_id(
@@ -170,6 +161,22 @@ impl StoreShardScopeV1 {
             Self::Project { project_id }
             | Self::ProjectSessions { project_id }
             | Self::Code { project_id, .. } => Some(project_id),
+        }
+    }
+
+    /// The observation scope whose sessions this shard stores; `None` for a
+    /// shard that holds no sessions.
+    pub fn session_scope(&self) -> Option<ObservationScopeV1> {
+        match self {
+            Self::ProfileSessions => Some(ObservationScopeV1::Profile),
+            Self::ProjectSessions { project_id } => Some(ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            }),
+            Self::Profile
+            | Self::ProfileMemory
+            | Self::RemoteNode { .. }
+            | Self::Project { .. }
+            | Self::Code { .. } => None,
         }
     }
 
@@ -292,7 +299,6 @@ impl StoreIncarnationV1 {
         Ok(Self(value))
     }
 
-    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -331,7 +337,6 @@ impl StoreAuthorityEpochV1 {
         Ok(Self(value))
     }
 
-    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -525,13 +530,19 @@ pub fn graph_store_locator_path(
 mod tests {
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("canonical fixture identity")
+    fn host_temp_root(name: &str) -> PathBuf {
+        let temp_root = std::env::temp_dir();
+        let absolute_temp_root = if temp_root.is_absolute() {
+            temp_root
+        } else {
+            std::env::current_dir()
+                .expect("fixture current directory")
+                .join(temp_root)
+        };
+        absolute_temp_root.join(name)
     }
+
+    use tracedecay_domain::test_fixtures::id;
 
     #[test]
     fn profile_memory_has_a_distinct_mutable_wire_identity() {
@@ -578,25 +589,71 @@ mod tests {
     }
 
     #[test]
+    fn only_session_shards_name_a_session_scope() {
+        let project_id = id::<ProjectId>("project.identity");
+        assert_eq!(
+            StoreShardScopeV1::ProfileSessions.session_scope(),
+            Some(ObservationScopeV1::Profile)
+        );
+        assert_eq!(
+            StoreShardScopeV1::ProjectSessions {
+                project_id: project_id.clone(),
+            }
+            .session_scope(),
+            Some(ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            })
+        );
+
+        for scope in [
+            StoreShardScopeV1::Profile,
+            StoreShardScopeV1::ProfileMemory,
+            StoreShardScopeV1::RemoteNode {
+                node_id: id::<BrainNodeId>("node.identity"),
+            },
+            StoreShardScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+            StoreShardScopeV1::Code {
+                project_id: project_id.clone(),
+                repository_id: id::<RepositoryId>("repository.identity"),
+                scope: CodeShardScopeV1::Worktree {
+                    worktree_id: id::<WorktreeId>("worktree.identity"),
+                },
+            },
+        ] {
+            assert_eq!(scope.session_scope(), None, "{scope:?} holds no sessions");
+        }
+    }
+
+    #[test]
     fn canonical_locator_digest_binds_the_exact_absolute_path() {
-        let first = canonical_store_locator_digest(Path::new("/stores/a/graph-store"))
-            .expect("absolute locator");
-        let second = canonical_store_locator_digest(Path::new("/stores/b/graph-store"))
-            .expect("absolute locator");
+        let fixture = host_temp_root("tracedecay-store-locator-fixture");
+        let first_path = fixture.join("stores/a/graph-store");
+        let second_path = fixture.join("stores/b/graph-store");
+        let first = canonical_store_locator_digest(&first_path).expect("absolute locator");
+        let second = canonical_store_locator_digest(&second_path).expect("absolute locator");
 
         assert_ne!(first, second);
-        assert!(canonical_store_locator_digest(Path::new("relative/graph-store")).is_err());
+        assert_eq!(
+            canonical_store_locator_digest(Path::new("relative/graph-store"))
+                .unwrap_err()
+                .to_string(),
+            "store locator path is not canonical"
+        );
     }
 
     #[test]
     fn graph_locator_is_an_ordinary_database_file_and_shard_specific() {
-        let root = Path::new("/stores/project-a");
+        let fixture = host_temp_root("tracedecay-graph-locator-fixture");
+        let root = fixture.join("stores/project-a");
+        let other_root = fixture.join("stores/project-b");
         assert_eq!(
-            graph_store_locator_path(root, &root.join("sessions.db"))
+            graph_store_locator_path(&root, &root.join("sessions.db"))
                 .expect("canonical graph locator"),
             root.join("sessions.grafeo")
         );
-        assert!(graph_store_locator_path(root, Path::new("/stores/project-b/project.db")).is_err());
+        assert!(graph_store_locator_path(&root, &other_root.join("project.db")).is_err());
     }
 
     #[test]

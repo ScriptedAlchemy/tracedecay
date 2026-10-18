@@ -2,8 +2,8 @@
  * One entry, one period, for the two surfaces that read Doctor findings.
  *
  * Observatory's findings section and the nav rail's health dot both call
- * `/api/storage/findings`. They used to spell the key and the URL separately
- * and name different `refetchInterval`s — 30 seconds and 60. Because the key
+ * `/api/doctor/findings?family=storage`. They used to spell the key and the URL separately
+ * and name different `refetchInterval`s, 30 seconds and 60. Because the key
  * was the same, React Query never honoured both: the shared entry polled on the
  * shorter of the two whenever both were mounted, so the rail's stated minute
  * was not a period that existed. These tests hold the entry to a single
@@ -12,7 +12,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, waitFor, cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DashboardEnvelopeV1Schema, StorageFindingsPayloadV1Schema } from '../../contracts/generated.ts';
 import {
   STORAGE_FINDINGS_REFETCH_MS,
   STORAGE_FINDINGS_URL,
@@ -51,8 +50,9 @@ function findingsBody() {
       entries: [],
       report_coverage: null,
       known_families: ['storage'],
+      schema_convergences: [],
       note: 'canonical Doctor storage family contained no entries',
-      kind_statuses: [],
+      storage_kind_statuses: [],
     },
   };
 }
@@ -99,15 +99,6 @@ function renderBoth() {
 }
 
 describe('the Doctor findings read, shared by two surfaces', () => {
-  it('reads a body the generated contract accepts', () => {
-    // Guards the two tests below: they distinguish decoded answers from
-    // transport outcomes, which only means something while this fixture is one
-    // the contract admits.
-    expect(DashboardEnvelopeV1Schema(StorageFindingsPayloadV1Schema).safeParse(findingsBody()).success).toBe(
-      true,
-    );
-  });
-
   it('is one cache entry and one request, not one per caller', async () => {
     const { client } = renderBoth();
 

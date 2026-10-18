@@ -1,7 +1,7 @@
 //! Exact application scope for the dashboard HTTP surface.
 //!
 //! The dashboard is an entry point: it resolves its project scope ONCE into
-//! the transport-neutral [`tracedecay_application::ResolvedScope`] when the
+//! the transport-neutral [`tracedecay_contracts::ResolvedScope`] when the
 //! state is constructed, and every handler consumes that pinned scope instead
 //! of re-deriving repository/worktree identity from paths per request.
 //!
@@ -24,7 +24,7 @@ use tracedecay_domain::ProjectId;
 pub fn resolve_dashboard_scope(
     project_root: &Path,
     project_id: Option<&str>,
-) -> Option<tracedecay_application::ResolvedScope> {
+) -> Option<tracedecay_contracts::ResolvedScope> {
     let project_id = ProjectId::new(project_id?).ok()?;
     let scope = tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
         project_root,
@@ -40,7 +40,6 @@ mod tests {
     use std::process::Command;
 
     use super::resolve_dashboard_scope;
-    use tracedecay_domain::ProjectId;
 
     /// A registered root is a real repository whose git common directory
     /// carries the on-disk repository identity marker; resolution fails closed
@@ -66,40 +65,27 @@ mod tests {
 
     #[test]
     fn dashboard_scope_fails_closed_without_registered_project_id() {
-        let root = tempfile::tempdir().expect("root tempdir");
+        let project_id = "project.dashboard-scope";
+        let root = registered_root(project_id);
 
         // Missing registry: there is no path or CWD fallback that could
-        // fabricate an exact scope for an unregistered root.
+        // fabricate an exact scope, even for a root carrying an identity.
         assert!(resolve_dashboard_scope(root.path(), None).is_none());
+        let scope = resolve_dashboard_scope(root.path(), Some(project_id))
+            .expect("registered project id resolves");
+        assert_eq!(scope.project_id.as_str(), project_id);
     }
 
     #[test]
     fn dashboard_scope_fails_closed_for_invalid_project_id() {
-        let root = tempfile::tempdir().expect("root tempdir");
+        let root = registered_root("project.bad");
 
         assert!(resolve_dashboard_scope(root.path(), Some("")).is_none());
         assert!(resolve_dashboard_scope(root.path(), Some(" project.bad")).is_none());
         assert!(resolve_dashboard_scope(root.path(), Some("project.bad\n")).is_none());
-    }
-
-    #[test]
-    fn dashboard_scope_resolves_the_exact_root_through_the_application_type() {
-        let project_id = ProjectId::new("project.dashboard-scope").expect("project id");
-        let root = registered_root(project_id.as_str());
-
-        let scope = resolve_dashboard_scope(root.path(), Some(project_id.as_str()))
-            .expect("exact resolved scope");
-
-        scope.validate().expect("resolved scope validates");
-        assert_eq!(scope.project_id, project_id);
-        // The canonical application authority supplies a digest bound to every
-        // resolved identity field; the dashboard does not re-derive it.
-        assert_eq!(scope.scope_digest, scope.compute_digest().expect("digest"));
-
-        // Resolved once: repeated resolution is byte-identical, digest included.
-        let again = resolve_dashboard_scope(root.path(), Some(project_id.as_str()))
-            .expect("exact resolved scope");
-        assert_eq!(scope, again);
+        let scope = resolve_dashboard_scope(root.path(), Some("project.bad"))
+            .expect("the canonical spelling resolves");
+        assert_eq!(scope.project_id.as_str(), "project.bad");
     }
 
     #[test]

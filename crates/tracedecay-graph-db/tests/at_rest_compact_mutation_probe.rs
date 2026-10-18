@@ -1,9 +1,11 @@
+// Its own test binary, not a graph_db_suite module: a grafeo `compact()` probe
+// that is run explicitly by name and needs no `test-helpers` fixture.
 //! Whether a compacted store survives being written to afterwards.
 //!
 //! Ignored by default, and pure grafeo: no TraceDecay schema, no registry, no
-//! generation runtime. It exists because "seal implies compact" — freezing a
+//! generation runtime. It exists because "seal implies compact", freezing a
 //! sealed generation into a columnar base at the end of
-//! `finalize_staged_generation` — cannot ship until this answers cleanly.
+//! `finalize_staged_generation`, cannot ship until this answers cleanly.
 //!
 //! # What it found
 //!
@@ -24,8 +26,8 @@
 //! freshly allocated id collides with a base id. The next open is down a node
 //! for good.
 //!
-//! This is not reachable today — nothing in the crate calls `compact()` outside
-//! the bench lane — but it is exactly what seal-time compaction would do: the
+//! This is not reachable today, nothing in the crate calls `compact()` outside
+//! the bench lane, but it is exactly what seal-time compaction would do: the
 //! generation lifecycle deletes rows after a seal (whole-generation retirement,
 //! `generation_runtime.rs`), and quarantine markers are created and cleared on
 //! the recovery path.
@@ -33,16 +35,14 @@
 //! # Running it
 //!
 //! ```text
-//! cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
-//!   --test at_rest_compact_mutation_probe -- --ignored --nocapture
+//! bazel test //crates/tracedecay-graph-db:at_rest_compact_mutation_probe \
+//!   --test_arg=--ignored --test_arg=--nocapture --test_output=streamed
 //! ```
 //!
 //! It asserts the behaviour that *should* hold, so it fails while the defect is
 //! present. Re-run it after a grafeo bump: when it passes, this blocker is
 //! cleared and the seal-time compaction in `docs/graph-at-rest/README.md` phase
 //! 2 becomes implementable.
-
-#![cfg(feature = "graph-disk-tier")]
 
 use grafeo_common::types::Value;
 use grafeo_core::graph::GraphStore;

@@ -1,16 +1,20 @@
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior, params,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_runtime_core::native_runtime;
 
 use super::*;
-use crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction;
-use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
+use crate::runtime::git_correlation::{
+    CommitRelationFilter, GIT_HISTORY_SEQUENCE_FRONTIER_KEY, GitEvidenceBatch, GitEvidencePass,
+    GitEvidenceWriter, GitRefFilter, SessionsForQuery, converge_git_evidence_pass,
+    ensure_git_correlation_receipt_schema_in_transaction, open_git_evidence_view, read_meta_value,
+};
 
 impl GitCorrelationWriteTxn for Transaction {
     async fn commit(self) -> Result<(), GitCorrelationError> {
@@ -22,24 +26,19 @@ impl GitCorrelationWriteTxn for Transaction {
 
 struct TestStore {
     connection: TestConnection,
-    graph: std::sync::Arc<MemoryEvidenceGraphRuntime>,
+    fail_next_write: AtomicBool,
 }
 
 impl TestStore {
     fn open(path: &Path) -> Self {
-        Self::open_with_graph(
-            path,
-            std::sync::Arc::new(MemoryEvidenceGraphRuntime::default()),
-        )
-    }
-
-    /// Reopen against the graph state a prior store instance published, the
-    /// way a restarted daemon sees the durable graph next to its receipts.
-    fn open_with_graph(path: &Path, graph: std::sync::Arc<MemoryEvidenceGraphRuntime>) -> Self {
         Self {
             connection: TestConnection::open(path),
-            graph,
+            fail_next_write: AtomicBool::new(false),
         }
+    }
+
+    fn fail_next_write(&self) {
+        self.fail_next_write.store(true, Ordering::Release);
     }
 }
 
@@ -59,18 +58,15 @@ impl GitCorrelationSessionStore for TestStore {
     }
 
     async fn open_write_transaction(&self) -> Result<Transaction, GitCorrelationError> {
+        if self.fail_next_write.swap(false, Ordering::AcqRel) {
+            return Err(GitCorrelationError::Db(
+                "injected frontier transaction failure".to_owned(),
+            ));
+        }
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(GitCorrelationError::from)
-    }
-
-    fn git_evidence_publication_lock(&self) -> Result<&std::sync::Mutex<()>, GitCorrelationError> {
-        Ok(self.graph.git_evidence_publication_lock())
-    }
-
-    fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
-        Ok(self.graph.as_ref())
     }
 }
 
@@ -98,6 +94,37 @@ fn repository_fixture() -> tempfile::TempDir {
     let fixture = tempfile::tempdir().unwrap();
     initialize_repository(fixture.path());
     fixture
+}
+
+struct FailCommitLogCall {
+    calls: AtomicUsize,
+    fail_on: usize,
+}
+
+impl GitReflogSource for FailCommitLogCall {
+    fn reflog(&self, worktree: &Path) -> Option<String> {
+        SystemGit.reflog(worktree)
+    }
+
+    fn current_branch(&self, worktree: &Path) -> Option<String> {
+        SystemGit.current_branch(worktree)
+    }
+
+    fn commit_reference_exists(
+        &self,
+        worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        SystemGit.commit_reference_exists(worktree, reference)
+    }
+
+    fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == self.fail_on {
+            None
+        } else {
+            SystemGit.commit_log(worktree, branch, since)
+        }
+    }
 }
 
 fn initialize_repository(path: &Path) {
@@ -171,7 +198,7 @@ fn append_linear_history(path: &Path, commit_count: usize) {
 }
 
 fn head_commit_time(path: &Path) -> i64 {
-    gix::discover(path)
+    tracedecay_runtime_core::git_open::discover(path)
         .unwrap()
         .head_commit()
         .unwrap()
@@ -194,14 +221,18 @@ async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
                 project_path TEXT NOT NULL,
                 started_at INTEGER,
                 ended_at INTEGER,
+                metadata_json TEXT,
                 PRIMARY KEY(provider, session_id)
             );
-            CREATE TABLE session_messages (
+            CREATE TABLE lcm_raw_messages (
+                store_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 provider TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 timestamp INTEGER,
-                PRIMARY KEY(provider, message_id)
+                content_hash TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT,
+                UNIQUE(provider, message_id)
             );",
         )
         .await
@@ -215,7 +246,1591 @@ async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
         )
         .await
         .unwrap();
+    touch(&store, "session-1").await;
+    crate::runtime::git_correlation::install_history_change_schema(&store.connection)
+        .await
+        .unwrap();
     store
+}
+
+/// Imports one more message for `session_id`, moving it past the history
+/// frontier; returns the session's new change sequence.
+async fn touch(store: &TestStore, session_id: &str) -> i64 {
+    store
+        .connection
+        .execute(
+            "INSERT INTO lcm_raw_messages(provider, message_id, session_id)
+             VALUES ('codex', lower(hex(randomblob(16))), ?1)",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    let mut tables = store
+        .connection
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE name = 'git_history_session_change'",
+            (),
+        )
+        .await
+        .unwrap();
+    let installed = tables.next().await.unwrap().is_some();
+    drop(tables);
+    if installed {
+        scalar(
+            store,
+            "SELECT MAX(sequence) FROM git_history_session_change",
+        )
+        .await
+    } else {
+        scalar(store, "SELECT MAX(store_id) FROM lcm_raw_messages").await
+    }
+}
+
+/// Real Git whose every read first takes two long polls, the way a large
+/// reflog or many worktrees do.
+struct SlowGit;
+
+impl SlowGit {
+    fn stall() {
+        std::thread::sleep(native_runtime::LONG_POLL * 2);
+    }
+}
+
+impl GitReflogSource for SlowGit {
+    fn reflog(&self, worktree: &Path) -> Option<String> {
+        Self::stall();
+        SystemGit.reflog(worktree)
+    }
+
+    fn current_branch(&self, worktree: &Path) -> Option<String> {
+        Self::stall();
+        SystemGit.current_branch(worktree)
+    }
+
+    fn commit_reference_exists(
+        &self,
+        worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        Self::stall();
+        SystemGit.commit_reference_exists(worktree, reference)
+    }
+
+    fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
+        Self::stall();
+        SystemGit.commit_log(worktree, branch, since)
+    }
+}
+
+#[track_caller]
+fn spawned_here<T: Clone + Send + Sync + 'static>(
+    work: impl Future<Output = T> + Send + 'static,
+) -> (
+    native_runtime::NativeTask<T>,
+    &'static std::panic::Location<'static>,
+) {
+    (
+        native_runtime::NativeTask::spawn(work).expect("native task"),
+        std::panic::Location::caller(),
+    )
+}
+
+/// The session refresh worker runs this pass on a native task. Its Git reads
+/// wait on subprocess pipes, so they must wait on the blocking pool: on the
+/// worker they hold it for every read and stall every task queued behind it.
+#[tokio::test]
+async fn convergence_waits_for_git_off_the_native_worker() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+
+    let (pass, site) = spawned_here(async move {
+        converge_git_evidence_pass(&store, Arc::new(SlowGit), None)
+            .await
+            .map(|outcome| outcome.pass.backfill)
+            .map_err(|error| error.to_string())
+    });
+    let native_runtime::NativeTaskOutcome::Completed(backfill) = pass.wait().await else {
+        panic!("the convergence task did not complete");
+    };
+    let backfill = backfill.unwrap();
+    assert!(backfill.spans_written > 0, "{backfill:?}");
+    assert!(backfill.commits_attributed > 0, "{backfill:?}");
+    assert_eq!(
+        native_runtime::long_native_polls().get(site),
+        None,
+        "a Git read held the native worker past {:?}",
+        native_runtime::LONG_POLL
+    );
+}
+
+/// The evidence rows, the attribution mark, and the history frontier commit
+/// in one transaction: a pass whose write fails leaves nothing behind, and a
+/// pass with nothing new installs no generation.
+#[tokio::test]
+async fn convergence_writes_evidence_and_frontier_atomically() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    store.fail_next_write();
+
+    let failed = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(failed, GitCorrelationError::Db(_)));
+    assert_eq!(
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        None,
+        "a failed pass must not settle the source tuple"
+    );
+    assert!(
+        open_git_evidence_view(&store.connection)
+            .await
+            .unwrap()
+            .is_none(),
+        "a failed pass must not leave evidence rows"
+    );
+
+    let retried = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(retried.later_failure, None);
+    assert_eq!(retried.pass.backfill.sessions_scanned, 1);
+    assert_eq!(retried.pass.backfill.skipped_git_error, 0);
+    assert!(retried.pass.backfill.spans_written > 0);
+    assert_eq!(
+        retried.pass.frontier,
+        GitHistoryIndexFrontier {
+            change_sequence: 1,
+            source_rowid: 1,
+        }
+    );
+    let installed = retried
+        .pass
+        .generation
+        .expect("new evidence installs a generation");
+    assert_eq!(installed.sequence, 1);
+
+    let settled = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(settled.pass.backfill.sessions_scanned, 0);
+    assert_eq!(
+        settled.pass.generation, None,
+        "a pass without new evidence installs no generation"
+    );
+    assert_eq!(
+        open_git_evidence_view(&store.connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .generation(),
+        &installed
+    );
+}
+
+#[tokio::test]
+async fn history_change_journal_survives_upserts_reinstall_and_rollback() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let initial = scalar(
+        &store,
+        "SELECT MAX(sequence) FROM git_history_session_change",
+    )
+    .await;
+    store
+        .connection
+        .execute(
+            "INSERT OR ABORT INTO sessions(provider, session_id, project_path, started_at)
+         VALUES ('codex', 'session-1', ?1, 1)
+         ON CONFLICT(provider, session_id) DO UPDATE SET started_at = excluded.started_at",
+            params![repository.path().to_str().unwrap()],
+        )
+        .await
+        .unwrap();
+    let changed = scalar(
+        &store,
+        "SELECT MAX(sequence) FROM git_history_session_change",
+    )
+    .await;
+    assert!(changed > initial);
+
+    for content_hash in ["first", "revised"] {
+        store.connection.execute(
+            "INSERT OR ABORT INTO lcm_raw_messages(provider, message_id, session_id, content_hash)
+             VALUES ('codex', 'stable-message', 'session-1', ?1)
+             ON CONFLICT(provider, message_id) DO UPDATE SET content_hash = excluded.content_hash",
+            params![content_hash],
+        ).await.unwrap();
+    }
+    let revised = scalar(
+        &store,
+        "SELECT MAX(sequence) FROM git_history_session_change",
+    )
+    .await;
+    assert!(revised > changed);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_history_session_change").await,
+        1
+    );
+
+    let transaction = store
+        .connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    transaction
+        .execute("UPDATE lcm_raw_messages SET timestamp = 99", ())
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        scalar(
+            &store,
+            "SELECT MAX(sequence) FROM git_history_session_change"
+        )
+        .await,
+        revised
+    );
+
+    // A shipped trigger must be repaired on open without resetting the frontier.
+    store
+        .connection
+        .execute_batch(
+            "DROP TRIGGER git_history_message_update;
+         CREATE TRIGGER git_history_message_update AFTER UPDATE ON lcm_raw_messages BEGIN
+             INSERT OR REPLACE INTO git_history_session_change(provider, session_id)
+                 VALUES (NEW.provider, NEW.session_id);
+         END;",
+        )
+        .await
+        .unwrap();
+    crate::runtime::git_correlation::install_history_change_schema(&store.connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(
+            &store,
+            "SELECT MAX(sequence) FROM git_history_session_change"
+        )
+        .await,
+        revised
+    );
+    store
+        .connection
+        .execute(
+            "INSERT OR ABORT INTO lcm_raw_messages(provider, message_id, session_id, content_hash)
+         VALUES ('codex', 'stable-message', 'session-1', 'after-reopen')
+         ON CONFLICT(provider, message_id) DO UPDATE SET content_hash = excluded.content_hash",
+            (),
+        )
+        .await
+        .unwrap();
+    assert!(
+        scalar(
+            &store,
+            "SELECT MAX(sequence) FROM git_history_session_change"
+        )
+        .await
+            > revised
+    );
+}
+
+#[tokio::test]
+async fn in_place_history_rewrites_revisit_and_retract_old_inference() {
+    for rewrite_message in [true, false] {
+        let repository = repository_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+        store
+            .connection
+            .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE lcm_raw_messages SET timestamp = ?1",
+                params![head_commit_time(repository.path())],
+            )
+            .await
+            .unwrap();
+        let initial = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+            .await
+            .unwrap()
+            .pass;
+        let initial_generation = initial.generation.unwrap();
+        assert!(initial_generation.span_count > 0);
+        let message_identity = scalar(&store, "SELECT MAX(store_id) FROM lcm_raw_messages").await;
+        if rewrite_message {
+            // Old activity is corrected without allocating a new message id.
+            store
+                .connection
+                .execute("UPDATE lcm_raw_messages SET timestamp = 1", ())
+                .await
+                .unwrap();
+        } else {
+            // Metadata can move a retained session out of its former worktree.
+            let plain = directory.path().join("plain directory");
+            std::fs::create_dir(&plain).unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE sessions SET metadata_json = ?1",
+                    params![
+                        serde_json::json!({"codex_session_cwd": plain.to_str().unwrap()})
+                            .to_string()
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            scalar(&store, "SELECT MAX(store_id) FROM lcm_raw_messages").await,
+            message_identity
+        );
+        let corrected = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+            .await
+            .unwrap()
+            .pass;
+        assert_eq!(corrected.backfill.sessions_scanned, 1);
+        assert!(corrected.frontier.change_sequence > initial.frontier.change_sequence);
+        let generation = corrected.generation.unwrap();
+        assert_eq!(
+            generation.span_count,
+            u64::from(rewrite_message),
+            "obsolete inferred windows must be retracted"
+        );
+        assert_eq!(
+            generation.commit_count, 0,
+            "obsolete inferred relations must be retracted"
+        );
+        assert_eq!(
+            scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+            i64::from(rewrite_message)
+        );
+        if rewrite_message {
+            assert_eq!(
+                scalar(&store, "SELECT MIN(first_ts) FROM git_evidence_span").await,
+                1
+            );
+            assert_eq!(
+                scalar(&store, "SELECT MAX(last_ts) FROM git_evidence_span").await,
+                1
+            );
+        }
+        assert_eq!(
+            scalar(&store, "SELECT COUNT(*) FROM git_evidence_commit").await,
+            0
+        );
+        let idle = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+            .await
+            .unwrap()
+            .pass;
+        assert_eq!(idle.backfill.sessions_scanned, 0);
+        assert!(idle.generation.is_none());
+    }
+}
+
+/// Capture and reflog inference describe the same session window: readers see
+/// one span whose branch is inferred, while the captured branch stays null and
+/// the inference alone is retracted when the session is revisited.
+#[tokio::test]
+async fn reflog_inference_attributes_the_captured_span_and_retracts_alone() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        1,
+        "capture and inference must share one span"
+    );
+    let main = SessionsForQuery {
+        git_ref: GitRefFilter::Branch("main".to_owned()),
+        since: None,
+        until: None,
+        limit: 10,
+    };
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let hits = view
+        .sessions_for(&main, CommitRelationFilter::All)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].span_count, 1);
+    assert_eq!(hits[0].branch.as_deref(), Some("main"));
+    assert_eq!(hits[0].sources, ["backfill", "ingest"]);
+    let span = &view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap()
+        .0[0];
+    assert_eq!(
+        span.source,
+        crate::runtime::git_correlation::SpanSource::Ingest
+    );
+    assert_eq!(
+        span.captured_branch(),
+        None,
+        "inference never becomes capture"
+    );
+    drop(view);
+
+    let plain = directory.path().join("plain directory");
+    std::fs::create_dir(&plain).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET metadata_json = ?1",
+            params![serde_json::json!({"codex_session_cwd": plain.to_str().unwrap()}).to_string()],
+        )
+        .await
+        .unwrap();
+    let revisited = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap()
+        .pass;
+    assert_eq!(revisited.backfill.sessions_scanned, 1);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        1,
+        "retracting inference keeps the captured span"
+    );
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        view.sessions_for(&main, CommitRelationFilter::All)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let (spans, commits) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(spans[0].branch, None);
+    assert_eq!(spans[0].captured_branch(), None);
+    assert!(
+        commits.iter().all(|record| record.branch.is_none()
+            && record.evidence != crate::runtime::git_correlation::CommitEvidence::ReflogOverlap),
+        "relations derived from the inferred branch must be retracted: {commits:#?}"
+    );
+}
+
+/// A captured span that names a different branch contradicts the reflog
+/// inference: the inference cannot fold, so it keeps its own span rather
+/// than being dropped silently.
+#[tokio::test]
+async fn conflicting_captured_branch_keeps_the_inferred_span() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: Some("feature".to_owned()),
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        2,
+        "an inference the capture contradicts must keep its own span"
+    );
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    for (branch, sources) in [("main", vec!["backfill"]), ("feature", vec!["ingest"])] {
+        let hits = view
+            .sessions_for(
+                &SessionsForQuery {
+                    git_ref: GitRefFilter::Branch(branch.to_owned()),
+                    since: None,
+                    until: None,
+                    limit: 10,
+                },
+                CommitRelationFilter::All,
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].span_count, 1);
+        assert_eq!(hits[0].branch.as_deref(), Some(branch));
+        assert_eq!(hits[0].sources, sources);
+    }
+}
+
+/// Folding keeps the segment's own coverage: the captured span absorbs the
+/// reflog window instead of replacing it with capture-only bounds, so a
+/// time-filtered query still sees everything the inference covered.
+#[tokio::test]
+async fn folded_inference_absorbs_the_segment_window() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            spans: vec![crate::runtime::git_correlation::stable_backfill_span(
+                "codex",
+                "session-1",
+                Some("main"),
+                &repository.path().to_string_lossy(),
+                active_at - 50,
+                active_at + 600,
+            )],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts),
+        (active_at - 50, active_at + 600),
+        "the folded span covers the union of capture and inference evidence"
+    );
+    assert_eq!(spans[0].captured_branch(), None);
+    // A query window inside the segment but past the capture still hits.
+    let hits = view
+        .sessions_for(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Branch("main".to_owned()),
+                since: Some(active_at + 300),
+                until: None,
+                limit: 10,
+            },
+            CommitRelationFilter::All,
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].sources, ["backfill", "ingest"]);
+}
+
+/// New contiguous capture retracts stale inference, retaining the capture identity.
+#[tokio::test]
+async fn branchless_capture_extension_retracts_and_requeues_inference() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    let apply_observation = |ts: i64| GitEvidenceBatch {
+        observations: vec![crate::runtime::git_correlation::SpanObservation {
+            provider: "codex".to_owned(),
+            session_id: "session-1".to_owned(),
+            thread_id: None,
+            branch: None,
+            worktree: repository.path().to_string_lossy().into_owned(),
+            ts,
+            source: crate::runtime::git_correlation::SpanSource::Ingest,
+        }],
+        merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+        ..GitEvidenceBatch::default()
+    };
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer.apply(apply_observation(active_at)).await.unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        1,
+        "capture and inference share one span"
+    );
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (before, before_commits) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert!(
+        !before_commits.is_empty(),
+        "the initial inference attributes the repository commit"
+    );
+    let captured_span_id = before[0].span_id.clone();
+    drop(view);
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(apply_observation(active_at + 600))
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, commits) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert!(
+        commits.is_empty(),
+        "stale inferred commit relations are retracted atomically"
+    );
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].span_id, captured_span_id);
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts),
+        (active_at, active_at + 600)
+    );
+    assert_eq!(spans[0].branch, None);
+    assert_eq!(
+        spans[0].branch_provenance,
+        crate::runtime::git_correlation::BranchProvenance::Captured
+    );
+    drop(view);
+    let revisited = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        revisited.pass.backfill.sessions_scanned, 1,
+        "capture invalidation requeues already-published history"
+    );
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (reattributed, commits) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(reattributed.len(), 1);
+    assert_eq!(reattributed[0].span_id, captured_span_id);
+    assert_eq!(reattributed[0].branch.as_deref(), Some("main"));
+    assert!(
+        !commits.is_empty(),
+        "convergence restores commit attribution"
+    );
+}
+
+/// An inference-tagged span is bounded by its evidence window. A branchless
+/// observation beyond it does not stretch the inferred branch over time the
+/// reflog segment never covered: capture opens its own span instead.
+#[tokio::test]
+async fn branchless_capture_beyond_an_inferred_window_opens_its_own_span() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    let apply_observation = |ts: i64| GitEvidenceBatch {
+        observations: vec![crate::runtime::git_correlation::SpanObservation {
+            provider: "codex".to_owned(),
+            session_id: "session-1".to_owned(),
+            thread_id: None,
+            branch: None,
+            worktree: repository.path().to_string_lossy().into_owned(),
+            ts,
+            source: crate::runtime::git_correlation::SpanSource::Ingest,
+        }],
+        merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+        ..GitEvidenceBatch::default()
+    };
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer.apply(apply_observation(active_at)).await.unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        1,
+        "capture and inference share one span"
+    );
+
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(apply_observation(
+            active_at + DEFAULT_SPAN_MERGE_GAP_SECS + 1,
+        ))
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        spans.len(),
+        2,
+        "later branchless capture opens its own span"
+    );
+    let inferred = spans
+        .iter()
+        .find(|span| span.branch.as_deref() == Some("main"))
+        .expect("the inference stays on its evidence window");
+    assert_eq!(
+        (inferred.first_ts, inferred.last_ts),
+        (active_at, active_at),
+        "the inferred branch does not cover activity past its segment"
+    );
+    let captured = spans
+        .iter()
+        .find(|span| span.branch.is_none())
+        .expect("the later observation is captured, not inferred");
+    assert_eq!(
+        captured.first_ts,
+        active_at + DEFAULT_SPAN_MERGE_GAP_SECS + 1
+    );
+    assert_eq!(
+        captured.branch_provenance,
+        crate::runtime::git_correlation::BranchProvenance::Captured
+    );
+}
+
+/// Revisiting a session retracts only what the inference produced. A commit
+/// linked to the captured span by capture-side evidence survives; the
+/// records the inferred branch admitted are deleted with it.
+#[tokio::test]
+async fn revisit_keeps_captured_commit_evidence_on_the_surviving_span() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let captured_span_id = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap()
+        .0[0]
+        .span_id
+        .clone();
+    drop(view);
+
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            commits: vec![crate::runtime::git_correlation::CommitSessionRecord {
+                commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                branch: None,
+                worktree: Some(repository.path().to_string_lossy().into_owned()),
+                committed_at: active_at,
+                span_overlap_kind: crate::runtime::git_correlation::SpanOverlapKind::Direct,
+                span_id: Some(captured_span_id),
+                relation: crate::runtime::git_correlation::CommitRelation::Produced,
+                evidence: crate::runtime::git_correlation::CommitEvidence::ToolResult,
+                confidence: 100,
+                evidence_message_id: None,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+
+    let plain = directory.path().join("plain directory");
+    std::fs::create_dir(&plain).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET metadata_json = ?1",
+            params![serde_json::json!({"codex_session_cwd": plain.to_str().unwrap()}).to_string()],
+        )
+        .await
+        .unwrap();
+    let revisited = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap()
+        .pass;
+    assert_eq!(revisited.backfill.sessions_scanned, 1);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        1,
+        "retracting inference keeps the captured span"
+    );
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, commits) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(spans[0].branch, None);
+    assert_eq!(spans[0].captured_branch(), None);
+    assert!(
+        commits.iter().any(|record| {
+            record.commit_sha == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                && record.evidence == crate::runtime::git_correlation::CommitEvidence::ToolResult
+        }),
+        "captured commit evidence on the surviving span must be kept: {commits:#?}"
+    );
+    assert!(
+        commits.iter().all(|record| record.branch.is_none()
+            && record.evidence != crate::runtime::git_correlation::CommitEvidence::ReflogOverlap),
+        "relations derived from the inferred branch must be retracted: {commits:#?}"
+    );
+}
+
+/// A fold unions the segment's window and count into the captured span only
+/// while the inference lives. Retracting the inference must restore the
+/// capture-only values, or the session keeps claiming activity the
+/// retracted evidence alone covered.
+#[tokio::test]
+async fn revisit_restores_the_capture_window_a_fold_unioned() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            spans: vec![crate::runtime::git_correlation::stable_backfill_span(
+                "codex",
+                "session-1",
+                Some("main"),
+                &repository.path().to_string_lossy(),
+                active_at - 50,
+                active_at + 600,
+            )],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts, spans[0].event_count),
+        (active_at - 50, active_at + 600, 2),
+        "the folded span carries the segment's coverage while the inference lives"
+    );
+    drop(view);
+
+    let plain = directory.path().join("plain directory");
+    std::fs::create_dir(&plain).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET metadata_json = ?1",
+            params![serde_json::json!({"codex_session_cwd": plain.to_str().unwrap()}).to_string()],
+        )
+        .await
+        .unwrap();
+    let revisited = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap()
+        .pass;
+    assert_eq!(revisited.backfill.sessions_scanned, 1);
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts, spans[0].event_count),
+        (active_at, active_at, 1),
+        "retracting the inference restores the capture-only window: {spans:#?}"
+    );
+    assert_eq!(spans[0].capture_window, None);
+    assert!(
+        view.sessions_for(
+            &SessionsForQuery {
+                git_ref: crate::runtime::git_correlation::GitRefFilter::Worktree(
+                    repository.path().to_string_lossy().into_owned(),
+                ),
+                since: Some(active_at + 300),
+                until: None,
+                limit: 10,
+            },
+            crate::runtime::git_correlation::CommitRelationFilter::All,
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "segment-covered time must not outlive the retracted inference"
+    );
+}
+
+/// An observation landing inside the folded window extends the capture-only
+/// window, not the unioned one. The merge that persists it must keep the
+/// grown snapshot, or a later revisit restores bounds the capture evidence
+/// already moved past.
+#[tokio::test]
+async fn folded_span_keeps_capture_growth_through_revisit() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            spans: vec![crate::runtime::git_correlation::stable_backfill_span(
+                "codex",
+                "session-1",
+                Some("main"),
+                &repository.path().to_string_lossy(),
+                active_at - 50,
+                active_at + 600,
+            )],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    // A later branchless observation lands inside the folded window but past
+    // the capture-only tail: the unioned window does not move, the snapshot
+    // grows to (active_at, active_at + 10).
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at + 10,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        spans[0].capture_window,
+        Some(crate::runtime::git_correlation::CaptureWindow {
+            first_ts: active_at,
+            last_ts: active_at + 10,
+            event_count: 2,
+        }),
+        "the merge keeps the capture growth for a later revisit: {spans:#?}"
+    );
+    drop(view);
+
+    let plain = directory.path().join("plain directory");
+    std::fs::create_dir(&plain).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET metadata_json = ?1",
+            params![serde_json::json!({"codex_session_cwd": plain.to_str().unwrap()}).to_string()],
+        )
+        .await
+        .unwrap();
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts, spans[0].event_count),
+        (active_at, active_at + 10, 2),
+        "the restore keeps activity captured after the inference: {spans:#?}"
+    );
+}
+
+/// A fresh project has never recorded Git evidence. Reporting that as a
+/// retryable unavailability put every fresh project's ingest into an endless
+/// retry loop.
+#[tokio::test]
+async fn never_recorded_evidence_converges_as_a_typed_no_op() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    store
+        .connection
+        .execute_batch("DELETE FROM sessions")
+        .await
+        .unwrap();
+
+    let outcome = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.later_failure, None);
+    assert_eq!(
+        outcome.pass,
+        GitEvidencePass {
+            backfill: BackfillStats::default(),
+            frontier: GitHistoryIndexFrontier {
+                change_sequence: 0,
+                source_rowid: 0,
+            },
+            generation: None,
+        }
+    );
+    assert!(
+        open_git_evidence_view(&store.connection)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn unscannable_targets_do_not_hold_back_the_rest() {
+    let spans = [
+        stable_backfill_span("codex", "gone", Some("main"), "/gone", 1, 2),
+        stable_backfill_span("codex", "flaky", Some("main"), "/flaky", 1, 2),
+        stable_backfill_span("codex", "live", Some("main"), "/live", 1, 2),
+    ];
+    let attribution = attribute_commits(&spans, 0, |target| match target.worktree.as_str() {
+        "/gone" => TargetScan::MissingWorktree,
+        "/flaky" => TargetScan::Unavailable,
+        _ => TargetScan::Scanned(vec![ScannedCommit {
+            sha: "c1".to_owned(),
+            committed_at: 1,
+        }]),
+    });
+    assert_eq!(attribution.unavailable_references, 1);
+    assert_eq!(attribution.retryable_targets, vec!["/flaky".to_owned()]);
+    let sessions: Vec<_> = attribution
+        .records
+        .iter()
+        .map(|record| record.session_id.as_str())
+        .collect();
+    assert_eq!(sessions, vec!["live"]);
+}
+
+#[tokio::test]
+async fn archived_branch_is_limited_coverage_without_losing_observed_span() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = TestStore::open(&directory.path().join("sessions.db"));
+    let archived = crate::runtime::git_correlation::SessionGitSpan {
+        span_id: "span-archived".to_owned(),
+        provider: "codex".to_owned(),
+        session_id: "archived-session".to_owned(),
+        thread_id: None,
+        branch: Some("codex/archived".to_owned()),
+        worktree: normalize_worktree(&repository.path().to_string_lossy()),
+        first_ts: 1,
+        last_ts: 2,
+        event_count: 2,
+        source: crate::runtime::git_correlation::SpanSource::Ingest,
+        branch_provenance: crate::runtime::git_correlation::BranchProvenance::Captured,
+        capture_window: None,
+    };
+    ensure_git_correlation_receipt_schema_in_transaction(&store.connection)
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            spans: vec![archived],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from([
+            "archived-session".to_owned()
+        ]))
+        .await
+        .unwrap();
+    let attribution = attribute_commits(&spans, DEFAULT_SPAN_MERGE_GAP_SECS, |target| {
+        scan_span_target(&SystemGit, target, DEFAULT_SPAN_MERGE_GAP_SECS, usize::MAX)
+    });
+    assert_eq!(attribution.records, Vec::new());
+    assert_eq!(attribution.unavailable_references, 1);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].branch.as_deref(), Some("codex/archived"));
+}
+
+/// Counts span-target scans that reach Git. `unreadable_log` fails every
+/// `git log` the way a transient subprocess failure does.
+struct CountingGit {
+    scans: AtomicUsize,
+    unreadable_log: bool,
+}
+
+impl CountingGit {
+    fn new(unreadable_log: bool) -> Self {
+        Self {
+            scans: AtomicUsize::new(0),
+            unreadable_log,
+        }
+    }
+
+    fn scans(&self) -> usize {
+        self.scans.load(Ordering::SeqCst)
+    }
+}
+
+impl GitReflogSource for CountingGit {
+    fn reflog(&self, worktree: &Path) -> Option<String> {
+        SystemGit.reflog(worktree)
+    }
+
+    fn current_branch(&self, worktree: &Path) -> Option<String> {
+        SystemGit.current_branch(worktree)
+    }
+
+    fn commit_reference_exists(
+        &self,
+        worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        SystemGit.commit_reference_exists(worktree, reference)
+    }
+
+    fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
+        if self.unreadable_log {
+            None
+        } else {
+            SystemGit.commit_log(worktree, branch, since)
+        }
+    }
+}
+
+/// A closed `main` span over the commits [`append_linear_history`] dates
+/// 1..=3.
+fn retained_span(
+    session_id: &str,
+    worktree: &Path,
+) -> crate::runtime::git_correlation::SessionGitSpan {
+    crate::runtime::git_correlation::SessionGitSpan {
+        span_id: format!("span-{session_id}"),
+        provider: "codex".to_owned(),
+        session_id: session_id.to_owned(),
+        thread_id: None,
+        branch: Some("main".to_owned()),
+        worktree: normalize_worktree(&worktree.to_string_lossy()),
+        first_ts: 1,
+        last_ts: 3,
+        event_count: 2,
+        source: crate::runtime::git_correlation::SpanSource::Ingest,
+        branch_provenance: crate::runtime::git_correlation::BranchProvenance::Captured,
+        capture_window: None,
+    }
+}
+
+/// A store that retains `spans` no attribution has covered yet, and no
+/// session rows for the backfill to scan.
+async fn store_retaining(
+    database: &Path,
+    spans: Vec<crate::runtime::git_correlation::SessionGitSpan>,
+) -> TestStore {
+    let unrelated = tempfile::tempdir().unwrap();
+    let store = prepare_store(database, unrelated.path()).await;
+    store
+        .connection
+        .execute_batch("DELETE FROM sessions")
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            spans,
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+    store
+}
+
+/// #3984: a retained span target whose Codex worktree was deleted failed
+/// attribution on every drain, so the whole pending set retried forever and
+/// the live targets beside it never attributed. A target that is gone or no
+/// longer a repository settles on the next pass, durably, and later passes
+/// scan nothing.
+#[tokio::test]
+async fn missing_span_worktrees_settle_attribution_without_rescans() {
+    let live = repository_fixture();
+    append_linear_history(live.path(), 3);
+    let deleted_parent = tempfile::tempdir().unwrap();
+    let deleted = deleted_parent.path().join("worktree");
+    std::fs::create_dir(&deleted).unwrap();
+    initialize_repository(&deleted);
+    let not_a_repository = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions.db");
+    let store = store_retaining(
+        &database,
+        vec![
+            retained_span("live", live.path()),
+            retained_span("deleted", &deleted),
+            retained_span("plain", not_a_repository.path()),
+        ],
+    )
+    .await;
+    std::fs::remove_dir_all(&deleted).unwrap();
+    let git = Arc::new(CountingGit::new(false));
+
+    let first = converge_git_evidence_pass(&store, git.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.later_failure, None,
+        "a missing worktree must not keep attribution retrying"
+    );
+    assert_eq!(first.pass.backfill.skipped_git_error, 0);
+    assert_eq!(first.pass.backfill.unavailable_attributions, 2);
+    assert_eq!(
+        first.pass.backfill.commits_attributed, 3,
+        "the live target attributes beside the missing ones"
+    );
+
+    drop(store);
+    let reopened = TestStore::open(&database);
+    let settled_scans = git.scans();
+    for tick in 1..=5 {
+        let outcome = converge_git_evidence_pass(&reopened, git.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.later_failure, None, "tick {tick}");
+        assert_eq!(outcome.pass.generation, None, "tick {tick}");
+    }
+    assert_eq!(
+        git.scans(),
+        settled_scans,
+        "settled targets must not be rescanned after a restart"
+    );
+}
+
+/// A Git failure in a worktree that still exists may clear, so it retries,
+/// but a bounded number of passes: a failure that never clears must not pin
+/// the drain the way #3984's deleted worktree did.
+#[tokio::test]
+async fn transient_span_scan_failure_retries_a_bounded_number_of_passes() {
+    let live = repository_fixture();
+    append_linear_history(live.path(), 3);
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_retaining(
+        &directory.path().join("sessions.db"),
+        vec![retained_span("live", live.path())],
+    )
+    .await;
+    let git = Arc::new(CountingGit::new(true));
+
+    let mut outcomes = Vec::new();
+    for _ in 0..10 {
+        outcomes.push(
+            converge_git_evidence_pass(&store, git.clone(), None)
+                .await
+                .unwrap(),
+        );
+    }
+    let retrying = outcomes
+        .iter()
+        .filter(|outcome| outcome.later_failure.is_some())
+        .count();
+    assert_eq!(retrying, 4, "{outcomes:#?}");
+    assert_eq!(outcomes[4].later_failure, None);
+    assert_eq!(outcomes[4].pass.backfill.unavailable_attributions, 1);
+    assert_eq!(git.scans(), 5, "no scan after the retry budget is spent");
+}
+
+#[tokio::test]
+async fn convergence_permanent_exclusion_advances_frontier() {
+    let plain_directory = tempfile::tempdir().unwrap();
+    let database_directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(
+        &database_directory.path().join("sessions.db"),
+        plain_directory.path(),
+    )
+    .await;
+
+    let excluded = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap()
+        .pass;
+
+    assert_eq!(excluded.backfill.sessions_scanned, 1);
+    assert_eq!(excluded.backfill.skipped_not_worktree, 1);
+    assert!(excluded.backfill.frontier_advanced);
+    assert_eq!(
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        Some(1)
+    );
 }
 
 async fn scalar(store: &TestStore, sql: &str) -> i64 {
@@ -223,6 +1838,7 @@ async fn scalar(store: &TestStore, sql: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+#[cfg(unix)]
 async fn text_scalar(store: &TestStore, sql: &str) -> String {
     let mut rows = store.connection.query(sql, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
@@ -235,7 +1851,18 @@ fn options(dry_run: bool) -> BackfillOptions {
         merge_gap_secs: 0,
         max_commits_per_repo: 100,
         dry_run,
+        project_root: None,
     }
+}
+
+/// A page soft-stops once its deadline is within reach and returns
+/// `interruption: None` before its traversal budget is spent. A deadline no
+/// test run reaches keeps each page's shape independent of host load.
+fn page_control() -> BoundedGitControl {
+    BoundedGitControl::new(
+        ObservationCancellation::default(),
+        Duration::from_secs(24 * 60 * 60),
+    )
 }
 
 #[tokio::test]
@@ -254,24 +1881,19 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
     )
     .await
     .unwrap();
-    assert_eq!(partial.frontier.activity_timestamp, -1);
+    assert_eq!(partial.frontier.change_sequence, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         1
     );
-    let durable_graph = std::sync::Arc::clone(&store.graph);
     drop(store);
 
-    let reopened = TestStore::open_with_graph(&database, durable_graph);
-    let completed = run_bounded_history_index_page(
-        &reopened,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let reopened = TestStore::open(&database);
+    let completed = run_bounded_history_index_page(&reopened, &options(false), &page_control())
+        .await
+        .unwrap();
     assert_eq!(completed.interruption, None);
-    assert_eq!(completed.frontier.activity_timestamp, i64::MAX);
+    assert_eq!(completed.frontier.change_sequence, 1);
     assert_eq!(
         scalar(&reopened, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
@@ -279,14 +1901,170 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
     assert!(completed.stats.spans_written > 0);
     assert!(completed.stats.commits_attributed > 0);
 
-    let repeated = run_bounded_history_index_page(
-        &reopened,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let repeated = run_bounded_history_index_page(&reopened, &options(false), &page_control())
+        .await
+        .unwrap();
     assert_eq!(repeated.stats.sessions_scanned, 0);
+}
+
+#[tokio::test]
+async fn incremental_unborn_history_settles_without_masking_source_failures() {
+    let repository = tempfile::tempdir().unwrap();
+    git(repository.path(), &["init", "-b", "main"]);
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    store
+        .connection
+        .execute_batch("UPDATE sessions SET ended_at = 1")
+        .await
+        .unwrap();
+
+    // A source with no unborn authority must retain its failed reflog read.
+    let source = FailCommitLogCall {
+        calls: AtomicUsize::new(0),
+        fail_on: usize::MAX,
+    };
+    let failed = converge_git_evidence_pass(&store, Arc::new(source), None)
+        .await
+        .unwrap();
+    assert_eq!(failed.pass.backfill.skipped_git_error, 1);
+    assert!(!failed.pass.backfill.frontier_advanced);
+    assert_eq!(
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let settled = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(settled.later_failure, None);
+    assert_eq!(settled.pass.backfill.skipped_git_error, 0);
+    assert!(settled.pass.backfill.frontier_advanced);
+    assert_eq!(settled.pass.backfill.spans_written, 0);
+    assert_eq!(settled.pass.backfill.commits_attributed, 0);
+    assert_eq!(
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    let repeated = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(repeated.pass.backfill.sessions_scanned, 0);
+    assert_eq!(repeated.later_failure, None);
+
+    // A historical commit makes the epoch-zero scan independent of whether
+    // backfill happens in the same wall-clock second as repository creation.
+    let output = Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())
+        .current_dir(repository.path())
+        .args([
+            "-c",
+            "user.name=TraceDecay",
+            "-c",
+            "user.email=test@tracedecay.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "first",
+        ])
+        .env("GIT_AUTHOR_DATE", "@1000000000 +0000")
+        .env("GIT_COMMITTER_DATE", "@1000000000 +0000")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let timestamp = head_commit_time(repository.path());
+    for (since, expected) in [(0, 1), (-300, 1), (timestamp, 1), (timestamp + 1, 0)] {
+        let log = SystemGit
+            .commit_log(repository.path(), "main", since)
+            .unwrap();
+        assert_eq!(parse_commit_log(&log, 10).len(), expected, "since={since}");
+    }
+    store
+        .connection
+        .execute("UPDATE sessions SET ended_at = ?1", params![timestamp])
+        .await
+        .unwrap();
+    let sequence = touch(&store, "session-1").await;
+    let settled = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
+        .await
+        .unwrap();
+    assert_eq!(settled.later_failure, None);
+    assert_eq!(settled.pass.backfill.skipped_git_error, 0);
+    assert!(settled.pass.backfill.frontier_advanced);
+    assert!(settled.pass.backfill.spans_written > 0);
+    assert!(settled.pass.backfill.commits_attributed > 0);
+    assert_eq!(
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        Some(sequence)
+    );
+}
+
+#[tokio::test]
+async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
+    let repository = tempfile::tempdir().unwrap();
+    git(repository.path(), &["init", "-b", "main"]);
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    store
+        .connection
+        .execute_batch("UPDATE sessions SET ended_at = 1")
+        .await
+        .unwrap();
+    let dry = run_bounded_history_index_page(&store, &options(true), &page_control())
+        .await
+        .unwrap();
+    assert_eq!(dry.interruption, None);
+    assert!(!dry.committed);
+    assert_eq!(dry.stats.commits_attributed, 0);
+    store.fail_next_write();
+    let failed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
+    assert_eq!(
+        failed.interruption,
+        Some(BoundedBackfillInterruption::SourceUnavailable)
+    );
+    assert_eq!(failed.frontier.change_sequence, 0);
+    let completed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
+    assert_eq!(completed.interruption, None);
+    assert_eq!(completed.remaining_sessions, 0);
+    assert_eq!(completed.frontier.change_sequence, 2);
+    assert_eq!(completed.stats.spans_written, 0);
+    assert_eq!(completed.stats.commits_attributed, 0);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
+        0
+    );
+
+    git(
+        repository.path(),
+        &["commit", "--allow-empty", "-m", "first"],
+    );
+    let committed_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET ended_at = ?1", params![committed_at])
+        .await
+        .unwrap();
+    let sequence = touch(&store, "session-1").await;
+    let completed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
+    assert_eq!(completed.interruption, None);
+    assert_eq!(completed.frontier.change_sequence, sequence);
+    assert_eq!(completed.stats.commits_attributed, 1);
+    assert!(completed.stats.spans_written > 0);
 }
 
 #[tokio::test]
@@ -308,13 +2086,9 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     let mut unbounded_commits = options(false);
     unbounded_commits.max_commits_per_repo = usize::MAX;
 
-    let staged = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let staged = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
     assert_eq!(
         staged.interruption,
         Some(BoundedBackfillInterruption::HistoryTraversalBudgetReached)
@@ -334,14 +2108,10 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     )
     .unwrap();
     initialize_repository(repository.path());
-    let reset = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
-    assert_eq!(reset.frontier.activity_timestamp, -1);
+    let reset = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
+    assert_eq!(reset.frontier.change_sequence, 0);
     for table in [
         "git_history_index_progress",
         "git_history_index_staged_spans",
@@ -362,15 +2132,11 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
         )
         .await
         .unwrap();
-    let completed = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let completed = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
     assert_eq!(completed.interruption, None);
-    assert_eq!(completed.frontier.activity_timestamp, i64::MAX);
+    assert_eq!(completed.frontier.change_sequence, 3);
     assert!(completed.stats.spans_written > 0);
 }
 
@@ -379,8 +2145,7 @@ async fn publish_verification_restart_rejects_same_path_repository_replacement()
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
     let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
-    let control =
-        BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
+    let control = page_control();
     let row = SessionActivityRow {
         provider: "codex".to_string(),
         session_id: "session-1".to_string(),
@@ -463,16 +2228,12 @@ async fn publish_verification_restart_rejects_same_path_repository_replacement()
     )
     .unwrap();
     initialize_repository(repository.path());
-    let restarted = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let restarted = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
 
     assert_eq!(restarted.interruption, None);
-    assert_eq!(restarted.frontier.activity_timestamp, -1);
+    assert_eq!(restarted.frontier.change_sequence, 0);
     for table in [
         "git_history_index_progress",
         "git_history_index_staged_spans",
@@ -503,31 +2264,23 @@ async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_st
     let mut unbounded_commits = options(false);
     unbounded_commits.max_commits_per_repo = usize::MAX;
 
-    let partial = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let partial = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
     assert_eq!(
         partial.interruption,
         Some(BoundedBackfillInterruption::HistoryTraversalBudgetReached)
     );
-    assert_eq!(partial.frontier.activity_timestamp, -1);
+    assert_eq!(partial.frontier.change_sequence, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_seen").await,
         i64::try_from(MAX_GRAPH_PAGE_EXAMINED_NODES).unwrap()
     );
-    let completed = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let completed = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
     assert_eq!(completed.interruption, None);
-    assert_eq!(completed.frontier.activity_timestamp, timestamp);
+    assert_eq!(completed.frontier.change_sequence, 2);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
@@ -568,16 +2321,42 @@ async fn resume_uses_sealed_canonical_worktree_after_alias_repoint() {
     );
     std::fs::remove_file(&alias).unwrap();
     symlink(&replacement, &alias).unwrap();
-    let completed = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let completed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
 
     assert_eq!(completed.interruption, None);
     assert!(completed.stats.spans_written > 0);
+}
+
+/// Report whether `directory`'s filesystem accepts a name that is not valid
+/// UTF-8.
+///
+/// `cfg(unix)` is a compile gate, not a filesystem capability: APFS refuses
+/// such a name outright with `EILSEQ`, so a macOS run fails at the fixture
+/// instead of exercising the backfill. Probing keeps the coverage everywhere
+/// the bytes are accepted while propagating unrelated storage failures.
+#[cfg(unix)]
+fn non_utf8_file_names_supported(directory: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let control = directory.join("filename-control");
+    std::fs::write(&control, b"")?;
+    std::fs::remove_file(control)?;
+
+    let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            std::fs::remove_file(&probe)?;
+            Ok(true)
+        }
+        // APFS rejects invalid UTF-8 with EILSEQ; the Darwin sandbox
+        // rejects it earlier with EPERM. The control write above proves
+        // the directory itself is writable.
+        #[cfg(target_os = "macos")]
+        Err(error) if matches!(error.raw_os_error(), Some(1 | 92)) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(unix)]
@@ -588,6 +2367,11 @@ async fn non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish() 
     use std::os::unix::fs::symlink;
 
     let root = tempfile::tempdir().unwrap();
+    if !non_utf8_file_names_supported(root.path())
+        .expect("probe non-UTF-8 file-name support without hiding storage failures")
+    {
+        return;
+    }
     let canonical = root
         .path()
         .join(OsString::from_vec(b"canonical-\xff".to_vec()));
@@ -617,13 +2401,9 @@ async fn non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish() 
     );
     std::fs::remove_file(&alias).unwrap();
     symlink(&replacement, &alias).unwrap();
-    let unsupported = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let unsupported = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
 
     assert_eq!(unsupported.stats.skipped_git_error, 1);
     assert_eq!(unsupported.unresolved_failures, 1);
@@ -642,7 +2422,7 @@ async fn non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish() 
 }
 
 #[tokio::test]
-async fn activity_change_finishes_sealed_candidate_before_newer_row() {
+async fn changed_session_discards_sealed_candidate_before_publishing_new_revision() {
     let repository = repository_fixture();
     let old_activity = head_commit_time(repository.path());
     let new_activity = old_activity.checked_add(1).unwrap();
@@ -667,14 +2447,14 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
     )
     .await
     .unwrap();
-    assert_eq!(partial.frontier.activity_timestamp, -1);
+    assert_eq!(partial.frontier.change_sequence, 0);
     assert_eq!(
         scalar(
             &store,
-            "SELECT activity_timestamp FROM git_history_index_progress"
+            "SELECT change_sequence FROM git_history_index_progress"
         )
         .await,
-        old_activity
+        2
     );
 
     store
@@ -685,27 +2465,20 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
         )
         .await
         .unwrap();
-    let resumed = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
-    assert_eq!(resumed.frontier.activity_timestamp, old_activity);
+    let newer_sequence = touch(&store, "session-1").await;
+    let resumed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
+    assert_eq!(resumed.frontier.change_sequence, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
     );
 
-    let newer = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
-    assert_eq!(newer.frontier.activity_timestamp, new_activity);
+    let newer = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
+    assert_eq!(newer.frontier.change_sequence, newer_sequence);
 }
 
 #[tokio::test]
@@ -736,6 +2509,7 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
         )
         .await
         .unwrap();
+    let valid_sequence = touch(&store, "session-2").await;
     let reflog = malformed_repository.path().join(".git/logs/HEAD");
     let valid_reflog = std::fs::read(&reflog).unwrap();
     let mut truncated_reflog = valid_reflog.clone();
@@ -744,27 +2518,19 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
     let mut page_options = options(false);
     page_options.limit_sessions = 2;
 
-    let outcome = run_bounded_history_index_page(
-        &store,
-        &page_options,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let outcome = run_bounded_history_index_page(&store, &page_options, &page_control())
+        .await
+        .unwrap();
     assert_eq!(outcome.interruption, None);
-    assert_eq!(outcome.frontier.activity_timestamp, valid_activity);
+    assert_eq!(outcome.frontier.change_sequence, valid_sequence);
     assert_eq!(outcome.stats.skipped_git_error, 1);
     assert_eq!(outcome.unresolved_failures, 1);
     assert_eq!(outcome.remaining_sessions, 0);
     assert!(outcome.stats.spans_written > 0);
 
-    let empty_pass = run_bounded_history_index_page(
-        &store,
-        &page_options,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let empty_pass = run_bounded_history_index_page(&store, &page_options, &page_control())
+        .await
+        .unwrap();
     assert_eq!(empty_pass.stats.sessions_scanned, 0);
     assert_eq!(empty_pass.remaining_sessions, 0);
     assert_eq!(empty_pass.unresolved_failures, 1);
@@ -778,14 +2544,11 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
         )
         .await
         .unwrap();
-    let recovered = run_bounded_history_index_page(
-        &store,
-        &page_options,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
-    assert_eq!(recovered.frontier.activity_timestamp, recovered_activity);
+    let recovered_sequence = touch(&store, "session-1").await;
+    let recovered = run_bounded_history_index_page(&store, &page_options, &page_control())
+        .await
+        .unwrap();
+    assert_eq!(recovered.frontier.change_sequence, recovered_sequence);
     assert_eq!(recovered.unresolved_failures, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_failures").await,
@@ -799,13 +2562,9 @@ async fn dry_run_leaves_progress_evidence_and_frontier_untouched() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("sessions.db");
     let store = prepare_store(&database, repository.path()).await;
-    let outcome = run_bounded_history_index_page(
-        &store,
-        &options(true),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let outcome = run_bounded_history_index_page(&store, &options(true), &page_control())
+        .await
+        .unwrap();
 
     assert!(!outcome.committed);
     assert!(outcome.stats.spans_written > 0);
@@ -835,26 +2594,4 @@ fn cancellation_precedes_deadline() {
         control.check().unwrap_err(),
         BoundedBackfillInterruption::Cancelled
     );
-}
-
-#[test]
-fn interrupted_evidence_keeps_the_completed_row_frontier() {
-    let frontier = GitHistoryIndexFrontier {
-        activity_timestamp: 100,
-        source_rowid: 7,
-    };
-    let outcome = interrupted_outcome(
-        BackfillStats::default(),
-        false,
-        frontier,
-        BoundedBackfillInterruption::CommandTimedOut,
-    );
-    assert_eq!(outcome.frontier, frontier);
-    assert_eq!(outcome.remaining_sessions, 1);
-}
-
-#[test]
-fn bounded_history_page_reports_unconsumed_session_suffix() {
-    assert!(bounded_page_has_more(51, 50));
-    assert!(!bounded_page_has_more(50, 50));
 }

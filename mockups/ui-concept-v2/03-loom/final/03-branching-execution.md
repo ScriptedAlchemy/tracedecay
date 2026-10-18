@@ -2,7 +2,7 @@
 design_status: current
 ---
 
-# Loom 03 — Branching execution
+# Loom 03, Branching execution
 
 - **Asset:** `03-branching-execution.png`
 - **Lifecycle:** `current`

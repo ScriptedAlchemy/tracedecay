@@ -93,7 +93,7 @@ fn validate_relative_path(path: &Path) -> Result<()> {
     }
     for component in path.components() {
         match component {
-            Component::Normal(part) if !part.to_string_lossy().contains('\\') => {}
+            Component::Normal(_) => {}
             _ => {
                 return Err(config_error(format!(
                     "unsafe support path '{}'",
@@ -262,6 +262,7 @@ pub fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
     validate_skill_id(&skill.metadata.id)?;
     validate_frontmatter_scalar("title", &skill.metadata.title)?;
     validate_frontmatter_scalar("summary", &skill.metadata.summary)?;
+    validate_native_skill_description(&skill.metadata.routing_description)?;
     validate_skill_category(&skill.metadata.category)?;
     validate_skill_targets(&skill.metadata.targets)?;
     validate_body_markdown(&skill.body_markdown)?;
@@ -278,6 +279,9 @@ pub fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Result<()> 
     }
     if let Some(summary) = &update.summary {
         validate_frontmatter_scalar("summary", summary)?;
+    }
+    if let Some(routing_description) = &update.routing_description {
+        validate_native_skill_description(routing_description)?;
     }
     if let Some(category) = &update.category {
         validate_skill_category(category)?;
@@ -300,8 +304,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::managed_skill_model::{
-        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-        SkillInstallTarget,
+        ManagedSkillDraft, ManagedSkillExt, ManagedSkillProvenance, ManagedSkillSource,
+        ManagedSupportFile, SkillInstallTarget,
     };
 
     use super::*;
@@ -311,6 +315,7 @@ mod tests {
             id: "managed-validation-eval".to_string(),
             title: "Managed Validation Eval".to_string(),
             summary: "validate generated managed skill packages".to_string(),
+            routing_description: "Validate generated managed skill packages.".to_string(),
             category: "validation".to_string(),
             targets: vec![SkillInstallTarget::Codex, SkillInstallTarget::Claude],
             body_markdown: "# Managed Validation Eval\n\nUse this when validating skills."
@@ -325,17 +330,94 @@ mod tests {
     }
 
     #[test]
-    fn managed_skill_validation_accepts_valid_draft() {
-        let skill = valid_draft().materialize().unwrap();
-        validate_managed_skill(&skill).unwrap();
+    fn routing_description_requires_valid_authored_host_text() {
+        for (description, expected) in [
+            ("", "native description cannot be empty"),
+            (" ", "native description cannot be empty"),
+            (
+                " leading",
+                "native description cannot have leading or trailing whitespace",
+            ),
+            (
+                "trailing ",
+                "native description cannot have leading or trailing whitespace",
+            ),
+            ("two\nlines", "native description must be a single line"),
+            ("two\rlines", "native description must be a single line"),
+        ] {
+            let expected = format!("config error: managed skill {expected}");
+            let mut draft = valid_draft();
+            draft.routing_description = description.to_string();
+            assert_eq!(
+                draft.materialize().unwrap_err().to_string(),
+                expected,
+                "draft {description:?}"
+            );
+            let update = ManagedSkillUpdate {
+                routing_description: Some(description.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                validate_managed_skill_update(&update)
+                    .unwrap_err()
+                    .to_string(),
+                expected,
+                "update {description:?}"
+            );
+        }
+        let too_long = "config error: native skill description cannot exceed 1024 characters";
+        let mut draft = valid_draft();
+        draft.routing_description = "é".repeat(MAX_NATIVE_SKILL_DESCRIPTION_CHARS);
+        let skill = draft.clone().materialize().unwrap();
+        assert_eq!(
+            skill.metadata.routing_description.chars().count(),
+            MAX_NATIVE_SKILL_DESCRIPTION_CHARS
+        );
+        skill.render_native_skill_markdown().unwrap();
+        draft.routing_description.push('é');
+        assert_eq!(draft.materialize().unwrap_err().to_string(), too_long);
+        let update = ManagedSkillUpdate {
+            routing_description: Some("a".repeat(MAX_NATIVE_SKILL_DESCRIPTION_CHARS + 1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_managed_skill_update(&update)
+                .unwrap_err()
+                .to_string(),
+            too_long
+        );
     }
 
     #[test]
-    fn managed_skill_validation_accepts_hermes_plugin_target() {
-        let mut draft = valid_draft();
-        draft.targets = vec![SkillInstallTarget::Hermes];
-        let skill = draft.materialize().unwrap();
-        assert_eq!(skill.metadata.targets, vec![SkillInstallTarget::Hermes]);
+    fn new_drafts_and_metadata_require_authored_routing_description() {
+        let complete = serde_json::to_value(valid_draft()).unwrap();
+        let decoded = serde_json::from_value::<ManagedSkillDraft>(complete.clone()).unwrap();
+        assert_eq!(
+            decoded.routing_description,
+            "Validate generated managed skill packages."
+        );
+        let mut draft = complete;
+        draft.as_object_mut().unwrap().remove("routing_description");
+        let error = serde_json::from_value::<ManagedSkillDraft>(draft)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("missing field `routing_description`"),
+            "{error}"
+        );
+
+        let mut skill = serde_json::to_value(valid_draft().materialize().unwrap()).unwrap();
+        skill["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("routing_description");
+        let error = serde_json::from_value::<ManagedSkill>(skill)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("missing field `routing_description`"),
+            "{error}"
+        );
     }
 
     #[test]

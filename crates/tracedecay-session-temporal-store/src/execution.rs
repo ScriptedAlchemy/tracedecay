@@ -1,33 +1,34 @@
-//! Authorized temporal execution contract.
-//!
-//! The only implementation of [`SessionTemporalExecutionPort`] is
-//! [`super::RegisteredGlobalDbSessionTemporalExecution`] in this module.
-//! Use-case callers depend on `global_db`, so the port lives beside its
-//! implementer to avoid a crate cycle.
+//! Authorized temporal execution contract executed by
+//! [`super::RegisteredGlobalDbSessionTemporalExecution`].
 
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
 
 use thiserror::Error;
+use tracedecay_contracts::retrieval::{
+    SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
+    SessionRetrievalBudgetStageV1,
+};
 use tracedecay_domain::SessionSourceCoverageAggregateStateV1;
 use tracedecay_domain::{
-    ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalAnchorId, RetrievalRequest,
-    RetrieverBatch, RetrieverOutcome, ScoreDomainId, SessionSourceCoverageReceiptV1,
+    ComponentRevision, CursorBindingV1, EphemeralSanitizedQueryViewV1, RetrievalAnchorId,
+    RetrievalRequest, RetrieverBatch, RetrieverOutcome, ScoreDomainId,
+    SessionSourceCoverageReceiptV1,
 };
 use tracedecay_query::retrieval::evidence_lanes::{
     EvidenceLaneExecutionControlV1, TaskSessionBindingV1, TaskSessionCandidateSelectionV1,
     TaskSessionLaneEvidenceV1,
 };
-use tracedecay_temporal_query::context::{ContextBudget, VersionedTokenEstimator};
-use tracedecay_temporal_query::ports::{ExecutionLimits, TemporalSnapshotRequest};
+use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::execution::ExecutionLimits;
+use tracedecay_temporal_query::execution::{BudgetObservation, ReadBudgetAccounting};
 use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedTemporalExecutionRequest {
     snapshot_request: TemporalSnapshotRequest,
+    cursor_binding: CursorBindingV1,
     query: String,
     direct_anchor: Option<RetrievalAnchorId>,
     cursor: Option<String>,
@@ -43,6 +44,7 @@ impl AuthorizedTemporalExecutionRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         snapshot_request: TemporalSnapshotRequest,
+        cursor_binding: CursorBindingV1,
         query: String,
         cursor: Option<String>,
         limit: usize,
@@ -54,6 +56,7 @@ impl AuthorizedTemporalExecutionRequest {
     ) -> Self {
         Self {
             snapshot_request,
+            cursor_binding,
             query,
             direct_anchor: None,
             cursor,
@@ -88,12 +91,10 @@ impl AuthorizedTemporalExecutionRequest {
         self.cursor.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn limit(&self) -> usize {
         self.limit
     }
 
-    #[hotpath::skip]
     pub const fn diversity(&self) -> DiversityLimits {
         self.diversity
     }
@@ -102,17 +103,14 @@ impl AuthorizedTemporalExecutionRequest {
         &self.context_budget
     }
 
-    #[hotpath::skip]
     pub const fn execution_limits(&self) -> ExecutionLimits {
         self.snapshot_request.limits()
     }
 
-    #[hotpath::skip]
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
 
-    #[hotpath::skip]
     pub const fn ranking_version(&self) -> u32 {
         self.ranking_version
     }
@@ -123,10 +121,11 @@ impl AuthorizedTemporalExecutionRequest {
 
     pub fn into_kernel_request(
         self,
-        snapshot: tracedecay_temporal_query::ports::TemporalExecutionSnapshot,
+        snapshot: tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot,
     ) -> tracedecay_temporal_query::TemporalKernelRequest {
         tracedecay_temporal_query::TemporalKernelRequest {
             snapshot,
+            cursor_binding: self.cursor_binding,
             query: self.query,
             direct_anchor: self.direct_anchor,
             cursor: self.cursor,
@@ -189,7 +188,6 @@ impl SessionTemporalExecutionReport {
         &self.result
     }
 
-    #[hotpath::skip]
     pub const fn freshness(&self) -> SessionDataFreshness {
         self.freshness
     }
@@ -203,20 +201,73 @@ impl SessionTemporalExecutionReport {
     }
 }
 
+/// Re-projects a kernel read boundary's accounting onto the contract shape the
+/// application surface reports, so the store and the retrieval service share one
+/// mapping instead of each keeping its own copy.
+#[must_use]
+pub fn port_budget_accounting(
+    accounting: ReadBudgetAccounting,
+) -> SessionRetrievalBudgetAccountingV1 {
+    let observed = match accounting.observed {
+        BudgetObservation::Requested(units) => {
+            SessionRetrievalBudgetObservationV1::Requested { units }
+        }
+        BudgetObservation::ConsumedWithMoreAvailable(units) => {
+            SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable { units }
+        }
+    };
+    SessionRetrievalBudgetAccountingV1 {
+        limit: accounting.limit,
+        observed,
+    }
+}
+
 #[derive(Debug)]
 pub enum SessionTemporalExecutionError {
     WrongScope,
-    Stale { generation_lag: u64 },
+    Stale {
+        generation_lag: u64,
+    },
     Locked,
     Redacted,
     Deleted,
     Denied,
+    /// The authority a request needs is absent, no store, no manifest, no
+    /// payload. A storage operation that *failed* is [`Self::Storage`]; keeping
+    /// them apart is what tells an empty root from a broken read.
     Unavailable,
+    /// A storage read, open, or layout expectation failed. Carries the operation
+    /// and the cause so a caller is not left guessing which read broke.
+    Storage {
+        operation: &'static str,
+        detail: String,
+    },
     ResetRequired,
-    Empty { freshness: SessionDataFreshness },
-    BudgetExhausted,
+    Empty {
+        freshness: SessionDataFreshness,
+    },
+    /// The bounded budget boundary that refused, with the ceiling and count the
+    /// boundary kept. Dropping these left every refusal indistinguishable from
+    /// an oversized request at the application surface.
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
+    },
     Cancelled,
+    /// The execution deadline elapsed. Distinct from [`Self::Cancelled`]: a
+    /// caller cancels, a deadline expires, and only one of those is the
+    /// caller's own doing.
+    DeadlineExceeded,
     Kernel(TemporalKernelError),
+}
+
+impl SessionTemporalExecutionError {
+    pub(crate) fn storage(operation: &'static str, cause: impl fmt::Display) -> Self {
+        Self::Storage {
+            operation,
+            detail: cause.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for SessionTemporalExecutionError {
@@ -229,10 +280,12 @@ impl fmt::Display for SessionTemporalExecutionError {
             Self::Deleted => "temporal payload was deleted",
             Self::Denied => "temporal execution was denied",
             Self::Unavailable => "temporal execution is unavailable",
+            Self::Storage { .. } => "temporal execution storage read failed",
             Self::ResetRequired => "temporal execution persisted state requires an explicit reset",
             Self::Empty { .. } => "temporal execution root is authoritatively empty",
-            Self::BudgetExhausted => "temporal execution budget was exhausted",
+            Self::BudgetExhausted { .. } => "temporal execution budget was exhausted",
             Self::Cancelled => "temporal execution was cancelled",
+            Self::DeadlineExceeded => "temporal execution deadline elapsed",
             Self::Kernel(_) => "temporal kernel failed",
         };
         formatter.write_str(message)
@@ -246,24 +299,6 @@ impl std::error::Error for SessionTemporalExecutionError {
             _ => None,
         }
     }
-}
-
-pub type TemporalExecutionFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<SessionTemporalExecutionReport, SessionTemporalExecutionError>>
-            + Send
-            + 'a,
-    >,
->;
-
-pub trait SessionTemporalExecutionPort: Send + Sync {
-    fn execute<'a, E>(
-        &'a self,
-        request: AuthorizedTemporalExecutionRequest,
-        estimator: &'a E,
-    ) -> TemporalExecutionFuture<'a>
-    where
-        E: VersionedTokenEstimator + Sync + 'a;
 }
 
 /// Exact points where the Work owner must prove that the Task/graph/attempt
@@ -338,7 +373,7 @@ impl AuthorizedTaskSessionExecutionRequestV1 {
             let snapshot = temporal.snapshot_request();
             let exact_session = matches!(
                 snapshot.retrieval_scope(),
-                tracedecay_temporal_query::ports::TemporalRetrievalScope::Session(session_id)
+                tracedecay_temporal_query::snapshot::TemporalRetrievalScope::Session(session_id)
                     if session_id == binding.source().session_id()
             );
             if !exact_session
@@ -392,10 +427,6 @@ impl AuthorizedTaskSessionExecutionRequestV1 {
     pub fn control(&self) -> &EvidenceLaneExecutionControlV1 {
         &self.control
     }
-
-    pub fn into_temporal(self) -> AuthorizedTemporalExecutionRequest {
-        self.temporal
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -422,95 +453,6 @@ pub struct TaskSessionTemporalExecutionReportV1 {
 pub enum TaskSessionTemporalExecutionOutcomeV1 {
     Complete(Box<TaskSessionTemporalExecutionReportV1>),
     Omitted(TaskSessionExecutionOmissionV1),
-}
-
-pub type TaskSessionTemporalExecutionFutureV1<'a> = Pin<
-    Box<
-        dyn Future<
-                Output = Result<
-                    TaskSessionTemporalExecutionOutcomeV1,
-                    SessionTemporalExecutionError,
-                >,
-            > + Send
-            + 'a,
-    >,
->;
-
-pub trait TaskSessionTemporalExecutionPortV1: Send + Sync {
-    fn execute_task_session<'a, E>(
-        &'a self,
-        request: AuthorizedTaskSessionExecutionRequestV1,
-        selector: &'a dyn TaskSessionRankSelectorV1,
-        estimator: &'a E,
-    ) -> TaskSessionTemporalExecutionFutureV1<'a>
-    where
-        E: VersionedTokenEstimator + Sync + 'a;
-}
-
-impl<T> TaskSessionTemporalExecutionPortV1 for &T
-where
-    T: TaskSessionTemporalExecutionPortV1 + ?Sized,
-{
-    fn execute_task_session<'a, E>(
-        &'a self,
-        request: AuthorizedTaskSessionExecutionRequestV1,
-        selector: &'a dyn TaskSessionRankSelectorV1,
-        estimator: &'a E,
-    ) -> TaskSessionTemporalExecutionFutureV1<'a>
-    where
-        E: VersionedTokenEstimator + Sync + 'a,
-    {
-        (**self).execute_task_session(request, selector, estimator)
-    }
-}
-
-impl<T> TaskSessionTemporalExecutionPortV1 for Arc<T>
-where
-    T: TaskSessionTemporalExecutionPortV1 + ?Sized,
-{
-    fn execute_task_session<'a, E>(
-        &'a self,
-        request: AuthorizedTaskSessionExecutionRequestV1,
-        selector: &'a dyn TaskSessionRankSelectorV1,
-        estimator: &'a E,
-    ) -> TaskSessionTemporalExecutionFutureV1<'a>
-    where
-        E: VersionedTokenEstimator + Sync + 'a,
-    {
-        (**self).execute_task_session(request, selector, estimator)
-    }
-}
-
-impl<T> SessionTemporalExecutionPort for &T
-where
-    T: SessionTemporalExecutionPort + ?Sized,
-{
-    fn execute<'a, E>(
-        &'a self,
-        request: AuthorizedTemporalExecutionRequest,
-        estimator: &'a E,
-    ) -> TemporalExecutionFuture<'a>
-    where
-        E: VersionedTokenEstimator + Sync + 'a,
-    {
-        (**self).execute(request, estimator)
-    }
-}
-
-impl<T> SessionTemporalExecutionPort for Arc<T>
-where
-    T: SessionTemporalExecutionPort + ?Sized,
-{
-    fn execute<'a, E>(
-        &'a self,
-        request: AuthorizedTemporalExecutionRequest,
-        estimator: &'a E,
-    ) -> TemporalExecutionFuture<'a>
-    where
-        E: VersionedTokenEstimator + Sync + 'a,
-    {
-        (**self).execute(request, estimator)
-    }
 }
 
 /// How current the data behind a temporal execution is.

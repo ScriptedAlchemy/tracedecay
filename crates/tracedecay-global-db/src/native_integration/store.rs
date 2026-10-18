@@ -1,8 +1,8 @@
 use tracedecay_domain::{
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPhaseV1,
-    NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationReceiptV1,
-    NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
-    NativeIntegrationTransactionStatusV1, RepositoryId,
+    CodeGenerationId, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationPhaseV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
+    NativeIntegrationReceiptV1, NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
+    NativeIntegrationTransactionStatusV1, RepositoryId, UtcMicros,
 };
 use tracedecay_store::{
     NativeIntegrationBeginResultV1, NativeIntegrationRecordV1, NativeIntegrationStoreError,
@@ -32,19 +32,21 @@ pub struct GlobalDbNativeIntegrationStore<'db> {
 }
 
 impl<'db> GlobalDbNativeIntegrationStore<'db> {
-    #[hotpath::skip]
     pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self {
             db: GitMutationDatabase::Registered(db),
         }
     }
 
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.preview")]
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.preview",
+        level = "trace",
+        skip_all
+    )]
     pub async fn save_preview(
         &self,
         preview: NativeIntegrationPreviewV1,
     ) -> NativeIntegrationStoreResult<()> {
-        crate::hotpath_observe::record_transaction_rows(1);
         preview.validate().map_err(invalid_domain)?;
         let transaction = self.begin_write().await?;
         let outcome = insert_preview_if_absent(&transaction, &preview).await;
@@ -56,7 +58,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn read_preview(
         &self,
         preview_id: &NativeIntegrationPreviewId,
@@ -66,13 +67,26 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_preview_from_transaction(&snapshot, preview_id).await
     }
 
+    pub async fn read_preview_by_digest(
+        &self,
+        preview_digest: &tracedecay_domain::ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>> {
+        preview_digest.validate().map_err(invalid_domain)?;
+        let snapshot = self.read_snapshot().await?;
+        read_preview_by_digest_from_transaction(&snapshot, preview_digest).await
+    }
+
     /// Persists one issued approval commitment.
     ///
     /// Issuance is idempotent for byte-identical approvals; a different
     /// approval under the same identity or digest is a conflict, never an
     /// overwrite. Consumption is not recorded here: an approval is consumed
     /// exactly when a transaction row binds its unique `approval_id`.
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.approval")]
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.approval",
+        level = "trace",
+        skip_all
+    )]
     pub async fn save_approval(
         &self,
         approval: NativeIntegrationApprovalV1,
@@ -88,7 +102,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn read_approval(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -99,12 +112,15 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     }
 
     /// Atomically consumes the approval and inserts the `Prepared` record.
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.begin")]
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.begin",
+        level = "trace",
+        skip_all
+    )]
     pub async fn begin_or_replay(
         &self,
         record: NativeIntegrationRecordV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationBeginResultV1> {
-        crate::hotpath_observe::record_transaction_rows(1);
         record.validate().map_err(invalid_domain)?;
         if record.terminal_receipt.is_some()
             || record.status.terminal_outcome.is_some()
@@ -179,7 +195,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn read_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -189,7 +204,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_status_from_transaction(&snapshot, transaction_id).await
     }
 
-    #[hotpath::skip]
     pub async fn read_record(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -199,7 +213,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_record_from_transaction(&snapshot, transaction_id).await
     }
 
-    #[hotpath::skip]
     pub async fn read_receipt(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -209,14 +222,26 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_receipt_from_transaction(&snapshot, transaction_id).await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.cas")]
+    pub async fn read_receipt_by_digest(
+        &self,
+        receipt_digest: &tracedecay_domain::ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>> {
+        receipt_digest.validate().map_err(invalid_domain)?;
+        let snapshot = self.read_snapshot().await?;
+        read_receipt_by_digest_from_transaction(&snapshot, receipt_digest).await
+    }
+
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.cas",
+        level = "trace",
+        skip_all
+    )]
     pub async fn compare_and_swap_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         replacement: NativeIntegrationTransactionStatusV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationTransactionStatusV1> {
-        crate::hotpath_observe::record_transaction_rows(1);
         transaction_id.validate().map_err(invalid_domain)?;
         replacement.validate().map_err(invalid_domain)?;
         // Terminal states are only reachable through `write_terminal`, which
@@ -251,14 +276,17 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     /// Publishes the terminal status transition and its receipt in one
     /// immediate database transaction, so restart recovery never observes a
     /// terminal phase without its immutable receipt or quarantine fence.
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.terminal")]
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.terminal",
+        level = "trace",
+        skip_all
+    )]
     pub async fn write_terminal(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         receipt: NativeIntegrationReceiptV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationReceiptV1> {
-        crate::hotpath_observe::record_transaction_rows(1);
         transaction_id.validate().map_err(invalid_domain)?;
         receipt.validate().map_err(invalid_domain)?;
         let Some(outcome_code) = receipt.status.terminal_outcome.map(terminal_outcome_code) else {
@@ -322,7 +350,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
 
     /// Every transaction that has not reached its terminal receipt, oldest
     /// first. Restart recovery replays these through the coordinator.
-    #[hotpath::skip]
     pub async fn pending_transactions(
         &self,
         repository_id: Option<&RepositoryId>,
@@ -350,7 +377,48 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         Ok(records)
     }
 
-    #[hotpath::skip]
+    /// Returns the exact analysis generations whose durable native preview or
+    /// unfinished transaction is still live at `observed_at`.
+    pub async fn live_candidate_generation_bindings(
+        &self,
+        repository_id: &RepositoryId,
+        observed_at: UtcMicros,
+    ) -> NativeIntegrationStoreResult<Vec<CodeGenerationId>> {
+        repository_id.validate().map_err(invalid_domain)?;
+        let snapshot = self.read_snapshot().await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT preview.preview_json
+                   FROM native_integration_previews AS preview
+                  WHERE preview.repository_id = ?1
+                    AND (preview.expires_at > ?2 OR EXISTS (
+                        SELECT 1 FROM native_integration_transactions AS txn
+                         WHERE txn.preview_id = preview.preview_id
+                           AND txn.terminal_outcome IS NULL
+                    ))
+                  ORDER BY preview.created_at, preview.preview_id",
+                params![repository_id.as_str(), observed_at.0],
+            )
+            .await
+            .map_err(unavailable)?;
+        let mut generations = Vec::new();
+        while let Some(row) = rows.next().await.map_err(unavailable)? {
+            let preview: NativeIntegrationPreviewV1 =
+                decode(&row.get::<String>(0).map_err(unavailable)?)?;
+            if let Some(analysis) = preview.analysis {
+                generations.extend([
+                    analysis.merge_base.generation_id,
+                    analysis.source.generation_id,
+                    analysis.destination.generation_id,
+                    analysis.candidate.generation_id,
+                ]);
+            }
+        }
+        generations.sort();
+        generations.dedup();
+        Ok(generations)
+    }
+
     pub async fn approval_consumed(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -360,9 +428,10 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         approval_consumed_in_transaction(&snapshot, approval_id).await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.native_integration.persist.quarantine"
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.quarantine",
+        level = "trace",
+        skip_all
     )]
     pub async fn quarantine_repository(
         &self,
@@ -402,14 +471,12 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub(super) async fn begin_write(
         &self,
     ) -> NativeIntegrationStoreResult<GitMutationWriteTransaction<'_>> {
         self.db.begin_write().await.map_err(unavailable)
     }
 
-    #[hotpath::skip]
     pub(super) async fn read_snapshot(
         &self,
     ) -> NativeIntegrationStoreResult<GitMutationReadSnapshot> {
@@ -577,6 +644,36 @@ where
     Ok(Some(preview))
 }
 
+async fn read_preview_by_digest_from_transaction<Q>(
+    transaction: &Q,
+    preview_digest: &tracedecay_domain::ManifestDigest,
+) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>>
+where
+    Q: QueryExecutor,
+{
+    let mut rows = transaction
+        .query(
+            "SELECT preview_json FROM native_integration_previews WHERE preview_digest = ?1",
+            params![preview_digest.as_str()],
+        )
+        .await
+        .map_err(unavailable)?;
+    let Some(row) = rows.next().await.map_err(unavailable)? else {
+        return Ok(None);
+    };
+    let preview: NativeIntegrationPreviewV1 = decode(&text(&row, 0, "preview commitment")?)?;
+    if preview.preview_digest != *preview_digest {
+        return Err(invalid(
+            "native integration preview digest key does not bind its payload",
+        ));
+    }
+    preview.validate().map_err(invalid_domain)?;
+    if rows.next().await.map_err(unavailable)?.is_some() {
+        return Err(invalid("duplicate native integration preview digest"));
+    }
+    Ok(Some(preview))
+}
+
 async fn read_approval_from_transaction<Q>(
     transaction: &Q,
     approval_id: &NativeIntegrationApprovalId,
@@ -693,6 +790,36 @@ where
     receipt.validate().map_err(invalid_domain)?;
     if rows.next().await.map_err(unavailable)?.is_some() {
         return Err(invalid("duplicate native integration receipt"));
+    }
+    Ok(Some(receipt))
+}
+
+async fn read_receipt_by_digest_from_transaction<Q>(
+    transaction: &Q,
+    receipt_digest: &tracedecay_domain::ManifestDigest,
+) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>>
+where
+    Q: QueryExecutor,
+{
+    let mut rows = transaction
+        .query(
+            "SELECT receipt_json FROM native_integration_receipts WHERE receipt_digest = ?1",
+            params![receipt_digest.as_str()],
+        )
+        .await
+        .map_err(unavailable)?;
+    let Some(row) = rows.next().await.map_err(unavailable)? else {
+        return Ok(None);
+    };
+    let receipt: NativeIntegrationReceiptV1 = decode(&text(&row, 0, "terminal receipt")?)?;
+    if receipt.receipt_digest != *receipt_digest {
+        return Err(invalid(
+            "native integration receipt digest key does not bind its payload",
+        ));
+    }
+    receipt.validate().map_err(invalid_domain)?;
+    if rows.next().await.map_err(unavailable)?.is_some() {
+        return Err(invalid("duplicate native integration receipt digest"));
     }
     Ok(Some(receipt))
 }
@@ -853,13 +980,13 @@ fn terminal_outcome_code(outcome: NativeIntegrationTerminalOutcomeV1) -> &'stati
 }
 
 pub(super) fn encode<T: serde::Serialize>(value: &T) -> NativeIntegrationStoreResult<String> {
-    serde_json::to_string(value).map_err(|error| invalid(error.to_string()))
+    crate::sqlite_persist::encode_json(value).map_err(|error| invalid(error.to_string()))
 }
 
 pub(super) fn decode<T: serde::de::DeserializeOwned>(
     value: &str,
 ) -> NativeIntegrationStoreResult<T> {
-    serde_json::from_str(value).map_err(|error| invalid(error.to_string()))
+    crate::sqlite_persist::decode_json(value).map_err(|error| invalid(error.to_string()))
 }
 
 pub(super) fn text(
@@ -867,8 +994,7 @@ pub(super) fn text(
     column: i32,
     field: &'static str,
 ) -> NativeIntegrationStoreResult<String> {
-    row.get::<String>(column)
-        .map_err(|error| invalid(format!("read {field}: {error}")))
+    crate::sqlite_persist::row_text(row, column, field).map_err(invalid)
 }
 
 fn optional_text(
@@ -876,8 +1002,7 @@ fn optional_text(
     column: i32,
     field: &'static str,
 ) -> NativeIntegrationStoreResult<Option<String>> {
-    row.get::<Option<String>>(column)
-        .map_err(|error| invalid(format!("read {field}: {error}")))
+    crate::sqlite_persist::row_optional_text(row, column, field).map_err(invalid)
 }
 
 pub(super) fn invalid(message: impl Into<String>) -> NativeIntegrationStoreError {

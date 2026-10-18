@@ -1,35 +1,45 @@
 //! The daemon-backed hook runtime that host integrations call into.
 //!
-//! **Registered ports.** Hook and host behavior lives in this crate. The root
-//! still owns daemon handshakes, registered project identity, resolved daemon
-//! scope, legacy daemon-event publication, and cached application
-//! configuration. Those capabilities are inverted through the narrow slots
-//! below so the host crate never depends back on the application binary.
+//! **One explicit composition handle**, passed by the root, not a process
+//! global.
 //!
-//! Root wiring: `src/runtime_ports.rs` registers every slot during startup,
-//! before any install, hook, ingest, or doctor path runs.
+//! Hook and host behavior lives in this crate. The root still owns daemon
+//! handshakes, registered project identity, resolved daemon scope, legacy
+//! daemon-event publication, and cached application configuration. Those
+//! capabilities are inverted through [`HookRuntimeV1`], which the composition
+//! root builds and hands to every hook entry point it invokes.
 //!
-//! Each port has a conservative unregistered result: daemon and scope calls
-//! fail closed, identity discovery yields no project, notification is inert,
-//! telemetry has no authoritative override, project initialization uses the
-//! kernel's durable local markers, memory injection is disabled, and the
-//! ingest ceiling is unbounded so doctor never fabricates a backlog warning.
+//! Every field is **required**: a hook that reaches this module in production
+//! needs all of them, so there is no partial handle and no per-capability
+//! default. Because the handle is a parameter rather than a slot, a hook path
+//! cannot run without one, the compiler, not a runtime probe, is the
+//! composition check, and two fixtures can hold two different handles in the
+//! same process without a first-registration-wins race.
+//!
+//! Two former slots are gone rather than moved. The memory-injection gate and
+//! the Cursor catch-up ingest ceiling both asked the root to hand this crate
+//! back its own `hooks::memory_inject::memory_injection_enabled` and
+//! `hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES`; their readers call them directly.
+//!
+//! Root wiring: `src/runtime_ports.rs` builds the handle (`hook_runtime()`)
+//! and the CLI passes it into each `hooks::hook_*` entry point.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::OnceLock;
 
 use serde_json::Value;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::ProjectId;
-use tracedecay_hooks::DaemonHookEvent;
-use tracedecay_runtime_core::storage::StoreLayout;
+use tracedecay_hooks::{DaemonHookEvent, HookEventNotifyOutcomeV1};
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 
-/// Invokes one daemon tool by name and yields its single JSON payload.
+/// Invokes one daemon tool of a profile by name and yields its single JSON
+/// payload.
 pub type DaemonToolInvoker = for<'a> fn(
+    &'a ProfileRoot,
     Option<&'a Path>,
     &'a str,
     Value,
@@ -37,167 +47,128 @@ pub type DaemonToolInvoker = for<'a> fn(
 )
     -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
 
-/// Resolves a checkout through the root's registered identity authority.
+/// Resolves a checkout in one profile through the root's registered identity
+/// authority.
 pub type ProjectRootResolver =
-    for<'a> fn(&'a Path) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>>;
+    for<'a> fn(
+        &'a ProfileRoot,
+        &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>>;
 
 /// Resolves the typed project/repository/worktree scope used by Hook bindings.
 pub type HookScopeResolver = fn(&Path, &ProjectId) -> std::result::Result<ResolvedScope, String>;
 
-/// Publishes one legacy daemon hook event through the root daemon runtime.
+/// Publishes one legacy daemon hook event of a profile through the root
+/// daemon runtime.
 pub type HookEventNotifier =
-    for<'a> fn(&'a Path, DaemonHookEvent) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+    for<'a> fn(
+        &'a ProfileRoot,
+        &'a Path,
+        DaemonHookEvent,
+    ) -> Pin<Box<dyn Future<Output = HookEventNotifyOutcomeV1> + Send + 'a>>;
 
-/// Reads the daemon-published telemetry timing decision without store I/O.
-pub type HookTimingGate = fn(&Path) -> Option<bool>;
-
-/// Reports whether one checkout has an initialized canonical store.
-pub type ProjectInitializationGate = fn(&Path) -> bool;
-
-/// Resolves the canonical store layout through registered project identity.
-pub type StoreLayoutResolver =
-    for<'a> fn(&'a Path) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + 'a>>;
-
-/// Reports whether memory injection is enabled for the active profile.
-pub type MemoryInjectionGate = fn() -> bool;
-
-/// Supplies the largest transcript tail a low-priority catch-up hook reads.
-pub type CursorCatchUpIngestMaxBytes = fn() -> u64;
-
-static DAEMON_TOOL_INVOKER: OnceLock<DaemonToolInvoker> = OnceLock::new();
-static PROJECT_ROOT_RESOLVER: OnceLock<ProjectRootResolver> = OnceLock::new();
-static HOOK_SCOPE_RESOLVER: OnceLock<HookScopeResolver> = OnceLock::new();
-static HOOK_EVENT_NOTIFIER: OnceLock<HookEventNotifier> = OnceLock::new();
-static HOOK_TIMING_GATE: OnceLock<HookTimingGate> = OnceLock::new();
-static PROJECT_INITIALIZATION_GATE: OnceLock<ProjectInitializationGate> = OnceLock::new();
-static STORE_LAYOUT_RESOLVER: OnceLock<StoreLayoutResolver> = OnceLock::new();
-static MEMORY_INJECTION_GATE: OnceLock<MemoryInjectionGate> = OnceLock::new();
-static CURSOR_CATCH_UP_INGEST_MAX_BYTES: OnceLock<CursorCatchUpIngestMaxBytes> = OnceLock::new();
-
-/// Registers the root crate's daemon tool invoker.
+/// Reads the telemetry timing decision a profile's daemon published, without
+/// store I/O.
 ///
-/// Idempotent: the first registration wins, so concurrent daemon and CLI
-/// initialisation cannot fight over it.
-pub fn register_daemon_tool_invoker(invoker: DaemonToolInvoker) {
-    let _ = DAEMON_TOOL_INVOKER.set(invoker);
-}
+/// The `Option` is the answer, not the wiring: `None` means the daemon has
+/// published no authoritative override for this checkout.
+pub type HookTimingGate = fn(&ProfileRoot, &Path) -> Option<bool>;
 
-pub fn register_project_root_resolver(resolver: ProjectRootResolver) {
-    let _ = PROJECT_ROOT_RESOLVER.set(resolver);
-}
+/// Reports whether one checkout has an initialized canonical store in a
+/// profile.
+pub type ProjectInitializationGate = fn(&ProfileRoot, &Path) -> bool;
 
-pub fn register_hook_scope_resolver(resolver: HookScopeResolver) {
-    let _ = HOOK_SCOPE_RESOLVER.set(resolver);
-}
-
-pub fn register_hook_event_notifier(notifier: HookEventNotifier) {
-    let _ = HOOK_EVENT_NOTIFIER.set(notifier);
-}
-
-pub fn register_hook_timing_gate(gate: HookTimingGate) {
-    let _ = HOOK_TIMING_GATE.set(gate);
-}
-
-pub fn register_project_initialization_gate(gate: ProjectInitializationGate) {
-    let _ = PROJECT_INITIALIZATION_GATE.set(gate);
-}
-
-pub fn register_store_layout_resolver(resolver: StoreLayoutResolver) {
-    let _ = STORE_LAYOUT_RESOLVER.set(resolver);
-}
-
-/// Registers the root crate's memory-injection settings read.
-pub fn register_memory_injection_gate(gate: MemoryInjectionGate) {
-    let _ = MEMORY_INJECTION_GATE.set(gate);
-}
-
-/// Registers the root crate's Cursor catch-up ingest ceiling.
-pub fn register_cursor_catch_up_ingest_max_bytes(max_bytes: CursorCatchUpIngestMaxBytes) {
-    let _ = CURSOR_CATCH_UP_INGEST_MAX_BYTES.set(max_bytes);
-}
-
-/// Calls one daemon tool and returns its JSON payload.
+/// The root-owned capabilities every hook path needs, as one value: the
+/// profile the hook process serves and plain function pointers into the root.
 ///
-/// Errors when the root never registered an invoker. Callers already treat a
-/// daemon request failure as "defer this work and warn", which is the correct
-/// handling for an unwired build too.
-pub async fn daemon_tool_json(
-    project_root: Option<&Path>,
-    tool_name: &str,
-    arguments: Value,
-    require_project_identity: bool,
-) -> Result<Value> {
-    let Some(invoker) = DAEMON_TOOL_INVOKER.get() else {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "daemon tool '{tool_name}' is unavailable: no daemon tool invoker is registered"
-            ),
-        });
-    };
-    invoker(project_root, tool_name, arguments, require_project_identity).await
+/// The root builds it wherever a hook path starts; no field can be missing
+/// while the others are present.
+#[derive(Clone)]
+pub struct HookRuntimeV1 {
+    pub profile: ProfileRoot,
+    pub daemon_tool: DaemonToolInvoker,
+    pub project_root_resolver: ProjectRootResolver,
+    pub scope_resolver: HookScopeResolver,
+    pub event_notifier: HookEventNotifier,
+    pub timing_gate: HookTimingGate,
+    pub project_initialization_gate: ProjectInitializationGate,
 }
 
-pub async fn resolve_project_root_with_identity(start: &Path) -> Option<PathBuf> {
-    let resolver = PROJECT_ROOT_RESOLVER.get()?;
-    resolver(start).await
-}
+#[cfg(test)]
+pub(crate) use test_runtime::crate_test_runtime;
 
-pub fn resolve_hook_scope(
-    project_root: &Path,
-    project_id: &ProjectId,
-) -> std::result::Result<ResolvedScope, String> {
-    HOOK_SCOPE_RESOLVER.get().map_or_else(
-        || Err("no Hook scope resolver is registered".to_owned()),
-        |resolver| resolver(project_root, project_id),
-    )
-}
+#[cfg(test)]
+mod test_runtime {
+    use super::{HookEventNotifyOutcomeV1, HookRuntimeV1, ProfileRoot, Result, Value};
+    use std::future::Future;
+    use std::path::{Path, PathBuf};
+    use std::pin::Pin;
+    use tracedecay_domain::errors::TraceDecayError;
 
-pub async fn notify_hook_event(project_root: &Path, event: DaemonHookEvent) {
-    if let Some(notifier) = HOOK_EVENT_NOTIFIER.get() {
-        notifier(project_root, event).await;
+    fn unavailable(capability: &str) -> TraceDecayError {
+        TraceDecayError::Config {
+            message: format!("crate test hook runtime has no {capability}"),
+        }
     }
-}
 
-#[must_use]
-pub fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
-    HOOK_TIMING_GATE.get().and_then(|gate| gate(project_root))
-}
+    fn daemon_tool<'a>(
+        _: &'a ProfileRoot,
+        _: Option<&'a Path>,
+        tool_name: &'a str,
+        _: Value,
+        _: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+        Box::pin(async move { Err(unavailable(&format!("daemon tool '{tool_name}'"))) })
+    }
 
-#[must_use]
-pub fn is_project_initialized(project_root: &Path) -> bool {
-    PROJECT_INITIALIZATION_GATE.get().map_or_else(
-        || {
-            crate::config::has_project_database(project_root)
-                || crate::storage::has_repository_identity_marker(project_root)
-        },
-        |gate| gate(project_root),
-    )
-}
+    fn project_root<'a>(
+        _: &'a ProfileRoot,
+        _: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>> {
+        Box::pin(async { None })
+    }
 
-pub async fn resolve_store_layout(project_root: &Path) -> Result<StoreLayout> {
-    let Some(resolver) = STORE_LAYOUT_RESOLVER.get() else {
-        return Err(TraceDecayError::Config {
-            message: "no Hook store-layout resolver is registered".to_owned(),
-        });
-    };
-    resolver(project_root).await
-}
+    fn scope(
+        _: &Path,
+        _: &tracedecay_domain::ProjectId,
+    ) -> std::result::Result<tracedecay_contracts::ResolvedScope, String> {
+        Err("crate test hook runtime has no scope resolver".to_owned())
+    }
 
-/// Whether memory injection is enabled, or `false` when the root never
-/// registered.
-#[must_use]
-pub fn memory_injection_enabled() -> bool {
-    MEMORY_INJECTION_GATE.get().is_some_and(|gate| gate())
-}
+    fn notify<'a>(
+        _: &'a ProfileRoot,
+        _: &'a Path,
+        _: tracedecay_hooks::DaemonHookEvent,
+    ) -> Pin<Box<dyn Future<Output = HookEventNotifyOutcomeV1> + Send + 'a>> {
+        Box::pin(async { HookEventNotifyOutcomeV1::Unavailable })
+    }
 
-/// Largest transcript tail a low-priority Cursor catch-up hook will read.
-///
-/// Reads as `u64::MAX` when the root never registered, so the doctor check
-/// that compares a pending backlog against this ceiling stays silent rather
-/// than reporting every install as stalled.
-#[must_use]
-pub fn cursor_catch_up_ingest_max_bytes() -> u64 {
-    CURSOR_CATCH_UP_INGEST_MAX_BYTES
-        .get()
-        .map_or(u64::MAX, |max_bytes| max_bytes())
+    fn timings(_: &ProfileRoot, _: &Path) -> Option<bool> {
+        None
+    }
+
+    /// The kernel's durable local markers. Production answers this through the
+    /// registered identity authority; this crate's tests seed the markers
+    /// directly, so the fixture reads them.
+    fn initialized(_: &ProfileRoot, project_root: &Path) -> bool {
+        tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
+    }
+
+    /// This crate's explicit test handle for `profile`: no daemon, no
+    /// registry.
+    ///
+    /// Tests that reach a hook-runtime reader pass this in, so their
+    /// dependency is stated at the call rather than inferred from a global
+    /// being absent. Every field answers the same way for every caller.
+    pub(crate) fn crate_test_runtime(profile: ProfileRoot) -> HookRuntimeV1 {
+        HookRuntimeV1 {
+            profile,
+            daemon_tool,
+            project_root_resolver: project_root,
+            scope_resolver: scope,
+            event_notifier: notify,
+            timing_gate: timings,
+            project_initialization_gate: initialized,
+        }
+    }
 }

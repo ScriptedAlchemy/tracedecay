@@ -1,11 +1,11 @@
 //! Owner-bound construction and settlement for canonical memory curation.
 
+use crate::memory::hygiene::detect_secret_like;
 use serde_json::Value;
 use tracedecay_domain::{
     ActorId, Confidence, FactEventId, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactOwnerV1, FactRelationKindV1, FactRelationV1, ProvenanceId, RunId,
 };
-use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
 use tracedecay_store::{
     FactWriteControl, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddMaterialV1,
     ProjectMemoryFactCurationAddV1, ProjectMemoryFactCurationBatchV1,
@@ -17,8 +17,8 @@ use tracedecay_store::{
     ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1,
     ProjectMemoryFactMergeTargetV1, ProjectMemoryFactNormalizeTagsV1,
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactStore,
-    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
-    ProjectMemoryFactUpdatePatchV1, derive_project_memory_fact_curation_child_operation_id,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdatePatchV1,
+    derive_project_memory_fact_curation_child_operation_id,
 };
 
 use super::MemoryApplication;
@@ -139,7 +139,7 @@ impl ProjectMemoryFactMutationTarget {
 
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Settles one already-canonical curation batch against its exact receipt.
-    #[hotpath::measure(label = "usecases.memory.curation", future = true)]
+    #[tracing::instrument(name = "usecases.memory.curation", level = "trace", skip_all)]
     pub async fn dashboard_curation(
         &self,
         request: ProjectMemoryFactCurationBatchV1,
@@ -220,7 +220,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         })
     }
 
-    #[hotpath::measure(label = "usecases.memory.curation.apply", future = true)]
+    #[tracing::instrument(name = "usecases.memory.curation.apply", level = "trace", skip_all)]
     pub async fn apply_project_memory_curation(
         &self,
         operations: Vec<ProjectMemoryCurationOperation>,
@@ -232,21 +232,24 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         ProjectMemoryFactCurationReceiptV1,
         MemoryMutationError<ProjectMemoryFactCurationReceiptV1>,
     > {
-        let operations = hotpath::measure_block!("usecases.memory.curation.prepare", {
-            operations
-                .into_iter()
-                .enumerate()
-                .map(|(index, operation)| {
-                    self.curation_operation(
-                        operation,
-                        context.operation_id(),
-                        index,
-                        context.actor(),
-                        automation_run_id.as_ref(),
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        });
+        let operations = {
+            let _span = tracing::trace_span!("usecases.memory.curation.prepare").entered();
+            {
+                operations
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, operation)| {
+                        self.curation_operation(
+                            operation,
+                            context.operation_id(),
+                            index,
+                            context.actor(),
+                            automation_run_id.as_ref(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
         let mut batch = ProjectMemoryFactCurationBatchV1::new(
             self.owner.clone(),
             context.operation_id().clone(),
@@ -473,38 +476,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .map_err(MemoryApplicationError::from)
     }
 
-    /// Constructs an owner-bound update command from the canonical store patch.
-    pub fn canonical_fact_update_command(
-        &self,
-        target: ProjectMemoryFactMutationTarget,
-        patch: ProjectMemoryFactUpdatePatchV1,
-        context: &MemoryOperationContext,
-    ) -> Result<ProjectMemoryFactUpdateCommandV1, MemoryApplicationError> {
-        update_command(
-            &self.owner,
-            target,
-            patch,
-            context.operation_id().clone(),
-            context.actor().cloned(),
-        )
-    }
-
-    #[hotpath::skip]
-    pub async fn update_canonical_fact(
-        &self,
-        target: ProjectMemoryFactMutationTarget,
-        patch: ProjectMemoryFactUpdatePatchV1,
-        context: MemoryOperationContext,
-        write_control: &FactWriteControl,
-    ) -> Result<
-        ProjectMemoryFactUpdateOutcomeV1,
-        MemoryMutationError<ProjectMemoryFactUpdateOutcomeV1>,
-    > {
-        let command = self.canonical_fact_update_command(target, patch, &context)?;
-        self.update_project_memory_fact(command, write_control)
-            .await
-    }
-
     /// Constructs an owner-bound compare-and-set remove command.
     pub fn canonical_fact_remove_command(
         &self,
@@ -520,7 +491,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     /// Removes an owner-bound fact when the caller has no read snapshot.
-    #[hotpath::skip]
     pub async fn remove_canonical_fact(
         &self,
         fact_id: FactId,
@@ -538,21 +508,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             write_control,
         )
         .await
-    }
-
-    #[hotpath::skip]
-    pub async fn remove_canonical_fact_at(
-        &self,
-        target: ProjectMemoryFactMutationTarget,
-        context: MemoryOperationContext,
-        write_control: &FactWriteControl,
-    ) -> Result<
-        ProjectMemoryFactRemoveOutcomeV1,
-        MemoryMutationError<ProjectMemoryFactRemoveOutcomeV1>,
-    > {
-        let command = self.canonical_fact_remove_command(target, &context)?;
-        self.remove_project_memory_fact(command, write_control)
-            .await
     }
 
     /// Constructs an owner-bound, compare-and-set merge command.
@@ -573,22 +528,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         )
     }
 
-    #[hotpath::skip]
-    pub async fn merge_canonical_facts(
-        &self,
-        winner: ProjectMemoryFactMutationTarget,
-        losers: Vec<ProjectMemoryFactMutationTarget>,
-        merged_content: Option<String>,
-        context: MemoryOperationContext,
-        write_control: &FactWriteControl,
-    ) -> Result<ProjectMemoryFactMergeOutcomeV1, MemoryMutationError<ProjectMemoryFactMergeOutcomeV1>>
-    {
-        let command =
-            self.canonical_fact_merge_command(winner, losers, merged_content, &context)?;
-        self.dashboard_merge_facts(command, write_control).await
-    }
-
-    #[hotpath::measure(label = "usecases.memory.merge", future = true)]
+    #[tracing::instrument(name = "usecases.memory.merge", level = "trace", skip_all)]
     pub async fn dashboard_merge_facts(
         &self,
         request: ProjectMemoryFactMergeCommandV1,

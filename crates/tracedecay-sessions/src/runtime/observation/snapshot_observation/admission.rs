@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tracedecay_domain::{
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
@@ -9,11 +10,14 @@ use tracedecay_domain::{
 use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::admission::{HostAdmission, is_admission_cancellation};
+use crate::admission::{HostAdmission, HostAdmissionRecovery, is_admission_cancellation};
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
+use crate::runtime::classify_transcript_ingest_disposition;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
+use crate::runtime::observation::jsonl_observation_admission::is_lost_cursor_cas;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{
     FileDiscoveryReport, TranscriptIngestError, TranscriptIngestResult,
@@ -31,12 +35,121 @@ pub struct SnapshotCaptureOutcome {
     pub deferred_by_byte_cap: bool,
 }
 
+/// A record the store permanently refused. The runner skipped that record's
+/// source for the rest of the call.
+#[derive(Debug)]
+pub struct SnapshotSourceRefusal {
+    pub session_id: String,
+    pub native_record_id: String,
+    pub error: TranscriptIngestError,
+}
+
+fn quarantines_source(error: &TranscriptIngestError) -> bool {
+    classify_transcript_ingest_disposition(error).quarantines_source()
+}
+
+/// The sources one `admit_batch` call stopped admitting, and why.
+#[derive(Default)]
+struct Refused {
+    /// Sources with a record the caller declined. Records of theirs already
+    /// pending stay admitted, so only later ones stop.
+    declined: BTreeSet<ObservationSourceIdentityV1>,
+    sources: BTreeSet<ObservationSourceIdentityV1>,
+    refusals: Vec<SnapshotSourceRefusal>,
+}
+
+impl Refused {
+    fn contains(&self, source: &ObservationSourceIdentityV1) -> bool {
+        self.sources.contains(source)
+    }
+
+    fn admits<R>(
+        &mut self,
+        source: &ObservationSourceIdentityV1,
+        record: &R,
+        admit_record: &mut impl FnMut(&R) -> bool,
+    ) -> bool {
+        if self.declined.contains(source) {
+            return false;
+        }
+        if admit_record(record) {
+            return true;
+        }
+        self.declined.insert(source.clone());
+        false
+    }
+
+    /// Keeps a permanent refusal of `record`; anything else comes back for
+    /// the caller to fail on.
+    fn absorb<R: SnapshotAdmissionRecord>(
+        &mut self,
+        source: &ObservationSourceIdentityV1,
+        record: &R,
+        error: TranscriptIngestError,
+    ) -> TranscriptIngestResult<()> {
+        if !quarantines_source(&error) {
+            return Err(error);
+        }
+        self.sources.insert(source.clone());
+        self.refusals.push(SnapshotSourceRefusal {
+            session_id: record.session_id().to_owned(),
+            native_record_id: record.native_record_id().to_owned(),
+            error,
+        });
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SnapshotAdmissionBatch<R> {
+    source: Option<ObservationSourceIdentityV1>,
+    pub generation: ObservationSourceGenerationV1,
+    pub records: Vec<R>,
+}
+
+impl<R> SnapshotAdmissionBatch<R> {
+    pub fn new(generation: ObservationSourceGenerationV1, records: Vec<R>) -> Self {
+        Self {
+            source: None,
+            generation,
+            records,
+        }
+    }
+
+    pub fn for_source(
+        source: ObservationSourceIdentityV1,
+        generation: ObservationSourceGenerationV1,
+        records: Vec<R>,
+    ) -> Self {
+        Self {
+            source: Some(source),
+            generation,
+            records,
+        }
+    }
+
+    pub fn source_identity(&self) -> Option<&ObservationSourceIdentityV1> {
+        self.source.as_ref()
+    }
+}
+
 pub trait SnapshotAdmissionRecord {
     fn provider(&self) -> &'static str;
     fn session_id(&self) -> &str;
     fn native_record_id(&self) -> &str;
     fn order(&self) -> u64;
     fn payload(&self) -> &[u8];
+    /// Mutable native records can identify their bounded content independently
+    /// while retaining the same bulk admission and cursor authority.
+    fn source_generation(
+        &self,
+        batch_generation: ObservationSourceGenerationV1,
+    ) -> TranscriptIngestResult<ObservationSourceGenerationV1> {
+        Ok(batch_generation)
+    }
+    fn source_identity(&self) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
+        snapshot_source_identity(self.provider(), self.session_id())
+    }
     fn capture_request(
         &self,
         scope: ObservationScopeV1,
@@ -60,7 +173,7 @@ where
 {
     let provider = record.provider();
     let range = ObservationSourceRangeV1::new(record.order(), record.order() + 1)?;
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         record.payload(),
         range,
         ObservationOrderingDomainV1::SnapshotOrder,
@@ -80,7 +193,7 @@ where
         end_offset: range.end(),
         reason: "normalized observation record is not durable",
     })?;
-    let source = snapshot_source_identity(provider, record.session_id())?;
+    let source = record.source_identity()?;
     let identity = ObservationIdentityMaterialV1::for_native_record(
         source,
         scope,
@@ -99,73 +212,91 @@ where
     .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })
 }
 
-#[cfg(test)]
-pub fn snapshot_cursor_after(
-    provider: &'static str,
-    session_id: &str,
-    order: u64,
-    scope: ObservationScopeV1,
-    generation: ObservationSourceGenerationV1,
-) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-    Ok(ObservationSourceCursorV1::for_ordering(
-        snapshot_source_identity(provider, session_id)?,
-        scope,
-        generation,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        order + 1,
-    )?)
-}
-
 /// Runs one bounded snapshot sweep for a provider that re-reads complete files.
 ///
 /// Every snapshot provider drives the same loop: bound discovery, defer when
 /// discovery truncated, then charge each discovered path against the sweep
 /// budget before loading and admitting its records. Providers supply only what
-/// actually differs — how paths are discovered, how a path's input bytes are
-/// charged, and how a path becomes `(generation, records)`.
+/// actually differs, how paths are discovered, which files make up a path's
+/// source, how a path's input bytes are charged, and how a path becomes
+/// complete source-generation batches.
 ///
 /// This deliberately re-reads complete snapshots and derives a new source
 /// generation from their content; it neither consults nor advances legacy parse
 /// offsets. `max_new_bytes` is one logical source-byte budget for the complete
-/// sweep.
+/// sweep. A source the store permanently refuses is quarantined in `sweep`
+/// and the sweep moves on to the next one.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "sessions.observation.capture_snapshot", future = true)]
-pub async fn capture_snapshot_observations<R, D, B, L>(
+#[tracing::instrument(
+    name = "sessions.observation.capture_snapshot",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn capture_snapshot_observations<R, D, M, B, L>(
     facade: &dyn HostAdmission,
     provider: &'static str,
     scope: ObservationScopeV1,
     cancellation: &ObservationCancellation,
     max_new_bytes: Option<u64>,
+    sweep: &mut SourceSweep,
     discover: D,
+    source_members: M,
     input_bytes_fn: B,
     load_fn: L,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome>
 where
-    R: SnapshotAdmissionRecord,
-    D: FnOnce() -> FileDiscoveryReport,
-    B: Fn(&Path) -> TranscriptIngestResult<u64>,
-    L: Fn(&Path) -> TranscriptIngestResult<Option<(ObservationSourceGenerationV1, Vec<R>)>>,
+    R: SnapshotAdmissionRecord + Send + 'static,
+    D: FnOnce() -> FileDiscoveryReport + Send + 'static,
+    M: Fn(&Path) -> (PathBuf, Vec<PathBuf>),
+    B: Fn(&Path) -> TranscriptIngestResult<u64> + Send + Sync + 'static,
+    L: Fn(&Path) -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>
+        + Send
+        + Sync
+        + 'static,
 {
     ensure_snapshot_admission_active(provider, cancellation)?;
-    let discovery = hotpath::measure_block!(
-        "sessions.observation.snapshot_discover_blocking",
-        run_blocking_transcript_section(discover)
-    );
+    let discovery = { run_blocking_transcript_section(provider, discover).await? };
     ensure_snapshot_admission_active(provider, cancellation)?;
     let mut runner = SnapshotAdmissionRunner::new(provider, max_new_bytes);
     if discovery.is_truncated() {
         runner.defer();
     }
+    let input_bytes_fn = Arc::new(input_bytes_fn);
+    let load_fn = Arc::new(load_fn);
     for path in discovery.paths {
         ensure_snapshot_admission_active(provider, cancellation)?;
-        let input_bytes = hotpath::measure_block!(
-            "sessions.observation.snapshot_bytes_blocking",
-            run_blocking_transcript_section(|| input_bytes_fn(&path))
-        )?;
+        let (key, members) = source_members(&path);
+        let Some(claim) = sweep.observe_files(&key, members).await? else {
+            continue;
+        };
+        let input_bytes = {
+            let input_bytes_fn = Arc::clone(&input_bytes_fn);
+            let path = path.clone();
+            run_blocking_transcript_section(provider, move || input_bytes_fn(&path)).await?
+        };
+        let input_bytes = match input_bytes {
+            Ok(input_bytes) => input_bytes,
+            Err(error) => {
+                sweep.refused(claim, error)?;
+                continue;
+            }
+        };
         ensure_snapshot_admission_active(provider, cancellation)?;
-        runner
-            .admit_batch(facade, input_bytes, &scope, cancellation, || load_fn(&path))
-            .await?;
+        let load_fn = Arc::clone(&load_fn);
+        let admitted = runner
+            .admit_batch(facade, input_bytes, &scope, cancellation, move || {
+                load_fn(&path)
+            })
+            .await;
+        // One path is one source, so its first refusal quarantines it whole.
+        match admitted {
+            Ok(refusals) => {
+                if let Some(refusal) = refusals.into_iter().next() {
+                    sweep.refused(claim, refusal.error)?;
+                }
+            }
+            Err(error) => sweep.refused(claim, error)?,
+        }
     }
     Ok(runner.finish())
 }
@@ -194,7 +325,8 @@ impl SnapshotAdmissionRunner {
         self.budget.defer();
     }
 
-    #[hotpath::skip]
+    /// Admits every loaded batch. A permanent refusal of one source's record
+    /// does not stop the others; it comes back as a [`SnapshotSourceRefusal`].
     pub async fn admit_batch<R, F>(
         &mut self,
         facade: &dyn HostAdmission,
@@ -202,82 +334,165 @@ impl SnapshotAdmissionRunner {
         scope: &ObservationScopeV1,
         cancellation: &ObservationCancellation,
         load: F,
-    ) -> TranscriptIngestResult<()>
+    ) -> TranscriptIngestResult<Vec<SnapshotSourceRefusal>>
     where
-        R: SnapshotAdmissionRecord,
-        F: FnOnce() -> TranscriptIngestResult<Option<(ObservationSourceGenerationV1, Vec<R>)>>,
+        R: SnapshotAdmissionRecord + Send + 'static,
+        F: FnOnce() -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>
+            + Send
+            + 'static,
+    {
+        self.admit_batch_gated(facade, input_bytes, scope, cancellation, load, |_| true)
+            .await
+    }
+
+    /// [`Self::admit_batch`] that first shows `admit_record` each record its
+    /// cursor does not cover yet, and admits nothing from a record it
+    /// declines onwards in that record's source.
+    pub async fn admit_batch_gated<R, F>(
+        &mut self,
+        facade: &dyn HostAdmission,
+        input_bytes: u64,
+        scope: &ObservationScopeV1,
+        cancellation: &ObservationCancellation,
+        load: F,
+        mut admit_record: impl FnMut(&R) -> bool + Send,
+    ) -> TranscriptIngestResult<Vec<SnapshotSourceRefusal>>
+    where
+        R: SnapshotAdmissionRecord + Send + 'static,
+        F: FnOnce() -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>
+            + Send
+            + 'static,
     {
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         if !self.budget.try_consume(input_bytes) {
-            return Ok(());
+            return Ok(Vec::new());
         }
         ensure_snapshot_admission_active(self.provider, cancellation)?;
-        let loaded = hotpath::measure_block!(
-            "sessions.observation.snapshot_parse_blocking",
-            run_blocking_transcript_section(load)
-        )?;
+        let loaded = { run_blocking_transcript_section(self.provider, load).await? }?;
         ensure_snapshot_admission_active(self.provider, cancellation)?;
-        let Some((generation, records)) = loaded else {
-            return Ok(());
+        let Some(batches) = loaded else {
+            return Ok(Vec::new());
         };
+        // Validate the complete loaded input before the first durable capture.
+        // An empty batch can retain source authority without inventing coverage.
+        for batch in &batches {
+            ensure_snapshot_admission_active(self.provider, cancellation)?;
+            if let Some(source) = batch.source_identity() {
+                for record in &batch.records {
+                    ensure_snapshot_admission_active(record.provider(), cancellation)?;
+                    if record.source_identity()? != *source {
+                        return Err(TranscriptIngestError::InvalidFrameState {
+                            provider: record.provider(),
+                        });
+                    }
+                }
+            }
+        }
+        let mut refused = Refused::default();
+        for batch in batches {
+            ensure_snapshot_admission_active(self.provider, cancellation)?;
+            self.admit_records(
+                facade,
+                scope,
+                cancellation,
+                batch.generation,
+                batch.records,
+                &mut refused,
+                &mut admit_record,
+            )
+            .await?;
+        }
+        Ok(refused.refusals)
+    }
 
-        let mut cursors: BTreeMap<String, Option<ObservationSourceCursorV1>> = BTreeMap::new();
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_records<R: SnapshotAdmissionRecord>(
+        &mut self,
+        facade: &dyn HostAdmission,
+        scope: &ObservationScopeV1,
+        cancellation: &ObservationCancellation,
+        generation: ObservationSourceGenerationV1,
+        records: Vec<R>,
+        refused: &mut Refused,
+        admit_record: &mut impl FnMut(&R) -> bool,
+    ) -> TranscriptIngestResult<()> {
+        let mut cursors: BTreeMap<ObservationSourceIdentityV1, Option<ObservationSourceCursorV1>> =
+            BTreeMap::new();
         let mut pending = Vec::new();
         for record in records {
+            let generation = record.source_generation(generation)?;
             let provider = record.provider();
             ensure_snapshot_admission_active(provider, cancellation)?;
-            let source_identity = snapshot_source_identity(provider, record.session_id())?;
+            let source_identity = record.source_identity()?;
+            if refused.contains(&source_identity) {
+                continue;
+            }
             let range = ObservationSourceRangeV1::new(record.order(), record.order() + 1)?;
             ensure_snapshot_admission_active(provider, cancellation)?;
-            let expected_cursor = session_cursor(
+            let expected_cursor = source_cursor(
                 facade,
                 &mut cursors,
                 provider,
-                record.session_id(),
                 &source_identity,
                 scope,
                 cancellation,
             )
             .await?;
             ensure_snapshot_admission_active(provider, cancellation)?;
-            if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
+            if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range)
+                || !refused.admits(&source_identity, &record, admit_record)
+            {
                 continue;
             }
-            pending.push((record, source_identity, range));
+            pending.push((record, source_identity, range, generation));
         }
 
-        for window in pending.chunks(SNAPSHOT_CAPTURE_WINDOW_RECORDS) {
+        for chunk in pending.chunks(SNAPSHOT_CAPTURE_WINDOW_RECORDS) {
             ensure_snapshot_admission_active(self.provider, cancellation)?;
             let mut chained_cursors = cursors.clone();
-            let mut requests = Vec::with_capacity(window.len());
-            for (record, source_identity, range) in window {
+            let mut window = Vec::with_capacity(chunk.len());
+            let mut requests = Vec::with_capacity(chunk.len());
+            for entry in chunk {
+                let (record, source_identity, range, generation) = entry;
+                if refused.contains(source_identity) {
+                    continue;
+                }
                 let provider = record.provider();
-                let expected_cursor = session_cursor(
+                let expected_cursor = source_cursor(
                     facade,
                     &mut chained_cursors,
                     provider,
-                    record.session_id(),
                     source_identity,
                     scope,
                     cancellation,
                 )
                 .await?;
-                requests.push(record.capture_request(
+                match record.capture_request(
                     scope.clone(),
-                    generation,
+                    *generation,
                     expected_cursor,
                     cancellation.clone(),
-                )?);
+                ) {
+                    Ok(request) => requests.push(request),
+                    Err(error) => {
+                        refused.absorb(source_identity, record, error)?;
+                        continue;
+                    }
+                }
+                window.push(entry);
                 chained_cursors.insert(
-                    record.session_id().to_owned(),
+                    source_identity.clone(),
                     Some(ObservationSourceCursorV1::for_ordering(
                         source_identity.clone(),
                         scope.clone(),
-                        generation,
+                        *generation,
                         ObservationOrderingDomainV1::SnapshotOrder,
                         range.end(),
                     )?),
                 );
+            }
+            if window.is_empty() {
+                continue;
             }
             let outcomes = facade.capture_observations(requests).await;
             ensure_snapshot_admission_active(self.provider, cancellation)?;
@@ -299,7 +514,9 @@ impl SnapshotAdmissionRunner {
                     true
                 }
                 Ok(outcomes) => {
-                    for ((record, _, _), outcome) in window.iter().zip(outcomes) {
+                    for ((record, source_identity, _, _), outcome) in
+                        window.iter().copied().zip(outcomes)
+                    {
                         let outcome = match outcome {
                             CaptureObservationOutcome::Persisted { outcome, .. }
                             | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
@@ -316,10 +533,7 @@ impl SnapshotAdmissionRunner {
                             self.stats.messages_upserted =
                                 self.stats.messages_upserted.saturating_add(1);
                         }
-                        cursors.insert(
-                            record.session_id().to_owned(),
-                            Some(outcome.receipt().committed_cursor().clone()),
-                        );
+                        remember_committed_cursor(&mut cursors, source_identity, &outcome);
                         self.sessions.insert(record.session_id().to_owned());
                     }
                     false
@@ -329,29 +543,47 @@ impl SnapshotAdmissionRunner {
                         provider: self.provider,
                     });
                 }
-                Err(error) if error.recovery.is_some() => true,
-                Err(error) => return Err(host_admission_error(self.provider, error)),
+                // A re-offered unchanged record is an exact duplicate that
+                // moves no cursor, so a record chained behind it in the same
+                // window loses its compare-and-swap. Scalar replay re-reads.
+                Err(error) if error.recovery.is_some() || is_lost_cursor_cas(&error) => true,
+                // One source's permanent refusal fails the whole window;
+                // scalar replay finds it and admits its healthy neighbours.
+                Err(error) => {
+                    let error = host_admission_error(self.provider, error);
+                    if !quarantines_source(&error) {
+                        return Err(error);
+                    }
+                    true
+                }
             };
             if scalar_replay {
                 // The default trait implementation can commit a prefix before
                 // surfacing a non-durable record. Re-read every affected
                 // source cursor before scalar replay so that prefix is
                 // classified as duplicate instead of violating the chain.
-                for (record, _, _) in window {
-                    cursors.remove(record.session_id());
+                for (_, source_identity, _, _) in window.iter().copied() {
+                    cursors.remove(source_identity);
                 }
-                for (record, source_identity, range) in window {
-                    self.capture_scalar_record(
-                        facade,
-                        record,
-                        source_identity,
-                        *range,
-                        &mut cursors,
-                        scope,
-                        generation,
-                        cancellation,
-                    )
-                    .await?;
+                for (record, source_identity, range, generation) in window.iter().copied() {
+                    if refused.contains(source_identity) {
+                        continue;
+                    }
+                    if let Err(error) = self
+                        .capture_scalar_record(
+                            facade,
+                            record,
+                            source_identity,
+                            *range,
+                            &mut cursors,
+                            scope,
+                            *generation,
+                            cancellation,
+                        )
+                        .await
+                    {
+                        refused.absorb(source_identity, record, error)?;
+                    }
                 }
             }
         }
@@ -365,18 +597,17 @@ impl SnapshotAdmissionRunner {
         record: &R,
         source_identity: &ObservationSourceIdentityV1,
         range: ObservationSourceRangeV1,
-        cursors: &mut BTreeMap<String, Option<ObservationSourceCursorV1>>,
+        cursors: &mut BTreeMap<ObservationSourceIdentityV1, Option<ObservationSourceCursorV1>>,
         scope: &ObservationScopeV1,
         generation: ObservationSourceGenerationV1,
         cancellation: &ObservationCancellation,
     ) -> TranscriptIngestResult<()> {
         let provider = record.provider();
         ensure_snapshot_admission_active(provider, cancellation)?;
-        let expected_cursor = session_cursor(
+        let expected_cursor = source_cursor(
             facade,
             cursors,
             provider,
-            record.session_id(),
             source_identity,
             scope,
             cancellation,
@@ -407,7 +638,22 @@ impl SnapshotAdmissionRunner {
                     return Err(host_admission_error(provider, error));
                 }
                 if committed {
-                    cursors.remove(record.session_id());
+                    // The store settled a deterministic refusal itself (an
+                    // identity collision records its marker and coverage in
+                    // one transaction), so this is the only place the skipped
+                    // record can be named; Doctor's census counts it, the log
+                    // has to say which one it was.
+                    if error.recovery == Some(HostAdmissionRecovery::DeterministicContentRefusal) {
+                        tracing::warn!(
+                            provider,
+                            session = source_identity.session_id().as_str(),
+                            position = range.start(),
+                            reason = error.reason_code.unwrap_or("host_admission_refused"),
+                            cause = error.cause.as_deref().unwrap_or("unspecified"),
+                            "admission refused a snapshot record; coverage settled past it"
+                        );
+                    }
+                    cursors.remove(source_identity);
                     return Ok(());
                 }
                 return Err(host_admission_error(provider, error));
@@ -420,10 +666,7 @@ impl SnapshotAdmissionRunner {
                 if matches!(outcome.as_ref(), ObservationPersistOutcome::Committed(_)) {
                     self.stats.messages_upserted = self.stats.messages_upserted.saturating_add(1);
                 }
-                cursors.insert(
-                    record.session_id().to_owned(),
-                    Some(outcome.receipt().committed_cursor().clone()),
-                );
+                remember_committed_cursor(cursors, source_identity, &outcome);
                 self.sessions.insert(record.session_id().to_owned());
             }
             CaptureObservationOutcome::Rejected { receipt, .. } => {
@@ -440,7 +683,7 @@ impl SnapshotAdmissionRunner {
                     cancellation,
                 )
                 .await?;
-                cursors.remove(record.session_id());
+                cursors.remove(source_identity);
             }
             CaptureObservationOutcome::Quarantined { receipt, .. } => {
                 advance_snapshot_coverage(
@@ -456,7 +699,7 @@ impl SnapshotAdmissionRunner {
                     cancellation,
                 )
                 .await?;
-                cursors.remove(record.session_id());
+                cursors.remove(source_identity);
             }
         }
         Ok(())
@@ -482,18 +725,17 @@ fn ensure_snapshot_admission_active(
     Ok(())
 }
 
-/// Reads a session's durable cursor once per sweep, reusing the committed cursor
+/// Reads a source's durable cursor once per batch, reusing the committed cursor
 /// carried by each capture receipt instead of re-selecting it per record.
-async fn session_cursor(
+async fn source_cursor(
     facade: &dyn HostAdmission,
-    cursors: &mut BTreeMap<String, Option<ObservationSourceCursorV1>>,
+    cursors: &mut BTreeMap<ObservationSourceIdentityV1, Option<ObservationSourceCursorV1>>,
     provider: &'static str,
-    session_id: &str,
     source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<Option<ObservationSourceCursorV1>> {
-    if let Some(cursor) = cursors.get(session_id) {
+    if let Some(cursor) = cursors.get(source) {
         return Ok(cursor.clone());
     }
     let cursor = facade
@@ -507,7 +749,7 @@ async fn session_cursor(
             }
         })?;
     ensure_snapshot_admission_active(provider, cancellation)?;
-    cursors.insert(session_id.to_owned(), cursor.clone());
+    cursors.insert(source.clone(), cursor.clone());
     Ok(cursor)
 }
 
@@ -613,6 +855,24 @@ pub async fn snapshot_range_was_committed(
     snapshot_cursor_covers_range(cursor.as_ref(), generation, range)
 }
 
+/// An exact duplicate's receipt names the frontier of its original commit,
+/// not the source's current cursor, so the next capture must re-read it.
+fn remember_committed_cursor(
+    cursors: &mut BTreeMap<ObservationSourceIdentityV1, Option<ObservationSourceCursorV1>>,
+    source: &ObservationSourceIdentityV1,
+    outcome: &ObservationPersistOutcome,
+) {
+    match outcome {
+        ObservationPersistOutcome::ExactDuplicate(_) => {
+            cursors.remove(source);
+        }
+        ObservationPersistOutcome::Committed(receipt)
+        | ObservationPersistOutcome::CoveredDuplicate(receipt) => {
+            cursors.insert(source.clone(), Some(receipt.committed_cursor().clone()));
+        }
+    }
+}
+
 pub fn snapshot_cursor_covers_range(
     cursor: Option<&ObservationSourceCursorV1>,
     generation: ObservationSourceGenerationV1,
@@ -625,14 +885,17 @@ pub fn snapshot_cursor_covers_range(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::admission::HostAdmission;
     use crate::admission::test_support::{MemoryHostAdmission, PanicHostAdmission};
+    use crate::admission::{HostAdmission, HostAdmissionOutcome, HostAdmissionStatus};
 
     use super::*;
 
     #[derive(Clone)]
     struct TestSnapshotRecord {
+        source_key: Option<String>,
         session_id: String,
         native_record_id: String,
         order: u64,
@@ -646,6 +909,17 @@ mod tests {
 
         fn session_id(&self) -> &str {
             &self.session_id
+        }
+
+        fn source_identity(&self) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
+            match &self.source_key {
+                Some(key) => Ok(ObservationSourceIdentityV1::for_provider_source(
+                    ProviderId::new(self.provider())?,
+                    SessionId::new(self.session_id())?,
+                    SessionId::new(key.clone())?,
+                )?),
+                None => snapshot_source_identity(self.provider(), self.session_id()),
+            }
         }
 
         fn native_record_id(&self) -> &str {
@@ -663,6 +937,7 @@ mod tests {
 
     fn test_record() -> TestSnapshotRecord {
         TestSnapshotRecord {
+            source_key: None,
             session_id: "session-1".to_owned(),
             native_record_id: "message-1".to_owned(),
             order: 0,
@@ -681,6 +956,7 @@ mod tests {
     fn test_record_at(order: u64) -> TestSnapshotRecord {
         let native_record_id = format!("message-{order}");
         TestSnapshotRecord {
+            source_key: None,
             session_id: "session-window".to_owned(),
             native_record_id: native_record_id.clone(),
             order,
@@ -688,12 +964,206 @@ mod tests {
                 "provider": "test",
                 "session_id": "session-window",
                 "message_id": native_record_id,
-                "role": if order % 2 == 0 { "user" } else { "assistant" },
+                "role": if order.is_multiple_of(2) { "user" } else { "assistant" },
                 "ordinal": order,
                 "text": format!("windowed snapshot record {order}")
             }))
             .unwrap(),
         }
+    }
+
+    fn source_record_at(source_key: &str, order: u64) -> TestSnapshotRecord {
+        let mut record = test_record_at(order);
+        record.source_key = Some(source_key.to_owned());
+        record.native_record_id = format!("{source_key}-{order}");
+        let mut payload: serde_json::Value = serde_json::from_slice(&record.payload).unwrap();
+        payload["message_id"] = serde_json::json!(record.native_record_id);
+        record.payload = serde_json::to_vec(&payload).unwrap();
+        record
+    }
+
+    #[tokio::test]
+    async fn native_sources_in_one_session_keep_independent_cursors_and_generations() {
+        let admission = MemoryHostAdmission::default();
+        let scope = ObservationScopeV1::Profile;
+        let cancellation = ObservationCancellation::default();
+        let generation = ObservationSourceGenerationV1::new(2).unwrap();
+        let api = source_record_at("api_history", 0)
+            .source_identity()
+            .unwrap();
+        let ui = source_record_at("ui_messages", 0)
+            .source_identity()
+            .unwrap();
+        let mut runner = SnapshotAdmissionRunner::new("test", Some(12));
+        let loads = Arc::new(AtomicUsize::new(0));
+        runner
+            .admit_batch(&admission, 4, &scope, &cancellation, {
+                let loads = Arc::clone(&loads);
+                move || {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(vec![SnapshotAdmissionBatch::new(
+                        generation,
+                        vec![
+                            source_record_at("api_history", 0),
+                            source_record_at("ui_messages", 0),
+                            source_record_at("api_history", 1),
+                        ],
+                    )]))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        let api_cursor = admission
+            .get_source_cursor(&api, &scope)
+            .await
+            .unwrap()
+            .unwrap();
+        let ui_cursor = admission
+            .get_source_cursor(&ui, &scope)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(api_cursor.position(), 2);
+        assert_eq!(ui_cursor.position(), 1);
+        assert_eq!(admission.capture_call_counts(), (0, 1));
+
+        let changed = ObservationSourceGenerationV1::new(9).unwrap();
+        let replacement_ui = (0..3)
+            .map(|order| {
+                let mut record = source_record_at("replacement-ui", order);
+                record.source_key = Some("ui_messages".to_owned());
+                record
+            })
+            .collect::<Vec<_>>();
+        runner
+            .admit_batch(&admission, 4, &scope, &cancellation, {
+                let loads = Arc::clone(&loads);
+                let api = api.clone();
+                let ui = ui.clone();
+                let replacement_ui = replacement_ui.clone();
+                move || {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(vec![
+                        SnapshotAdmissionBatch::for_source(
+                            api.clone(),
+                            generation,
+                            vec![
+                                source_record_at("api_history", 0),
+                                source_record_at("api_history", 1),
+                            ],
+                        ),
+                        SnapshotAdmissionBatch::for_source(
+                            ui.clone(),
+                            changed,
+                            replacement_ui.clone(),
+                        ),
+                    ]))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            admission
+                .get_source_cursor(&api, &scope)
+                .await
+                .unwrap()
+                .unwrap(),
+            api_cursor
+        );
+        let ui_cursor = admission
+            .get_source_cursor(&ui, &scope)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ui_cursor.generation(), changed);
+        assert_eq!(ui_cursor.position(), 3);
+        let before_retry = admission.capture_call_counts();
+        runner
+            .admit_batch(&admission, 4, &scope, &cancellation, {
+                let loads = Arc::clone(&loads);
+                let ui = ui.clone();
+                move || {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(vec![SnapshotAdmissionBatch::for_source(
+                        ui,
+                        changed,
+                        replacement_ui,
+                    )]))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(admission.capture_call_counts(), before_retry);
+        assert_eq!(loads.load(Ordering::SeqCst), 3);
+        let outcome = runner.finish();
+        assert_eq!(outcome.bytes_consumed, 12);
+        assert!(!outcome.deferred_by_byte_cap);
+        assert_eq!(outcome.stats.sessions_upserted, 1);
+    }
+
+    #[tokio::test]
+    async fn loaded_batches_validate_before_capture_and_empty_sources_write_no_cursor() {
+        let admission = MemoryHostAdmission::default();
+        let scope = ObservationScopeV1::Profile;
+        let cancellation = ObservationCancellation::default();
+        let generation = ObservationSourceGenerationV1::new(2).unwrap();
+        let api = source_record_at("api_history", 0)
+            .source_identity()
+            .unwrap();
+        let ui = source_record_at("ui_messages", 0)
+            .source_identity()
+            .unwrap();
+        let mut runner = SnapshotAdmissionRunner::new("test", None);
+        let error = runner
+            .admit_batch(&admission, 5, &scope, &cancellation, {
+                let api = api.clone();
+                let ui = ui.clone();
+                move || {
+                    Ok(Some(vec![
+                        SnapshotAdmissionBatch::for_source(
+                            api,
+                            generation,
+                            vec![source_record_at("api_history", 0)],
+                        ),
+                        SnapshotAdmissionBatch::for_source(
+                            ui,
+                            generation,
+                            vec![source_record_at("api_history", 1)],
+                        ),
+                    ]))
+                }
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TranscriptIngestError::InvalidFrameState { provider: "test" }
+        ));
+        assert!(admission.observations().is_empty());
+        assert_eq!(admission.capture_call_counts(), (0, 0));
+        let empty = SnapshotAdmissionBatch::<TestSnapshotRecord>::for_source(
+            ui.clone(),
+            generation,
+            Vec::new(),
+        );
+        assert_eq!(empty.source_identity(), Some(&ui));
+        runner
+            .admit_batch(&admission, 3, &scope, &cancellation, move || {
+                Ok(Some(vec![empty]))
+            })
+            .await
+            .unwrap();
+        assert!(
+            admission
+                .get_source_cursor(&ui, &scope)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(admission.capture_call_counts(), (0, 0));
+        assert_eq!(runner.finish().bytes_consumed, 8);
     }
 
     fn discovery(paths: Vec<PathBuf>) -> FileDiscoveryReport {
@@ -706,80 +1176,60 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn snapshot_adapter_discovery_releases_the_only_worker() {
-        let handle = tokio::runtime::Handle::current();
-        tokio::spawn(async move {
-            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
-                &MemoryHostAdmission::default(),
-                "test",
-                ObservationScopeV1::Profile,
-                &ObservationCancellation::default(),
-                None,
-                move || {
-                    crate::runtime::source::require_blocking_section_releases_worker(handle);
-                    discovery(Vec::new())
-                },
-                |_| Ok(0),
-                |_| Ok(None),
-            )
-            .await
-        })
-        .await
-        .expect("join snapshot discovery")
-        .expect("snapshot discovery");
+    fn single_file_source(path: &Path) -> (PathBuf, Vec<PathBuf>) {
+        (path.to_path_buf(), vec![path.to_path_buf()])
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn snapshot_adapter_metadata_read_releases_the_only_worker() {
-        let handle = tokio::runtime::Handle::current();
-        tokio::spawn(async move {
-            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
-                &MemoryHostAdmission::default(),
-                "test",
-                ObservationScopeV1::Profile,
-                &ObservationCancellation::default(),
-                None,
-                || discovery(vec![PathBuf::from("session.snapshot")]),
-                move |_| {
-                    crate::runtime::source::require_blocking_section_releases_worker(
-                        handle.clone(),
-                    );
-                    Ok(0)
-                },
-                |_| Ok(None),
-            )
-            .await
-        })
-        .await
-        .expect("join snapshot metadata read")
-        .expect("snapshot metadata read");
+    #[test]
+    fn snapshot_adapter_metadata_read_leaves_the_polling_thread() {
+        let caller = std::thread::current().id();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let mut sweep = SourceSweep::new("test", None);
+        let capture = capture_snapshot_observations::<TestSnapshotRecord, _, _, _, _>(
+            &admission,
+            "test",
+            ObservationScopeV1::Profile,
+            &cancellation,
+            None,
+            &mut sweep,
+            || discovery(vec![PathBuf::from("session.snapshot")]),
+            single_file_source,
+            move |_| {
+                crate::runtime::source::require_blocking_section_releases_worker(caller);
+                Ok(0)
+            },
+            |_| Ok(None),
+        );
+        tracedecay_runtime_core::native_runtime::block_on(capture)
+            .expect("process runtime")
+            .expect("snapshot metadata read");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn snapshot_adapter_parse_releases_the_only_worker() {
-        let handle = tokio::runtime::Handle::current();
-        tokio::spawn(async move {
-            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
-                &MemoryHostAdmission::default(),
-                "test",
-                ObservationScopeV1::Profile,
-                &ObservationCancellation::default(),
-                None,
-                || discovery(vec![PathBuf::from("session.snapshot")]),
-                |_| Ok(0),
-                move |_| {
-                    crate::runtime::source::require_blocking_section_releases_worker(
-                        handle.clone(),
-                    );
-                    Ok(None)
-                },
-            )
-            .await
-        })
-        .await
-        .expect("join snapshot parse")
-        .expect("snapshot parse");
+    #[test]
+    fn snapshot_adapter_parse_leaves_the_polling_thread() {
+        let caller = std::thread::current().id();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let mut sweep = SourceSweep::new("test", None);
+        let capture = capture_snapshot_observations::<TestSnapshotRecord, _, _, _, _>(
+            &admission,
+            "test",
+            ObservationScopeV1::Profile,
+            &cancellation,
+            None,
+            &mut sweep,
+            || discovery(vec![PathBuf::from("session.snapshot")]),
+            single_file_source,
+            |_| Ok(0),
+            move |_| {
+                crate::runtime::source::require_blocking_section_releases_worker(caller);
+                Ok(None)
+            },
+        );
+        tracedecay_runtime_core::native_runtime::block_on(capture)
+            .expect("process runtime")
+            .expect("snapshot parse");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -789,12 +1239,13 @@ mod tests {
         let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel();
         let (sleep_end_tx, sleep_end_rx) = std::sync::mpsc::channel();
         tokio::spawn(async move {
-            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+            capture_snapshot_observations::<TestSnapshotRecord, _, _, _, _>(
                 &MemoryHostAdmission::default(),
                 "test",
                 ObservationScopeV1::Profile,
                 &ObservationCancellation::default(),
                 None,
+                &mut SourceSweep::new("test", None),
                 move || {
                     handle.spawn(async move {
                         let _ = heartbeat_tx.send(std::time::Instant::now());
@@ -806,6 +1257,7 @@ mod tests {
                     let _ = sleep_end_tx.send(std::time::Instant::now());
                     discovery(Vec::new())
                 },
+                single_file_source,
                 |_| Ok(0),
                 |_| Ok(None),
             )
@@ -851,13 +1303,18 @@ mod tests {
             ObservationScopeV1::Profile,
             &ObservationCancellation::default(),
             None,
+            &mut SourceSweep::new("test", None),
             || discovery(vec![PathBuf::from("session.snapshot")]),
+            single_file_source,
             |_| Ok(1),
-            |_| {
-                Ok(Some((
-                    ObservationSourceGenerationV1::new(1).expect("generation"),
-                    vec![record.clone()],
-                )))
+            {
+                let record = record.clone();
+                move |_| {
+                    Ok(Some(vec![SnapshotAdmissionBatch::new(
+                        ObservationSourceGenerationV1::new(1).expect("generation"),
+                        vec![record.clone()],
+                    )]))
+                }
             },
         )
         .await
@@ -886,9 +1343,16 @@ mod tests {
             ObservationScopeV1::Profile,
             &ObservationCancellation::default(),
             None,
+            &mut SourceSweep::new("test", None),
             || discovery(vec![PathBuf::from("session-window.snapshot")]),
+            single_file_source,
             |_| Ok(1),
-            |_| Ok(Some((generation, records.clone()))),
+            move |_| {
+                Ok(Some(vec![SnapshotAdmissionBatch::new(
+                    generation,
+                    records.clone(),
+                )]))
+            },
         )
         .await
         .expect("windowed snapshot capture");
@@ -911,13 +1375,15 @@ mod tests {
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
 
-        let error = capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+        let error = capture_snapshot_observations::<TestSnapshotRecord, _, _, _, _>(
             &PanicHostAdmission,
             "test",
             ObservationScopeV1::Profile,
             &cancellation,
             None,
+            &mut SourceSweep::new("test", None),
             || discovery(Vec::new()),
+            single_file_source,
             |_| Ok(0),
             |_| Ok(None),
         )
@@ -944,9 +1410,19 @@ mod tests {
             ObservationScopeV1::Profile,
             &cancellation,
             None,
-            || discovery(vec![path.clone()]),
+            &mut SourceSweep::new("test", None),
+            {
+                let path = path.clone();
+                move || discovery(vec![path])
+            },
+            single_file_source,
             |_| Ok(1),
-            |_| Ok(Some((generation, vec![test_record()]))),
+            move |_| {
+                Ok(Some(vec![SnapshotAdmissionBatch::new(
+                    generation,
+                    vec![test_record()],
+                )]))
+            },
         )
         .await
         .expect_err("mid-sweep cancellation must terminate the sweep");
@@ -980,9 +1456,16 @@ mod tests {
             ObservationScopeV1::Profile,
             &ObservationCancellation::default(),
             None,
-            || discovery(vec![path]),
+            &mut SourceSweep::new("test", None),
+            move || discovery(vec![path]),
+            single_file_source,
             |_| Ok(1),
-            |_| Ok(Some((generation, vec![test_record()]))),
+            move |_| {
+                Ok(Some(vec![SnapshotAdmissionBatch::new(
+                    generation,
+                    vec![test_record()],
+                )]))
+            },
         )
         .await
         .expect("retry after cancellation must succeed");
@@ -991,27 +1474,95 @@ mod tests {
         assert_eq!(admission.observations().len(), 1);
     }
 
-    #[test]
-    fn snapshot_budget_is_aggregate_and_reports_deferral() {
-        let mut runner = SnapshotAdmissionRunner::new("test", Some(5));
-        assert!(runner.budget.try_consume(3));
-        assert!(!runner.budget.try_consume(3));
-        assert!(runner.budget.try_consume(2));
-        runner.sessions.insert("session-1".to_owned());
-
-        let outcome = runner.finish();
-        assert_eq!(outcome.bytes_consumed, 5);
-        assert!(outcome.deferred_by_byte_cap);
-        assert_eq!(outcome.stats.sessions_upserted, 1);
+    fn session_record(session_id: &str, order: u64) -> TestSnapshotRecord {
+        let native_record_id = format!("{session_id}-{order}");
+        TestSnapshotRecord {
+            source_key: None,
+            session_id: session_id.to_owned(),
+            native_record_id: native_record_id.clone(),
+            order,
+            payload: serde_json::to_vec(&serde_json::json!({
+                "provider": "test",
+                "session_id": session_id,
+                "message_id": native_record_id,
+                "role": "user",
+                "ordinal": order,
+                "text": format!("record {order}")
+            }))
+            .unwrap(),
+        }
     }
 
-    #[test]
-    fn unbounded_snapshot_budget_still_reports_consumed_bytes() {
+    fn refusal(status: HostAdmissionStatus, retryable: bool) -> HostAdmissionOutcome {
+        HostAdmissionOutcome {
+            status,
+            retryable,
+            reason_code: Some("observation_cursor_advance_ledger_disagreement"),
+            recovery: None,
+            cause: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_permanently_refused_session_does_not_stop_its_window() {
+        let admission = MemoryHostAdmission::default();
+        let scope = ObservationScopeV1::Profile;
+        let cancellation = ObservationCancellation::default();
+        let generation = ObservationSourceGenerationV1::new(1).unwrap();
+        let load = move || {
+            Ok(Some(vec![SnapshotAdmissionBatch::new(
+                generation,
+                vec![
+                    session_record("refused", 0),
+                    session_record("healthy", 0),
+                    session_record("refused", 1),
+                ],
+            )]))
+        };
+        admission
+            .fail_captures_for_session("refused", refusal(HostAdmissionStatus::Degraded, false));
         let mut runner = SnapshotAdmissionRunner::new("test", None);
-        assert!(runner.budget.try_consume(7));
-        assert!(runner.budget.try_consume(11));
-        let outcome = runner.finish();
-        assert_eq!(outcome.bytes_consumed, 18);
-        assert!(!outcome.deferred_by_byte_cap);
+
+        let refusals = runner
+            .admit_batch(&admission, 1, &scope, &cancellation, load)
+            .await
+            .expect("a permanent refusal is handed back, not raised");
+
+        assert_eq!(
+            refusals
+                .iter()
+                .map(|refusal| refusal.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["refused"]
+        );
+        let admitted = admission
+            .observations()
+            .iter()
+            .map(|stored| {
+                stored
+                    .observation()
+                    .source()
+                    .session_id()
+                    .as_str()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(admitted, ["healthy"], "the healthy neighbour is admitted");
+        assert_eq!(
+            admission.failed_session_capture_attempts(),
+            2,
+            "the window and the first refused record are attempted; the refused \
+             source's later record is not"
+        );
+
+        admission.fail_captures_for_session(
+            "refused",
+            refusal(HostAdmissionStatus::Backpressured, true),
+        );
+        let error = runner
+            .admit_batch(&admission, 1, &scope, &cancellation, load)
+            .await
+            .expect_err("a retryable refusal still fails the batch");
+        assert!(classify_transcript_ingest_disposition(&error).retryable);
     }
 }

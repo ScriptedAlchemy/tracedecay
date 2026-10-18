@@ -15,28 +15,23 @@
       "tracedecay_context"
     ],
     "acceptable": [
-      "tracedecay_redundancy",
       "tracedecay_dead_code",
       "tracedecay_complexity"
-    ],
-    "forbidden_first": [
-      "Grep",
-      "Glob"
-    ],
-    "forbidden_bash": [
-      "grep",
-      "rg ",
-      "rg\t",
-      "find ",
-      "cat ",
-      "sed ",
-      "awk ",
-      "ack "
     ]
   },
-  "ground_truth": [
-    "redundan"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states redundan",
+          "pattern": "\\bredundan\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
-  "notes": "health scorecard; the compute_total/compute_grand_total duplication should surface in the redundancy dimension."
+  "notes": "health scorecard; the compute_total/compute_grand_total duplication should surface in the redundancy dimension.",
+  "expected_skill": "code-health",
+  "max_tracedecay_calls": 5
 }

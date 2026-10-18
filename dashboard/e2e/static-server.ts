@@ -7,7 +7,7 @@
  * screenshots are deterministic.
  */
 import { spawnSync } from 'node:child_process';
-import { cpSync, createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { cpSync, createReadStream, existsSync, rmSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
 

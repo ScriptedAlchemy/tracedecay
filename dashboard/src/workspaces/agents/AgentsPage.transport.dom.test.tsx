@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -22,11 +23,11 @@ import { AgentsPage } from './AgentsPage.tsx';
  * different meanings may collapse into one reading.
  */
 const server = fixtureServer();
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
-/** The sentence `LegacyStates` prints for each state it can reach. Distinct
+/** The sentence `ReadFailure` prints for each state it can reach. Distinct
  * wording per state is the point: a reader has to be able to tell "the daemon
  * is down" from "the daemon answered wrong" without opening a console. */
 const GUIDANCE = {
@@ -51,7 +52,7 @@ type FailKind = keyof typeof GUIDANCE;
  *
  * The last two rows deliberately declare the same reading. `PayloadResult`
  * carries a `detail` only on `error`, so a body that is not JSON and a body the
- * decoder rejects both arrive as a bare `unsupported_schema` — one state,
+ * decoder rejects both arrive as a bare `unsupported_schema`, one state,
  * because both mean "this build cannot read what came back". Every other pair
  * here is required to be distinguishable, and the test below derives that
  * requirement from this table rather than from a hand-counted total.
@@ -74,12 +75,26 @@ describe('AgentsPage under HTTP transport faults', () => {
       const { container } = renderAgents();
 
       const chips = await findFaultChips(container);
-      // Every read boundary on the page reports the same wire fault; a plate
-      // rendering any other state would be inventing a reading.
+      // Every GET-fed read boundary on the page reports the same wire fault; a
+      // plate rendering any other state would be inventing a reading.
       for (const chip of chips) {
         expect(chip.getAttribute('data-state')).toBe(kind satisfies DomainStateKind);
         if (detail) expect(chip.textContent).toContain(detail);
       }
+
+      // The authority register keeps the two POST-fed authorities apart from
+      // the fault: the Work graph still answers from its fixture, and the token
+      // frontier was never asked because the failed tree named no session.
+      // Neither may borrow the GET fault, and neither may read as ready-by-
+      // default: one is the fixture's own answer, the other is `unknown`.
+      expect(authorityState('work')).not.toBe(kind);
+      // The fixture graph's runtime coverage is partial, and that is the
+      // fixture's own reading, not a fault.
+      expect(authorityState('work')).toMatch(/^(ready|complete_zero_findings|partial)$/);
+      expect(authorityState('tokens')).toBe('unknown');
+      expect(
+        container.querySelector('[data-agent-authority="tokens"]')?.textContent,
+      ).toMatch(/unasked · no session named/);
 
       // The state's own sentence (once per failed plate), and none of the
       // other failure sentences: an unreachable daemon must not read as a bad
@@ -89,8 +104,8 @@ describe('AgentsPage under HTTP transport faults', () => {
         if (other !== kind) expect(screen.queryAllByText(GUIDANCE[other])).toHaveLength(0);
       }
 
-      // The delegation plates stay on screen as named, failed regions — the
-      // frame is honest — but nothing was read, so nothing may be reported:
+      // The delegation plates stay on screen as named, failed regions, the
+      // frame is honest, but nothing was read, so nothing may be reported:
       // no event-window readouts and none of the counts the fixtures serve.
       expect(screen.getByRole('region', { name: 'Agents content' })).toBeTruthy();
       expect(screen.queryByText('Event window')).toBeNull();
@@ -116,8 +131,8 @@ describe('AgentsPage under HTTP transport faults', () => {
     }
 
     // Two faults may render alike only where MATRIX says they mean the same
-    // thing. Anything else collapsing — a 403 reading as a 500, an unreachable
-    // daemon reading as a bad payload — shows up as a shortfall here.
+    // thing. Anything else collapsing, a 403 reading as a 500, an unreachable
+    // daemon reading as a bad payload, shows up as a shortfall here.
     const declared = new Set(MATRIX.map((row) => `${row.kind}|${row.detail ?? ''}`));
     expect(new Set(rendered.values()).size).toBe(declared.size);
 
@@ -129,7 +144,7 @@ describe('AgentsPage under HTTP transport faults', () => {
 
   it('keeps a failed diagnostics read from becoming zero tool calls', async () => {
     // Only the slow diagnostics fold fails. Usage and hints answer from the
-    // fixtures, so the page renders — which is exactly when a fabricated zero
+    // fixtures, so the page renders, which is exactly when a fabricated zero
     // would be invisible, sitting in a readout among real numbers.
     server.use(faultHandler('*/api/plugins/analytics/diagnostics', 'server_error'));
     renderAgents();
@@ -150,7 +165,7 @@ describe('AgentsPage under HTTP transport faults', () => {
     for (const chip of failed) expect(chip.textContent).toContain('HTTP 500');
 
     // And the dashes are accounted for as a FAILED read. "unavailable" is the
-    // source's own declaration, which never arrived here — the strip used to
+    // source's own declaration, which never arrived here, the strip used to
     // put that word in the daemon's mouth for every pending or failed read.
     expect(screen.getAllByText(/analytics diagnostics could not be read/i).length)
       .toBeGreaterThan(0);
@@ -164,19 +179,36 @@ function renderAgents() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <AgentsPage />
+      <MemoryRouter>
+        <AgentsPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
-/** Every plate's state chip once the fully failed page has settled: each read
- * boundary reports the fault on its own face, so there are several, and every
- * one of them is part of the page's answer. */
+/** Every GET-fed plate's state chip once the fully failed page has settled:
+ * each read boundary reports the fault on its own face, so there are several,
+ * and every one of them is part of the page's answer.
+ *
+ * The Work and token cells of the authority register are excluded on purpose:
+ * `allRoutesFail` faults GETs only, so those two POST-fed authorities are not
+ * under the fault and are asserted separately as independent readings. */
 async function findFaultChips(container: HTMLElement): Promise<Element[]> {
   await screen.findAllByText(/^(Error|Offline|Unauthorized|Denied|Unsupported schema)$/);
-  const chips = [...container.querySelectorAll('[data-state]')];
+  const chips = [...container.querySelectorAll('[data-state]')].filter(
+    (chip) => chip.closest('[data-agent-authority="work"], [data-agent-authority="tokens"]') === null,
+  );
   expect(chips.length).toBeGreaterThan(0);
   return chips;
+}
+
+/** The state the authority register reports for one authority. */
+function authorityState(id: string): string | null {
+  return (
+    document
+      .querySelector(`[data-agent-authority="${id}"]`)
+      ?.getAttribute('data-agent-authority-state') ?? null
+  );
 }
 
 /** The value printed under a readout's engraved legend, or null when that

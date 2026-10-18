@@ -1,0 +1,93 @@
+use tracedecay_domain::WorkRuntimeContractError;
+
+use crate::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
+
+use super::WorkAttemptStorageError;
+
+pub(super) fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
+    match error {
+        WorkAttemptStorageError::NotFoundOrNotAuthorized => not_found_problem(),
+        WorkAttemptStorageError::AttemptConflict => ApplicationProblem::conflict(
+            "application.work-attempt.identity-conflict",
+            "The Work attempt identity was already used with different content.",
+        ),
+        WorkAttemptStorageError::RunAdmissionConflict => ApplicationProblem::conflict(
+            "application.work-attempt.run-admission-conflict",
+            "The Work attempt differs from this run's first admitted deadline or topology.",
+        ),
+        WorkAttemptStorageError::ReservationFenced => ApplicationProblem::conflict(
+            "application.work-attempt.reservation-fenced",
+            "The Work run control authority fenced new attempt reservations.",
+        ),
+        WorkAttemptStorageError::FenceConflict => ApplicationProblem::conflict(
+            "application.work-attempt.fence-conflict",
+            "The Work attempt lease fence changed after this transition was prepared.",
+        ),
+        WorkAttemptStorageError::CapacityExceeded => ApplicationProblem::saturated(
+            "application.work-attempt.capacity-exhausted",
+            "The registered Work topology has no parallel attempt capacity.",
+        ),
+        WorkAttemptStorageError::PlacementRootConflict => placement_root_conflict_problem(),
+        WorkAttemptStorageError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.work-attempt.storage-unavailable".to_owned(),
+            message: "The Work attempt authority is unavailable.".to_owned(),
+        }),
+    }
+}
+
+pub(super) fn placement_root_conflict_problem() -> ApplicationProblem {
+    ApplicationProblem::conflict(
+        "application.work-attempt.placement-root-conflict",
+        "The Work attempt worktree root is outside its run's admitted placement root.",
+    )
+}
+
+pub(super) fn contract_problem(_error: WorkRuntimeContractError) -> ApplicationProblem {
+    ApplicationProblem::invalid_request(
+        "application.work-attempt.invalid-transition",
+        "The Work attempt command or stored state is invalid.",
+    )
+}
+
+pub(super) fn not_found_problem() -> ApplicationProblem {
+    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+}
+
+pub(super) fn stale_cursor_problem() -> ApplicationProblem {
+    ApplicationProblem::stale(SafeDiagnostic {
+        code: "application.work-attempt.stale-cursor".to_owned(),
+        message: "The Work attempt list cursor was minted under a superseded topology snapshot."
+            .to_owned(),
+    })
+}
+
+pub(super) fn cursor_binding_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "application.work-attempt.cursor-binding-unavailable".to_owned(),
+        message: "The Work attempt list cursor could not be bound to its request.".to_owned(),
+    })
+}
+
+pub(super) fn list_page_contract_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "application.work-attempt.list-page-inconsistent".to_owned(),
+        message: "The Work attempt storage returned an inconsistent list page.".to_owned(),
+    })
+}
+
+pub(super) fn denied_problem(code: &str, message: &str) -> ApplicationProblem {
+    ApplicationProblem::InvalidRequest {
+        diagnostic: SafeDiagnostic {
+            code: code.to_owned(),
+            message: message.to_owned(),
+        },
+        retry: RetryDirective::AfterRevalidate,
+        legal_actions: vec![LegalAction::Refresh],
+    }
+}
+
+impl From<WorkAttemptStorageError> for ApplicationProblem {
+    fn from(error: WorkAttemptStorageError) -> Self {
+        storage_problem(error)
+    }
+}

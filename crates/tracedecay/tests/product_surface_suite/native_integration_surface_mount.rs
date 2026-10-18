@@ -1,39 +1,26 @@
-//! Direct surface proof for the native-integration journey.
-//!
-//! `stack_snapshot` and `preflight_native_integration` must be callable on
-//! the shipped application and CLI/MCP surfaces. Apply, status, and cancel
-//! join that same journey and must stay exposed consistently through CLI and
-//! MCP over one application result. Explicit-root worktree inventory and
-//! cleanup bind CLI, MCP, and HTTP; the transaction journey still withholds
-//! HTTP because apply has no transport fallback.
-//!
-//! This suite proves the journey is *mounted and callable* end to end at the
-//! surface boundary: canonical operation identity, catalog bindings on both
-//! CLI and MCP, an advertised MCP tool per operation, typed request decoding
-//! that rejects a mismatched or path-bearing request, and a truthful typed
-//! result envelope whose unavailable and cancellation states advance nothing.
-//!
-//! The full multi-repository apply journey needs a mounted native-integration
-//! runtime and is deliberately not attempted here.
-
 use std::collections::BTreeSet;
 
-use serde_json::json;
-use tracedecay::application_surface::{
-    ApplicationSurfaceRequest, parse_application_surface_request,
-    resolve_application_surface_dispatch, resolve_catalog_tool_binding,
-};
+use serde_json::{Value, json};
 use tracedecay_api::is_http_application_operation_exposed;
-use tracedecay_application::{
+use tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID;
+use tracedecay_contracts::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     RequestId, native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
 use tracedecay_daemon_protocol::RequestedOutputFormat;
-use tracedecay_mcp::get_tool_definitions;
-use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface, CatalogContributionV1};
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceRequest, parse_application_surface_request,
+};
+use tracedecay_daemon_service::application_surface::{
+    application_surface_catalog_ref, resolve_application_surface_dispatch,
+};
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, BindingSurface, CatalogContributionV1, ProfileId,
+    SurfaceOperationName,
+};
 
 /// The transaction journey, restated here as the reverse authority. Deriving
 /// it from the module under test would let a dropped operation pass vacuously.
@@ -89,22 +76,6 @@ const WORKTREE_JOURNEY: [(ApplicationSurfaceOperation, &str); 5] = [
 ];
 
 #[test]
-fn every_journey_operation_has_canonical_identity() {
-    for (operation, name) in JOURNEY.iter().chain(WORKTREE_JOURNEY.iter()) {
-        assert_eq!(operation.as_str(), *name);
-        assert_eq!(
-            ApplicationSurfaceOperation::from_tool_name(&format!("tracedecay_{name}")),
-            Some(*operation),
-            "{name} does not resolve from its MCP tool name"
-        );
-        assert!(
-            ApplicationSurfaceOperation::ALL.contains(operation),
-            "{name} is missing from the canonical operation authority"
-        );
-    }
-}
-
-#[test]
 fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
     let contribution =
         native_integration_surface_catalog_contribution().expect("catalog contribution");
@@ -120,7 +91,7 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
         // Apply is an authoritative native mutation and this journey has no
         // transport fallback, so HTTP stays deliberately unexposed.
         assert!(
-            !is_http_application_operation_exposed(operation),
+            !is_http_application_operation_exposed(operation).expect("HTTP exposure registry"),
             "{name} must not be exposed over HTTP"
         );
         assert!(
@@ -133,7 +104,7 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
     for (operation, name) in WORKTREE_JOURNEY {
         assert_cli_and_mcp_bindings(&contribution, name);
         assert!(
-            is_http_application_operation_exposed(operation),
+            is_http_application_operation_exposed(operation).expect("HTTP exposure registry"),
             "{name} is the read/admin worktree journey and must stay on HTTP"
         );
         assert!(
@@ -169,15 +140,25 @@ fn only_the_status_read_carries_a_dashboard_binding() {
             "{name} dashboard exposure must match the read-only status contract"
         );
     }
-    let resolved = resolve_catalog_tool_binding(
-        BindingSurface::Dashboard,
-        "tracedecay_native_integration_status",
-    )
-    .expect("dashboard binding resolution");
     assert!(
-        resolved.is_some(),
+        production_catalog_resolves(BindingSurface::Dashboard, "native_integration_status"),
         "the status dashboard binding is declared but the production resolver answers nothing"
     );
+}
+
+/// Whether the daemon's composed catalog resolves `operation` on `surface`
+/// for the default profile at the production protocol revision.
+fn production_catalog_resolves(surface: BindingSurface, operation: &str) -> bool {
+    application_surface_catalog_ref()
+        .expect("application catalog")
+        .resolve_binding(
+            &ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("default profile"),
+            surface,
+            &SurfaceOperationName::new(operation).expect("operation name"),
+            1,
+            &BTreeSet::new(),
+        )
+        .is_some()
 }
 
 fn assert_cli_and_mcp_bindings(contribution: &CatalogContributionV1, name: &str) {
@@ -188,34 +169,19 @@ fn assert_cli_and_mcp_bindings(contribution: &CatalogContributionV1, name: &str)
             }),
             "{name} declares no {surface:?} binding"
         );
-        let resolved = resolve_catalog_tool_binding(surface, &format!("tracedecay_{name}"))
-            .expect("binding resolution");
         assert!(
-            resolved.is_some(),
+            production_catalog_resolves(surface, name),
             "{name} is declared for {surface:?} but the production resolver answers nothing"
         );
     }
 }
 
-#[test]
-fn every_journey_operation_is_an_advertised_mcp_tool() {
-    let advertised = get_tool_definitions()
-        .expect("tool definitions")
-        .into_iter()
-        .map(|definition| definition.name)
-        .collect::<BTreeSet<_>>();
-    for (_, name) in JOURNEY.iter().chain(WORKTREE_JOURNEY.iter()) {
-        assert!(
-            advertised.contains(&format!("tracedecay_{name}")),
-            "tracedecay_{name} is not advertised by the MCP tool registry"
-        );
-    }
-}
-
-/// A minimally valid `stack_snapshot` body. Only exact typed identity appears:
-/// there is no path, branch display name, free-form SHA, or Git argument.
+/// A minimally valid declared-stack body. The caller supplies visible topology
+/// and typed commit identities; canonical order and digest stay daemon-owned.
 fn stack_snapshot_body() -> serde_json::Value {
     let digest = format!("sha256:{}", "ab".repeat(32));
+    let source_tip = "1".repeat(40);
+    let destination_tip = "2".repeat(40);
     json!({
         "source": {
             "project_id": "project.alpha",
@@ -237,8 +203,36 @@ fn stack_snapshot_body() -> serde_json::Value {
         "inventory_snapshot_id": "inventory.snapshot.1",
         "inventory_epoch": 7,
         "selection": {
-            "kind": "independent_branch",
-            "binding": {"proposal_digest": digest}
+            "kind": "declared_stack_edge",
+            "binding": {
+                "stack_id": "stack.alpha",
+                "revision_id": "stack-revision.alpha.1",
+                "nodes": [
+                    {
+                        "node_id": "node.destination",
+                        "project_id": "project.alpha",
+                        "repository_id": "repository.alpha",
+                        "reference": "refs/heads/destination",
+                        "tip": destination_tip,
+                        "worktree_id": "worktree.destination"
+                    },
+                    {
+                        "node_id": "node.source",
+                        "project_id": "project.alpha",
+                        "repository_id": "repository.alpha",
+                        "reference": "refs/heads/source",
+                        "tip": source_tip,
+                        "worktree_id": "worktree.source"
+                    }
+                ],
+                "edges": [{
+                    "dependency": "node.source",
+                    "dependent": "node.destination"
+                }],
+                "source_node_id": "node.source",
+                "destination_node_id": "node.destination",
+                "direction": "propagate_dependency_to_dependent"
+            }
         },
         "grant_digest": digest,
         "policy_digest": digest
@@ -267,17 +261,40 @@ fn stack_snapshot_decodes_into_the_typed_journey_request() {
     .expect("stack_snapshot dispatch");
 }
 
+fn surface_refusal(operation: ApplicationSurfaceOperation, body: Value) -> String {
+    match parse_application_surface_request(operation, body) {
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { detail }) => detail,
+        Err(other) => panic!("{operation:?} refused with the wrong kind: {other}"),
+        Ok(_) => panic!("{operation:?} must refuse this body"),
+    }
+}
+
+#[test]
+fn stack_snapshot_rejects_caller_supplied_canonical_revision_fields() {
+    let mut body = stack_snapshot_body();
+    body["selection"]["binding"]["canonical_order"] = json!(["node.source"]);
+    body["selection"]["binding"]["digest"] = json!(format!("sha256:{}", "cd".repeat(32)));
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
+        body,
+    );
+    assert!(
+        detail.starts_with("unknown field `canonical_order`"),
+        "canonical order and digest must be derived by the daemon: {detail}"
+    );
+}
+
 #[test]
 fn a_journey_request_cannot_carry_an_unknown_or_path_bearing_field() {
     let mut body = stack_snapshot_body();
     body["repository_path"] = json!("/tmp/alpha");
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
+        body,
+    );
     assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
-            body,
-        )
-        .is_err(),
-        "a path-bearing stack_snapshot body must be rejected, not silently ignored"
+        detail.starts_with("unknown field `repository_path`"),
+        "a path-bearing stack_snapshot body must be rejected, not silently ignored: {detail}"
     );
 }
 
@@ -285,31 +302,33 @@ fn a_journey_request_cannot_carry_an_unknown_or_path_bearing_field() {
 fn a_journey_request_cannot_be_submitted_under_another_operation() {
     // A `stack_snapshot` body under the apply operation must not decode: apply
     // accepts only an exact preview identity plus a one-use approval.
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationApply,
+        stack_snapshot_body(),
+    );
     assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::NativeIntegrationApply,
-            stack_snapshot_body(),
-        )
-        .is_err(),
-        "apply must not accept a snapshot body"
+        detail.starts_with("unknown field `authorized_scope_set_digest`"),
+        "apply must not accept a snapshot body: {detail}"
     );
     // Approval issuance accepts only the exact preview identity/digest pair;
     // a snapshot body or an approval body without the content digest must be
     // rejected rather than partially decoded.
-    assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::NativeIntegrationApprove,
-            stack_snapshot_body(),
-        )
-        .is_err(),
-        "approve must not accept a snapshot body"
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationApprove,
+        stack_snapshot_body(),
     );
     assert!(
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::NativeIntegrationApprove,
-            json!({"preview_id": "preview.native-integration.example"}),
-        )
-        .is_err(),
+        detail.starts_with(
+            "unknown field `authorized_scope_set_digest`, expected `preview_id` or `preview_digest`"
+        ),
+        "approve must not accept a snapshot body: {detail}"
+    );
+    let detail = surface_refusal(
+        ApplicationSurfaceOperation::NativeIntegrationApprove,
+        json!({"preview_id": "preview.native-integration.example"}),
+    );
+    assert_eq!(
+        detail, "missing field `preview_digest`",
         "approve must not accept a preview identity without its content digest"
     );
 }

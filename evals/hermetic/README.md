@@ -1,15 +1,15 @@
 # Hermetic eval harness
 
 Triggering evals must exercise the tracedecay build **under development in this
-worktree** — its binary *and* its plugin bundle — never the system-installed
+worktree**, its binary *and* its plugin bundle, never the system-installed
 `tracedecay` and never the user's real Claude Code config. Live concurrent
 sessions depend on the real `~/.claude`, `~/.tracedecay`, and
 `~/.cargo/bin/tracedecay`, so the harness touches none of them.
 
 ```bash
 # One-shot: build + isolate + install + index + one trivial scenario.
-evals/hermetic/run.sh smoke --agent claude --model sonnet --debug --keep
-evals/hermetic/run.sh smoke --agent codex --debug --keep
+evals/hermetic/run.sh smoke --agent claude --model sonnet --debug
+evals/hermetic/run.sh smoke --agent codex --debug
 
 # Full corpus against a reusable env:
 ENV=$(evals/hermetic/run.sh setup --agent claude --debug)
@@ -18,17 +18,27 @@ evals/hermetic/run.sh run   --agent claude --env-dir "$ENV" --corpus my-corpus.j
 evals/hermetic/run.sh teardown --env-dir "$ENV"
 ```
 
+Without `--project`, the harness indexes the checkout containing `run.sh`, not
+the caller's working directory or a machine-specific primary checkout. Pass
+`--project` explicitly to evaluate another repository.
+
+Offline harness path-selection checks (no build, agent, or daemon required):
+
+```bash
+python3 -m unittest discover -s evals/hermetic -p 'test_run.py' -v
+```
+
 ## Why a naive PATH override is not enough
 
 An eval session launched via `claude -p` resolves tracedecay **three** ways:
 
-1. **MCP server command** — the plugin registers an MCP server whose command is
+1. **MCP server command**, the plugin registers an MCP server whose command is
    the bare string `tracedecay`, resolved via `PATH` at session start.
-2. **Hook commands** — baked as **absolute paths** at install time. The
+2. **Hook commands**, baked as **absolute paths** at install time. The
    installer substitutes `__TRACEDECAY_BIN__` with a concrete path
    (`src/agents/claude.rs`), so a `PATH` override does *not* affect already
    installed hooks.
-3. **Plugin bundle** — skills / hooks / agents JSON that Claude Code loads from
+3. **Plugin bundle**, skills / hooks / agents JSON that Claude Code loads from
    its plugin marketplace under the config dir.
 
 A `PATH` override alone only fixes (1). The harness must control all three.
@@ -42,8 +52,8 @@ A `PATH` override alone only fixes (1). The harness must control all three.
 | Where the installer writes the plugin | `HOME` (installer uses `home_dir()` → `$HOME`, then `$HOME/.claude`) | `src/agents/mod.rs::home_dir()` reads `$HOME`; `src/agents/claude.rs` writes `ctx.home/.claude/plugins/marketplaces/tracedecay`. |
 | tracedecay graph/data home | `TRACEDECAY_DATA_DIR` | `src/config.rs::user_data_dir()` returns `$TRACEDECAY_DATA_DIR` when set, else `~/.tracedecay`. |
 | tracedecay daemon socket | derives from the data dir; also pinned via `TRACEDECAY_DAEMON_SOCKET` | `src/daemon/service.rs::default_socket_path()` = `tracedecay_data_dir()/daemon.sock`, overridable by `TRACEDECAY_DAEMON_SOCKET`. Isolating the data dir already isolates the socket, so the harness never fights the real daemon. |
-| Which binary the installer bakes | **staged copy of the dev binary at a non-cargo-target path** | `src/agents/mod.rs::which_tracedecay_from()` deliberately **refuses** a path under a cargo target dir (`target/{debug,release}`) and falls back to `PATH` — which would bake the *system* binary. See below. |
-| Auth for `claude -p` | copy `~/.claude/.credentials.json` into the isolated config (or `ANTHROPIC_API_KEY`) | Smoke test: without it the isolated session prints `Not logged in`; with the copied credential it returns a real result and `session_id`. |
+| Which binary the installer bakes | **staged copy of the dev binary at a non-cargo-target path** | `src/agents/mod.rs::which_tracedecay_from()` deliberately **refuses** a path under a cargo target dir (`target/{debug,release}`) and falls back to `PATH`, which would bake the *system* binary. See below. |
+| Auth for `claude -p` | `CLAUDE_CODE_OAUTH_TOKEN`, a `claude setup-token` grant saved as `$REAL_CLAUDE_DIR/.claude_code_oauth_token`, or `ANTHROPIC_API_KEY`. The harness never copies `.credentials.json`: its refresh token is shared with the real login, so a refresh in the isolated session would sign the real one out. | Smoke test: without a credential the isolated session prints `Not logged in`; with the setup-token it returns a real result and `session_id`. |
 
 `HOME` and `CLAUDE_CONFIG_DIR` are pointed at the **same** physical directory
 (`<env>/home/.claude`) so the installer's `$HOME/.claude` writes and Claude
@@ -80,8 +90,8 @@ warns loudly if it does not.
   env.sh                  sourceable export block (for reuse and manual debugging)
 ```
 
-`--keep` preserves the env for inspection; otherwise a freshly created env is
-removed on exit. `teardown --env-dir` refuses to delete anything that is not an
+A successful `smoke` removes the env it created. Failed evaluations retain the isolated environment and logs. A `setup` env lives until
+`teardown --env-dir`, which refuses to delete anything that is not an
 `eval-env-*` dir under `$TMPDIR`.
 
 ## Corpus schema
@@ -101,11 +111,11 @@ criterion).
 
 Optional per-scenario fields:
 
-- **`setup_cmd`** — shell command run in `project_dir` before the agent session
-  (restore fixture state between reps).
-- **`verify_cmd`** — shell command run in `project_dir` after the session with
+- **`setup_cmd`**, shell command run in `project_dir` before the agent session
+  (restore fixture state between reps). A nonzero setup exit records an error and skips the agent and verifier.
+- **`verify_cmd`**, shell command run in `project_dir` after the session with
   the staged dev binary first on `PATH`; non-zero exit fails the scenario.
-- **`attempt_tool`** — tool-name fragment; captured commands containing
+- **`attempt_tool`**, tool-name fragment; captured commands containing
   `tracedecay tool` plus this fragment are counted as `tool_cmd_attempts`.
 
 `project_dir` may be an absolute path or **`fixture:<name>`**, resolved at run
@@ -115,8 +125,7 @@ full corpus run; `run --reps N` re-stages fixtures automatically before each
 rep after the first.
 
 `run` executes each `prompt` through the selected `--agent` inside
-`project_dir` (falling back to the indexed default project if the dir is
-missing). Claude mode recovers the `session_id` and reads the isolated
+`project_dir` (using the indexed default only when the scenario omits a project path). A missing explicit project records an error instead of borrowing the default. Claude mode recovers the `session_id` and reads the isolated
 transcript. Codex mode scores the captured `codex exec --json` stream.
 `score.py` classifies MCP tools and CLI commands separately.
 
@@ -125,7 +134,7 @@ names, every `expected_cli` fragment appears in captured command strings, and no
 `anti_tools` appear. When `verify_cmd` is set, its exit status is also
 required (`verify_pass`). If no expectations are listed, the fallback pass
 criterion is at least one tracedecay MCP tool and no anti-tool use. This is a
-deliberately simple end-state judge — the harness exists to guarantee
+deliberately simple end-state judge, the harness exists to guarantee
 *isolation*, not to be a sophisticated grader; layer a stricter judge on top of
 `results.jsonl` if needed.
 
@@ -149,6 +158,9 @@ evals/hermetic/run.sh run --agent codex --env-dir "$ENV" \
   --corpus evals/hermetic/corpora/tool-args-ergonomics.jsonl
 ```
 
+Codex runs default to `gpt-5.6-sol` with medium reasoning. Override the model
+with `--model` and the reasoning effort with `CODEX_REASONING_EFFORT`.
+
 Outputs land in `<env>/results/`: `results.jsonl` (one scored object per
 scenario) and `summary.md` (pass count + per-scenario table).
 
@@ -157,13 +169,13 @@ scenario) and `summary.md` (pass count + per-scenario table).
 - **Model non-determinism.** Tool-use counts vary run to run; treat pass/fail as
   a signal over a corpus, not a single scenario.
 - **The `tracedecay init` index cost.** Indexing the tracedecay repo is not
-  free; reuse an env dir with `--keep` across corpus runs.
+  free; run several corpora against one `setup` env, then `teardown` it.
 - **Network / model backend.** Evals hit the real Anthropic API using the copied
   credential. There is no offline mode.
 - **Codex auth.** Codex mode copies only `~/.codex/auth.json` into the isolated
   `CODEX_HOME`. If Codex changes auth storage, `codex exec` will fail closed in
   the eval env instead of mutating the user's real config.
-- **Global cargo caches** (`~/.cargo/registry`) are shared — only the *output*
+- **Global cargo caches** (`~/.cargo/registry`) are shared, only the *output*
   (`CARGO_TARGET_DIR=<worktree>/target`) is worktree-scoped. The build cannot
   corrupt the user's install because it never writes to `~/.cargo/bin`.
 
@@ -188,7 +200,7 @@ the code change (plus model noise), not to drift in the user's real environment.
 The `evals/hermetic/corpora/fact-store-adoption.jsonl` corpus measures whether a
 real agent actually **uses project memory** the way the tools intend: whether it
 **stores** durable facts (`tracedecay_fact_store_add`), **recalls** them (`tracedecay_fact_store_search`) when they
-would help, and — the headline metric — gives **feedback** on the facts it used
+would help, and, the headline metric, gives **feedback** on the facts it used
 (`tracedecay_fact_feedback`). The write/recall/feedback loop is the point:
 storing a fact nobody ever reinforces or corrects decays in value, so the
 feedback bucket is the truest signal of adoption.
@@ -210,13 +222,40 @@ evals/hermetic/run.sh teardown --env-dir "$ENV"
 ```
 
 This is **not CI**. It runs deliberately, hits the real Anthropic API, and
-**consumes model credits** — reuse an env dir with `--keep` rather than
-re-setting up per run. A **low feedback-adoption %** is the *expected* baseline
+**consumes model credits**, run several corpora against one `setup` env
+rather than re-setting up per run. A **low feedback-adoption %** is the *expected* baseline
 today; that gap is the measurement, not a bug. It quantifies exactly what the
 recent context-lane, tool-description, and memory-digest changes aim to close,
 so the same corpus doubles as a **before/after** measure of those changes.
 
 Store the baseline the same way the post-merge re-eval protocol above prescribes:
 record the per-bucket and overall adoption % as a durable fact via
-`tracedecay_fact_store_add`, so a later rerun makes any regression — or the intended
-improvement — visible against a fixed number.
+`tracedecay_fact_store_add`, so a later rerun makes any regression, or the intended
+improvement, visible against a fixed number.
+
+## Exact-run scoring and process failures
+
+The runner scores only the session belonging to the current invocation. Claude
+evidence requires the reported session ID, one exact transcript, and matching
+recorded project and session metadata; an older or foreign transcript cannot
+serve as fallback evidence. Missing, ambiguous, unreadable, or malformed
+transcripts produce an explicit error row. Codex uses this invocation's captured
+JSONL and recognizes its real MCP tool field.
+
+Each result records the actual `setup_status` and `agent_status`, or null when
+the stage was not run. A nonzero setup exit skips the agent and verifier; a
+nonzero agent exit cannot pass even if it prints a success-looking transcript.
+The `status` field distinguishes `passed`, `failed`, and `error`; `error`
+identifies the failed stage and cause. Results and a Markdown summary are
+written before the batch exits nonzero if any scenario failed or none ran.
+Artifact names include the repetition and scenario ordinal, so duplicate
+scenario IDs do not overwrite another run's evidence.
+
+Run offline behavior tests without model tokens:
+
+```sh
+bazel test //evals/hermetic:score_test //evals/hermetic:run_test \
+  //evals/hermetic:scorecard_test --test_output=errors
+```
+
+Result rows also carry `scenario_index`, the 1-based nonblank corpus entry index, stable across repetitions. The scorecard pairs indexed rows by `(scenario_index, rep)` and validates their display ID/category against the corpus. Older unindexed reports retain the unique-ID rules; mixed identity schemes are rejected. Empty or whitespace-only prompts produce a `scenario/prompt_invalid` error row without running setup, an agent, or verification.

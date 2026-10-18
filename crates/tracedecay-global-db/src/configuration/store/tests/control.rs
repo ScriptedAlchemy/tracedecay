@@ -4,42 +4,44 @@ use super::super::audit::audit_target_commitment;
 use super::super::mutation::apply_direct_mutation_to_snapshot;
 use super::super::read::read_change_plan_from_executor;
 use super::super::{
-    ConfigurationControlStore, ConfigurationError, GlobalDbConfigurationControlStore,
-    OwnedGlobalDbConfigurationControlStore, params,
+    ConfigurationControlStore, ConfigurationError, GlobalDbConfigurationControlStore, params,
 };
 use super::{
     HostAdmissionScope, control_authority, control_authority_with_key, digest,
-    direct_project_layer, evidence_for, global_setup, id, policy_digest, protected_plan_for,
+    direct_project_layer, evidence_for, global_setup, id, protected_plan_for,
 };
-use crate::configuration::contracts::{ConfigurationRollbackRequest, DirectConfigurationMutation};
+use crate::configuration::contracts::{
+    AuthorizedActor, ConfigurationAuditQuery, ConfigurationRollbackRequest,
+    DirectConfigurationMutation,
+};
 use crate::configuration::registry::ConfigurationRegistry;
-use crate::configuration::resolver::registry_default_candidate;
-use crate::configuration::resolver::resolve_configuration;
+use crate::configuration::resolver::{registry_default_candidate, resolve_configuration};
 use std::collections::BTreeSet;
-use tracedecay_domain::configuration::CredentialReferenceMetadataV1;
 use tracedecay_domain::configuration::{
     AccessRuleId, AuthorityRef, ConfigurationLayerIdV1, ConfigurationMutationOperationV1,
-    ConfigurationSettlementAuthorityV1, ConfigurationValueV1, CredentialKindV1,
-    DIAGNOSTICS_PREWARM_SETTING_KEY, ProtectedApplyRequest, ProtectedChange, RollbackModeV1,
-    RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1,
-    ScopeControlOperationV1, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    ConfigurationValueV1, ProtectedApplyRequest, ProtectedChange, RollbackModeV1, RuleEffect,
+    SOURCE_BINDINGS_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1, ScopeControlOperationV1,
+    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::research::CapabilityId;
-use tracedecay_domain::{ActorId, LocatorDigest, ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ActorId, CursorBindingMismatchV1, CursorBindingV1, LocatorDigest, ProjectId, UtcMicros,
+    canonical_sha256, encode_bound_cursor,
+};
 use tracedecay_store::configuration::ConfigurationProtectedOperationV1;
 
 #[test]
 fn direct_unset_restores_the_registry_default_and_its_provenance() {
     let registry = ConfigurationRegistry::core().unwrap();
     let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-    let key = SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap();
+    let key = SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap();
     let set_revision = id("configuration.revision.set");
     let set = apply_direct_mutation_to_snapshot(
         &current,
         &DirectConfigurationMutation::Set {
             layer: direct_project_layer(),
             key: key.clone(),
-            value: Box::new(ConfigurationValueV1::Boolean(true)),
+            value: Box::new(ConfigurationValueV1::Boolean(false)),
         },
         &set_revision,
         &registry,
@@ -93,7 +95,7 @@ fn audit_target_commitments_are_keyed_and_event_scoped() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn partial_rollback_is_typed_unavailable_until_selective_restore_exists() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -117,7 +119,7 @@ async fn partial_rollback_is_typed_unavailable_until_selective_restore_exists() 
     assert_eq!(result, Err(ConfigurationError::Unavailable));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -130,15 +132,15 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
     );
     let mutation = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(true)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
     };
     let foreign_target = DirectConfigurationMutation::Set {
         layer: ConfigurationLayerIdV1::Project {
             project_id: id("project.foreign.fixture"),
         },
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(true)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
     };
     assert_eq!(
         store
@@ -161,8 +163,8 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
 
     let conflicting = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(false)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(true)),
     };
     assert_eq!(
         store
@@ -184,53 +186,9 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
             .await,
         Err(ConfigurationError::PolicyWideningForbidden)
     );
-    let credential_reference = CredentialReferenceMetadataV1 {
-        reference_id: id("credential.reference.direct-rejection"),
-        kind: CredentialKindV1::ApiToken,
-        reference_digest: digest('f'),
-        operation_digest: digest('e'),
-        settlement_authority: ConfigurationSettlementAuthorityV1 {
-            policy_epoch: 7,
-            policy_digest: policy_digest('b'),
-            revalidated_at: UtcMicros(1),
-        },
-        created_at: UtcMicros(1),
-        effective_deadline_at: UtcMicros(2),
-        rotation: 0,
-    };
-    credential_reference.validate().unwrap();
-    assert_eq!(
-        store
-            .commit_direct(
-                &authority,
-                &DirectConfigurationMutation::Set {
-                    layer: direct_project_layer(),
-                    key: SettingKey::new("diagnostics.credential_reference.v1").unwrap(),
-                    value: Box::new(ConfigurationValueV1::CredentialReference(
-                        credential_reference
-                    )),
-                },
-                &root.revision_id,
-            )
-            .await,
-        Err(ConfigurationError::Validation(
-            "credential references require the write-only credential operation".to_owned()
-        ))
-    );
 }
 
-fn assert_daemon_configuration_authority<T>()
-where
-    T: ConfigurationControlStore + Clone + Send + Sync + 'static,
-{
-}
-
-#[test]
-fn owned_global_control_adapter_satisfies_daemon_registration_bounds() {
-    assert_daemon_configuration_authority::<OwnedGlobalDbConfigurationControlStore>();
-}
-
-#[tokio::test]
+#[asupersync::test]
 async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active() {
     let (_directory, runtime, root) = global_setup().await;
     let store = runtime
@@ -245,8 +203,8 @@ async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active
     );
     let mutation = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(true)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
     };
     let receipt = store
         .commit_direct(&authority, &mutation, &root.revision_id)
@@ -267,8 +225,8 @@ async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active
                 &authority,
                 &DirectConfigurationMutation::Set {
                     layer: direct_project_layer(),
-                    key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-                    value: Box::new(ConfigurationValueV1::Boolean(false)),
+                    key: SettingKey::new("telemetry.timings.v1").unwrap(),
+                    value: Box::new(ConfigurationValueV1::Boolean(true)),
                 },
                 &root.revision_id,
             )
@@ -277,7 +235,7 @@ async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn owned_global_control_adapter_rejects_writes_after_daemon_scope_ends() {
     let (_directory, runtime, root) = global_setup().await;
     let store = runtime
@@ -291,8 +249,8 @@ async fn owned_global_control_adapter_rejects_writes_after_daemon_scope_ends() {
     );
     let mutation = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(true)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
     };
 
     assert_eq!(
@@ -303,7 +261,7 @@ async fn owned_global_control_adapter_rejects_writes_after_daemon_scope_ends() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn direct_audit_target_never_persists_sensitive_setting_values() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -347,11 +305,18 @@ async fn direct_audit_target_never_persists_sensitive_setting_values() {
         .unwrap()
         .get::<Vec<u8>>(0)
         .unwrap();
-    assert!(!String::from_utf8_lossy(&target).contains(secret_path));
+    let sealed: serde_json::Value = serde_json::from_slice(&target).unwrap();
+    assert_eq!(sealed["schema_version"], 1);
+    assert_eq!(
+        sealed["target"]["setting_keys"],
+        serde_json::json!(["index.exclude.v1"])
+    );
+    assert!(sealed["target"].get("value").is_none());
+    assert!(!sealed.to_string().contains(secret_path));
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn protected_operation_survives_adapter_rebuild_populates_projections_and_rolls_back() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -551,4 +516,103 @@ async fn protected_operation_survives_adapter_rebuild_populates_projections_and_
         .unwrap();
     assert_ne!(rollback_receipt.result_revision_id, root.revision_id);
     assert_eq!(store.current().await.unwrap().snapshot, root.snapshot);
+}
+
+#[asupersync::test]
+async fn configuration_audit_cursor_pages_only_the_request_that_minted_it() {
+    let (_directory, runtime, root) = global_setup().await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    let first = store
+        .commit_direct(
+            &control_authority(
+                ConfigurationMutationOperationV1::DirectMutation,
+                &root.revision_id,
+            ),
+            &DirectConfigurationMutation::Set {
+                layer: direct_project_layer(),
+                key: SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap(),
+                value: Box::new(ConfigurationValueV1::Boolean(false)),
+            },
+            &root.revision_id,
+        )
+        .await
+        .unwrap();
+    let second = store
+        .commit_direct(
+            &control_authority_with_key(
+                ConfigurationMutationOperationV1::DirectMutation,
+                &first.result_revision_id,
+                Some(id("configuration.idempotency.audit-page-two")),
+            ),
+            &DirectConfigurationMutation::Set {
+                layer: direct_project_layer(),
+                key: SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap(),
+                value: Box::new(ConfigurationValueV1::Boolean(true)),
+            },
+            &first.result_revision_id,
+        )
+        .await
+        .unwrap();
+    let actor = AuthorizedActor {
+        actor_id: id("actor.configuration.fixture"),
+    };
+    let query = |cursor: Option<&str>, limit| {
+        ConfigurationAuditQuery::from_request(cursor, limit)
+            .unwrap()
+            .unwrap()
+    };
+
+    let everything = store.audit(&actor, &query(None, 100)).await.unwrap();
+    assert_eq!(everything.next_cursor, None);
+    let revisions: Vec<_> = everything
+        .events
+        .iter()
+        .filter_map(|event| event.result_revision_id.clone())
+        .collect();
+    assert!(
+        revisions.contains(&first.result_revision_id),
+        "{revisions:?}"
+    );
+    assert!(
+        revisions.contains(&second.result_revision_id),
+        "{revisions:?}"
+    );
+
+    let first_page = store.audit(&actor, &query(None, 1)).await.unwrap();
+    assert_eq!(first_page.events, everything.events[..1]);
+    let cursor = first_page
+        .next_cursor
+        .expect("a continuation after page one");
+    assert!(cursor.starts_with("bc1."), "{cursor}");
+
+    assert_eq!(
+        ConfigurationAuditQuery::from_request(Some(&cursor), 2).unwrap(),
+        Err(CursorBindingMismatchV1::ParameterChanged { parameter: "limit" })
+    );
+    assert_eq!(
+        ConfigurationAuditQuery::from_request(Some("bc1.00"), 1).unwrap(),
+        Err(CursorBindingMismatchV1::Foreign)
+    );
+    let foreign = encode_bound_cursor(
+        &CursorBindingV1::builder("fact_store_list")
+            .parameter("limit", &1_usize)
+            .build()
+            .unwrap(),
+        &everything.events[0].event_id,
+    )
+    .unwrap();
+    assert_eq!(
+        ConfigurationAuditQuery::from_request(Some(&foreign), 1).unwrap(),
+        Err(CursorBindingMismatchV1::Foreign)
+    );
+
+    let second_page = store.audit(&actor, &query(Some(&cursor), 1)).await.unwrap();
+    assert_eq!(second_page.events, everything.events[1..2]);
+    assert_ne!(
+        second_page.events[0].event_id,
+        first_page.events[0].event_id
+    );
 }

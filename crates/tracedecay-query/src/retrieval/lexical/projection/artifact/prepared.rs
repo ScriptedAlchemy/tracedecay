@@ -1,24 +1,32 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use roaring::RoaringBitmap;
 use sha2::{Digest, Sha256};
+use tracedecay_code_index::clones::{CloneExactKeyV1, CodeIndexCloneBodyV1};
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, VerifiedSealedLexicalPageV1};
-use tracedecay_domain::{ExactFieldV1, ManifestDigest};
+use tracedecay_domain::{ExactFieldV1, ManifestDigest, NodeKind};
 
 use super::super::{
-    CodeLexicalProjectionMetadataV1, ProjectedChunkV1, canonical_projected_exact_term,
-    exact_field_for_kind,
+    CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1,
+    canonical_projected_exact_term, exact_field_for_kind, normalized_search_text,
 };
+use super::clone_codec::{encode_clone_eligibility, encode_clone_payload};
 use super::format::{
-    ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, encode_exact_field,
-    encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt, ngram_page_digest,
+    ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, PostingListEncoderV1,
+    contract_number, encode_exact_field, encode_field, encode_page_base_sections_receipt,
+    hash_bytes, ngram_page_digest,
 };
-use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
-use super::row_codec::encode_artifact_row;
-use super::schema::LexicalArtifactLayoutV1;
+use super::postings::{
+    NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams, ngram_is_case_sensitive,
+};
+use super::row_codec::{BlockRowV1, RowDictionaryTableV1, encode_artifact_row, encode_row_blocks};
+use super::schema::field_code;
 use super::{
     CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
 };
+
+/// Amortized per-entry b-tree node overhead charged on top of each dictionary
+/// entry's key/value payload (same constant the builder ledger uses).
+const BTREE_MAP_ENTRY_OVERHEAD_BYTES: usize = 16;
 
 #[derive(Debug)]
 pub struct PreparedCodeLexicalArtifactPageV1 {
@@ -29,14 +37,23 @@ pub struct PreparedCodeLexicalArtifactPageV1 {
     pub(super) payload_bytes: u64,
     pub(super) import_count: u64,
     pub(super) import_payload_bytes: u64,
-    pub(super) import_dictionary_digest: ManifestDigest,
+    /// Digest of this page's import records alone.
+    pub(super) import_digest: ManifestDigest,
+    /// The file every row on this page belongs to.
+    pub(super) file_ordinal: u64,
+    /// The page's first chunk position; its documents count from it.
+    pub(super) first_document: u64,
     pub(super) previous_cursor: Option<Vec<u8>>,
     pub(super) next_cursor: Vec<u8>,
-    pub(super) imports: Vec<PreparedImportV1>,
+    pub(super) clone_bodies: Vec<PreparedCloneBodyV1>,
     pub(super) documents: Vec<PreparedDocumentV1>,
+    /// The page's rows as stored blocks keyed by their first document.
+    pub(super) row_blocks: Vec<(i64, Vec<u8>)>,
     pub(super) ngram_shards: Vec<PreparedNgramShardV1>,
     pub(super) ngram_digest: ManifestDigest,
     pub(super) base_sections_receipt: Vec<u8>,
+    /// Every dictionary entry this page's rows reference.
+    pub(super) row_dictionary: RowDictionaryTableV1,
     source_retained_bytes: usize,
     prepared_retained_bytes: usize,
     preparation_scratch_bytes: usize,
@@ -77,32 +94,44 @@ impl PreparedCodeLexicalArtifactPageV1 {
         self.estimated_write_bytes
     }
 
-    pub fn ledger_charge_bytes(&self) -> Result<usize, CodeLexicalArtifactErrorV1> {
-        self.source_retained_bytes
-            .checked_add(self.prepared_retained_bytes)
-            .and_then(|bytes| bytes.checked_add(self.preparation_scratch_bytes))
-            .ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Contract(
-                    "prepared lexical page ledger charge overflowed".to_owned(),
-                )
-            })
+    /// Serialized bytes of this page's largest clone body (payload plus
+    /// occurrence), the scratch one clone row holds while it is written.
+    pub fn clone_body_peak_bytes(&self) -> usize {
+        self.clone_bodies
+            .iter()
+            .map(|body| body.serialized_bytes)
+            .max()
+            .unwrap_or(0)
     }
 }
 
 #[derive(Debug)]
-pub(super) struct PreparedImportV1 {
-    pub(super) canonical: Vec<u8>,
-    pub(super) integrity_digest: ManifestDigest,
+pub(super) struct PreparedCloneBodyV1 {
+    pub(super) payload_digest: String,
+    /// Stored (deflated binary) payload and the occurrence's eligibility.
+    pub(super) payload: Vec<u8>,
+    pub(super) eligibility: Vec<u8>,
+    /// Encoded payload bytes before deflate plus the eligibility bytes.
+    pub(super) serialized_bytes: usize,
+    pub(super) symbol_occurrence_id: String,
+    pub(super) path: String,
+    pub(super) body_start: u64,
+    pub(super) body_end: u64,
+    pub(super) exact_keys: Vec<CloneExactKeyV1>,
 }
 
 #[derive(Debug)]
 pub(super) struct PreparedDocumentV1 {
     pub(super) document_id: i64,
     pub(super) chunk_id: String,
+    /// Row metadata; its text is stored in the page's row blocks.
     pub(super) row: Vec<u8>,
     pub(super) term_postings: Vec<PreparedTermPostingV1>,
     pub(super) exact_postings: Vec<(String, Vec<u8>)>,
+    /// Tagged hex form, which the page receipt and memory accounting read.
     pub(super) integrity_digest: ManifestDigest,
+    /// The same digest as the 32 raw bytes `document_integrity` persists.
+    pub(super) integrity_digest_bytes: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -116,12 +145,12 @@ pub(super) struct PreparedNgramShardV1 {
 #[derive(Debug)]
 pub(super) struct PreparedTermPostingV1 {
     pub(super) field: String,
+    pub(super) field_code: i64,
     pub(super) term: String,
     pub(super) frequency: i64,
 }
 
 pub(super) fn prepare_page(
-    layout: LexicalArtifactLayoutV1,
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
     previous_cursor: Option<Vec<u8>>,
@@ -139,7 +168,9 @@ pub(super) fn prepare_page(
             )
         })?;
     let mut documents = Vec::with_capacity(page.chunks().len());
-    let mut ngram_documents = BTreeMap::<(i64, i64), RoaringBitmap>::new();
+    let mut texts = Vec::with_capacity(page.chunks().len());
+    let mut row_dictionary = RowDictionaryTableV1::new();
+    let mut ngram_postings = Vec::<((i64, i64), u32)>::new();
     let mut logical_ngram_postings = 0usize;
     if page.symbol_displays().len() != page.chunks().len() {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -150,6 +181,15 @@ pub(super) fn prepare_page(
         page.chunks().iter().zip(page.symbol_displays()).enumerate()
     {
         checkpoint(control)?;
+        // Attribute and annotation uses stay graph symbols, but the item they
+        // annotate already carries their text; they mint no lexical document
+        // and their source ordinal is left unused.
+        if display
+            .as_ref()
+            .is_some_and(|display| display.kind() == NodeKind::AnnotationUsage.as_str())
+        {
+            continue;
+        }
         let document = first_document
             .checked_add(u64::try_from(offset).map_err(contract_number)?)
             .ok_or_else(|| {
@@ -157,15 +197,17 @@ pub(super) fn prepare_page(
                     "lexical artifact prepared document id overflowed".to_owned(),
                 )
             })?;
-        let (prepared, ngrams) = prepare_document(
-            layout,
+        let (prepared, ngrams, text) = prepare_document(
             metadata,
             i64::try_from(document).map_err(contract_number)?,
             admitted.chunk(),
             display.as_ref(),
+            &mut row_dictionary,
             control,
         )?;
-        let document = u32::try_from(prepared.document_id).map_err(contract_number)?;
+        // Page receipts name documents by their place on the page, so a
+        // carried page keeps its receipts wherever earlier files move it.
+        let document = u32::try_from(offset).map_err(contract_number)?;
         logical_ngram_postings = logical_ngram_postings
             .checked_add(ngrams.len())
             .ok_or_else(|| {
@@ -173,67 +215,68 @@ pub(super) fn prepare_page(
                     "lexical artifact ngram aggregation count overflowed".to_owned(),
                 )
             })?;
-        for (kind, ngram) in ngrams {
-            // Pages enumerate documents by their contiguous source ordinal,
-            // and `document_ngrams` deduplicates each document first. Preserve
-            // that ordering at the bitmap boundary so Roaring can append
-            // instead of binary-searching every posting.
-            ngram_documents
-                .entry((kind, ngram))
-                .or_default()
-                .try_push(document)
-                .map_err(|_| {
-                    CodeLexicalArtifactErrorV1::Contract(
-                        "lexical artifact ngram documents are not strictly ordered".to_owned(),
-                    )
-                })?;
-        }
+        ngram_postings.extend(ngrams.into_iter().map(|key| (key, document)));
         documents.push(prepared);
+        texts.push(text);
     }
-    let mut imports = Vec::with_capacity(page.imports().len());
-    for evidence in page.imports() {
+    let mut clone_bodies = Vec::with_capacity(page.clone_bodies().len());
+    for body in page.clone_bodies() {
         checkpoint(control)?;
-        let canonical = serde_json::to_vec(evidence)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        let integrity_digest = import_integrity_digest(&canonical, &canonical)?;
-        imports.push(PreparedImportV1 {
-            canonical,
-            integrity_digest,
-        });
+        clone_bodies.push(prepare_clone_body(metadata, body)?);
     }
     let next_cursor = page
         .next_cursor()
         .persisted_bytes()
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-    let mut ngram_shards = Vec::with_capacity(ngram_documents.len());
-    for ((kind, ngram), documents) in ngram_documents {
+    // Documents were appended in ascending source order, so a stable sort by
+    // key leaves each key's documents ascending; `document_ngrams`
+    // deduplicates within a document, and the encoder refuses any repeat.
+    ngram_postings.sort_by_key(|(key, _)| *key);
+    let mut ngram_shards = Vec::new();
+    for run in ngram_postings.chunk_by(|left, right| left.0 == right.0) {
         checkpoint(control)?;
-        let encoded = encode_ngram_bitmap(layout, &documents)?;
+        let [((kind, ngram), _), ..] = run else {
+            continue;
+        };
+        let mut documents = PostingListEncoderV1::new(false);
+        for (_, document) in run {
+            documents.push(*document, 1)?;
+        }
         ngram_shards.push(PreparedNgramShardV1 {
-            kind,
-            ngram,
-            documents: encoded,
+            kind: *kind,
+            ngram: *ngram,
             cardinality: documents.len(),
+            documents: documents.finish()?,
         });
     }
-    let ngram_digest = ngram_page_digest(
-        page.page_ordinal(),
-        ngram_shards.iter().map(|shard| {
-            (
-                shard.kind,
-                shard.ngram,
-                shard.documents.as_slice(),
-                shard.cardinality,
-            )
-        }),
+    drop(ngram_postings);
+    let ngram_digest = ngram_page_digest(ngram_shards.iter().map(|shard| {
+        (
+            shard.kind,
+            shard.ngram,
+            shard.documents.as_slice(),
+            shard.cardinality,
+        )
+    }))?;
+    let base_sections_receipt =
+        prepare_base_sections_receipt(first_document, &documents, &texts, &ngram_shards, control)?;
+    checkpoint(control)?;
+    let row_blocks = encode_row_blocks(
+        &documents
+            .iter()
+            .zip(&texts)
+            .map(|(document, text)| BlockRowV1 {
+                document_id: document.document_id,
+                chunk_id: &document.chunk_id,
+                parent_chunk_id: text.parent_chunk_id.as_deref(),
+                row: &document.row,
+                text: &text.text,
+                field_lengths: &text.field_lengths,
+                trimmed_normalized_len: text.trimmed_normalized_len,
+            })
+            .collect::<Vec<_>>(),
     )?;
-    let base_sections_receipt = prepare_base_sections_receipt(
-        page.page_ordinal(),
-        &imports,
-        &documents,
-        &ngram_shards,
-        control,
-    )?;
+    drop(texts);
     let aggregation_scratch_bytes = logical_ngram_postings
         .checked_mul(NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1)
         .ok_or_else(|| {
@@ -256,14 +299,18 @@ pub(super) fn prepare_page(
         payload_bytes: page.payload_bytes(),
         import_count: page.import_count(),
         import_payload_bytes: page.import_payload_bytes(),
-        import_dictionary_digest: page.next_cursor().import_dictionary_digest().clone(),
+        import_digest: page.import_digest().clone(),
+        file_ordinal: page.file_ordinal(),
+        first_document,
         previous_cursor,
         next_cursor,
-        imports,
+        clone_bodies,
         documents,
+        row_blocks,
         ngram_shards,
         ngram_digest,
         base_sections_receipt,
+        row_dictionary,
         source_retained_bytes: page.retained_owned_bytes(),
         prepared_retained_bytes: 0,
         preparation_scratch_bytes,
@@ -278,54 +325,73 @@ pub(super) fn prepare_page(
     Ok(prepared)
 }
 
+fn prepare_clone_body(
+    metadata: &CodeLexicalProjectionMetadataV1,
+    body: &CodeIndexCloneBodyV1,
+) -> Result<PreparedCloneBodyV1, CodeLexicalArtifactErrorV1> {
+    // Only content is stored; the opener's route supplies project,
+    // repository, worktree, generation, and snapshot. A generation's file
+    // pages name no worktree, so a body from another project or repository
+    // would be silently re-labelled, and is refused.
+    let occurrence = &body.occurrence;
+    let owned = occurrence.worktree_id.is_none()
+        && metadata.clone_route.as_ref().is_some_and(|route| {
+            route.project_id == occurrence.project_id
+                && metadata.repository_id.as_ref() == Some(&occurrence.repository_id)
+        });
+    if !owned {
+        return Err(CodeLexicalArtifactErrorV1::Contract(
+            "clone body belongs to another route than the projection".to_owned(),
+        ));
+    }
+    let (payload, payload_bytes) = encode_clone_payload(&body.payload)?;
+    let eligibility = encode_clone_eligibility(occurrence.eligibility);
+    Ok(PreparedCloneBodyV1 {
+        payload_digest: body.payload.payload_digest.as_str().to_owned(),
+        payload,
+        serialized_bytes: payload_bytes.saturating_add(eligibility.len()),
+        eligibility,
+        symbol_occurrence_id: occurrence.symbol_occurrence_id.as_str().to_owned(),
+        path: occurrence.path.clone(),
+        body_start: occurrence.body_span.start_byte,
+        body_end: occurrence.body_span.end_byte,
+        exact_keys: body.payload.exact_keys(occurrence.eligibility),
+    })
+}
+
 fn prepare_base_sections_receipt(
-    page_ordinal: u64,
-    imports: &[PreparedImportV1],
+    first_document: u64,
     documents: &[PreparedDocumentV1],
+    texts: &[PreparedTextV1],
     ngram_shards: &[PreparedNgramShardV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    let mut document_integrity =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[0])?;
-    let mut import_integrity =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[1])?;
-    let mut import_evidence =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[2])?;
-    let mut rows = PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[3])?;
-    let mut term_postings =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[4])?;
-    let mut exact_postings =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[5])?;
-    let mut ngram_postings =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[6])?;
+    let first_document = i64::try_from(first_document).map_err(contract_number)?;
+    let mut document_integrity = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[0])?;
+    let mut rows = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[1])?;
+    let mut term_postings = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[2])?;
+    let mut exact_postings = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[3])?;
+    let mut ngram_postings = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[4])?;
 
-    for import in imports {
+    for (document, text) in documents.iter().zip(texts) {
         checkpoint(control)?;
-        import_integrity.begin_row()?;
-        import_integrity.blob(&import.canonical)?;
-        import_integrity.text(import.integrity_digest.as_str())?;
-        import_evidence.begin_row()?;
-        import_evidence.blob(&import.canonical)?;
-        import_evidence.blob(&import.canonical)?;
-    }
-    for document in documents {
-        checkpoint(control)?;
+        let local_document = document.document_id - first_document;
         document_integrity.begin_row()?;
-        document_integrity.integer(document.document_id);
-        document_integrity.text(&document.chunk_id)?;
-        document_integrity.text(document.integrity_digest.as_str())?;
+        document_integrity.integer(local_document);
+        document_integrity.blob(&document.integrity_digest_bytes)?;
 
         rows.begin_row()?;
-        rows.integer(document.document_id);
+        rows.integer(local_document);
         rows.text(&document.chunk_id)?;
         rows.blob(&document.row)?;
+        rows.text(&text.text)?;
 
         for posting in &document.term_postings {
             checkpoint(control)?;
             term_postings.begin_row()?;
             term_postings.text(&posting.field)?;
             term_postings.text(&posting.term)?;
-            term_postings.integer(document.document_id);
+            term_postings.integer(local_document);
             term_postings.integer(posting.frequency);
         }
         for (field, term) in &document.exact_postings {
@@ -333,51 +399,55 @@ fn prepare_base_sections_receipt(
             exact_postings.begin_row()?;
             exact_postings.text(field)?;
             exact_postings.blob(term)?;
-            exact_postings.integer(document.document_id);
+            exact_postings.integer(local_document);
         }
     }
     for shard in ngram_shards {
         checkpoint(control)?;
         ngram_postings.begin_row()?;
-        ngram_postings.integer(i64::try_from(page_ordinal).map_err(contract_number)?);
         ngram_postings.integer(shard.kind);
         ngram_postings.integer(shard.ngram);
         ngram_postings.blob(&shard.documents)?;
         ngram_postings.integer(i64::try_from(shard.cardinality).map_err(contract_number)?);
     }
 
-    encode_page_base_sections_receipt(
-        page_ordinal,
-        vec![
-            document_integrity.finish()?,
-            import_integrity.finish()?,
-            import_evidence.finish()?,
-            rows.finish()?,
-            term_postings.finish()?,
-            exact_postings.finish()?,
-            ngram_postings.finish()?,
-        ],
-    )
+    encode_page_base_sections_receipt(vec![
+        document_integrity.finish()?,
+        rows.finish()?,
+        term_postings.finish()?,
+        exact_postings.finish()?,
+        ngram_postings.finish()?,
+    ])
 }
 
+/// A prepared row's text and parent chunk, held only until the page's row
+/// blocks and receipt are built.
+struct PreparedTextV1 {
+    text: String,
+    parent_chunk_id: Option<String>,
+    field_lengths: BTreeMap<LexicalFieldV1, usize>,
+    trimmed_normalized_len: usize,
+}
+
+/// One prepared document, its `(kind, n-gram)` keys, and its text.
+type PreparedDocumentPartsV1 = (PreparedDocumentV1, Vec<(i64, i64)>, PreparedTextV1);
+
 fn prepare_document(
-    layout: LexicalArtifactLayoutV1,
     metadata: &CodeLexicalProjectionMetadataV1,
     document_id: i64,
     chunk: &tracedecay_domain::CodeSearchChunkV1,
     display: Option<&tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1>,
+    row_dictionary: &mut RowDictionaryTableV1,
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(PreparedDocumentV1, Vec<(i64, i64)>), CodeLexicalArtifactErrorV1> {
+) -> Result<PreparedDocumentPartsV1, CodeLexicalArtifactErrorV1> {
     u32::try_from(document_id).map_err(|_| {
         CodeLexicalArtifactErrorV1::Contract(
             "lexical artifact exceeds the posting document-id range".to_owned(),
         )
     })?;
-    if chunk.anchor.generation_id != metadata.generation {
-        return Err(CodeLexicalArtifactErrorV1::Contract(
-            "sealed lexical page contains a foreign generation".to_owned(),
-        ));
-    }
+    // Serving generation is metadata.generation. Chunk anchors may retain
+    // extraction provenance from an Arc-shared parent page; path membership
+    // is the live binding, and the encoded row is stamped with the serving id.
     let logical_path = metadata
         .logical_paths
         .get(&chunk.anchor.file_occurrence_id)
@@ -388,11 +458,13 @@ fn prepare_document(
                 chunk.anchor.file_occurrence_id
             ))
         })?;
-    let (row, fields) = ProjectedChunkV1::from_ref(chunk, logical_path, display);
+    let (mut row, fields) = ProjectedChunkV1::from_ref(chunk, logical_path, display);
+    row.anchor.generation_id = metadata.generation.clone();
     let mut term_postings = Vec::new();
     for (field, terms) in &fields {
         checkpoint(control)?;
         let encoded_field = encode_field(*field)?;
+        let encoded_field_code = field_code(*field);
         let mut frequencies = BTreeMap::<&str, u32>::new();
         for term in terms {
             frequencies
@@ -403,6 +475,7 @@ fn prepare_document(
         for (term, frequency) in frequencies {
             term_postings.push(PreparedTermPostingV1 {
                 field: encoded_field.clone(),
+                field_code: encoded_field_code,
                 term: term.to_owned(),
                 frequency: i64::from(frequency),
             });
@@ -432,25 +505,30 @@ fn prepare_document(
         ));
     }
 
-    let mut ngram_postings = document_ngrams(row.normalized_text.as_bytes(), control)?
-        .into_iter()
-        .map(|ngram| (NGRAM_NORMALIZED, i64::from(ngram)))
-        .collect::<Vec<_>>();
-    if row.sanitized_text.as_str().as_bytes() != row.normalized_text.as_bytes() {
-        ngram_postings.extend(
-            document_ngrams(row.sanitized_text.as_str().as_bytes(), control)?
-                .into_iter()
-                .map(|ngram| (NGRAM_RAW_OVERRIDE, i64::from(ngram))),
-        );
-    }
+    let ngram_postings = document_ngram_keys(
+        &normalized_search_text(&row),
+        row.sanitized_text.as_str(),
+        &row.normalized_text,
+        control,
+    )?;
     let artifact_row = ArtifactRowV1::from(row);
     let chunk_id = artifact_row.id.as_str().to_owned();
-    let row = encode_artifact_row(layout, &artifact_row)?;
+    let row = encode_artifact_row(&artifact_row, row_dictionary)?;
+    let text = PreparedTextV1 {
+        parent_chunk_id: artifact_row
+            .anchor
+            .parent_chunk_id
+            .as_ref()
+            .map(|parent| parent.as_str().to_owned()),
+        trimmed_normalized_len: artifact_row.normalized_text.trim().len(),
+        field_lengths: artifact_row.field_lengths.clone(),
+        text: artifact_row.sanitized_text.as_str().to_owned(),
+    };
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();
-    let integrity_digest = document_integrity_digest(
-        document_id,
+    let (integrity_digest, integrity_digest_bytes) = document_integrity_digest(
         chunk_id.as_bytes(),
         &row,
+        text.text.as_bytes(),
         &term_postings,
         &exact_postings,
     )?;
@@ -462,24 +540,53 @@ fn prepare_document(
             term_postings,
             exact_postings,
             integrity_digest,
+            integrity_digest_bytes,
         },
         ngram_postings,
+        text,
     ))
 }
 
+/// The `(kind, n-gram)` keys one admitted document contributes: its
+/// normalized search text always, and its raw text where that differs from
+/// the normalized form. Preparation and the sealed n-gram lists derive from
+/// this one definition.
+pub(super) fn document_ngram_keys(
+    search_text: &str,
+    sanitized_text: &str,
+    normalized_text: &str,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<Vec<(i64, i64)>, CodeLexicalArtifactErrorV1> {
+    let mut keys = document_ngrams(search_text.as_bytes(), control)?
+        .into_iter()
+        .map(|ngram| (NGRAM_NORMALIZED, i64::from(ngram)))
+        .collect::<Vec<_>>();
+    if sanitized_text.as_bytes() != normalized_text.as_bytes() {
+        keys.extend(
+            document_ngrams(sanitized_text.as_bytes(), control)?
+                .into_iter()
+                .filter(|ngram| ngram_is_case_sensitive(*ngram))
+                .map(|ngram| (NGRAM_RAW_OVERRIDE, i64::from(ngram))),
+        );
+    }
+    Ok(keys)
+}
+
+/// One document's content digest. It names no position: the page receipt
+/// row that carries it names the document's place on its page.
 fn document_integrity_digest(
-    document: i64,
     chunk_id: &[u8],
     row: &[u8],
+    text: &[u8],
     term_postings: &[PreparedTermPostingV1],
     exact_postings: &[(String, Vec<u8>)],
-) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+) -> Result<(ManifestDigest, [u8; 32]), CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v3\0");
-    hasher.update(document.to_le_bytes());
+    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v5\0");
     hash_table(&mut hasher, "row", 1, |hasher, _| {
         hash_text(hasher, chunk_id)?;
-        hash_blob(hasher, row)
+        hash_blob(hasher, row)?;
+        hash_text(hasher, text)
     })?;
     hash_table(
         &mut hasher,
@@ -503,7 +610,10 @@ fn document_integrity_digest(
             hash_blob(hasher, term)
         },
     )?;
-    integrity_digest(hasher)
+    let bytes: [u8; 32] = hasher.finalize().into();
+    let digest = ManifestDigest::from_sha256_bytes(&bytes)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    Ok((digest, bytes))
 }
 
 fn hash_table(
@@ -546,50 +656,19 @@ fn hash_blob(hasher: &mut Sha256, value: &[u8]) -> Result<(), CodeLexicalArtifac
     hash_bytes(hasher, value)
 }
 
-fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
-    hasher.update(
-        u64::try_from(bytes.len())
-            .map_err(contract_number)?
-            .to_le_bytes(),
-    );
-    hasher.update(bytes);
-    Ok(())
-}
-
-fn import_integrity_digest(
-    canonical: &[u8],
-    evidence: &[u8],
-) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-import.v1\0");
-    hash_bytes(&mut hasher, canonical)?;
-    hash_bytes(&mut hasher, evidence)?;
-    integrity_digest(hasher)
-}
-
-fn integrity_digest(hasher: Sha256) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    ManifestDigest::from_sha256_bytes(&hasher.finalize())
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
-}
-
 fn prepared_retained_bytes(
     page: &PreparedCodeLexicalArtifactPageV1,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    let clone_body_bytes = prepared_clone_body_retained_bytes(&page.clone_bodies)?;
     let mut bytes = page
         .page_digest
         .as_str()
         .len()
         .checked_add(page.cumulative_digest.as_str().len())
-        .and_then(|bytes| bytes.checked_add(page.import_dictionary_digest.as_str().len()))
+        .and_then(|bytes| bytes.checked_add(page.import_digest.as_str().len()))
         .and_then(|bytes| bytes.checked_add(page.next_cursor.capacity()))
         .and_then(|bytes| bytes.checked_add(page.previous_cursor.as_ref().map_or(0, Vec::capacity)))
-        .and_then(|bytes| {
-            bytes.checked_add(
-                page.imports
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<PreparedImportV1>()),
-            )
-        })
+        .and_then(|bytes| bytes.checked_add(clone_body_bytes))
         .and_then(|bytes| {
             bytes.checked_add(
                 page.documents
@@ -606,18 +685,20 @@ fn prepared_retained_bytes(
         })
         .and_then(|bytes| bytes.checked_add(page.ngram_digest.as_str().len()))
         .and_then(|bytes| bytes.checked_add(page.base_sections_receipt.capacity()))
+        .and_then(|bytes| {
+            page.row_blocks.iter().try_fold(bytes, |bytes, (_, block)| {
+                bytes
+                    .checked_add(block.capacity())
+                    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<(i64, Vec<u8>)>()))
+            })
+        })
         .ok_or_else(prepared_charge_overflow)?;
-    for import in &page.imports {
-        bytes = bytes
-            .checked_add(import.canonical.capacity())
-            .and_then(|bytes| bytes.checked_add(import.integrity_digest.as_str().len()))
-            .ok_or_else(prepared_charge_overflow)?;
-    }
     for document in &page.documents {
         bytes = bytes
             .checked_add(document.chunk_id.capacity())
             .and_then(|bytes| bytes.checked_add(document.row.capacity()))
             .and_then(|bytes| bytes.checked_add(document.integrity_digest.as_str().len()))
+            .and_then(|bytes| bytes.checked_add(document.integrity_digest_bytes.len()))
             .and_then(|bytes| {
                 bytes.checked_add(
                     document
@@ -653,7 +734,48 @@ fn prepared_retained_bytes(
             .checked_add(shard.documents.capacity())
             .ok_or_else(prepared_charge_overflow)?;
     }
+    for entry in page.row_dictionary.values() {
+        bytes = bytes
+            .checked_add(entry.capacity())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    std::mem::size_of::<(i64, Vec<u8>)>() + BTREE_MAP_ENTRY_OVERHEAD_BYTES,
+                )
+            })
+            .ok_or_else(prepared_charge_overflow)?;
+    }
     Ok(bytes)
+}
+
+fn prepared_clone_body_retained_bytes(
+    bodies: &[PreparedCloneBodyV1],
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    bodies
+        .iter()
+        .try_fold(std::mem::size_of_val(bodies), |bytes, body| {
+            bytes
+                .checked_add(body.payload_digest.capacity())
+                .and_then(|bytes| bytes.checked_add(body.payload.capacity()))
+                .and_then(|bytes| bytes.checked_add(body.eligibility.capacity()))
+                .and_then(|bytes| bytes.checked_add(body.symbol_occurrence_id.capacity()))
+                .and_then(|bytes| bytes.checked_add(body.path.capacity()))
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        body.exact_keys
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<CloneExactKeyV1>()),
+                    )
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        body.exact_keys
+                            .iter()
+                            .map(|key| key.digest.as_str().len())
+                            .sum::<usize>(),
+                    )
+                })
+                .ok_or_else(prepared_charge_overflow)
+        })
 }
 
 fn estimated_sqlite_writes(
@@ -663,24 +785,30 @@ fn estimated_sqlite_writes(
     let mut bytes = estimated_source_page_receipt_write_bytes(
         page.page_digest.as_str(),
         page.cumulative_digest.as_str(),
-        page.import_dictionary_digest.as_str(),
+        page.import_digest.as_str(),
         page.ngram_digest.as_str(),
         &page.base_sections_receipt,
         &page.next_cursor,
     )?;
-    for import in &page.imports {
-        rows = rows.checked_add(2).ok_or_else(prepared_write_overflow)?;
+    let (clone_rows, clone_bytes) = estimated_clone_body_writes(&page.clone_bodies)?;
+    rows = rows
+        .checked_add(clone_rows)
+        .ok_or_else(prepared_write_overflow)?;
+    bytes = bytes
+        .checked_add(clone_bytes)
+        .ok_or_else(prepared_write_overflow)?;
+    for (_, block) in &page.row_blocks {
+        rows = rows.checked_add(1).ok_or_else(prepared_write_overflow)?;
         bytes = bytes
-            .checked_add(import.canonical.len().saturating_mul(2))
-            .and_then(|bytes| bytes.checked_add(import.integrity_digest.as_str().len()))
+            .checked_add(block.len())
+            .and_then(|bytes| bytes.checked_add(8))
             .ok_or_else(prepared_write_overflow)?;
     }
     for document in &page.documents {
-        rows = rows.checked_add(2).ok_or_else(prepared_write_overflow)?;
+        rows = rows.checked_add(1).ok_or_else(prepared_write_overflow)?;
         bytes = bytes
             .checked_add(document.chunk_id.len())
-            .and_then(|bytes| bytes.checked_add(document.row.len()))
-            .and_then(|bytes| bytes.checked_add(document.integrity_digest.as_str().len()))
+            .and_then(|bytes| bytes.checked_add(8))
             .ok_or_else(prepared_write_overflow)?;
         for posting in &document.term_postings {
             rows = rows.checked_add(1).ok_or_else(prepared_write_overflow)?;
@@ -699,21 +827,48 @@ fn estimated_sqlite_writes(
         }
     }
     rows = rows
-        .checked_add(page.ngram_shards.len())
+        .checked_add(page.row_dictionary.len())
         .ok_or_else(prepared_write_overflow)?;
-    for shard in &page.ngram_shards {
+    for entry in page.row_dictionary.values() {
         bytes = bytes
-            .checked_add(shard.documents.len())
-            .and_then(|bytes| bytes.checked_add(32))
+            .checked_add(entry.len())
+            .and_then(|bytes| bytes.checked_add(16))
             .ok_or_else(prepared_write_overflow)?;
     }
     Ok((rows, bytes))
 }
 
+fn estimated_clone_body_writes(
+    bodies: &[PreparedCloneBodyV1],
+) -> Result<(usize, usize), CodeLexicalArtifactErrorV1> {
+    bodies
+        .iter()
+        .try_fold((0usize, 0usize), |(rows, bytes), body| {
+            let rows = rows
+                .checked_add(2usize.saturating_add(body.exact_keys.len()))
+                .ok_or_else(prepared_write_overflow)?;
+            let bytes = bytes
+                .checked_add(body.payload_digest.len().saturating_mul(2))
+                .and_then(|bytes| bytes.checked_add(body.payload.len()))
+                .and_then(|bytes| bytes.checked_add(body.eligibility.len()))
+                .and_then(|bytes| bytes.checked_add(body.symbol_occurrence_id.len()))
+                .and_then(|bytes| bytes.checked_add(body.path.len()))
+                .and_then(|bytes| {
+                    bytes.checked_add(body.exact_keys.iter().fold(0usize, |total, key| {
+                        total
+                            .saturating_add(key.digest.as_str().len())
+                            .saturating_add(16)
+                    }))
+                })
+                .ok_or_else(prepared_write_overflow)?;
+            Ok((rows, bytes))
+        })
+}
+
 fn estimated_source_page_receipt_write_bytes(
     page_digest: &str,
     cumulative_digest: &str,
-    import_dictionary_digest: &str,
+    import_digest: &str,
     ngram_digest: &str,
     base_sections_receipt: &[u8],
     next_cursor: &[u8],
@@ -721,7 +876,7 @@ fn estimated_source_page_receipt_write_bytes(
     page_digest
         .len()
         .checked_add(cumulative_digest.len())
-        .and_then(|bytes| bytes.checked_add(import_dictionary_digest.len()))
+        .and_then(|bytes| bytes.checked_add(import_digest.len()))
         .and_then(|bytes| bytes.checked_add(ngram_digest.len()))
         .and_then(|bytes| bytes.checked_add(base_sections_receipt.len()))
         .and_then(|bytes| bytes.checked_add(next_cursor.len()))
@@ -738,26 +893,4 @@ fn prepared_charge_overflow() -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(
         "prepared lexical page retained-byte charge overflowed".to_owned(),
     )
-}
-
-fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
-    CodeLexicalArtifactErrorV1::Contract(error.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::estimated_source_page_receipt_write_bytes;
-
-    #[test]
-    fn source_page_write_charge_includes_the_ngram_receipt_exactly() {
-        let without_ngram =
-            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "", b"", b"cursor")
-                .expect("receipt charge without ngram digest");
-        let with_ngram =
-            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "nnnnn", b"", b"cursor")
-                .expect("receipt charge with ngram digest");
-
-        assert_eq!(without_ngram, 1 + 2 + 3 + 6);
-        assert_eq!(with_ngram, without_ngram + 5);
-    }
 }

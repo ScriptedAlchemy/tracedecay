@@ -154,18 +154,9 @@ describe("dashboard SSE wire bridge", () => {
     },
   );
 
-  it("subscribes to server-emitted activity and resume-control names", () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
-    const connection = connectEvents("/api/events");
-    const source = FakeEventSource.instances[0]!;
-
-    expect(source.listeners.has("code_index")).toBe(false);
-    expect(source.listeners.has("code_index_activity")).toBe(true);
-    expect(source.listeners.has("control")).toBe(true);
-    connection.close();
-  });
-
   it("projects accepted events to live pulses carrying their own scope identity", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1800000000000);
     vi.stubGlobal("EventSource", FakeEventSource);
     const connection = connectEvents("/api/events");
     const source = FakeEventSource.instances[0]!;
@@ -190,8 +181,16 @@ describe("dashboard SSE wire bridge", () => {
 
     expect(connection.activityRevision()).toBe(2);
     expect(connection.activity()).toMatchObject([
-      { projectId: "project.alpha", family: "project_registry_changed" },
-      { projectId: "project.beta", family: "project_registry_changed" },
+      {
+        projectId: "project.alpha", family: "project_registry_changed",
+        eventId: "run-1-1700000000000000:project_registry:1",
+        observationTime: "1700000000000001", at: 1800000000000,
+      },
+      {
+        projectId: "project.beta", family: "project_registry_changed",
+        eventId: "run-1-1700000000000000:project_registry:2",
+        observationTime: "1700000000000002", at: 1800000000000,
+      },
     ]);
 
     // A duplicate is one real occurrence: it must not pulse twice.
@@ -293,7 +292,7 @@ describe("dashboard SSE wire bridge", () => {
    *
    * Decoding it is what makes the subscription worth having. A decoder that
    * only accepts the poll shape drops every hook, session-ingest, code-index,
-   * tool-call and task frame the daemon sends — and still reports the link as
+   * tool-call and task frame the daemon sends, and still reports the link as
    * live, because the state flips before the frame is parsed. That failure is
    * invisible to every other test here, so it is pinned against the real
    * constant rather than a plausible one.

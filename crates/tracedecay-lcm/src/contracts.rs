@@ -22,8 +22,6 @@ pub struct LcmRawMessage {
     pub content_hash: String,
     pub storage_kind: LcmStorageKind,
     pub payload_ref: Option<String>,
-    pub legacy_source: bool,
-    pub legacy_truncated: bool,
     pub metadata_json: Option<String>,
 }
 
@@ -39,8 +37,6 @@ pub struct LcmRawMessageMetadata {
     pub content_hash: String,
     pub storage_kind: LcmStorageKind,
     pub payload_ref: Option<String>,
-    pub legacy_source: bool,
-    pub legacy_truncated: bool,
     pub metadata_json: Option<String>,
 }
 
@@ -57,8 +53,6 @@ impl LcmRawMessage {
             content_hash: self.content_hash,
             storage_kind: self.storage_kind,
             payload_ref: self.payload_ref,
-            legacy_source: self.legacy_source,
-            legacy_truncated: self.legacy_truncated,
             metadata_json: self.metadata_json,
         }
     }
@@ -95,8 +89,6 @@ impl LcmRawMessageMetadata {
             content_hash: self.content_hash,
             storage_kind: self.storage_kind,
             payload_ref: self.payload_ref,
-            legacy_source: self.legacy_source,
-            legacy_truncated: self.legacy_truncated,
             metadata_json: self.metadata_json,
         }
     }
@@ -195,22 +187,18 @@ pub enum LcmRetrievalOutcome {
 }
 
 impl LcmRetrievalOutcome {
-    #[hotpath::skip]
     pub const fn complete(freshness: LcmDataFreshness) -> Self {
         Self::Complete { freshness }
     }
 
-    #[hotpath::skip]
     pub const fn partial(freshness: LcmDataFreshness, omitted: u64) -> Self {
         Self::Partial { freshness, omitted }
     }
 
-    #[hotpath::skip]
     pub const fn stale(freshness: LcmDataFreshness) -> Self {
         Self::Stale { freshness }
     }
 
-    #[hotpath::skip]
     pub const fn freshness(self) -> LcmDataFreshness {
         match self {
             Self::Complete { freshness }
@@ -219,7 +207,6 @@ impl LcmRetrievalOutcome {
         }
     }
 
-    #[hotpath::skip]
     pub const fn omitted(self) -> u64 {
         match self {
             Self::Partial { omitted, .. } => omitted,
@@ -231,6 +218,7 @@ impl LcmRetrievalOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LcmExpandTarget {
+    CanonicalOccurrence { message_id: String },
     RawMessage { store_id: i64 },
     SummaryNode { node_id: String },
     ExternalPayload { payload_ref: String },
@@ -287,11 +275,6 @@ pub struct LcmExpandResponse {
     /// Mirrors hermes-lcm `from_current_session`; raw-message targets only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_current_session: Option<bool>,
-    /// Legacy compatibility note mirrored from hermes-lcm payloads. Modern
-    /// cross-session expansion flows should rely on `payload_ref` +
-    /// `raw_message.session_id` and remain note-free.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub externalized_note: Option<String>,
     /// Source-list coverage metadata (summary-node targets only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_pagination: Option<LcmExpandSourcePagination>,
@@ -402,6 +385,10 @@ pub struct LcmDescribeResponse {
     pub provider: String,
     pub session_id: String,
     pub raw_message_count: i64,
+    /// Raw messages the session's active temporal generation has not
+    /// published. Transcript reads cannot page them yet, so a read reaches at
+    /// most `raw_message_count - unpublished_message_count` messages.
+    pub unpublished_message_count: i64,
     pub summary_node_count: i64,
     pub external_payload_count: i64,
     pub first_store_id: Option<i64>,
@@ -411,7 +398,7 @@ pub struct LcmDescribeResponse {
     pub summary_node: Option<LcmDescribeSummaryNode>,
     pub external_payload: Option<LcmDescribeExternalPayload>,
     /// Complete session token estimate from the store-status authority, or
-    /// typed-absent when the bounded scan could not cover the whole session —
+    /// typed-absent when the bounded scan could not cover the whole session,
     /// a partial estimate is never presented as the session's size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_token_estimate: Option<i64>,
@@ -444,7 +431,7 @@ impl LcmStorageKind {
 /// Reject any payload reference that is not a single normal path component.
 ///
 /// Containment is decided on the reference itself, before any storage root is
-/// joined, so every caller — session store, registered renderer, hydration —
+/// joined, so every caller, session store, registered renderer, hydration,
 /// rejects traversal identically.
 pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
     if payload_ref.is_empty()
@@ -504,7 +491,22 @@ pub enum LcmError {
         expected: i64,
         actual: i64,
     },
+    StaleRawRevision {
+        expected: i64,
+        actual: Option<i64>,
+    },
+    StaleRawProtectionSource {
+        store_id: i64,
+    },
+    StaleSummarySourceRange {
+        expected_from: i64,
+        expected_to: i64,
+        actual_from: Option<i64>,
+        actual_to: Option<i64>,
+    },
     LifecycleStateNotFound,
+    /// An LCM write targeted a store that holds no sessions.
+    NotASessionStore,
     Cancelled,
     DeadlineExceeded,
     BudgetExhausted,
@@ -514,6 +516,12 @@ pub enum LcmError {
     /// instead of scheduling a retry.
     SanitizationRefused {
         reason: String,
+        /// Set when the sanitizer reached a quarantine verdict, it withheld
+        /// content it proved it cannot serve, rather than failing to run.
+        /// A verdict is the sanitizer's current rendering of these bytes, so a
+        /// re-render of already-captured content converges to the withheld
+        /// state; a fault stays fail-closed.
+        quarantined: bool,
     },
     Db(String),
     Io(String),
@@ -588,8 +596,31 @@ impl std::fmt::Display for LcmError {
                     "summary generation compare-and-swap failed: expected {expected}, actual {actual}"
                 )
             }
+            Self::StaleRawRevision { expected, actual } => {
+                write!(
+                    f,
+                    "raw revision compare-and-swap failed: expected {expected}, actual {actual:?}"
+                )
+            }
+            Self::StaleRawProtectionSource { store_id } => write!(
+                f,
+                "raw protection source {store_id} changed while payloads were staged"
+            ),
+            Self::StaleSummarySourceRange {
+                expected_from,
+                expected_to,
+                actual_from,
+                actual_to,
+            } => write!(
+                f,
+                "summary source range changed: expected {expected_from}..={expected_to}, actual \
+                 {actual_from:?}..={actual_to:?}"
+            ),
             Self::LifecycleStateNotFound => {
                 write!(f, "payload database error: lifecycle state not found")
+            }
+            Self::NotASessionStore => {
+                write!(f, "LCM writes require a profile or project session store")
             }
             Self::Cancelled => write!(f, "LCM payload verification was cancelled"),
             Self::DeadlineExceeded => {
@@ -598,7 +629,7 @@ impl std::fmt::Display for LcmError {
             Self::BudgetExhausted => {
                 write!(f, "LCM payload verification budget was exhausted")
             }
-            Self::SanitizationRefused { reason } => {
+            Self::SanitizationRefused { reason, .. } => {
                 write!(f, "content sanitization refused: {reason}")
             }
             Self::Db(message) => write!(f, "payload database error: {message}"),

@@ -6,15 +6,19 @@ use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{self, TranscriptDiscoveryBounds};
-use crate::runtime::{SessionProvider, claude_observation, codex, cursor, cursor_composer};
+use crate::runtime::{
+    SessionProvider, hosts::claude_observation, hosts::codex, hosts::cursor, hosts::cursor_composer,
+};
 use tracedecay_domain::{BrainId, ObservationScopeV1, UserProfileId};
+use tracedecay_runtime_core::storage::USER_SESSIONS_DB_FILENAME;
 use tracedecay_store::StoreShardScopeV1;
 
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, IngestPassOutcome, ProviderRunFold,
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, observation_catch_up_failure,
-    scheduling_write_required,
+    scheduling_write_required, warn_transcript_catch_up_failure,
 };
+use super::quarantine::SourceSweep;
 use super::scheduler::{
     USER_CATCH_UP_PROVIDERS, USER_INGEST_PROVIDER_FRONTIER_KEY, default_ingest_pass_bounds,
     finish_user_provider_coverage, plan_provider_rotation_admission, read_ingest_frontier,
@@ -22,8 +26,6 @@ use super::scheduler::{
 };
 use super::startup::TranscriptIngestOutcome;
 use super::user_provider::UserProviderUnit;
-
-pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
 pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_SESSIONS_DB_FILENAME)
@@ -61,7 +63,7 @@ pub async fn try_ingest_user_codex_sessions_with_db_and_admission(
             });
         };
         let session_id_owned = session_id.to_owned();
-        let lookup = tokio::task::spawn_blocking(move || {
+        let lookup = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             source.find_session_transcript_paths_bounded(&session_id_owned)
         })
         .await
@@ -137,6 +139,7 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
         cancellation,
         codex::CodexDiscoveryFrontier::initial(),
         None,
+        &mut SourceSweep::new("codex", None),
     )
     .await
     .map(|result| result.outcome)
@@ -157,6 +160,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
     cancellation: &ObservationCancellation,
     frontier: codex::CodexDiscoveryFrontier,
     discovery_state: Option<(&codex::CodexDiscoveryHub, &str)>,
+    sweep: &mut SourceSweep,
 ) -> source::TranscriptIngestResult<CodexUserIngestOutcome> {
     let Some(source) = codex::CodexSource::new() else {
         return Ok(CodexUserIngestOutcome {
@@ -166,9 +170,9 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 deferred_by_byte_cap: false,
             },
             committable_frontier: None,
+            failures: Vec::new(),
         });
     };
-    let source = source.for_user_scope(session_id.clone(), registered_roots.clone());
     let pass = match discovery_state {
         Some((hub, consumer)) => match hub
             .discover(
@@ -188,15 +192,22 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                         deferred_by_byte_cap: true,
                     },
                     committable_frontier: None,
+                    failures: Vec::new(),
                 });
             }
         },
-        None => std::sync::Arc::new(source::run_blocking_transcript_section(|| {
-            source.discover_transcript_paths_with_frontier(
-                TranscriptDiscoveryBounds::default_walk(),
-                frontier,
-            )
-        })?),
+        None => std::sync::Arc::new(
+            source::run_blocking_transcript_section("codex", {
+                let source = source.clone();
+                move || {
+                    source.discover_transcript_paths_with_frontier(
+                        TranscriptDiscoveryBounds::default_walk(),
+                        frontier,
+                    )
+                }
+            })
+            .await??,
+        ),
     };
     let next_frontier = pass.next_frontier;
     let discovery = &pass.report;
@@ -204,6 +215,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
     let mut bytes_consumed = 0u64;
     let mut deferred_by_byte_cap = discovery.is_truncated();
     let mut frontier_committable = true;
+    let mut failures = Vec::new();
     for path in &discovery.paths {
         if remaining == Some(0) {
             deferred_by_byte_cap = true;
@@ -213,16 +225,40 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         if cancellation.is_cancelled() {
             return Err(source::TranscriptIngestError::Cancelled { provider: "codex" });
         }
-        let progress =
-            codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
-                path,
-                session_id.as_deref(),
-                &registered_roots,
-                admission,
-                remaining,
-                cancellation,
-            )
-            .await?;
+        let Some(pending) = sweep.observe_file(path).await? else {
+            continue;
+        };
+        let progress = match codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
+            path,
+            session_id.as_deref(),
+            &registered_roots,
+            admission,
+            remaining,
+            cancellation,
+        )
+        .await
+        {
+            Ok(progress) => progress,
+            Err(error) if error.is_cancelled() => return Err(error),
+            Err(error) => {
+                frontier_committable = false;
+                let Err(error) = sweep.refused(pending, error) else {
+                    continue;
+                };
+                let failure = warn_transcript_catch_up_failure(
+                    "codex",
+                    "observation",
+                    &error,
+                    "Codex transcript catch-up failed",
+                );
+                if failure.retryable {
+                    return Err(error);
+                }
+                failures.push(failure);
+                continue;
+            }
+        };
+        pending.admitted(progress.source_deferred, progress.covered_through)?;
         deferred_by_byte_cap |= progress.source_deferred;
         frontier_committable &= !progress.source_deferred;
         bytes_consumed = bytes_consumed.saturating_add(progress.bytes_consumed);
@@ -244,12 +280,14 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             deferred_by_byte_cap,
         },
         committable_frontier: frontier_committable.then_some(next_frontier),
+        failures,
     })
 }
 
 pub(super) struct CodexUserIngestOutcome {
     pub(super) outcome: BoundedProviderOutcome,
     pub(super) committable_frontier: Option<codex::CodexDiscoveryFrontier>,
+    pub(super) failures: Vec<TranscriptCatchUpFailure>,
 }
 
 pub(super) struct BoundedProviderOutcome {
@@ -301,6 +339,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> Result<BoundedProviderOutcome, BoundedProviderFailure> {
     if cancellation.is_cancelled() {
         return Ok(BoundedProviderOutcome {
@@ -317,6 +356,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
                 cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                 max_new_bytes,
                 cancellation,
+                sweep,
             )
             .await
         {
@@ -338,12 +378,13 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     let jsonl_skip_session_ids = composer.jsonl_skip_session_ids();
     let remaining = max_new_bytes.map(|limit| limit.saturating_sub(composer.bytes_consumed));
     let composer_outcome = BoundedProviderOutcome::from_composer(&composer);
-    let sweep = cursor::try_ingest_cursor_user_sweep_capped_with_session_ids(
+    let jsonl = cursor::try_ingest_cursor_user_sweep_capped_with_session_ids(
         &registered_roots,
         admission,
         remaining,
         jsonl_skip_session_ids,
         cancellation,
+        sweep,
     )
     .await
     .map_err(|error| BoundedProviderFailure {
@@ -353,7 +394,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     Ok(merge_user_cursor_sweep(
         &composer,
         projected_session_ids,
-        sweep,
+        jsonl,
     ))
 }
 
@@ -377,26 +418,6 @@ pub(super) fn provider_selected(
     candidate: SessionProvider,
 ) -> bool {
     scope.is_none() || scope == Some(candidate)
-}
-
-pub async fn ingest_user_global_sources_for_provider_with_authorities<A: SessionIngestAuthority>(
-    brain_id: &BrainId,
-    profile_id: &UserProfileId,
-    registered: &A,
-    registry_db: &A,
-    profile_root: &Path,
-    provider: Option<SessionProvider>,
-) -> TranscriptIngestOutcome {
-    ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
-        brain_id,
-        profile_id,
-        registered,
-        registry_db,
-        profile_root,
-        provider,
-        &ObservationCancellation::default(),
-    )
-    .await
 }
 
 pub async fn ingest_user_global_sources_for_provider_with_authorities_and_cancellation<
@@ -471,23 +492,6 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cance
     .into_transcript_outcome()
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-pub async fn ingest_user_global_sources_for_provider_with_roots_without_registered_authority<
-    A: SessionIngestAuthority,
->(
-    _db: &A,
-    _profile_root: &Path,
-    provider: Option<SessionProvider>,
-    _roots: Vec<PathBuf>,
-) -> TranscriptIngestOutcome {
-    TranscriptIngestOutcome::new(
-        TranscriptIngestStats::default(),
-        vec![TranscriptCatchUpFailure::registered_authority_unavailable(
-            provider.map_or("all", SessionProvider::id),
-        )],
-    )
-}
-
 /// Bounded fair multi-provider user catch-up with typed coverage outcomes.
 pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
     A: SessionIngestAuthority,
@@ -534,7 +538,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded_a
     .await
 }
 
-#[hotpath::measure(label = "sessions.ingest.user", future = true)]
+#[tracing::instrument(name = "sessions.ingest.user", level = "trace", skip_all)]
 async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
     A: SessionIngestAuthority,
 >(
@@ -708,14 +712,6 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
             usize::try_from(provider_runs.deferred_units).unwrap_or(usize::MAX),
         );
     }
-    if provider_runs.stats.messages_upserted > 0 {
-        crate::host_ports::session_review::schedule(
-            provider.map_or("all", SessionProvider::id),
-            None,
-        )
-        .await;
-    }
-
     if matches!(coverage, IngestPassCoverage::Backpressured { .. })
         && !provider_runs
             .failures
@@ -754,6 +750,7 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
         units_completed: provider_runs.units_completed,
         units_failed: provider_runs.units_failed,
         byte_bounds_enforced: provider_runs.byte_bounds_enforced,
+        coverage_advanced: provider_runs.coverage_advanced || scheduling_state_written,
     }
 }
 
@@ -761,8 +758,10 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
 mod cursor_tests {
     use std::collections::BTreeSet;
 
-    use crate::runtime::cursor::{CursorSweepIngestOutcome, CursorTranscriptIngestStats};
-    use crate::runtime::cursor_composer::CursorComposerSweepOutcome;
+    use crate::runtime::hosts::cursor::{
+        CursorSweepCoverage, CursorSweepIngestOutcome, CursorTranscriptIngestStats,
+    };
+    use crate::runtime::hosts::cursor_composer::CursorComposerSweepOutcome;
 
     use super::merge_user_cursor_sweep;
 
@@ -778,8 +777,11 @@ mod cursor_tests {
                 messages_upserted: 3,
                 bytes_consumed: 4,
                 source_deferred: true,
+                observations_committed: 0,
+                exact_duplicate: false,
             },
             session_ids: BTreeSet::from(["shared-session".to_string()]),
+            coverage: CursorSweepCoverage::Complete,
         };
 
         let outcome = merge_user_cursor_sweep(

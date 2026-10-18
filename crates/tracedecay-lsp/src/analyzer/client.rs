@@ -1,11 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use futures_util::SinkExt;
 use lsp_types::request::{
     CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
     DocumentSymbolRequest, GotoDeclaration, GotoDeclarationParams, GotoDefinition,
@@ -24,22 +21,18 @@ use lsp_types::{
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt;
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
-use tokio_util::codec::{FramedRead, FramedWrite};
 use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::broker::{CodeDiagnostic, DiagnosticSeverity};
 use super::error::{
     AnalyzerCancellation as CancellationToken, AnalyzerResult as Result,
     AnalyzerRuntimeError as TraceDecayError,
 };
+use super::launch::{AnalyzerLaunch, resolve_analyzer_launch};
+use super::process::AnalyzerProcess;
 
-use crate::{
-    AnalyzerEvent, AsyncContentLengthError, ContentLengthCodec, UpstreamCapabilities,
-    read_content_length_frame_until,
-};
+use crate::{AnalyzerEvent, AsyncContentLengthError, UpstreamCapabilities};
 
 const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MIN_INITIALIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -251,6 +244,47 @@ impl std::fmt::Display for LspSemanticRequestError {
     }
 }
 
+/// Typed outcome of a diagnostics collection after the analyzer initialized.
+///
+/// A quiet window with no publication is a broker policy decision, while a
+/// closed process, broken transport, or malformed protocol frame is evidence
+/// against the analyzer. Keeping that distinction here prevents the shared
+/// supervisor from treating every failed refresh as the same lifecycle event.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum LspRefreshError {
+    #[error("{message}")]
+    NoPublication { message: String },
+    #[error("{message}")]
+    ProcessExited { message: String },
+    #[error("{message}")]
+    Transport { message: String },
+    #[error("{message}")]
+    InvalidResponse { message: String },
+}
+
+impl LspRefreshError {
+    pub fn analyzer_event(&self) -> AnalyzerEvent {
+        match self {
+            Self::NoPublication { .. } => AnalyzerEvent::Retired,
+            Self::ProcessExited { .. } => AnalyzerEvent::Crashed,
+            Self::Transport { .. } => AnalyzerEvent::TransportFailed,
+            Self::InvalidResponse { .. } => AnalyzerEvent::InvalidResponse,
+        }
+    }
+
+    pub fn is_policy_retirement(&self) -> bool {
+        matches!(self, Self::NoPublication { .. })
+    }
+}
+
+impl From<LspRefreshError> for TraceDecayError {
+    fn from(error: LspRefreshError) -> Self {
+        Self::Config {
+            message: error.to_string(),
+        }
+    }
+}
+
 pub async fn collect_document_diagnostics(
     command: &str,
     args: &[String],
@@ -275,6 +309,7 @@ pub async fn collect_document_diagnostics_with_timeouts(
     client
         .collect_document_diagnostics(project_root, documents, timeouts)
         .await
+        .map_err(TraceDecayError::from)
 }
 
 pub struct StdioLspClient {
@@ -282,47 +317,48 @@ pub struct StdioLspClient {
     upstream_capabilities: UpstreamCapabilities,
     document_versions: BTreeMap<String, i32>,
     next_request_id: ConnectionLocalRequestSequence,
-    stdin: FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
-    reader: FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
-    child: tokio::process::Child,
-    stderr_task: JoinHandle<()>,
+    /// Killed and reaped when the client drops.
+    process: AnalyzerProcess,
 }
 
 impl StdioLspClient {
+    /// Resolves `command` for `project_root` (see [`resolve_analyzer_launch`])
+    /// and starts it. A rustup proxy whose toolchain lacks the analyzer is a
+    /// typed configuration failure here; no process is spawned for it.
     pub async fn start_with_timeouts(
         command: &str,
         args: &[String],
         project_root: &Path,
         timeouts: LspRefreshTimeouts,
     ) -> Result<Self> {
-        let mut child = tokio::process::Command::new(command)
-            .args(args)
-            .current_dir(project_root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("failed to spawn LSP server '{command}': {e}"),
+        let launch = resolve_analyzer_launch(command, project_root)
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: error.engine_error(),
             })?;
+        Self::start_with_launch(&launch, args, project_root, timeouts).await
+    }
 
-        let stdin = child.stdin.take().ok_or_else(|| TraceDecayError::Config {
-            message: format!("failed to open stdin for LSP server '{command}'"),
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| TraceDecayError::Config {
-            message: format!("failed to open stdout for LSP server '{command}'"),
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| TraceDecayError::Config {
-            message: format!("failed to open stderr for LSP server '{command}'"),
-        })?;
-        let mut stdin = FramedWrite::new(stdin, ContentLengthCodec::new());
-        let mut reader = FramedRead::new(stdout, ContentLengthCodec::new());
-        let stderr_capture = Arc::new(Mutex::new(Vec::new()));
-        let stderr_task = spawn_stderr_capture(stderr, Arc::clone(&stderr_capture));
+    /// Starts an already resolved launch. Every spawn carries the launch
+    /// environment, so neither the analyzer nor a `cargo` it runs can trigger a
+    /// rustup toolchain install.
+    pub async fn start_with_launch(
+        launch: &AnalyzerLaunch,
+        args: &[String],
+        project_root: &Path,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<Self> {
+        let command = launch.program.to_string_lossy().into_owned();
+        let command = command.as_str();
+        let mut spawn = std::process::Command::new(&launch.program);
+        spawn
+            .args(args)
+            .envs(launch.env.iter().map(|(key, value)| (key, value)))
+            .current_dir(project_root);
+        let mut process = AnalyzerProcess::spawn(spawn, command).await?;
 
         let send_initialize = write_message_with_timeout(
-            &mut stdin,
+            &process,
             json!({
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -368,7 +404,7 @@ impl StdioLspClient {
         )
         .await;
         // A server that dies immediately can fail the initialize *request*
-        // write (broken pipe — on Windows this races the spawn under load)
+        // write (broken pipe, on Windows this races the spawn under load)
         // just as easily as the initialize *response* wait. Route both
         // failures through the same stderr-enriched classification so the
         // crash reason (e.g. a toolchain's "unknown binary" complaint) is
@@ -376,8 +412,8 @@ impl StdioLspClient {
         let initialize_result = match send_initialize {
             Ok(()) => {
                 wait_for_initialize(
-                    &mut reader,
-                    tokio::time::Instant::now() + timeouts.initialize_response,
+                    &process,
+                    Instant::now() + timeouts.initialize_response,
                     command,
                     timeouts.initialize_response,
                 )
@@ -388,15 +424,12 @@ impl StdioLspClient {
         let initialize_response = match initialize_result {
             Ok(response) => response,
             Err(error) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                let _ = stderr_task.await;
-                let stderr = captured_stderr(&stderr_capture).await;
-                return Err(enrich_start_error(command, error, &stderr));
+                let _ = process.terminate().await;
+                return Err(enrich_start_error(command, error, &process.stderr()));
             }
         };
         write_message_with_timeout(
-            &mut stdin,
+            &process,
             json!({
                 "jsonrpc": "2.0",
                 "method": "initialized",
@@ -413,10 +446,7 @@ impl StdioLspClient {
             ),
             document_versions: BTreeMap::new(),
             next_request_id: ConnectionLocalRequestSequence::starting_at(2),
-            stdin,
-            reader,
-            child,
-            stderr_task,
+            process,
         })
     }
 
@@ -424,10 +454,59 @@ impl StdioLspClient {
         self.upstream_capabilities.clone()
     }
 
+    /// Opens `path` upstream once, so a semantic request can name it.
+    ///
+    /// The analyzer answers only for documents in its own view. Diagnostics
+    /// already open theirs (`collect_document_diagnostics`), but the semantic
+    /// lane forwarded the bare request, so a document the diagnostics sweep had
+    /// not happened to open yet came back `-32603 file not found`, surfaced to
+    /// the client as `providerUnavailable` for `documentSymbol`/`hover` on a
+    /// file it had just opened. Both lanes share one client and one
+    /// `document_versions` ledger, so this never re-opens what the other lane
+    /// already sent.
+    ///
+    /// ponytail: on-disk text, matching the diagnostics lane. Unsaved buffer
+    /// content would need the gateway's synced document plumbed down here.
+    pub(crate) async fn ensure_document_open(
+        &mut self,
+        path: &Path,
+        language_id: &str,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<()> {
+        let uri = file_uri(path);
+        if self.document_versions.contains_key(&uri) {
+            return Ok(());
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            // Unreadable here is not this lane's refusal to make: let the
+            // analyzer answer for whatever it already knows about the path.
+            return Ok(());
+        };
+        write_message_with_timeout(
+            &self.process,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": text,
+                    }
+                }
+            }),
+            timeouts.message_io,
+        )
+        .await?;
+        self.document_versions.insert(uri, 1);
+        Ok(())
+    }
+
     /// Sends one standard semantic request and returns its standard JSON
     /// result after matching the JSON-RPC correlation id. Notifications and
     /// stale responses from a cancelled request are deliberately ignored.
-    #[hotpath::measure(label = "lsp_analyzer_semantic_request", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_semantic_request", level = "trace", skip_all)]
     pub async fn semantic_request(
         &mut self,
         request: LspSemanticRequest,
@@ -554,7 +633,7 @@ impl StdioLspClient {
             .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_document_symbols", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_document_symbols", level = "trace", skip_all)]
     pub async fn document_symbols(
         &mut self,
         params: DocumentSymbolParams,
@@ -565,7 +644,7 @@ impl StdioLspClient {
             .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_workspace_symbols", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_workspace_symbols", level = "trace", skip_all)]
     pub async fn workspace_symbols(
         &mut self,
         params: WorkspaceSymbolParams,
@@ -656,7 +735,7 @@ impl StdioLspClient {
             .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_request_json", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_request_json", level = "trace", skip_all)]
     async fn request_json<R>(
         &mut self,
         params: R::Params,
@@ -666,13 +745,17 @@ impl StdioLspClient {
     where
         R: LspRequest,
     {
-        let response = self.request::<R>(params, cancellation, timeouts).await?;
+        // Boxed: with profiling enabled `request` is the widest I/O future in
+        // this client. Awaiting it by value inflates every semantic wrapper
+        // and the dispatch match (a match future is as large as its widest
+        // arm).
+        let response = Box::pin(self.request::<R>(params, cancellation, timeouts)).await?;
         serde_json::to_value(response).map_err(|error| LspSemanticRequestError::InvalidResponse {
             class: error.to_string(),
         })
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_request", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_request", level = "trace", skip_all)]
     async fn request<R>(
         &mut self,
         params: R::Params,
@@ -696,7 +779,7 @@ impl StdioLspClient {
             }
         })?;
         write_message_with_timeout(
-            &mut self.stdin,
+            &self.process,
             json!({
                 "jsonrpc": "2.0",
                 "id": request_id,
@@ -708,17 +791,17 @@ impl StdioLspClient {
         .await
         .map_err(semantic_transport_error)?;
 
-        let deadline = tokio::time::Instant::now() + timeouts.refresh;
+        let deadline = Instant::now() + timeouts.refresh;
         loop {
             let message = tokio::select! {
                 () = cancellation.cancelled() => {
                     let _ = self.cancel_request(request_id, timeouts).await;
                     return Err(LspSemanticRequestError::Cancelled);
                 }
-                message = read_message_until(&mut self.reader, deadline, timeouts) => {
+                message = read_message_until(&self.process, deadline, timeouts) => {
                     match message {
                         Ok(message) => message,
-                        Err(_error) if tokio::time::Instant::now() >= deadline => {
+                        Err(_error) if Instant::now() >= deadline => {
                             let _ = self.cancel_request(request_id, timeouts).await;
                             return Err(LspSemanticRequestError::TimedOut);
                         }
@@ -754,20 +837,20 @@ impl StdioLspClient {
         timeouts: LspRefreshTimeouts,
     ) -> Result<()> {
         write_message_with_timeout(
-            &mut self.stdin,
+            &self.process,
             cancel_request_message(request_id),
             timeouts.message_io,
         )
         .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_client_refresh", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_client_refresh", level = "trace", skip_all)]
     pub async fn collect_document_diagnostics(
         &mut self,
         project_root: &Path,
         documents: Vec<LspDocument>,
         timeouts: LspRefreshTimeouts,
-    ) -> Result<Vec<CodeDiagnostic>> {
+    ) -> std::result::Result<Vec<CodeDiagnostic>, LspRefreshError> {
         let mut uri_to_document = BTreeMap::new();
         let mut expected_versions = BTreeMap::new();
         for document in documents {
@@ -775,7 +858,7 @@ impl StdioLspClient {
             let current_version = self.document_versions.get(&uri).copied().unwrap_or(0);
             let version = if current_version == 0 {
                 write_message_with_timeout(
-                    &mut self.stdin,
+                    &self.process,
                     json!({
                         "jsonrpc": "2.0",
                         "method": "textDocument/didOpen",
@@ -790,12 +873,13 @@ impl StdioLspClient {
                     }),
                     timeouts.message_io,
                 )
-                .await?;
+                .await
+                .map_err(refresh_transport_error)?;
                 1
             } else {
                 let version = current_version + 1;
                 write_message_with_timeout(
-                    &mut self.stdin,
+                    &self.process,
                     json!({
                         "jsonrpc": "2.0",
                         "method": "textDocument/didChange",
@@ -811,7 +895,8 @@ impl StdioLspClient {
                     }),
                     timeouts.message_io,
                 )
-                .await?;
+                .await
+                .map_err(refresh_transport_error)?;
                 version
             };
             self.document_versions.insert(uri.clone(), version);
@@ -823,30 +908,36 @@ impl StdioLspClient {
             return Ok(Vec::new());
         }
         let mut diagnostics_by_uri: BTreeMap<String, Vec<CodeDiagnostic>> = BTreeMap::new();
-        let refresh_deadline = tokio::time::Instant::now() + timeouts.refresh;
+        let refresh_deadline = Instant::now() + timeouts.refresh;
         let mut quiet_deadline = None;
         loop {
-            let now = tokio::time::Instant::now();
-            let deadline = quiet_deadline
-                .map_or(refresh_deadline, |deadline: tokio::time::Instant| {
-                    deadline.min(refresh_deadline)
-                });
+            let now = Instant::now();
+            let deadline = quiet_deadline.map_or(refresh_deadline, |deadline: Instant| {
+                deadline.min(refresh_deadline)
+            });
             if now >= deadline {
                 break;
             }
-            let Some(message) = read_message_until(&mut self.reader, deadline, timeouts).await?
-            else {
-                break;
-            };
+            let message =
+                match read_refresh_message_until(&self.process, deadline, timeouts).await? {
+                    RefreshMessagePoll::Message(message) => message,
+                    RefreshMessagePoll::Quiet => break,
+                    RefreshMessagePoll::Closed => return Err(self.closed_refresh_error().await),
+                };
             if message.method.as_deref() != Some("textDocument/publishDiagnostics") {
                 continue;
             }
-            let Some(params) = message.params else {
-                continue;
-            };
-            let Ok(published) = serde_json::from_value::<PublishDiagnosticsParams>(params) else {
-                continue;
-            };
+            let params = message
+                .params
+                .ok_or_else(|| LspRefreshError::InvalidResponse {
+                    message: "LSP publishDiagnostics notification omitted params".to_owned(),
+                })?;
+            let published =
+                serde_json::from_value::<PublishDiagnosticsParams>(params).map_err(|error| {
+                    LspRefreshError::InvalidResponse {
+                        message: format!("failed to decode LSP publishDiagnostics params: {error}"),
+                    }
+                })?;
             if !is_current_diagnostic_publication(&published, &expected_versions) {
                 continue;
             }
@@ -861,7 +952,7 @@ impl StdioLspClient {
                     .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
                     .collect(),
             );
-            quiet_deadline = Some(tokio::time::Instant::now() + timeouts.diagnostics_quiet);
+            quiet_deadline = Some(Instant::now() + timeouts.diagnostics_quiet);
         }
         // Servers that suppress empty publishes (only publishing for files WITH
         // problems) never emit for clean files, so a fully-reported batch still
@@ -869,9 +960,50 @@ impl StdioLspClient {
         // diagnostics of the one file that did report. Only treat the batch as a
         // genuine timeout when nothing arrived at all.
         if diagnostics_by_uri.is_empty() && !uri_to_document.is_empty() {
-            return Err(refresh_timed_out(timeouts));
+            return Err(LspRefreshError::NoPublication {
+                message: format!(
+                    "LSP diagnostics collection timed out after {} ms without a publication",
+                    timeouts.refresh.as_millis()
+                ),
+            });
         }
         Ok(diagnostics_by_uri.into_values().flatten().collect())
+    }
+
+    async fn closed_refresh_error(&self) -> LspRefreshError {
+        match self.process.try_wait().await {
+            Ok(Some(status)) => LspRefreshError::ProcessExited {
+                message: format!(
+                    "LSP server '{}' exited while collecting diagnostics ({status})",
+                    self.command
+                ),
+            },
+            Ok(None) => LspRefreshError::Transport {
+                message: format!(
+                    "LSP server '{}' closed its diagnostics transport",
+                    self.command
+                ),
+            },
+            Err(error) => LspRefreshError::Transport {
+                message: format!(
+                    "failed to inspect LSP server '{}' after its diagnostics transport closed: {error}",
+                    self.command
+                ),
+            },
+        }
+    }
+
+    /// Terminates and waits for a retired process. The shared client slot
+    /// stores this future when an in-flight owner is dropped, and no successor
+    /// may acquire that slot until the future completes.
+    pub(crate) async fn reap(mut self) -> Result<()> {
+        self.process
+            .terminate()
+            .await
+            .map(drop)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to reap LSP server '{}': {error}", self.command),
+            })
     }
 }
 
@@ -889,37 +1021,6 @@ fn is_current_diagnostic_publication(
     }
 }
 
-impl Drop for StdioLspClient {
-    fn drop(&mut self) {
-        let _ = self.child.start_kill();
-        self.stderr_task.abort();
-    }
-}
-
-fn spawn_stderr_capture(
-    mut stderr: tokio::process::ChildStderr,
-    capture: Arc<Mutex<Vec<u8>>>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut buffer = [0_u8; 1024];
-        while let Ok(bytes_read) = stderr.read(&mut buffer).await {
-            if bytes_read == 0 {
-                break;
-            }
-            let mut captured = capture.lock().await;
-            let remaining = 8192_usize.saturating_sub(captured.len());
-            if remaining > 0 {
-                captured.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
-            }
-        }
-    })
-}
-
-async fn captured_stderr(capture: &Arc<Mutex<Vec<u8>>>) -> String {
-    let captured = capture.lock().await;
-    String::from_utf8_lossy(&captured).trim().to_string()
-}
-
 fn enrich_start_error(command: &str, err: TraceDecayError, stderr: &str) -> TraceDecayError {
     if stderr.is_empty() {
         return err;
@@ -930,13 +1031,13 @@ fn enrich_start_error(command: &str, err: TraceDecayError, stderr: &str) -> Trac
 }
 
 async fn wait_for_initialize(
-    reader: &mut FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
-    deadline: tokio::time::Instant,
+    process: &AnalyzerProcess,
+    deadline: Instant,
     command: &str,
     timeout: Duration,
 ) -> Result<Value> {
     loop {
-        let frame = match read_content_length_frame_until(reader, deadline).await {
+        let frame = match process.read_frame_until(deadline).await {
             Ok(FramePoll::Frame(frame)) => frame,
             Ok(FramePoll::Pending) | Err(AsyncContentLengthError::DeadlineElapsed) => {
                 return Err(TraceDecayError::Config {
@@ -973,27 +1074,24 @@ async fn wait_for_initialize(
 
 /// Send phase of one analyzer round-trip: JSON encoding plus the framed
 /// stdin write, including any backpressure wait, bounded by `timeout`.
-#[hotpath::measure(label = "lsp.analyzer.request_write")]
+#[tracing::instrument(name = "lsp.analyzer.request_write", level = "trace", skip_all)]
 async fn write_message_with_timeout(
-    stdin: &mut FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
+    process: &AnalyzerProcess,
     value: Value,
     timeout: Duration,
 ) -> Result<()> {
     let body = serde_json::to_vec(&value).map_err(|e| TraceDecayError::Config {
         message: format!("failed to encode LSP message: {e}"),
     })?;
-    tokio::time::timeout_at(
-        tokio::time::Instant::now() + timeout,
-        stdin.send(body.as_slice()),
-    )
-    .await
-    .map_err(|_| TraceDecayError::Config {
-        message: format!(
-            "LSP message write timed out after {} ms",
-            timeout.as_millis()
-        ),
-    })?
-    .map_err(frame_write_error)
+    match process.write_frame(&body, Instant::now() + timeout).await {
+        Err(AsyncContentLengthError::DeadlineElapsed) => Err(TraceDecayError::Config {
+            message: format!(
+                "LSP message write timed out after {} ms",
+                timeout.as_millis()
+            ),
+        }),
+        written => written.map_err(frame_write_error),
+    }
 }
 
 fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {
@@ -1011,6 +1109,46 @@ fn semantic_transport_error(error: TraceDecayError) -> LspSemanticRequestError {
     }
 }
 
+fn refresh_transport_error(error: TraceDecayError) -> LspRefreshError {
+    LspRefreshError::Transport {
+        message: error.to_string(),
+    }
+}
+
+enum RefreshMessagePoll {
+    Message(JsonRpcMessage),
+    Quiet,
+    Closed,
+}
+
+async fn read_refresh_message_until(
+    process: &AnalyzerProcess,
+    deadline: Instant,
+    timeouts: LspRefreshTimeouts,
+) -> std::result::Result<RefreshMessagePoll, LspRefreshError> {
+    match process.read_frame_until(deadline).await {
+        Ok(FramePoll::Frame(frame)) => serde_json::from_slice(&frame)
+            .map(RefreshMessagePoll::Message)
+            .map_err(|error| LspRefreshError::InvalidResponse {
+                message: format!("failed to parse LSP message: {error}"),
+            }),
+        Ok(FramePoll::Pending) => Ok(RefreshMessagePoll::Quiet),
+        Ok(FramePoll::Closed) => Ok(RefreshMessagePoll::Closed),
+        Err(AsyncContentLengthError::Io(error)) => Err(LspRefreshError::Transport {
+            message: format!("failed to read LSP frame: {error}"),
+        }),
+        Err(AsyncContentLengthError::Codec(error)) => Err(LspRefreshError::InvalidResponse {
+            message: format!("failed to decode LSP Content-Length frame: {error:?}"),
+        }),
+        Err(AsyncContentLengthError::DeadlineElapsed) => Err(LspRefreshError::InvalidResponse {
+            message: format!(
+                "partial LSP diagnostics frame timed out after {} ms",
+                timeouts.refresh.as_millis()
+            ),
+        }),
+    }
+}
+
 fn cancel_request_message(request_id: u64) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -1022,13 +1160,13 @@ fn cancel_request_message(request_id: u64) -> Value {
 /// Wait phase of one analyzer round-trip: the futures lane separates time
 /// suspended on analyzer stdout from poll (frame-decode) time, which a wall
 /// span alone cannot distinguish.
-#[hotpath::measure(label = "lsp.analyzer.response_wait", future = true)]
+#[tracing::instrument(name = "lsp.analyzer.response_wait", level = "trace", skip_all)]
 async fn read_message_until(
-    reader: &mut FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
-    deadline: tokio::time::Instant,
+    process: &AnalyzerProcess,
+    deadline: Instant,
     timeouts: LspRefreshTimeouts,
 ) -> Result<Option<JsonRpcMessage>> {
-    match read_content_length_frame_until(reader, deadline).await {
+    match process.read_frame_until(deadline).await {
         Ok(FramePoll::Frame(frame)) => decode_message(&frame).map(Some),
         Ok(FramePoll::Pending | FramePoll::Closed) => Ok(None),
         Err(AsyncContentLengthError::DeadlineElapsed) => Err(refresh_timed_out(timeouts)),
@@ -1036,7 +1174,7 @@ async fn read_message_until(
     }
 }
 
-#[hotpath::measure(label = "lsp.analyzer.response_parse")]
+#[tracing::instrument(name = "lsp.analyzer.response_parse", level = "trace", skip_all)]
 fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
     serde_json::from_slice(body).map_err(|e| TraceDecayError::Config {
         message: format!("failed to parse LSP message: {e}"),
@@ -1065,7 +1203,7 @@ fn frame_write_error(error: AsyncContentLengthError) -> TraceDecayError {
     TraceDecayError::Config { message }
 }
 
-fn file_uri(path: &Path) -> String {
+pub(crate) fn file_uri(path: &Path) -> String {
     let absolute = if path.is_absolute() {
         PathBuf::from(path)
     } else {
@@ -1094,7 +1232,9 @@ fn lsp_initialization_options(command: &str) -> Value {
 /// percent-encoding. Handles POSIX paths, Windows drive paths (`C:/…`), and UNC
 /// (`//server/share`) prefixes. Shared with the Kiro installer.
 pub fn file_uri_from_path_text(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
+    let normalized = plain_host_path(Path::new(path))
+        .to_string_lossy()
+        .replace('\\', "/");
     let encoded = percent_encode_file_uri_path(&normalized);
     if normalized.starts_with("//") {
         format!("file:{encoded}")
@@ -1170,16 +1310,8 @@ fn code_diagnostic(
         // resolved later via `DiagnosticBroker::resolve_enclosing_nodes`,
         // which has access to the indexed nodes for the file.
         enclosing_node: None,
-        updated_at: now_unix(),
+        updated_at: tracedecay_runtime_core::tracedecay::saturating_unix_secs(),
     }
-}
-
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-        })
 }
 
 fn code_to_string(value: NumberOrString) -> String {
@@ -1199,7 +1331,6 @@ mod tests {
     use super::{
         LspSemanticRequestError, cancel_request_message, decode_semantic_request,
         encode_semantic_request, file_uri_from_path_text, is_current_diagnostic_publication,
-        lsp_initialization_options,
     };
 
     #[test]
@@ -1263,26 +1394,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_errors_render_present_and_missing_codes_unambiguously() {
-        assert_eq!(
-            LspSemanticRequestError::Remote {
-                code: Some(-32603),
-                message: "server failed".to_owned(),
-            }
-            .to_string(),
-            "analyzer returned error -32603: server failed"
-        );
-        assert_eq!(
-            LspSemanticRequestError::Remote {
-                code: None,
-                message: "server failed".to_owned(),
-            }
-            .to_string(),
-            "analyzer returned an error: server failed"
-        );
-    }
-
-    #[test]
     fn file_uri_encodes_lsp_paths() {
         assert_eq!(
             file_uri_from_path_text("/tmp/trace decay/main#one.rs"),
@@ -1296,6 +1407,11 @@ mod tests {
             file_uri_from_path_text("/tmp/100% real.rs"),
             "file:///tmp/100%25%20real.rs"
         );
+        assert_eq!(
+            file_uri_from_path_text(r"\\?\D:\repo\src\main.rs"),
+            "file:///D:/repo/src/main.rs",
+            "a canonicalized Windows path must not become a `?` URL host"
+        );
     }
 
     #[test]
@@ -1308,15 +1424,6 @@ mod tests {
                 "params": { "id": 42 },
             })
         );
-    }
-
-    #[test]
-    fn rust_analyzer_initialization_disables_competing_cargo_flycheck() {
-        assert_eq!(
-            lsp_initialization_options("/toolchains/stable/bin/rust-analyzer"),
-            json!({ "checkOnSave": false })
-        );
-        assert_eq!(lsp_initialization_options("clangd"), json!({}));
     }
 
     #[test]

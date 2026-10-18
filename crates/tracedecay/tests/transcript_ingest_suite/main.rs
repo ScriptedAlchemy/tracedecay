@@ -5,10 +5,7 @@
 //! binaries: each integration test binary links the full `tracedecay` crate
 //! separately, and link time dominates Windows CI.
 
-// Full-journey Hotpath builds compose measured provider-ingest futures in each
-// test body; keep the expanded query budget local to this test crate.
-#![recursion_limit = "256"]
-
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -24,8 +21,18 @@ mod codex_response_items;
 mod codex_usage;
 mod cursor;
 mod cursor_composer;
+mod git_correlation;
 mod hermes;
+mod kimi;
 mod kiro;
+mod linked_worktree_sessions;
+mod opencode;
+mod pi;
+mod projector_upgrade;
 mod provider_contract;
 mod restart_atomicity;
+mod session_ingest;
+mod sessions_for_catch_up;
+mod source_identity;
 mod vibe;
+mod workflow_ingest;

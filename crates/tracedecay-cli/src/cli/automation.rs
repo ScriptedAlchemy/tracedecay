@@ -1,4 +1,4 @@
-use clap::{Subcommand, ValueEnum};
+use clap::Subcommand;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
@@ -25,20 +25,11 @@ pub enum AutomationAction {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum AutomationConfigScope {
-    Project,
-    Global,
-}
-
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum AutomationConfigAction {
     /// Print effective automation config.
     Get {
-        /// Config scope to inspect.
-        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
-        scope: AutomationConfigScope,
         /// Output as JSON.
         #[arg(long)]
         json: bool,
@@ -48,9 +39,6 @@ pub enum AutomationConfigAction {
     },
     /// Explain effective automation config, merge source, and backend availability.
     Explain {
-        /// Config scope to inspect.
-        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
-        scope: AutomationConfigScope,
         /// Output as JSON.
         #[arg(long)]
         json: bool,
@@ -60,27 +48,18 @@ pub enum AutomationConfigAction {
     },
     /// Enable project automation.
     Enable {
-        /// Config scope to mutate.
-        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
-        scope: AutomationConfigScope,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,
     },
     /// Disable project automation.
     Disable {
-        /// Config scope to mutate.
-        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
-        scope: AutomationConfigScope,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,
     },
     /// Patch project automation config fields.
     Set {
-        /// Config scope to mutate.
-        #[arg(long, value_enum, default_value_t = AutomationConfigScope::Project)]
-        scope: AutomationConfigScope,
         /// Backend: disabled, codex-app-server.
         #[arg(long)]
         backend: Option<String>,
@@ -214,6 +193,9 @@ pub enum AutomationSkillsAction {
         title: String,
         #[arg(long)]
         summary: String,
+        /// Discovery text describing when to use this skill.
+        #[arg(long)]
+        routing_description: String,
         #[arg(long)]
         category: String,
         #[arg(long)]
@@ -229,6 +211,9 @@ pub enum AutomationSkillsAction {
         title: Option<String>,
         #[arg(long)]
         summary: Option<String>,
+        /// Replacement discovery text describing when to use this skill.
+        #[arg(long)]
+        routing_description: Option<String>,
         #[arg(long)]
         category: Option<String>,
         #[arg(long)]
@@ -242,6 +227,10 @@ pub enum AutomationSkillsAction {
     Archive { id: String },
     /// Restore an archived skill to active state.
     Restore { id: String },
+    /// Redeploy active managed skills to every integrated host, refreshing the
+    /// per-host prompt index blocks and materialized skill files against the
+    /// store without mutating any skill.
+    Deploy,
 }
 
 #[derive(Subcommand)]

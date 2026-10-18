@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use thiserror::Error;
+use tracedecay_domain::canonical_sha256;
 
 use crate::{
     CancellationContract, CatalogDigest, EffectClass, PaginationContract, StreamingContract,
@@ -232,7 +233,7 @@ pub struct McpDispatchCatalogV1 {
 }
 
 impl McpDispatchCatalogV1 {
-    #[hotpath::measure(label = "tool_catalog.mcp.load")]
+    #[tracing::instrument(name = "tool_catalog.mcp.load", level = "trace", skip_all)]
     pub fn new(
         contracts: impl IntoIterator<Item = McpDispatchContractV1>,
     ) -> Result<Self, McpDispatchCatalogError> {
@@ -246,12 +247,13 @@ impl McpDispatchCatalogV1 {
         if by_name.is_empty() {
             return Err(McpDispatchCatalogError::EmptyCatalog);
         }
-        let canonical = serde_json::to_vec(&by_name)
+        let fingerprint = canonical_sha256(&by_name)
             .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
-        crate::hotpath_observe::mcp_catalog_entries(by_name.len());
+        let fingerprint = CatalogDigest::from_manifest_digest(fingerprint)
+            .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
         Ok(Self {
             contracts: by_name,
-            fingerprint: CatalogDigest::sha256(canonical),
+            fingerprint,
         })
     }
 
@@ -259,14 +261,12 @@ impl McpDispatchCatalogV1 {
         MCP_DISPATCH_CONTRACT_VERSION
     }
 
-    pub const fn fingerprint(&self) -> CatalogDigest {
-        self.fingerprint
+    pub fn fingerprint(&self) -> CatalogDigest {
+        self.fingerprint.clone()
     }
 
     pub fn contract(&self, tool_name: &str) -> Option<&McpDispatchContractV1> {
-        let contract = self.contracts.get(tool_name);
-        crate::hotpath_observe::mcp_contract_lookup(contract.is_some());
-        contract
+        self.contracts.get(tool_name)
     }
 
     pub fn contracts(&self) -> impl ExactSizeIterator<Item = &McpDispatchContractV1> {
@@ -361,11 +361,22 @@ mod tests {
             pagination: None,
             streaming: None,
         };
-        assert!(matches!(
+        assert_eq!(
             McpDispatchContractV1::new(input.clone()),
-            Err(McpDispatchCatalogError::InvalidInverse { .. })
-        ));
+            Err(McpDispatchCatalogError::InvalidInverse {
+                tool_name: "read".to_owned(),
+            })
+        );
         input.effect = EffectClass::Administrative;
-        assert!(McpDispatchContractV1::new(input).is_ok());
+        let accepted = McpDispatchContractV1::new(input).unwrap();
+        assert_eq!(accepted.tool_name(), "read");
+        assert_eq!(accepted.effect(), EffectClass::Administrative);
+        assert!(!accepted.read_only());
+        assert_eq!(
+            accepted.inverse(),
+            &McpInverseContract::Tool {
+                tool_name: "write".to_owned(),
+            }
+        );
     }
 }

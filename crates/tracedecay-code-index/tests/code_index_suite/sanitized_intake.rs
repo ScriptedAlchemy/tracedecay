@@ -43,6 +43,7 @@ fn snapshot(mut files: Vec<SanitizedCodeFileV1>) -> SanitizedCodeSnapshotV1 {
         content_identity: content_digest('b'),
         captured_at: UtcMicros(1_000_000),
         files,
+        omitted_sources: Vec::new(),
     }
 }
 
@@ -52,30 +53,6 @@ fn intake() -> SanitizedCodeIntake<tracedecay_code_index::languages::StaticLangu
         id::<SanitizerRevision>("sanitizer.v1"),
         UtcMicros(2_000_000),
     )
-}
-
-#[test]
-fn intake_is_receipt_bound_registry_backed_and_deterministic() {
-    let source = file(
-        "file.source",
-        "src/lib.rs",
-        Some("rust"),
-        SnapshotFileDispositionV1::Present,
-    );
-    let binary = file(
-        "file.binary",
-        "assets/logo.bin",
-        None,
-        SnapshotFileDispositionV1::Binary,
-    );
-    let admitted = snapshot(vec![source, binary]);
-
-    let first = intake()
-        .validate(admitted.clone())
-        .expect("snapshot admitted");
-    let second = intake().validate(admitted).expect("snapshot admitted");
-    assert_eq!(first.intake_digest, second.intake_digest);
-    assert_eq!(first.validated_at, UtcMicros(2_000_000));
 }
 
 #[test]

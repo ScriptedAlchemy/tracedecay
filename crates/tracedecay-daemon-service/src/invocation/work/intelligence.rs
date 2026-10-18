@@ -2,16 +2,14 @@
 //!
 //! These handlers bind their read operation to the admitted capability and
 //! use-case context before reading the registered Work authorities. Experience
-//! additionally snapshots current configuration consent, so expertise never
+//! also snapshots current configuration consent, so expertise never
 //! relies on caller-provided or stale authorization state.
 
-use std::sync::Arc;
-
-use tracedecay_application::{
+use tracedecay_application::work::RegisteredWorkApplicationServicesV1;
+use tracedecay_contracts::{
     ApplicationProblem, Deadline, RequestContext, RequestId, SafeDiagnostic,
-    WorkAttemptListRequestV1, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
-    WorkExperienceRequestV1, WorkExpertiseConsentSnapshotV1, WorkProductBindingV1,
-    WorkProposalComparisonRequestV1,
+    WorkAttemptListOperationV1, WorkAttemptListRequestV1, WorkExperienceRequestV1,
+    WorkExpertiseConsentSnapshotV1, WorkProductBindingV1, WorkProposalComparisonRequestV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -23,81 +21,119 @@ use tracedecay_global_db::configuration::{
     OwnedGlobalDbConfigurationControlStore, contracts::ConfigurationControlStore as _,
 };
 
-use super::{
-    RegisteredWorkRuntime, complete_work_read, work_product_problem, work_topology_problem,
-    work_topology_unavailable_problem,
-};
+use super::{RegisteredWorkRuntime, complete_work_read, preparation, work_product_problem};
 
-#[hotpath::measure(label = "daemon.service.work.generate_proposal")]
-pub(super) fn generate_proposal(
+fn intelligence_service(
     registered: &RegisteredWorkRuntime,
+    capability: &str,
+    use_case: &UseCaseId,
+) -> Result<
+    tracedecay_contracts::WorkIntelligenceServiceV1<
+        tracedecay_rusqlite_runtime::work_product::AuthorizedWorkProductReadStorageV1,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+    ApplicationProblem,
+> {
+    let unavailable = || {
+        work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+        )
+    };
+    let capability = CapabilityId::new(capability).map_err(|_| unavailable())?;
+    tracedecay_application::work::authorized_work_intelligence_service(
+        &registered.database,
+        WorkProductBindingV1::new(capability, use_case.clone()),
+        registered.authority.clone(),
+    )
+    .map_err(|_| unavailable())
+}
+
+#[tracing::instrument(
+    name = "daemon.service.work.generate_proposal",
+    level = "trace",
+    skip_all
+)]
+pub(super) async fn generate_proposal(
+    registered: &RegisteredWorkRuntime,
+    services: &RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     capability: &str,
     use_case: &UseCaseId,
-    request: tracedecay_application::GenerateProposalRequest,
-) -> Result<tracedecay_application::GeneratedWorkProposal, ApplicationProblem> {
-    let capability = CapabilityId::new(capability).map_err(|_| {
-        work_product_problem(
-            tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-        )
-    })?;
-    let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    tracedecay_usecases::work::work_intelligence_service(&registered.database, binding)
-        .map_err(|_| {
-            work_product_problem(
-                tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-            )
-        })?
-        .generate_proposal(
-            context,
-            registered.configuration_digest.clone(),
-            &registered.proposal_routing,
-            request,
-        )
-        .map_err(work_product_problem)
+    request: tracedecay_contracts::GenerateProposalRequest,
+) -> Result<tracedecay_contracts::GeneratedWorkProposal, ApplicationProblem> {
+    let (registered, context, capability, use_case) = (
+        registered.clone(),
+        context.clone(),
+        capability.to_owned(),
+        use_case.clone(),
+    );
+    services
+        .read(move |_| {
+            intelligence_service(&registered, &capability, &use_case)?
+                .generate_proposal(
+                    &context,
+                    registered.configuration_digest.clone(),
+                    &registered.proposal_routing,
+                    request,
+                )
+                .map_err(work_product_problem)
+        })
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.execution_history")]
-pub(super) fn execution_history(
+#[tracing::instrument(
+    name = "daemon.service.work.execution_history",
+    level = "trace",
+    skip_all
+)]
+pub(super) async fn execution_history(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
+    services: &RegisteredWorkApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
     operation_key: &str,
+    capability: &str,
     use_case: UseCaseId,
     input_digest: ManifestDigest,
     observed_at: UtcMicros,
     deadline: Deadline,
     request: WorkAttemptListRequestV1,
 ) -> DaemonInvocationResponse {
-    let attempts = services.attempts().list(context, &request, |authority| {
-        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        match services.topology().verified_snapshot(authority, cancelled) {
-            Ok(topology) => {
-                let task_count = u32::try_from(topology.task_count()).map_err(|_| {
-                    work_topology_unavailable_problem("the verified topology task count overflowed")
-                })?;
-                Ok(WorkAttemptTopologyStateV1::Verified(
-                    WorkAttemptTopologyBindingV1 {
-                        generation: topology.generation().as_str().to_owned(),
-                        task_count,
+    let history = {
+        let (registered, context, capability, use_case) = (
+            registered.clone(),
+            context.clone(),
+            capability.to_owned(),
+            use_case.clone(),
+        );
+        services
+            .read(move |services| {
+                let attempts = services.attempts().list(
+                    &context,
+                    WorkAttemptListOperationV1::ExecutionHistory,
+                    &request,
+                    || {
+                        preparation::current_work_product_attempt_topology(
+                            &registered,
+                            &context,
+                            &capability,
+                            &use_case,
+                            observed_at,
+                        )
                     },
-                ))
-            }
-            Err(error) => work_topology_problem(error),
-        }
-    });
-    let history = attempts.and_then(|attempts| {
-        let storage = registered.database.work_storage().map_err(|_| {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "application.work-execution-history.unavailable".to_owned(),
-                message: "The Work execution timing authority is unavailable.".to_owned(),
+                )?;
+                let storage = registered.database.work_storage().map_err(|_| {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "application.work-execution-history.unavailable".to_owned(),
+                        message: "The Work execution timing authority is unavailable.".to_owned(),
+                    })
+                })?;
+                tracedecay_contracts::project_work_execution_history(&storage, &context, attempts)
             })
-        })?;
-        tracedecay_application::project_work_execution_history(&storage, context, attempts)
-    });
+            .await
+    };
     complete_work_read(
         registered,
         request_id,
@@ -114,9 +150,10 @@ pub(super) fn execution_history(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.experience", future = true)]
+#[tracing::instrument(name = "daemon.service.work.experience", level = "trace", skip_all)]
 pub(super) async fn experience(
     registered: &RegisteredWorkRuntime,
+    services: &RegisteredWorkApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
@@ -128,15 +165,9 @@ pub(super) async fn experience(
     capability: &str,
     request: WorkExperienceRequestV1,
 ) -> DaemonInvocationResponse {
-    let Ok(capability) = CapabilityId::new(capability) else {
+    let Ok(intelligence) = intelligence_service(registered, capability, &use_case) else {
         return unavailable(request_id);
     };
-    let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence =
-        match tracedecay_usecases::work::work_intelligence_service(&registered.database, binding) {
-            Ok(service) => service,
-            Err(_) => return unavailable(request_id),
-        };
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         registered.database.clone(),
     );
@@ -151,6 +182,14 @@ pub(super) async fn experience(
         Ok(consent) => consent,
         Err(_) => return unavailable(request_id),
     };
+    let read_context = context.clone();
+    let experienced = services
+        .read(move |_| {
+            intelligence
+                .experience(&read_context, request, consent)
+                .map_err(work_product_problem)
+        })
+        .await;
     complete_work_read(
         registered,
         request_id,
@@ -159,9 +198,7 @@ pub(super) async fn experience(
         operation_key,
         use_case,
         input_digest,
-        intelligence
-            .experience(context, request, consent)
-            .map_err(work_product_problem),
+        experienced,
         observed_at,
         deadline,
         WorkApplicationOutcomeV1::Experience,
@@ -169,9 +206,14 @@ pub(super) async fn experience(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.compare_proposal")]
-pub(super) fn compare_proposal(
+#[tracing::instrument(
+    name = "daemon.service.work.compare_proposal",
+    level = "trace",
+    skip_all
+)]
+pub(super) async fn compare_proposal(
     registered: &RegisteredWorkRuntime,
+    services: &RegisteredWorkApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
@@ -183,15 +225,17 @@ pub(super) fn compare_proposal(
     capability: &str,
     request: WorkProposalComparisonRequestV1,
 ) -> DaemonInvocationResponse {
-    let Ok(capability) = CapabilityId::new(capability) else {
+    let Ok(intelligence) = intelligence_service(registered, capability, &use_case) else {
         return unavailable(request_id);
     };
-    let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence =
-        match tracedecay_usecases::work::work_intelligence_service(&registered.database, binding) {
-            Ok(service) => service,
-            Err(_) => return unavailable(request_id),
-        };
+    let read_context = context.clone();
+    let compared = services
+        .read(move |_| {
+            intelligence
+                .compare_proposal(&read_context, request)
+                .map_err(work_product_problem)
+        })
+        .await;
     complete_work_read(
         registered,
         request_id,
@@ -200,9 +244,7 @@ pub(super) fn compare_proposal(
         operation_key,
         use_case,
         input_digest,
-        intelligence
-            .compare_proposal(context, request)
-            .map_err(work_product_problem),
+        compared,
         observed_at,
         deadline,
         WorkApplicationOutcomeV1::CompareProposal,

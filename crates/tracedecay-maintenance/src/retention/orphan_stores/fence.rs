@@ -10,12 +10,13 @@ use std::path::{Component, Path, PathBuf};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{CollectionControl, CollectionFailureKind};
 
 /// Stable identity of an opened directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreRootIdentity {
     pub device: u64,
     pub inode: u64,
@@ -51,7 +52,7 @@ pub struct StoreContentInventory {
     pub entries: Vec<StoreContentEntry>,
 }
 
-/// Exact content identity carried from census to post-quarantine verification.
+/// Exact content identity carried from census to the delete boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreContentFence {
     Missing,
@@ -193,7 +194,11 @@ pub(super) fn capture_store_content_fence_controlled(
     capture_store_content_fence_impl(profile_root, data_root, Some(control))
 }
 
-#[hotpath::measure(label = "maintenance.orphan_stores.fence_content")]
+#[tracing::instrument(
+    name = "maintenance.orphan_stores.fence_content",
+    level = "trace",
+    skip_all
+)]
 fn capture_store_content_fence_impl(
     profile_root: &Path,
     data_root: &Path,
@@ -218,8 +223,8 @@ fn capture_store_content_fence_impl(
         .map_err(|error| failure_from_io(error, control))
 }
 
-/// Captures an inventory from an already-open directory; quarantine uses this
-/// after its same-parent rename so the proof applies to the moved bytes.
+/// Captures an inventory from an already-open directory so the proof applies
+/// to the exact handle collection later deletes.
 pub(super) fn capture_store_content_fence_in_dir_controlled(
     root: &Dir,
     control: Option<CollectionControl<'_>>,
@@ -294,45 +299,59 @@ fn capture_file_identity(
         digest.update(&buffer[..read]);
     }
     let sha256: [u8; 32] = digest.finalize().into();
+    let identity = capability_identity(&file, &metadata)?;
     Ok(StoreFileIdentity {
-        device: metadata_device(&metadata)?,
-        inode: metadata_inode(&metadata)?,
+        device: identity.device,
+        inode: identity.inode,
         size_bytes: metadata.len(),
         sha256,
     })
 }
 
-fn store_root_identity(directory: &Dir) -> io::Result<StoreRootIdentity> {
+pub(crate) fn store_root_identity(directory: &Dir) -> io::Result<StoreRootIdentity> {
     let metadata = directory.metadata(".")?;
+    capability_identity(directory, &metadata)
+}
+
+/// Filesystem identity of an already-open capability: the pair a rename
+/// preserves and a replacement changes.
+///
+/// Unix reads `st_dev`/`st_ino` from the capability's metadata. Windows must
+/// read the volume serial number and file index *by handle*, `cap_std`
+/// exposes them on `Metadata` only under the nightly `windows_by_handle`
+/// feature, so the stable build saw `None` and every fence capture failed with
+/// `InspectFailed`, which left every unregistered store unverifiable and every
+/// orphan-store sweep planning nothing.
+#[cfg(unix)]
+fn capability_identity<H>(
+    _handle: &H,
+    metadata: &cap_std::fs::Metadata,
+) -> io::Result<StoreRootIdentity> {
+    use cap_std::fs::MetadataExt;
+
     Ok(StoreRootIdentity {
-        device: metadata_device(&metadata)?,
-        inode: metadata_inode(&metadata)?,
+        device: metadata.dev(),
+        inode: metadata.ino(),
     })
 }
 
-#[cfg(unix)]
-fn metadata_device(metadata: &cap_std::fs::Metadata) -> io::Result<u64> {
-    use cap_std::fs::MetadataExt;
-
-    Ok(metadata.dev())
+#[cfg(windows)]
+fn capability_identity<H: std::os::windows::io::AsRawHandle>(
+    handle: &H,
+    _metadata: &cap_std::fs::Metadata,
+) -> io::Result<StoreRootIdentity> {
+    let information = tracedecay_private_fs::windows_file::information(handle)?;
+    Ok(StoreRootIdentity {
+        device: u64::from(information.volume_serial_number),
+        inode: information.file_index,
+    })
 }
 
-#[cfg(not(unix))]
-fn metadata_device(_metadata: &cap_std::fs::Metadata) -> io::Result<u64> {
-    Err(io::Error::other(
-        "orphan-store filesystem identity is unsupported",
-    ))
-}
-
-#[cfg(unix)]
-fn metadata_inode(metadata: &cap_std::fs::Metadata) -> io::Result<u64> {
-    use cap_std::fs::MetadataExt;
-
-    Ok(metadata.ino())
-}
-
-#[cfg(not(unix))]
-fn metadata_inode(_metadata: &cap_std::fs::Metadata) -> io::Result<u64> {
+#[cfg(not(any(unix, windows)))]
+fn capability_identity<H>(
+    _handle: &H,
+    _metadata: &cap_std::fs::Metadata,
+) -> io::Result<StoreRootIdentity> {
     Err(io::Error::other(
         "orphan-store filesystem identity is unsupported",
     ))

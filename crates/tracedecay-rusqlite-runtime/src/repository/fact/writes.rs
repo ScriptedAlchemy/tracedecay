@@ -6,8 +6,8 @@
 
 use rusqlite::{OptionalExtension, Savepoint, params};
 use tracedecay_domain::{
-    FactEventId, FactId, FactIdentityMaterialV1, FactLineageEventKindV1, FactLineageEventV1,
-    FactOwnerV1, PayloadAccessState, RetrievalAnchorRecordV2,
+    FactCurationActionV1, FactEventId, FactId, FactIdentityMaterialV1, FactLineageEventKindV1,
+    FactLineageEventV1, FactOwnerV1, PayloadAccessState, RetrievalAnchorRecord,
 };
 use tracedecay_store::FactWriteBatch;
 
@@ -87,7 +87,7 @@ pub(super) fn ensure_fact(
 pub(super) fn insert_anchor(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
-    anchor: &RetrievalAnchorRecordV2,
+    anchor: &RetrievalAnchorRecord,
 ) -> rusqlite::Result<()> {
     let encoded = encode(anchor)?;
     let stored = savepoint
@@ -136,6 +136,20 @@ pub(super) fn publish_projection(
     owner: &OwnerColumns,
     batch: &FactWriteBatch,
 ) -> rusqlite::Result<()> {
+    if batch.events().iter().enumerate().any(|(index, event)| {
+        index + 1 != batch.events().len()
+            && matches!(
+                event.kind(),
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::SupersededBy { .. },
+                    ..
+                }
+            )
+    }) {
+        return Err(invalid(
+            "fact supersession must be the final event in its write batch",
+        ));
+    }
     let existing = savepoint
         .query_row(
             "SELECT payload_access, trust_score, active_assertion_id
@@ -181,8 +195,26 @@ pub(super) fn publish_projection(
                     active = None;
                 }
             }
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::SupersededBy { .. },
+                ..
+            } => {
+                active = None;
+            }
             FactLineageEventKindV1::Curated { .. } => {}
         }
+    }
+    let superseded = batch.events().iter().any(|event| {
+        matches!(
+            event.kind(),
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::SupersededBy { .. },
+                ..
+            }
+        )
+    });
+    if active.is_none() && !matches!(access.as_str(), "quarantined" | "deleted") && !superseded {
+        return Err(invalid("fact projection has no active assertion"));
     }
     let last = batch
         .events()

@@ -444,7 +444,7 @@ impl WorkExecutionEnvelopeV1 {
 }
 
 impl WorkProviderBackendV1 {
-    pub(crate) fn provider_id(self) -> &'static ProviderId {
+    pub fn provider_id(self) -> &'static ProviderId {
         static CLAUDE: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
         static CODEX_APP_SERVER: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
         static CODEX_CLI: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
@@ -464,7 +464,7 @@ impl WorkProviderBackendV1 {
         }
     }
 
-    pub(crate) const fn protocol(self) -> crate::WorkProviderProtocol {
+    pub const fn protocol(self) -> crate::WorkProviderProtocol {
         match self {
             Self::ClaudeCodeCli => crate::WorkProviderProtocol::ClaudeStreamJson,
             Self::CodexAppServer => crate::WorkProviderProtocol::CodexAppServerJsonRpc,
@@ -769,6 +769,7 @@ pub enum WorkRecoveryStateV1 {
         #[serde(default)]
         source_attempt_id: Option<AttemptId>,
         reason: WorkRestartReasonV1,
+        observed_at: UtcMicros,
     },
 }
 
@@ -880,7 +881,13 @@ impl WorkTerminalEvidenceV1 {
         &self,
         run_id: RunId,
     ) -> Result<RuntimeEvidenceRef, WorkRuntimeContractError> {
-        let evidence_digest = match self {
+        RuntimeEvidenceRef::new(run_id, self.evidence_digest().clone(), true)
+            .map_err(|_| WorkRuntimeContractError::InconsistentAttemptState)
+    }
+
+    /// The provider evidence digest every terminal carries.
+    pub const fn evidence_digest(&self) -> &ManifestDigest {
+        match self {
             Self::Succeeded {
                 evidence_digest, ..
             }
@@ -892,10 +899,8 @@ impl WorkTerminalEvidenceV1 {
             }
             | Self::Cancelled {
                 evidence_digest, ..
-            } => evidence_digest.clone(),
-        };
-        RuntimeEvidenceRef::new(run_id, evidence_digest, true)
-            .map_err(|_| WorkRuntimeContractError::InconsistentAttemptState)
+            } => evidence_digest,
+        }
     }
 
     /// The durable instant at which the provider terminal was observed.

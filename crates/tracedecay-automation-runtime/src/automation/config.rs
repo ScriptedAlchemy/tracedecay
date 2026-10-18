@@ -3,14 +3,13 @@
 pub use tracedecay_automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
     AutomationSchedule, AutomationTaskConfig, AutomationTaskPatch, AutomationTaskSet, CronSchedule,
-    DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_LEGACY_SESSION_RETENTION_DAYS,
     DEFAULT_SCHEDULER_TICK_SECS, RetentionConfig, parse_schedule,
 };
 
-use crate::errors::{Result, TraceDecayError};
 use tracedecay_domain::configuration::{
     AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub fn from_configuration_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<AutomationConfig> {
     snapshot

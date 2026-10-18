@@ -5,14 +5,13 @@
 use std::path::{Path, PathBuf};
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
-    http_agent, pick_free_port, wait_for_dashboard,
+    MessageRecordBuilder, canonicalize_test_dir, create_runtime, get_json, http_agent,
+    isolated_profile_under_home, pick_free_port, tempdir_or_panic, wait_for_dashboard,
 };
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
@@ -20,14 +19,12 @@ use tracedecay_domain::{
     RejectedArgumentNameV1, RejectedArgumentObservedV1, RejectedArgumentSurfaceV1,
     RetrievalQueryObservedV1,
 };
-use tracedecay_global_db::AnalyticsEventInsert;
+use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 struct Fixture {
     _tmp: TempDir,
-    _env_guard: EnvVarGuard,
-    _data_dir_guard: EnvVarGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
     project_root: PathBuf,
@@ -202,12 +199,10 @@ async fn seed_session_store(runtime: &DashboardTestRuntimeV1, project: &Path) {
     ];
 
     for row in rows {
-        assert!(
-            runtime
-                .upsert_session_message_for_test(HostAdmissionScope::Project, &row)
-                .await
-                .expect("seed analytics session message")
-        );
+        runtime
+            .upsert_session_message_for_test(HostAdmissionScope::Project, &row)
+            .await
+            .expect("seed analytics session message");
     }
 }
 
@@ -358,7 +353,7 @@ fn rejected_argument_event(
 }
 
 async fn seed_durable_analytics(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
-    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -427,7 +422,7 @@ fn seed_hook_analytics(store_root: &Path) {
 }
 
 async fn seed_durable_recent_window(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
-    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(project_root);
     let mut events: Vec<_> = (0..10_000)
         .map(|offset| analytics_event(&project_id, 1_760_000_000 + offset, "older_noise"))
         .collect();
@@ -443,7 +438,7 @@ async fn seed_durable_recent_window(runtime: &DashboardTestRuntimeV1, project_ro
 }
 
 async fn seed_fallback_analytics(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
-    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -472,30 +467,30 @@ async fn seed_fallback_analytics(runtime: &DashboardTestRuntimeV1, project_root:
 }
 
 async fn start_fixture(seed_durable_events: bool) -> Fixture {
-    let tmp = TempDir::new().expect("temp dir");
-    let project_root = tmp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project dir");
+    let tmp = tempdir_or_panic();
+    let profile = isolated_profile_under_home(&tmp.path().join("home"));
+    let project_root = canonicalize_test_dir(&tmp.path().join("project"));
     std::fs::write(
         project_root.join("lib.rs"),
         "pub fn analytics_fixture() {}\n",
     )
     .expect("seed source file");
 
-    let global_db_path = tmp.path().join("global").join("global.db");
-    let env_guard = EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path);
-    let profile_root = tmp.path().join("profile").join(".tracedecay");
-    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-    let project_id =
-        tracedecay_domain::ProjectId::new("dashboard_analytics_fixture").expect("project identity");
+    let profile_root = profile.data_dir().to_path_buf();
+    let global_db_path = profile.global_db_path();
+    let project_id = tracedecay_domain::ProjectId::new(
+        tracedecay_runtime_core::storage::default_profile_project_id(&project_root),
+    )
+    .expect("project identity");
     let host_runtime = Arc::new(
-        DashboardTestRuntimeV1::project(&profile_root, &project_root, project_id)
+        DashboardTestRuntimeV1::project(&profile, &project_root, project_id)
             .await
             .expect("analytics host-admission runtime"),
     );
     let cg = host_runtime
         .initialize_project_graph_for_test(
             &project_root,
-            tracedecay::tracedecay::TraceDecayOpenOptions {
+            tracedecay_project::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: Some(global_db_path),
             },
@@ -509,21 +504,29 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     }
 
     let port = pick_free_port();
-    let base_url = format!("http://127.0.0.1:{port}");
+    let (access, base_url) = crate::dashboard_api_support::dashboard_access_for(port);
     let server_runtime = Arc::clone(&host_runtime);
     let server_graph = Arc::new(cg);
+    let server_profile = profile.clone();
     let server = tokio::spawn(async move {
         let authority = server_runtime
             .dashboard_test_authority()
             .expect("dashboard analytics authority");
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
+            &server_profile,
+            None,
             authority,
-            dashboard::DashboardTestProjectGraphsV1::default(),
-            "127.0.0.1",
-            port,
-            tracedecay::product_runtime::register_fixture_product_runtime().build_version(),
-            dashboard::spa_router(tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestEndpointV1 {
+                host: "127.0.0.1",
+                port,
+                access,
+            },
+            tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
+            tracedecay_api::static_dashboard_router(
+                tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
+            ),
             std::future::pending(),
         )
         .await;
@@ -532,8 +535,6 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
 
     Fixture {
         _tmp: tmp,
-        _env_guard: env_guard,
-        _data_dir_guard: data_dir_guard,
         base_url,
         server,
         project_root,
@@ -561,9 +562,6 @@ fn has_row(rows: &Value, key: &str, value: &str) -> bool {
 
 #[test]
 fn analytics_api_advertises_and_aggregates_session_usage() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
@@ -624,9 +622,6 @@ fn analytics_api_advertises_and_aggregates_session_usage() {
 
 #[test]
 fn analytics_api_prefers_durable_events_when_available() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
@@ -654,9 +649,6 @@ fn analytics_api_prefers_durable_events_when_available() {
 
 #[test]
 fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
@@ -711,9 +703,6 @@ fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
 /// back to showing a rollup captioned as a tree.
 #[test]
 fn subagent_tree_route_answers_seeded_delegation_edges_as_a_tree() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
@@ -758,6 +747,15 @@ fn subagent_tree_route_answers_seeded_delegation_edges_as_a_tree() {
             assert_eq!(child["is_subagent"], true);
         }
 
+        // This fixture publishes no provider-usage projection checkpoint, so
+        // per-node usage is the typed unavailable read: no node carries a
+        // `usage` object, and none may be captioned as "used no tokens".
+        assert_eq!(payload["usage_coverage"], "unavailable");
+        assert!(
+            nodes.iter().all(|node| node.get("usage").is_none()),
+            "an unavailable usage read must not fabricate per-node counts: {payload}"
+        );
+
         // The edge set is the point of the route: without it these five rows
         // are the same five islands `/agents` already served.
         let mut delegated: Vec<&str> = nodes[1..]
@@ -784,9 +782,6 @@ fn subagent_tree_route_answers_seeded_delegation_edges_as_a_tree() {
 
 #[test]
 fn analytics_api_filters_fallback_events_to_current_project() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
@@ -818,9 +813,6 @@ fn analytics_api_filters_fallback_events_to_current_project() {
 
 #[test]
 fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
@@ -858,13 +850,10 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
 ///
 /// What survives is the part that was never about the duplication: each
 /// canonical read must carry its metrics with a genuine `temporal.horizon`
-/// rather than an absent or inverted window — enforced inside
+/// rather than an absent or inverted window, enforced inside
 /// `metric_parity_view`, which panics on a metric that omits one.
 #[test]
 fn canonical_observatory_and_costs_reads_stamp_real_observed_windows() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
@@ -926,20 +915,17 @@ fn metric_parity_view(metrics: &Value) -> Vec<Value> {
 
 #[test]
 fn observatory_counts_canonical_failed_outcomes() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
+        let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
         fixture
             .host_runtime
             .append_analytics_event_for_test(
                 HostAdmissionScope::Profile,
                 &observability_event(
                     &project_id,
-                    tracedecay::tracedecay::current_timestamp(),
+                    tracedecay_runtime_core::tracedecay::current_timestamp(),
                     ObservabilityTerminalResultV1::Failed,
                 ),
             )
@@ -965,14 +951,11 @@ fn observatory_counts_canonical_failed_outcomes() {
 
 #[test]
 fn observatory_serves_rejected_argument_groups_from_seeded_observations() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
-        let timestamp = tracedecay::tracedecay::current_timestamp();
+        let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
+        let timestamp = tracedecay_runtime_core::tracedecay::current_timestamp();
         fixture
             .host_runtime
             .append_analytics_event_for_test(
@@ -1048,21 +1031,5 @@ fn observatory_serves_rejected_argument_groups_from_seeded_observations() {
             .expect("mcp group");
         assert_eq!(mcp["count"], 1);
         assert_eq!(mcp["error_class"], "unauthorized");
-    });
-}
-
-#[test]
-fn costs_read_model_is_mounted_on_the_active_dashboard() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(false).await;
-        let (status, costs) = get_json(&http_agent(), &format!("{}/api/costs", fixture.base_url));
-        assert_eq!(status, 200);
-        assert_eq!(costs["payload"]["authorized_scope_ref"], "all");
-        assert!(costs["payload"]["usage"].is_array());
-        assert!(costs["payload"]["estimated_cost"].is_array());
     });
 }

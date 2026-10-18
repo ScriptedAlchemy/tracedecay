@@ -3,7 +3,7 @@
 //! Every result is bound to one exact recovered-state-verified generation.
 //! The adapter receives no graph store path, connection, or query handle.
 
-use axum::extract::{Extension, State};
+use axum::extract::State;
 use axum::response::Json;
 use serde::Deserialize;
 
@@ -13,13 +13,17 @@ use super::read_model::{
     DashboardVersionV1, scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery, coerce_limit};
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use super::{DashboardState, RequestControl};
 use crate::graph::CodeGraphReadError;
 
 #[derive(Deserialize)]
 pub struct SearchParams {
     #[serde(default)]
     q: String,
+    /// Explicit project selector. Omitted means "search the launch project".
+    /// A different id fails closed as `wrong_project` instead of returning
+    /// that project's empty hit list from this listener.
+    project_id: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
@@ -50,19 +54,16 @@ pub struct PathParams {
 /// `GET /api/plugins/graph/overview`
 pub async fn overview(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphOverviewPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
-            let Some(Extension(control)) = control else {
-                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-            };
             graph_response(
                 &state,
                 graph_service::overview_payload(&state, &control).await,
             )
         },
-        label = "dashboard_api.graph.overview"
+        tracing::trace_span!("dashboard_api.graph.overview"),
     )
     .await
 }
@@ -70,23 +71,32 @@ pub async fn overview(
 /// `GET /api/plugins/graph/search?q=...&limit=50&offset=0`
 pub async fn search(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
+            if let Some(refusal) = crate::graph_binding::refuse_graph_search_scope(
+                state.project_id.as_deref(),
+                params.project_id.as_deref(),
+            ) {
+                return Json(graph_search_scope_envelope(&state, refusal));
+            }
             let limit = coerce_limit(params.limit, 50, 200);
             let offset = params.offset.unwrap_or(0).max(0);
-            let Some(Extension(control)) = control else {
-                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-            };
-            graph_response(
-                &state,
-                graph_service::search_payload(&state, &control, params.q.trim(), limit, offset)
-                    .await,
-            )
+            match graph_service::search_payload(&state, &control, params.q.trim(), limit, offset)
+                .await
+            {
+                Ok(read) if read.payload.is_complete_zero_in_bound_project() => {
+                    graph_search_complete_zero(&state, read)
+                }
+                Ok(read) => {
+                    graph_ready(&state, Some(read.payload), read.generation, read.freshness)
+                }
+                Err(error) => graph_read_failed(&state, error),
+            }
         },
-        label = "dashboard_api.graph.search"
+        tracing::trace_span!("dashboard_api.graph.search"),
     )
     .await
 }
@@ -94,14 +104,11 @@ pub async fn search(
 /// `GET /api/plugins/graph/node/{node_id}`
 pub async fn node(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNodePayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
-            let Some(Extension(control)) = control else {
-                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-            };
             match graph_service::node_payload(&state, &control, &node_id).await {
                 Ok(read) if read.payload.is_some() => {
                     graph_ready(&state, read.payload, read.generation, read.freshness)
@@ -118,7 +125,7 @@ pub async fn node(
                 Err(error) => graph_read_failed(&state, error),
             }
         },
-        label = "dashboard_api.graph.node"
+        tracing::trace_span!("dashboard_api.graph.node"),
     )
     .await
 }
@@ -126,16 +133,13 @@ pub async fn node(
 /// `GET /api/plugins/graph/node/{node_id}/neighbors`
 pub async fn neighbors(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<NeighborParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNeighborsPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let limit = coerce_limit(params.limit, 50, 200);
-            let Some(Extension(control)) = control else {
-                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-            };
             match graph_service::neighbors_payload(&state, &control, &node_id, limit).await {
                 Ok(read) if read.payload.is_some() => {
                     graph_ready(&state, read.payload, read.generation, read.freshness)
@@ -152,7 +156,7 @@ pub async fn neighbors(
                 Err(error) => graph_read_failed(&state, error),
             }
         },
-        label = "dashboard_api.graph.neighbors"
+        tracing::trace_span!("dashboard_api.graph.neighbors"),
     )
     .await
 }
@@ -165,16 +169,13 @@ pub async fn neighbors(
 /// instead: top-degree hubs plus the edges among them.
 pub async fn subgraph(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SubgraphParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSubgraphPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let node_limit = coerce_limit(params.limit_nodes, 80, 250);
             let edge_limit = coerce_limit(params.limit_edges, 120, 500);
-            let Some(Extension(control)) = control else {
-                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-            };
             graph_response(
                 &state,
                 graph_service::subgraph_payload(
@@ -188,7 +189,7 @@ pub async fn subgraph(
                 .await,
             )
         },
-        label = "dashboard_api.graph.subgraph"
+        tracing::trace_span!("dashboard_api.graph.subgraph"),
     )
     .await
 }
@@ -196,15 +197,12 @@ pub async fn subgraph(
 /// `GET /api/plugins/graph/path?from=<id>&to=<id>&max_depth=6`
 pub async fn path(
     State(state): State<DashboardState>,
-    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<PathParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphPathPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let max_depth = coerce_limit(params.max_depth, 6, 10);
-            let Some(Extension(control)) = control else {
-                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
-            };
             graph_response(
                 &state,
                 graph_service::path_payload(
@@ -217,9 +215,36 @@ pub async fn path(
                 .await,
             )
         },
-        label = "dashboard_api.graph.path"
+        tracing::trace_span!("dashboard_api.graph.path"),
     )
     .await
+}
+
+pub(super) fn graph_search_scope_envelope<T>(
+    state: &DashboardState,
+    refusal: crate::graph_binding::GraphSearchScopeRefusal,
+) -> DashboardEnvelopeV1<Option<T>> {
+    DashboardEnvelopeV1::unavailable(scope_from_state(state), None, refusal.omission_reason())
+}
+
+fn graph_search_complete_zero(
+    state: &DashboardState,
+    read: graph_service::GraphServiceReadV1<graph_service::GraphSearchPayloadV1>,
+) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
+    // A completed miss examined every symbol in the bound generation, so the
+    // coverage denominator is the indexed population the search page carried —
+    // never `0`, which would claim the index itself was empty. `matched` is
+    // the finding count, not the population: zero findings live here and in
+    // the payload. Wrong-project / empty-scope stay on the unavailable path.
+    let mut coverage = DashboardCoverageV1::complete(read.payload.indexed_symbols, "symbols");
+    coverage.matched = Some(0);
+    let mut envelope = DashboardEnvelopeV1::complete_zero_findings(
+        scope_from_state(state),
+        coverage,
+        Some(read.payload),
+    );
+    envelope.freshness = graph_service::graph_envelope_freshness(read.freshness);
+    Json(envelope.with_version(graph_version(read.generation)))
 }
 
 fn graph_response<T>(
@@ -259,8 +284,11 @@ fn graph_read_failed<T>(
         CodeGraphReadError::MissingRegistry => {
             DashboardEnvelopeV1::unavailable(scope, None, "missing_registry")
         }
-        CodeGraphReadError::Unavailable { detail } => {
+        CodeGraphReadError::Unavailable { detail } | CodeGraphReadError::Refused { detail } => {
             DashboardEnvelopeV1::unavailable(scope, None, detail)
+        }
+        refusal @ (CodeGraphReadError::Parked { .. } | CodeGraphReadError::Rewarming { .. }) => {
+            DashboardEnvelopeV1::unavailable(scope, None, refusal.to_string())
         }
         CodeGraphReadError::Stale { detail } => {
             let mut coverage = DashboardCoverageV1::unknown();

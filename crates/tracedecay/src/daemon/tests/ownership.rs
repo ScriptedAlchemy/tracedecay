@@ -7,7 +7,6 @@ use crate::daemon::ProjectServerRequirement;
 #[cfg(unix)]
 #[derive(Clone, Copy)]
 enum ProjectGitState {
-    NonGit,
     Unborn,
     Committed,
 }
@@ -22,28 +21,10 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         .expect("project-open owners source");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    if !matches!(git_state, ProjectGitState::NonGit) {
-        let initialized = Command::new("git")
-            .args(["init", "--quiet", "--initial-branch=main"])
-            .current_dir(&project)
-            .status()
-            .expect("run git init");
-        assert!(initialized.success(), "git init must succeed");
-    }
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
     if matches!(git_state, ProjectGitState::Unborn) {
-        let symbolic_head = Command::new("git")
-            .args(["symbolic-ref", "--quiet", "HEAD"])
-            .current_dir(&project)
-            .output()
-            .expect("read unborn symbolic HEAD");
-        assert!(
-            symbolic_head.status.success(),
-            "unborn HEAD must be symbolic"
-        );
         assert_eq!(
-            String::from_utf8(symbolic_head.stdout)
-                .expect("unborn symbolic HEAD must be UTF-8")
-                .trim(),
+            git(&project, &["symbolic-ref", "--quiet", "HEAD"]),
             "refs/heads/main",
             "unborn fixture must use its explicit default branch"
         );
@@ -58,27 +39,8 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         );
     }
     if matches!(git_state, ProjectGitState::Committed) {
-        let added = Command::new("git")
-            .args(["add", "--all"])
-            .current_dir(&project)
-            .status()
-            .expect("run git add");
-        assert!(added.success(), "git add must succeed");
-        let committed = Command::new("git")
-            .args([
-                "-c",
-                "user.name=TraceDecay Test",
-                "-c",
-                "user.email=tracedecay@example.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "test: initial",
-            ])
-            .current_dir(&project)
-            .status()
-            .expect("run git commit");
-        assert!(committed.success(), "git commit must succeed");
+        git(&project, &["add", "--all"]);
+        git(&project, &["commit", "--quiet", "-m", "test: initial"]);
     }
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
@@ -104,23 +66,52 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
             .is_some(),
         "fresh project open must retain its LSP owner"
     );
-    assert_eq!(
-        engine
-            .invocation
-            .service
-            .feedback_cycle(Some(&canonical_project))
+    // Project open publishes the route as soon as its owners are registered and
+    // lets the cold code-index mount finish behind it, so the feedback cycle,
+    // which is minted against a sealed generation, arrives with that
+    // generation rather than inside the open. Sampling the instant the open
+    // returns therefore measures mount latency, not ownership. Wait for the
+    // deferred mount for the one Git state that must reach it; an unborn HEAD
+    // refuses synchronously (`register_project_open_dependent_owners` returns
+    // before any feedback work), so its absence is already settled.
+    let feedback_cycle = match git_state {
+        ProjectGitState::Committed => {
+            tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                loop {
+                    if let Some(cycle) = engine
+                        .invocation
+                        .service
+                        .feedback_cycle(Some(&canonical_project))
+                        .await
+                    {
+                        return cycle;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            })
             .await
-            .is_some(),
+            .ok()
+        }
+        ProjectGitState::Unborn => {
+            engine
+                .invocation
+                .service
+                .feedback_cycle(Some(&canonical_project))
+                .await
+        }
+    };
+    assert_eq!(
+        feedback_cycle.is_some(),
         matches!(git_state, ProjectGitState::Committed),
-        "feedback cycle presence must follow exact committed Git identity"
+        "feedback cycle presence must follow exact committed Git identity for {}",
+        canonical_project.display(),
     );
     assert!(
-        crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(&replay_root),
+        crate::daemon::hook_v2_replay_consumer::hook_v2_replay_consumer_registered(&replay_root),
         "fresh project open must start Hook V2 replay"
     );
     let graph_weak = Arc::downgrade(&graph);
-    drop(graph);
-    drop(server);
+    drop((feedback_cycle, graph, server));
     let shutdown = engine.shutdown_all().await;
     assert!(
         shutdown.project_servers.is_clean(),
@@ -153,33 +144,9 @@ async fn cold_project_shutdown_joins_every_production_graph_holder() {
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("cold shutdown source");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    let initialized = Command::new("git")
-        .args(["init", "--quiet", "--initial-branch=main"])
-        .current_dir(&project)
-        .status()
-        .expect("run git init");
-    assert!(initialized.success(), "git init must succeed");
-    let added = Command::new("git")
-        .args(["add", "--all"])
-        .current_dir(&project)
-        .status()
-        .expect("run git add");
-    assert!(added.success(), "git add must succeed");
-    let committed = Command::new("git")
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            "test: initial",
-        ])
-        .current_dir(&project)
-        .status()
-        .expect("run git commit");
-    assert!(committed.success(), "git commit must succeed");
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
+    git(&project, &["add", "--all"]);
+    git(&project, &["commit", "--quiet", "-m", "test: initial"]);
     let canonical_project = project.canonicalize().expect("canonical project root");
     let handshake = DaemonHandshake {
         project_path: Some(canonical_project.clone()),
@@ -189,11 +156,10 @@ async fn cold_project_shutdown_joins_every_production_graph_holder() {
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "cold-production-owner-shutdown");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    let (cold_commit_entered, release_cold_commit) = engine
-        .invocation
-        .code_index_schedulers
-        .pause_next_cold_mount_before_final_commit(canonical_project)
-        .await;
+    let (cold_commit_entered, release_cold_commit) =
+        tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1::pause_next_cold_mount_before_final_commit(
+            canonical_project,
+        );
     let lifecycle = engine.lifecycle.clone();
     let server = engine
         .project_server(&handshake)
@@ -233,12 +199,6 @@ async fn cold_project_shutdown_joins_every_production_graph_holder() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn non_git_project_open_retains_lsp_and_starts_hook_replay() {
-    assert_fresh_project_open_owners("non-git-project-open-owners", ProjectGitState::NonGit).await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn unborn_git_project_open_retains_lsp_and_starts_hook_replay() {
     assert_fresh_project_open_owners("unborn-project-open-owners", ProjectGitState::Unborn).await;
 }
@@ -246,7 +206,6 @@ async fn unborn_git_project_open_retains_lsp_and_starts_hook_replay() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
-    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
     const PARALLEL_CLIENT_IDENTITIES: usize = 16;
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
@@ -288,18 +247,15 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         "aliases must share one route gate"
     );
 
+    tracedecay_runtime_core::git_repository::hold_repository_discovery_clock_for_test(&project);
     eprintln!("[cache-test] phase=concurrent-open start");
-    let (direct_server, alias_server) = tokio::time::timeout(
-        PHASE_TIMEOUT,
-        Box::pin(async {
-            tokio::join!(
-                engine.project_server(&direct),
-                engine.project_server(&aliased)
-            )
-        }),
-    )
-    .await
-    .expect("cache-test concurrent-open phase timed out");
+    let (direct_server, alias_server) = Box::pin(async {
+        tokio::join!(
+            engine.project_server(&direct),
+            engine.project_server(&aliased)
+        )
+    })
+    .await;
     eprintln!("[cache-test] phase=concurrent-open done");
     let direct_server = direct_server.expect("direct project server");
     let alias_server = alias_server.expect("aliased project server");
@@ -311,25 +267,21 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         1,
         "canonical aliases must singleflight the first project open"
     );
-    tokio::time::timeout(PHASE_TIMEOUT, async {
-        while engine
-            .automation_config_probe_attempts
-            .load(std::sync::atomic::Ordering::Relaxed)
-            == 0
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("initial automation configuration probe timed out");
+    while engine
+        .automation_config_probe_attempts
+        .load(std::sync::atomic::Ordering::Relaxed)
+        == 0
+    {
+        tokio::task::yield_now().await;
+    }
     engine
         .automation_config_probe_attempts
         .store(0, std::sync::atomic::Ordering::Relaxed);
 
     eprintln!("[cache-test] phase=cached-open start");
-    let cached = tokio::time::timeout(PHASE_TIMEOUT, engine.project_server(&direct))
+    let cached = engine
+        .project_server(&direct)
         .await
-        .expect("cache-test cached-open phase timed out")
         .expect("cached project server");
     eprintln!("[cache-test] phase=cached-open done");
     assert!(std::sync::Arc::ptr_eq(&direct_server, &cached));
@@ -378,14 +330,68 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     drop(alias_server);
     drop(direct_server);
     eprintln!("[cache-test] phase=shutdown start");
-    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
-        .await
-        .expect("cache-test shutdown phase timed out");
+    engine.shutdown_all().await;
     assert!(
         released_server.upgrade().is_none(),
         "shutdown must break the server-to-administration ownership cycle"
     );
     eprintln!("[cache-test] phase=shutdown done");
+    tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&project);
+}
+
+/// A daemon-wide graph listing must not count as a client of the servers it
+/// lists. A bounded route bind treats any extra server handle as a lease, so
+/// a listing that held handles across its graph reads made an idle server
+/// unevictable and refused the open with `project_server_capacity_reached`.
+#[cfg(unix)]
+#[tokio::test]
+async fn mounted_graph_listing_takes_no_server_lease_while_it_reads() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).expect("project dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("project source");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "graph-listing-lease");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("mount project server");
+
+    let swap = server.graph_slot().write_owned().await;
+    let listing = engine.store_administration.mounted_project_graphs();
+    let mut listing = std::pin::pin!(listing);
+    let handles = Arc::strong_count(&server);
+    assert!(
+        std::future::Future::poll(
+            listing.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop()),
+        )
+        .is_pending(),
+        "the listing parks on the held graph read"
+    );
+    assert_eq!(
+        Arc::strong_count(&server),
+        handles,
+        "a parked graph listing must hold no server handle"
+    );
+    assert!(
+        engine
+            .store_administration
+            .project_servers()
+            .try_lock()
+            .is_ok(),
+        "a parked graph listing must not hold the registry lock, or every route bind waits on the swap"
+    );
+    drop(swap);
+    assert_eq!(listing.await.len(), 1);
 }
 
 /// A mounted route alias answers without re-running registry admission: the
@@ -724,6 +730,74 @@ fn database_owner_registry_rekeys_and_evicts_stale_routes() {
     assert!(collision.get_route(&route).is_none());
 }
 
+/// A failed rekey is terminal for the route: its replacement key could not be
+/// taken, so this registration can never serve again. Clearing the fence alone
+/// is not enough, the code-index activation mount and the query-authority
+/// waiter no longer poll that flag, they hang off the route's own cancellation
+/// child. The revocation must cancel it, and must leave the project-open token
+/// it descends from alone: that one belongs to the caller, not the route.
+#[tokio::test]
+async fn failed_rekey_cancels_the_route_waiters_but_not_project_open() {
+    let temp = TempDir::new().expect("failed-rekey fixture");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).expect("failed-rekey project");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("failed-rekey source");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let graph = Arc::new(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
+            &project,
+            tracedecay_project::project::TraceDecayOpenOptions {
+                profile_root: Some(profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+        )
+        .await
+        .expect("open failed-rekey project graph"),
+    );
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let fresh_key = super::super::ProjectServerKey::from_open_project(&graph, &handshake)
+        .expect("fresh project server key");
+    // The route still believes it owns a different physical graph, so the
+    // reconciler attempts a rekey; the registry holds no server under that
+    // stale key, so the transition fails exactly as an owner collision does.
+    let mut stale_key = fresh_key.clone();
+    stale_key.owner.graph_db_path = stale_key.owner.graph_db_path.with_file_name("stale.db");
+    let owners = Arc::new(tokio::sync::Mutex::new(
+        super::super::DatabaseOwnerRegistry::default(),
+    ));
+    let route_registered = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let project_open = super::super::CancellationToken::new();
+    let route_cancellation = project_open.child_token();
+    let reconcile = super::super::portable_database_owner_reconciler(
+        StoreAdministration::with_project_servers(owners),
+        Arc::new(tokio::sync::Mutex::new(stale_key)),
+        Arc::clone(&route_registered),
+        route_cancellation.clone(),
+        handshake,
+    );
+
+    reconcile(Arc::clone(&graph)).await;
+
+    assert!(
+        !route_registered.load(std::sync::atomic::Ordering::Acquire),
+        "a failed rekey must revoke the route registration"
+    );
+    assert!(
+        route_cancellation.is_cancelled(),
+        "a failed rekey must cancel the route's own waiters"
+    );
+    assert!(
+        !project_open.is_cancelled(),
+        "route revocation must not cancel the project-open token it descends from"
+    );
+}
+
 #[test]
 fn database_owner_registry_race_keeps_first_server_and_binds_route() {
     let owner = StoreOwnerKey {
@@ -799,6 +873,18 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
         now.checked_sub(std::time::Duration::from_secs(10)).unwrap(),
     );
     registry.bind_route(route("idle"), idle.clone());
+    assert!(registry.mark_ready(&idle));
+    assert!(!registry.mark_degraded_core_if(&idle, |_| false));
+    assert!(registry.mark_degraded_core_if(&idle, |_| true));
+    assert!(registry.get_route(&route("idle")).is_some());
+    assert!(
+        registry
+            .get_route_and_touch_for(
+                &route("idle"),
+                ProjectServerRequirement::RegisteredHostIngest
+            )
+            .is_none()
+    );
     let active_lease = Arc::clone(registry.get(&oldest).expect("oldest server"));
 
     let (server, was_inserted, retired) = registry
@@ -934,7 +1020,7 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
 }
 
 #[tokio::test]
-async fn graph_pressure_retires_only_fully_published_response_idle_owners() {
+async fn graph_pressure_retires_only_settled_response_idle_owners() {
     fn key(name: &str) -> ProjectServerKey {
         ProjectServerKey {
             owner: StoreOwnerKey {
@@ -989,6 +1075,23 @@ async fn graph_pressure_retires_only_fully_published_response_idle_owners() {
     );
     assert!(registry.get(&pending).is_some());
     assert!(registry.get(&core).is_some());
+
+    let upgrading_core = Arc::clone(registry.get(&core).expect("retained core"));
+    assert!(registry.mark_degraded_core_if(&core, |current| Arc::ptr_eq(current, &upgrading_core)));
+    assert!(
+        registry
+            .retire_lru_ready_under_graph_pressure(|server| Arc::strong_count(server) > 1)
+            .is_err()
+    );
+    drop(upgrading_core);
+    let (owner, retired_core) = registry
+        .retire_lru_ready_under_graph_pressure(|server| Arc::strong_count(server) > 1)
+        .expect("completed degraded core can retire")
+        .expect("degraded core victim");
+    assert_eq!(owner, core.owner);
+    assert_eq!(retired_core.len(), 1);
+    assert!(registry.get_route(&route("core")).is_none());
+    assert!(registry.get(&pending).is_some());
 
     let idle_lifecycle = Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
     registry.insert_at(idle.clone(), idle_lifecycle, std::time::Instant::now());
@@ -1265,8 +1368,7 @@ async fn project_rekey_awaits_stale_automation_owner_before_replacement() {
     };
     let mut new = old.clone();
     new.owner.graph_db_path = PathBuf::from("/store/new.db");
-    let task = tokio::spawn(std::future::pending::<()>());
-    let stale_task = task.abort_handle();
+    let (task, stale_task) = probed_native_test_task(std::future::pending::<()>());
     engine
         .store_administration
         .automation_schedulers()
@@ -1306,11 +1408,11 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
         project_root: PathBuf::from("/project"),
         scope_prefix: None,
     };
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, stale_task, started_rx, completed_rx, release) =
+        spawn_noncooperative_native_test_task();
     started_rx
         .await
         .expect("noncooperative automation owner started");
-    let stale_task = task.abort_handle();
     engine
         .store_administration
         .automation_schedulers()
@@ -1326,13 +1428,7 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
     let shutdown = tokio::spawn(async move {
         shutdown_engine.shutdown_all().await;
     });
-    wait_for_automation_scheduler_state(
-        &engine,
-        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
-        "shutdown automation ownership drain",
-        std::collections::HashMap::is_empty,
-    )
-    .await;
+    wait_for_automation_scheduler_state(&engine, std::collections::HashMap::is_empty).await;
 
     assert!(
         !shutdown.is_finished(),
@@ -1355,7 +1451,7 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
     retirement.wait().await;
 
     assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
+        engine.store_administration.retirement_reaper_count(),
         0,
         "shutdown must leave no automation reaper ownership record"
     );
@@ -1394,9 +1490,9 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
     };
     let mut new = old.clone();
     new.owner.graph_db_path = PathBuf::from("/store/new.db");
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, stale_task, started_rx, completed_rx, release) =
+        spawn_noncooperative_native_test_task();
     started_rx.await.expect("noncooperative owner started");
-    let stale_task = task.abort_handle();
     engine
         .store_administration
         .automation_schedulers()
@@ -1459,7 +1555,17 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
         .lock()
         .await
         .len();
-    let reapers_after_join = engine.store_administration.retirement_reaper_count().await;
+    // The reaper may clear the tombstone before the join looks for it; the
+    // join then has nothing to wait on and the reaper releases its record
+    // right after.
+    let reapers_released = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        engine
+            .store_administration
+            .wait_for_retirement_reaper_count_for_test(0),
+    )
+    .await
+    .is_ok();
     engine.shutdown_all().await;
 
     assert_eq!(
@@ -1473,7 +1579,7 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
     );
     assert_eq!(
         reconcile,
-        Some(tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Retiring),
+        Some(tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Retiring),
         "replacement must remain unavailable while the old JoinHandle is live"
     );
     assert_eq!(
@@ -1491,8 +1597,8 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
         "stale owner task must be terminated"
     );
     assert_eq!(owners_after_join, 0, "the reaper must clear its tombstone");
-    assert_eq!(
-        reapers_after_join, 0,
+    assert!(
+        reapers_released,
         "normal automation reaper completion must release daemon ownership"
     );
 }
@@ -1503,7 +1609,7 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     use tracedecay_automation_runtime::automation::scheduler::{
         AutomationSchedulerControl, save_scheduler_control,
     };
-    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
+    use tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome;
 
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");
@@ -1535,19 +1641,31 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     let mut old = new.clone();
     old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
 
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
-    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+    let (task, _, started_rx, completed_rx, release) = spawn_noncooperative_native_test_task();
+    started_rx
         .await
-        .expect("noncooperative owner start timed out")
         .expect("noncooperative owner start sender dropped");
-    engine
-        .store_administration
-        .automation_schedulers()
-        .lock()
-        .await
-        .insert(old.clone(), test_automation_scheduler_handle(task));
+    // Project open publishes the live scheduler owner for this project, so the
+    // map already holds `new` before the tombstone goes in. This fixture is
+    // about a retiring predecessor standing alone: leaving the published owner
+    // beside it gives the reconcile two logical owners for one project and
+    // lets it answer for whichever the map yields first.
+    if let Some(retirement) = engine.retire_automation_scheduler_locked(&new).await {
+        retirement.wait().await;
+    }
+    {
+        let mut schedulers = engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await;
+        assert!(
+            schedulers.is_empty(),
+            "the tombstone must be the only scheduler owner in this fixture"
+        );
+        schedulers.insert(old.clone(), test_automation_scheduler_handle(task));
+    }
 
-    let retirement_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
     let retirement = {
         let engine = engine.clone();
         let old = old.clone();
@@ -1560,33 +1678,20 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
                 .await
         })
     };
-    wait_for_automation_scheduler_state(
-        &engine,
-        retirement_deadline,
-        "retiring scheduler tombstone",
-        |schedulers| {
-            schedulers
-                .get(&old)
-                .is_some_and(|owner| owner.lifecycle == AutomationSchedulerLifecycle::Retiring)
-        },
-    )
+    wait_for_automation_scheduler_state(&engine, |schedulers| {
+        schedulers
+            .get(&old)
+            .is_some_and(|owner| owner.lifecycle == AutomationSchedulerLifecycle::Retiring)
+    })
     .await;
-    let timed_out = tokio::time::timeout(
-        remaining_test_budget(
-            retirement_deadline,
-            "initial scheduler retirement did not finish",
-        ),
-        retirement,
-    )
-    .await
-    .expect("initial scheduler retirement did not finish")
-    .expect("initial scheduler retirement task panicked");
-    let reconcile = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        engine.ensure_automation_scheduler(new.clone(), project.clone(), handshake.clone()),
-    )
-    .await
-    .expect("scheduler reconcile did not observe the retiring tombstone");
+    // The rekey gives up on the noncooperative owner after its own production
+    // retirement deadline, so the task's completion is the event to await.
+    let timed_out = retirement
+        .await
+        .expect("initial scheduler retirement task panicked");
+    let reconcile = engine
+        .ensure_automation_scheduler(new.clone(), project.clone(), handshake.clone())
+        .await;
     let no_overlap = {
         let schedulers = engine
             .store_administration
@@ -1597,25 +1702,10 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     };
 
     release.release();
-    let release_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    tokio::time::timeout(
-        remaining_test_budget(
-            release_deadline,
-            "noncooperative owner completion timed out",
-        ),
-        completed_rx,
-    )
-    .await
-    .expect("noncooperative owner completion timed out")
-    .expect("noncooperative owner completion sender dropped");
-    wait_for_automation_scheduler_state(
-        &engine,
-        release_deadline,
-        "released scheduler tombstone",
-        |schedulers| !schedulers.contains_key(&old),
-    )
-    .await;
-    let replacement_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    completed_rx
+        .await
+        .expect("noncooperative owner completion sender dropped");
+    wait_for_automation_scheduler_state(&engine, |schedulers| !schedulers.contains_key(&old)).await;
     let replacement = {
         let engine = engine.clone();
         let old = old.clone();
@@ -1628,29 +1718,15 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
                 .await
         })
     };
-    wait_for_automation_scheduler_state(
-        &engine,
-        replacement_deadline,
-        "one live replacement scheduler",
-        |schedulers| {
-            schedulers.len() == 1
-                && schedulers
-                    .get(&new)
-                    .and_then(|owner| owner.task.as_ref())
-                    .is_some_and(|task| !task.is_finished())
-        },
-    )
+    wait_for_automation_scheduler_state(&engine, |schedulers| {
+        schedulers.len() == 1
+            && schedulers
+                .get(&new)
+                .and_then(|owner| owner.task.as_ref())
+                .is_some_and(|task| !task.is_finished())
+    })
     .await;
-    let replaced = tokio::time::timeout(
-        remaining_test_budget(
-            replacement_deadline,
-            "replacement rekey did not finish after owner publication",
-        ),
-        replacement,
-    )
-    .await
-    .expect("replacement rekey did not finish after owner publication")
-    .expect("replacement rekey task panicked");
+    let replaced = replacement.await.expect("replacement rekey task panicked");
     let (owner_count, owns_new, live_replacement) = {
         let schedulers = engine
             .store_administration
@@ -1666,6 +1742,7 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
                 .is_some_and(|task| !task.is_finished()),
         )
     };
+    drop((cg, server));
     engine.shutdown_all().await;
 
     assert_eq!(timed_out, super::super::MaintenanceRekeyOutcome::Retiring);

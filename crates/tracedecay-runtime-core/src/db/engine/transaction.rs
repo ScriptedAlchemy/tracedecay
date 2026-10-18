@@ -1,15 +1,15 @@
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::future::Future;
+use std::sync::Arc;
+
+use asupersync::Budget;
+use asupersync::sync::{Mutex, OwnedMutexGuard};
 
 use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlAttachment, ExactSqlTransaction as RuntimeTransaction,
+    ExactSqlJobTransaction, ExactSqlTransaction as RuntimeTransaction,
 };
 
 use super::{
-    Error, IntoParams, Result, Rows, Value, WriteStatement,
-    connection::{Runtime, statement},
+    Error, Executor, IntoParams, QueryExecutor, Result, Rows, WriteStatement, connection::statement,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,68 +20,79 @@ pub enum TransactionBehavior {
 }
 
 pub struct Transaction {
-    /// Serializes every statement issued against one open write transaction.
-    /// The lock is held across the blocking rusqlite call, so it is where a
-    /// transaction that has already won `BEGIN IMMEDIATE` makes its remaining
-    /// statements queue behind each other. Transactions are short-lived and
-    /// created per operation, so per-instance lock profiling would retain two
-    /// HDR histograms for every transaction. The measured statement methods
-    /// provide the stable timing boundary instead.
+    /// An owned async operation holds this gate until the writer acknowledges
+    /// its command. Dropping the caller cannot release serialization early or
+    /// truncate an already admitted statement batch.
     runtime: Arc<Mutex<Option<RuntimeTransaction>>>,
-    #[cfg(any(test, feature = "test-helpers"))]
-    connection_runtime: Arc<dyn Runtime>,
 }
 
 impl Transaction {
-    pub(super) fn from_runtime(
-        runtime: RuntimeTransaction,
-        connection_runtime: Arc<dyn Runtime>,
-    ) -> Self {
-        #[cfg(not(any(test, feature = "test-helpers")))]
-        let _ = connection_runtime;
+    pub(super) fn from_runtime(runtime: RuntimeTransaction) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(Some(runtime))),
-            #[cfg(any(test, feature = "test-helpers"))]
-            connection_runtime,
         }
     }
 
-    #[hotpath::skip]
+    /// Runs one operation that holds the transaction gate. Dropping the
+    /// caller's future detaches, never truncates, it.
+    async fn settle<T, F, Fut>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(TransactionGate) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T>> + Send + 'static,
+    {
+        let runtime = Arc::clone(&self.runtime);
+        crate::native_runtime::settle(async move {
+            let gate = match OwnedMutexGuard::try_lock(Arc::clone(&runtime)) {
+                Ok(gate) => gate,
+                Err(_) => {
+                    // Not the caller's `Cx`: cancelling the caller must not
+                    // cancel an operation it already handed over.
+                    let cx = crate::native_runtime::handle()
+                        .ok_or(Error::RuntimeContextUnavailable)?
+                        .try_request_cx_with_budget(Budget::INFINITE)
+                        .map_err(|error| {
+                            Error::Runtime(format!("failed to admit SQL settlement: {error}"))
+                        })?;
+                    OwnedMutexGuard::lock(runtime, &cx).await.map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                }
+            };
+            operation(gate).await
+        })
+        .await
+    }
+
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
-        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .execute(statement)
-                .map_err(super::Error::from)
+        self.settle(move |gate| async move {
+            let result = open(&gate)?.execute_async(statement).await?;
+            Ok(result.changed_rows as u64)
         })
         .await
-        .map_err(join_error)?
-        .map(|result| result.changed_rows as u64)
     }
 
-    #[hotpath::measure(
-        label = "runtime_core.db.transaction.execute_statements",
-        future = true
+    #[tracing::instrument(
+        name = "runtime_core.db.transaction.execute_statements",
+        level = "trace",
+        skip_all
     )]
     pub async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
-        let runtime = Arc::clone(&self.runtime);
         let statements = statements
             .into_iter()
             .map(WriteStatement::into_exact)
             .collect::<Vec<_>>();
-        tokio::task::spawn_blocking(move || {
-            let runtime = lock_runtime(&runtime)?;
-            let runtime = runtime.as_ref().ok_or(Error::TransactionClosed)?;
+        self.settle(move |gate| async move {
+            let runtime = open(&gate)?;
             let mut results = Vec::with_capacity(statements.len());
             for (index, statement) in statements.into_iter().enumerate() {
                 let result = runtime
-                    .execute(statement)
+                    .execute_async(statement)
+                    .await
                     .map_err(Error::from)
                     .map_err(|error| Error::statement_batch(index, error))?;
                 results.push(result.changed_rows as u64);
@@ -89,157 +100,156 @@ impl Transaction {
             Ok(results)
         })
         .await
-        .map_err(join_error)?
     }
 
-    #[hotpath::skip]
-    pub async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
-        let filename = path.to_str().ok_or_else(|| {
-            super::Error::invalid_operation("SQLite attachment path is not valid UTF-8")
-        })?;
-        let attachment = ExactSqlAttachment::new(filename.to_owned(), database_name.to_owned())?;
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .attach_database(attachment)
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
-    }
-
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
     {
-        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        let rows = tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .query(statement)
-                .map_err(super::Error::from)
+        self.settle(move |gate| async move {
+            Ok(Rows::from_exact(open(&gate)?.query_async(statement).await?))
         })
         .await
-        .map_err(join_error)??;
-        Ok(Rows::from_parts(
-            rows.columns,
-            rows.rows
-                .into_iter()
-                .map(|row| {
-                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
-                })
-                .collect(),
-        ))
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .execute_batch(sql)
-                .map(|_| ())
-                .map_err(super::Error::from)
+        self.settle(move |gate| async move {
+            open(&gate)?.execute_batch_async(sql).await?;
+            Ok(())
         })
         .await
-        .map_err(join_error)?
+    }
+
+    /// Runs one query under the authority-revalidated policy, without the
+    /// ordinary statement deadline.
+    pub async fn query_authority_revalidated<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        let statement = statement(sql, params)?;
+        self.settle(move |gate| async move {
+            Ok(Rows::from_exact(
+                open(&gate)?
+                    .query_authority_revalidated_async(statement)
+                    .await?,
+            ))
+        })
+        .await
     }
 
     /// Executes one separately authorized authority-revalidated batch without the ordinary
     /// statement deadline.
-    #[hotpath::skip]
     pub async fn execute_authority_revalidated_batch(&self, sql: &str) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .execute_authority_revalidated_batch(sql)
-                .map(|_| ())
-                .map_err(super::Error::from)
+        self.settle(move |gate| async move {
+            open(&gate)?
+                .execute_authority_revalidated_batch_async(sql)
+                .await?;
+            Ok(())
         })
         .await
-        .map_err(join_error)?
     }
 
-    #[hotpath::skip]
     pub async fn validate(&self, sql: &str) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, ())?;
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .validate(statement)
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
+        self.settle(move |gate| async move { Ok(open(&gate)?.validate_async(statement).await?) })
+            .await
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.connection_runtime.last_insert_rowid()
-    }
-
-    #[hotpath::skip]
     pub async fn commit(self) -> Result<()> {
-        let runtime = self.take_runtime()?;
-        tokio::task::spawn_blocking(move || {
-            runtime.commit().map(|_| ()).map_err(super::Error::from)
+        self.settle(|mut gate| async move {
+            let transaction = gate.take().ok_or(Error::TransactionClosed)?;
+            transaction.commit_async().await?;
+            Ok(())
         })
         .await
-        .map_err(join_error)?
     }
 
-    #[hotpath::skip]
+    /// The writer owns completion resources even if this future is dropped.
+    pub async fn commit_with_on_commit<F>(self, on_commit: F) -> Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.settle(move |mut gate| async move {
+            let transaction = gate.take().ok_or(Error::TransactionClosed)?;
+            transaction.commit_async_with_on_commit(on_commit).await?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn rollback(self) -> Result<()> {
-        let runtime = self.take_runtime()?;
-        tokio::task::spawn_blocking(move || {
-            runtime.rollback().map(|_| ()).map_err(super::Error::from)
+        self.settle(|mut gate| async move {
+            let transaction = gate.take().ok_or(Error::TransactionClosed)?;
+            transaction.rollback_async().await?;
+            Ok(())
         })
         .await
-        .map_err(join_error)?
-    }
-
-    fn take_runtime(&self) -> Result<RuntimeTransaction> {
-        lock_runtime(&self.runtime)?
-            .take()
-            .ok_or(super::Error::TransactionClosed)
     }
 }
 
-fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
-    runtime
-        .lock()
-        .map_err(|_| super::Error::Runtime("exact SQL transaction lock poisoned".to_owned()))
+/// One write job's transaction, seen through the executor traits so the
+/// async helpers written against them run inside the job unchanged. Each
+/// statement runs synchronously on the writer, so these futures are ready on
+/// their first poll.
+pub struct WriteTx<'a, 'b> {
+    job: &'a ExactSqlJobTransaction<'b>,
 }
 
-fn join_error(error: tokio::task::JoinError) -> super::Error {
-    super::Error::Runtime(format!("exact SQL transaction task failed: {error}"))
+impl<'a, 'b> WriteTx<'a, 'b> {
+    pub(super) const fn new(job: &'a ExactSqlJobTransaction<'b>) -> Self {
+        Self { job }
+    }
+}
+
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "A statement must run when its future is polled inside the job, not when it is built."
+)]
+impl QueryExecutor for WriteTx<'_, '_> {
+    async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        Ok(Rows::from_exact(self.job.query(statement(sql, params)?)?))
+    }
+}
+
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "A statement must run when its future is polled inside the job, not when it is built."
+)]
+impl Executor for WriteTx<'_, '_> {
+    async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
+    where
+        P: IntoParams,
+    {
+        Ok(self.job.execute(statement(sql, params)?)?.changed_rows as u64)
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<()> {
+        self.job.execute_batch(sql.to_owned())?;
+        Ok(())
+    }
+}
+
+type TransactionGate = OwnedMutexGuard<Option<RuntimeTransaction>>;
+
+fn open(gate: &TransactionGate) -> Result<&RuntimeTransaction> {
+    gate.as_ref().ok_or(Error::TransactionClosed)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use tracedecay_rusqlite_runtime::exact_sql::{
         ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
     };
 
-    use super::{
-        super::{Error, TestConnection},
-        lock_runtime,
-    };
+    use super::super::{Error, TestConnection};
 
     struct AllowWrites;
 
@@ -249,22 +259,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn poisoned_transaction_lock_returns_a_typed_error() {
-        let runtime = Mutex::new(());
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = runtime.lock().unwrap();
-            panic!("poison transaction lock");
-        });
-
-        let result = lock_runtime(&runtime);
-        let Err(Error::Runtime(message)) = result else {
-            panic!("poisoned transaction lock must return a runtime error");
-        };
-        assert_eq!(message, "exact SQL transaction lock poisoned");
-    }
-
-    #[tokio::test]
+    #[asupersync::test]
     async fn only_long_lease_transaction_exposes_authority_revalidated_batches() {
         let directory = tempfile::TempDir::new().unwrap();
         let connection = TestConnection::open_with_write_authority(

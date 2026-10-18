@@ -1,0 +1,581 @@
+use tracedecay_code_extraction::JavaExtractor;
+use tracedecay_code_extraction::LanguageExtractor;
+use tracedecay_domain::*;
+
+include!("support/edges.rs");
+
+#[test]
+fn java_records_call_argument_counts_and_declared_parameter_lists() {
+    let source = r#"
+class Validate {
+    Validate(int a, int b) {}
+    static void notNull(Object obj, String msg) {}
+    static String format(String pattern, Object... args) { return pattern; }
+    void run() {
+        notNull(this, /* why */ "m");
+        format("x");
+        Validate.notNull(null, String.valueOf(1));
+    }
+}
+"#;
+    let artifact = JavaExtractor.extract_artifact("Validate.java", source);
+    let name_of = |id: &str| {
+        artifact
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| node.name.clone())
+            .expect("arity node")
+    };
+    let arities = artifact
+        .callable_arities
+        .iter()
+        .map(|row| {
+            (
+                name_of(&row.node_id),
+                row.arity.parameters,
+                row.arity.variadic,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arities.iter().collect::<std::collections::BTreeSet<_>>(),
+        [
+            ("Validate".to_owned(), 2, false),
+            ("format".to_owned(), 2, true),
+            ("notNull".to_owned(), 2, false),
+            ("run".to_owned(), 0, false),
+        ]
+        .iter()
+        .collect()
+    );
+    let calls = artifact
+        .result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| (r.reference_name.as_str(), r.argument_count))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        calls,
+        std::collections::BTreeSet::from([
+            ("notNull", Some(2)),
+            ("format", Some(1)),
+            ("Validate.notNull", Some(2)),
+            ("String.valueOf", Some(1)),
+        ])
+    );
+}
+
+#[test]
+fn test_java_empty_javadoc_no_panic() {
+    let source = r#"
+public class PanicReproduction {
+    /**/
+    public enum Problem {
+        VALUE
+    }
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor
+        .extract_artifact("PanicReproduction.java", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let enums: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Enum)
+        .collect();
+    assert_eq!(enums.len(), 1);
+    assert_eq!(enums[0].name, "Problem");
+    assert!(enums[0].docstring.is_none() || enums[0].docstring.as_ref().unwrap().is_empty());
+}
+
+#[test]
+fn test_java_extract_package() {
+    let source = r#"package com.example.app;
+
+public class Main {
+    public static void main(String[] args) {}
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("src/Main.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let pkgs: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Package)
+        .collect();
+    assert_eq!(pkgs.len(), 1);
+    assert_eq!(pkgs[0].name, "com.example.app");
+}
+
+#[test]
+fn test_java_extract_class() {
+    let source = r#"package com.example;
+
+/**
+ * A simple calculator.
+ */
+public class Calculator {
+    public int add(int a, int b) {
+        return a + b;
+    }
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Calculator.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let classes: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class)
+        .collect();
+    assert_eq!(classes.len(), 1);
+    assert_eq!(classes[0].name, "Calculator");
+    assert_eq!(classes[0].visibility, Visibility::Pub);
+    assert!(
+        classes[0]
+            .docstring
+            .as_ref()
+            .unwrap()
+            .contains("simple calculator")
+    );
+}
+
+#[test]
+fn test_java_extract_methods() {
+    let source = r#"
+public class Foo {
+    public void doSomething() {}
+    private int compute(int x) { return x * 2; }
+    protected String getName() { return "foo"; }
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Foo.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 3);
+    let do_something = methods.iter().find(|m| m.name == "doSomething").unwrap();
+    assert_eq!(do_something.visibility, Visibility::Pub);
+    let compute = methods.iter().find(|m| m.name == "compute").unwrap();
+    assert_eq!(compute.visibility, Visibility::Private);
+    let get_name = methods.iter().find(|m| m.name == "getName").unwrap();
+    assert_eq!(get_name.visibility, Visibility::PubCrate); // protected maps to PubCrate
+}
+
+#[test]
+fn test_java_extract_constructor() {
+    let source = r#"
+public class Person {
+    private String name;
+    public Person(String name) {
+        this.name = name;
+    }
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Person.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let constructors: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Constructor)
+        .collect();
+    assert_eq!(constructors.len(), 1);
+    assert_eq!(constructors[0].name, "Person");
+}
+
+#[test]
+fn test_java_extract_interface() {
+    let source = r#"
+public interface Drawable {
+    void draw();
+    double area();
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Drawable.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let ifaces: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Interface)
+        .collect();
+    assert_eq!(ifaces.len(), 1);
+    assert_eq!(ifaces[0].name, "Drawable");
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method || n.kind == NodeKind::AbstractMethod)
+        .collect();
+    assert_eq!(methods.len(), 2);
+}
+
+#[test]
+fn test_java_extract_enum() {
+    let source = r#"
+public enum Color {
+    RED,
+    GREEN,
+    BLUE
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Color.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let enums: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Enum)
+        .collect();
+    assert_eq!(enums.len(), 1);
+    let variants: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::EnumVariant)
+        .collect();
+    assert_eq!(variants.len(), 3);
+}
+
+#[test]
+fn test_java_extract_fields() {
+    let source = r#"
+public class Config {
+    public static final int MAX_SIZE = 1024;
+    private String name;
+    protected int port;
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Config.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let fields: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Field)
+        .collect();
+    assert_eq!(fields.len(), 3);
+    let max_size = fields.iter().find(|f| f.name == "MAX_SIZE").unwrap();
+    assert_eq!(max_size.visibility, Visibility::Pub);
+}
+
+#[test]
+fn test_java_extract_imports() {
+    let source = r#"
+import java.util.List;
+import java.util.Map;
+import static java.lang.Math.PI;
+
+public class Foo {}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Foo.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let uses: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Use)
+        .collect();
+    assert_eq!(uses.len(), 3);
+}
+
+#[test]
+fn test_java_extract_extends_implements() {
+    let source = r#"
+interface Runnable { void run(); }
+class Base {}
+class Worker extends Base implements Runnable {
+    public void run() {}
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Worker.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let has_extends = result.edges.iter().any(|e| e.kind == EdgeKind::Extends)
+        || result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Extends);
+    assert!(has_extends, "should detect extends");
+    let has_implements = result.edges.iter().any(|e| e.kind == EdgeKind::Implements)
+        || result
+            .unresolved_refs
+            .iter()
+            .any(|r| r.reference_kind == EdgeKind::Implements);
+    assert!(has_implements, "should detect implements");
+}
+
+#[test]
+fn test_java_extract_marker_and_regular_annotations() {
+    let source = r#"
+public class Foo {
+    @Deprecated
+    @SuppressWarnings("unchecked")
+    public void oldMethod() {}
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Foo.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let annots: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::AnnotationUsage)
+        .collect();
+    assert_eq!(
+        annots.len(),
+        2,
+        "expected one marker and one regular annotation"
+    );
+    assert!(annots.iter().any(|n| n.name == "Deprecated"));
+    assert!(annots.iter().any(|n| n.name == "SuppressWarnings"));
+
+    let annotates_edges: Vec<_> = result
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Annotates)
+        .collect();
+    assert_eq!(
+        annotates_edges.len(),
+        2,
+        "expected direct annotates edges for both annotations"
+    );
+}
+
+#[test]
+fn test_java_extract_inner_class() {
+    let source = r#"
+public class Outer {
+    public class Inner {
+        public void innerMethod() {}
+    }
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Outer.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let inners: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::InnerClass)
+        .collect();
+    assert_eq!(inners.len(), 1);
+    assert_eq!(inners[0].name, "Inner");
+}
+
+#[test]
+fn test_java_extract_static_init_block() {
+    let source = r#"
+public class Registry {
+    private static Map<String, Object> cache;
+    static {
+        cache = new HashMap<>();
+    }
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Registry.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let init_blocks: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::InitBlock)
+        .collect();
+    assert_eq!(init_blocks.len(), 1);
+}
+
+#[test]
+fn test_java_extract_abstract_method() {
+    let source = r#"
+public abstract class Shape {
+    public abstract double area();
+    public void describe() { System.out.println("shape"); }
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Shape.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let abstract_methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::AbstractMethod)
+        .collect();
+    assert_eq!(abstract_methods.len(), 1);
+    assert_eq!(abstract_methods[0].name, "area");
+}
+
+#[test]
+fn test_java_extract_generics() {
+    let source = r#"
+public class Box<T> {
+    private T value;
+    public T getValue() { return value; }
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Box.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let generics: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::GenericParam)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(generics, ["T"]);
+}
+
+#[test]
+fn test_java_extract_call_sites() {
+    let source = r#"
+public class App {
+    public void run() {
+        System.out.println("hello");
+        helper();
+        new ArrayList<>();
+    }
+    private void helper() {}
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("App.java", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let call_refs: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
+        .collect();
+    assert_eq!(
+        call_refs,
+        ["System.out.println", "helper", "new ArrayList<>"]
+    );
+}
+
+#[test]
+fn test_java_extract_annotation_type() {
+    let source = r#"
+public @interface MyAnnotation {
+    String value();
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor
+        .extract_artifact("MyAnnotation.java", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let annots: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Annotation)
+        .collect();
+    assert_eq!(annots.len(), 1);
+    assert_eq!(annots[0].name, "MyAnnotation");
+}
+
+#[test]
+fn test_java_file_node_is_root() {
+    let source = "public class Main {}";
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("src/Main.java", source).result;
+    let files: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::File)
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "src/Main.java");
+}
+
+#[test]
+fn test_java_contains_edges() {
+    let source = r#"
+public class Foo {
+    private int x;
+    public void bar() {}
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("Foo.java", source).result;
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("Foo.java", "Foo"), ("Foo", "x"), ("Foo", "bar")]
+    );
+}
+
+#[test]
+fn test_java_qualified_names() {
+    let source = r#"
+package com.example;
+
+public class App {
+    public void run() {}
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract_artifact("src/App.java", source).result;
+    let methods: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 1);
+    assert!(methods[0].qualified_name.contains("App"));
+    assert!(methods[0].qualified_name.contains("run"));
+}
+
+#[test]
+fn java_declaration_line_is_past_its_annotations() {
+    let source = "package app;\n\
+\n\
+@Deprecated\n\
+class Circle {\n\
+    @Deprecated\n\
+    private double r;\n\
+\n\
+    @Override\n\
+    public double area() {\n\
+        return r;\n\
+    }\n\
+\n\
+    @SuppressWarnings(\"unused\")\n\
+    @Override\n\
+    double perimeter() {\n\
+        return r;\n\
+    }\n\
+\n\
+    public String name() {\n\
+        return \"c\";\n\
+    }\n\
+}\n";
+    let result = JavaExtractor
+        .extract_artifact("app/Circle.java", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let lines: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Field | NodeKind::Method))
+        .map(|n| (n.name.as_str(), n.start_line, n.attrs_start_line))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            ("Circle", 3, 2),
+            ("r", 5, 4),
+            ("area", 8, 7),
+            ("perimeter", 14, 12),
+            ("name", 18, 18),
+        ]
+    );
+}

@@ -38,6 +38,16 @@ impl Rows {
         }
     }
 
+    pub(super) fn from_exact(rows: tracedecay_rusqlite_runtime::exact_sql::ExactSqlRows) -> Self {
+        Self::from_parts(
+            rows.columns,
+            rows.rows
+                .into_iter()
+                .map(|row| Row::from_values(row.values.into_iter().map(Value::from).collect()))
+                .collect(),
+        )
+    }
+
     pub fn column_count(&self) -> i32 {
         i32::try_from(self.columns.len()).unwrap_or(i32::MAX)
     }
@@ -49,7 +59,10 @@ impl Rows {
             .map(String::as_str)
     }
 
-    #[hotpath::skip]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "An unpolled row read must not consume a row; retain the lazy async iterator API."
+    )]
     pub async fn next(&mut self) -> Result<Option<Row>> {
         Ok(self.rows.pop_front())
     }

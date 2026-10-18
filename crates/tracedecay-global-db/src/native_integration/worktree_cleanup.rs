@@ -14,9 +14,10 @@ use super::store::{decode, encode, invalid, invalid_domain, text, unavailable};
 use crate::sqlite_persist::{commit_outcome, replay_if_equal, require_single_cas_row};
 
 impl GlobalDbNativeIntegrationStore<'_> {
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.native_integration.persist.cleanup_begin"
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.cleanup_begin",
+        level = "trace",
+        skip_all
     )]
     pub async fn begin_worktree_cleanup(
         &self,
@@ -88,7 +89,6 @@ impl GlobalDbNativeIntegrationStore<'_> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn read_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,
@@ -100,9 +100,10 @@ impl GlobalDbNativeIntegrationStore<'_> {
             .map(|(record, _)| record))
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.native_integration.query.cleanup_pending"
+    #[tracing::instrument(
+        name = "global_db.native_integration.query.cleanup_pending",
+        level = "trace",
+        skip_all
     )]
     pub async fn pending_worktree_cleanups(
         &self,
@@ -132,8 +133,6 @@ impl GlobalDbNativeIntegrationStore<'_> {
             let payload = text(&row, 0, "pending cleanup transaction payload")?;
             pending.push(decode(&payload)?);
         }
-        hotpath::gauge!("global_db.native_integration.cleanup.pending_rows")
-            .inc(pending.len() as u64);
         if pending.len()
             > usize::try_from(limit).map_err(NativeIntegrationStoreError::unavailable)?
         {
@@ -144,9 +143,10 @@ impl GlobalDbNativeIntegrationStore<'_> {
         Ok(pending)
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.native_integration.persist.cleanup_cas"
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.cleanup_cas",
+        level = "trace",
+        skip_all
     )]
     pub async fn compare_and_swap_worktree_cleanup(
         &self,
@@ -186,9 +186,10 @@ impl GlobalDbNativeIntegrationStore<'_> {
         .await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.native_integration.persist.cleanup_terminal"
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.cleanup_terminal",
+        level = "trace",
+        skip_all
     )]
     pub async fn write_worktree_cleanup_terminal(
         &self,

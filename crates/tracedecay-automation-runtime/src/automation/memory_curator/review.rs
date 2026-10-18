@@ -1,20 +1,23 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{FactEventId, FactId, FactOwnerV1};
-use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_session_memory::memory::{MemoryApplication, MemoryApplicationError};
 use tracedecay_store::{
-    ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
-    ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactStore, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
+    ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
 };
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::super::lifecycle::AutomationRunControl;
 use super::super::run_ledger::load_latest_task_validation_pointer;
 use super::{memory_application_error, memory_contract_error};
-use crate::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 const CURATION_FACT_REVIEW_LIMIT: usize = 1_000;
 
@@ -70,14 +73,21 @@ pub(super) async fn memory_curator_review<A: ProjectMemoryFactStore + ProjectMem
     run_control: &AutomationRunControl,
 ) -> Result<MemoryCuratorReviewPage> {
     let limit = fact_review_limit.clamp(1, CURATION_FACT_REVIEW_LIMIT);
-    let page = memory
-        .list_project_memory_facts(
+    let listed: Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<ProjectMemoryFactPageV1, MemoryApplicationError>,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(
+        memory.list_project_memory_facts(
             ProjectMemoryFactListQueryV1::new(owner.clone(), None, None, after_fact_id, limit)
                 .map_err(memory_contract_error)?,
             run_control.read_control(),
-        )
-        .await
-        .map_err(memory_application_error)?;
+        ),
+    );
+    let page = listed.await.map_err(memory_application_error)?;
     let mut allowed_facts = BTreeMap::new();
     let mut unavailable_count = 0usize;
     let facts = page
@@ -103,8 +113,25 @@ pub(super) async fn memory_curator_review<A: ProjectMemoryFactStore + ProjectMem
         })
         .collect::<Vec<_>>();
     let next_after_fact_id = page.next_after_fact_id().cloned();
-    let graph = memory
-        .project_memory_graph(
+    if allowed_facts.is_empty() {
+        let mut review =
+            memory_curator_review_value(facts, unavailable_count, next_after_fact_id.is_some());
+        review["relations"] = Value::Array(Vec::new());
+        return Ok(MemoryCuratorReviewPage {
+            review,
+            allowed_facts,
+            resume_after_fact_id: next_after_fact_id,
+        });
+    }
+    let graphed: Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<ProjectMemoryGraphPageV1, MemoryApplicationError>,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(
+        memory.project_memory_graph(
             ProjectMemoryGraphQueryV1::new(
                 owner.clone(),
                 allowed_facts.keys().cloned().collect(),
@@ -112,9 +139,9 @@ pub(super) async fn memory_curator_review<A: ProjectMemoryFactStore + ProjectMem
             )
             .map_err(memory_contract_error)?,
             run_control.read_control(),
-        )
-        .await
-        .map_err(memory_application_error)?;
+        ),
+    );
+    let graph = graphed.await.map_err(memory_application_error)?;
     let relations = graph
         .relations()
         .iter()
@@ -178,7 +205,7 @@ pub(super) fn memory_curator_review_value(
         "facts": facts,
         "messages": [{
             "role": "system",
-            "content": "Return strict JSON {\"ops\":[]} with at most 256 operations. Review only the supplied canonical facts and current relations. Supported operations are add, update, merge, remove, normalize_tags, and link_facts. Every target, relation endpoint, and evidence item must copy the exact fact_id plus last_event_id pair from facts. Every operation requires nonempty evidence_facts, a bounded reason (except normalize_tags/link_facts), and confidence in [min_confidence,1]. Do not repeat a relation already listed. Link facts must use distinct source and target snapshots plus source_label and metadata. Never use timestamps as truth or freshness evidence."
+            "content": "Return strict JSON {\"ops\":[]} with at most 256 operations. Review only the supplied canonical facts and current relations; absent or unavailable facts are not evidence, and no warranted change returns an empty ops array. Supported operations are add, update, merge, remove, normalize_tags, and link_facts. Every target, relation endpoint, and evidence item must copy the exact fact_id plus last_event_id pair from facts. Every operation requires nonempty evidence_facts, a bounded reason (except normalize_tags/link_facts), and confidence in [min_confidence,1]. Do not repeat a relation already listed. Link facts must use distinct source and target snapshots plus source_label and metadata. Never use timestamps as truth or freshness evidence."
         }],
     })
 }

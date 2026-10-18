@@ -10,7 +10,7 @@
 //! the run's meta+result is the sibling `workflows/<run_id>.json`. A run is
 //! therefore *owned* by the session that spawned it (`parent_session_id`).
 //! Git-scoped callers resolve matching parent sessions through the canonical
-//! graph authority before querying this index (see [`runs_for_git_scope`]).
+//! graph authority before querying this index (see `runs_for_git_scope`).
 //!
 //! This module owns the **storage + query** foundation only. The ingest sweep
 //! that discovers run directories and parses transcripts, and the
@@ -25,12 +25,10 @@ use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, Row, Value, opt_i64, opt_text, params,
 };
+use tracedecay_runtime_core::db::schema_version::{self as store_schema, WORKFLOW_INDEX_COMPONENT};
 
-/// Schema version recorded in `session_schema_migrations` under
-/// [`MIGRATION_NAME`]. Bump when the workflow tables change shape.
+/// Schema version of the workflow index tables. Bump when they change shape.
 pub const WORKFLOW_INDEX_SCHEMA_VERSION: i64 = 1;
-
-const MIGRATION_NAME: &str = "workflow_indexing";
 
 /// Hard cap on rows returned by run/agent list queries, matching the
 /// git-correlation ceiling so the two surfaces page alike.
@@ -83,38 +81,27 @@ impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowInde
             crate::runtime::git_correlation::GitCorrelationError::Unavailable(authority) => {
                 Self::Db(authority)
             }
-            crate::runtime::git_correlation::GitCorrelationError::Cancelled => {
-                Self::AuthorityUnavailable {
-                    authority: "Git evidence request was cancelled",
-                }
-            }
-            crate::runtime::git_correlation::GitCorrelationError::BudgetExhausted => {
-                Self::AuthorityUnavailable {
-                    authority: "Git evidence request exhausted its budget",
-                }
-            }
         }
     }
 }
 
-/// Ensures the workflow-index tables exist in the session store. Version-gated
-/// through the shared `session_schema_migrations` table exactly like
-/// [`crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction`],
-/// so both stores register under their own migration name in one table.
-pub async fn ensure_workflow_index_schema(conn: &impl Executor) -> Result<(), WorkflowIndexError> {
-    if schema_version(conn)
-        .await
+/// Ensures the workflow-index tables exist in the session store. A store
+/// already at this version keeps its tables; the shared ledger still retires
+/// any legacy stamp so a current store moves onto it.
+pub async fn ensure_workflow_index_schema(
+    conn: &(impl Executor + Sync),
+) -> Result<(), WorkflowIndexError> {
+    if recorded_version(conn)
+        .await?
         .is_some_and(|version| version >= WORKFLOW_INDEX_SCHEMA_VERSION)
     {
+        store_schema::retire_named_ledgers(conn)
+            .await
+            .map_err(stamp_error)?;
         return Ok(());
     }
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS session_schema_migrations (
-            name TEXT PRIMARY KEY,
-            version INTEGER NOT NULL,
-            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE TABLE IF NOT EXISTS workflow_runs (
+        "CREATE TABLE IF NOT EXISTS workflow_runs (
             run_id TEXT PRIMARY KEY,
             parent_session_id TEXT NOT NULL DEFAULT '',
             name TEXT,
@@ -157,27 +144,26 @@ pub async fn ensure_workflow_index_schema(conn: &impl Executor) -> Result<(), Wo
         );",
     )
     .await?;
-    conn.execute(
-        "INSERT INTO session_schema_migrations(name, version)
-         VALUES (?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET
-            version = excluded.version,
-            applied_at = unixepoch()",
-        params![MIGRATION_NAME, WORKFLOW_INDEX_SCHEMA_VERSION],
+    store_schema::record_version(
+        conn,
+        WORKFLOW_INDEX_COMPONENT,
+        WORKFLOW_INDEX_SCHEMA_VERSION,
     )
-    .await?;
+    .await
+    .map_err(stamp_error)?;
     Ok(())
 }
 
-async fn schema_version(conn: &impl QueryExecutor) -> Option<i64> {
-    let mut rows = conn
-        .query(
-            "SELECT version FROM session_schema_migrations WHERE name = ?1",
-            params![MIGRATION_NAME],
-        )
+fn stamp_error(error: store_schema::SchemaVersionError) -> WorkflowIndexError {
+    WorkflowIndexError::Db(error.to_string())
+}
+
+async fn recorded_version(
+    conn: &(impl QueryExecutor + Sync),
+) -> Result<Option<i64>, WorkflowIndexError> {
+    store_schema::read_version(conn, WORKFLOW_INDEX_COMPONENT)
         .await
-        .ok()?;
-    rows.next().await.ok()??.get(0).ok()
+        .map_err(stamp_error)
 }
 
 #[cfg(test)]
@@ -382,7 +368,6 @@ impl<S> RegisteredWorkflowIndexSnapshot<S>
 where
     S: QueryExecutor + Send + Sync,
 {
-    #[hotpath::skip]
     async fn has_tables(&self, names: &[&str]) -> Result<bool, WorkflowIndexError> {
         if names.is_empty() {
             return Ok(true);
@@ -411,12 +396,10 @@ where
     /// The query methods below already treat an absent index as empty, which is
     /// safe but indistinguishable from a built index holding nothing. Callers
     /// that report to a user ask this first so they can say which one it is.
-    #[hotpath::skip]
     pub async fn workflow_tables_present(&self) -> Result<bool, WorkflowIndexError> {
         self.has_tables(&["workflow_runs", "workflow_agents"]).await
     }
 
-    #[hotpath::skip]
     pub async fn runs_for_session(
         &self,
         parent_session_id: &str,
@@ -446,7 +429,6 @@ where
         Ok(runs)
     }
 
-    #[hotpath::skip]
     pub async fn run_for_id(
         &self,
         run_id: &str,
@@ -462,7 +444,6 @@ where
         rows.next().await?.map(|row| row_to_run(&row)).transpose()
     }
 
-    #[hotpath::skip]
     pub async fn agents_for_run(
         &self,
         run_id: &str,
@@ -492,7 +473,6 @@ where
         Ok(agents)
     }
 
-    #[hotpath::skip]
     pub async fn agent_count_for_run(&self, run_id: &str) -> Result<i64, WorkflowIndexError> {
         if !self
             .has_tables(&["workflow_runs", "workflow_agents"])
@@ -513,7 +493,6 @@ where
         Ok(row.get(0)?)
     }
 
-    #[hotpath::skip]
     pub async fn agent_for_run_label(
         &self,
         run_id: &str,
@@ -539,7 +518,6 @@ where
         rows.next().await?.map(|row| row_to_agent(&row)).transpose()
     }
 
-    #[hotpath::skip]
     pub async fn runs_for_git_scope(
         &self,
         session_ids: Option<&[(String, String)]>,
@@ -717,27 +695,6 @@ async fn runs_for_git_scope(
         runs.push(row_to_run(&row)?);
     }
     Ok(runs)
-}
-
-#[cfg(test)]
-fn workflow_scope_exists_predicate(
-    filter: &WorkflowScopeFilter,
-    message_source_path_col: &str,
-    message_session_id_col: &str,
-) -> (String, Vec<Value>) {
-    let mut params = vec![Value::Text(filter.run_id.clone())];
-    let mut predicate = format!(
-        "EXISTS (SELECT 1 FROM workflow_agents wa \
-         WHERE wa.run_id = ?1 \
-           AND (wa.transcript_path = {message_source_path_col} \
-                OR wa.agent_session_id = {message_session_id_col})"
-    );
-    if let Some(label) = &filter.agent_label {
-        params.push(Value::Text(label.clone()));
-        let _ = write!(predicate, " AND wa.agent_label = ?{}", params.len());
-    }
-    predicate.push(')');
-    (predicate, params)
 }
 
 mod port;

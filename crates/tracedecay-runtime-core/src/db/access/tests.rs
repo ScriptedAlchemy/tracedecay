@@ -1,124 +1,24 @@
 use super::*;
 
-fn sqlite_fixture(path: &Path, marker: &str) -> u64 {
-    let connection = rusqlite::Connection::open(path).unwrap();
-    connection
-        .execute_batch(&format!(
-            "PRAGMA journal_mode=DELETE;
-             CREATE TABLE marker (value TEXT NOT NULL);
-             INSERT INTO marker VALUES ('{marker}');"
-        ))
-        .unwrap();
-    drop(connection);
-    crate::db::sqlite_generation_identity(path).unwrap()
-}
-
-fn sqlite_marker(path: &Path) -> String {
-    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .unwrap()
-        .query_row("SELECT value FROM marker", (), |row| row.get(0))
-        .unwrap()
-}
-
 #[test]
-fn restored_sqlite_publication_retains_exact_rollback() {
+fn filesystem_aliases_share_one_database_identity() {
     let temp = tempfile::tempdir().unwrap();
-    let destination = temp.path().join("project.db");
-    let staging = temp.path().join("restore.staging");
-    let rollback = temp.path().join("restore.rollback");
-    let destination_identity = sqlite_fixture(&destination, "old");
-    let staging_identity = sqlite_fixture(&staging, "new");
-
-    DatabaseAuthority::replace_sqlite_with_rollback_atomically(
-        &staging,
-        &destination,
-        &rollback,
-        destination_identity,
-        staging_identity,
-    )
-    .unwrap();
-
-    assert_eq!(sqlite_marker(&destination), "new");
-    assert_eq!(sqlite_marker(&rollback), "old");
-    assert_eq!(
-        crate::db::sqlite_generation_identity(&destination).unwrap(),
-        staging_identity
-    );
-    assert_eq!(
-        crate::db::sqlite_generation_identity(&rollback).unwrap(),
-        destination_identity
-    );
-    assert!(!staging.exists());
-}
-
-#[test]
-fn restored_sqlite_publication_rejects_changed_destination_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let destination = temp.path().join("project.db");
-    let staging = temp.path().join("restore.staging");
-    let rollback = temp.path().join("restore.rollback");
-    let stale_destination_identity = sqlite_fixture(&destination, "old");
-    let staging_identity = sqlite_fixture(&staging, "new");
-    let changed_destination = temp.path().join("changed.db");
-    sqlite_fixture(&changed_destination, "changed");
-    std::fs::rename(&changed_destination, &destination).unwrap();
-
-    let error = DatabaseAuthority::replace_sqlite_with_rollback_atomically(
-        &staging,
-        &destination,
-        &rollback,
-        stale_destination_identity,
-        staging_identity,
-    )
-    .unwrap_err();
-
-    assert!(error.to_string().contains("identity changed"));
-    assert_eq!(sqlite_marker(&destination), "changed");
-    assert_eq!(sqlite_marker(&staging), "new");
-    assert!(!rollback.exists());
-}
-
-#[test]
-fn restored_sqlite_publication_never_overwrites_existing_rollback() {
-    let temp = tempfile::tempdir().unwrap();
-    let destination = temp.path().join("project.db");
-    let staging = temp.path().join("restore.staging");
-    let rollback = temp.path().join("restore.rollback");
-    let destination_identity = sqlite_fixture(&destination, "old");
-    let staging_identity = sqlite_fixture(&staging, "new");
-    sqlite_fixture(&rollback, "retained");
-
-    let error = DatabaseAuthority::replace_sqlite_with_rollback_atomically(
-        &staging,
-        &destination,
-        &rollback,
-        destination_identity,
-        staging_identity,
-    )
-    .unwrap_err();
-
-    assert!(error.to_string().contains("already exists"));
-    assert_eq!(sqlite_marker(&destination), "old");
-    assert_eq!(sqlite_marker(&staging), "new");
-    assert_eq!(sqlite_marker(&rollback), "retained");
-}
-
-#[test]
-fn symlink_aliases_share_one_database_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let database = temp.path().join("database.db");
-    let alias = temp.path().join("database-alias.db");
+    let real = temp.path().join("real");
+    let alias_root = temp.path().join("alias");
+    std::fs::create_dir(&real).unwrap();
+    let database = real.join("database.db");
+    let alias = alias_root.join("database.db");
     std::fs::write(&database, []).unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&database, &alias).unwrap();
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&database, &alias).unwrap();
-    #[cfg(not(any(unix, windows)))]
-    std::fs::copy(&database, &alias).unwrap();
+    {
+        std::fs::create_dir(&alias_root).unwrap();
+        std::os::unix::fs::symlink(&database, &alias).unwrap();
+    }
+    #[cfg(not(unix))]
+    crate::test_fs::create_directory_alias(&real, &alias_root).unwrap();
 
     let database = DatabaseIdentity::for_path(&database).unwrap();
     let alias = DatabaseIdentity::for_path(&alias).unwrap();
-    #[cfg(any(unix, windows))]
     assert_eq!(database.database_key, alias.database_key);
 }
 
@@ -127,7 +27,7 @@ fn profile_project_databases_share_the_profile_scope() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
     let first = profile.join("projects/first/graph.db");
-    let second = profile.join("projects/second/branches/main.db");
+    let second = profile.join("projects/second/tracedecay.db");
     std::fs::create_dir_all(first.parent().unwrap()).unwrap();
     std::fs::create_dir_all(second.parent().unwrap()).unwrap();
 
@@ -137,25 +37,6 @@ fn profile_project_databases_share_the_profile_scope() {
         first.profile_root,
         profile.canonicalize().unwrap(),
         "project stores must inherit the profile lifecycle fence"
-    );
-    assert_eq!(second.profile_root, first.profile_root);
-}
-
-#[test]
-fn legacy_profile_store_databases_share_the_profile_scope() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile = temp.path().join("profile");
-    let first = profile.join("stores/first/graph.db");
-    let second = profile.join("stores/second/branches/main.db");
-    std::fs::create_dir_all(first.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
-
-    let first = DatabaseIdentity::for_path(&first).unwrap();
-    let second = DatabaseIdentity::for_path(&second).unwrap();
-    assert_eq!(
-        first.profile_root,
-        profile.canonicalize().unwrap(),
-        "legacy profile stores must inherit the profile lifecycle fence"
     );
     assert_eq!(second.profile_root, first.profile_root);
 }
@@ -292,19 +173,43 @@ fn writer_owner_intent_is_bounded_and_single_line() {
     assert!(owner.intent.len() <= 256);
 }
 
+/// Reproduces the macOS `/var` -> `/private/var` scope-key shape on any unix
+/// host: a daemon enters database scope naming a profile root that does not
+/// exist yet, through a directory that is an alias for somewhere else.
+///
+/// The scope key must already be resolved at registration, because the
+/// identity the lookup presents is resolved after the directory exists.
+#[cfg(unix)]
 #[test]
-fn fallback_scope_is_unambiguous_only_with_one_profile_owner() {
-    assert_eq!(fallback_scoped_runtime_role(0, 0).unwrap(), None);
+fn a_scope_entered_before_its_profile_root_exists_still_matches_the_opened_database() {
+    let temporary = tempfile::tempdir().unwrap();
+    let resolved = temporary.path().join("resolved");
+    std::fs::create_dir(&resolved).unwrap();
+    let alias = temporary.path().join("alias");
+    std::os::unix::fs::symlink(&resolved, &alias).unwrap();
+    let profile_root = alias.join("profile");
+
+    let scope = crate::db::enter_daemon_database_scope(&profile_root, 1, "alias scope").unwrap();
+
+    // Only now does the profile root exist, which is what lets the opened
+    // database resolve it to the `resolved` spelling. The identity is fully
+    // canonical, so the expectation must be too: on macOS `tempdir()` itself
+    // is spelled through the `/var` -> `/private/var` alias, and comparing
+    // against `resolved.join("profile")` would fail on spelling alone even
+    // though both name the same directory.
+    std::fs::create_dir(&profile_root).unwrap();
+    let identity = DatabaseIdentity::for_path(&profile_root.join("global.db")).unwrap();
     assert_eq!(
-        fallback_scoped_runtime_role(1, 0).unwrap(),
-        Some(DatabaseAuthorityRole::Maintenance)
+        identity.profile_root,
+        resolved.canonicalize().unwrap().join("profile"),
+        "the opened database must resolve the alias to the target directory"
     );
     assert_eq!(
-        fallback_scoped_runtime_role(0, 1).unwrap(),
-        Some(DatabaseAuthorityRole::Daemon)
+        exact_scoped_runtime_role(&identity.profile_root, "match alias scope").unwrap(),
+        Some(DatabaseAuthorityRole::Daemon),
+        "a scope entered through an alias must match the resolved database identity"
     );
-    assert!(fallback_scoped_runtime_role(1, 1).is_err());
-    assert!(fallback_scoped_runtime_role(2, 0).is_err());
+    drop(scope);
 }
 
 /// Reproduces the macOS/Windows shape of the isolated-test-path check on any

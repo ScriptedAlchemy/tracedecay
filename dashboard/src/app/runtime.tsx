@@ -18,7 +18,7 @@ export {
 };
 
 /** Same tree as `router` in `routes.tsx`, with the Hermes embed basename. */
-export function createDashboardRouter(basename: string) {
+function createDashboardRouter(basename: string) {
   const indexWorkspace = WORKSPACES[0];
   if (indexWorkspace === undefined) {
     throw new Error('dashboard workspace list is empty');

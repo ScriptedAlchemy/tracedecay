@@ -8,94 +8,171 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
 
 Deliver a fully integrated final-V2 product through real production journeys,
 truthful typed states, maintainable crate/module boundaries, and direct
-behavioral evidence—not PR choreography, gate scaffolding, or code that merely
+behavioral evidence, not PR choreography, gates built only to be checked, or code that merely
 compiles.
+
+## Task completion
+
+Carry the requested change through implementation and relevant verification; fix
+failures introduced by the change before reporting completion. Use focused checks
+for affected behavior and broaden only for unresolved risk. Documentation-only
+edits do not require application builds. Pause for a missing decision or an
+unauthorized external action after completing independent, authorized work.
+
+## Working checkout authority
+
+- Use the checkout supplied by the current task. Resolve its root with
+  `git rev-parse --show-toplevel`; never assume a machine-specific absolute path.
+- Inspect `git status --short`, `git branch --show-current`, and
+  `git worktree list` before changing branches or files. Honor an explicit task
+  branch; otherwise stay on the current branch. For a PR, resolve its head with
+  `gh pr view <number> --json headRefName,headRepositoryOwner,headRepository`.
+- Do not switch branches, merge other work, or create linked worktrees merely
+  because an old plan names them. If the requested checkout or branch is
+  unavailable, report the mismatch instead of substituting an unrelated tree.
+- Keep commands and maintained instructions repo-relative. Put machine-local
+  build caches and host settings in local configuration, not mandatory
+  repository guidance.
+- Multiple agents may work concurrently in a checkout; preserve peer edits and
+  stage only the paths owned by the current task.
+
+## No secondary copies
+
+- Never create or retain rollback copies, profile backups, old databases, old
+  binaries, snapshot clones, or any other secondary copy of project or operator
+  data or installed artifacts. Do not keep a prior version "just in case."
+- An operation that inherently requires temporary staging must remove that
+  staging when it finishes; it must not leave a recoverable old copy behind.
+  Never delete the sole active durable copy under the guise of this cleanup.
 
 ## Layout
 
-- The repository root is a **virtual workspace** — it has no package of its
+- The repository root is a **virtual workspace**. It has no package of its
   own. Every crate lives under `crates/`.
-- `crates/tracedecay/` — the composition-root library (daemon, MCP tools,
+- `crates/tracedecay/`, the composition-root library (daemon, MCP tools,
   global DB, sessions, code index, application services). Its integration
   suites are `crates/tracedecay/tests/`, and the ones that use the fixture
-  surface in `tests/common/` declare `required-features = ["test-helpers"]`.
-- `crates/tracedecay-cli/` — the package that produces the shipped
+  surface in `tests/common/` require `test-helpers`. Check the selected test
+  target's `required-features` in `Cargo.toml`; `mcp_suite` also requires
+  `test-transport`.
+- `crates/tracedecay-cli/`, the package that produces the shipped
   `tracedecay` binary.
-- `crates/` — the remaining workspace member crates (`tracedecay-api`,
-  `-application`, `-domain`, `-store`, `-hooks`, `-policy`, `-tool-catalog`,
-  rusqlite parity/runtime crates).
-- `dashboard/` — the single embedded dashboard (React + rsbuild + vitest).
-  `dashboard/src/contracts/` is generated from Rust schemas via schemars —
-  never hand-edit it; regenerate with the `contracts:generate` script and
-  verify with `contracts:check`.
-- `plugin/` — host bundles (Claude, Codex, Cursor, Kimi, opencode).
-- `tests/` — shared fixtures, distribution suites, and shell/Python gates that
+- `crates/`, the remaining workspace member crates (`tracedecay-api`,
+  `-application`, `-contracts`, `-domain`, `-store`, `-hooks`, `-policy`,
+  `-tool-catalog`, rusqlite parity/runtime crates).
+- `dashboard/`, the single embedded dashboard (React + rsbuild + vitest).
+  `dashboard/src/contracts/` (from Rust schemas via schemars), and the
+  TypeScript SDK sources in `sdks/typescript/src/` plus the Rust descriptors in
+  `crates/tracedecay-sdk/src/operations.rs` (from the canonical operation
+  registry) are generated. Never hand-edit them; regenerate all of them with
+  the dashboard `contracts:generate` script and verify with `contracts:check`.
+- `plugin/`, host bundles (Claude, Codex, Cursor, Kimi, opencode).
+- `tests/`, shared fixtures, distribution suites, and shell/Python gates that
   no single crate owns; crate-level integration suites and criterion benches
   live under that crate's own `tests/` and `benches/`.
-- `benchmark_data/` — benchmark fixtures, harnesses, and provenance;
-  `evals/` — memory, hermetic, and agent-adoption evals; `docs/` — plans and guides.
-- `scripts/` — CI/dev gates (commit-msg check, bundle checks, release drift).
+- `benchmark_data/`, benchmark fixtures, harnesses, and provenance;
+  `evals/`, memory, hermetic, and agent-adoption evals; `docs/`, plans and guides.
+- `scripts/`. CI/dev gates (commit-msg check, bundle checks, release drift).
 
 ## Build & test
 
-- Edition 2024, resolver 3.
-- Dashboard: `npm run build` (rsbuild), `npm run typecheck` (`tsc --noEmit`),
-  `npm test` (vitest) from `dashboard/`.
+- Bazel is the sole workspace build, test, check, run, benchmark, and
+  code-generation authority. Run `bazel build //...`,
+  `bazel test //... --test_output=errors`, `bazel run //crates/...`, and
+  `bazel test //crates/<crate>:<benchmark> --test_arg=--bench` for an explicit
+  benchmark target. Benchmarks with Cargo `test = false` remain compiled by
+  default builds but run only when selected explicitly. Edition 2024,
+  resolver 3, and the toolchain pinned in `rust-toolchain.toml` remain
+  canonical inputs. Never invoke `cargo` directly; route every build, test,
+  check, run, bench, and codegen through Bazel.
+- pnpm (pinned by `packageManager`) manages the npm packages and the Cargo
+  sources. Run `pnpm install` at the repository root after cloning and after
+  any `pnpm-lock.yaml` or `Cargo.lock` change. The committed
+  `.cargo/config.toml` optionally includes `.pnpm/crates/config.toml`, which
+  that install generates to replace crates.io and the pinned git sources with
+  `.pnpm/crates`. The Cargo error `no matching package named '<crate>' found`
+  with `location searched: directory source '<repo>/.pnpm/crates/crates-io'`
+  means "run `pnpm install`": Cargo.lock names a crate that is not vendored
+  yet. `verifyDepsBeforeRun` guards only the npm
+  packages; pnpm reads Cargo.lock as it is and never rewrites it or fails on
+  a manifest mismatch.
+- To add, remove, or bump a crate (member or `[workspace.dependencies]`),
+  edit the manifests by hand, then run `pnpm install` to re-vendor. For
+  lockfile refresh from outside the checkout (bumping a vendored source), use
+  the pinned toolchain: `cd / && cargo +<toolchain> update -w --manifest-path
+  <repo>/Cargo.toml` (`-p <crate>` for a targeted bump), then run
+  `pnpm install` again. Inside the checkout `cargo update` refuses the
+  vendored git sources and `cargo add` sees only vendored crates. A fork
+  only workspace members consume is a plain `git` + `rev` dependency
+  (grafeo in `[workspace.dependencies]`); `[patch.crates-io]` is only for
+  forks that crates.io dependents must also resolve to. To bump one, edit
+  `rev` on every crate from that repository, refresh the lock with `-p` for
+  each, and run `pnpm install`: pnpm vendors every source Cargo.lock names,
+  git included, and rewrites that source's replacement block in
+  `.pnpm/crates/config.toml`. Do not use `pnpm add crate:`; from a member
+  directory it regenerates the whole Cargo.lock, at the root it fails, and
+  `pnpm remove crate:` is unsupported. `pnpm install` leaves unused
+  `.pnpm/crates` directories in place; they are inert once the lock stops
+  naming them.
+- Code generation: `bazel run //sdks/codegen:generate -- <output-root>`
+  exports SDK sources; `bazel run //sdks/codegen:dashboard_schema -- <output-file>`
+  exports the dashboard schema. Dashboard `contracts:generate` and
+  `contracts:check` invoke these targets from the repository root.
+- Dashboard: `pnpm run build` (rsbuild), `pnpm run typecheck` (`tsc --noEmit`),
+  `pnpm test` (vitest) from `dashboard/`.
 - libtest `--exact` requires the full module path and exits 0 when a filter
-  matches nothing — a vacuous "0 passed" green. For name-filtered runs prefer
+  matches nothing. That is a vacuous "0 passed" green. For name-filtered runs prefer
   the ad-hoc anti-vacuity helper `scripts/require-exact-test.sh`; it is not a
   reason to ossify CI or test names. Otherwise pass the full path
   (`module::path::test_name`) and confirm the reported count is non-zero before
   treating a run as evidence.
-- `dashboard/app-dist/` is gitignored build output; only the CLI build script
-  (`crates/tracedecay-cli/build.rs`) embeds it, so a fresh checkout/worktree
-  must build the dashboard (or seed the directory) before building
-  `tracedecay-cli` — library crates no longer touch it.
-  `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` skips the npm rebuild only when
-  `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` carries the existing bundle's digest
-  (`python3 scripts/check-dashboard-bundle.py dashboard/app-dist
-  --print-digest`); a missing or mismatched digest fails the build.
-  Create linked worktrees with `scripts/agent-worktree.sh`
-  (it locks the lane). Clean up only via `scripts/worktree-gc.sh` or by the
-  owning lane unlocking and removing its own exact absolute path; never
-  `git worktree remove` / `git branch -D` another lane's tree or any path
-  you did not create, and never use name prefixes. A clean tree at the
-  integration tip may be a FRESH lane, not garbage.
+- The CLI build script is the sole dashboard embedder and stages an immutable
+  bundle under its `OUT_DIR`; ordinary builds need no environment. When using
+  prebuilt `dashboard/app-dist`, set `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` and the
+  digest from `scripts/check-dashboard-bundle.py` in
+  `TRACEDECAY_DASHBOARD_BUNDLE_SHA256`; missing or stale digests fail closed.
+- Existing linked worktrees may be cleaned up only through
+  `scripts/worktree-gc.py` (install its hourly user timer with
+  `scripts/install-worktree-gc-timer.sh`), or by unlocking and removing the
+  exact owned path. Never remove another lane, select cleanup targets by name
+  prefix, or treat a clean integration-tip lane as abandoned.
 - Never re-run tests that are known-red under another active lane; cite the
   owner instead.
 
 ## Conventions
 
-- Commits: `<type>(<scope>): <subject>` (subject ≤ 72 chars) with one of
+- Commits: `<type>(<scope>): <subject>` (scope optional; full header ≤ 72 chars)
+  with one of
   `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`,
-  `style`, `test`. Every non-merge commit message must pass commitlint
-  (`npm run lint:commit`, configured in `commitlint.config.cjs`; the
+  `simplify`, `style`, `test`. `simplify` is a behavior-preserving deletion
+  or dedup; like `refactor` it is hidden from generated release notes. Every non-merge commit message must pass commitlint
+  (`pnpm run lint:commit`, configured in `commitlint.config.cjs`; the
   `.githooks/commit-msg` hook runs it locally via
   `scripts/install-git-hooks.sh`).
 - Integration branch is `master` (GitHub: ScriptedAlchemy/tracedecay); CI
-  lives in `.github/workflows` (hidden — search with `rg --hidden`).
+  lives in `.github/workflows` (hidden, search with `rg --hidden`).
 - `.github/`, `.githooks/`, and nested `AGENTS.md` files may carry more
   specific guidance; the deeper file wins.
-- Keep changes minimal and scoped; match surrounding style; run the checks
-  that cover your change before calling it done.
 
 ## Engineering Hygiene
 
-- Limits are symptoms, not knobs. When an operation trips a deadline,
-  admission limit, memory budget, or backoff ceiling, do not raise, remove, or
-  env-override the limit as the fix. Instrument the operation with Hotpath
-  (see the `using-hotpath` skill), decompose where the time or memory actually
-  goes, and compare against what the operation should cost for its inputs. If
-  the cost is mis-sized — an N+1 query pattern, an unbatched writer, a serial
-  phase that should use every core, an inlined mega-future — fix that defect
-  and keep the limit. Change a budget only when the measured cost is genuinely
-  irreducible, in its own commit, with the measurement attached. A temporary
-  override that keeps an investigation moving is scaffolding: label it and
-  remove it before the work merges. Keep the observability layers distinct:
-  `tracing` events are the always-compiled operator log surface, Hotpath
-  macros the compile-to-no-op measurement surface (tracing bridges exist only
-  for third-party emitters like sqlx — see the skill), and `eprintln!`
-  scaffolds never merge.
+- When `ripwire` is installed, use its CLI where it shortens the work:
+  orient in unfamiliar subsystems, find and reuse existing symbols, trace
+  callers and impact, select relevant tests, and check a diff before landing
+  (`--pr-context`, `--edit-check`, or `--quality-delta` as appropriate).
+  Ripwire's static graph is coverage-bounded navigation and risk evidence, not
+  final correctness; confirm decisions with focused source reads, compiler
+  checks, and production-behavior tests. Do not block work when it is absent
+  or stale.
+- Limits are symptoms, not knobs. For a deadline, admission, memory, or backoff
+  failure, measure the operation (the workspace's `tracing` spans are the
+  instrumentation surface, and `TRACEDECAY_SPAN_TIMINGS=1` logs their close
+  timings) and fix mis-sized work
+  such as N+1 queries, unbatched writes, or accidental serialization. Change a
+  budget only when measurement shows the cost is irreducible, in its own
+  commit with the evidence. Remove investigative overrides before merge.
+  `tracing` events are the always-compiled operator log surface, `tracing`
+  spans are the measurement surface, and `eprintln!` scaffolds never merge.
 - Reuse canonical TraceDecay authorities and maintained libraries first.
   Custom parsers, cursors, caches, retries, transports, registries, schedulers,
   crypto/auth/policy stores, or filesystem durability layers require a concrete
@@ -115,12 +192,12 @@ compiles.
   provenance, and `--no-tests=fail`.
 - Complete cutovers in one delivery slice: migrate every caller and datum,
   then delete compatibility façades, duplicate routes, old flags, dead aliases,
-  and superseded scaffolding.
+  and support code left from the move.
 - Add a V2/V3 contract, compatibility alias, deprecation path, or data
   migration only after proving the prior shape shipped on `origin/master`, in
   a published package, or in a live persisted format. Branch-local and
   unreleased contracts change in place; a `V1` suffix alone is not release
-  evidence and does not justify compatibility scaffolding.
+  evidence and does not justify compatibility shims.
 - Keep boundaries explicit: use top-level explicit imports/reexports, avoid
   wildcard parent-child cycles and inline imports, maintain one generated wire
   authority, and do not hand-write duplicate DTOs.
@@ -132,34 +209,24 @@ compiles.
   production behavior. Wire it now or omit it truthfully.
 - Comments and docs explain invariants and why; remove narration, stale PR
   language, and superseded plan authority. `00-plan-set-index.md` is the sole
-  roadmap precedence; `NEXT.md` records current outcomes only, while historical
-  plans and benchmarks are archival.
+  roadmap precedence; historical plans and benchmarks are archival.
 - Name production modules, APIs, tests, scripts, and CI jobs for durable product
-  capabilities—not PR numbers, milestones, phases, or temporary gates. Keep
+  capabilities, not PR numbers, milestones, phases, or temporary gates. Keep
   PR/milestone labels only in clearly archival plans and benchmark provenance.
 - Tests must be falsifiable and cover failure, denial, staleness, isolation,
   cancellation, and rollback where relevant, without duplicating the same
-  substrate across every host × OS combination.
+  base across every host × OS combination.
 
-## Learned User Preferences
+## Shared work
 
-- In shared checkouts, honor active file ownership: re-read before editing,
-  commit only self-consistent owned paths, and never sweep in peer work.
-- Require measured, falsifiable verification and root-cause fixes; preserve
-  byte-exact identity contracts, and never weaken assertions, raise timeouts,
-  ignore tests, or mask gate failures.
-- Audit all supported host integrations when changing shared host behavior;
-  do not treat one host as representative of the complete integration set.
-- Parallelize independent work aggressively, but inspect active agents first,
-  keep file ownership disjoint, and coordinate shared integration centrally.
-- Commit coherent completed fixes incrementally with explanatory conventional
-  messages instead of holding a large mixed working tree.
-- Resolve conflicts and integrate parallel work from relevant transcripts,
-  plans, and Git history so intent—not whichever side is newer—wins.
-- Before final review, checkpoint the lane, merge the latest explicit clean-main
-  floor, and compare patch IDs plus owned paths. Drop duplicate or superseded
-  work instead of carrying parallel implementations; regenerate canonical
-  outputs after the merge rather than hand-merging generated files.
+- Honor active file ownership, preserve peer edits, and stage only coherent
+  owned paths. Coordinate overlap with the owner.
+- For shared host behavior, audit every supported integration. For divergent
+  lanes, recover intent from relevant transcripts, plans, and history; compare
+  patch identities and owned paths, discard superseded duplicates, and
+  regenerate canonical outputs after integration.
+- Preserve byte-exact identity contracts. Do not weaken assertions, raise
+  timeouts, ignore tests, or mask gate failures.
 
 ## Learned Workspace Facts
 

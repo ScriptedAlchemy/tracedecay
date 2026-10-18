@@ -45,10 +45,16 @@ pub enum HostKindV1 {
     OpenCode,
     Gemini,
     Copilot,
+    Zed,
+    Antigravity,
+    Vibe,
+    Pi,
+    FactoryDroid,
+    ChatGpt,
 }
 
 impl HostKindV1 {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 21] = [
         Self::ClaudeCode,
         Self::CursorDesktop,
         Self::CursorCloud,
@@ -64,29 +70,13 @@ impl HostKindV1 {
         Self::Gemini,
         Self::Copilot,
         Self::Devin,
+        Self::Zed,
+        Self::Antigravity,
+        Self::Vibe,
+        Self::Pi,
+        Self::FactoryDroid,
+        Self::ChatGpt,
     ];
-
-    /// Project a stock host surface into the bounded host observation catalog
-    /// only when a checked-in native event fixture proves that integration.
-    pub const fn fixture_backed_observation_integration_id(self) -> Option<HostIntegrationIdV1> {
-        match self {
-            Self::ClaudeCode => Some(HostIntegrationIdV1::Claude),
-            Self::CursorDesktop => Some(HostIntegrationIdV1::Cursor),
-            Self::Codex => Some(HostIntegrationIdV1::Codex),
-            Self::Hermes => Some(HostIntegrationIdV1::Hermes),
-            Self::Kiro => Some(HostIntegrationIdV1::Kiro),
-            Self::Devin
-            | Self::CursorCloud
-            | Self::ClineFamily
-            | Self::Cline
-            | Self::RooCode
-            | Self::Kilo
-            | Self::KimiCode
-            | Self::OpenCode
-            | Self::Gemini
-            | Self::Copilot => None,
-        }
-    }
 }
 
 #[derive(
@@ -99,6 +89,21 @@ pub enum HostCapabilityV1 {
     Hooks,
     Mcp,
     Cli,
+}
+
+impl HostCapabilityV1 {
+    /// Position of this capability in every stock host capability row.
+    /// `canonical_stock_host_capabilities` emits rows in exactly this order,
+    /// so indexing a row by it is total and needs no fallback state.
+    pub const fn row_index(self) -> usize {
+        match self {
+            Self::Lsp => 0,
+            Self::NativeDiagnostics => 1,
+            Self::Hooks => 2,
+            Self::Mcp => 3,
+            Self::Cli => 4,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -188,6 +193,16 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Supported,
             Supported,
         ),
+        // These direct-config hosts expose documented local stdio MCP
+        // registration but no TraceDecay-specific diagnostics or native hook
+        // capture surface.
+        HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
+            Supported,
+            Supported,
+        ),
         HostKindV1::Kiro => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
@@ -229,13 +244,22 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Supported,
             Supported,
         ),
-        HostKindV1::OpenCode => (Supported, Supported, Supported, Supported, Supported),
+        // OpenCode 2 exposes plugin hooks and local MCP registration, but it
+        // neither runs configured language servers nor exposes a native
+        // diagnostics API.
+        HostKindV1::OpenCode => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Supported,
+            Supported,
+            Supported,
+        ),
         // Gemini CLI's extension lifecycle carries exactly one registration
         // route: the `mcpServers` entry inside `gemini-extension.json`, which
         // `gemini extensions install` adopts. It exposes no LSP registration
         // and no diagnostics API. Its extension format does admit hooks, but
         // no checked-in native Gemini event fixture proves that route, and the
-        // staged extension declares none — claiming Hooks here would report a
+        // staged extension declares none, claiming Hooks here would report a
         // capability this integration cannot drive.
         HostKindV1::Gemini => (
             Unavailable(HostRegistrationUnsupported),
@@ -250,8 +274,8 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
         // `Mcp` and `Cli` are the only supported capabilities.
         //
         // `Hooks` is `HostApiAbsent`, not `CheckedInEvidenceMissing`: unlike
-        // Gemini — whose extension format admits hooks that no fixture yet
-        // proves — Copilot publishes no third-party event or hook registration
+        // Gemini, whose extension format admits hooks that no fixture yet
+        // proves. Copilot publishes no third-party event or hook registration
         // surface at all, in the CLI or in the VS Code extension. There is no
         // route to gather evidence for, so naming the gap "evidence missing"
         // would imply a capability that is one fixture away from working.
@@ -263,6 +287,46 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Unavailable(HostApiAbsent),
+            Supported,
+            Supported,
+        ),
+        // Pi exposes no MCP server route: its extension API registers
+        // model-callable tools and lifecycle hooks directly, and the shipped
+        // extension bridges the code graph through `tracedecay tool` over the
+        // daemon socket. The CLI remains the scripted fallback surface. Its
+        // lifecycle events reach `hook-pi-event` under the Pi native identity;
+        // the checked-in `pi.json` fixture proves the session-start and stop
+        // boundaries, exactly the evidence Codex's hook row rests on.
+        HostKindV1::Pi => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Supported,
+            Unavailable(HostRegistrationUnsupported),
+            Supported,
+        ),
+        // Factory Droid's adopted lifecycle drives two routes:
+        // `droid mcp add|remove` owns `~/.factory/mcp.json`, and the managed
+        // hook merge deploys `SessionStart` / `Stop` entries into
+        // `~/.factory/hooks.json` calling `hook-droid-event` under the Droid
+        // native identity. Both are backed by checked-in captured fixtures.
+        HostKindV1::FactoryDroid => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Supported,
+            Supported,
+            Supported,
+        ),
+        // ChatGPT registers MCP servers through the `mcp.json` inside its
+        // portable Agent Plugins bundle, which the host launches once the
+        // operator activates the plugin. The plugin format admits a hooks
+        // extension point, but no checked-in native ChatGPT event fixture
+        // proves that route and the staged bundle declares none, Gemini's
+        // shape exactly. There is no LSP registration route, no diagnostics
+        // API, and no host CLI to drive the servers with.
+        HostKindV1::ChatGpt => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
             Supported,
             Supported,
         ),
@@ -295,21 +359,23 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum HostIntegrationIdV1 {
-    /// Claude Code's provider identifier remains `claude` for compatibility.
+    /// Claude Code's provider identifier is `claude`.
     Claude,
     Codex,
     Cursor,
     Hermes,
     Kiro,
+    Pi,
 }
 
 impl HostIntegrationIdV1 {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::Hermes,
         Self::Kiro,
+        Self::Pi,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -319,6 +385,7 @@ impl HostIntegrationIdV1 {
             Self::Cursor => "cursor",
             Self::Hermes => "hermes",
             Self::Kiro => "kiro",
+            Self::Pi => "pi",
         }
     }
 
@@ -339,6 +406,7 @@ impl HostIntegrationIdV1 {
             "cursor" => Some(Self::Cursor),
             "hermes" => Some(Self::Hermes),
             "kiro" => Some(Self::Kiro),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -351,6 +419,7 @@ impl HostIntegrationIdV1 {
             Self::Cursor => ".cursor_shell_sync_at",
             Self::Hermes => ".hermes_terminal_receipt_at",
             Self::Kiro => ".kiro_post_tool_sync_at",
+            Self::Pi => ".pi_session_sync_at",
         }
     }
 }
@@ -488,24 +557,8 @@ impl HostIntegrationCatalogV1 {
         &self.capabilities
     }
 
-    pub fn stock_host_capabilities(&self, host: HostKindV1) -> &[HostCapabilityRecordV1; 5] {
-        match host {
-            HostKindV1::ClaudeCode => &STOCK_HOST_CAPABILITIES[0],
-            HostKindV1::CursorDesktop => &STOCK_HOST_CAPABILITIES[1],
-            HostKindV1::CursorCloud => &STOCK_HOST_CAPABILITIES[2],
-            HostKindV1::Codex => &STOCK_HOST_CAPABILITIES[3],
-            HostKindV1::Hermes => &STOCK_HOST_CAPABILITIES[4],
-            HostKindV1::Kiro => &STOCK_HOST_CAPABILITIES[5],
-            HostKindV1::ClineFamily => &STOCK_HOST_CAPABILITIES[6],
-            HostKindV1::Cline => &STOCK_HOST_CAPABILITIES[7],
-            HostKindV1::RooCode => &STOCK_HOST_CAPABILITIES[8],
-            HostKindV1::Kilo => &STOCK_HOST_CAPABILITIES[9],
-            HostKindV1::KimiCode => &STOCK_HOST_CAPABILITIES[10],
-            HostKindV1::OpenCode => &STOCK_HOST_CAPABILITIES[11],
-            HostKindV1::Gemini => &STOCK_HOST_CAPABILITIES[12],
-            HostKindV1::Copilot => &STOCK_HOST_CAPABILITIES[13],
-            HostKindV1::Devin => &STOCK_HOST_CAPABILITIES[14],
-        }
+    pub const fn stock_host_capabilities(&self, host: HostKindV1) -> [HostCapabilityRecordV1; 5] {
+        canonical_stock_host_capabilities(host)
     }
 
     pub fn stock_host_capability_views(&self) -> Vec<StockHostCapabilityViewV1> {
@@ -513,7 +566,7 @@ impl HostIntegrationCatalogV1 {
             .into_iter()
             .map(|host| StockHostCapabilityViewV1 {
                 host,
-                capabilities: *self.stock_host_capabilities(host),
+                capabilities: self.stock_host_capabilities(host),
             })
             .collect()
     }
@@ -536,7 +589,7 @@ impl HostIntegrationCatalogV1 {
     pub fn host_capability_digest(&self, host: HostKindV1) -> Result<[u8; 32], DomainError> {
         canonical_json_bytes(&StockHostCapabilityViewV1 {
             host,
-            capabilities: *self.stock_host_capabilities(host),
+            capabilities: self.stock_host_capabilities(host),
         })
         .map(|bytes| Sha256::digest(bytes).into())
     }
@@ -595,24 +648,6 @@ impl HostIntegrationCatalogV1 {
     }
 }
 
-const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 15] = [
-    canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
-    canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
-    canonical_stock_host_capabilities(HostKindV1::CursorCloud),
-    canonical_stock_host_capabilities(HostKindV1::Codex),
-    canonical_stock_host_capabilities(HostKindV1::Hermes),
-    canonical_stock_host_capabilities(HostKindV1::Kiro),
-    canonical_stock_host_capabilities(HostKindV1::ClineFamily),
-    canonical_stock_host_capabilities(HostKindV1::Cline),
-    canonical_stock_host_capabilities(HostKindV1::RooCode),
-    canonical_stock_host_capabilities(HostKindV1::Kilo),
-    canonical_stock_host_capabilities(HostKindV1::KimiCode),
-    canonical_stock_host_capabilities(HostKindV1::OpenCode),
-    canonical_stock_host_capabilities(HostKindV1::Gemini),
-    canonical_stock_host_capabilities(HostKindV1::Copilot),
-    canonical_stock_host_capabilities(HostKindV1::Devin),
-];
-
 #[derive(Serialize)]
 struct HostIntegrationCatalogAuthorityPayloadV1<'a> {
     observation_catalog: &'a HostIntegrationCatalogV1,
@@ -620,7 +655,7 @@ struct HostIntegrationCatalogAuthorityPayloadV1<'a> {
 }
 
 pub fn stock_host_capabilities(host: HostKindV1) -> [HostCapabilityRecordV1; 5] {
-    *host_integration_catalog_v1().stock_host_capabilities(host)
+    canonical_stock_host_capabilities(host)
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

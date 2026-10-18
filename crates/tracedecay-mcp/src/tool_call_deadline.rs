@@ -3,8 +3,8 @@
 //! Every other transport already lets the caller name the deadline the daemon
 //! must enforce: HTTP carries `x-tracedecay-deadline-micros`, and the typed
 //! application-surface path sends an absolute [`Deadline`] inside the
-//! invocation request. The MCP `tools/call` wire — the route the CLI's
-//! compatibility tools and every MCP host take — carried none, so the daemon
+//! invocation request. The MCP `tools/call` wire, the route the CLI's
+//! compatibility tools and every MCP host take, carried none, so the daemon
 //! fell back to the tool's canonical dispatch ceiling for *every* caller. A
 //! caller asking for a one-second budget was silently served on a
 //! thirty-second one, and the deadline-elapsed typed terminals that budget
@@ -17,7 +17,7 @@
 //! *because* the deadline elapsed is still read.
 
 use serde_json::{Value, json};
-use tracedecay_application::Deadline;
+use tracedecay_contracts::Deadline;
 use tracedecay_domain::UtcMicros;
 
 /// `_meta` key naming the caller's absolute request deadline, in UTC micros.
@@ -35,29 +35,27 @@ pub fn tool_call_deadline_meta(expires_at: UtcMicros) -> Value {
 /// the daemon falls back to the tool's canonical ceiling exactly as before.
 #[must_use]
 pub fn caller_tool_call_deadline(params: Option<&Value>) -> Option<Deadline> {
-    let micros = params?
-        .get("_meta")?
-        .get(TOOL_CALL_DEADLINE_META_KEY)?
-        .as_i64()?;
+    caller_tool_call_deadline_from_meta(params?.get("_meta")?.as_object())
+}
+
+/// The caller's request deadline read straight from an already-typed `_meta`
+/// object.
+///
+/// A typed `tools/call` transport (the `rmcp` adapter) hands the daemon the
+/// `_meta` map itself, with no surrounding params document to index into.
+/// Both entry points read the same key through this one authority so a typed
+/// caller and a raw JSON-RPC caller can never disagree about their deadline.
+#[must_use]
+pub fn caller_tool_call_deadline_from_meta(
+    meta: Option<&serde_json::Map<String, Value>>,
+) -> Option<Deadline> {
+    let micros = meta?.get(TOOL_CALL_DEADLINE_META_KEY)?.as_i64()?;
     Deadline::new(UtcMicros(micros)).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_declared_deadline_round_trips_through_the_meta_object() {
-        let params = json!({
-            "name": "tracedecay_fact_store_add",
-            "arguments": {},
-            "_meta": tool_call_deadline_meta(UtcMicros(1_765_000_000_000_000)),
-        });
-        assert_eq!(
-            caller_tool_call_deadline(Some(&params)).map(|deadline| deadline.expires_at),
-            Some(UtcMicros(1_765_000_000_000_000))
-        );
-    }
 
     #[test]
     fn params_without_a_declared_deadline_leave_the_ceiling_in_charge() {
@@ -69,6 +67,14 @@ mod tests {
                 "_meta": { TOOL_CALL_DEADLINE_META_KEY: "not-an-integer" }
             })))
             .is_none()
+        );
+        assert_eq!(
+            caller_tool_call_deadline(Some(&json!({
+                "_meta": { TOOL_CALL_DEADLINE_META_KEY: 1_700_000_000_000_000_i64 }
+            }))),
+            Some(Deadline {
+                expires_at: UtcMicros(1_700_000_000_000_000)
+            })
         );
     }
 }

@@ -64,6 +64,12 @@ thread_local! {
     static OBJECT_BUFFER_POOL: Cell<ObjectBufferPool> = Cell::new(ObjectBufferPool::default());
 }
 
+/// Drop the calling thread's pooled object buffers.
+pub(super) fn release_thread_object_buffers() {
+    // An exiting thread has already dropped its pool.
+    let _ = OBJECT_BUFFER_POOL.try_with(Cell::take);
+}
+
 /// Stream `value` into `sink` in canonical JSON form.
 pub(super) fn serialize_canonical<T, S>(value: &T, sink: &mut S) -> Result<(), DomainError>
 where

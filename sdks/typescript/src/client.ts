@@ -7,19 +7,23 @@ import {
   type ResponseFor,
   type ResultFor,
 } from "./operations";
-import { factStoreCurateTerminalMatches } from "./automation-terminal";
 import {
   applyHttpRequestControls,
   type OperationRequestOptions,
   type PageOptions,
 } from "./request-control";
 export type { OperationRequestOptions, PageOptions } from "./request-control";
-import type {
-  ApplicationProblemRecord,
-  HttpProblemEnvelope,
-  HttpSseEvent,
-  HttpSuccessEnvelope,
-  OperationReceipt,
+import {
+  OPERATION_TERMINATIONS,
+  applicationProblemBindingMatches,
+  applicationProblemStatusMatches,
+  factStoreCurateReceiptMatches,
+  isHttpProblemEnvelope,
+  type ApplicationProblemRecord,
+  type HttpProblemEnvelope,
+  type HttpSseEvent,
+  type HttpSuccessEnvelope,
+  type OperationReceipt,
 } from "./types";
 
 type FetchImplementation = typeof globalThis.fetch;
@@ -59,7 +63,12 @@ export interface OperationStreamResume {
 export interface OperationStreamOptions {
   resume?: OperationStreamResume;
   signal?: AbortSignal;
-  /** Explicit opt-in; transport reconnection is disabled by default. */
+  /**
+   * Explicit opt-in; reconnection is disabled by default. Each reconnect
+   * attempt, including one that fails to connect, spends this budget. Only
+   * transport failures are retried, never the first connection. After the
+   * budget is spent the generator throws one `TraceDecayDisconnectedError`.
+   */
   maxReconnects?: number;
 }
 
@@ -157,14 +166,7 @@ interface StreamFrontier {
   resumeToken?: string;
 }
 
-const TERMINAL_EVENTS = new Set([
-  "completed",
-  "cancelled",
-  "timed_out",
-  "failed",
-  "partial",
-  "effect_unknown",
-]);
+const TERMINAL_EVENTS: ReadonlySet<string> = new Set(OPERATION_TERMINATIONS);
 const MAX_PAGE_SIZE = 1_000;
 const MAX_OPAQUE_CURSOR_BYTES = 4_096;
 const MAX_RESUME_TOKEN_BYTES = 4_096;
@@ -208,23 +210,6 @@ function hasMediaType(response: Response, expected: string): boolean {
   );
 }
 
-function isContract(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    isBoundedOpaqueString(value.schema_id, 512) &&
-    isSafeUnsignedInteger(value.schema_revision) &&
-    value.schema_revision > 0
-  );
-}
-
-function isDiagnostic(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.code === "string" &&
-    typeof value.message === "string"
-  );
-}
-
 function isReceipt(value: unknown): value is OperationReceipt {
   if (
     !isRecord(value) ||
@@ -247,23 +232,8 @@ function isReceipt(value: unknown): value is OperationReceipt {
   );
 }
 
-function isPageState(value: unknown): boolean {
-  if (
-    !isRecord(value) ||
-    !isBoundedOpaqueString(value.sort_contract_id, 512) ||
-    !isSafeUnsignedInteger(value.sort_revision) ||
-    value.sort_revision === 0 ||
-    (value.total !== null && !isSafeUnsignedInteger(value.total)) ||
-    !isSafeUnsignedInteger(value.returned) ||
-    (value.cursor !== null &&
-      !isBoundedOpaqueString(value.cursor, MAX_OPAQUE_CURSOR_BYTES)) ||
-    (value.expires_at !== null && !isSafeInteger(value.expires_at))
-  ) {
-    return false;
-  }
-  return value.total === null || value.returned <= value.total;
-}
-
+// Page structure (counts, bounded sort contract, tagged cursor variants) is the
+// generated decoder's authority; only receipt and payload semantics remain here.
 function isDecodedSuccessEnvelope(value: unknown): boolean {
   if (
     !isRecord(value) ||
@@ -276,207 +246,11 @@ function isDecodedSuccessEnvelope(value: unknown): boolean {
   }
   if (value.outcome.outcome === "evidence") {
     return (
-      isPageState(value.outcome.value.page) &&
-      (value.outcome.value.execution.termination !== "completed" ||
-        value.outcome.value.payload !== null)
+      value.outcome.value.execution.termination !== "completed" ||
+      value.outcome.value.payload !== null
     );
   }
   return value.outcome.outcome === "preview" || value.outcome.outcome === "effect";
-}
-
-function isProblemEnvelope(value: unknown): value is HttpProblemEnvelope {
-  if (
-    !isRecord(value) ||
-    (value.binding_id !== undefined && typeof value.binding_id !== "string") ||
-    !isContract(value.contract) ||
-    !isBoundedOpaqueString(value.request_id, MAX_REQUEST_ID_BYTES) ||
-    !isRecord(value.problem)
-  ) {
-    return false;
-  }
-  const problem = value.problem;
-  const kinds = [
-    "invalid_request", "not_found_or_not_authorized", "conflict", "partial_effect",
-    "stale", "unsupported", "unavailable", "execution_failed", "reset_required",
-    "saturated", "cancelled", "timed_out",
-  ];
-  const cancellationStages = [
-    "before_admission", "before_read", "during_read", "before_effect", "effect_in_flight",
-  ];
-  const unavailableClasses = [
-    "authority", "backend_unavailable", "backend_disconnected", "backend_retryable",
-  ];
-  const executionFailureClasses = ["denied", "malformed_output", "permanent"];
-  const legalActions = Array.isArray(problem.legal_actions)
-    ? problem.legal_actions
-    : null;
-  const diagnosticKinds = [
-    "invalid_request", "conflict", "partial_effect", "stale", "unsupported",
-    "unavailable", "execution_failed", "reset_required", "saturated",
-  ];
-  const expectedRetryScope =
-    problem.retry === "never"
-      ? null
-      : problem.retry === "same_request" || problem.retry === "after_delay"
-        ? "same_request"
-        : problem.retry === "after_revalidate"
-          ? "fresh_request"
-          : problem.retry === "after_reconcile"
-            ? "same_operation"
-            : undefined;
-  const validShape =
-    problem.revision === 1 &&
-    typeof problem.kind === "string" && kinds.includes(problem.kind) &&
-    typeof problem.code === "string" &&
-    typeof problem.message === "string" &&
-    (problem.diagnostic === null || isDiagnostic(problem.diagnostic)) &&
-    "committed_receipt" in problem &&
-    typeof problem.owning_layer === "string" &&
-    typeof problem.terminality === "string" &&
-    typeof problem.retryable === "boolean" &&
-    typeof problem.retry === "string" &&
-    (problem.retry_scope === null || typeof problem.retry_scope === "string") &&
-    (problem.retry_after_millis === null ||
-      isSafeUnsignedInteger(problem.retry_after_millis)) &&
-    "cancellation_stage" in problem &&
-    (problem.cancellation_stage === null ||
-      (typeof problem.cancellation_stage === "string" &&
-        cancellationStages.includes(problem.cancellation_stage))) &&
-    "unavailable_classification" in problem &&
-    (problem.unavailable_classification === null ||
-      (typeof problem.unavailable_classification === "string" &&
-        unavailableClasses.includes(problem.unavailable_classification))) &&
-    "execution_failure_classification" in problem &&
-    (problem.execution_failure_classification === null ||
-      (typeof problem.execution_failure_classification === "string" &&
-        executionFailureClasses.includes(problem.execution_failure_classification))) &&
-    problem.request_id === value.request_id &&
-    isBoundedOpaqueString(problem.trace_id, MAX_REQUEST_ID_BYTES) &&
-    Array.isArray(problem.details) &&
-    problem.details.every(isDiagnostic) &&
-    legalActions !== null &&
-    legalActions.every((action) => typeof action === "string") &&
-    "coverage" in problem;
-  if (!validShape || legalActions === null) {
-    return false;
-  }
-  const admittedStage =
-    problem.cancellation_stage !== null &&
-    problem.cancellation_stage !== "before_admission";
-  const admittedUnavailable =
-    problem.unavailable_classification !== null &&
-    problem.unavailable_classification !== "authority";
-  const expectedAdmitted =
-    problem.kind === "partial_effect" ||
-    problem.kind === "reset_required" ||
-    problem.kind === "execution_failed" ||
-    admittedStage ||
-    admittedUnavailable;
-  if (
-    problem.terminality !==
-      (expectedAdmitted ? "admitted_terminal" : "pre_admission") ||
-    (problem.kind === "unavailable") !==
-      (problem.unavailable_classification !== null) ||
-    (problem.kind === "execution_failed") !==
-      (problem.execution_failure_classification !== null) ||
-    (problem.kind === "cancelled" || problem.kind === "timed_out") !==
-      (problem.cancellation_stage !== null) ||
-    (problem.diagnostic !== null) !==
-      (typeof problem.kind === "string" && diagnosticKinds.includes(problem.kind)) ||
-    problem.retryable !== (problem.retry !== "never") ||
-    expectedRetryScope === undefined ||
-    problem.retry_scope !== expectedRetryScope ||
-    (problem.retry === "after_delay") !==
-      (problem.retry_after_millis !== null)
-  ) {
-    return false;
-  }
-  if (problem.kind === "partial_effect") {
-    return (
-      problem.terminality === "admitted_terminal" &&
-      problem.retryable === false &&
-      problem.retry === "never" &&
-      isCommittedEffectReceipt(problem.committed_receipt, value.request_id) &&
-      legalActions.length === 1 &&
-      legalActions[0] === "reconcile"
-    );
-  }
-  if (problem.kind === "reset_required") {
-    return (
-      problem.terminality === "admitted_terminal" &&
-      problem.retryable === false &&
-      problem.retry === "never" &&
-      problem.committed_receipt === null &&
-      legalActions.length === 1 &&
-      legalActions[0] === "reset"
-    );
-  }
-  if (
-    problem.kind === "unavailable" &&
-    problem.unavailable_classification !== "authority"
-  ) {
-    return (
-      problem.terminality === "admitted_terminal" &&
-      problem.retryable === true &&
-      problem.retry === "after_revalidate" &&
-      problem.committed_receipt === null &&
-      legalActions.length === 1 &&
-      legalActions[0] === "retry"
-    );
-  }
-  if (problem.kind === "execution_failed") {
-    return (
-      problem.terminality === "admitted_terminal" &&
-      problem.retryable === false &&
-      problem.retry === "never" &&
-      problem.committed_receipt === null &&
-      legalActions.length === 1 &&
-      legalActions[0] === "contact_administrator"
-    );
-  }
-  return problem.committed_receipt === null;
-}
-
-function isCommittedEffectReceipt(value: unknown, requestId: string): boolean {
-  return (
-    isRecord(value) &&
-    value.request_id === requestId &&
-    value.outcome === "partial" &&
-    typeof value.operation === "string" &&
-    typeof value.effect_class === "string" &&
-    typeof value.idempotency_key === "string" &&
-    typeof value.input_digest === "string" &&
-    (typeof value.committed_state === "string" ||
-      typeof value.external_proof === "string")
-  );
-}
-
-function statusMatchesProblem(status: number, kind: string): boolean {
-  switch (kind) {
-    case "invalid_request":
-      return status === 400;
-    case "not_found_or_not_authorized":
-      return status === 404;
-    case "conflict":
-    case "partial_effect":
-    case "stale":
-      return status === 409;
-    case "unsupported":
-      return status === 422;
-    case "unavailable":
-    case "reset_required":
-      return status === 503;
-    case "execution_failed":
-      return status === 500;
-    case "saturated":
-      return status === 429;
-    case "cancelled":
-      return status === 408;
-    case "timed_out":
-      return status === 504;
-    default:
-      return false;
-  }
 }
 
 function validatePageOptions(page: PageOptions | undefined): void {
@@ -737,7 +511,7 @@ function decodeSse(
   frame: SseFrame,
   status: number,
   expectedCorrelationId: string,
-): { event: HttpSseEvent<unknown>; sequence?: string; frontier?: StreamFrontier } {
+): { event: HttpSseEvent<unknown>; sequence?: string; lastSequence?: string; frontier?: StreamFrontier } {
   const value = parseJson(frame.data, status);
   if (
     !isRecord(value) ||
@@ -819,6 +593,7 @@ function decodeSse(
       !isRecord(gap) ||
       !isSafeUnsignedInteger(gap.first_missing_sequence) ||
       !isSafeUnsignedInteger(gap.last_missing_sequence) ||
+      gap.first_missing_sequence !== eventData.sequence ||
       gap.first_missing_sequence > gap.last_missing_sequence ||
       !isRecord(gap.frontier) ||
       !isSafeUnsignedInteger(gap.frontier.next_sequence) ||
@@ -855,6 +630,21 @@ function decodeSse(
     event: eventName,
     data: eventData,
   };
+  if (eventName === "resume_gap") {
+    const gap = eventData.gap as Record<string, unknown>;
+    const frontier = gap.frontier as Record<string, unknown>;
+    return {
+      event,
+      sequence,
+      lastSequence: String(gap.last_missing_sequence),
+      frontier: {
+        nextSequence: (BigInt(gap.last_missing_sequence as number) + 1n).toString(),
+        ...(typeof frontier.resume_token === "string"
+          ? { resumeToken: frontier.resume_token }
+          : {}),
+      },
+    };
+  }
   return { event, sequence };
 }
 
@@ -982,7 +772,7 @@ export class TraceDecayClient {
     const envelope = parseJson(await response.text(), response.status);
     if (isRecord(envelope) && envelope.kind === "problem") {
       const problemEnvelope = envelope.value;
-      if (!isProblemEnvelope(problemEnvelope)) {
+      if (!isHttpProblemEnvelope(problemEnvelope)) {
         throw new TraceDecayMalformedResponseError(
           "the daemon returned a malformed problem envelope",
           { status: response.status, payload: problemEnvelope },
@@ -990,14 +780,12 @@ export class TraceDecayClient {
       }
       const validBinding =
         expectedBinding === undefined ||
-        (problemEnvelope.problem.kind === "not_found_or_not_authorized"
-          ? problemEnvelope.binding_id === undefined
-          : problemEnvelope.binding_id === expectedBinding);
+        applicationProblemBindingMatches(problemEnvelope, [expectedBinding]);
       if (
         response.ok ||
         !validBinding ||
         (expectedRequestId !== undefined && problemEnvelope.request_id !== expectedRequestId) ||
-        !statusMatchesProblem(response.status, problemEnvelope.problem.kind)
+        !applicationProblemStatusMatches(response.status, problemEnvelope.problem.kind)
       ) {
         throw new TraceDecayMalformedResponseError(
           "the daemon returned a malformed problem envelope",
@@ -1107,10 +895,10 @@ export class TraceDecayClient {
         throw new TypeError("daemon returned a different application request ID");
       }
       if (
-        descriptor.resultSemantics === "fact_store_curate_terminal" &&
-        !await factStoreCurateTerminalMatches(decodedRequest, decoded)
+        descriptor.resultSemantics === "fact_store_curate_receipt" &&
+        !await factStoreCurateReceiptMatches(decodedRequest, decoded)
       ) {
-        throw new TypeError("automatic curation terminal invariants are invalid");
+        throw new TypeError("automatic curation receipt invariants are invalid");
       }
       return decoded;
     } catch (cause) {
@@ -1163,81 +951,119 @@ export class TraceDecayClient {
       if (resumeToken !== undefined) {
         url.searchParams.set("resume_token", resumeToken);
       }
-      const response = await this.fetchResponse(
-        url,
-        {
-          method: "GET",
-          headers: this.headers("text/event-stream"),
-          signal: options.signal,
-        },
-        options.signal,
-      );
-      if (!response.ok || response.body === null) {
-        await this.readJson(response);
-        throw new TraceDecayMalformedResponseError(
-          "the daemon did not open an SSE stream",
-          { status: response.status },
-        );
-      }
-      if (!hasMediaType(response, "text/event-stream")) {
-        throw new TraceDecayMalformedResponseError(
-          "the daemon opened an operation stream with an invalid media type",
-          { status: response.status },
-        );
-      }
-
+      let response: Response;
       try {
-        for await (const frame of parseSse(response.body)) {
-          if (frame.retryDelayMs !== undefined) {
-            reconnectDelayMs = frame.retryDelayMs;
-          }
-          const decoded = decodeSse(frame, response.status, operationId);
-          if (decoded.frontier !== undefined) {
-            nextSequence = decoded.frontier.nextSequence;
-            resumeToken = decoded.frontier.resumeToken;
-          }
-          if (decoded.sequence !== undefined) {
-            if (
-              lastSequence !== undefined &&
-              BigInt(decoded.sequence) <= BigInt(lastSequence)
-            ) {
-              continue;
+        response = await this.fetchResponse(
+          url,
+          {
+            method: "GET",
+            headers: this.headers("text/event-stream"),
+            signal: options.signal,
+          },
+          options.signal,
+        );
+      } catch (cause) {
+        // The first connection is not retried. A failed reconnect spends budget
+        // like any other disconnect and keeps the last accepted frontier.
+        if (
+          reconnects === 0 ||
+          reconnects >= maxReconnects ||
+          !(cause instanceof TraceDecayDisconnectedError)
+        ) {
+          throw cause;
+        }
+        reconnects += 1;
+        await waitForReconnect(reconnectDelayMs, options.signal);
+        continue;
+      }
+      let streamFailed = false;
+      try {
+        if (!response.ok || response.body === null) {
+          await this.readJson(response);
+          throw new TraceDecayMalformedResponseError(
+            "the daemon did not open an SSE stream",
+            { status: response.status },
+          );
+        }
+        if (!hasMediaType(response, "text/event-stream")) {
+          throw new TraceDecayMalformedResponseError(
+            "the daemon opened an operation stream with an invalid media type",
+            { status: response.status },
+          );
+        }
+
+        try {
+          for await (const frame of parseSse(response.body)) {
+            if (frame.retryDelayMs !== undefined) {
+              reconnectDelayMs = frame.retryDelayMs;
             }
-            const expected =
-              lastSequence === undefined ? undefined : incrementDecimal(lastSequence);
-            if (expected !== undefined && decoded.sequence !== expected) {
-              throw new TraceDecayMalformedResponseError(
-                "the daemon returned a non-contiguous SSE sequence",
-                { status: response.status, payload: decoded.event },
-              );
+            const decoded = decodeSse(frame, response.status, operationId);
+            if (decoded.frontier !== undefined) {
+              nextSequence = decoded.frontier.nextSequence;
+              resumeToken = decoded.frontier.resumeToken;
             }
-            lastSequence = decoded.sequence;
-            nextSequence = incrementDecimal(decoded.sequence);
+            if (decoded.sequence !== undefined) {
+              if (
+                lastSequence !== undefined &&
+                BigInt(decoded.sequence) <= BigInt(lastSequence)
+              ) {
+                continue;
+              }
+              const expected =
+                lastSequence === undefined ? undefined : incrementDecimal(lastSequence);
+              if (expected !== undefined && decoded.sequence !== expected) {
+                throw new TraceDecayMalformedResponseError(
+                  "the daemon returned a non-contiguous SSE sequence",
+                  { status: response.status, payload: decoded.event },
+                );
+              }
+              lastSequence = decoded.lastSequence ?? decoded.sequence;
+              nextSequence = incrementDecimal(lastSequence);
+            }
+            yield {
+              event: frame.event,
+              id: decoded.sequence ?? null,
+              data: decoded.event,
+            };
+            if (TERMINAL_EVENTS.has(frame.event)) {
+              return;
+            }
           }
-          yield {
-            event: frame.event,
-            id: decoded.sequence ?? null,
-            data: decoded.event,
-          };
-          if (TERMINAL_EVENTS.has(frame.event)) {
-            return;
+        } catch (cause) {
+          streamFailed = true;
+          if (cause instanceof TraceDecayProtocolError) {
+            throw cause;
+          }
+          if (options.signal?.aborted) {
+            throw new TraceDecayAbortError(options.signal.reason ?? cause);
+          }
+          if (reconnects >= maxReconnects) {
+            if (cause instanceof TraceDecayDisconnectedError) {
+              throw cause;
+            }
+            throw new TraceDecayDisconnectedError(
+              `operation stream disconnected after ${reconnects} reconnects`,
+              cause,
+            );
           }
         }
       } catch (cause) {
-        if (cause instanceof TraceDecayProtocolError) {
-          throw cause;
-        }
-        if (options.signal?.aborted) {
-          throw new TraceDecayAbortError(options.signal.reason ?? cause);
-        }
-        if (reconnects >= maxReconnects) {
-          if (cause instanceof TraceDecayDisconnectedError) {
-            throw cause;
+        streamFailed = true;
+        throw cause;
+      } finally {
+        // Closing a watcher must close its HTTP body without cancelling the operation.
+        // parseSse has already released its reader when this outer cleanup runs.
+        try {
+          await response.body?.cancel();
+        } catch (cause) {
+          // Do not mask a primary failure (including a retryable disconnect).
+          // Otherwise disposal must report that its transport did not close.
+          if (!streamFailed) {
+            throw new TraceDecayDisconnectedError(
+              "failed to close operation stream transport",
+              cause,
+            );
           }
-          throw new TraceDecayDisconnectedError(
-            `operation stream disconnected after ${reconnects} reconnects`,
-            cause,
-          );
         }
       }
 

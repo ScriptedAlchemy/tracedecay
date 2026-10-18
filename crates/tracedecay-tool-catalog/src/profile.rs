@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use serde::Serialize;
 
 use crate::binding::BindingSurface;
@@ -51,83 +49,6 @@ impl ProfileBudget {
     }
 }
 
-/// Expected response from a profile-local routing fixture.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum RoutingFixtureExpectation {
-    Select { capability_id: CapabilityId },
-    Reject,
-    Ambiguous { capability_ids: Vec<CapabilityId> },
-    InsufficientCapability { capability_id: CapabilityId },
-}
-
-impl RoutingFixtureExpectation {
-    pub fn ambiguous(
-        mut capability_ids: Vec<CapabilityId>,
-    ) -> Result<Self, CatalogValidationError> {
-        if capability_ids.len() < 2 {
-            return Err(CatalogValidationError::InvalidValue {
-                field: "ambiguous routing fixture",
-                reason: "must name at least two capabilities",
-            });
-        }
-        canonicalize_set(
-            &mut capability_ids,
-            "ambiguous routing fixture capability IDs",
-        )?;
-        Ok(Self::Ambiguous { capability_ids })
-    }
-
-    pub fn capability_ids(&self) -> Vec<&CapabilityId> {
-        match self {
-            Self::Select { capability_id } | Self::InsufficientCapability { capability_id } => {
-                vec![capability_id]
-            }
-            Self::Reject => Vec::new(),
-            Self::Ambiguous { capability_ids } => capability_ids.iter().collect(),
-        }
-    }
-}
-
-/// A static, reviewed discriminator fixture. It contains no model output or
-/// executable routing behavior.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct RoutingFixtureV1 {
-    utterance: String,
-    expectation: RoutingFixtureExpectation,
-}
-
-impl RoutingFixtureV1 {
-    pub fn new(
-        utterance: impl Into<String>,
-        expectation: RoutingFixtureExpectation,
-    ) -> Result<Self, CatalogValidationError> {
-        let utterance = utterance.into();
-        if utterance.is_empty()
-            || utterance.trim() != utterance
-            || utterance.len() > 4096
-            || utterance.chars().any(char::is_control)
-        {
-            return Err(CatalogValidationError::InvalidValue {
-                field: "routing fixture utterance",
-                reason: "must be non-empty, trimmed, bounded, and control-character free",
-            });
-        }
-        Ok(Self {
-            utterance,
-            expectation,
-        })
-    }
-
-    pub fn utterance(&self) -> &str {
-        &self.utterance
-    }
-
-    pub fn expectation(&self) -> &RoutingFixtureExpectation {
-        &self.expectation
-    }
-}
-
 /// Input used to construct an explicit immutable surface profile.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileDefinitionInputV1 {
@@ -137,10 +58,13 @@ pub struct ProfileDefinitionInputV1 {
     pub enabled_surfaces: Vec<BindingSurface>,
     pub requires_cli_mcp_pairing: bool,
     pub budget: ProfileBudget,
-    pub routing_fixtures: Vec<RoutingFixtureV1>,
 }
 
 /// Explicit membership and ceilings for one surface/companion profile.
+///
+/// A profile carries membership, surfaces, and budgets only. Routing quality
+/// is exercised by the agent-adoption evals against real hosts, never by
+/// utterance fixtures embedded in catalog identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ProfileDefinition {
     profile_id: ProfileId,
@@ -149,17 +73,14 @@ pub struct ProfileDefinition {
     enabled_surfaces: Vec<BindingSurface>,
     requires_cli_mcp_pairing: bool,
     budget: ProfileBudget,
-    routing_fixtures: Vec<RoutingFixtureV1>,
 }
 
 impl ProfileDefinition {
     pub fn new(input: ProfileDefinitionInputV1) -> Result<Self, CatalogValidationError> {
         let mut capability_ids = input.capability_ids;
         let mut enabled_surfaces = input.enabled_surfaces;
-        let mut routing_fixtures = input.routing_fixtures;
         canonicalize_set(&mut capability_ids, "profile capability IDs")?;
         canonicalize_set(&mut enabled_surfaces, "profile enabled surfaces")?;
-        routing_fixtures.sort_by(|left, right| left.utterance().cmp(right.utterance()));
 
         if input.requires_cli_mcp_pairing
             && (!enabled_surfaces.contains(&BindingSurface::Cli)
@@ -171,16 +92,6 @@ impl ProfileDefinition {
             });
         }
 
-        let utterances: BTreeSet<_> = routing_fixtures
-            .iter()
-            .map(RoutingFixtureV1::utterance)
-            .collect();
-        if utterances.len() != routing_fixtures.len() {
-            return Err(CatalogValidationError::DuplicateValue {
-                field: "profile routing fixture utterances",
-            });
-        }
-
         Ok(Self {
             profile_id: input.profile_id,
             kind: input.kind,
@@ -188,7 +99,6 @@ impl ProfileDefinition {
             enabled_surfaces,
             requires_cli_mcp_pairing: input.requires_cli_mcp_pairing,
             budget: input.budget,
-            routing_fixtures,
         })
     }
 
@@ -214,10 +124,6 @@ impl ProfileDefinition {
 
     pub const fn budget(&self) -> ProfileBudget {
         self.budget
-    }
-
-    pub fn routing_fixtures(&self) -> &[RoutingFixtureV1] {
-        &self.routing_fixtures
     }
 
     pub fn includes_capability(&self, capability_id: &CapabilityId) -> bool {

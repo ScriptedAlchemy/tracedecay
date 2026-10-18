@@ -4,20 +4,26 @@
 //! so a root-crate edit no longer relinks a dozen ~700 MiB test binaries.
 
 #![recursion_limit = "256"]
-
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 
 mod advisory_runtime_acceptance;
 mod application_production_reachability;
+mod canonical_git_observation_correlation;
 #[allow(clippy::unwrap_used)]
 mod cross_host_handoff_test;
 mod daemon_runtime_acceptance;
 mod grafeo_restart_acceptance;
 mod host_event_fixture_test;
 mod lifecycle_production_authority_test;
+#[cfg(unix)]
+mod managed_test_run_restart_acceptance;
 mod private_route_restart_acceptance;
 mod runtime_surface_acceptance;
+// Not implied by `test-transport`: an unconditional evaluator dependency
+// links the evaluator into every test target of this package.
+#[cfg(feature = "search-eval")]
 #[allow(clippy::option_env_unwrap)]
 mod search_eval_cli_test;
 #[cfg(unix)]

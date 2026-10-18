@@ -1,55 +1,33 @@
 ---
 name: interpreting-tracedecay-diagnostics
-description: 'TraceDecay Dev: Use when interpreting TraceDecay compiler diagnostics, `tracedecay tool diagnose`, `tracedecay tool diagnostics`, mapped errors, affected symbols, or build/type failure output.'
+description: "Interpret TraceDecay mapped compiler diagnostics to locate a build or type failure and its affected callers."
 ---
 
-# TraceDecay Dev: Interpreting TraceDecay Diagnostics
+# Interpreting TraceDecay Diagnostics
 
-TraceDecay diagnostics turn raw compiler output into mapped symbols, callers,
-and likely test scope. Use them before eyeballing cargo, clippy, tsc, or
-pyright output.
+Use mapped diagnostics when symbol ownership or affected callers would help
+resolve a compiler failure. If existing compiler output already identifies a
+local error, work from it without launching another diagnostic pass.
 
-## Workflow
-
-1. If raw stderr already exists, pass it to
+1. Map existing stderr with
    `tracedecay tool diagnose --args '{"cargo_output":"..."}'`.
-2. If no stderr exists, run `tracedecay tool diagnostics` instead of a broad
-   shell build first.
-3. Read diagnostics by group:
-   - parser count: did TraceDecay recognize the compiler output?
-   - mapped node: which function, impl, type, or file owns the failure?
-   - callers/dependents: what may break after the fix?
-   - affected tests: what narrow verification should run?
-4. If parser count is zero, rerun the native command only long enough to
-   capture exact stderr, then diagnose that text. Do not manually scan pages
-   of compiler output.
-5. If output is truncated and includes a handle, retrieve or narrow before
-   rerunning broad diagnostics.
+   `tracedecay tool diagnostics` reads retained diagnostic evidence; it does
+   not run the compiler. For fresh evidence, run the narrow native compiler
+   command appropriate to the failure, then map that output if useful.
+2. Read recognized count, mapped owner, callers/dependents, and affected tests.
+   Many diagnostics can share one signature, enum, or feature root cause;
+   inspect that authority before patching callers individually.
+3. Unmapped or unrecognized output remains valid evidence. Read the raw stderr
+   and use the native tool when mapping is unavailable; do not repeatedly build
+   merely to obtain a mapped result.
+4. If output is truncated with a retrieval handle, retrieve or narrow it before
+   repeating an expensive diagnostic run.
 
-## Interpretation
+The legacy `scripts/diagnose-summary.sh` can hide malformed output as success.
+Use the direct tool output above until that helper validates typed responses
+and preserves failures; do not treat its empty summary as a clean build.
 
-- Unmapped diagnostics usually mean parse coverage or file mapping is missing,
-  not that the error is unimportant.
-- Many errors in one file often share one signature, enum variant, or feature
-  gate root cause. Fix the first mapped owner, then rerun diagnostics.
-- For Rust enum pattern errors, prefer `..` in matches when future fields are
-  intentionally ignored.
-- A mapped test target is a recommendation. Run it, then broaden only if the
-  changed symbol is shared or public.
-
-## Helper script
-
-[scripts/diagnose-summary.sh](scripts/diagnose-summary.sh) runs the mapped-owner
-workflow in one step. Pipe compiler stderr into it
-(`cargo check 2>&1 | scripts/diagnose-summary.sh`) to map each diagnostic to its
-enclosing symbol with callers attached; run it with no stdin to invoke
-`tracedecay tool diagnostics` directly (the first cold call can take minutes).
-It reports how many diagnostics were recognized, the mapped owners to fix, and
-how many went UNMAPPED — treat a high unmapped count as a parse/mapping-coverage
-gap, not an unimportant error.
-
-## Deliverable
-
-Report symptom, mapped owner, root cause, patch, and verification command. If
-diagnostics could not parse the output, include the exact command that produced
-the stderr sample.
+Mapped tests are suggestions. For a fix, run the narrow relevant check and
+broaden when changed behavior or remaining uncertainty warrants it. Report the
+root cause, patch or recommendation, and verification; distinguish parser gaps
+from compiler failures.

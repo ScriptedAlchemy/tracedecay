@@ -18,6 +18,15 @@ use crate::{
 
 pub const HOOK_SYNCHRONOUS_BUDGET_MICROS: u64 = 100_000;
 
+/// The same budget as a bounded lock wait: how long a hook may wait on another
+/// writer's lock, measured from the lock attempt. That covers the capture
+/// spool's writer lease and commit lock and the delivery-receipt writer lock.
+/// A hook that misses it stages its event or receipt, without a lock, for the
+/// next owner instead of losing it. The hook's own durability barriers are not
+/// lock waits and are not bounded by it.
+pub const HOOK_SYNCHRONOUS_BUDGET: std::time::Duration =
+    std::time::Duration::from_micros(HOOK_SYNCHRONOUS_BUDGET_MICROS);
+
 /// Non-widenable deadline token furnished to admission and replay ports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HookSynchronousDeadlineV1 {
@@ -151,7 +160,7 @@ pub trait AsyncHookAdmissionPortV1 {
 /// Validate exact daemon-issued scope before yielding to asynchronous local
 /// admission. This function performs no search, model, command, store-open, or
 /// external-network work.
-#[hotpath::measure(label = "hooks.runtime.admit_async", future = true)]
+#[tracing::instrument(name = "hooks.runtime.admit_async", level = "trace", skip_all)]
 pub async fn admit_async_exact_scope(
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
@@ -204,7 +213,7 @@ pub struct HookSynchronousResultV1 {
 /// hook dispatch cost as felt by the host. The completion mix is what tells
 /// apart a healthy hook path from one that is quietly missing its budget or
 /// falling back to replay.
-#[hotpath::measure(label = "hooks.runtime.finish_synchronous")]
+#[tracing::instrument(name = "hooks.runtime.finish_synchronous", level = "trace", skip_all)]
 pub fn finish_synchronous_hook(
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
@@ -250,35 +259,6 @@ pub fn finish_synchronous_hook(
         completed_at,
         deadline_exceeded,
     );
-
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!(match immediate_state {
-            HookImmediateAdmissionStateV1::Accepted => "hooks.admission.immediate.accepted",
-            HookImmediateAdmissionStateV1::CatchupRequired => {
-                "hooks.admission.immediate.catchup_required"
-            }
-            HookImmediateAdmissionStateV1::Unavailable => "hooks.admission.immediate.unavailable",
-            HookImmediateAdmissionStateV1::TimedOut => "hooks.admission.immediate.timed_out",
-            HookImmediateAdmissionStateV1::Backpressured => {
-                "hooks.admission.immediate.backpressured"
-            }
-        })
-        .inc(1);
-        hotpath::gauge!(match guidance {
-            HookGuidanceDispositionV1::Rendered => "hooks.guidance.rendered",
-            HookGuidanceDispositionV1::NotReady => "hooks.guidance.not_ready",
-            HookGuidanceDispositionV1::Paused => "hooks.guidance.paused",
-            HookGuidanceDispositionV1::Disabled => "hooks.guidance.disabled",
-            HookGuidanceDispositionV1::Expired => "hooks.guidance.expired",
-            HookGuidanceDispositionV1::Invalid => "hooks.guidance.invalid",
-            HookGuidanceDispositionV1::DeadlineExceeded => "hooks.guidance.deadline_exceeded",
-        })
-        .inc(1);
-        if deadline_exceeded {
-            hotpath::gauge!("hooks.synchronous.deadline_exceeded").inc(1);
-        }
-    }
 
     Ok(HookSynchronousResultV1 {
         receipt: HookAdmissionReceiptV1 {
@@ -333,20 +313,12 @@ fn guidance_result(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookFeedbackDeliveryRouteV1 {
-    HookV2,
-    Legacy,
-}
-
-/// Daemon configuration owns this rollback switch. Host lifecycle code may
-/// publish a new revision, while hook code can only dispatch through it.
+/// Daemon configuration owns this delivery switch. Host lifecycle code may
+/// publish a new revision; hook code only dispatches Hook V2 through it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookFeedbackRollbackSwitchV1 {
     pub configuration_revision: u64,
-    pub route: HookFeedbackDeliveryRouteV1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,30 +331,23 @@ pub enum HookFeedbackDeliveryOutcomeV1 {
 /// Delivery-only seam over the existing feedback authority. The generic
 /// payload remains the owning application's typed feedback value.
 pub trait HookFeedbackDeliveryPortV1<T> {
-    fn deliver_hook_v2(&self, feedback: &T) -> HookFeedbackDeliveryOutcomeV1;
-    fn deliver_legacy(&self, feedback: &T) -> HookFeedbackDeliveryOutcomeV1;
+    fn deliver_hook(&self, feedback: &T) -> HookFeedbackDeliveryOutcomeV1;
 }
 
-const fn route_for_rollback(
+const fn admit_rollback_revision(
     rollback: HookFeedbackRollbackSwitchV1,
-) -> Result<HookFeedbackDeliveryRouteV1, HookRuntimeErrorV1> {
+) -> Result<(), HookRuntimeErrorV1> {
     if rollback.configuration_revision == 0 {
         return Err(HookRuntimeErrorV1::InvalidControl);
     }
-    Ok(rollback.route)
+    Ok(())
 }
 
-#[cfg(feature = "hotpath")]
-fn record_feedback_outcome(outcome: HookFeedbackDeliveryOutcomeV1) {
-    hotpath::gauge!(match outcome {
-        HookFeedbackDeliveryOutcomeV1::Delivered => "hooks.feedback.delivered",
-        HookFeedbackDeliveryOutcomeV1::Duplicate => "hooks.feedback.duplicate",
-        HookFeedbackDeliveryOutcomeV1::Unavailable => "hooks.feedback.unavailable",
-    })
-    .inc(1);
-}
-
-#[hotpath::measure(label = "hooks.runtime.deliver_feedback_rollback")]
+#[tracing::instrument(
+    name = "hooks.runtime.deliver_feedback_rollback",
+    level = "trace",
+    skip_all
+)]
 pub fn deliver_feedback_with_rollback<T, P>(
     rollback: HookFeedbackRollbackSwitchV1,
     feedback: &T,
@@ -391,12 +356,9 @@ pub fn deliver_feedback_with_rollback<T, P>(
 where
     P: HookFeedbackDeliveryPortV1<T> + ?Sized,
 {
-    let outcome = match route_for_rollback(rollback)? {
-        HookFeedbackDeliveryRouteV1::HookV2 => port.deliver_hook_v2(feedback),
-        HookFeedbackDeliveryRouteV1::Legacy => port.deliver_legacy(feedback),
-    };
-    #[cfg(feature = "hotpath")]
-    record_feedback_outcome(outcome);
+    admit_rollback_revision(rollback)?;
+    let outcome = port.deliver_hook(feedback);
+
     Ok(outcome)
 }
 
@@ -410,14 +372,7 @@ pub type HookDeliveryFutureV1<'a> =
 /// inside `deadline`; they receive the validated content-free envelope and the
 /// owning application's typed payload, never a hook-authored command.
 pub trait AsyncHookFeedbackDeliveryPortV1<T> {
-    fn deliver_hook_v2<'a>(
-        &'a self,
-        envelope: &'a HookEventEnvelopeV2,
-        feedback: &'a T,
-        deadline: HookSynchronousDeadlineV1,
-    ) -> HookDeliveryFutureV1<'a>;
-
-    fn deliver_legacy<'a>(
+    fn deliver_hook<'a>(
         &'a self,
         envelope: &'a HookEventEnvelopeV2,
         feedback: &'a T,
@@ -435,16 +390,9 @@ pub async fn deliver_feedback_with_rollback_async<T, P>(
 where
     P: AsyncHookFeedbackDeliveryPortV1<T> + ?Sized,
 {
-    let outcome = match route_for_rollback(rollback)? {
-        HookFeedbackDeliveryRouteV1::HookV2 => {
-            port.deliver_hook_v2(envelope, feedback, deadline).await
-        }
-        HookFeedbackDeliveryRouteV1::Legacy => {
-            port.deliver_legacy(envelope, feedback, deadline).await
-        }
-    };
-    #[cfg(feature = "hotpath")]
-    record_feedback_outcome(outcome);
+    admit_rollback_revision(rollback)?;
+    let outcome = port.deliver_hook(envelope, feedback, deadline).await;
+
     Ok(outcome)
 }
 
@@ -483,7 +431,7 @@ const fn feedback_is_eligible(receipt: &HookAdmissionReceiptV1) -> bool {
 /// budget remains, so an over-budget or foreign-scope hook can never surface
 /// another scope's feedback. Acknowledgement failure withholds nothing already
 /// earned: the outcome is reported so callers can record it truthfully.
-#[hotpath::measure(label = "hooks.runtime.deliver_feedback", future = true)]
+#[tracing::instrument(name = "hooks.runtime.deliver_feedback", level = "trace", skip_all)]
 pub async fn deliver_hook_feedback<T, P>(
     envelope: &HookEventEnvelopeV2,
     receipt: &HookAdmissionReceiptV1,
@@ -520,4 +468,55 @@ pub enum HookRuntimeErrorV1 {
     InvalidAdmission,
     #[error("hook envelope does not satisfy the daemon-issued binding")]
     EnvelopeRejected(HookContractError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingHookV2Port {
+        hook_v2_calls: AtomicUsize,
+    }
+
+    impl HookFeedbackDeliveryPortV1<()> for CountingHookV2Port {
+        fn deliver_hook(&self, _feedback: &()) -> HookFeedbackDeliveryOutcomeV1 {
+            self.hook_v2_calls.fetch_add(1, Ordering::SeqCst);
+            HookFeedbackDeliveryOutcomeV1::Delivered
+        }
+    }
+
+    #[test]
+    fn rollback_delivery_dispatches_only_through_hook_v2() {
+        let port = CountingHookV2Port {
+            hook_v2_calls: AtomicUsize::new(0),
+        };
+        let outcome = deliver_feedback_with_rollback(
+            HookFeedbackRollbackSwitchV1 {
+                configuration_revision: 1,
+            },
+            &(),
+            &port,
+        )
+        .expect("valid revision admits delivery");
+        assert_eq!(outcome, HookFeedbackDeliveryOutcomeV1::Delivered);
+        assert_eq!(port.hook_v2_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn zero_revision_still_refuses_before_delivery() {
+        let port = CountingHookV2Port {
+            hook_v2_calls: AtomicUsize::new(0),
+        };
+        let error = deliver_feedback_with_rollback(
+            HookFeedbackRollbackSwitchV1 {
+                configuration_revision: 0,
+            },
+            &(),
+            &port,
+        )
+        .expect_err("revision 0 is invalid control");
+        assert_eq!(error, HookRuntimeErrorV1::InvalidControl);
+        assert_eq!(port.hook_v2_calls.load(Ordering::SeqCst), 0);
+    }
 }
